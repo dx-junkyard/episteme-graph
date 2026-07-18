@@ -146,6 +146,162 @@ class TestGroundingToText:
 
 
 # ---------------------------------------------------------------------------
+# 面③ 要素中心コンテキストビュー（Issue #498）: build_grounding の "context" キー
+# （context_lens.build を monkeypatch した fail-soft 挙動込み）
+# ---------------------------------------------------------------------------
+
+
+class TestBuildGroundingContext:
+    def _patch_breakdown_and_positioning(self, monkeypatch):
+        monkeypatch.setattr(
+            dialogue.decomposition, "build",
+            lambda ref: {"element_type": "theory_claim", "label": "L", "fields": {}, "notes": []},
+        )
+        monkeypatch.setattr(dialogue.positioning, "build", lambda ref: {})
+
+    def test_grounding_includes_context_key_from_context_lens(self, monkeypatch):
+        self._patch_breakdown_and_positioning(monkeypatch)
+        fake_context = {"focus": {"label": "f"}, "upper": [], "lower": [], "notes": []}
+        monkeypatch.setattr(dialogue.context_lens, "build", lambda ref: fake_context)
+
+        grounding = dialogue.build_grounding(_sample_ref())
+        assert grounding["context"] == fake_context
+
+    def test_grounding_context_is_none_for_shared_part(self, monkeypatch):
+        # context_lens.build() は shared_part（scope='domain'）に対して None を返す契約。
+        self._patch_breakdown_and_positioning(monkeypatch)
+        monkeypatch.setattr(dialogue.context_lens, "build", lambda ref: None)
+
+        grounding = dialogue.build_grounding(_sample_ref(SCOPE_DOMAIN))
+        assert grounding["context"] is None
+
+    def test_context_lens_exception_degrades_to_none_without_raising(self, monkeypatch):
+        # build_grounding 自身も念のため例外を握って None に縮退する（W6・overview の
+        # 三本目の try/except と同じ防御の二重化）。
+        self._patch_breakdown_and_positioning(monkeypatch)
+
+        def boom(ref):
+            raise RuntimeError("simulated context_lens outage")
+
+        monkeypatch.setattr(dialogue.context_lens, "build", boom)
+
+        grounding = dialogue.build_grounding(_sample_ref())
+        assert grounding["context"] is None
+
+
+class TestGroundingToTextContextLens:
+    """grounding_to_text() の面③レンダリング（純粋関数・DB 非依存）。"""
+
+    def _base_grounding(self, context) -> dict:
+        return {
+            "breakdown": {"element_type": "theory_claim", "label": "c", "fields": {}, "notes": []},
+            "positioning": {"available": False},
+            "context": context,
+        }
+
+    def test_none_context_is_omitted_without_error(self):
+        text = dialogue.grounding_to_text(self._base_grounding(None))
+        assert "[文脈:" not in text
+
+    def test_missing_context_key_is_omitted_without_error(self):
+        grounding = {
+            "breakdown": {"element_type": "theory_claim", "label": "c", "fields": {}, "notes": []},
+            "positioning": {"available": False},
+        }
+        text = dialogue.grounding_to_text(grounding)
+        assert "[文脈:" not in text
+
+    def test_unidentified_role_renders_fact_not_a_guess(self):
+        context = {
+            "focus": {
+                "label": "focus label",
+                "contextual_role": None,
+                "contextual_role_status": "unidentified",
+            },
+            "upper": [],
+            "lower": [],
+            "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 中心要素] focus label" in text
+        assert "上位構造との関係は未同定" in text
+
+    def test_identified_role_renders_role_text_and_status_label(self):
+        context = {
+            "focus": {
+                "label": "focus label",
+                "contextual_role": "中心命題を支持する",
+                "contextual_role_status": "source_backed",
+            },
+            "upper": [],
+            "lower": [],
+            "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "この文脈での役割: 中心命題を支持する（原文根拠）" in text
+
+    def test_upper_and_lower_lanes_render_relation_label_and_status(self):
+        context = {
+            "focus": {"label": "f", "contextual_role": None, "contextual_role_status": "unidentified"},
+            "upper": [
+                {"relation_label": "の根拠となる", "label": "上位要素", "relation_status": "source_backed"},
+            ],
+            "lower": [
+                {"relation_label": "を構成要素として含む", "label": "下位要素", "relation_status": "candidate"},
+            ],
+            "notes": ["注記事実"],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 上位構造]" in text
+        assert "- の根拠となる: 上位要素（原文根拠）" in text
+        assert "[文脈: 下位構造]" in text
+        assert "- を構成要素として含む: 下位要素（AI候補）" in text
+        assert "(注記) 注記事実" in text
+
+    def test_empty_lanes_are_omitted_entirely(self):
+        context = {
+            "focus": {"label": "f", "contextual_role": None, "contextual_role_status": "unidentified"},
+            "upper": [],
+            "lower": [],
+            "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 上位構造]" not in text
+        assert "[文脈: 下位構造]" not in text
+
+    def test_confirmed_status_renders_teacher_confirmed_label(self):
+        context = {
+            "focus": {"label": "f", "contextual_role": None, "contextual_role_status": "unidentified"},
+            "upper": [
+                {"relation_label": "の構成要素である", "label": "親", "relation_status": "confirmed"},
+            ],
+            "lower": [],
+            "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "（教員確認済み）" in text
+
+    def test_never_renders_raw_confidence_string(self):
+        context = {
+            "focus": {"label": "f", "contextual_role": "役割", "contextual_role_status": "source_backed"},
+            "upper": [{"relation_label": "r", "label": "l", "relation_status": "candidate"}],
+            "lower": [{"relation_label": "r2", "label": "l2", "relation_status": "source_backed"}],
+            "notes": ["note"],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "confidence" not in text.lower()
+
+
+class TestInstructionHeaderContextGuidance:
+    """_INSTRUCTION_HEADER が文脈レンズの引用・AI候補の非断定を教員向けに指示すること。"""
+
+    def test_header_instructs_citing_relations_and_not_asserting_ai_candidates_as_fact(self):
+        header = dialogue._INSTRUCTION_HEADER
+        assert "AI候補" in header
+        assert "確定した事実であるかのように述べないでください" in header
+
+
+# ---------------------------------------------------------------------------
 # run_turn: LLM 呼び出しの成功/失敗（縮退）挙動
 # ---------------------------------------------------------------------------
 

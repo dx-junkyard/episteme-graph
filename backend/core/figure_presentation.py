@@ -7,6 +7,7 @@ from typing import Any, Iterable
 
 from sqlalchemy import text as sa_text
 
+from core.deliberation.identity_links import confidence_label
 from core.postgres import get_session
 from episteme_graph.agents.figure_modes import (
     FIGURE_MODES,
@@ -129,13 +130,15 @@ def persist_suggestions(document_id: str, records: Iterable[Any]) -> int:
             if not figure_id:
                 continue
             normalized = analysis_profile_for_record(record)
+            iterative_analysis = _json_object(record.get("iterative_analysis"))
             result = session.execute(
                 sa_text(
                     """
                     UPDATE document_figures
                     SET suggested_mode = :suggested_mode,
                         mode_reason = :mode_reason,
-                        analysis_profile = CAST(:analysis_profile AS jsonb)
+                        analysis_profile = CAST(:analysis_profile AS jsonb),
+                        iterative_analysis = CAST(:iterative_analysis AS jsonb)
                     WHERE id = CAST(:figure_id AS uuid)
                       AND document_id = :document_id
                     """
@@ -148,6 +151,7 @@ def persist_suggestions(document_id: str, records: Iterable[Any]) -> int:
                     "analysis_profile": json.dumps(
                         normalized["analysis_profile"], ensure_ascii=False
                     ),
+                    "iterative_analysis": json.dumps(iterative_analysis, ensure_ascii=False),
                 },
             )
             updated += max(0, int(getattr(result, "rowcount", 0) or 0))
@@ -231,7 +235,8 @@ def set_reviewed_mode(
                           analysis_profile, mode_reviewed_by::text, mode_reviewed_at,
                           reviewed_analysis_mode, reviewed_analysis_profile,
                           analysis_review_status, analysis_reviewed_by::text,
-                          analysis_reviewed_at, analysis_review_source_annotation_id::text
+                          analysis_reviewed_at, analysis_review_source_annotation_id::text,
+                          iterative_analysis
                 """
             ),
             {
@@ -316,6 +321,76 @@ def commit_reviewed_analysis(
     }
 
 
+_ITERATIVE_PROJECTION_KEYS = (
+    "convergence_status",
+    "context_hypothesis",
+    "visual_observations",
+    "alignment_items",
+    "alternative_hypotheses",
+    "verification_iterations",
+    "open_verification_tasks",
+    "unresolved_conflicts",
+    "review_questions",
+    "stage_failures",
+)
+
+
+def _strip_confidence(value: Any) -> Any:
+    """Recursively replace raw ``confidence`` numbers with a staged label (W8).
+
+    Reuses ``core.deliberation.identity_links.confidence_label`` rather than
+    redefining thresholds. Any dict key literally named ``confidence`` whose
+    value is numeric is removed and replaced by a sibling
+    ``confidence_label`` — at any nesting depth (context_hypothesis /
+    expected_elements / alignment_items / alternative_hypotheses / ... all
+    carry their own ``confidence`` field).
+    """
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, inner in value.items():
+            if key == "confidence" and isinstance(inner, (int, float)) and not isinstance(inner, bool):
+                result["confidence_label"] = confidence_label(inner)
+                continue
+            result[key] = _strip_confidence(inner)
+        return result
+    if isinstance(value, list):
+        return [_strip_confidence(item) for item in value]
+    return value
+
+
+def assign_review_question_ids(questions: Any) -> list[dict[str, Any]]:
+    """Deterministically assign ``question_id`` (`q_{index}`) when absent."""
+    result: list[dict[str, Any]] = []
+    for index, question in enumerate(questions or []):
+        if not isinstance(question, dict):
+            continue
+        item = dict(question)
+        if not item.get("question_id"):
+            item["question_id"] = f"q_{index}"
+        result.append(item)
+    return result
+
+
+def iterative_analysis_payload(raw: dict[str, Any] | None) -> dict[str, Any]:
+    """Project the AI-proposed iterative analysis record for the API/UI (#499).
+
+    Empty/absent input (one-shot mode, or a figure never analyzed) is a
+    normal, supported state — returned as ``{"available": False}`` rather
+    than an error. Never exposes a raw numeric confidence (W8): every
+    ``confidence`` field is stripped and replaced by a staged
+    ``confidence_label`` sibling, recursively.
+    """
+    data = _json_object(raw)
+    if not data:
+        return {"available": False}
+
+    payload: dict[str, Any] = {"available": True}
+    for key in _ITERATIVE_PROJECTION_KEYS:
+        payload[key] = _strip_confidence(data.get(key))
+    payload["review_questions"] = assign_review_question_ids(payload.get("review_questions"))
+    return payload
+
+
 def presentation_payload(
     row: Any,
     artifact_record: Any = None,
@@ -389,4 +464,5 @@ def presentation_payload(
             MODE_REVIEW_REVIEWED if has_reviewed_analysis else MODE_REVIEW_PENDING
         ),
         "analysis_source": analysis_source,
+        "iterative_analysis": iterative_analysis_payload(item.get("iterative_analysis")),
     }

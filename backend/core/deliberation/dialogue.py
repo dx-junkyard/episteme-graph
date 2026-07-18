@@ -50,8 +50,12 @@ from core.llm_worker.client import resolve_model as _resolve_model_key
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
 from core.storage import get_storage_client
-from core.deliberation import decomposition, positioning
+from core.deliberation import context_lens, decomposition, positioning
 from core.deliberation.schema import (
+    CONTEXT_ROLE_STATUS_UNIDENTIFIED,
+    CONTEXT_STATUS_CANDIDATE,
+    CONTEXT_STATUS_CONFIRMED,
+    CONTEXT_STATUS_SOURCE_BACKED,
     ELEMENT_EQUATION,
     ELEMENT_FIGURE,
     ELEMENT_THEORY_CLAIM,
@@ -94,6 +98,9 @@ _INSTRUCTION_HEADER = (
     "根拠（evidence・reason）を示せない項目は annotations に含めないでください。"
     "kind='identity' は特別で、後述の「同分野の既存の共通部品」一覧が示されている場合に"
     "限り使用できます（一覧が無いときは identity を使わないでください）。"
+    "また、[文脈: 中心要素]・[文脈: 上位構造]・[文脈: 下位構造] が示されている場合は、"
+    "回答の中でそのどの関係・根拠に基づいたかを読み手が確認できる形式で述べ、"
+    "AI候補（ステータスが「AI候補」の関係）を確定した事実であるかのように述べないでください。"
 )
 
 # 供給あり: 「該当がある場合のみ」を強調し、shared_part_id を一覧内の実在 id に限定する
@@ -261,11 +268,15 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
 
 
 def build_grounding(ref: ElementRef) -> dict[str, Any]:
-    """面①内訳 + 面②位置づけ + 同一性候補材料を束ねた grounding 素材を返す（フィルタ前）。
+    """面①内訳 + 面②位置づけ + 面③コンテキスト + 同一性候補材料を束ねた grounding 素材を
+    返す（フィルタ前）。
 
     positioning 全体が失敗しても grounding 自体は内訳だけで返す（overview と同じ
     fail-soft。§4 冒頭のレンズ単位 fail-soft は positioning.py 内で既に効いている）。
     identity_candidates も同様に fail-soft（失敗・0件は空リスト → 捏造ガード文へ縮退）。
+    ``context``（Issue #498 の要素中心コンテキストビュー）は ``context_lens.build`` が
+    内部で fail-soft な契約を持つが、本モジュールでも念のため例外を握って None に縮退する
+    （overview 側の三本目の try/except と同じ防御・W6）。
     """
     breakdown = decomposition.build(ref)
     try:
@@ -279,10 +290,19 @@ def build_grounding(ref: ElementRef) -> dict[str, Any]:
             "available": False,
             "note": "位置づけレンズの取得に失敗したため内訳のみ返す",
         }
+    try:
+        context = context_lens.build(ref)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deliberation dialogue: context lens failed for %s:%s", ref.element_type, ref.element_id,
+            exc_info=True,
+        )
+        context = None
     identity_candidates = collect_identity_candidates(ref, breakdown)
     return {
         "breakdown": breakdown,
         "positioning": positioning_payload,
+        "context": context,
         "identity_candidates": identity_candidates,
     }
 
@@ -294,6 +314,18 @@ def _format_field_value(value: Any) -> str | None:
         joined = "、".join(str(v) for v in value if str(v or "").strip())
         return joined or None
     return str(value)
+
+
+# 面③コンテキスト（Issue #498）の根拠状態 → 読み手向けラベル（W8: 数値は一切出さない）。
+_CONTEXT_STATUS_LABELS: dict[str, str] = {
+    CONTEXT_STATUS_SOURCE_BACKED: "原文根拠",
+    CONTEXT_STATUS_CANDIDATE: "AI候補",
+    CONTEXT_STATUS_CONFIRMED: "教員確認済み",
+}
+
+
+def _context_status_label(status: Any) -> str:
+    return _CONTEXT_STATUS_LABELS.get(str(status or ""), str(status or ""))
 
 
 def grounding_to_text(grounding: dict[str, Any]) -> str:
@@ -330,6 +362,43 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
     else:
         note = positioning_payload.get("note")
         if note:
+            lines.append(f"(注記) {note}")
+
+    # 面③ 要素中心コンテキストビュー（Issue #498）。中心要素の文脈上の役割 + 上位構造
+    # （Why）/ 下位構造（How）を事実文で列挙する。空レーンは黙って省く（他セクションと
+    # 同じ「該当が無ければ書かない」方針）。数値（confidence 等）は一切出さない（W8）。
+    context = grounding.get("context")
+    if isinstance(context, dict):
+        focus = context.get("focus") or {}
+        role_status = focus.get("contextual_role_status")
+        lines.append(f"[文脈: 中心要素] {focus.get('label', '')}")
+        if role_status == CONTEXT_ROLE_STATUS_UNIDENTIFIED:
+            lines.append("- 上位構造との関係は未同定")
+        elif focus.get("contextual_role"):
+            lines.append(
+                f"- この文脈での役割: {focus.get('contextual_role')}"
+                f"（{_context_status_label(role_status)}）"
+            )
+
+        upper_items = [i for i in (context.get("upper") or []) if isinstance(i, dict)]
+        if upper_items:
+            lines.append("[文脈: 上位構造]")
+            for item in upper_items:
+                lines.append(
+                    f"- {item.get('relation_label', '')}: {item.get('label', '')}"
+                    f"（{_context_status_label(item.get('relation_status'))}）"
+                )
+
+        lower_items = [i for i in (context.get("lower") or []) if isinstance(i, dict)]
+        if lower_items:
+            lines.append("[文脈: 下位構造]")
+            for item in lower_items:
+                lines.append(
+                    f"- {item.get('relation_label', '')}: {item.get('label', '')}"
+                    f"（{_context_status_label(item.get('relation_status'))}）"
+                )
+
+        for note in context.get("notes") or []:
             lines.append(f"(注記) {note}")
 
     # N2: 同一性候補の材料（実在エントリの事実の一覧）または捏造ガード。

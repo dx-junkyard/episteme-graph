@@ -7,6 +7,7 @@ from episteme_graph.agents.apparatus_semantics.agent import ApparatusSemanticsAg
 from episteme_graph.agents.apparatus_semantics.schema import (
     ApparatusSemanticsResult,
     FigureImageInput,
+    IterativeConfig,
     LibraryCandidate,
 )
 
@@ -426,3 +427,25 @@ def test_guided_run_repair_path_also_receives_guidance_and_both_images():
     record = result.apparatus_records[0]
     assert record.guidance_note == "Found it."
     assert record.review_status == "review_required"
+
+
+# ------------------------------------------------------------------
+# Iterative pipeline opt-in (#499) — backward compatibility
+# ------------------------------------------------------------------
+
+
+def test_iterative_config_disabled_behaves_like_one_shot():
+    """``IterativeConfig(enabled=False)`` must be indistinguishable from not
+    passing an ``iterative_config`` at all: a single one-shot LLM call, and
+    ``record.iterative_analysis`` left at its default (``None``)."""
+    agent = ApparatusSemanticsAgent(iterative_config=IterativeConfig(enabled=False))
+    figure = _figure()
+    response = _raw_response(match_status="novel")
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mock_llm:
+        result = agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    assert mock_llm.call_count == 1
+    record = result.apparatus_records[0]
+    assert record.match_status == "novel"
+    assert record.iterative_analysis is None

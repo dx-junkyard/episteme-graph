@@ -136,9 +136,13 @@ class _FakeStorageClient:
 class _FakeApparatusSemanticsAgent:
     """``ApparatusSemanticsAgent`` の偽物。``run`` の kwargs を ``captured`` に記録する。"""
 
-    def __init__(self, captured: dict, cartridge_id=None, llm_client=None, cartridge_loader=None):
+    def __init__(
+        self, captured: dict, cartridge_id=None, llm_client=None, cartridge_loader=None,
+        iterative_config=None,
+    ):
         self._captured = captured
         captured["init_cartridge_id"] = cartridge_id
+        captured["init_iterative_config"] = iterative_config
 
     def run(self, *, document_id, figures, library_candidates=None, cartridge_id=None):
         self._captured["run_kwargs"] = {
@@ -151,9 +155,10 @@ class _FakeApparatusSemanticsAgent:
 
 
 def _make_agent_factory(captured: dict):
-    def _factory(cartridge_id=None, llm_client=None, cartridge_loader=None):
+    def _factory(cartridge_id=None, llm_client=None, cartridge_loader=None, iterative_config=None):
         return _FakeApparatusSemanticsAgent(
             captured, cartridge_id=cartridge_id, llm_client=llm_client, cartridge_loader=cartridge_loader,
+            iterative_config=iterative_config,
         )
     return _factory
 

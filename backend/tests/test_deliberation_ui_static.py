@@ -1078,3 +1078,331 @@ class TestElementInventoryLectureStudioEs5Guard:
 
     def test_only_var_used(self):
         assert "var " in self._added_region()
+
+
+# ---------------------------------------------------------------------------
+# 要素中心コンテキストビュー（Element-Centered Context Lens, Issue #498）。
+# 正本: docs/features/element_context_lens_design.md §2.3（読解の開始点を失わせ
+# ない・中心移動）/ §3（上位構造Why・選択要素What・下位構造How の共通UI）/
+# §6 Phase 2（deliberation.js への統合）/ §8（受け入れ条件）。
+# overview.context の統合表示と、隣接ノード選択・パンくずによる中心移動の
+# 静的ガードレール（backend/core/deliberation/context_lens.py 側は別ファイル対応）。
+# ---------------------------------------------------------------------------
+
+
+class TestElementContextLens:
+    """要素中心コンテキストビュー（上位構造Why / 選択要素What / 下位構造How）と
+    中心移動（隣接ノード選択・パンくず）の受け入れ条件。"""
+
+    def test_rendering_functions_present(self):
+        src = _read(DELIBERATION_JS)
+        for name in (
+            "_contextLensHtml",
+            "_contextLaneHtml",
+            "_contextFocusHtml",
+            "_contextStatusBadgeHtml",
+        ):
+            assert f"function {name}" in src, f"function {name} が見つかりません"
+
+    def test_navigation_functions_present(self):
+        """設計書 §2.3/§6 Phase 2: 中心移動・パンくずの本体関数。"""
+        src = _read(DELIBERATION_JS)
+        for name in ("_navigateToElement", "_renderBreadcrumb"):
+            assert f"function {name}" in src, f"function {name} が見つかりません"
+
+    def test_dom_ids_and_classes_present(self):
+        src = _read(DELIBERATION_JS)
+        assert 'id="deliberation-context-lens"' in src
+        assert "deliberation-context-nav" in src
+        assert 'id="deliberation-breadcrumb"' in src
+
+    def test_unidentified_upper_relation_is_a_factual_line_not_hidden(self):
+        """設計書 §2.2/§7: 上位構造の関係が得られない場合も非表示にせず、
+        「上位構造との関係は未同定」という事実文で保持する（推測で穴埋めしない）。"""
+        src = _read(DELIBERATION_JS)
+        assert "上位構造との関係は未同定" in src
+
+    def test_lower_lane_empty_fact_line_present(self):
+        """下位構造が0件のときも事実文で保持する（情報を落とさない）。"""
+        src = _read(DELIBERATION_JS)
+        assert "下位構造の情報はありません" in src
+
+    def test_status_badge_labels_present(self):
+        """W8: 数値・スコアを見せない。状態はラベルのみ
+        （原文根拠/AI候補/教員確認済み。§2.2「AIの解釈を原文事実に昇格させない」）。"""
+        src = _read(DELIBERATION_JS)
+        for label in ("原文根拠", "AI候補", "教員確認済み"):
+            assert label in src
+
+    def test_relation_label_is_the_rendered_relation_text(self):
+        """設計書 §3.2: 関係は動詞（relation_label、主語は焦点要素）で示す。
+        サーバ契約の relation_label をそのまま描画に使うこと。"""
+        src = _read(DELIBERATION_JS)
+        assert "relation_label" in src
+
+    def test_esc_html_used_in_lane_and_focus_renderers(self):
+        """XSS対策: 上位/下位レーン・中央カードの動的テキストは escHtml 経由で描画する。"""
+        src = _read(DELIBERATION_JS)
+        lane_block = _function_block(src, "_contextLaneHtml")
+        assert "escHtml(" in lane_block
+        focus_block = _function_block(src, "_contextFocusHtml")
+        assert "escHtml(" in focus_block
+
+    def test_navigate_does_not_close_modal(self):
+        """設計書 §2.3: 隣接ノード選択はモーダルを破棄せず中心だけを差し替える。
+        パンくず履歴を保持するため _navigateToElement は _closeModal を呼んではならない
+        （_closeModal は面③状態・パンくず履歴ごとリセットしてしまう）。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_navigateToElement")
+        assert "_closeModal" not in block
+
+    def test_context_lens_skips_intra_document_lens_when_available(self):
+        """設計書 §6 Phase 0: context が利用可能なとき、論文内レンズ
+        （intra_document）は上位/下位構造投影に再構成されるため二重表示しない。
+        旧run・context 不在時は従来どおり intra_document を表示する
+        （_positioningHtml が opts 省略可能な後方互換シグネチャであること）。"""
+        src = _read(DELIBERATION_JS)
+        assert "skipIntraDocument" in src
+        assert "function _positioningHtml(positioning, opts)" in src
+
+    def test_context_lens_integrated_into_render_modal_body(self):
+        """§6 Phase 2: _renderModalBody が data.context を読み、figure は
+        図ワークスペースの後（画像を主役に保つ）、非 figure は内訳より前に
+        コンテキストレンズを配置すること。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_renderModalBody")
+        assert "_contextLensHtml(data.context)" in block
+        assert "data.context && data.context.available" in block
+
+    def test_css_classes_defined(self):
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        for selector in (
+            ".deliberation-context-lens",
+            ".deliberation-context-lane",
+            ".deliberation-context-focus",
+            ".deliberation-context-nav",
+            ".deliberation-context-status",
+            ".deliberation-breadcrumb",
+        ):
+            assert selector in css, f"{selector} が styles.css に見つかりません"
+
+    def test_css_status_modifier_classes_distinguish_candidate_from_confirmed(self):
+        """W-層の既存視覚言語（candidate=点線・淡色 / confirmed=通常）と整合させる。"""
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert ".deliberation-context-status--candidate" in css
+        assert ".deliberation-context-status--confirmed" in css
+        candidate_idx = css.index(".deliberation-context-status--candidate")
+        candidate_block = css[candidate_idx : css.index("}", candidate_idx)]
+        assert "dashed" in candidate_block
+
+    def test_no_new_admin_documents_fetch_literal_introduced(self):
+        """既存の許可リスト（test_fetch_targets_use_exact_allowlist）を壊していない
+        ことの補強確認: /admin/documents/ の出現回数は既存契約どおり3のまま
+        （中心移動は既存の overview/annotations エンドポイントを再利用し、
+        新規 fetch 先を追加しない）。"""
+        src = _read(DELIBERATION_JS)
+        assert src.count('"/admin/documents/"') == 3
+
+    def test_no_raw_fetch_or_new_http_methods_introduced(self):
+        src = _read(DELIBERATION_JS)
+        assert re.search(r"(?<!api)fetch\(", src) is None
+        for method in ("PUT", "DELETE"):
+            assert f'"{method}"' not in src
+            assert f"'{method}'" not in src
+
+    def test_no_polling_or_forbidden_vocabulary_introduced(self):
+        src = _read(DELIBERATION_JS)
+        assert "setInterval" not in src
+        for word in ("踏破", "達成率", "ランキング"):
+            assert word not in src
+
+    def test_no_raw_confidence_field_rendered(self):
+        """W8: confidence の生値は表示しない（本機能に confidence フィールドは
+        契約上存在しないが、他要素と同じ規約として念のため固定する）。"""
+        src = _read(DELIBERATION_JS)
+        assert re.search(r"\bfocus\.confidence\b(?!_label)", src) is None
+        assert re.search(r"\bitem\.confidence\b(?!_label)", src) is None
+
+
+# ---------------------------------------------------------------------------
+# 照合解析（Contextual Figure Analysis Iterative Verification, #499 Wave 4）。
+# 正本: docs/features/contextual_figure_analysis_iterative_verification.md
+# 「実装記録（2026-07-18 実装決定事項）」節。バックエンド（別 Wave）が figures GET /
+# deliberation overview の figure fields に投影する fields.iterative_analysis
+# （confidence 生値を含まず confidence_label のみの契約）の表示と、レビュー質問
+# カード「この箇所を再解析」の配線を固定する。
+# ---------------------------------------------------------------------------
+
+
+class TestIterativeAnalysisUi:
+    """照合解析セクション（deliberation.js）の受け入れ条件。"""
+
+    def test_rendering_functions_present(self):
+        src = _read(DELIBERATION_JS)
+        for name in ("_iterativeAnalysisHtml", "_alignmentItemsHtml", "_reviewQuestionsHtml"):
+            assert f"function {name}" in src, f"function {name} が見つかりません"
+
+    def test_alignment_status_labels_cover_all_five_states(self):
+        src = _read(DELIBERATION_JS)
+        assert "ALIGNMENT_STATUS_LABELS" in src
+        for status in (
+            "supported_by_both",
+            "visual_only",
+            "text_only",
+            "contradicted",
+            "unresolved",
+        ):
+            assert f"{status}:" in src, f"status={status!r} のラベルが見つかりません"
+
+    def test_convergence_labels_cover_all_six_states(self):
+        src = _read(DELIBERATION_JS)
+        assert "ITERATIVE_CONVERGENCE_LABELS" in src
+        for status in (
+            "converged",
+            "max_iterations_reached",
+            "no_progress",
+            "aborted_error",
+            "aborted_cost_limit",
+            "not_run",
+        ):
+            assert f"{status}:" in src, f"convergence_status={status!r} のラベルが見つかりません"
+
+    def test_unavailable_state_is_a_factual_note_only(self):
+        """available が falsy/空なら「まだ実行されていません」の事実文のみを出す
+        （W4: 存在しない解析結果を捏造しない）。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_iterativeAnalysisHtml")
+        assert "反復照合解析はまだ実行されていません" in block
+        assert "if (!available)" in block
+
+    def test_iterative_analysis_html_uses_esc_html_repeatedly(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_iterativeAnalysisHtml")
+        assert block.count("escHtml(") >= 2
+
+    def test_alignment_and_review_renderers_use_esc_html(self):
+        """XSS対策: 照合項目・レビュー質問カードの動的テキストは escHtml 経由で描画する。"""
+        src = _read(DELIBERATION_JS)
+        row_block = _function_block(src, "_alignmentItemRowHtml")
+        assert "escHtml(" in row_block
+        card_block = _function_block(src, "_reviewQuestionCardHtml")
+        assert "escHtml(" in card_block
+
+    def test_no_raw_confidence_rendered_for_iterative_variables(self):
+        """W8: confidence の生値は表示しない。本セクションで使う変数名すべてに
+        ついて固定する（ia=iterative_analysis / hyp=context_hypothesis /
+        obs=visual_observations / alt=alternative_hypotheses / item=alignment_item /
+        rec=verification_iteration / el=expected_element）。"""
+        src = _read(DELIBERATION_JS)
+        for var in ("ia", "hyp", "obs", "alt", "item", "rec", "el"):
+            assert re.search(r"\b" + var + r"\.confidence\b(?!_label)", src) is None, (
+                f"{var}.confidence の生値描画を検出しました"
+            )
+        assert "confidence_label" in src
+
+    def test_unresolved_item_ids_present_in_reanalyze_payload_builder(self):
+        """レビュー質問カードが積んだ unresolved_item_ids は reanalyze の body 構築部
+        （_figureReanalyzeGuidancePayload）で組み立てる。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_figureReanalyzeGuidancePayload")
+        assert "unresolved_item_ids" in block
+        assert "unresolvedItemIds" in block
+
+    def test_reverify_button_carries_question_and_region_hint_data_attrs(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_reviewQuestionCardHtml")
+        assert "data-question-id=" in block
+        assert "data-region-hint=" in block
+        assert "deliberation-iterative-reverify" in block
+        assert "この箇所を再解析" in block
+
+    def test_reverify_reuses_existing_reanalyze_button_without_new_fetch(self):
+        """既存の許可リスト（test_fetch_targets_use_exact_allowlist: /admin/documents/
+        は3箇所固定）を壊さないこと。送信処理は新規 fetch を書かず、既存の
+        「AIで図を再解析」ボタン（_bindFigureReanalysis の click ハンドラ）を
+        プログラム的にクリックして完全共有する。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_bindIterativeReverify")
+        assert 'getElementById("deliberation-figure-reanalyze")' in block
+        assert "apiFetch(" not in block
+        assert "fetch(" not in block
+        assert src.count('"/admin/documents/"') == 3
+
+    def test_reverify_connects_to_candidate_flow_via_shared_button(self):
+        """「この箇所を再解析」はプログラム的クリックで既存ボタンの処理を起動する。
+        その既存処理（_bindFigureReanalysis）が候補注釈の再読込（_loadAnnotations）を
+        呼ぶことは既存テスト（TestFigurePresentationWorkspace）で別途保証されている
+        ため、ここでは共有関係そのものを固定する。"""
+        src = _read(DELIBERATION_JS)
+        reverify_block = _function_block(src, "_bindIterativeReverify")
+        assert "reanalyzeBtn.click()" in reverify_block
+        reanalyze_block = _function_block(src, "_bindFigureReanalysis")
+        assert "_loadAnnotations(" in reanalyze_block
+
+    def test_bind_called_in_render_modal_body_figure_branch(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_renderModalBody")
+        assert "_bindIterativeReverify()" in block
+
+    def test_inserted_right_after_figure_mode_container(self):
+        """§9: 図の分類ペイン（_figureModeHtml の描画結果）の直後に挿入する。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_figureWorkspaceHtml")
+        mode_idx = block.index("deliberation-figure-mode-container")
+        iterative_idx = block.index("_iterativeAnalysisHtml(fields)")
+        assert mode_idx < iterative_idx
+
+    def test_alignment_items_grouped_by_status_with_caution_styling(self):
+        """区分別 alignment 表示。text_only/contradicted/unresolved は注意色。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_alignmentItemsHtml")
+        assert "ALIGNMENT_STATUS_ORDER" in block
+        row_block = _function_block(src, "_alignmentItemRowHtml")
+        assert "is-caution" in row_block
+        assert "ALIGNMENT_CAUTION_STATUSES" in src
+
+    def test_evidence_four_way_note_present(self):
+        """根拠の4区分注記（画像で直接確認/本文の記述/推論/未確認）を固定文言で表示する。"""
+        src = _read(DELIBERATION_JS)
+        for phrase in ("画像で直接確認", "本文の記述", "推論", "未確認"):
+            assert phrase in src, f"{phrase!r} が見つかりません"
+
+    def test_no_forbidden_vocabulary_in_iterative_section(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_iterativeAnalysisHtml")
+        for word in ("踏破", "達成率", "ランキング"):
+            assert word not in block
+
+    def test_css_classes_defined(self):
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        for selector in (
+            ".deliberation-iterative-analysis",
+            ".deliberation-iterative-status",
+            ".deliberation-iterative-alignment-item",
+            ".deliberation-iterative-alignment-item.is-caution",
+            ".deliberation-iterative-review-card",
+            ".deliberation-iterative-reverify",
+            ".deliberation-iterative-details",
+        ):
+            assert selector in css, f"{selector} が styles.css に見つかりません"
+
+    def test_no_raw_fetch_or_new_http_methods_introduced(self):
+        src = _read(DELIBERATION_JS)
+        assert re.search(r"(?<!api)fetch\(", src) is None
+        for method in ("PUT", "DELETE"):
+            assert f'"{method}"' not in src
+            assert f"'{method}'" not in src
+
+    def test_no_polling_introduced(self):
+        src = _read(DELIBERATION_JS)
+        assert "setInterval" not in src
+
+    def test_es5_regression_not_reintroduced(self):
+        """開発ルール5: ES5 準拠を本追加分でも維持する
+        （TestDeliberationJsEs5RegressionGuard の全文検査と同じ観点の補強確認）。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_iterativeAnalysisHtml")
+        assert "=>" not in block
+        assert re.search(r"\bconst\s+\w", block) is None
+        assert re.search(r"\blet\s+\w", block) is None
+        assert "`" not in block

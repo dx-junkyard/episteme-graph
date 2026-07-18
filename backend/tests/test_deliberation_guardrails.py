@@ -75,6 +75,7 @@ from tests.guardrail_helpers import (  # noqa: E402
 _CORE_DIR = BACKEND / "core" / "deliberation"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "deliberation.py").read_text(encoding="utf-8")
 _POSITIONING_SRC = (BACKEND / "core" / "deliberation" / "positioning.py").read_text(encoding="utf-8")
+_CONTEXT_LENS_SRC = (BACKEND / "core" / "deliberation" / "context_lens.py").read_text(encoding="utf-8")
 _IDENTITY_LINKS_SRC = (BACKEND / "core" / "deliberation" / "identity_links.py").read_text(encoding="utf-8")
 _STORE_SRC = (BACKEND / "core" / "deliberation" / "store.py").read_text(encoding="utf-8")
 _DIALOGUE_SRC = (BACKEND / "core" / "deliberation" / "dialogue.py").read_text(encoding="utf-8")
@@ -222,6 +223,95 @@ class TestOverviewPositioningFallback:
         positioning_idx = _ROUTE_SRC.index("positioning.build(ref)")
         return_idx = _ROUTE_SRC.index('"decomposition": breakdown')
         assert decomposition_idx < positioning_idx < return_idx
+
+
+# ---------------------------------------------------------------------------
+# 面③ 要素中心コンテキストビュー（Issue #498, ``context_lens.py``）
+# ---------------------------------------------------------------------------
+
+
+class TestContextLensLayering:
+    """context_lens.py 固有のレイヤリング検査（TestLayering はディレクトリ単位で既に
+    rglob 経由でカバーしているが、単一ファイルに絞った検査を明示的に固定する）。"""
+
+    def test_context_lens_module_has_no_disallowed_imports(self):
+        assert_source_does_not_import(
+            _CONTEXT_LENS_SRC,
+            ["fastapi", "routes", "services", "episteme_graph.agents"],
+            context="core/deliberation/context_lens.py",
+        )
+
+
+class TestContextLensNoRawNumbersOrHype:
+    """W8: confidence の生値・禁止語彙を context_lens.py が持ち込まないことを構造的に守る
+    （positioning.py の TestPositioningNoRawNumbers と同型）。"""
+
+    def test_context_lens_source_has_no_confidence_string(self):
+        assert_source_forbids(_CONTEXT_LENS_SRC, ["confidence"])
+
+    def test_context_lens_source_forbids_hype_vocabulary(self):
+        assert_source_forbids(_CONTEXT_LENS_SRC, ["踏破", "達成率", "ランキング"])
+
+
+class TestOverviewContextLensFallback:
+    """overview が3本目の面（"context"）も decomposition → positioning に続く独立した
+    try/except で組み立て、その失敗が他の面の結果を握りつぶさないこと（Task 1、
+    TestOverviewPositioningFallback と同型のソース並び順検査）。"""
+
+    def test_route_wraps_context_lens_build_in_try_except(self):
+        assert "context_lens.build(ref)" in _ROUTE_SRC
+        assert '"available": True, **context_result' in _ROUTE_SRC
+
+    def test_route_reports_fail_soft_notes_honestly(self):
+        # shared_part（対象外）と例外時とで別々の事実文を返す（出所の正直さ・煽らない）。
+        assert "この要素型にはコンテキスト投影がありません" in _ROUTE_SRC
+        assert "コンテキスト投影の取得に失敗しました" in _ROUTE_SRC
+
+    def test_context_build_follows_decomposition_then_positioning_in_source_order(self):
+        decomposition_idx = _ROUTE_SRC.index("breakdown = decomposition.build(ref)")
+        positioning_idx = _ROUTE_SRC.index("positioning.build(ref)")
+        context_idx = _ROUTE_SRC.index("context_lens.build(ref)")
+        return_idx = _ROUTE_SRC.index('"decomposition": breakdown')
+        assert decomposition_idx < positioning_idx < context_idx < return_idx
+
+    def test_context_is_returned_in_overview_response(self):
+        assert '"context": context_payload' in _ROUTE_SRC
+
+
+class TestDialogueGroundingIncludesContextLens:
+    """dialogue.py（面③対話）の grounding にも同じ文脈レンズを供給すること（Task 2）。
+    core レイヤリング（FastAPI/routes/services 非import）は TestPhase2CoreLayering が
+    既にディレクトリ単位でカバー済みのため、ここでは context_lens 固有の配線のみ固定する。
+    """
+
+    def test_dialogue_module_imports_context_lens(self):
+        assert "context_lens" in _DIALOGUE_SRC
+        assert "from core.deliberation import context_lens" in _DIALOGUE_SRC
+
+    def test_build_grounding_includes_context_key(self):
+        body = extract_function_source(_DIALOGUE_SRC, "build_grounding")
+        assert '"context": context' in body
+
+    def test_build_grounding_wraps_context_lens_in_try_except(self):
+        body = extract_function_source(_DIALOGUE_SRC, "build_grounding")
+        context_call_idx = body.index("context_lens.build(ref)")
+        except_idx = body.index("except Exception", context_call_idx)
+        assert context_call_idx < except_idx
+
+    def test_grounding_to_text_does_not_read_a_confidence_field_for_context_items(self):
+        # W8: 面③の文脈レンズは relation_status/contextual_role_status のみをラベル化
+        # して表示し、数値 confidence を読み出す経路を持たない（"confidence" という語
+        # 自体は annotations 用の別スキーマ・指示文で正当に使われているため、
+        # grounding_to_text() 関数の抽出ソースに限定してフィールド読み出しの不在を検査する）。
+        body = extract_function_source(_DIALOGUE_SRC, "grounding_to_text")
+        for needle in ('.get("confidence"', ".get('confidence'", '["confidence"]', "['confidence']"):
+            assert needle not in body, f"grounding_to_text must not read a confidence field: {needle!r}"
+
+    def test_grounding_to_text_maps_context_status_vocabulary(self):
+        # W8: 段階ラベルのみ（source_backed→原文根拠 / candidate→AI候補 / confirmed→教員確認済み）。
+        assert "原文根拠" in _DIALOGUE_SRC
+        assert "AI候補" in _DIALOGUE_SRC
+        assert "教員確認済み" in _DIALOGUE_SRC
 
 
 # ---------------------------------------------------------------------------

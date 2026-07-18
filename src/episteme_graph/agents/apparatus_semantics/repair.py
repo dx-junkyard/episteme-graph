@@ -23,12 +23,21 @@ from .llm_client import ApparatusSemanticsLLMClient
 from .prompt import ApparatusSemanticsPromptFactory
 from .schema import (
     REVIEW_STATUS_DEFAULT,
+    AlignmentItem,
+    AlternativeHypothesis,
     ApparatusConnection,
     ApparatusPart,
     ApparatusRecord,
+    ContextHypothesis,
+    ExpectedElement,
+    ExpectedRelation,
     FigureImageInput,
     LibraryCandidate,
+    ObservedConnection,
+    ObservedElement,
     ValidationIssue,
+    VerificationTask,
+    VisualObservationSet,
 )
 
 logger = logging.getLogger(__name__)
@@ -173,6 +182,243 @@ def _parse_record(
         analysis_profile=mode_payload["analysis_profile"],
         guidance_note=str(raw.get("guidance_note", "") or "").strip()[:_MAX_GUIDANCE_NOTE_CHARS],
     )
+
+
+# ---------------------------------------------------------------------------
+# Iterative contextual-analysis pipeline parsing
+# (docs/features/contextual_figure_analysis_iterative_verification.md)
+#
+# These functions deterministically build the Wave 1 dataclasses from raw LLM
+# JSON for each of the four pipeline steps. Like ``_parse_record`` above, they
+# are defensive (type mismatches degrade to defaults, confidence is clamped to
+# 0..1) but deliberately do NOT enforce the controlled vocabularies
+# (status/severity/etc.) — an out-of-vocabulary value is kept as-is so
+# validator.py can report it as an explicit issue rather than silently
+# discarding it (design principle #4, "情報を落とさない"). No caller in this
+# wave invokes these yet — the state machine lives in a later wave.
+# ---------------------------------------------------------------------------
+
+def parse_hypothesis(raw: dict) -> ContextHypothesis:
+    """Deterministically build a ``ContextHypothesis`` from raw LLM JSON."""
+    raw = raw if isinstance(raw, dict) else {}
+
+    expected_elements: list[ExpectedElement] = []
+    for item in raw.get("expected_elements", []) or []:
+        if not isinstance(item, dict):
+            continue
+        expected_elements.append(ExpectedElement(
+            element_id=str(item.get("element_id", "") or ""),
+            name=str(item.get("name", "") or ""),
+            evidence_quote=str(item.get("evidence_quote", "") or ""),
+            expected_labels=[str(x) for x in (item.get("expected_labels") or [])],
+            importance=str(item.get("importance", "primary") or "primary"),
+            confidence=_safe_float(item.get("confidence", 0.0)),
+        ))
+
+    expected_relations: list[ExpectedRelation] = []
+    for item in raw.get("expected_relations", []) or []:
+        if not isinstance(item, dict):
+            continue
+        expected_relations.append(ExpectedRelation(
+            relation_id=str(item.get("relation_id", "") or ""),
+            from_element_id=str(item.get("from_element_id", "") or ""),
+            to_element_id=str(item.get("to_element_id", "") or ""),
+            relation=str(item.get("relation", "") or ""),
+            direction=str(item.get("direction", "") or ""),
+            evidence_quote=str(item.get("evidence_quote", "") or ""),
+            confidence=_safe_float(item.get("confidence", 0.0)),
+        ))
+
+    return ContextHypothesis(
+        role_in_paper=str(raw.get("role_in_paper", "") or ""),
+        overall_subject=str(raw.get("overall_subject", "") or ""),
+        expected_elements=expected_elements,
+        expected_relations=expected_relations,
+        expected_visual_cues=[str(x) for x in (raw.get("expected_visual_cues") or [])],
+        unstated_points=[str(x) for x in (raw.get("unstated_points") or [])],
+        falsification_conditions=[str(x) for x in (raw.get("falsification_conditions") or [])],
+        evidence_quotes=[str(x) for x in (raw.get("evidence_quotes") or [])],
+        reason=str(raw.get("reason", "") or ""),
+        confidence=_safe_float(raw.get("confidence", 0.0)),
+    )
+
+
+def parse_observations(raw: dict) -> VisualObservationSet:
+    """Deterministically build a ``VisualObservationSet`` from raw LLM JSON."""
+    raw = raw if isinstance(raw, dict) else {}
+
+    elements: list[ObservedElement] = []
+    for item in raw.get("elements", []) or []:
+        if not isinstance(item, dict):
+            continue
+        elements.append(ObservedElement(
+            observation_id=str(item.get("observation_id", "") or ""),
+            kind=str(item.get("kind", "other") or "other"),
+            description=str(item.get("description", "") or ""),
+            label_text=str(item.get("label_text", "") or ""),
+            region_hint=str(item.get("region_hint", "") or ""),
+        ))
+
+    connections: list[ObservedConnection] = []
+    for item in raw.get("connections", []) or []:
+        if not isinstance(item, dict):
+            continue
+        connections.append(ObservedConnection(
+            from_observation_id=str(item.get("from_observation_id", "") or ""),
+            to_observation_id=str(item.get("to_observation_id", "") or ""),
+            connector=str(item.get("connector", "") or ""),
+            direction=str(item.get("direction", "") or ""),
+            description=str(item.get("description", "") or ""),
+        ))
+
+    return VisualObservationSet(
+        panels=[dict(p) for p in (raw.get("panels") or []) if isinstance(p, dict)],
+        elements=elements,
+        connections=connections,
+        ocr_labels=[str(x) for x in (raw.get("ocr_labels") or [])],
+        repeated_motifs=[dict(m) for m in (raw.get("repeated_motifs") or []) if isinstance(m, dict)],
+        unreadable_regions=[
+            dict(r) for r in (raw.get("unreadable_regions") or []) if isinstance(r, dict)
+        ],
+        undecidable_elements=[
+            dict(u) for u in (raw.get("undecidable_elements") or []) if isinstance(u, dict)
+        ],
+        visual_mode_guess=str(raw.get("visual_mode_guess", "unknown") or "unknown"),
+        reason=str(raw.get("reason", "") or ""),
+        confidence=_safe_float(raw.get("confidence", 0.0)),
+    )
+
+
+def _parse_alignment_item(item: dict) -> AlignmentItem:
+    item = item if isinstance(item, dict) else {}
+    return AlignmentItem(
+        item_id=str(item.get("item_id", "") or ""),
+        item_kind=str(item.get("item_kind", "") or ""),
+        label=str(item.get("label", "") or ""),
+        # status/severity are intentionally NOT clamped to their controlled
+        # vocabulary here — an out-of-vocabulary value is kept as-is so
+        # validator.py can report it explicitly (design principle #4).
+        status=str(item.get("status", "") or ""),
+        expected_ref=str(item.get("expected_ref", "") or ""),
+        observation_refs=[str(x) for x in (item.get("observation_refs") or [])],
+        label_ref=str(item.get("label_ref", "") or ""),
+        text_evidence=str(item.get("text_evidence", "") or ""),
+        visual_evidence=str(item.get("visual_evidence", "") or ""),
+        severity=str(item.get("severity", "medium") or "medium"),
+        reason=str(item.get("reason", "") or ""),
+        confidence=_safe_float(item.get("confidence", 0.0)),
+    )
+
+
+def _parse_alternative_hypothesis(item: dict) -> AlternativeHypothesis:
+    item = item if isinstance(item, dict) else {}
+    return AlternativeHypothesis(
+        hypothesis_id=str(item.get("hypothesis_id", "") or ""),
+        description=str(item.get("description", "") or ""),
+        supporting_evidence=[str(x) for x in (item.get("supporting_evidence") or [])],
+        counter_evidence=[str(x) for x in (item.get("counter_evidence") or [])],
+        unverified_conditions=[str(x) for x in (item.get("unverified_conditions") or [])],
+        status=str(item.get("status", "active") or "active"),
+        confidence=_safe_float(item.get("confidence", 0.0)),
+    )
+
+
+def _parse_verification_task(item: dict) -> VerificationTask:
+    item = item if isinstance(item, dict) else {}
+    focus_bbox_rel = item.get("focus_bbox_rel")
+    return VerificationTask(
+        task_id=str(item.get("task_id", "") or ""),
+        question=str(item.get("question", "") or ""),
+        target_item_ids=[str(x) for x in (item.get("target_item_ids") or [])],
+        region_hint=str(item.get("region_hint", "") or ""),
+        focus_bbox_rel=(
+            list(focus_bbox_rel) if isinstance(focus_bbox_rel, list) and focus_bbox_rel else None
+        ),
+        success_condition=str(item.get("success_condition", "") or ""),
+        refutation_condition=str(item.get("refutation_condition", "") or ""),
+        status=str(item.get("status", "open") or "open"),
+    )
+
+
+def parse_alignment_output(
+    raw: dict,
+    figure: FigureImageInput,
+    candidates: list[LibraryCandidate],
+) -> tuple[ApparatusRecord, dict]:
+    """Split raw alignment-step LLM JSON into the final ``ApparatusRecord``
+    (built the same way ``_parse_record`` builds the one-shot record — reused
+    directly here, design principle #2/#4 discipline unchanged) plus the new
+    iterative-only pieces (alignment_items / alternative_hypotheses /
+    verification_tasks / review_questions).
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    record = _parse_record(raw, figure, candidates)
+
+    alignment_items = [
+        _parse_alignment_item(item) for item in raw.get("alignment_items", []) or []
+        if isinstance(item, dict)
+    ]
+    alternative_hypotheses = [
+        _parse_alternative_hypothesis(item)
+        for item in raw.get("alternative_hypotheses", []) or []
+        if isinstance(item, dict)
+    ]
+    verification_tasks = [
+        _parse_verification_task(item) for item in raw.get("verification_tasks", []) or []
+        if isinstance(item, dict)
+    ]
+    review_questions = [
+        dict(item) for item in raw.get("review_questions", []) or [] if isinstance(item, dict)
+    ]
+
+    return record, {
+        "alignment_items": alignment_items,
+        "alternative_hypotheses": alternative_hypotheses,
+        "verification_tasks": verification_tasks,
+        "review_questions": review_questions,
+    }
+
+
+def parse_verification_output(raw: dict) -> dict:
+    """Deterministically parse a gap-driven re-verification response.
+
+    ``task_findings`` / ``hypothesis_updates`` / ``record_deltas`` are kept as
+    plain (defensively-typed) dicts — they describe deltas against state this
+    module does not own, so validator.py/the (later-wave) engine interpret
+    them against the current alignment/observation state.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+
+    task_findings = [
+        dict(item) for item in raw.get("task_findings", []) or [] if isinstance(item, dict)
+    ]
+    updated_alignment_items = [
+        _parse_alignment_item(item) for item in raw.get("updated_alignment_items", []) or []
+        if isinstance(item, dict)
+    ]
+    new_alignment_items = [
+        _parse_alignment_item(item) for item in raw.get("new_alignment_items", []) or []
+        if isinstance(item, dict)
+    ]
+    new_verification_tasks = [
+        _parse_verification_task(item) for item in raw.get("new_verification_tasks", []) or []
+        if isinstance(item, dict)
+    ]
+    hypothesis_updates = [
+        dict(item) for item in raw.get("hypothesis_updates", []) or [] if isinstance(item, dict)
+    ]
+    record_deltas = raw.get("record_deltas")
+    record_deltas = dict(record_deltas) if isinstance(record_deltas, dict) else {}
+
+    return {
+        "task_findings": task_findings,
+        "updated_alignment_items": updated_alignment_items,
+        "new_alignment_items": new_alignment_items,
+        "new_verification_tasks": new_verification_tasks,
+        "hypothesis_updates": hypothesis_updates,
+        "record_deltas": record_deltas,
+        "notes": str(raw.get("notes", "") or ""),
+    }
 
 
 def _fallback_record(

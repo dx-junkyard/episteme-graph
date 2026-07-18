@@ -62,6 +62,7 @@ from dependencies import _require_teacher
 from core.config import get_settings
 from core.deliberation import (
     annotations as delib_annotations,
+    context_lens,
     decomposition,
     dialogue,
     identity_links,
@@ -266,10 +267,35 @@ def get_element_overview(
         # 候補をここでフィルタする（W5・fail-closed。§4.2「閲覧不可のものは除外」）。
         _apply_cross_corpus_gate(positioning_payload, current_user)
 
+    # 面③ 要素中心コンテキストビュー（Issue #498、`context_lens.py`）。document-scoped
+    # 4要素型のみ投影を持ち、shared_part（scope='domain'）は対象外（None）。positioning と
+    # 同様に独立した try/except にし、この面の失敗が decomposition/positioning の結果を
+    # 握りつぶさない（fail-soft・W6）。既存 overview 経路の権限ゲート（上の
+    # ``_ensure_document_viewable``）がそのまま効くため、追加のゲートは要らない
+    # （論文内に閉じた投影のため cross_corpus のような他 document 由来の候補も持たない）。
+    try:
+        context_result = context_lens.build(ref)
+        if context_result is None:
+            context_payload: dict[str, Any] = {
+                "available": False,
+                "note": "この要素型にはコンテキスト投影がありません",
+            }
+        else:
+            context_payload = {"available": True, **context_result}
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deliberation context lens failed for %s:%s", ref.element_type, ref.element_id, exc_info=True
+        )
+        context_payload = {
+            "available": False,
+            "note": "コンテキスト投影の取得に失敗しました",
+        }
+
     return {
         "ref": ref.to_dict(),
         "decomposition": breakdown,
         "positioning": positioning_payload,
+        "context": context_payload,
     }
 
 

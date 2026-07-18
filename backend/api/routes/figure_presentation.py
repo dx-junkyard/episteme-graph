@@ -179,14 +179,16 @@ def update_figure_presentation_mode(
 
 
 class FigureReanalyzeRequest(BaseModel):
-    """教員指示付き再解析（guided_figure_reanalysis_design.md §4-1）。
+    """教員指示付き再解析（guided_figure_reanalysis_design.md §4-1、
+    unresolved_item_ids は #499 の未解決箇所指定再解析）。
 
-    両フィールドとも省略・null なら従来どおりの無指示再解析（後方互換）。
+    全フィールドとも省略・null なら従来どおりの無指示再解析（後方互換）。
     値域検証は ``core.figure_reanalysis._normalize_guidance`` に一本化する
     （ここでは型だけを宣言し、範囲チェックはしない）。
     """
     hint_text: str | None = None
     focus_bbox: list[float] | None = None
+    unresolved_item_ids: list[str] | None = None
 
 
 @router.post("/documents/{document_id}/figures/{figure_id}/reanalyze")
@@ -199,9 +201,14 @@ def reanalyze_document_figure(
     """Create a structured AI candidate for one figure; never auto-confirm it."""
     chunks = _ensure_document_editable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
-    guidance = (
-        {"hint_text": body.hint_text, "focus_bbox": body.focus_bbox} if body else None
-    )
+    guidance = None
+    if body is not None:
+        guidance = {"hint_text": body.hint_text, "focus_bbox": body.focus_bbox}
+        # Additive key only — kept out entirely when absent so the existing
+        # hint/focus-only request shape (and the core's exact-equality
+        # back-compat contract) is unaffected.
+        if body.unresolved_item_ids is not None:
+            guidance["unresolved_item_ids"] = body.unresolved_item_ids
     try:
         result = figure_reanalysis.reanalyze_figure(
             canonical_document_id,

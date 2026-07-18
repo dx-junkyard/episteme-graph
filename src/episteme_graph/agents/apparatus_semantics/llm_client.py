@@ -96,6 +96,219 @@ APPARATUS_RESPONSE_SCHEMA: dict = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Iterative contextual-analysis pipeline response-schema hints
+# (docs/features/contextual_figure_analysis_iterative_verification.md)
+#
+# These are loose JSON-schema hints for each of the four pipeline steps'
+# structured-output calls; acceptance is still owned by validator.py/repair.py.
+# Wave 1 scaffolding — no caller in this wave dispatches these yet (the state
+# machine lives in a later wave's iterative.py).
+# ---------------------------------------------------------------------------
+
+HYPOTHESIS_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "role_in_paper": {"type": "string"},
+        "overall_subject": {"type": "string"},
+        "expected_elements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "element_id": {"type": "string"},
+                    "name": {"type": "string"},
+                    "evidence_quote": {"type": "string"},
+                    "expected_labels": {"type": "array", "items": {"type": "string"}},
+                    "importance": {"type": "string", "enum": ["primary", "secondary"]},
+                    "confidence": {"type": "number"},
+                },
+            },
+        },
+        "expected_relations": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "relation_id": {"type": "string"},
+                    "from_element_id": {"type": "string"},
+                    "to_element_id": {"type": "string"},
+                    "relation": {"type": "string"},
+                    "direction": {"type": "string"},
+                    "evidence_quote": {"type": "string"},
+                    "confidence": {"type": "number"},
+                },
+            },
+        },
+        "expected_visual_cues": {"type": "array", "items": {"type": "string"}},
+        "unstated_points": {"type": "array", "items": {"type": "string"}},
+        "falsification_conditions": {"type": "array", "items": {"type": "string"}},
+        "evidence_quotes": {"type": "array", "items": {"type": "string"}},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+}
+
+OBSERVATION_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "panels": {"type": "array", "items": {"type": "object"}},
+        "elements": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "observation_id": {"type": "string"},
+                    "kind": {"type": "string"},
+                    "description": {"type": "string"},
+                    "label_text": {"type": "string"},
+                    "region_hint": {"type": "string"},
+                },
+            },
+        },
+        "connections": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "from_observation_id": {"type": "string"},
+                    "to_observation_id": {"type": "string"},
+                    "connector": {"type": "string"},
+                    "direction": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+            },
+        },
+        "ocr_labels": {"type": "array", "items": {"type": "string"}},
+        "repeated_motifs": {"type": "array", "items": {"type": "object"}},
+        "unreadable_regions": {"type": "array", "items": {"type": "object"}},
+        "undecidable_elements": {"type": "array", "items": {"type": "object"}},
+        "visual_mode_guess": {
+            "type": "string",
+            "enum": ["functional_diagram", "data_plot", "descriptive_image", "mixed", "unknown"],
+        },
+        "reason": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+}
+
+# Shared nested shapes reused by both ALIGNMENT_RESPONSE_SCHEMA and
+# VERIFICATION_RESPONSE_SCHEMA — an alignment item / verification task looks
+# the same whether it is emitted by the alignment step or the verification step.
+_ALIGNMENT_ITEM_PROPERTIES: dict = {
+    "type": "object",
+    "properties": {
+        "item_id": {"type": "string"},
+        "item_kind": {"type": "string"},
+        "label": {"type": "string"},
+        "status": {
+            "type": "string",
+            "enum": ["supported_by_both", "visual_only", "text_only", "contradicted", "unresolved"],
+        },
+        "expected_ref": {"type": "string"},
+        "observation_refs": {"type": "array", "items": {"type": "string"}},
+        "label_ref": {"type": "string"},
+        "text_evidence": {"type": "string"},
+        "visual_evidence": {"type": "string"},
+        "severity": {"type": "string", "enum": ["high", "medium", "low"]},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number"},
+    },
+}
+
+_VERIFICATION_TASK_PROPERTIES: dict = {
+    "type": "object",
+    "properties": {
+        "task_id": {"type": "string"},
+        "question": {"type": "string"},
+        "target_item_ids": {"type": "array", "items": {"type": "string"}},
+        "region_hint": {"type": "string"},
+        "focus_bbox_rel": {"type": ["array", "null"]},
+        "success_condition": {"type": "string"},
+        "refutation_condition": {"type": "string"},
+    },
+}
+
+ALIGNMENT_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        **APPARATUS_RESPONSE_SCHEMA["properties"],
+        "alignment_items": {"type": "array", "items": _ALIGNMENT_ITEM_PROPERTIES},
+        "alternative_hypotheses": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hypothesis_id": {"type": "string"},
+                    "description": {"type": "string"},
+                    "supporting_evidence": {"type": "array", "items": {"type": "string"}},
+                    "counter_evidence": {"type": "array", "items": {"type": "string"}},
+                    "unverified_conditions": {"type": "array", "items": {"type": "string"}},
+                    "status": {"type": "string", "enum": ["active", "rejected", "selected"]},
+                    "confidence": {"type": "number"},
+                },
+            },
+        },
+        "verification_tasks": {"type": "array", "items": _VERIFICATION_TASK_PROPERTIES},
+        "review_questions": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "question_id": {"type": "string"},
+                    "question": {"type": "string"},
+                    "related_item_ids": {"type": "array", "items": {"type": "string"}},
+                    "region_hint": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+VERIFICATION_RESPONSE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "task_findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string"},
+                    "outcome": {"type": "string", "enum": ["resolved", "refuted", "unresolved"]},
+                    "observation": {"type": "string"},
+                    "evidence": {"type": "string"},
+                },
+            },
+        },
+        "updated_alignment_items": {"type": "array", "items": _ALIGNMENT_ITEM_PROPERTIES},
+        "new_alignment_items": {"type": "array", "items": _ALIGNMENT_ITEM_PROPERTIES},
+        "new_verification_tasks": {"type": "array", "items": _VERIFICATION_TASK_PROPERTIES},
+        "hypothesis_updates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "hypothesis_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["active", "rejected", "selected"]},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+            },
+        },
+        "record_deltas": {
+            "type": "object",
+            "properties": {
+                "parts_to_add": {"type": "array", "items": {"type": "object"}},
+                "parts_to_remove": {"type": "array", "items": {"type": "string"}},
+                "connections_to_add": {"type": "array", "items": {"type": "object"}},
+                "connections_to_remove": {"type": "array", "items": {"type": "object"}},
+            },
+        },
+        "notes": {"type": "string"},
+    },
+}
+
+
 class ApparatusSemanticsLLMClient(ProviderJSONLLMClient):
     """Provider-aware JSON client extended with multi-image vision input."""
 

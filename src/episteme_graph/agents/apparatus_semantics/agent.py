@@ -15,14 +15,17 @@ import logging
 
 from .cartridge_loader import CartridgeLoader
 from .input_builder import ApparatusSemanticsInputBuilder
+from .iterative import IterativeFigureAnalyzer, VisionBudget
 from .llm_client import ApparatusSemanticsLLMClient
-from .prompt import ApparatusSemanticsPromptFactory
+from .prompt import ApparatusSemanticsPromptFactory, IterativePromptFactory
 from .repair import ApparatusSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
     ApparatusRecord,
     ApparatusSemanticsResult,
     CartridgeContext,
     FigureImageInput,
+    IterativeAnalysisRecord,
+    IterativeConfig,
     LibraryCandidate,
 )
 from .validator import ApparatusSemanticsValidator
@@ -149,6 +152,7 @@ class ApparatusSemanticsAgent:
         cartridge_id: str | None = None,
         llm_client: ApparatusSemanticsLLMClient | None = None,
         cartridge_loader: CartridgeLoader | None = None,
+        iterative_config: IterativeConfig | None = None,
     ) -> None:
         self._default_cartridge_id = cartridge_id
         self._cartridge_loader = cartridge_loader or CartridgeLoader()
@@ -157,6 +161,9 @@ class ApparatusSemanticsAgent:
         self._llm_client = llm_client or ApparatusSemanticsLLMClient()
         self._validator = ApparatusSemanticsValidator()
         self._repairer = ApparatusSemanticsRepairer()
+        # Iterative hypothesis-verification pipeline (#499). ``None`` or
+        # ``enabled=False`` keeps the legacy one-shot behaviour.
+        self._iterative_config = iterative_config
 
     def run(
         self,
@@ -178,14 +185,37 @@ class ApparatusSemanticsAgent:
             for figure in figures
         }
 
+        # Iterative hypothesis-verification pipeline (#499). ``None`` or
+        # ``enabled=False`` keeps every figure on the legacy one-shot path
+        # below, byte-for-byte unchanged.
+        iterative_enabled = bool(self._iterative_config and self._iterative_config.enabled)
+        vision_budget = (
+            VisionBudget(self._iterative_config.vision_call_budget)
+            if iterative_enabled else None
+        )
+        iterative_analyzer = (
+            IterativeFigureAnalyzer(
+                self._llm_client, IterativePromptFactory(), self._validator,
+                self._iterative_config,
+            )
+            if iterative_enabled else None
+        )
+
         records = []
-        for figure in figures:
+        for index, figure in enumerate(figures):
             candidates = list(library_candidates.get(figure.figure_id) or [])
 
             # Image unavailable → never call the LLM; keep a reviewable
             # 'unknown' record instead of dropping the figure (P4).
             if not figure.image_bytes:
                 fallback = _fallback_record(figure, "image_unavailable")
+                if iterative_enabled:
+                    fallback.iterative_analysis = IterativeAnalysisRecord(
+                        enabled=True,
+                        convergence_status="not_run",
+                        stage_failures=["image_unavailable"],
+                        model=self._iterative_config.model_name,
+                    )
                 _attach_label_grounding(fallback, figure)  # no-op: parts == []
                 records.append(fallback)
                 continue
@@ -200,6 +230,35 @@ class ApparatusSemanticsAgent:
             # batch-pipeline figure always yields {} here, so build_messages
             # omits the guidance section entirely (GF7).
             guidance = self._input_builder.build_guidance(figure)
+
+            if iterative_analyzer is not None:
+                # Reservation policy: guarantee every remaining figure (this
+                # one included) at least one vision call for its mandatory
+                # observation step, so an early figure's gap-driven rescans
+                # cannot starve later figures of their own observation.
+                remaining_figures_after = len(figures) - index - 1
+                remaining_budget = vision_budget.remaining()
+                if remaining_budget is None:
+                    rescan_allowance = self._iterative_config.max_iterations
+                else:
+                    rescan_allowance = max(
+                        0, remaining_budget - remaining_figures_after - 1,
+                    )
+                record = iterative_analyzer.run_figure(
+                    figure=figure,
+                    candidates=candidates,
+                    candidate_briefs=candidate_briefs,
+                    cartridge_hints=cartridge_hints,
+                    guidance=guidance,
+                    image_payloads=image_payloads,
+                    budget=vision_budget,
+                    rescan_allowance=rescan_allowance,
+                )
+                _attach_label_grounding(record, figure)
+                _attach_profile_grounding(record, figure)
+                records.append(record)
+                continue
+
             messages = self._prompt_factory.build_messages(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
                 inner_label_hints=inner_label_hints, abbreviations=abbreviations,

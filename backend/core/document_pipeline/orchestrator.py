@@ -2377,6 +2377,7 @@ def _build_apparatus_semantics(
     from episteme_graph.agents.apparatus_semantics.agent import ApparatusSemanticsAgent
     from episteme_graph.agents.apparatus_semantics.schema import (
         FigureImageInput,
+        IterativeConfig,
         LibraryCandidate,
     )
 
@@ -2408,15 +2409,37 @@ def _build_apparatus_semantics(
     max_images = max(0, int(getattr(settings, "apparatus_max_images_per_document", 20) or 0))
     daily_remaining = _apparatus_daily_remaining(settings)
 
+    # 反復照合パイプライン（#499）: iterative モードは engine が
+    # hypothesis(非vision) → observation(vision) → alignment(非vision) →
+    # verification(vision)×N という複数コールを1図に費やすため、事前フィルタも
+    # 図あたり `1 + max_iterations` の保守的な見積りコストで許容図数を絞る
+    # （daily_remaining >= 1 なら最低1図は許可し、0図に縮退させない）。
+    analysis_mode = str(getattr(settings, "apparatus_analysis_mode", "iterative") or "iterative")
+    iterative_enabled = analysis_mode != "one_shot"
+    verify_max_iterations = max(0, int(getattr(settings, "apparatus_verify_max_iterations", 3) or 0))
+    iterative_config = IterativeConfig(
+        enabled=iterative_enabled,
+        max_iterations=verify_max_iterations,
+        vision_call_budget=daily_remaining,
+        model_name=str(getattr(settings, "apparatus_llm_model", "") or ""),
+    )
+    if iterative_enabled:
+        cost_per_figure = max(1, 1 + verify_max_iterations)
+        allowed_by_budget = daily_remaining // cost_per_figure
+        if allowed_by_budget <= 0 and daily_remaining >= 1:
+            allowed_by_budget = 1
+    else:
+        allowed_by_budget = daily_remaining
+    allowed_images = min(max_images, max(0, allowed_by_budget))
+
     figure_inputs: list[FigureImageInput] = []
     skipped_by_limit: list[str] = []
     context_collected = 0
     for idx, row in enumerate(figure_rows):
         figure_key = str(row.get("figure_key") or "")
-        if idx >= max_images or daily_remaining <= 0:
+        if idx >= allowed_images:
             skipped_by_limit.append(figure_key)
             continue
-        daily_remaining -= 1
 
         image_bytes = None
         minio_key = row.get("minio_key")
@@ -2510,15 +2533,36 @@ def _build_apparatus_semantics(
                         for h in hits
                     ]
 
-    vision_calls = sum(1 for fi in figure_inputs if fi.image_bytes)
-
-    agent = ApparatusSemanticsAgent(cartridge_id=cartridge_id)
+    agent = ApparatusSemanticsAgent(cartridge_id=cartridge_id, iterative_config=iterative_config)
     result = agent.run(
         document_id=document_id,
         figures=figure_inputs,
         library_candidates=library_candidates,
         cartridge_id=cartridge_id,
     )
+
+    # vision_calls は実測値: iterative_analysis を持つ record はその
+    # vision_calls を合算し、持たない record（one_shot 経路 / iterative 無効）は
+    # 従来どおり image_bytes 有無で1とみなす（設計書「コスト制御」節）。
+    records = getattr(result, "apparatus_records", []) or []
+    figure_input_by_id = {fi.figure_id: fi for fi in figure_inputs}
+    _convergence_keys = (
+        "converged", "max_iterations_reached", "no_progress",
+        "aborted_error", "aborted_cost_limit",
+    )
+    convergence_counts = {key: 0 for key in _convergence_keys}
+    vision_calls = 0
+    for record in records:
+        iterative = getattr(record, "iterative_analysis", None)
+        if iterative is not None:
+            vision_calls += int(getattr(iterative, "vision_calls", 0) or 0)
+            status = getattr(iterative, "convergence_status", None)
+            if status in convergence_counts:
+                convergence_counts[status] += 1
+        else:
+            fig_input = figure_input_by_id.get(getattr(record, "figure_id", None))
+            if fig_input is not None and fig_input.image_bytes:
+                vision_calls += 1
 
     # #496: persist the generic vision classification/profile separately from
     # any teacher override.  Artifact persistence remains the source for old
@@ -2548,21 +2592,24 @@ def _build_apparatus_semantics(
 
     done_payload = {
         "status": "completed",
-        "apparatus_records": len(getattr(result, "apparatus_records", []) or []),
+        "apparatus_records": len(records),
         "vision_calls": vision_calls,
         "skipped_by_limit": skipped_by_limit,
         "referenced_library_versions": referenced_versions,
         "context_collected": context_collected,
         "presentation_modes": {
             mode: sum(
-                1 for record in (getattr(result, "apparatus_records", []) or [])
+                1 for record in records
                 if getattr(record, "suggested_mode", "unknown") == mode
             )
             for mode in (
                 "functional_diagram", "data_plot", "descriptive_image", "mixed", "unknown"
             )
         },
+        "iterative_mode": iterative_enabled,
     }
+    if iterative_enabled:
+        done_payload["convergence"] = convergence_counts
     return result, done_payload
 
 

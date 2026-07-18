@@ -314,6 +314,45 @@ def _save_figure(
     candidate_id = str(uuid.uuid4())
     placeholder_key = f"figures/{document_id}/{candidate_id}.png"
     try:
+        if caption_block_id and bbox is not None:
+            # 旧runで caption を取得できなかった画像は ``p39_i0`` のような残余keyで
+            # 保存されている。caption補完後に ``fig_2_7`` を新規INSERTすると同じ画像が
+            # 二重化し、旧カードUUIDは永久に文脈なしのまま残る。document/page/bbox が
+            # 完全一致する未接続行だけを新keyへ移し、UUIDと教員レビュー済み列を保持する。
+            session.execute(
+                sa_text(
+                    """
+                    UPDATE document_figures AS target
+                    SET figure_key = :figure_key,
+                        figure_label = :figure_label
+                    WHERE target.id = (
+                        SELECT orphan.id
+                        FROM document_figures AS orphan
+                        WHERE orphan.document_id = :document_id
+                          AND orphan.page = :page
+                          AND orphan.bbox = CAST(:bbox AS jsonb)
+                          AND orphan.caption_block_id IS NULL
+                          AND orphan.figure_key ~ '^p[0-9]+_i[0-9]+$'
+                          AND NOT EXISTS (
+                              SELECT 1 FROM document_figures AS current
+                              WHERE current.document_id = :document_id
+                                AND current.figure_key = :figure_key
+                          )
+                        ORDER BY orphan.created_at ASC
+                        LIMIT 1
+                        FOR UPDATE
+                    )
+                    """
+                ),
+                {
+                    "document_id": document_id,
+                    "figure_key": figure_key,
+                    "figure_label": figure_label,
+                    "page": page,
+                    "bbox": json.dumps(bbox),
+                },
+            )
+
         row = session.execute(
             sa_text(
                 """
@@ -340,6 +379,7 @@ def _save_figure(
                     suggested_mode = 'unknown',
                     mode_reason = '',
                     analysis_profile = '{}'::jsonb,
+                    iterative_analysis = '{}'::jsonb,
                     status = 'extracted'
                 RETURNING id::text
                 """
@@ -598,7 +638,8 @@ def load_document_figures(document_id: str) -> list[dict]:
                        mode_review_status, mode_reviewed_by::text, mode_reviewed_at,
                        reviewed_analysis_mode, reviewed_analysis_profile,
                        analysis_review_status, analysis_reviewed_by::text,
-                       analysis_reviewed_at, analysis_review_source_annotation_id::text
+                       analysis_reviewed_at, analysis_review_source_annotation_id::text,
+                       iterative_analysis
                 FROM document_figures
                 WHERE document_id = :document_id
                 ORDER BY page NULLS LAST, figure_key
@@ -639,6 +680,14 @@ def load_document_figures(document_id: str) -> list[dict]:
                     item["reviewed_analysis_profile"] = {}
             elif not isinstance(reviewed_profile, dict):
                 item["reviewed_analysis_profile"] = {}
+            iterative_analysis = item.get("iterative_analysis")
+            if isinstance(iterative_analysis, str):
+                try:
+                    item["iterative_analysis"] = json.loads(iterative_analysis)
+                except (ValueError, TypeError):
+                    item["iterative_analysis"] = {}
+            elif not isinstance(iterative_analysis, dict):
+                item["iterative_analysis"] = {}
             result.append(item)
         return result
     finally:

@@ -122,6 +122,10 @@
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
   var chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
+  // 要素中心コンテキストビュー（Issue #498 §2.3）の中心移動履歴。openElement で
+  // その要素1件から再スタートし、_navigateToElement が隣接ノード選択のたびに
+  // 積み増す（パンくず・「← 戻る」が this を描画する）。
+  var navState = { trail: [] };
   // 教員指示付き再解析（guided reanalysis, focusMode/focusBbox/hintText）は
   // _reloadOverview を跨いで保持する（設計書 §7-3「送信した guidance は成功・失敗に
   // かかわらず消さない」）。別の要素でモーダルを開くとき（_closeModal 経由）にのみ
@@ -130,7 +134,11 @@
     objectUrls: [], requestId: 0,
     focusMode: false,
     focusBbox: null,
-    hintText: ""
+    hintText: "",
+    // 照合解析（#499）のレビュー質問カード「この箇所を再解析」が積む一回消費の
+    // 状態。_figureReanalyzeGuidancePayload が読み取ると同時に空へ戻す
+    // （consume-once。以降の通常の「AIで図を再解析」クリックへ持ち越さない）。
+    unresolvedItemIds: []
   };
 
   // 要素インベントリモーダルの状態（1モーダル分）。フィルタ（typeFilter/keyword）は
@@ -159,6 +167,7 @@
     figureImageState.focusMode = false;
     figureImageState.focusBbox = null;
     figureImageState.hintText = "";
+    figureImageState.unresolvedItemIds = [];
   }
 
   // ── 公開 API: init ───────────────────────────────────────────────────
@@ -241,10 +250,17 @@
     '</div>';
   }
 
-  function _positioningHtml(positioning) {
+  // opts.skipIntraDocument: 要素中心コンテキストビュー（Issue #498）が利用可能なとき、
+  // 論文内レンズ（intra_document）は上位/下位構造投影に再構成されるため二重表示しない
+  // （設計書 §6 Phase 0）。opts 省略時は従来どおり全レンズを表示する（後方互換）。
+  function _positioningHtml(positioning, opts) {
     if (!positioning || !positioning.available) return "";
+    opts = opts || {};
     var lenses = positioning.lenses || {};
-    var sections = LENS_ORDER.map(function (key) {
+    var order = opts.skipIntraDocument
+      ? LENS_ORDER.filter(function (key) { return key !== "intra_document"; })
+      : LENS_ORDER;
+    var sections = order.map(function (key) {
       return _lensSectionHtml(key, lenses[key]);
     }).join("");
     if (!sections.trim()) return "";
@@ -252,6 +268,147 @@
       '<h4 style="margin:0 0 10px;font-size:14px;color:var(--color-text-primary)">位置づけ</h4>' +
       sections +
     '</div>';
+  }
+
+  // ── 要素中心コンテキストビュー（Element-Centered Context Lens, Issue #498）───
+  // 正本: docs/features/element_context_lens_design.md §2.3/§3/§6 Phase 2/§8。
+  // overview.context を、選択要素を中心に上位構造（Why）/ 選択要素（What）/
+  // 下位構造（How）へ投影する。AI の解釈を原文事実に昇格させない（§2.2）:
+  // 関係が得られない場合は「上位構造との関係は未同定」と明示し、非表示にしない。
+  var CONTEXT_STATUS_LABELS = {
+    source_backed: "原文根拠",
+    candidate: "AI候補",
+    confirmed: "教員確認済み",
+    unidentified: "未同定"
+  };
+
+  function _contextStatusBadgeHtml(status) {
+    var known = !!CONTEXT_STATUS_LABELS[status];
+    var modifier = known ? status : "unidentified";
+    var label = known ? CONTEXT_STATUS_LABELS[status] : CONTEXT_STATUS_LABELS.unidentified;
+    return '<span class="deliberation-context-status deliberation-context-status--' +
+      escHtml(modifier) + '">' + escHtml(label) + '</span>';
+  }
+
+  function _contextLaneItemHtml(item) {
+    item = item || {};
+    var label = item.label || "";
+    var labelHtml;
+    if (item.navigable && item.element_id) {
+      labelHtml = '<button type="button" class="deliberation-context-nav" ' +
+        'data-context-element-type="' + escHtml(item.element_type) + '" ' +
+        'data-context-element-id="' + escHtml(item.element_id) + '" ' +
+        'data-context-document-id="' + escHtml(item.document_id || "") + '" ' +
+        'data-context-label="' + escHtml(label) + '">' +
+        escHtml(label) +
+      '</button>';
+    } else {
+      labelHtml = '<span class="deliberation-context-item-label">' + escHtml(label) + '</span>';
+    }
+    var refs = item.evidence_refs || [];
+    var evidenceHtml = refs.length
+      ? '<details class="deliberation-context-evidence"><summary>根拠</summary><ul>' +
+          refs.map(function (ref) { return '<li>' + escHtml(ref) + '</li>'; }).join("") +
+        '</ul></details>'
+      : "";
+    return '<div class="deliberation-context-item">' +
+      '<span class="deliberation-context-relation">' + escHtml(item.relation_label || "") + '</span> ' +
+      labelHtml + ' ' +
+      _contextStatusBadgeHtml(item.relation_status) +
+      evidenceHtml +
+    '</div>';
+  }
+
+  // laneTitle で上位/下位を判別し、階層それぞれの空欄事実文を出し分ける
+  // （§2.2/§7: 関係が得られなくても非表示にせず「未同定」等の事実文で保持する）。
+  function _contextLaneHtml(items, laneTitle) {
+    items = items || [];
+    var isUpper = String(laneTitle || "").indexOf("上位") !== -1;
+    var emptyFact = isUpper ? "上位構造との関係は未同定" : "下位構造の情報はありません";
+    var rowsHtml = items.length
+      ? items.map(_contextLaneItemHtml).join("")
+      : '<p class="deliberation-context-fact">' + escHtml(emptyFact) + '</p>';
+    return '<div class="deliberation-context-lane ' +
+        (isUpper ? "deliberation-context-lane-upper" : "deliberation-context-lane-lower") + '">' +
+      '<div class="deliberation-context-lane-title">' + escHtml(laneTitle) + '</div>' +
+      rowsHtml +
+    '</div>';
+  }
+
+  // 中央カード（§3.1）: 要素自体 / この文脈での役割 / 根拠・状態を別欄で並べる。
+  // contextual_role が無い、または status が unidentified のときは「未同定」を出す
+  // だけで、役割を推測で埋めない。
+  function _contextFocusHtml(focus) {
+    focus = focus || {};
+    var status = focus.contextual_role_status || "unidentified";
+    var roleText = (focus.contextual_role && status !== "unidentified") ? focus.contextual_role : "未同定";
+    var provenance = focus.provenance || [];
+    var provenanceHtml = provenance.length
+      ? '<ul class="deliberation-context-provenance">' +
+          provenance.map(function (p) { return '<li>' + escHtml(p) + '</li>'; }).join("") +
+        '</ul>'
+      : '<p class="deliberation-context-fact">出典情報はありません</p>';
+    return '<div class="deliberation-context-focus">' +
+      '<div class="deliberation-context-focus-section">' +
+        '<div class="deliberation-context-focus-label">要素自体</div>' +
+        '<div class="deliberation-context-focus-value">' + escHtml(focus.intrinsic_summary || "") + '</div>' +
+      '</div>' +
+      '<div class="deliberation-context-focus-section">' +
+        '<div class="deliberation-context-focus-label">この文脈での役割</div>' +
+        '<div class="deliberation-context-focus-value">' + escHtml(roleText) + '</div>' +
+      '</div>' +
+      '<div class="deliberation-context-focus-section">' +
+        '<div class="deliberation-context-focus-label">根拠・状態</div>' +
+        _contextStatusBadgeHtml(status) +
+        provenanceHtml +
+      '</div>' +
+    '</div>';
+  }
+
+  // 上位構造（Why）→ 中心カード（What）→ 下位構造（How）→ notes の順で描画する
+  // （設計書 §3 共通UI）。context が無い run（旧run・fail-closed）は空文字で
+  // 縮退し、呼び出し側は従来の内訳・位置づけ表示にフォールバックする。
+  function _contextLensHtml(context) {
+    if (!context) return "";
+    if (!context.available) {
+      if (!context.note) return "";
+      return '<div id="deliberation-context-lens" class="deliberation-context-lens deliberation-context-lens-unavailable">' +
+        '<p class="deliberation-context-fact">' + escHtml(context.note) + '</p>' +
+      '</div>';
+    }
+    var upperHtml = _contextLaneHtml(context.upper, "上位構造（Why）");
+    var lowerHtml = _contextLaneHtml(context.lower, "下位構造（How）");
+    var focusHtml = _contextFocusHtml(context.focus);
+    var notes = context.notes || [];
+    var notesHtml = notes.length
+      ? '<div class="deliberation-context-notes">' +
+          notes.map(function (n) { return '<p class="deliberation-context-fact">・' + escHtml(n) + '</p>'; }).join("") +
+        '</div>'
+      : "";
+    return '<div id="deliberation-context-lens" class="deliberation-context-lens">' +
+      upperHtml +
+      focusHtml +
+      lowerHtml +
+      notesHtml +
+    '</div>';
+  }
+
+  // .deliberation-context-nav（上位/下位レーンの隣接ノード）クリックで中心移動する。
+  // 再描画のたびに呼ばれるため data-context-nav-bound で二重バインドを防ぐ
+  // （_bindFigureContextActions と同型の idempotent bind パターン）。
+  function _bindContextNavigation() {
+    Array.prototype.forEach.call(document.querySelectorAll(".deliberation-context-nav"), function (btn) {
+      if (btn.getAttribute("data-context-nav-bound") === "true") return;
+      btn.setAttribute("data-context-nav-bound", "true");
+      btn.addEventListener("click", function () {
+        _navigateToElement(
+          btn.getAttribute("data-context-element-type"),
+          btn.getAttribute("data-context-element-id"),
+          btn.getAttribute("data-context-document-id") || null,
+          btn.getAttribute("data-context-label")
+        );
+      });
+    });
   }
 
   // ── 図・画像の読み解き UI（Issue #496）─────────────────────────────
@@ -825,7 +982,7 @@
       (unknownSummary ? '<div class="deliberation-figure-overall"><span>取得できた説明</span><strong>' + escHtml(unknownSummary) + '</strong></div>' : '');
   }
 
-  function _figureWorkspaceHtml(decomposition, positioning) {
+  function _figureWorkspaceHtml(decomposition, positioning, positioningOpts) {
     var fields = decomposition.fields || {};
     return '<div class="deliberation-figure-workspace">' +
       '<div class="deliberation-figure-image-card">' +
@@ -842,15 +999,271 @@
         '</div>' +
       '</div>' +
       '<div id="deliberation-figure-mode-container">' + _figureModeHtml(fields) + '</div>' +
+      _iterativeAnalysisHtml(fields) +
       '<details class="deliberation-figure-raw"><summary>抽出データ・根拠を見る</summary>' +
         '<div class="deliberation-figure-raw-body">' + _fieldsHtml(fields) + _notesHtml(decomposition.notes) + '</div>' +
       '</details>' +
-      _positioningHtml(positioning) +
+      _positioningHtml(positioning, positioningOpts) +
       '<div id="deliberation-figure-lightbox" class="deliberation-figure-lightbox" aria-hidden="true">' +
         '<button id="deliberation-figure-lightbox-close" type="button" aria-label="拡大表示を閉じる">&times;</button>' +
         '<img id="deliberation-figure-lightbox-image" alt="' + escHtml(decomposition.label || "検討対象の図") + '">' +
       '</div>' +
     '</div>';
+  }
+
+  // ── 照合解析（Contextual Figure Analysis Iterative Verification, #499 Wave 4）───
+  // 正本: docs/features/contextual_figure_analysis_iterative_verification.md
+  // 「実装記録（2026-07-18 実装決定事項）」節。バックエンド（別Wave）が
+  // fields.iterative_analysis に投影済みの契約（confidence 生値は含まれず
+  // confidence_label のみ）を返す。ここは読み取り専用の表示 + 「この箇所を
+  // 再解析」ボタンの配線のみを担う（判定・確定はしない・W2/W8 継承）。
+  var ITERATIVE_CONVERGENCE_LABELS = {
+    converged: "照合済み",
+    max_iterations_reached: "未収束（上限到達・要確認）",
+    no_progress: "未収束（新しい検証課題なし・要確認）",
+    aborted_error: "解析が途中で失敗（部分結果）",
+    aborted_cost_limit: "コスト上限で中断（部分結果）",
+    not_run: "未実行"
+  };
+
+  var ALIGNMENT_STATUS_LABELS = {
+    supported_by_both: "文章と画像の両方で確認",
+    visual_only: "画像のみ（本文での意味は未確認）",
+    text_only: "文章のみ（画像では未確認）",
+    contradicted: "文章と画像が矛盾",
+    unresolved: "未解決"
+  };
+  var ALIGNMENT_STATUS_ORDER = ["supported_by_both", "visual_only", "text_only", "contradicted", "unresolved"];
+  // 注意色（点線枠）を当てる区分。煽らず区分を視覚的に見分けやすくするだけ。
+  var ALIGNMENT_CAUTION_STATUSES = { text_only: true, contradicted: true, unresolved: true };
+
+  function _alignmentItemRowHtml(item) {
+    item = item || {};
+    var statusKey = item.status || "unresolved";
+    var label = ALIGNMENT_STATUS_LABELS[statusKey] || statusKey;
+    var caution = !!ALIGNMENT_CAUTION_STATUSES[statusKey];
+    var textEvidence = _itemText(item.text_evidence);
+    var visualEvidence = _itemText(item.visual_evidence);
+    return '<li class="deliberation-iterative-alignment-item' + (caution ? ' is-caution' : '') + '">' +
+      '<div class="deliberation-iterative-alignment-label">' + escHtml(item.label || label) + '</div>' +
+      (textEvidence ? '<div class="deliberation-iterative-evidence">本文: &quot;' + escHtml(textEvidence) + '&quot;</div>' : '') +
+      (visualEvidence ? '<div class="deliberation-iterative-evidence">画像: ' + escHtml(visualEvidence) + '</div>' : '') +
+      (item.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(item.confidence_label) + '</span>' : '') +
+    '</li>';
+  }
+
+  // status ごとにグループ化して表示する（設計書: 区分別 alignment 表示）。
+  function _alignmentItemsHtml(items) {
+    items = _asArray(items);
+    if (!items.length) {
+      return '<p class="deliberation-figure-muted">照合項目はありません。</p>';
+    }
+    var groups = {};
+    ALIGNMENT_STATUS_ORDER.forEach(function (key) { groups[key] = []; });
+    items.forEach(function (item) {
+      var key = (item && item.status) || "unresolved";
+      if (!groups[key]) groups[key] = [];
+      groups[key].push(item);
+    });
+    return ALIGNMENT_STATUS_ORDER.map(function (key) {
+      var group = groups[key] || [];
+      if (!group.length) return "";
+      return '<div class="deliberation-iterative-alignment-group">' +
+        '<div class="deliberation-iterative-alignment-heading">' + escHtml(ALIGNMENT_STATUS_LABELS[key]) + '</div>' +
+        '<ul class="deliberation-iterative-alignment-list">' + group.map(_alignmentItemRowHtml).join("") + '</ul>' +
+      '</div>';
+    }).join("");
+  }
+
+  // review_questions と unresolved_conflicts を「AIからの確認事項」として統合表示する。
+  // 各カードの「この箇所を再解析」は既存の「AIで図を再解析」ボタン（_bindFigureReanalysis）
+  // をプログラム的にクリックして送信処理を完全共有する（_bindIterativeReverify 参照。
+  // 新規 fetch 先を増やさない＝許可リストの /admin/documents/ カウントを壊さない）。
+  function _reviewQuestionCardHtml(entry) {
+    entry = entry || {};
+    var questionId = entry.question_id || entry.item_id || "";
+    var text = entry.question || entry.reason || "";
+    var regionHint = entry.region_hint || "";
+    return '<div class="deliberation-iterative-review-card">' +
+      '<p class="deliberation-iterative-review-question">' + escHtml(text) + '</p>' +
+      (entry.label ? '<p class="deliberation-iterative-review-label">対象: ' + escHtml(entry.label) + '</p>' : '') +
+      '<button type="button" class="deliberation-iterative-reverify" ' +
+        'data-question-id="' + escHtml(questionId) + '" ' +
+        'data-region-hint="' + escHtml(regionHint) + '">この箇所を再解析</button>' +
+    '</div>';
+  }
+
+  function _reviewQuestionsHtml(ia) {
+    ia = ia || {};
+    var entries = _asArray(ia.review_questions).concat(_asArray(ia.unresolved_conflicts));
+    if (!entries.length) return "";
+    return '<div class="deliberation-iterative-review-section">' +
+      '<h5>AIからの確認事項（この図について教えてください）</h5>' +
+      entries.map(_reviewQuestionCardHtml).join("") +
+    '</div>';
+  }
+
+  function _expectedElementsHtml(items) {
+    items = _asArray(items);
+    if (!items.length) return '<p class="deliberation-figure-muted">情報なし</p>';
+    return '<ul class="deliberation-figure-list">' + items.map(function (el) {
+      el = el || {};
+      var evidence = el.evidence_quote ? ' — &quot;' + escHtml(el.evidence_quote) + '&quot;' : "";
+      var confidence = el.confidence_label
+        ? ' <span class="deliberation-annotation-confidence">' + escHtml(el.confidence_label) + '</span>' : "";
+      return '<li>' + escHtml(el.name || "") + evidence + confidence + '</li>';
+    }).join("") + '</ul>';
+  }
+
+  function _expectedRelationsHtml(items) {
+    items = _asArray(items);
+    if (!items.length) return '<p class="deliberation-figure-muted">情報なし</p>';
+    return '<ul class="deliberation-figure-list">' + items.map(function (rel) {
+      rel = rel || {};
+      var evidence = rel.evidence_quote ? ' — &quot;' + escHtml(rel.evidence_quote) + '&quot;' : "";
+      return '<li>' + escHtml(rel.relation || "") + evidence + '</li>';
+    }).join("") + '</ul>';
+  }
+
+  // context_hypothesis（画像を見る前の文脈仮説）の折り畳み表示。
+  function _contextHypothesisHtml(hyp) {
+    if (!hyp) return '<p class="deliberation-figure-muted">仮説はありません。</p>';
+    hyp = hyp || {};
+    return '<div class="deliberation-iterative-subsection">' +
+      (hyp.role_in_paper ? '<p><strong>論文中の役割</strong> ' + escHtml(hyp.role_in_paper) + '</p>' : '') +
+      (hyp.overall_subject ? '<p><strong>想定される主題</strong> ' + escHtml(hyp.overall_subject) + '</p>' : '') +
+      '<div class="deliberation-figure-subheading">期待される要素</div>' + _expectedElementsHtml(hyp.expected_elements) +
+      '<div class="deliberation-figure-subheading">期待される関係</div>' + _expectedRelationsHtml(hyp.expected_relations) +
+      (_asArray(hyp.unstated_points).length
+        ? '<div class="deliberation-figure-subheading">未明示点</div>' + _simpleListHtml(hyp.unstated_points) : '') +
+      (_asArray(hyp.falsification_conditions).length
+        ? '<div class="deliberation-figure-subheading">反証条件</div>' + _simpleListHtml(hyp.falsification_conditions) : '') +
+      (hyp.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(hyp.confidence_label) + '</span>' : '') +
+    '</div>';
+  }
+
+  // visual_observations（caption・本文を渡さない独立観察。確証バイアス遮断）の折り畳み表示。
+  function _visualObservationsHtml(obs) {
+    if (!obs) return '<p class="deliberation-figure-muted">観察はありません。</p>';
+    obs = obs || {};
+    var elements = _asArray(obs.elements);
+    var connections = _asArray(obs.connections);
+    var unreadable = _asArray(obs.unreadable_regions).map(function (r) {
+      return (r && typeof r === "object") ? (r.reason || r.region_hint || "") : r;
+    });
+    return '<div class="deliberation-iterative-subsection">' +
+      '<div class="deliberation-figure-subheading">要素</div>' +
+      (elements.length ? '<ul class="deliberation-figure-list">' + elements.map(function (el) {
+        el = el || {};
+        return '<li>' + escHtml(el.description || el.label_text || el.kind || "") + '</li>';
+      }).join("") + '</ul>' : '<p class="deliberation-figure-muted">情報なし</p>') +
+      '<div class="deliberation-figure-subheading">接続</div>' +
+      (connections.length ? '<ul class="deliberation-figure-list">' + connections.map(function (conn) {
+        conn = conn || {};
+        return '<li>' + escHtml(conn.description || conn.connector || "") + '</li>';
+      }).join("") + '</ul>' : '<p class="deliberation-figure-muted">情報なし</p>') +
+      (_asArray(obs.ocr_labels).length
+        ? '<div class="deliberation-figure-subheading">OCR</div>' + _simpleListHtml(obs.ocr_labels) : '') +
+      (unreadable.length
+        ? '<div class="deliberation-figure-subheading">判読不能領域</div>' + _simpleListHtml(unreadable) : '') +
+      (obs.visual_mode_guess ? '<p><strong>見た目の分類推定</strong> ' + escHtml(obs.visual_mode_guess) + '</p>' : '') +
+      (obs.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(obs.confidence_label) + '</span>' : '') +
+    '</div>';
+  }
+
+  // alternative_hypotheses（競合仮説2〜3件）の折り畳み表示。類似形状は証拠に使わない
+  // （設計記録: 「形状一致は機能一致の証拠にしない」）── ここは受け取ったデータの
+  // 表示に徹し、証拠の重み付けの判断はしない。
+  function _alternativeHypothesesHtml(items) {
+    items = _asArray(items);
+    if (!items.length) return '<p class="deliberation-figure-muted">競合仮説はありません。</p>';
+    return items.map(function (alt) {
+      alt = alt || {};
+      return '<div class="deliberation-iterative-subsection">' +
+        (alt.description ? '<p>' + escHtml(alt.description) + '</p>' : '') +
+        (_asArray(alt.supporting_evidence).length
+          ? '<div class="deliberation-figure-subheading">支持する根拠</div>' + _simpleListHtml(alt.supporting_evidence) : '') +
+        (_asArray(alt.counter_evidence).length
+          ? '<div class="deliberation-figure-subheading">反する根拠</div>' + _simpleListHtml(alt.counter_evidence) : '') +
+        (_asArray(alt.unverified_conditions).length
+          ? '<div class="deliberation-figure-subheading">未確認の条件</div>' + _simpleListHtml(alt.unverified_conditions) : '') +
+        (alt.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(alt.confidence_label) + '</span>' : '') +
+      '</div>';
+    }).join("");
+  }
+
+  // verification_iterations（再スキャンの履歴）の折り畳み表示。
+  function _verificationIterationsHtml(items) {
+    items = _asArray(items);
+    if (!items.length) return '<p class="deliberation-figure-muted">検証履歴はありません。</p>';
+    return '<ol class="deliberation-iterative-iteration-list">' + items.map(function (rec) {
+      rec = rec || {};
+      var findings = _asArray(rec.findings);
+      var indexText = (rec.iteration_index === null || rec.iteration_index === undefined) ? "" : String(rec.iteration_index);
+      return '<li>' +
+        '<div><strong>反復 ' + escHtml(indexText) + '</strong></div>' +
+        (findings.length ? '<ul class="deliberation-figure-list">' + findings.map(function (finding) {
+          finding = finding || {};
+          var observation = finding.observation ? '：' + escHtml(finding.observation) : "";
+          return '<li>' + escHtml(finding.outcome || "") + observation + '</li>';
+        }).join("") + '</ul>' : '') +
+        (_asArray(rec.changes).length
+          ? '<div class="deliberation-figure-subheading">変更</div>' + _simpleListHtml(rec.changes) : '') +
+        (rec.notes ? '<p class="deliberation-figure-muted">' + escHtml(rec.notes) + '</p>' : '') +
+      '</li>';
+    }).join("") + '</ol>';
+  }
+
+  // fields.iterative_analysis（バックエンド投影済み。confidence 生値は含まれず
+  // confidence_label のみ）を描画する。available が falsy か中身が空なら
+  // 「まだ実行されていません」の事実文のみを出す（W4: 存在しない結果を捏造しない）。
+  function _iterativeAnalysisHtml(fields) {
+    fields = fields || {};
+    var ia = fields.iterative_analysis || null;
+    var available = !!(ia && ia.available);
+    var statusKey = (ia && ia.convergence_status) || "not_run";
+    var statusLabel = ITERATIVE_CONVERGENCE_LABELS[statusKey] || statusKey;
+    var header = '<div class="deliberation-iterative-header">' +
+      '<h5>照合解析（文脈仮説 × 画像観察）</h5>' +
+      '<span class="deliberation-iterative-status deliberation-iterative-status--' + escHtml(statusKey) + '">' +
+        escHtml(statusLabel) +
+      '</span>' +
+    '</div>';
+    if (!available) {
+      return '<section class="deliberation-iterative-analysis">' +
+        header +
+        '<p class="deliberation-figure-muted">反復照合解析はまだ実行されていません。</p>' +
+      '</section>';
+    }
+    ia = ia || {};
+    var stageFailures = _asArray(ia.stage_failures);
+    return '<section class="deliberation-iterative-analysis">' +
+      header +
+      '<p class="deliberation-iterative-note">' +
+        '以下は AI の候補です。「画像で直接確認」「本文の記述」「推論」「未確認」を区別して表示しています。' +
+        '確定には教員のレビューが必要です。' +
+      '</p>' +
+      '<div class="deliberation-figure-subheading">照合結果</div>' +
+      _alignmentItemsHtml(ia.alignment_items) +
+      _reviewQuestionsHtml(ia) +
+      '<details class="deliberation-iterative-details"><summary>文脈からの期待（画像を見る前の仮説）</summary>' +
+        _contextHypothesisHtml(ia.context_hypothesis) +
+      '</details>' +
+      '<details class="deliberation-iterative-details"><summary>画像の直接観察</summary>' +
+        _visualObservationsHtml(ia.visual_observations) +
+      '</details>' +
+      '<details class="deliberation-iterative-details"><summary>競合仮説</summary>' +
+        _alternativeHypothesesHtml(ia.alternative_hypotheses) +
+      '</details>' +
+      '<details class="deliberation-iterative-details"><summary>検証の履歴</summary>' +
+        _verificationIterationsHtml(ia.verification_iterations) +
+      '</details>' +
+      (stageFailures.length
+        ? '<details class="deliberation-iterative-details"><summary>解析の途中失敗</summary>' +
+            _simpleListHtml(stageFailures) +
+          '</details>'
+        : '') +
+    '</section>';
   }
 
   function _renderModalBody(data) {
@@ -859,6 +1272,12 @@
     var decomposition = data.decomposition || {};
     var typeLabel = ELEMENT_TYPE_LABELS[decomposition.element_type] || decomposition.element_type || "";
     var isFigure = decomposition.element_type === "figure";
+    // 要素中心コンテキストビュー（Issue #498）: context が利用可能なら論文内レンズ
+    // （intra_document）は上位/下位構造投影に再構成されるため二重表示しない
+    // （設計書 §6 Phase 0）。旧run等で context が無ければ従来の位置づけ表示のまま。
+    var contextAvailable = !!(data.context && data.context.available);
+    var positioningOpts = { skipIntraDocument: contextAvailable };
+    var contextHtml = _contextLensHtml(data.context);
     body.innerHTML =
       '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">' +
         '<span class="admin-status" style="background:var(--color-background-info);color:var(--color-text-info)">' +
@@ -866,13 +1285,14 @@
         '</span>' +
         '<h4 style="margin:0;font-size:15px;color:var(--color-text-primary)">' + escHtml(decomposition.label || "") + '</h4>' +
       '</div>' +
-      (isFigure ? _figureWorkspaceHtml(decomposition, data.positioning) :
+      (isFigure ? "" : contextHtml) +
+      (isFigure ? _figureWorkspaceHtml(decomposition, data.positioning, positioningOpts) + contextHtml :
         '<div style="margin-bottom:6px">' +
           '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-secondary);margin-bottom:4px">内訳</div>' +
           _fieldsHtml(decomposition.fields) +
         '</div>' +
         _notesHtml(decomposition.notes) +
-        _positioningHtml(data.positioning)) +
+        _positioningHtml(data.positioning, positioningOpts)) +
       _identityLinksSectionHtml(decomposition.element_type) +
       _standardizationSectionHtml(decomposition.element_type);
     if (isFigure) {
@@ -881,8 +1301,10 @@
       _bindFigureModeReview(decomposition);
       _bindFigureFocusDrawing();
       _bindFigureReanalysis(decomposition);
+      _bindIterativeReverify();
       _loadFigureImage(decomposition);
     }
+    _bindContextNavigation();
   }
 
   function _figureImagePath(decomposition) {
@@ -1094,6 +1516,9 @@
   function _figureReanalyzeGuidancePayload() {
     var hint = (figureImageState.hintText || "").trim();
     var focusBbox = figureImageState.focusBbox;
+    // 照合解析（#499）のレビュー質問カードが積んだ unresolved_item_ids。読み取ると
+    // 同時に消費する（consume-once。以降の通常クリックへ持ち越さない）。
+    var unresolvedItemIds = figureImageState.unresolvedItemIds || [];
     var payload = {};
     var hasGuidance = false;
     if (hint) {
@@ -1104,6 +1529,11 @@
       payload.focus_bbox = focusBbox;
       hasGuidance = true;
     }
+    if (unresolvedItemIds.length) {
+      payload.unresolved_item_ids = unresolvedItemIds;
+      hasGuidance = true;
+    }
+    figureImageState.unresolvedItemIds = [];
     return hasGuidance ? payload : null;
   }
 
@@ -1152,6 +1582,24 @@
           if (status) status.textContent = (err && err.detail) || "図を再解析できませんでした";
         })
         .then(function () { button.disabled = false; });
+    });
+  }
+
+  // 照合解析（#499）のレビュー質問カード「この箇所を再解析」。新しい fetch 先を
+  // 増やさず、既存の「AIで図を再解析」ボタン（上の _bindFigureReanalysis が配線した
+  // 同一クリックハンドラ）をプログラム的にクリックして送信処理を完全に共有する
+  // （status 表示 → _reloadOverview() → _loadAnnotations という既存フローがそのまま
+  // 動く。許可リストの /admin/documents/ 出現回数を増やさない）。
+  function _bindIterativeReverify() {
+    Array.prototype.forEach.call(document.querySelectorAll(".deliberation-iterative-reverify"), function (btn) {
+      if (btn.getAttribute("data-iterative-reverify-bound") === "true") return;
+      btn.setAttribute("data-iterative-reverify-bound", "true");
+      btn.addEventListener("click", function () {
+        var questionId = btn.getAttribute("data-question-id");
+        figureImageState.unresolvedItemIds = questionId ? [questionId] : [];
+        var reanalyzeBtn = document.getElementById("deliberation-figure-reanalyze");
+        if (reanalyzeBtn && !reanalyzeBtn.disabled) reanalyzeBtn.click();
+      });
     });
   }
 
@@ -1814,6 +2262,120 @@
       });
   }
 
+  // ── 要素中心コンテキストビュー: 中心移動（Issue #498 §2.3/§6 Phase 2）────────
+  // openElement によるモーダル破棄・再構築とは別に、隣接ノード選択・パンくずクリック
+  // では既存モーダルを壊さず chatState.ref だけを差し替えて内容を再読込する
+  // （読解の開始点を失わせない・パンくず履歴を保持する）。
+
+  // モーダルを開いたままの要素切替の共通部分（overview 再取得＋描画・面③リセット）。
+  // openElement 自身は使わない（モーダル構築前は #deliberation-modal-body 等の DOM が
+  // 無いため）。
+  function _loadAndRenderElement() {
+    return apiFetch(_overviewPath(chatState.ref))
+      .then(function (res) {
+        if (!res.ok) {
+          var status = res.status;
+          var err = new Error("status " + status);
+          err.status = status;
+          throw err;
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        _renderModalBody(data);
+        _bindStandardizationAssessButton(chatState.ref);
+        _bindIdentityLinkSearch(chatState.ref);
+        _loadIdentityLinks(chatState.ref);
+        return data;
+      })
+      .catch(function (err) {
+        _renderError(err && err.status);
+      });
+  }
+
+  // 別要素へ中心移動するときの面③リセット（W6: セッションは次の送信時に新規作成
+  // されるだけで、ここでは何も POST しない）。_closeModal は呼ばない
+  // （モーダル自体・パンくず履歴を保持したまま要素だけ差し替える）。
+  function _resetElementFocusState() {
+    _resetFigureImageState();
+    _resetFigureGuidanceState();
+    chatState.sessionId = null;
+    chatState.selectedContext = null;
+    var messages = document.getElementById("deliberation-chat-messages");
+    if (messages) messages.innerHTML = _chatEmptyStateHtml();
+    var annotations = document.getElementById("deliberation-chat-annotations");
+    if (annotations) annotations.innerHTML = "";
+    _updateSelectedContextUi();
+  }
+
+  function _switchCenterElement(entry) {
+    chatState.ref = {
+      elementType: entry.elementType,
+      elementId: entry.elementId,
+      documentId: entry.documentId || null,
+      title: entry.title || null
+    };
+    _resetElementFocusState();
+    _loadAndRenderElement().then(function () {
+      _loadAnnotations(entry.elementType, entry.elementId, entry.documentId);
+    });
+    _renderBreadcrumb();
+  }
+
+  // 上位/下位レーンの隣接ノードを選ぶと、そのノードを新しい中心に再配置する
+  // （設計書 §2.3）。documentId が無い項目（例: equation は document_id 必須）は
+  // 現在表示中の要素の documentId へフォールバックする。
+  function _navigateToElement(elementType, elementId, documentId, title) {
+    var entry = {
+      elementType: elementType,
+      elementId: elementId,
+      documentId: documentId || (chatState.ref && chatState.ref.documentId) || null,
+      title: title || null
+    };
+    navState.trail.push(entry);
+    _switchCenterElement(entry);
+  }
+
+  // パンくずクリック: そのノードまで履歴を切り詰めて再表示する（新規に積み増さない）。
+  function _goToTrailIndex(index) {
+    if (index < 0 || index >= navState.trail.length) return;
+    navState.trail = navState.trail.slice(0, index + 1);
+    _switchCenterElement(navState.trail[navState.trail.length - 1]);
+  }
+
+  // パンくず＋「← 戻る」を描画する（設計書 §2.3: 読解の開始点を失わせない）。
+  // 履歴が1件（初回表示）のときは何も出さない。
+  function _renderBreadcrumb() {
+    var container = document.getElementById("deliberation-breadcrumb");
+    if (!container) return;
+    var trail = navState.trail || [];
+    if (trail.length < 2) {
+      container.innerHTML = "";
+      return;
+    }
+    var crumbsHtml = trail.map(function (entry, index) {
+      var label = entry.title || ELEMENT_TYPE_LABELS[entry.elementType] || entry.elementType || "";
+      if (index === trail.length - 1) {
+        return '<span class="deliberation-breadcrumb-current">' + escHtml(label) + '</span>';
+      }
+      return '<button type="button" class="deliberation-breadcrumb-item" data-trail-index="' + index + '">' +
+        escHtml(label) +
+      '</button>';
+    }).join('<span class="deliberation-breadcrumb-sep">›</span>');
+    container.innerHTML =
+      '<button type="button" id="deliberation-breadcrumb-back" class="deliberation-breadcrumb-back">← 戻る</button>' +
+      '<span class="deliberation-breadcrumb-trail">' + crumbsHtml + '</span>';
+    var backBtn = document.getElementById("deliberation-breadcrumb-back");
+    if (backBtn) {
+      backBtn.addEventListener("click", function () { _goToTrailIndex(trail.length - 2); });
+    }
+    Array.prototype.forEach.call(container.querySelectorAll("[data-trail-index]"), function (btn) {
+      btn.addEventListener("click", function () {
+        _goToTrailIndex(parseInt(btn.getAttribute("data-trail-index"), 10));
+      });
+    });
+  }
+
   // ── 公開 API: openElement ────────────────────────────────────────────
   // opts = { documentId: string|null, title: string|null }
   // equation は document_id が必須（無ければ何もしない。設計書 §2 の equation 一意化の要件）。
@@ -1829,6 +2391,13 @@
       documentId: opts.documentId || null,
       title: opts.title || null
     };
+    // 中心移動の履歴をこの要素1件から開始する（設計書 §2.3）。
+    navState.trail = [{
+      elementType: elementType,
+      elementId: elementId,
+      documentId: opts.documentId || null,
+      title: opts.title || null
+    }];
 
     var overlay = document.createElement("div");
     overlay.id = "deliberation-modal";
@@ -1846,6 +2415,7 @@
         '</p>' +
         '<div class="deliberation-modal-columns">' +
           '<div class="deliberation-modal-left">' +
+            '<div id="deliberation-breadcrumb" class="deliberation-breadcrumb"></div>' +
             '<div id="deliberation-modal-body">' +
               '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
             '</div>' +
@@ -1898,26 +2468,9 @@
     // 面③の既存候補注釈を復元する（GET のみ・DB 非変更）。対話セッション自体は
     // ここでは作らない（POST /sessions は最初の送信時にのみ _ensureChatSession が呼ぶ）。
     _loadAnnotations(elementType, elementId, opts.documentId);
-
-    apiFetch(_overviewPath(chatState.ref))
-      .then(function (res) {
-        if (!res.ok) {
-          var status = res.status;
-          var err = new Error("status " + status);
-          err.status = status;
-          throw err;
-        }
-        return res.json();
-      })
-      .then(function (data) {
-        _renderModalBody(data);
-        _bindStandardizationAssessButton(chatState.ref);
-        _bindIdentityLinkSearch(chatState.ref);
-        _loadIdentityLinks(chatState.ref);
-      })
-      .catch(function (err) {
-        _renderError(err && err.status);
-      });
+    // 初回表示は履歴1件のため何も描画しない（_renderBreadcrumb 内部の早期returnで空欄）。
+    _renderBreadcrumb();
+    _loadAndRenderElement();
   }
 
   // ── 要素インベントリ: モーダル DOM / 描画 ───────────────────────────────

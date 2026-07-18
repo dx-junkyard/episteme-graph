@@ -259,6 +259,22 @@ class Settings(BaseSettings):
         default=6000,
         validation_alias=AliasChoices("APPARATUS_CONTEXT_MAX_CHARS"),
     )
+    # --- 図解析の反復照合パイプライン（#499） ---
+    # "iterative"（文脈仮説→独立観察→照合→ギャップ駆動再スキャン）| "one_shot"（旧方式）
+    apparatus_analysis_mode: str = Field(
+        default="iterative",
+        validation_alias=AliasChoices("APPARATUS_ANALYSIS_MODE"),
+    )
+    # バッチ解析（document pipeline）でのギャップ駆動再スキャンの最大試行回数
+    apparatus_verify_max_iterations: int = Field(
+        default=3,
+        validation_alias=AliasChoices("APPARATUS_VERIFY_MAX_ITERATIONS"),
+    )
+    # 教員指示付き再解析（同期API）での最大試行回数。応答時間を守るため既定は控えめ
+    apparatus_reanalyze_max_iterations: int = Field(
+        default=1,
+        validation_alias=AliasChoices("APPARATUS_REANALYZE_MAX_ITERATIONS"),
+    )
 
     # --- W層（Element Deliberation Workspace, 対話的検討） — コスト制御（他機能とは独立） ---
     # 1セッションあたりの LLM コール上限

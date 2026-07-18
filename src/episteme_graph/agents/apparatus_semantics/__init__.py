@@ -9,6 +9,7 @@ candidate-only (review_status='review_required', source_backing_status never
 (the library promotion flow, §6-4).
 """
 from .agent import ApparatusSemanticsAgent
+from .iterative import IterativeFigureAnalyzer, VisionBudget
 from .schema import (
     MATCH_STATUSES,
     REVIEW_STATUS_DEFAULT,
@@ -20,12 +21,16 @@ from .schema import (
     ApparatusSemanticsResult,
     CartridgeContext,
     FigureImageInput,
+    IterativeAnalysisRecord,
+    IterativeConfig,
     LibraryCandidate,
     ValidationIssue,
 )
 
 __all__ = [
     "ApparatusSemanticsAgent",
+    "IterativeFigureAnalyzer",
+    "VisionBudget",
     "MATCH_STATUSES",
     "REVIEW_STATUS_DEFAULT",
     "REVIEW_STATUSES",
@@ -36,6 +41,8 @@ __all__ = [
     "ApparatusSemanticsResult",
     "CartridgeContext",
     "FigureImageInput",
+    "IterativeAnalysisRecord",
+    "IterativeConfig",
     "LibraryCandidate",
     "ValidationIssue",
 ]

@@ -94,6 +94,31 @@ ANNOTATION_KINDS_COMMIT_UNSUPPORTED = (
     ANNOTATION_KIND_POSITIONING_NOTE,
 )
 
+# ── 要素中心コンテキストビュー（Element Context Lens, Issue #498）語彙 ──────────────
+# 設計書 docs/features/element_context_lens_design.md §5。``core/deliberation/context_lens.py``
+# の投影結果（focus/upper/lower）が使う根拠状態の正本語彙。
+#
+# - CONTEXT_STATUS_SOURCE_BACKED: A層 artifact の明示リンク（PDF 原文から決定論的に
+#   辿れる関係）。
+# - CONTEXT_STATUS_CANDIDATE: AI（inferred_* フィールド・vision・suggested_mode 等）が
+#   提案した未確定の関係。source-backed と自動表示しない（設計書 §2.2）。
+# - CONTEXT_STATUS_CONFIRMED: 教員が確定した関係（committed な element_annotations・
+#   confirmed な identity link・reviewed な図解析等）。
+# - CONTEXT_ROLE_STATUS_UNIDENTIFIED: focus.contextual_role 専用の第4状態。上位構造が
+#   一件も無いときに使う（「上位構造との関係は未同定」。推測で穴埋めしない・設計書 §2.2）。
+CONTEXT_STATUS_SOURCE_BACKED = "source_backed"
+CONTEXT_STATUS_CANDIDATE = "candidate"
+CONTEXT_STATUS_CONFIRMED = "confirmed"
+CONTEXT_ROLE_STATUS_UNIDENTIFIED = "unidentified"
+
+# ITEM["relation_status"] が取り得る3値（focus.contextual_role_status はこれに
+# CONTEXT_ROLE_STATUS_UNIDENTIFIED を加えた4値を取る）。
+CONTEXT_RELATION_STATUSES = (
+    CONTEXT_STATUS_SOURCE_BACKED,
+    CONTEXT_STATUS_CANDIDATE,
+    CONTEXT_STATUS_CONFIRMED,
+)
+
 
 class ElementResolutionError(Exception):
     """ElementRef の解決に失敗した（要素型が不正 / スコープ不一致 / 要素が存在しない）。

@@ -23,10 +23,27 @@ from .cartridge_loader import CartridgeLoader
 from .classifier import BlockClassifier
 from .hierarchy import SectionHierarchyBuilder
 from .parser import PDFBlockExtractor
-from .schema import CartridgeContext, DocumentMetadata, DocumentStructureResult
+from .schema import (
+    CartridgeContext,
+    DocumentMetadata,
+    DocumentStructureResult,
+    TypedBlock,
+)
 from .validator import StructureValidator
 
 logger = logging.getLogger(__name__)
+
+# GROBID が <figure>/<figDesc> を落とした PDF だけを PyMuPDF から補うための保守的な
+# caption パターン。本文の ``Figure 2 shows ...`` は対象にせず、図番号直後に明示的な
+# caption 区切り（colon / dash）がある独立ブロックだけを採用する。
+_PDF_FIGURE_CAPTION_RE = re.compile(
+    r"^(?:Figure|Fig\.?|図)\s*\d+(?:\s*\.\s*\d+)*(?:[A-Za-z])?\s*(?::|[-–—])\s*\S",
+    re.IGNORECASE,
+)
+
+# 単調alignmentの1 blockあたり先読み上限。全文末尾まで検索すると、局所blockが
+# 見つからない1回の低い類似一致で数十〜百ページ先へ飛び、その後を全て失う。
+_PDF_ALIGNMENT_LOOKAHEAD = 240
 
 
 class DocumentStructureAgent:
@@ -288,6 +305,7 @@ class DocumentStructureAgent:
 
         if pymupdf_blocks:
             self._align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks)
+            self._supplement_grobid_figure_captions(typed_blocks, pymupdf_blocks)
             self._refresh_section_pages_from_blocks(
                 sections, typed_blocks, total_pages or metadata.pages or 1
             )
@@ -313,12 +331,15 @@ class DocumentStructureAgent:
             return
 
         pdf_records = []
-        for idx, raw in enumerate(pymupdf_blocks):
+        for raw in pymupdf_blocks:
             text = getattr(raw, "text", "") or ""
             norm = DocumentStructureAgent._normalize_match_text(text)
             if not norm:
                 continue
-            pdf_records.append((idx, raw, norm))
+            # rec_idx は filtered ``pdf_records`` 自身の添字にする。元raw_blocksの添字を
+            # 保存すると、空blockを除外した分だけ ``pdf_records[start_idx:]`` と座標が
+            # ずれ、直前の正解候補を走査範囲から落としていた。
+            pdf_records.append((len(pdf_records), raw, norm))
 
         last_idx = 0
         for block in typed_blocks:
@@ -351,22 +372,30 @@ class DocumentStructureAgent:
         pdf_records: list[tuple[int, object, str]],
         start_idx: int,
     ):
+        # ページ番号・式番号・箇条書き番号のような短い断片は文書内で反復し、誤った
+        # 後方ページへ単調カーソルを飛ばして以降の全blockを未整列にする。短いblock
+        # 自体のpage補完より文書全体のanchor維持を優先する。
+        if len(target) < 12:
+            return None
         best: tuple[int, object, float] | None = None
         # Keep the search monotonic but allow a small look-behind for headers or
         # short blocks that PyMuPDF split differently.
         scan_start = max(0, start_idx - 3)
-        for rec_idx, raw, candidate in pdf_records[scan_start:]:
+        scan_end = scan_start + _PDF_ALIGNMENT_LOOKAHEAD
+        for rec_idx, raw, candidate in pdf_records[scan_start:scan_end]:
             if rec_idx < scan_start:
                 continue
             score = 0.0
-            short, long = (
-                (target, candidate)
-                if len(target) <= len(candidate)
-                else (candidate, target)
-            )
-            if short and short in long:
-                score = min(1.0, len(short) / max(1, len(long)))
-                if len(short) >= 80 or score >= 0.35:
+            if target in candidate:
+                score = min(1.0, len(target) / max(1, len(candidate)))
+                # GROBID の短い段落が大きなPDF text block内に完全包含されるケース。
+                if len(target) >= 20 or score >= 0.35:
+                    score = max(score, 0.92)
+            elif candidate in target:
+                score = min(1.0, len(candidate) / max(1, len(target)))
+                # PDF側の短い軸ラベルや記号が長いGROBID段落に偶然含まれてもanchorに
+                # しない。PDF断片側が十分長い場合だけ従来どおり採用する。
+                if len(candidate) >= 80:
                     score = max(score, 0.92)
             if score == 0.0:
                 score = SequenceMatcher(None, target[:900], candidate[:900]).ratio()
@@ -374,9 +403,79 @@ class DocumentStructureAgent:
                 best = (rec_idx, raw, score)
             if score >= 0.98:
                 break
-        if best and best[2] >= 0.42:
+        # 0.4台の弱い類似は数式・定型句で容易に発生し、単調カーソルを誤って進める。
+        # 完全包含は上で0.92へ昇格するため、ここでは非包含のfuzzy一致に十分な差を要求する。
+        if best and best[2] >= 0.60:
             return best
         return None
+
+    @staticmethod
+    def _supplement_grobid_figure_captions(typed_blocks, pymupdf_blocks) -> None:
+        """GROBID TEI が欠落させた明示的な図 caption を PDF text layer から補う。
+
+        hybrid backend はこれまで PyMuPDF を既存 TEI block の page/bbox 補完にしか使わず、
+        TEI に存在しない caption は捨てていた。その結果 ``figure_table_semantics`` が0件、
+        ``document_figures`` が caption 無しの残余 embedded image だけになる。本文参照を
+        caption と誤認しないよう、``_PDF_FIGURE_CAPTION_RE`` に一致する独立 block のみ追加する。
+        """
+        if not typed_blocks or not pymupdf_blocks:
+            return
+
+        existing_texts = {
+            DocumentStructureAgent._normalize_match_text(getattr(block, "text", "") or "")
+            for block in typed_blocks
+            if getattr(block, "block_type", "") == "figure_caption"
+        }
+        aligned = [
+            block
+            for block in typed_blocks
+            if getattr(block, "section_id", None)
+            and isinstance(getattr(block, "raw", None), dict)
+            and isinstance(block.raw.get("pdf_alignment"), dict)
+        ]
+
+        for raw in pymupdf_blocks:
+            text = str(getattr(raw, "text", "") or "").strip()
+            if not _PDF_FIGURE_CAPTION_RE.match(text):
+                continue
+            normalized = DocumentStructureAgent._normalize_match_text(text)
+            if not normalized or normalized in existing_texts:
+                continue
+
+            page = int(getattr(raw, "page", 1) or 1)
+            raw_order = int(getattr(raw, "order", 0) or 0)
+            same_page = [
+                block for block in aligned
+                if int(getattr(block, "page", 0) or 0) == page
+            ]
+            nearest = min(
+                same_page,
+                key=lambda block: abs(
+                    int(block.raw.get("pdf_alignment", {}).get("pdf_order") or 0) - raw_order
+                ),
+                default=None,
+            )
+            section_id = getattr(nearest, "section_id", None) if nearest else None
+
+            typed_blocks.append(TypedBlock(
+                block_id=f"blk_pdf_fig_{page}_{raw_order}",
+                page=page,
+                order=raw_order,
+                text=text,
+                block_type="figure_caption",
+                bbox=getattr(raw, "bbox", None),
+                confidence=0.95,
+                section_id=section_id,
+                raw={
+                    "parser_source": "grobid_hybrid_pdf_supplement",
+                    "pdf_alignment": {
+                        "page": page,
+                        "pdf_order": raw_order,
+                        "score": 1.0,
+                    },
+                },
+            ))
+            existing_texts.add(normalized)
 
     @staticmethod
     def _refresh_section_pages_from_blocks(

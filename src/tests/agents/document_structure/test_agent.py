@@ -166,3 +166,111 @@ def test_grobid_hybrid_alignment_updates_block_and_section_pages():
     assert typed_blocks[0].raw["pdf_alignment"]["page"] == 2
     assert sections[0].page_start == 2
     assert sections[0].page_end == 2
+
+
+def test_grobid_hybrid_alignment_accepts_substantial_pdf_fragment_inside_long_paragraph():
+    """十分長いPyMuPDF断片なら、長いGROBID段落内の完全一致をpage anchorにする。"""
+    from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+    from episteme_graph.agents.document_structure.parser import RawBlock
+
+    fragment = (
+        "The optical cavity uses a high finesse bow tie geometry and preserves the polarization "
+        "state across repeated round trips."
+    )
+    target = DocumentStructureAgent._normalize_match_text(
+        fragment + " This paragraph continues with substantially more explanatory text."
+    )
+    raw = RawBlock(page=39, order=120, text=fragment)
+    records = [(0, raw, DocumentStructureAgent._normalize_match_text(raw.text))]
+
+    match = DocumentStructureAgent._find_best_pdf_match(target, records, 0)
+
+    assert match is not None
+    assert match[1].page == 39
+    assert match[2] >= 0.92
+
+
+def test_grobid_hybrid_alignment_uses_filtered_record_indices():
+    """空raw blockの除外後も単調カーソルとlist sliceの座標を一致させる。"""
+    from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+    from episteme_graph.agents.document_structure.schema import TypedBlock
+    from episteme_graph.agents.document_structure.parser import RawBlock
+
+    typed_blocks = [
+        TypedBlock("t1", 1, 0, "First substantial paragraph used as an anchor.", "body_paragraph"),
+        TypedBlock("t2", 1, 1, "Second substantial paragraph immediately after it.", "body_paragraph"),
+    ]
+    raw_blocks = [
+        RawBlock(page=1, order=i, text="") for i in range(5)
+    ] + [
+        RawBlock(page=38, order=5, text=typed_blocks[0].text),
+        RawBlock(page=39, order=6, text=typed_blocks[1].text),
+    ]
+
+    DocumentStructureAgent._align_grobid_blocks_to_pdf_blocks(typed_blocks, raw_blocks)
+
+    assert [block.page for block in typed_blocks] == [38, 39]
+    assert [block.raw["pdf_alignment"]["pdf_order"] for block in typed_blocks] == [5, 6]
+
+
+def test_grobid_hybrid_alignment_rejects_short_label_inside_long_paragraph():
+    """図中の短い軸ラベルを段落のpage anchorとして採用しない。"""
+    from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+    from episteme_graph.agents.document_structure.parser import RawBlock
+
+    target = DocumentStructureAgent._normalize_match_text(
+        "Figure 2.2 shows upper limits on the axion-photon coupling constant from experiments."
+    )
+    raw = RawBlock(page=35, order=404, text="Axion-photon coupling constant")
+    records = [(0, raw, DocumentStructureAgent._normalize_match_text(raw.text))]
+
+    assert DocumentStructureAgent._find_best_pdf_match(target, records, 0) is None
+
+
+def test_grobid_hybrid_alignment_rejects_repeated_short_number():
+    from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+    from episteme_graph.agents.document_structure.parser import RawBlock
+
+    raw = RawBlock(page=77, order=1214, text="3)")
+    records = [(0, raw, DocumentStructureAgent._normalize_match_text(raw.text))]
+
+    assert DocumentStructureAgent._find_best_pdf_match("3", records, 0) is None
+
+
+def test_grobid_hybrid_supplements_only_explicit_pdf_figure_captions():
+    """colon付きcaptionを補い、本文の ``Figure ... shows`` は追加しない。"""
+    from episteme_graph.agents.document_structure.agent import DocumentStructureAgent
+    from episteme_graph.agents.document_structure.schema import TypedBlock
+    from episteme_graph.agents.document_structure.parser import RawBlock
+
+    typed_blocks = [TypedBlock(
+        block_id="body-1",
+        page=39,
+        order=118,
+        text="Nearby discussion of simultaneous resonance.",
+        block_type="body_paragraph",
+        section_id="sec-6",
+        raw={"pdf_alignment": {"page": 39, "pdf_order": 118, "score": 0.92}},
+    )]
+    pdf_blocks = [
+        RawBlock(
+            page=39,
+            order=120,
+            text="Figure 6 .8: Transmissions under the simultaneous resonance condition.",
+            bbox=(100, 400, 500, 450),
+        ),
+        RawBlock(
+            page=39,
+            order=121,
+            text="Figure 6 .9 shows the measured transfer function from PDs to PDp.",
+        ),
+    ]
+
+    DocumentStructureAgent._supplement_grobid_figure_captions(typed_blocks, pdf_blocks)
+
+    captions = [block for block in typed_blocks if block.block_type == "figure_caption"]
+    assert len(captions) == 1
+    assert captions[0].page == 39
+    assert captions[0].section_id == "sec-6"
+    assert captions[0].bbox == (100, 400, 500, 450)
+    assert captions[0].raw["parser_source"] == "grobid_hybrid_pdf_supplement"

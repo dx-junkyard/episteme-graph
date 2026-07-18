@@ -1,6 +1,6 @@
 # 要素中心コンテキストビュー（Element-Centered Context Lens）設計
 
-> **状態: 設計・未実装**（Issue [#498](https://github.com/dx-junkyard/episteme-graph/issues/498)）。
+> **状態: Phase 0〜3 実装済み（2026-07-18）**（Issue [#498](https://github.com/dx-junkyard/episteme-graph/issues/498)）。
 > 親設計書: [W層（Element Deliberation Workspace）設計](element_deliberation_workspace_design.md)。
 > 本書は W層で要素を開いたときに、選択要素を中心として上位構造・文脈上の役割・下位構造を一体表示するための追補設計である。
 
@@ -247,4 +247,92 @@ overview と dialogue grounding の双方で同じ情報を使うため、要素
 
 - [ ] 対話の grounding に、画面と同じ上下関係を含める。
 - [ ] 4要素型の投影契約、縮退、根拠状態、中心移動、groundingをテストする。
+
+---
+
+## 9. 実装ノート（2026-07-18）
+
+Phase 0〜3 を実装した。実装ファイルは以下のとおり。
+
+- `backend/core/deliberation/context_lens.py`（新規） — 読み取り専用・非LLM・FastAPI 非 import。
+  既存 A層成果物（thesis_reconstruction / derivation_chain / equation_semantics /
+  figure_table_semantics / claim_object_builder / symbol_registry の各 artifact、
+  `theory_component_graphs.graph_json`、`theory_claims` / `theory_components` /
+  `document_figures` テーブル、committed な `element_annotations`）を横断し、選択要素を
+  中心に上位・下位を各1階層だけ決定論的に投影する。`RELATION_LABELS`（内部語彙 → 日本語
+  動詞句のマッピング）はこのファイル内に持つ。
+- `backend/core/deliberation/schema.py` — `CONTEXT_STATUS_SOURCE_BACKED` /
+  `CONTEXT_STATUS_CANDIDATE` / `CONTEXT_STATUS_CONFIRMED` /
+  `CONTEXT_ROLE_STATUS_UNIDENTIFIED` を語彙定数として追加。
+- `backend/api/routes/deliberation.py` — 既存
+  `GET /api/admin/deliberation/elements/{type}/{id}/overview` のレスポンスに `context`
+  キーを追加した（新規エンドポイントは作らない）。権限は既存 `_ensure_document_viewable`
+  のまま（投影は同一 document 内に閉じるため追加ゲートは不要）。
+- `backend/core/deliberation/dialogue.py` — `build_grounding` に `context` を追加し、
+  `grounding_to_text` が画面と同じ上位/下位関係（`relation_label` + 状態ラベル）を
+  プロンプトへ整形する。応答が利用した根拠・関係を明示するよう instruction header に
+  追記した。
+- `frontend/public/js/deliberation.js` — 共通の要素中心レイアウト
+  （`#deliberation-context-lens`: 上位レーン → 中心カード（要素自体／この文脈での役割／
+  根拠・状態の3別欄）→ 下位レーン）、状態バッジ（原文根拠／AI候補／教員確認済み／未同定）、
+  `.deliberation-context-nav` ボタンによる中心移動（`_navigateToElement` — モーダル
+  非破棄・チャット状態は新要素へリセット）、`#deliberation-breadcrumb` パンくず + 戻るを
+  追加した。
+- `frontend/public/css/styles.css` — 上記要素のスタイル定義を追加した。
+- テスト: `backend/tests/test_deliberation_context_lens.py`（投影契約・縮退・根拠状態・
+  語彙完全性）、`test_deliberation_ui_static.py` の `TestElementContextLens`
+  （中心移動・パンくず・escHtml・未同定文言）、`test_deliberation_api.py` /
+  `test_deliberation_guardrails.py` の拡張（overview の `context` キー・
+  `context_lens.py` の FastAPI 非 import・`"confidence"` 文字列禁止）。
+
+### 確定した契約
+
+overview レスポンスの `context` は次の形で返る。
+
+```json
+"context": {
+  "available": true,
+  "focus": {
+    "element_type": "...", "element_id": "...", "document_id": "...",
+    "label": "...", "intrinsic_summary": "...",
+    "contextual_role": "...", "contextual_role_status": "candidate",
+    "provenance": []
+  },
+  "upper": [
+    {
+      "element_type": "...", "element_id": "...", "document_id": "...",
+      "label": "...", "relation": "provides_evidence_for",
+      "relation_label": "が証拠を与える", "relation_status": "source_backed",
+      "evidence_refs": [], "navigable": true
+    }
+  ],
+  "lower": ["同形"],
+  "notes": []
+}
+```
+
+- `relation` は内部語彙、`relation_label` は日本語動詞句（主語は常に焦点要素）。数値
+  スコアは出さない（W8）。
+- `relation_status` の判定則: A層の明示リンクは `source_backed` / `inferred_*` や
+  `*_candidates`・vision 由来の関係は `candidate` / 教員確定（committed 注釈・confirmed
+  同一性リンク・reviewed 解析）は `confirmed`。
+- 上位・下位の各レーンは上限20件。超過分は黙って切り捨てず `notes` に件数を記録する。
+- 上位関係が1件も得られない要素は `contextual_role_status="unidentified"` とし、推測で
+  埋めない。
+- `shared_part`（L層共通部品）は投影対象外で、`{"available": false, "note": "..."}` に
+  縮退する。
+- 既存の W層4レンズのうち「論文内レンズ」の表示のみ、この context ブロックへ置き換えた。
+  他3レンズ（コーパス横断／分野の地図／C層承認・D層疑義）は変更していない。
+
+### §5 契約例との差分
+
+§5 の契約例は設計時点の概形であり、実装では以下を追加している。
+
+- `relation_label`（UI表示用の日本語動詞句。§5 時点は `relation` のみで変換は UI 側の
+  想定だったが、実装では投影側が `RELATION_LABELS` で確定して返す）。
+- `navigable`（上位／下位ノードが中心移動可能かどうかを明示するフラグ）。
+- `notes`（レーン上限超過など、投影が省略した情報の正直な告知）。
+- `available`（focus 自体が投影不能な場合の縮退フラグ。§5 は前提としていた）。
+- `contextual_role_status` の語彙に `unidentified` を追加した（§2.2 の「上位構造との
+  関係は未同定」という文言を状態値として構造化したもの）。
 

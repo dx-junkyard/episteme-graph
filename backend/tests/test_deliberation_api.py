@@ -112,6 +112,120 @@ class TestRbacStudentRejected:
         assert response.status_code == 403
 
 
+# ---------------------------------------------------------------------------
+# 要素中心コンテキストビュー（Issue #498）: GET .../overview の "context" キー
+# ---------------------------------------------------------------------------
+
+
+def _contract_context_dict():
+    """`core.deliberation.context_lens.build()` の契約（設計書 §5）に沿った fake 結果。"""
+    return {
+        "focus": {
+            "element_type": "theory_claim",
+            "element_id": "c1",
+            "document_id": "doc-1",
+            "label": "focus label",
+            "intrinsic_summary": "summary text",
+            "contextual_role": "中心命題を支持する",
+            "contextual_role_status": "source_backed",
+            "provenance": ["theory_claims:c1"],
+        },
+        "upper": [
+            {
+                "element_type": "theory_component",
+                "element_id": "comp-1",
+                "document_id": "doc-1",
+                "label": "upper component",
+                "relation": "supports_component",
+                "relation_label": "の根拠となる",
+                "relation_status": "source_backed",
+                "evidence_refs": [],
+                "navigable": True,
+            }
+        ],
+        "lower": [],
+        "notes": ["note-1"],
+    }
+
+
+class TestOverviewContext:
+    """overview 応答の3本目の面（"context"）: available/note/フル契約の3分岐（Task 1）。"""
+
+    PATH = "/api/admin/deliberation/elements/theory_claim/c1/overview"
+
+    def _patch_decomposition_and_positioning(self, monkeypatch, route_mod):
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
+        monkeypatch.setattr(
+            route_mod.decomposition, "build",
+            lambda ref: {"element_type": ref.element_type, "label": "L", "fields": {}, "notes": []},
+        )
+        monkeypatch.setattr(route_mod.positioning, "build", lambda ref: {})
+
+    def test_context_available_returns_full_contract_shape(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        self._patch_decomposition_and_positioning(monkeypatch, route_mod)
+        monkeypatch.setattr(route_mod.context_lens, "build", lambda ref: _contract_context_dict())
+
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 200
+        context = response.json()["context"]
+        assert context["available"] is True
+        assert context["focus"]["label"] == "focus label"
+        assert context["focus"]["contextual_role_status"] == "source_backed"
+        assert context["upper"][0]["relation_label"] == "の根拠となる"
+        assert context["lower"] == []
+        assert context["notes"] == ["note-1"]
+
+    def test_shared_part_context_is_unavailable_with_factual_note(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_shared_part_ref())
+        monkeypatch.setattr(
+            route_mod.decomposition, "build",
+            lambda ref: {"element_type": "shared_part", "label": "L", "fields": {}, "notes": []},
+        )
+        monkeypatch.setattr(route_mod.positioning, "build", lambda ref: {})
+        monkeypatch.setattr(route_mod.context_lens, "build", lambda ref: None)
+
+        response = client.get(
+            "/api/admin/deliberation/elements/shared_part/sp-1/overview",
+            headers=_auth(teacher),
+        )
+        assert response.status_code == 200
+        assert response.json()["context"] == {
+            "available": False,
+            "note": "この要素型にはコンテキスト投影がありません",
+        }
+
+    def test_context_builder_exception_is_fail_soft_independent_of_other_lenses(
+        self, client_and_tokens, monkeypatch
+    ):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        self._patch_decomposition_and_positioning(monkeypatch, route_mod)
+
+        def boom(_ref):
+            raise RuntimeError("simulated context_lens outage")
+
+        monkeypatch.setattr(route_mod.context_lens, "build", boom)
+
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["context"] == {
+            "available": False,
+            "note": "コンテキスト投影の取得に失敗しました",
+        }
+        # decomposition/positioning は context の失敗に巻き込まれず引き続き返る（fail-soft の独立性）。
+        assert body["decomposition"]["label"] == "L"
+        assert body["positioning"]["available"] is True
+
+
 class TestCreateSessionHappyPath:
     def test_create_session_returns_200_with_session_shape(self, client_and_tokens, monkeypatch):
         client, _s, teacher = client_and_tokens

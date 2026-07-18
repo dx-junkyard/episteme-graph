@@ -798,6 +798,30 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   `generate_structured_with_images()`（v1 は OpenAI 経路のみ）。上限は
   `APPARATUS_MAX_IMAGES_PER_DOCUMENT`（既定20）/ `APPARATUS_MAX_CALLS_PER_DAY`（既定30）、
   超過分は `skipped_by_limit` で保持しステージは正常完了。
+- **反復照合解析（#499, migration 054）**: apparatus_semantics は既定で one-shot ではなく
+  **文脈仮説 → 独立画像観察 → 照合 → ギャップ駆動再スキャン → 決定論的収束判定** の状態機械
+  （`apparatus_semantics/iterative.py::IterativeFigureAnalyzer`、正本は
+  `docs/features/contextual_figure_analysis_iterative_verification.md` 末尾の実装記録）で動く。
+  ①仮説はテキストのみ（画像を見せない）②観察は画像+inner_labels のみ（**caption・近傍本文を
+  渡さない** — 確証バイアス遮断）③照合は画像を渡さないテキスト統合で、**parts は観察根拠
+  （observation_refs / label_ref）必須**（validator `part_without_visual_support` = hard error。
+  「文章にあるから画像で発見」を構造的に禁止）。text_only の期待要素は alignment item
+  （`supported_by_both / visual_only / text_only / contradicted / unresolved`）として保持され
+  parts に入らない。④再スキャン課題は `(target_item_ids, question)` で重複排除し無目的再実行を
+  禁止（iteration の `executed_task_ids` 空は validator error）。非収束時は `review_questions` /
+  `unresolved_conflicts` を必ず残して人間へ引き継ぐ（`convergence_status ∈ {converged,
+  max_iterations_reached, no_progress, aborted_error, aborted_cost_limit, not_run}`）。段階失敗・
+  コスト枯渇でも部分結果を `stage_failures` 付きで保持（P4）。結果は
+  `document_figures.iterative_analysis JSONB`（migration 054、AI 提案層・再抽出でリセット・教員
+  確定列なし）+ `stage_outputs._artifacts`（llm_calls/vision_calls/model/iteration差分の監査）。
+  API 投影は `figure_presentation.iterative_analysis_payload()` が confidence 生値を除去し
+  `confidence_label` のみ返す（W8）。reanalyze API は `unresolved_item_ids` で保存済み未解決
+  項目を指定した再解析が可能（hint_text/focus_bbox を決定論合成し既存 guided 経路に乗せる）。
+  設定: `APPARATUS_ANALYSIS_MODE`（`iterative`|`one_shot`、既定 iterative）/
+  `APPARATUS_VERIFY_MAX_ITERATIONS`（既定3）/ `APPARATUS_REANALYZE_MAX_ITERATIONS`（既定1）。
+  `APPARATUS_MAX_CALLS_PER_DAY` は vision 呼び出し数の意味のまま（orchestrator が日次残数を
+  `IterativeConfig.vision_call_budget` として渡し、engine が図間で観察1回分を予約しつつ動的消費）。
+  `IterativeConfig` 未指定の agent は従来 one-shot（後方互換）。
 - **component_type 語彙拡張**（migration 041）: `theory_components.component_type` CHECK に
   `apparatus` / `instrument` / `part` を追加。カートリッジ `component_types.json` にも同語彙。
   装置候補は ComponentAssembly 経由で `status='candidate'` の theory_components になる。
@@ -1170,6 +1194,13 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   equation 変更、`admin-lecture-studio.js` の論理要素カード・選択中コンポーネント・主張一覧）。
   モーダルは2ペイン（左=内訳+4レンズ / 右=対話+候補注釈カード confirm/dismiss）。figure は
   #496 のモード別解析ペイン切替 + 「AIで図を再解析」（教員指示付き再解析）を持つ。
+- **要素中心コンテキストレンズ（#498）**: overview に `context`（focus/upper/lower、各
+  1階層・レーン上限20・relation は動詞語彙＋relation_status(source_backed/candidate/
+  confirmed)）を追加。正本は `core/deliberation/context_lens.py`（読み取り専用・非LLM）＋
+  `docs/features/element_context_lens_design.md`。上位関係ゼロは unidentified（推測穴埋め
+  禁止）。UI は `deliberation.js` の上位/中心/下位レーン＋パンくず中心移動（モーダル非破棄）。
+  dialogue grounding にも同じ focus/upper/lower を注入する。文脈上の役割は要素の固定属性に
+  保存しない。
 - **ガードレール**: `test_deliberation_guardrails.py` / `test_deliberation_positioning.py` /
   `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
   candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。

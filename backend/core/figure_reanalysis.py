@@ -28,6 +28,7 @@ from core.document_pipeline.figure_context import collect_figure_context
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.figure_presentation import (
+    assign_review_question_ids,
     normalize_figure_analysis_candidate,
     persist_suggestions,
 )
@@ -35,7 +36,7 @@ from core.llm_usage import usage_context
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.storage import get_storage_client
 from episteme_graph.agents.apparatus_semantics.agent import ApparatusSemanticsAgent
-from episteme_graph.agents.apparatus_semantics.schema import FigureImageInput
+from episteme_graph.agents.apparatus_semantics.schema import FigureImageInput, IterativeConfig
 
 try:
     import fitz  # PyMuPDF
@@ -52,6 +53,13 @@ _MAX_HINT_CHARS = 2000
 _MIN_FOCUS_DIM = 0.02
 _GUIDANCE_REASON_PREFIX = "教員指示付き再解析: "
 
+# Unresolved-item-directed re-analysis bounds
+# (docs/features/contextual_figure_analysis_iterative_verification.md).
+_MAX_UNRESOLVED_ITEM_IDS = 10
+_MAX_UNRESOLVED_ITEM_ID_CHARS = 64
+_UNRESOLVED_ITEM_HINT_PREFIX = "未解決箇所の再確認: "
+_FOCUS_BBOX_PADDING_RATIO = 0.05
+
 
 class FigureReanalysisError(RuntimeError):
     def __init__(self, message: str, *, kind: str = "invalid") -> None:
@@ -59,14 +67,37 @@ class FigureReanalysisError(RuntimeError):
         self.kind = kind
 
 
+def _normalize_unresolved_item_ids(raw: Any) -> list[str] | None:
+    """Validate/normalize ``unresolved_item_ids`` (#499 unresolved-item-directed
+    re-analysis). ``None``/absent stays ``None`` — this is purely additive so a
+    caller that never sends this field is unaffected (§ guided re-analysis
+    back-compat). At most 10 ids, each a non-empty string of at most 64 chars.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise FigureReanalysisError("未解決箇所の指定形式が不正です", kind="invalid")
+    if len(raw) > _MAX_UNRESOLVED_ITEM_IDS:
+        raise FigureReanalysisError(
+            f"未解決箇所の指定は{_MAX_UNRESOLVED_ITEM_IDS}件までです", kind="invalid"
+        )
+    normalized: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not (1 <= len(item) <= _MAX_UNRESOLVED_ITEM_ID_CHARS):
+            raise FigureReanalysisError("未解決箇所の指定形式が不正です", kind="invalid")
+        normalized.append(item)
+    return normalized or None
+
+
 def _normalize_guidance(guidance: dict[str, Any] | None) -> dict[str, Any] | None:
     """Validate and normalize a teacher guidance payload.
 
-    Returns ``None`` when there is nothing to say (both fields absent/blank —
-    unguided re-analysis, fully backward compatible). Raises
-    ``FigureReanalysisError(kind="invalid")`` on any out-of-range value so the
-    API route's existing ``kind -> status`` mapping turns it into a 422
-    regardless of whether the caller is the HTTP route or a direct core call.
+    Returns ``None`` when there is nothing to say (hint_text, focus_bbox, and
+    unresolved_item_ids all absent/blank — unguided re-analysis, fully
+    backward compatible). Raises ``FigureReanalysisError(kind="invalid")`` on
+    any out-of-range value so the API route's existing ``kind -> status``
+    mapping turns it into a 422 regardless of whether the caller is the HTTP
+    route or a direct core call.
     """
     if not guidance:
         return None
@@ -106,9 +137,17 @@ def _normalize_guidance(guidance: dict[str, Any] | None) -> dict[str, Any] | Non
             )
         focus_bbox = values
 
-    if not hint_text and focus_bbox is None:
+    unresolved_item_ids = _normalize_unresolved_item_ids(guidance.get("unresolved_item_ids"))
+
+    if not hint_text and focus_bbox is None and not unresolved_item_ids:
         return None
-    return {"hint_text": hint_text or None, "focus_bbox": focus_bbox}
+    result: dict[str, Any] = {"hint_text": hint_text or None, "focus_bbox": focus_bbox}
+    # Additive key only when present — kept out of the dict entirely otherwise
+    # so every existing hint/focus-only call site's exact-equality assertions
+    # are unaffected (back-compat).
+    if unresolved_item_ids:
+        result["unresolved_item_ids"] = unresolved_item_ids
+    return result
 
 
 def _crop_focus_image(image_bytes: bytes, focus_bbox: list[float]) -> bytes | None:
@@ -187,6 +226,176 @@ def _labels_in_focus(
         if text not in labels:
             labels.append(text)
     return labels
+
+
+# ===========================================================================
+# Unresolved-item-directed re-analysis
+# (docs/features/contextual_figure_analysis_iterative_verification.md)
+#
+# A teacher may point at specific unresolved alignment items / review
+# questions / conflicts surfaced by a prior iterative analysis and ask for a
+# focused re-check, instead of (or in addition to) writing free-text
+# guidance. This resolves those ids against the figure's stored
+# ``iterative_analysis`` and deterministically synthesizes hint_text/
+# focus_bbox that ride the *existing* guided re-analysis path unchanged.
+# ===========================================================================
+
+
+def _resolve_unresolved_items(
+    iterative_analysis: Any, item_ids: list[str],
+) -> list[tuple[str, dict[str, Any]]]:
+    """Resolve ``unresolved_item_ids`` against a figure's stored ``iterative_analysis``.
+
+    Looks across ``alignment_items[].item_id`` / ``review_questions[].question_id``
+    (falling back to the same deterministic ``q_{index}`` id
+    ``core.figure_presentation.assign_review_question_ids`` assigns for the API
+    projection, so an id copied from what the teacher saw always resolves) /
+    ``unresolved_conflicts[].item_id``. Raises
+    ``FigureReanalysisError(kind="invalid")`` if even one requested id is
+    unknown — silently ignoring part of the teacher's request would be worse
+    than failing loud.
+    """
+    data = iterative_analysis if isinstance(iterative_analysis, dict) else {}
+    by_id: dict[str, tuple[str, dict[str, Any]]] = {}
+    for item in data.get("alignment_items") or []:
+        if isinstance(item, dict) and item.get("item_id"):
+            by_id.setdefault(str(item["item_id"]), ("alignment_item", item))
+    for question in assign_review_question_ids(data.get("review_questions")):
+        question_id = str(question.get("question_id") or "")
+        if question_id:
+            by_id.setdefault(question_id, ("review_question", question))
+    for item in data.get("unresolved_conflicts") or []:
+        if isinstance(item, dict) and item.get("item_id"):
+            by_id.setdefault(str(item["item_id"]), ("unresolved_conflict", item))
+
+    resolved: list[tuple[str, dict[str, Any]]] = []
+    unknown: list[str] = []
+    for item_id in item_ids:
+        hit = by_id.get(item_id)
+        if hit is None:
+            unknown.append(item_id)
+        else:
+            resolved.append(hit)
+    if unknown:
+        raise FigureReanalysisError(
+            "指定された未解決箇所が見つかりません: " + ", ".join(unknown), kind="invalid",
+        )
+    return resolved
+
+
+def _item_text_for_hint(kind: str, item: dict[str, Any]) -> str:
+    """Deterministically extract the human-readable text of one resolved item."""
+    if kind == "review_question":
+        return str(item.get("question") or "").strip()
+    if kind == "alignment_item":
+        label = str(item.get("label") or "").strip()
+        evidence = str(item.get("text_evidence") or "").strip()
+        if label and evidence:
+            return f"{label}: {evidence}"
+        return label or evidence
+    # unresolved_conflict entries are free-form (schema.py keeps them
+    # untyped) — fall back across the common descriptive keys.
+    for key in ("description", "reason", "label", "question"):
+        value = str(item.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _synthesize_unresolved_hint(user_hint: str, segments: list[str]) -> str:
+    """Compose the deterministic hint_text addendum, keeping any user hint first."""
+    body = "; ".join(segment for segment in segments if segment)
+    synthesized = f"{_UNRESOLVED_ITEM_HINT_PREFIX}{body}" if body else _UNRESOLVED_ITEM_HINT_PREFIX
+    combined = f"{user_hint}\n{synthesized}" if user_hint else synthesized
+    return combined[:_MAX_HINT_CHARS]
+
+
+def _relative_bbox_from_page_bbox(
+    page_bbox: list[float] | None, figure_bbox: list[float] | None,
+) -> list[float] | None:
+    """Inverse of the page-coordinate mapping ``_labels_in_focus`` uses: turn a
+    PDF-page-coordinate bbox (as stored in ``inner_labels[].bbox``) into the
+    image-relative ``[x0, y0, x1, y1]`` (0..1) space. ``None`` on any missing/
+    degenerate input (fail-soft — the caller falls back to hint_text-only
+    guidance)."""
+    if not figure_bbox or len(figure_bbox) != 4 or not page_bbox or len(page_bbox) != 4:
+        return None
+    fx0, fy0, fx1, fy1 = figure_bbox
+    width = fx1 - fx0
+    height = fy1 - fy0
+    if width <= 0 or height <= 0:
+        return None
+    x0, y0, x1, y1 = page_bbox
+    return [
+        (x0 - fx0) / width,
+        (y0 - fy0) / height,
+        (x1 - fx0) / width,
+        (y1 - fy0) / height,
+    ]
+
+
+def _synthesize_focus_bbox(
+    label_refs: list[str],
+    inner_labels: list[dict] | None,
+    figure_bbox: list[float] | None,
+) -> list[float] | None:
+    """Best-effort ``focus_bbox`` synthesis from resolved alignment items'
+    ``label_ref``: union of the matching in-figure label bboxes, padded 5%,
+    clamped to 0..1, and grown to the existing minimum focus dimension.
+    Returns ``None`` when nothing resolves to an in-figure label with a bbox
+    (fail-soft — the caller proceeds with hint_text-only guidance)."""
+    if not label_refs or not figure_bbox:
+        return None
+    label_bbox_by_text: dict[str, list[float]] = {}
+    for item in inner_labels or []:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text") or "").strip()
+        bbox = item.get("bbox")
+        if text and bbox and len(bbox) == 4:
+            label_bbox_by_text.setdefault(text, list(bbox))
+            label_bbox_by_text.setdefault(text.casefold(), list(bbox))
+
+    rel_boxes: list[list[float]] = []
+    for label_ref in label_refs:
+        ref = str(label_ref or "").strip()
+        if not ref:
+            continue
+        page_bbox = label_bbox_by_text.get(ref) or label_bbox_by_text.get(ref.casefold())
+        rel = _relative_bbox_from_page_bbox(page_bbox, figure_bbox) if page_bbox else None
+        if rel:
+            rel_boxes.append(rel)
+    if not rel_boxes:
+        return None
+
+    x0 = min(b[0] for b in rel_boxes)
+    y0 = min(b[1] for b in rel_boxes)
+    x1 = max(b[2] for b in rel_boxes)
+    y1 = max(b[3] for b in rel_boxes)
+
+    pad_x = max((x1 - x0) * _FOCUS_BBOX_PADDING_RATIO, _MIN_FOCUS_DIM / 2)
+    pad_y = max((y1 - y0) * _FOCUS_BBOX_PADDING_RATIO, _MIN_FOCUS_DIM / 2)
+    x0 -= pad_x
+    y0 -= pad_y
+    x1 += pad_x
+    y1 += pad_y
+
+    if x1 - x0 < _MIN_FOCUS_DIM:
+        center = (x0 + x1) / 2.0
+        x0 = min(center - _MIN_FOCUS_DIM / 2.0, 1.0 - _MIN_FOCUS_DIM)
+        x1 = x0 + _MIN_FOCUS_DIM
+    if y1 - y0 < _MIN_FOCUS_DIM:
+        center = (y0 + y1) / 2.0
+        y0 = min(center - _MIN_FOCUS_DIM / 2.0, 1.0 - _MIN_FOCUS_DIM)
+        y1 = y0 + _MIN_FOCUS_DIM
+
+    x0 = max(0.0, min(1.0, x0))
+    y0 = max(0.0, min(1.0, y0))
+    x1 = max(0.0, min(1.0, x1))
+    y1 = max(0.0, min(1.0, y1))
+    if not (x1 > x0 and y1 > y0):
+        return None
+    return [round(x0, 6), round(y0, 6), round(x1, 6), round(y1, 6)]
 
 
 def _consume_budget(figure_id: str, user_id: str | None) -> None:
@@ -303,6 +512,33 @@ def reanalyze_figure(
     if row.get("status") != "extracted" or not row.get("minio_key"):
         raise FigureReanalysisError("原図を取得できないため再解析できません", kind="invalid")
 
+    # Unresolved-item-directed re-analysis (#499): resolve the requested ids
+    # against this figure's stored iterative_analysis and deterministically
+    # synthesize hint_text/focus_bbox that ride the existing guided path
+    # below unchanged. Unknown ids fail loud before any paid work.
+    if norm_guidance and norm_guidance.get("unresolved_item_ids"):
+        resolved_items = _resolve_unresolved_items(
+            row.get("iterative_analysis"), norm_guidance["unresolved_item_ids"],
+        )
+        synthesized_hint = _synthesize_unresolved_hint(
+            norm_guidance.get("hint_text") or "",
+            [_item_text_for_hint(kind, item) for kind, item in resolved_items],
+        )
+        merged_guidance = dict(norm_guidance)
+        merged_guidance["hint_text"] = synthesized_hint
+        if merged_guidance.get("focus_bbox") is None:
+            label_refs = [
+                str(item.get("label_ref") or "")
+                for kind, item in resolved_items
+                if kind == "alignment_item" and item.get("label_ref")
+            ]
+            synthesized_bbox = _synthesize_focus_bbox(
+                label_refs, row.get("inner_labels") or [], row.get("bbox"),
+            )
+            if synthesized_bbox is not None:
+                merged_guidance["focus_bbox"] = synthesized_bbox
+        norm_guidance = merged_guidance
+
     storage = storage or get_storage_client()
     try:
         image_bytes = storage.get_object("figure-images", row["minio_key"])
@@ -368,7 +604,19 @@ def reanalyze_figure(
         focus_image_bytes=focus_image_bytes,
         focus_label_texts=focus_label_texts,
     )
-    analyzer = agent or ApparatusSemanticsAgent(cartridge_id=cartridge_id)
+    if agent is not None:
+        analyzer = agent
+    else:
+        # #499: the synchronous re-analysis API bounds iteration count more
+        # tightly than the batch pipeline to protect response time; budget is
+        # per-call (invocation-scoped cost gate above), not a shared daily pool.
+        iterative_config = IterativeConfig(
+            enabled=(settings.apparatus_analysis_mode != "one_shot"),
+            max_iterations=settings.apparatus_reanalyze_max_iterations,
+            vision_call_budget=None,
+            model_name=settings.apparatus_llm_model,
+        )
+        analyzer = ApparatusSemanticsAgent(cartridge_id=cartridge_id, iterative_config=iterative_config)
     # Count only requests that reached the paid vision boundary.  Missing or
     # corrupt stored images must not consume the teacher's re-analysis budget.
     if enforce_cost_gate:
