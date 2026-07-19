@@ -549,3 +549,60 @@ class TestIntegrationWithAbbreviations:
             + ctx.source_counts["reference_mentions"]
             + ctx.source_counts["section_body"]
         ) == len(ctx.nearby_text)
+
+
+class TestBrokenSpacingMentions:
+    """GROBID 由来の図番号スペース混入表記（"Fig. 3 .3"）の回帰テスト。
+
+    実データ（アクシオン論文 document 07699cf5、本文92ブロック中87件が壊れ表記）で
+    参照メンション検出が全滅していたバグの再発ガード。crosslink.py 側の同種修正と
+    同じ規約（番号内 ``.`` の前後空白許容 + 否定先読み ``(?!\\.?[0-9])``）。
+    """
+
+    def _figure_row(self) -> dict:
+        return {
+            "caption_block_id": "cap",
+            "figure_label": "Figure 3.3",
+            "caption_text": "Figure 3.3: sensitivity.",
+        }
+
+    def _blocks(self, mention_text: str) -> list[dict]:
+        # caption 直後2ブロックは caption_adjacent として先に消費されるため、
+        # メンションブロックはフィラー2つを挟んで adjacent 窓の外に置く。
+        return [
+            _block("Figure 3.3: sensitivity.", page=1, order=0, block_id="cap",
+                   block_type="figure_caption", section_id="s1"),
+            _block("Filler paragraph one.", page=1, order=1, block_id="f1", section_id="s1"),
+            _block("Filler paragraph two.", page=1, order=2, block_id="f2", section_id="s1"),
+            _block(mention_text, page=2, order=0, block_id="hit", section_id="s2"),
+        ]
+
+    def test_space_before_decimal_point_matches(self):
+        ctx = fc.collect_figure_context(
+            _structure(self._blocks(
+                "The parameter dependence of the sensitivity is summarized in Fig. 3 .3."
+            )),
+            self._figure_row(),
+        )
+        assert ctx.source_counts["reference_mentions"] == 1
+
+    def test_space_after_decimal_point_matches(self):
+        ctx = fc.collect_figure_context(
+            _structure(self._blocks("As shown in Fig. 3. 3, the response scales.")),
+            self._figure_row(),
+        )
+        assert ctx.source_counts["reference_mentions"] == 1
+
+    def test_sentence_ending_period_after_number_matches(self):
+        ctx = fc.collect_figure_context(
+            _structure(self._blocks("The setup is illustrated in Fig. 3.3.")),
+            self._figure_row(),
+        )
+        assert ctx.source_counts["reference_mentions"] == 1
+
+    def test_longer_number_still_excluded(self):
+        ctx = fc.collect_figure_context(
+            _structure(self._blocks("Unrelated statistics appear in Fig. 3 .35 only.")),
+            self._figure_row(),
+        )
+        assert ctx.source_counts["reference_mentions"] == 0

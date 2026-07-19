@@ -11,6 +11,10 @@ from episteme_graph.agents.document_structure.schema import (
     TypedBlock,
 )
 from episteme_graph.agents.figure_table_semantics import FigureTableSemanticsAgent
+from episteme_graph.agents.figure_table_semantics.crosslink import (
+    _figure_mention_pattern,
+    _table_mention_pattern,
+)
 
 
 def _structure_with(blocks: list[TypedBlock]) -> DocumentStructureResult:
@@ -195,3 +199,82 @@ def test_caption_block_itself_not_treated_as_mention_source():
     # The pre-existing caption block_id lookup in _build_figure_record still
     # applies (unchanged, unrelated to the mention pass).
     assert result.figures[0].linked_claim_ids == ["claim_caption_only"]
+
+
+# --- GROBID whitespace-in-number mention regression (#500/#501 root cause) ---
+#
+# GROBID-derived body text frequently splits the decimal point of a figure/
+# table number away from its digits with stray whitespace (real-data example
+# from the affected paper: "Fig. 3 .3"). Before the fix, `_figure_mention_pattern`
+# / `_table_mention_pattern` built their number sub-pattern with a bare
+# `re.escape(num)`, so none of these broken mentions matched and cross-linking
+# was 0 for the whole document (87 of 92 body_paragraph blocks used this
+# broken spacing in the affected paper).
+
+
+def test_broken_spacing_matches_real_data_sentence():
+    """The exact real-data sentence from the affected paper must match num="3.3",
+    including the case where the number is immediately followed by the
+    sentence-terminating period (no space before the period)."""
+    pattern = _figure_mention_pattern("3.3")
+    text = (
+        "The parameter dependence of the sensitivity is summarized in "
+        "Fig. 3 .3."
+    )
+    assert pattern.search(text) is not None
+
+
+def test_broken_spacing_variants_match():
+    """Further real-data-style variants: space-only, extra space around the
+    dot, and the Japanese prefix, plus the plural abbreviation "Figs."."""
+    cases = [
+        ("2.4", "Fig. 2 .4 depicts the apparatus geometry."),
+        ("3.5", "Figure 3 . 5 shows the residual distribution."),
+        ("3.2", "図3.2に測定結果を示す。"),
+        ("3.2", "Figs. 3 .2 illustrate the trend across runs."),
+    ]
+    for num, text in cases:
+        pattern = _figure_mention_pattern(num)
+        assert pattern.search(text) is not None, (num, text)
+
+
+def test_broken_spacing_does_not_match_longer_number():
+    """"Fig. 3 .35" must not cross-link to figure "3.3" (negative lookahead
+    still rejects a mention that continues with another digit)."""
+    pattern = _figure_mention_pattern("3.3")
+    text = "Fig. 3 .35 shows something unrelated."
+    assert pattern.search(text) is None
+
+
+def test_broken_spacing_does_not_match_concatenated_number():
+    """"Fig. 33" (no decimal point at all) must not match num="3.3"."""
+    pattern = _figure_mention_pattern("3.3")
+    text = "Fig. 33 is unrelated to this section."
+    assert pattern.search(text) is None
+
+
+def test_table_broken_spacing_matches():
+    """Table-side analogue: "Table 4 .1" must match num="4.1"."""
+    pattern = _table_mention_pattern("4.1")
+    text = "Table 4 .1 lists the systematic uncertainties."
+    assert pattern.search(text) is not None
+
+
+def test_broken_spacing_crosslink_end_to_end():
+    """Integration: a body_paragraph block using the broken real-data spacing
+    ("Fig. 3 .3") must yield a linked_claim_id via the full agent.run() pass
+    (which calls apply_mention_crosslinks), reproducing the fix for the
+    reported 0-crosslink regression."""
+    structure = _structure_with([
+        _figure_caption_block("blk_fig", 1, "Figure 3.3: sensitivity summary."),
+        _body_block(
+            "blk_body",
+            2,
+            "The parameter dependence of the sensitivity is summarized in "
+            "Fig. 3 .3.",
+        ),
+    ])
+    agent = FigureTableSemanticsAgent()
+    result = agent.run(structure, claim_link_index={"blk_body": ["claim_broken_spacing"]})
+    assert result.figures[0].figure_id == "fig_3.3"
+    assert result.figures[0].linked_claim_ids == ["claim_broken_spacing"]

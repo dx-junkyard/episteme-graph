@@ -135,14 +135,24 @@ def build_thesis_ref_text_map(thesis: Any) -> dict[str, dict]:
 
 
 def build_figure_db_maps(document_id: str) -> tuple[dict[str, dict], dict[str, dict]]:
-    """``document_figures`` rows keyed by ``figure_key`` and ``caption_block_id``.
+    """``document_figures`` rows keyed by normalized ``figure_key`` and by
+    ``caption_block_id``.
 
     Figures are persisted in the ``figure_image_extraction`` stage (well
     before this one runs), so these rows — including the real DB ``id`` and
     ``inner_labels`` — are always available here, fresh run or resumed.
+
+    The ``by_key`` map is keyed by ``normalize_figure_join_key(figure_key)``,
+    not the raw ``figure_key`` string: ``figure_table_semantics``'s
+    ``FigureRecord.figure_id`` keeps the caption label's punctuation
+    (``fig_3.3``) while ``document_figures.figure_key`` is already
+    alnum-normalized (``fig_3_3``) — a raw-string lookup would fail for every
+    chapter-numbered label. See ``figure_images.normalize_figure_join_key``
+    (the single source of truth for this normalization); callers must
+    normalize the same way on lookup (``_resolve_figure_db_row`` does).
     """
     try:
-        from .figure_images import load_document_figures
+        from .figure_images import load_document_figures, normalize_figure_join_key
     except Exception:  # noqa: BLE001
         logger.warning(
             "contextual_explanation: could not import figure_images (non-fatal)",
@@ -160,7 +170,7 @@ def build_figure_db_maps(document_id: str) -> tuple[dict[str, dict], dict[str, d
     by_key: dict[str, dict] = {}
     by_caption_block: dict[str, dict] = {}
     for row in rows:
-        key = str(row.get("figure_key") or "")
+        key = normalize_figure_join_key(row.get("figure_key"))
         if key:
             by_key[key] = row
         cbid = str(row.get("caption_block_id") or "")
@@ -479,11 +489,26 @@ def _resolve_figure_db_row(
     figure_rows_by_key: dict[str, dict],
     figure_rows_by_caption_block: dict[str, dict],
 ) -> dict | None:
-    source_location = fig_dict.get("source_location") or {}
-    caption_block_id = str(source_location.get("caption_block_id") or "")
-    row = figure_rows_by_caption_block.get(caption_block_id) if caption_block_id else None
+    """Resolve the ``document_figures`` row a ``FigureRecord`` corresponds to.
+
+    Mirrors ``context_lens._matching_figure_record``'s priority order: try a
+    normalized ``figure_key`` match first (``fig_dict["figure_id"]`` keeps
+    the caption label's punctuation, e.g. ``fig_3.3``, while
+    ``figure_rows_by_key`` is keyed by ``normalize_figure_join_key`` output,
+    e.g. ``fig_3_3`` — both sides go through the same normalization; see
+    ``figure_images.normalize_figure_join_key``), then fall back to
+    ``caption_block_id`` (``source_location.caption_block_id``) when no
+    normalized key match is found (e.g. legacy rows with an unresolvable
+    figure_key).
+    """
+    from .figure_images import normalize_figure_join_key
+
+    key = normalize_figure_join_key(fig_dict.get("figure_id"))
+    row = figure_rows_by_key.get(key) if key else None
     if row is None:
-        row = figure_rows_by_key.get(str(fig_dict.get("figure_id") or ""))
+        source_location = fig_dict.get("source_location") or {}
+        caption_block_id = str(source_location.get("caption_block_id") or "")
+        row = figure_rows_by_caption_block.get(caption_block_id) if caption_block_id else None
     return row
 
 

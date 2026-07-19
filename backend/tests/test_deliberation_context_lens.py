@@ -525,6 +525,22 @@ class TestMatchingFigureRecord:
         unrelated = {"figure_id": "other-id", "figure_key": "", "source_location": {}}
         assert context_lens._matching_figure_record([unrelated], figure) is None
 
+    def test_matches_by_normalized_figure_key_despite_chapter_label_punctuation(self):
+        """バグB回帰: figure_table_semantics の figure_id は句読点保持
+        (``fig_3.3``)、document_figures.figure_key はアンダースコア正規化済み
+        (``fig_3_3``)。caption_block_id が無くても normalize_figure_join_key 経由で
+        両者が一致すること（章番号付きラベルでの表記ゆれ）。"""
+        figure = {"id": "db-id-3-3", "figure_key": "fig_3_3", "caption_block_id": None}
+        record = {"figure_id": "fig_3.3", "source_location": {}}
+        assert context_lens._matching_figure_record([record], figure) is record
+
+    def test_empty_normalized_keys_do_not_match_each_other(self):
+        """正規化後に空文字列になる組み合わせ同士も一致とみなさない（P4 の裏返し:
+        情報が無い図同士を誤接続しない）。"""
+        figure = {"id": "", "figure_key": "", "caption_block_id": ""}
+        record = {"figure_id": "", "figure_key": "", "source_location": {}}
+        assert context_lens._matching_figure_record([record], figure) is None
+
 
 class TestBuildFigureWiring:
     def test_caption_record_and_persisted_profile_feed_both_lanes(self, monkeypatch):

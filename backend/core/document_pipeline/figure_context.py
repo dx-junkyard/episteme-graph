@@ -35,6 +35,23 @@ _FULL_AFTER_ABBR_RE = re.compile(
 # nearby_text 候補プールから除外する block_type（caption 自身は別途 id/identity で除外）。
 _CAPTION_BLOCK_TYPES = ("figure_caption", "table_caption")
 
+
+def _number_pattern_fragment(num: str) -> str:
+    """図番号 num を参照メンション検索用の正規表現断片に変換する。
+
+    GROBID 由来の本文では図番号の小数点前後にスペースが混入する表記
+    （実データ例: "Fig. 3 .3"）が生じるため、``.`` は ``\\s*\\.\\s*`` に、
+    それ以外の英数字は ``re.escape(ch)`` として連結する
+    （``figure_table_semantics/crosslink.py`` の同名ヘルパーと同じ規約）。
+    """
+    parts: list[str] = []
+    for ch in num:
+        if ch == ".":
+            parts.append(r"\s*\.\s*")
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts)
+
 # 予算超過時、切り詰めてでも採用するか丸ごとスキップするかの閾値（文字数）。
 _TRUNCATE_MIN_REMAINING = 80
 
@@ -154,8 +171,12 @@ def _build_candidate_pool(
     # (2) 参照メンション: "Fig. N" / "Figure N" / "図N" にヒットしたブロック + 前後1ブロック。
     num = _derive_figure_number(figure_row.get("figure_label"), figure_row.get("figure_key"))
     if num:
+        # 番号内スペース混入（"Fig. 3 .3"）と文末ピリオド直後（"Fig. 3.3."）の両方を
+        # 許容する。否定先読み (?!\.?[0-9]) は「より長い番号への連続」だけを弾く
+        # （crosslink.py の _figure_mention_pattern と同じ規約）。
         mention_re = re.compile(
-            rf"(?:Fig\.?|Figure|図)\s*{re.escape(num)}(?![0-9.])", re.IGNORECASE
+            rf"(?:Fig\.?|Figure|図)\s*{_number_pattern_fragment(num)}(?!\.?[0-9])",
+            re.IGNORECASE,
         )
         for idx, b in enumerate(sorted_blocks):
             if _is_caption_self(b, cap_block, caption_block_id):

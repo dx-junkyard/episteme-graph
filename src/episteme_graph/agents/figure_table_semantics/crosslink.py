@@ -16,6 +16,9 @@ claim スパンになることはなく、この参照は常に空振りする�
 - 図・表番号の導出は ``backend/core/document_pipeline/figure_context.py`` の
   ``_derive_figure_number`` と同じ規約（id prefix を剥がし ``_`` → ``.`` 変換）。
   agents は backend を import できないため同等ロジックをここに複製する。
+- GROBID 由来テキストでは図・表番号の小数点前後にスペースが混入する実例
+  （例: "Fig. 3 .3"）が多数観測されるため、mention パターンは番号内部の
+  空白揺れを吸収する（``_number_pattern_fragment`` 参照）。
 - LLM 不使用・domain 固有語彙のハードコードなし。
 """
 from __future__ import annotations
@@ -47,15 +50,48 @@ def _derive_reference_number(entity_id: str, prefix: str) -> str | None:
     return rest.replace("_", ".")
 
 
+def _number_pattern_fragment(num: str) -> str:
+    """図表番号 num を検索用の正規表現断片に変換する（figure/table 共通ヘルパー）。
+
+    GROBID 由来の本文では、図・表番号の小数点前後にスペースが混入する表記
+    （実データ例: "Fig. 3 .3"）が生じるため、num を1文字ずつ走査し ``.`` は
+    ``\\s*\\.\\s*``（前後の空白を許容）に、それ以外の英数字は ``re.escape(ch)``
+    としてそのまま連結する（例: "3.3" -> ``3\\s*\\.\\s*3``）。
+    """
+    parts: list[str] = []
+    for ch in num:
+        if ch == ".":
+            parts.append(r"\s*\.\s*")
+        else:
+            parts.append(re.escape(ch))
+    return "".join(parts)
+
+
 def _figure_mention_pattern(num: str) -> re.Pattern[str]:
+    """"Fig. N" / "Figure N" / "図N" 形式の参照メンションにマッチするパターンを作る。
+
+    num 内部の小数点まわりの空白混入（GROBID 由来、実データ例 "Fig. 3 .3"）は
+    ``_number_pattern_fragment`` で吸収する。末尾の否定先読みは、番号がさらに
+    続く場合（例: "5.21" が "5.2" に前方一致してしまうケースや、
+    "3.3.5" のような下位番号への前方一致）を除外しつつ、文末の句点がそのまま
+    続くケース（"...Fig. 3 .3." のように GROBID 実データでは番号の直後に文末の
+    句点が来ることがある）は誤って弾かないよう ``(?!\\.?[0-9])``
+    （「省略可能な "." の後に数字が続く」場合のみ拒否）とする。
+    """
     return re.compile(
-        rf"(?:Figs?\.?|Figures?|図)\s*{re.escape(num)}(?![0-9.])", re.IGNORECASE
+        rf"(?:Figs?\.?|Figures?|図)\s*{_number_pattern_fragment(num)}(?!\.?[0-9])",
+        re.IGNORECASE,
     )
 
 
 def _table_mention_pattern(num: str) -> re.Pattern[str]:
+    """"Table N" / "Tab. N" / "表N" 形式の参照メンションにマッチするパターンを作る。
+
+    空白混入の吸収・否定先読みの理由は ``_figure_mention_pattern`` と同じ。
+    """
     return re.compile(
-        rf"(?:Tabs?\.?|Tables?|表)\s*{re.escape(num)}(?![0-9.])", re.IGNORECASE
+        rf"(?:Tabs?\.?|Tables?|表)\s*{_number_pattern_fragment(num)}(?!\.?[0-9])",
+        re.IGNORECASE,
     )
 
 

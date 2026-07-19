@@ -99,6 +99,21 @@ def _normalize_figure_key(caption_text: str, page: int | None, index: int) -> tu
     return f"p{page or 0}_i{index}", None
 
 
+def normalize_figure_join_key(value: str | None) -> str:
+    """図ID表記ゆれの突合用正規化（``document_figures.figure_key`` と同じ文字規則）。
+
+    ``figure_table_semantics`` の ``FigureRecord.figure_id`` は caption ラベルを
+    そのまま使う ``fig_3.3``（ピリオド保持）形式、一方 ``document_figures.figure_key``
+    は ``_normalize_figure_key`` により ``fig_3_3``（非英数字→アンダースコア）形式で、
+    章番号付きラベルでは素朴な文字列一致が恒常的に失敗する。両者を突合する側は
+    必ず本関数で両辺を正規化してから比較・索引すること（生成側の正本規則は
+    ``_normalize_figure_key`` のまま変えない）。"""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    return re.sub(r"[^0-9A-Za-z]+", "_", text).strip("_").lower()
+
+
 # ---------------------------------------------------------------------------
 # 幾何: caption ⇔ embedded image の対応付け / 領域推定
 # ---------------------------------------------------------------------------

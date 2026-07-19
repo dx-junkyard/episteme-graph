@@ -68,6 +68,7 @@ from typing import Any, Callable
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
+from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.figure_presentation import presentation_payload
 from core.library import schema as library_schema
 from core.library import store as library_store_mod
@@ -233,23 +234,28 @@ def _matching_figure_record(
     """DB 図行に対応する figure/apparatus artifact record を返す。
 
     ``document_figures.id`` は UUID だが、caption-first の
-    ``figure_table_semantics.figure_id`` は ``fig_6.8`` または caption block ID である。
-    一方、画像解析後の ``apparatus_semantics.figure_id`` は DB UUID である。したがって
-    UUID の完全一致だけに依存せず、両ステージが共有する ``caption_block_id`` /
-    ``figure_key`` も正規の対応キーとして扱う。
+    ``figure_table_semantics.figure_id`` は章番号付きラベルの句読点を保持した
+    ``fig_6.8`` 形式（または caption block ID）である。一方 ``document_figures.figure_key``
+    は非英数字をアンダースコアへ畳み込んだ ``fig_6_8`` 形式に正規化済みのため、
+    素朴な文字列一致は章番号付きラベルで恒常的に失敗する。画像解析後の
+    ``apparatus_semantics.figure_id`` は DB UUID である。したがって UUID の完全一致を
+    まず試み、続く ``figure_key`` 系の比較は両辺を ``normalize_figure_join_key``
+    （``figure_images.py`` の正本規則）で正規化してから行う。caption_block_id の
+    対応キーはそのまま（非正規化）で最後に試す。
 
-    空文字同士は一致とみなさない。caption が無い残余 embedded image 同士を誤って
-    接続するのを防ぐためである。
+    空文字同士は一致とみなさない（正規化後に空文字列になった値同士も同様）。
+    caption が無い残余 embedded image 同士を誤って接続するのを防ぐためである。
     """
     figure_id = str(figure.get("id") or "").strip()
-    figure_key = str(figure.get("figure_key") or "").strip()
+    figure_key_norm = normalize_figure_join_key(figure.get("figure_key"))
     caption_block_id = str(figure.get("caption_block_id") or "").strip()
 
     for record in records:
         if not isinstance(record, dict):
             continue
         record_id = str(record.get("figure_id") or "").strip()
-        record_key = str(record.get("figure_key") or "").strip()
+        record_id_norm = normalize_figure_join_key(record_id)
+        record_key_norm = normalize_figure_join_key(record.get("figure_key"))
         location = record.get("source_location")
         record_caption_block_id = str(
             location.get("caption_block_id") if isinstance(location, dict) else ""
@@ -257,7 +263,7 @@ def _matching_figure_record(
 
         if figure_id and record_id == figure_id:
             return record
-        if figure_key and (record_id == figure_key or record_key == figure_key):
+        if figure_key_norm and (record_id_norm == figure_key_norm or record_key_norm == figure_key_norm):
             return record
         if caption_block_id and record_caption_block_id == caption_block_id:
             return record

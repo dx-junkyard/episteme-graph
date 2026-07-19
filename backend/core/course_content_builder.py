@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from core.course_data import course_chapters, course_source_material_ids, course_title, course_topics
+from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -293,12 +294,14 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
                 evidence[str(item["evidence_id"])] = item
 
         # figure_table_semantics (FigureRecord) を claim_id → 図 の逆引き索引にする。
-        # FigureRecord.figure_id は document_figures.figure_key と同じ正規化規則
-        # （'fig_3' 等）で振られ、orchestrator の apparatus_semantics 入力構築でも
-        # この2つを直接文字列一致で対応付けている（document_pipeline/orchestrator.py
-        # の fig_record_by_key と同型の突合）。ここでは document_figures.id (UUID) の
-        # 解決を先送りし、figure_key のまま保持しておいて _topic_evidence_links 側で
-        # figures_index を使って解決する。
+        # FigureRecord.figure_id は caption ラベルをそのまま使う表記（例 'fig_3.3'、
+        # ピリオド保持）で振られる一方、document_figures.figure_key は
+        # _normalize_figure_key により非英数字→アンダースコア正規化された表記
+        # （例 'fig_3_3'）になる（バグB）。両者は素朴な文字列一致では章番号付き
+        # ラベルで一致しないため、ここでは document_figures.id (UUID) の解決を先送り
+        # し figure_key のまま保持しておいて、_topic_evidence_links 側で
+        # figures_index（_resolve_figure_ref 経由、normalize_figure_join_key で
+        # 両辺を正規化してから突合）を使って解決する。
         fig_tbl_artifact = _as_dict(artifacts.get("figure_table_semantics"))
         for fig in _as_list(fig_tbl_artifact.get("figures")):
             if not isinstance(fig, dict):
@@ -365,8 +368,12 @@ def _load_document_figures_index(session, document_ids: list[str]) -> dict[str, 
 
     - ``figure_id``（``document_figures.id`` の UUID 文字列）: component の
       ``source_scope.figure_id`` から直接解決できる経路用
-    - ``"{document_id}::{figure_key}"``: figure_table_semantics の
-      ``FigureRecord.linked_claim_ids`` 逆引き（figure_key しか分からない）経路用
+    - ``"{document_id}::{normalize_figure_join_key(figure_key)}"``: figure_table_semantics の
+      ``FigureRecord.linked_claim_ids`` 逆引き（figure_key しか分からない）経路用。
+      ``document_figures.figure_key`` は既に ``normalize_figure_join_key`` と同じ規則
+      （非英数字→アンダースコア）で生成されているはずだが、突合側（呼び出し元）が
+      ``fig_3.3`` のようなピリオド保持表記を渡してくることがあるため、ここでも
+      正規化してから索引キーを合成し、突合を冪等にする（バグB修正）。
     """
     if not document_ids:
         return {}
@@ -396,8 +403,9 @@ def _load_document_figures_index(session, document_ids: list[str]) -> dict[str, 
             "caption": caption,
         }
         index[figure_id] = item
-        if document_id and figure_key:
-            index[f"{document_id}::{figure_key}"] = item
+        normalized_key = normalize_figure_join_key(figure_key)
+        if document_id and normalized_key:
+            index[f"{document_id}::{normalized_key}"] = item
     return index
 
 
@@ -408,14 +416,20 @@ def _resolve_figure_ref(
     document_id: str | None = None,
     figure_key: str | None = None,
 ) -> dict | None:
-    """figures_index から図参照を解決する（figure_id 優先、無ければ document_id+figure_key）。"""
+    """figures_index から図参照を解決する（figure_id 優先、無ければ document_id+figure_key）。
+
+    figure_key は ``FigureRecord.figure_id``（caption ラベル生。ピリオド保持、
+    例 ``fig_3.3``）と ``document_figures.figure_key``（非英数字→アンダースコア正規化、
+    例 ``fig_3_3``）とで表記が異なるため（バグB）、``normalize_figure_join_key`` で
+    正規化してから ``_load_document_figures_index`` と同じキー規則で lookup する。
+    """
     figure_id = str(figure_id or "").strip()
     if figure_id and figure_id in figures_index:
         return figures_index[figure_id]
     document_id = str(document_id or "").strip()
-    figure_key = str(figure_key or "").strip()
-    if document_id and figure_key:
-        return figures_index.get(f"{document_id}::{figure_key}")
+    normalized_key = normalize_figure_join_key(figure_key)
+    if document_id and normalized_key:
+        return figures_index.get(f"{document_id}::{normalized_key}")
     return None
 
 
@@ -1039,6 +1053,7 @@ def _generate_single_topic_draft(
         parsed = _parse_topic_draft_json(raw)
     result = _normalize_topic_draft_response(parsed)
     _ensure_required_equations_in_material(result, topic)
+    _ensure_required_figures_in_material(result, topic)
     _ensure_check_question_details(result, topic)
     if not any([
         result["key_concepts"],
@@ -1312,6 +1327,63 @@ def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
     ordered_ids.extend(eq_id for eq_id in by_id if eq_id not in ordered_ids)
     required = [by_id[eq_id] for eq_id in ordered_ids if eq_id in by_id]
     return required[:limit]
+
+
+def _required_figure_items(topic: dict, limit: int = 5) -> list[dict]:
+    """topic の ``evidence_links``（kind='figure'）から本文へ注入すべき図一覧を導出する。
+
+    数式版 ``_required_equation_items`` と同じ発想: 既に解決済みの evidence
+    （``document_figures.id`` が判明しているもの）だけを対象にし、出現順・重複排除で
+    返す。id を発明しない（存在しない figure_id を作らない）。
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    for link in topic.get("evidence_links") or []:
+        if not isinstance(link, dict) or link.get("kind") != "figure":
+            continue
+        figure_id = str(link.get("target_id") or link.get("figure_id") or "").strip()
+        if not figure_id or figure_id in seen:
+            continue
+        seen.add(figure_id)
+        items.append({
+            "figure_id": figure_id,
+            "caption": str(link.get("caption") or link.get("summary") or ""),
+        })
+    return items[:limit]
+
+
+def _ensure_required_figures_in_material(result: dict, topic: dict) -> None:
+    """トピックに紐づく図が本文に埋め込まれていなければ末尾へ決定論的に追記する。
+
+    数式の ``_ensure_required_equations_in_material`` と同格の決定論注入
+    （hierarchical_context_explanation_design.md Phase 4 §7.2）。LLM が
+    ``![[figure:id]]`` を書き漏らすと図が学習者に一切配信されない構造的弱点
+    （学習者向け配信の条件3が本文参照に依存するため）を埋める。``spoken_script``
+    は変更しない（v1 設計: 図は読み上げない）。
+    """
+    material = result.setdefault("student_material", {})
+    if not isinstance(material, dict):
+        material = {"source_format": "eg-markdown-v1", "source_text": str(material or "")}
+        result["student_material"] = material
+    material["source_format"] = material.get("source_format") or "eg-markdown-v1"
+    source_text = str(material.get("source_text") or "").strip()
+    required = _required_figure_items(topic)
+    missing = [
+        item for item in required
+        if item.get("figure_id") and f"![[figure:{item['figure_id']}]]" not in source_text
+    ]
+    if not missing:
+        material["source_text"] = source_text
+        return
+    lines = [source_text] if source_text else []
+    lines.extend(["", "### この節で参照する図"])
+    for item in missing:
+        figure_id = str(item.get("figure_id") or "")
+        caption = str(item.get("caption") or "").strip()
+        if caption:
+            lines.append(f"- {_short_excerpt(caption, limit=120)}")
+        lines.append(f"![[figure:{figure_id}]]")
+    material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
 
 
 def _ensure_check_question_details(result: dict, topic: dict) -> None:

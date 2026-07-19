@@ -841,3 +841,217 @@ def test_course_content_draft_prompt_documents_figure_embed_syntax():
         if "![[figure:id]]" in line
     ]
     assert any("available_references" in line for line in figure_lines)
+
+
+# ---------------------------------------------------------------------------
+# バグB回帰: FigureRecord.figure_id（ピリオド保持, 例 'fig_3.3'）と
+# document_figures.figure_key（アンダースコア正規化, 例 'fig_3_3'）の表記ゆれを
+# normalize_figure_join_key で突合すること。
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_figure_ref_normalizes_period_vs_underscore_figure_key():
+    """_resolve_figure_ref は figure_key のピリオド⇄アンダースコア表記ゆれを
+    normalize_figure_join_key で吸収してから索引を引くこと（バグB本体の修正）。"""
+    from core.course_content_builder import _resolve_figure_ref
+
+    entry = {"figure_id": "fig-uuid-33", "figure_key": "fig_3_3", "document_id": "doc-1", "caption": "c"}
+    index = {"fig-uuid-33": entry, "doc-1::fig_3_3": entry}
+
+    # figure_key 側がピリオド保持表記（FigureRecord.figure_id そのまま）でも一致する。
+    assert _resolve_figure_ref(index, document_id="doc-1", figure_key="fig_3.3") is entry
+    # 索引側と同じアンダースコア表記でも従来どおり一致する。
+    assert _resolve_figure_ref(index, document_id="doc-1", figure_key="fig_3_3") is entry
+    # 正規化後も一致しなければ None のまま（id を発明しない）。
+    assert _resolve_figure_ref(index, document_id="doc-1", figure_key="fig_9.9") is None
+
+
+def test_load_document_figures_index_normalizes_figure_key_for_composite_key():
+    """document_figures.figure_key は _normalize_figure_key により既に正規化済みの
+    はずだが、索引構築側でも normalize_figure_join_key を通して冪等に保つこと。"""
+    from core.course_content_builder import _load_document_figures_index
+
+    mock_session = MagicMock()
+    mock_session.execute.return_value.fetchall.return_value = [
+        ("fig-uuid-33", "doc-1", "fig_3.3", "Figure 3.3. Calibration setup."),
+    ]
+
+    index = _load_document_figures_index(mock_session, ["doc-1"])
+
+    assert index["doc-1::fig_3_3"] is index["fig-uuid-33"]
+    # ピリオド保持のままの複合キーは登録されない（正規化後の表記だけを持つ）。
+    assert "doc-1::fig_3.3" not in index
+
+
+def test_topic_evidence_links_resolves_figure_via_claim_reverse_lookup_with_period_label():
+    """バグB回帰（本丸）: figure_table_semantics の FigureRecord.figure_id が
+    章番号付きラベル 'fig_3.3'（ピリオド保持）で、document_figures.figure_key が
+    'fig_3_3'（アンダースコア正規化）の組でも、経路2（claim 逆引き）が
+    kind='figure' の evidence link を生成すること。修正前は素朴な文字列 join
+    のため100%解決に失敗していた。"""
+    from core.course_content_builder import _collect_structured_content, _topic_evidence_links
+
+    artifacts_by_doc = {
+        "doc-1": {
+            "figure_table_semantics": {
+                "figures": [
+                    {
+                        "figure_id": "fig_3.3",
+                        "caption": "Figure 3.3. Calibration setup.",
+                        "linked_claim_ids": ["clm_1"],
+                    },
+                ],
+            },
+        },
+    }
+    bundle = _collect_structured_content(artifacts_by_doc)
+
+    components = [
+        {
+            "component_id": "comp_1",
+            "document_id": "doc-1",
+            "linked_claim_ids": ["clm_1"],
+        },
+    ]
+    claims = {"clm_1": {"claim_id": "clm_1", "normalized_text": "測定値は較正済みである"}}
+    # _load_document_figures_index が実際に生成する形の索引（figure_key は既に
+    # 正規化済み表記 'fig_3_3' で複合キーが作られる）。
+    figures_index = {
+        "fig-uuid-33": {
+            "figure_id": "fig-uuid-33",
+            "figure_key": "fig_3_3",
+            "document_id": "doc-1",
+            "caption": "Figure 3.3. Calibration setup.",
+        },
+        "doc-1::fig_3_3": {
+            "figure_id": "fig-uuid-33",
+            "figure_key": "fig_3_3",
+            "document_id": "doc-1",
+            "caption": "Figure 3.3. Calibration setup.",
+        },
+    }
+
+    links = _topic_evidence_links(
+        components, [], claims, {}, "high",
+        figures_index=figures_index,
+        figure_claim_links=bundle["figure_claim_links"],
+    )
+    figure_links = [link for link in links if link["kind"] == "figure"]
+
+    assert len(figure_links) == 1
+    assert figure_links[0]["target_id"] == "fig-uuid-33"
+    assert figure_links[0]["figure_key"] == "fig_3_3"
+
+
+# ---------------------------------------------------------------------------
+# 図の決定論注入（数式の _ensure_required_equations_in_material と同格,
+# hierarchical_context_explanation_design.md Phase 4 §7.2）
+# ---------------------------------------------------------------------------
+
+
+def test_ensure_required_figures_appends_missing_embed():
+    """evidence_links に kind='figure' があり本文に embed が無ければ末尾に追記される。"""
+    from core.course_content_builder import _ensure_required_figures_in_material
+
+    result = {
+        "student_material": {"source_format": "eg-markdown-v1", "source_text": "導入の説明文"},
+        "spoken_script": "読み上げ原稿はそのまま",
+    }
+    topic = {
+        "evidence_links": [
+            {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1. Apparatus overview."},
+        ],
+    }
+
+    _ensure_required_figures_in_material(result, topic)
+    source_text = result["student_material"]["source_text"]
+
+    assert source_text.startswith("導入の説明文")
+    assert "![[figure:fig-uuid-1]]" in source_text
+    # spoken_script は変更しない(v1 設計: 図は読み上げない)。
+    assert result["spoken_script"] == "読み上げ原稿はそのまま"
+
+
+def test_ensure_required_figures_does_not_duplicate_existing_embed():
+    """既に LLM が書いた embed は重複させない。"""
+    from core.course_content_builder import _ensure_required_figures_in_material
+
+    source_text = "導入\n![[figure:fig-uuid-1]]\nつづき"
+    result = {"student_material": {"source_format": "eg-markdown-v1", "source_text": source_text}}
+    topic = {
+        "evidence_links": [
+            {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1."},
+        ],
+    }
+
+    _ensure_required_figures_in_material(result, topic)
+
+    assert result["student_material"]["source_text"].count("![[figure:fig-uuid-1]]") == 1
+
+
+def test_ensure_required_figures_noop_without_figure_evidence():
+    """図 evidence が無ければ本文は不変(equation 等の他 kind は無視される)。"""
+    from core.course_content_builder import _ensure_required_figures_in_material
+
+    result = {"student_material": {"source_format": "eg-markdown-v1", "source_text": "本文のみ"}}
+    topic = {"evidence_links": [{"kind": "equation", "target_id": "eq_1"}]}
+
+    _ensure_required_figures_in_material(result, topic)
+
+    assert result["student_material"]["source_text"] == "本文のみ"
+
+
+def test_ensure_required_figures_deduplicates_repeated_evidence_links():
+    """同じ figure が evidence_links に複数回現れても embed は1回だけ追加する。"""
+    from core.course_content_builder import _ensure_required_figures_in_material
+
+    result = {"student_material": {"source_format": "eg-markdown-v1", "source_text": ""}}
+    topic = {
+        "evidence_links": [
+            {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1."},
+            {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1."},
+            {"kind": "figure", "target_id": "fig-uuid-2", "caption": "Figure 2."},
+        ],
+    }
+
+    _ensure_required_figures_in_material(result, topic)
+    source_text = result["student_material"]["source_text"]
+
+    assert source_text.count("![[figure:fig-uuid-1]]") == 1
+    assert source_text.count("![[figure:fig-uuid-2]]") == 1
+
+
+def test_generate_single_topic_draft_wires_figure_injection_after_equations():
+    """_generate_single_topic_draft は equations と同格で figures も注入する
+    （LLM が空応答/未embed でも、根拠にある図は決定論側で必ず本文に出る）。"""
+    from core.course_content_builder import _generate_single_topic_draft
+
+    topic = {
+        "id": "t1",
+        "title": "セクション1",
+        "evidence_links": [
+            {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1. Apparatus overview."},
+        ],
+    }
+
+    with patch(
+        "core.course_content_builder.generate_text_with_structured_output",
+        return_value={
+            "key_concepts": ["概念A"],
+            "student_material": {"source_format": "eg-markdown-v1", "source_text": "LLM本文"},
+            "spoken_script": "LLM読み上げ",
+            "cautions": [],
+            "check_questions": [],
+        },
+    ):
+        result = _generate_single_topic_draft(
+            course_context={},
+            topics=[topic],
+            topic=topic,
+            index=0,
+            model="gpt-4o",
+            reasoning_effort=None,
+        )
+
+    assert "![[figure:fig-uuid-1]]" in result["student_material"]["source_text"]
+    assert result["spoken_script"] == "LLM読み上げ"

@@ -296,6 +296,47 @@ class TestFigureElement:
         elements, _ = _build(monkeypatch, claims=[claim], figures=[fig])
         assert elements[0].element_id == "fig_orphan"
 
+    def test_chapter_labeled_figure_id_resolves_via_normalized_figure_key(self, monkeypatch):
+        """バグB回帰: figure_table_semantics の FigureRecord.figure_id は句読点保持
+        (``fig_3.3``) だが document_figures.figure_key はアンダースコア正規化済み
+        (``fig_3_3``)。caption_block_id はわざと不一致にして、figure_key の
+        normalize_figure_join_key 経由の一致だけで DB 行（UUID）に解決されることを
+        確認する（``_resolve_figure_db_row``）。"""
+        claim = _claim("claim_x", text="claim text")
+        row = {
+            "id": "figrow-uuid-3-3",
+            "figure_key": "fig_3_3",
+            "caption_block_id": "cb-real",
+            "inner_labels": [],
+        }
+        fig = _fig(figure_id="fig_3.3", linked_claim_ids=["claim_x"], caption_block_id="cb-nomatch")
+        elements, meta = _build(
+            monkeypatch,
+            claims=[claim],
+            figures=[fig],
+            figure_maps=({"fig_3_3": row}, {"cb-real": row}),
+        )
+        el = next(e for e in elements if e.element_type == "figure")
+        assert el.element_id == "figrow-uuid-3-3"
+        assert meta["skipped"] == []
+
+
+class TestBuildFigureDbMaps:
+    """``build_figure_db_maps`` 自体が figure_key を正規化して索引すること
+    （``_resolve_figure_db_row`` 側だけでなく登録側も両辺で正規化規則を揃える必要がある）。"""
+
+    def test_by_key_index_is_normalized(self, monkeypatch):
+        rows = [
+            {"id": "figrow-uuid-3-3", "figure_key": "fig_3_3", "caption_block_id": "cb-real"},
+        ]
+        monkeypatch.setattr(
+            "core.document_pipeline.figure_images.load_document_figures",
+            lambda document_id: rows,
+        )
+        by_key, by_caption_block = cei.build_figure_db_maps("doc-1")
+        assert by_key["fig_3_3"]["id"] == "figrow-uuid-3-3"
+        assert by_caption_block["cb-real"]["id"] == "figrow-uuid-3-3"
+
 
 # ---------------------------------------------------------------------------
 # priority ordering + cap (design §5.1 "選抜と上限")

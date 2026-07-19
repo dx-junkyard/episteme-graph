@@ -159,3 +159,33 @@ class TestMigrationFile:
         assert path.is_file(), f"expected migration file at {path}"
         content = path.read_text(encoding="utf-8")
         assert "ADD COLUMN IF NOT EXISTS inner_labels" in content
+
+
+class TestNormalizeFigureJoinKey:
+    """図ID表記ゆれ突合ヘルパー ``normalize_figure_join_key`` の単体テスト。
+
+    figure_table_semantics 側 figure_id（``fig_3.3`` ピリオド保持）と
+    document_figures.figure_key（``fig_3_3`` アンダースコア）の突合不一致
+    （図のコース流通が0件になる実バグ）の回帰ガード。
+    """
+
+    def test_period_style_matches_db_underscore_style(self):
+        assert fi.normalize_figure_join_key("fig_3.3") == "fig_3_3"
+
+    def test_underscore_style_is_idempotent(self):
+        assert fi.normalize_figure_join_key("fig_3_3") == "fig_3_3"
+
+    def test_case_and_surrounding_separators_are_normalized(self):
+        assert fi.normalize_figure_join_key("Fig_3.3.") == "fig_3_3"
+        assert fi.normalize_figure_join_key("_fig-3 .3_") == "fig_3_3"
+
+    def test_empty_and_none_return_empty(self):
+        assert fi.normalize_figure_join_key("") == ""
+        assert fi.normalize_figure_join_key(None) == ""
+        assert fi.normalize_figure_join_key("  ") == ""
+
+    def test_rule_matches_figure_key_generation(self):
+        # 生成側 _normalize_figure_key("Figure 3.3 ...") が作る figure_key と
+        # 突合側の正規化結果が一致すること（規則の同一性ガード）。
+        key, _label = fi._normalize_figure_key("Figure 3.3: Conceptual diagram", 10, 0)
+        assert fi.normalize_figure_join_key("fig_3.3") == key
