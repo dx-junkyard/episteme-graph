@@ -206,6 +206,13 @@ def _purge_document(session, document_id: str) -> None:
     # ライフサイクルに従う・P4）。
     session.execute(sa_text("DELETE FROM element_annotations WHERE document_id IN (:a, :b)"), id_forms)
     session.execute(sa_text("DELETE FROM deliberation_sessions WHERE document_id IN (:a, :b)"), id_forms)
+    # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳:
+    # document_id は（element_annotations 等と異なり）polymorphic TEXT ではなく
+    # documents.id に準拠する UUID 列（FK 無し）なので id_forms の a 形のみで十分。
+    session.execute(
+        sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:a AS uuid)"),
+        {"a": document_id},
+    )
     if target_ids:
         session.execute(sa_text("DELETE FROM challenges WHERE target_id = ANY(:ids)"), {"ids": target_ids})
         session.execute(sa_text("DELETE FROM epistemic_ledger WHERE target_id = ANY(:ids)"), {"ids": target_ids})

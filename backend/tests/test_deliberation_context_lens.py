@@ -998,11 +998,15 @@ class TestBuildContract:
         assert set(result["focus"].keys()) == {
             "element_type", "element_id", "document_id", "label",
             "intrinsic_summary", "contextual_role", "contextual_role_status", "provenance",
+            "generic",
         }
         assert result["upper"] == []
         assert result["lower"] == []
         assert result["notes"]
         assert result["focus"]["contextual_role_status"] == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+        # 設計書 §6 Phase 3: リンク無し・読み取り失敗（DB 非接続環境を含む）は None に
+        # 縮退する（fail-soft・既存の縮退契約を壊さない）。
+        assert result["focus"]["generic"] is None
 
     def test_nonexistent_component_is_fail_soft(self):
         ref = ElementRef(
@@ -1042,3 +1046,123 @@ class TestBuildContract:
         result = context_lens.build(ref)
         assert result is not None
         assert result["notes"]
+
+
+# ---------------------------------------------------------------------------
+# focus.generic（Phase 3: 汎用×固有の結線）
+# 正本: docs/features/hierarchical_context_explanation_design.md §6。
+# ---------------------------------------------------------------------------
+
+
+class TestGenericBlockForFocus:
+    """``_generic_block_for_focus``: confirmed な同一性リンク先の active な L層エントリ
+    のみを focus.generic として返す。candidate/rejected・非active・読み取り失敗は None
+    （fail-soft・KN-3 の「確定は人間のみ」を継承）。
+    """
+
+    def _ref(self, document_id="doc-1"):
+        return ElementRef(
+            scope="document", element_type=ELEMENT_THEORY_COMPONENT, element_id="c1",
+            document_id=document_id,
+        )
+
+    def test_no_links_returns_none(self, monkeypatch):
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *a, **k: [])
+        assert context_lens._generic_block_for_focus(self._ref()) is None
+
+    def test_candidate_link_is_ignored(self, monkeypatch):
+        monkeypatch.setattr(
+            context_lens.identity_links_mod, "list_for_instance",
+            lambda *a, **k: [{"status": "candidate", "shared_part_id": "sp-1"}],
+        )
+        assert context_lens._generic_block_for_focus(self._ref()) is None
+
+    def test_rejected_link_is_ignored(self, monkeypatch):
+        monkeypatch.setattr(
+            context_lens.identity_links_mod, "list_for_instance",
+            lambda *a, **k: [{"status": "rejected", "shared_part_id": "sp-1"}],
+        )
+        assert context_lens._generic_block_for_focus(self._ref()) is None
+
+    def test_confirmed_link_but_entry_not_active_returns_none(self, monkeypatch):
+        monkeypatch.setattr(
+            context_lens.identity_links_mod, "list_for_instance",
+            lambda *a, **k: [{"status": "confirmed", "shared_part_id": "sp-1"}],
+        )
+        monkeypatch.setattr(
+            context_lens.library_store_mod, "get_entry",
+            lambda entry_id: {
+                "status": "retired", "name": "X", "summary": "Y",
+                "standardization_status": "novel",
+            },
+        )
+        assert context_lens._generic_block_for_focus(self._ref()) is None
+
+    def test_confirmed_link_but_entry_missing_returns_none(self, monkeypatch):
+        monkeypatch.setattr(
+            context_lens.identity_links_mod, "list_for_instance",
+            lambda *a, **k: [{"status": "confirmed", "shared_part_id": "sp-1"}],
+        )
+        monkeypatch.setattr(context_lens.library_store_mod, "get_entry", lambda entry_id: None)
+        assert context_lens._generic_block_for_focus(self._ref()) is None
+
+    def test_confirmed_link_and_active_entry_returns_generic_block(self, monkeypatch):
+        monkeypatch.setattr(
+            context_lens.identity_links_mod, "list_for_instance",
+            lambda *a, **k: [{"status": "confirmed", "shared_part_id": "sp-1"}],
+        )
+        monkeypatch.setattr(
+            context_lens.library_store_mod, "get_entry",
+            lambda entry_id: {
+                "status": "active", "name": "EOM", "summary": "electro-optic modulator",
+                "standardization_status": "field_standard",
+            },
+        )
+        generic = context_lens._generic_block_for_focus(self._ref())
+        assert generic == {
+            "entry_id": "sp-1",
+            "name": "EOM",
+            "summary": "electro-optic modulator",
+            "standardization_status": "field_standard",
+        }
+
+    def test_lookup_failure_is_fail_soft(self, monkeypatch):
+        def boom(*a, **k):
+            raise RuntimeError("simulated DB outage")
+
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", boom)
+        assert context_lens._generic_block_for_focus(self._ref()) is None
+
+    def test_domain_scoped_ref_returns_none_without_lookup(self, monkeypatch):
+        calls: list[int] = []
+        monkeypatch.setattr(
+            context_lens.identity_links_mod, "list_for_instance",
+            lambda *a, **k: calls.append(1) or [],
+        )
+        ref = ElementRef(scope="domain", element_type=ELEMENT_SHARED_PART, element_id="sp-1", domain_key="dk")
+        assert context_lens._generic_block_for_focus(ref) is None
+        assert not calls
+
+    def test_build_attaches_generic_key_from_successful_builder(self, monkeypatch):
+        """build() は builder 成功時にも focus.generic を必ず付与すること。"""
+
+        def fake_builder(ref):
+            return {
+                "focus": {
+                    "element_type": ref.element_type, "element_id": ref.element_id,
+                    "document_id": ref.document_id, "label": "L", "intrinsic_summary": "",
+                    "contextual_role": None, "contextual_role_status": CONTEXT_ROLE_STATUS_UNIDENTIFIED,
+                    "provenance": [],
+                },
+                "upper": [], "lower": [], "notes": [],
+            }
+
+        monkeypatch.setitem(context_lens._BUILDERS, ELEMENT_THEORY_COMPONENT, fake_builder)
+        monkeypatch.setattr(
+            context_lens, "_generic_block_for_focus",
+            lambda ref: {"entry_id": "sp-1", "name": "N", "summary": "S", "standardization_status": "standard"},
+        )
+        result = context_lens.build(self._ref())
+        assert result["focus"]["generic"] == {
+            "entry_id": "sp-1", "name": "N", "summary": "S", "standardization_status": "standard",
+        }

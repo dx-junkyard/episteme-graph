@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable
 
 from core.llm_usage.context import bind_usage_context, set_current_feature
+from core.llm_worker.cost_gate import CostGate, today_str
 
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
@@ -48,6 +49,14 @@ from .tex_archive import build_structure_from_tex_archive
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_KEY = "_artifacts"
+
+# contextual_explanation stage (hierarchical_context_explanation_design.md §5.1):
+# a single process-lifetime CostGate for the daily LLM-call budget, matching
+# figure_reanalysis.py's "CostGate + resolve_model only" partial-adoption of the
+# core/llm_worker/ skeleton (this stage's own agent lives in
+# episteme_graph.agents.contextual_explanation and is off-limits to edit here;
+# only the orchestrator-level cost gate belongs in this module).
+_ctxexpl_cost_gate = CostGate()
 
 
 PIPELINE_STAGES = [
@@ -73,6 +82,7 @@ PIPELINE_STAGES = [
     "component_assembly",
     "component_graph",
     "narrative_annotator",
+    "contextual_explanation",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -1406,6 +1416,45 @@ def _stage_narrative_annotator(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("narrative_annotator", narrative_counts)
 
 
+def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
+    # ── Stage 12a.2: contextual_explanation (Track A, hierarchical_context_
+    # explanation_design.md §5.1). Placed after component_graph /
+    # narrative_annotator and before course_mapping: at this point thesis /
+    # derivation / symbol_registry / figure iterative_analysis have all
+    # already run (E7), and equation_semantics (stage 8, much earlier) finally
+    # gets a position-in-the-paper it never had before (gap (a)). Non-fatal:
+    # failures here never block course_mapping / persistence.
+    ctxexpl_artifact = ctx.artifact("contextual_explanation")
+    if ctx.should_use_artifact("contextual_explanation"):
+        ctxexpl_payload = dict(ctxexpl_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded contextual_explanation artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("contextual_explanation", total=1, unit="builder")
+        try:
+            ctxexpl_payload = _build_contextual_explanation(
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                component_result=ctx.component_result,
+                claim_objects=ctx.claim_objects,
+                equations=ctx.equations,
+                fig_tbl=ctx.fig_tbl,
+                apparatus_result=ctx.apparatus_result,
+                thesis=ctx.thesis,
+            )
+        except Exception as exc:
+            logger.warning(
+                "contextual_explanation stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            ctxexpl_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("contextual_explanation", ctxexpl_payload)
+    ctx.report_done("contextual_explanation", dict(ctxexpl_payload))
+    return ctx.finish_target_stage("contextual_explanation", dict(ctxexpl_payload))
+
+
 def _stage_course_mapping(ctx: PipelineContext) -> bool:
     # ── Stage 12b: course_mapping (deterministic component → topic map) ─
     course_mapping_artifact = ctx.artifact("course_mapping")
@@ -1601,6 +1650,7 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 document_id=ctx.document_id,
                 qualified_result=ctx.qualified,
                 chunk_index=ctx.chunk_index,
+                thesis_result=ctx.thesis,
             )
             claim_id_map: dict[str, str] = {}
             for saved in saved_claims:
@@ -1759,6 +1809,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef("component_assembly", _stage_component_assembly),
     PipelineStageDef("component_graph", _stage_component_graph),
     PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
+    PipelineStageDef("contextual_explanation", _stage_contextual_explanation),
     PipelineStageDef("course_mapping", _stage_course_mapping),
     PipelineStageDef("blueprint", _stage_blueprint),
     PipelineStageDef("export_validation", _stage_export_validation),
@@ -2659,6 +2710,167 @@ def _build_apparatus_semantics(
     if iterative_enabled:
         done_payload["convergence"] = convergence_counts
     return result, done_payload
+
+
+def _ctxexpl_max_elements_per_document() -> int:
+    try:
+        return max(0, int(os.getenv("CTXEXPL_MAX_ELEMENTS_PER_DOCUMENT", "40")))
+    except (TypeError, ValueError):
+        return 40
+
+
+def _ctxexpl_max_calls_per_day() -> int:
+    try:
+        return max(0, int(os.getenv("CTXEXPL_MAX_CALLS_PER_DAY", "20")))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _ctxexpl_model() -> str:
+    """``CTXEXPL_LLM_MODEL`` if set, else the fast tier (mirrors
+    ``core.llm_worker.client.resolve_model``'s fallback shape without
+    requiring a new ``core.config.Settings`` field for this stage)."""
+    explicit = os.getenv("CTXEXPL_LLM_MODEL", "").strip()
+    if explicit:
+        return explicit
+    from core.config import get_settings
+
+    return get_settings().llm_fast_model
+
+
+def _build_contextual_explanation(
+    *,
+    document_id: str,
+    cartridge_id: str | None,
+    component_result: Any,
+    claim_objects: Any,
+    equations: Any,
+    fig_tbl: Any,
+    apparatus_result: Any,
+    thesis: Any,
+) -> dict:
+    """contextual_explanation ステージ本体（design doc §5.1）。
+
+    入力構築は ``contextual_explanation_inputs.py`` に分離（Tier 3-19 方式）。
+    ここでは (1) 優先順位付き・上限適用済みの要素リストを組み立て、
+    (2) 日次コスト上限を CostGate で事前チェック（apparatus の
+    ``_apparatus_daily_remaining`` と同じ「先に残数を見て、実行後に実測を計上する」
+    流儀を、DB 集計クエリの代わりに再利用可能な CostGate プリミティブで行う。
+    figure_reanalysis.py が既にこの組み合わせ方の前例）、(3) agent を実行し、
+    (4) 結果を ``element_explanations`` に candidate として保存する。
+    """
+    from .contextual_explanation_inputs import build_contextual_explanation_inputs
+
+    max_elements = _ctxexpl_max_elements_per_document()
+    elements, meta = build_contextual_explanation_inputs(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        component_result=component_result,
+        claim_objects=claim_objects,
+        equations=equations,
+        fig_tbl=fig_tbl,
+        apparatus_result=apparatus_result,
+        thesis=thesis,
+        max_elements=max_elements,
+    )
+
+    payload: dict[str, Any] = {
+        "status": "completed",
+        "elements_considered": meta.get("considered", 0),
+        "elements_selected": meta.get("selected", 0),
+        "truncated": bool(meta.get("truncated", False)),
+        "truncated_count": meta.get("truncated_count", 0),
+        "counts_by_kind": meta.get("counts_by_kind", {}),
+        "skipped": meta.get("skipped", []),
+        "llm_calls": 0,
+        "saved_candidates": 0,
+        "agent_skipped": [],
+    }
+
+    if not elements:
+        return payload
+
+    daily_limit = _ctxexpl_max_calls_per_day()
+    daily_key = today_str()
+    remaining = _ctxexpl_cost_gate.daily_remaining(daily_limit=daily_limit, daily_key=daily_key)
+    if remaining <= 0:
+        payload["skipped_by_limit"] = True
+        logger.info(
+            "contextual_explanation: daily call limit reached (limit=%d), skipping "
+            "LLM generation for document=%s (%d element(s) considered)",
+            daily_limit, document_id, len(elements),
+        )
+        return payload
+
+    from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
+
+    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model())
+    result = agent.run(elements, cartridge_id=cartridge_id)
+    # Real usage is only known after the batched+repaired run completes (a
+    # single stage run may cost more than 1 LLM call); book it post-hoc
+    # against today's counter, exactly like figure_reanalysis.py's
+    # vision-call accounting via CostGate.count_extra_daily.
+    _ctxexpl_cost_gate.count_extra_daily(daily_key=daily_key, amount=result.llm_call_count)
+
+    payload["llm_calls"] = result.llm_call_count
+    payload["truncated"] = bool(payload["truncated"] or result.truncated)
+
+    items: list[dict] = []
+    agent_skipped: list[dict] = []
+    for element_result in result.elements:
+        if element_result.skipped_reason:
+            agent_skipped.append({
+                "element_type": element_result.element_type,
+                "element_id": element_result.element_id,
+                "reason": element_result.skipped_reason,
+            })
+            continue
+        evidence = {
+            "evidence_quote": element_result.evidence_quote,
+            "reason": element_result.reason,
+            "confidence": element_result.confidence,
+        }
+        if element_result.contextual_explanation:
+            items.append({
+                "element_type": element_result.element_type,
+                "element_id": element_result.element_id,
+                "kind": "contextual",
+                "body": element_result.contextual_explanation,
+                "evidence": dict(evidence),
+                "created_by": "pipeline",
+            })
+        if element_result.generic_explanation:
+            items.append({
+                "element_type": element_result.element_type,
+                "element_id": element_result.element_id,
+                "kind": "generic",
+                "body": element_result.generic_explanation,
+                "evidence": dict(evidence),
+                "created_by": "pipeline",
+            })
+    payload["agent_skipped"] = agent_skipped
+
+    if items:
+        from core.postgres import get_session as _pg_session
+
+        session = _pg_session()
+        try:
+            from core.element_explanations import insert_candidates
+
+            saved = insert_candidates(session, document_id, items)
+            session.commit()
+            payload["saved_candidates"] = len(saved)
+        except Exception:
+            session.rollback()
+            logger.warning(
+                "contextual_explanation: failed to persist candidate explanations "
+                "(non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+        finally:
+            session.close()
+
+    return payload
 
 
 def _build_course_mapping(

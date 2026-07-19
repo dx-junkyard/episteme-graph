@@ -10,6 +10,7 @@ import uuid
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
@@ -38,6 +39,7 @@ from services import (
     detect_and_record_misconception,
     dismiss_anchor_trace,
     dismiss_tension_trace,
+    get_accessible_course_data,
     get_anchor_digest,
     get_tension_digest,
     course_deletion_notice,
@@ -76,7 +78,10 @@ from core.course_data import (
     course_topics,
     find_course_topic,
 )
+from core.lecture import find_figure_embed_ids, resolve_figure_embeds
+from core import element_explanations
 from core.llm import generate_text, get_llm_params, transcribe_audio
+from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
@@ -108,6 +113,17 @@ from core.structure_anchor.schema import (
 from core.structure_anchor.worker import (
     check_and_count_confirm_prompt,
     maybe_schedule_anchor_mining,
+)
+# Phase 4 図のコース流通 (§7.1/§7.2/§7.3): コースソース → document_id 解決と figure_id →
+# {caption, image_url} 供給は routes/lecture.py に実装済みの private helper を再利用する
+# （_ensure_document_viewable 等、private helper のクロスルーター再利用は既存の踏襲パターン）。
+# Phase 2 §5.3: 図デスクリプタへの承認済み説明充填（_attach_figure_explanations）と
+# material_id → document_id 解決（_resolve_course_document_ids）も同じ理由で再利用する。
+from routes.lecture import (
+    _attach_figure_explanations,
+    _course_document_ids,
+    _load_course_figures_by_id,
+    _resolve_course_document_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -791,6 +807,121 @@ _ANCHOR_CONFIRM_DOUBT_OPTIONS = [
 ]
 
 
+def _document_id_for_material(material_id: str | None) -> str | None:
+    """学習チャットの ``material_id``（``documents.source_path``）を ``documents.id``
+    （UUID 文字列）へ解決する（Phase 2 §5.3: element_explanations は document_id
+    スコープのため）。既存の Phase 4 ヘルパー（``routes.lecture._resolve_course_document_ids``）
+    をそのまま再利用する（1件解決も含め同じ関数で扱う）。
+    """
+    mid = str(material_id or "").strip()
+    if not mid:
+        return None
+    ids = _resolve_course_document_ids([mid])
+    return ids[0] if ids else None
+
+
+def _element_explanation_ref_for_graph_context(context: dict) -> tuple[str, str] | None:
+    """グラフ要素ポップアップの (element_type, element_id) を、element_explanations の
+    ポリモーフィック語彙（figure/theory_component/theory_claim/equation）へマップする。
+
+    現状 ``services._derive_graph_mentions`` が生成する graph_mentions は、legacy な
+    ``documents.knowledge_graph``（PaperStructure 由来の concept/relationship）と
+    TeX 由来の citation/reference のみで、これらは theory_components/theory_claims と
+    ID 体系が異なるため対応不能（誤結合を避けるためマップしない）。唯一 ``formula`` は
+    ``chunks.formulas[].id`` が equation_semantics の ``equation_id`` と同一の ID 体系
+    （``persist_equation_previews_to_chunks`` 参照）のため ``equation`` としてマップできる。
+    ``element_type in ('component','theory_component')`` / ``('claim','theory_claim')`` は
+    現状フロント（app.js）が C層（component_explanations）の別導線へバイパスしており本関数
+    には到達しない想定だが、将来この endpoint 経由で来ても正しく解決できるよう対応させておく。
+
+    注意（2026-07-19 確認・未修正 — 現状フロント未到達のため対応は将来の課題）:
+    ``context.get("element_id")`` をそのまま ``ELEMENT_TYPE_COMPONENT``/``ELEMENT_TYPE_CLAIM``
+    として返すが、``element_explanations`` の theory_component/theory_claim 行は
+    ``_stage_contextual_explanation`` が ``persist_claims_components_graph`` より前に走る
+    ため agent 側 ID（``ComponentRecord.component_id`` / ``ClaimObjectRecord.claim_id``）で
+    保存されている（``contextual_explanation_inputs.py`` 冒頭 docstring）。この
+    ``context.get("element_id")`` が DB UUID（例えば component_graph node id 由来）だと、
+    直後の ``approved_for_elements`` は ``core.deliberation.decomposition.
+    explanations_for_element`` と同じ ID 形式の不一致で行を引けない可能性がある
+    （decomposition.py 側は :func:`core.deliberation.decomposition._agent_id_candidates_for_focus`
+    で修正済み。本関数を実際に配線する際は同じ legacy_ids 突合を適用すること）。
+    """
+    target_formula = context.get("target_formula")
+    if isinstance(target_formula, dict):
+        formula_id = str(target_formula.get("id") or "").strip()
+        if formula_id:
+            return (element_explanations.ELEMENT_TYPE_EQUATION, formula_id)
+
+    element_type = str(context.get("element_type") or "").strip()
+    element_id = str(context.get("element_id") or "").strip()
+    if element_id and element_type in ("component", element_explanations.ELEMENT_TYPE_COMPONENT):
+        return (element_explanations.ELEMENT_TYPE_COMPONENT, element_id)
+    if element_id and element_type in ("claim", element_explanations.ELEMENT_TYPE_CLAIM):
+        return (element_explanations.ELEMENT_TYPE_CLAIM, element_id)
+    return None
+
+
+def _approved_graph_element_answer(
+    context: dict,
+    element_label: str,
+    source_title: str,
+) -> str | None:
+    """承認済み element_explanations があれば、それを主文にした回答を組み立てる（Phase 2 §5.3）。
+
+    学習者ポップアップの優先順位: approved contextual → C層承認済み（別導線、
+    ``showComponentExplanations`` 等）→ ローカル生成。本関数が None を返す場合は
+    呼び出し側が既存のローカル生成へフォールバックする。
+
+    contextual を主文にし、generic があれば「一般には…」として続ける
+    （既存の出典表記 ``[出典: ...]`` の流儀は維持）。``approved_for_elements`` は
+    ``status='approved'`` の行のみ返すため candidate/dismissed/superseded は混入しない
+    （E2）。confidence 等の生値は使わず body 文字列のみを組み込む。
+    """
+    element_ref = _element_explanation_ref_for_graph_context(context)
+    if element_ref is None:
+        return None
+    document_id = _document_id_for_material(context.get("material_id"))
+    if not document_id:
+        return None
+
+    session = _pg_session()
+    try:
+        approved = element_explanations.approved_for_elements(session, document_id, [element_ref])
+    except Exception:
+        logger.warning("Failed to load approved element_explanations for graph element", exc_info=True)
+        return None
+    finally:
+        session.close()
+
+    rows = approved.get(element_ref) or []
+    contextual_body = next(
+        (
+            r.get("body") for r in rows
+            if r.get("kind") == element_explanations.KIND_CONTEXTUAL and r.get("body")
+        ),
+        None,
+    )
+    generic_body = next(
+        (
+            r.get("body") for r in rows
+            if r.get("kind") == element_explanations.KIND_GENERIC and r.get("body")
+        ),
+        None,
+    )
+    if not contextual_body and not generic_body:
+        return None
+
+    lines = [f"**{element_label}** について説明します。", ""]
+    if contextual_body:
+        lines.append(contextual_body)
+        lines.append("")
+    if generic_body:
+        lines.append(f"一般には、{generic_body}")
+        lines.append("")
+    lines.append(f"[出典: 『{source_title}』]")
+    return "\n".join(lines).strip()
+
+
 def _generate_graph_element_explanation(
     *,
     user_id: str,
@@ -832,6 +963,16 @@ def _generate_graph_element_explanation(
         event_type="clicked_explain",
         user_message=user_message,
     )
+
+    # Phase 2 §5.3: 承認済み element_explanations があれば最優先で使い、ローカル LLM 生成
+    # をスキップする（candidate/dismissed/superseded・confidence 生値は出さない、E2/E6）。
+    approved_answer = _approved_graph_element_answer(context, element_label, source_title)
+    if approved_answer is not None:
+        persist_chat_history(
+            user_id, course_id, topic_id,
+            body.history, user_message, approved_answer,
+        )
+        return LearningChatResponse(answer=approved_answer, course_update=None)
 
     graph_description = (context.get("graph_description") or "").strip()
     related_chunks = context.get("related_chunks") or []
@@ -1039,11 +1180,18 @@ def get_topic_material(
     topic_text = _topic_student_material(topic or {})
     if topic_text.strip():
         formulas = _topic_formulas_from_content_blocks(topic or {})
+        # ![[figure:id]] 埋め込みを [[FIGURE_N]] プレースホルダーに解決する
+        # （Phase 4 図のコース流通 §7.2。レクチャー表示の build_topic_slides と同じ解決を通す）。
+        figures_by_id = _load_course_figures_by_id(course_id, course_data)
+        resolved_text, figures = resolve_figure_embeds(topic_text, figures_by_id)
+        # 承認済み contextual 説明を充填する（Phase 2 §5.3。無ければ explanation は None のまま）。
+        _attach_figure_explanations(figures, figures_by_id)
         chunks = [ChunkContent(
             id=f"topic:{topic_id}",
-            text=topic_text,
+            text=resolved_text,
             chunk_index=topic_index,
             formulas=formulas,
+            figures=figures,
             chapter=None,
             section=(topic or {}).get("title"),
             material_id=None,
@@ -1068,6 +1216,120 @@ def get_topic_material(
         chunks = []
 
     return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
+
+
+# ---------------------------------------------------------------------------
+# 図画像配信（学習者向け, Phase 4 図のコース流通 §7.3）
+# ---------------------------------------------------------------------------
+#
+# admin 側の図配信エンドポイント（routes/admin.py::get_document_figure_image、
+# _require_teacher・教材横断アクセス）は変更・流用しない。学習者向けは3条件 AND の
+# fail-closed ゲート（受講ゲート / 図の document がコース sources に含まれる / 図が
+# コース content から実際に参照されている）を独自に通す。
+
+
+def _load_figure_row_by_id(figure_id: str) -> dict | None:
+    """``document_figures`` を id 単位で取得する（学習者向け画像配信の単一行ルックアップ）。
+
+    admin 側は document_id 単位で ``load_document_figures()`` を使うが、学習者向け
+    エンドポイントは URL に document_id を持たないため figure_id から直接引く。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id::text, document_id, minio_key
+                FROM document_figures
+                WHERE id = CAST(:figure_id AS uuid)
+                LIMIT 1
+            """),
+            {"figure_id": figure_id},
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "document_id": row[1], "minio_key": row[2]}
+    except Exception:
+        logger.warning("Failed to load figure row %s", figure_id, exc_info=True)
+        return None
+    finally:
+        session.close()
+
+
+def _topic_linked_figure_ids(topic) -> list[str]:
+    """並行実装中の ``CourseTopic.linked_figure_ids`` を防御的に読む。
+
+    ``course_topics()`` が返す実体は常に dict（JSONB からの読み取り）だが、
+    ``CourseTopic``（``extra="allow"``）インスタンスが渡された場合にも備えて
+    ``getattr`` にフォールバックする。
+    """
+    if isinstance(topic, dict):
+        value = topic.get("linked_figure_ids")
+    else:
+        value = getattr(topic, "linked_figure_ids", None)
+    if not value:
+        return []
+    return [str(v) for v in value if v]
+
+
+def _course_references_figure(course_data: dict, figure_id: str) -> bool:
+    """figure_id がコース content（トピック本文の ``![[figure:id]]`` embed または
+    ``linked_figure_ids``）から実際に参照されているかを判定する（§7.3 条件3）。
+    """
+    for topic in course_topics(course_data):
+        text = _topic_student_material(topic)
+        if figure_id in find_figure_embed_ids(text):
+            return True
+        if figure_id in _topic_linked_figure_ids(topic):
+            return True
+    return False
+
+
+@router.get("/courses/{course_id}/figures/{figure_id}/image")
+def get_course_figure_image(
+    course_id: str,
+    figure_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> Response:
+    """学習者向け図画像配信（Phase 4 図のコース流通 §7.3）。
+
+    3条件の AND で判定し、いずれか欠ければ 404（fail-closed）:
+    1. 受講ゲート（``get_accessible_course_data`` — 本人が当該コースを閲覧できる）
+    2. 図の document がコースの ``sources[].document_id`` / ``material_id`` に含まれる
+    3. 図がコース content（``topics[].linked_figure_ids`` または student_material 内の
+       ``![[figure:id]]`` 参照）から実際に参照されている
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        uuid.UUID(figure_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    figure_row = _load_figure_row_by_id(figure_id)
+    if not figure_row or not figure_row.get("minio_key"):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    # 条件2: 図の document がコースの sources に含まれる
+    course_document_ids = set(_course_document_ids(course_data))
+    if str(figure_row.get("document_id")) not in course_document_ids:
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    # 条件3: 図がコース content から実際に参照されている
+    if not _course_references_figure(course_data, figure_id):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    try:
+        image_bytes = get_storage_client().get_object("figure-images", figure_row["minio_key"])
+    except Exception:
+        logger.warning(
+            "get_course_figure_image: MinIO fetch failed course=%s figure=%s",
+            course_id, figure_id, exc_info=True,
+        )
+        raise HTTPException(status_code=404, detail="Figure image not found")
+
+    return Response(content=image_bytes, media_type="image/png")
 
 
 @router.post(

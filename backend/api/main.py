@@ -55,6 +55,7 @@ from sqlalchemy import text as sa_text
 from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
 from routes import figure_presentation as figure_presentation_routes
+from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
@@ -214,6 +215,7 @@ admin.router.routes[:] = [
     )
 ]
 app.include_router(figure_presentation_routes.router)
+app.include_router(element_explanations_routes.router)
 app.include_router(admin.router)
 app.include_router(error_logs.router)
 app.include_router(lecture.router)

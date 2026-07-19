@@ -681,16 +681,365 @@ class TestApplyExemplarImageGate:
         assert breakdown == {}
 
 
+@_skip_no_fastapi
+class TestApplyLinkedInstancesGate:
+    """``_apply_linked_instances_gate``: shared_part 逆方向（設計書
+    `hierarchical_context_explanation_design.md` §6）の ``fields.linked_instances``
+    を由来 document の閲覧権限でフィルタし、``linked_instances_hidden_count`` を
+    正直に返す（``_apply_exemplar_image_gate`` と同型のパターン）。
+    """
+
+    def test_filters_instances_and_sets_hidden_count(self, deliberation_routes, monkeypatch):
+        def _fake_resolve(uid, doc_id):
+            class _A:
+                can_view = doc_id == "doc-owned"
+
+            return _A()
+
+        monkeypatch.setattr(deliberation_routes, "resolve_document_access", _fake_resolve)
+        breakdown = {
+            "fields": {
+                "linked_instances": [
+                    {"element_type": "theory_claim", "element_id": "c1", "document_id": "doc-owned"},
+                    {"element_type": "theory_claim", "element_id": "c2", "document_id": "doc-other"},
+                ]
+            }
+        }
+        deliberation_routes._apply_linked_instances_gate(breakdown, {"id": "u1"})
+        instances = breakdown["fields"]["linked_instances"]
+        assert [i["element_id"] for i in instances] == ["c1"]
+        assert breakdown["fields"]["linked_instances_hidden_count"] == 1
+
+    def test_no_linked_instances_is_a_noop(self, deliberation_routes):
+        breakdown = {"fields": {"linked_instances": []}}
+        deliberation_routes._apply_linked_instances_gate(breakdown, {"id": "u1"})
+        assert "linked_instances_hidden_count" not in breakdown["fields"]
+
+    def test_missing_fields_is_a_noop(self, deliberation_routes):
+        breakdown: dict = {}
+        deliberation_routes._apply_linked_instances_gate(breakdown, {"id": "u1"})
+        assert breakdown == {}
+
+
 class TestSharedPartPermissionGateWiring:
     """route 層の呼び出し箇所（ソース検査）。P4: 隠した件数を正直に返すこと。"""
 
     def test_overview_route_applies_exemplar_image_gate_for_shared_part(self):
         assert "_apply_exemplar_image_gate(breakdown, current_user)" in _ROUTE_SRC
 
+    def test_overview_route_applies_linked_instances_gate_for_shared_part(self):
+        assert "_apply_linked_instances_gate(breakdown, current_user)" in _ROUTE_SRC
+
     def test_shared_part_identity_links_route_filters_and_reports_hidden_count(self):
         body = extract_function_source(_ROUTE_SRC, "list_identity_links_for_shared_part")
         assert "_filter_by_document_view(" in body
         assert '"hidden_count": hidden' in body
+
+
+# ---------------------------------------------------------------------------
+# 説明の二層化（Phase 2/3: `hierarchical_context_explanation_design.md` §5.2/§5.3/§6）
+# ---------------------------------------------------------------------------
+
+
+class TestOverviewExplanationsWiring:
+    """overview 応答への explanations 同梱（ソース検査）。実行時の contract 検証は
+    ``test_deliberation_api.py::TestOverviewExplanations`` を参照。"""
+
+    def test_overview_uses_explanations_for_element_for_document_scope(self):
+        assert "decomposition.explanations_for_element(ref)" in _ROUTE_SRC
+
+    def test_overview_response_includes_explanations_key(self):
+        assert '"explanations": explanations_payload' in _ROUTE_SRC
+
+    def test_shared_part_scope_is_excluded(self):
+        body = extract_function_source(_ROUTE_SRC, "get_element_overview")
+        assert "この要素型には説明がありません" in body
+
+    def test_explanation_response_does_not_leak_raw_confidence(self):
+        body = extract_function_source(_ROUTE_SRC, "_element_explanation_response")
+        assert 'evidence.pop("confidence"' in body
+        assert '"confidence_label"' in body
+
+
+class TestExplanationsForElementSelectsCandidateAndApprovedOnly:
+    """``decomposition.explanations_for_element``: dismissed/superseded を取得しない
+    こと（status を明示指定した2回の問い合わせのみ・除外であって削除ではない）。"""
+
+    def test_only_queries_candidate_and_approved_statuses(self, monkeypatch):
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        seen_statuses: list[str] = []
+
+        def _fake_list_for_document(session, document_id, *, element_type=None, status=None, kind=None):
+            seen_statuses.append(status)
+            return []
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(decomposition, "get_session", lambda: _FakeSession())
+        monkeypatch.setattr(
+            decomposition.element_explanations_store, "list_for_document", _fake_list_for_document
+        )
+        ref = ElementRef(scope="document", element_type="theory_claim", element_id="c1", document_id="doc-1")
+        result = decomposition.explanations_for_element(ref)
+        assert result == []
+        assert set(seen_statuses) == {
+            decomposition.element_explanations_store.STATUS_CANDIDATE,
+            decomposition.element_explanations_store.STATUS_APPROVED,
+        }
+
+    def test_domain_scoped_ref_returns_empty_without_query(self, monkeypatch):
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        def boom(*a, **k):
+            raise AssertionError("must not query for domain-scoped ref")
+
+        monkeypatch.setattr(decomposition, "get_session", boom)
+        ref = ElementRef(scope="domain", element_type="shared_part", element_id="sp-1", domain_key="dk")
+        assert decomposition.explanations_for_element(ref) == []
+
+
+class TestExplanationsForElementResolvesAgentIdLegacyKeys:
+    """統合ギャップの回帰テスト（2026-07-19 確認）:
+
+    ``_stage_contextual_explanation``（document_pipeline/orchestrator.py）は
+    ``persist_claims_components_graph`` より前に走るため、element_explanations の
+    theory_component/theory_claim 行は agent 側 ID
+    （``ComponentRecord.component_id`` / ``ClaimObjectRecord.claim_id`` 形式）で
+    保存される一方、W層の ``ElementRef.element_id`` は常に DB UUID
+    （``refs.py`` の uuid 検証）。修正前は完全一致のみだったため、この2つの ID 空間の
+    ズレにより説明が overview/dialogue grounding に一切表示されないギャップがあった。
+    ``_agent_id_candidates_for_focus`` が ``source_scope.legacy_ids`` を介して橋渡し
+    することを確認する（write 側の保存形式は変更しない）。
+    """
+
+    class _FakeSourceScopeSession:
+        """``SELECT source_scope FROM ... WHERE id = :id`` の1行だけを模倣する。"""
+
+        def __init__(self, source_scope):
+            self._source_scope = source_scope
+
+        def close(self):
+            pass
+
+        def execute(self, _sql, _params):
+            scope = self._source_scope
+
+            class _Result:
+                def __init__(self, value):
+                    self._value = value
+
+                def fetchone(self):
+                    return None if self._value is None else (self._value,)
+
+            return _Result(scope)
+
+    @staticmethod
+    def _candidate_row(element_type: str, element_id: str, body: str = "説明本文") -> dict:
+        return {
+            "id": "expl-1",
+            "document_id": "doc-1",
+            "element_type": element_type,
+            "element_id": element_id,
+            "kind": "contextual",
+            "body": body,
+            "evidence": {},
+            "status": "candidate",
+            "created_by": "pipeline",
+            "created_at": "2026-07-19T00:00:00",
+        }
+
+    def _patch_list_for_document(self, monkeypatch, decomposition, candidate_rows):
+        def _fake(session, document_id, *, element_type=None, status=None, kind=None):
+            if status == decomposition.element_explanations_store.STATUS_CANDIDATE:
+                return list(candidate_rows)
+            return []
+
+        monkeypatch.setattr(decomposition.element_explanations_store, "list_for_document", _fake)
+
+    def test_component_explanation_saved_with_agent_id_is_found_from_db_uuid_ref(self, monkeypatch):
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        component_db_id = "c0000000-0000-0000-0000-000000000001"
+        agent_component_id = "comp_1"  # ComponentRecord.component_id 形式（persistence.py の
+        # persist_components が source_scope.legacy_ids = [component.component_id] で保存）
+
+        self._patch_list_for_document(
+            monkeypatch, decomposition,
+            [self._candidate_row("theory_component", agent_component_id)],
+        )
+        monkeypatch.setattr(
+            decomposition, "get_session",
+            lambda: self._FakeSourceScopeSession(
+                {"document_id": "doc-1", "legacy_ids": [agent_component_id]}
+            ),
+        )
+        ref = ElementRef(
+            scope="document", element_type="theory_component",
+            element_id=component_db_id, document_id="doc-1",
+        )
+        result = decomposition.explanations_for_element(ref)
+        assert [r["element_id"] for r in result] == [agent_component_id]
+
+    def test_claim_explanation_saved_with_agent_id_is_found_from_db_uuid_ref(self, monkeypatch):
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        claim_db_id = "c0000000-0000-0000-0000-000000000002"
+        # persistence.py の persist_qualified_claims: legacy_ids =
+        # sorted(_claim_legacy_keys({"span_id": span_id})) = {span_id, f"claim_{safe(span_id)}"}.
+        # ClaimObjectBuilder._make_claim_id が採番する agent 側 claim_id と同じ書式。
+        span_id = "span-007"
+        agent_claim_id = "claim_span_007"
+
+        self._patch_list_for_document(
+            monkeypatch, decomposition,
+            [self._candidate_row("theory_claim", agent_claim_id)],
+        )
+        monkeypatch.setattr(
+            decomposition, "get_session",
+            lambda: self._FakeSourceScopeSession(
+                {"document_id": "doc-1", "legacy_ids": [span_id, agent_claim_id]}
+            ),
+        )
+        ref = ElementRef(
+            scope="document", element_type="theory_claim",
+            element_id=claim_db_id, document_id="doc-1",
+        )
+        result = decomposition.explanations_for_element(ref)
+        assert [r["element_id"] for r in result] == [agent_claim_id]
+
+    def test_exact_match_still_works_when_element_id_already_matches(self, monkeypatch):
+        """将来 write 側が DB UUID を直接保存するようになった場合の後方互換
+        （完全一致は legacy_ids 展開が無くても常に候補集合に含まれる）。"""
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        component_db_id = "c0000000-0000-0000-0000-000000000003"
+        self._patch_list_for_document(
+            monkeypatch, decomposition,
+            [self._candidate_row("theory_component", component_db_id)],
+        )
+        monkeypatch.setattr(
+            decomposition, "get_session",
+            lambda: self._FakeSourceScopeSession({"document_id": "doc-1", "legacy_ids": []}),
+        )
+        ref = ElementRef(
+            scope="document", element_type="theory_component",
+            element_id=component_db_id, document_id="doc-1",
+        )
+        result = decomposition.explanations_for_element(ref)
+        assert [r["element_id"] for r in result] == [component_db_id]
+
+    def test_fails_soft_to_exact_match_when_db_row_not_found(self, monkeypatch):
+        """DB 行が存在しない（削除済み等）場合は legacy_ids 展開ができず、完全一致のみに
+        フォールバックする（ここでは一致せず空リスト＝過剰マッチしないことを確認）。"""
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        component_db_id = "c0000000-0000-0000-0000-000000000004"
+        agent_component_id = "comp_orphaned"
+        self._patch_list_for_document(
+            monkeypatch, decomposition,
+            [self._candidate_row("theory_component", agent_component_id)],
+        )
+        monkeypatch.setattr(
+            decomposition, "get_session",
+            lambda: self._FakeSourceScopeSession(None),
+        )
+        ref = ElementRef(
+            scope="document", element_type="theory_component",
+            element_id=component_db_id, document_id="doc-1",
+        )
+        assert decomposition.explanations_for_element(ref) == []
+
+    def test_fails_soft_when_session_has_no_execute(self, monkeypatch):
+        """既存の (close() のみの) フェイクセッションのような execute 非対応セッションでも
+        例外を漏らさず完全一致のみへ縮退すること（既存テストとの後方互換の裏付け）。"""
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        class _CloseOnlySession:
+            def close(self):
+                pass
+
+        component_db_id = "c0000000-0000-0000-0000-000000000005"
+        self._patch_list_for_document(
+            monkeypatch, decomposition,
+            [self._candidate_row("theory_component", component_db_id)],
+        )
+        monkeypatch.setattr(decomposition, "get_session", lambda: _CloseOnlySession())
+        ref = ElementRef(
+            scope="document", element_type="theory_component",
+            element_id=component_db_id, document_id="doc-1",
+        )
+        result = decomposition.explanations_for_element(ref)
+        assert [r["element_id"] for r in result] == [component_db_id]
+
+    def test_figure_ref_does_not_query_source_scope_table(self, monkeypatch):
+        """figure/equation は既に正準 ID のため legacy_ids 展開のクエリを発行しない。"""
+        from core.deliberation import decomposition
+        from core.deliberation.schema import ElementRef
+
+        figure_db_id = "c0000000-0000-0000-0000-000000000006"
+
+        def boom(*_a, **_k):
+            raise AssertionError("must not query source_scope for figure ref")
+
+        class _NoExecuteSession:
+            def close(self):
+                pass
+
+            def execute(self, *a, **k):
+                boom()
+
+        self._patch_list_for_document(monkeypatch, decomposition, [])
+        monkeypatch.setattr(decomposition, "get_session", lambda: _NoExecuteSession())
+        ref = ElementRef(
+            scope="document", element_type="figure",
+            element_id=figure_db_id, document_id="doc-1",
+        )
+        assert decomposition.explanations_for_element(ref) == []
+
+
+class TestGenericBlockIsReadOnly:
+    """Phase 3（§6）: context_lens.py の focus.generic 組み立てが読み取り専用であること
+    （L層・同一性リンクへの書き込み関数を一切呼ばない）。"""
+
+    def test_context_lens_never_calls_write_functions(self):
+        assert_source_forbids(
+            _CONTEXT_LENS_SRC,
+            [
+                "identity_links_mod.create_candidate",
+                "identity_links_mod.decide(",
+                "library_store_mod.create_entry",
+                "library_store_mod.update_entry",
+                "library_store_mod.freeze_entry",
+                "library_store_mod.retire_entry",
+                "library_store_mod.restore_entry",
+            ],
+        )
+
+
+class TestIdentityLinkResponseDeUuid:
+    """脱UUID（§6）: `_identity_link_response` がエントリ name/summary を同梱すること。"""
+
+    def test_response_enrichment_reads_library_entry(self):
+        body = extract_function_source(_ROUTE_SRC, "_identity_link_response")
+        assert "library_store.get_entry(shared_part_id)" in body
+        assert '"shared_part_name"' in body
+        assert '"shared_part_summary"' in body
+
+    def test_enrichment_failure_is_fail_soft(self):
+        body = extract_function_source(_ROUTE_SRC, "_identity_link_response")
+        try_idx = body.index("try:")
+        except_idx = body.index("except Exception", try_idx)
+        assert try_idx < except_idx
 
 
 # ---------------------------------------------------------------------------
@@ -1073,3 +1422,137 @@ class TestSessionOwnerOnlyAccessBehavior:
         session = {"id": "s1", "created_by": "owner-1"}
         result = deliberation_routes._ensure_session_owner(session, {"id": "owner-1"})
         assert result is session
+
+
+# ---------------------------------------------------------------------------
+# shared_part 逆方向（Phase 3: `hierarchical_context_explanation_design.md` §6）:
+# confirmed な同一性リンクを持つインスタンス一覧 + 各インスタンスの承認済み
+# contextual 説明。
+# ---------------------------------------------------------------------------
+
+
+class TestConfirmedLinkedInstances:
+    """``decomposition._confirmed_linked_instances``: confirmed のみを対象にし、
+    各インスタンスの approved contextual 説明を添える（KN-2: インスタンス側の表記は
+    書き換えない・読み出すだけ）。
+    """
+
+    def test_only_confirmed_links_are_included(self, monkeypatch):
+        from core.deliberation import decomposition
+
+        monkeypatch.setattr(
+            decomposition.identity_links_mod, "list_for_shared_part",
+            lambda shared_part_id: [
+                {
+                    "status": "candidate", "instance_element_type": "theory_claim",
+                    "instance_element_id": "c1", "instance_document_id": "doc-1",
+                    "local_expression": {},
+                },
+                {
+                    "status": "confirmed", "instance_element_type": "theory_claim",
+                    "instance_element_id": "c2", "instance_document_id": "doc-2",
+                    "local_expression": {"label": "X"},
+                },
+                {
+                    "status": "rejected", "instance_element_type": "theory_claim",
+                    "instance_element_id": "c3", "instance_document_id": "doc-3",
+                    "local_expression": {},
+                },
+            ],
+        )
+        monkeypatch.setattr(
+            decomposition, "_approved_contextual_explanation_for_instance", lambda *a, **k: None
+        )
+        result = decomposition._confirmed_linked_instances("sp-1")
+        assert [r["element_id"] for r in result] == ["c2"]
+        assert result[0]["document_id"] == "doc-2"
+        assert result[0]["local_expression"] == {"label": "X"}
+
+    def test_attaches_approved_contextual_explanation_when_present(self, monkeypatch):
+        from core.deliberation import decomposition
+
+        monkeypatch.setattr(
+            decomposition.identity_links_mod, "list_for_shared_part",
+            lambda shared_part_id: [
+                {
+                    "status": "confirmed", "instance_element_type": "theory_claim",
+                    "instance_element_id": "c2", "instance_document_id": "doc-2",
+                    "local_expression": {},
+                },
+            ],
+        )
+        monkeypatch.setattr(
+            decomposition, "_approved_contextual_explanation_for_instance",
+            lambda element_type, element_id, document_id: "この論文では§3の主張を支える。",
+        )
+        result = decomposition._confirmed_linked_instances("sp-1")
+        assert result[0]["approved_contextual_explanation"] == "この論文では§3の主張を支える。"
+
+    def test_empty_links_returns_empty(self, monkeypatch):
+        from core.deliberation import decomposition
+
+        monkeypatch.setattr(
+            decomposition.identity_links_mod, "list_for_shared_part", lambda shared_part_id: []
+        )
+        assert decomposition._confirmed_linked_instances("sp-1") == []
+
+
+class TestApprovedContextualExplanationForInstance:
+    """``decomposition._approved_contextual_explanation_for_instance``。"""
+
+    def test_no_document_id_returns_none_without_query(self, monkeypatch):
+        from core.deliberation import decomposition
+
+        def boom():
+            raise AssertionError("must not query without a document_id")
+
+        monkeypatch.setattr(decomposition, "get_session", boom)
+        assert decomposition._approved_contextual_explanation_for_instance("theory_claim", "c1", "") is None
+
+    def test_returns_first_matching_approved_contextual_body(self, monkeypatch):
+        from core.deliberation import decomposition
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(decomposition, "get_session", lambda: _FakeSession())
+        monkeypatch.setattr(
+            decomposition.element_explanations_store, "list_for_document",
+            lambda session, document_id, *, element_type=None, status=None, kind=None: [
+                {"element_id": "other", "body": "not this one"},
+                {"element_id": "c1", "body": "  approved text  "},
+            ],
+        )
+        result = decomposition._approved_contextual_explanation_for_instance("theory_claim", "c1", "doc-1")
+        assert result == "approved text"
+
+    def test_no_match_returns_none(self, monkeypatch):
+        from core.deliberation import decomposition
+
+        class _FakeSession:
+            def close(self):
+                pass
+
+        monkeypatch.setattr(decomposition, "get_session", lambda: _FakeSession())
+        monkeypatch.setattr(
+            decomposition.element_explanations_store, "list_for_document", lambda *a, **k: []
+        )
+        assert decomposition._approved_contextual_explanation_for_instance("theory_claim", "c1", "doc-1") is None
+
+
+class TestDecomposeSharedPartLinkedInstancesFailSoft:
+    """``_decompose_shared_part`` の linked_instances 取得は shared_part 本体の内訳を
+    巻き込まない（fail-soft・apparatus_semantics artifact 読み出しと同じ作法）。"""
+
+    def test_source_wraps_confirmed_linked_instances_in_try_except(self):
+        import inspect
+
+        from core.deliberation import decomposition
+
+        src = inspect.getsource(decomposition._decompose_shared_part)
+        try_idx = src.index("linked_instances: list[dict[str, Any]] = []")
+        call_idx = src.index("_confirmed_linked_instances(ref.element_id)", try_idx)
+        except_idx = src.index("except Exception", call_idx)
+        assert try_idx < call_idx < except_idx
+        assert '"linked_instances": linked_instances' in src

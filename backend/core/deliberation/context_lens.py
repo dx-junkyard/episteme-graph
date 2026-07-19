@@ -25,11 +25,21 @@
         "label": str, "intrinsic_summary": str, "contextual_role": str | None,
         "contextual_role_status": "source_backed"|"confirmed"|"candidate"|"unidentified",
         "provenance": [str, ...],
+        "generic": GENERIC | None,  # 設計書 §6 Phase 3。汎用×固有の結線
       },
       "upper": [ITEM, ...],
       "lower": [ITEM, ...],
       "notes": [str, ...],
     }
+
+    GENERIC = {
+      "entry_id": str, "name": str, "summary": str,
+      "standardization_status": "standard"|"field_standard"|"emerging_common"|"novel"|"unknown",
+    }
+    # GENERIC は confirmed な同一性リンク先の L層エントリ（active のみ）。リンク無し・
+    # エントリが active でない・読み取り失敗は None（fail-soft。文脈依存情報
+    # （contextual_role 等）とは別欄で持ち、「一般に何か」と「この論文の役割」を
+    # 混ぜない — 設計書 §2.1）。
 
     ITEM = {
       "element_type": "theory_claim"|"theory_component"|"equation"|"figure"|
@@ -59,6 +69,9 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core.figure_presentation import presentation_payload
+from core.library import schema as library_schema
+from core.library import store as library_store_mod
+from core.deliberation import identity_links as identity_links_mod
 from core.deliberation import refs as refs_mod
 from core.deliberation import store as store_mod
 from core.deliberation.schema import (
@@ -74,6 +87,8 @@ from core.deliberation.schema import (
     ELEMENT_SHARED_PART,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
+    IDENTITY_LINK_STATUS_CONFIRMED,
+    SCOPE_DOCUMENT,
     ElementRef,
 )
 
@@ -803,6 +818,64 @@ def _annotations_for(element_type: str, element_id: str, document_id: str | None
 
 
 # ---------------------------------------------------------------------------
+# focus.generic（設計書 §6 Phase 3: 汎用×固有の結線）
+# ---------------------------------------------------------------------------
+#
+# confirmed な同一性リンク先の L層エントリ（active のみ）を focus 直下に「汎用説明」
+# として添える。文脈依存情報（upper/lower・contextual_role）とは別欄で持つことで、
+# 「一般に何か」と「この論文で何の役割か」を混ぜない（設計書 §2.1 の不変条項を継承）。
+
+
+def _confirmed_identity_link_for_instance(ref: ElementRef) -> dict[str, Any] | None:
+    """当該インスタンスに付いた confirmed な同一性リンクを1件返す（無ければ None）。
+
+    候補（candidate）・却下（rejected）は対象にしない — 人間が確定した同一視のみを
+    事実として扱う。複数 confirmed があれば作成順で最初の1件を使う。
+    """
+    if not ref.document_id:
+        return None
+    links = identity_links_mod.list_for_instance(ref.element_type, ref.element_id, ref.document_id)
+    for link in links:
+        if str(link.get("status") or "") == IDENTITY_LINK_STATUS_CONFIRMED:
+            return link
+    return None
+
+
+def _generic_block_for_focus(ref: ElementRef) -> dict[str, Any] | None:
+    """focus.generic を組み立てる（confirmed identity link → active な L層エントリ）。
+
+    リンク無し・エントリが active でない・読み取り失敗は ``None``（fail-soft。
+    既存の縮退契約 — focus 自体は必ず返る — を壊さない）。domain-scoped 要素
+    （shared_part）は対象外（``build()`` 自体がその型を扱わない）。
+    """
+    if ref.scope != SCOPE_DOCUMENT:
+        return None
+    try:
+        link = _confirmed_identity_link_for_instance(ref)
+        if not link:
+            return None
+        shared_part_id = str(link.get("shared_part_id") or "").strip()
+        if not shared_part_id:
+            return None
+        entry = library_store_mod.get_entry(shared_part_id)
+        if not entry or str(entry.get("status") or "") != library_schema.STATUS_ACTIVE:
+            return None
+        return {
+            "entry_id": shared_part_id,
+            "name": str(entry.get("name") or ""),
+            "summary": str(entry.get("summary") or ""),
+            "standardization_status": str(
+                entry.get("standardization_status") or library_schema.STANDARDIZATION_STATUS_UNKNOWN
+            ),
+        }
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "context_lens generic block failed for %s:%s", ref.element_type, ref.element_id, exc_info=True
+        )
+        return None
+
+
+# ---------------------------------------------------------------------------
 # 要素型別プロジェクタ
 # ---------------------------------------------------------------------------
 
@@ -1394,6 +1467,9 @@ def build(ref: ElementRef) -> dict[str, Any] | None:
     ``shared_part``（scope='domain'）は本設計の対象外（論文への出現を前提とする
     document-scoped 4要素型のみ投影を持つ）のため ``None`` を返す。それ以外は
     どんな例外・欠損があっても必ず契約どおりの dict を返す（fail-soft・W6）。
+
+    ``focus.generic``（設計書 §6 Phase 3）: confirmed な同一性リンク先の L層エントリ
+    （active のみ）を汎用説明として添える。リンク無し・読み取り失敗は ``None``。
     """
     if ref.element_type == ELEMENT_SHARED_PART:
         return None
@@ -1407,4 +1483,6 @@ def build(ref: ElementRef) -> dict[str, Any] | None:
             "context_lens build failed for %s:%s", ref.element_type, ref.element_id, exc_info=True
         )
         result = None
-    return result if result is not None else _degenerate_result(ref)
+    result = result if result is not None else _degenerate_result(ref)
+    result["focus"]["generic"] = _generic_block_for_focus(ref)
+    return result

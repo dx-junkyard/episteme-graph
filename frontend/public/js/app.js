@@ -217,6 +217,22 @@
     return res;
   }
 
+  // apiFetch と同じ 401 処理だが Content-Type を強制しない生 fetch（画像 blob 取得用）。
+  // 図画像 endpoint は Authorization ヘッダ必須のため <img src> を直接指定できず、
+  // fetch + blob + createObjectURL で取得する（admin.js の apiFetchRaw と同じ方式）。
+  async function apiFetchRaw(path, opts = {}) {
+    const headers = { ...(opts.headers || {}) };
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
+    const res = await fetch(API + path, { ...opts, headers });
+    if (res.status === 401) {
+      state.token = null;
+      localStorage.removeItem("eg_token");
+      renderAuth();
+      throw new Error("Unauthorized");
+    }
+    return res;
+  }
+
   // ── Auth ───────────────────────────────────────────────────────────
   function renderAuth() {
     let overlay = document.getElementById("auth-overlay");
@@ -872,6 +888,7 @@
       html += '</div>';
     });
     body.innerHTML = html;
+    hydrateMaterialFigures(body);
 
     // 現在地ラベル（本筋）
     var topic = getCurrentTopic();
@@ -1157,10 +1174,11 @@
         var data = await res.json();
         var inner = "";
         if (data.section) inner += '<div class="src-popup-section">' + escHtml(data.section) + '</div>';
-        // renderMaterialChunk は [[FORMULA_N]] を KaTeX 描画した自己完結 HTML を返す。
+        // renderMaterialChunk は [[FORMULA_N]] / [[FIGURE_N]] を解決した自己完結 HTML を返す。
         inner += '<div class="material-chunk-text">' +
-          renderMaterialChunk({ text: data.text, formulas: data.formulas }) + '</div>';
+          renderMaterialChunk({ text: data.text, formulas: data.formulas, figures: data.figures }) + '</div>';
         body.innerHTML = inner;
+        hydrateMaterialFigures(body);
       } else {
         body.textContent = "出典を取得できませんでした。";
       }
@@ -3244,7 +3262,8 @@
         '<div class="voice-material-title">📖 いま話している題材: ' +
         escHtml(data.source_title || top.source_title || "教材") +
         (data.section ? " · " + escHtml(data.section) : "") + "</div>" +
-        renderMaterialChunk({ text: data.text, formulas: data.formulas });
+        renderMaterialChunk({ text: data.text, formulas: data.formulas, figures: data.figures });
+      hydrateMaterialFigures(el);
       el.classList.add("on");
     } catch (_) { /* best-effort */ }
   }
@@ -4135,6 +4154,7 @@
         display_text: seg.text || seg.display_text || "",
         spoken_text: seg.spoken_text || "",
         formulas: seg.formulas || [],
+        figures: seg.figures || [],
         has_audio: seg.has_audio,
         duration_ms: seg.duration_ms,
       }];
@@ -4146,6 +4166,7 @@
           display_text: slide.display_text || "",
           spoken_text: slide.spoken_text || "",
           formulas: slide.formulas || seg.formulas || [],
+          figures: slide.figures || seg.figures || [],
           has_audio: !!slide.has_audio,
           duration_ms: slide.duration_ms || 0,
           language: seg.language || "ja",
@@ -4208,8 +4229,9 @@
 
   // ── レクチャースライドステージ（表示の一本化）───────────────────
   // 現在デッキスライドの display_text を、通常閲覧ビューと同じ renderMaterialChunk
-  // （Markdown + KaTeX + [[FORMULA_N]] 解決）で描画する。レンダラは複製しない
-  // （スライドを同形の疑似チャンク {text, formulas} に包んで渡すだけの薄い適配）。
+  // （Markdown + KaTeX + [[FORMULA_N]] / [[FIGURE_N]] 解決）で描画する。レンダラは
+  // 複製しない（スライドを同形の疑似チャンク {text, formulas, figures} に包んで
+  // 渡すだけの薄い適配）。
   function renderLectureStage() {
     var inner = document.getElementById("lecture-slide-inner");
     var badge = document.getElementById("lecture-slide-noaudio");
@@ -4224,10 +4246,11 @@
     }
 
     var slide = lectureState.deck[lectureState.currentDeckIndex];
-    var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [] };
+    var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [], figures: slide.figures || [] };
     inner.style.fontSize = "";
     inner.style.transform = "";
     inner.innerHTML = '<div class="lecture-slide-text">' + renderMaterialChunk(pseudoChunk) + '</div>';
+    hydrateMaterialFigures(inner);
 
     if (badge) badge.hidden = !!slide.has_audio;
 
@@ -4367,8 +4390,22 @@
       formulaById["[[" + "FORMULA_" + idx + "]]"] = formula;
     });
 
+    // [[FIGURE_N]] プレースホルダ（セグメント内 1 始まり、chunk.figures 由来。
+    // [[FORMULA_N]] と同方式）。figures が無い/空の payload では何も置換しない
+    // （後方互換・防御的スキップ。設計書 Phase4 §7.2）。
+    var figures = chunk.figures || [];
+    var figureById = {};
+    figures.forEach(function (figure, idx) {
+      if (!figure) return;
+      var placeholderId = "FIGURE_" + (idx + 1);
+      figureById[placeholderId] = figure;
+      figureById["[[" + placeholderId + "]]"] = figure;
+      if (figure.figure_id) figureById[String(figure.figure_id)] = figure;
+    });
+
     var embedBlocks = [];
     var mathBlocks = [];
+    var figureBlocks = [];
     function preserveMath(expr, display) {
       var idx = mathBlocks.length;
       mathBlocks.push({ expr: expr, display: display });
@@ -4378,6 +4415,11 @@
       var idx = embedBlocks.length;
       embedBlocks.push({ kind: kind, id: id, inline: inline });
       return "\x00MATERIAL_EMBED_" + idx + "\x00";
+    }
+    function preserveFigure(figure) {
+      var idx = figureBlocks.length;
+      figureBlocks.push(figure);
+      return "\x00MATERIAL_FIGURE_" + idx + "\x00";
     }
 
     var preserved = normalizeMaterialLineBreaks(rawText);
@@ -4391,8 +4433,10 @@
     });
     preserved = preserved.replace(/\[\[([^\[\]:]+)\]\]/g, function (m, id) {
       var formula = formulaById[m] || formulaById[id] || formulaById[normalizeMaterialEvidenceId(id)];
-      if (!formula) return m;
-      return preserveMath(formula.latex || formula.summary || id, true);
+      if (formula) return preserveMath(formula.latex || formula.summary || id, true);
+      var figure = figureById[m] || figureById[id];
+      if (figure) return preserveFigure(figure);
+      return m;
     });
     preserved = preserved.replace(/\\\[([\s\S]+?)\\\]/g, function (_m, expr) {
       return preserveMath(expr, true);
@@ -4448,7 +4492,86 @@
       '</span>';
     });
 
+    html = html.replace(/\x00MATERIAL_FIGURE_(\d+)\x00/g, function (_m, idx) {
+      var figure = figureBlocks[parseInt(idx, 10)];
+      return figure ? renderMaterialFigureCard(figure) : "";
+    });
+
     return html || "";
+  }
+
+  // [[FIGURE_N]] の解決先マークアップ。画像本体は同期関数の中で fetch できないため、
+  // data-figure-fetch-url に URL を仕込んだ <img> を描き、hydrateMaterialFigures()
+  // が DOM 挿入後に Authorization ヘッダ付きで取得する（学習者向け画像 endpoint も
+  // 認証必須のため <img src> を直接指定できない。admin.js の図サムネイル読込と同方式）。
+  function renderMaterialFigureCard(figure) {
+    var caption = figure.caption || "";
+    var explanation = figure.explanation || "";
+    var imgUrl = figure.image_url || "";
+    if (!imgUrl) {
+      return '<figure class="material-figure">' +
+        '<span class="material-figure-placeholder material-figure-missing">この図の画像を取得できませんでした。</span>' +
+        (caption ? '<figcaption class="material-figure-caption">' + escHtml(caption) + '</figcaption>' : "") +
+      '</figure>';
+    }
+    return '<figure class="material-figure">' +
+      '<span class="material-figure-frame">' +
+        '<img class="material-figure-img" data-figure-fetch-url="' + escHtml(imgUrl) + '" style="display:none" alt="' + escHtml(caption || "図") + '">' +
+        '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
+      '</span>' +
+      (caption ? '<figcaption class="material-figure-caption">' + escHtml(caption) + '</figcaption>' : "") +
+      (explanation ? '<div class="material-figure-explanation">' + escHtml(explanation) + '</div>' : "") +
+    '</figure>';
+  }
+
+  // renderMaterialChunk が返した HTML を DOM へ挿入した後に呼ぶ。container 内の
+  // 未取得 <img data-figure-fetch-url> を Authorization ヘッダ付きで取得して差し替える。
+  // container は教材区画本体 / 出典ポップアップ / ボイスパネル / レクチャースライドの
+  // いずれか（呼び出し側で再構築されるたびに呼ばれるため、前回分の blob URL は
+  // container 自身に積んで都度 revoke する）。figures が無い payload では
+  // querySelectorAll が空になり何もしない（防御的スキップ）。
+  function hydrateMaterialFigures(container) {
+    if (!container || !container.querySelectorAll) return;
+    if (container._materialFigureObjectUrls) {
+      container._materialFigureObjectUrls.forEach(function (u) {
+        try { URL.revokeObjectURL(u); } catch (e) { /* noop */ }
+      });
+    }
+    container._materialFigureObjectUrls = [];
+    container.querySelectorAll("img.material-figure-img[data-figure-fetch-url]").forEach(function (img) {
+      var url = img.getAttribute("data-figure-fetch-url");
+      img.removeAttribute("data-figure-fetch-url");
+      if (!url) { markMaterialFigureFailed(img); return; }
+      if (url.indexOf("/api/") === 0) url = url.substring(4);
+      apiFetchRaw(url)
+        .then(function (res) {
+          if (!res.ok) throw new Error("figure image fetch failed");
+          return res.blob();
+        })
+        .then(function (blob) {
+          var objectUrl = URL.createObjectURL(blob);
+          container._materialFigureObjectUrls.push(objectUrl);
+          img.src = objectUrl;
+          img.style.display = "";
+          var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+          if (placeholder) placeholder.remove();
+          // レクチャースライドは1画面に収める必要があるため、画像サイズ確定後に
+          // 再フィットする（非レクチャー表示では #lecture-slide-stage が非表示のため no-op）。
+          img.addEventListener("load", function () { fitLectureSlideContent(); }, { once: true });
+        })
+        .catch(function () {
+          markMaterialFigureFailed(img);
+        });
+    });
+  }
+
+  function markMaterialFigureFailed(img) {
+    img.style.display = "none";
+    var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+    if (placeholder) {
+      placeholder.textContent = "画像を表示できません";
+      placeholder.classList.add("material-figure-missing");
+    }
   }
 
   // Best available representation of an equation embed: rendered math when LaTeX

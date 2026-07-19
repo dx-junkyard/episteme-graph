@@ -277,6 +277,10 @@ def build_grounding(ref: ElementRef) -> dict[str, Any]:
     ``context``（Issue #498 の要素中心コンテキストビュー）は ``context_lens.build`` が
     内部で fail-soft な契約を持つが、本モジュールでも念のため例外を握って None に縮退する
     （overview 側の三本目の try/except と同じ防御・W6）。
+    ``explanations``（設計書 `hierarchical_context_explanation_design.md` §5.3）:
+    focus 要素の element_explanations（candidate + approved のみ）を
+    :func:`decomposition.explanations_for_element` から読み、``grounding_to_text`` が
+    ``[説明]`` ブロックとして注入する。取得失敗は空リストへ縮退する（fail-soft）。
     """
     breakdown = decomposition.build(ref)
     try:
@@ -299,11 +303,25 @@ def build_grounding(ref: ElementRef) -> dict[str, Any]:
         )
         context = None
     identity_candidates = collect_identity_candidates(ref, breakdown)
+    try:
+        explanation_rows = decomposition.explanations_for_element(ref)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deliberation dialogue: explanations lookup failed for %s:%s", ref.element_type, ref.element_id,
+            exc_info=True,
+        )
+        explanation_rows = []
+    explanations = [
+        {"kind": row.get("kind"), "body": row.get("body"), "status": row.get("status")}
+        for row in explanation_rows
+        if isinstance(row, dict)
+    ]
     return {
         "breakdown": breakdown,
         "positioning": positioning_payload,
         "context": context,
         "identity_candidates": identity_candidates,
+        "explanations": explanations,
     }
 
 
@@ -326,6 +344,22 @@ _CONTEXT_STATUS_LABELS: dict[str, str] = {
 
 def _context_status_label(status: Any) -> str:
     return _CONTEXT_STATUS_LABELS.get(str(status or ""), str(status or ""))
+
+
+# 要素説明（element_explanations, 設計書 `hierarchical_context_explanation_design.md`
+# §5.2）の kind/status → 読み手向けラベル。status は既存の _CONTEXT_STATUS_LABELS と
+# 語彙（AI候補/教員確認済み）を揃えるが、element_explanations の status 語彙
+# （candidate/approved/dismissed/superseded）は element_identity_links や
+# context_lens の relation_status 語彙（source_backed/candidate/confirmed）とは
+# 別物のため、別の辞書として持つ（W8: 数値は出さない）。
+_EXPLANATION_KIND_LABELS: dict[str, str] = {
+    "generic": "汎用説明",
+    "contextual": "文脈説明",
+}
+_EXPLANATION_STATUS_LABELS: dict[str, str] = {
+    "candidate": "AI候補",
+    "approved": "教員確認済み",
+}
 
 
 def grounding_to_text(grounding: dict[str, Any]) -> str:
@@ -380,6 +414,18 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
                 f"（{_context_status_label(role_status)}）"
             )
 
+        # 設計書 §6 Phase 3: focus.generic（confirmed 同一性リンク先の L層エントリ）を
+        # 「汎用部品としての説明」として文脈上の役割とは別に注入する（§2.1 の分離を維持）。
+        generic = focus.get("generic")
+        if isinstance(generic, dict):
+            lines.append("[文脈: 共通部品]")
+            generic_line = f"- {generic.get('name', '')}"
+            if generic.get("summary"):
+                generic_line += f"：{generic.get('summary')}"
+            if generic.get("standardization_status"):
+                generic_line += f"（標準化状態: {generic.get('standardization_status')}）"
+            lines.append(generic_line)
+
         upper_items = [i for i in (context.get("upper") or []) if isinstance(i, dict)]
         if upper_items:
             lines.append("[文脈: 上位構造]")
@@ -400,6 +446,24 @@ def grounding_to_text(grounding: dict[str, Any]) -> str:
 
         for note in context.get("notes") or []:
             lines.append(f"(注記) {note}")
+
+    # 説明（element_explanations, 設計書 `hierarchical_context_explanation_design.md`
+    # §5.3）: 承認済み/AI候補の説明を kind・status ラベル付きで列挙する。空 body は
+    # 事実として書くことがないため飛ばす（W4 継承・情報捏造をしない）。全件が空 body の
+    # ときは見出し「[説明]」自体も出さない（空セクションを作らない）。
+    explanation_lines: list[str] = []
+    for explanation in grounding.get("explanations") or []:
+        if not isinstance(explanation, dict):
+            continue
+        body_text = str(explanation.get("body") or "").strip()
+        if not body_text:
+            continue
+        kind_label = _EXPLANATION_KIND_LABELS.get(str(explanation.get("kind") or ""), str(explanation.get("kind") or ""))
+        status_label = _EXPLANATION_STATUS_LABELS.get(str(explanation.get("status") or ""), str(explanation.get("status") or ""))
+        explanation_lines.append(f"- ({kind_label}/{status_label}) {body_text}")
+    if explanation_lines:
+        lines.append("[説明]")
+        lines.extend(explanation_lines)
 
     # N2: 同一性候補の材料（実在エントリの事実の一覧）または捏造ガード。
     # 供給ありは「該当がある場合のみ・一覧内の id のみ」、供給なしは identity 明示禁止。

@@ -119,6 +119,30 @@
     rejected: "却下"
   };
 
+  // 要素説明（element_explanations, migration 056）の kind/status ラベル。
+  // 正本: docs/features/hierarchical_context_explanation_design.md §5.2。
+  // generic=汎用説明（L層引用がある場合のみ生成）/ contextual=文脈説明（この論文での位置づけ）。
+  // status は candidate（AI候補）/ approved（承認済み）の2値のみを対象とする
+  // （dismissed/superseded は overview に同梱されない・W2/E2）。
+  var EXPLANATION_KIND_LABELS = {
+    generic: "汎用説明",
+    contextual: "文脈説明"
+  };
+  var EXPLANATION_STATUS_LABELS = {
+    candidate: "AI候補",
+    approved: "承認済み"
+  };
+
+  // Phase 3（設計書 §6）: L層エントリの標準化判定（standardization_status）。
+  // 段階ラベルのみ（生スコアは持たない語彙のため、そのまま日本語ラベルに変換する）。
+  var STANDARDIZATION_STATUS_LABELS = {
+    standard: "標準",
+    field_standard: "分野標準",
+    emerging_common: "普及しつつある",
+    novel: "新規",
+    unknown: "未評価"
+  };
+
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
   var chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
@@ -335,6 +359,26 @@
     '</div>';
   }
 
+  // Phase 3（設計書 §6）: focus.generic — confirmed な同一性リンク先の L層エントリの
+  // 汎用説明（「一般に何か」）。文脈上の役割（「この論文で何の役割か」）とは別欄に保つ
+  // （§2.1 の固有情報・文脈依存情報の分離）。リンク無し・非active・読み取り失敗は
+  // null なので、その場合はこのセクション自体を出さない（fail-soft・煽らない）。
+  function _contextGenericHtml(generic) {
+    if (!generic) return "";
+    var statusLabel = STANDARDIZATION_STATUS_LABELS[generic.standardization_status] ||
+      generic.standardization_status || "";
+    return '<div class="deliberation-context-focus-section deliberation-context-generic">' +
+      '<div class="deliberation-context-focus-label">汎用説明（共通部品）</div>' +
+      '<div class="deliberation-context-focus-value">' +
+        escHtml(generic.name || "") +
+        (generic.summary ? '：' + escHtml(generic.summary) : "") +
+      '</div>' +
+      (statusLabel
+        ? '<span class="deliberation-context-generic-status">' + escHtml(statusLabel) + '</span>'
+        : "") +
+    '</div>';
+  }
+
   // 中央カード（§3.1）: 要素自体 / この文脈での役割 / 根拠・状態を別欄で並べる。
   // contextual_role が無い、または status が unidentified のときは「未同定」を出す
   // だけで、役割を推測で埋めない。
@@ -353,6 +397,7 @@
         '<div class="deliberation-context-focus-label">要素自体</div>' +
         '<div class="deliberation-context-focus-value">' + escHtml(focus.intrinsic_summary || "") + '</div>' +
       '</div>' +
+      _contextGenericHtml(focus.generic) +
       '<div class="deliberation-context-focus-section">' +
         '<div class="deliberation-context-focus-label">この文脈での役割</div>' +
         '<div class="deliberation-context-focus-value">' + escHtml(roleText) + '</div>' +
@@ -1293,6 +1338,7 @@
         '</div>' +
         _notesHtml(decomposition.notes) +
         _positioningHtml(data.positioning, positioningOpts)) +
+      _explanationsSectionHtml(data.explanations) +
       _identityLinksSectionHtml(decomposition.element_type) +
       _standardizationSectionHtml(decomposition.element_type);
     if (isFigure) {
@@ -1305,6 +1351,7 @@
       _loadFigureImage(decomposition);
     }
     _bindContextNavigation();
+    _bindExplanationActions();
   }
 
   function _figureImagePath(decomposition) {
@@ -1814,7 +1861,15 @@
         escHtml(statusLabel) +
       '</span>' +
       (exprLabel ? '<div class="deliberation-annotation-body">' + escHtml(exprLabel) + '</div>' : '') +
-      (link.shared_part_id ? '<div class="deliberation-annotation-reason">共通部品: ' + escHtml(link.shared_part_id) + '</div>' : '') +
+      // 脱UUID（設計書 §6）: サーバが同梱するエントリ name/summary を優先表示し、
+      // 生 UUID は title 属性（ツールチップ）にのみ残す。API が未対応（name 無し）の
+      // 場合は従来どおり UUID を本文に出す fail-soft フォールバック。
+      (link.shared_part_id
+        ? '<div class="deliberation-annotation-reason" title="' + escHtml(link.shared_part_id) + '">共通部品: ' +
+            escHtml(link.shared_part_name || link.shared_part_id) +
+            (link.shared_part_summary ? '｜' + escHtml(link.shared_part_summary) : '') +
+          '</div>'
+        : '') +
       (link.instance_element_type
         ? '<div class="deliberation-annotation-reason">インスタンス: ' + escHtml(link.instance_element_type) +
           (link.instance_document_id ? ' / ' + escHtml(link.instance_document_id) : '') + '</div>'
@@ -1906,6 +1961,101 @@
         // fail-soft: 同一性リンクの読み込みに失敗しても内訳・対話は継続できる
         container.innerHTML = '<p class="deliberation-identity-empty">同一性リンクの読み込みに失敗しました。</p>';
       });
+  }
+
+  // ── 説明（element_explanations, migration 056）カード ─────────────────────
+  // 正本: docs/features/hierarchical_context_explanation_design.md §5.2/§5.3。
+  // overview.explanations（candidate + approved のみ。dismissed/superseded は既に
+  // サーバ側で除外済み）を、面③の候補注釈カードと同じ見た目・操作パターン
+  // （confirm/dismiss ボタン）で表示する。承認・却下は既存の element-explanations
+  // 承認 API（/api/admin/element-explanations/{id}/approve|dismiss）を呼ぶ
+  // （W層の annotations commit/dismiss とは別の独立した承認台帳・E2）。
+
+  function _explanationCardHtml(exp) {
+    exp = exp || {};
+    var kindLabel = EXPLANATION_KIND_LABELS[exp.kind] || exp.kind || "";
+    var statusLabel = EXPLANATION_STATUS_LABELS[exp.status] || exp.status || "";
+    var evidence = exp.evidence || {};
+    var pending = exp.status === "candidate";
+    return '<div class="deliberation-annotation-card deliberation-explanation-card" data-explanation-id="' +
+        escHtml(exp.id) + '">' +
+      '<div class="deliberation-annotation-kind">' +
+        escHtml(kindLabel) +
+        (evidence.confidence_label
+          ? ' <span class="deliberation-annotation-confidence">' + escHtml(evidence.confidence_label) + '</span>'
+          : '') +
+      '</div>' +
+      '<div class="deliberation-annotation-body">' + escHtml(exp.body || "") + '</div>' +
+      (evidence.evidence_quote ? '<div class="deliberation-annotation-reason">' + escHtml(evidence.evidence_quote) + '</div>' : '') +
+      (evidence.reason ? '<div class="deliberation-annotation-reason">' + escHtml(evidence.reason) + '</div>' : '') +
+      '<span class="deliberation-annotation-status' + (exp.status === "approved" ? " committed" : "") + '">' +
+        escHtml(statusLabel) +
+      '</span>' +
+      '<div class="deliberation-annotation-error" style="display:none"></div>' +
+      (pending
+        ? '<div class="deliberation-annotation-actions">' +
+            '<button type="button" class="deliberation-annotation-btn commit" data-explanation-action="approve">承認</button>' +
+            '<button type="button" class="deliberation-annotation-btn dismiss" data-explanation-action="dismiss">却下</button>' +
+          '</div>'
+        : '') +
+    '</div>';
+  }
+
+  function _explanationsSectionHtml(explanations) {
+    if (!explanations || !explanations.available) return "";
+    var items = explanations.items || [];
+    var body = items.length
+      ? items.map(_explanationCardHtml).join("")
+      : '<p class="deliberation-identity-empty">説明はまだありません。</p>';
+    return '<div class="deliberation-explanations-wrap" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
+      '<h4 style="margin:0 0 6px;font-size:14px;color:var(--color-text-primary)">説明（AI候補・承認済み）</h4>' +
+      '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px">' +
+        'この要素の汎用説明・この論文での位置づけの説明候補です。承認するまで学習者には表示されません。' +
+      '</p>' +
+      '<div id="deliberation-explanations">' + body + '</div>' +
+    '</div>';
+  }
+
+  function _decideExplanation(explanationId, action, card) {
+    if (!explanationId) return;
+    var buttons = card.querySelectorAll("[data-explanation-action]");
+    Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+    var path = "/admin/element-explanations/" + encodeURIComponent(explanationId) + "/" + action;
+    apiFetch(path, { method: "POST" })
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        var updated = (data && data.explanation) || {};
+        var wrapper = document.createElement("div");
+        wrapper.innerHTML = _explanationCardHtml(updated);
+        var newCard = wrapper.firstChild;
+        if (card.parentNode) card.parentNode.replaceChild(newCard, card);
+        _bindExplanationActions(newCard);
+      })
+      .catch(function (err) {
+        var errEl = card.querySelector(".deliberation-annotation-error");
+        var message = (err && err.detail) ||
+          (action === "approve" ? "承認できませんでした（既に処理済みの可能性があります）" : "却下できませんでした");
+        if (errEl) {
+          errEl.style.display = "";
+          errEl.innerHTML = escHtml(message);
+        }
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
+      });
+  }
+
+  // root 省略時は document 全体から未バインドのボタンを拾う（_renderModalBody からの
+  // 初回描画用）。個別カード差し替え後の再バインドは対象カードだけを渡す。
+  function _bindExplanationActions(root) {
+    var scope = root || document;
+    Array.prototype.forEach.call(scope.querySelectorAll("[data-explanation-action]"), function (btn) {
+      if (btn.getAttribute("data-explanation-bound") === "true") return;
+      btn.setAttribute("data-explanation-bound", "true");
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".deliberation-explanation-card");
+        if (!card) return;
+        _decideExplanation(card.getAttribute("data-explanation-id"), btn.getAttribute("data-explanation-action"), card);
+      });
+    });
   }
 
   // ── Phase S: 標準化度の評価（三角測量 worker の手動起動）。shared_part（共通部品）

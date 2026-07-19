@@ -144,6 +144,7 @@ class ChunkContent(BaseModel):
     text: str
     chunk_index: int
     formulas: list[dict] = []
+    figures: list[dict] = []  # Phase 4: 図のコース流通 §7.2（figure_id/caption/explanation/image_url）
     chapter: str | None = None
     section: str | None = None
     material_id: str | None = None
@@ -563,6 +564,19 @@ class LectureFormulaItem(BaseModel):
     review_reason: list[str] = Field(default_factory=list)
 
 
+class LectureFigureItem(BaseModel):
+    """スライド/セグメント内の図メタデータ（Phase 4: 図のコース流通 §7.2）。
+
+    ``![[figure:<figure_id>]]`` 埋め込みが ``core.lecture.resolve_figure_embeds`` で
+    ``[[FIGURE_N]]`` プレースホルダーに解決された際に生成される（DB には保存しない）。
+    """
+    id: str  # [[FIGURE_1]], [[FIGURE_2]], ...
+    figure_id: str  # document_figures.id (UUID)
+    caption: str | None = None
+    explanation: str | None = None  # v1 は常に None（後続エージェントが配線する）
+    image_url: str | None = None
+
+
 class LectureSlide(BaseModel):
     """レクチャーセグメント内の1スライド（migration 040: レクチャースライド同期 Phase 1）。
 
@@ -574,6 +588,7 @@ class LectureSlide(BaseModel):
     display_text: str
     spoken_text: str | None = None
     formulas: list[LectureFormulaItem] = []
+    figures: list[LectureFigureItem] = []
     has_audio: bool = False
     duration_ms: int = 0
 
@@ -585,6 +600,7 @@ class LectureSegment(BaseModel):
     text: str
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
+    figures: list[LectureFigureItem] = []
     has_audio: bool = False
     duration_ms: int = 0
     segment_mode: str = "full"  # full | summary | skip

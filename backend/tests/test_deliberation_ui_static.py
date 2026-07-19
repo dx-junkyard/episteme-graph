@@ -147,6 +147,8 @@ class TestDeliberationModule:
             allowed = (
                 src.startswith("/admin/deliberation", idx)
                 or src.startswith("/admin/documents/", idx)
+                # 要素説明（element_explanations）の承認/却下 API（migration 056）。
+                or src.startswith("/admin/element-explanations", idx)
                 # _figureImagePath の外部URL拒否ガード文字列そのもの。
                 or (
                     src.startswith("/admin/", idx)
@@ -526,6 +528,107 @@ class TestManualIdentityLinkCreation:
         assert "escHtml(entry.summary)" in row_block
         create_block = self._function_block(src, "_createIdentityLink")
         assert "escHtml(" in create_block
+
+
+class TestIdentityLinkDeUuid:
+    """脱UUID（`hierarchical_context_explanation_design.md` §6）: 同一性リンク行が
+    生 UUID の代わりにエントリ name/summary を表示すること（UUID は tooltip に残す）。
+    """
+
+    def _function_block(self, src: str, name: str) -> str:
+        m = re.search(r"function " + name + r"\([\s\S]+?\n  \}\n", src)
+        assert m, f"function {name} が見つかりません"
+        return m.group(0)
+
+    def test_row_prefers_entry_name_over_raw_uuid(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_identityLinkRowHtml")
+        assert "link.shared_part_name || link.shared_part_id" in block
+
+    def test_raw_uuid_kept_as_tooltip_not_dropped(self):
+        """P4: UUID 自体は情報として失わない（title 属性に残す）。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_identityLinkRowHtml")
+        assert "title=\"" in block and "escHtml(link.shared_part_id)" in block
+
+    def test_summary_rendered_through_esc_html(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_identityLinkRowHtml")
+        assert "escHtml(link.shared_part_summary)" in block
+
+
+# ---------------------------------------------------------------------------
+# 説明カード（element_explanations, migration 056）。
+# 正本: docs/features/hierarchical_context_explanation_design.md §5.2/§5.3。
+# ---------------------------------------------------------------------------
+
+
+class TestExplanationCardsWiring:
+    """overview.explanations（candidate + approved）を面③注釈カードと同じ流儀で表示し、
+    candidate には承認/却下ボタンを出す（approved はバッジ表示のみ）。"""
+
+    def _function_block(self, src: str, name: str) -> str:
+        m = re.search(r"function " + name + r"\([\s\S]+?\n  \}\n", src)
+        assert m, f"function {name} が見つかりません"
+        return m.group(0)
+
+    def test_rendering_and_binding_functions_present(self):
+        src = _read(DELIBERATION_JS)
+        for name in (
+            "_explanationCardHtml",
+            "_explanationsSectionHtml",
+            "_bindExplanationActions",
+            "_decideExplanation",
+        ):
+            assert f"function {name}" in src, f"function {name} が見つかりません"
+
+    def test_kind_and_status_label_dictionaries_present(self):
+        src = _read(DELIBERATION_JS)
+        assert "EXPLANATION_KIND_LABELS" in src
+        for kind in ("generic", "contextual"):
+            assert f"{kind}:" in src
+        assert "EXPLANATION_STATUS_LABELS" in src
+        for status in ("candidate", "approved"):
+            assert f"{status}:" in src
+
+    def test_unavailable_explanations_render_nothing(self):
+        """overview.explanations.available が false のときはセクション自体を出さない。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_explanationsSectionHtml")
+        assert "!explanations.available" in block or "!explanations || !explanations.available" in block
+
+    def test_approve_and_dismiss_actions_wired_to_element_explanations_endpoint(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_decideExplanation")
+        assert '"/admin/element-explanations/"' in block
+        assert 'method: "POST"' in block
+
+    def test_pending_only_shows_approve_dismiss_buttons(self):
+        """承認済みには操作ボタンを出さない（教員の再承認を促さない）。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_explanationCardHtml")
+        assert 'exp.status === "candidate"' in block
+        assert 'data-explanation-action="approve"' in block
+        assert 'data-explanation-action="dismiss"' in block
+
+    def test_no_raw_confidence_rendered(self):
+        """W8: confidence の生値ではなく confidence_label のみ描画する。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_explanationCardHtml")
+        assert "confidence_label" in block
+        assert re.search(r"\bevidence\.confidence\b(?!_label)", block) is None
+
+    def test_render_modal_body_wires_explanations_section_and_binds_actions(self):
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_renderModalBody")
+        assert "_explanationsSectionHtml(data.explanations)" in block
+        assert "_bindExplanationActions()" in block
+
+    def test_card_rendering_uses_esc_html(self):
+        """XSS対策: 説明本文・reason・evidence_quote は escHtml 経由で描画する。"""
+        src = _read(DELIBERATION_JS)
+        block = self._function_block(src, "_explanationCardHtml")
+        assert "escHtml(exp.body" in block
 
 
 class TestStandardizationAssessWiring:
@@ -1222,6 +1325,28 @@ class TestElementContextLens:
         src = _read(DELIBERATION_JS)
         assert re.search(r"\bfocus\.confidence\b(?!_label)", src) is None
         assert re.search(r"\bitem\.confidence\b(?!_label)", src) is None
+
+    def test_generic_block_rendering_function_present(self):
+        """Phase 3（設計書 §6）: focus.generic（confirmed 同一性リンク先の L層エントリ）
+        を中央カードの別欄として表示する。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _contextGenericHtml" in src
+
+    def test_generic_block_is_a_separate_section_from_contextual_role(self):
+        """§2.1: 汎用説明と文脈上の役割を混ぜない — 中央カード内の別セクションにする。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_contextFocusHtml")
+        assert "_contextGenericHtml(focus.generic)" in block
+
+    def test_generic_block_omitted_when_null(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_contextGenericHtml")
+        assert "if (!generic) return \"\";" in block
+
+    def test_generic_block_uses_esc_html(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_contextGenericHtml")
+        assert "escHtml(" in block
 
 
 # ---------------------------------------------------------------------------

@@ -15,13 +15,16 @@ resolve 済みの :class:`ElementRef` を受け、要素型ごとの内訳を **
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core import element_explanations as element_explanations_store
 from core.postgres import get_session
 from core.figure_presentation import presentation_payload
 from core.document_pipeline.persistence import get_latest_analysis_run
+from core.deliberation import identity_links as identity_links_mod
 from core.deliberation import refs as refs_mod
 from core.deliberation.schema import (
     ELEMENT_EQUATION,
@@ -29,9 +32,13 @@ from core.deliberation.schema import (
     ELEMENT_SHARED_PART,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
+    IDENTITY_LINK_STATUS_CONFIRMED,
+    SCOPE_DOCUMENT,
     ElementRef,
     ElementResolutionError,
 )
+
+logger = logging.getLogger(__name__)
 
 # migration 041 で theory_components.component_type CHECK に追加された装置系語彙。
 _APPARATUS_TYPES = ("apparatus", "instrument", "part")
@@ -39,6 +46,119 @@ _APPARATUS_TYPES = ("apparatus", "instrument", "part")
 
 def _json(value: Any, default: Any) -> Any:
     return value if isinstance(value, type(default)) else default
+
+
+# ---------------------------------------------------------------------------
+# 要素説明（element_explanations, Phase 2 / migration 056）の生行取得
+# ---------------------------------------------------------------------------
+#
+# overview（routes/deliberation.py）と dialogue grounding（dialogue.py）の双方が
+# 同じ選定ロジック（candidate + approved のみ・dismissed/superseded は除外）を必要と
+# するため、DB 読み出しをここに一本化する。呼び出し側が公開用の整形（confidence の
+# 生値を段階ラベルへ変換する等）を行う（本関数は core.element_explanations の生行を
+# そのまま返す）。
+
+
+def _agent_id_candidates_for_focus(session: Any, ref: ElementRef) -> set[str]:
+    """focus 要素の element_explanations 突合キー候補（``{ref.element_id}`` ∪ legacy_ids）。
+
+    ギャップ（2026-07-19 確認済み）: ``_stage_contextual_explanation``
+    （``document_pipeline/orchestrator.py`` の ``_PIPELINE_STEPS``）は
+    ``persist_claims_components_graph`` より**前**に実行されるため、
+    ``element_explanations.element_id`` は theory_component/theory_claim について
+    **agent 側 ID**（``ComponentRecord.component_id`` /
+    ``ClaimObjectRecord.claim_id``）で保存される
+    （``contextual_explanation_inputs.py`` 冒頭 docstring に明記の既知の逸脱）。
+    一方 ``ElementRef.element_id`` は常に DB UUID（``refs.py`` の
+    ``_resolve_theory_component``/``_resolve_theory_claim`` が uuid 検証済みの id しか
+    受け付けない）。figure（``document_figures.id``）と equation（artifact の
+    ``equation_id``）はこの逸脱の対象外で、element_explanations にも常に正準 ID の
+    ままなのでこの関数は素通りする。
+
+    突合は focus 行自身（``ref.element_id`` の1行）の ``source_scope.legacy_ids`` を
+    読んで行う。theory_components は ``legacy_ids = [component.component_id]``
+    （persistence.py の ``persist_components``。F2 の source_scope マージ後も維持される
+    契約）、theory_claims は ``legacy_ids = sorted(_claim_legacy_keys({"span_id": span_id}))``
+    = ``{span_id, f"claim_{safe(span_id)}"}``（persistence.py の
+    ``persist_qualified_claims``）で、``claim_{safe(span_id)}`` は
+    ``ClaimObjectBuilder._make_claim_id`` が採番する agent 側 ``claim_id`` と同じ書式
+    （``persistence.py`` の ``_rebuild_theory_claims_in_session`` 経由の行はさらに
+    ``agent_id`` 自体も legacy_ids に積むため、そちらの経路でも解決できる）。この
+    突合キーの流儀は ``context_lens.py`` の ``_component_id_lookup_from_rows`` /
+    ``_claim_id_lookup_from_rows``（document 全体を索く版）と同一で、ここでは
+    focus 行1件のみを直接引くだけで十分（呼び出し元は既に DB UUID を知っている）。
+
+    DB 行が引けない・``legacy_ids`` が空・クエリ失敗（fail-soft: 例えば旧仕様の
+    フェイクセッションのように ``execute`` を持たない場合も含む）は
+    ``{ref.element_id}`` のみを返す（= 従来どおりの完全一致にフォールバックする）。
+    """
+    match_ids = {str(ref.element_id)}
+    if ref.element_type == ELEMENT_THEORY_COMPONENT:
+        sql = "SELECT source_scope FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"
+    elif ref.element_type == ELEMENT_THEORY_CLAIM:
+        sql = "SELECT source_scope FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
+    else:
+        # figure / equation / shared_part: element_explanations は既に正準 ID なので
+        # legacy_ids 展開は不要（呼び出し元でも shared_part は既に scope ガードで弾かれる）。
+        return match_ids
+    try:
+        row = session.execute(sa_text(sql), {"id": ref.element_id}).fetchone()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "decomposition: legacy id lookup failed for %s:%s",
+            ref.element_type, ref.element_id, exc_info=True,
+        )
+        return match_ids
+    if not row:
+        return match_ids
+    scope = row[0] if isinstance(row[0], dict) else {}
+    for legacy_id in scope.get("legacy_ids") or []:
+        key = str(legacy_id or "").strip()
+        if key:
+            match_ids.add(key)
+    return match_ids
+
+
+def explanations_for_element(ref: ElementRef) -> list[dict[str, Any]]:
+    """focus 要素の element_explanations 生行を返す（candidate + approved のみ）。
+
+    document-scoped 要素のみ対象（``element_explanations.element_type`` の語彙に
+    shared_part は無いため、domain-scoped 要素は常に空リスト）。dismissed/superseded は
+    ``status`` を明示指定した2回の問い合わせで最初から取得しない（P4: 除外であって
+    削除ではない — 行自体は DB に残る。ここで返さないだけ）。
+
+    突合は ``ref.element_id`` の完全一致に加え、theory_component/theory_claim は
+    agent 側 ID（保存時の実際の element_id 形式）も候補に含める
+    （:func:`_agent_id_candidates_for_focus` 参照。write 側の保存形式は変更しない —
+    agent 側 ID は再解析を跨いで決定論的なため、保存形式としてはむしろ安定している）。
+    """
+    if ref.scope != SCOPE_DOCUMENT or not str(ref.document_id or "").strip():
+        return []
+    session = get_session()
+    try:
+        candidate_rows = element_explanations_store.list_for_document(
+            session, ref.document_id, element_type=ref.element_type,
+            status=element_explanations_store.STATUS_CANDIDATE,
+        )
+        approved_rows = element_explanations_store.list_for_document(
+            session, ref.document_id, element_type=ref.element_type,
+            status=element_explanations_store.STATUS_APPROVED,
+        )
+        match_ids = _agent_id_candidates_for_focus(session, ref)
+    finally:
+        session.close()
+    rows = [
+        r for r in candidate_rows + approved_rows
+        if str(r.get("element_id") or "") in match_ids
+    ]
+    rows.sort(
+        key=lambda r: (
+            0 if r.get("status") == element_explanations_store.STATUS_APPROVED else 1,
+            str(r.get("kind") or ""),
+            str(r.get("created_at") or ""),
+        )
+    )
+    return rows
 
 
 def _decompose_theory_claim(ref: ElementRef) -> dict[str, Any]:
@@ -290,6 +410,61 @@ def _decompose_equation(ref: ElementRef) -> dict[str, Any]:
     }
 
 
+def _approved_contextual_explanation_for_instance(
+    element_type: str, element_id: str, document_id: str
+) -> str | None:
+    """あるインスタンス要素の承認済み contextual 説明の本文（あれば1件）を返す
+    （設計書 §6 shared_part 逆方向: 各インスタンスの approved contextual 説明）。
+    複数 approved 行があっても最初の1件のみを使う（一覧表示の要約用途のため）。
+    """
+    if not str(document_id or "").strip():
+        return None
+    session = get_session()
+    try:
+        rows = element_explanations_store.list_for_document(
+            session, document_id, element_type=element_type,
+            status=element_explanations_store.STATUS_APPROVED,
+            kind=element_explanations_store.KIND_CONTEXTUAL,
+        )
+    finally:
+        session.close()
+    for row in rows:
+        if str(row.get("element_id") or "") == str(element_id):
+            body = str(row.get("body") or "").strip()
+            if body:
+                return body
+    return None
+
+
+def _confirmed_linked_instances(shared_part_id: str) -> list[dict[str, Any]]:
+    """shared_part へ confirmed な同一性リンクを持つインスタンス一覧（設計書 §6）。
+
+    KN-2 継承: インスタンス側の表記は書き換えない（読み出すだけ）。candidate/rejected は
+    対象にしない（KN-3: 確定済みのみを事実として扱う）。各インスタンスの由来 document の
+    閲覧権限は本関数では判定できない（core は per-user 権限を持たない）ため、呼び出し側
+    （routes/deliberation.py）が document_id で権限フィルタし hidden_count を算出する。
+    """
+    result: list[dict[str, Any]] = []
+    for link in identity_links_mod.list_for_shared_part(shared_part_id):
+        if str(link.get("status") or "") != IDENTITY_LINK_STATUS_CONFIRMED:
+            continue
+        instance_type = str(link.get("instance_element_type") or "")
+        instance_id = str(link.get("instance_element_id") or "")
+        instance_doc = str(link.get("instance_document_id") or "")
+        result.append(
+            {
+                "element_type": instance_type,
+                "element_id": instance_id,
+                "document_id": instance_doc,
+                "local_expression": link.get("local_expression") or {},
+                "approved_contextual_explanation": _approved_contextual_explanation_for_instance(
+                    instance_type, instance_id, instance_doc
+                ),
+            }
+        )
+    return result
+
+
 def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
     session = get_session()
     try:
@@ -325,6 +500,21 @@ def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
     if not version:
         notes.append("凍結版なし（draft のみ。パイプライン retrieval には未反映）")
     name = str(entry[3] or "")
+
+    # 設計書 §6 shared_part 逆方向: confirmed な同一性リンクを持つインスタンス一覧
+    # + 各インスタンスの approved contextual 説明。付帯情報の取得失敗は shared_part
+    # 本体の内訳表示を巻き込まない（fail-soft・既存の apparatus_semantics artifact
+    # 読み出しと同じ try/except の作法）。
+    linked_instances: list[dict[str, Any]] = []
+    try:
+        linked_instances = _confirmed_linked_instances(ref.element_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "decomposition: confirmed linked instances lookup failed for shared_part %s",
+            ref.element_id, exc_info=True,
+        )
+        linked_instances = []
+
     return {
         "element_type": ELEMENT_SHARED_PART,
         "label": name or f"shared_part:{ref.element_id[:8]}",
@@ -339,6 +529,10 @@ def _decompose_shared_part(ref: ElementRef) -> dict[str, Any]:
             # （教員向け一覧は `GET .../annotations` を参照。§5.5・migration 050）。
             "standardization_status": str(entry[5] or "unknown"),
             "frozen_content": frozen_content,
+            # 権限フィルタ前の生リスト。routes/deliberation.py が document 閲覧権限で
+            # フィルタし、隠した件数を linked_instances_hidden_count として正直に返す
+            # （W5・P4。ここでは全件を返す）。
+            "linked_instances": linked_instances,
         },
         "notes": notes,
     }

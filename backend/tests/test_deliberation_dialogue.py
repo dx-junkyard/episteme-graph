@@ -188,6 +188,37 @@ class TestBuildGroundingContext:
         grounding = dialogue.build_grounding(_sample_ref())
         assert grounding["context"] is None
 
+    def test_grounding_includes_explanations_from_decomposition(self, monkeypatch):
+        """設計書 `hierarchical_context_explanation_design.md` §5.3: focus 要素の
+        element_explanations（candidate + approved）を grounding に同梱する。"""
+        self._patch_breakdown_and_positioning(monkeypatch)
+        monkeypatch.setattr(dialogue.context_lens, "build", lambda ref: None)
+        monkeypatch.setattr(
+            dialogue.decomposition, "explanations_for_element",
+            lambda ref: [
+                {"id": "e1", "kind": "contextual", "body": "この論文での位置づけ", "status": "candidate"},
+                {"id": "e2", "kind": "generic", "body": "一般的な説明", "status": "approved"},
+            ],
+        )
+
+        grounding = dialogue.build_grounding(_sample_ref())
+        assert grounding["explanations"] == [
+            {"kind": "contextual", "body": "この論文での位置づけ", "status": "candidate"},
+            {"kind": "generic", "body": "一般的な説明", "status": "approved"},
+        ]
+
+    def test_explanations_lookup_failure_degrades_to_empty_list(self, monkeypatch):
+        self._patch_breakdown_and_positioning(monkeypatch)
+        monkeypatch.setattr(dialogue.context_lens, "build", lambda ref: None)
+
+        def boom(ref):
+            raise RuntimeError("simulated explanations lookup outage")
+
+        monkeypatch.setattr(dialogue.decomposition, "explanations_for_element", boom)
+
+        grounding = dialogue.build_grounding(_sample_ref())
+        assert grounding["explanations"] == []
+
 
 class TestGroundingToTextContextLens:
     """grounding_to_text() の面③レンダリング（純粋関数・DB 非依存）。"""
@@ -289,6 +320,71 @@ class TestGroundingToTextContextLens:
             "notes": ["note"],
         }
         text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "confidence" not in text.lower()
+
+    def test_focus_generic_renders_as_shared_part_context_block(self):
+        """Phase 3（設計書 §6）: focus.generic を [文脈: 共通部品] として注入する。"""
+        context = {
+            "focus": {
+                "label": "f", "contextual_role": None, "contextual_role_status": "unidentified",
+                "generic": {
+                    "entry_id": "sp-1", "name": "EOM", "summary": "electro-optic modulator",
+                    "standardization_status": "field_standard",
+                },
+            },
+            "upper": [], "lower": [], "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 共通部品]" in text
+        assert "EOM" in text
+        assert "electro-optic modulator" in text
+        assert "field_standard" in text
+
+    def test_no_generic_block_is_omitted(self):
+        context = {
+            "focus": {"label": "f", "contextual_role": None, "contextual_role_status": "unidentified"},
+            "upper": [], "lower": [], "notes": [],
+        }
+        text = dialogue.grounding_to_text(self._base_grounding(context))
+        assert "[文脈: 共通部品]" not in text
+
+
+class TestGroundingToTextExplanations:
+    """設計書 §5.3: [説明] ブロック — kind/status ラベル付きで列挙し、空 body は飛ばす。"""
+
+    def _grounding_with_explanations(self, explanations) -> dict:
+        return {
+            "breakdown": {"element_type": "theory_claim", "label": "c", "fields": {}, "notes": []},
+            "positioning": {"available": False},
+            "explanations": explanations,
+        }
+
+    def test_candidate_and_approved_labels_are_distinguished(self):
+        explanations = [
+            {"kind": "contextual", "body": "この論文での位置づけの説明", "status": "candidate"},
+            {"kind": "generic", "body": "一般的な説明", "status": "approved"},
+        ]
+        text = dialogue.grounding_to_text(self._grounding_with_explanations(explanations))
+        assert "[説明]" in text
+        assert "(文脈説明/AI候補) この論文での位置づけの説明" in text
+        assert "(汎用説明/教員確認済み) 一般的な説明" in text
+
+    def test_blank_body_is_skipped(self):
+        explanations = [{"kind": "contextual", "body": "   ", "status": "candidate"}]
+        text = dialogue.grounding_to_text(self._grounding_with_explanations(explanations))
+        assert "[説明]" not in text
+
+    def test_no_explanations_key_is_omitted_without_error(self):
+        grounding = {
+            "breakdown": {"element_type": "theory_claim", "label": "c", "fields": {}, "notes": []},
+            "positioning": {"available": False},
+        }
+        text = dialogue.grounding_to_text(grounding)
+        assert "[説明]" not in text
+
+    def test_never_renders_raw_confidence_string(self):
+        explanations = [{"kind": "generic", "body": "text", "status": "approved"}]
+        text = dialogue.grounding_to_text(self._grounding_with_explanations(explanations))
         assert "confidence" not in text.lower()
 
 

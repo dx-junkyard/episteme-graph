@@ -226,6 +226,109 @@ class TestOverviewContext:
         assert body["positioning"]["available"] is True
 
 
+# ---------------------------------------------------------------------------
+# 説明の二層化（Phase 2: `hierarchical_context_explanation_design.md` §5.2/§5.3）:
+# GET .../overview の "explanations" キー。
+# ---------------------------------------------------------------------------
+
+
+class TestOverviewExplanations:
+    PATH = "/api/admin/deliberation/elements/theory_claim/c1/overview"
+
+    def _patch_decomposition_and_positioning(self, monkeypatch, route_mod):
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
+        monkeypatch.setattr(
+            route_mod.decomposition, "build",
+            lambda ref: {"element_type": ref.element_type, "label": "L", "fields": {}, "notes": []},
+        )
+        monkeypatch.setattr(route_mod.positioning, "build", lambda ref: {})
+        monkeypatch.setattr(route_mod.context_lens, "build", lambda ref: None)
+
+    def test_document_scoped_explanations_return_confidence_label_not_raw_value(
+        self, client_and_tokens, monkeypatch
+    ):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        self._patch_decomposition_and_positioning(monkeypatch, route_mod)
+        monkeypatch.setattr(
+            route_mod.decomposition, "explanations_for_element",
+            lambda ref: [
+                {
+                    "id": "expl-1", "element_type": "theory_claim", "element_id": "c1",
+                    "kind": "contextual", "body": "この claim は §3 の中心命題を支持する。",
+                    "evidence": {"confidence": 0.83, "reason": "because", "evidence_quote": "quote"},
+                    "status": "candidate", "created_by": "pipeline", "reviewed_by": None,
+                    "reviewed_at": None, "created_at": "2026-01-01T00:00:00",
+                },
+                {
+                    "id": "expl-2", "element_type": "theory_claim", "element_id": "c1",
+                    "kind": "generic", "body": "一般に○○を指す。",
+                    "evidence": {"confidence": 0.4},
+                    "status": "approved", "created_by": "pipeline", "reviewed_by": "teacher-1",
+                    "reviewed_at": "2026-01-02T00:00:00", "created_at": "2026-01-01T00:00:00",
+                },
+            ],
+        )
+
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 200
+        explanations = response.json()["explanations"]
+        assert explanations["available"] is True
+        assert len(explanations["items"]) == 2
+        for item in explanations["items"]:
+            assert "confidence" not in item["evidence"]
+            assert item["evidence"]["confidence_label"]
+        statuses = {item["status"] for item in explanations["items"]}
+        assert statuses == {"candidate", "approved"}
+
+    def test_shared_part_scope_has_no_explanations(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_shared_part_ref())
+        monkeypatch.setattr(
+            route_mod.decomposition, "build",
+            lambda ref: {"element_type": "shared_part", "label": "L", "fields": {}, "notes": []},
+        )
+        monkeypatch.setattr(route_mod.positioning, "build", lambda ref: {})
+        monkeypatch.setattr(route_mod.context_lens, "build", lambda ref: None)
+
+        response = client.get(
+            "/api/admin/deliberation/elements/shared_part/sp-1/overview",
+            headers=_auth(teacher),
+        )
+        assert response.status_code == 200
+        assert response.json()["explanations"] == {
+            "available": False,
+            "note": "この要素型には説明がありません",
+        }
+
+    def test_explanations_lookup_failure_is_fail_soft_independent_of_other_faces(
+        self, client_and_tokens, monkeypatch
+    ):
+        client, _s, teacher = client_and_tokens
+        import routes.deliberation as route_mod
+
+        self._patch_decomposition_and_positioning(monkeypatch, route_mod)
+
+        def boom(_ref):
+            raise RuntimeError("simulated explanations lookup outage")
+
+        monkeypatch.setattr(route_mod.decomposition, "explanations_for_element", boom)
+
+        response = client.get(self.PATH, headers=_auth(teacher))
+        assert response.status_code == 200
+        body = response.json()
+        assert body["explanations"] == {
+            "available": False,
+            "note": "説明の取得に失敗しました",
+        }
+        assert body["decomposition"]["label"] == "L"
+        assert body["positioning"]["available"] is True
+
+
 class TestCreateSessionHappyPath:
     def test_create_session_returns_200_with_session_shape(self, client_and_tokens, monkeypatch):
         client, _s, teacher = client_and_tokens

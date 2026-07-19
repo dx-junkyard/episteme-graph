@@ -91,7 +91,8 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             return {"status": "waiting_for_pipeline", "updated_topics": 0}
 
         chunks_by_material = _load_chunks(session, material_ids)
-        enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material)
+        figures_index = _load_document_figures_index(session, document_ids)
+        enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material, figures_index)
         draft_result = _generate_course_topic_drafts(course, enriched_topics)
         course["topics"] = enriched_topics
         course["referenced_sections"] = _referenced_sections_from_topics(enriched_topics)
@@ -237,6 +238,11 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
     equations: dict[str, dict] = {}
     claims: dict[str, dict] = {}
     evidence: dict[str, dict] = {}
+    # claim_id -> [{"document_id", "figure_key", "caption"}] の逆引き索引。図⇄claim
+    # リンクの正本は FigureRecord.linked_claim_ids の一箇所（figure_concept_linking_design
+    # の決定）であり、claim 側には figure_ids が populate されないため、ここで明示的に
+    # 逆方向へたどる（Phase 4 §7.1）。
+    figure_claim_links: dict[str, list[dict]] = {}
 
     for document_id, artifacts in artifacts_by_doc.items():
         mapping = _as_dict(artifacts.get("course_mapping"))
@@ -286,12 +292,38 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
                 item.setdefault("document_id", document_id)
                 evidence[str(item["evidence_id"])] = item
 
+        # figure_table_semantics (FigureRecord) を claim_id → 図 の逆引き索引にする。
+        # FigureRecord.figure_id は document_figures.figure_key と同じ正規化規則
+        # （'fig_3' 等）で振られ、orchestrator の apparatus_semantics 入力構築でも
+        # この2つを直接文字列一致で対応付けている（document_pipeline/orchestrator.py
+        # の fig_record_by_key と同型の突合）。ここでは document_figures.id (UUID) の
+        # 解決を先送りし、figure_key のまま保持しておいて _topic_evidence_links 側で
+        # figures_index を使って解決する。
+        fig_tbl_artifact = _as_dict(artifacts.get("figure_table_semantics"))
+        for fig in _as_list(fig_tbl_artifact.get("figures")):
+            if not isinstance(fig, dict):
+                continue
+            figure_key = str(fig.get("figure_id") or "").strip()
+            if not figure_key:
+                continue
+            caption = str(fig.get("caption") or "")
+            for claim_id in _as_list(fig.get("linked_claim_ids")):
+                claim_id = str(claim_id or "").strip()
+                if not claim_id:
+                    continue
+                figure_claim_links.setdefault(claim_id, []).append({
+                    "document_id": document_id,
+                    "figure_key": figure_key,
+                    "caption": caption,
+                })
+
     return {
         "mapping_topics": mapping_topics,
         "components": components,
         "equations": equations,
         "claims": claims,
         "evidence": evidence,
+        "figure_claim_links": figure_claim_links,
     }
 
 
@@ -324,9 +356,78 @@ def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
     return chunks
 
 
-def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[str, list[dict]]) -> list[dict]:
+def _load_document_figures_index(session, document_ids: list[str]) -> dict[str, dict]:
+    """図のコース流通（Phase 4 §7.1）向けに ``document_figures`` を軽量索引化する。
+
+    ``figure_images.load_document_figures`` は図配信 API 向けの重い列
+    （bbox / inner_labels / analysis_profile 等）まで読むため、根拠リンク生成のような
+    id 解決だけの用途には使わず、専用の軽量クエリにする。索引は2通りのキーを持つ:
+
+    - ``figure_id``（``document_figures.id`` の UUID 文字列）: component の
+      ``source_scope.figure_id`` から直接解決できる経路用
+    - ``"{document_id}::{figure_key}"``: figure_table_semantics の
+      ``FigureRecord.linked_claim_ids`` 逆引き（figure_key しか分からない）経路用
+    """
+    if not document_ids:
+        return {}
+    params = {f"did_{idx}": did for idx, did in enumerate(document_ids)}
+    placeholders = ", ".join(f":did_{idx}" for idx in range(len(document_ids)))
+    rows = session.execute(
+        sa_text(f"""
+            SELECT id::text, document_id, figure_key, caption_text
+            FROM document_figures
+            WHERE document_id IN ({placeholders})
+              AND status = 'extracted'
+        """),
+        params,
+    ).fetchall()
+    index: dict[str, dict] = {}
+    for row in rows:
+        figure_id = str(row[0] or "")
+        document_id = str(row[1] or "")
+        figure_key = str(row[2] or "")
+        caption = str(row[3] or "")
+        if not figure_id:
+            continue
+        item = {
+            "figure_id": figure_id,
+            "figure_key": figure_key,
+            "document_id": document_id,
+            "caption": caption,
+        }
+        index[figure_id] = item
+        if document_id and figure_key:
+            index[f"{document_id}::{figure_key}"] = item
+    return index
+
+
+def _resolve_figure_ref(
+    figures_index: dict[str, dict],
+    *,
+    figure_id: str | None = None,
+    document_id: str | None = None,
+    figure_key: str | None = None,
+) -> dict | None:
+    """figures_index から図参照を解決する（figure_id 優先、無ければ document_id+figure_key）。"""
+    figure_id = str(figure_id or "").strip()
+    if figure_id and figure_id in figures_index:
+        return figures_index[figure_id]
+    document_id = str(document_id or "").strip()
+    figure_key = str(figure_key or "").strip()
+    if document_id and figure_key:
+        return figures_index.get(f"{document_id}::{figure_key}")
+    return None
+
+
+def _enrich_topics(
+    topics: list[dict],
+    bundle: dict,
+    chunks_by_material: dict[str, list[dict]],
+    figures_index: dict[str, dict] | None = None,
+) -> list[dict]:
     enriched: list[dict] = []
     all_chunks = [chunk for chunks in chunks_by_material.values() for chunk in chunks]
+    figures_index = figures_index or {}
     for index, raw_topic in enumerate(topics):
         topic = dict(raw_topic) if isinstance(raw_topic, dict) else {"title": str(raw_topic)}
         mapping, mapping_confidence = _best_mapping(topic, bundle["mapping_topics"], index)
@@ -347,6 +448,8 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
             bundle.get("claims") or {},
             bundle.get("evidence") or {},
             mapping_confidence,
+            figures_index=figures_index,
+            figure_claim_links=bundle.get("figure_claim_links") or {},
         )
 
         fallback_formulas = _fallback_formulas(fallback_chunk)
@@ -421,14 +524,29 @@ def _topic_evidence_links(
     claims_by_id: dict[str, dict],
     evidence_by_id: dict[str, dict],
     confidence: str,
+    *,
+    figures_index: dict[str, dict] | None = None,
+    figure_claim_links: dict[str, list[dict]] | None = None,
 ) -> list[dict]:
     """Build the authoritative 根拠リンク list consumed by the lecture studio UI.
 
-    Surfaces component / equation / claim / source references with summaries so
-    the frontend can resolve `![[component:id]]` / `![[equation:id]]` /
-    `![[claim:id]]` / `![[source:id]]` embeds. Without this, `topic.evidence_links`
-    stayed empty and any claim/source reference rendered as "未解決".
+    Surfaces component / equation / claim / source / figure references with
+    summaries so the frontend can resolve `![[component:id]]` /
+    `![[equation:id]]` / `![[claim:id]]` / `![[source:id]]` /
+    `![[figure:id]]` embeds. Without this, `topic.evidence_links` stayed empty
+    and any claim/source/figure reference rendered as "未解決".
+
+    Figures (kind='figure', Phase 4 §7.1) are derived deterministically via two
+    routes, never invented: (1) components whose `source_scope.figure_id` /
+    `figure_key` point at a `document_figures` row (apparatus/device candidate
+    components), and (2) claims linked to a figure through
+    `FigureRecord.linked_claim_ids` (figure_concept_linking_design's single
+    source of truth), resolved to the concrete `document_figures.id` UUID via
+    `figures_index`. `figure_claim_links` is the claim_id -> figure reverse
+    index built by `_collect_structured_content`.
     """
+    figures_index = figures_index or {}
+    figure_claim_links = figure_claim_links or {}
     links: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
@@ -441,6 +559,7 @@ def _topic_evidence_links(
         latex: str | None = None,
         plain_text: str | None = None,
         label: str | None = None,
+        extra: dict | None = None,
     ) -> None:
         target_id = str(target_id or "").strip()
         if not target_id:
@@ -470,6 +589,10 @@ def _topic_evidence_links(
             link["plain_text"] = plain_text
         if label:
             link["label"] = label
+        if extra:
+            for extra_key, extra_value in extra.items():
+                if extra_value not in (None, ""):
+                    link[extra_key] = extra_value
         links.append(link)
 
     for component in components:
@@ -523,6 +646,57 @@ def _topic_evidence_links(
             add("source", evidence_id, "", evidence_role, latex=evidence_text)
         else:
             add("source", evidence_id, evidence_text, evidence_role)
+
+    def add_figure(figure_ref: dict | None) -> None:
+        if not figure_ref:
+            return
+        figure_id = str(figure_ref.get("figure_id") or "")
+        if not figure_id:
+            return
+        add(
+            "figure",
+            figure_id,
+            figure_ref.get("caption") or "",
+            "figure",
+            extra={
+                "figure_id": figure_id,
+                "figure_key": figure_ref.get("figure_key") or "",
+                "document_id": figure_ref.get("document_id") or "",
+                "caption": figure_ref.get("caption") or "",
+            },
+        )
+
+    # 経路1: 装置候補コンポーネントは source_scope.figure_id / figure_key で図に
+    # 直接紐づく（apparatus_components.py が付与）。figures_index で
+    # document_figures.id (UUID) / caption を解決する。
+    for component in components:
+        source_scope = component.get("source_scope")
+        if not isinstance(source_scope, dict):
+            continue
+        comp_figure_id = source_scope.get("figure_id")
+        comp_figure_key = source_scope.get("figure_key")
+        if not comp_figure_id and not comp_figure_key:
+            continue
+        add_figure(_resolve_figure_ref(
+            figures_index,
+            figure_id=comp_figure_id,
+            document_id=component.get("document_id"),
+            figure_key=comp_figure_key,
+        ))
+
+    # 経路2: component の linked_claim_ids から、その claim を参照している図
+    # （FigureRecord.linked_claim_ids の逆引き、figure_claim_links）を辿る。
+    # claim → 図の対応が無い（本文メンション無し）図は正直にスキップする（P4）。
+    for claim_id in _linked_ids(components, "linked_claim_ids"):
+        for figure_link in figure_claim_links.get(str(claim_id), []):
+            resolved = _resolve_figure_ref(
+                figures_index,
+                document_id=figure_link.get("document_id"),
+                figure_key=figure_link.get("figure_key"),
+            )
+            if resolved and not resolved.get("caption") and figure_link.get("caption"):
+                resolved = {**resolved, "caption": figure_link["caption"]}
+            add_figure(resolved)
 
     return links
 
@@ -730,11 +904,12 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - インライン数式は `$...$`
 - ブロック数式は `$$...$$`
 - `\(...\)` や `\[...\]` は使わず、必ず `$...$` / `$$...$$` を使う
-- 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]` の形式を使う
+- 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]`, `![[figure:id]]` の形式を使う
 - 埋め込みに使ってよい kind と id の組み合わせは、根拠候補の `available_references` に列挙されたものだけ
 - `available_references` に無い id を発明してはならない。また id 本来の kind を変えて埋め込んではならない（例: component の id を `claim:` や `equation:` で埋め込まない）
 - 該当する根拠が `available_references` に無い場合は埋め込みを使わず、本文の言葉だけで説明する
 - `![[source:id]]` は `available_references` にある source span の id、または原文抜粋(source_excerpt)を指す `![[source:topic_summary]]` のみを使う
+- `![[figure:id]]` は `available_references` にある kind='figure' の id（供給された figure の id）のみ使用可。一覧に無い id を発明しない
 - 根拠候補の `content_blocks` に equations がある場合、トピック理解に必須の式を `![[equation:id]]` で教材欄に埋め込む
 - 数式を埋め込む前後には、その式が何を定義・変換・制約しているかを短く説明する
 - 数式を単に列挙せず、授業の流れの中で使う

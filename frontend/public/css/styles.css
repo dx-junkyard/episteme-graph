@@ -1158,6 +1158,52 @@ body {
   word-break: break-word;
 }
 
+/* 図（Figure）埋め込み: [[FIGURE_N]] プレースホルダの解決先。教材本文・出典ポップアップ・
+   ボイスパネル・レクチャースライドの renderMaterialChunk 共通レンダラで使う
+   （設計書 hierarchical_context_explanation_design.md Phase4 §7.2）。 */
+.material-figure {
+  display: block;
+  margin: 12px 0;
+  text-align: center;
+}
+
+.material-figure-frame {
+  display: inline-block;
+  position: relative;
+  max-width: 100%;
+}
+
+.material-figure-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 6px;
+  border: 0.5px solid var(--color-border-tertiary, var(--color-border, #2a3550));
+}
+
+.material-figure-placeholder {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8899bb);
+  padding: 10px 14px;
+}
+
+.material-figure-caption {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--color-text-tertiary, #8899bb);
+  text-align: center;
+}
+
+.material-figure-explanation {
+  margin: 4px auto 0;
+  max-width: 640px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8899bb);
+  text-align: center;
+}
+
 .check-overlay {
   position: fixed;
   inset: 0;
@@ -2898,6 +2944,14 @@ body {
 .lecture-formula-block.visible {
   opacity: 1;
   transform: scale(1);
+}
+
+/* レクチャースライド内の図: 単体で高さを取りすぎて fitLectureSlideContent の
+   フォント段階縮小より先に等比縮小へ落ちないよう、既定の上限を設ける
+   （収まらない場合の最終手段としての等比縮小は既存ロジックのまま働く）。 */
+.lecture-slide-inner .material-figure-img {
+  max-height: 42vh;
+  width: auto;
 }
 
 /* Interrupt chat popup */

@@ -419,6 +419,11 @@ def _find_spoken_for_latex(latex: str, formulas: list[dict]) -> str:
 # スライド区切りマーカー: 単独行の "===" （3個以上の連続 "=" を許容、行頭行末の空白も許容）
 _SLIDE_MARKER_RE = re.compile(r"^[ \t]*={3,}[ \t]*$", re.MULTILINE)
 _SLIDE_FORMULA_ID_RE = re.compile(r"\[\[FORMULA_\d+\]\]")
+# 図プレースホルダー（Phase 4 図のコース流通 §7.2）。数式の [[FORMULA_N]] と同方式。
+_SLIDE_FIGURE_ID_RE = re.compile(r"\[\[FIGURE_\d+\]\]")
+# 未解決の図埋め込み記法（resolve_figure_embeds 未適用、または figures_by_id に無く
+# 原文のまま残った場合）。定義は「図記法の解決」セクションで行う（本モジュール下方）。
+_FIGURE_EMBED_RE = re.compile(r"!\[\[figure:([^\]]+)\]\]")
 
 
 def _split_marker_segments(text: str | None) -> list[str]:
@@ -467,10 +472,47 @@ def _assign_slide_formulas(
     return slide_formula_lists
 
 
+def _assign_slide_figures(
+    slide_texts: list[tuple[str, str | None]],
+    figures: list[dict],
+) -> list[list[dict]]:
+    """figures を、各スライドの display_text が参照する [[FIGURE_N]] にのみ割り当てる。
+
+    ``_assign_slide_formulas`` と同じ規則（未参照分は最後のスライドに残し、
+    情報を落とさない。全スライドの figures の和 == 入力 figures を保証）。
+    """
+    slide_figure_lists: list[list[dict]] = [[] for _ in slide_texts]
+    if not slide_texts:
+        return slide_figure_lists
+
+    ids_per_slide = [
+        set(_SLIDE_FIGURE_ID_RE.findall(display)) for display, _spoken in slide_texts
+    ]
+
+    unassigned: list[dict] = []
+    for figure in figures:
+        fid = str(figure.get("id") or "") if isinstance(figure, dict) else ""
+        assigned = False
+        if fid:
+            for i, ids in enumerate(ids_per_slide):
+                if fid in ids:
+                    slide_figure_lists[i].append(figure)
+                    assigned = True
+                    break
+        if not assigned:
+            unassigned.append(figure)
+
+    if unassigned:
+        slide_figure_lists[-1].extend(unassigned)
+
+    return slide_figure_lists
+
+
 def split_slides(
     display_text: str | None,
     spoken_text: str | None,
     formulas: list | None = None,
+    figures: list | None = None,
 ) -> tuple[list[dict], bool]:
     """display_text / spoken_text をスライド区切りマーカー ``===`` で分割する。
 
@@ -486,15 +528,21 @@ def split_slides(
     formulas : list[dict] | None
         数式メタデータのリスト。各スライドの display_text が参照する [[FORMULA_N]]
         の分だけ割り当てられる。未参照分は最後のスライドに付与する。
+    figures : list[dict] | None
+        図メタデータのリスト（Phase 4 図のコース流通 §7.2）。各スライドの display_text
+        が参照する [[FIGURE_N]] の分だけ割り当てられる。未参照分は最後のスライドに付与する
+        （``formulas`` と同じ規則）。
 
     Returns
     -------
     tuple[list[dict], bool]
         ``(slides, mismatch)``。``slides`` の各要素は
-        ``{"slide_index": int, "display_text": str, "spoken_text": str | None, "formulas": list}``。
+        ``{"slide_index": int, "display_text": str, "spoken_text": str | None,
+        "formulas": list, "figures": list}``。
         ``mismatch`` は表示と読み上げの分割数が一致せず 1 スライドに縮退した場合に True。
     """
     formulas = list(formulas) if formulas else []
+    figures = list(figures) if figures else []
 
     display_segments = _split_marker_segments(display_text)
     if not display_segments:
@@ -518,6 +566,7 @@ def split_slides(
         mismatch = True
 
     slide_formula_lists = _assign_slide_formulas(slide_texts, formulas)
+    slide_figure_lists = _assign_slide_figures(slide_texts, figures)
 
     slides = [
         {
@@ -525,6 +574,7 @@ def split_slides(
             "display_text": display,
             "spoken_text": spoken,
             "formulas": slide_formula_lists[i],
+            "figures": slide_figure_lists[i],
         }
         for i, (display, spoken) in enumerate(slide_texts)
     ]
@@ -543,6 +593,7 @@ def split_slides(
 # 一致を保証する（決定論的・LLM 非使用）。
 
 _FORMULA_PLACEHOLDER_LEN = 60  # [[FORMULA_N]] 1個の表示長換算（§4-1 の目安に合わせる）
+_FIGURE_PLACEHOLDER_LEN = 200  # [[FIGURE_N]] 1個の表示長換算（図1個=200字、Phase 4 §7.2）
 DEFAULT_SLIDE_MAX_CHARS = 600  # スライド1枚の display 目安（§4-1）
 _JP_SENTENCE_ENDERS = "。．！？"
 
@@ -570,12 +621,26 @@ def _sentence_units(text: str) -> list[str]:
 
 
 def _display_length(text: str | None) -> int:
-    """``[[FORMULA_N]]`` を一定長に換算した表示長を返す（ページ分割の目安計算用）。"""
+    """``[[FORMULA_N]]`` / ``[[FIGURE_N]]`` / 未解決の ``![[figure:...]]`` を
+    一定長に換算した表示長を返す（ページ分割の目安計算用。図1個=200字、Phase 4 §7.2）。
+
+    解決済み ``[[FIGURE_N]]`` と未解決 ``![[figure:id]]``（呼び出し側が figures_by_id を
+    供給しない場合はこちらのまま残る — ``build_topic_slides`` の readiness/音声生成側の
+    呼び出し等）の両方を同じ 200字換算にすることで、figures_by_id の有無によって
+    ページ分割の境界がずれない（表示・音声生成・readiness の slide_index 一致を壊さない）。
+    """
     if not text:
         return 0
     formula_count = len(_SLIDE_FORMULA_ID_RE.findall(text))
+    figure_count = len(_SLIDE_FIGURE_ID_RE.findall(text)) + len(_FIGURE_EMBED_RE.findall(text))
     plain = _SLIDE_FORMULA_ID_RE.sub("", text)
-    return len(plain) + formula_count * _FORMULA_PLACEHOLDER_LEN
+    plain = _SLIDE_FIGURE_ID_RE.sub("", plain)
+    plain = _FIGURE_EMBED_RE.sub("", plain)
+    return (
+        len(plain)
+        + formula_count * _FORMULA_PLACEHOLDER_LEN
+        + figure_count * _FIGURE_PLACEHOLDER_LEN
+    )
 
 
 def _paragraph_units(text: str | None) -> list[str]:
@@ -647,6 +712,7 @@ def auto_paginate_slides(
     spoken_text: str | None,
     formulas: list | None = None,
     max_chars: int = DEFAULT_SLIDE_MAX_CHARS,
+    figures: list | None = None,
 ) -> tuple[list[dict], bool]:
     """``split_slides`` を自動ページ分割で包む（長いトピック教材を複数スライドへ）。
 
@@ -658,21 +724,25 @@ def auto_paginate_slides(
       ページ分割する（同期を壊さないための安全側）。
     - それ以外は従来どおり 1 スライド（``split_slides`` に委譲）。
 
+    ``figures``（Phase 4 図のコース流通 §7.2）は ``formulas`` と同様、display_text の
+    ``[[FIGURE_N]]`` プレースホルダーを頼りに各ページへ割り当てられる
+    （``_display_length`` が図1個=200字換算するため、ページ分割の目安計算にも反映される）。
+
     戻り値は ``split_slides`` と同形 ``(slides, mismatch)``。
     """
     if _SLIDE_MARKER_RE.search(display_text or "") or _SLIDE_MARKER_RE.search(spoken_text or ""):
-        return split_slides(display_text, spoken_text, formulas)
+        return split_slides(display_text, spoken_text, formulas, figures)
 
     if _display_length(display_text) <= max_chars:
-        return split_slides(display_text, spoken_text, formulas)
+        return split_slides(display_text, spoken_text, formulas, figures)
 
     units_d = _paragraph_units(display_text)
     if len(units_d) < 2:
-        return split_slides(display_text, spoken_text, formulas)
+        return split_slides(display_text, spoken_text, formulas, figures)
 
     groups_d = _group_units_by_size(units_d, max_chars)
     if len(groups_d) < 2:
-        return split_slides(display_text, spoken_text, formulas)
+        return split_slides(display_text, spoken_text, formulas, figures)
 
     n = len(groups_d)
     display_pages = ["\n\n".join(units_d[s:e]) for s, e in groups_d]
@@ -691,7 +761,7 @@ def auto_paginate_slides(
 
     display_marked = "\n===\n".join(display_pages)
     spoken_marked = "\n===\n".join(spoken_pages) if spoken_pages else ""
-    return split_slides(display_marked, spoken_marked, formulas)
+    return split_slides(display_marked, spoken_marked, formulas, figures)
 
 
 def count_slide_marker_segments(
@@ -811,21 +881,123 @@ def _resolve_equation_embeds(
     return result, formulas
 
 
-def build_topic_slides(topic: dict) -> tuple[list[dict], str, str, list[dict]]:
+# ---------------------------------------------------------------------------
+# 図記法の解決 (Phase 4: 図のコース流通, §7.2)
+# ---------------------------------------------------------------------------
+#
+# 記法 ``![[figure:<figure_id>]]``（figure_id = document_figures.id の UUID）を
+# ``[[FIGURE_N]]`` プレースホルダーに解決する。数式の ``![[equation:xxx]]`` →
+# ``[[FORMULA_N]]`` 解決と同格。core は DB を読まないため、caption/image_url 等の
+# 解決済みメタデータ（``figures_by_id``）は呼び出し側 routes が用意して渡す。
+# （``_FIGURE_EMBED_RE`` はスライド分割セクションで定義済み — ``_display_length`` が
+# 未解決 embed も 200字換算するために先出ししている）。
+
+
+def find_figure_embed_ids(text: str | None) -> list[str]:
+    """テキスト中の ``![[figure:<figure_id>]]`` 埋め込みが参照する figure_id 一覧を返す
+    （出現順・重複除去、DB を読まない純関数）。
+
+    学習者向け画像配信の「コース内容から実際に参照されているか」判定（§7.3 条件3）に使う。
+    """
+    if not text:
+        return []
+    seen: list[str] = []
+    for m in _FIGURE_EMBED_RE.finditer(text):
+        fig_id = m.group(1).strip()
+        if fig_id and fig_id not in seen:
+            seen.append(fig_id)
+    return seen
+
+
+def resolve_figure_embeds(
+    text: str | None,
+    figures_by_id: dict[str, dict] | None,
+) -> tuple[str, list[dict]]:
+    """``![[figure:<figure_id>]]`` 埋め込みを ``[[FIGURE_N]]`` プレースホルダーに解決する。
+
+    ``figures_by_id`` に無い（未供給・未知の）figure_id の埋め込みは、情報を落とさない
+    ために原文のまま残す（数式解決が「解決できなければ除去する」のとは異なる挙動 —
+    図は教員が後から供給し得るため）。
+
+    Parameters
+    ----------
+    figures_by_id : dict[str, dict] | None
+        ``figure_id -> {"caption": ..., "image_url": ...}`` の解決済みメタデータ。
+        DB は読まない（呼び出し側 routes が document_figures から用意する）。
+
+    Returns
+    -------
+    tuple[str, list[dict]]
+        ``(resolved_text, figures)``。``figures`` の各要素は
+        ``{"id": "[[FIGURE_N]]", "figure_id": str, "caption": str | None,
+        "explanation": None, "image_url": str | None}``。``id`` はスライド分割時の
+        割り当て（``_assign_slide_figures``）に使うプレースホルダー対応キー。
+        ``explanation`` は v1 では常に ``None``（後続エージェントが配線する）。
+    """
+    if not text:
+        return text or "", []
+
+    lookup = figures_by_id or {}
+    figures: list[dict] = []
+
+    def _replace(m: re.Match) -> str:
+        fig_id = m.group(1).strip()
+        meta = lookup.get(fig_id)
+        if meta is None:
+            # 未知/未供給の figure_id は原文のまま残す（情報を落とさない）。
+            # 空 dict（{}）はキー自体は存在する＝供給済みとみなし解決する
+            # （caption/image_url が未設定なだけ）。
+            return m.group(0)
+        idx = len(figures) + 1
+        placeholder = f"[[FIGURE_{idx}]]"
+        figures.append({
+            "id": placeholder,
+            "figure_id": fig_id,
+            "caption": meta.get("caption"),
+            "explanation": None,
+            "image_url": meta.get("image_url"),
+        })
+        return placeholder
+
+    resolved = _FIGURE_EMBED_RE.sub(_replace, text)
+    return resolved, figures
+
+
+def strip_figure_embeds(text: str | None) -> str:
+    """読み上げ原稿から ``![[figure:...]]`` 埋め込みを除去する（図は読み上げない、§7.2）。"""
+    if not text:
+        return text or ""
+    return _FIGURE_EMBED_RE.sub("", text)
+
+
+def build_topic_slides(
+    topic: dict,
+    figures_by_id: dict[str, dict] | None = None,
+) -> tuple[list[dict], str, str, list[dict]]:
     """トピック教材から、表示・音声・readiness が共有する正準スライドを決定論的に構築する。
 
     display=student_material、spoken=spoken_script（無ければ content/summary）を、数式
-    プレースホルダー正規化・``![[equation:xxx]]`` 解決のうえ ``auto_paginate_slides`` で
-    スライド分割する（``===`` マーカーがあれば教員の明示分割を優先、無く長い場合は段落
-    境界で自動ページ分割）。受講側（``_build_topic_draft_segment``）・studio の音声生成・
-    readiness の3者がこの関数を通ることで ``slide_index`` を完全一致させる。**LLM を使わない
-    ＝決定論的**（同期パスに非決定性を入れない）。
+    プレースホルダー正規化・``![[equation:xxx]]`` 解決・``![[figure:xxx]]`` 解決
+    （Phase 4 §7.2）のうえ ``auto_paginate_slides`` でスライド分割する（``===`` マーカーが
+    あれば教員の明示分割を優先、無く長い場合は段落境界で自動ページ分割）。受講側
+    （``_build_topic_draft_segment``）・studio の音声生成・readiness の3者がこの関数を
+    通ることで ``slide_index`` を完全一致させる。**LLM を使わない＝決定論的**
+    （同期パスに非決定性を入れない）。
+
+    Parameters
+    ----------
+    figures_by_id : dict[str, dict] | None
+        ``![[figure:xxx]]`` 埋め込み解決用の figure メタデータ（§7.2）。呼び出し側 routes
+        が document_figures から用意して渡す。省略時（None）は図埋め込みを解決せず
+        原文のまま残す（既存呼び出し元との後方互換）。読み上げ原稿からの図埋め込み除去
+        （``strip_figure_embeds``）は本引数の有無に関わらず常に行う（図は読み上げない）。
 
     Returns
     -------
     tuple[list[dict], str, str, list[dict]]
         ``(slide_dicts, display_text, spoken_text, formulas)``。教材が無ければ
-        ``([], "", "", [])``。
+        ``([], "", "", [])``。図メタデータは ``slide_dicts[i]["figures"]``
+        （スライド単位で割り当て済み）に含まれる。
     """
     display_text = topic_student_material(topic)
     spoken_text = topic_spoken_script(topic)
@@ -839,7 +1011,12 @@ def build_topic_slides(topic: dict) -> tuple[list[dict], str, str, list[dict]]:
     display_text, formulas = _resolve_equation_embeds(display_text, evidence_links, formulas)
     display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
 
-    slide_dicts, _mismatch = auto_paginate_slides(display_text, spoken_text, formulas)
+    # ![[figure:xxx]] 埋め込みを [[FIGURE_N]] プレースホルダーに解決する（Phase 4 §7.2）。
+    # 読み上げ原稿には図を含めない（spoken_text からは埋め込みを除去する）。
+    display_text, figures = resolve_figure_embeds(display_text, figures_by_id)
+    spoken_text = strip_figure_embeds(spoken_text)
+
+    slide_dicts, _mismatch = auto_paginate_slides(display_text, spoken_text, formulas, figures=figures)
     return slide_dicts, display_text, spoken_text, formulas
 
 

@@ -105,8 +105,14 @@ class TestSharedSlideBuilderForConsistency:
     通ること（slide_index 一致の要）。N18 で正本が routes から core へ移設された。"""
 
     def test_learner_segment_uses_shared_builder(self):
+        # Phase 4 図のコース流通 (§7.2): 学習者向け表示は figures_by_id も供給するため
+        # 呼び出し形が `build_topic_slides(topic, figures_by_id=figures_by_id)` に変わった
+        # （readiness/音声生成側は figures_by_id 無しの `build_topic_slides(topic)` のまま —
+        # _display_length が未解決 embed も 200字換算するため slide_index は一致し続ける）。
         src = LECTURE_PY.read_text(encoding="utf-8")
-        assert "build_topic_slides(topic)" in _extract_func(src, "_build_topic_draft_segment")
+        body = _extract_func(src, "_build_topic_draft_segment")
+        assert "build_topic_slides(" in body
+        assert "topic, figures_by_id=figures_by_id" in body
 
     def test_readiness_uses_shared_builder(self):
         src = CORE_LECTURE_PY.read_text(encoding="utf-8")

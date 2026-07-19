@@ -92,6 +92,11 @@ class CourseTopic(BaseModel):
 
     linked_component_ids: list[str] = Field(default_factory=list)
     linked_equation_ids: list[str] = Field(default_factory=list)
+    # Phase 4 §7.1 (hierarchical_context_explanation_design.md): figures backing
+    # this topic, derived deterministically by course_content_builder /
+    # CourseMappingAgent (component.source_scope.figure_id and figure_table_semantics
+    # linked_claim_ids reverse lookup). No migration needed (JSONB field).
+    linked_figure_ids: list[str] = Field(default_factory=list)
     source_evidence_ids: list[str] = Field(default_factory=list)
     teaching_takeaways: list[str] = Field(default_factory=list)
     material_chunk_ids: list[str] = Field(default_factory=list)

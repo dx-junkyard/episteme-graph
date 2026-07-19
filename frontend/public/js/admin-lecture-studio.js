@@ -1681,6 +1681,7 @@
       sourceEl.innerHTML = lsCourseDraftHtml(topic);
       sourceEl.hidden = false;
       lsBindCourseDraftControls(topic);
+      lsHydrateFigureEmbeds(sourceEl);
     }
     if (displayEl) {
       displayEl.value = lsTopicStudentMaterialSource(topic);
@@ -2439,6 +2440,27 @@
         });
         return;
       }
+      // 図（Figure のコース流通, 設計書 Phase4 §7.1）: course_content_builder が
+      // linked_component_ids / linked_claim_ids から決定論導出した evidence item。
+      // フィールドは figure_id / figure_key / document_id / caption（他 kind の
+      // target_id/id 方式とは別立て）。ref は figure:<figure_id>。
+      if (kind === "figure") {
+        var figId = link.figure_id || id;
+        items.push({
+          key: lsCourseEvidenceKey(kind, figId),
+          kind: kind,
+          id: figId,
+          figure_id: link.figure_id || figId,
+          figure_key: link.figure_key || "",
+          document_id: link.document_id || "",
+          title: "図: " + lsShortSummary(link.caption || figId || "図", 40),
+          summary: link.caption || "",
+          caption: link.caption || "",
+          role: link.support_role || "figure",
+          confidence: link.confidence || "",
+        });
+        return;
+      }
       // equation 以外（source の equation_quote 等）でも latex を持てる。
       // 旧データ互換: summary に生 TeX が入っている場合は latex に移し、
       // タイトル・本文に生 LaTeX 文字列を出さず数式として描画する。
@@ -2677,6 +2699,31 @@
           '<span class="ls-material-embed-summary">この数式IDに対応する数式本文を取得できませんでした。</span>' +
         '</button>';
       }
+      // 図（Figure のコース流通, 設計書 Phase4 §7.2）: ![[figure:id]] の解決。
+      // 画像は Authorization ヘッダ必須の admin endpoint（/admin/documents/{document_id}/
+      // figures/{figure_id}/image）からしか取得できないため、ここでは fetch 用パスを
+      // data-figure-fetch-path に仕込んだ <img> を描くだけに留め、実体は
+      // lsHydrateFigureEmbeds() が DOM 挿入後に apiFetchRaw + blob で取得する
+      // （admin.js の図サムネイル読込 loadFigureThumbnail と同じ方式）。
+      if (embed.kind === "figure") {
+        var figureItem = evidenceItem && evidenceItem.kind === "figure" ? evidenceItem : null;
+        if (figureItem && figureItem.figure_id && figureItem.document_id) {
+          var fetchPath = "/admin/documents/" + encodeURIComponent(figureItem.document_id) +
+            "/figures/" + encodeURIComponent(figureItem.figure_id) + "/image";
+          return '<figure class="material-figure ls-material-figure" data-evidence-ref="' + escHtml(key) + '">' +
+            '<span class="material-figure-frame">' +
+              '<img class="material-figure-img ls-figure-embed-img" data-figure-fetch-path="' + escHtml(fetchPath) + '" style="display:none" alt="' + escHtml(figureItem.caption || "図") + '">' +
+              '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
+            '</span>' +
+            (figureItem.caption ? '<figcaption class="material-figure-caption">' + escHtml(lsShortSummary(figureItem.caption, 200)) + '</figcaption>' : "") +
+          '</figure>';
+        }
+        return '<button type="button" class="ls-material-embed ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
+          '<span class="ls-material-embed-kind">未解決の図</span>' +
+          '<strong>' + escHtml(embedId || "図") + '</strong>' +
+          '<span class="ls-material-embed-summary">この図IDに対応する画像情報を取得できませんでした。</span>' +
+        '</button>';
+      }
       if (embed.kind === "source" && (embedId === "summary" || embedId === "topic_summary")) {
         return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-source" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">概要</span>' +
@@ -2713,6 +2760,51 @@
       '</button>';
     });
     return html || '<div class="ls-course-muted">教材プレビューは空です。</div>';
+  }
+
+  // lsCourseDraftHtml(topic) の innerHTML 差し替え後に呼ぶ。container 内の未取得
+  // <img data-figure-fetch-path>（![[figure:id]] の解決先）を apiFetchRaw + blob で
+  // 取得して差し替える（admin.js の loadFigureThumbnail と同じ方式。学習者向け同様
+  // Authorization ヘッダ必須のため <img src> を直接指定できない）。図が無い/未解決の
+  // ドラフトでは querySelectorAll が空になり何もしない（防御的スキップ）。
+  function lsHydrateFigureEmbeds(container) {
+    if (!container || !container.querySelectorAll) return;
+    if (container._lsFigureObjectUrls) {
+      container._lsFigureObjectUrls.forEach(function (u) {
+        try { URL.revokeObjectURL(u); } catch (e) { /* noop */ }
+      });
+    }
+    container._lsFigureObjectUrls = [];
+    container.querySelectorAll("img.ls-figure-embed-img[data-figure-fetch-path]").forEach(function (img) {
+      var path = img.getAttribute("data-figure-fetch-path");
+      img.removeAttribute("data-figure-fetch-path");
+      if (!path) { lsMarkFigureEmbedFailed(img); return; }
+      apiFetchRaw(path, { _noJson: true })
+        .then(function (res) {
+          if (!res.ok) throw new Error("figure image fetch failed");
+          return res.blob();
+        })
+        .then(function (blob) {
+          var url = URL.createObjectURL(blob);
+          container._lsFigureObjectUrls.push(url);
+          img.src = url;
+          img.style.display = "";
+          var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+          if (placeholder) placeholder.remove();
+        })
+        .catch(function () {
+          lsMarkFigureEmbedFailed(img);
+        });
+    });
+  }
+
+  function lsMarkFigureEmbedFailed(img) {
+    img.style.display = "none";
+    var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+    if (placeholder) {
+      placeholder.textContent = "画像を表示できません";
+      placeholder.classList.add("material-figure-missing");
+    }
   }
 
   function lsRenderWorkspace() {

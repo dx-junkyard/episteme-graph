@@ -72,6 +72,7 @@ from core.deliberation import (
     store as delib_store,
 )
 from core.library import search as library_search
+from core.library import store as library_store
 from core.deliberation.standardization import worker as standardization_worker
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
@@ -96,11 +97,52 @@ def _http_from_resolution_error(exc: ElementResolutionError) -> HTTPException:
 
 
 def _identity_link_response(link: dict[str, Any]) -> dict[str, Any]:
-    """同一性リンク行を API 応答用に整形する（W8: confidence は生値を返さずラベルのみ）。"""
+    """同一性リンク行を API 応答用に整形する（W8: confidence は生値を返さずラベルのみ）。
+
+    脱UUID（`hierarchical_context_explanation_design.md` §6）: ``shared_part_id`` が
+    指す L層エントリの name・summary 冒頭を同梱し、UI が生 UUID の代わりに読める
+    名前を表示できるようにする（deliberation.js の `_identityLinkRowHtml`）。
+    エントリが見つからない・読み取りに失敗した場合はキー自体を省略する
+    （fail-soft。UUID 自体は既存どおり ``shared_part_id`` に残るため情報は失われない）。
+    """
     response = dict(link)
     raw_confidence = response.pop("confidence", None)
     response["confidence_label"] = identity_links.confidence_label(raw_confidence)
+    shared_part_id = str(link.get("shared_part_id") or "").strip()
+    if shared_part_id:
+        try:
+            entry = library_store.get_entry(shared_part_id)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "deliberation: library entry lookup failed for shared_part_id=%s",
+                shared_part_id, exc_info=True,
+            )
+            entry = None
+        if entry:
+            response["shared_part_name"] = entry.get("name") or ""
+            response["shared_part_summary"] = str(entry.get("summary") or "")[:160]
     return response
+
+
+def _element_explanation_response(row: dict[str, Any]) -> dict[str, Any]:
+    """element_explanations の1行を overview 応答用に整形する（E6: confidence は
+    生値を返さずラベルのみ。承認 API（``routes/element_explanations.py`` の
+    ``_public_row``）と同じ変換方針を overview 応答でも独立に適用する）。
+    """
+    evidence = dict(row.get("evidence") or {})
+    raw_confidence = evidence.pop("confidence", None)
+    evidence["confidence_label"] = identity_links.confidence_label(raw_confidence)
+    return {
+        "id": row.get("id"),
+        "kind": row.get("kind"),
+        "body": row.get("body"),
+        "evidence": evidence,
+        "status": row.get("status"),
+        "created_by": row.get("created_by"),
+        "reviewed_by": row.get("reviewed_by"),
+        "reviewed_at": row.get("reviewed_at"),
+        "created_at": row.get("created_at"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +217,29 @@ def _apply_exemplar_image_gate(breakdown: dict[str, Any], current_user: dict) ->
     fields["exemplar_images_hidden_count"] = hidden
 
 
+def _apply_linked_instances_gate(breakdown: dict[str, Any], current_user: dict) -> None:
+    """shared_part の面①内訳（``fields.linked_instances``、設計書 §6 逆方向）を、
+    各インスタンスの由来 document の閲覧権限でフィルタする（W5: fail-closed）。
+
+    ``core.deliberation.decomposition._decompose_shared_part`` は per-user 権限を
+    判定できないため、confirmed な同一性リンクを持つインスタンス全件を返す
+    （``_confirmed_linked_instances``）。ここで閲覧不可 document 由来のインスタンスを
+    除外し、隠した件数を ``fields.linked_instances_hidden_count`` として正直に返す
+    （``_apply_exemplar_image_gate`` と同型のパターン。P4・出所の正直さ）。
+    """
+    fields = breakdown.get("fields")
+    if not isinstance(fields, dict):
+        return
+    instances = fields.get("linked_instances")
+    if not isinstance(instances, list) or not instances:
+        return
+    visible, hidden = _filter_by_document_view(
+        instances, "document_id", _make_document_view_checker(current_user)
+    )
+    fields["linked_instances"] = visible
+    fields["linked_instances_hidden_count"] = hidden
+
+
 def _apply_cross_corpus_gate(positioning_payload: dict[str, Any], current_user: dict) -> None:
     """面② cross_corpus レンズ（設計書 §4.2、Phase 1）の items を、各 item の由来
     document 閲覧権限でフィルタする（fail-closed・W5）。
@@ -245,6 +310,9 @@ def get_element_overview(
         # 継承する。凍結版スナップショット（frozen_content）に紛れ込む exemplar_images を
         # ここでフィルタする（レビュー指摘: 従来は無条件で返していた）。
         _apply_exemplar_image_gate(breakdown, current_user)
+        # 設計書 §6 shared_part 逆方向: confirmed な同一性リンクを持つインスタンス一覧
+        # （fields.linked_instances）も同じ理由で由来 document の閲覧権限を継承する。
+        _apply_linked_instances_gate(breakdown, current_user)
 
     # 面② 位置づけ（§4.1 論文内 / §4.3 分野の地図 / §4.4 承認・疑義）。positioning 全体が
     # 失敗しても overview 自体は面①内訳だけで返す（レンズ単位の fail-soft は positioning.py 側）。
@@ -291,11 +359,38 @@ def get_element_overview(
             "note": "コンテキスト投影の取得に失敗しました",
         }
 
+    # 説明（Phase 2, migration 056。`hierarchical_context_explanation_design.md` §5.2/§5.3）。
+    # focus 要素の element_explanations（candidate + approved のみ。dismissed/superseded は
+    # 除外）を同梱する。document スコープ要素のみ対象（element_explanations.element_type の
+    # 語彙に shared_part は無い）。context/positioning と同様、独立した try/except にする
+    # （fail-soft・この面の失敗が他の面の結果を握りつぶさない）。
+    try:
+        if ref.scope == SCOPE_DOCUMENT:
+            explanation_rows = decomposition.explanations_for_element(ref)
+            explanations_payload: dict[str, Any] = {
+                "available": True,
+                "items": [_element_explanation_response(r) for r in explanation_rows],
+            }
+        else:
+            explanations_payload = {
+                "available": False,
+                "note": "この要素型には説明がありません",
+            }
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deliberation element explanations failed for %s:%s", ref.element_type, ref.element_id, exc_info=True
+        )
+        explanations_payload = {
+            "available": False,
+            "note": "説明の取得に失敗しました",
+        }
+
     return {
         "ref": ref.to_dict(),
         "decomposition": breakdown,
         "positioning": positioning_payload,
         "context": context_payload,
+        "explanations": explanations_payload,
     }
 
 

@@ -514,6 +514,8 @@ def test_build_course_content_deletes_topic_lecture_audio_cache_after_regenerati
             result.fetchall.return_value = [("doc-1",)]
         elif "chunk_index ASC" in sql:
             result.fetchall.return_value = []
+        elif "FROM document_figures" in sql:
+            result.fetchall.return_value = []
         return result
 
     mock_session = MagicMock()
@@ -556,3 +558,286 @@ def test_build_course_content_deletes_topic_lecture_audio_cache_after_regenerati
     # より前に実行される（_save_course と同一トランザクションでまとめて確定するため）。
     save_indices = [i for i, c in enumerate(execute_calls) if "title = :title" in str(c.args[0])]
     assert save_indices and delete_indices[0] < save_indices[0]
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 §7.1 (hierarchical_context_explanation_design.md):
+# 図のコース流通 — evidence 供給（非LLM・決定論）
+# ---------------------------------------------------------------------------
+
+
+def test_collect_structured_content_builds_figure_claim_links():
+    """figure_table_semantics artifact の FigureRecord.linked_claim_ids から
+    claim_id → 図 の逆引き索引 (figure_claim_links) を構築すること。
+
+    図⇄claim リンクの正本は FigureRecord.linked_claim_ids の一箇所
+    （figure_concept_linking_design）で、claim 側には figure_ids が populate
+    されないため、ここで明示的に逆方向へたどる。
+    """
+    from core.course_content_builder import _collect_structured_content
+
+    artifacts_by_doc = {
+        "doc-1": {
+            "figure_table_semantics": {
+                "figures": [
+                    {
+                        "figure_id": "fig_2",
+                        "caption": "Figure 2. Apparatus overview.",
+                        "linked_claim_ids": ["clm_1", "clm_2"],
+                    },
+                    {
+                        "figure_id": "fig_5",
+                        "caption": "Figure 5. Unrelated figure.",
+                        "linked_claim_ids": [],
+                    },
+                ],
+            },
+        },
+    }
+
+    bundle = _collect_structured_content(artifacts_by_doc)
+    links = bundle["figure_claim_links"]
+
+    assert set(links.keys()) == {"clm_1", "clm_2"}
+    assert links["clm_1"] == [
+        {"document_id": "doc-1", "figure_key": "fig_2", "caption": "Figure 2. Apparatus overview."}
+    ]
+    assert links["clm_2"] == links["clm_1"]
+
+
+def test_load_document_figures_index_builds_dual_key_lookup():
+    """document_figures を figure_id (UUID) キーと document_id::figure_key キーの
+    両方で索引し、component 経由（figure_id 既知）と claim 逆引き経由
+    （document_id+figure_key しか分からない）の両方の解決経路を賄うこと。"""
+    from core.course_content_builder import _load_document_figures_index
+
+    mock_session = MagicMock()
+    mock_session.execute.return_value.fetchall.return_value = [
+        ("fig-uuid-1", "doc-1", "fig_2", "Figure 2. Apparatus overview."),
+    ]
+
+    index = _load_document_figures_index(mock_session, ["doc-1"])
+
+    assert index["fig-uuid-1"]["figure_key"] == "fig_2"
+    assert index["fig-uuid-1"]["document_id"] == "doc-1"
+    assert index["fig-uuid-1"]["caption"] == "Figure 2. Apparatus overview."
+    assert index["doc-1::fig_2"] is index["fig-uuid-1"]
+
+    call = mock_session.execute.call_args
+    assert "FROM document_figures" in str(call.args[0])
+    assert call.args[1] == {"did_0": "doc-1"}
+
+
+def test_load_document_figures_index_empty_document_ids_skips_query():
+    from core.course_content_builder import _load_document_figures_index
+
+    mock_session = MagicMock()
+    assert _load_document_figures_index(mock_session, []) == {}
+    mock_session.execute.assert_not_called()
+
+
+def test_resolve_figure_ref_prefers_figure_id_then_falls_back_to_composite_key():
+    from core.course_content_builder import _resolve_figure_ref
+
+    entry = {"figure_id": "fig-uuid-1", "figure_key": "fig_2", "document_id": "doc-1", "caption": "c"}
+    index = {"fig-uuid-1": entry, "doc-1::fig_2": entry}
+
+    assert _resolve_figure_ref(index, figure_id="fig-uuid-1") is entry
+    assert _resolve_figure_ref(index, document_id="doc-1", figure_key="fig_2") is entry
+    # figure_id が索引に無ければ document_id+figure_key へフォールバックする。
+    assert _resolve_figure_ref(index, figure_id="missing", document_id="doc-1", figure_key="fig_2") is entry
+    # どちらの経路でも解決できなければ None（id を発明しない）。
+    assert _resolve_figure_ref(index, figure_id="missing", document_id="doc-2", figure_key="fig_2") is None
+    assert _resolve_figure_ref(index) is None
+
+
+def test_topic_evidence_links_surfaces_figure_via_component_source_scope():
+    """経路1: 装置候補コンポーネントの source_scope.figure_id/figure_key から
+    図を根拠化する（apparatus_components.py が付与する source_scope）。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [
+        {
+            "component_id": "comp_apparatus_1",
+            "document_id": "doc-1",
+            "summary": "測定装置の構成コンポーネント",
+            "source_scope": {
+                "source": "apparatus_semantics",
+                "document_id": "doc-1",
+                "figure_id": "fig-uuid-1",
+                "figure_key": "fig_2",
+            },
+        },
+    ]
+    figures_index = {
+        "fig-uuid-1": {
+            "figure_id": "fig-uuid-1",
+            "figure_key": "fig_2",
+            "document_id": "doc-1",
+            "caption": "Figure 2. Schematic of the detector setup.",
+        },
+    }
+
+    links = _topic_evidence_links(components, [], {}, {}, "high", figures_index=figures_index)
+    figure_links = [l for l in links if l["kind"] == "figure"]
+
+    assert len(figure_links) == 1
+    fig_link = figure_links[0]
+    assert fig_link["target_id"] == "fig-uuid-1"
+    assert fig_link["figure_id"] == "fig-uuid-1"
+    assert fig_link["figure_key"] == "fig_2"
+    assert fig_link["document_id"] == "doc-1"
+    assert fig_link["caption"] == "Figure 2. Schematic of the detector setup."
+
+
+def test_topic_evidence_links_surfaces_figure_via_claim_reverse_lookup():
+    """経路2: component の linked_claim_ids → FigureRecord.linked_claim_ids の
+    逆引き (figure_claim_links) を辿って、claim を支持する図を根拠化する。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [
+        {
+            "component_id": "comp_1",
+            "document_id": "doc-1",
+            "summary": "測定結果を説明するコンポーネント",
+            "linked_claim_ids": ["clm_1"],
+        },
+    ]
+    claims = {"clm_1": {"claim_id": "clm_1", "normalized_text": "測定値は理論予測と一致する"}}
+    figure_claim_links = {
+        "clm_1": [{"document_id": "doc-1", "figure_key": "fig_3", "caption": "Figure 3. Result comparison."}],
+    }
+    figures_index = {
+        "doc-1::fig_3": {
+            "figure_id": "fig-uuid-3",
+            "figure_key": "fig_3",
+            "document_id": "doc-1",
+            "caption": "Figure 3. Result comparison.",
+        },
+        "fig-uuid-3": {
+            "figure_id": "fig-uuid-3",
+            "figure_key": "fig_3",
+            "document_id": "doc-1",
+            "caption": "Figure 3. Result comparison.",
+        },
+    }
+
+    links = _topic_evidence_links(
+        components, [], claims, {}, "high",
+        figures_index=figures_index,
+        figure_claim_links=figure_claim_links,
+    )
+    figure_links = [l for l in links if l["kind"] == "figure"]
+
+    assert len(figure_links) == 1
+    assert figure_links[0]["target_id"] == "fig-uuid-3"
+    assert figure_links[0]["figure_key"] == "fig_3"
+    # claim 自体も従来どおり根拠化される（figure 追加が既存 kind を壊さない）。
+    assert ("claim", "clm_1") in {(l["kind"], l["target_id"]) for l in links}
+
+
+def test_topic_evidence_links_figure_skipped_when_unresolvable():
+    """figures_index で解決できない figure_id/figure_key は根拠化しない
+    （document_figures.id を発明しない。P4 の正直な縮退）。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [
+        {
+            "component_id": "comp_apparatus_1",
+            "document_id": "doc-1",
+            "linked_claim_ids": ["clm_1"],
+            "source_scope": {"figure_id": "fig-uuid-unknown", "figure_key": "fig_9"},
+        },
+    ]
+    claims = {"clm_1": {"claim_id": "clm_1", "normalized_text": "..."}}
+    figure_claim_links = {
+        "clm_1": [{"document_id": "doc-1", "figure_key": "fig_unresolved", "caption": "..."}],
+    }
+
+    links = _topic_evidence_links(
+        components, [], claims, {}, "high",
+        figures_index={},
+        figure_claim_links=figure_claim_links,
+    )
+
+    assert not [l for l in links if l["kind"] == "figure"]
+
+
+def test_topic_evidence_links_figure_deduplicates_across_routes():
+    """同じ図が経路1（component）と経路2（claim 逆引き）の両方から到達しても
+    根拠リンクは1件にまとまること。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [
+        {
+            "component_id": "comp_apparatus_1",
+            "document_id": "doc-1",
+            "linked_claim_ids": ["clm_1"],
+            "source_scope": {"figure_id": "fig-uuid-1", "figure_key": "fig_2"},
+        },
+    ]
+    claims = {"clm_1": {"claim_id": "clm_1", "normalized_text": "..."}}
+    figure_claim_links = {
+        "clm_1": [{"document_id": "doc-1", "figure_key": "fig_2", "caption": "Figure 2."}],
+    }
+    figures_index = {
+        "fig-uuid-1": {
+            "figure_id": "fig-uuid-1",
+            "figure_key": "fig_2",
+            "document_id": "doc-1",
+            "caption": "Figure 2.",
+        },
+        "doc-1::fig_2": {
+            "figure_id": "fig-uuid-1",
+            "figure_key": "fig_2",
+            "document_id": "doc-1",
+            "caption": "Figure 2.",
+        },
+    }
+
+    links = _topic_evidence_links(
+        components, [], claims, {}, "high",
+        figures_index=figures_index,
+        figure_claim_links=figure_claim_links,
+    )
+
+    assert len([l for l in links if l["kind"] == "figure"]) == 1
+
+
+def test_topic_evidence_for_prompt_includes_figure_reference():
+    """kind='figure' の evidence_links も available_references に流れ、
+    `![[figure:id]]` が発明でなく供給された id で埋め込めること。"""
+    from core.course_content_builder import _topic_evidence_for_prompt
+
+    topic = {
+        "evidence_links": [
+            {"kind": "component", "target_id": "comp_001", "summary": "..."},
+            {
+                "kind": "figure",
+                "target_id": "fig-uuid-1",
+                "summary": "Figure 2.",
+                "figure_id": "fig-uuid-1",
+                "figure_key": "fig_2",
+                "document_id": "doc-1",
+                "caption": "Figure 2. Apparatus overview.",
+            },
+        ],
+    }
+
+    refs = _topic_evidence_for_prompt(topic)["available_references"]
+    assert {"kind": "figure", "id": "fig-uuid-1"} in refs
+
+
+def test_course_content_draft_prompt_documents_figure_embed_syntax():
+    """Phase 4 §7.1 の申し送り事項: `_COURSE_CONTENT_DRAFT_PROMPT` の埋め込み記法一覧に
+    `![[figure:id]]` を明記し、供給された figure の id のみ使用可能であることを明示する
+    （evidence には figure が既に流れているため、LLM へ記法自体を教える）。"""
+    from core.course_content_builder import _COURSE_CONTENT_DRAFT_PROMPT
+
+    assert "![[figure:id]]" in _COURSE_CONTENT_DRAFT_PROMPT
+    # available_references にある figure の id のみ使用可、という制約が明文化されている
+    figure_lines = [
+        line for line in _COURSE_CONTENT_DRAFT_PROMPT.splitlines()
+        if "![[figure:id]]" in line
+    ]
+    assert any("available_references" in line for line in figure_lines)

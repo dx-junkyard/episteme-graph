@@ -13,6 +13,10 @@ class CourseTopicMapping:
     # Issue #418: only derivations relevant to the topic's components are linked,
     # determined from the linked components (not attached indiscriminately).
     linked_derivation_ids: list[str] = field(default_factory=list)
+    # Phase 4 §7.1 (hierarchical_context_explanation_design.md): figures backing
+    # this topic's component(s), derived deterministically (non-LLM) from
+    # `component.source_scope.figure_id` -- never attached indiscriminately.
+    linked_figure_ids: list[str] = field(default_factory=list)
     learning_objectives: list[str] = field(default_factory=list)
     prerequisite_concepts: list[str] = field(default_factory=list)
     introduced_concepts: list[str] = field(default_factory=list)

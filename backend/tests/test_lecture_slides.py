@@ -38,6 +38,7 @@ class TestSplitSlidesNoMarker:
             "display_text": "Hello world",
             "spoken_text": "Spoken hello",
             "formulas": [],
+            "figures": [],
         }]
 
     def test_none_display_and_spoken_yields_single_empty_slide(self):

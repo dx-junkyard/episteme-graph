@@ -19,6 +19,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
 from schemas import (
+    LectureFigureItem,
     LectureFormulaItem,
     LectureInterruptRequest,
     LectureInterruptResponse,
@@ -36,6 +37,7 @@ from services import (
 )
 from core.course_data import (
     course_source_material_ids,
+    course_sources,
     course_title as _course_title,
     find_course_topic,
 )
@@ -55,6 +57,7 @@ from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
+from core import element_explanations
 
 logger = logging.getLogger(__name__)
 
@@ -602,6 +605,156 @@ def _is_valid_uuid(value: str) -> bool:
 # import しない）。
 
 
+def _resolve_course_document_ids(material_ids: list[str]) -> list[str]:
+    """コースソースの ``material_id``（``documents.source_path``）を ``documents.id``
+    （UUID 文字列）へ解決する（Phase 4 図のコース流通 §7.1/§7.2）。
+
+    ``document_figures.document_id`` は常に ``documents.id`` で保存される
+    （figure_image_extraction が orchestrator の document_id をそのまま使うため。
+    routes/admin.py の図配信エンドポイントと同じ前提）。
+    """
+    if not material_ids:
+        return []
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+        params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+        rows = session.execute(
+            sa_text(f"SELECT id::text FROM documents WHERE source_path IN ({placeholders})"),
+            params,
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    except Exception:
+        logger.warning("Failed to resolve document ids for course materials", exc_info=True)
+        return []
+    finally:
+        session.close()
+
+
+def _course_document_ids(course_data: dict) -> list[str]:
+    """コースの ``sources[]`` から document_id 集合を導出する（``documents.id`` 単位、
+    重複除去。Phase 4 図のコース流通 §7.1/§7.3 条件2）。
+
+    ``sources[].document_id``（書き手不在の読み取り専用フィールドだが、
+    ``theory_components.py`` が既に読んでいる既存フィールドのため、明示された分は
+    そのまま採用する）と、``material_id``（``documents.source_path``）から解決した
+    document_id の両方を合わせる。
+    """
+    explicit_ids = [
+        str(s["document_id"]) for s in course_sources(course_data) if s.get("document_id")
+    ]
+    resolved_ids = _resolve_course_document_ids(course_source_material_ids(course_data))
+    return list(dict.fromkeys(explicit_ids + resolved_ids))
+
+
+def _load_course_figures_by_id(course_id: str, course_data: dict) -> dict[str, dict]:
+    """コースのソース教材に属する ``document_figures`` を、``core.lecture`` の記法解決
+    （``resolve_figure_embeds``）が使う ``figure_id -> {"caption", "image_url"}`` へ変換する
+    （Phase 4 図のコース流通 §7.1/§7.2）。
+
+    ``core/`` は DB を読まない方針のため、この供給は routes 層の責務。学習者向け
+    ``image_url`` は 3条件 fail-closed ゲート付きの学習者エンドポイント
+    （``GET /api/learning/courses/{course_id}/figures/{figure_id}/image``）を指す。
+
+    ``document_id`` も同梱する（``core.lecture`` の記法解決自体は使わないが、
+    Phase 2 §5.3 の説明充填 ``_attach_figure_explanations`` が element_explanations を
+    document 単位でグルーピングして読むために必要）。
+    """
+    document_ids = _course_document_ids(course_data)
+    if not document_ids:
+        return {}
+
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":did_{i}" for i in range(len(document_ids)))
+        params: dict = {f"did_{i}": did for i, did in enumerate(document_ids)}
+        rows = session.execute(
+            sa_text(f"""
+                SELECT id::text, caption_text, document_id
+                FROM document_figures
+                WHERE document_id IN ({placeholders}) AND status = 'extracted'
+            """),
+            params,
+        ).fetchall()
+    except Exception:
+        logger.warning("Failed to load course figures for course %s", course_id, exc_info=True)
+        return {}
+    finally:
+        session.close()
+
+    figures_by_id: dict[str, dict] = {}
+    for row in rows:
+        fig_id = str(row[0])
+        figures_by_id[fig_id] = {
+            "caption": row[1],
+            "image_url": f"/api/learning/courses/{course_id}/figures/{fig_id}/image",
+            "document_id": str(row[2]) if row[2] else None,
+        }
+    return figures_by_id
+
+
+def _attach_figure_explanations(
+    figures: list[dict],
+    figures_by_id: dict[str, dict],
+) -> None:
+    """図デスクリプタ（dict、``resolve_figure_embeds``/``build_topic_slides`` 由来）に、
+    承認済み contextual 説明を充填する（Phase 2 §5.3・element_explanations 由来）。
+
+    ``figures`` の各要素を in-place で書き換える（``explanation`` フィールドのみ）。
+    ``figures_by_id`` の各エントリの ``document_id``（``_load_course_figures_by_id`` が
+    付与する）でグルーピングし、``element_explanations.approved_for_elements`` を
+    document 単位で（コースのソース document 数ぶんだけ、通常1回）呼ぶ —
+    スライド/チャンク単位ループでの N+1 呼び出しを避ける。
+
+    approved の ``kind='contextual'`` のみを採用する（generic はここでは使わない —
+    descriptor は「この論文での役割」を示す文脈説明の場であるため。学習者へは
+    candidate/dismissed/superseded を一切出さない — ``approved_for_elements`` が
+    ``status='approved'`` のみ返すため混入しない、E2）。
+    """
+    referenced_ids = {
+        str(fig.get("figure_id") or "").strip()
+        for fig in figures
+        if isinstance(fig, dict) and fig.get("figure_id")
+    }
+    referenced_ids.discard("")
+    if not referenced_ids:
+        return
+
+    by_document: dict[str, list[str]] = {}
+    for fig_id in referenced_ids:
+        doc_id = (figures_by_id.get(fig_id) or {}).get("document_id")
+        if doc_id:
+            by_document.setdefault(str(doc_id), []).append(fig_id)
+    if not by_document:
+        return
+
+    explanations: dict[str, str] = {}
+    session = _pg_session()
+    try:
+        for doc_id, fig_ids in by_document.items():
+            refs = [(element_explanations.ELEMENT_TYPE_FIGURE, fid) for fid in fig_ids]
+            approved = element_explanations.approved_for_elements(session, doc_id, refs)
+            for (_etype, eid), rows in approved.items():
+                for row in rows:
+                    if row.get("kind") == element_explanations.KIND_CONTEXTUAL and row.get("body"):
+                        explanations[eid] = row["body"]
+                        break
+    except Exception:
+        logger.warning("Failed to load approved figure explanations", exc_info=True)
+        return
+    finally:
+        session.close()
+
+    if not explanations:
+        return
+    for fig in figures:
+        if not isinstance(fig, dict):
+            continue
+        fig_id = str(fig.get("figure_id") or "").strip()
+        if fig_id and fig_id in explanations:
+            fig["explanation"] = explanations[fig_id]
+
+
 def _build_topic_draft_segment(
     course_id: str,
     topic_id: str,
@@ -614,14 +767,26 @@ def _build_topic_draft_segment(
     受講画面の非レクチャー教材表示（``get_topic_material``）と同じ student_material を
     ``display_text`` に、``spoken_script`` を ``spoken_text`` に割り当て、
     ``core.lecture.build_topic_slides`` でスライド分割する（長い教材は段落境界で自動ページ
-    分割）。各スライドの音声は ``topic_lecture_audio_cache``
-    （``(course_id, topic_id, slide_index)``）から解決し、キャッシュ済みスライドは
-    ``has_audio=True`` にする（教員が原稿スタジオで生成済みなら実声で読み上げ、無ければ
-    受講側でタイマー送りにフォールバックする。§6-4）。
+    分割）。``![[figure:id]]`` 埋め込みはコースのソース教材に属する document_figures から
+    解決し（Phase 4 §7.2）、各スライドの ``figures`` に割り当てる。各スライドの音声は
+    ``topic_lecture_audio_cache``（``(course_id, topic_id, slide_index)``）から解決し、
+    キャッシュ済みスライドは ``has_audio=True`` にする（教員が原稿スタジオで生成済みなら
+    実声で読み上げ、無ければ受講側でタイマー送りにフォールバックする。§6-4）。
     """
-    slide_dicts, display_text, spoken_text, formulas = build_topic_slides(topic)
+    figures_by_id = _load_course_figures_by_id(course_id, course_data)
+    slide_dicts, display_text, spoken_text, formulas = build_topic_slides(
+        topic, figures_by_id=figures_by_id,
+    )
     if not slide_dicts:
         return None
+
+    # 図デスクリプタに承認済み contextual 説明を充填する（Phase 2 §5.3）。slide_dicts の
+    # 各スライドの "figures" は同一 dict オブジェクトへの参照（コピーではない）なので、
+    # ここで in-place に書き換えれば以降の segment_figures 集約にも反映される。
+    _attach_figure_explanations(
+        [fig for sd in slide_dicts for fig in sd.get("figures", [])],
+        figures_by_id,
+    )
 
     # 各スライドの音声は topic_lecture_audio_cache から解決する（教員が生成済みなら has_audio=True）。
     topic_audio_map = _get_topic_slide_audio_map(course_id, topic_id)
@@ -631,11 +796,16 @@ def _build_topic_draft_segment(
             display_text=sd["display_text"],
             spoken_text=sd["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
+            figures=[LectureFigureItem(**f) for f in sd.get("figures", [])],
             has_audio=sd["slide_index"] in topic_audio_map,
             duration_ms=topic_audio_map.get(sd["slide_index"], 0),
         )
         for sd in slide_dicts
     ]
+
+    # セグメント全体の figures はスライド単位の割り当てから合成する（formulas と同じ規約:
+    # build_topic_slides は display_text 全体から解決した figures をスライドに分配済み）。
+    segment_figures = [fig for sd in slide_dicts for fig in sd.get("figures", [])]
 
     return LectureSegment(
         chunk_id=f"topic:{topic_id}",
@@ -643,6 +813,7 @@ def _build_topic_draft_segment(
         text=display_text,
         spoken_text=spoken_text,
         formulas=[LectureFormulaItem(**f) for f in formulas],
+        figures=[LectureFigureItem(**f) for f in segment_figures],
         has_audio=bool(topic_audio_map),
         duration_ms=0,
         segment_mode="full",

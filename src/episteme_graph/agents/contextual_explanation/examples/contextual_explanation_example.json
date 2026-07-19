@@ -1,0 +1,65 @@
+{
+  "_comment": "Sample input/output pair for ContextualExplanationAgent (design §5.1). Not consumed by code; for human reference and as a fixture source for tests.",
+  "input": {
+    "elements": [
+      {
+        "element_type": "theory_component",
+        "element_id": "main_theory_basis",
+        "local_text": "Defines the effective operators and couplings used throughout the analysis.",
+        "upper_context": [
+          {
+            "relation": "supports",
+            "kind": "thesis",
+            "text": "A single consistency relation links the three measured decay ratios."
+          }
+        ],
+        "lower_context": [
+          {
+            "relation": "constructed_from",
+            "kind": "equation",
+            "text": "eq_2_1 defines the effective Hamiltonian in terms of Wilson coefficients C_i."
+          }
+        ],
+        "library_excerpt": {
+          "entry_id": "lib_effective_hamiltonian",
+          "version_no": 3,
+          "name": "Effective Hamiltonian (weak decays)",
+          "summary": "A low-energy effective description of weak decays via short-distance Wilson coefficients.",
+          "body_excerpt": "The effective Hamiltonian approach integrates out heavy degrees of freedom, leaving a set of local operators weighted by Wilson coefficients that encode the short-distance physics."
+        }
+      },
+      {
+        "element_type": "figure",
+        "element_id": "fig_3_1",
+        "local_text": "Figure 3.1: Schematic of the detector apparatus used for the ratio measurement.",
+        "upper_context": [],
+        "lower_context": [],
+        "library_excerpt": null
+      }
+    ]
+  },
+  "output": {
+    "elements": [
+      {
+        "element_id": "main_theory_basis",
+        "element_type": "theory_component",
+        "contextual_explanation": "This component defines the effective operators and couplings that the paper's central consistency relation ultimately relies on. It is constructed from eq_2_1, which writes the effective Hamiltonian in terms of Wilson coefficients, so every downstream observable ratio traces back to these definitions.",
+        "generic_explanation": "An effective Hamiltonian is a low-energy description of weak decays in which heavy degrees of freedom are integrated out, leaving local operators weighted by Wilson coefficients that carry the short-distance physics.",
+        "evidence_quote": "A single consistency relation links the three measured decay ratios.",
+        "reason": "grounded in upper_context (thesis excerpt) and lower_context (eq_2_1); generic_explanation rephrases library_excerpt lib_effective_hamiltonian",
+        "confidence": 0.82,
+        "skipped_reason": null
+      },
+      {
+        "element_id": "fig_3_1",
+        "element_type": "figure",
+        "contextual_explanation": null,
+        "generic_explanation": null,
+        "evidence_quote": "",
+        "reason": "",
+        "confidence": 0.0,
+        "skipped_reason": "no_context_available"
+      }
+    ]
+  }
+}

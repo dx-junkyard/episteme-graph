@@ -1301,6 +1301,14 @@ def delete_material(
             {"doc_id": doc_id, "material_id": material_id},
         )
 
+        # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳:
+        # document_id は element_annotations 等と異なり documents.id に準拠する
+        # UUID 列（FK 無し）なので material_id 形は不要（孤児防止。_purge_document と同じ）。
+        session.execute(
+            sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:doc_id AS uuid)"),
+            {"doc_id": doc_id},
+        )
+
         # 4) ドキュメント削除
         session.execute(
             sa_text("DELETE FROM documents WHERE id = :doc_id"),
