@@ -22,6 +22,15 @@ class FakeResult:
     def fetchall(self):
         return list(self._rows)
 
+    def mappings(self):
+        """dict 行 (atlas_lifecycle._affected_courses_for_domain 用) はそのまま自身を返す。
+
+        呼び出し側は ``.mappings().fetchall()`` で dict-like 行 (``row["id"]`` 等) を
+        期待するため、rows が既に dict のときは self で十分 (SQLAlchemy の RowMapping
+        の完全互換は不要)。
+        """
+        return self
+
 
 class AtlasSkeletonTableFake:
     """atlas_skeletons のインメモリ実装 + learning_courses の最小模倣。
@@ -34,6 +43,9 @@ class AtlasSkeletonTableFake:
         # atlas_skeletons 行: {domain_key,status,version,content,revision,generated_by,seq}
         self.skeleton_rows: list[dict] = []
         self._seq = 0
+        # atlas_domain_meta 行 (migration 028 + 057): domain_key → {name, description,
+        # target_domain, concept_vocabulary, lifecycle, retired_at, retired_by, retire_note}
+        self.domain_meta: dict[str, dict] = {}
         # learning_courses: course_id → {"data": dict, "user_id": str}
         self.courses: dict[str, dict] = {}
         self.review_events: list[dict] = []
@@ -80,6 +92,8 @@ class AtlasSkeletonTableFake:
 
     # -- SQL ディスパッチ --
     def _dispatch(self, sql: str, p: dict) -> FakeResult:  # noqa: C901
+        if "atlas_domain_meta" in sql:
+            return self._dispatch_domain_meta(sql, p)
         if "atlas_skeletons" in sql:
             return self._dispatch_skeletons(sql, p)
         if "theory_review_events" in sql and sql.startswith("INSERT"):
@@ -96,6 +110,34 @@ class AtlasSkeletonTableFake:
                 and str(e.get("changed_by") or "") == uid
             )
             return FakeResult([(n,)])
+        if sql.startswith("SELECT id, title, data FROM learning_courses"):
+            # atlas_lifecycle._affected_courses_for_domain (freeze-impact §4.4) の模倣。
+            # 行は dict で返す (.mappings().fetchall() で row["id"] 等のキーアクセスをする)。
+            domain_key = str(p.get("domain_key") or "")
+            rows = [
+                {
+                    "id": cid,
+                    "title": (course.get("title") or course["data"].get("title") or cid),
+                    "data": course["data"],
+                }
+                for cid, course in self.courses.items()
+                if isinstance(course.get("data"), dict)
+                and course["data"].get("cartridge_id") == domain_key
+            ]
+            return FakeResult(rows)
+
+        if sql.startswith("SELECT DISTINCT user_id::text"):
+            # notification_recipients.atlas_bound_course_owner_ids (§3.4) の模倣。
+            domain_key = str(p.get("domain_key") or "")
+            owner_ids = {
+                str(course["user_id"])
+                for course in self.courses.values()
+                if isinstance(course.get("data"), dict)
+                and course["data"].get("cartridge_id") == domain_key
+                and course.get("user_id")
+            }
+            return FakeResult([(uid,) for uid in owner_ids])
+
         if "FROM learning_courses" in sql:
             course = self.courses.get(str(p.get("cid") or p.get("course_id") or ""))
             if not course:
@@ -152,6 +194,21 @@ class AtlasSkeletonTableFake:
                 out.append((r["domain_key"], r["status"], r["version"], r["revision"], rn))
             return FakeResult(out)
 
+        if sql.startswith("SELECT created_by::text AS uid FROM atlas_skeletons"):
+            # notification_recipients.atlas_skeleton_editor_ids (§3.4) の模倣
+            # (UNION の created_by / updated_by を合成して返す)。
+            uids = {
+                str(r.get("created_by"))
+                for r in self.skeleton_rows
+                if r["domain_key"] == domain_key and r.get("created_by")
+            }
+            uids |= {
+                str(r.get("updated_by"))
+                for r in self.skeleton_rows
+                if r["domain_key"] == domain_key and r.get("updated_by")
+            }
+            return FakeResult([(uid,) for uid in uids])
+
         if sql.startswith("INSERT INTO atlas_skeletons"):
             status = "draft" if "'draft'" in sql else "frozen"
             row = {
@@ -161,6 +218,8 @@ class AtlasSkeletonTableFake:
                 "content": json.loads(p["content"]),
                 "revision": 1,
                 "generated_by": str(p.get("generated_by") or ""),
+                "created_by": p.get("user_id"),
+                "updated_by": p.get("user_id"),
                 "seq": self._next_seq(),
             }
             if status == "frozen":
@@ -187,6 +246,8 @@ class AtlasSkeletonTableFake:
                     gen = str(p.get("generated_by") or "")
                     if gen:
                         r["generated_by"] = gen
+                    if p.get("user_id"):
+                        r["updated_by"] = p.get("user_id")
                     return FakeResult(rowcount=1)
             return FakeResult(rowcount=0)
 
@@ -200,6 +261,75 @@ class AtlasSkeletonTableFake:
             return FakeResult(rowcount=before - len(self.skeleton_rows))
 
         raise AssertionError(f"unhandled atlas_skeletons SQL: {sql}")
+
+    def _dispatch_domain_meta(self, sql: str, p: dict) -> FakeResult:  # noqa: C901
+        """atlas_domain_meta (migration 028 + 057 lifecycle 列) の最小模倣。"""
+        domain_key = str(p.get("domain_key") or "")
+
+        if sql.startswith("SELECT domain_key, name, lifecycle FROM atlas_domain_meta"):
+            # list_domains 用: 全行 (WHERE 無し)
+            rows = [
+                (key, meta.get("name", ""), meta.get("lifecycle", "active"))
+                for key, meta in self.domain_meta.items()
+            ]
+            return FakeResult(rows)
+
+        if sql.startswith("SELECT domain_key, name FROM atlas_domain_meta"):
+            rows = [(key, meta.get("name", "")) for key, meta in self.domain_meta.items()]
+            return FakeResult(rows)
+
+        if sql.startswith("SELECT domain_key FROM atlas_domain_meta"):
+            rows = [
+                (key,)
+                for key, meta in self.domain_meta.items()
+                if meta.get("lifecycle", "active") == "retired"
+            ]
+            return FakeResult(rows)
+
+        if sql.startswith("SELECT lifecycle FROM atlas_domain_meta"):
+            meta = self.domain_meta.get(domain_key)
+            if not meta:
+                return FakeResult()
+            return FakeResult([(meta.get("lifecycle", "active"),)])
+
+        if sql.startswith("SELECT name, description, target_domain, concept_vocabulary"):
+            meta = self.domain_meta.get(domain_key)
+            if not meta:
+                return FakeResult()
+            return FakeResult([(
+                meta.get("name", ""),
+                meta.get("description", ""),
+                json.dumps(meta.get("target_domain", [])),
+                meta.get("concept_vocabulary", ""),
+            )])
+
+        if sql.startswith("INSERT INTO atlas_domain_meta"):
+            existing = self.domain_meta.setdefault(domain_key, {"name": domain_key, "lifecycle": "active"})
+            if "retire_note" in sql:
+                # retire_domain(): upsert + lifecycle='retired'
+                existing["lifecycle"] = "retired"
+                existing["retired_at"] = "now"
+                existing["retired_by"] = p.get("user_id")
+                existing["retire_note"] = str(p.get("note") or "")
+            else:
+                # save_domain_meta(): 本文フィールドの upsert (lifecycle は変更しない)
+                existing["name"] = str(p.get("name") or domain_key)
+                existing["description"] = str(p.get("description") or "")
+                existing["target_domain"] = json.loads(p.get("target_domain") or "[]")
+                existing["concept_vocabulary"] = str(p.get("concept_vocabulary") or "")
+            return FakeResult(rowcount=1)
+
+        if sql.startswith("UPDATE atlas_domain_meta"):
+            # restore_domain(): lifecycle='active' + retired_at/by クリア
+            meta = self.domain_meta.get(domain_key)
+            if not meta:
+                return FakeResult(rowcount=0)
+            meta["lifecycle"] = "active"
+            meta["retired_at"] = None
+            meta["retired_by"] = None
+            return FakeResult(rowcount=1)
+
+        raise AssertionError(f"unhandled atlas_domain_meta SQL: {sql}")
 
 
 def make_session_factory(fake: AtlasSkeletonTableFake) -> Callable[[], Any]:

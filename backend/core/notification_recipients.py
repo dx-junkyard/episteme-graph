@@ -90,6 +90,47 @@ def course_group_member_ids(session, course_id: str, permissions: tuple[str, ...
     return [str(r[0]) for r in rows]
 
 
+def atlas_bound_course_owner_ids(session, domain_key: str) -> list[str]:
+    """domain_key（分野の地図の学習マップ）にバインド中のコースの所有者 user_id。
+
+    `learning_courses.data->>'cartridge_id' = domain_key` のコース所有者（重複除去）。
+    宛先の組み立て方針（骨格編集者との和・actor 除外）は呼び出し側
+    （`core/atlas_lifecycle.py::notify_atlas_event`）に置く（このモジュールの分業規約）。
+    """
+    if not domain_key:
+        return []
+    rows = session.execute(
+        sa_text("""
+            SELECT DISTINCT user_id::text
+            FROM learning_courses
+            WHERE data->>'cartridge_id' = :domain_key AND user_id IS NOT NULL
+        """),
+        {"domain_key": domain_key},
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def atlas_skeleton_editor_ids(session, domain_key: str) -> list[str]:
+    """domain の骨格 (`atlas_skeletons`) 編集履歴のある教員 user_id。
+
+    `created_by` / `updated_by` の和（重複除去）。「誰でも凍結できる共同財」の
+    透明性担保のため、生成者・更新者のどちらも当事者として扱う。
+    """
+    if not domain_key:
+        return []
+    rows = session.execute(
+        sa_text("""
+            SELECT created_by::text AS uid FROM atlas_skeletons
+             WHERE domain_key = :domain_key AND created_by IS NOT NULL
+            UNION
+            SELECT updated_by::text AS uid FROM atlas_skeletons
+             WHERE domain_key = :domain_key AND updated_by IS NOT NULL
+        """),
+        {"domain_key": domain_key},
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
 def document_legacy_group_visibility_member_ids(session, document_id: str) -> list[str]:
     """レガシー単一グループ共有（documents.visibility='group' + group_id）のメンバー user_id。
 

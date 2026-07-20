@@ -366,6 +366,15 @@
     if (n.kind === "course_script_failed") return t + "の原稿生成に失敗しました";
     if (n.kind === "course_audio_completed") return t + "の音声生成が完了しました";
     if (n.kind === "course_audio_failed") return t + "の音声生成に失敗しました";
+    // 分野マップ ドメインライフサイクル（migration 057, atlas_binding_lifecycle_design.md §3.4）
+    if (n.kind === "atlas_skeleton_frozen") {
+      var frozenPayload = n.payload || {};
+      return "分野マップ『" + (frozenPayload.domain_key || "") + "』の版 " + (frozenPayload.version || "?") + " が凍結されました";
+    }
+    if (n.kind === "atlas_domain_retired") {
+      var retiredPayload = n.payload || {};
+      return "分野マップ『" + (retiredPayload.domain_key || "") + "』が廃止されました";
+    }
     return t + "の更新";
   }
 

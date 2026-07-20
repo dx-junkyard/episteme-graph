@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,16 +20,18 @@ from pydantic import BaseModel, Field
 
 import services
 from core import atlas
+from core import atlas_lifecycle
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
-from core.course_data import course_cartridge_id, course_topics
+from core.course_data import course_atlas_binding_pending, course_cartridge_id, course_topics
 from core.schema import (
     AUDIT_ENTITY_ATLAS_ASSIST,
     AUDIT_ENTITY_ATLAS_BINDING,
     AUDIT_ENTITY_ATLAS_REPORT,
     AUDIT_ENTITY_ATLAS_SKELETON,
 )
+from core.status import cross_layer_notify
 from dependencies import _get_current_user, _require_teacher
 
 logger = logging.getLogger(__name__)
@@ -257,6 +260,11 @@ def generate_atlas_skeleton(
     body = body or GenerateSkeletonRequest()
     session = _skeleton_session()
     try:
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は廃止済みです。復帰してから編集してください",
+            )
         existing = atlas_store.load_draft(session, cartridge_id)
         domain_meta = body.domain or atlas_store.load_domain_meta(session, cartridge_id)
     finally:
@@ -341,6 +349,11 @@ def save_atlas_skeleton_draft(
 
     session = _skeleton_session()
     try:
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は廃止済みです。復帰してから編集してください",
+            )
         existing = atlas_store.load_draft(session, cartridge_id)
         existing_skeleton = existing["skeleton"] if existing else None
 
@@ -419,14 +432,25 @@ def freeze_atlas_skeleton(
     - 採用済みの修正報告 (Issue D) の報告者を changelog[].credits に自動で合流し、
       当該報告に applied_version を刻印してクローズする。pending の報告は
       新版へ引き継ぎ、id_migrations に従って対象 node_id を付け替える
+    - 凍結処理の前に凍結前の現行版 (DB) との影響プレビュー (§3.2/§4.4) を計算し、
+      レスポンスに含める。凍結成功後は関係教員へ通知する (§3.4, best-effort)
     """
     session = _skeleton_session()
     try:
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は廃止済みです。復帰してから編集してください",
+            )
         draft_row = atlas_store.load_draft(session, cartridge_id)
+        if draft_row is None:
+            raise HTTPException(status_code=404, detail="凍結対象の draft がありません")
+        current_frozen_for_impact = atlas_store.load_frozen_skeleton(session, cartridge_id)
+        freeze_impact = atlas_lifecycle.compute_freeze_impact(
+            session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
+        )
     finally:
         session.close()
-    if draft_row is None:
-        raise HTTPException(status_code=404, detail="凍結対象の draft がありません")
     draft = draft_row["skeleton"]
 
     # 採用済み報告の帰属を credits に合流する (受け入れ条件3)。
@@ -521,7 +545,176 @@ def freeze_atlas_skeleton(
             "reports_migrated": report_summary.get("migrated", 0),
         },
     )
-    return {"cartridge_id": cartridge_id, "frozen": _skeleton_payload(frozen)}
+
+    # 凍結時の通知 (§3.4)。best-effort — 通知の成否は凍結の成否に影響させない。
+    notified = 0
+    try:
+        from core.postgres import get_session as _get_notify_session
+
+        notify_session = _get_notify_session()
+        try:
+            notified = atlas_lifecycle.notify_atlas_event(
+                notify_session,
+                cartridge_id,
+                cross_layer_notify.NOTIF_ATLAS_SKELETON_FROZEN,
+                {
+                    "domain_key": cartridge_id,
+                    "version": body.version,
+                    "removed_node_count": len(freeze_impact.get("removed_node_ids") or []),
+                    "affected_course_count": len(freeze_impact.get("affected_courses") or []),
+                },
+                actor_id=str(current_user.get("id") or "") or None,
+            )
+        finally:
+            notify_session.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas skeleton freeze notify failed", exc_info=True)
+        notified = 0
+
+    return {
+        "cartridge_id": cartridge_id,
+        "frozen": _skeleton_payload(frozen),
+        "impact": freeze_impact,
+        "notified": notified,
+    }
+
+
+# ---------------------------------------------------------------------------
+# ドメインライフサイクル (migration 057, §3〜§4.3/§4.4)
+#
+# - retire / restore は状態遷移のみ (AB3: 削除しない)。retired ドメインは
+#   generate / draft 保存 / freeze が 409 (読み取り専用)。binding propose の照合対象
+#   からも除外される (照合ロジックは binding propose 側)。学習者向け読み取りは不変。
+# - freeze-impact は draft と現行凍結版 (DB) の node_id 差分 + 影響コースを返す読み取り
+#   専用 API。凍結エンドポイント自体も同じ計算を凍結前に行いレスポンスへ同梱する。
+# ---------------------------------------------------------------------------
+
+
+@router.get("/{cartridge_id}/atlas/freeze-impact")
+def get_atlas_freeze_impact(
+    cartridge_id: str, current_user: dict = Depends(_require_teacher)
+) -> dict:
+    """凍結前の影響プレビュー (§4.4)。draft と現行凍結版 (DB) の node_id 差分を返す。
+
+    draft が無ければ 404。現行凍結版が無ければ (初回凍結) removed は必ず空。
+    """
+    session = _skeleton_session()
+    try:
+        draft_row = atlas_store.load_draft(session, cartridge_id)
+        if draft_row is None:
+            raise HTTPException(status_code=404, detail="draft がありません")
+        frozen = atlas_store.load_frozen_skeleton(session, cartridge_id)
+        impact = atlas_lifecycle.compute_freeze_impact(
+            session, cartridge_id, draft_row["skeleton"], frozen
+        )
+    finally:
+        session.close()
+    return impact
+
+
+class RetireDomainRequest(BaseModel):
+    note: str = Field(default="", description="退場理由のメモ (任意)")
+
+
+@router.post("/{cartridge_id}/atlas/retire")
+def retire_atlas_domain(
+    cartridge_id: str,
+    body: RetireDomainRequest | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """domain を retired にする (§4.3)。
+
+    削除ではなく状態遷移のみ (AB3)。以後 binding propose の照合対象・候補から除外され、
+    generate / draft 保存 / freeze は 409 (読み取り専用) になる。既存の凍結版履歴・
+    バインド済みコースの学習者向け表示は不変。関係教員 (バインド中コース所有者 ∪
+    骨格編集履歴のある教員) へ通知する (§3.4, best-effort)。
+    """
+    body = body or RetireDomainRequest()
+    _ensure_domain_exists(cartridge_id)
+
+    session = _skeleton_session()
+    try:
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(status_code=409, detail="この分野は既に廃止済みです")
+        atlas_store.retire_domain(
+            session,
+            cartridge_id,
+            user_id=str(current_user.get("id") or "") or None,
+            note=body.note,
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        cartridge_id,
+        "active",
+        "retired",
+        current_user.get("id"),
+        {"action": "retire", "note": body.note},
+    )
+
+    notified = 0
+    try:
+        from core.postgres import get_session as _get_notify_session
+
+        notify_session = _get_notify_session()
+        try:
+            notified = atlas_lifecycle.notify_atlas_event(
+                notify_session,
+                cartridge_id,
+                cross_layer_notify.NOTIF_ATLAS_DOMAIN_RETIRED,
+                {"domain_key": cartridge_id, "note": body.note},
+                actor_id=str(current_user.get("id") or "") or None,
+            )
+        finally:
+            notify_session.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas domain retire notify failed", exc_info=True)
+        notified = 0
+
+    return {"cartridge_id": cartridge_id, "lifecycle": "retired", "notified": notified}
+
+
+@router.post("/{cartridge_id}/atlas/restore")
+def restore_atlas_domain(
+    cartridge_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """domain を active に戻す (§4.3)。監査のみ・通知はしない (pull 型の復帰操作)。"""
+    _ensure_domain_exists(cartridge_id)
+
+    session = _skeleton_session()
+    try:
+        if atlas_store.domain_lifecycle(session, cartridge_id) != "retired":
+            raise HTTPException(status_code=409, detail="この分野は廃止されていません")
+        atlas_store.restore_domain(
+            session, cartridge_id, user_id=str(current_user.get("id") or "") or None
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        cartridge_id,
+        "retired",
+        "active",
+        current_user.get("id"),
+        {"action": "restore"},
+    )
+    return {"cartridge_id": cartridge_id, "lifecycle": "active"}
 
 
 # ---------------------------------------------------------------------------
@@ -739,17 +932,26 @@ def propose_course_atlas_binding(
 ) -> dict:
     """コースの地図配置を決定論的に提案する (教員が確認して保存するまで確定しない)。
 
-    全 domain の凍結骨格に対し topic → 概念のカバレッジを算出して返す。
+    全 domain (retired を除く) の凍結骨格に対し topic → 概念のカバレッジを算出して返す。
     """
     session = _skeleton_session()
     try:
         course_data = _load_course_for_teacher(session, course_id, current_user)
         topics = [t for t in course_topics(course_data) if isinstance(t, dict)]
+        retired_keys = atlas_store.retired_domain_keys(session)
+        domains_checked = 0
+        retired_skipped = 0
         proposals: list[dict] = []
         for domain in atlas_store.list_domains(session):
-            skeleton = atlas_store.load_learner_skeleton(domain["domain_key"], session)
+            domain_key = domain["domain_key"]
+            skeleton = atlas_store.load_learner_skeleton(domain_key, session)
             if skeleton is None:
                 continue
+            if domain_key in retired_keys:
+                # retired ドメインは照合対象・候補から除外する (AB3・§4.1)。
+                retired_skipped += 1
+                continue
+            domains_checked += 1
             node_index = _skeleton_node_index(skeleton)
             bindings: list[dict] = []
             matched = 0
@@ -768,7 +970,7 @@ def propose_course_atlas_binding(
                 )
             proposals.append(
                 {
-                    "domain_key": domain["domain_key"],
+                    "domain_key": domain_key,
                     "frozen_version": skeleton.version,
                     "matched": matched,
                     "topic_count": len(topics),
@@ -792,6 +994,9 @@ def propose_course_atlas_binding(
         "current_cartridge_id": course_cartridge_id(course_data),
         "recommended": recommended,
         "proposals": proposals,
+        "domains_checked": domains_checked,
+        "retired_skipped": retired_skipped,
+        "atlas_binding_pending": course_atlas_binding_pending(course_data),
     }
 
 
@@ -814,6 +1019,11 @@ def save_course_atlas_binding(
         course_data = _load_course_for_teacher(session, course_id, current_user)
         known_nodes: dict[str, str] = {}
         if new_key:
+            if atlas_store.domain_lifecycle(session, new_key) == "retired":
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"domain '{new_key}' は廃止済みです。復帰してから指定してください",
+                )
             skeleton = atlas_store.load_learner_skeleton(new_key, session)
             if skeleton is None:
                 raise HTTPException(
@@ -827,6 +1037,8 @@ def save_course_atlas_binding(
             course_data["cartridge_id"] = new_key
         else:
             course_data.pop("cartridge_id", None)
+        # バインド保存が成功したら pending は自動クリアする (§2.3: 意思決定がなされたため)。
+        course_data.pop("atlas_binding_pending", None)
 
         requested = {
             str(b.get("topic_id") or ""): str(b.get("atlas_node_id") or "")
@@ -885,6 +1097,113 @@ def save_course_atlas_binding(
         "bindings_applied": applied,
         "bindings_skipped": skipped,
     }
+
+
+# ---------------------------------------------------------------------------
+# 凍結待ち仮予約 (pending binding, §2.3/§4.2) — コース起点で新分野を作成した際の
+# 「意思の記録」。バインド保存の確定とは独立し、バインド保存が成功したら自動クリアする。
+# ---------------------------------------------------------------------------
+
+_DOMAIN_KEY_SLUG_RE = re.compile(r"^[a-z0-9_]+$")
+
+
+class SetAtlasBindingPendingRequest(BaseModel):
+    domain_key: str = Field(description="仮予約する domain_key (スラッグ [a-z0-9_]+)")
+
+
+@binding_router.put("/{course_id}/atlas-binding/pending")
+def set_course_atlas_binding_pending(
+    course_id: str,
+    body: SetAtlasBindingPendingRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """凍結待ちドメインを仮予約する (§4.2)。コースの地図表示には一切影響しない。"""
+    from sqlalchemy import text as sa_text
+
+    domain_key = str(body.domain_key or "").strip()
+    if not domain_key or not _DOMAIN_KEY_SLUG_RE.match(domain_key):
+        raise HTTPException(
+            status_code=422,
+            detail="domain_key は英小文字・数字・アンダースコアのみ使えます",
+        )
+
+    session = _skeleton_session()
+    try:
+        course_data = _load_course_for_teacher(session, course_id, current_user)
+        if atlas_store.domain_lifecycle(session, domain_key) == "retired":
+            raise HTTPException(
+                status_code=422,
+                detail=f"domain '{domain_key}' は廃止済みです。復帰してから指定してください",
+            )
+        old_pending = course_atlas_binding_pending(course_data)
+        course_data["atlas_binding_pending"] = domain_key
+        session.execute(
+            sa_text(
+                "UPDATE learning_courses SET data = CAST(:data AS jsonb), "
+                "updated_at = now() WHERE id = :cid"
+            ),
+            {"cid": course_id, "data": json.dumps(course_data, ensure_ascii=False)},
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        course_id,
+        old_pending,
+        domain_key,
+        current_user.get("id"),
+        {"action": "atlas_binding_pending_set", "domain_key": domain_key},
+        entity_type=AUDIT_ENTITY_ATLAS_BINDING,
+    )
+    return {"course_id": course_id, "atlas_binding_pending": domain_key}
+
+
+@binding_router.delete("/{course_id}/atlas-binding/pending")
+def clear_course_atlas_binding_pending(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """凍結待ち仮予約を取り消す (§4.2)。予約が無くても 200 (冪等)。"""
+    from sqlalchemy import text as sa_text
+
+    session = _skeleton_session()
+    try:
+        course_data = _load_course_for_teacher(session, course_id, current_user)
+        old_pending = course_atlas_binding_pending(course_data)
+        course_data.pop("atlas_binding_pending", None)
+        session.execute(
+            sa_text(
+                "UPDATE learning_courses SET data = CAST(:data AS jsonb), "
+                "updated_at = now() WHERE id = :cid"
+            ),
+            {"cid": course_id, "data": json.dumps(course_data, ensure_ascii=False)},
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        course_id,
+        old_pending,
+        "",
+        current_user.get("id"),
+        {"action": "atlas_binding_pending_clear"},
+        entity_type=AUDIT_ENTITY_ATLAS_BINDING,
+    )
+    return {"course_id": course_id, "atlas_binding_pending": ""}
 
 
 # ---------------------------------------------------------------------------

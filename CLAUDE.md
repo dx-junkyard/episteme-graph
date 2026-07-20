@@ -495,6 +495,30 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
   対応しなければ `GET /api/atlas` は 404（骨格なし扱い→地図領域ごと非表示）。解析パイプ
   ラインは既定カートリッジで走るため、`document_analysis_runs` 由来の導出だけでは別分野
   コースに無関係な地図が出る（`atlas_state.course_has_skeleton_anchor`）。
+- **バインディングの該当なしUX + ドメインライフサイクル（migration 057）**: 正本は
+  `docs/features/atlas_binding_lifecycle_design.md`（一致ゼロは正常な状態＝発見、AB1）。
+  ①propose は retired ドメインを除外し `domains_checked` / `retired_skipped` /
+  `atlas_binding_pending` を返す。0一致時のフロント既定は「バインドしない」
+  （proposals[0] への fallback は廃止）で、出口3つ（手動対応 / 後回し=G層 To-Do /
+  コース起点の新分野作成）。topic 対応 0 件のまま cartridge_id を保存する時はフロントで
+  事実文 confirm（明示バインドのゲート免除自体は維持）。②新分野作成は
+  `PUT .../atlas-binding/pending`（`course_data.atlas_binding_pending`。読みは
+  `course_data.course_atlas_binding_pending`）→ 既存 generate（body.domain）の順。
+  バインド保存（解除含む）で pending は自動クリア。③ドメインは
+  `atlas_domain_meta.lifecycle`（active/retired）で `POST .../atlas/retire|restore`。
+  retired は propose 候補から除外・generate/draft保存/freeze は 409（読み取り専用、
+  L層 retired と同型）・**学習者表示は不変**（バインド済みコースの地図は出続ける）。
+  削除 API なし。④凍結前に `GET .../atlas/freeze-impact`（draft と現行凍結版の突合 +
+  バインド中コースの topic 影響、`core/atlas_lifecycle.compute_freeze_impact`）を
+  フロントが事実文 confirm で提示し、freeze レスポンスにも `impact` 同梱。⑤freeze /
+  retire は cross_layer_notify（kind=`atlas_skeleton_frozen` / `atlas_domain_retired`、
+  source='status'）で「バインド中コース所有者 + 骨格編集履歴のある教員」（actor 除外）へ
+  best-effort 通知（宛先 SQL は `notification_recipients.py`、方針の合成は
+  `core/atlas_lifecycle.notify_atlas_event`）。学習者・draft レビューには通知しない。
+  ⑥G層に `course.atlas_binding_ready`（pending の骨格が凍結された）/
+  `course.atlas_binding_stale`（バインド済み node_id が現行凍結版に無い）を追加
+  （いずれも recommended・capability `course.atlas_binding` 再利用）。
+  `course.no_atlas_binding` は pending 中のコースには出さない。
 - **フロントの fail-closed**: `atlas-data.js` は API 失敗時にフィクスチャへ退避しない
   （`null`＝非表示）。フィクスチャは `ATLAS_DATA_SOURCE=fixture` の明示時のみ。
   `/api/atlas` は `frontend/nginx.conf` の明示 proxy が必須（欠落すると SPA フォール

@@ -3364,7 +3364,9 @@
           atlasBindingPropose(
             newCourseId,
             document.getElementById("cb-atlas-binding-body"),
-            document.getElementById("cb-atlas-binding-status")
+            document.getElementById("cb-atlas-binding-status"),
+            null,
+            { courseTitle: draft.title || "", courseDescription: draft.description || "" }
           );
         }
 
@@ -3832,6 +3834,10 @@
     var tabPreview = document.getElementById("atlas-tab-preview");
     var assistToggle = document.getElementById("atlas-assist-toggle");
     var assistPanelEl = document.getElementById("atlas-assist-panel");
+    // ドメインライフサイクル（migration 057）: retire/restore ボタンと読み取り専用の注記
+    var retireBtn = document.getElementById("atlas-domain-retire");
+    var restoreBtn = document.getElementById("atlas-domain-restore");
+    var retiredNoteEl = document.getElementById("atlas-domain-retired-note");
     var hasDraft = false;
     var cartridgesLoaded = false;
     // migration 027: 楽観ロック。保存/生成は state 取得時の revision を添えて送る
@@ -3846,6 +3852,33 @@
     var latestAtlasCourses = [];
     // 新分野 (カートリッジファイル無し) の生成メタデータ: domain_key → {name, description}
     var pendingDomainMeta = {};
+    // ドメインライフサイクル（migration 057）: domain_key → "active" | "retired"
+    // meta 行の無いドメイン（同梱カートリッジ等）は active とみなす（未登録キーは既定 active）。
+    var domainLifecycles = {};
+
+    // retired 中は生成・保存・凍結を無効化し、retire/restore ボタンの表示を切り替える。
+    function updateLifecycleUI() {
+      var isRetired = !!select.value && domainLifecycles[select.value] === "retired";
+      if (retireBtn) retireBtn.style.display = (select.value && !isRetired) ? "" : "none";
+      if (restoreBtn) restoreBtn.style.display = isRetired ? "" : "none";
+      if (retiredNoteEl) retiredNoteEl.style.display = isRetired ? "" : "none";
+      if (generateBtn) generateBtn.disabled = isRetired;
+      var saveDraftBtn = document.getElementById("atlas-save-draft");
+      if (saveDraftBtn) saveDraftBtn.disabled = isRetired;
+      var freezeBtnEl = document.getElementById("atlas-freeze");
+      if (freezeBtnEl) freezeBtnEl.disabled = isRetired;
+    }
+
+    // select の <option> 表示ラベルに廃止済み表示を反映する（一覧の再取得はせず表示のみ更新）。
+    function refreshDomainOptionLabel(key, retired) {
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].value === key) {
+          var label = select.options[i].textContent.replace(/(?:\s*（廃止済み）)+$/, "");
+          select.options[i].textContent = retired ? (label + "（廃止済み）") : label;
+          return;
+        }
+      }
+    }
 
     function setStatus(text, isError) {
       statusEl.textContent = text || "";
@@ -4072,6 +4105,7 @@
         window.AtlasAssistPanel.notifyDraftChanged(draftRevision);
       }
       renderAtlasOverview();
+      updateLifecycleUI();
     }
 
     function loadState() {
@@ -4083,6 +4117,7 @@
         renderReports(null);
         setStatus("カートリッジを選択してください");
         renderAtlasOverview();
+        updateLifecycleUI();
         return;
       }
       setStatus("読み込み中...");
@@ -4313,16 +4348,22 @@
             if (d.domain_name && !names[d.domain_key]) {
               names[d.domain_key] = d.domain_name;
             }
+            // migration 057: ドメインライフサイクル。meta 行の無いキーは既定 active。
+            domainLifecycles[d.domain_key] = d.lifecycle || "active";
           });
           Object.keys(names).forEach(function (k) { keys[k] = true; });
           var sorted = Object.keys(keys).sort();
           sorted.forEach(function (k) {
-            addDomainOption(k, names[k] ? names[k] + " (" + k + ")" : k);
+            var label = names[k] ? names[k] + " (" + k + ")" : k;
+            if (domainLifecycles[k] === "retired") label += "（廃止済み）";
+            addDomainOption(k, label);
           });
           cartridgesLoaded = true;
           if (sorted.length === 1) {
             select.value = sorted[0];
             loadState();
+          } else {
+            updateLifecycleUI();
           }
         })
         .catch(function () { setStatus("分野一覧の取得に失敗しました", true); });
@@ -4390,6 +4431,68 @@
         select.value = key;
         addDomainForm.style.display = "none";
         runGenerate(false);
+      });
+    }
+
+    // ドメインライフサイクル（migration 057）: retire / restore。削除ではなく状態遷移のみ（AB3）。
+    if (retireBtn) {
+      retireBtn.addEventListener("click", function () {
+        if (!select.value) return;
+        if (!confirm("廃止すると新しいコースのバインド候補・照合対象から外れます。バインド済みコースの表示は維持されます。よろしいですか？")) return;
+        var key = select.value;
+        retireBtn.disabled = true;
+        apiFetch("/admin/cartridges/" + encodeURIComponent(key) + "/atlas/retire", {
+          method: "POST",
+          body: JSON.stringify({ note: "" }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok) {
+                var detail = body.detail;
+                throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+              }
+              return body;
+            });
+          })
+          .then(function () {
+            domainLifecycles[key] = "retired";
+            refreshDomainOptionLabel(key, true);
+            retireBtn.disabled = false;
+            setStatus("この分野を廃止しました");
+            loadState();
+          })
+          .catch(function (err) {
+            retireBtn.disabled = false;
+            setStatus("廃止に失敗しました: " + err.message, true);
+          });
+      });
+    }
+    if (restoreBtn) {
+      restoreBtn.addEventListener("click", function () {
+        if (!select.value) return;
+        var key = select.value;
+        restoreBtn.disabled = true;
+        apiFetch("/admin/cartridges/" + encodeURIComponent(key) + "/atlas/restore", { method: "POST" })
+          .then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok) {
+                var detail = body.detail;
+                throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+              }
+              return body;
+            });
+          })
+          .then(function () {
+            domainLifecycles[key] = "active";
+            refreshDomainOptionLabel(key, false);
+            restoreBtn.disabled = false;
+            setStatus("この分野を復帰しました");
+            loadState();
+          })
+          .catch(function (err) {
+            restoreBtn.disabled = false;
+            setStatus("復帰に失敗しました: " + err.message, true);
+          });
       });
     }
 
@@ -4508,28 +4611,51 @@
         "未確認の修正報告: " + pendingCount + "件",
         "この次版を学習者向けに公開しますか？取り消せません（修正は次版で行います）。",
       ];
-      openDangerConfirmModal({
-        title: "分野の地図骨格を公開前チェック",
-        message: checkLines,
-        confirmLabel: "公開する",
-      }, function () {
-        setStatus("学習者向けに公開中...");
-        apiFetch(basePath() + "/freeze", {
-          method: "POST",
-          body: JSON.stringify({ version: version, note: note }),
-        })
-          .then(function (res) {
-            return res.json().then(function (body) {
-              if (!res.ok) {
-                var detail = body.detail;
-                throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
-              }
-              return body;
-            });
+
+      function openFreezeChecklist() {
+        openDangerConfirmModal({
+          title: "分野の地図骨格を公開前チェック",
+          message: checkLines,
+          confirmLabel: "公開する",
+        }, function () {
+          setStatus("学習者向けに公開中...");
+          apiFetch(basePath() + "/freeze", {
+            method: "POST",
+            body: JSON.stringify({ version: version, note: note }),
           })
-          .then(function () { setStatus("版 " + version + " を学習者向けに公開しました"); loadState(); loadReports(); })
-          .catch(function (err) { setStatus("公開に失敗しました: " + err.message, true); });
-      });
+            .then(function (res) {
+              return res.json().then(function (body) {
+                if (!res.ok) {
+                  var detail = body.detail;
+                  throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+                }
+                return body;
+              });
+            })
+            .then(function () { setStatus("版 " + version + " を学習者向けに公開しました"); loadState(); loadReports(); })
+            .catch(function (err) { setStatus("公開に失敗しました: " + err.message, true); });
+        });
+      }
+
+      // §3.2: 凍結前に影響プレビューを取得し、影響があれば事実文で確認する（best-effort。
+      // 404/失敗時は従来どおり凍結チェックリストへ進む — プレビューが無くても凍結は止めない）。
+      apiFetch("/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/freeze-impact")
+        .then(function (res) { return res.ok ? res.json() : null; })
+        .then(function (impact) {
+          var removedCount = impact ? (impact.removed_node_ids || []).length : 0;
+          var affectedCourses = impact ? (impact.affected_courses || []) : [];
+          if (removedCount > 0 || affectedCourses.length > 0) {
+            var titles = affectedCourses.map(function (c) { return c.title; });
+            var shown = titles.slice(0, 5).join("、") + (titles.length > 5 ? " …" : "");
+            var proceed = confirm(
+              "この凍結で " + removedCount + " 概念が削除され、" + affectedCourses.length +
+              " コースの対応が外れます" + (shown ? ": " + shown : "") + "。凍結しますか？"
+            );
+            if (!proceed) return;
+          }
+          openFreezeChecklist();
+        })
+        .catch(function () { openFreezeChecklist(); });
     });
 
     select.addEventListener("change", function () {
@@ -4552,22 +4678,45 @@
   // 「この対応で反映」するまで確定しない。コースビルダーの登録直後にも同じ
   // エディタを cb-atlas-binding-area へ描画する。
 
-  function atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved) {
+  function atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved, options) {
+    options = options || {};
     function setStatus(text, isError) {
       if (!statusEl) return;
       statusEl.textContent = text || "";
       statusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
     }
     var proposals = data.proposals || [];
-    if (!proposals.length) {
-      bodyEl.innerHTML = "<div style='color:var(--color-text-tertiary)'>凍結済みの骨格がありません。先に「分野の地図」で骨格を生成・凍結してください。</div>";
-      return;
-    }
     var byKey = {};
     proposals.forEach(function (p) { byKey[p.domain_key] = p; });
-    var initial = data.recommended || data.current_cartridge_id || proposals[0].domain_key;
+    // §2.1 (atlas_binding_lifecycle_design.md): 0一致でも先頭ドメインへ fallback しない。
+    // 該当なしは「（バインドしない）」が既定になる。
+    var initial = data.recommended || data.current_cartridge_id || "";
+    var noMatch = !data.recommended && !data.current_cartridge_id;
+    var domainsChecked = (data.domains_checked != null) ? data.domains_checked : proposals.length;
+    var retiredSkipped = data.retired_skipped || 0;
 
-    var html = "<div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px'>";
+    var html = "";
+
+    // §2.3: 凍結待ちの仮予約（意思の記録。地図表示には影響しない）
+    if (data.atlas_binding_pending) {
+      html += "<div data-role='ab-pending-note' style='background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:6px;padding:8px 10px;margin-bottom:10px;font-size:12.5px'>" +
+        "新しい分野『" + escHtml(data.atlas_binding_pending) + "』の骨格の凍結待ちです。凍結後、『次にやること』に割り当ての再開が表示されます。" +
+        " <button type='button' data-role='ab-pending-cancel' class='admin-action-btn' style='margin-left:6px'>取り消す</button>" +
+        "</div>";
+    }
+
+    // §2.1/2.2: 該当なしの事実文（煽らない・エラー表示にしない）+ 既定の説明
+    if (noMatch) {
+      html += "<div data-role='ab-nomatch-note' style='color:var(--color-text-secondary);font-size:12.5px;margin-bottom:8px'>" +
+        "このコースのトピックに対応する分野マップは見つかりませんでした（" + escHtml(String(domainsChecked)) + "分野を照合）。" +
+        (retiredSkipped > 0 ? "<br><small style='color:var(--color-text-tertiary)'>（廃止済み " + escHtml(String(retiredSkipped)) + " 分野は照合対象外）</small>" : "") +
+        "<br>今はバインドしなくても、『次にやること』からいつでも再開できます。" +
+        "</div>";
+    } else if (!proposals.length) {
+      html += "<div style='color:var(--color-text-tertiary);font-size:12.5px;margin-bottom:8px'>凍結済みの骨格がありません。下記から新しい分野マップを作るか、「分野の地図」タブで骨格を生成・凍結してください。</div>";
+    }
+
+    html += "<div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px'>";
     html += "<label style='font-size:12.5px'>分野:</label>";
     html += "<select data-role='ab-domain' style='padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)'>";
     html += "<option value=''>（バインドしない — 地図を出さない/導出に任せる）</option>";
@@ -4582,7 +4731,25 @@
     }
     html += "</div>";
     html += "<div data-role='ab-table'></div>";
-    html += "<div style='margin-top:8px'><button data-role='ab-save' class='admin-action-btn'>この対応で反映</button></div>";
+    html += "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>" +
+      "<button data-role='ab-save' class='admin-action-btn'>この対応で反映</button>" +
+      "<button type='button' data-role='ab-new-domain-toggle' class='admin-action-btn'>このコースから新しい分野マップを作る</button>" +
+      "</div>";
+
+    // §2.3: コース起点の新分野作成（インラインのミニフォーム。既定は非表示）
+    html += "<div data-role='ab-new-domain-form' style='display:none;margin-top:10px;border:1px solid var(--color-border);border-radius:6px;padding:10px'>";
+    html += "<div style='font-size:12px;color:var(--color-text-secondary);margin-bottom:6px'>新しい分野マップの下書きを作成します。作成後は「分野の地図」タブでレビュー・凍結してください。</div>";
+    html += "<label style='font-size:12px;display:block;margin-bottom:2px'>管理ID（domain_key。英小文字・数字・アンダースコア）</label>";
+    html += "<input type='text' data-role='ab-new-domain-key' placeholder='例: modified_gravity' style='width:100%;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);margin-bottom:6px;box-sizing:border-box'>";
+    html += "<label style='font-size:12px;display:block;margin-bottom:2px'>分野名</label>";
+    html += "<input type='text' data-role='ab-new-domain-name' value='" + escHtml(options.courseTitle || "") + "' style='width:100%;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);margin-bottom:6px;box-sizing:border-box'>";
+    html += "<label style='font-size:12px;display:block;margin-bottom:2px'>説明（任意）</label>";
+    html += "<textarea data-role='ab-new-domain-desc' rows='2' style='width:100%;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);margin-bottom:6px;box-sizing:border-box'>" + escHtml(options.courseDescription || "") + "</textarea>";
+    html += "<div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap'>" +
+      "<button type='button' data-role='ab-new-domain-submit' class='admin-action-btn'>下書きを生成</button>" +
+      "<span data-role='ab-new-domain-status' style='font-size:12px;color:var(--color-text-secondary)'></span>" +
+      "</div>";
+    html += "</div>";
     bodyEl.innerHTML = html;
 
     var domainSelect = bodyEl.querySelector("[data-role='ab-domain']");
@@ -4620,14 +4787,50 @@
     domainSelect.addEventListener("change", renderTable);
     renderTable();
 
+    // §2.3: 凍結待ちの仮予約の取り消し
+    var pendingCancelBtn = bodyEl.querySelector("[data-role='ab-pending-cancel']");
+    if (pendingCancelBtn) {
+      pendingCancelBtn.addEventListener("click", function () {
+        pendingCancelBtn.disabled = true;
+        apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding/pending", { method: "DELETE" })
+          .then(function (res) {
+            if (!res.ok) {
+              return res.json().then(function (body) {
+                throw new Error(typeof body.detail === "string" ? body.detail : "HTTP " + res.status);
+              });
+            }
+            return res.json().catch(function () { return {}; });
+          })
+          .then(function () {
+            var note = bodyEl.querySelector("[data-role='ab-pending-note']");
+            if (note && note.parentNode) note.parentNode.removeChild(note);
+            if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+          })
+          .catch(function (err) {
+            pendingCancelBtn.disabled = false;
+            setStatus("仮予約の取り消しに失敗しました: " + err.message, true);
+          });
+      });
+    }
+
     bodyEl.querySelector("[data-role='ab-save']").addEventListener("click", function () {
       var bindings = [];
       var selects = tableEl.querySelectorAll("[data-role='ab-topic']");
+      var anyBound = false;
       for (var i = 0; i < selects.length; i++) {
+        var v = selects[i].value;
+        if (v) anyBound = true;
         bindings.push({
           topic_id: selects[i].getAttribute("data-topic-id"),
-          atlas_node_id: selects[i].value,
+          atlas_node_id: v,
         });
+      }
+      // §2.4: 0一致のまま明示バインドを保存しようとしたときだけ確認を挟む（禁止はしない）
+      if (domainSelect.value && !anyBound) {
+        var okToSave = window.confirm(
+          "この地図には現在このコースの対応（足がかり）がありません。学習者には現在地が表示されない地図が出ます。反映しますか？"
+        );
+        if (!okToSave) return;
       }
       setStatus("保存中...");
       apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding", {
@@ -4649,6 +4852,9 @@
           } else {
             setStatus("バインドを解除しました");
           }
+          // §2.3: バインド保存が成功すると仮予約はサーバ側で自動クリアされるため表示も消す
+          var pendingNote = bodyEl.querySelector("[data-role='ab-pending-note']");
+          if (pendingNote && pendingNote.parentNode) pendingNote.parentNode.removeChild(pendingNote);
           // G層: course.no_atlas_binding が解消され得るため再取得する。
           if (window.AdminNextSteps) window.AdminNextSteps.refresh();
           document.dispatchEvent(new CustomEvent("atlas:binding-saved"));
@@ -4656,9 +4862,95 @@
         })
         .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); });
     });
+
+    // §2.3: このコースから新しい分野マップを作る（凍結待ち仮予約 → 骨格 draft 生成）
+    var newDomainToggle = bodyEl.querySelector("[data-role='ab-new-domain-toggle']");
+    var newDomainForm = bodyEl.querySelector("[data-role='ab-new-domain-form']");
+    if (newDomainToggle && newDomainForm) {
+      newDomainToggle.addEventListener("click", function () {
+        newDomainForm.style.display = newDomainForm.style.display === "none" ? "" : "none";
+      });
+      var newDomainSubmit = bodyEl.querySelector("[data-role='ab-new-domain-submit']");
+      var newDomainStatusEl = bodyEl.querySelector("[data-role='ab-new-domain-status']");
+      function setNewDomainStatus(text, isError) {
+        if (!newDomainStatusEl) return;
+        newDomainStatusEl.textContent = text || "";
+        newDomainStatusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+      }
+      newDomainSubmit.addEventListener("click", function () {
+        var keyInput = bodyEl.querySelector("[data-role='ab-new-domain-key']");
+        var nameInput = bodyEl.querySelector("[data-role='ab-new-domain-name']");
+        var descInput = bodyEl.querySelector("[data-role='ab-new-domain-desc']");
+        var key = (keyInput.value || "").trim();
+        var name = (nameInput.value || "").trim();
+        var desc = (descInput.value || "").trim();
+        if (!/^[a-z0-9_]+$/.test(key)) {
+          setNewDomainStatus("管理IDは英小文字・数字・アンダースコアで入力してください", true);
+          return;
+        }
+        if (!name) { setNewDomainStatus("分野名を入力してください", true); return; }
+        newDomainSubmit.disabled = true;
+        setNewDomainStatus("仮予約を保存中...");
+        apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding/pending", {
+          method: "PUT",
+          body: JSON.stringify({ domain_key: key }),
+        })
+          .then(function (res) {
+            return res.json().then(function (body) {
+              if (!res.ok) {
+                var detail = body.detail;
+                throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+              }
+              return body;
+            });
+          })
+          .then(function () {
+            // ①成功: 仮予約が保存された。以降②が失敗しても仮予約は残る。
+            if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+            setNewDomainStatus("骨格の下書きを生成中...");
+            return apiFetch("/admin/cartridges/" + encodeURIComponent(key) + "/atlas/skeleton/generate", {
+              method: "POST",
+              body: JSON.stringify({ domain: { name: name, description: desc } }),
+            })
+              .then(function (res) {
+                return res.json().then(function (body) {
+                  if (!res.ok) {
+                    var detail = body.detail;
+                    throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+                  }
+                  return body;
+                });
+              })
+              .then(function () {
+                newDomainSubmit.disabled = false;
+                setNewDomainStatus("");
+                newDomainForm.innerHTML =
+                  "<div style='font-size:12.5px;color:var(--color-text-secondary)'>下書きを生成しました。『分野の地図』タブでレビュー・凍結してください。</div>" +
+                  "<button type='button' data-role='ab-new-domain-open-atlas' class='admin-action-btn' style='margin-top:6px'>分野の地図タブを開く</button>";
+                var openAtlasBtn = newDomainForm.querySelector("[data-role='ab-new-domain-open-atlas']");
+                if (openAtlasBtn) {
+                  openAtlasBtn.addEventListener("click", function () {
+                    if (typeof activateTabView === "function") activateTabView("atlas");
+                  });
+                }
+              })
+              .catch(function (err) {
+                newDomainSubmit.disabled = false;
+                setNewDomainStatus(
+                  "下書きの生成に失敗しました（仮予約は保存済み。分野の地図タブから再生成できます）: " + err.message,
+                  true
+                );
+              });
+          })
+          .catch(function (err) {
+            newDomainSubmit.disabled = false;
+            setNewDomainStatus("仮予約の保存に失敗しました: " + err.message, true);
+          });
+      });
+    }
   }
 
-  function atlasBindingPropose(courseId, bodyEl, statusEl, onSaved) {
+  function atlasBindingPropose(courseId, bodyEl, statusEl, onSaved, options) {
     if (!courseId || !bodyEl) return;
     if (statusEl) {
       statusEl.textContent = "トピックの対応案を作成中...";
@@ -4676,7 +4968,7 @@
       })
       .then(function (data) {
         if (statusEl) statusEl.textContent = "";
-        atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved);
+        atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved, options);
       })
       .catch(function (err) {
         if (statusEl) {

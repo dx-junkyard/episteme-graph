@@ -99,7 +99,9 @@ class TestCrossLayerNotifyCore:
             return _FakeFetchOne(None)
 
         session.execute = _fake_execute
-        monkeypatch.setattr(notif, "get_session", lambda: session)
+        import core.postgres
+
+        monkeypatch.setattr(core.postgres, "get_session", lambda: session)
 
         ok = notif.notify_user(
             "user-1", notif.NOTIF_EXPLANATION_ENDORSED, "explanation", "expl-1", {"k": "v"},
@@ -115,7 +117,9 @@ class TestCrossLayerNotifyCore:
         from core.status import cross_layer_notify as notif
 
         called = []
-        monkeypatch.setattr(notif, "get_session", lambda: called.append("should not be called"))
+        import core.postgres
+
+        monkeypatch.setattr(core.postgres, "get_session", lambda: called.append("should not be called"))
         assert notif.notify_user(None, notif.NOTIF_EXPLANATION_ENDORSED, "explanation", "e1") is False
         assert notif.notify_user("", notif.NOTIF_EXPLANATION_ENDORSED, "explanation", "e1") is False
         assert called == []
@@ -124,18 +128,24 @@ class TestCrossLayerNotifyCore:
         from core.status import cross_layer_notify as notif
 
         called = []
-        monkeypatch.setattr(notif, "get_session", lambda: called.append("should not be called"))
+        import core.postgres
+
+        monkeypatch.setattr(core.postgres, "get_session", lambda: called.append("should not be called"))
         assert notif.notify_user("user-1", "not_a_real_kind", "explanation", "e1") is False
         assert called == []
 
     def test_notify_user_swallows_db_errors(self, monkeypatch):
         from core.status import cross_layer_notify as notif
 
-        monkeypatch.setattr(notif, "get_session", lambda: _RaisingSession())
+        import core.postgres
+
+        monkeypatch.setattr(core.postgres, "get_session", lambda: _RaisingSession())
         # 例外を投げず False を返す（best-effort）。
         assert notif.notify_user("user-1", notif.NOTIF_EXPLANATION_ENDORSED, "explanation", "e1") is False
 
-    def test_vocab_is_the_four_v1_kinds(self):
+    def test_vocab_is_the_v1_kinds(self):
+        """v1 の4種（C/D/R/L層）+ atlas_binding_lifecycle_design.md §3.4 で追加された
+        2種（分野の地図: 骨格凍結 / ドメイン retire）。"""
         from core.status import cross_layer_notify as notif
 
         assert set(notif.CROSS_LAYER_NOTIFICATION_KINDS) == {
@@ -143,6 +153,8 @@ class TestCrossLayerNotifyCore:
             notif.NOTIF_LEDGER_TARGET_CHALLENGED,
             notif.NOTIF_RECONSTRUCTION_ITEM_FLAGGED,
             notif.NOTIF_LIBRARY_ENTRY_RETIRED,
+            notif.NOTIF_ATLAS_SKELETON_FROZEN,
+            notif.NOTIF_ATLAS_DOMAIN_RETIRED,
         }
 
     def test_cross_layer_kinds_disjoint_from_status_layer_kinds(self):

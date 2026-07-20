@@ -28,8 +28,14 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
+from core import atlas_store
 from core.admin_assistant import capabilities as caps
 from core.course_data import course_atlas_binding_facts
+from core.course_data import (
+    course_atlas_binding_pending,
+    course_cartridge_id,
+    iter_all_topics,
+)
 from core.status import projector as status_projector
 from core.status import schema as status_schema
 
@@ -42,6 +48,10 @@ RULE_MATERIAL_ANALYSIS_FAILED = "material.analysis_failed"
 RULE_MATERIAL_NO_COURSE = "material.no_course"
 RULE_COURSE_NOT_PUBLISHED = "course.not_published"
 RULE_COURSE_NO_ATLAS_BINDING = "course.no_atlas_binding"
+# atlas_binding_lifecycle_design.md §5: コース起点で新分野を仮予約した後、骨格が
+# 凍結されて割り当てを完了できる状態 / バインド済み node_id が現行凍結版に無い状態。
+RULE_COURSE_ATLAS_BINDING_READY = "course.atlas_binding_ready"
+RULE_COURSE_ATLAS_BINDING_STALE = "course.atlas_binding_stale"
 RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
 # N13（#496 追随）: 本人所有の教材に未レビューの AI 図分類が残っている。
 # `material.inventory_unvisited` は「見たかどうか」の押し付けになるため意図的に
@@ -74,6 +84,14 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "capability_id": "course.publish",
     },
     RULE_COURSE_NO_ATLAS_BINDING: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course.atlas_binding",
+    },
+    RULE_COURSE_ATLAS_BINDING_READY: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course.atlas_binding",  # 既存 capability を再利用（G3: registry 変更不要）
+    },
+    RULE_COURSE_ATLAS_BINDING_STALE: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "course.atlas_binding",
     },
@@ -321,6 +339,10 @@ def _eval_course_no_atlas_binding(session, uid: str) -> list[tuple[NextStep, str
         data = row["data"] if isinstance(row["data"], dict) else {}
         if not _course_needs_atlas_binding(data):
             continue
+        # atlas_binding_lifecycle_design.md §5: 凍結待ちを仮予約済みのコースには
+        # 二重督促しない（course.atlas_binding_ready ルールが凍結後に代わりに出る）。
+        if course_atlas_binding_pending(data):
+            continue
         cid = row["id"]
         title = row["title"] or cid
         step = _make_step(
@@ -328,6 +350,114 @@ def _eval_course_no_atlas_binding(session, uid: str) -> list[tuple[NextStep, str
             target_id=cid,
             title=f"コース『{title}』に学習マップを割り当てる",
             reason=f"コース『{title}』には学習マップ（分野の地図）が割り当てられていません。",
+            target={"course_id": cid},
+            ctx={"course_id": cid},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_course_atlas_binding_ready(session, uid: str) -> list[tuple[NextStep, str]]:
+    """atlas_binding_lifecycle_design.md §5: 仮予約したドメインの骨格が凍結され、
+    割り当てを完了できる状態（AND 条件: pending 非空 / 未バインドのまま /
+    pending ドメインに凍結骨格あり / pending ドメインが active）。
+    """
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+    skeleton_cache: dict[str, Any] = {}
+    lifecycle_cache: dict[str, str] = {}
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        pending = course_atlas_binding_pending(data)
+        if not pending:
+            continue
+        if not _course_needs_atlas_binding(data):
+            continue
+        if pending not in skeleton_cache:
+            try:
+                skeleton_cache[pending] = atlas_store.load_learner_skeleton(pending, session)
+            except Exception:  # noqa: BLE001
+                skeleton_cache[pending] = None
+        if skeleton_cache[pending] is None:
+            continue
+        if pending not in lifecycle_cache:
+            try:
+                lifecycle_cache[pending] = atlas_store.domain_lifecycle(session, pending)
+            except Exception:  # noqa: BLE001
+                lifecycle_cache[pending] = "active"
+        if lifecycle_cache[pending] != "active":
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        step = _make_step(
+            rule_id=RULE_COURSE_ATLAS_BINDING_READY,
+            target_id=cid,
+            title=f"コース『{title}』の学習マップ割り当てを完了する",
+            reason=(
+                f"保留中の分野『{pending}』の骨格が凍結され、"
+                f"コース『{title}』の学習マップ割り当てを完了できます。"
+            ),
+            target={"course_id": cid},
+            ctx={"course_id": cid},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_course_atlas_binding_stale(session, uid: str) -> list[tuple[NextStep, str]]:
+    """atlas_binding_lifecycle_design.md §5: バインド済み node_id が現行凍結版に
+    存在しない（改版で概念が削除・改名され、既存バインドが取り残された状態）。
+
+    骨格の読みはドメイン単位で辞書キャッシュし、コースごとの N+1 を避ける。
+    骨格が読めない（未凍結・DB 不通等）ドメインは判定不能として対象外にする
+    （fail-closed。誤って stale と断定しない）。
+    """
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+    skeleton_cache: dict[str, Any] = {}
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        cartridge_id = course_cartridge_id(data)
+        if not cartridge_id:
+            continue
+        if cartridge_id not in skeleton_cache:
+            try:
+                skeleton_cache[cartridge_id] = atlas_store.load_learner_skeleton(cartridge_id, session)
+            except Exception:  # noqa: BLE001
+                skeleton_cache[cartridge_id] = None
+        skeleton = skeleton_cache[cartridge_id]
+        if skeleton is None:
+            continue
+        known_ids = set(skeleton.concept_ids()) | set(skeleton.region_ids())
+        stale_count = 0
+        for topic in iter_all_topics(data):
+            node_id = topic.get("atlas_node_id")
+            if node_id and node_id not in known_ids:
+                stale_count += 1
+        if stale_count == 0:
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        step = _make_step(
+            rule_id=RULE_COURSE_ATLAS_BINDING_STALE,
+            target_id=cid,
+            title=f"コース『{title}』の学習マップ対応を確認する",
+            reason=(
+                f"コース『{title}』のトピック対応 {stale_count} 件が、"
+                "現在の地図に存在しない概念を指しています。"
+            ),
             target={"course_id": cid},
             ctx={"course_id": cid},
         )
@@ -418,6 +548,8 @@ _RULE_EVALUATORS = {
     RULE_MATERIAL_NO_COURSE: _eval_material_no_course,
     RULE_COURSE_NOT_PUBLISHED: _eval_course_not_published,
     RULE_COURSE_NO_ATLAS_BINDING: _eval_course_no_atlas_binding,
+    RULE_COURSE_ATLAS_BINDING_READY: _eval_course_atlas_binding_ready,
+    RULE_COURSE_ATLAS_BINDING_STALE: _eval_course_atlas_binding_stale,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
 }

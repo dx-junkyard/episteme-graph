@@ -211,6 +211,11 @@ class CourseData(BaseModel):
     cartridge_id: str | None = None
     lecture_studio_settings: LectureStudioSettings | None = None
     course_content_status: dict | None = Field(default_factory=dict)
+    # atlas_binding_lifecycle_design.md §2.3: コース起点で新分野を作成した際の
+    # 「凍結待ち」仮予約 domain_key。書き手は routes/atlas.py の
+    # PUT .../atlas-binding/pending のみ。バインド保存（PUT .../atlas-binding）成功時に
+    # 自動クリアされる（意思決定がなされたため）。
+    atlas_binding_pending: str | None = None
 
     # --- 読み取り専用（書き手不在）。LLM プロンプト補助情報として読まれるのみ ---
     domain: str | None = None
@@ -320,6 +325,17 @@ def course_title(data: dict | None, default: str = "") -> str:
     if not isinstance(data, dict):
         return default
     return data.get("title") or default
+
+
+def course_atlas_binding_pending(data: dict | None) -> str:
+    """``data.atlas_binding_pending`` を trim 済み文字列で返す（無ければ ``""``）。
+
+    atlas_binding_lifecycle_design.md §2.3 の「凍結待ち」仮予約 domain_key アクセサ。
+    旧: ``str(course_data.get("atlas_binding_pending") or "").strip()`` の置換先。
+    """
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("atlas_binding_pending") or "").strip()
 
 
 def lecture_studio_settings(data: dict | None) -> dict:

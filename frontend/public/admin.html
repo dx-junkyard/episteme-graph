@@ -99,6 +99,9 @@
             </select>
             <button id="atlas-refresh" class="admin-action-btn">更新</button>
             <button id="atlas-add-domain-toggle" class="admin-action-btn">新しい分野マップを作る</button>
+            <!-- ドメインライフサイクル（migration 057）: retire は共同財からの退場・履歴と学習者表示は維持 -->
+            <button id="atlas-domain-retire" class="admin-action-btn" style="display:none">この分野を廃止する</button>
+            <button id="atlas-domain-restore" class="admin-action-btn" style="display:none">復帰する</button>
           </div>
         </div>
         <div id="atlas-overview" class="atlas-admin-overview" aria-live="polite">
@@ -118,6 +121,7 @@
           <span id="atlas-step-impact" class="atlas-admin-step"><b>3</b> 報告と影響を確認</span>
           <span id="atlas-step-publish" class="atlas-admin-step"><b>4</b> 学習者向けに公開</span>
         </div>
+        <div id="atlas-domain-retired-note" style="display:none;font-size:12px;color:var(--color-text-danger,#e53935);margin-bottom:8px">この分野は廃止済みです。編集するには復帰してください。</div>
         <div id="atlas-add-domain-form" style="display:none;border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-bottom:12px">
           <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">新しい分野マップ</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap">

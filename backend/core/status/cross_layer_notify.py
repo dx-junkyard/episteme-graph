@@ -35,7 +35,10 @@ import logging
 
 from sqlalchemy import text as sa_text
 
-from core.postgres import get_session
+# 名前 import（from core.postgres import get_session）にすると import 時点の関数参照が
+# 束縛され、テストの monkeypatch.setattr(core.postgres, "get_session", ...) が効かない。
+# モジュール属性経由で毎回解決する。
+import core.postgres
 
 logger = logging.getLogger(__name__)
 
@@ -45,12 +48,16 @@ NOTIF_EXPLANATION_ENDORSED = "explanation_endorsed"                # C層: 承�
 NOTIF_LEDGER_TARGET_CHALLENGED = "ledger_target_challenged"        # D層: 疑義の被起票
 NOTIF_RECONSTRUCTION_ITEM_FLAGGED = "reconstruction_item_flagged"  # R層: item の flagged 遷移
 NOTIF_LIBRARY_ENTRY_RETIRED = "library_entry_retired"              # L層: エントリ retire
+NOTIF_ATLAS_SKELETON_FROZEN = "atlas_skeleton_frozen"              # 分野の地図: 骨格の凍結
+NOTIF_ATLAS_DOMAIN_RETIRED = "atlas_domain_retired"                # 分野の地図: ドメインの retire
 
 CROSS_LAYER_NOTIFICATION_KINDS = (
     NOTIF_EXPLANATION_ENDORSED,
     NOTIF_LEDGER_TARGET_CHALLENGED,
     NOTIF_RECONSTRUCTION_ITEM_FLAGGED,
     NOTIF_LIBRARY_ENTRY_RETIRED,
+    NOTIF_ATLAS_SKELETON_FROZEN,
+    NOTIF_ATLAS_DOMAIN_RETIRED,
 )
 
 
@@ -72,7 +79,7 @@ def notify_user(
     if kind not in CROSS_LAYER_NOTIFICATION_KINDS:
         logger.warning("cross_layer_notify: unknown kind %r (skipped)", kind)
         return False
-    session = get_session()
+    session = core.postgres.get_session()
     try:
         session.execute(
             sa_text("""
