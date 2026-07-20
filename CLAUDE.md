@@ -1238,6 +1238,23 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   意図的に不使用・縮退方式）と figure_reanalysis が CostGate / resolve_model のみ部分利用する。
   **新系統はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
   トリガー条件・DB 書き込みはドメイン側の責務。
+- **チャット型 AI の共通規約（2026-07-20 整理、正本は
+  `docs/features/assistant_common_infra_design.md`）** — ①会話履歴を LLM に渡すときは
+  `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep,
+  current_message)` を必ず通す（学習チャット 20/2000、コースビルダー 20/4000/head_keep=2
+  ＝フロントが履歴先頭に注入する course_draft 疑似ターン2件の保護、W層 16/4000/head_keep=1
+  ＝grounding 注入先の先頭 user メッセージの保護、Copilot 8/500。**保存用の履歴は
+  ウィンドウ化しない**）。②同期チャット・単発 AI にも CostGate(day-only) を置く
+  （`LEARNING_CHAT_MAX_CALLS_PER_DAY` 既定300 / `COURSE_BUILDER_MAX_CALLS_PER_DAY` 100 /
+  `LECTURE_REWRITE_MAX_CALLS_PER_DAY` 100 / Copilot は既存 `ASSISTANT_MAX_CALLS_PER_DAY` を
+  CostGate 実装に移行済み。超過は 429 + 事実文で数値を返さない。CostGate は in-memory・
+  プロセスローカルである制約を許容ずみ。atlas assist の DB 集計ゲートは意図的に別実装の
+  まま）。③モデル解決は `resolve_model(key, *, fallback="fast"|"analysis")`
+  （学習チャット `LEARNING_CHAT_LLM_MODEL` / コースビルダー `COURSE_BUILDER_LLM_MODEL` は
+  空 → analysis で従来挙動）。④チャット型メイン応答の LLM 失敗は 500 にせず degraded
+  固定文 + 200 + 履歴保存（誤解検出など回答本文依存の後処理はスキップ）。単発の明示操作
+  （rewrite）はエラー返却のまま。⑤原稿スタジオの chunk 書き換えは
+  `lecture_studio/_shared.py::_ensure_chunk_editable`（document 単位の edit 権限）を通す。
 - **`backend/core/privacy.py`** — k-匿名ゲートの正本（`K_ANONYMITY = 3` /
   `meets_k_anonymity` / `bucket_count_range`(3-5 / 6-10 / 11+) 等）。reconstruction/health.py・
   doubt/schema.py・services.py の集計はここに委譲済み（表示文言は各所に残る）。

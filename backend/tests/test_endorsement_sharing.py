@@ -155,15 +155,20 @@ class TestCandidateGeneration:
         # 存在しない claim_id は除去される
         assert [b.claim_id for b in comp.backing_claims] == ["valid-1"]
 
-    def test_llm_failure_returns_empty(self, monkeypatch):
+    def test_llm_failure_raises_candidate_generation_error(self, monkeypatch):
+        """LLM 呼び出し自体の失敗は「0件」と区別するため専用例外を送出する(§4 B2)。
+
+        真の0件(LLM 正常応答・候補なし)は引き続き空配列を返す
+        (backend/tests/test_component_candidates_failure.py 参照)。
+        """
         import core.component_candidates as cc
 
         def _boom(**kwargs):
             raise RuntimeError("llm down")
 
         monkeypatch.setattr(cc, "generate_text_with_structured_output", _boom)
-        result = cc.generate_component_candidates("q", "a", existing_claims=[])
-        assert result.components == []
+        with pytest.raises(cc.CandidateGenerationError):
+            cc.generate_component_candidates("q", "a", existing_claims=[])
 
 
 class TestFrontend:

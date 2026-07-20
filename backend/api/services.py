@@ -4274,8 +4274,12 @@ def save_cb_session(
     session_id: str,
     history: list[dict],
     course_draft: dict | None,
-) -> None:
-    """コース構築セッションの履歴と draft を PostgreSQL に保存する。"""
+) -> bool:
+    """コース構築セッションの履歴と draft を PostgreSQL に保存する。
+
+    成否を bool で返す（正本: docs/features/assistant_common_infra_design.md §6）。
+    例外は内部で catch して False を返す（ログは維持、呼び出し元へは伝播させない）。
+    """
     try:
         session = _pg_session()
         try:
@@ -4303,8 +4307,10 @@ def save_cb_session(
             raise
         finally:
             session.close()
+        return True
     except Exception:
         logger.exception("Failed to save course builder session %s", session_id)
+        return False
 
 
 # ---------------------------------------------------------------------------

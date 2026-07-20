@@ -311,6 +311,34 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("STDPART_LLM_MODEL"),
     )
 
+    # --- チャット型 AI 支援の共通基盤整理（正本: docs/features/assistant_common_infra_design.md） ---
+    # 既定はすべて現行挙動を保存する（I1）。
+    # 学習チャット本体（1リクエスト=1カウント。intent 分類〜本体を含めて1）
+    learning_chat_max_calls_per_day: int = Field(
+        default=300,
+        validation_alias=AliasChoices("LEARNING_CHAT_MAX_CALLS_PER_DAY"),
+    )
+    # コースビルダーチャット（他機能とは独立のカウンタ）
+    course_builder_max_calls_per_day: int = Field(
+        default=100,
+        validation_alias=AliasChoices("COURSE_BUILDER_MAX_CALLS_PER_DAY"),
+    )
+    # 原稿スタジオ rewrite（scripts.py / topics.py の両経路で同一ゲートインスタンス）
+    lecture_rewrite_max_calls_per_day: int = Field(
+        default=100,
+        validation_alias=AliasChoices("LECTURE_REWRITE_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら analysis tier（llm_analysis_model）に委譲（現行の暗黙依存を明示化, I1）
+    learning_chat_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("LEARNING_CHAT_LLM_MODEL"),
+    )
+    # 空文字なら analysis tier（llm_analysis_model）に委譲（I1）
+    course_builder_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("COURSE_BUILDER_LLM_MODEL"),
+    )
+
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"
     admin_password: str = ""

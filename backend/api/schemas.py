@@ -358,6 +358,9 @@ class LearningChatResponse(BaseModel):
     # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
     anchor_confirm: dict | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
+    # チャット型AI支援の共通基盤整理 §4: LLM 例外時に固定文へ縮退したターンかどうか
+    # （I3 会話は死なせない。degraded=true でも 200 を返し、履歴には保存済み）。
+    degraded: bool = False
 
 
 class LearningChatHistoryResponse(BaseModel):

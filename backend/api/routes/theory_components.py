@@ -63,7 +63,7 @@ from core.theory_components import (
     enrich_theory_components_with_llm,
     extract_theory_components_from_dsl,
 )
-from core.component_candidates import generate_component_candidates
+from core.component_candidates import CandidateGenerationError, generate_component_candidates
 
 try:
     # Shared deterministic helper so stored-graph normalization and the
@@ -3478,8 +3478,14 @@ def create_candidates_from_query(
     """
     _ensure_editable(body.course_id, current_user)
     existing_claims = _claims_for_course(body.course_id, current_user, limit=max(1, min(body.max_claims, 300)))
-    with usage_context("admin:component_candidates", user_id=current_user["id"], course_id=body.course_id):
-        result = generate_component_candidates(body.question, body.answer_text, existing_claims)
+    try:
+        with usage_context("admin:component_candidates", user_id=current_user["id"], course_id=body.course_id):
+            result = generate_component_candidates(body.question, body.answer_text, existing_claims)
+    except CandidateGenerationError:
+        raise HTTPException(
+            status_code=503,
+            detail="候補の生成に失敗しました。しばらくしてからもう一度お試しください。",
+        )
 
     created: list[dict] = []
     for candidate in result.components:

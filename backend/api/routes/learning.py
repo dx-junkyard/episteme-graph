@@ -8,6 +8,7 @@ import re
 import threading
 import uuid
 from dataclasses import asdict
+from typing import Callable
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from fastapi.responses import Response
@@ -78,11 +79,15 @@ from core.course_data import (
     course_topics,
     find_course_topic,
 )
+from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import element_explanations
 from core.llm import generate_text, get_llm_params, transcribe_audio
 from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
+from core.llm_worker.client import resolve_model
+from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.history import window_history
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
@@ -129,6 +134,42 @@ from routes.lecture import (
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/learning", tags=["Learning"])
+
+# ---------------------------------------------------------------------------
+# チャット型 AI 支援の共通基盤整理 §1: 学習チャット本体のコスト上限
+# （正本: docs/features/assistant_common_infra_design.md）。
+# CostGate は core/llm_worker/cost_gate.py の day-only 構成に委譲する（プロセス内
+# カウンタ・キーは (today, user_id)）。1 リクエスト = LLM を伴うリクエスト1回
+# （intent 分類〜本体まで含めて1）とし、多重カウントはリクエストスコープの状態
+# （_consume_learning_chat_quota の呼び出し側で保持する dict）で防止する。
+# ---------------------------------------------------------------------------
+_learning_chat_cost_gate = CostGate()
+
+
+def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
+    """そのリクエストで最初に LLM を呼ぶ直前に1回だけコスト上限を消費するヘルパー。
+
+    ``quota_state`` はリクエストスコープの mutable dict（``{"consumed": False}``）。
+    同一リクエスト内で複数回 LLM を呼んでも消費は1回のみ（学習チャットは intent 分類〜
+    本体まで含めて1、設計書 §1）。LLM を1度も呼ばないパス（承認済み説明があるグラフ
+    要素タップ等）からはそもそも呼ばれないため消費されない。超過時は 429（事実文のみ・
+    数値非表示, I2）。
+    """
+    if quota_state.get("consumed"):
+        return
+    quota_state["consumed"] = True
+    settings = get_settings()
+    limit = int(getattr(settings, "learning_chat_max_calls_per_day", 300) or 0)
+    ok = _learning_chat_cost_gate.check_and_count(
+        daily_limit=limit,
+        daily_key=(today_str(), user_id),
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=429,
+            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Course CRUD
@@ -583,7 +624,12 @@ def _route_for_typed_action(support_action: str | None) -> str | None:
     return _TYPED_ACTION_INTENT.get(support_action.strip())
 
 
-def _classify_intent(message: str, course_title: str) -> str:
+def _classify_intent(
+    message: str,
+    course_title: str,
+    *,
+    on_llm_call: Callable[[], None] | None = None,
+) -> str:
     """ユーザーメッセージの意図を分類する (Intent Routing)。
 
     Returns
@@ -607,6 +653,9 @@ def _classify_intent(message: str, course_title: str) -> str:
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
     )
 
+    if on_llm_call:
+        on_llm_call()
+
     try:
         result = generate_text(
             messages=[{"role": "user", "content": prompt}],
@@ -629,6 +678,7 @@ def _generate_learning_advice_response(
     *,
     topic_info: dict | None = None,
     course_data: dict | None = None,
+    on_llm_call: Callable[[], None] | None = None,
 ) -> str:
     """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
@@ -693,6 +743,9 @@ def _generate_learning_advice_response(
         "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。\n"
         "※注意: 選択肢ボタンはシステムが自動付与するので、本文に [ ] 形式のボタン記法は書かないこと。"
     )
+
+    if on_llm_call:
+        on_llm_call()
 
     try:
         return generate_text(
@@ -931,6 +984,7 @@ def _generate_graph_element_explanation(
     topic_title: str,
     course_data: dict,
     body: LearningChatRequest,
+    on_llm_call: Callable[[], None] | None = None,
 ) -> LearningChatResponse:
     """グラフ要素サジェストのクリックを、通常チャットとは独立して処理する。"""
     if not body.chunk_id or not body.element_id:
@@ -1005,9 +1059,11 @@ def _generate_graph_element_explanation(
             for r in related_chunks[:3]
         )
         personal = get_personal_layer(user_id, course_id)
+        # チャット型AI支援の共通基盤整理 §2-2: 直近6件・2000字/件へウィンドウ化
+        # （正本ユーティリティへの委譲。挙動は現行とほぼ同一）。
         recent_history = "\n".join(
-            f"{h.get('role')}: {str(h.get('content', ''))[:240]}"
-            for h in (body.history or [])[-6:]
+            f"{h.get('role')}: {h.get('content', '')}"
+            for h in window_history(body.history, max_messages=6, max_chars=2000)
         )
         response_persona = course_persona_settings(course_data)["response_persona"]
         persona_instruction = persona_prompt(response_persona, target="response")
@@ -1033,6 +1089,8 @@ def _generate_graph_element_explanation(
             "[[FORMULA_0]] のようなプレースホルダー名は説明文に出さないでください。"
             "最後に短い確認文を1つ添えてください。"
         )
+        if on_llm_call:
+            on_llm_call()
         answer = generate_text(
             messages=[{"role": "user", "content": prompt}],
             model=params["model"],
@@ -1385,12 +1443,13 @@ def check_topic_understanding(
 
     parsed: dict = {}
     try:
-        raw = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params["model"],
-            reasoning_effort=params["reasoning_effort"],
-            temperature=0.1,
-        )
+        with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
+            raw = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+                temperature=0.1,
+            )
         import json
         import re
         match = re.search(r"\{[\s\S]*\}", raw or "")
@@ -1739,6 +1798,13 @@ def learning_chat(
     current_user: dict = Depends(_get_current_user),
 ) -> LearningChatResponse:
     """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。"""
+    # チャット型AI支援の共通基盤整理 §1: このリクエストで最初に LLM を呼ぶ直前に1回だけ
+    # コスト上限を消費する（リクエストスコープの quota_state で多重カウントを防止）。
+    _quota_state: dict = {"consumed": False}
+
+    def _consume_quota() -> None:
+        _consume_learning_chat_quota(current_user["id"], _quota_state)
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -1790,6 +1856,7 @@ def learning_chat(
                 topic_title=topic_title,
                 course_data=course_data,
                 body=body,
+                on_llm_call=_consume_quota,
             )
         # グラフ要素の説明は常に detour（origin=現在アンカー）として扱い、
         # どの入口由来でも「学習パスに戻る」を提示する。
@@ -1840,7 +1907,8 @@ def learning_chat(
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
     with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
         intent = None if (_is_casual or _atlas_ctx) else (
-            _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
+            _route_for_typed_action(body.support_action)
+            or _classify_intent(body.message, course_title, on_llm_call=_consume_quota)
         )
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
@@ -1862,6 +1930,7 @@ def learning_chat(
             advice_answer = _generate_learning_advice_response(
                 course_title, topic_title, body.message,
                 topic_info=topic_info, course_data=course_data,
+                on_llm_call=_consume_quota,
             )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
         is_prereq = (
@@ -1995,30 +2064,50 @@ def learning_chat(
             f"はい、「{topic_title}」についてですね。お答えします。"
         )},
     ]
-    for turn in body.history:
+    # チャット型AI支援の共通基盤整理 §2-2: 直近20メッセージ・2000字/件へウィンドウ化
+    # （教材・RAGコンテキストは上の messages で毎回別途注入されるため先頭保護は不要, head_keep=0）。
+    for turn in window_history(body.history, max_messages=20, max_chars=2000):
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
     _chat_feature = "learning:chat_casual" if _is_casual else "learning:chat"
+    # この時点でリクエスト全体を通じて最初の（あるいは唯一の）LLM 呼び出しなら消費する
+    # （intent 分類等ですでに消費済みなら no-op、§1）。
+    _consume_quota()
+    degraded = False
     try:
         with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id):
-            answer = generate_text(messages=messages, temperature=0.3)
-    except Exception as exc:
+            answer = generate_text(
+                messages=messages,
+                temperature=0.3,
+                model=resolve_model("learning_chat_llm_model", fallback="analysis"),
+            )
+    except Exception:
+        # 会話は死なせない（設計書 I3）: 500 即死をやめ、degraded 固定文 + 200 へ縮退する。
+        # 履歴は保存し、回答本文に依存する後処理（誤解検出・ドリルダウン抽出）はスキップする（I4）。
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
-        raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+        answer = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+        degraded = True
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
-    # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。
+    # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。degraded な固定文には
+    # 付与しない（回答本文に依存する装飾のため、設計書 §4）。
     if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:
-        answer = out_of_source_notice() + "\n\n" + answer
+        if not degraded:
+            answer = out_of_source_notice() + "\n\n" + answer
 
     # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
+    # degraded ターンは回答本文が根拠を伴わない固定文のため、本文依存の後処理はスキップする
+    # （設計書 §4・I3/I4: 会話は死なせない・履歴保存はそのまま行う）。
     course_update = None
-    if not _is_casual and topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
-        course_update = detect_and_record_misconception(
-            current_user["id"], course_id, course_data, topic_id, body.message, answer
-        )
+    if not degraded:
+        if not _is_casual and topic_info and any(
+            kw in answer for kw in ["訂正", "より正確です", "誤解"]
+        ):
+            course_update = detect_and_record_misconception(
+                current_user["id"], course_id, course_data, topic_id, body.message, answer
+            )
 
     _persisted = persist_chat_history(
         current_user["id"], course_id, topic_id,
@@ -2087,8 +2176,12 @@ def learning_chat(
             "question": (body.message or "")[:120],
             "options": _ANCHOR_CONFIRM_DOUBT_OPTIONS,
         }
-    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。
-    clean_answer, inline_actions = extract_inline_actions(answer)
+    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。degraded ターンは
+    # 根拠を伴わない固定文のため本文依存の後処理をスキップする（設計書 §4）。
+    if degraded:
+        clean_answer, inline_actions = answer, []
+    else:
+        clean_answer, inline_actions = extract_inline_actions(answer)
 
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
@@ -2120,6 +2213,7 @@ def learning_chat(
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
         mock=False,
+        degraded=degraded,
     )
 
 

@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import datetime
 import logging
 from collections import Counter
 
@@ -29,6 +28,8 @@ from dependencies import _get_current_user, _require_teacher  # noqa: F401
 from core.config import get_settings
 from core.course_data import course_title as _course_title
 from core.llm_usage.context import usage_context
+from core.llm_worker.client import resolve_model
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
 from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP
 from core.admin_assistant import capabilities as caps
@@ -88,8 +89,9 @@ _TARGET_SELECTION_KEY = {
     "cartridge": "cartridge_id",
 }
 
-# 1 ユーザー 1 日あたりの LLM コール上限（P6）。プロセス内カウンタ（MVP。DB を汚さない）。
-_DAILY_LLM_CALLS: dict[str, tuple] = {}
+# 1 ユーザー 1 日あたりの LLM コール上限（P6）。core/llm_worker/cost_gate.py の
+# 共通 CostGate（day-only）に委譲する（プロセス内カウンタ・MVP・DB を汚さない）。
+_cost_gate = CostGate()
 
 
 # ---------------------------------------------------------------------------
@@ -109,29 +111,22 @@ def _record_assistant_event(
 
 
 def _assistant_model() -> str | None:
-    settings = get_settings()
-    return (
-        getattr(settings, "assistant_llm_model", "")
-        or getattr(settings, "llm_fast_model", "")
-        or None
-    )
+    """resolve_model("assistant_llm_model") への薄いラッパ（fast フォールバック維持）。"""
+    return resolve_model("assistant_llm_model") or None
 
 
 def _reserve_llm_quota(user_id: str) -> bool:
-    """本日の LLM コール枠が残っていれば 1 消費して True。上限なら False（heuristic へ縮退）。"""
+    """本日の LLM コール枠が残っていれば 1 消費して True。上限なら False（heuristic へ縮退）。
+
+    core/llm_worker/cost_gate.py::CostGate（day-only、キー ``(today_str(), user_id)``）に
+    委譲する。挙動は不変: 超過時は 429 にせず allow_llm=False のヒューリスティック縮退
+    （呼び出し側 assistant_chat が担う）。
+    """
     settings = get_settings()
     cap = int(getattr(settings, "assistant_max_calls_per_day", 20) or 0)
     if cap <= 0:
         return False
-    today = datetime.date.today().isoformat()
-    day, count = _DAILY_LLM_CALLS.get(user_id, (today, 0))
-    if day != today:
-        day, count = today, 0
-    if count >= cap:
-        _DAILY_LLM_CALLS[user_id] = (day, count)
-        return False
-    _DAILY_LLM_CALLS[user_id] = (day, count + 1)
-    return True
+    return _cost_gate.check_and_count(daily_limit=cap, daily_key=(today_str(), user_id))
 
 
 def _target_from_context(cap, screen_context: dict) -> dict:

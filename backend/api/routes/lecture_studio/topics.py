@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
-from services import get_viewable_course_data
+from services import get_editable_course_data, get_viewable_course_data
 from core.course_data import (
     course_chapters,
     course_source_material_ids,
@@ -30,7 +30,12 @@ from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
 from core import element_explanations
 
-from ._shared import _chunk_status, _get_course_chunks, _get_system_admin_course_data
+from ._shared import (
+    _chunk_status,
+    _get_course_chunks,
+    _get_system_admin_course_data,
+    consume_lecture_rewrite_quota,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +50,23 @@ router = APIRouter(tags=["Lecture Script Studio"])
 def _course_data_for_studio(course_id: str, current_user: dict) -> dict:
     """閲覧権限チェック付きでコースデータを返す。"""
     course_data = get_viewable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return course_data
+
+
+def _course_data_for_studio_editable(course_id: str, current_user: dict) -> dict:
+    """編集権限チェック付きでコースデータを返す（Phase 2-D 🔴）。
+
+    ``rewrite_lecture_studio_course_topic`` は LLM を呼んでコース内容のドラフトを
+    生成する書き込み系の操作だが、旧実装は ``_course_data_for_studio``（閲覧権限のみ）
+    を使っていたため、viewer 権限しかない教員でも呼び出せてしまっていた
+    （設計書 assistant_common_infra_design.md §5。scripts.py の設定 PUT 系
+    （``get_editable_course_data`` + SYSTEM_ADMIN フォールバック）と権限水準を揃える）。
+    """
+    course_data = get_editable_course_data(current_user["id"], course_id)
     if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
         course_data = _get_system_admin_course_data(course_id)
     if not course_data:
@@ -493,7 +515,7 @@ def rewrite_lecture_studio_course_topic(
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """教員の指示に基づいてコーストピックの授業用ドラフトを生成する。"""
-    course_data = _course_data_for_studio(course_id, current_user)
+    course_data = _course_data_for_studio_editable(course_id, current_user)
     topic = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
     if topic is None:
         raise HTTPException(status_code=404, detail="Topic not found")
@@ -530,6 +552,7 @@ def rewrite_lecture_studio_course_topic(
 
     params = get_llm_params("fast")
     parsed: object = {}
+    consume_lecture_rewrite_quota(current_user["id"])
     with usage_context("admin:lecture_rewrite", user_id=current_user["id"], course_id=course_id):
         try:
             parsed = generate_text_with_structured_output(

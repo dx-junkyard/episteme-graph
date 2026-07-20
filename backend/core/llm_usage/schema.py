@@ -60,6 +60,7 @@ KNOWN_FEATURES = (
     "learning:voice_tts",
     "learning:tension",
     "learning:structure_anchor",
+    "learning:understanding_check",
     # --- 管理画面（コースビルダー・原稿スタジオ・Admin Copilot・Field Atlas） ---
     "admin:course_builder",
     "admin:lecture_rewrite",

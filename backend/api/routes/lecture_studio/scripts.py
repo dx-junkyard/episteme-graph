@@ -59,7 +59,13 @@ from core.personas import course_persona_settings, normalize_persona_id, persona
 from core.postgres import get_session as _pg_session
 from core.tts import TtsFatalError, generate_tts_audio
 
-from ._shared import _chunk_status, _get_course_chunks, _get_system_admin_course_data
+from ._shared import (
+    _chunk_status,
+    _ensure_chunk_editable,
+    _get_course_chunks,
+    _get_system_admin_course_data,
+    consume_lecture_rewrite_quota,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -618,6 +624,7 @@ def save_lecture_script(
     current_user: dict = Depends(_require_teacher),
 ) -> LectureScriptSaveResponse:
     """教員が編集した spoken_text とメタデータを DB に保存する。"""
+    _ensure_chunk_editable(chunk_id, current_user)
     session = _pg_session()
     try:
         row = session.execute(
@@ -851,6 +858,7 @@ def rewrite_lecture_script(
 
     ソーステキストに限定せず、教員の指示に従い一般知識も活用して書き換える。
     """
+    _ensure_chunk_editable(chunk_id, current_user)
     session = _pg_session()
     try:
         row = session.execute(
@@ -915,6 +923,7 @@ def rewrite_lecture_script(
 
     params = get_llm_params("fast")
 
+    consume_lecture_rewrite_quota(current_user["id"])
     try:
         with usage_context("admin:lecture_rewrite", user_id=current_user["id"]):
             raw = generate_text(

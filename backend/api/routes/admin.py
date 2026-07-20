@@ -66,6 +66,7 @@ from services import (
     user_owns_course,
     user_owns_document,
 )
+from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
@@ -77,6 +78,9 @@ from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.llm import generate_text
 from core.llm_usage.context import usage_context
+from core.llm_worker.client import resolve_model
+from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.history import window_history
 from core.meta_analyzer import (
     analyze_unanswered_queries,
     approve_proposal,
@@ -1782,15 +1786,47 @@ def _build_material_context(
     return "\n".join(sections)
 
 
+class _CourseBuilderChatResponseOut(CourseBuilderChatResponse):
+    """course_builder_chat レスポンス拡張（正本: assistant_common_infra_design.md §4/§6）。
+
+    ``schemas.CourseBuilderChatResponse`` 自体はファイル所有権の都合上変更せず、
+    ここでサブクラス化して ``degraded``（LLM 縮退）/ ``session_saved``
+    （save_cb_session 正直化）を追加する。
+    """
+
+    degraded: bool = False
+    session_saved: bool = True
+
+
+# コースビルダーチャットの日次 LLM コール上限（正本: core/llm_worker/cost_gate.py の
+# 共通 CostGate、day-only）。プロセスローカル・in-memory カウンタ
+# （設計書 I6: 複数ワーカーで実効上限が緩む・再起動でリセットされる制約は許容）。
+_course_builder_cost_gate = CostGate()
+
+_COURSE_BUILDER_DEGRADED_MESSAGE = (
+    "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+)
+
+
 @router.post(
     "/course-builder/chat",
-    response_model=CourseBuilderChatResponse,
+    response_model=_CourseBuilderChatResponseOut,
 )
 def course_builder_chat(
     body: CourseBuilderChatRequest,
     current_user: dict = Depends(_require_teacher),
-) -> CourseBuilderChatResponse:
+) -> _CourseBuilderChatResponseOut:
     """教員がAIと対話しながらコースを設計するエンドポイント。"""
+    settings = get_settings()
+    daily_cap = int(getattr(settings, "course_builder_max_calls_per_day", 100) or 0)
+    if not _course_builder_cost_gate.check_and_count(
+        daily_limit=daily_cap, daily_key=(today_str(), current_user["id"])
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+        )
+
     messages: list[dict] = [
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
@@ -1814,64 +1850,84 @@ def course_builder_chat(
         except Exception:
             logger.warning("Failed to load selected materials context for course builder", exc_info=True)
 
-    for turn in body.history:
+    # 会話履歴のウィンドウ化（設計書 §2-2）。フロント（admin.js::sendCourseChat）が
+    # course_draft を JSON 化して履歴の先頭に user/assistant 疑似ターン（draftContext /
+    # draftAck の2件）を注入するため、head_keep=2 でこの2件を保護する。
+    windowed_history = window_history(body.history, max_messages=20, max_chars=4000, head_keep=2)
+    for turn in windowed_history:
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
+    degraded = False
+    course_draft: dict | None = None
     try:
         with usage_context("admin:course_builder", user_id=current_user["id"]):
-            raw_answer = generate_text(messages=messages, temperature=0.4)
-    except Exception as exc:
+            raw_answer = generate_text(
+                messages=messages,
+                temperature=0.4,
+                model=resolve_model("course_builder_llm_model", fallback="analysis"),
+            )
+    except Exception:
         logger.exception("Course builder chat LLM call failed")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+        degraded = True
+        answer = _COURSE_BUILDER_DEGRADED_MESSAGE
+    else:
+        answer, course_draft = _extract_course_draft_from_answer(raw_answer)
 
-    answer, course_draft = _extract_course_draft_from_answer(raw_answer)
-
-    # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
-    if course_draft is not None and body.selected_material_ids:
-        try:
-            pg_session = _pg_session()
+        # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
+        if course_draft is not None and body.selected_material_ids:
             try:
-                placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
-                params = {}
-                for i, mid in enumerate(body.selected_material_ids):
-                    params[f"mid_{i}"] = mid
-                records = pg_session.execute(
-                    sa_text(f"""
-                        SELECT source_path, title, filename
-                        FROM documents
-                        WHERE source_path IN ({placeholders}) AND status = 'completed'
-                    """),
-                    params,
-                ).fetchall()
-            finally:
-                pg_session.close()
+                pg_session = _pg_session()
+                try:
+                    placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
+                    params = {}
+                    for i, mid in enumerate(body.selected_material_ids):
+                        params[f"mid_{i}"] = mid
+                    records = pg_session.execute(
+                        sa_text(f"""
+                            SELECT source_path, title, filename
+                            FROM documents
+                            WHERE source_path IN ({placeholders}) AND status = 'completed'
+                        """),
+                        params,
+                    ).fetchall()
+                finally:
+                    pg_session.close()
 
-            sources = []
-            for r in records:
-                sources.append({
-                    "material_id": r[0] or "",
-                    "title": r[1] or r[2] or "",
-                    "subtitle": "",
-                })
-            course_draft["sources"] = sources
-        except Exception:
-            logger.warning("Failed to inject material sources into course_draft", exc_info=True)
+                sources = []
+                for r in records:
+                    sources.append({
+                        "material_id": r[0] or "",
+                        "title": r[1] or r[2] or "",
+                        "subtitle": "",
+                    })
+                course_draft["sources"] = sources
+            except Exception:
+                logger.warning("Failed to inject material sources into course_draft", exc_info=True)
 
     logger.info(
-        "Course builder chat for user=%s, draft=%s",
+        "Course builder chat for user=%s, draft=%s, degraded=%s",
         current_user["id"],
         "yes" if course_draft else "no",
+        degraded,
     )
 
+    # セッション保存は履歴を丸ごと（ウィンドウ化しない）保存する。degraded ターンも
+    # 通常どおり保存する（設計書 I4: 情報を落とさない）。
+    session_saved = True
     if body.session_id:
         updated_history = body.history + [
             {"role": "user", "content": body.message},
             {"role": "assistant", "content": answer},
         ]
-        save_cb_session(current_user["id"], body.session_id, updated_history, course_draft)
+        session_saved = save_cb_session(current_user["id"], body.session_id, updated_history, course_draft)
 
-    return CourseBuilderChatResponse(answer=answer, course_draft=course_draft)
+    return _CourseBuilderChatResponseOut(
+        answer=answer,
+        course_draft=course_draft,
+        degraded=degraded,
+        session_saved=session_saved,
+    )
 
 
 # ---------------------------------------------------------------------------

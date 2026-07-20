@@ -74,6 +74,7 @@ from core.deliberation import (
 from core.library import search as library_search
 from core.library import store as library_store
 from core.deliberation.standardization import worker as standardization_worker
+from core.llm_worker.history import window_history
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
@@ -838,6 +839,12 @@ def post_deliberation_message(
         for m in (session.get("messages") or [])
         if isinstance(m, dict)
     ]
+    # 会話履歴のウィンドウ化（設計書 §2-2）。grounding は dialogue.build_llm_messages が
+    # prior_messages + 今回発話のうち「最初に見つかった user メッセージ」に注入する
+    # （dialogue.py:548-568）。prior_messages[0] は常にセッション最初のユーザー発話
+    # （grounding が乗る場所）なので head_keep=1 でそれを保護する。セッション8コール
+    # 上限下では実質 no-op（安全網）。
+    prior_messages = window_history(prior_messages, max_messages=16, max_chars=4000, head_keep=1)
 
     result = dialogue.run_turn(
         ref,

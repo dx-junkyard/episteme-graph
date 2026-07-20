@@ -376,3 +376,12 @@
 4. 会話履歴ウィンドウ化の共通ユーティリティ新設と4者への適用
 5. モデル解決の `resolve_model()` 統一 + 専用 env var 追加
 6. 縮退規約の統一（メイン応答は degraded 縮退へ）
+
+## 10. 実施記録（追補、2026-07-20）
+
+上記 1〜6 と §6-6（usage_context 補完）を**同日中にすべて実装済み**。設計と実施内容の
+正本は [assistant_common_infra_design.md](../features/assistant_common_infra_design.md)
+（§10 実施記録）。バックエンド 5,029 pass / src 1,608 pass。実装中の追加発見として、
+`lecture_studio/topics.py` の rewrite 経路にも「閲覧権限のみで実行可能」という §8 🔴 と
+同種の欠如があり、同時に是正した。§8 の 🟡（casual テキスト UI・Copilot 画面コンテキスト
+拡張・W層注釈黙殺・会話不変ログ等）と ⚪ デッドコードは未着手のまま残る。

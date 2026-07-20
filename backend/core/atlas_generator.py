@@ -26,6 +26,7 @@ from core import atlas
 from core.cartridges import DomainCartridge, load_cartridge
 from core.config import get_settings
 from core.llm_usage.context import usage_context
+from core.llm_worker.client import resolve_model
 
 logger = logging.getLogger(__name__)
 
@@ -366,8 +367,12 @@ def _skeleton_outline(skeleton: dict) -> str:
 
 
 def _assist_model(model: str | None) -> str:
-    settings = get_settings()
-    return model or settings.atlas_assist_llm_model or settings.llm_analysis_model
+    """teacher 指定の ``model`` を最優先し、無ければ
+
+    ``resolve_model("atlas_assist_llm_model", fallback="analysis")``
+    （空なら analysis tier。既存の意図的差分を維持, I1）に解決する。
+    """
+    return model or resolve_model("atlas_assist_llm_model", fallback="analysis")
 
 
 def interpret_skeleton_instruction(

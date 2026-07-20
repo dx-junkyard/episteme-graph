@@ -3073,6 +3073,15 @@
           state.courseDraft = courseDraft;
           renderCoursePreview();
         }
+
+        // session_saved の正直化（設計書 §6）: 保存に失敗していても回答自体は表示済みの
+        // うえで、警告のみ画面表示する（chatHistory には積まず表示専用）。
+        if (data.session_saved === false) {
+          state.chatMessages.push({
+            role: "warning",
+            content: "セッションの保存に失敗しました。会話履歴が保存されていない可能性があります。",
+          });
+        }
       })
       .catch(function () {
         state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
@@ -3120,6 +3129,8 @@
     state.chatMessages.forEach(function (msg) {
       if (msg.role === "user") {
         html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
+      } else if (msg.role === "warning") {
+        html += '<div class="mg ai" style="color:var(--color-text-warning);font-size:12px;">⚠ ' + escHtml(msg.content) + "</div>";
       } else {
         html += '<div class="mg ai">' + renderSimpleMarkdown(msg.content) + "</div>";
       }

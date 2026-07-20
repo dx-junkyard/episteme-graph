@@ -26,6 +26,7 @@ from core.admin_assistant.schema import (
     IntentResult,
     LLMIntentResponse,
 )
+from core.llm_worker.history import window_history
 
 # where 型（道案内）の合図。
 _WHERE_MARKERS = (
@@ -185,32 +186,24 @@ _HISTORY_MAX_CHARS = 500
 def _normalize_history(history: Optional[list], current_message: str) -> list:
     """フロントが送る ``[{role, content}]`` を LLM messages 用に整形する。
 
+    実装は ``core/llm_worker/history.py::window_history`` への薄い委譲（正本:
+    docs/features/assistant_common_infra_design.md §2-2）。既存の挙動・シグネチャは
+    変えない:
+
     - role は user/assistant のみ許可（未知 role・非 dict はスキップ）。
     - content は文字列化し `_HISTORY_MAX_CHARS` でトリム、空要素は落とす。
     - フロントは送信直前に現在発話を history へ push するため、末尾が現在発話と
       重複する。その場合は末尾を1件除去する（ctx_lines の「ユーザー発話」と二重に
       ならないように）。
-    - 直近 `_HISTORY_MAX_TURNS` 件に絞る。
+    - 直近 `_HISTORY_MAX_TURNS` 件に絞る（head_keep なし。全体を KB 検索と同じ
+      1コールに収める設計のため先頭保護は不要）。
     """
-    out: list = []
-    for item in history or []:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        content = item.get("content")
-        if not isinstance(content, str):
-            content = "" if content is None else str(content)
-        content = content.strip()
-        if not content:
-            continue
-        out.append({"role": role, "content": content[:_HISTORY_MAX_CHARS]})
-
-    cur = (current_message or "").strip()[:_HISTORY_MAX_CHARS]
-    if cur and out and out[-1]["role"] == "user" and out[-1]["content"] == cur:
-        out.pop()
-    return out[-_HISTORY_MAX_TURNS:]
+    return window_history(
+        history,
+        max_messages=_HISTORY_MAX_TURNS,
+        max_chars=_HISTORY_MAX_CHARS,
+        current_message=current_message,
+    )
 
 
 def _refine_with_llm(

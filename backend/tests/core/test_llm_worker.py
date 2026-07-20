@@ -52,6 +52,33 @@ class TestResolveModel:
         with patch("core.llm_worker.client.get_settings", return_value=settings):
             assert resolve_model("nonexistent_key") == "fast-x"
 
+    def test_fallback_fast_is_the_default(self):
+        settings = type("S", (), {"llm_fast_model": "fast-x", "llm_analysis_model": "analysis-x"})()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            assert resolve_model("missing_key") == resolve_model("missing_key", fallback="fast")
+
+    def test_fallback_analysis_falls_back_to_analysis_tier_when_empty(self):
+        settings = type(
+            "S", (), {"llm_fast_model": "fast-x", "llm_analysis_model": "analysis-x", "my_model_key": ""}
+        )()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            assert resolve_model("my_model_key", fallback="analysis") == "analysis-x"
+
+    def test_fallback_analysis_still_prefers_explicit_override(self):
+        settings = type(
+            "S",
+            (),
+            {"llm_fast_model": "fast-x", "llm_analysis_model": "analysis-x", "my_model_key": "override-model"},
+        )()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            assert resolve_model("my_model_key", fallback="analysis") == "override-model"
+
+    def test_unknown_fallback_tier_raises_value_error(self):
+        settings = type("S", (), {"llm_fast_model": "fast-x"})()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            with pytest.raises(ValueError):
+                resolve_model("my_model_key", fallback="deep")
+
 
 class TestBaseJSONLLMClient:
     def test_complete_json_uses_explicit_model_and_returns_parsed_dict(self):
