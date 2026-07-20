@@ -4403,6 +4403,23 @@
       if (figure.figure_id) figureById[String(figure.figure_id)] = figure;
     });
 
+    // 読み取り専用 evidence DTO（backend build_topic_evidence_items）。![[component:id]]
+    // / ![[claim:id]] / ![[source:id]]（および数式・図の補助）を、そのトピックで公開済み
+    // の参照だけから解決する。exact キー "kind:id" 優先、kind 取り違え時は同一 ID の
+    // 別 kind へフォールバック（管理画面 lsEvidenceItemByRef と同一挙動。仕様として両画面
+    // 一致させる）。chunk.evidence_items が無い呼び出し（出典ポップアップ等）では空。
+    var evidenceByRef = {};
+    var evidenceById = {};
+    (chunk.evidence_items || []).forEach(function (item) {
+      if (!item || !item.kind) return;
+      var norm = normalizeMaterialEvidenceId(item.id);
+      evidenceByRef[item.kind + ":" + norm] = item;
+      if (!Object.prototype.hasOwnProperty.call(evidenceById, norm)) evidenceById[norm] = item;
+    });
+    function lookupEvidenceItem(kind, normId) {
+      return evidenceByRef[kind + ":" + normId] || evidenceById[normId] || null;
+    }
+
     var embedBlocks = [];
     var mathBlocks = [];
     var figureBlocks = [];
@@ -4468,8 +4485,12 @@
       var embed = embedBlocks[parseInt(idx, 10)];
       if (!embed) return "";
       var embedId = normalizeMaterialEvidenceId(embed.id);
+      var evidenceItem = lookupEvidenceItem(embed.kind, embedId);
       if (embed.kind === "equation") {
-        var formula = formulaById[String(embed.id)] || formulaById[embedId];
+        // 数式は既存専用描画（LaTeX → plain_text → raw_text）を維持しつつ、
+        // formulas に無い ID も evidence_items（管理画面と同じ根拠リンク由来）で裏付ける。
+        var formula = formulaById[String(embed.id)] || formulaById[embedId] ||
+          (evidenceItem && (evidenceItem.latex || evidenceItem.plain_text || evidenceItem.raw_text) ? evidenceItem : null);
         var body = renderMaterialEquationBody(formula);
         if (body) {
           return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
@@ -4485,11 +4506,33 @@
           '数式は準備中です' +
         '</span>';
       }
-      return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
-        '<span class="ls-material-embed-kind">未解決</span>' +
-        '<strong>' + escHtml(embed.kind + ":" + embed.id) + '</strong>' +
-        '<span class="ls-material-embed-summary">このIDに対応する教材要素を取得できませんでした。</span>' +
-      '</span>';
+      if (embed.kind === "figure") {
+        // 通常 ![[figure:id]] は backend が [[FIGURE_N]] に解決済み（figures 経由で
+        // 認可付き画像配信）。ここに来るのは未配信の figure_id のみ。evidence_items に
+        // caption があれば、画像なしの読み取りカードを出す（新たな画像取得経路は作らない）。
+        if (evidenceItem && evidenceItem.kind === "figure") {
+          return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="figure:' + escHtml(embedId) + '">' +
+            '<span class="ls-material-embed-kind">図</span>' +
+            '<strong>' + escHtml(evidenceItem.title || ("図: " + (evidenceItem.caption || embedId))) + '</strong>' +
+            '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.caption || evidenceItem.summary) || "この図の画像は現在配信対象ではありません。") + '</span>' +
+          '</span>';
+        }
+        return renderMaterialMissingEmbed(embed, embedId);
+      }
+      // component / claim / source: 解決できれば静的な根拠カードとして描画する。
+      if (evidenceItem) {
+        var cardBody = evidenceItem.latex
+          ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
+          : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
+        var meta = [evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ");
+        return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
+          '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
+          '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
+          cardBody +
+          (meta ? '<span class="ls-material-embed-meta">' + escHtml(meta) + '</span>' : "") +
+        '</span>';
+      }
+      return renderMaterialMissingEmbed(embed, embedId);
     });
 
     html = html.replace(/\x00MATERIAL_FIGURE_(\d+)\x00/g, function (_m, idx) {
@@ -4498,6 +4541,22 @@
     });
 
     return html || "";
+  }
+
+  // 本当に未解決の参照は、ID・種別を含む控えめなフォールバック表示を維持する
+  // （教材画面全体を壊さない。管理画面の同種フォールバックと文言を揃える）。
+  function renderMaterialMissingEmbed(embed, embedId) {
+    return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
+      '<span class="ls-material-embed-kind">未解決</span>' +
+      '<strong>' + escHtml(embed.kind + ":" + embed.id) + '</strong>' +
+      '<span class="ls-material-embed-summary">このIDに対応する教材要素を取得できませんでした。</span>' +
+    '</span>';
+  }
+
+  // 根拠カードの summary を読み取りやすい長さに丸める（管理画面 lsShortSummary(260) 相当）。
+  function shortMaterialEvidenceSummary(text) {
+    var t = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+    return t.length > 260 ? t.slice(0, 260).trim() + "..." : t;
   }
 
   // [[FIGURE_N]] の解決先マークアップ。画像本体は同期関数の中で fetch できないため、
@@ -4607,16 +4666,19 @@
     return '<span class="' + cls + '"><code>' + escHtml(formula) + '</code></span>';
   }
 
+  // 教材埋め込み ![[kind:id]] の id 正規化。管理画面 lsNormalizeEvidenceId
+  // （admin-lecture-studio.js）と backend normalize_evidence_id
+  // （core/course_content_builder.py）と**同一仕様**にする（両画面で同じ ID が同じ
+  // 解決キーになることを保証。test_topic_material_evidence_items が差分を固定）。
+  // 空白除去 → 先頭 [[ / 末尾 ]] を最大2回剥がす → 旧二重 "eq_" プレフィックス
+  // ("eq_eq_F2" → "eq_F2") を畳み込む。
   function normalizeMaterialEvidenceId(value) {
-    return String(value || "")
-      .trim()
-      .replace(/^\[\[/, "")
-      .replace(/\]\]$/, "")
-      .replace(/^equation:/, "")
-      .trim()
-      // Collapse a duplicated "eq_" prefix from the legacy double-prefix bug
-      // ("eq_eq_F2" → "eq_F2") so legacy and corrected ids resolve alike.
-      .replace(/^(?:eq_){2,}/i, "eq_");
+    var s = String(value || "").trim();
+    s = s.replace(/^\[\[/, "").replace(/\]\]$/, "");
+    s = s.replace(/^\[\[/, "").replace(/\]\]$/, "");
+    s = s.trim();
+    s = s.replace(/^(?:eq_){2,}/i, "eq_");
+    return s;
   }
 
   function normalizeMaterialLineBreaks(text) {

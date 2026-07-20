@@ -715,6 +715,235 @@ def _topic_evidence_links(
     return links
 
 
+# ---------------------------------------------------------------------------
+# 教材埋め込み ``![[kind:id]]`` の学習画面向け解決 DTO（evidence_items）
+# ---------------------------------------------------------------------------
+#
+# 授業用ドラフト（admin-lecture-studio.js の lsRenderCourseMaterialPreview /
+# lsTopicEvidenceItems）は topic の evidence_links / content_blocks /
+# linked_component_ids / source_excerpt を使って全 kind の ``![[kind:id]]`` を
+# クライアント側で解決していた。一方 get_topic_material は本文と数式・図しか渡さず、
+# 学習画面レンダラ（app.js renderMaterialChunk）は equation / figure 以外を常に
+# 「未解決」表示にしていた（同じ教材 DSL に対し解決コンテキストが画面ごとに違う不整合）。
+#
+# build_topic_evidence_items は admin と同一の抽出・正規化規則で、学習者へ公開して
+# よい参照だけから読み取り専用 DTO を組み立てる。DB 上の任意 ID をクライアント入力
+# から自由に解決する経路は作らない（ここに現れる参照＝そのトピックで公開済みの参照）。
+
+_EVIDENCE_ID_EQ_PREFIX_RE = re.compile(r"^(?:eq_){2,}", re.IGNORECASE)
+
+
+def normalize_evidence_id(value: object) -> str:
+    """教材埋め込み ``![[kind:id]]`` の id を正規化する（両画面共通の正本規則）。
+
+    frontend の ``lsNormalizeEvidenceId``（admin-lecture-studio.js）と
+    ``normalizeMaterialEvidenceId``（app.js）と**同一仕様**にする:
+    空白除去 → 先頭 ``[[`` / 末尾 ``]]`` を最大2回剥がす → 旧二重 ``eq_``
+    プレフィックス（``eq_eq_F2`` → ``eq_F2``）を畳み込む。これにより同じ ID が
+    両画面で同じ解決キーになる（差分は test_topic_material_evidence_items が固定する）。
+    """
+    s = str(value if value is not None else "").strip()
+    for _ in range(2):
+        if s.startswith("[["):
+            s = s[2:]
+        if s.endswith("]]"):
+            s = s[:-2]
+    s = s.strip()
+    s = _EVIDENCE_ID_EQ_PREFIX_RE.sub("eq_", s)
+    return s
+
+
+def _topic_content_block_formulas(topic: dict) -> list[dict]:
+    """``topic.content_blocks`` の equations を UI 数式アイテムへ変換する。
+
+    admin ``lsTopicFormulas`` / routes の ``_topic_formulas_from_content_blocks`` と
+    同じ規則（latex が無くても plain_text / raw_text があれば残す）。
+    """
+    formulas: list[dict] = []
+    for block in (topic or {}).get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if not (item.get("latex") or item.get("plain_text") or item.get("raw_text")):
+                continue
+            formulas.append({
+                "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
+                "label": item.get("label") or "",
+                "latex": item.get("latex") or "",
+                "plain_text": item.get("plain_text") or "",
+                "raw_text": item.get("raw_text") or "",
+            })
+    return formulas
+
+
+def _topic_component_block_item(topic: dict, component_id: object) -> dict:
+    """``content_blocks`` の components ブロックから component_id 一致アイテムを引く
+    （admin ``lsTopicComponentById`` と同じ探索）。無ければ空 dict。"""
+    norm = normalize_evidence_id(component_id)
+    for block in (topic or {}).get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "components":
+            continue
+        for item in block.get("items") or []:
+            if isinstance(item, dict) and normalize_evidence_id(item.get("component_id")) == norm:
+                return item
+    return {}
+
+
+def build_topic_evidence_items(topic: dict) -> list[dict]:
+    """学習画面向けの読み取り専用 evidence DTO を、トピックに公開済みの参照だけから
+    決定論的に組み立てる（admin ``lsTopicEvidenceItems`` と同一規則）。
+
+    学習画面が ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` /
+    ``![[equation:id]]`` / ``![[figure:id]]`` を解決するための材料。供給元は
+    ``learning_courses.data`` に保存済みの ``topic.evidence_links`` /
+    ``content_blocks`` / ``linked_component_ids`` / ``source_excerpt`` /
+    ``summary`` のみ（コース再生成不要）。**DB 上の任意 ID をクライアント入力から
+    解決しない** — ここに現れる参照＝そのトピックで公開してよい参照。
+
+    各アイテムの共通フィールド: ``kind`` / ``id``（正規化済み）/ ``title`` /
+    ``summary`` / ``role`` / ``confidence``。種別固有: equation は
+    ``latex`` / ``plain_text`` / ``raw_text``、figure は ``figure_id`` /
+    ``figure_key`` / ``caption``、latex を持つ source は ``latex``。
+    """
+    topic = topic or {}
+    items: list[dict] = []
+
+    formula_by_norm: dict[str, dict] = {}
+    for formula in _topic_content_block_formulas(topic):
+        formula_by_norm[normalize_evidence_id(formula.get("id"))] = formula
+
+    confidence = str(topic.get("content_confidence") or "")
+
+    # 1) evidence_links（component / equation / claim / source / figure）— 正本の根拠リンク。
+    for link in topic.get("evidence_links") or []:
+        if not isinstance(link, dict):
+            continue
+        kind = str(link.get("kind") or "source")
+        raw_id = link.get("target_id") or link.get("id") or ""
+        if kind == "equation":
+            norm = normalize_evidence_id(raw_id)
+            formula = formula_by_norm.get(norm) or {}
+            items.append({
+                "kind": "equation",
+                "id": norm,
+                # 生 LaTeX をタイトルに出さない（ラベル or 正規化 ID）。
+                "title": link.get("label") or formula.get("label") or norm,
+                "summary": link.get("summary") or "",
+                "latex": link.get("latex") or formula.get("latex") or "",
+                "plain_text": link.get("plain_text") or formula.get("plain_text") or "",
+                "raw_text": formula.get("raw_text") or "",
+                "role": link.get("support_role") or "equation",
+                "confidence": link.get("confidence") or "",
+            })
+            continue
+        if kind == "figure":
+            fig_id = str(link.get("figure_id") or raw_id or "")
+            caption = link.get("caption") or ""
+            items.append({
+                "kind": "figure",
+                "id": normalize_evidence_id(fig_id),
+                "figure_id": fig_id,
+                "figure_key": link.get("figure_key") or "",
+                "caption": caption,
+                "title": "図: " + _short_excerpt(caption or fig_id or "図", limit=40),
+                "summary": caption,
+                "role": link.get("support_role") or "figure",
+                "confidence": link.get("confidence") or "",
+            })
+            continue
+        # source / claim / component。equation_quote など生 TeX を summary に持つ source は
+        # latex に移して数式描画させる（admin と同じ切り詰め回避ガード）。
+        latex = link.get("latex") or ""
+        summary = link.get("summary") or ""
+        if not latex and _looks_like_tex_math(summary):
+            latex = summary
+            summary = ""
+        if latex:
+            title = link.get("label") or ("数式引用" if link.get("support_role") == "equation_quote" else "数式")
+        else:
+            title = summary or str(raw_id) or kind
+        item = {
+            "kind": kind,
+            "id": normalize_evidence_id(raw_id),
+            "title": title,
+            "summary": summary,
+            "role": link.get("support_role") or "",
+            "confidence": link.get("confidence") or "",
+        }
+        if latex:
+            item["latex"] = latex
+        items.append(item)
+
+    # 2) linked_component_ids: evidence_links に無い component を content_blocks から補う。
+    for cid in topic.get("linked_component_ids") or []:
+        block_component = _topic_component_block_item(topic, cid)
+        title = block_component.get("label") or block_component.get("component_id") or ""
+        summary = block_component.get("teaching_takeaway") or block_component.get("summary") or ""
+        items.append({
+            "kind": "component",
+            "id": normalize_evidence_id(cid),
+            "title": title or str(cid),
+            "summary": summary or "このトピックに関連付けられた論理コンポーネントです。",
+            "role": "support",
+            "confidence": confidence,
+        })
+
+    # 3) content_blocks の equations（本文が式を直接埋め込むケース）。
+    for formula in _topic_content_block_formulas(topic):
+        norm = normalize_evidence_id(formula.get("id"))
+        items.append({
+            "kind": "equation",
+            "id": norm,
+            "title": formula.get("label") or norm,
+            "summary": formula.get("plain_text") or formula.get("latex") or "",
+            "latex": formula.get("latex") or "",
+            "plain_text": formula.get("plain_text") or "",
+            "raw_text": formula.get("raw_text") or "",
+            "role": "equation",
+            "confidence": confidence,
+        })
+
+    # 4) source_excerpt（原文抜粋）。
+    if topic.get("source_excerpt"):
+        chunk_ids = topic.get("linked_chunk_ids") or []
+        excerpt_id = str(chunk_ids[0]) if chunk_ids else "excerpt"
+        items.append({
+            "kind": "source",
+            "id": normalize_evidence_id(excerpt_id),
+            "title": "原文抜粋",
+            "summary": topic.get("source_excerpt") or "",
+            "role": "source_span",
+            "confidence": confidence,
+        })
+
+    # 5) トピック概要（``![[source:topic_summary]]`` / ``![[source:summary]]``）。
+    #    course_content_builder のプロンプトが明示的に許可する参照（本文が概要を指す）。
+    if topic.get("summary"):
+        summary_text = _short_excerpt(str(topic.get("summary") or ""), limit=260)
+        for sid in ("topic_summary", "summary"):
+            items.append({
+                "kind": "source",
+                "id": sid,
+                "title": "トピック概要",
+                "summary": summary_text,
+                "role": "summary",
+                "confidence": confidence,
+            })
+
+    # dedup（``kind:normalized_id``、先勝ち — evidence_links を content_blocks より優先）。
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for item in items:
+        key = f"{item['kind']}:{item['id']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
+
+
 def _best_mapping(topic: dict, mapping_topics: list[dict], index: int) -> tuple[dict, str]:
     if not mapping_topics:
         return {}, "none"

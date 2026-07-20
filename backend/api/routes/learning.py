@@ -100,7 +100,7 @@ from core.learning_support_agent import (
 )
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
-from core.course_content_builder import build_course_content_background
+from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
@@ -1186,12 +1186,17 @@ def get_topic_material(
         resolved_text, figures = resolve_figure_embeds(topic_text, figures_by_id)
         # 承認済み contextual 説明を充填する（Phase 2 §5.3。無ければ explanation は None のまま）。
         _attach_figure_explanations(figures, figures_by_id)
+        # ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` を学習画面でも
+        # 解決できるよう、トピックに公開済みの参照だけから読み取り専用 DTO を渡す
+        # （管理画面 lsTopicEvidenceItems と同一規則。DB 上の任意 ID は解決しない）。
+        evidence_items = build_topic_evidence_items(topic or {})
         chunks = [ChunkContent(
             id=f"topic:{topic_id}",
             text=resolved_text,
             chunk_index=topic_index,
             formulas=formulas,
             figures=figures,
+            evidence_items=evidence_items,
             chapter=None,
             section=(topic or {}).get("title"),
             material_id=None,

@@ -145,6 +145,11 @@ class ChunkContent(BaseModel):
     chunk_index: int
     formulas: list[dict] = []
     figures: list[dict] = []  # Phase 4: 図のコース流通 §7.2（figure_id/caption/explanation/image_url）
+    # 学習画面向けの読み取り専用 evidence DTO（build_topic_evidence_items）。
+    # ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` / ``![[equation:id]]`` /
+    # ``![[figure:id]]`` を、そのトピックで公開済みの参照だけから解決するための材料。
+    # 管理画面の lsTopicEvidenceItems と同一規則で組み立てる（両画面の解決結果を揃える）。
+    evidence_items: list[dict] = []
     chapter: str | None = None
     section: str | None = None
     material_id: str | None = None
