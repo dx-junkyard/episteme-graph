@@ -24,6 +24,15 @@ logger = logging.getLogger(__name__)
 ALLOWED_COMPONENT_TYPES = ("theory", "concept", "law", "mechanism", "operator", "observation")
 
 
+class CandidateGenerationError(Exception):
+    """LLM 呼び出し自体が失敗した場合の専用例外(§4 B2)。
+
+    「LLM が正常応答して候補が0件」と「LLM 呼び出し自体が失敗」を区別するため、
+    後者はこの例外で送出する(握りつぶして空配列を返さない)。呼び出し元(route)が
+    503 + 事実文に変換する。
+    """
+
+
 class CandidateClaimLink(BaseModel):
     """AI が提示する claim 紐づけ候補(教員が確定するまでは候補扱い)。"""
 
@@ -117,9 +126,9 @@ def generate_component_candidates(
             response_format=CandidateGenerationResult,
             model=model,
         )
-    except Exception:
+    except Exception as exc:
         logger.exception("Component candidate generation failed")
-        return CandidateGenerationResult(components=[])
+        raise CandidateGenerationError("Component candidate generation failed") from exc
 
     # サニタイズ: component_type の正規化と、存在しない claim_id の除去。
     cleaned: list[CandidateComponent] = []

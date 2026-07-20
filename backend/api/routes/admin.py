@@ -66,6 +66,7 @@ from services import (
     user_owns_course,
     user_owns_document,
 )
+from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
@@ -77,6 +78,9 @@ from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.llm import generate_text
 from core.llm_usage.context import usage_context
+from core.llm_worker.client import resolve_model
+from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.history import window_history
 from core.meta_analyzer import (
     analyze_unanswered_queries,
     approve_proposal,
@@ -374,8 +378,15 @@ def upload_material(
 
 
 class ReanalyzeRequest(BaseModel):
-    """画像パイプライン §3: 再解析時の analyze_images オプション（任意 body）。"""
-    analyze_images: bool = False
+    """画像パイプライン §3: 再解析時の analyze_images オプション（任意 body）。
+
+    ``None``（未指定）は「前回 run の options を引き継ぐ」。orchestrator の継承分岐
+    （options is None → 最新 run の options を再利用）を生かすため、
+    ``reanalyze_document`` は ``options=None`` を渡す。明示 true/false のときのみ
+    上書きする。かつては未指定でも常に ``{"analyze_images": False}`` を渡していた
+    ため継承分岐が到達不能で、画像解析 ON で作った未レビューの AI 図分類
+    （suggested_mode / analysis_profile）が再解析のたびに無警告で消えていた。"""
+    analyze_images: bool | None = None
 
 
 @router.post("/documents/{document_id}/reanalyze", status_code=202)
@@ -391,7 +402,9 @@ def reanalyze_document(
     エンドポイントの後継。
 
     ``body.analyze_images``（画像パイプライン §3）: True のとき
-    ``apparatus_semantics`` ステージを有効にする。省略時は False
+    ``apparatus_semantics`` ステージを有効にする。省略（None）時は前回 run の
+    options を引き継ぐ（初回解析で ON にした選択が再解析で黙って落ちない）。
+    前回 run が無い場合の実効値は orchestrator 側の既定で False
     （明示オプトインのみ有効、原則6）。
     """
     session = _pg_session()
@@ -463,11 +476,14 @@ def reanalyze_document(
     finally:
         session.close()
 
-    analyze_images = bool(body.analyze_images) if body is not None else False
+    # None（body 無し / analyze_images 未指定）は options=None を渡し、orchestrator の
+    # 「前回 run の options を引き継ぐ」分岐を生かす。明示 true/false のみ上書きする。
+    analyze_images = body.analyze_images if body is not None else None
+    options = {"analyze_images": bool(analyze_images)} if analyze_images is not None else None
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
-        kwargs={"options": {"analyze_images": analyze_images}},
+        kwargs={"options": options},
         daemon=True,
     )
     thread.start()
@@ -602,7 +618,7 @@ def list_materials(
                     f"""
                     SELECT DISTINCT ON (material_id)
                            id::text AS id, material_id, status, current_stage, error_message,
-                           stage_outputs, updated_at, completed_at
+                           stage_outputs, options, updated_at, completed_at
                     FROM document_analysis_runs
                     WHERE material_id IN ({run_placeholders})
                     ORDER BY material_id, created_at DESC
@@ -755,6 +771,8 @@ def list_materials(
             analysis_processed=stage_info.get("processed"),
             analysis_total=stage_info.get("total"),
             analysis_error=run_data.get("error_message") or None,
+            # 最新 run の options（JSONB）。run が無ければ None（フロント契約: analysis_options）。
+            analysis_options=(run_data.get("options") if run else None),
             authors=authors,
             year=year,
             doc_type=doc_type,
@@ -1057,7 +1075,16 @@ def update_course_visibility(
     body: VisibilityUpdateRequest,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """コースの開示範囲を更新する。"""
+    """コースの開示範囲を更新する。
+
+    G1-1 是正: is_published は「現在 visibility='public' か」を常に正確に反映させる
+    （旧実装は public 化のときだけ true を立て、group/private へ戻しても is_published が
+    true のまま残っていた。学習者向け一覧・enroll・get_accessible_course_data は
+    visibility も併せて見るため受講可能一覧への漏れは無かったが、教員向けの公開状態表示
+    （コース管理タブ・G層 next-steps の「未公開」判定）が実態とずれていたため是正する）。
+    is_template は「テンプレートとして作られたことがあるか」の意図を保つため、
+    従来どおり public 化時のみ true を立て、離脱時にリセットはしない。
+    """
     if body.visibility not in ("public", "group", "private"):
         raise HTTPException(status_code=400, detail=f"Invalid visibility: {body.visibility}")
     if body.visibility == "group":
@@ -1073,7 +1100,7 @@ def update_course_visibility(
                 UPDATE learning_courses
                 SET visibility = :visibility,
                     group_id = CAST(:group_id AS uuid),
-                    is_published = CASE WHEN :visibility = 'public' THEN true ELSE is_published END,
+                    is_published = (:visibility = 'public'),
                     is_template = CASE WHEN :visibility = 'public' THEN true ELSE is_template END,
                     updated_at = now()
                 WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
@@ -1245,6 +1272,44 @@ def delete_material(
                 "DELETE FROM object_group_permissions "
                 "WHERE object_type = 'document' AND object_id = CAST(:doc_id AS uuid)::text"
             ),
+            {"doc_id": doc_id},
+        )
+
+        # W層 同一性リンク（migration 048）の instance 側も document_id への FK が無い
+        # ポリモーフィック行なので明示削除する（孤児防止。_purge_document と同じ
+        # orphan gap パターン。document_id は UUID / material_id 両形で書かれ得るため
+        # 両方を見る）。
+        session.execute(
+            sa_text(
+                "DELETE FROM element_identity_links "
+                "WHERE instance_document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
+            ),
+            {"doc_id": doc_id, "material_id": material_id},
+        )
+
+        # W層 対話セッション + 候補注釈（migration 049）の scope='document' 行も document_id への
+        # FK が無いポリモーフィック行なので明示削除する（_purge_document と同じ orphan gap
+        # パターン。scope='domain' 行は document_id が NULL のため対象外・L層のライフサイクルに従う）。
+        session.execute(
+            sa_text(
+                "DELETE FROM element_annotations "
+                "WHERE document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
+            ),
+            {"doc_id": doc_id, "material_id": material_id},
+        )
+        session.execute(
+            sa_text(
+                "DELETE FROM deliberation_sessions "
+                "WHERE document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
+            ),
+            {"doc_id": doc_id, "material_id": material_id},
+        )
+
+        # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳:
+        # document_id は element_annotations 等と異なり documents.id に準拠する
+        # UUID 列（FK 無し）なので material_id 形は不要（孤児防止。_purge_document と同じ）。
+        session.execute(
+            sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:doc_id AS uuid)"),
             {"doc_id": doc_id},
         )
 
@@ -1721,15 +1786,47 @@ def _build_material_context(
     return "\n".join(sections)
 
 
+class _CourseBuilderChatResponseOut(CourseBuilderChatResponse):
+    """course_builder_chat レスポンス拡張（正本: assistant_common_infra_design.md §4/§6）。
+
+    ``schemas.CourseBuilderChatResponse`` 自体はファイル所有権の都合上変更せず、
+    ここでサブクラス化して ``degraded``（LLM 縮退）/ ``session_saved``
+    （save_cb_session 正直化）を追加する。
+    """
+
+    degraded: bool = False
+    session_saved: bool = True
+
+
+# コースビルダーチャットの日次 LLM コール上限（正本: core/llm_worker/cost_gate.py の
+# 共通 CostGate、day-only）。プロセスローカル・in-memory カウンタ
+# （設計書 I6: 複数ワーカーで実効上限が緩む・再起動でリセットされる制約は許容）。
+_course_builder_cost_gate = CostGate()
+
+_COURSE_BUILDER_DEGRADED_MESSAGE = (
+    "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+)
+
+
 @router.post(
     "/course-builder/chat",
-    response_model=CourseBuilderChatResponse,
+    response_model=_CourseBuilderChatResponseOut,
 )
 def course_builder_chat(
     body: CourseBuilderChatRequest,
     current_user: dict = Depends(_require_teacher),
-) -> CourseBuilderChatResponse:
+) -> _CourseBuilderChatResponseOut:
     """教員がAIと対話しながらコースを設計するエンドポイント。"""
+    settings = get_settings()
+    daily_cap = int(getattr(settings, "course_builder_max_calls_per_day", 100) or 0)
+    if not _course_builder_cost_gate.check_and_count(
+        daily_limit=daily_cap, daily_key=(today_str(), current_user["id"])
+    ):
+        raise HTTPException(
+            status_code=429,
+            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+        )
+
     messages: list[dict] = [
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
@@ -1753,64 +1850,84 @@ def course_builder_chat(
         except Exception:
             logger.warning("Failed to load selected materials context for course builder", exc_info=True)
 
-    for turn in body.history:
+    # 会話履歴のウィンドウ化（設計書 §2-2）。フロント（admin.js::sendCourseChat）が
+    # course_draft を JSON 化して履歴の先頭に user/assistant 疑似ターン（draftContext /
+    # draftAck の2件）を注入するため、head_keep=2 でこの2件を保護する。
+    windowed_history = window_history(body.history, max_messages=20, max_chars=4000, head_keep=2)
+    for turn in windowed_history:
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
+    degraded = False
+    course_draft: dict | None = None
     try:
         with usage_context("admin:course_builder", user_id=current_user["id"]):
-            raw_answer = generate_text(messages=messages, temperature=0.4)
-    except Exception as exc:
+            raw_answer = generate_text(
+                messages=messages,
+                temperature=0.4,
+                model=resolve_model("course_builder_llm_model", fallback="analysis"),
+            )
+    except Exception:
         logger.exception("Course builder chat LLM call failed")
-        raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+        degraded = True
+        answer = _COURSE_BUILDER_DEGRADED_MESSAGE
+    else:
+        answer, course_draft = _extract_course_draft_from_answer(raw_answer)
 
-    answer, course_draft = _extract_course_draft_from_answer(raw_answer)
-
-    # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
-    if course_draft is not None and body.selected_material_ids:
-        try:
-            pg_session = _pg_session()
+        # 選択教材の正しい material_id を確定的に course_draft["sources"] に注入する
+        if course_draft is not None and body.selected_material_ids:
             try:
-                placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
-                params = {}
-                for i, mid in enumerate(body.selected_material_ids):
-                    params[f"mid_{i}"] = mid
-                records = pg_session.execute(
-                    sa_text(f"""
-                        SELECT source_path, title, filename
-                        FROM documents
-                        WHERE source_path IN ({placeholders}) AND status = 'completed'
-                    """),
-                    params,
-                ).fetchall()
-            finally:
-                pg_session.close()
+                pg_session = _pg_session()
+                try:
+                    placeholders = ", ".join(f":mid_{i}" for i in range(len(body.selected_material_ids)))
+                    params = {}
+                    for i, mid in enumerate(body.selected_material_ids):
+                        params[f"mid_{i}"] = mid
+                    records = pg_session.execute(
+                        sa_text(f"""
+                            SELECT source_path, title, filename
+                            FROM documents
+                            WHERE source_path IN ({placeholders}) AND status = 'completed'
+                        """),
+                        params,
+                    ).fetchall()
+                finally:
+                    pg_session.close()
 
-            sources = []
-            for r in records:
-                sources.append({
-                    "material_id": r[0] or "",
-                    "title": r[1] or r[2] or "",
-                    "subtitle": "",
-                })
-            course_draft["sources"] = sources
-        except Exception:
-            logger.warning("Failed to inject material sources into course_draft", exc_info=True)
+                sources = []
+                for r in records:
+                    sources.append({
+                        "material_id": r[0] or "",
+                        "title": r[1] or r[2] or "",
+                        "subtitle": "",
+                    })
+                course_draft["sources"] = sources
+            except Exception:
+                logger.warning("Failed to inject material sources into course_draft", exc_info=True)
 
     logger.info(
-        "Course builder chat for user=%s, draft=%s",
+        "Course builder chat for user=%s, draft=%s, degraded=%s",
         current_user["id"],
         "yes" if course_draft else "no",
+        degraded,
     )
 
+    # セッション保存は履歴を丸ごと（ウィンドウ化しない）保存する。degraded ターンも
+    # 通常どおり保存する（設計書 I4: 情報を落とさない）。
+    session_saved = True
     if body.session_id:
         updated_history = body.history + [
             {"role": "user", "content": body.message},
             {"role": "assistant", "content": answer},
         ]
-        save_cb_session(current_user["id"], body.session_id, updated_history, course_draft)
+        session_saved = save_cb_session(current_user["id"], body.session_id, updated_history, course_draft)
 
-    return CourseBuilderChatResponse(answer=answer, course_draft=course_draft)
+    return _CourseBuilderChatResponseOut(
+        answer=answer,
+        course_draft=course_draft,
+        degraded=degraded,
+        session_saved=session_saved,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2082,7 +2199,9 @@ def list_teacher_courses(
                            ) THEN 'editor'
                            ELSE 'viewer'
                        END AS role,
-                       lc.data
+                       lc.data,
+                       COALESCE(lc.visibility, 'private') AS visibility,
+                       lc.group_id
                 FROM learning_courses lc
                 WHERE lc.user_id = CAST(:user_id AS uuid)
                    OR EXISTS (
@@ -2119,6 +2238,9 @@ def list_teacher_courses(
             "atlas_cartridge_id": course_cartridge_id(data),
             "atlas_topic_count": bound_topics,
             "topic_count": len(topics),
+            # G1-1/G5-2: 公開状態・開示範囲を管理画面のコース管理テーブルで確認できるようにする。
+            "visibility": (r[8] if len(r) > 8 else None) or "private",
+            "group_id": str(r[9]) if len(r) > 9 and r[9] else None,
         })
     return result
 
@@ -2538,7 +2660,18 @@ def list_document_figures(
                 "apparatus_name_candidate": record.get("apparatus_name_candidate", ""),
                 "match_status": record.get("match_status", "unknown"),
                 "parts": [
-                    {"name": p.get("name", ""), "role": p.get("role", "")}
+                    {
+                        "name": p.get("name", ""),
+                        "role": p.get("role", ""),
+                        # Phase 2 拡張（label_ref/expanded_name/bbox/evidence_quote/reason/confidence）。
+                        # 旧 artifact にはキーが無いため .get() でデフォルトを与える（情報を落とさない）。
+                        "label_ref": p.get("label_ref"),
+                        "expanded_name": p.get("expanded_name", ""),
+                        "bbox": p.get("bbox"),
+                        "evidence_quote": p.get("evidence_quote", ""),
+                        "reason": p.get("reason", ""),
+                        "confidence": p.get("confidence", 0.0),
+                    }
                     for p in (record.get("parts") or [])
                     if isinstance(p, dict)
                 ],
@@ -2565,6 +2698,8 @@ def list_document_figures(
             "region_confidence": row.get("region_confidence"),
             "status": row.get("status"),
             "image_url": f"/api/admin/documents/{document_id}/figures/{fig_id}/image",
+            "bbox": row.get("bbox"),
+            "inner_labels": row.get("inner_labels") or [],
             "apparatus_candidates": apparatus_by_figure.get(fig_id, []),
         })
     return {"figures": figures}
@@ -3161,6 +3296,35 @@ def get_interest_dashboard(
         title_map = {}
 
     return aggregate_interest_dashboard(course_id, title_map)
+
+
+# ---------------------------------------------------------------------------
+# 知識ネットワークビジョン Phase B — 学習者重ね合わせの橋候補（教員向け）
+# ---------------------------------------------------------------------------
+@router.get("/courses/{course_id}/bridge-insights")
+def get_bridge_insights(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """教員向け橋候補インサイト（ビジョン §3 修正①・§4 KN-4・§7 Phase B）。
+
+    学習者が tension の connect 操作で自分の引っかかりを公共構造
+    （theory_component / TheoryOperationGraph の edge）へ自分で繋いだ「橋」を、
+    コース単位で k-匿名集約（k=3・人数はレンジ表示のみ。正本は core/privacy.py）した
+    橋候補として返す。ゲート・集約の流儀は interest-dashboard（B層教員向け集約）と同一。
+
+    - 個別の学習者・個別の痕跡行は一切返さない（PN-1/P3・評価利用禁止）
+    - 教員への候補提示のみで、ドメイン知識候補への自動昇格経路は作らない（KN-4）
+    - 「繋がりを見失う」側（迷いの集約）は v1 見送り（橋のみ）
+    """
+    from core.personal_graph.bridges import aggregate_bridge_candidates
+
+    bridges = aggregate_bridge_candidates(course_id)
+    return {
+        "course_id": course_id,
+        "bridges": bridges,
+        "note": "学習者個人は特定できません（k-匿名集約・人数はレンジ表示のみ）。評価利用は禁止です。",
+    }
 
 
 # ---------------------------------------------------------------------------

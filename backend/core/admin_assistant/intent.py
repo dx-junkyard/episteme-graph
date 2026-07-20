@@ -26,6 +26,7 @@ from core.admin_assistant.schema import (
     IntentResult,
     LLMIntentResponse,
 )
+from core.llm_worker.history import window_history
 
 # where 型（道案内）の合図。
 _WHERE_MARKERS = (
@@ -66,6 +67,11 @@ _KEYWORDS: dict[str, tuple] = {
     "users.create_teacher": ("教員", "先生", "教師", "アカウント", "作成"),
     "system.view_stats": ("統計", "stats", "状況", "件数"),
     "system.view_error_logs": ("エラー", "ログ", "error", "障害"),
+    # N13/N31: 図分類レビュー・stumbles・schema-proposals（いずれも guidance_only）。
+    # 「図」「提案」単体は他語（地図・検証提案 等）に部分一致するため複合語のみを使う。
+    "materials.review_figures": ("図・画像", "図の分類", "画像の分類", "図分類"),
+    "stumbles.view": ("つまづき", "つまずき", "未回答", "答えられなかった"),
+    "schema_proposals.review": ("スキーマ提案", "スキーマ拡張", "shadow testing", "シャドーテスト"),
 }
 
 # selection のキー → target_type（曖昧な削除/可視性の絞り込みに使う）。
@@ -172,6 +178,34 @@ def heuristic_classify(
     return IntentResult(intent=intent, answer="", capability_id=cap_id, source="heuristic")
 
 
+# 会話履歴を LLM に渡すときの上限（トークン量を抑え、P6 の 1 コール設計を維持する）。
+_HISTORY_MAX_TURNS = 8
+_HISTORY_MAX_CHARS = 500
+
+
+def _normalize_history(history: Optional[list], current_message: str) -> list:
+    """フロントが送る ``[{role, content}]`` を LLM messages 用に整形する。
+
+    実装は ``core/llm_worker/history.py::window_history`` への薄い委譲（正本:
+    docs/features/assistant_common_infra_design.md §2-2）。既存の挙動・シグネチャは
+    変えない:
+
+    - role は user/assistant のみ許可（未知 role・非 dict はスキップ）。
+    - content は文字列化し `_HISTORY_MAX_CHARS` でトリム、空要素は落とす。
+    - フロントは送信直前に現在発話を history へ push するため、末尾が現在発話と
+      重複する。その場合は末尾を1件除去する（ctx_lines の「ユーザー発話」と二重に
+      ならないように）。
+    - 直近 `_HISTORY_MAX_TURNS` 件に絞る（head_keep なし。全体を KB 検索と同じ
+      1コールに収める設計のため先頭保護は不要）。
+    """
+    return window_history(
+        history,
+        max_messages=_HISTORY_MAX_TURNS,
+        max_chars=_HISTORY_MAX_CHARS,
+        current_message=current_message,
+    )
+
+
 def _refine_with_llm(
     message: str,
     history: list,
@@ -193,7 +227,9 @@ def _refine_with_llm(
         "intent: guidance(操作の説明) / locate(どこで操作するかの道案内) / action(操作の代行) / "
         "clarify(聞き返し) / status_query(教材・コースの処理状態の照会)。\n"
         "capability_id は必ず与えられた許可リストの id から選ぶ（無ければ空文字）。"
-        "リストに無い操作を発明しない。断定しない。"
+        "リストに無い操作を発明しない。断定しない。\n"
+        "直前までの会話が与えられる場合は、指示語や省略された対象"
+        "（例:「それを公開して」の「それ」）の解決に使う。最新のユーザー発話が最も重要。"
     )
     ctx_lines = [
         f"現在のタブ: {(screen_context or {}).get('tab', '')}",
@@ -201,10 +237,9 @@ def _refine_with_llm(
         "許可された操作カタログ(JSON): " + _compact_json(allowed_json),
         f"ユーザー発話: {message}",
     ]
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": "\n".join(ctx_lines)},
-    ]
+    messages = [{"role": "system", "content": sys_prompt}]
+    messages.extend(_normalize_history(history, message))
+    messages.append({"role": "user", "content": "\n".join(ctx_lines)})
     try:
         parsed: LLMIntentResponse = generate_text_with_structured_output(
             messages, LLMIntentResponse, model=model or None
@@ -239,6 +274,8 @@ def classify(
     """intent 分類のエントリポイント。
 
     ヒューリスティックを基準に、`allow_llm` なら LLM で精緻化する（P6: 失敗は縮退）。
+    `allow_llm` のとき、直前までの会話履歴（`history`）と画面コンテキスト
+    （`screen_context`）を唯一の LLM コールに渡し、指示語・省略された対象の解決に使う。
     権限（role）による最終判定は route 側で行う。
     """
     base = heuristic_classify(message, role, screen_context)

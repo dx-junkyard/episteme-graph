@@ -28,6 +28,10 @@ class FigureRecord:
     interpretation: str = ""
     teaching_takeaway: str = ""
     source_evidence_ids: list[str] = field(default_factory=list)
+    # Candidate-only presentation mode.  The teacher-reviewed override lives
+    # on document_figures and is never inferred by this caption-only stage.
+    suggested_mode: str = "unknown"
+    mode_reason: str = ""
 
 
 @dataclass

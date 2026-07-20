@@ -220,6 +220,54 @@ PDF アップロード → MinIO 保存
 
 ---
 
+## 機能ドキュメント索引（docs/features/）
+
+機能・レイヤーごとの解説/設計書の全一覧。レイヤー ↔ migration の対応は
+[docs/architecture/layer_registry.md](docs/architecture/layer_registry.md) を参照。
+
+### 機能解説（実装ベース）
+
+- [学習機能（学生UI）](docs/features/learning.md)
+- [管理機能（教員/管理者UI）](docs/features/admin.md)
+- [認証・権限・開示範囲](docs/features/auth-visibility.md)
+- [承認・共有レイヤー（C層）](docs/features/endorsement-sharing.md)
+- [構造帰属型の問い記録（B層）](docs/features/structure-anchored-questions.md)
+
+### レイヤー設計書
+
+- [疑義・認識的地位台帳（D層）](docs/features/doubt_layer_issues.md)
+- [ガイダンス層（G層）](docs/features/guidance_layer_design.md)
+- [画像パイプライン + ナレッジライブラリ（L層）](docs/features/image_pipeline_knowledge_library_design.md)
+- [再構成ループ（R層）](docs/features/reconstruction_loop_design.md)
+- [LLM トークン使用量推計（U層）](docs/features/llm_usage_metering_design.md)
+- [共有物のバージョン管理（V層）](docs/features/shared_versioning_design.md)
+- [要素検討ワークスペース（W層）](docs/features/element_deliberation_workspace_design.md)
+  ／[外部レビュー](docs/features/element_deliberation_workspace_review.md)
+- [段階的翻訳レイヤー（E層・未実装）](docs/features/exposition_layer_design.md)
+- [Admin Copilot（横断ユーティリティ層）](docs/features/admin_assistant_design.md)
+- [状態管理・通知基盤](docs/features/status_notification_design.md)
+- [個人知識ネットワーク（Phase P）](docs/features/personal_knowledge_network_design.md)
+  ／[外部レビュー](docs/features/personal_knowledge_network_review.md)
+- [知識ネットワークビジョン（W層・個人知識ネットワークの親文書）](docs/features/knowledge_network_vision.md)
+
+### 分野の地図（Field Atlas）
+
+- [骨格](docs/features/field_atlas_skeleton.md) /
+  [コース⇄地図バインディング](docs/features/field_atlas_binding.md) /
+  [修正報告](docs/features/field_atlas_correction_reports.md) /
+  [DB 管理化](docs/features/field_atlas_db_managed_skeleton.md) /
+  [詳細パネル](docs/features/field_atlas_detail_panel.md) /
+  [骨格エディタ強化](docs/features/field_atlas_skeleton_editor_upgrade.md)
+
+### レクチャー・図解析ほか
+
+- [レクチャースライド同期 + 音声言語切替](docs/features/lecture_slide_sync_design.md)
+- [音声生成の準備確認フロー（#491）](docs/features/lecture_audio_generation_readiness.md)
+- [教員指示付き図再解析](docs/features/guided_figure_reanalysis_design.md)
+- [要素インベントリ](docs/features/element_inventory_design.md)
+
+---
+
 ## ディレクトリ構成
 
 ```
@@ -285,7 +333,7 @@ episteme-graph/
 │   │   ├── graphs/            # 学生向け/教員向けグラフ組み立て
 │   │   └── tension/           # TensionMiningAgent（B層: prefilter/agent/worker …）
 │   ├── cartridges/            # ドメインカートリッジ（particle_physics）
-│   ├── db/                    # SQLマイグレーション（init.sql, 002〜022）
+│   ├── db/                    # SQLマイグレーション（init.sql, 002〜053）
 │   └── tests/                 # pytest テスト（FastAPI / core）
 ├── src/
 │   ├── episteme_graph/agents/ # PDF解析エージェント群（document_structure, paper_skeleton,
@@ -300,7 +348,7 @@ episteme-graph/
 └── .env.example
 ```
 
-マイグレーションは `backend/db/`（init.sql 〜 022）。一覧と各テーブルの説明は
+マイグレーションは `backend/db/`（init.sql 〜 053）。一覧と各テーブルの説明は
 [docs/architecture/data-model.md](docs/architecture/data-model.md) を参照してください。
 
 ## API エンドポイント概要

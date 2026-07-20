@@ -13,12 +13,15 @@ Tier2 提案6）。このパッケージはその骨格だけを集約する。
 - ``client.py``: ``BaseJSONLLMClient`` / ``resolve_model`` / ``parse_json_response``
 - ``repair.py``: ``run_with_repair`` (validate/build_repair_prompt/on_repair_failed を注入)
 - ``cost_gate.py``: ``CostGate`` (session+daily) / ``InMemoryCounterGate`` (単一カウンタ)
+- ``history.py``: ``window_history`` (チャット型4者の会話履歴ウィンドウ化。
+  正本: docs/features/assistant_common_infra_design.md §2)
 """
 
 from __future__ import annotations
 
 from core.llm_worker.client import BaseJSONLLMClient, parse_json_response, resolve_model
 from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate, today_str
+from core.llm_worker.history import window_history
 from core.llm_worker.repair import MAX_REPAIR_ATTEMPTS, run_with_repair
 
 __all__ = [
@@ -30,4 +33,5 @@ __all__ = [
     "today_str",
     "MAX_REPAIR_ATTEMPTS",
     "run_with_repair",
+    "window_history",
 ]

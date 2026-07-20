@@ -26,6 +26,66 @@ for _p in (str(_BACKEND), str(_SRC)):
 from core.document_pipeline import figure_images as fi  # noqa: E402
 
 
+class TestSaveFigureOrphanAdoption:
+    def test_captioned_reanalysis_reuses_matching_orphan_row(self):
+        statements: list[tuple[str, dict]] = []
+        figure_id = "11111111-1111-1111-1111-111111111111"
+
+        class _Result:
+            def __init__(self, row=None):
+                self._row = row
+
+            def fetchone(self):
+                return self._row
+
+        class _Session:
+            def execute(self, statement, params):
+                sql = str(statement)
+                statements.append((sql, dict(params)))
+                return _Result((figure_id,)) if "INSERT INTO document_figures" in sql else _Result()
+
+            def commit(self):
+                pass
+
+            def rollback(self):
+                raise AssertionError("rollback should not run")
+
+        class _Storage:
+            def upload_bytes(self, bucket, key, data, content_type):
+                assert bucket == "figure-images"
+                assert key.endswith(f"/{figure_id}.png")
+                assert data == b"png"
+                assert content_type == "image/png"
+
+        bbox = [183.7, 135.7, 410.9, 310.8]
+        saved_id, ok = fi._save_figure(
+            _Session(),
+            document_id="doc-1",
+            run_id="22222222-2222-2222-2222-222222222222",
+            figure_key="fig_2_7",
+            figure_label="Figure 2.7",
+            page=39,
+            bbox=bbox,
+            caption_block_id="blk_pdf_fig_39_454",
+            caption_text="Figure 2.7: Schematic.",
+            extraction_method="embedded",
+            region_confidence=None,
+            inner_labels=[],
+            image_bytes=b"png",
+            storage=_Storage(),
+        )
+
+        assert saved_id == figure_id
+        assert ok is True
+        adoption_sql, adoption_params = statements[0]
+        assert "UPDATE document_figures AS target" in adoption_sql
+        assert "orphan.caption_block_id IS NULL" in adoption_sql
+        assert "orphan.bbox = CAST(:bbox AS jsonb)" in adoption_sql
+        assert "NOT EXISTS" in adoption_sql
+        assert adoption_params["figure_key"] == "fig_2_7"
+        assert adoption_params["page"] == 39
+
+
 class TestNormalizeFigureKey:
     def test_figure_with_number_label(self):
         key, label = fi._normalize_figure_key("Figure 3: A schematic of the apparatus.", page=2, index=0)

@@ -347,7 +347,8 @@ backend/core/reconstruction/
   モデルは fast tier 既定（`RECON_LLM_MODEL` で上書き）。
 - `core/` に FastAPI を import しない（既存ルール）。
 - 出題対象クエリ: `theory_claims` から `support_status='source_backed'` かつ
-  `review_status IN ('endorsed', ...)`（承認語彙は C層の実装に合わせて確定）。
+  `review_status IN ('teacher_approved', 'teacher_reviewed', 'endorsed')`
+  （実装で確定済み。正本は `backend/core/reconstruction/schema.py` の `APPROVED_REVIEW_STATUSES`）。
 
 ### 4.3 API
 
@@ -430,10 +431,12 @@ backend/core/reconstruction/
 - 4 軸: 誤り率 / 記号降下頻度 / 判定×自己確認の乖離 / FAQ・誤解（§3.5）
 - テスト初期の「まだデータなし」多発は許容し、k=3 は緩めない（§3.5）
 - サマリーからの資料生成は既存スタジオ機能の下流（スコープ外）（§2.3）
+- 出題対象とする `review_status` の承認語彙は実装で確定:
+  `teacher_approved` / `teacher_reviewed` / `endorsed`
+  （正本は `backend/core/reconstruction/schema.py` の `APPROVED_REVIEW_STATUSES`。§4.2 参照）
 
 ### 未決（実装時に確定）
 
-- 出題対象とする `review_status` の承認語彙の正確な集合（C層実装との突き合わせ）
 - worker のトリガー詳細（claim 承認イベントへのフック位置 / 手動バッチ API の要否）
 - 学習画面での出題導線の文言・頻度（「再構成に挑戦」ボタンの配置）
 - FAQ 集約における structure_anchor の anchor_id → claim_id 突き合わせの精度確認

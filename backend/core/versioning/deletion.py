@@ -196,6 +196,23 @@ def _purge_document(session, document_id: str) -> None:
     # verification_proposals は challenges に ON DELETE CASCADE なので challenges 削除で自動的に消える。
     session.execute(sa_text("DELETE FROM epistemic_ledger WHERE document_id IN (:a, :b)"), id_forms)
     session.execute(sa_text("DELETE FROM counterfactual_sessions WHERE document_id IN (:a, :b)"), id_forms)
+    # W層 同一性リンク（migration 048）: instance 側は document への FK が無い
+    # ポリモーフィック行（同じ orphan gap パターン）。shared_part_id 側は library_entries への
+    # 実 FK があるが、library_entries 自体は document 削除で消えないため触らない。
+    session.execute(sa_text("DELETE FROM element_identity_links WHERE instance_document_id IN (:a, :b)"), id_forms)
+    # W層 対話セッション + 候補注釈（migration 049）: scope='document' 行は document_id への
+    # FK が無いポリモーフィック行（同じ orphan gap パターン）。scope='domain' 行は
+    # document_id が NULL のため、この WHERE には元々一致せず触らない（L層 library_entry の
+    # ライフサイクルに従う・P4）。
+    session.execute(sa_text("DELETE FROM element_annotations WHERE document_id IN (:a, :b)"), id_forms)
+    session.execute(sa_text("DELETE FROM deliberation_sessions WHERE document_id IN (:a, :b)"), id_forms)
+    # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳:
+    # document_id は（element_annotations 等と異なり）polymorphic TEXT ではなく
+    # documents.id に準拠する UUID 列（FK 無し）なので id_forms の a 形のみで十分。
+    session.execute(
+        sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:a AS uuid)"),
+        {"a": document_id},
+    )
     if target_ids:
         session.execute(sa_text("DELETE FROM challenges WHERE target_id = ANY(:ids)"), {"ids": target_ids})
         session.execute(sa_text("DELETE FROM epistemic_ledger WHERE target_id = ANY(:ids)"), {"ids": target_ids})

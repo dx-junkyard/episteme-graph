@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -31,8 +32,11 @@ from core.admin_assistant import knowledge as kb  # noqa: E402
 from core.admin_assistant.actions import (  # noqa: E402
     ActionArgError,
     ActionContext,
+    ActionTargetError,
     CoursePublishAction,
     CourseSetVisibilityAction,
+    LectureRewriteChunkScriptAction,
+    get_handler,
 )
 from core.admin_assistant.schema import (  # noqa: E402
     INTENT_ACTION,
@@ -55,6 +59,60 @@ _ADMIN_JS = (ROOT / "frontend" / "public" / "js" / "admin-assistant.js").read_te
 _ADMIN_JS_MAIN = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
 
 
+def _parse_registered_anchors(src: str) -> dict:
+    """admin.js の `AA.registerUiAnchors("<screen>", {...})` を解析し
+    `{screen: {anchor_id, ...}}` を返す。
+
+    旧ガードレール（anchor 文字列が admin.js の**どこかに**存在するかの部分文字列一致）は
+    screen の対応を検証しなかったため、「別画面に同名 anchor がある」「コメントに文字列
+    だけ残っている」ケースを見逃した（vision_ux_gap_survey_2026-07-17.md §2-P5）。
+    ここではオブジェクトリテラルを波括弧カウントで切り出し、`key: function` 形式の
+    キーだけを anchor として数える。
+    """
+    anchors: dict = {}
+    for m in re.finditer(r'registerUiAnchors\(\s*"([^"]+)"\s*,\s*\{', src):
+        screen = m.group(1)
+        start = src.index("{", m.end() - 1)
+        depth = 0
+        end = None
+        for i in range(start, len(src)):
+            if src[i] == "{":
+                depth += 1
+            elif src[i] == "}":
+                depth -= 1
+                if depth == 0:
+                    end = i
+                    break
+        assert end is not None, f"unbalanced braces in registerUiAnchors({screen!r})"
+        block = src[start : end + 1]
+        keys = set()
+        for km in re.finditer(r'(?m)^\s*(?:"([^"]+)"|([A-Za-z_$][\w$]*))\s*:\s*function', block):
+            keys.add(km.group(1) or km.group(2))
+        anchors.setdefault(screen, set()).update(keys)
+    return anchors
+
+
+def _extract_js_function(src: str, fn_name: str) -> str:
+    """``function fn_name(`` から対応する閉じ ``}`` までを波括弧カウントで切り出す。
+
+    ``extract_function_source``（guardrail_helpers）は Python の ``def`` 構文専用のため、
+    ES5 の ``function foo() {...}`` 宣言には使えない。admin-assistant.js は ES5 なので
+    このテストファイル内だけの素朴な波括弧カウント版を使う。
+    """
+    marker = f"function {fn_name}("
+    start = src.index(marker)
+    brace_start = src.index("{", start)
+    depth = 0
+    for i in range(brace_start, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[start : i + 1]
+    raise ValueError(f"unbalanced braces while extracting function {fn_name}")
+
+
 # ===========================================================================
 # Group A-1: Capability Registry（P1 / P2）
 # ===========================================================================
@@ -75,9 +133,53 @@ class TestRegistry:
         assert "users.create_teacher" not in teacher_ids
         assert "system.view_stats" not in teacher_ids
         assert "system.view_error_logs" not in teacher_ids
+        assert "llm_usage.view_metrics" not in teacher_ids  # G6: SYSTEM_ADMIN専用
         # 教員が使える安全な操作は含まれる
         assert "materials.upload" in teacher_ids
         assert "course.publish" in teacher_ids
+
+    def test_known_screens_include_g6_new_tabs(self):
+        """G6是正: knowledge-library / llm-usage は実装済みタブなのに未登録で
+        「構造的に案内不能」だった（vision_ux_gap_survey_2026-07.md G6）。"""
+        assert "knowledge-library" in caps.KNOWN_SCREENS
+        assert "llm-usage" in caps.KNOWN_SCREENS
+
+    def test_g6_new_capabilities_registered(self):
+        """G6是正: C/D/R/W/L/V/U層・Phase Bの段階登録（新規11件）。"""
+        expected = {
+            "doubt.record_verification_status": ("doubt-atlas", "TEACHER"),
+            "doubt.manage_challenge": ("doubt-atlas", "TEACHER"),
+            "reconstruction.review_queue": ("lecture-studio", "TEACHER"),
+            "deliberation.identity_links_standardization": ("lecture-studio", "TEACHER"),
+            "library.view_and_freeze": ("knowledge-library", "TEACHER"),
+            "materials.manage_shared_version": ("materials", "TEACHER"),
+            "course.manage_shared_version": ("course-management", "TEACHER"),
+            "llm_usage.view_metrics": ("llm-usage", "SYSTEM_ADMIN"),
+            "materials.estimate_cost": ("materials", "TEACHER"),
+            "interest_dashboard.bridge_insights": ("interest-dashboard", "TEACHER"),
+            "course.sharing_dashboard": ("course-management", "TEACHER"),
+        }
+        for cap_id, (screen, role) in expected.items():
+            cap = caps.get_capability(cap_id)
+            assert cap is not None, f"{cap_id} が未登録"
+            assert cap.screen == screen, f"{cap_id} の screen が不一致: {cap.screen}"
+            assert cap.required_role == role, f"{cap_id} の required_role が不一致: {cap.required_role}"
+            assert cap.kind == "guidance_only", f"{cap_id} は guidance_only であるべき"
+            assert cap.howto_doc, f"{cap_id} に howto_doc が無い"
+
+    def test_g6_capabilities_reachable_only_by_declared_role(self):
+        assert caps.can_access("llm_usage.view_metrics", "TEACHER") is False
+        assert caps.can_access("llm_usage.view_metrics", "SYSTEM_ADMIN") is True
+        assert caps.can_access("doubt.record_verification_status", "TEACHER") is True
+        assert caps.can_access("doubt.record_verification_status", "STUDENT") is False
+
+    def test_course_publish_api_points_to_real_visibility_endpoint(self):
+        """G1-6是正: `PUT .../publish` は撤去済み（test_publish_endpoint_removed）。
+        capability の api メタデータが存在しないエンドポイントを指してはいけない。"""
+        cap = caps.get_capability("course.publish")
+        assert cap.api is not None
+        assert cap.api["path"] == "/api/admin/courses/{course_id}/visibility"
+        assert "/publish" not in cap.api["path"]
 
     def test_system_admin_reaches_everything(self):
         admin_ids = {c.id for c in caps.capabilities_for("SYSTEM_ADMIN")}
@@ -100,6 +202,42 @@ class TestRegistry:
             for st in cap.locate_steps:
                 assert st.screen in caps.KNOWN_SCREENS
                 assert st.anchor_id and st.hint
+
+    def test_n13_n31_new_capabilities_registered(self):
+        """N13/N31: 図分類レビュー + stumbles / schema-proposals の capability 登録。"""
+        expected = {
+            "materials.review_figures": "materials",
+            "stumbles.view": "stumbles",
+            "schema_proposals.review": "schema-proposals",
+        }
+        for cap_id, screen in expected.items():
+            cap = caps.get_capability(cap_id)
+            assert cap is not None, f"{cap_id} が未登録"
+            assert cap.screen == screen
+            assert cap.kind == "guidance_only", f"{cap_id} は guidance_only であるべき"
+            assert cap.required_role == "TEACHER"
+            assert cap.howto_doc, f"{cap_id} に howto_doc が無い"
+            assert cap.locate_steps, f"{cap_id} に locate_steps が無い"
+
+    def test_rewrite_capability_declares_l2_revert(self):
+        """N12: rewrite は実 API が即時保存するため L2 永続可逆として宣言する。"""
+        cap = caps.get_capability("lecture_studio.rewrite_chunk_script")
+        assert cap.reversible is True
+        assert cap.confirm is False  # 可逆なので確認ゲート不要（P2 と整合）
+        assert cap.revert == {"strategy": "restore_chunk_script"}
+        # 実エンドポイントは POST（routes/lecture_studio/scripts.py）
+        assert cap.api["method"] == "POST"
+        assert cap.api["path"] == "/api/admin/chunks/{chunk_id}/lecture-script/rewrite"
+        # 既存 rewrite API は _require_teacher のみでコース所有チェックを持たない（P7）。
+        # scope="own_course" のままだと route が chunk_id を user_owns_course に渡して
+        # 常に 403 になるため、any でなければならない。
+        assert cap.scope == "any"
+
+    def test_rewrite_handler_is_registered(self):
+        """N12: 原点動機の rewrite に代行ハンドラが存在する。"""
+        handler = get_handler("lecture_studio.rewrite_chunk_script")
+        assert handler is not None
+        assert isinstance(handler, LectureRewriteChunkScriptAction)
 
 
 # ===========================================================================
@@ -190,6 +328,120 @@ class TestIntentHeuristic:
 
 
 # ===========================================================================
+# Group A-3b: 会話履歴の整形 + LLM プロンプトへの反映
+# ===========================================================================
+
+
+class TestNormalizeHistory:
+    """_normalize_history: 会話履歴の整形（重複除去・role フィルタ・上限）。"""
+
+    def test_drops_trailing_duplicate_current_message(self):
+        """フロントは送信前に現在発話を history へ push するため、末尾の重複を除く。"""
+        hist = [
+            {"role": "user", "content": "コースを作りたい"},
+            {"role": "assistant", "content": "コースビルダーを開きます"},
+            {"role": "user", "content": "それを公開して"},
+        ]
+        out = intent_mod._normalize_history(hist, "それを公開して")
+        assert out == [
+            {"role": "user", "content": "コースを作りたい"},
+            {"role": "assistant", "content": "コースビルダーを開きます"},
+        ]
+
+    def test_filters_unknown_roles_and_empty(self):
+        hist = [
+            {"role": "system", "content": "無視される"},
+            {"role": "user", "content": "   "},
+            {"role": "user", "content": "有効"},
+            {"content": "role なし"},
+            "not a dict",
+        ]
+        out = intent_mod._normalize_history(hist, "現在の発話")
+        assert out == [{"role": "user", "content": "有効"}]
+
+    def test_caps_turn_count(self):
+        hist = [{"role": "user", "content": "m%d" % i} for i in range(20)]
+        out = intent_mod._normalize_history(hist, "現在")
+        assert len(out) == intent_mod._HISTORY_MAX_TURNS
+
+    def test_trims_long_content(self):
+        out = intent_mod._normalize_history(
+            [{"role": "assistant", "content": "あ" * 1000}], "x"
+        )
+        assert len(out) == 1
+        assert len(out[0]["content"]) == intent_mod._HISTORY_MAX_CHARS
+
+    def test_empty_or_none_history(self):
+        assert intent_mod._normalize_history([], "x") == []
+        assert intent_mod._normalize_history(None, "x") == []
+
+
+class TestIntentHistoryInPrompt:
+    """classify(allow_llm=True) が会話履歴を唯一の LLM コールの messages に含めること。
+
+    デッドパラメータ化していた `history` の回帰防止（指示語解決のため）。
+    """
+
+    def test_history_reaches_llm_messages(self, monkeypatch):
+        from core.admin_assistant.schema import LLMIntentResponse
+        import core.llm as llm_mod
+
+        captured = {}
+
+        def fake_generate(messages, schema, model=None):
+            captured["messages"] = messages
+            return LLMIntentResponse(
+                intent=INTENT_ACTION, capability_id="course.publish", answer=""
+            )
+
+        monkeypatch.setattr(llm_mod, "generate_text_with_structured_output", fake_generate)
+
+        hist = [
+            {"role": "user", "content": "このコースを学生に見せたい"},
+            {"role": "assistant", "content": "course.publish で公開できます"},
+            {"role": "user", "content": "それをやって"},
+        ]
+        r = intent_mod.classify(
+            "それをやって",
+            "TEACHER",
+            history=hist,
+            screen_context={"tab": "course-management", "selection": {"course_id": "c1"}},
+            allow_llm=True,
+        )
+
+        msgs = captured["messages"]
+        assert msgs[0]["role"] == "system"
+        # 直前の会話（ユーザー発話・アシスタント応答の両方）が渡っている
+        joined = " ".join(m["content"] for m in msgs)
+        assert "このコースを学生に見せたい" in joined
+        assert "course.publish で公開できます" in joined
+        # 末尾は ctx ブロック（現在発話 + 操作カタログ）
+        assert "ユーザー発話: それをやって" in msgs[-1]["content"]
+        # 現在発話は history 側で二重に現れない（重複除去）
+        assert {"role": "user", "content": "それをやって"} not in msgs
+        assert r.source == "llm"
+
+    def test_no_history_still_works(self, monkeypatch):
+        """history 未指定でも従来どおり system + ctx の2要素で成立する。"""
+        from core.admin_assistant.schema import LLMIntentResponse
+        import core.llm as llm_mod
+
+        captured = {}
+
+        def fake_generate(messages, schema, model=None):
+            captured["messages"] = messages
+            return LLMIntentResponse(intent=INTENT_GUIDANCE, capability_id="", answer="")
+
+        monkeypatch.setattr(llm_mod, "generate_text_with_structured_output", fake_generate)
+
+        intent_mod.classify("何ができますか", "TEACHER", allow_llm=True)
+        msgs = captured["messages"]
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+
+
+# ===========================================================================
 # Group A-4: Action handler の純粋ロジック
 # ===========================================================================
 
@@ -215,8 +467,132 @@ class TestActionLogic:
         with pytest.raises(ActionArgError):
             act._target_state(before, {"visibility": "everyone"})
 
+    def test_visibility_public_to_private_forces_unpublished(self):
+        """G1-6是正の回帰テスト: admin.py::update_course_visibility は
+        `is_published = (visibility = 'public')` を常に強制する（G1-1 是正）。
+        Copilot 経由の代行がこれと異なる状態（is_published を旧値のまま残す）を
+        作っていたバグを固定する。"""
+        act = CourseSetVisibilityAction()
+        before = {"visibility": "public", "group_id": None, "is_published": True, "is_template": True}
+        after = act._target_state(before, {"visibility": "private"})
+        assert after["visibility"] == "private"
+        assert after["is_published"] is False
+        # is_template は「作られたことがあるか」の意図を保つため離脱時にリセットしない
+        assert after["is_template"] is True
+
+    def test_visibility_public_to_group_forces_unpublished(self):
+        act = CourseSetVisibilityAction()
+        before = {"visibility": "public", "group_id": None, "is_published": True, "is_template": True}
+        after = act._target_state(before, {"visibility": "group", "group_id": "g1"})
+        assert after["is_published"] is False
+        assert after["group_id"] == "g1"
+
     def test_publish_capability_id(self):
         assert CoursePublishAction.capability_id == "course.publish"
+
+    def test_supported_capability_ids_are_exactly_the_implemented_three(self):
+        """N12（実行可否の事前開示）の根拠: handler 実装済み = この3件のみ。"""
+        from core.admin_assistant.actions import supported_capability_ids
+
+        assert set(supported_capability_ids()) == {
+            "course.set_visibility",
+            "course.publish",
+            "lecture_studio.rewrite_chunk_script",
+        }
+
+
+class TestRewriteActionLogic:
+    """N12: LectureRewriteChunkScriptAction の純ロジック（DB / LLM をモック）。"""
+
+    def _handler(self):
+        return LectureRewriteChunkScriptAction()
+
+    def test_capture_before_requires_target(self):
+        with pytest.raises(ActionArgError):
+            self._handler().capture_before(
+                ActionContext(user_id="u1", role="TEACHER", target_id=None)
+            )
+
+    def test_capture_before_missing_chunk(self, monkeypatch):
+        import core.admin_assistant.actions as actions_mod
+
+        monkeypatch.setattr(actions_mod, "_fetch_chunk_script", lambda cid: None)
+        with pytest.raises(ActionTargetError):
+            self._handler().capture_before(
+                ActionContext(user_id="u1", role="TEACHER", target_id="ch1")
+            )
+
+    def test_apply_requires_prompt(self):
+        with pytest.raises(ActionArgError):
+            self._handler().apply(
+                ActionContext(user_id="u1", role="TEACHER", target_id="ch1", args={}),
+                {"display_text": "d", "spoken_text": "s", "formulas": []},
+            )
+
+    def test_apply_calls_existing_rewrite_api(self, monkeypatch):
+        """P7: apply は既存 rewrite API 関数を呼ぶだけ。"""
+        import core.admin_assistant.actions as actions_mod
+
+        calls = []
+
+        def fake_call(chunk_id, prompt, studio_view, user):
+            calls.append((chunk_id, prompt, studio_view, user["id"]))
+            return {"display_text": "new-d", "spoken_text": "new-s", "formulas": []}
+
+        monkeypatch.setattr(actions_mod, "_call_rewrite_api", fake_call)
+        after = self._handler().apply(
+            ActionContext(user_id="u1", role="TEACHER", target_id="ch1",
+                          args={"prompt": "やさしく"}),
+            {"display_text": "old-d", "spoken_text": "old-s", "formulas": []},
+        )
+        assert after["display_text"] == "new-d"
+        assert calls == [("ch1", "やさしく", "edit", "u1")]
+
+    def test_apply_maps_http_404_to_target_error_without_fastapi_import(self, monkeypatch):
+        """既存 API の HTTPException は duck-typing で写像する（fastapi 非 import）。"""
+        import core.admin_assistant.actions as actions_mod
+
+        class _FakeHTTPError(Exception):
+            status_code = 404
+            detail = "Chunk not found"
+
+        def fake_call(chunk_id, prompt, studio_view, user):
+            raise _FakeHTTPError()
+
+        monkeypatch.setattr(actions_mod, "_call_rewrite_api", fake_call)
+        with pytest.raises(ActionTargetError):
+            self._handler().apply(
+                ActionContext(user_id="u1", role="TEACHER", target_id="ch1",
+                              args={"prompt": "p"}),
+                {},
+            )
+
+    def test_revert_restores_before_snapshot(self, monkeypatch):
+        """P3: revert は before スナップショットをそのまま復元する（L2）。"""
+        import core.admin_assistant.actions as actions_mod
+
+        written = []
+
+        def fake_write(chunk_id, state):
+            written.append((chunk_id, dict(state)))
+            return True
+
+        monkeypatch.setattr(actions_mod, "_write_chunk_script", fake_write)
+        before = {"display_text": "old-d", "spoken_text": "old-s",
+                  "formulas": [{"latex": "E=mc^2"}]}
+        self._handler().revert(
+            ActionContext(user_id="u1", role="TEACHER", target_id="ch1"), before
+        )
+        assert written == [("ch1", before)]
+
+    def test_revert_missing_chunk(self, monkeypatch):
+        import core.admin_assistant.actions as actions_mod
+
+        monkeypatch.setattr(actions_mod, "_write_chunk_script", lambda cid, st: False)
+        with pytest.raises(ActionTargetError):
+            self._handler().revert(
+                ActionContext(user_id="u1", role="TEACHER", target_id="ch1"), {}
+            )
 
 
 # ===========================================================================
@@ -247,15 +623,33 @@ class TestGuardrails:
         sql = read_migration_sql(BACKEND, 34)
         assert "assistant_actions" in sql
 
-    def test_registry_anchor_ids_registered_in_frontend(self):
-        """registry の locate anchor（base id）が admin.js の registerUiAnchors に存在する。"""
-        base_ids = set()
+    def test_registry_anchor_ids_registered_for_declared_screen(self):
+        """アンカー整合ガードレール（強化版, §5-5 仕組み化）。
+
+        capability の locate_steps の各 anchor_id（base id）が、**そのステップの screen の**
+        `registerUiAnchors` 登録に実在することを検査する。旧版の「admin.js のどこかに
+        文字列が存在する」部分文字列一致では screen の対応を検証できなかった。
+        """
+        anchors = _parse_registered_anchors(_ADMIN_JS_MAIN)
+        problems = []
         for cap in caps.all_capabilities():
             for st in cap.locate_steps:
                 base = st.anchor_id.split(":")[0]
-                base_ids.add(base)
-        for base in base_ids:
-            assert base in _ADMIN_JS_MAIN, f"anchor {base} が admin.js に未登録"
+                if base not in anchors.get(st.screen, set()):
+                    problems.append(
+                        f"{cap.id}: anchor {base!r} が screen {st.screen!r} の "
+                        "registerUiAnchors に未登録"
+                    )
+        assert problems == [], "\n".join(problems)
+
+    def test_anchor_parser_sees_known_registrations(self):
+        """パーサ自体の健全性: 既知の登録が拾えていること（誤って空 dict になり
+        ガードレールが全 pass する事故を防ぐ）。"""
+        anchors = _parse_registered_anchors(_ADMIN_JS_MAIN)
+        assert "upload_dropzone" in anchors.get("materials", set())
+        assert "ls-rewrite-prompt" in anchors.get("lecture-studio", set())  # quoted key
+        assert "stumbles_course_select" in anchors.get("stumbles", set())
+        assert "sp_proposals_list" in anchors.get("schema-proposals", set())
 
     def test_frontend_uses_prefix_and_spotlight_class(self):
         assert "admin-assistant-spotlight" in _ADMIN_JS
@@ -511,6 +905,24 @@ class TestActionAPI:
         assert store.courses["c1"]["is_published"] is False
         assert ("reverted" in [e[1] for e in store.events])         # P5 監査
 
+    def test_set_visibility_public_to_private_via_api_forces_unpublished(self, api):
+        """G1-6 是正の回帰テスト（API 経由）: いったん public にしたコースを private へ
+        戻すと is_published が False になる（admin.py の visibility エンドポイントと
+        同一意味論。旧実装のバグでは is_published=True のまま残っていた）。"""
+        client, store, _mp, _svc = api
+        store.courses["c1"] = {"visibility": "public", "group_id": None,
+                                "is_published": True, "is_template": True}
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "course.set_visibility",
+                              "target": {"type": "course", "id": "c1"},
+                              "args": {"visibility": "private"}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["after"]["visibility"] == "private"
+        assert data["after"]["is_published"] is False
+        assert store.courses["c1"]["is_published"] is False
+
     def test_publish_confirm_gate_then_apply(self, api):
         client, store, _mp, _svc = api
         self._seed_course(store)
@@ -575,3 +987,255 @@ class TestActionAPI:
                         json={"capability_id": "nope.nope", "target": {}},
                         headers=_headers("TEACHER"))
         assert r.status_code == 404
+
+    def test_list_actions_returns_reversible_status_for_undo_reconstruction(self, api):
+        """Copilot Undo 永続化（低優先度課題）: GET /actions が admin-assistant.js の
+        loadServerActionHistory() が actionStack を再構成するのに必要な
+        reversible / status / capability_id を返すこと。"""
+        client, store, _mp, _svc = api
+        self._seed_course(store)
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "course.set_visibility",
+                              "target": {"type": "course", "id": "c1"},
+                              "args": {"visibility": "public"}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        r2 = client.get("/api/admin/assistant/actions", headers=_headers("TEACHER"))
+        assert r2.status_code == 200
+        rows = r2.json()
+        assert len(rows) == 1
+        assert rows[0]["capability_id"] == "course.set_visibility"
+        assert rows[0]["reversible"] is True
+        assert rows[0]["status"] == "applied"
+        assert "action_id" in rows[0]
+
+    def test_list_actions_forbidden_for_student(self, api):
+        client, _store, _mp, _svc = api
+        r = client.get("/api/admin/assistant/actions", headers=_headers("STUDENT"))
+        assert r.status_code == 403
+
+
+# --- capabilities（実行可否の事前開示, N12） ------------------------------
+
+
+@pytestmark_api
+class TestCapabilitiesAPI:
+    def test_student_forbidden(self, api):
+        client, _store, _mp, _svc = api
+        r = client.get("/api/admin/assistant/capabilities", headers=_headers("STUDENT"))
+        assert r.status_code == 403
+
+    def test_executable_flag_marks_only_implemented_actions(self, api):
+        client, _store, _mp, _svc = api
+        r = client.get("/api/admin/assistant/capabilities", headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        rows = {row["id"]: row for row in r.json()}
+        # 実装済み action は executable=True
+        assert rows["course.publish"]["executable"] is True
+        assert rows["course.set_visibility"]["executable"] is True
+        assert rows["lecture_studio.rewrite_chunk_script"]["executable"] is True
+        # handler 未実装の action は False（道案内のみ対応と提示される）
+        assert rows["materials.delete"]["executable"] is False
+        assert rows["course.delete"]["executable"] is False
+        # guidance_only は常に False
+        assert rows["materials.upload"]["executable"] is False
+
+    def test_role_filtered(self, api):
+        """P1: TEACHER の一覧に SYSTEM_ADMIN 専用 capability が混ざらない。"""
+        client, _store, _mp, _svc = api
+        r = client.get("/api/admin/assistant/capabilities", headers=_headers("TEACHER"))
+        ids = {row["id"] for row in r.json()}
+        assert "users.create_teacher" not in ids
+        assert "llm_usage.view_metrics" not in ids
+
+
+# --- rewrite 代行（N12） ---------------------------------------------------
+
+
+@pytestmark_api
+class TestRewriteActionAPI:
+    def _patch_rewrite(self, monkeypatch, store):
+        import core.admin_assistant.actions as actions_mod
+
+        chunk = {"display_text": "old-d", "spoken_text": "old-s", "formulas": []}
+        calls = {"rewrite": [], "restore": []}
+
+        def fake_fetch(cid):
+            return dict(chunk) if cid == "ch1" else None
+
+        def fake_call(cid, prompt, studio_view, user):
+            calls["rewrite"].append((cid, prompt, studio_view))
+            chunk.update({"display_text": "new-d", "spoken_text": "new-s"})
+            return dict(chunk)
+
+        def fake_write(cid, state):
+            if cid != "ch1":
+                return False
+            calls["restore"].append((cid, dict(state)))
+            chunk.update(state)
+            return True
+
+        monkeypatch.setattr(actions_mod, "_fetch_chunk_script", fake_fetch)
+        monkeypatch.setattr(actions_mod, "_call_rewrite_api", fake_call)
+        monkeypatch.setattr(actions_mod, "_write_chunk_script", fake_write)
+        return chunk, calls
+
+    def test_chat_returns_supported_action_plan_with_prompt(self, api):
+        client, _store, _mp, _svc = api
+        r = client.post("/api/admin/assistant/chat",
+                        json={"message": "この原稿をもっとやさしく書き換えて",
+                              "screen_context": {"tab": "lecture-studio",
+                                                 "selection": {"chunk_id": "ch1"}}},
+                        headers=_headers("TEACHER"))
+        data = r.json()
+        assert data["intent"] == "action"
+        plan = data["action_plan"]
+        assert plan["capability_id"] == "lecture_studio.rewrite_chunk_script"
+        assert plan["supported"] is True
+        assert plan["confirm_required"] is False
+        assert plan["reversible"] is True
+        assert plan["args"]["prompt"] == "この原稿をもっとやさしく書き換えて"
+        assert plan["target"] == {"type": "chunk", "id": "ch1"}
+
+    def test_apply_then_revert_restores_script(self, api, monkeypatch):
+        """L2 永続可逆: apply（既存 API 呼び出し）→ revert で before に戻る（P3）。"""
+        client, store, _mp, _svc = api
+        chunk, calls = self._patch_rewrite(monkeypatch, store)
+
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "lecture_studio.rewrite_chunk_script",
+                              "target": {"type": "chunk", "id": "ch1"},
+                              "args": {"prompt": "やさしく"}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "applied"
+        assert data["reversible"] is True
+        assert data["after"]["display_text"] == "new-d"
+        assert calls["rewrite"] == [("ch1", "やさしく", "edit")]
+        assert ("applied" in [e[1] for e in store.events])  # P5 監査
+
+        aid = data["action_id"]
+        r2 = client.post("/api/admin/assistant/actions/%s/revert" % aid,
+                         headers=_headers("TEACHER"))
+        assert r2.status_code == 200
+        assert r2.json()["status"] == "reverted"
+        assert chunk["display_text"] == "old-d"   # before に復元
+        assert chunk["spoken_text"] == "old-s"
+        assert calls["restore"] and calls["restore"][0][1]["display_text"] == "old-d"
+        assert ("reverted" in [e[1] for e in store.events])  # P5 監査
+
+    def test_apply_without_prompt_is_400(self, api, monkeypatch):
+        client, store, _mp, _svc = api
+        self._patch_rewrite(monkeypatch, store)
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "lecture_studio.rewrite_chunk_script",
+                              "target": {"type": "chunk", "id": "ch1"},
+                              "args": {}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 400
+
+    def test_apply_unknown_chunk_is_404(self, api, monkeypatch):
+        client, store, _mp, _svc = api
+        self._patch_rewrite(monkeypatch, store)
+        r = client.post("/api/admin/assistant/actions",
+                        json={"capability_id": "lecture_studio.rewrite_chunk_script",
+                              "target": {"type": "chunk", "id": "nope"},
+                              "args": {"prompt": "p"}},
+                        headers=_headers("TEACHER"))
+        assert r.status_code == 404
+
+
+# ===========================================================================
+# Group A-7: Copilot Undo の永続化（低優先度課題）— フロント静的配線の検証
+#
+# 「Admin Copilot の Undo はメモリ内 actionStack のみで、サーバ側 assistant_actions
+# 履歴はリロード後に一切見えない」（vision_ux_gap_survey_2026-07.md §2 G2 末尾）を
+# 是正する。init() 時に GET /admin/assistant/actions からまだ取り消し可能な行だけを
+# 積み直す。JS 実行はしない静的アサーションのみ（既存 TestFrontendIntegration 方式）。
+# ===========================================================================
+
+
+class TestUndoPersistenceFrontend:
+    def test_load_server_action_history_function_exists(self):
+        assert "function loadServerActionHistory" in _ADMIN_JS
+
+    def test_init_calls_load_server_action_history(self):
+        init_src = _extract_js_function(_ADMIN_JS, "init")
+        assert "loadServerActionHistory()" in init_src
+
+    def test_history_endpoint_is_actions_list(self):
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert '"/admin/assistant/actions"' in body or "'/admin/assistant/actions'" in body
+
+    def test_only_reversible_and_applied_are_reconstructed(self):
+        """revert 済み・不可逆（reversible=false）は積まない。"""
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert "reversible" in body
+        assert '"applied"' in body or "'applied'" in body
+
+    def test_reconstructed_entries_are_kind_server(self):
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert '"server"' in body or "'server'" in body
+
+    def test_fails_closed_on_fetch_error(self):
+        """取得失敗時は静かに空スタックのまま（既存 actionStack を壊さない）。"""
+        body = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert ".catch(" in body
+
+    def test_admin_assistant_js_is_es5(self):
+        # admin-assistant.js は既存コードが ES5 のため、追加分も規約を維持する
+        # （既存の renderMarkdown は正規表現中のバッククォートであってテンプレート
+        # リテラルではないため、追加した関数だけを対象に確認する）。
+        added = _extract_js_function(_ADMIN_JS, "loadServerActionHistory")
+        assert "=>" not in added
+        assert re.search(r"\bconst\s", added) is None
+        assert re.search(r"\blet\s", added) is None
+        assert "`" not in added
+
+
+# ===========================================================================
+# Group A-8: 実行可否の事前開示（N12）— フロント静的配線の検証
+#
+# 挨拶文の「代行できます」例示は、サーバの GET /admin/assistant/capabilities が
+# executable=true と申告した操作に限定し、未実装の action は「道案内のみ対応」と
+# 明示する（vision_ux_gap_survey_2026-07-17.md §2-P5 / §5-5）。
+# ===========================================================================
+
+
+class TestExecutableDisclosureFrontend:
+    def test_greet_fetches_capabilities(self):
+        body = _extract_js_function(_ADMIN_JS, "greet")
+        assert '"/admin/assistant/capabilities"' in body or "'/admin/assistant/capabilities'" in body
+
+    def test_greeting_distinguishes_guide_only(self):
+        body = _extract_js_function(_ADMIN_JS, "buildGreeting")
+        assert "executable" in body
+        assert "道案内のみ対応" in body
+
+    def test_greet_fails_closed_to_static_text(self):
+        """capability 一覧が取れないときは実装済み例のみの静的文面へ縮退（捏造しない, P4）。"""
+        greet_body = _extract_js_function(_ADMIN_JS, "greet")
+        assert ".catch(" in greet_body
+        build_body = _extract_js_function(_ADMIN_JS, "buildGreeting")
+        # 静的フォールバックの代行例示は実装済みの course.publish の言い回しのみ
+        assert "このコースを公開して" in build_body
+
+    def test_new_frontend_functions_are_es5(self):
+        for fn in ("greet", "buildGreeting"):
+            added = _extract_js_function(_ADMIN_JS, fn)
+            assert "=>" not in added, fn
+            assert re.search(r"\bconst\s", added) is None, fn
+            assert re.search(r"\blet\s", added) is None, fn
+            assert "`" not in added, fn
+
+    def test_route_exposes_executable_flag(self):
+        assert "def assistant_list_capabilities" in _ROUTE_SRC
+        assert "executable" in _ROUTE_SRC
+        assert "_capability_is_executable" in _ROUTE_SRC
+
+    def test_guidance_fallback_marks_guide_only(self):
+        """capability 提示（できる操作の例）でも未実装 action を明示する。"""
+        assert "道案内のみ対応" in _ROUTE_SRC
+        body = extract_function_source(_ROUTE_SRC, "_guidance_response")
+        assert "_capability_display_title" in body

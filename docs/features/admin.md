@@ -3,10 +3,43 @@
 [← ドキュメント目次](../README.md)
 
 教員・管理者向けの管理 UI を機能別に解説します。
-実装: `frontend/public/admin.html` + `frontend/public/js/admin.js`（ES5 互換 SPA）。
+実装: `frontend/public/admin.html` + `frontend/public/js/admin.js`（ES5 互換 SPA）+ 分離モジュール
+（`admin-lecture-studio.js` / `admin-assistant.js` / `admin-next-steps.js` / `versioning.js` /
+`deliberation.js` / `doubt-atlas.js` / `admin-llm-usage.js` / `atlas-draft-preview.js` /
+`atlas-assist-panel.js`。モジュール一覧と DI 注入は [フロントエンド構成](../frontend/overview.md)）。
 バックエンドは主に `/api/admin/*`（[API](../backend/api.md)）。
 
-タブ構成（概略）: 教材管理 / コースビルダー / コース管理 / Lecture Studio / つまずきデータ / スキーマ提案 / グループ / システム統計 / エラー分析。
+## タブ構成
+
+タブはグループ別プルダウン（`admin.html` の `.admin-tab-group`）に束ねられている。
+「動的」はログイン後に `admin.js` の `setupRoleBasedUI()` がロールに応じて DOM 追加するタブ。
+
+| グループ | タブ（`data-tab`） | 表示条件 | 中身 |
+|---|---|---|---|
+| コンテンツ | 教材管理（`materials`） | TEACHER のみ※ | PDF/TeX アップロード・一覧・共有・要素インベントリ（深く検討） |
+| コンテンツ | コース構築（`course-builder`） | TEACHER のみ※ | AI 支援コースビルダー |
+| コンテンツ | コース管理（`course-management`） | TEACHER のみ※ | 公開・グループ共有・学習マップ編集・共有版 |
+| コンテンツ | 原稿スタジオ（`lecture-studio`） | TEACHER のみ※ | レクチャー原稿・音声の事前構築（`admin-lecture-studio.js`） |
+| 学習インサイト | つまづきデータ（`stumbles`） | 常時 | 未回答クエリ・つまずきログ |
+| 学習インサイト | 関心集約（`interest-dashboard`） | 常時 | 関心・tension の k-匿名化集計 |
+| 学習インサイト | 分野の地図（`atlas`） | 常時 | Field Atlas 骨格の生成・レビュー・凍結・修正報告 |
+| 学習インサイト | 前提の地図（`doubt-atlas`） | 常時 | D層 Assumption Atlas（`doubt-atlas.js` が描画。分野の地図とは別機能） |
+| ナレッジ基盤 | スキーマ提案（`schema-proposals`） | 常時 | 動的スキーマ進化（提案・Shadow Testing・承認） |
+| ナレッジ基盤 | ナレッジライブラリ（`knowledge-library`） | 常時 | L層 分野別ライブラリ（draft/凍結・retire） |
+| ナレッジ基盤 | DSL進化分析（`schema`、動的） | TEACHER / SYSTEM_ADMIN | スキーマ進化の分析ビュー |
+| 運用 | グループ管理（`groups`） | 常時 | グループ CRUD・招待 |
+| 運用 | 学生管理（`students`、動的） | TEACHER / SYSTEM_ADMIN | 学生アカウント作成 |
+| 運用 | 教員管理（`teachers`、動的） | SYSTEM_ADMIN のみ | 教員アカウント作成 |
+| 運用 | システム統計（`system-stats`） | SYSTEM_ADMIN のみ | 教材統計 |
+| 運用 | LLM使用量（`llm-usage`） | SYSTEM_ADMIN のみ | U層 使用量メトリクス（`admin-llm-usage.js` が描画） |
+| 運用 | エラー解析（`error-analysis`） | SYSTEM_ADMIN のみ | 5xx エラーログの絞り込み・一括コピー |
+
+※ ロール別の挙動: **STUDENT** は管理画面へアクセスすると学習画面（`/`）へリダイレクト。
+**SYSTEM_ADMIN** はコンテンツ系4タブ（教材管理/コース構築/コース管理/原稿スタジオ）が
+非表示になり、初期タブはエラー解析になる（コンテンツ管理は教員の画面という整理）。
+
+タブのほかに、ヘッダへ常設の「📋 次にやること」（G層バッジ、`admin-next-steps.js`）と
+「🔔 通知」（V層インボックス、`versioning.js`）、および Admin Copilot（`admin-assistant.js`）が載る。
 
 ---
 
@@ -48,7 +81,7 @@ LLM との対話形式でコース構造（章・トピック・前提知識・�
 | 機能 | API |
 |---|---|
 | 管理用コース一覧 | `GET /api/admin/courses` |
-| 学生への公開 | `PUT /api/admin/courses/{id}/publish` |
+| 学生への公開（`visibility='public'` に更新。`is_published` も自動追従） | `PUT /api/admin/courses/{id}/visibility` |
 | グループへの権限付与/剥奪（viewer/editor） | `GET/POST /courses/{id}/groups`, `DELETE /courses/{id}/groups/{gid}` |
 
 公開（`is_published = TRUE`）されたテンプレートは学生の「受講可能なコース」に並び、受講登録は複製せず `learning_states` に1行 INSERT するだけです（コース本体は不変のまま共有）。

@@ -1,6 +1,11 @@
 # 構造帰属型の問い記録（Structure-Anchored Questions）— 設計提案
 
-> **ステータス:** 提案（コード未着手）
+> **ステータス:** 実装済み（migration 025）。実装は `backend/core/structure_anchor/`
+> （agent / worker / validator / repair 等の独立モジュール一式）+
+> `backend/api/routes/learning.py` の anchors API（digest / confirm / dismiss）+
+> `app.js` の doubt_type 選択 UI。現行仕様の要約は CLAUDE.md
+> 「構造帰属型の問い記録（Structure-Anchored Questions, B層, migration 025）」を参照。
+> 本書は起草時の設計提案として保持する（以下の本文は提案時点の記述）。
 > **目的:** 学習チャットの「問い」を質問文そのままではなく、
 > **「提示された情報構造のどこに、どう引っかかったか」** として記録し、
 > 受講者の考えを正確に把握して効果的な学習機会につなげる。

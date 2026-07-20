@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import sys
 import os
+from unittest.mock import MagicMock, patch
 
 # Ensure api/ is on the path for schema/route imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
@@ -334,6 +335,172 @@ class TestCourseTopicCheckQuestions:
         assert result[0]["question"] == "要点を説明してください。"
         assert result[0]["model_answer"] == ""
         assert result[0]["answer_requirements"] == []
+
+
+class TestTopicFiguresForPrompt:
+    """Phase 4 §7.1 (hierarchical_context_explanation_design.md): 原稿スタジオの
+    トピック下書きプロンプトへ図の evidence（figure_id + caption）を供給する。
+    `![[figure:id]]` の予約記法に初めて実データが供給される経路。"""
+
+    def test_extracts_figure_id_and_caption_from_figure_evidence_links(self):
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+
+        topic = {
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_1", "summary": "..."},
+                {
+                    "kind": "figure",
+                    "target_id": "fig-uuid-1",
+                    "figure_id": "fig-uuid-1",
+                    "figure_key": "fig_2",
+                    "document_id": "doc-1",
+                    "caption": "Figure 2. Apparatus overview.",
+                },
+            ],
+        }
+
+        figures = _topic_figures_for_prompt(topic)
+
+        assert figures == [{"figure_id": "fig-uuid-1", "caption": "Figure 2. Apparatus overview."}]
+
+    def test_deduplicates_and_ignores_non_figure_kinds(self):
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+
+        topic = {
+            "evidence_links": [
+                {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1."},
+                {"kind": "figure", "target_id": "fig-uuid-1", "caption": "Figure 1 (dup)."},
+                {"kind": "claim", "target_id": "clm_1", "summary": "..."},
+            ],
+        }
+
+        figures = _topic_figures_for_prompt(topic)
+
+        assert len(figures) == 1
+        assert figures[0]["figure_id"] == "fig-uuid-1"
+
+    def test_no_figure_evidence_links_returns_empty_list(self):
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+
+        assert _topic_figures_for_prompt({}) == []
+        assert _topic_figures_for_prompt({"evidence_links": []}) == []
+
+    def _topic_with_figure(self, document_id="doc-1", figure_id="fig-uuid-1"):
+        return {
+            "evidence_links": [{
+                "kind": "figure",
+                "target_id": figure_id,
+                "figure_id": figure_id,
+                "document_id": document_id,
+                "caption": "Figure 2. Apparatus overview.",
+            }],
+        }
+
+    @patch("core.element_explanations.list_for_document")
+    @patch("routes.lecture_studio.topics._pg_session")
+    def test_approved_contextual_explanation_gets_approved_status_label(
+        self, mock_session, mock_list,
+    ):
+        """Phase 2 §5.3 続き: 承認済み(approved) contextual があれば
+        explanation_status='approved' で供給する（教員向け下書きの材料）。"""
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+        from core import element_explanations
+
+        mock_session.return_value = MagicMock()
+        mock_list.return_value = [{
+            "element_id": "fig-uuid-1",
+            "kind": element_explanations.KIND_CONTEXTUAL,
+            "body": "承認済みの文脈説明。",
+            "status": element_explanations.STATUS_APPROVED,
+        }]
+
+        figures = _topic_figures_for_prompt(self._topic_with_figure())
+
+        assert figures == [{
+            "figure_id": "fig-uuid-1",
+            "caption": "Figure 2. Apparatus overview.",
+            "explanation": "承認済みの文脈説明。",
+            "explanation_status": "approved",
+        }]
+
+    @patch("core.element_explanations.list_for_document")
+    @patch("routes.lecture_studio.topics._pg_session")
+    def test_candidate_only_explanation_is_labeled_ai_candidate(
+        self, mock_session, mock_list,
+    ):
+        """承認前(candidate)の contextual しかない場合は「AI候補」として
+        explanation_status='ai_candidate' で供給する（教員向け下書きのみの例外的許容）。"""
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+        from core import element_explanations
+
+        mock_session.return_value = MagicMock()
+        mock_list.return_value = [{
+            "element_id": "fig-uuid-1",
+            "kind": element_explanations.KIND_CONTEXTUAL,
+            "body": "AI候補の文脈説明。",
+            "status": element_explanations.STATUS_CANDIDATE,
+        }]
+
+        figures = _topic_figures_for_prompt(self._topic_with_figure())
+
+        assert figures[0]["explanation"] == "AI候補の文脈説明。"
+        assert figures[0]["explanation_status"] == "ai_candidate"
+
+    @patch("core.element_explanations.list_for_document")
+    @patch("routes.lecture_studio.topics._pg_session")
+    def test_approved_takes_priority_over_candidate(self, mock_session, mock_list):
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+        from core import element_explanations
+
+        mock_session.return_value = MagicMock()
+        mock_list.return_value = [
+            {
+                "element_id": "fig-uuid-1",
+                "kind": element_explanations.KIND_CONTEXTUAL,
+                "body": "古い候補。",
+                "status": element_explanations.STATUS_CANDIDATE,
+            },
+            {
+                "element_id": "fig-uuid-1",
+                "kind": element_explanations.KIND_CONTEXTUAL,
+                "body": "承認済み本文。",
+                "status": element_explanations.STATUS_APPROVED,
+            },
+        ]
+
+        figures = _topic_figures_for_prompt(self._topic_with_figure())
+
+        assert figures[0]["explanation"] == "承認済み本文。"
+        assert figures[0]["explanation_status"] == "approved"
+
+    @patch("core.element_explanations.list_for_document")
+    @patch("routes.lecture_studio.topics._pg_session")
+    def test_dismissed_or_superseded_explanations_are_not_supplied(
+        self, mock_session, mock_list,
+    ):
+        """P4: dismissed/superseded は履歴として保持されるだけで、下書き材料には出さない。"""
+        from routes.lecture_studio.topics import _topic_figures_for_prompt
+        from core import element_explanations
+
+        mock_session.return_value = MagicMock()
+        mock_list.return_value = [
+            {
+                "element_id": "fig-uuid-1",
+                "kind": element_explanations.KIND_CONTEXTUAL,
+                "body": "却下済み。",
+                "status": element_explanations.STATUS_DISMISSED,
+            },
+            {
+                "element_id": "fig-uuid-1",
+                "kind": element_explanations.KIND_CONTEXTUAL,
+                "body": "旧版。",
+                "status": element_explanations.STATUS_SUPERSEDED,
+            },
+        ]
+
+        figures = _topic_figures_for_prompt(self._topic_with_figure())
+
+        assert figures == [{"figure_id": "fig-uuid-1", "caption": "Figure 2. Apparatus overview."}]
 
 
 class TestPersonaPromptHelpers:

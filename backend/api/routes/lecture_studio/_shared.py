@@ -10,12 +10,91 @@ from __future__ import annotations
 
 import json
 
+from fastapi import HTTPException
 from sqlalchemy import text as sa_text
 
+from dependencies import ROLE_SYSTEM_ADMIN
+from services import resolve_document_access
+from core.config import get_settings
 from core.course_data import course_source_material_ids
 from core.document_sections import enrich_chunks_with_sections
 from core.lecture import normalize_to_placeholder_format
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
+
+
+# ---------------------------------------------------------------------------
+# Phase 2-D: 原稿スタジオ rewrite/save の権限ゲート（🔴 セキュリティ修正）
+#
+# chunk_id を直指定するエンドポイント（scripts.py の rewrite/save）は `_require_teacher`
+# のみで、chunk が属する document への編集権限を確認していなかったため、他教員の教材の
+# チャンクも書き換え可能だった（設計書 assistant_common_infra_design.md §5）。
+# `_ensure_document_editable`（routes/theory_components.py）と同じ fail-closed 流儀
+# （不可視・権限なしは 404「Chunk not found」— 存在の有無を権限で区別しない, I5）で揃える。
+# ---------------------------------------------------------------------------
+
+
+def _material_id_for_chunk(chunk_id: str) -> str | None:
+    """chunk_id から material_id を1件引く。chunk が存在しなければ None。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT material_id FROM chunks WHERE id = CAST(:cid AS uuid)"),
+            {"cid": chunk_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return None
+    return row[0] or ""
+
+
+def _ensure_chunk_editable(chunk_id: str, current_user: dict) -> str:
+    """chunk が属する document への編集権限を要求し、material_id を返す。
+
+    判定は ``services.resolve_document_access``（owner / editor グループ /
+    SYSTEM_ADMIN）に委譲する。chunk が存在しない・material_id が解決できない・
+    編集権限がない、のいずれも同一の 404「Chunk not found」にする
+    （fail-closed。既存の教材の有無で分岐させない）。
+    """
+    material_id = _material_id_for_chunk(chunk_id)
+    if material_id is None:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    if current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        return material_id
+    if not material_id or not resolve_document_access(current_user["id"], material_id).can_edit:
+        raise HTTPException(status_code=404, detail="Chunk not found")
+    return material_id
+
+
+# ---------------------------------------------------------------------------
+# Phase 2-D: 原稿スタジオ rewrite のコスト上限（設計書 §1）
+#
+# scripts.py の chunk 単位 rewrite と topics.py のトピック単位 rewrite の両経路が
+# 同一の CostGate インスタンスを共有する（`lecture_rewrite_max_calls_per_day`、
+# キーは (today_str(), user_id)）。バッチ生成・TTS・手動保存は対象外（rewrite の
+# LLM 呼び出しのみを数える）。
+# ---------------------------------------------------------------------------
+
+_lecture_rewrite_cost_gate = CostGate()
+
+
+def consume_lecture_rewrite_quota(user_id: str) -> None:
+    """原稿スタジオ rewrite の日次上限を1消費する。超過時は 429 + 事実文（I2、数値非表示）。
+
+    呼び出し順序: 権限ゲート（fail-closed 404）より**後**、LLM 呼び出しより**前**
+    （拒否されたリクエストを数えない）。
+    """
+    settings = get_settings()
+    cap = int(getattr(settings, "lecture_rewrite_max_calls_per_day", 100) or 0)
+    ok = _lecture_rewrite_cost_gate.check_and_count(
+        daily_limit=cap, daily_key=(today_str(), user_id)
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=429,
+            detail="本日の原稿書き換え回数の上限に達しました。明日以降に再度お試しください。",
+        )
 
 
 # ---------------------------------------------------------------------------

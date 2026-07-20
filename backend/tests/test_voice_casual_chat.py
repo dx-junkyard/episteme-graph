@@ -186,3 +186,54 @@ class TestFrontendVoiceMode:
         assert ".voice-mode-btn" in css
         assert ".voice-panel" in css
         assert ".voice-material" in css
+
+
+class TestVoiceErrorFeedback:
+    """N33 (vision_ux_gap_survey_2026-07-17 §5-7): サーバーエラー時に無言で
+    聞き取りへ戻らない。短い定型文を TTS で返し、TTS 失敗時はパネル表示のみに縮退。
+    エラー定型文 TTS はクールダウンで抑え、無限リトライループにしない。
+    """
+
+    def _fn(self, js: str, name: str) -> str:
+        """app.js の2-spaceインデント関数本体を切り出す（test_learner_ux_static.py と同様式）。"""
+        import re
+
+        match = re.search(
+            r"\n  (?:async )?function " + re.escape(name) + r"\(.*?\n  \}\n", js, re.S
+        )
+        assert match, f"{name} が見つかりません"
+        return match.group(0)
+
+    def test_transcribe_error_is_distinguished_from_silence(self):
+        """transcribe の HTTP エラーは throw（空文字＝無音と区別する）。"""
+        js = _read(APP_JS)
+        fn = self._fn(js, "transcribeVoiceBlob")
+        assert "throw new Error" in fn
+
+    def test_segment_handler_gives_feedback_on_errors(self):
+        """transcribe / chat 失敗時に voiceErrorFeedback を呼んでから聞き取り再開。"""
+        js = _read(APP_JS)
+        fn = self._fn(js, "handleVoiceSegment")
+        assert fn.count("voiceErrorFeedback") >= 2  # transcribe 失敗 + chat 失敗
+        assert "resumeVoiceListening" in fn
+
+    def test_tts_failure_degrades_to_panel_only(self):
+        """回答 TTS 失敗時は再帰 TTS せずパネル表示のみに縮退する。"""
+        js = _read(APP_JS)
+        fn = self._fn(js, "handleVoiceSegment")
+        assert "音声を再生できませんでした" in fn
+        speak = self._fn(js, "speakVoiceAnswer")
+        assert "return false" in speak
+        assert "return true" in speak
+
+    def test_error_tts_has_cooldown_no_retry_loop(self):
+        js = _read(APP_JS)
+        assert "VOICE_ERROR_TTS_COOLDOWN_MS" in js
+        fn = self._fn(js, "voiceErrorFeedback")
+        assert "lastErrorTtsAt" in fn
+        # フィードバック自身の失敗からさらにフィードバックを呼ばない（再帰なし）
+        assert "voiceErrorFeedback" not in fn.replace("function voiceErrorFeedback", "")
+
+    def test_feedback_message_is_short_and_neutral(self):
+        js = _read(APP_JS)
+        assert "エラーが発生しました。もう一度どうぞ。" in js

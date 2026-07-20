@@ -28,6 +28,8 @@
         <span style="opacity:.3">|</span>
         <button id="atlas-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
         <span style="opacity:.3">|</span>
+        <button id="my-map-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの地図を開く">わたしの地図</button>
+        <span style="opacity:.3">|</span>
         <span id="username"></span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit">ログアウト</button>
       </div>
@@ -82,7 +84,10 @@
         </div>
       </div>
       <div class="ia">
-        <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
+        <div class="lecture-toggle-wrap">
+          <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
+          <span class="lecture-toggle-hint" id="lecture-toggle-hint" hidden></span>
+        </div>
         <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで送信）">
         <button id="send-btn" title="質問する（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">質問</button>
         <button id="voice-mode-btn" class="voice-mode-btn" title="気軽に話せる先生とハンズフリーで会話">🤖</button>
@@ -139,6 +144,8 @@
   <script src="/js/atlas-report.js"></script>
   <script src="/js/atlas-minimap.js"></script>
   <script src="/js/atlas-cues.js"></script>
+  <script src="/js/personal-map.js"></script>
+  <script src="/js/personal-map-home.js"></script>
   <script src="/js/reconstruction.js"></script>
 </body>
 </html>

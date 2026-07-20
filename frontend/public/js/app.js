@@ -20,6 +20,10 @@
     learningSupport: null, // {mode, status_label, origin}
     sending: false,
     checkingUnderstanding: false,
+    // P1: 直前の /check 応答が返した course_completed（サーバー正本）。
+    // data-advance（サーバー応答なしの前進）経路が完了カードを出す判断に使う。
+    // トピック切替・コース切替でリセットする（古いコースの完了状態を持ち越さない）。
+    lastCheckCourseCompleted: false,
     topicHasAudio: false, // 現トピックに再生可能なキャッシュ済み音声があるか
     topicStaleLanguage: false, // audio-status.stale_language（表示のみ・判定には使わない）
     // ── 学習者体験レイヤー(B層) Stage M ──
@@ -213,6 +217,22 @@
     return res;
   }
 
+  // apiFetch と同じ 401 処理だが Content-Type を強制しない生 fetch（画像 blob 取得用）。
+  // 図画像 endpoint は Authorization ヘッダ必須のため <img src> を直接指定できず、
+  // fetch + blob + createObjectURL で取得する（admin.js の apiFetchRaw と同じ方式）。
+  async function apiFetchRaw(path, opts = {}) {
+    const headers = { ...(opts.headers || {}) };
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
+    const res = await fetch(API + path, { ...opts, headers });
+    if (res.status === 401) {
+      state.token = null;
+      localStorage.removeItem("eg_token");
+      renderAuth();
+      throw new Error("Unauthorized");
+    }
+    return res;
+  }
+
   // ── Auth ───────────────────────────────────────────────────────────
   function renderAuth() {
     let overlay = document.getElementById("auth-overlay");
@@ -243,13 +263,14 @@
     document.body.appendChild(overlay);
 
     let isLogin = true;
-    document.getElementById("auth-switch").addEventListener("click", function () {
+    // #auth-switch は innerHTML 差し替えで毎回作り直されるため、安定な親 #auth-toggle に委任する
+    document.getElementById("auth-toggle").addEventListener("click", function (e) {
+      if (!e.target || e.target.id !== "auth-switch") return;
       isLogin = !isLogin;
       document.getElementById("auth-btn").textContent = isLogin ? "ログイン" : "登録";
       document.getElementById("auth-toggle").innerHTML = isLogin
         ? 'アカウントがない場合 <a id="auth-switch">新規登録</a>'
         : '既にアカウントがある場合 <a id="auth-switch">ログイン</a>';
-      document.getElementById("auth-switch").addEventListener("click", arguments.callee);
     });
 
     document.getElementById("auth-form").addEventListener("submit", async function (e) {
@@ -438,8 +459,16 @@
       return;
     }
     const course = state.course;
+    // P1: リロード後の復元。サーバー正本の progress（loadAndRenderCourse が
+    // course.progress に格納する）から、確認済みトピックと全完了状態を控えめに示す
+    // （件数・割合は数値として出さない設計不変条項に従う）。
+    const progress = course.progress || {};
+    const completedTopicIds = Array.isArray(progress.completed_topic_ids) ? progress.completed_topic_ids : [];
     let html = '<div class="sb-hd">コースツリー</div>';
     html += '<div class="course-tree-title">' + escHtml(course.title || "コース") + '</div>';
+    if (progress.course_completed) {
+      html += '<div class="course-tree-done">全トピックの確認を終えています</div>';
+    }
 
     (course.chapters || []).forEach(function (ch, ci) {
       const chNum = ci + 1;
@@ -475,8 +504,12 @@
               escHtml(support.status_label || "詳細説明中") + '</span>'
           : "";
 
+        const doneBadge = completedTopicIds.indexOf(t.id) !== -1
+          ? '<span class="ni-done" title="確認済み">✓</span>'
+          : "";
+
         html += '<div class="' + cls + '" data-topic="' + t.id + '" style="padding-left:36px">';
-        html += escHtml(t.title) + annotationBadge + supportBadge;
+        html += escHtml(t.title) + annotationBadge + supportBadge + doneBadge;
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
     });
@@ -503,6 +536,9 @@
     sb.querySelectorAll("[data-topic]").forEach(function (el) {
       el.addEventListener("click", function () {
         var tid = this.getAttribute("data-topic");
+        // N32: ロック表示（グレー/鍵）のトピックも遷移は従来どおり許可する
+        // （押し付けない原則）。視覚と挙動の齟齬は一行の事実文で埋める。
+        maybeShowLockedTopicFact(tid);
         selectTopic(tid);
       });
     });
@@ -510,6 +546,49 @@
     // 分野の地図 (Issue F-1): 学習パスパネル下部の常設ミニマップ。
     // 骨格を同梱したカートリッジでのみ表示される (なければ領域ごと非表示)。
     if (window.AtlasMinimap) window.AtlasMinimap.mount(sb);
+  }
+
+  // 一行の事実文トースト。評価・催促の語彙を使わず、事実のみを短く示して自動で消える。
+  // 常に最新1枚のみ（連打で積み重ねない）。
+  var _factToastTimer = null;
+  function showFactToast(message) {
+    var existing = document.getElementById("fact-toast");
+    if (existing) existing.remove();
+    if (_factToastTimer) { clearTimeout(_factToastTimer); _factToastTimer = null; }
+    var div = document.createElement("div");
+    div.id = "fact-toast";
+    div.className = "fact-toast";
+    div.setAttribute("role", "status");
+    div.textContent = message;
+    document.body.appendChild(div);
+    _factToastTimer = setTimeout(function () {
+      div.remove();
+      _factToastTimer = null;
+    }, 4000);
+  }
+
+  // N32: ロック表示のトピックをクリックしたとき、視覚（鍵/グレー）と挙動（遷移可）の
+  // 齟齬を一行の事実文で埋める。遷移自体は従来どおり許可する（押し付けない原則）。
+  // 「前のトピックの確認が未完了です」が事実であるときだけ表示する
+  // （前のトピックが確認済みなら表示が古いだけなので何も出さない — fail-closed）。
+  function maybeShowLockedTopicFact(topicId) {
+    if (!state.course) return;
+    var topics = state.course.topics || [];
+    var idx = -1;
+    for (var i = 0; i < topics.length; i++) {
+      if (topics[i].id === topicId) { idx = i; break; }
+    }
+    if (idx <= 0) return; // 先頭トピック・不明トピックには「前のトピック」が無い
+    var topic = topics[idx];
+    if ((topic.status || "locked") !== "locked") return;
+    if (topic.id === state.currentTopicId) return;
+    var progress = state.course.progress || {};
+    if (progress.course_completed) return;
+    var completed = Array.isArray(progress.completed_topic_ids) ? progress.completed_topic_ids : [];
+    if (completed.indexOf(topic.id) !== -1) return; // 本人確認済み（ロック表示が古いだけ）
+    var prev = topics[idx - 1];
+    if (!prev || prev.status === "completed" || completed.indexOf(prev.id) !== -1) return;
+    showFactToast("前のトピックの確認が未完了です");
   }
 
   // ── Render: Chat ───────────────────────────────────────────────────
@@ -809,6 +888,7 @@
       html += '</div>';
     });
     body.innerHTML = html;
+    hydrateMaterialFigures(body);
 
     // 現在地ラベル（本筋）
     var topic = getCurrentTopic();
@@ -1094,10 +1174,11 @@
         var data = await res.json();
         var inner = "";
         if (data.section) inner += '<div class="src-popup-section">' + escHtml(data.section) + '</div>';
-        // renderMaterialChunk は [[FORMULA_N]] を KaTeX 描画した自己完結 HTML を返す。
+        // renderMaterialChunk は [[FORMULA_N]] / [[FIGURE_N]] を解決した自己完結 HTML を返す。
         inner += '<div class="material-chunk-text">' +
-          renderMaterialChunk({ text: data.text, formulas: data.formulas }) + '</div>';
+          renderMaterialChunk({ text: data.text, formulas: data.formulas, figures: data.figures }) + '</div>';
         body.innerHTML = inner;
+        hydrateMaterialFigures(body);
       } else {
         body.textContent = "出典を取得できませんでした。";
       }
@@ -1150,28 +1231,53 @@
     }
   }
 
+  // D層 (D3-6): 台帳の一行事実文を取得する。台帳未記帳 (404)・取得失敗時は null
+  // （fail-closed）。段階ラベルと事実文のみで、数値スコアは扱わない。
+  // 同一 (targetType, targetId) はセッション内でキャッシュする（再描画のたびに
+  // 再取得しない。null＝未記帳もキャッシュして 404 の連打を避ける）。
+  var _ledgerFactLineCache = {};
+  async function fetchLearnerLedgerFactLine(targetType, targetId) {
+    if (!targetId || !state.courseId) return null;
+    var cacheKey = state.courseId + "|" + targetType + "|" + targetId;
+    if (Object.prototype.hasOwnProperty.call(_ledgerFactLineCache, cacheKey)) {
+      return _ledgerFactLineCache[cacheKey];
+    }
+    var text = null;
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId +
+        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.fact_line) {
+          text = data.fact_line;
+          var axes = (data.scopes || []).map(function (s) {
+            return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
+          }).filter(Boolean);
+          if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
+        }
+      }
+    } catch (_) { /* fail-closed */ }
+    _ledgerFactLineCache[cacheKey] = text;
+    return text;
+  }
+
+  // 台帳一行の共通様式（component ポップアップと出典タブで同一の見た目にする）。
+  function makeLedgerLineDiv(text) {
+    var div = document.createElement("div");
+    div.className = "learner-ledger-line";
+    div.style.cssText = "margin-top:8px;padding-top:6px;border-top:1px dashed var(--color-border,#ddd);" +
+      "font-size:12px;color:var(--color-text-secondary,#64748b)";
+    div.textContent = text;
+    return div;
+  }
+
   // D層 (D3-6): 対象 claim/equation/component の検証状態の一行事実文を併記する。
   // 台帳未記帳 (404)・取得失敗時はセクション自体を出さない（fail-closed）。
   // 検証済みスコープも未記帳も同じ精度で示す（§8-1・8-2 — 不安を煽らない中立文言）。
   async function appendLearnerLedgerLine(container, targetType, targetId) {
-    if (!container || !targetId || !state.courseId) return;
-    try {
-      const res = await apiFetch("/learning/courses/" + state.courseId +
-        "/ledger/" + encodeURIComponent(targetType) + "/" + encodeURIComponent(targetId));
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data || !data.fact_line) return;
-      var text = data.fact_line;
-      var axes = (data.scopes || []).map(function (s) {
-        return [s.condition, s.domain, s.precision, s.system].filter(Boolean).join(" / ");
-      }).filter(Boolean);
-      if (axes.length > 1) text += "（記帳スコープ: " + axes.join("；") + "）";
-      var div = document.createElement("div");
-      div.style.cssText = "margin-top:8px;padding-top:6px;border-top:1px dashed var(--color-border,#ddd);" +
-        "font-size:12px;color:var(--color-text-secondary,#64748b)";
-      div.textContent = text;
-      container.appendChild(div);
-    } catch (_) { /* fail-closed */ }
+    if (!container) return;
+    var text = await fetchLearnerLedgerFactLine(targetType, targetId);
+    if (text) container.appendChild(makeLedgerLineDiv(text));
   }
 
   // ── 分野の地図: 学習パス提案カード (Issue C-3, 仕様書 §8) ─────────────
@@ -1430,6 +1536,7 @@
     const el = document.getElementById("tab-progress");
     if (!state.course) {
       el.innerHTML = "";
+      updateProgressTabDot();
       return;
     }
     const p = state.course.progress || {};
@@ -1473,6 +1580,14 @@
       loadInterestTraces();
     }
     bindProgressTabEvents(el);
+
+    // Phase P-1: 「わたしの地図」との相互リンク（問いの軌跡→地図上の位置）。
+    // 未ロード時は静的コンテナが無いため実質何もしない（fail-closed）。
+    if (window.PersonalMap) {
+      var trajList = document.getElementById("lx-trajectory-list");
+      if (trajList) window.PersonalMap.annotateTrajectoryList(trajList);
+    }
+    updateProgressTabDot();
   }
 
   // コース行程ブロック（全行程レール＋現在地＋一本パス＋戻りCTA）。
@@ -1663,26 +1778,37 @@
     renderProgressTab();
   }
 
+  // G3: 「候補ゼロ」と「取得できなかった」を区別するため、非 ok 応答/例外は
+  // items:[] に丸めつつ _error フラグを立てる（renderTensionDigestCard が読む）。
+  // P2: 開始時のコースIDを保持し、応答時に別コースへ切替済みなら state への書き込みを
+  // 破棄する（コースAの候補がコースBの画面に残る汚染を防ぐ）。
   async function loadTensionDigest() {
     if (!state.courseId) return;
+    var cid = state.courseId;
     try {
-      var res = await apiFetch("/learning/courses/" + state.courseId + "/tension/digest");
-      state.tensionDigest = res.ok ? await res.json() : { items: [] };
+      var res = await apiFetch("/learning/courses/" + cid + "/tension/digest");
+      var digest = res.ok ? await res.json() : { items: [], _error: true };
     } catch (_) {
-      state.tensionDigest = { items: [] };
+      digest = { items: [], _error: true };
     }
+    if (state.courseId !== cid) return; // 遅延応答ガード
+    state.tensionDigest = digest;
   }
 
   // ── 構造帰属（Structure-Anchored Questions）Stage 2: ダイジェスト・本人確定 ──
 
+  // P2: loadTensionDigest と同様、コース切替後の遅延応答を破棄する。
   async function loadAnchorDigest() {
     if (!state.courseId) return;
+    var cid = state.courseId;
     try {
-      var res = await apiFetch("/learning/courses/" + state.courseId + "/anchors/digest");
-      state.anchorDigest = res.ok ? await res.json() : { items: [] };
+      var res = await apiFetch("/learning/courses/" + cid + "/anchors/digest");
+      var digest = res.ok ? await res.json() : { items: [], _error: true };
     } catch (_) {
-      state.anchorDigest = { items: [] };
+      digest = { items: [], _error: true };
     }
+    if (state.courseId !== cid) return; // 遅延応答ガード
+    state.anchorDigest = digest;
   }
 
   // 帰属を本人が確定/訂正する（doubtType は任意。空なら候補のまま確定）。
@@ -1851,7 +1977,8 @@
         html += '<p class="lx-sec-head">参照した根拠</p>';
         srcs.forEach(function (s) {
           var c = tierCls(s.tier);
-          html += '<div class="lx-src ' + c + '"><div class="lx-src-top">';
+          // D層 (D3-6): 台帳併記用にチャンク ID をカードへ持たせる（描画後に非同期併記）。
+          html += '<div class="lx-src ' + c + '" data-lx-ledger-chunk="' + escHtml(s.chunk_id || "") + '"><div class="lx-src-top">';
           html += '<span class="lx-src-title">' + escHtml(s.source_title || "不明な教材") + '</span>';
           html += '<span class="lx-src-badges">';
           if (s.origin) html += '<span class="lx-origin-badge">' + escHtml(ORIGIN_LABEL[s.origin] || s.origin) + '</span>';
@@ -1910,6 +2037,92 @@
         if (openDetails.open) loadLearnerOpenAssumptions();
       });
     }
+
+    // D層 (D3-6): 根拠カードへ台帳の検証状態を一行併記（非同期・fail-closed）。
+    annotateSourceCardsWithLedger(el);
+  }
+
+  // D層 (D3-6): 出典タブの根拠カードに、そのチャンクに含まれる数式（equation）・
+  // claim の台帳検証状態を一行の事実として併記する。学習者に開かれた ID 供給源は
+  // equation は source-chunk API の formulas[].id（解析パイプラインの equation_id）、
+  // claim は学習者向け読み取り専用 API `/chunks/{chunk_id}/claim-refs`（コース教材
+  // 厳密一致のみを返す）。台帳未記帳 (404)・API 失敗時は何も出さない
+  // （fail-closed: 台帳未記帳コースでは表示が一切変わらない）。数値は出さない。
+  var _chunkEquationIdsCache = {};
+  var _chunkClaimIdsCache = {};
+  function annotateSourceCardsWithLedger(root) {
+    if (!root || !state.courseId) return;
+    var cards = root.querySelectorAll("[data-lx-ledger-chunk]");
+    var seen = {};
+    Array.prototype.forEach.call(cards, function (card) {
+      var chunkId = card.getAttribute("data-lx-ledger-chunk");
+      if (!chunkId || seen[chunkId]) return; // 同一チャンクの重複カードは最初の1枚だけ
+      seen[chunkId] = true;
+      annotateOneSourceCardLedger(card, chunkId);
+    });
+  }
+
+  async function annotateOneSourceCardLedger(card, chunkId) {
+    try {
+      var entries = _chunkEquationIdsCache[chunkId];
+      if (!entries) {
+        entries = [];
+        try {
+          const res = await apiFetch("/learning/courses/" + state.courseId +
+            "/source-chunk/" + encodeURIComponent(chunkId));
+          if (res.ok) {
+            const data = await res.json();
+            var seenIds = {};
+            ((data && data.formulas) || []).forEach(function (f) {
+              var id = f && f.id ? String(f.id) : "";
+              // パイプライン由来の equation_id のみ対象。旧フォーマット変換で付く
+              // [[FORMULA_N]] やトピック教材の TOPIC_FORMULA_N は台帳対象ではない。
+              if (!id || /^\[\[FORMULA_\d+\]\]$/.test(id) || /^TOPIC_FORMULA_/.test(id)) return;
+              if (seenIds[id]) return;
+              seenIds[id] = true;
+              entries.push({ id: id, label: (f && f.label) ? String(f.label) : "" });
+            });
+          }
+        } catch (_) { /* fail-closed */ }
+        _chunkEquationIdsCache[chunkId] = entries;
+      }
+      // claim 拡張: チャンク→claim ID は学習者向け読み取り専用 API から解決する。
+      // equation 経路の成否とは独立に fail-closed（一方の失敗が他方を巻き込まない）。
+      var claimEntries = _chunkClaimIdsCache[chunkId];
+      if (!claimEntries) {
+        claimEntries = [];
+        try {
+          const cres = await apiFetch("/learning/courses/" + state.courseId +
+            "/chunks/" + encodeURIComponent(chunkId) + "/claim-refs");
+          if (cres.ok) {
+            const cdata = await cres.json();
+            ((cdata && cdata.claims) || []).forEach(function (c) {
+              var id = c && c.id ? String(c.id) : "";
+              if (!id) return;
+              claimEntries.push({ id: id, label: (c && c.label) ? String(c.label) : "" });
+            });
+          }
+        } catch (_) { /* fail-closed */ }
+        _chunkClaimIdsCache[chunkId] = claimEntries;
+      }
+      var combined = entries.map(function (e) {
+        return { kind: "equation", id: e.id, label: e.label, prefix: "数式 " };
+      }).concat(claimEntries.map(function (e) {
+        return { kind: "claim", id: e.id, label: e.label, prefix: "主張 " };
+      }));
+      var shown = {};
+      var count = 0;
+      // 1カード最大3行（過密防止）。equation・claim を合算した上限で維持する。
+      for (var i = 0; i < combined.length && count < 3; i++) {
+        var text = await fetchLearnerLedgerFactLine(combined[i].kind, combined[i].id);
+        if (!text) continue;
+        var line = combined[i].label ? (combined[i].prefix + combined[i].label + " — " + text) : text;
+        if (shown[line]) continue; // 同一文言の重複行は出さない
+        shown[line] = true;
+        count++;
+        if (card.isConnected) card.appendChild(makeLedgerLineDiv(line));
+      }
+    } catch (_) { /* fail-closed */ }
   }
 
   // D層 (D3-6): 未検証合意リスト（読み取り専用・台帳の投影）。
@@ -1964,10 +2177,19 @@
   // 件数バッジ・ランキング化はしない（P7）。
   function renderTensionDigestCard() {
     var digest = state.tensionDigest;
-    if (!digest || !Array.isArray(digest.items)) return "";
+    if (!digest) return ""; // 未ロード（読み込み中）は何も出さない
+    // G3: 通信エラーと「候補ゼロ」を区別する。デフォードで隠している間は静かにしておく
+    // （押し付けない。P7）— 候補が本当に無いときだけ理由を一行添える。
+    if (digest._error) {
+      return '<div class="lx-digest-empty">引っかかりの候補を取得できませんでした。</div>';
+    }
+    var items = Array.isArray(digest.items) ? digest.items : [];
+    if (items.length === 0) {
+      return '<div class="lx-digest-empty">引っかかりの候補はまだありません。学習が進むと表示されることがあります。</div>';
+    }
     var item = null;
-    for (var i = 0; i < digest.items.length; i++) {
-      if (!state.tensionDeferred[digest.items[i].trace_id]) { item = digest.items[i]; break; }
+    for (var i = 0; i < items.length; i++) {
+      if (!state.tensionDeferred[items[i].trace_id]) { item = items[i]; break; }
     }
     if (!item) return "";
     var html = '<div class="lx-revisit lx-tension" data-tension-card="' + escHtml(item.trace_id) + '">';
@@ -1987,10 +2209,17 @@
   // 様相チップをタップするとその doubt_type で訂正確定できる（自己説明の入口。方法C と連続）。
   function renderAnchorDigestCard() {
     var digest = state.anchorDigest;
-    if (!digest || !Array.isArray(digest.items)) return "";
+    if (!digest) return ""; // 未ロード（読み込み中）は何も出さない
+    if (digest._error) {
+      return '<div class="lx-digest-empty">問いの帰属候補を取得できませんでした。</div>';
+    }
+    var items = Array.isArray(digest.items) ? digest.items : [];
+    if (items.length === 0) {
+      return '<div class="lx-digest-empty">確認できる問いの候補はまだありません。学習が進むと表示されることがあります。</div>';
+    }
     var item = null;
-    for (var i = 0; i < digest.items.length; i++) {
-      if (!state.anchorDeferred[digest.items[i].trace_id]) { item = digest.items[i]; break; }
+    for (var i = 0; i < items.length; i++) {
+      if (!state.anchorDeferred[items[i].trace_id]) { item = items[i]; break; }
     }
     if (!item) return "";
     var tid = escHtml(item.trace_id);
@@ -2056,12 +2285,17 @@
       fbtn("detour", "寄り道", "var(--lx-kind-detour)") +
       fbtn("misconception", "誤答", "var(--lx-kind-mis)") + '</div>';
 
-    // トレース群（status を主役に）
+    // トレース群（status を主役に）。「わたしの地図」との相互リンクのためコンテナに id を付与する
+    // (Phase P-1: PersonalMap.annotateTrajectoryList / openTrajectory が data-trace-id を参照する)。
+    html += '<div id="lx-trajectory-list">';
     traces.forEach(function (t) {
       if (f !== "all" && t.kind !== f) return;
       var kc = TRACE_KIND_CLS[t.kind] || "q";
       var sm = STATUS_META[t.status] || { label: t.status || "", cls: "open" };
-      html += '<div class="lx-trace ' + kc + '"><div class="lx-rail"></div><div class="lx-trace-body">';
+      // data-map-excluded: 「わたしの地図」に反映しない設定の有無（Phase P-3 §6）。
+      // PersonalMap.annotateTrajectoryList がこの属性を見て「地図に戻す」チップを付ける。
+      html += '<div class="lx-trace ' + kc + '" data-trace-id="' + escHtml(t.id || "") +
+        '" data-map-excluded="' + (t.map_excluded ? "1" : "0") + '"><div class="lx-rail"></div><div class="lx-trace-body">';
       html += '<div class="lx-trace-top"><span class="lx-kind-tag">' + escHtml(TRACE_KIND_LABEL[t.kind] || t.kind || "記録") + '</span>';
       html += '<span class="lx-status-tag ' + sm.cls + '">' + escHtml(sm.label) + '</span></div>';
       html += '<div class="lx-trace-text">' + escHtml(t.text || "") + '</div>';
@@ -2085,10 +2319,11 @@
       }
       html += '</div></div>';
     });
+    html += '</div>';
     return html;
   }
 
-  // 進捗タブに再訪推奨ドットを点す（タブ見出し）。
+  // 進捗タブに再訪推奨ドット・違和感/帰属候補の気づきドットを点す（タブ見出し）。
   function updateProgressTabDot() {
     var btn = document.querySelector('#tabBar button[data-tab="progress"]');
     if (!btn) return;
@@ -2101,30 +2336,71 @@
     } else if (!hasRevisit && dot) {
       dot.remove();
     }
+
+    // G4-T: 違和感/帰属候補ダイジェストに本人未確定の候補があるときも、既存の再訪推奨
+    // ドットとは区別できる表示で気づけるようにする（件数は出さない・押し付けない）。
+    var tensionItems = (state.tensionDigest && Array.isArray(state.tensionDigest.items)) ? state.tensionDigest.items : [];
+    var anchorItems = (state.anchorDigest && Array.isArray(state.anchorDigest.items)) ? state.anchorDigest.items : [];
+    var hasDigestCandidate =
+      tensionItems.some(function (i) { return !state.tensionDeferred[i.trace_id]; }) ||
+      anchorItems.some(function (i) { return !state.anchorDeferred[i.trace_id]; });
+    var hintDot = btn.querySelector(".lx-tab-dot-hint");
+    if (hasDigestCandidate && !hintDot) {
+      btn.insertAdjacentHTML(
+        "beforeend",
+        '<span class="lx-tab-dot-hint" title="確認できる引っかかり・問いの候補があります"></span>'
+      );
+    } else if (!hasDigestCandidate && hintDot) {
+      hintDot.remove();
+    }
   }
 
+  // P2: コース切替後の遅延応答を破棄する（cid を開始時に保持し、state へ反映する直前・
+  // renderProgressTab/updateProgressTabDot を呼ぶ直前に courseId 一致を確認する）。
   async function loadInterestTraces() {
     if (!state.courseId) return;
+    var cid = state.courseId;
     state.interestTraces = {}; // 多重ロード防止のプレースホルダ
     try {
       var res = await apiFetch(
-        "/learning/courses/" + state.courseId + "/interest-traces" +
+        "/learning/courses/" + cid + "/interest-traces" +
         (state.currentTopicId ? "?topic_id=" + encodeURIComponent(state.currentTopicId) : "")
       );
-      state.interestTraces = res.ok ? await res.json() : { traces: [] };
+      var traces = res.ok ? await res.json() : { traces: [] };
     } catch (_) {
-      state.interestTraces = { traces: [] };
+      traces = { traces: [] };
     }
+    if (state.courseId !== cid) return; // 遅延応答ガード: state 反映・再描画を破棄
+    state.interestTraces = traces;
     // 違和感ダイジェスト（次回ログイン時の提示。会話への割り込みはしない）
     if (state.tensionDigest === null) {
       await loadTensionDigest();
     }
+    if (state.courseId !== cid) return;
     // 帰属候補ダイジェスト（同上。確認カードは進捗タブでのみ提示する）
     if (state.anchorDigest === null) {
       await loadAnchorDigest();
     }
+    if (state.courseId !== cid) return;
     renderProgressTab();
     updateProgressTabDot();
+  }
+
+  // Phase P-1: 「わたしの地図」からの遷移先（PersonalMap.init の openTrajectory）。
+  // 進捗タブへ切替 → 軌跡が未ロードならロード → 該当アイテムへスクロールし一時ハイライト
+  // (jumpToChatMessage と同じ mg-highlight の一時強調パターンを流用)。
+  async function openTrajectory(traceId) {
+    if (!traceId) return;
+    var progressBtn = document.querySelector('#tabBar button[data-tab="progress"]');
+    if (progressBtn && !progressBtn.classList.contains("on")) progressBtn.click();
+    if (state.interestTraces === null) {
+      await loadInterestTraces();
+    }
+    var target = document.querySelector('[data-trace-id="' + traceId + '"]');
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    target.classList.add("mg-highlight");
+    setTimeout(function () { target.classList.remove("mg-highlight"); }, 2400);
   }
 
   // ── Topic Navigation ───────────────────────────────────────────────
@@ -2148,16 +2424,22 @@
     return ordered[idx + 1];
   }
 
+  // G1-4: 最終トピックでもボタンを消さず「確認して完了」を出す（コース完走時の完了体験）。
   function updateNextTopicBtn() {
     var btn = document.getElementById("next-topic-btn");
     if (!btn) return;
+    if (!state.currentTopicId) {
+      btn.style.display = "none";
+      return;
+    }
     var next = getNextTopic();
+    btn.style.display = "";
     if (next) {
-      btn.style.display = "";
       btn.textContent = "確認して次へ";
       btn.title = "確認問題に回答して次のセクションへ進む: " + (next.title || "");
     } else {
-      btn.style.display = "none";
+      btn.textContent = "確認して完了";
+      btn.title = "確認問題に回答してこのコースの学習を完了する";
     }
   }
 
@@ -2225,6 +2507,8 @@
     state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
     hideEditIndicator();
     state.topicMaterial = [];
+    // P1: トピック切替で「直前の check 応答の course_completed」を持ち越さない。
+    state.lastCheckCourseCompleted = false;
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
     // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
     var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
@@ -2306,8 +2590,7 @@
 
   function openCheckModal() {
     if (!state.currentTopicId || state.checkingUnderstanding) return;
-    var next = getNextTopic();
-    if (!next) return;
+    // G1-4: 最終トピック（次が無い）でも確認問題フローへ進み、合格後は完了カードへ繋ぐ。
     var existing = document.getElementById("check-overlay");
     if (existing) existing.remove();
 
@@ -2351,6 +2634,12 @@
       if (directNext) {
         await selectTopic(directNext.id);
         showAtlasCueAfterAdvance(directCompleted, directNext);
+      } else {
+        // G1-4: 最終トピックでは完了カードへ繋ぐ（次の案内が消えるだけで終わらせない）。
+        // P1: このパスはサーバー応答を伴わないため、断定文言は直前の /check 応答が
+        // 確認済みの course_completed（state.lastCheckCourseCompleted）でのみ出す。
+        if (lectureState.active) deactivateLecture();
+        showCourseCompletionCard(directCompleted, state.lastCheckCourseCompleted);
       }
       return;
     }
@@ -2380,6 +2669,8 @@
       );
       if (!res.ok) throw new Error("check failed");
       var data = await res.json();
+      // P1: サーバー正本の完了状態を保持する（data-advance 経路が後で参照する）。
+      state.lastCheckCourseCompleted = !!data.course_completed;
       if (data.passed) {
         var next = getNextTopic();
         var completedTopic = getCurrentTopic();
@@ -2390,6 +2681,11 @@
           await selectTopic(next.id);
           // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
           showAtlasCueAfterAdvance(completedTopic, next);
+        } else {
+          // G1-4: 最終トピック合格 → コース完走の完了カードへ繋ぐ（事実文のみ・数値なし）。
+          // P1: サーバーが course_completed===true を確認したときのみ断定文言を出す。
+          if (lectureState.active) deactivateLecture();
+          showCourseCompletionCard(completedTopic, data.course_completed === true);
         }
       } else {
         if (feedbackEl) {
@@ -2416,6 +2712,57 @@
       if (submitBtn) submitBtn.disabled = false;
     } finally {
       state.checkingUnderstanding = false;
+    }
+  }
+
+  // G1-4 / P1: コース完走時の完了カード。事実文のみ（数値・スコア・祝祭演出は出さない）で、
+  // 他のコースへの導線とわたしの地図への導線を添える。
+  // courseCompleted は呼び出し元が保持するサーバー正本の判定（/check レスポンスの
+  // course_completed）。true のときだけ「全トピックを学習しました」と断定してよい。
+  // falsy（未確認・不明を含む）なら fail-closed で縮退した事実文にする（途中を飛ばしても
+  // 断定文言が出ないようにする）。
+  function showCourseCompletionCard(completedTopic, courseCompleted) {
+    var existing = document.getElementById("course-complete-overlay");
+    if (existing) existing.remove();
+    var courseTitle = state.course ? (state.course.title || "") : "";
+    var titleText = courseCompleted ? "学習を完了しました" : "最後のトピックの確認を終えました";
+    var bodyText = courseCompleted
+      ? ('「' + escHtml(courseTitle) + '」の全トピックを学習しました。')
+      : "まだ確認を終えていないトピックがあります。";
+    var overlay = document.createElement("div");
+    overlay.id = "course-complete-overlay";
+    overlay.className = "check-overlay";
+    overlay.innerHTML =
+      '<div class="check-box">' +
+        '<div class="check-title">' + escHtml(titleText) + '</div>' +
+        '<div class="check-section">' + bodyText + '</div>' +
+        (completedTopic
+          ? '<div class="check-question">最後のトピック「' + escHtml(completedTopic.title || "") +
+            '」の確認問題に回答しました。</div>'
+          : "") +
+        '<div class="check-actions" style="justify-content:flex-start;flex-wrap:wrap">' +
+          '<button class="check-secondary" id="course-complete-other">他のコースを見る</button>' +
+          '<button class="check-secondary" id="course-complete-map">わたしの地図を見る</button>' +
+          '<button class="check-primary" id="course-complete-close">閉じる</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    var closeBtn = document.getElementById("course-complete-close");
+    if (closeBtn) closeBtn.addEventListener("click", function () { overlay.remove(); });
+    var otherBtn = document.getElementById("course-complete-other");
+    if (otherBtn) {
+      otherBtn.addEventListener("click", function () {
+        overlay.remove();
+        var select = document.getElementById("course-select");
+        if (select) select.focus();
+      });
+    }
+    var mapBtn = document.getElementById("course-complete-map");
+    if (mapBtn) {
+      mapBtn.addEventListener("click", function () {
+        overlay.remove();
+        if (window.PersonalMapHome) window.PersonalMapHome.open();
+      });
     }
   }
 
@@ -2610,6 +2957,10 @@
   const VOICE_MIN_SPEECH_MS = 400;    // これ未満の発話は物音とみなして破棄
   const VOICE_RMS_THRESHOLD = 0.015;  // 発話とみなす音量（RMS）
   const VOICE_IDLE_RESET_MS = 60000;  // 無発話でセグメントを作り直す（メモリ抑制）
+  // N33: エラー定型文の TTS はこの間隔をあける（失敗が続くときに TTS 呼び出しを
+  // 連打しない。間隔内はパネル表示のみに縮退）。
+  const VOICE_ERROR_TTS_COOLDOWN_MS = 15000;
+  const VOICE_ERROR_MESSAGE = "エラーが発生しました。もう一度どうぞ。";
 
   const voiceState = {
     active: false,
@@ -2626,6 +2977,7 @@
     segmentStart: 0,
     busy: false,   // 文字起こし〜応答再生中（この間は区切り検知を止める）
     player: null,
+    lastErrorTtsAt: 0,  // N33: エラー定型文 TTS の最終試行時刻
   };
 
   function setVoiceStatus(kind, label) {
@@ -2785,21 +3137,68 @@
 
     setVoiceStatus("thinking", "文字起こし中…");
     let text = "";
+    let transcribeFailed = false;
     try {
       text = await transcribeVoiceBlob(blob);
-    } catch (_) { /* best-effort */ }
+    } catch (_) { transcribeFailed = true; }
     if (!voiceState.active) return;
-    if (!text) { resumeVoiceListening(); return; }
+    if (transcribeFailed) {
+      // N33: サーバーエラーを無言で聞き取りに戻さない。短い定型文で知らせてから再開する。
+      await voiceErrorFeedback(VOICE_ERROR_MESSAGE);
+      if (voiceState.active) resumeVoiceListening();
+      return;
+    }
+    if (!text) { resumeVoiceListening(); return; }  // 無音・聞き取れず（エラーではない）
 
     setVoiceTranscript("あなた: " + text);
     setVoiceStatus("thinking", "先生が考えています…");
     const data = await sendMessage(text, { intent_mode: "casual" });
     if (!voiceState.active) return;
-    if (!data || !data.answer) { resumeVoiceListening(); return; }
+    if (!data || !data.answer) {
+      // N33: チャット失敗もエラーとして知らせる（sendMessage はエラー時 null を返す）。
+      await voiceErrorFeedback(VOICE_ERROR_MESSAGE);
+      if (voiceState.active) resumeVoiceListening();
+      return;
+    }
 
     showVoiceSourceMaterial(data.sources || []);
-    await speakVoiceAnswer(data.answer);
+    const spoken = await speakVoiceAnswer(data.answer);
+    if (!spoken && voiceState.active) {
+      // N33: TTS 自体が失敗しているのでパネル表示のみに縮退（TTS 再試行しない）。
+      setVoiceTranscript("音声を再生できませんでした。回答はチャット欄に表示されています。");
+    }
     if (voiceState.active) resumeVoiceListening();
+  }
+
+  // N33: ハンズフリー中のサーバーエラーを無言にしない。可能なら短い定型文を TTS で
+  // 再生し、TTS 自体が失敗している場合はボイスパネルへの表示のみに縮退する。
+  // 定型文 TTS は VOICE_ERROR_TTS_COOLDOWN_MS に1回までに抑え、失敗の連鎖で
+  // TTS 呼び出しのループにならないようにする（再帰・自動再試行はしない）。
+  async function voiceErrorFeedback(message) {
+    if (!voiceState.active) return;
+    setVoiceTranscript(message);
+    const now = Date.now();
+    if (voiceState.lastErrorTtsAt && now - voiceState.lastErrorTtsAt < VOICE_ERROR_TTS_COOLDOWN_MS) {
+      return; // パネル表示のみに縮退
+    }
+    voiceState.lastErrorTtsAt = now;
+    try {
+      const res = await apiFetch("/learning/voice/speak", {
+        method: "POST", body: JSON.stringify({ text: message }),
+      });
+      if (!res.ok) return; // パネル表示のみに縮退
+      const audioB64 = (await res.json()).audio_base64 || "";
+      if (!audioB64 || !voiceState.active) return;
+      setVoiceStatus("speaking", "先生が話しています…");
+      await new Promise(function (resolve) {
+        const player = new Audio("data:audio/mp3;base64," + audioB64);
+        voiceState.player = player;
+        player.onended = resolve;
+        player.onerror = resolve;
+        player.play().catch(resolve);
+      });
+      voiceState.player = null;
+    } catch (_) { /* パネル表示のみに縮退 */ }
   }
 
   function resumeVoiceListening() {
@@ -2818,12 +3217,15 @@
     const res = await fetch(API + "/learning/voice/transcribe?language=ja", {
       method: "POST", headers: headers, body: form,
     });
-    if (!res.ok) return "";
+    // N33: サーバーエラーは「無音（空文字）」と区別して throw する
+    // （呼び出し側がエラーフィードバックを返せるように）。
+    if (!res.ok) throw new Error("transcribe failed: " + res.status);
     const data = await res.json();
     return (data.text || "").trim();
   }
 
-  // 応答を TTS で再生する。TTS が使えない環境では静かにスキップ（テキストは残る）。
+  // 応答を TTS で再生する。再生できたら true、TTS が使えない環境・失敗時は false
+  //（N33: 呼び出し側がパネル表示のみへ縮退できるように成否を返す。テキストは残る）。
   async function speakVoiceAnswer(answerText) {
     let audioB64 = "";
     try {
@@ -2832,7 +3234,7 @@
       });
       if (res.ok) audioB64 = (await res.json()).audio_base64 || "";
     } catch (_) { /* best-effort */ }
-    if (!audioB64 || !voiceState.active) return;
+    if (!audioB64 || !voiceState.active) return false;
     setVoiceStatus("speaking", "先生が話しています…");
     await new Promise(function (resolve) {
       const player = new Audio("data:audio/mp3;base64," + audioB64);
@@ -2842,6 +3244,7 @@
       player.play().catch(resolve);
     });
     voiceState.player = null;
+    return true;
   }
 
   // 応答の第1根拠チャンクをパネルに教材表示する（会話中に教材が画面に出る）。
@@ -2859,7 +3262,8 @@
         '<div class="voice-material-title">📖 いま話している題材: ' +
         escHtml(data.source_title || top.source_title || "教材") +
         (data.section ? " · " + escHtml(data.section) : "") + "</div>" +
-        renderMaterialChunk({ text: data.text, formulas: data.formulas });
+        renderMaterialChunk({ text: data.text, formulas: data.formulas, figures: data.figures });
+      hydrateMaterialFigures(el);
       el.classList.add("on");
     } catch (_) { /* best-effort */ }
   }
@@ -2915,7 +3319,9 @@
       html += '<optgroup label="マイコース">';
       ownCourses.forEach(function (c) {
         const selected = c.id === state.courseId ? " selected" : "";
-        html += '<option value="' + escHtml(c.id) + '"' + selected + '>' + escHtml(c.title) + '</option>';
+        // G4-D: description をホバーで見られるよう title 属性に入れる。
+        const titleAttr = c.description ? ' title="' + escHtml(c.description) + '"' : "";
+        html += '<option value="' + escHtml(c.id) + '"' + titleAttr + selected + '>' + escHtml(c.title) + '</option>';
       });
       html += '</optgroup>';
     }
@@ -2924,7 +3330,8 @@
     if (enrollableCourses.length > 0) {
       html += '<optgroup label="新しく受講可能なコース">';
       enrollableCourses.forEach(function (c) {
-        html += '<option value="enroll:' + escHtml(c.id) + '">' + escHtml(c.title) + '</option>';
+        const titleAttr = c.description ? ' title="' + escHtml(c.description) + '"' : "";
+        html += '<option value="enroll:' + escHtml(c.id) + '"' + titleAttr + '>' + escHtml(c.title) + '</option>';
       });
       html += '</optgroup>';
     }
@@ -2932,15 +3339,96 @@
     select.innerHTML = html;
   }
 
+  // G1-5 / 指摘4: 受講登録の確認モーダル。タイトル＋description を提示し、キャンセル時は
+  // select を元の値へ戻す（確認なし即時 enroll をやめる）。
+  // callback(true) は enrollCourse を await する非同期関数を渡す想定。失敗（例外）時は
+  // モーダルを閉じずにエラーを表示し、ボタンを再有効化して再試行できるようにする
+  // （通信中は二重送信を防ぐため両ボタンを disabled にする）。
+  function openEnrollConfirm(course, callback) {
+    var existing = document.getElementById("enroll-confirm-overlay");
+    if (existing) existing.remove();
+    var overlay = document.createElement("div");
+    overlay.id = "enroll-confirm-overlay";
+    overlay.className = "check-overlay";
+    var title = course ? (course.title || "") : "";
+    var desc = course && course.description ? course.description : "";
+    overlay.innerHTML =
+      '<div class="check-box">' +
+        '<div class="check-title">このコースを受講しますか？</div>' +
+        '<div class="check-section">' + escHtml(title) + '</div>' +
+        (desc ? '<div class="check-question">' + escHtml(desc) + '</div>' : '') +
+        '<div id="enroll-confirm-error" class="enroll-confirm-error" hidden></div>' +
+        '<div class="check-actions">' +
+          '<button class="check-secondary" id="enroll-confirm-cancel">キャンセル</button>' +
+          '<button class="check-primary" id="enroll-confirm-ok">受講する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    var cancelBtn = document.getElementById("enroll-confirm-cancel");
+    var okBtn = document.getElementById("enroll-confirm-ok");
+    var errorEl = document.getElementById("enroll-confirm-error");
+    var busy = false;
+    function setBusy(next) {
+      busy = next;
+      cancelBtn.disabled = busy;
+      okBtn.disabled = busy;
+      okBtn.textContent = busy ? "受講手続き中…" : "受講する";
+    }
+    function showError(message) {
+      errorEl.textContent = message;
+      errorEl.hidden = false;
+    }
+    cancelBtn.addEventListener("click", function () {
+      if (busy) return;
+      overlay.remove();
+      callback(false);
+    });
+    okBtn.addEventListener("click", async function () {
+      if (busy) return;
+      setBusy(true);
+      errorEl.hidden = true;
+      try {
+        await callback(true);
+        overlay.remove();
+      } catch (err) {
+        showError("受講登録に失敗しました。もう一度お試しください。" +
+          (err && err.message ? "（" + err.message + "）" : ""));
+        setBusy(false);
+      }
+    });
+    overlay.addEventListener("click", function (e) {
+      if (busy) return;
+      if (e.target === overlay) {
+        overlay.remove();
+        callback(false);
+      }
+    });
+  }
+
   function initCourseSelectHandler() {
     const select = document.getElementById("course-select");
 
     select.addEventListener("change", function () {
       const val = this.value;
+      const prevVal = state.courseId || "";
       if (val.indexOf("enroll:") === 0) {
-        // 未受講コース → 受講処理
+        // 未受講コース → 受講前に確認（G1-5）。キャンセル時・失敗時は select を元に戻す。
         const courseId = val.substring(7);
-        enrollCourse(courseId);
+        const course = (_allCourses || []).find(function (c) { return c.id === courseId; });
+        openEnrollConfirm(course, async function (confirmed) {
+          if (confirmed) {
+            try {
+              await enrollCourse(courseId);
+            } catch (err) {
+              // 指摘4: 失敗時も select を元に戻し、再試行できるようにする
+              // （openEnrollConfirm 側がエラー表示・ボタン再有効化を行う）。
+              select.value = prevVal;
+              throw err;
+            }
+          } else {
+            select.value = prevVal;
+          }
+        });
       } else if (val && val !== state.courseId) {
         // マイコース → 切り替え
         switchCourse(val);
@@ -2958,6 +3446,21 @@
     state.course = null;
     state.personalLayer = null;
     state.learningSupport = null;
+    state.lastCheckCourseCompleted = false;
+
+    // P2: 違和感/帰属候補ダイジェスト・関心痕跡は前のコースのものを残さない
+    // （state 宣言時の初期値と同じ形に戻す）。
+    state.interestTraces = null;
+    state.tensionDigest = null;
+    state.tensionDeferred = {};
+    state.anchorDigest = null;
+    state.anchorDeferred = {};
+
+    // Phase P-1: コース切替で「わたしの地図」のキャッシュ・表示状態を破棄させる。
+    if (window.PersonalMap) window.PersonalMap.invalidate();
+    // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
+    // コース横断ネットワークだが、コース切替のたびに古い表示を残さないよう揃える）。
+    if (window.PersonalMapHome) window.PersonalMapHome.invalidate();
 
     // Re-render with clean state
     renderSidebar();
@@ -2976,17 +3479,25 @@
     await loadAndRenderCourse();
   }
 
+  // 指摘4: 失敗（非2xx・通信例外）を握りつぶさず throw する。呼び出し元
+  // （openEnrollConfirm 経由の initCourseSelectHandler）がこれを捕捉して
+  // select を復元し、再試行できる状態に戻す。
   async function enrollCourse(courseId) {
-    try {
-      const res = await apiFetch("/learning/courses/" + courseId + "/enroll", { method: "POST" });
-      if (res.ok) {
-        const data = await res.json();
-        // Refresh course list and switch to the new course
-        const courses = await loadCourses();
-        _allCourses = courses;
-        await switchCourse(data.id);
-      }
-    } catch (_) { /* ignore */ }
+    const res = await apiFetch("/learning/courses/" + courseId + "/enroll", { method: "POST" });
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const errBody = await res.json();
+        detail = errBody && errBody.detail ? errBody.detail : "";
+      } catch (_) { /* detail を JSON 化できない応答は detail なし扱い */ }
+      throw new Error(detail || ("HTTP " + res.status));
+    }
+    const data = await res.json();
+    // Refresh course list and switch to the new course
+    const courses = await loadCourses();
+    _allCourses = courses;
+    await switchCourse(data.id);
+    return true;
   }
 
   function showNoCourseState(hasEnrollable = false) {
@@ -3001,7 +3512,24 @@
 
     var ca = document.getElementById("chat-area");
     if (hasEnrollable) {
-      ca.innerHTML = '<div class="no-course-message">左上のプルダウンから受講するコースを選択してください。</div>';
+      // G4-D: 受講可能コースの description をここでも見られるようにする（プルダウンの
+      // title 属性はホバーでしか気づけないため）。
+      var enrollable = (_allCourses || []).filter(function (c) { return c.is_enrollable; });
+      var html = '<div class="no-course-empty">';
+      html += '<div class="no-course-message" style="height:auto">左上のプルダウンから受講するコースを選択してください。</div>';
+      if (enrollable.length > 0) {
+        html += '<div class="no-course-list">';
+        enrollable.forEach(function (c) {
+          html += '<div class="no-course-item"><div class="no-course-item-title">' + escHtml(c.title) + '</div>';
+          if (c.description) {
+            html += '<div class="no-course-item-desc">' + escHtml(c.description) + '</div>';
+          }
+          html += '</div>';
+        });
+        html += '</div>';
+      }
+      html += '</div>';
+      ca.innerHTML = html;
     } else {
       ca.innerHTML = '<div class="no-course-message">現在受講可能なコースはありません。<br>教員がコースを公開するまでお待ちください。</div>';
     }
@@ -3162,22 +3690,6 @@
         topbarR.insertBefore(adminLink, topbarR.firstChild);
       }
     }
-  }
-
-  // ── Init ───────────────────────────────────────────────────────────
-  async function initApp() {
-    if (!state.token) {
-      renderAuth();
-      return;
-    }
-    setupRoleUI();
-    initTabs();
-    initInput();
-    initSelectionAnchor();
-    initLogout();
-    initGroups();
-    await initCourseSelector();
-    loadInvitationBadge();
   }
 
   // ── Groups (Issue #121) ────────────────────────────────────────────
@@ -3433,6 +3945,8 @@
   function updateLectureToggleAvailability() {
     var btn = document.getElementById("lecture-toggle");
     if (!btn) return;
+    // G4-L: 無効理由はツールチップだけでなく、ボタン近傍のインライン表示でも分かるようにする。
+    var hint = document.getElementById("lecture-toggle-hint");
     // レクチャー再生中はトグル（テキストへ戻る）を常に許可する。
     var enabled = lectureState.active || state.topicHasAudio;
     btn.disabled = !enabled;
@@ -3442,9 +3956,11 @@
       btn.title = state.topicStaleLanguage
         ? "音声の言語が更新待ちです"
         : "レクチャーモード切替";
+      if (hint) { hint.hidden = true; hint.textContent = ""; }
     } else {
       btn.classList.add("disabled");
       btn.title = "このトピックの音声はまだ生成されていません（管理画面で音声を生成してください）";
+      if (hint) { hint.hidden = false; hint.textContent = "音声未生成"; }
     }
   }
 
@@ -3638,6 +4154,7 @@
         display_text: seg.text || seg.display_text || "",
         spoken_text: seg.spoken_text || "",
         formulas: seg.formulas || [],
+        figures: seg.figures || [],
         has_audio: seg.has_audio,
         duration_ms: seg.duration_ms,
       }];
@@ -3649,6 +4166,7 @@
           display_text: slide.display_text || "",
           spoken_text: slide.spoken_text || "",
           formulas: slide.formulas || seg.formulas || [],
+          figures: slide.figures || seg.figures || [],
           has_audio: !!slide.has_audio,
           duration_ms: slide.duration_ms || 0,
           language: seg.language || "ja",
@@ -3711,8 +4229,9 @@
 
   // ── レクチャースライドステージ（表示の一本化）───────────────────
   // 現在デッキスライドの display_text を、通常閲覧ビューと同じ renderMaterialChunk
-  // （Markdown + KaTeX + [[FORMULA_N]] 解決）で描画する。レンダラは複製しない
-  // （スライドを同形の疑似チャンク {text, formulas} に包んで渡すだけの薄い適配）。
+  // （Markdown + KaTeX + [[FORMULA_N]] / [[FIGURE_N]] 解決）で描画する。レンダラは
+  // 複製しない（スライドを同形の疑似チャンク {text, formulas, figures} に包んで
+  // 渡すだけの薄い適配）。
   function renderLectureStage() {
     var inner = document.getElementById("lecture-slide-inner");
     var badge = document.getElementById("lecture-slide-noaudio");
@@ -3727,10 +4246,11 @@
     }
 
     var slide = lectureState.deck[lectureState.currentDeckIndex];
-    var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [] };
+    var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [], figures: slide.figures || [] };
     inner.style.fontSize = "";
     inner.style.transform = "";
     inner.innerHTML = '<div class="lecture-slide-text">' + renderMaterialChunk(pseudoChunk) + '</div>';
+    hydrateMaterialFigures(inner);
 
     if (badge) badge.hidden = !!slide.has_audio;
 
@@ -3870,8 +4390,39 @@
       formulaById["[[" + "FORMULA_" + idx + "]]"] = formula;
     });
 
+    // [[FIGURE_N]] プレースホルダ（セグメント内 1 始まり、chunk.figures 由来。
+    // [[FORMULA_N]] と同方式）。figures が無い/空の payload では何も置換しない
+    // （後方互換・防御的スキップ。設計書 Phase4 §7.2）。
+    var figures = chunk.figures || [];
+    var figureById = {};
+    figures.forEach(function (figure, idx) {
+      if (!figure) return;
+      var placeholderId = "FIGURE_" + (idx + 1);
+      figureById[placeholderId] = figure;
+      figureById["[[" + placeholderId + "]]"] = figure;
+      if (figure.figure_id) figureById[String(figure.figure_id)] = figure;
+    });
+
+    // 読み取り専用 evidence DTO（backend build_topic_evidence_items）。![[component:id]]
+    // / ![[claim:id]] / ![[source:id]]（および数式・図の補助）を、そのトピックで公開済み
+    // の参照だけから解決する。exact キー "kind:id" 優先、kind 取り違え時は同一 ID の
+    // 別 kind へフォールバック（管理画面 lsEvidenceItemByRef と同一挙動。仕様として両画面
+    // 一致させる）。chunk.evidence_items が無い呼び出し（出典ポップアップ等）では空。
+    var evidenceByRef = {};
+    var evidenceById = {};
+    (chunk.evidence_items || []).forEach(function (item) {
+      if (!item || !item.kind) return;
+      var norm = normalizeMaterialEvidenceId(item.id);
+      evidenceByRef[item.kind + ":" + norm] = item;
+      if (!Object.prototype.hasOwnProperty.call(evidenceById, norm)) evidenceById[norm] = item;
+    });
+    function lookupEvidenceItem(kind, normId) {
+      return evidenceByRef[kind + ":" + normId] || evidenceById[normId] || null;
+    }
+
     var embedBlocks = [];
     var mathBlocks = [];
+    var figureBlocks = [];
     function preserveMath(expr, display) {
       var idx = mathBlocks.length;
       mathBlocks.push({ expr: expr, display: display });
@@ -3881,6 +4432,11 @@
       var idx = embedBlocks.length;
       embedBlocks.push({ kind: kind, id: id, inline: inline });
       return "\x00MATERIAL_EMBED_" + idx + "\x00";
+    }
+    function preserveFigure(figure) {
+      var idx = figureBlocks.length;
+      figureBlocks.push(figure);
+      return "\x00MATERIAL_FIGURE_" + idx + "\x00";
     }
 
     var preserved = normalizeMaterialLineBreaks(rawText);
@@ -3894,8 +4450,10 @@
     });
     preserved = preserved.replace(/\[\[([^\[\]:]+)\]\]/g, function (m, id) {
       var formula = formulaById[m] || formulaById[id] || formulaById[normalizeMaterialEvidenceId(id)];
-      if (!formula) return m;
-      return preserveMath(formula.latex || formula.summary || id, true);
+      if (formula) return preserveMath(formula.latex || formula.summary || id, true);
+      var figure = figureById[m] || figureById[id];
+      if (figure) return preserveFigure(figure);
+      return m;
     });
     preserved = preserved.replace(/\\\[([\s\S]+?)\\\]/g, function (_m, expr) {
       return preserveMath(expr, true);
@@ -3927,8 +4485,12 @@
       var embed = embedBlocks[parseInt(idx, 10)];
       if (!embed) return "";
       var embedId = normalizeMaterialEvidenceId(embed.id);
+      var evidenceItem = lookupEvidenceItem(embed.kind, embedId);
       if (embed.kind === "equation") {
-        var formula = formulaById[String(embed.id)] || formulaById[embedId];
+        // 数式は既存専用描画（LaTeX → plain_text → raw_text）を維持しつつ、
+        // formulas に無い ID も evidence_items（管理画面と同じ根拠リンク由来）で裏付ける。
+        var formula = formulaById[String(embed.id)] || formulaById[embedId] ||
+          (evidenceItem && (evidenceItem.latex || evidenceItem.plain_text || evidenceItem.raw_text) ? evidenceItem : null);
         var body = renderMaterialEquationBody(formula);
         if (body) {
           return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
@@ -3944,14 +4506,131 @@
           '数式は準備中です' +
         '</span>';
       }
-      return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
-        '<span class="ls-material-embed-kind">未解決</span>' +
-        '<strong>' + escHtml(embed.kind + ":" + embed.id) + '</strong>' +
-        '<span class="ls-material-embed-summary">このIDに対応する教材要素を取得できませんでした。</span>' +
-      '</span>';
+      if (embed.kind === "figure") {
+        // 通常 ![[figure:id]] は backend が [[FIGURE_N]] に解決済み（figures 経由で
+        // 認可付き画像配信）。ここに来るのは未配信の figure_id のみ。evidence_items に
+        // caption があれば、画像なしの読み取りカードを出す（新たな画像取得経路は作らない）。
+        if (evidenceItem && evidenceItem.kind === "figure") {
+          return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="figure:' + escHtml(embedId) + '">' +
+            '<span class="ls-material-embed-kind">図</span>' +
+            '<strong>' + escHtml(evidenceItem.title || ("図: " + (evidenceItem.caption || embedId))) + '</strong>' +
+            '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.caption || evidenceItem.summary) || "この図の画像は現在配信対象ではありません。") + '</span>' +
+          '</span>';
+        }
+        return renderMaterialMissingEmbed(embed, embedId);
+      }
+      // component / claim / source: 解決できれば静的な根拠カードとして描画する。
+      if (evidenceItem) {
+        var cardBody = evidenceItem.latex
+          ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
+          : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
+        var meta = [evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ");
+        return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
+          '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
+          '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
+          cardBody +
+          (meta ? '<span class="ls-material-embed-meta">' + escHtml(meta) + '</span>' : "") +
+        '</span>';
+      }
+      return renderMaterialMissingEmbed(embed, embedId);
+    });
+
+    html = html.replace(/\x00MATERIAL_FIGURE_(\d+)\x00/g, function (_m, idx) {
+      var figure = figureBlocks[parseInt(idx, 10)];
+      return figure ? renderMaterialFigureCard(figure) : "";
     });
 
     return html || "";
+  }
+
+  // 本当に未解決の参照は、ID・種別を含む控えめなフォールバック表示を維持する
+  // （教材画面全体を壊さない。管理画面の同種フォールバックと文言を揃える）。
+  function renderMaterialMissingEmbed(embed, embedId) {
+    return '<span class="ls-material-embed ls-material-evidence-card ls-material-missing" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
+      '<span class="ls-material-embed-kind">未解決</span>' +
+      '<strong>' + escHtml(embed.kind + ":" + embed.id) + '</strong>' +
+      '<span class="ls-material-embed-summary">このIDに対応する教材要素を取得できませんでした。</span>' +
+    '</span>';
+  }
+
+  // 根拠カードの summary を読み取りやすい長さに丸める（管理画面 lsShortSummary(260) 相当）。
+  function shortMaterialEvidenceSummary(text) {
+    var t = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+    return t.length > 260 ? t.slice(0, 260).trim() + "..." : t;
+  }
+
+  // [[FIGURE_N]] の解決先マークアップ。画像本体は同期関数の中で fetch できないため、
+  // data-figure-fetch-url に URL を仕込んだ <img> を描き、hydrateMaterialFigures()
+  // が DOM 挿入後に Authorization ヘッダ付きで取得する（学習者向け画像 endpoint も
+  // 認証必須のため <img src> を直接指定できない。admin.js の図サムネイル読込と同方式）。
+  function renderMaterialFigureCard(figure) {
+    var caption = figure.caption || "";
+    var explanation = figure.explanation || "";
+    var imgUrl = figure.image_url || "";
+    if (!imgUrl) {
+      return '<figure class="material-figure">' +
+        '<span class="material-figure-placeholder material-figure-missing">この図の画像を取得できませんでした。</span>' +
+        (caption ? '<figcaption class="material-figure-caption">' + escHtml(caption) + '</figcaption>' : "") +
+      '</figure>';
+    }
+    return '<figure class="material-figure">' +
+      '<span class="material-figure-frame">' +
+        '<img class="material-figure-img" data-figure-fetch-url="' + escHtml(imgUrl) + '" style="display:none" alt="' + escHtml(caption || "図") + '">' +
+        '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
+      '</span>' +
+      (caption ? '<figcaption class="material-figure-caption">' + escHtml(caption) + '</figcaption>' : "") +
+      (explanation ? '<div class="material-figure-explanation">' + escHtml(explanation) + '</div>' : "") +
+    '</figure>';
+  }
+
+  // renderMaterialChunk が返した HTML を DOM へ挿入した後に呼ぶ。container 内の
+  // 未取得 <img data-figure-fetch-url> を Authorization ヘッダ付きで取得して差し替える。
+  // container は教材区画本体 / 出典ポップアップ / ボイスパネル / レクチャースライドの
+  // いずれか（呼び出し側で再構築されるたびに呼ばれるため、前回分の blob URL は
+  // container 自身に積んで都度 revoke する）。figures が無い payload では
+  // querySelectorAll が空になり何もしない（防御的スキップ）。
+  function hydrateMaterialFigures(container) {
+    if (!container || !container.querySelectorAll) return;
+    if (container._materialFigureObjectUrls) {
+      container._materialFigureObjectUrls.forEach(function (u) {
+        try { URL.revokeObjectURL(u); } catch (e) { /* noop */ }
+      });
+    }
+    container._materialFigureObjectUrls = [];
+    container.querySelectorAll("img.material-figure-img[data-figure-fetch-url]").forEach(function (img) {
+      var url = img.getAttribute("data-figure-fetch-url");
+      img.removeAttribute("data-figure-fetch-url");
+      if (!url) { markMaterialFigureFailed(img); return; }
+      if (url.indexOf("/api/") === 0) url = url.substring(4);
+      apiFetchRaw(url)
+        .then(function (res) {
+          if (!res.ok) throw new Error("figure image fetch failed");
+          return res.blob();
+        })
+        .then(function (blob) {
+          var objectUrl = URL.createObjectURL(blob);
+          container._materialFigureObjectUrls.push(objectUrl);
+          img.src = objectUrl;
+          img.style.display = "";
+          var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+          if (placeholder) placeholder.remove();
+          // レクチャースライドは1画面に収める必要があるため、画像サイズ確定後に
+          // 再フィットする（非レクチャー表示では #lecture-slide-stage が非表示のため no-op）。
+          img.addEventListener("load", function () { fitLectureSlideContent(); }, { once: true });
+        })
+        .catch(function () {
+          markMaterialFigureFailed(img);
+        });
+    });
+  }
+
+  function markMaterialFigureFailed(img) {
+    img.style.display = "none";
+    var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+    if (placeholder) {
+      placeholder.textContent = "画像を表示できません";
+      placeholder.classList.add("material-figure-missing");
+    }
   }
 
   // Best available representation of an equation embed: rendered math when LaTeX
@@ -3987,16 +4666,19 @@
     return '<span class="' + cls + '"><code>' + escHtml(formula) + '</code></span>';
   }
 
+  // 教材埋め込み ![[kind:id]] の id 正規化。管理画面 lsNormalizeEvidenceId
+  // （admin-lecture-studio.js）と backend normalize_evidence_id
+  // （core/course_content_builder.py）と**同一仕様**にする（両画面で同じ ID が同じ
+  // 解決キーになることを保証。test_topic_material_evidence_items が差分を固定）。
+  // 空白除去 → 先頭 [[ / 末尾 ]] を最大2回剥がす → 旧二重 "eq_" プレフィックス
+  // ("eq_eq_F2" → "eq_F2") を畳み込む。
   function normalizeMaterialEvidenceId(value) {
-    return String(value || "")
-      .trim()
-      .replace(/^\[\[/, "")
-      .replace(/\]\]$/, "")
-      .replace(/^equation:/, "")
-      .trim()
-      // Collapse a duplicated "eq_" prefix from the legacy double-prefix bug
-      // ("eq_eq_F2" → "eq_F2") so legacy and corrected ids resolve alike.
-      .replace(/^(?:eq_){2,}/i, "eq_");
+    var s = String(value || "").trim();
+    s = s.replace(/^\[\[/, "").replace(/\]\]$/, "");
+    s = s.replace(/^\[\[/, "").replace(/\]\]$/, "");
+    s = s.trim();
+    s = s.replace(/^(?:eq_){2,}/i, "eq_");
+    return s;
   }
 
   function normalizeMaterialLineBreaks(text) {
@@ -4219,7 +4901,9 @@
     var player = document.getElementById("lecture-player");
     if (!mn || !player || document.getElementById("lecture-complete-banner")) return;
     var next = getNextTopic();
-    var label = next ? "確認問題に進む" : "レクチャーを終了";
+    // G1-4: 最終トピックでも「確認して完了」で同じ確認問題フローに合流させ、
+    // 合格後の完了カードへ繋ぐ（レクチャーを黙って終わらせない）。
+    var label = next ? "確認問題に進む" : "確認して完了";
     var banner = document.createElement("div");
     banner.className = "lecture-complete";
     banner.id = "lecture-complete-banner";
@@ -4227,15 +4911,7 @@
       '<button class="suggest-btn" id="lecture-complete-next">' + label + '</button>';
     mn.insertBefore(banner, player);
     var btn = document.getElementById("lecture-complete-next");
-    if (btn) {
-      btn.addEventListener("click", function () {
-        if (getNextTopic()) {
-          openCheckModal();
-        } else {
-          deactivateLecture();
-        }
-      });
-    }
+    if (btn) btn.addEventListener("click", openCheckModal);
     // 分野の地図 (Issue F-2 導線2): 講義の章末 (章の最後のトピックのレクチャーを
     // 聴き終えたとき) にサマリーの末尾で「地図で現在地を見る」を提示する。
     // 章の途中のトピックでは出さない (完了時の導線1がその役を持つ)。
@@ -4482,9 +5158,21 @@
     initInput();
     initSelectionAnchor();
     initLogout();
+    initGroups();
     initLectureMode();
     initSplitHandle();
+    // Phase P-1: 「わたしの地図」から問いの軌跡へ戻る導線 (openTrajectory) を一度だけ登録する。
+    if (window.PersonalMap) window.PersonalMap.init({ openTrajectory: openTrajectory });
+    // Phase P-3: 最上位「わたしの地図」パネル。openTrajectory は将来のノード詳細導線用（任意）。
+    if (window.PersonalMapHome) window.PersonalMapHome.init({ openTrajectory: openTrajectory });
+    var myMapBtn = document.getElementById("my-map-btn");
+    if (myMapBtn) {
+      myMapBtn.addEventListener("click", function () {
+        if (window.PersonalMapHome) window.PersonalMapHome.open();
+      });
+    }
     await initCourseSelector();
+    loadInvitationBadge();
     // 分野の地図 (Issue F-2 導線4): 初回ログイン時のみ L1 を俯瞰位置で自動表示する。
     // フラグはサーバに永続化され、再ログイン・別端末でも繰り返さない。
     if (window.AtlasCues) window.AtlasCues.maybeAutoOpenFirstLogin();

@@ -281,8 +281,22 @@
     }
     cueBubbleEl.textContent = text || "";
     var r = anchorEl.getBoundingClientRect();
-    cueBubbleEl.style.top = (window.scrollY + r.bottom + 6) + "px";
-    cueBubbleEl.style.left = (window.scrollX + r.left) + "px";
+    // アンカーが画面下端に近い（Admin Copilot の右下フローティングボタン等）場合は
+    // 吹き出しを上に出す。左右も画面半分より右側のアンカーなら右端揃えにする
+    // （固定 left 揃えだと右下のフローティングボタン基準で画面外にはみ出すため）。
+    var estimatedHeight = 40;
+    var showAbove = r.bottom + 6 + estimatedHeight > window.innerHeight;
+    var alignRight = r.left > window.innerWidth / 2;
+    cueBubbleEl.style.top = showAbove
+      ? (window.scrollY + r.top - estimatedHeight - 6) + "px"
+      : (window.scrollY + r.bottom + 6) + "px";
+    if (alignRight) {
+      cueBubbleEl.style.left = "auto";
+      cueBubbleEl.style.right = (window.innerWidth - window.scrollX - r.right) + "px";
+    } else {
+      cueBubbleEl.style.right = "auto";
+      cueBubbleEl.style.left = (window.scrollX + r.left) + "px";
+    }
     cueBubbleEl.style.display = "block";
     setTimeout(function () { if (cueBubbleEl) cueBubbleEl.style.display = "none"; }, 3600);
   }

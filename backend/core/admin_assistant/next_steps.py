@@ -28,8 +28,14 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
+from core import atlas_store
 from core.admin_assistant import capabilities as caps
 from core.course_data import course_atlas_binding_facts
+from core.course_data import (
+    course_atlas_binding_pending,
+    course_cartridge_id,
+    iter_all_topics,
+)
 from core.status import projector as status_projector
 from core.status import schema as status_schema
 
@@ -42,7 +48,15 @@ RULE_MATERIAL_ANALYSIS_FAILED = "material.analysis_failed"
 RULE_MATERIAL_NO_COURSE = "material.no_course"
 RULE_COURSE_NOT_PUBLISHED = "course.not_published"
 RULE_COURSE_NO_ATLAS_BINDING = "course.no_atlas_binding"
+# atlas_binding_lifecycle_design.md §5: コース起点で新分野を仮予約した後、骨格が
+# 凍結されて割り当てを完了できる状態 / バインド済み node_id が現行凍結版に無い状態。
+RULE_COURSE_ATLAS_BINDING_READY = "course.atlas_binding_ready"
+RULE_COURSE_ATLAS_BINDING_STALE = "course.atlas_binding_stale"
 RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
+# N13（#496 追随）: 本人所有の教材に未レビューの AI 図分類が残っている。
+# `material.inventory_unvisited` は「見たかどうか」の押し付けになるため意図的に
+# 実装しない（vision_ux_gap_survey_2026-07-17.md §5-5 の見送り推奨, G4）。
+RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
 
 SEVERITY_REQUIRED = "required"
 SEVERITY_RECOMMENDED = "recommended"
@@ -73,9 +87,21 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "course.atlas_binding",
     },
+    RULE_COURSE_ATLAS_BINDING_READY: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course.atlas_binding",  # 既存 capability を再利用（G3: registry 変更不要）
+    },
+    RULE_COURSE_ATLAS_BINDING_STALE: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course.atlas_binding",
+    },
     RULE_COURSE_AUDIO_MISSING: {
         "severity": SEVERITY_OPTIONAL,
         "capability_id": "lecture_studio.generate_audio",
+    },
+    RULE_FIGURE_UNREVIEWED_MODES: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.review_figures",  # 道案内のみ（図モーダルへ, #496）
     },
 }
 
@@ -313,6 +339,10 @@ def _eval_course_no_atlas_binding(session, uid: str) -> list[tuple[NextStep, str
         data = row["data"] if isinstance(row["data"], dict) else {}
         if not _course_needs_atlas_binding(data):
             continue
+        # atlas_binding_lifecycle_design.md §5: 凍結待ちを仮予約済みのコースには
+        # 二重督促しない（course.atlas_binding_ready ルールが凍結後に代わりに出る）。
+        if course_atlas_binding_pending(data):
+            continue
         cid = row["id"]
         title = row["title"] or cid
         step = _make_step(
@@ -320,6 +350,114 @@ def _eval_course_no_atlas_binding(session, uid: str) -> list[tuple[NextStep, str
             target_id=cid,
             title=f"コース『{title}』に学習マップを割り当てる",
             reason=f"コース『{title}』には学習マップ（分野の地図）が割り当てられていません。",
+            target={"course_id": cid},
+            ctx={"course_id": cid},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_course_atlas_binding_ready(session, uid: str) -> list[tuple[NextStep, str]]:
+    """atlas_binding_lifecycle_design.md §5: 仮予約したドメインの骨格が凍結され、
+    割り当てを完了できる状態（AND 条件: pending 非空 / 未バインドのまま /
+    pending ドメインに凍結骨格あり / pending ドメインが active）。
+    """
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+    skeleton_cache: dict[str, Any] = {}
+    lifecycle_cache: dict[str, str] = {}
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        pending = course_atlas_binding_pending(data)
+        if not pending:
+            continue
+        if not _course_needs_atlas_binding(data):
+            continue
+        if pending not in skeleton_cache:
+            try:
+                skeleton_cache[pending] = atlas_store.load_learner_skeleton(pending, session)
+            except Exception:  # noqa: BLE001
+                skeleton_cache[pending] = None
+        if skeleton_cache[pending] is None:
+            continue
+        if pending not in lifecycle_cache:
+            try:
+                lifecycle_cache[pending] = atlas_store.domain_lifecycle(session, pending)
+            except Exception:  # noqa: BLE001
+                lifecycle_cache[pending] = "active"
+        if lifecycle_cache[pending] != "active":
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        step = _make_step(
+            rule_id=RULE_COURSE_ATLAS_BINDING_READY,
+            target_id=cid,
+            title=f"コース『{title}』の学習マップ割り当てを完了する",
+            reason=(
+                f"保留中の分野『{pending}』の骨格が凍結され、"
+                f"コース『{title}』の学習マップ割り当てを完了できます。"
+            ),
+            target={"course_id": cid},
+            ctx={"course_id": cid},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
+def _eval_course_atlas_binding_stale(session, uid: str) -> list[tuple[NextStep, str]]:
+    """atlas_binding_lifecycle_design.md §5: バインド済み node_id が現行凍結版に
+    存在しない（改版で概念が削除・改名され、既存バインドが取り残された状態）。
+
+    骨格の読みはドメイン単位で辞書キャッシュし、コースごとの N+1 を避ける。
+    骨格が読めない（未凍結・DB 不通等）ドメインは判定不能として対象外にする
+    （fail-closed。誤って stale と断定しない）。
+    """
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+    skeleton_cache: dict[str, Any] = {}
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        cartridge_id = course_cartridge_id(data)
+        if not cartridge_id:
+            continue
+        if cartridge_id not in skeleton_cache:
+            try:
+                skeleton_cache[cartridge_id] = atlas_store.load_learner_skeleton(cartridge_id, session)
+            except Exception:  # noqa: BLE001
+                skeleton_cache[cartridge_id] = None
+        skeleton = skeleton_cache[cartridge_id]
+        if skeleton is None:
+            continue
+        known_ids = set(skeleton.concept_ids()) | set(skeleton.region_ids())
+        stale_count = 0
+        for topic in iter_all_topics(data):
+            node_id = topic.get("atlas_node_id")
+            if node_id and node_id not in known_ids:
+                stale_count += 1
+        if stale_count == 0:
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        step = _make_step(
+            rule_id=RULE_COURSE_ATLAS_BINDING_STALE,
+            target_id=cid,
+            title=f"コース『{title}』の学習マップ対応を確認する",
+            reason=(
+                f"コース『{title}』のトピック対応 {stale_count} 件が、"
+                "現在の地図に存在しない概念を指しています。"
+            ),
             target={"course_id": cid},
             ctx={"course_id": cid},
         )
@@ -361,13 +499,59 @@ def _eval_course_audio_missing(session, uid: str) -> list[tuple[NextStep, str]]:
     return out
 
 
+def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str]]:
+    """N13: 本人所有の教材に、AI が分類したが未レビューの図・画像がある（#496）。
+
+    「AI 分類済み」= `suggested_mode <> 'unknown'`（migration 052 の既定値のままの行は
+    分類が走っていないため対象にしない）。「未レビュー」= `mode_review_status = 'pending'`。
+    レビューが済めば行の状態が変わり項目は自動消滅する（G1: 完了フラグを持たない）。
+    """
+    rows = session.execute(
+        sa_text("""
+            SELECT d.id::text AS id, d.source_path, d.title, d.created_at,
+                   count(*) AS pending_count
+            FROM documents d
+            -- document_figures.document_id は UUID の文字列表現（TEXT）で保持している。
+            -- documents.id（UUID）と比較する際は UUID 側を文字列化する。
+            JOIN document_figures f ON f.document_id = d.id::text
+            WHERE d.uploaded_by = CAST(:uid AS uuid)
+              AND f.mode_review_status = 'pending'
+              AND f.suggested_mode <> 'unknown'
+            GROUP BY d.id, d.source_path, d.title, d.created_at
+            ORDER BY d.created_at ASC
+        """),
+        {"uid": uid},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        doc_id = row["id"]
+        title = row["title"] or doc_id
+        count = int(row["pending_count"] or 0)
+        # locate の material_row アンカーは教材一覧の data-material-id（= source_path）で
+        # 行解決するため、ctx には source_path 優先の id を渡す（_eval_material_no_course と同じ慣例）。
+        material_row_id = row["source_path"] or doc_id
+        step = _make_step(
+            rule_id=RULE_FIGURE_UNREVIEWED_MODES,
+            target_id=doc_id,
+            title=f"教材『{title}』の図・画像の分類を確認する",
+            reason=f"教材『{title}』に AI が分類した図・画像が {count} 件あり、まだ確認されていません。",
+            target={"material_id": doc_id},
+            ctx={"material_id": material_row_id},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 _RULE_EVALUATORS = {
     RULE_MATERIALS_NONE: _eval_materials_none,
     RULE_MATERIAL_ANALYSIS_FAILED: _eval_material_analysis_failed,
     RULE_MATERIAL_NO_COURSE: _eval_material_no_course,
     RULE_COURSE_NOT_PUBLISHED: _eval_course_not_published,
     RULE_COURSE_NO_ATLAS_BINDING: _eval_course_no_atlas_binding,
+    RULE_COURSE_ATLAS_BINDING_READY: _eval_course_atlas_binding_ready,
+    RULE_COURSE_ATLAS_BINDING_STALE: _eval_course_atlas_binding_stale,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
+    RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
 }
 
 

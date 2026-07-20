@@ -18,6 +18,7 @@ from episteme_graph.agents.document_structure.schema import (
     TypedBlock,
 )
 
+from .crosslink import apply_mention_crosslinks
 from .schema import (
     FigureRecord,
     FigureSourceLocation,
@@ -25,6 +26,7 @@ from .schema import (
     TableRecord,
     ValidationIssue,
 )
+from episteme_graph.agents.figure_modes import infer_mode_from_text
 
 _FIG_LABEL_RE = re.compile(r"^(?:Figure|Fig\.?)\s*([0-9A-Za-z\.]+)\s*[:.\-]?\s*", re.IGNORECASE)
 _TBL_LABEL_RE = re.compile(r"^Table\s*([0-9A-Za-z\.]+)\s*[:.\-]?\s*", re.IGNORECASE)
@@ -96,6 +98,13 @@ class FigureTableSemanticsAgent:
                             field=tbl.table_id,
                         ))
                 tables.append(tbl)
+
+        # F1 (docs/features/figure_concept_linking_design.md): caption block_id
+        # lookup above is structurally near-empty (claim spans only come from
+        # body_paragraph blocks). Apply the mention-based cross-link pass before
+        # the validation checks below so figures/tables with an explicit "Fig. N"
+        # / "Table N" reference in the body text lose their missing-link warning.
+        apply_mention_crosslinks(structure, figures, tables, claim_link_index)
 
         for fig in figures:
             if not fig.caption:
@@ -204,6 +213,7 @@ class FigureTableSemanticsAgent:
         label, caption_text = self._split_label(block.text, _FIG_LABEL_RE)
         figure_id = f"fig_{label}" if label else block.block_id
         figure_type = self._infer_figure_type(caption_text)
+        suggested_mode, mode_reason = infer_mode_from_text(caption_text, figure_type)
         comparison_axes = self._infer_comparison_axes(
             caption_text + " " + " ".join(b.text for b in neighbors)
         )
@@ -226,6 +236,8 @@ class FigureTableSemanticsAgent:
             interpretation="",
             teaching_takeaway=self._figure_takeaway(figure_type, caption_text, comparison_axes),
             source_evidence_ids=list(evidence_index.get(block.block_id, [])),
+            suggested_mode=suggested_mode,
+            mode_reason=mode_reason,
         )
 
     def _build_table_record(

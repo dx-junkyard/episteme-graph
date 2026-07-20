@@ -187,7 +187,7 @@ class TestListTeacherCourses:
         now = datetime(2026, 3, 30, 12, 0, 0)
         mock_pg = MagicMock()
         mock_pg.execute.return_value.fetchall.return_value = [
-            ("c-001", "量子力学入門", True, True, now, now, "owner"),
+            ("c-001", "量子力学入門", True, True, now, now, "owner", {}, "public", None),
         ]
         mock_session.return_value = mock_pg
 
@@ -202,6 +202,28 @@ class TestListTeacherCourses:
         assert data[0]["atlas_cartridge_id"] == ""
         assert data[0]["atlas_topic_count"] == 0
         assert data[0]["topic_count"] == 0
+        # G1-1/G5-2: 公開状態・開示範囲をコース管理タブで確認できるように返す。
+        assert data[0]["visibility"] == "public"
+        assert data[0]["group_id"] is None
+
+    @patch("routes.admin._pg_session")
+    def test_list_courses_missing_visibility_columns_defaults_private(self, mock_session, client, auth_headers):
+        """visibility/group_id 列を返さない行（旧形状のモック等）でも IndexError にならず
+        private 扱いに縮退すること（fail-closed）。"""
+        from datetime import datetime
+
+        now = datetime(2026, 3, 30, 12, 0, 0)
+        mock_pg = MagicMock()
+        mock_pg.execute.return_value.fetchall.return_value = [
+            ("c-002", "旧形状コース", False, False, now, now, "owner"),
+        ]
+        mock_session.return_value = mock_pg
+
+        resp = client.get("/api/admin/courses", headers=auth_headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data[0]["visibility"] == "private"
+        assert data[0]["group_id"] is None
 
     def test_list_courses_requires_auth(self, client):
         """認証なしで401が返ること。"""

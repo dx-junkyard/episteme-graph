@@ -57,6 +57,10 @@
     definitional: "定義の曖昧さという疑義",
     hidden_lemma: "暗黙の補題に依存しているという疑義",
   };
+  var CHALLENGE_STATUS_LABELS = {
+    open: "未対応", answered: "対応済み", withdrawn: "取り下げ済み",
+    led_to_verification: "検証提案へ昇格済み",
+  };
   var DOUBT_TYPE_LABELS = {
     definition: "定義", justification_gap: "根拠の飛躍", premise: "前提",
     prior_conflict: "既知との衝突", scope: "適用範囲", connection: "つながり",
@@ -132,8 +136,12 @@
       html += '<p class="doubt-muted">検証スコープの記帳なし</p>';
       html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1">スコープを記帳</button>';
       html += '<div data-doubt-form-slot="1"></div>';
+      // T1(G2-D): 検証状態の記帳導線（台帳行が無くても記帳操作自体は可能）
+      html += '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-form="1">検証状態を記帳する</button>';
+      html += '<div data-doubt-vstatus-slot="1"></div>';
       container.innerHTML = html;
       bindScopeForm(container, targetType, targetId);
+      bindVerificationStatusForm(container, targetType, targetId, 0);
       return;
     }
 
@@ -194,16 +202,32 @@
     html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1">スコープを記帳</button>';
     html += '<div data-doubt-form-slot="1"></div>';
 
+    // T1(G2-D): 検証状態の記帳（「確定は人間」の実行手段）。directly_verified への
+    // 昇格はスコープ1件以上が前提（サーバも422で弾くが、UI側でも選択肢を無効化する）。
+    html += '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-form="1">検証状態を記帳する</button>';
+    html += '<div data-doubt-vstatus-slot="1"></div>';
+
     // D3-1: 疑義（併記。主語は常に型 — 人格対立の文面にしない）
     html += '<div class="doubt-section"><b>疑義</b>';
     var challenges = entry.challenges || [];
-    if (challenges.length) {
-      challenges.forEach(function (c) {
-        if (c.status === "withdrawn") return;
-        html += '<div class="doubt-scope">' +
+    var openChallenges = challenges.filter(function (c) { return c.status !== "withdrawn"; });
+    if (openChallenges.length) {
+      openChallenges.forEach(function (c) {
+        html += '<div class="doubt-scope" data-doubt-challenge-item="' + escHtml(c.id) + '">' +
           escHtml(CHALLENGE_TYPE_LABELS[c.challenge_type] || c.challenge_type) +
           '<div class="doubt-scope-meta">' + escHtml(c.challenger_name || "") +
-          (c.reason ? ' — ' + escHtml(c.reason) : '') + '</div></div>';
+          (c.reason ? ' — ' + escHtml(c.reason) : '') + '</div>' +
+          '<div class="doubt-scope-meta">状態: ' + escHtml(CHALLENGE_STATUS_LABELS[c.status] || c.status) + '</div>';
+        if (c.id && (c.status === "open" || c.status === "answered")) {
+          // T2: 自分の疑義への取り下げ・検証提案への昇格（取り下げは本人のみ・API 403 で保護）
+          html += '<div>' +
+            '<button type="button" class="doubt-chip-btn" data-doubt-challenge-withdraw="' + escHtml(c.id) + '">取り下げ</button>' +
+            '<button type="button" class="doubt-chip-btn" data-doubt-challenge-proposal="' + escHtml(c.id) + '">検証提案にする</button>' +
+            '</div>';
+          html += '<div data-doubt-proposal-slot="' + escHtml(c.id) + '"></div>';
+          html += '<span class="doubt-muted" data-doubt-challenge-action-msg="' + escHtml(c.id) + '"></span>';
+        }
+        html += '</div>';
       });
     } else {
       html += '<p class="doubt-muted">疑義はありません。</p>';
@@ -217,7 +241,9 @@
     container.innerHTML = html;
     bindScopeForm(container, targetType, targetId);
     bindCandidateButtons(container, targetType, targetId);
+    bindVerificationStatusForm(container, targetType, targetId, scopes.length);
     bindChallengeForm(container, targetType, targetId);
+    bindChallengeActions(container, targetType, targetId);
   }
 
   function refreshLedgerSection(container, targetType, targetId) {
@@ -259,6 +285,66 @@
               return res.json().then(function (data) {
                 slot.querySelector("[data-doubt-scope-msg]").textContent =
                   (data && data.detail) || "1 軸以上 + 根拠 + 理由が必要です";
+                throw new Error("validation");
+              });
+            }
+            if (!res.ok) throw new Error("failed");
+            return res.json();
+          })
+          .then(function () { refreshLedgerSection(container, targetType, targetId); })
+          .catch(function () { /* message already shown */ });
+      });
+    });
+  }
+
+  // T1(G2-D): 検証状態の記帳フォーム。「確定は人間」の実行手段そのもの。
+  // directly_verified はスコープ1件以上が前提（サーバ422で最終的に弾くが、UI側でも
+  // 選択肢を無効化し、事実文で案内する）。reason は必須入力（記帳は人間の行為として
+  // 帰属される正式な学術行為, docs/features/doubt_layer_issues.md D1-3）。
+  function bindVerificationStatusForm(container, targetType, targetId, scopesCount) {
+    var btn = container.querySelector("[data-doubt-vstatus-form]");
+    var slot = container.querySelector("[data-doubt-vstatus-slot]");
+    if (!btn || !slot) return;
+    btn.addEventListener("click", function () {
+      if (slot.firstChild) { slot.innerHTML = ""; return; }
+      var options = "";
+      Object.keys(STATUS_LABELS).forEach(function (key) {
+        var disabled = (key === "directly_verified" && scopesCount < 1) ? " disabled" : "";
+        options += '<option value="' + escHtml(key) + '"' + disabled + '>' +
+          escHtml(STATUS_LABELS[key]) + '</option>';
+      });
+      slot.innerHTML =
+        '<div class="doubt-form">' +
+        '<label>検証状態</label><select data-f="verification_status">' + options + '</select>' +
+        (scopesCount < 1
+          ? '<p class="doubt-muted">直接検証の記帳には検証スコープが1件以上必要です' +
+            '（空欄は異常ではなく発見です。まずスコープを記帳してください）。</p>'
+          : '') +
+        '<label>理由（必須）</label><textarea data-f="reason" rows="2"></textarea>' +
+        '<p class="doubt-muted">この記帳はあなたの操作として帰属され、監査ログに記録されます。</p>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-submit="1">記帳する</button>' +
+        '<span class="doubt-muted" data-doubt-vstatus-msg=""></span>' +
+        '</div>';
+      var submit = slot.querySelector("[data-doubt-vstatus-submit]");
+      var msg = slot.querySelector("[data-doubt-vstatus-msg]");
+      submit.addEventListener("click", function () {
+        var status = slot.querySelector('[data-f="verification_status"]').value;
+        var reason = (slot.querySelector('[data-f="reason"]').value || "").trim();
+        if (!reason) {
+          msg.textContent = "理由の入力が必要です。";
+          return;
+        }
+        if (status === "directly_verified" && scopesCount < 1) {
+          msg.textContent = "直接検証の記帳には検証スコープの記帳が1件以上必要です。";
+          return;
+        }
+        apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
+          encodeURIComponent(targetId) + "/verification-status",
+          { method: "PUT", body: JSON.stringify({ verification_status: status, reason: reason }) })
+          .then(function (res) {
+            if (res.status === 422) {
+              return res.json().then(function (data) {
+                msg.textContent = (data && data.detail) || "この検証状態には記帳できませんでした。";
                 throw new Error("validation");
               });
             }
@@ -328,6 +414,69 @@
           .catch(function () { /* message shown */ });
       });
     });
+  }
+
+  // T2: 疑義ライフサイクルの完結（取り下げ・検証提案への昇格）。
+  // 取り下げは行削除ではなく status 遷移（P4）。本人以外は API が 403 を返す
+  // （サーバ側 fail-closed。フロントはメッセージを事実文で表示するのみ）。
+  function bindChallengeActions(container, targetType, targetId) {
+    Array.prototype.forEach.call(
+      container.querySelectorAll("[data-doubt-challenge-withdraw]"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var id = btn.getAttribute("data-doubt-challenge-withdraw");
+          var msg = container.querySelector('[data-doubt-challenge-action-msg="' + id + '"]');
+          apiFetch("/admin/doubt/challenges/" + encodeURIComponent(id) + "/withdraw",
+            { method: "POST", body: JSON.stringify({}) })
+            .then(function (res) {
+              if (res.status === 403) {
+                if (msg) msg.textContent = "この疑義の取り下げは本人のみ可能です。";
+                throw new Error("forbidden");
+              }
+              if (!res.ok) throw new Error("failed");
+              return res.json();
+            })
+            .then(function () { refreshLedgerSection(container, targetType, targetId); })
+            .catch(function () { /* message already shown（表示済みの場合）*/ });
+        });
+      }
+    );
+    Array.prototype.forEach.call(
+      container.querySelectorAll("[data-doubt-challenge-proposal]"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var id = btn.getAttribute("data-doubt-challenge-proposal");
+          var slot = container.querySelector('[data-doubt-proposal-slot="' + id + '"]');
+          if (!slot) return;
+          if (slot.firstChild) { slot.innerHTML = ""; return; }
+          slot.innerHTML =
+            '<div class="doubt-form">' +
+            '<label>検証提案（どの実験・計算で検証可能か）</label><textarea data-f="proposal" rows="2"></textarea>' +
+            '<button type="button" class="doubt-chip-btn" data-doubt-proposal-submit="1">提案として登録</button>' +
+            '<span class="doubt-muted" data-doubt-proposal-msg=""></span>' +
+            '</div>';
+          slot.querySelector("[data-doubt-proposal-submit]").addEventListener("click", function () {
+            var proposal = (slot.querySelector('[data-f="proposal"]').value || "").trim();
+            var pmsg = slot.querySelector("[data-doubt-proposal-msg]");
+            if (!proposal) { pmsg.textContent = "検証提案の内容が必要です。"; return; }
+            apiFetch("/admin/doubt/challenges/" + encodeURIComponent(id) + "/proposals",
+              { method: "POST", body: JSON.stringify({ proposal: proposal }) })
+              .then(function (res) {
+                if (res.status === 422) {
+                  return res.json().then(function (data) {
+                    pmsg.textContent = (data && data.detail) || "登録できませんでした。";
+                    throw new Error("validation");
+                  });
+                }
+                if (!res.ok) throw new Error("failed");
+                return res.json();
+              })
+              .then(function () { refreshLedgerSection(container, targetType, targetId); })
+              .catch(function () { /* message shown */ });
+          });
+        });
+      }
+    );
   }
 
   /* =================================================================

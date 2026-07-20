@@ -48,6 +48,7 @@ FULL_COURSE_DATA = {
             "expected_misconceptions": ["誤解1"],
             "linked_component_ids": ["comp-1"],
             "linked_equation_ids": ["eq-1"],
+            "linked_figure_ids": ["fig-uuid-1"],
             "source_evidence_ids": ["ev-1"],
             "teaching_takeaways": ["要点1"],
             "material_chunk_ids": ["chunk-1"],
@@ -360,6 +361,8 @@ class TestValidateCourseData:
         assert len(course.topics) == 1
         assert course.topics[0].id == "topic-A-1"
         assert course.topics[0].atlas_node_id == "node-1"
+        # Phase 4 §7.1 (hierarchical_context_explanation_design.md): 図のコース流通。
+        assert course.topics[0].linked_figure_ids == ["fig-uuid-1"]
         assert course.sources[0].material_id == "mat-A-001"
         assert course.sources[0].document_id == "doc-A-001"
         assert course.lecture_studio_settings.lecture_language == "ja"
@@ -370,6 +373,12 @@ class TestValidateCourseData:
         assert course.topics == []
         assert course.sources == []
         assert course.title is None
+
+    def test_topic_linked_figure_ids_defaults_to_empty_list(self):
+        """linked_figure_ids が無いトピック（既存コースデータ・移行前）でも
+        空リストへ安全に縮退し、validate_course_data を壊さないこと。"""
+        course = cd.validate_course_data({"topics": [{"id": "t1", "title": "T1"}]})
+        assert course.topics[0].linked_figure_ids == []
 
     def test_extra_allow_roundtrip_preserves_unknown_keys(self):
         """extra="allow" ラウンドトリップで未知キーが model_dump で保存されること。"""

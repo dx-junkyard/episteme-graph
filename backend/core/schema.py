@@ -457,6 +457,15 @@ AUDIT_ENTITY_SHARED_SUBSCRIPTION = "shared_subscription"
 # 教材リビジョン（document_pipeline/revision）
 AUDIT_ENTITY_REVISION_RUN = "revision_run"
 
+# W層（要素検討ワークスペース / 同一性リンク, Phase W-β）
+AUDIT_ENTITY_DELIBERATION = "deliberation"
+
+# 図表示モード（AI候補 → 教員 reviewed override、issue #496）
+AUDIT_ENTITY_FIGURE_PRESENTATION = "figure_presentation"
+
+# 上位・下位概念を活用した説明付与（要素説明の二層台帳, Phase 2, migration 056）
+AUDIT_ENTITY_ELEMENT_EXPLANATION = "element_explanation"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -485,4 +494,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_SHARED_DELETION,
     AUDIT_ENTITY_SHARED_SUBSCRIPTION,
     AUDIT_ENTITY_REVISION_RUN,
+    AUDIT_ENTITY_DELIBERATION,
+    AUDIT_ENTITY_FIGURE_PRESENTATION,
+    AUDIT_ENTITY_ELEMENT_EXPLANATION,
 )

@@ -1,6 +1,7 @@
 """既存テーブルからの決定論的な状態投影（S1: 保存しない・毎回導出）。
 
 documents / document_analysis_runs / learning_courses / chunks / lecture_audio_cache /
+topic_lecture_audio_cache（migration 047、N18: トピック教材経路の音声 readiness）/
 object_group_permissions（migration 044、統合前は専用テーブル=migration 010）を読むだけで、
 新規の正本テーブルは持たない。FastAPI / LLM クライアントを import しない（S3）。
 投影できないエンティティは unknown を返す（S5）。
@@ -14,7 +15,7 @@ from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
 
 from core.course_data import course_atlas_binding_facts, course_source_material_ids
-from core.lecture import compute_material_audio_readiness, get_course_lecture_language
+from core.lecture import compute_course_audio_readiness, get_course_lecture_language
 
 from . import schema
 
@@ -308,9 +309,12 @@ def project_course_status(session: Session, course_id: str) -> schema.CourseStat
     # 音声 readiness はスライド単位 + 言語一致（core/lecture.py の正本判定, Tier2-11）で
     # 決める。旧実装は chunk 単位の粗い判定（lecture_audio_cache に1行でもあれば
     # readiness とみなす）で、api/routes/lecture.py::get_topic_audio_status の
-    # スライド単位判定と食い違い得た。
+    # スライド単位判定と食い違い得た。N18: チャンク経路に加えトピック教材経路
+    # （lecture_uses_topic_material が真のトピック。topic_lecture_audio_cache +
+    # 読み上げ原稿の充足）も合算する（読み上げ原稿が無いトピックスライドは ready に
+    # ならないため、draft 未充足のコースが generated に化けない）。
     lecture_language = get_course_lecture_language(data)
-    audio_readiness = compute_material_audio_readiness(session, material_ids, lecture_language)
+    audio_readiness = compute_course_audio_readiness(session, course_id, data, lecture_language)
     total_slides = audio_readiness["total_slides"]
     ready_slides = audio_readiness["ready_slides"]
 

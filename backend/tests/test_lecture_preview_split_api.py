@@ -100,7 +100,7 @@ class TestPreviewSplitEndpointAuth:
         data = r.json()
         assert data["slides"] == [{
             "slide_index": 0, "display_text": "", "spoken_text": None,
-            "formulas": [], "has_audio": False, "duration_ms": 0,
+            "formulas": [], "figures": [], "has_audio": False, "duration_ms": 0,
         }]
 
 

@@ -461,3 +461,91 @@ class TestListAndGetMaterialConsistency:
         get_legacy = admin_mod._legacy_material_status(get_mstatus)
 
         assert list_legacy == get_legacy == expected_legacy
+
+
+# ===========================================================================
+# list_materials: analysis_options（最新 run の options JSONB / run 無しは None）
+# ===========================================================================
+
+
+class TestListMaterialsAnalysisOptions:
+    """解析再開の analyze_images 継承（画像パイプライン §3-2）のフロント契約。
+
+    フロント（admin.js）が再解析モーダルで前回選択を復元できるよう、
+    `GET /api/admin/materials` の各要素に最新 `document_analysis_runs.options` を
+    **analysis_options**（確定契約フィールド名）として返す。run が無ければ None。
+    既存の latest_runs バルククエリ（DISTINCT ON）に列を足すだけで N+1 は発生しない。
+    """
+
+    @patch("routes.admin.get_storage_client")
+    @patch("routes.admin.get_user_group_ids", return_value=[])
+    @patch("routes.admin._pg_session")
+    def test_list_materials_returns_latest_run_options_or_none(
+        self, mock_pg_session, _mock_groups, mock_storage,
+    ):
+        import routes.admin as admin_mod
+
+        records = [
+            # (source_path, filename, title, status, created_at, knowledge_graph,
+            #  visibility, group_id, chunk_count, document_id, authors, year, doc_type)
+            ("mat-1", "a.pdf", "A", "completed", None, None, "private", None, 3,
+             "doc-1", [], None, None),
+            ("mat-2", "b.pdf", "B", "uploaded", None, None, "private", None, 0,
+             "doc-2", [], None, None),
+        ]
+        run = _run_row("run-1", "doc-1", "mat-1", status="completed")
+        run["options"] = {"analyze_images": True}
+
+        mock_session = MagicMock()
+        mock_session.execute.side_effect = [
+            _result(fetchall=records),
+            _result(mappings_all=[run]),
+        ]
+        mock_pg_session.return_value = mock_session
+        mock_storage.return_value.list_objects.return_value = []
+
+        materials = admin_mod.list_materials(current_user={"id": "user-1"})
+
+        by_mid = {m.material_id: m for m in materials}
+        assert by_mid["mat-1"].analysis_options == {"analyze_images": True}
+        # run が無い教材は None（空 dict ではなく「情報なし」を正直に返す）。
+        assert by_mid["mat-2"].analysis_options is None
+
+    @patch("routes.admin.get_storage_client")
+    @patch("routes.admin.get_user_group_ids", return_value=[])
+    @patch("routes.admin._pg_session")
+    def test_run_with_empty_options_returns_empty_dict_not_none(
+        self, mock_pg_session, _mock_groups, mock_storage,
+    ):
+        """migration 041 の NOT NULL DEFAULT '{}' により、run があれば options は
+        少なくとも {}。「run はあるが選択情報なし」を None と区別して返す。"""
+        import routes.admin as admin_mod
+
+        records = [
+            ("mat-1", "a.pdf", "A", "completed", None, None, "private", None, 3,
+             "doc-1", [], None, None),
+        ]
+        run = _run_row("run-1", "doc-1", "mat-1", status="completed")
+        run["options"] = {}
+
+        mock_session = MagicMock()
+        mock_session.execute.side_effect = [
+            _result(fetchall=records),
+            _result(mappings_all=[run]),
+        ]
+        mock_pg_session.return_value = mock_session
+        mock_storage.return_value.list_objects.return_value = []
+
+        materials = admin_mod.list_materials(current_user={"id": "user-1"})
+        assert materials[0].analysis_options == {}
+
+    def test_latest_runs_bulk_query_selects_options_column(self):
+        """options は既存のバルククエリ（DISTINCT ON）に列追加で取得する（N+1 禁止）。"""
+        import re
+
+        src = (BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
+        m = re.search(r"def list_materials\b.*?return materials", src, re.DOTALL)
+        assert m
+        body = m.group(0)
+        assert "stage_outputs, options, updated_at" in body
+        assert 'analysis_options=(run_data.get("options") if run else None)' in body

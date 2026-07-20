@@ -295,10 +295,17 @@ class TestGenerateSpokenTextLanguagePrompt:
 
 
 class TestLanguageSchemaValidation:
-    def test_lecture_studio_settings_default_language_is_ja(self):
+    def test_lecture_studio_settings_omitted_language_defaults_to_none(self):
+        """省略時は None（"変更しない" の意味）。
+
+        旧 default="ja" だと PUT で lecture_language を省略した場合と明示的に "ja" を
+        指定した場合が区別できず、口調のみの設定保存が既存の言語設定（例: en）を
+        無警告で "ja" に巻き戻していた。None にすることで「省略」と「明示指定」を
+        区別できるようにする（GET レスポンスは routes 側で常に解決済みの ja/en を返す）。
+        """
         from schemas import LectureStudioSettings
 
-        assert LectureStudioSettings().lecture_language == "ja"
+        assert LectureStudioSettings().lecture_language is None
 
     def test_lecture_studio_settings_accepts_en(self):
         from schemas import LectureStudioSettings
@@ -388,6 +395,57 @@ class TestLectureStudioSettingsLanguageEndpoint:
         saved_json = mock_session.execute.call_args.args[1]["data"]
         saved = json.loads(saved_json)
         assert saved["lecture_studio_settings"]["scripts_need_regeneration"] is False
+
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
+    def test_put_settings_omitted_language_keeps_previous_and_does_not_force_regeneration(
+        self, mock_course, mock_pg,
+    ):
+        """回帰テスト: 口調のみを保存する PUT で lecture_language を省略した場合、
+
+        以前は Pydantic のデフォルト値 "ja" が明示指定と区別できずに前回値 (en) を
+        無警告で "ja" に巻き戻し、scripts_need_regeneration まで立てて次回の音声生成で
+        全チャンクが日本語に再生成される事故があった。省略 (None) は「変更しない」を
+        意味し、保存後も en が維持され、regeneration も立たないことを確認する。
+        """
+        from api.routes.lecture_studio import update_lecture_studio_settings
+        from schemas import LectureStudioSettings
+
+        mock_course.return_value = {"lecture_studio_settings": {"lecture_language": "en"}}
+        mock_session = MagicMock()
+        mock_pg.return_value = mock_session
+
+        body = LectureStudioSettings()  # lecture_language 省略 -> None
+        result = update_lecture_studio_settings("course-1", body, {"id": "u1", "role": "TEACHER"})
+
+        assert result.lecture_language == "en"
+        saved_json = mock_session.execute.call_args.args[1]["data"]
+        saved = json.loads(saved_json)
+        assert saved["lecture_studio_settings"]["lecture_language"] == "en"
+        assert saved["lecture_studio_settings"]["scripts_need_regeneration"] is False
+
+    @patch("api.routes.lecture_studio.scripts._pg_session")
+    @patch("api.routes.lecture_studio.scripts.get_editable_course_data")
+    def test_put_settings_explicit_change_to_ja_forces_regeneration(self, mock_course, mock_pg):
+        """明示的に ja へ変更した場合は en から実際に変更され、regeneration が立つ
+
+        （省略時の「変更しない」動作と明示指定時の「変更する」動作を対比する回帰テスト）。
+        """
+        from api.routes.lecture_studio import update_lecture_studio_settings
+        from schemas import LectureStudioSettings
+
+        mock_course.return_value = {"lecture_studio_settings": {"lecture_language": "en"}}
+        mock_session = MagicMock()
+        mock_pg.return_value = mock_session
+
+        body = LectureStudioSettings(lecture_language="ja")
+        result = update_lecture_studio_settings("course-1", body, {"id": "u1", "role": "TEACHER"})
+
+        assert result.lecture_language == "ja"
+        saved_json = mock_session.execute.call_args.args[1]["data"]
+        saved = json.loads(saved_json)
+        assert saved["lecture_studio_settings"]["lecture_language"] == "ja"
+        assert saved["lecture_studio_settings"]["scripts_need_regeneration"] is True
 
 
 # ---------------------------------------------------------------------------

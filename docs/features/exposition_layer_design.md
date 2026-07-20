@@ -6,6 +6,29 @@
 > R層（migration 036）・V層（migration 037）は実装済みだが、E層は issue化・着手ともに
 > 未了。実装に着手する際は本書 §10 の issue 分割を正本として使うこと。
 
+> **着手前提の更新（2026-07-17、vision×UX ギャップ調査 N41）**: 本書起草後にリポジトリの
+> 前提が4点変わった。§10 の issue 分割は有効なまま、着手時に以下を織り込むこと。
+>
+> 1. **migration は 054 以降で採番する**。本書の「migration 034」は Admin Copilot
+>    （`034_assistant_actions.sql`）と衝突済みで、044〜053 も他機能（object_group_permissions
+>    〜 figure_reviewed_analysis）で使用済み。一次情報は `backend/db/0NN_*.sql` の実ファイル名
+>    （`docs/architecture/layer_registry.md` §3 参照）。
+> 2. **生成 worker は独立モジュールの新設ではなく `backend/core/llm_worker/` への
+>    アダプタ接続で実装する**（現行の家風。tension / structure_anchor / reconstruction /
+>    doubt×2 / deliberation.standardization に続く7系統目として、`BaseJSONLLMClient` +
+>    `run_with_repair` + `CostGate` に15〜20行のアダプタで乗る。コピペ禁止 — CLAUDE.md
+>    「横断基盤」参照）。
+> 3. **UI の差し込み先 DOM は `admin-lecture-studio.js` に移動済み**。本書が想定した
+>    admin.js 内の原稿スタジオ画面（`ls` 接頭辞の関数群）は Tier 3-17b で
+>    `admin-lecture-studio.js`（`window.LectureStudio`、DI 注入方式）へ分離された。
+>    E層の教員向け UI はこちらに書く。
+> 4. **「学習者はグラフ表示に無垢」という前提（§1）は崩れている**。Field Atlas
+>    （分野の地図オーバーレイ + ミニマップ）と「わたしの地図」（個人知識ネットワーク、
+>    `personal-map*.js`）の実装により、学習者は既に2種類の node/edge 視覚語彙に接触して
+>    いる。E層ビューが同じ視覚語彙を使うと「また別の地図？」という混乱を生むため、
+>    E層ビューは Atlas・わたしの地図と**視覚語彙を意図的に差別化**する設計検討
+>    （レイアウト・ノード形状・配色・呼称）を issue 分割に追加すること。
+
 > **目的**: A層パイプラインが論文から再構成した component / claim / equation / TheoryOperationGraph は
 > 「その分野の専門家だからこそ読める」構造物である。これを、入門的立場の学生や非専門家が
 > 興味を持って手に取れる形へ**段階的に翻訳する層**を、既存実装に違和感なく積む。

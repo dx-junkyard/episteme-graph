@@ -47,6 +47,7 @@ KNOWN_FEATURES = (
     "pipeline:component_assembly",
     "pipeline:component_graph",
     "pipeline:narrative_annotator",
+    "pipeline:contextual_explanation",
     "pipeline:course_mapping",
     "pipeline:blueprint",
     "pipeline:export_validation",
@@ -59,6 +60,7 @@ KNOWN_FEATURES = (
     "learning:voice_tts",
     "learning:tension",
     "learning:structure_anchor",
+    "learning:understanding_check",
     # --- 管理画面（コースビルダー・原稿スタジオ・Admin Copilot・Field Atlas） ---
     "admin:course_builder",
     "admin:lecture_rewrite",
@@ -72,6 +74,15 @@ KNOWN_FEATURES = (
     # --- D層（Doubt Layer） ---
     "doubt:scope_candidates",
     "doubt:assumption_normalize",
+    # --- W層（Element Deliberation Workspace）。cross_corpus は §4.2 chunk-proxy レンズの
+    # embedding 生成（Phase 1）。chat/vision は面③対話（Phase 2、設計書 §0 W9）の
+    # 1ターン=1構造化出力コール（core.llm.generate_conversation_turn）。standardization は
+    # Phase S 標準化判定 worker（知識ネットワークビジョン §6・三角測量の証拠①LLM 事前知識）。---
+    "deliberation:cross_corpus",
+    "deliberation:chat",
+    "deliberation:vision",
+    "deliberation:figure_reanalysis",
+    "deliberation:standardization",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",

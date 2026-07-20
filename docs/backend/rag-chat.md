@@ -103,12 +103,18 @@ tension プレフィルタも通常どおり効きます（payload に `casual: 
 
 | 値 | 意味 |
 |---|---|
-| `course_material` | このコースの教材に基づく（cited チャンクの `material_id` がコースの `sources[].material_id` に含まれる） |
+| `course_material` | このコースの教材に基づく（cited チャンクの `material_id` がコースの `sources[].material_id` に含まれる、**または現在表示中のトピック教材（`student_material` 等）をコンテキストに注入した場合**） |
 | `other_material` | 別の資料（cited はあるがコース教材外） |
-| `model_generated` | `cited_sources` が完全に空 — モデルの一般知識（出典なし） |
+| `model_generated` | RAG ヒットもトピック教材も無い — モデルの一般知識（出典なし） |
 
 判定は `search_chunks_with_metadata`（`services.py`）が返す `material_id` を使うため、
 **この関数のクエリを変更する際は `material_id` の SELECT を落とさないこと**。
+
+トピック教材はプロンプトへ `[現在表示中の教材]` として注入される。この場合、回答には
+実根拠があるため `overall_tier` の集約結果を `source` を下限に引き上げる
+（`tier_floor(overall_tier, TIER_SOURCE)`、`routes/learning.py`）。これにより
+「📘 教材から回答」と「参考（out_of_source）+ 未踏ガード」の矛盾表示は発生しない。
+承認チェーン由来ではないため **approved へは昇格させない**（不可侵の一線）。
 
 ---
 

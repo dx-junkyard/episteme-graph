@@ -96,6 +96,10 @@
     // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
     rightPaneMode: "evidence",
     stumbleByDocument: {},
+    // 再構成ループ (R層, G4-R): レビューキュー直行ボタンの件数バッジ。
+    // null = 未取得（ボタンは件数無しで表示）。教員自身の作業件数であり、
+    // 学習者統計の k-匿名レンジ表示原則とは別物（内部運用カウント）。
+    reconReviewCount: null,
   };
 
   var lsPersonaOptions = [
@@ -272,6 +276,8 @@
         lsState.pipelineTask = null;
         lsState.scriptsLoaded = false;
         lsState.structureLoaded = false;
+        lsState.reconReviewCount = null;
+        lsState.stumbleByDocument = {};
         lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
@@ -304,6 +310,8 @@
         // リセットし、音声言語モーダルを閉じる（§2-1）。
         lsState.scriptsLoaded = false;
         lsState.structureLoaded = false;
+        lsState.reconReviewCount = null;
+        lsState.stumbleByDocument = {};
         lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
@@ -580,9 +588,14 @@
   function lsSaveSettings(modal) {
     var statusEl = document.getElementById("ls-settings-status");
     var saveBtn = document.getElementById("ls-settings-save");
+    // lecture_language を明示的に含めて送信する。バックエンドは省略 (undefined/null)
+    // を「変更しない」として前回値を保持するが、このモーダルは口調しか編集しない
+    // ため、省略に頼らず現在のコース言語を毎回明示送信して事故を二重に防ぐ
+    // （設定保存で既存の言語設定が無警告で ja に巻き戻る事故の再発防止）。
     var settings = {
       narration_persona: document.getElementById("ls-narration-persona").value,
       response_persona: document.getElementById("ls-response-persona").value,
+      lecture_language: lsCourseLectureLanguage(),
     };
     statusEl.textContent = "保存中...";
     statusEl.className = "upload-status upload-status-info";
@@ -648,6 +661,18 @@
     statusEl.textContent = "現状: " + lsAudioLangLabel(language) + "音声 " + stat.ready + "/" + stat.total + " スライド生成済み";
   }
 
+  // 選択言語と実際に生成済みの原稿言語 (chunk.spoken_language) が食い違うチャンク数を返す。
+  // spoken_language 未設定（原稿未生成 or 旧データ）のチャンクはここでは数えない
+  // （生成前のチャンクは「言語が食い違っている」わけではないため）。
+  function lsChunksWithMismatchedSpokenLanguage(language) {
+    var chunks = lsState.chunks || [];
+    var mismatched = 0;
+    chunks.forEach(function (c) {
+      if (c && c.spoken_language && c.spoken_language !== language) mismatched += 1;
+    });
+    return mismatched;
+  }
+
   function lsUpdateAudioLangWarning(selectedLanguage) {
     var warnEl = document.getElementById("ls-audio-lang-warning");
     if (!warnEl) return;
@@ -655,6 +680,16 @@
     if (selectedLanguage !== currentLanguage) {
       warnEl.textContent = "⚠ 読み上げ原稿を " + lsAudioLangLabel(selectedLanguage) + " で再生成し、音声を作り直します。" +
         "既存の " + lsAudioLangLabel(currentLanguage) + " 音声は使われなくなります。";
+      warnEl.style.display = "block";
+      return;
+    }
+    // コース設定言語とは一致していても、一部チャンクの原稿が別言語のまま生成済み
+    // なことがある（言語切替の途中経過・旧データ等）。lsCanGenerateAudio() 自体は
+    // ブロックしないため、ここで気づけるよう警告文だけ出す。
+    var mismatched = lsChunksWithMismatchedSpokenLanguage(selectedLanguage);
+    if (mismatched > 0) {
+      warnEl.textContent = "⚠ " + mismatched + " 件のスライドの読み上げ原稿が " +
+        lsAudioLangLabel(selectedLanguage) + " ではありません。生成前に原稿の言語をご確認ください。";
       warnEl.style.display = "block";
     } else {
       warnEl.style.display = "none";
@@ -793,6 +828,8 @@
         // Issue #232: コース構造とコンポーネントを非同期ロード
         lsLoadCourseStructure(courseId);
         lsLoadCourseComponents(courseId);
+        // 再構成ループ (R層, G4-R): レビューキュー直行ボタンの件数バッジを更新
+        lsRefreshReconReviewBadge(courseId);
       })
       .catch(function () {
         // 音声準備確認フロー (Issue #491): 読み込み失敗も「読み込み完了（結果は空）」
@@ -913,11 +950,15 @@
       '<div class="ls-doc-title">' + escHtml(s.title || "コース") + '</div>' +
       '<div class="ls-doc-meta">' + escHtml(statusLabel[s.course_status] || s.course_status || "") +
       (s.total_chunks > 0 ? ' (' + (s.generated_chunks || 0) + '/' + s.total_chunks + ')' : '') + '</div>' +
+      lsReconReviewBadgeHtml() +
+      lsCourseInventoryButtonHtml() +
       '</div>';
 
     if (!s.chapters || !s.chapters.length) {
       html += '<div style="padding:12px 16px;color:var(--color-text-tertiary);font-size:12px">章構造がありません。<br>コースビルダーでコース設計を完了してください。</div>';
       el.innerHTML = html;
+      lsBindReconReviewButtons();
+      lsBindCourseInventoryButtons();
       return;
     }
 
@@ -935,6 +976,8 @@
     });
 
     el.innerHTML = html;
+    lsBindReconReviewButtons();
+    lsBindCourseInventoryButtons();
 
     el.querySelectorAll(".ls-course-topic").forEach(function (item) {
       item.addEventListener("click", function () {
@@ -952,6 +995,79 @@
           lsRenderWorkspace();
         }
       });
+    });
+  }
+
+  // 要素インベントリ（検出要素の一覧）: コース構造タブのコースヘッダに置く入口
+  // （設計書 element_inventory_design.md §9-3）。sources の読み方は
+  // lsCoursePrimaryDocumentId() と同じ（course.sources || course.data.sources）。
+  function lsCourseInventorySources() {
+    var course = lsState.courseStructure || {};
+    var sources = course.sources || (course.data && course.data.sources) || [];
+    var result = [];
+    sources.forEach(function (src) {
+      if (src && src.material_id) {
+        result.push({ materialId: src.material_id, title: src.title || src.material_id });
+      }
+    });
+    return result;
+  }
+
+  // 0件はボタン自体を描画しない。window.Deliberation が無い場合も同様（fail-soft）。
+  function lsCourseInventoryButtonHtml() {
+    if (!window.Deliberation) return "";
+    var sources = lsCourseInventorySources();
+    if (!sources.length) return "";
+    if (sources.length === 1) {
+      return '<button type="button" class="admin-action-btn ls-course-inventory-btn" ' +
+        'data-ls-inventory-material-id="' + escHtml(sources[0].materialId) + '" ' +
+        'data-ls-inventory-title="' + escHtml(sources[0].title) + '">検出要素</button>';
+    }
+    var menuItems = sources.map(function (src) {
+      return '<button type="button" class="ls-menu-item ls-course-inventory-item" ' +
+        'data-ls-inventory-material-id="' + escHtml(src.materialId) + '" ' +
+        'data-ls-inventory-title="' + escHtml(src.title) + '"><span>' + escHtml(src.title) + '</span></button>';
+    }).join("");
+    return '<div class="ls-course-inventory-menu-wrap" style="position:relative;display:inline-block">' +
+      '<button type="button" class="admin-action-btn ls-menu-trigger ls-course-inventory-trigger">検出要素 ▼</button>' +
+      '<div class="ls-menu ls-course-inventory-menu" hidden>' + menuItems + '</div>' +
+    '</div>';
+  }
+
+  function lsBindCourseInventoryButtons() {
+    document.querySelectorAll(".ls-course-inventory-btn").forEach(function (btn) {
+      btn.onclick = function () {
+        if (window.Deliberation) {
+          window.Deliberation.openInventory(btn.getAttribute("data-ls-inventory-material-id"), {
+            title: btn.getAttribute("data-ls-inventory-title")
+          });
+        }
+      };
+    });
+    document.querySelectorAll(".ls-course-inventory-trigger").forEach(function (btn) {
+      btn.onclick = function (e) {
+        e.stopPropagation();
+        var wrap = btn.closest(".ls-course-inventory-menu-wrap");
+        var menu = wrap && wrap.querySelector(".ls-course-inventory-menu");
+        if (!menu) return;
+        var willOpen = menu.hidden;
+        document.querySelectorAll(".ls-menu").forEach(function (m) { m.hidden = true; });
+        menu.hidden = !willOpen;
+      };
+    });
+    document.querySelectorAll(".ls-course-inventory-menu").forEach(function (menu) {
+      menu.onclick = function (e) { e.stopPropagation(); };
+    });
+    document.querySelectorAll(".ls-course-inventory-item").forEach(function (btn) {
+      btn.onclick = function () {
+        var menu = btn.closest(".ls-menu");
+        if (menu) menu.hidden = true;
+        if (window.Deliberation) {
+          window.Deliberation.openInventory(btn.getAttribute("data-ls-inventory-material-id"), {
+            title: btn.getAttribute("data-ls-inventory-title")
+          });
+        }
+      };
     });
   }
 
@@ -978,6 +1094,7 @@
       '<div class="ls-doc-title">理論コンポーネント</div>' +
       '<div class="ls-doc-meta">' + escHtml(analysisLabel[data.analysis_status] || data.analysis_status || "") +
       ' / ' + (data.components ? data.components.length : 0) + '件</div>' +
+      lsReconReviewBadgeHtml() +
       '</div>';
 
     if (data.analysis_status !== "completed" && (!data.components || !data.components.length)) {
@@ -987,6 +1104,7 @@
          "Agent解析が未完了です。<br>パイプラインを実行してコンポーネントを生成してください。") +
         '</div>';
       el.innerHTML = html;
+      lsBindReconReviewButtons();
       return;
     }
 
@@ -1036,6 +1154,7 @@
     }
 
     el.innerHTML = html;
+    lsBindReconReviewButtons();
 
     el.querySelectorAll(".ls-component-item").forEach(function (item) {
       item.addEventListener("click", function () {
@@ -1478,6 +1597,14 @@
         if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
         if (action === "reject") lsRejectTheoryComponent(component);
         if (action === "endorse") lsOpenEndorsementModal(component);
+        if (action === "deliberate") {
+          if (window.Deliberation) {
+            window.Deliberation.openElement("theory_component", component.id, {
+              documentId: lsTheoryElementDocumentId(component),
+              title: component.name || "",
+            });
+          }
+        }
       });
     });
   }
@@ -1554,6 +1681,7 @@
       sourceEl.innerHTML = lsCourseDraftHtml(topic);
       sourceEl.hidden = false;
       lsBindCourseDraftControls(topic);
+      lsHydrateFigureEmbeds(sourceEl);
     }
     if (displayEl) {
       displayEl.value = lsTopicStudentMaterialSource(topic);
@@ -1744,12 +1872,13 @@
         }
         box.innerHTML = items.map(function (it) {
           var sig = it.signals || {};
-          return '<div class="ls-stumble-item">' +
+          return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
             '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") + '</div>' +
             '<div class="ls-stumble-item-prompt">' + escHtml(it.prompt || "") + '</div>' +
             '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
               ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
               (sig.verdict_dissent ? ' / 判定への異議あり' : '') + '</div>' +
+            '<div class="ls-course-muted ls-recon-item-error" data-recon-item-error="' + escHtml(it.item_id) + '" hidden></div>' +
             '<div class="ls-stumble-item-actions">' +
               '<button type="button" class="ls-stumble-mini" data-item-status="retired" data-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
               '<button type="button" class="ls-stumble-mini" data-item-status="confirmed" data-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
@@ -1758,25 +1887,265 @@
         }).join("");
         box.querySelectorAll("[data-item-id]").forEach(function (b) {
           b.addEventListener("click", function () {
-            lsPatchReconItem(this.getAttribute("data-item-id"), this.getAttribute("data-item-status"), box, claimId);
+            lsPatchReconItem(this.getAttribute("data-item-id"), this.getAttribute("data-item-status"), box, claimId, this);
           });
         });
       })
       .catch(function () { box.innerHTML = '<div class="ls-course-muted">読み込みに失敗しました。</div>'; });
   }
 
-  function lsPatchReconItem(itemId, status, box, claimId) {
-    apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
+  // 対象 item カード（[data-recon-item]）内のボタンを一括で有効/無効化する共通ヘルパー。
+  // claim 別インラインパネル（data-item-id）とレビューキューモーダル（data-recon-item-id）
+  // の両方の markup を対象にする（レビュー指摘5）。
+  function lsSetReconItemBusy(card, busy) {
+    if (!card) return;
+    card.querySelectorAll("[data-item-id], [data-recon-item-id]").forEach(function (b) {
+      b.disabled = busy;
+    });
+  }
+
+  function lsShowReconItemError(card, message) {
+    if (!card) return;
+    var errorBox = card.querySelector("[data-recon-item-error]");
+    if (!errorBox) return;
+    errorBox.hidden = false;
+    errorBox.textContent = message;
+  }
+
+  function lsClearReconItemError(card) {
+    if (!card) return;
+    var errorBox = card.querySelector("[data-recon-item-error]");
+    if (!errorBox) return;
+    errorBox.hidden = true;
+    errorBox.textContent = "";
+  }
+
+  // 既存 PATCH API（教員向け status 遷移。削除 API は無い・retire のみ）の共通呼び出し。
+  // claim 別インライン確認パネル（lsToggleReviewQueueForClaim）とレビューキュー直行
+  // モーダル（G4-R, lsOpenReconReviewModal）の双方から再利用する。
+  // 非 2xx は resolve せず reject する（レビュー指摘5: PATCH 失敗が成功扱いになっていた）。
+  function lsPatchReconItemStatus(itemId, status) {
+    return apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
       method: "PATCH",
       body: JSON.stringify({ status: status }),
-    })
-      .then(function (res) { return res.ok ? res.json() : null; })
+    }).then(function (res) {
+      if (res.ok) return res.json();
+      return res.json()
+        .catch(function () { return null; })
+        .then(function (body) {
+          var detail = (body && body.detail) || "更新に失敗しました。";
+          throw new Error(detail);
+        });
+    });
+  }
+
+  function lsPatchReconItem(itemId, status, box, claimId, triggerBtn) {
+    var card = (triggerBtn && triggerBtn.closest) ? triggerBtn.closest("[data-recon-item]") : null;
+    lsClearReconItemError(card);
+    lsSetReconItemBusy(card, true);
+    lsPatchReconItemStatus(itemId, status)
       .then(function () {
-        // review キューを再取得して反映
+        // review キューを再取得して反映（成功時のみ。再取得後は DOM が置換されるため
+        // ボタンの再有効化は不要）
         box.hidden = true;
         lsToggleReviewQueueForClaim(claimId);
       })
-      .catch(function () {});
+      .catch(function (err) {
+        lsSetReconItemBusy(card, false);
+        lsShowReconItemError(card, (err && err.message) || "更新に失敗しました。");
+      });
+  }
+
+  // ── G4-R: R層レビューキューへの直行導線 ──────────────────────────────
+  // 原稿スタジオは「コース→トピック→右ペイン切替→claim カード展開」の5段階の奥に
+  // レビューキューが埋もれている（到達前にバッジも無い）。コース選択直後のコース/
+  // コンポーネントビュー付近に件数バッジ付きボタンを出し、押下でレビューキューを
+  // フラットに一覧するモーダルを開き、その場で confirm/retire まで行えるようにする。
+  // 既存の5段階の経路（lsToggleReviewQueueForClaim 経由）はそのまま残す。
+
+  // クエリ構築の共通ヘルパー（レビュー指摘2）: コース選択中は course_id を優先する
+  // （バックエンドがコース内の全 source 教材の item を集約するため、複数教材コースで
+  // 先頭教材以外の項目が欠落する問題を解消する）。コース未選択時（コンポーネント
+  // ビュー単体等）は従来どおり document_id にフォールバックする。バッジ
+  // （lsRefreshReconReviewBadge）とモーダル一覧（lsLoadReconReviewModalList）の
+  // 両方がこのヘルパーを使うことで、常に同じスコープを見る。
+  function lsReconReviewQueryString() {
+    if (lsState.courseId) return "course_id=" + encodeURIComponent(lsState.courseId);
+    var documentId = lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+    return documentId ? "document_id=" + encodeURIComponent(documentId) : "";
+  }
+
+  // 「要レビュー」判定の共通述語（レビュー指摘2）: status='auto'（教員未確認）かつ
+  // rank_tier が付いた（人数 k=3 以上で疑わしさランクが算出された）item のみを
+  // 「教員が今日やること」として数える。「情報不足」（k未満）は教員の作業対象では
+  // ないため数えない。バッジの件数とモーダルの「要レビュー」セクションの母数を
+  // 一致させるため、両方がこの述語を使う。
+  function lsReconItemNeedsReview(it) {
+    return !!it && it.status === "auto" && !!it.rank_tier && it.rank_tier !== "情報不足";
+  }
+
+  function lsReconReviewBadgeHtml() {
+    var label = "再構成の確認";
+    if (typeof lsState.reconReviewCount === "number") {
+      label += "（要レビュー " + lsState.reconReviewCount + "件）";
+    }
+    return '<button type="button" class="ls-recon-review-btn" data-ls-recon-review="1">' +
+      escHtml(label) + '</button>';
+  }
+
+  function lsUpdateReconReviewBadgeText() {
+    var label = "再構成の確認";
+    if (typeof lsState.reconReviewCount === "number") {
+      label += "（要レビュー " + lsState.reconReviewCount + "件）";
+    }
+    document.querySelectorAll("[data-ls-recon-review]").forEach(function (btn) {
+      btn.textContent = label;
+    });
+  }
+
+  function lsBindReconReviewButtons() {
+    document.querySelectorAll("[data-ls-recon-review]").forEach(function (btn) {
+      btn.onclick = function () { lsOpenReconReviewModal(); };
+    });
+  }
+
+  // 件数バッジの母数: lsReconItemNeedsReview を満たす item のみを「教員が今日
+  // やること」として数える。これは学習者統計の k-匿名レンジ表示（3-5/6-10/11+）とは
+  // 別物の内部運用カウントであり、生数値のまま表示してよい（教員自身の作業件数。
+  // 学習者個別データは一切含まない）。
+  function lsRefreshReconReviewBadge(courseId) {
+    var qs = lsReconReviewQueryString();
+    if (!qs) {
+      lsState.reconReviewCount = null;
+      lsUpdateReconReviewBadgeText();
+      return;
+    }
+    apiFetch("/admin/reconstruction/items/review-queue?" + qs)
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (courseId && lsState.courseId !== courseId) return;
+        var items = (data && data.items) || [];
+        lsState.reconReviewCount = items.filter(lsReconItemNeedsReview).length;
+        lsUpdateReconReviewBadgeText();
+      })
+      .catch(function () {
+        lsState.reconReviewCount = null;
+        lsUpdateReconReviewBadgeText();
+      });
+  }
+
+  function lsOpenReconReviewModal() {
+    var existing = document.getElementById("ls-recon-review-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "ls-recon-review-modal";
+    overlay.className = "ls-settings-modal";
+    overlay.innerHTML =
+      '<div class="ls-settings-dialog ls-recon-review-dialog">' +
+        '<div class="ls-settings-head">' +
+          '<h3>再構成の確認</h3>' +
+          '<button id="ls-recon-review-close" class="lecture-chat-close" type="button">&times;</button>' +
+        '</div>' +
+        '<p class="ls-course-muted">疑わしさランク順の一覧です。教員は事後の監査役であり、' +
+          'AI が自動生成した問いをその場で追認（confirm）・配信停止（retire）できます。</p>' +
+        '<div id="ls-recon-review-list"><div class="ls-course-muted">読み込み中…</div></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    function close() { overlay.remove(); }
+    document.getElementById("ls-recon-review-close").addEventListener("click", close);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
+
+    lsLoadReconReviewModalList();
+  }
+
+  function lsLoadReconReviewModalList() {
+    var list = document.getElementById("ls-recon-review-list");
+    if (!list) return;
+    var qs = lsReconReviewQueryString();
+    apiFetch("/admin/reconstruction/items/review-queue" + (qs ? "?" + qs : ""))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        lsRenderReconReviewModalList((data && data.items) || []);
+      })
+      .catch(function () {
+        list.innerHTML = '<div class="ls-course-muted">読み込みに失敗しました。</div>';
+      });
+  }
+
+  // レビュー対象母数（バッジ件数）と一覧の食い違い解消（レビュー指摘2）: API の全項目
+  // （confirmed/retired/情報不足含む）を一律に描画するのではなく、「要レビュー」
+  // （lsReconItemNeedsReview を満たす item・確認操作可）と「その他」（情報不足は
+  // 操作可のまま残す・処理済みは履歴表示のみ）にセクション分離する。
+  function lsRenderReconReviewModalList(items) {
+    var list = document.getElementById("ls-recon-review-list");
+    if (!list) return;
+    if (!items.length) {
+      list.innerHTML = '<div class="ls-course-muted">現在レビュー対象の再構成課題はありません。</div>';
+      return;
+    }
+    var needsReview = items.filter(lsReconItemNeedsReview);
+    var others = items.filter(function (it) { return !lsReconItemNeedsReview(it); });
+
+    function itemCardHtml(it, withActions) {
+      var sig = it.signals || {};
+      var actions = withActions
+        ? '<div class="ls-stumble-item-actions">' +
+            '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
+            '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
+          '</div>'
+        : '';
+      return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
+        '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") +
+          (it.status ? ' · ' + escHtml(it.status) : '') + '</div>' +
+        '<div class="ls-stumble-item-prompt">' + escHtml(it.prompt || "") + '</div>' +
+        '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
+          ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
+          (sig.verdict_dissent ? ' / 判定への異議あり' : '') + '</div>' +
+        '<div class="ls-course-muted ls-recon-item-error" data-recon-item-error="' + escHtml(it.item_id) + '" hidden></div>' +
+        actions +
+      '</div>';
+    }
+
+    var html = '<div class="ls-recon-review-section">' +
+      '<h4 class="ls-recon-review-section-title">要レビュー</h4>' +
+      (needsReview.length
+        ? needsReview.map(function (it) { return itemCardHtml(it, true); }).join("")
+        : '<div class="ls-course-muted">現在レビュー対象の再構成課題はありません。</div>') +
+      '</div>';
+    html += '<div class="ls-recon-review-section">' +
+      '<h4 class="ls-recon-review-section-title">その他（情報不足・処理済み）</h4>' +
+      (others.length
+        ? others.map(function (it) { return itemCardHtml(it, it.status === "auto"); }).join("")
+        : '<div class="ls-course-muted">該当する item はありません。</div>') +
+      '</div>';
+    list.innerHTML = html;
+
+    list.querySelectorAll("[data-recon-item-id]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        lsPatchReconItemInModal(btn.getAttribute("data-recon-item-id"), btn.getAttribute("data-recon-item-status"), btn);
+      });
+    });
+  }
+
+  function lsPatchReconItemInModal(itemId, status, triggerBtn) {
+    var card = (triggerBtn && triggerBtn.closest) ? triggerBtn.closest("[data-recon-item]") : null;
+    lsClearReconItemError(card);
+    lsSetReconItemBusy(card, true);
+    lsPatchReconItemStatus(itemId, status)
+      .then(function () {
+        // 成功時のみ一覧・バッジ・キャッシュを更新する（一覧再取得で DOM が置換される
+        // ため、ボタンの再有効化は不要）
+        lsLoadReconReviewModalList();
+        lsRefreshReconReviewBadge();
+        // claim 別つまづきパネルのキャッシュも古くなるため破棄する（次回開いたときに再取得）
+        lsState.stumbleByDocument = {};
+      })
+      .catch(function (err) {
+        lsSetReconItemBusy(card, false);
+        lsShowReconItemError(card, (err && err.message) || "更新に失敗しました。");
+      });
   }
 
   function lsTopicCoverageStatus(topic) {
@@ -2071,6 +2440,27 @@
         });
         return;
       }
+      // 図（Figure のコース流通, 設計書 Phase4 §7.1）: course_content_builder が
+      // linked_component_ids / linked_claim_ids から決定論導出した evidence item。
+      // フィールドは figure_id / figure_key / document_id / caption（他 kind の
+      // target_id/id 方式とは別立て）。ref は figure:<figure_id>。
+      if (kind === "figure") {
+        var figId = link.figure_id || id;
+        items.push({
+          key: lsCourseEvidenceKey(kind, figId),
+          kind: kind,
+          id: figId,
+          figure_id: link.figure_id || figId,
+          figure_key: link.figure_key || "",
+          document_id: link.document_id || "",
+          title: "図: " + lsShortSummary(link.caption || figId || "図", 40),
+          summary: link.caption || "",
+          caption: link.caption || "",
+          role: link.support_role || "figure",
+          confidence: link.confidence || "",
+        });
+        return;
+      }
       // equation 以外（source の equation_quote 等）でも latex を持てる。
       // 旧データ互換: summary に生 TeX が入っている場合は latex に移し、
       // タイトル・本文に生 LaTeX 文字列を出さず数式として描画する。
@@ -2309,6 +2699,31 @@
           '<span class="ls-material-embed-summary">この数式IDに対応する数式本文を取得できませんでした。</span>' +
         '</button>';
       }
+      // 図（Figure のコース流通, 設計書 Phase4 §7.2）: ![[figure:id]] の解決。
+      // 画像は Authorization ヘッダ必須の admin endpoint（/admin/documents/{document_id}/
+      // figures/{figure_id}/image）からしか取得できないため、ここでは fetch 用パスを
+      // data-figure-fetch-path に仕込んだ <img> を描くだけに留め、実体は
+      // lsHydrateFigureEmbeds() が DOM 挿入後に apiFetchRaw + blob で取得する
+      // （admin.js の図サムネイル読込 loadFigureThumbnail と同じ方式）。
+      if (embed.kind === "figure") {
+        var figureItem = evidenceItem && evidenceItem.kind === "figure" ? evidenceItem : null;
+        if (figureItem && figureItem.figure_id && figureItem.document_id) {
+          var fetchPath = "/admin/documents/" + encodeURIComponent(figureItem.document_id) +
+            "/figures/" + encodeURIComponent(figureItem.figure_id) + "/image";
+          return '<figure class="material-figure ls-material-figure" data-evidence-ref="' + escHtml(key) + '">' +
+            '<span class="material-figure-frame">' +
+              '<img class="material-figure-img ls-figure-embed-img" data-figure-fetch-path="' + escHtml(fetchPath) + '" style="display:none" alt="' + escHtml(figureItem.caption || "図") + '">' +
+              '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
+            '</span>' +
+            (figureItem.caption ? '<figcaption class="material-figure-caption">' + escHtml(lsShortSummary(figureItem.caption, 200)) + '</figcaption>' : "") +
+          '</figure>';
+        }
+        return '<button type="button" class="ls-material-embed ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
+          '<span class="ls-material-embed-kind">未解決の図</span>' +
+          '<strong>' + escHtml(embedId || "図") + '</strong>' +
+          '<span class="ls-material-embed-summary">この図IDに対応する画像情報を取得できませんでした。</span>' +
+        '</button>';
+      }
       if (embed.kind === "source" && (embedId === "summary" || embedId === "topic_summary")) {
         return '<button type="button" class="ls-material-embed ls-material-evidence-card ls-material-source" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">概要</span>' +
@@ -2345,6 +2760,51 @@
       '</button>';
     });
     return html || '<div class="ls-course-muted">教材プレビューは空です。</div>';
+  }
+
+  // lsCourseDraftHtml(topic) の innerHTML 差し替え後に呼ぶ。container 内の未取得
+  // <img data-figure-fetch-path>（![[figure:id]] の解決先）を apiFetchRaw + blob で
+  // 取得して差し替える（admin.js の loadFigureThumbnail と同じ方式。学習者向け同様
+  // Authorization ヘッダ必須のため <img src> を直接指定できない）。図が無い/未解決の
+  // ドラフトでは querySelectorAll が空になり何もしない（防御的スキップ）。
+  function lsHydrateFigureEmbeds(container) {
+    if (!container || !container.querySelectorAll) return;
+    if (container._lsFigureObjectUrls) {
+      container._lsFigureObjectUrls.forEach(function (u) {
+        try { URL.revokeObjectURL(u); } catch (e) { /* noop */ }
+      });
+    }
+    container._lsFigureObjectUrls = [];
+    container.querySelectorAll("img.ls-figure-embed-img[data-figure-fetch-path]").forEach(function (img) {
+      var path = img.getAttribute("data-figure-fetch-path");
+      img.removeAttribute("data-figure-fetch-path");
+      if (!path) { lsMarkFigureEmbedFailed(img); return; }
+      apiFetchRaw(path, { _noJson: true })
+        .then(function (res) {
+          if (!res.ok) throw new Error("figure image fetch failed");
+          return res.blob();
+        })
+        .then(function (blob) {
+          var url = URL.createObjectURL(blob);
+          container._lsFigureObjectUrls.push(url);
+          img.src = url;
+          img.style.display = "";
+          var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+          if (placeholder) placeholder.remove();
+        })
+        .catch(function () {
+          lsMarkFigureEmbedFailed(img);
+        });
+    });
+  }
+
+  function lsMarkFigureEmbedFailed(img) {
+    img.style.display = "none";
+    var placeholder = img.parentNode && img.parentNode.querySelector(".material-figure-placeholder");
+    if (placeholder) {
+      placeholder.textContent = "画像を表示できません";
+      placeholder.classList.add("material-figure-missing");
+    }
   }
 
   function lsRenderWorkspace() {
@@ -2651,6 +3111,9 @@
         '<div class="ls-theory-section"><b>support</b> ' + escHtml(claim.support_status || "source_backed") + '</div>' +
         '<div class="ls-theory-section"><b>source_scope</b> <span class="ls-theory-ref">' + escHtml(scopeText) + '</span></div>' +
         '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
+        '<div class="ls-theory-actions">' +
+          '<button class="admin-action-btn ls-claim-deliberate-btn" type="button" data-claim-id="' + escHtml(claim.claim_id) + '" data-document-id="' + escHtml(claim.document_id || "") + '">深く検討</button>' +
+        '</div>' +
       '</div>';
   }
 
@@ -2676,6 +3139,20 @@
     container.innerHTML =
       '<div class="ls-theory-current">Chunk #' + escHtml(chunk.chunk_index || "") + ' / 主張ビュー</div>' +
       claims.map(lsClaimCardHtml).join("");
+    // W層（要素検討ワークスペース, Phase 0）— theory_claim 要素の「深く検討」導線。
+    container.querySelectorAll(".ls-claim-deliberate-btn").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var claimId = this.getAttribute("data-claim-id");
+        var documentId = this.getAttribute("data-document-id");
+        if (window.Deliberation) {
+          window.Deliberation.openElement("theory_claim", claimId, {
+            documentId: documentId,
+            title: claimId,
+          });
+        }
+      });
+    });
   }
 
   function lsLoadClaimsForChunk(chunk) {
@@ -2804,8 +3281,19 @@
           '<button class="admin-action-btn" data-theory-action="approve"' + approveDisabled + '>承認</button>' +
           '<button class="admin-action-btn" data-theory-action="reject">却下</button>' +
           '<button class="admin-action-btn" data-theory-action="endorse">説明・承認の共有</button>' +
+          '<button class="admin-action-btn" data-theory-action="deliberate">深く検討</button>' +
         '</div>' +
       '</div>';
+  }
+
+  // W層（要素検討ワークスペース, Phase 0）— theory_component 要素の「深く検討」導線で
+  // 使う document_id の解決。TheoryComponentOut.source_scope.document_id
+  // （backend/api/schemas.py の TheorySourceScope）は chunk 由来・section 由来・
+  // 「選択中コンポーネント」経路のいずれでも共通して埋まっているフィールドなので、
+  // 呼び出し元の表示スコープ（チャンク/セクション/単体）に依存せずここから直接読む。
+  function lsTheoryElementDocumentId(component) {
+    var scope = (component && component.source_scope) || {};
+    return scope.document_id || "";
   }
 
   function lsRenderTheoryPanel(chunk) {
@@ -2834,6 +3322,14 @@
           if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
           if (action === "reject") lsRejectTheoryComponent(component);
           if (action === "endorse") lsOpenEndorsementModal(component);
+          if (action === "deliberate") {
+            if (window.Deliberation) {
+              window.Deliberation.openElement("theory_component", component.id, {
+                documentId: lsTheoryElementDocumentId(component),
+                title: component.name || "",
+              });
+            }
+          }
         });
       });
       return;
@@ -2867,6 +3363,14 @@
         if (action === "approve") lsSaveTheoryComponent(component, { status: "teacher_reviewed" });
         if (action === "reject") lsRejectTheoryComponent(component);
         if (action === "endorse") lsOpenEndorsementModal(component);
+        if (action === "deliberate") {
+          if (window.Deliberation) {
+            window.Deliberation.openElement("theory_component", component.id, {
+              documentId: lsTheoryElementDocumentId(component),
+              title: component.name || "",
+            });
+          }
+        }
       });
     });
   }
@@ -4489,7 +4993,20 @@
       ".ls-exp-controls input,.ls-exp-controls select{font-size:12px;padding:3px 6px;}" +
       ".ls-endorse-form{border-top:1px solid #eee;margin-top:12px;padding-top:12px;}" +
       ".ls-endorse-form textarea,.ls-endorse-form input{width:100%;margin:3px 0;font-size:13px;padding:4px;box-sizing:border-box;}" +
-      ".ls-endorse-status{font-size:12px;margin:6px 0;min-height:16px;}";
+      ".ls-endorse-status{font-size:12px;margin:6px 0;min-height:16px;}" +
+      ".ls-exp-backing{margin-top:6px;font-size:12px;}" +
+      ".ls-exp-claim-row{display:flex;align-items:center;gap:6px;margin:3px 0;flex-wrap:wrap;}" +
+      ".ls-exp-claim-row .admin-action-btn{font-size:11px;padding:2px 8px;}" +
+      ".ls-exp-claim-state{font-size:11px;color:#666;}" +
+      ".ls-exp-claim-confirmed .ls-exp-claim-state{color:#0a7;}" +
+      ".ls-exp-claim-rejected{opacity:.7;}" +
+      ".ls-exp-endorsers{margin-top:6px;font-size:12px;}" +
+      ".ls-exp-endorsers summary{cursor:pointer;color:#555;}" +
+      ".ls-exp-endorser-row{margin:2px 0 2px 12px;}" +
+      // ls-settings-modal と同じ罠 (Issue #491): display:flex が [hidden] を上書きするため
+      // [hidden] 時の display:none を明示する。
+      ".ls-exp-cite-area{margin-top:6px;font-size:12px;display:flex;align-items:center;gap:6px;flex-wrap:wrap;}" +
+      ".ls-exp-cite-area[hidden]{display:none;}";
     document.head.appendChild(style);
   }
 
@@ -4513,16 +5030,64 @@
       '</select>';
   }
 
+  // 直近に読み込んだ説明バージョンのキャッシュ（claim 紐づけ更新時に
+  // 現在の backing_claims 配列を組み立て直すために使う）。
+  var lsExplanationCache = {};
+
+  // backing_claims の各要素は dict（claim_id/reason/confidence/confirmed[/status]）
+  // または素の claim_id 文字列（後方互換）。dict に正規化する。
+  function lsBackingClaimEntry(b) {
+    if (typeof b === "string") return { claim_id: b };
+    return b || {};
+  }
+
+  // claim 紐づけの3状態: confirmed（教員が確定）/ rejected（教員が却下・記録は保持, P4）/
+  // candidate（AI候補のまま）。
+  function lsBackingClaimState(b) {
+    var entry = lsBackingClaimEntry(b);
+    if (entry.confirmed) return "confirmed";
+    if (entry.status === "rejected") return "rejected";
+    return "candidate";
+  }
+
+  // N3: claim 紐づけの確定/却下ボタン付き表示。
+  // 「claim 紐づけの最終確定は必ず教員」(C層設計原則2) の確定操作を担う。
+  function lsRenderBackingClaims(exp) {
+    var items = exp.backing_claims || [];
+    if (!items.length) return "";
+    var rows = items.map(function (b) {
+      var entry = lsBackingClaimEntry(b);
+      var cid = String(entry.claim_id || "");
+      if (!cid) return "";
+      var st = lsBackingClaimState(entry);
+      var stateLabel = st === "confirmed" ? "✓ 確定" : st === "rejected" ? "却下" : "候補";
+      var buttons;
+      if (st === "candidate") {
+        buttons =
+          '<button class="admin-action-btn" data-claim-action="confirm" data-claim-id="' + escHtml(cid) + '">確定</button>' +
+          '<button class="admin-action-btn" data-claim-action="reject" data-claim-id="' + escHtml(cid) + '">却下</button>';
+      } else {
+        // 確定・却下とも可逆（記録は保持したまま候補状態に戻せる）。
+        buttons = '<button class="admin-action-btn" data-claim-action="reset" data-claim-id="' + escHtml(cid) + '">候補に戻す</button>';
+      }
+      var reasonAttr = entry.reason ? ' title="' + escHtml(String(entry.reason)) + '"' : "";
+      return '<div class="ls-exp-claim-row ls-exp-claim-' + st + '">' +
+        '<span class="ls-theory-ref"' + reasonAttr + '>' + escHtml(cid) + '</span>' +
+        '<span class="ls-exp-claim-state">[' + stateLabel + ']</span>' +
+        buttons +
+        '</div>';
+    }).join("");
+    return '<div class="ls-exp-backing">' +
+      '<div class="ls-theory-muted">根拠claim（AI候補。確定・却下は教員のみ。却下しても記録は保持されます）:</div>' +
+      rows +
+      '</div>';
+  }
+
   function lsRenderExplanationCard(exp) {
     var kindLabel = exp.kind === "standard" ? "標準の説明" : ("教員: " + (exp.author_name || "不明"));
     var reviewLabel = exp.review_status === "teacher_approved" ? "承認済み" :
       exp.review_status === "rejected" ? "却下" :
       exp.review_status === "needs_revision" ? "要修正" : "査読待ち";
-    var backing = (exp.backing_claims || []).map(function (b) {
-      var cid = b.claim_id || b;
-      var confirmed = (b && b.confirmed) ? "✓" : "候補";
-      return '<span class="ls-theory-ref">' + escHtml(String(cid)) + " [" + confirmed + "]</span>";
-    }).join(" ");
     return '<div class="ls-exp-card kind-' + escHtml(exp.kind) + '" data-exp-id="' + escHtml(exp.id) + '">' +
       '<div class="ls-exp-head">' +
         '<div><span class="ls-exp-badge">' + escHtml(kindLabel) + '</span> <strong>' + escHtml(exp.title || "(無題)") + '</strong></div>' +
@@ -4530,7 +5095,13 @@
       '</div>' +
       '<div class="ls-exp-body">' + escHtml(exp.body || "") + '</div>' +
       '<div class="ls-theory-muted">状態: ' + escHtml(reviewLabel) + ' / 共有: ' + (exp.shared ? "ON" : "OFF") +
-        ' / 引用: ' + escHtml(String(exp.citation_count || 0)) + (backing ? (' / 根拠: ' + backing) : "") + '</div>' +
+        ' / 引用: ' + escHtml(String(exp.citation_count || 0)) + '</div>' +
+      lsRenderBackingClaims(exp) +
+      // N30: 承認者個別一覧（名前+専門タグ+段階ラベルのみ。数値スコアは出さない）。
+      '<details class="ls-exp-endorsers" data-exp-endorsers="' + escHtml(exp.id) + '">' +
+        '<summary>承認者一覧</summary>' +
+        '<div class="ls-exp-endorsers-body ls-theory-muted">開くと読み込みます...</div>' +
+      '</details>' +
       '<div class="ls-exp-controls">' +
         lsExpLevelSelect(exp.id) +
         '<input type="text" data-exp-tag="' + escHtml(exp.id) + '" placeholder="専門タグ (例: 統計物理)" />' +
@@ -4540,6 +5111,8 @@
         '<button class="admin-action-btn" data-exp-action="share">' + (exp.shared ? "共有OFF" : "共有ON") + '</button>' +
         '<button class="admin-action-btn" data-exp-action="cite">別コースで引用</button>' +
       '</div>' +
+      // N35: 引用先コースのインライン選択エリア（window.prompt の置換）。
+      '<div class="ls-exp-cite-area" data-cite-area="' + escHtml(exp.id) + '" hidden></div>' +
       '</div>';
   }
 
@@ -4563,11 +5136,143 @@
           var turnOn = this.textContent.indexOf("ON") >= 0;
           lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { shared: turnOn }, "共有設定を更新しました");
         } else if (action === "cite") {
-          var target = window.prompt("引用先のコースID を入力してください");
-          if (target) lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+          // N35: コースIDの手入力(window.prompt)ではなく、管理コース一覧からの選択。
+          lsOpenCiteSelector(component, expId, card);
         }
       });
     });
+    // N3: claim 紐づけの確定/却下/候補に戻す。
+    list.querySelectorAll("[data-claim-action]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var card = this.closest(".ls-exp-card");
+        var expId = card.getAttribute("data-exp-id");
+        lsSetBackingClaimState(component, expId, this.getAttribute("data-claim-id"), this.getAttribute("data-claim-action"));
+      });
+    });
+    // N30: 承認者一覧は開いたときに一度だけ読み込む。
+    list.querySelectorAll("[data-exp-endorsers]").forEach(function (det) {
+      det.addEventListener("toggle", function () {
+        if (this.open && !this.getAttribute("data-endorsers-loaded")) {
+          lsLoadEndorsers(this.getAttribute("data-exp-endorsers"), this);
+        }
+      });
+    });
+  }
+
+  // N3: backing_claims 内の1件の状態を更新して PATCH /admin/explanations/{id} を呼ぶ。
+  // 却下は行削除ではなく status='rejected' で保持する（P4: 情報を落とさない）。
+  function lsSetBackingClaimState(component, expId, claimId, action) {
+    var exp = lsExplanationCache[expId];
+    if (!exp) {
+      lsSetEndorseStatus("説明データが読み込まれていません。再読み込みしてください", "error");
+      return;
+    }
+    var changed = false;
+    var updated = (exp.backing_claims || []).map(function (b) {
+      var entry = Object.assign({}, lsBackingClaimEntry(b));
+      if (String(entry.claim_id || "") !== String(claimId)) return entry;
+      changed = true;
+      if (action === "confirm") {
+        entry.confirmed = true;
+        entry.status = "confirmed";
+      } else if (action === "reject") {
+        entry.confirmed = false;
+        entry.status = "rejected";
+      } else {
+        entry.confirmed = false;
+        entry.status = "candidate";
+      }
+      return entry;
+    });
+    if (!changed) {
+      lsSetEndorseStatus("対象のclaim紐づけが見つかりませんでした", "error");
+      return;
+    }
+    var okMsg = action === "confirm" ? "claim紐づけを確定しました" :
+      action === "reject" ? "claim紐づけを却下しました(記録は保持されます)" :
+      "claim紐づけを候補に戻しました";
+    lsCallExplanation(component, "/admin/explanations/" + expId, "PATCH", { backing_claims: updated }, okMsg);
+  }
+
+  function lsEndorseLevelLabel(level) {
+    return level === "strong" ? "強い承認" : level === "provisional" ? "暫定" : "承認";
+  }
+
+  // N30: 個別承認者リスト（名前 + 専門タグ + 段階ラベル）。数値スコアは表示しない。
+  function lsLoadEndorsers(expId, detailsEl) {
+    var body = detailsEl.querySelector(".ls-exp-endorsers-body");
+    if (!body) return;
+    body.textContent = "読み込み中...";
+    apiFetch("/admin/explanations/" + expId + "/endorsements")
+      .then(function (res) {
+        if (!res.ok) throw new Error("承認者一覧の取得に失敗しました");
+        return res.json();
+      })
+      .then(function (data) {
+        detailsEl.setAttribute("data-endorsers-loaded", "1");
+        var items = (data && data.endorsements) || [];
+        if (!items.length) {
+          body.innerHTML = '<div class="ls-theory-muted">承認者はまだいません。</div>';
+          return;
+        }
+        body.innerHTML = items.map(function (en) {
+          var name = en.endorser_name || "不明";
+          var tag = en.expertise_tag ? "（専門: " + en.expertise_tag + "）" : "";
+          return '<div class="ls-exp-endorser-row">' + escHtml(name) + escHtml(tag) +
+            ' <span class="ls-exp-badge">' + escHtml(lsEndorseLevelLabel(en.level)) + '</span></div>';
+        }).join("");
+      })
+      .catch(function (err) {
+        body.textContent = err.message || "承認者一覧の取得に失敗しました";
+      });
+  }
+
+  // N35: 引用先コースを管理コース一覧から選ぶインラインセレクタ。
+  // 引用APIは編集権限(_ensure_editable)を要求するため、owner/editor のコースに絞る。
+  function lsOpenCiteSelector(component, expId, card) {
+    var area = card.querySelector("[data-cite-area]");
+    if (!area) return;
+    if (!area.hidden) {
+      area.hidden = true;
+      area.innerHTML = "";
+      return;
+    }
+    area.hidden = false;
+    area.innerHTML = '<span class="ls-theory-muted">コース一覧を読み込み中...</span>';
+    apiFetch("/admin/courses")
+      .then(function (res) {
+        if (!res.ok) throw new Error("コース一覧の取得に失敗しました");
+        return res.json();
+      })
+      .then(function (courses) {
+        var options = (courses || []).filter(function (c) {
+          if (String(c.id) === String(component.course_id)) return false; // 引用元と同じコースは除外
+          return c.role === "owner" || c.role === "editor"; // 引用は編集権限が必要
+        });
+        if (!options.length) {
+          area.innerHTML = '<span class="ls-theory-muted">引用先にできる編集可能な別コースがありません。</span>';
+          return;
+        }
+        area.innerHTML = '<span>引用先コース:</span>' +
+          '<select data-cite-select>' + options.map(function (c) {
+            return '<option value="' + escHtml(c.id) + '">' + escHtml(c.title || c.id) + '</option>';
+          }).join("") + '</select>' +
+          '<button class="admin-action-btn" data-cite-run>引用する</button>' +
+          '<button class="admin-action-btn" data-cite-cancel>キャンセル</button>';
+        area.querySelector("[data-cite-run]").addEventListener("click", function () {
+          var sel = area.querySelector("[data-cite-select]");
+          var target = sel ? sel.value : "";
+          if (!target) return;
+          lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+        });
+        area.querySelector("[data-cite-cancel]").addEventListener("click", function () {
+          area.hidden = true;
+          area.innerHTML = "";
+        });
+      })
+      .catch(function (err) {
+        area.innerHTML = '<span class="ls-theory-muted">' + escHtml(err.message || "コース一覧の取得に失敗しました") + '</span>';
+      });
   }
 
   function lsEndorseExplanation(component, expId, payload) {
@@ -4599,6 +5304,10 @@
       .then(function (res) { if (!res.ok) throw new Error("読み込みに失敗しました"); return res.json(); })
       .then(function (data) {
         var items = data || [];
+        lsExplanationCache = {};
+        items.forEach(function (it) {
+          if (it && it.id) lsExplanationCache[it.id] = it;
+        });
         list.innerHTML = items.length ? items.map(lsRenderExplanationCard).join("") : '<div class="ls-empty-state">説明バージョンがありません。</div>';
         lsBindExplanationActions(component);
       })
@@ -5453,12 +6162,14 @@
     });
   }
 
+  // `lsAllChunksHaveSpokenText` と同じ判定に統一する。API の spoken_text は
+  // display_text へフォールバックして返るため、その値の有無だけで判定すると
+  // 原稿未生成でも常に真になってしまう（パイプライン状態表示が「原稿生成」を
+  // 済み扱いしてしまうバグ）。サーバ由来の status（"ungenerated" は原稿未生成）
+  // で判定する関数へ委譲する（呼び出し元 lsCoursePipelineState は every の
+  // 全件一致セマンティクスのまま）。
   function lsHasScripts() {
-    var chunks = lsState.chunks || [];
-    if (!chunks.length) return false;
-    return chunks.every(function (chunk) {
-      return Boolean(String(chunk.spoken_text || chunk.display_text || "").trim());
-    });
+    return lsAllChunksHaveSpokenText();
   }
 
   function lsHasAudio() {
@@ -5692,60 +6403,6 @@
           : { step: "document_pipeline", status: "failed" };
         lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
         lsSetCourseTaskBusy(false);
-      });
-  }
-
-  function lsRunCourseStep(kind, endpoint, label, body) {
-    var stepMap = { structure: "structure", claims: "claims", components: "components", graph: "graph" };
-    lsState.pipelineTask = { step: stepMap[kind] || kind, status: "running" };
-    lsSetCourseTaskBusy(true);
-    lsShowProgress(label + "を開始しています...", "info");
-    apiFetch(endpoint, {
-      method: "POST",
-      body: body || "{}",
-    })
-      .then(function (res) {
-        if (!res.ok) {
-          return res.json().then(function (errBody) {
-            throw new Error((errBody && errBody.detail) || label + "を開始できませんでした");
-          }, function () {
-            throw new Error(label + "を開始できませんでした");
-          });
-        }
-        return res.json();
-      })
-      .then(function (data) {
-        lsPollGenericCourseTask(data.task_id, label, stepMap[kind] || kind);
-      })
-      .catch(function (err) {
-        lsState.pipelineTask = { step: stepMap[kind] || kind, status: "failed" };
-        lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
-        lsSetCourseTaskBusy(false);
-      });
-  }
-
-  function lsRunCourseStepWithRetryConfirm(kind, endpoint, label) {
-    lsShowProgress(label + "の状態を確認しています...", "info");
-    apiFetch("/admin/courses/" + lsState.courseId + "/analysis-status")
-      .then(function (res) {
-        if (!res.ok) throw new Error("解析状態を確認できませんでした");
-        return res.json();
-      })
-      .then(function (status) {
-        var step = status[kind] || {};
-        var force = false;
-        if (step.complete) {
-          var ok = window.confirm(label + "は解析済です。解析済のデータも含めてすべて再度実行しますか？");
-          if (!ok) {
-            lsHideProgress();
-            return;
-          }
-          force = true;
-        }
-        lsRunCourseStep(kind, endpoint, label, JSON.stringify({ force: force }));
-      })
-      .catch(function (err) {
-        lsShowProgress((err && err.message) || "解析状態を確認できませんでした", "error");
       });
   }
 

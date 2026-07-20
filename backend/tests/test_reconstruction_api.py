@@ -62,6 +62,159 @@ class TestAdminRBAC:
         assert r.json()["k_anonymity"] == 3
 
 
+class _DummySession:
+    def close(self):
+        pass
+
+
+class TestReviewQueueCourseScope:
+    """レビュー指摘2: course_id 指定時は document_id より優先し、コースの全 source
+    教材に紐づく item を集約する（複数教材コースで先頭教材のみになる欠落の解消）。"""
+
+    def test_course_id_aggregates_multiple_documents(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.reconstruction as route_mod
+        import services
+
+        monkeypatch.setattr(route_mod, "user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr(
+            services, "_fetch_course_data_row",
+            lambda cid: {"sources": [{"material_id": "m1"}, {"material_id": "m2"}]},
+        )
+        monkeypatch.setattr(route_mod, "_pg_session", lambda: _DummySession())
+        monkeypatch.setattr(
+            route_mod, "_course_scope",
+            lambda session, course_data, topic_id=None: {
+                "material_ids": ["m1", "m2"],
+                "doc_refs": ["m1", "m2", "doc-uuid-1", "doc-uuid-2"],
+                "topic_chunk_ids": [],
+            },
+        )
+        captured = {}
+
+        def _fake_get_review_queue(document_id=None, document_ids=None):
+            captured["document_id"] = document_id
+            captured["document_ids"] = document_ids
+            return {"items": [{"item_id": "x"}], "k_anonymity": 3}
+
+        monkeypatch.setattr(route_mod, "get_review_queue", _fake_get_review_queue)
+
+        r = client.get(
+            "/api/admin/reconstruction/items/review-queue?course_id=c1",
+            headers=_auth(teacher),
+        )
+        assert r.status_code == 200
+        assert r.json()["items"] == [{"item_id": "x"}]
+        # document_id より course_id 由来の集約(document_ids) が優先される
+        assert captured["document_id"] is None
+        assert captured["document_ids"] == ["m1", "m2", "doc-uuid-1", "doc-uuid-2"]
+
+    def test_course_id_takes_priority_over_document_id(self, client_and_tokens, monkeypatch):
+        """両方指定時は course_id を優先する。"""
+        client, _s, teacher = client_and_tokens
+        import routes.reconstruction as route_mod
+        import services
+
+        monkeypatch.setattr(route_mod, "user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr(services, "_fetch_course_data_row", lambda cid: {"sources": [{"material_id": "m1"}]})
+        monkeypatch.setattr(route_mod, "_pg_session", lambda: _DummySession())
+        monkeypatch.setattr(
+            route_mod, "_course_scope",
+            lambda session, course_data, topic_id=None: {"material_ids": ["m1"], "doc_refs": ["m1"], "topic_chunk_ids": []},
+        )
+        captured = {}
+
+        def _fake_get_review_queue(document_id=None, document_ids=None):
+            captured["document_id"] = document_id
+            captured["document_ids"] = document_ids
+            return {"items": [], "k_anonymity": 3}
+
+        monkeypatch.setattr(route_mod, "get_review_queue", _fake_get_review_queue)
+
+        r = client.get(
+            "/api/admin/reconstruction/items/review-queue?course_id=c1&document_id=other-doc",
+            headers=_auth(teacher),
+        )
+        assert r.status_code == 200
+        assert captured["document_ids"] == ["m1"]
+
+    def test_course_id_forbidden_is_fail_closed_404(self, client_and_tokens, monkeypatch):
+        """閲覧権限が無いコースは 404（admin.py の既存コース閲覧ガードと同じ規約。403 にしない）。"""
+        client, _s, teacher = client_and_tokens
+        import routes.reconstruction as route_mod
+
+        monkeypatch.setattr(route_mod, "user_can_view_course", lambda uid, cid: False)
+        r = client.get(
+            "/api/admin/reconstruction/items/review-queue?course_id=c1",
+            headers=_auth(teacher),
+        )
+        assert r.status_code == 404
+
+    def test_course_id_missing_course_data_is_404(self, client_and_tokens, monkeypatch):
+        client, _s, teacher = client_and_tokens
+        import routes.reconstruction as route_mod
+        import services
+
+        monkeypatch.setattr(route_mod, "user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr(services, "_fetch_course_data_row", lambda cid: None)
+        r = client.get(
+            "/api/admin/reconstruction/items/review-queue?course_id=c1",
+            headers=_auth(teacher),
+        )
+        assert r.status_code == 404
+
+    def test_course_id_with_no_sources_returns_empty_items(self, client_and_tokens, monkeypatch):
+        """sources が空のコースは doc_refs も空になり、document_ids=[] で get_review_queue
+        に委譲される（health.py 側の fail-closed 挙動は test_reconstruction_loop.py で検証）。"""
+        client, _s, teacher = client_and_tokens
+        import routes.reconstruction as route_mod
+        import services
+
+        monkeypatch.setattr(route_mod, "user_can_view_course", lambda uid, cid: True)
+        monkeypatch.setattr(services, "_fetch_course_data_row", lambda cid: {"sources": []})
+        monkeypatch.setattr(route_mod, "_pg_session", lambda: _DummySession())
+        monkeypatch.setattr(
+            route_mod, "_course_scope",
+            lambda session, course_data, topic_id=None: {"material_ids": [], "doc_refs": [], "topic_chunk_ids": []},
+        )
+        captured = {}
+
+        def _fake_get_review_queue(document_id=None, document_ids=None):
+            captured["document_ids"] = document_ids
+            return {"items": [], "k_anonymity": 3}
+
+        monkeypatch.setattr(route_mod, "get_review_queue", _fake_get_review_queue)
+
+        r = client.get(
+            "/api/admin/reconstruction/items/review-queue?course_id=c1",
+            headers=_auth(teacher),
+        )
+        assert r.status_code == 200
+        assert r.json() == {"items": [], "k_anonymity": 3}
+        assert captured["document_ids"] == []
+
+    def test_no_course_id_keeps_existing_document_id_behavior(self, client_and_tokens, monkeypatch):
+        """course_id 未指定時は従来どおり document_id をそのまま渡す（既存挙動を維持）。"""
+        client, _s, teacher = client_and_tokens
+        import routes.reconstruction as route_mod
+
+        captured = {}
+
+        def _fake_get_review_queue(document_id=None, document_ids=None):
+            captured["document_id"] = document_id
+            captured["document_ids"] = document_ids
+            return {"items": [], "k_anonymity": 3}
+
+        monkeypatch.setattr(route_mod, "get_review_queue", _fake_get_review_queue)
+        r = client.get(
+            "/api/admin/reconstruction/items/review-queue?document_id=doc1",
+            headers=_auth(teacher),
+        )
+        assert r.status_code == 200
+        assert captured["document_id"] == "doc1"
+        assert captured["document_ids"] is None
+
+
 class TestLearnerGating:
     def test_next_requires_auth(self, client_and_tokens):
         client, _s, _t = client_and_tokens

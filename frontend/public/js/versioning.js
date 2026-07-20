@@ -4,7 +4,12 @@
  * ES5 / IIFE。window.Versioning を公開。admin.js の initApp() から
  * Versioning.init({apiFetch: apiFetch, state: state}) で起動する。
  *
- * - openModal(objectType, objectId, title): 所有者向け（発行 / 版履歴 / 削除予約・取消）
+ * - openModal(objectType, objectId, title): 版管理モーダル。所有者は発行 / 版履歴 /
+ *   削除予約・取消のフル操作、非所有者（editor / viewer）にも読み取り専用で開く
+ *   （N10残: 版履歴・現在版・自分のピン状態・削除予定バナーは表示し、発行・削除予約は
+ *   「所有者のみ操作できます」の理由付きで無効化。隠さない）。権限判定はサーバの
+ *   version-state レスポンス（is_owner / can_publish / can_schedule_deletion / role）を
+ *   使い、フラグ未取得・API 失敗時は false 扱いの fail-closed。
  * - initInbox(): 共有先向け通知インボックス（更新あり → 取り込む / 削除予定バナー）
  *
  * API は /api/admin/shared/... （apiFetch は /api を前置し、Response を返す）。
@@ -89,6 +94,29 @@
     });
   }
 
+  // 非所有者向けの「あなたが見ている版」の事実文を作る（宣言しない・数値スコアなし）。
+  // editor はピンせず常に HEAD（作業版）を読む仕様のため、その旨を正直に表示する。
+  function _viewingLine(state, releases) {
+    var role = state.role || "viewer";
+    if (role === "editor") {
+      return "あなたは編集者のため、常に最新の作業版（発行前の内容を含む）を見ています。版へのピン留めはありません。";
+    }
+    if (state.pinned_version_no) {
+      var line = "あなたが見ている版: v" + state.pinned_version_no + "（取り込むまでこの版に留まります）";
+      if (state.update_available) line += "。新しい版が発行されています";
+      return line;
+    }
+    // 未ピン viewer は有効版（active）を見る。releases から version_no を引く。
+    if (state.active_release_id) {
+      var activeNo = null;
+      for (var i = 0; i < releases.length; i++) {
+        if (releases[i].id === state.active_release_id) { activeNo = releases[i].version_no; break; }
+      }
+      if (activeNo) return "あなたが見ている版: v" + activeNo + "（現行の発行版）";
+    }
+    return "まだ版が発行されていないため、現在は最新の内容が表示されています。";
+  }
+
   function _renderModal(objectType, objectId, title, state, releases) {
     var body = document.getElementById("vg-body");
     var banner = document.getElementById("vg-banner");
@@ -96,6 +124,12 @@
 
     var lifecycle = state.lifecycle || "active";
     var pending = lifecycle === "pending_deletion";
+    // 権限フラグ（version-state レスポンス）。未取得・API 失敗（state={}）は
+    // false 扱いの fail-closed（=== true の厳密判定）。
+    var isOwner = state.is_owner === true;
+    var canPublish = state.can_publish === true;
+    var canScheduleDel = state.can_schedule_deletion === true;
+    var ownerOnlyNote = "所有者のみ操作できます";
 
     if (banner) {
       if (pending) {
@@ -104,7 +138,8 @@
             '<div style="font-size:13px;color:var(--color-text-danger,#c00);font-weight:600">削除予定</div>' +
             '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">期限 <b>' + esc(fmtDate(state.delete_purge_after)) + '</b> 以降、全ユーザーから物理削除されます。' +
             (state.delete_reason ? ' 理由: ' + esc(state.delete_reason) : '') + '</div>' +
-            '<button id="vg-cancel-del" style="margin-top:8px;background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px">削除予約を取り消す</button>' +
+            '<button id="vg-cancel-del"' + (isOwner ? '' : ' disabled') + ' style="margin-top:8px;background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:4px 10px;border-radius:4px;cursor:' + (isOwner ? 'pointer' : 'not-allowed') + ';font-size:12px' + (isOwner ? '' : ';opacity:0.5') + '">削除予約を取り消す</button>' +
+            (isOwner ? '' : '<span style="font-size:11px;color:var(--color-text-tertiary);margin-left:8px">' + esc(ownerOnlyNote) + '</span>') +
           '</div>';
       } else {
         banner.innerHTML = "";
@@ -118,34 +153,59 @@
     } else {
       histHtml = releases.map(function (r) {
         var isActive = state.active_release_id && r.id === state.active_release_id;
+        var isPinned = state.pinned_release_id && r.id === state.pinned_release_id;
         return '<div style="border:1px solid var(--color-border,#ddd);border-radius:6px;padding:8px 10px;margin-bottom:6px;display:flex;justify-content:space-between;align-items:center">' +
           '<div><b style="font-size:13px;color:var(--color-text-primary)">v' + esc(r.version_no) + '</b>' +
           (isActive ? ' <span style="font-size:10px;background:var(--color-text-success,#2a7);color:#fff;padding:1px 6px;border-radius:3px">現行</span>' : '') +
+          (isPinned ? ' <span style="font-size:10px;background:var(--color-text-info,#06c);color:#fff;padding:1px 6px;border-radius:3px">あなたの版</span>' : '') +
           '<div style="font-size:11px;color:var(--color-text-tertiary)">' + esc(fmtDate(r.created_at)) + (r.note ? ' — ' + esc(r.note) : '') + '</div></div>' +
           '</div>';
       }).join("");
     }
 
+    // 発行セクション: 所有者はフル操作、非所有者は理由付きで無効化（隠さない）。
+    var publishHtml = "";
+    if (!pending) {
+      if (canPublish) {
+        publishHtml =
+          '<textarea id="vg-note" placeholder="この版のメモ（任意。例: 第3章を修正）" style="width:100%;box-sizing:border-box;min-height:48px;font-size:12px;padding:6px;border:1px solid var(--color-border,#ccc);border-radius:4px"></textarea>' +
+          '<button id="vg-publish" style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:13px">共有版として発行</button>';
+      } else {
+        publishHtml =
+          '<button id="vg-publish" disabled style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:not-allowed;font-size:13px;opacity:0.5">共有版として発行</button>' +
+          '<span style="font-size:11px;color:var(--color-text-tertiary);margin-left:8px">' + esc(ownerOnlyNote) + '</span>';
+      }
+    }
+
+    // 削除予約セクション: 同じく非所有者には理由付きで無効化して見せる。
+    var deletionHtml = "";
+    if (!pending) {
+      var delDisabled = canScheduleDel ? '' : ' disabled';
+      var delStyleExtra = canScheduleDel ? '' : ';opacity:0.5';
+      deletionHtml =
+        '<div style="margin-top:16px;border-top:1px solid var(--color-border,#eee);padding-top:12px">' +
+          '<h4 style="font-size:13px;margin:0 0 6px 0;color:var(--color-text-danger,#c00)">削除の予約</h4>' +
+          '<p style="font-size:11px;color:var(--color-text-tertiary);margin:0 0 6px">猶予日数を指定して削除を予約します。共有先に通知され、期限後に全ユーザーから物理削除されます。' +
+          (canScheduleDel ? '' : ' ' + esc(ownerOnlyNote) + '。') + '</p>' +
+          '<label style="font-size:12px;color:var(--color-text-secondary)">猶予日数 <input id="vg-grace" type="number" min="1" value="14"' + delDisabled + ' style="width:64px;padding:4px;border:1px solid var(--color-border,#ccc);border-radius:4px' + delStyleExtra + '"></label> ' +
+          '<input id="vg-reason" type="text" placeholder="理由（任意）"' + delDisabled + ' style="width:200px;padding:4px;border:1px solid var(--color-border,#ccc);border-radius:4px;font-size:12px' + delStyleExtra + '"> ' +
+          '<button id="vg-schedule-del"' + delDisabled + ' style="background:none;border:1px solid var(--color-text-danger,#c00);color:var(--color-text-danger,#c00);padding:4px 10px;border-radius:4px;cursor:' + (canScheduleDel ? 'pointer' : 'not-allowed') + ';font-size:12px' + delStyleExtra + '">削除を予約</button>' +
+        '</div>';
+    }
+
     body.innerHTML =
       '<div style="margin-bottom:14px">' +
         '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px">現在の最新版: <b>' + (latest ? 'v' + esc(latest) : '未発行') + '</b></div>' +
-        (pending ? '' :
-          '<textarea id="vg-note" placeholder="この版のメモ（任意。例: 第3章を修正）" style="width:100%;box-sizing:border-box;min-height:48px;font-size:12px;padding:6px;border:1px solid var(--color-border,#ccc);border-radius:4px"></textarea>' +
-          '<button id="vg-publish" style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:13px">共有版として発行</button>') +
+        (isOwner ? '' :
+          '<div style="font-size:12px;color:var(--color-text-secondary);border:1px solid var(--color-border,#ddd);border-radius:6px;padding:8px 10px;margin-bottom:8px;background:rgba(0,100,200,0.04)">' + esc(_viewingLine(state, releases)) + '</div>') +
+        publishHtml +
       '</div>' +
       '<h4 style="font-size:13px;margin:12px 0 8px 0;color:var(--color-text-secondary)">版の履歴</h4>' +
       histHtml +
-      (pending ? '' :
-        '<div style="margin-top:16px;border-top:1px solid var(--color-border,#eee);padding-top:12px">' +
-          '<h4 style="font-size:13px;margin:0 0 6px 0;color:var(--color-text-danger,#c00)">削除の予約</h4>' +
-          '<p style="font-size:11px;color:var(--color-text-tertiary);margin:0 0 6px">猶予日数を指定して削除を予約します。共有先に通知され、期限後に全ユーザーから物理削除されます。</p>' +
-          '<label style="font-size:12px;color:var(--color-text-secondary)">猶予日数 <input id="vg-grace" type="number" min="1" value="14" style="width:64px;padding:4px;border:1px solid var(--color-border,#ccc);border-radius:4px"></label> ' +
-          '<input id="vg-reason" type="text" placeholder="理由（任意）" style="width:200px;padding:4px;border:1px solid var(--color-border,#ccc);border-radius:4px;font-size:12px"> ' +
-          '<button id="vg-schedule-del" style="background:none;border:1px solid var(--color-text-danger,#c00);color:var(--color-text-danger,#c00);padding:4px 10px;border-radius:4px;cursor:pointer;font-size:12px">削除を予約</button>' +
-        '</div>') +
+      deletionHtml +
       '<div id="vg-status" style="margin-top:10px;font-size:12px"></div>';
 
-    _bindModalActions(objectType, objectId, title);
+    _bindModalActions(objectType, objectId, title, isOwner);
   }
 
   function _setStatus(msg, kind) {
@@ -156,8 +216,12 @@
     el.textContent = msg;
   }
 
-  function _bindModalActions(objectType, objectId, title) {
+  function _bindModalActions(objectType, objectId, title, isOwner) {
     var base = "/admin/shared/" + encodeURIComponent(objectType) + "/" + encodeURIComponent(objectId);
+
+    // 非所有者はサーバ側でも 404 で拒否されるが、UI 側でもハンドラを張らない
+    // （disabled 属性 + 未バインドの二重防御。fail-closed）。
+    if (isOwner !== true) return;
 
     var pub = document.getElementById("vg-publish");
     if (pub) pub.addEventListener("click", function () {
@@ -180,12 +244,27 @@
       var grace = parseInt((document.getElementById("vg-grace") || {}).value, 10);
       var reason = (document.getElementById("vg-reason") || {}).value || "";
       if (!grace || grace < 1) { _setStatus("猶予日数を1以上で指定してください", "error"); return; }
-      if (!window.confirm("削除を予約します。期限後に全ユーザーから物理削除されます。よろしいですか？")) return;
-      sched.disabled = true;
-      apiFetch(base + "/deletion", { method: "POST", body: JSON.stringify({ grace_days: grace, reason: reason }) })
-        .then(function (res) { if (!res.ok) return res.json().then(function (b) { throw b; }); return res.json(); })
-        .then(function () { _setStatus("削除を予約しました", "success"); _loadModal(objectType, objectId, title); })
-        .catch(function (b) { sched.disabled = false; _setStatus((b && b.detail) || "予約に失敗しました", "error"); });
+
+      function _doScheduleDeletion() {
+        sched.disabled = true;
+        apiFetch(base + "/deletion", { method: "POST", body: JSON.stringify({ grace_days: grace, reason: reason }) })
+          .then(function (res) { if (!res.ok) return res.json().then(function (b) { throw b; }); return res.json(); })
+          .then(function () { _setStatus("削除を予約しました", "success"); _loadModal(objectType, objectId, title); })
+          .catch(function (b) { sched.disabled = false; _setStatus((b && b.detail) || "予約に失敗しました", "error"); });
+      }
+
+      // admin.js の共通2段確認モーダル（明示ボタンクリック必須）があればそれを使い、
+      // 無ければ従来の window.confirm() にフォールバックする。
+      if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+        window.AdminDangerConfirm.open({
+          title: "削除の予約",
+          message: "削除を予約します。期限後に全ユーザーから物理削除されます。よろしいですか？",
+          confirmLabel: "予約する",
+        }, _doScheduleDeletion);
+      } else {
+        if (!window.confirm("削除を予約します。期限後に全ユーザーから物理削除されます。よろしいですか？")) return;
+        _doScheduleDeletion();
+      }
     });
 
     var cancel = document.getElementById("vg-cancel-del");
@@ -202,26 +281,30 @@
   // 共有先向け通知インボックス
   // -------------------------------------------------------------------------
 
+  // 通知ベルはトップバーの常設ボタン（admin.html の #vg-inbox-btn）を使う。
+  // 以前この位置は右下の常設フローティングボタンだったが、「AI アシスタントへの
+  // アクセスを良くする」ため位置を入れ替え、右下フローティングは Admin Copilot（🤖）に譲った。
   function initInbox() {
-    if (document.getElementById("vg-inbox-btn")) return;
-    var btn = document.createElement("button");
-    btn.id = "vg-inbox-btn";
-    btn.title = "共有物の更新通知";
-    btn.style.cssText = "position:fixed;right:18px;bottom:18px;width:44px;height:44px;border-radius:50%;border:none;background:var(--color-text-info,#06c);color:#fff;font-size:20px;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,0.25);z-index:9998";
-    btn.innerHTML = "🔔<span id=\"vg-inbox-badge\" style=\"position:absolute;top:-4px;right:-4px;background:var(--color-text-danger,#c00);color:#fff;border-radius:10px;font-size:10px;min-width:16px;height:16px;line-height:16px;display:none\"></span>";
+    var btn = document.getElementById("vg-inbox-btn");
+    if (!btn || btn.dataset.vgInboxBound) return;
+    btn.dataset.vgInboxBound = "1";
+    var badge = document.createElement("span");
+    badge.id = "vg-inbox-badge";
+    badge.style.cssText = "margin-left:3px;font-size:11px";
+    btn.appendChild(badge);
     btn.addEventListener("click", _toggleInbox);
-    document.body.appendChild(btn);
     _refreshInbox();
     _inboxTimer = setInterval(_refreshInbox, 60000);
   }
 
   function _refreshInbox() {
+    var badge = document.getElementById("vg-inbox-badge");
     apiFetch("/admin/notifications").then(json).then(function (data) {
-      var badge = document.getElementById("vg-inbox-badge");
       if (!badge) return;
       var n = (data && data.unread_count) || 0;
-      badge.textContent = n > 9 ? "9+" : String(n);
-      badge.style.display = n > 0 ? "block" : "none";
+      badge.textContent = n > 0 ? (n > 9 ? " (9+)" : " (" + n + ")") : "";
+      badge.style.color = n > 0 ? "var(--color-text-danger,#e24b4a)" : "var(--color-text-secondary,#6e6e73)";
+      badge.style.fontWeight = n > 0 ? "600" : "normal";
     }).catch(function () {});
   }
 
@@ -230,7 +313,7 @@
     if (existing) { existing.remove(); return; }
     var panel = document.createElement("div");
     panel.id = "vg-inbox-panel";
-    panel.style.cssText = "position:fixed;right:18px;bottom:70px;width:360px;max-height:60vh;overflow:auto;background:var(--color-bg-primary,#fff);border:1px solid var(--color-border,#ddd);border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,0.2);z-index:9998;padding:12px";
+    panel.style.cssText = "position:fixed;top:46px;right:20px;width:340px;max-width:calc(100vw - 32px);max-height:60vh;overflow:auto;background:var(--color-background-primary,#fff);border:1px solid var(--color-border-secondary,#d2d2d7);border-radius:12px;box-shadow:0 20px 48px rgba(0,0,0,0.24);z-index:10045;padding:12px";
     panel.innerHTML =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
         '<b style="font-size:14px;color:var(--color-text-primary)">共有物の更新通知</b>' +
@@ -283,6 +366,15 @@
     if (n.kind === "course_script_failed") return t + "の原稿生成に失敗しました";
     if (n.kind === "course_audio_completed") return t + "の音声生成が完了しました";
     if (n.kind === "course_audio_failed") return t + "の音声生成に失敗しました";
+    // 分野マップ ドメインライフサイクル（migration 057, atlas_binding_lifecycle_design.md §3.4）
+    if (n.kind === "atlas_skeleton_frozen") {
+      var frozenPayload = n.payload || {};
+      return "分野マップ『" + (frozenPayload.domain_key || "") + "』の版 " + (frozenPayload.version || "?") + " が凍結されました";
+    }
+    if (n.kind === "atlas_domain_retired") {
+      var retiredPayload = n.payload || {};
+      return "分野マップ『" + (retiredPayload.domain_key || "") + "』が廃止されました";
+    }
     return t + "の更新";
   }
 
@@ -321,7 +413,10 @@
         _adopt(objectType, objectId).then(function (ok) {
           var doneLabel = objectType === "document" ? "確認済み" : "取り込み済み";
           adoptBtn.textContent = ok ? doneLabel : "再読込してください";
-          apiFetch("/admin/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" });
+          // 取り込みに失敗したら未読のまま残す（成功時のみ既読化する）。
+          if (ok) {
+            apiFetch("/admin/notifications/" + encodeURIComponent(id) + "/read", { method: "POST" });
+          }
           _refreshInbox(); _loadInboxList();
         });
       });

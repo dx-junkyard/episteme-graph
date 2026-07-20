@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from core.course_data import course_chapters, course_source_material_ids, course_title, course_topics
+from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.postgres import get_session as _pg_session
 
@@ -91,7 +92,8 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             return {"status": "waiting_for_pipeline", "updated_topics": 0}
 
         chunks_by_material = _load_chunks(session, material_ids)
-        enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material)
+        figures_index = _load_document_figures_index(session, document_ids)
+        enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material, figures_index)
         draft_result = _generate_course_topic_drafts(course, enriched_topics)
         course["topics"] = enriched_topics
         course["referenced_sections"] = _referenced_sections_from_topics(enriched_topics)
@@ -109,6 +111,7 @@ def build_course_content(user_id: str, course_id: str) -> dict:
                 "draft_errors": draft_result["draft_errors"],
             },
         )
+        _invalidate_topic_lecture_audio_cache(session, course_id)
         _save_course(session, course_id, course)
         return {
             "status": "completed",
@@ -121,6 +124,27 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         raise
     finally:
         session.close()
+
+
+def _invalidate_topic_lecture_audio_cache(session, course_id: str) -> None:
+    """コース内容生成が全トピックの student_material/spoken_script を無条件上書き
+
+    （``_generate_course_topic_drafts`` / ``_apply_deterministic_topic_draft_fallback``）
+    するため、生成済みのトピック音声キャッシュ (``topic_lecture_audio_cache``) を
+    無効化する。個別トピック編集時の DELETE
+    （``routes/lecture_studio/topics.py::save_lecture_studio_course_topic``）と同じ方針で、
+    次回の音声生成で作り直される。全トピックが無条件上書きされるため、トピック単位
+    ではなくコース単位で削除する。呼び出し元 ``build_course_content`` の
+    try/except/finally（rollback・close）にそのまま乗るよう、commit はしない
+    （``_save_course`` の commit と同一トランザクションでまとめて確定する）。
+    """
+    session.execute(
+        sa_text("""
+            DELETE FROM topic_lecture_audio_cache
+            WHERE course_id = :course_id
+        """),
+        {"course_id": course_id},
+    )
 
 
 def _course_material_ids(course: dict) -> list[str]:
@@ -215,6 +239,11 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
     equations: dict[str, dict] = {}
     claims: dict[str, dict] = {}
     evidence: dict[str, dict] = {}
+    # claim_id -> [{"document_id", "figure_key", "caption"}] の逆引き索引。図⇄claim
+    # リンクの正本は FigureRecord.linked_claim_ids の一箇所（figure_concept_linking_design
+    # の決定）であり、claim 側には figure_ids が populate されないため、ここで明示的に
+    # 逆方向へたどる（Phase 4 §7.1）。
+    figure_claim_links: dict[str, list[dict]] = {}
 
     for document_id, artifacts in artifacts_by_doc.items():
         mapping = _as_dict(artifacts.get("course_mapping"))
@@ -264,12 +293,40 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
                 item.setdefault("document_id", document_id)
                 evidence[str(item["evidence_id"])] = item
 
+        # figure_table_semantics (FigureRecord) を claim_id → 図 の逆引き索引にする。
+        # FigureRecord.figure_id は caption ラベルをそのまま使う表記（例 'fig_3.3'、
+        # ピリオド保持）で振られる一方、document_figures.figure_key は
+        # _normalize_figure_key により非英数字→アンダースコア正規化された表記
+        # （例 'fig_3_3'）になる（バグB）。両者は素朴な文字列一致では章番号付き
+        # ラベルで一致しないため、ここでは document_figures.id (UUID) の解決を先送り
+        # し figure_key のまま保持しておいて、_topic_evidence_links 側で
+        # figures_index（_resolve_figure_ref 経由、normalize_figure_join_key で
+        # 両辺を正規化してから突合）を使って解決する。
+        fig_tbl_artifact = _as_dict(artifacts.get("figure_table_semantics"))
+        for fig in _as_list(fig_tbl_artifact.get("figures")):
+            if not isinstance(fig, dict):
+                continue
+            figure_key = str(fig.get("figure_id") or "").strip()
+            if not figure_key:
+                continue
+            caption = str(fig.get("caption") or "")
+            for claim_id in _as_list(fig.get("linked_claim_ids")):
+                claim_id = str(claim_id or "").strip()
+                if not claim_id:
+                    continue
+                figure_claim_links.setdefault(claim_id, []).append({
+                    "document_id": document_id,
+                    "figure_key": figure_key,
+                    "caption": caption,
+                })
+
     return {
         "mapping_topics": mapping_topics,
         "components": components,
         "equations": equations,
         "claims": claims,
         "evidence": evidence,
+        "figure_claim_links": figure_claim_links,
     }
 
 
@@ -302,9 +359,89 @@ def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
     return chunks
 
 
-def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[str, list[dict]]) -> list[dict]:
+def _load_document_figures_index(session, document_ids: list[str]) -> dict[str, dict]:
+    """図のコース流通（Phase 4 §7.1）向けに ``document_figures`` を軽量索引化する。
+
+    ``figure_images.load_document_figures`` は図配信 API 向けの重い列
+    （bbox / inner_labels / analysis_profile 等）まで読むため、根拠リンク生成のような
+    id 解決だけの用途には使わず、専用の軽量クエリにする。索引は2通りのキーを持つ:
+
+    - ``figure_id``（``document_figures.id`` の UUID 文字列）: component の
+      ``source_scope.figure_id`` から直接解決できる経路用
+    - ``"{document_id}::{normalize_figure_join_key(figure_key)}"``: figure_table_semantics の
+      ``FigureRecord.linked_claim_ids`` 逆引き（figure_key しか分からない）経路用。
+      ``document_figures.figure_key`` は既に ``normalize_figure_join_key`` と同じ規則
+      （非英数字→アンダースコア）で生成されているはずだが、突合側（呼び出し元）が
+      ``fig_3.3`` のようなピリオド保持表記を渡してくることがあるため、ここでも
+      正規化してから索引キーを合成し、突合を冪等にする（バグB修正）。
+    """
+    if not document_ids:
+        return {}
+    params = {f"did_{idx}": did for idx, did in enumerate(document_ids)}
+    placeholders = ", ".join(f":did_{idx}" for idx in range(len(document_ids)))
+    rows = session.execute(
+        sa_text(f"""
+            SELECT id::text, document_id, figure_key, caption_text
+            FROM document_figures
+            WHERE document_id IN ({placeholders})
+              AND status = 'extracted'
+        """),
+        params,
+    ).fetchall()
+    index: dict[str, dict] = {}
+    for row in rows:
+        figure_id = str(row[0] or "")
+        document_id = str(row[1] or "")
+        figure_key = str(row[2] or "")
+        caption = str(row[3] or "")
+        if not figure_id:
+            continue
+        item = {
+            "figure_id": figure_id,
+            "figure_key": figure_key,
+            "document_id": document_id,
+            "caption": caption,
+        }
+        index[figure_id] = item
+        normalized_key = normalize_figure_join_key(figure_key)
+        if document_id and normalized_key:
+            index[f"{document_id}::{normalized_key}"] = item
+    return index
+
+
+def _resolve_figure_ref(
+    figures_index: dict[str, dict],
+    *,
+    figure_id: str | None = None,
+    document_id: str | None = None,
+    figure_key: str | None = None,
+) -> dict | None:
+    """figures_index から図参照を解決する（figure_id 優先、無ければ document_id+figure_key）。
+
+    figure_key は ``FigureRecord.figure_id``（caption ラベル生。ピリオド保持、
+    例 ``fig_3.3``）と ``document_figures.figure_key``（非英数字→アンダースコア正規化、
+    例 ``fig_3_3``）とで表記が異なるため（バグB）、``normalize_figure_join_key`` で
+    正規化してから ``_load_document_figures_index`` と同じキー規則で lookup する。
+    """
+    figure_id = str(figure_id or "").strip()
+    if figure_id and figure_id in figures_index:
+        return figures_index[figure_id]
+    document_id = str(document_id or "").strip()
+    normalized_key = normalize_figure_join_key(figure_key)
+    if document_id and normalized_key:
+        return figures_index.get(f"{document_id}::{normalized_key}")
+    return None
+
+
+def _enrich_topics(
+    topics: list[dict],
+    bundle: dict,
+    chunks_by_material: dict[str, list[dict]],
+    figures_index: dict[str, dict] | None = None,
+) -> list[dict]:
     enriched: list[dict] = []
     all_chunks = [chunk for chunks in chunks_by_material.values() for chunk in chunks]
+    figures_index = figures_index or {}
     for index, raw_topic in enumerate(topics):
         topic = dict(raw_topic) if isinstance(raw_topic, dict) else {"title": str(raw_topic)}
         mapping, mapping_confidence = _best_mapping(topic, bundle["mapping_topics"], index)
@@ -325,6 +462,8 @@ def _enrich_topics(topics: list[dict], bundle: dict, chunks_by_material: dict[st
             bundle.get("claims") or {},
             bundle.get("evidence") or {},
             mapping_confidence,
+            figures_index=figures_index,
+            figure_claim_links=bundle.get("figure_claim_links") or {},
         )
 
         fallback_formulas = _fallback_formulas(fallback_chunk)
@@ -399,14 +538,29 @@ def _topic_evidence_links(
     claims_by_id: dict[str, dict],
     evidence_by_id: dict[str, dict],
     confidence: str,
+    *,
+    figures_index: dict[str, dict] | None = None,
+    figure_claim_links: dict[str, list[dict]] | None = None,
 ) -> list[dict]:
     """Build the authoritative 根拠リンク list consumed by the lecture studio UI.
 
-    Surfaces component / equation / claim / source references with summaries so
-    the frontend can resolve `![[component:id]]` / `![[equation:id]]` /
-    `![[claim:id]]` / `![[source:id]]` embeds. Without this, `topic.evidence_links`
-    stayed empty and any claim/source reference rendered as "未解決".
+    Surfaces component / equation / claim / source / figure references with
+    summaries so the frontend can resolve `![[component:id]]` /
+    `![[equation:id]]` / `![[claim:id]]` / `![[source:id]]` /
+    `![[figure:id]]` embeds. Without this, `topic.evidence_links` stayed empty
+    and any claim/source/figure reference rendered as "未解決".
+
+    Figures (kind='figure', Phase 4 §7.1) are derived deterministically via two
+    routes, never invented: (1) components whose `source_scope.figure_id` /
+    `figure_key` point at a `document_figures` row (apparatus/device candidate
+    components), and (2) claims linked to a figure through
+    `FigureRecord.linked_claim_ids` (figure_concept_linking_design's single
+    source of truth), resolved to the concrete `document_figures.id` UUID via
+    `figures_index`. `figure_claim_links` is the claim_id -> figure reverse
+    index built by `_collect_structured_content`.
     """
+    figures_index = figures_index or {}
+    figure_claim_links = figure_claim_links or {}
     links: list[dict] = []
     seen: set[tuple[str, str]] = set()
 
@@ -419,6 +573,7 @@ def _topic_evidence_links(
         latex: str | None = None,
         plain_text: str | None = None,
         label: str | None = None,
+        extra: dict | None = None,
     ) -> None:
         target_id = str(target_id or "").strip()
         if not target_id:
@@ -448,6 +603,10 @@ def _topic_evidence_links(
             link["plain_text"] = plain_text
         if label:
             link["label"] = label
+        if extra:
+            for extra_key, extra_value in extra.items():
+                if extra_value not in (None, ""):
+                    link[extra_key] = extra_value
         links.append(link)
 
     for component in components:
@@ -502,7 +661,287 @@ def _topic_evidence_links(
         else:
             add("source", evidence_id, evidence_text, evidence_role)
 
+    def add_figure(figure_ref: dict | None) -> None:
+        if not figure_ref:
+            return
+        figure_id = str(figure_ref.get("figure_id") or "")
+        if not figure_id:
+            return
+        add(
+            "figure",
+            figure_id,
+            figure_ref.get("caption") or "",
+            "figure",
+            extra={
+                "figure_id": figure_id,
+                "figure_key": figure_ref.get("figure_key") or "",
+                "document_id": figure_ref.get("document_id") or "",
+                "caption": figure_ref.get("caption") or "",
+            },
+        )
+
+    # 経路1: 装置候補コンポーネントは source_scope.figure_id / figure_key で図に
+    # 直接紐づく（apparatus_components.py が付与）。figures_index で
+    # document_figures.id (UUID) / caption を解決する。
+    for component in components:
+        source_scope = component.get("source_scope")
+        if not isinstance(source_scope, dict):
+            continue
+        comp_figure_id = source_scope.get("figure_id")
+        comp_figure_key = source_scope.get("figure_key")
+        if not comp_figure_id and not comp_figure_key:
+            continue
+        add_figure(_resolve_figure_ref(
+            figures_index,
+            figure_id=comp_figure_id,
+            document_id=component.get("document_id"),
+            figure_key=comp_figure_key,
+        ))
+
+    # 経路2: component の linked_claim_ids から、その claim を参照している図
+    # （FigureRecord.linked_claim_ids の逆引き、figure_claim_links）を辿る。
+    # claim → 図の対応が無い（本文メンション無し）図は正直にスキップする（P4）。
+    for claim_id in _linked_ids(components, "linked_claim_ids"):
+        for figure_link in figure_claim_links.get(str(claim_id), []):
+            resolved = _resolve_figure_ref(
+                figures_index,
+                document_id=figure_link.get("document_id"),
+                figure_key=figure_link.get("figure_key"),
+            )
+            if resolved and not resolved.get("caption") and figure_link.get("caption"):
+                resolved = {**resolved, "caption": figure_link["caption"]}
+            add_figure(resolved)
+
     return links
+
+
+# ---------------------------------------------------------------------------
+# 教材埋め込み ``![[kind:id]]`` の学習画面向け解決 DTO（evidence_items）
+# ---------------------------------------------------------------------------
+#
+# 授業用ドラフト（admin-lecture-studio.js の lsRenderCourseMaterialPreview /
+# lsTopicEvidenceItems）は topic の evidence_links / content_blocks /
+# linked_component_ids / source_excerpt を使って全 kind の ``![[kind:id]]`` を
+# クライアント側で解決していた。一方 get_topic_material は本文と数式・図しか渡さず、
+# 学習画面レンダラ（app.js renderMaterialChunk）は equation / figure 以外を常に
+# 「未解決」表示にしていた（同じ教材 DSL に対し解決コンテキストが画面ごとに違う不整合）。
+#
+# build_topic_evidence_items は admin と同一の抽出・正規化規則で、学習者へ公開して
+# よい参照だけから読み取り専用 DTO を組み立てる。DB 上の任意 ID をクライアント入力
+# から自由に解決する経路は作らない（ここに現れる参照＝そのトピックで公開済みの参照）。
+
+_EVIDENCE_ID_EQ_PREFIX_RE = re.compile(r"^(?:eq_){2,}", re.IGNORECASE)
+
+
+def normalize_evidence_id(value: object) -> str:
+    """教材埋め込み ``![[kind:id]]`` の id を正規化する（両画面共通の正本規則）。
+
+    frontend の ``lsNormalizeEvidenceId``（admin-lecture-studio.js）と
+    ``normalizeMaterialEvidenceId``（app.js）と**同一仕様**にする:
+    空白除去 → 先頭 ``[[`` / 末尾 ``]]`` を最大2回剥がす → 旧二重 ``eq_``
+    プレフィックス（``eq_eq_F2`` → ``eq_F2``）を畳み込む。これにより同じ ID が
+    両画面で同じ解決キーになる（差分は test_topic_material_evidence_items が固定する）。
+    """
+    s = str(value if value is not None else "").strip()
+    for _ in range(2):
+        if s.startswith("[["):
+            s = s[2:]
+        if s.endswith("]]"):
+            s = s[:-2]
+    s = s.strip()
+    s = _EVIDENCE_ID_EQ_PREFIX_RE.sub("eq_", s)
+    return s
+
+
+def _topic_content_block_formulas(topic: dict) -> list[dict]:
+    """``topic.content_blocks`` の equations を UI 数式アイテムへ変換する。
+
+    admin ``lsTopicFormulas`` / routes の ``_topic_formulas_from_content_blocks`` と
+    同じ規則（latex が無くても plain_text / raw_text があれば残す）。
+    """
+    formulas: list[dict] = []
+    for block in (topic or {}).get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "equations":
+            continue
+        for item in block.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            if not (item.get("latex") or item.get("plain_text") or item.get("raw_text")):
+                continue
+            formulas.append({
+                "id": item.get("equation_id") or f"TOPIC_FORMULA_{len(formulas)}",
+                "label": item.get("label") or "",
+                "latex": item.get("latex") or "",
+                "plain_text": item.get("plain_text") or "",
+                "raw_text": item.get("raw_text") or "",
+            })
+    return formulas
+
+
+def _topic_component_block_item(topic: dict, component_id: object) -> dict:
+    """``content_blocks`` の components ブロックから component_id 一致アイテムを引く
+    （admin ``lsTopicComponentById`` と同じ探索）。無ければ空 dict。"""
+    norm = normalize_evidence_id(component_id)
+    for block in (topic or {}).get("content_blocks") or []:
+        if not isinstance(block, dict) or block.get("type") != "components":
+            continue
+        for item in block.get("items") or []:
+            if isinstance(item, dict) and normalize_evidence_id(item.get("component_id")) == norm:
+                return item
+    return {}
+
+
+def build_topic_evidence_items(topic: dict) -> list[dict]:
+    """学習画面向けの読み取り専用 evidence DTO を、トピックに公開済みの参照だけから
+    決定論的に組み立てる（admin ``lsTopicEvidenceItems`` と同一規則）。
+
+    学習画面が ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` /
+    ``![[equation:id]]`` / ``![[figure:id]]`` を解決するための材料。供給元は
+    ``learning_courses.data`` に保存済みの ``topic.evidence_links`` /
+    ``content_blocks`` / ``linked_component_ids`` / ``source_excerpt`` /
+    ``summary`` のみ（コース再生成不要）。**DB 上の任意 ID をクライアント入力から
+    解決しない** — ここに現れる参照＝そのトピックで公開してよい参照。
+
+    各アイテムの共通フィールド: ``kind`` / ``id``（正規化済み）/ ``title`` /
+    ``summary`` / ``role`` / ``confidence``。種別固有: equation は
+    ``latex`` / ``plain_text`` / ``raw_text``、figure は ``figure_id`` /
+    ``figure_key`` / ``caption``、latex を持つ source は ``latex``。
+    """
+    topic = topic or {}
+    items: list[dict] = []
+
+    formula_by_norm: dict[str, dict] = {}
+    for formula in _topic_content_block_formulas(topic):
+        formula_by_norm[normalize_evidence_id(formula.get("id"))] = formula
+
+    confidence = str(topic.get("content_confidence") or "")
+
+    # 1) evidence_links（component / equation / claim / source / figure）— 正本の根拠リンク。
+    for link in topic.get("evidence_links") or []:
+        if not isinstance(link, dict):
+            continue
+        kind = str(link.get("kind") or "source")
+        raw_id = link.get("target_id") or link.get("id") or ""
+        if kind == "equation":
+            norm = normalize_evidence_id(raw_id)
+            formula = formula_by_norm.get(norm) or {}
+            items.append({
+                "kind": "equation",
+                "id": norm,
+                # 生 LaTeX をタイトルに出さない（ラベル or 正規化 ID）。
+                "title": link.get("label") or formula.get("label") or norm,
+                "summary": link.get("summary") or "",
+                "latex": link.get("latex") or formula.get("latex") or "",
+                "plain_text": link.get("plain_text") or formula.get("plain_text") or "",
+                "raw_text": formula.get("raw_text") or "",
+                "role": link.get("support_role") or "equation",
+                "confidence": link.get("confidence") or "",
+            })
+            continue
+        if kind == "figure":
+            fig_id = str(link.get("figure_id") or raw_id or "")
+            caption = link.get("caption") or ""
+            items.append({
+                "kind": "figure",
+                "id": normalize_evidence_id(fig_id),
+                "figure_id": fig_id,
+                "figure_key": link.get("figure_key") or "",
+                "caption": caption,
+                "title": "図: " + _short_excerpt(caption or fig_id or "図", limit=40),
+                "summary": caption,
+                "role": link.get("support_role") or "figure",
+                "confidence": link.get("confidence") or "",
+            })
+            continue
+        # source / claim / component。equation_quote など生 TeX を summary に持つ source は
+        # latex に移して数式描画させる（admin と同じ切り詰め回避ガード）。
+        latex = link.get("latex") or ""
+        summary = link.get("summary") or ""
+        if not latex and _looks_like_tex_math(summary):
+            latex = summary
+            summary = ""
+        if latex:
+            title = link.get("label") or ("数式引用" if link.get("support_role") == "equation_quote" else "数式")
+        else:
+            title = summary or str(raw_id) or kind
+        item = {
+            "kind": kind,
+            "id": normalize_evidence_id(raw_id),
+            "title": title,
+            "summary": summary,
+            "role": link.get("support_role") or "",
+            "confidence": link.get("confidence") or "",
+        }
+        if latex:
+            item["latex"] = latex
+        items.append(item)
+
+    # 2) linked_component_ids: evidence_links に無い component を content_blocks から補う。
+    for cid in topic.get("linked_component_ids") or []:
+        block_component = _topic_component_block_item(topic, cid)
+        title = block_component.get("label") or block_component.get("component_id") or ""
+        summary = block_component.get("teaching_takeaway") or block_component.get("summary") or ""
+        items.append({
+            "kind": "component",
+            "id": normalize_evidence_id(cid),
+            "title": title or str(cid),
+            "summary": summary or "このトピックに関連付けられた論理コンポーネントです。",
+            "role": "support",
+            "confidence": confidence,
+        })
+
+    # 3) content_blocks の equations（本文が式を直接埋め込むケース）。
+    for formula in _topic_content_block_formulas(topic):
+        norm = normalize_evidence_id(formula.get("id"))
+        items.append({
+            "kind": "equation",
+            "id": norm,
+            "title": formula.get("label") or norm,
+            "summary": formula.get("plain_text") or formula.get("latex") or "",
+            "latex": formula.get("latex") or "",
+            "plain_text": formula.get("plain_text") or "",
+            "raw_text": formula.get("raw_text") or "",
+            "role": "equation",
+            "confidence": confidence,
+        })
+
+    # 4) source_excerpt（原文抜粋）。
+    if topic.get("source_excerpt"):
+        chunk_ids = topic.get("linked_chunk_ids") or []
+        excerpt_id = str(chunk_ids[0]) if chunk_ids else "excerpt"
+        items.append({
+            "kind": "source",
+            "id": normalize_evidence_id(excerpt_id),
+            "title": "原文抜粋",
+            "summary": topic.get("source_excerpt") or "",
+            "role": "source_span",
+            "confidence": confidence,
+        })
+
+    # 5) トピック概要（``![[source:topic_summary]]`` / ``![[source:summary]]``）。
+    #    course_content_builder のプロンプトが明示的に許可する参照（本文が概要を指す）。
+    if topic.get("summary"):
+        summary_text = _short_excerpt(str(topic.get("summary") or ""), limit=260)
+        for sid in ("topic_summary", "summary"):
+            items.append({
+                "kind": "source",
+                "id": sid,
+                "title": "トピック概要",
+                "summary": summary_text,
+                "role": "summary",
+                "confidence": confidence,
+            })
+
+    # dedup（``kind:normalized_id``、先勝ち — evidence_links を content_blocks より優先）。
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for item in items:
+        key = f"{item['kind']}:{item['id']}"
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped
 
 
 def _best_mapping(topic: dict, mapping_topics: list[dict], index: int) -> tuple[dict, str]:
@@ -708,11 +1147,12 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - インライン数式は `$...$`
 - ブロック数式は `$$...$$`
 - `\(...\)` や `\[...\]` は使わず、必ず `$...$` / `$$...$$` を使う
-- 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]` の形式を使う
+- 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]`, `![[figure:id]]` の形式を使う
 - 埋め込みに使ってよい kind と id の組み合わせは、根拠候補の `available_references` に列挙されたものだけ
 - `available_references` に無い id を発明してはならない。また id 本来の kind を変えて埋め込んではならない（例: component の id を `claim:` や `equation:` で埋め込まない）
 - 該当する根拠が `available_references` に無い場合は埋め込みを使わず、本文の言葉だけで説明する
 - `![[source:id]]` は `available_references` にある source span の id、または原文抜粋(source_excerpt)を指す `![[source:topic_summary]]` のみを使う
+- `![[figure:id]]` は `available_references` にある kind='figure' の id（供給された figure の id）のみ使用可。一覧に無い id を発明しない
 - 根拠候補の `content_blocks` に equations がある場合、トピック理解に必須の式を `![[equation:id]]` で教材欄に埋め込む
 - 数式を埋め込む前後には、その式が何を定義・変換・制約しているかを短く説明する
 - 数式を単に列挙せず、授業の流れの中で使う
@@ -842,6 +1282,7 @@ def _generate_single_topic_draft(
         parsed = _parse_topic_draft_json(raw)
     result = _normalize_topic_draft_response(parsed)
     _ensure_required_equations_in_material(result, topic)
+    _ensure_required_figures_in_material(result, topic)
     _ensure_check_question_details(result, topic)
     if not any([
         result["key_concepts"],
@@ -1115,6 +1556,63 @@ def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
     ordered_ids.extend(eq_id for eq_id in by_id if eq_id not in ordered_ids)
     required = [by_id[eq_id] for eq_id in ordered_ids if eq_id in by_id]
     return required[:limit]
+
+
+def _required_figure_items(topic: dict, limit: int = 5) -> list[dict]:
+    """topic の ``evidence_links``（kind='figure'）から本文へ注入すべき図一覧を導出する。
+
+    数式版 ``_required_equation_items`` と同じ発想: 既に解決済みの evidence
+    （``document_figures.id`` が判明しているもの）だけを対象にし、出現順・重複排除で
+    返す。id を発明しない（存在しない figure_id を作らない）。
+    """
+    items: list[dict] = []
+    seen: set[str] = set()
+    for link in topic.get("evidence_links") or []:
+        if not isinstance(link, dict) or link.get("kind") != "figure":
+            continue
+        figure_id = str(link.get("target_id") or link.get("figure_id") or "").strip()
+        if not figure_id or figure_id in seen:
+            continue
+        seen.add(figure_id)
+        items.append({
+            "figure_id": figure_id,
+            "caption": str(link.get("caption") or link.get("summary") or ""),
+        })
+    return items[:limit]
+
+
+def _ensure_required_figures_in_material(result: dict, topic: dict) -> None:
+    """トピックに紐づく図が本文に埋め込まれていなければ末尾へ決定論的に追記する。
+
+    数式の ``_ensure_required_equations_in_material`` と同格の決定論注入
+    （hierarchical_context_explanation_design.md Phase 4 §7.2）。LLM が
+    ``![[figure:id]]`` を書き漏らすと図が学習者に一切配信されない構造的弱点
+    （学習者向け配信の条件3が本文参照に依存するため）を埋める。``spoken_script``
+    は変更しない（v1 設計: 図は読み上げない）。
+    """
+    material = result.setdefault("student_material", {})
+    if not isinstance(material, dict):
+        material = {"source_format": "eg-markdown-v1", "source_text": str(material or "")}
+        result["student_material"] = material
+    material["source_format"] = material.get("source_format") or "eg-markdown-v1"
+    source_text = str(material.get("source_text") or "").strip()
+    required = _required_figure_items(topic)
+    missing = [
+        item for item in required
+        if item.get("figure_id") and f"![[figure:{item['figure_id']}]]" not in source_text
+    ]
+    if not missing:
+        material["source_text"] = source_text
+        return
+    lines = [source_text] if source_text else []
+    lines.extend(["", "### この節で参照する図"])
+    for item in missing:
+        figure_id = str(item.get("figure_id") or "")
+        caption = str(item.get("caption") or "").strip()
+        if caption:
+            lines.append(f"- {_short_excerpt(caption, limit=120)}")
+        lines.append(f"![[figure:{figure_id}]]")
+    material["source_text"] = "\n".join(line for line in lines if line is not None).strip()
 
 
 def _ensure_check_question_details(result: dict, topic: dict) -> None:

@@ -38,6 +38,7 @@ class TestSplitSlidesNoMarker:
             "display_text": "Hello world",
             "spoken_text": "Spoken hello",
             "formulas": [],
+            "figures": [],
         }]
 
     def test_none_display_and_spoken_yields_single_empty_slide(self):
@@ -477,8 +478,9 @@ class TestSequenceApiSlides:
         assert seg.slides[1].duration_ms == 4000
         assert seg.language == "en"
 
+    @patch("api.routes.lecture._pg_session")
     @patch("api.routes.lecture.get_course_data")
-    def test_draft_topic_sequence_returns_slides(self, mock_course):
+    def test_draft_topic_sequence_returns_slides(self, mock_course, mock_pg):
         from api.routes.lecture import get_lecture_sequence
 
         mock_course.return_value = {
@@ -489,6 +491,12 @@ class TestSequenceApiSlides:
             }],
             "sources": [],
         }
+        # トピック音声キャッシュは空（音声未生成）→ has_audio False + タイマー送り
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = []
+        session = MagicMock()
+        session.execute.return_value = audio_result
+        mock_pg.return_value = session
 
         resp = get_lecture_sequence("course-1", "topic-1", {"id": "u1"})
 
@@ -655,18 +663,53 @@ class TestAudioStatusSlideCalculation:
         assert result["stale_language"] is True
         assert result["language"] == "ja"
 
+    @patch("api.routes.lecture._pg_session")
     @patch("api.routes.lecture.get_course_data")
-    def test_draft_topic_audio_status_is_empty(self, mock_course):
+    def test_draft_topic_without_generated_audio_is_not_ready(self, mock_course, mock_session):
+        """トピック教材ベース（spoken_script あり）のトピックは、音声未生成なら
+        has_audio=False。ただしスライド自体は導出される（total_slides>=1）ので、音声を
+        生成すれば再生可能になる（旧仕様の「ドラフトは常に total_slides=0」から変更）。"""
         from api.routes.lecture import get_topic_audio_status
 
         mock_course.return_value = {
             "topics": [{"id": "t1", "spoken_script": "draft only"}],
         }
+        # topic_lecture_audio_cache は空（音声未生成）
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = []
+        session = MagicMock()
+        session.execute.return_value = audio_result
+        mock_session.return_value = session
+
         result = get_topic_audio_status("c1", "t1", {"id": "u1"})
 
         assert result["has_audio"] is False
-        assert result["total_slides"] == 0
+        assert result["total_slides"] == 1
         assert result["ready_slides"] == 0
+
+    @patch("api.routes.lecture._pg_session")
+    @patch("api.routes.lecture.get_course_data")
+    def test_draft_topic_with_generated_audio_is_ready(self, mock_course, mock_session):
+        """トピック音声が生成済みなら has_audio=True（実声で読み上げ可能）。"""
+        from api.routes.lecture import get_topic_audio_status
+
+        mock_course.return_value = {
+            "topics": [{"id": "t1", "spoken_script": "Speak A\n===\nSpeak B",
+                        "student_material": {"source_text": "Show A\n===\nShow B"}}],
+        }
+        # 両スライドとも ja でキャッシュ済み
+        audio_result = MagicMock()
+        audio_result.fetchall.return_value = [(0, "ja"), (1, "ja")]
+        session = MagicMock()
+        session.execute.return_value = audio_result
+        mock_session.return_value = session
+
+        result = get_topic_audio_status("c1", "t1", {"id": "u1"})
+
+        assert result["has_audio"] is True
+        assert result["total_slides"] == 2
+        assert result["ready_slides"] == 2
+        assert result["stale_language"] is False
 
     @patch("api.routes.lecture.get_course_data")
     def test_no_material_ids_audio_status_is_empty(self, mock_course):

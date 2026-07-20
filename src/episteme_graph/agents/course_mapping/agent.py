@@ -187,6 +187,16 @@ class CourseMappingAgent:
             str(d) for d in (_attr(component, "linked_derivation_ids") or []) if d
         ]
 
+        # Phase 4 §7.1: apparatus/device candidate components carry the figure
+        # they were derived from in source_scope.figure_id (see
+        # apparatus_components.py). Non-figure-derived components have no
+        # figure_id, so linked_figure_ids stays empty for them (no invention).
+        source_scope = _attr(component, "source_scope") or {}
+        figure_id = ""
+        if isinstance(source_scope, dict):
+            figure_id = str(source_scope.get("figure_id") or "").strip()
+        linked_figure_ids = [figure_id] if figure_id else []
+
         # Blackbox policy: derived from component_type
         blackbox_policy = self._default_blackbox_policy(comp_type, component)
 
@@ -198,6 +208,7 @@ class CourseMappingAgent:
             description=summary or label or "",
             linked_component_ids=[comp_id] if comp_id else [],
             linked_derivation_ids=linked_derivation_ids,
+            linked_figure_ids=linked_figure_ids,
             learning_objectives=objectives,
             prerequisite_concepts=prerequisite_concepts,
             introduced_concepts=introduced_concepts,

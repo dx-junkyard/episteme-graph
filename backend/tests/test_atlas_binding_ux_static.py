@@ -1,0 +1,145 @@
+"""分野マップ — コースバインディングの「該当なし」UX とドメインライフサイクルの静的回帰テスト。
+
+正本: docs/features/atlas_binding_lifecycle_design.md（AB1〜AB8、特に §8 フロントエンド）。
+バックエンド API（propose の domains_checked/retired_skipped/atlas_binding_pending・
+pending PUT/DELETE・retire/restore・freeze-impact 等）は別エージェントが並行実装しており、
+本ファイルはフロントエンド (frontend/public/js/admin.js, versioning.js, admin.html) の
+静的検証にとどめる（既存 test_atlas_operations_ux.py と同じ方式）。
+"""
+
+import re
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+def read(relative: str) -> str:
+    return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def test_binding_editor_does_not_fall_back_to_first_proposal():
+    """§2.1: 0一致でも先頭ドメインへ fallback しない。既定は「バインドしない」。"""
+    js = read("frontend/public/js/admin.js")
+    assert "proposals[0].domain_key" not in js
+    assert 'var initial = data.recommended || data.current_cartridge_id || "";' in js
+
+
+def test_binding_editor_shows_no_match_fact_and_three_exits():
+    """§2.1/2.2: 該当なしの事実文（N分野を照合）+ 3つの出口（手動対応・バインドしない・新分野作成）。"""
+    js = read("frontend/public/js/admin.js")
+    assert "var noMatch = !data.recommended && !data.current_cartridge_id;" in js
+    assert "対応する分野マップは見つかりませんでした" in js
+    assert "分野を照合" in js
+    assert "domains_checked" in js
+    assert "retired_skipped" in js
+    assert "廃止済み" in js and "照合対象外" in js
+    # 出口2: 今はバインドしなくても『次にやること』からいつでも再開できる（督促文にしない）
+    assert "今はバインドしなくても" in js and "次にやること" in js
+    # 出口3: このコースから新しい分野マップを作る
+    assert "このコースから新しい分野マップを作る" in js
+
+
+def test_binding_editor_shows_pending_note_with_cancel():
+    """§2.3: 凍結待ちの仮予約の表示 + 取り消しボタン（DELETE）。"""
+    js = read("frontend/public/js/admin.js")
+    assert "data.atlas_binding_pending" in js
+    assert "の骨格の凍結待ちです" in js
+    assert "ab-pending-cancel" in js
+    assert '"/atlas-binding/pending", { method: "DELETE" }' in js
+
+
+def test_binding_editor_new_domain_flow_calls_pending_then_generate():
+    """§2.3: 新分野作成ミニフォームが pending PUT → skeleton/generate の順で呼ぶこと。"""
+    js = read("frontend/public/js/admin.js")
+    assert "ab-new-domain-toggle" in js
+    assert "ab-new-domain-key" in js
+    assert "ab-new-domain-name" in js
+    assert "ab-new-domain-desc" in js
+    assert '/^[a-z0-9_]+$/' in js
+    # 仮予約 PUT (domain_key のみ送る) の一意な目印
+    pending_put_idx = js.index("body: JSON.stringify({ domain_key: key })")
+    generate_idx = js.index("/atlas/skeleton/generate")
+    assert pending_put_idx < generate_idx, "仮予約 (PUT pending) は generate 呼び出しより前に実行されること"
+    assert "atlas-binding/pending" in js and 'method: "PUT"' in js
+    assert "下書きの生成に失敗しました（仮予約は保存済み。分野の地図タブから再生成できます）" in js
+    assert "下書きを生成しました。『分野の地図』タブでレビュー・凍結してください。" in js
+
+
+def test_binding_editor_options_param_threads_course_title_and_description():
+    """options 引数（courseTitle/courseDescription）を受け取り、コース承認直後の呼び出しから渡すこと。"""
+    js = read("frontend/public/js/admin.js")
+    assert "function atlasBindingRenderEditor(bodyEl, statusEl, courseId, data, onSaved, options)" in js
+    assert "function atlasBindingPropose(courseId, bodyEl, statusEl, onSaved, options)" in js
+    assert "options.courseTitle" in js
+    assert "options.courseDescription" in js
+    assert "{ courseTitle: draft.title || \"\", courseDescription: draft.description || \"\" }" in js
+
+
+def test_binding_editor_confirms_zero_match_save():
+    """§2.4: 0一致のまま明示バインドを保存しようとしたときだけ window.confirm で確認する。"""
+    js = read("frontend/public/js/admin.js")
+    assert "domainSelect.value && !anyBound" in js
+    assert "window.confirm(" in js
+    assert "足がかり" in js
+
+
+def test_atlas_domain_lifecycle_ui_present():
+    """§3.1/§8.2: retired 表示・retire/restore ボタン・retired 中の編集ボタン無効化。"""
+    html = read("frontend/public/admin.html")
+    js = read("frontend/public/js/admin.js")
+    assert 'id="atlas-domain-retire"' in html
+    assert 'id="atlas-domain-restore"' in html
+    assert 'id="atlas-domain-retired-note"' in html
+    assert "domainLifecycles[d.domain_key] = d.lifecycle" in js
+    assert "（廃止済み）" in js
+    assert '"/atlas/retire"' in js
+    assert '"/atlas/restore"' in js
+    assert "function updateLifecycleUI()" in js
+    # retired 中は生成・保存・凍結ボタンを無効化する
+    assert "generateBtn.disabled = isRetired" in js
+    assert "saveDraftBtn.disabled = isRetired" in js
+    assert "freezeBtnEl.disabled = isRetired" in js
+
+
+def test_freeze_checks_impact_before_confirming():
+    """§3.2: 凍結実行前に freeze-impact を取得し、影響があれば事実文で確認する。
+
+    実行時の前後関係は Promise チェーンで決まる（凍結本体は openFreezeChecklist()
+    に包まれ、freeze-impact 取得の .then / .catch 両方から呼ばれる）ため、ソース上の
+    行順ではなく「関数定義 → 呼び出し」の構造で検証する。
+    """
+    js = read("frontend/public/js/admin.js")
+    assert "/atlas/freeze-impact" in js
+    assert "function openFreezeChecklist()" in js
+    definition_idx = js.index("function openFreezeChecklist()")
+    freeze_post_idx = js.index('basePath() + "/freeze"')
+    assert definition_idx < freeze_post_idx, "凍結 POST は openFreezeChecklist() 関数の内側にあること"
+
+    freeze_impact_idx = js.index("/atlas/freeze-impact")
+    call_sites = [m.start() for m in re.finditer(r"openFreezeChecklist\(\);", js)]
+    assert len(call_sites) >= 2, "openFreezeChecklist() は影響なし経路と best-effort 失敗経路の双方から呼ばれること"
+    assert all(freeze_impact_idx < c for c in call_sites), (
+        "openFreezeChecklist() の呼び出しは freeze-impact 取得より後（その .then/.catch 内）であること"
+    )
+    assert "removed_node_ids" in js
+    assert "affected_courses" in js
+    assert "概念が削除され" in js and "コースの対応が外れます" in js
+
+
+def test_notification_labels_added_for_atlas_lifecycle_events():
+    """§3.4/§8.3: 通知インボックスに atlas_skeleton_frozen / atlas_domain_retired のラベルを追加。"""
+    js = read("frontend/public/js/versioning.js")
+    assert 'n.kind === "atlas_skeleton_frozen"' in js
+    assert 'n.kind === "atlas_domain_retired"' in js
+    assert "が凍結されました" in js
+    assert "が廃止されました" in js
+
+
+def test_existing_atlas_operations_ux_still_holds():
+    """既存の状態起点 UX 回帰テストが引き続き成立する前提条件（壊していないことの粗い確認）。"""
+    html = read("frontend/public/admin.html")
+    js = read("frontend/public/js/admin.js")
+    assert 'id="atlas-overview"' in html
+    assert 'id="atlas-overview-action"' in js
+    assert "atlas:binding-saved" in js

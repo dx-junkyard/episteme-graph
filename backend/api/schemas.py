@@ -65,6 +65,10 @@ class MaterialOut(BaseModel):
     analysis_processed: int | None = None
     analysis_total: int | None = None
     analysis_error: str | None = None
+    # 最新 document_analysis_runs.options の JSONB（例: {"analyze_images": true}）。
+    # run が無ければ None。フロントが再解析モーダルで前回選択を復元するための契約
+    # フィールド（フィールド名 analysis_options は admin.js との確定契約）。
+    analysis_options: dict | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
@@ -140,6 +144,12 @@ class ChunkContent(BaseModel):
     text: str
     chunk_index: int
     formulas: list[dict] = []
+    figures: list[dict] = []  # Phase 4: 図のコース流通 §7.2（figure_id/caption/explanation/image_url）
+    # 学習画面向けの読み取り専用 evidence DTO（build_topic_evidence_items）。
+    # ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` / ``![[equation:id]]`` /
+    # ``![[figure:id]]`` を、そのトピックで公開済みの参照だけから解決するための材料。
+    # 管理画面の lsTopicEvidenceItems と同一規則で組み立てる（両画面の解決結果を揃える）。
+    evidence_items: list[dict] = []
     chapter: str | None = None
     section: str | None = None
     material_id: str | None = None
@@ -259,6 +269,10 @@ class LearningProgress(BaseModel):
     misconceptions: int = 0
     streak_days: int = 0
     sessions: list[LearningSession] = []
+    # コース完了判定のサーバー正本化: 保存済みの合格トピックと、それから毎回導出する完了状態
+    # (services.get_course_completion / calculate_progress)。
+    completed_topic_ids: list[str] = Field(default_factory=list)
+    course_completed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +358,9 @@ class LearningChatResponse(BaseModel):
     # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
     anchor_confirm: dict | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
+    # チャット型AI支援の共通基盤整理 §4: LLM 例外時に固定文へ縮退したターンかどうか
+    # （I3 会話は死なせない。degraded=true でも 200 を返し、履歴には保存済み）。
+    degraded: bool = False
 
 
 class LearningChatHistoryResponse(BaseModel):
@@ -363,6 +380,11 @@ class LearningCheckQuestionResponse(BaseModel):
     model_answer: str = ""
     answer_requirements: list[str] = Field(default_factory=list)
     explanation: str = ""
+    # コース完了判定のサーバー正本化: 合格時は services.record_topic_check_pass の永続化結果、
+    # 不合格時は services.get_course_completion の現況（topic_completed=False のまま）。
+    topic_completed: bool = False
+    course_completed: bool = False
+    completed_topic_ids: list[str] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -550,6 +572,19 @@ class LectureFormulaItem(BaseModel):
     review_reason: list[str] = Field(default_factory=list)
 
 
+class LectureFigureItem(BaseModel):
+    """スライド/セグメント内の図メタデータ（Phase 4: 図のコース流通 §7.2）。
+
+    ``![[figure:<figure_id>]]`` 埋め込みが ``core.lecture.resolve_figure_embeds`` で
+    ``[[FIGURE_N]]`` プレースホルダーに解決された際に生成される（DB には保存しない）。
+    """
+    id: str  # [[FIGURE_1]], [[FIGURE_2]], ...
+    figure_id: str  # document_figures.id (UUID)
+    caption: str | None = None
+    explanation: str | None = None  # v1 は常に None（後続エージェントが配線する）
+    image_url: str | None = None
+
+
 class LectureSlide(BaseModel):
     """レクチャーセグメント内の1スライド（migration 040: レクチャースライド同期 Phase 1）。
 
@@ -561,6 +596,7 @@ class LectureSlide(BaseModel):
     display_text: str
     spoken_text: str | None = None
     formulas: list[LectureFormulaItem] = []
+    figures: list[LectureFigureItem] = []
     has_audio: bool = False
     duration_ms: int = 0
 
@@ -572,6 +608,7 @@ class LectureSegment(BaseModel):
     text: str
     spoken_text: str
     formulas: list[LectureFormulaItem] = []
+    figures: list[LectureFigureItem] = []
     has_audio: bool = False
     duration_ms: int = 0
     segment_mode: str = "full"  # full | summary | skip
@@ -1051,7 +1088,11 @@ class LectureStudioSettings(BaseModel):
     response_persona: str = ""
     # レクチャースライド同期 + 音声言語切替 (migration 040 Phase 4): コース単位の読み上げ言語。
     # 不正値は pydantic のバリデーションで 422 になる。
-    lecture_language: Literal["ja", "en"] = "ja"
+    # 省略時は None（PUT では「変更しない」を意味し、前回保存済みの言語を保持する —
+    # 旧 default="ja" だと省略が明示的な "ja" 指定と区別できず、口調のみの設定保存で
+    # 既存の言語設定を無警告で ja に巻き戻していた）。GET レスポンスは常に解決済みの
+    # ja/en を返す（routes 側で _normalize_lecture_language により埋める）。
+    lecture_language: Literal["ja", "en"] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1249,6 +1290,23 @@ class AssistantActionSummary(BaseModel):
     status: str = "applied"
     created_at: str = ""
     reverted_at: str | None = None
+
+
+class AssistantCapabilityOut(BaseModel):
+    """GET /api/admin/assistant/capabilities の 1 行（実行可否の事前開示, N12）。
+
+    `executable` = kind=action かつ代行ハンドラ実装済み。False の action は
+    「道案内のみ対応」としてフロントが明示する。
+    """
+    id: str
+    screen: str
+    title: str
+    required_role: str
+    kind: str                                      # guidance_only | action
+    reversible: bool = True
+    confirm: bool = False
+    description: str = ""
+    executable: bool = False
 
 
 class NextStepOut(BaseModel):

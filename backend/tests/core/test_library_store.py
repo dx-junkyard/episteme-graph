@@ -22,7 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from core.library import seed as library_seed  # noqa: E402
 from core.library import store  # noqa: E402
-from core.library.store import LibraryConflictError, LibraryNotFoundError  # noqa: E402
+from core.library.store import (  # noqa: E402
+    LibraryConflictError,
+    LibraryNotFoundError,
+    LibraryRetiredError,
+)
 from tests.fixtures.library_entries_fake import (  # noqa: E402
     LibraryEntryTableFake,
     make_session_factory,
@@ -156,14 +160,30 @@ class TestFreezeEntry:
 class TestRetireRestore:
     def test_retire_sets_status_retired(self, fake):
         entry = _make_entry()
-        retired = store.retire_entry(entry["id"], updated_by="teacher-1")
+        retired, previous_status = store.retire_entry(entry["id"], updated_by="teacher-1")
         assert retired["status"] == "retired"
+        assert previous_status == "active"
 
     def test_restore_sets_status_active(self, fake):
         entry = _make_entry()
         store.retire_entry(entry["id"])
-        restored = store.restore_entry(entry["id"])
+        restored, previous_status = store.restore_entry(entry["id"])
         assert restored["status"] == "active"
+        assert previous_status == "retired"
+
+    def test_idempotent_transition_reports_actual_previous_status(self, fake):
+        """既に目的の status だった冪等呼び出しでも、遷移前 status は事実
+        （ハードコードの active/retired ではなく実際の現在値）を返す。"""
+        entry = _make_entry()
+        store.retire_entry(entry["id"])
+        retired_again, previous_status = store.retire_entry(entry["id"])
+        assert retired_again["status"] == "retired"
+        assert previous_status == "retired"
+
+        store.restore_entry(entry["id"])
+        restored_again, previous_status = store.restore_entry(entry["id"])
+        assert restored_again["status"] == "active"
+        assert previous_status == "active"
 
     def test_retire_missing_entry_raises_not_found(self, fake):
         with pytest.raises(LibraryNotFoundError):
@@ -174,6 +194,50 @@ class TestRetireRestore:
         store.retire_entry(entry["id"])
         assert store.list_entries(domain_key="particle_physics") == []
         assert len(store.list_entries(domain_key="particle_physics", include_retired=True)) == 1
+
+
+class TestRetiredIsReadOnly:
+    """N29: retired エントリは読み取り専用。draft 更新・凍結は LibraryRetiredError
+    （routes 側で 409 にマップ）。復元（restore）してからなら従来どおり編集できる。"""
+
+    def test_update_retired_entry_raises_retired_error(self, fake):
+        entry = _make_entry()
+        store.retire_entry(entry["id"])
+        with pytest.raises(LibraryRetiredError):
+            store.update_entry(entry["id"], expected_revision=entry["revision"], name="Renamed")
+        # 行は変更されていない（P4: retired の内容は保全される）。
+        current = store.get_entry(entry["id"])
+        assert current["name"] == "Vacuum chamber"
+        assert current["revision"] == entry["revision"]
+
+    def test_freeze_retired_entry_raises_retired_error(self, fake):
+        entry = _make_entry()
+        store.retire_entry(entry["id"])
+        with pytest.raises(LibraryRetiredError):
+            store.freeze_entry(entry["id"], embed_fn=lambda text: [0.1])
+        # 版は追加されていない。
+        assert store.list_versions(entry["id"]) == []
+
+    def test_restore_then_update_and_freeze_work(self, fake):
+        entry = _make_entry()
+        store.retire_entry(entry["id"])
+        store.restore_entry(entry["id"])
+        updated = store.update_entry(entry["id"], expected_revision=entry["revision"], name="Renamed")
+        assert updated["name"] == "Renamed"
+        version = store.freeze_entry(entry["id"], embed_fn=lambda text: [0.1])
+        assert version["version_no"] == 1
+
+    def test_retired_error_message_is_factual(self, fake):
+        entry = _make_entry()
+        store.retire_entry(entry["id"])
+        with pytest.raises(LibraryRetiredError) as exc:
+            store.update_entry(entry["id"], expected_revision=entry["revision"], name="x")
+        assert "復元" in str(exc.value)
+
+    def test_update_missing_entry_still_raises_not_found(self, fake):
+        """retired 事前チェックの追加で not-found の挙動が変わっていないこと。"""
+        with pytest.raises(LibraryNotFoundError):
+            store.update_entry("00000000-0000-0000-0000-000000000000", expected_revision=1, name="x")
 
 
 class TestSeedImportIdempotency:

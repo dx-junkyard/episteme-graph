@@ -222,6 +222,13 @@ def run_anchor_mining(user_id: str, course_id: str, topic_id: str | None) -> int
         claimed_ids = {str(r[0]) for r in claimed}
 
         if not _check_and_count_llm_call(user_id, course_id, topic_id or ""):
+            # コスト上限で解析できない問いは claim を解放する（P4: 帰属候補の機会を
+            # 無言で失わない）。上限リセット後の実行で未帰属として再取得される。
+            session.execute(
+                sa_text("UPDATE interest_traces SET payload = payload - 'anchor_analyzed_at' WHERE id::text = ANY(:ids)"),
+                {"ids": sorted(claimed_ids)},
+            )
+            session.commit()
             return 0
 
         course_row = session.execute(

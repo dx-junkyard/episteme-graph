@@ -19,6 +19,7 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
 from schemas import (
+    LectureFigureItem,
     LectureFormulaItem,
     LectureInterruptRequest,
     LectureInterruptResponse,
@@ -42,10 +43,13 @@ from core.course_data import (
 )
 from core.lecture import (
     build_lecture_sequence,
+    build_topic_slides,
     compute_material_audio_readiness,
+    compute_topic_audio_readiness,
     generate_spoken_text_and_formulas,
     get_course_lecture_language,
     get_user_mastered_concepts,
+    lecture_uses_topic_material,
     normalize_to_placeholder_format,
     split_slides,
 )
@@ -53,6 +57,7 @@ from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
+from core import element_explanations
 
 logger = logging.getLogger(__name__)
 
@@ -86,12 +91,17 @@ def get_lecture_sequence(
     if not topic_info:
         raise HTTPException(status_code=404, detail="Topic not found")
 
-    # 実チャンク教材（音声キャッシュ可能）を持つトピックは、たとえ student_material/
-    # content が設定されていても、チャンクベースの再生（下記）を優先する。ドラフト
-    # セグメントは実チャンク教材が無いトピックの代替手段としてのみ使う。
+    # レクチャーの表示ソースは、受講画面の非レクチャー教材表示（get_topic_material）と
+    # 同じ優先順位に揃える: トピックが授業用の教材本文（student_material）／読み上げ原稿
+    # （spoken_script）を持つなら、それを1トピック分のレクチャー教材として使う（表示＝
+    # 非レクチャー時と一致させる）。実チャンク教材しか無いトピックだけがチャンク経路
+    # （下記・PDF由来チャンク）へフォールバックする。音声はスライド単位で
+    # topic_lecture_audio_cache から解決する（_build_topic_draft_segment 内）。
+    # 述語・スライド分割の正本は core/lecture.py（lecture_uses_topic_material /
+    # build_topic_slides）。
     topic_segment = None
-    if not _topic_has_linkable_material(topic_info, course_data):
-        topic_segment = _build_topic_draft_segment(topic_id, topic_info, course_data)
+    if lecture_uses_topic_material(topic_info):
+        topic_segment = _build_topic_draft_segment(course_id, topic_id, topic_info, course_data)
     if topic_segment:
         return LectureSequenceResponse(
             course_id=course_id,
@@ -356,14 +366,17 @@ def generate_tts(
     """
     chunk_id = body.chunk_id
 
-    # topic: ドラフト原稿などキャッシュ不可（非 UUID）の chunk_id は音声未生成扱い。
-    if not _is_valid_uuid(chunk_id):
-        raise HTTPException(
-            status_code=404,
-            detail="この内容の音声はまだ生成されていません。管理画面で音声を生成してください。",
-        )
+    # トピック教材ベースのレクチャー（chunk_id="topic:{topic_id}"）はトピック音声
+    # キャッシュ (topic_lecture_audio_cache) から配信する。それ以外はチャンク音声。
+    topic_ref = _parse_topic_ref(chunk_id)
+    if topic_ref is not None:
+        cached = _get_topic_audio_cache(course_id, topic_ref, body.voice, body.slide_index)
+    elif _is_valid_uuid(chunk_id):
+        cached = _get_audio_cache(chunk_id, body.voice, body.slide_index)
+    else:
+        # キャッシュ不可（非 UUID かつ topic 形式でもない）は音声未生成扱い。
+        cached = None
 
-    cached = _get_audio_cache(chunk_id, body.voice, body.slide_index)
     if not cached:
         raise HTTPException(
             status_code=404,
@@ -411,14 +424,31 @@ def get_topic_audio_status(
         "stale_language": False,
     }
 
-    # ドラフト原稿ベースのトピックは topic: セグメントで再生され音声をキャッシュできない。
-    # ただし student_material/content/summary はほぼ全トピックに設定されるため、
-    # それだけで判定すると実チャンク教材を持つトピックまで無効化してしまう。
-    # 実チャンク教材（キャッシュ可能）が無い場合のみドラフト専用として扱う。
-    if not _topic_has_linkable_material(topic_info, course_data) and (
-        _topic_student_material(topic_info) or _topic_spoken_script(topic_info)
-    ):
-        return empty
+    # トピック教材ベースのレクチャー（表示＝非レクチャー教材表示と一致）は、
+    # トピック音声 (topic_lecture_audio_cache) の readiness で判定する。
+    # get_lecture_sequence の表示ソース判定（lecture_uses_topic_material）と同じ
+    # 述語を使い、ボタン活性・表示・音声生成の食い違いを防ぐ。判定の正本は
+    # core/lecture.py::compute_topic_audio_readiness（状態投影と同じ判定を共有）。
+    if lecture_uses_topic_material(topic_info):
+        session = _pg_session()
+        try:
+            readiness = compute_topic_audio_readiness(
+                session, course_id, topic_id, topic_info, lecture_language,
+            )
+        finally:
+            session.close()
+        ready_slides = readiness["ready_slides"]
+        return {
+            "course_id": course_id,
+            "topic_id": topic_id,
+            "has_audio": ready_slides > 0,
+            "ready_chunks": 1 if ready_slides > 0 else 0,
+            "total_chunks": 1,
+            "ready_slides": ready_slides,
+            "total_slides": readiness["total_slides"],
+            "language": lecture_language,
+            "stale_language": readiness["stale_language"],
+        }
 
     material_ids = course_source_material_ids(course_data)
     if not material_ids:
@@ -569,130 +599,213 @@ def _is_valid_uuid(value: str) -> bool:
         return False
 
 
-def _topic_student_material(topic: dict) -> str:
-    material = topic.get("student_material")
-    if isinstance(material, dict):
-        text = str(material.get("source_text") or "").strip()
-        if text:
-            return text
-    return str(topic.get("content") or topic.get("summary") or "").strip()
+# トピック教材の表示ソース判定（lecture_uses_topic_material）・スライド分割
+# （build_topic_slides）の正本は core/lecture.py に移設済み（N18: 状態投影
+# core/status/projector.py と readiness 判定を共有するため。core から routes を
+# import しない）。
 
 
-def _topic_spoken_script(topic: dict) -> str:
-    return str(topic.get("spoken_script") or topic.get("content") or topic.get("summary") or "").strip()
+def _resolve_course_document_ids(material_ids: list[str]) -> list[str]:
+    """コースソースの ``material_id``（``documents.source_path``）を ``documents.id``
+    （UUID 文字列）へ解決する（Phase 4 図のコース流通 §7.1/§7.2）。
 
-
-def _topic_has_linkable_material(topic: dict, course_data: dict) -> bool:
-    """トピックが実チャンク教材（音声を事前生成・キャッシュできる教材）を持つか判定する。
-
-    ``student_material``/``content``/``summary`` はコースビルダーが生成する
-    ほぼ全トピックに設定されるため、それらの有無だけでは「ドラフト専用トピックか」を
-    判定できない（実チャンクを持つトピックまで誤って無効化してしまう）。
-    実際にチャンク単位で音声をキャッシュできる教材があるかどうかで判定する。
+    ``document_figures.document_id`` は常に ``documents.id`` で保存される
+    （figure_image_extraction が orchestrator の document_id をそのまま使うため。
+    routes/admin.py の図配信エンドポイントと同じ前提）。
     """
-    if topic.get("material_chunk_ids"):
-        return True
-    return any(s.get("material_id") for s in course_sources(course_data))
+    if not material_ids:
+        return []
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+        params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
+        rows = session.execute(
+            sa_text(f"SELECT id::text FROM documents WHERE source_path IN ({placeholders})"),
+            params,
+        ).fetchall()
+        return [str(r[0]) for r in rows]
+    except Exception:
+        logger.warning("Failed to resolve document ids for course materials", exc_info=True)
+        return []
+    finally:
+        session.close()
 
 
-import re as _re
+def _course_document_ids(course_data: dict) -> list[str]:
+    """コースの ``sources[]`` から document_id 集合を導出する（``documents.id`` 単位、
+    重複除去。Phase 4 図のコース流通 §7.1/§7.3 条件2）。
 
-def _resolve_equation_embeds(
-    text: str,
-    evidence_links: list[dict],
-    existing_formulas: list[dict],
-) -> tuple[str, list[dict]]:
-    """![[equation:xxx]] / [[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに変換する。
-
-    evidence_links から LaTeX を取得できる場合はそれを使い、取得できない場合は
-    埋め込みを空文字列に除去する（生テキストをフロントに渡さない）。
+    ``sources[].document_id``（書き手不在の読み取り専用フィールドだが、
+    ``theory_components.py`` が既に読んでいる既存フィールドのため、明示された分は
+    そのまま採用する）と、``material_id``（``documents.source_path``）から解決した
+    document_id の両方を合わせる。
     """
-    eq_by_id: dict[str, dict] = {}
-    for link in (evidence_links or []):
-        if link.get("kind") == "equation":
-            tid = str(link.get("target_id") or "").strip()
-            if tid:
-                eq_by_id[tid] = link
+    explicit_ids = [
+        str(s["document_id"]) for s in course_sources(course_data) if s.get("document_id")
+    ]
+    resolved_ids = _resolve_course_document_ids(course_source_material_ids(course_data))
+    return list(dict.fromkeys(explicit_ids + resolved_ids))
 
-    formulas = list(existing_formulas)
-    formula_offset = len(formulas)
 
-    def _replace(m: _re.Match) -> str:
-        eq_id = m.group(1).strip()
-        link = eq_by_id.get(eq_id)
-        latex = str(link.get("latex") or "") if link else ""
-        summary = str(link.get("summary") or "") if link else ""
-        plain_text = str(link.get("plain_text") or "") if link else ""
-        idx = formula_offset + len(formulas) - len(existing_formulas)
-        placeholder = f"[[FORMULA_{idx}]]"
-        # 描画用 LaTeX は link.latex を最優先する。summary は意味要約（散文）の
-        # 場合があり、それを LaTeX として埋め込むと数式描画が壊れる。
-        body = latex or summary
-        if body:
-            formulas.append({
-                "id": placeholder,
-                "latex": body,
-                # 読み上げは人間向けテキストを優先する（生 TeX を読み上げない）。
-                "spoken": plain_text or summary or body,
-                "is_display": True,
-            })
-            return placeholder
-        # 解決できない場合は埋め込みを除去する（生テキストを見せない）
-        return ""
+def _load_course_figures_by_id(course_id: str, course_data: dict) -> dict[str, dict]:
+    """コースのソース教材に属する ``document_figures`` を、``core.lecture`` の記法解決
+    （``resolve_figure_embeds``）が使う ``figure_id -> {"caption", "image_url"}`` へ変換する
+    （Phase 4 図のコース流通 §7.1/§7.2）。
 
-    result = _re.sub(r"!\[\[equation:([^\]]+)\]\]", _replace, text)
-    result = _re.sub(r"\[\[equation:([^\]]+)\]\]", _replace, result)
-    return result, formulas
+    ``core/`` は DB を読まない方針のため、この供給は routes 層の責務。学習者向け
+    ``image_url`` は 3条件 fail-closed ゲート付きの学習者エンドポイント
+    （``GET /api/learning/courses/{course_id}/figures/{figure_id}/image``）を指す。
+
+    ``document_id`` も同梱する（``core.lecture`` の記法解決自体は使わないが、
+    Phase 2 §5.3 の説明充填 ``_attach_figure_explanations`` が element_explanations を
+    document 単位でグルーピングして読むために必要）。
+    """
+    document_ids = _course_document_ids(course_data)
+    if not document_ids:
+        return {}
+
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":did_{i}" for i in range(len(document_ids)))
+        params: dict = {f"did_{i}": did for i, did in enumerate(document_ids)}
+        rows = session.execute(
+            sa_text(f"""
+                SELECT id::text, caption_text, document_id
+                FROM document_figures
+                WHERE document_id IN ({placeholders}) AND status = 'extracted'
+            """),
+            params,
+        ).fetchall()
+    except Exception:
+        logger.warning("Failed to load course figures for course %s", course_id, exc_info=True)
+        return {}
+    finally:
+        session.close()
+
+    figures_by_id: dict[str, dict] = {}
+    for row in rows:
+        fig_id = str(row[0])
+        figures_by_id[fig_id] = {
+            "caption": row[1],
+            "image_url": f"/api/learning/courses/{course_id}/figures/{fig_id}/image",
+            "document_id": str(row[2]) if row[2] else None,
+        }
+    return figures_by_id
+
+
+def _attach_figure_explanations(
+    figures: list[dict],
+    figures_by_id: dict[str, dict],
+) -> None:
+    """図デスクリプタ（dict、``resolve_figure_embeds``/``build_topic_slides`` 由来）に、
+    承認済み contextual 説明を充填する（Phase 2 §5.3・element_explanations 由来）。
+
+    ``figures`` の各要素を in-place で書き換える（``explanation`` フィールドのみ）。
+    ``figures_by_id`` の各エントリの ``document_id``（``_load_course_figures_by_id`` が
+    付与する）でグルーピングし、``element_explanations.approved_for_elements`` を
+    document 単位で（コースのソース document 数ぶんだけ、通常1回）呼ぶ —
+    スライド/チャンク単位ループでの N+1 呼び出しを避ける。
+
+    approved の ``kind='contextual'`` のみを採用する（generic はここでは使わない —
+    descriptor は「この論文での役割」を示す文脈説明の場であるため。学習者へは
+    candidate/dismissed/superseded を一切出さない — ``approved_for_elements`` が
+    ``status='approved'`` のみ返すため混入しない、E2）。
+    """
+    referenced_ids = {
+        str(fig.get("figure_id") or "").strip()
+        for fig in figures
+        if isinstance(fig, dict) and fig.get("figure_id")
+    }
+    referenced_ids.discard("")
+    if not referenced_ids:
+        return
+
+    by_document: dict[str, list[str]] = {}
+    for fig_id in referenced_ids:
+        doc_id = (figures_by_id.get(fig_id) or {}).get("document_id")
+        if doc_id:
+            by_document.setdefault(str(doc_id), []).append(fig_id)
+    if not by_document:
+        return
+
+    explanations: dict[str, str] = {}
+    session = _pg_session()
+    try:
+        for doc_id, fig_ids in by_document.items():
+            refs = [(element_explanations.ELEMENT_TYPE_FIGURE, fid) for fid in fig_ids]
+            approved = element_explanations.approved_for_elements(session, doc_id, refs)
+            for (_etype, eid), rows in approved.items():
+                for row in rows:
+                    if row.get("kind") == element_explanations.KIND_CONTEXTUAL and row.get("body"):
+                        explanations[eid] = row["body"]
+                        break
+    except Exception:
+        logger.warning("Failed to load approved figure explanations", exc_info=True)
+        return
+    finally:
+        session.close()
+
+    if not explanations:
+        return
+    for fig in figures:
+        if not isinstance(fig, dict):
+            continue
+        fig_id = str(fig.get("figure_id") or "").strip()
+        if fig_id and fig_id in explanations:
+            fig["explanation"] = explanations[fig_id]
 
 
 def _build_topic_draft_segment(
+    course_id: str,
     topic_id: str,
     topic: dict,
     course_data: dict,
 ) -> LectureSegment | None:
-    """原稿スタジオの授業用ドラフトをレクチャー用セグメントに変換する。"""
-    display_text = _topic_student_material(topic)
-    spoken_text = _topic_spoken_script(topic)
-    if not display_text and not spoken_text:
+    """トピックの授業用教材（student_material / spoken_script）をレクチャー用セグメントに
+    変換する。
+
+    受講画面の非レクチャー教材表示（``get_topic_material``）と同じ student_material を
+    ``display_text`` に、``spoken_script`` を ``spoken_text`` に割り当て、
+    ``core.lecture.build_topic_slides`` でスライド分割する（長い教材は段落境界で自動ページ
+    分割）。``![[figure:id]]`` 埋め込みはコースのソース教材に属する document_figures から
+    解決し（Phase 4 §7.2）、各スライドの ``figures`` に割り当てる。各スライドの音声は
+    ``topic_lecture_audio_cache``（``(course_id, topic_id, slide_index)``）から解決し、
+    キャッシュ済みスライドは ``has_audio=True`` にする（教員が原稿スタジオで生成済みなら
+    実声で読み上げ、無ければ受講側でタイマー送りにフォールバックする。§6-4）。
+    """
+    figures_by_id = _load_course_figures_by_id(course_id, course_data)
+    slide_dicts, display_text, spoken_text, formulas = build_topic_slides(
+        topic, figures_by_id=figures_by_id,
+    )
+    if not slide_dicts:
         return None
 
-    evidence_links = topic.get("evidence_links") or []
+    # 図デスクリプタに承認済み contextual 説明を充填する（Phase 2 §5.3）。slide_dicts の
+    # 各スライドの "figures" は同一 dict オブジェクトへの参照（コピーではない）なので、
+    # ここで in-place に書き換えれば以降の segment_figures 集約にも反映される。
+    _attach_figure_explanations(
+        [fig for sd in slide_dicts for fig in sd.get("figures", [])],
+        figures_by_id,
+    )
 
-    narration_persona = course_persona_settings(course_data)["narration_persona"]
-    if not spoken_text:
-        result = generate_spoken_text_and_formulas(
-            display_text,
-            chunk_index=0,
-            course_data=course_data,
-            persona_id=narration_persona,
-            language=get_course_lecture_language(course_data),
-        )
-        spoken_text = result["spoken_text"]
-        display_text = result.get("display_text") or display_text
-        formulas = result.get("formulas") or []
-    else:
-        normalized, formulas = normalize_to_placeholder_format(display_text or spoken_text, [])
-        display_text = normalized
-
-    # ![[equation:xxx]] 埋め込みを [[FORMULA_N]] プレースホルダーに解決する
-    display_text, formulas = _resolve_equation_embeds(display_text, evidence_links, formulas)
-
-    display_text, formulas = normalize_to_placeholder_format(display_text or spoken_text, formulas)
-
-    # ドラフト専用トピックは音声をキャッシュできないため、スライドは常に has_audio=False
-    # （§2-4）。同じ === マーカー規約で複数スライドに分割する。
-    slide_dicts, _mismatch = split_slides(display_text, spoken_text, formulas)
+    # 各スライドの音声は topic_lecture_audio_cache から解決する（教員が生成済みなら has_audio=True）。
+    topic_audio_map = _get_topic_slide_audio_map(course_id, topic_id)
     slides = [
         LectureSlide(
             slide_index=sd["slide_index"],
             display_text=sd["display_text"],
             spoken_text=sd["spoken_text"],
             formulas=[LectureFormulaItem(**f) for f in sd["formulas"]],
-            has_audio=False,
-            duration_ms=0,
+            figures=[LectureFigureItem(**f) for f in sd.get("figures", [])],
+            has_audio=sd["slide_index"] in topic_audio_map,
+            duration_ms=topic_audio_map.get(sd["slide_index"], 0),
         )
         for sd in slide_dicts
     ]
+
+    # セグメント全体の figures はスライド単位の割り当てから合成する（formulas と同じ規約:
+    # build_topic_slides は display_text 全体から解決した figures をスライドに分配済み）。
+    segment_figures = [fig for sd in slide_dicts for fig in sd.get("figures", [])]
 
     return LectureSegment(
         chunk_id=f"topic:{topic_id}",
@@ -700,7 +813,8 @@ def _build_topic_draft_segment(
         text=display_text,
         spoken_text=spoken_text,
         formulas=[LectureFormulaItem(**f) for f in formulas],
-        has_audio=False,
+        figures=[LectureFigureItem(**f) for f in segment_figures],
+        has_audio=bool(topic_audio_map),
         duration_ms=0,
         segment_mode="full",
         slides=slides,
@@ -788,6 +902,88 @@ def _get_slide_audio_map(chunk_ids: list[str]) -> dict[tuple[str, int], int]:
         return {}
     finally:
         session.close()
+
+
+def _parse_topic_ref(chunk_id: str) -> str | None:
+    """``"topic:{topic_id}"`` 形式のセグメント chunk_id からトピックIDを取り出す。
+
+    トピック教材ベースのレクチャー（``_build_topic_draft_segment``）のセグメントは
+    UUID チャンクではなく ``topic:{topic_id}`` を chunk_id に持つ。学習側の TTS 配信は
+    この形式を検出して ``topic_lecture_audio_cache`` から音声を返す。
+    """
+    if isinstance(chunk_id, str) and chunk_id.startswith("topic:"):
+        return chunk_id[len("topic:"):]
+    return None
+
+
+def _get_topic_slide_audio_map(course_id: str, topic_id: str) -> dict[int, int]:
+    """トピックのスライド単位音声キャッシュ (``topic_lecture_audio_cache``) を一括取得する。
+
+    Returns
+    -------
+    dict[int, int]
+        ``slide_index -> duration_ms``（voice='alloy' のみ。学習画面の再生ボイス固定）。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT slide_index, duration_ms
+                FROM topic_lecture_audio_cache
+                WHERE course_id = :course_id AND topic_id = :topic_id AND voice = 'alloy'
+            """),
+            {"course_id": course_id, "topic_id": topic_id},
+        ).fetchall()
+        return {int(r[0]): int(r[1] or 0) for r in rows}
+    except Exception:
+        logger.warning(
+            "Failed to load topic slide audio map for %s/%s", course_id, topic_id, exc_info=True,
+        )
+        return {}
+    finally:
+        session.close()
+
+
+def _get_topic_audio_cache(
+    course_id: str, topic_id: str, voice: str, slide_index: int = 0,
+) -> dict | None:
+    """トピックのスライド音声キャッシュを取得する（``(course_id, topic_id, slide_index, voice)``）。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT audio_data, duration_ms, word_timestamps
+                FROM topic_lecture_audio_cache
+                WHERE course_id = :course_id AND topic_id = :topic_id
+                  AND voice = :voice AND slide_index = :slide_index
+                LIMIT 1
+            """),
+            {
+                "course_id": course_id, "topic_id": topic_id,
+                "voice": voice, "slide_index": slide_index,
+            },
+        ).fetchone()
+        if not row:
+            return None
+        audio_bytes = row[0]
+        if isinstance(audio_bytes, memoryview):
+            audio_bytes = bytes(audio_bytes)
+        return {
+            "audio_base64": base64.b64encode(audio_bytes).decode("utf-8"),
+            "duration_ms": row[1],
+            "word_timestamps": row[2] if row[2] else [],
+        }
+    except Exception:
+        logger.warning(
+            "Failed to get topic audio cache for %s/%s", course_id, topic_id, exc_info=True,
+        )
+        return None
+    finally:
+        session.close()
+
+
+# トピック教材ベースの音声 readiness 判定の正本は
+# core/lecture.py::compute_topic_audio_readiness に移設済み（N18）。
 
 
 def _build_slides_for_segment(

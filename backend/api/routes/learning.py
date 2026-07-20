@@ -8,8 +8,10 @@ import re
 import threading
 import uuid
 from dataclasses import asdict
+from typing import Callable
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
@@ -38,18 +40,22 @@ from services import (
     detect_and_record_misconception,
     dismiss_anchor_trace,
     dismiss_tension_trace,
+    get_accessible_course_data,
     get_anchor_digest,
     get_tension_digest,
     course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
+    get_course_completion,
     get_course_data,
     get_editable_course_data,
     get_viewable_course_data,
     get_chunk_passage,
+    get_chunk_claim_refs,
     get_graph_element_context,
     get_interest_traces,
     get_personal_layer,
+    get_trace_map_exclusion_flags,
     get_user_group_ids,
     log_unanswered_query,
     persist_chat_history,
@@ -57,8 +63,10 @@ from services import (
     record_internalization,
     record_interest_trace,
     record_student_stumble_event,
+    record_topic_check_pass,
     resolve_interest_trace,
     save_course_data,
+    set_trace_map_exclusion,
     delete_course_data,
     search_chunks_with_metadata,
     user_can_access_group,
@@ -71,15 +79,24 @@ from core.course_data import (
     course_topics,
     find_course_topic,
 )
+from core.config import get_settings
+from core.lecture import find_figure_embed_ids, resolve_figure_embeds
+from core import element_explanations
 from core.llm import generate_text, get_llm_params, transcribe_audio
+from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
+from core.llm_worker.client import resolve_model
+from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.history import window_history
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
+    TIER_SOURCE,
     aggregate_overall_tier,
     build_position_anchor,
     out_of_source_guard_instruction,
     out_of_source_notice,
+    tier_floor,
 )
 from core.learning_support_agent import (
     LearningSupportAgent,
@@ -88,7 +105,7 @@ from core.learning_support_agent import (
 )
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
-from core.course_content_builder import build_course_content_background
+from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
@@ -102,10 +119,57 @@ from core.structure_anchor.worker import (
     check_and_count_confirm_prompt,
     maybe_schedule_anchor_mining,
 )
+# Phase 4 図のコース流通 (§7.1/§7.2/§7.3): コースソース → document_id 解決と figure_id →
+# {caption, image_url} 供給は routes/lecture.py に実装済みの private helper を再利用する
+# （_ensure_document_viewable 等、private helper のクロスルーター再利用は既存の踏襲パターン）。
+# Phase 2 §5.3: 図デスクリプタへの承認済み説明充填（_attach_figure_explanations）と
+# material_id → document_id 解決（_resolve_course_document_ids）も同じ理由で再利用する。
+from routes.lecture import (
+    _attach_figure_explanations,
+    _course_document_ids,
+    _load_course_figures_by_id,
+    _resolve_course_document_ids,
+)
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/learning", tags=["Learning"])
+
+# ---------------------------------------------------------------------------
+# チャット型 AI 支援の共通基盤整理 §1: 学習チャット本体のコスト上限
+# （正本: docs/features/assistant_common_infra_design.md）。
+# CostGate は core/llm_worker/cost_gate.py の day-only 構成に委譲する（プロセス内
+# カウンタ・キーは (today, user_id)）。1 リクエスト = LLM を伴うリクエスト1回
+# （intent 分類〜本体まで含めて1）とし、多重カウントはリクエストスコープの状態
+# （_consume_learning_chat_quota の呼び出し側で保持する dict）で防止する。
+# ---------------------------------------------------------------------------
+_learning_chat_cost_gate = CostGate()
+
+
+def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
+    """そのリクエストで最初に LLM を呼ぶ直前に1回だけコスト上限を消費するヘルパー。
+
+    ``quota_state`` はリクエストスコープの mutable dict（``{"consumed": False}``）。
+    同一リクエスト内で複数回 LLM を呼んでも消費は1回のみ（学習チャットは intent 分類〜
+    本体まで含めて1、設計書 §1）。LLM を1度も呼ばないパス（承認済み説明があるグラフ
+    要素タップ等）からはそもそも呼ばれないため消費されない。超過時は 429（事実文のみ・
+    数値非表示, I2）。
+    """
+    if quota_state.get("consumed"):
+        return
+    quota_state["consumed"] = True
+    settings = get_settings()
+    limit = int(getattr(settings, "learning_chat_max_calls_per_day", 300) or 0)
+    ok = _learning_chat_cost_gate.check_and_count(
+        daily_limit=limit,
+        daily_key=(today_str(), user_id),
+    )
+    if not ok:
+        raise HTTPException(
+            status_code=429,
+            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Course CRUD
@@ -560,7 +624,12 @@ def _route_for_typed_action(support_action: str | None) -> str | None:
     return _TYPED_ACTION_INTENT.get(support_action.strip())
 
 
-def _classify_intent(message: str, course_title: str) -> str:
+def _classify_intent(
+    message: str,
+    course_title: str,
+    *,
+    on_llm_call: Callable[[], None] | None = None,
+) -> str:
     """ユーザーメッセージの意図を分類する (Intent Routing)。
 
     Returns
@@ -584,6 +653,9 @@ def _classify_intent(message: str, course_title: str) -> str:
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
     )
 
+    if on_llm_call:
+        on_llm_call()
+
     try:
         result = generate_text(
             messages=[{"role": "user", "content": prompt}],
@@ -606,6 +678,7 @@ def _generate_learning_advice_response(
     *,
     topic_info: dict | None = None,
     course_data: dict | None = None,
+    on_llm_call: Callable[[], None] | None = None,
 ) -> str:
     """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
@@ -670,6 +743,9 @@ def _generate_learning_advice_response(
         "※注意: ここでは具体的な解説（数式展開など）はまだ行わないこと。\n"
         "※注意: 選択肢ボタンはシステムが自動付与するので、本文に [ ] 形式のボタン記法は書かないこと。"
     )
+
+    if on_llm_call:
+        on_llm_call()
 
     try:
         return generate_text(
@@ -784,6 +860,121 @@ _ANCHOR_CONFIRM_DOUBT_OPTIONS = [
 ]
 
 
+def _document_id_for_material(material_id: str | None) -> str | None:
+    """学習チャットの ``material_id``（``documents.source_path``）を ``documents.id``
+    （UUID 文字列）へ解決する（Phase 2 §5.3: element_explanations は document_id
+    スコープのため）。既存の Phase 4 ヘルパー（``routes.lecture._resolve_course_document_ids``）
+    をそのまま再利用する（1件解決も含め同じ関数で扱う）。
+    """
+    mid = str(material_id or "").strip()
+    if not mid:
+        return None
+    ids = _resolve_course_document_ids([mid])
+    return ids[0] if ids else None
+
+
+def _element_explanation_ref_for_graph_context(context: dict) -> tuple[str, str] | None:
+    """グラフ要素ポップアップの (element_type, element_id) を、element_explanations の
+    ポリモーフィック語彙（figure/theory_component/theory_claim/equation）へマップする。
+
+    現状 ``services._derive_graph_mentions`` が生成する graph_mentions は、legacy な
+    ``documents.knowledge_graph``（PaperStructure 由来の concept/relationship）と
+    TeX 由来の citation/reference のみで、これらは theory_components/theory_claims と
+    ID 体系が異なるため対応不能（誤結合を避けるためマップしない）。唯一 ``formula`` は
+    ``chunks.formulas[].id`` が equation_semantics の ``equation_id`` と同一の ID 体系
+    （``persist_equation_previews_to_chunks`` 参照）のため ``equation`` としてマップできる。
+    ``element_type in ('component','theory_component')`` / ``('claim','theory_claim')`` は
+    現状フロント（app.js）が C層（component_explanations）の別導線へバイパスしており本関数
+    には到達しない想定だが、将来この endpoint 経由で来ても正しく解決できるよう対応させておく。
+
+    注意（2026-07-19 確認・未修正 — 現状フロント未到達のため対応は将来の課題）:
+    ``context.get("element_id")`` をそのまま ``ELEMENT_TYPE_COMPONENT``/``ELEMENT_TYPE_CLAIM``
+    として返すが、``element_explanations`` の theory_component/theory_claim 行は
+    ``_stage_contextual_explanation`` が ``persist_claims_components_graph`` より前に走る
+    ため agent 側 ID（``ComponentRecord.component_id`` / ``ClaimObjectRecord.claim_id``）で
+    保存されている（``contextual_explanation_inputs.py`` 冒頭 docstring）。この
+    ``context.get("element_id")`` が DB UUID（例えば component_graph node id 由来）だと、
+    直後の ``approved_for_elements`` は ``core.deliberation.decomposition.
+    explanations_for_element`` と同じ ID 形式の不一致で行を引けない可能性がある
+    （decomposition.py 側は :func:`core.deliberation.decomposition._agent_id_candidates_for_focus`
+    で修正済み。本関数を実際に配線する際は同じ legacy_ids 突合を適用すること）。
+    """
+    target_formula = context.get("target_formula")
+    if isinstance(target_formula, dict):
+        formula_id = str(target_formula.get("id") or "").strip()
+        if formula_id:
+            return (element_explanations.ELEMENT_TYPE_EQUATION, formula_id)
+
+    element_type = str(context.get("element_type") or "").strip()
+    element_id = str(context.get("element_id") or "").strip()
+    if element_id and element_type in ("component", element_explanations.ELEMENT_TYPE_COMPONENT):
+        return (element_explanations.ELEMENT_TYPE_COMPONENT, element_id)
+    if element_id and element_type in ("claim", element_explanations.ELEMENT_TYPE_CLAIM):
+        return (element_explanations.ELEMENT_TYPE_CLAIM, element_id)
+    return None
+
+
+def _approved_graph_element_answer(
+    context: dict,
+    element_label: str,
+    source_title: str,
+) -> str | None:
+    """承認済み element_explanations があれば、それを主文にした回答を組み立てる（Phase 2 §5.3）。
+
+    学習者ポップアップの優先順位: approved contextual → C層承認済み（別導線、
+    ``showComponentExplanations`` 等）→ ローカル生成。本関数が None を返す場合は
+    呼び出し側が既存のローカル生成へフォールバックする。
+
+    contextual を主文にし、generic があれば「一般には…」として続ける
+    （既存の出典表記 ``[出典: ...]`` の流儀は維持）。``approved_for_elements`` は
+    ``status='approved'`` の行のみ返すため candidate/dismissed/superseded は混入しない
+    （E2）。confidence 等の生値は使わず body 文字列のみを組み込む。
+    """
+    element_ref = _element_explanation_ref_for_graph_context(context)
+    if element_ref is None:
+        return None
+    document_id = _document_id_for_material(context.get("material_id"))
+    if not document_id:
+        return None
+
+    session = _pg_session()
+    try:
+        approved = element_explanations.approved_for_elements(session, document_id, [element_ref])
+    except Exception:
+        logger.warning("Failed to load approved element_explanations for graph element", exc_info=True)
+        return None
+    finally:
+        session.close()
+
+    rows = approved.get(element_ref) or []
+    contextual_body = next(
+        (
+            r.get("body") for r in rows
+            if r.get("kind") == element_explanations.KIND_CONTEXTUAL and r.get("body")
+        ),
+        None,
+    )
+    generic_body = next(
+        (
+            r.get("body") for r in rows
+            if r.get("kind") == element_explanations.KIND_GENERIC and r.get("body")
+        ),
+        None,
+    )
+    if not contextual_body and not generic_body:
+        return None
+
+    lines = [f"**{element_label}** について説明します。", ""]
+    if contextual_body:
+        lines.append(contextual_body)
+        lines.append("")
+    if generic_body:
+        lines.append(f"一般には、{generic_body}")
+        lines.append("")
+    lines.append(f"[出典: 『{source_title}』]")
+    return "\n".join(lines).strip()
+
+
 def _generate_graph_element_explanation(
     *,
     user_id: str,
@@ -793,6 +984,7 @@ def _generate_graph_element_explanation(
     topic_title: str,
     course_data: dict,
     body: LearningChatRequest,
+    on_llm_call: Callable[[], None] | None = None,
 ) -> LearningChatResponse:
     """グラフ要素サジェストのクリックを、通常チャットとは独立して処理する。"""
     if not body.chunk_id or not body.element_id:
@@ -826,6 +1018,16 @@ def _generate_graph_element_explanation(
         user_message=user_message,
     )
 
+    # Phase 2 §5.3: 承認済み element_explanations があれば最優先で使い、ローカル LLM 生成
+    # をスキップする（candidate/dismissed/superseded・confidence 生値は出さない、E2/E6）。
+    approved_answer = _approved_graph_element_answer(context, element_label, source_title)
+    if approved_answer is not None:
+        persist_chat_history(
+            user_id, course_id, topic_id,
+            body.history, user_message, approved_answer,
+        )
+        return LearningChatResponse(answer=approved_answer, course_update=None)
+
     graph_description = (context.get("graph_description") or "").strip()
     related_chunks = context.get("related_chunks") or []
     target_formula = context.get("target_formula") or {}
@@ -857,9 +1059,11 @@ def _generate_graph_element_explanation(
             for r in related_chunks[:3]
         )
         personal = get_personal_layer(user_id, course_id)
+        # チャット型AI支援の共通基盤整理 §2-2: 直近6件・2000字/件へウィンドウ化
+        # （正本ユーティリティへの委譲。挙動は現行とほぼ同一）。
         recent_history = "\n".join(
-            f"{h.get('role')}: {str(h.get('content', ''))[:240]}"
-            for h in (body.history or [])[-6:]
+            f"{h.get('role')}: {h.get('content', '')}"
+            for h in window_history(body.history, max_messages=6, max_chars=2000)
         )
         response_persona = course_persona_settings(course_data)["response_persona"]
         persona_instruction = persona_prompt(response_persona, target="response")
@@ -885,6 +1089,8 @@ def _generate_graph_element_explanation(
             "[[FORMULA_0]] のようなプレースホルダー名は説明文に出さないでください。"
             "最後に短い確認文を1つ添えてください。"
         )
+        if on_llm_call:
+            on_llm_call()
         answer = generate_text(
             messages=[{"role": "user", "content": prompt}],
             model=params["model"],
@@ -1032,11 +1238,23 @@ def get_topic_material(
     topic_text = _topic_student_material(topic or {})
     if topic_text.strip():
         formulas = _topic_formulas_from_content_blocks(topic or {})
+        # ![[figure:id]] 埋め込みを [[FIGURE_N]] プレースホルダーに解決する
+        # （Phase 4 図のコース流通 §7.2。レクチャー表示の build_topic_slides と同じ解決を通す）。
+        figures_by_id = _load_course_figures_by_id(course_id, course_data)
+        resolved_text, figures = resolve_figure_embeds(topic_text, figures_by_id)
+        # 承認済み contextual 説明を充填する（Phase 2 §5.3。無ければ explanation は None のまま）。
+        _attach_figure_explanations(figures, figures_by_id)
+        # ``![[component:id]]`` / ``![[claim:id]]`` / ``![[source:id]]`` を学習画面でも
+        # 解決できるよう、トピックに公開済みの参照だけから読み取り専用 DTO を渡す
+        # （管理画面 lsTopicEvidenceItems と同一規則。DB 上の任意 ID は解決しない）。
+        evidence_items = build_topic_evidence_items(topic or {})
         chunks = [ChunkContent(
             id=f"topic:{topic_id}",
-            text=topic_text,
+            text=resolved_text,
             chunk_index=topic_index,
             formulas=formulas,
+            figures=figures,
+            evidence_items=evidence_items,
             chapter=None,
             section=(topic or {}).get("title"),
             material_id=None,
@@ -1061,6 +1279,120 @@ def get_topic_material(
         chunks = []
 
     return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
+
+
+# ---------------------------------------------------------------------------
+# 図画像配信（学習者向け, Phase 4 図のコース流通 §7.3）
+# ---------------------------------------------------------------------------
+#
+# admin 側の図配信エンドポイント（routes/admin.py::get_document_figure_image、
+# _require_teacher・教材横断アクセス）は変更・流用しない。学習者向けは3条件 AND の
+# fail-closed ゲート（受講ゲート / 図の document がコース sources に含まれる / 図が
+# コース content から実際に参照されている）を独自に通す。
+
+
+def _load_figure_row_by_id(figure_id: str) -> dict | None:
+    """``document_figures`` を id 単位で取得する（学習者向け画像配信の単一行ルックアップ）。
+
+    admin 側は document_id 単位で ``load_document_figures()`` を使うが、学習者向け
+    エンドポイントは URL に document_id を持たないため figure_id から直接引く。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id::text, document_id, minio_key
+                FROM document_figures
+                WHERE id = CAST(:figure_id AS uuid)
+                LIMIT 1
+            """),
+            {"figure_id": figure_id},
+        ).fetchone()
+        if not row:
+            return None
+        return {"id": row[0], "document_id": row[1], "minio_key": row[2]}
+    except Exception:
+        logger.warning("Failed to load figure row %s", figure_id, exc_info=True)
+        return None
+    finally:
+        session.close()
+
+
+def _topic_linked_figure_ids(topic) -> list[str]:
+    """並行実装中の ``CourseTopic.linked_figure_ids`` を防御的に読む。
+
+    ``course_topics()`` が返す実体は常に dict（JSONB からの読み取り）だが、
+    ``CourseTopic``（``extra="allow"``）インスタンスが渡された場合にも備えて
+    ``getattr`` にフォールバックする。
+    """
+    if isinstance(topic, dict):
+        value = topic.get("linked_figure_ids")
+    else:
+        value = getattr(topic, "linked_figure_ids", None)
+    if not value:
+        return []
+    return [str(v) for v in value if v]
+
+
+def _course_references_figure(course_data: dict, figure_id: str) -> bool:
+    """figure_id がコース content（トピック本文の ``![[figure:id]]`` embed または
+    ``linked_figure_ids``）から実際に参照されているかを判定する（§7.3 条件3）。
+    """
+    for topic in course_topics(course_data):
+        text = _topic_student_material(topic)
+        if figure_id in find_figure_embed_ids(text):
+            return True
+        if figure_id in _topic_linked_figure_ids(topic):
+            return True
+    return False
+
+
+@router.get("/courses/{course_id}/figures/{figure_id}/image")
+def get_course_figure_image(
+    course_id: str,
+    figure_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> Response:
+    """学習者向け図画像配信（Phase 4 図のコース流通 §7.3）。
+
+    3条件の AND で判定し、いずれか欠ければ 404（fail-closed）:
+    1. 受講ゲート（``get_accessible_course_data`` — 本人が当該コースを閲覧できる）
+    2. 図の document がコースの ``sources[].document_id`` / ``material_id`` に含まれる
+    3. 図がコース content（``topics[].linked_figure_ids`` または student_material 内の
+       ``![[figure:id]]`` 参照）から実際に参照されている
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        uuid.UUID(figure_id)
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    figure_row = _load_figure_row_by_id(figure_id)
+    if not figure_row or not figure_row.get("minio_key"):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    # 条件2: 図の document がコースの sources に含まれる
+    course_document_ids = set(_course_document_ids(course_data))
+    if str(figure_row.get("document_id")) not in course_document_ids:
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    # 条件3: 図がコース content から実際に参照されている
+    if not _course_references_figure(course_data, figure_id):
+        raise HTTPException(status_code=404, detail="Figure not found")
+
+    try:
+        image_bytes = get_storage_client().get_object("figure-images", figure_row["minio_key"])
+    except Exception:
+        logger.warning(
+            "get_course_figure_image: MinIO fetch failed course=%s figure=%s",
+            course_id, figure_id, exc_info=True,
+        )
+        raise HTTPException(status_code=404, detail="Figure image not found")
+
+    return Response(content=image_bytes, media_type="image/png")
 
 
 @router.post(
@@ -1111,12 +1443,13 @@ def check_topic_understanding(
 
     parsed: dict = {}
     try:
-        raw = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params["model"],
-            reasoning_effort=params["reasoning_effort"],
-            temperature=0.1,
-        )
+        with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
+            raw = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+                temperature=0.1,
+            )
         import json
         import re
         match = re.search(r"\{[\s\S]*\}", raw or "")
@@ -1160,12 +1493,39 @@ def check_topic_understanding(
             generated_explanation=model_answer[:4000],
         )
 
+    # コース完了判定のサーバー正本化: 採点結果だけでなく、合格トピック・コース完了状態を
+    # learning_states.progress_data に永続化する（フロントが「次のトピックが無い」ことだけで
+    # 完走と断定していた問題の是正）。永続化の失敗で採点レスポンス自体は落とさない（fail-open）。
+    topic_completed = False
+    course_completed = False
+    completed_topic_ids: list[str] = []
+    try:
+        if passed:
+            completion = record_topic_check_pass(
+                current_user["id"], course_id, topic_id, course_data,
+            )
+            topic_completed = bool(completion.get("topic_completed"))
+            course_completed = bool(completion.get("course_completed"))
+            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+        else:
+            completion = get_course_completion(current_user["id"], course_id, course_data)
+            course_completed = bool(completion.get("course_completed"))
+            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+    except Exception:
+        logger.warning(
+            "Failed to persist topic check completion for user=%s course=%s topic=%s",
+            current_user["id"], course_id, topic_id, exc_info=True,
+        )
+
     return LearningCheckQuestionResponse(
         passed=passed,
         feedback=feedback,
         model_answer=model_answer,
         answer_requirements=answer_requirements,
         explanation=response_explanation,
+        topic_completed=topic_completed,
+        course_completed=course_completed,
+        completed_topic_ids=completed_topic_ids,
     )
 
 
@@ -1438,6 +1798,13 @@ def learning_chat(
     current_user: dict = Depends(_get_current_user),
 ) -> LearningChatResponse:
     """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。"""
+    # チャット型AI支援の共通基盤整理 §1: このリクエストで最初に LLM を呼ぶ直前に1回だけ
+    # コスト上限を消費する（リクエストスコープの quota_state で多重カウントを防止）。
+    _quota_state: dict = {"consumed": False}
+
+    def _consume_quota() -> None:
+        _consume_learning_chat_quota(current_user["id"], _quota_state)
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -1489,6 +1856,7 @@ def learning_chat(
                 topic_title=topic_title,
                 course_data=course_data,
                 body=body,
+                on_llm_call=_consume_quota,
             )
         # グラフ要素の説明は常に detour（origin=現在アンカー）として扱い、
         # どの入口由来でも「学習パスに戻る」を提示する。
@@ -1539,7 +1907,8 @@ def learning_chat(
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
     with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
         intent = None if (_is_casual or _atlas_ctx) else (
-            _route_for_typed_action(body.support_action) or _classify_intent(body.message, course_title)
+            _route_for_typed_action(body.support_action)
+            or _classify_intent(body.message, course_title, on_llm_call=_consume_quota)
         )
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
@@ -1561,6 +1930,7 @@ def learning_chat(
             advice_answer = _generate_learning_advice_response(
                 course_title, topic_title, body.message,
                 topic_info=topic_info, course_data=course_data,
+                on_llm_call=_consume_quota,
             )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
         is_prereq = (
@@ -1653,6 +2023,11 @@ def learning_chat(
 
     # L1: 回答全体の格を最弱根拠へ安全側集約。採用根拠が無ければ未踏(out_of_source)。
     overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
+    # トピック教材をコンテキストに注入済みなら回答には実根拠があり、out_of_source
+    # （「教材の裏づけなし」バナー + 未踏ガード）は事実と矛盾する。承認チェーン由来
+    # ではないため approved には昇格させず、source を下限に引き上げる。
+    if has_topic_material:
+        overall_tier = tier_floor(overall_tier, TIER_SOURCE)
     # 回答内容の出所分類（tier=教員承認状況とは別軸）:
     #   教材(このコース) > 別の資料 > 出典を追えないモデル生成、の優先度で決める。
     if has_topic_material or any(s["origin"] == "course_material" for s in cited_sources):
@@ -1689,30 +2064,50 @@ def learning_chat(
             f"はい、「{topic_title}」についてですね。お答えします。"
         )},
     ]
-    for turn in body.history:
+    # チャット型AI支援の共通基盤整理 §2-2: 直近20メッセージ・2000字/件へウィンドウ化
+    # （教材・RAGコンテキストは上の messages で毎回別途注入されるため先頭保護は不要, head_keep=0）。
+    for turn in window_history(body.history, max_messages=20, max_chars=2000):
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
     _chat_feature = "learning:chat_casual" if _is_casual else "learning:chat"
+    # この時点でリクエスト全体を通じて最初の（あるいは唯一の）LLM 呼び出しなら消費する
+    # （intent 分類等ですでに消費済みなら no-op、§1）。
+    _consume_quota()
+    degraded = False
     try:
         with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id):
-            answer = generate_text(messages=messages, temperature=0.3)
-    except Exception as exc:
+            answer = generate_text(
+                messages=messages,
+                temperature=0.3,
+                model=resolve_model("learning_chat_llm_model", fallback="analysis"),
+            )
+    except Exception:
+        # 会話は死なせない（設計書 I3）: 500 即死をやめ、degraded 固定文 + 200 へ縮退する。
+        # 履歴は保存し、回答本文に依存する後処理（誤解検出・ドリルダウン抽出）はスキップする（I4）。
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
-        raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc
+        answer = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+        degraded = True
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
-    # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。
+    # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。degraded な固定文には
+    # 付与しない（回答本文に依存する装飾のため、設計書 §4）。
     if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:
-        answer = out_of_source_notice() + "\n\n" + answer
+        if not degraded:
+            answer = out_of_source_notice() + "\n\n" + answer
 
     # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
+    # degraded ターンは回答本文が根拠を伴わない固定文のため、本文依存の後処理はスキップする
+    # （設計書 §4・I3/I4: 会話は死なせない・履歴保存はそのまま行う）。
     course_update = None
-    if not _is_casual and topic_info and any(kw in answer for kw in ["訂正", "より正確です", "誤解"]):
-        course_update = detect_and_record_misconception(
-            current_user["id"], course_id, course_data, topic_id, body.message, answer
-        )
+    if not degraded:
+        if not _is_casual and topic_info and any(
+            kw in answer for kw in ["訂正", "より正確です", "誤解"]
+        ):
+            course_update = detect_and_record_misconception(
+                current_user["id"], course_id, course_data, topic_id, body.message, answer
+            )
 
     _persisted = persist_chat_history(
         current_user["id"], course_id, topic_id,
@@ -1781,8 +2176,12 @@ def learning_chat(
             "question": (body.message or "")[:120],
             "options": _ANCHOR_CONFIRM_DOUBT_OPTIONS,
         }
-    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。
-    clean_answer, inline_actions = extract_inline_actions(answer)
+    # 本文中のドリルダウンマーカーは構造化アクションへ正規化する。degraded ターンは
+    # 根拠を伴わない固定文のため本文依存の後処理をスキップする（設計書 §4）。
+    if degraded:
+        clean_answer, inline_actions = answer, []
+    else:
+        clean_answer, inline_actions = extract_inline_actions(answer)
 
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
@@ -1814,6 +2213,7 @@ def learning_chat(
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
         mock=False,
+        degraded=degraded,
     )
 
 
@@ -1830,6 +2230,28 @@ def get_source_chunk_route(
     return passage
 
 
+@router.get("/courses/{course_id}/chunks/{chunk_id}/claim-refs")
+def get_chunk_claim_refs_route(
+    course_id: str,
+    chunk_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """出典タブの台帳併記（D3-6）を claim にも拡張するための学習者向け読み取り API。
+
+    チャンクが当該コースの sources 教材に属するかを検証したうえで、そのチャンクに
+    紐づく claim の最小情報（id・claim_type・短い label）のみを返す。数値
+    （confidence 等）は含めない。コース非アクセス・チャンクがコース教材に属さない
+    場合は 404（fail-closed。既存 source-chunk API のゲート欠落は繰り返さない）。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="Course not found")
+    claims = get_chunk_claim_refs(course_data, chunk_id)
+    if claims is None:
+        raise HTTPException(status_code=404, detail="Chunk not found in this course")
+    return {"claims": claims}
+
+
 @router.get("/courses/{course_id}/interest-traces")
 def get_interest_traces_route(
     course_id: str,
@@ -1840,7 +2262,14 @@ def get_interest_traces_route(
 
     interest_traces から本人の痕跡を status 主役で返す。個人特定情報は含めない。
     """
-    return get_interest_traces(current_user["id"], course_id, topic_id)
+    view = get_interest_traces(current_user["id"], course_id, topic_id)
+    # 個人知識ネットワーク（わたしの地図）への表示除外フラグを付与する（UX proposal §6:
+    # 地図には反映しない/地図に戻す）。既存の get_interest_traces は変更せず、
+    # ここで1フィールド足すだけの最小変更にする。
+    exclusion_flags = get_trace_map_exclusion_flags(current_user["id"], course_id)
+    for trace in view.get("traces") or []:
+        trace["map_excluded"] = exclusion_flags.get(trace["id"], False)
+    return view
 
 
 @router.post("/courses/{course_id}/interest-traces/{trace_id}/resolve")
@@ -2119,6 +2548,39 @@ def dismiss_anchor_route(
 
 
 # ---------------------------------------------------------------------------
+# 個人知識ネットワーク（わたしの地図）— 表示除外/復帰 (UX proposal §6)
+# ---------------------------------------------------------------------------
+# 「地図には反映しない」「地図に戻す」操作。痕跡は削除されず（P4）、地図の導出
+# （core/personal_graph/derive.py）から外れるだけ。tension/anchor の dismiss（候補の
+# 当落判定）とは独立で、status には触れない。本人のみ（current_user 以外の
+# user_id を受けない）。
+
+
+@router.post("/traces/{trace_id}/map-exclude")
+def map_exclude_trace_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """個人知識ネットワークへの表示から本人の痕跡を除外する（削除ではない。P4）。"""
+    result = set_trace_map_exclusion(current_user["id"], trace_id, True)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"ok": True, **result}
+
+
+@router.post("/traces/{trace_id}/map-restore")
+def map_restore_trace_route(
+    trace_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """表示除外していた痕跡を個人知識ネットワークの表示へ戻す。"""
+    result = set_trace_map_exclusion(current_user["id"], trace_id, False)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Trace not found")
+    return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
 # ハンズフリー音声会話（カジュアル対話モード用）
 # ---------------------------------------------------------------------------
 
@@ -2179,13 +2641,58 @@ def voice_speak_route(
     return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}
 
 
+def _tension_connect_edge_viewable(user_id: str, edge_id: str) -> bool:
+    """connect 先の graph edge が本人にとって閲覧可能な document に属するか検証する（N38）。
+
+    component 側の検証（``services._tension_connect_component_viewable``）と同型の
+    予防的 fail-closed ゲート。graph edge は独立テーブルを持たず
+    ``theory_component_graphs.graph_json`` の ``edges[]`` 内に ``edge_id`` キーで
+    存在するため、JSONB containment で所属 document を解決し、
+    ``services.resolve_document_access`` で閲覧可否を判定する。
+
+    edge が見つからない・document が特定できない・閲覧不可、のいずれも False
+    （安全側）。既存の connected 行には触らない — connect 時の新規書き込みだけを
+    堰き止める（設計書 §6 / PN-7。journey が閲覧不可 document の情報を漏らす経路を
+    connect 時点で断つ、component 側と同じ理由の予防措置）。
+    """
+    from services import resolve_document_access  # 既存 services の権限判定正本を再利用
+
+    session = _pg_session()
+    try:
+        try:
+            rows = session.execute(
+                sa_text("""
+                    SELECT DISTINCT document_id FROM theory_component_graphs
+                    WHERE graph_json->'edges' @> jsonb_build_array(
+                        jsonb_build_object('edge_id', CAST(:eid AS text))
+                    )
+                """),
+                {"eid": edge_id},
+            ).fetchall()
+        except Exception:
+            return False
+    finally:
+        session.close()
+    document_ids = sorted(str(r[0]) for r in rows if r and r[0])
+    if not document_ids:
+        return False
+    return any(resolve_document_access(user_id, doc_id).can_view for doc_id in document_ids)
+
+
 @router.post("/tension/{trace_id}/connect")
 def connect_tension_route(
     trace_id: str,
     body: TensionConnectRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """確定済み tension をグラフ上の node/edge に接続する（後続フェーズ）。"""
+    """確定済み tension をグラフ上の node/edge に接続する（後続フェーズ）。
+
+    component_id の閲覧可否は ``services.connect_tension_trace`` 内で検証済み。
+    edge_id は route 側で同型に検証する（N38。fail-closed・既存データ非改変）。
+    """
+    edge_id = (body.edge_id or "").strip()
+    if edge_id and not _tension_connect_edge_viewable(current_user["id"], edge_id):
+        raise HTTPException(status_code=400, detail="Could not connect tension trace")
     result = connect_tension_trace(
         current_user["id"], trace_id,
         component_id=body.component_id, edge_id=body.edge_id,

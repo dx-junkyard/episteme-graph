@@ -15,18 +15,135 @@ import logging
 
 from .cartridge_loader import CartridgeLoader
 from .input_builder import ApparatusSemanticsInputBuilder
+from .iterative import IterativeFigureAnalyzer, VisionBudget
 from .llm_client import ApparatusSemanticsLLMClient
-from .prompt import ApparatusSemanticsPromptFactory
+from .prompt import ApparatusSemanticsPromptFactory, IterativePromptFactory
 from .repair import ApparatusSemanticsRepairer, _fallback_record, _parse_record
 from .schema import (
+    ApparatusRecord,
     ApparatusSemanticsResult,
     CartridgeContext,
     FigureImageInput,
+    IterativeAnalysisRecord,
+    IterativeConfig,
     LibraryCandidate,
 )
 from .validator import ApparatusSemanticsValidator
 
 logger = logging.getLogger(__name__)
+
+# Consider a label_ref a prefix match of an abbreviation key when at most this
+# many trailing characters differ (e.g. "RFPDs" against key "RFPD" — plural
+# 's' suffix). Not a similarity/fuzzy-match algorithm — purely a bounded
+# suffix allowance so validator.py / this module agree on the same rule.
+_ABBREVIATION_PREFIX_SLACK = 3
+
+
+def _expand_label(label: str | None, abbreviations: dict[str, str] | None) -> str:
+    """Deterministic abbreviation expansion for one label/part name.
+
+    Match priority: exact key -> case-insensitive key -> "label starts with
+    key, with at most a few trailing characters left over" (covers plural /
+    minor suffixes such as "RFPDs" vs. "RFPD"). Never taken from the LLM —
+    this is a plain dictionary lookup against ``FigureImageInput.abbreviations``.
+    """
+    if not label or not abbreviations:
+        return ""
+    label = label.strip()
+    if not label:
+        return ""
+    if label in abbreviations:
+        return abbreviations[label]
+
+    label_ci = label.casefold()
+    for key, value in abbreviations.items():
+        if key.casefold() == label_ci:
+            return value
+
+    for key, value in abbreviations.items():
+        key_ci = key.casefold()
+        if not key_ci:
+            continue
+        if label_ci.startswith(key_ci) and len(label) - len(key) <= _ABBREVIATION_PREFIX_SLACK:
+            return value
+
+    return ""
+
+
+def _attach_label_grounding(record: ApparatusRecord, figure: FigureImageInput) -> None:
+    """Deterministically attach ``bbox`` / ``expanded_name`` to each part.
+
+    ``label_ref`` is the only part of this grounding trusted from the LLM
+    (validator.py already checked it against ``figure.inner_labels``). bbox is
+    a spatial fact and expanded_name is a dictionary lookup — both are plain
+    data lookups performed here, never taken verbatim from the LLM (design
+    principle #2/#4). No-op when ``record.parts`` is empty (fallback records).
+    """
+    label_bbox: dict[str, list | None] = {}
+    label_bbox_ci: dict[str, list | None] = {}
+    for label in figure.inner_labels or []:
+        if not isinstance(label, dict):
+            continue
+        text = str(label.get("text", "") or "").strip()
+        if not text:
+            continue
+        bbox = label.get("bbox")
+        label_bbox.setdefault(text, bbox)
+        label_bbox_ci.setdefault(text.casefold(), bbox)
+
+    for part in record.parts:
+        label_ref = (part.label_ref or "").strip() or None
+        bbox = None
+        if label_ref:
+            if label_ref in label_bbox:
+                bbox = label_bbox[label_ref]
+            elif label_ref.casefold() in label_bbox_ci:
+                bbox = label_bbox_ci[label_ref.casefold()]
+        part.bbox = list(bbox) if bbox else None
+        part.expanded_name = _expand_label(label_ref or part.name, figure.abbreviations)
+
+
+def _attach_profile_grounding(record: ApparatusRecord, figure: FigureImageInput) -> None:
+    """Copy only deterministic PDF-label grounding into mode profile items."""
+    profile = record.analysis_profile if isinstance(record.analysis_profile, dict) else {}
+    label_bbox: dict[str, list | None] = {}
+    for label in figure.inner_labels or []:
+        if not isinstance(label, dict):
+            continue
+        label_text = str(label.get("text") or "").strip()
+        if label_text:
+            label_bbox.setdefault(label_text.casefold(), label.get("bbox"))
+
+    parts_by_label = {
+        str(part.label_ref or "").strip().casefold(): part
+        for part in record.parts
+        if str(part.label_ref or "").strip()
+    }
+    parts_by_name = {
+        str(part.name or "").strip().casefold(): part
+        for part in record.parts
+        if str(part.name or "").strip()
+    }
+    for key in ("functions", "subjects", "regions", "observations", "highlights"):
+        for item in profile.get(key) or []:
+            if not isinstance(item, dict):
+                continue
+            label_ref = str(item.get("label_ref") or "").strip()
+            name = str(item.get("name") or item.get("label") or "").strip()
+            part = parts_by_label.get(label_ref.casefold()) or parts_by_name.get(name.casefold())
+            # A model-provided bbox is not a PDF page-coordinate fact. Remove
+            # it unless it can be replaced by deterministic text-layer data.
+            item["bbox"] = None
+            if part is not None:
+                item["bbox"] = list(part.bbox) if part.bbox else None
+                item["expanded_name"] = part.expanded_name
+                if not item.get("evidence_quote"):
+                    item["evidence_quote"] = part.evidence_quote
+                continue
+            bbox = label_bbox.get(label_ref.casefold()) if label_ref else None
+            if bbox:
+                item["bbox"] = list(bbox)
+                item["expanded_name"] = _expand_label(label_ref, figure.abbreviations)
 
 
 class ApparatusSemanticsAgent:
@@ -35,6 +152,7 @@ class ApparatusSemanticsAgent:
         cartridge_id: str | None = None,
         llm_client: ApparatusSemanticsLLMClient | None = None,
         cartridge_loader: CartridgeLoader | None = None,
+        iterative_config: IterativeConfig | None = None,
     ) -> None:
         self._default_cartridge_id = cartridge_id
         self._cartridge_loader = cartridge_loader or CartridgeLoader()
@@ -43,6 +161,9 @@ class ApparatusSemanticsAgent:
         self._llm_client = llm_client or ApparatusSemanticsLLMClient()
         self._validator = ApparatusSemanticsValidator()
         self._repairer = ApparatusSemanticsRepairer()
+        # Iterative hypothesis-verification pipeline (#499). ``None`` or
+        # ``enabled=False`` keeps the legacy one-shot behaviour.
+        self._iterative_config = iterative_config
 
     def run(
         self,
@@ -55,33 +176,105 @@ class ApparatusSemanticsAgent:
         resolved_cartridge_id = cartridge_id or self._default_cartridge_id
         cartridge = self._load_cartridge(resolved_cartridge_id)
         library_candidates = library_candidates or {}
+        figures_by_id = {figure.figure_id: figure for figure in figures}
+        candidate_ids_by_figure = {
+            figure.figure_id: {
+                candidate.entry_id
+                for candidate in (library_candidates.get(figure.figure_id) or [])
+            }
+            for figure in figures
+        }
+
+        # Iterative hypothesis-verification pipeline (#499). ``None`` or
+        # ``enabled=False`` keeps every figure on the legacy one-shot path
+        # below, byte-for-byte unchanged.
+        iterative_enabled = bool(self._iterative_config and self._iterative_config.enabled)
+        vision_budget = (
+            VisionBudget(self._iterative_config.vision_call_budget)
+            if iterative_enabled else None
+        )
+        iterative_analyzer = (
+            IterativeFigureAnalyzer(
+                self._llm_client, IterativePromptFactory(), self._validator,
+                self._iterative_config,
+            )
+            if iterative_enabled else None
+        )
 
         records = []
-        for figure in figures:
+        for index, figure in enumerate(figures):
             candidates = list(library_candidates.get(figure.figure_id) or [])
 
             # Image unavailable → never call the LLM; keep a reviewable
             # 'unknown' record instead of dropping the figure (P4).
             if not figure.image_bytes:
-                records.append(_fallback_record(figure, "image_unavailable"))
+                fallback = _fallback_record(figure, "image_unavailable")
+                if iterative_enabled:
+                    fallback.iterative_analysis = IterativeAnalysisRecord(
+                        enabled=True,
+                        convergence_status="not_run",
+                        stage_failures=["image_unavailable"],
+                        model=self._iterative_config.model_name,
+                    )
+                _attach_label_grounding(fallback, figure)  # no-op: parts == []
+                records.append(fallback)
                 continue
 
-            image_payload = self._input_builder.build_image_payload(figure)
+            image_payloads = self._input_builder.build_image_payloads(figure)
             candidate_briefs = self._input_builder.build_candidate_briefs(candidates)
             nearby_text = self._input_builder.build_nearby_text(figure)
             cartridge_hints = self._input_builder.build_cartridge_hints(cartridge)
+            inner_label_hints = self._input_builder.build_inner_label_hints(figure)
+            abbreviations = self._input_builder.build_abbreviations(figure)
+            # Guided re-analysis only (guided_figure_reanalysis_design.md); a
+            # batch-pipeline figure always yields {} here, so build_messages
+            # omits the guidance section entirely (GF7).
+            guidance = self._input_builder.build_guidance(figure)
+
+            if iterative_analyzer is not None:
+                # Reservation policy: guarantee every remaining figure (this
+                # one included) at least one vision call for its mandatory
+                # observation step, so an early figure's gap-driven rescans
+                # cannot starve later figures of their own observation.
+                remaining_figures_after = len(figures) - index - 1
+                remaining_budget = vision_budget.remaining()
+                if remaining_budget is None:
+                    rescan_allowance = self._iterative_config.max_iterations
+                else:
+                    rescan_allowance = max(
+                        0, remaining_budget - remaining_figures_after - 1,
+                    )
+                record = iterative_analyzer.run_figure(
+                    figure=figure,
+                    candidates=candidates,
+                    candidate_briefs=candidate_briefs,
+                    cartridge_hints=cartridge_hints,
+                    guidance=guidance,
+                    image_payloads=image_payloads,
+                    budget=vision_budget,
+                    rescan_allowance=rescan_allowance,
+                )
+                _attach_label_grounding(record, figure)
+                _attach_profile_grounding(record, figure)
+                records.append(record)
+                continue
+
             messages = self._prompt_factory.build_messages(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
+                inner_label_hints=inner_label_hints, abbreviations=abbreviations,
+                guidance=guidance,
             )
 
             try:
-                raw_output = self._llm_client.generate(messages, images=[image_payload])
+                raw_output = self._llm_client.generate(messages, images=image_payloads)
             except Exception as exc:
                 logger.exception(
                     "apparatus_semantics LLM call failed document=%s figure=%s",
                     document_id, figure.figure_id,
                 )
-                records.append(_fallback_record(figure, f"llm_call_failed: {exc}"))
+                fallback = _fallback_record(figure, f"llm_call_failed: {exc}")
+                _attach_label_grounding(fallback, figure)  # no-op: parts == []
+                records.append(fallback)
                 continue
 
             candidate_ids = {c.entry_id for c in candidates}
@@ -106,8 +299,17 @@ class ApparatusSemanticsAgent:
                     llm_client=self._llm_client,
                     prompt_factory=self._prompt_factory,
                     validator=self._validator,
-                    image_payload=image_payload,
+                    image_payloads=image_payloads,
+                    inner_label_hints=inner_label_hints,
+                    abbreviations=abbreviations,
+                    guidance=guidance,
                 )
+            # Deterministic bbox/expanded_name grounding — always applied last,
+            # right before the record is kept, across every code path
+            # (normal parse, repair success, repair exhaustion) (design
+            # principle #2/#4: never taken from the LLM).
+            _attach_label_grounding(record, figure)
+            _attach_profile_grounding(record, figure)
             records.append(record)
 
         result = ApparatusSemanticsResult(
@@ -115,7 +317,11 @@ class ApparatusSemanticsAgent:
             cartridge_id=cartridge.cartridge_id if cartridge else resolved_cartridge_id,
             apparatus_records=records,
         )
-        result.validation_issues = self._validator.validate(result)
+        result.validation_issues = self._validator.validate(
+            result,
+            figures_by_id=figures_by_id,
+            candidate_ids_by_figure=candidate_ids_by_figure,
+        )
         return result
 
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:

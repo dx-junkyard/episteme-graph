@@ -140,7 +140,7 @@ class Capability:
 | `lecture_studio.rewrite_chunk_script` | lecture-studio | TEACHER (own) | action | ✅(L1) | `POST /admin/chunks/{id}/lecture-script/rewrite` |
 | `lecture_studio.rewrite_topic_draft` | lecture-studio | TEACHER (own) | action | ✅(L1) | `POST /admin/courses/{cid}/lecture-studio/course-topics/{tid}/draft/rewrite` |
 | `course.set_visibility` | course-management | TEACHER (own) | action | ✅ | `PUT /admin/courses/{id}/visibility` |
-| `course.publish` | course-management | TEACHER (own) | action | ❌ confirm | `PUT /admin/courses/{id}/publish` |
+| `course.publish` | course-management | TEACHER (own) | action | ❌ confirm | `PUT /admin/courses/{id}/visibility`（body `{"visibility": "public"}`。旧 `/publish` は撤去済み） |
 | `course.delete` | course-management | TEACHER (own) | action | ❌ confirm | `DELETE /admin/courses/{id}` |
 | `atlas.generate_skeleton` | atlas | TEACHER | action | ✅ | `POST /cartridges/{id}/atlas/skeleton/generate` |
 | `atlas.freeze_skeleton` | atlas | TEACHER | action | ❌ confirm | `POST /cartridges/{id}/atlas/skeleton/freeze` |

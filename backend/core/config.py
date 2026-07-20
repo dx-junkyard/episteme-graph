@@ -249,6 +249,95 @@ class Settings(BaseSettings):
         default=5,
         validation_alias=AliasChoices("APPARATUS_RETRIEVAL_TOP_K"),
     )
+    # 図ごとの周辺本文（figure_context 収集）の最大ブロック数
+    apparatus_context_max_items: int = Field(
+        default=12,
+        validation_alias=AliasChoices("APPARATUS_CONTEXT_MAX_ITEMS"),
+    )
+    # 図ごとの周辺本文（figure_context 収集）の合計文字数上限
+    apparatus_context_max_chars: int = Field(
+        default=6000,
+        validation_alias=AliasChoices("APPARATUS_CONTEXT_MAX_CHARS"),
+    )
+    # --- 図解析の反復照合パイプライン（#499） ---
+    # "iterative"（文脈仮説→独立観察→照合→ギャップ駆動再スキャン）| "one_shot"（旧方式）
+    apparatus_analysis_mode: str = Field(
+        default="iterative",
+        validation_alias=AliasChoices("APPARATUS_ANALYSIS_MODE"),
+    )
+    # バッチ解析（document pipeline）でのギャップ駆動再スキャンの最大試行回数
+    apparatus_verify_max_iterations: int = Field(
+        default=3,
+        validation_alias=AliasChoices("APPARATUS_VERIFY_MAX_ITERATIONS"),
+    )
+    # 教員指示付き再解析（同期API）での最大試行回数。応答時間を守るため既定は控えめ
+    apparatus_reanalyze_max_iterations: int = Field(
+        default=1,
+        validation_alias=AliasChoices("APPARATUS_REANALYZE_MAX_ITERATIONS"),
+    )
+
+    # --- W層（Element Deliberation Workspace, 対話的検討） — コスト制御（他機能とは独立） ---
+    # 1セッションあたりの LLM コール上限
+    deliberation_max_calls_per_session: int = Field(
+        default=8,
+        validation_alias=AliasChoices("DELIBERATION_MAX_CALLS_PER_SESSION"),
+    )
+    # 1ユーザー1日あたりの LLM コール上限
+    deliberation_max_calls_per_day: int = Field(
+        default=40,
+        validation_alias=AliasChoices("DELIBERATION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    deliberation_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DELIBERATION_LLM_MODEL"),
+    )
+    # 対話 grounding へ供給する同一性候補（同分野の凍結済み library_entries）の件数上限
+    # （N2: 供給は事実の一覧のみで LLM に同一視を促しすぎない・apparatus_retrieval_top_k と同型）
+    deliberation_identity_candidates_top_k: int = Field(
+        default=5,
+        validation_alias=AliasChoices("DELIBERATION_IDENTITY_CANDIDATES_TOP_K"),
+    )
+
+    # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
+    # 三角測量の証拠①（LLM 事前知識）の 1 日あたり LLM コール上限
+    stdpart_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("STDPART_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    stdpart_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("STDPART_LLM_MODEL"),
+    )
+
+    # --- チャット型 AI 支援の共通基盤整理（正本: docs/features/assistant_common_infra_design.md） ---
+    # 既定はすべて現行挙動を保存する（I1）。
+    # 学習チャット本体（1リクエスト=1カウント。intent 分類〜本体を含めて1）
+    learning_chat_max_calls_per_day: int = Field(
+        default=300,
+        validation_alias=AliasChoices("LEARNING_CHAT_MAX_CALLS_PER_DAY"),
+    )
+    # コースビルダーチャット（他機能とは独立のカウンタ）
+    course_builder_max_calls_per_day: int = Field(
+        default=100,
+        validation_alias=AliasChoices("COURSE_BUILDER_MAX_CALLS_PER_DAY"),
+    )
+    # 原稿スタジオ rewrite（scripts.py / topics.py の両経路で同一ゲートインスタンス）
+    lecture_rewrite_max_calls_per_day: int = Field(
+        default=100,
+        validation_alias=AliasChoices("LECTURE_REWRITE_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら analysis tier（llm_analysis_model）に委譲（現行の暗黙依存を明示化, I1）
+    learning_chat_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("LEARNING_CHAT_LLM_MODEL"),
+    )
+    # 空文字なら analysis tier（llm_analysis_model）に委譲（I1）
+    course_builder_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("COURSE_BUILDER_LLM_MODEL"),
+    )
 
     # --- JWT / Auth ---
     jwt_secret: str = "episteme-dev-secret-change-in-prod"

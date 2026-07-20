@@ -122,6 +122,35 @@ class TestDocumentUIHonest:
         assert "esc(n.payload.note)" not in _VERSIONING_JS
 
 
+class TestVersionModalReadOnlyMode:
+    """N10残: 版管理モーダルの非所有者開放（見せて、できない操作は理由付きで無効化）。"""
+
+    def test_owner_flags_strict_fail_closed(self):
+        # フラグ未取得（state={}）でも false 扱いになる === true の厳密判定
+        assert "state.is_owner === true" in _VERSIONING_JS
+        assert "state.can_publish === true" in _VERSIONING_JS
+        assert "state.can_schedule_deletion === true" in _VERSIONING_JS
+
+    def test_disabled_sections_carry_factual_reason(self):
+        # セクションを消すのではなく、事実文の理由付きで無効化する
+        assert "所有者のみ操作できます" in _VERSIONING_JS
+
+    def test_non_owner_handlers_not_bound(self):
+        # disabled 属性 + ハンドラ未バインドの二重防御（fail-closed）
+        assert "if (isOwner !== true) return;" in _VERSIONING_JS
+
+    def test_viewer_sees_own_pin_state(self):
+        # viewer が「自分がいまどの版を見ているか」を確認できる（V層の核心の約束）
+        assert "_viewingLine" in _VERSIONING_JS
+        assert "あなたが見ている版" in _VERSIONING_JS
+
+    def test_api_returns_permission_flags(self):
+        # version-state レスポンスに権限フラグが載る（フロント契約の下地）
+        assert "_permission_flags" in _ROUTE_SRC
+        assert '"is_owner"' in _ROUTE_SRC
+        assert '"can_publish"' in _ROUTE_SRC
+
+
 class TestLearnerBannerRobust:
     """Issue 2a UX: 猶予バナーの文法崩れ回避 + 画面離脱時の残留除去。"""
 

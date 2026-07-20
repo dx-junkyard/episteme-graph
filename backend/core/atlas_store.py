@@ -154,10 +154,15 @@ def load_draft(session, domain_key: str) -> dict | None:
 def list_domains(session) -> list[dict]:
     """骨格を持つ domain の一覧 (DB + 同梱カートリッジの合成)。
 
-    返り値: {domain_key, frozen_version, has_draft, draft_revision, source}
+    返り値: {domain_key, frozen_version, has_draft, draft_revision, source, lifecycle}
     source は 'db' / 'bundled' (DB に凍結版がある domain は 'db')。
+    lifecycle は 'active' / 'retired' (migration 057。meta 行が無ければ 'active')。
     """
     domains: dict[str, dict] = {}
+    # domain_key -> (name, lifecycle)。atlas_skeletons 行の有無に関わらず適用するため
+    # (同梱カートリッジのみで DB 骨格行が無い domain も retire しうる)、DB 行の走査より
+    # 先に読み切っておく。
+    meta_by_key: dict[str, tuple[str, str]] = {}
     if session is not None:
         try:
             rows = session.execute(
@@ -187,6 +192,7 @@ def list_domains(session) -> list[dict]:
                     "has_draft": False,
                     "draft_revision": None,
                     "source": "db",
+                    "lifecycle": "active",
                 },
             )
             if status == "frozen":
@@ -197,11 +203,15 @@ def list_domains(session) -> list[dict]:
 
         try:
             meta_rows = session.execute(
-                sa_text("SELECT domain_key, name FROM atlas_domain_meta")
+                sa_text("SELECT domain_key, name, lifecycle FROM atlas_domain_meta")
             ).fetchall()
-            for domain_key, name in meta_rows:
-                if str(domain_key) in domains and name:
-                    domains[str(domain_key)]["domain_name"] = str(name)
+            for domain_key, name, lifecycle in meta_rows:
+                key = str(domain_key)
+                meta_by_key[key] = (str(name or ""), str(lifecycle or "active"))
+                if key in domains:
+                    if name:
+                        domains[key]["domain_name"] = str(name)
+                    domains[key]["lifecycle"] = str(lifecycle or "active")
         except Exception:  # noqa: BLE001
             logger.warning("atlas domain_meta listing failed", exc_info=True)
 
@@ -216,6 +226,7 @@ def list_domains(session) -> list[dict]:
             skeleton = _bundled_skeleton(key)
             if skeleton is None:
                 continue
+            _name, lifecycle = meta_by_key.get(key, ("", "active"))
             domains[key] = {
                 "domain_key": key,
                 "domain_name": "",
@@ -223,11 +234,110 @@ def list_domains(session) -> list[dict]:
                 "has_draft": False,
                 "draft_revision": None,
                 "source": "bundled",
+                "lifecycle": lifecycle,
             }
     except Exception:  # noqa: BLE001
         logger.warning("bundled cartridge listing failed", exc_info=True)
 
     return sorted(domains.values(), key=lambda d: d["domain_key"])
+
+
+# ---------------------------------------------------------------------------
+# ドメインライフサイクル (migration 057, §3.1)
+# ---------------------------------------------------------------------------
+
+
+def domain_lifecycle(session, domain_key: str) -> str:
+    """domain の lifecycle ('active' | 'retired') を返す。
+
+    `atlas_domain_meta` に行が無い、または問い合わせ自体に失敗した場合は
+    'active' とみなす (fail-open: retired は明示 `retire_domain()` 呼び出しの
+    結果のみが持つ状態であり、未知の状態を retired 扱いにしてはならない)。
+    """
+    if session is None or not domain_key:
+        return "active"
+    try:
+        row = session.execute(
+            sa_text(
+                "SELECT lifecycle FROM atlas_domain_meta WHERE domain_key = :domain_key"
+            ),
+            {"domain_key": domain_key},
+        ).fetchone()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas domain lifecycle query failed for %s", domain_key, exc_info=True)
+        return "active"
+    if not row or not row[0]:
+        return "active"
+    return str(row[0])
+
+
+def retired_domain_keys(session) -> set[str]:
+    """lifecycle='retired' の domain_key 集合を1クエリで返す (propose の照合フィルタ用)。"""
+    if session is None:
+        return set()
+    try:
+        rows = session.execute(
+            sa_text("SELECT domain_key FROM atlas_domain_meta WHERE lifecycle = 'retired'")
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas retired domain listing failed", exc_info=True)
+        return set()
+    return {str(r[0]) for r in rows}
+
+
+def retire_domain(
+    session, domain_key: str, *, user_id: str | None = None, note: str = ""
+) -> None:
+    """domain を retired にする (meta 行が無ければ name=domain_key で新規作成)。
+
+    コミットは呼び出し側の責務 (他の書き込み関数と同じ規約)。
+    """
+    session.execute(
+        sa_text(
+            """
+            INSERT INTO atlas_domain_meta
+                (domain_key, name, lifecycle, retired_at, retired_by, retire_note, created_by)
+            VALUES
+                (:domain_key, :domain_key, 'retired', now(), CAST(:user_id AS uuid),
+                 :note, CAST(:user_id AS uuid))
+            ON CONFLICT (domain_key) DO UPDATE SET
+                lifecycle = 'retired',
+                retired_at = now(),
+                retired_by = CAST(:user_id AS uuid),
+                retire_note = :note,
+                updated_at = now()
+            """
+        ),
+        {
+            "domain_key": domain_key,
+            "user_id": user_id or None,
+            "note": note or "",
+        },
+    )
+
+
+def restore_domain(session, domain_key: str, *, user_id: str | None = None) -> None:
+    """domain を active に戻す (retired_at/retired_by をクリア)。
+
+    `retire_note` は履歴として残す (上書きしない)。`user_id` は呼び出し側の監査記録
+    (`theory_review_events`) との呼び出し規約を揃えるために受け取るが、
+    v1 に "restored_by" 列は無いため本関数の SQL 自体では使用しない。
+    コミットは呼び出し側の責務。
+    """
+    del user_id  # v1: restored_by 列なし。将来拡張時の呼び出し規約のため引数のみ保持。
+    session.execute(
+        sa_text(
+            """
+            UPDATE atlas_domain_meta
+               SET lifecycle = 'active',
+                   retired_at = NULL,
+                   retired_by = NULL,
+                   updated_at = now()
+             WHERE domain_key = :domain_key
+            """
+        ),
+        {"domain_key": domain_key},
+    )
 
 
 def load_domain_meta(session, domain_key: str) -> dict | None:

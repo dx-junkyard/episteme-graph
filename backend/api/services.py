@@ -18,6 +18,7 @@ from sqlalchemy import text as sa_text
 from core.course_data import course_source_material_ids, course_sources, course_topics
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
+from core.personal_graph import graph_data as personal_graph_data
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
 from core.schema import (
@@ -299,10 +300,13 @@ def get_personal_layer(user_id: str, course_id: str) -> dict:
         ).fetchone()
         if not row or not row[0]:
             return {"misconceptions_by_topic": {}, "chat_anchors": {}}
-        personal = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        raw = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+        # personal_graph 列の読み書きは core.personal_graph.graph_data アクセサに一本化
+        # （Phase P-0。素の dict アクセスを新規に書かない）。
+        data = personal_graph_data.parse_personal_graph(raw)
         return {
-            "misconceptions_by_topic": personal.get("misconceptions_by_topic", {}) or {},
-            "chat_anchors": personal.get("chat_anchors", {}) or {},
+            "misconceptions_by_topic": dict(data.misconceptions_by_topic),
+            "chat_anchors": dict(data.chat_anchors),
         }
     finally:
         session.close()
@@ -377,12 +381,10 @@ def record_personal_misconception(
         ).fetchone()
 
         personal_raw = row[0] if row and row[0] is not None else {}
-        personal = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
-        by_topic = personal.get("misconceptions_by_topic", {}) or {}
-        current = by_topic.get(topic_id, []) or []
-        current = [misconception] + current
-        by_topic[topic_id] = current[:5]
-        personal["misconceptions_by_topic"] = by_topic
+        raw = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
+        # 「先頭に追加・最新5件」の上限ロジックはアクセサ側が正本（Phase P-0）。
+        data = personal_graph_data.parse_personal_graph(raw)
+        data = personal_graph_data.append_misconception(data, topic_id, misconception)
 
         session.execute(
             sa_text("""
@@ -394,7 +396,7 @@ def record_personal_misconception(
             {
                 "user_id": user_id,
                 "course_id": course_id,
-                "personal": json.dumps(personal, ensure_ascii=False),
+                "personal": json.dumps(personal_graph_data.to_jsonb(data), ensure_ascii=False),
             },
         )
         session.commit()
@@ -403,6 +405,128 @@ def record_personal_misconception(
         raise
     finally:
         session.close()
+
+
+def _course_topic_ids(course_data: dict) -> list[str]:
+    """course_data.topics[].id を文字列で正規化して返す（id 無しはスキップ）。"""
+    return [str(t["id"]) for t in course_topics(course_data) if t.get("id")]
+
+
+def _course_completed_from_topic_ids(topic_ids: list[str], completed_topics: dict) -> bool:
+    """コース完了状態を保存値ではなく毎回導出する。
+
+    現在のコーストピック集合すべてが completed_topics に含まれ、かつトピックが
+    1件以上あることを条件にする（トピックが1件も無いコースを完了扱いにしない。
+    また、コース構成が後から変わった場合に古い完了断定を残さないよう、判定は
+    常にこの関数を通す）。
+    """
+    if not topic_ids:
+        return False
+    return all(tid in completed_topics for tid in topic_ids)
+
+
+def record_topic_check_pass(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    course_data: dict,
+) -> dict:
+    """確認問題の合格を learning_states.progress_data に永続化する。
+
+    - `progress_data.completed_topics`（topic_id → ISO8601 UTC タイムスタンプ）に upsert する。
+      既に完了済みのトピックはタイムスタンプを上書きしない。
+    - 現在のコーストピック（`core.course_data.course_topics`）が全て completed_topics に
+      含まれ、かつ `progress_data.course_completed_at` が未設定なら現在時刻を設定する
+      （一度設定した完了時刻は上書きしない）。
+    - 未受講の場合はレコードを自動生成してから書き込む（record_personal_misconception と同じパターン）。
+    """
+    topic_ids = _course_topic_ids(course_data)
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+
+        progress_raw = row[0] if row and row[0] is not None else {}
+        progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+        completed_topics = dict(progress.get("completed_topics") or {})
+
+        topic_key = str(topic_id)
+        if topic_key not in completed_topics:
+            completed_topics[topic_key] = now_iso
+        progress["completed_topics"] = completed_topics
+
+        course_completed = _course_completed_from_topic_ids(topic_ids, completed_topics)
+        if course_completed and not progress.get("course_completed_at"):
+            progress["course_completed_at"] = now_iso
+
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET progress_data = CAST(:progress AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    return {
+        "topic_completed": True,
+        "course_completed": course_completed,
+        "completed_topic_ids": list(completed_topics.keys()),
+    }
+
+
+def get_course_completion(user_id: str, course_id: str, course_data: dict) -> dict:
+    """コース完了状態を読み取り専用で返す（保存値ではなく毎回導出、record_topic_check_pass 不使用時にも安全）。"""
+    topic_ids = _course_topic_ids(course_data)
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    progress_raw = row[0] if row and row[0] is not None else {}
+    progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+    completed_topics = dict(progress.get("completed_topics") or {})
+
+    return {
+        "course_completed": _course_completed_from_topic_ids(topic_ids, completed_topics),
+        "completed_topic_ids": list(completed_topics.keys()),
+    }
 
 
 def _fetch_course_data_row(course_id: str) -> dict | None:
@@ -1668,11 +1792,15 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
 
     streak = calculate_streak(user_id, course_id)
 
+    completion = get_course_completion(user_id, course_id, course_data)
+
     return {
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
         "streak_days": streak,
         "sessions": sessions_list[:5],
+        "completed_topic_ids": completion["completed_topic_ids"],
+        "course_completed": completion["course_completed"],
     }
 
 
@@ -2385,6 +2513,59 @@ def get_chunk_passage(chunk_id: str) -> dict | None:
     }
 
 
+def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] | None:
+    """学習者向け chunk→claim ID 解決（読み取り専用・最小フィールドのみ）。
+
+    D3-6 の出典タブ台帳併記（equation）を claim にも拡張するための下請け。
+    チャンクが当該コースの sources 教材に属することを ``chunks.material_id`` と
+    ``course_source_material_ids(course_data)`` の一致で検証し、属さない場合・
+    チャンクが存在しない場合・chunk_id が不正な場合は ``None`` を返す
+    （呼び出し側は 404 として fail-closed に扱う）。ドキュメント全体への
+    フォールバックはしない（チャンク厳密一致のみ）。数値（confidence 等）は含めない。
+    """
+    course_material_ids = set(course_source_material_ids(course_data))
+    session = _pg_session()
+    try:
+        try:
+            chunk_row = session.execute(
+                sa_text("SELECT material_id FROM chunks WHERE id = CAST(:cid AS uuid)"),
+                {"cid": chunk_id},
+            ).fetchone()
+        except Exception as exc:
+            logger.warning("get_chunk_claim_refs: invalid chunk_id %s: %s", chunk_id, exc)
+            return None
+        if not chunk_row:
+            return None
+        chunk_material_id = str(chunk_row[0] or "")
+        if not chunk_material_id or chunk_material_id not in course_material_ids:
+            return None
+        rows = session.execute(
+            sa_text("""
+                SELECT id, claim_type, text, normalized_text
+                FROM theory_claims
+                WHERE chunk_id = CAST(:cid AS uuid)
+                ORDER BY created_at ASC
+            """),
+            {"cid": chunk_id},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_chunk_claim_refs failed: %s", exc)
+        return None
+    finally:
+        session.close()
+
+    claims: list[dict] = []
+    for row in rows:
+        label_source = (row[3] or row[2] or "").strip()
+        label = (label_source[:60] + "…") if len(label_source) > 60 else label_source
+        claims.append({
+            "id": str(row[0]),
+            "claim_type": row[1] or "",
+            "label": label,
+        })
+    return claims
+
+
 def record_internalization(user_id: str, trace_id: str, reason: str) -> bool:
     """痕跡に「なぜ自分に重要か」(Internalization Prompt) を payload へ保存する（L3/内発的動機）。
 
@@ -2543,16 +2724,60 @@ def dismiss_tension_trace(user_id: str, trace_id: str) -> dict | None:
     return {"trace_id": str(trace_id), "status": "dismissed"}
 
 
+def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool:
+    """connect 先の component が本人にとって閲覧可能な document に属するかを検証する。
+
+    Phase P（個人知識ネットワーク）の journey が connected tension の component アンカーから
+    ``theory_component_graphs`` / 同一性リンクを辿れるようになったため、connect 時点で
+    不正・閲覧不可な component 参照を弾く（設計書 §6 / PN-7 の fail-closed をここでも担保する）。
+
+    ``theory_components`` は document_id 列を持たず ``source_scope`` JSONB に格納する
+    （``routes/theory_components.py::_normalize_source_scope`` と同じ規約）。component_id が
+    UUID として不正・component が存在しない・document が特定できない場合はすべて
+    安全側（不可）に倒す。
+    """
+    session = _pg_session()
+    try:
+        try:
+            row = session.execute(
+                sa_text(
+                    "SELECT source_scope->>'document_id' FROM theory_components "
+                    "WHERE id = CAST(:id AS uuid)"
+                ),
+                {"id": component_id},
+            ).fetchone()
+        except Exception:
+            return False
+    finally:
+        session.close()
+    document_id = str(row[0]) if row and row[0] else None
+    if not document_id:
+        return False
+    return resolve_document_access(user_id, document_id).can_view
+
+
 def connect_tension_trace(
     user_id: str, trace_id: str, component_id: str = "", edge_id: str = "",
 ) -> dict | None:
     """確定済み tension をグラフ上の node/edge に接続する: → connected（後続フェーズ）。
 
     candidate からの直接 connect は許さない（本人の confirm を経ること。P1）。
+    ``component_id`` を指定する場合、本人が閲覧できる document に属する theory_component
+    でなければ拒否する（不正・閲覧不可な component 参照を持つ trace から、Phase P の
+    journey が閲覧不可 document の情報を漏らさないための事前検証。PN-7）。
+
+    本人が connect 操作で明示的に指定した ID は ``payload.connected_refs`` に書く。
+    LLM 候補生成時点で書かれる ``payload.target_refs``（``core/tension/worker.py``）とは
+    別キーであり、こちらは後方互換・他機能（D1-5 素朴な問いの計器化 `core/doubt/naive_signal.py`
+    等）のため変更せず引き続き追記する。Phase P の個人ネットワーク導出
+    （``core/personal_graph/derive.py``）は ``connected_refs`` のみをアンカー・橋の根拠に使い、
+    本人が接続していない LLM 候補由来の ``target_refs`` を使わない（PN-3）。
     """
     component_id = (component_id or "").strip()
     edge_id = (edge_id or "").strip()
     if not component_id and not edge_id:
+        return None
+    if component_id and not _tension_connect_component_viewable(user_id, component_id):
         return None
     session = _pg_session()
     try:
@@ -2561,14 +2786,25 @@ def connect_tension_trace(
                 UPDATE interest_traces
                 SET status = 'connected',
                     payload = jsonb_set(
-                        payload,
-                        '{target_refs}',
-                        COALESCE(payload->'target_refs', '{}'::jsonb) || jsonb_build_object(
+                        jsonb_set(
+                            payload,
+                            '{target_refs}',
+                            COALESCE(payload->'target_refs', '{}'::jsonb) || jsonb_build_object(
+                                'component_ids',
+                                COALESCE(payload->'target_refs'->'component_ids', '[]'::jsonb)
+                                    || CASE WHEN :comp <> '' THEN jsonb_build_array(CAST(:comp AS text)) ELSE '[]'::jsonb END,
+                                'edge_ids',
+                                COALESCE(payload->'target_refs'->'edge_ids', '[]'::jsonb)
+                                    || CASE WHEN :edge <> '' THEN jsonb_build_array(CAST(:edge AS text)) ELSE '[]'::jsonb END
+                            )
+                        ),
+                        '{connected_refs}',
+                        jsonb_build_object(
                             'component_ids',
-                            COALESCE(payload->'target_refs'->'component_ids', '[]'::jsonb)
+                            COALESCE(payload->'connected_refs'->'component_ids', '[]'::jsonb)
                                 || CASE WHEN :comp <> '' THEN jsonb_build_array(CAST(:comp AS text)) ELSE '[]'::jsonb END,
                             'edge_ids',
-                            COALESCE(payload->'target_refs'->'edge_ids', '[]'::jsonb)
+                            COALESCE(payload->'connected_refs'->'edge_ids', '[]'::jsonb)
                                 || CASE WHEN :edge <> '' THEN jsonb_build_array(CAST(:edge AS text)) ELSE '[]'::jsonb END
                         )
                     ),
@@ -2794,6 +3030,84 @@ def dismiss_anchor_trace(user_id: str, trace_id: str) -> dict | None:
         return None
     _record_anchor_event(trace_id, "llm_candidate", "dismissed", user_id)
     return {"trace_id": str(trace_id), "anchor_status": "dismissed"}
+
+
+# ---------------------------------------------------------------------------
+# 個人知識ネットワーク — 「地図には反映しない/地図に戻す」(UX proposal §6)
+# ---------------------------------------------------------------------------
+# tension/anchor の dismiss（候補の当落判定）とは独立した「表示除外」フラグ。
+# 行削除・status 変更ではなく payload.map_excluded を立てるだけ（P4: 情報を落とさない）。
+# 導出側フィルタ（core/personal_graph/derive.py）が payload.map_excluded を見て
+# 個人知識ネットワークの表示から外す（別実装。本関数は書き込みのみを担当する）。
+
+
+def set_trace_map_exclusion(user_id: str, trace_id: str, excluded: bool) -> dict | None:
+    """本人が痕跡の個人知識ネットワーク表示を除外/復帰する。
+
+    対象は本人の tension/question 行のみ（他人の行・対象外 kind・存在しない trace_id は
+    None を返し、呼び出し側で 404 とする）。status・structure_anchor.status には触れない
+    （地図から消えるだけで digest・軌跡・既存機能の扱いは不変）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET payload = jsonb_set(payload, '{map_excluded}', to_jsonb(CAST(:excluded AS boolean))),
+                    last_seen_at = now()
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid)
+                  AND kind IN ('tension', 'question')
+                RETURNING kind
+            """),
+            {"excluded": excluded, "tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("set_trace_map_exclusion failed: %s", exc)
+        return None
+    finally:
+        session.close()
+    if row is None:
+        return None
+    kind = row[0]
+    entity_type = AUDIT_ENTITY_TENSION if kind == "tension" else AUDIT_ENTITY_STRUCTURE_ANCHOR
+    old_status, new_status = (
+        ("included_in_map", "excluded_from_map") if excluded
+        else ("excluded_from_map", "included_in_map")
+    )
+    record_review_event(
+        entity_type, str(trace_id), old_status, new_status, user_id,
+        {"action": "map_exclude" if excluded else "map_restore", "map_excluded": excluded},
+    )
+    return {"trace_id": str(trace_id), "map_excluded": excluded}
+
+
+def get_trace_map_exclusion_flags(user_id: str, course_id: str) -> dict[str, bool]:
+    """本人の痕跡のうち ``payload.map_excluded`` が真の trace_id 集合を返す。
+
+    interest-traces 一覧（``get_interest_traces``）は既存関数を変更せず、ルート側で
+    この関数の結果とマージして "map_excluded" フィールドを1つ足すだけにする
+    （UX proposal §6: 地図には反映しない/地図に戻す）。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind IN ('tension', 'question')
+                  AND payload->>'map_excluded' = 'true'
+            """),
+            {"uid": user_id, "cid": course_id},
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("get_trace_map_exclusion_flags failed: %s", exc)
+        return {}
+    finally:
+        session.close()
+    return {str(r[0]): True for r in rows}
 
 
 def get_graph_element_context(
@@ -3960,8 +4274,12 @@ def save_cb_session(
     session_id: str,
     history: list[dict],
     course_draft: dict | None,
-) -> None:
-    """コース構築セッションの履歴と draft を PostgreSQL に保存する。"""
+) -> bool:
+    """コース構築セッションの履歴と draft を PostgreSQL に保存する。
+
+    成否を bool で返す（正本: docs/features/assistant_common_infra_design.md §6）。
+    例外は内部で catch して False を返す（ログは維持、呼び出し元へは伝播させない）。
+    """
     try:
         session = _pg_session()
         try:
@@ -3989,8 +4307,10 @@ def save_cb_session(
             raise
         finally:
             session.close()
+        return True
     except Exception:
         logger.exception("Failed to save course builder session %s", session_id)
+        return False
 
 
 # ---------------------------------------------------------------------------

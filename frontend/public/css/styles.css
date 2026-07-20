@@ -113,6 +113,23 @@ body {
   line-height: 1.35;
 }
 
+/* P1: サーバーが全トピック確認済みと判定したときのみ出す事実文（数値・割合は出さない）。 */
+.course-tree-done {
+  padding: 0 14px 8px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* P1: リロード後の復元。トピックが確認済み（progress.completed_topic_ids）であることの
+   控えめなマーカー（件数・進捗率は出さない）。 */
+.ni-done {
+  display: inline-flex;
+  align-items: center;
+  font-size: 10px;
+  color: var(--color-text-success);
+  margin-left: 2px;
+}
+
 .ni {
   display: flex;
   align-items: center;
@@ -577,9 +594,24 @@ body {
 /* ── Input area ─────────────────────────────────────────────────── */
 .ia {
   display: flex;
+  align-items: center;
   gap: 8px;
   padding-top: 10px;
   border-top: 0.5px solid var(--color-border-tertiary);
+}
+
+/* G4-L: レクチャートグルの無効理由をボタン近傍にインライン表示する */
+.lecture-toggle-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+
+.lecture-toggle-hint {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
 }
 
 .ia input {
@@ -1032,6 +1064,43 @@ body {
   line-height: 1.6;
 }
 
+/* G4-D: 受講可能コースの description をここでも表示する（プルダウンの title だけでは
+   ホバーしないと気づけないため）。 */
+.no-course-empty {
+  height: 100%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  gap: 12px;
+}
+.no-course-list {
+  width: 100%;
+  max-width: 380px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.no-course-item {
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-align: left;
+}
+.no-course-item-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.no-course-item-desc {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+
 /* Legacy course-select (sidebar) */
 .course-select {
   width: 100%;
@@ -1087,6 +1156,52 @@ body {
   color: var(--color-text-primary, #e8eaf0);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* 図（Figure）埋め込み: [[FIGURE_N]] プレースホルダの解決先。教材本文・出典ポップアップ・
+   ボイスパネル・レクチャースライドの renderMaterialChunk 共通レンダラで使う
+   （設計書 hierarchical_context_explanation_design.md Phase4 §7.2）。 */
+.material-figure {
+  display: block;
+  margin: 12px 0;
+  text-align: center;
+}
+
+.material-figure-frame {
+  display: inline-block;
+  position: relative;
+  max-width: 100%;
+}
+
+.material-figure-img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+  border-radius: 6px;
+  border: 0.5px solid var(--color-border-tertiary, var(--color-border, #2a3550));
+}
+
+.material-figure-placeholder {
+  display: inline-block;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8899bb);
+  padding: 10px 14px;
+}
+
+.material-figure-caption {
+  margin-top: 6px;
+  font-size: 12.5px;
+  color: var(--color-text-tertiary, #8899bb);
+  text-align: center;
+}
+
+.material-figure-explanation {
+  margin: 4px auto 0;
+  max-width: 640px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8899bb);
+  text-align: center;
 }
 
 .check-overlay {
@@ -1177,6 +1292,14 @@ body {
   justify-content: flex-end;
   gap: 8px;
   margin-top: 14px;
+}
+
+/* 指摘4: 受講登録確認モーダルの失敗表示（再試行可能な状態のまま提示する）。 */
+.enroll-confirm-error {
+  margin-top: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-danger);
 }
 
 .check-secondary,
@@ -1730,6 +1853,75 @@ body {
 .status-failed {
   background: #fcebeb;
   color: var(--color-text-danger);
+}
+
+/* G1-1/G5-2: コース/教材の開示範囲バッジ（.admin-status と併用）。 */
+.status-visibility-public {
+  background: var(--color-background-success);
+  color: var(--color-text-success);
+}
+
+.status-visibility-group {
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+}
+
+.status-visibility-private {
+  background: #f0f0f2;
+  color: var(--color-text-tertiary);
+}
+
+/* U層（LLM使用量推計, migration 043）— TEACHER 向け解析コスト見積りポップオーバー（G2-U）。
+   レンジのみ・金額なしの表示専用スタイル（数値は本文で描画、ここは箱の見た目のみ）。 */
+.llm-usage-estimate-popover {
+  z-index: 9999;
+  width: 280px;
+  max-width: calc(100vw - 16px);
+  background: var(--color-background-primary);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+}
+
+.llm-usage-estimate-title {
+  font-weight: 600;
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+  margin-bottom: 6px;
+}
+
+.llm-usage-estimate-total {
+  margin-bottom: 6px;
+}
+
+.llm-usage-estimate-list {
+  margin: 0 0 6px;
+  padding-left: 18px;
+  line-height: 1.6;
+}
+
+.llm-usage-estimate-note {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.llm-usage-estimate-footnote {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  margin-top: 4px;
+}
+
+.llm-usage-table th,
+.llm-usage-table td {
+  text-align: right;
+}
+
+.llm-usage-table th:first-child,
+.llm-usage-table td:first-child {
+  text-align: left;
 }
 
 .admin-pdf-reupload-btn {
@@ -2752,6 +2944,14 @@ body {
 .lecture-formula-block.visible {
   opacity: 1;
   transform: scale(1);
+}
+
+/* レクチャースライド内の図: 単体で高さを取りすぎて fitLectureSlideContent の
+   フォント段階縮小より先に等比縮小へ落ちないよう、既定の上限を設ける
+   （収まらない場合の最終手段としての等比縮小は既存ロジックのまま働く）。 */
+.lecture-slide-inner .material-figure-img {
+  max-height: 42vh;
+  width: auto;
 }
 
 /* Interrupt chat popup */
@@ -5420,6 +5620,8 @@ body {
 
 /* 進捗タブの再訪推奨ドット */
 .lx-tab-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-revisit); margin-left:6px; vertical-align:middle; }
+/* G4-T: 違和感/帰属候補ダイジェストの気づきドット（再訪推奨ドットと区別できる色） */
+.lx-tab-dot-hint { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-kind-q); margin-left:6px; vertical-align:middle; }
 
 /* --- 出典タブ：全体格バナー --- */
 .lx-overall { display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:9px; margin-bottom:18px; font-size:13px; line-height:1.5; }
@@ -5499,6 +5701,8 @@ body {
 .lx-revisit .k { font-size:11px; font-weight:700; color:var(--lx-revisit); letter-spacing:.04em; }
 .lx-revisit .h { font-size:13.5px; font-weight:600; margin:3px 0 2px; }
 .lx-revisit .s { font-size:12px; color:var(--lx-ink-soft); }
+/* G3: 違和感/帰属候補ダイジェストの「候補ゼロ」「取得できなかった」を示す一行事実文 */
+.lx-digest-empty { font-size:12px; color:var(--lx-ink-faint); margin:0 0 12px; line-height:1.5; }
 .lx-filters { display:flex; gap:8px; margin:0 0 14px; flex-wrap:wrap; }
 .lx-filter { appearance:none; border:1px solid var(--lx-line); background:#fff; cursor:pointer; border-radius:999px; padding:5px 11px; font-size:12px; color:var(--lx-ink-soft); font-family:inherit; display:inline-flex; align-items:center; gap:6px; }
 .lx-filter[aria-pressed="true"] { border-color:var(--lx-brand); background:var(--lx-brand-soft); color:var(--lx-brand); font-weight:600; }
@@ -5699,7 +5903,30 @@ body {
 /* ===========================================================================
  * 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント
  * 識別子は admin-assistant- プレフィックス（Field Atlas / Doubt Atlas と非衝突）。
+ * 右下常設フローティングボタン（旧: 通知ベルの位置。AI アシスタントへのアクセスを
+ * 良くするため入れ替え、通知はトップバーの #vg-inbox-btn へ移した）。
  * =========================================================================== */
+
+.admin-assistant-fab {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: var(--color-text-info, #06c);
+  color: #fff;
+  font-size: 20px;
+  line-height: 44px;
+  padding: 0;
+  cursor: pointer;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
+  z-index: 9999;
+}
+.admin-assistant-fab:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32); }
+/* G層の初回ログイン cue（.admin-next-steps-pulse）が丸ボタンでも円のまま光るように上書き */
+.admin-assistant-fab.admin-next-steps-pulse { border-radius: 50%; }
 
 .admin-assistant-panel {
   position: fixed;
@@ -6157,4 +6384,1465 @@ body {
 .ls-stumble-mini {
   padding: 3px 10px; border: 1px solid var(--lx-line, #d0d7de); border-radius: 6px; cursor: pointer;
   font-size: 12px; background: var(--color-background-primary, #fff); color: var(--color-text-primary, #1f2328);
+}
+
+/* G4-R: R層レビューキューへの直行導線（コース/コンポーネントビュー付近のバッジボタン
+   + フラットな一覧モーダル）。モーダル自体は既存 .ls-settings-modal / .ls-settings-dialog
+   を再利用し、幅だけをレビューキュー向けに広げる。 */
+.ls-recon-review-btn {
+  justify-self: start;
+  margin-top: 4px;
+  padding: 3px 10px;
+  border: 1px solid var(--lx-line, #d0d7de);
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 12px;
+  background: var(--color-background-secondary, #f6f8fa);
+  color: var(--color-text-primary, #1f2328);
+}
+.ls-recon-review-btn:hover { background: var(--color-background-tertiary, #eaeef2); }
+.ls-recon-review-dialog { width: min(640px, calc(100vw - 32px)); }
+#ls-recon-review-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 60vh;
+  overflow-y: auto;
+  margin-top: 8px;
+}
+
+/* ===========================================================================
+ * W層（要素検討ワークスペース）— 面③ 対話的検討（Phase 2）
+ * 識別子は deliberation- プレフィックス（Field Atlas / Doubt Atlas と非衝突）。
+ * モーダル本体・面①②の既存レイアウトはインライン style のまま維持し、
+ * Phase 2 で新設した右ペイン（対話・候補注釈）だけをクラス化する。
+ * =========================================================================== */
+
+.deliberation-modal-columns {
+  display: flex;
+  gap: 18px;
+  flex: 1;
+  min-height: 0;
+}
+
+.deliberation-modal-left {
+  flex: 1 1 50%;
+  min-width: 0;
+  overflow-y: auto;
+  padding-right: 12px;
+  border-right: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+
+.deliberation-chat-pane {
+  flex: 1 1 50%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.deliberation-chat-messages {
+  flex: 1;
+  min-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 2px 8px;
+}
+
+.deliberation-chat-empty {
+  font-size: 12.5px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  padding: 8px 2px;
+}
+
+.deliberation-chat-msg {
+  max-width: 92%;
+  font-size: 13px;
+  line-height: 1.55;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.deliberation-chat-msg.user {
+  align-self: flex-end;
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  padding: 8px 12px;
+  border-radius: 12px 12px 4px 12px;
+}
+.deliberation-chat-msg.ai {
+  align-self: flex-start;
+  color: var(--color-text-primary, #1d1d1f);
+  padding: 8px 12px;
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 12px 12px 12px 4px;
+}
+
+.deliberation-chat-note {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8b949e);
+  padding: 2px 10px;
+}
+
+.deliberation-chat-annotations {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 34%;
+  overflow-y: auto;
+  padding: 8px 2px 0;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+  margin-top: 6px;
+}
+.deliberation-chat-annotations:empty { border-top: none; margin-top: 0; padding-top: 0; }
+
+.deliberation-annotation-card {
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-background-primary, #fff);
+}
+
+.deliberation-annotation-kind {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 3px;
+}
+.deliberation-annotation-confidence {
+  font-weight: 400;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+
+.deliberation-annotation-body {
+  font-size: 13px;
+  color: var(--color-text-primary, #1d1d1f);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.deliberation-annotation-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8b949e);
+}
+.deliberation-annotation-note {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.deliberation-figure-candidate-preview {
+  margin-top: 8px;
+  border: 1px solid var(--color-border-subtle, #dfe1e5);
+  border-radius: 8px;
+  background: var(--color-background-primary, #fff);
+}
+.deliberation-figure-candidate-preview > summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  color: var(--color-text-secondary, #5f6368);
+  font-size: 12px;
+  font-weight: 600;
+}
+.deliberation-figure-candidate-preview .deliberation-figure-analysis { border-top: 1px solid var(--color-border-subtle, #dfe1e5); }
+
+.deliberation-annotation-error {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-danger, #e24b4a);
+}
+
+.deliberation-annotation-status {
+  display: inline-block;
+  margin-top: 6px;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+}
+.deliberation-annotation-status.committed {
+  background: var(--color-background-success, #e6f4ea);
+  color: var(--color-text-success, #1e7e34);
+}
+.deliberation-annotation-status.dismissed {
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+
+.deliberation-annotation-actions {
+  margin-top: 6px;
+  display: flex;
+  gap: 6px;
+}
+.deliberation-annotation-btn {
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
+}
+.deliberation-annotation-btn.commit {
+  background: var(--color-text-info, #378add);
+  border-color: var(--color-text-info, #378add);
+  color: #fff;
+}
+.deliberation-annotation-btn.dismiss { color: var(--color-text-secondary, #6e6e73); }
+.deliberation-annotation-btn[disabled] { opacity: .5; cursor: default; }
+
+.deliberation-chat-inputrow {
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+  padding-top: 8px;
+}
+.deliberation-chat-input {
+  flex: 1;
+  resize: none;
+  max-height: 96px;
+  padding: 8px 10px;
+  font-size: 13px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  font-family: inherit;
+}
+.deliberation-chat-input[disabled] { opacity: .6; }
+.deliberation-chat-send {
+  padding: 8px 14px;
+  font-size: 13px;
+  border: none;
+  border-radius: 8px;
+  background: var(--color-text-info, #378add);
+  color: #fff;
+  cursor: pointer;
+}
+.deliberation-chat-send[disabled] { opacity: .6; cursor: default; }
+
+/* Phase W-β: 同一性リンク（identity-links）・Phase S 標準化度セクション。
+   カード内の状態・本文・理由・確定操作は既存の deliberation-annotation-* を
+   再利用し（G2-W）、行そのものの枠だけをここで定義する。 */
+.deliberation-identity-link-row {
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+  background: var(--color-background-primary, #fff);
+}
+.deliberation-identity-empty,
+.deliberation-identity-hidden {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 4px 0;
+}
+
+/* ===================================================================
+   個人知識ネットワーク（Phase P-3）— personal-map.js 追加分
+   本人による訂正（提案書 §6）: 「地図には反映しない」/「地図に戻す」/
+   コース横断の橋（旅カードの静かな一行）。既存 personal-map.js の大半のスタイルは
+   atlas.css 側にあるが、本 Phase の追加分はここに置く（ファイル所有境界のため）。
+   =================================================================== */
+.personal-map-exclude-btn,
+.personal-map-restore-chip {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  cursor: pointer;
+  border-radius: 7px;
+  padding: 4px 9px;
+  font-size: 11px;
+  font-family: inherit;
+}
+.personal-map-exclude-btn:hover,
+.personal-map-restore-chip:hover {
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+}
+.personal-map-restore-chip { margin-left: 8px; }
+
+.personal-map-transient-note {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.personal-map-journey-cross-hint {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.personal-map-journey-cross-hint span {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.personal-map-journey-cross-btn {
+  align-self: flex-start;
+  appearance: none;
+  border: 1px solid var(--color-border-info, #378add);
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  cursor: pointer;
+  border-radius: 7px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+}
+.personal-map-journey-cross-btn:hover { background: var(--color-background-primary, #fff); }
+
+/* ===================================================================
+   個人知識ネットワーク（Phase P-3）— 最上位「わたしの地図」パネル
+   frontend/public/js/personal-map-home.js（window.PersonalMapHome）。
+   atlas オーバーレイとは独立の軽量 DOM。`.pm-home-` プレフィックス。
+   =================================================================== */
+.pm-home-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1450;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 24px 16px;
+}
+.pm-home-overlay[hidden] { display: none; }
+
+.pm-home-panel {
+  width: min(720px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+
+.pm-home-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+}
+.pm-home-title { font-size: 15px; font-weight: 600; }
+.pm-home-close-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 2px 6px;
+}
+.pm-home-close-btn:hover { color: var(--color-text-primary, #1d1d1f); }
+
+.pm-home-note {
+  padding: 8px 18px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--color-text-tertiary, #aeaeb2);
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-secondary, #f5f5f7);
+}
+
+.pm-home-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 18px 0;
+  border-bottom: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+}
+.pm-home-tab {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 8px 12px 10px;
+  border-bottom: 2px solid transparent;
+}
+.pm-home-tab.active {
+  color: var(--color-text-info, #378add);
+  border-bottom-color: var(--color-text-info, #378add);
+  font-weight: 600;
+}
+
+.pm-home-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+}
+
+.pm-home-empty,
+.pm-home-fail,
+.pm-home-loading {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  line-height: 1.6;
+  margin: 8px 0;
+}
+
+.pm-home-current-heading,
+.pm-home-related-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 4px 0 8px;
+}
+
+/* G3-P1: 「いまの地図」タブのコース絞り込み（複数コースに痕跡があるときだけ表示） */
+.pm-home-course-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+.pm-home-course-filter-label {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.pm-home-course-filter-select {
+  font-size: 12px;
+  font-family: inherit;
+  color: var(--color-text-primary, #1d1d1f);
+  background: var(--color-background-primary, #fff);
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 7px;
+  padding: 4px 8px;
+}
+.pm-home-related { margin-top: 16px; }
+.pm-home-related-sub {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin: 10px 0 6px;
+}
+
+.pm-home-node-row,
+.pm-home-journey-card-item {
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+}
+.pm-home-node-top { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.pm-home-node-kind {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-text-info, #378add);
+  background: var(--color-background-info, #eef4fb);
+  border-radius: 5px;
+  padding: 1px 6px;
+  flex: 0 0 auto;
+}
+.pm-home-node-label { font-size: 13px; color: var(--color-text-primary, #1d1d1f); }
+.pm-home-node-ctx {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-top: 3px;
+}
+.pm-home-facts {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  line-height: 1.5;
+}
+.pm-home-node-actions { margin-top: 8px; }
+.pm-home-journey-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-info, #378add);
+  cursor: pointer;
+  border-radius: 7px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-family: inherit;
+}
+.pm-home-journey-btn:hover { background: var(--color-background-info, #eef4fb); }
+
+.pm-home-reflect-month { margin-bottom: 18px; }
+.pm-home-reflect-month-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.pm-home-reflect-item {
+  border-left: 2px solid var(--color-border-tertiary, #e5e5ea);
+  padding: 2px 0 10px 12px;
+  margin-bottom: 4px;
+}
+.pm-home-reflect-item-title {
+  font-size: 13px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+
+.pm-home-journey-area {
+  border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  padding: 12px 18px;
+  position: relative;
+  background: var(--color-background-secondary, #f5f5f7);
+  max-height: 34vh;
+  overflow-y: auto;
+}
+.pm-home-journey-area[hidden] { display: none; }
+.pm-home-journey-close {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 16px;
+  line-height: 1;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.pm-home-journey-heading {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.pm-home-journey-list { display: flex; flex-direction: column; gap: 6px; }
+.pm-home-journey-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.pm-home-journey-fact { color: var(--color-text-primary, #1d1d1f); }
+.pm-home-journey-ref-kind {
+  font-size: 10px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+.pm-home-journey-frontier {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.pm-home-journey-truncated {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+/* G7-J: 旅の行き止まり（frontier_note）から、別の問いで旅をやり直す導線 */
+.pm-home-journey-restart { margin-top: 8px; }
+
+
+/* ===========================================================================
+ * W層 Issue #496 — 図を証拠として見ながら分類別に検討するワークスペース
+ * =========================================================================== */
+.deliberation-modal-dialog {
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 10px;
+  padding: 22px;
+  width: min(1180px, 94vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.deliberation-figure-workspace {
+  position: relative;
+}
+
+.deliberation-figure-image-card {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  margin-bottom: 14px;
+  padding: 8px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 9px;
+  background: var(--color-background-primary, #fff);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, .04);
+}
+
+.deliberation-figure-image-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 2px 7px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  font-weight: 600;
+}
+.deliberation-figure-image-toolbar button,
+.deliberation-mode-review button,
+.deliberation-mode-review select,
+.deliberation-chat-context button {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.deliberation-figure-image-toolbar button[disabled],
+.deliberation-mode-review button[disabled] {
+  opacity: .5;
+  cursor: default;
+}
+
+.deliberation-figure-image-stage {
+  min-height: 180px;
+  max-height: 300px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-tertiary, #8b949e);
+  font-size: 12px;
+  text-align: center;
+}
+.deliberation-figure-image-canvas {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  max-height: 300px;
+  line-height: 0;
+}
+.deliberation-figure-image-canvas[hidden] { display: none; }
+.deliberation-figure-image-stage img {
+  display: block;
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 300px;
+  object-fit: contain;
+  cursor: zoom-in;
+}
+.deliberation-figure-overlays {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.deliberation-figure-overlay {
+  position: absolute;
+  min-width: 18px;
+  min-height: 18px;
+  margin: 0;
+  border: 1.5px solid var(--color-text-info, #378add);
+  border-radius: 4px;
+  background: rgba(55, 138, 221, .10);
+  color: var(--color-text-info, #378add);
+  font-size: 10px;
+  line-height: 1;
+  text-align: left;
+  pointer-events: auto;
+}
+.deliberation-figure-overlay:hover,
+.deliberation-figure-overlay.is-selected {
+  border-width: 2px;
+  background: rgba(55, 138, 221, .24);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, .85), 0 0 0 4px var(--color-text-info, #378add);
+}
+
+/* 教員指示付き図再解析（Guided Figure Re-analysis）: 領域指定のドラッグ描画レイヤー。
+   #deliberation-figure-overlays の兄弟として既存オーバーレイのクリック選択とは
+   独立に重ねる。既定は pointer-events:none、focus モード ON（is-drawable）のときだけ
+   ドラッグを受け付ける。 */
+.deliberation-figure-focus-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.deliberation-figure-focus-layer.is-drawable {
+  pointer-events: auto;
+  cursor: crosshair;
+}
+.deliberation-figure-focus-rect {
+  position: absolute;
+  border: 1.5px dashed var(--color-text-warning, #ef9f27);
+  border-radius: 3px;
+  background: rgba(239, 159, 39, .16);
+  pointer-events: none;
+}
+
+.deliberation-figure-lightbox {
+  display: none;
+  position: fixed;
+  inset: 0;
+  z-index: 10001;
+  align-items: center;
+  justify-content: center;
+  padding: 52px 24px 24px;
+  background: rgba(0, 0, 0, .82);
+}
+.deliberation-figure-lightbox.is-open { display: flex; }
+.deliberation-figure-lightbox img {
+  max-width: 96vw;
+  max-height: 90vh;
+  object-fit: contain;
+}
+.deliberation-figure-lightbox > button {
+  position: absolute;
+  top: 12px;
+  right: 18px;
+  border: 0;
+  background: transparent;
+  color: #fff;
+  font-size: 34px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.deliberation-figure-mode-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.deliberation-figure-mode-badge,
+.deliberation-figure-reviewed {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+}
+.deliberation-figure-mode-badge {
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  font-weight: 600;
+}
+.deliberation-figure-reviewed {
+  background: var(--color-background-success, #e6f4ea);
+  color: var(--color-text-success, #1e7e34);
+}
+.deliberation-figure-mode-reason,
+.deliberation-figure-caution {
+  margin: 6px 0 10px;
+  color: var(--color-text-tertiary, #8b949e);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.deliberation-figure-caution {
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--color-background-tertiary, #eeeef0);
+}
+
+.deliberation-mode-review {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin: 9px 0 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+}
+.deliberation-mode-review select { background: var(--color-background-primary, #fff); }
+#deliberation-mode-save-status,
+#deliberation-figure-reanalyze-status {
+  color: var(--color-text-tertiary, #8b949e);
+}
+
+/* 教員指示付き図再解析（Guided Figure Re-analysis）: トグル・クリアボタンと指示欄。 */
+.deliberation-figure-focus-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  margin: 0 0 7px;
+}
+.deliberation-focus-toggle,
+#deliberation-focus-clear {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.deliberation-focus-toggle.is-active {
+  border-color: var(--color-text-warning, #ef9f27);
+  background: var(--color-background-warning, #fff3cd);
+  color: var(--color-text-warning, #ef9f27);
+  font-weight: 600;
+}
+.deliberation-reanalyze-hint {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin: 0 0 9px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+.deliberation-figure-analysis {
+  margin-top: 10px;
+}
+.deliberation-figure-analysis.nested {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+.deliberation-figure-analysis h5,
+.deliberation-figure-analysis h6 {
+  margin: 0;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.deliberation-figure-analysis h5 { margin-bottom: 8px; font-size: 13px; }
+.deliberation-figure-analysis h6 { font-size: 12px; }
+.deliberation-figure-empty {
+  margin: 9px 0;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.deliberation-figure-muted {
+  color: var(--color-text-tertiary, #8b949e);
+  font-size: 11.5px;
+}
+
+.deliberation-figure-overall {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 9px 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--color-text-info, #378add);
+  background: var(--color-background-info, #eef4fb);
+  border-radius: 4px 7px 7px 4px;
+}
+.deliberation-figure-overall span {
+  color: var(--color-text-info, #378add);
+  font-size: 11px;
+  font-weight: 600;
+}
+.deliberation-figure-overall strong {
+  color: var(--color-text-primary, #1d1d1f);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.deliberation-figure-system-io {
+  display: grid;
+  gap: 6px;
+  margin: 8px 0;
+}
+.deliberation-figure-io {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+}
+.deliberation-figure-io-label {
+  min-width: 48px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11px;
+  font-weight: 600;
+}
+.deliberation-figure-chip {
+  display: inline-block;
+  padding: 2px 7px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 999px;
+  color: var(--color-text-primary, #1d1d1f);
+  background: var(--color-background-primary, #fff);
+  font-size: 11px;
+}
+
+.deliberation-figure-subheading {
+  margin: 12px 0 6px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+  font-weight: 600;
+}
+.deliberation-function-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.deliberation-function-card {
+  padding: 9px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+}
+.deliberation-function-card p {
+  margin: 5px 0 8px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.deliberation-mixed-panel-detail {
+  margin-top: 7px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+  padding-top: 7px;
+}
+.deliberation-mixed-panel-detail > summary {
+  color: var(--color-text-info, #378add);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.deliberation-mixed-panel-detail .deliberation-function-grid {
+  grid-template-columns: 1fr;
+}
+
+.deliberation-context-target {
+  appearance: none;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  padding: 2px 4px;
+  margin: -2px -4px;
+  font: inherit;
+  font-weight: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.deliberation-context-target:hover,
+.deliberation-context-target.is-selected {
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  box-shadow: 0 0 0 1px var(--color-text-info, #378add);
+}
+
+.deliberation-connection-list,
+.deliberation-figure-list {
+  margin: 4px 0;
+  padding-left: 20px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+.deliberation-connection-list li,
+.deliberation-figure-list li { margin: 3px 0; }
+.deliberation-connection-list li.is-related {
+  margin-left: -4px;
+  padding: 3px 5px;
+  border-radius: 5px;
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  font-weight: 600;
+}
+
+.deliberation-plot-basics {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.deliberation-plot-basics > div {
+  padding: 9px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 7px;
+}
+.deliberation-observation-list {
+  list-style: none;
+  display: grid;
+  gap: 7px;
+  margin: 0;
+  padding: 0;
+}
+.deliberation-observation-list > li {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  padding: 8px 9px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 7px;
+}
+.deliberation-observation-list strong {
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11px;
+}
+.deliberation-observation-list p {
+  margin: 3px 0 0;
+  color: var(--color-text-primary, #1d1d1f);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.deliberation-figure-raw {
+  margin-top: 14px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+  padding-top: 10px;
+}
+.deliberation-figure-raw summary {
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  cursor: pointer;
+}
+.deliberation-figure-raw-body { padding: 8px 2px; }
+
+.deliberation-chat-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  font-size: 11.5px;
+}
+.deliberation-chat-context[hidden] { display: none; }
+.deliberation-chat-context strong {
+  display: inline-block;
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  white-space: nowrap;
+}
+
+/* ===========================================================================
+ * 要素中心コンテキストビュー（Element-Centered Context Lens, Issue #498）
+ * 正本: docs/features/element_context_lens_design.md §3/§6 Phase 2/§8。
+ * 上位構造（Why）/ 選択要素（What）/ 下位構造（How）を1階層ずつ投影する。
+ * badge はラベルのみ（数値・スコアは出さない・W8 を継承）。source_backed=通常 /
+ * confirmed=強調 / candidate=点線・淡色 / unidentified=点線・より淡色（W-層の
+ * 既存視覚言語 candidate=点線／confirmed=通常 と整合させる）。
+ * =========================================================================== */
+.deliberation-context-lens {
+  margin: 2px 0 16px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--color-border-tertiary, #e5e5ea);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.deliberation-context-lens-unavailable { padding-bottom: 8px; }
+
+.deliberation-context-lane {
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--color-background-secondary, #f5f5f7);
+}
+.deliberation-context-lane-title {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 6px;
+}
+
+.deliberation-context-item {
+  padding: 5px 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  border-top: 1px solid var(--color-border-subtle, #dfe1e5);
+}
+.deliberation-context-item:first-of-type { border-top: none; padding-top: 0; }
+.deliberation-context-relation { color: var(--color-text-secondary, #6e6e73); }
+.deliberation-context-item-label {
+  color: var(--color-text-primary, #1d1d1f);
+  font-weight: 600;
+}
+.deliberation-context-evidence {
+  margin-top: 3px;
+  font-size: 11.5px;
+}
+.deliberation-context-evidence > summary {
+  cursor: pointer;
+  color: var(--color-text-tertiary, #8b949e);
+}
+.deliberation-context-evidence ul {
+  margin: 4px 0 0 16px;
+  padding: 0;
+  color: var(--color-text-tertiary, #8b949e);
+}
+.deliberation-context-fact {
+  margin: 2px 0;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8b949e);
+}
+.deliberation-context-notes { margin-top: 2px; }
+
+.deliberation-context-focus {
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--color-background-primary, #fff);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.deliberation-context-focus-section + .deliberation-context-focus-section {
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+  padding-top: 8px;
+}
+.deliberation-context-focus-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary, #8b949e);
+  margin-bottom: 3px;
+}
+.deliberation-context-focus-value {
+  font-size: 13px;
+  color: var(--color-text-primary, #1d1d1f);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.deliberation-context-provenance {
+  margin: 4px 0 0;
+  padding: 0 0 0 16px;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #8b949e);
+}
+
+.deliberation-context-nav {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--color-text-info, #378add);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+.deliberation-context-nav:hover { color: var(--color-text-primary, #1d1d1f); }
+
+.deliberation-context-status {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 9px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+  white-space: nowrap;
+}
+.deliberation-context-status--source_backed {
+  border-color: var(--color-text-success, #1e7e34);
+  color: var(--color-text-success, #1e7e34);
+  background: var(--color-background-success, #e6f4ea);
+}
+.deliberation-context-status--confirmed {
+  border-style: solid;
+  border-color: var(--color-text-info, #378add);
+  color: var(--color-text-info, #378add);
+  background: var(--color-background-info, #eef4fb);
+}
+.deliberation-context-status--candidate {
+  border-style: dashed;
+  color: var(--color-text-secondary, #6e6e73);
+  background: none;
+}
+.deliberation-context-status--unidentified {
+  border-style: dotted;
+  color: var(--color-text-tertiary, #aeaeb2);
+  background: none;
+}
+
+/* ── パンくず（中心移動の履歴。設計書 §2.3）───────────────────────────── */
+.deliberation-breadcrumb {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #8b949e);
+  margin-bottom: 8px;
+}
+.deliberation-breadcrumb:empty { margin-bottom: 0; }
+.deliberation-breadcrumb-back {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.deliberation-breadcrumb-trail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.deliberation-breadcrumb-item {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--color-text-info, #378add);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+}
+.deliberation-breadcrumb-current {
+  color: var(--color-text-primary, #1d1d1f);
+  font-weight: 600;
+}
+.deliberation-breadcrumb-sep { color: var(--color-text-tertiary, #aeaeb2); }
+
+/* ===========================================================================
+ * 照合解析（Contextual Figure Analysis Iterative Verification, #499 Wave 4）
+ * 正本: docs/features/contextual_figure_analysis_iterative_verification.md
+ * 「実装記録」節。文脈仮説×画像観察の照合結果を区分別に提示する。
+ * 注意色（点線枠・薄色）は煽らず、事実の区分（text_only/contradicted/unresolved）
+ * を見分けやすくするだけ（W8: 数値・スコアは出さない）。
+ * =========================================================================== */
+.deliberation-iterative-analysis {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+.deliberation-iterative-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.deliberation-iterative-header h5 {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.deliberation-iterative-status {
+  display: inline-block;
+  font-size: 11px;
+  padding: 1px 8px;
+  border-radius: 9px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-secondary, #6e6e73);
+  white-space: nowrap;
+}
+.deliberation-iterative-status--converged {
+  border-color: var(--color-text-success, #1e7e34);
+  color: var(--color-text-success, #1e7e34);
+  background: var(--color-background-success, #e6f4ea);
+}
+.deliberation-iterative-status--max_iterations_reached,
+.deliberation-iterative-status--no_progress {
+  border-style: dashed;
+  color: var(--color-text-warning, #ef9f27);
+  background: var(--color-background-warning, #fff3cd);
+}
+.deliberation-iterative-status--aborted_error,
+.deliberation-iterative-status--aborted_cost_limit {
+  border-style: dashed;
+  color: var(--color-text-danger, #e24b4a);
+  background: none;
+}
+.deliberation-iterative-status--not_run {
+  border-style: dotted;
+  color: var(--color-text-tertiary, #aeaeb2);
+  background: none;
+}
+
+.deliberation-iterative-note {
+  margin: 4px 0 10px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  background: var(--color-background-tertiary, #eeeef0);
+  color: var(--color-text-tertiary, #8b949e);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.deliberation-iterative-alignment-group { margin-bottom: 10px; }
+.deliberation-iterative-alignment-heading {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 4px;
+}
+.deliberation-iterative-alignment-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.deliberation-iterative-alignment-item {
+  padding: 7px 9px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+  font-size: 12px;
+}
+.deliberation-iterative-alignment-item.is-caution {
+  border-style: dashed;
+  background: var(--color-background-primary, #fff);
+}
+.deliberation-iterative-alignment-label {
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.deliberation-iterative-evidence {
+  margin-top: 3px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.deliberation-iterative-review-section {
+  margin: 12px 0;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border-tertiary, #e5e5ea);
+}
+.deliberation-iterative-review-section h5 {
+  margin: 0 0 6px;
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.deliberation-iterative-review-card {
+  padding: 8px 9px;
+  margin-bottom: 7px;
+  border: 1px dashed var(--color-border-secondary, #d2d2d7);
+  border-radius: 7px;
+  background: var(--color-background-primary, #fff);
+}
+.deliberation-iterative-review-question {
+  margin: 0 0 4px;
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.deliberation-iterative-review-label {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #8b949e);
+}
+.deliberation-iterative-reverify {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+  padding: 4px 9px;
+  font: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.deliberation-iterative-reverify:disabled {
+  opacity: .6;
+  cursor: default;
+}
+
+.deliberation-iterative-details {
+  margin-top: 8px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+  padding-top: 8px;
+}
+.deliberation-iterative-details summary {
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  cursor: pointer;
+}
+.deliberation-iterative-subsection {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.deliberation-iterative-subsection p { margin: 4px 0; }
+.deliberation-iterative-iteration-list {
+  margin: 4px 0;
+  padding-left: 18px;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.deliberation-iterative-iteration-list > li { margin-bottom: 8px; }
+
+@media (max-width: 820px) {
+  .deliberation-modal-dialog {
+    width: calc(100vw - 18px);
+    max-height: 94vh;
+    padding: 14px;
+  }
+  .deliberation-modal-columns {
+    flex-direction: column;
+    overflow-y: auto;
+  }
+  .deliberation-modal-left {
+    flex: none;
+    overflow: visible;
+    padding-right: 0;
+    border-right: 0;
+    border-bottom: 1px solid var(--color-border-tertiary, #e5e5ea);
+    padding-bottom: 14px;
+  }
+  .deliberation-chat-pane {
+    flex: none;
+    min-height: 360px;
+  }
+  .deliberation-figure-image-card { position: static; }
+  .deliberation-figure-image-stage { max-height: 42vh; }
+  .deliberation-figure-image-stage img { max-height: 42vh; }
+  .deliberation-function-grid,
+  .deliberation-plot-basics,
+  .deliberation-observation-list > li {
+    grid-template-columns: 1fr;
+  }
+  .deliberation-context-lane,
+  .deliberation-context-focus {
+    padding: 8px;
+  }
+  .deliberation-breadcrumb-trail { width: 100%; }
+}
+
+/* ── 一行の事実文トースト（N32: ロックトピックの視覚と挙動の齟齬を事実文で埋める） ── */
+.fact-toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #475569);
+  border: 1px solid var(--color-border-secondary, #d8dee6);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  z-index: 1200;
+  pointer-events: none;
 }

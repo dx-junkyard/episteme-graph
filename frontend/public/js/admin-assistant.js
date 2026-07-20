@@ -91,6 +91,19 @@
   // パネル DOM
   // -------------------------------------------------------------------------
 
+  // 常設フローティング起動ボタン（右下）。以前この位置は通知ベル（🔔）が占めていたが、
+  // 「AI アシスタントへのアクセスを良くする」ため位置を入れ替え、通知はトップバーへ移した。
+  function buildToggleButton() {
+    toggleBtn = document.createElement("button");
+    toggleBtn.id = "admin-copilot-toggle";
+    toggleBtn.type = "button";
+    toggleBtn.className = "admin-assistant-fab";
+    toggleBtn.title = "管理画面の操作を手伝う AI アシスタント";
+    toggleBtn.innerHTML = "🤖";
+    toggleBtn.addEventListener("click", togglePanel);
+    document.body.appendChild(toggleBtn);
+  }
+
   function buildPanel() {
     panelEl = document.createElement("div");
     panelEl.className = "admin-assistant-panel";
@@ -139,14 +152,48 @@
     if (panelEl.hasAttribute("hidden")) openPanel(); else closePanel();
   }
 
-  function greet() {
-    appendAiMsg(
+  // N12（実行可否の事前開示）: 挨拶文の「代行できます」例示は、サーバが executable=true と
+  // 申告した（＝代行ハンドラ実装済みの）操作に限定する。未実装の action は
+  // 「道案内のみ対応」と明示し、どれが実際に動くかを事前に区別できるようにする。
+  function buildGreeting(capabilities) {
+    var base =
       "こんにちは。管理画面の操作をお手伝いします。\n\n" +
       "・**説明**: 「コースを公開するには？」\n" +
-      "・**道案内**: 「教材ってどこからアップロードするの？」\n" +
-      "・**代行**: 「このコースを公開して」\n\n" +
-      "あなたの権限でできる操作だけをご案内します。"
-    );
+      "・**道案内**: 「教材ってどこからアップロードするの？」\n";
+    var executable = [];
+    var guideOnly = [];
+    var i, c;
+    if (capabilities && capabilities.length) {
+      for (i = 0; i < capabilities.length; i++) {
+        c = capabilities[i];
+        if (!c || c.kind !== "action") continue;
+        if (c.executable) executable.push(c.title);
+        else guideOnly.push(c.title);
+      }
+    }
+    if (executable.length) {
+      base += "・**代行**（実行まで対応）: " + executable.join("・") + "\n";
+      if (guideOnly.length) {
+        base += "・**道案内のみ対応**: " + guideOnly.join("・") + "\n";
+      }
+    } else {
+      // capability 一覧が取れないときは、実装済みと確認されている例だけを出す（捏造しない, P4）。
+      base += "・**代行**: 「このコースを公開して」\n";
+    }
+    base += "\nあなたの権限でできる操作だけをご案内します。";
+    return base;
+  }
+
+  function greet() {
+    // サーバの capability 一覧（executable フラグ付き）で挨拶を組み立てる。
+    // 取得失敗時は静的文面へ縮退（fail-closed。代行例示は実装済みのもののみ）。
+    apiFetch("/admin/assistant/capabilities").then(function (res) {
+      return res.ok ? res.json() : null;
+    }).then(function (rows) {
+      if (bodyEl && !bodyEl.childNodes.length) appendAiMsg(buildGreeting(rows));
+    }).catch(function () {
+      if (bodyEl && !bodyEl.childNodes.length) appendAiMsg(buildGreeting(null));
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -370,6 +417,39 @@
     }).then(function () { busy = false; refreshUndo(); });
   }
 
+  // G2 是正: サーバ側 assistant_actions 履歴（GET /admin/assistant/actions）から
+  // actionStack を再構成する。従来 actionStack はメモリ内のみで、ページを再読み込み
+  // すると「戻す」が常に空になっていた（P3「before スナップショットで取り消し可能」の
+  // 約束がセッション内でしか成立していなかった）。まだ取り消し可能（reversible かつ
+  // status='applied'）な行だけを、古い順に積み直す（最新のものが「戻す」の対象になる）。
+  // 取得に失敗しても静かに空スタックのまま（fail-closed。ローカル L1 Undo はセッション
+  // 限りのまま変更しない）。
+  function loadServerActionHistory() {
+    apiFetch("/admin/assistant/actions").then(function (res) {
+      return res.ok ? res.json() : [];
+    }).then(function (rows) {
+      if (!rows || !rows.length) return;
+      var revertible = [];
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        if (r && r.reversible && r.status === "applied") revertible.push(r);
+      }
+      // サーバは新しい順に返すため、古い順に積み直す（最新が一番上=次の Undo 対象）。
+      revertible.reverse();
+      for (var j = 0; j < revertible.length; j++) {
+        actionStack.push({
+          kind: "server",
+          // AssistantActionSummary には人間向けタイトルが無いため capability_id を使う
+          // （plan.title || plan.capability_id という既存のフォールバック方針と同じ, P4）。
+          label: revertible[j].capability_id,
+          reversible: true,
+          action_id: revertible[j].action_id
+        });
+      }
+      refreshUndo();
+    }).catch(function () { /* fail-closed: 履歴なしのまま続行 */ });
+  }
+
   // -------------------------------------------------------------------------
   // 道案内（runLocatePlan + スポットライト） — 変更を伴わない（P8）
   // -------------------------------------------------------------------------
@@ -451,9 +531,8 @@
     deps.activateTabView = options.activateTabView || null;
 
     buildPanel();
-
-    toggleBtn = document.getElementById("admin-copilot-toggle");
-    if (toggleBtn) toggleBtn.addEventListener("click", togglePanel);
+    buildToggleButton();
+    loadServerActionHistory();
 
     initialized = true;
   }

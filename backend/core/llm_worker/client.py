@@ -17,16 +17,29 @@ from core.config import get_settings
 from core.llm import generate_text
 
 
-def resolve_model(model_setting_key: str) -> str:
-    """settings.<model_setting_key> があればそれを、無ければ fast tier のモデルを使う。
+def resolve_model(model_setting_key: str, *, fallback: str = "fast") -> str:
+    """settings.<model_setting_key> があればそれを、無ければ ``fallback`` tier のモデルを使う。
 
     各系統固有の環境変数名は core/config.py 側の Settings フィールド名
     （model_setting_key として渡される属性名）を通して間接的に解決される。
     このモジュールは系統ごとの環境変数の実名には一切触れない（呼び出し側の
     core/<system>/llm_client.py が Settings のフィールド名だけを注入する）。
+
+    ``fallback`` は空文字時のフォールバック先 tier。``"fast"``（既定、後方互換）は
+    ``settings.llm_fast_model``、``"analysis"`` は ``settings.llm_analysis_model`` に
+    解決する。それ以外の値は ``ValueError``（正本:
+    docs/features/assistant_common_infra_design.md §3。既定を変えずに tier を
+    増やすための最小拡張）。
     """
+    if fallback == "fast":
+        fallback_attr = "llm_fast_model"
+    elif fallback == "analysis":
+        fallback_attr = "llm_analysis_model"
+    else:
+        raise ValueError(f"unknown fallback tier: {fallback!r}")
+
     settings = get_settings()
-    return getattr(settings, model_setting_key, "") or settings.llm_fast_model
+    return getattr(settings, model_setting_key, "") or getattr(settings, fallback_attr)
 
 
 def parse_json_response(text: str) -> dict:

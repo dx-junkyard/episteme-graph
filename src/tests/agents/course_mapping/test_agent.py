@@ -172,3 +172,39 @@ def test_topic_has_no_derivations_when_component_has_none():
     comp = _make_component("comp_nd")
     result = CourseMappingAgent().run("doc", [comp])
     assert result.topics[0].linked_derivation_ids == []
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 §7.1 (hierarchical_context_explanation_design.md): 図のコース流通。
+# linked_figure_ids は component.source_scope.figure_id から決定論的に導出する
+# （LLM は使わない。apparatus_components.py が付与する source_scope の形に依存）。
+# ---------------------------------------------------------------------------
+
+
+def test_linked_figure_ids_derived_from_apparatus_component_source_scope():
+    comp = _make_component("comp_apparatus_1", component_type="ApparatusComponent")
+    comp.source_scope = {  # type: ignore[attr-defined]
+        "source": "apparatus_semantics",
+        "document_id": "doc_test",
+        "figure_id": "fig-uuid-1",
+        "figure_key": "fig_2",
+    }
+    result = CourseMappingAgent().run("doc_test", [comp])
+    assert result.topics[0].linked_figure_ids == ["fig-uuid-1"]
+
+
+def test_linked_figure_ids_empty_when_component_has_no_figure_source_scope():
+    # Regular derivation-backed components carry no figure_id in source_scope
+    # (or none at all); linked_figure_ids must stay empty rather than invent one.
+    comp = _make_component("comp_no_figure")
+    result = CourseMappingAgent().run("doc_test", [comp])
+    assert result.topics[0].linked_figure_ids == []
+
+
+def test_linked_figure_ids_empty_when_source_scope_missing_figure_key_only():
+    # source_scope present but with no figure_id at all (e.g. derivation_chain's
+    # {"section_id": ...} shape) must not surface a figure link.
+    comp = _make_component("comp_section_scope")
+    comp.source_scope = {"section_id": "sec_3"}  # type: ignore[attr-defined]
+    result = CourseMappingAgent().run("doc_test", [comp])
+    assert result.topics[0].linked_figure_ids == []

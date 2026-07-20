@@ -70,7 +70,7 @@ src/tests/                     → agents 用 pytest テスト
 | `backend/core/postgres.py` | PostgreSQL セッション管理 |
 | `backend/core/llm.py` | OpenAI クライアントファクトリ |
 | `backend/core/storage.py` | MinIO S3互換ストレージ |
-| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。5系統が利用） |
+| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。フル骨格は6系統が利用、CostGate 等の部分利用が別途あり） |
 | `backend/core/privacy.py` | k-匿名ゲートの正本（K_ANONYMITY=3・件数レンジ導出） |
 | `backend/core/notification_recipients.py` | 通知宛先解決の共通 JOIN プリミティブ（status 系 / V層が利用） |
 | `backend/core/course_data.py` | `learning_courses.data` JSONB の正本スキーマ（CourseData 系 Pydantic モデル＝全て `extra="allow"` + アクセサ群）。course_data への素の dict アクセスを新規に書かない（Tier 3-18） |
@@ -123,6 +123,8 @@ PDF ファイル
 [#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
     ↓  DerivationChainResult (JSON)
 [#237] FigureTableSemanticsAgent — 図表の意味復元（caption-first, LLM enricher 任意）
+                                  + mention クロスリンク（本文の Fig./Table/図/表 参照から
+                                    claim ⇄ 図・表を決定論リンク。crosslink.py, 2026-07-18）
     ↓  FigureTableSemanticsResult (JSON)
 [L層]  ApparatusSemanticsAgent    — 図画像の装置・パーツ候補抽出（vision LLM、`analyze_images` オプトイン時のみ）
     ↓  ApparatusSemanticsResult (JSON; 全出力 review_required 系)
@@ -493,6 +495,30 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
   対応しなければ `GET /api/atlas` は 404（骨格なし扱い→地図領域ごと非表示）。解析パイプ
   ラインは既定カートリッジで走るため、`document_analysis_runs` 由来の導出だけでは別分野
   コースに無関係な地図が出る（`atlas_state.course_has_skeleton_anchor`）。
+- **バインディングの該当なしUX + ドメインライフサイクル（migration 057）**: 正本は
+  `docs/features/atlas_binding_lifecycle_design.md`（一致ゼロは正常な状態＝発見、AB1）。
+  ①propose は retired ドメインを除外し `domains_checked` / `retired_skipped` /
+  `atlas_binding_pending` を返す。0一致時のフロント既定は「バインドしない」
+  （proposals[0] への fallback は廃止）で、出口3つ（手動対応 / 後回し=G層 To-Do /
+  コース起点の新分野作成）。topic 対応 0 件のまま cartridge_id を保存する時はフロントで
+  事実文 confirm（明示バインドのゲート免除自体は維持）。②新分野作成は
+  `PUT .../atlas-binding/pending`（`course_data.atlas_binding_pending`。読みは
+  `course_data.course_atlas_binding_pending`）→ 既存 generate（body.domain）の順。
+  バインド保存（解除含む）で pending は自動クリア。③ドメインは
+  `atlas_domain_meta.lifecycle`（active/retired）で `POST .../atlas/retire|restore`。
+  retired は propose 候補から除外・generate/draft保存/freeze は 409（読み取り専用、
+  L層 retired と同型）・**学習者表示は不変**（バインド済みコースの地図は出続ける）。
+  削除 API なし。④凍結前に `GET .../atlas/freeze-impact`（draft と現行凍結版の突合 +
+  バインド中コースの topic 影響、`core/atlas_lifecycle.compute_freeze_impact`）を
+  フロントが事実文 confirm で提示し、freeze レスポンスにも `impact` 同梱。⑤freeze /
+  retire は cross_layer_notify（kind=`atlas_skeleton_frozen` / `atlas_domain_retired`、
+  source='status'）で「バインド中コース所有者 + 骨格編集履歴のある教員」（actor 除外）へ
+  best-effort 通知（宛先 SQL は `notification_recipients.py`、方針の合成は
+  `core/atlas_lifecycle.notify_atlas_event`）。学習者・draft レビューには通知しない。
+  ⑥G層に `course.atlas_binding_ready`（pending の骨格が凍結された）/
+  `course.atlas_binding_stale`（バインド済み node_id が現行凍結版に無い）を追加
+  （いずれも recommended・capability `course.atlas_binding` 再利用）。
+  `course.no_atlas_binding` は pending 中のコースには出さない。
 - **フロントの fail-closed**: `atlas-data.js` は API 失敗時にフィクスチャへ退避しない
   （`null`＝非表示）。フィクスチャは `ATLAS_DATA_SOURCE=fixture` の明示時のみ。
   `/api/atlas` は `frontend/nginx.conf` の明示 proxy が必須（欠落すると SPA フォール
@@ -660,15 +686,40 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   行削除しない・core 非 FastAPI・禁止語彙・上限と truncated の整合）。
 - **非スコープ**: 学習者向けバッジ / To-Do 自動実行 / メール・プッシュ通知 / 進捗率表示。
 
-### レクチャー音声キャッシュの判定（`backend/api/routes/lecture.py`）
+### レクチャーの表示ソースと音声（トピック教材ベース、migration 047）
 
-`student_material`/`content`/`summary` はコースビルダーが生成するほぼ全トピックに
-設定されるため、これらの有無だけで「ドラフト専用トピック（`topic:` セグメント再生、
-音声キャッシュ不可）」を判定してはならない（実チャンク教材を持つトピックまで
-`get_topic_audio_status`/`get_lecture_sequence` が無効化してしまう）。判定は
-`_topic_has_linkable_material(topic, course_data)`（`topic.material_chunk_ids` または
-`course_data.sources[].material_id` の有無）を必ず経由し、実チャンク教材が無い
-トピックに限ってドラフト（`_build_topic_draft_segment`）へフォールバックすること。
+**レクチャー受講の表示は、非レクチャー時の教材表示（`get_topic_material` =
+`topics[].student_material` 最優先）と一致させる。** かつては音声キャッシュのために
+「実チャンク教材を持つトピックはチャンク経路（PDF由来チャンク）を優先」していたが、
+これだと受講画面のレクチャーが「トピックに紐づく整形済み教材」ではなく生 PDF チャンク
+（英語原文・OCR ノイズ）を流してしまい、表示が非レクチャー時と食い違った。現在は逆に
+**トピック教材を最優先**する。
+
+- **表示ソース判定の正本は `_lecture_uses_topic_material(topic)`**（`backend/api/routes/lecture.py`）:
+  トピックが `student_material`/`content`/`summary` または `spoken_script` を持つなら
+  トピック教材経路（`_build_topic_draft_segment`＝display=student_material /
+  read=spoken_script をスライド分割）を使う。持たないトピックだけが PDF 由来
+  チャンク経路へフォールバックする。`get_lecture_sequence` / `get_topic_audio_status` /
+  studio のトピック音声生成の3者が**同じ述語**を使い、表示・ボタン活性・音声生成の
+  食い違いを防ぐ（`_topic_has_linkable_material` は撤去済み）。
+- **スライド分割の正本は `_build_topic_slides(topic)`**（`routes/lecture.py`、決定論的・LLM 非使用）:
+  正規化＋`![[equation]]` 解決のうえ `core/lecture.py::auto_paginate_slides` で分割する。
+  受講表示・音声生成・readiness の3者が**この関数を通る**ことで `slide_index` を完全一致させる。
+  分割規約: `===` マーカーがあれば教員の明示分割を優先。無く display が長い（既定600字目安・
+  数式1個=60字換算）場合は**段落境界で自動ページ分割**し、表示と読み上げを同数ページ・同順で
+  対応させる（読み上げが同数ページに割れないときは spoken を空＝タイマー送りに縮退し表示だけ
+  分割）。チャンク経路は従来どおり `split_slides`（自動ページ分割しない）。
+- **トピック音声は別テーブル `topic_lecture_audio_cache`（migration 047）**にキャッシュする。
+  キーは `(course_id, topic_id, slide_index, voice)`。`lecture_audio_cache` は `chunk_id`
+  が `chunks(id)` への FK を持ちトピック（JSON キー）を格納できないため独立テーブルにした
+  （既存のチャンク音声・#491 readiness には影響しない）。学習側 `generate_tts` は
+  chunk_id が `topic:{topic_id}` 形式なら本テーブルから配信する（`_parse_topic_ref` /
+  `_get_topic_audio_cache`）。生成は studio の音声生成（`_batch_audio_worker` 内の
+  `_generate_course_topic_audio`）が担い、受講側と同じ `split_slides` で分割して各スライドの
+  `spoken_text` を TTS 化する（表示スライドと音声スライドが同じ `slide_index` で一致）。
+  トピックの授業用教材/読み上げ原稿を編集すると当該トピックのトピック音声は無効化される
+  （`save_lecture_studio_course_topic` が `DELETE`）。学習者経路からの音声生成禁止
+  （`generate_tts` はキャッシュ配信のみ・404 方針）は不変。
 
 ### レクチャースライド同期 + 音声言語切替（migration 040）
 
@@ -742,11 +793,30 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   fallback（`extraction_method='embedded'|'region_render'`）。MinIO `figure-images` バケット +
   `document_figures` テーブル（`UNIQUE(document_id, figure_key)` upsert）。caption 対応が
   取れない画像も `caption_block_id=NULL` で保持（P4）。図単位の失敗は `status='failed'` で
-  非致命。
+  非致命。**図中ラベル抽出（migration 051）**: 図領域内のテキストスパンを
+  `page.get_text("words", clip=...)` で収集し、同一行・近接語をグルーピングして
+  `document_figures.inner_labels JSONB`（`[{"text","bbox":[x0,y0,x1,y1]}]`、ページ座標系）に
+  保存する（決定論・非LLM。caption ブロックと重なる語は除外。`f = 75 mm` 等の
+  パラメータ表記も落とさない、P4）。ベクター描画の図（TikZ 等）でラベルが PDF テキスト層に
+  埋まっているケース（装置模式図）のパーツ列挙グラウンディングに使う。
+- **`figure_context.py`**（`core/document_pipeline/`、非LLM・決定論的）: 図ごとの文脈収集
+  `collect_figure_context(structure, figure_row, inner_labels=...) -> FigureContext`。
+  ① caption ブロックが属するセクションの本文 ② `Fig. 5.2` 型の参照メンション段落（±1ブロック、
+  図番号は figure_label / figure_key から導出）③ `フル表記 (略語)` / `略語 (フル表記)` パターンの
+  略語辞書（inner_labels の語で引けるものに絞る）を優先度順
+  （略語定義 > caption 直近 > 参照段落 > セクション残り）に収集。上限は
+  `APPARATUS_CONTEXT_MAX_ITEMS`（既定12）/ `APPARATUS_CONTEXT_MAX_CHARS`（既定6000）。
 - **`apparatus_semantics`**（`src/episteme_graph/agents/apparatus_semantics/`、vision LLM、
   `figure_table_semantics` 直後・`analyze_images=true` のときのみ）: 画像 + caption + 近傍本文
-  + ライブラリ**凍結版**の retrieval（caption テキスト embedding → pgvector top-k、既定5）を
-  入力に、装置同定・パーツ分解を structured output で候補化。出力は常に
+  （`figure_context.py` の実収集結果。かつて `nearby_text=[]` 固定だったギャップは解消済み）
+  + 図中ラベル + 略語辞書 + ライブラリ**凍結版**の retrieval（caption + 近傍本文 + 略語展開の
+  テキスト embedding → pgvector top-k、既定5）を入力に、装置同定・パーツ分解を structured
+  output で候補化。`ApparatusPart` は `label_ref`（図中ラベルへの参照、LLM出力・validator が
+  inner_labels 実在を hard error 検査）/ `expanded_name` / `bbox` を持ち、**bbox と
+  expanded_name は agent 側で label_ref → inner_labels / abbreviations の突合により決定論的に
+  付与する（LLM 出力からは取らない）**。role は本文からの verbatim quote で裏付け、根拠のない
+  役割は書かせない（見た目の推測は reason に留める）。図中ラベルは網羅を促すがパラメータ表記
+  （`f = 75 mm`・`s-pol.` 等）はスキップ可、未カバーは warning で保持（P4）。出力は常に
   `review_status='review_required'` 系・`source_backed` を自動付与しない（確定は人間のみ）。
   off 時は `{"skipped_by_option": true}` を `stage_outputs` に正直に記録。ライブラリ 0 件でも
   単独動作（`match_status ∈ {novel, unknown}` に縮退）。参照版は
@@ -754,10 +824,49 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   `generate_structured_with_images()`（v1 は OpenAI 経路のみ）。上限は
   `APPARATUS_MAX_IMAGES_PER_DOCUMENT`（既定20）/ `APPARATUS_MAX_CALLS_PER_DAY`（既定30）、
   超過分は `skipped_by_limit` で保持しステージは正常完了。
+- **反復照合解析（#499, migration 054）**: apparatus_semantics は既定で one-shot ではなく
+  **文脈仮説 → 独立画像観察 → 照合 → ギャップ駆動再スキャン → 決定論的収束判定** の状態機械
+  （`apparatus_semantics/iterative.py::IterativeFigureAnalyzer`、正本は
+  `docs/features/contextual_figure_analysis_iterative_verification.md` 末尾の実装記録）で動く。
+  ①仮説はテキストのみ（画像を見せない）②観察は画像+inner_labels のみ（**caption・近傍本文を
+  渡さない** — 確証バイアス遮断）③照合は画像を渡さないテキスト統合で、**parts は観察根拠
+  （observation_refs / label_ref）必須**（validator `part_without_visual_support` = hard error。
+  「文章にあるから画像で発見」を構造的に禁止）。text_only の期待要素は alignment item
+  （`supported_by_both / visual_only / text_only / contradicted / unresolved`）として保持され
+  parts に入らない。④再スキャン課題は `(target_item_ids, question)` で重複排除し無目的再実行を
+  禁止（iteration の `executed_task_ids` 空は validator error）。非収束時は `review_questions` /
+  `unresolved_conflicts` を必ず残して人間へ引き継ぐ（`convergence_status ∈ {converged,
+  max_iterations_reached, no_progress, aborted_error, aborted_cost_limit, not_run}`）。段階失敗・
+  コスト枯渇でも部分結果を `stage_failures` 付きで保持（P4）。結果は
+  `document_figures.iterative_analysis JSONB`（migration 054、AI 提案層・再抽出でリセット・教員
+  確定列なし）+ `stage_outputs._artifacts`（llm_calls/vision_calls/model/iteration差分の監査）。
+  API 投影は `figure_presentation.iterative_analysis_payload()` が confidence 生値を除去し
+  `confidence_label` のみ返す（W8）。reanalyze API は `unresolved_item_ids` で保存済み未解決
+  項目を指定した再解析が可能（hint_text/focus_bbox を決定論合成し既存 guided 経路に乗せる）。
+  設定: `APPARATUS_ANALYSIS_MODE`（`iterative`|`one_shot`、既定 iterative）/
+  `APPARATUS_VERIFY_MAX_ITERATIONS`（既定3）/ `APPARATUS_REANALYZE_MAX_ITERATIONS`（既定1）。
+  `APPARATUS_MAX_CALLS_PER_DAY` は vision 呼び出し数の意味のまま（orchestrator が日次残数を
+  `IterativeConfig.vision_call_budget` として渡し、engine が図間で観察1回分を予約しつつ動的消費。
+  同期再解析も日次残数を budget として渡し、完了後に実測 `vision_calls` を日次カウンタへ事後計上 —
+  `CostGate.daily_remaining` / `count_extra_daily`）。
+  `IterativeConfig` 未指定の agent は従来 one-shot（後方互換）。
 - **component_type 語彙拡張**（migration 041）: `theory_components.component_type` CHECK に
   `apparatus` / `instrument` / `part` を追加。カートリッジ `component_types.json` にも同語彙。
   装置候補は ComponentAssembly 経由で `status='candidate'` の theory_components になる。
   **TheoryOperationGraph には組み込まない**（v1。式 backing が無いため）。
+- **図⇄概念構造の接続（2026-07-18）**: 正本は `docs/features/figure_concept_linking_design.md`。
+  ①claim ⇄ 図・表リンクの正本は `FigureRecord.linked_claim_ids` /
+  `TableRecord.linked_claim_ids` の一箇所（`figure_table_semantics/crosslink.py` の
+  mention ベースクロスリンク。**claim 側 `figure_ids` は artifact 冪等性のため populate
+  しない** — `_link_figures_tables` は意図的に空のまま）。②orchestrator の
+  `claim_link_index` は **block_id キー**（claim の `source_evidence_ids` → evidence の
+  block_id join が主経路。rhetorical_role の span_id は block ごとに振り直され文書内で
+  一意でないため、span map は一意対応時のみ使用）。③`persist_components` は agent 側
+  `ComponentRecord.source_scope` を保持したうえで `document_id` / `legacy_ids` を上書き
+  マージする（全上書きに戻さない — 装置候補の `figure_id` / `figure_key` が図単位対応の
+  正本）。④W層 context lens は figure_id/figure_key で装置候補を図単位に絞り込み、
+  linked claim との `evidence_claims` 交差で図→component 候補（inferred）と図→thesis を
+  読み時導出する。
 - **L層ライブラリ**（migration 042 `library_entries` / `library_entry_versions`、
   `backend/core/library/`（store/search/seed、FastAPI 非 import）+
   `backend/api/routes/library.py`（実パス `/api/admin/library/...`、`_require_teacher`））:
@@ -771,7 +880,11 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   （所有者以外は 403、fail-closed）。エントリ本文（テキスト）は教員全体に開示、
   画像は元 document の権限を継承。
 - **図画像 API**: `GET /api/admin/documents/{id}/figures` / `GET .../figures/{fid}/image` —
-  必ず `_ensure_document_viewable` を通す（権利 fail-closed）。
+  必ず `_ensure_document_viewable` を通す（権利 fail-closed）。figures 一覧は図の `bbox` /
+  `inner_labels` と装置候補パーツの `label_ref` / `expanded_name` / `bbox` / `evidence_quote`
+  も返し、管理UI（`admin.js` 図モーダル）が図画像上に bbox オーバーレイ（%座標 = ページ座標を
+  図 bbox で正規化。region_render / embedded 両方式で同一変換）+ パーツ詳細を表示する。
+  オーバーレイは閲覧・レビュー用で、確定操作は既存のライブラリ昇格導線のみ（candidate-only 原則）。
 - **監査**: 作成・draft 更新・凍結・retire/restore・画像含有承認を `theory_review_events`
   `entity_type='library_entry'` に記録。
 - **ガードレール**: `backend/tests/test_image_library_guardrails.py`（LLM 直接書込経路なし・
@@ -779,6 +892,27 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   skipped_by_option 記録・core/library の FastAPI 非 import・retrieval が draft を読まない）。
 - **非スコープ（v1）**: 学習者向け表示 / TheoryOperationGraph への装置ノード / CLIP 等の
   画像埋め込みモデル / グループ限定ライブラリ / vision 自動有効化 / table の画像解析。
+- **図・画像の分類と「深く検討」UI 切替（#496, migration 052/053）**: vision 解析
+  （apparatus_semantics の**同一コール**に相乗り・追加 LLM なし）が図を提示モードに分類する。
+  語彙の正本は `src/episteme_graph/agents/figure_modes.py` の `FIGURE_MODES`
+  （`functional_diagram`（機能構成図）/ `data_plot`（グラフ）/ `descriptive_image`
+  （写真・解説画像）/ `mixed` / `unknown`）。vision 不在時は caption ヒューリスティック
+  `infer_mode_from_text()` に縮退（判別不能は `unknown`）。保存先は `document_figures`:
+  AI 候補 = `suggested_mode` / `mode_reason` / `analysis_profile JSONB`（052、再解析で置換可）、
+  教員の分類オーバーライド = `reviewed_mode` / `mode_review_status(pending|reviewed)` /
+  `mode_reviewed_by/at`（052）、教員確定の構造化解析 = `reviewed_analysis_mode` /
+  `reviewed_analysis_profile` / `analysis_review_status` / `analysis_reviewed_by/at` /
+  `analysis_review_source_annotation_id`（053。W層注釈 commit 由来・AI 再解析で消えない）。
+  `effective_mode = reviewed_mode ?? suggested_mode` で、モード訂正後に対応解析が未確定なら
+  旧モードの解析を新モードの顔で見せず空プロファイルに縮退（`analysis_source` を明示）。
+  API は `routes/figure_presentation.py`（figures GET の正本 / `PATCH .../presentation-mode` /
+  `POST .../reanalyze`＝候補注釈化。監査 `entity_type='figure_presentation'`）。UI は
+  `deliberation.js`「深く検討」モーダルが `effective_mode` 別に解析ペインを切替
+  （機能・ポート・接続 / 軸・系列・観察と解釈の分離 / 被写体・領域・教示ポイント / パネル別）。
+  分類・解析とも教員の確定操作なしに reviewed にならない（candidate-only 原則を継承）。
+  詳細は `docs/features/image_pipeline_knowledge_library_design.md` §15。
+- **retired エントリは読み取り専用（2026-07-17 確定）**: retired の draft 編集・凍結は 409。
+  変更は `restore` で active に戻してから（同設計書 §16）。
 
 ### LLM トークン使用量推計（U層, migration 043）
 
@@ -989,6 +1123,129 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
   所有者ガード・purge の orphan gap 解消・スイーパの thread+env・監査語彙・ルータ登録）他、
   `test_shared_versioning_{migration,api,logic}.py`。
 
+### 個人知識ネットワーク（Personal Knowledge Network, Phase P + P-0.5〜P-3）
+
+学習者本人の確定痕跡（tension / 帰属付き問い / 再構成成功 / connect した橋）から
+**決定論的に導出される**個人の知識ネットワーク。正本は
+`docs/features/personal_knowledge_network_design.md`（§16 に P-0.5〜P-3 の意味論移行）。
+親文書は `knowledge_network_vision.md`（KN-1〜4）。**保存物ではなく毎回導出**（PN-2）・
+**本人のみ可視**（PN-1、教員向けは Phase B の k-匿名橋候補集約
+`GET /api/admin/courses/{id}/bridge-insights` のみ）・candidate を数えない（PN-3）・
+数値を見せない（PN-4）・旅は非LLM/境界付き/明示操作のみ（PN-5）・同一性リンクは
+confirmed のみ（PN-6）・fail-closed（PN-7）。migration 不要（既存テーブルの読みのみ）。
+
+- **所有単位は本人（P-0.5, 2026-07-16）**: 個人ネットワークの所有は常に `user_id`。
+  `course_id` は所有境界ではなく **provenance（出所）+ フィルター**。正本 API は
+  `GET /api/me/personal-network`（`{nodes, edges, anchor_groups, courses}`。
+  `include_candidate_links=true` は 422 の fail-closed）と
+  `GET /api/me/personal-network/journey?node_id=`。コース配下
+  `GET /api/learning/courses/{id}/personal-network(...)` は「コースビュー」＝互換。
+  コース削除後も本人の痕跡はノードとして残る（タイトルが引けなくなるだけ）。
+- **実装**: `backend/core/personal_graph/`（schema / queries / derive / journey / graph_data /
+  bridges。FastAPI 非 import・DB 読みは queries.py に集約）+ `routes/personal_map.py`
+  （`router`=コースビュー / `me_router`=正本。**両方とも読み取り専用** — 書き込みAPIを
+  ここに作らない。ガードレールで固定）。導出純粋部（build_network /
+  build_person_network / build_journey / build_person_journey）は fake rows のみで
+  テスト可能（sqlalchemy 遅延 import）。
+- **ノード導出規則の正本は設計書 §2**: tension は `TENSION_OWNED_STATUSES` +
+  connect 済みは `payload.connected_refs` のみアンカー化（LLM 候補由来の `target_refs` は
+  使わない・PN-3）。question は本人確定 structure_anchor（llm_candidate 不使用・topic 縮退）。
+  reconstruction は revision チェーン終端の match + 非異議（opt-out 同意汲み取り）。
+  `payload.map_excluded` truthy な trace は導出から除外。
+- **旅（journey）**: 本人ノード→[1]論文ローカルグラフ→[2]confirmed 同一性リンク→
+  [3]L層ハブ(active のみ)→他インスタンス→[4]atlas 骨格→[5]本人の別ノード。
+  fan-out≤5・step≤12・事実文のみ。コーススコープの旅は当該コース sources 内限定 +
+  `cross_course_hint`（別コースに同一アンカーの兄弟がいれば「以前の学習につながる道が
+  あります」だけを返す。詳細は本人が開くまで伏せる）。コース横断版
+  （`journey_for_person_node`）は can_view_document で hop を個別 fail-closed
+  フィルタし、別コース兄弟の事実文にコース名を含める（出所を失わない）。
+- **訂正操作（提案書 §6）**: `POST /api/learning/traces/{trace_id}/map-exclude` /
+  `.../map-restore`（routes/learning.py。`payload.map_excluded` の状態遷移のみで
+  **status・行は触らない**。dismiss とは独立。監査は既存カタログ定数
+  tension/structure_anchor で記帳）。`GET .../interest-traces` 各項目に `map_excluded`。
+- **フロント**: `personal-map.js`（コースビュー: atlas トグル・kind 別ドット・
+  「まだ地図にない」トレイ・旅カード + cross_course_hint 導線 + 「地図には反映しない」
+  「地図に戻す」）と `personal-map-home.js`（P-3 最上位「わたしの地図」パネル。
+  ヘッダ `#my-map-btn` → いまの地図 / 問いからの旅 / 振り返り の3タブ +
+  `/api/me/...` の旅カード。常設注記「この地図はあなたにだけ表示されます。成績評価には
+  使用されません。」・ポーリング禁止・数値/進捗/ゲーミフィケーション表示禁止）。
+- **ガードレール**: `test_personal_graph_guardrails.py`（core 非 FastAPI・読み取り専用・
+  connected_refs・confirmed のみ・Phase B の k=3 は `core/privacy.py` 正本）+
+  `test_personal_graph_{derive,person_scope,journey,journey_person,map_ops}.py` +
+  `test_personal_map_{ui_guardrails,home_ui_static}.py`。
+
+### 要素検討ワークスペース（W層, migration 048〜050）
+
+一度パイプラインで処理された**任意の1要素**（figure / theory_component / theory_claim /
+equation / 共通部品）を選び、内訳・文脈を確認し AI と対話し、解釈を**候補として**付与する
+横断ハブ。正本は `docs/features/element_deliberation_workspace_design.md`（親文書
+`knowledge_network_vision.md`。KN-1〜4 の不変条項に従う）。Phase 0/1/W-β/2/S 実装済み。
+「E層」は Exposition Layer が占有しているため W層（Workspace）。Field Atlas とは別機能
+（`deliberation-` / `element-` プレフィックスで衝突回避）。教員（TEACHER 以上）のみ。
+実装は `backend/core/deliberation/`（refs / decomposition / positioning / dialogue /
+annotations / store / identity_links / standardization/。FastAPI 非 import）+
+`backend/api/routes/deliberation.py`（実パス `/api/admin/deliberation/...`）+
+`frontend/public/js/deliberation.js`（ES5・`window.Deliberation`）。
+
+**不変条項**: W1 A層非改変（成果テーブルに列を足さず W層専用テーブルに積む）/
+W2 確定は人間・AI は候補のみ（対話の解釈は常に `status='candidate'`、`source_backed` を
+自動付与しない）/ W3 evidence-based（evidence + reason + confidence、断定せず仮説文体）/
+W4 情報を落とさない（対話ログ・候補・却下は削除せず `candidate → committed / dismissed`
+遷移。行削除 API なし）/ W5 権限 fail-closed（document-scoped は
+`_ensure_document_viewable/editable`、domain-scoped 共通部品は L層の権限モデル）/
+W6 同期パスを重くしない（1応答=1 LLM コール、失敗時は非LLM集約へ縮退）/ W7 監査必須
+（`entity_type='deliberation'`）/ W8 数値を見せない（confidence は段階ラベル）/
+W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cross_corpus`）。
+
+- **ElementRef と2スコープ**: `(scope, element_type, element_id, anchor)`。
+  `scope='document'`（1論文からの出現: figure=document_figures.id /
+  theory_component・theory_claim=DB UUID / equation=equations.json の equation_id —
+  テーブル無しのため `stage_outputs` を索く）と `scope='domain'`（共通部品
+  `shared_part` = **L層 `library_entries.id`**。W層は共通部品テーブルを新設しない）。
+- **3つの面**: ①内訳・同定（`decomposition.py`、A層成果の読み出しのみ。figure は #496 の
+  presentation 分類を同梱）②文脈的位置づけ（`positioning.py` の4レンズ = 論文内 /
+  コーパス横断（chunk-proxy ベクトル検索・唯一の新下地。閲覧不可 document は route 層
+  `_apply_cross_corpus_gate` で除外）/ 分野の地図 / C層承認・D層疑義）③対話的検討
+  （`dialogue.py`。figure は vision。`core/llm.py::generate_conversation_turn` で
+  マルチターン + 候補注釈を同一コールの structured output で取得。スキーマ検証失敗は
+  注釈なしに縮退・LLM 失敗は `degraded:true` の非LLMフォールバック）。
+- **DB（migration 049）**: `deliberation_sessions`（対話ログ・追記のみ）/
+  `element_annotations`（`kind ∈ {meaning, decomposition, positioning_note, interpretation,
+  identity, standardization}`・`status ∈ {candidate, committed, dismissed}`）。
+  FK は element_id に張らない（ポリモーフィック）。孤児掃除は document 削除経路に同乗。
+- **コミットルーティング（v1 は3経路）**: `interpretation` → C層 explanation
+  (`kind='personal'`) / `meaning`・`decomposition` → `theory_components.summary` /
+  `teacher_notes` / `identity` → W-β `create_candidate`。`positioning_note` は 422（後続）。
+  W層独自の最終格納庫を持たない（既存構造へ返すハブ）。
+- **同一性リンク（Phase W-β, migration 048 `element_identity_links`）**: instance ↔
+  shared_part の**非破壊リンク**（KN-2。インスタンス側の表記は書き換えず、共通部品側
+  `local_expressions` に出所付き表現を追記）。candidate/confirmed/rejected、一意性は
+  `instance_document_id` を含む4列（equation の element_id が論文間で衝突しうるため）。
+  `confirmed_links_for_document` が P-2 旅 traversal の読み取り正本。閲覧不可 document 由来の
+  リンクは一覧から除外し `hidden_count` を正直に返す。
+- **標準化判定（Phase S, migration 050）**: `core/deliberation/standardization/`
+  （llm_worker 6系統目アダプタ）が三角測量（LLM 事前知識 + L層凍結版類似 + コーパス反復）→
+  `aggregate.decide()` の決定論5語彙（`standard / field_standard / emerging_common / novel /
+  unknown`）合成。**LLM 単独主張は unknown（幻覚ガード）**。確定は教員 commit のみで
+  `library_entries.standardization_status`（migration 050。draft 編集から書けないガバナンス列、
+  語彙の正本は `core/library/schema.py`）へ反映。上限 `STDPART_MAX_CALLS_PER_DAY`（既定10）。
+- **コスト上限**: `DELIBERATION_MAX_CALLS_PER_SESSION`（既定8）/
+  `DELIBERATION_MAX_CALLS_PER_DAY`（既定40）、fast tier 既定（`DELIBERATION_LLM_MODEL`）。
+- **フロント導線**: 4要素型すべてに「深く検討」ボタン（`admin.js` 図モーダル・revisions の
+  equation 変更、`admin-lecture-studio.js` の論理要素カード・選択中コンポーネント・主張一覧）。
+  モーダルは2ペイン（左=内訳+4レンズ / 右=対話+候補注釈カード confirm/dismiss）。figure は
+  #496 のモード別解析ペイン切替 + 「AIで図を再解析」（教員指示付き再解析）を持つ。
+- **要素中心コンテキストレンズ（#498）**: overview に `context`（focus/upper/lower、各
+  1階層・レーン上限20・relation は動詞語彙＋relation_status(source_backed/candidate/
+  confirmed)）を追加。正本は `core/deliberation/context_lens.py`（読み取り専用・非LLM）＋
+  `docs/features/element_context_lens_design.md`。上位関係ゼロは unidentified（推測穴埋め
+  禁止）。UI は `deliberation.js` の上位/中心/下位レーン＋パンくず中心移動（モーダル非破棄）。
+  dialogue grounding にも同じ focus/upper/lower を注入する。文脈上の役割は要素の固定属性に
+  保存しない。
+- **ガードレール**: `test_deliberation_guardrails.py` / `test_deliberation_positioning.py` /
+  `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
+  candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
@@ -998,10 +1255,30 @@ P7 スコア・正答率数値を学習者に見せない、REFLECT は事実文
 - **`backend/core/llm_worker/`** — 非同期 LLM worker の共通骨格。`client.py`
   （`BaseJSONLLMClient(model_setting_key)`・`core.llm` 経由で U層計測を維持）/ `repair.py`
   （`run_with_repair(...)`: 1+2回試行、修復失敗時の後処理は `on_repair_failed` 注入で各系統に残す）/
-  `cost_gate.py`（`CostGate`(session+daily) / `InMemoryCounterGate`）。tension / structure_anchor /
-  reconstruction / doubt.scope_candidates / doubt.assumption_mining の5系統が利用中。
-  **6系統目はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
+  `cost_gate.py`（`CostGate`(session+daily) / `InMemoryCounterGate`）。フル骨格
+  （BaseJSONLLMClient + run_with_repair）は tension / structure_anchor / reconstruction /
+  doubt.scope_candidates / doubt.assumption_mining / deliberation.standardization の6系統が利用中。
+  ほかに deliberation の対話（`core/deliberation/dialogue.py`。同期パスのため run_with_repair は
+  意図的に不使用・縮退方式）と figure_reanalysis が CostGate / resolve_model のみ部分利用する。
+  **新系統はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
   トリガー条件・DB 書き込みはドメイン側の責務。
+- **チャット型 AI の共通規約（2026-07-20 整理、正本は
+  `docs/features/assistant_common_infra_design.md`）** — ①会話履歴を LLM に渡すときは
+  `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep,
+  current_message)` を必ず通す（学習チャット 20/2000、コースビルダー 20/4000/head_keep=2
+  ＝フロントが履歴先頭に注入する course_draft 疑似ターン2件の保護、W層 16/4000/head_keep=1
+  ＝grounding 注入先の先頭 user メッセージの保護、Copilot 8/500。**保存用の履歴は
+  ウィンドウ化しない**）。②同期チャット・単発 AI にも CostGate(day-only) を置く
+  （`LEARNING_CHAT_MAX_CALLS_PER_DAY` 既定300 / `COURSE_BUILDER_MAX_CALLS_PER_DAY` 100 /
+  `LECTURE_REWRITE_MAX_CALLS_PER_DAY` 100 / Copilot は既存 `ASSISTANT_MAX_CALLS_PER_DAY` を
+  CostGate 実装に移行済み。超過は 429 + 事実文で数値を返さない。CostGate は in-memory・
+  プロセスローカルである制約を許容ずみ。atlas assist の DB 集計ゲートは意図的に別実装の
+  まま）。③モデル解決は `resolve_model(key, *, fallback="fast"|"analysis")`
+  （学習チャット `LEARNING_CHAT_LLM_MODEL` / コースビルダー `COURSE_BUILDER_LLM_MODEL` は
+  空 → analysis で従来挙動）。④チャット型メイン応答の LLM 失敗は 500 にせず degraded
+  固定文 + 200 + 履歴保存（誤解検出など回答本文依存の後処理はスキップ）。単発の明示操作
+  （rewrite）はエラー返却のまま。⑤原稿スタジオの chunk 書き換えは
+  `lecture_studio/_shared.py::_ensure_chunk_editable`（document 単位の edit 権限）を通す。
 - **`backend/core/privacy.py`** — k-匿名ゲートの正本（`K_ANONYMITY = 3` /
   `meets_k_anonymity` / `bucket_count_range`(3-5 / 6-10 / 11+) 等）。reconstruction/health.py・
   doubt/schema.py・services.py の集計はここに委譲済み（表示文言は各所に残る）。

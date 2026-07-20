@@ -76,6 +76,91 @@ class TestRuleCatalog:
             cap = caps.get_capability(cap_id)
             assert cap.locate_steps, f"{cap_id} に locate_steps が無い"
 
+    def test_all_rules_have_registered_evaluators(self):
+        """RULE_CATALOG と _RULE_EVALUATORS の対応漏れを構造的に防ぐ（追随の仕組み化）。"""
+        assert set(next_steps_mod.RULE_CATALOG.keys()) == set(
+            next_steps_mod._RULE_EVALUATORS.keys()
+        )
+
+
+# ===========================================================================
+# Group A-1b: figure.unreviewed_modes（N13, #496 追随）
+# ===========================================================================
+
+
+class _FakeResult:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def mappings(self):
+        return self
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeSession:
+    def __init__(self, rows):
+        self.rows = rows
+        self.queries = []
+
+    def execute(self, stmt, params=None):
+        self.queries.append((str(stmt), params))
+        return _FakeResult(self.rows)
+
+
+class TestFigureUnreviewedModesRule:
+    def test_rule_registered_as_recommended_guidance(self):
+        rule = next_steps_mod.RULE_CATALOG[next_steps_mod.RULE_FIGURE_UNREVIEWED_MODES]
+        assert rule["severity"] == next_steps_mod.SEVERITY_RECOMMENDED
+        assert rule["capability_id"] == "materials.review_figures"
+        cap = caps.get_capability("materials.review_figures")
+        assert cap is not None
+        assert cap.kind == "guidance_only"  # 道案内のみ（図モーダルへ, G8）
+
+    def test_inventory_unvisited_rule_intentionally_absent(self):
+        """survey §5-5 の見送り推奨: 「検出要素を見たか」は押し付けになるため
+        ルール化しない（G4）。"""
+        assert "material.inventory_unvisited" not in next_steps_mod.RULE_CATALOG
+
+    def test_evaluator_sql_targets_pending_ai_suggestions_of_own_documents(self):
+        """未レビュー = mode_review_status='pending'、AI 分類済み = suggested_mode<>'unknown'、
+        対象は本人所有（uploaded_by）のみ。"""
+        src = extract_function_source(_NEXT_STEPS_SRC, "_eval_figure_unreviewed_modes")
+        assert "mode_review_status = 'pending'" in src
+        assert "suggested_mode <> 'unknown'" in src
+        assert "uploaded_by = CAST(:uid AS uuid)" in src
+        assert "document_figures" in src
+        assert "f.document_id = d.id::text" in src
+
+    def test_evaluator_builds_factual_step(self):
+        session = _FakeSession([
+            {
+                "id": "d-uuid-1",
+                "source_path": "mat_1",
+                "title": "レーザー分光の基礎",
+                "created_at": "2026-07-01T00:00:00+00:00",
+                "pending_count": 3,
+            },
+        ])
+        out = next_steps_mod._eval_figure_unreviewed_modes(session, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_FIGURE_UNREVIEWED_MODES
+        assert step.severity == next_steps_mod.SEVERITY_RECOMMENDED
+        assert step.step_key == "figure.unreviewed_modes:d-uuid-1"
+        assert step.target == {"material_id": "d-uuid-1"}
+        assert "3 件" in step.reason
+        assert "レーザー分光の基礎" in step.title
+        # locate の行アンカーは data-material-id（= source_path）で解決される
+        anchors = [s["anchor_id"] for s in step.locate_plan["steps"]]
+        assert "material_row:mat_1" in anchors
+        assert "material_figures_button" in anchors
+
+    def test_evaluator_returns_empty_when_no_pending_rows(self):
+        out = next_steps_mod._eval_figure_unreviewed_modes(_FakeSession([]), "u1")
+        assert out == []
+
 
 # ===========================================================================
 # Group A-2: fail-closed（STUDENT には何も出さない）
@@ -275,6 +360,270 @@ class TestCourseAtlasBindingLogic:
     def test_finds_atlas_node_nested_in_chapters(self):
         data = {"chapters": [{"topics": [{"atlas_node_id": "n1"}]}]}
         assert next_steps_mod._course_has_atlas_node(data) is True
+
+
+# ===========================================================================
+# Group A-7b: atlas_binding_lifecycle_design.md §5 の新ルール2件 + pending 抑制
+# ===========================================================================
+
+
+class _StubSkeleton:
+    """concept_ids()/region_ids() だけを持つ最小スタブ（stale ルール専用）。"""
+
+    def __init__(self, concept_ids=(), region_ids=()):
+        self._concept_ids = concept_ids
+        self._region_ids = region_ids
+
+    def concept_ids(self):
+        return self._concept_ids
+
+    def region_ids(self):
+        return self._region_ids
+
+
+class TestNewAtlasBindingRulesRegistered:
+    def test_ready_rule_registered_as_recommended_reusing_capability(self):
+        rule = next_steps_mod.RULE_CATALOG[next_steps_mod.RULE_COURSE_ATLAS_BINDING_READY]
+        assert rule["severity"] == next_steps_mod.SEVERITY_RECOMMENDED
+        assert rule["capability_id"] == "course.atlas_binding"
+
+    def test_stale_rule_registered_as_recommended_reusing_capability(self):
+        rule = next_steps_mod.RULE_CATALOG[next_steps_mod.RULE_COURSE_ATLAS_BINDING_STALE]
+        assert rule["severity"] == next_steps_mod.SEVERITY_RECOMMENDED
+        assert rule["capability_id"] == "course.atlas_binding"
+
+
+class TestCourseAtlasBindingReadyRule:
+    def test_produces_step_when_pending_frozen_and_active(self, monkeypatch):
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: object()
+        )
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "domain_lifecycle", lambda session, dk: "active"
+        )
+        session = _FakeSession([
+            {
+                "id": "course1",
+                "title": "コースA",
+                "data": {"atlas_binding_pending": "modified_gravity", "topics": []},
+                "created_at": "2026-07-01T00:00:00+00:00",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_ready(session, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_COURSE_ATLAS_BINDING_READY
+        assert step.severity == next_steps_mod.SEVERITY_RECOMMENDED
+        assert step.step_key == "course.atlas_binding_ready:course1"
+        assert step.target == {"course_id": "course1"}
+        assert "modified_gravity" in step.reason
+        assert "コースA" in step.reason
+
+    def test_no_step_when_skeleton_not_yet_frozen(self, monkeypatch):
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: None
+        )
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "domain_lifecycle", lambda session, dk: "active"
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {"atlas_binding_pending": "modified_gravity", "topics": []},
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_ready(session, "u1")
+        assert out == []
+
+    def test_no_step_when_pending_domain_retired(self, monkeypatch):
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: object()
+        )
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "domain_lifecycle", lambda session, dk: "retired"
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {"atlas_binding_pending": "modified_gravity", "topics": []},
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_ready(session, "u1")
+        assert out == []
+
+    def test_no_step_when_not_pending(self, monkeypatch):
+        def _boom(dk, session):
+            raise AssertionError("skeleton lookup should be skipped when not pending")
+
+        monkeypatch.setattr(next_steps_mod.atlas_store, "load_learner_skeleton", _boom)
+        session = _FakeSession([
+            {"id": "course1", "title": "コースA", "data": {"topics": []}, "created_at": "t"},
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_ready(session, "u1")
+        assert out == []
+
+    def test_no_step_when_already_bound(self, monkeypatch):
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: object()
+        )
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "domain_lifecycle", lambda session, dk: "active"
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {
+                    "atlas_binding_pending": "modified_gravity",
+                    "cartridge_id": "modified_gravity",
+                    "topics": [],
+                },
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_ready(session, "u1")
+        assert out == []
+
+
+class TestCourseAtlasBindingStaleRule:
+    def test_detects_node_ids_missing_from_current_frozen_skeleton(self, monkeypatch):
+        skeleton = _StubSkeleton(concept_ids=("c1", "c2"), region_ids=("r1",))
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: skeleton
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {
+                    "cartridge_id": "dom",
+                    "topics": [
+                        {"id": "t1", "atlas_node_id": "c1"},
+                        {"id": "t2", "atlas_node_id": "c9"},  # 現行凍結版に存在しない
+                    ],
+                },
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_COURSE_ATLAS_BINDING_STALE
+        assert step.step_key == "course.atlas_binding_stale:course1"
+        assert "1 件" in step.reason
+        assert "コースA" in step.reason
+        # 版数・数値スコア（confidence 等）は出さない（事実としての件数のみ, G6）
+        assert "revision" not in step.reason
+        assert "version" not in step.reason
+
+    def test_no_step_when_all_node_ids_known(self, monkeypatch):
+        skeleton = _StubSkeleton(concept_ids=("c1", "c2"), region_ids=("r1",))
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: skeleton
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {"cartridge_id": "dom", "topics": [{"id": "t1", "atlas_node_id": "c1"}]},
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
+        assert out == []
+
+    def test_no_step_when_no_cartridge_id(self, monkeypatch):
+        def _boom(dk, session):
+            raise AssertionError("skeleton lookup should be skipped without cartridge_id")
+
+        monkeypatch.setattr(next_steps_mod.atlas_store, "load_learner_skeleton", _boom)
+        session = _FakeSession([
+            {"id": "course1", "title": "コースA", "data": {"topics": []}, "created_at": "t"},
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
+        assert out == []
+
+    def test_no_step_when_skeleton_unavailable_fail_closed(self, monkeypatch):
+        """骨格が読めない（未凍結・DB 不通等）場合は stale と断定しない（fail-closed）。"""
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: None
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {"cartridge_id": "dom", "topics": [{"id": "t1", "atlas_node_id": "c9"}]},
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
+        assert out == []
+
+    def test_checks_nested_chapter_topics_too(self, monkeypatch):
+        skeleton = _StubSkeleton(concept_ids=("c1",), region_ids=())
+        monkeypatch.setattr(
+            next_steps_mod.atlas_store, "load_learner_skeleton", lambda dk, session: skeleton
+        )
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {
+                    "cartridge_id": "dom",
+                    "chapters": [{"topics": [{"id": "t1", "atlas_node_id": "c9"}]}],
+                    "topics": [],
+                },
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
+        assert len(out) == 1
+
+    def test_skeleton_lookup_cached_per_domain_not_per_course(self, monkeypatch):
+        """同一ドメインを参照する複数コースがあっても load_learner_skeleton は
+        ドメイン単位で1回だけ呼ばれる（N+1 回避）。"""
+        calls: list[str] = []
+
+        def _tracked(dk, session):
+            calls.append(dk)
+            return _StubSkeleton(concept_ids=("c1",), region_ids=())
+
+        monkeypatch.setattr(next_steps_mod.atlas_store, "load_learner_skeleton", _tracked)
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {"cartridge_id": "dom", "topics": [{"id": "t1", "atlas_node_id": "c9"}]},
+                "created_at": "t",
+            },
+            {
+                "id": "course2", "title": "コースB",
+                "data": {"cartridge_id": "dom", "topics": [{"id": "t2", "atlas_node_id": "c9"}]},
+                "created_at": "t2",
+            },
+        ])
+        next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
+        assert calls == ["dom"]
+
+
+class TestNoAtlasBindingPendingSuppression:
+    """atlas_binding_lifecycle_design.md §5 最終項: atlas_binding_pending が非空の
+    コースには course.no_atlas_binding を出さない（二重督促の回避）。"""
+
+    def test_pending_course_is_suppressed(self):
+        session = _FakeSession([
+            {
+                "id": "course1", "title": "コースA",
+                "data": {"atlas_binding_pending": "modified_gravity", "topics": []},
+                "created_at": "t",
+            },
+        ])
+        out = next_steps_mod._eval_course_no_atlas_binding(session, "u1")
+        assert out == []
+
+    def test_non_pending_course_still_flagged(self):
+        session = _FakeSession([
+            {"id": "course2", "title": "コースB", "data": {"topics": []}, "created_at": "t"},
+        ])
+        out = next_steps_mod._eval_course_no_atlas_binding(session, "u1")
+        assert len(out) == 1
+        assert out[0][0].step_key == "course.no_atlas_binding:course2"
 
 
 # ===========================================================================

@@ -1,7 +1,9 @@
 """L層ライブラリの検索 — apparatus_semantics retrieval / 昇格モーダルの類似提示。
 
-- ``search_frozen_entries`` は **各 active エントリの最新凍結版のみ** を対象にする
+- ``search_frozen_entries`` は **各 active エントリの凍結版のみ** を対象にする
   （draft は解析に使わない。原則8 / ガードレール#8）。retired は除外する。
+  代表版は「embedding を持つ最新凍結版」（最新版の embedding が failed/欠落なら
+  直近の有効な embedding を持つ版へ fallback する。N23）。
 - 失敗時（embedding 不可・クエリ失敗）は例外を投げず空リストを返し、パイプラインを
   止めない。呼び出し側は「ライブラリが空・retrieval 0件」と同じ縮退として扱える。
 - 画像埋め込みモデル（CLIP 等）は導入しない。retrieval はテキスト記述（name /
@@ -45,7 +47,15 @@ def _embedding_search(
     top_k: int,
     embed_fn: Any = None,
 ) -> list[dict]:
-    """各 active エントリの最新凍結版のみを対象にした pgvector cosine 類似検索。"""
+    """各 active エントリの「embedding を持つ最新凍結版」を対象にした pgvector cosine 類似検索。
+
+    最新凍結版の embedding が failed/欠落（NULL）のエントリは、直近の有効な embedding を
+    持つ凍結版をそのエントリの代表として対象に含める（N23 fallback: 凍結時の embedding
+    失敗で retrieval から静かに脱落させない）。実装は row_number() の PARTITION を
+    ``embedding IS NOT NULL`` の行だけで振ること（CTE 内 WHERE）による。全凍結版に
+    embedding が無いエントリだけが対象外になる。返す ``version_no`` / ``content`` は
+    実際に代表となった版のもの（referenced_library_versions の記録が事実と一致する）。
+    """
     if not domain_key or not query_text:
         return []
     vector = _embed_query(query_text, embed_fn)
@@ -54,7 +64,6 @@ def _embedding_search(
 
     conditions = [
         "l.rn = 1",
-        "l.embedding IS NOT NULL",
         "e.domain_key = :domain_key",
         "e.status = 'active'",
     ]
@@ -73,6 +82,9 @@ def _embedding_search(
         # name/aliases/summary/body は凍結スナップショット（versions.content）から復元する。
         # library_entries（draft）は domain/type/status フィルタにのみ使う — draft の本文を
         # 解析入力に混ぜない（原則8: パイプラインが参照するのは凍結版のみ）。
+        # CTE 内の WHERE v.embedding IS NOT NULL が N23 fallback の実体:
+        # rn=1 は「embedding を持つ版のうち最新」を指す（最新版が NULL でも直近の
+        # 有効版がエントリの代表になる）。
         rows = session.execute(
             sa_text(
                 f"""
@@ -82,6 +94,7 @@ def _embedding_search(
                                PARTITION BY v.entry_id ORDER BY v.version_no DESC
                            ) AS rn
                       FROM library_entry_versions v
+                     WHERE v.embedding IS NOT NULL
                 )
                 SELECT l.entry_id::text, l.version_no, l.content,
                        (l.embedding <=> CAST(:qvec AS vector)) AS distance

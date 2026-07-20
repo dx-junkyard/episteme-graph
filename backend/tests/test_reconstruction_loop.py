@@ -155,7 +155,7 @@ class TestHealthRank:
              "n_responses": 8, "n_mismatch": 0, "n_verdict_dissent": 0, "n_verdict_self_disagree": 0,
              "n_descend": 0, "n_users": 6, "elicit_mode": "predict", "prompt": "p"},
         ]
-        monkeypatch.setattr(health_mod, "_fetch_health_rows", lambda session, doc: rows)
+        monkeypatch.setattr(health_mod, "_fetch_health_rows", lambda session, document_id=None, document_ids=None: rows)
         monkeypatch.setattr(health_mod, "_pg_session", lambda: _NullSession())
         out = health_mod.get_review_queue("doc1")
         ids = [it["item_id"] for it in out["items"]]
@@ -169,7 +169,7 @@ class TestHealthRank:
         rows = [{"item_id": "x", "claim_id": "c", "status": "auto", "author_confidence": 0.2,
                  "n_responses": 2, "n_mismatch": 2, "n_verdict_dissent": 0, "n_verdict_self_disagree": 0,
                  "n_descend": 0, "n_users": 2, "elicit_mode": "restate", "prompt": "p"}]
-        monkeypatch.setattr(health_mod, "_fetch_health_rows", lambda session, doc: rows)
+        monkeypatch.setattr(health_mod, "_fetch_health_rows", lambda session, document_id=None, document_ids=None: rows)
         monkeypatch.setattr(health_mod, "_pg_session", lambda: _NullSession())
         out = health_mod.get_review_queue("doc1")
         assert out["items"][0]["rank_tier"] == "情報不足"
@@ -180,7 +180,7 @@ class TestHealthRank:
         rows = [{"item_id": "x", "claim_id": "c", "status": "auto", "author_confidence": 0.2,
                  "n_responses": 8, "n_mismatch": 6, "n_verdict_dissent": 1, "n_verdict_self_disagree": 2,
                  "n_descend": 5, "n_users": 1, "elicit_mode": "predict", "prompt": "p"}]
-        monkeypatch.setattr(health_mod, "_fetch_health_rows", lambda session, doc: rows)
+        monkeypatch.setattr(health_mod, "_fetch_health_rows", lambda session, document_id=None, document_ids=None: rows)
         monkeypatch.setattr(health_mod, "_pg_session", lambda: _NullSession())
         item = health_mod.get_review_queue("doc1")["items"][0]
         assert item["rank_tier"] == "情報不足"
@@ -188,6 +188,97 @@ class TestHealthRank:
         assert item["signals"]["responses"] == "まだデータなし"
         assert item["signals"]["descend_frequency"] == "まだデータなし"
         assert item["signals"]["verdict_dissent"] is False
+
+
+class TestFetchHealthRowsDocumentIdsAggregation:
+    """レビュー指摘2: 複数教材コース集約向け document_ids フィルタ（health.py 正本）。
+
+    document_ids は document_id より優先し、空リストは全件フォールバックせず
+    DB へも問い合わせず即0件を返す（fail-closed）。
+    """
+
+    def test_document_ids_used_when_both_given(self):
+        captured = {}
+
+        class _FakeResult:
+            def fetchall(self):
+                return []
+
+        class _FakeSession:
+            def execute(self, stmt, params):
+                captured["sql"] = str(stmt)
+                captured["params"] = params
+                return _FakeResult()
+
+        health_mod._fetch_health_rows(_FakeSession(), document_id="ignored", document_ids=["doc-a", "doc-b"])
+        assert "ANY(:docs)" in captured["sql"]
+        assert captured["params"] == {"docs": ["doc-a", "doc-b"]}
+
+    def test_falls_back_to_document_id_when_document_ids_is_none(self):
+        captured = {}
+
+        class _FakeResult:
+            def fetchall(self):
+                return []
+
+        class _FakeSession:
+            def execute(self, stmt, params):
+                captured["sql"] = str(stmt)
+                captured["params"] = params
+                return _FakeResult()
+
+        health_mod._fetch_health_rows(_FakeSession(), document_id="doc1", document_ids=None)
+        assert "i.document_id = :doc" in captured["sql"]
+        assert captured["params"] == {"doc": "doc1"}
+
+    def test_empty_document_ids_returns_empty_without_querying_db(self):
+        class _RaisingSession:
+            def execute(self, *a, **k):
+                raise AssertionError("should not query DB when document_ids is an empty list")
+
+        assert health_mod._fetch_health_rows(_RaisingSession(), document_ids=[]) == []
+
+    def test_no_filters_returns_all_rows_unchanged_behavior(self):
+        """document_id・document_ids とも未指定なら従来どおり無条件（全件）。"""
+        captured = {}
+
+        class _FakeResult:
+            def fetchall(self):
+                return []
+
+        class _FakeSession:
+            def execute(self, stmt, params):
+                captured["sql"] = str(stmt)
+                captured["params"] = params
+                return _FakeResult()
+
+        health_mod._fetch_health_rows(_FakeSession())
+        assert "WHERE" not in captured["sql"]
+        assert captured["params"] == {}
+
+
+class TestGetReviewQueueDocumentIdsAggregation:
+    """get_review_queue の document_ids 経路（review_queue API から course_id 指定時に使われる）。"""
+
+    def test_document_ids_returns_aggregated_items(self, monkeypatch):
+        rows = [{"item_id": "y", "claim_id": "c", "status": "auto", "author_confidence": 0.1,
+                 "n_responses": 8, "n_mismatch": 6, "n_verdict_dissent": 0,
+                 "n_verdict_self_disagree": 0, "n_descend": 0, "n_users": 6,
+                 "elicit_mode": "predict", "prompt": "p"}]
+        monkeypatch.setattr(
+            health_mod, "_fetch_health_rows",
+            lambda session, document_id=None, document_ids=None: rows if document_ids else [],
+        )
+        monkeypatch.setattr(health_mod, "_pg_session", lambda: _NullSession())
+        out = health_mod.get_review_queue(document_ids=["doc-a", "doc-b"])
+        assert len(out["items"]) == 1
+        assert out["items"][0]["item_id"] == "y"
+
+    def test_empty_document_ids_is_fail_closed(self, monkeypatch):
+        """空リストは全件フォールバックせず0件（コースの source 教材が0件の場合等）。"""
+        monkeypatch.setattr(health_mod, "_pg_session", lambda: _NullSession())
+        out = health_mod.get_review_queue(document_ids=[])
+        assert out == {"items": [], "k_anonymity": health_mod.K_ANON}
 
 
 class TestStumble:

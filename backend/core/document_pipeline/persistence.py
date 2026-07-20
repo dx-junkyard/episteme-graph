@@ -77,6 +77,128 @@ def _claim_legacy_keys(claim: dict) -> set[str]:
     return keys
 
 
+# ---------------------------------------------------------------------------
+# thesis_context / thesis_refs (hierarchical_context_explanation_design.md §4)
+# ---------------------------------------------------------------------------
+
+
+def _thesis_ref_nodes(thesis_result: Any) -> list[dict]:
+    """Flatten a ThesisReconstructionResult-like artifact into ref nodes.
+
+    Mirrors ``component_assembly/input_builder.py``'s ``_thesis_nodes`` (same
+    ``thesis_ref`` / ``kind`` vocabulary: ``"central_thesis"`` for the central
+    node, ``f"support:{section}:{idx}"`` for each ``support_structure`` entry)
+    so a persisted claim's ``thesis_refs`` and a persisted component's
+    ``thesis_context.supports_thesis_node_ids`` use the exact same identifiers
+    and can be cross-referenced without any translation step.
+    """
+    if not thesis_result:
+        return []
+    central = getattr(thesis_result, "central_thesis", None)
+    if not isinstance(central, dict):
+        central = {}
+    nodes: list[dict] = [{
+        "thesis_ref": "central_thesis",
+        "kind": "central_thesis",
+        "text": str(central.get("text") or ""),
+        "claim_ids": list(central.get("claim_ids") or []),
+    }]
+    support_structure = getattr(thesis_result, "support_structure", None)
+    if isinstance(support_structure, dict):
+        for section, entries in support_structure.items():
+            if not isinstance(entries, list):
+                continue
+            for idx, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    continue
+                nodes.append({
+                    "thesis_ref": f"support:{section}:{idx}",
+                    "kind": str(section),
+                    "text": str(entry.get("text") or ""),
+                    "claim_ids": list(entry.get("claim_ids") or []),
+                })
+    return nodes
+
+
+def _truncate_excerpt(text: str, limit: int = 240) -> str:
+    excerpt = str(text or "").strip()
+    if len(excerpt) <= limit:
+        return excerpt
+    return excerpt[:limit].rstrip() + "…"
+
+
+def _claim_thesis_ref_index(thesis_result: Any) -> dict[str, list[dict]]:
+    """Invert thesis ref nodes into ``{agent claim key: [{thesis_ref, kind, text_excerpt}]}``.
+
+    Keys are the same span-derived identifiers ``_claim_legacy_keys`` produces
+    for a persisted claim (its ``span_id`` and ``claim_{safe(span_id)}``), so
+    matching a about-to-be-persisted span's keys against this index is a plain
+    dict lookup — no separate ID-canonicalization machinery is introduced here.
+    Claim references that resolve to neither key (e.g. equation-claim-synthesis
+    IDs like ``synth_claim_0001``, which never become a ``theory_claims`` row,
+    or counter-suffixed atomic sub-claim ids) are simply not found. This is
+    deliberate: only exact matches are recorded, nothing is guessed.
+    """
+    index: dict[str, list[dict]] = {}
+    for node in _thesis_ref_nodes(thesis_result):
+        ref_entry = {
+            "thesis_ref": node["thesis_ref"],
+            "kind": node["kind"],
+            "text_excerpt": _truncate_excerpt(node["text"]),
+        }
+        for claim_id in node.get("claim_ids") or []:
+            key = str(claim_id or "").strip()
+            if not key:
+                continue
+            bucket = index.setdefault(key, [])
+            if not any(e["thesis_ref"] == ref_entry["thesis_ref"] for e in bucket):
+                bucket.append(ref_entry)
+    return index
+
+
+def _claim_thesis_refs_for_span(
+    span_id: Any,
+    thesis_ref_index: dict[str, list[dict]],
+) -> list[dict]:
+    """Look up the thesis refs backing one qualified span (by span_id)."""
+    if not thesis_ref_index or not span_id:
+        return []
+    matches: list[dict] = []
+    seen_refs: set[str] = set()
+    for key in sorted(_claim_legacy_keys({"span_id": span_id})):
+        for entry in thesis_ref_index.get(key, []):
+            if entry["thesis_ref"] in seen_refs:
+                continue
+            seen_refs.add(entry["thesis_ref"])
+            matches.append(entry)
+    matches.sort(key=lambda e: (e["kind"], e["thesis_ref"]))
+    return matches
+
+
+def _component_thesis_context(comp: Any) -> dict | None:
+    """Build ``theory_components.thesis_context`` from a ComponentRecord.
+
+    Transcribes ``role_in_thesis`` / ``supports_thesis_node_ids`` /
+    ``support_role`` / ``support_distance_to_headline_claim`` — fields the
+    component_assembly agent already derives deterministically (issue #354 /
+    #440) but that were previously artifact-only (never reaching the DB).
+    Returns ``None`` (persisted as SQL NULL) when all four are at their empty
+    default, so old rows and rows with genuinely no thesis backing look alike.
+    """
+    role_in_thesis = str(getattr(comp, "role_in_thesis", "") or "")
+    supports_thesis_node_ids = list(getattr(comp, "supports_thesis_node_ids", []) or [])
+    support_role = str(getattr(comp, "support_role", "") or "")
+    support_distance = int(getattr(comp, "support_distance_to_headline_claim", 0) or 0)
+    if not (role_in_thesis or supports_thesis_node_ids or support_role or support_distance):
+        return None
+    return {
+        "role_in_thesis": role_in_thesis,
+        "supports_thesis_node_ids": supports_thesis_node_ids,
+        "support_role": support_role,
+        "support_distance_to_headline_claim": support_distance,
+    }
+
+
 def _remap_string_list(values: Any, id_map: dict[str, str]) -> list[str]:
     out: list[str] = []
     for value in values or []:
@@ -410,12 +532,18 @@ def persist_qualified_claims(
     document_id: str,
     qualified_result,
     chunk_index: list[dict],
+    thesis_result: Any = None,
 ) -> list[dict]:
     """ClaimQualificationResult.qualified_spans を `theory_claims` に保存する。
 
     Args:
         chunk_index: persist_source_chunks の戻り値。block_id → chunk_id の
             解決に使う。
+        thesis_result: ThesisReconstructionResult（省略可）。指定されると
+            central_thesis / support_structure の claim_ids を span_id 単位で
+            逆引きし、各行の `thesis_refs` に
+            `[{"thesis_ref", "kind", "text_excerpt"}]` を保存する
+            （hierarchical_context_explanation_design.md §4。決定論・非LLM）。
 
     Returns:
         [{claim_id, span_id, chunk_id, text}] のリスト。
@@ -428,6 +556,8 @@ def persist_qualified_claims(
     spans = list(getattr(qualified_result, "qualified_spans", []) or [])
     if not spans:
         return []
+
+    thesis_ref_index = _claim_thesis_ref_index(thesis_result)
 
     saved: list[dict] = []
     session = _pg_session()
@@ -444,6 +574,7 @@ def persist_qualified_claims(
                 continue
             chunk_id = block_to_chunk.get(getattr(span, "block_id", ""))
             span_id = getattr(span, "span_id", None)
+            thesis_refs = _claim_thesis_refs_for_span(span_id, thesis_ref_index)
             params = {
                 "document_id": _strip_nuls(document_id),
                 "chunk_id": chunk_id,
@@ -467,6 +598,7 @@ def persist_qualified_claims(
                 # source-backed evidence として扱われるため空文字に変更。
                 "evidence_text": "",
                 "review_status": "teacher_review_required",
+                "thesis_refs": _json_dumps(thesis_refs) if thesis_refs else None,
             }
             row = session.execute(
                 sa_text(
@@ -474,12 +606,13 @@ def persist_qualified_claims(
                     INSERT INTO theory_claims (
                         document_id, chunk_id, source_scope, claim_type, text,
                         normalized_text, concepts, equation, support_status,
-                        evidence_text, review_status
+                        evidence_text, review_status, thesis_refs
                     )
                     VALUES (
                         :document_id, CAST(:chunk_id AS uuid), CAST(:source_scope AS jsonb),
                         :claim_type, :text, :normalized_text, CAST(:concepts AS jsonb),
-                        CAST(:equation AS jsonb), :support_status, :evidence_text, :review_status
+                        CAST(:equation AS jsonb), :support_status, :evidence_text, :review_status,
+                        CAST(:thesis_refs AS jsonb)
                     )
                     RETURNING id
                     """
@@ -580,6 +713,17 @@ def persist_components(
             preconditions = _remap_nested_claim_refs(getattr(comp, "preconditions", []) or [], claim_id_map)
             cautions = _remap_nested_claim_refs(getattr(comp, "cautions", []) or [], claim_id_map)
             raw_component_type = _strip_nuls(getattr(comp, "component_type", "") or "")
+            # source_scope は agent 側（例: apparatus_components.py の
+            # ComponentRecord.source_scope）をベースに document_id / legacy_ids を
+            # 上書きマージする（figure_concept_linking_design.md F2）。かつては
+            # {"document_id", "legacy_ids"} で全上書きしており、apparatus 候補の
+            # figure_id / figure_key / match_status 等が DB 行から失われていた。
+            # legacy_ids=[component_id] の既存セマンティクスは
+            # _component_id_lookup_from_rows（context_lens.py）が依存するため不変。
+            source_scope = dict(getattr(comp, "source_scope", {}) or {})
+            source_scope["document_id"] = document_id
+            source_scope["legacy_ids"] = [getattr(comp, "component_id", "")]
+            thesis_context = _component_thesis_context(comp)
             params = {
                 "course_id": course_id,
                 "document_id": document_id,
@@ -610,10 +754,7 @@ def persist_components(
                 }),
                 "validation_warnings": _json_dumps([]),
                 "teacher_notes": "",
-                "source_scope": _json_dumps({
-                    "document_id": document_id,
-                    "legacy_ids": [getattr(comp, "component_id", "")],
-                }),
+                "source_scope": _json_dumps(source_scope),
                 "evidence_claims": _json_dumps(
                     evidence_refs.get("claim_ids") or []
                 ),
@@ -628,6 +769,7 @@ def persist_components(
                 "connectors": _json_dumps({}),
                 "internal_flow": _json_dumps(getattr(comp, "internal_flow", []) or []),
                 "duplicate_candidates": _json_dumps([]),
+                "thesis_context": _json_dumps(thesis_context) if thesis_context is not None else None,
             }
             row = session.execute(
                 sa_text(
@@ -640,7 +782,7 @@ def persist_components(
                         validation_warnings, teacher_notes, source_scope,
                         evidence_claims, maturity_level, maturity_source,
                         review_status, cautions, connectors, internal_flow,
-                        duplicate_candidates
+                        duplicate_candidates, thesis_context
                     )
                     VALUES (
                         :course_id, :document_id, :name, :component_type,
@@ -653,7 +795,8 @@ def persist_components(
                         CAST(:source_scope AS jsonb), CAST(:evidence_claims AS jsonb),
                         :maturity_level, :maturity_source, :review_status,
                         CAST(:cautions AS jsonb), CAST(:connectors AS jsonb),
-                        CAST(:internal_flow AS jsonb), CAST(:duplicate_candidates AS jsonb)
+                        CAST(:internal_flow AS jsonb), CAST(:duplicate_candidates AS jsonb),
+                        CAST(:thesis_context AS jsonb)
                     )
                     RETURNING id
                     """

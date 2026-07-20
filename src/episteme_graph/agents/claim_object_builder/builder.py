@@ -979,8 +979,16 @@ class ClaimObjectBuilder:
 
     @staticmethod
     def _link_figures_tables(role_labels: list[str], claim_type: str) -> tuple[list[str], list[str]]:
-        # Linking requires figure/table semantics input; default to empty.
-        # Downstream FigureTableSemanticsAgent populates this via cross-link pass.
+        # Intentionally always empty: this builder does not populate claim-side
+        # figure/table links. The single source of truth is the *other*
+        # direction — FigureRecord.linked_claim_ids / TableRecord.linked_claim_ids
+        # in figure_table_semantics, populated by the mention-based cross-link
+        # pass (figure_table_semantics/crosslink.py, issue F1). See
+        # docs/features/figure_concept_linking_design.md §3 for why claim-side
+        # figure_ids are deliberately not populated here (artifact-immutability /
+        # stage-ordering rationale) and how downstream readers (e.g. the W-layer
+        # context lens) derive the claim -> figure/table direction from that
+        # single source instead.
         return [], []
 
     # ------------------------------------------------------------------

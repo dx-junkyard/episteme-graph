@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
-from services import get_viewable_course_data
+from services import get_editable_course_data, get_viewable_course_data
 from core.course_data import (
     course_chapters,
     course_source_material_ids,
@@ -28,8 +28,14 @@ from core.course_data import (
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
+from core import element_explanations
 
-from ._shared import _chunk_status, _get_course_chunks, _get_system_admin_course_data
+from ._shared import (
+    _chunk_status,
+    _get_course_chunks,
+    _get_system_admin_course_data,
+    consume_lecture_rewrite_quota,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +50,23 @@ router = APIRouter(tags=["Lecture Script Studio"])
 def _course_data_for_studio(course_id: str, current_user: dict) -> dict:
     """閲覧権限チェック付きでコースデータを返す。"""
     course_data = get_viewable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return course_data
+
+
+def _course_data_for_studio_editable(course_id: str, current_user: dict) -> dict:
+    """編集権限チェック付きでコースデータを返す（Phase 2-D 🔴）。
+
+    ``rewrite_lecture_studio_course_topic`` は LLM を呼んでコース内容のドラフトを
+    生成する書き込み系の操作だが、旧実装は ``_course_data_for_studio``（閲覧権限のみ）
+    を使っていたため、viewer 権限しかない教員でも呼び出せてしまっていた
+    （設計書 assistant_common_infra_design.md §5。scripts.py の設定 PUT 系
+    （``get_editable_course_data`` + SYSTEM_ADMIN フォールバック）と権限水準を揃える）。
+    """
+    course_data = get_editable_course_data(current_user["id"], course_id)
     if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
         course_data = _get_system_admin_course_data(course_id)
     if not course_data:
@@ -181,6 +204,88 @@ def _clean_str_list(value: object) -> list[str]:
     return []
 
 
+def _topic_figures_for_prompt(topic: dict) -> list[dict]:
+    """トピックの evidence_links から kind='figure' を抜き出し、LLM が
+    `![[figure:<figure_id>]]` を実 ID で埋め込めるようにする（Phase 4 §7.1）。
+
+    Phase 2 §5.3 続き: 承認済み(approved)/候補(candidate) の contextual
+    element_explanations があれば ``explanation`` / ``explanation_status``
+    （``"approved"`` | ``"ai_candidate"``）を添える。教員向け下書きの根拠材料のため、
+    未確定の candidate も「AI候補」であることが分かるラベル付きで供給してよい
+    （学習者向け descriptor / チャット説明とは異なり candidate-only 原則の例外——
+    ここでの読者は必ず教員であり、最終確認は教員が下書きをレビューする際に行う）。
+    approved を candidate より優先する。element_explanations が無い/未取得の場合は
+    従来どおり ``{figure_id, caption}`` のみ返す（情報を落とさない・fail-soft）。
+    """
+    figures: list[dict] = []
+    seen: set[str] = set()
+    figure_document_ids: dict[str, str] = {}
+    for link in topic.get("evidence_links") or []:
+        if not isinstance(link, dict) or link.get("kind") != "figure":
+            continue
+        figure_id = str(link.get("figure_id") or link.get("target_id") or "").strip()
+        if not figure_id or figure_id in seen:
+            continue
+        seen.add(figure_id)
+        figures.append({
+            "figure_id": figure_id,
+            "caption": str(link.get("caption") or link.get("summary") or ""),
+        })
+        doc_id = str(link.get("document_id") or "").strip()
+        if doc_id:
+            figure_document_ids[figure_id] = doc_id
+
+    if not figures or not figure_document_ids:
+        return figures
+
+    by_document: dict[str, list[str]] = {}
+    for fig_id, doc_id in figure_document_ids.items():
+        by_document.setdefault(doc_id, []).append(fig_id)
+
+    # figure_id -> (body, "approved"|"ai_candidate")
+    explanations: dict[str, tuple[str, str]] = {}
+    session = _pg_session()
+    try:
+        for doc_id, fig_ids in by_document.items():
+            rows = element_explanations.list_for_document(
+                session,
+                doc_id,
+                element_type=element_explanations.ELEMENT_TYPE_FIGURE,
+                kind=element_explanations.KIND_CONTEXTUAL,
+            )
+            by_figure: dict[str, list[dict]] = {}
+            for row in rows:
+                fid = row.get("element_id")
+                if fid in fig_ids:
+                    by_figure.setdefault(fid, []).append(row)
+            for fig_id in fig_ids:
+                candidates = by_figure.get(fig_id) or []
+                approved_row = next(
+                    (r for r in candidates if r.get("status") == element_explanations.STATUS_APPROVED and r.get("body")),
+                    None,
+                )
+                if approved_row:
+                    explanations[fig_id] = (approved_row["body"], "approved")
+                    continue
+                candidate_row = next(
+                    (r for r in candidates if r.get("status") == element_explanations.STATUS_CANDIDATE and r.get("body")),
+                    None,
+                )
+                if candidate_row:
+                    explanations[fig_id] = (candidate_row["body"], "ai_candidate")
+    except Exception:
+        logger.warning("Failed to load figure explanations for lecture studio prompt", exc_info=True)
+        explanations = {}
+    finally:
+        session.close()
+
+    for fig in figures:
+        info = explanations.get(fig["figure_id"])
+        if info:
+            fig["explanation"], fig["explanation_status"] = info
+    return figures
+
+
 def _normalize_check_questions(value: object) -> list[dict]:
     """Normalize legacy string questions and detailed check-question objects."""
     if value is None:
@@ -268,6 +373,16 @@ def save_lecture_studio_course_topic(
                 "data": json.dumps(course_data, ensure_ascii=False),
             },
         )
+        # トピックの授業用教材（student_material）/読み上げ原稿（spoken_script）が変わったため、
+        # 生成済みのトピック音声を無効化する（原稿編集時のチャンク音声無効化と同じ方針。
+        # 次回の音声生成で作り直される）。表示スライドと音声スライドの食い違いを防ぐ。
+        session.execute(
+            sa_text("""
+                DELETE FROM topic_lecture_audio_cache
+                WHERE course_id = :course_id AND topic_id = :topic_id
+            """),
+            {"course_id": course_id, "topic_id": topic_id},
+        )
         session.commit()
     except HTTPException:
         raise
@@ -294,6 +409,7 @@ _COURSE_TOPIC_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト
 - ブロック数式は `$$...$$`
 - `\(...\)` や `\[...\]` は使わず、必ず `$...$` / `$$...$$` を使う
 - 埋め込みは `![[equation:id]]`, `![[figure:id]]`, `![[source:id]]`, `![[claim:id]]`, `![[component:id]]`
+- `![[figure:id]]` は根拠候補の `figures` に列挙された `figure_id` のみ使用可（一覧に無い id を発明しない）
 
 必ずJSONのみを返してください。
 JSON文字列内のLaTeXバックスラッシュは必ず `\\Lambda` のように二重化してください。
@@ -399,7 +515,7 @@ def rewrite_lecture_studio_course_topic(
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """教員の指示に基づいてコーストピックの授業用ドラフトを生成する。"""
-    course_data = _course_data_for_studio(course_id, current_user)
+    course_data = _course_data_for_studio_editable(course_id, current_user)
     topic = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
     if topic is None:
         raise HTTPException(status_code=404, detail="Topic not found")
@@ -418,6 +534,7 @@ def rewrite_lecture_studio_course_topic(
         "linked_equation_ids": topic.get("linked_equation_ids", []),
         "source_evidence_ids": topic.get("source_evidence_ids", []),
         "evidence_links": topic.get("evidence_links", []),
+        "figures": _topic_figures_for_prompt(topic),
         "content_blocks": topic.get("content_blocks", []),
         "coverage": topic.get("coverage", {}),
         "content_confidence": topic.get("content_confidence", ""),
@@ -435,6 +552,7 @@ def rewrite_lecture_studio_course_topic(
 
     params = get_llm_params("fast")
     parsed: object = {}
+    consume_lecture_rewrite_quota(current_user["id"])
     with usage_context("admin:lecture_rewrite", user_id=current_user["id"], course_id=course_id):
         try:
             parsed = generate_text_with_structured_output(

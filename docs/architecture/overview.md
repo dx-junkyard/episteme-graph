@@ -68,7 +68,7 @@ episteme-graph/
 │   │   ├── graphs/               # 学生向けグラフ組み立て（student_graph）
 │   │   └── tension/              # TensionMiningAgent（prefilter / agent / worker など, B層）
 │   ├── cartridges/               # ドメインカートリッジ（particle_physics）
-│   ├── db/                       # SQL マイグレーション（init.sql, 002〜022）
+│   ├── db/                       # SQL マイグレーション（init.sql, 002〜053）
 │   └── tests/                    # pytest（FastAPI / core）
 │
 ├── src/episteme_graph/agents/    # PDF解析 Agent 群（→ pipeline/agents.md）
@@ -114,7 +114,7 @@ episteme-graph/
 
 | サブシステム | 概要 | 詳細 |
 |---|---|---|
-| PDF 解析パイプライン | アップロードされた PDF を 23 ステージの Agent 群で構造化 | [pipeline/overview.md](../pipeline/overview.md) |
+| PDF 解析パイプライン | アップロードされた PDF を 26 ステージの Agent 群で構造化 | [pipeline/overview.md](../pipeline/overview.md) |
 | RAG チャット | pgvector 検索（tier 付き）でコンテキストを組み、LLM が回答 | [backend/rag-chat.md](../backend/rag-chat.md) |
 | 動的スキーマ進化 | 未回答クエリから新しい OntologyType/CorePredicate を提案・検証・反映 | [pipeline/schema-evolution.md](../pipeline/schema-evolution.md) |
 | 理論操作グラフ | 導出チェーンから理論の操作構造を 2 層グラフで表現 | [pipeline/theory-graph.md](../pipeline/theory-graph.md) |

@@ -54,12 +54,15 @@ from sqlalchemy import text as sa_text
 
 from dependencies import _hash_password
 from routes import auth, learning, admin, lecture, groups, error_logs, export as export_routes
+from routes import figure_presentation as figure_presentation_routes
+from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
+from routes import personal_map as personal_map_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 13個の子ルーターを、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -71,6 +74,7 @@ from routes.admin_assistant import admin_router as _admin_assistant_router
 from routes.versioning import router as _versioning_router
 from routes.status import router as _status_router
 from routes.notifications import router as _notifications_router
+from routes.deliberation import router as _deliberation_router
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 from core.migrations import run_migrations
@@ -200,6 +204,18 @@ error_logs.register_error_log_middleware(app)
 # ルーターのマウント
 app.include_router(auth.router)
 app.include_router(learning.router)
+# #496 moved the figures list to figure_presentation so there is one
+# registered GET operation (not two order-dependent handlers).  The legacy
+# function remains importable for static/backward-compatibility tests.
+admin.router.routes[:] = [
+    route for route in admin.router.routes
+    if not (
+        getattr(route, "path", "") == "/api/admin/documents/{document_id}/figures"
+        and "GET" in (getattr(route, "methods", set()) or set())
+    )
+]
+app.include_router(figure_presentation_routes.router)
+app.include_router(element_explanations_routes.router)
 app.include_router(admin.router)
 app.include_router(error_logs.router)
 app.include_router(lecture.router)
@@ -212,6 +228,8 @@ app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
+app.include_router(personal_map_routes.router)
+app.include_router(personal_map_routes.me_router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下13ルーターは admin.router と同じ "/api/admin" prefix で
@@ -229,6 +247,7 @@ app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")
+app.include_router(_deliberation_router, prefix="/api/admin")
 
 
 @app.get("/healthz")

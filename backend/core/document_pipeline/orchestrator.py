@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable
 
 from core.llm_usage.context import bind_usage_context, set_current_feature
+from core.llm_worker.cost_gate import CostGate, today_str
 
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
@@ -48,6 +49,14 @@ from .tex_archive import build_structure_from_tex_archive
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_KEY = "_artifacts"
+
+# contextual_explanation stage (hierarchical_context_explanation_design.md §5.1):
+# a single process-lifetime CostGate for the daily LLM-call budget, matching
+# figure_reanalysis.py's "CostGate + resolve_model only" partial-adoption of the
+# core/llm_worker/ skeleton (this stage's own agent lives in
+# episteme_graph.agents.contextual_explanation and is off-limits to edit here;
+# only the orchestrator-level cost gate belongs in this module).
+_ctxexpl_cost_gate = CostGate()
 
 
 PIPELINE_STAGES = [
@@ -73,6 +82,7 @@ PIPELINE_STAGES = [
     "component_assembly",
     "component_graph",
     "narrative_annotator",
+    "contextual_explanation",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -273,18 +283,28 @@ def run_document_pipeline(
     if start_stage and target_stage and stage_order[start_stage] > stage_order[target_stage]:
         raise ValueError(f"start_stage {start_stage!r} is after target_stage {target_stage!r}")
 
+    fetched_previous_run = resume and agents is None
     previous_run = (
         get_latest_analysis_run(document_id=document_id, material_id=material_id)
-        if resume and agents is None else None
+        if fetched_previous_run else None
     )
     # options（migration 041 §3-2）: 明示指定があればそれを優先し、なければ前回 run の
     # options を引き継ぐ（再解析のたびに analyze_images 等を指定しなくても前回の選択が
     # 維持される）。completed 済み run は artifact 再利用の対象から外れる（下の reset）が、
     # options の引き継ぎ元としては有効なので reset **前**にここで確定させる。
+    # resume=False の全体再実行（lecture studio の document-pipeline/run 等）でも
+    # options だけは最新 run から引き継ぐ — previous_run は artifact 再利用のために
+    # resume 時のみ読むが、options の継承はそれとは独立の関心事（agents 注入の
+    # ユニットテスト実行では DB を読まない）。
     if options is not None:
         effective_options = dict(options)
     else:
-        effective_options = dict((previous_run or {}).get("options") or {})
+        options_source_run = previous_run
+        if not fetched_previous_run and agents is None:
+            options_source_run = get_latest_analysis_run(
+                document_id=document_id, material_id=material_id
+            )
+        effective_options = dict((options_source_run or {}).get("options") or {})
     if previous_run and previous_run.get("status") == "completed" and target_stage is None and start_stage is None:
         previous_run = None
     previous_outputs = dict((previous_run or {}).get("stage_outputs") or {})
@@ -1060,6 +1080,10 @@ def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
                 structure=ctx.structure,
                 evidence=ctx.evidence,
                 claim_objects=ctx.claim_objects,
+                # span_id -> block_id resolution for the F1 claim cross-link
+                # (works both freshly-run and resumed: _stage_claim_qualification
+                # restores ctx.qualified from the artifact via from_dict).
+                qualified=ctx.qualified,
             )
         except Exception as exc:
             logger.exception(
@@ -1110,6 +1134,7 @@ def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
                     document_id=ctx.document_id,
                     cartridge_id=ctx.cartridge_id,
                     fig_tbl=ctx.fig_tbl,
+                    structure=ctx.structure,
                 )
                 ctx.save_artifact("apparatus_semantics", ctx.apparatus_result)
             except Exception as exc:
@@ -1391,6 +1416,45 @@ def _stage_narrative_annotator(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("narrative_annotator", narrative_counts)
 
 
+def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
+    # ── Stage 12a.2: contextual_explanation (Track A, hierarchical_context_
+    # explanation_design.md §5.1). Placed after component_graph /
+    # narrative_annotator and before course_mapping: at this point thesis /
+    # derivation / symbol_registry / figure iterative_analysis have all
+    # already run (E7), and equation_semantics (stage 8, much earlier) finally
+    # gets a position-in-the-paper it never had before (gap (a)). Non-fatal:
+    # failures here never block course_mapping / persistence.
+    ctxexpl_artifact = ctx.artifact("contextual_explanation")
+    if ctx.should_use_artifact("contextual_explanation"):
+        ctxexpl_payload = dict(ctxexpl_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded contextual_explanation artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("contextual_explanation", total=1, unit="builder")
+        try:
+            ctxexpl_payload = _build_contextual_explanation(
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                component_result=ctx.component_result,
+                claim_objects=ctx.claim_objects,
+                equations=ctx.equations,
+                fig_tbl=ctx.fig_tbl,
+                apparatus_result=ctx.apparatus_result,
+                thesis=ctx.thesis,
+            )
+        except Exception as exc:
+            logger.warning(
+                "contextual_explanation stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            ctxexpl_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("contextual_explanation", ctxexpl_payload)
+    ctx.report_done("contextual_explanation", dict(ctxexpl_payload))
+    return ctx.finish_target_stage("contextual_explanation", dict(ctxexpl_payload))
+
+
 def _stage_course_mapping(ctx: PipelineContext) -> bool:
     # ── Stage 12b: course_mapping (deterministic component → topic map) ─
     course_mapping_artifact = ctx.artifact("course_mapping")
@@ -1586,6 +1650,7 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 document_id=ctx.document_id,
                 qualified_result=ctx.qualified,
                 chunk_index=ctx.chunk_index,
+                thesis_result=ctx.thesis,
             )
             claim_id_map: dict[str, str] = {}
             for saved in saved_claims:
@@ -1744,6 +1809,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef("component_assembly", _stage_component_assembly),
     PipelineStageDef("component_graph", _stage_component_graph),
     PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
+    PipelineStageDef("contextual_explanation", _stage_contextual_explanation),
     PipelineStageDef("course_mapping", _stage_course_mapping),
     PipelineStageDef("blueprint", _stage_blueprint),
     PipelineStageDef("export_validation", _stage_export_validation),
@@ -2263,6 +2329,7 @@ def _build_figure_table_semantics(
     structure: Any,
     evidence: Any,
     claim_objects: Any,
+    qualified: Any = None,
 ):
     from episteme_graph.agents.figure_table_semantics.agent import (
         FigureTableSemanticsAgent,
@@ -2280,11 +2347,54 @@ def _build_figure_table_semantics(
         if block_id and ev_id:
             evidence_index.setdefault(block_id, []).append(ev_id)
 
-    # block_id -> [claim_id, ...] from claim_objects (claim's source span block).
+    # claim_link_index: block_id -> [claim_id, ...] (F1 cross-link contract).
+    #
+    # The agent's mention cross-link pass (figure_table_semantics/crosslink.py)
+    # looks this index up with *block ids*, but ClaimObjectRecord only stores
+    # rhetorical-role span ids ("span_001"-style) in source_span_ids. Those span
+    # ids are generated per block and routinely repeat across blocks, so two
+    # joins back to the source block are used here:
+    #   (1) claim.source_evidence_ids -> evidence record's block_id
+    #       (unambiguous: evidence ids are unique and block-scoped, and the
+    #       builder resolves a claim's evidence strictly from its own block);
+    #   (2) span_id -> block_id via claim_qualification's QualifiedSpanRecord,
+    #       used only when the span id maps to exactly one block.
+    # A span id that is unknown or ambiguous (maps to multiple blocks) keeps its
+    # raw span_id key so no information is dropped (P4); such keys simply never
+    # match a body-paragraph block id in the cross-link pass.
+    span_to_blocks: dict[str, set[str]] = {}
+    for span in getattr(qualified, "qualified_spans", []) or []:
+        span_id = getattr(span, "span_id", None)
+        block_id = getattr(span, "block_id", None)
+        if span_id and block_id:
+            span_to_blocks.setdefault(span_id, set()).add(block_id)
+
+    evidence_block_index: dict[str, str] = {}
+    for block_id, ev_ids in evidence_index.items():
+        for ev_id in ev_ids:
+            evidence_block_index.setdefault(ev_id, block_id)
+
     claim_link_index: dict[str, list[str]] = {}
+
+    def _index_claim(key: str, claim_id: str) -> None:
+        bucket = claim_link_index.setdefault(key, [])
+        if claim_id not in bucket:
+            bucket.append(claim_id)
+
     for claim in getattr(claim_objects, "claims", []) or []:
+        claim_id = getattr(claim, "claim_id", None)
+        if not claim_id:
+            continue
+        for ev_id in getattr(claim, "source_evidence_ids", []) or []:
+            block_id = evidence_block_index.get(ev_id)
+            if block_id:
+                _index_claim(block_id, claim_id)
         for span_id in getattr(claim, "source_span_ids", []) or []:
-            claim_link_index.setdefault(span_id, []).append(claim.claim_id)
+            blocks = span_to_blocks.get(span_id)
+            if blocks and len(blocks) == 1:
+                _index_claim(next(iter(blocks)), claim_id)
+            else:
+                _index_claim(span_id, claim_id)
 
     return agent.run(
         structure,
@@ -2348,6 +2458,7 @@ def _build_apparatus_semantics(
     document_id: str,
     cartridge_id: str | None,
     fig_tbl: Any,
+    structure: Any = None,
 ) -> tuple[Any, dict]:
     """apparatus_semantics ステージ本体（画像パイプライン §5-3/5-5）。
 
@@ -2355,6 +2466,8 @@ def _build_apparatus_semantics(
     bytes を取得し、ライブラリ retrieval（凍結版のみ、§6-5）で few-shot 候補を
     注入して ApparatusSemanticsAgent を実行する。上限（1 document あたり /
     日次）を超えた図は agent に渡さず ``skipped_by_limit`` として記録する (P4)。
+    ``structure``（document_structure の成果）から ``collect_figure_context``
+    で図ごとの周辺本文・略語辞書を収集し agent 入力に配線する（G1 ギャップ解消）。
 
     Returns: (ApparatusSemanticsResult, done_payload dict)
     """
@@ -2363,9 +2476,11 @@ def _build_apparatus_semantics(
     from episteme_graph.agents.apparatus_semantics.agent import ApparatusSemanticsAgent
     from episteme_graph.agents.apparatus_semantics.schema import (
         FigureImageInput,
+        IterativeConfig,
         LibraryCandidate,
     )
 
+    from .figure_context import collect_figure_context
     from .figure_images import load_document_figures
 
     settings = get_settings()
@@ -2393,14 +2508,37 @@ def _build_apparatus_semantics(
     max_images = max(0, int(getattr(settings, "apparatus_max_images_per_document", 20) or 0))
     daily_remaining = _apparatus_daily_remaining(settings)
 
+    # 反復照合パイプライン（#499）: iterative モードは engine が
+    # hypothesis(非vision) → observation(vision) → alignment(非vision) →
+    # verification(vision)×N という複数コールを1図に費やすため、事前フィルタも
+    # 図あたり `1 + max_iterations` の保守的な見積りコストで許容図数を絞る
+    # （daily_remaining >= 1 なら最低1図は許可し、0図に縮退させない）。
+    analysis_mode = str(getattr(settings, "apparatus_analysis_mode", "iterative") or "iterative")
+    iterative_enabled = analysis_mode != "one_shot"
+    verify_max_iterations = max(0, int(getattr(settings, "apparatus_verify_max_iterations", 3) or 0))
+    iterative_config = IterativeConfig(
+        enabled=iterative_enabled,
+        max_iterations=verify_max_iterations,
+        vision_call_budget=daily_remaining,
+        model_name=str(getattr(settings, "apparatus_llm_model", "") or ""),
+    )
+    if iterative_enabled:
+        cost_per_figure = max(1, 1 + verify_max_iterations)
+        allowed_by_budget = daily_remaining // cost_per_figure
+        if allowed_by_budget <= 0 and daily_remaining >= 1:
+            allowed_by_budget = 1
+    else:
+        allowed_by_budget = daily_remaining
+    allowed_images = min(max_images, max(0, allowed_by_budget))
+
     figure_inputs: list[FigureImageInput] = []
     skipped_by_limit: list[str] = []
+    context_collected = 0
     for idx, row in enumerate(figure_rows):
         figure_key = str(row.get("figure_key") or "")
-        if idx >= max_images or daily_remaining <= 0:
+        if idx >= allowed_images:
             skipped_by_limit.append(figure_key)
             continue
-        daily_remaining -= 1
 
         image_bytes = None
         minio_key = row.get("minio_key")
@@ -2419,6 +2557,23 @@ def _build_apparatus_semantics(
             or fig_record_by_key.get(figure_key)
         )
         caption_text = str(row.get("caption_text") or "")
+        inner_labels = row.get("inner_labels") or []
+
+        try:
+            fig_context = collect_figure_context(
+                structure, row,
+                inner_labels=inner_labels,
+                max_items=settings.apparatus_context_max_items,
+                max_chars=settings.apparatus_context_max_chars,
+            )
+        except Exception:
+            logger.warning(
+                "apparatus_semantics: figure context collection failed document=%s figure=%s",
+                document_id, figure_key, exc_info=True,
+            )
+            fig_context = None
+        if fig_context and fig_context.nearby_text:
+            context_collected += 1
 
         figure_inputs.append(FigureImageInput(
             figure_id=str(row.get("id") or figure_key),
@@ -2426,8 +2581,10 @@ def _build_apparatus_semantics(
             figure_label=row.get("figure_label"),
             caption_text=caption_text,
             image_bytes=image_bytes,
-            nearby_text=[],
+            nearby_text=(fig_context.nearby_text if fig_context else []),
             figure_record=fig_record,
+            inner_labels=inner_labels,
+            abbreviations=(fig_context.abbreviations if fig_context else {}),
         ))
 
     # ライブラリ retrieval（凍結版のみ、§5-3/6-5）: cartridge が無ければ候補なしに
@@ -2442,7 +2599,11 @@ def _build_apparatus_semantics(
         if search_frozen_entries is not None:
             for fig_input in figure_inputs:
                 query_text = " ".join(
-                    t for t in [fig_input.caption_text, *(fig_input.nearby_text or [])] if t
+                    t for t in [
+                        fig_input.caption_text,
+                        *(fig_input.nearby_text or []),
+                        *sorted((fig_input.abbreviations or {}).values()),
+                    ] if t
                 ).strip()
                 if not query_text:
                     continue
@@ -2471,15 +2632,52 @@ def _build_apparatus_semantics(
                         for h in hits
                     ]
 
-    vision_calls = sum(1 for fi in figure_inputs if fi.image_bytes)
-
-    agent = ApparatusSemanticsAgent(cartridge_id=cartridge_id)
+    agent = ApparatusSemanticsAgent(cartridge_id=cartridge_id, iterative_config=iterative_config)
     result = agent.run(
         document_id=document_id,
         figures=figure_inputs,
         library_candidates=library_candidates,
         cartridge_id=cartridge_id,
     )
+
+    # vision_calls は実測値: iterative_analysis を持つ record はその
+    # vision_calls を合算し、持たない record（one_shot 経路 / iterative 無効）は
+    # 従来どおり image_bytes 有無で1とみなす（設計書「コスト制御」節）。
+    records = getattr(result, "apparatus_records", []) or []
+    figure_input_by_id = {fi.figure_id: fi for fi in figure_inputs}
+    _convergence_keys = (
+        "converged", "max_iterations_reached", "no_progress",
+        "aborted_error", "aborted_cost_limit",
+    )
+    convergence_counts = {key: 0 for key in _convergence_keys}
+    vision_calls = 0
+    for record in records:
+        iterative = getattr(record, "iterative_analysis", None)
+        if iterative is not None:
+            vision_calls += int(getattr(iterative, "vision_calls", 0) or 0)
+            status = getattr(iterative, "convergence_status", None)
+            if status in convergence_counts:
+                convergence_counts[status] += 1
+        else:
+            fig_input = figure_input_by_id.get(getattr(record, "figure_id", None))
+            if fig_input is not None and fig_input.image_bytes:
+                vision_calls += 1
+
+    # #496: persist the generic vision classification/profile separately from
+    # any teacher override.  Artifact persistence remains the source for old
+    # runs; a DB write failure is therefore fail-soft and must not discard the
+    # completed analysis result.
+    try:
+        from core.figure_presentation import persist_suggestions
+
+        persist_suggestions(document_id, getattr(result, "apparatus_records", []) or [])
+    except Exception:
+        logger.warning(
+            "apparatus_semantics: failed to persist figure presentation suggestions "
+            "document=%s",
+            document_id,
+            exc_info=True,
+        )
 
     seen_versions: set[tuple[str, int]] = set()
     referenced_versions: list[dict] = []
@@ -2493,12 +2691,186 @@ def _build_apparatus_semantics(
 
     done_payload = {
         "status": "completed",
-        "apparatus_records": len(getattr(result, "apparatus_records", []) or []),
+        "apparatus_records": len(records),
         "vision_calls": vision_calls,
         "skipped_by_limit": skipped_by_limit,
         "referenced_library_versions": referenced_versions,
+        "context_collected": context_collected,
+        "presentation_modes": {
+            mode: sum(
+                1 for record in records
+                if getattr(record, "suggested_mode", "unknown") == mode
+            )
+            for mode in (
+                "functional_diagram", "data_plot", "descriptive_image", "mixed", "unknown"
+            )
+        },
+        "iterative_mode": iterative_enabled,
     }
+    if iterative_enabled:
+        done_payload["convergence"] = convergence_counts
     return result, done_payload
+
+
+def _ctxexpl_max_elements_per_document() -> int:
+    try:
+        return max(0, int(os.getenv("CTXEXPL_MAX_ELEMENTS_PER_DOCUMENT", "40")))
+    except (TypeError, ValueError):
+        return 40
+
+
+def _ctxexpl_max_calls_per_day() -> int:
+    try:
+        return max(0, int(os.getenv("CTXEXPL_MAX_CALLS_PER_DAY", "20")))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _ctxexpl_model() -> str:
+    """``CTXEXPL_LLM_MODEL`` if set, else the fast tier (mirrors
+    ``core.llm_worker.client.resolve_model``'s fallback shape without
+    requiring a new ``core.config.Settings`` field for this stage)."""
+    explicit = os.getenv("CTXEXPL_LLM_MODEL", "").strip()
+    if explicit:
+        return explicit
+    from core.config import get_settings
+
+    return get_settings().llm_fast_model
+
+
+def _build_contextual_explanation(
+    *,
+    document_id: str,
+    cartridge_id: str | None,
+    component_result: Any,
+    claim_objects: Any,
+    equations: Any,
+    fig_tbl: Any,
+    apparatus_result: Any,
+    thesis: Any,
+) -> dict:
+    """contextual_explanation ステージ本体（design doc §5.1）。
+
+    入力構築は ``contextual_explanation_inputs.py`` に分離（Tier 3-19 方式）。
+    ここでは (1) 優先順位付き・上限適用済みの要素リストを組み立て、
+    (2) 日次コスト上限を CostGate で事前チェック（apparatus の
+    ``_apparatus_daily_remaining`` と同じ「先に残数を見て、実行後に実測を計上する」
+    流儀を、DB 集計クエリの代わりに再利用可能な CostGate プリミティブで行う。
+    figure_reanalysis.py が既にこの組み合わせ方の前例）、(3) agent を実行し、
+    (4) 結果を ``element_explanations`` に candidate として保存する。
+    """
+    from .contextual_explanation_inputs import build_contextual_explanation_inputs
+
+    max_elements = _ctxexpl_max_elements_per_document()
+    elements, meta = build_contextual_explanation_inputs(
+        document_id=document_id,
+        cartridge_id=cartridge_id,
+        component_result=component_result,
+        claim_objects=claim_objects,
+        equations=equations,
+        fig_tbl=fig_tbl,
+        apparatus_result=apparatus_result,
+        thesis=thesis,
+        max_elements=max_elements,
+    )
+
+    payload: dict[str, Any] = {
+        "status": "completed",
+        "elements_considered": meta.get("considered", 0),
+        "elements_selected": meta.get("selected", 0),
+        "truncated": bool(meta.get("truncated", False)),
+        "truncated_count": meta.get("truncated_count", 0),
+        "counts_by_kind": meta.get("counts_by_kind", {}),
+        "skipped": meta.get("skipped", []),
+        "llm_calls": 0,
+        "saved_candidates": 0,
+        "agent_skipped": [],
+    }
+
+    if not elements:
+        return payload
+
+    daily_limit = _ctxexpl_max_calls_per_day()
+    daily_key = today_str()
+    remaining = _ctxexpl_cost_gate.daily_remaining(daily_limit=daily_limit, daily_key=daily_key)
+    if remaining <= 0:
+        payload["skipped_by_limit"] = True
+        logger.info(
+            "contextual_explanation: daily call limit reached (limit=%d), skipping "
+            "LLM generation for document=%s (%d element(s) considered)",
+            daily_limit, document_id, len(elements),
+        )
+        return payload
+
+    from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
+
+    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model())
+    result = agent.run(elements, cartridge_id=cartridge_id)
+    # Real usage is only known after the batched+repaired run completes (a
+    # single stage run may cost more than 1 LLM call); book it post-hoc
+    # against today's counter, exactly like figure_reanalysis.py's
+    # vision-call accounting via CostGate.count_extra_daily.
+    _ctxexpl_cost_gate.count_extra_daily(daily_key=daily_key, amount=result.llm_call_count)
+
+    payload["llm_calls"] = result.llm_call_count
+    payload["truncated"] = bool(payload["truncated"] or result.truncated)
+
+    items: list[dict] = []
+    agent_skipped: list[dict] = []
+    for element_result in result.elements:
+        if element_result.skipped_reason:
+            agent_skipped.append({
+                "element_type": element_result.element_type,
+                "element_id": element_result.element_id,
+                "reason": element_result.skipped_reason,
+            })
+            continue
+        evidence = {
+            "evidence_quote": element_result.evidence_quote,
+            "reason": element_result.reason,
+            "confidence": element_result.confidence,
+        }
+        if element_result.contextual_explanation:
+            items.append({
+                "element_type": element_result.element_type,
+                "element_id": element_result.element_id,
+                "kind": "contextual",
+                "body": element_result.contextual_explanation,
+                "evidence": dict(evidence),
+                "created_by": "pipeline",
+            })
+        if element_result.generic_explanation:
+            items.append({
+                "element_type": element_result.element_type,
+                "element_id": element_result.element_id,
+                "kind": "generic",
+                "body": element_result.generic_explanation,
+                "evidence": dict(evidence),
+                "created_by": "pipeline",
+            })
+    payload["agent_skipped"] = agent_skipped
+
+    if items:
+        from core.postgres import get_session as _pg_session
+
+        session = _pg_session()
+        try:
+            from core.element_explanations import insert_candidates
+
+            saved = insert_candidates(session, document_id, items)
+            session.commit()
+            payload["saved_candidates"] = len(saved)
+        except Exception:
+            session.rollback()
+            logger.warning(
+                "contextual_explanation: failed to persist candidate explanations "
+                "(non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+        finally:
+            session.close()
+
+    return payload
 
 
 def _build_course_mapping(

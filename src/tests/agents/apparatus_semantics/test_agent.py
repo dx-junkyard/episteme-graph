@@ -7,6 +7,7 @@ from episteme_graph.agents.apparatus_semantics.agent import ApparatusSemanticsAg
 from episteme_graph.agents.apparatus_semantics.schema import (
     ApparatusSemanticsResult,
     FigureImageInput,
+    IterativeConfig,
     LibraryCandidate,
 )
 
@@ -321,3 +322,130 @@ def test_run_processes_multiple_figures_independently():
     assert by_id["fig_1"].match_status == "novel"
     assert by_id["fig_2"].match_status == "unknown"
     assert by_id["fig_2"].reason == "image_unavailable"
+
+
+# ------------------------------------------------------------------
+# Guided re-analysis (guided_figure_reanalysis_design.md)
+# ------------------------------------------------------------------
+
+
+def test_unguided_run_passes_a_single_image_to_the_llm():
+    """No focus_image_bytes -> images list has exactly the original figure image."""
+    agent = ApparatusSemanticsAgent()
+    figure = _figure()
+    response = _raw_response(match_status="novel")
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mock_llm:
+        agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    _, kwargs = mock_llm.call_args
+    assert len(kwargs["images"]) == 1
+
+
+def test_guided_run_passes_two_images_to_the_llm():
+    """figure.focus_image_bytes set -> the vision call receives [original, crop]."""
+    agent = ApparatusSemanticsAgent()
+    figure = _figure()
+    figure.guidance_text = "the modulator is the box on the left"
+    figure.focus_bbox_rel = [0.1, 0.2, 0.4, 0.5]
+    figure.focus_image_bytes = b"\xff\xd8\xff" + b"fake-crop-bytes"
+    response = _raw_response(match_status="novel", guidance_note="Found the modulator as described.")
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mock_llm:
+        result = agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    _, kwargs = mock_llm.call_args
+    images = kwargs["images"]
+    assert len(images) == 2
+    assert images[0]["mime_type"] == "image/png"
+    assert images[1]["mime_type"] == "image/jpeg"
+
+    record = result.apparatus_records[0]
+    assert record.guidance_note == "Found the modulator as described."
+
+
+def test_guided_run_still_leaves_review_status_review_required():
+    """GF1: guidance is an attention directive, never a confirmation."""
+    agent = ApparatusSemanticsAgent()
+    figure = _figure()
+    figure.guidance_text = "check the bottom-right corner"
+    response = _raw_response(match_status="novel", guidance_note="Checked; nothing distinct found there.")
+
+    with patch.object(agent._llm_client, "generate", return_value=response):
+        result = agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    record = result.apparatus_records[0]
+    assert record.review_status == "review_required"
+    assert record.source_backing_status != "source_backed"
+
+
+def test_guided_run_prompt_includes_teacher_guidance_section():
+    agent = ApparatusSemanticsAgent()
+    figure = _figure()
+    figure.guidance_text = "the modulator is the box on the left"
+    response = _raw_response(match_status="novel")
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mock_llm:
+        agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    content = "\n".join(str(m.get("content", "")) for m in mock_llm.call_args[0][0])
+    assert "Teacher Guidance" in content
+    assert "the modulator is the box on the left" in content
+
+
+def test_unguided_run_prompt_omits_teacher_guidance_section():
+    agent = ApparatusSemanticsAgent()
+    figure = _figure()
+    response = _raw_response(match_status="novel")
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mock_llm:
+        agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    content = "\n".join(str(m.get("content", "")) for m in mock_llm.call_args[0][0])
+    assert "Teacher Guidance" not in content
+
+
+def test_guided_run_repair_path_also_receives_guidance_and_both_images():
+    """Validation failure -> repair loop must keep guidance + image count intact."""
+    agent = ApparatusSemanticsAgent()
+    figure = _figure()
+    figure.guidance_text = "the modulator is the box on the left"
+    figure.focus_image_bytes = b"\xff\xd8\xff" + b"fake-crop-bytes"
+    bad = _raw_response(match_status="not_a_real_status")
+    fixed = _raw_response(match_status="novel", guidance_note="Found it.")
+
+    with patch.object(agent._llm_client, "generate", side_effect=[bad, fixed]) as mock_llm:
+        result = agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    assert mock_llm.call_count == 2
+    for call in mock_llm.call_args_list:
+        args, kwargs = call
+        assert len(kwargs["images"]) == 2
+        content = "\n".join(str(m.get("content", "")) for m in args[0])
+        assert "Teacher Guidance" in content
+
+    record = result.apparatus_records[0]
+    assert record.guidance_note == "Found it."
+    assert record.review_status == "review_required"
+
+
+# ------------------------------------------------------------------
+# Iterative pipeline opt-in (#499) — backward compatibility
+# ------------------------------------------------------------------
+
+
+def test_iterative_config_disabled_behaves_like_one_shot():
+    """``IterativeConfig(enabled=False)`` must be indistinguishable from not
+    passing an ``iterative_config`` at all: a single one-shot LLM call, and
+    ``record.iterative_analysis`` left at its default (``None``)."""
+    agent = ApparatusSemanticsAgent(iterative_config=IterativeConfig(enabled=False))
+    figure = _figure()
+    response = _raw_response(match_status="novel")
+
+    with patch.object(agent._llm_client, "generate", return_value=response) as mock_llm:
+        result = agent.run(document_id="doc_test", figures=[figure], library_candidates={})
+
+    assert mock_llm.call_count == 1
+    record = result.apparatus_records[0]
+    assert record.match_status == "novel"
+    assert record.iterative_analysis is None

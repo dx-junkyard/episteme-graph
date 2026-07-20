@@ -40,6 +40,10 @@ class LibraryConflictError(LibraryError, revision_store.RevisionConflictError):
     """楽観ロック衝突（expected_revision が現在値と不一致）。current_revision に現在値を持つ。"""
 
 
+class LibraryRetiredError(LibraryError):
+    """retired エントリへの draft 更新・凍結（N29: retired は読み取り専用。編集には復元が先）。"""
+
+
 # ---------------------------------------------------------------------------
 # 行 ⇄ dict 変換
 # ---------------------------------------------------------------------------
@@ -48,7 +52,7 @@ class LibraryConflictError(LibraryError, revision_store.RevisionConflictError):
 _ENTRY_COLUMNS_SQL = """
     id::text, domain_key, entry_type, name, aliases, summary, body,
     exemplar_images, source_component_ids, source_document_ids,
-    status, revision, latest_version_no, created_by, updated_by,
+    status, standardization_status, revision, latest_version_no, created_by, updated_by,
     created_at, updated_at
 """
 
@@ -72,12 +76,13 @@ def _row_to_entry(row: Any) -> dict:
         source_component_ids=schema.as_list(row[8]),
         source_document_ids=schema.as_list(row[9]),
         status=row[10] or "",
-        revision=int(row[11] or 1),
-        latest_version_no=int(row[12] or 0),
-        created_by=row[13],
-        updated_by=row[14],
-        created_at=row[15].isoformat() if row[15] else "",
-        updated_at=row[16].isoformat() if row[16] else "",
+        standardization_status=row[11] or schema.STANDARDIZATION_STATUS_UNKNOWN,
+        revision=int(row[12] or 1),
+        latest_version_no=int(row[13] or 0),
+        created_by=row[14],
+        updated_by=row[15],
+        created_at=row[16].isoformat() if row[16] else "",
+        updated_at=row[17].isoformat() if row[17] else "",
     )
     return entry.to_dict()
 
@@ -225,6 +230,7 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
     raises:
         ValueError — ホワイトリスト外のフィールド指定 / フィールド未指定 / name を空にする更新
         LibraryNotFoundError — entry_id が存在しない
+        LibraryRetiredError — エントリが retired（読み取り専用。編集には restore が先。N29）
         LibraryConflictError — expected_revision が現在値と不一致（current_revision を持つ）
     """
     unknown = set(fields) - set(schema.UPDATABLE_FIELDS)
@@ -252,6 +258,20 @@ def update_entry(entry_id: str, *, expected_revision: int, updated_by: str | Non
 
     session = get_session()
     try:
+        # N29: retired は読み取り専用（履歴・provenance の保全対象）。draft 更新の前に
+        # 現在 status を確認し、retired なら楽観ロックに進まず明示エラーにする
+        # （restore してから編集する、が正規の経路）。
+        current = session.execute(
+            sa_text(f"{_SELECT_ENTRY_SQL} WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": entry_id},
+        ).fetchone()
+        if current is None:
+            raise LibraryNotFoundError(f"library entry not found: {entry_id}")
+        # _ENTRY_COLUMNS_SQL の並びで status は index 10（_row_to_entry と同じ規約）。
+        if str(current[10] or "") == schema.STATUS_RETIRED:
+            raise LibraryRetiredError(
+                "retired のエントリは編集できません。復元してから編集してください"
+            )
         result = revision_store.update_with_revision_lock(
             session,
             update_sql=f"""
@@ -303,6 +323,7 @@ def freeze_entry(
 
     raises:
         LibraryNotFoundError — entry_id が存在しない
+        LibraryRetiredError — エントリが retired（読み取り専用。凍結には restore が先。N29）
     """
     session = get_session()
     try:
@@ -313,6 +334,12 @@ def freeze_entry(
         if row is None:
             raise LibraryNotFoundError(f"library entry not found: {entry_id}")
         entry = _row_to_entry(row)
+        # N29: retired は読み取り専用。retired のまま新版を発行できると retrieval 除外
+        # （status='active' フィルタ）と版履歴の意味が食い違うため、restore を先に要求する。
+        if entry["status"] == schema.STATUS_RETIRED:
+            raise LibraryRetiredError(
+                "retired のエントリは凍結できません。復元してから凍結してください"
+            )
         version_no = int(entry["latest_version_no"]) + 1
         content = entry
 
@@ -399,9 +426,24 @@ def freeze_entry(
 # ---------------------------------------------------------------------------
 
 
-def _set_status(entry_id: str, status: str, *, updated_by: str | None) -> dict:
+def _set_status(entry_id: str, status: str, *, updated_by: str | None) -> tuple[dict, str]:
+    """status を遷移させ、``(更新後 entry, 遷移前 status)`` を返す。
+
+    監査記録（routes/library.py）が遷移前の実状態を事実どおり記帳できるよう、
+    UPDATE 前に現在行を読んで遷移前 status を確定する（既に目的の status だった
+    冪等呼び出しでも old_status をハードコードせず事実を返す）。
+    """
     session = get_session()
     try:
+        current = session.execute(
+            sa_text(f"{_SELECT_ENTRY_SQL} WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            {"id": entry_id},
+        ).fetchone()
+        if current is None:
+            session.rollback()
+            raise LibraryNotFoundError(f"library entry not found: {entry_id}")
+        # _ENTRY_COLUMNS_SQL の並びで status は index 10（_row_to_entry と同じ規約）。
+        previous_status = str(current[10] or "")
         row = session.execute(
             sa_text(
                 f"""
@@ -424,16 +466,16 @@ def _set_status(entry_id: str, status: str, *, updated_by: str | None) -> dict:
         raise
     finally:
         session.close()
-    return _row_to_entry(row)
+    return _row_to_entry(row), previous_status
 
 
-def retire_entry(entry_id: str, updated_by: str | None = None) -> dict:
-    """status を 'retired' に遷移する（行削除はしない）。"""
+def retire_entry(entry_id: str, updated_by: str | None = None) -> tuple[dict, str]:
+    """status を 'retired' に遷移する（行削除はしない）。``(entry, 遷移前 status)`` を返す。"""
     return _set_status(entry_id, schema.STATUS_RETIRED, updated_by=updated_by)
 
 
-def restore_entry(entry_id: str, updated_by: str | None = None) -> dict:
-    """status を 'active' に戻す。"""
+def restore_entry(entry_id: str, updated_by: str | None = None) -> tuple[dict, str]:
+    """status を 'active' に戻す。``(entry, 遷移前 status)`` を返す。"""
     return _set_status(entry_id, schema.STATUS_ACTIVE, updated_by=updated_by)
 
 

@@ -102,8 +102,10 @@ PDF アップロード
 ### アーキテクチャ / 基盤
 - [アーキテクチャ概要](architecture/overview.md) — システム全体構成、ディレクトリ構成、データストア役割分担
 - [デプロイ構成](architecture/deployment.md) — Docker Compose 構成、環境変数、ネットワーク設計
-- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 045）
-- [レイヤー索引表](architecture/layer_registry.md) — A〜V層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧
+- [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 053）
+- [レイヤー索引表](architecture/layer_registry.md) — A〜W層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧（migration 帰属一覧 init〜053 付き）
+- [対ユーザー支援エージェント調査](architecture/user_assistant_agents_survey_2026-07.md) — チャット型4者/単発型/非対話型の全列挙と機構比較、共通化・分離の指針、不足機能（コスト上限・履歴・権限の穴）
+- [新機能 PR チェックリスト](development_checklist.md) — Copilot capability/KB/G層ルールの追随、docs 3点セット更新、2機能境界の回帰テスト、アンカー整合
 
 ### バックエンド
 - [API とルーティング](backend/api.md) — エンドポイント一覧、認証・RBAC・開示範囲
@@ -112,6 +114,7 @@ PDF アップロード
 
 ### PDF 解析パイプライン
 - [パイプライン概要](pipeline/overview.md) — PDF → ナレッジグラフの全 26 ステージ
+- [論文の抽出単位](pipeline/extraction-units.md) — ブロック → チャンク／エビデンス → atomic claim → 理論部品、という「単位」で貫いた説明
 - [PDF 解析 Agent 詳細](pipeline/agents.md) — 各 Agent の役割・入出力・LLM/決定論の区別
 - [カートリッジシステム](pipeline/cartridges.md) — ドメイン固有語彙・検証ルールの注入
 - [DSL と理論操作グラフ](pipeline/theory-graph.md) — SMILES 風 DSL、TheoryOperationGraph、ソースバッキング
@@ -122,6 +125,8 @@ PDF アップロード
 - [管理機能（教員/管理者UI）](features/admin.md) — 教材管理、コースビルダー、Lecture Studio
 - [承認・共有レイヤー（C層）](features/endorsement-sharing.md) — 教員による査読承認、独自解釈の並存、教員間共有、質問→候補生成
 - [認証・権限・開示範囲](features/auth-visibility.md) — JWT、RBAC、グループ、Visibility
+- [要素検討ワークスペース（W層）](features/element_deliberation_workspace_design.md) — 任意要素の内訳・位置づけ・対話的検討
+- [要素中心コンテキストビュー設計](features/element_context_lens_design.md) — 選択要素を中心に上位構造・文脈上の役割・下位構造を一体表示する追補設計（#498）
 
 ### フロントエンド
 - [フロントエンド構成](frontend/overview.md) — SPA 構成、画面フロー、API 連携

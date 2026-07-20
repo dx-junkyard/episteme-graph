@@ -52,6 +52,33 @@ class TestResolveModel:
         with patch("core.llm_worker.client.get_settings", return_value=settings):
             assert resolve_model("nonexistent_key") == "fast-x"
 
+    def test_fallback_fast_is_the_default(self):
+        settings = type("S", (), {"llm_fast_model": "fast-x", "llm_analysis_model": "analysis-x"})()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            assert resolve_model("missing_key") == resolve_model("missing_key", fallback="fast")
+
+    def test_fallback_analysis_falls_back_to_analysis_tier_when_empty(self):
+        settings = type(
+            "S", (), {"llm_fast_model": "fast-x", "llm_analysis_model": "analysis-x", "my_model_key": ""}
+        )()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            assert resolve_model("my_model_key", fallback="analysis") == "analysis-x"
+
+    def test_fallback_analysis_still_prefers_explicit_override(self):
+        settings = type(
+            "S",
+            (),
+            {"llm_fast_model": "fast-x", "llm_analysis_model": "analysis-x", "my_model_key": "override-model"},
+        )()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            assert resolve_model("my_model_key", fallback="analysis") == "override-model"
+
+    def test_unknown_fallback_tier_raises_value_error(self):
+        settings = type("S", (), {"llm_fast_model": "fast-x"})()
+        with patch("core.llm_worker.client.get_settings", return_value=settings):
+            with pytest.raises(ValueError):
+                resolve_model("my_model_key", fallback="deep")
+
 
 class TestBaseJSONLLMClient:
     def test_complete_json_uses_explicit_model_and_returns_parsed_dict(self):
@@ -232,6 +259,61 @@ class TestCostGate:
         session_alias.clear()
         daily_alias.clear()
         assert gate.check_and_count(session_limit=5, session_key="s", daily_limit=5, daily_key="d") is True
+
+    # -----------------------------------------------------------------
+    # daily_remaining / count_extra_daily (#499 review P1: figure_reanalysis
+    # needs to read the live remaining allowance and post-hoc reconcile
+    # actual vision spend without going through check_and_count's gating).
+    # -----------------------------------------------------------------
+
+    def test_daily_remaining_reflects_prior_consumption(self):
+        gate = CostGate()
+        gate.check_and_count(daily_limit=5, daily_key="d")
+        gate.check_and_count(daily_limit=5, daily_key="d")
+        assert gate.daily_remaining(daily_limit=5, daily_key="d") == 3
+
+    def test_daily_remaining_is_zero_for_unknown_key(self):
+        gate = CostGate()
+        assert gate.daily_remaining(daily_limit=5, daily_key="never-touched") == 5
+
+    def test_daily_remaining_never_goes_negative(self):
+        gate = CostGate()
+        gate.daily_counts["d"] = 999
+        assert gate.daily_remaining(daily_limit=5, daily_key="d") == 0
+
+    def test_daily_remaining_does_not_advance_the_counter(self):
+        gate = CostGate()
+        gate.daily_remaining(daily_limit=5, daily_key="d")
+        gate.daily_remaining(daily_limit=5, daily_key="d")
+        assert gate.daily_counts.get("d", 0) == 0
+
+    def test_count_extra_daily_adds_to_existing_count(self):
+        gate = CostGate()
+        gate.check_and_count(daily_limit=100, daily_key="d")
+        gate.count_extra_daily(daily_key="d", amount=3)
+        assert gate.daily_counts["d"] == 4
+
+    def test_count_extra_daily_creates_key_when_absent(self):
+        gate = CostGate()
+        gate.count_extra_daily(daily_key="new", amount=2)
+        assert gate.daily_counts["new"] == 2
+
+    def test_count_extra_daily_zero_or_negative_is_a_no_op(self):
+        gate = CostGate()
+        gate.count_extra_daily(daily_key="d", amount=0)
+        assert "d" not in gate.daily_counts
+        gate.count_extra_daily(daily_key="d", amount=-5)
+        assert "d" not in gate.daily_counts
+
+    def test_count_extra_daily_can_push_past_the_limit_honestly(self):
+        """This is an accounting call, not a gate — it must not clamp to the
+        limit (overshoot needs to be visible for the next check_and_count to
+        correctly refuse further calls)."""
+        gate = CostGate()
+        gate.check_and_count(daily_limit=2, daily_key="d")
+        gate.count_extra_daily(daily_key="d", amount=10)
+        assert gate.daily_counts["d"] == 11
+        assert gate.check_and_count(daily_limit=2, daily_key="d") is False
 
 
 def test_today_str_is_iso_date():
