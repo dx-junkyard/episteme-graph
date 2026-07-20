@@ -136,6 +136,69 @@ def test_notification_labels_added_for_atlas_lifecycle_events():
     assert "が廃止されました" in js
 
 
+def test_new_domain_success_handler_focuses_atlas_domain_not_just_activates_tab():
+    """コードレビュー指摘1: 新分野生成後の「分野の地図タブを開く」導線が機能しない。
+
+    activateTabView("atlas") 単独では initAtlas の onTabActivate コールバック
+    （loadCartridges/loadAtlasCourses）が発火しないため、atlasAdminFocusDomain
+    経由で新分野へフォーカスしてタブ内一覧・状態を明示的に読み込むこと。
+    """
+    js = read("frontend/public/js/admin.js")
+    assert "var atlasAdminFocusDomain = null;" in js
+    assert "atlasAdminFocusDomain = focusDomain;" in js
+    assert "function focusDomain(domainKey)" in js
+
+    # 成功ハンドラの「分野の地図タブを開く」クリックが activateTabView("atlas") だけで
+    # 終わらないこと（focusDomain 呼び出しか、その未初期化フォールバックのタブクリックが続くこと）。
+    handler_idx = js.index("if (typeof activateTabView === \"function\") activateTabView(\"atlas\");")
+    tail = js[handler_idx:handler_idx + 600]
+    assert "atlasAdminFocusDomain(key)" in tail
+    assert '.admin-tab[data-tab="atlas"]' in tail
+
+
+def test_focus_domain_resets_and_reloads_cartridge_list():
+    """focusDomain は一覧を取り直し（cartridgesLoaded リセット）、対象キーを選択すること。"""
+    js = read("frontend/public/js/admin.js")
+    definition_idx = js.index("function focusDomain(domainKey)")
+    body = js[definition_idx:definition_idx + 600]
+    assert "pendingFocusKey = domainKey;" in body
+    assert "cartridgesLoaded = false;" in body
+    assert "loadCartridges();" in body
+    assert "loadAtlasCourses();" in body
+    assert "if (pendingFocusKey && keys[pendingFocusKey]) {" in js
+
+
+def test_binding_editor_warns_when_current_binding_missing_from_candidates():
+    """コードレビュー指摘2: 現行バインドが候補にない（廃止済み等）場合、無言で解除しない。
+
+    事実文で状態を明示し、保存しない限り現状維持であることを伝える。
+    「（バインドしない）」を選んで保存する場合のみ明示 confirm を挟む。
+    """
+    js = read("frontend/public/js/admin.js")
+    assert "var currentMissing = !!(currentKey && !byKey[currentKey]);" in js
+    assert "ab-current-missing-note" in js
+    assert "は候補にありません" in js
+    assert "は廃止済みのため、候補には表示されません" in js
+    assert "保存しない限り現在のバインドは維持されます" in js
+    assert "学習者の地図表示は変わりません" in js
+
+    # 解除 confirm は 0一致確認 (domainSelect.value && !anyBound) とは独立した分岐であること。
+    assert "if (currentMissing && !domainSelect.value) {" in js
+    assert "とトピックの対応をすべて解除します" in js
+
+
+def test_init_atlas_binding_threads_course_title_to_propose():
+    """コードレビュー指摘3: 学習マップ編集タブの propose もコース名/説明を prefill すること。"""
+    js = read("frontend/public/js/admin.js")
+    definition_idx = js.index("function initAtlasBinding()")
+    end_idx = js.index("\n  }\n", definition_idx)
+    body = js[definition_idx:end_idx]
+    assert "var courseMeta = {};" in body
+    assert "courseMeta[c.id] = { title: c.title || \"\", description: c.description || \"\" };" in body
+    assert "atlasBindingPropose(select.value, bodyEl, statusEl, null, {" in body
+    assert "courseTitle: meta.title" in body
+
+
 def test_existing_atlas_operations_ux_still_holds():
     """既存の状態起点 UX 回帰テストが引き続き成立する前提条件（壊していないことの粗い確認）。"""
     html = read("frontend/public/admin.html")

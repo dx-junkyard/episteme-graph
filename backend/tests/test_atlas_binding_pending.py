@@ -234,6 +234,8 @@ class TestSetPending:
         assert skeleton_db.courses["c1"]["data"]["atlas_binding_pending"] == "modified_gravity"
         events = [e for e in skeleton_db.review_events if e.get("entity_type") == "atlas_binding"]
         assert any(e.get("new_status") == "modified_gravity" for e in events)
+        # 監査 action は設計書 §4.2 の契約値 (entity_type で既にスコープ済みのため短命名)
+        assert any(_review_event_action(e) == "pending_set" for e in events)
 
     def test_new_domain_without_frozen_skeleton_is_allowed(self, client, teacher_headers, skeleton_db):
         """凍結骨格がまだ無い (これから generate する) 新分野の指定は許可される。"""
@@ -276,7 +278,7 @@ class TestClearPending:
         _seed_course(skeleton_db, data={"atlas_binding_pending": "modified_gravity", "topics": []})
         client.delete("/api/admin/courses/c1/atlas-binding/pending", headers=teacher_headers)
         events = [e for e in skeleton_db.review_events if e.get("entity_type") == "atlas_binding"]
-        assert any(_review_event_action(e) == "atlas_binding_pending_clear" for e in events)
+        assert any(_review_event_action(e) == "pending_clear" for e in events)
 
 
 @_skip_no_fastapi
@@ -321,6 +323,30 @@ class TestProposeNewFields:
         resp = client.post("/api/admin/courses/c1/atlas-binding/propose", headers=teacher_headers)
         assert resp.status_code == 200, resp.text
         assert resp.json()["atlas_binding_pending"] == ""
+
+    def test_current_retired_flag(self, client, teacher_headers, skeleton_db):
+        """現行バインド先が retired のとき current_retired=True を返す
+        (候補に現れないため、フロントが「維持される・解除は明示操作」を出す材料)。"""
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        _seed_frozen_domain(skeleton_db, "domain_b")
+        _seed_course(skeleton_db, data={"cartridge_id": "domain_b", "topics": []})
+        from core import atlas_store
+
+        atlas_store.retire_domain(skeleton_db, "domain_b", note="")
+        resp = client.post("/api/admin/courses/c1/atlas-binding/propose", headers=teacher_headers)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["current_cartridge_id"] == "domain_b"
+        assert data["current_retired"] is True
+        assert "domain_b" not in {p["domain_key"] for p in data["proposals"]}
+
+    def test_current_retired_false_for_active_binding(self, client, teacher_headers, skeleton_db):
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        _seed_course(skeleton_db, data={"cartridge_id": "domain_a", "topics": []})
+        resp = client.post("/api/admin/courses/c1/atlas-binding/propose", headers=teacher_headers)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["current_retired"] is False
 
 
 @_skip_no_fastapi

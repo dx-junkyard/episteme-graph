@@ -498,10 +498,12 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
 - **バインディングの該当なしUX + ドメインライフサイクル（migration 057）**: 正本は
   `docs/features/atlas_binding_lifecycle_design.md`（一致ゼロは正常な状態＝発見、AB1）。
   ①propose は retired ドメインを除外し `domains_checked` / `retired_skipped` /
-  `atlas_binding_pending` を返す。0一致時のフロント既定は「バインドしない」
-  （proposals[0] への fallback は廃止）で、出口3つ（手動対応 / 後回し=G層 To-Do /
-  コース起点の新分野作成）。topic 対応 0 件のまま cartridge_id を保存する時はフロントで
-  事実文 confirm（明示バインドのゲート免除自体は維持）。②新分野作成は
+  `atlas_binding_pending` / `current_retired` を返す。0一致時のフロント既定は
+  「バインドしない」（proposals[0] への fallback は廃止）で、出口3つ（手動対応 /
+  後回し=G層 To-Do / コース起点の新分野作成）。topic 対応 0 件のまま cartridge_id を
+  保存する時と、候補に無い現行バインド（retired）を空選択で解除する時は、フロントで
+  事実文 confirm（明示バインドのゲート免除自体は維持。retired な現行バインドは
+  保存しない限り維持される — 設計書 §2.5）。②新分野作成は
   `PUT .../atlas-binding/pending`（`course_data.atlas_binding_pending`。読みは
   `course_data.course_atlas_binding_pending`）→ 既存 generate（body.domain）の順。
   バインド保存（解除含む）で pending は自動クリア。③ドメインは

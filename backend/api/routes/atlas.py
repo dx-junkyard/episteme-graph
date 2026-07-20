@@ -989,9 +989,13 @@ def propose_course_atlas_binding(
     recommended = ""
     if proposals and proposals[0]["matched"] > 0:
         recommended = proposals[0]["domain_key"]
+    current_key = course_cartridge_id(course_data)
     return {
         "course_id": course_id,
-        "current_cartridge_id": course_cartridge_id(course_data),
+        "current_cartridge_id": current_key,
+        # 現行バインド先が retired のとき候補 (proposals) に現れないため、フロントが
+        # 「維持される・解除は明示操作」の事実文を出せるよう真偽を明示する。
+        "current_retired": bool(current_key and current_key in retired_keys),
         "recommended": recommended,
         "proposals": proposals,
         "domains_checked": domains_checked,
@@ -1159,7 +1163,7 @@ def set_course_atlas_binding_pending(
         old_pending,
         domain_key,
         current_user.get("id"),
-        {"action": "atlas_binding_pending_set", "domain_key": domain_key},
+        {"action": "pending_set", "domain_key": domain_key},
         entity_type=AUDIT_ENTITY_ATLAS_BINDING,
     )
     return {"course_id": course_id, "atlas_binding_pending": domain_key}
@@ -1200,7 +1204,7 @@ def clear_course_atlas_binding_pending(
         old_pending,
         "",
         current_user.get("id"),
-        {"action": "atlas_binding_pending_clear"},
+        {"action": "pending_clear"},
         entity_type=AUDIT_ENTITY_ATLAS_BINDING,
     )
     return {"course_id": course_id, "atlas_binding_pending": ""}

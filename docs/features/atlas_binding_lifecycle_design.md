@@ -97,6 +97,24 @@ cartridge_id を保存しようとしたときのみ**、フロントで確認�
 
 サーバ側は挙動不変（確認はクライアントの責務。UI 非経由の API 呼び出しは教員の明示意思とみなす）。
 
+### 2.5 現行バインド先が候補に無い場合（retired 等）の維持と明示解除
+
+現行バインド先（`current_cartridge_id`）が retired のとき、propose の候補（proposals）には
+現れない（§3.1）。このとき編集 UI が候補から option を構築すると選択が空（バインドしない）へ
+落ち、そのまま保存すると**既存バインドと topic 対応が無言で解除される** — これは AB3
+（既存バインド済みコースの表示維持）の趣旨に反する。次のように扱う:
+
+- propose レスポンスの `current_retired`（§4.1）を材料に、編集 UI は事実文の注記を出す:
+  「現在バインドされている分野『X』は廃止済みのため、候補には表示されません。保存しない限り
+  現在のバインドは維持されます（学習者の地図表示は変わりません）。解除するには
+  『（バインドしない）』を選んで保存してください。」
+- 現行バインドが候補に無い状態で選択が空のまま保存するときは、フロントで確認を挟む
+  （解除を明示操作にする）: 「現在のバインド（分野『X』）とトピックの対応をすべて解除します。
+  よろしいですか？」
+- retired な現行バインドの**維持**は「保存しない」ことで実現する（retired ドメインを
+  cartridge_id に再保存することはサーバが 422 で拒否するため、維持＝無変更が唯一の経路。
+  学習者表示は §3.1 のとおり不変）。
+
 ## 3. ドメインライフサイクル
 
 ```
@@ -117,7 +135,10 @@ cartridge_id を保存しようとしたときのみ**、フロントで確認�
   - binding propose の照合対象・候補から除外（`retired_skipped` で正直に件数を返す）。
   - `PUT atlas-binding` / `PUT atlas-binding/pending` で retired ドメインを指定したら 422。
   - generate / draft 保存 / freeze は 409（読み取り専用。L層 retired の先例に一致）。
-    draft の削除は許可（後始末）。restore で active に戻してから編集する。
+    restore で active に戻してから編集する。retire 時点で残っていた draft は**そのまま保持**
+    される（AB3。学習者に見えず propose も読まない不活性データであり、restore 後に再び
+    編集・凍結できる）。draft 単体の削除 API は設けない（削除 API を作らない方針と整合。
+    draft の消滅経路は従来どおり freeze 成功時の後始末のみ）。
   - **学習者表示は不変**: `load_learner_skeleton` は lifecycle を見ない。バインド済みコースの
     地図・ミニマップは表示され続ける（AB3）。
 - 削除 API は作らない。
@@ -167,7 +188,8 @@ impact 要約を含める。
 {
   "domains_checked": 4,          // retired 除外後に照合した凍結骨格ドメイン数
   "retired_skipped": 1,          // retired のため照合しなかったドメイン数（正直さ）
-  "atlas_binding_pending": ""    // course_data.atlas_binding_pending（無ければ空）
+  "atlas_binding_pending": "",   // course_data.atlas_binding_pending（無ければ空）
+  "current_retired": false       // 現行バインド先が retired か（§2.5 の注記・明示解除の材料）
 }
 ```
 
