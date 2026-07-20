@@ -104,6 +104,7 @@ PDF アップロード
 - [デプロイ構成](architecture/deployment.md) — Docker Compose 構成、環境変数、ネットワーク設計
 - [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧（init → 053）
 - [レイヤー索引表](architecture/layer_registry.md) — A〜W層・横断ユーティリティ層・状態通知基盤の正本設計書/実装場所/migration対応一覧（migration 帰属一覧 init〜053 付き）
+- [対ユーザー支援エージェント調査](architecture/user_assistant_agents_survey_2026-07.md) — チャット型4者/単発型/非対話型の全列挙と機構比較、共通化・分離の指針、不足機能（コスト上限・履歴・権限の穴）
 - [新機能 PR チェックリスト](development_checklist.md) — Copilot capability/KB/G層ルールの追随、docs 3点セット更新、2機能境界の回帰テスト、アンカー整合
 
 ### バックエンド

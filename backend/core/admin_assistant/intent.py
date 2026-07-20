@@ -177,6 +177,42 @@ def heuristic_classify(
     return IntentResult(intent=intent, answer="", capability_id=cap_id, source="heuristic")
 
 
+# 会話履歴を LLM に渡すときの上限（トークン量を抑え、P6 の 1 コール設計を維持する）。
+_HISTORY_MAX_TURNS = 8
+_HISTORY_MAX_CHARS = 500
+
+
+def _normalize_history(history: Optional[list], current_message: str) -> list:
+    """フロントが送る ``[{role, content}]`` を LLM messages 用に整形する。
+
+    - role は user/assistant のみ許可（未知 role・非 dict はスキップ）。
+    - content は文字列化し `_HISTORY_MAX_CHARS` でトリム、空要素は落とす。
+    - フロントは送信直前に現在発話を history へ push するため、末尾が現在発話と
+      重複する。その場合は末尾を1件除去する（ctx_lines の「ユーザー発話」と二重に
+      ならないように）。
+    - 直近 `_HISTORY_MAX_TURNS` 件に絞る。
+    """
+    out: list = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        role = item.get("role")
+        if role not in ("user", "assistant"):
+            continue
+        content = item.get("content")
+        if not isinstance(content, str):
+            content = "" if content is None else str(content)
+        content = content.strip()
+        if not content:
+            continue
+        out.append({"role": role, "content": content[:_HISTORY_MAX_CHARS]})
+
+    cur = (current_message or "").strip()[:_HISTORY_MAX_CHARS]
+    if cur and out and out[-1]["role"] == "user" and out[-1]["content"] == cur:
+        out.pop()
+    return out[-_HISTORY_MAX_TURNS:]
+
+
 def _refine_with_llm(
     message: str,
     history: list,
@@ -198,7 +234,9 @@ def _refine_with_llm(
         "intent: guidance(操作の説明) / locate(どこで操作するかの道案内) / action(操作の代行) / "
         "clarify(聞き返し) / status_query(教材・コースの処理状態の照会)。\n"
         "capability_id は必ず与えられた許可リストの id から選ぶ（無ければ空文字）。"
-        "リストに無い操作を発明しない。断定しない。"
+        "リストに無い操作を発明しない。断定しない。\n"
+        "直前までの会話が与えられる場合は、指示語や省略された対象"
+        "（例:「それを公開して」の「それ」）の解決に使う。最新のユーザー発話が最も重要。"
     )
     ctx_lines = [
         f"現在のタブ: {(screen_context or {}).get('tab', '')}",
@@ -206,10 +244,9 @@ def _refine_with_llm(
         "許可された操作カタログ(JSON): " + _compact_json(allowed_json),
         f"ユーザー発話: {message}",
     ]
-    messages = [
-        {"role": "system", "content": sys_prompt},
-        {"role": "user", "content": "\n".join(ctx_lines)},
-    ]
+    messages = [{"role": "system", "content": sys_prompt}]
+    messages.extend(_normalize_history(history, message))
+    messages.append({"role": "user", "content": "\n".join(ctx_lines)})
     try:
         parsed: LLMIntentResponse = generate_text_with_structured_output(
             messages, LLMIntentResponse, model=model or None
@@ -244,6 +281,8 @@ def classify(
     """intent 分類のエントリポイント。
 
     ヒューリスティックを基準に、`allow_llm` なら LLM で精緻化する（P6: 失敗は縮退）。
+    `allow_llm` のとき、直前までの会話履歴（`history`）と画面コンテキスト
+    （`screen_context`）を唯一の LLM コールに渡し、指示語・省略された対象の解決に使う。
     権限（role）による最終判定は route 側で行う。
     """
     base = heuristic_classify(message, role, screen_context)

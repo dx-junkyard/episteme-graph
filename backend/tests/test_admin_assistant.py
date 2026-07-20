@@ -328,6 +328,120 @@ class TestIntentHeuristic:
 
 
 # ===========================================================================
+# Group A-3b: 会話履歴の整形 + LLM プロンプトへの反映
+# ===========================================================================
+
+
+class TestNormalizeHistory:
+    """_normalize_history: 会話履歴の整形（重複除去・role フィルタ・上限）。"""
+
+    def test_drops_trailing_duplicate_current_message(self):
+        """フロントは送信前に現在発話を history へ push するため、末尾の重複を除く。"""
+        hist = [
+            {"role": "user", "content": "コースを作りたい"},
+            {"role": "assistant", "content": "コースビルダーを開きます"},
+            {"role": "user", "content": "それを公開して"},
+        ]
+        out = intent_mod._normalize_history(hist, "それを公開して")
+        assert out == [
+            {"role": "user", "content": "コースを作りたい"},
+            {"role": "assistant", "content": "コースビルダーを開きます"},
+        ]
+
+    def test_filters_unknown_roles_and_empty(self):
+        hist = [
+            {"role": "system", "content": "無視される"},
+            {"role": "user", "content": "   "},
+            {"role": "user", "content": "有効"},
+            {"content": "role なし"},
+            "not a dict",
+        ]
+        out = intent_mod._normalize_history(hist, "現在の発話")
+        assert out == [{"role": "user", "content": "有効"}]
+
+    def test_caps_turn_count(self):
+        hist = [{"role": "user", "content": "m%d" % i} for i in range(20)]
+        out = intent_mod._normalize_history(hist, "現在")
+        assert len(out) == intent_mod._HISTORY_MAX_TURNS
+
+    def test_trims_long_content(self):
+        out = intent_mod._normalize_history(
+            [{"role": "assistant", "content": "あ" * 1000}], "x"
+        )
+        assert len(out) == 1
+        assert len(out[0]["content"]) == intent_mod._HISTORY_MAX_CHARS
+
+    def test_empty_or_none_history(self):
+        assert intent_mod._normalize_history([], "x") == []
+        assert intent_mod._normalize_history(None, "x") == []
+
+
+class TestIntentHistoryInPrompt:
+    """classify(allow_llm=True) が会話履歴を唯一の LLM コールの messages に含めること。
+
+    デッドパラメータ化していた `history` の回帰防止（指示語解決のため）。
+    """
+
+    def test_history_reaches_llm_messages(self, monkeypatch):
+        from core.admin_assistant.schema import LLMIntentResponse
+        import core.llm as llm_mod
+
+        captured = {}
+
+        def fake_generate(messages, schema, model=None):
+            captured["messages"] = messages
+            return LLMIntentResponse(
+                intent=INTENT_ACTION, capability_id="course.publish", answer=""
+            )
+
+        monkeypatch.setattr(llm_mod, "generate_text_with_structured_output", fake_generate)
+
+        hist = [
+            {"role": "user", "content": "このコースを学生に見せたい"},
+            {"role": "assistant", "content": "course.publish で公開できます"},
+            {"role": "user", "content": "それをやって"},
+        ]
+        r = intent_mod.classify(
+            "それをやって",
+            "TEACHER",
+            history=hist,
+            screen_context={"tab": "course-management", "selection": {"course_id": "c1"}},
+            allow_llm=True,
+        )
+
+        msgs = captured["messages"]
+        assert msgs[0]["role"] == "system"
+        # 直前の会話（ユーザー発話・アシスタント応答の両方）が渡っている
+        joined = " ".join(m["content"] for m in msgs)
+        assert "このコースを学生に見せたい" in joined
+        assert "course.publish で公開できます" in joined
+        # 末尾は ctx ブロック（現在発話 + 操作カタログ）
+        assert "ユーザー発話: それをやって" in msgs[-1]["content"]
+        # 現在発話は history 側で二重に現れない（重複除去）
+        assert {"role": "user", "content": "それをやって"} not in msgs
+        assert r.source == "llm"
+
+    def test_no_history_still_works(self, monkeypatch):
+        """history 未指定でも従来どおり system + ctx の2要素で成立する。"""
+        from core.admin_assistant.schema import LLMIntentResponse
+        import core.llm as llm_mod
+
+        captured = {}
+
+        def fake_generate(messages, schema, model=None):
+            captured["messages"] = messages
+            return LLMIntentResponse(intent=INTENT_GUIDANCE, capability_id="", answer="")
+
+        monkeypatch.setattr(llm_mod, "generate_text_with_structured_output", fake_generate)
+
+        intent_mod.classify("何ができますか", "TEACHER", allow_llm=True)
+        msgs = captured["messages"]
+        assert len(msgs) == 2
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+
+
+# ===========================================================================
 # Group A-4: Action handler の純粋ロジック
 # ===========================================================================
 
