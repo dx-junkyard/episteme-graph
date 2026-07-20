@@ -92,6 +92,10 @@ class AtlasSkeletonTableFake:
 
     # -- SQL ディスパッチ --
     def _dispatch(self, sql: str, p: dict) -> FakeResult:  # noqa: C901
+        if "pg_advisory_xact_lock" in sql:
+            # atlas_store.lock_domain_for_write (domain 単位の書き込み直列化)。
+            # 単一プロセスのテストでは no-op。取得記録は self.calls で検証できる。
+            return FakeResult([(True,)])
         if "atlas_domain_meta" in sql:
             return self._dispatch_domain_meta(sql, p)
         if "atlas_skeletons" in sql:

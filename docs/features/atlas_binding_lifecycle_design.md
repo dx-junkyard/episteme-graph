@@ -135,10 +135,16 @@ cartridge_id を保存しようとしたときのみ**、フロントで確認�
   - binding propose の照合対象・候補から除外（`retired_skipped` で正直に件数を返す）。
   - `PUT atlas-binding` / `PUT atlas-binding/pending` で retired ドメインを指定したら 422。
   - generate / draft 保存 / freeze は 409（読み取り専用。L層 retired の先例に一致）。
-    restore で active に戻してから編集する。retire 時点で残っていた draft は**そのまま保持**
-    される（AB3。学習者に見えず propose も読まない不活性データであり、restore 後に再び
-    編集・凍結できる）。draft 単体の削除 API は設けない（削除 API を作らない方針と整合。
-    draft の消滅経路は従来どおり freeze 成功時の後始末のみ）。
+    restore で active に戻してから編集する。**draft の破棄（削除）のみ retired 中も許可**
+    — `DELETE /api/admin/cartridges/{id}/atlas/skeleton/draft`（§4.3）が後始末の明示経路。
+    draft は共有物・履歴ではなく作業コピーのため、AB3「削除しない」（凍結版履歴・ドメイン
+    自体が対象）の対象外。凍結版履歴・学習者表示には一切影響しない。
+- **lifecycle 判定と書き込みの直列化**: retire / restore と書き込み系（generate / draft 保存 /
+  freeze / draft 破棄）は check-then-write のため、domain 単位の
+  `pg_advisory_xact_lock`（`atlas_store.lock_domain_for_write`）で直列化する。
+  セッションを跨ぐ generate（LLM 生成を挟む）と freeze（報告処理を挟む）は、
+  **書き込みトランザクション内で lifecycle を再確認**し、間に retire されていたら
+  409 を返して何も書かない（draft は rollback で保持、P4）。
   - **学習者表示は不変**: `load_learner_skeleton` は lifecycle を見ない。バインド済みコースの
     地図・ミニマップは表示され続ける（AB3）。
 - 削除 API は作らない。
@@ -217,6 +223,11 @@ retired ドメインは `proposals` に含めない。`recommended` ロジック
 - `GET /api/admin/atlas/domains`（既存）の各要素に `lifecycle` を追加（既定 'active'）。
 - generate / draft 保存 / freeze は retired ドメインで 409
   （detail に「廃止済みです。復帰してから編集してください」相当の事実文）。
+- `DELETE /api/admin/cartridges/{cartridge_id}/atlas/skeleton/draft`（新設・後始末）
+  - draft を破棄する。**retired ドメインでも許可**（retire 後に残った draft の唯一の
+    後始末経路）。draft が無ければ 404。監査: `entity_type='atlas_skeleton'`
+    action=`draft_discard`。通知なし。UI は「下書きを破棄」（事実文 confirm 付き。
+    retired 中も有効）。
 
 ### 4.4 freeze-impact（新設）
 

@@ -292,6 +292,15 @@ def generate_atlas_skeleton(
 
     session = _skeleton_session()
     try:
+        # LLM 生成の間に別教員が retire している可能性がある (check-then-write の窓)。
+        # domain 単位ロックで retire/restore と直列化したうえで、書き込みと同一
+        # トランザクション内で lifecycle を再確認する。
+        atlas_store.lock_domain_for_write(session, cartridge_id)
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は生成中に廃止されました。復帰してから再生成してください",
+            )
         revision = atlas_store.save_draft(
             session,
             cartridge_id,
@@ -349,6 +358,8 @@ def save_atlas_skeleton_draft(
 
     session = _skeleton_session()
     try:
+        # lifecycle 確認と draft 書き込みを retire/restore と直列化する (同一トランザクション)。
+        atlas_store.lock_domain_for_write(session, cartridge_id)
         if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
             raise HTTPException(
                 status_code=409,
@@ -417,6 +428,45 @@ def save_atlas_skeleton_draft(
     if payload is not None:
         payload["revision"] = revision
     return {"cartridge_id": cartridge_id, "draft": payload}
+
+
+@router.delete("/{cartridge_id}/atlas/skeleton/draft")
+def discard_atlas_skeleton_draft(
+    cartridge_id: str, current_user: dict = Depends(_require_teacher)
+) -> dict:
+    """draft を破棄する (後始末。§3.1)。
+
+    draft は共有物・履歴ではなく作業コピーのため、AB3 (削除しない) の対象外。
+    **retired ドメインでも許可する** — retire 後に残った draft を後始末する唯一の経路
+    (generate / draft 保存 / freeze は retired で 409 のため)。凍結版履歴・学習者表示には
+    一切影響しない。
+    """
+    _ensure_domain_exists(cartridge_id)
+    session = _skeleton_session()
+    try:
+        atlas_store.lock_domain_for_write(session, cartridge_id)
+        existing = atlas_store.load_draft(session, cartridge_id)
+        if existing is None:
+            raise HTTPException(status_code=404, detail="破棄する draft がありません")
+        atlas_store.delete_draft(session, cartridge_id)
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        cartridge_id,
+        atlas.STATUS_DRAFT,
+        "",
+        current_user.get("id"),
+        {"action": "draft_discard"},
+    )
+    return {"cartridge_id": cartridge_id, "discarded": True}
 
 
 @router.post("/{cartridge_id}/atlas/skeleton/freeze")
@@ -488,6 +538,14 @@ def freeze_atlas_skeleton(
     # DB へ凍結版を追加し draft を消す (migration 027: DB が正本。ファイルは書かない)
     session = _skeleton_session()
     try:
+        # 入口の lifecycle 確認からここまでの間に retire され得る (check-then-write の窓)。
+        # domain 単位ロックで直列化し、書き込みと同一トランザクション内で再確認する。
+        atlas_store.lock_domain_for_write(session, cartridge_id)
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は凍結処理中に廃止されました。復帰してから凍結してください",
+            )
         atlas_store.insert_frozen(
             session,
             cartridge_id,
@@ -496,6 +554,11 @@ def freeze_atlas_skeleton(
         )
         atlas_store.delete_draft(session, cartridge_id)
         session.commit()
+    except HTTPException:
+        session.rollback()
+        if report_session is not None:
+            report_session.close()
+        raise
     except Exception as exc:  # noqa: BLE001
         session.rollback()
         if report_session is not None:
@@ -634,6 +697,8 @@ def retire_atlas_domain(
 
     session = _skeleton_session()
     try:
+        # 書き込み系 (generate/draft保存/freeze) と直列化する (check-then-write 競合の防止)。
+        atlas_store.lock_domain_for_write(session, cartridge_id)
         if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
             raise HTTPException(status_code=409, detail="この分野は既に廃止済みです")
         atlas_store.retire_domain(
@@ -692,6 +757,8 @@ def restore_atlas_domain(
 
     session = _skeleton_session()
     try:
+        # 書き込み系 (generate/draft保存/freeze) と直列化する (check-then-write 競合の防止)。
+        atlas_store.lock_domain_for_write(session, cartridge_id)
         if atlas_store.domain_lifecycle(session, cartridge_id) != "retired":
             raise HTTPException(status_code=409, detail="この分野は廃止されていません")
         atlas_store.restore_domain(

@@ -2201,7 +2201,8 @@ def list_teacher_courses(
                        END AS role,
                        lc.data,
                        COALESCE(lc.visibility, 'private') AS visibility,
-                       lc.group_id
+                       lc.group_id,
+                       COALESCE(lc.description, '') AS description
                 FROM learning_courses lc
                 WHERE lc.user_id = CAST(:user_id AS uuid)
                    OR EXISTS (
@@ -2241,6 +2242,10 @@ def list_teacher_courses(
             # G1-1/G5-2: 公開状態・開示範囲を管理画面のコース管理テーブルで確認できるようにする。
             "visibility": (r[8] if len(r) > 8 else None) or "private",
             "group_id": str(r[9]) if len(r) > 9 and r[9] else None,
+            # 学習マップ編集の「このコースから新しい分野マップを作る」prefill 用 (§2.3)。
+            # description 列が空なら course_data 側の description に縮退する。
+            "description": (str(r[10]) if len(r) > 10 and r[10] else "")
+            or str(data.get("description") or ""),
         })
     return result
 

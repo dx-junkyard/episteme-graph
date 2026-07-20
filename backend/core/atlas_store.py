@@ -404,6 +404,22 @@ def save_domain_meta(session, domain_key: str, meta: dict, *, user_id: str | Non
 # ---------------------------------------------------------------------------
 
 
+def lock_domain_for_write(session, domain_key: str) -> None:
+    """domain 単位の書き込み直列化 (トランザクションスコープの advisory lock)。
+
+    retire / restore と draft・凍結版の書き込みは check-then-write のため、
+    素朴に並行すると「active 確認 → (別教員が retire) → retired ドメインへ書き込み」の
+    競合が起きる (特に generate は LLM 生成を挟むため窓が大きい)。lifecycle の確認より
+    前に本ロックを取得することで、同一 domain の状態遷移と書き込みを直列化する。
+    ロックはトランザクション終了 (commit / rollback) で自動解放される。
+    seed の 57 は本ライフサイクルを導入した migration 番号 (名前空間の衝突回避)。
+    """
+    session.execute(
+        sa_text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 57))"),
+        {"key": f"atlas_domain:{domain_key}"},
+    )
+
+
 def save_draft(
     session,
     domain_key: str,

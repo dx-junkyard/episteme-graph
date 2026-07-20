@@ -510,7 +510,11 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
   `atlas_domain_meta.lifecycle`（active/retired）で `POST .../atlas/retire|restore`。
   retired は propose 候補から除外・generate/draft保存/freeze は 409（読み取り専用、
   L層 retired と同型）・**学習者表示は不変**（バインド済みコースの地図は出続ける）。
-  削除 API なし。④凍結前に `GET .../atlas/freeze-impact`（draft と現行凍結版の突合 +
+  ドメイン削除 API なし。draft の破棄 `DELETE .../atlas/skeleton/draft` のみ retired 中も
+  許可（後始末。draft は作業コピーで AB3 の対象外）。retire/restore と書き込み系は
+  domain 単位 advisory lock（`atlas_store.lock_domain_for_write`）で直列化し、
+  generate/freeze は書き込みトランザクション内で lifecycle を再確認する（check-then-write
+  競合の防止）。④凍結前に `GET .../atlas/freeze-impact`（draft と現行凍結版の突合 +
   バインド中コースの topic 影響、`core/atlas_lifecycle.compute_freeze_impact`）を
   フロントが事実文 confirm で提示し、freeze レスポンスにも `impact` 同梱。⑤freeze /
   retire は cross_layer_notify（kind=`atlas_skeleton_frozen` / `atlas_domain_retired`、

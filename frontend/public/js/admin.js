@@ -4572,8 +4572,51 @@
         .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); throw err; });
     }
 
-    document.getElementById("atlas-save-draft").addEventListener("click", function () {
+    var saveDraftBtnEl = document.getElementById("atlas-save-draft");
+    saveDraftBtnEl.addEventListener("click", function () {
       saveDraft().catch(function () {});
+    });
+
+    // 下書きを破棄（レビュー2回目 修正1）: draft は作業コピーなので、retired（廃止済み）
+    // ドメインでも破棄は許可する（後始末の手段）。admin.html には触れず JS 側で
+    // 「次版を保存」ボタンの隣に生成する。draft が無いときは atlas-draft-area 自体が
+    // display:none になるため、この場所に置けば自然に非表示になる。
+    var discardDraftBtn = document.createElement("button");
+    discardDraftBtn.type = "button";
+    discardDraftBtn.id = "atlas-discard-draft";
+    discardDraftBtn.className = "admin-action-btn";
+    discardDraftBtn.textContent = "下書きを破棄";
+    saveDraftBtnEl.parentNode.insertBefore(discardDraftBtn, saveDraftBtnEl.nextSibling);
+    discardDraftBtn.addEventListener("click", function () {
+      if (!select.value) return;
+      if (!confirm("現在の下書きを破棄します。凍結済みの版と学習者の表示には影響しません。よろしいですか？")) return;
+      var key = select.value;
+      discardDraftBtn.disabled = true;
+      apiFetch("/admin/cartridges/" + encodeURIComponent(key) + "/atlas/skeleton/draft", { method: "DELETE" })
+        .then(function (res) {
+          if (res.status === 404) {
+            discardDraftBtn.disabled = false;
+            setStatus("破棄する下書きがありません", true);
+            return null;
+          }
+          return res.json().then(function (body) {
+            if (!res.ok) {
+              var detail = body.detail;
+              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+            }
+            return body;
+          });
+        })
+        .then(function (body) {
+          discardDraftBtn.disabled = false;
+          if (!body) return;
+          setStatus("下書きを破棄しました");
+          loadState();
+        })
+        .catch(function (err) {
+          discardDraftBtn.disabled = false;
+          setStatus("破棄に失敗しました: " + err.message, true);
+        });
     });
 
     // AIアシスト提案の適用: 提案後の骨格 dict を editor へ反映し、保存フローに乗せる
@@ -5060,7 +5103,15 @@
           (courses || []).forEach(function (c) {
             var opt = document.createElement("option");
             opt.value = c.id;
-            opt.textContent = c.title + " (" + c.id + ")";
+            var label = c.title + " (" + c.id + ")";
+            // atlas-binding の propose/save/pending は所有者または SYSTEM_ADMIN のみ許可
+            // （バックエンド側ゲート）。viewer/editor のコースは選んでも 403 になるため、
+            // 選択肢の時点で操作不可を明示する（SYSTEM_ADMIN は全コース操作可なので除外しない）。
+            if (c.role !== "owner" && state.role !== "SYSTEM_ADMIN") {
+              opt.disabled = true;
+              label += "（所有者のみ操作できます）";
+            }
+            opt.textContent = label;
             select.appendChild(opt);
             courseMeta[c.id] = { title: c.title || "", description: c.description || "" };
           });

@@ -206,3 +206,44 @@ def test_existing_atlas_operations_ux_still_holds():
     assert 'id="atlas-overview"' in html
     assert 'id="atlas-overview-action"' in js
     assert "atlas:binding-saved" in js
+
+
+def test_discard_draft_button_present_and_calls_delete_endpoint():
+    """コードレビュー2回目 修正1: 下書きを破棄ボタン（draft 破棄 API の UI）。
+
+    admin.html には触れず JS 側で「次版を保存」ボタンの隣に生成すること。
+    draft は作業コピーであり retired ドメインでも破棄は許可する（後始末）。
+    """
+    js = read("frontend/public/js/admin.js")
+    assert 'discardDraftBtn.id = "atlas-discard-draft"' in js
+    assert "document.createElement(\"button\")" in js
+    assert "saveDraftBtnEl.parentNode.insertBefore(discardDraftBtn, saveDraftBtnEl.nextSibling)" in js
+    assert '"/atlas/skeleton/draft", { method: "DELETE" }' in js
+    assert "現在の下書きを破棄します。凍結済みの版と学習者の表示には影響しません。よろしいですか？" in js
+    assert "破棄する下書きがありません" in js
+    assert "下書きを破棄しました" in js
+
+
+def test_discard_draft_button_not_disabled_by_retired_lifecycle():
+    """下書き破棄は retired 中も有効のまま（updateLifecycleUI の無効化対象に含めない）。"""
+    js = read("frontend/public/js/admin.js")
+    definition_idx = js.index("function updateLifecycleUI()")
+    end_idx = js.index("\n    }\n", definition_idx)
+    body = js[definition_idx:end_idx]
+    assert "atlas-discard-draft" not in body
+    assert "discardDraftBtn" not in body
+
+
+def test_atlas_binding_course_select_disables_non_owner_options():
+    """コードレビュー2回目 修正2: 学習マップ編集のコース選択で所有者以外を操作不可にする。
+
+    atlas-binding API（propose/save/pending）は所有者または SYSTEM_ADMIN のみ許可のため、
+    viewer/editor のコースは選択肢の時点で disabled にし、理由を表示する。
+    """
+    js = read("frontend/public/js/admin.js")
+    definition_idx = js.index("function initAtlasBinding()")
+    end_idx = js.index("\n  }\n", definition_idx)
+    body = js[definition_idx:end_idx]
+    assert 'c.role !== "owner" && state.role !== "SYSTEM_ADMIN"' in body
+    assert "opt.disabled = true;" in body
+    assert "（所有者のみ操作できます）" in body
