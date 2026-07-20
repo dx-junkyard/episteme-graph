@@ -161,6 +161,7 @@
 
 ## 4. 関連
 
+- 抽出単位で貫いた説明（ブロック → チャンク / エビデンス → atomic claim → 理論部品）: [論文の抽出単位](extraction-units.md)
 - ドメイン語彙の注入: [カートリッジシステム](cartridges.md)
 - 理論操作グラフの内部構造: [DSL と理論操作グラフ](theory-graph.md)
 - パイプライン全体の流れ: [パイプライン概要](overview.md)

@@ -113,6 +113,7 @@ PDF アップロード
 
 ### PDF 解析パイプライン
 - [パイプライン概要](pipeline/overview.md) — PDF → ナレッジグラフの全 26 ステージ
+- [論文の抽出単位](pipeline/extraction-units.md) — ブロック → チャンク／エビデンス → atomic claim → 理論部品、という「単位」で貫いた説明
 - [PDF 解析 Agent 詳細](pipeline/agents.md) — 各 Agent の役割・入出力・LLM/決定論の区別
 - [カートリッジシステム](pipeline/cartridges.md) — ドメイン固有語彙・検証ルールの注入
 - [DSL と理論操作グラフ](pipeline/theory-graph.md) — SMILES 風 DSL、TheoryOperationGraph、ソースバッキング

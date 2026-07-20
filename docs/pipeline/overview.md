@@ -8,6 +8,7 @@
 - オーケストレータ: `backend/core/document_pipeline/orchestrator.py` の `run_document_pipeline()`
 - 各 Agent 実装: `src/episteme_graph/agents/<agent_name>/`
 - 各 Agent の詳細: [PDF 解析 Agent 詳細](agents.md)
+- 「論文をどの単位で切り出しているか」を縦串で読むなら: [論文の抽出単位](extraction-units.md)
 
 ---
 
@@ -84,10 +85,14 @@ PDF
                                                        CourseMapping ─▶ Blueprint ─▶ ExportValidation
 ```
 
+> この図は**実行順ではなくデータ依存関係**を示す（矢印は「どの成果物に依存するか」）。実際の実行順は §2 のステージ表が正。特に `evidence_registry` はステージ 11 で、`claim_qualification`（9）・`equation_semantics`（10）の**後**に走り、それらの採択スパン・式に絞って逐語根拠を張る（`_build_evidence_registry` は `structure` に加え `qualified` と `equations` を入力に取る）。
+
 責務分担の要点:
 - **Claim の atomic 化は ClaimQualificationAgent（LLM）が担当**。ClaimObjectBuilder は候補を変換・リンク・検証するだけ（atomic rewrite はしない）。非 atomic / split_pending は `review_required` で保持。
 - **Evidence は PDF 原文由来のみ**を EvidenceRegistry が一元管理。各 claim/equation は `source_evidence_ids` で参照する。
 - **理論操作グラフ（ComponentGraph）**は導出チェーンから決定論的に構築し、ソースバッキング状態とレビュー理由を必ず付与する。詳細 → [DSL と理論操作グラフ](theory-graph.md)。
+
+> 上表の各出力を「論文の抽出単位（ブロック → チャンク / エビデンス → span → atomic claim → 理論部品）」という縦串で読み直すなら → [論文の抽出単位](extraction-units.md)。
 
 ---
 
