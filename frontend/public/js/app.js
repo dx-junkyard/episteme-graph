@@ -4375,6 +4375,61 @@
     });
   }
 
+  // ── component/claim 引用チップ + 文脈ポップオーバー（component 根拠カード再設計）────
+  // 設計書: docs/features/component_evidence_redesign.md。component/claim は本文を壊す
+  // ブロックカードをやめ、内容を持たないインラインチップにする（それ自体が内容を持つ
+  // equation/figure/source はブロックカードのまま維持する）。
+  var MATERIAL_EVIDENCE_KIND_LABELS = {
+    component: "論理要素",
+    claim: "主張",
+    equation: "数式",
+    figure: "図",
+    source: "出典",
+  };
+
+  // supports.equations[].role（component_assembly 由来）の日本語バッジ。
+  var MATERIAL_EVIDENCE_EQUATION_ROLE_LABELS = {
+    input: "入力",
+    intermediate: "中間",
+    output: "出力",
+    constraint: "制約",
+    definition: "定義",
+    linked: "関連",
+  };
+
+  // L層 LibraryEntry.standardization_status の日本語ラベル（Phase 2「共通部品として」面）。
+  var MATERIAL_LIBRARY_STATUS_LABELS = {
+    standard: "標準",
+    field_standard: "分野標準",
+    emerging_common: "共通化進行中",
+    novel: "新規",
+    unknown: "未判定",
+  };
+
+  // チップ ref（"kind:id"）→ { item, resolver } のレジストリ。renderMaterialChunk は
+  // 教材区画・出典ポップアップ・ボイスパネル・レクチャースライドの複数箇所から呼ばれるため、
+  // クリック配線は document への委譲リスナー1本（initMaterialEvidenceChipDelegation）にし、
+  // ここに登録された最新の item/resolver を都度引く。
+  var materialEvidenceChipItems = {};
+
+  function registerMaterialEvidenceChipEntry(ref, item, resolver) {
+    materialEvidenceChipItems[ref] = { item: item, resolver: resolver || null };
+  }
+
+  var _materialEvidenceChipDelegationWired = false;
+  function initMaterialEvidenceChipDelegation() {
+    if (_materialEvidenceChipDelegationWired) return;
+    _materialEvidenceChipDelegationWired = true;
+    document.addEventListener("click", function (e) {
+      var chip = e.target && e.target.closest ? e.target.closest(".ls-material-evidence-chip") : null;
+      if (!chip) return;
+      var ref = chip.getAttribute("data-evidence-ref") || "";
+      var entry = materialEvidenceChipItems[ref];
+      if (!entry || !entry.item) return;
+      openEvidenceChipPopover(chip, entry);
+    });
+  }
+
   // ── Material chunk renderer（教材スタジオプレビュー互換・レクチャースライドでも再利用）───
   function renderMaterialChunk(chunk) {
     var rawText = chunk.text || "";
@@ -4419,6 +4474,25 @@
     function lookupEvidenceItem(kind, normId) {
       return evidenceByRef[kind + ":" + normId] || evidenceById[normId] || null;
     }
+
+    // component の supports.equations / supports.claims を、同じチャンクの
+    // formulas / evidence_items から解決するためのリゾルバ（チップのポップオーバーが
+    // 後から参照する。設計書 §5.1「接続の説明文を見せる」の実装）。
+    var chunkEvidenceResolver = {
+      resolveEquation: function (rawId) {
+        if (!rawId) return null;
+        var norm = normalizeMaterialEvidenceId(rawId);
+        var formula = formulaById[String(rawId)] || formulaById[norm] || formulaById["[[" + norm + "]]"];
+        if (formula) return formula;
+        var ev = lookupEvidenceItem("equation", norm);
+        if (ev && (ev.latex || ev.plain_text)) return ev;
+        return null;
+      },
+      resolveClaim: function (rawId) {
+        if (!rawId) return null;
+        return lookupEvidenceItem("claim", normalizeMaterialEvidenceId(rawId));
+      },
+    };
 
     var embedBlocks = [];
     var mathBlocks = [];
@@ -4512,24 +4586,33 @@
         // caption があれば、画像なしの読み取りカードを出す（新たな画像取得経路は作らない）。
         if (evidenceItem && evidenceItem.kind === "figure") {
           return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="figure:' + escHtml(embedId) + '">' +
-            '<span class="ls-material-embed-kind">図</span>' +
+            '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS.figure || "図") + '</span>' +
             '<strong>' + escHtml(evidenceItem.title || ("図: " + (evidenceItem.caption || embedId))) + '</strong>' +
             '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.caption || evidenceItem.summary) || "この図の画像は現在配信対象ではありません。") + '</span>' +
           '</span>';
         }
         return renderMaterialMissingEmbed(embed, embedId);
       }
-      // component / claim / source: 解決できれば静的な根拠カードとして描画する。
+      // component / claim: それ自体は内容を持たない引用チップにする（設計書 §3 方向A）。
+      // クリックで文脈ポップオーバー（この論文での位置づけ・下位接続・「詳しく見る」）を
+      // 開く。解決できない場合のみ従来どおり未解決カードに留める。
+      if (embed.kind === "component" || embed.kind === "claim") {
+        if (evidenceItem) {
+          return renderMaterialEvidenceChip(embed.kind, embedId, evidenceItem, chunkEvidenceResolver);
+        }
+        return renderMaterialMissingEmbed(embed, embedId);
+      }
+      // source: 原文抜粋・数式引用などそれ自体が内容を持つ埋め込みなのでブロックカードを
+      // 維持する。role/confidence（パイプライン照合の来歴メタデータ）は学習UIには出さない
+      // （admin 側のみで表示する。設計書 §7 受け入れ基準）。
       if (evidenceItem) {
         var cardBody = evidenceItem.latex
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
-        var meta = [evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ");
         return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
-          '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
+          '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS[evidenceItem.kind] || evidenceItem.kind) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           cardBody +
-          (meta ? '<span class="ls-material-embed-meta">' + escHtml(meta) + '</span>' : "") +
         '</span>';
       }
       return renderMaterialMissingEmbed(embed, embedId);
@@ -4557,6 +4640,441 @@
   function shortMaterialEvidenceSummary(text) {
     var t = String(text == null ? "" : text).replace(/\s+/g, " ").trim();
     return t.length > 260 ? t.slice(0, 260).trim() + "..." : t;
+  }
+
+  // 教材本文中の component/claim 引用チップ本体。ブロックカードにはしない
+  // （内容を持たない出典アンカーのため。設計書 §3 方向A）。
+  function renderMaterialEvidenceChip(kind, embedId, evidenceItem, resolver) {
+    var ref = kind + ":" + embedId;
+    registerMaterialEvidenceChipEntry(ref, evidenceItem, resolver);
+    var label = evidenceItem.title || evidenceItem.label || evidenceItem.id || embedId;
+    return '<button type="button" class="ls-material-evidence-chip" data-evidence-ref="' + escHtml(ref) + '" data-evidence-kind="' + escHtml(kind) + '">' +
+      '<span class="ls-material-evidence-chip-icon">⚓</span>' +
+      '<span class="ls-material-evidence-chip-label">' + escHtml(label) + '</span>' +
+    '</button>';
+  }
+
+  // ── チップ ポップオーバー（Phase 1: トピック snapshot 内で完結）────────────
+  // 既存の出典ポップアップ基盤（.src-popup / _positionSourcePopup / closeSourcePopup /
+  // 外側クリック・Esc）を踏襲する。
+  function evidenceChipPopoverHead(kind, title) {
+    var kindLabel = MATERIAL_EVIDENCE_KIND_LABELS[kind] || kind;
+    return '<div class="src-popup-head">' +
+      '<span class="src-popup-title">' + escHtml(kindLabel) + ' ・ ' + escHtml(title || "") + '</span>' +
+      '<button class="src-popup-close" aria-label="閉じる">×</button></div>';
+  }
+
+  function openEvidenceChipPopover(anchor, entry) {
+    closeSourcePopup();
+    var item = entry && entry.item;
+    if (!item) return;
+    var kind = item.kind === "component" ? "component" : "claim";
+    var title = item.title || item.label || item.id || "";
+
+    var pop = document.createElement("div");
+    pop.className = "src-popup evidence-chip-popover";
+    pop.id = "src-popup";
+    pop.innerHTML = evidenceChipPopoverHead(kind, title) +
+      '<div class="src-popup-body evidence-chip-popover-body">' +
+        (kind === "component" ? renderComponentChipPopoverBody(item, entry.resolver) : renderClaimChipPopoverBody(item)) +
+      '</div>';
+    document.body.appendChild(pop);
+    _positionSourcePopup(pop, anchor);
+    pop.querySelector(".src-popup-close").addEventListener("click", closeSourcePopup);
+    document.addEventListener("mousedown", _srcOutsideClose, true);
+    document.addEventListener("keydown", _srcEscClose, true);
+
+    var moreBtn = pop.querySelector(".evidence-chip-popover-more-btn");
+    if (moreBtn) {
+      moreBtn.addEventListener("click", function () {
+        openEvidenceChipContextPanel(pop, item, entry.resolver);
+      });
+    }
+  }
+
+  function renderClaimChipPopoverBody(item) {
+    var summary = (item && item.summary) || "この主張の詳細はまだ登録されていません。";
+    return '<div class="evidence-chip-popover-claim">' + escHtml(summary) + '</div>';
+  }
+
+  function renderComponentChipPopoverBody(item, resolver) {
+    var position = (item && (item.narrative_role || item.teaching_takeaway || item.summary)) || "";
+    var supports = item && item.supports;
+    var html = "";
+    if (position) html += '<div class="evidence-chip-popover-position">' + escHtml(position) + '</div>';
+    if (!supports) {
+      // rich フィールドが無い旧データ: summary のみ + 「詳しく見る」に留める（劣化許容）。
+      if (!position) html += '<div class="evidence-chip-popover-position">この論文での位置づけはまだ登録されていません。</div>';
+      html += evidenceChipPopoverMoreButton();
+      return html;
+    }
+    html += renderSupportsSummaryLine(supports);
+    html += renderSupportsTextSection("前提", supports.preconditions);
+    html += renderSupportsTextSection("入力", supports.inputs);
+    html += renderSupportsTextSection("出力", supports.outputs);
+    html += renderSupportsTextSection("注意", supports.cautions);
+    html += renderSupportsEquationSection(supports.equations, resolver);
+    html += renderSupportsDependencySection(supports.dependencies);
+    html += renderSupportsClaimSection(supports.claims, resolver);
+    html += evidenceChipPopoverMoreButton();
+    return html;
+  }
+
+  function evidenceChipPopoverMoreButton() {
+    return '<div class="evidence-chip-popover-footer">' +
+      '<button type="button" class="evidence-chip-popover-more-btn">詳しく見る</button>' +
+    '</div>';
+  }
+
+  // 前提/入力/出力/注意/数式/主張のうち「非ゼロのみ」の摘要行（例: 前提 2件 · 数式 3件）。
+  // これは学習内容の構成数であり評価数値ではない（設計書 §5.4）。
+  function renderSupportsSummaryLine(supports) {
+    var groups = [
+      ["前提", supports.preconditions],
+      ["入力", supports.inputs],
+      ["出力", supports.outputs],
+      ["注意", supports.cautions],
+      ["数式", supports.equations],
+      ["主張", supports.claims],
+    ];
+    var parts = [];
+    groups.forEach(function (pair) {
+      var list = pair[1];
+      if (list && list.length) parts.push(pair[0] + " " + list.length + "件");
+    });
+    if (!parts.length) return "";
+    return '<div class="evidence-chip-popover-summary-line">' + escHtml(parts.join(" · ")) + '</div>';
+  }
+
+  // preconditions/inputs/outputs/cautions は { text, claim_ids?, equation_ids? } の配列。
+  // 裸のIDは出さず text のみを文リストにする（設計書 §5.4）。
+  function renderSupportsTextSection(label, list) {
+    var texts = (list || []).map(function (it) { return it && it.text; }).filter(Boolean);
+    if (!texts.length) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">' + escHtml(label) + '</div>' +
+      '<ul class="evidence-chip-popover-list">' +
+      texts.map(function (t) { return '<li>' + escHtml(t) + '</li>'; }).join("") +
+      '</ul></div>';
+  }
+
+  // supports.equations は Phase1 では { id, role } のみ（label 無し）なので、同じチャンクの
+  // resolver で解決できたものだけ KaTeX 表示する（解決できない id はスキップ。設計書 §5.1）。
+  function renderSupportsEquationSection(equations, resolver) {
+    var items = (equations || []).map(function (eq) {
+      if (!eq || !eq.id) return "";
+      var resolved = resolver && resolver.resolveEquation ? resolver.resolveEquation(eq.id) : null;
+      var latex = resolved ? (resolved.latex || resolved.summary || "") : "";
+      if (!latex) return "";
+      var roleLabel = MATERIAL_EVIDENCE_EQUATION_ROLE_LABELS[eq.role] || "";
+      return '<div class="evidence-chip-popover-equation-item">' +
+        (roleLabel ? '<span class="evidence-chip-popover-equation-role">' + escHtml(roleLabel) + '</span>' : "") +
+        '<span class="evidence-chip-popover-equation-body">' + renderMaterialKatex(latex, true) + '</span>' +
+      '</div>';
+    }).filter(Boolean);
+    if (!items.length) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">数式</div>' + items.join("") + '</div>';
+  }
+
+  function renderSupportsDependencySection(dependencies) {
+    var texts = (dependencies || []).map(function (d) { return d && d.reason; }).filter(Boolean);
+    if (!texts.length) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">関連</div>' +
+      '<ul class="evidence-chip-popover-list">' +
+      texts.map(function (t) { return '<li>' + escHtml(t) + '</li>'; }).join("") +
+      '</ul></div>';
+  }
+
+  // supports.claims は claim_id の配列（Phase1）。同じチャンクの evidence registry
+  // （kind=claim）で解決できたものだけ summary 文を表示する（裸のID一覧は出さない）。
+  function renderSupportsClaimSection(claimIds, resolver) {
+    var texts = [];
+    (claimIds || []).forEach(function (cid) {
+      var claimItem = resolver && resolver.resolveClaim ? resolver.resolveClaim(cid) : null;
+      if (claimItem && claimItem.summary) texts.push(claimItem.summary);
+    });
+    if (!texts.length) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">主張</div>' +
+      '<ul class="evidence-chip-popover-list">' +
+      texts.map(function (t) { return '<li>' + escHtml(t) + '</li>'; }).join("") +
+      '</ul></div>';
+  }
+
+  // ── 文脈パネル（Phase 2）+ グラフ（Phase 3）─────────────────────────────
+  // 「詳しく見る」で GET /api/learning/courses/{courseId}/components/{componentId}/context
+  // を取得し、ポップオーバー本体を「この論文では」「共通部品として」の2面に差し替える。
+  function openEvidenceChipContextPanel(pop, item, resolver) {
+    var body = pop.querySelector(".evidence-chip-popover-body");
+    if (!body || !item) return;
+    body.innerHTML = '<div class="evidence-chip-popover-loading">読み込み中…</div>';
+    fetchComponentContextAndRender(pop, body, item.id, resolver);
+  }
+
+  async function fetchComponentContextAndRender(pop, body, componentId, resolver) {
+    if (!componentId || !state.courseId) {
+      body.textContent = "詳細情報を取得できませんでした。";
+      return;
+    }
+    try {
+      var res = await apiFetch("/learning/courses/" + state.courseId +
+        "/components/" + encodeURIComponent(componentId) + "/context");
+      if (!res.ok) { body.textContent = "詳細情報を取得できませんでした。"; return; }
+      var data = await res.json();
+      renderComponentContextPanel(pop, body, data, resolver);
+    } catch (_) {
+      body.textContent = "詳細情報を取得できませんでした。";
+    }
+  }
+
+  function renderComponentContextPanel(pop, body, data, resolver) {
+    var instance = (data && data.instance) || {};
+    var sharedPart = data && data.shared_part;
+    var graph = data && data.graph;
+
+    var headTitle = pop.querySelector(".src-popup-title");
+    if (headTitle && instance.component && instance.component.label) {
+      headTitle.textContent = (MATERIAL_EVIDENCE_KIND_LABELS.component || "論理要素") + " ・ " + instance.component.label;
+    }
+
+    var html = '<div class="evidence-chip-context-tabs" role="tablist">' +
+      '<button type="button" class="evidence-chip-context-tab active" data-tab="instance">この論文では</button>' +
+      (sharedPart ? '<button type="button" class="evidence-chip-context-tab" data-tab="shared">共通部品として</button>' : "") +
+    '</div>' +
+    '<div class="evidence-chip-context-pane" data-pane="instance">' + renderContextInstancePane(instance, resolver) + '</div>' +
+    (sharedPart ? '<div class="evidence-chip-context-pane" data-pane="shared" hidden>' + renderContextSharedPane(sharedPart) + '</div>' : "") +
+    (graph ? '<div class="evidence-chip-context-graph-toggle">' +
+        '<button type="button" class="evidence-chip-context-graph-btn">グラフで見る</button>' +
+      '</div><div class="evidence-chip-context-graph" hidden></div>' : "");
+
+    body.innerHTML = html;
+
+    var tabs = body.querySelectorAll(".evidence-chip-context-tab");
+    tabs.forEach(function (tabBtn) {
+      tabBtn.addEventListener("click", function () {
+        tabs.forEach(function (t) { t.classList.remove("active"); });
+        tabBtn.classList.add("active");
+        body.querySelectorAll(".evidence-chip-context-pane").forEach(function (pane) {
+          pane.hidden = pane.getAttribute("data-pane") !== tabBtn.getAttribute("data-tab");
+        });
+      });
+    });
+
+    if (graph) {
+      var graphBtn = body.querySelector(".evidence-chip-context-graph-btn");
+      var graphContainer = body.querySelector(".evidence-chip-context-graph");
+      if (graphBtn && graphContainer) {
+        graphBtn.addEventListener("click", function () {
+          graphContainer.hidden = !graphContainer.hidden;
+          if (!graphContainer.hidden && !graphContainer._rendered) {
+            graphContainer.appendChild(buildEvidenceContextGraphSvg(graph, function (node) {
+              navigateEvidenceContextGraph(pop, body, node);
+            }));
+            graphContainer._rendered = true;
+          }
+        });
+      }
+    }
+  }
+
+  // 「グラフで見る」内のノードクリック（旅）。theory_component かつ navigable な
+  // ノードのみ辿れる。パンくずは持たず、パネルをその場で置き換える。
+  function navigateEvidenceContextGraph(pop, body, node) {
+    if (!node || node.element_type !== "theory_component" || !node.navigable || !node.id) return;
+    body.innerHTML = '<div class="evidence-chip-popover-loading">読み込み中…</div>';
+    fetchComponentContextAndRender(pop, body, node.id, null);
+  }
+
+  function renderContextInstancePane(instance, resolver) {
+    var inPaper = instance.in_paper || {};
+    var supports = instance.supports || {};
+    var component = instance.component || {};
+    var html = "";
+    var position = inPaper.narrative_role || component.teaching_takeaway || component.summary || "";
+    if (position) html += '<div class="evidence-chip-popover-position">' + escHtml(position) + '</div>';
+    if (inPaper.graph_summary_excerpt) {
+      html += '<div class="evidence-chip-context-graph-summary">' + escHtml(inPaper.graph_summary_excerpt) + '</div>';
+    }
+    html += renderSupportsSummaryLine(supports);
+    html += renderSupportsTextSection("前提", supports.preconditions);
+    html += renderSupportsTextSection("入力", supports.inputs);
+    html += renderSupportsTextSection("出力", supports.outputs);
+    html += renderSupportsTextSection("注意", supports.cautions);
+    html += renderContextEquationSection(supports.equations, resolver);
+    html += renderContextDependencySection(supports.dependencies);
+    html += renderContextClaimSection(supports.claims);
+    if (inPaper.document && inPaper.document.title) {
+      html += '<div class="evidence-chip-context-document">出典論文: ' + escHtml(inPaper.document.title) + '</div>';
+    }
+    if (instance.explanation && (instance.explanation.body || instance.explanation.title)) {
+      html += '<div class="evidence-chip-context-explanation">' +
+        '<div class="evidence-chip-popover-section-title">教員の説明</div>' +
+        (instance.explanation.title ? '<div class="evidence-chip-context-explanation-title">' + escHtml(instance.explanation.title) + '</div>' : "") +
+        (instance.explanation.body ? '<div>' + escHtml(instance.explanation.body) + '</div>' : "") +
+        (instance.explanation.endorsement_label ? '<div class="evidence-chip-context-explanation-endorsement">' + escHtml(instance.explanation.endorsement_label) + '</div>' : "") +
+      '</div>';
+    }
+    return html || '<div class="evidence-chip-popover-position">この論文での位置づけはまだ登録されていません。</div>';
+  }
+
+  // Phase2 API は equations に label を持つため、latex が解決できなくても label + role は
+  // 常に表示する（Phase1のポップオーバーと違いスキップしない。設計書 §5.4）。
+  function renderContextEquationSection(equations, resolver) {
+    var items = (equations || []).map(function (eq) {
+      if (!eq) return "";
+      var roleLabel = MATERIAL_EVIDENCE_EQUATION_ROLE_LABELS[eq.role] || "";
+      var resolved = resolver && resolver.resolveEquation ? resolver.resolveEquation(eq.id) : null;
+      var latex = resolved ? (resolved.latex || resolved.summary || "") : "";
+      return '<div class="evidence-chip-popover-equation-item">' +
+        (roleLabel ? '<span class="evidence-chip-popover-equation-role">' + escHtml(roleLabel) + '</span>' : "") +
+        '<span class="evidence-chip-popover-equation-body">' +
+        (latex ? renderMaterialKatex(latex, true) : escHtml(eq.label || eq.id || "")) +
+        '</span></div>';
+    }).join("");
+    if (!items) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">数式</div>' + items + '</div>';
+  }
+
+  function renderContextDependencySection(dependencies) {
+    var texts = (dependencies || []).map(function (d) {
+      if (!d) return "";
+      var t = d.reason || "";
+      if (d.target_label) t = t ? (d.target_label + " — " + t) : d.target_label;
+      return t;
+    }).filter(Boolean);
+    if (!texts.length) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">関連</div>' +
+      '<ul class="evidence-chip-popover-list">' +
+      texts.map(function (t) { return '<li>' + escHtml(t) + '</li>'; }).join("") +
+      '</ul></div>';
+  }
+
+  function renderContextClaimSection(claims) {
+    var texts = (claims || []).map(function (c) { return c && c.excerpt; }).filter(Boolean);
+    if (!texts.length) return "";
+    return '<div class="evidence-chip-popover-section">' +
+      '<div class="evidence-chip-popover-section-title">主張</div>' +
+      '<ul class="evidence-chip-popover-list">' +
+      texts.map(function (t) { return '<li>' + escHtml(t) + '</li>'; }).join("") +
+      '</ul></div>';
+  }
+
+  function renderContextSharedPane(sharedPart) {
+    var entry = sharedPart.entry || {};
+    var html = "";
+    if (entry.name) html += '<div class="evidence-chip-context-shared-name">' + escHtml(entry.name) + '</div>';
+    if (entry.aliases && entry.aliases.length) {
+      html += '<div class="evidence-chip-context-shared-aliases">別名: ' + escHtml(entry.aliases.join(" ・ ")) + '</div>';
+    }
+    if (entry.summary) html += '<div class="evidence-chip-popover-position">' + escHtml(entry.summary) + '</div>';
+    if (entry.standardization_status) {
+      var statusLabel = MATERIAL_LIBRARY_STATUS_LABELS[entry.standardization_status] || entry.standardization_status;
+      html += '<div class="evidence-chip-context-shared-status">標準化状況: ' + escHtml(statusLabel) + '</div>';
+    }
+    if (entry.other_documents_count) {
+      html += '<div class="evidence-chip-context-shared-count">他 ' + escHtml(String(entry.other_documents_count)) + ' 論文でも使用</div>';
+    }
+    return html || '<div class="evidence-chip-popover-position">共通部品としての情報はまだ登録されていません。</div>';
+  }
+
+  // ── 1-hop 近傍グラフ（Phase 3・「グラフで見る」・「旅」の実装）───────────────
+  var EVIDENCE_GRAPH_SVG_NS = "http://www.w3.org/2000/svg";
+
+  function evidenceGraphSvgEl(tag, attrs) {
+    var node = document.createElementNS(EVIDENCE_GRAPH_SVG_NS, tag);
+    if (attrs) {
+      for (var k in attrs) {
+        if (Object.prototype.hasOwnProperty.call(attrs, k)) node.setAttribute(k, attrs[k]);
+      }
+    }
+    return node;
+  }
+
+  function truncateGraphLabel(label, max) {
+    var s = String(label == null ? "" : label);
+    return s.length > max ? s.slice(0, max - 1) + "…" : s;
+  }
+
+  // 上段= upper、中央= focus、下段= lower の小型 SVG。エッジは実線のみ（candidate は
+  // API 側で除外済みのため点線は使わない）。navigable な theory_component ノードのみ
+  // クリック可（旅の起点。設計書 §5.4・Phase3）。
+  function buildEvidenceContextGraphSvg(graph, onNodeClick) {
+    var width = 320, height = 220, nodeW = 100, nodeH = 30;
+    var svg = evidenceGraphSvgEl("svg", {
+      viewBox: "0 0 " + width + " " + height,
+      width: "100%",
+      height: String(height),
+      class: "evidence-chip-context-graph-svg",
+    });
+
+    var focus = graph.focus || {};
+    var upper = graph.upper || [];
+    var lower = graph.lower || [];
+    var focusX = width / 2, focusY = height / 2;
+
+    function layoutRow(nodes, y) {
+      var n = nodes.length;
+      if (!n) return [];
+      var gap = width / (n + 1);
+      return nodes.map(function (node, i) {
+        return { node: node, x: gap * (i + 1), y: y };
+      });
+    }
+
+    var upperPositions = layoutRow(upper, 22);
+    var lowerPositions = layoutRow(lower, height - 22);
+
+    function drawEdge(x1, y1, x2, y2, relationLabel) {
+      svg.appendChild(evidenceGraphSvgEl("line", {
+        x1: x1, y1: y1, x2: x2, y2: y2,
+        class: "evidence-chip-context-graph-edge",
+      }));
+      if (relationLabel) {
+        var text = evidenceGraphSvgEl("text", {
+          x: (x1 + x2) / 2, y: (y1 + y2) / 2 - 4,
+          class: "evidence-chip-context-graph-edge-label",
+          "text-anchor": "middle",
+        });
+        text.textContent = truncateGraphLabel(relationLabel, 12);
+        svg.appendChild(text);
+      }
+    }
+
+    function drawNode(x, y, node, isFocus) {
+      var navigable = !isFocus && node && node.navigable && node.element_type === "theory_component";
+      var group = evidenceGraphSvgEl("g", {
+        class: "evidence-chip-context-graph-node" + (isFocus ? " is-focus" : "") + (navigable ? " is-navigable" : ""),
+        transform: "translate(" + (x - nodeW / 2) + "," + (y - nodeH / 2) + ")",
+      });
+      group.appendChild(evidenceGraphSvgEl("rect", {
+        width: nodeW, height: nodeH, rx: 8, ry: 8,
+        class: "evidence-chip-context-graph-node-rect",
+      }));
+      var text = evidenceGraphSvgEl("text", {
+        x: nodeW / 2, y: nodeH / 2 + 4,
+        class: "evidence-chip-context-graph-node-label",
+        "text-anchor": "middle",
+      });
+      text.textContent = truncateGraphLabel((node && (node.label || node.id)) || "", 16);
+      group.appendChild(text);
+      if (navigable && typeof onNodeClick === "function") {
+        group.style.cursor = "pointer";
+        group.addEventListener("click", function () { onNodeClick(node); });
+      }
+      svg.appendChild(group);
+    }
+
+    upperPositions.forEach(function (p) { drawEdge(p.x, p.y + nodeH / 2, focusX, focusY - nodeH / 2, p.node.relation_label); });
+    lowerPositions.forEach(function (p) { drawEdge(focusX, focusY + nodeH / 2, p.x, p.y - nodeH / 2, p.node.relation_label); });
+    upperPositions.forEach(function (p) { drawNode(p.x, p.y, p.node, false); });
+    drawNode(focusX, focusY, focus, true);
+    lowerPositions.forEach(function (p) { drawNode(p.x, p.y, p.node, false); });
+
+    return svg;
   }
 
   // [[FIGURE_N]] の解決先マークアップ。画像本体は同期関数の中で fetch できないため、
@@ -5161,6 +5679,10 @@
     initGroups();
     initLectureMode();
     initSplitHandle();
+    // component/claim 引用チップのクリック配線（教材区画・出典ポップアップ・ボイスパネル・
+    // レクチャースライドの複数箇所から renderMaterialChunk が呼ばれるため、document への
+    // 委譲リスナー1本にまとめる。1度だけ登録）。
+    initMaterialEvidenceChipDelegation();
     // Phase P-1: 「わたしの地図」から問いの軌跡へ戻る導線 (openTrajectory) を一度だけ登録する。
     if (window.PersonalMap) window.PersonalMap.init({ openTrajectory: openTrajectory });
     // Phase P-3: 最上位「わたしの地図」パネル。openTrajectory は将来のノード詳細導線用（任意）。

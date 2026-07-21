@@ -253,12 +253,34 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
                 topic.setdefault("document_id", document_id)
                 mapping_topics.append(topic)
 
+        # narrative_annotator（#360）は TheoryOperationGraph 主グラフノードの
+        # narrative_role（この段階が論文の主張に何を寄与するか、1〜2文）を
+        # component_id 名前空間で component_assembly と共有する
+        # （component_evidence_redesign.md Phase 1）。この接続の説明文を
+        # components 投影に持ち込み、チップ展開時の「この論文の中での位置づけ」に
+        # 使う。artifact が dict でない/欠落時は _as_dict/_as_list が空を返すため
+        # 静かにスキップされる（防御的）。narrative の confidence（生値）はここでは
+        # 使わない（投影に混ぜない）。
+        narrative_artifact = _as_dict(artifacts.get("narrative_annotator"))
+        narrative_role_by_component_id: dict[str, str] = {}
+        for node in _as_list(narrative_artifact.get("node_narratives")):
+            if not isinstance(node, dict):
+                continue
+            comp_id = str(node.get("component_id") or "").strip()
+            role = str(node.get("narrative_role") or "").strip()
+            if comp_id and role:
+                narrative_role_by_component_id[comp_id] = role
+
         assembly = _as_dict(artifacts.get("component_assembly"))
         for component in _as_list(assembly.get("components")):
             if isinstance(component, dict) and component.get("component_id"):
                 item = dict(component)
                 item.setdefault("document_id", document_id)
-                components[str(item["component_id"])] = item
+                comp_id = str(item["component_id"])
+                narrative_role = narrative_role_by_component_id.get(comp_id)
+                if narrative_role:
+                    item["narrative_role"] = narrative_role
+                components[comp_id] = item
 
         eq_artifact = _as_dict(artifacts.get("equation_semantics"))
         for equation in _as_list(eq_artifact.get("equations")):
@@ -615,6 +637,7 @@ def _topic_evidence_links(
             component.get("component_id") or component.get("id") or "",
             component.get("summary") or component.get("teaching_takeaway") or "",
             "support",
+            label=component.get("label") or "",
         )
 
     for equation in equations:
@@ -778,17 +801,59 @@ def _topic_content_block_formulas(topic: dict) -> list[dict]:
     return formulas
 
 
-def _topic_component_block_item(topic: dict, component_id: object) -> dict:
-    """``content_blocks`` の components ブロックから component_id 一致アイテムを引く
-    （admin ``lsTopicComponentById`` と同じ探索）。無ければ空 dict。"""
-    norm = normalize_evidence_id(component_id)
+def _topic_component_block_index(topic: dict) -> dict[str, dict]:
+    """``content_blocks`` の components ブロックを component_id（正規化後）で索引化する。
+
+    ``build_topic_evidence_items`` が evidence_links 経由 / linked_component_ids
+    フォールバックの両経路で rich な component 投影
+    （label / narrative_role / document_id / supports）をマージするための共通索引。
+    """
+    index: dict[str, dict] = {}
     for block in (topic or {}).get("content_blocks") or []:
         if not isinstance(block, dict) or block.get("type") != "components":
             continue
         for item in block.get("items") or []:
-            if isinstance(item, dict) and normalize_evidence_id(item.get("component_id")) == norm:
-                return item
-    return {}
+            if not isinstance(item, dict):
+                continue
+            norm = normalize_evidence_id(item.get("component_id"))
+            if norm:
+                index[norm] = item
+    return index
+
+
+def _topic_component_block_item(topic: dict, component_id: object) -> dict:
+    """``content_blocks`` の components ブロックから component_id 一致アイテムを引く
+    （admin ``lsTopicComponentById`` と同じ探索）。無ければ空 dict。"""
+    return _topic_component_block_index(topic).get(normalize_evidence_id(component_id), {})
+
+
+def _merge_component_rich_projection(item: dict, rich: dict | None) -> None:
+    """``_content_blocks`` の components 投影（rich item）を evidence item にマージする
+    （component_evidence_redesign.md Phase 1 §4）。
+
+    ``label`` / ``narrative_role`` / ``document_id`` と、下位接続の説明文付き投影
+    ``supports``（preconditions/inputs/outputs/cautions/equations/claims/dependencies）
+    を追加する。索引に無い component（``rich`` が falsy）には何も付けない —
+    ``content_blocks`` に rich 投影が無い旧データでも壊れない後方互換。
+    既存フィールド（kind/id/title/summary/role/confidence）は変更しない。
+    """
+    if not rich:
+        return
+    if rich.get("label"):
+        item["label"] = rich["label"]
+    if rich.get("narrative_role"):
+        item["narrative_role"] = rich["narrative_role"]
+    if rich.get("document_id"):
+        item["document_id"] = rich["document_id"]
+    item["supports"] = {
+        "preconditions": rich.get("preconditions") or [],
+        "inputs": rich.get("inputs") or [],
+        "outputs": rich.get("outputs") or [],
+        "cautions": rich.get("cautions") or [],
+        "equations": rich.get("equations") or [],
+        "claims": rich.get("claims") or [],
+        "dependencies": rich.get("dependencies") or [],
+    }
 
 
 def build_topic_evidence_items(topic: dict) -> list[dict]:
@@ -805,7 +870,12 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
     各アイテムの共通フィールド: ``kind`` / ``id``（正規化済み）/ ``title`` /
     ``summary`` / ``role`` / ``confidence``。種別固有: equation は
     ``latex`` / ``plain_text`` / ``raw_text``、figure は ``figure_id`` /
-    ``figure_key`` / ``caption``、latex を持つ source は ``latex``。
+    ``figure_key`` / ``caption``、latex を持つ source は ``latex``。component は
+    ``content_blocks`` の rich 投影が解決できた場合に限り ``label`` /
+    ``narrative_role`` / ``document_id`` / ``supports``（preconditions/inputs/
+    outputs/cautions/equations/claims/dependencies）を追加で持つ
+    （component_evidence_redesign.md Phase 1）。title は summary を流用せず、
+    label（無ければ「論理コンポーネント」）にする。
     """
     topic = topic or {}
     items: list[dict] = []
@@ -813,6 +883,13 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
     formula_by_norm: dict[str, dict] = {}
     for formula in _topic_content_block_formulas(topic):
         formula_by_norm[normalize_evidence_id(formula.get("id"))] = formula
+
+    # content_blocks の components 投影（rich item: label / narrative_role /
+    # document_id / preconditions・inputs・outputs・cautions / dependencies /
+    # equations / claims）を component_id（正規化後）で索引化する。evidence_links
+    # 経由 / linked_component_ids フォールバックの両経路がここから同じ規則でマージする
+    # （component_evidence_redesign.md Phase 1 §4）。
+    component_index = _topic_component_block_index(topic)
 
     confidence = str(topic.get("content_confidence") or "")
 
@@ -860,13 +937,19 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
         if not latex and _looks_like_tex_math(summary):
             latex = summary
             summary = ""
+        norm_id = normalize_evidence_id(raw_id)
+        rich_component = component_index.get(norm_id) if kind == "component" else None
         if latex:
             title = link.get("label") or ("数式引用" if link.get("support_role") == "equation_quote" else "数式")
+        elif kind == "component":
+            # component_evidence_redesign.md Phase 1 §4: title に summary を流用
+            # しない（同じ文が title/summary に二重表示される症状の解消）。
+            title = link.get("label") or (rich_component or {}).get("label") or "論理コンポーネント"
         else:
             title = summary or str(raw_id) or kind
         item = {
             "kind": kind,
-            "id": normalize_evidence_id(raw_id),
+            "id": norm_id,
             "title": title,
             "summary": summary,
             "role": link.get("support_role") or "",
@@ -874,21 +957,27 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
         }
         if latex:
             item["latex"] = latex
+        if kind == "component":
+            _merge_component_rich_projection(item, rich_component)
         items.append(item)
 
     # 2) linked_component_ids: evidence_links に無い component を content_blocks から補う。
     for cid in topic.get("linked_component_ids") or []:
-        block_component = _topic_component_block_item(topic, cid)
+        norm_cid = normalize_evidence_id(cid)
+        rich_component = component_index.get(norm_cid)
+        block_component = rich_component or {}
         title = block_component.get("label") or block_component.get("component_id") or ""
         summary = block_component.get("teaching_takeaway") or block_component.get("summary") or ""
-        items.append({
+        item = {
             "kind": "component",
-            "id": normalize_evidence_id(cid),
+            "id": norm_cid,
             "title": title or str(cid),
             "summary": summary or "このトピックに関連付けられた論理コンポーネントです。",
             "role": "support",
             "confidence": confidence,
-        })
+        }
+        _merge_component_rich_projection(item, rich_component)
+        items.append(item)
 
     # 3) content_blocks の equations（本文が式を直接埋め込むケース）。
     for formula in _topic_content_block_formulas(topic):
@@ -1053,6 +1142,88 @@ def _compose_topic_content(
     return "\n".join(line for line in lines if line is not None).strip()
 
 
+def _component_field_refs(value: Any, limit: int = 8) -> list[dict]:
+    """ComponentFieldRef のリスト（preconditions/inputs/outputs/cautions）を
+    components 投影用に正規化する（component_evidence_redesign.md Phase 1 §5.1）。
+
+    ``text`` が空の要素は落とす（説明文の無い裸参照を投影に持ち込まない）。
+    ``claim_ids`` / ``equation_ids`` は文字列リストへ正規化する。
+    """
+    out: list[dict] = []
+    for raw in _as_list(value):
+        if not isinstance(raw, dict):
+            continue
+        text = str(raw.get("text") or "").strip()
+        if not text:
+            continue
+        out.append({
+            "text": text,
+            "claim_ids": [str(cid) for cid in _as_list(raw.get("claim_ids")) if str(cid).strip()],
+            "equation_ids": [str(eid) for eid in _as_list(raw.get("equation_ids")) if str(eid).strip()],
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _component_dependency_refs(value: Any, limit: int = 8) -> list[dict]:
+    """ComponentDependency のリストを components 投影用に正規化する。
+
+    ``reason`` と ``targets``(component_refs) のどちらも空の要素は落とす
+    （説明文の無いエッジを投影に持ち込まない）。
+    """
+    out: list[dict] = []
+    for raw in _as_list(value):
+        if not isinstance(raw, dict):
+            continue
+        targets = [str(t) for t in _as_list(raw.get("component_refs")) if str(t).strip()]
+        reason = str(raw.get("reason") or "").strip()
+        if not targets and not reason:
+            continue
+        out.append({
+            "type": str(raw.get("dependency_type") or ""),
+            "targets": targets,
+            "reason": reason,
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+
+# ComponentRecord の役割別 equation id フィールド → role 語彙（順序が dedupe の優先順位）。
+_COMPONENT_EQUATION_ROLE_FIELDS = (
+    ("input_equation_ids", "input"),
+    ("intermediate_equation_ids", "intermediate"),
+    ("output_equation_ids", "output"),
+    ("constraint_equation_ids", "constraint"),
+    ("definition_equation_ids", "definition"),
+)
+
+
+def _component_equations_with_roles(component: dict, limit: int = 12) -> list[dict]:
+    """ComponentRecord の役割別 equation id リストを role 付きでまとめる（初出優先で dedupe）。
+
+    ``linked_equation_ids`` にあってどの役割リストにも無い id は role="linked" で
+    末尾に追加する。
+    """
+    seen: set[str] = set()
+    out: list[dict] = []
+    for field, role in _COMPONENT_EQUATION_ROLE_FIELDS:
+        for eq_id in _as_list(component.get(field)):
+            eq_id = str(eq_id or "").strip()
+            if not eq_id or eq_id in seen:
+                continue
+            seen.add(eq_id)
+            out.append({"id": eq_id, "role": role})
+    for eq_id in _as_list(component.get("linked_equation_ids")):
+        eq_id = str(eq_id or "").strip()
+        if not eq_id or eq_id in seen:
+            continue
+        seen.add(eq_id)
+        out.append({"id": eq_id, "role": "linked"})
+    return out[:limit]
+
+
 def _content_blocks(
     summary: str,
     learning_objectives: list[str],
@@ -1075,6 +1246,20 @@ def _content_blocks(
                     "label": c.get("label"),
                     "summary": c.get("summary"),
                     "teaching_takeaway": c.get("teaching_takeaway"),
+                    # component_evidence_redesign.md Phase 1: 裸IDではなく接続の
+                    # 説明文を運ぶ（narrative_role / 下位接続の text・reason 付き
+                    # 投影 / 数式の役割分類）。
+                    "narrative_role": c.get("narrative_role") or "",
+                    "document_id": c.get("document_id") or "",
+                    "preconditions": _component_field_refs(c.get("preconditions")),
+                    "inputs": _component_field_refs(c.get("inputs")),
+                    "outputs": _component_field_refs(c.get("outputs")),
+                    "cautions": _component_field_refs(c.get("cautions")),
+                    "dependencies": _component_dependency_refs(c.get("dependencies")),
+                    "equations": _component_equations_with_roles(c),
+                    "claims": [
+                        str(cid) for cid in _as_list(c.get("linked_claim_ids")) if str(cid).strip()
+                    ][:12],
                 }
                 for c in components[:5]
             ],

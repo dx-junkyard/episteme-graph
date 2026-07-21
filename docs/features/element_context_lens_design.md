@@ -336,3 +336,89 @@ overview レスポンスの `context` は次の形で返る。
 - `contextual_role_status` の語彙に `unidentified` を追加した（§2.2 の「上位構造との
   関係は未同定」という文言を状態値として構造化したもの）。
 
+---
+
+## 10. 実装ノート（2026-07-21）— コンポーネントの上位リンク拡充（B）
+
+Phase 0 のコンポーネント投影は、上位構造を **TheoryOperationGraph
+（`theory_component_graphs`）由来の関係だけ**（`parent_component_id` の `member_of` /
+`is_thesis_anchor` / 入辺 `used_by_component`）から導出していた。ComponentAssembly が
+組み立てた `theory_components` はグラフノードとして登録されないことが多く、その結果
+`focus.provenance` に `component_graph` が付かないコンポーネントは上位が空になり、
+「上位構造との関係は未同定」ばかりが並んでいた。§4.2 が求める「中心命題との関係」が
+実際には出ていなかった。
+
+これを解消するため `_build_component` に本流（中心命題・支持構造・掲載セクション）への
+接続を追加した。**A層は非改変**（読むだけ・W1 継承）で、既に DB に保存済みの
+`theory_components.thesis_context` を読むだけである。
+
+- **主軸: `thesis_context.supports_thesis_node_ids` → 中心命題 / 支持構造**。
+  component_assembly が claim/equation の重なりから決定論的に導出したノード参照
+  （`persistence.py` の `_thesis_ref_nodes` と同一の `central_thesis` /
+  `support:<section>:<idx>` 語彙、#354/#440）を thesis_reconstruction artifact で解決し
+  `supports_thesis`（`source_backed`）の上位項目にする。グラフノードでなくても本流に
+  結びつく。artifact 欠損・未解決ノードは ID をラベルにして残す（P4・推測で埋めない）。
+  グラフ由来の `is_thesis_anchor` 項目もラベルを headline に統一して `_dedupe_items` で
+  中心命題項目と重複排除する。
+- **`role_in_thesis` を「この文脈での役割」に採用**。`_derive_contextual_role` に
+  `fallback_role` を追加し、優先順位を「人間確定注釈 > `role_in_thesis` > 上位項目からの
+  機械文 > unidentified」にした（fallback は component のみ渡す。他要素型は不変）。
+  `supports_thesis_node_ids` が空でも `role_in_thesis` があれば役割を出し、未同定を脱する。
+- **副軸: 掲載セクション**。`source_chunks` → `chunks.section_id` → `document_structure`
+  のセクション見出しを `appears_in_section`（`source_backed`）で出す。見出しが引けない
+  section_id は本流の位置づけノイズになるため出さない（best-effort・fail-soft）。
+- **provenance** に `thesis_context` / `chunks` を追記し、上位が何由来かを正直に示す。
+
+実装・テスト:
+
+- `backend/core/deliberation/context_lens.py` — `_load_component_row` に `thesis_context`
+  / `source_chunks` を追加、純粋ヘルパ `_thesis_context_upper_items` /
+  `_section_items_from_ids` と DB ヘルパ `_chunk_section_ids` を新設、
+  `_derive_contextual_role` に `fallback_role`/`fallback_status` を追加、`_build_component`
+  に上記の配線を追加。`RELATION_LABELS` は新規語彙なし（`supports_thesis` /
+  `appears_in_section` を再利用）。
+- `backend/tests/test_deliberation_context_lens.py` — `TestThesisContextUpperItems` /
+  `TestSectionItemsFromIds`、`TestDeriveContextualRole` の fallback ケース、
+  `TestBuildComponentUpperFromThesisContext`（グラフノード無し + thesis_context ありで
+  上位・役割が出る／`role_in_thesis` 単独でも未同定を脱する／両方無ければ従来どおり
+  未同定を維持）を追加。
+- フロントは変更不要（上位レーンは項目を汎用にレンダリングするため、埋まった時点で
+  「未同定」文言が消える）。
+
+### 同日追補（2026-07-21・第2弾）— theory stage 接続 + evidence_claims 本文表示
+
+§10 冒頭時点で「未対応（別課題）」としていた2件も同日中に実装した。
+
+- **theory stage（main 層）ノードへの接続**: コンポーネントがグラフノードでない
+  （`node is None`）場合、`graph_json` の `graph_layer=="main"` ノード（theory stage、
+  label は "Theory basis" 等の stage label）の `linked_claim_ids` と component の
+  `evidence_claims` を、両辺 `claim_lookup.get(x, x)` で正規化してから交差し、交差した
+  main ノードごとに上位項目を出す（`_stage_participation_items`・純粋関数）。
+  - graph_json の node `linked_claim_ids` は persist 時に **agent 側 claim ID のまま**
+    （remap されない）、component 側 `evidence_claims` は remap 済み DB UUID、という
+    非対称を lookup 正規化で吸収する。main ノード id（`theory_op_XXXX`）は
+    theory_components 行に対応しないため**非ナビゲーション**（`element_type="stage"` を
+    ITEM 契約に追加。`_NAVIGABLE_ELEMENT_TYPES` は不変）。
+  - relation は新語彙 `participates_in_stage`（「の理論段階に関与する」）。
+    `relation_status` は **candidate**: claim 交差は決定論的だが A層の明示リンクではない
+    （figure レンズの `related_component_candidates` と同じ扱い）。`evidence_refs` に
+    交差 claim ID の先頭3件を積んで追跡可能にする。
+  - node が存在する場合は出さない（親 main ノードが `member_of` で既出のため）。
+- **下位 `evidence_claims` の claim 本文表示**: `evidence_claims` は「remap 済み DB UUID
+  （親 claim）」と「agent 側 atomic sub-claim ID（`claim_span_001_sub01` 形式。
+  theory_claims 行にならないため remap されず素通り）」の混在。従来はループ内 N+1 +
+  引けない ID の生ID表示だった。変更後: ①`claim_lookup` で解決できた ID を**1回の
+  バッチ** `_claims_by_id` で取得し本文 + navigable ②解決不能 ID は claim_object_builder
+  artifact の `claims[]`（`claim_id` → `text`/`normalized_text`、
+  `_artifact_claim_text_index`）でラベル補完（非 navigable・`evidence_refs=[生ID]`）
+  ③それも無ければ生 ID（P4）。3経路とも status は従来どおり explicit（source_backed）。
+- テスト: `TestArtifactClaimTextIndex` / `TestStageParticipationItems` /
+  `TestBuildComponentEvidenceClaimsResolution`（バッチ1回検証・DB断時の artifact
+  フォールバック生存）/ `TestBuildComponentStageParticipation`（node=None で emit・
+  node ありで抑制）+ 語彙登録テスト拡張（計21件追加）。敵対的レビュー済み
+  （翻訳一致テストは component 側 DB ID vs graph 側 agent ID の非対称データで検証）。
+  backend 全体 5,271 pass。
+- 既知の限界（意図的・実害小）: `is_thesis_anchor` 由来と `thesis_context` 由来の
+  central_thesis 項目はラベルを揃えて `_dedupe_items` で1件に畳むため、後者の
+  `evidence_refs=["central_thesis"]` は畳まれた側では失われる（表示上は同一項目）。
+

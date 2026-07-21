@@ -5778,6 +5778,213 @@ body {
 .src-popup-body { padding: 12px; line-height: 1.6; }
 .src-popup-section { font-size: 11px; color: var(--lx-ink-faint, #8a93a1); margin-bottom: 8px; }
 
+/* ============ component/claim 引用チップ + 文脈ポップオーバー ============
+   設計書: docs/features/component_evidence_redesign.md。component/claim は本文を
+   壊すブロックカードをやめ、内容を持たないインラインチップにする（それ自体が内容を
+   持つ equation/figure/source は .ls-material-embed 系のブロックカードのまま）。 */
+.ls-material-evidence-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  margin: 0 2px;
+  padding: 2px 9px 2px 6px;
+  border: 1px solid var(--color-border-info, #378add);
+  border-radius: 999px;
+  background: var(--color-background-info, #eef4fb);
+  color: var(--color-text-info, #378add);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.5;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.ls-material-evidence-chip:hover {
+  background: var(--color-text-info, #378add);
+  color: #fff;
+}
+.ls-material-evidence-chip-icon {
+  flex-shrink: 0;
+  font-size: 11px;
+}
+.ls-material-evidence-chip-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+/* ポップオーバー本体（Phase 1: この論文での位置づけ・下位接続の文リスト） */
+.evidence-chip-popover-position {
+  font-size: 13px;
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+.evidence-chip-popover-summary-line {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-bottom: 10px;
+}
+.evidence-chip-popover-claim {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.evidence-chip-popover-loading {
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.evidence-chip-popover-section { margin-bottom: 10px; }
+.evidence-chip-popover-section-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 4px;
+}
+.evidence-chip-popover-list {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.evidence-chip-popover-list li { margin-bottom: 3px; }
+.evidence-chip-popover-equation-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+  overflow-x: auto;
+}
+.evidence-chip-popover-equation-role {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 10px;
+  font-weight: 700;
+}
+.evidence-chip-popover-footer {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--lx-line, #e6e9ef);
+  text-align: right;
+}
+.evidence-chip-popover-more-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-info, #378add);
+  background: none;
+  color: var(--color-text-info, #378add);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.evidence-chip-popover-more-btn:hover {
+  background: var(--color-background-info, #eef4fb);
+}
+
+/* Phase 2: 文脈パネル（「この論文では」/「共通部品として」の2タブ） */
+.evidence-chip-context-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--lx-line, #e6e9ef);
+}
+.evidence-chip-context-tab {
+  appearance: none;
+  border: none;
+  background: none;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+.evidence-chip-context-tab.active {
+  color: var(--color-text-info, #378add);
+  border-bottom-color: var(--color-text-info, #378add);
+  font-weight: 600;
+}
+.evidence-chip-context-pane[hidden] { display: none; }
+.evidence-chip-context-graph-summary {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.evidence-chip-context-document {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.evidence-chip-context-explanation {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--lx-line, #e6e9ef);
+  font-size: 12px;
+}
+.evidence-chip-context-explanation-title { font-weight: 600; margin-bottom: 2px; }
+.evidence-chip-context-explanation-endorsement {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}
+.evidence-chip-context-shared-name { font-weight: 600; font-size: 14px; margin-bottom: 4px; }
+.evidence-chip-context-shared-aliases,
+.evidence-chip-context-shared-status,
+.evidence-chip-context-shared-count {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-top: 4px;
+}
+
+/* Phase 3: 1-hop 近傍グラフ（「グラフで見る」・「旅」） */
+.evidence-chip-context-graph-toggle { margin: 8px 0; }
+.evidence-chip-context-graph-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.evidence-chip-context-graph-btn:hover { border-color: var(--color-border-info, #378add); }
+.evidence-chip-context-graph[hidden] { display: none; }
+.evidence-chip-context-graph {
+  margin-top: 8px;
+  overflow-x: auto;
+}
+.evidence-chip-context-graph-svg { display: block; max-width: 100%; }
+.evidence-chip-context-graph-node-rect {
+  fill: var(--color-background-secondary, #f5f5f7);
+  stroke: var(--color-border-secondary, #d2d2d7);
+  stroke-width: 1;
+}
+.evidence-chip-context-graph-node.is-focus .evidence-chip-context-graph-node-rect {
+  fill: var(--color-background-info, #eef4fb);
+  stroke: var(--color-text-info, #378add);
+  stroke-width: 1.5;
+}
+.evidence-chip-context-graph-node.is-navigable .evidence-chip-context-graph-node-rect {
+  cursor: pointer;
+}
+.evidence-chip-context-graph-node.is-navigable:hover .evidence-chip-context-graph-node-rect {
+  stroke: var(--color-text-info, #378add);
+}
+.evidence-chip-context-graph-node-label {
+  font-size: 10px;
+  fill: var(--color-text-primary, #1d1d1f);
+}
+.evidence-chip-context-graph-edge {
+  stroke: var(--color-border-secondary, #d2d2d7);
+  stroke-width: 1;
+}
+.evidence-chip-context-graph-edge-label {
+  font-size: 9px;
+  fill: var(--color-text-tertiary, #aeaeb2);
+}
+
 /* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
 .voice-mode-btn {
   width: 38px;

@@ -107,6 +107,87 @@ def test_content_blocks_carry_raw_text_for_latexless_equations():
     assert _equation_material_description({"plain_text": "F2はaとbの和"}) == "F2はaとbの和"
 
 
+def test_content_blocks_components_projection_includes_rich_fields():
+    """component_evidence_redesign.md Phase 1: components 投影は裸IDではなく
+    接続の説明文（narrative_role / preconditions・inputs・outputs・cautions の
+    text 付き投影 / dependencies の reason 付き投影 / 数式の役割分類 / claims）を運ぶ。"""
+    from core.course_content_builder import _content_blocks
+
+    components = [
+        {
+            "component_id": "comp_1",
+            "label": "ラベル1",
+            "summary": "要約1",
+            "teaching_takeaway": "要点1",
+            "document_id": "doc-1",
+            "narrative_role": "この段階は中心主張の前提を与える。",
+            "preconditions": [
+                {"text": "前提A", "claim_ids": ["clm_1"], "equation_ids": []},
+                {"text": "", "claim_ids": ["ignored"]},  # text 空は落ちる
+            ],
+            "inputs": [{"text": "入力A", "claim_ids": [], "equation_ids": ["eq_1"]}],
+            "outputs": [{"text": "出力A"}],
+            "cautions": [{"text": "注意A"}],
+            "dependencies": [
+                {"dependency_type": "requires", "component_refs": ["comp_2"], "reason": "comp_2 の結果を使う"},
+                {"dependency_type": "x", "component_refs": [], "reason": ""},  # 両方空は落ちる
+            ],
+            "input_equation_ids": ["eq_1"],
+            "intermediate_equation_ids": ["eq_2"],
+            "output_equation_ids": ["eq_3"],
+            "constraint_equation_ids": [],
+            "definition_equation_ids": [],
+            "linked_equation_ids": ["eq_1", "eq_4"],
+            "linked_claim_ids": ["clm_1", "clm_2"],
+        },
+    ]
+
+    blocks = _content_blocks("", [], components, [], [])
+    comp_block = next(b for b in blocks if b["type"] == "components")
+    item = comp_block["items"][0]
+
+    assert item["narrative_role"] == "この段階は中心主張の前提を与える。"
+    assert item["document_id"] == "doc-1"
+    assert item["preconditions"] == [{"text": "前提A", "claim_ids": ["clm_1"], "equation_ids": []}]
+    assert item["inputs"] == [{"text": "入力A", "claim_ids": [], "equation_ids": ["eq_1"]}]
+    assert item["outputs"] == [{"text": "出力A", "claim_ids": [], "equation_ids": []}]
+    assert item["cautions"] == [{"text": "注意A", "claim_ids": [], "equation_ids": []}]
+    assert item["dependencies"] == [{"type": "requires", "targets": ["comp_2"], "reason": "comp_2 の結果を使う"}]
+    # 役割別リストで初出優先 dedupe。linked_equation_ids のみにある eq_4 は role="linked"。
+    assert item["equations"] == [
+        {"id": "eq_1", "role": "input"},
+        {"id": "eq_2", "role": "intermediate"},
+        {"id": "eq_3", "role": "output"},
+        {"id": "eq_4", "role": "linked"},
+    ]
+    assert item["claims"] == ["clm_1", "clm_2"]
+    # 既存4フィールドは維持（フロント互換）。
+    assert item["component_id"] == "comp_1"
+    assert item["label"] == "ラベル1"
+    assert item["summary"] == "要約1"
+    assert item["teaching_takeaway"] == "要点1"
+
+
+def test_content_blocks_components_projection_defaults_when_fields_absent():
+    """narrative_annotator artifact が無い / ComponentRecord に新フィールドが
+    無い（古い成果物）場合でも空文字・空リストへ縮退し、壊れない。"""
+    from core.course_content_builder import _content_blocks
+
+    components = [{"component_id": "comp_old", "label": "旧ラベル"}]
+    blocks = _content_blocks("", [], components, [], [])
+    item = next(b for b in blocks if b["type"] == "components")["items"][0]
+
+    assert item["narrative_role"] == ""
+    assert item["document_id"] == ""
+    assert item["preconditions"] == []
+    assert item["inputs"] == []
+    assert item["outputs"] == []
+    assert item["cautions"] == []
+    assert item["dependencies"] == []
+    assert item["equations"] == []
+    assert item["claims"] == []
+
+
 def test_detailed_check_questions_fills_legacy_question_fields():
     from core.course_content_builder import _detailed_check_questions
 
@@ -220,6 +301,102 @@ def test_topic_evidence_links_surfaces_component_equation_claim_and_source():
     assert by_key[("source", "ev_1")]["summary"] == "We find that the kernel coefficients are time dependent."
     assert by_key[("source", "ev_1")]["support_role"] == "source_quote"
     assert by_key[("component", "comp_001")]["confidence"] == "high"
+
+
+def test_topic_evidence_links_component_carries_label():
+    """component の根拠リンクは label を持つ（build_topic_evidence_items が
+    title に summary を流用せず label を使えるようにする, Phase 1 §3）。"""
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [{"component_id": "comp_1", "label": "ラベルA", "summary": "要約"}]
+    links = _topic_evidence_links(components, [], {}, {}, "high")
+    by_key = {(l["kind"], l["target_id"]): l for l in links}
+
+    assert by_key[("component", "comp_1")]["label"] == "ラベルA"
+
+
+def test_topic_evidence_links_component_without_label_has_no_label_key():
+    from core.course_content_builder import _topic_evidence_links
+
+    components = [{"component_id": "comp_1", "summary": "要約"}]
+    links = _topic_evidence_links(components, [], {}, {}, "high")
+    by_key = {(l["kind"], l["target_id"]): l for l in links}
+
+    assert "label" not in by_key[("component", "comp_1")]
+
+
+def test_collect_structured_content_joins_narrative_role_from_annotator():
+    """narrative_annotator の node_narratives（component_id は component_assembly と
+    共有する名前空間）から narrative_role を components 投影へ join する
+    （component_evidence_redesign.md Phase 1 §1）。narrative の生 confidence は
+    投影に混ぜない。"""
+    from core.course_content_builder import _collect_structured_content
+
+    artifacts_by_doc = {
+        "doc-1": {
+            "component_assembly": {
+                "components": [
+                    {"component_id": "comp_1", "label": "L1", "confidence": 0.4},
+                    {"component_id": "comp_2", "label": "L2"},
+                ],
+            },
+            "narrative_annotator": {
+                "node_narratives": [
+                    {"component_id": "comp_1", "narrative_role": "導入段階", "reason": "x", "confidence": 0.9},
+                    {"component_id": "comp_missing", "narrative_role": "存在しないコンポーネント"},
+                ],
+            },
+        },
+    }
+
+    bundle = _collect_structured_content(artifacts_by_doc)
+    comp1 = bundle["components"]["comp_1"]
+    comp2 = bundle["components"]["comp_2"]
+
+    assert comp1["narrative_role"] == "導入段階"
+    assert "narrative_role" not in comp2
+    # narrative 由来の生 confidence (0.9) が component 自身の confidence (0.4) を
+    # 上書きしない（投影に narrative の数値を混ぜない）。
+    assert comp1["confidence"] == 0.4
+
+
+def test_collect_structured_content_narrative_artifact_missing_or_malformed_is_skipped():
+    """narrative_annotator artifact が欠落 / dict でない / node_narratives の要素が
+    dict でない場合も静かにスキップされ、例外を投げない（防御的）。"""
+    from core.course_content_builder import _collect_structured_content
+
+    # 1) narrative_annotator キー自体が無い。
+    bundle = _collect_structured_content({
+        "doc-1": {"component_assembly": {"components": [{"component_id": "comp_1", "label": "L1"}]}},
+    })
+    assert "narrative_role" not in bundle["components"]["comp_1"]
+
+    # 2) narrative_annotator が dict でない（壊れた artifact）。
+    bundle = _collect_structured_content({
+        "doc-1": {
+            "component_assembly": {"components": [{"component_id": "comp_1", "label": "L1"}]},
+            "narrative_annotator": "not-a-dict",
+        },
+    })
+    assert "narrative_role" not in bundle["components"]["comp_1"]
+
+    # 3) node_narratives の要素が dict でない。
+    bundle = _collect_structured_content({
+        "doc-1": {
+            "component_assembly": {"components": [{"component_id": "comp_1", "label": "L1"}]},
+            "narrative_annotator": {"node_narratives": ["not-a-dict", None, 42]},
+        },
+    })
+    assert "narrative_role" not in bundle["components"]["comp_1"]
+
+    # 4) narrative_role が空文字（LLM が空を返した）は付与しない。
+    bundle = _collect_structured_content({
+        "doc-1": {
+            "component_assembly": {"components": [{"component_id": "comp_1", "label": "L1"}]},
+            "narrative_annotator": {"node_narratives": [{"component_id": "comp_1", "narrative_role": ""}]},
+        },
+    })
+    assert "narrative_role" not in bundle["components"]["comp_1"]
 
 
 def test_collect_structured_content_flattens_nested_equation_latex():

@@ -965,6 +965,38 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
 `material_id` を使うため、この関数のクエリを変更する際は `material_id` の SELECT を
 落とさないこと。
 
+### component 根拠カードの引用チップ化 + コーススコープ component 文脈API（2026-07-21）
+
+学習UI教材内の `![[component:id]]` / `![[claim:id]]` はブロックカードではなく
+**インラインチップ（⚓）+ クリック展開**で描画する（equation / figure / source のみ
+ブロックカード維持）。正本は `docs/features/component_evidence_redesign.md`（§8 に実装記録）。
+role/confidence（`_best_mapping` の照合来歴 `exact_title|title_similarity|none`）は
+**学習UIに一切出さない** — admin 原稿スタジオのみ日本語ラベル（「根拠 / 対応付け:
+タイトル類似」）で表示する。
+
+- **Phase 1（snapshot 投影・freeze で固定）**: `_content_blocks` の components 投影は
+  従来4フィールド + `narrative_role`（`_artifacts.narrative_annotator` を agent 側
+  component_id で join）/ `document_id` / `preconditions・inputs・outputs・cautions`
+  （text 付き）/ `dependencies`（reason 付き）/ `equations`（役割分類 input/intermediate/
+  output/constraint/definition/linked）/ `claims`。`build_topic_evidence_items` の
+  component item は **title=label（summary 流用禁止）** + rich 投影 `supports` をマージ
+  （旧投影データは劣化許容）。
+- **Phase 2/3（文脈API）**: `GET /api/learning/courses/{course_id}/components/{component_id}/context`
+  （`backend/core/component_context.py`、FastAPI 非import）。図配信 Phase 4 と同型の
+  fail-closed（受講ゲート + document スコープを SQL 内 `ANY(:doc_ids)` で強制 + 404 統一）。
+  component_id は DB UUID / agent ID（`source_scope.legacy_ids`）両対応。DTO =
+  `instance`（component / in_paper（narrative_role 優先順: graph_json["narrative"] →
+  `thesis_context.role_in_thesis` → teaching_takeaway → summary。teaching_takeaway は
+  DB 列に無いため component_assembly artifact 併読）/ supports / explanation（C層
+  teacher_approved のみ・route 側でマージ）/ provenance="course_freeze"）+
+  `shared_part`（confirmed identity link + active L層エントリが揃う場合のみ・無ければ
+  null で枠ごと非表示）+ `graph`（W層 context_lens の 1-hop を candidate 除外で射影・
+  失敗時 null 縮退。フロントは SVG 表示 + component ノードクリックで再フェッチ=「旅」）。
+  confidence キーは再帰除去（W8 相当）。
+- **ガバナンス**: コース公開（freeze）= ソース文書内 1-hop 近傍の露出承認（設計書 §6）。
+- ガードレール: `test_component_context_{core,api}.py` /
+  `test_component_evidence_chips_ui_static.py` / `test_component_evidence_admin_ui_static.py`。
+
 ### カジュアル対話モード + ハンズフリー音声会話（B層）
 
 学習チャットに「気軽に話せる先生」モード（`intent_mode='casual'`）を追加。

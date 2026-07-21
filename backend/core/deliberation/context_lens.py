@@ -43,7 +43,7 @@
 
     ITEM = {
       "element_type": "theory_claim"|"theory_component"|"equation"|"figure"|
-                       "section"|"thesis"|"derivation"|"symbol"|"evidence"|"part",
+                       "section"|"thesis"|"derivation"|"symbol"|"evidence"|"part"|"stage",
       "element_id": str | None,       # None = 表示のみ（非ナビゲーション）
       "document_id": str | None,
       "label": str,
@@ -137,6 +137,9 @@ RELATION_LABELS: dict[str, str] = {
     "uses_equation": "の数式を用いる",
     "relates_to_component": "に関連する",
     "used_by_component": "に利用される",
+    # TheoryOperationGraph の main ステージノードとの claim 交差から導出する上位項目
+    # （課題B）。A層の明示リンクではなく決定論的な集合演算の結果なので candidate。
+    "participates_in_stage": "の理論段階に関与する",
 }
 
 # thesis_reconstruction artifact の support_structure セクション名 → 日本語ラベル
@@ -375,15 +378,26 @@ def _committed_contextual_role(annotations: list[dict[str, Any]]) -> tuple[str |
 def _derive_contextual_role(
     upper_items: list[dict[str, Any]],
     annotations: list[dict[str, Any]],
+    *,
+    fallback_role: str | None = None,
+    fallback_status: str | None = None,
 ) -> tuple[str | None, str]:
     """focus.contextual_role / contextual_role_status を導出する（設計書 §2.2/§3.1）。
 
-    優先順位: 1) 人間が確定した注釈 2) 最初の上位構造項目から機械的に組み立てた
-    事実文 3) 上位構造が一件も無い場合は None + unidentified（推測で穴埋めしない）。
+    優先順位: 1) 人間が確定した注釈 2) 要素が自己記述する役割文（``fallback_role``。
+    コンポーネントの ``thesis_context.role_in_thesis`` のような決定論的に導出済みの
+    役割説明）3) 最初の上位構造項目から機械的に組み立てた事実文 4) 上位構造が一件も無い
+    場合は None + unidentified（推測で穴埋めしない）。
+
+    ``fallback_role`` は本来「この文脈での役割」そのものなので、機械的に組み立てる
+    上位項目ベースの事実文より優先する（ただし人間確定注釈には劣後させる）。
     """
     committed_text, committed_status = _committed_contextual_role(annotations)
     if committed_text:
         return committed_text, committed_status
+    fallback_text = str(fallback_role or "").strip()
+    if fallback_text:
+        return fallback_text, (fallback_status or CONTEXT_STATUS_SOURCE_BACKED)
     if not upper_items:
         return None, CONTEXT_ROLE_STATUS_UNIDENTIFIED
     top = upper_items[0]
@@ -457,6 +471,29 @@ def _equation_label(record: dict[str, Any] | None) -> str:
     return str(text)[:80]
 
 
+def _artifact_claim_text_index(claim_objects: list[dict[str, Any]]) -> dict[str, str]:
+    """ClaimObjectBuilder artifact の ``claims[]`` から「claim_id → 本文」の索引を
+    組み立てる（純粋関数）。
+
+    ``theory_components.evidence_claims`` には DB UUID（remap 済みの親 claim）と
+    agent 側の atomic sub-claim ID（``claim_span_001_sub01`` 形式。sub-claim は
+    theory_claims 行にならないため remap されず素通りする）が混在する。sub-claim ID
+    は ``_claim_id_lookup`` では解決できないため、この索引を DB 未解決 ID の表示ラベル
+    代替源として使う（本文優先・空なら normalized_text）。
+    """
+    index: dict[str, str] = {}
+    for c in claim_objects:
+        if not isinstance(c, dict):
+            continue
+        claim_id = str(c.get("claim_id") or "").strip()
+        if not claim_id:
+            continue
+        text = str(c.get("text") or "").strip() or str(c.get("normalized_text") or "").strip()
+        if text:
+            index[claim_id] = text
+    return index
+
+
 def _claim_object_for(
     claims: list[dict[str, Any]], claim_lookup: dict[str, str], element_id: str
 ) -> dict[str, Any] | None:
@@ -523,6 +560,88 @@ def _thesis_upper_items_for_equation(
     return items
 
 
+def _thesis_context_upper_items(
+    thesis: dict[str, Any] | None,
+    thesis_context: dict[str, Any] | None,
+    document_id: str | None,
+) -> list[dict[str, Any]]:
+    """theory_components.thesis_context.supports_thesis_node_ids を thesis 構造で解決し、
+    コンポーネント → 中心命題 / 支持構造 の上位項目を組み立てる（純粋関数）。
+
+    ``supports_thesis_node_ids`` は component_assembly が claim/equation の重なりから
+    決定論的に導出したノード参照（persistence.py の ``_thesis_ref_nodes`` と同じ
+    ``central_thesis`` / ``support:<section>:<idx>`` 語彙）なので source_backed とする。
+    これがコンポーネントをグラフノードでなくても本文の主な流れ（中心命題・支持構造）へ
+    結びつける主経路である（設計書 §4.2 の「中心命題との関係」）。thesis_reconstruction
+    artifact が無い / 参照先が解決できない場合でもノード ID をそのままラベルにして残す
+    （P4: 情報を落とさない・推測で穴埋めしない）。
+    """
+    if not isinstance(thesis_context, dict):
+        return []
+    node_ids = thesis_context.get("supports_thesis_node_ids")
+    if not isinstance(node_ids, list) or not node_ids:
+        return []
+    thesis = thesis if isinstance(thesis, dict) else {}
+    headline = str(thesis.get("headline_claim") or "").strip() or "中心命題"
+    support = thesis.get("support_structure") if isinstance(thesis.get("support_structure"), dict) else {}
+    status = _status_for_link("explicit")
+    items: list[dict[str, Any]] = []
+    for raw in node_ids:
+        node_id = str(raw or "").strip()
+        if not node_id:
+            continue
+        if node_id == "central_thesis":
+            items.append(_item("thesis", None, document_id, headline, "supports_thesis", status, evidence_refs=[node_id]))
+            continue
+        if node_id.startswith("support:"):
+            parts = node_id.split(":")
+            section_name = parts[1] if len(parts) > 1 else ""
+            idx_raw = parts[2] if len(parts) > 2 else ""
+            section_label = _SUPPORT_SECTION_LABELS.get(section_name, section_name or node_id)
+            label = f"支持構造「{section_label}」"
+            entries = support.get(section_name) if isinstance(support.get(section_name), list) else []
+            entry = None
+            try:
+                entry = entries[int(idx_raw)] if idx_raw != "" else None
+            except (ValueError, IndexError):
+                entry = None
+            if isinstance(entry, dict):
+                excerpt = str(entry.get("text") or "").strip()
+                if excerpt:
+                    label = f"{label}: {excerpt[:60]}"
+            items.append(_item("thesis", None, document_id, label, "supports_thesis", status, evidence_refs=[node_id]))
+            continue
+        # 未知の node id 形式でも落とさず、推測せずそのまま残す（P4）。
+        items.append(_item("thesis", None, document_id, node_id, "supports_thesis", status, evidence_refs=[node_id]))
+    return items
+
+
+def _section_items_from_ids(
+    section_ids: list[str],
+    sections_by_id: dict[str, dict[str, Any]],
+    document_id: str | None,
+) -> list[dict[str, Any]]:
+    """section_id の集合 → 掲載セクション上位項目（純粋関数）。
+
+    ラベル（見出し）が引けない section_id は上位に出さない（節見出しの無い chunk 由来
+    ノイズを本流の位置づけに混ぜない）。掲載セクションは決定論的に辿れるため
+    source_backed。
+    """
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for sid in section_ids:
+        key = str(sid or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        label = _section_label(sections_by_id.get(key))
+        if label:
+            items.append(
+                _item("section", None, document_id, label, "appears_in_section", _status_for_link("explicit"))
+            )
+    return items
+
+
 def _derivation_membership_facts(
     chains: list[dict[str, Any]], document_id: str | None, member_check: Callable[[str], bool]
 ) -> list[dict[str, Any]]:
@@ -570,6 +689,61 @@ def _derivation_membership_facts(
                     _status_for_link("explicit"), evidence_refs=[derivation_id],
                 )
             )
+    return items
+
+
+def _stage_participation_items(
+    graph_nodes: list[dict[str, Any]],
+    claim_lookup: dict[str, str],
+    component_claim_ids: list[Any],
+    document_id: str | None,
+) -> list[dict[str, Any]]:
+    """component の evidence_claims と TheoryOperationGraph の main ステージノードの
+    linked_claim_ids が交差する場合、「この要素はどの理論段階に関与するか」を上位項目
+    として返す（純粋関数。課題B）。
+
+    グラフが component_id を持たない main ノード（``theory_op_XXXX`` 形式・
+    theory_components 行に対応しない集約ノード）へも claim 集合の交差経由で接続できる
+    ようにする。グラフ側の claim id は agent 側 ID のまま（remap されない）、
+    component 側は DB UUID へ remap 済みという表記差を ``claim_lookup``
+    （agent ID → DB UUID、DB UUID は恒等写像）で両辺とも正規化してから比較する。
+
+    対象は ``graph_layer == "main"`` のノードのみ（式単位の ``equation_detail`` /
+    非確定な ``debug`` 層は理論段階の集約ラベルを持たないため対象外。設計書の main/
+    detail 2層分離を尊重する）。
+
+    claim 集合の交差は決定論的な集合演算だが、component_assembly が component と
+    main ノードを直接結ぶ明示リンクを持たない（node は theory_components 行に
+    対応しない）ため、A層の明示リンク（explicit）とは呼べない。したがって
+    relation_status は常に candidate（inferred）に倒す — 図レンズの
+    ``related_component_candidate`` と同じ扱い。
+    """
+    component_ids = {
+        claim_lookup.get(str(cid), str(cid)) for cid in (component_claim_ids or []) if str(cid or "").strip()
+    }
+    if not component_ids:
+        return []
+    items: list[dict[str, Any]] = []
+    for node in graph_nodes:
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("graph_layer") or "main") != "main":
+            continue
+        node_claim_ids = {
+            claim_lookup.get(str(cid), str(cid))
+            for cid in (node.get("linked_claim_ids") or [])
+            if str(cid or "").strip()
+        }
+        overlap = component_ids & node_claim_ids
+        if not overlap:
+            continue
+        label = str(node.get("label") or "").strip() or str(node.get("id") or "")
+        items.append(
+            _item(
+                "stage", None, document_id, label, "participates_in_stage",
+                _status_for_link("inferred"), evidence_refs=sorted(overlap)[:3],
+            )
+        )
     return items
 
 
@@ -668,7 +842,8 @@ def _load_component_row(component_id: str) -> dict[str, Any] | None:
             sa_text(
                 """
                 SELECT id::text AS id, document_id, name, component_type, summary, status,
-                       review_status, dependencies, evidence_claims, source_scope
+                       review_status, dependencies, evidence_claims, source_scope,
+                       thesis_context, source_chunks
                 FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
@@ -682,6 +857,8 @@ def _load_component_row(component_id: str) -> dict[str, Any] | None:
     data["dependencies"] = data.get("dependencies") if isinstance(data.get("dependencies"), list) else []
     data["evidence_claims"] = data.get("evidence_claims") if isinstance(data.get("evidence_claims"), list) else []
     data["source_scope"] = data.get("source_scope") if isinstance(data.get("source_scope"), dict) else {}
+    data["thesis_context"] = data.get("thesis_context") if isinstance(data.get("thesis_context"), dict) else None
+    data["source_chunks"] = data.get("source_chunks") if isinstance(data.get("source_chunks"), list) else []
     return data
 
 
@@ -772,6 +949,30 @@ def _load_components_with_evidence_claims(document_id: str) -> list[dict[str, An
         d["evidence_claims"] = d.get("evidence_claims") if isinstance(d.get("evidence_claims"), list) else []
         result.append(d)
     return result
+
+
+def _chunk_section_ids(chunk_ids: list[str]) -> list[str]:
+    """component.source_chunks（chunk id）→ 掲載セクション id の集合を引く。
+
+    ``source_chunks`` が chunks.id に対応しない値（agent 側 index 等）でも
+    ``id::text = ANY(:ids)`` は単に一致 0 件になるだけで例外にはならない
+    （呼び出し側は best-effort。fail-soft）。section_id が NULL の chunk は除外する。
+    """
+    ids = [str(c) for c in chunk_ids if str(c or "").strip()]
+    if not ids:
+        return []
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT DISTINCT section_id FROM chunks "
+                "WHERE id::text = ANY(:ids) AND section_id IS NOT NULL"
+            ),
+            {"ids": ids},
+        ).fetchall()
+    finally:
+        session.close()
+    return [str(r[0]) for r in rows if r[0]]
 
 
 def _load_component_graph(document_id: str) -> dict[str, list[dict[str, Any]]]:
@@ -1139,6 +1340,17 @@ def _build_component(ref: ElementRef) -> dict[str, Any] | None:
     if not graph.get("nodes"):
         notes.append("component_graph が保存されていないため、上位/下位のグラフ関係を判定できません")
     component_lookup = _safe(lambda: _component_id_lookup(document_id), {})
+    # evidence_claims の解決（課題A）と main ステージノードとの claim 交差判定
+    # （課題B）の両方で使う。
+    claim_lookup = _safe(lambda: _claim_id_lookup(document_id), {})
+
+    # 本流（中心命題・支持構造・掲載セクション）への接続に thesis_reconstruction
+    # artifact と document_structure を使う。読み取り失敗はグラフ由来の上位/下位を
+    # 壊さないよう {} へ縮退させる（W6）。
+    artifacts = _safe(lambda: refs_mod.document_run_artifacts(document_id), {})
+    thesis = artifacts.get("thesis_reconstruction")
+    thesis = thesis if isinstance(thesis, dict) else None
+    headline = str((thesis or {}).get("headline_claim") or "").strip() or "中心命題"
 
     upper: list[dict[str, Any]] = []
     lower: list[dict[str, Any]] = []
@@ -1154,7 +1366,8 @@ def _build_component(ref: ElementRef) -> dict[str, Any] | None:
             )
 
         if node.get("is_thesis_anchor"):
-            upper.append(_item("thesis", None, document_id, "中心命題", "supports_thesis", _status_for_link("explicit")))
+            # thesis_context 由来の central_thesis 項目とラベルを揃えて重複排除させる。
+            upper.append(_item("thesis", None, document_id, headline, "supports_thesis", _status_for_link("explicit")))
 
         for member_raw in node.get("member_component_ids") or []:
             member_db = component_lookup.get(str(member_raw))
@@ -1194,22 +1407,91 @@ def _build_component(ref: ElementRef) -> dict[str, Any] | None:
                 _item("theory_component", dep_db if dep_node else None, document_id, str(label or raw_ref), "requires", _status_for_link("explicit"))
             )
 
-    for claim_id in row.get("evidence_claims") or []:
-        claim_row = _safe(lambda: _claims_by_id([str(claim_id)]), {}).get(str(claim_id))
-        label = claim_row.get("text") if claim_row else str(claim_id)
-        lower.append(
-            _item("theory_claim", str(claim_id) if claim_row else None, document_id, str(label or claim_id)[:80], "backed_by_claim", _status_for_link("explicit"))
+    # evidence_claims の解決（課題A）。theory_components.evidence_claims は DB UUID
+    # （remap 済みの親 claim）と agent 側 atomic sub-claim ID（DB に存在せず remap
+    # されない）が混在するため、まず claim_lookup で解決できる ID だけを1回の
+    # バッチ取得（N+1 回避）にまとめ、解決できない ID は ClaimObjectBuilder artifact
+    # の本文で補い、それも無ければ生ID表示に縮退する（P4: 情報を落とさない）。
+    evidence_claim_ids = [str(c) for c in (row.get("evidence_claims") or []) if str(c or "").strip()]
+    resolved_db_ids: list[str] = []
+    for cid in evidence_claim_ids:
+        db_id = claim_lookup.get(cid)
+        if db_id and db_id not in resolved_db_ids:
+            resolved_db_ids.append(db_id)
+    # DB 取得の失敗をこの1呼び出しだけに絞ることで、失敗しても後段の artifact
+    # フォールバックは影響を受けずに機能する。
+    claim_rows = _safe(lambda: _claims_by_id(resolved_db_ids), {}) if resolved_db_ids else {}
+    artifact_claim_text: dict[str, str] | None = None
+    for cid in evidence_claim_ids:
+        db_id = claim_lookup.get(cid)
+        if db_id:
+            claim_row = claim_rows.get(db_id)
+            label = claim_row.get("text") if claim_row else db_id
+            lower.append(
+                _item("theory_claim", db_id, document_id, str(label or db_id)[:80], "backed_by_claim", _status_for_link("explicit"))
+            )
+            continue
+        if artifact_claim_text is None:
+            artifact_claim_text = _artifact_claim_text_index(_list(artifacts.get("claim_object_builder"), "claims"))
+        artifact_text = artifact_claim_text.get(cid)
+        if artifact_text:
+            lower.append(
+                _item(
+                    "theory_claim", None, document_id, str(artifact_text)[:80], "backed_by_claim",
+                    _status_for_link("explicit"), evidence_refs=[cid],
+                )
+            )
+        else:
+            lower.append(_item("theory_claim", None, document_id, cid, "backed_by_claim", _status_for_link("explicit")))
+
+    # 理論段階（main ステージノード）との claim 交差（課題B）。グラフノードが
+    # ある場合は親 main ノードが member_of 経由で既に上位に出ているため、
+    # node が無い（component_graph 未生成 or ノード非対応）ときだけ追加する。
+    if node is None:
+        upper.extend(
+            _safe(
+                lambda: _stage_participation_items(
+                    graph.get("nodes", []), claim_lookup, evidence_claim_ids, document_id
+                ),
+                [],
+            )
         )
+
+    # 中心命題・支持構造への接続（thesis_context・主軸）。グラフノードでなくても
+    # component_assembly が決定論的に導出した thesis_context から本流へ結びつける。
+    thesis_context = row.get("thesis_context") if isinstance(row.get("thesis_context"), dict) else None
+    thesis_context_items = _thesis_context_upper_items(thesis, thesis_context, document_id)
+    if thesis_context_items and thesis is None and "thesis_reconstruction" not in artifacts:
+        notes.append("thesis_reconstruction artifact が無いため、中心命題との対応はノード参照のみ表示しています")
+    upper.extend(thesis_context_items)
+
+    # 掲載セクション（source_chunks 由来・best-effort）。
+    section_items = _safe(
+        lambda: _section_items_from_ids(
+            _chunk_section_ids([str(c) for c in (row.get("source_chunks") or [])]),
+            _sections_by_id(artifacts),
+            document_id,
+        ),
+        [],
+    )
+    upper.extend(section_items)
 
     upper = _cap_lane(_dedupe_items(upper), notes, "上位構造")
     lower = _cap_lane(_dedupe_items(lower), notes, "下位構造")
 
     annotations = _annotations_for(ELEMENT_THEORY_COMPONENT, ref.element_id, document_id)
-    role_text, role_status = _derive_contextual_role(upper, annotations)
+    role_in_thesis = str((thesis_context or {}).get("role_in_thesis") or "").strip()
+    role_text, role_status = _derive_contextual_role(
+        upper, annotations, fallback_role=role_in_thesis, fallback_status=CONTEXT_STATUS_SOURCE_BACKED
+    )
 
     provenance = [f"theory_components:{ref.element_id}"]
     if node:
         provenance.append("component_graph")
+    if thesis_context_items or role_in_thesis:
+        provenance.append("thesis_context")
+    if section_items:
+        provenance.append("chunks")
 
     focus = {
         "element_type": ELEMENT_THEORY_COMPONENT,
