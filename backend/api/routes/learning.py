@@ -105,6 +105,7 @@ from core.learning_support_agent import (
 )
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
+from core.component_context import build_component_context
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
@@ -2753,3 +2754,84 @@ def get_component_explanations_for_learner(
             "endorsement_label": _endorsement_label(summary),
         })
     return {"component_id": component_id, "explanations": explanations}
+
+
+def _first_approved_component_explanation(component_id: str, course_id: str) -> dict | None:
+    """承認済み(teacher_approved)の component_explanations を1件返す(C層)。
+
+    ``get_component_explanations_for_learner`` と同じ承認条件・course スコープ・
+    並び順（標準優先 → 承認厚み → 作成順）で、先頭1件のみを
+    ``get_course_component_context`` の ``instance.explanation`` に充填する。
+    """
+    from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT e.kind, COALESCE(u.display_name, ''), e.title, e.body,
+                       COALESCE(s.endorser_count, 0), COALESCE(s.strong_count, 0),
+                       COALESCE(s.provisional_count, 0), COALESCE(s.expertise_breadth, 0)
+                FROM component_explanations e
+                LEFT JOIN users u ON u.id = e.author_id
+                LEFT JOIN component_explanation_endorsement_summary s ON s.explanation_id = e.id
+                WHERE e.component_id = CAST(:cid AS uuid)
+                  AND e.course_id = :course_id
+                  AND e.review_status = 'teacher_approved'
+                ORDER BY (e.kind = 'standard') DESC, COALESCE(s.endorser_count, 0) DESC, e.created_at ASC
+                LIMIT 1
+            """),
+            {"cid": component_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return None
+    summary = {
+        "endorser_count": int(row[4] or 0),
+        "strong_count": int(row[5] or 0),
+        "provisional_count": int(row[6] or 0),
+        "expertise_breadth": int(row[7] or 0),
+    }
+    return {
+        "kind": str(row[0] or "personal"),
+        "title": str(row[2] or ""),
+        "body": str(row[3] or ""),
+        "author_name": str(row[1] or ""),
+        "endorsement_label": _endorsement_label(summary),
+    }
+
+
+@router.get("/courses/{course_id}/components/{component_id}/context")
+def get_course_component_context(
+    course_id: str,
+    component_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """コーススコープ component 文脈 API（component_evidence_redesign Phase 2/3）。
+
+    3条件の fail-closed（学習者向け図配信 API
+    ``get_course_figure_image`` の Phase 4 パターンを踏襲）:
+    1. 受講ゲート（``get_accessible_course_data`` — 本人が当該コースを閲覧できる）
+    2. component の document がコースの document 集合
+       （``_course_document_ids``）に含まれる（``core.component_context`` 内の
+       SQL 制約として実施 — コース外文書の component は解決自体が失敗する）
+    3. component 自体が解決できる（DB UUID または agent 側 legacy ID の両方を受理）
+
+    いずれかが欠ければ 404（fail-closed）。承認済み(teacher_approved)の説明が
+    1件あれば ``instance.explanation`` に充填する(C層。承認・共有レイヤーの
+    既存条件をそのまま踏襲し、A/C層のコードは変更しない)。
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    course_document_ids = set(_course_document_ids(course_data))
+    context = build_component_context(component_id, course_id, course_document_ids)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Component not found")
+
+    explanation = _first_approved_component_explanation(context["component_id"], course_id)
+    if explanation is not None:
+        context["instance"]["explanation"] = explanation
+    return context

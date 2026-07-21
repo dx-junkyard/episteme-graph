@@ -234,6 +234,8 @@ class TestSetPending:
         assert skeleton_db.courses["c1"]["data"]["atlas_binding_pending"] == "modified_gravity"
         events = [e for e in skeleton_db.review_events if e.get("entity_type") == "atlas_binding"]
         assert any(e.get("new_status") == "modified_gravity" for e in events)
+        # 監査 action は設計書 §4.2 の契約値 (entity_type で既にスコープ済みのため短命名)
+        assert any(_review_event_action(e) == "pending_set" for e in events)
 
     def test_new_domain_without_frozen_skeleton_is_allowed(self, client, teacher_headers, skeleton_db):
         """凍結骨格がまだ無い (これから generate する) 新分野の指定は許可される。"""
@@ -276,7 +278,7 @@ class TestClearPending:
         _seed_course(skeleton_db, data={"atlas_binding_pending": "modified_gravity", "topics": []})
         client.delete("/api/admin/courses/c1/atlas-binding/pending", headers=teacher_headers)
         events = [e for e in skeleton_db.review_events if e.get("entity_type") == "atlas_binding"]
-        assert any(_review_event_action(e) == "atlas_binding_pending_clear" for e in events)
+        assert any(_review_event_action(e) == "pending_clear" for e in events)
 
 
 @_skip_no_fastapi
@@ -321,6 +323,30 @@ class TestProposeNewFields:
         resp = client.post("/api/admin/courses/c1/atlas-binding/propose", headers=teacher_headers)
         assert resp.status_code == 200, resp.text
         assert resp.json()["atlas_binding_pending"] == ""
+
+    def test_current_retired_flag(self, client, teacher_headers, skeleton_db):
+        """現行バインド先が retired のとき current_retired=True を返す
+        (候補に現れないため、フロントが「維持される・解除は明示操作」を出す材料)。"""
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        _seed_frozen_domain(skeleton_db, "domain_b")
+        _seed_course(skeleton_db, data={"cartridge_id": "domain_b", "topics": []})
+        from core import atlas_store
+
+        atlas_store.retire_domain(skeleton_db, "domain_b", note="")
+        resp = client.post("/api/admin/courses/c1/atlas-binding/propose", headers=teacher_headers)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["current_cartridge_id"] == "domain_b"
+        assert data["current_retired"] is True
+        assert "domain_b" not in {p["domain_key"] for p in data["proposals"]}
+
+    def test_current_retired_false_for_active_binding(self, client, teacher_headers, skeleton_db):
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        _seed_course(skeleton_db, data={"cartridge_id": "domain_a", "topics": []})
+        resp = client.post("/api/admin/courses/c1/atlas-binding/propose", headers=teacher_headers)
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["current_retired"] is False
 
 
 @_skip_no_fastapi
@@ -559,3 +585,134 @@ class TestRetiredReadOnlyGuard:
             "/api/learning/atlas/domain_a/skeleton", headers=student_headers
         )
         assert resp.status_code == 200
+
+
+@_skip_no_fastapi
+class TestDiscardDraft:
+    """DELETE /api/admin/cartridges/{id}/atlas/skeleton/draft (§3.1 後始末)。
+
+    draft は共有物・履歴ではなく作業コピーのため破棄を許可する。ポイントは
+    **retired ドメインでも許可される**こと (retire 後に残った draft の唯一の後始末経路)。
+    """
+
+    def _seed_draft(self, skeleton_db, domain_key="domain_a"):
+        from core import atlas_store
+
+        atlas_store.save_draft(
+            skeleton_db,
+            domain_key,
+            _skeleton(domain_key, status="draft"),
+            expected_revision=None,
+        )
+
+    def test_requires_teacher(self, client, student_headers, skeleton_db):
+        self._seed_draft(skeleton_db)
+        resp = client.delete(
+            "/api/admin/cartridges/domain_a/atlas/skeleton/draft", headers=student_headers
+        )
+        assert resp.status_code == 403
+
+    def test_discards_active_domain_draft(self, client, teacher_headers, skeleton_db):
+        self._seed_draft(skeleton_db)
+        resp = client.delete(
+            "/api/admin/cartridges/domain_a/atlas/skeleton/draft", headers=teacher_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json() == {"cartridge_id": "domain_a", "discarded": True}
+        assert skeleton_db._drafts("domain_a") == []
+
+    def test_discards_retired_domain_draft(self, client, teacher_headers, skeleton_db):
+        """retired でも破棄は許可 (generate/保存/freeze の 409 とは対照的な唯一の書き込み)。"""
+        from core import atlas_store
+
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        self._seed_draft(skeleton_db)
+        atlas_store.retire_domain(skeleton_db, "domain_a", note="実験終了")
+        resp = client.delete(
+            "/api/admin/cartridges/domain_a/atlas/skeleton/draft", headers=teacher_headers
+        )
+        assert resp.status_code == 200, resp.text
+        assert skeleton_db._drafts("domain_a") == []
+        # 凍結版履歴は不変 (AB3)
+        assert skeleton_db._frozen("domain_a")
+
+    def test_no_draft_is_404(self, client, teacher_headers, skeleton_db):
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        resp = client.delete(
+            "/api/admin/cartridges/domain_a/atlas/skeleton/draft", headers=teacher_headers
+        )
+        assert resp.status_code == 404
+
+    def test_audits_discard(self, client, teacher_headers, skeleton_db):
+        self._seed_draft(skeleton_db)
+        client.delete(
+            "/api/admin/cartridges/domain_a/atlas/skeleton/draft", headers=teacher_headers
+        )
+        events = [e for e in skeleton_db.review_events if e.get("entity_type") == "atlas_skeleton"]
+        assert any(_review_event_action(e) == "draft_discard" for e in events)
+
+
+@_skip_no_fastapi
+class TestLifecycleWriteSerialization:
+    """check-then-write 競合の防止 (レビュー v2 P1-2)。
+
+    lifecycle 確認と書き込みは domain 単位の advisory lock で直列化し、
+    セッションを跨ぐ generate / freeze は書き込みトランザクション内で再確認する。
+    """
+
+    def test_generate_rechecks_lifecycle_after_llm(
+        self, client, teacher_headers, skeleton_db, monkeypatch
+    ):
+        """LLM 生成中に別教員が retire したら、draft を保存せず 409 を返す。"""
+        from core import atlas_generator, atlas_store
+
+        def _generate_and_retire(cartridge_id, model=None, domain_meta=None):
+            # LLM 生成に相当する時間の間に retire が割り込んだ状況を決定論的に再現する
+            atlas_store.retire_domain(skeleton_db, cartridge_id, note="生成中に廃止")
+            return _skeleton(cartridge_id, status="draft")
+
+        monkeypatch.setattr(atlas_generator, "generate_skeleton_draft", _generate_and_retire)
+        resp = client.post(
+            "/api/admin/cartridges/race_domain/atlas/skeleton/generate",
+            headers=teacher_headers,
+            json={"domain": {"name": "競合テスト", "description": ""}},
+        )
+        assert resp.status_code == 409, resp.text
+        assert skeleton_db._drafts("race_domain") == []
+
+    def test_freeze_rechecks_lifecycle_before_insert(
+        self, client, teacher_headers, skeleton_db, monkeypatch
+    ):
+        """入口チェックと書き込みの間に retire されたら、凍結版を挿入せず 409 を返す。"""
+        import api.routes.atlas as atlas_routes
+        from core import atlas_store
+
+        atlas_store.save_draft(
+            skeleton_db,
+            "race_domain",
+            _skeleton("race_domain", status="draft"),
+            expected_revision=None,
+        )
+
+        def _retire_then_no_reports(session, cartridge_id):
+            atlas_store.retire_domain(skeleton_db, cartridge_id, note="凍結処理中に廃止")
+            return []
+
+        monkeypatch.setattr(
+            atlas_routes.atlas_reports, "accepted_unapplied_reports", _retire_then_no_reports
+        )
+        resp = client.post(
+            "/api/admin/cartridges/race_domain/atlas/skeleton/freeze",
+            headers=teacher_headers,
+            json={"version": "2026.1", "note": ""},
+        )
+        assert resp.status_code == 409, resp.text
+        assert skeleton_db._frozen("race_domain") == []
+        # draft は失われない (P4: rollback で保持)
+        assert skeleton_db._drafts("race_domain")
+
+    def test_write_paths_take_domain_lock(self, client, teacher_headers, skeleton_db):
+        """retire が advisory lock を取得している (書き込み系との直列化の実在確認)。"""
+        _seed_frozen_domain(skeleton_db, "domain_a")
+        client.post("/api/admin/cartridges/domain_a/atlas/retire", headers=teacher_headers, json={})
+        assert any("pg_advisory_xact_lock" in sql for sql, _ in skeleton_db.calls)

@@ -98,6 +98,9 @@ class TestRelationLabelsCompleteness:
             [{"id": "comp-1", "name": "Apparatus", "review_status": "teacher_approved"}], "doc-1"
         ):
             emitted_relations.add(item["relation"])
+        stage_nodes = [{"id": "theory_op_0001", "graph_layer": "main", "label": "Equation system", "linked_claim_ids": ["c1"]}]
+        for item in context_lens._stage_participation_items(stage_nodes, {"c1": "c1"}, ["c1"], "doc-1"):
+            emitted_relations.add(item["relation"])
 
         assert emitted_relations
         assert emitted_relations <= set(context_lens.RELATION_LABELS)
@@ -223,6 +226,38 @@ class TestDeriveContextualRole:
         assert role == "中心命題" + context_lens.RELATION_LABELS["supports_thesis"]
         assert status == CONTEXT_STATUS_SOURCE_BACKED
 
+    def test_fallback_role_used_over_upper_item_sentence(self):
+        # fallback_role（例: component の role_in_thesis）は「この文脈での役割」そのもの
+        # なので、上位項目から機械的に組み立てる事実文より優先する。
+        upper = [
+            context_lens._item("thesis", None, "doc-1", "中心命題", "supports_thesis", CONTEXT_STATUS_SOURCE_BACKED)
+        ]
+        role, status = context_lens._derive_contextual_role(
+            upper, [], fallback_role="Provides the theoretical basis", fallback_status=CONTEXT_STATUS_SOURCE_BACKED
+        )
+        assert role == "Provides the theoretical basis"
+        assert status == CONTEXT_STATUS_SOURCE_BACKED
+
+    def test_committed_annotation_overrides_fallback_role(self):
+        annotations = [
+            {"status": ANNOTATION_STATUS_COMMITTED, "kind": ANNOTATION_KIND_INTERPRETATION, "body": {"text": "人間確定"}}
+        ]
+        role, status = context_lens._derive_contextual_role(
+            [], annotations, fallback_role="Provides the theoretical basis"
+        )
+        assert role == "人間確定"
+        assert status == CONTEXT_STATUS_CONFIRMED
+
+    def test_fallback_role_prevents_unidentified_even_with_no_upper(self):
+        role, status = context_lens._derive_contextual_role([], [], fallback_role="States the central result")
+        assert role == "States the central result"
+        assert status == CONTEXT_STATUS_SOURCE_BACKED
+
+    def test_blank_fallback_role_is_ignored(self):
+        role, status = context_lens._derive_contextual_role([], [], fallback_role="   ")
+        assert role is None
+        assert status == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+
 
 # ---------------------------------------------------------------------------
 # 縮退: レーン上限（20件）超過時の notes 記録
@@ -340,6 +375,38 @@ class TestClaimObjectFor:
         assert context_lens._claim_object_for(claims, {}, "db-1") is None
 
 
+class TestArtifactClaimTextIndex:
+    """課題A: ClaimObjectBuilder artifact から DB 未解決 claim_id の本文を補う索引。"""
+
+    def test_indexes_by_claim_id_using_text(self):
+        claims = [
+            {"claim_id": "claim_span_001_sub01", "text": "運動量は保存される"},
+            {"claim_id": "claim_span_002_sub01", "text": "別の主張"},
+        ]
+        index = context_lens._artifact_claim_text_index(claims)
+        assert index == {
+            "claim_span_001_sub01": "運動量は保存される",
+            "claim_span_002_sub01": "別の主張",
+        }
+
+    def test_records_without_claim_id_are_skipped(self):
+        claims = [{"text": "claim_id の無い行"}, {"claim_id": "", "text": "空文字の claim_id"}]
+        assert context_lens._artifact_claim_text_index(claims) == {}
+
+    def test_blank_text_falls_back_to_normalized_text(self):
+        claims = [{"claim_id": "claim_span_003_sub01", "text": "  ", "normalized_text": "正規化済み本文"}]
+        assert context_lens._artifact_claim_text_index(claims) == {
+            "claim_span_003_sub01": "正規化済み本文",
+        }
+
+    def test_no_text_and_no_normalized_text_is_omitted(self):
+        claims = [{"claim_id": "claim_span_004_sub01"}]
+        assert context_lens._artifact_claim_text_index(claims) == {}
+
+    def test_non_dict_entries_are_skipped(self):
+        assert context_lens._artifact_claim_text_index([None, "bogus"]) == {}
+
+
 # ---------------------------------------------------------------------------
 # 上位構造: thesis_reconstruction artifact との関係（claim / equation）
 # ---------------------------------------------------------------------------
@@ -384,6 +451,82 @@ class TestThesisUpperItemsForEquation:
         assert context_lens._thesis_upper_items_for_equation(thesis, "eq_999", "doc-1") == []
 
 
+class TestThesisContextUpperItems:
+    """theory_components.thesis_context → 中心命題 / 支持構造 上位項目（B: 上位リンク拡充）。"""
+
+    def test_central_thesis_node_uses_headline_and_is_source_backed(self):
+        thesis = {"headline_claim": "側帯波の共振応答"}
+        thesis_context = {"supports_thesis_node_ids": ["central_thesis"]}
+        items = context_lens._thesis_context_upper_items(thesis, thesis_context, "doc-1")
+        assert len(items) == 1
+        item = items[0]
+        assert item["element_type"] == "thesis"
+        assert item["element_id"] is None
+        assert item["navigable"] is False
+        assert item["relation"] == "supports_thesis"
+        assert item["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED
+        assert item["label"] == "側帯波の共振応答"
+        assert item["evidence_refs"] == ["central_thesis"]
+
+    def test_support_structure_node_is_localized_and_carries_excerpt(self):
+        thesis = {
+            "support_structure": {
+                "assumptions": [{"text": "理想共振条件を仮定する"}],
+            }
+        }
+        thesis_context = {"supports_thesis_node_ids": ["support:assumptions:0"]}
+        items = context_lens._thesis_context_upper_items(thesis, thesis_context, "doc-1")
+        assert len(items) == 1
+        assert items[0]["label"].startswith("支持構造「前提」")
+        assert "理想共振条件を仮定する" in items[0]["label"]
+        assert items[0]["evidence_refs"] == ["support:assumptions:0"]
+
+    def test_missing_thesis_artifact_degrades_to_headline_default(self):
+        thesis_context = {"supports_thesis_node_ids": ["central_thesis", "support:direct_supports:1"]}
+        items = context_lens._thesis_context_upper_items(None, thesis_context, "doc-1")
+        assert [i["label"] for i in items] == ["中心命題", "支持構造「直接支持」"]
+
+    def test_unknown_node_id_form_is_kept_not_guessed(self):
+        thesis_context = {"supports_thesis_node_ids": ["weird_ref_x"]}
+        items = context_lens._thesis_context_upper_items({}, thesis_context, "doc-1")
+        assert len(items) == 1
+        assert items[0]["label"] == "weird_ref_x"
+        assert items[0]["relation"] == "supports_thesis"
+
+    def test_no_node_ids_returns_empty(self):
+        assert context_lens._thesis_context_upper_items({}, {"supports_thesis_node_ids": []}, "doc-1") == []
+        assert context_lens._thesis_context_upper_items({}, None, "doc-1") == []
+        assert context_lens._thesis_context_upper_items({}, {}, "doc-1") == []
+
+    def test_blank_and_non_string_node_ids_are_skipped(self):
+        thesis_context = {"supports_thesis_node_ids": ["", "  ", "central_thesis"]}
+        items = context_lens._thesis_context_upper_items({"headline_claim": "H"}, thesis_context, "doc-1")
+        assert [i["label"] for i in items] == ["H"]
+
+
+class TestSectionItemsFromIds:
+    """source_chunks → 掲載セクション上位項目（B: 上位リンク拡充・副軸）。"""
+
+    def test_resolvable_section_ids_become_source_backed_items(self):
+        sections_by_id = {"s1": {"section_id": "s1", "title": "2. Cavity response"}}
+        items = context_lens._section_items_from_ids(["s1"], sections_by_id, "doc-1")
+        assert len(items) == 1
+        assert items[0]["element_type"] == "section"
+        assert items[0]["relation"] == "appears_in_section"
+        assert items[0]["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED
+        assert items[0]["label"] == "2. Cavity response"
+
+    def test_unlabeled_section_ids_are_dropped(self):
+        # 見出しの引けない section_id は本流の位置づけノイズになるので出さない。
+        items = context_lens._section_items_from_ids(["s_missing"], {}, "doc-1")
+        assert items == []
+
+    def test_duplicate_section_ids_are_collapsed(self):
+        sections_by_id = {"s1": {"section_id": "s1", "title": "Intro"}}
+        items = context_lens._section_items_from_ids(["s1", "s1", ""], sections_by_id, "doc-1")
+        assert len(items) == 1
+
+
 # ---------------------------------------------------------------------------
 # 導出チェーン所属の事実項目（claim / equation 共通ヘルパ）
 # ---------------------------------------------------------------------------
@@ -418,6 +561,79 @@ class TestDerivationMembershipFacts:
 
     def test_non_dict_chain_entries_are_skipped(self):
         assert context_lens._derivation_membership_facts([None, "bogus"], "doc-1", lambda x: True) == []
+
+
+# ---------------------------------------------------------------------------
+# 課題B: TheoryOperationGraph main ステージノードへの claim 交差接続
+# ---------------------------------------------------------------------------
+
+
+class TestStageParticipationItems:
+    def test_overlap_via_claim_lookup_translation_emits_item(self):
+        # グラフ側は agent 側 claim ID のまま、component 側は DB UUID という表記差を
+        # claim_lookup（agent ID → DB UUID、DB UUID は恒等写像）越しに一致させる。
+        graph_nodes = [
+            {
+                "id": "theory_op_0001", "graph_layer": "main",
+                "component_type": "TheoryOperationNode", "label": "Equation system",
+                "linked_claim_ids": ["claim_agent_1"],
+            }
+        ]
+        claim_lookup = {"claim_agent_1": "claim-db-1", "claim-db-1": "claim-db-1"}
+        items = context_lens._stage_participation_items(
+            graph_nodes, claim_lookup, ["claim-db-1"], "doc-1"
+        )
+        assert len(items) == 1
+        item = items[0]
+        assert item["element_type"] == "stage"
+        assert item["element_id"] is None
+        assert item["navigable"] is False
+        assert item["label"] == "Equation system"
+        assert item["relation"] == "participates_in_stage"
+        assert item["relation_status"] == CONTEXT_STATUS_CANDIDATE
+        assert item["evidence_refs"] == ["claim-db-1"]
+
+    def test_equation_detail_and_debug_layers_are_ignored(self):
+        graph_nodes = [
+            {"id": "eq-step-1", "graph_layer": "equation_detail", "linked_claim_ids": ["c1"], "label": "step"},
+            {"id": "fallback-1", "graph_layer": "debug", "linked_claim_ids": ["c1"], "label": "fallback"},
+        ]
+        items = context_lens._stage_participation_items(graph_nodes, {"c1": "c1"}, ["c1"], "doc-1")
+        assert items == []
+
+    def test_no_overlap_returns_empty(self):
+        graph_nodes = [{"id": "theory_op_0002", "graph_layer": "main", "linked_claim_ids": ["c9"], "label": "Elimination"}]
+        items = context_lens._stage_participation_items(graph_nodes, {}, ["c1"], "doc-1")
+        assert items == []
+
+    def test_no_component_claim_ids_returns_empty_without_scanning(self):
+        graph_nodes = [{"id": "theory_op_0003", "graph_layer": "main", "linked_claim_ids": ["c1"], "label": "X"}]
+        assert context_lens._stage_participation_items(graph_nodes, {}, [], "doc-1") == []
+
+    def test_falls_back_to_node_id_when_label_blank(self):
+        graph_nodes = [{"id": "theory_op_0004", "graph_layer": "main", "linked_claim_ids": ["c1"], "label": ""}]
+        items = context_lens._stage_participation_items(graph_nodes, {"c1": "c1"}, ["c1"], "doc-1")
+        assert items[0]["label"] == "theory_op_0004"
+
+    def test_missing_graph_layer_defaults_to_main(self):
+        # normalizer.py の既存規約（getattr default "main"）に合わせ、graph_layer が
+        # 無いノードも main として扱う（後方互換）。
+        graph_nodes = [{"id": "theory_op_0005", "linked_claim_ids": ["c1"], "label": "Legacy stage"}]
+        items = context_lens._stage_participation_items(graph_nodes, {"c1": "c1"}, ["c1"], "doc-1")
+        assert len(items) == 1
+
+    def test_evidence_refs_capped_at_three_and_sorted(self):
+        graph_nodes = [
+            {
+                "id": "theory_op_0006", "graph_layer": "main", "label": "Consistency relation",
+                "linked_claim_ids": ["c1", "c2", "c3", "c4"],
+            }
+        ]
+        items = context_lens._stage_participation_items(
+            graph_nodes, {}, ["c1", "c2", "c3", "c4"], "doc-1"
+        )
+        assert len(items) == 1
+        assert items[0]["evidence_refs"] == ["c1", "c2", "c3"]
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +1138,326 @@ class TestBuildClaimWiring:
         assert len(matches) == 1
         assert matches[0]["element_id"] == "fig-uuid-1"
         assert matches[0]["label"] == "Figure 3.1: apparatus diagram."
+
+
+# ---------------------------------------------------------------------------
+# B: コンポーネント上位リンク拡充（thesis_context / section）の統合配線
+# ---------------------------------------------------------------------------
+
+
+class TestBuildComponentUpperFromThesisContext:
+    """グラフノードでない component でも thesis_context から本流へ結びつく（B）。"""
+
+    def _component_row(self):
+        # 画面再現: component_graph にノードが無く、evidence_claims は agent 側 span ID
+        # のまま（DB claim に解決できない）。thesis_context が本流への唯一の橋になる。
+        return {
+            "id": "comp-db-1",
+            "document_id": "doc-1",
+            "name": "Ideal resonance assumptions",
+            "component_type": "theory",
+            "summary": "Sets the resonance and approximation regime.",
+            "status": "candidate",
+            "review_status": "teacher_review_required",
+            "dependencies": [],
+            "evidence_claims": ["claim_span_001_sub01"],
+            "source_scope": {"legacy_ids": ["comp-agent-1"]},
+            "thesis_context": {
+                "role_in_thesis": "Provides the theoretical basis",
+                "supports_thesis_node_ids": ["central_thesis", "support:assumptions:0"],
+                "support_role": "assumption",
+                "support_distance_to_headline_claim": 2,
+            },
+            "source_chunks": ["chunk-1"],
+        }
+
+    def _patch(self, monkeypatch, *, artifacts):
+        monkeypatch.setattr(context_lens, "_load_component_row", lambda _id: self._component_row())
+        # component_graph は空（node is None）— 画面のケースを再現する。
+        monkeypatch.setattr(context_lens, "_load_component_graph", lambda _doc: {"nodes": [], "edges": []})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: artifacts)
+        # evidence_claims は解決できない（screenshot 同様、ID そのまま）。
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claims_by_id", lambda _ids: {})
+        monkeypatch.setattr(context_lens, "_chunk_section_ids", lambda _ids: ["s1"])
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        # build() が触る generic ブロックは DB を叩かないよう空リンクに固定。
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *_a, **_k: [])
+
+    def _ref(self):
+        return ElementRef(
+            scope="document", element_type=ELEMENT_THEORY_COMPONENT,
+            element_id="comp-db-1", document_id="doc-1",
+        )
+
+    def test_thesis_context_produces_upper_and_role(self, monkeypatch):
+        artifacts = {
+            "thesis_reconstruction": {
+                "headline_claim": "側帯波の共振応答",
+                "support_structure": {"assumptions": [{"text": "理想共振条件を仮定する"}]},
+            },
+            "document_structure": {"sections": [{"section_id": "s1", "title": "2. Cavity response"}]},
+        }
+        self._patch(monkeypatch, artifacts=artifacts)
+
+        result = context_lens.build(self._ref())
+
+        # 上位が「未同定」ではなくなる: 中心命題 + 支持構造への接続が出る。
+        thesis_items = [i for i in result["upper"] if i["element_type"] == "thesis"]
+        labels = {i["label"] for i in thesis_items}
+        assert "側帯波の共振応答" in labels
+        assert any(l.startswith("支持構造「前提」") for l in labels)
+        assert all(i["relation"] == "supports_thesis" for i in thesis_items)
+        assert all(i["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED for i in thesis_items)
+
+        # 掲載セクションも副軸として出る。
+        assert any(
+            i["element_type"] == "section" and i["label"] == "2. Cavity response"
+            for i in result["upper"]
+        )
+
+        # この文脈での役割は role_in_thesis を採用（未同定にならない）。
+        assert result["focus"]["contextual_role"] == "Provides the theoretical basis"
+        assert result["focus"]["contextual_role_status"] == CONTEXT_STATUS_SOURCE_BACKED
+        assert "thesis_context" in result["focus"]["provenance"]
+        assert "chunks" in result["focus"]["provenance"]
+
+    def test_role_in_thesis_without_node_ids_still_sets_role(self, monkeypatch):
+        row = self._component_row()
+        row["thesis_context"] = {"role_in_thesis": "States the central result"}
+        monkeypatch.setattr(context_lens, "_load_component_row", lambda _id: row)
+        monkeypatch.setattr(context_lens, "_load_component_graph", lambda _doc: {"nodes": [], "edges": []})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claims_by_id", lambda _ids: {})
+        monkeypatch.setattr(context_lens, "_chunk_section_ids", lambda _ids: [])
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *_a, **_k: [])
+
+        result = context_lens.build(self._ref())
+
+        # supports_thesis_node_ids が無くても、役割説明で「未同定」を脱する。
+        assert result["focus"]["contextual_role"] == "States the central result"
+        assert result["focus"]["contextual_role_status"] == CONTEXT_STATUS_SOURCE_BACKED
+
+    def test_no_thesis_context_stays_unidentified(self, monkeypatch):
+        row = self._component_row()
+        row["thesis_context"] = None
+        row["source_chunks"] = []
+        monkeypatch.setattr(context_lens, "_load_component_row", lambda _id: row)
+        monkeypatch.setattr(context_lens, "_load_component_graph", lambda _doc: {"nodes": [], "edges": []})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claims_by_id", lambda _ids: {})
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *_a, **_k: [])
+
+        result = context_lens.build(self._ref())
+
+        # thesis_context も上位も無ければ従来どおり未同定（推測で埋めない）。
+        assert not [i for i in result["upper"] if i["element_type"] == "thesis"]
+        assert result["focus"]["contextual_role_status"] == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+        assert "thesis_context" not in result["focus"]["provenance"]
+
+
+# ---------------------------------------------------------------------------
+# 課題A: evidence_claims 解決の統合配線（バッチ取得 + artifact フォールバック）
+# ---------------------------------------------------------------------------
+
+
+class TestBuildComponentEvidenceClaimsResolution:
+    """theory_components.evidence_claims は DB UUID（remap 済みの親 claim）と agent 側
+    atomic sub-claim ID の混在。DB 解決可能な ID は1回のバッチ取得、それ以外は
+    ClaimObjectBuilder artifact の本文、どちらも無ければ生ID表示に縮退する。"""
+
+    def _component_row(self):
+        return {
+            "id": "comp-db-1",
+            "document_id": "doc-1",
+            "name": "Some component",
+            "component_type": "theory",
+            "summary": "",
+            "status": "candidate",
+            "review_status": "teacher_review_required",
+            "dependencies": [],
+            "evidence_claims": ["claim-db-1", "claim_span_001_sub01", "claim-totally-unknown"],
+            "source_scope": {},
+            "thesis_context": None,
+            "source_chunks": [],
+        }
+
+    def _ref(self):
+        return ElementRef(
+            scope="document", element_type=ELEMENT_THEORY_COMPONENT,
+            element_id="comp-db-1", document_id="doc-1",
+        )
+
+    def test_resolves_db_artifact_and_raw_id_fallbacks_in_order(self, monkeypatch):
+        artifacts = {
+            "claim_object_builder": {
+                "claims": [{"claim_id": "claim_span_001_sub01", "text": "サブ主張の本文"}],
+            },
+        }
+        claims_by_id_calls: list[list[str]] = []
+
+        def fake_claims_by_id(ids):
+            claims_by_id_calls.append(list(ids))
+            return {"claim-db-1": {"text": "親主張の本文"}}
+
+        monkeypatch.setattr(context_lens, "_load_component_row", lambda _id: self._component_row())
+        monkeypatch.setattr(context_lens, "_load_component_graph", lambda _doc: {"nodes": [], "edges": []})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: artifacts)
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {"claim-db-1": "claim-db-1"})
+        monkeypatch.setattr(context_lens, "_claims_by_id", fake_claims_by_id)
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *_a, **_k: [])
+
+        result = context_lens.build(self._ref())
+
+        claim_items = [i for i in result["lower"] if i["element_type"] == "theory_claim"]
+        assert len(claim_items) == 3
+        resolved, artifact_backed, unknown = claim_items
+
+        assert resolved["element_id"] == "claim-db-1"
+        assert resolved["label"] == "親主張の本文"
+        assert resolved["navigable"] is True
+        assert resolved["relation"] == "backed_by_claim"
+        assert resolved["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED
+        assert resolved["evidence_refs"] == []
+
+        assert artifact_backed["element_id"] is None
+        assert artifact_backed["label"] == "サブ主張の本文"
+        assert artifact_backed["navigable"] is False
+        assert artifact_backed["evidence_refs"] == ["claim_span_001_sub01"]
+
+        assert unknown["element_id"] is None
+        assert unknown["label"] == "claim-totally-unknown"
+        assert unknown["navigable"] is False
+        assert unknown["evidence_refs"] == []
+
+        # N+1 回避: 3件の evidence_claims に対しバッチ取得は1回だけ。
+        assert len(claims_by_id_calls) == 1
+        assert claims_by_id_calls[0] == ["claim-db-1"]
+
+    def test_db_fetch_failure_still_allows_artifact_fallback(self, monkeypatch):
+        # _claims_by_id が例外を投げても（_safe が1呼び出しだけに握る粒度のため）、
+        # artifact フォールバックは独立して機能する。
+        row = self._component_row()
+        row["evidence_claims"] = ["claim-db-1", "claim_span_001_sub01"]
+        artifacts = {
+            "claim_object_builder": {
+                "claims": [{"claim_id": "claim_span_001_sub01", "text": "サブ主張の本文"}],
+            },
+        }
+
+        def boom(_ids):
+            raise RuntimeError("simulated DB outage")
+
+        monkeypatch.setattr(context_lens, "_load_component_row", lambda _id: row)
+        monkeypatch.setattr(context_lens, "_load_component_graph", lambda _doc: {"nodes": [], "edges": []})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: artifacts)
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {"claim-db-1": "claim-db-1"})
+        monkeypatch.setattr(context_lens, "_claims_by_id", boom)
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *_a, **_k: [])
+
+        result = context_lens.build(self._ref())
+
+        claim_items = [i for i in result["lower"] if i["element_type"] == "theory_claim"]
+        assert len(claim_items) == 2
+        # DB 取得は失敗したので、解決できた ID は生 db_id ラベルへ縮退する（P4）。
+        assert claim_items[0]["element_id"] == "claim-db-1"
+        assert claim_items[0]["label"] == "claim-db-1"
+        # 一方、未解決 ID の artifact フォールバックは失敗の影響を受けない。
+        assert claim_items[1]["label"] == "サブ主張の本文"
+
+
+# ---------------------------------------------------------------------------
+# 課題B: TheoryOperationGraph main ステージノードへの claim 交差接続（統合配線）
+# ---------------------------------------------------------------------------
+
+
+class TestBuildComponentStageParticipation:
+    """node が無い component でも main ステージノードとの claim 交差で「どの理論段階に
+    関与するか」を upper に出す。node があるときは member_of 経由で親 main ノードが
+    既に出るため、stage 参加項目は追加しない。"""
+
+    def _component_row(self, *, evidence_claims):
+        return {
+            "id": "comp-db-1",
+            "document_id": "doc-1",
+            "name": "Some component",
+            "component_type": "theory",
+            "summary": "",
+            "status": "candidate",
+            "review_status": "teacher_review_required",
+            "dependencies": [],
+            "evidence_claims": evidence_claims,
+            "source_scope": {},
+            "thesis_context": None,
+            "source_chunks": [],
+        }
+
+    def _ref(self):
+        return ElementRef(
+            scope="document", element_type=ELEMENT_THEORY_COMPONENT,
+            element_id="comp-db-1", document_id="doc-1",
+        )
+
+    def _patch(self, monkeypatch, *, row, graph_nodes, claim_lookup):
+        monkeypatch.setattr(context_lens, "_load_component_row", lambda _id: row)
+        monkeypatch.setattr(context_lens, "_load_component_graph", lambda _doc: {"nodes": graph_nodes, "edges": []})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: dict(claim_lookup))
+        monkeypatch.setattr(context_lens, "_claims_by_id", lambda _ids: {})
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        monkeypatch.setattr(context_lens.identity_links_mod, "list_for_instance", lambda *_a, **_k: [])
+
+    def test_node_is_none_emits_stage_participation_item(self, monkeypatch):
+        row = self._component_row(evidence_claims=["claim-db-1"])
+        # グラフ側は agent 側 claim ID（linked_claim_ids は remap されない）。
+        graph_nodes = [
+            {
+                "id": "theory_op_0001", "graph_layer": "main",
+                "component_type": "TheoryOperationNode", "label": "Equation system",
+                "linked_claim_ids": ["claim_agent_1"],
+            }
+        ]
+        claim_lookup = {"claim_agent_1": "claim-db-1", "claim-db-1": "claim-db-1"}
+        self._patch(monkeypatch, row=row, graph_nodes=graph_nodes, claim_lookup=claim_lookup)
+
+        result = context_lens.build(self._ref())
+
+        stage_items = [i for i in result["upper"] if i["element_type"] == "stage"]
+        assert len(stage_items) == 1
+        assert stage_items[0]["label"] == "Equation system"
+        assert stage_items[0]["element_id"] is None
+        assert stage_items[0]["navigable"] is False
+        assert stage_items[0]["relation"] == "participates_in_stage"
+        assert stage_items[0]["relation_status"] == CONTEXT_STATUS_CANDIDATE
+
+    def test_node_present_suppresses_stage_participation(self, monkeypatch):
+        row = self._component_row(evidence_claims=["claim-db-1"])
+        graph_nodes = [
+            # 自身が equation_detail ノードとしてグラフに存在する（node is not None）。
+            {"id": "comp-db-1", "graph_layer": "equation_detail", "label": "step", "linked_claim_ids": []},
+            {
+                "id": "theory_op_0001", "graph_layer": "main", "label": "Equation system",
+                "linked_claim_ids": ["claim_agent_1"],
+            },
+        ]
+        claim_lookup = {"claim_agent_1": "claim-db-1", "claim-db-1": "claim-db-1"}
+        self._patch(monkeypatch, row=row, graph_nodes=graph_nodes, claim_lookup=claim_lookup)
+
+        result = context_lens.build(self._ref())
+
+        assert not [i for i in result["upper"] if i["element_type"] == "stage"]
 
 
 # ---------------------------------------------------------------------------

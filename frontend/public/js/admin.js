@@ -3815,6 +3815,10 @@
   }
 
   // ── 分野の地図 — 骨格レビュー・凍結 (Issue A-3) ─────────────────────
+  // initAtlas の外から「この分野にフォーカスしてタブを開く」ために使う関数。
+  // initAtlas 実行前（タブ未初期化）は null のまま。
+  var atlasAdminFocusDomain = null;
+
   function initAtlas() {
     var select = document.getElementById("atlas-cartridge-select");
     if (!select) return;
@@ -3855,6 +3859,8 @@
     // ドメインライフサイクル（migration 057）: domain_key → "active" | "retired"
     // meta 行の無いドメイン（同梱カートリッジ等）は active とみなす（未登録キーは既定 active）。
     var domainLifecycles = {};
+    // タブ外（コースビルダー導線等）から特定分野へフォーカスして開くための予約キー。
+    var pendingFocusKey = null;
 
     // retired 中は生成・保存・凍結を無効化し、retire/restore ボタンの表示を切り替える。
     function updateLifecycleUI() {
@@ -4359,15 +4365,37 @@
             addDomainOption(k, label);
           });
           cartridgesLoaded = true;
-          if (sorted.length === 1) {
+          if (pendingFocusKey && keys[pendingFocusKey]) {
+            select.value = pendingFocusKey;
+            pendingFocusKey = null;
+            loadState();
+          } else if (sorted.length === 1) {
+            pendingFocusKey = null;
             select.value = sorted[0];
             loadState();
           } else {
+            pendingFocusKey = null;
             updateLifecycleUI();
           }
         })
         .catch(function () { setStatus("分野一覧の取得に失敗しました", true); });
     }
+
+    // タブ外（コースビルダーの「このコースから新しい分野マップを作る」導線等）から
+    // 特定分野へフォーカスして「分野の地図」タブを開くための入口。
+    // 一覧は毎回取り直す（生成直後で新分野がまだ選択肢に無い可能性があるため）。
+    function focusDomain(domainKey) {
+      if (!domainKey) return;
+      pendingFocusKey = domainKey;
+      cartridgesLoaded = false;
+      for (var i = select.options.length - 1; i >= 0; i--) {
+        if (select.options[i].value !== "") select.remove(i);
+      }
+      select.value = "";
+      loadCartridges();
+      loadAtlasCourses();
+    }
+    atlasAdminFocusDomain = focusDomain;
 
     function loadAtlasCourses() {
       apiFetch("/admin/courses")
@@ -4544,8 +4572,51 @@
         .catch(function (err) { setStatus("保存に失敗しました: " + err.message, true); throw err; });
     }
 
-    document.getElementById("atlas-save-draft").addEventListener("click", function () {
+    var saveDraftBtnEl = document.getElementById("atlas-save-draft");
+    saveDraftBtnEl.addEventListener("click", function () {
       saveDraft().catch(function () {});
+    });
+
+    // 下書きを破棄（レビュー2回目 修正1）: draft は作業コピーなので、retired（廃止済み）
+    // ドメインでも破棄は許可する（後始末の手段）。admin.html には触れず JS 側で
+    // 「次版を保存」ボタンの隣に生成する。draft が無いときは atlas-draft-area 自体が
+    // display:none になるため、この場所に置けば自然に非表示になる。
+    var discardDraftBtn = document.createElement("button");
+    discardDraftBtn.type = "button";
+    discardDraftBtn.id = "atlas-discard-draft";
+    discardDraftBtn.className = "admin-action-btn";
+    discardDraftBtn.textContent = "下書きを破棄";
+    saveDraftBtnEl.parentNode.insertBefore(discardDraftBtn, saveDraftBtnEl.nextSibling);
+    discardDraftBtn.addEventListener("click", function () {
+      if (!select.value) return;
+      if (!confirm("現在の下書きを破棄します。凍結済みの版と学習者の表示には影響しません。よろしいですか？")) return;
+      var key = select.value;
+      discardDraftBtn.disabled = true;
+      apiFetch("/admin/cartridges/" + encodeURIComponent(key) + "/atlas/skeleton/draft", { method: "DELETE" })
+        .then(function (res) {
+          if (res.status === 404) {
+            discardDraftBtn.disabled = false;
+            setStatus("破棄する下書きがありません", true);
+            return null;
+          }
+          return res.json().then(function (body) {
+            if (!res.ok) {
+              var detail = body.detail;
+              throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
+            }
+            return body;
+          });
+        })
+        .then(function (body) {
+          discardDraftBtn.disabled = false;
+          if (!body) return;
+          setStatus("下書きを破棄しました");
+          loadState();
+        })
+        .catch(function (err) {
+          discardDraftBtn.disabled = false;
+          setStatus("破棄に失敗しました: " + err.message, true);
+        });
     });
 
     // AIアシスト提案の適用: 提案後の骨格 dict を editor へ反映し、保存フローに乗せる
@@ -4694,6 +4765,11 @@
     var noMatch = !data.recommended && !data.current_cartridge_id;
     var domainsChecked = (data.domains_checked != null) ? data.domains_checked : proposals.length;
     var retiredSkipped = data.retired_skipped || 0;
+    // 現行バインドが候補一覧に無い場合（廃止済み分野など）、保存すると無言で解除されて
+    // しまうため、明示の事実文で伝える。current_retired はバックエンド propose 応答の
+    // 追加フィールド（未定義でも動作する）。
+    var currentKey = data.current_cartridge_id || "";
+    var currentMissing = !!(currentKey && !byKey[currentKey]);
 
     var html = "";
 
@@ -4714,6 +4790,18 @@
         "</div>";
     } else if (!proposals.length) {
       html += "<div style='color:var(--color-text-tertiary);font-size:12.5px;margin-bottom:8px'>凍結済みの骨格がありません。下記から新しい分野マップを作るか、「分野の地図」タブで骨格を生成・凍結してください。</div>";
+    }
+
+    // 現行バインドが候補に無い（廃止済み等）場合の事実文。保存しない限り現状維持であることを
+    // 明示し、無言の解除を防ぐ（AB1: 事実文のみ・警告色にしない）。
+    if (currentMissing) {
+      html += "<div data-role='ab-current-missing-note' style='color:var(--color-text-secondary);font-size:12.5px;margin-bottom:8px'>" +
+        (data.current_retired === true
+          ? "現在バインドされている分野『" + escHtml(currentKey) + "』は廃止済みのため、候補には表示されません。"
+          : "現在バインドされている分野『" + escHtml(currentKey) + "』は候補にありません。") +
+        "<br>保存しない限り現在のバインドは維持されます（学習者の地図表示は変わりません）。" +
+        "解除するには「（バインドしない）」を選んで保存してください。" +
+        "</div>";
     }
 
     html += "<div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px'>";
@@ -4832,6 +4920,14 @@
         );
         if (!okToSave) return;
       }
+      // 現行バインドが候補に無い（廃止済み等）まま「（バインドしない）」で保存しようとした
+      // ときは、無言の解除にならないよう明示確認を挟む（上記0一致確認とは独立の分岐）。
+      if (currentMissing && !domainSelect.value) {
+        var okToUnbind = window.confirm(
+          "現在のバインド（分野『" + currentKey + "』）とトピックの対応をすべて解除します。よろしいですか？"
+        );
+        if (!okToUnbind) return;
+      }
       setStatus("保存中...");
       apiFetch("/admin/courses/" + encodeURIComponent(courseId) + "/atlas-binding", {
         method: "PUT",
@@ -4931,6 +5027,15 @@
                 if (openAtlasBtn) {
                   openAtlasBtn.addEventListener("click", function () {
                     if (typeof activateTabView === "function") activateTabView("atlas");
+                    // タブの実クリックハンドラ (onTabActivate) は activateTabView からは
+                    // 発火しないため、新分野へフォーカスして一覧・状態を明示的に読み込む。
+                    // initAtlas 未実行環境（タブ未初期化）へのフォールバックはタブの実クリック。
+                    if (atlasAdminFocusDomain) {
+                      atlasAdminFocusDomain(key);
+                    } else {
+                      var tabBtn = document.querySelector('.admin-tab[data-tab="atlas"]');
+                      if (tabBtn) tabBtn.click();
+                    }
                   });
                 }
               })
@@ -4985,6 +5090,10 @@
     var bodyEl = document.getElementById("atlas-binding-body");
     var statusEl = document.getElementById("atlas-binding-status");
     var coursesLoaded = false;
+    // コース起点の新分野作成フォームに prefill するための title/description。
+    // コースビルダー承認直後の導線 (atlasBindingPropose の呼び出し箇所を参照) と同じ
+    // options 形にして atlasBindingRenderEditor へ渡す。
+    var courseMeta = {};
 
     function loadCourses() {
       if (coursesLoaded) return;
@@ -4994,8 +5103,17 @@
           (courses || []).forEach(function (c) {
             var opt = document.createElement("option");
             opt.value = c.id;
-            opt.textContent = c.title + " (" + c.id + ")";
+            var label = c.title + " (" + c.id + ")";
+            // atlas-binding の propose/save/pending は所有者または SYSTEM_ADMIN のみ許可
+            // （バックエンド側ゲート）。viewer/editor のコースは選んでも 403 になるため、
+            // 選択肢の時点で操作不可を明示する（SYSTEM_ADMIN は全コース操作可なので除外しない）。
+            if (c.role !== "owner" && state.role !== "SYSTEM_ADMIN") {
+              opt.disabled = true;
+              label += "（所有者のみ操作できます）";
+            }
+            opt.textContent = label;
             select.appendChild(opt);
+            courseMeta[c.id] = { title: c.title || "", description: c.description || "" };
           });
           coursesLoaded = true;
         })
@@ -5008,7 +5126,11 @@
         statusEl.style.color = "var(--color-text-danger, #e53935)";
         return;
       }
-      atlasBindingPropose(select.value, bodyEl, statusEl);
+      var meta = courseMeta[select.value] || {};
+      atlasBindingPropose(select.value, bodyEl, statusEl, null, {
+        courseTitle: meta.title || "",
+        courseDescription: meta.description || "",
+      });
     });
     onTabActivate("atlas", loadCourses);
   }

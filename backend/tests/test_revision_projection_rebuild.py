@@ -190,6 +190,16 @@ def test_revision_graph_still_rejects_unresolved_ordinary_component_node():
         )
 
 
+def test_delete_component_graph_issues_scoped_delete_and_commits(monkeypatch):
+    # フル再解析経路（orchestrator）で components 再生成・graph スキップ時に呼ばれる。
+    session = _RebuildSession()
+    monkeypatch.setattr(persistence, "_pg_session", lambda: session)
+    persistence.delete_component_graph("doc-9")
+    assert session.committed is True
+    assert any("DELETE FROM theory_component_graphs" in s for s in session.sql)
+    assert session.params[0]["doc"] == "doc-9"
+
+
 # --- full accept transaction ----------------------------------------------
 
 def _candidate():
@@ -228,6 +238,30 @@ def test_accept_rebuilds_all_projections_in_one_transaction(monkeypatch):
     )
     stored_graph = json.loads(graph_params["graph"])
     assert stored_graph["nodes"][0]["node_id"] == "dbcomp1"
+
+
+def test_accept_deletes_stale_graph_when_candidate_has_no_graph(monkeypatch):
+    # 候補に component_graph が無い場合: components は作り直される（新UUID）が
+    # グラフは作り直せない → 旧UUIDを指す stale グラフを残さないよう、明示的に
+    # DELETE FROM theory_component_graphs を発行して整合させる。
+    candidate = _candidate()
+    candidate.pop("component_graph")
+    session = _RebuildSession(
+        ids=["dbclaim1", "dbcomp1"], switch_rowcount=1,
+        lock_row=("running", "proposed", "base-1", "revision"),
+    )
+    monkeypatch.setattr(persistence, "_pg_session", lambda: session)
+    out = persistence.accept_revision(
+        document_id="doc-1", run_id="rev-1", expected_base_run_id="base-1",
+        candidate_artifacts=candidate,
+    )
+    assert out["accepted"] is True
+    assert session.committed is True
+    graph_stmts = [s for s in session.sql if "theory_component_graphs" in s]
+    # グラフ再構築（INSERT ... ON CONFLICT）ではなく DELETE だけが発行される。
+    assert graph_stmts, "expected a theory_component_graphs statement"
+    assert all("DELETE FROM theory_component_graphs" in s for s in graph_stmts)
+    assert not any("INSERT INTO theory_component_graphs" in s for s in graph_stmts)
 
 
 def test_accept_rolls_back_when_projection_fails(monkeypatch):

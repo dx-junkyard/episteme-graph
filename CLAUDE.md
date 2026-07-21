@@ -498,17 +498,23 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
 - **バインディングの該当なしUX + ドメインライフサイクル（migration 057）**: 正本は
   `docs/features/atlas_binding_lifecycle_design.md`（一致ゼロは正常な状態＝発見、AB1）。
   ①propose は retired ドメインを除外し `domains_checked` / `retired_skipped` /
-  `atlas_binding_pending` を返す。0一致時のフロント既定は「バインドしない」
-  （proposals[0] への fallback は廃止）で、出口3つ（手動対応 / 後回し=G層 To-Do /
-  コース起点の新分野作成）。topic 対応 0 件のまま cartridge_id を保存する時はフロントで
-  事実文 confirm（明示バインドのゲート免除自体は維持）。②新分野作成は
+  `atlas_binding_pending` / `current_retired` を返す。0一致時のフロント既定は
+  「バインドしない」（proposals[0] への fallback は廃止）で、出口3つ（手動対応 /
+  後回し=G層 To-Do / コース起点の新分野作成）。topic 対応 0 件のまま cartridge_id を
+  保存する時と、候補に無い現行バインド（retired）を空選択で解除する時は、フロントで
+  事実文 confirm（明示バインドのゲート免除自体は維持。retired な現行バインドは
+  保存しない限り維持される — 設計書 §2.5）。②新分野作成は
   `PUT .../atlas-binding/pending`（`course_data.atlas_binding_pending`。読みは
   `course_data.course_atlas_binding_pending`）→ 既存 generate（body.domain）の順。
   バインド保存（解除含む）で pending は自動クリア。③ドメインは
   `atlas_domain_meta.lifecycle`（active/retired）で `POST .../atlas/retire|restore`。
   retired は propose 候補から除外・generate/draft保存/freeze は 409（読み取り専用、
   L層 retired と同型）・**学習者表示は不変**（バインド済みコースの地図は出続ける）。
-  削除 API なし。④凍結前に `GET .../atlas/freeze-impact`（draft と現行凍結版の突合 +
+  ドメイン削除 API なし。draft の破棄 `DELETE .../atlas/skeleton/draft` のみ retired 中も
+  許可（後始末。draft は作業コピーで AB3 の対象外）。retire/restore と書き込み系は
+  domain 単位 advisory lock（`atlas_store.lock_domain_for_write`）で直列化し、
+  generate/freeze は書き込みトランザクション内で lifecycle を再確認する（check-then-write
+  競合の防止）。④凍結前に `GET .../atlas/freeze-impact`（draft と現行凍結版の突合 +
   バインド中コースの topic 影響、`core/atlas_lifecycle.compute_freeze_impact`）を
   フロントが事実文 confirm で提示し、freeze レスポンスにも `impact` 同梱。⑤freeze /
   retire は cross_layer_notify（kind=`atlas_skeleton_frozen` / `atlas_domain_retired`、
@@ -958,6 +964,38 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
 完全に空なら `model_generated`。判定は `search_chunks_with_metadata` が返す
 `material_id` を使うため、この関数のクエリを変更する際は `material_id` の SELECT を
 落とさないこと。
+
+### component 根拠カードの引用チップ化 + コーススコープ component 文脈API（2026-07-21）
+
+学習UI教材内の `![[component:id]]` / `![[claim:id]]` はブロックカードではなく
+**インラインチップ（⚓）+ クリック展開**で描画する（equation / figure / source のみ
+ブロックカード維持）。正本は `docs/features/component_evidence_redesign.md`（§8 に実装記録）。
+role/confidence（`_best_mapping` の照合来歴 `exact_title|title_similarity|none`）は
+**学習UIに一切出さない** — admin 原稿スタジオのみ日本語ラベル（「根拠 / 対応付け:
+タイトル類似」）で表示する。
+
+- **Phase 1（snapshot 投影・freeze で固定）**: `_content_blocks` の components 投影は
+  従来4フィールド + `narrative_role`（`_artifacts.narrative_annotator` を agent 側
+  component_id で join）/ `document_id` / `preconditions・inputs・outputs・cautions`
+  （text 付き）/ `dependencies`（reason 付き）/ `equations`（役割分類 input/intermediate/
+  output/constraint/definition/linked）/ `claims`。`build_topic_evidence_items` の
+  component item は **title=label（summary 流用禁止）** + rich 投影 `supports` をマージ
+  （旧投影データは劣化許容）。
+- **Phase 2/3（文脈API）**: `GET /api/learning/courses/{course_id}/components/{component_id}/context`
+  （`backend/core/component_context.py`、FastAPI 非import）。図配信 Phase 4 と同型の
+  fail-closed（受講ゲート + document スコープを SQL 内 `ANY(:doc_ids)` で強制 + 404 統一）。
+  component_id は DB UUID / agent ID（`source_scope.legacy_ids`）両対応。DTO =
+  `instance`（component / in_paper（narrative_role 優先順: graph_json["narrative"] →
+  `thesis_context.role_in_thesis` → teaching_takeaway → summary。teaching_takeaway は
+  DB 列に無いため component_assembly artifact 併読）/ supports / explanation（C層
+  teacher_approved のみ・route 側でマージ）/ provenance="course_freeze"）+
+  `shared_part`（confirmed identity link + active L層エントリが揃う場合のみ・無ければ
+  null で枠ごと非表示）+ `graph`（W層 context_lens の 1-hop を candidate 除外で射影・
+  失敗時 null 縮退。フロントは SVG 表示 + component ノードクリックで再フェッチ=「旅」）。
+  confidence キーは再帰除去（W8 相当）。
+- **ガバナンス**: コース公開（freeze）= ソース文書内 1-hop 近傍の露出承認（設計書 §6）。
+- ガードレール: `test_component_context_{core,api}.py` /
+  `test_component_evidence_chips_ui_static.py` / `test_component_evidence_admin_ui_static.py`。
 
 ### カジュアル対話モード + ハンズフリー音声会話（B層）
 

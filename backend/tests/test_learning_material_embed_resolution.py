@@ -42,6 +42,15 @@ function extractFrom(src, name){
 // eval(extractMany(...)) すること（forEach などのコールバック内で eval すると宣言が
 // そのコールバックのスコープに閉じ込められ、外から参照できなくなる）。
 function extractMany(src, names){ return names.map(function(n){ return extractFrom(src,n); }).join("\n"); }
+// function ではない "var NAME = { ... };" 形式のモジュール定数（例:
+// MATERIAL_EVIDENCE_KIND_LABELS）を抽出する。
+function extractVar(src, name){
+  const s = src.indexOf("var " + name + " = {");
+  if (s<0) throw new Error("missing var "+name);
+  let d=0,st=false;
+  for(let j=src.indexOf("{",s);j<src.length;j++){const c=src[j];if(c==="{"){d++;st=true;}else if(c==="}"){d--;if(st&&d===0)return src.slice(s,j+1)+";";}}
+  throw new Error("unbalanced var "+name);
+}
 """
 
 
@@ -96,14 +105,21 @@ process.stdout.write(JSON.stringify({mismatches:mismatches}));
         assert out["mismatches"] == [], f"normalizers diverge: {out['mismatches']}"
 
     def test_render_resolves_all_kinds(self, tmp_path):
+        """component/claim/source/equation それぞれの解決を検証する。component/claim は
+        component_evidence_redesign（引用チップ化）以降、ブロックカードではなくインライン
+        チップに解決される（summary はポップオーバー専用でチップの静的 HTML には出ない）。
+        source/equation は従来どおりブロックカードのまま。"""
         script = r"""
 const fs=require("fs");
 const app=fs.readFileSync(process.argv[2],"utf8");
 var window={katex:null};
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+var materialEvidenceChipItems = {};
+eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
- "shortMaterialEvidenceSummary","renderMaterialFigureCard","renderMaterialChunk"]));
+ "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
+ "renderMaterialEvidenceChip","renderMaterialChunk"]));
 const chunk={
   text:"本文 ![[component:comp_1]] つづき ![[claim:claim_1]] さらに ![[source:ev_1]] "
     +"数式 ![[equation:eq_1]] 未知 ![[component:missing_1]]",
@@ -118,27 +134,32 @@ const chunk={
 };
 const html=renderMaterialChunk(chunk);
 const out={
-  component: html.indexOf("コンポーネントA")>=0 && html.indexOf("コンポの要約")>=0,
+  component: html.indexOf("コンポーネントA")>=0 && html.indexOf("ls-material-evidence-chip")>=0,
   claim: html.indexOf("主張A")>=0,
   source: html.indexOf("原文引用")>=0,
   equation: /ls-material-formula-only/.test(html),
+  // component/claim はチップ化され、summary はチップの静的 HTML に出ない（ポップオーバー専用）
+  componentSummaryNotInline: html.indexOf("コンポの要約")<0,
   // 解決済み参照は「未解決」カードにならない
   resolvedNotMissing: html.indexOf("comp_1")<0 || html.indexOf("ls-material-missing")>=0,
   // 未知 ID は安全なフォールバック（未解決カード）に留まる
   missingFallback: /ls-material-missing/.test(html) && html.indexOf("missing_1")>=0,
-  // 3件の根拠カード + 未解決1件
+  // チップ2件（component + claim）
+  chips: (html.match(/ls-material-evidence-chip"/g)||[]).length,
+  // source の解決済みカード + 未解決1カード = 2（component/claim はもうカードにならない）
   cards: (html.match(/ls-material-evidence-card/g)||[]).length
 };
 process.stdout.write(JSON.stringify(out));
 """
         out = self._run(script, tmp_path)
-        assert out["component"], "component embed must render as a card with title+summary"
+        assert out["component"], "component embed must render as an inline chip with its label"
         assert out["claim"], "claim embed must resolve"
         assert out["source"], "source embed must resolve"
         assert out["equation"], "equation embed must render as math via evidence_items latex"
+        assert out["componentSummaryNotInline"], "component summary must stay popover-only, not leak into chip HTML"
         assert out["missingFallback"], "unknown id must fall back to the safe 未解決 card"
-        # component/claim/source の3カード + 未解決1カード = 4
-        assert out["cards"] == 4, out
+        assert out["chips"] == 2, out
+        assert out["cards"] == 2, out
 
     def test_kind_mismatch_falls_back_by_id(self, tmp_path):
         """本文が kind を取り違えても（実体は component なのに ``![[claim:comp_1]]``）、
@@ -148,9 +169,12 @@ const fs=require("fs");
 const app=fs.readFileSync(process.argv[2],"utf8");
 var window={katex:null};
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
+var materialEvidenceChipItems = {};
+eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
- "shortMaterialEvidenceSummary","renderMaterialFigureCard","renderMaterialChunk"]));
+ "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
+ "renderMaterialEvidenceChip","renderMaterialChunk"]));
 const chunk={
   text:"取り違え ![[claim:comp_1]]",
   formulas:[], figures:[],

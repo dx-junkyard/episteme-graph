@@ -2380,6 +2380,41 @@
     return kind + ":" + lsNormalizeEvidenceId(id);
   }
 
+  // 根拠リンクの表示語彙（component_evidence_redesign.md）。パイプライン由来の
+  // 内部語彙（kind / support_role / confidence 手法名）をそのまま画面に出さず、
+  // 日本語ラベルに変換する。未知の値は原文へフォールバックする（情報を落とさない）。
+  var LS_EVIDENCE_KIND_LABELS = {
+    component: "論理要素",
+    claim: "主張",
+    equation: "数式",
+    figure: "図",
+    source: "出典",
+  };
+  var LS_EVIDENCE_ROLE_LABELS = {
+    support: "根拠",
+    equation: "数式",
+    equation_quote: "数式引用",
+    figure: "図",
+  };
+  var LS_EVIDENCE_CONFIDENCE_LABELS = {
+    exact_title: "タイトル一致",
+    title_similarity: "タイトル類似",
+    none: "対応付けなし",
+  };
+
+  function lsEvidenceKindLabel(kind) {
+    return LS_EVIDENCE_KIND_LABELS[kind] || kind;
+  }
+
+  function lsEvidenceMetaLabel(role, confidence) {
+    var roleLabel = role ? (LS_EVIDENCE_ROLE_LABELS[role] || role) : "";
+    var confidenceLabel = confidence ? (LS_EVIDENCE_CONFIDENCE_LABELS[confidence] || confidence) : "";
+    if (roleLabel && confidenceLabel) return roleLabel + " / 対応付け: " + confidenceLabel;
+    if (roleLabel) return roleLabel;
+    if (confidenceLabel) return "対応付け: " + confidenceLabel;
+    return "";
+  }
+
   function lsCourseComponentById(componentId) {
     var normalizedId = lsNormalizeEvidenceId(componentId);
     var components = (lsState.courseComponents && lsState.courseComponents.components) || [];
@@ -2552,7 +2587,7 @@
     if (!items.length) return '<span class="ls-course-muted">根拠リンク候補はまだありません。</span>';
     return items.map(function (item) {
       return '<button type="button" class="ls-evidence-chip" data-evidence-ref="' + escHtml(item.key) + '">' +
-        escHtml(item.kind) + ': ' + escHtml(item.title) +
+        escHtml(lsEvidenceKindLabel(item.kind)) + ': ' + escHtml(item.title) +
       '</button>';
     }).join("");
   }
@@ -2563,18 +2598,16 @@
       return '<div class="ls-course-evidence-empty">このトピックに対応する根拠リンク候補はまだありません。</div>';
     }
     return '<div class="ls-course-evidence-list">' + items.map(function (item) {
+      var metaLabel = lsEvidenceMetaLabel(item.role, item.confidence);
       return '<article class="ls-course-evidence-card" data-evidence-key="' + escHtml(item.key) + '">' +
         '<div class="ls-course-evidence-head">' +
-          '<span class="ls-evidence-kind">' + escHtml(item.kind) + '</span>' +
+          '<span class="ls-evidence-kind">' + escHtml(lsEvidenceKindLabel(item.kind)) + '</span>' +
           '<strong>' + escHtml(item.title) + '</strong>' +
         '</div>' +
         (item.latex
           ? '<div class="ls-course-evidence-formula">' + lsRenderKatex(item.latex, true) + '</div>'
           : (item.summary ? '<div class="ls-course-evidence-summary">' + lsRenderTextWithFormulas(item.summary, lsTopicFormulas(topic)) + '</div>' : '')) +
-        '<div class="ls-course-evidence-meta">' +
-          (item.role ? '<span>' + escHtml(item.role) + '</span>' : '') +
-          (item.confidence ? '<span>' + escHtml(item.confidence) + '</span>' : '') +
-        '</div>' +
+        (metaLabel ? '<div class="ls-course-evidence-meta"><span>' + escHtml(metaLabel) + '</span></div>' : '') +
       '</article>';
     }).join("") + '</div>';
   }
@@ -2734,16 +2767,28 @@
       // 特定の根拠アイテム（source span / claim / component 等）が解決できる場合は、
       // 汎用のトピック原文抜粋フォールバックより優先して、そのアイテム自身を表示する。
       if (evidenceItem) {
+        // component / claim は引用チップへ格下げする（design:
+        // docs/features/component_evidence_redesign.md 方向A）。教科書の主役は
+        // 本文の説明であり、これらは grounding アンカーに徹する。クリックすると
+        // 既存の data-evidence-ref 配線経由で右ペインの根拠カードへフォーカスする。
+        if (evidenceItem.kind === "component" || evidenceItem.kind === "claim") {
+          return '<button type="button" class="ls-material-evidence-chip" data-evidence-ref="' + escHtml(key) + '" data-evidence-kind="' + escHtml(evidenceItem.kind) + '">' +
+            '<span class="ls-material-evidence-chip-icon">⚓</span>' +
+            '<span class="ls-material-evidence-chip-label">' + escHtml(evidenceItem.title || evidenceItem.id) + '</span>' +
+          '</button>';
+        }
         // 数式（equation_quote の source 等）は生 LaTeX 文字列を切り詰めて出さず、
         // KaTeX で数式として描画する。
         var embedBody = evidenceItem.latex
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + lsRenderKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(evidenceItem.summary, 260) || "この教材要素に紐づく根拠リンクです。右ペインで詳細を確認できます。") + '</span>';
+        // admin ドラフト画面では grounding 検証情報（対応付け方法等）を維持する
+        // （学習UI側は ls-material-embed-meta を出さない方針。§受け入れ基準）。
         return '<button type="button" class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(key) + '">' +
-          '<span class="ls-material-embed-kind">' + escHtml(evidenceItem.kind) + '</span>' +
+          '<span class="ls-material-embed-kind">' + escHtml(lsEvidenceKindLabel(evidenceItem.kind)) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           embedBody +
-          '<span class="ls-material-embed-meta">' + escHtml([evidenceItem.role, evidenceItem.confidence].filter(Boolean).join(" / ")) + '</span>' +
+          '<span class="ls-material-embed-meta">' + escHtml(lsEvidenceMetaLabel(evidenceItem.role, evidenceItem.confidence)) + '</span>' +
         '</button>';
       }
       if (embed.kind === "source" && topic.source_excerpt) {

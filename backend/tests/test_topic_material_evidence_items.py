@@ -157,6 +157,178 @@ class TestBuildTopicEvidenceItems:
         assert build_topic_evidence_items(None) == []
 
 
+class TestComponentEvidenceRedesignPhase1:
+    """component_evidence_redesign.md Phase 1: evidence_links 経由の component は
+    title に summary を流用せず label を使い、content_blocks の rich 投影
+    （label / narrative_role / document_id / supports）をマージする。"""
+
+    def test_component_title_uses_link_label_not_summary(self):
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_1", "summary": "コンポ要約",
+                 "support_role": "support", "label": "ラベルA"},
+            ],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_1"]
+        assert item["title"] == "ラベルA"
+        # summary はそのまま維持される(title と重複する文言を summary から消したりしない)。
+        assert item["summary"] == "コンポ要約"
+
+    def test_component_title_falls_back_to_generic_label_without_any_label(self):
+        """label が evidence_link にも content_blocks にも無ければ「論理コンポーネント」
+        にする(summary をタイトルへ流用しない)。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_1", "summary": "コンポ要約",
+                 "support_role": "support"},
+            ],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_1"]
+        assert item["title"] == "論理コンポーネント"
+        assert item["summary"] == "コンポ要約"
+
+    def test_component_title_falls_back_to_content_block_label(self):
+        """evidence_link に label が無くても content_blocks 側の label を使う。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_1", "summary": "コンポ要約",
+                 "support_role": "support"},
+            ],
+            "content_blocks": [{"type": "components", "items": [
+                {"component_id": "comp_1", "label": "content_blocksラベル"},
+            ]}],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_1"]
+        assert item["title"] == "content_blocksラベル"
+
+    def test_component_merges_supports_narrative_and_document_id(self):
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_1", "summary": "コンポ要約",
+                 "support_role": "support"},
+            ],
+            "content_blocks": [{"type": "components", "items": [
+                {
+                    "component_id": "comp_1",
+                    "label": "ラベルA",
+                    "narrative_role": "この段階は前提を与える。",
+                    "document_id": "doc-1",
+                    "preconditions": [{"text": "前提A", "claim_ids": [], "equation_ids": []}],
+                    "inputs": [],
+                    "outputs": [],
+                    "cautions": [],
+                    "equations": [{"id": "eq_1", "role": "input"}],
+                    "claims": ["clm_1"],
+                    "dependencies": [{"type": "requires", "targets": ["comp_2"], "reason": "r"}],
+                },
+            ]}],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_1"]
+
+        assert item["label"] == "ラベルA"
+        assert item["narrative_role"] == "この段階は前提を与える。"
+        assert item["document_id"] == "doc-1"
+        assert item["supports"]["preconditions"] == [{"text": "前提A", "claim_ids": [], "equation_ids": []}]
+        assert item["supports"]["equations"] == [{"id": "eq_1", "role": "input"}]
+        assert item["supports"]["claims"] == ["clm_1"]
+        assert item["supports"]["dependencies"] == [{"type": "requires", "targets": ["comp_2"], "reason": "r"}]
+        # 既存フィールドは維持される(フロント互換)。
+        assert item["kind"] == "component"
+        assert item["id"] == "comp_1"
+        assert item["summary"] == "コンポ要約"
+        assert item["role"] == "support"
+
+    def test_component_without_content_block_match_has_no_supports_key(self):
+        """content_blocks に該当する component が無ければ supports は付けない
+        (rich投影が無い旧データ・別トピックの component でも壊れない)。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_unmatched", "summary": "要約"},
+            ],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_unmatched"]
+        assert "supports" not in item
+        assert "narrative_role" not in item
+        assert "document_id" not in item
+
+    def test_component_fallback_path_also_merges_rich_projection(self):
+        """linked_component_ids フォールバック経路でも同じ rich マージが効く。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "linked_component_ids": ["comp_extra"],
+            "content_blocks": [{"type": "components", "items": [
+                {
+                    "component_id": "comp_extra",
+                    "label": "ラベルX",
+                    "teaching_takeaway": "要点X",
+                    "narrative_role": "位置づけ文",
+                    "document_id": "doc-9",
+                    "equations": [{"id": "eq_9", "role": "output"}],
+                },
+            ]}],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_extra"]
+
+        assert item["title"] == "ラベルX"
+        assert item["summary"] == "要点X"
+        assert item["label"] == "ラベルX"
+        assert item["narrative_role"] == "位置づけ文"
+        assert item["document_id"] == "doc-9"
+        assert item["supports"]["equations"] == [{"id": "eq_9", "role": "output"}]
+
+    def test_component_rich_projection_without_new_fields_is_backward_compatible(self):
+        """content_blocks の components 投影が旧フォーマット(narrative_role 等の
+        新フィールド無し)でも build_topic_evidence_items は壊れない。supports は
+        存在してもすべて空リストへ縮退する(存在自体は rich マッチの証跡)。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "linked_component_ids": ["comp_old"],
+            "content_blocks": [{"type": "components", "items": [
+                {"component_id": "comp_old", "label": "旧ラベル", "summary": "旧要約"},
+            ]}],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_old"]
+
+        assert item["title"] == "旧ラベル"
+        assert item["label"] == "旧ラベル"
+        assert item["supports"] == {
+            "preconditions": [], "inputs": [], "outputs": [], "cautions": [],
+            "equations": [], "claims": [], "dependencies": [],
+        }
+
+    def test_component_confidence_stays_topic_label_not_raw_narrative_value(self):
+        """narrative_role がマージされても confidence はトピックの段階ラベル
+        (文字列)のままで、narrative 由来の生 confidence(float)は混入しない。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "content_confidence": "high",
+            "evidence_links": [
+                {"kind": "component", "target_id": "comp_1", "summary": "コンポ要約",
+                 "support_role": "support", "confidence": "high"},
+            ],
+            "content_blocks": [{"type": "components", "items": [
+                {"component_id": "comp_1", "label": "ラベルA", "narrative_role": "位置づけ"},
+            ]}],
+        }
+        item = _items_by_ref(build_topic_evidence_items(topic))["component:comp_1"]
+
+        assert item["confidence"] == "high"
+        assert isinstance(item["confidence"], str)
+
+
 class TestScopingAndPrivacy:
     """解決対象は「そのトピックに公開済みの参照」だけ — DB 上の任意 ID は解決しない。"""
 

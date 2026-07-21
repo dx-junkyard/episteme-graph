@@ -1172,6 +1172,33 @@ def persist_component_graph(
         session.close()
 
 
+def delete_component_graph(document_id: str) -> None:
+    """当該 document の component graph 行（theory_component_graphs）を削除する。
+
+    コンポーネントを DELETE→新UUIDで再INSERT したのにグラフを再保存しない経路
+    （検証エラーで graph persist をスキップした場合など）では、
+    theory_component_graphs に旧・削除済みUUIDを指す古いノード/エッジが残る。
+    この stale グラフは context_lens._build_component の
+    ``nodes_by_id.get(ref.element_id)`` を全ミスさせ、component の上位/下位を
+    一切引けなくする（しかも古いグラフにノードが在るため「グラフ未保存」注記も
+    出ない）。components を作り直したのにグラフを作り直さないケースで本関数を呼び、
+    古い行を明示削除して不整合を断つ（削除後は _build_component が正直に
+    「component_graph が保存されていないため…」の注記を出す）。
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("DELETE FROM theory_component_graphs WHERE document_id = :doc"),
+            {"doc": document_id},
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # document_embeddings
 # ---------------------------------------------------------------------------
@@ -2323,6 +2350,17 @@ def accept_revision(
                 graph_payload,
                 component_id_map,
                 claim_id_map,
+            )
+        else:
+            # 候補に component_graph が無い場合、components は上で無条件に作り直され
+            # （DELETE→新UUID）ているため、古い theory_component_graphs 行を残すと
+            # 旧・削除済みUUIDを指す stale グラフになり、context_lens が component の
+            # 上位/下位を一切引けなくなる。同一トランザクション内で明示削除し整合させる
+            # （delete_component_graph と同義だが、accept_revision のトランザクションに
+            # 同乗させるため inline で実行する）。
+            session.execute(
+                sa_text("DELETE FROM theory_component_graphs WHERE document_id = :doc"),
+                {"doc": document_id},
             )
 
         session.execute(

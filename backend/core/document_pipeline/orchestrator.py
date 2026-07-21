@@ -36,6 +36,7 @@ from .persistence import (
     get_latest_analysis_run,
     set_active_analysis_run,
     load_source_chunk_index,
+    delete_component_graph,
     persist_component_graph,
     persist_components,
     persist_document_embedding,
@@ -1679,6 +1680,16 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                     "component_graph persist skipped (validation errors): document=%s",
                     ctx.document_id,
                 )
+                # components を作り直した（新UUID）のに graph 保存だけスキップすると、
+                # 旧UUIDを指す古い theory_component_graphs 行が残り、context_lens が
+                # component の上位/下位を一切引けなくなる（古いグラフにノードが在るため
+                # 「グラフ未保存」注記すら出ない stale 状態）。この不整合が生じるのは
+                # 「components は再persist・graph はスキップ」の組み合わせのときだけなので、
+                # その場合に限り古いグラフ行を明示削除して整合させる。
+                # skip_component_persist（= components も未更新 → 旧 components + 旧 graph で
+                # 整合済み）のときは触らない。
+                if ctx.skip_graph_persist and not ctx.skip_component_persist:
+                    delete_component_graph(ctx.document_id)
             else:
                 persist_component_graph(
                     document_id=ctx.document_id,
