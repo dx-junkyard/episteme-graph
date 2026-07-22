@@ -1,0 +1,333 @@
+# システム管理者編（技術者向け）
+
+[← マニュアル索引](README.md)
+
+本ドキュメントは、episteme-graph をホストし運用する**システム管理者（SYSTEM_ADMIN）**向けの
+技術者向けマニュアルです。読む前に、まず全ロール共通の [仕様編](01-specification.md) に目を通し、
+システム全体像・ロールと権限・用語を把握しておくことを推奨します。
+
+システム管理者は教員（TEACHER）ができることをすべて行えるため、[教員編](03-teacher.md) も
+あわせて読むことをおすすめします。
+
+---
+
+## 1. 初期構築
+
+### 1.1 `.env` の設定
+
+リポジトリ直下の `.env.example` を `.env` にコピーし、値を設定します。
+
+```bash
+cp .env.example .env
+```
+
+以下の3つは**必ず**既定値から変更してください（詳細は [9. セキュリティ要点](#9-セキュリティ要点)）。
+
+| 変数 | 用途 |
+|---|---|
+| `LLM_API_KEY` | LLM プロバイダの API キー（OpenAI / Gemini。後方互換で `OPENAI_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` も使用可）。`LLM_PROVIDER=google`（Vertex AI + ADC）の場合は不要 |
+| `JWT_SECRET` | JWT 署名鍵 |
+| `ADMIN_PASSWORD` | 初期システム管理者アカウントのパスワード |
+
+### 1.2 起動
+
+```bash
+docker compose up -d
+```
+
+Compose ファイルの使い分け（本番用の `docker-compose.yml` 単体では `postgres` が含まれない点に注意）は
+[2. Compose ファイルの使い分け](#2-compose-ファイルの使い分け) を参照してください。
+
+### 1.3 初期管理者アカウント
+
+初期アカウントは `.env` の `ADMIN_PASSWORD` で作成される**システム管理者アカウントのみ**です。
+教員・学生アカウントはこの初期管理者が管理 UI から作成します（[6. 教員アカウントの作成](#6-教員アカウントの作成) 参照）。
+
+### 1.4 アクセス先
+
+| サービス | URL | 備考 |
+|---|---|---|
+| 学習UI | http://localhost:3000 | 受講者・教員・システム管理者共通の入口 |
+| 管理UI | http://localhost:3000/admin.html | 教員・システム管理者向け |
+| Swagger UI | http://localhost:8001/docs | ローカル開発で直接公開する設定の場合のみ |
+| MinIO コンソール | http://localhost:9001 | ローカル開発（`docker-compose.local.yml` 併用時） |
+| GROBID | http://localhost:8070 | ローカル開発（`docker-compose.local.yml` 併用時） |
+| ngrok Web UI | http://localhost:4040 | `docker-compose.prod.yml` で ngrok トンネルを併用する場合 |
+
+本番・共通構成で外部に公開されるのは **学習UI（frontend, 3000番）のみ**です。詳細は
+[3. サービス構成](#3-サービス構成) を参照してください。
+
+---
+
+## 2. Compose ファイルの使い分け
+
+| ファイル | 用途 | 追加するもの |
+|---|---|---|
+| `docker-compose.yml` | 本番 / CI 共通のベース | grobid, minio, api-server, frontend |
+| `docker-compose.local.yml` | ローカル開発 | `postgres`（`pgvector/pgvector:pg16`）、DB クライアント向けポート公開など |
+| `docker-compose.prod.yml` | 本番補助 | `ngrok` トンネル |
+
+```bash
+# 本番 / CI
+docker compose up -d
+
+# ローカル開発（postgres コンテナ + ngrok などを併用）
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
+
+# API のみ再ビルド（コード変更後）
+docker compose up -d --build api-server
+
+# ログ確認
+docker compose logs -f api-server
+```
+
+**重要:** ベースの `docker-compose.yml` には `postgres` サービスが定義されていません。
+`api-server` は `DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}`
+を参照するため、本番運用ではマネージド PostgreSQL（例: Cloud SQL）を `DB_HOST` 等で指定する
+ことが前提になっています。ローカル開発で自前の PostgreSQL コンテナを使う場合のみ、
+`docker-compose.local.yml` を重ねて `postgres` サービス（`pgvector/pgvector:pg16` イメージ）を
+追加してください。
+
+`docker-compose.prod.yml` は `ngrok` による固定ドメインの外部公開トンネルを追加する補助ファイルです。
+使う場合は事前に ngrok アカウントで固定ドメインを取得し、`.env` に `NGROK_AUTHTOKEN` /
+`NGROK_DOMAIN` を設定してください。
+
+---
+
+## 3. サービス構成
+
+| サービス | イメージ / ビルド | 役割 |
+|---|---|---|
+| `grobid` | `lfoppiano/grobid:0.8.1` | PDF → TEI-XML 解析（8070番） |
+| `minio` | `minio/minio:latest` | S3 互換オブジェクトストレージ（コンソール 9001番）。PDF原本・図画像を保存 |
+| `api-server` | `backend/Dockerfile` ビルド | FastAPI 本体（`backend/api` + `backend/core` + `src/episteme_graph/agents`）。`.gcp` を `/app/.gcp:ro` でマウント |
+| `frontend` | `frontend/Dockerfile` ビルド | nginx。静的 SPA 配信 + `/api/*` を api-server へリバースプロキシ（3000番公開） |
+
+- 全サービスは Docker 内部ネットワーク `episteme`（bridge）で相互接続します。
+- ボリューム: `postgres_data`, `minio_data`。
+- `api-server` は `postgres`（healthy）/ `minio` / `grobid` の起動を待って起動します（`depends_on`）。
+
+### ネットワーク設計（セキュリティ）
+
+- **外部に公開されるポートは frontend の 3000番のみ**です。
+- `api-server`（8001番）は本番・ローカルとも直接公開されず、必ず nginx（3000番）経由でアクセスします。
+- API リバースプロキシの定義は `frontend/nginx.conf` にあり、`/api/learning`, `/api/auth`,
+  `/api/admin`, `/api/groups`, `/api/me`, `/api/courses`, `/api/documents` などを api-server に
+  プロキシします。
+
+> 旧 `neo4j` サービスは書き込み経路がなく実質未使用だったため撤去済みです。
+
+---
+
+## 4. 主要環境変数
+
+`api-server` の environment は `docker-compose.yml` で `.env` から注入されます。実在する変数のみ
+記載しています。
+
+### 4.1 LLM プロバイダ
+
+| 変数 | 説明 |
+|---|---|
+| `LLM_PROVIDER` | `openai`（既定） / `gemini`（Google AI Studio） / `google`（Vertex AI + ADC）。`gemini-vertex` は廃止予定 |
+| `LLM_API_KEY` | 共通 API キー。後方互換で `OPENAI_API_KEY` / `GEMINI_API_KEY` / `GOOGLE_API_KEY` も使用可。`LLM_PROVIDER=google` では不要（ADC を使用） |
+| `LLM_FAST_MODEL` / `LLM_FAST_EFFORT` | 軽い判断用のモデル・推論努力度 |
+| `LLM_STANDARD_MODEL` / `LLM_STANDARD_EFFORT` | 標準分析用 |
+| `LLM_DEEP_MODEL` / `LLM_DEEP_EFFORT` | 複雑推論用 |
+| `LLM_ANALYSIS_MODEL` | 非 OpenAI プロバイダのフォールバック等に使用 |
+| `LLM_FAST_MODEL_MAX_TOKENS` / `LLM_STANDARD_MODEL_MAX_TOKENS` / `LLM_ANALYSIS_MODEL_MAX_TOKENS` / `LLM_DEEP_MODEL_MAX_TOKENS` | ティアごとの最大出力トークン数 |
+| `LLM_EMBEDDING_MODEL` | 埋め込みモデル（既定 `text-embedding-3-large`） |
+| `LLM_EMBEDDING_DIM` | pgvector の次元数（既定 3072。Gemini 系では 768 など） |
+
+### 4.2 Google Cloud（Vertex AI / ADC）
+
+| 変数 | 説明 |
+|---|---|
+| `GCP_PROJECT_ID`（または `GOOGLE_CLOUD_PROJECT`） | GCP プロジェクト ID |
+| `GCP_LOCATION` | Vertex AI のリージョン（既定 `us-central1`） |
+| `GCP_USE_VERTEX_AI` | Vertex AI 経由利用フラグ |
+| `GOOGLE_APPLICATION_CREDENTIALS` | ADC 認証情報ファイルパス（既定 `/app/.gcp/application_default_credentials.json`） |
+
+ホストの `./.gcp` ディレクトリがコンテナの `/app/.gcp:ro` に読み取り専用でマウントされます。
+
+### 4.3 データストア
+
+| 変数 | 説明 |
+|---|---|
+| `DATABASE_URL` | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` から組み立てられる PostgreSQL 接続文字列 |
+| `MINIO_ENDPOINT` | MinIO エンドポイント |
+| `MINIO_ACCESS_KEY` / `MINIO_SECRET_KEY` | MinIO 認証情報（`MINIO_ROOT_USER` / `MINIO_ROOT_PASSWORD` にフォールバック） |
+| `MINIO_PUBLIC_ENDPOINT` | クライアント側から見える MinIO エンドポイント |
+| `GROBID_URL` | GROBID サービスの URL |
+
+### 4.4 認証・CORS・カートリッジ
+
+| 変数 | 説明 |
+|---|---|
+| `JWT_SECRET` | JWT 署名鍵。**必ず既定値から変更すること** |
+| `ADMIN_PASSWORD` | 初期システム管理者パスワード |
+| `CORS_ORIGINS` | 許可オリジン（カンマ区切り）。既定 `*`（全許可・開発用）。本番は明示リスト推奨 |
+| `ADMIN_ERROR_LOG_MAX_ITEMS` | Admin エラー解析画面で保持・返却するログ最大件数（既定 1000） |
+| `EPISTEME_DEFAULT_CARTRIDGE_ID` | 既定のドメインカートリッジ（既定 `particle_physics`） |
+| `EPISTEME_CARTRIDGES_DIR` | カートリッジ定義ディレクトリの上書き（未指定時は `backend/cartridges`） |
+| `ATLAS_DATA_SOURCE` | 分野の地図のデータソース。`api`（既定・本番推奨）/ `fixture`（ローカル確認用のモック地図。本番で使うと全ユーザーにモック地図が表示されるため注意） |
+
+### 4.5 音声・文字起こし
+
+| 変数 | 説明 |
+|---|---|
+| `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（既定 `whisper-1`。openai プロバイダのみ対応） |
+
+### 4.6 機能別 LLM コール数上限（コスト制御）
+
+各機能は互いに独立したカウンタでレート制限されます。
+
+| 変数 | 既定値 | 対象機能 |
+|---|---|---|
+| `TENSION_MAX_CALLS_PER_SESSION` | 3 | TensionMiningAgent（B層）セッションあたり |
+| `TENSION_MAX_CALLS_PER_DAY` | 10 | TensionMiningAgent 1ユーザー1日あたり |
+| `DOUBT_SCOPE_MAX_CALLS_PER_DAY` | 10 | D層 検証スコープ候補抽出 |
+| `DOUBT_ASSUMPTION_MAX_CALLS_PER_DAY` | 10 | D層 暗黙前提マイニングの LLM 正規化 |
+| `ATLAS_ASSIST_MAX_CALLS_PER_DAY` | 60 | 分野の地図 骨格エディタ AI アシスト編集（1教員あたり） |
+| `ASSISTANT_MAX_CALLS_PER_DAY` | 20 | Admin Copilot（横断ユーティリティ層） |
+| `RECON_MAX_ITEMS_PER_DOCUMENT` | 30 | 再構成ループ（R層）自動生成 item 上限 |
+| `RECON_MAX_CALLS_PER_DAY` | 10 | 再構成ループ item オーサリング worker |
+| `APPARATUS_MAX_IMAGES_PER_DOCUMENT` | 20 | 画像読み取りパイプライン（L層）1文書あたりの vision 対象図数上限 |
+| `APPARATUS_MAX_CALLS_PER_DAY` | 30 | 画像読み取りパイプライン vision 呼び出し日次上限 |
+| `LEARNING_CHAT_MAX_CALLS_PER_DAY` | 300 | 学習チャット本体（1ユーザー1日） |
+| `COURSE_BUILDER_MAX_CALLS_PER_DAY` | 100 | コースビルダーチャット（1ユーザー1日） |
+| `LECTURE_REWRITE_MAX_CALLS_PER_DAY` | 100 | 原稿スタジオ rewrite（1ユーザー1日） |
+
+モデル指定用の `*_LLM_MODEL` 変数（例: `TENSION_LLM_MODEL` / `DOUBT_SCOPE_LLM_MODEL` /
+`ATLAS_ASSIST_LLM_MODEL` / `ASSISTANT_LLM_MODEL` / `RECON_LLM_MODEL` /
+`LEARNING_CHAT_LLM_MODEL` / `COURSE_BUILDER_LLM_MODEL` など）は空欄にすると fast tier または
+analysis tier のモデルに自動的に委譲されます（各変数のコメントを `.env.example` で確認してください）。
+
+### 4.7 その他の画像パイプライン設定
+
+| 変数 | 説明 |
+|---|---|
+| `APPARATUS_LLM_MODEL` | vision 同定モデル（既定 `gpt-4o`。v1 は OpenAI 経路のみ） |
+| `APPARATUS_FEWSHOT_IMAGES` | 含有承認済み例示画像の few-shot 添付（既定 `false`） |
+| `APPARATUS_RETRIEVAL_TOP_K` | ライブラリ凍結版 retrieval の候補数（既定 5） |
+
+### 4.8 LLM トークン使用量推計（U層）
+
+| 変数 | 説明 |
+|---|---|
+| `LLM_USAGE_TRACKING_ENABLED` | 記録の有効/無効（既定 `true`。`false` でテスト・ローカル用に no-op 化） |
+| `LLM_USAGE_BUFFER_MAX` | in-memory バッファ上限（既定 1000。超過分は破棄され `dropped_events` に計上） |
+| `LLM_USAGE_FLUSH_INTERVAL_SECONDS` | バックグラウンド flusher の周期（既定 10秒） |
+| `LLM_USAGE_FLUSH_BATCH` | この件数到達で flusher を即時起動（既定 100） |
+| `LLM_PRICE_TABLE_PATH` | モデル単価表 JSON のパス。空なら概算費用は常に `null`（価格をハードコードしない方針） |
+
+### 4.9 ローカル開発 / ngrok
+
+`docker-compose.local.yml` を使ったローカル開発時のみ必要です。
+
+| 変数 | 説明 |
+|---|---|
+| `NGROK_AUTHTOKEN` | ngrok 認証トークン |
+| `NGROK_DOMAIN` | ngrok 固定ドメイン |
+
+---
+
+## 5. 起動時の自動処理
+
+`api-server` 起動時、`backend/api/main.py` の lifespan で以下が実行されます。
+
+1. **DB マイグレーションの適用** — `backend/db/` の SQL ファイル（`init.sql` + 番号順ファイル群）が
+   正本です。`backend/core/migrations.py` の薄いランナーが**毎起動、番号順に全ファイルを冪等に
+   再実行**します（`pg_advisory_lock` による多重起動排他つき）。すべてのファイルは冪等に書かれて
+   いる前提のため、既存データの列追加・次元変更なども安全に繰り返し適用されます。
+2. **ビルトインスキーマの seed** — `schema_registry.seed_builtin_schema()` が `OntologyType` /
+   `CorePredicate` のビルトイン語彙を DB に投入します（`is_builtin=true`）。
+3. **システム管理者アカウントの初期化** — `.env` の `ADMIN_PASSWORD` で初期システム管理者
+   アカウントを作成します。
+
+---
+
+## 6. 教員アカウントの作成
+
+**必要ロール:** システム管理者（SYSTEM_ADMIN）のみ
+
+教員アカウントの作成は、システム管理者だけが実行できる操作です。教員（TEACHER）権限では
+実行できません。**アカウント作成は取り消せません。** 実行前に確認ダイアログが表示されます。
+
+具体的な手順は [教員アカウント作成](../admin_operations/users.md#create-teacher) を参照してください
+（対象タブ: グループ管理）。
+
+なお、学生アカウントの作成は教員以上のロールで実行可能です（[ユーザー・グループ管理](../admin_operations/users.md#create-student) 参照）。
+
+---
+
+## 7. 監視
+
+### 7.1 システム統計
+
+**対象タブ:** システム統計（system-stats） / **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ / **取り消し可否:** 該当なし（読み取り専用・確認ダイアログなし）
+
+教材数・処理状況などのシステム統計を確認できます。詳細は
+[システム統計を見る](../admin_operations/system.md#stats) を参照してください。
+
+### 7.2 エラーログ
+
+**対象タブ:** エラー解析（error-analysis） / **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ / **取り消し可否:** 該当なし（読み取り専用・確認ダイアログなし）
+
+システムのエラーログを確認できます。保持・返却されるログの最大件数は環境変数
+`ADMIN_ERROR_LOG_MAX_ITEMS`（既定 1000）で制御されます。詳細は
+[エラーログを見る](../admin_operations/system.md#error-logs) を参照してください。
+
+### 7.3 LLM 使用量
+
+**対象タブ:** LLM使用量（llm-usage） / **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ / **取り消し可否:** 該当なし（読み取り専用・確認ダイアログなし）
+
+システム全体の LLM トークン消費量を確認できます。
+
+- **実測（reported）と推計（estimated_tokenizer / estimated_heuristic）は分離して集計表示**
+  され、混ぜた単一数値は表示されません。
+- バッファ溢れ（`dropped_events`）がある場合はそのまま表示されます（隠しません）。
+- 概算費用は `LLM_PRICE_TABLE_PATH` が設定されている場合のみ表示されます。設定が無い場合は
+  費用は `null` のまま表示されません（金額はハードコードしません）。
+
+詳細は [LLM使用量メトリクスを確認する](../admin_operations/llm_usage.md#view-metrics) を参照してください。
+教材ごとの解析コスト事前見積り（レンジのみ・金額なし）は教材管理タブから確認できます（教員以上）。
+
+---
+
+## 8. スキーマ進化の運用
+
+システムは固定の `OntologyType` / `CorePredicate` に加えて、運用中に得た学生の質問から
+グラフ DSL の語彙を動的に成長させる仕組み（スキーマ進化）を持っています。全体ワークフロー
+（未回答クエリの蓄積 → AI によるスキーマ提案生成 → Shadow Testing による検証 → 教員の承認/棄却
+→ 再抽出ジョブ）の詳細は [動的スキーマ進化](../pipeline/schema-evolution.md) を参照してください。
+
+「スキーマ提案」タブでの承認操作には2つの選択肢があります。
+
+- **システム全体に適用** — **全教材の再抽出ジョブ**を開始します。処理対象がシステム全体の
+  教材に及ぶため**コストが大きく、取り消せません**。実行前に確認ダイアログが表示されます。
+- **カナリアリリース** — 選択した特定コースのみに適用し、影響を限定して試すことができます。
+  全体適用前の検証手段として活用してください。
+
+具体的な操作手順は [スキーマ提案を確認・承認する](../admin_operations/schema_proposals.md#review)
+を参照してください（対象タブ: スキーマ提案 / 必要ロール: 教員以上）。
+
+---
+
+## 9. セキュリティ要点
+
+- **`JWT_SECRET` と `ADMIN_PASSWORD` は既定値から必ず変更してください。** 既定値のまま本番運用
+  すると、認証トークンの偽造や初期管理者アカウントへの不正ログインを許すことになります。
+- **`CORS_ORIGINS` は本番では明示リストに限定してください。** 既定の `*`（全オリジン許可）は
+  開発用です。例: `CORS_ORIGINS=https://your-domain.example.com`。
+- **`api-server`（8001番）を直接外部公開しないでください。** 必ず nginx（3000番）経由でアクセス
+  する構成を維持してください。
+- **機微データを URL パラメータに載せないでください。** クエリ文字列はログやブラウザ履歴に残る
+  ため、個人情報・認証情報等を含めないよう API 設計・運用の両面で注意してください。
+- **k-匿名化された学習データを成績評価に使わないでください。** TensionMiningAgent（B層）・
+  D層の素朴な問いの計器化・分野の地図の踏破状況など、学習者の関心・つまずき・違和感に関する
+  集計は、本人への学習支援を目的とした k-匿名化集計（k=3、n<3 のセルは非表示）であり、
+  個々の学習者の評価・成績判定に転用しないことが設計上の不変条項です。
+
+---
+
+[← マニュアル索引](README.md)

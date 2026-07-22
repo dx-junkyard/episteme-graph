@@ -254,24 +254,10 @@
           <input id="auth-pass" type="password" placeholder="パスワード" required autocomplete="current-password">
           <button type="submit" id="auth-btn">ログイン</button>
         </form>
-        <div class="auth-toggle" id="auth-toggle">
-          アカウントがない場合 <a id="auth-switch">新規登録</a>
-        </div>
         <div class="auth-error" id="auth-error"></div>
       </div>
     `;
     document.body.appendChild(overlay);
-
-    let isLogin = true;
-    // #auth-switch は innerHTML 差し替えで毎回作り直されるため、安定な親 #auth-toggle に委任する
-    document.getElementById("auth-toggle").addEventListener("click", function (e) {
-      if (!e.target || e.target.id !== "auth-switch") return;
-      isLogin = !isLogin;
-      document.getElementById("auth-btn").textContent = isLogin ? "ログイン" : "登録";
-      document.getElementById("auth-toggle").innerHTML = isLogin
-        ? 'アカウントがない場合 <a id="auth-switch">新規登録</a>'
-        : '既にアカウントがある場合 <a id="auth-switch">ログイン</a>';
-    });
 
     document.getElementById("auth-form").addEventListener("submit", async function (e) {
       e.preventDefault();
@@ -280,10 +266,8 @@
       const errEl = document.getElementById("auth-error");
       errEl.textContent = "";
 
-      const endpoint = isLogin ? "/auth/login" : "/auth/register";
-      const payload = isLogin
-        ? { username, password }
-        : { username, password, email: username + "@learning.local" };
+      const endpoint = "/auth/login";
+      const payload = { username, password };
       try {
         const res = await fetch(API + endpoint, {
           method: "POST",

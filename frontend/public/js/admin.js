@@ -103,22 +103,9 @@
           '<input id="auth-pass" type="password" placeholder="パスワード" required autocomplete="current-password">' +
           '<button type="submit" id="auth-btn">ログイン</button>' +
         '</form>' +
-        '<div class="auth-toggle" id="auth-toggle">' +
-          'アカウントがない場合 <a id="auth-switch">新規登録</a>' +
-        '</div>' +
         '<div class="auth-error" id="auth-error"></div>' +
       '</div>';
     document.body.appendChild(overlay);
-
-    var isLogin = true;
-    document.getElementById("auth-switch").addEventListener("click", function handleSwitch() {
-      isLogin = !isLogin;
-      document.getElementById("auth-btn").textContent = isLogin ? "ログイン" : "登録";
-      document.getElementById("auth-toggle").innerHTML = isLogin
-        ? 'アカウントがない場合 <a id="auth-switch">新規登録</a>'
-        : '既にアカウントがある場合 <a id="auth-switch">ログイン</a>';
-      document.getElementById("auth-switch").addEventListener("click", handleSwitch);
-    });
 
     document.getElementById("auth-form").addEventListener("submit", function (e) {
       e.preventDefault();
@@ -127,10 +114,8 @@
       var errEl = document.getElementById("auth-error");
       errEl.textContent = "";
 
-      var endpoint = isLogin ? "/auth/login" : "/auth/register";
-      var payload = isLogin
-        ? { username: username, password: password }
-        : { username: username, password: password, email: username + "@learning.local" };
+      var endpoint = "/auth/login";
+      var payload = { username: username, password: password };
 
       fetch(API + endpoint, {
         method: "POST",

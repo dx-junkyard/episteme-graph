@@ -5,7 +5,6 @@
 
 Endpoints
 ---------
-POST /api/auth/register                                         ユーザー登録
 POST /api/auth/login                                            ログイン
 GET  /api/auth/me                                               現在のユーザー情報
 POST /api/learning/courses                                      コースを新規作成
