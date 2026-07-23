@@ -282,6 +282,7 @@ function normalizeMaterialEvidenceId(v){ return String(v||"").trim().replace(/^\
 function renderMaterialKatex(){ return "<span class=\"katex\"></span>"; }
 function renderMaterialEquationBody(){ return ""; }
 eval(extractFrom(src, "renderMaterialFigureCard"));
+eval(extractFrom(src, "mdBlocksToHtml"));
 eval(extractFrom(src, "renderMaterialChunk"));
 const out = {};
 // figures 無し → プレースホルダは手つかずのまま（防御的スキップ・後方互換）

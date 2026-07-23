@@ -187,6 +187,27 @@ class TestNoHypeLanguage:
         assert '"依存の広がり"' in _ROUTES_SRC
 
 
+class TestNoBrokenBindParamCast:
+    """SQLAlchemy `text()` のバインド検出は `:name::type`（バインド名直後の `::` キャスト）を
+    1トークンとして誤認識し、`:name` がバインドパラメータとして展開されずリテラルのまま
+    Postgres に送られて構文エラーになる（2026-07-24 修正、naive_signal.py /
+    open_assumptions.py で発生）。正しくは `CAST(:name AS type)` を使う。再発防止のため
+    D層 SQL に同アンチパターンが無いことを検証する。
+    """
+
+    _BIND_DIRECT_CAST = re.compile(r":[a-zA-Z_][a-zA-Z0-9_]*::[a-zA-Z_]")
+
+    def test_naive_signal_has_no_bind_param_direct_cast(self):
+        src = (_BACKEND / "core" / "doubt" / "naive_signal.py").read_text(encoding="utf-8")
+        match = self._BIND_DIRECT_CAST.search(src)
+        assert match is None, f"found `:name::type` bind-cast anti-pattern: {match.group(0)!r}"
+
+    def test_open_assumptions_has_no_bind_param_direct_cast(self):
+        src = (_BACKEND / "core" / "doubt" / "open_assumptions.py").read_text(encoding="utf-8")
+        match = self._BIND_DIRECT_CAST.search(src)
+        assert match is None, f"found `:name::type` bind-cast anti-pattern: {match.group(0)!r}"
+
+
 class TestEmptyScopeIsNormal:
     """「空欄」はエラーではなく事実（D1-1/D1-3）。"""
 

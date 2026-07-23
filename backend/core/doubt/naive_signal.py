@@ -230,9 +230,9 @@ def has_naive_signal(anchor_type: str, anchor_id: str, course_id: str = "") -> b
                       AND status = ANY(:statuses)
                       AND payload->'target_refs' IS NOT NULL
                       AND (
-                        (payload->'target_refs'->'component_ids') @> to_jsonb(:aid::text)
-                        OR (payload->'target_refs'->'claim_ids') @> to_jsonb(:aid::text)
-                        OR (payload->'target_refs'->'equation_ids') @> to_jsonb(:aid::text)
+                        (payload->'target_refs'->'component_ids') @> to_jsonb(CAST(:aid AS text))
+                        OR (payload->'target_refs'->'claim_ids') @> to_jsonb(CAST(:aid AS text))
+                        OR (payload->'target_refs'->'equation_ids') @> to_jsonb(CAST(:aid AS text))
                       )
                 ) owned
             """),
@@ -240,7 +240,7 @@ def has_naive_signal(anchor_type: str, anchor_id: str, course_id: str = "") -> b
         ).fetchone()
         return int(row[0] or 0) >= NAIVE_SIGNAL_K_ANONYMITY
     except Exception:
-        logger.debug("has_naive_signal failed for %s/%s", anchor_type, anchor_id, exc_info=True)
+        logger.warning("has_naive_signal failed for %s/%s", anchor_type, anchor_id, exc_info=True)
         return False
     finally:
         session.close()

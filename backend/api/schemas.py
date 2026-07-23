@@ -1074,6 +1074,14 @@ class ComponentGraphResponse(BaseModel):
     # edge_narratives: {edge_id: {...}}}. Annotation only — never part of
     # nodes / edges.
     narrative: dict = Field(default_factory=dict)
+    # Reference index for evidence-link resolution: node/edge payloads carry
+    # pipeline-internal IDs (atomic claim IDs, ev_NNNN evidence IDs,
+    # derivation/step IDs) that have no DB table of their own and cannot be
+    # resolved by the frontend on its own. This maps only the referenced IDs
+    # (never the whole stage_outputs) to a short human-readable snippet:
+    # {"claims": {id: {"claim_id", "text"}}, "evidence": {id: {"text",
+    # "block_id"}}, "derivations": {id: {"label", "kind", "operation"}}}.
+    reference_index: dict = Field(default_factory=dict)
 
 
 class LectureStudioSettings(BaseModel):

@@ -119,7 +119,7 @@ eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
  "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
- "renderMaterialEvidenceChip","renderMaterialChunk"]));
+ "renderMaterialEvidenceChip","mdBlocksToHtml","renderMaterialChunk"]));
 const chunk={
   text:"本文 ![[component:comp_1]] つづき ![[claim:claim_1]] さらに ![[source:ev_1]] "
     +"数式 ![[equation:eq_1]] 未知 ![[component:missing_1]]",
@@ -174,7 +174,7 @@ eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
  "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
- "renderMaterialEvidenceChip","renderMaterialChunk"]));
+ "renderMaterialEvidenceChip","mdBlocksToHtml","renderMaterialChunk"]));
 const chunk={
   text:"取り違え ![[claim:comp_1]]",
   formulas:[], figures:[],

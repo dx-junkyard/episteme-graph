@@ -296,7 +296,7 @@ eval(extractVar(app, "MATERIAL_EVIDENCE_KIND_LABELS"));
 eval(extractMany(app, ["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
   "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
   "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
-  "renderMaterialEvidenceChip","renderMaterialChunk"]));
+  "renderMaterialEvidenceChip","mdBlocksToHtml","renderMaterialChunk"]));
 
 const chunk = {
   text: "本文 ![[component:comp_1]] 続き 数式 ![[equation:eq_1]] 出典 ![[source:ev_1]]",

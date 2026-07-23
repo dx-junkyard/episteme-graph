@@ -933,11 +933,14 @@
 
   // 既にHTMLエスケープ済みのテキストを行単位で走査し、見出し・箇条書き・
   // 番号付きリスト・段落へ変換する。inline はボールド/コード変換コールバック。
-  function mdBlocksToHtml(escaped, inline) {
+  // headingBase: 見出しレベルのシフト量（0=素の #→h1。教材本文は 1 を渡し #→h2 とし、
+  // ページ見出し h1 と衝突させない）。レベルは h6 で頭打ち。
+  function mdBlocksToHtml(escaped, inline, headingBase) {
     var lines = escaped.split("\n");
     var out = [];
     var listType = null; // "ul" | "ol"
     var para = [];
+    var base = headingBase || 0;
     function closeList() { if (listType) { out.push("</" + listType + ">"); listType = null; } }
     function flushPara() {
       if (para.length) { out.push("<p>" + para.join("<br>") + "</p>"); para = []; }
@@ -948,7 +951,7 @@
       var h = /^(#{1,6})\s+(.*)$/.exec(line);
       if (h) {
         flushPara(); closeList();
-        var lvl = h[1].length;
+        var lvl = Math.min(6, h[1].length + base);
         out.push("<h" + lvl + ">" + inline(h[2]) + "</h" + lvl + ">");
         continue;
       }
@@ -4526,14 +4529,12 @@
       return preserveMath(expr, false);
     });
 
-    var html = escHtml(preserved);
-    html = html.replace(/^### (.+)$/gm, "<h4>$1</h4>");
-    html = html.replace(/^## (.+)$/gm, "<h3>$1</h3>");
-    html = html.replace(/^# (.+)$/gm, "<h2>$1</h2>");
-    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    html = html.split("\n\n").map(function (p) {
-      return "<p>" + p.replace(/\n/g, "<br>") + "</p>";
-    }).join("");
+    // 見出し(#..######)・箇条書き(- * +)・番号付きリスト(1. 1))・太字を
+    // ブロック変換する。チャット本文と同じ mdBlocksToHtml を共有し、教材では
+    // headingBase=1 で #→h2（従来の #/##/### → h2/h3/h4 を維持しつつ #### 以降にも対応）。
+    var html = mdBlocksToHtml(escHtml(preserved), function (s) {
+      return s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+    }, 1);
 
     html = html.replace(/\x00MATERIAL_MATH_(\d+)\x00/g, function (_m, idx) {
       var block = mathBlocks[parseInt(idx, 10)];
