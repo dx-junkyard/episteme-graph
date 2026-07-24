@@ -1028,6 +1028,22 @@ body {
   text-align: center;
 }
 
+/* Groups modal reuses the .auth-box shell but has its own inner layout
+   (flex header row, inline join-code form). Neutralize the global
+   full-width button/input rules so they don't squash the layout. */
+#groups-overlay .auth-box h2 {
+  margin-bottom: 0;
+  text-align: left;
+}
+#groups-overlay .auth-box input {
+  width: auto;
+  margin-bottom: 0;
+}
+#groups-overlay .auth-box button {
+  width: auto;
+  margin-top: 0;
+}
+
 /* ── Course selector (topbar dropdown) ──────────────────────────── */
 .course-select {
   padding: 4px 10px;
