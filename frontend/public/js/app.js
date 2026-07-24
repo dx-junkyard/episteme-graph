@@ -39,6 +39,19 @@
     pendingSelection: null, // 方法A: 「ここについて質問」で選択したテキスト {text, segment_id}
   };
 
+  // 送信直後の描画で「新しい問い」の先頭へスクロールさせるための一時フラグ（state には
+  // 含めない。state の一部は永続化されるため、描画専用の transient 値を混ぜない）。
+  let _pendingScrollMsgId = null;
+
+  // チャット送信時に教材区画を自動で畳み、対話の外をクリックしたら元の比率に戻す制御。
+  // active: 現在畳み中か / prevPx: 復元先の高さ(px) / hadInline: 畳む前から手動調整済み
+  // 高さ（inline style）を持っていたか（無ければ復元時に CSS 既定の max-height に戻す）。
+  // gen: 圧縮サイクルの世代カウンタ。restoreMaterialRegion の setTimeout 後始末が、
+  // その完了を待たずに始まった次の圧縮サイクルへ誤って干渉しないようにするため
+  // （setTimeout のクロージャは _matCollapse の可変フィールドを後から読むと
+  // 新サイクルの値で上書きされてしまうので、呼び出し時点でローカルに退避して使う）。
+  const _matCollapse = { active: false, prevPx: 0, hadInline: false, gen: 0 };
+
   // 構造帰属: 疑いの様相の1タップ選択肢（サーバの DOUBT_TYPE_LABELS と同語彙。
   // unclassified は提示しない — 未選択のまま閉じれば unclassified が保たれる）。
   var ANCHOR_DOUBT_OPTIONS = [
@@ -644,7 +657,25 @@
     }
 
     ca.innerHTML = html;
-    ca.scrollTop = ca.scrollHeight;
+    // 機能1: 送信直後は回答末尾ではなく「新しい問い」の先頭へ着地させる（長文回答で
+    // 本文の頭が見えなくなる問題への対処）。それ以外（トピック切替・履歴ロード・
+    // 送信中の typing 表示など）は従来どおり最下部へスクロールする。
+    if (_pendingScrollMsgId) {
+      var _scrollTargetEl = document.getElementById("msg-" + _pendingScrollMsgId);
+      if (_scrollTargetEl) {
+        var _scrollTop = _scrollTargetEl.getBoundingClientRect().top - ca.getBoundingClientRect().top + ca.scrollTop - 8;
+        if (typeof ca.scrollTo === "function") {
+          ca.scrollTo({ top: _scrollTop, behavior: "smooth" });
+        } else {
+          ca.scrollTop = _scrollTop;
+        }
+      } else {
+        ca.scrollTop = ca.scrollHeight;
+      }
+      _pendingScrollMsgId = null;
+    } else {
+      ca.scrollTop = ca.scrollHeight;
+    }
     var clearBtn = document.getElementById("chat-clear-btn");
     if (clearBtn) clearBtn.disabled = !state.course || !state.currentTopicId || state.sending || state.chatMessages.length === 0;
 
@@ -2480,6 +2511,11 @@
   // 既定（サイドツリーからの手動選択など）では detour を閉じて再アンカーする。
   async function selectTopic(topicId, opts) {
     opts = opts || {};
+    // 機能2: トピック切替は教材区画の対象そのものが変わるため、直前の圧縮状態を
+    // 持ち越さない。「本筋へ戻る」(#mode-bar) や本文内の同アクションボタンは
+    // #chat-area/#mode-bar 内にあり自動復元の対象外クリックだが、ここへ来る時点で
+    // 明示的に復元する（そうしないと新トピックの教材が畳まれたまま表示され続ける）。
+    restoreMaterialRegion();
     if (!opts.keepDetour) {
       // 手動ナビゲーション = 再アンカー。開いている寄り道は閉じる。
       Session.clearDetour();
@@ -2756,6 +2792,7 @@
   // ── Send Message ───────────────────────────────────────────────────
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return null;
+    collapseMaterialForChat();  // 機能2: 送信時に教材区画を自動で畳む
     let respData = null;  // 音声会話モードが answer/sources を使うため応答を返す
 
     // 機能3（書き直し）: _replace_message_id が指定されていれば、その往復以降を
@@ -2874,6 +2911,9 @@
     }
 
     state.sending = false;
+    // 機能1: この往復の user メッセージ（新しい問い）の先頭へ着地させる。成功・エラー
+    // どちらの経路でもここに合流するので1箇所で済む。
+    _pendingScrollMsgId = userMsgId;
     renderChat();
     renderRightPanel();  // L1: 直近回答の tier を Sources タブへ反映
     return respData;
@@ -2933,6 +2973,14 @@
         e.preventDefault();
         sendCurrent();
       }
+    });
+
+    // 機能2: 対話に属する領域（チャット・入力・モードバー・音声パネル・出典ポップアップ等）の
+    // 外側をクリックしたら、送信時に自動で畳んだ教材区画を元の比率に戻す。
+    document.addEventListener("click", function (e) {
+      if (!_matCollapse.active) return;
+      if (e.target.closest("#chat-area, #chat-input, #send-btn, #voice-mode-btn, #chat-clear-btn, #mode-bar, #voice-panel, #src-popup, #lecture-chat-popup, #split-handle")) return;
+      restoreMaterialRegion();
     });
   }
 
@@ -5602,6 +5650,56 @@
     startPlayback();
   }
 
+  // ── 教材区画の自動圧縮/復元（機能2） ─────────────────────────────
+  // チャット送信時に教材区画（上段）を一時的に畳んで対話の可視領域を広げ、
+  // 対話の外側をクリックしたら元の比率へ戻す。ユーザーが分割ハンドルで手動調整した
+  // 高さ（localStorage）には一切書き込まない（あくまで一時的な UI 状態）。
+  function collapseMaterialForChat() {
+    var region = document.getElementById("material-region");
+    if (!region || region.offsetParent === null) return; // 非表示（レクチャーモード等）なら何もしない
+    if (_matCollapse.active) return;
+    var COLLAPSED = 120;
+    var h = region.getBoundingClientRect().height;
+    if (h <= COLLAPSED + 20) return; // 畳む価値がないほど既に小さい
+
+    _matCollapse.gen++;
+    _matCollapse.prevPx = Math.round(h);
+    _matCollapse.hadInline = !!region.style.height;
+
+    region.style.height = h + "px";
+    region.style.maxHeight = "none";
+    region.style.flex = "0 0 auto";
+    void region.offsetHeight; // 強制リフロー（transition を効かせるため）
+    region.classList.add("mr-animating");
+    region.style.height = COLLAPSED + "px";
+    _matCollapse.active = true;
+  }
+
+  function restoreMaterialRegion() {
+    if (!_matCollapse.active) return;
+    _matCollapse.active = false;
+    var region = document.getElementById("material-region");
+    if (!region) return;
+    // 後始末を行う setTimeout のクロージャが _matCollapse の可変フィールドを後から
+    // 読むと、この 250ms の間に次の collapseMaterialForChat が呼ばれて値が
+    // 上書きされてしまう（hadInline の取り違え・新サイクルの mr-animating を
+    // 誤って剥がす）。呼び出し時点の値をローカルへ退避し、gen で世代不一致なら
+    // 何もしない。
+    var hadInline = _matCollapse.hadInline;
+    var myGen = _matCollapse.gen;
+    region.style.height = _matCollapse.prevPx + "px";
+    setTimeout(function () {
+      if (_matCollapse.gen !== myGen) return; // 新しい圧縮サイクルが既に開始済み
+      region.classList.remove("mr-animating");
+      if (!hadInline) {
+        // 畳む前が手動調整済みでなければ CSS 既定（max-height 42%）に戻す。
+        region.style.height = "";
+        region.style.maxHeight = "";
+        region.style.flex = "";
+      }
+    }, 250);
+  }
+
   // ── 分割ハンドル ─────────────────────────────────────────────────
   // 教材区画（上段）と下段（読み上げ行＋ホワイトボード）の比率をドラッグで調整する。
   // 高さは localStorage に保存し、次回以降も同じ比率で表示する。
@@ -5628,6 +5726,12 @@
 
     var dragging = false, startY = 0, startH = 0;
     handle.addEventListener("pointerdown", function (e) {
+      // 手動でハンドルを掴んだら機能2の自動圧縮制御を放棄する（以後は従来どおり手動値が
+      // localStorage に保存される）。
+      if (_matCollapse.active) {
+        _matCollapse.active = false;
+        region.classList.remove("mr-animating");
+      }
       dragging = true;
       startY = e.clientY;
       startH = region.getBoundingClientRect().height;

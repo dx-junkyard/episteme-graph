@@ -266,6 +266,10 @@ body {
   margin-bottom: 12px;
   overflow: hidden;
 }
+/* チャット送信時の自動圧縮/復元アニメーション（手動ドラッグ時は付与しない） */
+.material-region.mr-animating {
+  transition: height 0.22s ease;
+}
 .material-region .material-body {
   flex: 1;
   overflow-y: auto;
