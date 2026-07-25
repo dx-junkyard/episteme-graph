@@ -5,9 +5,10 @@
 `extract_function_source`）と既存パターン（`test_next_steps_guardrails.py` の
 ソース検査スタイル）を踏襲する。
 
-対象外（Phase 2 のため）:
-  - §6-10: k=3 再定義禁止（help_usage 集計自体が Phase 2 の G層ルールでまだ存在しないため）
-  - §6-14: G層整合（同上、G層ルール3本は Phase 2）
+§6-10（k=3 再定義禁止）と §6-14（G層整合）は Phase 2 実装済みの G層ルール3本
+（`manual.help_gaps_pending` / `assistant_kb.undocumented` / `manual.todo_unresolved`）
+に対する検証であるため、本ファイルではなく `backend/tests/test_next_steps_guardrails.py`
+（`TestHelpGapsPendingUsesPrivacyModule` / `TestHelpKbRulesRegistered` 等）で担保する。
 
 本ファイルは「動く」ことの確認（test_help_kb.py / test_help_usage_route.py）とは別に、
 構造的な不変条項（audience 越境禁止・fail-closed・情報を落とさない・数値非表示・

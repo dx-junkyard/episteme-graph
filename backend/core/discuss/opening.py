@@ -516,10 +516,18 @@ def _claim_label_index(document_id: str, artifacts: dict[str, Any]) -> dict[str,
     return index
 
 
-def _equations_index_for(document_id: str) -> dict[str, dict[str, Any]]:
+def _equations_index_for(
+    document_id: str, artifacts: dict[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
+    """document の equation_id → record 索引。
+
+    ``artifacts`` を渡すと ``equation_records`` に素通しし、呼び出し側が既に取得済みの
+    ``document_run_artifacts`` を再利用する（同一 document で ``document_analysis_runs``
+    を2回 SELECT しない。省略時は従来どおり自前で取得する）。
+    """
     return {
         str(r.get("equation_id")): r
-        for r in equation_records(document_id)
+        for r in equation_records(document_id, artifacts=artifacts)
         if isinstance(r, dict) and r.get("equation_id")
     }
 
@@ -574,7 +582,7 @@ def build_opening(course_id: str, document_ids: Iterable[str]) -> dict[str, Any]
         thesis_artifact = artifacts.get("thesis_reconstruction")
 
         try:
-            equations_by_id = _equations_index_for(document_id)
+            equations_by_id = _equations_index_for(document_id, artifacts)
         except Exception:  # noqa: BLE001
             logger.warning("discuss opening: equation index failed for %s", document_id, exc_info=True)
             equations_by_id = {}

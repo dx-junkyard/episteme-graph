@@ -44,11 +44,12 @@ class _Result:
 
 
 class _FakeChunkClaimSession:
-    """chunks.material_id 解決 + theory_claims 一覧を SQL 部分一致でエミュレートする。"""
+    """chunks.material_id/document_id 解決 + theory_claims 一覧を SQL 部分一致でエミュレートする。"""
 
     def __init__(self, chunk_material_id=None, chunk_missing=False,
-                 claim_rows=None, raise_on_chunk_lookup=False):
+                 claim_rows=None, raise_on_chunk_lookup=False, chunk_document_id=None):
         self.chunk_material_id = chunk_material_id
+        self.chunk_document_id = chunk_document_id
         self.chunk_missing = chunk_missing
         self.claim_rows = claim_rows or []
         self.raise_on_chunk_lookup = raise_on_chunk_lookup
@@ -63,7 +64,7 @@ class _FakeChunkClaimSession:
                 raise ValueError("invalid input syntax for type uuid")
             if self.chunk_missing:
                 return _Result(row=None)
-            return _Result(row=(self.chunk_material_id,))
+            return _Result(row=(self.chunk_material_id, self.chunk_document_id))
         if "FROM theory_claims" in sql:
             return _Result(rows=self.claim_rows)
         return _Result(row=None)
@@ -206,6 +207,87 @@ class TestGetChunkClaimRefsService:
 
 
 # ===========================================================================
+# レビュー確定の修正2: discuss モード all_visible スコープの user_id 可視性フォールバック
+# ===========================================================================
+
+
+class TestGetChunkClaimRefsUserVisibilityFallback:
+    def test_resolves_via_user_visibility_when_outside_course_sources(self, monkeypatch):
+        """discuss の all_visible スコープで引用された、コース外だが本人可視のチャンク。"""
+        from api import services
+
+        fake = _FakeChunkClaimSession(
+            chunk_material_id="other-material",
+            chunk_document_id="doc-outside",
+            claim_rows=[("id-1", "diagnostic_claim", "text", "norm")],
+        )
+        monkeypatch.setattr(services, "_pg_session", lambda: fake)
+        monkeypatch.setattr(services, "list_visible_document_ids", lambda uid: {"doc-outside"})
+
+        result = services.get_chunk_claim_refs(
+            _course_data(["mat-1"]), "chunk-1", user_id="user-1",
+        )
+        assert result == [{"id": "id-1", "claim_type": "diagnostic_claim", "label": "norm"}]
+
+    def test_returns_none_when_not_in_course_and_not_visible(self, monkeypatch):
+        """コース sources にも本人可視集合にも属さない → fail-closed で None のまま。"""
+        from api import services
+
+        fake = _FakeChunkClaimSession(
+            chunk_material_id="other-material",
+            chunk_document_id="doc-outside",
+            claim_rows=[("id-1", "diagnostic_claim", "text", "norm")],
+        )
+        monkeypatch.setattr(services, "_pg_session", lambda: fake)
+        monkeypatch.setattr(services, "list_visible_document_ids", lambda uid: set())
+
+        result = services.get_chunk_claim_refs(
+            _course_data(["mat-1"]), "chunk-1", user_id="user-1",
+        )
+        assert result is None
+
+    def test_user_id_omitted_skips_visibility_fallback(self, monkeypatch):
+        """user_id 省略時は従来どおりコース sources 判定のみ（後方互換・fail-closed）。"""
+        from api import services
+
+        fake = _FakeChunkClaimSession(
+            chunk_material_id="other-material", chunk_document_id="doc-outside",
+        )
+        monkeypatch.setattr(services, "_pg_session", lambda: fake)
+
+        def _boom(_uid):
+            raise AssertionError("list_visible_document_ids should not be called without user_id")
+
+        monkeypatch.setattr(services, "list_visible_document_ids", _boom)
+
+        result = services.get_chunk_claim_refs(_course_data(["mat-1"]), "chunk-1")
+        assert result is None
+
+    def test_course_membership_takes_precedence_without_visibility_call(self, monkeypatch):
+        """コース sources 一致で許可できるときは list_visible_document_ids を呼ばない。"""
+        from api import services
+
+        fake = _FakeChunkClaimSession(
+            chunk_material_id="mat-1",
+            chunk_document_id="doc-in-course",
+            claim_rows=[("id-1", "diagnostic_claim", "text", "norm")],
+        )
+        monkeypatch.setattr(services, "_pg_session", lambda: fake)
+
+        def _boom(_uid):
+            raise AssertionError(
+                "list_visible_document_ids should not be called when course membership already allows"
+            )
+
+        monkeypatch.setattr(services, "list_visible_document_ids", _boom)
+
+        result = services.get_chunk_claim_refs(
+            _course_data(["mat-1"]), "chunk-1", user_id="user-1",
+        )
+        assert result == [{"id": "id-1", "claim_type": "diagnostic_claim", "label": "norm"}]
+
+
+# ===========================================================================
 # routes.learning.get_chunk_claim_refs_route
 # ===========================================================================
 
@@ -234,7 +316,7 @@ class TestGetChunkClaimRefsRoute:
         )
         monkeypatch.setattr(
             learning_module, "get_chunk_claim_refs",
-            lambda course_data, chunk_id: None,
+            lambda course_data, chunk_id, user_id=None: None,
         )
 
         with pytest.raises(HTTPException) as exc_info:
@@ -252,7 +334,7 @@ class TestGetChunkClaimRefsRoute:
         )
         monkeypatch.setattr(
             learning_module, "get_chunk_claim_refs",
-            lambda course_data, chunk_id: [
+            lambda course_data, chunk_id, user_id=None: [
                 {"id": "id-1", "claim_type": "diagnostic_claim", "label": "短い要約"},
             ],
         )
@@ -274,10 +356,34 @@ class TestGetChunkClaimRefsRoute:
         )
         monkeypatch.setattr(
             learning_module, "get_chunk_claim_refs",
-            lambda course_data, chunk_id: [],
+            lambda course_data, chunk_id, user_id=None: [],
         )
 
         result = learning_module.get_chunk_claim_refs_route(
             "course-1", "chunk-1", current_user={"id": "user-1"},
         )
         assert result == {"claims": []}
+
+    def test_route_passes_current_user_id_to_service(self, monkeypatch):
+        """レビュー確定の修正2: ルートは user_id をサービス関数へ必ず渡す。"""
+        from api.routes import learning as learning_module
+
+        captured: dict = {}
+
+        monkeypatch.setattr(
+            learning_module, "get_course_data",
+            lambda user_id, course_id: {"sources": [{"material_id": "mat-1"}]},
+        )
+
+        def _fake_get_chunk_claim_refs(course_data, chunk_id, user_id=None):
+            captured["user_id"] = user_id
+            return []
+
+        monkeypatch.setattr(
+            learning_module, "get_chunk_claim_refs", _fake_get_chunk_claim_refs,
+        )
+
+        learning_module.get_chunk_claim_refs_route(
+            "course-1", "chunk-1", current_user={"id": "user-42"},
+        )
+        assert captured["user_id"] == "user-42"

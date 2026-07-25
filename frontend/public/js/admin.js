@@ -7869,7 +7869,7 @@
       });
     }
 
-    // 利用者マニュアル KB（help_kb, migration 0本）— draft 編集 + 凍結配信の管理 UI。
+    // 利用者マニュアル KB（help_kb, migration 058/059）— draft 編集 + 凍結配信の管理 UI。
     // DI 注入して疎結合に起動する（admin-llm-usage.js と同型）。
     if (window.ManualKbEditor) {
       window.ManualKbEditor.init({

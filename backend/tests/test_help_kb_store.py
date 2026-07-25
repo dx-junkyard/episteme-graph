@@ -91,6 +91,10 @@ class ManualKbFake:
 
     # -- dispatch --
     def _dispatch(self, sql: str, p: dict) -> FakeResult:  # noqa: C901
+        if "pg_advisory_xact_lock" in sql:
+            # フェイクは単一プロセス内で逐次実行されるため実ロックは不要。
+            # freeze() が採番前にロックを取得していることの検証は calls ログで行う。
+            return FakeResult([(None,)])
         if "manual_kb_drafts" in sql:
             return self._dispatch_drafts(sql, p)
         if "manual_kb_versions" in sql:
@@ -416,6 +420,31 @@ class TestFreezeValidationGate:
         result = kb_store.freeze()
         assert result["version_no"] == 1
         assert result["audience_file_counts"] == {}
+
+    def test_freeze_takes_advisory_lock_before_version_numbering(self, fake):
+        """version_no 採番（MAX+1）の直列化用 advisory lock が採番より前に取得される。
+
+        同時 freeze の PK 衝突（生 IntegrityError）を防ぐための
+        ``pg_advisory_xact_lock`` 呼び出しが実在し、``SELECT COALESCE(MAX(version_no)``
+        より先に発行されていることを確認する（``atlas_store`` の
+        ``test_write_paths_take_domain_lock`` と同型の存在確認）。
+        """
+        _seed_draft(fake, "teacher", "a.md", VALID_TEACHER_MD)
+        kb_store.freeze()
+        lock_idx = next(
+            (i for i, (sql, _p) in enumerate(fake.calls) if "pg_advisory_xact_lock" in sql), None
+        )
+        version_select_idx = next(
+            (
+                i
+                for i, (sql, _p) in enumerate(fake.calls)
+                if sql.startswith("SELECT COALESCE(MAX(version_no)")
+            ),
+            None,
+        )
+        assert lock_idx is not None, "freeze() が advisory lock を取得していない"
+        assert version_select_idx is not None
+        assert lock_idx < version_select_idx
 
 
 # ---------------------------------------------------------------------------

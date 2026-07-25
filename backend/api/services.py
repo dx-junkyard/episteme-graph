@@ -2642,24 +2642,43 @@ def resolve_interest_trace(user_id: str, trace_id: str, status: str = "resolved"
         session.close()
 
 
-def get_chunk_passage(chunk_id: str) -> dict | None:
+def get_chunk_passage(
+    chunk_id: str,
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> dict | None:
     """出典ポップアップ用に、チャンク本文（数式プレースホルダ正規化済み）と数式を返す。
 
     display_text を優先し、`normalize_to_placeholder_format` で [[FORMULA_N]] 形式へ正規化する
     （フロントの renderMaterialChunk がそのまま数式を KaTeX 描画できる形）。
+
+    レビュー確定の修正1（セキュリティ）: `search_chunks_with_metadata` と同じ意味論の
+    `allowed_document_ids` を必須キーワード引数にする。認証済みユーザーが任意の chunk_id を
+    指定するだけで他人の Private 文書本文を取得できていた欠落を塞ぐ。`None` はテスト・
+    未接続コード専用の無フィルタ、空集合は SQL を発行せず即座に None（fail-closed）、
+    非空集合は SQL 内 `c.document_id = ANY(...)` で強制する。
     """
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return None
+
     session = _pg_session()
     try:
+        params: dict = {"cid": chunk_id}
+        doc_filter_sql = ""
+        if allowed_document_ids is not None:
+            doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+            params["doc_ids"] = list(allowed_document_ids)
         row = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT c.text, c.display_text, c.formulas, c.chapter, c.section,
                        COALESCE(d.title, d.filename, '') AS source_title, d.filename
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
                 WHERE c.id = CAST(:cid AS uuid)
+                {doc_filter_sql}
                 LIMIT 1
             """),
-            {"cid": chunk_id},
+            params,
         ).fetchone()
     except Exception as exc:
         logger.warning("get_chunk_passage failed: %s", exc)
@@ -2683,7 +2702,9 @@ def get_chunk_passage(chunk_id: str) -> dict | None:
     }
 
 
-def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] | None:
+def get_chunk_claim_refs(
+    course_data: dict | None, chunk_id: str, *, user_id: str | None = None,
+) -> list[dict] | None:
     """学習者向け chunk→claim ID 解決（読み取り専用・最小フィールドのみ）。
 
     D3-6 の出典タブ台帳併記（equation）を claim にも拡張するための下請け。
@@ -2692,13 +2713,22 @@ def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] 
     チャンクが存在しない場合・chunk_id が不正な場合は ``None`` を返す
     （呼び出し側は 404 として fail-closed に扱う）。ドキュメント全体への
     フォールバックはしない（チャンク厳密一致のみ）。数値（confidence 等）は含めない。
+
+    レビュー確定の修正2: discuss モードの ``all_visible`` スコープで引用されたチャンクは
+    コース sources に属さないため、上記判定だけでは常に None（fail-closed が過剰）になる。
+    ``user_id`` が渡された場合は、チャンクの document が
+    ``list_visible_document_ids(user_id)`` に含まれることも許可条件に加える
+    （どちらにも該当しなければ従来どおり None）。``user_id`` 省略時は従来どおり
+    コース sources 判定のみ（既存呼び出し元との後方互換・fail-closed 維持）。
     """
     course_material_ids = set(course_source_material_ids(course_data))
     session = _pg_session()
     try:
         try:
             chunk_row = session.execute(
-                sa_text("SELECT material_id FROM chunks WHERE id = CAST(:cid AS uuid)"),
+                sa_text(
+                    "SELECT material_id, document_id FROM chunks WHERE id = CAST(:cid AS uuid)"
+                ),
                 {"cid": chunk_id},
             ).fetchone()
         except Exception as exc:
@@ -2707,7 +2737,12 @@ def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] 
         if not chunk_row:
             return None
         chunk_material_id = str(chunk_row[0] or "")
-        if not chunk_material_id or chunk_material_id not in course_material_ids:
+        chunk_document_id = str(chunk_row[1] or "")
+        allowed_by_course = bool(chunk_material_id) and chunk_material_id in course_material_ids
+        allowed_by_visibility = False
+        if not allowed_by_course and user_id and chunk_document_id:
+            allowed_by_visibility = chunk_document_id in list_visible_document_ids(user_id)
+        if not (allowed_by_course or allowed_by_visibility):
             return None
         rows = session.execute(
             sa_text("""

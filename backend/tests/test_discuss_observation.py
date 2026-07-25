@@ -18,7 +18,11 @@ TestClient は使わない）で以下を検証する:
 
 from __future__ import annotations
 
+import io
+import json
 import sys
+import tarfile
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -248,6 +252,26 @@ class _FakeSession:
         return _FakeMappingResult(self._rows)
 
 
+class _SequentialFakeSession:
+    """呼び出しごとに事前登録した結果を順番に返す fake session。
+
+    ``build_observation_status`` / ``build_observation_dump`` は複数回 ``session.execute(...)``
+    を呼ぶため、単一の固定 rows を返す ``_FakeSession`` では表現できないケースに使う。
+    """
+
+    def __init__(self, results):
+        self._results = list(results)
+        self._idx = 0
+
+    def execute(self, _stmt, _params=None):
+        result = self._results[self._idx]
+        self._idx += 1
+        return result
+
+    def close(self):
+        pass
+
+
 def _fake_llm_usage_row(user_id: str) -> dict:
     return {
         "occurred_at": datetime(2026, 7, 20, 3, 0, tzinfo=timezone.utc),
@@ -290,6 +314,43 @@ class TestRowCapTruncation:
 
 
 # ---------------------------------------------------------------------------
+# レビュー指摘1: build_observation_status() に generated_at が含まれる
+# （フロントが data.generated_at を参照するための契約）
+# ---------------------------------------------------------------------------
+
+
+class TestBuildObservationStatusGeneratedAt:
+    def test_includes_generated_at_iso8601_string(self, monkeypatch):
+        # build_observation_status() は session.execute を5回呼ぶ
+        # （usage:1回, traces:2回=totals+分布, ui_events:2回=totals+by_event）。
+        results = [_FakeMappingResult([]) for _ in range(5)]
+        session = _SequentialFakeSession(results)
+
+        import core.postgres as core_postgres
+
+        monkeypatch.setattr(core_postgres, "get_session", lambda: session)
+
+        status = observation.build_observation_status()
+
+        assert "generated_at" in status
+        # 例外を投げなければ ISO8601 として妥当。
+        datetime.fromisoformat(status["generated_at"])
+
+    def test_generated_at_is_fresh_each_call(self, monkeypatch):
+        import core.postgres as core_postgres
+
+        def fake_get_session():
+            return _SequentialFakeSession([_FakeMappingResult([]) for _ in range(5)])
+
+        monkeypatch.setattr(core_postgres, "get_session", fake_get_session)
+
+        first = observation.build_observation_status()["generated_at"]
+        second = observation.build_observation_status()["generated_at"]
+        # 同一プロセス内でも呼び出しごとに現在時刻を計算する（キャッシュしない）。
+        assert first <= second
+
+
+# ---------------------------------------------------------------------------
 # イベント語彙・payload キーホワイトリスト
 # ---------------------------------------------------------------------------
 
@@ -327,6 +388,47 @@ class TestMetricEventVocabAndPayloadWhitelist:
 
     def test_sanitize_event_payload_empty_dict_stays_empty(self):
         assert observation.sanitize_event_payload({}) == {}
+
+    # -- レビュー指摘2: 値のホワイトリスト検証（DO1のギャップ修正） -----------------
+
+    def test_sanitize_event_payload_accepts_all_documented_enum_values(self):
+        assert observation.sanitize_event_payload({"scope": "course_sources"}) == {
+            "scope": "course_sources"
+        }
+        assert observation.sanitize_event_payload({"scope": "all_visible"}) == {
+            "scope": "all_visible"
+        }
+        for reason in ("explicit", "topic_switch", "timeout"):
+            assert observation.sanitize_event_payload({"reason": reason}) == {"reason": reason}
+        for kind in ("tension", "anchor"):
+            assert observation.sanitize_event_payload({"kind": kind}) == {"kind": kind}
+
+    def test_sanitize_event_payload_drops_key_with_invalid_enum_value(self):
+        """不正な値は 422 にせず、そのキーだけを黙って捨てる（DO6: 計測失敗でUXを止めない）。"""
+        out = observation.sanitize_event_payload(
+            {
+                "scope": "not-a-real-scope",
+                "reason": "arbitrary free text reason that should be dropped",
+                "kind": "unknown-kind",
+            }
+        )
+        assert out == {}
+
+    def test_sanitize_event_payload_drops_non_string_values(self):
+        out = observation.sanitize_event_payload({"scope": 123, "reason": None, "kind": ["tension"]})
+        assert out == {}
+
+    def test_sanitize_event_payload_partial_valid_partial_invalid(self):
+        """一部だけ不正な値のときも、有効なキーは残る。"""
+        out = observation.sanitize_event_payload(
+            {"scope": "course_sources", "reason": "this is a free-form leak attempt", "kind": "tension"}
+        )
+        assert out == {"scope": "course_sources", "kind": "tension"}
+
+    def test_sanitize_event_payload_rejects_long_freeform_text_via_reason(self):
+        leak = "ここには絶対に出てはいけない学習者の発話本文です" * 5
+        out = observation.sanitize_event_payload({"reason": leak})
+        assert out == {}
 
     def test_route_validates_against_vocab_and_raises_422(self):
         """未知イベント422の配線: ルートが observation.METRIC_EVENT_VOCAB を参照し、
@@ -504,6 +606,127 @@ class TestDailySummaryMerge:
 
     def test_no_input_yields_no_rows(self):
         assert observation.build_daily_summary_rows({}, {}, {}, {}) == []
+
+
+# ---------------------------------------------------------------------------
+# レビュー指摘3: manifest.json の「期間」（設計書 §5）
+# ---------------------------------------------------------------------------
+
+
+class TestPeriodFromRows:
+    """``_period_from_rows`` 単体（純粋関数）。"""
+
+    def test_computes_min_max_created_at_across_multiple_row_lists(self):
+        rows_a = [{"created_at": "2026-07-05T00:00:00+00:00"}, {"created_at": "2026-07-10T00:00:00+00:00"}]
+        rows_b = [{"created_at": "2026-07-01T00:00:00+00:00"}]
+        rows_c = [{"created_at": "2026-07-20T00:00:00+00:00"}]
+
+        period = observation._period_from_rows([rows_a, rows_b, rows_c])
+
+        assert period == {"from": "2026-07-01T00:00:00+00:00", "to": "2026-07-20T00:00:00+00:00"}
+
+    def test_empty_rows_yield_null_period(self):
+        assert observation._period_from_rows([[], []]) == {"from": None, "to": None}
+
+    def test_rows_missing_key_are_ignored_not_crash(self):
+        rows = [{"created_at": None}, {"other_field": "x"}, {"created_at": "2026-07-03T00:00:00+00:00"}]
+        period = observation._period_from_rows([rows])
+        assert period == {"from": "2026-07-03T00:00:00+00:00", "to": "2026-07-03T00:00:00+00:00"}
+
+    def test_supports_alternate_key_for_daily_summary_rows(self):
+        rows = [{"day": "2026-07-10"}, {"day": "2026-07-01"}]
+        period = observation._period_from_rows([rows], key="day")
+        assert period == {"from": "2026-07-01", "to": "2026-07-10"}
+
+
+class TestManifestPeriodEndToEnd:
+    """``build_observation_dump`` が manifest.json に全体期間・ファイル別期間を書き込む。"""
+
+    def _make_session(self, *, with_rows: bool):
+        if with_rows:
+            llm_row = {
+                "occurred_at": datetime(2026, 7, 1, 0, 0, tzinfo=timezone.utc),
+                "feature": "learning:chat_discuss",
+                "operation": "chat",
+                "model": "gpt-4o",
+                "usage_source": "reported",
+                "prompt_tokens": 1,
+                "completion_tokens": 1,
+                "total_tokens": 2,
+                "cached_tokens": 0,
+                "reasoning_tokens": 0,
+                "user_id": "11111111-1111-1111-1111-111111111111",
+                "course_id": "course-1",
+            }
+            trace_row = {
+                "created_at": datetime(2026, 7, 15, 0, 0, tzinfo=timezone.utc),
+                "user_id": "22222222-2222-2222-2222-222222222222",
+                "course_id": "course-1",
+                "kind": "question",
+                "status": "open",
+                "overall_tier": None,
+                "content_grounding": None,
+                "discuss_scope": None,
+                "tension_hint": "false",
+                "structure_anchor_present": False,
+                "map_excluded": "false",
+            }
+            ui_event_row = {
+                "created_at": datetime(2026, 7, 20, 0, 0, tzinfo=timezone.utc),
+                "user_id": "33333333-3333-3333-3333-333333333333",
+                "course_id": "course-1",
+                "event": "landing_shown",
+                "payload": {},
+            }
+            results = [
+                _FakeMappingResult([llm_row]),  # _fetch_llm_usage_chat_rows
+                _FakeMappingResult([trace_row]),  # _fetch_discuss_trace_rows
+                _FakeMappingResult([ui_event_row]),  # _fetch_discuss_ui_event_rows
+                _FakeMappingResult([]),  # _fetch_daily_usage
+                _FakeMappingResult([]),  # _fetch_daily_grounding
+                _FakeMappingResult([]),  # _fetch_daily_landing
+                _FakeMappingResult([]),  # _fetch_discuss_usage_events_for_followup
+            ]
+        else:
+            results = [_FakeMappingResult([]) for _ in range(7)]
+        return _SequentialFakeSession(results)
+
+    def test_manifest_includes_period_spanning_all_rows(self, monkeypatch):
+        import core.postgres as core_postgres
+
+        session = self._make_session(with_rows=True)
+        monkeypatch.setattr(core_postgres, "get_session", lambda: session)
+
+        content, _filename = observation.build_observation_dump("zip")
+
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            manifest = json.loads(zf.read("manifest.json"))
+
+        assert manifest["period"] == {
+            "from": "2026-07-01T00:00:00+00:00",
+            "to": "2026-07-20T00:00:00+00:00",
+        }
+        # ファイル別 period も併せて記録される（任意項目・設計書 §5）。
+        assert manifest["files"]["llm_usage_chat"]["period"] == {
+            "from": "2026-07-01T00:00:00+00:00",
+            "to": "2026-07-01T00:00:00+00:00",
+        }
+
+    def test_manifest_period_is_null_when_no_data(self, monkeypatch):
+        import core.postgres as core_postgres
+
+        session = self._make_session(with_rows=False)
+        monkeypatch.setattr(core_postgres, "get_session", lambda: session)
+
+        content, _filename = observation.build_observation_dump("tar.gz")
+
+        with tarfile.open(fileobj=io.BytesIO(content), mode="r:gz") as tf:
+            manifest_bytes = tf.extractfile("manifest.json").read()
+        manifest = json.loads(manifest_bytes)
+
+        assert manifest["period"] == {"from": None, "to": None}
+        for file_info in manifest["files"].values():
+            assert file_info["period"] == {"from": None, "to": None}
 
 
 # ---------------------------------------------------------------------------

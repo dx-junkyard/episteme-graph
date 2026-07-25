@@ -71,8 +71,9 @@ CREATE TABLE IF NOT EXISTS discuss_metric_events (
 `landing_continue_clicked`
 
 **payload ホワイトリスト**: `scope`（course_sources|all_visible）/ `reason`
-（explicit|topic_switch|timeout）/ `kind`（tension|anchor）。**それ以外のキーはサーバ側で捨てる**
-（本文混入の構造的防止 — DO1）。
+（explicit|topic_switch|timeout）/ `kind`（tension|anchor）。**それ以外のキー、および上記の
+許容値以外の値（非文字列を含む）はサーバ側でキーごと黙って捨てる**（本文混入の構造的防止 — DO1。
+422 にはしない — イベント本体の記録は継続する、DO6。値検証は 2026-07-25 のレビュー修正で追加）。
 
 **取込 API**: `POST /api/learning/discuss/metric-events`（認証必須・本人記録のみ）
 body `{"events": [{"event": str, "course_id": str, "payload": {...}}]}`（1リクエスト最大20件）。

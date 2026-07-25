@@ -251,3 +251,84 @@ class TestLectureHelperDelegation:
         source = _read(LECTURE)
         block = source.split("from services import (")[1].split(")")[0]
         assert "list_course_source_document_ids," in block
+
+
+class TestDiscussScopeValidatedBeforeTruncate:
+    """レビュー確定の修正3: discuss_scope の不正値 422 は replace_message_id の
+
+    truncate_chat_and_supersede 実行より前に判定し、履歴だけ巻き戻って処理が
+    失敗する片手落ちを防ぐ。
+    """
+
+    def test_precheck_appears_before_truncate_call(self):
+        from tests.guardrail_helpers import extract_function_source
+
+        body = extract_function_source(_read(LEARNING), "learning_chat")
+        precheck_idx = body.index('if (body.intent_mode or "").strip() == "discuss":')
+        truncate_idx = body.index("truncate_chat_and_supersede(")
+        assert precheck_idx < truncate_idx
+
+    def test_precheck_appears_before_replace_message_id_check(self):
+        from tests.guardrail_helpers import extract_function_source
+
+        body = extract_function_source(_read(LEARNING), "learning_chat")
+        precheck_idx = body.index('if (body.intent_mode or "").strip() == "discuss":')
+        replace_idx = body.index("if body.replace_message_id:")
+        assert precheck_idx < replace_idx
+
+    def test_precheck_raises_422_with_expected_detail_text(self):
+        from tests.guardrail_helpers import extract_function_source
+
+        body = extract_function_source(_read(LEARNING), "learning_chat")
+        precheck = body.split(
+            'if (body.intent_mode or "").strip() == "discuss":'
+        )[1].split("\n\n    # 1. コースデータを取得")[0]
+        assert "raise HTTPException(" in precheck
+        assert "status_code=422" in precheck
+        # 後段の本検証（discuss_scope 解決ブロック）と同一の利用者向け文言にする。
+        assert "discuss_scope には course_sources か all_visible を指定してください" in precheck
+
+    def test_precheck_is_duplicated_not_a_replacement_of_the_later_validation(self):
+        """後段の scope 解決ブロックの検証（TestScopeResolution）も残っていること。"""
+        source = _read(LEARNING)
+        assert source.count(
+            'discuss_scope には course_sources か all_visible を指定してください'
+        ) == 2
+
+
+class TestDiscussionOriginTopicTitle:
+    """レビュー確定の修正4: EXPLAIN_GRAPH_ELEMENT 経路等で使われる origin の
+    topic_title に生の予約 topic_id "_discussion" が渡らないこと。
+    """
+
+    def test_origin_topic_info_uses_synthetic_dict_for_discussion(self):
+        source = _read(LEARNING)
+        block = source.split("if topic_id == DISCUSSION_TOPIC_ID:")[1][:400]
+        assert (
+            '_origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": DISCUSSION_TOPIC_LABEL}'
+            in block
+        )
+        assert "else:" in block
+        tail = block.split("else:")[1]
+        assert "_origin_topic_info = topic_info" in tail
+
+    def test_origin_for_topic_call_uses_origin_topic_info_variable(self):
+        source = _read(LEARNING)
+        assert "topic_id, _origin_topic_info, segment_id=_seg, scroll_offset=_scroll" in source
+        # 変換前の生 topic_info を直接渡す旧コードには戻っていないこと。
+        assert "topic_id, topic_info, segment_id=_seg, scroll_offset=_scroll" not in source
+
+    def test_origin_for_topic_resolves_discussion_label_not_raw_topic_id(self):
+        """learning_support_agent.py は非改変のまま、渡す topic_info だけで生文字列露出を防げる。"""
+        from core.learning_support_agent import LearningSupportAgent
+
+        agent = LearningSupportAgent("course-1", {})
+        origin = agent.origin_for_topic(
+            "_discussion", {"id": "_discussion", "title": "論文との議論"},
+        )
+        assert origin.topic_title == "論文との議論"
+        assert origin.topic_title != "_discussion"
+
+        # 対比: 従来のバグ（topic_info=None）を再現すると生文字列に劣化することを明示する。
+        buggy_origin = agent.origin_for_topic("_discussion", None)
+        assert buggy_origin.topic_title == "_discussion"

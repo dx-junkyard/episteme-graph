@@ -404,3 +404,20 @@ tension prefilter・structure_anchor worker の `_discussion` 耐性 / **reconst
 - §7 の観察ポイント（U層 `learning:chat_discuss` の実測 → 専用上限の要否判断 — 裁定 #9）
 - Phase 3（v2）: 専用設計文書を切ってから（migration 061〜）。着手判断の実測ゲートは
   観測基盤（`docs/features/discuss_observation_design.md`、migration 060）が担う
+
+### 9.4 実装レビューと修正（2026-07-25、Fable + sonnet 並列体制）
+
+コミット後の全面レビュー（7観点並列）で確定した問題を同日修正した。
+
+| # | 指摘 | 修正 |
+|---|---|---|
+| 1 | 🔴 `GET .../source-chunk/{chunk_id}` に可視性ゲートが無く、認証済みユーザーが任意 chunk_id で他人の Private 文書本文を直読みできた（ff4cc2b 由来の既存穴。Phase 0 は検索経路のみ塞いでいた — DM2 の塞ぎ漏れ） | `get_chunk_passage` に `search_chunks_with_metadata` と同意味論の必須キーワード引数 `allowed_document_ids` を追加し、ルートが `list_visible_document_ids` を渡す。`test_source_chunk_visibility.py` 新設 |
+| 2 | 🟠 コース切替で discuss の15分無活動タイマー・turnCount が残存し、別コース画面で旧コースの着地モーダルが誤発火（`Discuss.reset()` が未配線） | `switchCourse`/logout/401 失効で `Discuss.reset()`、`init({getActiveCourseId})` DI によるコース一致ガードを `maybeShowLanding` に追加（不一致時は `landing_shown` も送らない） |
+| 3 | claim-refs がコース sources 判定のみで、`all_visible` スコープの引用チャンクが常に 404 | 「コース sources ∪ 本人可視 document」の複合判定へ拡張（fail-closed 維持） |
+| 4 | `replace_message_id` の履歴 truncate が `discuss_scope` 不正値 422 より先に commit され、不正リクエストで履歴だけ消えた | scope 値検証を truncate より前へ前倒し |
+| 5 | `origin_for_topic` に生 `_discussion` が渡り `LearningSupportOrigin.topic_title` に露出しうる | 変換済みラベル入りの topic_info を渡す（変換1箇所の原則は維持） |
+| 6 | 軌道修正 #5 の「接続は『わたしの地図』で行える」事実文注記が着地モーダルに未実装 | 注記を追加 |
+| 7 | 開幕画面で `document_run_artifacts` が document あたり2回 SELECT | `refs.equation_records(..., artifacts=)` 後方互換引数で1回化 + 回帰検知テスト |
+
+観測基盤側の修正（ダッシュボードキー名不一致・payload 値ホワイトリスト・manifest 期間）は
+`discuss_observation_design.md` §2-2 の追記を参照。修正後フルスイート 5,943 passed / 0 failed。

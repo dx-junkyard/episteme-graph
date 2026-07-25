@@ -8,9 +8,9 @@
  *
  * バックエンド API（別チーム実装、SYSTEM_ADMIN のみ）:
  *   GET /api/admin/discuss/observation-status
- *     → {generated_at, usage:{tag:{events,distinct_users,first_at,last_at}},
- *        traces:{discuss_total, grounding_recorded, grounding_distribution:{...}, grounding_recorded_since},
- *        ui_events:{by_event:{...}, first_at, last_at},
+ *     → {generated_at, usage:{tag:{count,distinct_users,first_at,last_at}},
+ *        traces:{total, grounding_recorded, grounding_distribution:{...}, recorded_since},
+ *        ui_events:{total, by_event:{...}, first_at, last_at},
  *        criteria:[{key,label,current,target,met}], ready_for_analysis}
  *   GET /api/admin/discuss/observation-dump?format=tar.gz|zip
  *     → バイナリダウンロード（Content-Disposition 付き）
@@ -89,19 +89,19 @@
     USAGE_TAGS.forEach(function (t) {
       var u = usage[t.key] || {};
       html += "<tr><td>" + escHtml(t.label) + " <span style=\"color:var(--color-text-tertiary)\">(" +
-        escHtml(t.key) + ")</span></td><td>" + _fmtNum(u.events) + "</td><td>" +
+        escHtml(t.key) + ")</span></td><td>" + _fmtNum(u.count) + "</td><td>" +
         _fmtNum(u.distinct_users) + "</td><td>" + _fmtSpan(u.first_at, u.last_at) + "</td></tr>";
     });
     html += "</tbody></table></div>";
 
     // 2) discuss 痕跡（grounding 分布）
     html += '<h4 class="ado-subhead">discuss 痕跡（会話ターン）</h4>';
-    html += '<div class="ado-note">記録開始日: ' + escHtml(traces.grounding_recorded_since || "-") +
+    html += '<div class="ado-note">記録開始日: ' + escHtml(traces.recorded_since || "-") +
       '（それ以前の痕跡には grounding の記録がありません。grounding 分布は「記録済み件数」を分母にしています）</div>';
     html += '<div style="overflow-x:auto"><table class="admin-table"><thead><tr>' +
       '<th>discuss 総数</th><th>grounding 記録済み</th><th>教材由来</th><th>別の資料</th><th>AI生成</th>' +
       '</tr></thead><tbody><tr>' +
-      "<td>" + _fmtNum(traces.discuss_total) + "</td>" +
+      "<td>" + _fmtNum(traces.total) + "</td>" +
       "<td>" + _fmtNum(traces.grounding_recorded) + "</td>" +
       "<td>" + _fmtNum(grounding.course_material) + "</td>" +
       "<td>" + _fmtNum(grounding.other_material) + "</td>" +

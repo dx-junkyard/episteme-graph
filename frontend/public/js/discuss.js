@@ -7,6 +7,10 @@
 //   - sendMessage() 成功パスから notifyActivity() を呼ぶ（無活動タイムアウト用）
 //   - selectTopic() の discuss→通常トピック遷移直後に maybeShowLanding(courseId, "topic_switch")
 //   - discuss バーの「議論を終える」ボタンから maybeShowLanding(courseId, "explicit")
+//   - initApp() から Discuss.init({getActiveCourseId}) で現在コースの getter を注入
+//     （着地判定のコース一致ガードに使う。未注入でも後方互換で動く）
+//   - switchCourse() / logout / 401 失効時に Discuss.reset() を呼ぶ（旧コースの
+//     discuss 内部状態＝無活動タイマー・往復回数・ctx.courseId を持ち越さない）
 //
 // 開幕・着地とも非LLM・既存 API の束ねのみ（DM8）。数値・件数・網羅率は出さない（DM6）。
 // explore（コース逸脱時の内部語彙）に使われる語はここでは使わない（DM5）。
@@ -25,6 +29,16 @@
   var turnCount = 0;
   var lastShownAt = 0;
   var inactivityTimer = null;
+
+  // app.js からの DI（任意）。現在アプリが表示しているコース ID を読めるようにする
+  // getter。未注入（null）のときは従来どおり（コース一致チェックをスキップ）動作する
+  // 後方互換フォールバック。
+  var getActiveCourseId = null;
+
+  function init(opts) {
+    opts = opts || {};
+    getActiveCourseId = (typeof opts.getActiveCourseId === "function") ? opts.getActiveCourseId : null;
+  }
 
   var openingCache = { courseId: "", data: null };
   var openingReqSeq = 0;
@@ -508,6 +522,11 @@
       tensionItems.forEach(function (item) { html += tensionCardHtml(item); });
       anchorItems.forEach(function (item) { html += anchorCardHtml(item); });
     }
+    // 設計 §9.1 軌道修正 #5: connect（他の理解とつなぐ）操作はこのモーダル内には
+    // 実装しない（component/edge ピッカーを要し過大なため）。既存の別導線が
+    // あることだけを事実文で示す。
+    html += '<div class="discuss-muted discuss-landing-connect-note">候補を他の理解とつなぐ（接続）は、' +
+      '「わたしの地図」の既存の導線から行えます。</div>';
     html += '</div>';
 
     if (reconItem) {
@@ -537,6 +556,15 @@
     clearInactivityTimer();
     if (courseId) ctx.courseId = courseId;
     if (!ctx.courseId) return;
+    // 防御の二重化: switchCourse 側の Discuss.reset() 呼び出しが（将来の改修漏れ・
+    // ログアウト等の未整備経路で）効かなかった場合でも、発火時点でアプリが表示して
+    // いるコースと discuss セッションのコースが一致しなければ何もしない
+    // （landing_shown メトリクスも送らない）。DI 未注入（getActiveCourseId が
+    // 無い）ときは従来どおり常にチェックをスキップする後方互換。
+    if (getActiveCourseId) {
+      var activeCourseId = getActiveCourseId();
+      if (activeCourseId && activeCourseId !== ctx.courseId) return;
+    }
     if (turnCount <= 0) return;
     var now = Date.now();
     if (now - lastShownAt < SUPPRESS_MS) return;
@@ -578,14 +606,19 @@
   }
 
   window.Discuss = {
+    init: init,
     renderOpening: renderOpening,
     maybeShowLanding: maybeShowLanding,
     notifyActivity: notifyActivity,
     renderBranchChips: renderBranchChips,
+    // コース切替・ログアウト時に呼ぶ。無活動タイマー・往復回数・開幕表示済み
+    // フラグに加え、旧コースの discuss コンテキスト（ctx.courseId）も破棄する
+    // （そうしないと reset 後に stale な courseId で着地判定が動きうる）。
     reset: function () {
       clearInactivityTimer();
       turnCount = 0;
       openingShownCourseId = "";
+      ctx.courseId = "";
       closeLanding();
     },
   };

@@ -2044,6 +2044,23 @@ def learning_chat(
     def _consume_quota() -> None:
         _consume_learning_chat_quota(current_user["id"], _quota_state)
 
+    # レビュー確定の修正3: discuss_scope の値検証（不正値 422）は、以降の
+    # truncate_chat_and_supersede（機能3の書き直し）より前に行う。従来はこの検証が
+    # RAG 検索直前まで遅延しており、不正な discuss_scope を伴う replace_message_id
+    # リクエストがサーバ正本の履歴を巻き戻したうえで 422 になっていた
+    # （履歴だけ消えて処理は失敗する片手落ちを防ぐ）。詳細文言は後段の本検証
+    # （discuss_scope 解決ブロック）と一致させる。
+    if (body.intent_mode or "").strip() == "discuss":
+        _discuss_scope_precheck = (body.discuss_scope or "course_sources").strip()
+        if _discuss_scope_precheck not in ("course_sources", "all_visible"):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "discuss_scope には course_sources か all_visible を指定してください"
+                    f"（受信値: {_discuss_scope_precheck!r}）。"
+                ),
+            )
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -2066,8 +2083,10 @@ def learning_chat(
     # ここでラベル変換することで、表示・プロンプト・痕跡 context_label すべてに一括で効く。
     if topic_id == DISCUSSION_TOPIC_ID:
         topic_title = DISCUSSION_TOPIC_LABEL
+        _origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": DISCUSSION_TOPIC_LABEL}
     else:
         topic_title = topic_info["title"] if topic_info else topic_id
+        _origin_topic_info = topic_info
     course_title = _course_title(course_data, default=course_id)
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
@@ -2078,8 +2097,12 @@ def learning_chat(
     _anchor = body.position_anchor or {}
     _seg = int(_anchor.get("segment_id") or 0)
     _scroll = int(_anchor.get("scroll_offset") or 0)
+    # レビュー確定の修正4: origin_for_topic に topic_info=None を渡すと
+    # LearningSupportOrigin.topic_title が生の topic_id（"_discussion"）にフォールバック
+    # してしまう（EXPLAIN_GRAPH_ELEMENT 経路等で UI に露出しうる）。ラベル変換は上の1箇所に
+    # 留め、discussion のときは _origin_topic_info（変換後ラベル入り）を渡す。
     support_origin = support_agent.origin_for_topic(
-        topic_id, topic_info, segment_id=_seg, scroll_offset=_scroll
+        topic_id, _origin_topic_info, segment_id=_seg, scroll_offset=_scroll
     )
 
     if body.support_action == "return_to_learning_path":
@@ -2578,8 +2601,15 @@ def get_source_chunk_route(
     chunk_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。"""
-    passage = get_chunk_passage(chunk_id)
+    """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。
+
+    レビュー確定の修正1（セキュリティ）: 従来は chunk_id のみで本人の可視性を検証せず
+    任意の Private 文書本文が読めてしまっていた。`list_visible_document_ids` の正本
+    （所有/public/group/object_group_permissions ∪ アクセス可能コースの sources 経由）で
+    fail-closed に絞る。
+    """
+    allowed_document_ids = list_visible_document_ids(current_user["id"])
+    passage = get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)
     if not passage:
         raise HTTPException(status_code=404, detail="Source chunk not found")
     return passage
@@ -2601,7 +2631,7 @@ def get_chunk_claim_refs_route(
     course_data = get_course_data(current_user["id"], course_id)
     if course_data is None:
         raise HTTPException(status_code=404, detail="Course not found")
-    claims = get_chunk_claim_refs(course_data, chunk_id)
+    claims = get_chunk_claim_refs(course_data, chunk_id, user_id=current_user["id"])
     if claims is None:
         raise HTTPException(status_code=404, detail="Chunk not found in this course")
     return {"claims": claims}

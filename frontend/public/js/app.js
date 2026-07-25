@@ -236,6 +236,8 @@
     if (res.status === 401) {
       state.token = null;
       localStorage.removeItem("eg_token");
+      // discuss モード（論文と話す）: トークン失効時も discuss 内部状態を残さない。
+      if (window.Discuss) window.Discuss.reset();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -252,6 +254,8 @@
     if (res.status === 401) {
       state.token = null;
       localStorage.removeItem("eg_token");
+      // discuss モード（論文と話す）: トークン失効時も discuss 内部状態を残さない。
+      if (window.Discuss) window.Discuss.reset();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -3751,6 +3755,11 @@
     // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
     // コース横断ネットワークだが、コース切替のたびに古い表示を残さないよう揃える）。
     if (window.PersonalMapHome) window.PersonalMapHome.invalidate();
+    // discuss モード（論文と話す）: コース切替で旧コースの discuss 内部状態
+    // （無活動タイマー・往復回数・ctx.courseId）を持ち越さない。これを怠ると、
+    // 旧コースでの discuss セッションの無活動タイムアウト（15分）が、切替後の
+    // 別コース画面上で着地モーダルとして誤発火する。
+    if (window.Discuss) window.Discuss.reset();
 
     // Re-render with clean state
     renderSidebar();
@@ -3953,6 +3962,9 @@
         localStorage.removeItem("eg_token");
         localStorage.removeItem("eg_username");
         localStorage.removeItem("eg_course");
+        // discuss モード（論文と話す）: ログアウトでも discuss 内部状態
+        // （無活動タイマー・ctx.courseId 等）を残さない。
+        if (window.Discuss) window.Discuss.reset();
         renderAuth();
       });
     }
@@ -6028,6 +6040,11 @@
     initTabs();
     initInput();
     initDiscussUI();
+    // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める
+    // ようにする DI（着地モーダルのコース一致ガードの防御の二重化に使う）。
+    if (window.Discuss && window.Discuss.init) {
+      window.Discuss.init({ getActiveCourseId: function () { return state.courseId; } });
+    }
     initSelectionAnchor();
     initLogout();
     initGroups();

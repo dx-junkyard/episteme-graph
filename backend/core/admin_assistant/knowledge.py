@@ -34,6 +34,9 @@ def _candidate_dirs() -> list[Path]:
     cwd = Path.cwd()
     cands.append(cwd / "docs" / "admin_operations")
     cands.append(cwd.parent / "docs" / "admin_operations")
+    # コンテナ向け保険候補（help_kb/manual.py の _candidate_roots() と同型。
+    # backend/Dockerfile は docs/admin_operations を /app/docs/admin_operations に COPY する）。
+    cands.append(Path("/app/docs/admin_operations"))
     return cands
 
 

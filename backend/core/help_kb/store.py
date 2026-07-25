@@ -286,6 +286,26 @@ def seed_drafts_from_served(*, user_id: Optional[str] = None) -> dict:
 # 凍結（版発行）
 # ---------------------------------------------------------------------------
 
+# freeze の版採番（``SELECT COALESCE(MAX(version_no), 0) + 1``）を直列化するための
+# advisory lock 名前空間。59 は本ストアを導入した migration 番号（衝突回避のための
+# 識別子で、値そのものに意味は無い。``atlas_store.lock_domain_for_write`` と同型）。
+_FREEZE_LOCK_SEED = 59
+
+
+def _lock_freeze_for_write(session) -> None:
+    """freeze のトランザクションを直列化する (トランザクションスコープの advisory lock)。
+
+    freeze() は「現在の MAX(version_no) を読んで +1 して INSERT する」read-then-write
+    のため、複数リクエストが同時に freeze すると version_no の UNIQUE 制約違反
+    （生 IntegrityError）が起き得る。採番の SELECT より前でこのロックを取得することで、
+    同時 freeze を直列化する。ロックはトランザクション終了 (commit / rollback) で
+    自動解放される（``atlas_store.lock_domain_for_write`` と同じパターン）。
+    """
+    session.execute(
+        sa_text(f"SELECT pg_advisory_xact_lock(hashtextextended(:key, {_FREEZE_LOCK_SEED}))"),
+        {"key": "help_kb_freeze"},
+    )
+
 
 def freeze(*, user_id: Optional[str] = None) -> dict:
     """全 draft を集めて凍結検証ゲートを通過すれば新版を発行する。
@@ -323,6 +343,7 @@ def freeze(*, user_id: Optional[str] = None) -> dict:
 
     session = get_session()
     try:
+        _lock_freeze_for_write(session)
         next_version = session.execute(
             sa_text("SELECT COALESCE(MAX(version_no), 0) + 1 FROM manual_kb_versions")
         ).scalar()

@@ -301,6 +301,7 @@ def build_observation_status() -> dict:
 
     criteria, ready_for_analysis = compute_criteria(usage, traces, ui_events)
     return {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "usage": usage,
         "traces": traces,
         "ui_events": ui_events,
@@ -332,15 +333,36 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
     }
 )
 
-# payload キーホワイトリスト（設計書 §2-2）。それ以外のキーはサーバ側で捨てる（DO1）。
-_METRIC_EVENT_PAYLOAD_KEYS: frozenset[str] = frozenset({"scope", "reason", "kind"})
+# payload キー + 値ホワイトリスト（設計書 §2-2）。キーだけでなく値も列挙型で検証する
+# （直接 API 経由で reason 等に任意の自由文を入れてダンプへ持ち出す穴を塞ぐ）。
+_METRIC_EVENT_PAYLOAD_VALUE_VOCAB: dict[str, frozenset[str]] = {
+    "scope": frozenset({"course_sources", "all_visible"}),
+    "reason": frozenset({"explicit", "topic_switch", "timeout"}),
+    "kind": frozenset({"tension", "anchor"}),
+}
+_METRIC_EVENT_PAYLOAD_KEYS: frozenset[str] = frozenset(_METRIC_EVENT_PAYLOAD_VALUE_VOCAB.keys())
 
 
 def sanitize_event_payload(payload: dict | None) -> dict:
-    """payload をホワイトリスト（scope/reason/kind）だけに絞る（DO1: 本文混入の構造的防止）。"""
+    """payload をホワイトリスト（scope/reason/kind）だけに絞り、値も許容 enum のみ通す
+    （DO1: 本文混入の構造的防止）。
+
+    キーが未知、値が文字列以外、または値が許容 enum に含まれない場合は、その
+    キーを**黙って捨てる**（422 にはしない — DO6: 計測失敗で UX を止めない。イベント
+    本体の記録は継続する）。
+    """
     if not isinstance(payload, dict):
         return {}
-    return {k: v for k, v in payload.items() if k in _METRIC_EVENT_PAYLOAD_KEYS}
+    out: dict[str, Any] = {}
+    for key, value in payload.items():
+        if key not in _METRIC_EVENT_PAYLOAD_VALUE_VOCAB:
+            continue
+        if not isinstance(value, str):
+            continue
+        if value not in _METRIC_EVENT_PAYLOAD_VALUE_VOCAB[key]:
+            continue
+        out[key] = value
+    return out
 
 
 def insert_metric_events(user_id: str, events: list[dict]) -> int:
@@ -665,6 +687,27 @@ def _build_daily_summary(session) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# §5: manifest.json — 期間（全行の created_at から算出。純粋関数）
+# ---------------------------------------------------------------------------
+
+
+def _period_from_rows(row_lists: Iterable[list[dict]], *, key: str = "created_at") -> dict[str, str | None]:
+    """複数のダンプ行リストから、全体の期間（``key`` 列の最小・最大）を算出する。
+
+    既定 ``key="created_at"`` は ``project_*_row`` 済み行（ISO8601 文字列 or None）を
+    想定する。``daily_summary`` 行だけは ``created_at`` を持たず ``day``（YYYY-MM-DD）を
+    持つため、呼び出し側が ``key="day"`` を渡す。対象行が1件も無ければ
+    ``{"from": None, "to": None}``（設計書 §5「期間」。データが無い場合を誠実に null で
+    表す）。ISO8601 文字列は同一タイムゾーン表記（本モジュールの ``_iso`` はすべて UTC
+    オフセット付き）なので辞書順比較がそのまま時系列順になる。
+    """
+    values = [row.get(key) for rows in row_lists for row in rows if row.get(key)]
+    if not values:
+        return {"from": None, "to": None}
+    return {"from": min(values), "to": max(values)}
+
+
+# ---------------------------------------------------------------------------
 # §5: README.md（分析観点・近似指標の注意）
 # ---------------------------------------------------------------------------
 
@@ -680,8 +723,8 @@ user は HMAC-SHA256 による安定した仮名（`user_pseudonym`）に置き�
 
 ### manifest.json
 
-生成時刻・スキーマ版・仮名化方式・各ファイルの行数と truncated（200,000行キャップに
-達したか）を記録します。
+生成時刻・スキーマ版・期間（`period.from`〜`period.to`。対象行が無ければ両方 null）・
+仮名化方式・各ファイルの行数と truncated（200,000行キャップに達したか）を記録します。
 
 ### llm_usage_chat.jsonl
 
@@ -846,9 +889,17 @@ def build_observation_dump(fmt: str) -> tuple[bytes, str]:
     manifest = {
         "generated_at": generated_at.isoformat(),
         "schema_version": SCHEMA_VERSION,
+        # 全体の期間（設計書 §5「期間」。created_at を持つ3ファイル横断。データが
+        # 無ければ両方 null — 自動アラートにしない、DO5 と同じ誠実さ）。
+        "period": _period_from_rows([llm_usage_rows, trace_rows, ui_event_rows]),
         "pseudonymization": f"hmac-sha256(jwt_secret + '{_PSEUDONYM_DOMAIN}')",
         "files": {
-            name: {"rows": len(rows), "truncated": truncated}
+            name: {
+                "rows": len(rows),
+                "truncated": truncated,
+                # daily_summary は created_at を持たず day（YYYY-MM-DD）を持つ。
+                "period": _period_from_rows([rows], key="day" if name == "daily_summary" else "created_at"),
+            }
             for name, (rows, truncated) in file_rows.items()
         },
         "truncated": any(truncated for _rows, truncated in file_rows.values()),

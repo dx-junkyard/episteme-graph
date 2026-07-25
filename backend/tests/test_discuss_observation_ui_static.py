@@ -297,6 +297,30 @@ class TestAdminDiscussObservationModule:
         assert "chat-area" not in self.js
 
 
+class TestAdminDiscussObservationBackendKeyContract:
+    """レビュー指摘1の再発防止: フロントが読むキー名がバックエンド
+    ``build_observation_status()``（backend/core/discuss/observation.py）の実際のレスポンス
+    キーと一致していること。過去に u.events / traces.discuss_total /
+    traces.grounding_recorded_since という存在しないキーを参照し、主要数値が常に
+    0/"-" 表示になる不具合があった（バックエンドのキー名を正としてフロントを合わせた）。
+    """
+
+    def setup_method(self):
+        assert ADMIN_DISCUSS_OBS_JS.exists(), "admin-discuss-observation.js が存在しません"
+        self.js = _read(ADMIN_DISCUSS_OBS_JS)
+
+    def test_references_actual_backend_keys(self):
+        assert "data.generated_at" in self.js
+        assert "u.count" in self.js
+        assert "traces.total" in self.js
+        assert "traces.recorded_since" in self.js
+
+    def test_does_not_reference_stale_incorrect_keys(self):
+        assert "u.events" not in self.js
+        assert "discuss_total" not in self.js
+        assert "grounding_recorded_since" not in self.js
+
+
 class TestAdminHtmlWiring:
     def setup_method(self):
         self.html = _read(ADMIN_HTML)

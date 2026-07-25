@@ -25,6 +25,7 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from core.deliberation import refs as refs_module  # noqa: E402
 from core.discuss import opening  # noqa: E402
 from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
@@ -51,6 +52,11 @@ class TestLayering:
 
     def test_no_routes_or_services_import(self):
         assert_module_tree_does_not_import(_CORE_DIR, ["routes", "services"])
+
+    def test_no_llm_import(self):
+        # DM8: 開幕画面（および core/discuss/ 配下全体、observation.py 含む）は非LLM。
+        # core.llm / core.llm_worker のどちらも import しないことを構造的に固定する。
+        assert_module_tree_does_not_import(_CORE_DIR, ["core.llm", "core.llm_worker"])
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +333,59 @@ class TestNoNumericLeak:
                     _walk(v)
 
         _walk(result)
+
+
+# ---------------------------------------------------------------------------
+# document_run_artifacts の二重取得防止（build_opening が1 document につき1回だけ
+# document_analysis_runs.stage_outputs を読むこと）
+# ---------------------------------------------------------------------------
+
+
+class TestArtifactsFetchedOncePerDocument:
+    def test_document_run_artifacts_not_refetched_for_equation_index(self, monkeypatch):
+        """``build_opening`` が取得済み artifacts を ``_equations_index_for`` に渡し、
+        ``equation_records`` 内部の ``document_run_artifacts`` 再取得を起こさないこと。
+
+        ``opening.document_run_artifacts``（build_opening が直接呼ぶ束縛）と
+        ``core.deliberation.refs.document_run_artifacts``（``equation_records`` が
+        ``artifacts=None`` のときにだけ内部で呼ぶ、refs モジュール自身のグローバル参照）を
+        別々のカウンタを持つフェイクにすげ替える。fix が正しく効いていれば
+        ``_equations_index_for`` は取得済み artifacts をそのまま渡すため refs 側は
+        1回も呼ばれない。呼び出し例外で検出しない（``build_opening`` は document 単位の
+        読み出し失敗を fail-soft に握って ``equations_by_id = {}`` へ縮退させる設計
+        （opening.py の docstring/コメント参照）のため、raise させる方式だと
+        再取得が起きても静かに握り潰され検出できない）。
+        """
+        opening_calls = {"count": 0}
+        refs_calls = {"count": 0}
+        fake_artifacts = {
+            "thesis_reconstruction": {},
+            "equation_semantics": {"equations": [{"equation_id": "eq1", "label": "E=mc^2"}]},
+        }
+
+        def fake_opening_document_run_artifacts(document_id):
+            opening_calls["count"] += 1
+            return fake_artifacts
+
+        def fake_refs_document_run_artifacts(document_id):
+            refs_calls["count"] += 1
+            return fake_artifacts
+
+        monkeypatch.setattr(opening, "document_run_artifacts", fake_opening_document_run_artifacts)
+        monkeypatch.setattr(refs_module, "document_run_artifacts", fake_refs_document_run_artifacts)
+        monkeypatch.setattr(opening, "_document_titles", lambda ids: {})
+        monkeypatch.setattr(opening, "_load_graph_nodes", lambda document_id: [])
+        monkeypatch.setattr(opening, "_claim_label_index", lambda document_id, artifacts: {})
+        monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id: [])
+
+        result = opening.build_opening("course1", ["doc1"])
+
+        assert opening_calls["count"] == 1
+        assert refs_calls["count"] == 0, (
+            "equation_records must reuse the artifacts already fetched by build_opening "
+            "instead of re-invoking core.deliberation.refs.document_run_artifacts"
+        )
+        assert result["documents"][0]["document_id"] == "doc1"
 
 
 # ---------------------------------------------------------------------------

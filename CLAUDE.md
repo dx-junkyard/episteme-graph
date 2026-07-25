@@ -1115,6 +1115,10 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   sources 由来 document**。コース経由開示を含むのは、受講コースの sources（教員 private が多い）
   を RAG できないと既存学習体験が壊れるため。コース sources→document 解決の正本は
   `services.list_course_source_document_ids(course_data)`（lecture.py の旧ヘルパーは委譲済み）。
+  **チャンク直読み API も同じ可視集合で fail-closed**（2026-07-25 レビュー修正）:
+  `GET .../source-chunk/{chunk_id}` は `get_chunk_passage(chunk_id, allowed_document_ids=...)`
+  （必須キーワード引数・空集合 SQL 非発行）、claim-refs は「コース sources ∪ 本人可視 document」
+  の複合判定（`get_chunk_claim_refs(..., user_id=)`）。検索経路だけ塞いで直読み経路を残さない。
 - **Phase 1（v1 最小: migration 0・新テーブル 0・新エンドポイント 0）**: casual と同型の
   バイパス4点（意図分類 / 前提知識ゲート / detour 化 / U層タグ `learning:chat_discuss`）。
   usage_help pre-route → casual → discuss の判定順を崩さない。会話は予約疑似トピック

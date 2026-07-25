@@ -16,6 +16,15 @@
 7. app.js: selectTopic の discuss→通常トピック遷移直後に着地画面トリガー②が発火する。
 8. index.html: discuss.js の script タグと着地モーダルのルート要素が存在する。
 9. discuss.js 全体に「寄り道」「疑え」という語が一切含まれない。
+10. app.js: switchCourse がコース切替時に旧コースの discuss 内部状態を破棄する
+    （Discuss.reset() 呼び出し）。無活動タイムアウトが別コース画面で誤発火するのを防ぐ
+    （2026-07-25 追記）。
+11. discuss.js: maybeShowLanding は発火時点のアプリ現在コースと discuss セッションの
+    コースが一致しない場合は何もしない防御ガードを持つ（DI 未注入時は後方互換で従来
+    どおり動作する）。app.js が initApp から Discuss.init に getActiveCourseId を注入する
+    （2026-07-25 追記）。
+12. discuss.js: 着地モーダル本文に「接続は『わたしの地図』の既存導線で行える」旨の
+    事実文注記が存在する（設計 §9.1 軌道修正 #5、2026-07-25 追記）。
 """
 from __future__ import annotations
 
@@ -254,6 +263,56 @@ class TestActivityAndTriggerWiring:
         html = _read(INDEX_HTML)
         assert 'id="discuss-end-btn"' in html
         assert "議論を終える" in html
+
+
+class TestCourseSwitchResetsDiscussState:
+    """コース切替（switchCourse）で旧コースの discuss 内部状態（無活動タイマー・
+    往復回数・ctx.courseId）を持ち越さない。持ち越すと、旧コースの discuss セッションの
+    無活動タイムアウト（15分）が切替後の別コース画面上で着地モーダルとして誤発火する。"""
+
+    def test_switch_course_calls_discuss_reset(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "async function switchCourse(courseId) {")
+        assert "window.Discuss.reset()" in block
+
+    def test_discuss_init_di_wired_from_app_js(self):
+        """app.js が initApp から Discuss.init に現在コースを読める getter を注入する
+        （着地判定のコース一致ガードの防御の二重化に使う）。"""
+        js = _read(APP_JS)
+        assert "window.Discuss.init(" in js
+        assert "getActiveCourseId" in js
+
+    def test_maybe_show_landing_has_active_course_guard(self):
+        """防御の二重化: 発火時点のアプリの現在コースと discuss セッションのコースが
+        一致しなければ何もしない（DI 未注入時は後方互換で常にチェックをスキップする）。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "async function maybeShowLanding(courseId, reason) {")
+        assert "getActiveCourseId" in block
+        assert "activeCourseId !== ctx.courseId" in block
+        # ガードは landing_shown メトリクス送信・往復回数リセットより前に判定する
+        # （不一致なら landing_shown も送らない）。
+        idx_guard = block.index("activeCourseId !== ctx.courseId")
+        idx_metric = block.index('sendDiscussMetric("landing_shown"')
+        assert idx_guard < idx_metric
+
+    def test_discuss_reset_clears_stale_course_context(self):
+        """reset() 自体も ctx.courseId を破棄する（reset 経路が単独でも安全なように）。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "reset: function () {")
+        assert 'ctx.courseId = "";' in block
+
+
+class TestLandingConnectNote:
+    """設計 §9.1 軌道修正 #5: 着地モーダルは connect 機能そのものは持たず、
+    「わたしの地図」の既存導線で行える旨を事実文で注記する。"""
+
+    def test_connect_fact_sentence_present(self):
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(
+            js, "function buildLandingBodyHtml(tensionItems, anchorItems, reconItem) {"
+        )
+        assert "接続" in block
+        assert "わたしの地図" in block
 
 
 class TestIndexHtmlWiring:
