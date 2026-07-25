@@ -132,6 +132,14 @@ from routes.lecture import (
     _resolve_course_document_ids,
 )
 
+# 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
+# 非ベクトル索引検索。core.help_kb は並行実装中のため、モジュール不在でも学習チャットが
+# 壊れないよう import 自体をガードする（呼び出し側でも None チェック + try/except で二重に守る）。
+try:
+    from core.help_kb import search_manual as _search_manual
+except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
+    _search_manual = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/learning", tags=["Learning"])
@@ -602,6 +610,46 @@ def _is_greeting(message: str) -> bool:
     return False
 
 
+# 学生 HELP ルート（設計 §1-3-2）: UI・システム操作についての質問を、教材内容の質問と
+# 誤爆させずに拾うための保守的なキーワード判定。
+#
+# 方針:
+#   - 「UI・システム参照語」と「使い方の問い形」の**組み合わせ**でのみ真にする
+#     （どちらか片方だけでは弱すぎる誤爆源になる）。「使い方」は参照語・問い形の
+#     両方に置く（「使い方を教えて」単体で成立させるための意図的な重複）。
+#   - 教材内容の質問（数式・物理概念）は誤爆コストの方が大きいため、UI参照語と
+#     問い形が両方揃っていても、数式・物理用語らしき語（_CONTENT_QUESTION_TERMS）が
+#     共起していれば偽に倒す（例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - メッセージが長い（雑談・複合質問らしい）場合も偽にする（保守的に絞る）。
+_HELP_CONTEXT_TERMS = (
+    "画面", "ボタン", "操作", "アプリ", "この機能", "音声モード", "音声入力",
+    "マイク", "ヘルプ", "メニュー", "使い方",
+)
+_HELP_QUESTION_FORMS = (
+    "使い方", "どう使", "どうやって", "方法", "どこ",
+)
+_CONTENT_QUESTION_TERMS = (
+    "式", "方程式", "定理", "法則", "証明", "導出", "定義", "公式",
+    "エネルギー", "運動", "力学", "波動", "ベクトル", "微分", "積分",
+    "質量", "加速度", "速度", "粒子", "理論",
+)
+
+
+def _is_usage_question(message: str) -> bool:
+    """メッセージが画面・システムの使い方についての質問かどうかを保守的に判定する。
+
+    非LLM・同期（casual/音声バイパスより手前で評価するための決定論判定）。
+    """
+    msg = (message or "").strip()
+    if not msg or len(msg) >= 50:
+        return False
+    if any(term in msg for term in _CONTENT_QUESTION_TERMS):
+        return False
+    has_context = any(term in msg for term in _HELP_CONTEXT_TERMS)
+    has_form = any(term in msg for term in _HELP_QUESTION_FORMS)
+    return has_context and has_form
+
+
 # UI ボタン由来の型付きアクションは、自然文の intent 分類を経由せず決定論的に
 # ルートへ割り当てる。これにより日本語ラベル（や壊れたトークン）が CHIT_CHAT へ
 # 誤分類される事故を防ぐ。
@@ -613,6 +661,7 @@ _TYPED_ACTION_INTENT: dict[str, str] = {
     "ask_question": "DOMAIN_RAG",
     "continue_detail": "DOMAIN_RAG",
     "start_topic": "DOMAIN_RAG",
+    "usage_help": "USAGE_HELP",
 }
 
 _PREREQUISITE_ACTIONS = {"check_prerequisites", "review_prerequisite", "prerequisite_review"}
@@ -1788,6 +1837,109 @@ def _atlas_action_response(
     return None
 
 
+_USAGE_HELP_FOOTER = "教材の内容についての質問なら、そのまま送り直してください。"
+_USAGE_HELP_NOT_DOCUMENTED = "その使い方の説明はまだ整備されていません。"
+
+
+def _usage_help_response(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    *,
+    on_llm_call: Callable[[], None] | None = None,
+) -> LearningChatResponse:
+    """学生 HELP ルートのハンドラ（設計 §1-3）。
+
+    docs/manual/student/ の凍結索引を検索し、テキスト経路は本文素通し（パラフレーズ
+    禁止・quota 非消費）、音声・casual 経路は 1 LLM コールで会話調へ整形する
+    （quota は既存 ``on_llm_call`` で消費）。無ヒット・未整備時は LLM を呼ばず固定文
+    （捏造禁止, P4）。CHIT_CHAT/LEARNING_ADVICE と同型の早期 return ハンドラで、
+    呼び出し側（learning_chat）はここより後段の意図分類・前提知識チェック・
+    誤解検出・tension prefilter に到達しない。
+    """
+    hits: list[dict] = []
+    if _search_manual is not None:
+        try:
+            hits = _search_manual(body.message, audience="student", limit=3) or []
+        except Exception:
+            logger.warning("search_manual failed for usage help route; falling back to no-hit", exc_info=True)
+            hits = []
+
+    top = hits[0] if hits else None
+    documented = bool(top) and bool(top.get("documented", True))
+    is_casual = (body.intent_mode or "").strip() == "casual"
+    degraded = False
+
+    if not documented:
+        answer = f"{_USAGE_HELP_NOT_DOCUMENTED}\n\n{_USAGE_HELP_FOOTER}"
+        manual_citations = None
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="help_usage",
+            text="使い方の質問",
+            extra_payload={"help_anchor": None, "documented": False, "no_hit": True},
+        )
+    else:
+        citation = str(top.get("citation") or "")
+        manual_citations = [{
+            "file": top.get("file", ""),
+            "anchor": top.get("anchor", ""),
+            "title": top.get("title", ""),
+        }]
+        body_text = str(top.get("body") or "")
+        if is_casual:
+            # 音声・casual 経路: 生 Markdown の読み上げは体験として成立しないため
+            # 1 LLM コールで会話調へ整形する（quota は on_llm_call で消費）。
+            if on_llm_call:
+                on_llm_call()
+            params = get_llm_params("fast")
+            prompt = (
+                "以下はシステムの使い方マニュアルの抜粋です。この内容だけを根拠に、"
+                "学習者からの音声での質問に短い話し言葉で分かりやすく答えてください。"
+                "マニュアルに書かれていない情報を付け足したり断定したりしないでください。\n\n"
+                f"質問: {body.message}\n\nマニュアル抜粋:\n{body_text}"
+            )
+            try:
+                formatted = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=params["model"],
+                    reasoning_effort=params["reasoning_effort"],
+                ).strip()
+                if not formatted:
+                    raise ValueError("empty response")
+                answer = f"{formatted}\n\n{_USAGE_HELP_FOOTER}"
+            except Exception:
+                logger.warning("usage help casual LLM formatting failed; falling back to raw body", exc_info=True)
+                answer = f"{body_text}\n\n{_USAGE_HELP_FOOTER}"
+                degraded = True
+        else:
+            # テキスト経路: 凍結本文を素通し（パラフレーズによる意味ドリフトをゼロにする）。
+            answer = f"{body_text}\n\n[出典1]\n\n{_USAGE_HELP_FOOTER}"
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="help_usage",
+            text=top.get("title") or "使い方の質問",
+            extra_payload={
+                "help_anchor": citation or None,
+                "documented": True,
+                "no_hit": False,
+            },
+        )
+
+    persist_chat_history(
+        user_id, course_id, topic_id,
+        body.history, body.message, answer,
+        user_message_id=body.message_id or None,
+    )
+    return LearningChatResponse(
+        answer=answer,
+        course_update=None,
+        manual_citations=manual_citations,
+        degraded=degraded,
+    )
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -1890,6 +2042,24 @@ def learning_chat(
             structure_anchor=_tap_anchor,
         )
 
+    # 学生 HELP ルート（設計 §1-3）: casual バイパス（次の _is_casual 判定）より手前に
+    # 置く非LLM pre-route。typed action (usage_help) または保守的なキーワード判定
+    # (_is_usage_question) でヒットしたら、ここで早期 return し、以降の意図分類・
+    # 前提知識チェック・誤解検出・tension prefilter に構造的に到達させない
+    # （ハンズフリー中の「これどう使うの」に効く唯一の位置）。分野の地図の ↗ アクション
+    # （atlas_context）とは競合させないため、atlas_context が無いときのみ判定する。
+    if not (isinstance(body.atlas_context, dict) and body.atlas_context):
+        _is_usage_help = (
+            _route_for_typed_action(body.support_action) == "USAGE_HELP"
+            or _is_usage_question(body.message)
+        )
+        if _is_usage_help:
+            with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
+                return _usage_help_response(
+                    current_user["id"], course_id, topic_id, body,
+                    on_llm_call=_consume_quota,
+                )
+
     # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
     # 意図分類（雑談拒否）・前提知識ゲート・誤解検出をバイパスし、RAG検索と
     # tier 集約（根拠の一線）はそのまま通す。
@@ -1917,7 +2087,8 @@ def learning_chat(
         chit_chat_answer = (
             "申し訳ありませんが、私は物理学の学習支援に特化したAIです。\n\n"
             "物理学・数学の概念についての質問や、学習の進め方についての相談でしたら、"
-            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！"
+            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！\n\n"
+            "画面の使い方についての質問にもお答えできます。"
         )
         persist_chat_history(
             current_user["id"], course_id, topic_id,

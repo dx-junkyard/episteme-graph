@@ -6098,6 +6098,35 @@ body {
   fill: var(--color-text-tertiary, #aeaeb2);
 }
 
+/* ============ ヘルプルート（使い方ボタン・マニュアル出典） ============ */
+.help-usage-btn {
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.help-usage-btn:hover {
+  background: var(--color-background-info);
+  border-color: var(--color-border-info);
+}
+
+.manual-citation-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.manual-citation-chip {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+  background: var(--color-background-secondary);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 10px;
+  padding: 2px 9px;
+  white-space: nowrap;
+}
+
 /* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
 .voice-mode-btn {
   width: 38px;

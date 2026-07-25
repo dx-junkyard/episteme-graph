@@ -1,19 +1,25 @@
+---
+audience: system_admin
+---
+
 # システム管理者編（技術者向け）
 
-[← マニュアル索引](README.md)
+[← マニュアル索引](../README.md)
 
 本ドキュメントは、episteme-graph をホストし運用する**システム管理者（SYSTEM_ADMIN）**向けの
-技術者向けマニュアルです。読む前に、まず全ロール共通の [仕様編](01-specification.md) に目を通し、
-システム全体像・ロールと権限・用語を把握しておくことを推奨します。
+技術者向けマニュアルです。読む前に、まず全ロール共通の
+[仕様編](../student/01-specification.md) に目を通し、システム全体像・ロールと権限・用語を
+把握しておくことを推奨します。アーキテクチャとロールの運用上の詳細は
+[仕様編（運用・アーキテクチャ）](01-operations-spec.md) にまとめています。
 
-システム管理者は教員（TEACHER）ができることをすべて行えるため、[教員編](03-teacher.md) も
+システム管理者は教員（TEACHER）ができることをすべて行えるため、[教員編](../teacher/03-teacher.md) も
 あわせて読むことをおすすめします。
 
 ---
 
-## 1. 初期構築
+## 1. 初期構築 {#initial-setup}
 
-### 1.1 `.env` の設定
+### 1.1 `.env` の設定 {#env-setup}
 
 リポジトリ直下の `.env.example` を `.env` にコピーし、値を設定します。
 
@@ -21,7 +27,7 @@
 cp .env.example .env
 ```
 
-以下の3つは**必ず**既定値から変更してください（詳細は [9. セキュリティ要点](#9-セキュリティ要点)）。
+以下の3つは**必ず**既定値から変更してください（詳細は [9. セキュリティ要点](#security-notes)）。
 
 | 変数 | 用途 |
 |---|---|
@@ -29,21 +35,21 @@ cp .env.example .env
 | `JWT_SECRET` | JWT 署名鍵 |
 | `ADMIN_PASSWORD` | 初期システム管理者アカウントのパスワード |
 
-### 1.2 起動
+### 1.2 起動 {#startup}
 
 ```bash
 docker compose up -d
 ```
 
 Compose ファイルの使い分け（本番用の `docker-compose.yml` 単体では `postgres` が含まれない点に注意）は
-[2. Compose ファイルの使い分け](#2-compose-ファイルの使い分け) を参照してください。
+[2. Compose ファイルの使い分け](#compose-files) を参照してください。
 
-### 1.3 初期管理者アカウント
+### 1.3 初期管理者アカウント {#initial-admin-account}
 
 初期アカウントは `.env` の `ADMIN_PASSWORD` で作成される**システム管理者アカウントのみ**です。
-教員・学生アカウントはこの初期管理者が管理 UI から作成します（[6. 教員アカウントの作成](#6-教員アカウントの作成) 参照）。
+教員・学生アカウントはこの初期管理者が管理 UI から作成します（[6. 教員アカウントの作成](#create-teacher-account) 参照）。
 
-### 1.4 アクセス先
+### 1.4 アクセス先 {#access-urls}
 
 | サービス | URL | 備考 |
 |---|---|---|
@@ -55,11 +61,11 @@ Compose ファイルの使い分け（本番用の `docker-compose.yml` 単体�
 | ngrok Web UI | http://localhost:4040 | `docker-compose.prod.yml` で ngrok トンネルを併用する場合 |
 
 本番・共通構成で外部に公開されるのは **学習UI（frontend, 3000番）のみ**です。詳細は
-[3. サービス構成](#3-サービス構成) を参照してください。
+[3. サービス構成](#service-architecture) を参照してください。
 
 ---
 
-## 2. Compose ファイルの使い分け
+## 2. Compose ファイルの使い分け {#compose-files}
 
 | ファイル | 用途 | 追加するもの |
 |---|---|---|
@@ -94,7 +100,7 @@ docker compose logs -f api-server
 
 ---
 
-## 3. サービス構成
+## 3. サービス構成 {#service-architecture}
 
 | サービス | イメージ / ビルド | 役割 |
 |---|---|---|
@@ -107,7 +113,7 @@ docker compose logs -f api-server
 - ボリューム: `postgres_data`, `minio_data`。
 - `api-server` は `postgres`（healthy）/ `minio` / `grobid` の起動を待って起動します（`depends_on`）。
 
-### ネットワーク設計（セキュリティ）
+### ネットワーク設計（セキュリティ） {#network-design}
 
 - **外部に公開されるポートは frontend の 3000番のみ**です。
 - `api-server`（8001番）は本番・ローカルとも直接公開されず、必ず nginx（3000番）経由でアクセスします。
@@ -119,12 +125,12 @@ docker compose logs -f api-server
 
 ---
 
-## 4. 主要環境変数
+## 4. 主要環境変数 {#env-vars}
 
 `api-server` の environment は `docker-compose.yml` で `.env` から注入されます。実在する変数のみ
 記載しています。
 
-### 4.1 LLM プロバイダ
+### 4.1 LLM プロバイダ {#env-llm-provider}
 
 | 変数 | 説明 |
 |---|---|
@@ -138,7 +144,7 @@ docker compose logs -f api-server
 | `LLM_EMBEDDING_MODEL` | 埋め込みモデル（既定 `text-embedding-3-large`） |
 | `LLM_EMBEDDING_DIM` | pgvector の次元数（既定 3072。Gemini 系では 768 など） |
 
-### 4.2 Google Cloud（Vertex AI / ADC）
+### 4.2 Google Cloud（Vertex AI / ADC） {#env-gcp}
 
 | 変数 | 説明 |
 |---|---|
@@ -149,7 +155,7 @@ docker compose logs -f api-server
 
 ホストの `./.gcp` ディレクトリがコンテナの `/app/.gcp:ro` に読み取り専用でマウントされます。
 
-### 4.3 データストア
+### 4.3 データストア {#env-datastore}
 
 | 変数 | 説明 |
 |---|---|
@@ -159,7 +165,7 @@ docker compose logs -f api-server
 | `MINIO_PUBLIC_ENDPOINT` | クライアント側から見える MinIO エンドポイント |
 | `GROBID_URL` | GROBID サービスの URL |
 
-### 4.4 認証・CORS・カートリッジ
+### 4.4 認証・CORS・カートリッジ {#env-auth-cors}
 
 | 変数 | 説明 |
 |---|---|
@@ -171,13 +177,13 @@ docker compose logs -f api-server
 | `EPISTEME_CARTRIDGES_DIR` | カートリッジ定義ディレクトリの上書き（未指定時は `backend/cartridges`） |
 | `ATLAS_DATA_SOURCE` | 分野の地図のデータソース。`api`（既定・本番推奨）/ `fixture`（ローカル確認用のモック地図。本番で使うと全ユーザーにモック地図が表示されるため注意） |
 
-### 4.5 音声・文字起こし
+### 4.5 音声・文字起こし {#env-voice}
 
 | 変数 | 説明 |
 |---|---|
 | `LLM_TRANSCRIBE_MODEL` | 音声文字起こしモデル（既定 `whisper-1`。openai プロバイダのみ対応） |
 
-### 4.6 機能別 LLM コール数上限（コスト制御）
+### 4.6 機能別 LLM コール数上限（コスト制御） {#env-call-limits}
 
 各機能は互いに独立したカウンタでレート制限されます。
 
@@ -202,7 +208,7 @@ docker compose logs -f api-server
 `LEARNING_CHAT_LLM_MODEL` / `COURSE_BUILDER_LLM_MODEL` など）は空欄にすると fast tier または
 analysis tier のモデルに自動的に委譲されます（各変数のコメントを `.env.example` で確認してください）。
 
-### 4.7 その他の画像パイプライン設定
+### 4.7 その他の画像パイプライン設定 {#env-image-pipeline}
 
 | 変数 | 説明 |
 |---|---|
@@ -210,7 +216,7 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 | `APPARATUS_FEWSHOT_IMAGES` | 含有承認済み例示画像の few-shot 添付（既定 `false`） |
 | `APPARATUS_RETRIEVAL_TOP_K` | ライブラリ凍結版 retrieval の候補数（既定 5） |
 
-### 4.8 LLM トークン使用量推計（U層）
+### 4.8 LLM トークン使用量推計（U層） {#env-llm-usage}
 
 | 変数 | 説明 |
 |---|---|
@@ -220,7 +226,7 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 | `LLM_USAGE_FLUSH_BATCH` | この件数到達で flusher を即時起動（既定 100） |
 | `LLM_PRICE_TABLE_PATH` | モデル単価表 JSON のパス。空なら概算費用は常に `null`（価格をハードコードしない方針） |
 
-### 4.9 ローカル開発 / ngrok
+### 4.9 ローカル開発 / ngrok {#env-local-ngrok}
 
 `docker-compose.local.yml` を使ったローカル開発時のみ必要です。
 
@@ -231,7 +237,7 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 
 ---
 
-## 5. 起動時の自動処理
+## 5. 起動時の自動処理 {#startup-automation}
 
 `api-server` 起動時、`backend/api/main.py` の lifespan で以下が実行されます。
 
@@ -246,38 +252,38 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 
 ---
 
-## 6. 教員アカウントの作成
+## 6. 教員アカウントの作成 {#create-teacher-account}
 
 **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ
 
 教員アカウントの作成は、システム管理者だけが実行できる操作です。教員（TEACHER）権限では
 実行できません。**アカウント作成は取り消せません。** 実行前に確認ダイアログが表示されます。
 
-具体的な手順は [教員アカウント作成](../admin_operations/users.md#create-teacher) を参照してください
+具体的な手順は [教員アカウント作成](../../admin_operations/users.md#create-teacher) を参照してください
 （対象タブ: グループ管理）。
 
-なお、学生アカウントの作成は教員以上のロールで実行可能です（[ユーザー・グループ管理](../admin_operations/users.md#create-student) 参照）。
+なお、学生アカウントの作成は教員以上のロールで実行可能です（[ユーザー・グループ管理](../../admin_operations/users.md#create-student) 参照）。
 
 ---
 
-## 7. 監視
+## 7. 監視 {#monitoring}
 
-### 7.1 システム統計
+### 7.1 システム統計 {#system-stats}
 
 **対象タブ:** システム統計（system-stats） / **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ / **取り消し可否:** 該当なし（読み取り専用・確認ダイアログなし）
 
 教材数・処理状況などのシステム統計を確認できます。詳細は
-[システム統計を見る](../admin_operations/system.md#stats) を参照してください。
+[システム統計を見る](../../admin_operations/system.md#stats) を参照してください。
 
-### 7.2 エラーログ
+### 7.2 エラーログ {#error-logs}
 
 **対象タブ:** エラー解析（error-analysis） / **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ / **取り消し可否:** 該当なし（読み取り専用・確認ダイアログなし）
 
 システムのエラーログを確認できます。保持・返却されるログの最大件数は環境変数
 `ADMIN_ERROR_LOG_MAX_ITEMS`（既定 1000）で制御されます。詳細は
-[エラーログを見る](../admin_operations/system.md#error-logs) を参照してください。
+[エラーログを見る](../../admin_operations/system.md#error-logs) を参照してください。
 
-### 7.3 LLM 使用量
+### 7.3 LLM 使用量 {#llm-usage-monitoring}
 
 **対象タブ:** LLM使用量（llm-usage） / **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ / **取り消し可否:** 該当なし（読み取り専用・確認ダイアログなし）
 
@@ -289,17 +295,17 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 - 概算費用は `LLM_PRICE_TABLE_PATH` が設定されている場合のみ表示されます。設定が無い場合は
   費用は `null` のまま表示されません（金額はハードコードしません）。
 
-詳細は [LLM使用量メトリクスを確認する](../admin_operations/llm_usage.md#view-metrics) を参照してください。
+詳細は [LLM使用量メトリクスを確認する](../../admin_operations/llm_usage.md#view-metrics) を参照してください。
 教材ごとの解析コスト事前見積り（レンジのみ・金額なし）は教材管理タブから確認できます（教員以上）。
 
 ---
 
-## 8. スキーマ進化の運用
+## 8. スキーマ進化の運用 {#schema-evolution-ops}
 
 システムは固定の `OntologyType` / `CorePredicate` に加えて、運用中に得た学生の質問から
 グラフ DSL の語彙を動的に成長させる仕組み（スキーマ進化）を持っています。全体ワークフロー
 （未回答クエリの蓄積 → AI によるスキーマ提案生成 → Shadow Testing による検証 → 教員の承認/棄却
-→ 再抽出ジョブ）の詳細は [動的スキーマ進化](../pipeline/schema-evolution.md) を参照してください。
+→ 再抽出ジョブ）の詳細は [動的スキーマ進化](../../pipeline/schema-evolution.md) を参照してください。
 
 「スキーマ提案」タブでの承認操作には2つの選択肢があります。
 
@@ -308,12 +314,12 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 - **カナリアリリース** — 選択した特定コースのみに適用し、影響を限定して試すことができます。
   全体適用前の検証手段として活用してください。
 
-具体的な操作手順は [スキーマ提案を確認・承認する](../admin_operations/schema_proposals.md#review)
+具体的な操作手順は [スキーマ提案を確認・承認する](../../admin_operations/schema_proposals.md#review)
 を参照してください（対象タブ: スキーマ提案 / 必要ロール: 教員以上）。
 
 ---
 
-## 9. セキュリティ要点
+## 9. セキュリティ要点 {#security-notes}
 
 - **`JWT_SECRET` と `ADMIN_PASSWORD` は既定値から必ず変更してください。** 既定値のまま本番運用
   すると、認証トークンの偽造や初期管理者アカウントへの不正ログインを許すことになります。
@@ -330,4 +336,4 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 
 ---
 
-[← マニュアル索引](README.md)
+[← マニュアル索引](../README.md)

@@ -1106,6 +1106,16 @@
       html += bar;
     }
 
+    // ヘルプルート（§1-3-6）: マニュアル出典。HELP 応答時のみ非 null。
+    // chunk ではないためクリック動作は持たせない（/source-chunk/ には接続しない）。
+    if (msg && msg.manual_citations && msg.manual_citations.length > 0) {
+      html += '<div class="manual-citation-line">' +
+        msg.manual_citations.map(function (c) {
+          return '<span class="manual-citation-chip">📖 マニュアル: ' + escHtml((c && c.title) || (c && c.file) || "") + '</span>';
+        }).join("") +
+        '</div>';
+    }
+
     // 本文中の連番出典 [出典N] を、該当チャンクをポップアップ表示できる span に変換する。
     return linkifyCitations(html, msg);
   }
@@ -2875,6 +2885,9 @@
           overall_tier: data.overall_tier || null,
           content_grounding: data.content_grounding || null,
           sources: data.sources || [],
+          // ヘルプルート（§1-3-6）: マニュアル出典。sources/tier とは別軸で、
+          // HELP 応答時のみ非 null。chunk ではないので /source-chunk/ には繋がない。
+          manual_citations: data.manual_citations || null,
           position_anchor: data.position_anchor || null,
           // 分野の地図 (Issue C-3): 学習パス提案カード
           atlas_path_card: registerAtlasPathCard(data.atlas_path_card),
@@ -2962,6 +2975,16 @@
 
     btn.addEventListener("click", sendCurrent);
     if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
+    // ❓ 使い方ボタン（typed action・一次経路・誤爆ゼロ）。入力欄に途中入力が
+    // あればそれを message に使い、空なら固定文を送る。分類LLMを経由しない確定ルート。
+    const helpUsageBtn = document.getElementById("help-usage-btn");
+    if (helpUsageBtn) {
+      helpUsageBtn.addEventListener("click", function () {
+        var typed = input.value.trim();
+        var text = typed || "この画面の使い方を教えてください";
+        sendMessage(text, { support_action: "usage_help" });
+      });
+    }
     // 🤖 気軽に話せる先生（ハンズフリー音声会話）
     const voiceBtn = document.getElementById("voice-mode-btn");
     if (voiceBtn) voiceBtn.addEventListener("click", toggleVoiceMode);
@@ -2979,7 +3002,7 @@
     // 外側をクリックしたら、送信時に自動で畳んだ教材区画を元の比率に戻す。
     document.addEventListener("click", function (e) {
       if (!_matCollapse.active) return;
-      if (e.target.closest("#chat-area, #chat-input, #send-btn, #voice-mode-btn, #chat-clear-btn, #mode-bar, #voice-panel, #src-popup, #lecture-chat-popup, #split-handle")) return;
+      if (e.target.closest("#chat-area, #chat-input, #send-btn, #help-usage-btn, #voice-mode-btn, #chat-clear-btn, #mode-bar, #voice-panel, #src-popup, #lecture-chat-popup, #split-handle")) return;
       restoreMaterialRegion();
     });
   }
@@ -3196,7 +3219,12 @@
       return;
     }
 
-    showVoiceSourceMaterial(data.sources || []);
+    // ヘルプルート（§1-3-7 音声フェイルソフト）: マニュアル節は chunk ではないため
+    // /source-chunk/ を引けない。manual_citations が非空なら教材表示をスキップし
+    // 回答読み上げのみにする。
+    if (!data.manual_citations || data.manual_citations.length === 0) {
+      showVoiceSourceMaterial(data.sources || []);
+    }
     const spoken = await speakVoiceAnswer(data.answer);
     if (!spoken && voiceState.active) {
       // N33: TTS 自体が失敗しているのでパネル表示のみに縮退（TTS 再試行しない）。

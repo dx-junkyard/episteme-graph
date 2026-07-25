@@ -637,7 +637,8 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   `locate_steps`（道案内の順序付き点灯手順。各要素 = `{screen, anchor_id, hint, precondition?}`。
   `anchor_id` は**論理 ID**でバックエンドは DOM セレクタを持たない）を宣言。全 API を一度に載せず
   安全・高頻度から段階登録（fail-closed）。ロール階層 SYSTEM_ADMIN ≥ TEACHER ≥ STUDENT。
-- **操作 KB**: `docs/admin_operations/*.md`（front-matter `capability`/`role`/`screen`）。`knowledge.py` が
+- **操作 KB**: `docs/admin_operations/*.md`（front-matter は `screen:` / `role:` の2キー。
+  `capability` キーは存在しない — 結び付けは capability 側の `howto_doc` → `{#anchor}`）。`knowledge.py` が
   起動時にインデックス化し、検索前に `capabilities_for(role)` で絞る（権限外の手順は出さない）。
   リアルタイム生成しない。KB に無ければ「未整備」。
 - **操作代行 + 戻す**: `action` capability は `actions/` に tool（`capture_before`/`apply`/`revert`）として実装し
@@ -650,6 +651,45 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 - **コスト上限**: `ASSISTANT_MAX_CALLS_PER_DAY`（既定 20）/ モデルは fast tier 既定（`ASSISTANT_LLM_MODEL` で上書き）。
 - **ガードレール**: `backend/tests/test_admin_assistant.py` が「全 `reversible=false` は `confirm=true`」
   「`core/admin_assistant/` が FastAPI を import しない」「locate は role で fail-closed」を構造的に守る。
+
+### 利用者マニュアル KB（help_kb, migration 0本, 2026-07-25）
+
+docs/manual を AI アシスタントの知識源にする非ベクトル KB。正本は
+`docs/features/manual_help_kb_design.md`。ベクトル RAG は建てない（97KB・70節に埋め込み
+基盤は過剰。無ヒット率の計器が要求してから Phase 3 で検討）。**chunks テーブルへの
+マニュアル相乗りは禁止**（`search_chunks_with_metadata` は全域検索のため教材回答へ混入する）。
+
+- **`backend/core/help_kb/`**（FastAPI 非 import）: `admin_assistant/knowledge.py` の索引
+  エンジンを一般化した正本。`index.py`（見出し節分割 + 語彙重なり検索 + マニュアル専用の
+  決定論変換 = HTMLコメント除去・テーブル平坦化・**TODOマーカー入りチャンクの索引除外**）/
+  `manual.py`（`search_manual(query, *, audience, limit)` — **audience は必須キーワード引数**。
+  student → student/ のみ、teacher → +teacher/、system_admin → 全部の上位継承。学生索引
+  ビルダーは student/ パスしか組めない構造分離）/ `validator.py`（front-matter・anchor・
+  リンクの起動時検証。main.py lifespan から fail-open で呼ぶ）。
+  `admin_assistant/knowledge.py` は外部シグネチャ不変の薄い委譲（admin_operations 側は
+  変換なし・挙動不変）。
+- **docs/manual は audience でディレクトリ物理分離**: `student/` / `teacher/` /
+  `system_admin/`（README.md は KB 非対象）。front-matter `audience:` はディレクトリと一致
+  必須、全 `##`〜`####` 見出しに明示 `{#anchor}`、student/ は禁止語彙 denylist
+  （ADMIN_PASSWORD・/api/admin 等）を機械検査。**backend/Dockerfile は
+  docs/admin_operations と docs/manual のみ COPY**（docs/features 等の設計書は
+  イメージ非同梱 = fail-closed のビルド時前倒し）。
+- **学生 HELP ルート**（`routes/learning.py`）: ①typed action `usage_help`（誤爆ゼロ）
+  ②非LLM pre-route `_is_usage_question()` を **casual バイパスより手前**に配置（音声・casual
+  ユーザーに届く唯一の位置 — ここより後ろに戻さない）。テキスト経路 = マニュアル本文
+  素通し + `manual_citations`（新 optional DTO フィールド）+ **quota 非消費・LLM 0回**。
+  音声/casual 経路のみ 1 LLM コールで会話調整形（`feature="learning:help_usage"` で U層計測、
+  失敗時は raw 本文へフェイルソフト）。無ヒットは固定文（捏造禁止）。痕跡は
+  `interest_traces` の kind `help_usage`（**質問逐語を積まない**。anchor/documented/no_hit
+  のみ。tension/anchor worker・digest・個人知識ネットワーク・問いの軌跡から除外）。
+- **教員/管理者**: Admin Copilot guidance の第2知識源（capability KB が手順の正本・manual は
+  概念/全体像。primary 未整備時のみ本文フォールバック + citation 出所別併記）。
+- **ガードレール**: `backend/tests/test_help_kb_guardrails.py`（audience 越境禁止・denylist・
+  TODO 凍結拒否・痕跡非汚染・Dockerfile 回帰・chunks 非汚染ほか）+ `test_help_kb.py` /
+  `test_help_usage_route.py` / `test_help_usage_ui_static.py`。
+- **非スコープ（Phase 2〜3）**: G層ルール3本・意図分類の 4 ラベル化（USAGE_HELP）・
+  refresh API・`screen_mode` コンテキストヘルプ・ベクトル補助層・DB draft/freeze・
+  content-hash 監査記帳（着手条件は設計書 §5/§7 に宣言済み）。
 
 ### ガイダンス層（G層, migration 039）
 

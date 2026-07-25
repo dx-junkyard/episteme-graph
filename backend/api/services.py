@@ -2197,7 +2197,11 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
 
 # tension は TensionMiningAgent (B層, backend/core/tension/) が追加する kind。
 # LLM 出力は常に status='candidate' で、学習者本人の confirm/dismiss でのみ遷移する（P1）。
-_INTEREST_KINDS = ("raw", "question", "detour", "misconception", "tension")
+# help_usage は学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3-8）が
+# 追加する kind。payload には質問逐語を積まない（help_anchor / documented / no_hit のみ,
+# P3）。tension/anchor worker・digest・個人知識ネットワーク導出・問いの軌跡ビューは
+# help_usage を対象にしない（意図的に除外。§6-6 ガードレール）。
+_INTEREST_KINDS = ("raw", "question", "detour", "misconception", "tension", "help_usage")
 _TRACE_STATUSES = (
     "open", "revisited", "resolved",   # 既存
     "candidate",      # LLM提案・本人未確定（tension のみ）
@@ -2274,6 +2278,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   AND NOT (kind = 'tension' AND status IN ('candidate', 'dismissed'))
                   -- 機能3: 書き直し/削除で往復ごと差し替えられた痕跡は出さない（保持はする。P4）
                   AND status <> 'superseded'
+                  -- 学生 HELP ルート（設計 §1-3-8）: help_usage は使い方の質問の痕跡であり
+                  -- 「問いの軌跡」（教材内容についての未解決の問い）には出さない
+                  AND kind <> 'help_usage'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC

@@ -37,6 +37,11 @@ from core.admin_assistant import intent as intent_mod
 from core.admin_assistant import knowledge as kb
 from core.admin_assistant import action_store
 from core.admin_assistant import next_steps as next_steps_mod
+
+try:  # pragma: no cover - core/help_kb は別タスクで並行実装中（不在時は現状挙動へ縮退）
+    from core.help_kb import search_manual as _search_manual
+except Exception:  # noqa: BLE001
+    _search_manual = None
 from core.admin_assistant.actions import (
     ActionArgError,
     ActionContext,
@@ -187,9 +192,31 @@ def _denial_response(cap, role: str) -> AssistantChatResponse:
     )
 
 
+def _manual_audience(role: str) -> str:
+    """§1-2 の audience 解決: SYSTEM_ADMIN はその索引、それ以外（TEACHER）は teacher 索引。"""
+    return "system_admin" if role == "SYSTEM_ADMIN" else "teacher"
+
+
+def _manual_hits(message: str, role: str) -> list[dict]:
+    """docs/manual 索引（core/help_kb, 第2知識源）からの検索。
+
+    capability KB（admin_operations）が手順の正本で、manual は概念/全体像担当（§1-2）。
+    モジュール未実装（並行実装中）・索引空・検索失敗のいずれも現状と完全に同じ挙動へ
+    縮退する（fail-closed。捏造しない, P4）。
+    """
+    if _search_manual is None:
+        return []
+    try:
+        return _search_manual(message, audience=_manual_audience(role), limit=3) or []
+    except Exception:
+        logger.warning("guidance: manual search failed", exc_info=True)
+        return []
+
+
 def _guidance_response(message: str, role: str, cap) -> AssistantChatResponse:
     allowed = caps.capabilities_for(role)
     results = kb.search(message, allowed, limit=3)
+    manual_hits = _manual_hits(message, role)
     citations: list = []
     parts: list[str] = []
     screen = ""
@@ -217,17 +244,36 @@ def _guidance_response(message: str, role: str, cap) -> AssistantChatResponse:
             primary = results[0]
 
     if primary and primary.get("documented"):
+        # capability KB（手順の正本）が documented — 応答本文は現状のまま。
+        # 関連 manual ヒットがあれば出所別の citation として併記するだけ（§1-2）。
         parts.append(primary["body"])
         screen = primary.get("screen", "")
         if primary.get("citation"):
             citations.append({"doc": primary["citation"]})
+        for m in manual_hits[:2]:
+            if m.get("citation"):
+                citations.append({"doc": m["citation"]})
     elif primary is not None:
-        # KB 未整備 — 手順をでっち上げない（P4）。
-        parts.append(
-            f"「{primary.get('title', '')}」の詳しい手順はまだ整備されていません。"
-            f"操作は「{primary.get('screen', '')}」タブで行います。"
-        )
+        # capability KB 未整備 — manual にヒットがあれば「未整備」固定文の代わりに
+        # 節本文を素通しする（捏造しない・本文はそのまま, P4）。ヒットが無ければ従来どおり。
+        if manual_hits:
+            top = manual_hits[0]
+            parts.append(top.get("body", ""))
+            if top.get("citation"):
+                citations.append({"doc": top["citation"]})
+        else:
+            parts.append(
+                f"「{primary.get('title', '')}」の詳しい手順はまだ整備されていません。"
+                f"操作は「{primary.get('screen', '')}」タブで行います。"
+            )
         screen = primary.get("screen", "")
+    elif manual_hits:
+        # capability 側に primary が無い（cap 未解決 かつ 検索結果ゼロ）。
+        # manual にヒットがあればそちらを素通しする（primary 不在時のフォールバック）。
+        top = manual_hits[0]
+        parts.append(top.get("body", ""))
+        if top.get("citation"):
+            citations.append({"doc": top["citation"]})
     else:
         # N12: 代行ハンドラ未実装の action は「道案内のみ対応」を明示する
         # （どれが実際に動くか事前に判る。実行可否の事前開示）。

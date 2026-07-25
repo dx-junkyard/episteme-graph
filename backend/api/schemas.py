@@ -351,6 +351,10 @@ class LearningChatResponse(BaseModel):
     # 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。tension_hint 等でゲートされた
     # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
     anchor_confirm: dict | None = None
+    # 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
+    # 出典（ヒット時のみ設定）。各要素は {file, anchor, title}。既存 sources/tier には
+    # 相乗りしない（_TIER_STRENGTH が未知 tier を out_of_source=0 に落とすため）。
+    manual_citations: list[dict] | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
     # チャット型AI支援の共通基盤整理 §4: LLM 例外時に固定文へ縮退したターンかどうか
     # （I3 会話は死なせない。degraded=true でも 200 を返し、履歴には保存済み）。

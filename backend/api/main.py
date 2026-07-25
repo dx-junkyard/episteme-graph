@@ -182,6 +182,15 @@ async def _lifespan(application: FastAPI):
     except Exception:  # noqa: BLE001
         logger.warning("status watcher startup skipped", exc_info=True)
 
+    # ヘルプKB（docs/manual）の起動時バリデーション（fail-open: 起動は止めない）
+    try:
+        from core.help_kb.validator import validate_manual
+
+        for violation in validate_manual():
+            logger.warning("help_kb manual validation: %s", violation)
+    except Exception:  # noqa: BLE001
+        logger.warning("help_kb manual validation skipped", exc_info=True)
+
     yield
 
 
