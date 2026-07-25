@@ -469,6 +469,9 @@ AUDIT_ENTITY_ELEMENT_EXPLANATION = "element_explanation"
 # 利用者マニュアル KB（help_kb, Phase 2 手動 refresh トリガー）
 AUDIT_ENTITY_MANUAL = "manual"
 
+# discuss 観測基盤（Observation Layer for Phase 3 Gate, migration 060）
+AUDIT_ENTITY_DISCUSS_OBSERVATION = "discuss_observation"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -501,4 +504,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_FIGURE_PRESENTATION,
     AUDIT_ENTITY_ELEMENT_EXPLANATION,
     AUDIT_ENTITY_MANUAL,
+    AUDIT_ENTITY_DISCUSS_OBSERVATION,
 )

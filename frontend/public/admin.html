@@ -79,6 +79,7 @@
           <button class="admin-tab" data-tab="llm-usage" id="tab-btn-llm-usage" role="menuitem" style="display:none">LLM使用量</button>
           <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" role="menuitem" style="display:none">エラー解析</button>
           <button class="admin-tab" data-tab="manual-editor" id="tab-btn-manual-editor" role="menuitem" style="display:none">マニュアル編集</button>
+          <button class="admin-tab" data-tab="discuss-observation" id="tab-btn-discuss-observation" role="menuitem" style="display:none">discuss 観測</button>
         </div>
       </div>
     </div>
@@ -88,6 +89,10 @@
 
     <!-- 利用者マニュアル KB（help_kb）draft/freeze 管理 UI — SYSTEM_ADMIN のみ。中身は admin-manual-editor.js が描画 -->
     <div class="admin-panel" id="tab-manual-editor"></div>
+
+    <!-- discuss 観測基盤（Observation Layer, docs/features/discuss_observation_design.md）—
+         SYSTEM_ADMIN のみ。中身は admin-discuss-observation.js が描画 -->
+    <div class="admin-panel" id="tab-discuss-observation"></div>
 
     <!-- Field Atlas operations dashboard -->
     <div class="admin-panel" id="tab-atlas">
@@ -903,6 +908,8 @@
   <script src="/js/admin-llm-usage.js?v=gap-fixes-20260716-2"></script>
   <!-- 利用者マニュアル KB（help_kb）draft/freeze 管理 UI（manual_help_kb_design.md Phase 3 ②）— SYSTEM_ADMIN のみ -->
   <script src="/js/admin-manual-editor.js?v=help-kb-editor-20260725-1"></script>
+  <!-- discuss 観測基盤（Observation Layer, docs/features/discuss_observation_design.md）— SYSTEM_ADMIN のみ -->
+  <script src="/js/admin-discuss-observation.js?v=discuss-observation-20260725-1"></script>
   <script src="/js/admin.js?v=gap-fixes-20260716-3"></script>
 </body>
 </html>

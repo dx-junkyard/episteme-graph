@@ -60,6 +60,7 @@ from routes import atlas as atlas_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
+from routes import discuss_observation as discuss_observation_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
 from routes import personal_map as personal_map_routes
@@ -262,6 +263,7 @@ app.include_router(atlas_routes.report_router)
 app.include_router(atlas_view_routes.router)
 app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
+app.include_router(discuss_observation_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
 app.include_router(personal_map_routes.router)
@@ -280,6 +282,7 @@ app.include_router(atlas_routes.binding_router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
+app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")

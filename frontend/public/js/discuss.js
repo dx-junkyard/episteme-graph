@@ -46,6 +46,19 @@
       .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   }
 
+  // discuss 観測基盤（docs/features/discuss_observation_design.md §3）: UI イベントの
+  // fire-and-forget 送信。await しない・失敗は握りつぶす（DO6）。レスポンス
+  // （{recorded:n}）は学習者に見せないため中身を読まない・DOM にも出さない（DO3）。
+  function sendDiscussMetric(event, payload) {
+    if (!ctx.courseId) return;
+    apiFetch("/learning/discuss/metric-events", {
+      method: "POST",
+      body: JSON.stringify({
+        events: [{ event: event, course_id: ctx.courseId, payload: payload || {} }],
+      }),
+    }).catch(function () { /* fire-and-forget: 失敗は無視 (DO6) */ });
+  }
+
   // 開幕画面は #material-here が「論文と議論中」であるあいだだけ有効なコンテキスト
   // とみなす（app.js が discuss モード中に同期でこの文言をセットする）。非同期応答が
   // 戻ったときに、既にトピック切替済みなら教材区画を上書きしない（新規APIを増やさず
@@ -182,9 +195,26 @@
     containerEl.querySelectorAll("[data-discuss-ask]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var text = this.getAttribute("data-discuss-ask");
+        // 観測: バックボーンノードと、それ以外の起点チップ（中心命題・最初の一手）を区別する。
+        if (this.classList.contains("discuss-backbone-node")) {
+          sendDiscussMetric("opening_backbone_clicked", {});
+        } else {
+          sendDiscussMetric("opening_starter_clicked", {});
+        }
         if (text && window.sendPrompt) window.sendPrompt(text);
       });
     });
+  }
+
+  var openingShownCourseId = "";
+
+  // 観測: 開幕画面が実際に描画されたときに一度だけ opening_shown を送る
+  // （renderChat 経由で renderOpening は何度も呼ばれるため、同一コース内での
+  // 再描画は重複計上しない）。
+  function notifyOpeningShown(courseId) {
+    if (openingShownCourseId === courseId) return;
+    openingShownCourseId = courseId;
+    sendDiscussMetric("opening_shown", {});
   }
 
   // 教材区画（#material-body）を開幕画面へ置き換える。取得できない/該当なしのときは
@@ -203,6 +233,7 @@
       if (cachedHtml && stillInDiscussContext()) {
         containerEl.innerHTML = cachedHtml;
         bindOpeningEvents(containerEl);
+        notifyOpeningShown(courseId);
       }
       return;
     }
@@ -220,6 +251,7 @@
       if (stillInDiscussContext()) {
         containerEl.innerHTML = html;
         bindOpeningEvents(containerEl);
+        notifyOpeningShown(courseId);
       }
     } catch (e) {
       // fail-closed: プレースホルダのまま（フィクスチャ・偽データを出さない）
@@ -230,9 +262,9 @@
 
   function renderBranchChips() {
     return '<div class="discuss-branch-chips">' +
-      '<button type="button" class="discuss-branch-btn suggest-btn" data-suggest="' +
+      '<button type="button" class="discuss-branch-btn suggest-btn" data-discuss-branch="deep" data-suggest="' +
       esc("いまの回答の前提と根拠を、もう一段掘り下げてください。") + '">🔎 深掘り</button>' +
-      '<button type="button" class="discuss-branch-btn suggest-btn" data-suggest="' +
+      '<button type="button" class="discuss-branch-btn suggest-btn" data-discuss-branch="wide" data-suggest="' +
       esc("いまの話題と隣り合う概念や、関連する別の論点に広げてください。") + '">🧭 横展開</button>' +
       '</div>';
   }
@@ -268,10 +300,10 @@
     if (landingRootBound) return;
     landingRootBound = true;
     root.addEventListener("click", function (e) {
-      if (e.target === root) closeLanding();
+      if (e.target === root) skipLanding();
     });
     document.addEventListener("keydown", function (e) {
-      if (e.key === "Escape" && root && !root.hidden) closeLanding();
+      if (e.key === "Escape" && root && !root.hidden) skipLanding();
     });
   }
 
@@ -280,6 +312,14 @@
     if (!root) return;
     root.hidden = true;
     root.innerHTML = "";
+  }
+
+  // 観測: 「読まずに閉じた」明示スキップ（ヘッダ×・フッタのスキップボタン・背景クリック・
+  // Escape）。「挑戦する」「このトピックで続きを学ぶ」経由の close は landing_skipped に
+  // 数えない（別イベントで区別する）。
+  function skipLanding() {
+    sendDiscussMetric("landing_skipped", {});
+    closeLanding();
   }
 
   async function fetchDigest(path) {
@@ -365,6 +405,7 @@
     var reconBtn = document.getElementById("discuss-landing-recon-btn");
     if (reconBtn) {
       reconBtn.addEventListener("click", function () {
+        sendDiscussMetric("landing_probe_clicked", {});
         closeLanding();
         var region = document.getElementById("reconstruction-region");
         if (!region) return;
@@ -376,6 +417,7 @@
     var contBtn = document.getElementById("discuss-landing-continue-btn");
     if (contBtn) {
       contBtn.addEventListener("click", function () {
+        sendDiscussMetric("landing_continue_clicked", {});
         closeLanding();
         if (window.discussReturnToSequential) window.discussReturnToSequential();
       });
@@ -411,6 +453,7 @@
       box.replaceWith(actions);
     });
     confirmBtn.addEventListener("click", async function () {
+      sendDiscussMetric("landing_confirmed", { kind: "tension" });
       var text = ta ? (ta.value || "").trim() : "";
       try {
         await apiFetch("/learning/tension/" + encodeURIComponent(traceId) + "/confirm", {
@@ -423,6 +466,7 @@
 
   async function dismissTensionCard(traceId) {
     var card = document.querySelector('[data-discuss-tension-card="' + traceId + '"]');
+    sendDiscussMetric("landing_dismissed", { kind: "tension" });
     try {
       await apiFetch("/learning/tension/" + encodeURIComponent(traceId) + "/dismiss", {
         method: "POST", body: JSON.stringify({}),
@@ -433,6 +477,7 @@
 
   async function confirmAnchorCard(traceId) {
     var card = document.querySelector('[data-discuss-anchor-card="' + traceId + '"]');
+    sendDiscussMetric("landing_confirmed", { kind: "anchor" });
     try {
       await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/confirm", {
         method: "POST", body: JSON.stringify({ doubt_type: "" }),
@@ -443,6 +488,7 @@
 
   async function dismissAnchorCard(traceId) {
     var card = document.querySelector('[data-discuss-anchor-card="' + traceId + '"]');
+    sendDiscussMetric("landing_dismissed", { kind: "anchor" });
     try {
       await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/dismiss", {
         method: "POST", body: JSON.stringify({}),
@@ -501,12 +547,13 @@
     if (!root) return;
     bindLandingRootOnce(root);
     root.hidden = false;
+    sendDiscussMetric("landing_shown", { reason: reason || "" });
     root.innerHTML = landingShellHtml('<div class="discuss-landing-loading">読み込み中…</div>');
     var contentEl = document.getElementById("discuss-landing-content");
     var skipBtn0 = document.getElementById("discuss-landing-skip-btn");
-    if (skipBtn0) skipBtn0.addEventListener("click", closeLanding);
+    if (skipBtn0) skipBtn0.addEventListener("click", skipLanding);
     var skipTop0 = document.getElementById("discuss-landing-skip-top-btn");
-    if (skipTop0) skipTop0.addEventListener("click", closeLanding);
+    if (skipTop0) skipTop0.addEventListener("click", skipLanding);
 
     var courseIdForFetch = ctx.courseId;
     var tensionDigest = { items: [] };
@@ -538,6 +585,7 @@
     reset: function () {
       clearInactivityTimer();
       turnCount = 0;
+      openingShownCourseId = "";
       closeLanding();
     },
   };

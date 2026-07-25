@@ -2460,6 +2460,12 @@ def learning_chat(
         # discuss モード（設計 §6.2 Phase 1）: 後から U層・k-匿名集計・personal_graph が
         # discuss 由来の痕跡を区別できるように焼き込む。
         **({"entry_mode": "discuss"} if _is_discuss else {}),
+        # discuss 観測基盤（docs/features/discuss_observation_design.md §2-1）: 全モード共通で
+        # 回答の出所分類を焼き込む（記録開始日以前の痕跡には無いキーなので、集計側は
+        # 「記録済み件数」を分母として明示する — U1 と同じ誠実さ）。
+        "content_grounding": content_grounding,
+        # discuss のときのみスコープも焼き込む（discuss 以外は None のまま）。
+        **({"discuss_scope": _discuss_scope} if _is_discuss else {}),
     }
     # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
     # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。

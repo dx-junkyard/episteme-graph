@@ -5698,6 +5698,10 @@
       // 利用者マニュアル KB（help_kb）draft/freeze 管理 — SYSTEM_ADMIN のみ（manual_help_kb_design.md Phase 3 ②）。
       var manualEditorTabBtn = document.getElementById("tab-btn-manual-editor");
       if (manualEditorTabBtn) manualEditorTabBtn.style.display = "";
+
+      // discuss 観測基盤（Observation Layer）— SYSTEM_ADMIN のみ（discuss_observation_design.md §4）。
+      var discussObservationTabBtn = document.getElementById("tab-btn-discuss-observation");
+      if (discussObservationTabBtn) discussObservationTabBtn.style.display = "";
     }
 
     // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
@@ -7869,6 +7873,18 @@
     // DI 注入して疎結合に起動する（admin-llm-usage.js と同型）。
     if (window.ManualKbEditor) {
       window.ManualKbEditor.init({
+        apiFetch: apiFetch,
+        escHtml: escHtml,
+        onTabActivate: onTabActivate,
+        state: state,
+      });
+    }
+
+    // discuss 観測基盤（Observation Layer, docs/features/discuss_observation_design.md §4）—
+    // Phase 3 着手判断のための観測状況ダッシュボード + ダンプ取得。DI 注入して疎結合に起動する
+    // （admin-manual-editor.js と同型）。
+    if (window.AdminDiscussObservation) {
+      window.AdminDiscussObservation.init({
         apiFetch: apiFetch,
         escHtml: escHtml,
         onTabActivate: onTabActivate,

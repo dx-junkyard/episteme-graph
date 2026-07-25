@@ -8239,6 +8239,29 @@ body {
   resize: vertical;
 }
 
+/* discuss 観測基盤（Observation Layer, docs/features/discuss_observation_design.md §4）—
+   管理画面「運用」タブ。SYSTEM_ADMIN 専用ダッシュボード。数値は運用者のみに見せ、
+   参考目安の達成状況は事実文の○×のみで、警告色・強調演出は付けない（DO5）。 */
+.ado-note {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 8px;
+}
+
+.ado-subhead {
+  font-size: 13px;
+  margin: 16px 0 6px;
+  color: var(--color-text-primary);
+}
+
+.ado-met {
+  color: var(--color-text-success);
+}
+
+.ado-unmet {
+  color: var(--color-text-tertiary);
+}
+
 /* ============================================================
    discuss モード（論文と話す）Phase 1 — app.js 追加分
    （docs/features/discussion_mode_design.md §3.2/3.4/3.6）

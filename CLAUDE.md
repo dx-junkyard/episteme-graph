@@ -1098,7 +1098,13 @@ casual チャット → 応答を TTS 再生（再生中はマイク停止）→
 周辺資料と最初から議論できる係留付きディスカッションモード。正本は
 `docs/features/discussion_mode_design.md`（不変条項 DM1〜DM8。Phase 0〜2 実装済み、
 Phase 3=document 直付け入口は v2 として未着手 — 着手時は専用設計文書を切る。設計書の
-「migration 058 想定」は help_kb が 058/059 を消費済みのため実際は 060〜）。
+「migration 058 想定」は help_kb が 058/059 を消費済み・観測基盤が 060 を消費のため実際は 061〜。
+Phase 3 着手判断の実測ゲートは discuss 観測基盤
+（`docs/features/discuss_observation_design.md`、migration 060 `discuss_metric_events`・
+DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし/参考目安は自動ゲートにしない/
+計測失敗でUXを止めない。`GET /api/admin/discuss/observation-status`・
+`GET /api/admin/discuss/observation-dump`（tar.gz|zip・監査 entity_type='discuss_observation'）・
+`POST /api/learning/discuss/metric-events`、core は `backend/core/discuss/observation.py`）が担う）。
 
 - **Phase 0（可視性フィルタ、discuss と独立の先行バグ修正）**:
   `search_chunks_with_metadata` は**必須キーワード引数** `allowed_document_ids` で可視性を

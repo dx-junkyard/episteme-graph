@@ -253,17 +253,31 @@ class TestUsageContextSeparatesDiscussFromCasualAndNormal:
 
 
 class TestFutureDiscussAggregationMustGoThroughPrivacyModule:
-    """discuss 専用の教員向け k-匿名集計は設計書 §6.4（Phase 3・v2）でまだ実装されていない。
+    """discuss 専用の教員向け **per-student** k-匿名集計は設計書 §6.4（Phase 3・v2）で
+    まだ実装されていない。
 
-    ここでは (a) 実装が始まる前に k=3 のリテラル再定義がどこにも紛れ込んでいないこと、
-    (b) 教員/管理者向けの discuss 集計エンドポイントがまだ存在しないこと — の2点を
-    フォワードガードとして固定する。Phase 3 で集計を実装する際は、この
-    テストクラスを拡張し `core/privacy.py` の `K_ANONYMITY` / `meets_k_anonymity` /
+    2026-07-25 に discuss 観測基盤（`docs/features/discuss_observation_design.md`）が
+    `routes/discuss_observation.py` の `admin_router` に SYSTEM_ADMIN 向け
+    `/api/admin/discuss/observation-status` / `/api/admin/discuss/observation-dump` を
+    追加した。これは Phase 3 が指す「教員向け per-student 内訳の k-匿名集計」ではなく、
+    全体の蓄積量（distinct users 件数・往復数など、個別学習者の内訳を含まない）を
+    SYSTEM_ADMIN のみに見せる観測状況ゲート（DO3 相当）であるため、以下では
+    この2パスのみ明示的にアローリストする。それ以外の discuss admin エンドポイントが
+    無断で追加されていないこと・k=3 のリテラル再定義がどこにも紛れ込んでいないことは
+    引き続きフォワードガードとして固定する。Phase 3 で per-student 集計を実装する際は、
+    このテストクラスを拡張し `core/privacy.py` の `K_ANONYMITY` / `meets_k_anonymity` /
     `bucket_count_range` を経由することを要求すること（既存の
     test_next_steps_guardrails.py / test_personal_graph_guardrails.py と同じ規律）。
     """
 
     _K_ANON_REDEFINITION_PATTERNS = ("K_ANONYMITY =", "K_ANONYMITY=")
+
+    # discuss 観測基盤（本タスクで実装済み）の SYSTEM_ADMIN 専用パス。per-student
+    # 内訳を持たない全体集計のみのため、k-匿名ゲート必須の対象から明示的に除外する。
+    _ALLOWED_DISCUSS_ADMIN_PATHS = (
+        "/discuss/observation-status",
+        "/discuss/observation-dump",
+    )
 
     def test_no_k_anonymity_literal_redefinition_in_core_discuss(self):
         assert_module_tree_forbids(_CORE_DISCUSS_DIR, self._K_ANON_REDEFINITION_PATTERNS)
@@ -274,19 +288,30 @@ class TestFutureDiscussAggregationMustGoThroughPrivacyModule:
     def test_no_k_anonymity_literal_redefinition_in_discuss_js(self):
         assert_source_forbids(_DISCUSS_JS_SRC, self._K_ANON_REDEFINITION_PATTERNS, context="discuss.js")
 
-    def test_no_admin_facing_discuss_aggregation_endpoint_registered_yet(self):
+    def test_no_unlisted_admin_facing_discuss_endpoint_registered(self):
         """`/api/admin/...` 配下（あるいは admin 系ルータ名）に discuss を含むパスの
-        エンドポイントがまだ登録されていないこと。実装されたら本テストは失敗するので、
-        そのときに k-匿名ゲートの配線ガードへ差し替えること。"""
+        エンドポイントは、観測基盤のアローリスト2件以外はまだ登録されていないこと。
+        新しい discuss admin エンドポイントが増えたら本テストは失敗するので、それが
+        per-student 集計であれば k-匿名ゲートの配線ガードへ差し替えること。"""
         routes_dir = _BACKEND / "api" / "routes"
         pattern = re.compile(r'@(\w*admin\w*)\.(get|post|put|patch|delete)\("([^"]*)"\)', re.IGNORECASE)
         offending: list[str] = []
         for path in sorted(routes_dir.rglob("*.py")):
             src = path.read_text(encoding="utf-8")
             for match in pattern.finditer(src):
-                if "discuss" in match.group(3).lower():
-                    offending.append(f"{path}:{match.group(0)}")
-        assert offending == [], f"admin-facing discuss endpoint(s) found: {offending}"
+                path_literal = match.group(3)
+                if "discuss" not in path_literal.lower():
+                    continue
+                if path_literal in self._ALLOWED_DISCUSS_ADMIN_PATHS:
+                    continue
+                offending.append(f"{path}:{match.group(0)}")
+        assert offending == [], f"unlisted admin-facing discuss endpoint(s) found: {offending}"
+
+    def test_observation_endpoints_are_system_admin_gated(self):
+        """観測基盤の2エンドポイントは SYSTEM_ADMIN dependency で fail-closed になっている
+        こと（per-student 集計ではなく管理者専用の内部ゲートであることの裏付け）。"""
+        src = (_BACKEND / "api" / "routes" / "discuss_observation.py").read_text(encoding="utf-8")
+        assert src.count("_require_system_admin") >= 2
 
     def test_no_dedicated_discuss_router_file_exists_yet(self):
         assert not (_BACKEND / "api" / "routes" / "discuss.py").exists()

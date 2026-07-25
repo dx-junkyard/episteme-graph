@@ -258,6 +258,19 @@
     return res;
   }
 
+  // discuss 観測基盤（docs/features/discuss_observation_design.md §3）: UI イベントの
+  // fire-and-forget 送信。await しない・失敗は握りつぶす（DO6）。レスポンス
+  // （{recorded:n}）は学習者に見せないため中身を読まない・DOM にも出さない（DO3）。
+  function sendDiscussMetric(event, payload) {
+    if (!state.courseId) return;
+    apiFetch("/learning/discuss/metric-events", {
+      method: "POST",
+      body: JSON.stringify({
+        events: [{ event: event, course_id: state.courseId, payload: payload || {} }],
+      }),
+    }).catch(function () { /* fire-and-forget: 失敗は無視 (DO6) */ });
+  }
+
   // ── Auth ───────────────────────────────────────────────────────────
   function renderAuth() {
     let overlay = document.getElementById("auth-overlay");
@@ -755,6 +768,12 @@
         }
         if (supportAction) payload.support_action = supportAction;
         Object.assign(payload, Session.contextPayload());
+        // discuss モード（論文と話す）Phase 2: 分岐チップ（深掘り／横展開）。チップ自体は
+        // discuss.js の renderBranchChips が生成するが、送信はこの汎用配線に相乗りする
+        // ため、観測イベントもここで拾う（data-discuss-branch は discuss.js 側で付与）。
+        var discussBranch = this.getAttribute("data-discuss-branch");
+        if (discussBranch === "deep") sendDiscussMetric("branch_deep_clicked", {});
+        else if (discussBranch === "wide") sendDiscussMetric("branch_wide_clicked", {});
         sendMessage(suggest, payload);
       });
     });
@@ -2660,6 +2679,8 @@
   // 流用する（サイドバー・モードバー・レクチャー終了・detour クリア等は共通処理のまま
   // 動く。教材フェッチだけ selectTopic 内部で discuss 用に分岐している）。
   function enterDiscussMode() {
+    // 観測（discussion_entered）: 既に discuss 中の再クリックでは重複計上しない。
+    if (!isDiscussMode()) sendDiscussMetric("discussion_entered", {});
     return selectTopic(DISCUSS_TOPIC_ID);
   }
 
@@ -2731,7 +2752,11 @@
     if (scopeToggle) {
       scopeToggle.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
         b.addEventListener("click", function () {
+          var _prevScope = state.discussScope;
           state.discussScope = this.getAttribute("data-discuss-scope") || "course_sources";
+          if (state.discussScope !== _prevScope) {
+            sendDiscussMetric("scope_switched", { scope: state.discussScope });
+          }
           renderDiscussBar();
         });
       });

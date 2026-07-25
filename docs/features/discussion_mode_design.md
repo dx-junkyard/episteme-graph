@@ -360,7 +360,7 @@ Fable 指揮 + sonnet 並列サブエージェント体制で実装。バック�
 
 | # | 設計書の前提 | 実機の現状（2026-07-25） | 裁定 |
 |---|---|---|---|
-| 1 | 最新 migration 057・v2 想定 058 | help_kb（manual KB）が **058/059 を消費済み** | Phase 0〜2 は migration 0 本のため影響なし。**Phase 3 の migration は 060〜** |
+| 1 | 最新 migration 057・v2 想定 058 | help_kb（manual KB）が **058/059 を消費済み**（さらに観測基盤 `discuss_observation_design.md` が 060 を消費） | Phase 0〜2 は migration 0 本のため影響なし。**Phase 3 の migration は 061〜** |
 | 2 | casual バイパスは3点（learning.py:1910/1975/2188） | help_kb の **usage_help pre-route** が casual 判定の手前に追加され行番号が全面シフト。U層タグ分岐を含め実質**4点** | discuss 判定は pre-route より後ろ・casual 直後に配置（usage_help が discuss ユーザーにも届く位置関係を維持）。バイパスは4点として実装 |
 | 3 | §6.1「可視 document 集合 = user_can_view_document の集合クエリ化」 | `user_can_view_document` は document 単体判定で**コース経由の開示を含まない**。文字通り実装すると公開コース受講生が教員 private の sources を RAG できなくなる退行 | `list_visible_document_ids` は **document 直接可視 ∪ アクセス可能コース（所有/公開テンプレート/グループ/受講中）の sources 由来 document** の和集合とした。コースへのアクセス自体が sources の開示を意味するため |
 | 4 | §3.2「コース着地画面に2ボタン」 | 現アプリに独立したコース着地画面は存在しない（コース選択で先頭/in_progress トピックへ自動遷移） | 二枚看板は**サイドバー最上部の常設等重ブロック**として実装。既存の自動トピック選択は不変（逐次 UX を壊さない）。真の着地画面化は将来の UX 改修候補として残す |
@@ -402,4 +402,5 @@ tension prefilter・structure_anchor worker の `_discussion` 耐性 / **reconst
 
 - docker compose での実機 E2E（開幕画面の実データ表示・着地モーダル・スコープ切替の目視）
 - §7 の観察ポイント（U層 `learning:chat_discuss` の実測 → 専用上限の要否判断 — 裁定 #9）
-- Phase 3（v2）: 専用設計文書を切ってから（migration 060〜）
+- Phase 3（v2）: 専用設計文書を切ってから（migration 061〜）。着手判断の実測ゲートは
+  観測基盤（`docs/features/discuss_observation_design.md`、migration 060）が担う
