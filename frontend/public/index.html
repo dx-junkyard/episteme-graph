@@ -83,6 +83,21 @@
           <button class="lecture-question-btn" id="lecture-question" title="質問する">&#10067; 質問</button>
         </div>
       </div>
+      <!-- discuss モード（論文と話す）Phase 1: スコープ切替 ＋「もっと自由に話す」導線。
+           寄り道（explore）とは独立した機構 — 語彙・スタイルとも「寄り道」を使わない。 -->
+      <div class="discuss-bar" id="discuss-bar" hidden>
+        <span class="discuss-bar-label">🗣 範囲:</span>
+        <div class="discuss-scope-toggle" id="discuss-scope-toggle">
+          <button type="button" class="discuss-scope-opt" data-discuss-scope="course_sources">このコースのソース論文</button>
+          <button type="button" class="discuss-scope-opt" data-discuss-scope="all_visible">閲覧できる周辺資料まで</button>
+        </div>
+        <!-- Phase 2 着地画面トリガー①（明示終了）。押すと discuss.js が今日の議論を
+             振り返る軽量モーダルを提示する（スキップ可・既定オン）。 -->
+        <button type="button" class="discuss-end-btn" id="discuss-end-btn" title="今日の議論を振り返って終える">議論を終える</button>
+      </div>
+      <div class="discuss-free-link-row" id="discuss-free-link-row" hidden>
+        <button type="button" class="discuss-free-link" id="discuss-free-link-btn">🗣 もっと自由に話す</button>
+      </div>
       <div class="ia">
         <div class="lecture-toggle-wrap">
           <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
@@ -135,6 +150,10 @@
         <button class="chat-clear-btn" id="chat-clear-btn" title="このトピックの質疑応答履歴を削除">質疑応答履歴を削除</button>
       </div>
     </div>
+
+    <!-- discuss モード（論文と話す）着地画面（Phase 2）: 討議終了時の軽量モーダル。
+         スキップ可・既定オン。中身は discuss.js が描画する（既定 hidden）。 -->
+    <div class="discuss-landing-overlay" id="discuss-landing-region" hidden></div>
   </div>
 
   <script src="/js/app.js"></script>
@@ -148,5 +167,6 @@
   <script src="/js/personal-map.js"></script>
   <script src="/js/personal-map-home.js"></script>
   <script src="/js/reconstruction.js"></script>
+  <script src="/js/discuss.js"></script>
 </body>
 </html>

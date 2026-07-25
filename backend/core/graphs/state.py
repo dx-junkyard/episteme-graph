@@ -20,6 +20,8 @@ class StudentState(TypedDict, total=False):
     topic_title: str
     course_title: str
     user_id: str
+    # Phase 0（discuss モード設計書 §6.1）: 可視 document 集合。本番未接続のため None 許容。
+    allowed_document_ids: list[str] | None
 
     # --- トピックメタ情報 (オーバービュー用) ---
     topic_concepts: list[str]       # トピックに関連する主要概念名

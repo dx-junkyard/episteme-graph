@@ -1092,6 +1092,56 @@ casual チャット → 応答を TTS 再生（再生中はマイク停止）→
 応答の第1根拠チャンク（`sources[0].chunk_id`）を `/source-chunk/` から取得し
 ボイスパネルに教材表示する。
 
+### 「論文と話す」ディスカッションモード（discuss, B層, migration 不要, 2026-07-25）
+
+学習チャットの4値目 `intent_mode='discuss'`。コース教材を順にたどらず、ソース論文全体＋
+周辺資料と最初から議論できる係留付きディスカッションモード。正本は
+`docs/features/discussion_mode_design.md`（不変条項 DM1〜DM8。Phase 0〜2 実装済み、
+Phase 3=document 直付け入口は v2 として未着手 — 着手時は専用設計文書を切る。設計書の
+「migration 058 想定」は help_kb が 058/059 を消費済みのため実際は 060〜）。
+
+- **Phase 0（可視性フィルタ、discuss と独立の先行バグ修正）**:
+  `search_chunks_with_metadata` は**必須キーワード引数** `allowed_document_ids` で可視性を
+  強制する（`None` はテスト・本番未接続コード専用、空集合は SQL 非発行で `[]` の fail-closed。
+  `material_id` の SELECT は grounding 判定の生命線なので落とさない）。可視集合の正本は
+  `services.list_visible_document_ids(user_id)` — document 直接可視（所有/public/group/
+  object_group_permissions）**∪ アクセス可能コース（所有/公開テンプレート/グループ/受講中）の
+  sources 由来 document**。コース経由開示を含むのは、受講コースの sources（教員 private が多い）
+  を RAG できないと既存学習体験が壊れるため。コース sources→document 解決の正本は
+  `services.list_course_source_document_ids(course_data)`（lecture.py の旧ヘルパーは委譲済み）。
+- **Phase 1（v1 最小: migration 0・新テーブル 0・新エンドポイント 0）**: casual と同型の
+  バイパス4点（意図分類 / 前提知識ゲート / detour 化 / U層タグ `learning:chat_discuss`）。
+  usage_help pre-route → casual → discuss の判定順を崩さない。会話は予約疑似トピック
+  `_discussion`（`DISCUSSION_TOPIC_ID`、表示・プロンプト・痕跡 context_label は
+  `DISCUSSION_TOPIC_LABEL="論文との議論"` へ1箇所で変換）。応答は casual と違い
+  **学術ディスカッション調**（`_get_discuss_system_prompt`: 即答・出し惜しみ禁止 +
+  **生成プロンプト構造的必須**（応答末尾に言い換え/予測/自己説明の誘い or why/how/what-if
+  問い返しを必ず1つ — DM4））。スコープ2段 `LearningChatRequest.discuss_scope`
+  （`course_sources` 既定 / `all_visible`、不正値 422）。該当チャンクゼロでも他スコープへ
+  **無断フォールバックしない**（DM1。事実文の context_block に置換）。out_of_source_notice は
+  casual と違い discuss では維持（DM1 の明示）。痕跡 payload に `entry_mode: 'discuss'`。
+  tension prefilter / structure_anchor / 書き直し・削除は無変更で効く。コスト上限は既存
+  `LEARNING_CHAT_MAX_CALLS_PER_DAY`（専用上限は U層実測後に判断 — 裁定 #9）。
+- **Phase 2（開幕・着地、非LLM）**: `GET /api/learning/courses/{course_id}/discuss/opening`
+  （`backend/core/discuss/`、FastAPI 非 import・読み取り専用・LLM 0回・confidence 等の
+  生数値非漏洩）— thesis_reconstruction artifact（`document_run_artifacts`）+
+  `theory_component_graphs` main 層バックボーン + 「最も脆い一手」（`compile_open_assumptions`
+  + review_required ノードの事実文）を投影。着地画面はフロントの既存 API 束ね
+  （tension/anchors digest の confirm/dismiss + 再構成プローブ「あれば1問」=
+  `reconstruction/next` の未知 topic コース全体フォールバック挙動を `_discussion` で流用 +
+  「このトピックで続きを学ぶ」情報的提示）。トリガー = 明示終了 / トピック切替 /
+  無活動15分（ポーリング禁止）。
+- **フロント**（`app.js` + `discuss.js`（`window.Discuss`、reconstruction.js と同型の後付け
+  パターン））: サイドバー最上部の**二枚看板**（「順番に学ぶ」/「この論文と議論する」を等重表示。
+  現アプリにコース着地画面が無いため設計書 §3.2 の想定をサイドバー常設ブロックに軌道修正、
+  既存の先頭トピック自動選択は不変）・「もっと自由に話す」常設リンク・スコープトグル・
+  モードバー「論文と議論中」（中立色）・応答後の分岐チップ（深掘り/横展開）。
+  **discuss UI 文言に「寄り道」を使わない**（DM5。explore の内部語彙・既存 UI は不変）。
+- **ガードレール**: `test_discuss_guardrails.py` / `test_discuss_mode.py` /
+  `test_discuss_opening.py` / `test_search_visibility.py` / `test_discuss_ui_static.py` /
+  `test_discuss_phase2_ui_static.py`（可視性 fail-closed・無断フォールバック禁止・
+  生成プロンプト必須要素・数値非表示・`_discussion` 痕跡動作・U層タグ分離・k=3 正本）。
+
 ### 学習チャットのメッセージ書き直し・削除（機能3, B層）
 
 学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。

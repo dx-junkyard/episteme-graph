@@ -1362,11 +1362,165 @@ def search_relevant_chunks_with_scores(
         return [], []
 
 
+def list_visible_document_ids(user_id: str) -> set[str]:
+    """本人が閲覧可能な document.id（テキスト表現）の集合を返す（discuss モード設計書 §6.1 Phase 0）。
+
+    `search_chunks_with_metadata` の全域ベクトル検索に可視性フィルタを掛けるためのヘルパー。
+    以下の和集合を1つの SQL（CTE 込みで1文）で計算する — チャンク単位・document 単位の
+    ループでの N+1 判定呼び出しは横断基盤の既存ルールで禁止されている:
+
+      (a) documents.uploaded_by = 本人（所有者）
+      (b) documents.visibility = 'public'
+      (c) documents.visibility = 'group' かつ本人がその group_id に所属（group_members）
+      (d) object_group_permissions（object_type='document', permission IN viewer/editor）の
+          グループに所属
+      (e) 本人がアクセス可能なコース（所有 / visibility='public' かつ is_published かつ
+          is_template / visibility='group' でメンバー / learning_states 受講中）の
+          `data->'sources'[].material_id` が指す document（= documents.source_path）
+
+    (e) を含める理由: 学習チャットの RAG は受講コースの sources（教員の private 文書のことが
+    多い）を検索できる必要があり、document 単体の可視性だけで絞ると既存の学習体験
+    （content_grounding='course_material'）が壊れる。コースへのアクセス自体が sources の
+    開示を意味する、という設計判断（`docs/features/discussion_mode_design.md` §6.1）。
+
+    例外時は空集合を返す（fail-closed。呼び出し側は「何も見えない」として扱う）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    WITH accessible_courses AS (
+                        SELECT lc.id, lc.data
+                        FROM learning_courses lc
+                        WHERE lc.user_id = CAST(:uid AS uuid)
+                           OR EXISTS (
+                               SELECT 1 FROM learning_states ls
+                               WHERE ls.course_id = lc.id AND ls.user_id = CAST(:uid AS uuid)
+                           )
+                           OR (
+                               COALESCE(lc.visibility, 'private') = 'public'
+                               AND COALESCE(lc.is_published, false)
+                               AND COALESCE(lc.is_template, false)
+                           )
+                           OR (
+                               COALESCE(lc.visibility, 'private') = 'group'
+                               AND lc.group_id IS NOT NULL
+                               AND EXISTS (
+                                   SELECT 1 FROM group_members gm
+                                   WHERE gm.group_id = lc.group_id AND gm.user_id = CAST(:uid AS uuid)
+                               )
+                           )
+                    ),
+                    course_material_ids AS (
+                        SELECT DISTINCT (src ->> 'material_id') AS material_id
+                        FROM accessible_courses,
+                             LATERAL jsonb_array_elements(
+                                 CASE WHEN jsonb_typeof(accessible_courses.data -> 'sources') = 'array'
+                                      THEN accessible_courses.data -> 'sources'
+                                      ELSE '[]'::jsonb
+                                 END
+                             ) AS src
+                        WHERE COALESCE(src ->> 'material_id', '') <> ''
+                    )
+                    SELECT d.id::text
+                    FROM documents d
+                    WHERE d.uploaded_by = CAST(:uid AS uuid)
+                       OR d.visibility = 'public'
+                       OR (
+                           d.visibility = 'group' AND d.group_id IS NOT NULL AND EXISTS (
+                               SELECT 1 FROM group_members gm2
+                               WHERE gm2.group_id = d.group_id AND gm2.user_id = CAST(:uid AS uuid)
+                           )
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM object_group_permissions ogp
+                           JOIN group_members gm3 ON gm3.group_id = ogp.group_id
+                           WHERE ogp.object_type = 'document'
+                             AND ogp.object_id = d.id::text
+                             AND ogp.permission IN ('viewer', 'editor')
+                             AND gm3.user_id = CAST(:uid AS uuid)
+                       )
+                       OR d.source_path IN (SELECT material_id FROM course_material_ids)
+                """),
+                {"uid": user_id},
+            ).fetchall()
+            return {str(row[0]) for row in rows if row[0]}
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("list_visible_document_ids failed (fail-closed, empty set): %s", exc)
+        return set()
+
+
+def list_course_source_document_ids(course_data: dict | None) -> set[str]:
+    """コースの ``sources[]`` が指す document.id（テキスト表現）の集合を返す
+    （discuss モード設計書 §6.2 Phase 1: discuss_scope='course_sources' の既定検索範囲の正本）。
+
+    以下の和集合:
+      (a) ``core.course_data.course_source_material_ids(course_data)``（``documents.source_path``）
+          を1 SQL で ``documents.id`` に解決したもの
+      (b) ``course_sources(course_data)`` の各要素が明示 ``document_id`` を持っていれば
+          そのまま採用したもの（``routes/lecture.py::_course_document_ids`` と同じ意味論）
+
+    ``routes/lecture.py`` の ``_resolve_course_document_ids`` / ``_course_document_ids`` は
+    重複実装を残さないため本関数へ委譲する薄いラッパーに揃える（Tier 3-20 の横断基盤ルール）。
+
+    course_data が dict でない、または例外発生時は空集合（fail-closed）。discuss モードの
+    「該当チャンクが無ければ他スコープへ無断で広げない」（DM1）と対になる — ここで検索範囲を
+    勝手に膨らませない。
+    """
+    if not isinstance(course_data, dict):
+        return set()
+
+    explicit_ids = {
+        str(s["document_id"]) for s in course_sources(course_data) if s.get("document_id")
+    }
+    material_ids = course_source_material_ids(course_data)
+    if not material_ids:
+        return explicit_ids
+
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
+                {"mids": list(material_ids)},
+            ).fetchall()
+            resolved_ids = {str(row[0]) for row in rows if row[0]}
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning(
+            "list_course_source_document_ids failed to resolve material_ids (fail-closed, "
+            "returning explicit document_id only): %s", exc,
+        )
+        return explicit_ids
+
+    return explicit_ids | resolved_ids
+
+
 def search_chunks_with_metadata(
     query: str,
     top_k: int = 8,
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
 ) -> list[dict]:
-    """システム全域の chunks をベクトル検索し、出典情報を付けて返す。"""
+    """システム全域の chunks をベクトル検索し、出典情報を付けて返す。
+
+    discuss モード設計書 §6.1（Phase 0）: `allowed_document_ids` は必須キーワード引数にして
+    呼び忘れを構造的に防ぐ（`core/help_kb/manual.py::search_manual(..., audience)` と同じ規律）。
+    `None` を渡すと無フィルタ（全域検索）になるが、これは **テスト・本番未接続コード専用**
+    （例: `core/graphs/student_graph.py::retrieval_node` — 本番ルートに未接続）。本番の呼び出し元
+    （`routes/learning.py` の learning_chat / `routes/lecture.py` の
+    `_generate_sequence_from_search`）は必ず `list_visible_document_ids(user_id)` の結果を渡すこと。
+
+    `allowed_document_ids` が空集合（非 None）の場合は SQL を発行せず即座に `[]` を返す
+    （fail-closed）。
+    """
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return []
+
     try:
         query_vector = embed_text(query)
     except Exception as exc:
@@ -1377,6 +1531,14 @@ def search_chunks_with_metadata(
         session = _pg_session()
         try:
             dim = get_embedding_dim()
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            doc_filter_sql = ""
+            if allowed_document_ids is not None:
+                # chunks.document_id は UUID 列（theory_components.document_id 等の TEXT 列とは
+                # 異なる。component_context.py:131 の ANY(:doc_ids) をそのまま真似ると型不一致に
+                # なりうるため、text[] → uuid[] の明示 CAST を挟む。
+                doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+                params["doc_ids"] = list(allowed_document_ids)
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.id,
@@ -1388,10 +1550,11 @@ def search_chunks_with_metadata(
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
+                    {doc_filter_sql}
                     ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
-                {"query_vector": str(query_vector), "limit": top_k},
+                params,
             ).fetchall()
             from core.learning_experience import attach_tiers, approved_chunk_ids
 

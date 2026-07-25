@@ -37,6 +37,9 @@
     anchorDigest: null,     // 帰属候補ダイジェスト {items: [...]}（StructureAnchorAgent Stage 2）
     anchorDeferred: {},     // [あとで] で今セッション中は隠す trace_id の集合
     pendingSelection: null, // 方法A: 「ここについて質問」で選択したテキスト {text, segment_id}
+    // discuss モード（論文と話す）のスコープ選択。トピック切替で discuss を離れても
+    // 選択値自体は保持する（再入場時に前回の選択を引き継ぐ）。
+    discussScope: "course_sources", // "course_sources" | "all_visible"
   };
 
   // 送信直後の描画で「新しい問い」の先頭へスクロールさせるための一時フラグ（state には
@@ -199,6 +202,15 @@
       saveLearningSupportContext();
     },
   };
+
+  // ── discuss モード（「論文と話す」, Phase 1）────────────────────────
+  // コースと対等併記の会話モード。バックエンドは予約疑似トピック "_discussion" で
+  // 会話を受ける（既存トピックと衝突しない予約キー。find_course_topic は None を
+  // 返し、教材フェッチ対象が無いだけで他のトピック遷移処理はそのまま共有できる）。
+  var DISCUSS_TOPIC_ID = "_discussion";
+  function isDiscussMode() {
+    return state.currentTopicId === DISCUSS_TOPIC_ID;
+  }
 
   function parseJwtPayload(token) {
     try {
@@ -461,7 +473,17 @@
     // （件数・割合は数値として出さない設計不変条項に従う）。
     const progress = course.progress || {};
     const completedTopicIds = Array.isArray(progress.completed_topic_ids) ? progress.completed_topic_ids : [];
-    let html = '<div class="sb-hd">コースツリー</div>';
+
+    // discuss モード（論文と話す）二枚看板: 「順番に学ぶ」（現行逐次型）と
+    // 「この論文と議論する」を同じ視覚的重みで並べる。既定選択なし（設計 §3.2）。
+    const discussActive = isDiscussMode();
+    let html = '<div class="discuss-mode-switch">' +
+      '<button type="button" class="discuss-mode-btn' + (!discussActive ? " active" : "") +
+      '" id="discuss-mode-sequential-btn" title="コースの教材をトピック順にたどります">📘 順番に学ぶ</button>' +
+      '<button type="button" class="discuss-mode-btn' + (discussActive ? " active" : "") +
+      '" id="discuss-mode-discuss-btn" title="トピックに縛られず、この論文について話します">🗣 この論文と議論する</button>' +
+      "</div>";
+    html += '<div class="sb-hd">コースツリー</div>';
     html += '<div class="course-tree-title">' + escHtml(course.title || "コース") + '</div>';
     if (progress.course_completed) {
       html += '<div class="course-tree-done">全トピックの確認を終えています</div>';
@@ -528,6 +550,12 @@
     html += "</div>";
 
     sb.innerHTML = html;
+
+    // discuss モード二枚看板の配線
+    var seqModeBtn = document.getElementById("discuss-mode-sequential-btn");
+    if (seqModeBtn) seqModeBtn.addEventListener("click", goToSequentialLearning);
+    var discussModeBtn = document.getElementById("discuss-mode-discuss-btn");
+    if (discussModeBtn) discussModeBtn.addEventListener("click", function () { enterDiscussMode(); });
 
     // Bind topic clicks
     sb.querySelectorAll("[data-topic]").forEach(function (el) {
@@ -616,15 +644,17 @@
       ca.innerHTML = '<div class="mg ai" style="color:var(--color-text-tertiary)">左のサイドバーからトピックを選択してください。</div>';
       renderMaterialRegion();
       renderModeBar();
+      renderDiscussBar();
       return;
     }
 
     let html = "";
 
     // 教材は上部の「教材区画」に分離（renderMaterialRegion）。ここはチャット（探索）のみ。
-    // 初期状態（チャット履歴なし）ならサジェストUIを表示
+    // 初期状態（チャット履歴なし）ならサジェストUIを表示（discuss モードは前提知識確認の
+    // ボタンが文脈に合わないため、専用の素直な一言に差し替える）。
     if (state.chatMessages.length === 0 && !state.sending) {
-      html += _renderInitialSuggestions();
+      html += isDiscussMode() ? _renderDiscussInitialGreeting() : _renderInitialSuggestions();
     }
 
     state.chatMessages.forEach(function (msg) {
@@ -750,6 +780,7 @@
     // 教材区画（本筋）とモードバー（現在地）を更新する。
     renderMaterialRegion();
     renderModeBar();
+    renderDiscussBar();
   }
 
   // ── 構造帰属（方法A）: 教材区画のテキスト選択 →「ここについて質問」 ──
@@ -870,6 +901,18 @@
       updateNextTopicBtn();
       return;
     }
+    // discuss モード（論文と話す）: 存在しない予約トピックのため教材チャンクは無い。
+    // まず Phase 1 の素直なプレースホルダを描画し（fail-closed の既定表示）、
+    // discuss.js（Phase 2）が開幕画面（中心命題・バックボーン・最初の一手）を
+    // 取得できた場合のみここを置き換える。取得できない/該当なしなら
+    // プレースホルダのまま（フィクスチャ・偽データは出さない）。
+    if (isDiscussMode()) {
+      body.innerHTML = renderDiscussPlaceholder();
+      if (here) here.textContent = "論文と議論中";
+      if (window.Discuss) window.Discuss.renderOpening(body, state.courseId);
+      updateNextTopicBtn();
+      return;
+    }
     if (!state.topicMaterial || state.topicMaterial.length === 0) {
       body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:13px">教材を読み込み中…</div>';
       if (here) here.textContent = "";
@@ -941,6 +984,12 @@
     if (!bar) return;
     if (!state.course || !state.currentTopicId) { bar.hidden = true; return; }
     bar.hidden = false;
+    // discuss モード（論文と話す）: 復帰督促・寄り道の語彙を使わない中立表示。
+    if (isDiscussMode()) {
+      bar.className = "mode-bar discuss";
+      bar.innerHTML = '<span class="mb-label">🗣 論文と議論中</span>';
+      return;
+    }
     if (Session.inDetour()) {
       var origin = Session.detourOrigin() || {};
       var label = (state.learningSupport && (state.learningSupport.detour_label || state.learningSupport.status_label)) || "寄り道中";
@@ -1091,6 +1140,12 @@
     // 分野の地図 (Issue C-3): 学習パス提案カード (§8)
     if (msg && msg.atlas_path_card) {
       html += renderAtlasPathCard(msg.atlas_path_card);
+    }
+
+    // discuss モード（論文と話す）Phase 2: 分岐チップ（深掘り／横展開）。
+    // アシスタント応答の直後にのみ出す（discuss モード限定・設計 §3.4）。
+    if (isDiscussMode() && window.Discuss) {
+      html += window.Discuss.renderBranchChips();
     }
 
     // 回答内容の出所（教材/別の資料/モデル生成）と L1 信頼性（tier）を末尾に明示する。
@@ -1484,6 +1539,10 @@
     const el = document.getElementById("tab-context");
     if (!state.course || !state.currentTopicId) {
       el.innerHTML = '<div class="ps"><div class="cc">トピックを選択してください</div></div>';
+      return;
+    }
+    if (isDiscussMode()) {
+      el.innerHTML = '<div class="ps"><div class="cc">論文と議論しています。特定のトピックには紐づきません。</div></div>';
       return;
     }
 
@@ -2456,6 +2515,11 @@
   function updateNextTopicBtn() {
     var btn = document.getElementById("next-topic-btn");
     if (!btn) return;
+    // discuss モード（論文と話す）には順路の「次へ」概念がない。
+    if (isDiscussMode()) {
+      btn.style.display = "none";
+      return;
+    }
     if (!state.currentTopicId) {
       btn.style.display = "none";
       return;
@@ -2521,6 +2585,10 @@
   // 既定（サイドツリーからの手動選択など）では detour を閉じて再アンカーする。
   async function selectTopic(topicId, opts) {
     opts = opts || {};
+    // discuss モード（論文と話す）Phase 2: 着地画面トリガー②の判定用に、切替前の
+    // 状態を記録しておく（実際の呼び出しは本関数末尾・遷移完了後。遷移自体はブロックしない）。
+    var _discussLeaving = isDiscussMode() && topicId !== DISCUSS_TOPIC_ID;
+    var _discussLeavingCourseId = state.courseId;
     // 機能2: トピック切替は教材区画の対象そのものが変わるため、直前の圧縮状態を
     // 持ち越さない。「本筋へ戻る」(#mode-bar) や本文内の同アクションボタンは
     // #chat-area/#mode-bar 内にあり自動復元の対象外クリックだが、ここへ来る時点で
@@ -2563,14 +2631,117 @@
     if (window.Reconstruction) window.Reconstruction.setContext(state.courseId || "", topicId || "");
 
     if (state.courseId && topicId) {
-      // 教材チャンクとチャット履歴を並行取得
-      const [material, history] = await Promise.all([
-        fetchTopicMaterial(state.courseId, topicId),
-        loadChatHistory(state.courseId, topicId),
-      ]);
-      state.topicMaterial = material;
-      state.chatMessages = history;
-      renderChat();
+      if (topicId === DISCUSS_TOPIC_ID) {
+        // discuss モード（論文と話す, Phase 1）: 予約疑似トピックは実在しないため
+        // 教材フェッチは行わない（教材区画は renderMaterialRegion のプレースホルダに委ねる）。
+        // 履歴（discuss スレッド）は既存の loadChatHistory がそのまま取得できる。
+        state.chatMessages = await loadChatHistory(state.courseId, topicId);
+        renderChat();
+      } else {
+        // 教材チャンクとチャット履歴を並行取得
+        const [material, history] = await Promise.all([
+          fetchTopicMaterial(state.courseId, topicId),
+          loadChatHistory(state.courseId, topicId),
+        ]);
+        state.topicMaterial = material;
+        state.chatMessages = history;
+        renderChat();
+      }
+    }
+
+    // discuss モード（論文と話す）Phase 2: 着地画面トリガー②（discuss → 通常トピック）。
+    // 遷移はブロックしない — 切替が完了した後にオーバーレイとして提示する（設計 §3.5）。
+    if (_discussLeaving && window.Discuss) {
+      window.Discuss.maybeShowLanding(_discussLeavingCourseId, "topic_switch");
+    }
+  }
+
+  // discuss モードへ入る。予約疑似トピック "_discussion" 経由で既存の selectTopic を
+  // 流用する（サイドバー・モードバー・レクチャー終了・detour クリア等は共通処理のまま
+  // 動く。教材フェッチだけ selectTopic 内部で discuss 用に分岐している）。
+  function enterDiscussMode() {
+    return selectTopic(DISCUSS_TOPIC_ID);
+  }
+
+  // discuss モードから順路（コースのトピック順）へ戻る。すでに通常トピック中なら
+  // 現在のトピックを維持する（何もしない）。
+  function _defaultSequentialTopicId() {
+    if (!state.course) return null;
+    var topics = state.course.topics || [];
+    var inProgress = topics.find(function (t) { return t.status === "in_progress"; });
+    if (inProgress) return inProgress.id;
+    return topics.length > 0 ? topics[0].id : null;
+  }
+
+  function goToSequentialLearning() {
+    if (!state.course || !isDiscussMode()) return;
+    var target = _defaultSequentialTopicId();
+    if (target) selectTopic(target);
+  }
+
+  // discuss モードの教材区画プレースホルダ（Phase 1）。Phase 2 で開幕画面（中心命題・
+  // 理論のバックボーン・最初の一手）に置き換わる前提の、素直な事実文カード。
+  // 煽り文句・数値・「自由に何でも」的な誇大表現は書かない（設計 DM6）。
+  function renderDiscussPlaceholder() {
+    return (
+      '<div class="discuss-placeholder">' +
+      '<div class="discuss-placeholder-hd">この論文と議論する</div>' +
+      '<p class="discuss-placeholder-body">' +
+      "このコースのソース論文と、その周辺の資料を相手に、順番に縛られず議論できます。" +
+      "回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。" +
+      "</p>" +
+      "</div>"
+    );
+  }
+
+  // discuss モードのチャット欄・初回表示（履歴が空のときのみ）。前提知識確認の
+  // ボタンは通常トピック用のため出さない。
+  function _renderDiscussInitialGreeting() {
+    return (
+      '<div class="mg ai">' +
+      "この論文について、気になるところから話しかけてください。" +
+      "</div>"
+    );
+  }
+
+  // 入力欄上部の discuss バー（スコープ切替）と「もっと自由に話す」リンクの表示切替。
+  // 選択状態そのものが出所の正直さの UI になる（設計 DM1）。
+  function renderDiscussBar() {
+    var bar = document.getElementById("discuss-bar");
+    var freeLinkRow = document.getElementById("discuss-free-link-row");
+    var discuss = !!state.course && !!state.currentTopicId && isDiscussMode();
+    var showFreeLink = !!state.course && !!state.currentTopicId && !isDiscussMode();
+    if (bar) bar.hidden = !discuss;
+    if (freeLinkRow) freeLinkRow.hidden = !showFreeLink;
+    if (bar) {
+      var scope = state.discussScope || "course_sources";
+      bar.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
+        b.classList.toggle("active", b.getAttribute("data-discuss-scope") === scope);
+      });
+    }
+  }
+
+  // discuss UI（スコープ切替・「もっと自由に話す」リンク）の配線。一度だけ登録する。
+  function initDiscussUI() {
+    var freeLinkBtn = document.getElementById("discuss-free-link-btn");
+    if (freeLinkBtn) {
+      freeLinkBtn.addEventListener("click", function () { enterDiscussMode(); });
+    }
+    var scopeToggle = document.getElementById("discuss-scope-toggle");
+    if (scopeToggle) {
+      scopeToggle.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
+        b.addEventListener("click", function () {
+          state.discussScope = this.getAttribute("data-discuss-scope") || "course_sources";
+          renderDiscussBar();
+        });
+      });
+    }
+    // Phase 2 着地画面トリガー①（明示終了）。
+    var endBtn = document.getElementById("discuss-end-btn");
+    if (endBtn) {
+      endBtn.addEventListener("click", function () {
+        if (window.Discuss) window.Discuss.maybeShowLanding(state.courseId, "explicit");
+      });
     }
   }
 
@@ -2841,6 +3012,13 @@
     // detour 中の自由質問でも origin（復帰先）が失われないよう、明示 payload が
     // support_context を持たない場合は現在のセッション文脈を補完する。
     const payload = Object.assign({}, Session.contextPayload(), actionPayload || {});
+    // discuss モード（論文と話す）Phase 2: 開幕画面のチップ／分岐チップは sendWith を
+    // 経由しないため、ここで最終フォールバックとして intent_mode を補う
+    // （sendWith 等が明示指定済みなら上書きしない）。
+    if (isDiscussMode() && !payload.intent_mode) {
+      payload.intent_mode = "discuss";
+      payload.discuss_scope = payload.discuss_scope || state.discussScope || "course_sources";
+    }
     // L2: いまの読み位置（segment/scroll）。寄り道に入る瞬間の origin に正確に焼き込む。
     const anchorAtAsk = Session.currentAnchor();
     // 構造帰属（方法A）: 「ここについて質問」で選択したテキストをこの1問にだけ添える。
@@ -2868,6 +3046,8 @@
       if (res.ok) {
         const data = await res.json();
         respData = data;
+        // discuss モード（論文と話す）Phase 2: 着地画面の無活動タイムアウト（トリガー③）用。
+        if (isDiscussMode() && window.Discuss) window.Discuss.notifyActivity();
         setLearningSupportFromResponse(data);
         // L2 寄り道先ラベル: 寄り道に入ったら、その入口となった問い本文を origin に添える
         // （status_label のような汎用語ではなく、何に寄り道したかを実体で示す）。
@@ -2974,15 +3154,23 @@
       var text = input.value.trim();
       if (!text) return;
       if (mode === "on_path") Session.clearDetour();
+      var payload = { intent_mode: mode };
+      // discuss モード（論文と話す）: 予約疑似トピック中は on_path/explore の判定より
+      // 優先して discuss 送信にする。スコープ選択状態をそのまま添える（DM1/DM2）。
+      if (isDiscussMode()) {
+        payload.intent_mode = "discuss";
+        payload.discuss_scope = state.discussScope || "course_sources";
+      }
       // 機能3: 書き直し中なら replace_message_id を添えて以降を差し替える
       if (state.editingMessageId) {
         var replaceId = state.editingMessageId;
         state.editingMessageId = null;
         hideEditIndicator();
-        sendMessage(text, { intent_mode: mode, _replace_message_id: replaceId });
+        payload._replace_message_id = replaceId;
+        sendMessage(text, payload);
         return;
       }
-      sendMessage(text, { intent_mode: mode });
+      sendMessage(text, payload);
     }
 
     function sendCurrent() { sendWith(Session.inDetour() ? "explore" : "on_path"); }
@@ -3971,6 +4159,14 @@
     sendMessage(text, payload);
   };
 
+  // discuss モード（論文と話す）Phase 2: 着地画面「このトピックで続きを学ぶ」用。
+  // サイドバー二枚看板の goToSequentialLearning と異なり、既にトピック切替済み
+  // （着地画面トリガー②発火後）の状態でも呼べるよう isDiscussMode() の制約を課さない。
+  window.discussReturnToSequential = function () {
+    var target = _defaultSequentialTopicId();
+    if (target) selectTopic(target);
+  };
+
   // ── Interactive Lecture Mode (Issue #66 / スライド同期 migration 040) ─────
   // lectureState.deck は全セグメントのスライドをフラット化した一覧で、再生・表示・
   // ナビゲーションはすべてこのデッキ基準で行う（§1 レクチャースライド同期設計）。
@@ -3999,7 +4195,8 @@
     state.topicHasAudio = false;
     state.topicStaleLanguage = false;
     updateLectureToggleAvailability();
-    if (!state.courseId || !state.currentTopicId) return;
+    // discuss モード（論文と話す）は予約疑似トピックのためレクチャー音声の対象外。
+    if (!state.courseId || !state.currentTopicId || isDiscussMode()) return;
     var requestedTopicId = state.currentTopicId;
     try {
       var res = await apiFetch(
@@ -5805,6 +6002,7 @@
     setupRoleUI();
     initTabs();
     initInput();
+    initDiscussUI();
     initSelectionAnchor();
     initLogout();
     initGroups();

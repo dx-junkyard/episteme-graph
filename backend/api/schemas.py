@@ -285,7 +285,12 @@ class LearningChatRequest(BaseModel):
     # サーバ正本の履歴から削除し、派生 interest_traces を status='superseded' にしてから、
     # message を新しいターンとして同じ位置から再処理する。指定なしなら通常の追記。
     replace_message_id: str | None = None
-    intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) — 送信時の意図
+    # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) | "discuss"(論文と話す) — 送信時の意図
+    intent_mode: str | None = None
+    # discuss（論文と話す）専用: 検索スコープ。"course_sources"(既定=このコースのソース論文) |
+    # "all_visible"(本人が閲覧可能な周辺資料まで)。該当チャンクが無くても他スコープへ
+    # 無断フォールバックしない（DM1）。
+    discuss_scope: str | None = None
     # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
     # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
     #  related?, juxtapose?} — 自由文のみに依存しない

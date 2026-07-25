@@ -1,7 +1,7 @@
 # 「論文と話す」— 係留付きディスカッションモード（discuss モード）設計書
 
 - 対象: episteme-graph（ura-dev）
-- ステータス: 討議確定（2026-07-25）・実装未着手
+- ステータス: 討議確定（2026-07-25）→ **Phase 0〜2 実装済み（2026-07-25、§9 実装記録参照）**。Phase 3（v2）は未着手
 - 関連正本: `docs/features/personal_knowledge_network_design.md` / `component_evidence_redesign.md` /
   `reconstruction_loop_design.md` / `assistant_common_infra_design.md` / `manual_help_kb_design.md`（§1-1 が
   本書 Phase 0 と同じ全域検索の事実を独立に確認済み）
@@ -348,3 +348,58 @@ Phase 1/2 の U層実測でモードの価値を確認してから、専用の�
 - 学習者への研究引用の権威づけ表示・スコア表示・ゲーミフィケーション
 - 教員による discuss 個別履歴の閲覧（k-匿名集約のみ）
 - explore（寄り道）語彙・UI の既存動作変更（discuss とは独立に維持）
+
+---
+
+## 9. 実装記録（2026-07-25、Phase 0〜2 完了）
+
+Fable 指揮 + sonnet 並列サブエージェント体制で実装。バックエンドフルスイート
+**5,790+ passed / 0 failed**（backend/.venv、docker 不要）。docker 実機 E2E は未実施。
+
+### 9.1 仕様作成後のコード変更に伴う軌道修正（着手前に実機確認して裁定）
+
+| # | 設計書の前提 | 実機の現状（2026-07-25） | 裁定 |
+|---|---|---|---|
+| 1 | 最新 migration 057・v2 想定 058 | help_kb（manual KB）が **058/059 を消費済み** | Phase 0〜2 は migration 0 本のため影響なし。**Phase 3 の migration は 060〜** |
+| 2 | casual バイパスは3点（learning.py:1910/1975/2188） | help_kb の **usage_help pre-route** が casual 判定の手前に追加され行番号が全面シフト。U層タグ分岐を含め実質**4点** | discuss 判定は pre-route より後ろ・casual 直後に配置（usage_help が discuss ユーザーにも届く位置関係を維持）。バイパスは4点として実装 |
+| 3 | §6.1「可視 document 集合 = user_can_view_document の集合クエリ化」 | `user_can_view_document` は document 単体判定で**コース経由の開示を含まない**。文字通り実装すると公開コース受講生が教員 private の sources を RAG できなくなる退行 | `list_visible_document_ids` は **document 直接可視 ∪ アクセス可能コース（所有/公開テンプレート/グループ/受講中）の sources 由来 document** の和集合とした。コースへのアクセス自体が sources の開示を意味するため |
+| 4 | §3.2「コース着地画面に2ボタン」 | 現アプリに独立したコース着地画面は存在しない（コース選択で先頭/in_progress トピックへ自動遷移） | 二枚看板は**サイドバー最上部の常設等重ブロック**として実装。既存の自動トピック選択は不変（逐次 UX を壊さない）。真の着地画面化は将来の UX 改修候補として残す |
+| 5 | §3.5 着地画面で confirm/dismiss/**connect** | tension connect は component/edge ピッカーを要する（着地モーダル内実装は過大） | 着地モーダルは confirm/dismiss + 「接続は『わたしの地図』の既存導線で行える」旨の事実文注記。connect API 自体は既存のまま利用可能 |
+| 6 | §6.3 Field Atlas 現在地チップ | 現在地は atlas-minimap.js のクロージャ内 private 状態のみで、安価に読める公開 getter が無い | **見送り**（fail-closed・偽装しない）。discuss.js にコメントで理由を記録 |
+| 7 | §6.0「positioning.py:194-237 が claim ラベル解決の先例」 | 当該行は thesis 位置ヘルパーで、claim→ラベル解決器ではなかった | `context_lens.py::_claim_id_lookup_from_rows` + `_artifact_claim_text_index` の2先例を合成して解決（DB id / legacy_ids / span_id / claim_object_builder text の順。未解決 id は id 文字列を label に — 情報を落とさない） |
+
+設計書 §6.2 の想定どおり確認できたもの: `find_course_topic` の未知 topic None 返し /
+tension prefilter・structure_anchor worker の `_discussion` 耐性 / **reconstruction `next` の
+未知 topic → コース全体フォールバック**（改修ゼロで「あれば1問」が成立）。
+
+### 9.2 実装ファイル一覧
+
+- **Phase 0**: `services.py`（`list_visible_document_ids` / `search_chunks_with_metadata` の
+  必須キーワード引数 `allowed_document_ids`・空集合 fail-closed・`material_id` SELECT 維持）、
+  呼び出し3箇所配線（learning.py / lecture.py / core/graphs/student_graph.py=None 明示）
+- **Phase 1 backend**: `schemas.py`（`discuss_scope`）、`services.py`
+  （`list_course_source_document_ids`、lecture.py 旧ヘルパーは委譲化）、`learning.py`
+  （`DISCUSSION_TOPIC_ID/LABEL`・バイパス4点・スコープ解決と 422・無断フォールバック禁止の
+  事実文 context_block・`_get_discuss_system_prompt`（即答 + 生成プロンプト構造的必須）・
+  out_of_source_notice 維持・payload `entry_mode:'discuss'`）、
+  `core/llm_usage/schema.py`（`learning:chat_discuss` 登録）
+- **Phase 1 frontend**: `app.js`（二枚看板 = サイドバー等重ブロック・`enterDiscussMode` =
+  `selectTopic("_discussion")` 流用・スコープトグル・モードバー「論文と議論中」・
+  「もっと自由に話す」リンク）、index.html、styles.css（`.discuss-*`）
+- **Phase 2 backend**: `backend/core/discuss/opening.py`（FastAPI 非 import・非LLM・
+  純粋投影と DB 読み分離・数値キー再帰除去）、`learning.py` に
+  `GET /api/learning/courses/{course_id}/discuss/opening`
+- **Phase 2 frontend**: `discuss.js`（`window.Discuss`: renderOpening / maybeShowLanding /
+  notifyActivity / renderBranchChips / reset。着地トリガー = 明示終了・トピック切替・
+  無活動15分、10分抑制 + 往復0ガード）、app.js への7フック（全て追加のみ）
+- **テスト**: `test_search_visibility.py` / `test_discuss_mode.py` / `test_discuss_opening.py` /
+  `test_discuss_ui_static.py` / `test_discuss_phase2_ui_static.py` / `test_discuss_guardrails.py`
+  （§6.5 対応表は同ファイル docstring）
+- **ドキュメント**: CLAUDE.md「『論文と話す』ディスカッションモード」節、
+  `.claude/skills/episteme-graph-dev/SKILL.md`（learning.py 行 + `core/discuss/` 行）
+
+### 9.3 残作業
+
+- docker compose での実機 E2E（開幕画面の実データ表示・着地モーダル・スコープ切替の目視）
+- §7 の観察ポイント（U層 `learning:chat_discuss` の実測 → 専用上限の要否判断 — 裁定 #9）
+- Phase 3（v2）: 専用設計文書を切ってから（migration 060〜）

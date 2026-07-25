@@ -35,13 +35,17 @@ class TestCasualModeRouting:
         assert "_get_casual_teacher_system_prompt" in source
 
     def test_casual_bypasses_intent_classification(self):
-        """CHIT_CHAT 拒否ルートを通らない（雑談を弾かない）。"""
+        """CHIT_CHAT 拒否ルートを通らない（雑談を弾かない）。
+
+        discuss モード追加（discuss モード設計書 §6.2）で `_is_discuss` が同じ条件式に
+        併記されたが、casual のバイパス自体は不変。
+        """
         source = _read(LEARNING)
-        assert "None if (_is_casual or _atlas_ctx) else (" in source
+        assert "None if (_is_casual or _is_discuss or _atlas_ctx) else (" in source
 
     def test_casual_bypasses_prerequisite_gate(self):
         source = _read(LEARNING)
-        assert "None if (_is_casual or _atlas_ctx) else check_prerequisites(" in source
+        assert "None if (_is_casual or _is_discuss or _atlas_ctx) else check_prerequisites(" in source
 
     def test_casual_skips_visible_notice_but_keeps_guard(self):
         """OutOfSourceGuard の system 注入は維持し、可視プレフィックスのみ省略する。"""
@@ -61,8 +65,10 @@ class TestCasualModeRouting:
         assert '"casual": _is_casual' in source
 
     def test_casual_does_not_enter_detour(self):
+        """discuss モード追加（設計 §6.2）でタプルに "discuss" が併記されたが、casual 自体の
+        detour 非化は不変。"""
         source = _read(LEARNING)
-        assert 'in ("on_path", "casual")' in source
+        assert 'in ("on_path", "casual", "discuss")' in source
 
     def test_casual_prompt_is_voice_friendly(self):
         source = _read(LEARNING)

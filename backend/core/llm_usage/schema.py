@@ -56,6 +56,7 @@ KNOWN_FEATURES = (
     # --- 学習（core/chat.py・音声） ---
     "learning:chat",
     "learning:chat_casual",
+    "learning:chat_discuss",
     "learning:voice_stt",
     "learning:voice_tts",
     "learning:tension",

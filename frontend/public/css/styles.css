@@ -8238,3 +8238,439 @@ body {
   color: var(--color-text-primary);
   resize: vertical;
 }
+
+/* ============================================================
+   discuss モード（論文と話す）Phase 1 — app.js 追加分
+   （docs/features/discussion_mode_design.md §3.2/3.4/3.6）
+   ・サイドバー二枚看板（順番に学ぶ / この論文と議論する）
+   ・入力欄上部のスコープ切替 ＋「もっと自由に話す」常設リンク
+   ・モードバー discuss 色・教材区画プレースホルダ
+   「寄り道」語彙は使わない（DM5）。数値・件数・網羅率は出さない（DM6）。
+   ============================================================ */
+
+/* サイドバー最上部の二枚看板。等重ブロック — 既定選択なし（DM5: コースと対等併記）。 */
+.discuss-mode-switch {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.discuss-mode-btn {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 6px;
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.35;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  text-align: center;
+}
+.discuss-mode-btn.active {
+  border-color: var(--color-border-primary);
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+/* モードバー: discuss 中は中立色（本筋=青／寄り道=アンバーのどちらとも異なる配色）。 */
+.mode-bar.discuss {
+  background: #eeecf8;
+  color: #5b4b8a;
+}
+
+/* 入力欄上部: discuss スコープ切替（控えめなセグメントコントロール）。
+   選択状態が常時視認できることが出所の正直さの一部（DM1/DM2）。 */
+.discuss-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 4px;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.discuss-bar[hidden] { display: none; }
+.discuss-bar-label { white-space: nowrap; }
+.discuss-scope-toggle {
+  display: flex;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 14px;
+  overflow: hidden;
+}
+.discuss-scope-opt {
+  padding: 4px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  border: none;
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.discuss-scope-opt + .discuss-scope-opt {
+  border-left: 1px solid var(--color-border-secondary);
+}
+.discuss-scope-opt.active {
+  background: #eeecf8;
+  color: #5b4b8a;
+  font-weight: 600;
+}
+
+/* 「もっと自由に話す」常設リンク（通常トピック中のみ表示。discuss モード中は非表示）。 */
+.discuss-free-link-row { margin: 0; }
+.discuss-free-link-row[hidden] { display: none; }
+.discuss-free-link {
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 3px 2px;
+  text-decoration: underline;
+}
+.discuss-free-link:hover { color: var(--color-text-primary); }
+
+/* 教材区画: discuss モードのプレースホルダカード（Phase 2 で開幕画面に置き換わる前提）。 */
+.discuss-placeholder {
+  padding: 16px;
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-tertiary);
+}
+.discuss-placeholder-hd {
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--color-text-primary);
+}
+.discuss-placeholder-body {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+  margin: 0;
+}
+
+/* ============================================================
+   discuss モード（論文と話す）Phase 2 — discuss.js 追加分
+   （docs/features/discussion_mode_design.md §3.3/3.4/3.5）
+   ・開幕画面（この論文が賭けているもの／理論のバックボーン／最初の一手）
+   ・分岐チップ（深掘り／横展開）
+   ・着地画面（討議終了時の軽量モーダル。スキップ可・既定オン）
+   「寄り道」語彙は使わない（DM5）。数値・件数・網羅率は出さない（DM6）。
+   ============================================================ */
+
+/* ── 開幕画面（教材区画 #material-body を置き換える）───────────────── */
+.discuss-opening {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.discuss-opening-note {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.discuss-opening-doc {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 10px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.discuss-opening-doc:last-of-type { border-bottom: none; padding-bottom: 0; }
+.discuss-opening-doc-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.discuss-section {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-tertiary);
+}
+.discuss-section-hd {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--color-text-primary);
+}
+
+.discuss-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.discuss-chip {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.discuss-chip:hover { color: var(--color-text-primary); border-color: var(--color-border-primary); }
+
+.discuss-support-section {
+  margin-top: 6px;
+  font-size: 12px;
+}
+.discuss-support-section summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  margin-bottom: 6px;
+}
+
+.discuss-fragile {
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border-secondary);
+}
+.discuss-fragile-hd {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+.discuss-fragile-item {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 2px 0;
+}
+
+.discuss-backbone-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.discuss-backbone-node {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 6px 10px;
+  background: var(--color-background-primary);
+  cursor: pointer;
+  font-family: inherit;
+  text-align: left;
+  max-width: 220px;
+}
+/* review_status / source_backing_status が source_backed でないノードは
+   控えめな点線枠にする（強調色・警告色は使わない。W層の表示規約と同趣旨）。 */
+.discuss-backbone-node--review { border-style: dashed; }
+.discuss-backbone-stage {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+}
+.discuss-backbone-label {
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+}
+
+.discuss-muted {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  line-height: 1.6;
+}
+.discuss-truncated-note { margin-top: 4px; }
+.discuss-free-input-note { margin-top: 6px; }
+
+/* ── 分岐チップ（チャット区画・discuss モード限定）───────────────────── */
+.discuss-branch-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.discuss-branch-btn {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  border-radius: 14px;
+  padding: 4px 12px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.discuss-branch-btn:hover { color: var(--color-text-primary); }
+
+/* ── discuss バーの「議論を終える」ボタン（着地画面トリガー①）────────── */
+.discuss-end-btn {
+  margin-left: auto;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 3px 2px;
+}
+.discuss-end-btn:hover { color: var(--color-text-primary); }
+
+/* ── 着地画面（討議終了時の軽量モーダル）─────────────────────────────── */
+.discuss-landing-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1460;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.45);
+  padding: 24px 16px;
+}
+.discuss-landing-overlay[hidden] { display: none; }
+
+.discuss-landing-panel {
+  width: min(640px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary);
+  border-radius: 12px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+
+.discuss-landing-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.discuss-landing-title { font-size: 15px; font-weight: 600; }
+.discuss-landing-close-btn {
+  appearance: none;
+  border: none;
+  background: none;
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--color-text-secondary);
+  padding: 2px 6px;
+}
+.discuss-landing-close-btn:hover { color: var(--color-text-primary); }
+
+.discuss-landing-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 14px 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.discuss-landing-loading {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.discuss-landing-section-hd {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: var(--color-text-primary);
+}
+.discuss-landing-section-body {
+  font-size: 12.5px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin: 0 0 8px;
+}
+
+.discuss-landing-card {
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 10px;
+  margin-bottom: 8px;
+  font-size: 12.5px;
+}
+.discuss-landing-card-ctx {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
+.discuss-landing-card-quote {
+  color: var(--color-text-primary);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+.discuss-landing-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.discuss-landing-card-btn {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.discuss-landing-card-btn.secondary { opacity: 0.75; }
+.discuss-landing-card-done {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+.discuss-landing-card-input textarea {
+  width: 100%;
+  min-height: 48px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.discuss-landing-empty {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  line-height: 1.6;
+}
+
+.discuss-landing-btn {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 12.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.discuss-landing-btn:hover { border-color: var(--color-border-primary); }
+
+.discuss-landing-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 18px;
+  border-top: 0.5px solid var(--color-border-tertiary);
+}
+.discuss-landing-skip-note {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+}
+.discuss-landing-skip-btn {
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  white-space: nowrap;
+}
+.discuss-landing-skip-btn:hover { color: var(--color-text-primary); }
