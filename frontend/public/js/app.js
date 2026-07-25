@@ -2800,6 +2800,17 @@
   }
 
   // ── Send Message ───────────────────────────────────────────────────
+  // §4-3 UI内コンテキストヘルプ: 送信時点の画面モードを判定する pure 関数。
+  // 優先順は voice → lecture → chat（ハンズフリー音声会話中はレクチャー再生と
+  // 同時に active になり得ないため voice を先に判定する）。typeof ガードは
+  // voiceState/lectureState が本関数より後方（ファイル下部）で定義されるための
+  // 防御で、Session.currentAnchor (:166) と同じパターンを踏襲する。
+  function resolveScreenMode() {
+    if (typeof voiceState !== "undefined" && voiceState.active) return "voice";
+    if (typeof lectureState !== "undefined" && lectureState.active) return "lecture";
+    return "chat";
+  }
+
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return null;
     collapseMaterialForChat();  // 機能2: 送信時に教材区画を自動で畳む
@@ -2849,6 +2860,9 @@
           position_anchor: anchorAtAsk,
           ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
           ...payload,
+          // §4-3: ヘルプボタン・通常送信・音声経路すべてがこの1関数を通る
+          // （sendMessage が全送信経路の合流点のため、payload 側の値より必ず優先する）。
+          screen_mode: resolveScreenMode(),
         }),
       });
       if (res.ok) {

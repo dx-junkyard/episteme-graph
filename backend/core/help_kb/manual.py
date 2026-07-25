@@ -120,14 +120,49 @@ def excluded_sections() -> list[dict]:
     return out
 
 
-def search_manual(query: str, *, audience: str, limit: int = 3) -> list[dict]:
+def section_title_for_citation(citation: str) -> Optional[str]:
+    """``manual/<audience>/<file>#<anchor>`` 形式の引用から節タイトルを引く。
+
+    G層 To-Do の理由文など、人間向け表示で anchor パスの代わりに節名を出すための
+    読み取り専用ヘルパー。解決できなければ None（呼び出し側が anchor パスへ縮退）。
+    """
+    ref = (citation or "").strip()
+    if not ref.startswith("manual/") or "#" not in ref:
+        return None
+    rest = ref[len("manual/") :]
+    if "/" not in rest:
+        return None
+    aud, tail = rest.split("/", 1)
+    fname, anchor = tail.split("#", 1)
+    if aud not in AUDIENCES:
+        return None
+    idx, _excluded = _INDEX_BUILDERS[aud]()
+    sec = idx.get(f"{fname}#{anchor}")
+    if sec is None:
+        return None
+    title = (sec.get("title") or "").strip()
+    return title or None
+
+
+def search_manual(
+    query: str,
+    *,
+    audience: str,
+    limit: int = 3,
+    screen: Optional[str] = None,
+) -> list[dict]:
     """``audience`` から見える節のうち query に最も近いものを返す。
 
     audience は必須キーワード引数（fail-closed の強制点）。``"student"`` /
     ``"teacher"`` / ``"system_admin"`` 以外は ``ValueError``。
+
+    ``screen``（§4-3 コンテキストヘルプ）を指定すると、front-matter ``screen:``
+    が一致する節を検索ランキングの第一候補にする（語彙重なりスコアが正の節に限る。
+    詳細は ``index.score_sections`` を参照）。``screen=None`` は完全に従来挙動
+    （後方互換）。返却 dict の形（キー集合）は screen 指定の有無で変わらない。
     """
     sections = _sections_for_audience(audience)
-    scored = _index.score_sections(query, sections, limit=limit)
+    scored = _index.score_sections(query, sections, limit=limit, screen=screen)
     results: list[dict] = []
     for sec in scored:
         sec_audience = sec.get("audience", audience)

@@ -140,6 +140,53 @@ class TestIndexEngine:
         result = kb_index.score_sections("教材 アップロード", sections, limit=3)
         assert result and result[0]["title"] == "教材のアップロード"
 
+    def test_manual_transforms_captures_screen_front_matter(self, tmp_path):
+        _write(
+            tmp_path / "a.md",
+            "---\naudience: student\nscreen: lecture\n---\n## 節 {#sec}\n本文\n",
+        )
+        index, _excluded = kb_index.build_section_index(tmp_path, manual_transforms=True)
+        assert index["a.md#sec"]["screen"] == "lecture"
+
+    def test_manual_transforms_screen_defaults_to_none_when_absent(self, tmp_path):
+        _write(tmp_path / "a.md", "---\naudience: student\n---\n## 節 {#sec}\n本文\n")
+        index, _excluded = kb_index.build_section_index(tmp_path, manual_transforms=True)
+        assert index["a.md#sec"]["screen"] is None
+
+    def test_non_manual_transforms_has_no_screen_key(self, tmp_path):
+        _write(tmp_path / "a.md", "## 節 {#sec}\n本文\n")
+        index, _excluded = kb_index.build_section_index(tmp_path)
+        assert "screen" not in index["a.md#sec"]
+
+    def test_score_sections_screen_prioritizes_matching_section(self):
+        """スコアが正である限り、screen 一致節が高スコアの不一致節より優先される。"""
+        sections = [
+            {"title": "alpha", "body": "alpha bravo charlie delta", "screen": "screenA"},
+            {"title": "other", "body": "alpha bravo echo foxtrot golf", "screen": "screenB"},
+        ]
+        # screen 無指定なら title 一致ボーナスで sections[0] が先頭（従来挙動）
+        baseline = kb_index.score_sections("alpha bravo", sections, limit=2)
+        assert baseline[0]["screen"] == "screenA"
+
+        prioritized = kb_index.score_sections("alpha bravo", sections, limit=2, screen="screenB")
+        assert prioritized[0]["screen"] == "screenB"
+
+    def test_score_sections_screen_none_matches_baseline_ranking(self):
+        sections = [
+            {"title": "alpha", "body": "alpha bravo charlie delta", "screen": "screenA"},
+            {"title": "other", "body": "alpha bravo echo foxtrot golf", "screen": "screenB"},
+        ]
+        without_screen = kb_index.score_sections("alpha bravo", sections, limit=2)
+        explicit_none = kb_index.score_sections("alpha bravo", sections, limit=2, screen=None)
+        assert without_screen == explicit_none
+
+    def test_score_sections_zero_score_section_not_surfaced_by_screen_alone(self):
+        sections = [
+            {"title": "unrelated", "body": "zzz yyy xxx", "screen": "target"},
+        ]
+        result = kb_index.score_sections("totally different words", sections, limit=3, screen="target")
+        assert result == []
+
 
 # ===========================================================================
 # Group B: manual.py（docs/manual audience 別索引）
@@ -257,6 +304,51 @@ class TestManualIndex:
         kb_manual.clear_manual_cache()
         fresh = kb_manual.search_manual("delta echo foxtrot", audience="student", limit=1)
         assert fresh and "delta echo foxtrot" in fresh[0]["body"]
+
+    def _setup_screen_tree(self, tmp_path, monkeypatch):
+        root = tmp_path / "docs" / "manual"
+        _write(
+            root / "student" / "a.md",
+            "---\naudience: student\nscreen: lecture\n---\n## alpha topic {#alpha}\nalpha bravo charlie delta\n",
+        )
+        _write(
+            root / "student" / "b.md",
+            "---\naudience: student\nscreen: chat\n---\n## other topic {#other}\nalpha bravo echo foxtrot\n",
+        )
+        monkeypatch.setattr(kb_manual, "manual_root", lambda: root)
+        return root
+
+    def test_search_manual_screen_none_keeps_previous_ranking(self, tmp_path, monkeypatch):
+        self._setup_screen_tree(tmp_path, monkeypatch)
+        res = kb_manual.search_manual("alpha bravo", audience="student", limit=5)
+        assert res[0]["anchor"] == "alpha"
+
+    def test_search_manual_screen_match_is_prioritized(self, tmp_path, monkeypatch):
+        self._setup_screen_tree(tmp_path, monkeypatch)
+        res = kb_manual.search_manual("alpha bravo", audience="student", limit=5, screen="chat")
+        assert res[0]["anchor"] == "other"
+
+    def test_search_manual_screen_does_not_surface_zero_score_section(self, tmp_path, monkeypatch):
+        root = self._setup_screen_tree(tmp_path, monkeypatch)
+        _write(
+            root / "student" / "c.md",
+            "---\naudience: student\nscreen: chat\n---\n## unrelated topic {#zzz}\nzzz yyy xxx\n",
+        )
+        kb_manual.clear_manual_cache()
+        res = kb_manual.search_manual("alpha bravo", audience="student", limit=5, screen="chat")
+        anchors = {r["anchor"] for r in res}
+        assert "zzz" not in anchors
+
+    def test_search_manual_screen_does_not_grow_result_keys(self, tmp_path, monkeypatch):
+        self._setup_screen_tree(tmp_path, monkeypatch)
+        expected_keys = {"file", "anchor", "title", "body", "audience", "citation", "documented"}
+        res_no_screen = kb_manual.search_manual("alpha bravo", audience="student", limit=5)
+        res_with_screen = kb_manual.search_manual("alpha bravo", audience="student", limit=5, screen="chat")
+        for item in res_no_screen + res_with_screen:
+            assert set(item.keys()) == expected_keys
+            assert "score" not in item
+            assert "confidence" not in item
+            assert "screen" not in item
 
     def test_student_index_builder_source_has_no_other_audience_literal(self):
         """学生索引ビルダーはコード構造として student/ 以外を参照しない。"""

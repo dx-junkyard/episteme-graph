@@ -15,6 +15,7 @@ from .manual import (
     excluded_sections,
     manual_available,
     search_manual,
+    section_title_for_citation,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "excluded_sections",
     "manual_available",
     "search_manual",
+    "section_title_for_citation",
 ]

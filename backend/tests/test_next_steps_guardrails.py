@@ -29,6 +29,7 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from core import help_kb  # noqa: E402
 from core.admin_assistant import capabilities as caps  # noqa: E402
 from core.admin_assistant import next_steps as next_steps_mod  # noqa: E402
 from core.admin_assistant.schema import ROLE_TEACHER  # noqa: E402
@@ -55,12 +56,31 @@ class TestRuleCatalog:
             cap = caps.get_capability(rule["capability_id"])
             assert cap is not None, f"{rule_id} が参照する capability {rule['capability_id']} が未登録"
 
+    # manual_help_kb_design.md §4-1 の供給側計器2ルールは意図的に SYSTEM_ADMIN 専用
+    # （capability registry / 操作KB という運用基盤そのものの計器のため）。それ以外の
+    # ルールは従来どおり TEACHER が満たせる required_role であることを検証する。
+    _SYSTEM_ADMIN_ONLY_RULES = (
+        next_steps_mod.RULE_ASSISTANT_KB_UNDOCUMENTED,
+        next_steps_mod.RULE_MANUAL_TODO_UNRESOLVED,
+    )
+
     def test_all_rule_capabilities_reachable_by_teacher(self):
-        """TEACHER 以下（= TEACHER が満たせる）required_role であること。"""
+        """TEACHER 以下（= TEACHER が満たせる）required_role であること
+        （意図的な SYSTEM_ADMIN 専用ルールを除く）。"""
         for rule_id, rule in next_steps_mod.RULE_CATALOG.items():
+            if rule_id in self._SYSTEM_ADMIN_ONLY_RULES:
+                continue
             assert caps.can_access(rule["capability_id"], ROLE_TEACHER), (
                 f"{rule_id} の capability {rule['capability_id']} は TEACHER からアクセスできない"
             )
+
+    def test_system_admin_only_rules_still_require_at_least_system_admin(self):
+        """意図的な除外リストが、うっかり STUDENT まで開いてしまう抜け穴になっていないこと。"""
+        for rule_id in self._SYSTEM_ADMIN_ONLY_RULES:
+            rule = next_steps_mod.RULE_CATALOG[rule_id]
+            assert caps.can_access(rule["capability_id"], "SYSTEM_ADMIN") is True
+            assert caps.can_access(rule["capability_id"], ROLE_TEACHER) is False
+            assert caps.can_access(rule["capability_id"], "STUDENT") is False
 
     def test_all_severities_are_known(self):
         for rule_id, rule in next_steps_mod.RULE_CATALOG.items():
@@ -600,6 +620,242 @@ class TestCourseAtlasBindingStaleRule:
         ])
         next_steps_mod._eval_course_atlas_binding_stale(session, "u1")
         assert calls == ["dom"]
+
+
+# ===========================================================================
+# Group A-8: help_kb G層ルール3本（manual_help_kb_design.md §4-1）
+# ===========================================================================
+
+
+class TestHelpKbRulesRegistered:
+    """需要側/供給側の両面計器3ルールが RULE_CATALOG + capability registry に
+    正しく配線され、G3 fail-closed（ロール階層）を満たすこと。"""
+
+    def test_three_rules_present_with_expected_severity_and_capability(self):
+        expected = {
+            next_steps_mod.RULE_MANUAL_HELP_GAPS_PENDING: (
+                next_steps_mod.SEVERITY_RECOMMENDED, "manual_help.view_gaps",
+            ),
+            next_steps_mod.RULE_ASSISTANT_KB_UNDOCUMENTED: (
+                next_steps_mod.SEVERITY_OPTIONAL, "assistant_kb.view_undocumented",
+            ),
+            next_steps_mod.RULE_MANUAL_TODO_UNRESOLVED: (
+                next_steps_mod.SEVERITY_OPTIONAL, "manual_kb.view_todos",
+            ),
+        }
+        for rule_id, (severity, capability_id) in expected.items():
+            rule = next_steps_mod.RULE_CATALOG[rule_id]
+            assert rule["severity"] == severity
+            assert rule["capability_id"] == capability_id
+            cap = caps.get_capability(capability_id)
+            assert cap is not None, f"{capability_id} が未登録"
+            assert cap.kind == "guidance_only"
+
+    def test_help_gaps_pending_capability_is_teacher_reachable(self):
+        cap = caps.get_capability("manual_help.view_gaps")
+        assert cap.required_role == "TEACHER"
+        assert caps.can_access("manual_help.view_gaps", "TEACHER") is True
+        assert caps.can_access("manual_help.view_gaps", "STUDENT") is False
+
+    def test_supply_side_capabilities_are_system_admin_only(self):
+        """G3 fail-closed: 供給側2ルールは SYSTEM_ADMIN のみ到達可能（TEACHER 不可）。"""
+        for capability_id in ("assistant_kb.view_undocumented", "manual_kb.view_todos"):
+            cap = caps.get_capability(capability_id)
+            assert cap.required_role == "SYSTEM_ADMIN"
+            assert caps.can_access(capability_id, "SYSTEM_ADMIN") is True
+            assert caps.can_access(capability_id, "TEACHER") is False
+            assert caps.can_access(capability_id, "STUDENT") is False
+
+    def test_system_admin_rules_not_evaluated_for_teacher_role(self):
+        """compute_next_steps の active_rules フィルタで、TEACHER には供給側2ルールの
+        評価関数自体が呼ばれない（G3: 評価すらしない）ことを、DB 例外の有無で確認する。
+
+        session=None を渡し、もし誤って評価されればどのルールも session.execute で
+        即座に AttributeError になる。TEACHER には required の materials.none 等は
+        評価されるため、DB 到達不能な None セッションでは例外送出そのものが
+        「評価された」ことの証拠になる — ここでは代わりに active_rules を直接検証する。
+        """
+        role = "TEACHER"
+        active_rule_ids = {
+            rule_id for rule_id, rule in next_steps_mod.RULE_CATALOG.items()
+            if caps.can_access(rule["capability_id"], role)
+        }
+        assert next_steps_mod.RULE_ASSISTANT_KB_UNDOCUMENTED not in active_rule_ids
+        assert next_steps_mod.RULE_MANUAL_TODO_UNRESOLVED not in active_rule_ids
+        assert next_steps_mod.RULE_MANUAL_HELP_GAPS_PENDING in active_rule_ids
+
+        admin_active_rule_ids = {
+            rule_id for rule_id, rule in next_steps_mod.RULE_CATALOG.items()
+            if caps.can_access(rule["capability_id"], "SYSTEM_ADMIN")
+        }
+        assert next_steps_mod.RULE_ASSISTANT_KB_UNDOCUMENTED in admin_active_rule_ids
+        assert next_steps_mod.RULE_MANUAL_TODO_UNRESOLVED in admin_active_rule_ids
+
+    def test_new_rules_have_registered_evaluators(self):
+        for rule_id in (
+            next_steps_mod.RULE_MANUAL_HELP_GAPS_PENDING,
+            next_steps_mod.RULE_ASSISTANT_KB_UNDOCUMENTED,
+            next_steps_mod.RULE_MANUAL_TODO_UNRESOLVED,
+        ):
+            assert rule_id in next_steps_mod._RULE_EVALUATORS
+
+
+class TestHelpGapsPendingUsesPrivacyModule:
+    """k=3 をリテラル再定義しない（core/privacy.py 正本を使う）。"""
+
+    def test_next_steps_imports_privacy_module(self):
+        assert "from core import privacy" in _NEXT_STEPS_SRC
+
+    def test_evaluator_source_calls_privacy_helpers_not_literal_k(self):
+        src = extract_function_source(_NEXT_STEPS_SRC, "_eval_manual_help_gaps_pending")
+        assert "privacy.meets_k_anonymity" in src
+        assert "privacy.bucket_count_range" in src
+        # K_ANONYMITY をリテラルの 3 として再定義していないこと（正本は core/privacy.py のみ）
+        assert "K_ANONYMITY = 3" not in _NEXT_STEPS_SRC
+        assert "K_ANONYMITY=3" not in _NEXT_STEPS_SRC
+
+    def test_query_excludes_superseded_traces(self):
+        """機能3（メッセージ書き直し/削除）で superseded になった痕跡を集計に含めない。"""
+        src = extract_function_source(_NEXT_STEPS_SRC, "_eval_manual_help_gaps_pending")
+        assert "status <> 'superseded'" in src
+
+    def test_query_does_not_select_verbatim_question_text(self):
+        """P3: 質問逐語・ユーザー特定情報を集計クエリで読まない（payload->>'text' 不使用）。"""
+        src = extract_function_source(_NEXT_STEPS_SRC, "_eval_manual_help_gaps_pending")
+        assert "payload->>'text'" not in src
+        assert "user_id" not in src
+
+
+class TestManualHelpGapsPendingEvaluator:
+    def test_bucket_below_k_anonymity_is_not_shown(self):
+        session = _FakeSession([
+            {"bucket_key": "manual/student/02-student.md#voice-mode", "cnt": 2,
+             "last_seen": "2026-07-20T00:00:00+00:00"},
+        ])
+        out = next_steps_mod._eval_manual_help_gaps_pending(session, "u1")
+        assert out == []
+
+    def test_bucket_at_k_anonymity_is_shown_with_range_and_no_verbatim(self):
+        session = _FakeSession([
+            {"bucket_key": "manual/student/02-student.md#voice-mode", "cnt": 3,
+             "last_seen": "2026-07-20T00:00:00+00:00"},
+        ])
+        out = next_steps_mod._eval_manual_help_gaps_pending(session, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_MANUAL_HELP_GAPS_PENDING
+        assert step.severity == next_steps_mod.SEVERITY_RECOMMENDED
+        assert step.step_key == "manual.help_gaps_pending:manual/student/02-student.md#voice-mode"
+        # 表示ラベルは節タイトル優先（索引から解決できないときのみ anchor パスへ縮退）。
+        # 引用の正本は target.anchor に保持される。
+        label = help_kb.section_title_for_citation(
+            "manual/student/02-student.md#voice-mode"
+        ) or "student/02-student.md#voice-mode"
+        assert f"『{label}』" in step.reason
+        assert step.target == {"anchor": "manual/student/02-student.md#voice-mode"}
+        assert "3-5" in step.reason
+        assert "未整備" in step.reason
+
+    def test_higher_count_buckets_into_wider_range(self):
+        session = _FakeSession([
+            {"bucket_key": "manual/student/02-student.md#voice-mode", "cnt": 12,
+             "last_seen": "t"},
+        ])
+        out = next_steps_mod._eval_manual_help_gaps_pending(session, "u1")
+        assert len(out) == 1
+        assert "11+" in out[0][0].reason
+
+    def test_no_hit_bucket_uses_dedicated_key_and_wording(self):
+        session = _FakeSession([
+            {"bucket_key": "no_hit", "cnt": 5, "last_seen": "t"},
+        ])
+        out = next_steps_mod._eval_manual_help_gaps_pending(session, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.step_key == "manual.help_gaps_pending:no_hit"
+        assert "一致する説明が見つからない" in step.reason
+        assert step.target == {"anchor": None}
+
+    def test_no_rows_returns_empty(self):
+        out = next_steps_mod._eval_manual_help_gaps_pending(_FakeSession([]), "u1")
+        assert out == []
+
+
+class TestAssistantKbUndocumentedEvaluator:
+    def test_no_undocumented_capabilities_returns_empty(self, monkeypatch):
+        class _Cap:
+            def __init__(self, title, howto_doc):
+                self.title = title
+                self.howto_doc = howto_doc
+
+        monkeypatch.setattr(
+            next_steps_mod.caps, "all_capabilities",
+            lambda: [_Cap("A", "materials.md#a"), _Cap("B", "materials.md#b")],
+        )
+        monkeypatch.setattr(
+            next_steps_mod.admin_kb, "section_for_howto",
+            lambda howto: {"body": "説明あり"},
+        )
+        out = next_steps_mod._eval_assistant_kb_undocumented(None, "u1")
+        assert out == []
+
+    def test_missing_or_empty_kb_section_is_flagged(self, monkeypatch):
+        class _Cap:
+            def __init__(self, cap_id, title, howto_doc):
+                self.id = cap_id
+                self.title = title
+                self.howto_doc = howto_doc
+
+        caps_list = [
+            _Cap("a.one", "機能A", "materials.md#a"),   # documented
+            _Cap("b.two", "機能B", "materials.md#b"),   # section missing
+            _Cap("c.three", "機能C", ""),                 # no howto_doc at all
+        ]
+        monkeypatch.setattr(next_steps_mod.caps, "all_capabilities", lambda: caps_list)
+
+        def _section_for_howto(howto):
+            if howto == "materials.md#a":
+                return {"body": "説明あり"}
+            if howto == "materials.md#b":
+                return {"body": ""}  # 空節 = 未整備
+            return None
+
+        monkeypatch.setattr(next_steps_mod.admin_kb, "section_for_howto", _section_for_howto)
+        out = next_steps_mod._eval_assistant_kb_undocumented(None, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_ASSISTANT_KB_UNDOCUMENTED
+        assert step.severity == next_steps_mod.SEVERITY_OPTIONAL
+        assert step.step_key == "assistant_kb.undocumented:global"
+        assert "2 件" in step.reason
+        assert "機能B" in step.reason
+        assert "機能C" in step.reason
+        # 数値スコア(confidence 等)や督促語彙を出さない事実文であること
+        assert "confidence" not in step.reason
+
+
+class TestManualTodoUnresolvedEvaluator:
+    def test_no_excluded_sections_returns_empty(self, monkeypatch):
+        monkeypatch.setattr(next_steps_mod.help_manual, "excluded_sections", lambda: [])
+        out = next_steps_mod._eval_manual_todo_unresolved(None, "u1")
+        assert out == []
+
+    def test_excluded_sections_present_produces_step(self, monkeypatch):
+        monkeypatch.setattr(
+            next_steps_mod.help_manual, "excluded_sections",
+            lambda: [
+                {"file": "02-student.md", "anchor": "todo-one", "title": "T1"},
+                {"file": "03-teacher.md", "anchor": "todo-two", "title": "T2"},
+            ],
+        )
+        out = next_steps_mod._eval_manual_todo_unresolved(None, "u1")
+        assert len(out) == 1
+        step, _sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_MANUAL_TODO_UNRESOLVED
+        assert step.severity == next_steps_mod.SEVERITY_OPTIONAL
+        assert step.step_key == "manual.todo_unresolved:global"
+        assert "2 件" in step.reason
+        assert "TODO" in step.reason
 
 
 class TestNoAtlasBindingPendingSuppression:

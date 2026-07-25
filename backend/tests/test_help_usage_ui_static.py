@@ -14,6 +14,11 @@
 3. §1-3-7 音声フェイルソフト: ハンズフリーモードで `manual_citations` が
    非空のときは教材パネル表示（`/source-chunk/` フェッチ）をスキップする。
 4. 追加コードにポーリング（`setInterval`）を持ち込まない。
+5. §4-3 UI内コンテキストヘルプ（Phase 2）: 送信時点の画面モード
+   (`screen_mode: "voice"|"lecture"|"chat"`) を判定する pure 関数が存在し、
+   ヘルプボタン・通常送信・音声経路すべてが合流する `sendMessage` の
+   送信ペイロード構築に組み込まれている。proactive カード・滞留検知・
+   自動ポップアップ・ポーリングは作らない（G4）。
 """
 from __future__ import annotations
 
@@ -109,6 +114,58 @@ class TestVoicePanelFailSoft:
         call_idx = block.index("showVoiceSourceMaterial(data.sources || []);")
         assert guard_idx < call_idx
         assert "setInterval" not in block
+
+
+class TestScreenModeContextHelp:
+    """§4-3: 学生UIの「？」ボタン向けコンテキストヘルプ（Phase 2）。
+
+    `LearningChatRequest.screen_mode` はバックエンド側で別エージェントが並行実装中
+    のため、ここではフロント側の判定関数と送信経路への組み込みのみを検証する。
+    """
+
+    def test_resolve_screen_mode_function_exists(self):
+        src = _read(APP_JS)
+        assert "function resolveScreenMode()" in src
+        start = src.index("function resolveScreenMode()")
+        end = src.index("\n  }", start)
+        block = src[start:end]
+        assert '"voice"' in block
+        assert '"lecture"' in block
+        assert '"chat"' in block
+        assert "voiceState.active" in block
+        assert "lectureState.active" in block
+
+    def test_resolve_screen_mode_priority_is_voice_then_lecture_then_chat(self):
+        """優先順は voice → lecture → chat（voiceState.active の判定が
+        lectureState.active の判定より先に現れる）。"""
+        src = _read(APP_JS)
+        start = src.index("function resolveScreenMode()")
+        end = src.index("\n  }", start)
+        block = src[start:end]
+        voice_idx = block.index("voiceState.active")
+        lecture_idx = block.index("lectureState.active")
+        assert voice_idx < lecture_idx
+
+    def test_send_message_payload_includes_screen_mode(self):
+        """全送信経路の合流点である sendMessage の API 送信ペイロードに
+        screen_mode が含まれる（ヘルプボタン・通常送信・音声経路のいずれも
+        sendMessage を経由するため、ここ1箇所への組み込みで全経路をカバーする）。"""
+        src = _read(APP_JS)
+        start = src.index("async function sendMessage(text, actionPayload) {")
+        end = src.index("\n  }", start)
+        block = src[start:end]
+        assert "screen_mode: resolveScreenMode()" in block
+
+    def test_no_proactive_help_polling_or_auto_popup(self):
+        """proactive カード・滞留検知・自動ポップアップ・ポーリングは作らない（G4）。
+        既存の❓使い方ボタンは押下時のみ送信する（挙動を変えない）。"""
+        src = _read(APP_JS)
+        start = src.index("function resolveScreenMode()")
+        end = src.index('const helpUsageBtn = document.getElementById("help-usage-btn");')
+        block = src[start:end]
+        assert "setInterval" not in block
+        # ❓ボタンは既存どおり click ハンドラ内でのみ送信する。
+        assert 'helpUsageBtn.addEventListener("click", function () {' in src
 
 
 class TestStylesCss:

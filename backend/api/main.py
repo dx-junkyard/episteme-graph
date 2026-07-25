@@ -70,6 +70,7 @@ from routes.theory_components import router as _theory_components_router
 from routes.cartridges import router as _cartridges_router
 from routes.revisions import router as _revisions_router
 from routes.admin_assistant import admin_router as _admin_assistant_router
+from routes.admin_assistant import help_kb_router as _help_kb_router
 from routes.versioning import router as _versioning_router
 from routes.status import router as _status_router
 from routes.notifications import router as _notifications_router
@@ -256,6 +257,9 @@ app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")
 app.include_router(_deliberation_router, prefix="/api/admin")
+# 利用者マニュアル KB（help_kb, Phase 2 §2-2）の手動更新トリガー。
+# admin_router（/assistant 配下）とは別ルーター（最終パス /api/admin/help-kb/refresh）。
+app.include_router(_help_kb_router, prefix="/api/admin")
 
 
 @app.get("/healthz")

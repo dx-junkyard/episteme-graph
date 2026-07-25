@@ -29,13 +29,16 @@ from typing import Any, Optional
 from sqlalchemy import text as sa_text
 
 from core import atlas_store
+from core import privacy
 from core.admin_assistant import capabilities as caps
+from core.admin_assistant import knowledge as admin_kb
 from core.course_data import course_atlas_binding_facts
 from core.course_data import (
     course_atlas_binding_pending,
     course_cartridge_id,
     iter_all_topics,
 )
+from core.help_kb import manual as help_manual
 from core.status import projector as status_projector
 from core.status import schema as status_schema
 
@@ -57,6 +60,12 @@ RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
 # `material.inventory_unvisited` は「見たかどうか」の押し付けになるため意図的に
 # 実装しない（vision_ux_gap_survey_2026-07-17.md §5-5 の見送り推奨, G4）。
 RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
+
+# 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側 + 供給側の
+# 両面計器。改善ループを閉じるための3ルール（2026-07-25 追加）。
+RULE_MANUAL_HELP_GAPS_PENDING = "manual.help_gaps_pending"     # 需要側: help_usage 無ヒット/未整備の k-匿名集計
+RULE_ASSISTANT_KB_UNDOCUMENTED = "assistant_kb.undocumented"   # 供給側: capability の操作KB未整備
+RULE_MANUAL_TODO_UNRESOLVED = "manual.todo_unresolved"         # TODO 可視化: 索引除外チャンク
 
 SEVERITY_REQUIRED = "required"
 SEVERITY_RECOMMENDED = "recommended"
@@ -103,7 +112,24 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.review_figures",  # 道案内のみ（図モーダルへ, #496）
     },
+    # manual_help_kb_design.md §4-1: 需要側 + 供給側の両面計器。
+    RULE_MANUAL_HELP_GAPS_PENDING: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "manual_help.view_gaps",
+    },
+    RULE_ASSISTANT_KB_UNDOCUMENTED: {
+        "severity": SEVERITY_OPTIONAL,
+        "capability_id": "assistant_kb.view_undocumented",
+    },
+    RULE_MANUAL_TODO_UNRESOLVED: {
+        "severity": SEVERITY_OPTIONAL,
+        "capability_id": "manual_kb.view_todos",
+    },
 }
+
+# manual.help_gaps_pending: help_anchor が空（無ヒット）行の集計バケツキー。
+# 実データの help_anchor は常に "manual/<audience>/<file>#<anchor>" 形式であり衝突しない。
+_HELP_GAP_NO_HIT_BUCKET = "no_hit"
 
 MAX_STEPS = 10
 
@@ -542,6 +568,122 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
     return out
 
 
+def _eval_manual_help_gaps_pending(session, uid: str) -> list[tuple[NextStep, str]]:
+    """需要側計器（manual_help_kb_design.md §4-1）: 学生 HELP ルートの
+
+    「無ヒット（payload.no_hit）」または「未整備節ヒット（payload.documented=false）」を
+    anchor 単位（無ヒットは専用バケツ `_HELP_GAP_NO_HIT_BUCKET`）で集計し、k-匿名
+    （`core/privacy.py` 正本、リテラル再定義しない）を満たすセルのみ点灯する。
+    質問逐語・ユーザー特定情報は集計に使わない（P3。SQL は count のみ読む）。
+    書き直し/削除で `status='superseded'` になった痕跡は除外する（機能3 と同型）。
+    このルールは特定教員の所有物に紐づかない全体計器のため `uid` は使わない
+    （他ルールと同一の評価関数シグネチャに揃えるための引数）。
+    """
+    del uid
+    rows = session.execute(
+        sa_text("""
+            SELECT COALESCE(NULLIF(payload->>'help_anchor', ''), :no_hit_bucket) AS bucket_key,
+                   count(*) AS cnt,
+                   max(created_at) AS last_seen
+            FROM interest_traces
+            WHERE kind = 'help_usage'
+              AND status <> 'superseded'
+              AND (
+                    COALESCE((payload->>'no_hit')::boolean, false) = true
+                    OR COALESCE((payload->>'documented')::boolean, true) = false
+              )
+            GROUP BY bucket_key
+        """),
+        {"no_hit_bucket": _HELP_GAP_NO_HIT_BUCKET},
+    ).mappings().fetchall()
+    out: list[tuple[NextStep, str]] = []
+    for row in rows:
+        count = int(row["cnt"] or 0)
+        if not privacy.meets_k_anonymity(count):
+            continue
+        bucket_key = row["bucket_key"]
+        count_range = privacy.bucket_count_range(count)
+        if bucket_key == _HELP_GAP_NO_HIT_BUCKET:
+            title = "使い方に関する質問（該当節なし）を確認する"
+            reason = (
+                "受講者からの使い方に関する質問で、マニュアルに一致する説明が見つからない"
+                f"ケースが複数（{count_range}件）あります。"
+            )
+            target = {"anchor": None}
+        else:
+            # 表示は人間可読な節タイトルを優先し、索引から引けないときだけ
+            # anchor パスへ縮退する（引用の正本は target.anchor に保持）。
+            label = help_manual.section_title_for_citation(bucket_key) or (
+                bucket_key[len("manual/"):] if bucket_key.startswith("manual/") else bucket_key
+            )
+            title = f"受講者マニュアルの『{label}』節を確認する"
+            reason = (
+                f"受講者マニュアルの『{label}』節への質問が複数（{count_range}件）ありますが、"
+                "説明が未整備です。"
+            )
+            target = {"anchor": bucket_key}
+        step = _make_step(
+            rule_id=RULE_MANUAL_HELP_GAPS_PENDING,
+            target_id=bucket_key,
+            title=title,
+            reason=reason,
+            target=target,
+        )
+        out.append((step, _iso(row["last_seen"])))
+    return out
+
+
+def _eval_assistant_kb_undocumented(session, uid: str) -> list[tuple[NextStep, str]]:
+    """供給側計器（manual_help_kb_design.md §4-1）: capability registry のうち
+
+    操作KB（`docs/admin_operations/*.md`）に対応節が無い・空の（= `documented=False`,
+    admin_assistant/knowledge.py の判定と同一基準）ものを1件に集約して To-Do 化する。
+    DB を読まない（capability registry + KB 索引のみの純投影）。
+    """
+    del session, uid
+    undocumented_titles: list[str] = []
+    for cap in caps.all_capabilities():
+        section = admin_kb.section_for_howto(cap.howto_doc) if cap.howto_doc else None
+        documented = bool(section) and bool(section.get("body"))
+        if not documented:
+            undocumented_titles.append(cap.title)
+    count = len(undocumented_titles)
+    if count == 0:
+        return []
+    sample = "、".join(undocumented_titles[:3])
+    reason = f"操作ナレッジベースに説明が整備されていない機能が {count} 件あります（例: {sample}）。"
+    step = _make_step(
+        rule_id=RULE_ASSISTANT_KB_UNDOCUMENTED,
+        target_id="global",
+        title="操作ナレッジベースの未整備箇所を確認する",
+        reason=reason,
+        target={},
+    )
+    return [(step, "")]
+
+
+def _eval_manual_todo_unresolved(session, uid: str) -> list[tuple[NextStep, str]]:
+    """TODO 可視化（manual_help_kb_design.md §4-1）: TODO 注記のため索引から
+
+    除外されている docs/manual の節が1件以上あれば点灯する。TODO を解消すれば
+    次回導出（起動時索引再構築後）で対象から自動で外れる（G1: 完了フラグを持たない）。
+    """
+    del session, uid
+    excluded = help_manual.excluded_sections()
+    count = len(excluded)
+    if count == 0:
+        return []
+    reason = f"マニュアルの TODO 注記が残っているため索引から除外されている節が {count} 件あります。"
+    step = _make_step(
+        rule_id=RULE_MANUAL_TODO_UNRESOLVED,
+        target_id="global",
+        title="マニュアルの TODO を解消する",
+        reason=reason,
+        target={},
+    )
+    return [(step, "")]
+
+
 _RULE_EVALUATORS = {
     RULE_MATERIALS_NONE: _eval_materials_none,
     RULE_MATERIAL_ANALYSIS_FAILED: _eval_material_analysis_failed,
@@ -552,6 +694,9 @@ _RULE_EVALUATORS = {
     RULE_COURSE_ATLAS_BINDING_STALE: _eval_course_atlas_binding_stale,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
+    RULE_MANUAL_HELP_GAPS_PENDING: _eval_manual_help_gaps_pending,
+    RULE_ASSISTANT_KB_UNDOCUMENTED: _eval_assistant_kb_undocumented,
+    RULE_MANUAL_TODO_UNRESOLVED: _eval_manual_todo_unresolved,
 }
 
 

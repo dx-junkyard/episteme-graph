@@ -171,3 +171,84 @@ class TestNoConfidenceLeak:
         resp = route_mod._guidance_response("教材のアップロード方法を教えて", "TEACHER", cap)
         for c in resp.citations:
             assert set(c.keys()) == {"doc"}
+
+
+class TestScreenHintPropagation:
+    """§4-3: Copilot の現在タブ（screen_context.tab）を manual 検索のヒントに渡す。
+
+    front-matter ``screen:`` 一致節を優先する ``search_manual(..., screen=...)`` へ
+    そのまま伝播させるだけで、フロント側の変更は不要（screen_context は既に
+    collectScreenContext() が送っている）。
+    """
+
+    def test_screen_hint_propagates_to_search_manual(self, monkeypatch):
+        captured = {}
+
+        def _capture(message, *, audience, limit=3, screen=None):
+            captured["screen"] = screen
+            return []
+
+        monkeypatch.setattr(route_mod, "_search_manual", _capture)
+        route_mod._manual_hits("原稿の書き換え方法", "TEACHER", "lecture-studio")
+        assert captured["screen"] == "lecture-studio"
+
+    def test_no_screen_hint_keeps_existing_call_shape(self, monkeypatch):
+        """screen 未指定時は screen kwarg 自体を渡さない（旧シグネチャとの後方互換）。"""
+        captured = {}
+
+        def _capture(message, *, audience, limit=3):
+            captured["called"] = True
+            captured["audience"] = audience
+            return []
+
+        monkeypatch.setattr(route_mod, "_search_manual", _capture)
+        route_mod._manual_hits("原稿の書き換え方法", "TEACHER")
+        assert captured["called"] is True
+        assert captured["audience"] == "teacher"
+
+    def test_empty_screen_string_is_treated_as_no_hint(self, monkeypatch):
+        captured = {}
+
+        def _capture(message, *, audience, limit=3):
+            captured["called"] = True
+            return []
+
+        monkeypatch.setattr(route_mod, "_search_manual", _capture)
+        route_mod._manual_hits("原稿の書き換え方法", "TEACHER", "")
+        assert captured["called"] is True
+
+    def test_guidance_response_extracts_tab_from_screen_context(self, monkeypatch):
+        """_guidance_response が screen_context["tab"] を screen ヒントとして使う。"""
+        cap = caps.get_capability("materials.upload")
+        monkeypatch.setattr(route_mod.kb, "section_for_howto", lambda howto: None)
+        monkeypatch.setattr(route_mod.kb, "search", lambda *a, **kw: [])
+
+        captured = {}
+
+        def _capture(message, role, screen=None):
+            captured["screen"] = screen
+            return []
+
+        monkeypatch.setattr(route_mod, "_manual_hits", _capture)
+
+        route_mod._guidance_response(
+            "教材のアップロード方法を教えて", "TEACHER", cap,
+            {"tab": "materials", "selection": {}},
+        )
+        assert captured["screen"] == "materials"
+
+    def test_guidance_response_without_screen_context_passes_no_hint(self, monkeypatch):
+        cap = caps.get_capability("materials.upload")
+        monkeypatch.setattr(route_mod.kb, "section_for_howto", lambda howto: None)
+        monkeypatch.setattr(route_mod.kb, "search", lambda *a, **kw: [])
+
+        captured = {}
+
+        def _capture(message, role, screen=None):
+            captured["screen"] = screen
+            return []
+
+        monkeypatch.setattr(route_mod, "_manual_hits", _capture)
+
+        route_mod._guidance_response("教材のアップロード方法を教えて", "TEACHER", cap)
+        assert captured["screen"] is None

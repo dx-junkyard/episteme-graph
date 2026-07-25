@@ -466,6 +466,9 @@ AUDIT_ENTITY_FIGURE_PRESENTATION = "figure_presentation"
 # 上位・下位概念を活用した説明付与（要素説明の二層台帳, Phase 2, migration 056）
 AUDIT_ENTITY_ELEMENT_EXPLANATION = "element_explanation"
 
+# 利用者マニュアル KB（help_kb, Phase 2 手動 refresh トリガー）
+AUDIT_ENTITY_MANUAL = "manual"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -497,4 +500,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_DELIBERATION,
     AUDIT_ENTITY_FIGURE_PRESENTATION,
     AUDIT_ENTITY_ELEMENT_EXPLANATION,
+    AUDIT_ENTITY_MANUAL,
 )

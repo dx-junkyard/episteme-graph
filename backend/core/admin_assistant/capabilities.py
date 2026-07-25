@@ -540,6 +540,37 @@ _REGISTRY: list[Capability] = [
             _step("schema-proposals", "sp_proposals_list", "提案の一覧を確認します"),
         ),
     ),
+    # -------------------------------------------------------------------
+    # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側/供給側の
+    # 両面計器 G層ルールが参照する capability。3件とも guidance_only（DB 非変更）。
+    # 専用の管理画面はまだ無い（Phase 2 時点）ため locate_steps は持たせない
+    # （§8 の流儀: 誘導先が無ければ省略可）。
+    # -------------------------------------------------------------------
+    Capability(
+        id="manual_help.view_gaps",
+        screen="interest-dashboard",
+        title="受講者マニュアルの説明ギャップを確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        description="学生 HELP ルートの無ヒット・未整備節ヒットを k-匿名集計した需要側計器を確認する。",
+    ),
+    Capability(
+        id="assistant_kb.view_undocumented",
+        screen="system-stats",
+        title="操作ナレッジベースの未整備箇所を確認する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        description="Admin Copilot の capability registry のうち、操作KBの説明が"
+                    "整備されていないものを確認する（供給側計器）。",
+    ),
+    Capability(
+        id="manual_kb.view_todos",
+        screen="system-stats",
+        title="マニュアルの未解消 TODO を確認する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        description="TODO 注記のため索引から除外されているマニュアル節を確認する。",
+    ),
 ]
 
 _BY_ID = {cap.id: cap for cap in _REGISTRY}

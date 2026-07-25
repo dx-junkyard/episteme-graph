@@ -160,8 +160,11 @@ def build_section_index(
         except OSError:
             continue
         lines = raw.splitlines()
+        file_screen: Optional[str] = None
         if manual_transforms:
-            _front_matter, lines = parse_front_matter(lines)
+            front_matter, lines = parse_front_matter(lines)
+            raw_screen = front_matter.get("screen")
+            file_screen = raw_screen if isinstance(raw_screen, str) else None
         else:
             lines = strip_front_matter(lines)
 
@@ -192,6 +195,10 @@ def build_section_index(
             }
             if audience_tag:
                 section["audience"] = audience_tag
+            if manual_transforms:
+                # front-matter `screen:` 由来（§4-3 コンテキストヘルプ突合キー）。
+                # 無ければ None を明示保持する（情報を落とさない）。
+                section["screen"] = file_screen
             index[f"{md.name}#{cur_anchor}"] = section
 
         for line in lines:
@@ -207,10 +214,23 @@ def build_section_index(
     return index, excluded
 
 
-def score_sections(query: str, sections: list[dict], *, limit: int = 3) -> list[dict]:
-    """節（title/body を持つ dict）を query との語彙重なりでスコアリングして返す。"""
+def score_sections(
+    query: str,
+    sections: list[dict],
+    *,
+    limit: int = 3,
+    screen: Optional[str] = None,
+) -> list[dict]:
+    """節（title/body を持つ dict）を query との語彙重なりでスコアリングして返す。
+
+    ``screen``（§4-3 コンテキストヘルプ突合キー）を指定すると、語彙重なりスコアが
+    既に正（0 より大きい）である節のうち、``sec["screen"]`` が一致するものを
+    検索ランキングの第一候補にする。語彙が一切重ならない（スコア0の）節は
+    screen 一致だけでは決して浮上しない — 元のスコアリング条件は不変。
+    ``screen=None`` は完全に従来どおりスコア降順のみ（後方互換）。
+    """
     q_tokens = tokenize(query)
-    scored: list[tuple[float, dict]] = []
+    scored: list[tuple[int, float, dict]] = []
     for sec in sections:
         title = sec.get("title", "")
         body = sec.get("body", "")
@@ -220,6 +240,7 @@ def score_sections(query: str, sections: list[dict], *, limit: int = 3) -> list[
         score = overlap + title_bonus
         if score <= 0:
             continue
-        scored.append((float(score), sec))
-    scored.sort(key=lambda t: t[0], reverse=True)
-    return [sec for _, sec in scored[: max(1, limit)]]
+        screen_match = 1 if screen is not None and sec.get("screen") == screen else 0
+        scored.append((screen_match, float(score), sec))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return [sec for _, _, sec in scored[: max(1, limit)]]

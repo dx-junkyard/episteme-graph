@@ -24,24 +24,32 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text as sa_text
 
 import services
-from dependencies import _get_current_user, _require_teacher  # noqa: F401
+from dependencies import _get_current_user, _require_teacher, _require_system_admin  # noqa: F401
 from core.config import get_settings
 from core.course_data import course_title as _course_title
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
-from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP
+from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP, AUDIT_ENTITY_MANUAL
 from core.admin_assistant import capabilities as caps
 from core.admin_assistant import intent as intent_mod
 from core.admin_assistant import knowledge as kb
 from core.admin_assistant import action_store
 from core.admin_assistant import next_steps as next_steps_mod
 
-try:  # pragma: no cover - core/help_kb は別タスクで並行実装中（不在時は現状挙動へ縮退）
+# core/help_kb は別タスクで並行実装中（`screen` 引数の追加含む）のため、モジュール自体・
+# 各シンボルとも不在/失敗時は現状挙動へ縮退する（fail-closed。捏造しない, P4）。
+try:  # pragma: no cover
     from core.help_kb import search_manual as _search_manual
+    from core.help_kb import manual as _help_kb_manual
+    from core.help_kb import index as _help_kb_index
+    from core.help_kb import validator as _help_kb_validator
 except Exception:  # noqa: BLE001
     _search_manual = None
+    _help_kb_manual = None
+    _help_kb_index = None
+    _help_kb_validator = None
 from core.admin_assistant.actions import (
     ActionArgError,
     ActionContext,
@@ -69,6 +77,7 @@ from schemas import (
     AssistantLocatePlan,
     AssistantLocateStep,
     AssistantRevertResponse,
+    HelpKbRefreshResponse,
     NextStepDismissResponse,
     NextStepsResponse,
 )
@@ -77,6 +86,12 @@ logger = logging.getLogger(__name__)
 
 # admin.router（prefix=/api/admin）に include される
 admin_router = APIRouter(prefix="/assistant", tags=["Admin Assistant"])
+
+# 利用者マニュアル KB（help_kb, Phase 2 §2-2）の手動更新トリガー。
+# 最終パスは /api/admin/help-kb/refresh（admin_router の /assistant 配下ではない
+# ため、main.py から prefix="/api/admin" で個別マウントする — 既存の admin 系子
+# ルーター登録規約, CLAUDE.md「admin.router に子ルーターを include しない」）。
+help_kb_router = APIRouter(prefix="/help-kb", tags=["Help KB"])
 
 _ROLE_LABELS = {"TEACHER": "教員", "SYSTEM_ADMIN": "システム管理者", "STUDENT": "学生"}
 _TARGET_LABELS = {
@@ -113,6 +128,23 @@ def _record_assistant_event(
 ) -> None:
     """theory_review_events への監査記録（P5。実体は services.record_review_event, 提案7）。"""
     services.record_review_event(AUDIT_ENTITY_ASSISTANT_ACTION, entity_id, old_status, new_status, user_id, metadata)
+
+
+# help-kb refresh は特定オブジェクトを持たない（KB 全体の再構築操作）ため entity_id は
+# 固定値。呼び出し箇所で生リテラルを渡さず名前付き定数を参照する
+# （test_audit_entity_catalog_guardrails.py の生リテラル検出と同じ規約に合わせる）。
+_MANUAL_REFRESH_ENTITY_ID = "help_kb"
+
+
+def _record_manual_event(
+    entity_id: str, new_status: str, user_id: str | None, metadata: dict | None = None,
+) -> None:
+    """theory_review_events への監査記録（entity_type='manual'。help-kb refresh 専用）。
+
+    設計書 docs/features/manual_help_kb_design.md §2-2。metadata には節数・違反数
+    など事実のみを積む（confidence 等の生数値は含めない）。
+    """
+    services.record_review_event(AUDIT_ENTITY_MANUAL, entity_id, "", new_status, user_id, metadata)
 
 
 def _assistant_model() -> str | None:
@@ -197,26 +229,37 @@ def _manual_audience(role: str) -> str:
     return "system_admin" if role == "SYSTEM_ADMIN" else "teacher"
 
 
-def _manual_hits(message: str, role: str) -> list[dict]:
+def _manual_hits(message: str, role: str, screen: str | None = None) -> list[dict]:
     """docs/manual 索引（core/help_kb, 第2知識源）からの検索。
 
     capability KB（admin_operations）が手順の正本で、manual は概念/全体像担当（§1-2）。
     モジュール未実装（並行実装中）・索引空・検索失敗のいずれも現状と完全に同じ挙動へ
     縮退する（fail-closed。捏造しない, P4）。
+
+    ``screen``（§4-3, Copilot 側の画面ヒント）は現在アクティブなタブ
+    （``screen_context.tab``）。front-matter ``screen:`` 一致節を優先する
+    ``search_manual`` のヒント引数へそのまま渡す（未指定/空なら従来どおり渡さない —
+    ``search_manual`` の旧シグネチャ・既存呼び出し元との後方互換を保つ）。
     """
     if _search_manual is None:
         return []
+    kwargs: dict = {"audience": _manual_audience(role), "limit": 3}
+    if screen:
+        kwargs["screen"] = screen
     try:
-        return _search_manual(message, audience=_manual_audience(role), limit=3) or []
+        return _search_manual(message, **kwargs) or []
     except Exception:
         logger.warning("guidance: manual search failed", exc_info=True)
         return []
 
 
-def _guidance_response(message: str, role: str, cap) -> AssistantChatResponse:
+def _guidance_response(
+    message: str, role: str, cap, screen_context: dict | None = None,
+) -> AssistantChatResponse:
     allowed = caps.capabilities_for(role)
     results = kb.search(message, allowed, limit=3)
-    manual_hits = _manual_hits(message, role)
+    hint_screen = (screen_context or {}).get("tab") or None
+    manual_hits = _manual_hits(message, role, hint_screen)
     citations: list = []
     parts: list[str] = []
     screen = ""
@@ -334,7 +377,7 @@ def _infer_args(cap, message: str) -> tuple[dict, str | None]:
 
 def _action_response(message: str, role: str, cap, screen_context: dict) -> AssistantChatResponse:
     if not cap.is_action():
-        return _guidance_response(message, role, cap)
+        return _guidance_response(message, role, cap, screen_context)
 
     target = _target_from_context(cap, screen_context)
     tlabel = _TARGET_LABELS.get(cap.target_type, "対象")
@@ -567,7 +610,7 @@ def assistant_chat(
         )
     else:
         # guidance（および cap 未解決の locate/action）は説明にまとめる。
-        resp = _guidance_response(body.message, role, cap)
+        resp = _guidance_response(body.message, role, cap, screen_context)
 
     resp.source = res.source
     return resp
@@ -844,3 +887,71 @@ def restore_next_step(
         session.close()
     _record_next_step_event(step_key, "restored", uid)
     return NextStepDismissResponse(status="restored", step_key=step_key)
+
+
+# ---------------------------------------------------------------------------
+# 8.6 POST /help-kb/refresh（利用者マニュアル KB の手動更新トリガー, Phase 2 §2-2）
+#
+# 正本の更新経路は「デプロイ = 凍結版の切替」（起動時 lru_cache 読み込み + CI ガード
+# レール）。本 API は volume-mount 開発や hotfix の非常口であり、運用の主経路には
+# しない（設計書 docs/features/manual_help_kb_design.md §2-2）。SYSTEM_ADMIN のみ
+# （fail-closed）。DB 書き込みは監査行1件のみ・KB 自体は再起動同様に読み直すだけで
+# 冪等（何度呼んでも同じ状態に収束する）。
+# ---------------------------------------------------------------------------
+
+
+def _manual_audience_section_counts() -> dict[str, int]:
+    """audience 別の索引済み節数（事実のみ・confidence 等は含めない）。
+
+    ``core/help_kb`` の公開 API（``manual.manual_root`` / ``manual.AUDIENCES`` /
+    ``index.build_section_index``）だけを使って再集計する。``manual.py`` の
+    ``lru_cache`` 付き private ビルダーには依存しない（本関数自体が「再構築後の
+    状態」を確認する側であり、キャッシュを跨いで確認できることが重要なため）。
+    """
+    if _help_kb_manual is None or _help_kb_index is None:
+        return {}
+    root = _help_kb_manual.manual_root()
+    if root is None:
+        return {}
+    counts: dict[str, int] = {}
+    for audience in _help_kb_manual.AUDIENCES:
+        directory = root / audience
+        idx, _excluded = _help_kb_index.build_section_index(
+            directory, manual_transforms=True, audience_tag=audience,
+        )
+        counts[audience] = len(idx)
+    return counts
+
+
+@help_kb_router.post("/refresh", response_model=HelpKbRefreshResponse)
+def refresh_help_kb(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbRefreshResponse:
+    """``docs/manual`` / capability KB のキャッシュをクリアし、再構築後の状態を返す。
+
+    volume-mount 開発時やドキュメントの hotfix を即座に反映させたいときの手動
+    トリガー（非常口）。通常運用はデプロイ（イメージ再ビルド → 再起動）で更新される
+    ため、このエンドポイントを定期実行・自動化する運用は想定しない。
+    """
+    if _help_kb_manual is not None:
+        _help_kb_manual.clear_manual_cache()
+    kb.clear_cache()
+
+    section_counts = _manual_audience_section_counts()
+    violations = _help_kb_validator.validate_manual() if _help_kb_validator is not None else []
+    excluded = _help_kb_manual.excluded_sections() if _help_kb_manual is not None else []
+
+    metadata = {
+        "audience_section_counts": section_counts,
+        "validator_violations": len(violations),
+        "excluded_sections": len(excluded),
+    }
+    uid = str(current_user.get("id") or "")
+    _record_manual_event(_MANUAL_REFRESH_ENTITY_ID, "refreshed", uid, metadata)
+
+    return HelpKbRefreshResponse(
+        status="refreshed",
+        audience_section_counts=section_counts,
+        validator_violations=len(violations),
+        excluded_sections=len(excluded),
+    )

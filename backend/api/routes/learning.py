@@ -685,7 +685,15 @@ def _classify_intent(
     Returns
     -------
     str
-        ``'CHIT_CHAT'`` | ``'LEARNING_ADVICE'`` | ``'DOMAIN_RAG'``
+        ``'CHIT_CHAT'`` | ``'LEARNING_ADVICE'`` | ``'USAGE_HELP'`` | ``'DOMAIN_RAG'``
+
+    Notes
+    -----
+    ``USAGE_HELP``（設計 §4-4, Phase 2 分離リリース）はアプリ・画面の使い方についての
+    質問を拾うためのラベルで、``learning_chat`` 側では pre-route
+    （``_is_usage_question`` / typed action ``usage_help``）を保守的キーワード判定で
+    すり抜けたケースの受け皿として使う。教材内容と迷う場合は誤爆コストの小さい
+    ``DOMAIN_RAG`` に倒す（保守設計。プロンプト内にも明記）。
     """
     if _is_greeting(message):
         return "LEARNING_ADVICE"
@@ -694,11 +702,13 @@ def _classify_intent(
 
     params = get_llm_params("fast")
     prompt = (
-        f"学習コース「{course_title}」の学習支援AIとして、学生からの質問を3つのルートに分類します。\n\n"
+        f"学習コース「{course_title}」の学習支援AIとして、学生からの質問を4つのルートに分類します。\n\n"
         "分類ルート:\n"
         "- CHIT_CHAT: 学習と無関係な雑談・日常会話（天気、食事、娯楽、個人的な話題など）\n"
         "- LEARNING_ADVICE: 学習の進め方・方法に関するメタ質問（どう進めるか、何から学ぶか、学習計画の相談など）\n"
+        "- USAGE_HELP: アプリ・画面の使い方、ボタンや機能の操作方法についての質問（教材の内容そのものではない）\n"
         "- DOMAIN_RAG: 物理学・数学などの専門知識・概念に関する質問\n\n"
+        "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n\n"
         f"質問: {message}\n\n"
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
     )
@@ -712,7 +722,7 @@ def _classify_intent(
             model=params["model"],
             reasoning_effort=params["reasoning_effort"],
         ).strip().upper()
-        for label in ("CHIT_CHAT", "LEARNING_ADVICE", "DOMAIN_RAG"):
+        for label in ("CHIT_CHAT", "LEARNING_ADVICE", "USAGE_HELP", "DOMAIN_RAG"):
             if label in result:
                 return label
     except Exception:
@@ -1861,7 +1871,9 @@ def _usage_help_response(
     hits: list[dict] = []
     if _search_manual is not None:
         try:
-            hits = _search_manual(body.message, audience="student", limit=3) or []
+            hits = _search_manual(
+                body.message, audience="student", limit=3, screen=body.screen_mode,
+            ) or []
         except Exception:
             logger.warning("search_manual failed for usage help route; falling back to no-hit", exc_info=True)
             hits = []
@@ -2095,6 +2107,19 @@ def learning_chat(
             body.history, body.message, chit_chat_answer,
         )
         return LearningChatResponse(answer=chit_chat_answer, course_update=None)
+
+    # ルート①-b（設計 §4-4, Phase 2）: 意図分類 LLM が USAGE_HELP と判定した場合も
+    # Phase 1 の HELP ハンドラへ委譲する。pre-route（_is_usage_question / typed action
+    # usage_help）の保守的キーワード判定をすり抜けたケースの受け皿。ハンドラ自体の挙動
+    # （テキスト経路は quota 非消費・本文素通し、音声/casual 経路は 1 LLM コール）は
+    # Phase 1 と同一で、二重に interest_trace を記録することもない
+    # （pre-route はここに到達する前に早期 return しているため一度しか通らない）。
+    if intent == "USAGE_HELP":
+        with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
+            return _usage_help_response(
+                current_user["id"], course_id, topic_id, body,
+                on_llm_call=_consume_quota,
+            )
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":

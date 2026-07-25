@@ -1,12 +1,20 @@
-"""学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）のテスト。
+"""学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3 / §4-3 / §4-4）
+のテスト。
 
 対象: ``backend/api/routes/learning.py`` の ``_is_usage_question`` /
 ``_usage_help_response`` / ``learning_chat`` 内の pre-route 挿入、
 ``backend/api/schemas.py`` の ``LearningChatResponse.manual_citations``、
 ``backend/api/services.py`` の ``_INTEREST_KINDS`` / ``get_interest_traces`` 除外。
 
+§4-4（Phase 2 分離リリース）: ``_classify_intent`` が4番目のラベル ``USAGE_HELP`` を
+返した場合、``learning_chat`` は pre-route（保守的キーワード判定）と同じ HELP ハンドラ
+（``_usage_help_response``）へ委譲する（クラス ``TestClassifierRoutedUsageHelp``）。
+
+§4-3（学生側バックエンド）: ``LearningChatRequest.screen_mode`` を
+``search_manual(..., screen=...)`` へそのまま橋渡しする（クラス ``TestScreenModeBridging``）。
+
 ``core.help_kb.search_manual`` は並行実装中のため、``routes.learning._search_manual``
-を monkeypatch して契約 (``search_manual(query, *, audience, limit) ->
+を monkeypatch して契約 (``search_manual(query, *, audience, limit=3, screen=None) ->
 list[{file, anchor, title, body, audience, citation, documented}]``) 相当のダミーを
 差し込む（DB・実 LLM には触れず、既存テストファイル群と同型の手法）。
 """
@@ -27,6 +35,7 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
         sys.path.insert(0, _p)
 
 import routes.learning as learning_mod  # noqa: E402
+import core.llm_worker.client as llm_worker_client  # noqa: E402
 from core.llm_worker.cost_gate import CostGate, today_str  # noqa: E402
 from schemas import LearningChatRequest  # noqa: E402
 
@@ -412,3 +421,143 @@ class TestChitChatReguidanceAndServicesChanges:
 
         resp = LearningChatResponse(answer="ok")
         assert resp.manual_citations is None
+
+
+# ===========================================================================
+# 8. 意図分類 USAGE_HELP（設計 §4-4, Phase 2 分離リリース）
+# ===========================================================================
+
+
+@pytest.fixture
+def classifier_help_env(monkeypatch):
+    """pre-route（保守的キーワード判定）をすり抜け、意図分類 LLM 経由で USAGE_HELP に
+    到達するケースを厳密にテストするための環境。``_is_usage_question`` を False 固定に
+    することで、pre-route ではなく分類ルートだけを通っていることを保証する。"""
+    settings = _fake_settings()
+    monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
+    monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
+    monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
+    monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message: False)
+
+    persist_mock = MagicMock(return_value={"user_message_id": "msg-1"})
+    monkeypatch.setattr(learning_mod, "persist_chat_history", persist_mock)
+    trace_mock = MagicMock(return_value="trace-1")
+    monkeypatch.setattr(learning_mod, "record_interest_trace", trace_mock)
+
+    def _unexpected_check_prerequisites(*a, **k):
+        raise AssertionError("USAGE_HELP 判定後は check_prerequisites が呼ばれてはならない")
+
+    monkeypatch.setattr(learning_mod, "check_prerequisites", _unexpected_check_prerequisites)
+
+    return SimpleNamespace(settings=settings, persist_mock=persist_mock, trace_mock=trace_mock)
+
+
+class TestClassifierRoutedUsageHelp:
+    """①分類が USAGE_HELP を返したら HELP ハンドラに到達する（テキスト経路・quota 非消費）。"""
+
+    def test_llm_classifies_usage_help_routes_to_handler(self, classifier_help_env, monkeypatch):
+        _set_search_manual(monkeypatch, [_HIT])
+        classify_mock = MagicMock(return_value="USAGE_HELP")
+        monkeypatch.setattr(learning_mod, "_classify_intent", classify_mock)
+
+        # pre-route の保守的キーワード判定はすり抜ける想定のメッセージ（_is_usage_question
+        # は fixture で False 固定済みなので、内容自体は任意でよい）。
+        body = _make_body(message="これはどこで確認すればいいですか")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+        classify_mock.assert_called_once()
+        assert _HIT["body"] in resp.answer
+        assert "[出典1]" in resp.answer
+        assert "教材の内容についての質問なら、そのまま送り直してください。" in resp.answer
+
+    def test_llm_classifies_usage_help_text_route_does_not_consume_quota(
+        self, classifier_help_env, monkeypatch
+    ):
+        """分類そのもの（generate_text 呼び出し）はモックで置き換えているため、
+        HELP ハンドラのテキスト経路自体が quota を消費しないことを確認する。"""
+        _set_search_manual(monkeypatch, [_HIT])
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "USAGE_HELP")
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **kwargs: "呼ばれてはならない")
+        classifier_help_env.settings.learning_chat_max_calls_per_day = 1
+
+        body = _make_body(message="これはどこで確認すればいいですか")
+        learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+        key = (today_str(), CURRENT_USER["id"])
+        assert learning_mod._learning_chat_cost_gate.daily_counts.get(key, 0) == 0
+
+    def test_classification_result_other_than_usage_help_does_not_reach_help_handler(
+        self, monkeypatch
+    ):
+        """②分類失敗時は（内部フォールバックである）DOMAIN_RAG に落ち、
+        HELP ハンドラには到達しない（従来どおりの経路を維持）。"""
+        settings = _fake_settings()
+        monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
+        monkeypatch.setattr(llm_worker_client, "get_settings", lambda: settings)
+        monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
+        monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
+        monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message: False)
+        monkeypatch.setattr(learning_mod, "search_chunks_with_metadata", lambda *a, **k: [])
+        monkeypatch.setattr(learning_mod, "log_unanswered_query", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "check_prerequisites", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "_atlas_topic_attribution", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "check_and_count_confirm_prompt", lambda *a, **k: False)
+        monkeypatch.setattr(learning_mod, "maybe_schedule_tension_mining", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "maybe_schedule_anchor_mining", lambda *a, **k: None)
+        monkeypatch.setattr(learning_mod, "persist_chat_history", MagicMock(return_value={"user_message_id": "msg-1"}))
+        monkeypatch.setattr(learning_mod, "record_interest_trace", MagicMock(return_value="trace-1"))
+        monkeypatch.setattr(learning_mod, "detect_and_record_misconception", MagicMock(return_value=None))
+        monkeypatch.setattr(learning_mod, "generate_text", lambda **kwargs: "テスト応答")
+        # 分類 LLM 呼び出しが失敗すると _classify_intent は内部で DOMAIN_RAG を返す
+        # （test_intent_routing.py::test_llm_failure_defaults_to_domain_rag で単体検証済み）。
+        # ここでは学習チャット側がその結果を尊重し、HELP ハンドラを迂回することを検証する。
+        monkeypatch.setattr(learning_mod, "_classify_intent", lambda *a, **k: "DOMAIN_RAG")
+
+        def _unexpected_usage_help(*a, **k):
+            raise AssertionError("USAGE_HELP 以外の分類結果で _usage_help_response が呼ばれてはならない")
+
+        monkeypatch.setattr(learning_mod, "_usage_help_response", _unexpected_usage_help)
+        _set_search_manual(monkeypatch, [_HIT])  # 呼ばれないはずだが、呼ばれても無害にしておく
+
+        body = _make_body(message="これはどこで確認すればいいですか")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+        assert resp.answer  # DOMAIN_RAG の通常経路が完走し応答が返る
+
+
+# ===========================================================================
+# 9. screen_mode コンテキスト絞り込み（設計 §4-3）
+# ===========================================================================
+
+
+class TestScreenModeBridging:
+    def test_screen_mode_is_passed_to_search_manual(self, help_env, monkeypatch):
+        captured: dict = {}
+
+        def _fake_search_manual(query, *, audience, limit=3, screen=None):
+            captured["audience"] = audience
+            captured["screen"] = screen
+            return [_HIT]
+
+        monkeypatch.setattr(learning_mod, "_search_manual", _fake_search_manual)
+
+        body = _make_body(support_action="usage_help", screen_mode="lecture")
+        learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+        assert captured["screen"] == "lecture"
+        assert captured["audience"] == "student"
+
+    def test_screen_mode_unset_passes_none_and_keeps_legacy_behavior(self, help_env, monkeypatch):
+        captured: dict = {}
+
+        def _fake_search_manual(query, *, audience, limit=3, screen=None):
+            captured["screen"] = screen
+            return [_HIT]
+
+        monkeypatch.setattr(learning_mod, "_search_manual", _fake_search_manual)
+
+        body = _make_body(support_action="usage_help")
+        resp = learning_mod.learning_chat("course-1", "topic-1", body, current_user=CURRENT_USER)
+
+        assert captured["screen"] is None
+        assert _HIT["body"] in resp.answer

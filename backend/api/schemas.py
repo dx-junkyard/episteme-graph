@@ -298,6 +298,10 @@ class LearningChatRequest(BaseModel):
     # 選択テキストの逐語と、選択があったセグメント番号（position_anchor とは独立に保持）。
     selection_text: str | None = None
     selection_segment_id: int | None = None
+    # UI内コンテキストヘルプ（設計 §4-3）: 「？」ボタン押下時の画面文脈。
+    # "lecture" | "chat" | "voice"。HELP ルートの search_manual に screen ヒントとして渡し、
+    # front-matter screen: 一致節を検索の第一候補にする。未指定は従来挙動（screen=None）。
+    screen_mode: str | None = None
 
 
 class LearningSupportNextAction(BaseModel):
@@ -1340,3 +1344,14 @@ class NextStepDismissResponse(BaseModel):
     """POST /next-steps/{step_key}/dismiss|restore の共通レスポンス。"""
     status: str                                     # dismissed | restored
     step_key: str
+
+
+class HelpKbRefreshResponse(BaseModel):
+    """POST /api/admin/help-kb/refresh のレスポンス（設計 §2-2）。
+
+    数値は節数・違反数などの事実のみ（confidence 等の生値は含めない）。
+    """
+    status: str = "refreshed"
+    audience_section_counts: dict[str, int] = Field(default_factory=dict)
+    validator_violations: int = 0
+    excluded_sections: int = 0

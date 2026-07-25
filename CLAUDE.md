@@ -683,12 +683,25 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
   `interest_traces` の kind `help_usage`（**質問逐語を積まない**。anchor/documented/no_hit
   のみ。tension/anchor worker・digest・個人知識ネットワーク・問いの軌跡から除外）。
 - **教員/管理者**: Admin Copilot guidance の第2知識源（capability KB が手順の正本・manual は
-  概念/全体像。primary 未整備時のみ本文フォールバック + citation 出所別併記）。
+  概念/全体像。primary 未整備時のみ本文フォールバック + citation 出所別併記。screen_context の
+  tab を `search_manual(..., screen=)` ヒントとして伝播）。
+- **Phase 2 実装済み（2026-07-25）**:
+  ①意図分類の 4 ラベル化 — `_classify_intent` に `USAGE_HELP` 追加（迷えば DOMAIN_RAG の
+  保守設計。分類経由でも Phase 1 の HELP ハンドラへ委譲）。
+  ②`screen_mode` コンテキストヘルプ — `LearningChatRequest.screen_mode`（voice/lecture/chat、
+  app.js の `resolveScreenMode()` が全送信経路で付与）→ front-matter `screen:` 一致節を
+  検索ランキングで優先（スコア正の節に限る。`search_manual(..., screen=)`）。
+  ③G層ルール3本 — `manual.help_gaps_pending`（TEACHER・recommended。help_usage 痕跡の
+  無ヒット/未整備節を anchor 単位で k-匿名集計、`core/privacy.py` 正本・レンジ表示のみ）/
+  `assistant_kb.undocumented`（SYSTEM_ADMIN・optional。howto_doc 未整備 capability）/
+  `manual.todo_unresolved`（SYSTEM_ADMIN。`excluded_sections()` ≥1 で点灯・解消で自動消滅）。
+  ④`POST /api/admin/help-kb/refresh`（SYSTEM_ADMIN・`AUDIT_ENTITY_MANUAL` で監査記帳。
+  volume-mount 開発や hotfix の非常口 — 運用の主経路はデプロイ=再起動のまま）。
 - **ガードレール**: `backend/tests/test_help_kb_guardrails.py`（audience 越境禁止・denylist・
   TODO 凍結拒否・痕跡非汚染・Dockerfile 回帰・chunks 非汚染ほか）+ `test_help_kb.py` /
-  `test_help_usage_route.py` / `test_help_usage_ui_static.py`。
-- **非スコープ（Phase 2〜3）**: G層ルール3本・意図分類の 4 ラベル化（USAGE_HELP）・
-  refresh API・`screen_mode` コンテキストヘルプ・ベクトル補助層・DB draft/freeze・
+  `test_help_usage_route.py` / `test_help_usage_ui_static.py` / `test_help_kb_refresh_api.py` +
+  `test_next_steps_guardrails.py`（G層3ルール分）。
+- **非スコープ（Phase 3・条件付き封印）**: ベクトル補助層・DB draft/freeze・
   content-hash 監査記帳（着手条件は設計書 §5/§7 に宣言済み）。
 
 ### ガイダンス層（G層, migration 039）
@@ -1362,7 +1375,8 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   doubt/schema.py・services.py の集計はここに委譲済み（表示文言は各所に残る）。
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
-  `AUDIT_ENTITY_TYPES`（26語彙）。`theory_review_events` への記帳は原則
+  `AUDIT_ENTITY_TYPES`（30語彙。2026-07-25 に `AUDIT_ENTITY_MANUAL="manual"` を追加）。
+  `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は
   必ずカタログ定数を使う）。
