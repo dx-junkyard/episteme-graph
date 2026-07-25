@@ -44,6 +44,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
+import threading
 import uuid
 from contextlib import asynccontextmanager
 
@@ -191,6 +192,32 @@ async def _lifespan(application: FastAPI):
             logger.warning("help_kb manual validation: %s", violation)
     except Exception:  # noqa: BLE001
         logger.warning("help_kb manual validation skipped", exc_info=True)
+
+    # ヘルプKB Phase 3: content-hash 監査記帳（変化時のみ・冪等、§2-3）と
+    # ベクトル補助層の同期（全置換スナップショット、§5 Phase 3 ①）。
+    # 記帳は軽いので同期実行、埋め込みは外部 API を呼ぶためバックグラウンド
+    # スレッドで実行する（いずれも fail-open: 起動を止めない）。
+    try:
+        from core.help_kb.audit import record_snapshot_if_changed
+
+        record_snapshot_if_changed()
+    except Exception:  # noqa: BLE001
+        logger.warning("help_kb snapshot audit skipped", exc_info=True)
+    try:
+        from core.help_kb.vector import sync_manual_vectors
+
+        def _help_kb_vector_sync() -> None:
+            try:
+                result = sync_manual_vectors()
+                logger.info("help_kb vector sync: %s", result)
+            except Exception:  # noqa: BLE001
+                logger.warning("help_kb vector sync failed", exc_info=True)
+
+        threading.Thread(
+            target=_help_kb_vector_sync, name="help-kb-vector-sync", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001
+        logger.warning("help_kb vector sync startup skipped", exc_info=True)
 
     yield
 

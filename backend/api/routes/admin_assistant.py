@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -45,11 +46,13 @@ try:  # pragma: no cover
     from core.help_kb import manual as _help_kb_manual
     from core.help_kb import index as _help_kb_index
     from core.help_kb import validator as _help_kb_validator
+    from core.help_kb import store as _help_kb_store
 except Exception:  # noqa: BLE001
     _search_manual = None
     _help_kb_manual = None
     _help_kb_index = None
     _help_kb_validator = None
+    _help_kb_store = None
 from core.admin_assistant.actions import (
     ActionArgError,
     ActionContext,
@@ -77,7 +80,16 @@ from schemas import (
     AssistantLocatePlan,
     AssistantLocateStep,
     AssistantRevertResponse,
+    HelpKbDraftOut,
+    HelpKbDraftsResponse,
+    HelpKbDraftUpdateRequest,
+    HelpKbFreezeResponse,
     HelpKbRefreshResponse,
+    HelpKbSeedResponse,
+    HelpKbServingSourceRequest,
+    HelpKbStateOut,
+    HelpKbVersionOut,
+    HelpKbVersionsResponse,
     NextStepDismissResponse,
     NextStepsResponse,
 )
@@ -134,6 +146,14 @@ def _record_assistant_event(
 # 固定値。呼び出し箇所で生リテラルを渡さず名前付き定数を参照する
 # （test_audit_entity_catalog_guardrails.py の生リテラル検出と同じ規約に合わせる）。
 _MANUAL_REFRESH_ENTITY_ID = "help_kb"
+
+# help_kb Phase 3 (DB draft/freeze) の固定 entity_id 群。draft 更新のみ対象が
+# (audience, file) 単位のため f-string を使う（f-string は raw literal 検出の対象外 —
+# 文字列そのものが呼び出し箇所ごとに変わる識別子であって、新規 entity_type 語彙の
+# 紛れ込みではないため）。draft 以外は KB 全体操作のため refresh と同じ固定値パターン。
+_MANUAL_DRAFTS_SEED_ENTITY_ID = "drafts"
+_MANUAL_FREEZE_ENTITY_ID = "freeze"
+_MANUAL_SERVING_SOURCE_ENTITY_ID = "serving_source"
 
 
 def _record_manual_event(
@@ -948,6 +968,7 @@ def refresh_help_kb(
     }
     uid = str(current_user.get("id") or "")
     _record_manual_event(_MANUAL_REFRESH_ENTITY_ID, "refreshed", uid, metadata)
+    _resync_help_kb_derived()
 
     return HelpKbRefreshResponse(
         status="refreshed",
@@ -955,3 +976,182 @@ def refresh_help_kb(
         validator_violations=len(violations),
         excluded_sections=len(excluded),
     )
+
+
+# ---------------------------------------------------------------------------
+# help_kb Phase 3: DB draft/freeze（設計 §7-2、atlas/library の draft/freeze 踏襲）
+#
+# 配信ソースの既定は files のまま（デプロイ=凍結版の切替という Phase 1/2 運用を壊さない）。
+# DB 配信になるのは POST .../freeze の実行後のみ（freeze = 配信ソースの明示切替。
+# POST .../serving-source は files への切戻し・db への再切替の escape hatch）。
+# 全エンドポイント SYSTEM_ADMIN のみ（fail-closed。DB
+# draft/freeze は git レビューを経ない書き込み経路のため、atlas/library より一段
+# 強い権限で閉じる）。書き込み系はすべて監査記帳する（P5, _record_manual_event）。
+# ---------------------------------------------------------------------------
+
+
+def _require_help_kb_store():
+    if _help_kb_store is None:  # pragma: no cover — 並行実装中の一時的な不在のみ
+        raise HTTPException(status_code=503, detail="help_kb store is unavailable")
+    return _help_kb_store
+
+
+def _resync_help_kb_derived() -> None:
+    """配信スナップショット変更後の派生データ再同期（best-effort・非同期）。
+
+    refresh / freeze / serving-source 切替で配信内容が変わると、ベクトル補助層
+    （manual_sections）と content-hash 監査記帳が古くなるため、バックグラウンド
+    スレッドで追随させる。失敗しても本体操作の成功は変えない（fail-open。
+    次回起動時の lifespan 同期でも追随する）。
+    """
+
+    def _run() -> None:
+        try:
+            from core.help_kb.audit import record_snapshot_if_changed
+
+            record_snapshot_if_changed()
+        except Exception:  # noqa: BLE001
+            logger.warning("help_kb snapshot audit resync failed", exc_info=True)
+        try:
+            from core.help_kb.vector import sync_manual_vectors
+
+            sync_manual_vectors()
+        except Exception:  # noqa: BLE001
+            logger.warning("help_kb vector resync failed", exc_info=True)
+
+    threading.Thread(target=_run, name="help-kb-derived-resync", daemon=True).start()
+
+
+@help_kb_router.get("/drafts", response_model=HelpKbDraftsResponse)
+def list_help_kb_drafts(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbDraftsResponse:
+    store = _require_help_kb_store()
+    drafts = [HelpKbDraftOut(**d) for d in store.list_drafts()]
+    state = HelpKbStateOut(**store.get_state())
+    return HelpKbDraftsResponse(drafts=drafts, state=state)
+
+
+@help_kb_router.get("/drafts/{audience}/{file}", response_model=HelpKbDraftOut)
+def get_help_kb_draft(
+    audience: str,
+    file: str,
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbDraftOut:
+    store = _require_help_kb_store()
+    try:
+        draft = store.get_draft(audience, file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if draft is None:
+        raise HTTPException(status_code=404, detail=f"draft not found: {audience}/{file}")
+    return HelpKbDraftOut(**draft)
+
+
+@help_kb_router.put("/drafts/{audience}/{file}", response_model=HelpKbDraftOut)
+def update_help_kb_draft(
+    audience: str,
+    file: str,
+    body: HelpKbDraftUpdateRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbDraftOut:
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    try:
+        draft = store.update_draft(
+            audience, file, body.content, expected_revision=body.expected_revision, user_id=uid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except store.DraftNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except store.DraftConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "current_revision": exc.current_revision},
+        ) from exc
+    _record_manual_event(
+        f"draft:{audience}/{file}", "updated", uid,
+        {"audience": audience, "file": file, "revision": draft["revision"]},
+    )
+    return HelpKbDraftOut(**draft)
+
+
+@help_kb_router.post("/drafts/seed", response_model=HelpKbSeedResponse)
+def seed_help_kb_drafts(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbSeedResponse:
+    """現配信ファイルのスナップショットから draft を冪等シードする（既存 draft は上書きしない）。"""
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    result = store.seed_drafts_from_served(user_id=uid)
+    _record_manual_event(_MANUAL_DRAFTS_SEED_ENTITY_ID, "seeded", uid, result)
+    return HelpKbSeedResponse(**result)
+
+
+@help_kb_router.post("/freeze", response_model=HelpKbFreezeResponse)
+def freeze_help_kb(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbFreezeResponse:
+    """全 draft を凍結検証ゲートに通し、通過すれば新版を発行して db 配信へ切り替える。
+
+    検証違反があれば 422（``violations`` 配列）を返し、版・配信状態は変更しない。
+    """
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    try:
+        result = store.freeze(user_id=uid)
+    except store.FreezeValidationError as exc:
+        _record_manual_event(
+            _MANUAL_FREEZE_ENTITY_ID, "rejected", uid,
+            {"violations": exc.violations, "violation_count": len(exc.violations)},
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "manual kb freeze validation failed", "violations": exc.violations},
+        ) from exc
+    if _help_kb_manual is not None:
+        _help_kb_manual.clear_manual_cache()
+    kb.clear_cache()
+    _record_manual_event(
+        _MANUAL_FREEZE_ENTITY_ID, "frozen", uid,
+        {"version_no": result["version_no"], "audience_file_counts": result["audience_file_counts"]},
+    )
+    _resync_help_kb_derived()
+    return HelpKbFreezeResponse(
+        version_no=result["version_no"],
+        audience_file_counts=result["audience_file_counts"],
+        serving_source="db",
+    )
+
+
+@help_kb_router.post("/serving-source", response_model=HelpKbStateOut)
+def set_help_kb_serving_source(
+    body: HelpKbServingSourceRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbStateOut:
+    """配信ソースを明示切替する（db への切替には freeze 済みの版が必須）。"""
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    try:
+        state = store.set_serving_source(body.source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except store.ServingSourceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if _help_kb_manual is not None:
+        _help_kb_manual.clear_manual_cache()
+    kb.clear_cache()
+    _record_manual_event(_MANUAL_SERVING_SOURCE_ENTITY_ID, state["serving_source"], uid, state)
+    _resync_help_kb_derived()
+    return HelpKbStateOut(**state)
+
+
+@help_kb_router.get("/versions", response_model=HelpKbVersionsResponse)
+def list_help_kb_versions(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbVersionsResponse:
+    """版一覧（内容なし・メタのみ。削除 API は無い — append-only）。"""
+    store = _require_help_kb_store()
+    versions = [HelpKbVersionOut(**v) for v in store.list_versions()]
+    return HelpKbVersionsResponse(versions=versions)

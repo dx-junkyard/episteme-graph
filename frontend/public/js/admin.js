@@ -5694,6 +5694,10 @@
       // U層（LLM使用量推計, migration 043）— SYSTEM_ADMIN のみメトリクス閲覧可（G2-U）。
       var llmUsageTabBtn = document.getElementById("tab-btn-llm-usage");
       if (llmUsageTabBtn) llmUsageTabBtn.style.display = "";
+
+      // 利用者マニュアル KB（help_kb）draft/freeze 管理 — SYSTEM_ADMIN のみ（manual_help_kb_design.md Phase 3 ②）。
+      var manualEditorTabBtn = document.getElementById("tab-btn-manual-editor");
+      if (manualEditorTabBtn) manualEditorTabBtn.style.display = "";
     }
 
     // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
@@ -7854,6 +7858,17 @@
     // TEACHER 向け教材見積りポップオーバー。DI 注入して疎結合に起動する（G2-U）。
     if (window.AdminLlmUsage) {
       window.AdminLlmUsage.init({
+        apiFetch: apiFetch,
+        escHtml: escHtml,
+        onTabActivate: onTabActivate,
+        state: state,
+      });
+    }
+
+    // 利用者マニュアル KB（help_kb, migration 0本）— draft 編集 + 凍結配信の管理 UI。
+    // DI 注入して疎結合に起動する（admin-llm-usage.js と同型）。
+    if (window.ManualKbEditor) {
+      window.ManualKbEditor.init({
         apiFetch: apiFetch,
         escHtml: escHtml,
         onTabActivate: onTabActivate,

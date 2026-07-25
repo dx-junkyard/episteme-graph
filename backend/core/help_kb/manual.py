@@ -13,11 +13,14 @@ student/ + teacher/ / system_admin → 3ディレクトリ全部。
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
 
 from . import index as _index
+
+logger = logging.getLogger(__name__)
 
 AUDIENCES = ("student", "teacher", "system_admin")
 
@@ -62,6 +65,29 @@ def _dir_for(name: str) -> Optional[Path]:
 
 
 def _build_for_dir_name(name: str) -> tuple[dict, list[dict]]:
+    """audience 用の索引を構築する。
+
+    配信ソースの既定は ``files``（Phase 1 運用は変えない）。Phase 3 の DB draft/freeze
+    （``core/help_kb/store.py``）で明示 freeze され、かつ ``serving_source='db'`` に
+    切り替えられた場合のみ DB の active version テキストから構築する。DB 参照時の
+    例外・active version 不在は files へ fail-open する（マニュアル配信を止めない）。
+    """
+    if name in AUDIENCES:
+        try:
+            from . import store as _store  # 遅延 import（循環回避・store 未整備環境への耐性）
+
+            state = _store.get_state()
+            if state.get("serving_source") == "db" and state.get("active_version_no"):
+                texts = _store.get_active_version_texts()
+                if texts is not None:
+                    return _index.build_section_index_from_texts(
+                        texts.get(name) or {}, manual_transforms=True, audience_tag=name,
+                    )
+        except Exception:  # noqa: BLE001 — DB 障害時は files 配信へ fail-open
+            logger.warning(
+                "help_kb DB serving lookup failed for %s; falling back to files", name, exc_info=True,
+            )
+
     directory = _dir_for(name)
     if directory is None:
         return {}, []

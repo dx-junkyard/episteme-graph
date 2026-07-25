@@ -8195,3 +8195,46 @@ body {
   z-index: 1200;
   pointer-events: none;
 }
+
+/* 利用者マニュアル KB（help_kb）draft/freeze 管理 UI（manual_help_kb_design.md Phase 3 ②）—
+   SYSTEM_ADMIN 専用。数値スコアは出さない・配信ソースの事実のみをバッジ表示する。 */
+.mke-serving-badge {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 12px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border);
+}
+
+.mke-file-btn {
+  transition: border-color 0.15s ease;
+}
+
+.mke-file-btn:hover {
+  border-color: var(--color-text-link, #2f6fed);
+}
+
+.mke-conflict-note {
+  border: 1px solid var(--color-text-danger);
+  border-radius: 4px;
+  color: var(--color-text-danger);
+  font-size: 12px;
+  padding: 8px;
+  margin-top: 8px;
+}
+
+.mke-editor-textarea {
+  width: 100%;
+  min-height: 420px;
+  font-family: "SFMono-Regular", Consolas, Menlo, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  padding: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-bg-secondary);
+  color: var(--color-text-primary);
+  resize: vertical;
+}

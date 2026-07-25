@@ -134,6 +134,104 @@ def flatten_tables(text: str) -> str:
     return "\n".join(out)
 
 
+def _index_text(
+    filename: str,
+    raw: str,
+    *,
+    manual_transforms: bool,
+    audience_tag: Optional[str],
+    index: dict,
+    excluded: list[dict],
+) -> None:
+    """1ファイル分の生テキストを見出し単位でパースし ``index``/``excluded`` に積む。
+
+    ``build_section_index`` と ``build_section_index_from_texts`` の共通実体
+    （ファイル走査部と行パース部の分離。Phase 3 §7-2 の DB draft/freeze 検証で
+    ファイルシステムを経由せずテキストのまま索引化するために切り出した）。
+    """
+    lines = raw.splitlines()
+    file_screen: Optional[str] = None
+    if manual_transforms:
+        front_matter, lines = parse_front_matter(lines)
+        raw_screen = front_matter.get("screen")
+        file_screen = raw_screen if isinstance(raw_screen, str) else None
+    else:
+        lines = strip_front_matter(lines)
+
+    cur_anchor: Optional[str] = None
+    cur_title = ""
+    buf: list[str] = []
+
+    def _flush() -> None:
+        if not cur_anchor:
+            return
+        raw_body = "\n".join(buf).strip()
+        title = ANCHOR_RE.sub("", cur_title).strip()
+        if manual_transforms and _contains_todo_comment(raw_body):
+            entry = {"file": filename, "anchor": cur_anchor, "title": title}
+            if audience_tag:
+                entry["audience"] = audience_tag
+            excluded.append(entry)
+            return
+        body = raw_body
+        if manual_transforms:
+            body = strip_comments(body)
+            body = flatten_tables(body)
+        section = {
+            "title": title,
+            "body": body.strip(),
+            "file": filename,
+            "anchor": cur_anchor,
+        }
+        if audience_tag:
+            section["audience"] = audience_tag
+        if manual_transforms:
+            # front-matter `screen:` 由来（§4-3 コンテキストヘルプ突合キー）。
+            # 無ければ None を明示保持する（情報を落とさない）。
+            section["screen"] = file_screen
+        index[f"{filename}#{cur_anchor}"] = section
+
+    for line in lines:
+        m = HEADING_RE.match(line)
+        if m:
+            _flush()
+            cur_title = m.group(2)
+            cur_anchor = slugify(cur_title)
+            buf = []
+        else:
+            buf.append(line)
+    _flush()
+
+
+def build_section_index_from_texts(
+    texts: dict[str, str],
+    *,
+    manual_transforms: bool = True,
+    audience_tag: Optional[str] = None,
+) -> tuple[dict, list[dict]]:
+    """``texts``（``{ファイル名: 本文}``）を見出し単位でパースし索引を構築する。
+
+    ``build_section_index`` のファイルシステム版と同じパース規則を使うが、
+    ディスクを読まない（DB draft/freeze の検証・DB 配信構築が入力に使う）。
+    ファイル走査順は決定論性のためソート済みで処理する。
+
+    Returns:
+        ``build_section_index`` と同じ形の ``(index, excluded)``。
+    """
+    index: dict = {}
+    excluded: list[dict] = []
+    for filename in sorted(texts.keys()):
+        _index_text(
+            filename,
+            texts[filename],
+            manual_transforms=manual_transforms,
+            audience_tag=audience_tag,
+            index=index,
+            excluded=excluded,
+        )
+    return index, excluded
+
+
 def build_section_index(
     directory: Path,
     *,
@@ -159,58 +257,14 @@ def build_section_index(
             raw = md.read_text(encoding="utf-8")
         except OSError:
             continue
-        lines = raw.splitlines()
-        file_screen: Optional[str] = None
-        if manual_transforms:
-            front_matter, lines = parse_front_matter(lines)
-            raw_screen = front_matter.get("screen")
-            file_screen = raw_screen if isinstance(raw_screen, str) else None
-        else:
-            lines = strip_front_matter(lines)
-
-        cur_anchor: Optional[str] = None
-        cur_title = ""
-        buf: list[str] = []
-
-        def _flush() -> None:
-            if not cur_anchor:
-                return
-            raw_body = "\n".join(buf).strip()
-            title = ANCHOR_RE.sub("", cur_title).strip()
-            if manual_transforms and _contains_todo_comment(raw_body):
-                entry = {"file": md.name, "anchor": cur_anchor, "title": title}
-                if audience_tag:
-                    entry["audience"] = audience_tag
-                excluded.append(entry)
-                return
-            body = raw_body
-            if manual_transforms:
-                body = strip_comments(body)
-                body = flatten_tables(body)
-            section = {
-                "title": title,
-                "body": body.strip(),
-                "file": md.name,
-                "anchor": cur_anchor,
-            }
-            if audience_tag:
-                section["audience"] = audience_tag
-            if manual_transforms:
-                # front-matter `screen:` 由来（§4-3 コンテキストヘルプ突合キー）。
-                # 無ければ None を明示保持する（情報を落とさない）。
-                section["screen"] = file_screen
-            index[f"{md.name}#{cur_anchor}"] = section
-
-        for line in lines:
-            m = HEADING_RE.match(line)
-            if m:
-                _flush()
-                cur_title = m.group(2)
-                cur_anchor = slugify(cur_title)
-                buf = []
-            else:
-                buf.append(line)
-        _flush()
+        _index_text(
+            md.name,
+            raw,
+            manual_transforms=manual_transforms,
+            audience_tag=audience_tag,
+            index=index,
+            excluded=excluded,
+        )
     return index, excluded
 
 

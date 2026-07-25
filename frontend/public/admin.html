@@ -78,12 +78,16 @@
           <button class="admin-tab" data-tab="system-stats" id="tab-btn-system-stats" role="menuitem" style="display:none">システム統計</button>
           <button class="admin-tab" data-tab="llm-usage" id="tab-btn-llm-usage" role="menuitem" style="display:none">LLM使用量</button>
           <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" role="menuitem" style="display:none">エラー解析</button>
+          <button class="admin-tab" data-tab="manual-editor" id="tab-btn-manual-editor" role="menuitem" style="display:none">マニュアル編集</button>
         </div>
       </div>
     </div>
 
     <!-- D層（Doubt Layer）— 前提の地図タブ（Field Atlas とは別機能。中身は doubt-atlas.js が描画） -->
     <div class="admin-panel" id="tab-doubt-atlas"></div>
+
+    <!-- 利用者マニュアル KB（help_kb）draft/freeze 管理 UI — SYSTEM_ADMIN のみ。中身は admin-manual-editor.js が描画 -->
+    <div class="admin-panel" id="tab-manual-editor"></div>
 
     <!-- Field Atlas operations dashboard -->
     <div class="admin-panel" id="tab-atlas">
@@ -897,6 +901,8 @@
   <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
   <!-- U層（LLM トークン使用量推計, migration 043）管理 UI — SYSTEM_ADMIN メトリクス + TEACHER 事前見積り -->
   <script src="/js/admin-llm-usage.js?v=gap-fixes-20260716-2"></script>
+  <!-- 利用者マニュアル KB（help_kb）draft/freeze 管理 UI（manual_help_kb_design.md Phase 3 ②）— SYSTEM_ADMIN のみ -->
+  <script src="/js/admin-manual-editor.js?v=help-kb-editor-20260725-1"></script>
   <script src="/js/admin.js?v=gap-fixes-20260716-3"></script>
 </body>
 </html>

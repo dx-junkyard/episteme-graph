@@ -5,7 +5,7 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -1355,3 +1355,65 @@ class HelpKbRefreshResponse(BaseModel):
     audience_section_counts: dict[str, int] = Field(default_factory=dict)
     validator_violations: int = 0
     excluded_sections: int = 0
+
+
+# ---------------------------------------------------------------------------
+# help_kb Phase 3: DB draft/freeze（設計 §7-2、atlas/library の draft/freeze 踏襲）
+# ---------------------------------------------------------------------------
+
+
+class HelpKbDraftOut(BaseModel):
+    """``manual_kb_drafts`` の1行（``audience`` + ``file`` で一意）。"""
+    audience: str
+    file: str
+    content: str
+    revision: int
+    updated_at: str = ""
+    updated_by: Optional[str] = None
+
+
+class HelpKbStateOut(BaseModel):
+    """``manual_kb_state``（単一行）。配信ソースの既定は ``files``。"""
+    serving_source: str = "files"
+    active_version_no: Optional[int] = None
+    updated_at: str = ""
+
+
+class HelpKbDraftsResponse(BaseModel):
+    drafts: list[HelpKbDraftOut] = Field(default_factory=list)
+    state: HelpKbStateOut = Field(default_factory=HelpKbStateOut)
+
+
+class HelpKbDraftUpdateRequest(BaseModel):
+    content: str
+    expected_revision: int
+
+
+class HelpKbSeedResponse(BaseModel):
+    """draft シード結果（``core/revision_store.py::idempotent_seed_import`` の戻り値）。"""
+    imported: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class HelpKbFreezeResponse(BaseModel):
+    """凍結成功時のレスポンス。凍結検証ゲート不通過時は 422 + violations（HTTPException detail）。"""
+    version_no: int
+    audience_file_counts: dict[str, int] = Field(default_factory=dict)
+    serving_source: str = "db"
+
+
+class HelpKbServingSourceRequest(BaseModel):
+    source: str  # "files" | "db"
+
+
+class HelpKbVersionOut(BaseModel):
+    """版メタデータ（内容は含めない — 数値は事実の集計のみ）。"""
+    version_no: int
+    created_at: str = ""
+    created_by: Optional[str] = None
+    audience_file_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class HelpKbVersionsResponse(BaseModel):
+    versions: list[HelpKbVersionOut] = Field(default_factory=list)

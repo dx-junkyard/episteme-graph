@@ -119,6 +119,12 @@ def help_env(monkeypatch):
     monkeypatch.setattr(learning_mod, "_classify_intent", _unexpected_classify_intent)
     monkeypatch.setattr(learning_mod, "check_prerequisites", _unexpected_check_prerequisites)
 
+    # ベクトル補助層フォールバック（Phase 3 ①）はデフォルトで無ヒットに固定する。
+    # 未モックのまま放置すると実 DB/実 LLM を呼びに行きかねない
+    # （このテストファイルは _search_manual 境界のみを対象にしているため）。
+    # 個々のテストでベクトルヒットを検証したい場合は明示的に上書きすること。
+    monkeypatch.setattr(learning_mod, "_vector_search_manual", lambda *a, **k: [])
+
     return SimpleNamespace(settings=settings, persist_mock=persist_mock, trace_mock=trace_mock)
 
 
@@ -448,6 +454,7 @@ def classifier_help_env(monkeypatch):
         raise AssertionError("USAGE_HELP 判定後は check_prerequisites が呼ばれてはならない")
 
     monkeypatch.setattr(learning_mod, "check_prerequisites", _unexpected_check_prerequisites)
+    monkeypatch.setattr(learning_mod, "_vector_search_manual", lambda *a, **k: [])
 
     return SimpleNamespace(settings=settings, persist_mock=persist_mock, trace_mock=trace_mock)
 

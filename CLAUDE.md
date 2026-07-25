@@ -652,7 +652,7 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 - **ガードレール**: `backend/tests/test_admin_assistant.py` が「全 `reversible=false` は `confirm=true`」
   「`core/admin_assistant/` が FastAPI を import しない」「locate は role で fail-closed」を構造的に守る。
 
-### 利用者マニュアル KB（help_kb, migration 0本, 2026-07-25）
+### 利用者マニュアル KB（help_kb, migration 058/059, 2026-07-25）
 
 docs/manual を AI アシスタントの知識源にする非ベクトル KB。正本は
 `docs/features/manual_help_kb_design.md`。ベクトル RAG は建てない（97KB・70節に埋め込み
@@ -697,12 +697,33 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
   `manual.todo_unresolved`（SYSTEM_ADMIN。`excluded_sections()` ≥1 で点灯・解消で自動消滅）。
   ④`POST /api/admin/help-kb/refresh`（SYSTEM_ADMIN・`AUDIT_ENTITY_MANUAL` で監査記帳。
   volume-mount 開発や hotfix の非常口 — 運用の主経路はデプロイ=再起動のまま）。
+- **Phase 3 実装済み（2026-07-25、封印はオーナー指示で解除。着手時必須条件は遵守）**:
+  ①**ベクトル補助層**（migration 058 `manual_sections`、`core/help_kb/vector.py`）—
+  専用テーブル（chunks 非汚染）・全置換スナップショット同期（孤児行は同一トランザクション
+  DELETE）・凍結検証（validator 違反あり）時は埋め込まない・埋め込み失敗時は一切書き込まない。
+  学生 HELP の**非ベクトル無ヒット時のみ**のフォールバック検索（`_MAX_COSINE_DISTANCE=0.55`
+  の保守的足切り — 「なんとなく関連」は捏造に見えるため厳格。痕跡 payload に `vector:true`）。
+  `HELP_KB_VECTOR_ENABLED`（既定 on）。起動時 lifespan + refresh/freeze/serving-source 後に
+  best-effort 再同期（`_resync_help_kb_derived`）。DB 不達は fail-open（skipped を正直に返す）。
+  ②**DB draft/freeze**（migration 059、`core/help_kb/store.py` — `revision_store` 委譲）—
+  **配信既定は files のまま**（デプロイ=凍結切替の運用を壊さない。atlas と違い起動時に DB を
+  正本化しない）。DB 配信は `POST /api/admin/help-kb/freeze` 実行後のみ（freeze = 検証ゲート
+  通過が条件: validator 全チェック + student denylist をコード側ゲートに昇格、違反は 422 で
+  版を作らない）。draft は revision 楽観ロック（409）・版は append-only・DB 障害は files へ
+  fail-open。API は drafts CRUD / seed / freeze / serving-source（files への escape hatch）/
+  versions（全て SYSTEM_ADMIN・監査記帳）。UI は `admin-manual-editor.js`（ES5・運用タブ・
+  SYSTEM_ADMIN のみ・409 は事実文 + 再読込・freeze は事実文 confirm + violations 素通し表示）。
+  ③**content-hash 監査記帳**（`core/help_kb/audit.py`）— 配信スナップショットの決定論 sha256 を
+  起動時に照合し**変化時のみ** `theory_review_events`（`AUDIT_ENTITY_MANUAL`・
+  entity_id=`help_kb_snapshot`・`changed_by=NULL`）へ記帳（冪等・fail-open。二元台帳:
+  誰が書いたか=git / いつ配信状態になったか=DB。取れない帰属を偽装記帳しない）。
 - **ガードレール**: `backend/tests/test_help_kb_guardrails.py`（audience 越境禁止・denylist・
-  TODO 凍結拒否・痕跡非汚染・Dockerfile 回帰・chunks 非汚染ほか）+ `test_help_kb.py` /
-  `test_help_usage_route.py` / `test_help_usage_ui_static.py` / `test_help_kb_refresh_api.py` +
+  TODO 凍結拒否・痕跡非汚染・Dockerfile 回帰・chunks 非汚染ほか。`DELETE FROM` 禁止は
+  vector.py の内部スナップショット同期のみ設計明示で例外化 — 公開削除 API 禁止は不変）+
+  `test_help_kb.py` / `test_help_usage_route.py` / `test_help_usage_ui_static.py` /
+  `test_help_kb_refresh_api.py` / `test_help_kb_vector.py` / `test_help_kb_store.py` /
+  `test_help_kb_audit.py` / `test_manual_editor_ui_static.py` +
   `test_next_steps_guardrails.py`（G層3ルール分）。
-- **非スコープ（Phase 3・条件付き封印）**: ベクトル補助層・DB draft/freeze・
-  content-hash 監査記帳（着手条件は設計書 §5/§7 に宣言済み）。
 
 ### ガイダンス層（G層, migration 039）
 

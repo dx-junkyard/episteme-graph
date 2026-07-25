@@ -140,6 +140,14 @@ try:
 except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
     _search_manual = None  # type: ignore[assignment]
 
+# ベクトル補助層（Phase 3 ①、設計 §5 Phase 3 ①）: 非ベクトル検索
+# （``_search_manual``）が documented ヒットを返さなかったときのみ試す縮退経路。
+# 既定経路（documented ヒット時）のコスト・レイテンシには一切影響しない。
+try:
+    from core.help_kb.vector import vector_search_manual as _vector_search_manual
+except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
+    _vector_search_manual = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/learning", tags=["Learning"])
@@ -1880,6 +1888,25 @@ def _usage_help_response(
 
     top = hits[0] if hits else None
     documented = bool(top) and bool(top.get("documented", True))
+
+    # ベクトル補助層フォールバック（Phase 3 ①）: 非ベクトル検索が documented
+    # ヒットを返さなかったときのみ試す。ヒットすれば通常の documented 経路と
+    # 同じ応答（素通し + manual_citations + quota 非消費）に合流する。
+    used_vector = False
+    if not documented and _vector_search_manual is not None:
+        try:
+            vector_hits = _vector_search_manual(body.message, audience="student", limit=3) or []
+        except Exception:
+            logger.warning(
+                "vector_search_manual failed for usage help fallback; falling back to no-hit",
+                exc_info=True,
+            )
+            vector_hits = []
+        if vector_hits:
+            top = vector_hits[0]
+            documented = bool(top.get("documented", True))
+            used_vector = True
+
     is_casual = (body.intent_mode or "").strip() == "casual"
     degraded = False
 
@@ -1928,15 +1955,20 @@ def _usage_help_response(
         else:
             # テキスト経路: 凍結本文を素通し（パラフレーズによる意味ドリフトをゼロにする）。
             answer = f"{body_text}\n\n[出典1]\n\n{_USAGE_HELP_FOOTER}"
+        trace_payload = {
+            "help_anchor": citation or None,
+            "documented": True,
+            "no_hit": False,
+        }
+        if used_vector:
+            # P4（出所の正直さ）: 非ベクトル索引ではなくベクトル補助層で
+            # ヒットしたことを痕跡に残す（質問逐語は積まない）。
+            trace_payload["vector"] = True
         record_interest_trace(
             user_id, course_id, topic_id,
             kind="help_usage",
             text=top.get("title") or "使い方の質問",
-            extra_payload={
-                "help_anchor": citation or None,
-                "documented": True,
-                "no_hit": False,
-            },
+            extra_payload=trace_payload,
         )
 
     persist_chat_history(

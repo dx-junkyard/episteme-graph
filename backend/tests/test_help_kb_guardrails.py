@@ -37,6 +37,7 @@ from core.help_kb import validator as kb_validator  # noqa: E402
 from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
     assert_module_tree_forbids,
+    assert_paths_forbid,
     assert_source_forbids,
     extract_function_source,
 )
@@ -388,8 +389,25 @@ class TestStructuralRules:
         assert_module_tree_does_not_import(HELP_KB_DIR, ["fastapi"])
 
     def test_help_kb_has_no_delete_or_remove_public_api(self):
-        forbidden_defs = ("def delete", "def remove", "DELETE FROM")
+        # "def delete" / "def remove" (a dedicated deletion API) remain forbidden
+        # across the whole help_kb tree, including vector.py.
+        forbidden_defs = ("def delete", "def remove")
         assert_module_tree_forbids(HELP_KB_DIR, forbidden_defs)
+
+    def test_help_kb_forbids_delete_from_outside_vector_sync(self):
+        """``DELETE FROM`` は ``vector.py`` の全置換スナップショット同期にのみ許可する。
+
+        設計書 §5 Phase 3 ②（manual_help_kb_design.md）は「シード = 全置換
+        スナップショット。現行ファイル集合に無い (audience, file, anchor) 行を
+        同一トランザクションで DELETE する」ことを明示的に要求している
+        （孤児行が存在しない機能の古い説明を返すドリフトの遮断）。これは
+        「削除 API」ではなく同期処理の内部実装であるため、他の help_kb
+        モジュールでは従来どおり ``DELETE FROM`` を禁止しつつ、``vector.py``
+        だけを対象外にする（ガードレールの意図を弱めるのではなく、設計書の
+        明示要求に合わせて対象を最小限に絞る）。
+        """
+        other_paths = [p for p in HELP_KB_DIR.glob("*.py") if p.name != "vector.py"]
+        assert_paths_forbid(other_paths, ["DELETE FROM"])
 
 
 # ===========================================================================
