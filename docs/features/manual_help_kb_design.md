@@ -1,9 +1,22 @@
 # docs/manual のAIアシスタント知識源化 — 最終設計書（3チーム代表討議 統合版）
 
 - 対象: episteme-graph（ura-dev）
-- ステータス: 討議確定・実装前
+- ステータス: 討議確定 + ユーザー決定反映済み（2026-07-25）・Phase 0 実装待ち
 - 関連正本: `docs/features/admin_assistant_design.md` / `guidance_layer_design.md` / `assistant_common_infra_design.md`
 - 討議の性格: チームA（最小コスト）・チームB（ガバナンス）・チームC（体験最大化）の3案を相互検証のうえ統合。単なる折衷ではなく、実機検証で生き残った設計だけを採用した。
+
+---
+
+## ユーザー決定（2026-07-25）— §8 未決事項の確定
+
+討議後に提示した6つの未決事項について、以下のとおり確定した（詳細と根拠は §8）。本文は本決定を反映済み。
+
+1. **コミット状態**: ura-dev は clean・origin と同期済み。設計書（本書）は `e3e0a8e` にコミット済み。着手前の追加コミット分割は不要。
+2. **audience 分離の範囲**: **全分離**（student / teacher / system_admin の3ディレクトリ）で確定。§3-1。
+3. **TODO 要確認16〜17件**: **各項目とも「実コードで事実を調べ、現行挙動をマニュアルに書いて閉じる」**。挙動そのものの是非（仕様変更の要否）はマニュアル整備の範囲外とし、気になるものだけ**別 issue に切り出す**。§3-4。
+4. **content-hash 監査記帳（§2-3）**: **Phase 1 では実装しない**（git のコミット履歴で版の変化は追える。安全性＝fail-closed / 捏造禁止には無関係）。必要が生じたら Phase 3 の任意項目として足す。
+5. **文字回答の会話口調トグル**: **作らない**。文字チャットはマニュアル本文を正確に素通し、音声・casual のみ LLM 整形。§1-3-4。
+6. **本番 KB 縮退疑い（§2-1）**: **まず Phase 0 で事実確認**（本番相当コンテナで `kb_available()==True` を検証）。壊れていれば Dockerfile 2行の軽微修正として**通常の Phase 0 リリースに含めて対応**（緊急対応・特別な告知は事実確認後に判断）。
 
 ---
 
@@ -57,6 +70,59 @@
 8. **痕跡は最小構造化トレース**: `interest_traces` に新 kind `"help_usage"`（`services.py:2200 _INTEREST_KINDS` へ追加）。payload は **ヒット節 anchor / documented / 無ヒットフラグのみ — 質問逐語を積まない**（P3）。これが §4-1 の改善ループの唯一のデータ基質。tension/anchor worker・digest・個人知識ネットワーク導出・問いの軌跡ビューに help_usage が一切現れないことをガードレールで固定（§6-6）。
 9. CHIT_CHAT 拒否固定文（learning.py:1917-1921）に「画面の使い方についての質問にもお答えできます」の再誘導1文を追加。HELP 応答フッターに「教材の内容についての質問なら、そのまま送り直してください」（誤爆時の自己救済）。
 
+### 1-4. 全体像: 6分類 → 2段ルーティング（§1-2/§1-3 を俯瞰する地図・2026-07-25 追補）
+
+「AIアシスタント応答の6分類」（①教材内容の質問 / ②教材編集の指示 / ③画面操作・システムの質問 / ④教材外の基礎知識 / ⑤教材外の応用知識 / ⑥その他）は、**1つの分類問題ではなく2段の別問題**に割れる。本システムは既にこの2段を実装しており（検索前 = `_classify_intent`, learning.py:628-672 / 検索後 = grounding 判定, learning.py:1998-2039）、本設計のカテゴリ③（help_kb）は**検索前段に欠けていた分岐**、後述のカテゴリ④/⑤分離は**検索後段で潰れている区別**の精緻化にあたる。
+
+```mermaid
+flowchart TD
+    Q(["ユーザーの質問（学習チャット）"]) --> TYPED{"typed action?<br/>ボタン由来（誤爆ゼロ）"}
+
+    subgraph PRE["① 検索前ルーティング — 安価・大半が非LLM（②③⑥ はここで確定）"]
+        direction TB
+        TYPED -->|"usage_help"| C3["カテゴリ③: 画面操作・システム<br/>= help_kb（audience別索引）"]
+        TYPED -->|"drilldown / start_topic 等"| GO["→ 検索へ"]
+        TYPED -->|"なし"| PREROUTE{"_is_usage_question?<br/>（非LLM・casual バイパス手前）"}
+        PREROUTE -->|"はい"| C3
+        PREROUTE -->|"いいえ"| CASUAL{"casual / 音声 / 地図文脈?"}
+        CASUAL -->|"はい（分類バイパス）"| GO
+        CASUAL -->|"いいえ"| INTENT{"_classify_intent（LLM・fast）"}
+        INTENT -->|"CHIT_CHAT"| C6["カテゴリ⑥: その他<br/>断り＋『使い方も聞けます』再誘導"]
+        INTENT -->|"LEARNING_ADVICE"| ADVICE["学習アドバイス / 前提確認 detour"]
+        INTENT -->|"DOMAIN_RAG（既定・迷えばここ）"| GO
+    end
+
+    GO --> RAG["検索実行<br/>search_chunks_with_metadata（score>=0.30）"]
+
+    subgraph POST["② 検索後 grounding — ①④⑤ は検索しないと決まらない"]
+        direction TB
+        RAG --> GND{"grounding 判定<br/>material_id を course sources と突合"}
+        GND -->|"course_material ヒット"| C1["カテゴリ①: 教材内容（答えが教材内）<br/>権威的回答 + 出典 + tier"]
+        GND -->|"ヒットゼロ = model_generated"| SPLIT{"構造で ④/⑤ を振り分け<br/>【本追補の提案・未確定】"}
+        SPLIT -->|"prerequisites 一致 / atlas depends 上流"| C4["カテゴリ④: 基礎（教材外・前提）<br/>足場かけ + 上流ノードへ誘導"]
+        SPLIT -->|"下流・範囲外 / 迷えば⑤"| C5["カテゴリ⑤: 応用（教材外・発展）<br/>範囲外を明示 + explore寄り道 + hedge維持"]
+    end
+
+    classDef existing fill:#e7f3ff,stroke:#3178c6,color:#0b3d66;
+    classDef thisdoc fill:#e6f6ea,stroke:#2f9e44,color:#14532d;
+    classDef proposed fill:#fff3cd,stroke:#d39e00,color:#664d03;
+    class Q,TYPED,CASUAL,INTENT,GO,RAG,GND,C1,C6,ADVICE existing;
+    class PREROUTE,C3 thisdoc;
+    class SPLIT,C4,C5 proposed;
+```
+
+**読み方**:
+- **色**: 青 = 既存実装（コード確認済み）/ 緑 = 本設計（Phase 0/1）の新規 = カテゴリ③ / 黄 = 本追補の提案（3チーム討議の範囲外・**未確定**）= カテゴリ④/⑤分離。
+- **カテゴリ②（教材編集・教員）は本図の対象外** — 学習チャットではなく Admin Copilot（別アシスタント）の action mode（confirm ゲート・before/after スナップショット付き）に属する。
+- **原則**: 検索前段の分類器に ①④⑤ を当てさせない。「教材内に答えがあるか・基礎の欠落か・範囲外の外挿か」は**検索してみないと原理的に決まらない**（grounding 段の仕事）。`USAGE_HELP` 4ラベル化を Phase 2 分離リリースにした判断（§4-4）は、この2段構造と整合する。
+
+**カテゴリ④/⑤分離の技術的裏づけ（提案・要検討）**: ④（基礎＝教材の上流・前提）と⑤（応用＝教材の下流・範囲外）は、いま両方 `model_generated` + 同一 out_of_source ガード（learning_experience.py:121-133 の順序注入＋⚠️バナー）に潰れているが、**新テーブル・新LLM分類器なしに既存構造で振り分けられる**:
+- `topic.prerequisites`（check_prerequisites, services.py:1847-1943 が既読）一致 → ④。
+- Field Atlas 骨格の有向 `depends` エッジ（atlas.py:47,106-110。**現状 atlas_view.py:272-289 が方向を捨てて無向消費しているのを活かす**）で上流 → ④ / 下流・依存錐の外 → ⑤。
+- キーワード（とは・定義・そもそも → ④ / 応用・実際・発展・最新 → ⑤）。**迷えば⑤に倒す**（外挿を基礎と誤るより hedge 過剰の方が安全）。
+
+**既知の穴（音声・casual）**: casual/音声は分類も out_of_source バナー（learning.py:2097-2099）も省くため、**音声のカテゴリ⑤は hedge が落ちる**（外挿が権威的に読み上げられる）。視覚バナーの代替として、音声整形時に発話用の正直さ手がかり（「ただしこれは教材の外の一般的な話ですが」）を前置きする。
+
 ---
 
 ## 2. KB構築・更新タイミングの設計
@@ -79,12 +145,15 @@
 
 **正直な注記（チームA、全チーム合意）**: イメージ焼き込み環境で mtime 失効は飾りであり、本番の更新実態は「デプロイ=再起動=再構築」。これを隠さず明文化する。既存 `clear_cache()`（knowledge.py:113-114）が本番コードから一度も呼ばれていない（呼び出しはテスト test_admin_assistant.py:250 のみ）事実とも整合する。
 
-### 2-3. 版の同定と監査（争点だったが採用）
+### 2-3. 版の同定と監査（討議では 2:1 採用 → ユーザー決定で Phase 1 不採用）
 
-- `backend/core/schema.py` に `AUDIT_ENTITY_MANUAL = "manual"` を追加（27語彙目）。起動時スナップショット構築で **content-hash が前回記帳値と変化したときのみ** `theory_review_events` に記帳（冪等・再起動ごとに増えない。`metadata={content_hash, files, excluded_sections}`、`changed_by=NULL`）。約30〜50行。
-- **二元台帳の正直な宣言**: 「誰が書いたか」= git（PRレビュー・blame）、「いつどの版が配信状態になったか」= DB。コンテナ内に git メタデータは無く、**取れない帰属を偽装記帳しない**。Phase 2 の refresh API のみ `changed_by=操作者`。
+**決定（2026-07-25）**: content-hash による起動時監査記帳は **Phase 1 では実装しない**。版の変化（いつマニュアル内容が変わったか）は git のコミット履歴で追跡でき、fail-closed / 捏造禁止といった安全性には一切寄与しない付加機能であるため。必要が生じた場合の設計は下記に温存し、Phase 3 の任意項目とする（着手時の投資は約30〜50行）。
+
+**（温存・Phase 3 任意）実装するなら**:
+- `backend/core/schema.py` に `AUDIT_ENTITY_MANUAL = "manual"` を追加。起動時スナップショット構築で **content-hash が前回記帳値と変化したときのみ** `theory_review_events` に記帳（冪等・再起動ごとに増えない。`metadata={content_hash, files, excluded_sections}`、`changed_by=NULL`）。
+- **二元台帳の正直な宣言**: 「誰が書いたか」= git（PRレビュー・blame）、「いつどの版が配信状態になったか」= DB。コンテナ内に git メタデータは無く、**取れない帰属を偽装記帳しない**。refresh API 経由のときのみ `changed_by=操作者`。
 - 記帳は `services.record_review_event` 経由・カタログ定数必須（`test_audit_entity_catalog_guardrails.py:72-99` が生リテラルを拒否）。`_AUDIT_CALLER_FILES` 追記と CLAUDE.md 語彙集合の更新を手順に含める。
-- チームAは「git+デプロイ記録で足りる」と反対したが、**学生が誤った操作案内を受けた時に「その時点で配信されていた版」を人力突合なしで特定できる**価値と、26語彙の監査カタログを持つ本リポジトリで AIの知識源だけが監査圏外になる非一貫性を重く見て採用（B・C 2:1、コスト30〜50行）。
+- 採用意義: 学生が誤った操作案内を受けた時に「その時点で配信されていた版」を人力突合なしで特定できる。git のデプロイ記録でも代替可能なため、この利便性が実運用で要求されるまでは作らない。
 
 ---
 
@@ -180,7 +249,6 @@ capabilities: [materials.upload]  # 任意。registry と相互参照（実在�
 | docs 手術: ディレクトリ物理分離・01分割・denylist スクラブ・front-matter・全70節 `{#anchor}`・34リンク張り替え・TODO 15件解消 | docs 編集（〜1,100行改訂） |
 | 学生 HELP: typed action 1行 + `_is_usage_question` pre-route（casual 手前）+ ハンドラ + `manual_citations` + `_INTEREST_KINDS` に `help_usage` + CHIT_CHAT 文言 | learning.py 〜100〜150行 |
 | Copilot guidance への teacher/system_admin 索引フォールバック | admin_assistant.py 〜30行 |
-| `AUDIT_ENTITY_MANUAL` + 起動時 content-hash 記帳 | 30〜50行 |
 | app.js: ヘルプボタン + `manual_citations` 出典表示 + 音声フェイルソフト | 〜80行 |
 | ガードレールテスト（§6） | 400〜600行 |
 
@@ -195,6 +263,7 @@ capabilities: [materials.upload]  # 任意。registry と相互参照（実在�
 
 - **ベクトル補助層（migration `manual_sections`）**: 着手条件 =「`help_usage` 痕跡の無ヒット率が運用で実測され、非ベクトル検索の限界がレンジ表示で示されたとき」のみ。着手時の必須条件: ①専用テーブル（chunks 非汚染）②**シード = 全置換スナップショット（現行ファイル集合に無い `(file, anchor)` 行を同一トランザクションで DELETE — 孤児行が存在しない機能の古い説明を返すドリフトの遮断）**③凍結検証を通過した節のみ埋め込む ④`library_entry_versions`（042_knowledge_library.sql:36-50）前例踏襲・70節なら HNSW 不要。参考実測: 全70節で約22Kトークン・`embedder.py:61 _BATCH=100` で1コール。
 - **DB draft/freeze**: 着手条件 = (a) git 非利用の編集者（事務職員等）の運用開始 (b) デプロイ独立の版操作要求の実測 (c) audience 別部分公開の必要、のいずれか。移行時は `revision_store.update_with_revision_lock` / `idempotent_seed_import`（revision_store.py:56-69, 114-122）へ委譲。
+- **content-hash 監査記帳**（§2-3 温存分）: 着手条件 =「配信中のマニュアル版を DB で同定する必要が実運用で生じたとき」。git のコミット履歴で足りるうちは作らない。約30〜50行。
 
 ---
 
@@ -212,7 +281,7 @@ capabilities: [materials.upload]  # 任意。registry と相互参照（実在�
 8. **front-matter 契約 + anchor 整合**: audience 必須・ディレクトリ一致 / `capabilities:` 記載 id が registry に実在 / admin_operations の `role:` ⟷ `required_role` 一致 / 全見出しに明示 `{#anchor}`・ファイル内一意 / manual→admin_operations 全リンク解決。
 9. **数値非表示**: HELP レスポンス / `manual_citations` に confidence/score キーが漏れない（test_next_steps_guardrails.py:264 の禁止語彙パターン踏襲）。
 10. **k=3 再定義禁止**: 集約コードが `core/privacy.py` を import しリテラル再定義しない。
-11. **構造規約**: `core/help_kb/` の FastAPI 非 import / 索引・監査の削除 API 不在 / 監査はカタログ定数経由（`_AUDIT_CALLER_FILES` 追記込み）/ フロントに `setInterval` 不在（ポーリング禁止）。
+11. **構造規約**: `core/help_kb/` の FastAPI 非 import / 索引の削除 API 不在 / フロントに `setInterval` 不在（ポーリング禁止）。（content-hash 監査記帳は Phase 1 不採用のため、監査カタログ定数経由の検査は Phase 3 で採用した場合にのみ追加する。）
 12. **委譲互換**: `admin_assistant/knowledge.py` 委譲化後も既存テスト（test_admin_assistant.py:250-267）が無変更で通る。
 13. **chunks 非汚染**: help_kb が `chunks` テーブル・`search_chunks_with_metadata` に触れない（ソース検査）。
 14. **G層整合（Phase 2）**: 新ルール3本の capability 実在・fail-closed・dismiss が行削除しない（test_next_steps_guardrails.py へ追加）。
@@ -238,14 +307,16 @@ capabilities: [materials.upload]  # 任意。registry と相互参照（実在�
 
 ---
 
-## 8. 未決事項（ユーザー判断が必要）
+## 8. 決定事項（2026-07-25 ユーザー確定）
 
-1. **docs/manual の未コミット状態**: 対象マニュアル5ファイル（2026-07-22 新設）と本設計の前提となる大量の未コミット変更が ura-dev に滞留している。**Phase 0 着手前にコミット分割の方針**（マニュアルを先にコミットするか、本設計の docs 手術後にまとめるか）の判断が必要。
-2. **ディレクトリ物理分離の範囲**: 本設計は teacher/system_admin を含む全分離を採用したが、チームCは「分割が本当に必要なのは汚染実証済みの 01 のみ」と最後まで主張した。34リンク張り替え + 履歴の churn を許容するか、01 分割のみの縮小版にするかは最終的に運用者の好みが残る（設計としては全分離を推奨 — 以後の節単位タグ規律が不要になり最小メンテ）。
-3. **TODO #5 系の製品判断**: 「コース非公開化→既受講者は次回アクセスから閲覧不可」等、現行挙動をマニュアルに固定化してよいかは製品判断。矛盾2件と異なり技術的には解消済みのため、別 issue 化の要否と優先度の判断を仰ぐ。
-4. **content-hash 監査記帳（§2-3）の Phase 1 同梱**: B・C 採用 / A 反対で 2:1 採用としたが、30〜50行とはいえ「起動時 DB 書込」が増える。Phase 2 送りにしたい場合は fail-closed・捏造禁止は一切弱くならない（Aの指摘どおり）ため降格可能。
-5. **音声・casual での LLM 整形の既定**: 本設計は「音声のみ整形・テキストは素通し」としたが、テキストでも短い会話調を好むユーザーがいる場合、整形をオプトインにする UI（トグル）を作るかは体験判断。
-6. **既存 Admin Copilot KB の本番縮退の確認**: Phase 0 の docker 実機検証で `kb_available()==False` が確定した場合、「Admin Copilot の guidance が本番で常に『未整備』を返していた」期間の告知・hotfix の扱い（通常リリースに載せるか緊急修正か）。
+討議後の未決6件は以下のとおり確定した。本文は本決定を反映済み。
+
+1. **コミット状態**: ✅ 解決済み。ura-dev は clean・origin/ura-dev と同期済み。本設計書は `e3e0a8e feat: AIエージェントのナレッジベース` にコミット済み、対象マニュアル5ファイル `docs/manual/*.md` も追跡済み。着手前の追加コミット分割は不要（メモリにあった過去の大量未コミットは別ブランチ learning-ux / dev の話で、ura-dev には元々含まれない）。
+2. **ディレクトリ物理分離の範囲**: **全分離で確定**（student / teacher / system_admin）。以後の節単位タグ規律が不要になり最小メンテになる。34リンク張り替え + 01 分割は Phase 1 の docs 作業に計上。§3-1。
+3. **TODO 要確認（実測17注釈 + 地の文1）**: **各項目とも実コードで事実を調べ、現行挙動をマニュアルに書いて閉じる**。「コース非公開化→既受講者は次回アクセスから閲覧不可・再公開で復元」（services.py:631）のような**挙動そのものの是非（仕様変更の要否）はマニュアル整備の範囲外**とし、気になるものだけ別 issue に切り出す。矛盾2件（#11 説明バージョン履歴 / #16 ライブラリ restore）は Phase 0 で本文修正。§3-4。
+4. **content-hash 監査記帳（§2-3）**: **Phase 1 不採用で確定**。版の変化は git のコミット履歴で追跡でき、fail-closed / 捏造禁止といった安全性には寄与しない。必要が生じたら Phase 3 の任意項目として足す（設計は §2-3 に温存）。
+5. **音声・casual での LLM 整形の既定**: **「音声・casual のみ整形・テキストは本文素通し」で確定**。文字回答の会話口調トグルは作らない（使い方説明は正確さが価値）。§1-3-4。
+6. **既存 Admin Copilot KB の本番縮退の確認**: **まず Phase 0 で事実確認**（本番相当コンテナで `kb_available()==True` を検証）。`kb_available()==False` が確定した場合は Dockerfile 2行の軽微修正として**通常の Phase 0 リリースに含めて対応**。過去に「guidance が本番で常に『未整備』を返していた」期間の告知・緊急対応の要否は、事実確認の結果を見てから判断する。
 
 ---
 
