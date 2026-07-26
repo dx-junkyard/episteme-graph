@@ -438,17 +438,78 @@
       '</div></div>';
   }
 
+  // 帰属様相（doubt_type）の語彙。正本は
+  // backend/core/structure_anchor/schema.py::DOUBT_TYPE_LABELS で、app.js の
+  // ANCHOR_DOUBT_OPTIONS と同じ並び。このモジュールを自己完結させるため意図的に
+  // 複製している（DISCUSS_TOPIC_ID と同じ方針）。
+  var ANCHOR_DOUBT_OPTIONS = [
+    { doubt_type: "definition", label: "定義がわからない" },
+    { doubt_type: "justification_gap", label: "なぜ成り立つのか" },
+    { doubt_type: "premise", label: "前提への疑い" },
+    { doubt_type: "prior_conflict", label: "既有知識との衝突" },
+    { doubt_type: "scope", label: "どこまで成り立つのか" },
+    { doubt_type: "connection", label: "他とどう繋がるのか" },
+  ];
+
+  // 帰属候補カード。確定するのは「どこへの・どの様相の引っかかりだったか」（帰属）で
+  // あって「理解」ではない。API が返す anchor_label / doubt_type_label を落として
+  // 質問文だけを見せると、自分が書いた質問がそのまま返ってくるだけのカードになるため、
+  // app.js の renderAnchorDigestCard と同じ問いかけの形に揃える（確定は本人のみ。P1）。
   function anchorCardHtml(item) {
     var tid = esc(item.trace_id);
-    return '<div class="discuss-landing-card" data-discuss-anchor-card="' + tid + '">' +
-      (item.context_label ? '<div class="discuss-landing-card-ctx">' + esc(item.context_label) + '</div>' : "") +
-      '<div class="discuss-landing-card-quote">『' + esc(item.question_text || "") + '』</div>' +
-      '<div class="discuss-landing-card-actions">' +
-      '<button type="button" class="discuss-landing-card-btn" data-discuss-anchor-confirm="' + tid + '">' +
-      'この理解で残す</button>' +
-      '<button type="button" class="discuss-landing-card-btn secondary" data-discuss-anchor-dismiss="' + tid + '">' +
-      '違う</button>' +
-      '</div></div>';
+    var where = item.anchor_label || item.anchor_type_label || "";
+    var doubtLabel = item.doubt_type_label || "";
+    var vague = !item.doubt_type || item.doubt_type === "unclassified" || !doubtLabel;
+    var head;
+    if (where && !vague) {
+      head = 'この疑問は「' + esc(where) + '」の<b>' + esc(doubtLabel) + '</b>についてでしたか?';
+    } else if (where) {
+      head = 'この疑問は「' + esc(where) + '」についてでしたか?';
+    } else if (!vague) {
+      head = 'この疑問は<b>' + esc(doubtLabel) + '</b>についてでしたか?';
+    } else {
+      head = 'この疑問はどこへの引っかかりでしたか?';
+    }
+    var html = '<div class="discuss-landing-card" data-discuss-anchor-card="' + tid + '">';
+    html += '<div class="discuss-landing-card-ctx">疑問の在り処' +
+      (item.context_label ? ' · ' + esc(item.context_label) : "") + '</div>';
+    html += '<div class="discuss-landing-card-head">' + head + '</div>';
+    html += '<div class="discuss-landing-card-quote">『' + esc(item.question_text || "") + '』</div>';
+    html += '<div class="discuss-landing-card-actions">';
+    html += '<button type="button" class="discuss-landing-card-btn" data-discuss-anchor-confirm="' + tid + '">' +
+      'そう、これ</button>';
+    html += '<button type="button" class="discuss-landing-card-btn secondary" data-discuss-anchor-dismiss="' + tid + '">' +
+      '違う</button>';
+    html += '</div>';
+    // 様相の訂正チップ（提案と違う様相ならタップでその doubt_type に訂正して確定する）。
+    html += '<div class="discuss-landing-card-chips">';
+    html += '<span class="discuss-landing-card-chips-hd">様相が違うなら:</span>';
+    ANCHOR_DOUBT_OPTIONS.forEach(function (o) {
+      if (o.doubt_type === item.doubt_type) return;
+      html += '<button type="button" class="discuss-landing-card-btn secondary" ' +
+        'data-discuss-anchor-correct="' + tid + '" data-discuss-anchor-doubt="' + esc(o.doubt_type) + '">' +
+        esc(o.label) + '</button>';
+    });
+    html += '</div></div>';
+    return html;
+  }
+
+  // 「今日の理解を自分の言葉で」（着地画面の先頭）。候補（tension / anchor）は本人が
+  // 書いた発話から非同期 LLM が起こすため、質問しかしていない対話からは残す価値のある
+  // 理解が生まれない。ここは候補生成を待たず、本人の記述をそのまま tension として
+  // 残す唯一の直接経路（確定するのは本人・LLM 非経由。P1）。
+  function reflectionSectionHtml() {
+    var html = '<div class="discuss-landing-section">';
+    html += '<div class="discuss-landing-section-hd">今日の理解を自分の言葉で</div>';
+    html += '<p class="discuss-landing-section-body">議論して分かったこと・まだ引っかかっていることを1〜2文で。' +
+      '書いたものはそのまま「わたしの地図」に残ります（あなたにだけ表示されます）。</p>';
+    html += '<div class="discuss-landing-reflect" id="discuss-landing-reflect">';
+    html += '<textarea id="discuss-landing-reflect-input" rows="2" ' +
+      'placeholder="例: 感度が効くのは共振の幅の内側だけだと理解した。ただし雑音の効き方はまだ腑に落ちない。"></textarea>';
+    html += '<div class="discuss-landing-card-actions">';
+    html += '<button type="button" class="discuss-landing-card-btn" id="discuss-landing-reflect-save">残す</button>';
+    html += '</div></div></div>';
+    return html;
   }
 
   function landingShellHtml(bodyHtml) {
@@ -479,6 +540,17 @@
     root.querySelectorAll("[data-discuss-anchor-dismiss]").forEach(function (btn) {
       btn.addEventListener("click", function () { dismissAnchorCard(this.getAttribute("data-discuss-anchor-dismiss")); });
     });
+    // 様相の訂正チップ: 提案とは違う doubt_type で確定する（訂正も本人の操作。P1）。
+    root.querySelectorAll("[data-discuss-anchor-correct]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        confirmAnchorCard(
+          this.getAttribute("data-discuss-anchor-correct"),
+          this.getAttribute("data-discuss-anchor-doubt") || ""
+        );
+      });
+    });
+    var reflectBtn = document.getElementById("discuss-landing-reflect-save");
+    if (reflectBtn) reflectBtn.addEventListener("click", saveReflection);
     var reconBtn = document.getElementById("discuss-landing-recon-btn");
     if (reconBtn) {
       reconBtn.addEventListener("click", function () {
@@ -552,15 +624,51 @@
     if (card) card.remove();
   }
 
-  async function confirmAnchorCard(traceId) {
+  // doubtType を渡すとその様相に訂正して確定する（空文字なら候補どおり確定）。
+  async function confirmAnchorCard(traceId, doubtType) {
     var card = document.querySelector('[data-discuss-anchor-card="' + traceId + '"]');
     sendDiscussMetric("landing_confirmed", { kind: "anchor" });
     try {
       await apiFetch("/learning/anchors/" + encodeURIComponent(traceId) + "/confirm", {
-        method: "POST", body: JSON.stringify({ doubt_type: "" }),
+        method: "POST", body: JSON.stringify({ doubt_type: doubtType || "" }),
       });
     } catch (e) { /* best-effort */ }
     if (card) card.innerHTML = '<div class="discuss-landing-card-done">地図に置きました。</div>';
+  }
+
+  // 「今日の理解を自分の言葉で」の保存。候補の confirm と違い、失敗を握りつぶすと
+  // 本人が書いた文章が消えるだけになるので、失敗時は入力を残したまま事実文を出す。
+  async function saveReflection() {
+    var box = document.getElementById("discuss-landing-reflect");
+    var input = document.getElementById("discuss-landing-reflect-input");
+    if (!box || !input) return;
+    var text = (input.value || "").trim();
+    if (!text) { input.focus(); return; }
+    var btn = document.getElementById("discuss-landing-reflect-save");
+    if (btn) btn.disabled = true;
+    var ok = false;
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + encodeURIComponent(ctx.courseId) + "/discuss/reflection",
+        { method: "POST", body: JSON.stringify({ text: text }) }
+      );
+      ok = !!(res && res.ok);
+    } catch (e) {
+      ok = false;
+    }
+    if (!ok) {
+      if (btn) btn.disabled = false;
+      var err = box.querySelector(".discuss-landing-reflect-error");
+      if (!err) {
+        err = document.createElement("div");
+        err.className = "discuss-landing-reflect-error";
+        box.appendChild(err);
+      }
+      err.textContent = "保存できませんでした。入力はそのまま残しています。";
+      return;
+    }
+    sendDiscussMetric("landing_reflection_saved", {});
+    box.innerHTML = '<div class="discuss-landing-card-done">地図に置きました。</div>';
   }
 
   async function dismissAnchorCard(traceId) {
@@ -576,6 +684,8 @@
 
   function buildLandingBodyHtml(tensionItems, anchorItems, reconItem) {
     var html = "";
+    // 本人の言葉を先頭に置く（候補の有無に関わらず常に出す）。
+    html += reflectionSectionHtml();
     html += '<div class="discuss-landing-section">';
     html += '<div class="discuss-landing-section-hd">今日話した内容を地図に置く</div>';
     if (tensionItems.length === 0 && anchorItems.length === 0) {

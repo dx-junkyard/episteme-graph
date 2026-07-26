@@ -2929,6 +2929,47 @@ def dismiss_tension_trace(user_id: str, trace_id: str) -> dict | None:
     return {"trace_id": str(trace_id), "status": "dismissed"}
 
 
+def record_learner_articulated_tension(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    text: str,
+    context_label: str = "",
+    origin: str = "",
+) -> dict | None:
+    """本人が自分の言葉で書いた理解・引っかかりを tension として1行記録する。
+
+    LLM 候補（``status='candidate'``）を経由しない点が
+    ``confirm_tension_trace`` との違い。着地画面の「今日の理解を自分の言葉で」の
+    ように、本人の記述そのものが起点になる導線で使う。違和感を生成するのは人間で
+    あるという不変条項（P1）はここでも保たれる — LLM は一切関与しない。
+
+    ``status='articulated'`` は ``TENSION_OWNED_STATUSES``（本人が引き受けた状態）に
+    含まれるため、この行はそのまま個人知識ネットワークのノードになる。
+    空文字は記録しない（None を返す）。
+    """
+    text = (text or "").strip()[:1000]
+    if not text:
+        return None
+    payload = {"learner_text": text, "self_articulated": True}
+    if origin:
+        payload["origin"] = origin
+    trace_id = record_interest_trace(
+        user_id, course_id, topic_id,
+        kind="tension",
+        text=text,
+        context_label=context_label,
+        extra_payload=payload,
+        status="articulated",
+    )
+    if trace_id is None:
+        return None
+    # 監査（P5 相当）: 候補経由ではないので old_status は空文字にする。
+    _record_tension_event(trace_id, "", "articulated", user_id,
+                          {"origin": origin} if origin else None)
+    return {"trace_id": str(trace_id), "status": "articulated"}
+
+
 def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool:
     """connect 先の component が本人にとって閲覧可能な document に属するかを検証する。
 

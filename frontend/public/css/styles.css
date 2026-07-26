@@ -8762,10 +8762,26 @@ body.inspect-mode [data-ui-anchor]:hover {
   color: var(--color-text-tertiary);
   margin-bottom: 4px;
 }
-.discuss-landing-card-quote {
+.discuss-landing-card-head {
   color: var(--color-text-primary);
   line-height: 1.6;
+  margin-bottom: 4px;
+}
+.discuss-landing-card-quote {
+  color: var(--color-text-secondary);
+  line-height: 1.6;
   margin-bottom: 8px;
+}
+.discuss-landing-card-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.discuss-landing-card-chips-hd {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
 }
 .discuss-landing-card-actions {
   display: flex;
@@ -8797,6 +8813,23 @@ body.inspect-mode [data-ui-anchor]:hover {
   margin-bottom: 8px;
   resize: vertical;
   box-sizing: border-box;
+}
+.discuss-landing-reflect textarea {
+  width: 100%;
+  min-height: 52px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.discuss-landing-reflect-error {
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  margin-top: 6px;
 }
 .discuss-landing-empty {
   font-size: 12px;

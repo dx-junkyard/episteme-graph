@@ -461,3 +461,37 @@ tension prefilter・structure_anchor worker の `_discussion` 耐性 / **reconst
    未知 stage は従来どおりコードの整形表示へ縮退する。
 
 未着手（別件）: 中心命題の日本語要約（要パイプライン変更）。現状は原文のまま3行クランプ。
+
+### 9.6 着地画面の実効性改修（2026-07-26）
+
+「『今日の議論を振り返る』に出るカードが、いずれも残す意味のない内容になっている」という
+オーナー指摘を受けた改修。§3.5 の**構成**（候補 → 理解の確認 → 続きを学ぶ、スキップ可）は
+変えず、カードの中身と「残せるもの」の供給源を直す。
+
+診断（実画面 + コード）:
+
+| 症状 | 原因 |
+|---|---|
+| 3枚とも自分が打った質問文の echo で、ボタンが「この理解で残す」 | `anchorCardHtml` が anchors/digest の `anchor_label` / `anchor_type_label` / `doubt_type_label` を捨て `question_text` だけを描画していた。app.js の `renderAnchorDigestCard` は同じ API から「この疑問は『◯◯』の**定義がわからない**についてでしたか？」を出しており、着地版だけが意味を落としていた。confirm の実体は帰属の確定であって「理解を残す」ではない |
+| 残す価値のある「理解」が1つも並ばない | tension 候補は非LLM prefilter のヘッジ・逆接・再訪マーカーでしか立たず（`core/tension/prefilter.py`）、質問→回答だけの往復では発生しない。DM4 の生成プロンプト（末尾の言い換え・問い返し）が守られても、学習者の言い直しを受け止める先が無く `kind='question'` の痕跡になるだけだった |
+| 「理解の確認」区画が出ない | 再構成 item は `teacher_approved` 等の承認済み claim にしか自動生成されない（`core/reconstruction/worker.py`）。claim 未レビューのコースでは永久に出ない（既知の限界。本改修の対象外） |
+
+確定した修正:
+
+1. **帰属カードを帰属の問いに戻す**（app.js と同じ形）。見出し「この疑問は『◯◯』の**◯◯**
+   についてでしたか?」＋ 質問文は引用として残す ＋ 様相（doubt_type）の訂正チップ。
+   `unclassified` / ラベル欠落時は断定せず「この疑問はどこへの引っかかりでしたか?」へ縮退し、
+   様相はチップから本人が選ぶ。訂正確定も `POST /api/learning/anchors/{id}/confirm` の
+   `doubt_type` で行い、確定するのは常に本人（P1）。
+2. **「今日の理解を自分の言葉で」を着地画面の先頭に常設**（候補の有無に関わらず出す）。
+   `POST /api/learning/courses/{course_id}/discuss/reflection`（新規・非LLM・migration 不要）
+   が本人の記述を `kind='tension'` / `status='articulated'` の痕跡として1行記録する
+   （`services.record_learner_articulated_tension`。候補 `candidate` を経由しないので
+   LLM は一切関与しない）。`articulated` は `TENSION_OWNED_STATUSES` に含まれるため、
+   この行はそのまま「わたしの地図」のノードになる。保存失敗時は入力を消さず事実文を出す。
+   監査は既存 `entity_type='tension'`（old_status は空文字）。
+3. **観測**: `landing_reflection_saved` を `METRIC_EVENT_VOCAB` に追加（14語彙目）。候補の
+   `landing_confirmed` とは別導線なので合算しない。payload は空（DO1: 本文を積まない）。
+
+非スコープ（このラウンドではやらない）: DM4 の遵守自体の計測（応答末尾に誘い・問い返しが
+あったかの判定）、prefilter への言い換え宣言マーカー追加、再構成 item のオーサリング条件緩和。

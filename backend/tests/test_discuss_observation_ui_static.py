@@ -199,7 +199,8 @@ class TestDiscussJsMetricHelper:
         js = _read(DISCUSS_JS)
         tension_block = _extract_function_body(js, "function openTensionInlineConfirm(traceId) {")
         assert 'sendDiscussMetric("landing_confirmed", { kind: "tension" })' in tension_block
-        anchor_block = _extract_function_body(js, "async function confirmAnchorCard(traceId) {")
+        # doubtType は様相の訂正確定（chips）用の任意引数。訂正でも confirm 1件として数える。
+        anchor_block = _extract_function_body(js, "async function confirmAnchorCard(traceId, doubtType) {")
         assert 'sendDiscussMetric("landing_confirmed", { kind: "anchor" })' in anchor_block
 
     def test_landing_dismissed_wired_for_tension_and_anchor(self):

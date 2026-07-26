@@ -370,11 +370,13 @@ class TestMetricEventVocabAndPayloadWhitelist:
         "landing_skipped",
         "landing_probe_clicked",
         "landing_continue_clicked",
+        # 着地画面の「今日の理解を自分の言葉で」保存（候補 confirm とは別導線）
+        "landing_reflection_saved",
     }
 
-    def test_vocab_matches_design_doc_13_events(self):
+    def test_vocab_matches_design_doc_14_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 13
+        assert len(observation.METRIC_EVENT_VOCAB) == 14
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(

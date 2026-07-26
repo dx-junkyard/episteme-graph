@@ -1140,7 +1140,16 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   （tension/anchors digest の confirm/dismiss + 再構成プローブ「あれば1問」=
   `reconstruction/next` の未知 topic コース全体フォールバック挙動を `_discussion` で流用 +
   「このトピックで続きを学ぶ」情報的提示）。トリガー = 明示終了 / トピック切替 /
-  無活動15分（ポーリング禁止）。
+  無活動15分（ポーリング禁止）。着地の帰属カードは anchors/digest の
+  `anchor_label` / `doubt_type_label` を必ず提示する（質問文だけの echo に戻さない —
+  confirm の実体は「理解を残す」ではなく帰属の確定。app.js の `renderAnchorDigestCard`
+  と同型、様相の訂正チップ付き）。加えて着地画面先頭の「今日の理解を自分の言葉で」
+  （`POST /api/learning/courses/{course_id}/discuss/reflection`、非LLM・migration 不要）が
+  本人の記述を `kind='tension'` / `status='articulated'` の痕跡として直接記録する
+  （`services.record_learner_articulated_tension`。候補 candidate を経由しない = LLM 非関与、
+  `articulated` は `TENSION_OWNED_STATUSES` なのでそのまま「わたしの地図」に載る）。
+  観測イベントは `landing_reflection_saved`（候補の `landing_confirmed` と合算しない）。
+  設計記録は設計書 §9.6。
 - **フロント**（`app.js` + `discuss.js`（`window.Discuss`、reconstruction.js と同型の後付け
   パターン））: サイドバー最上部の**二枚看板**（「順番に学ぶ」/「この論文と議論する」を等重表示。
   現アプリにコース着地画面が無いため設計書 §3.2 の想定をサイドバー常設ブロックに軌道修正、

@@ -330,6 +330,9 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         "landing_skipped",
         "landing_probe_clicked",
         "landing_continue_clicked",
+        # 着地画面「今日の理解を自分の言葉で」の保存（候補の confirm とは別の導線なので
+        # landing_confirmed には合算しない）。
+        "landing_reflection_saved",
     }
 )
 

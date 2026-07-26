@@ -62,6 +62,7 @@ from services import (
     truncate_chat_and_supersede,
     record_internalization,
     record_interest_trace,
+    record_learner_articulated_tension,
     record_student_stumble_event,
     record_topic_check_pass,
     resolve_interest_trace,
@@ -2731,6 +2732,42 @@ def get_discussion_opening(
 
     document_ids = list_course_source_document_ids(course_data)
     return build_discussion_opening(course_id, document_ids)
+
+
+class DiscussReflectionRequest(BaseModel):
+    text: str = ""
+
+
+@router.post("/courses/{course_id}/discuss/reflection", status_code=201)
+def record_discuss_reflection(
+    course_id: str,
+    body: DiscussReflectionRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """着地画面の「今日の理解を自分の言葉で」を本人の tension 痕跡として残す。
+
+    着地画面に並ぶ候補（tension / anchor）は、いずれも学習者が既に書いた発話から
+    非同期 LLM が起こしたものであり、質問しかしていない対話からは「残す価値のある
+    理解」が生まれない。この API は候補の生成を待たず、**本人が書いた一文をそのまま**
+    確定済み（``status='articulated'``）の tension として記録する導線を与える。
+
+    LLM 呼び出し 0 回・migration 不要（DM8）。確定するのは常に本人（P1）で、
+    AI が代わりに理解を要約して置くことはしない。空文字は 422。
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    result = record_learner_articulated_tension(
+        current_user["id"], course_id, DISCUSSION_TOPIC_ID, text,
+        context_label=DISCUSSION_TOPIC_LABEL,
+        origin="discuss_landing",
+    )
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to record reflection")
+    return {"ok": True, **result}
 
 
 @router.get("/courses/{course_id}/source-chunk/{chunk_id}")
