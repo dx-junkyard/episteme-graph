@@ -86,11 +86,56 @@
 
   // ── 開幕画面（§3.3）─────────────────────────────────────────────────
 
-  function discussChip(label, documentId) {
+  // 起点となる定型質問。押すとこの文がそのまま送信される（bindOpeningEvents）。
+  function askText(label) {
+    return "「" + label + "」について、この論文での位置づけと根拠を教えてください。";
+  }
+
+  function discussChip(label) {
     if (!label) return "";
-    var text = "「" + label + "」について、この論文での位置づけと根拠を教えてください。";
-    return '<button type="button" class="discuss-chip" data-discuss-ask="' + esc(text) + '">' +
+    return '<button type="button" class="discuss-chip" data-discuss-ask="' + esc(askText(label)) + '">' +
       esc(label) + '</button>';
+  }
+
+  // 中心命題は「押すもの」ではなく「読むもの」として出す（claim の label は論文原文
+  // ＝長い1文になりうるため、チップに詰めると読めない）。本文は CSS で3行に抑え、
+  // 全文は明示操作で開く。行動（質問開始）は下のボタンに分離する。
+  // 原文を要約・和訳して出すことはしない（開幕画面は非LLM・既存成果の投影のみ, DM8）。
+  var CLAIM_CLAMP_HINT_CHARS = 60;
+
+  function claimBlockHtml(item) {
+    var label = (item && item.label) || "";
+    if (!label) return "";
+    var html = '<div class="discuss-claim">';
+    html += '<div class="discuss-claim-text">' + esc(label) + '</div>';
+    html += '<div class="discuss-claim-actions">';
+    html += '<button type="button" class="discuss-claim-ask" data-discuss-ask="' +
+      esc(askText(label)) + '">この主張について聞く</button>';
+    if (label.length > CLAIM_CLAMP_HINT_CHARS) {
+      html += '<button type="button" class="discuss-claim-more" data-discuss-expand="1">全文を見る</button>';
+    }
+    html += '</div></div>';
+    return html;
+  }
+
+  // 支持構造（前提 / 導出の核 / 訂正の源 …）は A層の分類語彙で、閉じた状態では
+  // 専門用語の縦積みにしか見えない。区画ごとに details を開かず、1つに畳んでおく。
+  function renderSupportDetails(sections) {
+    var usable = (sections || []).filter(function (sec) {
+      return sec && Array.isArray(sec.items) && sec.items.length > 0;
+    });
+    if (!usable.length) return "";
+    var html = '<details class="discuss-support-section discuss-support-details">';
+    html += '<summary>支持構造をくわしく見る</summary>';
+    usable.forEach(function (sec) {
+      html += '<div class="discuss-support-group">';
+      html += '<div class="discuss-support-group-hd">' + esc(sec.label || "") + '</div>';
+      html += '<div class="discuss-chip-row">';
+      sec.items.forEach(function (item) { html += discussChip(item && item.label); });
+      html += '</div></div>';
+    });
+    html += '</details>';
+    return html;
   }
 
   function renderThesisSection(doc, fragilePoints) {
@@ -100,36 +145,28 @@
     });
     var html = '<div class="discuss-section discuss-section-thesis">';
     html += '<div class="discuss-section-hd">この論文が賭けているもの</div>';
+    html += '<div class="discuss-section-sub">この論文がいちばん言いたいことです。</div>';
     if (thesis) {
       var claims = Array.isArray(thesis.central_claims) ? thesis.central_claims : [];
       var equations = Array.isArray(thesis.central_equations) ? thesis.central_equations : [];
-      if (claims.length || equations.length) {
+      claims.forEach(function (c) { html += claimBlockHtml(c); });
+      if (equations.length) {
+        html += '<div class="discuss-section-sub discuss-central-eq-hd">中心となる式</div>';
         html += '<div class="discuss-chip-row">';
-        claims.forEach(function (c) { html += discussChip(c && c.label, doc.document_id); });
-        equations.forEach(function (e) { html += discussChip(e && e.label, doc.document_id); });
+        equations.forEach(function (e) { html += discussChip(e && e.label); });
         html += '</div>';
       }
-      var sections = Array.isArray(thesis.support_sections) ? thesis.support_sections : [];
-      sections.forEach(function (sec) {
-        if (!sec || !Array.isArray(sec.items) || sec.items.length === 0) return;
-        html += '<details class="discuss-support-section">';
-        html += '<summary>' + esc(sec.label || "") + '</summary>';
-        html += '<div class="discuss-chip-row">';
-        sec.items.forEach(function (item) {
-          html += discussChip(item && item.label, doc.document_id);
-        });
-        html += '</div></details>';
-      });
+      html += renderSupportDetails(thesis.support_sections);
     } else {
       html += '<div class="discuss-muted">この論文の中心命題はまだ整理されていません。</div>';
     }
     if (docFragile.length) {
-      html += '<div class="discuss-fragile">';
-      html += '<div class="discuss-fragile-hd">最も脆い一手</div>';
+      html += '<details class="discuss-support-section discuss-fragile">';
+      html += '<summary>最も脆い一手（根拠がまだ確認されていない箇所）</summary>';
       docFragile.forEach(function (f) {
         html += '<div class="discuss-fragile-item">' + esc(f.fact_line || "") + '</div>';
       });
-      html += '</div>';
+      html += '</details>';
     }
     html += '</div>';
     return html;
@@ -139,22 +176,33 @@
     var nodes = Array.isArray(doc.backbone) ? doc.backbone : [];
     var html = '<div class="discuss-section discuss-section-backbone">';
     html += '<div class="discuss-section-hd">理論のバックボーン</div>';
+    html += '<div class="discuss-section-sub">この論文は、この順に組み立てられています。押すと、その段階から話せます。</div>';
     if (!nodes.length) {
       html += '<div class="discuss-muted">この論文のバックボーンはまだ整理されていません。</div>';
     } else {
-      html += '<div class="discuss-backbone-list">';
-      nodes.forEach(function (n) {
+      var hasReview = false;
+      // 段階の並び（stage 順）が読み取れるよう、横並びの矢印つなぎで出す。
+      // ラベルは stage_label（学習者向け日本語）を優先し、stage が未知のときだけ
+      // ノードの label（A層の保存値）へ縮退する — main ノードの label は stage 名
+      // そのものなので、両方描くと同じ文字が二重に出る。
+      html += '<div class="discuss-backbone-list discuss-backbone-flow">';
+      nodes.forEach(function (n, i) {
         var backed = n && n.source_backing_status === "source_backed";
+        if (!backed) hasReview = true;
         var cls = "discuss-backbone-node" + (backed ? "" : " discuss-backbone-node--review");
-        var label = (n && n.label) || "";
-        var text = "「" + label + "」について、この論文での位置づけと根拠を教えてください。";
-        html += '<button type="button" class="' + cls + '" data-discuss-ask="' + esc(text) + '"' +
+        var label = (n && n.stage_label) || (n && n.label) || "";
+        if (i > 0) html += '<span class="discuss-backbone-arrow" aria-hidden="true">›</span>';
+        html += '<button type="button" class="' + cls + '" data-discuss-ask="' + esc(askText(label)) + '"' +
           (n && n.description ? ' title="' + esc(n.description) + '"' : '') + '>';
-        html += '<span class="discuss-backbone-stage">' + esc((n && n.stage_label) || "") + '</span>';
+        html += '<span class="discuss-backbone-num">' + (i + 1) + '</span>';
         html += '<span class="discuss-backbone-label">' + esc(label) + '</span>';
         html += '</button>';
       });
       html += '</div>';
+      if (hasReview) {
+        html += '<div class="discuss-muted discuss-backbone-legend">' +
+          '点線は、根拠がまだ確認されていない段階です。</div>';
+      }
     }
     if (doc.truncated) {
       html += '<div class="discuss-muted discuss-truncated-note">この一覧は主要なものに絞って表示しています。</div>';
@@ -172,6 +220,7 @@
   function renderFirstMoveSection() {
     var html = '<div class="discuss-section discuss-section-first-move">';
     html += '<div class="discuss-section-hd">最初の一手</div>';
+    html += '<div class="discuss-section-sub">ボタンを押すと、その話題から質問が始まります。</div>';
     html += '<div class="discuss-chip-row">';
     FIRST_MOVE_PROMPTS.forEach(function (p) {
       html += '<button type="button" class="discuss-chip discuss-first-move-chip" data-discuss-ask="' +
@@ -190,7 +239,11 @@
     var fragile = Array.isArray(data.fragile_points) ? data.fragile_points : [];
     var html = '<div class="discuss-opening">';
     html += '<div class="discuss-opening-note">' +
+      'トピック順に縛られず、論文全体について話せます。' +
       '回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。</div>';
+    // 行動の起点（最初の一手）を最上部に置く。以前は最下部にあり、初見の学習者が
+    // 最初に取れる操作が折り返し線の外にあった。
+    html += renderFirstMoveSection();
     docs.forEach(function (doc) {
       html += '<div class="discuss-opening-doc">';
       if (multi) html += '<div class="discuss-opening-doc-title">' + esc(doc.title || "") + '</div>';
@@ -198,7 +251,6 @@
       html += renderBackboneSection(doc);
       html += '</div>';
     });
-    html += renderFirstMoveSection();
     if (data.truncated) {
       html += '<div class="discuss-muted discuss-truncated-note">' +
         '論文・資料の一覧は主要なものに絞って表示しています。</div>';
@@ -218,6 +270,15 @@
           sendDiscussMetric("opening_starter_clicked", {});
         }
         if (text && window.sendPrompt) window.sendPrompt(text);
+      });
+    });
+    // 中心命題の本文は既定で3行に抑える（CSS）。全文表示は明示操作のみ。
+    containerEl.querySelectorAll("[data-discuss-expand]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var block = this.closest(".discuss-claim");
+        if (!block) return;
+        var expanded = block.classList.toggle("expanded");
+        this.textContent = expanded ? "折りたたむ" : "全文を見る";
       });
     });
   }

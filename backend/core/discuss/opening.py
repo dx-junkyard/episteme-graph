@@ -39,7 +39,13 @@ _MAX_FRAGILE_POINTS = 8
 # ---------------------------------------------------------------------------
 # theory stage 語彙（domain-neutral・A層コードを import しない写し）。
 # 順序の正本: core/atlas_state.py::_STAGE_ORDER（L3 導出チェーンが同じ並びを使う）。
-# 表示名の正本: src/episteme_graph/agents/component_graph/schema.py::THEORY_STAGE_LABELS。
+# stage コードの正本: src/episteme_graph/agents/component_graph/schema.py::THEORY_STAGES。
+#
+# 表示名は**学習者向けの日本語**にする（A層の THEORY_STAGE_LABELS は英語で、教員向け
+# 管理UI（admin.js / W層）はそちらを使い続ける）。開幕画面は学習者が最初に見る画面で、
+# `Theory basis` `Equation system` のような内部語彙をそのまま出すと理論の骨格ではなく
+# 分類名の羅列に見えてしまうため、この API に限り日本語表示名を持つ。stage コード自体は
+# domain-neutral のまま変えない。
 # ---------------------------------------------------------------------------
 
 _STAGE_ORDER = (
@@ -53,21 +59,22 @@ _STAGE_ORDER = (
 )
 
 _STAGE_LABELS = {
-    "theory_basis": "Theory basis",
-    "observation_model": "Observation model",
-    "observable_construction": "Observable construction",
-    "equation_system": "Equation system",
-    "elimination": "Elimination",
-    "consistency_relation": "Consistency relation",
-    "diagnostic_application": "Diagnostic / application",
+    "theory_basis": "理論の土台",
+    "observation_model": "観測モデル",
+    "observable_construction": "観測量の構成",
+    "equation_system": "方程式系",
+    "elimination": "消去",
+    "consistency_relation": "整合関係",
+    "diagnostic_application": "診断・応用",
 }
 
 
 def _stage_label(stage: str) -> str:
-    """stage コード → 表示ラベル。未知の stage は機械的な整形に縮退する（情報を落とさない）。
+    """stage コード → 学習者向け日本語表示ラベル。
 
-    正本 ``theory_stage_label()``（agents 側）と同じ縮退規則
-    （``snake_case`` → 先頭大文字の空白区切り）。
+    未知の stage は機械的な整形（``snake_case`` → 先頭大文字の空白区切り。正本
+    ``theory_stage_label()``（agents 側）と同じ縮退規則）に落とす。日本語訳を持たない
+    stage が増えてもコードそのものが読める形で残る（情報を落とさない）。
     """
     key = str(stage or "").strip()
     if not key:

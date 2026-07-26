@@ -7,8 +7,8 @@
 1. `_discussion` 予約疑似トピックで送信するとき、on_path/explore の既定判定より
    優先して `intent_mode: "discuss"` と `discuss_scope` を付与する配線がある
    （バックエンド契約: POST .../topics/_discussion/chat）。
-2. サイドバー二枚看板（「順番に学ぶ」/「この論文と議論する」）が同格（同じCSSクラス）
-   で存在し、ナビゲーションに配線されている。
+2. サイドバー二枚看板（「順番に学ぶ」/「論文と議論」）が同格（同じCSSクラス）
+   で存在し、ナビゲーションに配線されている。表示形態はセグメントコントロール。
 3. スコープ2段切替の2ラベルが存在し、値がバックエンド契約
    （course_sources / all_visible）と一致する。
 4. 「もっと自由に話す」常設リンクはサイドバー二枚看板と完全重複のため削除済み
@@ -106,12 +106,26 @@ class TestDiscussSendWiring:
 
 
 class TestTwoBannerEntry:
-    """設計 §3.2: 同じ視覚的重みの二枚看板。既定選択なし。"""
+    """設計 §3.2: 同じ視覚的重みの二枚看板。
+
+    表示形態は2枚のカードではなくセグメントコントロール（1つのピルに2セグメント）。
+    絵文字＋長い文字列で2行に折り返していたため短縮したが、等重（同一CSSクラス・
+    同幅）は維持する。アイコンのみにはしない（初見で意味が取れなくなる）。
+    """
 
     def test_two_buttons_present_with_expected_labels(self):
         js = _read(APP_JS)
-        assert "📘 順番に学ぶ" in js
-        assert "🗣 この論文と議論する" in js
+        assert ">順番に学ぶ</button>" in js
+        assert ">論文と議論</button>" in js
+
+    def test_mode_labels_are_single_line_short_text(self):
+        """ラベルは短く保つ（セグメント幅で折り返さないこと）。"""
+        js = _read(APP_JS)
+        for label in ("順番に学ぶ", "論文と議論"):
+            assert len(label) <= 6
+        # 旧・長ラベル（絵文字付き2行折り返し）の痕跡が残っていない
+        assert "📘 順番に学ぶ" not in js
+        assert "🗣 この論文と議論する" not in js
 
     def test_buttons_share_same_css_class_equal_weight(self):
         js = _read(APP_JS)
@@ -119,6 +133,19 @@ class TestTwoBannerEntry:
         assert block.count('class="discuss-mode-btn') >= 2
         # どちらかを primary 色で強調しない（設計 §3.2「既定選択なし」）
         assert "primary" not in block
+
+    def test_segment_control_markup_is_accessible(self):
+        """セグメントは選択状態を aria-pressed で公開する（見た目の塗りだけに頼らない）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderSidebar() {")
+        assert block.count('aria-pressed="') >= 2
+        assert 'role="group"' in block
+
+    def test_segment_control_css_is_single_pill(self):
+        css = _read(STYLES_CSS)
+        rule = css.split(".discuss-mode-switch {")[1].split("}")[0]
+        assert "border-radius: 999px" in rule
+        assert "overflow: hidden" in rule
 
     def test_buttons_wired_to_navigation(self):
         js = _read(APP_JS)

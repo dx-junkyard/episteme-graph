@@ -187,9 +187,24 @@ class TestProjectBackbone:
         assert truncated is False
 
     def test_stage_label_present(self):
+        """stage_label は学習者向けの日本語表示名（開幕画面は学習者が最初に見る画面で、
+        A層の英語内部語彙をそのまま出すと分類名の羅列に見えるため）。stage コード自体は
+        domain-neutral のまま変えない。"""
         nodes = [_main_node("n1", "observable_construction", label="")]
         projected, _truncated = opening.project_backbone(nodes)
-        assert projected[0]["stage_label"] == "Observable construction"
+        assert projected[0]["stage"] == "observable_construction"
+        assert projected[0]["stage_label"] == "観測量の構成"
+
+    def test_all_known_stages_have_japanese_labels(self):
+        for stage in opening._STAGE_ORDER:
+            label = opening._stage_label(stage)
+            assert label
+            assert label.isascii() is False, f"stage {stage} の表示名が日本語化されていない"
+
+    def test_unknown_stage_degrades_to_readable_code(self):
+        """日本語訳の無い stage が増えてもコードが読める形で残る（情報を落とさない）。"""
+        assert opening._stage_label("some_new_stage") == "Some new stage"
+        assert opening._stage_label("") == ""
 
     def test_review_reasons_and_backing_status_passed_through(self):
         nodes = [

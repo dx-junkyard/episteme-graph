@@ -81,7 +81,71 @@ class TestOpeningScreenSections:
         js = _read(DISCUSS_JS)
         block = _extract_function_body(js, "function renderBackboneSection(doc) {")
         assert "data-discuss-ask" in block
-        assert "位置づけと根拠を教えてください" in block
+        assert "位置づけと根拠を教えてください" in _extract_function_body(js, "function askText(label) {")
+
+    def test_action_starts_above_the_fold(self):
+        """行動の起点（最初の一手）を開幕画面の最上部に置く。以前は最下部にあり、
+        初見の学習者が最初に取れる操作がスクロール外だった。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function buildOpeningHtml(data) {")
+        idx_first_move = block.index("renderFirstMoveSection()")
+        idx_docs = block.index("docs.forEach(")
+        assert idx_first_move < idx_docs
+
+    def test_each_section_has_plain_language_subline(self):
+        """A層の語彙（バックボーン・支持構造）を学習者の言葉へ橋渡しする1行を持つ。"""
+        js = _read(DISCUSS_JS)
+        assert "discuss-section-sub" in js
+        assert "この論文がいちばん言いたいことです。" in js
+        assert "この論文は、この順に組み立てられています。" in js
+        assert "ボタンを押すと、その話題から質問が始まります。" in js
+
+    def test_central_claim_is_readable_block_not_a_chip(self):
+        """中心命題（claim の label＝論文原文の1文）はチップに詰めず、
+        引用ブロックとして読ませる（既定3行クランプ + 明示操作で全文）。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function claimBlockHtml(item) {")
+        assert "discuss-claim-text" in block
+        assert "この主張について聞く" in block
+        assert "data-discuss-expand" in block
+        css = _read(STYLES_CSS)
+        clamp_rule = css.split(".discuss-claim-text {")[1].split("}")[0]
+        assert "line-clamp: 3" in clamp_rule
+
+    def test_claim_text_is_not_summarized_or_translated_client_side(self):
+        """開幕画面は非LLM・既存成果の投影のみ（DM8）。原文を勝手に要約・和訳しない。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function claimBlockHtml(item) {")
+        assert "esc(label)" in block
+        for forbidden in ("summar", "translate", "slice(0,"):
+            assert forbidden not in block
+
+    def test_backbone_renders_stage_label_once_as_a_flow(self):
+        """main ノードの label は stage 名そのもの（CLAUDE.md #308）なので、
+        stage_label と label を両方描くと同じ文字が二重に出る。日本語 stage_label を
+        優先し、矢印つなぎの流れとして描く。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function renderBackboneSection(doc) {")
+        assert "n.stage_label) || (n && n.label)" in block
+        assert "discuss-backbone-stage" not in block
+        assert "discuss-backbone-flow" in block
+        assert "discuss-backbone-arrow" in block
+
+    def test_backbone_review_dashed_border_has_a_fact_legend(self):
+        """点線の意味を凡例1行で説明する（見た目の差だけでは学習者に読めない）。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function renderBackboneSection(doc) {")
+        assert "点線は、根拠がまだ確認されていない段階です。" in block
+        # 凡例は該当ノードがあるときだけ出す
+        assert "if (hasReview) {" in block
+
+    def test_support_sections_collapse_into_one_details(self):
+        """支持構造は区画ごとに details を開かず1つに畳む（閉じた状態で A層の
+        分類語が縦積みになるのを避ける）。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function renderSupportDetails(sections) {")
+        assert block.count("<details") == 1
+        assert "支持構造をくわしく見る" in block
 
     def test_review_status_gets_subtle_visual_difference_not_alarm_color(self):
         """review_status/source_backing_status が source_backed でないノードは
@@ -340,6 +404,12 @@ class TestStylesCssPhase2:
             ".discuss-chip",
             ".discuss-backbone-list",
             ".discuss-backbone-node",
+            ".discuss-backbone-flow",
+            ".discuss-backbone-arrow",
+            ".discuss-section-sub",
+            ".discuss-claim",
+            ".discuss-claim-text",
+            ".discuss-support-group",
             ".discuss-branch-chips",
             ".discuss-end-btn",
             ".discuss-landing-overlay",

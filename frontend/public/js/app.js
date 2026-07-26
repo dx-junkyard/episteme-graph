@@ -492,13 +492,20 @@
     const completedTopicIds = Array.isArray(progress.completed_topic_ids) ? progress.completed_topic_ids : [];
 
     // discuss モード（論文と話す）二枚看板: 「順番に学ぶ」（現行逐次型）と
-    // 「この論文と議論する」を同じ視覚的重みで並べる。既定選択なし（設計 §3.2）。
+    // 「論文と議論」を同じ視覚的重みで並べる（設計 §3.2）。表示形態は2枚のカードでは
+    // なく1つのセグメントコントロール（等重は維持したまま、絵文字＋長い文字列による
+    // 2行折り返しをやめて高さを詰める）。ラベルは短縮するが、アイコンのみにはしない
+    // （初見で意味が取れなくなるため）。
     const discussActive = isDiscussMode();
-    let html = '<div class="discuss-mode-switch">' +
+    let html = '<div class="discuss-mode-switch" role="group" aria-label="学び方の切替">' +
       '<button type="button" class="discuss-mode-btn' + (!discussActive ? " active" : "") +
-      '" id="discuss-mode-sequential-btn" data-ui-anchor="sidebar.mode-sequential" title="コースの教材をトピック順にたどります">📘 順番に学ぶ</button>' +
+      '" id="discuss-mode-sequential-btn" data-ui-anchor="sidebar.mode-sequential"' +
+      ' aria-pressed="' + (!discussActive ? "true" : "false") + '"' +
+      ' title="コースの教材をトピック順にたどります">順番に学ぶ</button>' +
       '<button type="button" class="discuss-mode-btn' + (discussActive ? " active" : "") +
-      '" id="discuss-mode-discuss-btn" data-ui-anchor="sidebar.mode-discuss" title="トピックに縛られず、この論文について話します">🗣 この論文と議論する</button>' +
+      '" id="discuss-mode-discuss-btn" data-ui-anchor="sidebar.mode-discuss"' +
+      ' aria-pressed="' + (discussActive ? "true" : "false") + '"' +
+      ' title="トピックに縛られず、この論文について話します">論文と議論</button>' +
       "</div>";
     // インスペクト・モード（学習UI再編 Phase 2, §5.2）: コースツリー領域全体を
     // 1つの UI 論理アンカーとして扱う（個々のトピック行までは分解しない）。

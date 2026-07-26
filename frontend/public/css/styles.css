@@ -8284,34 +8284,45 @@ body.inspect-mode [data-ui-anchor]:hover {
 /* ============================================================
    discuss モード（論文と話す）Phase 1 — app.js 追加分
    （docs/features/discussion_mode_design.md §3.2/3.4/3.6）
-   ・サイドバー二枚看板（順番に学ぶ / この論文と議論する）
+   ・サイドバー二枚看板（順番に学ぶ / 論文と議論。セグメントコントロール, §9.5）
    ・入力欄上部のスコープ切替（「もっと自由に話す」常設リンクは学習UI再編で重複削除済み）
    ・モードバー discuss 色・教材区画プレースホルダ
    「寄り道」語彙は使わない（DM5）。数値・件数・網羅率は出さない（DM6）。
    ============================================================ */
 
-/* サイドバー最上部の二枚看板。等重ブロック — 既定選択なし（DM5: コースと対等併記）。 */
+/* サイドバー最上部の二枚看板（DM5: コースと対等併記）。等重は保ったまま、
+   2枚のカードではなく1つのセグメントコントロールとして見せる — 絵文字＋長い
+   文字列で2行に折り返し、サイドバー上部を占有していたため。 */
 .discuss-mode-switch {
   display: flex;
-  gap: 8px;
   margin-bottom: 14px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 999px;
+  overflow: hidden;
 }
 .discuss-mode-btn {
   flex: 1;
   min-width: 0;
-  padding: 8px 6px;
-  font-size: 12px;
+  padding: 0 6px;
+  height: 28px;
+  font-size: 11.5px;
   font-family: inherit;
-  line-height: 1.35;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-secondary);
-  background: var(--color-background-secondary);
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border: none;
+  background: transparent;
   color: var(--color-text-secondary);
   cursor: pointer;
   text-align: center;
 }
+.discuss-mode-btn + .discuss-mode-btn {
+  border-left: 1px solid var(--color-border-secondary);
+}
+.discuss-mode-btn:hover { color: var(--color-text-primary); }
 .discuss-mode-btn.active {
-  border-color: var(--color-border-primary);
+  background: var(--color-background-secondary);
   color: var(--color-text-primary);
   font-weight: 600;
 }
@@ -8420,9 +8431,71 @@ body.inspect-mode [data-ui-anchor]:hover {
 .discuss-section-hd {
   font-size: 13px;
   font-weight: 600;
-  margin-bottom: 8px;
+  margin-bottom: 2px;
   color: var(--color-text-primary);
 }
+/* 見出し直下の1行。A層の語彙（バックボーン・支持構造）を学習者の言葉に橋渡しする。 */
+.discuss-section-sub {
+  font-size: 11.5px;
+  color: var(--color-text-tertiary);
+  line-height: 1.6;
+  margin-bottom: 8px;
+}
+.discuss-central-eq-hd { margin-top: 10px; }
+
+/* 中心命題: ボタンではなく引用ブロックとして読ませる。既定は3行で抑え、
+   全文は .expanded（明示操作）で開く。 */
+.discuss-claim {
+  border-left: 2px solid var(--color-border-secondary);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 8px;
+}
+.discuss-claim-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+  overflow: hidden;
+}
+.discuss-claim.expanded .discuss-claim-text {
+  display: block;
+  overflow: visible;
+}
+.discuss-claim-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 6px;
+}
+.discuss-claim-ask {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  border-radius: 14px;
+  padding: 3px 10px;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.discuss-claim-ask:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-primary);
+}
+.discuss-claim-more {
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 0;
+}
+.discuss-claim-more:hover { color: var(--color-text-primary); }
 
 .discuss-chip-row {
   display: flex;
@@ -8450,17 +8523,20 @@ body.inspect-mode [data-ui-anchor]:hover {
   color: var(--color-text-secondary);
   margin-bottom: 6px;
 }
+/* 支持構造は区画ごとに details を開かず1つに畳む（閉じた状態で A層の分類語が
+   縦積みになるのを避ける）。 */
+.discuss-support-group { margin-bottom: 8px; }
+.discuss-support-group:last-child { margin-bottom: 0; }
+.discuss-support-group-hd {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
 
 .discuss-fragile {
   margin-top: 10px;
   padding-top: 8px;
   border-top: 1px dashed var(--color-border-secondary);
-}
-.discuss-fragile-hd {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-secondary);
-  margin-bottom: 4px;
 }
 .discuss-fragile-item {
   font-size: 12px;
@@ -8474,31 +8550,46 @@ body.inspect-mode [data-ui-anchor]:hover {
   flex-wrap: wrap;
   gap: 8px;
 }
+/* 「並んだ分類」ではなく「論文の組み立て順」に見えるよう、矢印でつないだ流れにする。 */
+.discuss-backbone-flow {
+  align-items: center;
+  gap: 4px;
+}
+.discuss-backbone-arrow {
+  font-size: 13px;
+  color: var(--color-text-tertiary);
+}
 .discuss-backbone-node {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 2px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
   border: 1px solid var(--color-border-secondary);
-  border-radius: 8px;
-  padding: 6px 10px;
+  border-radius: 999px;
+  padding: 5px 11px;
   background: var(--color-background-primary);
   cursor: pointer;
   font-family: inherit;
   text-align: left;
   max-width: 220px;
 }
+.discuss-backbone-node:hover { border-color: var(--color-border-primary); }
 /* review_status / source_backing_status が source_backed でないノードは
    控えめな点線枠にする（強調色・警告色は使わない。W層の表示規約と同趣旨）。 */
 .discuss-backbone-node--review { border-style: dashed; }
-.discuss-backbone-stage {
+.discuss-backbone-num {
   font-size: 10px;
   color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 .discuss-backbone-label {
   font-size: 12.5px;
   color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.discuss-backbone-legend { margin-top: 6px; }
 
 .discuss-muted {
   font-size: 12px;
