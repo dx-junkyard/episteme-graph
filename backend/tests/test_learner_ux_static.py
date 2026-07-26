@@ -351,9 +351,12 @@ class TestLectureToggleHint:
         assert "音声未生成" in body
 
     def test_css_defines_lecture_toggle_hint_style(self):
+        """学習UI再編 Phase 1（§3.2）で lecture-toggle-hint は教材ヘッダの
+        .material-format-toggle 内へ移設された（旧 .lecture-toggle-wrap の縦積み
+        レイアウトは廃止）。"""
         css = _read(STYLES_CSS)
         assert ".lecture-toggle-hint" in css
-        assert ".lecture-toggle-wrap" in css
+        assert ".material-format-toggle" in css
 
 
 # ---------------------------------------------------------------------------

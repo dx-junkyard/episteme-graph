@@ -56,11 +56,13 @@ KNOWN_FEATURES = (
     # --- 学習（core/chat.py・音声） ---
     "learning:chat",
     "learning:chat_casual",
+    "learning:chat_discuss",
     "learning:voice_stt",
     "learning:voice_tts",
     "learning:tension",
     "learning:structure_anchor",
     "learning:understanding_check",
+    "learning:help_usage",
     # --- 管理画面（コースビルダー・原稿スタジオ・Admin Copilot・Field Atlas） ---
     "admin:course_builder",
     "admin:lecture_rewrite",
@@ -86,6 +88,9 @@ KNOWN_FEATURES = (
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",
+    # help_kb ベクトル補助層（Phase 3 ①、正本 docs/features/manual_help_kb_design.md
+    # §5）。core/help_kb/vector.py::sync_manual_vectors が凍結節を埋め込む際に使う。
+    "admin:help_kb_embed",
 )
 
 

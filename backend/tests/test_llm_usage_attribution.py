@@ -102,7 +102,10 @@ WIRING_CHECKLIST: list[tuple[str, list[str]]] = [
         [
             "from core.llm_usage.context import usage_context",
             'usage_context("learning:chat", user_id=current_user["id"], course_id=course_id)',
-            '_chat_feature = "learning:chat_casual" if _is_casual else "learning:chat"',
+            # discuss モード（discuss モード設計書 §6.2 Phase 1）: U層タグを分離するため
+            # ternary から if/elif/else へ拡張済み（casual と discuss を独立記録する）。
+            '_chat_feature = "learning:chat_discuss"',
+            '_chat_feature = "learning:chat_casual"',
             "usage_context(_chat_feature, user_id=current_user[\"id\"], course_id=course_id)",
             'usage_context("learning:voice_stt", user_id=current_user["id"])',
             'usage_context("learning:voice_tts", user_id=current_user["id"])',
@@ -315,6 +318,7 @@ class TestKnownFeaturesCoverage:
         [
             "learning:chat",
             "learning:chat_casual",
+            "learning:chat_discuss",
             "learning:voice_stt",
             "learning:voice_tts",
             "learning:tension",

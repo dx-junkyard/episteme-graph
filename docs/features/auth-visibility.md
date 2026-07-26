@@ -14,7 +14,7 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 - トークン payload: `{sub, username, email, role, exp}`。
 - フロントは `localStorage["eg_token"]` に保持し、`Authorization: Bearer {token}` を付与。
 
-ログイン/登録/自己情報は `/api/auth`（`/login`, `/register`, `/me`）。
+ログイン/自己情報は `/api/auth`（`/login`, `/me`）。
 
 ---
 

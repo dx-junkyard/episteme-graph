@@ -1,5 +1,7 @@
 <!DOCTYPE html>
-<html lang="ja">
+<!-- .learn-page: 学習画面は1画面に収める（ページ自体をスクロールさせない）。
+     styles.css の html.learn-page ルール参照。admin.html には付けない。 -->
+<html lang="ja" class="learn-page">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,7 +9,9 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-  <link rel="stylesheet" href="/css/styles.css">
+  <!-- ?v=: レイアウト（1画面に収める）系の修正は CSS が古いままだと効かないので、
+       atlas.css と同じくバージョンクエリでキャッシュを切る。 -->
+  <link rel="stylesheet" href="/css/styles.css?v=discuss-layout-20260726">
   <link rel="stylesheet" href="/css/atlas.css?v=field-atlas-20260713-1">
 </head>
 <body>
@@ -26,14 +30,26 @@
         <span style="opacity:.3">|</span>
         <button id="groups-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
         <span style="opacity:.3">|</span>
-        <button id="atlas-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
+        <button id="atlas-btn" data-ui-anchor="topbar.atlas" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
         <span style="opacity:.3">|</span>
-        <button id="my-map-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの地図を開く">わたしの地図</button>
+        <button id="my-map-btn" data-ui-anchor="topbar.my-map" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの地図を開く">わたしの地図</button>
+        <span style="opacity:.3">|</span>
+        <!-- 学習UI再編 Phase 1（§4）: composer から画面全体トグルの定位置＝トップバーへ移設。
+             ID・typed action 配線（support_action="usage_help"）は不変。
+             Phase 2: 押下は「使い方インスペクト・モード」の ON/OFF トグルになった
+             （旧・押下即送信の typed action 送信は composer/音声側の発話経路へ移設。§4）。 -->
+        <button id="help-usage-btn" class="help-usage-btn" data-ui-anchor="topbar.inspect" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="この画面の使い方インスペクト・モードを ON/OFF（ON中は部品にカーソルを合わせると説明が出ます）">❓ 使い方</button>
         <span style="opacity:.3">|</span>
         <span id="username"></span>
         <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit">ログアウト</button>
       </div>
     </div>
+
+    <!-- インスペクト・モード常設バナー（学習UI再編 Phase 2, §4）。既定 hidden。
+         クリックは解除のみ（IH4） — バナー自体の中では通常のクリックを許可する。 -->
+    <div class="inspect-banner" id="inspect-banner" hidden>使い方を確認中 — 知りたい部分にカーソルを合わせてください（Esc で終了）</div>
+    <!-- インスペクト・ツールチップ容器（§5.2〜5.4）。JS が innerHTML と位置を都度書き換える。 -->
+    <div class="inspect-tooltip" id="inspect-tooltip" hidden></div>
 
     <!-- Sidebar -->
     <div class="sb" id="sidebar">
@@ -44,10 +60,22 @@
     <div class="mn">
       <!-- 教材区画（本筋・順路）: 教材本文＋確認して次へ。会話で流れない独立スクロール -->
       <div class="material-region" id="material-region">
+        <!-- 教材区画ヘッダ（②提示形式, §3.2）: 左=「教材 · トピック名」/ 右=提示形式
+             セグメント [📖 読む|🎙 講義]。discuss モード中はセグメントごと隠す
+             （教材区画がプレースホルダに変わるため）。全画面ボタンは講義中のみ表示。 -->
+        <div class="material-header" id="material-header">
+          <span class="material-header-title" id="material-header-title">教材</span>
+          <button id="discuss-opening-toggle" class="discuss-opening-toggle" type="button" hidden aria-expanded="false">開く</button>
+          <div class="material-format-toggle" id="material-format-toggle">
+            <button type="button" class="material-format-opt active" id="material-format-read" title="教材を通常表示で読む">📖 読む</button>
+            <button type="button" class="material-format-opt" id="lecture-toggle" data-ui-anchor="material.lecture-toggle" title="レクチャーモード切替">🎙 講義</button>
+            <span class="lecture-toggle-hint" id="lecture-toggle-hint" hidden></span>
+          </div>
+          <button type="button" class="lecture-fullscreen-btn" id="lecture-fullscreen-btn" title="スライドを全画面表示" hidden>⛶ 全画面</button>
+        </div>
         <div class="material-body" id="material-body"></div>
         <div class="material-foot">
-          <span class="material-here" id="material-here"></span>
-          <button class="next-topic-btn" id="next-topic-btn" style="display:none" title="次のトピックへ進む">確認して次へ</button>
+          <button class="next-topic-btn" id="next-topic-btn" data-ui-anchor="material.next-topic" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
         <!-- 再構成ループ (R層): 「再構成に挑戦」導線。自動では開かない（本人が開く） -->
         <div class="reconstruction-region" id="reconstruction-region" hidden></div>
@@ -83,14 +111,23 @@
           <button class="lecture-question-btn" id="lecture-question" title="質問する">&#10067; 質問</button>
         </div>
       </div>
-      <div class="ia">
-        <div class="lecture-toggle-wrap">
-          <button class="lecture-toggle-btn" id="lecture-toggle" title="レクチャーモード切替">&#127897; レクチャー</button>
-          <span class="lecture-toggle-hint" id="lecture-toggle-hint" hidden></span>
+      <!-- discuss モード（論文と話す）Phase 1: スコープ切替。入口はサイドバー二枚看板に一本化
+           （常設リンクによる重複導線は学習UI再編 Phase 0 で削除済み）。
+           寄り道（explore）とは独立した機構 — 語彙・スタイルとも「寄り道」を使わない。 -->
+      <div class="discuss-bar" id="discuss-bar" hidden>
+        <span class="discuss-bar-label">🗣 範囲:</span>
+        <div class="discuss-scope-toggle" id="discuss-scope-toggle" data-ui-anchor="discuss.scope-toggle">
+          <button type="button" class="discuss-scope-opt" data-discuss-scope="course_sources">このコースのソース論文</button>
+          <button type="button" class="discuss-scope-opt" data-discuss-scope="all_visible">閲覧できる周辺資料まで</button>
         </div>
-        <input type="text" id="chat-input" placeholder="質問を入力してください…（Enterで送信）">
-        <button id="send-btn" title="質問する（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">質問</button>
-        <button id="voice-mode-btn" class="voice-mode-btn" title="気軽に話せる先生とハンズフリーで会話">🤖</button>
+        <!-- Phase 2 着地画面トリガー①（明示終了）。押すと discuss.js が今日の議論を
+             振り返る軽量モーダルを提示する（スキップ可・既定オン）。 -->
+        <button type="button" class="discuss-end-btn" id="discuss-end-btn" data-ui-anchor="discuss.end" title="今日の議論を振り返って終える">議論を終える</button>
+      </div>
+      <div class="ia">
+        <input type="text" id="chat-input" data-ui-anchor="composer.input" placeholder="質問や考えを入力…（Enterで送信）">
+        <button id="send-btn" class="primary" data-ui-anchor="composer.send" title="送信（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">送信</button>
+        <button id="voice-mode-btn" class="voice-mode-btn" data-ui-anchor="composer.voice" title="気軽に話せる先生とハンズフリーで会話" aria-label="音声で話す">🎤 音声で話す</button>
       </div>
 
       <!-- ハンズフリー音声会話パネル（気軽に話せる先生） -->
@@ -105,35 +142,27 @@
       </div>
     </div>
 
-    <!-- Lecture interrupt chat popup -->
-    <div class="lecture-chat-popup" id="lecture-chat-popup">
-      <div class="lecture-chat-header">
-        <span>&#10067; 講義中の質問</span>
-        <button class="lecture-chat-close" id="lecture-chat-close">&times;</button>
-      </div>
-      <div class="lecture-chat-messages" id="lecture-chat-messages"></div>
-      <div class="lecture-chat-input-area">
-        <input type="text" id="lecture-chat-input" placeholder="質問を入力...">
-        <button id="lecture-chat-mic" class="lecture-mic-btn" title="音声入力">&#127908;</button>
-        <button id="lecture-chat-send">送信</button>
-      </div>
-      <button class="lecture-chat-resume-btn" id="lecture-chat-resume">&#9654; 講義を再開する</button>
-    </div>
-
     <!-- Right Panel -->
     <div class="rp">
       <div class="tb" id="tabBar">
-        <button class="on" data-tab="context">コンテキスト</button>
-        <button data-tab="progress">進捗</button>
-        <button data-tab="sources">出典</button>
+        <button class="on" data-tab="context" data-ui-anchor="rightpanel.tab-context">コンテキスト</button>
+        <button data-tab="progress" data-ui-anchor="rightpanel.tab-progress">進捗</button>
+        <button data-tab="sources" data-ui-anchor="rightpanel.tab-sources">出典</button>
       </div>
       <div class="tp vis" id="tab-context"></div>
       <div class="tp" id="tab-progress"></div>
       <div class="tp" id="tab-sources"></div>
-      <div class="rp-danger-zone">
-        <button class="chat-clear-btn" id="chat-clear-btn" title="このトピックの質疑応答履歴を削除">質疑応答履歴を削除</button>
-      </div>
+      <details class="rp-collapse">
+        <summary>▸ このトピックの操作</summary>
+        <div class="rp-danger-zone">
+          <button class="chat-clear-btn" id="chat-clear-btn" data-ui-anchor="rightpanel.clear-history" title="このトピックの質疑応答履歴を削除">質疑応答履歴を削除</button>
+        </div>
+      </details>
     </div>
+
+    <!-- discuss モード（論文と話す）着地画面（Phase 2）: 討議終了時の軽量モーダル。
+         スキップ可・既定オン。中身は discuss.js が描画する（既定 hidden）。 -->
+    <div class="discuss-landing-overlay" id="discuss-landing-region" hidden></div>
   </div>
 
   <script src="/js/app.js"></script>
@@ -147,5 +176,6 @@
   <script src="/js/personal-map.js"></script>
   <script src="/js/personal-map-home.js"></script>
   <script src="/js/reconstruction.js"></script>
+  <script src="/js/discuss.js"></script>
 </body>
 </html>

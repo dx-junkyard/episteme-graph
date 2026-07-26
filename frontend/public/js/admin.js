@@ -103,22 +103,9 @@
           '<input id="auth-pass" type="password" placeholder="パスワード" required autocomplete="current-password">' +
           '<button type="submit" id="auth-btn">ログイン</button>' +
         '</form>' +
-        '<div class="auth-toggle" id="auth-toggle">' +
-          'アカウントがない場合 <a id="auth-switch">新規登録</a>' +
-        '</div>' +
         '<div class="auth-error" id="auth-error"></div>' +
       '</div>';
     document.body.appendChild(overlay);
-
-    var isLogin = true;
-    document.getElementById("auth-switch").addEventListener("click", function handleSwitch() {
-      isLogin = !isLogin;
-      document.getElementById("auth-btn").textContent = isLogin ? "ログイン" : "登録";
-      document.getElementById("auth-toggle").innerHTML = isLogin
-        ? 'アカウントがない場合 <a id="auth-switch">新規登録</a>'
-        : '既にアカウントがある場合 <a id="auth-switch">ログイン</a>';
-      document.getElementById("auth-switch").addEventListener("click", handleSwitch);
-    });
 
     document.getElementById("auth-form").addEventListener("submit", function (e) {
       e.preventDefault();
@@ -127,10 +114,8 @@
       var errEl = document.getElementById("auth-error");
       errEl.textContent = "";
 
-      var endpoint = isLogin ? "/auth/login" : "/auth/register";
-      var payload = isLogin
-        ? { username: username, password: password }
-        : { username: username, password: password, email: username + "@learning.local" };
+      var endpoint = "/auth/login";
+      var payload = { username: username, password: password };
 
       fetch(API + endpoint, {
         method: "POST",
@@ -5709,6 +5694,14 @@
       // U層（LLM使用量推計, migration 043）— SYSTEM_ADMIN のみメトリクス閲覧可（G2-U）。
       var llmUsageTabBtn = document.getElementById("tab-btn-llm-usage");
       if (llmUsageTabBtn) llmUsageTabBtn.style.display = "";
+
+      // 利用者マニュアル KB（help_kb）draft/freeze 管理 — SYSTEM_ADMIN のみ（manual_help_kb_design.md Phase 3 ②）。
+      var manualEditorTabBtn = document.getElementById("tab-btn-manual-editor");
+      if (manualEditorTabBtn) manualEditorTabBtn.style.display = "";
+
+      // discuss 観測基盤（Observation Layer）— SYSTEM_ADMIN のみ（discuss_observation_design.md §4）。
+      var discussObservationTabBtn = document.getElementById("tab-btn-discuss-observation");
+      if (discussObservationTabBtn) discussObservationTabBtn.style.display = "";
     }
 
     // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
@@ -7869,6 +7862,29 @@
     // TEACHER 向け教材見積りポップオーバー。DI 注入して疎結合に起動する（G2-U）。
     if (window.AdminLlmUsage) {
       window.AdminLlmUsage.init({
+        apiFetch: apiFetch,
+        escHtml: escHtml,
+        onTabActivate: onTabActivate,
+        state: state,
+      });
+    }
+
+    // 利用者マニュアル KB（help_kb, migration 058/059）— draft 編集 + 凍結配信の管理 UI。
+    // DI 注入して疎結合に起動する（admin-llm-usage.js と同型）。
+    if (window.ManualKbEditor) {
+      window.ManualKbEditor.init({
+        apiFetch: apiFetch,
+        escHtml: escHtml,
+        onTabActivate: onTabActivate,
+        state: state,
+      });
+    }
+
+    // discuss 観測基盤（Observation Layer, docs/features/discuss_observation_design.md §4）—
+    // Phase 3 着手判断のための観測状況ダッシュボード + ダンプ取得。DI 注入して疎結合に起動する
+    // （admin-manual-editor.js と同型）。
+    if (window.AdminDiscussObservation) {
+      window.AdminDiscussObservation.init({
         apiFetch: apiFetch,
         escHtml: escHtml,
         onTabActivate: onTabActivate,

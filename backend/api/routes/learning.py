@@ -62,12 +62,15 @@ from services import (
     truncate_chat_and_supersede,
     record_internalization,
     record_interest_trace,
+    record_learner_articulated_tension,
     record_student_stumble_event,
     record_topic_check_pass,
     resolve_interest_trace,
     save_course_data,
     set_trace_map_exclusion,
     delete_course_data,
+    list_course_source_document_ids,
+    list_visible_document_ids,
     search_chunks_with_metadata,
     user_can_access_group,
     user_can_view_course,
@@ -106,11 +109,13 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.component_context import build_component_context
+from core.discuss.opening import build_opening as build_discussion_opening
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
 from core.structure_anchor.schema import (
+    ANCHOR_TYPE_LABELS,
     ATTRIBUTION_LEARNER_SELECTED,
     DOUBT_TYPE_LABELS,
     anchor_type_for_element,
@@ -132,9 +137,47 @@ from routes.lecture import (
     _resolve_course_document_ids,
 )
 
+# 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
+# 非ベクトル索引検索。core.help_kb は並行実装中のため、モジュール不在でも学習チャットが
+# 壊れないよう import 自体をガードする（呼び出し側でも None チェック + try/except で二重に守る）。
+try:
+    from core.help_kb import search_manual as _search_manual
+except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
+    _search_manual = None  # type: ignore[assignment]
+
+# ベクトル補助層（Phase 3 ①、設計 §5 Phase 3 ①）: 非ベクトル検索
+# （``_search_manual``）が documented ヒットを返さなかったときのみ試す縮退経路。
+# 既定経路（documented ヒット時）のコスト・レイテンシには一切影響しない。
+try:
+    from core.help_kb.vector import vector_search_manual as _vector_search_manual
+except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
+    _vector_search_manual = None  # type: ignore[assignment]
+
+# インスペクト・モード（設計 docs/features/learning_ui_inspect_hover_design.md §5.2/§9）:
+# UI 論理アンカー表。並行実装中のモジュール不在でも学習チャットが壊れないよう防御する。
+try:
+    from core.help_kb.ui_anchors import (
+        KNOWN_UI_ANCHOR_IDS as _KNOWN_UI_ANCHOR_IDS,
+        resolve_ui_anchor as _resolve_ui_anchor,
+        resolve_ui_anchors as _resolve_ui_anchors,
+        split_manual_ref as _split_manual_ref,
+    )
+except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
+    _KNOWN_UI_ANCHOR_IDS = frozenset()  # type: ignore[assignment]
+    _resolve_ui_anchor = None  # type: ignore[assignment]
+    _resolve_ui_anchors = None  # type: ignore[assignment]
+    _split_manual_ref = None  # type: ignore[assignment]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/learning", tags=["Learning"])
+
+# discuss モード（「論文と話す」, discuss モード設計書 §6.2 Phase 1）: topic_id の予約キー。
+# find_course_topic はこの id を持つトピックを持たないため None を返し、既存の
+# topic_info=None 経路（存在しないトピックの第一級扱い）にそのまま乗る。表示・プロンプト・
+# 痕跡 context_label 用のラベル変換は topic_title 決定の1箇所でのみ行う。
+DISCUSSION_TOPIC_ID = "_discussion"
+DISCUSSION_TOPIC_LABEL = "論文との議論"
 
 # ---------------------------------------------------------------------------
 # チャット型 AI 支援の共通基盤整理 §1: 学習チャット本体のコスト上限
@@ -602,6 +645,46 @@ def _is_greeting(message: str) -> bool:
     return False
 
 
+# 学生 HELP ルート（設計 §1-3-2）: UI・システム操作についての質問を、教材内容の質問と
+# 誤爆させずに拾うための保守的なキーワード判定。
+#
+# 方針:
+#   - 「UI・システム参照語」と「使い方の問い形」の**組み合わせ**でのみ真にする
+#     （どちらか片方だけでは弱すぎる誤爆源になる）。「使い方」は参照語・問い形の
+#     両方に置く（「使い方を教えて」単体で成立させるための意図的な重複）。
+#   - 教材内容の質問（数式・物理概念）は誤爆コストの方が大きいため、UI参照語と
+#     問い形が両方揃っていても、数式・物理用語らしき語（_CONTENT_QUESTION_TERMS）が
+#     共起していれば偽に倒す（例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - メッセージが長い（雑談・複合質問らしい）場合も偽にする（保守的に絞る）。
+_HELP_CONTEXT_TERMS = (
+    "画面", "ボタン", "操作", "アプリ", "この機能", "音声モード", "音声入力",
+    "マイク", "ヘルプ", "メニュー", "使い方",
+)
+_HELP_QUESTION_FORMS = (
+    "使い方", "どう使", "どうやって", "方法", "どこ",
+)
+_CONTENT_QUESTION_TERMS = (
+    "式", "方程式", "定理", "法則", "証明", "導出", "定義", "公式",
+    "エネルギー", "運動", "力学", "波動", "ベクトル", "微分", "積分",
+    "質量", "加速度", "速度", "粒子", "理論",
+)
+
+
+def _is_usage_question(message: str) -> bool:
+    """メッセージが画面・システムの使い方についての質問かどうかを保守的に判定する。
+
+    非LLM・同期（casual/音声バイパスより手前で評価するための決定論判定）。
+    """
+    msg = (message or "").strip()
+    if not msg or len(msg) >= 50:
+        return False
+    if any(term in msg for term in _CONTENT_QUESTION_TERMS):
+        return False
+    has_context = any(term in msg for term in _HELP_CONTEXT_TERMS)
+    has_form = any(term in msg for term in _HELP_QUESTION_FORMS)
+    return has_context and has_form
+
+
 # UI ボタン由来の型付きアクションは、自然文の intent 分類を経由せず決定論的に
 # ルートへ割り当てる。これにより日本語ラベル（や壊れたトークン）が CHIT_CHAT へ
 # 誤分類される事故を防ぐ。
@@ -613,6 +696,7 @@ _TYPED_ACTION_INTENT: dict[str, str] = {
     "ask_question": "DOMAIN_RAG",
     "continue_detail": "DOMAIN_RAG",
     "start_topic": "DOMAIN_RAG",
+    "usage_help": "USAGE_HELP",
 }
 
 _PREREQUISITE_ACTIONS = {"check_prerequisites", "review_prerequisite", "prerequisite_review"}
@@ -636,7 +720,15 @@ def _classify_intent(
     Returns
     -------
     str
-        ``'CHIT_CHAT'`` | ``'LEARNING_ADVICE'`` | ``'DOMAIN_RAG'``
+        ``'CHIT_CHAT'`` | ``'LEARNING_ADVICE'`` | ``'USAGE_HELP'`` | ``'DOMAIN_RAG'``
+
+    Notes
+    -----
+    ``USAGE_HELP``（設計 §4-4, Phase 2 分離リリース）はアプリ・画面の使い方についての
+    質問を拾うためのラベルで、``learning_chat`` 側では pre-route
+    （``_is_usage_question`` / typed action ``usage_help``）を保守的キーワード判定で
+    すり抜けたケースの受け皿として使う。教材内容と迷う場合は誤爆コストの小さい
+    ``DOMAIN_RAG`` に倒す（保守設計。プロンプト内にも明記）。
     """
     if _is_greeting(message):
         return "LEARNING_ADVICE"
@@ -645,11 +737,13 @@ def _classify_intent(
 
     params = get_llm_params("fast")
     prompt = (
-        f"学習コース「{course_title}」の学習支援AIとして、学生からの質問を3つのルートに分類します。\n\n"
+        f"学習コース「{course_title}」の学習支援AIとして、学生からの質問を4つのルートに分類します。\n\n"
         "分類ルート:\n"
         "- CHIT_CHAT: 学習と無関係な雑談・日常会話（天気、食事、娯楽、個人的な話題など）\n"
         "- LEARNING_ADVICE: 学習の進め方・方法に関するメタ質問（どう進めるか、何から学ぶか、学習計画の相談など）\n"
+        "- USAGE_HELP: アプリ・画面の使い方、ボタンや機能の操作方法についての質問（教材の内容そのものではない）\n"
         "- DOMAIN_RAG: 物理学・数学などの専門知識・概念に関する質問\n\n"
+        "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n\n"
         f"質問: {message}\n\n"
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
     )
@@ -663,7 +757,7 @@ def _classify_intent(
             model=params["model"],
             reasoning_effort=params["reasoning_effort"],
         ).strip().upper()
-        for label in ("CHIT_CHAT", "LEARNING_ADVICE", "DOMAIN_RAG"):
+        for label in ("CHIT_CHAT", "LEARNING_ADVICE", "USAGE_HELP", "DOMAIN_RAG"):
             if label in result:
                 return label
     except Exception:
@@ -817,6 +911,38 @@ def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None 
    システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。{persona_block}"""
 
 
+def _get_discuss_system_prompt(domain: str, response_persona: str | None = None) -> str:
+    """discuss モード（「論文と話す」）のシステムプロンプトを生成する（設計 §6.2 Phase 1）。
+
+    casual（気軽に話せる先生・会話調）とは異なり、学術ディスカッション調を維持し
+    LaTeX・出典マーカー `[出典N]` はチューターモードと同様に使用する。DM4「即答＋生成
+    プロンプト構造的必須」・DM1「範囲外の話題はこの論文由来ではないと明示」・
+    DM6「数値・件数・網羅率を出さない」を必須要素として明記する。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    return f"""あなたは{domain_label}を専門とする研究者で、学生と1本の論文について対等に議論する「ディスカッション相手」です。
+学生は寄り道ではなく、この論文と正面から格闘することを選んでいます。学術的な検討に値する相手として遇してください。
+
+**対話のルール:**
+1. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
+   一方的な講義にせず対話として書いてください。数式は LaTeX 記法（インライン $...$、
+   ディスプレイ $$...$$）を使い、教材を参照した場合はコンテキストに付された番号付き出典
+   マーカー `[出典1]` `[出典2]` … を本文に自然に挿入してください。
+2. 【即答・出し惜しみ禁止】学生が求めた情報は、ためらわずすぐに答えてください。
+   1テンポ遅らせて考えさせてから答える、といった Socratic な出し惜しみは行わないでください。
+   answer は完全な形で提供したうえで、深める余地を次のルールで残します。
+3. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
+   （どちらか一つは毎回必須であり、気が向いたときだけ付ける確率的な付加は不可です）:
+   - 学生自身の言葉での言い換え・予測・自己説明を促す短い誘い
+   - why / how / what-if 型の問い返し（この結果が崩れるとしたら何が変わるか、等）
+4. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
+   「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
+   のように、その部分がこの論文由来ではないことを一言明示してください。
+5. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
+
+
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
     """発話時の明示アンカー（構造帰属・方法A）を非LLMで構築する。無ければ None。
 
@@ -850,6 +976,85 @@ def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
             reason="text_selection",
             confidence=1.0,
         )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# アンカー優先ラダー（設計 docs/features/learning_ui_inspect_hover_design.md §7、
+# IH6/IH7）: ホバー+ラッチ機能（Phase 3・フロント未実装）が element_label を自由文
+# メッセージに添付して送ってきたときのために、既存の1 LLM コールへヒントを同梱する。
+# 追加の分類・生成コールは作らない（IH6）。
+# ---------------------------------------------------------------------------
+
+_ANCHOR_LADDER_HINT_PREFIX = "[アンカーヒント] "
+
+
+def _build_anchor_ladder_hint(
+    body: LearningChatRequest, history: list[dict] | None,
+) -> str | None:
+    """アンカー優先ラダーのヒントブロックを構築する（設計 §7）。
+
+    非LLM・副作用なしの純関数（DB・LLM を一切呼ばない）。既存の学習チャット system
+    プロンプトへ追記する短いヒント文字列を返す。優先順位（設計 §7）:
+
+      1. ラッチ中アンカー — ``element_label``（+ ``element_type``）が自由文メッセージに
+         添付されている場合。既存の要素タップ typed 経路（``action="EXPLAIN_GRAPH_ELEMENT"``）
+         は本関数の呼び出しに到達する前に早期 return するため、ここに渡ってくる
+         ``element_label`` は常に「ラッチ後の自由文送信」（設計 §6.2、Phase 3 フロント
+         実装分）由来になる。呼び出し側はこの関数を RAG 本文生成の直前（typed action /
+         usage_help pre-route の早期 return より後段）でのみ呼ぶこと。
+      2. 表示中のスライド / セグメント — ``position_anchor.segment_id`` /
+         ``selection_segment_id``。
+      3. 現在のトピック — 呼び出し側の user プロンプトに既にトピック名が入っているため、
+         単独のランクとしては起動しない（ランク1のヒント文中で候補の一つとして言及するのみ）。
+      4. 直近回答の第1根拠チャンク — ``history`` の直近 assistant メッセージが持つ
+         ``sources[0]``（サーバ側の保存履歴・クライアント再送履歴のいずれにも同じ形で
+         乗っている。§9 参照）。
+
+    アンカー文脈が一切無ければ ``None``（従来と完全同一のプロンプトを維持する）。
+    指示ではなくヒントとして書く（断定・強制をしない, IH6）。confidence 等の生数値は
+    一切含めない（IH7）。
+    """
+    label = (body.element_label or body.element_id or "").strip()
+    if label:
+        anchor_type = anchor_type_for_element(body.element_type)
+        type_label = ANCHOR_TYPE_LABELS.get(anchor_type, "")
+        target = f"{type_label}〈{label}〉" if type_label else f"〈{label}〉"
+        return (
+            f"{_ANCHOR_LADDER_HINT_PREFIX}学習者は{target}に注目した状態でこの発言をしています。"
+            f"発言がそれに関係する場合は{target}を最優先の文脈として答えてください。"
+            "関係しない場合は、表示中のセクション・現在のトピック・直前の回答の根拠のうち"
+            "最も近いものを選んで答えてください。"
+            "回答の冒頭または末尾に、何について答えたかを一行で明示してください"
+            "（例:「〈○○〉についてお答えしています」）。"
+        )
+
+    seg = None
+    if isinstance(body.position_anchor, dict) and "segment_id" in body.position_anchor:
+        seg = body.position_anchor.get("segment_id")
+    if seg is None:
+        seg = body.selection_segment_id
+    if seg is not None:
+        return (
+            f"{_ANCHOR_LADDER_HINT_PREFIX}学習者は、いま表示している教材の区画に注目した"
+            "状態でこの発言をしています。発言がその内容に関係する場合は、その文脈を優先"
+            "して答えてください。"
+        )
+
+    for turn in reversed(history or []):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        sources = turn.get("sources")
+        if isinstance(sources, list) and sources:
+            first = sources[0] if isinstance(sources[0], dict) else {}
+            title = str(first.get("source_title") or "").strip()
+            if title:
+                return (
+                    f"{_ANCHOR_LADDER_HINT_PREFIX}直前の回答は〈{title}〉を根拠にしています。"
+                    "発言がその続きの話題であれば、その文脈を優先して答えてください。"
+                )
+        break  # 直近の assistant メッセージのみを見る（それより前へは遡らない）
+
     return None
 
 
@@ -1788,6 +1993,174 @@ def _atlas_action_response(
     return None
 
 
+_USAGE_HELP_FOOTER = "教材の内容についての質問なら、そのまま送り直してください。"
+_USAGE_HELP_NOT_DOCUMENTED = "その使い方の説明はまだ整備されていません。"
+
+
+def _usage_help_response(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    *,
+    on_llm_call: Callable[[], None] | None = None,
+) -> LearningChatResponse:
+    """学生 HELP ルートのハンドラ（設計 §1-3、ui_anchor 優先は §5.2/§9-1）。
+
+    docs/manual/student/ の凍結索引を検索し、テキスト経路は本文素通し（パラフレーズ
+    禁止・quota 非消費）、音声・casual 経路は 1 LLM コールで会話調へ整形する
+    （quota は既存 ``on_llm_call`` で消費）。無ヒット・未整備時は LLM を呼ばず固定文
+    （捏造禁止, P4）。CHIT_CHAT/LEARNING_ADVICE と同型の早期 return ハンドラで、
+    呼び出し側（learning_chat）はここより後段の意図分類・前提知識チェック・
+    誤解検出・tension prefilter に到達しない。
+
+    ``body.ui_anchor``（インスペクト・モード中にラッチされていた UI 論理アンカー）が
+    あり、かつマップ済みなら、対応マニュアル節を検索より優先して直接解決する
+    （マップ未整備・解決失敗なら通常の ``search_manual`` にフォールバック）。
+    ``ui_anchor`` が指定された場合、記録する help_usage 痕跡の anchor 値は
+    documented/no_hit を問わず常に ``"ui:<ui_anchor>"``（demand 追跡を UI 要素単位に
+    一本化する。実際に応答した節は ``manual_citations`` 側の file/anchor/title に
+    保持される）。
+    """
+    ui_anchor_id = (body.ui_anchor or "").strip() or None
+
+    hits: list[dict] = []
+    if ui_anchor_id and _resolve_ui_anchor is not None:
+        try:
+            resolved = _resolve_ui_anchor(ui_anchor_id)
+        except Exception:
+            logger.warning(
+                "resolve_ui_anchor failed for usage help ui_anchor priority; "
+                "falling back to keyword search",
+                exc_info=True,
+            )
+            resolved = None
+        if resolved and _split_manual_ref is not None:
+            manual_file, manual_anchor = _split_manual_ref(resolved.get("manual_anchor", ""))
+            hits = [{
+                "file": manual_file,
+                "anchor": manual_anchor,
+                "title": resolved.get("title", ""),
+                "body": resolved.get("body", ""),
+                "audience": "student",
+                "citation": f"manual/student/{manual_file}#{manual_anchor}",
+                "documented": True,
+            }]
+
+    if not hits and _search_manual is not None:
+        try:
+            hits = _search_manual(
+                body.message, audience="student", limit=3, screen=body.screen_mode,
+            ) or []
+        except Exception:
+            logger.warning("search_manual failed for usage help route; falling back to no-hit", exc_info=True)
+            hits = []
+
+    top = hits[0] if hits else None
+    documented = bool(top) and bool(top.get("documented", True))
+
+    # ベクトル補助層フォールバック（Phase 3 ①）: 非ベクトル検索が documented
+    # ヒットを返さなかったときのみ試す。ヒットすれば通常の documented 経路と
+    # 同じ応答（素通し + manual_citations + quota 非消費）に合流する。
+    used_vector = False
+    if not documented and _vector_search_manual is not None:
+        try:
+            vector_hits = _vector_search_manual(body.message, audience="student", limit=3) or []
+        except Exception:
+            logger.warning(
+                "vector_search_manual failed for usage help fallback; falling back to no-hit",
+                exc_info=True,
+            )
+            vector_hits = []
+        if vector_hits:
+            top = vector_hits[0]
+            documented = bool(top.get("documented", True))
+            used_vector = True
+
+    is_casual = (body.intent_mode or "").strip() == "casual"
+    degraded = False
+
+    # ui_anchor 指定時は痕跡の anchor を常に "ui:<ui_anchor>" に一本化する（§9-1）。
+    # 未指定時は従来どおり search_manual/vector が見つけた節の citation を使う。
+    trace_anchor = f"ui:{ui_anchor_id}" if ui_anchor_id else None
+
+    if not documented:
+        answer = f"{_USAGE_HELP_NOT_DOCUMENTED}\n\n{_USAGE_HELP_FOOTER}"
+        manual_citations = None
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="help_usage",
+            text="使い方の質問",
+            extra_payload={"help_anchor": trace_anchor, "documented": False, "no_hit": True},
+        )
+    else:
+        citation = str(top.get("citation") or "")
+        manual_citations = [{
+            "file": top.get("file", ""),
+            "anchor": top.get("anchor", ""),
+            "title": top.get("title", ""),
+        }]
+        body_text = str(top.get("body") or "")
+        if is_casual:
+            # 音声・casual 経路: 生 Markdown の読み上げは体験として成立しないため
+            # 1 LLM コールで会話調へ整形する（quota は on_llm_call で消費）。
+            if on_llm_call:
+                on_llm_call()
+            params = get_llm_params("fast")
+            prompt = (
+                "以下はシステムの使い方マニュアルの抜粋です。この内容だけを根拠に、"
+                "学習者からの音声での質問に短い話し言葉で分かりやすく答えてください。"
+                "マニュアルに書かれていない情報を付け足したり断定したりしないでください。\n\n"
+                f"質問: {body.message}\n\nマニュアル抜粋:\n{body_text}"
+            )
+            try:
+                formatted = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=params["model"],
+                    reasoning_effort=params["reasoning_effort"],
+                ).strip()
+                if not formatted:
+                    raise ValueError("empty response")
+                answer = f"{formatted}\n\n{_USAGE_HELP_FOOTER}"
+            except Exception:
+                logger.warning("usage help casual LLM formatting failed; falling back to raw body", exc_info=True)
+                answer = f"{body_text}\n\n{_USAGE_HELP_FOOTER}"
+                degraded = True
+        else:
+            # テキスト経路: 凍結本文を素通し（パラフレーズによる意味ドリフトをゼロにする）。
+            answer = f"{body_text}\n\n[出典1]\n\n{_USAGE_HELP_FOOTER}"
+        trace_payload = {
+            "help_anchor": trace_anchor or (citation or None),
+            "documented": True,
+            "no_hit": False,
+        }
+        if used_vector:
+            # P4（出所の正直さ）: 非ベクトル索引ではなくベクトル補助層で
+            # ヒットしたことを痕跡に残す（質問逐語は積まない）。
+            trace_payload["vector"] = True
+        record_interest_trace(
+            user_id, course_id, topic_id,
+            kind="help_usage",
+            text=top.get("title") or "使い方の質問",
+            extra_payload=trace_payload,
+        )
+
+    persist_chat_history(
+        user_id, course_id, topic_id,
+        body.history, body.message, answer,
+        user_message_id=body.message_id or None,
+        # 履歴復元後もマニュアル出典チップ（📖）を保つ。chunk ではないので出典チップ
+        # （/source-chunk/）には繋がらず、本文の [出典1] は素通しのままでよい。
+        assistant_meta={"manual_citations": manual_citations},
+    )
+    return LearningChatResponse(
+        answer=answer,
+        course_update=None,
+        manual_citations=manual_citations,
+        degraded=degraded,
+    )
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -1806,6 +2179,23 @@ def learning_chat(
     def _consume_quota() -> None:
         _consume_learning_chat_quota(current_user["id"], _quota_state)
 
+    # レビュー確定の修正3: discuss_scope の値検証（不正値 422）は、以降の
+    # truncate_chat_and_supersede（機能3の書き直し）より前に行う。従来はこの検証が
+    # RAG 検索直前まで遅延しており、不正な discuss_scope を伴う replace_message_id
+    # リクエストがサーバ正本の履歴を巻き戻したうえで 422 になっていた
+    # （履歴だけ消えて処理は失敗する片手落ちを防ぐ）。詳細文言は後段の本検証
+    # （discuss_scope 解決ブロック）と一致させる。
+    if (body.intent_mode or "").strip() == "discuss":
+        _discuss_scope_precheck = (body.discuss_scope or "course_sources").strip()
+        if _discuss_scope_precheck not in ("course_sources", "all_visible"):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "discuss_scope には course_sources か all_visible を指定してください"
+                    f"（受信値: {_discuss_scope_precheck!r}）。"
+                ),
+            )
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -1823,7 +2213,15 @@ def learning_chat(
             body.history = _trunc["truncated_history"]
 
     topic_info = find_course_topic(course_data, topic_id)
-    topic_title = topic_info["title"] if topic_info else topic_id
+    # discuss モード（設計 §6.2）: 予約 topic_id は既存トピックに存在しないため
+    # find_course_topic は None を返し topic_title は生の topic_id にフォールバックする。
+    # ここでラベル変換することで、表示・プロンプト・痕跡 context_label すべてに一括で効く。
+    if topic_id == DISCUSSION_TOPIC_ID:
+        topic_title = DISCUSSION_TOPIC_LABEL
+        _origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": DISCUSSION_TOPIC_LABEL}
+    else:
+        topic_title = topic_info["title"] if topic_info else topic_id
+        _origin_topic_info = topic_info
     course_title = _course_title(course_data, default=course_id)
     # domain が未設定の場合は course_title にフォールバック
     domain = course_data.get("domain") or course_title
@@ -1834,8 +2232,12 @@ def learning_chat(
     _anchor = body.position_anchor or {}
     _seg = int(_anchor.get("segment_id") or 0)
     _scroll = int(_anchor.get("scroll_offset") or 0)
+    # レビュー確定の修正4: origin_for_topic に topic_info=None を渡すと
+    # LearningSupportOrigin.topic_title が生の topic_id（"_discussion"）にフォールバック
+    # してしまう（EXPLAIN_GRAPH_ELEMENT 経路等で UI に露出しうる）。ラベル変換は上の1箇所に
+    # 留め、discussion のときは _origin_topic_info（変換後ラベル入り）を渡す。
     support_origin = support_agent.origin_for_topic(
-        topic_id, topic_info, segment_id=_seg, scroll_offset=_scroll
+        topic_id, _origin_topic_info, segment_id=_seg, scroll_offset=_scroll
     )
 
     if body.support_action == "return_to_learning_path":
@@ -1890,10 +2292,32 @@ def learning_chat(
             structure_anchor=_tap_anchor,
         )
 
+    # 学生 HELP ルート（設計 §1-3）: casual バイパス（次の _is_casual 判定）より手前に
+    # 置く非LLM pre-route。typed action (usage_help) または保守的なキーワード判定
+    # (_is_usage_question) でヒットしたら、ここで早期 return し、以降の意図分類・
+    # 前提知識チェック・誤解検出・tension prefilter に構造的に到達させない
+    # （ハンズフリー中の「これどう使うの」に効く唯一の位置）。分野の地図の ↗ アクション
+    # （atlas_context）とは競合させないため、atlas_context が無いときのみ判定する。
+    if not (isinstance(body.atlas_context, dict) and body.atlas_context):
+        _is_usage_help = (
+            _route_for_typed_action(body.support_action) == "USAGE_HELP"
+            or _is_usage_question(body.message)
+        )
+        if _is_usage_help:
+            with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
+                return _usage_help_response(
+                    current_user["id"], course_id, topic_id, body,
+                    on_llm_call=_consume_quota,
+                )
+
     # カジュアル対話モード（気軽に話せる先生・ハンズフリー音声会話）:
     # 意図分類（雑談拒否）・前提知識ゲート・誤解検出をバイパスし、RAG検索と
     # tier 集約（根拠の一線）はそのまま通す。
     _is_casual = (body.intent_mode or "").strip() == "casual"
+    # discuss モード（「論文と話す」, 設計 §6.2 Phase 1）: casual と同型の3点バイパス
+    # （意図分類・前提知識ゲート・detour化）を共有するが、応答スタイルは会話調ではなく
+    # 学術ディスカッション調（_get_discuss_system_prompt）にする。
+    _is_discuss = (body.intent_mode or "").strip() == "discuss"
 
     # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
     # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
@@ -1906,8 +2330,9 @@ def learning_chat(
             return _atlas_response
 
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
+    #    discuss は casual と同様に意図分類（雑談拒否）をバイパスする（設計 §6.2）。
     with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
-        intent = None if (_is_casual or _atlas_ctx) else (
+        intent = None if (_is_casual or _is_discuss or _atlas_ctx) else (
             _route_for_typed_action(body.support_action)
             or _classify_intent(body.message, course_title, on_llm_call=_consume_quota)
         )
@@ -1917,13 +2342,27 @@ def learning_chat(
         chit_chat_answer = (
             "申し訳ありませんが、私は物理学の学習支援に特化したAIです。\n\n"
             "物理学・数学の概念についての質問や、学習の進め方についての相談でしたら、"
-            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！"
+            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！\n\n"
+            "画面の使い方についての質問にもお答えできます。"
         )
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, chit_chat_answer,
         )
         return LearningChatResponse(answer=chit_chat_answer, course_update=None)
+
+    # ルート①-b（設計 §4-4, Phase 2）: 意図分類 LLM が USAGE_HELP と判定した場合も
+    # Phase 1 の HELP ハンドラへ委譲する。pre-route（_is_usage_question / typed action
+    # usage_help）の保守的キーワード判定をすり抜けたケースの受け皿。ハンドラ自体の挙動
+    # （テキスト経路は quota 非消費・本文素通し、音声/casual 経路は 1 LLM コール）は
+    # Phase 1 と同一で、二重に interest_trace を記録することもない
+    # （pre-route はここに到達する前に早期 return しているため一度しか通らない）。
+    if intent == "USAGE_HELP":
+        with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
+            return _usage_help_response(
+                current_user["id"], course_id, topic_id, body,
+                on_llm_call=_consume_quota,
+            )
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":
@@ -1971,8 +2410,8 @@ def learning_chat(
         )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
-    # casual モードでは会話を止めない（前提確認の逆質問ゲートを挟まない）。
-    prerequisite_intervention = None if (_is_casual or _atlas_ctx) else check_prerequisites(
+    # casual / discuss モードでは会話を止めない（前提確認の逆質問ゲートを挟まない）。
+    prerequisite_intervention = None if (_is_casual or _is_discuss or _atlas_ctx) else check_prerequisites(
         current_user["id"], course_id, course_data, topic_title, body.message
     )
     if prerequisite_intervention:
@@ -1996,7 +2435,25 @@ def learning_chat(
     #    search_chunks_with_metadata は各チャンクに tier(L1信頼性) を付与して返す。
     # このコース自身の教材（material_id）の集合。出典が「教材」か「別の資料」かの分類に使う。
     course_material_ids = set(course_source_material_ids(course_data))
-    chunk_results = search_chunks_with_metadata(body.message, top_k=8)
+    # Phase 0（discuss モード設計書 §6.1）: 全域検索は本人が閲覧可能な document に fail-closed で絞る。
+    # discuss モード（設計 §6.2 Phase 1）: スコープ2段切替。既定/明示 "course_sources" は
+    # このコースのソース論文のみ、"all_visible" は Phase 0 の可視集合まで。該当チャンクが
+    # 無くても他スコープへ無断で広げない（DM1）ため、discuss_scope が空集合でもそのまま渡す。
+    _discuss_scope = (body.discuss_scope or "course_sources").strip() if _is_discuss else None
+    if _is_discuss and _discuss_scope not in ("course_sources", "all_visible"):
+        raise HTTPException(
+            status_code=422,
+            detail=f"discuss_scope には course_sources か all_visible を指定してください（受信値: {_discuss_scope!r}）。",
+        )
+    if _is_discuss and _discuss_scope == "all_visible":
+        allowed_document_ids = list_visible_document_ids(current_user["id"])
+    elif _is_discuss:
+        allowed_document_ids = list_course_source_document_ids(course_data)
+    else:
+        allowed_document_ids = list_visible_document_ids(current_user["id"])
+    chunk_results = search_chunks_with_metadata(
+        body.message, top_k=8, allowed_document_ids=allowed_document_ids,
+    )
     cited_chunks = []
     cited_sources: list[dict] = []  # L1: 文脈に採用した根拠の tier 一覧
     has_topic_material = False
@@ -2040,19 +2497,37 @@ def learning_chat(
 
     if cited_chunks:
         context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
+    elif _is_discuss:
+        # DM1（出所の正直さ）: discuss は該当チャンクが無くても他スコープへ無断で
+        # 広げない。範囲を広げていない事実と、範囲外知識を使う場合の出所明示を指示する。
+        context_block = (
+            "※選択中の検索範囲には、この質問に直接関連する箇所は見当たりませんでした。"
+            "範囲は広げていません。一般的な学術知識で回答する場合は、この論文由来ではないことを明示してください。"
+        )
+        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
     else:
         context_block = "※この質問に直接関連する教材セクションは見つかりませんでした。一般的な学術知識を用いて回答してください。"
         log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
     # 5. 回答の生成（ルート統合）
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
-    # casual モードでも guard の注入（振る舞い）は維持する — 気軽さ≠根拠の放棄。
-    if _is_casual:
+    # casual / discuss モードでも guard の注入（振る舞い）は維持する — 気軽さ・自由さ≠根拠の放棄。
+    # discuss は casual と判定が競合しないが（intent_mode は単一値）、設計上 discuss を先に判定する。
+    if _is_discuss:
+        _system_prompt = _get_discuss_system_prompt(domain, response_persona)
+    elif _is_casual:
         _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
     else:
         _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
     if overall_tier == TIER_OUT_OF_SOURCE:
         _system_prompt += "\n\n" + out_of_source_guard_instruction()
+    # アンカー優先ラダー（設計 §7、IH6）: typed action（EXPLAIN_GRAPH_ELEMENT）・
+    # usage_help pre-route はこの行より前段で早期 return 済みのため、ここに到達する
+    # のは通常の学習チャット（casual/discuss 含む）のみ。追加の LLM コールは作らず、
+    # 既存の1コールへヒントを同梱するだけ（純関数・DB/LLM 非使用）。
+    _anchor_ladder_hint = _build_anchor_ladder_hint(body, body.history)
+    if _anchor_ladder_hint:
+        _system_prompt += "\n\n" + _anchor_ladder_hint
     messages: list[dict] = [
         {"role": "system", "content": _system_prompt},
         {"role": "user", "content": (
@@ -2071,7 +2546,14 @@ def learning_chat(
         messages.append({"role": turn["role"], "content": turn["content"]})
     messages.append({"role": "user", "content": body.message})
 
-    _chat_feature = "learning:chat_casual" if _is_casual else "learning:chat"
+    # discuss モード（設計 §6.2 Phase 1）: U層タグを "learning:chat_discuss" に分離し、
+    # casual / 通常チャットと独立にコストを実測する（専用上限は Phase 3 で実測後に判断）。
+    if _is_discuss:
+        _chat_feature = "learning:chat_discuss"
+    elif _is_casual:
+        _chat_feature = "learning:chat_casual"
+    else:
+        _chat_feature = "learning:chat"
     # この時点でリクエスト全体を通じて最初の（あるいは唯一の）LLM 呼び出しなら消費する
     # （intent 分類等ですでに消費済みなら no-op、§1）。
     _consume_quota()
@@ -2094,6 +2576,7 @@ def learning_chat(
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
     # tier 自体はレスポンスで返し、UI のバッジ表示で担保する。degraded な固定文には
     # 付与しない（回答本文に依存する装飾のため、設計書 §4）。
+    # discuss では意図的にこの明示を維持する（DM1: 出所の正直さを弱めない）。
     if overall_tier == TIER_OUT_OF_SOURCE and not _is_casual:
         if not degraded:
             answer = out_of_source_notice() + "\n\n" + answer
@@ -2114,6 +2597,24 @@ def learning_chat(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
         user_message_id=body.message_id or None,
+        # 履歴復元後も本文中の [出典N] を出典チップに戻せるようにする（sources を焼き込まないと
+        # リロード・トピック切替・discuss モード遷移のあとプレーンテキストに退化する）。
+        # 保存するのはチップ描画とポップアップ起動に要る最小フィールドのみ（quote / meta /
+        # origin は「いまの回答」を扱う出典タブ専用で、復元メッセージからは参照されない）。
+        assistant_meta={
+            "sources": [
+                {
+                    "index": s["index"],
+                    "chunk_id": s["chunk_id"],
+                    "source_title": s["source_title"],
+                    "tier": s["tier"],
+                    "score": s["score"],
+                }
+                for s in cited_sources
+            ],
+            "overall_tier": overall_tier,
+            "content_grounding": content_grounding,
+        },
     )
     # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
     position_anchor = build_position_anchor(topic_id, _seg, _scroll)
@@ -2139,6 +2640,15 @@ def learning_chat(
         "cited_chunk_ids": [s["chunk_id"] for s in cited_sources[:3] if s.get("chunk_id")],
         # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
         **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
+        # discuss モード（設計 §6.2 Phase 1）: 後から U層・k-匿名集計・personal_graph が
+        # discuss 由来の痕跡を区別できるように焼き込む。
+        **({"entry_mode": "discuss"} if _is_discuss else {}),
+        # discuss 観測基盤（docs/features/discuss_observation_design.md §2-1）: 全モード共通で
+        # 回答の出所分類を焼き込む（記録開始日以前の痕跡には無いキーなので、集計側は
+        # 「記録済み件数」を分母として明示する — U1 と同じ誠実さ）。
+        "content_grounding": content_grounding,
+        # discuss のときのみスコープも焼き込む（discuss 以外は None のまま）。
+        **({"discuss_scope": _discuss_scope} if _is_discuss else {}),
     }
     # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
     # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
@@ -2187,8 +2697,10 @@ def learning_chat(
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
     #  - casual  : 気軽に話せる先生。detour 化も復帰導線も付けない（会話を UI 遷移で邪魔しない）
+    #  - discuss : 論文と話す（設計 §6.2）。「寄り道」化しない — origin=None により既存フロントの
+    #              寄り道バナーは自動的に出ない（対等併記, DM5）
     #  - explore : 従来どおり寄り道（detail_explanation, 復帰導線つき）
-    if (body.intent_mode or "").strip() in ("on_path", "casual"):
+    if (body.intent_mode or "").strip() in ("on_path", "casual", "discuss"):
         result = LearningSupportResult(
             answer=clean_answer,
             mode="normal",
@@ -2218,14 +2730,82 @@ def learning_chat(
     )
 
 
+@router.get("/courses/{course_id}/discuss/opening")
+def get_discussion_opening(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """discuss モード（「論文と話す」）の開幕画面（設計書 §3.3・非LLM・読み取り専用）。
+
+    白紙のチャット欄で始めないための3要素のうち、非LLM・A層成果の読み出しだけで
+    組み立てられる分を返す（最初の一手の固定チップはフロント側で描く）:
+    中心命題・支持構造（thesis_reconstruction artifact）／理論のバックボーン
+    （TheoryOperationGraph の main 層・theory stage 順）／「最も脆い一手」
+    （D層台帳の未検証合意リスト + review_required なバックボーンノードの事実提示）。
+
+    LLM 呼び出し 0 回・痕跡記録なし・migration なし（DM8）。confidence / load_score
+    等の生数値は一切含めない（``core/discuss/opening.py::build_opening`` が
+    ホワイトリスト射影 + 再帰除去の二重で保証する）。
+    """
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    document_ids = list_course_source_document_ids(course_data)
+    return build_discussion_opening(course_id, document_ids)
+
+
+class DiscussReflectionRequest(BaseModel):
+    text: str = ""
+
+
+@router.post("/courses/{course_id}/discuss/reflection", status_code=201)
+def record_discuss_reflection(
+    course_id: str,
+    body: DiscussReflectionRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """着地画面の「今日の理解を自分の言葉で」を本人の tension 痕跡として残す。
+
+    着地画面に並ぶ候補（tension / anchor）は、いずれも学習者が既に書いた発話から
+    非同期 LLM が起こしたものであり、質問しかしていない対話からは「残す価値のある
+    理解」が生まれない。この API は候補の生成を待たず、**本人が書いた一文をそのまま**
+    確定済み（``status='articulated'``）の tension として記録する導線を与える。
+
+    LLM 呼び出し 0 回・migration 不要（DM8）。確定するのは常に本人（P1）で、
+    AI が代わりに理解を要約して置くことはしない。空文字は 422。
+    """
+    text = (body.text or "").strip()
+    if not text:
+        raise HTTPException(status_code=422, detail="text is required")
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    result = record_learner_articulated_tension(
+        current_user["id"], course_id, DISCUSSION_TOPIC_ID, text,
+        context_label=DISCUSSION_TOPIC_LABEL,
+        origin="discuss_landing",
+    )
+    if result is None:
+        raise HTTPException(status_code=500, detail="Failed to record reflection")
+    return {"ok": True, **result}
+
+
 @router.get("/courses/{course_id}/source-chunk/{chunk_id}")
 def get_source_chunk_route(
     course_id: str,
     chunk_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。"""
-    passage = get_chunk_passage(chunk_id)
+    """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。
+
+    レビュー確定の修正1（セキュリティ）: 従来は chunk_id のみで本人の可視性を検証せず
+    任意の Private 文書本文が読めてしまっていた。`list_visible_document_ids` の正本
+    （所有/public/group/object_group_permissions ∪ アクセス可能コースの sources 経由）で
+    fail-closed に絞る。
+    """
+    allowed_document_ids = list_visible_document_ids(current_user["id"])
+    passage = get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)
     if not passage:
         raise HTTPException(status_code=404, detail="Source chunk not found")
     return passage
@@ -2247,7 +2827,7 @@ def get_chunk_claim_refs_route(
     course_data = get_course_data(current_user["id"], course_id)
     if course_data is None:
         raise HTTPException(status_code=404, detail="Course not found")
-    claims = get_chunk_claim_refs(course_data, chunk_id)
+    claims = get_chunk_claim_refs(course_data, chunk_id, user_id=current_user["id"])
     if claims is None:
         raise HTTPException(status_code=404, detail="Chunk not found in this course")
     return {"claims": claims}
@@ -2640,6 +3220,116 @@ def voice_speak_route(
     if audio_bytes is None:
         raise HTTPException(status_code=503, detail="TTS provider is not available")
     return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}
+
+
+# ---------------------------------------------------------------------------
+# インスペクト・モード（設計 docs/features/learning_ui_inspect_hover_design.md
+# §5.2/§5.4/§9）: UI 論理アンカーの配信 + 未整備アンカーへのホバー滞留（no_hit）記録。
+# どちらもコース非依存（トップバー・サイドバー等、画面全体のUI部品が対象）。
+# ---------------------------------------------------------------------------
+
+# interest_traces.course_id は NOT NULL のため、コース文脈を伴わない UI 全体の
+# no_hit 記録には予約疑似コースIDを使う（discuss の "_discussion" と同じパターン）。
+_UI_ANCHOR_EVENT_COURSE_ID = "_ui"
+
+_UI_ANCHOR_EVENT_KINDS = frozenset({"no_hit"})
+
+# 同一ユーザー×同一アンカーの no_hit 記録を書きすぎない簡易スパム防止（IH10/§5.4）。
+_UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES = 30
+
+
+@router.get("/help/ui-anchors")
+def get_ui_anchors_route(current_user: dict = Depends(_get_current_user)) -> dict:
+    """インスペクト・モードの UI 論理アンカー配信（設計 §5.2/§9-3）。
+
+    ログイン必須・読み取り専用・痕跡を書かない。クライアントはログイン時に1回
+    フェッチしてキャッシュする前提で、ホバーごとに呼ばれることは想定しない。
+    student audience で解決済みの節のみを返す（audience 越境なし）。
+    """
+    del current_user
+    if _resolve_ui_anchors is None:
+        return {"anchors": {}}
+    try:
+        return {"anchors": _resolve_ui_anchors()}
+    except Exception:
+        logger.warning("resolve_ui_anchors failed for ui-anchors endpoint", exc_info=True)
+        return {"anchors": {}}
+
+
+class UiAnchorEventRequest(BaseModel):
+    anchor_id: str
+    kind: str = "no_hit"
+    # インスペクトは画面全体のモードのため、送信時点でコース/トピックが定まらない
+    # 場合がある（例: コース選択前のトップバー）。両方任意。
+    course_id: str | None = None
+    topic_id: str | None = None
+
+
+def _recent_duplicate_ui_anchor_event(user_id: str, help_anchor: str) -> bool:
+    """直近（既定 30 分）に同一ユーザー×同一アンカーの no_hit 記録が無いかを確認する。
+
+    スパム防止（IH10/§5.4）の簡易実装。DB 障害時は False（fail-open — 記録自体は
+    止めない。ダブり抑制の失敗より記録漏れの方が実害が大きいため）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid)
+                  AND kind = 'help_usage'
+                  AND payload->>'help_anchor' = :anchor
+                  AND created_at > now() - (:minutes || ' minutes')::interval
+                LIMIT 1
+            """),
+            {
+                "uid": user_id,
+                "anchor": help_anchor,
+                "minutes": _UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
+            },
+        ).fetchone()
+        return row is not None
+    except Exception:
+        logger.warning("ui anchor event dedup check failed", exc_info=True)
+        return False
+    finally:
+        session.close()
+
+
+@router.post("/help/ui-anchor-events", status_code=201)
+def record_ui_anchor_event_route(
+    body: UiAnchorEventRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """未整備 UI アンカーへのホバー滞留を help_usage 痕跡として記録する（設計 §5.4/§8）。
+
+    質問の逐語は積まない（anchor_id は固定の論理IDであり自由文ではない）。
+    滞留閾値・生ホバーイベントの記録禁止（IH10）はフロント側の責務 — ここは
+    「一定時間ツールチップが表示され続けた」という事実の記録のみを担う。
+    記録した行は G層 ``manual.help_gaps_pending`` の需要側集計にそのまま乗る
+    （``help_anchor`` が空文字列にならない限り、no_hit の汎用バケツではなく
+    ``ui:<anchor_id>`` 単位のバケツに集計される）。
+    """
+    anchor_id = (body.anchor_id or "").strip()
+    if not anchor_id or anchor_id not in _KNOWN_UI_ANCHOR_IDS:
+        raise HTTPException(status_code=422, detail=f"未知の UI アンカー: {body.anchor_id!r}")
+    if body.kind not in _UI_ANCHOR_EVENT_KINDS:
+        raise HTTPException(status_code=422, detail=f"未知の kind: {body.kind!r}")
+
+    user_id = current_user["id"]
+    help_anchor = f"ui:{anchor_id}"
+
+    if _recent_duplicate_ui_anchor_event(user_id, help_anchor):
+        return {"ok": True, "recorded": False}
+
+    course_id = (body.course_id or "").strip() or _UI_ANCHOR_EVENT_COURSE_ID
+    record_interest_trace(
+        user_id, course_id, body.topic_id or None,
+        kind="help_usage",
+        text="UI要素の使い方（未整備）",
+        extra_payload={"help_anchor": help_anchor, "documented": False, "no_hit": True},
+    )
+    return {"ok": True, "recorded": True}
 
 
 def _tension_connect_edge_viewable(user_id: str, edge_id: str) -> bool:

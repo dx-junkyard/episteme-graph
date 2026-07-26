@@ -637,7 +637,8 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
   `locate_steps`（道案内の順序付き点灯手順。各要素 = `{screen, anchor_id, hint, precondition?}`。
   `anchor_id` は**論理 ID**でバックエンドは DOM セレクタを持たない）を宣言。全 API を一度に載せず
   安全・高頻度から段階登録（fail-closed）。ロール階層 SYSTEM_ADMIN ≥ TEACHER ≥ STUDENT。
-- **操作 KB**: `docs/admin_operations/*.md`（front-matter `capability`/`role`/`screen`）。`knowledge.py` が
+- **操作 KB**: `docs/admin_operations/*.md`（front-matter は `screen:` / `role:` の2キー。
+  `capability` キーは存在しない — 結び付けは capability 側の `howto_doc` → `{#anchor}`）。`knowledge.py` が
   起動時にインデックス化し、検索前に `capabilities_for(role)` で絞る（権限外の手順は出さない）。
   リアルタイム生成しない。KB に無ければ「未整備」。
 - **操作代行 + 戻す**: `action` capability は `actions/` に tool（`capture_before`/`apply`/`revert`）として実装し
@@ -650,6 +651,79 @@ P7 既存 A/B/C/D 層コードを変更しない/ P8 道案内は誘導まで（
 - **コスト上限**: `ASSISTANT_MAX_CALLS_PER_DAY`（既定 20）/ モデルは fast tier 既定（`ASSISTANT_LLM_MODEL` で上書き）。
 - **ガードレール**: `backend/tests/test_admin_assistant.py` が「全 `reversible=false` は `confirm=true`」
   「`core/admin_assistant/` が FastAPI を import しない」「locate は role で fail-closed」を構造的に守る。
+
+### 利用者マニュアル KB（help_kb, migration 058/059, 2026-07-25）
+
+docs/manual を AI アシスタントの知識源にする非ベクトル KB。正本は
+`docs/features/manual_help_kb_design.md`。ベクトル RAG は建てない（97KB・70節に埋め込み
+基盤は過剰。無ヒット率の計器が要求してから Phase 3 で検討）。**chunks テーブルへの
+マニュアル相乗りは禁止**（`search_chunks_with_metadata` は全域検索のため教材回答へ混入する）。
+
+- **`backend/core/help_kb/`**（FastAPI 非 import）: `admin_assistant/knowledge.py` の索引
+  エンジンを一般化した正本。`index.py`（見出し節分割 + 語彙重なり検索 + マニュアル専用の
+  決定論変換 = HTMLコメント除去・テーブル平坦化・**TODOマーカー入りチャンクの索引除外**）/
+  `manual.py`（`search_manual(query, *, audience, limit)` — **audience は必須キーワード引数**。
+  student → student/ のみ、teacher → +teacher/、system_admin → 全部の上位継承。学生索引
+  ビルダーは student/ パスしか組めない構造分離）/ `validator.py`（front-matter・anchor・
+  リンクの起動時検証。main.py lifespan から fail-open で呼ぶ）。
+  `admin_assistant/knowledge.py` は外部シグネチャ不変の薄い委譲（admin_operations 側は
+  変換なし・挙動不変）。
+- **docs/manual は audience でディレクトリ物理分離**: `student/` / `teacher/` /
+  `system_admin/`（README.md は KB 非対象）。front-matter `audience:` はディレクトリと一致
+  必須、全 `##`〜`####` 見出しに明示 `{#anchor}`、student/ は禁止語彙 denylist
+  （ADMIN_PASSWORD・/api/admin 等）を機械検査。**backend/Dockerfile は
+  docs/admin_operations と docs/manual のみ COPY**（docs/features 等の設計書は
+  イメージ非同梱 = fail-closed のビルド時前倒し）。
+- **学生 HELP ルート**（`routes/learning.py`）: ①typed action `usage_help`（誤爆ゼロ）
+  ②非LLM pre-route `_is_usage_question()` を **casual バイパスより手前**に配置（音声・casual
+  ユーザーに届く唯一の位置 — ここより後ろに戻さない）。テキスト経路 = マニュアル本文
+  素通し + `manual_citations`（新 optional DTO フィールド）+ **quota 非消費・LLM 0回**。
+  音声/casual 経路のみ 1 LLM コールで会話調整形（`feature="learning:help_usage"` で U層計測、
+  失敗時は raw 本文へフェイルソフト）。無ヒットは固定文（捏造禁止）。痕跡は
+  `interest_traces` の kind `help_usage`（**質問逐語を積まない**。anchor/documented/no_hit
+  のみ。tension/anchor worker・digest・個人知識ネットワーク・問いの軌跡から除外）。
+- **教員/管理者**: Admin Copilot guidance の第2知識源（capability KB が手順の正本・manual は
+  概念/全体像。primary 未整備時のみ本文フォールバック + citation 出所別併記。screen_context の
+  tab を `search_manual(..., screen=)` ヒントとして伝播）。
+- **Phase 2 実装済み（2026-07-25）**:
+  ①意図分類の 4 ラベル化 — `_classify_intent` に `USAGE_HELP` 追加（迷えば DOMAIN_RAG の
+  保守設計。分類経由でも Phase 1 の HELP ハンドラへ委譲）。
+  ②`screen_mode` コンテキストヘルプ — `LearningChatRequest.screen_mode`（voice/lecture/chat、
+  app.js の `resolveScreenMode()` が全送信経路で付与）→ front-matter `screen:` 一致節を
+  検索ランキングで優先（スコア正の節に限る。`search_manual(..., screen=)`）。
+  ③G層ルール3本 — `manual.help_gaps_pending`（TEACHER・recommended。help_usage 痕跡の
+  無ヒット/未整備節を anchor 単位で k-匿名集計、`core/privacy.py` 正本・レンジ表示のみ）/
+  `assistant_kb.undocumented`（SYSTEM_ADMIN・optional。howto_doc 未整備 capability）/
+  `manual.todo_unresolved`（SYSTEM_ADMIN。`excluded_sections()` ≥1 で点灯・解消で自動消滅）。
+  ④`POST /api/admin/help-kb/refresh`（SYSTEM_ADMIN・`AUDIT_ENTITY_MANUAL` で監査記帳。
+  volume-mount 開発や hotfix の非常口 — 運用の主経路はデプロイ=再起動のまま）。
+- **Phase 3 実装済み（2026-07-25、封印はオーナー指示で解除。着手時必須条件は遵守）**:
+  ①**ベクトル補助層**（migration 058 `manual_sections`、`core/help_kb/vector.py`）—
+  専用テーブル（chunks 非汚染）・全置換スナップショット同期（孤児行は同一トランザクション
+  DELETE）・凍結検証（validator 違反あり）時は埋め込まない・埋め込み失敗時は一切書き込まない。
+  学生 HELP の**非ベクトル無ヒット時のみ**のフォールバック検索（`_MAX_COSINE_DISTANCE=0.55`
+  の保守的足切り — 「なんとなく関連」は捏造に見えるため厳格。痕跡 payload に `vector:true`）。
+  `HELP_KB_VECTOR_ENABLED`（既定 on）。起動時 lifespan + refresh/freeze/serving-source 後に
+  best-effort 再同期（`_resync_help_kb_derived`）。DB 不達は fail-open（skipped を正直に返す）。
+  ②**DB draft/freeze**（migration 059、`core/help_kb/store.py` — `revision_store` 委譲）—
+  **配信既定は files のまま**（デプロイ=凍結切替の運用を壊さない。atlas と違い起動時に DB を
+  正本化しない）。DB 配信は `POST /api/admin/help-kb/freeze` 実行後のみ（freeze = 検証ゲート
+  通過が条件: validator 全チェック + student denylist をコード側ゲートに昇格、違反は 422 で
+  版を作らない）。draft は revision 楽観ロック（409）・版は append-only・DB 障害は files へ
+  fail-open。API は drafts CRUD / seed / freeze / serving-source（files への escape hatch）/
+  versions（全て SYSTEM_ADMIN・監査記帳）。UI は `admin-manual-editor.js`（ES5・運用タブ・
+  SYSTEM_ADMIN のみ・409 は事実文 + 再読込・freeze は事実文 confirm + violations 素通し表示）。
+  ③**content-hash 監査記帳**（`core/help_kb/audit.py`）— 配信スナップショットの決定論 sha256 を
+  起動時に照合し**変化時のみ** `theory_review_events`（`AUDIT_ENTITY_MANUAL`・
+  entity_id=`help_kb_snapshot`・`changed_by=NULL`）へ記帳（冪等・fail-open。二元台帳:
+  誰が書いたか=git / いつ配信状態になったか=DB。取れない帰属を偽装記帳しない）。
+- **ガードレール**: `backend/tests/test_help_kb_guardrails.py`（audience 越境禁止・denylist・
+  TODO 凍結拒否・痕跡非汚染・Dockerfile 回帰・chunks 非汚染ほか。`DELETE FROM` 禁止は
+  vector.py の内部スナップショット同期のみ設計明示で例外化 — 公開削除 API 禁止は不変）+
+  `test_help_kb.py` / `test_help_usage_route.py` / `test_help_usage_ui_static.py` /
+  `test_help_kb_refresh_api.py` / `test_help_kb_vector.py` / `test_help_kb_store.py` /
+  `test_help_kb_audit.py` / `test_manual_editor_ui_static.py` +
+  `test_next_steps_guardrails.py`（G層3ルール分）。
 
 ### ガイダンス層（G層, migration 039）
 
@@ -1018,6 +1092,75 @@ casual チャット → 応答を TTS 再生（再生中はマイク停止）→
 応答の第1根拠チャンク（`sources[0].chunk_id`）を `/source-chunk/` から取得し
 ボイスパネルに教材表示する。
 
+### 「論文と話す」ディスカッションモード（discuss, B層, migration 不要, 2026-07-25）
+
+学習チャットの4値目 `intent_mode='discuss'`。コース教材を順にたどらず、ソース論文全体＋
+周辺資料と最初から議論できる係留付きディスカッションモード。正本は
+`docs/features/discussion_mode_design.md`（不変条項 DM1〜DM8。Phase 0〜2 実装済み、
+Phase 3=document 直付け入口は v2 として未着手 — 着手時は専用設計文書を切る。設計書の
+「migration 058 想定」は help_kb が 058/059 を消費済み・観測基盤が 060 を消費のため実際は 061〜。
+Phase 3 着手判断の実測ゲートは discuss 観測基盤
+（`docs/features/discuss_observation_design.md`、migration 060 `discuss_metric_events`・
+DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし/参考目安は自動ゲートにしない/
+計測失敗でUXを止めない。`GET /api/admin/discuss/observation-status`・
+`GET /api/admin/discuss/observation-dump`（tar.gz|zip・監査 entity_type='discuss_observation'）・
+`POST /api/learning/discuss/metric-events`、core は `backend/core/discuss/observation.py`）が担う）。
+
+- **Phase 0（可視性フィルタ、discuss と独立の先行バグ修正）**:
+  `search_chunks_with_metadata` は**必須キーワード引数** `allowed_document_ids` で可視性を
+  強制する（`None` はテスト・本番未接続コード専用、空集合は SQL 非発行で `[]` の fail-closed。
+  `material_id` の SELECT は grounding 判定の生命線なので落とさない）。可視集合の正本は
+  `services.list_visible_document_ids(user_id)` — document 直接可視（所有/public/group/
+  object_group_permissions）**∪ アクセス可能コース（所有/公開テンプレート/グループ/受講中）の
+  sources 由来 document**。コース経由開示を含むのは、受講コースの sources（教員 private が多い）
+  を RAG できないと既存学習体験が壊れるため。コース sources→document 解決の正本は
+  `services.list_course_source_document_ids(course_data)`（lecture.py の旧ヘルパーは委譲済み）。
+  **チャンク直読み API も同じ可視集合で fail-closed**（2026-07-25 レビュー修正）:
+  `GET .../source-chunk/{chunk_id}` は `get_chunk_passage(chunk_id, allowed_document_ids=...)`
+  （必須キーワード引数・空集合 SQL 非発行）、claim-refs は「コース sources ∪ 本人可視 document」
+  の複合判定（`get_chunk_claim_refs(..., user_id=)`）。検索経路だけ塞いで直読み経路を残さない。
+- **Phase 1（v1 最小: migration 0・新テーブル 0・新エンドポイント 0）**: casual と同型の
+  バイパス4点（意図分類 / 前提知識ゲート / detour 化 / U層タグ `learning:chat_discuss`）。
+  usage_help pre-route → casual → discuss の判定順を崩さない。会話は予約疑似トピック
+  `_discussion`（`DISCUSSION_TOPIC_ID`、表示・プロンプト・痕跡 context_label は
+  `DISCUSSION_TOPIC_LABEL="論文との議論"` へ1箇所で変換）。応答は casual と違い
+  **学術ディスカッション調**（`_get_discuss_system_prompt`: 即答・出し惜しみ禁止 +
+  **生成プロンプト構造的必須**（応答末尾に言い換え/予測/自己説明の誘い or why/how/what-if
+  問い返しを必ず1つ — DM4））。スコープ2段 `LearningChatRequest.discuss_scope`
+  （`course_sources` 既定 / `all_visible`、不正値 422）。該当チャンクゼロでも他スコープへ
+  **無断フォールバックしない**（DM1。事実文の context_block に置換）。out_of_source_notice は
+  casual と違い discuss では維持（DM1 の明示）。痕跡 payload に `entry_mode: 'discuss'`。
+  tension prefilter / structure_anchor / 書き直し・削除は無変更で効く。コスト上限は既存
+  `LEARNING_CHAT_MAX_CALLS_PER_DAY`（専用上限は U層実測後に判断 — 裁定 #9）。
+- **Phase 2（開幕・着地、非LLM）**: `GET /api/learning/courses/{course_id}/discuss/opening`
+  （`backend/core/discuss/`、FastAPI 非 import・読み取り専用・LLM 0回・confidence 等の
+  生数値非漏洩）— thesis_reconstruction artifact（`document_run_artifacts`）+
+  `theory_component_graphs` main 層バックボーン + 「最も脆い一手」（`compile_open_assumptions`
+  + review_required ノードの事実文）を投影。着地画面はフロントの既存 API 束ね
+  （tension/anchors digest の confirm/dismiss + 再構成プローブ「あれば1問」=
+  `reconstruction/next` の未知 topic コース全体フォールバック挙動を `_discussion` で流用 +
+  「このトピックで続きを学ぶ」情報的提示）。トリガー = 明示終了 / トピック切替 /
+  無活動15分（ポーリング禁止）。着地の帰属カードは anchors/digest の
+  `anchor_label` / `doubt_type_label` を必ず提示する（質問文だけの echo に戻さない —
+  confirm の実体は「理解を残す」ではなく帰属の確定。app.js の `renderAnchorDigestCard`
+  と同型、様相の訂正チップ付き）。加えて着地画面先頭の「今日の理解を自分の言葉で」
+  （`POST /api/learning/courses/{course_id}/discuss/reflection`、非LLM・migration 不要）が
+  本人の記述を `kind='tension'` / `status='articulated'` の痕跡として直接記録する
+  （`services.record_learner_articulated_tension`。候補 candidate を経由しない = LLM 非関与、
+  `articulated` は `TENSION_OWNED_STATUSES` なのでそのまま「わたしの地図」に載る）。
+  観測イベントは `landing_reflection_saved`（候補の `landing_confirmed` と合算しない）。
+  設計記録は設計書 §9.6。
+- **フロント**（`app.js` + `discuss.js`（`window.Discuss`、reconstruction.js と同型の後付け
+  パターン））: サイドバー最上部の**二枚看板**（「順番に学ぶ」/「この論文と議論する」を等重表示。
+  現アプリにコース着地画面が無いため設計書 §3.2 の想定をサイドバー常設ブロックに軌道修正、
+  既存の先頭トピック自動選択は不変）・「もっと自由に話す」常設リンク・スコープトグル・
+  モードバー「論文と議論中」（中立色）・応答後の分岐チップ（深掘り/横展開）。
+  **discuss UI 文言に「寄り道」を使わない**（DM5。explore の内部語彙・既存 UI は不変）。
+- **ガードレール**: `test_discuss_guardrails.py` / `test_discuss_mode.py` /
+  `test_discuss_opening.py` / `test_search_visibility.py` / `test_discuss_ui_static.py` /
+  `test_discuss_phase2_ui_static.py`（可視性 fail-closed・無断フォールバック禁止・
+  生成プロンプト必須要素・数値非表示・`_discussion` 痕跡動作・U層タグ分離・k=3 正本）。
+
 ### 学習チャットのメッセージ書き直し・削除（機能3, B層）
 
 学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。
@@ -1322,7 +1465,8 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   doubt/schema.py・services.py の集計はここに委譲済み（表示文言は各所に残る）。
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
-  `AUDIT_ENTITY_TYPES`（26語彙）。`theory_review_events` への記帳は原則
+  `AUDIT_ENTITY_TYPES`（30語彙。2026-07-25 に `AUDIT_ENTITY_MANUAL="manual"` を追加）。
+  `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は
   必ずカタログ定数を使う）。
@@ -1385,6 +1529,15 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   原稿スタジオの UI 変更はこちらに書く
 - `app.js` は ES6+ (const/let, async/await) を使用している
 - フレームワーク不使用（Vanilla JS のみ）
+- **学習画面（index.html）は1画面に収めるレイアウト**: ページ（document）と主カラム `.mn` は
+  `overflow: clip`（`hidden` にしない — hidden は `scrollIntoView()` / `input.focus()` で
+  プログラム的にスクロールしてしまい、トップバーごと画面全体がずれる）。縦が足りないときに
+  縮むのは上段（`.material-region` = `flex: 0 1 auto` + `min-height: 0`）と会話（`.ca`、floor
+  120px）で、下段（`.mode-bar` / `.discuss-bar` / `.ia` / `.lecture-player`）は `flex: 0 0 auto`
+  で潰さない。教材区画の高さを px 指定する JS（分割ハンドル・自動圧縮）は inline で
+  `flex: 0 1 auto` を入れる（`0 0 auto` にすると下段が押し出される）。ガードレールは
+  `backend/tests/test_learning_layout_static.py`。ページスクロールが正な admin 画面には
+  `<html class="learn-page">` を付けない
 
 ### 6. テスト
 - `pytest` を使用

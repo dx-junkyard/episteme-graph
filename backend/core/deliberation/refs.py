@@ -69,10 +69,18 @@ def document_run_artifacts(document_id: str) -> dict[str, Any]:
     return artifacts if isinstance(artifacts, dict) else {}
 
 
-def equation_records(document_id: str) -> list[dict[str, Any]]:
-    """document の equation_semantics artifact から equation レコード配列を返す（best-effort）。"""
-    artifacts = document_run_artifacts(document_id)
-    eq_stage = artifacts.get("equation_semantics")
+def equation_records(
+    document_id: str, *, artifacts: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """document の equation_semantics artifact から equation レコード配列を返す（best-effort）。
+
+    ``artifacts`` を渡すと ``document_run_artifacts`` の再取得を省略する（呼び出し側が
+    既に同じ document の artifacts を取得済みの場合の二重 SELECT 回避。省略時
+    （``None``、既定）は従来どおり自前で取得する — 既存呼び出し元は無変更で動く）。
+    """
+    if artifacts is None:
+        artifacts = document_run_artifacts(document_id)
+    eq_stage = artifacts.get("equation_semantics") if isinstance(artifacts, dict) else None
     if not isinstance(eq_stage, dict):
         return []
     records = eq_stage.get("equations")

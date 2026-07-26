@@ -3,7 +3,8 @@
 Issue #141:
 - _is_greeting との協調動作
 - _classify_intent のルール判定ショートカット（挨拶→LEARNING_ADVICE）
-- LLM 呼び出しによる CHIT_CHAT / LEARNING_ADVICE / DOMAIN_RAG 分類
+- LLM 呼び出しによる CHIT_CHAT / LEARNING_ADVICE / USAGE_HELP / DOMAIN_RAG 分類
+  （USAGE_HELP は設計 §4-4, Phase 2 分離リリースで追加された4番目のラベル）
 - LLM 失敗時のフォールバック（DOMAIN_RAG）
 - learning_chat の各ルートへの分岐動作
 - 基礎知識フォールバック（RAGヒット0件時のラベル付与）
@@ -83,7 +84,7 @@ class TestClassifyIntentGreetingShortcut:
 
 
 class TestClassifyIntentLLM:
-    """LLM を使った 3 ルート分類の動作テスト。"""
+    """LLM を使った 4 ルート分類の動作テスト（USAGE_HELP は設計 §4-4 で追加）。"""
 
     def test_chit_chat_classification(self):
         """LLM が CHIT_CHAT を返した場合に CHIT_CHAT として分類される。"""
@@ -108,6 +109,33 @@ class TestClassifyIntentLLM:
         with patch("api.routes.learning.generate_text", return_value="DOMAIN_RAG"):
             result = _classify_intent("レプトンとは何ですか？", "量子力学入門")
             assert result == "DOMAIN_RAG"
+
+    def test_usage_help_classification(self):
+        """LLM が USAGE_HELP を返した場合に USAGE_HELP として分類される
+        （設計 §4-4。pre-route のキーワード判定をすり抜けた使い方質問の受け皿）。"""
+        from api.routes.learning import _classify_intent
+
+        with patch("api.routes.learning.generate_text", return_value="USAGE_HELP"):
+            result = _classify_intent("これってどこで確認できますか？", "量子力学入門")
+            assert result == "USAGE_HELP"
+
+    def test_prompt_includes_usage_help_label_and_conservative_fallback_note(self):
+        """プロンプトに USAGE_HELP ラベルの説明と、迷ったら DOMAIN_RAG に倒す
+        旨の注記が含まれている（保守設計、§4-4）。"""
+        from api.routes.learning import _classify_intent
+
+        captured = {}
+
+        def mock_generate_text(messages, **kwargs):
+            captured["prompt"] = messages[0]["content"]
+            return "DOMAIN_RAG"
+
+        with patch("api.routes.learning.generate_text", side_effect=mock_generate_text):
+            _classify_intent("何かの質問", "量子力学入門")
+
+        assert "USAGE_HELP" in captured["prompt"]
+        assert "DOMAIN_RAG" in captured["prompt"]
+        assert "迷う場合は、DOMAIN_RAG" in captured["prompt"]
 
     def test_label_extraction_from_verbose_response(self):
         """LLM が余分な文章を返しても分類ラベルを抽出できる。"""

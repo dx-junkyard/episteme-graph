@@ -5,7 +5,7 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -13,12 +13,6 @@ from pydantic import BaseModel, Field
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
-
-class RegisterRequest(BaseModel):
-    username: str
-    email: str
-    password: str
-
 
 class LoginRequest(BaseModel):
     username: str
@@ -291,7 +285,12 @@ class LearningChatRequest(BaseModel):
     # サーバ正本の履歴から削除し、派生 interest_traces を status='superseded' にしてから、
     # message を新しいターンとして同じ位置から再処理する。指定なしなら通常の追記。
     replace_message_id: str | None = None
-    intent_mode: str | None = None  # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) — 送信時の意図
+    # "on_path"(本筋維持) | "explore"(寄り道) | "casual"(気軽に話せる先生) | "discuss"(論文と話す) — 送信時の意図
+    intent_mode: str | None = None
+    # discuss（論文と話す）専用: 検索スコープ。"course_sources"(既定=このコースのソース論文) |
+    # "all_visible"(本人が閲覧可能な周辺資料まで)。該当チャンクが無くても他スコープへ
+    # 無断フォールバックしない（DM1）。
+    discuss_scope: str | None = None
     # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
     # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
     #  related?, juxtapose?} — 自由文のみに依存しない
@@ -304,6 +303,17 @@ class LearningChatRequest(BaseModel):
     # 選択テキストの逐語と、選択があったセグメント番号（position_anchor とは独立に保持）。
     selection_text: str | None = None
     selection_segment_id: int | None = None
+    # UI内コンテキストヘルプ（設計 §4-3）: 「？」ボタン押下時の画面文脈。
+    # "lecture" | "chat" | "voice"。HELP ルートの search_manual に screen ヒントとして渡し、
+    # front-matter screen: 一致節を検索の第一候補にする。未指定は従来挙動（screen=None）。
+    screen_mode: str | None = None
+    # インスペクト・モード（設計 docs/features/learning_ui_inspect_hover_design.md §9-1）:
+    # トップバー「？」ON 中にホバー（ラッチ）していた UI 論理アンカーID
+    # （core.help_kb.ui_anchors.UI_ANCHORS / KNOWN_UI_ANCHOR_IDS のキー）。
+    # support_action="usage_help" と併せて送られ、_usage_help_response がマップ済みなら
+    # 対応マニュアル節を検索より優先して直接解決する（無ければ従来の search_manual に
+    # フォールバック）。痕跡の anchor 値は常に "ui:<ui_anchor>" として記録される。
+    ui_anchor: str | None = None
 
 
 class LearningSupportNextAction(BaseModel):
@@ -357,6 +367,10 @@ class LearningChatResponse(BaseModel):
     # 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。tension_hint 等でゲートされた
     # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
     anchor_confirm: dict | None = None
+    # 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
+    # 出典（ヒット時のみ設定）。各要素は {file, anchor, title}。既存 sources/tier には
+    # 相乗りしない（_TIER_STRENGTH が未知 tier を out_of_source=0 に落とすため）。
+    manual_citations: list[dict] | None = None
     mock: bool = False                          # 🚧 mock 由来データを含むか（UI バッジ用）
     # チャット型AI支援の共通基盤整理 §4: LLM 例外時に固定文へ縮退したターンかどうか
     # （I3 会話は死なせない。degraded=true でも 200 を返し、履歴には保存済み）。
@@ -1080,6 +1094,14 @@ class ComponentGraphResponse(BaseModel):
     # edge_narratives: {edge_id: {...}}}. Annotation only — never part of
     # nodes / edges.
     narrative: dict = Field(default_factory=dict)
+    # Reference index for evidence-link resolution: node/edge payloads carry
+    # pipeline-internal IDs (atomic claim IDs, ev_NNNN evidence IDs,
+    # derivation/step IDs) that have no DB table of their own and cannot be
+    # resolved by the frontend on its own. This maps only the referenced IDs
+    # (never the whole stage_outputs) to a short human-readable snippet:
+    # {"claims": {id: {"claim_id", "text"}}, "evidence": {id: {"text",
+    # "block_id"}}, "derivations": {id: {"label", "kind", "operation"}}}.
+    reference_index: dict = Field(default_factory=dict)
 
 
 class LectureStudioSettings(BaseModel):
@@ -1334,3 +1356,76 @@ class NextStepDismissResponse(BaseModel):
     """POST /next-steps/{step_key}/dismiss|restore の共通レスポンス。"""
     status: str                                     # dismissed | restored
     step_key: str
+
+
+class HelpKbRefreshResponse(BaseModel):
+    """POST /api/admin/help-kb/refresh のレスポンス（設計 §2-2）。
+
+    数値は節数・違反数などの事実のみ（confidence 等の生値は含めない）。
+    """
+    status: str = "refreshed"
+    audience_section_counts: dict[str, int] = Field(default_factory=dict)
+    validator_violations: int = 0
+    excluded_sections: int = 0
+
+
+# ---------------------------------------------------------------------------
+# help_kb Phase 3: DB draft/freeze（設計 §7-2、atlas/library の draft/freeze 踏襲）
+# ---------------------------------------------------------------------------
+
+
+class HelpKbDraftOut(BaseModel):
+    """``manual_kb_drafts`` の1行（``audience`` + ``file`` で一意）。"""
+    audience: str
+    file: str
+    content: str
+    revision: int
+    updated_at: str = ""
+    updated_by: Optional[str] = None
+
+
+class HelpKbStateOut(BaseModel):
+    """``manual_kb_state``（単一行）。配信ソースの既定は ``files``。"""
+    serving_source: str = "files"
+    active_version_no: Optional[int] = None
+    updated_at: str = ""
+
+
+class HelpKbDraftsResponse(BaseModel):
+    drafts: list[HelpKbDraftOut] = Field(default_factory=list)
+    state: HelpKbStateOut = Field(default_factory=HelpKbStateOut)
+
+
+class HelpKbDraftUpdateRequest(BaseModel):
+    content: str
+    expected_revision: int
+
+
+class HelpKbSeedResponse(BaseModel):
+    """draft シード結果（``core/revision_store.py::idempotent_seed_import`` の戻り値）。"""
+    imported: int = 0
+    skipped: int = 0
+    errors: list[str] = Field(default_factory=list)
+
+
+class HelpKbFreezeResponse(BaseModel):
+    """凍結成功時のレスポンス。凍結検証ゲート不通過時は 422 + violations（HTTPException detail）。"""
+    version_no: int
+    audience_file_counts: dict[str, int] = Field(default_factory=dict)
+    serving_source: str = "db"
+
+
+class HelpKbServingSourceRequest(BaseModel):
+    source: str  # "files" | "db"
+
+
+class HelpKbVersionOut(BaseModel):
+    """版メタデータ（内容は含めない — 数値は事実の集計のみ）。"""
+    version_no: int
+    created_at: str = ""
+    created_by: Optional[str] = None
+    audience_file_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class HelpKbVersionsResponse(BaseModel):
+    versions: list[HelpKbVersionOut] = Field(default_factory=list)

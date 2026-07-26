@@ -36,6 +36,17 @@ GET・POST のみ）と Phase S の standardization/assess は API 実装済み�
 6. 標準化度は shared_part 要素にのみ「標準化度を評価」ボタンを表示し、
    `POST /shared-parts/{id}/standardization/assess` を呼ぶ。結果は既存の
    候補注釈カード（commit/dismiss）に現れ、自動確定はしない
+
+説明レビューキュー（本ファイル追記分, 2026-07-22）: document 単位で
+element_explanations の candidate を一覧し、要素ごとにグループ化して一括承認/却下
+できる `_openExplanationReviewModal` を追加した。1件ずつ「深く検討」を開いて承認する
+既存 UX（_explanationCardHtml 等）は変更せず併存させる。新規 `GET/POST
+/admin/documents/{document_id}/element-explanations(...)` は `_explanationReviewBasePath`
+という1つのヘルパーへ集約したため、ソース中の `"/admin/documents/"` リテラル出現数は
+既存3箇所（image_url fallback・presentation-mode・reanalyze）+ 本ヘルパー1箇所の
+4箇所になる（`test_fetch_targets_use_exact_allowlist` 等の該当アサーションを
+3→4 に更新）。固有の受け入れ条件は `test_element_explanation_review_ui_static.py`
+を参照。
 """
 
 from __future__ import annotations
@@ -134,8 +145,11 @@ class TestDeliberationModule:
         """Issue #496: deliberation API に加え、図画像・分類レビュー・再解析だけを許可する。"""
         src = _read(DELIBERATION_JS)
         assert "/admin/deliberation/" in src
-        # document API は image_url fallback・presentation-mode・reanalyze の3箇所だけ。
-        assert src.count('"/admin/documents/"') == 3
+        # document API は image_url fallback・presentation-mode・reanalyze の3箇所 +
+        # 説明レビューキューの共有ヘルパー _explanationReviewBasePath の1箇所で計4箇所。
+        # （bulk-review/一覧取得の両方がこの1ヘルパーを経由するため、呼び出し箇所が
+        # 増えてもソース中のリテラル出現数はここでは増えない）
+        assert src.count('"/admin/documents/"') == 4
         assert '"/image"' in src
         assert '"/presentation-mode"' in src
         assert '"/reanalyze"' in src
@@ -989,8 +1003,9 @@ class TestElementInventoryDeliberationJs:
         src = _read(DELIBERATION_JS)
         idx = src.index('"/admin/deliberation/documents/"')
         assert src.startswith("/admin/deliberation", idx + 1)
-        # 既存契約（/admin/documents/ は3箇所固定）を増やしていないこと。
-        assert src.count('"/admin/documents/"') == 3
+        # 既存契約（/admin/documents/ は4箇所固定。説明レビューキュー追加分は
+        # test_fetch_targets_use_exact_allowlist 参照）を増やしていないこと。
+        assert src.count('"/admin/documents/"') == 4
 
     def test_keyword_input_does_not_trigger_fetch(self):
         """§6: フィルタはクライアントサイド。キー入力ごとに再フェッチしない。"""
@@ -1300,11 +1315,12 @@ class TestElementContextLens:
 
     def test_no_new_admin_documents_fetch_literal_introduced(self):
         """既存の許可リスト（test_fetch_targets_use_exact_allowlist）を壊していない
-        ことの補強確認: /admin/documents/ の出現回数は既存契約どおり3のまま
+        ことの補強確認: /admin/documents/ の出現回数は既存契約どおり4のまま
         （中心移動は既存の overview/annotations エンドポイントを再利用し、
-        新規 fetch 先を追加しない）。"""
+        新規 fetch 先を追加しない。4という基準値自体は説明レビューキュー追加分の
+        test_fetch_targets_use_exact_allowlist で説明済み）。"""
         src = _read(DELIBERATION_JS)
-        assert src.count('"/admin/documents/"') == 3
+        assert src.count('"/admin/documents/"') == 4
 
     def test_no_raw_fetch_or_new_http_methods_introduced(self):
         src = _read(DELIBERATION_JS)
@@ -1443,15 +1459,16 @@ class TestIterativeAnalysisUi:
 
     def test_reverify_reuses_existing_reanalyze_button_without_new_fetch(self):
         """既存の許可リスト（test_fetch_targets_use_exact_allowlist: /admin/documents/
-        は3箇所固定）を壊さないこと。送信処理は新規 fetch を書かず、既存の
-        「AIで図を再解析」ボタン（_bindFigureReanalysis の click ハンドラ）を
-        プログラム的にクリックして完全共有する。"""
+        は4箇所固定。説明レビューキュー追加分で3→4に更新済み）を壊さないこと。
+        送信処理は新規 fetch を書かず、既存の「AIで図を再解析」ボタン
+        （_bindFigureReanalysis の click ハンドラ）をプログラム的にクリックして
+        完全共有する。"""
         src = _read(DELIBERATION_JS)
         block = _function_block(src, "_bindIterativeReverify")
         assert 'getElementById("deliberation-figure-reanalyze")' in block
         assert "apiFetch(" not in block
         assert "fetch(" not in block
-        assert src.count('"/admin/documents/"') == 3
+        assert src.count('"/admin/documents/"') == 4
 
     def test_reverify_connects_to_candidate_flow_via_shared_button(self):
         """「この箇所を再解析」はプログラム的クリックで既存ボタンの処理を起動する。

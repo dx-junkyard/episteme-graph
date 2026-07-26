@@ -212,9 +212,11 @@ class TestChatTransitionServer:
         assert "generate_text" not in block
 
     def test_atlas_actions_skip_intent_classification_and_prereq_gate(self):
+        """discuss モード追加（discuss モード設計書 §6.2）で `_is_discuss` が条件式に併記
+        されたが、atlas_context によるバイパス自体は不変。"""
         source = _read(LEARNING)
-        assert "None if (_is_casual or _atlas_ctx) else (" in source
-        assert "None if (_is_casual or _atlas_ctx) else check_prerequisites(" in source
+        assert "None if (_is_casual or _is_discuss or _atlas_ctx) else (" in source
+        assert "None if (_is_casual or _is_discuss or _atlas_ctx) else check_prerequisites(" in source
 
     def test_evid_flow_bakes_attribution_into_trace(self):
         source = _read(LEARNING)

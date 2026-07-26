@@ -81,9 +81,9 @@ def related_confirmed_assumption(session, anchor_id: str) -> dict | None:
                 FROM assumption_nodes
                 WHERE status IN ('confirmed', 'operationalized')
                   AND (
-                    created_from->'node_ids' @> to_jsonb(:aid::text)
-                    OR created_from->'claim_ids' @> to_jsonb(:aid::text)
-                    OR created_from->'equation_ids' @> to_jsonb(:aid::text)
+                    created_from->'node_ids' @> to_jsonb(CAST(:aid AS text))
+                    OR created_from->'claim_ids' @> to_jsonb(CAST(:aid AS text))
+                    OR created_from->'equation_ids' @> to_jsonb(CAST(:aid AS text))
                   )
                 ORDER BY confirmed_at DESC NULLS LAST
                 LIMIT 1

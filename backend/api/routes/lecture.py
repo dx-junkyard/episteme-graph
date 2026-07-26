@@ -32,12 +32,13 @@ from schemas import (
 from services import (
     detect_and_record_misconception,
     get_course_data,
+    list_course_source_document_ids,
+    list_visible_document_ids,
     persist_chat_history,
     search_chunks_with_metadata,
 )
 from core.course_data import (
     course_source_material_ids,
-    course_sources,
     course_title as _course_title,
     find_course_topic,
 )
@@ -266,7 +267,11 @@ def _generate_sequence_from_search(
     current_user: dict,
 ) -> LectureSequenceResponse:
     """ソース教材が直接指定されていない場合、ベクトル検索でチャンクを取得してシーケンス構築。"""
-    chunk_results = search_chunks_with_metadata(topic_title, top_k=10)
+    # Phase 0（discuss モード設計書 §6.1）: 全域検索は本人が閲覧可能な document に fail-closed で絞る。
+    allowed_document_ids = list_visible_document_ids(current_user["id"])
+    chunk_results = search_chunks_with_metadata(
+        topic_title, top_k=10, allowed_document_ids=allowed_document_ids,
+    )
     if not chunk_results:
         return LectureSequenceResponse(
             course_id=course_id,
@@ -612,23 +617,18 @@ def _resolve_course_document_ids(material_ids: list[str]) -> list[str]:
     ``document_figures.document_id`` は常に ``documents.id`` で保存される
     （figure_image_extraction が orchestrator の document_id をそのまま使うため。
     routes/admin.py の図配信エンドポイントと同じ前提）。
+
+    正本は ``services.list_course_source_document_ids``（discuss モード設計書 §6.2、
+    Tier 3-20 の横断基盤ルールで重複実装を残さない）。単一 material_id リストを
+    擬似 ``sources`` へ包んで渡すだけで、SQL 解決・fail-closed ロジックは共有する。
     """
     if not material_ids:
         return []
-    session = _pg_session()
-    try:
-        placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
-        params: dict = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
-        rows = session.execute(
-            sa_text(f"SELECT id::text FROM documents WHERE source_path IN ({placeholders})"),
-            params,
-        ).fetchall()
-        return [str(r[0]) for r in rows]
-    except Exception:
-        logger.warning("Failed to resolve document ids for course materials", exc_info=True)
-        return []
-    finally:
-        session.close()
+    return list(
+        list_course_source_document_ids(
+            {"sources": [{"material_id": mid} for mid in material_ids]}
+        )
+    )
 
 
 def _course_document_ids(course_data: dict) -> list[str]:
@@ -638,13 +638,10 @@ def _course_document_ids(course_data: dict) -> list[str]:
     ``sources[].document_id``（書き手不在の読み取り専用フィールドだが、
     ``theory_components.py`` が既に読んでいる既存フィールドのため、明示された分は
     そのまま採用する）と、``material_id``（``documents.source_path``）から解決した
-    document_id の両方を合わせる。
+    document_id の両方を合わせる。正本は ``services.list_course_source_document_ids``
+    （discuss モード設計書 §6.2）。
     """
-    explicit_ids = [
-        str(s["document_id"]) for s in course_sources(course_data) if s.get("document_id")
-    ]
-    resolved_ids = _resolve_course_document_ids(course_source_material_ids(course_data))
-    return list(dict.fromkeys(explicit_ids + resolved_ids))
+    return list(list_course_source_document_ids(course_data))
 
 
 def _load_course_figures_by_id(course_id: str, course_data: dict) -> dict[str, dict]:

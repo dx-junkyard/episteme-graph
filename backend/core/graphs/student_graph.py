@@ -139,7 +139,11 @@ def retrieval_node(state: StudentState) -> dict[str, Any]:
 
     question = state["question"]
     relevance_threshold = 0.35
-    chunk_results = search_chunks_with_metadata(question, top_k=8)
+    # 本グラフは本番ルート未接続（backend/tests のみが利用）のため allowed_document_ids は
+    # None 許容のまま state 経由で渡す（Phase 0, discuss モード設計書 §6.1）。
+    chunk_results = search_chunks_with_metadata(
+        question, top_k=8, allowed_document_ids=state.get("allowed_document_ids"),
+    )
 
     above_threshold = [r for r in chunk_results if r["score"] >= relevance_threshold]
     if not above_threshold:

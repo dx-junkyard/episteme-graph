@@ -384,6 +384,99 @@ def dismiss(session: Any, explanation_id: str, user_id: str) -> dict | None:
     return _transition(session, explanation_id, new_status=STATUS_DISMISSED, user_id=user_id)
 
 
+def bulk_transition(
+    session: Any,
+    document_id: str,
+    explanation_ids: Iterable[str],
+    *,
+    new_status: str,
+    user_id: str,
+) -> dict:
+    """一括承認・一括却下（``candidate → approved/dismissed``）。教員のレビュー負荷軽減用。
+
+    candidate-only 原則（E2）は一括操作でも維持する — 遷移できるのは ``candidate`` の行
+    のみで、対象は必ず ``document_id`` にスコープする（他 document の行を巻き込まない）。
+    確定は依然として人間（教員）の明示操作であり、本関数はその操作を1回にまとめる
+    だけで承認基準そのものは変えない。
+
+    部分成功セマンティクス: 1件の競合（既に approved/dismissed 等）や不正な id が
+    混ざっていても全体を例外で失敗させない。遷移できた行は ``updated``
+    （入力 ``explanation_ids`` の順序で整列）、できなかった行は ``skipped`` に
+    ``{"id", "status", "reason"}`` で正直に報告する（P4: 失敗を隠さない）。
+    ``reason`` は次の2値:
+
+    - ``"conflict"``: 同一 document 内に存在するが ``status`` が ``candidate`` ではない
+      （``status`` に実際の値を入れる）。
+    - ``"not_found"``: id が存在しない、または**別 document** に属する行だった
+      （権限境界のため、別 document 行の実際の ``status`` は返さず ``None`` にする —
+      他 document の状態を漏らさない）。
+
+    ``user_id`` が空、``new_status`` が :data:`STATUS_APPROVED`/:data:`STATUS_DISMISSED`
+    以外、または正規化後（str化・strip・重複除去・順序保持）の ``explanation_ids`` が
+    空の場合は ``ValueError`` を送出する。
+    """
+    if not str(user_id or "").strip():
+        raise ValueError("user_id is required")
+    if new_status not in (STATUS_APPROVED, STATUS_DISMISSED):
+        raise ValueError(f"invalid new_status: {new_status!r} (must be approved/dismissed)")
+
+    ids: list[str] = []
+    seen: set[str] = set()
+    for raw in explanation_ids or []:
+        normalized = str(raw or "").strip()
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            ids.append(normalized)
+    if not ids:
+        raise ValueError("explanation_ids is required")
+
+    rows = session.execute(
+        sa_text(
+            f"""
+            UPDATE element_explanations
+            SET status = :new_status, reviewed_by = :user_id, reviewed_at = now()
+            WHERE id::text = ANY(:ids)
+              AND document_id = CAST(:document_id AS uuid)
+              AND status = :candidate
+            RETURNING {_COLUMNS_SQL}
+            """
+        ),
+        {
+            "ids": ids,
+            "document_id": document_id,
+            "new_status": new_status,
+            "user_id": user_id,
+            "candidate": STATUS_CANDIDATE,
+        },
+    ).fetchall()
+    updated_by_id: dict[str, dict] = {}
+    for row in rows:
+        d = _row_to_dict(row)
+        updated_by_id[d["id"]] = d
+
+    skipped: list[dict] = []
+    remaining_ids = [i for i in ids if i not in updated_by_id]
+    if remaining_ids:
+        check_rows = session.execute(
+            sa_text(
+                "SELECT id::text, document_id::text, status FROM element_explanations "
+                "WHERE id::text = ANY(:ids)"
+            ),
+            {"ids": remaining_ids},
+        ).fetchall()
+        found = {r[0]: {"document_id": r[1], "status": r[2]} for r in check_rows}
+        for eid in remaining_ids:
+            info = found.get(eid)
+            if info is not None and info["document_id"] == document_id:
+                skipped.append({"id": eid, "status": info["status"], "reason": "conflict"})
+            else:
+                # 存在しない、または別 document の行（権限境界のため status を漏らさない）。
+                skipped.append({"id": eid, "status": None, "reason": "not_found"})
+
+    updated = [updated_by_id[i] for i in ids if i in updated_by_id]
+    return {"updated": updated, "skipped": skipped}
+
+
 # ---------------------------------------------------------------------------
 # 編集（新 revision 行 + 旧行 superseded・履歴保持）
 # ---------------------------------------------------------------------------

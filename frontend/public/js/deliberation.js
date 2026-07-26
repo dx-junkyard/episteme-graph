@@ -2623,9 +2623,346 @@
     _loadAndRenderElement();
   }
 
+  // ── 説明レビューキュー（Element Explanation Review Queue）───────────────
+  // element_explanations（migration 056）の candidate を document 単位で一覧し、
+  // 要素ごとにグループ化して一括承認/却下できるようにする。1件ずつ「深く検討」を
+  // 開いて承認する既存 UX（_explanationCardHtml/_decideExplanation, overview 内）は
+  // そのまま残す（併存・非改変）。candidate-only 原則は維持: 承認するまで学習者には
+  // 表示されない。取得はインベントリを開いた時の1回のみ（ポーリング禁止）。
+  var explanationReviewState = { documentId: null, items: null, selected: {} };
+  var EXPLANATION_REVIEW_MAX_BULK = 200;
+
+  function _resetExplanationReviewState() {
+    explanationReviewState = { documentId: null, items: null, selected: {} };
+  }
+
+  // GET/POST とも同じ document スコープのベースパスを共有する（許可リストの
+  // admin/documents 出現をこのヘルパー1箇所に集約し、呼び出し側では
+  // 文字列リテラルを増やさない）。
+  function _explanationReviewBasePath(documentId) {
+    return "/admin/documents/" + encodeURIComponent(documentId) + "/element-explanations";
+  }
+
+  function _inventoryElementLabel(elementType, elementId) {
+    var elements = (inventoryState.data && inventoryState.data.elements) || [];
+    for (var i = 0; i < elements.length; i++) {
+      var el = elements[i];
+      if (el.element_type === elementType && el.element_id === elementId) {
+        return el.label || elementId;
+      }
+    }
+    var typeLabel = INVENTORY_TYPE_BADGE_LABELS[elementType] || ELEMENT_TYPE_LABELS[elementType] || elementType || "";
+    return (typeLabel ? typeLabel + " " : "") + String(elementId || "").substring(0, 8);
+  }
+
+  function _groupExplanationsByElement(items) {
+    var groups = [];
+    var index = {};
+    (items || []).forEach(function (exp) {
+      var key = exp.element_type + "|" + exp.element_id;
+      if (!index[key]) {
+        index[key] = {
+          elementType: exp.element_type,
+          elementId: exp.element_id,
+          label: _inventoryElementLabel(exp.element_type, exp.element_id),
+          items: []
+        };
+        groups.push(index[key]);
+      }
+      index[key].items.push(exp);
+    });
+    return groups;
+  }
+
+  function _explanationReviewCardHtml(exp) {
+    exp = exp || {};
+    var kindLabel = EXPLANATION_KIND_LABELS[exp.kind] || exp.kind || "";
+    var evidence = exp.evidence || {};
+    var checked = explanationReviewState.selected[exp.id] ? " checked" : "";
+    return '<div class="deliberation-annotation-card deliberation-explanation-review-card" data-explanation-id="' +
+        escHtml(exp.id) + '">' +
+      '<label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer">' +
+        '<input type="checkbox" data-explanation-review-checkbox="true" data-explanation-id="' +
+          escHtml(exp.id) + '"' + checked + ' style="margin-top:3px">' +
+        '<span class="deliberation-annotation-kind">' +
+          escHtml(kindLabel) +
+          (evidence.confidence_label
+            ? ' <span class="deliberation-annotation-confidence">' + escHtml(evidence.confidence_label) + '</span>'
+            : '') +
+        '</span>' +
+      '</label>' +
+      '<div class="deliberation-annotation-body" style="margin-top:4px">' + escHtml(exp.body || "") + '</div>' +
+      (evidence.evidence_quote ? '<div class="deliberation-annotation-reason">' + escHtml(evidence.evidence_quote) + '</div>' : '') +
+      (evidence.reason ? '<div class="deliberation-annotation-reason">' + escHtml(evidence.reason) + '</div>' : '') +
+      '<div class="deliberation-annotation-error" style="display:none"></div>' +
+      '<div class="deliberation-annotation-actions">' +
+        '<button type="button" class="deliberation-annotation-btn commit" data-explanation-review-action="approve">承認</button>' +
+        '<button type="button" class="deliberation-annotation-btn dismiss" data-explanation-review-action="dismiss">却下</button>' +
+      '</div>' +
+    '</div>';
+  }
+
+  function _explanationReviewGroupHtml(group) {
+    return '<section class="deliberation-explanation-review-group" style="margin-bottom:10px">' +
+      '<h4 style="margin:0 0 6px;font-size:13px;color:var(--color-text-primary)">' + escHtml(group.label) + '</h4>' +
+      '<div style="display:flex;flex-direction:column;gap:8px">' +
+        group.items.map(_explanationReviewCardHtml).join("") +
+      '</div>' +
+    '</section>';
+  }
+
+  function _explanationReviewSelectedIds() {
+    var ids = [];
+    (explanationReviewState.items || []).forEach(function (exp) {
+      if (explanationReviewState.selected[exp.id]) ids.push(exp.id);
+    });
+    return ids;
+  }
+
+  function _updateExplanationReviewToolbar() {
+    var count = _explanationReviewSelectedIds().length;
+    var approveBtn = document.getElementById("deliberation-explanation-review-approve-selected");
+    var dismissBtn = document.getElementById("deliberation-explanation-review-dismiss-selected");
+    if (approveBtn) {
+      approveBtn.textContent = "選択した" + count + "件を承認";
+      approveBtn.disabled = count === 0;
+    }
+    if (dismissBtn) {
+      dismissBtn.textContent = "選択した" + count + "件を却下";
+      dismissBtn.disabled = count === 0;
+    }
+  }
+
+  function _setExplanationReviewMessage(text, isError) {
+    var el = document.getElementById("deliberation-explanation-review-message");
+    if (!el) return;
+    el.style.color = isError ? "var(--color-text-danger)" : "var(--color-text-tertiary)";
+    el.innerHTML = text ? escHtml(text) : "";
+  }
+
+  function _renderExplanationReviewList() {
+    var list = document.getElementById("deliberation-explanation-review-list");
+    if (!list) return;
+    var items = explanationReviewState.items || [];
+    if (!items.length) {
+      list.innerHTML = '<p style="padding:16px;color:var(--color-text-tertiary);font-size:13px">' +
+        'レビュー待ちの説明候補はありません。</p>';
+    } else {
+      list.innerHTML = _groupExplanationsByElement(items).map(_explanationReviewGroupHtml).join("");
+    }
+    _bindExplanationReviewCardEvents(list);
+    _updateExplanationReviewToolbar();
+  }
+
+  function _removeExplanationsFromReviewQueue(ids) {
+    var removed = {};
+    (ids || []).forEach(function (id) { removed[id] = true; });
+    explanationReviewState.items = (explanationReviewState.items || []).filter(function (exp) {
+      return !removed[exp.id];
+    });
+    (ids || []).forEach(function (id) { delete explanationReviewState.selected[id]; });
+  }
+
+  // 単件の承認/却下（キュー内カードのボタン）。既存 _decideExplanation は
+  // overview 内カードの DOM 差し替え専用のため、キュー専用に別実装する
+  // （呼ぶ API は同じ既存 element-explanations 承認 API）。
+  function _decideExplanationReviewCard(explanationId, action, card) {
+    if (!explanationId) return;
+    var buttons = card.querySelectorAll("[data-explanation-review-action]");
+    Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+    var path = "/admin/element-explanations/" + encodeURIComponent(explanationId) + "/" + action;
+    apiFetch(path, { method: "POST" })
+      .then(_parseJsonResponse)
+      .then(function () {
+        _removeExplanationsFromReviewQueue([explanationId]);
+        _renderExplanationReviewList();
+        _renderExplanationReviewEntry();
+      })
+      .catch(function (err) {
+        var errEl = card.querySelector(".deliberation-annotation-error");
+        var message = (err && err.detail) ||
+          (action === "approve" ? "承認できませんでした（既に処理済みの可能性があります）" : "却下できませんでした");
+        if (errEl) {
+          errEl.style.display = "";
+          errEl.innerHTML = escHtml(message);
+        }
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
+      });
+  }
+
+  function _bindExplanationReviewCardEvents(root) {
+    if (!root) return;
+    Array.prototype.forEach.call(root.querySelectorAll("[data-explanation-review-checkbox]"), function (cb) {
+      cb.addEventListener("change", function () {
+        var id = cb.getAttribute("data-explanation-id");
+        if (cb.checked) explanationReviewState.selected[id] = true;
+        else delete explanationReviewState.selected[id];
+        _updateExplanationReviewToolbar();
+      });
+    });
+    Array.prototype.forEach.call(root.querySelectorAll("[data-explanation-review-action]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".deliberation-explanation-review-card");
+        if (!card) return;
+        _decideExplanationReviewCard(card.getAttribute("data-explanation-id"), btn.getAttribute("data-explanation-review-action"), card);
+      });
+    });
+  }
+
+  // 一括承認/却下: 実行前に事実文で確認する（admin.js の共通2段確認モーダルが
+  // あればそれを使い、無ければ window.confirm にフォールバックする。versioning.js
+  // の _doScheduleDeletion と同型のフォールバックパターン）。
+  function _bulkReviewExplanations(action) {
+    var ids = _explanationReviewSelectedIds();
+    if (!ids.length) return;
+    if (ids.length > EXPLANATION_REVIEW_MAX_BULK) {
+      _setExplanationReviewMessage("一度に承認できるのは200件までです。選択数を減らしてください。", true);
+      return;
+    }
+    var count = ids.length;
+    var confirmMessage = action === "approve"
+      ? count + "件の説明候補を承認します。承認済みの説明は学習者に表示されます。よろしいですか？"
+      : count + "件の説明候補を却下します（候補は削除されず保持されます）。よろしいですか？";
+
+    function _doBulkReview() {
+      var approveBtn = document.getElementById("deliberation-explanation-review-approve-selected");
+      var dismissBtn = document.getElementById("deliberation-explanation-review-dismiss-selected");
+      if (approveBtn) approveBtn.disabled = true;
+      if (dismissBtn) dismissBtn.disabled = true;
+      _setExplanationReviewMessage("", false);
+      var documentId = explanationReviewState.documentId;
+      apiFetch(_explanationReviewBasePath(documentId) + "/bulk-review", {
+        method: "POST",
+        body: JSON.stringify({ action: action, explanation_ids: ids })
+      })
+        .then(_parseJsonResponse)
+        .then(function (data) {
+          var updated = (data && data.updated) || [];
+          var skipped = (data && data.skipped) || [];
+          _removeExplanationsFromReviewQueue(updated.map(function (row) { return row.id; }));
+          _renderExplanationReviewList();
+          _renderExplanationReviewEntry();
+          if (skipped.length) {
+            _setExplanationReviewMessage(skipped.length + "件は既に処理済みのためスキップされました", false);
+          }
+        })
+        .catch(function (err) {
+          _setExplanationReviewMessage((err && err.detail) || "一括処理に失敗しました", true);
+        })
+        .then(function () {
+          _updateExplanationReviewToolbar();
+        });
+    }
+
+    if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+      window.AdminDangerConfirm.open({
+        title: action === "approve" ? "説明候補の承認" : "説明候補の却下",
+        message: confirmMessage,
+        confirmLabel: action === "approve" ? "承認する" : "却下する"
+      }, _doBulkReview);
+    } else {
+      if (!window.confirm(confirmMessage)) return;
+      _doBulkReview();
+    }
+  }
+
+  function _closeExplanationReviewModal() {
+    var modal = document.getElementById("deliberation-explanation-review-modal");
+    if (modal) modal.remove();
+  }
+
+  function _openExplanationReviewModal() {
+    if (!explanationReviewState.items || !explanationReviewState.items.length) return;
+    _closeExplanationReviewModal();
+
+    var overlay = document.createElement("div");
+    overlay.id = "deliberation-explanation-review-modal";
+    // インベントリ（9400）より上・深く検討モーダル（9999）より下に置く
+    // （キューから深く検討へ潜る操作導線は現状無いため単純に中間の値でよい）。
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;" +
+      "background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9500";
+    overlay.innerHTML =
+      '<div class="deliberation-modal-dialog" style="width:min(760px,92vw);display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">説明レビュー</h3>' +
+          '<button id="deliberation-explanation-review-close" type="button" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          'AIが生成した説明の候補です。承認すると学習者に表示されます。' +
+        '</p>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">' +
+          '<button type="button" id="deliberation-explanation-review-select-all" class="deliberation-annotation-btn">全選択</button>' +
+          '<button type="button" id="deliberation-explanation-review-deselect-all" class="deliberation-annotation-btn">選択解除</button>' +
+          '<button type="button" id="deliberation-explanation-review-approve-selected" class="deliberation-annotation-btn commit" disabled>選択した0件を承認</button>' +
+          '<button type="button" id="deliberation-explanation-review-dismiss-selected" class="deliberation-annotation-btn dismiss" disabled>選択した0件を却下</button>' +
+        '</div>' +
+        '<div id="deliberation-explanation-review-message" style="font-size:11.5px;margin:0 0 8px"></div>' +
+        '<div id="deliberation-explanation-review-list" style="overflow-y:auto;max-height:60vh;display:flex;flex-direction:column;gap:8px"></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeExplanationReviewModal(); });
+    document.getElementById("deliberation-explanation-review-close").addEventListener("click", _closeExplanationReviewModal);
+    document.getElementById("deliberation-explanation-review-select-all").addEventListener("click", function () {
+      (explanationReviewState.items || []).forEach(function (exp) { explanationReviewState.selected[exp.id] = true; });
+      _renderExplanationReviewList();
+    });
+    document.getElementById("deliberation-explanation-review-deselect-all").addEventListener("click", function () {
+      explanationReviewState.selected = {};
+      _renderExplanationReviewList();
+    });
+    document.getElementById("deliberation-explanation-review-approve-selected").addEventListener("click", function () {
+      _bulkReviewExplanations("approve");
+    });
+    document.getElementById("deliberation-explanation-review-dismiss-selected").addEventListener("click", function () {
+      _bulkReviewExplanations("dismiss");
+    });
+
+    _renderExplanationReviewList();
+  }
+
+  // インベントリモーダルのツールバー付近に置く入口ボタン。件数はラベルにのみ
+  // 出す（W8: 数値以外の煽り表現はしない・件数そのものは事実として出してよい）。
+  // items が null（未取得 or 取得失敗）のときはボタンごと出さない（fail-closed）。
+  function _renderExplanationReviewEntry() {
+    var container = document.getElementById("deliberation-explanation-review-entry");
+    if (!container) return;
+    var items = explanationReviewState.items;
+    if (!items) {
+      container.innerHTML = "";
+      return;
+    }
+    var count = items.length;
+    container.innerHTML = '<button type="button" id="deliberation-explanation-review-open" ' +
+      'class="deliberation-annotation-btn"' + (count === 0 ? " disabled" : "") + '>' +
+      '説明レビュー (' + count + ')</button>';
+    var btn = document.getElementById("deliberation-explanation-review-open");
+    if (btn) btn.addEventListener("click", _openExplanationReviewModal);
+  }
+
+  // GET のみ・DB非変更。openInventory 時に1回だけ呼ぶ（ポーリング禁止・§9 と同じ規約）。
+  function _loadExplanationReviewQueue(documentId) {
+    return apiFetch(_explanationReviewBasePath(documentId) + "?status=candidate")
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        explanationReviewState.documentId = documentId;
+        explanationReviewState.items = (data && data.explanations) || [];
+        explanationReviewState.selected = {};
+        _renderExplanationReviewEntry();
+      })
+      .catch(function () {
+        // fail-closed: 一覧取得に失敗したらボタンごと出さない（インベントリ本体の
+        // 表示は止めない・エラーを目立たせない）。
+        explanationReviewState.items = null;
+        _renderExplanationReviewEntry();
+      });
+  }
+
   // ── 要素インベントリ: モーダル DOM / 描画 ───────────────────────────────
 
   function _closeInventoryModal() {
+    _closeExplanationReviewModal();
+    _resetExplanationReviewState();
     var modal = document.getElementById("deliberation-inventory-modal");
     if (modal) modal.remove();
     _resetInventoryState();
@@ -2845,6 +3182,7 @@
     inventoryState.typeFilter = "all";
     inventoryState.keyword = "";
     inventoryState.data = null;
+    _resetExplanationReviewState();
 
     var overlay = document.createElement("div");
     overlay.id = "deliberation-inventory-modal";
@@ -2865,6 +3203,7 @@
           'この教材からパイプラインが検出した要素の一覧です。表示はすべて既存データの読み出しで、確定済みの判断ではありません。' +
         '</p>' +
         '<div id="deliberation-inventory-toolbar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px"></div>' +
+        '<div id="deliberation-explanation-review-entry" style="margin:0 0 8px"></div>' +
         '<div id="deliberation-inventory-truncated-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px"></div>' +
         '<div id="deliberation-inventory-list" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:8px">' +
           '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
@@ -2876,6 +3215,7 @@
     document.getElementById("deliberation-inventory-close").addEventListener("click", _closeInventoryModal);
 
     _loadInventory();
+    _loadExplanationReviewQueue(documentId);
   }
 
   window.Deliberation = {

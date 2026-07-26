@@ -1362,11 +1362,165 @@ def search_relevant_chunks_with_scores(
         return [], []
 
 
+def list_visible_document_ids(user_id: str) -> set[str]:
+    """本人が閲覧可能な document.id（テキスト表現）の集合を返す（discuss モード設計書 §6.1 Phase 0）。
+
+    `search_chunks_with_metadata` の全域ベクトル検索に可視性フィルタを掛けるためのヘルパー。
+    以下の和集合を1つの SQL（CTE 込みで1文）で計算する — チャンク単位・document 単位の
+    ループでの N+1 判定呼び出しは横断基盤の既存ルールで禁止されている:
+
+      (a) documents.uploaded_by = 本人（所有者）
+      (b) documents.visibility = 'public'
+      (c) documents.visibility = 'group' かつ本人がその group_id に所属（group_members）
+      (d) object_group_permissions（object_type='document', permission IN viewer/editor）の
+          グループに所属
+      (e) 本人がアクセス可能なコース（所有 / visibility='public' かつ is_published かつ
+          is_template / visibility='group' でメンバー / learning_states 受講中）の
+          `data->'sources'[].material_id` が指す document（= documents.source_path）
+
+    (e) を含める理由: 学習チャットの RAG は受講コースの sources（教員の private 文書のことが
+    多い）を検索できる必要があり、document 単体の可視性だけで絞ると既存の学習体験
+    （content_grounding='course_material'）が壊れる。コースへのアクセス自体が sources の
+    開示を意味する、という設計判断（`docs/features/discussion_mode_design.md` §6.1）。
+
+    例外時は空集合を返す（fail-closed。呼び出し側は「何も見えない」として扱う）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("""
+                    WITH accessible_courses AS (
+                        SELECT lc.id, lc.data
+                        FROM learning_courses lc
+                        WHERE lc.user_id = CAST(:uid AS uuid)
+                           OR EXISTS (
+                               SELECT 1 FROM learning_states ls
+                               WHERE ls.course_id = lc.id AND ls.user_id = CAST(:uid AS uuid)
+                           )
+                           OR (
+                               COALESCE(lc.visibility, 'private') = 'public'
+                               AND COALESCE(lc.is_published, false)
+                               AND COALESCE(lc.is_template, false)
+                           )
+                           OR (
+                               COALESCE(lc.visibility, 'private') = 'group'
+                               AND lc.group_id IS NOT NULL
+                               AND EXISTS (
+                                   SELECT 1 FROM group_members gm
+                                   WHERE gm.group_id = lc.group_id AND gm.user_id = CAST(:uid AS uuid)
+                               )
+                           )
+                    ),
+                    course_material_ids AS (
+                        SELECT DISTINCT (src ->> 'material_id') AS material_id
+                        FROM accessible_courses,
+                             LATERAL jsonb_array_elements(
+                                 CASE WHEN jsonb_typeof(accessible_courses.data -> 'sources') = 'array'
+                                      THEN accessible_courses.data -> 'sources'
+                                      ELSE '[]'::jsonb
+                                 END
+                             ) AS src
+                        WHERE COALESCE(src ->> 'material_id', '') <> ''
+                    )
+                    SELECT d.id::text
+                    FROM documents d
+                    WHERE d.uploaded_by = CAST(:uid AS uuid)
+                       OR d.visibility = 'public'
+                       OR (
+                           d.visibility = 'group' AND d.group_id IS NOT NULL AND EXISTS (
+                               SELECT 1 FROM group_members gm2
+                               WHERE gm2.group_id = d.group_id AND gm2.user_id = CAST(:uid AS uuid)
+                           )
+                       )
+                       OR EXISTS (
+                           SELECT 1 FROM object_group_permissions ogp
+                           JOIN group_members gm3 ON gm3.group_id = ogp.group_id
+                           WHERE ogp.object_type = 'document'
+                             AND ogp.object_id = d.id::text
+                             AND ogp.permission IN ('viewer', 'editor')
+                             AND gm3.user_id = CAST(:uid AS uuid)
+                       )
+                       OR d.source_path IN (SELECT material_id FROM course_material_ids)
+                """),
+                {"uid": user_id},
+            ).fetchall()
+            return {str(row[0]) for row in rows if row[0]}
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning("list_visible_document_ids failed (fail-closed, empty set): %s", exc)
+        return set()
+
+
+def list_course_source_document_ids(course_data: dict | None) -> set[str]:
+    """コースの ``sources[]`` が指す document.id（テキスト表現）の集合を返す
+    （discuss モード設計書 §6.2 Phase 1: discuss_scope='course_sources' の既定検索範囲の正本）。
+
+    以下の和集合:
+      (a) ``core.course_data.course_source_material_ids(course_data)``（``documents.source_path``）
+          を1 SQL で ``documents.id`` に解決したもの
+      (b) ``course_sources(course_data)`` の各要素が明示 ``document_id`` を持っていれば
+          そのまま採用したもの（``routes/lecture.py::_course_document_ids`` と同じ意味論）
+
+    ``routes/lecture.py`` の ``_resolve_course_document_ids`` / ``_course_document_ids`` は
+    重複実装を残さないため本関数へ委譲する薄いラッパーに揃える（Tier 3-20 の横断基盤ルール）。
+
+    course_data が dict でない、または例外発生時は空集合（fail-closed）。discuss モードの
+    「該当チャンクが無ければ他スコープへ無断で広げない」（DM1）と対になる — ここで検索範囲を
+    勝手に膨らませない。
+    """
+    if not isinstance(course_data, dict):
+        return set()
+
+    explicit_ids = {
+        str(s["document_id"]) for s in course_sources(course_data) if s.get("document_id")
+    }
+    material_ids = course_source_material_ids(course_data)
+    if not material_ids:
+        return explicit_ids
+
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text("SELECT id::text FROM documents WHERE source_path = ANY(:mids)"),
+                {"mids": list(material_ids)},
+            ).fetchall()
+            resolved_ids = {str(row[0]) for row in rows if row[0]}
+        finally:
+            session.close()
+    except Exception as exc:
+        logger.warning(
+            "list_course_source_document_ids failed to resolve material_ids (fail-closed, "
+            "returning explicit document_id only): %s", exc,
+        )
+        return explicit_ids
+
+    return explicit_ids | resolved_ids
+
+
 def search_chunks_with_metadata(
     query: str,
     top_k: int = 8,
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
 ) -> list[dict]:
-    """システム全域の chunks をベクトル検索し、出典情報を付けて返す。"""
+    """システム全域の chunks をベクトル検索し、出典情報を付けて返す。
+
+    discuss モード設計書 §6.1（Phase 0）: `allowed_document_ids` は必須キーワード引数にして
+    呼び忘れを構造的に防ぐ（`core/help_kb/manual.py::search_manual(..., audience)` と同じ規律）。
+    `None` を渡すと無フィルタ（全域検索）になるが、これは **テスト・本番未接続コード専用**
+    （例: `core/graphs/student_graph.py::retrieval_node` — 本番ルートに未接続）。本番の呼び出し元
+    （`routes/learning.py` の learning_chat / `routes/lecture.py` の
+    `_generate_sequence_from_search`）は必ず `list_visible_document_ids(user_id)` の結果を渡すこと。
+
+    `allowed_document_ids` が空集合（非 None）の場合は SQL を発行せず即座に `[]` を返す
+    （fail-closed）。
+    """
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return []
+
     try:
         query_vector = embed_text(query)
     except Exception as exc:
@@ -1377,6 +1531,14 @@ def search_chunks_with_metadata(
         session = _pg_session()
         try:
             dim = get_embedding_dim()
+            params: dict = {"query_vector": str(query_vector), "limit": top_k}
+            doc_filter_sql = ""
+            if allowed_document_ids is not None:
+                # chunks.document_id は UUID 列（theory_components.document_id 等の TEXT 列とは
+                # 異なる。component_context.py:131 の ANY(:doc_ids) をそのまま真似ると型不一致に
+                # なりうるため、text[] → uuid[] の明示 CAST を挟む。
+                doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+                params["doc_ids"] = list(allowed_document_ids)
             rows = session.execute(
                 sa_text(f"""
                     SELECT c.id,
@@ -1388,10 +1550,11 @@ def search_chunks_with_metadata(
                     FROM chunks c
                     LEFT JOIN documents d ON c.document_id = d.id
                     WHERE c.embedding IS NOT NULL
+                    {doc_filter_sql}
                     ORDER BY c.embedding::halfvec({dim}) <=> CAST(:query_vector AS halfvec({dim}))
                     LIMIT :limit
                 """),
-                {"query_vector": str(query_vector), "limit": top_k},
+                params,
             ).fetchall()
             from core.learning_experience import attach_tiers, approved_chunk_ids
 
@@ -1957,18 +2120,32 @@ def persist_chat_history(
     assistant_answer: str,
     user_message_id: str | None = None,
     assistant_message_id: str | None = None,
+    assistant_meta: dict | None = None,
 ) -> dict:
     """チャット履歴を PostgreSQL に永続化し、付与したメッセージ id を返す。
 
     各メッセージに安定した ``id`` を焼き込む。これを interest_traces にも記録することで、
     「この問いに戻る」を同じ問いの再送信ではなく該当往復（元の Q/A）へのジャンプに使える。
     id は best-effort で、永続化に失敗しても返す（呼び出し側の in-memory 状態と一致させる）。
+
+    ``assistant_meta`` は assistant メッセージに焼き込む描画メタ（``sources`` /
+    ``overall_tier`` / ``content_grounding`` / ``manual_citations`` 等）。履歴復元後も
+    本文中の ``[出典N]`` を出典チップに変換できるようにするためのもので、値が空のキーは
+    保存しない（既存行にキーが無いのと同じ扱いにし、履歴 JSONB を無駄に太らせない）。
+    ``role`` / ``content`` / ``id`` は上書きさせない。
     """
     user_message_id = user_message_id or str(uuid.uuid4())
     assistant_message_id = assistant_message_id or str(uuid.uuid4())
+    assistant_entry: dict = {
+        "role": "assistant", "content": assistant_answer, "id": assistant_message_id,
+    }
+    for key, value in (assistant_meta or {}).items():
+        if key in ("role", "content", "id") or value in (None, "", [], {}):
+            continue
+        assistant_entry[key] = value
     updated_history = history + [
         {"role": "user", "content": user_message, "id": user_message_id},
-        {"role": "assistant", "content": assistant_answer, "id": assistant_message_id},
+        assistant_entry,
     ]
     try:
         session = _pg_session()
@@ -2197,7 +2374,11 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
 
 # tension は TensionMiningAgent (B層, backend/core/tension/) が追加する kind。
 # LLM 出力は常に status='candidate' で、学習者本人の confirm/dismiss でのみ遷移する（P1）。
-_INTEREST_KINDS = ("raw", "question", "detour", "misconception", "tension")
+# help_usage は学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3-8）が
+# 追加する kind。payload には質問逐語を積まない（help_anchor / documented / no_hit のみ,
+# P3）。tension/anchor worker・digest・個人知識ネットワーク導出・問いの軌跡ビューは
+# help_usage を対象にしない（意図的に除外。§6-6 ガードレール）。
+_INTEREST_KINDS = ("raw", "question", "detour", "misconception", "tension", "help_usage")
 _TRACE_STATUSES = (
     "open", "revisited", "resolved",   # 既存
     "candidate",      # LLM提案・本人未確定（tension のみ）
@@ -2274,6 +2455,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   AND NOT (kind = 'tension' AND status IN ('candidate', 'dismissed'))
                   -- 機能3: 書き直し/削除で往復ごと差し替えられた痕跡は出さない（保持はする。P4）
                   AND status <> 'superseded'
+                  -- 学生 HELP ルート（設計 §1-3-8）: help_usage は使い方の質問の痕跡であり
+                  -- 「問いの軌跡」（教材内容についての未解決の問い）には出さない
+                  AND kind <> 'help_usage'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -2472,24 +2656,43 @@ def resolve_interest_trace(user_id: str, trace_id: str, status: str = "resolved"
         session.close()
 
 
-def get_chunk_passage(chunk_id: str) -> dict | None:
+def get_chunk_passage(
+    chunk_id: str,
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
+) -> dict | None:
     """出典ポップアップ用に、チャンク本文（数式プレースホルダ正規化済み）と数式を返す。
 
     display_text を優先し、`normalize_to_placeholder_format` で [[FORMULA_N]] 形式へ正規化する
     （フロントの renderMaterialChunk がそのまま数式を KaTeX 描画できる形）。
+
+    レビュー確定の修正1（セキュリティ）: `search_chunks_with_metadata` と同じ意味論の
+    `allowed_document_ids` を必須キーワード引数にする。認証済みユーザーが任意の chunk_id を
+    指定するだけで他人の Private 文書本文を取得できていた欠落を塞ぐ。`None` はテスト・
+    未接続コード専用の無フィルタ、空集合は SQL を発行せず即座に None（fail-closed）、
+    非空集合は SQL 内 `c.document_id = ANY(...)` で強制する。
     """
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return None
+
     session = _pg_session()
     try:
+        params: dict = {"cid": chunk_id}
+        doc_filter_sql = ""
+        if allowed_document_ids is not None:
+            doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+            params["doc_ids"] = list(allowed_document_ids)
         row = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT c.text, c.display_text, c.formulas, c.chapter, c.section,
                        COALESCE(d.title, d.filename, '') AS source_title, d.filename
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
                 WHERE c.id = CAST(:cid AS uuid)
+                {doc_filter_sql}
                 LIMIT 1
             """),
-            {"cid": chunk_id},
+            params,
         ).fetchone()
     except Exception as exc:
         logger.warning("get_chunk_passage failed: %s", exc)
@@ -2513,7 +2716,9 @@ def get_chunk_passage(chunk_id: str) -> dict | None:
     }
 
 
-def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] | None:
+def get_chunk_claim_refs(
+    course_data: dict | None, chunk_id: str, *, user_id: str | None = None,
+) -> list[dict] | None:
     """学習者向け chunk→claim ID 解決（読み取り専用・最小フィールドのみ）。
 
     D3-6 の出典タブ台帳併記（equation）を claim にも拡張するための下請け。
@@ -2522,13 +2727,22 @@ def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] 
     チャンクが存在しない場合・chunk_id が不正な場合は ``None`` を返す
     （呼び出し側は 404 として fail-closed に扱う）。ドキュメント全体への
     フォールバックはしない（チャンク厳密一致のみ）。数値（confidence 等）は含めない。
+
+    レビュー確定の修正2: discuss モードの ``all_visible`` スコープで引用されたチャンクは
+    コース sources に属さないため、上記判定だけでは常に None（fail-closed が過剰）になる。
+    ``user_id`` が渡された場合は、チャンクの document が
+    ``list_visible_document_ids(user_id)`` に含まれることも許可条件に加える
+    （どちらにも該当しなければ従来どおり None）。``user_id`` 省略時は従来どおり
+    コース sources 判定のみ（既存呼び出し元との後方互換・fail-closed 維持）。
     """
     course_material_ids = set(course_source_material_ids(course_data))
     session = _pg_session()
     try:
         try:
             chunk_row = session.execute(
-                sa_text("SELECT material_id FROM chunks WHERE id = CAST(:cid AS uuid)"),
+                sa_text(
+                    "SELECT material_id, document_id FROM chunks WHERE id = CAST(:cid AS uuid)"
+                ),
                 {"cid": chunk_id},
             ).fetchone()
         except Exception as exc:
@@ -2537,7 +2751,12 @@ def get_chunk_claim_refs(course_data: dict | None, chunk_id: str) -> list[dict] 
         if not chunk_row:
             return None
         chunk_material_id = str(chunk_row[0] or "")
-        if not chunk_material_id or chunk_material_id not in course_material_ids:
+        chunk_document_id = str(chunk_row[1] or "")
+        allowed_by_course = bool(chunk_material_id) and chunk_material_id in course_material_ids
+        allowed_by_visibility = False
+        if not allowed_by_course and user_id and chunk_document_id:
+            allowed_by_visibility = chunk_document_id in list_visible_document_ids(user_id)
+        if not (allowed_by_course or allowed_by_visibility):
             return None
         rows = session.execute(
             sa_text("""
@@ -2722,6 +2941,47 @@ def dismiss_tension_trace(user_id: str, trace_id: str) -> dict | None:
         return None
     _record_tension_event(trace_id, "candidate", "dismissed", user_id)
     return {"trace_id": str(trace_id), "status": "dismissed"}
+
+
+def record_learner_articulated_tension(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    text: str,
+    context_label: str = "",
+    origin: str = "",
+) -> dict | None:
+    """本人が自分の言葉で書いた理解・引っかかりを tension として1行記録する。
+
+    LLM 候補（``status='candidate'``）を経由しない点が
+    ``confirm_tension_trace`` との違い。着地画面の「今日の理解を自分の言葉で」の
+    ように、本人の記述そのものが起点になる導線で使う。違和感を生成するのは人間で
+    あるという不変条項（P1）はここでも保たれる — LLM は一切関与しない。
+
+    ``status='articulated'`` は ``TENSION_OWNED_STATUSES``（本人が引き受けた状態）に
+    含まれるため、この行はそのまま個人知識ネットワークのノードになる。
+    空文字は記録しない（None を返す）。
+    """
+    text = (text or "").strip()[:1000]
+    if not text:
+        return None
+    payload = {"learner_text": text, "self_articulated": True}
+    if origin:
+        payload["origin"] = origin
+    trace_id = record_interest_trace(
+        user_id, course_id, topic_id,
+        kind="tension",
+        text=text,
+        context_label=context_label,
+        extra_payload=payload,
+        status="articulated",
+    )
+    if trace_id is None:
+        return None
+    # 監査（P5 相当）: 候補経由ではないので old_status は空文字にする。
+    _record_tension_event(trace_id, "", "articulated", user_id,
+                          {"origin": origin} if origin else None)
+    return {"trace_id": str(trace_id), "status": "articulated"}
 
 
 def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool:

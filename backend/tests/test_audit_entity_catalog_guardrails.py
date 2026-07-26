@@ -44,6 +44,7 @@ _CALL_PREFIXES = (
     "_record_anchor_event(",
     "_record_assistant_event(",
     "_record_next_step_event(",
+    "_record_manual_event(",
     "_record_item_event(",
     "_audit(",
 )

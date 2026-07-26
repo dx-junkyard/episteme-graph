@@ -1,6 +1,7 @@
 # 上位・下位概念を活用した説明付与と図のコース流通 — 設計
 
-状態: **Phase 1〜4 実装済み（2026-07-19、ura-dev 未コミット。§11 の決定事項と §12 の実装記録を参照）**
+状態: **Phase 1〜4 実装済み（2026-07-19、ura-dev 未コミット。§11 の決定事項と §12 の実装記録を参照）**。
+追補は §13「説明レビューキュー + 一括承認/却下」（2026-07-22 設計確定、実装は別途進行）を参照。
 
 前提調査: 2026-07-19 実施の現状調査（図⇄概念接続 / W層コンテキストレンズ / 要素説明の生成入力 /
 汎用部品×論文文脈 / コース作成への図取込、の5系統）。
@@ -350,3 +351,76 @@ Fable 5 指揮 + Sonnet 5 サブエージェント10体（3波）で全 Phase �
 - migration は **055**（thesis_context / thesis_refs）と **056**（element_explanations）。
   document 削除経路（`versioning/deletion.py::_purge_document` / `admin.py::delete_material`）に
   element_explanations の明示 DELETE を同乗済み。
+
+---
+
+## 13. 追補: 説明レビューキュー + 一括承認/却下（2026-07-22）
+
+状態: **設計確定（本節）。実装は別エージェントが並行作業中**。§5.2 の承認 API
+（1件ずつの `approve`/`dismiss`）を置き換えず、その上にバッチ経路を追加する追補。
+
+### 13.0 決定の記録
+
+- **問題**: §5.2 の「深く検討」モーダルは説明候補を1件ずつ確認・承認する UX しか持たない。
+  ContextualExplanationAgent は document 1本あたり最大 `CTXEXPL_MAX_ELEMENTS_PER_DOCUMENT`
+  （既定40）件の候補を生成しうるため、1件ずつの承認はレビュー負荷が高すぎ、実運用では
+  ゲート（E2 candidate-only）が事実上機能しない（承認が進まない→学習者に何も出ない状態が
+  常態化する）。
+- **検討した選択肢**:
+  1. 一括承認/レビューキュー — candidate-only ゲート（E2）は維持したまま「1件ずつ」という
+     操作上の摩擦だけを取り除く。
+  2. 出所ラベル付き既定表示 + 事後修正（opt-out） — candidate をラベル付きで先に学習者へ出し、
+     教員は誤りだけを事後に取り消す。
+  3. 要素種別による段階化 — 図など高リスク種別のみゲートし、他は自動承認に近づける。
+- **決定**: (1) を採用する。E2（candidate-only。確定は必ず人間）は不変のまま、
+  「1件ずつ」の操作コストのみを下げる。(2) は学習者への露出タイミングが AI 生成直後になり
+  E2 の精神（教員確定なしに露出しない）と衝突するため不採用。(3) は要素型ごとの信頼度に
+  優劣をつける根拠が現時点で無く、運用観察後に再検討する（本追補の非スコープ）。
+
+### 13.1 API
+
+`POST /api/admin/documents/{document_id}/element-explanations/bulk-review`
+
+- **body**: `{"action": "approve" | "dismiss", "explanation_ids": ["...", ...]}`
+  （1〜200件。上限は `BULK_REVIEW_MAX_ITEMS`、既定200。超過は 422）。
+- **権限**: TEACHER 以上 + `_ensure_document_editable`（§5.2 の承認 API と同じ document 単位
+  fail-closed ゲート。他 document 所有の explanation_id は下記のとおり not_found 扱いにし、
+  存在有無を漏らさない）。
+- **セマンティクス**: 部分成功を許容する。`status='candidate'` の行だけを遷移させ、
+  それ以外は失敗させず `skipped: [{"id", "status", "reason": "conflict" | "not_found"}]` に
+  積んで正直に返す（1件の競合や1件の権限外指定でバッチ全体を失敗させない）。
+  `document_id` に属さない・存在しない `explanation_id` は `reason="not_found"` に統一し、
+  他 document の存在を推測させない。
+- **監査**: 遷移した行は **1行ずつ** `theory_review_events`
+  （`entity_type='element_explanation'`、`services.record_review_event` 経由、
+  `payload` に `"bulk": true` を含める）。`skipped` の行は監査記帳しない
+  （状態が変わっていないため）。
+- **一覧**: 新規リスト API は作らない。既存
+  `GET /documents/{id}/element-explanations?status=candidate` をそのまま再利用する。
+- **削除 API は引き続き作らない**（P4。§5.2 の方針を継承）。
+
+### 13.2 UI（`deliberation.js`）
+
+- **入口**: 要素インベントリモーダルのツールバーに「説明レビュー (N)」ボタンを追加する。
+  `N` = 当該 document の `status='candidate'` 件数。モーダルを開いたときに1回取得し、
+  ポーリングはしない（既存 UI 規約を継承）。
+- **キュー画面**: candidate を要素ごとにグループ化したカード一覧 + 各カードのチェックボックス
+  + 「すべて選択」「選択解除」+「選択した N 件を承認」「選択した N 件を却下」ボタン。
+  実行前に事実文で確認する（例:「承認すると学習者に表示されます」— 煽り文言・数値スコアは
+  出さない、E6 継承）。実行後、応答の `skipped` があれば「N 件は状態が変わっていたため
+  スキップされました」等の事実文で表示する。
+- **単件操作との併存**: §5.2 の1件ずつの承認/却下カード（「深く検討」モーダル内）は
+  そのまま残す。レビューキューは追加の入口であり、既存導線を置き換えない。
+- **表示規約**: confidence は生値を出さず段階ラベルのみ（E6 継承）。
+
+### 13.3 不変条項との整合
+
+- **E2（candidate-only）は不変**: 一括であっても、`candidate → approved/dismissed` の遷移は
+  常に教員の明示操作（バッチ実行ボタンの押下）が起点であり、AI が自動で確定させることはない。
+- **P4（情報を落とさない）は不変**: 却下は行削除ではなく `dismissed` への状態遷移として保持する。
+  `skipped` の行も状態を変えずにそのまま残る。
+- **帰属必須**: 遷移した各行の `reviewed_by` / `reviewed_at` に操作者・時刻を記録し、
+  監査は1行ずつ `theory_review_events` に記帳する（バッチ実行であることは `payload.bulk` で
+  区別できるが、監査行自体をまとめて集約しない）。
+- **権限 fail-closed（E6 継承）**: `_ensure_document_editable` を通らないリクエストは
+  そもそもバッチの対象にならない。

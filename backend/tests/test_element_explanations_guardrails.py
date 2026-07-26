@@ -31,6 +31,7 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
 from tests.guardrail_helpers import (  # noqa: E402
     assert_source_does_not_import,
     assert_source_forbids,
+    extract_function_source,
     read_migration_sql,
 )
 
@@ -197,3 +198,39 @@ class TestMigrationIdempotent:
         assert "CREATE INDEX IF NOT EXISTS" in sql
         assert "DROP TABLE" not in sql
         assert "DELETE FROM" not in sql
+
+
+# ---------------------------------------------------------------------------
+# 7. 一括承認/却下（bulk-review）: 権限ゲート・上限・監査 bulk フラグ
+# ---------------------------------------------------------------------------
+
+
+class TestBulkReviewEndpoint:
+    def test_bulk_review_max_items_constant_exists(self):
+        assert "BULK_REVIEW_MAX_ITEMS" in _ROUTE_SRC
+
+    def test_bulk_review_route_goes_through_editable_gate(self):
+        # 一括操作は承認・却下のみ1件版と同じ強さの権限ゲート(_ensure_document_editable)を
+        # 通ること — レビュー負荷軽減のために権限チェックを弱めていないかの静的検査。
+        fn_src = extract_function_source(_ROUTE_SRC, "bulk_review_element_explanations")
+        assert "_ensure_document_editable(" in fn_src
+
+    def test_bulk_review_audits_with_bulk_flag_and_catalog_constant(self):
+        fn_src = extract_function_source(_ROUTE_SRC, "bulk_review_element_explanations")
+        assert '"bulk": True' in fn_src
+        assert "AUDIT_ENTITY_ELEMENT_EXPLANATION" in fn_src
+        assert "record_review_event(" in fn_src
+
+    @_skip_no_fastapi
+    def test_bulk_review_route_registered_as_post_only(self):
+        import routes.element_explanations as element_explanations_routes
+
+        matched = [
+            route
+            for route in element_explanations_routes.router.routes
+            if getattr(route, "path", "").endswith("/element-explanations/bulk-review")
+        ]
+        assert len(matched) == 1
+        methods = matched[0].methods or set()
+        assert "POST" in methods
+        assert "DELETE" not in methods

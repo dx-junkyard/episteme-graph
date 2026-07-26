@@ -83,7 +83,6 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
-| POST | `/api/auth/register` | 公開 | ユーザー登録（既定 learner=STUDENT）、JWT を返す |
 | POST | `/api/auth/login` | 公開 | ログイン（JWT 取得） |
 | GET | `/api/auth/me` | 要ログイン | 現在のユーザー情報 |
 

@@ -296,7 +296,7 @@ eval(extractVar(app, "MATERIAL_EVIDENCE_KIND_LABELS"));
 eval(extractMany(app, ["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
   "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
   "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
-  "renderMaterialEvidenceChip","renderMaterialChunk"]));
+  "renderMaterialEvidenceChip","mdBlocksToHtml","renderMaterialChunk"]));
 
 const chunk = {
   text: "本文 ![[component:comp_1]] 続き 数式 ![[equation:eq_1]] 出典 ![[source:ev_1]]",
@@ -317,7 +317,10 @@ const out = {
   equationStaysBlockCard: /ls-material-formula-only/.test(html),
   // source は引き続きブロックカードで、kind バッジが日本語化されている（"出典"）。
   sourceKindLabelIsJapanese: /ls-material-embed-kind">出典</.test(html),
-  registryPopulated: Object.keys(materialEvidenceChipItems).length === 1
+  // 学習UI再編 Phase 3（教材ホバー+ラッチ）以降、ホバーツールチップの内容取得のため
+  // component だけでなく equation/source も registerMaterialEvidenceChipEntry で
+  // 登録される（component:comp_1 / equation:eq_1 / source:ev_1 の3件）。
+  registryPopulated: Object.keys(materialEvidenceChipItems).length === 3
 };
 process.stdout.write(JSON.stringify(out));
 """
@@ -332,4 +335,7 @@ process.stdout.write(JSON.stringify(out));
     assert out["sourceKindLabelIsJapanese"], "source card kind badge must use the Japanese label map"
     assert out["noRoleConfidenceLeak"], "role/confidence must not leak into learner-facing HTML"
     assert out["equationStaysBlockCard"], "equation embeds must remain a block card, not a chip"
-    assert out["registryPopulated"], "the chip must register its item for the delegated click handler"
+    assert out["registryPopulated"], (
+        "component/equation/source must all register into materialEvidenceChipItems "
+        "for the Phase 3 hover tooltip lookup (not just component/claim)"
+    )

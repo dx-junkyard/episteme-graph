@@ -18,25 +18,41 @@
 from __future__ import annotations
 
 import logging
+import threading
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import text as sa_text
 
 import services
-from dependencies import _get_current_user, _require_teacher  # noqa: F401
+from dependencies import _get_current_user, _require_teacher, _require_system_admin  # noqa: F401
 from core.config import get_settings
 from core.course_data import course_title as _course_title
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
-from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP
+from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP, AUDIT_ENTITY_MANUAL
 from core.admin_assistant import capabilities as caps
 from core.admin_assistant import intent as intent_mod
 from core.admin_assistant import knowledge as kb
 from core.admin_assistant import action_store
 from core.admin_assistant import next_steps as next_steps_mod
+
+# core/help_kb は別タスクで並行実装中（`screen` 引数の追加含む）のため、モジュール自体・
+# 各シンボルとも不在/失敗時は現状挙動へ縮退する（fail-closed。捏造しない, P4）。
+try:  # pragma: no cover
+    from core.help_kb import search_manual as _search_manual
+    from core.help_kb import manual as _help_kb_manual
+    from core.help_kb import index as _help_kb_index
+    from core.help_kb import validator as _help_kb_validator
+    from core.help_kb import store as _help_kb_store
+except Exception:  # noqa: BLE001
+    _search_manual = None
+    _help_kb_manual = None
+    _help_kb_index = None
+    _help_kb_validator = None
+    _help_kb_store = None
 from core.admin_assistant.actions import (
     ActionArgError,
     ActionContext,
@@ -64,6 +80,16 @@ from schemas import (
     AssistantLocatePlan,
     AssistantLocateStep,
     AssistantRevertResponse,
+    HelpKbDraftOut,
+    HelpKbDraftsResponse,
+    HelpKbDraftUpdateRequest,
+    HelpKbFreezeResponse,
+    HelpKbRefreshResponse,
+    HelpKbSeedResponse,
+    HelpKbServingSourceRequest,
+    HelpKbStateOut,
+    HelpKbVersionOut,
+    HelpKbVersionsResponse,
     NextStepDismissResponse,
     NextStepsResponse,
 )
@@ -72,6 +98,12 @@ logger = logging.getLogger(__name__)
 
 # admin.router（prefix=/api/admin）に include される
 admin_router = APIRouter(prefix="/assistant", tags=["Admin Assistant"])
+
+# 利用者マニュアル KB（help_kb, Phase 2 §2-2）の手動更新トリガー。
+# 最終パスは /api/admin/help-kb/refresh（admin_router の /assistant 配下ではない
+# ため、main.py から prefix="/api/admin" で個別マウントする — 既存の admin 系子
+# ルーター登録規約, CLAUDE.md「admin.router に子ルーターを include しない」）。
+help_kb_router = APIRouter(prefix="/help-kb", tags=["Help KB"])
 
 _ROLE_LABELS = {"TEACHER": "教員", "SYSTEM_ADMIN": "システム管理者", "STUDENT": "学生"}
 _TARGET_LABELS = {
@@ -108,6 +140,31 @@ def _record_assistant_event(
 ) -> None:
     """theory_review_events への監査記録（P5。実体は services.record_review_event, 提案7）。"""
     services.record_review_event(AUDIT_ENTITY_ASSISTANT_ACTION, entity_id, old_status, new_status, user_id, metadata)
+
+
+# help-kb refresh は特定オブジェクトを持たない（KB 全体の再構築操作）ため entity_id は
+# 固定値。呼び出し箇所で生リテラルを渡さず名前付き定数を参照する
+# （test_audit_entity_catalog_guardrails.py の生リテラル検出と同じ規約に合わせる）。
+_MANUAL_REFRESH_ENTITY_ID = "help_kb"
+
+# help_kb Phase 3 (DB draft/freeze) の固定 entity_id 群。draft 更新のみ対象が
+# (audience, file) 単位のため f-string を使う（f-string は raw literal 検出の対象外 —
+# 文字列そのものが呼び出し箇所ごとに変わる識別子であって、新規 entity_type 語彙の
+# 紛れ込みではないため）。draft 以外は KB 全体操作のため refresh と同じ固定値パターン。
+_MANUAL_DRAFTS_SEED_ENTITY_ID = "drafts"
+_MANUAL_FREEZE_ENTITY_ID = "freeze"
+_MANUAL_SERVING_SOURCE_ENTITY_ID = "serving_source"
+
+
+def _record_manual_event(
+    entity_id: str, new_status: str, user_id: str | None, metadata: dict | None = None,
+) -> None:
+    """theory_review_events への監査記録（entity_type='manual'。help-kb refresh 専用）。
+
+    設計書 docs/features/manual_help_kb_design.md §2-2。metadata には節数・違反数
+    など事実のみを積む（confidence 等の生数値は含めない）。
+    """
+    services.record_review_event(AUDIT_ENTITY_MANUAL, entity_id, "", new_status, user_id, metadata)
 
 
 def _assistant_model() -> str | None:
@@ -187,9 +244,42 @@ def _denial_response(cap, role: str) -> AssistantChatResponse:
     )
 
 
-def _guidance_response(message: str, role: str, cap) -> AssistantChatResponse:
+def _manual_audience(role: str) -> str:
+    """§1-2 の audience 解決: SYSTEM_ADMIN はその索引、それ以外（TEACHER）は teacher 索引。"""
+    return "system_admin" if role == "SYSTEM_ADMIN" else "teacher"
+
+
+def _manual_hits(message: str, role: str, screen: str | None = None) -> list[dict]:
+    """docs/manual 索引（core/help_kb, 第2知識源）からの検索。
+
+    capability KB（admin_operations）が手順の正本で、manual は概念/全体像担当（§1-2）。
+    モジュール未実装（並行実装中）・索引空・検索失敗のいずれも現状と完全に同じ挙動へ
+    縮退する（fail-closed。捏造しない, P4）。
+
+    ``screen``（§4-3, Copilot 側の画面ヒント）は現在アクティブなタブ
+    （``screen_context.tab``）。front-matter ``screen:`` 一致節を優先する
+    ``search_manual`` のヒント引数へそのまま渡す（未指定/空なら従来どおり渡さない —
+    ``search_manual`` の旧シグネチャ・既存呼び出し元との後方互換を保つ）。
+    """
+    if _search_manual is None:
+        return []
+    kwargs: dict = {"audience": _manual_audience(role), "limit": 3}
+    if screen:
+        kwargs["screen"] = screen
+    try:
+        return _search_manual(message, **kwargs) or []
+    except Exception:
+        logger.warning("guidance: manual search failed", exc_info=True)
+        return []
+
+
+def _guidance_response(
+    message: str, role: str, cap, screen_context: dict | None = None,
+) -> AssistantChatResponse:
     allowed = caps.capabilities_for(role)
     results = kb.search(message, allowed, limit=3)
+    hint_screen = (screen_context or {}).get("tab") or None
+    manual_hits = _manual_hits(message, role, hint_screen)
     citations: list = []
     parts: list[str] = []
     screen = ""
@@ -217,17 +307,36 @@ def _guidance_response(message: str, role: str, cap) -> AssistantChatResponse:
             primary = results[0]
 
     if primary and primary.get("documented"):
+        # capability KB（手順の正本）が documented — 応答本文は現状のまま。
+        # 関連 manual ヒットがあれば出所別の citation として併記するだけ（§1-2）。
         parts.append(primary["body"])
         screen = primary.get("screen", "")
         if primary.get("citation"):
             citations.append({"doc": primary["citation"]})
+        for m in manual_hits[:2]:
+            if m.get("citation"):
+                citations.append({"doc": m["citation"]})
     elif primary is not None:
-        # KB 未整備 — 手順をでっち上げない（P4）。
-        parts.append(
-            f"「{primary.get('title', '')}」の詳しい手順はまだ整備されていません。"
-            f"操作は「{primary.get('screen', '')}」タブで行います。"
-        )
+        # capability KB 未整備 — manual にヒットがあれば「未整備」固定文の代わりに
+        # 節本文を素通しする（捏造しない・本文はそのまま, P4）。ヒットが無ければ従来どおり。
+        if manual_hits:
+            top = manual_hits[0]
+            parts.append(top.get("body", ""))
+            if top.get("citation"):
+                citations.append({"doc": top["citation"]})
+        else:
+            parts.append(
+                f"「{primary.get('title', '')}」の詳しい手順はまだ整備されていません。"
+                f"操作は「{primary.get('screen', '')}」タブで行います。"
+            )
         screen = primary.get("screen", "")
+    elif manual_hits:
+        # capability 側に primary が無い（cap 未解決 かつ 検索結果ゼロ）。
+        # manual にヒットがあればそちらを素通しする（primary 不在時のフォールバック）。
+        top = manual_hits[0]
+        parts.append(top.get("body", ""))
+        if top.get("citation"):
+            citations.append({"doc": top["citation"]})
     else:
         # N12: 代行ハンドラ未実装の action は「道案内のみ対応」を明示する
         # （どれが実際に動くか事前に判る。実行可否の事前開示）。
@@ -288,7 +397,7 @@ def _infer_args(cap, message: str) -> tuple[dict, str | None]:
 
 def _action_response(message: str, role: str, cap, screen_context: dict) -> AssistantChatResponse:
     if not cap.is_action():
-        return _guidance_response(message, role, cap)
+        return _guidance_response(message, role, cap, screen_context)
 
     target = _target_from_context(cap, screen_context)
     tlabel = _TARGET_LABELS.get(cap.target_type, "対象")
@@ -521,7 +630,7 @@ def assistant_chat(
         )
     else:
         # guidance（および cap 未解決の locate/action）は説明にまとめる。
-        resp = _guidance_response(body.message, role, cap)
+        resp = _guidance_response(body.message, role, cap, screen_context)
 
     resp.source = res.source
     return resp
@@ -798,3 +907,251 @@ def restore_next_step(
         session.close()
     _record_next_step_event(step_key, "restored", uid)
     return NextStepDismissResponse(status="restored", step_key=step_key)
+
+
+# ---------------------------------------------------------------------------
+# 8.6 POST /help-kb/refresh（利用者マニュアル KB の手動更新トリガー, Phase 2 §2-2）
+#
+# 正本の更新経路は「デプロイ = 凍結版の切替」（起動時 lru_cache 読み込み + CI ガード
+# レール）。本 API は volume-mount 開発や hotfix の非常口であり、運用の主経路には
+# しない（設計書 docs/features/manual_help_kb_design.md §2-2）。SYSTEM_ADMIN のみ
+# （fail-closed）。DB 書き込みは監査行1件のみ・KB 自体は再起動同様に読み直すだけで
+# 冪等（何度呼んでも同じ状態に収束する）。
+# ---------------------------------------------------------------------------
+
+
+def _manual_audience_section_counts() -> dict[str, int]:
+    """audience 別の索引済み節数（事実のみ・confidence 等は含めない）。
+
+    ``core/help_kb`` の公開 API（``manual.manual_root`` / ``manual.AUDIENCES`` /
+    ``index.build_section_index``）だけを使って再集計する。``manual.py`` の
+    ``lru_cache`` 付き private ビルダーには依存しない（本関数自体が「再構築後の
+    状態」を確認する側であり、キャッシュを跨いで確認できることが重要なため）。
+    """
+    if _help_kb_manual is None or _help_kb_index is None:
+        return {}
+    root = _help_kb_manual.manual_root()
+    if root is None:
+        return {}
+    counts: dict[str, int] = {}
+    for audience in _help_kb_manual.AUDIENCES:
+        directory = root / audience
+        idx, _excluded = _help_kb_index.build_section_index(
+            directory, manual_transforms=True, audience_tag=audience,
+        )
+        counts[audience] = len(idx)
+    return counts
+
+
+@help_kb_router.post("/refresh", response_model=HelpKbRefreshResponse)
+def refresh_help_kb(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbRefreshResponse:
+    """``docs/manual`` / capability KB のキャッシュをクリアし、再構築後の状態を返す。
+
+    volume-mount 開発時やドキュメントの hotfix を即座に反映させたいときの手動
+    トリガー（非常口）。通常運用はデプロイ（イメージ再ビルド → 再起動）で更新される
+    ため、このエンドポイントを定期実行・自動化する運用は想定しない。
+    """
+    if _help_kb_manual is not None:
+        _help_kb_manual.clear_manual_cache()
+    kb.clear_cache()
+
+    section_counts = _manual_audience_section_counts()
+    violations = _help_kb_validator.validate_manual() if _help_kb_validator is not None else []
+    excluded = _help_kb_manual.excluded_sections() if _help_kb_manual is not None else []
+
+    metadata = {
+        "audience_section_counts": section_counts,
+        "validator_violations": len(violations),
+        "excluded_sections": len(excluded),
+    }
+    uid = str(current_user.get("id") or "")
+    _record_manual_event(_MANUAL_REFRESH_ENTITY_ID, "refreshed", uid, metadata)
+    _resync_help_kb_derived()
+
+    return HelpKbRefreshResponse(
+        status="refreshed",
+        audience_section_counts=section_counts,
+        validator_violations=len(violations),
+        excluded_sections=len(excluded),
+    )
+
+
+# ---------------------------------------------------------------------------
+# help_kb Phase 3: DB draft/freeze（設計 §7-2、atlas/library の draft/freeze 踏襲）
+#
+# 配信ソースの既定は files のまま（デプロイ=凍結版の切替という Phase 1/2 運用を壊さない）。
+# DB 配信になるのは POST .../freeze の実行後のみ（freeze = 配信ソースの明示切替。
+# POST .../serving-source は files への切戻し・db への再切替の escape hatch）。
+# 全エンドポイント SYSTEM_ADMIN のみ（fail-closed。DB
+# draft/freeze は git レビューを経ない書き込み経路のため、atlas/library より一段
+# 強い権限で閉じる）。書き込み系はすべて監査記帳する（P5, _record_manual_event）。
+# ---------------------------------------------------------------------------
+
+
+def _require_help_kb_store():
+    if _help_kb_store is None:  # pragma: no cover — 並行実装中の一時的な不在のみ
+        raise HTTPException(status_code=503, detail="help_kb store is unavailable")
+    return _help_kb_store
+
+
+def _resync_help_kb_derived() -> None:
+    """配信スナップショット変更後の派生データ再同期（best-effort・非同期）。
+
+    refresh / freeze / serving-source 切替で配信内容が変わると、ベクトル補助層
+    （manual_sections）と content-hash 監査記帳が古くなるため、バックグラウンド
+    スレッドで追随させる。失敗しても本体操作の成功は変えない（fail-open。
+    次回起動時の lifespan 同期でも追随する）。
+    """
+
+    def _run() -> None:
+        try:
+            from core.help_kb.audit import record_snapshot_if_changed
+
+            record_snapshot_if_changed()
+        except Exception:  # noqa: BLE001
+            logger.warning("help_kb snapshot audit resync failed", exc_info=True)
+        try:
+            from core.help_kb.vector import sync_manual_vectors
+
+            sync_manual_vectors()
+        except Exception:  # noqa: BLE001
+            logger.warning("help_kb vector resync failed", exc_info=True)
+
+    threading.Thread(target=_run, name="help-kb-derived-resync", daemon=True).start()
+
+
+@help_kb_router.get("/drafts", response_model=HelpKbDraftsResponse)
+def list_help_kb_drafts(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbDraftsResponse:
+    store = _require_help_kb_store()
+    drafts = [HelpKbDraftOut(**d) for d in store.list_drafts()]
+    state = HelpKbStateOut(**store.get_state())
+    return HelpKbDraftsResponse(drafts=drafts, state=state)
+
+
+@help_kb_router.get("/drafts/{audience}/{file}", response_model=HelpKbDraftOut)
+def get_help_kb_draft(
+    audience: str,
+    file: str,
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbDraftOut:
+    store = _require_help_kb_store()
+    try:
+        draft = store.get_draft(audience, file)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if draft is None:
+        raise HTTPException(status_code=404, detail=f"draft not found: {audience}/{file}")
+    return HelpKbDraftOut(**draft)
+
+
+@help_kb_router.put("/drafts/{audience}/{file}", response_model=HelpKbDraftOut)
+def update_help_kb_draft(
+    audience: str,
+    file: str,
+    body: HelpKbDraftUpdateRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbDraftOut:
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    try:
+        draft = store.update_draft(
+            audience, file, body.content, expected_revision=body.expected_revision, user_id=uid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except store.DraftNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except store.DraftConflictError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "current_revision": exc.current_revision},
+        ) from exc
+    _record_manual_event(
+        f"draft:{audience}/{file}", "updated", uid,
+        {"audience": audience, "file": file, "revision": draft["revision"]},
+    )
+    return HelpKbDraftOut(**draft)
+
+
+@help_kb_router.post("/drafts/seed", response_model=HelpKbSeedResponse)
+def seed_help_kb_drafts(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbSeedResponse:
+    """現配信ファイルのスナップショットから draft を冪等シードする（既存 draft は上書きしない）。"""
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    result = store.seed_drafts_from_served(user_id=uid)
+    _record_manual_event(_MANUAL_DRAFTS_SEED_ENTITY_ID, "seeded", uid, result)
+    return HelpKbSeedResponse(**result)
+
+
+@help_kb_router.post("/freeze", response_model=HelpKbFreezeResponse)
+def freeze_help_kb(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbFreezeResponse:
+    """全 draft を凍結検証ゲートに通し、通過すれば新版を発行して db 配信へ切り替える。
+
+    検証違反があれば 422（``violations`` 配列）を返し、版・配信状態は変更しない。
+    """
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    try:
+        result = store.freeze(user_id=uid)
+    except store.FreezeValidationError as exc:
+        _record_manual_event(
+            _MANUAL_FREEZE_ENTITY_ID, "rejected", uid,
+            {"violations": exc.violations, "violation_count": len(exc.violations)},
+        )
+        raise HTTPException(
+            status_code=422,
+            detail={"message": "manual kb freeze validation failed", "violations": exc.violations},
+        ) from exc
+    if _help_kb_manual is not None:
+        _help_kb_manual.clear_manual_cache()
+    kb.clear_cache()
+    _record_manual_event(
+        _MANUAL_FREEZE_ENTITY_ID, "frozen", uid,
+        {"version_no": result["version_no"], "audience_file_counts": result["audience_file_counts"]},
+    )
+    _resync_help_kb_derived()
+    return HelpKbFreezeResponse(
+        version_no=result["version_no"],
+        audience_file_counts=result["audience_file_counts"],
+        serving_source="db",
+    )
+
+
+@help_kb_router.post("/serving-source", response_model=HelpKbStateOut)
+def set_help_kb_serving_source(
+    body: HelpKbServingSourceRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbStateOut:
+    """配信ソースを明示切替する（db への切替には freeze 済みの版が必須）。"""
+    store = _require_help_kb_store()
+    uid = str(current_user.get("id") or "") or None
+    try:
+        state = store.set_serving_source(body.source)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except store.ServingSourceError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    if _help_kb_manual is not None:
+        _help_kb_manual.clear_manual_cache()
+    kb.clear_cache()
+    _record_manual_event(_MANUAL_SERVING_SOURCE_ENTITY_ID, state["serving_source"], uid, state)
+    _resync_help_kb_derived()
+    return HelpKbStateOut(**state)
+
+
+@help_kb_router.get("/versions", response_model=HelpKbVersionsResponse)
+def list_help_kb_versions(
+    current_user: dict = Depends(_require_system_admin),
+) -> HelpKbVersionsResponse:
+    """版一覧（内容なし・メタのみ。削除 API は無い — append-only）。"""
+    store = _require_help_kb_store()
+    versions = [HelpKbVersionOut(**v) for v in store.list_versions()]
+    return HelpKbVersionsResponse(versions=versions)

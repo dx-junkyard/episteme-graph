@@ -2651,6 +2651,60 @@
     return html;
   }
 
+  // 行内装飾（太字）。教材プレビュー各所で共通利用する。
+  function lsInlineMd(s) {
+    return s.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
+  }
+
+  // Markdown のブロック変換（見出し #..###### / 箇条書き - * + / 番号付き 1. 1)）。
+  // 授業用ドラフト・スライド・トピック教材プレビューで共通利用し、受講画面(app.js の
+  // mdBlocksToHtml)と表示規則を揃える。入力は escHtml 済み + 数式/チップのプレースホルダ
+  // 置換済みであること。inline は行内装飾コールバック、headingBase は見出しレベルの
+  // シフト量（教材は 1 = "#"→h2、上限 h6）。空行が段落/リストの区切り、行内改行は <br>。
+  function lsMdBlocksToHtml(escaped, inline, headingBase) {
+    var lines = String(escaped).split("\n");
+    var out = [];
+    var listType = null; // "ul" | "ol"
+    var para = [];
+    var base = headingBase || 0;
+    function closeList() { if (listType) { out.push("</" + listType + ">"); listType = null; } }
+    function flushPara() { if (para.length) { out.push("<p>" + para.join("<br>") + "</p>"); para = []; } }
+    for (var i = 0; i < lines.length; i++) {
+      var line = lines[i].replace(/\s+$/, "");
+      if (line === "") { flushPara(); closeList(); continue; }
+      var h = /^(#{1,6})\s+(.*)$/.exec(line);
+      if (h) {
+        flushPara(); closeList();
+        var lvl = Math.min(6, h[1].length + base);
+        out.push("<h" + lvl + ">" + inline(h[2]) + "</h" + lvl + ">");
+        continue;
+      }
+      var ul = /^\s*[-*+]\s+(.*)$/.exec(line);
+      if (ul) {
+        flushPara();
+        if (listType !== "ul") { closeList(); out.push("<ul>"); listType = "ul"; }
+        out.push("<li>" + inline(ul[1]) + "</li>");
+        continue;
+      }
+      var ol = /^\s*(\d+)[.)]\s+(.*)$/.exec(line);
+      if (ol) {
+        flushPara();
+        if (listType !== "ol") {
+          closeList();
+          var start = parseInt(ol[1], 10);
+          out.push(start > 1 ? '<ol start="' + start + '">' : "<ol>");
+          listType = "ol";
+        }
+        out.push("<li>" + inline(ol[2]) + "</li>");
+        continue;
+      }
+      closeList();
+      para.push(inline(line));
+    }
+    flushPara(); closeList();
+    return out.join("");
+  }
+
   function lsRenderCourseMaterialPreview(text, topic) {
     var formulas = lsTopicFormulas(topic);
     var formulaById = {};
@@ -2700,13 +2754,7 @@
     preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
       return preserveMath(expr, false);
     });
-    var html = escHtml(preserved);
-    html = html.replace(/^### (.+)$/gm, "<h4>$1</h4>");
-    html = html.replace(/^## (.+)$/gm, "<h3>$1</h3>");
-    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
-    html = html.split("\n\n").map(function (p) {
-      return "<p>" + p.replace(/\n/g, "<br>") + "</p>";
-    }).join("");
+    var html = lsMdBlocksToHtml(escHtml(preserved), lsInlineMd, 1);
     html = html.replace(/@@EG_COURSE_MATH_(\d+)@@/g, function (_m, idx) {
       var block = mathBlocks[parseInt(idx, 10)];
       return block ? lsRenderKatex(block.expr, block.display) : "";
@@ -3989,7 +4037,18 @@
         }
       });
     });
-    return { nodeMap: nodeMap, claimMap: claimMap, equationMap: equationMap };
+    var refIndex = (graph && graph.reference_index) || {};
+    var refClaims = refIndex.claims || {};
+    var refEvidence = refIndex.evidence || {};
+    var refDerivations = refIndex.derivations || {};
+    return {
+      nodeMap: nodeMap,
+      claimMap: claimMap,
+      equationMap: equationMap,
+      refClaims: refClaims,
+      refEvidence: refEvidence,
+      refDerivations: refDerivations
+    };
   }
 
   function lsGraphSnippet(text, max) {
@@ -4021,6 +4080,24 @@
       if (claim) {
         ref.resolved = true;
         ref.label = lsGraphSnippet(claim.text || claim.normalized_text || id);
+      } else {
+        var refClaim = (resolver.refClaims || {})[id];
+        if (refClaim) {
+          ref.resolved = true;
+          ref.label = lsGraphSnippet(refClaim.text || id);
+        }
+      }
+    } else if (kind === "evidence") {
+      var refEvidence = (resolver.refEvidence || {})[id];
+      if (refEvidence) {
+        ref.resolved = true;
+        ref.label = lsGraphSnippet(refEvidence.text || id);
+      }
+    } else if (kind === "derivation") {
+      var refDerivation = (resolver.refDerivations || {})[id];
+      if (refDerivation) {
+        ref.resolved = true;
+        ref.label = lsGraphSnippet(refDerivation.label || refDerivation.operation || id);
       }
     }
     return ref;
@@ -4034,6 +4111,10 @@
     if (ref.resolved) {
       if (ref.kind === "equation" && ref.latex) {
         return '<span class="ls-graph-ref ls-graph-ref-resolved">' + lsRenderKatex(ref.latex, false) +
+          ' <span class="ls-graph-ref-id">' + escHtml(ref.id) + '</span></span>';
+      }
+      if (ref.kind === "evidence" || ref.kind === "derivation") {
+        return '<span class="ls-graph-ref ls-graph-ref-resolved">' + escHtml(ref.label) +
           ' <span class="ls-graph-ref-id">' + escHtml(ref.id) + '</span></span>';
       }
       return '<span class="ls-graph-ref ls-graph-ref-resolved">' + escHtml(ref.label) + '</span>';
@@ -5604,7 +5685,6 @@
       return preserveMath(expr, false);
     });
     var html = escHtml(preserved);
-    html = html.replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>");
     html = html.replace(/@@EG_PREVIEW_THEORY_(\d+)@@/g, function (_m, idx) {
       var chip = theoryChips[parseInt(idx, 10)] || {};
       var component = lsFindTheoryComponent(chip.id);
@@ -5614,7 +5694,7 @@
       if (component && component.blackbox_policy && component.blackbox_policy.default_level === "io_only") marker = "🔒";
       return '<span class="ls-theory-chip" data-component-id="' + escHtml(chip.id) + '">' + escHtml(chip.label) + ' ' + marker + '</span>';
     });
-    preview.innerHTML = html.split("\n\n").map(function (p) { return "<p>" + p.replace(/\n/g, "<br>") + "</p>"; }).join("");
+    preview.innerHTML = lsMdBlocksToHtml(html, lsInlineMd, 1);
     preview.innerHTML = preview.innerHTML.replace(/@@EG_PREVIEW_MATH_(\d+)@@/g, function (_m, idx) {
       var block = mathBlocks[parseInt(idx, 10)];
       return lsRenderKatex(block.expr, block.display);
@@ -5659,9 +5739,7 @@
     preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
       return preserveMath(expr, false);
     });
-    var html = escHtml(preserved).split("\n\n").map(function (p) {
-      return "<p>" + p.replace(/\n/g, "<br>") + "</p>";
-    }).join("");
+    var html = lsMdBlocksToHtml(escHtml(preserved), lsInlineMd, 1);
     return html.replace(/@@EG_TOPIC_MATH_(\d+)@@/g, function (_m, idx) {
       var block = mathBlocks[parseInt(idx, 10)];
       return block ? lsRenderKatex(block.expr, block.display) : "";

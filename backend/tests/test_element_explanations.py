@@ -104,8 +104,12 @@ class FakeElementExplanationSession:
             return self._supersede_by_element(params)
         if sql.startswith("UPDATE element_explanations SET status = :superseded WHERE id"):
             return self._supersede_by_id(params)
+        if sql.startswith("UPDATE element_explanations SET status = :new_status") and "ANY(:ids)" in sql:
+            return self._bulk_transition(params)
         if sql.startswith("UPDATE element_explanations SET status = :new_status"):
             return self._transition(params)
+        if sql.startswith("SELECT id::text, document_id::text, status FROM element_explanations"):
+            return self._bulk_status_check(params)
         if sql.startswith("SELECT") and sql.endswith("WHERE id = CAST(:id AS uuid)"):
             return self._get_by_id(params)
         if sql.startswith("SELECT") and "ORDER BY element_type, element_id, kind, created_at DESC" in sql:
@@ -162,6 +166,26 @@ class FakeElementExplanationSession:
                 row["reviewed_at"] = datetime.now(timezone.utc)
                 return _FakeResult([self._row_tuple(row)])
         return _FakeResult([])
+
+    def _bulk_transition(self, params: dict) -> _FakeResult:
+        ids = set(params["ids"])
+        updated = []
+        for row in self.rows:
+            if (
+                row["id"] in ids
+                and row["document_id"] == params["document_id"]
+                and row["status"] == params["candidate"]
+            ):
+                row["status"] = params["new_status"]
+                row["reviewed_by"] = params["user_id"]
+                row["reviewed_at"] = datetime.now(timezone.utc)
+                updated.append(row)
+        return _FakeResult([self._row_tuple(r) for r in updated])
+
+    def _bulk_status_check(self, params: dict) -> _FakeResult:
+        ids = set(params["ids"])
+        matched = [r for r in self.rows if r["id"] in ids]
+        return _FakeResult([(r["id"], r["document_id"], r["status"]) for r in matched])
 
     def _get_by_id(self, params: dict) -> _FakeResult:
         for row in self.rows:
@@ -362,6 +386,116 @@ class TestApproveDismiss:
         [row] = store.insert_candidates(fake, DOC_A, [_item()])
         store.approve(fake, row["id"], "teacher-1")
         assert len(fake.rows) == 1  # 行削除なし・遷移のみ
+
+
+# ---------------------------------------------------------------------------
+# bulk_transition
+# ---------------------------------------------------------------------------
+
+
+OTHER_DOC = "22222222-2222-2222-2222-222222222222"
+
+
+class TestBulkTransition:
+    def test_bulk_approve_happy_path(self):
+        fake = FakeElementExplanationSession()
+        rows = store.insert_candidates(
+            fake, DOC_A,
+            [
+                _item(element_id="fig-1"),
+                _item(element_id="fig-2"),
+                _item(element_id="fig-3"),
+            ],
+        )
+        ids = [r["id"] for r in rows]
+        result = store.bulk_transition(
+            fake, DOC_A, ids, new_status=store.STATUS_APPROVED, user_id="teacher-1",
+        )
+        assert result["skipped"] == []
+        assert [r["id"] for r in result["updated"]] == ids  # 入力順で整列
+        for row in result["updated"]:
+            assert row["status"] == store.STATUS_APPROVED
+            assert row["reviewed_by"] == "teacher-1"
+            assert row["reviewed_at"] is not None
+
+    def test_bulk_dismiss_happy_path(self):
+        fake = FakeElementExplanationSession()
+        rows = store.insert_candidates(
+            fake, DOC_A, [_item(element_id="fig-1"), _item(element_id="fig-2")],
+        )
+        ids = [r["id"] for r in rows]
+        result = store.bulk_transition(
+            fake, DOC_A, ids, new_status=store.STATUS_DISMISSED, user_id="teacher-1",
+        )
+        assert result["skipped"] == []
+        assert all(r["status"] == store.STATUS_DISMISSED for r in result["updated"])
+
+    def test_bulk_mixed_conflict_and_not_found(self):
+        fake = FakeElementExplanationSession()
+        [candidate_row] = store.insert_candidates(fake, DOC_A, [_item(element_id="fig-1")])
+        [already_approved] = store.insert_candidates(fake, DOC_A, [_item(element_id="fig-2")])
+        store.approve(fake, already_approved["id"], "teacher-1")
+        [other_doc_row] = store.insert_candidates(fake, OTHER_DOC, [_item(element_id="fig-9")])
+
+        ids = [candidate_row["id"], already_approved["id"], "bogus-id", other_doc_row["id"]]
+        result = store.bulk_transition(
+            fake, DOC_A, ids, new_status=store.STATUS_APPROVED, user_id="teacher-1",
+        )
+
+        assert [r["id"] for r in result["updated"]] == [candidate_row["id"]]
+        skipped_by_id = {s["id"]: s for s in result["skipped"]}
+        assert skipped_by_id[already_approved["id"]] == {
+            "id": already_approved["id"], "status": store.STATUS_APPROVED, "reason": "conflict",
+        }
+        assert skipped_by_id["bogus-id"] == {"id": "bogus-id", "status": None, "reason": "not_found"}
+        # 別 document の candidate 行は status を漏らさず not_found 扱い(権限境界)。
+        assert skipped_by_id[other_doc_row["id"]] == {
+            "id": other_doc_row["id"], "status": None, "reason": "not_found",
+        }
+        # 別 document の行自体は無傷(承認されていない)。
+        untouched = store.get_by_id(fake, other_doc_row["id"])
+        assert untouched["status"] == store.STATUS_CANDIDATE
+
+    def test_empty_ids_raises(self):
+        fake = FakeElementExplanationSession()
+        with pytest.raises(ValueError):
+            store.bulk_transition(fake, DOC_A, [], new_status=store.STATUS_APPROVED, user_id="teacher-1")
+
+    def test_blank_ids_normalize_to_empty_and_raise(self):
+        fake = FakeElementExplanationSession()
+        with pytest.raises(ValueError):
+            store.bulk_transition(
+                fake, DOC_A, ["  ", ""], new_status=store.STATUS_APPROVED, user_id="teacher-1",
+            )
+
+    def test_invalid_new_status_raises(self):
+        fake = FakeElementExplanationSession()
+        [row] = store.insert_candidates(fake, DOC_A, [_item()])
+        with pytest.raises(ValueError):
+            store.bulk_transition(fake, DOC_A, [row["id"]], new_status="bogus", user_id="teacher-1")
+
+    def test_requires_user_id(self):
+        fake = FakeElementExplanationSession()
+        [row] = store.insert_candidates(fake, DOC_A, [_item()])
+        with pytest.raises(ValueError):
+            store.bulk_transition(fake, DOC_A, [row["id"]], new_status=store.STATUS_APPROVED, user_id="")
+
+    def test_duplicate_ids_are_deduped(self):
+        fake = FakeElementExplanationSession()
+        [row] = store.insert_candidates(fake, DOC_A, [_item()])
+        result = store.bulk_transition(
+            fake, DOC_A, [row["id"], row["id"], row["id"]],
+            new_status=store.STATUS_APPROVED, user_id="teacher-1",
+        )
+        assert len(result["updated"]) == 1
+        assert result["skipped"] == []
+
+    def test_no_row_is_ever_deleted(self):
+        fake = FakeElementExplanationSession()
+        rows = store.insert_candidates(fake, DOC_A, [_item(element_id="fig-1"), _item(element_id="fig-2")])
+        ids = [r["id"] for r in rows]
+        store.bulk_transition(fake, DOC_A, ids, new_status=store.STATUS_DISMISSED, user_id="teacher-1")
+        assert len(fake.rows) == 2
 
 
 # ---------------------------------------------------------------------------

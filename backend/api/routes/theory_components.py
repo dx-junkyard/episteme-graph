@@ -53,6 +53,7 @@ from core.schema import (
 )
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
 from core.course_data import course_source_material_ids, course_sources
+from core.deliberation.refs import document_run_artifacts
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
@@ -2133,6 +2134,228 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
     }
 
 
+# ---------------------------------------------------------------------------
+# Reference index (evidence-link resolution for the theory graph UI)
+# ---------------------------------------------------------------------------
+#
+# node/edge payloads carry pipeline-internal IDs that have no DB table of
+# their own (atomic claim IDs from ClaimObjectBuilder, ``ev_NNNN`` evidence
+# IDs from EvidenceRegistryBuilder, derivation/step IDs from
+# DerivationChainAgent). The frontend cannot resolve these on its own, so we
+# build a small index — keyed only by IDs actually referenced in the graph
+# (never the whole stage_outputs, to keep the payload bounded) — mapping each
+# ID to a short human-readable snippet.
+
+_REFERENCE_TEXT_SNIPPET_MAX = 200
+
+_NODE_CLAIM_ID_KEYS = ("linked_claim_ids",)
+_NODE_EVIDENCE_ID_KEYS = ("linked_evidence_ids",)
+_NODE_DERIVATION_ID_KEYS = ("linked_derivation_ids",)
+_EDGE_CLAIM_ID_KEYS = ("evidence_claim_ids",)
+_EDGE_EVIDENCE_ID_KEYS = ("source_evidence_ids",)
+_EDGE_DERIVATION_ID_KEYS = ("evidence_derivation_ids",)
+
+
+def _collect_ids_into(container: Any, keys: tuple[str, ...], target: set[str]) -> None:
+    if not isinstance(container, dict):
+        return
+    for key in keys:
+        values = container.get(key)
+        if isinstance(values, list):
+            target.update(str(v) for v in values if v)
+
+
+def _collect_graph_reference_ids(graph_payload: dict) -> tuple[set[str], set[str], set[str]]:
+    """参照済みの claim / evidence / derivation ID を graph payload から集める。
+
+    索引に載せるのはここで集めた ID のみ（stage_outputs 全体は載せない）。
+    """
+    claim_ids: set[str] = set()
+    evidence_ids: set[str] = set()
+    derivation_ids: set[str] = set()
+
+    nodes = graph_payload.get("nodes") if isinstance(graph_payload, dict) else None
+    for node in nodes if isinstance(nodes, list) else []:
+        _collect_ids_into(node, _NODE_CLAIM_ID_KEYS, claim_ids)
+        _collect_ids_into(node, _NODE_EVIDENCE_ID_KEYS, evidence_ids)
+        _collect_ids_into(node, _NODE_DERIVATION_ID_KEYS, derivation_ids)
+
+    edges = graph_payload.get("edges") if isinstance(graph_payload, dict) else None
+    for edge in edges if isinstance(edges, list) else []:
+        _collect_ids_into(edge, _EDGE_CLAIM_ID_KEYS, claim_ids)
+        _collect_ids_into(edge, _EDGE_EVIDENCE_ID_KEYS, evidence_ids)
+        _collect_ids_into(edge, _EDGE_DERIVATION_ID_KEYS, derivation_ids)
+        nested_evidence = edge.get("evidence") if isinstance(edge, dict) else None
+        if isinstance(nested_evidence, dict):
+            _collect_ids_into(nested_evidence, _EDGE_CLAIM_ID_KEYS, claim_ids)
+            _collect_ids_into(nested_evidence, _EDGE_EVIDENCE_ID_KEYS, evidence_ids)
+            _collect_ids_into(nested_evidence, _EDGE_DERIVATION_ID_KEYS, derivation_ids)
+
+    return claim_ids, evidence_ids, derivation_ids
+
+
+def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
+    """``theory_claims`` を document_id で引き、参照済み ID → {claim_id, text} を作る。
+
+    各行の ``source_scope`` の ``span_id`` / ``legacy_ids``（agent 側の atomic claim
+    ID を含む。persistence.py 参照）と DB UUID 自身の両方をキー候補にし、
+    ``ref_ids`` と交差するものだけを採用する。
+    """
+    index: dict[str, dict] = {}
+    if not ref_ids or not str(document_id or "").strip():
+        return index
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("SELECT id, text, source_scope FROM theory_claims WHERE document_id = :document_id"),
+            {"document_id": document_id},
+        ).fetchall()
+    finally:
+        session.close()
+    for row in rows:
+        claim_uuid = str(row[0])
+        text = str(row[1] or "")
+        snippet = text[:_REFERENCE_TEXT_SNIPPET_MAX]
+        source_scope = _json_value(row[2], {})
+        candidate_keys = {claim_uuid}
+        if isinstance(source_scope, dict):
+            span_id = source_scope.get("span_id")
+            if span_id:
+                candidate_keys.add(str(span_id))
+            legacy_ids = source_scope.get("legacy_ids")
+            if isinstance(legacy_ids, list):
+                candidate_keys.update(str(v) for v in legacy_ids if v)
+        for key in candidate_keys & ref_ids:
+            index[key] = {"claim_id": claim_uuid, "text": snippet}
+    return index
+
+
+def _resolve_evidence_reference_index(artifacts: dict, ref_ids: set[str]) -> dict:
+    """``evidence_registry`` stage output（EvidenceRegistryResult.to_dict()）から
+    参照済み ``ev_NNNN`` ID → {text, block_id} を作る。"""
+    index: dict[str, dict] = {}
+    if not ref_ids:
+        return index
+    stage = artifacts.get("evidence_registry") if isinstance(artifacts, dict) else None
+    records = stage.get("records") if isinstance(stage, dict) else None
+    for record in records if isinstance(records, list) else []:
+        if not isinstance(record, dict):
+            continue
+        evidence_id = str(record.get("evidence_id") or "")
+        if not evidence_id or evidence_id not in ref_ids:
+            continue
+        text = str(record.get("evidence_text") or "")
+        source = record.get("source")
+        block_id = str(source.get("block_id") or "") if isinstance(source, dict) else ""
+        index[evidence_id] = {
+            "text": text[:_REFERENCE_TEXT_SNIPPET_MAX],
+            "block_id": block_id,
+        }
+    return index
+
+
+def _derivation_chain_label(chain: dict) -> str:
+    teaching_takeaway = str(chain.get("teaching_takeaway") or "").strip()
+    if teaching_takeaway:
+        return teaching_takeaway[:_REFERENCE_TEXT_SNIPPET_MAX]
+    operation = str(chain.get("operation") or "").strip()
+    if operation:
+        return operation
+    chain_type = str(chain.get("chain_type") or "").strip()
+    if chain_type:
+        return chain_type
+    return str(chain.get("derivation_id") or "")
+
+
+def _derivation_step_label(step: dict, step_id: str) -> str:
+    reason = str(step.get("reason") or "").strip()
+    if reason:
+        return reason[:_REFERENCE_TEXT_SNIPPET_MAX]
+    operation = str(step.get("operation") or "").strip()
+    return operation or step_id
+
+
+def _resolve_derivation_reference_index(artifacts: dict, ref_ids: set[str]) -> dict:
+    """``derivation_chain`` stage output（DerivationChainResult.to_dict()）から
+    参照済み derivation_id / step_id → {label, kind, operation} を作る。
+
+    step は所属する derivation の ``steps`` 配列内にネストされている点に注意。
+    """
+    index: dict[str, dict] = {}
+    if not ref_ids:
+        return index
+    stage = artifacts.get("derivation_chain") if isinstance(artifacts, dict) else None
+    chains = stage.get("chains") if isinstance(stage, dict) else None
+    for chain in chains if isinstance(chains, list) else []:
+        if not isinstance(chain, dict):
+            continue
+        derivation_id = str(chain.get("derivation_id") or "")
+        if derivation_id and derivation_id in ref_ids:
+            index[derivation_id] = {
+                "label": _derivation_chain_label(chain),
+                "kind": "derivation",
+                "operation": str(chain.get("operation") or ""),
+            }
+        steps = chain.get("steps")
+        for step in steps if isinstance(steps, list) else []:
+            if not isinstance(step, dict):
+                continue
+            step_id = str(step.get("step_id") or "")
+            if not step_id or step_id not in ref_ids:
+                continue
+            operation = str(step.get("operation") or "")
+            index[step_id] = {
+                "label": _derivation_step_label(step, step_id),
+                "kind": "step",
+                "operation": operation,
+            }
+    return index
+
+
+def _build_graph_reference_index(document_id: str, graph_payload: dict) -> dict:
+    """理論グラフの根拠リンク（claim/evidence/derivation）解決用の索引を組み立てる。
+
+    graph_payload（stored / build いずれの経路も可）に現れる参照済み ID のみを対象と
+    する。DB / stage_outputs が無い・古い run しか無い場合は該当キーが空 dict になる
+    だけで例外を出さない（fail-open）。confidence の生値はここでは扱わない。
+    """
+    reference_index: dict[str, dict] = {"claims": {}, "evidence": {}, "derivations": {}}
+    if not isinstance(graph_payload, dict):
+        return reference_index
+
+    claim_ids, evidence_ids, derivation_ids = _collect_graph_reference_ids(graph_payload)
+
+    if claim_ids:
+        try:
+            reference_index["claims"] = _resolve_claim_reference_index(document_id, claim_ids)
+        except Exception:
+            logger.debug(
+                "reference_index: claim resolution failed for document %s", document_id, exc_info=True
+            )
+
+    if evidence_ids or derivation_ids:
+        try:
+            artifacts = document_run_artifacts(document_id)
+        except Exception:
+            artifacts = {}
+        if evidence_ids:
+            try:
+                reference_index["evidence"] = _resolve_evidence_reference_index(artifacts, evidence_ids)
+            except Exception:
+                logger.debug(
+                    "reference_index: evidence resolution failed for document %s", document_id, exc_info=True
+                )
+        if derivation_ids:
+            try:
+                reference_index["derivations"] = _resolve_derivation_reference_index(artifacts, derivation_ids)
+            except Exception:
+                logger.debug(
+                    "reference_index: derivation resolution failed for document %s", document_id, exc_info=True
+                )
+
+    return reference_index
+
+
 def _save_component_graph(course_id: str, document_id: str, graph: dict, user_id: str | None) -> None:
     session = _pg_session()
     try:
@@ -2496,8 +2719,11 @@ def get_component_graph(
     components = _components_for_document(document_id)
     stored_graph = _normalize_stored_component_graph(document_id, _stored_component_graph(document_id), components)
     if stored_graph:
+        stored_graph["reference_index"] = _build_graph_reference_index(document_id, stored_graph)
         return ComponentGraphResponse(**stored_graph)
-    return ComponentGraphResponse(**_build_component_graph_payload(document_id, components))
+    payload = _build_component_graph_payload(document_id, components)
+    payload["reference_index"] = _build_graph_reference_index(document_id, payload)
+    return ComponentGraphResponse(**payload)
 
 
 
