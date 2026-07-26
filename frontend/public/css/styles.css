@@ -8872,3 +8872,90 @@ body.inspect-mode [data-ui-anchor]:hover {
   white-space: nowrap;
 }
 .discuss-landing-skip-btn:hover { color: var(--color-text-primary); }
+
+/* ===== discuss 対話ファーストレイアウト（論文と議論モード時のみ） =====
+   app.js の applyDiscussLayout() が .app に discuss-on / discuss-chat-active を、
+   #material-region に discuss-expanded を付与する。基底ルールは変更しない。 */
+.app.discuss-on {
+  grid-template-columns: 200px minmax(0, 1fr) 0;
+}
+.app.discuss-on .rp {
+  display: none;
+}
+/* 左サイドバーはモード切替ピルだけのスリムレールに */
+.app.discuss-on .sb > * {
+  display: none;
+}
+.app.discuss-on .sb > .discuss-mode-switch,
+.app.discuss-on .sb > .discuss-mode-switch-row {
+  display: flex;
+}
+.app.discuss-on .sb {
+  padding: 12px 10px;
+}
+/* ピルは 200px のスリムレールに収まるよう控えめに詰める
+   （基底 .discuss-mode-switch / .discuss-mode-btn は変更しない）。 */
+.app.discuss-on .sb .discuss-mode-switch {
+  margin-bottom: 0;
+}
+.app.discuss-on .sb .discuss-mode-btn {
+  flex: 1 1 auto;
+  padding: 0 4px;
+  font-size: 11px;
+}
+/* 中央は読みやすい一本のカラムに寄せる */
+.app.discuss-on .material-region,
+.app.discuss-on .mode-bar,
+.app.discuss-on .ca,
+.app.discuss-on .discuss-bar,
+.app.discuss-on .ia,
+.app.discuss-on .voice-panel {
+  width: 100%;
+  max-width: 880px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.app.discuss-on .split-handle {
+  display: none;
+}
+.app.discuss-on .material-foot {
+  display: none;
+}
+/* 会話が始まる前は開幕カードに広い場所を与える */
+.app.discuss-on:not(.discuss-chat-active) .material-region {
+  flex: 1 1 auto;
+  max-height: none;
+}
+/* 会話が始まったら要点ストリップにたたむ（.material-body だけ隠す。
+   #reconstruction-region は残す — 着地画面の「理解の確認」導線が使う） */
+.app.discuss-on.discuss-chat-active .material-region:not(.discuss-expanded) {
+  flex: 0 0 auto;
+}
+.app.discuss-on.discuss-chat-active .material-region:not(.discuss-expanded) .material-body {
+  display: none;
+}
+.app.discuss-on.discuss-chat-active .material-region.discuss-expanded {
+  flex: 0 1 auto;
+  max-height: 48%;
+}
+.app.discuss-on.discuss-chat-active .material-header {
+  cursor: pointer;
+}
+.discuss-opening-toggle {
+  flex: 0 0 auto;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 3px 2px;
+  white-space: nowrap;
+}
+.discuss-opening-toggle:hover {
+  color: var(--color-text-primary);
+}
+.discuss-opening-toggle[hidden] {
+  display: none;
+}

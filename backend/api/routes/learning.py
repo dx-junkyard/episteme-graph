@@ -2149,6 +2149,9 @@ def _usage_help_response(
         user_id, course_id, topic_id,
         body.history, body.message, answer,
         user_message_id=body.message_id or None,
+        # 履歴復元後もマニュアル出典チップ（📖）を保つ。chunk ではないので出典チップ
+        # （/source-chunk/）には繋がらず、本文の [出典1] は素通しのままでよい。
+        assistant_meta={"manual_citations": manual_citations},
     )
     return LearningChatResponse(
         answer=answer,
@@ -2594,6 +2597,24 @@ def learning_chat(
         current_user["id"], course_id, topic_id,
         body.history, body.message, answer,
         user_message_id=body.message_id or None,
+        # 履歴復元後も本文中の [出典N] を出典チップに戻せるようにする（sources を焼き込まないと
+        # リロード・トピック切替・discuss モード遷移のあとプレーンテキストに退化する）。
+        # 保存するのはチップ描画とポップアップ起動に要る最小フィールドのみ（quote / meta /
+        # origin は「いまの回答」を扱う出典タブ専用で、復元メッセージからは参照されない）。
+        assistant_meta={
+            "sources": [
+                {
+                    "index": s["index"],
+                    "chunk_id": s["chunk_id"],
+                    "source_title": s["source_title"],
+                    "tier": s["tier"],
+                    "score": s["score"],
+                }
+                for s in cited_sources
+            ],
+            "overall_tier": overall_tier,
+            "content_grounding": content_grounding,
+        },
     )
     # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
     position_anchor = build_position_anchor(topic_id, _seg, _scroll)

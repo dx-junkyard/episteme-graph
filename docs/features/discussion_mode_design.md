@@ -495,3 +495,62 @@ tension prefilter・structure_anchor worker の `_discussion` 耐性 / **reconst
 
 非スコープ（このラウンドではやらない）: DM4 の遵守自体の計測（応答末尾に誘い・問い返しが
 あったかの判定）、prefilter への言い換え宣言マーカー追加、再構成 item のオーサリング条件緩和。
+
+### 9.7 対話ファーストレイアウト（2026-07-26）
+
+「discuss 中も学習画面が3ペイン（サイドバー・教材区画・右パネル）のままで、静的な開幕
+カード（この論文が賭けているもの／理論のバックボーン／最初の一手）が対話領域を圧迫している」
+というオーナー指摘を受けた改修。§9.5 は開幕画面の**中身**の可読性を直したが、画面**構造**
+そのものは通常学習と同じ3ペイン・教材区画固定比率のままだった。本改修は discuss 中の画面
+構造そのものを会話中心へ切り替える。§3.2〜§3.5 の内容（二枚看板・スコープ2段・分岐チップ・
+着地画面の構成）は変えない。
+
+**診断**: discuss は本来トピック教材を持たない対話モードなのに、通常学習用の「教材区画
+固定比率 + 右パネル常設 + 分割ハンドルで手動調整」というレイアウト機構をそのまま流用して
+いたため、開幕カードが1画面の大半を占有し会話領域が狭いままになっていた。
+
+**確定した修正**:
+
+1. **3クラス設計**: `applyDiscussLayout()` が `.app`（学習画面の grid ルート）へ
+   `discuss-on` / `discuss-chat-active` の2クラスをトグルする単一の正本関数になり、
+   モード切替（`enterDiscussMode` / `goToSequentialLearning` 経由の `selectTopic`）と
+   会話描画（`renderChat`）の両経路から呼ばれる。開幕カード側の折りたたみ状態は
+   `#material-region` の `discuss-expanded` クラスが独立に持つ（3クラス目）。
+2. **右パネル非表示・左サイドバーのレール化**: `.app.discuss-on .rp` は
+   `display: none`。`.app.discuss-on .sb > *` は既定で隠し、
+   `.app.discuss-on .sb > .discuss-mode-switch` だけを例外的に見せることで、
+   モード切替ピル（順番に学ぶ | 論文と議論）は元の位置（左上）に残したまま
+   サイドバー本体（コースツリー）だけを退避する。DM5（等重表示）の継続 — ピルは
+   discuss 中も常時可視のまま、通常学習への戻り口を失わない。
+3. **開幕カードの「論文の要点」ストリップ化**: 会話が始まる前（`discuss-on` のみ）は
+   `#material-region` に `max-height: none` を与え開幕カードへ大きく空間を割く。
+   会話が始まると（`discuss-chat-active` 追加）`#material-region` は既定で
+   `.material-body` を隠す細いヘッダーストリップに縮み、タイトルは
+   「論文の要点」に変わる（`updateMaterialHeader()`）。ヘッダーの
+   `#discuss-opening-toggle`（ラベル 開く/たたむ、`aria-expanded` で状態を公開）が
+   `discuss-expanded` クラスをトグルすると `max-height` 付きで再展開する。新しい
+   メッセージが来るたびに再度たたむ（会話領域を優先する既定に毎回戻す）。
+4. **中央カラムのセンタリング**: `.app.discuss-on` 系のレイアウトで
+   `.material-region` / `.mode-bar` / `.ca` / `.discuss-bar` / `.ia` を含む中央カラムを
+   最大幅880pxのセンタリング列にし、会話が縦方向の主役になるようにした。
+5. **分割ハンドル・自動圧縮機構の discuss 中無効化**: `.app.discuss-on .split-handle` は
+   `display: none`。加えて `collapseMaterialForChat()` / `restoreMaterialRegion()`
+   （機能2の自動圧縮/復元）は先頭で `if (isDiscussMode()) return;` により無効化する
+   — discuss のレイアウトは `applyDiscussLayout()` / 開幕ストリップの専用ロジックで
+   完結しており、px 指定の高さ操作（通常学習の教材区画向け）と衝突させない。
+6. **基底 CSS ルールは非改変**: `.material-region` の基底ルール（`flex: 0 1 auto` /
+   `max-height: 42%` 等、test_learning_layout_static.py が固定する1画面設計）は
+   そのまま残し、discuss 専用の振る舞いはすべて `.app.discuss-on` 系の複合セレクタで
+   上書きする形にした。両ガードレールが同一ファイル上で両立する。
+7. **順番に学ぶへ戻る**と `discuss-on` / `discuss-chat-active` / `discuss-expanded` が
+   すべて外れ、通常の3ペイン・教材区画固定比率のレイアウトに復元される。
+
+**新規ガードレール**: `backend/tests/test_discuss_layout_ui_static.py`
+（`applyDiscussLayout()` の呼び出し配線・3クラスの CSS 効果・開幕ストリップの
+開く/たたむ・分割ハンドル/自動圧縮の discuss 中無効化・基底ルール非改変の多重防御・
+新規コピーの DM5 継続を検査）。既存 `test_discuss_ui_static.py` /
+`test_learning_layout_static.py` とあわせて有効。
+
+**ドキュメント**: `docs/manual/student/02-student.md` §2（画面の見方）・§5（学習モードを
+選ぶ）に、discuss 中はレイアウトが会話中心に切り替わることと開幕カードの
+開く/たたむの説明を追記。

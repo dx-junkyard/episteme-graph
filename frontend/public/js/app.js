@@ -673,6 +673,7 @@
       renderMaterialRegion();
       renderModeBar();
       renderDiscussBar();
+      applyDiscussLayout();
       return;
     }
 
@@ -815,6 +816,7 @@
     renderMaterialRegion();
     renderModeBar();
     renderDiscussBar();
+    applyDiscussLayout();
   }
 
   // ── 構造帰属（方法A）: 教材区画のテキスト選択 →「ここについて質問」 ──
@@ -932,7 +934,7 @@
       var topic = getCurrentTopic();
       var label = "教材";
       if (isDiscussMode()) {
-        label = "教材 · 論文と議論中";
+        label = "論文の要点";
       } else if (topic && topic.title) {
         label = "教材 · " + topic.title;
       }
@@ -1329,6 +1331,10 @@
           renderMaterialChunk({ text: data.text, formulas: data.formulas, figures: data.figures }) + '</div>';
         body.innerHTML = inner;
         hydrateMaterialFigures(body);
+      } else if (res.status === 404) {
+        // 履歴に焼き込まれた古い出典は、教材の再解析・削除でチャンクが消えていることがある
+        // （履歴復元でチップが出る以上、この経路は通常運用で起こりうる）。事実だけ返す。
+        body.textContent = "この出典は現在参照できません（教材が更新または削除された可能性があります）。";
       } else {
         body.textContent = "出典を取得できませんでした。";
       }
@@ -2688,6 +2694,7 @@
       topicLabel: _topicForAtlas ? (_topicForAtlas.title || "") : "",
     };
     renderSidebar();
+    applyDiscussLayout();
     renderChat();
     renderRightPanel();
     updateNextTopicBtn();
@@ -2746,6 +2753,74 @@
     if (!state.course || !isDiscussMode()) return;
     var target = _defaultSequentialTopicId();
     if (target) selectTopic(target);
+  }
+
+  // discuss モード（論文と話す）の会話ファースト・レイアウト適用。
+  // `.app` への discuss-on / discuss-chat-active の付与だけをここに一本化し、
+  // 実際の表示切替（サイドバー折りたたみ・教材区画の折り返し等）は CSS 側の責務とする
+  // （class 付与の判断をレンダー関数側にばらまかない）。
+  function applyDiscussLayout() {
+    var appEl = document.querySelector(".app");
+    if (!appEl) return;
+    var wasOn = appEl.classList.contains("discuss-on");
+    var on = isDiscussMode();
+    var hasChat = on && !!(state.chatMessages && state.chatMessages.length > 0);
+    appEl.classList.toggle("discuss-on", on);
+    appEl.classList.toggle("discuss-chat-active", hasChat);
+
+    var region = document.getElementById("material-region");
+    if (on) {
+      if (region) {
+        // 分割ハンドル/自動圧縮（機能2）が残した inline サイズ指定を捨て、
+        // class ベースの CSS に表示を委ねる。
+        region.style.height = "";
+        region.style.maxHeight = "";
+        region.style.flex = "";
+        if (hasChat) {
+          // 再描画のたびに開幕カードへ再収縮させる（開閉の維持は明示クリックのみ）。
+          region.classList.remove("discuss-expanded");
+        }
+      }
+      // 自動圧縮サイクルは discuss レイアウトと無関係のため無効化し、世代を進めて
+      // 進行中の restoreMaterialRegion 後始末（setTimeout）を無害化する。
+      _matCollapse.active = false;
+      _matCollapse.gen++;
+    } else if (wasOn && region) {
+      // discuss から離れるときは、ユーザーが保存した分割高さを復元する
+      // （initSplitHandle と同じクランプ規約）。
+      var mn = region.parentElement;
+      var saved = parseInt(localStorage.getItem(SPLIT_STORAGE_KEY) || "", 10);
+      if (saved > 0 && mn) {
+        var max = Math.max(120, (mn.clientHeight || window.innerHeight) * 0.75);
+        var px = Math.max(80, Math.min(saved, max));
+        region.style.height = px + "px";
+        region.style.maxHeight = "none";
+        region.style.flex = "0 1 auto";
+      }
+      region.classList.remove("discuss-expanded");
+    }
+
+    var tbtn = document.getElementById("discuss-opening-toggle");
+    if (tbtn) {
+      var expanded = !!(region && region.classList.contains("discuss-expanded"));
+      tbtn.hidden = !hasChat;
+      tbtn.setAttribute("aria-expanded", expanded ? "true" : "false");
+      tbtn.textContent = expanded ? "たたむ" : "開く";
+    }
+  }
+
+  // discuss 教材区画（開幕カード）の開閉トグル。discuss モード以外では何もしない。
+  function toggleDiscussOpening() {
+    if (!isDiscussMode()) return;
+    var region = document.getElementById("material-region");
+    if (!region) return;
+    region.classList.toggle("discuss-expanded");
+    var tbtn = document.getElementById("discuss-opening-toggle");
+    if (tbtn) {
+      var expanded = region.classList.contains("discuss-expanded");
+      tbtn.setAttribute("aria-expanded", expanded ? "true" : "false");
+      tbtn.textContent = expanded ? "たたむ" : "開く";
+    }
   }
 
   // discuss モードの教材区画プレースホルダ（Phase 1）。Phase 2 で開幕画面（中心命題・
@@ -4210,6 +4285,7 @@
     renderSidebar();
     renderChat();
     renderRightPanel();
+    applyDiscussLayout();
 
     // Update select active state
     const ownCourses = _allCourses.filter(function (c) { return !c.is_enrollable; });
@@ -6282,6 +6358,7 @@
   // 対話の外側をクリックしたら元の比率へ戻す。ユーザーが分割ハンドルで手動調整した
   // 高さ（localStorage）には一切書き込まない（あくまで一時的な UI 状態）。
   function collapseMaterialForChat() {
+    if (isDiscussMode()) return;
     var region = document.getElementById("material-region");
     if (!region || region.offsetParent === null) return; // 非表示（レクチャーモード等）なら何もしない
     if (_matCollapse.active) return;
@@ -6305,6 +6382,7 @@
   }
 
   function restoreMaterialRegion() {
+    if (isDiscussMode()) return;
     if (!_matCollapse.active) return;
     _matCollapse.active = false;
     var region = document.getElementById("material-region");
@@ -6358,6 +6436,7 @@
 
     var dragging = false, startY = 0, startH = 0;
     handle.addEventListener("pointerdown", function (e) {
+      if (isDiscussMode()) return;
       // 手動でハンドルを掴んだら機能2の自動圧縮制御を放棄する（以後は従来どおり手動値が
       // localStorage に保存される）。
       if (_matCollapse.active) {
@@ -6406,6 +6485,27 @@
     if (window.Discuss && window.Discuss.init) {
       window.Discuss.init({ getActiveCourseId: function () { return state.courseId; } });
     }
+    // discuss 会話ファースト・レイアウト（学習UI再編）: 開幕カードの開閉トグルと、
+    // 教材ヘッダのクリックでの開閉（ボタン以外への click のみ・二重トグル防止に
+    // stopPropagation）を配線する。
+    var discussOpeningToggle = document.getElementById("discuss-opening-toggle");
+    if (discussOpeningToggle) {
+      discussOpeningToggle.addEventListener("click", function (e) {
+        e.stopPropagation();
+        toggleDiscussOpening();
+      });
+    }
+    var materialHeaderEl = document.getElementById("material-header");
+    if (materialHeaderEl) {
+      materialHeaderEl.addEventListener("click", function (e) {
+        if (!isDiscussMode()) return;
+        var appEl = document.querySelector(".app");
+        if (!appEl || !appEl.classList.contains("discuss-chat-active")) return;
+        if (e.target.closest && e.target.closest("button")) return;
+        toggleDiscussOpening();
+      });
+    }
+    applyDiscussLayout();
     initSelectionAnchor();
     initLogout();
     initGroups();

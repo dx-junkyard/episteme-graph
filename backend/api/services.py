@@ -2120,18 +2120,32 @@ def persist_chat_history(
     assistant_answer: str,
     user_message_id: str | None = None,
     assistant_message_id: str | None = None,
+    assistant_meta: dict | None = None,
 ) -> dict:
     """チャット履歴を PostgreSQL に永続化し、付与したメッセージ id を返す。
 
     各メッセージに安定した ``id`` を焼き込む。これを interest_traces にも記録することで、
     「この問いに戻る」を同じ問いの再送信ではなく該当往復（元の Q/A）へのジャンプに使える。
     id は best-effort で、永続化に失敗しても返す（呼び出し側の in-memory 状態と一致させる）。
+
+    ``assistant_meta`` は assistant メッセージに焼き込む描画メタ（``sources`` /
+    ``overall_tier`` / ``content_grounding`` / ``manual_citations`` 等）。履歴復元後も
+    本文中の ``[出典N]`` を出典チップに変換できるようにするためのもので、値が空のキーは
+    保存しない（既存行にキーが無いのと同じ扱いにし、履歴 JSONB を無駄に太らせない）。
+    ``role`` / ``content`` / ``id`` は上書きさせない。
     """
     user_message_id = user_message_id or str(uuid.uuid4())
     assistant_message_id = assistant_message_id or str(uuid.uuid4())
+    assistant_entry: dict = {
+        "role": "assistant", "content": assistant_answer, "id": assistant_message_id,
+    }
+    for key, value in (assistant_meta or {}).items():
+        if key in ("role", "content", "id") or value in (None, "", [], {}):
+            continue
+        assistant_entry[key] = value
     updated_history = history + [
         {"role": "user", "content": user_message, "id": user_message_id},
-        {"role": "assistant", "content": assistant_answer, "id": assistant_message_id},
+        assistant_entry,
     ]
     try:
         session = _pg_session()
