@@ -126,6 +126,40 @@ class TestInspectBannerAndCss:
         assert "_inspectState.hoveredAnchorId = null;" in block
 
 
+class TestTooltipSafeArea:
+    """§5.2: ツールチップは固定要素（トップバー・インスペクトバナー）に隠れない安全域へ収める。
+
+    上方向に出したとき、冒頭がトップバーの下へ潜り込んで読めなくなる不具合の再発防止。
+    """
+
+    def test_safe_top_bound_measures_fixed_overlays(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function _inspectSafeTopBound() {")
+        assert 'document.querySelector(".topbar")' in block
+        assert 'document.getElementById("inspect-banner")' in block
+        # hidden なバナーは安全域に数えない（インスペクト OFF 時に無駄に狭めない）。
+        assert "el.hidden" in block
+        assert "rect.bottom" in block
+
+    def test_position_clamps_max_height_to_safe_area(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function _positionInspectTooltip(tip, anchorEl) {")
+        assert "_inspectSafeTopBound()" in block
+        # 実測前にクランプを解除しないと自然高さを測り違える。
+        assert 'tip.style.maxHeight = "none";' in block
+        max_height_idx = block.index('tip.style.maxHeight = "none";')
+        assert block.index("tip.offsetHeight") > max_height_idx
+        # 上下どちらの分岐でも max-height を設定する（クランプが片側だけにならない）。
+        assert block.count("tip.style.maxHeight = Math.max(") == 2
+        assert "spaceAbove" in block and "spaceBelow" in block
+
+    def test_css_allows_internal_scroll_when_clamped(self):
+        css = _read(STYLES_CSS)
+        start = css.index(".inspect-tooltip {")
+        rule = css[start:css.index("}", start)]
+        assert "overflow-y: auto;" in rule
+
+
 class TestUndocumentedFixedText:
     """IH8: 未整備は固定事実文 + no_hit 記録。捏造しない。"""
 

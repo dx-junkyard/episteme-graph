@@ -6093,6 +6093,11 @@ body.inspect-mode [data-ui-anchor]:hover {
   font-size: 12.5px;
   line-height: 1.5;
   pointer-events: none;
+  /* 高さの上限は JS（_positionInspectTooltip）が「トップバー・インスペクトバナーに
+     隠れない安全域」から実測して max-height に入れる。収まらない場合だけ内部スクロール
+     になり、冒頭が固定要素の下へ潜り込まない。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 .inspect-tooltip[hidden] { display: none; }
 .inspect-tooltip-source {

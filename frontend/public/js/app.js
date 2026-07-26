@@ -3271,21 +3271,51 @@
     if (tip) { tip.hidden = true; tip.innerHTML = ""; }
   }
 
+  const INSPECT_TOOLTIP_GAP = 8;      // アンカーとツールチップの隙間
+  const INSPECT_TOOLTIP_MARGIN = 12;  // 画面端・固定要素との余白
+
+  // ツールチップより手前に居座る固定要素（トップバー・インスペクトバナー）の下端を返す。
+  // 上方向に出したツールチップがこれを越えると本文の冒頭が隠れて読めなくなるため、
+  // 表示領域の上限として使う（下端は画面下）。
+  function _inspectSafeTopBound() {
+    let bound = 0;
+    const fixedEls = [document.querySelector(".topbar"), document.getElementById("inspect-banner")];
+    for (const el of fixedEls) {
+      if (!el || el.hidden) continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.height > 0) bound = Math.max(bound, rect.bottom);
+    }
+    return bound;
+  }
+
   function _positionInspectTooltip(tip, anchorEl) {
     const r = anchorEl.getBoundingClientRect();
     const tw = Math.min(320, window.innerWidth - 24);
     tip.style.width = tw + "px";
     const left = Math.max(12, Math.min(r.left, window.innerWidth - tw - 12));
-    const top = r.bottom + 8;
-    // 下に入りきらなければ上に出す（既存 _positionSourcePopup と同じ方式）。
-    if (top + 160 > window.innerHeight && r.top > window.innerHeight - r.bottom) {
-      tip.style.bottom = (window.innerHeight - r.top + 8) + "px";
-      tip.style.top = "auto";
-    } else {
-      tip.style.bottom = "auto";
-      tip.style.top = top + "px";
-    }
     tip.style.left = left + "px";
+
+    // 自然な高さを実測する（前回のクランプが残っていると測り違える）。
+    tip.style.maxHeight = "none";
+    const th = tip.offsetHeight;
+
+    // 固定要素に隠れない範囲を安全域とし、上下どちらに出す場合もこの中へ収める。
+    const safeTop = _inspectSafeTopBound() + INSPECT_TOOLTIP_MARGIN;
+    const safeBottom = window.innerHeight - INSPECT_TOOLTIP_MARGIN;
+    const spaceBelow = safeBottom - (r.bottom + INSPECT_TOOLTIP_GAP);
+    const spaceAbove = (r.top - INSPECT_TOOLTIP_GAP) - safeTop;
+
+    // 下に入りきるなら下。入らなければ広い方に出し、はみ出す分は max-height で詰める
+    // （上に出したときに冒頭がトップバーの下へ潜り込むのを防ぐ）。
+    if (th <= spaceBelow || spaceBelow >= spaceAbove) {
+      tip.style.bottom = "auto";
+      tip.style.top = Math.max(safeTop, r.bottom + INSPECT_TOOLTIP_GAP) + "px";
+      tip.style.maxHeight = Math.max(80, spaceBelow) + "px";
+    } else {
+      tip.style.top = "auto";
+      tip.style.bottom = (window.innerHeight - r.top + INSPECT_TOOLTIP_GAP) + "px";
+      tip.style.maxHeight = Math.max(80, spaceAbove) + "px";
+    }
   }
 
   // IH10: 一定時間（既定 1 秒）ツールチップが表示され続けた場合のみ、未整備アンカーの
