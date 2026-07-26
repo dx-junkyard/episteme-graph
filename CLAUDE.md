@@ -1520,6 +1520,15 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   原稿スタジオの UI 変更はこちらに書く
 - `app.js` は ES6+ (const/let, async/await) を使用している
 - フレームワーク不使用（Vanilla JS のみ）
+- **学習画面（index.html）は1画面に収めるレイアウト**: ページ（document）と主カラム `.mn` は
+  `overflow: clip`（`hidden` にしない — hidden は `scrollIntoView()` / `input.focus()` で
+  プログラム的にスクロールしてしまい、トップバーごと画面全体がずれる）。縦が足りないときに
+  縮むのは上段（`.material-region` = `flex: 0 1 auto` + `min-height: 0`）と会話（`.ca`、floor
+  120px）で、下段（`.mode-bar` / `.discuss-bar` / `.ia` / `.lecture-player`）は `flex: 0 0 auto`
+  で潰さない。教材区画の高さを px 指定する JS（分割ハンドル・自動圧縮）は inline で
+  `flex: 0 1 auto` を入れる（`0 0 auto` にすると下段が押し出される）。ガードレールは
+  `backend/tests/test_learning_layout_static.py`。ページスクロールが正な admin 画面には
+  `<html class="learn-page">` を付けない
 
 ### 6. テスト
 - `pytest` を使用

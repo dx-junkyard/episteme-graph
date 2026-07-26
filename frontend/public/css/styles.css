@@ -40,6 +40,17 @@ body {
 }
 
 /* ── Layout ─────────────────────────────────────────────────────── */
+/* 学習画面は「1画面に収める」レイアウト。ページ（document）自体は決してスクロールさせず、
+   スクロールはサイドバー・教材本文・会話・右パネルの内側だけで起こす。
+   overflow:clip はスクロールコンテナを作らない（hidden と違いプログラム的にもスクロール
+   できない）ため、scrollIntoView() や input の focus() でトップバーごと画面全体が
+   ずれる事故を構造的に防ぐ。admin 画面（.admin-app）はページスクロールが正なので、
+   学習画面のみを対象にするため index.html の <html> に .learn-page を付ける。 */
+html.learn-page,
+html.learn-page > body {
+  overflow: clip;
+}
+
 .app {
   display: grid;
   grid-template-columns: 260px minmax(0, 1fr) 300px;
@@ -238,15 +249,23 @@ body {
 }
 
 /* ── Main chat area ─────────────────────────────────────────────── */
+/* overflow:clip（hidden ではない）: 主カラムは列ごと動かしてはいけない。hidden だと
+   scrollIntoView()/focus() で .mn 自身が内部スクロールし、教材区画がトップへ抜けて
+   「画面全体が一体でスクロールした」ように見える。clip ならスクロールコンテナに
+   ならないのでそれが起きない（内側の #material-body / .ca が個別にスクロールする）。 */
 .mn {
-  overflow: hidden;
+  overflow: clip;
+  min-height: 0;
   padding: 20px;
   display: flex;
   flex-direction: column;
 }
 
 .ca {
-  flex: 1;
+  flex: 1 1 0;
+  /* 会話の最低表示域。教材区画（可変）より優先して確保し、上段が高くても
+     会話が 0px に潰れない。 */
+  min-height: 120px;
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -254,9 +273,21 @@ body {
   overflow-y: auto;
 }
 
-/* 教材区画（本筋・順路）: 上部に独立スクロールで常時表示 */
+/* 極端に低いウィンドウでは会話の最低表示域を下げ、composer が主カラムから
+   押し出されないことを優先する（1画面に収める原則）。 */
+@media (max-height: 560px) {
+  .ca {
+    min-height: 60px;
+  }
+}
+
+/* 教材区画（本筋・順路）: 上部に独立スクロールで常時表示。
+   flex-shrink:1 + min-height:0 = 縦が足りない画面では上段が縮んで下段（会話・
+   モードバー・composer）を押し出さない。分割ハンドルの px 指定（inline height）も
+   この shrink で自動的に画面内に収まる。 */
 .material-region {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
+  min-height: 0;
   max-height: 42%;
   display: flex;
   flex-direction: column;
@@ -270,8 +301,13 @@ body {
 .material-region.mr-animating {
   transition: height 0.22s ease;
 }
+/* flex-basis は auto（0 にしない）: basis 0 だと教材区画の基準高さに本文が
+   算入されず、区画が max-height:42% まで伸びずヘッダ＋フッタ分に潰れる。
+   auto + min-height:0 なら「長い教材は 42% まで伸び、短い教材は内容ぶんだけ」
+   になり、あふれた本文はこの要素の中だけでスクロールする。 */
 .material-region .material-body {
-  flex: 1;
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px 14px;
 }
@@ -422,6 +458,7 @@ body {
 
 /* チャット区画のモードバー（本筋＝青／寄り道＝アンバー） */
 .mode-bar {
+  flex: 0 0 auto; /* 縦が足りなくても潰さない（縮むのは教材区画・会話の側） */
   display: flex;
   align-items: center;
   gap: 10px;
@@ -671,6 +708,7 @@ body {
 
 /* ── Input area ─────────────────────────────────────────────────── */
 .ia {
+  flex: 0 0 auto; /* composer は常に最下部に見えていること（縮まない・押し出されない） */
   display: flex;
   align-items: center;
   gap: 8px;
@@ -2839,6 +2877,7 @@ body {
 /* Lecture player bar */
 .lecture-player {
   display: none;
+  flex: 0 0 auto;
   flex-direction: column;
   border-top: 1px solid var(--color-border-tertiary);
   background: var(--color-background-primary);
@@ -6178,6 +6217,8 @@ body.inspect-mode [data-ui-anchor]:hover {
 
 .voice-panel {
   display: none;
+  flex: 0 1 auto;
+  min-height: 0;
   border-top: 1px solid var(--color-border-secondary);
   background: var(--color-background-secondary);
   padding: 10px 14px;
@@ -8341,6 +8382,7 @@ body.inspect-mode [data-ui-anchor]:hover {
 /* 入力欄上部: discuss スコープ切替（控えめなセグメントコントロール）。
    選択状態が常時視認できることが出所の正直さの一部（DM1/DM2）。 */
 .discuss-bar {
+  flex: 0 0 auto; /* composer 直上の常設バー: 縦が足りなくても潰さない */
   display: flex;
   align-items: center;
   gap: 8px;

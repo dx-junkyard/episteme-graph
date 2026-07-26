@@ -6295,7 +6295,9 @@
 
     region.style.height = h + "px";
     region.style.maxHeight = "none";
-    region.style.flex = "0 0 auto";
+    // flex-shrink は 1 のまま（0 0 auto にしない）: 画面が低いときに上段が縮んで
+    // 下段（会話・composer）を押し出さないようにする。
+    region.style.flex = "0 1 auto";
     void region.offsetHeight; // 強制リフロー（transition を効かせるため）
     region.classList.add("mr-animating");
     region.style.height = COLLAPSED + "px";
@@ -6343,7 +6345,10 @@
       px = Math.max(80, Math.min(px, max));
       region.style.height = px + "px";
       region.style.maxHeight = "none";
-      region.style.flex = "0 0 auto";
+      // flex-shrink は 1 のまま（0 0 auto にしない）: ウィンドウを低くしても上段が
+      // 自動的に縮み、下段（会話・モードバー・composer）が主カラムから押し出されない。
+      // px 値の再クランプを待たずに CSS 側で収まるのがねらい。
+      region.style.flex = "0 1 auto";
       return px;
     }
 

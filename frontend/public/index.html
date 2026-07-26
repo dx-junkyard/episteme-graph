@@ -1,5 +1,7 @@
 <!DOCTYPE html>
-<html lang="ja">
+<!-- .learn-page: 学習画面は1画面に収める（ページ自体をスクロールさせない）。
+     styles.css の html.learn-page ルール参照。admin.html には付けない。 -->
+<html lang="ja" class="learn-page">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -7,7 +9,9 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
-  <link rel="stylesheet" href="/css/styles.css">
+  <!-- ?v=: レイアウト（1画面に収める）系の修正は CSS が古いままだと効かないので、
+       atlas.css と同じくバージョンクエリでキャッシュを切る。 -->
+  <link rel="stylesheet" href="/css/styles.css?v=learn-layout-20260726">
   <link rel="stylesheet" href="/css/atlas.css?v=field-atlas-20260713-1">
 </head>
 <body>
