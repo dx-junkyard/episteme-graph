@@ -114,6 +114,7 @@ from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
 from core.structure_anchor.schema import (
+    ANCHOR_TYPE_LABELS,
     ATTRIBUTION_LEARNER_SELECTED,
     DOUBT_TYPE_LABELS,
     anchor_type_for_element,
@@ -150,6 +151,21 @@ try:
     from core.help_kb.vector import vector_search_manual as _vector_search_manual
 except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
     _vector_search_manual = None  # type: ignore[assignment]
+
+# インスペクト・モード（設計 docs/features/learning_ui_inspect_hover_design.md §5.2/§9）:
+# UI 論理アンカー表。並行実装中のモジュール不在でも学習チャットが壊れないよう防御する。
+try:
+    from core.help_kb.ui_anchors import (
+        KNOWN_UI_ANCHOR_IDS as _KNOWN_UI_ANCHOR_IDS,
+        resolve_ui_anchor as _resolve_ui_anchor,
+        resolve_ui_anchors as _resolve_ui_anchors,
+        split_manual_ref as _split_manual_ref,
+    )
+except Exception:  # pragma: no cover - 並行実装中のモジュール不在に対する防御
+    _KNOWN_UI_ANCHOR_IDS = frozenset()  # type: ignore[assignment]
+    _resolve_ui_anchor = None  # type: ignore[assignment]
+    _resolve_ui_anchors = None  # type: ignore[assignment]
+    _split_manual_ref = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -959,6 +975,85 @@ def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
             reason="text_selection",
             confidence=1.0,
         )
+    return None
+
+
+# ---------------------------------------------------------------------------
+# アンカー優先ラダー（設計 docs/features/learning_ui_inspect_hover_design.md §7、
+# IH6/IH7）: ホバー+ラッチ機能（Phase 3・フロント未実装）が element_label を自由文
+# メッセージに添付して送ってきたときのために、既存の1 LLM コールへヒントを同梱する。
+# 追加の分類・生成コールは作らない（IH6）。
+# ---------------------------------------------------------------------------
+
+_ANCHOR_LADDER_HINT_PREFIX = "[アンカーヒント] "
+
+
+def _build_anchor_ladder_hint(
+    body: LearningChatRequest, history: list[dict] | None,
+) -> str | None:
+    """アンカー優先ラダーのヒントブロックを構築する（設計 §7）。
+
+    非LLM・副作用なしの純関数（DB・LLM を一切呼ばない）。既存の学習チャット system
+    プロンプトへ追記する短いヒント文字列を返す。優先順位（設計 §7）:
+
+      1. ラッチ中アンカー — ``element_label``（+ ``element_type``）が自由文メッセージに
+         添付されている場合。既存の要素タップ typed 経路（``action="EXPLAIN_GRAPH_ELEMENT"``）
+         は本関数の呼び出しに到達する前に早期 return するため、ここに渡ってくる
+         ``element_label`` は常に「ラッチ後の自由文送信」（設計 §6.2、Phase 3 フロント
+         実装分）由来になる。呼び出し側はこの関数を RAG 本文生成の直前（typed action /
+         usage_help pre-route の早期 return より後段）でのみ呼ぶこと。
+      2. 表示中のスライド / セグメント — ``position_anchor.segment_id`` /
+         ``selection_segment_id``。
+      3. 現在のトピック — 呼び出し側の user プロンプトに既にトピック名が入っているため、
+         単独のランクとしては起動しない（ランク1のヒント文中で候補の一つとして言及するのみ）。
+      4. 直近回答の第1根拠チャンク — ``history`` の直近 assistant メッセージが持つ
+         ``sources[0]``（サーバ側の保存履歴・クライアント再送履歴のいずれにも同じ形で
+         乗っている。§9 参照）。
+
+    アンカー文脈が一切無ければ ``None``（従来と完全同一のプロンプトを維持する）。
+    指示ではなくヒントとして書く（断定・強制をしない, IH6）。confidence 等の生数値は
+    一切含めない（IH7）。
+    """
+    label = (body.element_label or body.element_id or "").strip()
+    if label:
+        anchor_type = anchor_type_for_element(body.element_type)
+        type_label = ANCHOR_TYPE_LABELS.get(anchor_type, "")
+        target = f"{type_label}〈{label}〉" if type_label else f"〈{label}〉"
+        return (
+            f"{_ANCHOR_LADDER_HINT_PREFIX}学習者は{target}に注目した状態でこの発言をしています。"
+            f"発言がそれに関係する場合は{target}を最優先の文脈として答えてください。"
+            "関係しない場合は、表示中のセクション・現在のトピック・直前の回答の根拠のうち"
+            "最も近いものを選んで答えてください。"
+            "回答の冒頭または末尾に、何について答えたかを一行で明示してください"
+            "（例:「〈○○〉についてお答えしています」）。"
+        )
+
+    seg = None
+    if isinstance(body.position_anchor, dict) and "segment_id" in body.position_anchor:
+        seg = body.position_anchor.get("segment_id")
+    if seg is None:
+        seg = body.selection_segment_id
+    if seg is not None:
+        return (
+            f"{_ANCHOR_LADDER_HINT_PREFIX}学習者は、いま表示している教材の区画に注目した"
+            "状態でこの発言をしています。発言がその内容に関係する場合は、その文脈を優先"
+            "して答えてください。"
+        )
+
+    for turn in reversed(history or []):
+        if not isinstance(turn, dict) or turn.get("role") != "assistant":
+            continue
+        sources = turn.get("sources")
+        if isinstance(sources, list) and sources:
+            first = sources[0] if isinstance(sources[0], dict) else {}
+            title = str(first.get("source_title") or "").strip()
+            if title:
+                return (
+                    f"{_ANCHOR_LADDER_HINT_PREFIX}直前の回答は〈{title}〉を根拠にしています。"
+                    "発言がその続きの話題であれば、その文脈を優先して答えてください。"
+                )
+        break  # 直近の assistant メッセージのみを見る（それより前へは遡らない）
+
     return None
 
 
@@ -1909,7 +2004,7 @@ def _usage_help_response(
     *,
     on_llm_call: Callable[[], None] | None = None,
 ) -> LearningChatResponse:
-    """学生 HELP ルートのハンドラ（設計 §1-3）。
+    """学生 HELP ルートのハンドラ（設計 §1-3、ui_anchor 優先は §5.2/§9-1）。
 
     docs/manual/student/ の凍結索引を検索し、テキスト経路は本文素通し（パラフレーズ
     禁止・quota 非消費）、音声・casual 経路は 1 LLM コールで会話調へ整形する
@@ -1917,9 +2012,41 @@ def _usage_help_response(
     （捏造禁止, P4）。CHIT_CHAT/LEARNING_ADVICE と同型の早期 return ハンドラで、
     呼び出し側（learning_chat）はここより後段の意図分類・前提知識チェック・
     誤解検出・tension prefilter に到達しない。
+
+    ``body.ui_anchor``（インスペクト・モード中にラッチされていた UI 論理アンカー）が
+    あり、かつマップ済みなら、対応マニュアル節を検索より優先して直接解決する
+    （マップ未整備・解決失敗なら通常の ``search_manual`` にフォールバック）。
+    ``ui_anchor`` が指定された場合、記録する help_usage 痕跡の anchor 値は
+    documented/no_hit を問わず常に ``"ui:<ui_anchor>"``（demand 追跡を UI 要素単位に
+    一本化する。実際に応答した節は ``manual_citations`` 側の file/anchor/title に
+    保持される）。
     """
+    ui_anchor_id = (body.ui_anchor or "").strip() or None
+
     hits: list[dict] = []
-    if _search_manual is not None:
+    if ui_anchor_id and _resolve_ui_anchor is not None:
+        try:
+            resolved = _resolve_ui_anchor(ui_anchor_id)
+        except Exception:
+            logger.warning(
+                "resolve_ui_anchor failed for usage help ui_anchor priority; "
+                "falling back to keyword search",
+                exc_info=True,
+            )
+            resolved = None
+        if resolved and _split_manual_ref is not None:
+            manual_file, manual_anchor = _split_manual_ref(resolved.get("manual_anchor", ""))
+            hits = [{
+                "file": manual_file,
+                "anchor": manual_anchor,
+                "title": resolved.get("title", ""),
+                "body": resolved.get("body", ""),
+                "audience": "student",
+                "citation": f"manual/student/{manual_file}#{manual_anchor}",
+                "documented": True,
+            }]
+
+    if not hits and _search_manual is not None:
         try:
             hits = _search_manual(
                 body.message, audience="student", limit=3, screen=body.screen_mode,
@@ -1952,6 +2079,10 @@ def _usage_help_response(
     is_casual = (body.intent_mode or "").strip() == "casual"
     degraded = False
 
+    # ui_anchor 指定時は痕跡の anchor を常に "ui:<ui_anchor>" に一本化する（§9-1）。
+    # 未指定時は従来どおり search_manual/vector が見つけた節の citation を使う。
+    trace_anchor = f"ui:{ui_anchor_id}" if ui_anchor_id else None
+
     if not documented:
         answer = f"{_USAGE_HELP_NOT_DOCUMENTED}\n\n{_USAGE_HELP_FOOTER}"
         manual_citations = None
@@ -1959,7 +2090,7 @@ def _usage_help_response(
             user_id, course_id, topic_id,
             kind="help_usage",
             text="使い方の質問",
-            extra_payload={"help_anchor": None, "documented": False, "no_hit": True},
+            extra_payload={"help_anchor": trace_anchor, "documented": False, "no_hit": True},
         )
     else:
         citation = str(top.get("citation") or "")
@@ -1998,7 +2129,7 @@ def _usage_help_response(
             # テキスト経路: 凍結本文を素通し（パラフレーズによる意味ドリフトをゼロにする）。
             answer = f"{body_text}\n\n[出典1]\n\n{_USAGE_HELP_FOOTER}"
         trace_payload = {
-            "help_anchor": citation or None,
+            "help_anchor": trace_anchor or (citation or None),
             "documented": True,
             "no_hit": False,
         }
@@ -2386,6 +2517,13 @@ def learning_chat(
         _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
     if overall_tier == TIER_OUT_OF_SOURCE:
         _system_prompt += "\n\n" + out_of_source_guard_instruction()
+    # アンカー優先ラダー（設計 §7、IH6）: typed action（EXPLAIN_GRAPH_ELEMENT）・
+    # usage_help pre-route はこの行より前段で早期 return 済みのため、ここに到達する
+    # のは通常の学習チャット（casual/discuss 含む）のみ。追加の LLM コールは作らず、
+    # 既存の1コールへヒントを同梱するだけ（純関数・DB/LLM 非使用）。
+    _anchor_ladder_hint = _build_anchor_ladder_hint(body, body.history)
+    if _anchor_ladder_hint:
+        _system_prompt += "\n\n" + _anchor_ladder_hint
     messages: list[dict] = [
         {"role": "system", "content": _system_prompt},
         {"role": "user", "content": (
@@ -3024,6 +3162,116 @@ def voice_speak_route(
     if audio_bytes is None:
         raise HTTPException(status_code=503, detail="TTS provider is not available")
     return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}
+
+
+# ---------------------------------------------------------------------------
+# インスペクト・モード（設計 docs/features/learning_ui_inspect_hover_design.md
+# §5.2/§5.4/§9）: UI 論理アンカーの配信 + 未整備アンカーへのホバー滞留（no_hit）記録。
+# どちらもコース非依存（トップバー・サイドバー等、画面全体のUI部品が対象）。
+# ---------------------------------------------------------------------------
+
+# interest_traces.course_id は NOT NULL のため、コース文脈を伴わない UI 全体の
+# no_hit 記録には予約疑似コースIDを使う（discuss の "_discussion" と同じパターン）。
+_UI_ANCHOR_EVENT_COURSE_ID = "_ui"
+
+_UI_ANCHOR_EVENT_KINDS = frozenset({"no_hit"})
+
+# 同一ユーザー×同一アンカーの no_hit 記録を書きすぎない簡易スパム防止（IH10/§5.4）。
+_UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES = 30
+
+
+@router.get("/help/ui-anchors")
+def get_ui_anchors_route(current_user: dict = Depends(_get_current_user)) -> dict:
+    """インスペクト・モードの UI 論理アンカー配信（設計 §5.2/§9-3）。
+
+    ログイン必須・読み取り専用・痕跡を書かない。クライアントはログイン時に1回
+    フェッチしてキャッシュする前提で、ホバーごとに呼ばれることは想定しない。
+    student audience で解決済みの節のみを返す（audience 越境なし）。
+    """
+    del current_user
+    if _resolve_ui_anchors is None:
+        return {"anchors": {}}
+    try:
+        return {"anchors": _resolve_ui_anchors()}
+    except Exception:
+        logger.warning("resolve_ui_anchors failed for ui-anchors endpoint", exc_info=True)
+        return {"anchors": {}}
+
+
+class UiAnchorEventRequest(BaseModel):
+    anchor_id: str
+    kind: str = "no_hit"
+    # インスペクトは画面全体のモードのため、送信時点でコース/トピックが定まらない
+    # 場合がある（例: コース選択前のトップバー）。両方任意。
+    course_id: str | None = None
+    topic_id: str | None = None
+
+
+def _recent_duplicate_ui_anchor_event(user_id: str, help_anchor: str) -> bool:
+    """直近（既定 30 分）に同一ユーザー×同一アンカーの no_hit 記録が無いかを確認する。
+
+    スパム防止（IH10/§5.4）の簡易実装。DB 障害時は False（fail-open — 記録自体は
+    止めない。ダブり抑制の失敗より記録漏れの方が実害が大きいため）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid)
+                  AND kind = 'help_usage'
+                  AND payload->>'help_anchor' = :anchor
+                  AND created_at > now() - (:minutes || ' minutes')::interval
+                LIMIT 1
+            """),
+            {
+                "uid": user_id,
+                "anchor": help_anchor,
+                "minutes": _UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
+            },
+        ).fetchone()
+        return row is not None
+    except Exception:
+        logger.warning("ui anchor event dedup check failed", exc_info=True)
+        return False
+    finally:
+        session.close()
+
+
+@router.post("/help/ui-anchor-events", status_code=201)
+def record_ui_anchor_event_route(
+    body: UiAnchorEventRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """未整備 UI アンカーへのホバー滞留を help_usage 痕跡として記録する（設計 §5.4/§8）。
+
+    質問の逐語は積まない（anchor_id は固定の論理IDであり自由文ではない）。
+    滞留閾値・生ホバーイベントの記録禁止（IH10）はフロント側の責務 — ここは
+    「一定時間ツールチップが表示され続けた」という事実の記録のみを担う。
+    記録した行は G層 ``manual.help_gaps_pending`` の需要側集計にそのまま乗る
+    （``help_anchor`` が空文字列にならない限り、no_hit の汎用バケツではなく
+    ``ui:<anchor_id>`` 単位のバケツに集計される）。
+    """
+    anchor_id = (body.anchor_id or "").strip()
+    if not anchor_id or anchor_id not in _KNOWN_UI_ANCHOR_IDS:
+        raise HTTPException(status_code=422, detail=f"未知の UI アンカー: {body.anchor_id!r}")
+    if body.kind not in _UI_ANCHOR_EVENT_KINDS:
+        raise HTTPException(status_code=422, detail=f"未知の kind: {body.kind!r}")
+
+    user_id = current_user["id"]
+    help_anchor = f"ui:{anchor_id}"
+
+    if _recent_duplicate_ui_anchor_event(user_id, help_anchor):
+        return {"ok": True, "recorded": False}
+
+    course_id = (body.course_id or "").strip() or _UI_ANCHOR_EVENT_COURSE_ID
+    record_interest_trace(
+        user_id, course_id, body.topic_id or None,
+        kind="help_usage",
+        text="UI要素の使い方（未整備）",
+        extra_payload={"help_anchor": help_anchor, "documented": False, "no_hit": True},
+    )
+    return {"ok": True, "recorded": True}
 
 
 def _tension_connect_edge_viewable(user_id: str, edge_id: str) -> bool:

@@ -194,6 +194,17 @@ async def _lifespan(application: FastAPI):
     except Exception:  # noqa: BLE001
         logger.warning("help_kb manual validation skipped", exc_info=True)
 
+    # 学習画面インスペクト・モード（migration 不要, §5.2/§9-2）: UI アンカー表
+    # （core/help_kb/ui_anchors.py）の実在・audience 越境チェック（fail-open）。
+    # validate_manual() とは独立に呼ぶ（理由は check_ui_anchor_mappings の docstring 参照）。
+    try:
+        from core.help_kb.validator import check_ui_anchor_mappings
+
+        for violation in check_ui_anchor_mappings():
+            logger.warning("help_kb ui_anchors validation: %s", violation)
+    except Exception:  # noqa: BLE001
+        logger.warning("help_kb ui_anchors validation skipped", exc_info=True)
+
     # ヘルプKB Phase 3: content-hash 監査記帳（変化時のみ・冪等、§2-3）と
     # ベクトル補助層の同期（全置換スナップショット、§5 Phase 3 ①）。
     # 記帳は軽いので同期実行、埋め込みは外部 API を呼ぶためバックグラウンド

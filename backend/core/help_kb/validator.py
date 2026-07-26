@@ -7,12 +7,15 @@ fail-open 検証として使う（起動は止めない）。CI ガードレー�
 
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Optional
 
 from . import index as _index
 from .manual import AUDIENCES, manual_root
+
+logger = logging.getLogger(__name__)
 
 _LINK_RE = re.compile(r"\(\.\./\.\./admin_operations/([^)#\s]+\.md)#([^)\s]+)\)")
 
@@ -109,6 +112,61 @@ def validate_manual_texts(texts_by_audience: dict[str, dict[str, str]]) -> list[
         if audience == "student":
             violations.extend(check_student_denylist(files))
 
+    return violations
+
+
+def check_ui_anchor_mappings() -> list[str]:
+    """UI アンカー表（``core/help_kb/ui_anchors.py``）の全参照を検証する。
+
+    学習画面インスペクト・モード（``docs/features/learning_ui_inspect_hover_design.md``
+    §5.2/§9-2）のガバナンス条項: ``UI_ANCHORS`` の値は必ず ``student/`` 配下を指し
+    （audience 越境禁止）、かつ実在する節でなければならない。
+
+    ``validate_manual()`` とは**独立の関数**として提供する（呼び出し元 ``main.py``
+    lifespan が同じ fail-open スタイルで別途呼ぶ想定）。``validate_manual()`` 自身に
+    統合しないのは、既存のガードレールテスト群が ``manual_root()`` を差し替えた
+    最小限の合成ツリーで ``validate_manual()`` の戻り値を厳密にピン留めしており
+    （例: ``test_help_kb.py`` の空ツリー/最小ツリーケース）、ここに UI_ANCHORS 実在
+    チェックを混ぜると本 UI アンカー機能と無関係なテストが軒並み壊れるため。
+
+    ``resolve_ui_anchors()``（配信用・DB draft/freeze の serving_source 切替に追従する）
+    ではなく、**常にファイルシステム（``docs/manual/student/``）を直接検証する**。
+    ``UI_ANCHORS`` は git 管理された docs に対して人手で書いたマッピングであり、
+    その静的な正しさを見るのが目的のため（``validate_manual_texts`` の
+    admin_operations リンク検証が serving_source に関わらず常にファイルシステムを
+    参照するのと同じ理由・同じパターン）。DB 配信中の内容が一時的にこれと食い違う
+    ケース（教員が DB draft から該当節を削除した等）は、配信側の
+    ``resolve_ui_anchors()`` が fail-open で当該アンカーを黙って除外するため実害は
+    ない（no_hit 経路にフォールバックするだけ）。
+    """
+    try:
+        from . import ui_anchors as _ui_anchors
+    except Exception:  # noqa: BLE001 — 並行実装中のモジュール不在に対する防御
+        logger.warning("ui_anchors module unavailable during validation", exc_info=True)
+        return []
+
+    violations: list[str] = []
+    root = manual_root()
+    idx: dict = {}
+    if root is not None:
+        student_dir = root / "student"
+        if student_dir.is_dir():
+            idx, _excluded = _index.build_section_index(
+                student_dir, manual_transforms=True, audience_tag="student"
+            )
+
+    for anchor_id, ref in _ui_anchors.UI_ANCHORS.items():
+        if not ref.startswith("student/"):
+            violations.append(
+                f"ui_anchors: {anchor_id!r} が student/ 以外を参照している: {ref!r}"
+            )
+            continue
+        _audience, _file, rest = ref.partition("/")
+        file, _, anchor = rest.partition("#")
+        if f"{file}#{anchor}" not in idx:
+            violations.append(
+                f"ui_anchors: {anchor_id!r} の参照先が見つからない: {ref!r}"
+            )
     return violations
 
 

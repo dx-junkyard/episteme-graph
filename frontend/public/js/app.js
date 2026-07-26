@@ -496,10 +496,13 @@
     const discussActive = isDiscussMode();
     let html = '<div class="discuss-mode-switch">' +
       '<button type="button" class="discuss-mode-btn' + (!discussActive ? " active" : "") +
-      '" id="discuss-mode-sequential-btn" title="コースの教材をトピック順にたどります">📘 順番に学ぶ</button>' +
+      '" id="discuss-mode-sequential-btn" data-ui-anchor="sidebar.mode-sequential" title="コースの教材をトピック順にたどります">📘 順番に学ぶ</button>' +
       '<button type="button" class="discuss-mode-btn' + (discussActive ? " active" : "") +
-      '" id="discuss-mode-discuss-btn" title="トピックに縛られず、この論文について話します">🗣 この論文と議論する</button>' +
+      '" id="discuss-mode-discuss-btn" data-ui-anchor="sidebar.mode-discuss" title="トピックに縛られず、この論文について話します">🗣 この論文と議論する</button>' +
       "</div>";
+    // インスペクト・モード（学習UI再編 Phase 2, §5.2）: コースツリー領域全体を
+    // 1つの UI 論理アンカーとして扱う（個々のトピック行までは分解しない）。
+    html += '<div data-ui-anchor="sidebar.course-tree">';
     html += '<div class="sb-hd">コースツリー</div>';
     html += '<div class="course-tree-title">' + escHtml(course.title || "コース") + '</div>';
     if (progress.course_completed) {
@@ -549,6 +552,7 @@
         html += '<span class="dot ' + dotCls + '" style="margin-left:auto"></span></div>';
       });
     });
+    html += "</div>"; // data-ui-anchor="sidebar.course-tree" 終わり
 
     // Concept map
     html += '<div class="sb-hd" style="margin-top:14px">概念マップ</div><div class="ct">';
@@ -912,15 +916,37 @@
     });
   }
 
+  // 教材区画ヘッダ（②提示形式, §3.2）: 左=「教材 · トピック名」/ 右=セグメント
+  // [📖 読む|🎙 講義]。discuss モード中や無選択時はセグメントごと隠す（教材区画が
+  // プレースホルダに変わる／表示対象が無いため）。renderMaterialRegion から毎回呼ぶ。
+  function updateMaterialHeader() {
+    var titleEl = document.getElementById("material-header-title");
+    if (titleEl) {
+      var topic = getCurrentTopic();
+      var label = "教材";
+      if (isDiscussMode()) {
+        label = "教材 · 論文と議論中";
+      } else if (topic && topic.title) {
+        label = "教材 · " + topic.title;
+      }
+      titleEl.textContent = label;
+    }
+    var toggle = document.getElementById("material-format-toggle");
+    if (toggle) toggle.hidden = isDiscussMode() || !state.currentTopicId;
+  }
+
   // 教材区画（本筋・順路）: 教材本文を独立スクロール領域に描画する。
   // ここは renderChat とは別の #material-body に出すため、会話で流れて消えない。
   function renderMaterialRegion() {
     var body = document.getElementById("material-body");
-    var here = document.getElementById("material-here");
     if (!body) return;
+    updateMaterialHeader();
+    // discuss.js の stillInDiscussContext() が「非同期の開幕画面フェッチが戻った時点でも
+    // まだ discuss モードのままか」を判定するための不可視の合図（旧 #material-here の
+    // textContent="論文と議論中" を置き換え。表示テキストではなく data 属性にする）。
+    body.dataset.discussActive = isDiscussMode() ? "true" : "false";
     if (!state.course || !state.currentTopicId) {
       body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:13px">トピックを選択すると教材が表示されます。</div>';
-      if (here) here.textContent = "";
       updateNextTopicBtn();
       return;
     }
@@ -931,20 +957,21 @@
     // プレースホルダのまま（フィクスチャ・偽データは出さない）。
     if (isDiscussMode()) {
       body.innerHTML = renderDiscussPlaceholder();
-      if (here) here.textContent = "論文と議論中";
       if (window.Discuss) window.Discuss.renderOpening(body, state.courseId);
       updateNextTopicBtn();
       return;
     }
     if (!state.topicMaterial || state.topicMaterial.length === 0) {
       body.innerHTML = '<div style="color:var(--color-text-tertiary);font-size:13px">教材を読み込み中…</div>';
-      if (here) here.textContent = "";
       updateNextTopicBtn();
       return;
     }
     var html = '<div class="material-block-header">教材</div>';
     state.topicMaterial.forEach(function (chunk) {
-      html += '<div class="material-chunk">';
+      // Phase 3（ホバー+ラッチ, §7）: ラダー4位「直近回答の第1根拠チャンク」と同じ
+      // chunk_id 系だが、ここではラッチ時に「どのチャンク内で注目したか」を拾うための
+      // data 属性。既存の描画には影響しない（純粋な追加属性）。
+      html += '<div class="material-chunk" data-chunk-id="' + escHtml(chunk.id || "") + '">';
       if (chunk.chapter || chunk.section) {
         var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
         html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
@@ -970,10 +997,6 @@
     });
     body.innerHTML = html;
     hydrateMaterialFigures(body);
-
-    // 現在地ラベル（本筋）
-    var topic = getCurrentTopic();
-    if (here) here.textContent = topic ? ("本筋：" + (topic.title || "")) : "";
 
     // グラフサジェストの配線（教材区画内）
     body.querySelectorAll(".graph-suggest-btn").forEach(function (btn) {
@@ -1001,19 +1024,32 @@
     updateNextTopicBtn();
   }
 
-  // チャット区画のモードバー: 本筋（青）か寄り道（アンバー＋戻る）かを常時表示する。
+  // チャット区画のモードバー（§3.4 静音化）: discuss（論文と議論中）と寄り道のときだけ表示する。
+  // 通常状態（本筋・on-path）はバー自体を出さない — バーの出現自体が「特殊状態」の意味を持つ。
   function renderModeBar() {
     var bar = document.getElementById("mode-bar");
     if (!bar) return;
     if (!state.course || !state.currentTopicId) { bar.hidden = true; return; }
-    bar.hidden = false;
+    // レクチャー外科手術 案①（§15）: 質問のため講義を一時停止中は、他の状態表示より
+    // 優先して再開導線を出す（旧 lecture-chat-popup の再開ボタンをモードバーへ統合）。
+    if (typeof lectureState !== "undefined" && lectureState.active && lectureState.pausedForQuestion) {
+      bar.hidden = false;
+      bar.className = "mode-bar lecture-paused";
+      bar.innerHTML = '<span class="mb-label">🎙 講義を一時停止中</span>' +
+        '<button class="mb-resume" data-mode-resume-lecture>▶ 再開</button>';
+      var resumeBtn = bar.querySelector("[data-mode-resume-lecture]");
+      if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
+      return;
+    }
     // discuss モード（論文と話す）: 復帰督促・寄り道の語彙を使わない中立表示。
     if (isDiscussMode()) {
+      bar.hidden = false;
       bar.className = "mode-bar discuss";
       bar.innerHTML = '<span class="mb-label">🗣 論文と議論中</span>';
       return;
     }
     if (Session.inDetour()) {
+      bar.hidden = false;
       var origin = Session.detourOrigin() || {};
       var label = (state.learningSupport && (state.learningSupport.detour_label || state.learningSupport.status_label)) || "寄り道中";
       if (label.length > 28) label = label.slice(0, 28) + "…";
@@ -1027,10 +1063,11 @@
         returnToLearningPath(this.getAttribute("data-mode-return"));
       });
     } else {
-      var topic = getCurrentTopic();
+      // on-path（通常状態）: モードバーを非表示にする。情報は教材フッタの
+      // 「確認して次へ」のみが担い、常設の「本筋：〜」表示は持たない。
+      bar.hidden = true;
       bar.className = "mode-bar on-path";
-      bar.innerHTML = '<span class="mb-label">📘 本筋に沿って学習中：' + escHtml(topic ? (topic.title || "") : "") +
-        '<span class="mb-sub"> ／ 次のセクションは上の「確認して次へ」</span></span>';
+      bar.innerHTML = "";
     }
   }
 
@@ -2729,15 +2766,13 @@
     );
   }
 
-  // 入力欄上部の discuss バー（スコープ切替）と「もっと自由に話す」リンクの表示切替。
+  // 入力欄上部の discuss バー（スコープ切替）の表示切替。
   // 選択状態そのものが出所の正直さの UI になる（設計 DM1）。
+  // 「もっと自由に話す」リンクはサイドバー二枚看板と完全重複のため削除済み（§3.5）。
   function renderDiscussBar() {
     var bar = document.getElementById("discuss-bar");
-    var freeLinkRow = document.getElementById("discuss-free-link-row");
     var discuss = !!state.course && !!state.currentTopicId && isDiscussMode();
-    var showFreeLink = !!state.course && !!state.currentTopicId && !isDiscussMode();
     if (bar) bar.hidden = !discuss;
-    if (freeLinkRow) freeLinkRow.hidden = !showFreeLink;
     if (bar) {
       var scope = state.discussScope || "course_sources";
       bar.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
@@ -2746,12 +2781,8 @@
     }
   }
 
-  // discuss UI（スコープ切替・「もっと自由に話す」リンク）の配線。一度だけ登録する。
+  // discuss UI（スコープ切替）の配線。一度だけ登録する。
   function initDiscussUI() {
-    var freeLinkBtn = document.getElementById("discuss-free-link-btn");
-    if (freeLinkBtn) {
-      freeLinkBtn.addEventListener("click", function () { enterDiscussMode(); });
-    }
     var scopeToggle = document.getElementById("discuss-scope-toggle");
     if (scopeToggle) {
       scopeToggle.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
@@ -3013,6 +3044,12 @@
 
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return null;
+    // レクチャー外科手術 案①（§15）: 講義再生中に composer（sendMessage は全送信経路の
+    // 合流点）から送信したら講義音声を自動一時停止する。旧 openInterruptChat の一時停止
+    // ロジックを流用し、第2 composer（lecture-chat-popup）は廃止して通常送信へ一本化する。
+    if (typeof lectureState !== "undefined" && lectureState.active && lectureState.playing) {
+      pauseLectureForQuestion();
+    }
     collapseMaterialForChat();  // 機能2: 送信時に教材区画を自動で畳む
     let respData = null;  // 音声会話モードが answer/sources を使うため応答を返す
 
@@ -3056,6 +3093,25 @@
       payload.selection_segment_id = state.pendingSelection.segment_id;
     }
     clearPendingSelection();
+
+    // 教材ホバー + ラッチ（学習UI再編 Phase 3, §6.2/§7/IH3/IH5）: 可視のピン留め
+    // ツールチップが実在する場合のみ、既存の方法A（element_id/element_type/
+    // element_label/chunk_id）でアンカーを添付する。判定は「_latchState.pinned かつ
+    // DOM 上のツールチップが実際に表示中（tip && !tip.hidden）」を唯一の真実源にする
+    // — 不可視になったラッチ値を送らない（IH3）。明示アンカー経由（EXPLAIN_GRAPH_ELEMENT
+    // 等）が既に element_id を積んでいれば上書きしない。sendMessage は全送信経路
+    // （composer/音声/discuss/書き直し等）の合流点のため、ここ一箇所で足りる。
+    const _materialTip = document.getElementById("inspect-tooltip");
+    const _pinVisible = _latchState.pinned && !!_materialTip && !_materialTip.hidden;
+    if (_pinVisible && _latchState.anchor) {
+      if (!payload.element_id) {
+        payload.element_id = _latchState.anchor.element_id;
+        payload.element_type = _latchState.anchor.element_type;
+        payload.element_label = _latchState.anchor.element_label;
+        if (_latchState.anchor.chunk_id) payload.chunk_id = _latchState.anchor.chunk_id;
+      }
+      clearMaterialLatch(); // 使う/使わないに関わらず、送信の瞬間にラッチは消費される。
+    }
 
     try {
       const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
@@ -3168,6 +3224,332 @@
     });
   }
 
+  // ══════════════════════════════════════════════════════════════════
+  // インスペクト・モード（学習UI再編 Phase 2, docs/features/
+  // learning_ui_inspect_hover_design.md §4/§5/§8）。
+  //
+  // トップバー「？」を画面全体の「使い方インスペクト」トグルとして扱う。ON 中は
+  // UI 論理アンカー（data-ui-anchor 属性を持つ要素、IH9）へのホバーでマニュアル節
+  // ツールチップを表示する（既に配信済みの静的データのみ・LLM/チャットAPI 0回、IH2）。
+  // クリックは解除のみ（IH4）。ON のまま composer/音声で発話すると、無条件で
+  // usage_help ルートへ確定する（§4.1・sendWith/handleVoiceSegment 側で分岐）。
+  // ══════════════════════════════════════════════════════════════════
+  const _inspectState = {
+    active: false,
+    anchors: null,          // GET /learning/help/ui-anchors のキャッシュ（フェッチ前は null）
+    anchorsFetched: false,  // 1回だけフェッチする（失敗時も再フェッチしない。fail-closed）
+    hoveredAnchorId: null,  // 最後にホバー/ツールチップ表示したアンカーID（発話送信時の ui_anchor）
+    reportedNoHitIds: new Set(), // IH10: セッション内 no_hit dedup（anchor 単位で1回まで）
+    noHitTimer: null,
+  };
+
+  // ログイン時に1回だけフェッチしてメモリキャッシュする（ホバーごとの API コールはしない）。
+  // 失敗時は空オブジェクト（fail-closed でツールチップは常に「未整備」扱いになる。
+  // リトライは連打しない — inspect を何度 ON/OFF してもフェッチは初回の1回のみ）。
+  async function fetchUiAnchorsOnce() {
+    if (_inspectState.anchorsFetched) return;
+    _inspectState.anchorsFetched = true;
+    try {
+      const res = await apiFetch("/learning/help/ui-anchors");
+      const data = res.ok ? await res.json() : null;
+      _inspectState.anchors = (data && data.anchors) || {};
+    } catch (_) {
+      _inspectState.anchors = {};
+    }
+  }
+
+  function hideInspectTooltip() {
+    if (_inspectState.noHitTimer) { clearTimeout(_inspectState.noHitTimer); _inspectState.noHitTimer = null; }
+    const tip = document.getElementById("inspect-tooltip");
+    if (tip) { tip.hidden = true; tip.innerHTML = ""; }
+  }
+
+  function _positionInspectTooltip(tip, anchorEl) {
+    const r = anchorEl.getBoundingClientRect();
+    const tw = Math.min(320, window.innerWidth - 24);
+    tip.style.width = tw + "px";
+    const left = Math.max(12, Math.min(r.left, window.innerWidth - tw - 12));
+    const top = r.bottom + 8;
+    // 下に入りきらなければ上に出す（既存 _positionSourcePopup と同じ方式）。
+    if (top + 160 > window.innerHeight && r.top > window.innerHeight - r.bottom) {
+      tip.style.bottom = (window.innerHeight - r.top + 8) + "px";
+      tip.style.top = "auto";
+    } else {
+      tip.style.bottom = "auto";
+      tip.style.top = top + "px";
+    }
+    tip.style.left = left + "px";
+  }
+
+  // IH10: 一定時間（既定 1 秒）ツールチップが表示され続けた場合のみ、未整備アンカーの
+  // no_hit をセッション内 anchor 単位で1回まで記録する（ホバーの生イベント自体は記録しない）。
+  const INSPECT_NO_HIT_DWELL_MS = 1000;
+
+  // UI 論理アンカーへのホバー中に出すツールチップ（IH1 出所チップ付き・IH7 数値非表示）。
+  // 既に配信済みのマニュアル節データを見せるだけで、LLM・チャットAPI は一切呼ばない（IH2）。
+  function showInspectTooltip(anchorEl, anchorId) {
+    hideInspectTooltip();
+    _inspectState.hoveredAnchorId = anchorId;
+    const tip = document.getElementById("inspect-tooltip");
+    if (!tip) return;
+    const entry = (_inspectState.anchors || {})[anchorId] || null;
+    if (entry) {
+      tip.innerHTML =
+        '<div class="inspect-tooltip-source">📖 使い方</div>' +
+        '<div class="inspect-tooltip-title">' + escHtml(entry.title || "") + "</div>" +
+        '<div class="inspect-tooltip-body">' + escHtml(entry.body || "") + "</div>";
+    } else {
+      // IH8: 未整備は固定事実文のみ。生成で埋めない。
+      tip.innerHTML =
+        '<div class="inspect-tooltip-source">📖 使い方</div>' +
+        '<div class="inspect-tooltip-body">この部分の説明はまだ用意されていません</div>';
+      _inspectState.noHitTimer = setTimeout(function () {
+        reportInspectNoHit(anchorId);
+      }, INSPECT_NO_HIT_DWELL_MS);
+    }
+    tip.hidden = false;
+    _positionInspectTooltip(tip, anchorEl);
+  }
+
+  function reportInspectNoHit(anchorId) {
+    if (_inspectState.reportedNoHitIds.has(anchorId)) return;
+    _inspectState.reportedNoHitIds.add(anchorId);
+    apiFetch("/learning/help/ui-anchor-events", {
+      method: "POST",
+      body: JSON.stringify({ anchor_id: anchorId, kind: "no_hit" }),
+    }).catch(function () { /* fail-open: 記録できなくても UX は止めない（no_hit はベストエフォート） */ });
+  }
+
+  function setInspectMode(active) {
+    if (_inspectState.active === active) return;
+    _inspectState.active = active;
+    document.body.classList.toggle("inspect-mode", active);
+    const banner = document.getElementById("inspect-banner");
+    if (banner) banner.hidden = !active;
+    hideInspectTooltip();
+    _inspectState.hoveredAnchorId = null;
+    // §4.1: インスペクト ON 中は教材ホバー/ラッチを使わない（排他）。ON へ入る瞬間、
+    // 残っている教材ラッチ（ピン留め）を強制解除し、共有しているツールチップ容器を
+    // インスペクト側が引き継げるようにする（Phase 3, learning_ui_inspect_hover_design.md §6）。
+    if (active) clearMaterialLatch();
+    if (active) fetchUiAnchorsOnce(); // 万一ログイン時フェッチが未了なら保険で試す（二重フェッチ防止済み）
+  }
+
+  function toggleInspectMode() {
+    setInspectMode(!_inspectState.active);
+  }
+
+  // インスペクト中の発話（composer のテキスト送信・音声どちらからも呼ばれる）を
+  // typed usage_help として送る。旧「❓使い方」ボタンの送信ロジック（入力欄が空なら
+  // 固定文にフォールバック）をそのまま再利用する（§4.1・§8）。
+  function sendUsageHelpMessage(typedText) {
+    var typed = (typedText || "").trim();
+    var text = typed || "この画面の使い方を教えてください";
+    sendMessage(text, { support_action: "usage_help", ui_anchor: _inspectState.hoveredAnchorId || null });
+  }
+
+  function initInspectMode() {
+    // IH4: インスペクト中のクリックは解除のみ。capture フェーズで document 全体を
+    // 先取りし、下の操作（送信・削除等）へ絶対に伝播させない（stopPropagation により
+    // target/bubble フェーズへ到達しない）。「？」ボタン自身とバナー内だけは
+    // 通常のクリック動作を許可する（トグル自体はボタンの bubble リスナーが行う）。
+    document.addEventListener("click", function (e) {
+      if (!_inspectState.active) return;
+      if (e.target.closest("#help-usage-btn, #inspect-banner")) return;
+      e.preventDefault();
+      e.stopPropagation();
+      setInspectMode(false); // release のみ。下の操作は実行しない。
+    }, true);
+
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && _inspectState.active) setInspectMode(false);
+    });
+
+    // ホバー対象は data-ui-anchor 登録済み要素のみ（IH9。素の本文段落は対象外 —
+    // 段落は既存のテキスト選択→「ここについて質問」経路を使う）。
+    document.addEventListener("mouseover", function (e) {
+      if (!_inspectState.active) return;
+      const el = e.target.closest("[data-ui-anchor]");
+      if (!el) return;
+      showInspectTooltip(el, el.getAttribute("data-ui-anchor"));
+    });
+    document.addEventListener("mouseout", function (e) {
+      if (!_inspectState.active) return;
+      const el = e.target.closest("[data-ui-anchor]");
+      if (!el) return;
+      if (e.relatedTarget && el.contains(e.relatedTarget)) return;
+      hideInspectTooltip();
+    });
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 教材ホバー + ラッチ（学習UI再編 Phase 3, docs/features/
+  // learning_ui_inspect_hover_design.md §5.1/§6/§7/§8）。
+  //
+  // インスペクト・モード（Phase 2）が使うツールチップ基盤（#inspect-tooltip 容器・
+  // _positionInspectTooltip の位置決め関数）をそのまま再利用する（第2のツールチップ
+  // 実装をコピペしない）。両モードは排他: インスペクト ON 中は教材ツールチップを
+  // 出さない（§4.1 マトリクス）。インスペクトへ入る瞬間、既存の教材ラッチは
+  // setInspectMode(true) 側から強制解除する。
+  //
+  // ホバー対象は data-evidence-ref（"kind:id"）を持つ要素のみ（IH9）:
+  // componentチップ（⚓ .ls-material-evidence-chip）・数式ブロック（.ls-material-embed）・
+  // 図カード（.material-figure / .ls-material-evidence-card）・出典カード
+  // （.ls-material-evidence-card）。renderMaterialChunk が教材区画・レクチャースライド・
+  // ボイスパネル・出典ポップアップのどこで描画してもこの属性は共通で付くため、
+  // コンテナ側で分岐する必要が無い。素の本文段落には data-evidence-ref が付かないため
+  // 自然に対象外になる（IH9）。
+  //
+  // 内容は renderMaterialChunk がその場で既に持っているデータ（evidence_items /
+  // formulas / figures）だけを見せる（IH2: API・LLM を一切呼ばない）。
+  // ══════════════════════════════════════════════════════════════════
+  const _latchState = {
+    pinned: false,   // ピン留め済みか（true のときのみ送信時にアンカーを添付できる, IH3/IH5）
+    anchor: null,    // ピン留め対象 { element_id, element_type, element_label, chunk_id }
+    hoverRef: null,  // 現在ホバー中（ピン留め前の候補）の data-evidence-ref
+    hoverEl: null,   // 現在ホバー中の DOM 要素（ラッチ時の対象特定・chunk_id 逆引きに使う）
+  };
+
+  // kind（"component"/"claim"/"equation"/"figure"/"source" 等）→ 既存の structure_anchor
+  // 方法A の element_type 語彙（anchor_type_for_element の入力語彙）への変換。
+  // equation は「数式」アンカー種別に正しくマップされる "formula" を使う。他の kind は
+  // 対応する専用語彙が無いため、backend 側の既定フォールバック（"concept"）に委ねる
+  // （backend/core は変更しない）。
+  function materialAnchorElementType(kind) {
+    return kind === "equation" ? "formula" : "concept";
+  }
+
+  // data-evidence-ref に登録済みのアイテム（evidence_items の kind=component/claim/
+  // equation/figure/source、または chunk.figures の figure オブジェクト）から、
+  // ツールチップに出す {label, body} を作る。フィールド名の形が異なる2系統
+  // （title/summary 系と caption/explanation 系）を緩く正規化するだけで、
+  // 新しい取得は一切行わない（IH2）。
+  function materialAnchorTooltipContent(item) {
+    if (!item) return null;
+    var label = item.title || item.label || item.caption || item.figure_id || item.id || "";
+    var body = item.explanation || item.summary || item.plain_text || item.caption || item.raw_text || "";
+    if (body && body === label) body = ""; // caption などがラベルと重複するだけの場合は省く
+    if (!label && !body) return null;
+    return { label: label, body: body };
+  }
+
+  // ラッチ対象の要素が属するチャンク（.material-chunk / .lecture-slide-text）の
+  // data-chunk-id を逆引きする（method A の chunk_id フィールドに使う。無ければ ""）。
+  function _closestChunkId(el) {
+    var wrap = el && el.closest ? el.closest("[data-chunk-id]") : null;
+    return wrap ? (wrap.getAttribute("data-chunk-id") || "") : "";
+  }
+
+  // ホバー中の教材アンカーにツールチップを表示する（IH1 出所チップ「📄 教材」・
+  // IH7 数値非表示）。インスペクト ON 中・ピン留め中はホバーで新規表示しない
+  // （インスペクトは UI 部品側の担当・ピンが優先, §4.1/§6.1）。
+  function showMaterialTooltip(anchorEl, ref) {
+    if (_inspectState.active) return;
+    if (_latchState.pinned) return;
+    _latchState.hoverRef = ref;
+    _latchState.hoverEl = anchorEl;
+    const tip = document.getElementById("inspect-tooltip");
+    if (!tip) return;
+    const entry = materialEvidenceChipItems[ref];
+    const content = materialAnchorTooltipContent(entry && entry.item);
+    tip.classList.add("material");
+    // ✕（ピン留め解除ボタン）は常に埋め込むが、CSS が .pinned 修飾クラスの無いうちは
+    // 非表示にする（ラッチ時に innerHTML を作り直さず classList.add("pinned") だけで
+    // 見た目を切り替えられるようにするため）。
+    tip.innerHTML =
+      '<button type="button" class="inspect-tooltip-close" aria-label="ピン留めを解除">✕</button>' +
+      '<div class="inspect-tooltip-source">📄 教材</div>' +
+      (content
+        ? (content.label ? '<div class="inspect-tooltip-title">' + escHtml(content.label) + '</div>' : '') +
+          (content.body ? '<div class="inspect-tooltip-body">' + escHtml(content.body) + '</div>' : '')
+        // IH8: 表示できる説明が何も無い要素は固定事実文（捏造しない）。
+        : '<div class="inspect-tooltip-body">この部分の説明はまだ用意されていません</div>');
+    tip.hidden = false;
+    _positionInspectTooltip(tip, anchorEl);
+  }
+
+  // マウスが離れたときの非表示。ピン留め中（§6.1）は消さない — 消せるのは ✕/Esc/送信のみ。
+  function hideMaterialTooltip() {
+    if (_latchState.pinned) return;
+    const tip = document.getElementById("inspect-tooltip");
+    if (tip && tip.classList.contains("material")) {
+      tip.hidden = true;
+      tip.innerHTML = "";
+      tip.classList.remove("material");
+    }
+    _latchState.hoverRef = null;
+    _latchState.hoverEl = null;
+  }
+
+  // 入力欄の最初のキーストローク（空→非空）/ 発話検知の瞬間に、その時点でホバー中
+  // だった教材アンカーをラッチする（§6.1）。既にピン留め済みなら何もしない（ラッチ値は
+  // 変わらない）。ホバー中でなければ何も起こらない（アンカー無しのままラダー第2位
+  // 以降に落ちる）。
+  function latchMaterialAnchorIfHovering() {
+    if (_latchState.pinned) return;
+    const ref = _latchState.hoverRef;
+    const el = _latchState.hoverEl;
+    if (!ref || !el) return;
+    const kind = ref.split(":")[0];
+    const id = ref.slice(kind.length + 1);
+    const entry = materialEvidenceChipItems[ref];
+    const content = materialAnchorTooltipContent(entry && entry.item);
+    _latchState.pinned = true;
+    _latchState.anchor = {
+      element_id: id,
+      element_type: materialAnchorElementType(kind),
+      element_label: (content && content.label) || id,
+      chunk_id: _closestChunkId(el),
+    };
+    const tip = document.getElementById("inspect-tooltip");
+    if (tip) tip.classList.add("pinned");
+  }
+
+  // ✕ / Esc / 送信後の手動・自動クリア。DOM のツールチップも同時に消す
+  // （IH3/IH5: 「ピンの可視状態」が唯一の真実源 — pinned を false にする瞬間に
+  // 必ず不可視にもする。不可視のラッチ値を送信に使わせない）。
+  function clearMaterialLatch() {
+    _latchState.pinned = false;
+    _latchState.anchor = null;
+    _latchState.hoverRef = null;
+    _latchState.hoverEl = null;
+    const tip = document.getElementById("inspect-tooltip");
+    if (tip) {
+      tip.hidden = true;
+      tip.innerHTML = "";
+      tip.classList.remove("material", "pinned");
+    }
+  }
+
+  function initMaterialHoverLatch() {
+    // ホバー対象は data-evidence-ref 登録済み要素のみ（IH9。素の本文段落は対象外）。
+    document.addEventListener("mouseover", function (e) {
+      if (_inspectState.active) return;
+      if (_latchState.pinned) return; // ラッチ後は別要素ホバーで新規ツールチップを出さない（§6.1）
+      const el = e.target.closest("[data-evidence-ref]");
+      if (!el) return;
+      const ref = el.getAttribute("data-evidence-ref");
+      if (!ref) return;
+      showMaterialTooltip(el, ref);
+    });
+    document.addEventListener("mouseout", function (e) {
+      if (_inspectState.active) return;
+      if (_latchState.pinned) return; // ピン留め中はマウスが離れても消えない（§6.1）
+      const el = e.target.closest("[data-evidence-ref]");
+      if (!el) return;
+      if (e.relatedTarget && el.contains(e.relatedTarget)) return;
+      hideMaterialTooltip();
+    });
+    // ✕ ボタン: ピン留めの手動解除。
+    document.addEventListener("click", function (e) {
+      if (e.target.closest(".inspect-tooltip-close")) clearMaterialLatch();
+    });
+    // Esc: ピン留めの手動解除（インスペクトの Esc とは独立 — 排他なので競合しない）。
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && _latchState.pinned) clearMaterialLatch();
+    });
+  }
+
   // ── Input handling ─────────────────────────────────────────────────
   // 「教材に沿って質問」「自由に質問・探索」の2ボタンは廃止し「質問」1つに統合。
   // 事前に意図を選ばせず、常に RAG 検索を行った上で回答が何に基づくか
@@ -3182,6 +3564,14 @@
     function sendWith(mode) {
       var text = input.value.trim();
       if (!text) return;
+      // インスペクト・モード中の発話は無条件で usage_help ルートに確定する（§4.1）。
+      // 通常チャット分岐（on_path/explore/discuss/書き直し）より手前で確定させる。
+      // インスペクトはそのまま維持する（解除はクリック/Esc/ボタンのみ・連続質問できる）。
+      if (_inspectState.active) {
+        input.value = "";
+        sendUsageHelpMessage(text);
+        return;
+      }
       if (mode === "on_path") Session.clearDetour();
       var payload = { intent_mode: mode };
       // discuss モード（論文と話す）: 予約疑似トピック中は on_path/explore の判定より
@@ -3206,14 +3596,14 @@
 
     btn.addEventListener("click", sendCurrent);
     if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
-    // ❓ 使い方ボタン（typed action・一次経路・誤爆ゼロ）。入力欄に途中入力が
-    // あればそれを message に使い、空なら固定文を送る。分類LLMを経由しない確定ルート。
+    // ❓ 使い方ボタン（学習UI再編 Phase 2, §4）: 押下は使い方インスペクト・モードの
+    // ON/OFF トグルのみを行う。旧仕様（押下で即 typed usage_help 送信）はここでは
+    // 行わない — インスペクト ON 中の発話（composer/音声）が sendUsageHelpMessage
+    // 経由で usage_help ルートに確定する（sendWith / handleVoiceSegment 側で分岐）。
     const helpUsageBtn = document.getElementById("help-usage-btn");
     if (helpUsageBtn) {
       helpUsageBtn.addEventListener("click", function () {
-        var typed = input.value.trim();
-        var text = typed || "この画面の使い方を教えてください";
-        sendMessage(text, { support_action: "usage_help" });
+        toggleInspectMode();
       });
     }
     // 🤖 気軽に話せる先生（ハンズフリー音声会話）
@@ -3229,11 +3619,22 @@
       }
     });
 
+    // 教材ホバー + ラッチ（学習UI再編 Phase 3, §6.1）: 入力欄の最初のキーストローク
+    // （空→非空になる瞬間）でホバー中の教材アンカーをラッチする。入力欄を全消去
+    // （非空→空）してもラッチは維持する（打ち直しで消えると煩わしいため）。クリアは
+    // ✕/Esc/送信のみ（latchMaterialAnchorIfHovering / clearMaterialLatch 参照）。
+    var _chatInputWasEmpty = true;
+    input.addEventListener("input", function () {
+      var isEmpty = input.value.length === 0;
+      if (_chatInputWasEmpty && !isEmpty) latchMaterialAnchorIfHovering();
+      _chatInputWasEmpty = isEmpty;
+    });
+
     // 機能2: 対話に属する領域（チャット・入力・モードバー・音声パネル・出典ポップアップ等）の
     // 外側をクリックしたら、送信時に自動で畳んだ教材区画を元の比率に戻す。
     document.addEventListener("click", function (e) {
       if (!_matCollapse.active) return;
-      if (e.target.closest("#chat-area, #chat-input, #send-btn, #help-usage-btn, #voice-mode-btn, #chat-clear-btn, #mode-bar, #voice-panel, #src-popup, #lecture-chat-popup, #split-handle")) return;
+      if (e.target.closest("#chat-area, #chat-input, #send-btn, #help-usage-btn, #voice-mode-btn, #chat-clear-btn, #mode-bar, #voice-panel, #src-popup, #split-handle")) return;
       restoreMaterialRegion();
     });
   }
@@ -3390,6 +3791,9 @@
         voiceState.speechDetected = true;
         voiceState.speechStart = now;
         setVoiceStatus("listening", "聞き取り中…");
+        // 教材ホバー + ラッチ（§6.1）: 発話区間の開始でホバー中の教材アンカーをラッチする
+        // （入力欄の最初のキーストロークと同じ扱い）。
+        latchMaterialAnchorIfHovering();
       }
       voiceState.silenceStart = 0;
       return;
@@ -3441,7 +3845,11 @@
 
     setVoiceTranscript("あなた: " + text);
     setVoiceStatus("thinking", "先生が考えています…");
-    const data = await sendMessage(text, { intent_mode: "casual" });
+    // インスペクト・モード中の発話は無条件で usage_help ルートに確定する（§4.1）。
+    // ホバー/ツールチップ表示中だった UI アンカーがあれば ui_anchor として添える。
+    const data = _inspectState.active
+      ? await sendMessage(text, { support_action: "usage_help", ui_anchor: _inspectState.hoveredAnchorId || null })
+      : await sendMessage(text, { intent_mode: "casual" });
     if (!voiceState.active) return;
     if (!data || !data.answer) {
       // N33: チャット失敗もエラーとして知らせる（sendMessage はエラー時 null を返す）。
@@ -3845,7 +4253,7 @@
     var clearBtn = document.getElementById("chat-clear-btn");
     if (input) {
       input.disabled = !enabled;
-      input.placeholder = enabled ? "質問を入力してください..." : "コースを選択してください";
+      input.placeholder = enabled ? "質問や考えを入力…（Enterで送信）" : "コースを選択してください";
     }
     if (btn) btn.disabled = !enabled;
     if (clearBtn) clearBtn.disabled = !enabled || !state.currentTopicId || state.chatMessages.length === 0;
@@ -4218,12 +4626,14 @@
     playing: false,
     audio: null,
     pausePositionMs: 0,
-    sendingInterrupt: false,
     highlightTimer: null,
     resizeTimer: null,
-    voiceRecognition: null,
     loadingAudio: false, // TTS フェッチ中フラグ（連打による多重再生を防ぐ）
     readingSentence: -1, // 現在読み上げ中の文インデックス（-1 = 未設定）
+    // レクチャー外科手術 案①（§15）: 質問のため一時停止中か（モードバーの再開導線を出す条件）。
+    // 手動一時停止（プレイヤーバーの▶/⏸）とは区別しない — どちらも composer から
+    // 質問を送れば再開できるので、同じ「一時停止中」表示で足りる。
+    pausedForQuestion: false,
   };
 
   // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
@@ -4275,41 +4685,87 @@
     }
   }
 
+  // 教材区画ヘッダ（②提示形式）のセグメント active 表示を lectureState.active に同期する。
+  // 「📖 読む」「🎙 講義」双方のラベルは静的固定（テキストは書き換えない）で、
+  // どちらが選択中かは .active クラスのみで示す。全画面ボタンは講義中のみ見せる。
+  function syncMaterialFormatToggle() {
+    var readBtn = document.getElementById("material-format-read");
+    var lectureBtn = document.getElementById("lecture-toggle");
+    if (readBtn) readBtn.classList.toggle("active", !lectureState.active);
+    if (lectureBtn) lectureBtn.classList.toggle("active", lectureState.active);
+    var fsBtn = document.getElementById("lecture-fullscreen-btn");
+    if (fsBtn) {
+      fsBtn.hidden = !lectureState.active;
+      if (!lectureState.active) fsBtn.classList.remove("active");
+    }
+  }
+
+  // 講義中はハンズフリー音声会話ボタンを無効化する（講義 TTS とマイクの二重音声を防ぐ）。
+  // 講義終了で通常の title/有効状態へ復帰する。
+  function updateVoiceModeBtnForLecture() {
+    var voiceBtn = document.getElementById("voice-mode-btn");
+    if (!voiceBtn) return;
+    if (lectureState.active) {
+      voiceBtn.disabled = true;
+      voiceBtn.title = "講義の再生中は使えません（講義を終了してから）";
+    } else {
+      voiceBtn.disabled = false;
+      voiceBtn.title = "気軽に話せる先生とハンズフリーで会話";
+    }
+  }
+
+  // 講義を質問のために一時停止する（旧 openInterruptChat の一時停止ロジック）。
+  // 通常 composer からの送信（sendMessage）とプレイヤーバーの「質問」ボタンの両方から呼ぶ。
+  function pauseLectureForQuestion() {
+    if (!lectureState.active) return;
+    if (lectureState.playing) pausePlayback();
+    lectureState.pausedForQuestion = true;
+    renderModeBar();
+  }
+
+  // プレイヤーバーの「質問」ボタン: 講義を一時停止して通常 composer にフォーカスを移す
+  // （第2 composer は廃止済みのため、ポップアップは開かない）。
+  function focusChatForLectureQuestion() {
+    pauseLectureForQuestion();
+    var input = document.getElementById("chat-input");
+    if (input) input.focus();
+  }
+
+  // 講義スライドの全画面表示（既定 OFF・任意）。教材ヘッダの「⛶ 全画面」から
+  // .mn へ .lecture-fullscreen を付け外しし、下段（会話・composer）を一時的に隠す。
+  function toggleLectureFullscreen() {
+    var mn = document.querySelector(".mn");
+    if (!mn) return;
+    var on = mn.classList.toggle("lecture-fullscreen");
+    var btn = document.getElementById("lecture-fullscreen-btn");
+    if (btn) btn.classList.toggle("active", on);
+    fitLectureSlideContent();
+  }
+
   function initLectureMode() {
     var toggleBtn = document.getElementById("lecture-toggle");
+    var readBtn = document.getElementById("material-format-read");
     var playBtn = document.getElementById("lecture-play");
     var prevBtn = document.getElementById("lecture-prev");
     var nextBtn = document.getElementById("lecture-next");
     var questionBtn = document.getElementById("lecture-question");
-    var chatCloseBtn = document.getElementById("lecture-chat-close");
-    var chatSendBtn = document.getElementById("lecture-chat-send");
-    var chatInput = document.getElementById("lecture-chat-input");
-    var chatMicBtn = document.getElementById("lecture-chat-mic");
-    var resumeBtn = document.getElementById("lecture-chat-resume");
+    var fullscreenBtn = document.getElementById("lecture-fullscreen-btn");
     var nextTopicBtn = document.getElementById("next-topic-btn");
 
     if (toggleBtn) toggleBtn.addEventListener("click", toggleLectureMode);
+    // 「📖 読む」側は講義中のみ意味を持つ（クリックで通常表示へ戻る）。
+    if (readBtn) readBtn.addEventListener("click", function () {
+      if (lectureState.active) deactivateLecture();
+    });
     updateLectureToggleAvailability();
     if (playBtn) playBtn.addEventListener("click", togglePlayPause);
     if (prevBtn) prevBtn.addEventListener("click", prevSegment);
     if (nextBtn) nextBtn.addEventListener("click", nextSegment);
-    // レクチャー中は下段（チャット）を畳んでいるため、質問はフローティングの
-    // 割込みポップアップで受ける（講義を一時停止して開く）。
-    if (questionBtn) questionBtn.addEventListener("click", openInterruptChat);
-    if (chatCloseBtn) chatCloseBtn.addEventListener("click", closeInterruptChat);
-    if (chatSendBtn) chatSendBtn.addEventListener("click", sendInterruptMessage);
-    if (chatMicBtn) chatMicBtn.addEventListener("click", toggleVoiceInput);
-    if (resumeBtn) resumeBtn.addEventListener("click", resumeLecture);
+    // レクチャー外科手術 案①（§15）: 質問は通常 composer に一本化。プレイヤーバーの
+    // 「質問」ボタンは一時停止して入力欄へフォーカスを移すだけ（第2 composer は廃止）。
+    if (questionBtn) questionBtn.addEventListener("click", focusChatForLectureQuestion);
+    if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleLectureFullscreen);
     if (nextTopicBtn) nextTopicBtn.addEventListener("click", openCheckModal);
-
-    if (chatInput) {
-      chatInput.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-          e.preventDefault();
-          sendInterruptMessage();
-        }
-      });
-    }
 
     // ウィンドウリサイズ時にスライドのフィット（フォント縮小/等比縮小）を再計算する。
     window.addEventListener("resize", function () {
@@ -4320,60 +4776,13 @@
         fitLectureSlideContent();
       }, 150);
     });
-  }
 
-  function toggleVoiceInput() {
-    var SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    var micBtn = document.getElementById("lecture-chat-mic");
-
-    // Stop if already recording
-    if (lectureState.voiceRecognition) {
-      lectureState.voiceRecognition.stop();
-      return;
-    }
-
-    if (!SpeechRecognition) {
-      alert("このブラウザは音声認識に対応していません。Chrome または Edge をお試しください。");
-      return;
-    }
-
-    var recognition = new SpeechRecognition();
-    recognition.lang = "ja-JP";
-    recognition.interimResults = true;
-    recognition.continuous = false;
-    lectureState.voiceRecognition = recognition;
-
-    recognition.onstart = function () {
-      if (micBtn) micBtn.classList.add("recording");
-    };
-
-    recognition.onresult = function (event) {
-      var transcript = "";
-      for (var i = event.resultIndex; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
-      }
-      var input = document.getElementById("lecture-chat-input");
-      if (input) input.value = transcript;
-    };
-
-    recognition.onend = function () {
-      lectureState.voiceRecognition = null;
-      if (micBtn) micBtn.classList.remove("recording");
-      var input = document.getElementById("lecture-chat-input");
-      if (input && input.value.trim()) {
-        sendInterruptMessage();
-      }
-    };
-
-    recognition.onerror = function (event) {
-      lectureState.voiceRecognition = null;
-      if (micBtn) micBtn.classList.remove("recording");
-      if (event.error === "not-allowed") {
-        alert("マイクの使用が許可されていません。ブラウザのアドレスバーからマイクの許可を確認してください。");
-      }
-    };
-
-    recognition.start();
+    // Esc で全画面スライド表示を解除する。
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      var mn = document.querySelector(".mn");
+      if (mn && mn.classList.contains("lecture-fullscreen")) toggleLectureFullscreen();
+    });
   }
 
   // レクチャーモードを終了して通常表示へ戻す（トグル・トピック切替の両方から使う）。
@@ -4381,18 +4790,18 @@
   // ここでその畳み（.lecture-on）を解除し、専用UIの後片付けを行う。
   function deactivateLecture() {
     if (!lectureState.active) return;
-    var toggleBtn = document.getElementById("lecture-toggle");
     var lecturePlayer = document.getElementById("lecture-player");
     var mn = document.querySelector(".mn");
 
     lectureState.active = false;
+    lectureState.pausedForQuestion = false;
     stopPlayback();
-    closeInterruptChat();
-    if (mn) mn.classList.remove("lecture-on");
-    if (toggleBtn) {
-      toggleBtn.classList.remove("active");
-      toggleBtn.innerHTML = "&#127897; レクチャー";
+    if (mn) {
+      mn.classList.remove("lecture-on");
+      mn.classList.remove("lecture-fullscreen"); // 全画面は既定 OFF に戻す（次回開始時も既定 OFF）
     }
+    syncMaterialFormatToggle();
+    updateVoiceModeBtnForLecture();
     hideLectureSlideNotice();
     var banner = document.getElementById("lecture-complete-banner");
     if (banner) banner.remove();
@@ -4405,7 +4814,6 @@
   }
 
   async function toggleLectureMode() {
-    var toggleBtn = document.getElementById("lecture-toggle");
     var lecturePlayer = document.getElementById("lecture-player");
     var mn = document.querySelector(".mn");
 
@@ -4425,14 +4833,15 @@
       return;
     }
 
-    // Activate lecture mode。上段の教材区画（#material-region）を隠し、代わりに
-    // スライドステージ（#lecture-slide-stage）を表示する。下段（チャット/
-    // ホワイトボード）と分割ハンドルは .lecture-on で畳む。
+    // Activate lecture mode（案①）。上段の教材区画（#material-region）だけをスライド
+    // ステージ（#lecture-slide-stage）に差し替える。下段（会話・composer・分割ハンドル・
+    // モードバー）は畳まず、講義中もそのまま使える。
     lectureState.active = true;
+    lectureState.pausedForQuestion = false;
     if (mn) mn.classList.add("lecture-on");
-    toggleBtn.classList.add("active");
-    toggleBtn.innerHTML = "&#9209; レクチャー終了";
-    lecturePlayer.classList.add("visible");
+    syncMaterialFormatToggle();
+    updateVoiceModeBtnForLecture();
+    if (lecturePlayer) lecturePlayer.classList.add("visible");
 
     // Ensure player is actually visible (override any CSS hiding)
     if (lecturePlayer) {
@@ -4560,7 +4969,10 @@
     var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [], figures: slide.figures || [] };
     inner.style.fontSize = "";
     inner.style.transform = "";
-    inner.innerHTML = '<div class="lecture-slide-text">' + renderMaterialChunk(pseudoChunk) + '</div>';
+    // Phase 3（教材ホバー+ラッチ）: data-chunk-id は renderMaterialRegion の
+    // .material-chunk と同じ用途（ラッチ時にどのチャンクへの注目かを拾う）。
+    inner.innerHTML = '<div class="lecture-slide-text" data-chunk-id="' + escHtml(slide.chunk_id || "") + '">' +
+      renderMaterialChunk(pseudoChunk) + '</div>';
     hydrateMaterialFigures(inner);
 
     if (badge) badge.hidden = !!slide.has_audio;
@@ -4872,7 +5284,11 @@
       if (embed.kind === "equation") {
         // 数式は既存専用描画（LaTeX → plain_text → raw_text）を維持しつつ、
         // formulas に無い ID も evidence_items（管理画面と同じ根拠リンク由来）で裏付ける。
-        var formula = formulaById[String(embed.id)] || formulaById[embedId] ||
+        var formulaObj = formulaById[String(embed.id)] || formulaById[embedId] || null;
+        // Phase 3（教材ホバー+ラッチ, §5.1）: ツールチップは新規 API/LLM を呼ばず、
+        // 既にここにある evidence_item / formula をそのまま登録するだけ（IH2）。
+        registerMaterialEvidenceChipEntry("equation:" + embedId, evidenceItem || formulaObj, null);
+        var formula = formulaObj ||
           (evidenceItem && (evidenceItem.latex || evidenceItem.plain_text || evidenceItem.raw_text) ? evidenceItem : null);
         var body = renderMaterialEquationBody(formula);
         if (body) {
@@ -4894,6 +5310,8 @@
         // 認可付き画像配信）。ここに来るのは未配信の figure_id のみ。evidence_items に
         // caption があれば、画像なしの読み取りカードを出す（新たな画像取得経路は作らない）。
         if (evidenceItem && evidenceItem.kind === "figure") {
+          // Phase 3: 図カード（画像なし・caption のみ）もホバー対象にする（IH2: 既存データのみ）。
+          registerMaterialEvidenceChipEntry("figure:" + embedId, evidenceItem, null);
           return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="figure:' + escHtml(embedId) + '">' +
             '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS.figure || "図") + '</span>' +
             '<strong>' + escHtml(evidenceItem.title || ("図: " + (evidenceItem.caption || embedId))) + '</strong>' +
@@ -4915,6 +5333,8 @@
       // 維持する。role/confidence（パイプライン照合の来歴メタデータ）は学習UIには出さない
       // （admin 側のみで表示する。設計書 §7 受け入れ基準）。
       if (evidenceItem) {
+        // Phase 3: 出典（source）カードもホバー対象にする（IH2: 既存データのみ）。
+        registerMaterialEvidenceChipEntry(embed.kind + ":" + embedId, evidenceItem, null);
         var cardBody = evidenceItem.latex
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
@@ -5394,13 +5814,20 @@
     var caption = figure.caption || "";
     var explanation = figure.explanation || "";
     var imgUrl = figure.image_url || "";
+    // Phase 3（教材ホバー+ラッチ, §5.1/IH9）: 画像付き図カードもホバー対象にするため
+    // data-evidence-ref を付与し、既存データ（caption/explanation）をそのまま登録する
+    // （IH2: 新規 API/LLM 呼び出しはしない）。figure_id が無い（供給元不明の figure）
+    // 場合は ref を付与せずホバー対象から自然に外れる。
+    var ref = figure.figure_id ? ("figure:" + normalizeMaterialEvidenceId(figure.figure_id)) : "";
+    if (ref) registerMaterialEvidenceChipEntry(ref, figure, null);
+    var refAttr = ref ? ' data-evidence-ref="' + escHtml(ref) + '"' : "";
     if (!imgUrl) {
-      return '<figure class="material-figure">' +
+      return '<figure class="material-figure"' + refAttr + '>' +
         '<span class="material-figure-placeholder material-figure-missing">この図の画像を取得できませんでした。</span>' +
         (caption ? '<figcaption class="material-figure-caption">' + escHtml(caption) + '</figcaption>' : "") +
       '</figure>';
     }
-    return '<figure class="material-figure">' +
+    return '<figure class="material-figure"' + refAttr + '>' +
       '<span class="material-figure-frame">' +
         '<img class="material-figure-img" data-figure-fetch-url="' + escHtml(imgUrl) + '" style="display:none" alt="' + escHtml(caption || "図") + '">' +
         '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
@@ -5549,6 +5976,12 @@
     if (lectureState.playing) {
       pausePlayback();
     } else {
+      // プレイヤーバーの▶から直接再開した場合も、モードバーの「一時停止中」表示を
+      // 一貫して解除する（質問のための一時停止と手動一時停止を区別しない）。
+      if (lectureState.pausedForQuestion) {
+        lectureState.pausedForQuestion = false;
+        renderModeBar();
+      }
       await startPlayback();
     }
   }
@@ -5797,132 +6230,13 @@
     }
   }
 
-  // ── Interrupt Chat ──────────────────────────────────────────────
-  // 割込みチャットはレクチャー（origin=現セグメント）からの寄り道。会話は本トピックの
-  // state.chatMessages と同一スレッドで管理し、テキスト表示へ戻っても継続して見える。
-  function openInterruptChat() {
-    pausePlayback();
-    var popup = document.getElementById("lecture-chat-popup");
-    popup.classList.add("visible");
-    renderInterruptMessages();
-    var input = document.getElementById("lecture-chat-input");
-    if (input) input.focus();
-  }
-
-  function closeInterruptChat() {
-    // Stop any active voice recognition before closing
-    if (lectureState.voiceRecognition) {
-      lectureState.voiceRecognition.abort();
-      lectureState.voiceRecognition = null;
-      var micBtn = document.getElementById("lecture-chat-mic");
-      if (micBtn) micBtn.classList.remove("recording");
-    }
-    var popup = document.getElementById("lecture-chat-popup");
-    if (popup) popup.classList.remove("visible");
-  }
-
-  // ポップアップへ会話スレッドを描画し、AI 応答のボタンを bind する（型付き送信）。
-  function renderInterruptMessages(pendingUserText) {
-    var messages = document.getElementById("lecture-chat-messages");
-    if (!messages) return;
-    var html = '<div class="mg ai">講義を一時停止しました。ご質問をどうぞ。</div>';
-    state.chatMessages.forEach(function (m) {
-      if (m.role === "user") {
-        html += '<div class="mg usr">' + escHtml(m.content) + '</div>';
-      } else {
-        html += '<div class="mg ai">' + renderAiContent(m.content, m) + '</div>';
-      }
-    });
-    if (pendingUserText) {
-      html += '<div class="mg usr">' + escHtml(pendingUserText) + '</div>';
-      html += '<div class="mg ai"><div class="typing"><span></span><span></span><span></span></div></div>';
-    }
-    messages.innerHTML = html;
-
-    // AI 応答内のアクションボタンは、押すとさらに割込み質問として送信する。
-    messages.querySelectorAll(".suggest-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        var text = this.getAttribute("data-suggest") || this.textContent.replace(/\s*↗$/, "");
-        if (text) sendInterruptMessage(text);
-      });
-    });
-
-    if (window.renderMathInElement) {
-      try {
-        window.renderMathInElement(messages, {
-          delimiters: [
-            { left: "$$", right: "$$", display: true },
-            { left: "$", right: "$", display: false },
-          ],
-          throwOnError: false,
-        });
-      } catch (e) { /* ignore */ }
-    }
-    messages.scrollTop = messages.scrollHeight;
-  }
-
-  async function sendInterruptMessage(presetText) {
-    var input = document.getElementById("lecture-chat-input");
-    var message = (presetText != null ? presetText : (input ? input.value : "")).trim();
-    if (!message || lectureState.sendingInterrupt) return;
-    if (input && presetText == null) input.value = "";
-
-    lectureState.sendingInterrupt = true;
-    var priorHistory = state.chatMessages.slice();
-    renderInterruptMessages(message);
-
-    var slide = lectureState.deck[lectureState.currentDeckIndex];
-    var messages = document.getElementById("lecture-chat-messages");
-
-    try {
-      var res = await apiFetch(
-        "/learning/lecture/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/interrupt",
-        {
-          method: "POST",
-          body: JSON.stringify({
-            message: message,
-            current_chunk_id: slide ? slide.chunk_id : "",
-            current_slide_index: slide ? slide.slide_index : 0,
-            pause_position_ms: lectureState.pausePositionMs,
-            history: priorHistory,
-          }),
-        }
-      );
-
-      if (res.ok) {
-        var data = await res.json();
-        // 同一スレッドへ追記（テキスト表示へ戻っても継続して見える）。
-        state.chatMessages.push({ role: "user", content: message });
-        state.chatMessages.push({
-          role: "assistant",
-          content: data.answer,
-          next_actions: data.next_actions || [],
-        });
-        renderInterruptMessages();
-
-        if (data.course_update && state.course) {
-          Object.assign(state.course, data.course_update);
-          renderSidebar();
-          renderRightPanel();
-        }
-      } else if (messages) {
-        var typingEl = messages.querySelector(".typing");
-        if (typingEl) typingEl.parentElement.remove();
-        messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">エラーが発生しました。</div>';
-      }
-    } catch (err) {
-      if (messages) {
-        var typingEl2 = messages.querySelector(".typing");
-        if (typingEl2) typingEl2.parentElement.remove();
-        messages.innerHTML += '<div class="mg ai" style="color:var(--color-text-danger)">サーバーに接続できません。</div>';
-      }
-    } finally {
-      lectureState.sendingInterrupt = false;
-    }
-  }
-
+  // ── レクチャー一時停止からの再開（案①・§15）────────────────────────
+  // 講義中の質問は通常 composer（sendMessage）に一本化されており、第2 composer
+  // （旧 lecture-chat-popup）は廃止済み。モードバーの「▶ 再開」・プレイヤーバーの
+  // ▶ ボタンの双方から呼べるよう、一時停止フラグの解除と再生開始をここへ集約する。
   function resumeLecture() {
-    closeInterruptChat();
+    lectureState.pausedForQuestion = false;
+    renderModeBar();
     startPlayback();
   }
 
@@ -6039,6 +6353,11 @@
     setupRoleUI();
     initTabs();
     initInput();
+    initInspectMode();
+    // インスペクト・モード（学習UI再編 Phase 2, §5.2）: ログイン時に1回だけ
+    // フェッチしてキャッシュする（ホバーごとの API コールはしない）。
+    fetchUiAnchorsOnce();
+    initMaterialHoverLatch(); // 教材ホバー + ラッチ（学習UI再編 Phase 3）
     initDiscussUI();
     // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める
     // ようにする DI（着地モーダルのコース一致ガードの防御の二重化に使う）。

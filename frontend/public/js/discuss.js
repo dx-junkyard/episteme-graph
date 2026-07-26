@@ -73,13 +73,15 @@
     }).catch(function () { /* fire-and-forget: 失敗は無視 (DO6) */ });
   }
 
-  // 開幕画面は #material-here が「論文と議論中」であるあいだだけ有効なコンテキスト
-  // とみなす（app.js が discuss モード中に同期でこの文言をセットする）。非同期応答が
-  // 戻ったときに、既にトピック切替済みなら教材区画を上書きしない（新規APIを増やさず
-  // 既存 DOM の合図だけで遅延応答を破棄する）。
+  // 開幕画面は #material-body の data-discuss-active="true" であるあいだだけ有効な
+  // コンテキストとみなす（app.js の renderMaterialRegion が discuss モード判定のたびに
+  // 同期でこの属性をセットする。学習UI再編で表示専用だった #material-here を廃止した
+  // ため、不可視の合図として data 属性へ移した）。非同期応答が戻ったときに、既に
+  // トピック切替済みなら教材区画を上書きしない（新規APIを増やさず既存 DOM の合図だけで
+  // 遅延応答を破棄する）。
   function stillInDiscussContext() {
-    var here = document.getElementById("material-here");
-    return !!here && here.textContent === "論文と議論中";
+    var body = document.getElementById("material-body");
+    return !!body && body.dataset.discussActive === "true";
   }
 
   // ── 開幕画面（§3.3）─────────────────────────────────────────────────

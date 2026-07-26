@@ -278,19 +278,86 @@ body {
 .material-region .material-foot {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 10px;
   padding: 8px 12px;
   border-top: 0.5px solid var(--color-border-tertiary);
 }
-.material-region .material-here {
+
+/* 教材区画ヘッダ（②提示形式, §3.2）: 左=「教材 · トピック名」/ 右=提示形式セグメント。 */
+.material-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.material-header-title {
   flex: 1;
   min-width: 0;
-  font-size: 12px;
-  color: var(--color-text-info);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.material-format-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+.material-format-opt {
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: all 0.15s;
+}
+.material-format-opt:hover { background: var(--color-background-info); }
+.material-format-opt.active {
+  background: var(--color-text-info);
+  color: #fff;
+  border-color: var(--color-text-info);
+}
+.material-format-opt:disabled,
+.material-format-opt.disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.material-format-opt:disabled:hover,
+.material-format-opt.disabled:hover {
+  background: transparent;
+}
+.lecture-fullscreen-btn {
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.15s;
+}
+.lecture-fullscreen-btn:hover { background: var(--color-background-info); }
+.lecture-fullscreen-btn.active {
+  background: var(--color-text-info);
+  color: #fff;
+  border-color: var(--color-text-info);
+}
+.lecture-fullscreen-btn[hidden] { display: none; }
 
 /* 分割ハンドル: 教材区画と下段の比率をドラッグで調整する */
 .split-handle {
@@ -316,21 +383,25 @@ body {
   background: var(--color-text-info);
 }
 
-/* レクチャー中のレイアウト: 上段の教材区画（#material-region）を隠し、代わりに
-   スライドステージ（#lecture-slide-stage）をいっぱいに広げる。下段（チャット/
-   ホワイトボード）と分割ハンドルは畳む。 */
+/* レクチャー中のレイアウト（案①・§15）: 上段の教材区画（#material-region）だけを
+   スライドステージ（#lecture-slide-stage）に差し替える。下段（会話・composer・
+   分割ハンドル・モードバー）は畳まず、講義中もそのまま使える
+   （第2 composer=lecture-chat-popup は廃止し、質問は通常 composer に一本化）。 */
 .mn.lecture-on #material-region {
   display: none !important;
 }
 .mn.lecture-on .lecture-slide-stage {
   display: flex !important;
 }
-.mn.lecture-on #split-handle,
-.mn.lecture-on #chat-area,
-.mn.lecture-on #mode-bar,
-.mn.lecture-on #chat-input,
-.mn.lecture-on #send-btn,
-.mn.lecture-on #voice-mode-btn {
+
+/* 講義スライドの全画面表示（既定 OFF・任意, §3-2）: 教材ヘッダの「⛶ 全画面」で
+   下段（会話・composer・分割ハンドル・モードバー）を一時的に隠し、スライドを
+   メイン列いっぱいに占有させる。 */
+.mn.lecture-on.lecture-fullscreen #split-handle,
+.mn.lecture-on.lecture-fullscreen #mode-bar,
+.mn.lecture-on.lecture-fullscreen #chat-area,
+.mn.lecture-on.lecture-fullscreen .ia,
+.mn.lecture-on.lecture-fullscreen #discuss-bar {
   display: none !important;
 }
 
@@ -362,9 +433,12 @@ body {
 .mode-bar[hidden] { display: none; }
 .mode-bar.on-path { background: var(--color-background-info); color: var(--color-text-info); }
 .mode-bar.detour  { background: #fff6e6; color: var(--color-text-warning); }
+/* レクチャーを質問のため一時停止中（案①・旧 lecture-chat-popup の再開導線）。 */
+.mode-bar.lecture-paused { background: #fff6e6; color: var(--color-text-warning); }
 .mode-bar .mb-label { flex: 1; min-width: 0; }
 .mode-bar .mb-sub { font-size: 11px; opacity: 0.85; }
-.mode-bar .mb-return {
+.mode-bar .mb-return,
+.mode-bar .mb-resume {
   border: 0.5px solid var(--color-text-warning);
   background: transparent;
   color: var(--color-text-warning);
@@ -604,14 +678,9 @@ body {
   border-top: 0.5px solid var(--color-border-tertiary);
 }
 
-/* G4-L: レクチャートグルの無効理由をボタン近傍にインライン表示する */
-.lecture-toggle-wrap {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 2px;
-}
-
+/* G4-L: レクチャートグルの無効理由をボタン近傍にインライン表示する
+   （学習UI再編 Phase 1 で教材ヘッダの .material-format-toggle 内へ移設。
+   旧 .lecture-toggle-wrap の縦積みレイアウトは廃止し、セグメントの並びに合わせる）。 */
 .lecture-toggle-hint {
   font-size: 10px;
   color: var(--color-text-tertiary);
@@ -634,17 +703,19 @@ body {
   border-color: var(--color-border-info);
 }
 
+/* 視覚階層（§3.3）: composer のボタンは既定でセカンダリ（枠線＋背景透明）。
+   青塗り（プライマリ）は送信のみ — #send-btn / .ia button.primary に限定する。 */
 .ia button {
   padding: 10px 16px;
   border-radius: 12px;
-  background: var(--color-text-info);
-  color: #fff;
-  border: none;
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-secondary);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
   font-family: inherit;
-  transition: opacity 0.12s;
+  transition: opacity 0.12s, background 0.12s, border-color 0.12s;
 }
 
 .ia button:hover {
@@ -654,6 +725,13 @@ body {
 .ia button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+#send-btn,
+.ia button.primary {
+  background: var(--color-text-info);
+  color: #fff;
+  border: none;
 }
 
 /* ── Right panel ────────────────────────────────────────────────── */
@@ -703,10 +781,26 @@ body {
   flex: 1;
 }
 
-.rp-danger-zone {
+/* 右パネル降格（§3.6）: 破壊的操作（履歴削除）は折りたたみ配下に置く。
+   <details> 自体が .rp（flex column）の末尾に押し出される。 */
+.rp-collapse {
   margin-top: auto;
   padding-top: 14px;
   border-top: 0.5px solid var(--color-border-tertiary);
+}
+.rp-collapse summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  list-style: none;
+  user-select: none;
+}
+.rp-collapse summary::-webkit-details-marker { display: none; }
+.rp-collapse summary::marker { content: ""; }
+.rp-collapse[open] summary { margin-bottom: 10px; }
+
+.rp-danger-zone {
+  padding-top: 4px;
 }
 
 /* ── Panel sections ─────────────────────────────────────────────── */
@@ -2742,41 +2836,6 @@ body {
   background: var(--color-background-success, rgba(93,202,165,0.12));
 }
 
-/* Lecture mode toggle button */
-.lecture-toggle-btn {
-  padding: 6px 14px;
-  border-radius: 8px;
-  border: 1px solid var(--color-border-info);
-  background: transparent;
-  color: var(--color-text-info);
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  transition: all 0.15s;
-  white-space: nowrap;
-}
-
-.lecture-toggle-btn:hover {
-  background: var(--color-background-info);
-}
-
-.lecture-toggle-btn.active {
-  background: var(--color-text-info);
-  color: #fff;
-}
-
-.lecture-toggle-btn:disabled,
-.lecture-toggle-btn.disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.lecture-toggle-btn:disabled:hover,
-.lecture-toggle-btn.disabled:hover {
-  background: transparent;
-}
-
 /* Lecture player bar */
 .lecture-player {
   display: none;
@@ -3018,146 +3077,12 @@ body {
   width: auto;
 }
 
-/* Interrupt chat popup */
-.lecture-chat-popup {
-  display: none;
-  position: fixed;
-  bottom: 80px;
-  right: 24px;
-  width: 380px;
-  max-height: 480px;
-  background: var(--color-background-primary);
-  border-radius: 16px;
-  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.15);
-  z-index: 200;
-  flex-direction: column;
-  overflow: hidden;
-}
-
-.lecture-chat-popup.visible {
-  display: flex;
-}
-
-.lecture-chat-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 12px 16px;
-  border-bottom: 0.5px solid var(--color-border-tertiary);
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-primary);
-}
-
-.lecture-chat-close {
-  width: 28px;
-  height: 28px;
-  border-radius: 50%;
-  border: none;
-  background: var(--color-background-secondary);
-  color: var(--color-text-secondary);
-  font-size: 14px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.lecture-chat-messages {
-  flex: 1;
-  overflow-y: auto;
-  padding: 12px 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  max-height: 320px;
-}
-
-.lecture-chat-input-area {
-  display: flex;
-  gap: 6px;
-  padding: 10px 12px;
-  border-top: 0.5px solid var(--color-border-tertiary);
-}
-
-.lecture-chat-input-area input {
-  flex: 1;
-  padding: 8px 12px;
-  border: 0.5px solid var(--color-border-secondary);
-  border-radius: 10px;
-  font-size: 13px;
-  font-family: inherit;
-  outline: none;
-}
-
-.lecture-chat-input-area input:focus {
-  border-color: var(--color-border-info);
-}
-
-.lecture-chat-input-area button {
-  padding: 8px 14px;
-  border-radius: 10px;
-  background: var(--color-text-info);
-  color: #fff;
-  border: none;
-  font-size: 12px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-}
-
-.lecture-mic-btn {
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  border: 1px solid var(--color-border-secondary);
-  background: var(--color-background-secondary);
-  color: var(--color-text-secondary);
-  font-size: 15px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  flex-shrink: 0;
-  transition: all 0.15s;
-}
-
-.lecture-mic-btn:hover {
-  background: var(--color-background-info);
-  border-color: var(--color-border-info);
-  color: var(--color-text-info);
-}
-
-.lecture-mic-btn.recording {
-  background: #fee2e2;
-  border-color: #ef4444;
-  color: #ef4444;
-  animation: mic-pulse 1s ease-in-out infinite;
-}
-
+/* mic-pulse キーフレームは .voice-mode-btn.active（ハンズフリー音声会話）が使う。
+   旧 lecture-chat-popup（第2 composer）の録音マイクボタンは学習UI再編 案①で
+   廃止済み（質問は通常 composer に一本化）だが、キーフレーム自体は残す。 */
 @keyframes mic-pulse {
   0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, 0.4); }
   50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
-}
-
-.lecture-chat-resume-btn {
-  display: block;
-  width: calc(100% - 24px);
-  margin: 8px 12px;
-  padding: 10px;
-  border-radius: 10px;
-  background: var(--color-text-success);
-  color: #fff;
-  border: none;
-  font-size: 13px;
-  font-weight: 500;
-  cursor: pointer;
-  font-family: inherit;
-  transition: opacity 0.12s;
-}
-
-.lecture-chat-resume-btn:hover {
-  opacity: 0.85;
 }
 
 /* ── Lecture Script Studio (Issue #70) ───────────────────────── */
@@ -6099,8 +6024,9 @@ body {
 }
 
 /* ============ ヘルプルート（使い方ボタン・マニュアル出典） ============ */
+/* セカンダリ見た目（枠線＋背景透明）: プライマリは #send-btn のみ（§3.3）。 */
 .help-usage-btn {
-  background: var(--color-background-secondary);
+  background: transparent;
   color: var(--color-text-secondary);
   border: 1px solid var(--color-border-secondary);
   flex-shrink: 0;
@@ -6127,19 +6053,112 @@ body {
   white-space: nowrap;
 }
 
-/* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
-.voice-mode-btn {
-  width: 38px;
-  height: 38px;
-  border-radius: 50%;
-  border: 1px solid var(--color-border-secondary);
+/* ============ インスペクト・モード（学習UI再編 Phase 2, §4/§5） ============ */
+/* 常設バナー: トップバー（48px）のすぐ下に控えめに固定表示する。 */
+.inspect-banner {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  z-index: 1400;
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+  border-bottom: 1px solid var(--color-border-info);
+  text-align: center;
+  font-size: 12.5px;
+  padding: 6px 12px;
+}
+.inspect-banner[hidden] { display: none; }
+
+/* ON 中は UI 論理アンカー登録済み要素（IH9）にだけ cursor:help + 軽いハイライトを出す。
+   多くのトップバーボタンが inline style で cursor:pointer を持つため !important が必要。 */
+body.inspect-mode [data-ui-anchor] { cursor: help !important; }
+body.inspect-mode [data-ui-anchor]:hover {
+  outline: 1px dashed var(--color-border-info);
+  outline-offset: 2px;
+}
+
+/* マニュアル節ツールチップ（§5.2〜5.4）。JS が innerHTML と位置を書き換える。
+   pointer-events:none にして、ツールチップ自体がホバー/mouseout 判定に干渉しないようにする。
+   モーダル（discuss-landing-overlay z-index:1460 等）より下に置く。 */
+.inspect-tooltip {
+  position: fixed;
+  z-index: 1400;
+  max-width: 320px;
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border-info);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 6px 20px rgba(31, 37, 48, .16);
+  font-size: 12.5px;
+  line-height: 1.5;
+  pointer-events: none;
+}
+.inspect-tooltip[hidden] { display: none; }
+.inspect-tooltip-source {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--color-text-info);
+  background: var(--color-background-info);
+  border-radius: 8px;
+  padding: 1px 8px;
+  margin-bottom: 6px;
+}
+.inspect-tooltip-title { font-weight: 600; margin-bottom: 4px; }
+.inspect-tooltip-body { color: var(--color-text-secondary); white-space: pre-wrap; }
+
+/* ============ 教材ホバー + ラッチ（学習UI再編 Phase 3, §5.1/§6） ============ */
+/* #inspect-tooltip 容器をそのまま共用する（インスペクトと教材ホバーは排他なので
+   同じ箱を使い回してよい。第2のツールチップ実装は作らない）。出所チップの色だけ
+   教材用（📄 教材）に変える — インスペクトの 📖 使い方（info 色）と混同しない（IH1）。 */
+.inspect-tooltip.material .inspect-tooltip-source {
+  color: var(--color-text-secondary);
   background: var(--color-background-secondary);
-  font-size: 17px;
+}
+/* ピン留め中（ラッチ, §6.1）: マウスが離れても残っていることが一目で分かるよう
+   枠を強調する。ツールチップ自体は pointer-events:none のままだが、✕ ボタンだけ
+   クリックできるようにする（下の .inspect-tooltip-close 参照）。 */
+.inspect-tooltip.pinned {
+  border: 2px solid var(--color-border-primary, #1f2530);
+  box-shadow: 0 8px 24px rgba(31, 37, 48, .28);
+}
+.inspect-tooltip-close {
+  display: none;
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
   cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 4px;
+}
+.inspect-tooltip.pinned .inspect-tooltip-close {
+  display: inline-block;
+  pointer-events: auto; /* 容器は pointer-events:none だが ✕ だけは押せるようにする */
+}
+
+/* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
+/* セカンダリ見た目（枠線＋背景透明）: プライマリは #send-btn のみ（§3.3）。
+   ラベル付き（🎤 音声で話す）になったため固定サイズの円形をやめ、他の
+   composer ボタンと同じ可変幅のピル形状にする。 */
+.voice-mode-btn {
+  padding: 10px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  font-family: inherit;
   display: flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
   flex-shrink: 0;
+  white-space: nowrap;
   transition: all 0.15s;
 }
 .voice-mode-btn:hover {
@@ -8266,7 +8285,7 @@ body {
    discuss モード（論文と話す）Phase 1 — app.js 追加分
    （docs/features/discussion_mode_design.md §3.2/3.4/3.6）
    ・サイドバー二枚看板（順番に学ぶ / この論文と議論する）
-   ・入力欄上部のスコープ切替 ＋「もっと自由に話す」常設リンク
+   ・入力欄上部のスコープ切替（「もっと自由に話す」常設リンクは学習UI再編で重複削除済み）
    ・モードバー discuss 色・教材区画プレースホルダ
    「寄り道」語彙は使わない（DM5）。数値・件数・網羅率は出さない（DM6）。
    ============================================================ */
@@ -8338,21 +8357,6 @@ body {
   color: #5b4b8a;
   font-weight: 600;
 }
-
-/* 「もっと自由に話す」常設リンク（通常トピック中のみ表示。discuss モード中は非表示）。 */
-.discuss-free-link-row { margin: 0; }
-.discuss-free-link-row[hidden] { display: none; }
-.discuss-free-link {
-  border: none;
-  background: none;
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-family: inherit;
-  cursor: pointer;
-  padding: 3px 2px;
-  text-decoration: underline;
-}
-.discuss-free-link:hover { color: var(--color-text-primary); }
 
 /* 教材区画: discuss モードのプレースホルダカード（Phase 2 で開幕画面に置き換わる前提）。 */
 .discuss-placeholder {

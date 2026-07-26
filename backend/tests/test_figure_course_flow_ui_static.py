@@ -281,6 +281,12 @@ function normalizeMaterialLineBreaks(t){ return String(t||"").replace(/\r\n/g,"\
 function normalizeMaterialEvidenceId(v){ return String(v||"").trim().replace(/^\[\[/,"").replace(/\]\]$/,"").replace(/^equation:/,"").trim().replace(/^(?:eq_){2,}/i,"eq_"); }
 function renderMaterialKatex(){ return "<span class=\"katex\"></span>"; }
 function renderMaterialEquationBody(){ return ""; }
+// 学習UI再編 Phase 3（教材ホバー+ラッチ）: renderMaterialFigureCard がホバー用の
+// registerMaterialEvidenceChipEntry を呼ぶようになったため、renderMaterialChunk
+// 単体評価のこの最小ハーネスにも同じスタブを用意する（他ハーネスは extractMany の
+// リストに既に含めている）。
+var materialEvidenceChipItems = {};
+eval(extractFrom(src, "registerMaterialEvidenceChipEntry"));
 eval(extractFrom(src, "renderMaterialFigureCard"));
 eval(extractFrom(src, "mdBlocksToHtml"));
 eval(extractFrom(src, "renderMaterialChunk"));
@@ -295,6 +301,9 @@ const withFigure = renderMaterialChunk({
 out.resolvesImg = withFigure.indexOf("data-figure-fetch-url") >= 0;
 out.resolvesCaption = withFigure.indexOf("装置の概観") >= 0;
 out.noRawPlaceholderLeft = withFigure.indexOf("[[FIGURE_1]]") < 0;
+// Phase 3: 画像付き図カードもホバー対象になり、data-evidence-ref="figure:fig1" を持つ。
+out.hasHoverAnchor = withFigure.indexOf('data-evidence-ref="figure:fig1"') >= 0;
+out.registryPopulated = Object.keys(materialEvidenceChipItems).length === 1;
 // image_url が空でも壊れず「取得できませんでした」に縮退する（情報を落とさない）
 const missingUrl = renderMaterialChunk({
   text: "[[FIGURE_1]]",
@@ -313,3 +322,7 @@ process.stdout.write(JSON.stringify(out));
     assert out["resolvesCaption"]
     assert out["noRawPlaceholderLeft"]
     assert out["missingUrlDegradesGracefully"]
+    # 学習UI再編 Phase 3（教材ホバー+ラッチ）: 画像付き図カードも data-evidence-ref を
+    # 持ち、既存データがそのまま registerMaterialEvidenceChipEntry に登録される。
+    assert out["hasHoverAnchor"], "画像付き図カードに data-evidence-ref が付与されていません"
+    assert out["registryPopulated"]

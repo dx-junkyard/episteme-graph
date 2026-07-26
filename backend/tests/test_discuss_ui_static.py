@@ -11,9 +11,12 @@
    で存在し、ナビゲーションに配線されている。
 3. スコープ2段切替の2ラベルが存在し、値がバックエンド契約
    （course_sources / all_visible）と一致する。
-4. 「もっと自由に話す」常設リンクが存在し discuss モードへ配線されている。
+4. 「もっと自由に話す」常設リンクはサイドバー二枚看板と完全重複のため削除済み
+   （学習UI再編 docs/features/learning_ui_inspect_hover_design.md §3.5）。discuss への
+   入口は二枚看板に一本化されており、free-link の痕跡が HTML/JS/CSS に残っていない。
 5. discuss 関連 UI 文言に「寄り道」という語が一切含まれない（DM5）。
 6. discuss モードでは `fetchTopicMaterial` を呼ばない（予約トピックは実在しない）。
+7. モードバーは通常状態（on-path）では表示されない（学習UI再編 §3.4 静音化）。
 """
 from __future__ import annotations
 
@@ -156,19 +159,35 @@ class TestScopeToggle:
         assert 'classList.toggle("active"' in block
 
 
-class TestFreeLinkAndModeBar:
-    def test_free_link_present_in_html_and_wired(self):
-        html = _read(INDEX_HTML)
-        assert 'id="discuss-free-link-btn"' in html
-        assert "もっと自由に話す" in html
-        js = _read(APP_JS)
-        block = _extract_function_body(js, "function initDiscussUI() {")
-        assert "enterDiscussMode()" in block
+class TestFreeLinkRemovedAndModeBar:
+    """重複導線の削除（設計 §3.5）: 「もっと自由に話す」はサイドバー二枚看板と
+    完全重複していたため削除済み。discuss への入口は二枚看板に一本化されている
+    （TestTwoBannerEntry が唯一の入口であることを検査する）。"""
 
-    def test_free_link_hidden_while_already_in_discuss_mode(self):
+    def test_free_link_absent_from_html(self):
+        html = _read(INDEX_HTML)
+        assert 'id="discuss-free-link-btn"' not in html
+        assert 'id="discuss-free-link-row"' not in html
+        assert "もっと自由に話す" not in html
+
+    def test_free_link_absent_from_js(self):
+        js = _read(APP_JS)
+        assert "discuss-free-link-btn" not in js
+        assert "discuss-free-link-row" not in js
+        assert "freeLinkBtn" not in js
+        assert "freeLinkRow" not in js
+        assert "showFreeLink" not in js
+
+    def test_free_link_absent_from_css(self):
+        css = _read(STYLES_CSS)
+        assert "discuss-free-link" not in css
+
+    def test_render_discuss_bar_no_longer_touches_free_link(self):
+        """renderDiscussBar はスコープトグルの active 表示のみを担う。"""
         js = _read(APP_JS)
         block = _extract_function_body(js, "function renderDiscussBar() {")
-        assert "!isDiscussMode()" in block
+        assert "freeLinkRow" not in block
+        assert 'classList.toggle("active"' in block
 
     def test_mode_bar_discuss_branch_is_neutral_and_terse(self):
         js = _read(APP_JS)
@@ -180,6 +199,17 @@ class TestFreeLinkAndModeBar:
         assert "寄り道" not in discuss_branch
         # 復帰督促ボタン（本筋へ戻る）は discuss では出さない
         assert "mb-return" not in discuss_branch
+
+    def test_mode_bar_on_path_is_hidden(self):
+        """§3.4 モードバー静音化: 通常状態（on-path）ではバー自体を表示しない
+        （discuss/detour のときだけ「特殊状態」として出す）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderModeBar() {")
+        idx = block.rindex("} else {")
+        else_branch = block[idx:]
+        assert "bar.hidden = true;" in else_branch
+        # 旧「本筋に沿って学習中」の常設表示文言は残っていない
+        assert "本筋に沿って学習中" not in js
 
 
 class TestDiscussPlaceholderMaterialRegion:
@@ -215,7 +245,6 @@ class TestNoDetourVocabInDiscussUi:
         "discuss-mode-btn",
         "discuss-bar",
         "discuss-scope",
-        "discuss-free-link",
         "discuss-placeholder",
     ]
 
@@ -267,7 +296,6 @@ class TestDiscussCssPresent:
             ".discuss-bar",
             ".discuss-scope-toggle",
             ".discuss-scope-opt",
-            ".discuss-free-link",
             ".discuss-placeholder",
         ):
             assert selector in css, f"missing CSS selector: {selector}"

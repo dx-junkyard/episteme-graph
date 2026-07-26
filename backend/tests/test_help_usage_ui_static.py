@@ -6,19 +6,29 @@
 返す `LearningChatResponse`）は並行実装中のため、ここでは JS/HTML/CSS 側の
 静的契約のみを検証する:
 
-1. §1-3-1 ヘルプボタン: 入力欄付近に `support_action='usage_help'` を送る
-   typed action 経路（分類LLMを経由しない誤爆ゼロの一次経路）が存在する。
+1. §1-3-1 ヘルプボタン: `support_action='usage_help'` を送る typed action 経路
+   （分類LLMを経由しない誤爆ゼロの一次経路）が存在する。
+   **学習UI再編 Phase 2（docs/features/learning_ui_inspect_hover_design.md §4）で、
+   ボタン押下そのものの挙動は「即送信」から「使い方インスペクト・モードの
+   ON/OFF トグル」に置き換わった。** typed usage_help の送信は
+   `sendUsageHelpMessage()`（composer/音声の発話経路から呼ばれる）に移設済み —
+   ID・typed action 配線・外側クリック許可リストという不変条件は維持する。
 2. §1-3-6 出典表示: `manual_citations` があればアシスタントバブルに出典行を
    表示し、既存の `/source-chunk/` チャンクポップアップには接続しない
    （マニュアル節は chunk ではないため）。
 3. §1-3-7 音声フェイルソフト: ハンズフリーモードで `manual_citations` が
    非空のときは教材パネル表示（`/source-chunk/` フェッチ）をスキップする。
+   Phase 2 でインスペクト・モード中は casual ではなく usage_help ルートへ
+   分岐するようになったが、manual_citations ガードの位置関係は不変。
 4. 追加コードにポーリング（`setInterval`）を持ち込まない。
 5. §4-3 UI内コンテキストヘルプ（Phase 2）: 送信時点の画面モード
    (`screen_mode: "voice"|"lecture"|"chat"`) を判定する pure 関数が存在し、
    ヘルプボタン・通常送信・音声経路すべてが合流する `sendMessage` の
    送信ペイロード構築に組み込まれている。proactive カード・滞留検知・
    自動ポップアップ・ポーリングは作らない（G4）。
+
+インスペクト・モード自体（状態機械・ツールチップ・no_hit 記録・ui_anchor 送信）の
+詳細な検証は `test_learning_ui_phase2_static.py` に分離する。
 """
 from __future__ import annotations
 
@@ -39,26 +49,37 @@ class TestHelpUsageButton:
         src = _read(INDEX_HTML)
         assert 'id="help-usage-btn"' in src
 
-    def test_help_button_wired_to_typed_usage_help_action(self):
+    def test_help_button_toggles_inspect_mode_not_immediate_send(self):
+        """Phase 2: 押下は使い方インスペクト・モードの ON/OFF トグルのみを行う。
+        旧仕様（押下で即 usage_help 送信）はここでは行わない — 送信は
+        composer/音声の発話経路（sendUsageHelpMessage 経由）に移設済み。"""
         src = _read(APP_JS)
         assert 'document.getElementById("help-usage-btn")' in src
         start = src.index('const helpUsageBtn = document.getElementById("help-usage-btn");')
         end = src.index("\n    }", start)
         block = src[start:end]
-        assert 'support_action: "usage_help"' in block
-        assert "sendMessage(text" in block
-        # 誤爆ゼロの一次経路: 分類LLM (_classify_intent 相当) を経由せず、
-        # 既存の typed action 送信経路 (sendMessage への直接 payload) を再利用する。
+        assert "toggleInspectMode();" in block
+        # 押下そのものはメッセージを送らない（送信は sendUsageHelpMessage 側の責務）。
+        assert "sendMessage(" not in block
+        assert "support_action" not in block
         assert "setInterval" not in block
         assert "confirm(" not in block  # 確認ダイアログは不要（誤爆ゼロの一次経路）
 
-    def test_help_button_falls_back_to_fixed_message_when_input_empty(self):
+    def test_send_usage_help_message_falls_back_to_fixed_message_when_empty(self):
+        """typed usage_help の送信ロジック（旧ヘルプボタンの送信ブロック）は
+        `sendUsageHelpMessage()` に再利用されている。入力が空なら固定文へ
+        フォールバックし、`support_action='usage_help'` で送る。"""
         src = _read(APP_JS)
-        start = src.index('const helpUsageBtn = document.getElementById("help-usage-btn");')
-        end = src.index("\n    }", start)
+        assert "function sendUsageHelpMessage(typedText) {" in src
+        start = src.index("function sendUsageHelpMessage(typedText) {")
+        end = src.index("\n  }", start)
         block = src[start:end]
         assert "この画面の使い方を教えてください" in block
         assert "typed || " in block
+        assert 'support_action: "usage_help"' in block
+        assert "sendMessage(text" in block
+        assert "setInterval" not in block
+        assert "confirm(" not in block
 
     def test_help_button_added_to_material_collapse_outside_click_allowlist(self):
         """機能2の自動畳み（collapseMaterialForChat）が、ヘルプボタン押下直後に
@@ -102,11 +123,16 @@ class TestManualCitationsRendering:
 
 class TestVoicePanelFailSoft:
     def test_voice_panel_skips_material_fetch_when_manual_citations_present(self):
+        """`handleVoiceSegment` は Phase 2 でインスペクト・モード分岐
+        （casual か usage_help かで payload を切り替える）を得たため、
+        直前の `const data = ...` 一行は固定文字列でピン留めしない
+        （`async function handleVoiceSegment() {` からの関数本体で検査する）。"""
         src = _read(APP_JS)
         assert "showVoiceSourceMaterial(data.sources || []);" in src
-        start = src.index("const data = await sendMessage(text, { intent_mode: \"casual\" });")
-        end = src.index("const spoken = await speakVoiceAnswer(data.answer);")
+        start = src.index("async function handleVoiceSegment() {")
+        end = src.index("const spoken = await speakVoiceAnswer(data.answer);", start)
         block = src[start:end]
+        assert '{ intent_mode: "casual" }' in block
         assert "data.manual_citations" in block
         assert "showVoiceSourceMaterial" in block
         # ガード節の内側で呼ばれている（無条件呼び出しに戻っていない）こと。

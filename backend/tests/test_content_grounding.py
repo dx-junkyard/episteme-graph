@@ -1,6 +1,7 @@
 """質問ボタン統合 + 出典3分類（教材/別の資料/モデル生成）のテスト。
 
-- 「教材に沿って質問」「自由に質問・探索」ボタンが「質問」1つに統合されていること
+- 「教材に沿って質問」「自由に質問・探索」ボタンが単一の送信ボタン（#send-btn、
+  学習UI再編で「質問」→「送信」に改称）に統合されていること
 - search_chunks_with_metadata が material_id を返すこと（教材スコープ判定に必要）
 - learning_chat が origin（course_material/other_material）と content_grounding を
   正しい優先順位（教材 > 別の資料 > モデル生成）で計算・返却すること
@@ -33,7 +34,9 @@ class TestButtonConsolidation:
         html = _read(INDEX_HTML)
         assert 'id="send-explore"' not in html
         assert 'id="send-btn"' in html
-        assert ">質問<" in html
+        # 学習UI再編（docs/features/learning_ui_inspect_hover_design.md §3.3）で
+        # 「質問」→「送信」に改称（視覚階層: プライマリ=送信のみ）。
+        assert ">送信<" in html
         assert "教材に沿って質問" not in html
         assert "自由に質問・探索" not in html
 

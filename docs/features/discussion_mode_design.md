@@ -5,6 +5,11 @@
 - 関連正本: `docs/features/personal_knowledge_network_design.md` / `component_evidence_redesign.md` /
   `reconstruction_loop_design.md` / `assistant_common_infra_design.md` / `manual_help_kb_design.md`（§1-1 が
   本書 Phase 0 と同じ全域検索の事実を独立に確認済み）
+- **supersede 注記（学習UI再編, 2026-07-26）**: `docs/features/learning_ui_inspect_hover_design.md`
+  §3.5 により、入力欄上の「🗣 もっと自由に話す」常設リンク（`discuss-free-link-row` /
+  `discuss-free-link-btn`、本書 §3.2）はサイドバー二枚看板と完全重複するため**削除**された。
+  discuss への入口は二枚看板に一本化。本書 §3.2/§6.5/§9 のうち free-link に触れる記述は
+  歴史的経緯として残すが、現行実装はリンク非搭載。
 - 討議の性格: チームA（好奇心最大化: SDT・情報ギャップ理論・expertise reversal を支柱とする急進案）・
   チームB（構造と足場: 認知負荷理論・ICAP・productive failure を支柱とする条件設計案）・
   チームC（プロダクト現実: 既存アーキテクチャとの整合・実装コスト最小化案）の3チームが独立検討し、

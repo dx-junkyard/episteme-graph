@@ -307,6 +307,13 @@ class LearningChatRequest(BaseModel):
     # "lecture" | "chat" | "voice"。HELP ルートの search_manual に screen ヒントとして渡し、
     # front-matter screen: 一致節を検索の第一候補にする。未指定は従来挙動（screen=None）。
     screen_mode: str | None = None
+    # インスペクト・モード（設計 docs/features/learning_ui_inspect_hover_design.md §9-1）:
+    # トップバー「？」ON 中にホバー（ラッチ）していた UI 論理アンカーID
+    # （core.help_kb.ui_anchors.UI_ANCHORS / KNOWN_UI_ANCHOR_IDS のキー）。
+    # support_action="usage_help" と併せて送られ、_usage_help_response がマップ済みなら
+    # 対応マニュアル節を検索より優先して直接解決する（無ければ従来の search_manual に
+    # フォールバック）。痕跡の anchor 値は常に "ui:<ui_anchor>" として記録される。
+    ui_anchor: str | None = None
 
 
 class LearningSupportNextAction(BaseModel):
