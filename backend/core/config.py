@@ -464,6 +464,14 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_PRICE_TABLE_PATH"),
     )
 
+    # --- M層（LLM モデル選択, core/llm_policy.py） ---
+    # モデルカタログ (JSON) のパス。空/不在/パース不能なら catalog_models() は空リスト
+    # を返す（M4: 選択肢を捏造しない）。正本: docs/features/llm_model_selection_design.md §5
+    llm_model_catalog_path: str = Field(
+        default="",
+        validation_alias=AliasChoices("LLM_MODEL_CATALOG_PATH"),
+    )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

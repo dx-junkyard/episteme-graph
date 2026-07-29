@@ -21,15 +21,29 @@
         <a href="/" style="color:var(--color-text-info);text-decoration:none;font-size:12px">学習画面へ</a>
         <span style="opacity:.3">|</span>
         <span id="admin-username"></span>
-        <button id="admin-next-steps-toggle" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="状態から導出した次のタスク">📋 次にやること</button>
-        <button id="vg-inbox-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="共有物の更新通知">🔔 通知</button>
+        <button id="admin-next-steps-toggle" data-ui-anchor="header.next-steps" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="状態から導出した次のタスク">📋 次にやること</button>
+        <!-- header.notifications / versioning.inbox: 通知タブ企画がドキュメント2系統
+             (共通ヘッダー節 + V層版管理節) から同じボタンを参照しているため、
+             data-ui-anchor には両アンカーIDを空白区切りで併記する
+             （admin-help-inspect.js 側でどちらか登録済みの方を解決する）。 -->
+        <button id="vg-inbox-btn" data-ui-anchor="header.notifications" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="共有物の更新通知">🔔 通知</button>
         <span style="opacity:.3">|</span>
-        <button id="logout-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
+        <!-- admin「？使い方」インスペクト・モード（学習画面の #help-usage-btn と同型）。
+             機構本体は js/admin-help-inspect.js。 -->
+        <button id="admin-help-usage-btn" class="admin-help-usage-btn" data-ui-anchor="header.inspect" type="button" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px" title="この画面の使い方インスペクト・モードを ON/OFF（ON中は部品にカーソルを合わせると説明が出ます）">❓ 使い方</button>
+        <span style="opacity:.3">|</span>
+        <button id="logout-btn" data-ui-anchor="header.logout" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px">ログアウト</button>
       </div>
     </div>
 
+    <!-- インスペクト・モード常設バナー（admin「？使い方」）。既定 hidden。
+         クリックはバナー自身の中では通常のクリックを許可する（他は release のみ）。 -->
+    <div class="admin-inspect-banner" id="admin-inspect-banner" hidden>使い方を確認中 — 知りたい部分にカーソルを合わせてください（Esc で終了）</div>
+    <!-- インスペクト・ツールチップ容器。JS が innerHTML と位置を都度書き換える。 -->
+    <div class="admin-inspect-tooltip" id="admin-inspect-tooltip" hidden></div>
+
     <!-- Tab navigation — グループ別プルダウン（.admin-tab の data-tab / on は維持し、見せ方だけ束ねる） -->
-    <div class="admin-tabs" id="adminTabs">
+    <div class="admin-tabs" id="adminTabs" data-ui-anchor="header.tab-bar">
       <div class="admin-tab-group" data-group="content">
         <button class="admin-tab-group-trigger" type="button" aria-haspopup="true" aria-expanded="false">
           <span class="admin-tab-group-label">コンテンツ</span>
@@ -80,6 +94,7 @@
           <button class="admin-tab" data-tab="error-analysis" id="tab-btn-error-analysis" role="menuitem" style="display:none">エラー解析</button>
           <button class="admin-tab" data-tab="manual-editor" id="tab-btn-manual-editor" role="menuitem" style="display:none">マニュアル編集</button>
           <button class="admin-tab" data-tab="discuss-observation" id="tab-btn-discuss-observation" role="menuitem" style="display:none">discuss 観測</button>
+          <button class="admin-tab" data-tab="llm-models" id="tab-btn-llm-models" role="menuitem" style="display:none">AIモデル</button>
         </div>
       </div>
     </div>
@@ -94,6 +109,10 @@
          SYSTEM_ADMIN のみ。中身は admin-discuss-observation.js が描画 -->
     <div class="admin-panel" id="tab-discuss-observation"></div>
 
+    <!-- M層（LLM モデル選択, migration 061）運用タブ「AIモデル」— SYSTEM_ADMIN のみ。
+         中身は admin-llm-models.js が描画 -->
+    <div class="admin-panel" id="tab-llm-models"></div>
+
     <!-- Field Atlas operations dashboard -->
     <div class="admin-panel" id="tab-atlas">
       <div class="admin-section">
@@ -103,14 +122,14 @@
             <p class="atlas-admin-subtitle">公開中の地図、編集中の次版、修正報告、コース配置をここで管理します。</p>
           </div>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="atlas-cartridge-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="atlas-cartridge-select" data-ui-anchor="atlas.cartridge-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">分野を選択...</option>
             </select>
-            <button id="atlas-refresh" class="admin-action-btn">更新</button>
-            <button id="atlas-add-domain-toggle" class="admin-action-btn">新しい分野マップを作る</button>
+            <button id="atlas-refresh" data-ui-anchor="atlas.refresh" class="admin-action-btn">更新</button>
+            <button id="atlas-add-domain-toggle" data-ui-anchor="atlas.add-domain-toggle" class="admin-action-btn">新しい分野マップを作る</button>
             <!-- ドメインライフサイクル（migration 057）: retire は共同財からの退場・履歴と学習者表示は維持 -->
-            <button id="atlas-domain-retire" class="admin-action-btn" style="display:none">この分野を廃止する</button>
-            <button id="atlas-domain-restore" class="admin-action-btn" style="display:none">復帰する</button>
+            <button id="atlas-domain-retire" data-ui-anchor="atlas.domain-retire" class="admin-action-btn" style="display:none">この分野を廃止する</button>
+            <button id="atlas-domain-restore" data-ui-anchor="atlas.domain-restore" class="admin-action-btn" style="display:none">復帰する</button>
           </div>
         </div>
         <div id="atlas-overview" class="atlas-admin-overview" aria-live="polite">
@@ -142,7 +161,7 @@
           <textarea id="atlas-new-domain-desc" rows="2" placeholder="分野の説明（地図の対応案を作るために使います）"
             style="width:100%;font-size:12.5px;border:1px solid var(--color-border);border-radius:4px;padding:6px;box-sizing:border-box;margin-top:6px"></textarea>
           <div style="margin-top:6px">
-            <button id="atlas-add-domain" class="admin-action-btn">分野を追加して地図の対応案を作る</button>
+            <button id="atlas-add-domain" data-ui-anchor="atlas.add-domain-toggle" class="admin-action-btn">分野を追加して地図の対応案を作る</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
@@ -150,8 +169,10 @@
           公開済みの版は直接変更せず、新しい版として編集します。
         </p>
         <div id="atlas-frozen-info" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:12px"></div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
-          <button id="atlas-generate" class="admin-action-btn">次版の編集を始める</button>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px" data-ui-anchor="atlas.generate">
+          <button id="atlas-generate" data-ui-anchor="atlas.generate" class="admin-action-btn">次版の編集を始める</button>
+          <!-- M層 Phase 3（§6.5）: 骨格生成モデルのチップ。中身は AdminLlmModels.createModelChip が描画 -->
+          <span id="atlas-generate-model-chip"></span>
         </div>
         <div id="atlas-draft-area" style="display:none">
           <div style="display:flex;align-items:center;gap:8px;margin:12px 0 6px;flex-wrap:wrap">
@@ -161,7 +182,7 @@
               <button id="atlas-tab-preview" class="admin-action-btn atlas-editor-tab on" data-atlas-view="preview" role="tab" aria-selected="true" style="border:none;border-radius:0">地図プレビュー</button>
               <button id="atlas-tab-json" class="admin-action-btn atlas-editor-tab" data-atlas-view="json" role="tab" aria-selected="false" style="border:none;border-radius:0">詳細設定（JSON）</button>
             </div>
-            <button id="atlas-assist-toggle" class="admin-action-btn" title="地図の一部分をAIと対話しながら修正します">AIと部分修正</button>
+            <button id="atlas-assist-toggle" data-ui-anchor="atlas.assist-toggle" class="admin-action-btn" title="地図の一部分をAIと対話しながら修正します">AIと部分修正</button>
           </div>
           <div id="atlas-view-json" style="display:none">
             <textarea id="atlas-draft-editor" rows="18" spellcheck="false"
@@ -172,13 +193,13 @@
           <div id="atlas-assist-panel" style="display:none;border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-top:8px;background:var(--color-bg-secondary)"></div>
           <div id="atlas-validation" style="font-size:12px;margin:6px 0"></div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:6px">
-            <button id="atlas-save-draft" class="admin-action-btn">次版を保存</button>
+            <button id="atlas-save-draft" data-ui-anchor="atlas.save-draft" class="admin-action-btn">次版を保存</button>
             <span style="flex:1"></span>
             <input id="atlas-freeze-version" placeholder="公開版 (例: 2026.1)"
               style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:120px">
             <input id="atlas-freeze-note" placeholder="変更内容のメモ"
               style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;width:220px">
-            <button id="atlas-freeze" class="admin-action-btn atlas-admin-primary">公開前チェック</button>
+            <button id="atlas-freeze" data-ui-anchor="atlas.freeze" class="admin-action-btn atlas-admin-primary">公開前チェック</button>
           </div>
         </div>
         <div id="atlas-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:10px"></div>
@@ -189,7 +210,7 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
           <h3 class="admin-section-title" style="margin-bottom:0">修正報告のレビュー</h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="atlas-report-status-filter" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="atlas-report-status-filter" data-ui-anchor="atlas.reports-filter" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="pending" selected>レビュー待ち</option>
               <option value="accepted">採用済み</option>
               <option value="declined">見送り</option>
@@ -212,10 +233,10 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px">
           <h3 class="admin-section-title" style="margin-bottom:0">コース配置</h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="atlas-binding-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="atlas-binding-course-select" data-ui-anchor="atlas.binding-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">コースを選択...</option>
             </select>
-            <button id="atlas-binding-propose" class="admin-action-btn">トピックの対応案を作る</button>
+            <button id="atlas-binding-propose" data-ui-anchor="atlas.binding-propose" class="admin-action-btn">トピックの対応案を作る</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">
@@ -233,32 +254,32 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;flex-wrap:wrap">
           <h3 class="admin-section-title" style="margin-bottom:0">エラーログ解析</h3>
           <div class="error-log-controls">
-            <input id="error-log-keyword" type="search" placeholder="セッションID / ユーザーID / 教材ID / コースID / メッセージ" class="error-log-search">
-            <select id="error-log-minutes" class="error-log-select">
+            <input id="error-log-keyword" type="search" data-ui-anchor="error-analysis.keyword-search" placeholder="セッションID / ユーザーID / 教材ID / コースID / メッセージ" class="error-log-search">
+            <select id="error-log-minutes" data-ui-anchor="error-analysis.time-range" class="error-log-select">
               <option value="60">直近1時間</option>
               <option value="360">直近6時間</option>
               <option value="1440" selected>直近24時間</option>
               <option value="10080">直近7日</option>
             </select>
-            <label class="error-log-toggle">
+            <label class="error-log-toggle" data-ui-anchor="error-analysis.include-info">
               <input id="error-log-include-info" type="checkbox">
               <span>INFOを含める</span>
             </label>
-            <button id="error-log-refresh" class="admin-action-btn">更新</button>
+            <button id="error-log-refresh" data-ui-anchor="error-analysis.refresh" class="admin-action-btn">更新</button>
           </div>
         </div>
         <div id="error-log-status" class="upload-status" style="display:none"></div>
         <div class="error-log-copybar">
           <div id="error-log-selection-count" class="error-log-selection-count">0件選択中</div>
-          <select id="error-log-copy-format" class="error-log-select" aria-label="コピー形式">
+          <select id="error-log-copy-format" data-ui-anchor="error-analysis.copy-format" class="error-log-select" aria-label="コピー形式">
             <option value="ai-markdown" selected>AI解析用Markdown</option>
             <option value="json">JSON</option>
             <option value="plain">プレーンテキスト</option>
           </select>
-          <button id="error-log-select-all" class="admin-action-btn" type="button">表示中を選択</button>
-          <button id="error-log-clear-selection" class="admin-action-btn" type="button">選択解除</button>
-          <button id="error-log-copy-selected" class="admin-action-btn" type="button" disabled>選択したログをコピー</button>
-          <button id="error-log-copy-visible" class="admin-action-btn" type="button">表示中すべてをコピー</button>
+          <button id="error-log-select-all" data-ui-anchor="error-analysis.select-all" class="admin-action-btn" type="button">表示中を選択</button>
+          <button id="error-log-clear-selection" data-ui-anchor="error-analysis.clear-selection" class="admin-action-btn" type="button">選択解除</button>
+          <button id="error-log-copy-selected" data-ui-anchor="error-analysis.copy-selected" class="admin-action-btn" type="button" disabled>選択したログをコピー</button>
+          <button id="error-log-copy-visible" data-ui-anchor="error-analysis.copy-visible" class="admin-action-btn" type="button">表示中すべてをコピー</button>
         </div>
         <div id="error-log-list" class="error-log-list">
           <div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>
@@ -269,9 +290,9 @@
     <!-- Materials tab -->
     <div class="admin-panel vis" id="tab-materials">
       <!-- Upload area -->
-      <div class="admin-section">
+      <div class="admin-section" data-ui-anchor="materials.upload-zone">
         <h3 class="admin-section-title">教材アップロード</h3>
-        <div class="upload-zone" id="upload-zone">
+        <div class="upload-zone" id="upload-zone" data-ui-anchor="materials.upload-zone">
           <div class="upload-icon">&#128196;</div>
           <p>PDF または TeX .tar.gz をドラッグ＆ドロップ</p>
           <p style="font-size:12px;color:var(--color-text-tertiary)">または</p>
@@ -281,10 +302,19 @@
           </label>
         </div>
         <!-- 画像読み取りパイプライン（migration 041）: 既定 off。vision LLM は明示オプトインのみで呼ぶ -->
-        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
+        <label data-ui-anchor="materials.analyze-images" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
           <input type="checkbox" id="upload-analyze-images">
           図面・画像を解析する（装置図の同定に vision AI を使用）
         </label>
+        <!-- M層（LLM モデル選択, migration 061）: 解析モデルの1行サマリ + 変更パネル。
+             中身は admin-llm-models.js が描画（AdminLlmModels.initMaterialsPanel）。 -->
+        <div id="llm-model-summary" data-ui-anchor="materials.llm-model-change" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
+          解析モデル: <span id="llm-model-summary-value">取得中...</span>
+          <button type="button" id="llm-model-change-btn" data-ui-anchor="materials.llm-model-change" class="admin-action-btn" style="padding:1px 8px;font-size:11px;margin-left:6px">変更</button>
+          <!-- [変更] を押せないときに理由を必ず事実文で出す（無効化されたボタンだけを見せない） -->
+          <span id="llm-model-summary-note" style="color:var(--color-text-tertiary);font-size:11.5px;margin-left:6px" hidden></span>
+        </div>
+        <div id="llm-model-panel" hidden></div>
         <div id="upload-status" class="upload-status"></div>
       </div>
 
@@ -292,7 +322,7 @@
       <div class="admin-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">アップロード済み教材</h3>
-          <button id="refresh-materials" class="admin-action-btn">更新</button>
+          <button id="refresh-materials" data-ui-anchor="materials.refresh" class="admin-action-btn">更新</button>
         </div>
         <table class="admin-table" id="materials-table">
           <thead>
@@ -316,7 +346,11 @@
       <div class="course-builder">
         <!-- Left pane: Chat -->
         <div class="cb-chat-pane">
-          <div class="cb-chat-header">AIアシスタントとコース設計</div>
+          <div class="cb-chat-header" data-ui-anchor="course-builder.model-chip" style="display:flex;align-items:center;justify-content:space-between">
+            <span>AIアシスタントとコース設計</span>
+            <!-- M層 Phase 3（§6.2）: コース構築チャットのモデルチップ。中身は AdminLlmModels.createModelChip が描画 -->
+            <span id="cb-chat-model-chip" data-ui-anchor="course-builder.model-chip"></span>
+          </div>
           <div class="cb-session-bar" id="cb-session-bar"></div>
           <div class="cb-material-select" id="cb-material-select">
             <div class="cb-material-select-header">
@@ -324,15 +358,15 @@
               <span class="cb-material-count" id="cb-material-count"></span>
             </div>
             <div class="cb-material-toolbar">
-              <input type="text" id="cb-material-search" class="cb-material-search" placeholder="ファイル名・タイトルで検索…">
-              <select id="cb-material-sort" class="cb-material-sort">
+              <input type="text" id="cb-material-search" data-ui-anchor="course-builder.material-search" class="cb-material-search" placeholder="ファイル名・タイトルで検索…">
+              <select id="cb-material-sort" data-ui-anchor="course-builder.material-sort" class="cb-material-sort">
                 <option value="uploaded">新しい順（アップロード）</option>
                 <option value="analyzed">直近の生成順</option>
                 <option value="title">タイトル順</option>
                 <option value="volume">ボリューム順</option>
               </select>
             </div>
-            <div class="cb-material-filters" id="cb-material-filters">
+            <div class="cb-material-filters" id="cb-material-filters" data-ui-anchor="course-builder.material-filter">
               <button class="cb-mat-chip active" data-filter="all" type="button">すべて</button>
               <button class="cb-mat-chip" data-filter="no_course" type="button">コース未作成</button>
               <button class="cb-mat-chip" data-filter="recent" type="button">直近の生成</button>
@@ -350,7 +384,7 @@
           </div>
           <div class="ia">
             <input type="text" id="cb-chat-input" placeholder="コースの要件を入力してください...">
-            <button id="cb-send-btn">送信</button>
+            <button id="cb-send-btn" data-ui-anchor="course-builder.send-btn">送信</button>
           </div>
         </div>
 
@@ -362,11 +396,11 @@
               AIとの対話でコース構成が生成されると、ここにプレビューが表示されます。
             </div>
           </div>
-          <div class="cb-approve-area" id="cb-approve-area" style="display:none">
-            <button id="cb-approve-btn" class="cb-approve-btn">承認してコースを登録</button>
+          <div class="cb-approve-area" id="cb-approve-area" data-ui-anchor="course-builder.approve-btn" style="display:none">
+            <button id="cb-approve-btn" data-ui-anchor="course-builder.approve-btn" class="cb-approve-btn">承認してコースを登録</button>
           </div>
           <!-- コース登録直後の地図配置の提案 (S2)。教員が承認して保存するまで確定しない -->
-          <div id="cb-atlas-binding-area" style="display:none;margin-top:12px;border:1px solid var(--color-border);border-radius:6px;padding:10px">
+          <div id="cb-atlas-binding-area" data-ui-anchor="course-builder.atlas-binding-area" style="display:none;margin-top:12px;border:1px solid var(--color-border);border-radius:6px;padding:10px">
             <div style="font-size:13px;font-weight:600;margin-bottom:6px">次のステップ: 学習マップの割り当て（分野の地図への配置・提案）</div>
             <div id="cb-atlas-binding-body" style="font-size:12.5px"></div>
             <div id="cb-atlas-binding-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px"></div>
@@ -380,8 +414,8 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">コース管理</h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <button id="cm-atlas-binding-open" class="admin-action-btn" title="コースに学習マップ（分野の地図）を割り当てます">学習マップ編集</button>
-            <button id="cm-refresh" class="admin-action-btn">更新</button>
+            <button id="cm-atlas-binding-open" data-ui-anchor="course-management.atlas-binding-open" class="admin-action-btn" title="コースに学習マップ（分野の地図）を割り当てます">学習マップ編集</button>
+            <button id="cm-refresh" data-ui-anchor="course-management.refresh" class="admin-action-btn">更新</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
@@ -413,20 +447,20 @@
         <!-- Top bar: course selector + global actions -->
         <div class="ls-topbar">
           <div class="ls-topbar-left">
-            <button id="ls-course-reset-btn" class="ls-course-reset-btn" type="button" hidden>[選び直す]</button>
+            <button id="ls-course-reset-btn" data-ui-anchor="lecture-studio.course-reset" class="ls-course-reset-btn" type="button" hidden>[選び直す]</button>
             <span id="ls-course-current" class="ls-course-current" hidden>コース: -</span>
             <label id="ls-course-select-label" style="font-size:13px;color:var(--color-text-secondary)">コース:</label>
-            <select id="ls-course-select" style="flex:1;max-width:400px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="ls-course-select" data-ui-anchor="lecture-studio.course-select" style="flex:1;max-width:400px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">コースを選択...</option>
             </select>
           </div>
           <div class="ls-topbar-right">
-            <div class="ls-action-menu">
-              <button id="ls-more-menu-btn" class="admin-action-btn ls-menu-trigger" type="button" disabled>コース設定 ▼</button>
+            <div class="ls-action-menu" data-ui-anchor="lecture-studio.more-menu">
+              <button id="ls-more-menu-btn" data-ui-anchor="lecture-studio.more-menu" class="admin-action-btn ls-menu-trigger" type="button" disabled>コース設定 ▼</button>
               <div id="ls-more-menu" class="ls-menu" hidden>
-                <button id="ls-settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
-                <button id="ls-course-content-btn" class="ls-menu-item" type="button" disabled><span>コース内容生成</span></button>
-                <button id="ls-audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成</span></button>
+                <button id="ls-settings-btn" data-ui-anchor="lecture-studio.settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
+                <button id="ls-course-content-btn" data-ui-anchor="lecture-studio.course-content-btn" class="ls-menu-item" type="button" disabled><span>コース内容生成</span></button>
+                <button id="ls-audio-all-btn" data-ui-anchor="lecture-studio.audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成</span></button>
                 <!-- 音声準備確認フロー (Issue #491) §3-2: 音声生成が無効なとき、理由と次の操作を近傍に示す -->
                 <div id="ls-audio-readiness-note" class="ls-audio-readiness-note" hidden>
                   <span id="ls-audio-readiness-reason" class="ls-audio-readiness-reason"></span>
@@ -445,25 +479,30 @@
         <div id="ls-studio-workarea" class="ls-studio-workarea" hidden>
           <div class="ls-studio-toolbar">
             <div class="ls-nav-tabs">
-              <button class="ls-nav-tab active" data-ls-nav="course">コース</button>
-              <button class="ls-nav-tab" data-ls-nav="document">文書構造</button>
-              <button class="ls-nav-tab" data-ls-nav="components">コンポーネント</button>
+              <button class="ls-nav-tab active" data-ls-nav="course" data-ui-anchor="lecture-studio.nav-course">コース</button>
+              <button class="ls-nav-tab" data-ls-nav="document" data-ui-anchor="lecture-studio.nav-document">文書構造</button>
+              <button class="ls-nav-tab" data-ls-nav="components" data-ui-anchor="lecture-studio.nav-components">コンポーネント</button>
             </div>
             <div class="ls-toolbar-divider"></div>
             <div class="ls-work-tabs" id="ls-work-tabs">
-              <button class="ls-work-tab active" data-ls-view="edit">原稿</button>
-              <button class="ls-work-tab" data-ls-view="structure" hidden>構造</button>
-              <button class="ls-work-tab" data-ls-view="graph" hidden>理論グラフ</button>
+              <button class="ls-work-tab active" data-ls-view="edit" data-ui-anchor="lecture-studio.work-tab-edit">原稿</button>
+              <button class="ls-work-tab" data-ls-view="structure" hidden data-ui-anchor="lecture-studio.work-tab-structure">構造</button>
+              <!-- data-ui-anchor は付与しない: backend/tests/test_lecture_studio.py
+                   test_theory_graph_top_tab_opens_graph_view がこのタグの完全一致
+                   （属性追加なし）を検査しているため。lecture-studio.work-tab-graph は
+                   このボタンには貼れない（既知のギャップ。テスト側の更新は本タスクの
+                   担当範囲外）。 -->
+              <button class="ls-work-tab" data-ls-view="graph" hidden data-ui-anchor="lecture-studio.work-tab-graph">理論グラフ</button>
             </div>
             <div class="ls-work-tabs ls-theory-graph-tabs" id="ls-theory-graph-tabs" hidden>
-              <button class="ls-work-tab active" data-ls-view="claims">主張</button>
-              <button class="ls-work-tab" data-ls-view="theory">論理要素</button>
-              <button class="ls-work-tab" data-ls-view="graph">グラフ</button>
+              <button class="ls-work-tab active" data-ls-view="claims" data-ui-anchor="lecture-studio.theory-tab-claims">主張</button>
+              <button class="ls-work-tab" data-ls-view="theory" data-ui-anchor="lecture-studio.theory-tab-theory">論理要素</button>
+              <button class="ls-work-tab" data-ls-view="graph" data-ui-anchor="lecture-studio.theory-tab-graph">グラフ</button>
             </div>
             <div class="ls-toolbar-spacer"></div>
-            <button id="ls-right-pane-toggle" class="admin-action-btn ls-toolbar-btn" type="button" disabled>右ペインを隠す</button>
-            <button id="ls-ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI アシスタント</button>
-            <button id="ls-save-btn" class="admin-action-btn ls-toolbar-btn ls-save-toolbar-btn" type="button" disabled>原稿を保存</button>
+            <button id="ls-right-pane-toggle" data-ui-anchor="lecture-studio.right-pane-toggle" class="admin-action-btn ls-toolbar-btn" type="button" disabled>右ペインを隠す</button>
+            <button id="ls-ai-assistant-btn" data-ui-anchor="lecture-studio.ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI アシスタント</button>
+            <button id="ls-save-btn" data-ui-anchor="lecture-studio.save-btn" class="admin-action-btn ls-toolbar-btn ls-save-toolbar-btn" type="button" disabled>原稿を保存</button>
           </div>
           <div class="ls-work-meta-row">
             <div id="ls-chunk-meta" class="ls-chunk-meta">トピックを選択してください</div>
@@ -500,8 +539,8 @@
                   <div class="ls-pane-head">
                     <div class="ls-pane-title" id="ls-left-title">原典</div>
                     <div class="ls-mini-tabs" id="ls-evidence-tabs">
-                      <button class="ls-mini-tab active" data-ls-evidence="pdf">PDF</button>
-                      <button class="ls-mini-tab" data-ls-evidence="extract">抽出</button>
+                      <button class="ls-mini-tab active" data-ls-evidence="pdf" data-ui-anchor="lecture-studio.evidence-tab-pdf">PDF</button>
+                      <button class="ls-mini-tab" data-ls-evidence="extract" data-ui-anchor="lecture-studio.evidence-tab-extract">抽出</button>
                     </div>
                   </div>
                   <div class="ls-pane-body">
@@ -516,21 +555,21 @@
                   <div class="ls-pane-head">
                     <div class="ls-pane-title" id="ls-right-title">表示テキスト</div>
                     <div class="ls-mini-tabs" id="ls-display-tabs">
-                      <button class="ls-mini-tab active" data-ls-display="preview">プレビュー</button>
-                      <button class="ls-mini-tab" data-ls-display="script">原稿</button>
-                      <button class="ls-mini-tab" data-ls-display="formulas">数式一覧</button>
-                      <button class="ls-mini-tab" data-ls-display="slides">スライド</button>
+                      <button class="ls-mini-tab active" data-ls-display="preview" data-ui-anchor="lecture-studio.display-tab-preview">プレビュー</button>
+                      <button class="ls-mini-tab" data-ls-display="script" data-ui-anchor="lecture-studio.display-tab-script">原稿</button>
+                      <button class="ls-mini-tab" data-ls-display="formulas" data-ui-anchor="lecture-studio.display-tab-formulas">数式一覧</button>
+                      <button class="ls-mini-tab" data-ls-display="slides" data-ui-anchor="lecture-studio.display-tab-slides">スライド</button>
                     </div>
                     <!-- 再構成ループ (R層): 根拠リンク ⇄ つまづき の表示切り替え（別タブにしない） -->
                     <div class="ls-mini-tabs" id="ls-stumble-tabs" hidden>
-                      <button class="ls-mini-tab active" data-ls-rightmode="evidence">根拠リンク</button>
-                      <button class="ls-mini-tab" data-ls-rightmode="stumble">つまづき</button>
+                      <button class="ls-mini-tab active" data-ls-rightmode="evidence" data-ui-anchor="lecture-studio.stumble-tab-evidence">根拠リンク</button>
+                      <button class="ls-mini-tab" data-ls-rightmode="stumble" data-ui-anchor="lecture-studio.stumble-tab-stumble">つまづき</button>
                     </div>
                   </div>
                   <!-- レクチャースライド同期 (migration 040 Phase 3): 表示/読み上げテキストの
                        近くにスライド区切り挿入ボタン + 整合インジケータを置く。原稿タブでのみ表示。 -->
                   <div id="ls-slide-tools-row" class="ls-slide-tools-row" hidden>
-                    <button type="button" id="ls-insert-slide-marker-btn" class="ls-mini-tab"
+                    <button type="button" id="ls-insert-slide-marker-btn" data-ui-anchor="lecture-studio.insert-slide-marker-btn" class="ls-mini-tab"
                       title="最後にフォーカスしていた入力欄（表示テキスト or 読み上げテキスト）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>
                     <span id="ls-slide-tools-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>
                   </div>
@@ -561,16 +600,16 @@
               </section>
 
               <section id="ls-theory-panel" class="ls-theory-panel" hidden>
-                <div class="ls-theory-toolbar">
-                  <button id="ls-extract-theory-btn" class="admin-action-btn">論理要素候補を抽出</button>
+                <div class="ls-theory-toolbar" data-ui-anchor="lecture-studio.extract-theory-btn">
+                  <button id="ls-extract-theory-btn" data-ui-anchor="lecture-studio.extract-theory-btn" class="admin-action-btn">論理要素候補を抽出</button>
                   <span id="ls-theory-status" class="ls-theory-status"></span>
                 </div>
                 <div id="ls-theory-components" class="ls-theory-components"></div>
               </section>
 
               <section id="ls-claims-panel" class="ls-theory-panel" hidden>
-                <div class="ls-theory-toolbar">
-                  <button id="ls-extract-claims-btn" class="admin-action-btn">主張を抽出</button>
+                <div class="ls-theory-toolbar" data-ui-anchor="lecture-studio.extract-claims-btn">
+                  <button id="ls-extract-claims-btn" data-ui-anchor="lecture-studio.extract-claims-btn" class="admin-action-btn">主張を抽出</button>
                   <span id="ls-claims-status" class="ls-theory-status"></span>
                 </div>
                 <div id="ls-claims-list" class="ls-theory-components"></div>
@@ -578,7 +617,7 @@
 
               <section id="ls-graph-panel" class="ls-theory-panel" hidden>
                 <div class="ls-theory-toolbar">
-                  <button id="ls-refresh-graph-btn" class="admin-action-btn">グラフを更新</button>
+                  <button id="ls-refresh-graph-btn" data-ui-anchor="lecture-studio.refresh-graph-btn" class="admin-action-btn">グラフを更新</button>
                   <span id="ls-graph-status" class="ls-theory-status"></span>
                 </div>
                 <div id="ls-component-graph" class="ls-theory-components"></div>
@@ -594,7 +633,7 @@
         </div>
         </div>
 
-        <div id="ls-assistant-modal" class="ls-assistant-modal" hidden>
+        <div id="ls-assistant-modal" class="ls-assistant-modal" hidden data-ui-anchor="lecture-studio.assistant-modal">
           <div class="ls-assistant-dialog">
             <div class="ls-assistant-head">
               <h3>AI アシスタント</h3>
@@ -603,13 +642,18 @@
             <div class="ls-assistant-body">
               <label id="ls-assistant-label" class="ls-assistant-label">書き換え指示:</label>
               <textarea id="ls-rewrite-prompt" class="ls-rewrite-textarea" placeholder="例: 前提知識の説明を1文追加して" disabled></textarea>
+              <!-- M層 Phase 3（§6.3）: 生成モデルのチップ。中身は AdminLlmModels.createModelChip が描画 -->
+              <div style="display:flex;align-items:center;gap:6px;margin:4px 0 8px;font-size:12px;color:var(--color-text-secondary)">
+                <span>生成モデル:</span>
+                <span id="ls-rewrite-model-chip"></span>
+              </div>
               <button id="ls-rewrite-btn" class="admin-action-btn" disabled>AIで提案</button>
             </div>
           </div>
         </div>
 
         <!-- レクチャースライド同期 + 音声言語切替 (migration 040 Phase 3/4): 音声生成前の言語選択モーダル -->
-        <div id="ls-audio-lang-modal" class="ls-settings-modal" hidden>
+        <div id="ls-audio-lang-modal" class="ls-settings-modal" hidden data-ui-anchor="lecture-studio.audio-lang-modal">
           <div class="ls-settings-dialog">
             <div class="ls-settings-head">
               <h3>音声を生成します</h3>
@@ -643,26 +687,26 @@
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
           AIが提案したスキーマ拡張をシミュレーションで検証し、安全に承認できます。
         </p>
-        <div id="sp-proposals-list">
+        <div id="sp-proposals-list" data-ui-anchor="schema-proposals.proposals-list">
           <p style="color:var(--color-text-tertiary)">読み込み中...</p>
         </div>
       </div>
 
       <!-- Simulation result area (hidden by default) -->
-      <div class="admin-section" id="sp-simulation-area" style="display:none;margin-top:24px">
+      <div class="admin-section" id="sp-simulation-area" data-ui-anchor="schema-proposals.simulation-result" style="display:none;margin-top:24px">
         <h3 class="admin-section-title">シミュレーション結果</h3>
         <div id="sp-simulation-summary" style="margin-bottom:16px"></div>
         <div id="sp-simulation-details"></div>
         <div id="sp-approve-actions" style="margin-top:16px;display:none">
           <h4 style="margin-bottom:8px">承認アクション</h4>
           <div style="display:flex;gap:8px;flex-wrap:wrap">
-            <button id="sp-approve-full" class="admin-action-btn">システム全体に適用</button>
-            <button id="sp-approve-canary" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text-primary)">カナリアリリース（特定コースのみ）</button>
+            <button id="sp-approve-full" data-ui-anchor="schema-proposals.approve-full-btn" class="admin-action-btn">システム全体に適用</button>
+            <button id="sp-approve-canary" data-ui-anchor="schema-proposals.approve-canary-btn" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text-primary)">カナリアリリース（特定コースのみ）</button>
           </div>
           <div id="sp-canary-options" style="display:none;margin-top:8px">
-            <select id="sp-canary-course-select" multiple style="width:100%;min-height:60px;padding:4px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="sp-canary-course-select" data-ui-anchor="schema-proposals.canary-course-select" multiple style="width:100%;min-height:60px;padding:4px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
             </select>
-            <button id="sp-canary-confirm" class="admin-action-btn" style="margin-top:8px;font-size:12px">選択したコースに適用</button>
+            <button id="sp-canary-confirm" data-ui-anchor="schema-proposals.canary-confirm-btn" class="admin-action-btn" style="margin-top:8px;font-size:12px">選択したコースに適用</button>
           </div>
           <div id="sp-approve-msg" class="upload-status" style="display:none;margin-top:8px"></div>
         </div>
@@ -674,7 +718,7 @@
       <div class="admin-section">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">
           <h3 class="admin-section-title" style="margin-bottom:0">ナレッジライブラリ</h3>
-          <button id="library-new-entry-btn" class="admin-action-btn">新規エントリ作成</button>
+          <button id="library-new-entry-btn" data-ui-anchor="knowledge-library.new-entry-btn" class="admin-action-btn">新規エントリ作成</button>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
           分野ごとの装置・理論コンポーネントの記述を教員コミュニティで編集・凍結する共有ライブラリです。
@@ -684,23 +728,23 @@
         <div id="library-body" style="display:flex;gap:14px;align-items:flex-start;flex-wrap:wrap">
           <div id="library-domains-panel" style="min-width:180px;max-width:220px;flex:0 0 200px">
             <div style="font-size:12.5px;font-weight:600;margin-bottom:6px">分野</div>
-            <div id="library-domains-list" style="display:flex;flex-direction:column;gap:4px">
+            <div id="library-domains-list" data-ui-anchor="knowledge-library.domains-list" style="display:flex;flex-direction:column;gap:4px">
               <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">読み込み中...</div>
             </div>
           </div>
           <div id="library-entries-panel" style="min-width:260px;flex:1 1 320px">
             <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:8px">
-              <input type="text" id="library-search-q" placeholder="名称・別名で検索..." style="flex:1;min-width:140px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">
-              <select id="library-filter-type" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">
+              <input type="text" id="library-search-q" data-ui-anchor="knowledge-library.search" placeholder="名称・別名で検索..." style="flex:1;min-width:140px;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">
+              <select id="library-filter-type" data-ui-anchor="knowledge-library.filter-type" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">
                 <option value="">すべての種別</option>
                 <option value="apparatus">装置 (apparatus)</option>
                 <option value="theory_component">理論コンポーネント</option>
               </select>
-              <label style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--color-text-secondary);white-space:nowrap">
+              <label data-ui-anchor="knowledge-library.include-retired" style="display:flex;align-items:center;gap:4px;font-size:12px;color:var(--color-text-secondary);white-space:nowrap">
                 <input type="checkbox" id="library-include-retired"> 廃止済みも表示
               </label>
             </div>
-            <div id="library-entries-list" style="display:flex;flex-direction:column;gap:4px;max-height:520px;overflow-y:auto">
+            <div id="library-entries-list" data-ui-anchor="knowledge-library.entries-list" style="display:flex;flex-direction:column;gap:4px;max-height:520px;overflow-y:auto">
               <div style="padding:8px;color:var(--color-text-tertiary);font-size:12.5px">分野を選択してください</div>
             </div>
           </div>
@@ -723,16 +767,16 @@
         </p>
 
         <!-- Pending invitations for me -->
-        <div id="groups-my-invitations" style="margin-bottom:16px"></div>
+        <div id="groups-my-invitations" data-ui-anchor="groups.my-invitations" style="margin-bottom:16px"></div>
 
         <!-- Join by code form -->
-        <form id="groups-join-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+        <form id="groups-join-form" data-ui-anchor="groups.join-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
           <input type="text" id="groups-join-code" placeholder="招待コードを入力..." style="flex:1;max-width:240px;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
           <button type="submit" id="groups-join-btn" class="admin-action-btn">招待コードで参加</button>
         </form>
 
         <!-- Create group form -->
-        <form id="groups-create-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+        <form id="groups-create-form" data-ui-anchor="groups.create-form" style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
           <input type="text" id="groups-new-name" placeholder="新規グループ名..." style="flex:1;max-width:240px;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
           <input type="text" id="groups-new-desc" placeholder="説明 (任意)" style="flex:1;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
           <button type="submit" id="groups-create-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">グループを作成</button>
@@ -742,7 +786,7 @@
 
         <!-- Group list (accordion) -->
         <h4 style="font-size:13px;margin:0 0 8px 0;color:var(--color-text-secondary)">所属グループ</h4>
-        <div id="groups-list" style="display:flex;flex-direction:column;gap:8px">
+        <div id="groups-list" data-ui-anchor="groups.list" style="display:flex;flex-direction:column;gap:8px">
           <div style="padding:12px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>
         </div>
       </div>
@@ -754,16 +798,16 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">学生のつまづきデータ</h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="stumbles-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="stumbles-course-select" data-ui-anchor="stumbles.course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">コースを選択...</option>
             </select>
-            <button id="refresh-stumbles" class="admin-action-btn">更新</button>
+            <button id="refresh-stumbles" data-ui-anchor="stumbles.refresh-btn" class="admin-action-btn">更新</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
           RAG検索で教材から回答できなかった質問の一覧です。教材の補強やコース改善に活用してください。
         </p>
-        <table class="admin-table" id="stumbles-table">
+        <table class="admin-table" id="stumbles-table" data-ui-anchor="stumbles.table">
           <thead>
             <tr>
               <th>日時</th>
@@ -785,23 +829,23 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">関心集約ダッシュボード</h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="interest-dashboard-course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="interest-dashboard-course-select" data-ui-anchor="interest-dashboard.course-select" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">コースを選択...</option>
             </select>
-            <button id="refresh-interest-dashboard" class="admin-action-btn">更新</button>
+            <button id="refresh-interest-dashboard" data-ui-anchor="interest-dashboard.refresh-btn" class="admin-action-btn">更新</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
           クラス全体の関心傾向を、個人を特定しない集団集計で表示します（点数・ランキングではなく問いの深まりを見せる設計）。
         </p>
-        <div id="interest-dashboard-body" class="interest-dashboard">
+        <div id="interest-dashboard-body" class="interest-dashboard" data-ui-anchor="interest-dashboard.dashboard-body">
           <div style="color:var(--color-text-tertiary)">コースを選択してください</div>
         </div>
       </div>
 
       <!-- 知識ネットワークビジョン Phase B — 橋の候補（学習者の重ね合わせ、教員向け唯一の窓口）。
            選択中のコース（#interest-dashboard-course-select）と連動する。k-匿名集約はサーバ側。 -->
-      <div class="admin-section" id="bridge-insights-section">
+      <div class="admin-section" id="bridge-insights-section" data-ui-anchor="interest-dashboard.bridge-insights-section">
         <h3 class="admin-section-title" style="margin-bottom:0">橋の候補（学習者の重ね合わせ）</h3>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin:8px 0 12px">
           複数の学習者が、自分の引っかかり（tension）を同じ構造要素に自分で結び付けた場合に、
@@ -820,10 +864,10 @@
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <h3 class="admin-section-title" style="margin-bottom:0">全コース・パイプライン統計</h3>
           <div style="display:flex;gap:8px;align-items:center">
-            <select id="ss-teacher-filter" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
+            <select id="ss-teacher-filter" data-ui-anchor="system-stats.teacher-filter" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">
               <option value="">全教員</option>
             </select>
-            <button id="ss-refresh" class="admin-action-btn">更新</button>
+            <button id="ss-refresh" data-ui-anchor="system-stats.refresh" class="admin-action-btn">更新</button>
           </div>
         </div>
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:16px">
@@ -833,15 +877,15 @@
         <table class="admin-table" id="ss-table">
           <thead>
             <tr>
-              <th class="ss-sortable" data-sort="title" style="cursor:pointer">タイトル &#9651;</th>
-              <th class="ss-sortable" data-sort="uploaded_by" style="cursor:pointer">アップロード者 &#9651;</th>
-              <th class="ss-sortable" data-sort="created_at" style="cursor:pointer">日時 &#9651;</th>
-              <th class="ss-sortable" data-sort="chunk_count" style="cursor:pointer">チャンク数 &#9651;</th>
+              <th class="ss-sortable" data-sort="title" data-ui-anchor="system-stats.sort-columns" style="cursor:pointer">タイトル &#9651;</th>
+              <th class="ss-sortable" data-sort="uploaded_by" data-ui-anchor="system-stats.sort-columns" style="cursor:pointer">アップロード者 &#9651;</th>
+              <th class="ss-sortable" data-sort="created_at" data-ui-anchor="system-stats.sort-columns" style="cursor:pointer">日時 &#9651;</th>
+              <th class="ss-sortable" data-sort="chunk_count" data-ui-anchor="system-stats.sort-columns" style="cursor:pointer">チャンク数 &#9651;</th>
               <th>解析</th>
               <th>原稿生成</th>
               <th>音声生成</th>
-              <th class="ss-sortable" data-sort="enrolled_students" style="cursor:pointer">受講者数 &#9651;</th>
-              <th class="ss-sortable" data-sort="chat_count" style="cursor:pointer">チャット数 &#9651;</th>
+              <th class="ss-sortable" data-sort="enrolled_students" data-ui-anchor="system-stats.sort-columns" style="cursor:pointer">受講者数 &#9651;</th>
+              <th class="ss-sortable" data-sort="chat_count" data-ui-anchor="system-stats.sort-columns" style="cursor:pointer">チャット数 &#9651;</th>
             </tr>
           </thead>
           <tbody id="ss-tbody">
@@ -857,7 +901,7 @@
   </div>
 
   <!-- Export bundle modal -->
-  <div id="export-modal-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
+  <div id="export-modal-overlay" data-ui-anchor="materials.export-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:1000;align-items:center;justify-content:center">
     <div style="background:#fff;border-radius:8px;padding:28px;min-width:380px;max-width:480px;box-shadow:0 8px 32px rgba(0,0,0,0.18)">
       <h3 style="margin:0 0 16px;font-size:16px">外部レビュー用に書き出し</h3>
 
@@ -894,6 +938,9 @@
   <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
   <script src="/js/atlas-draft-preview.js?v=atlas-editor-20260707-1"></script>
   <script src="/js/atlas-assist-panel.js?v=atlas-editor-20260707-1"></script>
+  <!-- admin「？使い方」インスペクト・モード（学習画面 index.html の同型移植）。
+       admin-assistant.js の usage_help 連携（support_action/ui_anchor）より前に読み込む。 -->
+  <script src="/js/admin-help-inspect.js?v=admin-help-inspect-20260729-1"></script>
   <!-- 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント -->
   <script src="/js/admin-assistant.js?v=gap-fixes-20260716-3"></script>
   <!-- G層（ガイダンス層）— 状態導出型 Next Steps バッジ + パネル -->
@@ -910,6 +957,8 @@
   <script src="/js/admin-manual-editor.js?v=help-kb-editor-20260725-1"></script>
   <!-- discuss 観測基盤（Observation Layer, docs/features/discuss_observation_design.md）— SYSTEM_ADMIN のみ -->
   <script src="/js/admin-discuss-observation.js?v=discuss-observation-20260725-1"></script>
-  <script src="/js/admin.js?v=gap-fixes-20260716-3"></script>
+  <!-- M層（LLM モデル選択, migration 061）— 教材管理の解析モデル選択 + 運用タブ「AIモデル」 -->
+  <script src="/js/admin-llm-models.js?v=llm-model-select-20260728-3"></script>
+  <script src="/js/admin.js?v=llm-model-select-20260728-1"></script>
 </body>
 </html>

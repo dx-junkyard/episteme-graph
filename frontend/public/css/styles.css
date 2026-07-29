@@ -6184,6 +6184,84 @@ body.inspect-mode [data-ui-anchor]:hover {
   pointer-events: auto; /* 容器は pointer-events:none だが ✕ だけは押せるようにする */
 }
 
+/* ============ 管理画面「？使い方」インスペクト・モード（admin-help-inspect.js） ============ */
+/* 学習画面の .help-usage-btn / .inspect-banner / body.inspect-mode / .inspect-tooltip と
+   同型（クラス名は admin- 接頭辞で分離。admin.html と index.html は同じ styles.css を
+   共有するが、別ページのため実際の衝突はない。テスト・保守のため名前空間だけ分ける）。 */
+.admin-help-usage-btn {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.admin-help-usage-btn:hover,
+.admin-help-usage-btn.active {
+  background: var(--color-background-info);
+  border-color: var(--color-border-info);
+}
+
+/* 常設バナー: admin の topbar のすぐ下に控えめに固定表示する。 */
+.admin-inspect-banner {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  z-index: 1400;
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+  border-bottom: 1px solid var(--color-border-info);
+  text-align: center;
+  font-size: 12.5px;
+  padding: 6px 12px;
+}
+.admin-inspect-banner[hidden] { display: none; }
+
+/* ON 中は UI 論理アンカー登録済み要素にだけ cursor:help + 軽いハイライトを出す。 */
+body.admin-inspect-mode [data-ui-anchor] { cursor: help !important; }
+body.admin-inspect-mode [data-ui-anchor]:hover {
+  outline: 1px dashed var(--color-border-info);
+  outline-offset: 2px;
+}
+/* disabled なフォーム部品はホバーイベントを一切発火しないため、インスペクト中だけ
+   pointer-events:none にして、直近の親ラッパー（同じ data-ui-anchor を持つ）へ
+   ホバー判定を透過させる（通常操作時はこのルールが効かないため無効化の意味は変わらない）。 */
+body.admin-inspect-mode button:disabled,
+body.admin-inspect-mode select:disabled,
+body.admin-inspect-mode input:disabled,
+body.admin-inspect-mode textarea:disabled {
+  pointer-events: none;
+}
+
+/* マニュアル節ツールチップ。JS が innerHTML と位置を書き換える。 */
+.admin-inspect-tooltip {
+  position: fixed;
+  z-index: 1400;
+  max-width: 320px;
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border-info);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 6px 20px rgba(31, 37, 48, .16);
+  font-size: 12.5px;
+  line-height: 1.5;
+  pointer-events: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.admin-inspect-tooltip[hidden] { display: none; }
+.admin-inspect-tooltip-source {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--color-text-info);
+  background: var(--color-background-info);
+  border-radius: 8px;
+  padding: 1px 8px;
+  margin-bottom: 6px;
+}
+.admin-inspect-tooltip-title { font-weight: 600; margin-bottom: 4px; }
+.admin-inspect-tooltip-body { color: var(--color-text-secondary); white-space: pre-wrap; }
+
 /* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
 /* セカンダリ見た目（枠線＋背景透明）: プライマリは #send-btn のみ（§3.3）。
    ラベル付き（🎤 音声で話す）になったため固定サイズの円形をやめ、他の

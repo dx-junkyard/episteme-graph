@@ -145,7 +145,9 @@
 
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
-  var chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
+  // selectedModel: M層 Phase 3（llm_model_selection_design.md §6.5）のこの対話1回だけの
+  // モデル上書き。null ならサーバ既定（resolve_model）に委ねる。
+  var chatState = { sessionId: null, ref: null, sending: false, selectedContext: null, selectedModel: null };
   // 要素中心コンテキストビュー（Issue #498 §2.3）の中心移動履歴。openElement で
   // その要素1件から再スタートし、_navigateToElement が隣接ノード選択のたびに
   // 積み増す（パンくず・「← 戻る」が this を描画する）。
@@ -176,7 +178,7 @@
   }
 
   function _resetChatState() {
-    chatState = { sessionId: null, ref: null, sending: false, selectedContext: null };
+    chatState = { sessionId: null, ref: null, sending: false, selectedContext: null, selectedModel: null };
   }
 
   function _resetFigureImageState() {
@@ -288,7 +290,7 @@
       return _lensSectionHtml(key, lenses[key]);
     }).join("");
     if (!sections.trim()) return "";
-    return '<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
+    return '<div data-ui-anchor="deliberation.positioning-lenses" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
       '<h4 style="margin:0 0 10px;font-size:14px;color:var(--color-text-primary)">位置づけ</h4>' +
       sections +
     '</div>';
@@ -417,7 +419,7 @@
     if (!context) return "";
     if (!context.available) {
       if (!context.note) return "";
-      return '<div id="deliberation-context-lens" class="deliberation-context-lens deliberation-context-lens-unavailable">' +
+      return '<div id="deliberation-context-lens" class="deliberation-context-lens deliberation-context-lens-unavailable" data-ui-anchor="deliberation.context-lens">' +
         '<p class="deliberation-context-fact">' + escHtml(context.note) + '</p>' +
       '</div>';
     }
@@ -430,7 +432,7 @@
           notes.map(function (n) { return '<p class="deliberation-context-fact">・' + escHtml(n) + '</p>'; }).join("") +
         '</div>'
       : "";
-    return '<div id="deliberation-context-lens" class="deliberation-context-lens">' +
+    return '<div id="deliberation-context-lens" class="deliberation-context-lens" data-ui-anchor="deliberation.context-lens">' +
       upperHtml +
       focusHtml +
       lowerHtml +
@@ -1001,9 +1003,9 @@
               escHtml(FIGURE_MODE_LABELS[key]) + '</option>';
           }).join("") +
         '</select>' +
-        '<button id="deliberation-mode-save" type="button">保存</button>' +
+        '<button id="deliberation-mode-save" type="button" data-ui-anchor="deliberation.mode-save">保存</button>' +
         '<span id="deliberation-mode-save-status" role="status"></span>' +
-        '<button id="deliberation-figure-reanalyze" type="button">AIで図を再解析</button>' +
+        '<button id="deliberation-figure-reanalyze" type="button" data-ui-anchor="deliberation.figure-reanalyze">AIで図を再解析</button>' +
         '<span id="deliberation-figure-reanalyze-status" role="status"></span>' +
       '</div>' +
       _figureFocusControlsHtml();
@@ -1031,8 +1033,8 @@
     var fields = decomposition.fields || {};
     return '<div class="deliberation-figure-workspace">' +
       '<div class="deliberation-figure-image-card">' +
-        '<div class="deliberation-figure-image-toolbar"><span>原図</span>' +
-          '<button id="deliberation-figure-expand" type="button" disabled>拡大表示</button></div>' +
+        '<div class="deliberation-figure-image-toolbar" data-ui-anchor="deliberation.figure-expand"><span>原図</span>' +
+          '<button id="deliberation-figure-expand" type="button" disabled data-ui-anchor="deliberation.figure-expand">拡大表示</button></div>' +
         '<div class="deliberation-figure-image-stage" data-figure-bbox="' +
           escHtml(JSON.stringify(fields.bbox || fields.figure_bbox || null)) + '">' +
           '<div id="deliberation-figure-image-status">画像を読み込み中...</div>' +
@@ -1045,9 +1047,11 @@
       '</div>' +
       '<div id="deliberation-figure-mode-container">' + _figureModeHtml(fields) + '</div>' +
       _iterativeAnalysisHtml(fields) +
+      '<div data-ui-anchor="deliberation.decomposition">' +
       '<details class="deliberation-figure-raw"><summary>抽出データ・根拠を見る</summary>' +
         '<div class="deliberation-figure-raw-body">' + _fieldsHtml(fields) + _notesHtml(decomposition.notes) + '</div>' +
       '</details>' +
+      '</div>' +
       _positioningHtml(positioning, positioningOpts) +
       '<div id="deliberation-figure-lightbox" class="deliberation-figure-lightbox" aria-hidden="true">' +
         '<button id="deliberation-figure-lightbox-close" type="button" aria-label="拡大表示を閉じる">&times;</button>' +
@@ -1332,7 +1336,7 @@
       '</div>' +
       (isFigure ? "" : contextHtml) +
       (isFigure ? _figureWorkspaceHtml(decomposition, data.positioning, positioningOpts) + contextHtml :
-        '<div style="margin-bottom:6px">' +
+        '<div data-ui-anchor="deliberation.decomposition" style="margin-bottom:6px">' +
           '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-secondary);margin-bottom:4px">内訳</div>' +
           _fieldsHtml(decomposition.fields) +
         '</div>' +
@@ -1700,7 +1704,7 @@
     if (elementType && elementType !== "shared_part") {
       createHtml =
         '<div style="margin-top:8px">' +
-          '<button type="button" id="deliberation-identity-link-open-search" class="deliberation-chat-send" style="padding:4px 10px;font-size:12px">共通部品と結びつける</button>' +
+          '<button type="button" id="deliberation-identity-link-open-search" class="deliberation-chat-send" data-ui-anchor="deliberation.identity-link-create" style="padding:4px 10px;font-size:12px">共通部品と結びつける</button>' +
         '</div>' +
         '<div id="deliberation-identity-link-search" hidden style="margin-top:8px;padding:8px;border:1px solid var(--color-border-tertiary);border-radius:6px">' +
           '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">' +
@@ -1877,9 +1881,9 @@
       (link.reason ? '<div class="deliberation-annotation-reason">' + escHtml(link.reason) + '</div>' : '') +
       (link.confidence_label ? '<span class="deliberation-annotation-confidence">' + escHtml(link.confidence_label) + '</span>' : '') +
       (pending
-        ? '<div class="deliberation-annotation-actions">' +
-            '<button type="button" class="deliberation-annotation-btn commit" data-identity-action="confirm">確定</button>' +
-            '<button type="button" class="deliberation-annotation-btn dismiss" data-identity-action="reject">却下</button>' +
+        ? '<div class="deliberation-annotation-actions" data-ui-anchor="deliberation.identity-link-decide">' +
+            '<button type="button" class="deliberation-annotation-btn commit" data-identity-action="confirm" data-ui-anchor="deliberation.identity-link-decide">確定</button>' +
+            '<button type="button" class="deliberation-annotation-btn dismiss" data-identity-action="reject" data-ui-anchor="deliberation.identity-link-decide">却下</button>' +
           '</div>'
         : '') +
       // 確定・却下失敗時の表示先。catch 側が引く専用クラス（スタイルは annotation-error を流用）
@@ -2065,8 +2069,8 @@
     if (elementType !== "shared_part") return "";
     return '<div class="deliberation-standardization" style="margin-top:16px;padding-top:14px;border-top:1px solid var(--color-border-tertiary)">' +
       '<h4 style="margin:0 0 6px;font-size:14px;color:var(--color-text-primary)">標準化度</h4>' +
-      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
-        '<button type="button" id="deliberation-standardization-assess" class="deliberation-chat-send" style="padding:4px 10px;font-size:12px">標準化度を評価</button>' +
+      '<div data-ui-anchor="deliberation.standardization-assess" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+        '<button type="button" id="deliberation-standardization-assess" class="deliberation-chat-send" data-ui-anchor="deliberation.standardization-assess" style="padding:4px 10px;font-size:12px">標準化度を評価</button>' +
         '<span id="deliberation-standardization-note" style="font-size:12px;color:var(--color-text-tertiary)"></span>' +
       '</div>' +
       '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:6px 0 0">' +
@@ -2203,6 +2207,8 @@
           // backend が未対応の期間も通常の本文契約を維持できる形にする。
           messageBody.selected_context = chatState.selectedContext;
         }
+        // M層 Phase 3（§6.5）: この対話1回だけのモデル上書き。未選択ならサーバ既定に委ねる。
+        if (chatState.selectedModel) messageBody.model = chatState.selectedModel;
         return apiFetch(
           "/admin/deliberation/sessions/" + encodeURIComponent(sessionId) + "/messages",
           { method: "POST", body: JSON.stringify(messageBody) }
@@ -2290,9 +2296,9 @@
       '<div class="deliberation-annotation-error" style="display:none"></div>' +
       _annotationStatusHtml(ann.status) +
       (isPending
-        ? '<div class="deliberation-annotation-actions">' +
-            (canCommit ? '<button type="button" class="deliberation-annotation-btn commit" data-action="commit">確定</button>' : '') +
-            '<button type="button" class="deliberation-annotation-btn dismiss" data-action="dismiss">却下</button>' +
+        ? '<div class="deliberation-annotation-actions" data-ui-anchor="deliberation.annotation-decide">' +
+            (canCommit ? '<button type="button" class="deliberation-annotation-btn commit" data-action="commit" data-ui-anchor="deliberation.annotation-decide">確定</button>' : '') +
+            '<button type="button" class="deliberation-annotation-btn dismiss" data-action="dismiss" data-ui-anchor="deliberation.annotation-decide">却下</button>' +
           '</div>'
         : '');
 
@@ -2571,6 +2577,10 @@
             '</div>' +
           '</div>' +
           '<div class="deliberation-chat-pane">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
+              '<span style="font-size:11px;color:var(--color-text-tertiary)">対話</span>' +
+              '<span id="deliberation-model-chip"></span>' +
+            '</div>' +
             '<div class="deliberation-chat-messages" id="deliberation-chat-messages">' +
               _chatEmptyStateHtml() +
             '</div>' +
@@ -2579,14 +2589,28 @@
               '<span>質問対象: <strong id="deliberation-chat-context-label"></strong></span>' +
               '<button id="deliberation-chat-context-clear" type="button" aria-label="質問対象を解除">解除</button>' +
             '</div>' +
-            '<div class="deliberation-chat-inputrow">' +
+            '<div class="deliberation-chat-inputrow" data-ui-anchor="deliberation.chat-send">' +
               '<textarea id="deliberation-chat-input" class="deliberation-chat-input" rows="2" placeholder="この要素について質問..."></textarea>' +
-              '<button id="deliberation-chat-send" type="button" class="deliberation-chat-send">送信</button>' +
+              '<button id="deliberation-chat-send" type="button" class="deliberation-chat-send" data-ui-anchor="deliberation.chat-send">送信</button>' +
             '</div>' +
           '</div>' +
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
+
+    // M層 Phase 3（§6.5）: 対話のモデルチップ。figure 要素は vision 対応モデルのみに
+    // 絞る（バックエンドの検証 scene と同じ "deliberation:vision" を使う。W層 dialogue.py の
+    // MessageCreateRequest 検証がこの scene 名と一致していることが前提）。
+    var modelChipMount = document.getElementById("deliberation-model-chip");
+    if (modelChipMount && window.AdminLlmModels) {
+      var chipScene = elementType === "figure" ? "deliberation:vision" : "deliberation";
+      window.AdminLlmModels.createModelChip({
+        sceneKey: chipScene,
+        mountEl: modelChipMount,
+        compact: true,
+        onChange: function (model) { chatState.selectedModel = model; }
+      });
+    }
 
     overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeModal(); });
     document.getElementById("deliberation-modal-close").addEventListener("click", _closeModal);
@@ -2890,11 +2914,11 @@
         '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
           'AIが生成した説明の候補です。承認すると学習者に表示されます。' +
         '</p>' +
-        '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">' +
+        '<div data-ui-anchor="deliberation.inventory-bulk-review" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">' +
           '<button type="button" id="deliberation-explanation-review-select-all" class="deliberation-annotation-btn">全選択</button>' +
           '<button type="button" id="deliberation-explanation-review-deselect-all" class="deliberation-annotation-btn">選択解除</button>' +
-          '<button type="button" id="deliberation-explanation-review-approve-selected" class="deliberation-annotation-btn commit" disabled>選択した0件を承認</button>' +
-          '<button type="button" id="deliberation-explanation-review-dismiss-selected" class="deliberation-annotation-btn dismiss" disabled>選択した0件を却下</button>' +
+          '<button type="button" id="deliberation-explanation-review-approve-selected" class="deliberation-annotation-btn commit" data-ui-anchor="deliberation.inventory-bulk-review" disabled>選択した0件を承認</button>' +
+          '<button type="button" id="deliberation-explanation-review-dismiss-selected" class="deliberation-annotation-btn dismiss" data-ui-anchor="deliberation.inventory-bulk-review" disabled>選択した0件を却下</button>' +
         '</div>' +
         '<div id="deliberation-explanation-review-message" style="font-size:11.5px;margin:0 0 8px"></div>' +
         '<div id="deliberation-explanation-review-list" style="overflow-y:auto;max-height:60vh;display:flex;flex-direction:column;gap:8px"></div>' +
@@ -3202,7 +3226,7 @@
         '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
           'この教材からパイプラインが検出した要素の一覧です。表示はすべて既存データの読み出しで、確定済みの判断ではありません。' +
         '</p>' +
-        '<div id="deliberation-inventory-toolbar" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px"></div>' +
+        '<div id="deliberation-inventory-toolbar" data-ui-anchor="deliberation.inventory-filter" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px"></div>' +
         '<div id="deliberation-explanation-review-entry" style="margin:0 0 8px"></div>' +
         '<div id="deliberation-inventory-truncated-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 8px"></div>' +
         '<div id="deliberation-inventory-list" style="overflow-y:auto;flex:1;display:flex;flex-direction:column;gap:8px">' +

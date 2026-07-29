@@ -170,6 +170,63 @@ def check_ui_anchor_mappings() -> list[str]:
     return violations
 
 
+def check_admin_ui_anchor_mappings() -> list[str]:
+    """管理画面 UI アンカー表（``core/help_kb/admin_ui_anchors.py``）の全参照を検証する。
+
+    学習側 ``check_ui_anchor_mappings()`` と同型・独立の関数（同じ理由でこの2つは
+    統合しない — 既存ガードレールテストが最小合成ツリーで戻り値をピン留めしている）。
+    検証内容:
+      ①``ADMIN_UI_ANCHORS`` の値は必ず ``teacher/`` か ``system_admin/`` を指す
+        （``student/`` を指す値は audience 越境として違反）。
+      ②参照先ファイル・見出し ``{#anchor}`` が実在する（teacher 索引・system_admin
+        索引をそれぞれファイルシステムから直接構築して検証する。理由は
+        ``check_ui_anchor_mappings`` と同じ — 配信ソースが DB に切り替わっていても
+        ``ADMIN_UI_ANCHORS`` 自体は git 管理された docs に対する人手マッピングであり、
+        その静的な正しさを見るのが目的のため）。
+      ③``KNOWN_ADMIN_UI_ANCHOR_IDS`` が ``ADMIN_UI_ANCHORS`` の全キーを包含する
+        （no_hit 記録が「未知のアンカーID」として弾かれないことを保証する）。
+    """
+    try:
+        from . import admin_ui_anchors as _admin_ui_anchors
+    except Exception:  # noqa: BLE001 — 並行実装中のモジュール不在に対する防御
+        logger.warning("admin_ui_anchors module unavailable during validation", exc_info=True)
+        return []
+
+    violations: list[str] = []
+    root = manual_root()
+    idx_by_audience: dict[str, dict] = {}
+    if root is not None:
+        for audience in ("teacher", "system_admin"):
+            directory = root / audience
+            if directory.is_dir():
+                idx, _excluded = _index.build_section_index(
+                    directory, manual_transforms=True, audience_tag=audience
+                )
+                idx_by_audience[audience] = idx
+
+    mapped_ids = set(_admin_ui_anchors.ADMIN_UI_ANCHORS.keys())
+    unknown_ids = mapped_ids - set(_admin_ui_anchors.KNOWN_ADMIN_UI_ANCHOR_IDS)
+    for anchor_id in sorted(unknown_ids):
+        violations.append(
+            f"admin_ui_anchors: {anchor_id!r} が KNOWN_ADMIN_UI_ANCHOR_IDS に含まれていない"
+        )
+
+    for anchor_id, ref in _admin_ui_anchors.ADMIN_UI_ANCHORS.items():
+        audience, _, rest = (ref or "").partition("/")
+        if audience not in ("teacher", "system_admin"):
+            violations.append(
+                f"admin_ui_anchors: {anchor_id!r} が teacher/ system_admin/ 以外を参照している: {ref!r}"
+            )
+            continue
+        file, _, anchor = rest.partition("#")
+        idx = idx_by_audience.get(audience, {})
+        if f"{file}#{anchor}" not in idx:
+            violations.append(
+                f"admin_ui_anchors: {anchor_id!r} の参照先が見つからない: {ref!r}"
+            )
+    return violations
+
+
 def _validate_manual_files() -> list[str]:
     """ファイルシステム（``docs/manual/``）を検証する（Phase 1 からの既存ロジック）。"""
     violations: list[str] = []

@@ -98,6 +98,7 @@
     toggleBtn.id = "admin-copilot-toggle";
     toggleBtn.type = "button";
     toggleBtn.className = "admin-assistant-fab";
+    toggleBtn.setAttribute("data-ui-anchor", "header.copilot");
     toggleBtn.title = "管理画面の操作を手伝う AI アシスタント";
     toggleBtn.innerHTML = "🤖";
     toggleBtn.addEventListener("click", togglePanel);
@@ -262,14 +263,22 @@
     busy = true;
     showTyping();
 
+    var payload = {
+      message: message,
+      history: history.slice(-10),
+      session_id: sessionId,
+      screen_context: collectScreenContext()
+    };
+    // admin「？使い方」インスペクト・モード中は typed usage_help として送る
+    // （ホバー中のアンカーIDを添えて、意図分類LLMを経由しない一次経路に載せる）。
+    if (window.AdminHelpInspect && window.AdminHelpInspect.isActive()) {
+      payload.support_action = "usage_help";
+      payload.ui_anchor = window.AdminHelpInspect.hoveredAnchorId();
+    }
+
     apiFetch("/admin/assistant/chat", {
       method: "POST",
-      body: JSON.stringify({
-        message: message,
-        history: history.slice(-10),
-        session_id: sessionId,
-        screen_context: collectScreenContext()
-      })
+      body: JSON.stringify(payload)
     }).then(function (res) { return res.json(); })
       .then(function (data) { hideTyping(); handleChatResponse(data); })
       .catch(function () { hideTyping(); appendAiMsg("すみません、うまく処理できませんでした。もう一度お試しください。"); })

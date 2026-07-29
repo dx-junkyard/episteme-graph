@@ -134,10 +134,10 @@
     if (!entry) {
       // 台帳行なし = 記帳がまだ無いという事実（エラーではない）
       html += '<p class="doubt-muted">検証スコープの記帳なし</p>';
-      html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1">スコープを記帳</button>';
+      html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1" data-ui-anchor="doubt-atlas.record-scope">スコープを記帳</button>';
       html += '<div data-doubt-form-slot="1"></div>';
       // T1(G2-D): 検証状態の記帳導線（台帳行が無くても記帳操作自体は可能）
-      html += '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-form="1">検証状態を記帳する</button>';
+      html += '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-form="1" data-ui-anchor="doubt-atlas.record-verification-status">検証状態を記帳する</button>';
       html += '<div data-doubt-vstatus-slot="1"></div>';
       container.innerHTML = html;
       bindScopeForm(container, targetType, targetId);
@@ -194,17 +194,17 @@
       if (c.evidence_quote) html += '<div class="doubt-scope-meta">「' + escHtml(c.evidence_quote) + '」</div>';
       if (c.reason) html += '<div class="doubt-scope-meta">' + escHtml(c.reason) + '</div>';
       html += '<div>' +
-        '<button type="button" class="doubt-chip-btn" data-doubt-candidate-confirm="' + escHtml(c.candidate_id) + '">確定</button>' +
-        '<button type="button" class="doubt-chip-btn" data-doubt-candidate-dismiss="' + escHtml(c.candidate_id) + '">却下</button>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-candidate-confirm="' + escHtml(c.candidate_id) + '" data-ui-anchor="doubt-atlas.record-scope">確定</button>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-candidate-dismiss="' + escHtml(c.candidate_id) + '" data-ui-anchor="doubt-atlas.record-scope">却下</button>' +
         '</div></div>';
     });
 
-    html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1">スコープを記帳</button>';
+    html += '<button type="button" class="doubt-chip-btn" data-doubt-scope-form="1" data-ui-anchor="doubt-atlas.record-scope">スコープを記帳</button>';
     html += '<div data-doubt-form-slot="1"></div>';
 
     // T1(G2-D): 検証状態の記帳（「確定は人間」の実行手段）。directly_verified への
     // 昇格はスコープ1件以上が前提（サーバも422で弾くが、UI側でも選択肢を無効化する）。
-    html += '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-form="1">検証状態を記帳する</button>';
+    html += '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-form="1" data-ui-anchor="doubt-atlas.record-verification-status">検証状態を記帳する</button>';
     html += '<div data-doubt-vstatus-slot="1"></div>';
 
     // D3-1: 疑義（併記。主語は常に型 — 人格対立の文面にしない）
@@ -221,8 +221,8 @@
         if (c.id && (c.status === "open" || c.status === "answered")) {
           // T2: 自分の疑義への取り下げ・検証提案への昇格（取り下げは本人のみ・API 403 で保護）
           html += '<div>' +
-            '<button type="button" class="doubt-chip-btn" data-doubt-challenge-withdraw="' + escHtml(c.id) + '">取り下げ</button>' +
-            '<button type="button" class="doubt-chip-btn" data-doubt-challenge-proposal="' + escHtml(c.id) + '">検証提案にする</button>' +
+            '<button type="button" class="doubt-chip-btn" data-doubt-challenge-withdraw="' + escHtml(c.id) + '" data-ui-anchor="doubt-atlas.manage-challenge">取り下げ</button>' +
+            '<button type="button" class="doubt-chip-btn" data-doubt-challenge-proposal="' + escHtml(c.id) + '" data-ui-anchor="doubt-atlas.manage-challenge">検証提案にする</button>' +
             '</div>';
           html += '<div data-doubt-proposal-slot="' + escHtml(c.id) + '"></div>';
           html += '<span class="doubt-muted" data-doubt-challenge-action-msg="' + escHtml(c.id) + '"></span>';
@@ -233,7 +233,7 @@
       html += '<p class="doubt-muted">疑義はありません。</p>';
     }
     if (targetType === "assumption" || targetType === "claim") {
-      html += '<button type="button" class="doubt-chip-btn" data-doubt-challenge-form="1">疑義を残す</button>';
+      html += '<button type="button" class="doubt-chip-btn" data-doubt-challenge-form="1" data-ui-anchor="doubt-atlas.record-challenge">疑義を残す</button>';
       html += '<div data-doubt-challenge-slot="1"></div>';
     }
     html += '</div>';
@@ -268,7 +268,7 @@
         '<label>系（system）</label><input data-f="system" placeholder="例: 水素原子で">' +
         '<label>根拠（原文の引用など）</label><textarea data-f="evidence_quote" rows="2"></textarea>' +
         '<label>理由</label><input data-f="reason" placeholder="なぜこのスコープと言えるか">' +
-        '<button type="button" class="doubt-chip-btn" data-doubt-scope-submit="1">記帳する</button>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-scope-submit="1" data-ui-anchor="doubt-atlas.record-scope">記帳する</button>' +
         '<span class="doubt-muted" data-doubt-scope-msg=""></span>' +
         '</div>';
       var submit = slot.querySelector("[data-doubt-scope-submit]");
@@ -315,14 +315,14 @@
       });
       slot.innerHTML =
         '<div class="doubt-form">' +
-        '<label>検証状態</label><select data-f="verification_status">' + options + '</select>' +
+        '<label>検証状態</label><select data-f="verification_status" data-ui-anchor="doubt-atlas.record-verification-status">' + options + '</select>' +
         (scopesCount < 1
           ? '<p class="doubt-muted">直接検証の記帳には検証スコープが1件以上必要です' +
             '（空欄は異常ではなく発見です。まずスコープを記帳してください）。</p>'
           : '') +
         '<label>理由（必須）</label><textarea data-f="reason" rows="2"></textarea>' +
         '<p class="doubt-muted">この記帳はあなたの操作として帰属され、監査ログに記録されます。</p>' +
-        '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-submit="1">記帳する</button>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-vstatus-submit="1" data-ui-anchor="doubt-atlas.record-verification-status">記帳する</button>' +
         '<span class="doubt-muted" data-doubt-vstatus-msg=""></span>' +
         '</div>';
       var submit = slot.querySelector("[data-doubt-vstatus-submit]");
@@ -392,7 +392,7 @@
         '<div class="doubt-form">' +
         '<label>疑義の型</label><select data-f="challenge_type">' + options + '</select>' +
         '<label>理由（本人の言葉・必須）</label><textarea data-f="reason" rows="2"></textarea>' +
-        '<button type="button" class="doubt-chip-btn" data-doubt-challenge-submit="1">疑義を残す</button>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-challenge-submit="1" data-ui-anchor="doubt-atlas.record-challenge">疑義を残す</button>' +
         '<span class="doubt-muted" data-doubt-challenge-msg=""></span>' +
         '</div>';
       slot.querySelector("[data-doubt-challenge-submit]").addEventListener("click", function () {
@@ -452,7 +452,7 @@
           slot.innerHTML =
             '<div class="doubt-form">' +
             '<label>検証提案（どの実験・計算で検証可能か）</label><textarea data-f="proposal" rows="2"></textarea>' +
-            '<button type="button" class="doubt-chip-btn" data-doubt-proposal-submit="1">提案として登録</button>' +
+            '<button type="button" class="doubt-chip-btn" data-doubt-proposal-submit="1" data-ui-anchor="doubt-atlas.manage-challenge">提案として登録</button>' +
             '<span class="doubt-muted" data-doubt-proposal-msg=""></span>' +
             '</div>';
           slot.querySelector("[data-doubt-proposal-submit]").addEventListener("click", function () {
@@ -655,11 +655,11 @@
         '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">' +
         '<h3 class="admin-section-title" style="margin:0">前提の地図</h3>' +
         '<span class="doubt-muted">※「分野の地図」とは別機能です（負荷度×検証度の事実の投影）</span>' +
-        '<select id="doubt-course-select" style="padding:4px 8px;font-size:13px"><option value="">コースを選択...</option></select>' +
-        '<button type="button" class="doubt-cf-btn" id="doubt-refresh-btn">再読込</button>' +
-        '<button type="button" class="doubt-cf-btn" id="doubt-mining-btn">前提マイニング実行</button>' +
-        '<button type="button" class="doubt-cf-btn" id="doubt-audit-btn">コーパス監査実行</button>' +
-        '<button type="button" class="doubt-cf-btn" id="doubt-load-btn">負荷再計算</button>' +
+        '<select id="doubt-course-select" data-ui-anchor="doubt-atlas.course-select" style="padding:4px 8px;font-size:13px"><option value="">コースを選択...</option></select>' +
+        '<button type="button" class="doubt-cf-btn" id="doubt-refresh-btn" data-ui-anchor="doubt-atlas.refresh">再読込</button>' +
+        '<button type="button" class="doubt-cf-btn" id="doubt-mining-btn" data-ui-anchor="doubt-atlas.mining-run">前提マイニング実行</button>' +
+        '<button type="button" class="doubt-cf-btn" id="doubt-audit-btn" data-ui-anchor="doubt-atlas.audit-run">コーパス監査実行</button>' +
+        '<button type="button" class="doubt-cf-btn" id="doubt-load-btn" data-ui-anchor="doubt-atlas.load-recompute">負荷再計算</button>' +
         '</div>' +
         '<div class="doubt-atlas-wrap">' +
         '<div class="doubt-atlas-plot"><div id="doubt-atlas-svg"></div></div>' +
@@ -669,7 +669,7 @@
         '</div>' +
         '<div class="admin-section"><h3 class="admin-section-title">前提候補のレビュー</h3>' +
         '<div style="margin-bottom:6px"><label class="doubt-muted">表示: </label>' +
-        '<select id="doubt-assumption-filter" style="font-size:12px">' +
+        '<select id="doubt-assumption-filter" data-ui-anchor="doubt-atlas.assumption-filter" style="font-size:12px">' +
         '<option value="candidate">候補</option><option value="confirmed">確定済み</option>' +
         '<option value="dismissed">却下済み（保持）</option><option value="all">すべて</option></select></div>' +
         '<div id="doubt-assumption-list"></div></div>' +
@@ -782,7 +782,7 @@
       var fill = p.unscoped ? "none" : "#64748b";
       var dash = p.unscoped ? ' stroke-dasharray="3,3"' : "";
       var stroke = p.target_type === "assumption" ? "#7c3aed" : "#64748b";
-      svg += '<circle class="doubt-svg-point" data-doubt-point="' + idx + '" cx="' + cx + '" cy="' + cy +
+      svg += '<circle class="doubt-svg-point" data-doubt-point="' + idx + '" data-ui-anchor="doubt-atlas.plot-detail" cx="' + cx + '" cy="' + cy +
         '" r="7" fill="' + fill + '" fill-opacity="0.55" stroke="' + stroke + '"' + dash + '>' +
         '<title>' + escHtml(p.label || p.target_id) + '</title></circle>';
       if (p.has_naive_signal) {
@@ -835,9 +835,9 @@
           }
           if (a.status === "candidate") {
             html += '<div>' +
-              '<button type="button" class="doubt-chip-btn" data-doubt-assumption-confirm="' + escHtml(a.id) + '">確定</button>' +
-              '<button type="button" class="doubt-chip-btn" data-doubt-assumption-edit="' + escHtml(a.id) + '">文面を訂正して確定</button>' +
-              '<button type="button" class="doubt-chip-btn" data-doubt-assumption-dismiss="' + escHtml(a.id) + '">却下</button>' +
+              '<button type="button" class="doubt-chip-btn" data-doubt-assumption-confirm="' + escHtml(a.id) + '" data-ui-anchor="doubt-atlas.assumption-confirm">確定</button>' +
+              '<button type="button" class="doubt-chip-btn" data-doubt-assumption-edit="' + escHtml(a.id) + '" data-ui-anchor="doubt-atlas.assumption-confirm">文面を訂正して確定</button>' +
+              '<button type="button" class="doubt-chip-btn" data-doubt-assumption-dismiss="' + escHtml(a.id) + '" data-ui-anchor="doubt-atlas.assumption-dismiss">却下</button>' +
               '</div>';
           }
           html += '</div>';
@@ -896,7 +896,7 @@
         }
         var html = "";
         items.forEach(function (item, idx) {
-          html += '<div class="doubt-list-row" data-doubt-open="' + idx + '">' +
+          html += '<div class="doubt-list-row" data-doubt-open="' + idx + '" data-ui-anchor="doubt-atlas.open-assumptions-row">' +
             '<div>' + escHtml(item.statement) + '</div>' +
             '<div style="margin-top:3px">' +
             '<span class="doubt-badge">依存の広がり: ' + escHtml(LOAD_LABELS[item.load_level] || item.load_level) + '</span>' +

@@ -134,11 +134,11 @@
     if (banner) {
       if (pending) {
         banner.innerHTML =
-          '<div style="border:1px solid var(--color-text-danger,#c00);background:rgba(200,0,0,0.06);border-radius:6px;padding:10px;margin-bottom:12px">' +
+          '<div data-ui-anchor="versioning.cancel-deletion" style="border:1px solid var(--color-text-danger,#c00);background:rgba(200,0,0,0.06);border-radius:6px;padding:10px;margin-bottom:12px">' +
             '<div style="font-size:13px;color:var(--color-text-danger,#c00);font-weight:600">削除予定</div>' +
             '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:2px">期限 <b>' + esc(fmtDate(state.delete_purge_after)) + '</b> 以降、全ユーザーから物理削除されます。' +
             (state.delete_reason ? ' 理由: ' + esc(state.delete_reason) : '') + '</div>' +
-            '<button id="vg-cancel-del"' + (isOwner ? '' : ' disabled') + ' style="margin-top:8px;background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:4px 10px;border-radius:4px;cursor:' + (isOwner ? 'pointer' : 'not-allowed') + ';font-size:12px' + (isOwner ? '' : ';opacity:0.5') + '">削除予約を取り消す</button>' +
+            '<button id="vg-cancel-del" data-ui-anchor="versioning.cancel-deletion"' + (isOwner ? '' : ' disabled') + ' style="margin-top:8px;background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:4px 10px;border-radius:4px;cursor:' + (isOwner ? 'pointer' : 'not-allowed') + ';font-size:12px' + (isOwner ? '' : ';opacity:0.5') + '">削除予約を取り消す</button>' +
             (isOwner ? '' : '<span style="font-size:11px;color:var(--color-text-tertiary);margin-left:8px">' + esc(ownerOnlyNote) + '</span>') +
           '</div>';
       } else {
@@ -168,12 +168,16 @@
     if (!pending) {
       if (canPublish) {
         publishHtml =
+          '<div data-ui-anchor="versioning.publish">' +
           '<textarea id="vg-note" placeholder="この版のメモ（任意。例: 第3章を修正）" style="width:100%;box-sizing:border-box;min-height:48px;font-size:12px;padding:6px;border:1px solid var(--color-border,#ccc);border-radius:4px"></textarea>' +
-          '<button id="vg-publish" style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:13px">共有版として発行</button>';
+          '<button id="vg-publish" data-ui-anchor="versioning.publish" style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:pointer;font-size:13px">共有版として発行</button>' +
+          '</div>';
       } else {
         publishHtml =
-          '<button id="vg-publish" disabled style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:not-allowed;font-size:13px;opacity:0.5">共有版として発行</button>' +
-          '<span style="font-size:11px;color:var(--color-text-tertiary);margin-left:8px">' + esc(ownerOnlyNote) + '</span>';
+          '<div data-ui-anchor="versioning.publish">' +
+          '<button id="vg-publish" disabled data-ui-anchor="versioning.publish" style="margin-top:6px;background:var(--color-text-info,#06c);border:none;color:#fff;padding:6px 14px;border-radius:4px;cursor:not-allowed;font-size:13px;opacity:0.5">共有版として発行</button>' +
+          '<span style="font-size:11px;color:var(--color-text-tertiary);margin-left:8px">' + esc(ownerOnlyNote) + '</span>' +
+          '</div>';
       }
     }
 
@@ -183,13 +187,13 @@
       var delDisabled = canScheduleDel ? '' : ' disabled';
       var delStyleExtra = canScheduleDel ? '' : ';opacity:0.5';
       deletionHtml =
-        '<div style="margin-top:16px;border-top:1px solid var(--color-border,#eee);padding-top:12px">' +
+        '<div data-ui-anchor="versioning.schedule-deletion" style="margin-top:16px;border-top:1px solid var(--color-border,#eee);padding-top:12px">' +
           '<h4 style="font-size:13px;margin:0 0 6px 0;color:var(--color-text-danger,#c00)">削除の予約</h4>' +
           '<p style="font-size:11px;color:var(--color-text-tertiary);margin:0 0 6px">猶予日数を指定して削除を予約します。共有先に通知され、期限後に全ユーザーから物理削除されます。' +
           (canScheduleDel ? '' : ' ' + esc(ownerOnlyNote) + '。') + '</p>' +
           '<label style="font-size:12px;color:var(--color-text-secondary)">猶予日数 <input id="vg-grace" type="number" min="1" value="14"' + delDisabled + ' style="width:64px;padding:4px;border:1px solid var(--color-border,#ccc);border-radius:4px' + delStyleExtra + '"></label> ' +
           '<input id="vg-reason" type="text" placeholder="理由（任意）"' + delDisabled + ' style="width:200px;padding:4px;border:1px solid var(--color-border,#ccc);border-radius:4px;font-size:12px' + delStyleExtra + '"> ' +
-          '<button id="vg-schedule-del"' + delDisabled + ' style="background:none;border:1px solid var(--color-text-danger,#c00);color:var(--color-text-danger,#c00);padding:4px 10px;border-radius:4px;cursor:' + (canScheduleDel ? 'pointer' : 'not-allowed') + ';font-size:12px' + delStyleExtra + '">削除を予約</button>' +
+          '<button id="vg-schedule-del" data-ui-anchor="versioning.schedule-deletion"' + delDisabled + ' style="background:none;border:1px solid var(--color-text-danger,#c00);color:var(--color-text-danger,#c00);padding:4px 10px;border-radius:4px;cursor:' + (canScheduleDel ? 'pointer' : 'not-allowed') + ';font-size:12px' + delStyleExtra + '">削除を予約</button>' +
         '</div>';
     }
 
@@ -200,8 +204,10 @@
           '<div style="font-size:12px;color:var(--color-text-secondary);border:1px solid var(--color-border,#ddd);border-radius:6px;padding:8px 10px;margin-bottom:8px;background:rgba(0,100,200,0.04)">' + esc(_viewingLine(state, releases)) + '</div>') +
         publishHtml +
       '</div>' +
+      '<div data-ui-anchor="versioning.version-history">' +
       '<h4 style="font-size:13px;margin:12px 0 8px 0;color:var(--color-text-secondary)">版の履歴</h4>' +
       histHtml +
+      '</div>' +
       deletionHtml +
       '<div id="vg-status" style="margin-top:10px;font-size:12px"></div>';
 
@@ -313,11 +319,12 @@
     if (existing) { existing.remove(); return; }
     var panel = document.createElement("div");
     panel.id = "vg-inbox-panel";
+    panel.setAttribute("data-ui-anchor", "versioning.inbox");
     panel.style.cssText = "position:fixed;top:46px;right:20px;width:340px;max-width:calc(100vw - 32px);max-height:60vh;overflow:auto;background:var(--color-background-primary,#fff);border:1px solid var(--color-border-secondary,#d2d2d7);border-radius:12px;box-shadow:0 20px 48px rgba(0,0,0,0.24);z-index:10045;padding:12px";
     panel.innerHTML =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
         '<b style="font-size:14px;color:var(--color-text-primary)">共有物の更新通知</b>' +
-        '<button id="vg-inbox-readall" style="background:none;border:none;color:var(--color-text-info);font-size:12px;cursor:pointer">すべて既読</button>' +
+        '<button id="vg-inbox-readall" data-ui-anchor="versioning.inbox-read" style="background:none;border:none;color:var(--color-text-info);font-size:12px;cursor:pointer">すべて既読</button>' +
       '</div><div id="vg-inbox-list"><p style="font-size:12px;color:var(--color-text-tertiary)">読み込み中...</p></div>';
     document.body.appendChild(panel);
     document.getElementById("vg-inbox-readall").addEventListener("click", function () {
@@ -386,11 +393,11 @@
   function _renderNotif(n) {
     var unread = !n.read_at;
     var canAdopt = n.kind === "version_published" && !n.acted_at;
-    return '<div class="vg-notif" data-id="' + esc(n.id) + '" data-type="' + esc(n.object_type || n.entity_type) + '" data-oid="' + esc(n.object_id || n.entity_id) + '"' +
+    return '<div class="vg-notif" data-ui-anchor="versioning.inbox-read" data-id="' + esc(n.id) + '" data-type="' + esc(n.object_type || n.entity_type) + '" data-oid="' + esc(n.object_id || n.entity_id) + '"' +
       ' style="border-bottom:1px solid var(--color-border,#eee);padding:8px 2px;' + (unread ? 'background:rgba(0,100,200,0.05)' : '') + '">' +
       '<div style="font-size:12px;color:var(--color-text-primary)">' + esc(_notifText(n)) + '</div>' +
       '<div style="font-size:10px;color:var(--color-text-tertiary);margin-top:2px">' + esc(fmtDate(n.created_at)) + '</div>' +
-      (canAdopt ? '<button class="vg-adopt-btn" style="margin-top:6px;background:var(--color-text-success,#2a7);border:none;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px">' + esc(_adoptLabel(n.object_type)) + '</button>' : '') +
+      (canAdopt ? '<button class="vg-adopt-btn" data-ui-anchor="versioning.inbox-adopt" style="margin-top:6px;background:var(--color-text-success,#2a7);border:none;color:#fff;padding:3px 10px;border-radius:4px;cursor:pointer;font-size:12px">' + esc(_adoptLabel(n.object_type)) + '</button>' : '') +
       '</div>';
   }
 

@@ -235,7 +235,7 @@ class TestLectureStudioModeUI:
         root = Path(__file__).resolve().parents[2]
         html = (root / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
         js = (root / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
-        assert '<button class="ls-work-tab" data-ls-view="graph" hidden>理論グラフ</button>' in html
+        assert '<button class="ls-work-tab" data-ls-view="graph" hidden data-ui-anchor="lecture-studio.work-tab-graph">理論グラフ</button>' in html
         assert 'if (lsState.leftTab === "document") return ["edit", "structure", "graph"];' in js
         assert 'var topView = lsIsTheoryGraphView(view) ? "graph" : view;' in js
 

@@ -25,6 +25,13 @@ import tempfile
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable
 
+from core.llm_policy import (
+    SCENE_PIPELINE,
+    SCENE_PIPELINE_VISION,
+    SOURCE_RUN_OVERRIDE,
+    model_override,
+    resolve_scene_model,
+)
 from core.llm_usage.context import bind_usage_context, set_current_feature
 from core.llm_worker.cost_gate import CostGate, today_str
 
@@ -50,6 +57,82 @@ from .tex_archive import build_structure_from_tex_archive
 logger = logging.getLogger(__name__)
 
 ARTIFACTS_KEY = "_artifacts"
+
+# ---------------------------------------------------------------------------
+# M層（LLM モデル選択）Phase 2: run 単位のステージ別モデル上書き + 使用モデルの記録。
+# 正本設計: docs/features/llm_model_selection_design.md §3/§8/§10 Phase 2。
+#
+# ``run_document_pipeline`` はスレッドを起こさず全ステージを同一スレッドで順に
+# 実行する（本モジュールに Thread/asyncio 系の生成は無い）ため、
+# ``core.llm_policy.model_override`` の contextvar はそのままステージ内の
+# ``generate_*`` 呼び出しへ伝播する。ステージ関数の中身は変更せず、
+# ``_PIPELINE_STEPS`` を回すランナーループの1箇所だけで override を張る。
+# ---------------------------------------------------------------------------
+
+STAGE_MODELS_KEY = "_stage_models"
+
+# options.models による run override / 使用モデル記録(M7)の対象ステージ。
+# 「LLM-first」と明言されている、または vision/opt-in で実行が二値に決まる
+# ステージのみを対象にする。document_structure（構造優先・曖昧箇所のみ LLM 補助）・
+# figure_table_semantics（caption-first・LLM enricher 任意）・symbol_registry /
+# derivation_chain / course_mapping / component_graph（いずれも非LLM・決定論的）は、
+# 実行時に LLM 呼び出しが実際にあったかどうかを外側（ループ側）から正確に判定
+# できないため、記録対象から意図的に除外する（不正確な網羅より正直な部分記録を
+# 優先する、という Phase 2 依頼の指示どおり）。
+LLM_STAGE_NAMES = frozenset({
+    "paper_skeleton",
+    "rhetorical_role",
+    "claim_qualification",
+    "equation_semantics",
+    "apparatus_semantics",
+    "thesis_reconstruction",
+    "dsl_linking",
+    "component_assembly",
+    "narrative_annotator",
+    "contextual_explanation",
+})
+
+# 後方互換エイリアス（Phase 4 で `LLM_STAGE_NAMES` へ昇格・公開。旧名を参照する
+# 外部コードのための薄いエイリアスで、正本は `LLM_STAGE_NAMES`）。
+_LLM_STAGE_NAMES = LLM_STAGE_NAMES
+
+
+def _resolve_stage_override_model(stage_name: str | None, effective_options: dict) -> str | None:
+    """``effective_options["models"]`` から stage 単位の run override モデルを引く。
+
+    解決順: ``pipeline:{stage_name}`` → (``apparatus_semantics`` だけ
+    ``pipeline.vision``、それ以外は ``pipeline``)。どちらにも一致しなければ
+    None を返す（override なし = 従来どおり env/tier 既定へフォールバックする）。
+    between-stage の決定論的後処理フック（``stage_name is None``）は対象外。
+    """
+    if not stage_name:
+        return None
+    models = effective_options.get("models")
+    if not isinstance(models, dict):
+        return None
+    candidate = models.get(f"pipeline:{stage_name}")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    fallback_key = SCENE_PIPELINE_VISION if stage_name == "apparatus_semantics" else SCENE_PIPELINE
+    candidate = models.get(fallback_key)
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return None
+
+
+def _stage_artifact_indicates_llm_skip(artifact_value: Any) -> bool:
+    """このステージが（実行はされたが）LLM 呼び出しをしなかったことを示す既知の
+    placeholder かどうかを判定する。``apparatus_semantics`` の
+    ``skipped_by_option`` / ``contextual_explanation`` の ``skipped_by_limit``・
+    ``llm_calls == 0``（対象要素が無い/日次上限で0回だった場合を含む）を検出する。
+    """
+    if isinstance(artifact_value, dict):
+        if artifact_value.get("skipped_by_option") or artifact_value.get("skipped_by_limit"):
+            return True
+        if artifact_value.get("llm_calls") == 0:
+            return True
+    return False
+
 
 # contextual_explanation stage (hierarchical_context_explanation_design.md §5.1):
 # a single process-lifetime CostGate for the daily LLM-call budget, matching
@@ -316,6 +399,17 @@ def run_document_pipeline(
             for stage, value in previous_artifacts.items()
             if stage_order.get(stage, 10_000) < start_index
         }
+    # M7: 前回 run の使用モデル記録を引き継ぐ（resume で artifact 再利用したステージは
+    # 前回のモデル記録をそのまま保持し、実際に再実行したステージだけを後段のループが
+    # 上書きする。start_index より後ろのステージは今回作り直されるので、artifact と
+    # 同じ規則で古い記録を落とす — 捏造しない）。
+    stage_models: dict[str, str] = dict(previous_outputs.get(STAGE_MODELS_KEY) or {})
+    if start_index is not None:
+        stage_models = {
+            stage: value
+            for stage, value in stage_models.items()
+            if stage_order.get(stage, 10_000) < start_index
+        }
     run_id = (previous_run or {}).get("id")
     if run_id:
         upsert_analysis_run(
@@ -484,12 +578,56 @@ def run_document_pipeline(
     ctx.finish_target_stage = finish_target_stage
     ctx.all_artifacts = all_artifacts
 
+    def _record_stage_model_if_used(stage_name: str, had_artifact_before: bool) -> None:
+        # M7: 実際に実行した（artifact 再利用ではない）LLM ステージのみ、使用モデルを
+        # stage_outputs["_stage_models"] に記録する。resume で artifact を再利用した
+        # ステージはここに到達しない前提（had_artifact_before が真）ため、前回の記録が
+        # そのまま残る。
+        if stage_name not in LLM_STAGE_NAMES or had_artifact_before:
+            return
+        new_artifact = ctx.artifact(stage_name)
+        if new_artifact is None or _stage_artifact_indicates_llm_skip(new_artifact):
+            return
+        try:
+            resolved_model = resolve_scene_model(f"pipeline:{stage_name}").model
+        except Exception:
+            logger.debug("failed to resolve stage model for %s", stage_name, exc_info=True)
+            return
+        if not resolved_model:
+            return
+        stage_models[stage_name] = resolved_model
+        upsert_analysis_run(
+            run_id=run_id,
+            document_id=document_id,
+            material_id=material_id,
+            cartridge_id=cartridge_id,
+            status="running",
+            current_stage=stage_name,
+            stage_outputs={STAGE_MODELS_KEY: dict(stage_models)},
+        )
+
     try:
         if source_kind not in {"pdf", "tex_archive"}:
             raise ValueError(f"unsupported source_kind: {source_kind}")
 
         for step in _PIPELINE_STEPS:
-            if step.execute(ctx):
+            stage_name = step.name
+            override_model = _resolve_stage_override_model(stage_name, effective_options)
+            had_artifact_before = stage_name is not None and ctx.artifact(stage_name) is not None
+
+            def _run_step(_stage_name=stage_name, _had_artifact_before=had_artifact_before) -> bool:
+                stopped_inner = step.execute(ctx)
+                if _stage_name is not None:
+                    _record_stage_model_if_used(_stage_name, _had_artifact_before)
+                return stopped_inner
+
+            if override_model:
+                with model_override(override_model, source=SOURCE_RUN_OVERRIDE):
+                    stopped = _run_step()
+            else:
+                stopped = _run_step()
+
+            if stopped:
                 return ctx.result
 
         _stage_completed(ctx)
@@ -1444,6 +1582,7 @@ def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
                 fig_tbl=ctx.fig_tbl,
                 apparatus_result=ctx.apparatus_result,
                 thesis=ctx.thesis,
+                effective_options=ctx.effective_options,
             )
         except Exception as exc:
             logger.warning(
@@ -2527,11 +2666,19 @@ def _build_apparatus_semantics(
     analysis_mode = str(getattr(settings, "apparatus_analysis_mode", "iterative") or "iterative")
     iterative_enabled = analysis_mode != "one_shot"
     verify_max_iterations = max(0, int(getattr(settings, "apparatus_verify_max_iterations", 3) or 0))
+    # ``model_name`` は audit-record 用のヒントで、実際の生成モデル解決は
+    # llm_client 側（``ApparatusSemanticsLLMClient`` → ``core.llm.py`` の
+    # ``resolve_scene_model``）が行う（schema.py の ``IterativeConfig.model_name``
+    # docstring 参照）。ここで ``resolve_scene_model`` を直接呼ぶことで、
+    # run override（``options.models["pipeline.vision"]`` 等。ランナーループが
+    # 張る ``model_override`` contextvar 経由で反映される）を含めた実際の解決結果を
+    # 監査記録に正しく反映する（旧実装は env 設定値の素読みで、run override は
+    # 反映されず、env 未設定時は空文字のまま記録されていた）。
     iterative_config = IterativeConfig(
         enabled=iterative_enabled,
         max_iterations=verify_max_iterations,
         vision_call_budget=daily_remaining,
-        model_name=str(getattr(settings, "apparatus_llm_model", "") or ""),
+        model_name=resolve_scene_model("pipeline:apparatus_semantics").model,
     )
     if iterative_enabled:
         cost_per_figure = max(1, 1 + verify_max_iterations)
@@ -2737,10 +2884,24 @@ def _ctxexpl_max_calls_per_day() -> int:
         return 20
 
 
-def _ctxexpl_model() -> str:
-    """``CTXEXPL_LLM_MODEL`` if set, else the fast tier (mirrors
-    ``core.llm_worker.client.resolve_model``'s fallback shape without
-    requiring a new ``core.config.Settings`` field for this stage)."""
+def _ctxexpl_model(effective_options: dict | None = None) -> str:
+    """run override（``options.models``）→ ``CTXEXPL_LLM_MODEL`` → fast tier の順。
+
+    ``ContextualExplanationAgent`` はモデル名を construction 時の明示引数
+    (``llm_model=``) として受け取るため、``core.llm.py`` の呼び出し口で
+    call-argument 扱いになり、M層設計書 §3 の解決順①（呼び出し側の明示引数）が
+    最優先されてしまう。そのため、ランナーループが張る
+    ``core.llm_policy.model_override`` の contextvar（解決順②）はこの1コールには
+    素通り（stage の中身は変えない前提のため resolve_scene_model 経由の
+    contextvar 参照に置き換えない）。ここで ``effective_options["models"]`` を
+    先読みすることで run override を反映する
+    （``pipeline:contextual_explanation`` → ``pipeline`` の順）。
+    """
+    models = (effective_options or {}).get("models") if effective_options else None
+    if isinstance(models, dict):
+        override = models.get("pipeline:contextual_explanation") or models.get("pipeline")
+        if isinstance(override, str) and override.strip():
+            return override.strip()
     explicit = os.getenv("CTXEXPL_LLM_MODEL", "").strip()
     if explicit:
         return explicit
@@ -2759,6 +2920,7 @@ def _build_contextual_explanation(
     fig_tbl: Any,
     apparatus_result: Any,
     thesis: Any,
+    effective_options: dict | None = None,
 ) -> dict:
     """contextual_explanation ステージ本体（design doc §5.1）。
 
@@ -2815,7 +2977,7 @@ def _build_contextual_explanation(
 
     from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
 
-    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model())
+    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model(effective_options))
     result = agent.run(elements, cartridge_id=cartridge_id)
     # Real usage is only known after the batched+repaired run completes (a
     # single stage run may cost more than 1 LLM call); book it post-hoc

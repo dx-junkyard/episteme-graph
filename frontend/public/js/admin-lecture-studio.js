@@ -160,6 +160,22 @@
     lsUpdateAssistantOpenButton();
   }
 
+  // M層 Phase 3（§6.3）: 「AIアシスタント」モーダル共通のモデルチップ（rewrite 系2経路が共有）。
+  var _lsRewriteModelChip = null;
+  function _lsInitRewriteModelChip() {
+    var mount = document.getElementById("ls-rewrite-model-chip");
+    if (!mount || !window.AdminLlmModels) return;
+    _lsRewriteModelChip = window.AdminLlmModels.createModelChip({
+      sceneKey: "lecture_studio",
+      mountEl: mount,
+      compact: true,
+      onChange: function () {}
+    });
+  }
+  function _lsRewriteModel() {
+    return _lsRewriteModelChip ? _lsRewriteModelChip.getSelected() : null;
+  }
+
   function lsUpdateAssistantOpenButton() {
     var btn = document.getElementById("ls-ai-assistant-btn");
     var promptEl = document.getElementById("ls-rewrite-prompt");
@@ -1989,7 +2005,7 @@
     if (typeof lsState.reconReviewCount === "number") {
       label += "（要レビュー " + lsState.reconReviewCount + "件）";
     }
-    return '<button type="button" class="ls-recon-review-btn" data-ls-recon-review="1">' +
+    return '<button type="button" class="ls-recon-review-btn" data-ls-recon-review="1" data-ui-anchor="lecture-studio.recon-review-btn">' +
       escHtml(label) + '</button>';
   }
 
@@ -2239,7 +2255,7 @@
     var conceptsText = lsListText(topic.key_concepts);
     var status = lsTopicCoverageStatus(topic);
     return '' +
-      '<div class="ls-course-draft" data-topic-id="' + escHtml(topic.id || "") + '">' +
+      '<div class="ls-course-draft" data-ui-anchor="lecture-studio.course-draft" data-topic-id="' + escHtml(topic.id || "") + '">' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">トピック</div>' +
           '<div class="ls-course-topic-title">' + escHtml(topic.title || "無題") + '</div>' +
@@ -2259,7 +2275,7 @@
         // レクチャースライド同期 (migration 040 Phase 3): 教材/本文説明にも同じ
         // 区切り挿入ボタンと整合インジケータを付ける（編集タブでのみ表示）。
         '<div class="ls-course-slide-tools-row"' + editHidden + '>' +
-          '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" ' +
+          '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-slide-marker-btn" ' +
             'title="最後にフォーカスしていた入力欄（教材 or 本文説明）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>' +
           '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>' +
         '</div>' +
@@ -3205,7 +3221,7 @@
         '<div class="ls-theory-section"><b>source_scope</b> <span class="ls-theory-ref">' + escHtml(scopeText) + '</span></div>' +
         '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
         '<div class="ls-theory-actions">' +
-          '<button class="admin-action-btn ls-claim-deliberate-btn" type="button" data-claim-id="' + escHtml(claim.claim_id) + '" data-document-id="' + escHtml(claim.document_id || "") + '">深く検討</button>' +
+          '<button class="admin-action-btn ls-claim-deliberate-btn" type="button" data-ui-anchor="lecture-studio.component-deliberate" data-claim-id="' + escHtml(claim.claim_id) + '" data-document-id="' + escHtml(claim.document_id || "") + '">深く検討</button>' +
         '</div>' +
       '</div>';
   }
@@ -3369,12 +3385,12 @@
         '<div class="ls-theory-section"><b>出典</b><div>' + lsTheorySourceHtml(c) + '</div></div>' +
         '<div class="ls-theory-section"><b>表示</b> ' + escHtml(level) + '</div>' +
         '<div class="ls-theory-actions">' +
-          '<button class="admin-action-btn" data-theory-action="open">開く</button>' +
-          '<button class="admin-action-btn" data-theory-action="insert">原稿に挿入</button>' +
-          '<button class="admin-action-btn" data-theory-action="approve"' + approveDisabled + '>承認</button>' +
-          '<button class="admin-action-btn" data-theory-action="reject">却下</button>' +
-          '<button class="admin-action-btn" data-theory-action="endorse">説明・承認の共有</button>' +
-          '<button class="admin-action-btn" data-theory-action="deliberate">深く検討</button>' +
+          '<button class="admin-action-btn" data-theory-action="open" data-ui-anchor="lecture-studio.component-open">開く</button>' +
+          '<button class="admin-action-btn" data-theory-action="insert" data-ui-anchor="lecture-studio.component-insert">原稿に挿入</button>' +
+          '<button class="admin-action-btn" data-theory-action="approve" data-ui-anchor="lecture-studio.component-approve"' + approveDisabled + '>承認</button>' +
+          '<button class="admin-action-btn" data-theory-action="reject" data-ui-anchor="lecture-studio.component-reject">却下</button>' +
+          '<button class="admin-action-btn" data-theory-action="endorse" data-ui-anchor="lecture-studio.component-endorse">説明・承認の共有</button>' +
+          '<button class="admin-action-btn" data-theory-action="deliberate" data-ui-anchor="lecture-studio.component-deliberate">深く検討</button>' +
         '</div>' +
       '</div>';
   }
@@ -6680,7 +6696,11 @@
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts/generate", {
       method: "POST",
-      body: JSON.stringify({ override: false }),
+      // M層 Phase 3（§6.3）: 現時点でこの一括生成関数を呼び出す UI 導線は無い
+      // （原稿の一括生成は自動パイプライン kickAutoPipeline 経由のみが実運用経路。
+      // admin.js 側に委譲）。将来この関数を呼ぶ導線を復活・追加する場合に備え、
+      // 既存の「AIアシスタント」モデルチップの選択を here でも尊重しておく。
+      body: JSON.stringify({ override: false, model: _lsRewriteModel() }),
     })
       .then(function (res) {
         if (!res.ok) {
@@ -7121,6 +7141,8 @@
         narration_persona: lsState.settings.narration_persona || "",
         studio_view: view,
         theory_components: theoryComponents,
+        // M層 Phase 3（§6.3）: この実行だけのモデル上書き。未選択ならサーバ既定に委ねる。
+        model: _lsRewriteModel(),
       }),
     })
       .then(function (res) {
@@ -7179,6 +7201,8 @@
       spoken_script: (document.getElementById("ls-course-spoken-script") || {}).value || "",
       cautions: lsSplitLines((document.getElementById("ls-course-cautions") || {}).value),
       check_questions: lsCollectCheckQuestions(),
+      // M層 Phase 3（§6.3）: この実行だけのモデル上書き。未選択ならサーバ既定に委ねる。
+      model: _lsRewriteModel(),
     };
     document.getElementById("ls-rewrite-btn").disabled = true;
     lsShowActionStatus("AIで提案中...", "info");
@@ -7269,6 +7293,7 @@
     state = deps.state;
 
     initLectureStudio();
+    _lsInitRewriteModelChip();
     initialized = true;
   }
 

@@ -49,7 +49,7 @@
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">' +
           '<h3 class="admin-section-title" style="margin-bottom:0">LLM使用量</h3>' +
           '<div style="display:flex;gap:8px;align-items:center">' +
-            '<select id="llm-usage-groupby" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+            '<select id="llm-usage-groupby" data-ui-anchor="llm-usage.groupby" style="padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
               '<option value="feature,model">feature &times; model</option>' +
               '<option value="feature">feature</option>' +
               '<option value="model">model</option>' +
@@ -57,7 +57,7 @@
               '<option value="operation">operation</option>' +
               '<option value="day">day</option>' +
             '</select>' +
-            '<button id="llm-usage-refresh" class="admin-action-btn">更新</button>' +
+            '<button id="llm-usage-refresh" class="admin-action-btn" data-ui-anchor="llm-usage.refresh">更新</button>' +
           '</div>' +
         '</div>' +
         '<p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">' +

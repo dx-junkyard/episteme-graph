@@ -24,6 +24,7 @@ from core import atlas_lifecycle
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
+from core import llm_policy
 from core.course_data import course_atlas_binding_pending, course_cartridge_id, course_topics
 from core.schema import (
     AUDIT_ENTITY_ATLAS_ASSIST,
@@ -258,6 +259,14 @@ def generate_atlas_skeleton(
     body.domain のメタデータで生成する。
     """
     body = body or GenerateSkeletonRequest()
+    # M層 Phase 3（§6.5）: この実行だけのモデル上書き（scene "atlas"）。既存の
+    # ``body.model`` は Phase 3 以前からある実行時パラメータだが、これまでカタログ
+    # 検証を経ていなかった（fail-closed でなかった）ため、ここで初めて検証する。
+    # 未指定なら従来どおり（settings.llm_analysis_model）。
+    if body.model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_ATLAS, body.model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
     session = _skeleton_session()
     try:
         if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":

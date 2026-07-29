@@ -208,6 +208,11 @@ class CourseUpdateRequest(BaseModel):
     visibility: str | None = None
     group_id: str | None = None
     description: str | None = None
+    # M層 Phase 3（llm_model_selection_design.md §6.4）: 場面別コース単位のモデル上書き。
+    # キーは scene_key（現状 "learning_chat" のみ対応）。値が null/空文字のキーは
+    # 「設定解除」（学習チャットのモデルをシステム既定へ戻す）を意味する。
+    # 未指定（None）は「変更しない」。サーバ側でカタログ検証（fail-closed, 422）する。
+    llm_models: dict[str, str | None] | None = None
 
 
 class LearningCourseOut(BaseModel):
@@ -416,6 +421,10 @@ class CourseBuilderChatRequest(BaseModel):
     history: list[dict] = []
     session_id: str | None = None
     selected_material_ids: list[str] = []
+    # M層 Phase 3（llm_model_selection_design.md §6.2）: この実行だけのモデル上書き
+    # （scene "course_builder"）。未指定は従来どおり（user/system policy → env → tier既定）。
+    # カタログ外の値は 422（fail-closed）。
+    model: str | None = None
 
 
 class CourseBuilderChatResponse(BaseModel):
@@ -715,6 +724,9 @@ class LectureScriptGenerateRequest(BaseModel):
     override: bool = False  # 既存スクリプトを上書きするか
     auto_audio: bool = False  # スクリプト生成完了後、自動で音声生成タスクを起動するか (Issue #139)
     language: Literal["ja", "en"] | None = None  # 省略時はコース設定 (lecture_language) を使う
+    # M層 Phase 3（llm_model_selection_design.md §6.3）: この実行だけのモデル上書き
+    # （scene "lecture_studio"）。未指定は従来どおり fast tier。カタログ外は 422。
+    model: str | None = None
 
 
 class LectureScriptGenerateStartResponse(BaseModel):
@@ -780,6 +792,9 @@ class LectureScriptRewriteRequest(BaseModel):
     narration_persona: str | None = None
     studio_view: str = "edit"
     theory_components: list[dict] = Field(default_factory=list)
+    # M層 Phase 3（llm_model_selection_design.md §6.3）: この実行だけのモデル上書き
+    # （scene "lecture_studio"）。未指定は従来どおり fast tier。カタログ外は 422。
+    model: str | None = None
 
 
 class LectureScriptRewriteResponse(BaseModel):
@@ -1239,6 +1254,12 @@ class AssistantChatRequest(BaseModel):
     history: list[dict] = Field(default_factory=list)
     session_id: str | None = None
     screen_context: AssistantScreenContext = Field(default_factory=AssistantScreenContext)
+    # 管理画面インスペクト・モード（❓ 使い方）から送られる usage_help 分岐用（後方互換の
+    # 追加フィールド。省略時は既存の意図分類チャットとして扱う）。
+    support_action: str | None = None
+    # インスペクト・モードでラッチされていた UI 論理アンカー（core/help_kb/admin_ui_anchors.py
+    # のキー）。support_action="usage_help" のときのみ参照する。
+    ui_anchor: str | None = None
 
 
 class AssistantActionPlan(BaseModel):

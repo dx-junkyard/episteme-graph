@@ -25,6 +25,7 @@ from core.course_data import (
     course_topics,
     find_course_topic,
 )
+from core import llm_policy
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
@@ -551,6 +552,16 @@ def rewrite_lecture_studio_course_topic(
     )
 
     params = get_llm_params("fast")
+    # M層 Phase 3（§6.3）: この実行だけのモデル上書き（scene "lecture_studio"）。
+    # 未指定なら従来どおり fast tier。
+    requested_model = str(body.get("model") or "").strip() or None
+    if requested_model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_LECTURE_STUDIO, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+    effective_model = requested_model or params["model"]
+    effective_effort = None if requested_model else params["reasoning_effort"]
+
     parsed: object = {}
     consume_lecture_rewrite_quota(current_user["id"])
     with usage_context("admin:lecture_rewrite", user_id=current_user["id"], course_id=course_id):
@@ -558,7 +569,7 @@ def rewrite_lecture_studio_course_topic(
             parsed = generate_text_with_structured_output(
                 messages=[{"role": "user", "content": prompt}],
                 response_format=CourseTopicDraftLLMResponse,
-                model=params["model"],
+                model=effective_model,
             )
         except Exception as structured_exc:
             logger.warning(
@@ -570,8 +581,8 @@ def rewrite_lecture_studio_course_topic(
             try:
                 raw = generate_text(
                     messages=[{"role": "user", "content": prompt}],
-                    model=params["model"],
-                    reasoning_effort=params["reasoning_effort"],
+                    model=effective_model,
+                    reasoning_effort=effective_effort,
                 )
                 parsed = _parse_course_topic_draft_json(raw)
             except Exception:

@@ -9,6 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/core/ /app/core/
 COPY backend/db/ /app/db/
 COPY backend/cartridges/ /app/cartridges/
+COPY backend/config/ /app/config/
 COPY backend/api/ /app/
 COPY src/ /app/src/
 

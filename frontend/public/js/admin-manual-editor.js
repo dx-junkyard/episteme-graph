@@ -171,7 +171,7 @@
         escHtml(AUDIENCE_LABELS[a] || a) + "</div>";
       files.forEach(function (f) {
         var isActive = (currentAudience === a && currentFile === f.file);
-        html += '<button type="button" class="mke-file-btn" data-audience="' + escHtml(a) +
+        html += '<button type="button" class="mke-file-btn" data-ui-anchor="manual-editor.select-file" data-audience="' + escHtml(a) +
           '" data-file="' + escHtml(f.file) + '" style="display:block;width:100%;text-align:left;' +
           "padding:5px 8px;margin-bottom:2px;border-radius:4px;cursor:pointer;font-size:12px;" +
           "border:1px solid " + (isActive ? "var(--color-text-link, #2f6fed)" : "var(--color-border)") + ";" +
@@ -421,7 +421,7 @@
       '<div class="admin-section">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">' +
           '<h3 class="admin-section-title" style="margin-bottom:0">マニュアル編集（help_kb draft/freeze）</h3>' +
-          '<button id="mke-refresh-btn" class="admin-action-btn">更新</button>' +
+          '<button id="mke-refresh-btn" class="admin-action-btn" data-ui-anchor="manual-editor.refresh">更新</button>' +
         '</div>' +
         '<p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:10px">' +
           'ここでの編集は draft（下書き）です。「凍結して配信」を実行するまで、学生・教員向けの' +
@@ -430,10 +430,10 @@
         '</p>' +
         '<div id="mke-serving-badge" style="margin-bottom:10px"></div>' +
         '<div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">' +
-          '<button id="mke-seed-btn" class="admin-action-btn">ファイルから取込</button>' +
-          '<button id="mke-freeze-btn" class="admin-action-btn">凍結して配信</button>' +
-          '<button id="mke-switch-files-btn" class="admin-action-btn" style="display:none">ファイル配信に戻す</button>' +
-          '<button id="mke-switch-db-btn" class="admin-action-btn" style="display:none">DB配信に切替</button>' +
+          '<button id="mke-seed-btn" class="admin-action-btn" data-ui-anchor="manual-editor.seed">ファイルから取込</button>' +
+          '<button id="mke-freeze-btn" class="admin-action-btn" data-ui-anchor="manual-editor.freeze">凍結して配信</button>' +
+          '<button id="mke-switch-files-btn" class="admin-action-btn" data-ui-anchor="manual-editor.switch-to-files" style="display:none">ファイル配信に戻す</button>' +
+          '<button id="mke-switch-db-btn" class="admin-action-btn" data-ui-anchor="manual-editor.switch-to-db" style="display:none">DB配信に切替</button>' +
         '</div>' +
         '<div id="mke-status" style="font-size:12px;margin-bottom:10px"></div>' +
         '<div style="display:flex;gap:16px;flex-wrap:wrap">' +
@@ -454,10 +454,10 @@
               '<textarea id="mke-editor-textarea" class="mke-editor-textarea" spellcheck="false"></textarea>' +
               '<div id="mke-conflict-note" class="mke-conflict-note" style="display:none">' +
                 '他の編集と衝突しました。最新を読み込み直してください。' +
-                '<button id="mke-reload-btn" class="admin-action-btn" style="margin-left:8px">再読込</button>' +
+                '<button id="mke-reload-btn" class="admin-action-btn" data-ui-anchor="manual-editor.reload" style="margin-left:8px">再読込</button>' +
               '</div>' +
-              '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-                '<button id="mke-save-btn" class="admin-action-btn">保存</button>' +
+              '<div style="margin-top:8px;display:flex;gap:8px;align-items:center;flex-wrap:wrap" data-ui-anchor="manual-editor.save">' +
+                '<button id="mke-save-btn" class="admin-action-btn" data-ui-anchor="manual-editor.save">保存</button>' +
                 '<span id="mke-save-status" style="font-size:12px"></span>' +
               '</div>' +
             '</div>' +

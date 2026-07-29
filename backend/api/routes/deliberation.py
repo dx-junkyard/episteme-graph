@@ -74,6 +74,7 @@ from core.deliberation import (
 from core.library import search as library_search
 from core.library import store as library_store
 from core.deliberation.standardization import worker as standardization_worker
+from core import llm_policy
 from core.llm_worker.history import window_history
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
@@ -684,6 +685,10 @@ class SelectedFigureContext(BaseModel):
 class MessageCreateRequest(BaseModel):
     content: str
     selected_context: SelectedFigureContext | None = None
+    # M層 Phase 3（llm_model_selection_design.md §6.5）: この実行だけのモデル上書き
+    # （scene "deliberation"。figure 要素は "deliberation:vision" として vision
+    # capability を必須検証する）。未指定は従来どおり resolve_model()。
+    model: str | None = None
 
 
 def _session_response(session: dict[str, Any]) -> dict[str, Any]:
@@ -811,6 +816,18 @@ def post_deliberation_message(
             detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
         )
 
+    # M層 Phase 3（§6.5）: この実行だけのモデル上書き。figure 要素は画像添付（vision）
+    # 経路になるため "deliberation:vision" として capability=vision を必須検証する
+    # （非 vision モデルへ落とす回帰を防ぐ、M5）。
+    requested_model = (body.model or "").strip() or None
+    if requested_model:
+        _validation_scene = (
+            "deliberation:vision" if ref.element_type == ELEMENT_FIGURE else llm_policy.SCENE_DELIBERATION
+        )
+        reason = llm_policy.validate_model_for_scene(_validation_scene, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+
     grounding = dialogue.build_grounding(ref)
     if grounding.get("positioning", {}).get("available"):
         _apply_cross_corpus_gate(grounding["positioning"], current_user)
@@ -852,6 +869,7 @@ def post_deliberation_message(
         user_content=llm_user_content,
         grounding_text=grounding_text,
         images=images,
+        model=requested_model,
         user_id=current_user.get("id"),
     )
 

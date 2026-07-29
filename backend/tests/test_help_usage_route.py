@@ -36,6 +36,7 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
 
 import routes.learning as learning_mod  # noqa: E402
 import core.llm_worker.client as llm_worker_client  # noqa: E402
+import core.llm_policy as llm_policy_mod  # noqa: E402
 from core.llm_worker.cost_gate import CostGate, today_str  # noqa: E402
 from schemas import LearningChatRequest  # noqa: E402
 
@@ -500,7 +501,7 @@ class TestClassifierRoutedUsageHelp:
         HELP ハンドラには到達しない（従来どおりの経路を維持）。"""
         settings = _fake_settings()
         monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
-        monkeypatch.setattr(llm_worker_client, "get_settings", lambda: settings)
+        monkeypatch.setattr(llm_policy_mod, "get_settings", lambda: settings)
         monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
         monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
         monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message: False)

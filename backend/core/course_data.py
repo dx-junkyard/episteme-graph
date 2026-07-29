@@ -210,6 +210,10 @@ class CourseData(BaseModel):
 
     cartridge_id: str | None = None
     lecture_studio_settings: LectureStudioSettings | None = None
+    # M層 Phase 3（llm_model_selection_design.md §6.4）: 場面別コース単位のモデル上書き。
+    # キーは scene_key（現状 "learning_chat" のみ書き手・読み手を持つ）、値はモデル id。
+    # 書き手: routes/learning.py::update_course（CourseUpdateRequest.llm_models）。
+    llm_models: dict[str, str] = Field(default_factory=dict)
     course_content_status: dict | None = Field(default_factory=dict)
     # atlas_binding_lifecycle_design.md §2.3: コース起点で新分野を作成した際の
     # 「凍結待ち」仮予約 domain_key。書き手は routes/atlas.py の
@@ -336,6 +340,19 @@ def course_atlas_binding_pending(data: dict | None) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("atlas_binding_pending") or "").strip()
+
+
+def course_llm_models(data: dict | None) -> dict:
+    """``data.llm_models`` を dict で返す（無い/非 dict なら ``{}``）。
+
+    M層 Phase 3（場面別 LLM モデル選択, `docs/features/llm_model_selection_design.md` §6.4）
+    のコース単位モデル上書き。キーは scene_key（現状 ``"learning_chat"`` のみ意味を持つ）、
+    値はカタログ収載モデル id の文字列。
+    """
+    if not isinstance(data, dict):
+        return {}
+    models = data.get("llm_models")
+    return models if isinstance(models, dict) else {}
 
 
 def lecture_studio_settings(data: dict | None) -> dict:

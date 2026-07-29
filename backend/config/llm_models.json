@@ -1,0 +1,44 @@
+{
+  "models": [
+    {
+      "id": "gpt-5.4",
+      "provider": "openai",
+      "capabilities": ["text", "structured"],
+      "default_effort": "medium",
+      "cost_hint": "high",
+      "note": "vision 対応なら capabilities に \"vision\" を追加してください"
+    },
+    {
+      "id": "gpt-5.2",
+      "provider": "openai",
+      "capabilities": ["text", "structured", "vision"],
+      "default_effort": "medium",
+      "cost_hint": "high",
+      "note": "既定の解析モデル"
+    },
+    {
+      "id": "gpt-5.4-mini",
+      "provider": "openai",
+      "capabilities": ["text", "structured"],
+      "default_effort": "medium",
+      "cost_hint": "medium",
+      "note": ""
+    },
+    {
+      "id": "gpt-5.4-nano",
+      "provider": "openai",
+      "capabilities": ["text", "structured"],
+      "default_effort": "low",
+      "cost_hint": "low",
+      "note": "軽量タスク向け"
+    },
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "capabilities": ["text", "structured", "vision"],
+      "default_effort": "medium",
+      "cost_hint": "medium",
+      "note": "図の解析で使用中"
+    }
+  ]
+}

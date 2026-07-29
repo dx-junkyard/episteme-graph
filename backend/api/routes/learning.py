@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import asdict
 from typing import Callable
 
@@ -48,6 +49,7 @@ from services import (
     get_course_chunks_ordered,
     get_course_completion,
     get_course_data,
+    get_course_live_llm_models,
     get_editable_course_data,
     get_viewable_course_data,
     get_chunk_passage,
@@ -60,6 +62,7 @@ from services import (
     log_unanswered_query,
     persist_chat_history,
     truncate_chat_and_supersede,
+    recent_duplicate_ui_anchor_event as _recent_duplicate_ui_anchor_event_shared,
     record_internalization,
     record_interest_trace,
     record_learner_articulated_tension,
@@ -77,6 +80,7 @@ from services import (
 )
 from pydantic import BaseModel
 from core.course_data import (
+    course_llm_models,
     course_source_material_ids,
     course_title as _course_title,
     course_topics,
@@ -85,6 +89,7 @@ from core.course_data import (
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import element_explanations
+from core import llm_policy
 from core.llm import generate_text, get_llm_params, transcribe_audio
 from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
@@ -523,6 +528,32 @@ def update_course(
         data["concepts"] = [c.model_dump() for c in body.concepts]
     if body.sources is not None:
         data["sources"] = [s.model_dump() for s in body.sources]
+    if body.llm_models is not None:
+        # M層 Phase 3（§6.4）: コース単位のモデル上書き。v1 は "learning_chat" scene のみ
+        # 対応（他 scene のコース単位上書きは未実装 — 意味を持たない値を無警告で
+        # 保存しない、fail-closed）。空/null は当該キーの設定解除。
+        current_models = dict(course_llm_models(data))
+        for scene_key, model in body.llm_models.items():
+            if scene_key != llm_policy.SCENE_LEARNING_CHAT:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"llm_models[{scene_key!r}] はコース単位では未対応です"
+                        f"（対応 scene: {llm_policy.SCENE_LEARNING_CHAT!r} のみ）"
+                    ),
+                )
+            if model is None or not str(model).strip():
+                current_models.pop(scene_key, None)
+                continue
+            model = str(model).strip()
+            reason = llm_policy.validate_model_for_scene(scene_key, model)
+            if reason:
+                raise HTTPException(status_code=422, detail=reason)
+            current_models[scene_key] = model
+        if current_models:
+            data["llm_models"] = current_models
+        else:
+            data.pop("llm_models", None)
 
     save_course_data(current_user["id"], course_id, data)
     logger.info("Updated course %s for user=%s", course_id, current_user["id"])
@@ -1647,15 +1678,29 @@ def check_topic_understanding(
         "核心が抜けている、逆に理解している、空欄に近い場合は false。"
     )
 
+    # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書きが設定されていれば
+    # 採点にも適用する（live 設定、版ピンと独立）。未設定時は従来どおり fast tier 固定
+    # （params）を使う — 挙動を変えない。
+    _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+
     parsed: dict = {}
     try:
         with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
-            raw = generate_text(
-                messages=[{"role": "user", "content": prompt}],
-                model=params["model"],
-                reasoning_effort=params["reasoning_effort"],
-                temperature=0.1,
-            )
+            if _course_chat_model:
+                # override 時は呼び出し引数として直接渡す（call_argument が最優先, §3-1）。
+                # reasoning_effort は明示しない（カタログの既定 effort に委ねる）。
+                raw = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=_course_chat_model,
+                    temperature=0.1,
+                )
+            else:
+                raw = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=params["model"],
+                    reasoning_effort=params["reasoning_effort"],
+                    temperature=0.1,
+                )
         import json
         import re
         match = re.search(r"\{[\s\S]*\}", raw or "")
@@ -2558,8 +2603,18 @@ def learning_chat(
     # （intent 分類等ですでに消費済みなら no-op、§1）。
     _consume_quota()
     degraded = False
+    # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書き。運用パラメータのため
+    # 版ピン中の学習者にも所有者の live（HEAD）設定を適用する — course_data は非所有者に
+    # 版スナップショットを返しうるため、専用の live-only SELECT を別途使う
+    # （get_course_live_llm_models）。未設定なら resolve_model() 内の既存解決順序
+    # （user policy → system policy → env → tier既定）がそのまま効く（挙動不変）。
+    _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+    _course_chat_override = (
+        llm_policy.model_override(_course_chat_model, source=llm_policy.SOURCE_COURSE_OVERRIDE)
+        if _course_chat_model else nullcontext()
+    )
     try:
-        with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id):
+        with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id), _course_chat_override:
             answer = generate_text(
                 messages=messages,
                 temperature=0.3,
@@ -3268,32 +3323,13 @@ class UiAnchorEventRequest(BaseModel):
 def _recent_duplicate_ui_anchor_event(user_id: str, help_anchor: str) -> bool:
     """直近（既定 30 分）に同一ユーザー×同一アンカーの no_hit 記録が無いかを確認する。
 
-    スパム防止（IH10/§5.4）の簡易実装。DB 障害時は False（fail-open — 記録自体は
-    止めない。ダブり抑制の失敗より記録漏れの方が実害が大きいため）。
+    スパム防止（IH10/§5.4）の簡易実装。実体は管理画面インスペクト・モード
+    （``routes/admin_assistant.py``）と共有する ``services.recent_duplicate_ui_anchor_event``
+    に委譲（外部挙動不変・DB 障害時 False で fail-open）。
     """
-    session = _pg_session()
-    try:
-        row = session.execute(
-            sa_text("""
-                SELECT 1 FROM interest_traces
-                WHERE user_id = CAST(:uid AS uuid)
-                  AND kind = 'help_usage'
-                  AND payload->>'help_anchor' = :anchor
-                  AND created_at > now() - (:minutes || ' minutes')::interval
-                LIMIT 1
-            """),
-            {
-                "uid": user_id,
-                "anchor": help_anchor,
-                "minutes": _UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
-            },
-        ).fetchone()
-        return row is not None
-    except Exception:
-        logger.warning("ui anchor event dedup check failed", exc_info=True)
-        return False
-    finally:
-        session.close()
+    return _recent_duplicate_ui_anchor_event_shared(
+        user_id, help_anchor, window_minutes=_UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
+    )
 
 
 @router.post("/help/ui-anchor-events", status_code=201)

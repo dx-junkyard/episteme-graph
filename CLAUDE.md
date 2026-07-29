@@ -724,6 +724,29 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
   `test_help_kb_refresh_api.py` / `test_help_kb_vector.py` / `test_help_kb_store.py` /
   `test_help_kb_audit.py` / `test_manual_editor_ui_static.py` +
   `test_next_steps_guardrails.py`（G層3ルール分）。
+- **管理画面「？使い方」＝admin インスペクト・モード（2026-07-30、migration 不要）**:
+  学習画面のインスペクト・モード（`core/help_kb/ui_anchors.py`）の管理画面版。
+  ①アンカー表の正本は `core/help_kb/admin_ui_anchors.py`（`KNOWN_ADMIN_UI_ANCHOR_IDS` /
+  `ADMIN_UI_ANCHORS` 223件。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
+  構造的禁止**、`resolve_admin_ui_anchors(role)` は TEACHER=teacher/ のみ・SYSTEM_ADMIN=+
+  system_admin/ のロール fail-closed）。②配信 `GET /api/admin/assistant/help/ui-anchors`、
+  no_hit 記録 `POST /api/admin/assistant/help/ui-anchor-events`（`_require_teacher`・30分
+  デデュープは `services.recent_duplicate_ui_anchor_event`（learning 側と共有化済み）・痕跡は
+  kind=`help_usage`/course_id センチネル `"_ui"` で G層 `manual.help_gaps_pending` に相乗り）。
+  ③Copilot chat の `support_action="usage_help"`（+`ui_anchor`）は意図分類 LLM を**バイパス**して
+  非LLM guidance 直行（ui_anchor 直接解決 → 無ければ capability KB+manual 検索）。④フロントは
+  `admin-help-inspect.js`（ES5・`window.AdminHelpInspect`、ヘッダー「❓ 使い方」トグル →
+  `[data-ui-anchor]` ホバーでツールチップ・API はログイン後1回フェッチのみ）。disabled 要素は
+  インスペクト中のみ `pointer-events:none` で親ラッパー（同じ anchor を重複付与）に透過させる。
+  ⑤マニュアル本体はタブ別リファレンス `docs/manual/teacher/1x〜2x-admin-*.md`（15ファイル）+
+  `system_admin/1x-*.md`（7ファイル）— **操作要素1つ=1節（`###`+明示anchor）**、無効化され得る
+  要素は「ボタンが無効になっている場合: 理由+解消方法」を必ず持つ（front-matter `screen:` =
+  admin タブの `data-tab` 値で検索ランキング優先が効く）。⑥ガードレール:
+  `test_admin_help_ui_anchors.py`（表整合・ロール fail-closed・chat 非LLM・痕跡形）+
+  `test_admin_help_inspect_ui_static.py`（UI 契約 + **双方向網羅**: KNOWN 全IDに frontend 担体 /
+  frontend の全 data-ui-anchor 値が KNOWN 登録済み・1属性1ID）+ validator
+  `check_admin_ui_anchor_mappings()`（lifespan で fail-open 実行）。**新しい管理UIを追加したら
+  マニュアル節 + ADMIN_UI_ANCHORS + data-ui-anchor の3点を揃えること**（網羅テストが落ちる）。
 
 ### ガイダンス層（G層, migration 039）
 
@@ -1025,6 +1048,94 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
 - **ガードレール**: `backend/tests/test_llm_usage_guardrails.py`（recorder 非漏洩・
   FastAPI 非 import・削除 API 不在・権限 fail-closed・分離集計・レンジのみ・
   価格ハードコード検出・学習者 API 非漏洩・estimator 決定性）。
+
+### 場面別 LLM モデル選択（M層, migration 061）
+
+各 LLM 使用場面（scene）のモデルを UI から実モデル名で選べる層。正本は
+`docs/features/llm_model_selection_design.md`（不変条項 M1〜M10）。
+
+- **モデル決定の正本は `core/llm_policy.py`**（FastAPI 非 import）。U層 `usage_context` の
+  feature 文字列を scene キーに再利用し、`core/llm.py` の `generate_text` /
+  `generate_text_with_structured_output` / `generate_structured_with_images` /
+  `generate_conversation_turn` が `model=None` のときのみ入口で1回解決する。
+  **「env を読んでモデルを決める」処理を他所に新規に書かない（M1）**。既存の
+  `core/llm_worker/client.py::resolve_model` は `llm_policy.resolve_for_setting` への
+  委譲（外部シグネチャ不変）。
+- **解決順序**: 呼び出し引数 > 実行時 override（contextvar `model_override`、スレッドを
+  またがない）> user 行 > system 行（`llm_model_policies`, migration 061）> 既存
+  `*_LLM_MODEL` env > tier 既定。**モデル選択はユーザーごとに保存される**
+  （`scope='user'` + user_id。教員 A の選択は B に影響しない）。起動時に env →
+  `scope='system'` 行を冪等シード取込（既存 DB 行は上書きしない。以降 DB が勝つ）。
+  DB 実装は `core/llm_policy_store.py`（fail-open・20秒 TTL キャッシュ・書き込み後
+  `invalidate()`）。
+- **カタログ**: 選択肢は `LLM_MODEL_CATALOG_PATH`（既定同梱 `backend/config/llm_models.json`）
+  のホワイトリストのみ。provider / capability（vision）で絞り fail-closed（M4/M5）。
+  embedding モデルは選択対象外（pgvector 次元と結合）。
+  `deliberation:figure_reanalysis` は実体が apparatus vision エンジンのため scene は
+  `pipeline.vision` / env は `apparatus_llm_model`（非 vision モデルへ落とさない）。
+- **API**（`routes/llm_models.py`、`/api/admin/llm-models/...`）: `GET /catalog?scene=`
+  （TEACHER・本人にとっての実効モデル + 選択肢）/ `GET|PUT|DELETE /policies/{scene_key}`
+  （SYSTEM_ADMIN・システム既定）/ `PUT|DELETE /my-policies/{scene_key}`（TEACHER・
+  user_id は認証ユーザー固定）。検証はサーバ側 fail-closed（カタログ外・capability 不足・
+  未知 scene は 422）。監査は `AUDIT_ENTITY_LLM_MODEL_POLICY`。
+- **Phase 4（ステージ別指定、実装済み）**:
+  `GET /pipeline-stages`（TEACHER）— `orchestrator.PIPELINE_STAGES` の順序で
+  `orchestrator.LLM_STAGE_NAMES`（旧 `_LLM_STAGE_NAMES` を公開昇格）と交差した
+  LLM ステージのみ一覧し、各ステージの `feature`（`pipeline:<stage>`）/ `label`
+  （`llm_policy.PIPELINE_STAGE_LABELS`、orchestrator 非 import で llm_policy 側に
+  静的定義・キー集合の相互整合はテストで固定）/ `vision`（`apparatus_semantics` のみ
+  true）/ `effective`（本人にとっての実効モデル）を返す。`GET /policies` の
+  システム既定一覧は各行に `is_feature_level`（scene_key が `SCENES` に無い =
+  `pipeline:<stage>` 等のステージ別上書き行）と `label` を付与し、UI がステージ別の
+  指定（§6.6）をシステム既定の表と区別して描画できるようにする。フロント
+  （`admin-llm-models.js`）: 教材管理の変更パネルに既定で閉じた「▸ ステージ別に指定する
+  （詳細）」（各行 = ラベル + select、先頭は `継承（実効モデル）`。vision ステージは
+  vision 対応 options のみ。**選択は run-only** — `getUploadModels` の
+  `pipeline:<stage>` キーに合流するだけで user 既定としては保存しない）。再解析モーダルは
+  ステージ別指定の事実文表示のみ（編集はアップロード時 —
+  `getReanalyzeModels` は backend が `options.models` を全置換するため前回の
+  `pipeline:<stage>` キーを引き継いで送る）。運用タブは feature 行が1件以上あるときだけ
+  「▸ ステージ別の指定（N件）」を表示（変更/解除は既存の confirm 経路を再利用 +
+  ステージ追加導線）。
+- **解析 run 単位の指定**: `POST /materials/upload` の `models`（JSON 文字列）/
+  reanalyze body `models` → `document_analysis_runs.options.models`（キーは `pipeline` /
+  `pipeline.vision` / `pipeline:<stage>`。前回 run から自動継承）。orchestrator は
+  `_PIPELINE_STEPS` ループ1箇所で stage ごとに `model_override` を張り
+  （`apparatus_semantics` は `pipeline.vision` キーのみ参照 — 汎用 text 指定を vision に
+  流さない）、実行したLLMステージの使用モデルを `stage_outputs._stage_models` に記録する
+  （M7。resume 再利用ステージは前回値を保持、skip は記録しない）。
+- **UI**: 教材管理 = アップロードゾーン直下の1行サマリ `解析モデル: gpt-5.2（システム既定）
+  [変更]`（既定入り・必須入力にしない。確定は本人の user 既定として保存）。再解析モーダル =
+  前回値継承表示。運用タブ「AIモデル」（SYSTEM_ADMIN のみ、システム既定の表 + 事実文
+  confirm）。実装は `admin-llm-models.js`（ES5・`window.AdminLlmModels`）。
+  **表示は実モデル名のみ — tier 名（fast/standard/deep/analysis）を UI に出さない（M3）。
+  学生にはモデル名自体を出さない（M9）。教員に金額を出さない（M8）**。
+- **Phase 3（チャット型・単発操作のチップ、実装済み）**: 共通部品は
+  `AdminLlmModels.createModelChip(opts)`（scene 別カタログキャッシュ・「既定に戻す」項目・
+  catalog 不在時は表示のみの fail-closed）。配置と受け口:
+  ①コースビルダーチャット（`.cb-chat-header`、body `model`、in-memory セッション保持・
+  モデル変更時に表示専用の事実文区切りを挿入）②原稿スタジオの AI 書き換えモーダル
+  （chunk rewrite / topic draft rewrite の body `model`）③コース管理の所有行「AIモデル」
+  モーダル = 受講チャットのコース単位上書き（`PUT /api/learning/courses/{id}` の
+  `llm_models: {learning_chat}`。v1 は learning_chat のみ・事実文 confirm。現在値は
+  `GET /api/admin/courses` の `llm_models` 投影から読む — 学習者向け DTO には出さない）
+  ④地図骨格 generate（body `model`）⑤W層対話（`deliberation.js`、figure 要素は
+  `deliberation:vision` で vision 検証）。**受講チャットの実行時解決は必ず live（HEAD）の
+  course 行から読む**（`services.get_course_live_llm_models`。版ピン中の学習者にも所有者の
+  現在の設定を適用 — モデルは運用パラメータで学習内容ではない）。共通検証は
+  `llm_policy.validate_model_for_scene(scene_key, model)`（fail-closed の単一正本）。
+- **ガードレール**: `test_llm_model_policy_guardrails.py`（FastAPI 非 import・tier 名非表示・
+  金額非表示・KNOWN_FEATURES 全解決・ユーザー分離・llm_usage_events 非接触・fail-open・
+  llm_policy が orchestrator を import しないこと）+
+  `test_llm_policy{,_store}.py` / `test_llm_model_policy_api.py` /
+  `test_pipeline_model_override.py` / `test_llm_models_ui_static.py` /
+  `test_llm_model_phase4.py`（pipeline-stages の順序・vision フラグ・実効モデル、
+  `PIPELINE_STAGE_LABELS` と `LLM_STAGE_NAMES` の相互整合、policies 一覧の
+  `is_feature_level`/`label`、feature キー単位の vision fail-closed 検証）。
+- **非スコープ（v1）**: 学習者向け表示 / embedding 切替 / グループ scope / 自動フォール
+  バック / コスト上限との連動（`*_MAX_CALLS_*` は不変, M10）/ ステージ別選択の
+  ユーザー既定保存（ステージ別はアップロードパネルでは run-only。永続化はシステム既定
+  =運用タブ or API の `pipeline:<stage>` キーのみ）。
 
 ### 質問の出所分類（教材/別の資料/モデル生成）
 
