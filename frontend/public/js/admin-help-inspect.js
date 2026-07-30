@@ -41,6 +41,21 @@
   var TOOLTIP_GAP = 8;
   var TOOLTIP_MARGIN = 12;
   var NO_HIT_DWELL_MS = 1000;
+  // 本文が安全域に収まらないときに順に試す幅（狭い順）。長い節でも全文が読めるように
+  // 幅を広げて高さを削るために使う（positionTooltip 参照）。
+  var TOOLTIP_WIDTHS = [320, 460, 560];
+
+  // マニュアル本文は Markdown で書かれているが、ツールチップは素のテキスト
+  // （white-space: pre-wrap）として出すため、強調記号がそのまま見えてしまう。
+  // 表示用に記号だけを落とす（本文の語は変えない・要約もしない）。
+  function plainManualText(text) {
+    return String(text == null ? "" : text)
+      .replace(/\*\*([\s\S]+?)\*\*/g, "$1")
+      .replace(/__([\s\S]+?)__/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\n{3,}/g, "\n\n")
+      .replace(/^\s+|\s+$/g, "");
+  }
 
   function escHtml(value) {
     return String(value == null ? "" : value)
@@ -110,28 +125,42 @@
 
   function positionTooltip(tip, anchorEl) {
     var r = anchorEl.getBoundingClientRect();
-    var tw = Math.min(320, window.innerWidth - 24);
-    tip.style.width = tw + "px";
-    var left = Math.max(12, Math.min(r.left, window.innerWidth - tw - 12));
-    tip.style.left = left + "px";
-
-    // 自然な高さを実測する（前回のクランプが残っていると測り違える）。
-    tip.style.maxHeight = "none";
-    var th = tip.offsetHeight;
-
     var safeTop = safeTopBound() + TOOLTIP_MARGIN;
     var safeBottom = window.innerHeight - TOOLTIP_MARGIN;
+    var safeHeight = Math.max(80, safeBottom - safeTop);
     var spaceBelow = safeBottom - (r.bottom + TOOLTIP_GAP);
     var spaceAbove = (r.top - TOOLTIP_GAP) - safeTop;
 
-    if (th <= spaceBelow || spaceBelow >= spaceAbove) {
+    // 全文が安全域に収まる最も狭い幅を探す。ツールチップは pointer-events:none で
+    // 内部スクロールができないため、狭いまま縦に伸ばすと本文が途中で切れて続きを
+    // 読む手段がなくなる。まず幅を広げて高さを削り、収まらないときだけクランプする。
+    var tw = 0;
+    var th = 0;
+    var i;
+    for (i = 0; i < TOOLTIP_WIDTHS.length; i++) {
+      tw = Math.min(TOOLTIP_WIDTHS[i], window.innerWidth - 24);
+      tip.style.width = tw + "px";
+      tip.style.maxWidth = tw + "px"; // CSS の max-width を上書きして実際に広げる
+      tip.style.maxHeight = "none";   // 実測前にクランプを解除（残っていると測り違える）
+      th = tip.offsetHeight;
+      if (th <= safeHeight) break;
+    }
+    tip.style.left = Math.max(12, Math.min(r.left, window.innerWidth - tw - 12)) + "px";
+
+    // 下に入りきるなら下、上に入りきるなら上。どちらにも入らない場合は安全域いっぱいに
+    // 出す（アンカーに重なってもよい。狭い側に押し込めて切るより全文が読める）。
+    if (th <= spaceBelow) {
       tip.style.bottom = "auto";
       tip.style.top = Math.max(safeTop, r.bottom + TOOLTIP_GAP) + "px";
       tip.style.maxHeight = Math.max(80, spaceBelow) + "px";
-    } else {
+    } else if (th <= spaceAbove) {
       tip.style.top = "auto";
       tip.style.bottom = (window.innerHeight - r.top + TOOLTIP_GAP) + "px";
       tip.style.maxHeight = Math.max(80, spaceAbove) + "px";
+    } else {
+      tip.style.bottom = "auto";
+      tip.style.top = safeTop + "px";
+      tip.style.maxHeight = Math.max(80, safeHeight) + "px";
     }
   }
 
@@ -156,8 +185,8 @@
     if (entry) {
       tip.innerHTML =
         '<div class="admin-inspect-tooltip-source">📖 使い方</div>' +
-        '<div class="admin-inspect-tooltip-title">' + escHtml(entry.title || "") + "</div>" +
-        '<div class="admin-inspect-tooltip-body">' + escHtml(entry.body || "") + "</div>";
+        '<div class="admin-inspect-tooltip-title">' + escHtml(plainManualText(entry.title)) + "</div>" +
+        '<div class="admin-inspect-tooltip-body">' + escHtml(plainManualText(entry.body)) + "</div>";
     } else {
       // 未整備は固定事実文のみ。生成で埋めない。
       tip.innerHTML =

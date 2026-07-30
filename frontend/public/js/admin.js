@@ -6908,9 +6908,14 @@
         var llmModelBtn = '<button class="cm-llm-model-btn admin-action-btn" data-ui-anchor="course-management.llm-model-btn" data-course-id="' + escHtml(c.id) +
           '" data-course-title="' + escHtml(c.title) + '" style="font-size:11px;padding:2px 8px" ' +
           'title="このコースの受講チャットが使うモデルを設定します">AIモデル</button>';
+        // Phase 0b（discuss_opening_authoring_design.md §2 最下段）: discuss 開幕画面の
+        // 「このコースで議論したいこと」。教員の任意入力のみ（AI 生成なし・空欄可）。
+        var focusBtn = '<button class="cm-focus-btn admin-action-btn" data-ui-anchor="course-management.focus-btn" data-course-id="' + escHtml(c.id) +
+          '" data-course-title="' + escHtml(c.title) + '" style="font-size:11px;padding:2px 8px" ' +
+          'title="「論文と議論する」の開幕画面に出す、このコースで議論したいことを入力します">議論テーマ</button>';
         actionHtml = '<button class="cm-manage-btn admin-action-btn" data-ui-anchor="course-management.manage-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="開示範囲・グループ共有を設定します">共有設定</button>' +
           ' <button class="cm-version-btn admin-action-btn" data-ui-anchor="course-management.version-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="コースを版（リリース）として発行・履歴管理します（共有設定とは別機能）">版の管理</button>' +
-          ' ' + sharingDashboardBtn + ' ' + llmModelBtn;
+          ' ' + sharingDashboardBtn + ' ' + llmModelBtn + ' ' + focusBtn;
         var isPublic = c.visibility === "public";
         var quickToggle = '<button class="cm-quick-publish-btn admin-action-btn" data-ui-anchor="course-management.quick-publish-btn" data-course-id="' + escHtml(c.id) + '" data-action="' + (isPublic ? "unpublish" : "publish") + '" style="font-size:11px;padding:2px 8px;margin-top:4px">' +
           (isPublic ? "公開を止める" : "公開する") + '</button>';
@@ -6963,6 +6968,12 @@
     tbody.querySelectorAll(".cm-llm-model-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openCourseModelModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+    // Phase 0b — discuss 開幕画面の「このコースで議論したいこと」（教員の任意入力）
+    tbody.querySelectorAll(".cm-focus-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openCourseFocusModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
       });
     });
     // G1-1: 行内の「公開する/公開を止める」クイック操作（visibility=public ⇔ private の切替）。
@@ -7166,6 +7177,92 @@
             if (toSave) course.llm_models.learning_chat = toSave;
             else delete course.llm_models.learning_chat;
           }
+          setTimeout(function () { overlay.remove(); }, 500);
+        })
+        .catch(function (err) {
+          statusEl.textContent = (err && err.message) || "保存に失敗しました";
+        });
+    });
+  }
+
+  // ── Phase 0b — discuss 開幕画面「このコースで議論したいこと」 ─────────────────
+  // discuss_opening_authoring_design.md §2 最下段 / §10 Phase 0b。教員の任意入力だけで
+  // 成立させる（AI 生成・候補提示は一切しない）。保存先は learning_courses.data.course_focus
+  // （PUT /api/learning/courses/{id} body.course_focus、正本アクセサは core/course_data.py::
+  // course_focus）。現在値は GET /api/admin/courses（_cmState.courses[].course_focus）から
+  // 読む。空欄で保存すると設定解除（開幕画面から区画ごと消える）。
+  var COURSE_FOCUS_MAX_CHARS = 600;
+
+  function openCourseFocusModal(courseId, courseTitle) {
+    var existing = document.getElementById("course-focus-modal");
+    if (existing) existing.remove();
+
+    var course = null;
+    for (var i = 0; i < _cmState.courses.length; i++) {
+      if (_cmState.courses[i].id === courseId) { course = _cmState.courses[i]; break; }
+    }
+    var currentFocus = (course && course.course_focus) || "";
+
+    var overlay = document.createElement("div");
+    overlay.id = "course-focus-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      // モーダル全体に「議論テーマ」の節を係留する（入力欄にホバーしても説明が出る。
+      // 「保存」ボタンだけは自分の節を持つので closest() でそちらが勝つ）。
+      '<div data-ui-anchor="course-management.focus-btn" style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:460px;max-width:560px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">議論テーマ — ' + escHtml(courseTitle || "") + '</h3>' +
+          '<button id="course-focus-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          '「論文と議論する」の開幕画面の先頭に、担当教員が書いたものとして表示されます。' +
+          'AI は生成しません。空欄のままでも構いません（その場合は区画ごと表示されません）。</p>' +
+        '<textarea id="course-focus-input" rows="4" maxlength="' + COURSE_FOCUS_MAX_CHARS + '" ' +
+          'placeholder="例: この論文の感度の限界がどこから来るのかを、前提に戻って議論してください。" ' +
+          'style="width:100%;box-sizing:border-box;font-family:inherit;font-size:13px;line-height:1.7;padding:8px;' +
+          'border:1px solid var(--color-border-secondary);border-radius:6px;background:var(--color-background-secondary);' +
+          'color:var(--color-text-primary)"></textarea>' +
+        '<p style="font-size:11px;color:var(--color-text-tertiary);margin:6px 0 10px">' + COURSE_FOCUS_MAX_CHARS + '文字以内。</p>' +
+        '<div id="course-focus-status" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button id="course-focus-cancel" class="admin-action-btn">閉じる</button>' +
+          '<button id="course-focus-save" class="admin-action-btn" data-ui-anchor="course-management.course-focus-save">保存</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("course-focus-modal-close").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("course-focus-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    var input = document.getElementById("course-focus-input");
+    if (input) { input.value = currentFocus; input.focus(); }
+
+    document.getElementById("course-focus-save").addEventListener("click", function () {
+      var statusEl = document.getElementById("course-focus-status");
+      var text = input ? (input.value || "").trim() : "";
+      if (text.length > COURSE_FOCUS_MAX_CHARS) {
+        statusEl.textContent = COURSE_FOCUS_MAX_CHARS + "文字以内で入力してください。";
+        return;
+      }
+      // 事実文の確認（削除・公開ではないので破壊的確認ゲートは使わない。ただし
+      // 空欄保存＝学習者の画面から区画が消えることは明示する）。
+      if (!text && currentFocus) {
+        if (!window.confirm("入力を空にして保存すると、開幕画面からこの区画が表示されなくなります。")) return;
+      }
+      statusEl.textContent = "保存しています...";
+      apiFetch("/learning/courses/" + encodeURIComponent(courseId), {
+        method: "PUT",
+        body: JSON.stringify({ course_focus: text }),
+      })
+        .then(function (res) {
+          if (!res.ok) {
+            return res.json().then(function (d) { throw new Error((d && d.detail) || "保存に失敗しました"); });
+          }
+          return res.json();
+        })
+        .then(function () {
+          statusEl.textContent = "保存しました。";
+          if (course) course.course_focus = text;
           setTimeout(function () { overlay.remove(); }, 500);
         })
         .catch(function (err) {
@@ -8210,6 +8307,19 @@
         var mid = id || _matLastAnchoredMaterialId;
         return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-figures-btn'))
           || document.querySelector('#materials-tbody .admin-figures-btn');
+      },
+      // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
+      material_inventory_button: function (id) {
+        if (id) _matLastAnchoredMaterialId = id;
+        var mid = id || _matLastAnchoredMaterialId;
+        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-inventory-btn'))
+          || document.querySelector('#materials-tbody .admin-inventory-btn');
+      },
+      // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
+      // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、
+      // 未解決なら道案内はそこで止まる（P8 fail-closed）。
+      explanation_review_button: function () {
+        return document.getElementById("deliberation-explanation-review-open");
       }
     });
     AA.registerUiAnchors("course-builder", {

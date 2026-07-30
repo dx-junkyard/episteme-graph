@@ -1,0 +1,60 @@
+{
+  "_comment": "Sample input/output pair for DiscussOpeningAgent (discuss_opening_authoring_design.md §4.1). Not consumed by code; human reference + fixture source for tests. All ids are already resolved into text by core/discuss/authoring.py before the agent sees them.",
+  "input": {
+    "document_id": "11111111-2222-3333-4444-555555555555",
+    "language": "ja",
+    "max_seeds": 4,
+    "thesis": {
+      "central_question": "Can the three measured decay ratios be described by a single consistency relation?",
+      "paper_goal": "Establish a consistency relation between the measured decay ratios.",
+      "central_thesis_text": "A single consistency relation links the three measured decay ratios within the quoted precision."
+    },
+    "untested_assumptions": [
+      {
+        "statement": "The detector response is linear over the full energy range considered.",
+        "target_type": "assumption",
+        "verification_status": "untested"
+      },
+      {
+        "statement": "Higher-order corrections are negligible at the quoted precision.",
+        "target_type": "claim",
+        "verification_status": "unknown"
+      }
+    ],
+    "author_choices": [
+      {
+        "operation": "linearize",
+        "operation_subtype": "small-amplitude expansion",
+        "reason": "The amplitude is small compared with the equilibrium separation.",
+        "from_label": "x'' + sin(x) = 0",
+        "to_label": "x'' + x = 0"
+      },
+      {
+        "operation": "eliminate",
+        "operation_subtype": "",
+        "reason": "The background term cancels between the two channels.",
+        "from_label": "R = (S + B) / (S0 + B)",
+        "to_label": "R = S / S0"
+      }
+    ]
+  },
+  "output": {
+    "seeds": [
+      {
+        "body": "検出器の応答が全エネルギー領域で線形だという前提は、まだ確かめられていません。この前提が高エネルギー側で崩れるとしたら、結論のどこがどう変わると考えますか？",
+        "evidence_quote": "The detector response is linear over the full energy range considered.",
+        "reason": "未検証の前提が結論の精度に直結しているため、成立範囲を問う余地がある",
+        "confidence": 0.72,
+        "grounded_in": "untested_assumption"
+      },
+      {
+        "body": "著者は振幅が小さいことを理由に線形化を選んでいますが、線形化しない扱いを選んだ場合に何が見えなくなると思いますか？",
+        "evidence_quote": "The amplitude is small compared with the equilibrium separation.",
+        "reason": "著者が選んだ手（linearize）は別の選択もあり得たため、選択の代償を問える",
+        "confidence": 0.66,
+        "grounded_in": "author_choice"
+      }
+    ],
+    "skipped_reason": null
+  }
+}

@@ -121,8 +121,6 @@ docker compose logs -f api-server
   `/api/admin`, `/api/groups`, `/api/me`, `/api/courses`, `/api/documents` などを api-server に
   プロキシします。
 
-> 旧 `neo4j` サービスは書き込み経路がなく実質未使用だったため撤去済みです。
-
 ---
 
 ## 4. 主要環境変数 {#env-vars}

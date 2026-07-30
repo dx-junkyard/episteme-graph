@@ -21,6 +21,8 @@ from pydantic import BaseModel
 from dependencies import _require_teacher
 from core import element_explanations as store
 from core.deliberation.identity_links import confidence_label
+from core.deliberation.refs import document_run_artifacts
+from core.discuss.authoring import compute_source_fingerprint
 from core.postgres import get_session
 from core.schema import AUDIT_ENTITY_ELEMENT_EXPLANATION
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
@@ -33,6 +35,13 @@ router = APIRouter(prefix="/api/admin", tags=["element-explanations"])
 
 # 一括承認/却下の1回あたり上限（正規化後の explanation_ids 件数）。
 BULK_REVIEW_MAX_ITEMS = 200
+
+# 鮮度（``discuss_opening_authoring_design.md`` §7.1）: 開幕素材
+# （``element_type='document'`` / ``role='discussion_seed'``）の生成時に保存した
+# ``evidence.source_fingerprint`` と、現在の解析結果の指紋が食い違っている状態を示す
+# 事実文。**自動で非承認に落とさない** — 学習者に出ていたものが黙って消えるほうが
+# 有害なので、``approved`` の行にも印だけを付けてレビューキューで見えるようにする。
+STALE_NOTICE = "元の解析結果が変わっています"
 
 _BULK_ACTION_TO_STATUS = {
     "approve": store.STATUS_APPROVED,
@@ -47,17 +56,24 @@ def _canonical_document_id(chunks: list[dict], fallback: str) -> str:
     return fallback
 
 
-def _public_row(row: dict) -> dict:
-    """API 応答用に confidence 生値を除去した1件を返す（E6: 段階ラベルのみ）。"""
+def _public_row(row: dict, *, stale: bool | None = None) -> dict:
+    """API 応答用に confidence 生値を除去した1件を返す（E6: 段階ラベルのみ）。
+
+    ``role``（migration 062）は素材の役割そのものなので常に返す（既存4要素型の行は
+    ``None``＝二層説明の説明本文）。``stale`` は鮮度判定ができたときだけ渡され、
+    真のときは事実文 ``stale_notice`` を添える（判定不能なら両キーとも付けない —
+    「鮮度不明」と「新鮮」を同じ形で返さない）。
+    """
     evidence = dict(row.get("evidence") or {})
     confidence_raw = evidence.pop("confidence", None)
     evidence["confidence_label"] = confidence_label(confidence_raw)
-    return {
+    public = {
         "id": row.get("id"),
         "document_id": row.get("document_id"),
         "element_type": row.get("element_type"),
         "element_id": row.get("element_id"),
         "kind": row.get("kind"),
+        "role": row.get("role"),
         "body": row.get("body"),
         "evidence": evidence,
         "status": row.get("status"),
@@ -66,6 +82,63 @@ def _public_row(row: dict) -> dict:
         "reviewed_at": row.get("reviewed_at"),
         "created_at": row.get("created_at"),
     }
+    if stale is not None:
+        public["stale"] = bool(stale)
+        if stale:
+            public["stale_notice"] = STALE_NOTICE
+    return public
+
+
+# ---------------------------------------------------------------------------
+# 鮮度（設計書 §7.1）: document スコープの開幕素材だけを対象にする
+# ---------------------------------------------------------------------------
+
+
+def _is_freshness_tracked(row: dict) -> bool:
+    """鮮度突合の対象行か（開幕素材のみ。既存4要素型の説明本文は対象外）。"""
+    return (
+        row.get("element_type") == store.ELEMENT_TYPE_DOCUMENT
+        and row.get("role") == store.ROLE_DISCUSSION_SEED
+    )
+
+
+def _stored_fingerprint(row: dict) -> str:
+    evidence = row.get("evidence")
+    if not isinstance(evidence, dict):
+        return ""
+    return str(evidence.get("source_fingerprint") or "").strip()
+
+
+def _current_source_fingerprint(document_id: str) -> str | None:
+    """現在の解析結果の指紋。取得できなければ ``None``（fail-open）。
+
+    artifact が読めない状況（run 無し・DB 不通等）で「変わっています」と誤って
+    表示しないため、例外は握って鮮度判定そのものをスキップする。
+    """
+    try:
+        return compute_source_fingerprint(document_run_artifacts(document_id))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "element_explanations: failed to compute source fingerprint for document %s",
+            document_id,
+            exc_info=True,
+        )
+        return None
+
+
+def _public_rows_with_freshness(document_id: str, rows: list[dict]) -> list[dict]:
+    """一覧応答（鮮度付き）。指紋計算は document 単位で高々1回（行ごとに再読しない）。"""
+    needs_check = any(_is_freshness_tracked(r) and _stored_fingerprint(r) for r in rows)
+    current = _current_source_fingerprint(document_id) if needs_check else None
+    out: list[dict] = []
+    for row in rows:
+        stale: bool | None = None
+        if current and _is_freshness_tracked(row):
+            stored = _stored_fingerprint(row)
+            if stored:
+                stale = stored != current
+        out.append(_public_row(row, stale=stale))
+    return out
 
 
 @router.get("/documents/{document_id}/element-explanations")
@@ -74,8 +147,16 @@ def list_document_element_explanations(
     element_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     kind: str | None = Query(default=None),
+    role: str | None = Query(default=None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
+    """document 内の説明一覧（レビューキューの供給元）。
+
+    ``element_type='document'``（開幕素材, migration 062）の行も同じ一覧に含まれる。
+    開幕素材には鮮度（``stale`` / ``stale_notice``、設計書 §7.1）を付ける — 対象は
+    ``candidate`` だけでなく ``approved`` も含む（承認済みでも元の解析結果が変わった
+    ことをレビューキューで見えるようにする。自動で非承認へは落とさない）。
+    """
     chunks = _ensure_document_viewable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
     session = get_session()
@@ -86,10 +167,11 @@ def list_document_element_explanations(
             element_type=element_type,
             status=status,
             kind=kind,
+            role=role,
         )
     finally:
         session.close()
-    return {"explanations": [_public_row(r) for r in rows]}
+    return {"explanations": _public_rows_with_freshness(canonical_document_id, rows)}
 
 
 @router.post("/element-explanations/{explanation_id}/approve")

@@ -533,6 +533,28 @@ _REGISTRY: list[Capability] = [
                   precondition="material_selected"),
         ),
     ),
+    # discuss_opening_authoring_design.md §6.2: 開幕素材（議論のきっかけ）のレビュー。
+    # キューは教材管理タブの「検出要素」→「説明レビュー」にあるため screen は materials。
+    # v1 は道案内のみ（承認・編集は既存 element-explanations API を UI から行う）。
+    Capability(
+        id="course.discuss_opening_review",
+        screen="materials",
+        title="論文の議論のきっかけ（AI候補）を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        description="discuss の開幕画面で使う「議論のきっかけ」の AI 候補を確認・編集・承認する。"
+                    "承認するまで学習者には表示されない（候補のまま）。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_id}/element-explanations"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_inventory_button",
+                  "「検出要素」を押して要素の一覧を開きます",
+                  precondition="material_selected"),
+            _step("materials", "explanation_review_button",
+                  "「説明レビュー」を押して候補を確認します",
+                  precondition="inventory_modal_open"),
+        ),
+    ),
     # --- つまづきデータ (stumbles) ---
     Capability(
         id="stumbles.view",

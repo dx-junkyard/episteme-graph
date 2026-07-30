@@ -198,15 +198,24 @@ class TestDeliberationModule:
 class TestDeliberationDialoguePhase2:
     """面③ 対話的検討（Phase 2）固有の受け入れ条件。"""
 
+    # PATCH を使ってよい既知の書き込み先（増やすときはここに明示して意図を残す）。
+    # ① 図の提示モード訂正（#496） ② 開幕素材の本文インライン編集
+    #    （discuss_opening_authoring_design.md §6.1。旧行 superseded → 教員名義の新行）
+    _ALLOWED_PATCH_TARGETS = ("/presentation-mode", "/admin/element-explanations/")
+
     def test_write_methods_scoped_to_deliberation_dialogue(self):
-        """POST は従来経路と図再解析、PATCH は図の presentation-mode 1箇所に限定する。"""
+        """POST は従来経路と図再解析、PATCH は上記の既知2箇所に限定する。"""
         src = _read(DELIBERATION_JS)
         for method in ("PUT", "DELETE"):
             assert f'"{method}"' not in src
             assert f"'{method}'" not in src
-        assert src.count('method: "PATCH"') == 1
-        patch_pos = src.index('method: "PATCH"')
-        assert "/presentation-mode" in src[max(0, patch_pos - 500) : patch_pos]
+        patch_positions = [m.start() for m in re.finditer(r'method: "PATCH"', src)]
+        assert len(patch_positions) == len(self._ALLOWED_PATCH_TARGETS)
+        for pos in patch_positions:
+            preceding = src[max(0, pos - 500) : pos]
+            assert any(target in preceding for target in self._ALLOWED_PATCH_TARGETS), (
+                "未知の PATCH 書き込み先が追加されている"
+            )
         assert '"POST"' in src or "'POST'" in src
         # POST を使う既知のエンドポイント（設計書 §8）がすべて揃っていること。
         # test_fetch_target_is_deliberation_only により、これらはすべて

@@ -154,6 +154,7 @@ PIPELINE_STAGE_LABELS: dict[str, str] = {
     "component_assembly": "コンポーネント生成",
     "narrative_annotator": "ナラティブ注釈",
     "contextual_explanation": "文脈的説明の生成",
+    "discuss_opening": "議論のきっかけの生成",
 }
 
 
@@ -212,6 +213,9 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
 # (環境変数名, フォールバック tier)。
 _FEATURE_DIRECT_ENV: dict[str, tuple[str, str]] = {
     "pipeline:contextual_explanation": ("CTXEXPL_LLM_MODEL", "fast"),
+    # discuss 開幕素材の生成（discuss_opening_authoring_design.md §4.1）。専用の
+    # Settings フィールドを持たず env 直読みなのは contextual_explanation と同じ。
+    "pipeline:discuss_opening": ("DISCUSS_OPENING_LLM_MODEL", "fast"),
 }
 
 # 上記マッピングに無い feature（その他 pipeline:* 全般・unattributed 等）の既定 tier。

@@ -251,8 +251,11 @@ class TestProjectFragilePoints:
         assert points == [
             {
                 "kind": "assumption",
+                # 主語は論文（この論文が確かめていないこと）。システムの解析状態と
+                # 同じ区画に積まないための構造的な区別（投影の是正 §2/§3）。
+                "subject": "paper",
                 "label": "前提の文",
-                "fact_line": "検証スコープは記録されていません。",
+                "fact_line": "どの範囲で確かめたかが記録されていません。",
                 "document_id": None,
             }
         ]
@@ -270,8 +273,11 @@ class TestProjectFragilePoints:
         points, _truncated = opening.project_fragile_points([], backbone)
         assert len(points) == 1
         assert points[0]["kind"] == "backbone_node"
+        # 主語はシステム（解析）。論文の弱点として読ませない。
+        assert points[0]["subject"] == "system"
         assert points[0]["document_id"] == "doc1"
-        assert "式へのリンクが不足しています" in points[0]["fact_line"]
+        assert "関係する式とのつながりを記録できていません" in points[0]["fact_line"]
+        assert "解析" in points[0]["fact_line"]
 
     def test_source_backed_backbone_node_excluded(self):
         backbone = {
@@ -392,6 +398,9 @@ class TestArtifactsFetchedOncePerDocument:
         monkeypatch.setattr(opening, "_load_graph_nodes", lambda document_id: [])
         monkeypatch.setattr(opening, "_claim_label_index", lambda document_id, artifacts: {})
         monkeypatch.setattr(opening, "_compile_open_assumptions", lambda course_id: [])
+        # Phase 3（承認済み素材の配信）の DB 読み出しもここでは無効化する（この test の
+        # 対象は artifacts の再取得回数だけ）。
+        monkeypatch.setattr(opening, "_load_approved_discussion_seeds", lambda document_id: [])
 
         result = opening.build_opening("course1", ["doc1"])
 

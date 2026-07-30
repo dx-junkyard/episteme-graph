@@ -477,6 +477,59 @@
     }
   }
 
+  // 出典タブ「このトピックの論理要素」の材料。教材本文の ⚓ チップと同じ供給元
+  // （build_topic_evidence_items の evidence_items）から component 要素だけを拾い、
+  // 要素名（title）と要旨（summary）を返す。内部 ID・agent 名は返さない
+  // （旧 referenced_sections が学習者に出していたのはそれだけだった）。
+  //
+  // hasAnchor は「その要素がチャンク本文に ![[component:id]] として埋め込まれているか」で、
+  // DOM ではなくチャンクのテキストから判定する（右パネルと教材区画の描画順に依存しない）。
+  const _TOPIC_COMPONENT_LIMIT = 12;
+
+  function collectTopicComponentEvidence() {
+    const chunks = state.topicMaterial || [];
+    const embedded = {};
+    chunks.forEach(function (chunk) {
+      const text = String((chunk && chunk.text) || "");
+      const re = /!\[\[component:([^\]]+)\]\]/g;
+      let m;
+      while ((m = re.exec(text)) !== null) {
+        embedded[normalizeMaterialEvidenceId(m[1])] = true;
+      }
+    });
+
+    const seen = {};
+    const out = [];
+    chunks.forEach(function (chunk) {
+      ((chunk && chunk.evidence_items) || []).forEach(function (item) {
+        if (!item || item.kind !== "component") return;
+        const norm = normalizeMaterialEvidenceId(item.id);
+        if (!norm || seen[norm]) return;
+        const title = item.title || item.label || "";
+        if (!title) return; // ラベルの無い要素は出さない（ID だけのカードを作らない）
+        seen[norm] = true;
+        if (out.length >= _TOPIC_COMPONENT_LIMIT) return;
+        const summary = item.summary && item.summary !== title ? item.summary : "";
+        out.push({
+          ref: "component:" + norm,
+          title: title,
+          summary: summary,
+          hasAnchor: !!embedded[norm],
+        });
+      });
+    });
+    return out;
+  }
+
+  // 「教材の該当箇所へ」: 本文中の該当チップまでスクロールし、既存のチップ
+  // ポップオーバー（component context API）を開く。詳細表示の実装を二重に持たない。
+  function jumpToMaterialEvidenceChip(ref) {
+    const chip = document.querySelector('.ls-material-evidence-chip[data-evidence-ref="' + ref + '"]');
+    if (!chip) return;
+    chip.scrollIntoView({ behavior: "smooth", block: "center" });
+    chip.click();
+  }
+
   // ── Render: Sidebar ────────────────────────────────────────────────
   function renderSidebar() {
     const sb = document.getElementById("sidebar");
@@ -2172,13 +2225,29 @@
       });
       html += "</div>";
     }
-    const refs = state.course.referenced_sections || [];
-    if (refs.length > 0) {
-      html += '<div class="ps"><h4>本セッションで参照されたセクション</h4>';
-      refs.forEach(function (r) {
-        html += '<div class="cc"><div class="lb">' + escHtml(r.source) + "</div>";
-        html += '<strong style="color:var(--color-text-primary)">' + escHtml(r.section) + "</strong> " + escHtml(r.title) + "<br>";
-        html += '<span style="font-size:11px">' + escHtml(r.note) + "</span></div>";
+    // このトピックの論理要素（2026-07-26 差し替え）。
+    // 旧「本セッションで参照されたセクション」は course.referenced_sections（トピック→
+    // component_id の内部対応表）をそのまま描画しており、学習者には内部ID（comp_001）と
+    // agent クラス名しか伝わっていなかった。加えて見出しが事実と違った（セッション単位でも
+    // セクションでもない）。ここでは教材本文の ⚓ チップと同じデータ（evidence_items）から
+    // 要素名と要旨を出し、詳細は既存のチップのポップオーバー（component context API）へ
+    // 送る（詳細表示の実装を二重に持たない）。
+    const topicComponents = collectTopicComponentEvidence();
+    if (topicComponents.length > 0) {
+      html += '<div class="ps"><h4>このトピックの論理要素</h4>';
+      html += '<p class="lx-note" style="margin-top:0">教材の本文に ⚓ で埋め込まれている要素です。' +
+        '「教材の該当箇所へ」でその場の説明を開けます。</p>';
+      topicComponents.forEach(function (c) {
+        html += '<div class="lx-topic-component">';
+        html += '<div class="lx-topic-component-title">' + escHtml(c.title) + '</div>';
+        if (c.summary) {
+          html += '<div class="lx-topic-component-summary">' + escHtml(c.summary) + '</div>';
+        }
+        if (c.hasAnchor) {
+          html += '<button type="button" class="lx-topic-component-btn" data-lx-component-ref="' +
+            escHtml(c.ref) + '">教材の該当箇所へ</button>';
+        }
+        html += '</div>';
       });
       html += "</div>";
     }
@@ -2197,6 +2266,12 @@
         if (openDetails.open) loadLearnerOpenAssumptions();
       });
     }
+
+    el.querySelectorAll("[data-lx-component-ref]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        jumpToMaterialEvidenceChip(this.getAttribute("data-lx-component-ref") || "");
+      });
+    });
 
     // D層 (D3-6): 根拠カードへ台帳の検証状態を一行併記（非同期・fail-closed）。
     annotateSourceCardsWithLedger(el);
@@ -3348,6 +3423,21 @@
 
   const INSPECT_TOOLTIP_GAP = 8;      // アンカーとツールチップの隙間
   const INSPECT_TOOLTIP_MARGIN = 12;  // 画面端・固定要素との余白
+  // 本文が安全域に収まらないときに順に試す幅（狭い順）。長い節でも全文が読めるように
+  // 幅を広げて高さを削るために使う（_positionInspectTooltip 参照）。
+  const INSPECT_TOOLTIP_WIDTHS = [320, 460, 560];
+
+  // マニュアル本文は Markdown で書かれているが、ツールチップは素のテキスト
+  // （white-space: pre-wrap）として出すため、強調記号がそのまま見えてしまう。
+  // 表示用に記号だけを落とす（本文の語は変えない・要約もしない）。
+  function _plainManualText(text) {
+    return String(text || "")
+      .replace(/\*\*([\s\S]+?)\*\*/g, "$1")
+      .replace(/__([\s\S]+?)__/g, "$1")
+      .replace(/`([^`]+)`/g, "$1")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
 
   // ツールチップより手前に居座る固定要素（トップバー・インスペクトバナー）の下端を返す。
   // 上方向に出したツールチップがこれを越えると本文の冒頭が隠れて読めなくなるため、
@@ -3365,31 +3455,44 @@
 
   function _positionInspectTooltip(tip, anchorEl) {
     const r = anchorEl.getBoundingClientRect();
-    const tw = Math.min(320, window.innerWidth - 24);
-    tip.style.width = tw + "px";
-    const left = Math.max(12, Math.min(r.left, window.innerWidth - tw - 12));
-    tip.style.left = left + "px";
 
-    // 自然な高さを実測する（前回のクランプが残っていると測り違える）。
-    tip.style.maxHeight = "none";
-    const th = tip.offsetHeight;
-
-    // 固定要素に隠れない範囲を安全域とし、上下どちらに出す場合もこの中へ収める。
+    // 固定要素に隠れない範囲を安全域とし、どこに出す場合もこの中へ収める。
     const safeTop = _inspectSafeTopBound() + INSPECT_TOOLTIP_MARGIN;
     const safeBottom = window.innerHeight - INSPECT_TOOLTIP_MARGIN;
+    const safeHeight = Math.max(80, safeBottom - safeTop);
     const spaceBelow = safeBottom - (r.bottom + INSPECT_TOOLTIP_GAP);
     const spaceAbove = (r.top - INSPECT_TOOLTIP_GAP) - safeTop;
 
-    // 下に入りきるなら下。入らなければ広い方に出し、はみ出す分は max-height で詰める
-    // （上に出したときに冒頭がトップバーの下へ潜り込むのを防ぐ）。
-    if (th <= spaceBelow || spaceBelow >= spaceAbove) {
+    // 全文が安全域に収まる最も狭い幅を探す。ツールチップは pointer-events:none で
+    // 内部スクロールができないため、狭いまま縦に伸ばすと本文が途中で切れて続きを
+    // 読む手段がなくなる（節が長いマニュアルで実際に切れていた）。まず幅を広げて
+    // 高さを削り、それでも収まらないときだけクランプする。
+    let tw = 0;
+    let th = 0;
+    for (let i = 0; i < INSPECT_TOOLTIP_WIDTHS.length; i++) {
+      tw = Math.min(INSPECT_TOOLTIP_WIDTHS[i], window.innerWidth - 24);
+      tip.style.width = tw + "px";
+      tip.style.maxWidth = tw + "px"; // CSS の max-width を上書きして実際に広げる
+      tip.style.maxHeight = "none";   // 実測前にクランプを解除（残っていると測り違える）
+      th = tip.offsetHeight;
+      if (th <= safeHeight) break;
+    }
+    tip.style.left = Math.max(12, Math.min(r.left, window.innerWidth - tw - 12)) + "px";
+
+    // 下に入りきるなら下、上に入りきるなら上。どちらにも入らない場合は安全域いっぱいに
+    // 出す（アンカーに重なってもよい。上下の狭い側に押し込めて切るより全文が読める）。
+    if (th <= spaceBelow) {
       tip.style.bottom = "auto";
       tip.style.top = Math.max(safeTop, r.bottom + INSPECT_TOOLTIP_GAP) + "px";
       tip.style.maxHeight = Math.max(80, spaceBelow) + "px";
-    } else {
+    } else if (th <= spaceAbove) {
       tip.style.top = "auto";
       tip.style.bottom = (window.innerHeight - r.top + INSPECT_TOOLTIP_GAP) + "px";
       tip.style.maxHeight = Math.max(80, spaceAbove) + "px";
+    } else {
+      tip.style.bottom = "auto";
+      tip.style.top = safeTop + "px";
+      tip.style.maxHeight = Math.max(80, safeHeight) + "px";
     }
   }
 
@@ -3408,8 +3511,8 @@
     if (entry) {
       tip.innerHTML =
         '<div class="inspect-tooltip-source">📖 使い方</div>' +
-        '<div class="inspect-tooltip-title">' + escHtml(entry.title || "") + "</div>" +
-        '<div class="inspect-tooltip-body">' + escHtml(entry.body || "") + "</div>";
+        '<div class="inspect-tooltip-title">' + escHtml(_plainManualText(entry.title)) + "</div>" +
+        '<div class="inspect-tooltip-body">' + escHtml(_plainManualText(entry.body)) + "</div>";
     } else {
       // IH8: 未整備は固定事実文のみ。生成で埋めない。
       tip.innerHTML =

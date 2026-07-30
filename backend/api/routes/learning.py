@@ -44,6 +44,7 @@ from services import (
     get_accessible_course_data,
     get_anchor_digest,
     get_tension_digest,
+    resolve_course_source_titles,
     course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
@@ -80,6 +81,7 @@ from services import (
 )
 from pydantic import BaseModel
 from core.course_data import (
+    course_focus,
     course_llm_models,
     course_source_material_ids,
     course_title as _course_title,
@@ -183,6 +185,10 @@ router = APIRouter(prefix="/api/learning", tags=["Learning"])
 # 痕跡 context_label 用のラベル変換は topic_title 決定の1箇所でのみ行う。
 DISCUSSION_TOPIC_ID = "_discussion"
 DISCUSSION_TOPIC_LABEL = "論文との議論"
+
+# discuss 開幕画面の「このコースで議論したいこと」（Phase 0b）の入力上限。
+# 開幕画面の先頭に地の文として出す短い提示なので、長文（教材本文の代替）にはさせない。
+_MAX_COURSE_FOCUS_CHARS = 600
 
 # ---------------------------------------------------------------------------
 # チャット型 AI 支援の共通基盤整理 §1: 学習チャット本体のコスト上限
@@ -460,6 +466,49 @@ def list_courses(
     return unique_courses
 
 
+def _with_resolved_source_titles(data: dict) -> dict:
+    """出典タブ「登録済み教材」向けに ``sources[].title`` を論文の題名へ差し替えた
+    コピーを返す（保存データは変更しない）。
+
+    差し替えるのは **title が空 or material_id と同一** の場合のみ（コース作成時に
+    ファイル名相当がそのまま入ったケース）。教員が付けた題名は尊重して上書きしない。
+    差し替えたときは元の値を ``subtitle`` に残す（P4: 情報を落とさない）。
+    解決できなければ何もしない（fail-soft）。
+    """
+    if not isinstance(data, dict) or not data.get("sources"):
+        return data
+    try:
+        titles = resolve_course_source_titles(data)
+    except Exception:  # noqa: BLE001 — fail-soft
+        return data
+    if not titles:
+        return data
+
+    changed = False
+    sources: list[dict] = []
+    for src in data.get("sources") or []:
+        if not isinstance(src, dict):
+            sources.append(src)
+            continue
+        material_id = str(src.get("material_id") or "").strip()
+        resolved = titles.get(material_id, "")
+        stored = str(src.get("title") or "").strip()
+        if resolved and resolved != stored and (not stored or stored == material_id):
+            new_src = dict(src)
+            new_src["title"] = resolved
+            if stored and not str(src.get("subtitle") or "").strip():
+                new_src["subtitle"] = stored
+            sources.append(new_src)
+            changed = True
+        else:
+            sources.append(src)
+    if not changed:
+        return data
+    out = dict(data)
+    out["sources"] = sources
+    return out
+
+
 @router.get("/courses/{course_id}", response_model=LearningCourseLayeredResponse)
 def get_course(
     course_id: str,
@@ -476,7 +525,7 @@ def get_course(
 
     personal = get_personal_layer(current_user["id"], course_id)
     return LearningCourseLayeredResponse(
-        master_course=LearningCourseDetail(**data),
+        master_course=LearningCourseDetail(**_with_resolved_source_titles(data)),
         personal_layer=PersonalLayer(**personal),
     )
 
@@ -528,6 +577,22 @@ def update_course(
         data["concepts"] = [c.model_dump() for c in body.concepts]
     if body.sources is not None:
         data["sources"] = [s.model_dump() for s in body.sources]
+    if body.course_focus is not None:
+        # Phase 0b（discuss_opening_authoring_design.md §2 最下段）: discuss 開幕画面の
+        # 「このコースで議論したいこと」。教員の任意入力のみ（AI 生成なし）。空文字は
+        # 設定解除（キーごと削除 = 開幕画面から区画が消える）。
+        focus = str(body.course_focus).strip()
+        if len(focus) > _MAX_COURSE_FOCUS_CHARS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"「このコースで議論したいこと」は{_MAX_COURSE_FOCUS_CHARS}文字以内で入力してください"
+                ),
+            )
+        if focus:
+            data["course_focus"] = focus
+        else:
+            data.pop("course_focus", None)
     if body.llm_models is not None:
         # M層 Phase 3（§6.4）: コース単位のモデル上書き。v1 は "learning_chat" scene のみ
         # 対応（他 scene のコース単位上書きは未実装 — 意味を持たない値を無警告で
@@ -2798,6 +2863,19 @@ def get_discussion_opening(
     （TheoryOperationGraph の main 層・theory stage 順）／「最も脆い一手」
     （D層台帳の未検証合意リスト + review_required なバックボーンノードの事実提示）。
 
+    加えて投影の是正（`discuss_opening_authoring_design.md` §3 Phase 0）で、agent が
+    既に合成していた「この論文が答えようとした問い」（central_question / paper_goal）・
+    中心命題の合成文（central_thesis.text）・支持構造の合成文・「別の見方」
+    （alternative_theses、出所ラベル付き）も投影する。脆い箇所は主語ごとに
+    （論文 / システム）分離できる形（fragile_points[].subject）で返す。
+    Phase 0b の `course_focus`（教員の任意入力「このコースで議論したいこと」）も同梱する。
+
+    「議論のきっかけ」（同 §7 Phase 3、`documents[].discussion_seeds`）だけは投影ではなく、
+    解析パイプラインが生成し**教員が承認した**素材（`element_explanations` の
+    `status='approved'` / `role='discussion_seed'` 行）の配信で、各件に出所表示
+    （`authored` / `authored_by_label`）が付く。承認済みが1件も無い document は投影のまま
+    （Phase 0 と同一の DTO）で、`available` の判定もこの素材の有無では変わらない。
+
     LLM 呼び出し 0 回・痕跡記録なし・migration なし（DM8）。confidence / load_score
     等の生数値は一切含めない（``core/discuss/opening.py::build_opening`` が
     ホワイトリスト射影 + 再帰除去の二重で保証する）。
@@ -2807,7 +2885,11 @@ def get_discussion_opening(
         raise HTTPException(status_code=404, detail="Course not found")
 
     document_ids = list_course_source_document_ids(course_data)
-    return build_discussion_opening(course_id, document_ids)
+    # Phase 0b: 教員の任意入力（AI 生成なし）。course_data への素の dict アクセスは
+    # しない（Tier 3-18: 正本は core/course_data.py のアクセサ）。
+    return build_discussion_opening(
+        course_id, document_ids, course_focus=course_focus(course_data)
+    )
 
 
 class DiscussReflectionRequest(BaseModel):

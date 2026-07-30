@@ -129,6 +129,29 @@ class TestAdminHelpInspectPublicApi:
         assert "setActive(false)" in src
 
 
+class TestTooltipFitsWholeSection:
+    """長いマニュアル節がツールチップで途中で切れないこと（学習画面側と同じ規約）。
+
+    ツールチップは pointer-events:none で内部スクロールできないため、狭いまま縦に
+    伸ばして max-height でクランプすると続きを読む手段がなくなる。まず幅を広げ、
+    上下どちらにも収まらない場合は安全域いっぱいに出す。
+    """
+
+    def test_widths_escalate_before_clipping(self):
+        src = _read(ADMIN_HELP_INSPECT_JS)
+        assert "TOOLTIP_WIDTHS = [320, 460, 560];" in src
+        assert "TOOLTIP_WIDTHS.length" in src
+        assert "tip.style.maxWidth = tw" in src  # CSS の max-width を上書きする
+        assert "th <= safeHeight" in src
+        assert "tip.style.top = safeTop" in src
+
+    def test_markdown_markers_stripped_for_display(self):
+        src = _read(ADMIN_HELP_INSPECT_JS)
+        assert "function plainManualText(text) {" in src
+        assert "plainManualText(entry.body)" in src
+        assert "escHtml(entry.body" not in src  # 生の Markdown をそのまま出さない
+
+
 class TestAdminAssistantUsageHelpIntegration:
     def test_support_action_guarded_by_is_active(self):
         src = _read(ADMIN_ASSISTANT_JS)

@@ -5695,6 +5695,38 @@ html.learn-page > body {
 .lx-note { font-size: 11px; color: var(--lx-ink-faint); margin-top: 16px; line-height: 1.5; }
 .lx-sec-head { font-size: 12px; color: var(--lx-ink-soft); font-weight: 600; margin: 0 0 10px; }
 
+/* 出典タブ「このトピックの論理要素」（旧「本セッションで参照されたセクション」の置き換え。
+   内部 ID・agent 名ではなく、要素名と要旨、そして教材本文の該当チップへの導線を出す）。 */
+.lx-topic-component {
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.lx-topic-component:last-child { border-bottom: none; }
+.lx-topic-component-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+.lx-topic-component-summary {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-top: 3px;
+}
+.lx-topic-component-btn {
+  margin-top: 5px;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.lx-topic-component-btn:hover { color: var(--color-text-primary); }
+
 /* 進捗タブの再訪推奨ドット */
 .lx-tab-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-revisit); margin-left:6px; vertical-align:middle; }
 /* G4-T: 違和感/帰属候補ダイジェストの気づきドット（再訪推奨ドットと区別できる色） */
@@ -8517,7 +8549,7 @@ body.admin-inspect-mode textarea:disabled {
 /* ============================================================
    discuss モード（論文と話す）Phase 2 — discuss.js 追加分
    （docs/features/discussion_mode_design.md §3.3/3.4/3.5）
-   ・開幕画面（この論文が賭けているもの／理論のバックボーン／最初の一手）
+   ・開幕画面（この論文の主張／理論のバックボーン／最初の一手）
    ・分岐チップ（深掘り／横展開）
    ・着地画面（討議終了時の軽量モーダル。スキップ可・既定オン）
    「寄り道」語彙は使わない（DM5）。数値・件数・網羅率は出さない（DM6）。
@@ -8667,8 +8699,90 @@ body.admin-inspect-mode textarea:disabled {
   font-size: 12px;
   color: var(--color-text-secondary);
   line-height: 1.6;
-  margin: 2px 0;
+  margin: 4px 0;
 }
+.discuss-fragile-label {
+  color: var(--color-text-primary);
+}
+.discuss-fragile-fact {
+  color: var(--color-text-tertiary);
+}
+
+/* ── 投影の是正（discuss_opening_authoring_design.md §2/§3）─────────────
+   主語ごとに区画を分ける: 教員（このコースで議論したいこと）/ 論文（問い・主張・
+   確かめていないこと）/ システム（まだ確認できていないところ）/ AI（別の見方）。
+   いずれも警告色・強調色は使わない（事実として並べる）。 */
+.discuss-section-focus {
+  border-left: 2px solid var(--color-border-secondary);
+}
+.discuss-focus-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+}
+.discuss-paper-goal { margin-top: 6px; margin-bottom: 0; }
+.discuss-support-entry { margin-bottom: 6px; }
+.discuss-support-entry:last-child { margin-bottom: 0; }
+.discuss-support-entry-text {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+.discuss-alt-item {
+  border-left: 2px solid var(--color-border-tertiary);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 8px;
+}
+.discuss-alt-item:last-child { margin-bottom: 0; }
+.discuss-alt-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+}
+/* 出所ラベル（「AI が提示した別の定式化（出典との対応は未確認）」）。
+   小さく静かに、しかし必ず添える。 */
+.discuss-attribution {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+/* 「議論のきっかけ」（承認済み素材の配信・§7）。投影の区画と同じ静かな見え方にする
+   （新しいものだからといって強調色・バッジを付けない）。署名行は
+   .discuss-attribution を再利用し、区画の最後に1行だけ添える。 */
+.discuss-section-seeds {
+  border-left: 2px solid var(--color-border-secondary);
+}
+.discuss-seed-item {
+  margin-bottom: 8px;
+}
+.discuss-seed-item:last-of-type { margin-bottom: 4px; }
+.discuss-seed-body {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+}
+.discuss-seed-quote {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+.discuss-seed-attribution { margin-top: 6px; }
+/* 「くわしく見る」— 開幕画面に一度に並べない残りへの到達口。 */
+.discuss-more {
+  font-size: 12px;
+}
+.discuss-more > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.discuss-more > .discuss-section { margin-bottom: 8px; }
+.discuss-section-unverified > summary { cursor: pointer; }
+.discuss-section-unverified > summary.discuss-section-hd { margin-bottom: 4px; }
 
 .discuss-backbone-list {
   display: flex;

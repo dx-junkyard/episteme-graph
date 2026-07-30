@@ -96,7 +96,11 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material, figures_index)
         draft_result = _generate_course_topic_drafts(course, enriched_topics)
         course["topics"] = enriched_topics
-        course["referenced_sections"] = _referenced_sections_from_topics(enriched_topics)
+        # referenced_sections は生成しない（2026-07-26）。トピック→component_id の内部対応表を
+        # そのまま学習者の出典タブに出しており、内部 ID（comp_001）と agent クラス名だけが
+        # 並ぶ「学習者に何も伝えない」表示になっていた。根拠となる論理要素は教材本文の
+        # ⚓ チップ（evidence_items + component context API）が正本で、こちらは重複かつ劣化。
+        # 既存コースの保存済み `referenced_sections` は消さない（P4。UI が読まなくなるだけ）。
         _set_content_status(
             course,
             "completed",
@@ -1299,24 +1303,6 @@ def _content_blocks(
     if assessment_prompts:
         blocks.append({"type": "assessment_prompts", "items": assessment_prompts})
     return blocks
-
-
-def _referenced_sections_from_topics(topics: list[dict]) -> list[dict]:
-    refs: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for topic in topics:
-        for component_id in topic.get("linked_component_ids") or []:
-            key = (str(topic.get("id") or topic.get("title") or ""), str(component_id))
-            if key in seen:
-                continue
-            seen.add(key)
-            refs.append({
-                "source": "Agent pipeline",
-                "section": str(component_id),
-                "title": str(topic.get("title") or ""),
-                "note": "CourseMappingAgent / ComponentAssemblyAgent から対応付け",
-            })
-    return refs[:100]
 
 
 _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフト作成を支援するアシスタントです。

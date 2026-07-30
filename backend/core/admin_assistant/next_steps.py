@@ -29,6 +29,7 @@ from typing import Any, Optional
 from sqlalchemy import text as sa_text
 
 from core import atlas_store
+from core import element_explanations as element_explanations_store
 from core import privacy
 from core.admin_assistant import capabilities as caps
 from core.admin_assistant import knowledge as admin_kb
@@ -36,6 +37,7 @@ from core.course_data import course_atlas_binding_facts
 from core.course_data import (
     course_atlas_binding_pending,
     course_cartridge_id,
+    course_source_material_ids,
     iter_all_topics,
 )
 from core.help_kb import manual as help_manual
@@ -60,6 +62,11 @@ RULE_COURSE_AUDIO_MISSING = "course.audio_missing"
 # `material.inventory_unvisited` は「見たかどうか」の押し付けになるため意図的に
 # 実装しない（vision_ux_gap_survey_2026-07-17.md §5-5 の見送り推奨, G4）。
 RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
+
+# discuss_opening_authoring_design.md §6.2: 生成は document 単位だが、添削の動機は
+# コースを作るときに生まれる。所有コースのソース論文に未確認の「議論のきっかけ」
+# （element_explanations の element_type='document' / role='discussion_seed'）が残っている。
+RULE_COURSE_DISCUSS_OPENING_UNREVIEWED = "course.discuss_opening_unreviewed"
 
 # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側 + 供給側の
 # 両面計器。改善ループを閉じるための3ルール（2026-07-25 追加）。
@@ -111,6 +118,10 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_FIGURE_UNREVIEWED_MODES: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.review_figures",  # 道案内のみ（図モーダルへ, #496）
+    },
+    RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "course.discuss_opening_review",  # 道案内のみ（説明レビューキューへ）
     },
     # manual_help_kb_design.md §4-1: 需要側 + 供給側の両面計器。
     RULE_MANUAL_HELP_GAPS_PENDING: {
@@ -568,6 +579,120 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
     return out
 
 
+def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[NextStep, str]]:
+    """discuss_opening_authoring_design.md §6.2: 所有コースのソース論文に、未確認の
+    「議論のきっかけ」（``element_type='document'`` / ``role='discussion_seed'`` の
+    ``candidate``）が残っている。
+
+    - 点灯: 当該 document に ``candidate`` が1件以上ある。
+    - 消滅: 全件が ``approved`` / ``dismissed`` になれば導出されなくなる
+      （G1: 完了フラグを持たない）。
+    - 抑止: **過去に全却下された document は再点灯させない** — その document の
+      ``dismissed`` が1件以上あり ``approved`` が0件なら、再解析で新しい ``candidate``
+      が積まれても点灯しない（却下履歴からの導出。同じ判断を再解析ごとに求めない, G4）。
+      承認が1件でもある document は「使っている素材」なので通常どおり点灯する。
+
+    クエリは3本（コース / document 解決 / 素材の status 集計）で、コースごとの N+1 は
+    作らない。コースのソース参照の走査は ``core/course_data.py`` のアクセサに委譲する。
+    """
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+
+    courses: list[tuple[Any, list[str]]] = []
+    refs: set[str] = set()
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        material_ids = [str(m) for m in course_source_material_ids(data) if m]
+        if not material_ids:
+            continue
+        courses.append((row, material_ids))
+        refs.update(material_ids)
+    if not refs:
+        return []
+
+    # sources[].material_id は documents.id / documents.source_path のどちらでも
+    # 参照されうる（_resolve_document の慣例）ため両方で突合する。
+    doc_rows = session.execute(
+        sa_text(
+            "SELECT id::text AS id, source_path FROM documents "
+            "WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)"
+        ),
+        {"refs": sorted(refs)},
+    ).mappings().fetchall()
+    ref_to_doc: dict[str, str] = {}
+    for row in doc_rows:
+        doc_id = str(row["id"])
+        ref_to_doc[doc_id] = doc_id
+        if row["source_path"]:
+            ref_to_doc[str(row["source_path"])] = doc_id
+    if not ref_to_doc:
+        return []
+
+    seed_rows = session.execute(
+        sa_text("""
+            SELECT document_id::text AS document_id, status, count(*) AS cnt
+            FROM element_explanations
+            WHERE element_type = :element_type AND role = :role
+              AND document_id::text = ANY(:doc_ids)
+            GROUP BY document_id, status
+        """),
+        {
+            "element_type": element_explanations_store.ELEMENT_TYPE_DOCUMENT,
+            "role": element_explanations_store.ROLE_DISCUSSION_SEED,
+            "doc_ids": sorted(set(ref_to_doc.values())),
+        },
+    ).mappings().fetchall()
+    counts_by_document: dict[str, dict[str, int]] = {}
+    for row in seed_rows:
+        bucket = counts_by_document.setdefault(str(row["document_id"]), {})
+        bucket[str(row["status"] or "")] = int(row["cnt"] or 0)
+
+    out: list[tuple[NextStep, str]] = []
+    for row, material_ids in courses:
+        pending = 0
+        anchor_ref = ""
+        seen_documents: set[str] = set()
+        for ref in material_ids:
+            doc_id = ref_to_doc.get(ref)
+            if not doc_id or doc_id in seen_documents:
+                continue
+            seen_documents.add(doc_id)
+            counts = counts_by_document.get(doc_id) or {}
+            candidate = counts.get(element_explanations_store.STATUS_CANDIDATE, 0)
+            if candidate <= 0:
+                continue
+            dismissed = counts.get(element_explanations_store.STATUS_DISMISSED, 0)
+            approved = counts.get(element_explanations_store.STATUS_APPROVED, 0)
+            if dismissed > 0 and approved == 0:
+                continue
+            pending += candidate
+            if not anchor_ref:
+                anchor_ref = ref
+        if pending <= 0:
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        step = _make_step(
+            rule_id=RULE_COURSE_DISCUSS_OPENING_UNREVIEWED,
+            target_id=cid,
+            title=f"コース『{title}』の議論のきっかけを確認する",
+            reason=(
+                f"コース『{title}』のソース論文に、未確認の議論のきっかけが {pending} 件あります。"
+            ),
+            target={"course_id": cid, "material_id": ref_to_doc.get(anchor_ref, "")},
+            # locate の行アンカーは教材一覧の data-material-id（= source_path）で
+            # 行解決するため、ctx には sources[].material_id をそのまま渡す。
+            ctx={"material_id": anchor_ref},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 def _eval_manual_help_gaps_pending(session, uid: str) -> list[tuple[NextStep, str]]:
     """需要側計器（manual_help_kb_design.md §4-1）: 学生 HELP ルートの
 
@@ -694,6 +819,7 @@ _RULE_EVALUATORS = {
     RULE_COURSE_ATLAS_BINDING_STALE: _eval_course_atlas_binding_stale,
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
+    RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
     RULE_MANUAL_HELP_GAPS_PENDING: _eval_manual_help_gaps_pending,
     RULE_ASSISTANT_KB_UNDOCUMENTED: _eval_assistant_kb_undocumented,
     RULE_MANUAL_TODO_UNRESOLVED: _eval_manual_todo_unresolved,

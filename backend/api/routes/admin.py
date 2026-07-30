@@ -71,6 +71,7 @@ from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
+    course_focus,
     course_llm_models,
     course_sources,
     course_title as _course_title,
@@ -2383,6 +2384,10 @@ def list_teacher_courses(
             # （システム既定に従う）。実効モデル・出所は GET /api/admin/llm-models/catalog
             # 側で解決するため、ここでは生の上書き値のみを返す。
             "llm_models": course_llm_models(data),
+            # Phase 0b（discuss_opening_authoring_design.md §2 最下段）: discuss 開幕画面の
+            # 「このコースで議論したいこと」。教員の任意入力で、コース管理タブの編集
+            # モーダルが現在値の prefill に使う（保存は PUT /api/learning/courses/{id}）。
+            "course_focus": course_focus(data),
         })
     return result
 

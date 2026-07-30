@@ -234,3 +234,179 @@ class TestBulkReviewEndpoint:
         methods = matched[0].methods or set()
         assert "POST" in methods
         assert "DELETE" not in methods
+
+
+# ---------------------------------------------------------------------------
+# 8. document スコープの開幕素材（migration 062）: role の露出と鮮度（§7.1）
+#    正本: docs/features/discuss_opening_authoring_design.md §6 / §7.1
+# ---------------------------------------------------------------------------
+
+
+def _document_row(**overrides) -> dict:
+    row = {
+        "id": "e-doc-1",
+        "document_id": "d1",
+        "element_type": "document",
+        "element_id": "d1",
+        "kind": "contextual",
+        "role": "discussion_seed",
+        "body": "この論文の近似は、どの条件までなら受け入れられるだろうか。",
+        "evidence": {
+            "evidence_quote": "we linearize the response",
+            "reason": "著者が線形化を選んでいる",
+            "confidence": 0.72,
+            "source_fingerprint": "fp-old",
+            "opening_version": "v1",
+        },
+        "status": "candidate",
+        "created_by": "pipeline",
+        "reviewed_by": None,
+        "reviewed_at": None,
+        "created_at": "2026-07-30T00:00:00+00:00",
+    }
+    row.update(overrides)
+    return row
+
+
+class TestRoleExposedInResponse:
+    def test_public_row_source_includes_role(self):
+        assert '"role": row.get("role")' in _ROUTE_SRC
+
+    @_skip_no_fastapi
+    def test_role_returned_for_document_scope_and_none_for_element_scope(self):
+        from routes.element_explanations import _public_row
+
+        assert _public_row(_document_row())["role"] == "discussion_seed"
+        # 既存4要素型の行は role=NULL のまま（後方互換）。
+        legacy = _public_row(
+            {
+                "id": "e1",
+                "document_id": "d1",
+                "element_type": "figure",
+                "element_id": "fig-1",
+                "kind": "contextual",
+                "body": "text",
+                "evidence": {"reason": "r"},
+                "status": "candidate",
+                "created_by": "pipeline",
+                "reviewed_by": None,
+                "reviewed_at": None,
+                "created_at": "2026-07-19T00:00:00+00:00",
+            }
+        )
+        assert legacy["role"] is None
+
+    @_skip_no_fastapi
+    def test_document_row_still_hides_raw_confidence(self):
+        """開幕素材でも confidence 生値は出さない（E6 / OA6）。"""
+        import json
+
+        from routes.element_explanations import _public_row
+
+        dumped = json.dumps(_public_row(_document_row()), ensure_ascii=False)
+        assert "0.72" not in dumped
+        assert "confidence_label" in dumped
+
+
+@_skip_no_fastapi
+class TestFreshnessOfDocumentScopeRows:
+    """§7.1: 生成時の evidence.source_fingerprint と現在の解析結果の指紋を突合する。
+
+    自動で非承認に落とさないため、``approved`` の stale 行にも印だけを付ける
+    （レビューキューで見えるようにする）。判定できないときは stale キーを付けない。
+    """
+
+    def _rows(self, monkeypatch, rows, artifacts=None, raise_on_read=False):
+        import routes.element_explanations as mod
+
+        calls = []
+
+        def fake_artifacts(document_id):
+            calls.append(document_id)
+            if raise_on_read:
+                raise RuntimeError("no run")
+            return artifacts if artifacts is not None else {}
+
+        monkeypatch.setattr(mod, "document_run_artifacts", fake_artifacts)
+        return mod._public_rows_with_freshness("d1", rows), calls
+
+    def _fingerprint(self, artifacts):
+        from core.discuss.authoring import compute_source_fingerprint
+
+        return compute_source_fingerprint(artifacts)
+
+    def test_matching_fingerprint_is_not_stale(self, monkeypatch):
+        artifacts = {"thesis_reconstruction": {"central_question": "Q", "central_thesis": {"text": "T"}}}
+        row = _document_row()
+        row["evidence"]["source_fingerprint"] = self._fingerprint(artifacts)
+        out, calls = self._rows(monkeypatch, [row], artifacts=artifacts)
+        assert out[0]["stale"] is False
+        assert "stale_notice" not in out[0]
+        assert calls == ["d1"]
+
+    def test_changed_analysis_marks_row_stale_with_factual_notice(self, monkeypatch):
+        artifacts = {"thesis_reconstruction": {"central_question": "Q2", "central_thesis": {"text": "T2"}}}
+        out, _calls = self._rows(monkeypatch, [_document_row()], artifacts=artifacts)
+        assert out[0]["stale"] is True
+        assert out[0]["stale_notice"] == "元の解析結果が変わっています"
+
+    def test_approved_stale_row_stays_approved(self, monkeypatch):
+        """承認は自動で外さない（status は approved のまま stale だけが立つ）。"""
+        artifacts = {"thesis_reconstruction": {"central_question": "Q2"}}
+        row = _document_row(status="approved", reviewed_by="u-teacher")
+        out, _calls = self._rows(monkeypatch, [row], artifacts=artifacts)
+        assert out[0]["status"] == "approved"
+        assert out[0]["stale"] is True
+
+    def test_artifact_read_failure_skips_staleness_fail_open(self, monkeypatch):
+        out, calls = self._rows(monkeypatch, [_document_row()], raise_on_read=True)
+        assert "stale" not in out[0]
+        assert "stale_notice" not in out[0]
+        assert calls == ["d1"]
+
+    def test_row_without_stored_fingerprint_is_not_judged(self, monkeypatch):
+        row = _document_row()
+        row["evidence"].pop("source_fingerprint")
+        out, calls = self._rows(monkeypatch, [row])
+        assert "stale" not in out[0]
+        # 突合対象が無いので artifact を読みに行かない（無駄な I/O を作らない）。
+        assert calls == []
+
+    def test_element_scope_rows_are_never_marked(self, monkeypatch):
+        figure_row = _document_row(
+            id="e2", element_type="figure", element_id="fig-1", role=None
+        )
+        out, _calls = self._rows(monkeypatch, [figure_row], artifacts={})
+        assert "stale" not in out[0]
+
+    def test_fingerprint_computed_once_per_document(self, monkeypatch):
+        rows = [_document_row(id="a"), _document_row(id="b"), _document_row(id="c")]
+        out, calls = self._rows(monkeypatch, rows, artifacts={"thesis_reconstruction": {}})
+        assert len(out) == 3
+        assert calls == ["d1"], "行ごとに artifact を再読している"
+
+
+class TestListRouteWiring:
+    def test_list_route_applies_freshness_and_accepts_role_filter(self):
+        fn_src = extract_function_source(_ROUTE_SRC, "list_document_element_explanations")
+        assert "_public_rows_with_freshness(canonical_document_id, rows)" in fn_src
+        assert "role=role" in fn_src
+        # 権限ゲートは従来どおり（鮮度の追加で弱めていない）。
+        assert "_ensure_document_viewable(" in fn_src
+
+    def test_stale_notice_is_a_factual_sentence(self):
+        assert 'STALE_NOTICE = "元の解析結果が変わっています"' in _ROUTE_SRC
+        for word in ("！", "今すぐ", "急いで", "至急"):
+            assert word not in _ROUTE_SRC
+
+    def test_staleness_never_transitions_status(self):
+        """鮮度は表示だけ（自動で非承認に落とさない, §7.1）。"""
+        for name in (
+            "_public_rows_with_freshness",
+            "_current_source_fingerprint",
+            "_is_freshness_tracked",
+        ):
+            fn_src = extract_function_source(_ROUTE_SRC, name)
+            assert "store.dismiss" not in fn_src
+            assert "UPDATE" not in fn_src
+            assert "session" not in fn_src

@@ -215,6 +215,11 @@ class CourseData(BaseModel):
     # 書き手: routes/learning.py::update_course（CourseUpdateRequest.llm_models）。
     llm_models: dict[str, str] = Field(default_factory=dict)
     course_content_status: dict | None = Field(default_factory=dict)
+    # discuss_opening_authoring_design.md §2 最下段 / Phase 0b: 「このコースで議論したい
+    # こと」。**教員の任意入力**で AI 生成は関与しない（主語=教員）。discuss 開幕画面の
+    # 先頭に表示される。書き手は routes/learning.py::update_course
+    # （CourseUpdateRequest.course_focus）のみ。
+    course_focus: str | None = ""
     # atlas_binding_lifecycle_design.md §2.3: コース起点で新分野を作成した際の
     # 「凍結待ち」仮予約 domain_key。書き手は routes/atlas.py の
     # PUT .../atlas-binding/pending のみ。バインド保存（PUT .../atlas-binding）成功時に
@@ -340,6 +345,18 @@ def course_atlas_binding_pending(data: dict | None) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("atlas_binding_pending") or "").strip()
+
+
+def course_focus(data: dict | None) -> str:
+    """``data.course_focus`` を trim 済み文字列で返す（無ければ ``""``）。
+
+    discuss 開幕画面の「このコースで議論したいこと」（`discuss_opening_authoring_design.md`
+    §2 最下段・Phase 0b）。**教員の任意入力**で、AI 生成・候補提示は一切関与しない。
+    未入力（``""``）は正常な状態で、開幕画面は区画ごと非表示にする（欠落を警告しない）。
+    """
+    if not isinstance(data, dict):
+        return ""
+    return str(data.get("course_focus") or "").strip()
 
 
 def course_llm_models(data: dict | None) -> dict:

@@ -1272,6 +1272,51 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   `test_discuss_phase2_ui_static.py`（可視性 fail-closed・無断フォールバック禁止・
   生成プロンプト必須要素・数値非表示・`_discussion` 痕跡動作・U層タグ分離・k=3 正本）。
 
+### discuss 開幕素材のオーサリング（投影是正 + AI生成 + 教員添削, migration 062, 2026-07-30）
+
+discuss 開幕画面の情報を「主語で分けて全部出す」層。正本は
+`docs/features/discuss_opening_authoring_design.md`（OA1〜OA8。§12 に実装記録）。
+
+- **Phase 0 投影の是正（非LLM）**: `core/discuss/opening.py` が thesis artifact の
+  `central_question` / `central_thesis.text` / `alternative_theses`（出所ラベル
+  「AI が提示した別の定式化（出典との対応は未確認）」付き）/ `support_structure[].text` を
+  投影（**`paper_goal` の正本は paper_skeleton artifact** — 同一 artifacts dict から併読）。
+  `fragile_points[].subject`（`paper`|`system`）で主語を構造化し、`discuss.js` が
+  「この論文が確かめていないこと」（論文）と「まだ確認できていないところ」（システム。
+  内部用語は平易化）の2区画に分離。少数を一等地・残りは「くわしく見る」details（OA7）。
+- **Phase 0b course_focus**: 教員の「このコースで議論したいこと」＝
+  `learning_courses.data.course_focus`（読みは `core.course_data.course_focus()`、保存は
+  `PUT /api/learning/courses/{id}`・600字上限・空で解除。admin コース管理「議論テーマ」
+  モーダル）。開幕画面の先頭に表示（AI 生成なし）。
+- **Phase 1 生成ステージ `discuss_opening`**: `src/episteme_graph/agents/discuss_opening/`
+  （llm_worker 8系統目アダプタ・1 document = 1 コール）。contextual_explanation 後・
+  course_mapping 前に `_PIPELINE_STEPS` 登録。入力は解決済みテキスト（D層未検証前提 +
+  derivation operation 列 + thesis 合成文）、出力は「議論のきっかけ」（立場を求める問い）。
+  素材が無ければ **LLM を呼ばず** `skipped_reason` 記録（根拠の無い火種を創作しない）。
+  validator は evidence_quote の **verbatim 包含**（捏造ガード）+ D層 denylist を hard error。
+  設定: `DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT`(4) / `DISCUSS_OPENING_MAX_CALLS_PER_DAY`(20) /
+  `DISCUSS_OPENING_LANGUAGE`(ja) / `DISCUSS_OPENING_LLM_MODEL`（fast。scene は
+  `pipeline:discuss_opening`）。
+- **格納庫は element_explanations に相乗り（migration 062）**: element_type CHECK に
+  `'document'`（element_id=document_id）、`role TEXT`（CHECK: NULL or `'discussion_seed'`。
+  §4.2 thesis_restatement は v1 見送り）。行は `kind='contextual'` / `status='candidate'`、
+  evidence に `source_fingerprint`（正本 `core/discuss/authoring.py::compute_source_fingerprint`
+  = central_question + central_thesis_text + claim id 集合の決定論 sha256）。再解析は
+  candidate のみ superseded・approved 不変（#496 と同じ原則）。
+- **レビュー導線**: 既存説明レビューキュー（`deliberation.js`）先頭に独立グループ
+  「この論文の議論のきっかけ」（深く検討なし・インライン編集=既存 PATCH の履歴保持経路・
+  一括承認対応）。一覧 API が `role` と鮮度 `stale`/`stale_notice`（指紋不一致・fail-open・
+  **approved も対象だが status は変えない**）を付与。G層 `course.discuss_opening_unreviewed`
+  （recommended、capability `course.discuss_opening_review`）は**全却下 document を再点灯させない**
+  （dismissed>0 かつ approved==0 の履歴導出・新列なし）。
+- **配信（OA2/OA4/OA6）**: `build_opening` が approved のみを
+  `documents[].discussion_seeds[{body, evidence_quote, authored, authored_by_label}]` で配信
+  （承認ゼロならキー自体を足さず Phase 0 DTO と完全一致。created_at 降順・上限4。署名行は
+  サーバ側定数）。`available` 判定は不変。`GET /discuss/opening` は LLM 0回のまま（OA3）。
+- **ガードレール**: `test_discuss_opening_projection.py` /
+  `test_discuss_opening_authoring_guardrails.py` / `test_discuss_opening_stage.py` +
+  `test_next_steps_guardrails.py`（全却下抑止）+ `test_element_explanation_review_ui_static.py`。
+
 ### 学習チャットのメッセージ書き直し・削除（機能3, B層）
 
 学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。

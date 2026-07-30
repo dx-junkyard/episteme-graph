@@ -2653,8 +2653,23 @@
   // 開いて承認する既存 UX（_explanationCardHtml/_decideExplanation, overview 内）は
   // そのまま残す（併存・非改変）。candidate-only 原則は維持: 承認するまで学習者には
   // 表示されない。取得はインベントリを開いた時の1回のみ（ポーリング禁止）。
+  //
+  // discuss 開幕素材（migration 062, element_type='document' / role='discussion_seed'）は
+  // 係留先の要素が無いため、要素グループより上の独立グループとして先頭に置く
+  // （discuss_opening_authoring_design.md §6.1）。このグループのカードは「深く検討」
+  // 導線を持たず、代わりに本文のインライン編集（既存 PATCH: 旧行 superseded → 教員名義の
+  // 新行 INSERT）を持つ。鮮度（§7.1）で元の解析結果が変わった承認済みの素材も同じ
+  // グループに事実文付きで並べる（自動で非承認に落とさない）。
   var explanationReviewState = { documentId: null, items: null, selected: {} };
   var EXPLANATION_REVIEW_MAX_BULK = 200;
+  var EXPLANATION_DOCUMENT_GROUP_LABEL = "この論文の議論のきっかけ";
+  var EXPLANATION_STALE_NOTICE = "元の解析結果が変わっています";
+  var EXPLANATION_REVIEW_STATUS_LABELS = {
+    candidate: "候補",
+    approved: "承認済み",
+    dismissed: "却下",
+    superseded: "差し替え済み"
+  };
 
   function _resetExplanationReviewState() {
     explanationReviewState = { documentId: null, items: null, selected: {} };
@@ -2679,10 +2694,27 @@
     return (typeLabel ? typeLabel + " " : "") + String(elementId || "").substring(0, 8);
   }
 
+  // 開幕素材（document スコープ）か。element_type だけで判定する（role は
+  // サーバ側の語彙で、キューの表示分岐はスコープの違いだけで足りる）。
+  function _isDocumentScopeExplanation(exp) {
+    return !!exp && exp.element_type === "document";
+  }
+
+  // 一括選択・単件承認/却下の対象になるのは candidate のみ（E2）。鮮度で並ぶ
+  // approved 行はチェックボックスも承認/却下ボタンも持たない（API も 422 を返す）。
+  function _explanationReviewSelectable(exp) {
+    return !!exp && (exp.status || "candidate") === "candidate";
+  }
+
   function _groupExplanationsByElement(items) {
     var groups = [];
     var index = {};
+    var documentItems = [];
     (items || []).forEach(function (exp) {
+      if (_isDocumentScopeExplanation(exp)) {
+        documentItems.push(exp);
+        return;
+      }
       var key = exp.element_type + "|" + exp.element_id;
       if (!index[key]) {
         index[key] = {
@@ -2695,6 +2727,15 @@
       }
       index[key].items.push(exp);
     });
+    if (documentItems.length) {
+      groups.unshift({
+        elementType: "document",
+        elementId: "",
+        label: EXPLANATION_DOCUMENT_GROUP_LABEL,
+        items: documentItems,
+        documentScope: true
+      });
+    }
     return groups;
   }
 
@@ -2703,32 +2744,72 @@
     var kindLabel = EXPLANATION_KIND_LABELS[exp.kind] || exp.kind || "";
     var evidence = exp.evidence || {};
     var checked = explanationReviewState.selected[exp.id] ? " checked" : "";
+    var selectable = _explanationReviewSelectable(exp);
+    var editable = _isDocumentScopeExplanation(exp);
+    var statusLabel = selectable ? "" : (EXPLANATION_REVIEW_STATUS_LABELS[exp.status] || exp.status || "");
     return '<div class="deliberation-annotation-card deliberation-explanation-review-card" data-explanation-id="' +
         escHtml(exp.id) + '">' +
       '<label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer">' +
-        '<input type="checkbox" data-explanation-review-checkbox="true" data-explanation-id="' +
-          escHtml(exp.id) + '"' + checked + ' style="margin-top:3px">' +
+        (selectable
+          ? '<input type="checkbox" data-explanation-review-checkbox="true" data-explanation-id="' +
+              escHtml(exp.id) + '"' + checked + ' style="margin-top:3px">'
+          : '') +
         '<span class="deliberation-annotation-kind">' +
           escHtml(kindLabel) +
           (evidence.confidence_label
             ? ' <span class="deliberation-annotation-confidence">' + escHtml(evidence.confidence_label) + '</span>'
+            : '') +
+          (statusLabel
+            ? ' <span class="deliberation-annotation-status">' + escHtml(statusLabel) + '</span>'
+            : '') +
+          (exp.stale
+            ? ' <span class="deliberation-annotation-status">' +
+                escHtml(exp.stale_notice || EXPLANATION_STALE_NOTICE) + '</span>'
             : '') +
         '</span>' +
       '</label>' +
       '<div class="deliberation-annotation-body" style="margin-top:4px">' + escHtml(exp.body || "") + '</div>' +
       (evidence.evidence_quote ? '<div class="deliberation-annotation-reason">' + escHtml(evidence.evidence_quote) + '</div>' : '') +
       (evidence.reason ? '<div class="deliberation-annotation-reason">' + escHtml(evidence.reason) + '</div>' : '') +
+      (editable
+        ? '<div class="deliberation-explanation-review-editor" style="display:none;margin-top:6px">' +
+            '<textarea data-explanation-edit-input="true" rows="4" ' +
+              'style="width:100%;box-sizing:border-box;font-size:12.5px">' +
+              escHtml(exp.body || "") + '</textarea>' +
+            '<div style="display:flex;gap:6px;margin-top:4px">' +
+              '<button type="button" class="deliberation-annotation-btn commit" data-explanation-edit-action="save" data-ui-anchor="deliberation.explanation-body-edit">本文を保存</button>' +
+              '<button type="button" class="deliberation-annotation-btn" data-explanation-edit-action="cancel" data-ui-anchor="deliberation.explanation-body-edit">編集をやめる</button>' +
+            '</div>' +
+          '</div>'
+        : '') +
       '<div class="deliberation-annotation-error" style="display:none"></div>' +
       '<div class="deliberation-annotation-actions">' +
-        '<button type="button" class="deliberation-annotation-btn commit" data-explanation-review-action="approve">承認</button>' +
-        '<button type="button" class="deliberation-annotation-btn dismiss" data-explanation-review-action="dismiss">却下</button>' +
+        (selectable
+          ? '<button type="button" class="deliberation-annotation-btn commit" data-explanation-review-action="approve">承認</button>' +
+            '<button type="button" class="deliberation-annotation-btn dismiss" data-explanation-review-action="dismiss">却下</button>'
+          : '') +
+        (editable
+          ? '<button type="button" class="deliberation-annotation-btn" data-explanation-edit-action="open" data-ui-anchor="deliberation.explanation-body-edit">本文を編集</button>'
+          : '') +
       '</div>' +
     '</div>';
   }
 
   function _explanationReviewGroupHtml(group) {
-    return '<section class="deliberation-explanation-review-group" style="margin-bottom:10px">' +
+    // document スコープのグループは、係留先の要素が無いこと（＝「深く検討」導線を
+    // 持たないこと）を事実文で1行添える。要素グループの見た目は変えない。
+    var note = group.documentScope
+      ? '<p style="margin:0 0 6px;font-size:11.5px;color:var(--color-text-tertiary)">' +
+          '論文全体に対する素材です。本文を編集してから承認できます。</p>'
+      : '';
+    // 「？使い方」の係留: 開幕素材グループだけは専用の節を持つ（要素グループは
+    // 一括操作のツールバー側 deliberation.inventory-bulk-review が説明する）。
+    var anchorAttr = group.documentScope
+      ? ' data-ui-anchor="deliberation.discussion-seed-group"'
+      : '';
+    return '<section class="deliberation-explanation-review-group"' + anchorAttr + ' style="margin-bottom:10px">' +
       '<h4 style="margin:0 0 6px;font-size:13px;color:var(--color-text-primary)">' + escHtml(group.label) + '</h4>' +
+      note +
       '<div style="display:flex;flex-direction:column;gap:8px">' +
         group.items.map(_explanationReviewCardHtml).join("") +
       '</div>' +
@@ -2738,6 +2819,7 @@
   function _explanationReviewSelectedIds() {
     var ids = [];
     (explanationReviewState.items || []).forEach(function (exp) {
+      if (!_explanationReviewSelectable(exp)) return;
       if (explanationReviewState.selected[exp.id]) ids.push(exp.id);
     });
     return ids;
@@ -2787,6 +2869,71 @@
     (ids || []).forEach(function (id) { delete explanationReviewState.selected[id]; });
   }
 
+  // 本文編集の応答（新 revision 行）でキュー内の1件を差し替える。PATCH は旧行を
+  // superseded にして新 id の行を返すため、選択状態と鮮度の印を新 id へ引き継ぐ
+  // （キュー全体の再取得はしない）。
+  function _replaceExplanationInReviewQueue(oldId, newRow) {
+    if (!newRow || !newRow.id) return;
+    var wasSelected = !!explanationReviewState.selected[oldId];
+    explanationReviewState.items = (explanationReviewState.items || []).map(function (exp) {
+      if (exp.id !== oldId) return exp;
+      if (newRow.stale === undefined && exp.stale !== undefined) newRow.stale = exp.stale;
+      if (newRow.stale_notice === undefined && exp.stale_notice !== undefined) {
+        newRow.stale_notice = exp.stale_notice;
+      }
+      return newRow;
+    });
+    delete explanationReviewState.selected[oldId];
+    if (wasSelected && _explanationReviewSelectable(newRow)) {
+      explanationReviewState.selected[newRow.id] = true;
+    }
+  }
+
+  function _toggleExplanationReviewEditor(card, open) {
+    var editor = card.querySelector(".deliberation-explanation-review-editor");
+    if (editor) editor.style.display = open ? "" : "none";
+  }
+
+  function _setExplanationReviewCardError(card, message) {
+    var errEl = card.querySelector(".deliberation-annotation-error");
+    if (!errEl) return;
+    if (!message) {
+      errEl.style.display = "none";
+      errEl.innerHTML = "";
+      return;
+    }
+    errEl.style.display = "";
+    errEl.innerHTML = escHtml(message);
+  }
+
+  // 本文のインライン編集（既存 PATCH /api/admin/element-explanations/{id}）。
+  // 教員が直した時点で書き手は教員になる（created_by=user_id の新行）。
+  function _saveExplanationReviewBody(explanationId, card) {
+    var input = card.querySelector("[data-explanation-edit-input]");
+    if (!explanationId || !input) return;
+    var newBody = String(input.value || "").trim();
+    if (!newBody) {
+      _setExplanationReviewCardError(card, "本文が空です");
+      return;
+    }
+    _setExplanationReviewCardError(card, "");
+    var buttons = card.querySelectorAll("[data-explanation-edit-action],[data-explanation-review-action]");
+    Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
+    apiFetch("/admin/element-explanations/" + encodeURIComponent(explanationId), {
+      method: "PATCH",
+      body: JSON.stringify({ body: newBody })
+    })
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        _replaceExplanationInReviewQueue(explanationId, (data && data.explanation) || null);
+        _renderExplanationReviewList();
+      })
+      .catch(function (err) {
+        _setExplanationReviewCardError(card, (err && err.detail) || "本文を保存できませんでした");
+        Array.prototype.forEach.call(buttons, function (b) { b.disabled = false; });
+      });
+  }
+
   // 単件の承認/却下（キュー内カードのボタン）。既存 _decideExplanation は
   // overview 内カードの DOM 差し替え専用のため、キュー専用に別実装する
   // （呼ぶ API は同じ既存 element-explanations 承認 API）。
@@ -2829,6 +2976,23 @@
         var card = btn.closest(".deliberation-explanation-review-card");
         if (!card) return;
         _decideExplanationReviewCard(card.getAttribute("data-explanation-id"), btn.getAttribute("data-explanation-review-action"), card);
+      });
+    });
+    Array.prototype.forEach.call(root.querySelectorAll("[data-explanation-edit-action]"), function (btn) {
+      btn.addEventListener("click", function () {
+        var card = btn.closest(".deliberation-explanation-review-card");
+        if (!card) return;
+        var action = btn.getAttribute("data-explanation-edit-action");
+        if (action === "open") {
+          _toggleExplanationReviewEditor(card, true);
+          return;
+        }
+        if (action === "cancel") {
+          _setExplanationReviewCardError(card, "");
+          _toggleExplanationReviewEditor(card, false);
+          return;
+        }
+        _saveExplanationReviewBody(card.getAttribute("data-explanation-id"), card);
       });
     });
   }
@@ -2913,6 +3077,7 @@
         '</div>' +
         '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
           'AIが生成した説明の候補です。承認すると学習者に表示されます。' +
+          '元の解析結果が変わった承認済みの素材も一覧に含まれます（承認は自動では外れません）。' +
         '</p>' +
         '<div data-ui-anchor="deliberation.inventory-bulk-review" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:6px">' +
           '<button type="button" id="deliberation-explanation-review-select-all" class="deliberation-annotation-btn">全選択</button>' +
@@ -2928,7 +3093,10 @@
     overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeExplanationReviewModal(); });
     document.getElementById("deliberation-explanation-review-close").addEventListener("click", _closeExplanationReviewModal);
     document.getElementById("deliberation-explanation-review-select-all").addEventListener("click", function () {
-      (explanationReviewState.items || []).forEach(function (exp) { explanationReviewState.selected[exp.id] = true; });
+      (explanationReviewState.items || []).forEach(function (exp) {
+        // 鮮度で並ぶ承認済み行は一括操作の対象にしない（candidate-only, E2）。
+        if (_explanationReviewSelectable(exp)) explanationReviewState.selected[exp.id] = true;
+      });
       _renderExplanationReviewList();
     });
     document.getElementById("deliberation-explanation-review-deselect-all").addEventListener("click", function () {
@@ -2964,13 +3132,34 @@
     if (btn) btn.addEventListener("click", _openExplanationReviewModal);
   }
 
+  // 鮮度（設計書 §7.1）: 承認済みの開幕素材のうち、元の解析結果が変わったもの
+  // （サーバが stale=true を付ける）だけをキューに合流させる。承認は自動で外さない
+  // ため、教員が気づける場所はこのキューだけになる。取得失敗時は候補一覧のみで続ける
+  // （キュー自体を殺さない）。
+  function _loadStaleApprovedDocumentExplanations(documentId, candidates) {
+    return apiFetch(_explanationReviewBasePath(documentId) + "?element_type=document&status=approved")
+      .then(_parseJsonResponse)
+      .then(function (data) {
+        var stale = ((data && data.explanations) || []).filter(function (exp) {
+          return !!exp && exp.stale === true;
+        });
+        return candidates.concat(stale);
+      })
+      .catch(function () {
+        return candidates;
+      });
+  }
+
   // GET のみ・DB非変更。openInventory 時に1回だけ呼ぶ（ポーリング禁止・§9 と同じ規約）。
   function _loadExplanationReviewQueue(documentId) {
     return apiFetch(_explanationReviewBasePath(documentId) + "?status=candidate")
       .then(_parseJsonResponse)
       .then(function (data) {
+        return _loadStaleApprovedDocumentExplanations(documentId, (data && data.explanations) || []);
+      })
+      .then(function (items) {
         explanationReviewState.documentId = documentId;
-        explanationReviewState.items = (data && data.explanations) || [];
+        explanationReviewState.items = items || [];
         explanationReviewState.selected = {};
         _renderExplanationReviewEntry();
       })

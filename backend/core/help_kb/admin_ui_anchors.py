@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。2026-07-29 時点では全223アンカーがマップ済み
+no_hit 経路で需要を計測する）。2026-07-30 時点では全227アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -69,7 +69,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "course-builder.send-btn",
         "course-builder.session-select",
         "course-management.atlas-binding-open",
+        "course-management.course-focus-save",
         "course-management.course-model-save",
+        "course-management.focus-btn",
         "course-management.llm-model-btn",
         "course-management.manage-btn",
         "course-management.perm-add",
@@ -82,6 +84,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "deliberation.chat-send",
         "deliberation.context-lens",
         "deliberation.decomposition",
+        "deliberation.discussion-seed-group",
+        "deliberation.explanation-body-edit",
         "deliberation.figure-expand",
         "deliberation.figure-reanalyze",
         "deliberation.identity-link-create",
@@ -338,8 +342,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- course-management.* — コース管理タブ --------------------------------------------
     # 学習マップ編集
     "course-management.atlas-binding-open": "teacher/13-admin-course-management.md#atlas-binding-open",
+    # 議論テーマモーダルの「保存」
+    "course-management.course-focus-save": "teacher/13-admin-course-management.md#course-focus-save",
     # 保存
     "course-management.course-model-save": "teacher/13-admin-course-management.md#course-model-save",
+    # 議論テーマ
+    "course-management.focus-btn": "teacher/13-admin-course-management.md#focus-btn",
     # AIモデル
     "course-management.llm-model-btn": "teacher/13-admin-course-management.md#llm-model-btn",
     # 共有設定
@@ -366,6 +374,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "deliberation.context-lens": "teacher/24-admin-deliberation.md#context-lens",
     # 内訳・同定
     "deliberation.decomposition": "teacher/24-admin-deliberation.md#decomposition",
+    # 説明レビューキュー：この論文の議論のきっかけ（グループ全体）
+    "deliberation.discussion-seed-group": "teacher/24-admin-deliberation.md#discussion-seed-group",
+    # 説明レビューキュー：本文を編集 / 本文を保存
+    "deliberation.explanation-body-edit": "teacher/24-admin-deliberation.md#explanation-body-edit",
     # 拡大表示（図要素のみ）
     "deliberation.figure-expand": "teacher/24-admin-deliberation.md#figure-expand",
     # AIで図を再解析

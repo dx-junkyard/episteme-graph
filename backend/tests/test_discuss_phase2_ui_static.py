@@ -4,7 +4,7 @@
 部分一致・関数本体の抽出検査のみを行う（実サーバ・実DOM不使用）。
 
 検証観点:
-1. discuss.js: 開幕画面3区画（この論文が賭けているもの／理論のバックボーン／最初の一手）
+1. discuss.js: 開幕画面3区画（この論文の主張／理論のバックボーン／最初の一手）
    の見出し文言が存在する。
 2. discuss.js: 開幕画面は available:false / 非 ok 応答 / documents 空のとき教材区画を
    上書きしない（fail-closed。Phase 1 のプレースホルダのまま）。
@@ -64,13 +64,21 @@ class TestOpeningScreenSections:
 
     def test_three_section_headings_present(self):
         js = _read(DISCUSS_JS)
-        assert "この論文が賭けているもの" in js
+        assert "この論文の主張" in js
+        # 旧見出し（比喩的で学習者に伝わらない）に戻さない（§9.5）
+        assert "賭けているもの" not in js
         assert "理論のバックボーン" in js
         assert "最初の一手" in js
 
-    def test_fragile_point_subsection_present(self):
+    def test_fragile_points_are_split_by_subject(self):
+        """投影の是正（discuss_opening_authoring_design.md §2/§3）: 旧「最も脆い一手」は
+        論文についての言明とシステム（解析）についての言明を1区画に混ぜていた。
+        主語ごとの2区画に分け、混合見出しには戻さない。詳細は
+        test_discuss_opening_projection.py（TestFragileSubjectSeparationInUi）。"""
         js = _read(DISCUSS_JS)
-        assert "最も脆い一手" in js
+        assert "この論文が確かめていないこと" in js
+        assert "まだ確認できていないところ" in js
+        assert "最も脆い一手" not in js
 
     def test_free_input_note_present(self):
         js = _read(DISCUSS_JS)
@@ -176,9 +184,12 @@ class TestOpeningScreenFailClosed:
         assert "if (!data || !data.available) return;" in block
 
     def test_render_opening_checks_empty_documents(self):
+        """出せる中身が何も無ければ描画しない（Phase 1 プレースホルダのまま）。
+        Phase 0b 以降は「教員が書いた course_focus だけがある」場合も中身として数える
+        （サーバから来た実データであり、捏造ではない）。"""
         js = _read(DISCUSS_JS)
         block = _extract_function_body(js, "function buildOpeningHtml(data) {")
-        assert "if (!docs.length) return" in block
+        assert "if (!docs.length && !focus) return" in block
         opening_block = _extract_function_body(js, "async function renderOpening(containerEl, courseId) {")
         assert "if (!html) return;" in opening_block
 

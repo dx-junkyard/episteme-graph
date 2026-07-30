@@ -1535,6 +1535,44 @@ def list_course_source_document_ids(course_data: dict | None) -> set[str]:
     return explicit_ids | resolved_ids
 
 
+def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
+    """コースの ``sources[].material_id`` → 論文の題名（``documents.title``）の対応を返す。
+
+    出典タブの「登録済み教材」は ``sources[].title`` をそのまま出すため、コース作成時に
+    material_id（``arXiv-2407.01221v2`` のようなファイル名相当）が入っていると、学習者に
+    ファイル名が論文名として表示される。解析済みの題名は ``documents.title`` にあるので、
+    配信時にだけ差し替えられるよう対応表を返す（保存データは書き換えない）。
+
+    題名が空の document は対応表に載せない（呼び出し側が保存値のままにできるよう、
+    「解決できなかった」と「空題名」を区別しない — どちらも差し替えないのが正しい）。
+    DB 不達・例外時は空 dict（fail-soft。教材一覧そのものは出し続ける）。
+    """
+    if not isinstance(course_data, dict):
+        return {}
+    material_ids = course_source_material_ids(course_data)
+    if not material_ids:
+        return {}
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text(
+                    "SELECT source_path, title FROM documents WHERE source_path = ANY(:mids)"
+                ),
+                {"mids": list(material_ids)},
+            ).fetchall()
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        logger.warning("resolve_course_source_titles failed: %s", exc)
+        return {}
+    return {
+        str(row[0]): str(row[1]).strip()
+        for row in rows
+        if row[0] and str(row[1] or "").strip()
+    }
+
+
 def search_chunks_with_metadata(
     query: str,
     top_k: int = 8,

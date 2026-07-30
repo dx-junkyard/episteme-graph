@@ -90,6 +90,7 @@ LLM_STAGE_NAMES = frozenset({
     "component_assembly",
     "narrative_annotator",
     "contextual_explanation",
+    "discuss_opening",
 })
 
 # 後方互換エイリアス（Phase 4 で `LLM_STAGE_NAMES` へ昇格・公開。旧名を参照する
@@ -142,6 +143,14 @@ def _stage_artifact_indicates_llm_skip(artifact_value: Any) -> bool:
 # only the orchestrator-level cost gate belongs in this module).
 _ctxexpl_cost_gate = CostGate()
 
+# discuss_opening stage (discuss_opening_authoring_design.md §4.1): same
+# partial-adoption of the core/llm_worker/ skeleton as contextual_explanation —
+# a single process-lifetime CostGate for the daily LLM-call budget
+# (``DISCUSS_OPENING_MAX_CALLS_PER_DAY``). The repair loop / JSON client live in
+# the agent (episteme_graph.agents.discuss_opening), which delegates to
+# core/llm_worker/ as its 8th consumer.
+_discuss_opening_cost_gate = CostGate()
+
 
 PIPELINE_STAGES = [
     "save_pdf",
@@ -167,6 +176,7 @@ PIPELINE_STAGES = [
     "component_graph",
     "narrative_annotator",
     "contextual_explanation",
+    "discuss_opening",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -1595,6 +1605,41 @@ def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("contextual_explanation", dict(ctxexpl_payload))
 
 
+def _stage_discuss_opening(ctx: PipelineContext) -> bool:
+    # ── Stage 12a.3: discuss_opening (discuss_opening_authoring_design.md §4.1).
+    # Registered after contextual_explanation and before course_mapping: thesis /
+    # graph / derivation / narrative / figure analysis have all run by now, so the
+    # only generated ingredient the opening screen lacks (「議論のきっかけ」) can be
+    # grounded in D層の未検証前提 + derivation の operation 列 + thesis の合成文.
+    # Non-fatal: a failure here never blocks course_mapping / persistence.
+    discuss_artifact = ctx.artifact("discuss_opening")
+    if ctx.should_use_artifact("discuss_opening"):
+        discuss_payload = dict(discuss_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded discuss_opening artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("discuss_opening", total=1, unit="builder")
+        try:
+            discuss_payload = _build_discuss_opening(
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                artifacts=ctx.all_artifacts(),
+                derivations=ctx.derivations,
+                equations=ctx.equations,
+            )
+        except Exception as exc:
+            logger.warning(
+                "discuss_opening stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            discuss_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("discuss_opening", discuss_payload)
+    ctx.report_done("discuss_opening", dict(discuss_payload))
+    return ctx.finish_target_stage("discuss_opening", dict(discuss_payload))
+
+
 def _stage_course_mapping(ctx: PipelineContext) -> bool:
     # ── Stage 12b: course_mapping (deterministic component → topic map) ─
     course_mapping_artifact = ctx.artifact("course_mapping")
@@ -1960,6 +2005,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef("component_graph", _stage_component_graph),
     PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
     PipelineStageDef("contextual_explanation", _stage_contextual_explanation),
+    PipelineStageDef("discuss_opening", _stage_discuss_opening),
     PipelineStageDef("course_mapping", _stage_course_mapping),
     PipelineStageDef("blueprint", _stage_blueprint),
     PipelineStageDef("export_validation", _stage_export_validation),
@@ -3042,6 +3088,219 @@ def _build_contextual_explanation(
             )
         finally:
             session.close()
+
+    return payload
+
+
+def _discuss_opening_max_items_per_document() -> int:
+    try:
+        return max(0, int(os.getenv("DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT", "4")))
+    except (TypeError, ValueError):
+        return 4
+
+
+def _discuss_opening_max_calls_per_day() -> int:
+    try:
+        return max(0, int(os.getenv("DISCUSS_OPENING_MAX_CALLS_PER_DAY", "20")))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _discuss_opening_language() -> str:
+    """生成言語（設計書 §4.1）。``lecture_language`` は使わない — 同じ論文が言語設定の
+    違うコースに載りうるため、document 単位の生成物は env 1つで決める。"""
+    return (os.getenv("DISCUSS_OPENING_LANGUAGE", "") or "ja").strip() or "ja"
+
+
+def _discuss_opening_model() -> str:
+    """M層の正本（``core.llm_policy.resolve_scene_model``）でモデルを決める。
+
+    ``DiscussOpeningAgent`` はモデル名を construction 引数で受けるため、ランナー
+    ループが張る ``model_override`` の contextvar（解決順②）を素通ししてしまう。
+    ここで **同じ正本関数**を呼んで解決してから渡すことで、run override →
+    user/system ポリシー → ``DISCUSS_OPENING_LLM_MODEL``（``llm_policy`` の
+    ``_FEATURE_DIRECT_ENV``）→ fast tier の順が効く。この関数は本ステージが
+    ``model_override`` コンテキストの内側で実行されることを前提にしている
+    （``run_document_pipeline`` のループがステージ単位で張る）。
+    """
+    try:
+        return resolve_scene_model(f"{SCENE_PIPELINE}:discuss_opening").model
+    except Exception:
+        logger.debug("failed to resolve discuss_opening model", exc_info=True)
+        return ""
+
+
+def _build_discuss_opening(
+    *,
+    document_id: str,
+    cartridge_id: str | None,
+    artifacts: dict,
+    derivations: Any,
+    equations: Any,
+) -> dict:
+    """discuss_opening ステージ本体（``discuss_opening_authoring_design.md`` §4.1）。
+
+    (1) 素材（D層の未検証前提 / derivation の operation 列 / thesis の合成文）を
+    ``core.discuss.authoring`` で**解決済みテキスト**として組み立て、
+    (2) 日次コスト上限を CostGate で事前チェックし（contextual_explanation と同じ
+    「先に残数を見て、実行後に実測を計上する」流儀）、
+    (3) agent を 1 document = 1 コールで実行し、
+    (4) 結果を ``element_explanations`` に ``element_type='document'`` /
+    ``kind='contextual'`` / ``role='discussion_seed'`` の candidate として保存する
+    （再解析時、同じキーの既存 candidate は superseded・approved は不変）。
+
+    素材が無い document は**生成しない**（``skipped_reason='no_source_material'`` を
+    stage_outputs に正直に記録する。根拠の無い火種を創作させない — 設計書 §4.1）。
+    """
+    from core.discuss.authoring import (
+        build_discuss_opening_input,
+        collect_untested_assumptions,
+        compute_source_fingerprint,
+    )
+
+    max_items = _discuss_opening_max_items_per_document()
+    language = _discuss_opening_language()
+
+    payload: dict[str, Any] = {
+        "status": "completed",
+        "language": language,
+        "max_items": max_items,
+        "assumption_count": 0,
+        "author_choice_count": 0,
+        "llm_calls": 0,
+        "seed_count": 0,
+        "saved_candidates": 0,
+        "truncated": False,
+        "truncated_count": 0,
+    }
+
+    untested_assumptions: list[dict] = []
+    session = None
+    try:
+        from core.postgres import get_session as _pg_session
+
+        session = _pg_session()
+        untested_assumptions = collect_untested_assumptions(session, document_id)
+    except Exception:
+        # 台帳未整備 / DB 不達でもステージは進める（operation だけで生成できる）。
+        payload["assumption_lookup_failed"] = True
+        logger.warning(
+            "discuss_opening: failed to read epistemic_ledger (non-fatal): document=%s",
+            document_id, exc_info=True,
+        )
+    finally:
+        if session is not None:
+            session.close()
+
+    agent_input = build_discuss_opening_input(
+        document_id=document_id,
+        artifacts=artifacts,
+        derivations=derivations,
+        equations=equations,
+        untested_assumptions=untested_assumptions,
+        language=language,
+        max_seeds=max_items,
+    )
+    payload["assumption_count"] = len(agent_input.get("untested_assumptions") or [])
+    payload["author_choice_count"] = len(agent_input.get("author_choices") or [])
+
+    if max_items <= 0:
+        payload["skipped_reason"] = "item_limit_is_zero"
+        return payload
+
+    if not (payload["assumption_count"] or payload["author_choice_count"]):
+        payload["skipped_reason"] = "no_source_material"
+        logger.info(
+            "discuss_opening: no untested assumption / author choice for document=%s; "
+            "skipping generation",
+            document_id,
+        )
+        return payload
+
+    daily_limit = _discuss_opening_max_calls_per_day()
+    daily_key = today_str()
+    remaining = _discuss_opening_cost_gate.daily_remaining(
+        daily_limit=daily_limit, daily_key=daily_key
+    )
+    if remaining <= 0:
+        payload["skipped_by_limit"] = True
+        payload["skipped_reason"] = "daily_call_limit_reached"
+        logger.info(
+            "discuss_opening: daily call limit reached (limit=%d), skipping generation "
+            "for document=%s",
+            daily_limit, document_id,
+        )
+        return payload
+
+    from episteme_graph.agents.discuss_opening.agent import DiscussOpeningAgent
+
+    agent = DiscussOpeningAgent(llm_model=_discuss_opening_model() or None)
+    result = agent.run(agent_input, cartridge_id=cartridge_id)
+    # 実測の事後計上（contextual_explanation / figure_reanalysis と同じ会計）。
+    _discuss_opening_cost_gate.count_extra_daily(
+        daily_key=daily_key, amount=result.llm_call_count
+    )
+
+    payload["llm_calls"] = result.llm_call_count
+    payload["seed_count"] = len(result.seeds)
+    payload["truncated"] = bool(result.truncated)
+    payload["truncated_count"] = int(result.truncated_count or 0)
+    if result.skipped_reason:
+        payload["skipped_reason"] = result.skipped_reason
+    if result.review_notes:
+        payload["review_notes"] = list(result.review_notes)
+
+    if not result.seeds:
+        return payload
+
+    fingerprint = compute_source_fingerprint(artifacts)
+    payload["source_fingerprint"] = fingerprint
+
+    from core.element_explanations import (
+        ELEMENT_TYPE_DOCUMENT,
+        KIND_CONTEXTUAL,
+        PIPELINE_CREATED_BY,
+        ROLE_DISCUSSION_SEED,
+    )
+
+    items = [
+        {
+            "element_type": ELEMENT_TYPE_DOCUMENT,
+            "element_id": str(document_id),
+            "kind": KIND_CONTEXTUAL,
+            "role": ROLE_DISCUSSION_SEED,
+            "body": seed.body,
+            "evidence": {
+                "evidence_quote": seed.evidence_quote,
+                "reason": seed.reason,
+                "confidence": seed.confidence,
+                "grounded_in": seed.grounded_in,
+                "language": result.language,
+                "source_fingerprint": fingerprint,
+                "opening_version": result.opening_version,
+            },
+            "created_by": PIPELINE_CREATED_BY,
+        }
+        for seed in result.seeds
+    ]
+
+    from core.postgres import get_session as _pg_session
+
+    session = _pg_session()
+    try:
+        from core.element_explanations import insert_candidates
+
+        saved = insert_candidates(session, document_id, items)
+        session.commit()
+        payload["saved_candidates"] = len(saved)
+    except Exception:
+        session.rollback()
+        logger.warning(
+            "discuss_opening: failed to persist candidate seeds (non-fatal): document=%s",
+            document_id, exc_info=True,
+        )
+    finally:
+        session.close()
 
     return payload
 

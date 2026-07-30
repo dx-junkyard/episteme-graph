@@ -213,6 +213,10 @@ class CourseUpdateRequest(BaseModel):
     # 「設定解除」（学習チャットのモデルをシステム既定へ戻す）を意味する。
     # 未指定（None）は「変更しない」。サーバ側でカタログ検証（fail-closed, 422）する。
     llm_models: dict[str, str | None] | None = None
+    # discuss 開幕画面の「このコースで議論したいこと」（discuss_opening_authoring_design.md
+    # §2 最下段 / Phase 0b）。教員の任意入力で AI 生成は関与しない。空文字は「設定解除」、
+    # 未指定（None）は「変更しない」。
+    course_focus: str | None = None
 
 
 class LearningCourseOut(BaseModel):
