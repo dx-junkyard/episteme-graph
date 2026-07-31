@@ -165,11 +165,15 @@ CREATE INDEX IF NOT EXISTS idx_teaching_figures_course
   （既定 true）で draft 保存も可能（§8）。
 - **`document_figures` とは独立**（FG1）。ID は両方 UUID なので `figures_by_id` マップ上で
   衝突しない。
-- 削除 API は作らない。孤児掃除はコース物理削除の **3 経路すべて**に明示 DELETE を同乗させる:
+- 削除 API は作らない。孤児掃除はコース物理削除の **5 経路すべて**に明示 DELETE を同乗させる
+  （実装時に3経路では不足と判明 — 教員の主経路 ④⑤ を含める）:
   ①`services.py::delete_course_data`（即時削除）②`core/versioning/deletion.py::_purge_course`
-  （V層スイーパ）③`_purge_document` 内の独立したコース削除ループ。MinIO オブジェクト削除の
-  ため **`StorageManager.remove_object(bucket, key)` を新設**する（現状 storage.py に削除
+  （V層スイーパ）③`_purge_document` 内の独立したコース削除ループ
+  ④`admin.py::delete_material`（教材削除の巻き添えコース削除）⑤`admin.py::delete_course`
+  （管理画面のコース削除ボタンの実体）。MinIO オブジェクト削除のため
+  **`StorageManager.remove_object(bucket, key)` を新設**する（現状 storage.py に削除
   メソッドは存在しない。best-effort・失敗は WARN ログで DB 削除は止めない）。
+  suggestions 行も同時に削除する。
 
 ### 3.2 `teaching_figure_suggestions` — ギャップ候補（candidate 層）
 
@@ -550,8 +554,12 @@ document 成果物のピン凍結ブラウズ未実装と同格）。
   admin.router に include しない）。コース編集権限ヘルパは lecture_studio 側 module-private の
   `_course_data_for_studio_editable` を `_shared.py` へ移して共有する。
 - **権限の非対称に注意**: トピック本文の保存はコース所有者 / SYSTEM_ADMIN のみ（既存挙動）。
-  よって v1 の図の保存・採用も**同じゲート**にする（editor 教員が図だけ作れて本文に反映
-  できない中途半端を作らない。editor への開放はトピック保存の権限拡張と同時に検討）。
+  よって v1 の図の**書き込み系**（turn / 保存 / PATCH / 提案 generate・確定）も**同じゲート**に
+  する（editor 教員が図だけ作れて本文に反映できない中途半端を作らない。editor への開放は
+  トピック保存の権限拡張と同時に検討)。**読み取り系**（一覧 GET / 画像 GET / 提案一覧 GET）は
+  editor 共有教員にも開く（`_course_data_for_studio_editable`。studio プレビューの
+  figures_index が画像 URL を指すため、owner 限定にすると editor のプレビューが 403 で壊れる
+  — 実装時の裁定）。
 
 ---
 
@@ -654,3 +662,40 @@ UI static: `test_figure_studio_ui_static.py`（ES5 準拠 / `innerHTML` への S
 9. **音声キャッシュの条件付き温存はしない（レビュー M3 の裁定）** — 図は読み上げに
    入らないため理論上は温存可能だが、v1 は既存の「保存 = 音声無効化」を変えず事実文の
    事前告知で対応（安全側 = 消す方に倒す。差分検知の最適化は v2）。
+
+---
+
+## 13. 実装記録（2026-07-31、Phase 0〜2 全実装）
+
+Fable 5 指揮・Opus 5 実装3レーン（コア基盤 / API・統合 / フロントエンド）+
+ガードレールレーンで実装。設計からの主な差分・裁定:
+
+- **削除経路は5経路**（§3.1 を訂正。`delete_material` / `delete_course`（admin.py）を追加）。
+  `delete_figures_for_course` は suggestions 行も同時削除。
+- **読み取り系 API 3本（一覧 / 画像 / 提案一覧）は `_course_data_for_studio_editable`**、
+  書き込み系は `course_data_for_owner`（§8 を更新。`_course_data_for_studio_editable` は
+  topics.py から `_shared.py` へ移設し、`ensure_course_owner` / `course_data_for_owner` を新設）。
+- **`create_teaching_figure` に任意 `figure_id` 引数**（MinIO キー `teaching/{course_id}/{id}.svg`
+  が id 依存のため `schema.new_figure_id()` で事前採番）。
+- **evidence_links の図行はトップレベルにも `figure_id` / `caption` を持つ**（`extra` のみだと
+  既存の読み手 `build_topic_evidence_items` / `_topic_figures_for_prompt` /
+  `_required_figure_items` に載らないため。§7.1b-2 の意図を満たす実装形）。
+- **サニタイザ追加ハードニング**: paint 属性の外部 `url()` 拒否 / 処理命令拒否 /
+  非 SVG 名前空間拒否 / コメントは出力から除去 / 検証済みツリーで再直列化 /
+  サイズ上限は入出力両方。
+- **rewrite 応答に `figures_restored: bool`**（消えた embed の決定論復元を UI に正直に通知）。
+- **`_purge_course` / `_purge_document` の戻り値が MinIO キーの list に変更**（呼び出し元は
+  `purge_object` のみ）。
+- 教員向け画像配信は MinIO 失敗時に DB の `svg_source` へフェイルソフト（正本は DB）。
+- FigureStudio の `onInsert(figureId, embedText, result)` は第3引数に保存 API レスポンスを渡す
+  （evidence_link / linked_figure_ids をローカル topic に反映して挿入直後のプレビューを成立させる）。
+- モーダルの `FigureStudio.init` は admin.js ではなく `LectureStudio.init()` から DI 注入
+  （呼び出し元が原稿スタジオのみのため）。
+- 提案の確定 API は「判断済み・レース」を 404 でなく **409 + 事実文**に写像
+  （store 契約どおり）。フロントは 409 時に detail を表示して一覧を再取得。
+- テスト: sanitizer 55 / store 57 / API 69 / UI static 37 / guardrails 60（変異テストで
+  検査の実効性確認済み）+ 管理UIアンカー 7 件（総数 229 → 236）+ マニュアル3節。
+  最終: backend 7,178 passed / 24 skipped、src 1,656 passed（回帰ゼロ）。
+- docker E2E（実 DB / MinIO / LLM。migration 063 実適用・SVG 実配信・blob レンダ）は未実施。
+- suggest.py の repair 分岐・degraded 経路の専用単体テストは未作成（ガードレール内の
+  機能検査4件が現状の唯一のカバレッジ。必要なら `test_teaching_figures_suggest.py` を切る）。

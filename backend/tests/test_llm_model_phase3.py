@@ -650,10 +650,12 @@ class TestLectureStudioModelParam:
     TEACHER = {"id": "teacher-1", "username": "t1", "email": "t1@test.local", "role": "TEACHER"}
 
     def test_course_topic_draft_rewrite_uses_requested_model(self, fake_catalog, monkeypatch):
+        import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
         course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: course_data)
+        # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
 
         captured = {}
@@ -673,10 +675,12 @@ class TestLectureStudioModelParam:
         assert result["key_concepts"] == ["a"]
 
     def test_course_topic_draft_rewrite_invalid_model_422(self, fake_catalog, monkeypatch):
+        import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
         course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: course_data)
+        # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
 
         def _unexpected(*a, **k):
@@ -694,10 +698,12 @@ class TestLectureStudioModelParam:
         assert exc.value.status_code == 422
 
     def test_course_topic_draft_rewrite_unspecified_model_keeps_fast_tier(self, fake_catalog, monkeypatch):
+        import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
         course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: course_data)
+        # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
         monkeypatch.setattr(
             topics_mod, "get_llm_params", lambda mode: {"model": "fast-model-x", "reasoning_effort": "low"},

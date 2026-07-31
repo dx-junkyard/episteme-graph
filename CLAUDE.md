@@ -1322,6 +1322,68 @@ discuss 開幕画面の情報を「主語で分けて全部出す」層。正本
   `test_discuss_opening_authoring_guardrails.py` / `test_discuss_opening_stage.py` +
   `test_next_steps_guardrails.py`（全却下抑止）+ `test_element_explanation_review_ui_static.py`。
 
+### 教材図スタジオ（Teaching Figure Studio, migration 063, 2026-07-31）
+
+わかりづらい箇所に AI 対話で説明図（SVG）を生成し、既存の `![[figure:id]]` 記法で教材に
+埋め込む層。正本は `docs/features/teaching_figure_studio_design.md`（不変条項 FG1〜FG9、
+§13 に実装記録）。実装は `backend/core/teaching_figures/`（FastAPI 非 import）+
+`backend/api/routes/teaching_figures.py`（`/api/admin/...`、main.py 直接登録）+
+`frontend/public/js/admin-figure-studio.js`（ES5・`window.FigureStudio`、init は
+`LectureStudio.init()` から DI）。
+
+- **SVG-first（FG3）**: 生成図は SVG のみ（ラスター生成 API 不使用）。**保存の唯一の入口は
+  `core/teaching_figures/sanitizer.py`**（lxml 固定・`resolve_entities=False` 等 +
+  `<!DOCTYPE`/`<!ENTITY` 事前拒否 + 要素/属性許可リスト + 外部参照/script/foreignObject/
+  image/on* 拒否 = 422、viewBox 必須・width/height 正規化付与。stdlib xml.etree への
+  フォールバック禁止）。SVG 配信は学習者・教員とも `nosniff` + CSP sandbox ヘッダ必須。
+- **DB（migration 063）**: `course_teaching_figures`（`svg_source` が正本、MinIO
+  `figure-images` の `teaching/{course_id}/{id}.svg` は配信スナップショット。
+  `status ∈ {draft, adopted, retired}`・行削除 API なし・revisions JSONB に旧版 append）+
+  `teaching_figure_suggestions`（ギャップ候補。再生成は candidate のみ superseded）。
+  孤児掃除はコース物理削除の **5 経路**（`delete_course_data` / `_purge_course` /
+  `_purge_document` 内ループ / `delete_material` / `delete_course`）に同乗、
+  `StorageManager.remove_object`（新設）で MinIO も best-effort 削除。
+- **採用時の参照登録が要石（§7.1b）**: adopt で本文挿入と同時に `topic.linked_figure_ids` +
+  `topic.evidence_links`（トップレベルに figure_id/caption + `extra.teaching:true`）へ
+  サーバ側登録。これで ①AI 書き換え（本文丸ごと再生成）後も `_required_figure_items`
+  （evidence_links ∪ linked_figure_ids に拡張済み）の決定論復元が効く（rewrite 応答
+  `figures_restored`）②retired 時に学習者へ生 UUID が出ず「配信対象ではありません」カードに
+  落ちる ③配信ゲート条件3が本文 embed 消失後も成立する。
+- **解決・配信は既存資産へ相乗り（FG9）**: `_load_course_figures_by_id` に adopted 図を
+  **document 走査の早期 return より前に**マージ（`document_id: None` / `teaching: true`）。
+  学習者配信 `GET /api/learning/courses/{id}/figures/{fid}/image` は document_figures に
+  無ければ教材図を 4 条件（受講 / course_id 一致 / `_course_references_figure` / adopted）で
+  fail-closed 配信、media_type は行の content_type（抽出図は PNG 不変）。
+  `_course_references_figure` は `iter_all_topics` 化済み（章ネスト取りこぼしの既存バグ修正）。
+  studio プレビューは course-structure の `figures_index`（admin 経路 URL）で2段フォール
+  バック解決。
+- **権限**: 書き込み系（turn / 保存 / PATCH / 提案 generate・確定）= コース所有者 /
+  SYSTEM_ADMIN（`_shared.course_data_for_owner`。トピック保存の権限と同水準）。
+  読み取り系（一覧 / 画像 / 提案一覧）= editor 共有教員も可
+  （`_course_data_for_studio_editable`、`_shared.py` へ移設済み）。
+- **対話生成**: `generate_conversation_turn` + structured output（毎ターン完全 SVG、
+  差分パッチにしない）。sanitize 失敗は同一コール内 1 回修復 → 失敗時は前回版維持。
+  LLM 失敗は degraded 事実文 + 200。履歴はブラウザ内のみ（atlas-assist 前例）。
+  会話 grounding の図制約 = 「grounding に現れる関係のみ描く」+ data_plot は
+  実測値捏造禁止（プロンプト制約文はガードレールが grep）。
+- **ギャップ検出（candidate-only）**: 入力 = 本文 + stumble 4軸 / naive signals の
+  **k-匿名通過済みレンジ・段階ラベルのみ**（生値・個人行・逐語質問文を LLM に渡さない、
+  FG8。signals.py は個人行テーブルを直接 SELECT しない）。`anchor_excerpt` は verbatim
+  検査（捏造ガード）。提示は原稿スタジオ右ペイン第3トグル「図の提案」。
+- **M層/U層/コスト**: scene `figure_studio`・feature `admin:figure_studio` /
+  `admin:figure_suggest`・`FIGURE_STUDIO_MAX_CALLS_PER_DAY`(60) /
+  `FIGURE_SUGGEST_MAX_CALLS_PER_DAY`(20)・fast tier 既定（`FIGURE_STUDIO_LLM_MODEL`）。
+  監査 `AUDIT_ENTITY_TEACHING_FIGURE`。
+- **副作用の正直な提示**: トピック保存で音声キャッシュ全消去（既存挙動を変えない・
+  事前告知）/ 図 1 個 = 200 字換算でページ分割が動き得る（spoken 縮退の警告）。
+- **ガードレール**: `test_teaching_figures_guardrails.py` +
+  `test_teaching_figures_{sanitizer,store,api}.py` + `test_figure_studio_ui_static.py`。
+  管理UI 3点セット（マニュアル節 `docs/manual/teacher/14-admin-lecture-studio.md` +
+  ADMIN_UI_ANCHORS 7件 + data-ui-anchor + `_ADMIN_FRONTEND_SOURCES` 登録）実施済み。
+- **非スコープ（v1）**: ラスター生成 / 学習者起点の図リクエスト / 版ピン学習者への図スナップ
+  ショット / data_plot への実データ接続 / mermaid 等の図 DSL / 図の読み上げ /
+  figure_presentation・W層モード分類の対象化。
+
 ### 学習チャットのメッセージ書き直し・削除（機能3, B層）
 
 学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。

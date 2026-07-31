@@ -303,52 +303,30 @@ class TestDeleteMaterial:
         #   for free — delete_material now issues one extra DELETE per linked
         #   course and one extra DELETE for the document itself)
 
-        call_count = {"n": 0}
-        original_execute = mock_pg.execute
+        # 応答は呼び出し順（n 番目）ではなく **SQL の内容** で決める。孤児掃除の
+        # DELETE が増えるたびに番号がずれて壊れるのを避けるため（教材図の掃除
+        # （teaching_figure_studio_design.md §3.1）追加時に実際にずれた）。
+        course_data_by_id = {
+            "course-1": {"sources": [{"material_id": "mat-001", "title": "テスト教材"}]},
+            "course-2": {"sources": [{"material_id": "mat-999", "title": "別の教材"}]},
+        }
 
         def side_effect_execute(*args, **kwargs):
-            call_count["n"] += 1
+            sql = " ".join(str(args[0]).split()) if args else ""
+            params = args[1] if len(args) > 1 else (kwargs.get("params") or {})
             result = MagicMock()
-            n = call_count["n"]
-            if n == 1:
-                # Document lookup
+            if "FROM documents" in sql and "SELECT" in sql:
                 result.fetchone.return_value = (
                     "doc-uuid-1", "テスト教材", "test.pdf", "mat-001"
                 )
-            elif n == 2:
-                # Course list
+            elif "SELECT id FROM learning_courses" in sql:
                 result.fetchall.return_value = [("course-1",), ("course-2",)]
-            elif n == 3:
-                # Course-1 data with linked material
-                result.fetchone.return_value = (
-                    json.dumps({
-                        "sources": [{"material_id": "mat-001", "title": "テスト教材"}]
-                    }),
-                )
-            elif n == 4:
-                # Delete chat history for course-1
-                result.rowcount = 0
-            elif n == 5:
-                # Delete object_group_permissions (object_type='course') for course-1
-                result.rowcount = 0
-            elif n == 6:
-                # Delete course-1
-                result.rowcount = 1
-            elif n == 7:
-                # Course-2 data with different material
-                result.fetchone.return_value = (
-                    json.dumps({
-                        "sources": [{"material_id": "mat-999", "title": "別の教材"}]
-                    }),
-                )
-            elif n == 8:
-                # Delete chunks
-                result.rowcount = 5
-            elif n == 9:
-                # Delete object_group_permissions (object_type='document') for the material
-                result.rowcount = 0
-            elif n == 10:
-                # Delete document
+            elif "SELECT data FROM learning_courses" in sql:
+                cid = (params or {}).get("cid")
+                result.fetchone.return_value = (json.dumps(course_data_by_id.get(cid, {})),)
+            elif "DELETE FROM course_teaching_figures" in sql:
+                result.fetchall.return_value = []
+            else:
                 result.rowcount = 1
             return result
 

@@ -74,6 +74,11 @@ KNOWN_FEATURES = (
     "admin:reconstruction_authoring",
     "admin:atlas_skeleton",
     "admin:atlas_assist",
+    # --- 教材図スタジオ（migration 063、正本 docs/features/teaching_figure_studio_design.md
+    # §4.3）。figure_studio は対話1ターン（SVG 生成・修正）、figure_suggest は
+    # ギャップ検出 + 図タイプ提案の単発コール。どちらも教員の明示操作のみ。---
+    "admin:figure_studio",
+    "admin:figure_suggest",
     # --- D層（Doubt Layer） ---
     "doubt:scope_candidates",
     "doubt:assumption_normalize",

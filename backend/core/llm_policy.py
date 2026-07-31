@@ -54,6 +54,7 @@ SCENE_ATLAS = "atlas"
 SCENE_DOUBT = "doubt"
 SCENE_DELIBERATION = "deliberation"
 SCENE_ASSISTANT = "assistant"
+SCENE_FIGURE_STUDIO = "figure_studio"
 
 _SCENE_LABELS: dict[str, str] = {
     SCENE_PIPELINE: "教材の解析",
@@ -67,6 +68,7 @@ _SCENE_LABELS: dict[str, str] = {
     SCENE_DOUBT: "前提の地図",
     SCENE_DELIBERATION: "要素検討ワークスペース",
     SCENE_ASSISTANT: "管理アシスタント",
+    SCENE_FIGURE_STUDIO: "教材図スタジオ",
 }
 
 
@@ -124,6 +126,11 @@ def scene_for_feature(feature: str) -> str | None:
         return SCENE_DOUBT
     if feature.startswith("deliberation:"):
         return SCENE_DELIBERATION
+    if feature in ("admin:figure_studio", "admin:figure_suggest"):
+        # 教材図スタジオ（設計書 teaching_figure_studio_design.md §4.3）。図の対話生成と
+        # ギャップ提案は教員から見て同じ場面なので、1つの scene に束ねる（vision 不要 —
+        # SVG はテキスト生成なので _VISION_REQUIRED_SCENE_KEYS には入れない）。
+        return SCENE_FIGURE_STUDIO
     if feature == "admin:assistant":
         return SCENE_ASSISTANT
     if feature == "admin:component_candidates":
@@ -206,6 +213,10 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "learning:help_usage": ("learning_chat_llm_model", "analysis"),
     "admin:course_builder": ("course_builder_llm_model", "analysis"),
     "pipeline:apparatus_semantics": ("apparatus_llm_model", "analysis"),
+    # 教材図スタジオ: 対話生成とギャップ提案で同一の設定キーを共有する
+    # （deliberation の chat/vision と同じパターン）。
+    "admin:figure_studio": ("figure_studio_llm_model", "fast"),
+    "admin:figure_suggest": ("figure_studio_llm_model", "fast"),
 }
 
 # 特例: Settings に専用フィールドが無く、呼び出し元が os.getenv で直接読んでいる feature
@@ -661,6 +672,7 @@ __all__ = [
     "SCENE_DOUBT",
     "SCENE_DELIBERATION",
     "SCENE_ASSISTANT",
+    "SCENE_FIGURE_STUDIO",
     "scene_for_feature",
     "ResolvedModel",
     "PolicyRow",

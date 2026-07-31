@@ -78,6 +78,7 @@ from routes.versioning import router as _versioning_router
 from routes.status import router as _status_router
 from routes.notifications import router as _notifications_router
 from routes.deliberation import router as _deliberation_router
+from routes.teaching_figures import router as _teaching_figures_router
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 from core.migrations import run_migrations
@@ -335,6 +336,9 @@ app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")
 app.include_router(_deliberation_router, prefix="/api/admin")
+# 教材図スタジオ（teaching_figure_studio_design.md §8）。既存 admin ルーターと
+# パスが衝突しないため登録順に依存しない（Tier 3-17c と同じフラット登録）。
+app.include_router(_teaching_figures_router, prefix="/api/admin")
 # 利用者マニュアル KB（help_kb, Phase 2 §2-2）の手動更新トリガー。
 # admin_router（/assistant 配下）とは別ルーター（最終パス /api/admin/help-kb/refresh）。
 app.include_router(_help_kb_router, prefix="/api/admin")

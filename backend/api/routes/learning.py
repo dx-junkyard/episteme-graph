@@ -87,7 +87,9 @@ from core.course_data import (
     course_title as _course_title,
     course_topics,
     find_course_topic,
+    iter_all_topics,
 )
+from core.teaching_figures import store as teaching_figures_store
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import element_explanations
@@ -146,6 +148,13 @@ from routes.lecture import (
     _course_document_ids,
     _load_course_figures_by_id,
     _resolve_course_document_ids,
+)
+# 教材図スタジオ（teaching_figure_studio_design.md §7.2）: 学習者向け・教員向けの図配信が
+# 同じ SVG セキュリティヘッダ（nosniff + CSP sandbox）を通るよう、Response 組み立ての
+# 正本を共有する（定義を二重化しない・FG3）。
+from routes.teaching_figures import (
+    STATUS_ADOPTED as TEACHING_FIGURE_STATUS_ADOPTED,
+    figure_image_response,
 )
 
 # 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
@@ -1667,8 +1676,13 @@ def _topic_linked_figure_ids(topic) -> list[str]:
 def _course_references_figure(course_data: dict, figure_id: str) -> bool:
     """figure_id がコース content（トピック本文の ``![[figure:id]]`` embed または
     ``linked_figure_ids``）から実際に参照されているかを判定する（§7.3 条件3）。
+
+    走査は ``iter_all_topics``（フラット ``topics[]`` + 章ネスト ``chapters[].topics[]``）。
+    旧実装は ``course_topics()``（フラットのみ）だったため章ネスト形のトピックから
+    参照されている図を取りこぼしていた（教材図スタジオ設計書 §7.2 条件3 の既存バグ
+    修正。抽出図側もこの修正の恩恵を受ける）。
     """
-    for topic in course_topics(course_data):
+    for topic in iter_all_topics(course_data):
         text = _topic_student_material(topic)
         if figure_id in find_figure_embed_ids(text):
             return True
@@ -1677,19 +1691,43 @@ def _course_references_figure(course_data: dict, figure_id: str) -> bool:
     return False
 
 
+def _load_teaching_figure_row(course_id: str, figure_id: str) -> dict | None:
+    """``course_teaching_figures`` を id 単位で取得する（教材図スタジオ設計書 §7.2）。
+
+    ``document_figures`` に無い figure_id を引く second lookup。取得失敗は None
+    （fail-closed で 404 になる）。course_id 一致・status の判定は呼び出し側で行う。
+    """
+    session = _pg_session()
+    try:
+        return teaching_figures_store.get_teaching_figure(session, figure_id)
+    except Exception:
+        logger.warning(
+            "Failed to load teaching figure row course=%s figure=%s",
+            course_id, figure_id, exc_info=True,
+        )
+        return None
+    finally:
+        session.close()
+
+
 @router.get("/courses/{course_id}/figures/{figure_id}/image")
 def get_course_figure_image(
     course_id: str,
     figure_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> Response:
-    """学習者向け図画像配信（Phase 4 図のコース流通 §7.3）。
+    """学習者向け図画像配信（Phase 4 図のコース流通 §7.3 + 教材図スタジオ §7.2）。
 
-    3条件の AND で判定し、いずれか欠ければ 404（fail-closed）:
+    **抽出図**（``document_figures``）は3条件の AND、いずれか欠ければ 404（fail-closed）:
     1. 受講ゲート（``get_accessible_course_data`` — 本人が当該コースを閲覧できる）
     2. 図の document がコースの ``sources[].document_id`` / ``material_id`` に含まれる
     3. 図がコース content（``topics[].linked_figure_ids`` または student_material 内の
        ``![[figure:id]]`` 参照）から実際に参照されている
+
+    ``document_figures`` に無い figure_id は**採用済み教材図**（``course_teaching_figures``）
+    として引き、4条件の AND で判定する（FG4）: 受講ゲート / 図の ``course_id`` 一致 /
+    条件3（同じ ``_course_references_figure``）/ ``status='adopted'``。draft・retired は
+    学習者に出ない。
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if not course_data:
@@ -1701,28 +1739,54 @@ def get_course_figure_image(
         raise HTTPException(status_code=404, detail="Figure not found")
 
     figure_row = _load_figure_row_by_id(figure_id)
-    if not figure_row or not figure_row.get("minio_key"):
-        raise HTTPException(status_code=404, detail="Figure not found")
+    if figure_row and figure_row.get("minio_key"):
+        # --- 抽出図（document_figures）経路 ---
+        # 条件2: 図の document がコースの sources に含まれる
+        course_document_ids = set(_course_document_ids(course_data))
+        if str(figure_row.get("document_id")) not in course_document_ids:
+            raise HTTPException(status_code=404, detail="Figure not found")
 
-    # 条件2: 図の document がコースの sources に含まれる
-    course_document_ids = set(_course_document_ids(course_data))
-    if str(figure_row.get("document_id")) not in course_document_ids:
-        raise HTTPException(status_code=404, detail="Figure not found")
+        # 条件3: 図がコース content から実際に参照されている
+        if not _course_references_figure(course_data, figure_id):
+            raise HTTPException(status_code=404, detail="Figure not found")
 
-    # 条件3: 図がコース content から実際に参照されている
+        try:
+            image_bytes = get_storage_client().get_object("figure-images", figure_row["minio_key"])
+        except Exception:
+            logger.warning(
+                "get_course_figure_image: MinIO fetch failed course=%s figure=%s",
+                course_id, figure_id, exc_info=True,
+            )
+            raise HTTPException(status_code=404, detail="Figure image not found")
+
+        # 抽出図は常に PNG（document_figures に content_type 列は無い）。
+        return figure_image_response(image_bytes, None)
+
+    # --- 採用済み教材図（course_teaching_figures）経路 ---
+    teaching_row = _load_teaching_figure_row(course_id, figure_id)
+    if not teaching_row or not teaching_row.get("minio_key"):
+        raise HTTPException(status_code=404, detail="Figure not found")
+    # 条件2': 図の course_id が一致する（他コースの図は出さない）
+    if str(teaching_row.get("course_id") or "") != str(course_id):
+        raise HTTPException(status_code=404, detail="Figure not found")
+    # 条件4: status='adopted' のみ（draft / retired は学習者に出ない）
+    if str(teaching_row.get("status") or "") != TEACHING_FIGURE_STATUS_ADOPTED:
+        raise HTTPException(status_code=404, detail="Figure not found")
+    # 条件3: 図がコース content から実際に参照されている（抽出図と同じ判定）
     if not _course_references_figure(course_data, figure_id):
         raise HTTPException(status_code=404, detail="Figure not found")
 
     try:
-        image_bytes = get_storage_client().get_object("figure-images", figure_row["minio_key"])
+        image_bytes = get_storage_client().get_object("figure-images", teaching_row["minio_key"])
     except Exception:
         logger.warning(
-            "get_course_figure_image: MinIO fetch failed course=%s figure=%s",
+            "get_course_figure_image: MinIO fetch failed (teaching) course=%s figure=%s",
             course_id, figure_id, exc_info=True,
         )
         raise HTTPException(status_code=404, detail="Figure image not found")
 
-    return Response(content=image_bytes, media_type="image/png")
+    # 教材図は SVG（``figure_image_response`` が nosniff + CSP sandbox を付ける・FG3）。
+    return figure_image_response(image_bytes, teaching_row.get("content_type"))
 
 
 @router.post(

@@ -16,7 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
-from services import get_editable_course_data, get_viewable_course_data
+from services import get_viewable_course_data
 from core.course_data import (
     course_chapters,
     course_source_material_ids,
@@ -26,13 +26,21 @@ from core.course_data import (
     find_course_topic,
 )
 from core import llm_policy
+from core.course_content_builder import (
+    _ensure_required_figures_in_material,
+    _required_figure_items,
+)
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
 from core import element_explanations
+# 教材図スタジオ（teaching_figure_studio_design.md §7.3）: 原稿スタジオプレビューの
+# 図解決マップ。学習画面（``_load_course_figures_by_id``）と同じ解決規則を共有する。
+from routes.lecture import load_course_figures_index_for_admin
 
 from ._shared import (
     _chunk_status,
+    _course_data_for_studio_editable as _shared_course_data_for_studio_editable,
     _get_course_chunks,
     _get_system_admin_course_data,
     consume_lecture_rewrite_quota,
@@ -59,20 +67,13 @@ def _course_data_for_studio(course_id: str, current_user: dict) -> dict:
 
 
 def _course_data_for_studio_editable(course_id: str, current_user: dict) -> dict:
-    """編集権限チェック付きでコースデータを返す（Phase 2-D 🔴）。
+    """編集権限チェック付きでコースデータを返す。
 
-    ``rewrite_lecture_studio_course_topic`` は LLM を呼んでコース内容のドラフトを
-    生成する書き込み系の操作だが、旧実装は ``_course_data_for_studio``（閲覧権限のみ）
-    を使っていたため、viewer 権限しかない教員でも呼び出せてしまっていた
-    （設計書 assistant_common_infra_design.md §5。scripts.py の設定 PUT 系
-    （``get_editable_course_data`` + SYSTEM_ADMIN フォールバック）と権限水準を揃える）。
+    正本は ``_shared.py``（教材図スタジオ設計書 §8 で共有化。本モジュールは委譲に
+    置き換え、``routes.lecture_studio.topics._course_data_for_studio_editable`` という
+    参照名と挙動は不変に保つ）。
     """
-    course_data = get_editable_course_data(current_user["id"], course_id)
-    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
-        course_data = _get_system_admin_course_data(course_id)
-    if not course_data:
-        raise HTTPException(status_code=404, detail="Course not found")
-    return course_data
+    return _shared_course_data_for_studio_editable(course_id, current_user)
 
 
 @router.get("/courses/{course_id}/lecture-studio/course-structure")
@@ -180,6 +181,17 @@ def get_lecture_studio_course_structure(
             "topics": topics_out,
         })
 
+    # 図マップ（教材図スタジオ設計書 §7.3）: 学習画面と同じ解決規則で
+    # figure_id -> {caption, image_url(admin 経路), document_id, teaching} を返す。
+    # これにより studio プレビューが evidence_links 由来の図だけでなく、教員が本文に
+    # 手で書いた任意の figure_id も画像表示できる（学習画面との非対称の解消）。
+    # 取得失敗はプレビューの劣化に留める（構造取得自体は成功させる・fail-soft）。
+    try:
+        figures_index = load_course_figures_index_for_admin(course_id, course_data)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to build figures_index for course %s", course_id, exc_info=True)
+        figures_index = {}
+
     return {
         "course_id": course_id,
         "title": course_title,
@@ -189,6 +201,7 @@ def get_lecture_studio_course_structure(
         "generated_chunks": generated_chunks,
         "audio_chunks": audio_chunks,
         "chapters": chapters_out,
+        "figures_index": figures_index,
     }
 
 
@@ -598,7 +611,33 @@ def rewrite_lecture_studio_course_topic(
     ]):
         logger.error("AI course topic draft returned empty result for course_id=%s topic_id=%s", course_id, topic_id)
         raise HTTPException(status_code=502, detail="AI draft response was empty")
+
+    # AI 書き換え耐性（教材図スタジオ設計書 §7.1b-3）: rewrite は本文を丸ごと再生成する
+    # ため、トピックに紐づく図（evidence_links ∪ linked_figure_ids）の
+    # ``![[figure:id]]`` が黙って消えることがある。消えていたら決定論的に末尾へ復元し、
+    # 「位置がリセットされた」ことをフロントへ正直に伝える（黙って直さない）。
+    result["figures_restored"] = _restore_missing_figure_embeds(result, topic)
     return result
+
+
+def _restore_missing_figure_embeds(result: dict, topic: dict) -> bool:
+    """rewrite 応答の本文から消えた図 embed を末尾へ復元する。復元したら True。
+
+    注入そのものは ``core.course_content_builder._ensure_required_figures_in_material``
+    （コース内容生成と同じ決定論注入）に委譲し、「何が欠けていたか」の判定だけを行う
+    （空白の正規化だけで ``figures_restored`` が立たないようにするため）。
+    """
+    material = result.get("student_material")
+    source_text = str(material.get("source_text") or "") if isinstance(material, dict) else ""
+    missing = [
+        item
+        for item in _required_figure_items(topic)
+        if item.get("figure_id") and f"![[figure:{item['figure_id']}]]" not in source_text
+    ]
+    if not missing:
+        return False
+    _ensure_required_figures_in_material(result, topic)
+    return True
 
 
 @router.get("/courses/{course_id}/lecture-studio/document-structure")

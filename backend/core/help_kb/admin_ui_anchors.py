@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。2026-07-31 時点では全229アンカーがマップ済み
+no_hit 経路で需要を計測する）。2026-07-31 時点では全236アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -178,6 +178,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.evidence-tab-pdf",
         "lecture-studio.extract-claims-btn",
         "lecture-studio.extract-theory-btn",
+        "lecture-studio.figure-studio-adopt",
+        "lecture-studio.figure-studio-modal",
+        "lecture-studio.figure-studio-send",
+        "lecture-studio.figure-suggestions",
+        "lecture-studio.figure-suggestions-generate",
+        "lecture-studio.insert-figure",
         "lecture-studio.insert-slide-marker-btn",
         "lecture-studio.more-menu",
         "lecture-studio.nav-components",
@@ -189,6 +195,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.save-btn",
         "lecture-studio.settings-btn",
         "lecture-studio.stumble-tab-evidence",
+        "lecture-studio.stumble-tab-figures",
         "lecture-studio.stumble-tab-stumble",
         "lecture-studio.theory-tab-claims",
         "lecture-studio.theory-tab-graph",
@@ -580,6 +587,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.extract-claims-btn": "teacher/14-admin-lecture-studio.md#extract-claims-btn",
     # 論理要素候補を抽出
     "lecture-studio.extract-theory-btn": "teacher/14-admin-lecture-studio.md#extract-theory-btn",
+    # 採用して挿入（教材図スタジオ）
+    "lecture-studio.figure-studio-adopt": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # 教材図スタジオ（モーダル本体 / 既存の図から選ぶタブ）
+    "lecture-studio.figure-studio-modal": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # 送信（教材図スタジオの AI との相談）
+    "lecture-studio.figure-studio-send": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # 図の提案ペイン
+    "lecture-studio.figure-suggestions": "teacher/14-admin-lecture-studio.md#figure-suggestions",
+    # 提案を生成
+    "lecture-studio.figure-suggestions-generate": "teacher/14-admin-lecture-studio.md#figure-suggestions",
+    # 🖼 図を挿入
+    "lecture-studio.insert-figure": "teacher/14-admin-lecture-studio.md#insert-figure",
     # + スライド区切りを挿入
     "lecture-studio.insert-slide-marker-btn": "teacher/14-admin-lecture-studio.md#insert-slide-marker-btn",
     # コース設定 ▼
@@ -602,6 +621,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.settings-btn": "teacher/14-admin-lecture-studio.md#settings-btn",
     # 根拠リンク
     "lecture-studio.stumble-tab-evidence": "teacher/14-admin-lecture-studio.md#stumble-tabs",
+    # 図の提案（右ペイン第3トグル）
+    "lecture-studio.stumble-tab-figures": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # つまづき
     "lecture-studio.stumble-tab-stumble": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # 主張

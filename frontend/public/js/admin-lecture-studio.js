@@ -93,9 +93,17 @@
     // コース分だけ揃うまで音声生成を有効化しない（それまでは「読み込み中」扱い）。
     scriptsLoaded: false,
     structureLoaded: false,
-    // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
+    // 再構成ループ (R層): コーストピック右ペインの表示
+    // ("evidence" | "stumble" | "figures"。figures = 教材図スタジオの「図の提案」)
     rightPaneMode: "evidence",
     stumbleByDocument: {},
+    // 教材図スタジオ（teaching_figure_studio_design.md §7.3）: コース単位の
+    // figure_id → {caption, image_url, document_id, teaching} マップ。
+    // course-structure レスポンスの figures_index をそのまま保持し、
+    // ![[figure:id]] プレビューの 2段目フォールバックに使う。コース切替でクリアする。
+    figuresIndex: {},
+    // 図の提案（同 §5.3）の取得キャッシュ。キーは topic_id。コース切替でクリアする。
+    figureSuggestionsByTopic: {},
     // 根拠リンクカードの上位/下位コンテキスト（W層 context lens）の遅延取得キャッシュ。
     // キーは "<element_type>:<正規化id>@<document_id>"。コース切替でクリアする。
     evidenceContextByKey: {},
@@ -298,6 +306,9 @@
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
         lsState.evidenceContextByKey = {};
+        // 教材図スタジオ: コース単位のキャッシュ（figures_index / 図の提案）もクリアする。
+        lsState.figuresIndex = {};
+        lsState.figureSuggestionsByTopic = {};
         lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
@@ -333,6 +344,9 @@
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
         lsState.evidenceContextByKey = {};
+        // 教材図スタジオ: コース単位のキャッシュ（figures_index / 図の提案）もクリアする。
+        lsState.figuresIndex = {};
+        lsState.figureSuggestionsByTopic = {};
         lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
@@ -923,6 +937,10 @@
         if (lsState.courseId !== courseId) return;
         lsState.structureLoaded = true;
         lsState.courseStructure = data || null;
+        // 教材図スタジオ（§7.3）: コース単位の figures_index を保持する。
+        // 未対応バックエンドでは空オブジェクトに縮退する（プレビューは従来どおり
+        // evidence_links 由来の図のみ解決する）。
+        lsState.figuresIndex = (data && data.figures_index) || {};
         lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
       })
@@ -1758,7 +1776,11 @@
       });
     }
     if (!preview) return;
-    if (lsState.rightPaneMode === "stumble") {
+    if (lsState.rightPaneMode === "figures") {
+      // 教材図スタジオ（teaching_figure_studio_design.md §5.3）: 図の提案ペイン。
+      if (rightTitle) rightTitle.textContent = "図の提案";
+      lsRenderFigureSuggestionsPane(topic, preview);
+    } else if (lsState.rightPaneMode === "stumble") {
       if (rightTitle) rightTitle.textContent = "つまづき";
       preview.innerHTML = '<div class="ls-course-muted">つまづきの集計を読み込み中…</div>';
       lsLoadStumbleSummary(topic, preview);
@@ -1767,6 +1789,355 @@
       preview.innerHTML = lsCourseEvidenceHtml(topic);
       lsBindCourseEvidenceCards(topic, preview);
     }
+  }
+
+  // ── 図の提案（教材図スタジオ, teaching_figure_studio_design.md §5.3）─────────
+  // 右ペイン第3トグル。保存済み候補の一覧 + [提案を生成] + カードごとの
+  // [この図を作る] / [却下]。confidence は API が返す段階ラベルのみ描画する（FG8）。
+  // 取得はトグルを開いた最初の1回だけ（ポーリングしない・FG6）。
+
+  function lsFigureSuggestionsBasePath(topicId) {
+    return "/admin/courses/" + encodeURIComponent(lsState.courseId) +
+      "/topics/" + encodeURIComponent(topicId) + "/figure-suggestions";
+  }
+
+  function lsRenderFigureSuggestionsPane(topic, container) {
+    var topicId = topic.id || "";
+    if (!lsState.courseId || !topicId) {
+      container.innerHTML = '<div class="ls-course-muted">トピックを選ぶと図の提案を確認できます。</div>';
+      return;
+    }
+    var cached = lsState.figureSuggestionsByTopic[topicId];
+    if (!cached) {
+      container.innerHTML = '<div class="ls-course-muted">図の提案を読み込み中…</div>';
+      lsLoadFigureSuggestions(topic, container);
+      return;
+    }
+    container.innerHTML = lsFigureSuggestionsHtml(cached);
+    lsBindFigureSuggestions(topic, container);
+  }
+
+  function lsLoadFigureSuggestions(topic, container) {
+    var topicId = topic.id || "";
+    apiFetch(lsFigureSuggestionsBasePath(topicId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (lsState.rightPaneMode !== "figures") return;
+        lsState.figureSuggestionsByTopic[topicId] = data || { suggestions: [] };
+        lsRenderFigureSuggestionsPane(topic, container);
+      })
+      .catch(function () {
+        container.innerHTML = lsFigureSuggestionsWrapperHtml(
+          lsFigureSuggestionsToolbarHtml() +
+          '<div class="ls-course-muted">図の提案を取得できませんでした。' +
+          '<br>[提案を生成] で作成できます。</div>'
+        );
+        lsBindFigureSuggestions(topic, container);
+      });
+  }
+
+  // ペイン全体を包む担体（インスペクト・モードのアンカー）。
+  function lsFigureSuggestionsWrapperHtml(inner) {
+    return '<div class="ls-figure-suggestions" data-ui-anchor="lecture-studio.figure-suggestions">' +
+      inner +
+    '</div>';
+  }
+
+  function lsFigureSuggestionsToolbarHtml() {
+    return '<div class="ls-figure-suggestions-toolbar">' +
+      '<button type="button" class="ls-mini-tab" id="ls-figure-suggest-generate" ' +
+        'data-ui-anchor="lecture-studio.figure-suggestions-generate">提案を生成</button>' +
+    '</div>';
+  }
+
+  function lsFigureSuggestionStatusLabel(status) {
+    var labels = { candidate: "候補", accepted: "作成中", dismissed: "却下", superseded: "差し替え済み" };
+    return labels[status] || status || "";
+  }
+
+  function lsFigureSuggestionCardHtml(suggestion) {
+    var kindLabel = suggestion.figure_kind_label ||
+      (window.FigureStudio && window.FigureStudio.FIGURE_KIND_LABELS
+        ? (window.FigureStudio.FIGURE_KIND_LABELS[suggestion.figure_kind] || suggestion.figure_kind || "")
+        : (suggestion.figure_kind || ""));
+    var status = suggestion.status || "candidate";
+    var actionable = status === "candidate" || status === "accepted";
+    return '<div class="ls-figure-suggestion-card" data-figure-suggestion-id="' + escHtml(suggestion.id) + '">' +
+      '<div class="ls-figure-suggestion-head">' +
+        '<span class="ls-figure-suggestion-kind">' + escHtml(kindLabel) + '</span>' +
+        (status !== "candidate"
+          ? '<span class="ls-figure-suggestion-status">' + escHtml(lsFigureSuggestionStatusLabel(status)) + '</span>'
+          : '') +
+        (suggestion.confidence_label
+          ? '<span class="ls-figure-suggestion-confidence">' + escHtml(suggestion.confidence_label) + '</span>'
+          : '') +
+      '</div>' +
+      (suggestion.gap_reason
+        ? '<div class="ls-figure-suggestion-reason">' + escHtml(suggestion.gap_reason) + '</div>'
+        : '') +
+      (suggestion.figure_brief
+        ? '<div class="ls-figure-suggestion-brief">' + escHtml(suggestion.figure_brief) + '</div>'
+        : '') +
+      (suggestion.anchor_excerpt
+        ? '<button type="button" class="ls-figure-suggestion-anchor" data-figure-suggestion-anchor="' +
+            escHtml(suggestion.anchor_excerpt) + '" title="教材の該当箇所へ移動します">' +
+            '「' + escHtml(lsShortSummary(suggestion.anchor_excerpt, 120)) + '」' +
+          '</button>'
+        : '') +
+      (suggestion.signal_basis
+        ? '<div class="ls-figure-suggestion-basis">' + escHtml(lsFigureSignalBasisLabel(suggestion.signal_basis)) + '</div>'
+        : '') +
+      (actionable
+        ? '<div class="ls-figure-suggestion-actions">' +
+            '<button type="button" class="admin-action-btn" data-figure-suggestion-build="' +
+              escHtml(suggestion.id) + '">この図を作る</button>' +
+            '<button type="button" class="admin-action-btn" data-figure-suggestion-dismiss="' +
+              escHtml(suggestion.id) + '">却下</button>' +
+          '</div>'
+        : '') +
+    '</div>';
+  }
+
+  function lsFigureSignalBasisLabel(basis) {
+    var labels = {
+      text_analysis: "根拠: 教材本文の解析",
+      learner_signals: "根拠: 学習者の記録の集計",
+      both: "根拠: 教材本文の解析と学習者の記録の集計"
+    };
+    return labels[basis] || basis || "";
+  }
+
+  function lsFigureSuggestionsHtml(data) {
+    var suggestions = (data && data.suggestions) || [];
+    var visible = suggestions.filter(function (s) {
+      return s && s.status !== "superseded";
+    });
+    var html = lsFigureSuggestionsToolbarHtml();
+    if (!visible.length) {
+      html += '<div class="ls-course-muted">このトピックの図の提案はまだありません。' +
+        '<br>[提案を生成] を押すと、教材本文と学習者の記録の集計から候補を作ります。</div>';
+      return lsFigureSuggestionsWrapperHtml(html);
+    }
+    html += '<div class="ls-figure-suggestions-list">' +
+      visible.map(function (s) { return lsFigureSuggestionCardHtml(s); }).join("") +
+    '</div>';
+    return lsFigureSuggestionsWrapperHtml(html);
+  }
+
+  function lsBindFigureSuggestions(topic, container) {
+    var generateBtn = container.querySelector("#ls-figure-suggest-generate");
+    if (generateBtn) {
+      generateBtn.addEventListener("click", function () {
+        lsGenerateFigureSuggestions(topic, container, generateBtn);
+      });
+    }
+    container.querySelectorAll("[data-figure-suggestion-anchor]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        lsFocusDraftText(btn.getAttribute("data-figure-suggestion-anchor"));
+      });
+    });
+    container.querySelectorAll("[data-figure-suggestion-build]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-figure-suggestion-build");
+        lsOpenFigureStudioForSuggestion(topic, id);
+      });
+    });
+    container.querySelectorAll("[data-figure-suggestion-dismiss]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-figure-suggestion-dismiss");
+        btn.disabled = true;
+        apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
+          "/figure-suggestions/" + encodeURIComponent(id) + "/dismiss", { method: "POST" })
+          .then(function (res) {
+            if (res.ok) {
+              lsState.figureSuggestionsByTopic[topic.id || ""] = null;
+              lsRenderRightPaneForTopic(topic);
+              return null;
+            }
+            // 409 = 右ペインのキャッシュが古く、既に判断済み（サーバの事実文を見せて
+            // 一覧を再取得する。エラー扱いにしない）
+            return res.json().catch(function () { return null; }).then(function (body) {
+              var detail = body && body.detail;
+              if (res.status === 409) {
+                lsShowActionStatus(detail || "この提案はすでに判断済みです。", "info");
+                lsState.figureSuggestionsByTopic[topic.id || ""] = null;
+                lsRenderRightPaneForTopic(topic);
+                return null;
+              }
+              var err = new Error(detail || ("status " + res.status));
+              err.detail = detail;
+              throw err;
+            });
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            lsShowActionStatus((err && err.detail) || "提案の却下に失敗しました", "error");
+          });
+      });
+    });
+  }
+
+  function lsGenerateFigureSuggestions(topic, container, btn) {
+    var topicId = topic.id || "";
+    var cached = lsState.figureSuggestionsByTopic[topicId];
+    var hasCandidate = ((cached && cached.suggestions) || []).some(function (s) {
+      return s && s.status === "candidate";
+    });
+
+    function doGenerate() {
+      btn.disabled = true;
+      btn.textContent = "生成中…";
+      apiFetch(lsFigureSuggestionsBasePath(topicId) + "/generate", { method: "POST" })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (body) {
+            if (!res.ok) {
+              var err = new Error((body && body.detail) || ("status " + res.status));
+              err.detail = body && body.detail;
+              throw err;
+            }
+            return body;
+          });
+        })
+        .then(function (data) {
+          lsState.figureSuggestionsByTopic[topicId] = { suggestions: (data && data.suggestions) || [] };
+          if (data && data.dropped) {
+            lsShowActionStatus("提案を生成しました（本文と対応が取れなかった候補は保存していません）", "info");
+          } else {
+            lsShowActionStatus("提案を生成しました", "success");
+          }
+          lsRenderRightPaneForTopic(topic);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          btn.textContent = "提案を生成";
+          lsShowActionStatus((err && err.detail) || "提案の生成に失敗しました", "error");
+        });
+    }
+
+    if (!hasCandidate) {
+      doGenerate();
+      return;
+    }
+    // 再生成は既存の候補を差し替える（判断済みの accepted / dismissed は変わらない）。
+    // 事実文の確認は admin.js の共通2段確認モーダルに委ね、無ければ window.confirm へ
+    // フォールバックする（deliberation.js の一括承認と同型）。
+    var confirmMessage = "提案を作り直すと、まだ判断していない候補は差し替え済みになります。" +
+      "作成済みの図と、却下した候補はそのまま残ります。";
+    if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+      window.AdminDangerConfirm.open({
+        title: "図の提案の作り直し",
+        message: confirmMessage,
+        confirmLabel: "作り直す"
+      }, doGenerate);
+    } else {
+      if (!window.confirm(confirmMessage)) return;
+      doGenerate();
+    }
+  }
+
+  function lsFindFigureSuggestion(topicId, suggestionId) {
+    var cached = lsState.figureSuggestionsByTopic[topicId];
+    var suggestions = (cached && cached.suggestions) || [];
+    for (var i = 0; i < suggestions.length; i++) {
+      if (suggestions[i] && suggestions[i].id === suggestionId) return suggestions[i];
+    }
+    return null;
+  }
+
+  // 提案カードの [この図を作る]: brief をプリセットにスタジオを起動する（§6.2-2）。
+  // 挿入先は教材欄で、anchor_excerpt が本文にあればその位置を既定のカーソル位置にする。
+  function lsOpenFigureStudioForSuggestion(topic, suggestionId) {
+    if (!window.FigureStudio) return;
+    var topicId = topic.id || "";
+    var suggestion = lsFindFigureSuggestion(topicId, suggestionId) || {};
+    var materialEl = document.getElementById("ls-course-material-text");
+    var recorded = null;
+    if (materialEl) {
+      var pos = lsDraftOffsetForExcerpt(materialEl.value || "", suggestion.anchor_excerpt);
+      if (pos < 0) {
+        pos = typeof materialEl.selectionStart === "number"
+          ? materialEl.selectionStart : (materialEl.value || "").length;
+      }
+      recorded = { selectionStart: pos, selectionEnd: pos, consumed: false };
+    }
+    window.FigureStudio.open({
+      courseId: lsState.courseId,
+      topicId: topicId,
+      insertTarget: materialEl
+        ? { textarea: materialEl, selectionStart: recorded.selectionStart, selectionEnd: recorded.selectionEnd }
+        : null,
+      preset: {
+        figureBrief: suggestion.figure_brief || "",
+        figureKind: suggestion.figure_kind || "",
+        anchorExcerpt: suggestion.anchor_excerpt || "",
+        suggestionId: suggestionId
+      },
+      existingOnly: false,
+      figuresIndex: lsState.figuresIndex,
+      documentIds: lsCourseDocumentIds(),
+      onInsert: function (figureId, embedText, result) {
+        if (!materialEl) return;
+        lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
+        lsState.figureSuggestionsByTopic[topicId] = null;
+      }
+    });
+    // 提案の accepted 遷移（監査記帳はサーバ側）。失敗しても図の作成は続行できる。
+    apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
+      "/figure-suggestions/" + encodeURIComponent(suggestionId) + "/accept", { method: "POST" })
+      .then(function () { lsState.figureSuggestionsByTopic[topicId] = null; })
+      .catch(function () { /* 事実の記録のみ。UI は止めない */ });
+  }
+
+  // 本文中の逐語引用の位置（見つからなければ先頭40字で再試行 → -1）。
+  function lsDraftOffsetForExcerpt(text, excerpt) {
+    var needle = String(excerpt || "").trim();
+    if (!needle || !text) return -1;
+    var idx = text.indexOf(needle);
+    if (idx >= 0) return idx;
+    var head = needle.slice(0, 40);
+    return head ? text.indexOf(head) : -1;
+  }
+
+  // 提案の anchor_excerpt → 左ドラフトの該当箇所へジャンプする
+  // （lsFocusDraftEvidence と同型。編集タブでは textarea のカーソル移動、
+  //  プレビュー表示中は該当要素のハイライト + スクロール）。
+  function lsFocusDraftText(excerpt) {
+    var needle = String(excerpt || "").trim();
+    if (!needle) return false;
+    var materialEl = document.getElementById("ls-course-material-text");
+    if (materialEl && !materialEl.hidden) {
+      var idx = lsDraftOffsetForExcerpt(materialEl.value || "", needle);
+      if (idx < 0) return false;
+      materialEl.focus();
+      materialEl.selectionStart = idx;
+      materialEl.selectionEnd = Math.min(idx + needle.length, (materialEl.value || "").length);
+      // textarea は scrollIntoView が効かないため、行数から概算スクロールする。
+      var before = (materialEl.value || "").slice(0, idx).split("\n").length - 1;
+      var lineHeight = 20;
+      try {
+        var computed = window.getComputedStyle(materialEl);
+        var parsed = parseFloat(computed.lineHeight);
+        if (parsed > 0) lineHeight = parsed;
+      } catch (e) { /* 既定値を使う */ }
+      materialEl.scrollTop = Math.max(0, (before * lineHeight) - (materialEl.clientHeight / 3));
+      return true;
+    }
+    var preview = document.getElementById("ls-course-material-preview");
+    if (!preview) return false;
+    preview.querySelectorAll(".ls-draft-evidence-focus").forEach(function (el) {
+      el.classList.remove("ls-draft-evidence-focus");
+    });
+    var head = needle.slice(0, 40);
+    var target = null;
+    preview.querySelectorAll("p, li, div, td, h1, h2, h3, h4").forEach(function (el) {
+      if (target) return;
+      var text = el.textContent || "";
+      if (text.indexOf(needle) >= 0 || (head && text.indexOf(head) >= 0)) target = el;
+    });
+    if (!target) return false;
+    target.classList.add("ls-draft-evidence-focus");
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    return true;
   }
 
   // つまづきサマリーを document 単位で取得（キャッシュ）し、トピックの claim に絞って描画。
@@ -2284,6 +2655,10 @@
         '<div class="ls-course-slide-tools-row"' + editHidden + '>' +
           '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-slide-marker-btn" ' +
             'title="最後にフォーカスしていた入力欄（教材 or 本文説明）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>' +
+          // 教材図スタジオ（teaching_figure_studio_design.md §6.2-1）: 教材欄の
+          // カーソル位置に図を挿入する。読み上げ原稿にフォーカス中は無効化する
+          // （図は読み上げから除去されるため、入口で無意味な操作を塞ぐ）。
+          '<button type="button" id="ls-course-insert-figure-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-figure">🖼 図を挿入</button>' +
           '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>' +
         '</div>' +
         '<section class="ls-course-draft-section">' +
@@ -2348,8 +2723,28 @@
     // 「スライド区切りを挿入」ボタン + 整合インジケータ。
     var spokenScriptEl = document.getElementById("ls-course-spoken-script");
     var courseSlideLastFocus = "ls-course-material-text";
-    if (materialEl) materialEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-material-text"; });
-    if (spokenScriptEl) spokenScriptEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-spoken-script"; });
+
+    // 教材図スタジオ（§6.2-1）: [🖼 図を挿入] は教材欄のみが対象。読み上げ原稿に
+    // フォーカス中は disabled + title で理由を出す（図は読み上げから除去される）。
+    var insertFigureBtn = document.getElementById("ls-course-insert-figure-btn");
+    function updateInsertFigureBtnState() {
+      if (!insertFigureBtn) return;
+      var onSpoken = courseSlideLastFocus === "ls-course-spoken-script";
+      insertFigureBtn.disabled = onSpoken;
+      insertFigureBtn.title = onSpoken
+        ? "読み上げ原稿には図を挿入できません（図は読み上げから除去されます）"
+        : "教材欄のカーソル位置に図の埋め込み（![[figure:id]]）を挿入します。";
+    }
+    updateInsertFigureBtnState();
+
+    if (materialEl) materialEl.addEventListener("focus", function () {
+      courseSlideLastFocus = "ls-course-material-text";
+      updateInsertFigureBtnState();
+    });
+    if (spokenScriptEl) spokenScriptEl.addEventListener("focus", function () {
+      courseSlideLastFocus = "ls-course-spoken-script";
+      updateInsertFigureBtnState();
+    });
 
     // サーバへの分割問い合わせは非同期になるため、連続入力時に古いレスポンスが
     // 新しい入力内容を上書きしないよう世代を振って捨てる（lsUpdateSlideIndicatorsNow と同型）。
@@ -2386,6 +2781,101 @@
         updateCourseSlideIndicator();
       });
     }
+
+    // 教材図スタジオの起動（§6.2-1）。挿入位置は押下時点の教材欄の選択範囲を記憶し、
+    // 最初の挿入でだけそれを復元する（2件目以降は直前の挿入で進んだ位置を使う）。
+    if (insertFigureBtn) {
+      insertFigureBtn.addEventListener("click", function () {
+        if (insertFigureBtn.disabled) return;
+        if (!materialEl || !window.FigureStudio) return;
+        var recorded = {
+          selectionStart: typeof materialEl.selectionStart === "number"
+            ? materialEl.selectionStart : (materialEl.value || "").length,
+          selectionEnd: typeof materialEl.selectionEnd === "number"
+            ? materialEl.selectionEnd : (materialEl.value || "").length,
+          consumed: false
+        };
+        window.FigureStudio.open({
+          courseId: lsState.courseId,
+          topicId: topic.id || "",
+          insertTarget: {
+            textarea: materialEl,
+            selectionStart: recorded.selectionStart,
+            selectionEnd: recorded.selectionEnd
+          },
+          preset: null,
+          existingOnly: false,
+          figuresIndex: lsState.figuresIndex,
+          documentIds: lsCourseDocumentIds(),
+          onInsert: function (figureId, embedText, result) {
+            lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
+            updateTopic();
+            updateCourseSlideIndicator();
+          }
+        });
+      });
+    }
+  }
+
+  // 図の挿入（教材図スタジオ / 既存図の選択に共通）。本文へ埋め込みを差し込み、
+  // サーバが返した topic 側登録（evidence_link / linked_figure_ids）と figures_index を
+  // ローカルにも反映して、その場のプレビューで画像が引けるようにする。
+  // トピック本体の保存は既存の [原稿を保存] のみが行う（ここでは PUT しない）。
+  function lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result) {
+    if (!materialEl || !figureId) return;
+    if (recorded && !recorded.consumed) {
+      if (typeof recorded.selectionStart === "number") {
+        materialEl.selectionStart = recorded.selectionStart;
+        materialEl.selectionEnd = typeof recorded.selectionEnd === "number"
+          ? recorded.selectionEnd : recorded.selectionStart;
+      }
+      recorded.consumed = true;
+    }
+    lsInsertTextAtCursor(materialEl, embedText || ("![[figure:" + figureId + "]]"));
+
+    if (result) {
+      if (result.evidence_link) {
+        topic.evidence_links = (topic.evidence_links || []).concat([result.evidence_link]);
+      }
+      if (result.linked_figure_ids) topic.linked_figure_ids = result.linked_figure_ids;
+      // 生成図はコース単位の figures_index にも載る（サーバ側は次回の
+      // course-structure 取得で返す）。挿入直後のプレビュー用に先行登録する。
+      if (!lsState.figuresIndex) lsState.figuresIndex = {};
+      if (!lsState.figuresIndex[figureId]) {
+        lsState.figuresIndex[figureId] = {
+          caption: (result.evidence_link && result.evidence_link.caption) || "",
+          teaching: true
+        };
+      }
+    }
+    lsRefreshCourseMaterialPreview(topic, materialEl);
+  }
+
+  // 教材プレビュー区画だけを再描画する（ドラフト全体を作り直すと textarea の
+  // イベント配線・カーソル位置が失われるため、対象を preview 要素に限定する）。
+  function lsRefreshCourseMaterialPreview(topic, materialEl) {
+    var previewEl = document.getElementById("ls-course-material-preview");
+    if (!previewEl) return;
+    var text = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
+    previewEl.innerHTML = lsRenderCourseMaterialPreview(text, topic);
+    lsHydrateFigureEmbeds(previewEl);
+  }
+
+  // コースの source document id 群（既存図タブのフォールバック取得に使う）。
+  function lsCourseDocumentIds() {
+    var course = lsState.courseStructure || {};
+    var sources = course.sources || (course.data && course.data.sources) || [];
+    var ids = [];
+    var seen = {};
+    sources.forEach(function (source) {
+      var id = source && (source.material_id || source.document_id);
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      ids.push(id);
+    });
+    var current = lsCurrentDocumentId();
+    if (current && !seen[current]) ids.push(current);
+    return ids;
   }
 
   function lsNormalizeEvidenceId(id) {
@@ -3329,15 +3819,30 @@
       // （admin.js の図サムネイル読込 loadFigureThumbnail と同じ方式）。
       if (embed.kind === "figure") {
         var figureItem = evidenceItem && evidenceItem.kind === "figure" ? evidenceItem : null;
+        // 教材図スタジオ（teaching_figure_studio_design.md §7.3）: 2段フォールバック。
+        // ① evidence_links 由来 item（document_id 付き）→ ② コース構造の figures_index
+        // （教員が手で挿入した図・採用済みの生成図もここで解決する。学習画面との整合）。
+        var figureFetchPath = "";
+        var figureCaption = (figureItem && figureItem.caption) || "";
         if (figureItem && figureItem.figure_id && figureItem.document_id) {
-          var fetchPath = "/admin/documents/" + encodeURIComponent(figureItem.document_id) +
+          figureFetchPath = "/admin/documents/" + encodeURIComponent(figureItem.document_id) +
             "/figures/" + encodeURIComponent(figureItem.figure_id) + "/image";
+        } else {
+          var indexed = lsFigureIndexFetch(
+            (figureItem && figureItem.figure_id) ? figureItem.figure_id : embedId
+          );
+          if (indexed) {
+            figureFetchPath = indexed.path;
+            if (!figureCaption) figureCaption = indexed.caption;
+          }
+        }
+        if (figureFetchPath) {
           return '<figure class="material-figure ls-material-figure" data-evidence-ref="' + escHtml(key) + '">' +
             '<span class="material-figure-frame">' +
-              '<img class="material-figure-img ls-figure-embed-img" data-figure-fetch-path="' + escHtml(fetchPath) + '" style="display:none" alt="' + escHtml(figureItem.caption || "図") + '">' +
+              '<img class="material-figure-img ls-figure-embed-img" data-figure-fetch-path="' + escHtml(figureFetchPath) + '" style="display:none" alt="' + escHtml(figureCaption || "図") + '">' +
               '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
             '</span>' +
-            (figureItem.caption ? '<figcaption class="material-figure-caption">' + escHtml(lsShortSummary(figureItem.caption, 200)) + '</figcaption>' : "") +
+            (figureCaption ? '<figcaption class="material-figure-caption">' + escHtml(lsShortSummary(figureCaption, 200)) + '</figcaption>' : "") +
           '</figure>';
         }
         return '<button type="button" class="ls-material-embed ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
@@ -3394,6 +3899,29 @@
       '</button>';
     });
     return html || '<div class="ls-course-muted">教材プレビューは空です。</div>';
+  }
+
+  // 教材図スタジオ（§7.3）: コース構造の figures_index から画像取得パスを引く
+  // （プレビュー解決の2段目）。抽出図は document 経路、生成図（teaching）はコース経路。
+  // image_url が返っていればそれを使う（"/api" プレフィックスは apiFetchRaw と
+  // 整合させるため剥がす。admin.js の loadFigureThumbnail と同じ流儀）。
+  function lsFigureIndexFetch(figureId) {
+    var id = lsNormalizeEvidenceId(figureId);
+    var index = lsState.figuresIndex || {};
+    var entry = index[id] || index[figureId];
+    if (!entry) return null;
+    var path = entry.image_url || "";
+    if (path && path.indexOf("/api/") === 0) path = path.substring(4);
+    if (!path && entry.teaching && lsState.courseId) {
+      path = "/admin/courses/" + encodeURIComponent(lsState.courseId) +
+        "/teaching-figures/" + encodeURIComponent(id) + "/image";
+    }
+    if (!path && entry.document_id) {
+      path = "/admin/documents/" + encodeURIComponent(entry.document_id) +
+        "/figures/" + encodeURIComponent(id) + "/image";
+    }
+    if (!path) return null;
+    return { path: path, caption: entry.caption || "" };
   }
 
   // lsCourseDraftHtml(topic) の innerHTML 差し替え後に呼ぶ。container 内の未取得
@@ -6639,19 +7167,27 @@
     }, 300);
   }
 
-  // 「スライド区切りを挿入」ボタン: 最後にフォーカスしていた textarea のカーソル位置に
-  // \n===\n を挿入する。もう一方の textarea には挿入しない（対応位置の自動推定は不確実）。
-  function lsInsertSlideMarkerIntoTextarea(el) {
+  // textarea のカーソル位置に任意のテキストを挿入する汎用ユーティリティ。
+  // スライド区切り（`===`）と教材図スタジオの `![[figure:id]]` 挿入が共有する
+  // （teaching_figure_studio_design.md §6.1: lsInsertSlideMarkerIntoTextarea の汎用化）。
+  // input イベントを発火させることで既存の updateTopic / インジケータ更新に届ける。
+  function lsInsertTextAtCursor(el, text) {
     if (!el) return;
-    var marker = "\n===\n";
+    var insert = String(text === null || text === undefined ? "" : text);
     var start = typeof el.selectionStart === "number" ? el.selectionStart : (el.value || "").length;
     var end = typeof el.selectionEnd === "number" ? el.selectionEnd : start;
     var value = el.value || "";
-    el.value = value.slice(0, start) + marker + value.slice(end);
-    var newPos = start + marker.length;
+    el.value = value.slice(0, start) + insert + value.slice(end);
+    var newPos = start + insert.length;
     el.selectionStart = el.selectionEnd = newPos;
     el.focus();
     el.dispatchEvent(new Event("input"));
+  }
+
+  // 「スライド区切りを挿入」ボタン: 最後にフォーカスしていた textarea のカーソル位置に
+  // \n===\n を挿入する。もう一方の textarea には挿入しない（対応位置の自動推定は不確実）。
+  function lsInsertSlideMarkerIntoTextarea(el) {
+    lsInsertTextAtCursor(el, "\n===\n");
   }
 
   function lsInsertSlideMarker() {
@@ -7816,6 +8352,17 @@
     deps.onTabActivate = options.onTabActivate || null;
     deps.state = options.state || null;
     state = deps.state;
+
+    // 教材図スタジオ（teaching_figure_studio_design.md §6.1）: 呼び出し元は
+    // 本モジュールだけなので、依存の注入もここで行う（admin.js から見た
+    // 起動点を増やさない）。init は冪等。
+    if (window.FigureStudio && window.FigureStudio.init) {
+      window.FigureStudio.init({
+        apiFetch: deps.apiFetch,
+        apiFetchRaw: deps.apiFetchRaw,
+        escHtml: deps.escHtml
+      });
+    }
 
     initLectureStudio();
     _lsInitRewriteModelChip();

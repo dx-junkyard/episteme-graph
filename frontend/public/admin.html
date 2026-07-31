@@ -564,6 +564,8 @@
                     <div class="ls-mini-tabs" id="ls-stumble-tabs" hidden>
                       <button class="ls-mini-tab active" data-ls-rightmode="evidence" data-ui-anchor="lecture-studio.stumble-tab-evidence">根拠リンク</button>
                       <button class="ls-mini-tab" data-ls-rightmode="stumble" data-ui-anchor="lecture-studio.stumble-tab-stumble">つまづき</button>
+                      <!-- 教材図スタジオ（teaching_figure_studio_design.md §5.3）: 図の提案 -->
+                      <button class="ls-mini-tab" data-ls-rightmode="figures" data-ui-anchor="lecture-studio.stumble-tab-figures">図の提案</button>
                     </div>
                   </div>
                   <!-- レクチャースライド同期 (migration 040 Phase 3): 表示/読み上げテキストの
@@ -947,8 +949,11 @@
   <script src="/js/admin-next-steps.js?v=copilot-fab-20260716-1"></script>
   <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
   <script src="/js/versioning.js?v=copilot-fab-20260716-1"></script>
+  <!-- 教材図スタジオ（Teaching Figure Studio）— 図の生成・調整・挿入モーダル。
+       原稿スタジオ（admin-lecture-studio.js）の init() から init される。 -->
+  <script src="/js/admin-figure-studio.js?v=teaching-figure-studio-20260731-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
-  <script src="/js/admin-lecture-studio.js?v=figure-course-flow-20260719-1"></script>
+  <script src="/js/admin-lecture-studio.js?v=teaching-figure-studio-20260731-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
   <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
   <!-- U層（LLM トークン使用量推計, migration 043）管理 UI — SYSTEM_ADMIN メトリクス + TEACHER 事前見積り -->

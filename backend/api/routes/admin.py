@@ -54,6 +54,7 @@ from services import (
     create_background_task,
     extract_pdf_pages,
     get_background_task,
+    remove_teaching_figure_objects as _remove_teaching_figure_objects,
     get_course_group_permissions,
     get_document_group_permissions,
     get_user_group_ids,
@@ -104,6 +105,9 @@ from core.schema_registry import (
 from core.status import projector as status_projector
 from core.status import schema as status_schema
 from core.storage import get_storage_client
+# 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
+# コース物理削除の全経路で明示削除する（delete_material の巻き添え削除・delete_course）。
+from core.teaching_figures import store as _teaching_figures_store
 # 画像パイプライン §7: 図画像 API は theory_components.py の
 # _ensure_document_viewable（document_id は UUID / material_id 両対応）を必ず通す。
 from routes.theory_components import _ensure_document_viewable
@@ -1344,6 +1348,7 @@ def delete_material(
         ).fetchall()
 
         deleted_course_ids: list[str] = []
+        teaching_figure_keys: list[str] = []
         for row in course_rows:
             course_id = row[0]
             course_data_row = session.execute(
@@ -1371,6 +1376,13 @@ def delete_material(
                         "WHERE object_type = 'course' AND object_id = :cid"
                     ),
                     {"cid": course_id},
+                )
+                # 教材図（course_teaching_figures / teaching_figure_suggestions、
+                # migration 063）も course_id への FK が無いため明示削除する
+                # （教材図スタジオ設計書 §3.1。MinIO オブジェクトは commit 後に
+                # best-effort で削除する）。
+                teaching_figure_keys.extend(
+                    _teaching_figures_store.delete_figures_for_course(session, course_id) or []
                 )
                 # コース削除
                 session.execute(
@@ -1447,6 +1459,10 @@ def delete_material(
         raise
     finally:
         session.close()
+
+    # 教材図の MinIO オブジェクトは DB 削除の commit 後に best-effort で消す
+    # （ロールバック時に画像だけ消える事故を防ぐ）。
+    _remove_teaching_figure_objects(teaching_figure_keys)
 
     logger.info(
         "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
@@ -2932,6 +2948,11 @@ def delete_course(
             ),
             {"course_id": course_id},
         )
+        # 教材図（course_teaching_figures / teaching_figure_suggestions、migration 063）も
+        # course_id への FK が無いため明示削除する（教材図スタジオ設計書 §3.1）。
+        teaching_figure_keys = list(
+            _teaching_figures_store.delete_figures_for_course(session, course_id) or []
+        )
         # コース削除
         session.execute(
             sa_text("DELETE FROM learning_courses WHERE id = :course_id"),
@@ -2945,6 +2966,9 @@ def delete_course(
         raise
     finally:
         session.close()
+
+    # MinIO オブジェクトは commit 後に best-effort で削除する。
+    _remove_teaching_figure_objects(teaching_figure_keys)
 
     logger.info("Course %s (%s) deleted by user=%s", course_id, course_title, current_user["id"])
     # V層（migration 037）: コースの共有版状態を掃除し購読者へ通知する（orphan gap 解消）

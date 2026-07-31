@@ -9471,3 +9471,361 @@ body.admin-inspect-mode textarea:disabled {
 .discuss-opening-toggle[hidden] {
   display: none;
 }
+
+
+/* ===========================================================================
+ * 教材図スタジオ（Teaching Figure Studio）
+ * 正本: docs/features/teaching_figure_studio_design.md §5.3 / §6.1
+ * モーダルの2ペイン・チャット部品は deliberation-* の既存クラスを流用し、
+ * ここでは図スタジオ固有の枠（プレビュー・既存図カード・提案カード）だけを定義する。
+ * =========================================================================== */
+
+/* 無効化されたツールバーボタン（読み上げ原稿にフォーカス中の [🖼 図を挿入] など） */
+.ls-mini-tab:disabled {
+  opacity: .5;
+  cursor: default;
+}
+
+/* --- 右ペイン第3トグル「図の提案」------------------------------------------ */
+.ls-figure-suggestions-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+}
+
+.ls-figure-suggestions-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0 10px 12px;
+}
+
+.ls-figure-suggestion-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 10px;
+  background: var(--color-background-primary);
+}
+
+.ls-figure-suggestion-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+
+.ls-figure-suggestion-kind {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+.ls-figure-suggestion-status,
+.ls-figure-suggestion-confidence {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.ls-figure-suggestion-reason {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--color-text-primary);
+}
+
+.ls-figure-suggestion-brief {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+  margin-top: 4px;
+}
+
+.ls-figure-suggestion-anchor {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  border: 1px dashed var(--color-border);
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.ls-figure-suggestion-anchor:hover {
+  color: var(--color-text-primary);
+}
+
+.ls-figure-suggestion-basis {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 6px;
+}
+
+.ls-figure-suggestion-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+/* --- 図スタジオモーダル ---------------------------------------------------- */
+.figure-studio-dialog {
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 10px;
+  padding: 20px;
+  width: min(1180px, 94vw);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+}
+
+.figure-studio-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.figure-studio-title-text {
+  margin: 0;
+  font-size: 16px;
+  color: var(--color-text-primary);
+}
+
+.figure-studio-close {
+  background: none;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  padding: 4px;
+}
+
+.figure-studio-note {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  line-height: 1.5;
+  margin: 6px 0 10px;
+}
+
+.figure-studio-tabs {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+.figure-studio-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.figure-studio-preview-pane {
+  flex: 1 1 52%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  padding-right: 12px;
+  border-right: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+
+.figure-studio-preview-frame {
+  flex: 0 0 auto;
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 10px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+}
+
+.figure-studio-preview-img {
+  max-width: 100%;
+  max-height: 46vh;
+  height: auto;
+}
+
+.figure-studio-preview-img[hidden] {
+  display: none;
+}
+
+.figure-studio-preview-empty {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary);
+  text-align: center;
+}
+
+.figure-studio-preview-empty[hidden] {
+  display: none;
+}
+
+.figure-studio-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.figure-studio-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary);
+}
+
+.figure-studio-input {
+  padding: 7px 9px;
+  font-size: 13px;
+  font-family: inherit;
+  color: var(--color-text-primary);
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  background: var(--color-background-primary);
+  resize: vertical;
+}
+
+.figure-studio-kind {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.figure-studio-kind:empty {
+  display: none;
+}
+
+.figure-studio-chat-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.figure-studio-existing {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.figure-studio-existing[hidden] {
+  display: none;
+}
+
+.figure-studio-existing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 2px;
+}
+
+.figure-studio-card {
+  display: flex;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-background-primary);
+}
+
+.figure-studio-card-thumb {
+  width: 120px;
+  height: 120px;
+  flex: 0 0 120px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 6px;
+  background: var(--color-background-secondary);
+}
+
+.figure-studio-card-img {
+  max-width: 100%;
+  max-height: 100%;
+}
+
+.figure-studio-card-img[hidden] {
+  display: none;
+}
+
+.figure-studio-card-placeholder {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.figure-studio-card-body {
+  flex: 1;
+  min-width: 0;
+}
+
+.figure-studio-card-meta {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.figure-studio-card-caption {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--color-text-primary);
+  margin: 4px 0 6px;
+}
+
+.figure-studio-card-note {
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  margin-bottom: 6px;
+}
+
+.figure-studio-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  margin-top: 10px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+
+.figure-studio-status {
+  flex: 1;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--color-text-secondary);
+}
+
+.figure-studio-actions {
+  display: flex;
+  gap: 8px;
+  flex: 0 0 auto;
+}
+
+.figure-studio-actions[hidden] {
+  display: none;
+}
+
+.figure-studio-primary:not(:disabled) {
+  background: var(--color-text-info);
+  border-color: var(--color-text-info);
+  color: #fff;
+}
+
+.figure-studio-muted {
+  font-size: 12.5px;
+  color: var(--color-text-tertiary);
+  padding: 10px;
+  line-height: 1.6;
+}

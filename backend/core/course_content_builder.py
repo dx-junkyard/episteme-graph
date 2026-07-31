@@ -1730,11 +1730,18 @@ def _required_equation_items(topic: dict, limit: int = 5) -> list[dict]:
 
 
 def _required_figure_items(topic: dict, limit: int = 5) -> list[dict]:
-    """topic の ``evidence_links``（kind='figure'）から本文へ注入すべき図一覧を導出する。
+    """topic の ``evidence_links``（kind='figure'）∪ ``linked_figure_ids`` から本文へ
+    注入すべき図一覧を導出する。
 
     数式版 ``_required_equation_items`` と同じ発想: 既に解決済みの evidence
-    （``document_figures.id`` が判明しているもの）だけを対象にし、出現順・重複排除で
-    返す。id を発明しない（存在しない figure_id を作らない）。
+    （``document_figures.id`` / ``course_teaching_figures.id`` が判明しているもの）だけを
+    対象にし、出現順・重複排除で返す。id を発明しない（存在しない figure_id を作らない）。
+
+    ``linked_figure_ids`` も引くのは教材図スタジオ設計書 §7.1b-3（AI 書き換え耐性）:
+    採用時の参照登録は ``evidence_links`` と ``linked_figure_ids`` の両方に書くが、
+    片方だけが残っている（旧データ・部分的な編集）場合にも本文復元が効くようにする。
+    caption は ``evidence_links`` 側にしか無いため、``linked_figure_ids`` 単独の図は
+    caption 空で返す（キャプションを捏造しない）。
     """
     items: list[dict] = []
     seen: set[str] = set()
@@ -1745,10 +1752,19 @@ def _required_figure_items(topic: dict, limit: int = 5) -> list[dict]:
         if not figure_id or figure_id in seen:
             continue
         seen.add(figure_id)
+        extra = link.get("extra") if isinstance(link.get("extra"), dict) else {}
         items.append({
             "figure_id": figure_id,
-            "caption": str(link.get("caption") or link.get("summary") or ""),
+            "caption": str(
+                link.get("caption") or link.get("summary") or extra.get("caption") or ""
+            ),
         })
+    for raw_id in topic.get("linked_figure_ids") or []:
+        figure_id = str(raw_id or "").strip()
+        if not figure_id or figure_id in seen:
+            continue
+        seen.add(figure_id)
+        items.append({"figure_id": figure_id, "caption": ""})
     return items[:limit]
 
 

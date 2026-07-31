@@ -14,7 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN
-from services import resolve_document_access
+from services import get_editable_course_data, resolve_document_access
 from core.config import get_settings
 from core.course_data import course_source_material_ids
 from core.document_sections import enrich_chunks_with_sections
@@ -65,6 +65,69 @@ def _ensure_chunk_editable(chunk_id: str, current_user: dict) -> str:
     if not material_id or not resolve_document_access(current_user["id"], material_id).can_edit:
         raise HTTPException(status_code=404, detail="Chunk not found")
     return material_id
+
+
+# ---------------------------------------------------------------------------
+# コース単位の権限ゲート（原稿スタジオ / 教材図スタジオの共有）
+#
+# ``_course_data_for_studio_editable`` は topics.py の module-private helper だったが、
+# 教材図スタジオ（`docs/features/teaching_figure_studio_design.md` §8）も同じ編集権限
+# ゲートを使うためここへ移した（topics.py 側は委譲に置き換え、外部からの参照名
+# ``routes.lecture_studio.topics._course_data_for_studio_editable`` は不変）。
+# ---------------------------------------------------------------------------
+
+
+def _course_data_for_studio_editable(course_id: str, current_user: dict) -> dict:
+    """編集権限チェック付きでコースデータを返す（Phase 2-D 🔴）。
+
+    ``rewrite_lecture_studio_course_topic`` は LLM を呼んでコース内容のドラフトを
+    生成する書き込み系の操作だが、旧実装は ``_course_data_for_studio``（閲覧権限のみ）
+    を使っていたため、viewer 権限しかない教員でも呼び出せてしまっていた
+    （設計書 assistant_common_infra_design.md §5。scripts.py の設定 PUT 系
+    （``get_editable_course_data`` + SYSTEM_ADMIN フォールバック）と権限水準を揃える）。
+    """
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if not course_data and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _get_system_admin_course_data(course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    return course_data
+
+
+def ensure_course_owner(course_id: str, current_user: dict) -> None:
+    """コース所有者 / SYSTEM_ADMIN のみ許可する（それ以外は 403）。
+
+    トピック本文の保存（``save_lecture_studio_course_topic``）と**同じ判定**にするための
+    共通ゲート（教材図スタジオ設計書 §8「権限の非対称に注意」）。editor 権限の教員が
+    図だけ作れて本文へ反映できない中途半端を作らないため、図の生成・保存・採用も
+    トピック保存と同じ所有者ゲートに揃える。
+
+    コース行が無ければ 404（存在の有無で 403/404 を分けるのは所有者判定より前の段階の
+    ``_course_data_for_studio_editable`` が既に済ませている）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT user_id FROM learning_courses WHERE id = :course_id LIMIT 1"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if str(row[0]) != str(current_user["id"]) and current_user.get("role") != ROLE_SYSTEM_ADMIN:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+
+def course_data_for_owner(course_id: str, current_user: dict) -> dict:
+    """所有者 / SYSTEM_ADMIN 限定でコースデータを返す（教材図スタジオの共通入口）。
+
+    ``_course_data_for_studio_editable``（404 fail-closed）→ ``ensure_course_owner``
+    （403）の順に通す。editor 共有の教員は course_data は引けるが 403 になる。
+    """
+    course_data = _course_data_for_studio_editable(course_id, current_user)
+    ensure_course_owner(course_id, current_user)
+    return course_data
 
 
 # ---------------------------------------------------------------------------

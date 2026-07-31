@@ -27,6 +27,9 @@ from core.schema import (
     PaperStructure,
 )
 from core.storage import get_storage_client as _get_storage
+# 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
+# コース削除3経路すべてで明示削除する。
+from core.teaching_figures import store as _teaching_figures_store
 
 logger = logging.getLogger(__name__)
 
@@ -1262,6 +1265,21 @@ def record_review_event(
         session.close()
 
 
+def remove_teaching_figure_objects(minio_keys: list[str]) -> None:
+    """教材図の MinIO オブジェクトを best-effort で削除する（教材図スタジオ §3.1）。
+
+    失敗は WARN ログのみで DB 削除を止めない（孤児オブジェクトが残っても
+    正本である DB 行の削除を無効化しない）。
+    """
+    for key in minio_keys or []:
+        if not key:
+            continue
+        try:
+            _get_storage().remove_object("figure-images", key)
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.warning("Failed to remove teaching figure object %s", key, exc_info=True)
+
+
 def delete_course_data(user_id: str, course_id: str) -> bool:
     """LearningCourse レコードを削除する。"""
     session = _pg_session()
@@ -1274,6 +1292,7 @@ def delete_course_data(user_id: str, course_id: str) -> bool:
             """),
             {"course_id": course_id, "user_id": user_id},
         ).fetchone()
+        figure_keys: list[str] = []
         if result is not None:
             # object_group_permissions は course_id への FK が無いポリモーフィック
             # テーブルなので明示削除する（孤児防止。migration 044。旧テーブルは
@@ -1285,7 +1304,16 @@ def delete_course_data(user_id: str, course_id: str) -> bool:
                 ),
                 {"course_id": course_id},
             )
+            # 教材図（course_teaching_figures / teaching_figure_suggestions、migration 063）も
+            # course_id への FK を持たないため明示削除する（教材図スタジオ §3.1。
+            # 孤児掃除は削除3経路すべてに同乗させる）。
+            figure_keys = list(
+                _teaching_figures_store.delete_figures_for_course(session, course_id) or []
+            )
         session.commit()
+        # MinIO オブジェクト削除は commit 後に best-effort で行う（DB 削除が確定して
+        # から消す — ロールバック時に画像だけ消える事故を防ぐ）。
+        remove_teaching_figure_objects(figure_keys)
         return result is not None
     except Exception:
         session.rollback()
