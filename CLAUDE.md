@@ -727,7 +727,7 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 - **管理画面「？使い方」＝admin インスペクト・モード（2026-07-30、migration 不要）**:
   学習画面のインスペクト・モード（`core/help_kb/ui_anchors.py`）の管理画面版。
   ①アンカー表の正本は `core/help_kb/admin_ui_anchors.py`（`KNOWN_ADMIN_UI_ANCHOR_IDS` /
-  `ADMIN_UI_ANCHORS` 223件。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
+  `ADMIN_UI_ANCHORS` 228件（正確な件数は `test_admin_help_ui_anchors.py` が正）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
   構造的禁止**、`resolve_admin_ui_anchors(role)` は TEACHER=teacher/ のみ・SYSTEM_ADMIN=+
   system_admin/ のロール fail-closed）。②配信 `GET /api/admin/assistant/help/ui-anchors`、
   no_hit 記録 `POST /api/admin/assistant/help/ui-anchor-events`（`_require_teacher`・30分

@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。2026-07-30 時点では全227アンカーがマップ済み
+no_hit 経路で需要を計測する）。2026-07-31 時点では全228アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -172,6 +172,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.display-tab-preview",
         "lecture-studio.display-tab-script",
         "lecture-studio.display-tab-slides",
+        "lecture-studio.evidence-context",
         "lecture-studio.evidence-tab-extract",
         "lecture-studio.evidence-tab-pdf",
         "lecture-studio.extract-claims-btn",
@@ -567,6 +568,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # スライド
     "lecture-studio.display-tab-slides": "teacher/14-admin-lecture-studio.md#display-tabs",
     # 抽出
+    # 根拠リンクカードのヘッダー（開いて文脈を確認）
+    "lecture-studio.evidence-context": "teacher/14-admin-lecture-studio.md#evidence-context",
     "lecture-studio.evidence-tab-extract": "teacher/14-admin-lecture-studio.md#evidence-tabs",
     # PDF
     "lecture-studio.evidence-tab-pdf": "teacher/14-admin-lecture-studio.md#evidence-tabs",

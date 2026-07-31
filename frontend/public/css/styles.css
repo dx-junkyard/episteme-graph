@@ -4346,6 +4346,155 @@ html.learn-page > body {
   font-size: 13px;
 }
 
+/* ── 根拠リンクカードの開閉 + 上位/下位コンテキスト ───────────────────
+   ヘッダはボタン（開閉トグル）。既存の .ls-course-evidence-head レイアウト
+   （flex）をそのまま使い、ボタン既定のスタイルだけ打ち消す。 */
+button.ls-course-evidence-head {
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  margin-bottom: 8px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.ls-course-evidence-caret {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-course-evidence-card.expanded .ls-course-evidence-caret {
+  transform: rotate(90deg);
+}
+
+.ls-course-evidence-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ls-course-evidence-link {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--lx-brand, var(--color-primary, #2563eb));
+  text-decoration: underline;
+}
+
+.ls-course-evidence-context-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.ls-evidence-context {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ls-evidence-context-role,
+.ls-evidence-context-generic {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+}
+
+.ls-evidence-context-role-label {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-evidence-context-generic {
+  color: var(--color-text-secondary);
+}
+
+.ls-evidence-context-lane {
+  border-left: 3px solid var(--color-border);
+  padding: 4px 0 4px 8px;
+}
+
+.ls-evidence-context-lane-title {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.ls-evidence-context-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  line-height: 1.6;
+}
+
+.ls-evidence-context-item-label {
+  color: var(--color-text-primary);
+}
+
+.ls-evidence-context-relation {
+  color: var(--color-text-secondary);
+}
+
+.ls-evidence-context-item-actions {
+  margin-left: auto;
+}
+
+.ls-evidence-context-notes {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 関係の裏付け状態バッジ（段階ラベルのみ。数値は出さない）。
+   出典に裏付け=実線の落ち着いた緑 / 教員確定=通常枠 / AI候補=点線・薄色。 */
+.ls-context-status {
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid var(--color-border);
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.ls-context-status-source_backed {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+.ls-context-status-candidate {
+  border-style: dashed;
+  color: var(--color-text-tertiary);
+  background: transparent;
+}
+
+/* 右カード展開・「ドラフトの該当箇所へ」で左ドラフト側の対応埋め込みを示す
+   （既存 .active と同じトーンの控えめな強調）。 */
+.ls-draft-evidence-focus {
+  outline: 2px solid var(--color-text-info);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .ls-material-embed {
   display: block;
   width: 100%;

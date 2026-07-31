@@ -96,6 +96,9 @@
     // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
     rightPaneMode: "evidence",
     stumbleByDocument: {},
+    // 根拠リンクカードの上位/下位コンテキスト（W層 context lens）の遅延取得キャッシュ。
+    // キーは "<element_type>:<正規化id>@<document_id>"。コース切替でクリアする。
+    evidenceContextByKey: {},
     // 再構成ループ (R層, G4-R): レビューキュー直行ボタンの件数バッジ。
     // null = 未取得（ボタンは件数無しで表示）。教員自身の作業件数であり、
     // 学習者統計の k-匿名レンジ表示原則とは別物（内部運用カウント）。
@@ -294,6 +297,7 @@
         lsState.structureLoaded = false;
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
+        lsState.evidenceContextByKey = {};
         lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
@@ -328,6 +332,7 @@
         lsState.structureLoaded = false;
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
+        lsState.evidenceContextByKey = {};
         lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
@@ -1760,6 +1765,7 @@
     } else {
       if (rightTitle) rightTitle.textContent = "根拠リンク";
       preview.innerHTML = lsCourseEvidenceHtml(topic);
+      lsBindCourseEvidenceCards(topic, preview);
     }
   }
 
@@ -2157,6 +2163,7 @@
         lsRefreshReconReviewBadge();
         // claim 別つまづきパネルのキャッシュも古くなるため破棄する（次回開いたときに再取得）
         lsState.stumbleByDocument = {};
+        lsState.evidenceContextByKey = {};
       })
       .catch(function (err) {
         lsSetReconItemBusy(card, false);
@@ -2521,13 +2528,31 @@
         srcLatex = srcSummary;
         srcSummary = "";
       }
+      // 重複表示の解消: 旧実装は title に summary 全文をそのまま入れていたため、
+      // カード描画（太字ヘッダ=title / 本文=summary）で同じ文が2回並んでいた。
+      // title は「チップの見出し」として必要なので空にはせず、短い抜粋にして
+      // title_is_excerpt を立てる（カード側は抜粋ヘッダを描かず本文のみ出す）。
+      var srcTitle;
+      var srcTitleIsExcerpt = false;
+      if (srcLatex) {
+        srcTitle = link.label || (link.support_role === "equation_quote" ? "数式引用" : "数式");
+      } else if (link.label) {
+        // component 等、builder が明示ラベルを持つリンクはラベルを見出しにする
+        // （summary 本文とは別物なので抜粋扱いにしない。同一文なら
+        // lsEvidenceCardShowsTitle の等値ガードが見出しを抑止する）。
+        srcTitle = link.label;
+      } else if (srcSummary) {
+        srcTitle = lsShortSummary(srcSummary, 60);
+        srcTitleIsExcerpt = true;
+      } else {
+        srcTitle = id || kind;
+      }
       items.push({
         key: lsCourseEvidenceKey(kind, id),
         kind: kind,
         id: id,
-        title: srcLatex
-          ? (link.label || (link.support_role === "equation_quote" ? "数式引用" : "数式"))
-          : (srcSummary || id || kind),
+        title: srcTitle,
+        title_is_excerpt: srcTitleIsExcerpt,
         summary: srcSummary,
         latex: srcLatex,
         role: link.support_role || "",
@@ -2608,6 +2633,17 @@
     }).join("");
   }
 
+  // 太字ヘッダ（title）を描くかどうか。title が本文（summary）の抜粋・同一文の場合は
+  // 描かない（同じ文が2回並ぶのを防ぐ）。title_is_excerpt が無い旧保存データにも
+  // 効くよう、title === summary の等値判定も併用する（後方互換ガード）。
+  function lsEvidenceCardShowsTitle(item) {
+    if (!item || !item.title) return false;
+    if (item.title_is_excerpt) return false;
+    var title = String(item.title).replace(/\s+/g, " ").trim();
+    var summary = String(item.summary || "").replace(/\s+/g, " ").trim();
+    return !(title && title === summary);
+  }
+
   function lsCourseEvidenceHtml(topic) {
     var items = lsTopicEvidenceItems(topic);
     if (!items.length) {
@@ -2615,15 +2651,27 @@
     }
     return '<div class="ls-course-evidence-list">' + items.map(function (item) {
       var metaLabel = lsEvidenceMetaLabel(item.role, item.confidence);
+      var canDeliberate = !!lsEvidenceContextElementType(item.kind);
       return '<article class="ls-course-evidence-card" data-evidence-key="' + escHtml(item.key) + '">' +
-        '<div class="ls-course-evidence-head">' +
+        // ヘッダは開閉トグル（クリックで文脈の遅延読み込み + 左ドラフトの該当箇所へ）。
+        '<button type="button" class="ls-course-evidence-head" data-evidence-toggle="' + escHtml(item.key) + '"' +
+          ' data-ui-anchor="lecture-studio.evidence-context" aria-expanded="false">' +
           '<span class="ls-evidence-kind">' + escHtml(lsEvidenceKindLabel(item.kind)) + '</span>' +
-          '<strong>' + escHtml(item.title) + '</strong>' +
-        '</div>' +
+          (lsEvidenceCardShowsTitle(item) ? '<strong>' + escHtml(item.title) + '</strong>' : '') +
+          '<span class="ls-course-evidence-caret" aria-hidden="true">▸</span>' +
+        '</button>' +
         (item.latex
           ? '<div class="ls-course-evidence-formula">' + lsRenderKatex(item.latex, true) + '</div>'
           : (item.summary ? '<div class="ls-course-evidence-summary">' + lsRenderTextWithFormulas(item.summary, lsTopicFormulas(topic)) + '</div>' : '')) +
         (metaLabel ? '<div class="ls-course-evidence-meta"><span>' + escHtml(metaLabel) + '</span></div>' : '') +
+        '<div class="ls-course-evidence-context-body" data-evidence-context="' + escHtml(item.key) + '" hidden></div>' +
+        '<div class="ls-course-evidence-actions">' +
+          '<button type="button" class="ls-course-evidence-link" data-evidence-draft="' + escHtml(item.key) + '">ドラフトの該当箇所へ</button>' +
+          (canDeliberate
+            ? '<button type="button" class="ls-course-evidence-link" data-evidence-deliberate="' + escHtml(item.key) + '"' +
+                ' data-ui-anchor="lecture-studio.component-deliberate" hidden>深く検討</button>'
+            : '') +
+        '</div>' +
       '</article>';
     }).join("") + '</div>';
   }
@@ -2636,6 +2684,316 @@
     });
     var target = preview.querySelector('[data-evidence-key="' + CSS.escape(key) + '"]');
     if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  // 右ペインの根拠カード → 左ドラフトの対応埋め込みへの逆リンク（双方向化）。
+  // 左ドラフト側の埋め込み・チップは既存の [data-evidence-ref] を担体にしているので、
+  // 同じキー（lsCourseEvidenceKey）で引き当てる。ドラフト末尾の根拠チップより本文中の
+  // 埋め込みを優先する（本文の該当箇所を見せるのが目的）。見つからなければ false。
+  function lsFocusDraftEvidence(key) {
+    var draft = document.getElementById("ls-source-text");
+    if (!draft || !key) return false;
+    draft.querySelectorAll(".ls-draft-evidence-focus").forEach(function (el) {
+      el.classList.remove("ls-draft-evidence-focus");
+    });
+    var targets = draft.querySelectorAll('[data-evidence-ref="' + CSS.escape(key) + '"]');
+    if (!targets.length) return false;
+    var target = null;
+    targets.forEach(function (el) {
+      if (target) return;
+      if (!el.classList.contains("ls-evidence-chip")) target = el;
+    });
+    if (!target) target = targets[0];
+    target.classList.add("ls-draft-evidence-focus");
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    return true;
+  }
+
+  // ── 根拠リンクカードの上位/下位コンテキスト（W層 context lens の遅延取得）─────
+  // 正本: docs/features/element_context_lens_design.md（W層の要素中心コンテキスト）。
+  // 根拠リンクの kind → W層 element_type の写像。source は問い合わせ対象にしない
+  // （出典抜粋は原文そのもので、上位/下位構造を持つ「要素」ではない）。
+  var LS_EVIDENCE_CONTEXT_ELEMENT_TYPES = {
+    component: "theory_component",
+    claim: "theory_claim",
+    equation: "equation",
+    figure: "figure",
+  };
+  // 逆写像（W層 element_type → 根拠リンクの kind）。ペイン内ジャンプの対応判定に使う。
+  var LS_EVIDENCE_CONTEXT_KINDS = {
+    theory_component: "component",
+    theory_claim: "claim",
+    equation: "equation",
+    figure: "figure",
+  };
+  // 関係の裏付け状態（内部語彙をそのまま出さず日本語ラベルにする）。
+  // 数値（confidence 等）は一切表示しない（W8）。
+  var LS_CONTEXT_STATUS_LABELS = {
+    source_backed: "出典に裏付け",
+    confirmed: "教員確定",
+    candidate: "AI候補",
+  };
+
+  function lsEvidenceContextElementType(kind) {
+    return LS_EVIDENCE_CONTEXT_ELEMENT_TYPES[kind] || "";
+  }
+
+  function lsEvidenceContextDocumentId(item) {
+    if (item && item.kind === "figure") return item.document_id || "";
+    return lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+  }
+
+  function lsContextStatusBadgeHtml(status) {
+    var label = LS_CONTEXT_STATUS_LABELS[status];
+    if (!label) return "";
+    return '<span class="ls-context-status ls-context-status-' + escHtml(status) + '">' +
+      escHtml(label) + '</span>';
+  }
+
+  function lsEvidenceContextFactHtml(text) {
+    return '<div class="ls-course-muted">' + escHtml(text) + '</div>';
+  }
+
+  // カード展開時に一度だけ文脈を取得する。トピック/コース切替のステイル応答は
+  // courseId 照合 + 描画先コンテナが右ペインに残っているかで破棄する
+  // （lsLoadStumbleSummary と同型のキャッシュ・縮退方針）。
+  function lsLoadEvidenceContext(topic, item, container) {
+    if (!item || !container) return;
+    var elementType = lsEvidenceContextElementType(item.kind);
+    if (!elementType) {
+      container.innerHTML = lsEvidenceContextFactHtml(
+        "出典の抜粋です。上位・下位の構造の問い合わせは行いません。");
+      return;
+    }
+    var documentId = lsEvidenceContextDocumentId(item);
+    if (!documentId) {
+      container.innerHTML = lsEvidenceContextFactHtml(
+        "この要素に紐づく解析済みドキュメントが見つかりません。");
+      return;
+    }
+    var cacheKey = elementType + ":" + lsNormalizeEvidenceId(item.id) + "@" + documentId;
+    var cached = lsState.evidenceContextByKey[cacheKey];
+    if (cached) { lsRenderEvidenceContext(topic, item, container, cached); return; }
+    container.innerHTML = '<div class="ls-course-muted">文脈を読み込み中…</div>';
+    var courseId = lsState.courseId;
+    apiFetch("/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" +
+      encodeURIComponent(item.id) + "/context?document_id=" + encodeURIComponent(documentId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (courseId !== lsState.courseId) return; // コース切替後の古い応答は捨てる
+        if (!lsEvidenceContextStillVisible(container)) return; // トピック/タブ切替で破棄
+        if (!data) {
+          container.innerHTML = lsEvidenceContextFactHtml("コンテキストを取得できませんでした。");
+          return;
+        }
+        lsState.evidenceContextByKey[cacheKey] = data;
+        lsRenderEvidenceContext(topic, item, container, data);
+      })
+      .catch(function () {
+        if (!lsEvidenceContextStillVisible(container)) return;
+        container.innerHTML = lsEvidenceContextFactHtml("コンテキストを取得できませんでした。");
+      });
+  }
+
+  function lsEvidenceContextStillVisible(container) {
+    var preview = document.getElementById("ls-display-preview");
+    return !!(preview && container && preview.contains(container));
+  }
+
+  function lsRenderEvidenceContext(topic, item, container, data) {
+    if (!data || data.available === false) {
+      container.innerHTML = lsEvidenceContextFactHtml(
+        (data && data.note) || "この要素の文脈情報はまだありません。");
+      return;
+    }
+    var focus = data.focus || {};
+    var html = '<div class="ls-evidence-context">';
+    var roleStatus = focus.contextual_role_status || "";
+    if (focus.contextual_role && roleStatus !== "unidentified") {
+      html += '<div class="ls-evidence-context-role">' +
+        '<span class="ls-evidence-context-role-label">この論文での役割</span>' +
+        '<span class="ls-evidence-context-role-value">' + escHtml(focus.contextual_role) + '</span>' +
+        lsContextStatusBadgeHtml(roleStatus) +
+      '</div>';
+    }
+    if (focus.generic && (focus.generic.name || focus.generic.summary)) {
+      html += '<div class="ls-evidence-context-generic">一般には: ' +
+        escHtml(focus.generic.name || "") +
+        (focus.generic.summary ? ' — ' + escHtml(focus.generic.summary) : "") +
+      '</div>';
+    }
+    html += lsEvidenceContextLaneHtml(topic, "上位（この要素が支えるもの）", data.upper, "upper");
+    html += lsEvidenceContextLaneHtml(topic, "下位（この要素を支えるもの）", data.lower, "lower");
+    var notes = data.notes || [];
+    if (notes.length) {
+      html += '<ul class="ls-evidence-context-notes">' + notes.map(function (note) {
+        return '<li>' + escHtml(note) + '</li>';
+      }).join("") + '</ul>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+    lsBindEvidenceContextActions(container);
+    lsRevealEvidenceDeliberateButton(container, item, focus);
+  }
+
+  function lsEvidenceContextLaneHtml(topic, title, items, laneKind) {
+    items = items || [];
+    var rows;
+    if (!items.length) {
+      rows = lsEvidenceContextFactHtml(laneKind === "upper"
+        ? "この要素が支える上位の構造は、まだ同定されていません。"
+        : "この要素を支える下位の構造は見つかりませんでした。");
+    } else {
+      rows = items.map(function (ctxItem) {
+        return lsEvidenceContextItemHtml(topic, ctxItem);
+      }).join("");
+    }
+    return '<div class="ls-evidence-context-lane ls-evidence-context-lane-' + escHtml(laneKind) + '">' +
+      '<div class="ls-evidence-context-lane-title">' + escHtml(title) + '</div>' +
+      rows +
+    '</div>';
+  }
+
+  function lsEvidenceContextItemHtml(topic, ctxItem) {
+    ctxItem = ctxItem || {};
+    var localMatch = lsEvidenceContextLocalMatch(topic, ctxItem);
+    var action = "";
+    if (localMatch) {
+      action = '<button type="button" class="ls-course-evidence-link" data-context-jump="' +
+        escHtml(localMatch.key) + '">この根拠リンク内で見る</button>';
+    } else if (ctxItem.navigable && ctxItem.element_id && window.Deliberation) {
+      action = '<button type="button" class="ls-course-evidence-link"' +
+        ' data-ui-anchor="lecture-studio.component-deliberate"' +
+        ' data-context-deliberate-type="' + escHtml(ctxItem.element_type || "") + '"' +
+        ' data-context-deliberate-id="' + escHtml(ctxItem.element_id) + '"' +
+        ' data-context-deliberate-doc="' + escHtml(ctxItem.document_id || "") + '"' +
+        ' data-context-deliberate-title="' + escHtml(ctxItem.label || "") + '">深く検討</button>';
+    }
+    return '<div class="ls-evidence-context-item">' +
+      '<span class="ls-evidence-context-item-label">' + escHtml(ctxItem.label || "") + '</span>' +
+      (ctxItem.relation_label
+        ? '<span class="ls-evidence-context-relation">' + escHtml(ctxItem.relation_label) + '</span>'
+        : "") +
+      lsContextStatusBadgeHtml(ctxItem.relation_status) +
+      (action ? '<span class="ls-evidence-context-item-actions">' + action + '</span>' : "") +
+    '</div>';
+  }
+
+  // 同一トピックの根拠リンクに対応アイテムがあるか。(1) ID 一致 → (2) 同 kind の
+  // タイトル/サマリ先頭一致（ITEM.label はサーバ側で切り詰められるため前方一致）。
+  function lsEvidenceContextLocalMatch(topic, ctxItem) {
+    var kind = LS_EVIDENCE_CONTEXT_KINDS[ctxItem && ctxItem.element_type];
+    if (!kind) return null;
+    if (ctxItem.element_id) {
+      var byId = lsEvidenceItemByRef(topic, kind, ctxItem.element_id);
+      if (byId) return byId;
+    }
+    var label = String(ctxItem.label || "").replace(/\s+/g, " ").trim();
+    label = label.replace(/\.\.\.$/, "").replace(/…$/, "").trim();
+    if (label.length < 8) return null;
+    var found = null;
+    lsTopicEvidenceItems(topic).forEach(function (evi) {
+      if (found || evi.kind !== kind) return;
+      var summary = String(evi.summary || "").replace(/\s+/g, " ").trim();
+      var title = String(evi.title || "").replace(/\s+/g, " ").trim();
+      if ((summary && summary.indexOf(label) === 0) || (title && title.indexOf(label) === 0)) {
+        found = evi;
+      }
+    });
+    return found;
+  }
+
+  function lsBindEvidenceContextActions(container) {
+    container.querySelectorAll("[data-context-jump]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        lsFocusEvidence(this.getAttribute("data-context-jump"));
+      });
+    });
+    container.querySelectorAll("[data-context-deliberate-type]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var elementType = this.getAttribute("data-context-deliberate-type");
+        var elementId = this.getAttribute("data-context-deliberate-id");
+        var documentId = this.getAttribute("data-context-deliberate-doc") || "";
+        var title = this.getAttribute("data-context-deliberate-title") || "";
+        if (!elementType || !elementId) return;
+        if (window.Deliberation) {
+          window.Deliberation.openElement(elementType, elementId, {
+            documentId: documentId,
+            title: title,
+          });
+        }
+      });
+    });
+  }
+
+  // カードフッターの「深く検討」は、解決済みの element_id（focus）が取れてから出す。
+  function lsRevealEvidenceDeliberateButton(container, item, focus) {
+    var card = container.closest ? container.closest(".ls-course-evidence-card") : null;
+    if (!card) return;
+    var btn = card.querySelector("[data-evidence-deliberate]");
+    if (!btn) return;
+    var elementType = (focus && focus.element_type) || lsEvidenceContextElementType(item.kind);
+    var elementId = (focus && focus.element_id) || "";
+    if (!window.Deliberation || !elementType || !elementId) { btn.hidden = true; return; }
+    btn.hidden = false;
+    btn.setAttribute("data-context-deliberate-type", elementType);
+    btn.setAttribute("data-context-deliberate-id", elementId);
+    btn.setAttribute("data-context-deliberate-doc",
+      (focus && focus.document_id) || lsEvidenceContextDocumentId(item) || "");
+    btn.setAttribute("data-context-deliberate-title", item.title || "");
+  }
+
+  // 右ペイン根拠カードの配線（開閉トグル + 双方向リンク + フッター操作）。
+  function lsBindCourseEvidenceCards(topic, container) {
+    if (!container) return;
+    var itemsByKey = {};
+    lsTopicEvidenceItems(topic).forEach(function (item) { itemsByKey[item.key] = item; });
+    container.querySelectorAll("[data-evidence-toggle]").forEach(function (head) {
+      head.addEventListener("click", function () {
+        var card = this.closest(".ls-course-evidence-card");
+        if (!card) return;
+        var key = card.getAttribute("data-evidence-key");
+        var body = card.querySelector("[data-evidence-context]");
+        if (card.classList.contains("expanded")) {
+          card.classList.remove("expanded");
+          this.setAttribute("aria-expanded", "false");
+          if (body) body.hidden = true;
+          return;
+        }
+        card.classList.add("expanded");
+        this.setAttribute("aria-expanded", "true");
+        if (body) {
+          body.hidden = false;
+          lsLoadEvidenceContext(topic, itemsByKey[key], body);
+        }
+        // 展開時に左ドラフトの対応箇所へスクロール + ハイライト（Phase 0 の双方向化）。
+        lsFocusDraftEvidence(key);
+      });
+    });
+    container.querySelectorAll("[data-evidence-draft]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        lsFocusDraftEvidence(this.getAttribute("data-evidence-draft"));
+      });
+    });
+    container.querySelectorAll("[data-evidence-deliberate]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var elementType = this.getAttribute("data-context-deliberate-type");
+        var elementId = this.getAttribute("data-context-deliberate-id");
+        var documentId = this.getAttribute("data-context-deliberate-doc") || "";
+        var title = this.getAttribute("data-context-deliberate-title") || "";
+        if (!elementType || !elementId) return;
+        if (window.Deliberation) {
+          window.Deliberation.openElement(elementType, elementId, {
+            documentId: documentId,
+            title: title,
+          });
+        }
+      });
+    });
   }
 
   function lsRenderCourseListPreview(text, topic, emptyMessage) {

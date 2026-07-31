@@ -69,9 +69,10 @@ class TestAdminUiAnchorsModule:
         assert set(admin_anchors_mod.ADMIN_UI_ANCHORS.keys()) <= admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS
 
     def test_all_anchors_currently_mapped(self):
-        # 2026-07-30 時点で全227アンカーがマップ済み（223 + discuss 開幕素材オーサリング
-        # の4件: 議論テーマのボタン/保存・説明レビューキューの開幕素材グループ/本文編集）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 227
+        # 2026-07-31 時点で全228アンカーがマップ済み（223 + discuss 開幕素材オーサリング
+        # の4件: 議論テーマのボタン/保存・説明レビューキューの開幕素材グループ/本文編集
+        # + 原稿スタジオ 根拠リンクカードの開閉トグル lecture-studio.evidence-context）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 228
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

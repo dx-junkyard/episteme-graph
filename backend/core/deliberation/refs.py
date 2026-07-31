@@ -212,6 +212,89 @@ def _resolve_shared_part(element_id: str) -> ElementRef:
     )
 
 
+# ---------------------------------------------------------------------------
+# agent 側 ID（``comp_001`` / ``claim_span_007`` 等）からの解決
+# ---------------------------------------------------------------------------
+#
+# 原稿スタジオの evidence_links や pipeline artifact は agent 側 ID（論文ごとに独立採番）
+# を持つが、``resolve()`` は theory_claim / theory_component について DB UUID を要求する
+# （``_is_uuid`` チェック）。両者を橋渡しするため、``source_scope.legacy_ids`` の JSONB
+# containment で DB 行を索く経路を別関数として足す（``resolve()`` の外部挙動は変えない）。
+#
+# agent 側 ID は文書間で衝突しうるため、**必ず document_id でスコープする**
+# （``core/component_context.py::_resolve_component_row`` と同じ fail-closed パターン。
+# 後付けの Python フィルタではなく SQL の WHERE 句で絞り、コース外・別論文の同名要素へ
+# 誤って一致する余地を断つ）。document_id が無い agent 側 ID は解決しない。
+
+_LEGACY_ID_TABLES = {
+    ELEMENT_THEORY_COMPONENT: "theory_components",
+    ELEMENT_THEORY_CLAIM: "theory_claims",
+}
+
+
+def _resolve_by_legacy_id(element_type: str, element_id: str, document_id: str | None) -> ElementRef:
+    """agent 側 ID を ``source_scope.legacy_ids`` 経由で1行に解決する（document スコープ必須）。"""
+    table = _LEGACY_ID_TABLES[element_type]
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        # document スコープが無ければ agent 側 ID は一意でない（fail-closed・推測で広げない）。
+        raise ElementResolutionError(
+            f"{element_type} agent id requires document_id: {element_id!r}", kind="not_found"
+        )
+    session = get_session()
+    try:
+        row = session.execute(
+            sa_text(
+                f"""
+                SELECT id::text
+                FROM {table}
+                WHERE document_id = :doc_id
+                  AND source_scope->'legacy_ids' ? :raw_id
+                ORDER BY created_at ASC, id::text ASC
+                LIMIT 1
+                """
+            ),
+            {"doc_id": doc_id, "raw_id": str(element_id)},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        raise ElementResolutionError(
+            f"{element_type} not found in document {doc_id}: {element_id}", kind="not_found"
+        )
+    return ElementRef(
+        scope=SCOPE_DOCUMENT,
+        element_type=element_type,
+        element_id=str(row[0]),
+        document_id=doc_id,
+        provenance={"agent_element_id": str(element_id)},
+    )
+
+
+def resolve_with_agent_id(
+    element_type: str,
+    element_id: str,
+    *,
+    document_id: str | None = None,
+    domain_key: str | None = None,
+) -> ElementRef:
+    """``resolve()`` と同じだが、theory_claim / theory_component の agent 側 ID も解決する。
+
+    ``element_id`` が UUID なら従来どおり ``resolve()`` に委譲する（外部挙動は不変）。
+    UUID でない theory_claim / theory_component だけが ``source_scope.legacy_ids`` 経路に
+    入り、**``document_id`` でスコープされる**（無ければ ``kind='not_found'``）。
+    figure / equation / shared_part は常に ``resolve()`` のまま。
+
+    戻り値の ``element_id`` は常に DB UUID（下流の投影が DB UUID 前提のため）。元の
+    agent 側 ID は ``provenance['agent_element_id']`` に残す（情報を落とさない）。
+    """
+    if element_type in _LEGACY_ID_TABLES and not _is_uuid(element_id):
+        ref = _resolve_by_legacy_id(element_type, element_id, document_id)
+        ref.validate()
+        return ref
+    return resolve(element_type, element_id, document_id=document_id, domain_key=domain_key)
+
+
 def resolve(
     element_type: str,
     element_id: str,
