@@ -42,13 +42,22 @@ function extractFrom(src, name){
 // eval(extractMany(...)) すること（forEach などのコールバック内で eval すると宣言が
 // そのコールバックのスコープに閉じ込められ、外から参照できなくなる）。
 function extractMany(src, names){ return names.map(function(n){ return extractFrom(src,n); }).join("\n"); }
-// function ではない "var NAME = { ... };" 形式のモジュール定数（例:
-// MATERIAL_EVIDENCE_KIND_LABELS）を抽出する。
+// function ではない "var NAME = { ... };" / "var NAME = [ ... ];" 形式のモジュール
+// 定数（例: MATERIAL_EVIDENCE_KIND_LABELS / MATERIAL_ELEMENT_CONTEXT_TYPES）を抽出する。
 function extractVar(src, name){
-  const s = src.indexOf("var " + name + " = {");
+  const s = src.indexOf("var " + name + " = ");
   if (s<0) throw new Error("missing var "+name);
-  let d=0,st=false;
-  for(let j=src.indexOf("{",s);j<src.length;j++){const c=src[j];if(c==="{"){d++;st=true;}else if(c==="}"){d--;if(st&&d===0)return src.slice(s,j+1)+";";}}
+  let open=-1,oc="",cc="";
+  for(let j=src.indexOf("=",s)+1;j<src.length;j++){
+    const c=src[j];
+    if(c===" "||c==="\n"||c==="\r"||c==="\t") continue;
+    if(c==="{"){open=j;oc="{";cc="}";}
+    else if(c==="["){open=j;oc="[";cc="]";}
+    break;
+  }
+  if(open<0) throw new Error("unsupported initializer for var "+name);
+  let d=0;
+  for(let j=open;j<src.length;j++){const c=src[j];if(c===oc){d++;}else if(c===cc){d--;if(d===0)return src.slice(s,j+1)+";";}}
   throw new Error("unbalanced var "+name);
 }
 """
@@ -116,10 +125,11 @@ var window={katex:null};
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 var materialEvidenceChipItems = {};
 eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
+eval(extractVar(app,"MATERIAL_ELEMENT_CONTEXT_TYPES"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
  "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
- "renderMaterialEvidenceChip","mdBlocksToHtml","renderMaterialChunk"]));
+ "renderMaterialEvidenceChip","renderMaterialElementContextButton","mdBlocksToHtml","renderMaterialChunk"]));
 const chunk={
   text:"本文 ![[component:comp_1]] つづき ![[claim:claim_1]] さらに ![[source:ev_1]] "
     +"数式 ![[equation:eq_1]] 未知 ![[component:missing_1]]",
@@ -171,10 +181,11 @@ var window={katex:null};
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 var materialEvidenceChipItems = {};
 eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
+eval(extractVar(app,"MATERIAL_ELEMENT_CONTEXT_TYPES"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
  "shortMaterialEvidenceSummary","renderMaterialFigureCard","registerMaterialEvidenceChipEntry",
- "renderMaterialEvidenceChip","mdBlocksToHtml","renderMaterialChunk"]));
+ "renderMaterialEvidenceChip","renderMaterialElementContextButton","mdBlocksToHtml","renderMaterialChunk"]));
 const chunk={
   text:"取り違え ![[claim:comp_1]]",
   formulas:[], figures:[],
