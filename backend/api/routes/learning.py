@@ -1374,18 +1374,6 @@ def _generate_graph_element_explanation(
     source_title = context.get("source_title") or "教材"
     user_message = body.message or f"{element_label}を説明"
 
-    record_student_stumble_event(
-        instructor_id=instructor_id,
-        student_id=user_id,
-        course_id=course_id,
-        material_id=material_id,
-        chunk_id=body.chunk_id,
-        element_id=body.element_id,
-        element_label=element_label,
-        event_type="clicked_explain",
-        user_message=user_message,
-    )
-
     # Phase 2 §5.3: 承認済み element_explanations があれば最優先で使い、ローカル LLM 生成
     # をスキップする（candidate/dismissed/superseded・confidence 生値は出さない、E2/E6）。
     approved_answer = _approved_graph_element_answer(context, element_label, source_title)
@@ -1409,19 +1397,6 @@ def _generate_graph_element_explanation(
             f"[出典: 『{source_title}』]"
         )
     else:
-        if not related_chunks:
-            record_student_stumble_event(
-                instructor_id=instructor_id,
-                student_id=user_id,
-                course_id=course_id,
-                material_id=material_id,
-                chunk_id=body.chunk_id,
-                element_id=body.element_id,
-                element_label=element_label,
-                event_type="explanation_missing",
-                user_message=user_message,
-            )
-
         related_block = "\n\n".join(
             f"[出典: 『{r.get('source_title') or source_title}』]\n{r.get('text', '')[:1200]}"
             for r in related_chunks[:3]
@@ -1471,19 +1446,6 @@ def _generate_graph_element_explanation(
                 answer = answer.replace(formula_id, f"${target_formula_latex}$")
             if target_formula_latex not in answer:
                 answer = f"対象の数式は次の式です。\n\n$${target_formula_latex}$$\n\n" + answer
-        record_student_stumble_event(
-            instructor_id=instructor_id,
-            student_id=user_id,
-            course_id=course_id,
-            material_id=material_id,
-            chunk_id=body.chunk_id,
-            element_id=body.element_id,
-            element_label=element_label,
-            event_type="generated_for_student",
-            user_message=user_message,
-            generated_explanation=answer[:4000],
-        )
-
     persist_chat_history(
         user_id, course_id, topic_id,
         body.history, user_message, answer,
