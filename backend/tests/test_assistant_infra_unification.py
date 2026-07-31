@@ -28,6 +28,7 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
         sys.path.insert(0, _p)
 
 import core.llm_worker.client as llm_worker_client  # noqa: E402
+import core.llm_policy as llm_policy_mod  # noqa: E402
 from core.llm_worker.cost_gate import CostGate  # noqa: E402
 from core.admin_assistant import intent as intent_mod  # noqa: E402
 import core.atlas_generator as atlas_generator  # noqa: E402
@@ -42,7 +43,7 @@ pytestmark_api = pytest.mark.skipif(not _HAS_FASTAPI, reason="FastAPI 未導入"
 
 
 def _fake_client_settings(**overrides) -> SimpleNamespace:
-    """core.llm_worker.client.resolve_model が参照する settings のフェイク。"""
+    """resolve_model の実体（core.llm_policy.resolve_for_setting）が参照する settings のフェイク。"""
     base = dict(
         assistant_llm_model="",
         llm_fast_model="gpt-5.4-nano",
@@ -159,7 +160,7 @@ class TestAssistantModelResolution:
         import routes.admin_assistant as route_mod
 
         monkeypatch.setattr(
-            llm_worker_client, "get_settings",
+            llm_policy_mod, "get_settings",
             lambda: _fake_client_settings(assistant_llm_model="", llm_fast_model="gpt-5.4-nano"),
         )
         assert route_mod._assistant_model() == "gpt-5.4-nano"
@@ -168,7 +169,7 @@ class TestAssistantModelResolution:
         import routes.admin_assistant as route_mod
 
         monkeypatch.setattr(
-            llm_worker_client, "get_settings",
+            llm_policy_mod, "get_settings",
             lambda: _fake_client_settings(assistant_llm_model="custom-assistant-model"),
         )
         assert route_mod._assistant_model() == "custom-assistant-model"
@@ -178,7 +179,7 @@ class TestAssistantModelResolution:
         import routes.admin_assistant as route_mod
 
         monkeypatch.setattr(
-            llm_worker_client, "get_settings",
+            llm_policy_mod, "get_settings",
             lambda: _fake_client_settings(assistant_llm_model="", llm_fast_model=""),
         )
         assert route_mod._assistant_model() is None
@@ -192,21 +193,21 @@ class TestAssistantModelResolution:
 class TestAtlasAssistModelResolution:
     def test_env_unset_falls_back_to_analysis_tier(self, monkeypatch):
         monkeypatch.setattr(
-            llm_worker_client, "get_settings",
+            llm_policy_mod, "get_settings",
             lambda: _fake_client_settings(atlas_assist_llm_model="", llm_analysis_model="o3-mini"),
         )
         assert atlas_generator._assist_model(None) == "o3-mini"
 
     def test_explicit_env_is_used_over_analysis_tier(self, monkeypatch):
         monkeypatch.setattr(
-            llm_worker_client, "get_settings",
+            llm_policy_mod, "get_settings",
             lambda: _fake_client_settings(atlas_assist_llm_model="atlas-custom-model"),
         )
         assert atlas_generator._assist_model(None) == "atlas-custom-model"
 
     def test_caller_supplied_model_wins_over_settings(self, monkeypatch):
         monkeypatch.setattr(
-            llm_worker_client, "get_settings",
+            llm_policy_mod, "get_settings",
             lambda: _fake_client_settings(atlas_assist_llm_model="atlas-custom-model"),
         )
         assert atlas_generator._assist_model("teacher-picked-model") == "teacher-picked-model"

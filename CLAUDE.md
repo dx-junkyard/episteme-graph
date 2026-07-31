@@ -724,6 +724,29 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
   `test_help_kb_refresh_api.py` / `test_help_kb_vector.py` / `test_help_kb_store.py` /
   `test_help_kb_audit.py` / `test_manual_editor_ui_static.py` +
   `test_next_steps_guardrails.py`（G層3ルール分）。
+- **管理画面「？使い方」＝admin インスペクト・モード（2026-07-30、migration 不要）**:
+  学習画面のインスペクト・モード（`core/help_kb/ui_anchors.py`）の管理画面版。
+  ①アンカー表の正本は `core/help_kb/admin_ui_anchors.py`（`KNOWN_ADMIN_UI_ANCHOR_IDS` /
+  `ADMIN_UI_ANCHORS` 228件（正確な件数は `test_admin_help_ui_anchors.py` が正）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
+  構造的禁止**、`resolve_admin_ui_anchors(role)` は TEACHER=teacher/ のみ・SYSTEM_ADMIN=+
+  system_admin/ のロール fail-closed）。②配信 `GET /api/admin/assistant/help/ui-anchors`、
+  no_hit 記録 `POST /api/admin/assistant/help/ui-anchor-events`（`_require_teacher`・30分
+  デデュープは `services.recent_duplicate_ui_anchor_event`（learning 側と共有化済み）・痕跡は
+  kind=`help_usage`/course_id センチネル `"_ui"` で G層 `manual.help_gaps_pending` に相乗り）。
+  ③Copilot chat の `support_action="usage_help"`（+`ui_anchor`）は意図分類 LLM を**バイパス**して
+  非LLM guidance 直行（ui_anchor 直接解決 → 無ければ capability KB+manual 検索）。④フロントは
+  `admin-help-inspect.js`（ES5・`window.AdminHelpInspect`、ヘッダー「❓ 使い方」トグル →
+  `[data-ui-anchor]` ホバーでツールチップ・API はログイン後1回フェッチのみ）。disabled 要素は
+  インスペクト中のみ `pointer-events:none` で親ラッパー（同じ anchor を重複付与）に透過させる。
+  ⑤マニュアル本体はタブ別リファレンス `docs/manual/teacher/1x〜2x-admin-*.md`（15ファイル）+
+  `system_admin/1x-*.md`（7ファイル）— **操作要素1つ=1節（`###`+明示anchor）**、無効化され得る
+  要素は「ボタンが無効になっている場合: 理由+解消方法」を必ず持つ（front-matter `screen:` =
+  admin タブの `data-tab` 値で検索ランキング優先が効く）。⑥ガードレール:
+  `test_admin_help_ui_anchors.py`（表整合・ロール fail-closed・chat 非LLM・痕跡形）+
+  `test_admin_help_inspect_ui_static.py`（UI 契約 + **双方向網羅**: KNOWN 全IDに frontend 担体 /
+  frontend の全 data-ui-anchor 値が KNOWN 登録済み・1属性1ID）+ validator
+  `check_admin_ui_anchor_mappings()`（lifespan で fail-open 実行）。**新しい管理UIを追加したら
+  マニュアル節 + ADMIN_UI_ANCHORS + data-ui-anchor の3点を揃えること**（網羅テストが落ちる）。
 
 ### ガイダンス層（G層, migration 039）
 
@@ -1026,6 +1049,94 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   FastAPI 非 import・削除 API 不在・権限 fail-closed・分離集計・レンジのみ・
   価格ハードコード検出・学習者 API 非漏洩・estimator 決定性）。
 
+### 場面別 LLM モデル選択（M層, migration 061）
+
+各 LLM 使用場面（scene）のモデルを UI から実モデル名で選べる層。正本は
+`docs/features/llm_model_selection_design.md`（不変条項 M1〜M10）。
+
+- **モデル決定の正本は `core/llm_policy.py`**（FastAPI 非 import）。U層 `usage_context` の
+  feature 文字列を scene キーに再利用し、`core/llm.py` の `generate_text` /
+  `generate_text_with_structured_output` / `generate_structured_with_images` /
+  `generate_conversation_turn` が `model=None` のときのみ入口で1回解決する。
+  **「env を読んでモデルを決める」処理を他所に新規に書かない（M1）**。既存の
+  `core/llm_worker/client.py::resolve_model` は `llm_policy.resolve_for_setting` への
+  委譲（外部シグネチャ不変）。
+- **解決順序**: 呼び出し引数 > 実行時 override（contextvar `model_override`、スレッドを
+  またがない）> user 行 > system 行（`llm_model_policies`, migration 061）> 既存
+  `*_LLM_MODEL` env > tier 既定。**モデル選択はユーザーごとに保存される**
+  （`scope='user'` + user_id。教員 A の選択は B に影響しない）。起動時に env →
+  `scope='system'` 行を冪等シード取込（既存 DB 行は上書きしない。以降 DB が勝つ）。
+  DB 実装は `core/llm_policy_store.py`（fail-open・20秒 TTL キャッシュ・書き込み後
+  `invalidate()`）。
+- **カタログ**: 選択肢は `LLM_MODEL_CATALOG_PATH`（既定同梱 `backend/config/llm_models.json`）
+  のホワイトリストのみ。provider / capability（vision）で絞り fail-closed（M4/M5）。
+  embedding モデルは選択対象外（pgvector 次元と結合）。
+  `deliberation:figure_reanalysis` は実体が apparatus vision エンジンのため scene は
+  `pipeline.vision` / env は `apparatus_llm_model`（非 vision モデルへ落とさない）。
+- **API**（`routes/llm_models.py`、`/api/admin/llm-models/...`）: `GET /catalog?scene=`
+  （TEACHER・本人にとっての実効モデル + 選択肢）/ `GET|PUT|DELETE /policies/{scene_key}`
+  （SYSTEM_ADMIN・システム既定）/ `PUT|DELETE /my-policies/{scene_key}`（TEACHER・
+  user_id は認証ユーザー固定）。検証はサーバ側 fail-closed（カタログ外・capability 不足・
+  未知 scene は 422）。監査は `AUDIT_ENTITY_LLM_MODEL_POLICY`。
+- **Phase 4（ステージ別指定、実装済み）**:
+  `GET /pipeline-stages`（TEACHER）— `orchestrator.PIPELINE_STAGES` の順序で
+  `orchestrator.LLM_STAGE_NAMES`（旧 `_LLM_STAGE_NAMES` を公開昇格）と交差した
+  LLM ステージのみ一覧し、各ステージの `feature`（`pipeline:<stage>`）/ `label`
+  （`llm_policy.PIPELINE_STAGE_LABELS`、orchestrator 非 import で llm_policy 側に
+  静的定義・キー集合の相互整合はテストで固定）/ `vision`（`apparatus_semantics` のみ
+  true）/ `effective`（本人にとっての実効モデル）を返す。`GET /policies` の
+  システム既定一覧は各行に `is_feature_level`（scene_key が `SCENES` に無い =
+  `pipeline:<stage>` 等のステージ別上書き行）と `label` を付与し、UI がステージ別の
+  指定（§6.6）をシステム既定の表と区別して描画できるようにする。フロント
+  （`admin-llm-models.js`）: 教材管理の変更パネルに既定で閉じた「▸ ステージ別に指定する
+  （詳細）」（各行 = ラベル + select、先頭は `継承（実効モデル）`。vision ステージは
+  vision 対応 options のみ。**選択は run-only** — `getUploadModels` の
+  `pipeline:<stage>` キーに合流するだけで user 既定としては保存しない）。再解析モーダルは
+  ステージ別指定の事実文表示のみ（編集はアップロード時 —
+  `getReanalyzeModels` は backend が `options.models` を全置換するため前回の
+  `pipeline:<stage>` キーを引き継いで送る）。運用タブは feature 行が1件以上あるときだけ
+  「▸ ステージ別の指定（N件）」を表示（変更/解除は既存の confirm 経路を再利用 +
+  ステージ追加導線）。
+- **解析 run 単位の指定**: `POST /materials/upload` の `models`（JSON 文字列）/
+  reanalyze body `models` → `document_analysis_runs.options.models`（キーは `pipeline` /
+  `pipeline.vision` / `pipeline:<stage>`。前回 run から自動継承）。orchestrator は
+  `_PIPELINE_STEPS` ループ1箇所で stage ごとに `model_override` を張り
+  （`apparatus_semantics` は `pipeline.vision` キーのみ参照 — 汎用 text 指定を vision に
+  流さない）、実行したLLMステージの使用モデルを `stage_outputs._stage_models` に記録する
+  （M7。resume 再利用ステージは前回値を保持、skip は記録しない）。
+- **UI**: 教材管理 = アップロードゾーン直下の1行サマリ `解析モデル: gpt-5.2（システム既定）
+  [変更]`（既定入り・必須入力にしない。確定は本人の user 既定として保存）。再解析モーダル =
+  前回値継承表示。運用タブ「AIモデル」（SYSTEM_ADMIN のみ、システム既定の表 + 事実文
+  confirm）。実装は `admin-llm-models.js`（ES5・`window.AdminLlmModels`）。
+  **表示は実モデル名のみ — tier 名（fast/standard/deep/analysis）を UI に出さない（M3）。
+  学生にはモデル名自体を出さない（M9）。教員に金額を出さない（M8）**。
+- **Phase 3（チャット型・単発操作のチップ、実装済み）**: 共通部品は
+  `AdminLlmModels.createModelChip(opts)`（scene 別カタログキャッシュ・「既定に戻す」項目・
+  catalog 不在時は表示のみの fail-closed）。配置と受け口:
+  ①コースビルダーチャット（`.cb-chat-header`、body `model`、in-memory セッション保持・
+  モデル変更時に表示専用の事実文区切りを挿入）②原稿スタジオの AI 書き換えモーダル
+  （chunk rewrite / topic draft rewrite の body `model`）③コース管理の所有行「AIモデル」
+  モーダル = 受講チャットのコース単位上書き（`PUT /api/learning/courses/{id}` の
+  `llm_models: {learning_chat}`。v1 は learning_chat のみ・事実文 confirm。現在値は
+  `GET /api/admin/courses` の `llm_models` 投影から読む — 学習者向け DTO には出さない）
+  ④地図骨格 generate（body `model`）⑤W層対話（`deliberation.js`、figure 要素は
+  `deliberation:vision` で vision 検証）。**受講チャットの実行時解決は必ず live（HEAD）の
+  course 行から読む**（`services.get_course_live_llm_models`。版ピン中の学習者にも所有者の
+  現在の設定を適用 — モデルは運用パラメータで学習内容ではない）。共通検証は
+  `llm_policy.validate_model_for_scene(scene_key, model)`（fail-closed の単一正本）。
+- **ガードレール**: `test_llm_model_policy_guardrails.py`（FastAPI 非 import・tier 名非表示・
+  金額非表示・KNOWN_FEATURES 全解決・ユーザー分離・llm_usage_events 非接触・fail-open・
+  llm_policy が orchestrator を import しないこと）+
+  `test_llm_policy{,_store}.py` / `test_llm_model_policy_api.py` /
+  `test_pipeline_model_override.py` / `test_llm_models_ui_static.py` /
+  `test_llm_model_phase4.py`（pipeline-stages の順序・vision フラグ・実効モデル、
+  `PIPELINE_STAGE_LABELS` と `LLM_STAGE_NAMES` の相互整合、policies 一覧の
+  `is_feature_level`/`label`、feature キー単位の vision fail-closed 検証）。
+- **非スコープ（v1）**: 学習者向け表示 / embedding 切替 / グループ scope / 自動フォール
+  バック / コスト上限との連動（`*_MAX_CALLS_*` は不変, M10）/ ステージ別選択の
+  ユーザー既定保存（ステージ別はアップロードパネルでは run-only。永続化はシステム既定
+  =運用タブ or API の `pipeline:<stage>` キーのみ）。
+
 ### 質問の出所分類（教材/別の資料/モデル生成）
 
 学習チャットの「教材に沿って質問」「自由に質問・探索」ボタンは廃止し「質問」1つに
@@ -1126,7 +1237,12 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   `DISCUSSION_TOPIC_LABEL="論文との議論"` へ1箇所で変換）。応答は casual と違い
   **学術ディスカッション調**（`_get_discuss_system_prompt`: 即答・出し惜しみ禁止 +
   **生成プロンプト構造的必須**（応答末尾に言い換え/予測/自己説明の誘い or why/how/what-if
-  問い返しを必ず1つ — DM4））。スコープ2段 `LearningChatRequest.discuss_scope`
+  問い返しを必ず1つ — DM4））。**対話進行は歩調合わせ型（2026-07-31、正本は
+  `docs/features/discuss_dialogue_alignment_design.md` DA1〜DA6）**: 発話タイプ別 move
+  （質問=即答維持 / 解釈表明=revoice（言い直し＋確認）→ギャップ提示→学習者が検討箇所を選ぶ /
+  詰まり=一点だけの足場かけ）+ マクロ3局面（係留→ギャップの地図→共同検討）+ 末尾必須問いの
+  uptake 化（学習者の直前の発話を引用・組み込み、汎用文禁止）。局面状態はサーバに持たない
+  （プロンプト自己管理・migration 0）。スコープ2段 `LearningChatRequest.discuss_scope`
   （`course_sources` 既定 / `all_visible`、不正値 422）。該当チャンクゼロでも他スコープへ
   **無断フォールバックしない**（DM1。事実文の context_block に置換）。out_of_source_notice は
   casual と違い discuss では維持（DM1 の明示）。痕跡 payload に `entry_mode: 'discuss'`。
@@ -1160,6 +1276,51 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   `test_discuss_opening.py` / `test_search_visibility.py` / `test_discuss_ui_static.py` /
   `test_discuss_phase2_ui_static.py`（可視性 fail-closed・無断フォールバック禁止・
   生成プロンプト必須要素・数値非表示・`_discussion` 痕跡動作・U層タグ分離・k=3 正本）。
+
+### discuss 開幕素材のオーサリング（投影是正 + AI生成 + 教員添削, migration 062, 2026-07-30）
+
+discuss 開幕画面の情報を「主語で分けて全部出す」層。正本は
+`docs/features/discuss_opening_authoring_design.md`（OA1〜OA8。§12 に実装記録）。
+
+- **Phase 0 投影の是正（非LLM）**: `core/discuss/opening.py` が thesis artifact の
+  `central_question` / `central_thesis.text` / `alternative_theses`（出所ラベル
+  「AI が提示した別の定式化（出典との対応は未確認）」付き）/ `support_structure[].text` を
+  投影（**`paper_goal` の正本は paper_skeleton artifact** — 同一 artifacts dict から併読）。
+  `fragile_points[].subject`（`paper`|`system`）で主語を構造化し、`discuss.js` が
+  「この論文が確かめていないこと」（論文）と「まだ確認できていないところ」（システム。
+  内部用語は平易化）の2区画に分離。少数を一等地・残りは「くわしく見る」details（OA7）。
+- **Phase 0b course_focus**: 教員の「このコースで議論したいこと」＝
+  `learning_courses.data.course_focus`（読みは `core.course_data.course_focus()`、保存は
+  `PUT /api/learning/courses/{id}`・600字上限・空で解除。admin コース管理「議論テーマ」
+  モーダル）。開幕画面の先頭に表示（AI 生成なし）。
+- **Phase 1 生成ステージ `discuss_opening`**: `src/episteme_graph/agents/discuss_opening/`
+  （llm_worker 8系統目アダプタ・1 document = 1 コール）。contextual_explanation 後・
+  course_mapping 前に `_PIPELINE_STEPS` 登録。入力は解決済みテキスト（D層未検証前提 +
+  derivation operation 列 + thesis 合成文）、出力は「議論のきっかけ」（立場を求める問い）。
+  素材が無ければ **LLM を呼ばず** `skipped_reason` 記録（根拠の無い火種を創作しない）。
+  validator は evidence_quote の **verbatim 包含**（捏造ガード）+ D層 denylist を hard error。
+  設定: `DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT`(4) / `DISCUSS_OPENING_MAX_CALLS_PER_DAY`(20) /
+  `DISCUSS_OPENING_LANGUAGE`(ja) / `DISCUSS_OPENING_LLM_MODEL`（fast。scene は
+  `pipeline:discuss_opening`）。
+- **格納庫は element_explanations に相乗り（migration 062）**: element_type CHECK に
+  `'document'`（element_id=document_id）、`role TEXT`（CHECK: NULL or `'discussion_seed'`。
+  §4.2 thesis_restatement は v1 見送り）。行は `kind='contextual'` / `status='candidate'`、
+  evidence に `source_fingerprint`（正本 `core/discuss/authoring.py::compute_source_fingerprint`
+  = central_question + central_thesis_text + claim id 集合の決定論 sha256）。再解析は
+  candidate のみ superseded・approved 不変（#496 と同じ原則）。
+- **レビュー導線**: 既存説明レビューキュー（`deliberation.js`）先頭に独立グループ
+  「この論文の議論のきっかけ」（深く検討なし・インライン編集=既存 PATCH の履歴保持経路・
+  一括承認対応）。一覧 API が `role` と鮮度 `stale`/`stale_notice`（指紋不一致・fail-open・
+  **approved も対象だが status は変えない**）を付与。G層 `course.discuss_opening_unreviewed`
+  （recommended、capability `course.discuss_opening_review`）は**全却下 document を再点灯させない**
+  （dismissed>0 かつ approved==0 の履歴導出・新列なし）。
+- **配信（OA2/OA4/OA6）**: `build_opening` が approved のみを
+  `documents[].discussion_seeds[{body, evidence_quote, authored, authored_by_label}]` で配信
+  （承認ゼロならキー自体を足さず Phase 0 DTO と完全一致。created_at 降順・上限4。署名行は
+  サーバ側定数）。`available` 判定は不変。`GET /discuss/opening` は LLM 0回のまま（OA3）。
+- **ガードレール**: `test_discuss_opening_projection.py` /
+  `test_discuss_opening_authoring_guardrails.py` / `test_discuss_opening_stage.py` +
+  `test_next_steps_guardrails.py`（全却下抑止）+ `test_element_explanation_review_ui_static.py`。
 
 ### 学習チャットのメッセージ書き直し・削除（機能3, B層）
 

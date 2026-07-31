@@ -63,6 +63,7 @@ from routes import reconstruction as reconstruction_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
+from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 13個の子ルーターを、admin.py 経由の二段ネストではなく main.py から直接
@@ -159,6 +160,29 @@ async def _lifespan(application: FastAPI):
                 _library_seed.import_bundled_library()
             except Exception:  # noqa: BLE001
                 logger.warning("bundled library seed import skipped", exc_info=True)
+
+            # M層（LLM モデル選択, migration 061）: 起動時冪等 env → DB シード取込
+            # （設計書 §3 手順⑤→④）+ PolicyBackend を DB 実装へ差し替え。
+            # fail-open — シード・差し替えのいずれが失敗しても NullPolicyBackend の
+            # まま起動を継続する（env/tier 既定のみが効く Phase 0 相当の挙動）。
+            try:
+                from core import llm_policy as _llm_policy
+                from core import llm_policy_store as _llm_policy_store
+
+                seed_session = _pg_session()
+                try:
+                    inserted = _llm_policy_store.seed_env_policies(seed_session)
+                    seed_session.commit()
+                    logger.info("llm_policy: seeded %d system policy row(s) from env", inserted)
+                except Exception:  # noqa: BLE001
+                    seed_session.rollback()
+                    logger.warning("llm_policy: env seed skipped", exc_info=True)
+                finally:
+                    seed_session.close()
+
+                _llm_policy.set_policy_backend(_llm_policy_store.DbPolicyBackend())
+            except Exception:  # noqa: BLE001
+                logger.warning("llm_policy: DB backend activation skipped", exc_info=True)
             break
         except Exception as exc:
             if attempt < max_retries - 1:
@@ -204,6 +228,18 @@ async def _lifespan(application: FastAPI):
             logger.warning("help_kb ui_anchors validation: %s", violation)
     except Exception:  # noqa: BLE001
         logger.warning("help_kb ui_anchors validation skipped", exc_info=True)
+
+    # 管理画面インスペクト・モード（migration 不要）: admin 用 UI アンカー表
+    # （core/help_kb/admin_ui_anchors.py）の実在・audience 越境チェック（fail-open）。
+    # check_ui_anchor_mappings と同じ理由で独立に呼ぶ（validator.py の
+    # check_admin_ui_anchor_mappings docstring 参照）。
+    try:
+        from core.help_kb.validator import check_admin_ui_anchor_mappings
+
+        for violation in check_admin_ui_anchor_mappings():
+            logger.warning("help_kb admin_ui_anchors validation: %s", violation)
+    except Exception:  # noqa: BLE001
+        logger.warning("help_kb admin_ui_anchors validation skipped", exc_info=True)
 
     # ヘルプKB Phase 3: content-hash 監査記帳（変化時のみ・冪等、§2-3）と
     # ベクトル補助層の同期（全置換スナップショット、§5 Phase 3 ①）。
@@ -277,6 +313,7 @@ app.include_router(reconstruction_routes.learning_router)
 app.include_router(discuss_observation_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
+app.include_router(llm_models_routes.router)
 app.include_router(personal_map_routes.router)
 app.include_router(personal_map_routes.me_router)
 

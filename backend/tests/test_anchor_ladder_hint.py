@@ -37,6 +37,7 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
 
 import routes.learning as learning_mod  # noqa: E402
 import core.llm_worker.client as llm_worker_client  # noqa: E402
+import core.llm_policy as llm_policy_mod  # noqa: E402
 from core.llm_worker.cost_gate import CostGate  # noqa: E402
 from schemas import LearningChatRequest  # noqa: E402
 from tests.guardrail_helpers import extract_function_source  # noqa: E402
@@ -95,7 +96,7 @@ def chat_env(monkeypatch):
     （test_learning_chat_infra.py の chat_env と同型）。"""
     settings = _fake_settings()
     monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
-    monkeypatch.setattr(llm_worker_client, "get_settings", lambda: settings)
+    monkeypatch.setattr(llm_policy_mod, "get_settings", lambda: settings)
     monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
 
     monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())

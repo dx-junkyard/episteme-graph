@@ -35,6 +35,8 @@ from typing import Any, Literal, TypeVar
 from pydantic import BaseModel
 
 from core.config import get_settings
+from core.llm_policy import effort_for_call, resolve_scene_model
+from core.llm_usage.context import current_usage_context
 from core.llm_usage.observe import (
     observe_chat,
     observe_embeddings,
@@ -805,7 +807,12 @@ def generate_text(
         LLM のレスポンステキスト。
     """
     settings = get_settings()
-    model_name = model or settings.llm_analysis_model
+    if model is not None:
+        model_name = model
+    else:
+        resolved = resolve_scene_model(current_usage_context().feature)
+        model_name = resolved.model
+        reasoning_effort = effort_for_call(resolved, requested_effort=reasoning_effort)
 
     if settings.llm_provider == "gemini":
         return _gemini_generate_text(
@@ -903,7 +910,7 @@ def generate_text_with_structured_output(
         パースされた Pydantic モデルインスタンス。
     """
     settings = get_settings()
-    model_name = model or settings.llm_analysis_model
+    model_name = model if model is not None else resolve_scene_model(current_usage_context().feature).model
 
     if settings.llm_provider == "gemini":
         return _gemini_generate_structured(messages, response_format, model_name, genai_module=_get_gemini_module())
@@ -1152,7 +1159,10 @@ def generate_structured_with_images(
             "apparatus vision is only supported for LLM_PROVIDER=openai"
         )
 
-    model_name = model or getattr(settings, "apparatus_llm_model", "gpt-4o")
+    if model is not None:
+        model_name = model
+    else:
+        model_name = resolve_scene_model(current_usage_context().feature).model
 
     content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
     for image_bytes in images:
@@ -1265,7 +1275,7 @@ def generate_conversation_turn(
     if not messages or messages[-1].get("role") != "user":
         raise ValueError("messages must be non-empty and end with a 'user' turn")
 
-    model_name = model or settings.llm_analysis_model
+    model_name = model if model is not None else resolve_scene_model(current_usage_context().feature).model
 
     prepared_messages: list[dict[str, Any]] = list(messages)
     if images:

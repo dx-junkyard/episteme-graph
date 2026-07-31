@@ -14,6 +14,15 @@
 //
 // 開幕・着地とも非LLM・既存 API の束ねのみ（DM8）。数値・件数・網羅率は出さない（DM6）。
 // explore（コース逸脱時の内部語彙）に使われる語はここでは使わない（DM5）。
+//
+// 開幕画面の区画は**主語ごとに固定**する（docs/features/discuss_opening_authoring_design.md
+// §2 / §3、Phase 0 + 0b）: 教員（このコースで議論したいこと）/ 論文（答えようとした問い・
+// 主張・確かめていないこと）/ システム（まだ確認できていないところ = 解析が裏付けを取れて
+// いない箇所）/ AI の推測（別の見方。出所ラベル必須）。混ぜて1区画に積まない。
+// 「議論のきっかけ」（同 §7、Phase 3）は主語=論文の区画だが、他と違い投影ではなく
+// **教員が承認した**素材の配信で、承認済みが無ければ区画ごと出ない（OA4）。
+// 一度に並べるのは少数で、残りは同じ画面の「くわしく見る」から到達できる
+// （この画面から到達できない情報は作らない, OA7）。原文の要約・和訳はしない（DM8）。
 (function () {
   "use strict";
 
@@ -55,9 +64,13 @@
     return fetch(API + path, Object.assign({}, opts, { headers: headers }));
   }
 
+  // 引用符も含めてエスケープする。本文（テキストノード）では &quot; / &#39; がそのまま
+  // 引用符として表示されるので見た目は変わらず、`data-discuss-ask="…"` のような属性値に
+  // 論文原文・生成文をそのまま埋める箇所での属性の破れ（値の外へ抜ける事故）を防ぐ。
   function esc(s) {
     return String(s == null ? "" : s)
-      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
   }
 
   // discuss 観測基盤（docs/features/discuss_observation_design.md §3）: UI イベントの
@@ -120,9 +133,14 @@
 
   // 支持構造（前提 / 導出の核 / 訂正の源 …）は A層の分類語彙で、閉じた状態では
   // 専門用語の縦積みにしか見えない。区画ごとに details を開かず、1つに畳んでおく。
+  // entries[]（agent が合成した1文）があればそれを本文として読ませ、無い場合だけ
+  // 従来の参照チップ（items[]）へ縮退する。
   function renderSupportDetails(sections) {
     var usable = (sections || []).filter(function (sec) {
-      return sec && Array.isArray(sec.items) && sec.items.length > 0;
+      if (!sec) return false;
+      var hasEntries = Array.isArray(sec.entries) && sec.entries.length > 0;
+      var hasItems = Array.isArray(sec.items) && sec.items.length > 0;
+      return hasEntries || hasItems;
     });
     if (!usable.length) return "";
     var html = '<details class="discuss-support-section discuss-support-details">';
@@ -130,23 +148,74 @@
     usable.forEach(function (sec) {
       html += '<div class="discuss-support-group">';
       html += '<div class="discuss-support-group-hd">' + esc(sec.label || "") + '</div>';
-      html += '<div class="discuss-chip-row">';
-      sec.items.forEach(function (item) { html += discussChip(item && item.label); });
-      html += '</div></div>';
+      var entries = Array.isArray(sec.entries) ? sec.entries : [];
+      if (entries.length) {
+        entries.forEach(function (entry) { html += supportEntryHtml(entry); });
+      } else {
+        html += '<div class="discuss-chip-row">';
+        sec.items.forEach(function (item) { html += discussChip(item && item.label); });
+        html += '</div>';
+      }
+      html += '</div>';
     });
     html += '</details>';
     return html;
   }
 
-  function renderThesisSection(doc, fragilePoints) {
+  // 支持構造の1エントリ（agent が合成した1文 + その参照）。合成文があればそれを読ませ、
+  // 参照はチップとして下に並べる（従来は claim の生ラベルのチップだけだった）。
+  function supportEntryHtml(entry) {
+    var text = (entry && entry.text) || "";
+    var items = (entry && Array.isArray(entry.items)) ? entry.items : [];
+    if (!text && !items.length) return "";
+    var html = '<div class="discuss-support-entry">';
+    if (text) html += '<div class="discuss-support-entry-text">' + esc(text) + '</div>';
+    if (items.length) {
+      html += '<div class="discuss-chip-row">';
+      items.forEach(function (item) { html += discussChip(item && item.label); });
+      html += '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // 「この論文が答えようとした問い」（主語=論文）。thesis artifact の central_question /
+  // paper_skeleton の paper_goal をそのまま出す（投影の是正 Phase 0。要約・和訳はしない）。
+  function renderQuestionSection(doc) {
+    var thesis = doc.thesis || {};
+    var question = thesis.central_question || "";
+    var goal = thesis.paper_goal || "";
+    if (!question && !goal) return "";
+    var html = '<div class="discuss-section discuss-section-question">';
+    html += '<div class="discuss-section-hd">この論文が答えようとした問い</div>';
+    html += '<div class="discuss-section-sub">ここから議論を始めると、話がつながります。</div>';
+    if (question) {
+      html += '<div class="discuss-claim">';
+      html += '<div class="discuss-claim-text">' + esc(question) + '</div>';
+      html += '<div class="discuss-claim-actions">';
+      html += '<button type="button" class="discuss-claim-ask" data-discuss-ask="' +
+        esc(askText(question)) + '">この問いから聞く</button>';
+      html += '</div></div>';
+    }
+    if (goal) {
+      html += '<div class="discuss-section-sub discuss-paper-goal">この論文が目指したこと: ' +
+        esc(goal) + '</div>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  function renderThesisSection(doc) {
     var thesis = doc.thesis;
-    var docFragile = fragilePoints.filter(function (f) {
-      return f && f.document_id === doc.document_id;
-    });
     var html = '<div class="discuss-section discuss-section-thesis">';
-    html += '<div class="discuss-section-hd">この論文が賭けているもの</div>';
+    html += '<div class="discuss-section-hd">この論文の主張</div>';
     html += '<div class="discuss-section-sub">この論文がいちばん言いたいことです。</div>';
     if (thesis) {
+      // 中心命題は agent が合成した1文（central_thesis_text）を優先して読ませる。
+      // claim の生ラベル（論文原文）も従来どおり併記する（置き換えではなく併記）。
+      if (thesis.central_thesis_text) {
+        html += claimBlockHtml({ label: thesis.central_thesis_text });
+      }
       var claims = Array.isArray(thesis.central_claims) ? thesis.central_claims : [];
       var equations = Array.isArray(thesis.central_equations) ? thesis.central_equations : [];
       claims.forEach(function (c) { html += claimBlockHtml(c); });
@@ -156,18 +225,113 @@
         equations.forEach(function (e) { html += discussChip(e && e.label); });
         html += '</div>';
       }
-      html += renderSupportDetails(thesis.support_sections);
     } else {
       html += '<div class="discuss-muted">この論文の中心命題はまだ整理されていません。</div>';
     }
-    if (docFragile.length) {
-      html += '<details class="discuss-support-section discuss-fragile">';
-      html += '<summary>最も脆い一手（根拠がまだ確認されていない箇所）</summary>';
-      docFragile.forEach(function (f) {
-        html += '<div class="discuss-fragile-item">' + esc(f.fact_line || "") + '</div>';
-      });
-      html += '</details>';
+    html += '</div>';
+    return html;
+  }
+
+  // 「議論のきっかけ」（主語=論文）。ここだけは投影ではなく、解析結果をもとに生成され
+  // **担当教員が承認した**素材（discussion_seeds）を出す
+  // （docs/features/discuss_opening_authoring_design.md §2 / §7）。
+  //  - 承認済みが1件も無ければ区画ごと出さない（Phase 0 の画面と同一・OA4）。
+  //  - 署名（authored_by_label）はサーバが付ける文をそのまま出す。ここで文を作らない。
+  //  - body は「立場を求める問い」そのものなので、押したらその文をそのまま送る
+  //    （askText() で包まない）。観測は既存の opening_starter_clicked に相乗りする。
+  function renderDiscussionSeedsSection(doc) {
+    var seeds = (doc && Array.isArray(doc.discussion_seeds)) ? doc.discussion_seeds : [];
+    var usable = seeds.filter(function (s) { return s && s.body; });
+    if (!usable.length) return "";
+    var notice = "";
+    usable.forEach(function (s) {
+      if (!notice && s.authored_by_label) notice = s.authored_by_label;
+    });
+    var html = '<div class="discuss-section discuss-section-seeds">';
+    html += '<div class="discuss-section-hd">議論のきっかけ</div>';
+    html += '<div class="discuss-section-sub">立場を決めて答えると、そこから議論が進みます。</div>';
+    usable.forEach(function (s) {
+      html += '<div class="discuss-seed-item">';
+      html += '<div class="discuss-seed-body">' + esc(s.body) + '</div>';
+      if (s.evidence_quote) {
+        html += '<div class="discuss-seed-quote">論文の記述: 『' + esc(s.evidence_quote) + '』</div>';
+      }
+      html += '<div class="discuss-claim-actions">';
+      html += '<button type="button" class="discuss-claim-ask discuss-seed-ask" data-discuss-ask="' +
+        esc(s.body) + '">この問いから話す</button>';
+      html += '</div></div>';
+    });
+    if (notice) {
+      html += '<div class="discuss-attribution discuss-seed-attribution">' + esc(notice) + '</div>';
     }
+    html += '</div>';
+    return html;
+  }
+
+  // 「別の見方（AI の提示）」（主語=AI の推測）。alternative_theses は出典（claim_ids /
+  // evidence_block_ids）を持たない artifact なので、サーバが付ける出所ラベル
+  // （attribution_label）を必ず添えて出す。無署名で論文の主張として並べない。
+  function renderAlternativesSection(thesis) {
+    var alts = (thesis && Array.isArray(thesis.alternatives)) ? thesis.alternatives : [];
+    if (!alts.length) return "";
+    var html = '<div class="discuss-section discuss-section-alternatives">';
+    html += '<div class="discuss-section-hd">別の見方（AI の提示）</div>';
+    html += '<div class="discuss-section-sub">論文の主張そのものではありません。' +
+      '解析が別の言い方の候補として挙げたものです。</div>';
+    alts.forEach(function (alt) {
+      var text = (alt && alt.text) || "";
+      if (!text) return;
+      html += '<div class="discuss-alt-item">';
+      html += '<div class="discuss-alt-text">' + esc(text) + '</div>';
+      if (alt.attribution_label) {
+        html += '<div class="discuss-attribution">' + esc(alt.attribution_label) + '</div>';
+      }
+      html += '</div>';
+    });
+    html += '</div>';
+    return html;
+  }
+
+  // 脆い箇所は**主語ごとに2区画**に分ける（投影の是正 §2/§3）。
+  //  - kind='assumption'（subject='paper'）: この論文が確かめていないこと
+  //  - kind='backbone_node'（subject='system'）: 解析がまだ裏付けを取れていないところ
+  // 混ぜて1つの見出しに積むと（旧実装）、システムの解析状態が論文の弱点として
+  // 読まれてしまう。
+  function fragileItemsHtml(points) {
+    var html = "";
+    points.forEach(function (f) {
+      html += '<div class="discuss-fragile-item">';
+      if (f && f.label) html += '<div class="discuss-fragile-label">' + esc(f.label) + '</div>';
+      html += '<div class="discuss-fragile-fact">' + esc((f && f.fact_line) || "") + '</div>';
+      html += '</div>';
+    });
+    return html;
+  }
+
+  // D層台帳由来（コース全体の未検証前提）。document_id を持たないため、以前は
+  // renderThesisSection の document_id 一致フィルタで画面に一度も出ていなかった。
+  // 開幕画面から到達できる場所を必ず持たせる（OA7）。
+  function renderPaperUnverifiedSection(fragilePoints) {
+    var points = (fragilePoints || []).filter(function (f) { return f && f.kind === "assumption"; });
+    if (!points.length) return "";
+    var html = '<details class="discuss-section discuss-section-unverified">';
+    html += '<summary class="discuss-section-hd">この論文が確かめていないこと</summary>';
+    html += '<div class="discuss-section-sub">前提として置かれていて、検証の記録がない箇所です。</div>';
+    html += fragileItemsHtml(points);
+    html += '</details>';
+    return html;
+  }
+
+  function renderSystemUnconfirmedSection(fragilePoints, documentId) {
+    var points = (fragilePoints || []).filter(function (f) {
+      return f && f.kind === "backbone_node" && (!documentId || f.document_id === documentId);
+    });
+    if (!points.length) return "";
+    var html = '<div class="discuss-section discuss-section-unconfirmed">';
+    html += '<div class="discuss-section-hd">まだ確認できていないところ</div>';
+    html += '<div class="discuss-section-sub">論文の弱点ではありません。' +
+      'この教材を解析したときに、裏付けを取れなかった箇所です。</div>';
+    html += fragileItemsHtml(points);
     html += '</div>';
     return html;
   }
@@ -232,25 +396,58 @@
     return html;
   }
 
+  // 「このコースで議論したいこと」（主語=教員）。教員の任意入力のみで AI 生成は
+  // 関与しない。未入力なら区画ごと出さない（欠落を警告・催促しない）。
+  function renderCourseFocusSection(focus) {
+    if (!focus) return "";
+    var html = '<div class="discuss-section discuss-section-focus">';
+    html += '<div class="discuss-section-hd">このコースで議論したいこと</div>';
+    html += '<div class="discuss-section-sub">担当教員が書いたものです。</div>';
+    html += '<div class="discuss-focus-text">' + esc(focus) + '</div>';
+    html += '</div>';
+    return html;
+  }
+
+  // 開幕画面に一度に並べるのは少数（このコースで議論したいこと・きっかけ・問い・主張）。
+  // 残り（バックボーン・支持構造・別の見方・まだ確認できていないところ）は同じ画面の
+  // 「くわしく見る」から到達できるようにする。この画面から到達できない情報は作らない（OA7）。
   function buildOpeningHtml(data) {
     var docs = Array.isArray(data.documents) ? data.documents : [];
-    if (!docs.length) return "";
+    var focus = (data && data.course_focus) || "";
+    // fail-closed: 出せる中身（論文の投影 or 教員の入力）が何も無ければ描画しない。
+    if (!docs.length && !focus) return "";
     var multi = docs.length > 1;
     var fragile = Array.isArray(data.fragile_points) ? data.fragile_points : [];
     var html = '<div class="discuss-opening">';
+    // 教員の提示を最初に読ませる（誰が開いても同じ画面、を非LLMで解く唯一の手段）。
+    html += renderCourseFocusSection(focus);
+    // 進行の型を先に予告する（discuss_dialogue_alignment_design.md §6）。序盤の
+    // 「言い直し＋確認」の往復が冗長に見えないよう、静的文言で流れだけ伝える（DM6）。
     html += '<div class="discuss-opening-note">' +
       'トピック順に縛られず、論文全体について話せます。' +
-      '回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。</div>';
+      '回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。' +
+      'まず互いの読みを突き合わせてから、論文の主張を一緒に検討します。</div>';
     // 行動の起点（最初の一手）を最上部に置く。以前は最下部にあり、初見の学習者が
     // 最初に取れる操作が折り返し線の外にあった。
     html += renderFirstMoveSection();
     docs.forEach(function (doc) {
       html += '<div class="discuss-opening-doc">';
       if (multi) html += '<div class="discuss-opening-doc-title">' + esc(doc.title || "") + '</div>';
-      html += renderThesisSection(doc, fragile);
+      html += renderQuestionSection(doc);
+      html += renderThesisSection(doc);
+      // 承認済みの「議論のきっかけ」は一等地（折りたたみの外）に置く。無ければ何も出ない。
+      html += renderDiscussionSeedsSection(doc);
+      html += '<details class="discuss-more">';
+      html += '<summary>この論文の組み立てをくわしく見る</summary>';
       html += renderBackboneSection(doc);
+      html += renderSupportDetails(doc.thesis && doc.thesis.support_sections);
+      html += renderAlternativesSection(doc.thesis);
+      html += renderSystemUnconfirmedSection(fragile, doc.document_id);
+      html += '</details>';
       html += '</div>';
     });
+    // D層台帳由来（コース全体の前提）は document に紐づかないので docs ループの外に出す。
+    html += renderPaperUnverifiedSection(fragile);
     if (data.truncated) {
       html += '<div class="discuss-muted discuss-truncated-note">' +
         '論文・資料の一覧は主要なものに絞って表示しています。</div>';

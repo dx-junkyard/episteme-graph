@@ -46,6 +46,13 @@ per-element ゲートは不要（`services.resolve_document_access` で正規化
 行う。fail-closed=404）。組み立ては非LLM・DB 書き込みゼロの `core.deliberation.inventory.build()`
 に一任し、本ルータは権限ゲートと整形のみを担う。
 
+軽量コンテキスト取得（本増分）: `GET /elements/{element_type}/{element_id}/context` は
+overview の面③（`core.deliberation.context_lens`）だけを返す読み取り専用の派生経路。
+overview は面②のコーパス横断ベクトル検索まで走るため、原稿スタジオ「根拠リンク」ペインの
+ように上位/下位コンテキストだけが要る呼び出しには重い。theory_claim / theory_component は
+agent 側 ID（`comp_001` 等）でも呼べるよう `refs.resolve_with_agent_id` を通す（agent 側 ID は
+必ず `document_id` スコープ内で解決される）。権限ゲート・fail-soft の作法は overview と同型。
+
 core 側（`core.deliberation`）は FastAPI を import しない。
 """
 
@@ -74,6 +81,7 @@ from core.deliberation import (
 from core.library import search as library_search
 from core.library import store as library_store
 from core.deliberation.standardization import worker as standardization_worker
+from core import llm_policy
 from core.llm_worker.history import window_history
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
@@ -395,6 +403,57 @@ def get_element_overview(
     }
 
 
+@router.get("/elements/{element_type}/{element_id}/context")
+def get_element_context(
+    element_type: str,
+    element_id: str,
+    document_id: str | None = Query(
+        default=None,
+        description="equation 要素で必須（独立テーブルを持たないため document で一意化）。"
+        "theory_claim / theory_component は agent 側 ID（comp_001 等）の解決スコープにも使う。",
+    ),
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """要素中心コンテキスト（面③）だけを軽量に返す（非LLM・DB 非変更）。
+
+    overview（``get_element_overview``）は面①内訳・面②位置づけ（コーパス横断のベクトル
+    検索を含む）・説明まで一括で組み立てるため、原稿スタジオ「根拠リンク」ペインのような
+    上位/下位コンテキストだけが要る呼び出しには重い。本エンドポイントは
+    ``context_lens.build()`` のみを実行する。
+
+    - document-scoped（figure/theory_component/theory_claim/equation）は解決後に
+      ``_ensure_document_viewable`` を通す（fail-closed・W5）。ゲートは DB 行由来の
+      ``ref.document_id`` に対して行い、クエリで渡された hint は信用しない。
+    - domain-scoped（shared_part）はコンテキスト投影を持たないため
+      ``available: false`` + 事実文を返す（``context_lens.build()`` が None）。
+    - theory_claim / theory_component は agent 側 ID（``comp_001`` 等）でも呼べる
+      （``refs.resolve_with_agent_id``。agent 側 ID は必ず ``document_id`` スコープ内で
+      解決され、スコープ外の同名要素には一致しない）。
+    - 数値（confidence 等）は返さない（W8。``context_lens.build()`` の出力は既に
+      段階ラベルのみ）。
+    """
+    try:
+        ref = refs.resolve_with_agent_id(element_type, element_id, document_id=document_id)
+    except ElementResolutionError as exc:
+        raise _http_from_resolution_error(exc) from exc
+
+    if ref.scope == SCOPE_DOCUMENT:
+        # 権限ゲート（fail-closed）。閲覧不可・不存在は 404。
+        _ensure_document_viewable(ref.document_id or "", current_user)
+
+    try:
+        context_result = context_lens.build(ref)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "deliberation context lens failed for %s:%s", ref.element_type, ref.element_id, exc_info=True
+        )
+        return {"available": False, "note": "コンテキスト投影の取得に失敗しました"}
+
+    if context_result is None:
+        return {"available": False, "note": "この要素型にはコンテキスト投影がありません"}
+    return {"available": True, **context_result}
+
+
 # ---------------------------------------------------------------------------
 # Phase W-β: 同一性リンク（element_identity_links）
 # ---------------------------------------------------------------------------
@@ -684,6 +743,10 @@ class SelectedFigureContext(BaseModel):
 class MessageCreateRequest(BaseModel):
     content: str
     selected_context: SelectedFigureContext | None = None
+    # M層 Phase 3（llm_model_selection_design.md §6.5）: この実行だけのモデル上書き
+    # （scene "deliberation"。figure 要素は "deliberation:vision" として vision
+    # capability を必須検証する）。未指定は従来どおり resolve_model()。
+    model: str | None = None
 
 
 def _session_response(session: dict[str, Any]) -> dict[str, Any]:
@@ -811,6 +874,18 @@ def post_deliberation_message(
             detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
         )
 
+    # M層 Phase 3（§6.5）: この実行だけのモデル上書き。figure 要素は画像添付（vision）
+    # 経路になるため "deliberation:vision" として capability=vision を必須検証する
+    # （非 vision モデルへ落とす回帰を防ぐ、M5）。
+    requested_model = (body.model or "").strip() or None
+    if requested_model:
+        _validation_scene = (
+            "deliberation:vision" if ref.element_type == ELEMENT_FIGURE else llm_policy.SCENE_DELIBERATION
+        )
+        reason = llm_policy.validate_model_for_scene(_validation_scene, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+
     grounding = dialogue.build_grounding(ref)
     if grounding.get("positioning", {}).get("available"):
         _apply_cross_corpus_gate(grounding["positioning"], current_user)
@@ -852,6 +927,7 @@ def post_deliberation_message(
         user_content=llm_user_content,
         grounding_text=grounding_text,
         images=images,
+        model=requested_model,
         user_id=current_user.get("id"),
     )
 

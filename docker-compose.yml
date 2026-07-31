@@ -61,6 +61,8 @@ services:
       TENSION_MAX_CALLS_PER_SESSION: ${TENSION_MAX_CALLS_PER_SESSION:-3}
       TENSION_MAX_CALLS_PER_DAY: ${TENSION_MAX_CALLS_PER_DAY:-10}
       TENSION_LLM_MODEL: ${TENSION_LLM_MODEL:-}
+      # M層モデルカタログ（空なら同梱 backend/config/llm_models.json = /app/config/llm_models.json）
+      LLM_MODEL_CATALOG_PATH: ${LLM_MODEL_CATALOG_PATH:-}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。

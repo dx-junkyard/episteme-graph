@@ -211,9 +211,9 @@
         '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px">' +
           '<h3 class="admin-section-title" style="margin-bottom:0">discuss 観測状況</h3>' +
           '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-            '<button id="ado-refresh-btn" class="admin-action-btn">取得</button>' +
-            '<button id="ado-dump-targz-btn" class="admin-action-btn">ダンプ (tar.gz)</button>' +
-            '<button id="ado-dump-zip-btn" class="admin-action-btn">ダンプ (zip)</button>' +
+            '<button id="ado-refresh-btn" class="admin-action-btn" data-ui-anchor="discuss-observation.refresh">取得</button>' +
+            '<button id="ado-dump-targz-btn" class="admin-action-btn" data-ui-anchor="discuss-observation.dump-targz">ダンプ (tar.gz)</button>' +
+            '<button id="ado-dump-zip-btn" class="admin-action-btn" data-ui-anchor="discuss-observation.dump-zip">ダンプ (zip)</button>' +
           '</div>' +
         '</div>' +
         '<p class="ado-note">' +

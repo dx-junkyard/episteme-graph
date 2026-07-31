@@ -883,6 +883,207 @@ class TestNoAtlasBindingPendingSuppression:
 
 
 # ===========================================================================
+# Group A-7: course.discuss_opening_unreviewed（discuss_opening_authoring_design.md §6.2）
+# ===========================================================================
+
+
+class _ScriptedSession:
+    """複数クエリを撃つ評価関数用のフェイク（SQL 断片で応答を切り替える）。
+
+    `_FakeSession` は全クエリに同じ行を返すため、コース → document 解決 → 素材集計の
+    3本を撃つ `_eval_course_discuss_opening_unreviewed` には使えない。
+    """
+
+    def __init__(self, courses=None, documents=None, seeds=None):
+        self.courses = courses or []
+        self.documents = documents or []
+        self.seeds = seeds or []
+        self.queries = []
+
+    def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        self.queries.append((sql, params))
+        if "FROM learning_courses" in sql:
+            return _FakeResult(self.courses)
+        if "FROM documents" in sql:
+            return _FakeResult(self.documents)
+        if "FROM element_explanations" in sql:
+            return _FakeResult(self.seeds)
+        raise AssertionError(f"unexpected SQL: {sql!r}")
+
+    def tables_queried(self):
+        return [
+            table
+            for table in ("learning_courses", "documents", "element_explanations")
+            if any(f"FROM {table}" in sql for sql, _ in self.queries)
+        ]
+
+
+_COURSE_ROW = {
+    "id": "c1",
+    "title": "コースA",
+    "data": {"sources": [{"material_id": "mat_1"}]},
+    "created_at": "2026-07-01T00:00:00+00:00",
+}
+_DOC_ROW = {"id": "doc-1", "source_path": "mat_1"}
+
+
+def _seed_counts(**counts):
+    return [
+        {"document_id": "doc-1", "status": status, "cnt": cnt}
+        for status, cnt in counts.items()
+    ]
+
+
+class TestDiscussOpeningUnreviewedRuleRegistration:
+    def test_rule_registered_as_recommended_guidance(self):
+        rule = next_steps_mod.RULE_CATALOG[
+            next_steps_mod.RULE_COURSE_DISCUSS_OPENING_UNREVIEWED
+        ]
+        assert rule["severity"] == next_steps_mod.SEVERITY_RECOMMENDED
+        assert rule["capability_id"] == "course.discuss_opening_review"
+
+    def test_capability_exists_and_is_guidance_only(self):
+        cap = caps.get_capability("course.discuss_opening_review")
+        assert cap is not None
+        assert cap.kind == "guidance_only"   # G8: 道案内まで（承認は本人の操作）
+        assert cap.locate_steps, "locate_steps が無い（道案内できない）"
+
+    def test_capability_fail_closed_for_student(self):
+        assert caps.can_access("course.discuss_opening_review", ROLE_TEACHER) is True
+        assert caps.can_access("course.discuss_opening_review", "SYSTEM_ADMIN") is True
+        assert caps.can_access("course.discuss_opening_review", "STUDENT") is False
+
+    def test_rule_not_evaluated_for_student_role(self):
+        """G3 fail-closed: STUDENT では評価すらしない（session=None でも例外にならない）。"""
+        result = next_steps_mod.compute_next_steps(
+            None, {"id": "u-student", "role": "STUDENT"}
+        )
+        assert result["steps"] == []
+
+    def test_evaluator_registered(self):
+        assert (
+            next_steps_mod.RULE_COURSE_DISCUSS_OPENING_UNREVIEWED
+            in next_steps_mod._RULE_EVALUATORS
+        )
+
+
+class TestDiscussOpeningUnreviewedEvaluator:
+    def test_candidate_seeds_produce_factual_step(self):
+        session = _ScriptedSession(
+            courses=[_COURSE_ROW], documents=[_DOC_ROW], seeds=_seed_counts(candidate=2)
+        )
+        out = next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
+        assert len(out) == 1
+        step, sort_ts = out[0]
+        assert step.rule_id == next_steps_mod.RULE_COURSE_DISCUSS_OPENING_UNREVIEWED
+        assert step.step_key == "course.discuss_opening_unreviewed:c1"
+        assert step.severity == next_steps_mod.SEVERITY_RECOMMENDED
+        assert step.target["course_id"] == "c1"
+        assert step.target["material_id"] == "doc-1"
+        assert "未確認の議論のきっかけ" in step.reason
+        assert "2 件" in step.reason
+        assert sort_ts == "2026-07-01T00:00:00+00:00"
+        # 道案内は教材一覧の行アンカー（data-material-id = source_path）で解決する。
+        anchors = [s["anchor_id"] for s in step.locate_plan["steps"]]
+        assert "material_row:mat_1" in anchors
+
+    def test_query_scopes_seeds_to_document_role(self):
+        """開幕素材（element_type='document' / role='discussion_seed'）だけを数える
+        （二層説明の説明本文＝role IS NULL を巻き込まない）。"""
+        session = _ScriptedSession(
+            courses=[_COURSE_ROW], documents=[_DOC_ROW], seeds=_seed_counts(candidate=1)
+        )
+        next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
+        seed_query = [
+            (sql, params) for sql, params in session.queries if "FROM element_explanations" in sql
+        ]
+        assert len(seed_query) == 1
+        sql, params = seed_query[0]
+        assert "element_type = :element_type" in sql
+        assert "role = :role" in sql
+        assert params["element_type"] == "document"
+        assert params["role"] == "discussion_seed"
+
+    def test_no_candidate_means_no_step(self):
+        session = _ScriptedSession(
+            courses=[_COURSE_ROW],
+            documents=[_DOC_ROW],
+            seeds=_seed_counts(approved=2, dismissed=1),
+        )
+        assert next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1") == []
+
+    def test_all_dismissed_document_does_not_light_up_again(self):
+        """§6.2: 過去に全却下された document は、再解析で candidate が積まれても
+        再点灯させない（dismissed>0 かつ approved==0）。"""
+        session = _ScriptedSession(
+            courses=[_COURSE_ROW],
+            documents=[_DOC_ROW],
+            seeds=_seed_counts(candidate=3, dismissed=3),
+        )
+        assert next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1") == []
+
+    def test_partially_approved_document_still_lights_up(self):
+        """却下と承認が混在する document は「使っている素材」なので通常どおり点灯する。"""
+        session = _ScriptedSession(
+            courses=[_COURSE_ROW],
+            documents=[_DOC_ROW],
+            seeds=_seed_counts(candidate=1, dismissed=2, approved=1),
+        )
+        out = next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
+        assert len(out) == 1
+        assert "1 件" in out[0][0].reason
+
+    def test_course_without_sources_skips_further_queries(self):
+        session = _ScriptedSession(
+            courses=[{"id": "c9", "title": "空コース", "data": {}, "created_at": "t"}]
+        )
+        assert next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1") == []
+        assert session.tables_queried() == ["learning_courses"]
+
+    def test_unresolvable_material_reference_is_skipped(self):
+        session = _ScriptedSession(courses=[_COURSE_ROW], documents=[], seeds=[])
+        assert next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1") == []
+
+    def test_duplicate_source_reference_is_counted_once(self):
+        course = dict(_COURSE_ROW)
+        course["data"] = {"sources": [{"material_id": "mat_1"}, {"material_id": "doc-1"}]}
+        session = _ScriptedSession(
+            courses=[course], documents=[_DOC_ROW], seeds=_seed_counts(candidate=2)
+        )
+        out = next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
+        assert len(out) == 1
+        assert "2 件" in out[0][0].reason  # 4 件（重複計上）にならない
+
+    def test_only_own_courses_are_scanned(self):
+        session = _ScriptedSession(
+            courses=[_COURSE_ROW], documents=[_DOC_ROW], seeds=_seed_counts(candidate=1)
+        )
+        next_steps_mod._eval_course_discuss_opening_unreviewed(session, "u1")
+        course_sql = [sql for sql, _ in session.queries if "FROM learning_courses" in sql][0]
+        assert "user_id = CAST(:uid AS uuid)" in course_sql
+
+    def test_evaluator_uses_course_data_accessor_not_raw_dict_access(self):
+        """Tier 3-18: course_data への素の dict アクセスを新規に書かない。"""
+        src = extract_function_source(
+            _NEXT_STEPS_SRC, "_eval_course_discuss_opening_unreviewed"
+        )
+        assert "course_source_material_ids(data)" in src
+        assert 'data.get("sources"' not in src
+        # 素材の status 語彙は core.element_explanations の定数を使う（リテラル再定義しない）。
+        assert "element_explanations_store.STATUS_CANDIDATE" in src
+        assert "element_explanations_store.ROLE_DISCUSSION_SEED" in src
+
+    def test_evaluator_has_no_per_course_query_loop(self):
+        """N+1 回避: クエリは3本（コース / document 解決 / 素材集計）で、
+        コースごとのループ内で execute しない。"""
+        src = extract_function_source(
+            _NEXT_STEPS_SRC, "_eval_course_discuss_opening_unreviewed"
+        )
+        assert src.count("session.execute(") == 3
+
+
+# ===========================================================================
 # Group B: API 結合テスト（TestClient。実 DB なしでの fail-closed 縮退を検証）
 # ===========================================================================
 

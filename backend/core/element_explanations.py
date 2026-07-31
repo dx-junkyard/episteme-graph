@@ -2,7 +2,8 @@
 
 正本: ``docs/features/hierarchical_context_explanation_design.md`` §2（E1〜E8）・§5.2。
 
-全要素型（figure / theory_component / theory_claim / equation）を受けるポリモーフィックな
+全要素型（figure / theory_component / theory_claim / equation）+ document スコープ
+（migration 062・``discuss_opening_authoring_design.md`` §5）を受けるポリモーフィックな
 説明台帳。C層 ``component_explanations`` とは別物（component 専用・course 文脈前提のため
 流用しない）。W層 ``element_annotations`` / ``core.atlas_store`` と同じ流儀:
 セッションは呼び出し側が管理する（``core/postgres.get_session()`` + try/finally）。
@@ -34,16 +35,27 @@ ELEMENT_TYPE_FIGURE = "figure"
 ELEMENT_TYPE_COMPONENT = "theory_component"
 ELEMENT_TYPE_CLAIM = "theory_claim"
 ELEMENT_TYPE_EQUATION = "equation"
+# document スコープ（migration 062・discuss_opening_authoring_design.md §5）:
+# 係留先が要素ではなく document 全体である素材（開幕画面の「議論のきっかけ」）。
+# ``element_id`` は ``document_id`` と同値で使う。
+ELEMENT_TYPE_DOCUMENT = "document"
 ELEMENT_TYPES = (
     ELEMENT_TYPE_FIGURE,
     ELEMENT_TYPE_COMPONENT,
     ELEMENT_TYPE_CLAIM,
     ELEMENT_TYPE_EQUATION,
+    ELEMENT_TYPE_DOCUMENT,
 )
 
 KIND_GENERIC = "generic"
 KIND_CONTEXTUAL = "contextual"
 KINDS = (KIND_GENERIC, KIND_CONTEXTUAL)
+
+# role（migration 062）: 生成物の役割。NULL は二層説明の説明本文（既存行）。
+# 語彙を増やすときは migration の CHECK と同時に更新する（DB とコードの二重管理を
+# 避けるため、ここが唯一のコード側正本）。
+ROLE_DISCUSSION_SEED = "discussion_seed"
+ROLES = (ROLE_DISCUSSION_SEED,)
 
 STATUS_CANDIDATE = "candidate"
 STATUS_APPROVED = "approved"
@@ -82,7 +94,7 @@ def _dump(value: Any) -> str:
 
 _COLUMNS_SQL = """
     id::text, document_id::text, element_type, element_id, kind, body, evidence,
-    status, created_by, reviewed_by, reviewed_at, created_at
+    status, created_by, reviewed_by, reviewed_at, created_at, role
 """
 
 
@@ -100,6 +112,9 @@ def _row_to_dict(row: Any) -> dict:
         "reviewed_by": row[9],
         "reviewed_at": row[10].isoformat() if row[10] else None,
         "created_at": row[11].isoformat() if row[11] else "",
+        # role は migration 062 で後から足した列なので、旧 DB スキーマ相手でも
+        # 落ちないよう長さで防御する（None = 二層説明の説明本文）。
+        "role": (row[12] if len(row) > 12 else None) or None,
     }
 
 
@@ -116,17 +131,18 @@ def _insert_row(
     created_by: str,
     reviewed_by: str | None = None,
     reviewed_at: str | None = None,
+    role: str | None = None,
 ) -> dict:
     row = session.execute(
         sa_text(
             f"""
             INSERT INTO element_explanations (
                 document_id, element_type, element_id, kind, body, evidence,
-                status, created_by, reviewed_by, reviewed_at
+                status, created_by, reviewed_by, reviewed_at, role
             ) VALUES (
                 CAST(:document_id AS uuid), :element_type, :element_id, :kind, :body,
                 CAST(:evidence AS jsonb), :status, :created_by,
-                :reviewed_by, CAST(:reviewed_at AS timestamptz)
+                :reviewed_by, CAST(:reviewed_at AS timestamptz), :role
             )
             RETURNING {_COLUMNS_SQL}
             """
@@ -142,6 +158,7 @@ def _insert_row(
             "created_by": created_by,
             "reviewed_by": reviewed_by,
             "reviewed_at": reviewed_at,
+            "role": role or None,
         },
     ).fetchone()
     return _row_to_dict(row)
@@ -168,6 +185,9 @@ def _validate_candidate_item(raw: dict) -> dict:
     evidence_raw = (raw or {}).get("evidence")
     evidence = evidence_raw if isinstance(evidence_raw, dict) else {}
     created_by = str((raw or {}).get("created_by") or "").strip() or PIPELINE_CREATED_BY
+    role_raw = str((raw or {}).get("role") or "").strip()
+    if role_raw and role_raw not in ROLES:
+        raise ValueError(f"invalid role: {role_raw!r}")
     return {
         "element_type": element_type,
         "element_id": element_id,
@@ -175,26 +195,42 @@ def _validate_candidate_item(raw: dict) -> dict:
         "body": body,
         "evidence": evidence,
         "created_by": created_by,
+        "role": role_raw or None,
     }
 
 
 def insert_candidates(session: Any, document_id: str, items: Iterable[dict]) -> list[dict]:
-    """パイプライン（ContextualExplanationAgent 等）用の一括 candidate 投入。
+    """パイプライン（ContextualExplanationAgent / DiscussOpeningAgent 等）用の
+    一括 candidate 投入。
 
-    各 item は ``{element_type, element_id, kind, body, evidence?, created_by?}``。
-    同一 ``(document_id, element_type, element_id, kind)`` の既存 ``candidate`` 行は
-    ``superseded`` へ遷移させてから新しい candidate 行を INSERT する
+    各 item は ``{element_type, element_id, kind, body, evidence?, created_by?, role?}``。
+    同一 ``(document_id, element_type, element_id, kind, role)`` の既存 ``candidate``
+    行は ``superseded`` へ遷移させてから新しい candidate 行を INSERT する
     （``approved``/``dismissed``/既に ``superseded`` の行はそのまま — E2・P4。
     AI 再解析が教員確定を消さない。migration 053 と同じ原則）。
 
-    ``items`` の要素が不正（語彙外の element_type/kind・空の element_id/body）な場合は
-    ``ValueError`` を送出する（呼び出し元 agent の validator が事前に弾いている想定の
-    最終ガード。ここで弾かれた要素があると以降の要素も含め全体が例外で止まるため、
+    supersede は **キー単位で1回だけ**（全 INSERT の前に）実行する。同じキーに複数行を
+    積む使い方（migration 062 の ``role='discussion_seed'``: 1 document に 2〜3 件の
+    議論のきっかけ）で、後続 INSERT が直前に入れた兄弟行を superseded にしてしまうのを
+    防ぐため。1キー1行だった従来（二層説明）の挙動は変わらない。
+
+    ``role`` は ``None``（既定）なら二層説明の説明本文として扱い、supersede も
+    ``role IS NULL`` の行だけを対象にする（role 付きの開幕素材と二層説明が互いを
+    巻き込まない）。
+
+    ``items`` の要素が不正（語彙外の element_type/kind/role・空の element_id/body）な
+    場合は ``ValueError`` を送出する（呼び出し元 agent の validator が事前に弾いている
+    想定の最終ガード。ここで弾かれた要素があると以降の要素も含め全体が例外で止まるため、
     呼び出し側で事前検証しておくこと）。
     """
-    created: list[dict] = []
-    for raw in items or []:
-        item = _validate_candidate_item(raw)
+    validated = [_validate_candidate_item(raw) for raw in (items or [])]
+
+    superseded_keys: set[tuple[str, str, str, str | None]] = set()
+    for item in validated:
+        key = (item["element_type"], item["element_id"], item["kind"], item["role"])
+        if key in superseded_keys:
+            continue
+        superseded_keys.add(key)
         session.execute(
             sa_text(
                 """
@@ -204,6 +240,7 @@ def insert_candidates(session: Any, document_id: str, items: Iterable[dict]) -> 
                   AND element_type = :element_type
                   AND element_id = :element_id
                   AND kind = :kind
+                  AND role IS NOT DISTINCT FROM :role
                   AND status = :candidate
                 """
             ),
@@ -212,10 +249,14 @@ def insert_candidates(session: Any, document_id: str, items: Iterable[dict]) -> 
                 "element_type": item["element_type"],
                 "element_id": item["element_id"],
                 "kind": item["kind"],
+                "role": item["role"],
                 "superseded": STATUS_SUPERSEDED,
                 "candidate": STATUS_CANDIDATE,
             },
         )
+
+    created: list[dict] = []
+    for item in validated:
         created.append(
             _insert_row(
                 session,
@@ -227,6 +268,7 @@ def insert_candidates(session: Any, document_id: str, items: Iterable[dict]) -> 
                 evidence=item["evidence"],
                 status=STATUS_CANDIDATE,
                 created_by=item["created_by"],
+                role=item["role"],
             )
         )
     return created
@@ -252,9 +294,15 @@ def list_for_document(
     element_type: str | None = None,
     status: str | None = None,
     kind: str | None = None,
+    role: str | None = None,
 ) -> list[dict]:
     """document 内の説明一覧（承認 API・要素インベントリ用。P4: candidate/approved/
-    dismissed/superseded すべて対象— フィルタは呼び出し側の指定次第）。"""
+    dismissed/superseded すべて対象— フィルタは呼び出し側の指定次第）。
+
+    ``role`` を指定すると当該 role の行だけを返す（migration 062。開幕素材の
+    レビューキュー・配信が ``role='discussion_seed'`` で引く）。未指定なら role の
+    有無で絞らない（二層説明の説明本文＝``role IS NULL`` も含む）。
+    """
     clauses = ["document_id = CAST(:document_id AS uuid)"]
     params: dict[str, Any] = {"document_id": document_id}
     if element_type:
@@ -266,6 +314,9 @@ def list_for_document(
     if kind:
         clauses.append("kind = :kind")
         params["kind"] = kind
+    if role:
+        clauses.append("role = :role")
+        params["role"] = role
     where_sql = " AND ".join(clauses)
     rows = session.execute(
         sa_text(
@@ -546,4 +597,6 @@ def update_body(session: Any, explanation_id: str, user_id: str, new_body: str) 
         created_by=user_id,
         reviewed_by=existing["reviewed_by"],
         reviewed_at=existing["reviewed_at"],
+        # role は素材の役割そのものなので編集で失わない（migration 062）。
+        role=existing.get("role"),
     )

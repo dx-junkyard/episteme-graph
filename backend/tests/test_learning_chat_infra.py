@@ -36,6 +36,7 @@ for _p in (str(BACKEND), str(BACKEND / "api")):
 
 import routes.learning as learning_mod  # noqa: E402
 import core.llm_worker.client as llm_worker_client  # noqa: E402
+import core.llm_policy as llm_policy_mod  # noqa: E402
 from core.llm_worker.cost_gate import CostGate, today_str  # noqa: E402
 from schemas import LearningChatRequest, LearningCheckQuestionRequest  # noqa: E402
 
@@ -94,7 +95,7 @@ def chat_env(monkeypatch):
     """
     settings = _fake_settings()
     monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
-    monkeypatch.setattr(llm_worker_client, "get_settings", lambda: settings)
+    monkeypatch.setattr(llm_policy_mod, "get_settings", lambda: settings)
     monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
 
     monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
@@ -345,7 +346,7 @@ class TestModelResolution:
         from unittest.mock import patch
 
         settings = _fake_settings(learning_chat_llm_model="", llm_analysis_model="o3-mini")
-        with patch("core.llm_worker.client.get_settings", return_value=settings):
+        with patch("core.llm_policy.get_settings", return_value=settings):
             assert (
                 llm_worker_client.resolve_model("learning_chat_llm_model", fallback="analysis")
                 == "o3-mini"

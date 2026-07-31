@@ -232,7 +232,9 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 教材・コース・スキーマ・ユーザー管理の中核ルーター（43 エンドポイント）。
 手順の正本: [admin_operations/materials.md](../admin_operations/materials.md) /
 [admin_operations/course.md](../admin_operations/course.md) /
-[admin_operations/users.md](../admin_operations/users.md) /
+[admin_operations/users.md](../admin_operations/users.md)（グループ管理） /
+[admin_operations/students.md](../admin_operations/students.md) /
+[admin_operations/teachers.md](../admin_operations/teachers.md) /
 [admin_operations/system.md](../admin_operations/system.md)。
 
 #### 教材管理・タスク

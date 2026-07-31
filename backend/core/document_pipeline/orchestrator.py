@@ -25,6 +25,13 @@ import tempfile
 from dataclasses import asdict, dataclass, field, is_dataclass
 from typing import Any, Callable
 
+from core.llm_policy import (
+    SCENE_PIPELINE,
+    SCENE_PIPELINE_VISION,
+    SOURCE_RUN_OVERRIDE,
+    model_override,
+    resolve_scene_model,
+)
 from core.llm_usage.context import bind_usage_context, set_current_feature
 from core.llm_worker.cost_gate import CostGate, today_str
 
@@ -51,6 +58,83 @@ logger = logging.getLogger(__name__)
 
 ARTIFACTS_KEY = "_artifacts"
 
+# ---------------------------------------------------------------------------
+# M層（LLM モデル選択）Phase 2: run 単位のステージ別モデル上書き + 使用モデルの記録。
+# 正本設計: docs/features/llm_model_selection_design.md §3/§8/§10 Phase 2。
+#
+# ``run_document_pipeline`` はスレッドを起こさず全ステージを同一スレッドで順に
+# 実行する（本モジュールに Thread/asyncio 系の生成は無い）ため、
+# ``core.llm_policy.model_override`` の contextvar はそのままステージ内の
+# ``generate_*`` 呼び出しへ伝播する。ステージ関数の中身は変更せず、
+# ``_PIPELINE_STEPS`` を回すランナーループの1箇所だけで override を張る。
+# ---------------------------------------------------------------------------
+
+STAGE_MODELS_KEY = "_stage_models"
+
+# options.models による run override / 使用モデル記録(M7)の対象ステージ。
+# 「LLM-first」と明言されている、または vision/opt-in で実行が二値に決まる
+# ステージのみを対象にする。document_structure（構造優先・曖昧箇所のみ LLM 補助）・
+# figure_table_semantics（caption-first・LLM enricher 任意）・symbol_registry /
+# derivation_chain / course_mapping / component_graph（いずれも非LLM・決定論的）は、
+# 実行時に LLM 呼び出しが実際にあったかどうかを外側（ループ側）から正確に判定
+# できないため、記録対象から意図的に除外する（不正確な網羅より正直な部分記録を
+# 優先する、という Phase 2 依頼の指示どおり）。
+LLM_STAGE_NAMES = frozenset({
+    "paper_skeleton",
+    "rhetorical_role",
+    "claim_qualification",
+    "equation_semantics",
+    "apparatus_semantics",
+    "thesis_reconstruction",
+    "dsl_linking",
+    "component_assembly",
+    "narrative_annotator",
+    "contextual_explanation",
+    "discuss_opening",
+})
+
+# 後方互換エイリアス（Phase 4 で `LLM_STAGE_NAMES` へ昇格・公開。旧名を参照する
+# 外部コードのための薄いエイリアスで、正本は `LLM_STAGE_NAMES`）。
+_LLM_STAGE_NAMES = LLM_STAGE_NAMES
+
+
+def _resolve_stage_override_model(stage_name: str | None, effective_options: dict) -> str | None:
+    """``effective_options["models"]`` から stage 単位の run override モデルを引く。
+
+    解決順: ``pipeline:{stage_name}`` → (``apparatus_semantics`` だけ
+    ``pipeline.vision``、それ以外は ``pipeline``)。どちらにも一致しなければ
+    None を返す（override なし = 従来どおり env/tier 既定へフォールバックする）。
+    between-stage の決定論的後処理フック（``stage_name is None``）は対象外。
+    """
+    if not stage_name:
+        return None
+    models = effective_options.get("models")
+    if not isinstance(models, dict):
+        return None
+    candidate = models.get(f"pipeline:{stage_name}")
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    fallback_key = SCENE_PIPELINE_VISION if stage_name == "apparatus_semantics" else SCENE_PIPELINE
+    candidate = models.get(fallback_key)
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    return None
+
+
+def _stage_artifact_indicates_llm_skip(artifact_value: Any) -> bool:
+    """このステージが（実行はされたが）LLM 呼び出しをしなかったことを示す既知の
+    placeholder かどうかを判定する。``apparatus_semantics`` の
+    ``skipped_by_option`` / ``contextual_explanation`` の ``skipped_by_limit``・
+    ``llm_calls == 0``（対象要素が無い/日次上限で0回だった場合を含む）を検出する。
+    """
+    if isinstance(artifact_value, dict):
+        if artifact_value.get("skipped_by_option") or artifact_value.get("skipped_by_limit"):
+            return True
+        if artifact_value.get("llm_calls") == 0:
+            return True
+    return False
+
+
 # contextual_explanation stage (hierarchical_context_explanation_design.md §5.1):
 # a single process-lifetime CostGate for the daily LLM-call budget, matching
 # figure_reanalysis.py's "CostGate + resolve_model only" partial-adoption of the
@@ -58,6 +142,14 @@ ARTIFACTS_KEY = "_artifacts"
 # episteme_graph.agents.contextual_explanation and is off-limits to edit here;
 # only the orchestrator-level cost gate belongs in this module).
 _ctxexpl_cost_gate = CostGate()
+
+# discuss_opening stage (discuss_opening_authoring_design.md §4.1): same
+# partial-adoption of the core/llm_worker/ skeleton as contextual_explanation —
+# a single process-lifetime CostGate for the daily LLM-call budget
+# (``DISCUSS_OPENING_MAX_CALLS_PER_DAY``). The repair loop / JSON client live in
+# the agent (episteme_graph.agents.discuss_opening), which delegates to
+# core/llm_worker/ as its 8th consumer.
+_discuss_opening_cost_gate = CostGate()
 
 
 PIPELINE_STAGES = [
@@ -84,6 +176,7 @@ PIPELINE_STAGES = [
     "component_graph",
     "narrative_annotator",
     "contextual_explanation",
+    "discuss_opening",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -316,6 +409,17 @@ def run_document_pipeline(
             for stage, value in previous_artifacts.items()
             if stage_order.get(stage, 10_000) < start_index
         }
+    # M7: 前回 run の使用モデル記録を引き継ぐ（resume で artifact 再利用したステージは
+    # 前回のモデル記録をそのまま保持し、実際に再実行したステージだけを後段のループが
+    # 上書きする。start_index より後ろのステージは今回作り直されるので、artifact と
+    # 同じ規則で古い記録を落とす — 捏造しない）。
+    stage_models: dict[str, str] = dict(previous_outputs.get(STAGE_MODELS_KEY) or {})
+    if start_index is not None:
+        stage_models = {
+            stage: value
+            for stage, value in stage_models.items()
+            if stage_order.get(stage, 10_000) < start_index
+        }
     run_id = (previous_run or {}).get("id")
     if run_id:
         upsert_analysis_run(
@@ -484,12 +588,56 @@ def run_document_pipeline(
     ctx.finish_target_stage = finish_target_stage
     ctx.all_artifacts = all_artifacts
 
+    def _record_stage_model_if_used(stage_name: str, had_artifact_before: bool) -> None:
+        # M7: 実際に実行した（artifact 再利用ではない）LLM ステージのみ、使用モデルを
+        # stage_outputs["_stage_models"] に記録する。resume で artifact を再利用した
+        # ステージはここに到達しない前提（had_artifact_before が真）ため、前回の記録が
+        # そのまま残る。
+        if stage_name not in LLM_STAGE_NAMES or had_artifact_before:
+            return
+        new_artifact = ctx.artifact(stage_name)
+        if new_artifact is None or _stage_artifact_indicates_llm_skip(new_artifact):
+            return
+        try:
+            resolved_model = resolve_scene_model(f"pipeline:{stage_name}").model
+        except Exception:
+            logger.debug("failed to resolve stage model for %s", stage_name, exc_info=True)
+            return
+        if not resolved_model:
+            return
+        stage_models[stage_name] = resolved_model
+        upsert_analysis_run(
+            run_id=run_id,
+            document_id=document_id,
+            material_id=material_id,
+            cartridge_id=cartridge_id,
+            status="running",
+            current_stage=stage_name,
+            stage_outputs={STAGE_MODELS_KEY: dict(stage_models)},
+        )
+
     try:
         if source_kind not in {"pdf", "tex_archive"}:
             raise ValueError(f"unsupported source_kind: {source_kind}")
 
         for step in _PIPELINE_STEPS:
-            if step.execute(ctx):
+            stage_name = step.name
+            override_model = _resolve_stage_override_model(stage_name, effective_options)
+            had_artifact_before = stage_name is not None and ctx.artifact(stage_name) is not None
+
+            def _run_step(_stage_name=stage_name, _had_artifact_before=had_artifact_before) -> bool:
+                stopped_inner = step.execute(ctx)
+                if _stage_name is not None:
+                    _record_stage_model_if_used(_stage_name, _had_artifact_before)
+                return stopped_inner
+
+            if override_model:
+                with model_override(override_model, source=SOURCE_RUN_OVERRIDE):
+                    stopped = _run_step()
+            else:
+                stopped = _run_step()
+
+            if stopped:
                 return ctx.result
 
         _stage_completed(ctx)
@@ -1444,6 +1592,7 @@ def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
                 fig_tbl=ctx.fig_tbl,
                 apparatus_result=ctx.apparatus_result,
                 thesis=ctx.thesis,
+                effective_options=ctx.effective_options,
             )
         except Exception as exc:
             logger.warning(
@@ -1454,6 +1603,41 @@ def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
         ctx.save_artifact("contextual_explanation", ctxexpl_payload)
     ctx.report_done("contextual_explanation", dict(ctxexpl_payload))
     return ctx.finish_target_stage("contextual_explanation", dict(ctxexpl_payload))
+
+
+def _stage_discuss_opening(ctx: PipelineContext) -> bool:
+    # ── Stage 12a.3: discuss_opening (discuss_opening_authoring_design.md §4.1).
+    # Registered after contextual_explanation and before course_mapping: thesis /
+    # graph / derivation / narrative / figure analysis have all run by now, so the
+    # only generated ingredient the opening screen lacks (「議論のきっかけ」) can be
+    # grounded in D層の未検証前提 + derivation の operation 列 + thesis の合成文.
+    # Non-fatal: a failure here never blocks course_mapping / persistence.
+    discuss_artifact = ctx.artifact("discuss_opening")
+    if ctx.should_use_artifact("discuss_opening"):
+        discuss_payload = dict(discuss_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded discuss_opening artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("discuss_opening", total=1, unit="builder")
+        try:
+            discuss_payload = _build_discuss_opening(
+                document_id=ctx.document_id,
+                cartridge_id=ctx.cartridge_id,
+                artifacts=ctx.all_artifacts(),
+                derivations=ctx.derivations,
+                equations=ctx.equations,
+            )
+        except Exception as exc:
+            logger.warning(
+                "discuss_opening stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            discuss_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("discuss_opening", discuss_payload)
+    ctx.report_done("discuss_opening", dict(discuss_payload))
+    return ctx.finish_target_stage("discuss_opening", dict(discuss_payload))
 
 
 def _stage_course_mapping(ctx: PipelineContext) -> bool:
@@ -1821,6 +2005,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef("component_graph", _stage_component_graph),
     PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
     PipelineStageDef("contextual_explanation", _stage_contextual_explanation),
+    PipelineStageDef("discuss_opening", _stage_discuss_opening),
     PipelineStageDef("course_mapping", _stage_course_mapping),
     PipelineStageDef("blueprint", _stage_blueprint),
     PipelineStageDef("export_validation", _stage_export_validation),
@@ -2527,11 +2712,19 @@ def _build_apparatus_semantics(
     analysis_mode = str(getattr(settings, "apparatus_analysis_mode", "iterative") or "iterative")
     iterative_enabled = analysis_mode != "one_shot"
     verify_max_iterations = max(0, int(getattr(settings, "apparatus_verify_max_iterations", 3) or 0))
+    # ``model_name`` は audit-record 用のヒントで、実際の生成モデル解決は
+    # llm_client 側（``ApparatusSemanticsLLMClient`` → ``core.llm.py`` の
+    # ``resolve_scene_model``）が行う（schema.py の ``IterativeConfig.model_name``
+    # docstring 参照）。ここで ``resolve_scene_model`` を直接呼ぶことで、
+    # run override（``options.models["pipeline.vision"]`` 等。ランナーループが
+    # 張る ``model_override`` contextvar 経由で反映される）を含めた実際の解決結果を
+    # 監査記録に正しく反映する（旧実装は env 設定値の素読みで、run override は
+    # 反映されず、env 未設定時は空文字のまま記録されていた）。
     iterative_config = IterativeConfig(
         enabled=iterative_enabled,
         max_iterations=verify_max_iterations,
         vision_call_budget=daily_remaining,
-        model_name=str(getattr(settings, "apparatus_llm_model", "") or ""),
+        model_name=resolve_scene_model("pipeline:apparatus_semantics").model,
     )
     if iterative_enabled:
         cost_per_figure = max(1, 1 + verify_max_iterations)
@@ -2737,10 +2930,24 @@ def _ctxexpl_max_calls_per_day() -> int:
         return 20
 
 
-def _ctxexpl_model() -> str:
-    """``CTXEXPL_LLM_MODEL`` if set, else the fast tier (mirrors
-    ``core.llm_worker.client.resolve_model``'s fallback shape without
-    requiring a new ``core.config.Settings`` field for this stage)."""
+def _ctxexpl_model(effective_options: dict | None = None) -> str:
+    """run override（``options.models``）→ ``CTXEXPL_LLM_MODEL`` → fast tier の順。
+
+    ``ContextualExplanationAgent`` はモデル名を construction 時の明示引数
+    (``llm_model=``) として受け取るため、``core.llm.py`` の呼び出し口で
+    call-argument 扱いになり、M層設計書 §3 の解決順①（呼び出し側の明示引数）が
+    最優先されてしまう。そのため、ランナーループが張る
+    ``core.llm_policy.model_override`` の contextvar（解決順②）はこの1コールには
+    素通り（stage の中身は変えない前提のため resolve_scene_model 経由の
+    contextvar 参照に置き換えない）。ここで ``effective_options["models"]`` を
+    先読みすることで run override を反映する
+    （``pipeline:contextual_explanation`` → ``pipeline`` の順）。
+    """
+    models = (effective_options or {}).get("models") if effective_options else None
+    if isinstance(models, dict):
+        override = models.get("pipeline:contextual_explanation") or models.get("pipeline")
+        if isinstance(override, str) and override.strip():
+            return override.strip()
     explicit = os.getenv("CTXEXPL_LLM_MODEL", "").strip()
     if explicit:
         return explicit
@@ -2759,6 +2966,7 @@ def _build_contextual_explanation(
     fig_tbl: Any,
     apparatus_result: Any,
     thesis: Any,
+    effective_options: dict | None = None,
 ) -> dict:
     """contextual_explanation ステージ本体（design doc §5.1）。
 
@@ -2815,7 +3023,7 @@ def _build_contextual_explanation(
 
     from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
 
-    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model())
+    agent = ContextualExplanationAgent(llm_model=_ctxexpl_model(effective_options))
     result = agent.run(elements, cartridge_id=cartridge_id)
     # Real usage is only known after the batched+repaired run completes (a
     # single stage run may cost more than 1 LLM call); book it post-hoc
@@ -2880,6 +3088,219 @@ def _build_contextual_explanation(
             )
         finally:
             session.close()
+
+    return payload
+
+
+def _discuss_opening_max_items_per_document() -> int:
+    try:
+        return max(0, int(os.getenv("DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT", "4")))
+    except (TypeError, ValueError):
+        return 4
+
+
+def _discuss_opening_max_calls_per_day() -> int:
+    try:
+        return max(0, int(os.getenv("DISCUSS_OPENING_MAX_CALLS_PER_DAY", "20")))
+    except (TypeError, ValueError):
+        return 20
+
+
+def _discuss_opening_language() -> str:
+    """生成言語（設計書 §4.1）。``lecture_language`` は使わない — 同じ論文が言語設定の
+    違うコースに載りうるため、document 単位の生成物は env 1つで決める。"""
+    return (os.getenv("DISCUSS_OPENING_LANGUAGE", "") or "ja").strip() or "ja"
+
+
+def _discuss_opening_model() -> str:
+    """M層の正本（``core.llm_policy.resolve_scene_model``）でモデルを決める。
+
+    ``DiscussOpeningAgent`` はモデル名を construction 引数で受けるため、ランナー
+    ループが張る ``model_override`` の contextvar（解決順②）を素通ししてしまう。
+    ここで **同じ正本関数**を呼んで解決してから渡すことで、run override →
+    user/system ポリシー → ``DISCUSS_OPENING_LLM_MODEL``（``llm_policy`` の
+    ``_FEATURE_DIRECT_ENV``）→ fast tier の順が効く。この関数は本ステージが
+    ``model_override`` コンテキストの内側で実行されることを前提にしている
+    （``run_document_pipeline`` のループがステージ単位で張る）。
+    """
+    try:
+        return resolve_scene_model(f"{SCENE_PIPELINE}:discuss_opening").model
+    except Exception:
+        logger.debug("failed to resolve discuss_opening model", exc_info=True)
+        return ""
+
+
+def _build_discuss_opening(
+    *,
+    document_id: str,
+    cartridge_id: str | None,
+    artifacts: dict,
+    derivations: Any,
+    equations: Any,
+) -> dict:
+    """discuss_opening ステージ本体（``discuss_opening_authoring_design.md`` §4.1）。
+
+    (1) 素材（D層の未検証前提 / derivation の operation 列 / thesis の合成文）を
+    ``core.discuss.authoring`` で**解決済みテキスト**として組み立て、
+    (2) 日次コスト上限を CostGate で事前チェックし（contextual_explanation と同じ
+    「先に残数を見て、実行後に実測を計上する」流儀）、
+    (3) agent を 1 document = 1 コールで実行し、
+    (4) 結果を ``element_explanations`` に ``element_type='document'`` /
+    ``kind='contextual'`` / ``role='discussion_seed'`` の candidate として保存する
+    （再解析時、同じキーの既存 candidate は superseded・approved は不変）。
+
+    素材が無い document は**生成しない**（``skipped_reason='no_source_material'`` を
+    stage_outputs に正直に記録する。根拠の無い火種を創作させない — 設計書 §4.1）。
+    """
+    from core.discuss.authoring import (
+        build_discuss_opening_input,
+        collect_untested_assumptions,
+        compute_source_fingerprint,
+    )
+
+    max_items = _discuss_opening_max_items_per_document()
+    language = _discuss_opening_language()
+
+    payload: dict[str, Any] = {
+        "status": "completed",
+        "language": language,
+        "max_items": max_items,
+        "assumption_count": 0,
+        "author_choice_count": 0,
+        "llm_calls": 0,
+        "seed_count": 0,
+        "saved_candidates": 0,
+        "truncated": False,
+        "truncated_count": 0,
+    }
+
+    untested_assumptions: list[dict] = []
+    session = None
+    try:
+        from core.postgres import get_session as _pg_session
+
+        session = _pg_session()
+        untested_assumptions = collect_untested_assumptions(session, document_id)
+    except Exception:
+        # 台帳未整備 / DB 不達でもステージは進める（operation だけで生成できる）。
+        payload["assumption_lookup_failed"] = True
+        logger.warning(
+            "discuss_opening: failed to read epistemic_ledger (non-fatal): document=%s",
+            document_id, exc_info=True,
+        )
+    finally:
+        if session is not None:
+            session.close()
+
+    agent_input = build_discuss_opening_input(
+        document_id=document_id,
+        artifacts=artifacts,
+        derivations=derivations,
+        equations=equations,
+        untested_assumptions=untested_assumptions,
+        language=language,
+        max_seeds=max_items,
+    )
+    payload["assumption_count"] = len(agent_input.get("untested_assumptions") or [])
+    payload["author_choice_count"] = len(agent_input.get("author_choices") or [])
+
+    if max_items <= 0:
+        payload["skipped_reason"] = "item_limit_is_zero"
+        return payload
+
+    if not (payload["assumption_count"] or payload["author_choice_count"]):
+        payload["skipped_reason"] = "no_source_material"
+        logger.info(
+            "discuss_opening: no untested assumption / author choice for document=%s; "
+            "skipping generation",
+            document_id,
+        )
+        return payload
+
+    daily_limit = _discuss_opening_max_calls_per_day()
+    daily_key = today_str()
+    remaining = _discuss_opening_cost_gate.daily_remaining(
+        daily_limit=daily_limit, daily_key=daily_key
+    )
+    if remaining <= 0:
+        payload["skipped_by_limit"] = True
+        payload["skipped_reason"] = "daily_call_limit_reached"
+        logger.info(
+            "discuss_opening: daily call limit reached (limit=%d), skipping generation "
+            "for document=%s",
+            daily_limit, document_id,
+        )
+        return payload
+
+    from episteme_graph.agents.discuss_opening.agent import DiscussOpeningAgent
+
+    agent = DiscussOpeningAgent(llm_model=_discuss_opening_model() or None)
+    result = agent.run(agent_input, cartridge_id=cartridge_id)
+    # 実測の事後計上（contextual_explanation / figure_reanalysis と同じ会計）。
+    _discuss_opening_cost_gate.count_extra_daily(
+        daily_key=daily_key, amount=result.llm_call_count
+    )
+
+    payload["llm_calls"] = result.llm_call_count
+    payload["seed_count"] = len(result.seeds)
+    payload["truncated"] = bool(result.truncated)
+    payload["truncated_count"] = int(result.truncated_count or 0)
+    if result.skipped_reason:
+        payload["skipped_reason"] = result.skipped_reason
+    if result.review_notes:
+        payload["review_notes"] = list(result.review_notes)
+
+    if not result.seeds:
+        return payload
+
+    fingerprint = compute_source_fingerprint(artifacts)
+    payload["source_fingerprint"] = fingerprint
+
+    from core.element_explanations import (
+        ELEMENT_TYPE_DOCUMENT,
+        KIND_CONTEXTUAL,
+        PIPELINE_CREATED_BY,
+        ROLE_DISCUSSION_SEED,
+    )
+
+    items = [
+        {
+            "element_type": ELEMENT_TYPE_DOCUMENT,
+            "element_id": str(document_id),
+            "kind": KIND_CONTEXTUAL,
+            "role": ROLE_DISCUSSION_SEED,
+            "body": seed.body,
+            "evidence": {
+                "evidence_quote": seed.evidence_quote,
+                "reason": seed.reason,
+                "confidence": seed.confidence,
+                "grounded_in": seed.grounded_in,
+                "language": result.language,
+                "source_fingerprint": fingerprint,
+                "opening_version": result.opening_version,
+            },
+            "created_by": PIPELINE_CREATED_BY,
+        }
+        for seed in result.seeds
+    ]
+
+    from core.postgres import get_session as _pg_session
+
+    session = _pg_session()
+    try:
+        from core.element_explanations import insert_candidates
+
+        saved = insert_candidates(session, document_id, items)
+        session.commit()
+        payload["saved_candidates"] = len(saved)
+    except Exception:
+        session.rollback()
+        logger.warning(
+            "discuss_opening: failed to persist candidate seeds (non-fatal): document=%s",
+            document_id, exc_info=True,
+        )
+    finally:
+        session.close()
 
     return payload
 

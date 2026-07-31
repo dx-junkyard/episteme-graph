@@ -149,15 +149,43 @@ class TestTooltipSafeArea:
         assert 'tip.style.maxHeight = "none";' in block
         max_height_idx = block.index('tip.style.maxHeight = "none";')
         assert block.index("tip.offsetHeight") > max_height_idx
-        # 上下どちらの分岐でも max-height を設定する（クランプが片側だけにならない）。
-        assert block.count("tip.style.maxHeight = Math.max(") == 2
+        # 下・上・安全域いっぱいの3分岐すべてで max-height を設定する
+        # （クランプが一部の分岐だけにならない）。
+        assert block.count("tip.style.maxHeight = Math.max(") == 3
         assert "spaceAbove" in block and "spaceBelow" in block
+
+    def test_position_widens_before_clipping_long_sections(self):
+        """本文が長い節でツールチップが途中で切れないよう、まず幅を広げて高さを削る。
+
+        ツールチップは pointer-events:none で内部スクロールできないため、狭いまま
+        縦に伸ばして max-height でクランプすると続きを読む手段がなくなる
+        （マニュアルの長い節が「〜大きく 3 つのパネルに分」で切れていた不具合）。
+        """
+        js = _read(APP_JS)
+        assert "INSPECT_TOOLTIP_WIDTHS = [320, 460, 560];" in js
+        block = _extract_function_body(js, "function _positionInspectTooltip(tip, anchorEl) {")
+        # 収まる幅を狭い順に探すループ（幅ごとに実測し直す）。
+        assert "INSPECT_TOOLTIP_WIDTHS.length" in block
+        assert "tip.style.maxWidth = tw" in block  # CSS の max-width:320px を上書きする
+        assert "th <= safeHeight" in block
+        # 上下どちらにも収まらない場合は安全域いっぱい（＝最大の表示領域）に出す。
+        assert "tip.style.top = safeTop" in block
 
     def test_css_allows_internal_scroll_when_clamped(self):
         css = _read(STYLES_CSS)
         start = css.index(".inspect-tooltip {")
         rule = css[start:css.index("}", start)]
         assert "overflow-y: auto;" in rule
+
+    def test_manual_body_markdown_markers_are_stripped_for_display(self):
+        """素テキスト表示なので Markdown の強調記号は見せない（本文の語は変えない）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function _plainManualText(text) {")
+        assert "\\*\\*" in block  # ** の除去
+        assert "\\n{3,}" in block  # 平坦化テーブル由来の空行の詰め
+        show = _extract_function_body(js, "function showInspectTooltip(anchorEl, anchorId) {")
+        assert "_plainManualText(entry.body)" in show
+        assert "escHtml(entry.body" not in show  # 生の Markdown をそのまま出さない
 
 
 class TestUndocumentedFixedText:

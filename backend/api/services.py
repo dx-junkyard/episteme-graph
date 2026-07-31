@@ -15,7 +15,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text as sa_text
 
-from core.course_data import course_source_material_ids, course_sources, course_topics
+from core.course_data import course_llm_models, course_source_material_ids, course_sources, course_topics
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
 from core.personal_graph import graph_data as personal_graph_data
@@ -279,6 +279,41 @@ def get_course_data(user_id: str, course_id: str) -> dict | None:
     # V層（migration 037）: 受講学習者（非所有者）の主経路も発行版に追従させる。
     # editor は HEAD、純 viewer・学習者は有効な版のスナップショット（未発行なら live）。
     return _apply_course_version_view(course_id, user_id, data)
+
+
+def get_course_live_llm_models(course_id: str) -> dict:
+    """コースの ``data.llm_models`` を **版ピン適用前の live（HEAD）行**から読む。
+
+    M層 Phase 3（``docs/features/llm_model_selection_design.md`` §6.4）: モデル選択は
+    学習内容ではなく運用パラメータのため、学習者が V層の版スナップショットを見ている
+    場合でも、モデル解決だけは所有者の現在の設定に常に従う。``get_course_data()`` は
+    非所有者に ``_apply_course_version_view`` 適用後のデータを返しうるため、ここでは
+    それを経由せず ``learning_courses.data`` を直接1回 SELECT する（存在しない
+    course_id・NULL data は空 dict）。
+
+    fail-open: この呼び出しはチャット本体のホットパス（メッセージ毎）に乗るため、
+    DB 取得に失敗しても例外を伝播させずチャットを止めない（``course_deletion_notice``
+    と同型。未設定 = システム既定へフォールバックするだけなので安全に握りつぶせる）。
+    """
+    try:
+        session = _pg_session()
+        try:
+            row = session.execute(
+                sa_text("SELECT data FROM learning_courses WHERE id = :course_id LIMIT 1"),
+                {"course_id": course_id},
+            ).fetchone()
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — fail-open（設計書 M2: 既定で完結する）
+        logger.warning(
+            "get_course_live_llm_models: failed to load course %s; falling back to no override",
+            course_id, exc_info=True,
+        )
+        return {}
+    if not row or not row[0]:
+        return {}
+    data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
+    return course_llm_models(data)
 
 
 def get_personal_layer(user_id: str, course_id: str) -> dict:
@@ -1500,6 +1535,44 @@ def list_course_source_document_ids(course_data: dict | None) -> set[str]:
     return explicit_ids | resolved_ids
 
 
+def resolve_course_source_titles(course_data: dict | None) -> dict[str, str]:
+    """コースの ``sources[].material_id`` → 論文の題名（``documents.title``）の対応を返す。
+
+    出典タブの「登録済み教材」は ``sources[].title`` をそのまま出すため、コース作成時に
+    material_id（``arXiv-2407.01221v2`` のようなファイル名相当）が入っていると、学習者に
+    ファイル名が論文名として表示される。解析済みの題名は ``documents.title`` にあるので、
+    配信時にだけ差し替えられるよう対応表を返す（保存データは書き換えない）。
+
+    題名が空の document は対応表に載せない（呼び出し側が保存値のままにできるよう、
+    「解決できなかった」と「空題名」を区別しない — どちらも差し替えないのが正しい）。
+    DB 不達・例外時は空 dict（fail-soft。教材一覧そのものは出し続ける）。
+    """
+    if not isinstance(course_data, dict):
+        return {}
+    material_ids = course_source_material_ids(course_data)
+    if not material_ids:
+        return {}
+    try:
+        session = _pg_session()
+        try:
+            rows = session.execute(
+                sa_text(
+                    "SELECT source_path, title FROM documents WHERE source_path = ANY(:mids)"
+                ),
+                {"mids": list(material_ids)},
+            ).fetchall()
+        finally:
+            session.close()
+    except Exception as exc:  # noqa: BLE001 — fail-soft
+        logger.warning("resolve_course_source_titles failed: %s", exc)
+        return {}
+    return {
+        str(row[0]): str(row[1]).strip()
+        for row in rows
+        if row[0] and str(row[1] or "").strip()
+    }
+
+
 def search_chunks_with_metadata(
     query: str,
     top_k: int = 8,
@@ -2432,6 +2505,41 @@ def record_interest_trace(
         session.rollback()
         logger.warning("Failed to record interest trace: %s", exc)
         return None
+    finally:
+        session.close()
+
+
+def recent_duplicate_ui_anchor_event(
+    user_id: str, help_anchor: str, *, window_minutes: int = 30,
+) -> bool:
+    """直近（既定30分）に同一ユーザー×同一アンカーの help_usage no_hit 記録が無いかを確認する。
+
+    学習画面インスペクト・モード（``routes/learning.py``）と管理画面インスペクト・
+    モード（``routes/admin_assistant.py``）で共通のスパム防止ヘルパー（IH10/§5.4 と
+    同型）。DB 障害時は False（fail-open — 記録自体は止めない。ダブり抑制の失敗より
+    記録漏れの方が実害が大きいため）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT 1 FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid)
+                  AND kind = 'help_usage'
+                  AND payload->>'help_anchor' = :anchor
+                  AND created_at > now() - (:minutes || ' minutes')::interval
+                LIMIT 1
+            """),
+            {
+                "uid": user_id,
+                "anchor": help_anchor,
+                "minutes": window_minutes,
+            },
+        ).fetchone()
+        return row is not None
+    except Exception:
+        logger.warning("ui anchor event dedup check failed", exc_info=True)
+        return False
     finally:
         session.close()
 

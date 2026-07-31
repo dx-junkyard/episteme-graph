@@ -121,8 +121,6 @@ docker compose logs -f api-server
   `/api/admin`, `/api/groups`, `/api/me`, `/api/courses`, `/api/documents` などを api-server に
   プロキシします。
 
-> 旧 `neo4j` サービスは書き込み経路がなく実質未使用だったため撤去済みです。
-
 ---
 
 ## 4. 主要環境変数 {#env-vars}
@@ -257,12 +255,14 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 **必要ロール:** システム管理者（SYSTEM_ADMIN）のみ
 
 教員アカウントの作成は、システム管理者だけが実行できる操作です。教員（TEACHER）権限では
-実行できません。**アカウント作成は取り消せません。** 実行前に確認ダイアログが表示されます。
+実行できません。**アカウント作成は取り消せません。** 送信すると確認ダイアログを挟まず
+即座に作成されるため、入力内容をよく確認してから送信してください。
 
-具体的な手順は [教員アカウント作成](../../admin_operations/users.md#create-teacher) を参照してください
-（対象タブ: グループ管理）。
+具体的な手順は [教員アカウント作成](../../admin_operations/teachers.md#create-teacher) を参照してください
+（対象タブ: 教員管理）。
 
-なお、学生アカウントの作成は教員以上のロールで実行可能です（[ユーザー・グループ管理](../../admin_operations/users.md#create-student) 参照）。
+なお、学生アカウントの作成は教員以上のロールで実行可能です
+（[学生アカウントを作成する](../../admin_operations/students.md#create-student) 参照）。
 
 ---
 

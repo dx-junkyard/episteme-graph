@@ -38,6 +38,14 @@ KNOWN_SCREENS = (
     "error-analysis",
     "knowledge-library",
     "llm-usage",
+    # 2026-07-29 是正: 実タブ20個のうち以下6個が capability registry にも
+    # docs/admin_operations/ にも未登録で「構造的に案内不能」だった。
+    "students",
+    "teachers",
+    "schema",
+    "manual-editor",
+    "discuss-observation",
+    "llm-models",
 )
 
 
@@ -254,37 +262,54 @@ _REGISTRY: list[Capability] = [
         description="骨格 draft を凍結して版として確定する（取り消し不可）。",
         api={"method": "POST", "path": "/api/admin/{cartridge_id}/atlas/skeleton/freeze"},
     ),
-    # --- ユーザー / グループ (groups) ---
+    # --- ユーザー管理 (students / teachers) ---
+    # 2026-07-29 是正: 学生・教員アカウント作成フォームは #tab-groups ではなく
+    # 独立タブ #tab-students / #tab-teachers にある（admin.js setupRoleBasedUI）。
+    # 従来 screen="groups" だったため道案内が実在しないフォームを指していた。
     Capability(
         id="users.create_student",
-        screen="groups",
+        screen="students",
         title="学生アカウントを作成する",
         required_role=ROLE_TEACHER,
         kind=KIND_ACTION,
         reversible=False,
         confirm=True,
         target_type="user",
-        howto_doc="admin_operations/users.md#create-student",
+        howto_doc="admin_operations/students.md#create-student",
         description="学生アカウントを新規作成する（取り消し不可）。",
         api={"method": "POST", "path": "/api/admin/users/student"},
         locate_steps=(
-            _step("groups", "create_student_form", "学生アカウント作成フォームに入力します"),
+            _step("students", "create_student_form", "学生アカウント作成フォームに入力します"),
         ),
     ),
     Capability(
         id="users.create_teacher",
-        screen="groups",
+        screen="teachers",
         title="教員アカウントを作成する",
         required_role=ROLE_SYSTEM_ADMIN,  # 教員作成は SYSTEM_ADMIN のみ
         kind=KIND_ACTION,
         reversible=False,
         confirm=True,
         target_type="user",
-        howto_doc="admin_operations/users.md#create-teacher",
+        howto_doc="admin_operations/teachers.md#create-teacher",
         description="教員アカウントを新規作成する（SYSTEM_ADMIN のみ・取り消し不可）。",
         api={"method": "POST", "path": "/api/admin/users/teacher"},
         locate_steps=(
-            _step("groups", "create_teacher_form", "教員アカウント作成フォームに入力します"),
+            _step("teachers", "create_teacher_form", "教員アカウント作成フォームに入力します"),
+        ),
+    ),
+    # --- グループ管理 (groups) ---
+    Capability(
+        id="groups.manage",
+        screen="groups",
+        title="グループを作成・招待する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/users.md#manage-groups",
+        description="教材・コースをグループ内限定で共有するためのグループを作成し、"
+                    "招待コード・直接招待でメンバーを管理する。",
+        locate_steps=(
+            _step("groups", "groups_create_form", "グループ名を入力して「グループを作成」を押します"),
         ),
     ),
     # --- システム (SYSTEM_ADMIN 専用・説明のみ) ---
@@ -508,6 +533,28 @@ _REGISTRY: list[Capability] = [
                   precondition="material_selected"),
         ),
     ),
+    # discuss_opening_authoring_design.md §6.2: 開幕素材（議論のきっかけ）のレビュー。
+    # キューは教材管理タブの「検出要素」→「説明レビュー」にあるため screen は materials。
+    # v1 は道案内のみ（承認・編集は既存 element-explanations API を UI から行う）。
+    Capability(
+        id="course.discuss_opening_review",
+        screen="materials",
+        title="論文の議論のきっかけ（AI候補）を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        description="discuss の開幕画面で使う「議論のきっかけ」の AI 候補を確認・編集・承認する。"
+                    "承認するまで学習者には表示されない（候補のまま）。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_id}/element-explanations"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_inventory_button",
+                  "「検出要素」を押して要素の一覧を開きます",
+                  precondition="material_selected"),
+            _step("materials", "explanation_review_button",
+                  "「説明レビュー」を押して候補を確認します",
+                  precondition="inventory_modal_open"),
+        ),
+    ),
     # --- つまづきデータ (stumbles) ---
     Capability(
         id="stumbles.view",
@@ -540,6 +587,25 @@ _REGISTRY: list[Capability] = [
             _step("schema-proposals", "sp_proposals_list", "提案の一覧を確認します"),
         ),
     ),
+    # --- DSL進化分析 (schema) ---
+    # 2026-07-29 是正: 「スキーマ提案」タブ（schema-proposals、シミュレーション付き）とは
+    # 別に、「DSL進化分析」タブ（schema）が直接の承認・却下フロー（確認ダイアログ無し）を
+    # 持つ。未登録で案内不能だったため追加する。
+    Capability(
+        id="schema.evolve",
+        screen="schema",
+        title="DSL進化分析を実行し、提案を承認・却下する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/schema.md#analyze",
+        description="学生のつまづきデータから AI がスキーマ拡張（概念タイプ・述語）を提案する。"
+                    "このタブの承認・却下には確認ダイアログが無い（慎重に検証したい場合は"
+                    "「スキーマ提案」タブのシミュレーション経由の承認を使う）。",
+        api={"method": "POST", "path": "/api/admin/schema-proposals/analyze"},
+        locate_steps=(
+            _step("schema", "schema_analyze_button", "「AIメタ分析を実行」ボタンを押します"),
+        ),
+    ),
     # -------------------------------------------------------------------
     # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側/供給側の
     # 両面計器 G層ルールが参照する capability。3件とも guidance_only（DB 非変更）。
@@ -570,6 +636,54 @@ _REGISTRY: list[Capability] = [
         required_role=ROLE_SYSTEM_ADMIN,
         kind=KIND_GUIDANCE_ONLY,
         description="TODO 注記のため索引から除外されているマニュアル節を確認する。",
+    ),
+    # -------------------------------------------------------------------
+    # 2026-07-29 是正: manual-editor / discuss-observation / llm-models は
+    # 実装済み SYSTEM_ADMIN 専用タブだが capability registry 未登録だった。
+    # いずれも guidance_only（DB 非変更の確認・操作は各タブの既存 UI に委ねる）。
+    # -------------------------------------------------------------------
+    Capability(
+        id="manual_kb.edit_freeze",
+        screen="manual-editor",
+        title="利用者マニュアルの draft を編集し凍結配信する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/manual_editor.md#edit-and-freeze",
+        description="利用者マニュアル（help_kb）の draft を編集し、検証に通ったうえで"
+                    "凍結版として配信ソースを切り替える。",
+        api={"method": "POST", "path": "/api/admin/help-kb/freeze"},
+        locate_steps=(
+            _step("manual-editor", "manual_editor_panel", "編集したいファイルを一覧から選びます"),
+        ),
+    ),
+    Capability(
+        id="discuss_observation.view",
+        screen="discuss-observation",
+        title="discuss 観測データを確認・ダンプする",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/discuss_observation.md#view-and-dump",
+        description="「論文と話す」（discuss）モードの Phase 3 着手判断のための観測データ"
+                    "（LLM利用量・grounding分布・UIイベント・参考目安）を確認し、ダンプする。",
+        api={"method": "GET", "path": "/api/admin/discuss/observation-status"},
+        locate_steps=(
+            _step("discuss-observation", "discuss_observation_panel", "「取得」ボタンを押します"),
+        ),
+    ),
+    Capability(
+        id="llm_models.manage",
+        screen="llm-models",
+        title="場面別のAIモデル既定を変更する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/llm_models.md#change-default",
+        description="各場面（コース構築チャット・原稿の書き換え等）の LLM 呼び出しに使う"
+                    "モデルのシステム既定を確認・変更・解除する。教員個人の既定はここでは"
+                    "変更できない。",
+        api={"method": "PUT", "path": "/api/admin/llm-models/policies/{scene_key}"},
+        locate_steps=(
+            _step("llm-models", "llm_models_ops_table", "変更したい場面の「変更」ボタンを押します"),
+        ),
     ),
 ]
 

@@ -153,6 +153,38 @@ class TestDiscussSystemPrompt:
         body = self._prompt_body()
         assert "数値スコア" in body or "数値" in body
 
+    def test_prompt_branches_by_utterance_type(self):
+        """DA1: 発話タイプで move を分岐（解釈表明には解説で応じない）。"""
+        body = self._prompt_body()
+        assert "解釈" in body
+        assert "解説で応じないでください" in body
+
+    def test_prompt_requires_revoice_first(self):
+        """DA2: revoice ファースト（言い直し＋確認を最初の応答にする）。"""
+        body = self._prompt_body()
+        assert "言い直し" in body
+        assert "確認してください" in body
+
+    def test_prompt_gives_gap_choice_to_learner(self):
+        """DA3: どのズレから検討・埋めるかは学習者が選ぶ。"""
+        body = self._prompt_body()
+        assert "学生に選ばせ" in body
+
+    def test_prompt_requires_uptake_in_closing_prompt(self):
+        """DA4: 末尾の生成プロンプトは学習者の直前の発話を組み込んだ固有の問い。"""
+        body = self._prompt_body()
+        assert "直前の発話" in body
+        assert "引用" in body or "組み込" in body
+        assert "汎用の決まり文句は不可" in body
+
+    def test_prompt_describes_macro_phases(self):
+        """DA/§3: マクロ局面（係留 / ギャップの地図 / 共同検討）の流れが記述されている。"""
+        body = self._prompt_body()
+        assert "係留" in body
+        assert "ギャップの地図" in body
+        assert "共同検討" in body
+        assert "突き合わせ" in body
+
 
 class TestDiscussSelectedBeforeCasualForPrompt:
     def test_system_prompt_selection_checks_discuss_first(self):

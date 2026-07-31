@@ -386,7 +386,7 @@
       if (isDegraded) {
         html += '<div class="admin-degraded-hint" style="font-size:11px;color:var(--color-text-warning,#c85a00);margin-top:2px;">' +
           '⚠ 一部の高度な機能は制限されています。RAGチャットは利用可能です。' +
-          (retryStage ? ' <a href="#" class="admin-retry-stage-link" data-material-id="' + escHtml(m.material_id) + '" data-stage="' + escHtml(retryStage) + '" style="text-decoration:underline;cursor:pointer;">ステージ再実行</a>' : '') +
+          (retryStage ? ' <a href="#" class="admin-retry-stage-link" data-ui-anchor="materials.row-retry-stage" data-material-id="' + escHtml(m.material_id) + '" data-stage="' + escHtml(retryStage) + '" style="text-decoration:underline;cursor:pointer;">ステージ再実行</a>' : '') +
           '</div>';
       }
       html += "</td>";
@@ -402,40 +402,40 @@
         : "PDFのみ再登録";
       var resumeBtn = "";
       if (m.status === "failed" && m.document_id) {
-        resumeBtn = '<button class="admin-resume-analysis-btn" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
+        resumeBtn = '<button class="admin-resume-analysis-btn" data-ui-anchor="materials.row-resume-analysis" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
       }
       // 機能1: 解析成果のグループ共有 + 開示範囲（G1-1）（document_id が必要）
       var shareBtn = m.document_id
-        ? '<button class="admin-share-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有設定</button>'
+        ? '<button class="admin-share-doc-btn" data-ui-anchor="materials.row-share" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有設定</button>'
         : "";
       // V層: 共有版（リリース）の発行・履歴・削除予約（document_id が必要。上の「共有設定」とは別機能）
       var versionBtn = m.document_id
-        ? '<button class="admin-version-doc-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果を版（リリース）として発行・履歴管理します（共有設定とは別機能）" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">版の管理</button>'
+        ? '<button class="admin-version-doc-btn" data-ui-anchor="materials.row-version" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果を版（リリース）として発行・履歴管理します（共有設定とは別機能）" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">版の管理</button>'
         : "";
       // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
       var figuresBtn = m.document_id
-        ? '<button class="admin-figures-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">図・画像</button>'
+        ? '<button class="admin-figures-btn" data-ui-anchor="materials.row-figures" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">図・画像</button>'
         : "";
       // 要素インベントリ（W層の教材単位の統合入口）: この教材からパイプラインが検出した
       // theory_component / theory_claim / equation / figure の全件を一覧表示する
       // （document_id が必要。図・画像ボタンと同条件・その隣に並べる）。
       var inventoryBtn = m.document_id
-        ? '<button class="admin-inventory-btn" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">検出要素</button>'
+        ? '<button class="admin-inventory-btn" data-ui-anchor="materials.row-inventory" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">検出要素</button>'
         : "";
       // U層（LLM使用量推計, migration 043）: 解析前の事前トークン見積り（TEACHER・レンジのみ・金額なし, G2-U）
       var estimateBtn = m.material_id
-        ? '<button class="admin-estimate-btn" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）" style="background:none;border:1px solid var(--color-text-tertiary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">解析コスト見積り</button>'
+        ? '<button class="admin-estimate-btn" data-ui-anchor="materials.row-estimate" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）" style="background:none;border:1px solid var(--color-text-tertiary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">解析コスト見積り</button>'
         : "";
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
-        '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
+        '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-ui-anchor="materials.row-pdf-reupload" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
         resumeBtn +
         figuresBtn +
         inventoryBtn +
         shareBtn +
         versionBtn +
         estimateBtn +
-        '<button class="admin-delete-btn" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
+        '<button class="admin-delete-btn" data-ui-anchor="materials.row-delete" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
         '</div></td>';
       html += "</tr>";
     });
@@ -575,8 +575,8 @@
     var mid = escHtml(material.material_id || "");
     var disabled = material.document_id ? "" : " disabled";
     var html =
-      '<div class="material-pipeline-menu ls-action-menu" data-material-id="' + mid + '">' +
-        '<button class="admin-action-btn ls-menu-trigger material-pipeline-trigger" type="button" data-material-id="' + mid + '"' + disabled + '>' +
+      '<div class="material-pipeline-menu ls-action-menu" data-ui-anchor="materials.row-pipeline-run" data-material-id="' + mid + '">' +
+        '<button class="admin-action-btn ls-menu-trigger material-pipeline-trigger" data-ui-anchor="materials.row-pipeline-run" type="button" data-material-id="' + mid + '"' + disabled + '>' +
           '<span class="ls-step-mark"></span><span>パイプラインを実行 ▼</span>' +
         '</button>' +
         '<div class="ls-menu material-pipeline-panel" hidden>' +
@@ -820,6 +820,7 @@
 
     var overlay = document.createElement("div");
     overlay.id = "delete-confirm-modal";
+    overlay.setAttribute("data-ui-anchor", "header.delete-confirm");
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
 
     overlay.innerHTML =
@@ -839,7 +840,7 @@
         '<div id="delete-confirm-error" style="display:none;color:var(--color-text-danger);font-size:12px;margin-bottom:8px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end">' +
           '<button id="delete-cancel-btn" style="padding:6px 16px;border:1px solid var(--color-border);border-radius:4px;background:none;color:var(--color-text-secondary);cursor:pointer;font-size:13px">キャンセル</button>' +
-          '<button id="delete-exec-btn" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px" disabled>削除する</button>' +
+          '<button id="delete-exec-btn" data-ui-anchor="header.delete-confirm" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px" disabled>削除する</button>' +
         '</div>' +
       '</div>';
 
@@ -923,6 +924,7 @@
 
     var overlay = document.createElement("div");
     overlay.id = "danger-confirm-modal";
+    overlay.setAttribute("data-ui-anchor", "header.danger-confirm");
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
 
     overlay.innerHTML =
@@ -971,15 +973,17 @@
 
     var overlay = document.createElement("div");
     overlay.id = "reanalyze-options-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.reanalyze-modal");
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
     overlay.innerHTML =
       '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:360px;max-width:440px">' +
         '<h3 style="margin:0 0 12px;font-size:15px;color:var(--color-text-primary)">解析を再開</h3>' +
         '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0 0 12px">「' + escHtml(filename) + '」の解析を再開します。</p>' +
-        '<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:16px">' +
+        '<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:8px">' +
           '<input type="checkbox" id="reanalyze-analyze-images">' +
           '図面・画像を解析する（装置図の同定に vision AI を使用）' +
         '</label>' +
+        '<div id="reanalyze-llm-model-row" style="margin-bottom:16px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end">' +
           '<button id="reanalyze-cancel-btn" class="admin-action-btn">キャンセル</button>' +
           '<button id="reanalyze-confirm-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">再開する</button>' +
@@ -993,10 +997,17 @@
     var analyzeImagesCheckbox = document.getElementById("reanalyze-analyze-images");
     if (analyzeImagesCheckbox) analyzeImagesCheckbox.checked = !!(lastOpts && lastOpts.analyze_images);
 
+    // M層（LLM モデル選択, migration 061）: 前回値を表示し「変更」で選び直せるようにする。
+    if (window.AdminLlmModels) {
+      var llmModelRow = document.getElementById("reanalyze-llm-model-row");
+      if (llmModelRow) window.AdminLlmModels.initReanalyzePanel(llmModelRow, lastOpts);
+    }
+
     overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
     document.getElementById("reanalyze-cancel-btn").addEventListener("click", function () { overlay.remove(); });
     document.getElementById("reanalyze-confirm-btn").addEventListener("click", function () {
       var analyzeImages = document.getElementById("reanalyze-analyze-images").checked;
+      var llmModels = window.AdminLlmModels ? window.AdminLlmModels.getReanalyzeModels(lastOpts, analyzeImages) : null;
       // N6残: 前回 run が analyze_images=true で、今回チェックを外して実行する場合は
       // 未レビューの AI 図分類・装置候補が失われることを明示確認してから実行する
       // （明示 OFF はユーザーの意思なのでブロックはしないが、警告なしには通さない）。
@@ -1006,14 +1017,14 @@
         if (confirmBtn) confirmBtn.disabled = true; // 件数取得中の二重クリック防止
         _confirmExplicitImagesOff(docId, function () {
           overlay.remove();
-          performReanalyze(docId, filename, triggerBtn, analyzeImages);
+          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels);
         }, function () {
           if (confirmBtn) confirmBtn.disabled = false; // キャンセル時は選び直せる
         });
         return;
       }
       overlay.remove();
-      performReanalyze(docId, filename, triggerBtn, analyzeImages);
+      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels);
     });
   }
 
@@ -1068,11 +1079,14 @@
       });
   }
 
-  function performReanalyze(docId, filename, btn, analyzeImages) {
+  function performReanalyze(docId, filename, btn, analyzeImages, models) {
     if (btn) { btn.disabled = true; btn.textContent = "再開中..."; }
+    var body = { analyze_images: !!analyzeImages };
+    // M層（LLM モデル選択, migration 061）: 未指定（null）なら前回 run の options から自動継承される。
+    if (models) body.models = models;
     apiFetch("/admin/documents/" + docId + "/reanalyze", {
       method: "POST",
-      body: JSON.stringify({ analyze_images: !!analyzeImages }),
+      body: JSON.stringify(body),
     })
       .then(function (res) {
         if (!res.ok) throw new Error("status " + res.status);
@@ -1111,6 +1125,7 @@
 
     var overlay = document.createElement("div");
     overlay.id = "figures-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.figures-modal");
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
     overlay.innerHTML =
       '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:520px;max-width:760px;max-height:82vh;display:flex;flex-direction:column">' +
@@ -1192,7 +1207,7 @@
           '</div>' +
           '<div style="font-size:12px;color:var(--color-text-secondary);margin:4px 0">' + escHtml(fig.caption_text || "(captionなし)") + '</div>' +
           '<div style="margin-bottom:6px">' + figureExtractionBadge(fig.extraction_method) +
-            ' <button class="admin-action-btn figure-deliberate-btn" type="button" data-figure-id="' + escHtml(fig.id) + '" style="font-size:11px;padding:2px 8px;margin-left:4px">深く検討</button>' +
+            ' <button class="admin-action-btn figure-deliberate-btn" type="button" data-ui-anchor="materials.figure-deliberate" data-figure-id="' + escHtml(fig.id) + '" style="font-size:11px;padding:2px 8px;margin-left:4px">深く検討</button>' +
           '</div>' +
           _renderApparatusCandidates(fig) +
         '</div>' +
@@ -1261,10 +1276,10 @@
         figureMatchBadge(c.match_status) +
         (parts ? '<span style="font-size:11.5px;color:var(--color-text-tertiary)">パーツ: ' + parts + '</span>' : "") +
         (canOverlay
-          ? '<button class="admin-action-btn figure-overlay-btn" type="button" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">図で確認</button>'
+          ? '<button class="admin-action-btn figure-overlay-btn" type="button" data-ui-anchor="materials.figure-overlay" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">図で確認</button>'
           : "") +
         '<span style="flex:1"></span>' +
-        '<button class="admin-action-btn figure-promote-btn" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">ライブラリへ昇格</button>' +
+        '<button class="admin-action-btn figure-promote-btn" data-ui-anchor="materials.figure-promote" data-figure-id="' + escHtml(fig.id) + '" data-candidate-idx="' + i + '" style="font-size:11.5px;padding:2px 8px">ライブラリへ昇格</button>' +
       '</div>';
     });
     html += '</div>';
@@ -1605,6 +1620,7 @@
 
     var overlay = document.createElement("div");
     overlay.id = "library-entry-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.library-entry-modal");
     overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:10000";
     overlay.innerHTML =
       '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:460px;max-width:600px;max-height:86vh;overflow-y:auto">' +
@@ -1668,14 +1684,14 @@
         '</div>' +
 
         (canOfferImage
-          ? ('<label style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:4px">' +
+          ? ('<label data-ui-anchor="materials.library-entry-merge-target" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:4px">' +
               '<input type="checkbox" id="lib-entry-include-image"> 例示画像を含める（元教材の所有者のみ有効）' +
             '</label>' +
             '<div id="lib-entry-image-warning" style="display:none;font-size:11.5px;color:var(--color-text-warning);background:#fff6e6;border:1px solid var(--color-text-warning);border-radius:4px;padding:5px 7px;margin-bottom:10px">この画像はライブラリを閲覧できる全教員に表示されます。元教材の所有者以外がこの操作を行うと拒否されます。</div>' +
             '<div id="lib-entry-image-merge-note" style="display:none;font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:10px">統合では例示画像は引き継がれません（新規作成時のみ）</div>')
           : "") +
 
-        '<div style="border-top:1px solid var(--color-border-tertiary);padding-top:10px;margin-top:4px">' +
+        '<div data-ui-anchor="materials.library-entry-merge-target" style="border-top:1px solid var(--color-border-tertiary);padding-top:10px;margin-top:4px">' +
           '<label style="display:flex;align-items:center;gap:6px;font-size:12px;margin-bottom:4px">' +
             '<input type="radio" name="lib-entry-merge-target" value="" checked> 新規作成' +
           '</label>' +
@@ -2024,10 +2040,10 @@
     var listEl = document.getElementById("library-domains-list");
     if (!listEl) return;
     var allActive = !_libraryTabState.selectedDomain;
-    var html = '<button type="button" class="library-domain-item admin-action-btn" data-domain-key="" style="' + _libraryDomainButtonStyle(allActive) + '">すべての分野</button>';
+    var html = '<button type="button" class="library-domain-item admin-action-btn" data-ui-anchor="knowledge-library.domains-list" data-domain-key="" style="' + _libraryDomainButtonStyle(allActive) + '">すべての分野</button>';
     domains.forEach(function (d) {
       var active = _libraryTabState.selectedDomain === d.domain_key;
-      html += '<button type="button" class="library-domain-item admin-action-btn" data-domain-key="' + escHtml(d.domain_key) + '" style="' + _libraryDomainButtonStyle(active) + '">' +
+      html += '<button type="button" class="library-domain-item admin-action-btn" data-ui-anchor="knowledge-library.domains-list" data-domain-key="' + escHtml(d.domain_key) + '" style="' + _libraryDomainButtonStyle(active) + '">' +
         '<span>' + escHtml(d.domain_key) + '</span>' +
         '<span style="color:var(--color-text-tertiary);font-size:11px">' + (d.entry_count || 0) + '件 / 凍結' + (d.frozen_count || 0) + '</span>' +
       '</button>';
@@ -2081,7 +2097,7 @@
     var html = "";
     entries.forEach(function (e) {
       var retired = e.status === "retired";
-      html += '<button type="button" class="library-entry-item" data-entry-id="' + escHtml(e.id) + '" style="text-align:left;border:1px solid var(--color-border-tertiary);border-radius:4px;padding:6px 8px;background:' + (retired ? "var(--color-background-tertiary)" : "var(--color-background-primary)") + ';opacity:' + (retired ? "0.6" : "1") + ';cursor:pointer">' +
+      html += '<button type="button" class="library-entry-item" data-ui-anchor="knowledge-library.entries-list" data-entry-id="' + escHtml(e.id) + '" style="text-align:left;border:1px solid var(--color-border-tertiary);border-radius:4px;padding:6px 8px;background:' + (retired ? "var(--color-background-tertiary)" : "var(--color-background-primary)") + ';opacity:' + (retired ? "0.6" : "1") + ';cursor:pointer">' +
         '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' + escHtml(e.name) +
           (retired ? ' <span style="font-size:10.5px;color:var(--color-text-tertiary)">(廃止)</span>' : '') +
         '</div>' +
@@ -2154,7 +2170,7 @@
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">' +
         _libraryStandardizationBadgeHtml(entry.standardization_status) +
         (window.Deliberation && window.Deliberation.openElement
-          ? '<button type="button" id="lib-detail-deliberate" class="admin-action-btn" style="font-size:11.5px;padding:2px 8px" title="この共通部品の内訳・標準化度の評価・同一性リンクを検討します">深く検討</button>'
+          ? '<button type="button" id="lib-detail-deliberate" data-ui-anchor="knowledge-library.detail-deliberate" class="admin-action-btn" style="font-size:11.5px;padding:2px 8px" title="この共通部品の内訳・標準化度の評価・同一性リンクを検討します">深く検討</button>'
           : '') +
       '</div>' +
 
@@ -2223,12 +2239,12 @@
         ? '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:6px">retired のエントリは編集できません。復元してから編集してください。</div>'
         : '') +
       '<div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px">' +
-        '<button id="lib-detail-save" class="admin-action-btn" style="background:var(--color-text-success);color:#fff"' +
+        '<button id="lib-detail-save" data-ui-anchor="knowledge-library.detail-save" class="admin-action-btn" style="background:var(--color-text-success);color:#fff"' +
           (isRetired ? ' disabled title="retired のエントリは編集できません。復元してから編集してください"' : '') + '>保存</button>' +
         (isRetired
-          ? '<button id="lib-detail-restore" class="admin-action-btn">復元</button>'
-          : ('<button id="lib-detail-freeze" class="admin-action-btn">凍結（版発行）</button>' +
-             '<button id="lib-detail-retire" class="admin-action-btn" style="background:var(--color-text-danger);color:#fff">廃止</button>')) +
+          ? '<button id="lib-detail-restore" data-ui-anchor="knowledge-library.detail-restore" class="admin-action-btn">復元</button>'
+          : ('<button id="lib-detail-freeze" data-ui-anchor="knowledge-library.detail-freeze" class="admin-action-btn">凍結（版発行）</button>' +
+             '<button id="lib-detail-retire" data-ui-anchor="knowledge-library.detail-retire" class="admin-action-btn" style="background:var(--color-text-danger);color:#fff">廃止</button>')) +
       '</div>' +
 
       '<div style="font-size:12px;font-weight:600;margin-bottom:4px">版履歴</div>' +
@@ -2455,7 +2471,13 @@
     formData.append("file", file);
     // 画像読み取りパイプライン（migration 041）: チェックボックスの明示オプトインのみで vision LLM を呼ぶ
     var analyzeImagesEl = document.getElementById("upload-analyze-images");
-    formData.append("analyze_images", (analyzeImagesEl && analyzeImagesEl.checked) ? "true" : "false");
+    var analyzeImagesChecked = !!(analyzeImagesEl && analyzeImagesEl.checked);
+    formData.append("analyze_images", analyzeImagesChecked ? "true" : "false");
+    // M層（LLM モデル選択, migration 061）: 選択済みモデル（カタログ収載分のみ）を run options へ渡す。
+    if (window.AdminLlmModels) {
+      var uploadModels = window.AdminLlmModels.getUploadModels(analyzeImagesChecked);
+      if (uploadModels) formData.append("models", JSON.stringify(uploadModels));
+    }
 
     apiFetchRaw("/admin/materials/upload", {
       method: "POST",
@@ -2595,6 +2617,53 @@
   }
 
   // ── Course Builder Chat ────────────────────────────────────────────
+  //
+  // M層 Phase 3（llm_model_selection_design.md §6.2）: チャット右上のモデルチップ。
+  // 選択は court_builder_sessions の DB スキーマ（history/course_draft/status 等の
+  // 固定列のみ）に相乗りできる汎用フィールドが無いため、サーバへは永続化しない
+  // （セッション更新 API に model 用の列を追加していない — 正直に記録する）。
+  // 代わりにセッションID単位の in-memory map で「同一ページ滞在中のセッション切替」
+  // だけ選択を復元する（ページ再読込・別端末では復元されない）。
+  var _cbModelChip = null;
+  var _cbModelBySession = {};
+  var _cbLastAnnouncedModel = null;
+
+  function _cbSessionKey() {
+    return state.currentSessionId || "__new__";
+  }
+
+  function _cbCurrentModel() {
+    return _cbModelBySession[_cbSessionKey()] || null;
+  }
+
+  // セッション切替時にチップの表示だけを追従させる（onChange は発火させない=通知しない）。
+  function _cbSyncModelChipToSession() {
+    _cbLastAnnouncedModel = null;
+    if (_cbModelChip) _cbModelChip.setModel(_cbModelBySession[_cbSessionKey()] || null);
+  }
+
+  function _initCourseBuilderModelChip() {
+    var mount = document.getElementById("cb-chat-model-chip");
+    if (!mount || !window.AdminLlmModels) return;
+    _cbModelChip = window.AdminLlmModels.createModelChip({
+      sceneKey: "course_builder",
+      mountEl: mount,
+      compact: true,
+      anchorId: "course-builder.model-chip",
+      onChange: function (model) {
+        _cbModelBySession[_cbSessionKey()] = model;
+        var label = model || (_cbModelChip ? _cbModelChip.getModel() : null);
+        // 既に対話が始まっている場合のみ、以降の応答がこのモデルになることを
+        // 区切り線として履歴表示に追記する（chatHistory には積まず表示専用）。
+        if (label && label !== _cbLastAnnouncedModel && state.chatMessages && state.chatMessages.length > 0) {
+          state.chatMessages.push({ role: "divider", content: "ここから " + label + " で応答します" });
+          renderCourseChat();
+        }
+        _cbLastAnnouncedModel = label;
+      }
+    });
+  }
+
   function initCourseBuilder() {
     var input = document.getElementById("cb-chat-input");
     var btn = document.getElementById("cb-send-btn");
@@ -2620,6 +2689,8 @@
     initMaterialToolbar();
     // Issue #72: 利用可能な教材一覧をロード
     loadMaterialsForSelection();
+    // M層 Phase 3（§6.2）: モデルチップ
+    _initCourseBuilderModelChip();
   }
 
   // ── Material Selection (Issue #72 / 機能2 コース作成UX) ─────────────
@@ -2767,7 +2838,7 @@
       var previewNames = (m.top_components && m.top_components.length) ? m.top_components : (m.top_concepts || []);
       var hasDetail = (m.section_outline && m.section_outline.length) || (previewNames && previewNames.length);
 
-      html += '<div class="cb-mat-card' + (selected ? " selected" : "") + (selectable ? "" : " disabled") + '" data-mid="' + midE + '">';
+      html += '<div class="cb-mat-card' + (selected ? " selected" : "") + (selectable ? "" : " disabled") + '" data-ui-anchor="course-builder.material-card" data-mid="' + midE + '">';
       html += '<div class="cb-mat-card-row">';
       html += '<span class="cb-mat-check">' + (selected ? "✓" : "") + '</span>';
       html += '<div class="cb-mat-body">';
@@ -2883,7 +2954,7 @@
     var bar = document.getElementById("cb-session-bar");
     if (!bar) return;
 
-    var selectHtml = '<select id="session-select" style="flex:1;padding:4px 6px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);font-size:12px">';
+    var selectHtml = '<select id="session-select" data-ui-anchor="course-builder.session-select" style="flex:1;padding:4px 6px;background:var(--color-bg-secondary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);font-size:12px">';
     selectHtml += '<option value="">― 過去のセッションを選択 ―</option>';
     (sessions || []).forEach(function (s) {
       var label = s.display_name || s.title || s.session_id;
@@ -2895,8 +2966,8 @@
     bar.innerHTML =
       '<div style="display:flex;gap:8px;align-items:center;padding:6px 12px;border-bottom:1px solid var(--color-border)">' +
       selectHtml +
-      '<button id="new-session-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);cursor:pointer;white-space:nowrap">+ 新規</button>' +
-      '<button id="import-course-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-info);cursor:pointer;white-space:nowrap">既存コースを読込</button>' +
+      '<button id="new-session-btn" data-ui-anchor="course-builder.new-session-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-primary);cursor:pointer;white-space:nowrap">+ 新規</button>' +
+      '<button id="import-course-btn" data-ui-anchor="course-builder.import-course-btn" style="padding:4px 10px;font-size:12px;background:var(--color-bg-tertiary);border:1px solid var(--color-border);border-radius:4px;color:var(--color-text-info);cursor:pointer;white-space:nowrap">既存コースを読込</button>' +
       "</div>";
 
     // 現在選択中のセッションがあれば反映（なければ空欄のまま）
@@ -2932,6 +3003,7 @@
     state.importedFromCourseId = null;
     renderCourseChat();
     renderCoursePreview();
+    _cbSyncModelChipToSession();
   }
 
   function createNewSession() {
@@ -2946,6 +3018,11 @@
     })
       .then(function (res) { return res.json(); })
       .then(function (data) {
+        // "__new__" キーに積んでいた選択を、実際のセッションIDへ引き継ぐ。
+        if (_cbModelBySession.hasOwnProperty("__new__")) {
+          _cbModelBySession[data.session_id] = _cbModelBySession["__new__"];
+          delete _cbModelBySession.__new__;
+        }
         state.currentSessionId = data.session_id;
         state.currentSessionStatus = data.status || "draft";
         state.currentSessionPublishedCourseId = data.published_course_id || null;
@@ -2984,6 +3061,7 @@
         renderCoursePreview();
         var sel = document.getElementById("session-select");
         if (sel) sel.value = sessionId;
+        _cbSyncModelChipToSession();
       })
       .catch(function () {});
   }
@@ -3039,6 +3117,9 @@
         history: chatHistory,
         session_id: state.currentSessionId || null,
         selected_material_ids: state.selectedMaterialIds,
+        // M層 Phase 3（§6.2）: この実行だけのモデル上書き。未選択（null）なら
+        // サーバ側の既定解決順序（ユーザー既定 → システム既定 → env → tier）に委ねる。
+        model: _cbCurrentModel(),
       }),
     })
       .then(function (res) {
@@ -3116,6 +3197,10 @@
         html += '<div class="mg usr">' + escHtml(msg.content) + "</div>";
       } else if (msg.role === "warning") {
         html += '<div class="mg ai" style="color:var(--color-text-warning);font-size:12px;">⚠ ' + escHtml(msg.content) + "</div>";
+      } else if (msg.role === "divider") {
+        // M層 Phase 3（§6.2）: モデル変更の区切り事実文。chatHistory には積まず表示専用。
+        html += '<div class="cb-model-divider" style="text-align:center;font-size:11px;' +
+          'color:var(--color-text-tertiary);margin:8px 0">── ' + escHtml(msg.content) + " ──</div>";
       } else {
         html += '<div class="mg ai">' + renderSimpleMarkdown(msg.content) + "</div>";
       }
@@ -3846,6 +3931,17 @@
     var domainLifecycles = {};
     // タブ外（コースビルダー導線等）から特定分野へフォーカスして開くための予約キー。
     var pendingFocusKey = null;
+    // M層 Phase 3（§6.5）: 骨格生成モデルのチップ（生成ボタンの隣）。
+    var _atlasModelChip = null;
+    var atlasModelChipMount = document.getElementById("atlas-generate-model-chip");
+    if (atlasModelChipMount && window.AdminLlmModels) {
+      _atlasModelChip = window.AdminLlmModels.createModelChip({
+        sceneKey: "atlas",
+        mountEl: atlasModelChipMount,
+        compact: true,
+        onChange: function () {}
+      });
+    }
 
     // retired 中は生成・保存・凍結を無効化し、retire/restore ボタンの表示を切り替える。
     function updateLifecycleUI() {
@@ -4210,13 +4306,13 @@
           html += "<div style='color:var(--color-text-secondary);font-size:12px;margin-top:2px'>版 " + escHtml(r.applied_version) + " に反映済み</div>";
         }
         if (r.status === "pending") {
-          html += "<div style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>" +
+          html += "<div data-ui-anchor='atlas.report-resolve' style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>" +
             "<button class='admin-action-btn' data-report-action='accept'>採用（次版へ）</button>" +
             "<button class='admin-action-btn' data-report-action='decline'>見送り（理由つき）</button>" +
             "<button class='admin-action-btn' data-report-action='merge'>重複統合</button>" +
             "</div>";
         } else if (r.status === "accepted" && !r.incorporated_at && !r.applied_version) {
-          html += "<div style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>" +
+          html += "<div data-ui-anchor='atlas.report-incorporate' style='display:flex;gap:6px;margin-top:6px;flex-wrap:wrap'>" +
             "<button class='admin-action-btn' data-report-action='incorporate'>次版で対応済みにする</button>" +
             "</div>";
         }
@@ -4395,6 +4491,10 @@
       if (pendingDomainMeta[select.value]) {
         payload.domain = pendingDomainMeta[select.value];
       }
+      // M層 Phase 3（§6.5）: 骨格生成モデルのこの実行だけの上書き。未選択なら省略し、
+      // サーバ側の既定解決順序に委ねる。
+      var atlasModel = _atlasModelChip ? _atlasModelChip.getSelected() : null;
+      if (atlasModel) payload.model = atlasModel;
       apiFetch(basePath() + "/generate", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -4569,6 +4669,7 @@
     var discardDraftBtn = document.createElement("button");
     discardDraftBtn.type = "button";
     discardDraftBtn.id = "atlas-discard-draft";
+    discardDraftBtn.setAttribute("data-ui-anchor", "atlas.discard-draft");
     discardDraftBtn.className = "admin-action-btn";
     discardDraftBtn.textContent = "下書きを破棄";
     saveDraftBtnEl.parentNode.insertBefore(discardDraftBtn, saveDraftBtnEl.nextSibling);
@@ -4805,8 +4906,8 @@
     html += "</div>";
     html += "<div data-role='ab-table'></div>";
     html += "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>" +
-      "<button data-role='ab-save' class='admin-action-btn'>この対応で反映</button>" +
-      "<button type='button' data-role='ab-new-domain-toggle' class='admin-action-btn'>このコースから新しい分野マップを作る</button>" +
+      "<button data-role='ab-save' data-ui-anchor='atlas.binding-save' class='admin-action-btn'>この対応で反映</button>" +
+      "<button type='button' data-role='ab-new-domain-toggle' data-ui-anchor='atlas.binding-new-domain' class='admin-action-btn'>このコースから新しい分野マップを作る</button>" +
       "</div>";
 
     // §2.3: コース起点の新分野作成（インラインのミニフォーム。既定は非表示）
@@ -4819,7 +4920,7 @@
     html += "<label style='font-size:12px;display:block;margin-bottom:2px'>説明（任意）</label>";
     html += "<textarea data-role='ab-new-domain-desc' rows='2' style='width:100%;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);margin-bottom:6px;box-sizing:border-box'>" + escHtml(options.courseDescription || "") + "</textarea>";
     html += "<div style='display:flex;gap:8px;align-items:center;flex-wrap:wrap'>" +
-      "<button type='button' data-role='ab-new-domain-submit' class='admin-action-btn'>下書きを生成</button>" +
+      "<button type='button' data-role='ab-new-domain-submit' data-ui-anchor='atlas.binding-new-domain' class='admin-action-btn'>下書きを生成</button>" +
       "<span data-role='ab-new-domain-status' style='font-size:12px;color:var(--color-text-secondary)'></span>" +
       "</div>";
     html += "</div>";
@@ -5367,7 +5468,7 @@
       html += '<div class="error-log-item" data-log-id="' + escHtml(logId) + '">' +
         '<div class="error-log-item-head">' +
           '<label class="error-log-check">' +
-            '<input class="error-log-select-row" type="checkbox" data-log-id="' + escHtml(logId) + '">' +
+            '<input class="error-log-select-row" data-ui-anchor="error-analysis.select-row" type="checkbox" data-log-id="' + escHtml(logId) + '">' +
           '</label>' +
           '<div class="error-log-main">' +
             '<div class="error-log-time">' + escHtml(formatDateTime(row.timestamp)) + ' / ' + escHtml(row.level) + ' / ' + escHtml(row.logger) + '</div>' +
@@ -5702,6 +5803,10 @@
       // discuss 観測基盤（Observation Layer）— SYSTEM_ADMIN のみ（discuss_observation_design.md §4）。
       var discussObservationTabBtn = document.getElementById("tab-btn-discuss-observation");
       if (discussObservationTabBtn) discussObservationTabBtn.style.display = "";
+
+      // M層（LLM モデル選択, migration 061）— SYSTEM_ADMIN のみ運用タブでシステム既定を管理。
+      var llmModelsTabBtn = document.getElementById("tab-btn-llm-models");
+      if (llmModelsTabBtn) llmModelsTabBtn.style.display = "";
     }
 
     // Show schema evolution tab for TEACHER/SYSTEM_ADMIN
@@ -5725,16 +5830,16 @@
           '学生のつまづきデータを分析し、不足している概念カテゴリや関係性の拡張をAIが提案します。' +
         '</p>' +
         '<div style="display:flex;gap:8px;margin-bottom:16px">' +
-          '<button id="schema-analyze-btn" class="admin-action-btn">AIメタ分析を実行</button>' +
-          '<button id="schema-refresh-btn" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">提案を更新</button>' +
+          '<button id="schema-analyze-btn" data-ui-anchor="schema.analyze-btn" class="admin-action-btn">AIメタ分析を実行</button>' +
+          '<button id="schema-refresh-btn" data-ui-anchor="schema.refresh-btn" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">提案を更新</button>' +
         '</div>' +
         '<div id="schema-analyze-msg" class="upload-status" style="display:none"></div>' +
         '<h4 style="margin:16px 0 8px">提案一覧</h4>' +
-        '<div id="schema-proposals-list" style="margin-bottom:24px">' +
+        '<div id="schema-proposals-list" data-ui-anchor="schema.proposals-list" style="margin-bottom:24px">' +
           '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
         '</div>' +
         '<h4 style="margin:16px 0 8px">再抽出ジョブ</h4>' +
-        '<div id="schema-jobs-list">' +
+        '<div id="schema-jobs-list" data-ui-anchor="schema.jobs-list">' +
           '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
         '</div>' +
       '</div>' +
@@ -5743,11 +5848,11 @@
         '<div style="display:flex;gap:24px;flex-wrap:wrap">' +
           '<div style="flex:1;min-width:300px">' +
             '<h4>概念カテゴリ (OntologyType)</h4>' +
-            '<div id="schema-types-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+            '<div id="schema-types-list" data-ui-anchor="schema.types-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
           '</div>' +
           '<div style="flex:1;min-width:300px">' +
             '<h4>関係性タイプ (CorePredicate)</h4>' +
-            '<div id="schema-preds-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+            '<div id="schema-preds-list" data-ui-anchor="schema.preds-list"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
           '</div>' +
         '</div>' +
       '</div>';
@@ -5760,7 +5865,7 @@
     studentPanel.innerHTML =
       '<div class="admin-section">' +
         '<h3 class="admin-section-title">学生アカウント追加</h3>' +
-        '<form id="student-form" class="admin-user-form">' +
+        '<form id="student-form" data-ui-anchor="students.student-form" class="admin-user-form">' +
           '<div class="admin-form-row">' +
             '<label>ユーザー名 <input id="student-username" type="text" required placeholder="student_name"></label>' +
           '</div>' +
@@ -5784,7 +5889,7 @@
       teacherPanel.innerHTML =
         '<div class="admin-section">' +
           '<h3 class="admin-section-title">教員アカウント追加</h3>' +
-          '<form id="teacher-form" class="admin-user-form">' +
+          '<form id="teacher-form" data-ui-anchor="teachers.teacher-form" class="admin-user-form">' +
             '<div class="admin-form-row">' +
               '<label>ユーザー名 <input id="teacher-username" type="text" required placeholder="teacher_name"></label>' +
             '</div>' +
@@ -5862,7 +5967,7 @@
 
           if (p.status === "pending") {
             html += '<div style="display:flex;gap:8px">';
-            html += '<button class="admin-action-btn sp-simulate-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">シミュレーションを実行</button>';
+            html += '<button class="admin-action-btn sp-simulate-btn" data-ui-anchor="schema-proposals.simulate-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">シミュレーションを実行</button>';
             html += '</div>';
           }
 
@@ -6209,8 +6314,8 @@
           }
           if (p.status === "pending") {
             html += '<div style="margin-top:8px;display:flex;gap:8px">';
-            html += '<button class="admin-action-btn schema-approve-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">承認して適用</button>';
-            html += '<button class="admin-action-btn schema-reject-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px;background:var(--color-bg-tertiary);color:var(--color-text)">却下</button>';
+            html += '<button class="admin-action-btn schema-approve-btn" data-ui-anchor="schema.approve-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px">承認して適用</button>';
+            html += '<button class="admin-action-btn schema-reject-btn" data-ui-anchor="schema.reject-btn" data-id="' + escHtml(p.proposal_id) + '" style="font-size:0.85em;padding:4px 12px;background:var(--color-bg-tertiary);color:var(--color-text)">却下</button>';
             html += '</div>';
           }
           html += '</div>';
@@ -6406,7 +6511,7 @@
       html +=
         '<div style="' + cardStyle + '">' +
           accentBar +
-          '<div class="groups-item" data-gid="' + escHtml(g.id) + '" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;background:' + headerBg + '">' +
+          '<div class="groups-item" data-ui-anchor="groups.list" data-gid="' + escHtml(g.id) + '" style="display:flex;align-items:center;justify-content:space-between;padding:10px 14px;cursor:pointer;background:' + headerBg + '">' +
             '<div>' +
               '<div style="font-size:13px;font-weight:' + (isSelected ? "600" : "500") + '">' + escHtml(g.name) + badge + "</div>" +
               '<div style="font-size:11px;color:var(--color-text-tertiary)">メンバー ' + (g.member_count || 0) + "人</div>" +
@@ -6450,9 +6555,9 @@
     var members = (g.members || []).map(function (m) {
       var actions = "";
       if (isAdmin && m.role !== "admin") {
-        actions = '<button class="admin-action-btn groups-remove-btn" data-uid="' + escHtml(m.user_id) + '" style="font-size:11px">除名</button>';
+        actions = '<button class="admin-action-btn groups-remove-btn" data-ui-anchor="groups.remove-btn" data-uid="' + escHtml(m.user_id) + '" style="font-size:11px">除名</button>';
       } else if (!isAdmin && m.user_id === _meUserId()) {
-        actions = '<button class="admin-action-btn groups-leave-btn" style="font-size:11px">退会</button>';
+        actions = '<button class="admin-action-btn groups-leave-btn" data-ui-anchor="groups.leave-btn" style="font-size:11px">退会</button>';
       }
       return '<tr><td>' + escHtml(m.username) + '</td><td>' + escHtml(m.email || "") + '</td><td>' + escHtml(m.role) + '</td><td>' + actions + '</td></tr>';
     }).join("");
@@ -6462,7 +6567,7 @@
       inviteCodeBlock =
         '<div style="margin:8px 0">' +
         '<strong>招待コード:</strong> <code style="font-size:13px;padding:2px 6px;background:var(--color-bg-tertiary);border-radius:3px">' + escHtml(g.invite_code) + '</code>' +
-        ' <button id="groups-rotate-btn" class="admin-action-btn" style="font-size:11px;margin-left:8px">再発行</button>' +
+        ' <button id="groups-rotate-btn" data-ui-anchor="groups.rotate-btn" class="admin-action-btn" style="font-size:11px;margin-left:8px">再発行</button>' +
         "</div>";
     }
 
@@ -6473,7 +6578,7 @@
         '<h4 style="font-size:13px;margin:0 0 8px 0">ユーザーを直接招待</h4>' +
         '<div style="display:flex;gap:8px">' +
         '<input type="text" id="groups-invite-username" placeholder="ユーザー名" style="flex:1;padding:4px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
-        '<button id="groups-invite-btn" class="admin-action-btn">招待</button>' +
+        '<button id="groups-invite-btn" data-ui-anchor="groups.invite-btn" class="admin-action-btn">招待</button>' +
         "</div></div>";
     }
 
@@ -6481,7 +6586,7 @@
     if (isAdmin) {
       dangerZone =
         '<div style="margin-top:24px">' +
-        '<button id="groups-delete-btn" class="admin-action-btn" style="background:#dc2626;color:#fff">グループを削除</button>' +
+        '<button id="groups-delete-btn" data-ui-anchor="groups.delete-btn" class="admin-action-btn" style="background:#dc2626;color:#fff">グループを削除</button>' +
         "</div>";
     }
 
@@ -6634,8 +6739,8 @@
         list.forEach(function (inv) {
           html += '<div style="display:flex;align-items:center;gap:8px;padding:4px 0">' +
             '<span style="flex:1;font-size:13px">グループ「' + escHtml(inv.group_name) + '」 (招待者: ' + escHtml(inv.inviter_username) + ")</span>" +
-            '<button class="admin-action-btn groups-inv-accept" data-id="' + escHtml(inv.id) + '" style="font-size:11px;background:var(--color-text-success);color:#fff">承諾</button>' +
-            '<button class="admin-action-btn groups-inv-decline" data-id="' + escHtml(inv.id) + '" style="font-size:11px">辞退</button>' +
+            '<button class="admin-action-btn groups-inv-accept" data-ui-anchor="groups.my-invitations" data-id="' + escHtml(inv.id) + '" style="font-size:11px;background:var(--color-text-success);color:#fff">承諾</button>' +
+            '<button class="admin-action-btn groups-inv-decline" data-ui-anchor="groups.my-invitations" data-id="' + escHtml(inv.id) + '" style="font-size:11px">辞退</button>' +
             "</div>";
         });
         html += "</div>";
@@ -6795,15 +6900,24 @@
       // C層(承認・共有レイヤー) — 説明バージョン・承認・引用の状況を見る共有ダッシュボード。
       // グループ共有（V層「版の管理」）とは別機能。閲覧可能な行なら owner/editor/viewer 問わず開ける
       // （sharing-dashboard API は _ensure_viewable のみを要求する）。
-      var sharingDashboardBtn = '<button class="cm-sharing-dashboard-btn admin-action-btn" data-course-id="' +
+      var sharingDashboardBtn = '<button class="cm-sharing-dashboard-btn admin-action-btn" data-ui-anchor="course-management.sharing-dashboard-btn" data-course-id="' +
         escHtml(c.id) + '" data-course-title="' + escHtml(c.title) +
         '" style="font-size:11px;padding:2px 8px" title="説明バージョン・承認・引用の状況を表示します">共有ダッシュボード</button>';
       if (c.role === "owner") {
-        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="開示範囲・グループ共有を設定します">共有設定</button>' +
-          ' <button class="cm-version-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="コースを版（リリース）として発行・履歴管理します（共有設定とは別機能）">版の管理</button>' +
-          ' ' + sharingDashboardBtn;
+        // M層 Phase 3（§6.4）: 学習チャットのモデル設定（コース単位の上書き）。学生には出さない（M9）。
+        var llmModelBtn = '<button class="cm-llm-model-btn admin-action-btn" data-ui-anchor="course-management.llm-model-btn" data-course-id="' + escHtml(c.id) +
+          '" data-course-title="' + escHtml(c.title) + '" style="font-size:11px;padding:2px 8px" ' +
+          'title="このコースの受講チャットが使うモデルを設定します">AIモデル</button>';
+        // Phase 0b（discuss_opening_authoring_design.md §2 最下段）: discuss 開幕画面の
+        // 「このコースで議論したいこと」。教員の任意入力のみ（AI 生成なし・空欄可）。
+        var focusBtn = '<button class="cm-focus-btn admin-action-btn" data-ui-anchor="course-management.focus-btn" data-course-id="' + escHtml(c.id) +
+          '" data-course-title="' + escHtml(c.title) + '" style="font-size:11px;padding:2px 8px" ' +
+          'title="「論文と議論する」の開幕画面に出す、このコースで議論したいことを入力します">議論テーマ</button>';
+        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-ui-anchor="course-management.manage-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="開示範囲・グループ共有を設定します">共有設定</button>' +
+          ' <button class="cm-version-btn admin-action-btn" data-ui-anchor="course-management.version-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="コースを版（リリース）として発行・履歴管理します（共有設定とは別機能）">版の管理</button>' +
+          ' ' + sharingDashboardBtn + ' ' + llmModelBtn + ' ' + focusBtn;
         var isPublic = c.visibility === "public";
-        var quickToggle = '<button class="cm-quick-publish-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-action="' + (isPublic ? "unpublish" : "publish") + '" style="font-size:11px;padding:2px 8px;margin-top:4px">' +
+        var quickToggle = '<button class="cm-quick-publish-btn admin-action-btn" data-ui-anchor="course-management.quick-publish-btn" data-course-id="' + escHtml(c.id) + '" data-action="' + (isPublic ? "unpublish" : "publish") + '" style="font-size:11px;padding:2px 8px;margin-top:4px">' +
           (isPublic ? "公開を止める" : "公開する") + '</button>';
         stateHtml = '<div style="display:flex;flex-direction:column;gap:3px;align-items:flex-start">' +
           courseVisibilityBadgeHtml(c) +
@@ -6815,7 +6929,7 @@
         // モーダル（版履歴・現在版・自分のピン状態は見え、発行・削除予約は versioning.js が
         // version-state の is_owner/can_publish フラグで理由付き無効化する。fail-closed）。
         actionHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">所有者のみ変更可</span> ' +
-          '<button class="cm-version-btn admin-action-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="共有版の履歴と現在見ている版を確認します（発行・削除予約は所有者のみ）">版の管理</button> ' +
+          '<button class="cm-version-btn admin-action-btn" data-ui-anchor="course-management.version-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="共有版の履歴と現在見ている版を確認します（発行・削除予約は所有者のみ）">版の管理</button> ' +
           sharingDashboardBtn;
         stateHtml = '<div style="display:flex;flex-direction:column;gap:3px;align-items:flex-start">' +
           courseVisibilityBadgeHtml(c) +
@@ -6848,6 +6962,18 @@
     tbody.querySelectorAll(".cm-sharing-dashboard-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openSharingDashboardModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+    // M層 Phase 3（§6.4）— 学習チャットのモデル設定
+    tbody.querySelectorAll(".cm-llm-model-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openCourseModelModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+    // Phase 0b — discuss 開幕画面の「このコースで議論したいこと」（教員の任意入力）
+    tbody.querySelectorAll(".cm-focus-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openCourseFocusModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
       });
     });
     // G1-1: 行内の「公開する/公開を止める」クイック操作（visibility=public ⇔ private の切替）。
@@ -6961,6 +7087,190 @@
     body.innerHTML = html;
   }
 
+  // ── M層 Phase 3（§6.4）— コース単位の学習チャットモデル設定 ─────────────────
+  // 学生には出さない（M9）。保存先は learning_courses.data.llm_models.learning_chat
+  // （PUT /api/learning/courses/{id} body.llm_models、core/course_data.py 正本）。
+  // 現在の保存値は GET /api/admin/courses（loadCourseManagement で取得済みの
+  // _cmState.courses[].llm_models）から読む — 未保存なら catalog の実効モデルに
+  // 追従して表示する（捏造しない）。
+  function openCourseModelModal(courseId, courseTitle) {
+    var existing = document.getElementById("course-model-modal");
+    if (existing) existing.remove();
+
+    var course = null;
+    for (var i = 0; i < _cmState.courses.length; i++) {
+      if (_cmState.courses[i].id === courseId) { course = _cmState.courses[i]; break; }
+    }
+    var savedModels = (course && course.llm_models) || {};
+    var currentOverride = savedModels.learning_chat || null;
+
+    var overlay = document.createElement("div");
+    overlay.id = "course-model-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:420px;max-width:520px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">AIモデル設定 — ' + escHtml(courseTitle || "") + '</h3>' +
+          '<button id="course-model-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">受講者には表示されません。このコースの受講チャットが使うモデルの設定です。</p>' +
+        '<div style="font-size:13px;margin-bottom:6px">学習チャットのモデル: <span id="course-model-chip-mount" style="display:inline-block;vertical-align:middle"></span></div>' +
+        '<p id="course-model-current-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          (currentOverride
+            ? "現在このコースの設定として保存されています。"
+            : "現在このコース独自の設定はありません（表示は既定値です）。") +
+        '</p>' +
+        '<div id="course-model-status" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button id="course-model-cancel" class="admin-action-btn">閉じる</button>' +
+          '<button id="course-model-save" data-ui-anchor="course-management.course-model-save" class="admin-action-btn">保存</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("course-model-modal-close").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("course-model-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    // pendingModel: null は「未変更（保存済みの値のまま）」ではなく「既定に戻す」を意味する
+    // ―― chip の初期状態は currentOverride で復元しているため、ユーザーが一度も触らなければ
+    // save 時に currentOverride をそのまま送る。
+    var touched = false;
+    var pendingModel = currentOverride;
+    var modelChip = null;
+    var mount = document.getElementById("course-model-chip-mount");
+    if (mount && window.AdminLlmModels) {
+      modelChip = window.AdminLlmModels.createModelChip({
+        sceneKey: "learning_chat",
+        mountEl: mount,
+        compact: true,
+        initialModel: currentOverride,
+        onChange: function (model) {
+          touched = true;
+          pendingModel = model;
+        }
+      });
+    }
+
+    document.getElementById("course-model-save").addEventListener("click", function () {
+      var statusEl = document.getElementById("course-model-status");
+      var toSave = touched ? pendingModel : currentOverride;
+      var fallbackLabel = modelChip ? modelChip.getModel() : "既定";
+      var message = toSave
+        ? "このコースの受講チャットは " + toSave + " で応答するようになります。"
+        : "このコースの受講チャットの設定を解除します（既定 " + (fallbackLabel || "既定") + " に戻ります）。";
+      if (!window.confirm(message)) return;
+      statusEl.textContent = "保存しています...";
+      apiFetch("/learning/courses/" + encodeURIComponent(courseId), {
+        method: "PUT",
+        body: JSON.stringify({ llm_models: { learning_chat: toSave || null } }),
+      })
+        .then(function (res) {
+          if (!res.ok) {
+            return res.json().then(function (d) { throw new Error((d && d.detail) || "保存に失敗しました"); });
+          }
+          return res.json();
+        })
+        .then(function () {
+          statusEl.textContent = "保存しました。";
+          if (course) {
+            course.llm_models = course.llm_models || {};
+            if (toSave) course.llm_models.learning_chat = toSave;
+            else delete course.llm_models.learning_chat;
+          }
+          setTimeout(function () { overlay.remove(); }, 500);
+        })
+        .catch(function (err) {
+          statusEl.textContent = (err && err.message) || "保存に失敗しました";
+        });
+    });
+  }
+
+  // ── Phase 0b — discuss 開幕画面「このコースで議論したいこと」 ─────────────────
+  // discuss_opening_authoring_design.md §2 最下段 / §10 Phase 0b。教員の任意入力だけで
+  // 成立させる（AI 生成・候補提示は一切しない）。保存先は learning_courses.data.course_focus
+  // （PUT /api/learning/courses/{id} body.course_focus、正本アクセサは core/course_data.py::
+  // course_focus）。現在値は GET /api/admin/courses（_cmState.courses[].course_focus）から
+  // 読む。空欄で保存すると設定解除（開幕画面から区画ごと消える）。
+  var COURSE_FOCUS_MAX_CHARS = 600;
+
+  function openCourseFocusModal(courseId, courseTitle) {
+    var existing = document.getElementById("course-focus-modal");
+    if (existing) existing.remove();
+
+    var course = null;
+    for (var i = 0; i < _cmState.courses.length; i++) {
+      if (_cmState.courses[i].id === courseId) { course = _cmState.courses[i]; break; }
+    }
+    var currentFocus = (course && course.course_focus) || "";
+
+    var overlay = document.createElement("div");
+    overlay.id = "course-focus-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      // モーダル全体に「議論テーマ」の節を係留する（入力欄にホバーしても説明が出る。
+      // 「保存」ボタンだけは自分の節を持つので closest() でそちらが勝つ）。
+      '<div data-ui-anchor="course-management.focus-btn" style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:460px;max-width:560px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">議論テーマ — ' + escHtml(courseTitle || "") + '</h3>' +
+          '<button id="course-focus-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+          '「論文と議論する」の開幕画面の先頭に、担当教員が書いたものとして表示されます。' +
+          'AI は生成しません。空欄のままでも構いません（その場合は区画ごと表示されません）。</p>' +
+        '<textarea id="course-focus-input" rows="4" maxlength="' + COURSE_FOCUS_MAX_CHARS + '" ' +
+          'placeholder="例: この論文の感度の限界がどこから来るのかを、前提に戻って議論してください。" ' +
+          'style="width:100%;box-sizing:border-box;font-family:inherit;font-size:13px;line-height:1.7;padding:8px;' +
+          'border:1px solid var(--color-border-secondary);border-radius:6px;background:var(--color-background-secondary);' +
+          'color:var(--color-text-primary)"></textarea>' +
+        '<p style="font-size:11px;color:var(--color-text-tertiary);margin:6px 0 10px">' + COURSE_FOCUS_MAX_CHARS + '文字以内。</p>' +
+        '<div id="course-focus-status" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button id="course-focus-cancel" class="admin-action-btn">閉じる</button>' +
+          '<button id="course-focus-save" class="admin-action-btn" data-ui-anchor="course-management.course-focus-save">保存</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("course-focus-modal-close").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("course-focus-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    var input = document.getElementById("course-focus-input");
+    if (input) { input.value = currentFocus; input.focus(); }
+
+    document.getElementById("course-focus-save").addEventListener("click", function () {
+      var statusEl = document.getElementById("course-focus-status");
+      var text = input ? (input.value || "").trim() : "";
+      if (text.length > COURSE_FOCUS_MAX_CHARS) {
+        statusEl.textContent = COURSE_FOCUS_MAX_CHARS + "文字以内で入力してください。";
+        return;
+      }
+      // 事実文の確認（削除・公開ではないので破壊的確認ゲートは使わない。ただし
+      // 空欄保存＝学習者の画面から区画が消えることは明示する）。
+      if (!text && currentFocus) {
+        if (!window.confirm("入力を空にして保存すると、開幕画面からこの区画が表示されなくなります。")) return;
+      }
+      statusEl.textContent = "保存しています...";
+      apiFetch("/learning/courses/" + encodeURIComponent(courseId), {
+        method: "PUT",
+        body: JSON.stringify({ course_focus: text }),
+      })
+        .then(function (res) {
+          if (!res.ok) {
+            return res.json().then(function (d) { throw new Error((d && d.detail) || "保存に失敗しました"); });
+          }
+          return res.json();
+        })
+        .then(function () {
+          statusEl.textContent = "保存しました。";
+          if (course) course.course_focus = text;
+          setTimeout(function () { overlay.remove(); }, 500);
+        })
+        .catch(function (err) {
+          statusEl.textContent = (err && err.message) || "保存に失敗しました";
+        });
+    });
+  }
+
   function openPermissionModal(courseId, courseTitle) {
     _cmState.currentCourseId = courseId;
     _cmState.currentCourseTitle = courseTitle;
@@ -6988,7 +7298,7 @@
             '<option value="public">公開（誰でも受講可）</option>' +
           '</select>' +
           '<select id="cm-visibility-group-select" style="display:none;padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"></select>' +
-          '<button id="cm-visibility-apply-btn" class="admin-action-btn">適用</button>' +
+          '<button id="cm-visibility-apply-btn" data-ui-anchor="course-management.visibility-apply" class="admin-action-btn">適用</button>' +
         '</div>' +
         '<div id="cm-visibility-status" class="upload-status" style="display:none;margin-bottom:12px"></div>' +
         '<hr style="border:none;border-top:1px solid var(--color-border);margin:4px 0 12px 0">' +
@@ -7004,7 +7314,7 @@
             '<option value="viewer">viewer (受講可)</option>' +
             '<option value="editor">editor (編集可)</option>' +
           '</select>' +
-          '<button id="cm-perm-add-btn" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">追加</button>' +
+          '<button id="cm-perm-add-btn" data-ui-anchor="course-management.perm-add" class="admin-action-btn" style="background:var(--color-text-success);color:#fff">追加</button>' +
         '</div>' +
       '</div>';
 
@@ -7644,7 +7954,10 @@
   }
 
   function ssGenerateButton(courseId, kind, label) {
-    return '<button class="admin-action-btn ss-generate-btn" data-kind="' + escHtml(kind) +
+    var anchor = kind === "script" ? "system-stats.generate-script"
+      : kind === "audio" ? "system-stats.generate-audio"
+      : "system-stats.run-analysis";
+    return '<button class="admin-action-btn ss-generate-btn" data-ui-anchor="' + anchor + '" data-kind="' + escHtml(kind) +
       '" data-course-id="' + escHtml(courseId || "") +
       '" style="margin-top:6px;padding:3px 8px;font-size:11px">' + label + '</button>';
   }
@@ -7825,8 +8138,24 @@
 
     initTabs();
     initErrorAnalysis();
+
+    // M層（LLM モデル選択, migration 061）— 依存注入は initMaterialsPanel() より前に
+    // 行うこと。モジュール内の fetch 実体は deps.apiFetch であり、注入前に叩くと
+    // 教材管理の初期化ごと落ちる（解析モデル/教材一覧が「読み込み中」のまま止まる）。
+    if (window.AdminLlmModels) {
+      window.AdminLlmModels.init({
+        apiFetch: apiFetch,
+        escHtml: escHtml,
+        onTabActivate: onTabActivate,
+        state: state,
+        activateTabView: activateTabView,
+      });
+    }
+
     if (state.role !== "SYSTEM_ADMIN") {
       initUpload();
+      // M層 — 教材アップロード区画の解析モデル1行サマリ（init 済みが前提）。
+      if (window.AdminLlmModels) window.AdminLlmModels.initMaterialsPanel();
       initCourseBuilder();
       initCourseManagement();
       if (window.LectureStudio) {
@@ -7892,6 +8221,9 @@
       });
     }
 
+    // M層の AdminLlmModels.init はこの関数の先頭側（initUpload より前）で実施済み —
+    // initMaterialsPanel が deps.apiFetch を必要とするため、ここには置かない。
+
     // 横断ユーティリティ層（Admin Copilot）— 統合 AI アシスタント。
     // 依存を注入して疎結合に起動し、各画面の状態・点灯先フックを登録する。
     if (window.AdminAssistant) {
@@ -7901,6 +8233,12 @@
         activateTabView: activateTabView,
       });
       registerAssistantHooks();
+    }
+
+    // admin「？使い方」インスペクト・モード（学習画面のインスペクトと同型）。
+    // [data-ui-anchor] 要素へのホバーでマニュアル節ツールチップを表示する。
+    if (window.AdminHelpInspect) {
+      window.AdminHelpInspect.init({ apiFetch: apiFetch });
     }
 
     // G層（ガイダンス層）— 状態導出型「次にやること」バッジ。AdminAssistant のすぐ後に起動する
@@ -7969,6 +8307,19 @@
         var mid = id || _matLastAnchoredMaterialId;
         return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-figures-btn'))
           || document.querySelector('#materials-tbody .admin-figures-btn');
+      },
+      // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
+      material_inventory_button: function (id) {
+        if (id) _matLastAnchoredMaterialId = id;
+        var mid = id || _matLastAnchoredMaterialId;
+        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-inventory-btn'))
+          || document.querySelector('#materials-tbody .admin-inventory-btn');
+      },
+      // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
+      // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、
+      // 未解決なら道案内はそこで止まる（P8 fail-closed）。
+      explanation_review_button: function () {
+        return document.getElementById("deliberation-explanation-review-open");
       }
     });
     AA.registerUiAnchors("course-builder", {
@@ -8035,9 +8386,17 @@
     AA.registerUiAnchors("atlas", {
       atlas_generate_button: function () { return document.getElementById("atlas-generate"); }
     });
+    // 2026-07-29 是正: 学生・教員アカウント作成フォームは #tab-groups ではなく
+    // 独立タブ #tab-students / #tab-teachers 側にある（setupRoleBasedUI が動的生成）。
+    // 従来ここで "groups" screen に登録していたため道案内が実在しないフォームを指していた。
     AA.registerUiAnchors("groups", {
-      create_student_form: function () { return document.getElementById("tab-groups"); },
-      create_teacher_form: function () { return document.getElementById("tab-groups"); }
+      groups_create_form: function () { return document.getElementById("groups-create-form"); }
+    });
+    AA.registerUiAnchors("students", {
+      create_student_form: function () { return document.getElementById("student-form"); }
+    });
+    AA.registerUiAnchors("teachers", {
+      create_teacher_form: function () { return document.getElementById("teacher-form"); }
     });
     // 知識ネットワークビジョン Phase B（G2-B）: 橋の候補セクション。
     AA.registerUiAnchors("interest-dashboard", {
@@ -8068,6 +8427,22 @@
     // N31: スキーマ提案タブ（提案一覧。承認はシミュレーション結果画面の確認ゲート経由）。
     AA.registerUiAnchors("schema-proposals", {
       sp_proposals_list: function () { return document.getElementById("sp-proposals-list"); }
+    });
+    // 2026-07-29 是正: DSL進化分析タブ（このタブ自身の承認・却下には確認ダイアログが無い）。
+    AA.registerUiAnchors("schema", {
+      schema_analyze_button: function () { return document.getElementById("schema-analyze-btn"); }
+    });
+    // 2026-07-29 是正: マニュアル編集タブ（help_kb draft/freeze、SYSTEM_ADMIN のみ）。
+    AA.registerUiAnchors("manual-editor", {
+      manual_editor_panel: function () { return document.getElementById("mke-draft-list") || document.getElementById("tab-manual-editor"); }
+    });
+    // 2026-07-29 是正: discuss 観測タブ（Observation Layer、SYSTEM_ADMIN のみ）。
+    AA.registerUiAnchors("discuss-observation", {
+      discuss_observation_panel: function () { return document.getElementById("ado-body") || document.getElementById("tab-discuss-observation"); }
+    });
+    // 2026-07-29 是正: AIモデルタブ（M層、システム既定の変更、SYSTEM_ADMIN のみ）。
+    AA.registerUiAnchors("llm-models", {
+      llm_models_ops_table: function () { return document.getElementById("llm-models-ops-table") || document.getElementById("tab-llm-models"); }
     });
 
     // --- 画面コンテキスト（現在の選択・可視要素） ---
@@ -8117,6 +8492,7 @@
       var overlay = document.createElement("div");
       overlay.id = "eg-rev-modal";
       overlay.className = "eg-rev-overlay";
+      overlay.setAttribute("data-ui-anchor", "materials.revision-modal");
       overlay.innerHTML =
         '<div class="eg-rev-box">' +
           '<div class="eg-rev-header">' +
@@ -8125,7 +8501,7 @@
           '</div>' +
           '<div class="eg-rev-active" id="eg-rev-active">読み込み中…</div>' +
           '<div class="eg-rev-toolbar">' +
-            '<button id="eg-rev-start" class="admin-action-btn" type="button">改善処理を開始</button>' +
+            '<button id="eg-rev-start" data-ui-anchor="materials.revision-start" class="admin-action-btn" type="button">改善処理を開始</button>' +
             '<span class="eg-rev-hint">採用済み成果物は変更されません。</span>' +
           '</div>' +
           '<div class="eg-rev-list" id="eg-rev-list"></div>' +
@@ -8239,11 +8615,11 @@
         '<p class="eg-rev-hint">通常は空のままにします。監査結果から修正候補が自動生成されます。' +
         'JSON を入力した場合のみ、その operations が使われます（サーバー側で検証）。</p>' +
         '<textarea id="eg-rev-ops" class="eg-rev-ops-text" placeholder="[]"></textarea></details>';
-      html += '<div class="eg-rev-actions">' +
-        '<button id="eg-rev-run" class="admin-action-btn" type="button">監査＋候補生成</button>' +
-        '<button id="eg-rev-accept" class="admin-action-btn"' + (detail.has_report ? '' : ' disabled') + ' type="button">採用</button>' +
-        '<button id="eg-rev-reject" class="admin-action-btn" type="button">却下</button>' +
-        '<button id="eg-rev-revise" class="admin-action-btn" type="button">再修正</button>' +
+      html += '<div class="eg-rev-actions" data-ui-anchor="materials.revision-decision">' +
+        '<button id="eg-rev-run" data-ui-anchor="materials.revision-decision" class="admin-action-btn" type="button">監査＋候補生成</button>' +
+        '<button id="eg-rev-accept" data-ui-anchor="materials.revision-decision" class="admin-action-btn"' + (detail.has_report ? '' : ' disabled') + ' type="button">採用</button>' +
+        '<button id="eg-rev-reject" data-ui-anchor="materials.revision-decision" class="admin-action-btn" type="button">却下</button>' +
+        '<button id="eg-rev-revise" data-ui-anchor="materials.revision-decision" class="admin-action-btn" type="button">再修正</button>' +
         '<label class="eg-rev-confirm"><input type="checkbox" id="eg-rev-confirm-protected"> 保護項目の変更を明示承認</label>' +
         '<input id="eg-rev-comment" class="eg-rev-comment" placeholder="決定コメント">' +
         '</div>';

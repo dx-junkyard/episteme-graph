@@ -4346,6 +4346,219 @@ html.learn-page > body {
   font-size: 13px;
 }
 
+/* ── 根拠リンクカードの開閉 + 上位/下位コンテキスト ───────────────────
+   ヘッダはボタン（開閉トグル）。既存の .ls-course-evidence-head レイアウト
+   （flex）をそのまま使い、ボタン既定のスタイルだけ打ち消す。 */
+button.ls-course-evidence-head {
+  width: 100%;
+  border: none;
+  background: none;
+  padding: 0;
+  margin-bottom: 8px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  font-size: 13px;
+}
+
+.ls-course-evidence-caret {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-course-evidence-card.expanded .ls-course-evidence-caret {
+  transform: rotate(90deg);
+}
+
+.ls-course-evidence-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+}
+
+.ls-course-evidence-link {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--lx-brand, var(--color-primary, #2563eb));
+  text-decoration: underline;
+}
+
+.ls-course-evidence-context-body {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border);
+}
+
+/* ── 根拠リンクの構造アウトライン（論理要素ごとのグループ）─────────────────
+   グループバーはカードヘッダとは別コントロール。控えめな見出し行 + 折りたたみ。 */
+.ls-course-evidence-outline {
+  gap: 12px;
+}
+
+.ls-evidence-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.ls-evidence-group-bar {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--color-border);
+  background: none;
+  padding: 0 0 4px;
+  text-align: left;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+}
+
+.ls-evidence-group-title {
+  font-weight: 700;
+  color: var(--color-text-primary);
+}
+
+.ls-evidence-group-detail {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-evidence-group-caret {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-evidence-group.collapsed .ls-evidence-group-caret {
+  transform: rotate(-90deg);
+}
+
+.ls-evidence-group-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+/* 子要素（主張・数式）はインデントして親の論理要素との従属関係を示す。 */
+.ls-evidence-group-children {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-left: 12px;
+  padding-left: 8px;
+  border-left: 2px solid var(--color-border);
+}
+
+.ls-evidence-context {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ls-evidence-context-role,
+.ls-evidence-context-generic {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--color-text-primary);
+  line-height: 1.6;
+}
+
+.ls-evidence-context-role-label {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.ls-evidence-context-generic {
+  color: var(--color-text-secondary);
+}
+
+.ls-evidence-context-lane {
+  border-left: 3px solid var(--color-border);
+  padding: 4px 0 4px 8px;
+}
+
+.ls-evidence-context-lane-title {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.ls-evidence-context-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  line-height: 1.6;
+}
+
+.ls-evidence-context-item-label {
+  color: var(--color-text-primary);
+}
+
+.ls-evidence-context-relation {
+  color: var(--color-text-secondary);
+}
+
+.ls-evidence-context-item-actions {
+  margin-left: auto;
+}
+
+.ls-evidence-context-notes {
+  margin: 0;
+  padding-left: 16px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* 関係の裏付け状態バッジ（段階ラベルのみ。数値は出さない）。
+   出典に裏付け=実線の落ち着いた緑 / 教員確定=通常枠 / AI候補=点線・薄色。 */
+.ls-context-status {
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  border: 1px solid var(--color-border);
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+}
+
+.ls-context-status-source_backed {
+  background: #ecfdf5;
+  color: #047857;
+  border-color: #a7f3d0;
+}
+
+.ls-context-status-candidate {
+  border-style: dashed;
+  color: var(--color-text-tertiary);
+  background: transparent;
+}
+
+/* 右カード展開・「ドラフトの該当箇所へ」で左ドラフト側の対応埋め込みを示す
+   （既存 .active と同じトーンの控えめな強調）。 */
+.ls-draft-evidence-focus {
+  outline: 2px solid var(--color-text-info);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
 .ls-material-embed {
   display: block;
   width: 100%;
@@ -5695,6 +5908,38 @@ html.learn-page > body {
 .lx-note { font-size: 11px; color: var(--lx-ink-faint); margin-top: 16px; line-height: 1.5; }
 .lx-sec-head { font-size: 12px; color: var(--lx-ink-soft); font-weight: 600; margin: 0 0 10px; }
 
+/* 出典タブ「このトピックの論理要素」（旧「本セッションで参照されたセクション」の置き換え。
+   内部 ID・agent 名ではなく、要素名と要旨、そして教材本文の該当チップへの導線を出す）。 */
+.lx-topic-component {
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.lx-topic-component:last-child { border-bottom: none; }
+.lx-topic-component-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+.lx-topic-component-summary {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  margin-top: 3px;
+}
+.lx-topic-component-btn {
+  margin-top: 5px;
+  border: none;
+  background: none;
+  padding: 0;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.lx-topic-component-btn:hover { color: var(--color-text-primary); }
+
 /* 進捗タブの再訪推奨ドット */
 .lx-tab-dot { display:inline-block; width:6px; height:6px; border-radius:50%; background:var(--lx-revisit); margin-left:6px; vertical-align:middle; }
 /* G4-T: 違和感/帰属候補ダイジェストの気づきドット（再訪推奨ドットと区別できる色） */
@@ -6062,6 +6307,113 @@ html.learn-page > body {
   fill: var(--color-text-tertiary, #aeaeb2);
 }
 
+/* ============ claim / equation の上位・下位文脈（learner element context） ============ */
+/* claim チップの「詳しく見る」・数式カードの「文脈を見る」から開くパネル。
+   数値・スコア・進捗は出さず、事実文と裏付けラベルのみを控えめに並べる。 */
+.evidence-chip-popover-context-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-info, #378add);
+  background: none;
+  color: var(--color-text-info, #378add);
+  border-radius: 6px;
+  padding: 3px 10px;
+  font-size: 11px;
+  cursor: pointer;
+}
+.evidence-chip-popover-context-btn:hover {
+  background: var(--color-background-info, #f0f6fc);
+}
+
+/* 数式ブロックカード隅の控えめなトグル（数式が多い教材でも本文を邪魔しない） */
+.ls-material-context-btn {
+  appearance: none;
+  display: inline-block;
+  margin-left: 8px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: none;
+  color: var(--color-text-tertiary, #aeaeb2);
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10px;
+  line-height: 1.7;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.ls-material-context-btn:hover {
+  color: var(--color-text-secondary, #6e6e73);
+  border-color: var(--color-text-tertiary, #aeaeb2);
+}
+/* レクチャー受講中のスライドは1画面に収める（教材本文と同じレンダラを共有するため、
+   スライド上では文脈トグルを出さない）。 */
+#lecture-slide-stage .ls-material-context-btn {
+  display: none;
+}
+
+.evidence-chip-context-role {
+  margin-bottom: 10px;
+}
+.evidence-chip-context-role-body {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.evidence-chip-context-generic {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 10px;
+}
+.evidence-chip-context-status {
+  display: inline-block;
+  margin-left: 6px;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.evidence-chip-context-lane-list {
+  list-style: none;
+  padding-left: 0;
+}
+.evidence-chip-context-lane-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px;
+  margin-bottom: 5px;
+}
+.evidence-chip-context-lane-label {
+  font-size: 12px;
+  line-height: 1.5;
+}
+.evidence-chip-context-lane-relation {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.evidence-chip-context-jump-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: none;
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 10px;
+  cursor: pointer;
+}
+.evidence-chip-context-jump-btn:hover {
+  border-color: var(--color-border-info, #378add);
+  color: var(--color-text-info, #378add);
+}
+
+/* 教材内ジャンプ先の一時ハイライト（1.6 秒で自動解除。点滅させない） */
+.ls-material-evidence-jump {
+  outline: 2px solid var(--color-border-info, #378add);
+  outline-offset: 2px;
+  border-radius: 6px;
+  transition: outline-color 0.4s ease;
+}
+
 /* ============ ヘルプルート（使い方ボタン・マニュアル出典） ============ */
 /* セカンダリ見た目（枠線＋背景透明）: プライマリは #send-btn のみ（§3.3）。 */
 .help-usage-btn {
@@ -6183,6 +6535,84 @@ body.inspect-mode [data-ui-anchor]:hover {
   display: inline-block;
   pointer-events: auto; /* 容器は pointer-events:none だが ✕ だけは押せるようにする */
 }
+
+/* ============ 管理画面「？使い方」インスペクト・モード（admin-help-inspect.js） ============ */
+/* 学習画面の .help-usage-btn / .inspect-banner / body.inspect-mode / .inspect-tooltip と
+   同型（クラス名は admin- 接頭辞で分離。admin.html と index.html は同じ styles.css を
+   共有するが、別ページのため実際の衝突はない。テスト・保守のため名前空間だけ分ける）。 */
+.admin-help-usage-btn {
+  background: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border-secondary);
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.admin-help-usage-btn:hover,
+.admin-help-usage-btn.active {
+  background: var(--color-background-info);
+  border-color: var(--color-border-info);
+}
+
+/* 常設バナー: admin の topbar のすぐ下に控えめに固定表示する。 */
+.admin-inspect-banner {
+  position: fixed;
+  top: 48px;
+  left: 0;
+  right: 0;
+  z-index: 1400;
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+  border-bottom: 1px solid var(--color-border-info);
+  text-align: center;
+  font-size: 12.5px;
+  padding: 6px 12px;
+}
+.admin-inspect-banner[hidden] { display: none; }
+
+/* ON 中は UI 論理アンカー登録済み要素にだけ cursor:help + 軽いハイライトを出す。 */
+body.admin-inspect-mode [data-ui-anchor] { cursor: help !important; }
+body.admin-inspect-mode [data-ui-anchor]:hover {
+  outline: 1px dashed var(--color-border-info);
+  outline-offset: 2px;
+}
+/* disabled なフォーム部品はホバーイベントを一切発火しないため、インスペクト中だけ
+   pointer-events:none にして、直近の親ラッパー（同じ data-ui-anchor を持つ）へ
+   ホバー判定を透過させる（通常操作時はこのルールが効かないため無効化の意味は変わらない）。 */
+body.admin-inspect-mode button:disabled,
+body.admin-inspect-mode select:disabled,
+body.admin-inspect-mode input:disabled,
+body.admin-inspect-mode textarea:disabled {
+  pointer-events: none;
+}
+
+/* マニュアル節ツールチップ。JS が innerHTML と位置を書き換える。 */
+.admin-inspect-tooltip {
+  position: fixed;
+  z-index: 1400;
+  max-width: 320px;
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border-info);
+  border-radius: 8px;
+  padding: 10px 12px;
+  box-shadow: 0 6px 20px rgba(31, 37, 48, .16);
+  font-size: 12.5px;
+  line-height: 1.5;
+  pointer-events: none;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.admin-inspect-tooltip[hidden] { display: none; }
+.admin-inspect-tooltip-source {
+  display: inline-block;
+  font-size: 11px;
+  color: var(--color-text-info);
+  background: var(--color-background-info);
+  border-radius: 8px;
+  padding: 1px 8px;
+  margin-bottom: 6px;
+}
+.admin-inspect-tooltip-title { font-weight: 600; margin-bottom: 4px; }
+.admin-inspect-tooltip-body { color: var(--color-text-secondary); white-space: pre-wrap; }
 
 /* ============ ハンズフリー音声会話（気軽に話せる先生） ============ */
 /* セカンダリ見た目（枠線＋背景透明）: プライマリは #send-btn のみ（§3.3）。
@@ -8439,7 +8869,7 @@ body.inspect-mode [data-ui-anchor]:hover {
 /* ============================================================
    discuss モード（論文と話す）Phase 2 — discuss.js 追加分
    （docs/features/discussion_mode_design.md §3.3/3.4/3.5）
-   ・開幕画面（この論文が賭けているもの／理論のバックボーン／最初の一手）
+   ・開幕画面（この論文の主張／理論のバックボーン／最初の一手）
    ・分岐チップ（深掘り／横展開）
    ・着地画面（討議終了時の軽量モーダル。スキップ可・既定オン）
    「寄り道」語彙は使わない（DM5）。数値・件数・網羅率は出さない（DM6）。
@@ -8589,8 +9019,90 @@ body.inspect-mode [data-ui-anchor]:hover {
   font-size: 12px;
   color: var(--color-text-secondary);
   line-height: 1.6;
-  margin: 2px 0;
+  margin: 4px 0;
 }
+.discuss-fragile-label {
+  color: var(--color-text-primary);
+}
+.discuss-fragile-fact {
+  color: var(--color-text-tertiary);
+}
+
+/* ── 投影の是正（discuss_opening_authoring_design.md §2/§3）─────────────
+   主語ごとに区画を分ける: 教員（このコースで議論したいこと）/ 論文（問い・主張・
+   確かめていないこと）/ システム（まだ確認できていないところ）/ AI（別の見方）。
+   いずれも警告色・強調色は使わない（事実として並べる）。 */
+.discuss-section-focus {
+  border-left: 2px solid var(--color-border-secondary);
+}
+.discuss-focus-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+  white-space: pre-wrap;
+}
+.discuss-paper-goal { margin-top: 6px; margin-bottom: 0; }
+.discuss-support-entry { margin-bottom: 6px; }
+.discuss-support-entry:last-child { margin-bottom: 0; }
+.discuss-support-entry-text {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+  margin-bottom: 4px;
+}
+.discuss-alt-item {
+  border-left: 2px solid var(--color-border-tertiary);
+  padding: 2px 0 2px 10px;
+  margin-bottom: 8px;
+}
+.discuss-alt-item:last-child { margin-bottom: 0; }
+.discuss-alt-text {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+}
+/* 出所ラベル（「AI が提示した別の定式化（出典との対応は未確認）」）。
+   小さく静かに、しかし必ず添える。 */
+.discuss-attribution {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+/* 「議論のきっかけ」（承認済み素材の配信・§7）。投影の区画と同じ静かな見え方にする
+   （新しいものだからといって強調色・バッジを付けない）。署名行は
+   .discuss-attribution を再利用し、区画の最後に1行だけ添える。 */
+.discuss-section-seeds {
+  border-left: 2px solid var(--color-border-secondary);
+}
+.discuss-seed-item {
+  margin-bottom: 8px;
+}
+.discuss-seed-item:last-of-type { margin-bottom: 4px; }
+.discuss-seed-body {
+  font-size: 12.5px;
+  line-height: 1.7;
+  color: var(--color-text-primary);
+}
+.discuss-seed-quote {
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary);
+  margin-top: 2px;
+}
+.discuss-seed-attribution { margin-top: 6px; }
+/* 「くわしく見る」— 開幕画面に一度に並べない残りへの到達口。 */
+.discuss-more {
+  font-size: 12px;
+}
+.discuss-more > summary {
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.discuss-more > .discuss-section { margin-bottom: 8px; }
+.discuss-section-unverified > summary { cursor: pointer; }
+.discuss-section-unverified > summary.discuss-section-hd { margin-bottom: 4px; }
 
 .discuss-backbone-list {
   display: flex;

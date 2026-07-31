@@ -119,8 +119,16 @@ class TestProviderBranching:
         fake_model.generate_content.return_value = fake_resp
         fake_genai = MagicMock()
         fake_genai.GenerativeModel.return_value = fake_model
+        gemini_settings = _make_settings("gemini")
 
-        with patch.object(llm, "get_settings", return_value=_make_settings("gemini")), \
+        # model=None は core.llm_policy.resolve_scene_model() 経由でモデル名を解決する
+        # ため、core.llm.get_settings だけでなく core.llm_policy.get_settings も同じ
+        # settings に差し替える（M層のモデル解決は core.llm_policy が持つ独立の
+        # get_settings 参照を使うため）。
+        import core.llm_policy as llm_policy
+
+        with patch.object(llm, "get_settings", return_value=gemini_settings), \
+             patch.object(llm_policy, "get_settings", return_value=gemini_settings), \
              patch.object(llm, "_get_gemini_module", return_value=fake_genai), \
              patch.object(llm, "_get_openai_client") as openai_client:
             out = llm.generate_text(

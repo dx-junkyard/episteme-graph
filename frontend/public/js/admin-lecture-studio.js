@@ -96,6 +96,9 @@
     // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
     rightPaneMode: "evidence",
     stumbleByDocument: {},
+    // 根拠リンクカードの上位/下位コンテキスト（W層 context lens）の遅延取得キャッシュ。
+    // キーは "<element_type>:<正規化id>@<document_id>"。コース切替でクリアする。
+    evidenceContextByKey: {},
     // 再構成ループ (R層, G4-R): レビューキュー直行ボタンの件数バッジ。
     // null = 未取得（ボタンは件数無しで表示）。教員自身の作業件数であり、
     // 学習者統計の k-匿名レンジ表示原則とは別物（内部運用カウント）。
@@ -158,6 +161,22 @@
     if (workarea) workarea.hidden = !selected;
     lsUpdateRightPaneToggle();
     lsUpdateAssistantOpenButton();
+  }
+
+  // M層 Phase 3（§6.3）: 「AIアシスタント」モーダル共通のモデルチップ（rewrite 系2経路が共有）。
+  var _lsRewriteModelChip = null;
+  function _lsInitRewriteModelChip() {
+    var mount = document.getElementById("ls-rewrite-model-chip");
+    if (!mount || !window.AdminLlmModels) return;
+    _lsRewriteModelChip = window.AdminLlmModels.createModelChip({
+      sceneKey: "lecture_studio",
+      mountEl: mount,
+      compact: true,
+      onChange: function () {}
+    });
+  }
+  function _lsRewriteModel() {
+    return _lsRewriteModelChip ? _lsRewriteModelChip.getSelected() : null;
   }
 
   function lsUpdateAssistantOpenButton() {
@@ -278,6 +297,7 @@
         lsState.structureLoaded = false;
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
+        lsState.evidenceContextByKey = {};
         lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
@@ -312,6 +332,7 @@
         lsState.structureLoaded = false;
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
+        lsState.evidenceContextByKey = {};
         lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
@@ -1744,6 +1765,7 @@
     } else {
       if (rightTitle) rightTitle.textContent = "根拠リンク";
       preview.innerHTML = lsCourseEvidenceHtml(topic);
+      lsBindCourseEvidenceCards(topic, preview);
     }
   }
 
@@ -1989,7 +2011,7 @@
     if (typeof lsState.reconReviewCount === "number") {
       label += "（要レビュー " + lsState.reconReviewCount + "件）";
     }
-    return '<button type="button" class="ls-recon-review-btn" data-ls-recon-review="1">' +
+    return '<button type="button" class="ls-recon-review-btn" data-ls-recon-review="1" data-ui-anchor="lecture-studio.recon-review-btn">' +
       escHtml(label) + '</button>';
   }
 
@@ -2141,6 +2163,7 @@
         lsRefreshReconReviewBadge();
         // claim 別つまづきパネルのキャッシュも古くなるため破棄する（次回開いたときに再取得）
         lsState.stumbleByDocument = {};
+        lsState.evidenceContextByKey = {};
       })
       .catch(function (err) {
         lsSetReconItemBusy(card, false);
@@ -2239,7 +2262,7 @@
     var conceptsText = lsListText(topic.key_concepts);
     var status = lsTopicCoverageStatus(topic);
     return '' +
-      '<div class="ls-course-draft" data-topic-id="' + escHtml(topic.id || "") + '">' +
+      '<div class="ls-course-draft" data-ui-anchor="lecture-studio.course-draft" data-topic-id="' + escHtml(topic.id || "") + '">' +
         '<section class="ls-course-draft-section">' +
           '<div class="ls-course-draft-label">トピック</div>' +
           '<div class="ls-course-topic-title">' + escHtml(topic.title || "無題") + '</div>' +
@@ -2259,7 +2282,7 @@
         // レクチャースライド同期 (migration 040 Phase 3): 教材/本文説明にも同じ
         // 区切り挿入ボタンと整合インジケータを付ける（編集タブでのみ表示）。
         '<div class="ls-course-slide-tools-row"' + editHidden + '>' +
-          '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" ' +
+          '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-slide-marker-btn" ' +
             'title="最後にフォーカスしていた入力欄（教材 or 本文説明）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>' +
           '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>' +
         '</div>' +
@@ -2505,13 +2528,31 @@
         srcLatex = srcSummary;
         srcSummary = "";
       }
+      // 重複表示の解消: 旧実装は title に summary 全文をそのまま入れていたため、
+      // カード描画（太字ヘッダ=title / 本文=summary）で同じ文が2回並んでいた。
+      // title は「チップの見出し」として必要なので空にはせず、短い抜粋にして
+      // title_is_excerpt を立てる（カード側は抜粋ヘッダを描かず本文のみ出す）。
+      var srcTitle;
+      var srcTitleIsExcerpt = false;
+      if (srcLatex) {
+        srcTitle = link.label || (link.support_role === "equation_quote" ? "数式引用" : "数式");
+      } else if (link.label) {
+        // component 等、builder が明示ラベルを持つリンクはラベルを見出しにする
+        // （summary 本文とは別物なので抜粋扱いにしない。同一文なら
+        // lsEvidenceCardShowsTitle の等値ガードが見出しを抑止する）。
+        srcTitle = link.label;
+      } else if (srcSummary) {
+        srcTitle = lsShortSummary(srcSummary, 60);
+        srcTitleIsExcerpt = true;
+      } else {
+        srcTitle = id || kind;
+      }
       items.push({
         key: lsCourseEvidenceKey(kind, id),
         kind: kind,
         id: id,
-        title: srcLatex
-          ? (link.label || (link.support_role === "equation_quote" ? "数式引用" : "数式"))
-          : (srcSummary || id || kind),
+        title: srcTitle,
+        title_is_excerpt: srcTitleIsExcerpt,
         summary: srcSummary,
         latex: srcLatex,
         role: link.support_role || "",
@@ -2592,24 +2633,200 @@
     }).join("");
   }
 
+  // 太字ヘッダ（title）を描くかどうか。title が本文（summary）の抜粋・同一文の場合は
+  // 描かない（同じ文が2回並ぶのを防ぐ）。title_is_excerpt が無い旧保存データにも
+  // 効くよう、title === summary の等値判定も併用する（後方互換ガード）。
+  function lsEvidenceCardShowsTitle(item) {
+    if (!item || !item.title) return false;
+    if (item.title_is_excerpt) return false;
+    var title = String(item.title).replace(/\s+/g, " ").trim();
+    var summary = String(item.summary || "").replace(/\s+/g, " ").trim();
+    return !(title && title === summary);
+  }
+
   function lsCourseEvidenceHtml(topic) {
     var items = lsTopicEvidenceItems(topic);
     if (!items.length) {
       return '<div class="ls-course-evidence-empty">このトピックに対応する根拠リンク候補はまだありません。</div>';
     }
-    return '<div class="ls-course-evidence-list">' + items.map(function (item) {
+    // Phase 2: 論理要素（component）が1つ以上あるトピックは、その配下に主張・数式を
+    // 束ねた構造アウトラインで描く。component アイテムが無いトピックは
+    // 従来どおりフラットなカードリスト（グループバーなし）。
+    var groups = lsGroupCourseEvidenceItems(topic, items);
+    if (!groups) {
+      return '<div class="ls-course-evidence-list">' + items.map(function (item) {
+        return lsCourseEvidenceCardHtml(topic, item);
+      }).join("") + '</div>';
+    }
+    return '<div class="ls-course-evidence-list ls-course-evidence-outline">' +
+      groups.map(function (group) {
+        return lsEvidenceGroupHtml(topic, group);
+      }).join("") +
+    '</div>';
+  }
+
+  // 根拠リンクカード1枚。Phase 0/1 の DOM 契約（data-evidence-key /
+  // data-evidence-toggle / data-evidence-context / フッター操作）はそのまま。
+  // グループ化はこのカードを包む DOM を足すだけで、カード自身は変えない。
+  function lsCourseEvidenceCardHtml(topic, item) {
       var metaLabel = lsEvidenceMetaLabel(item.role, item.confidence);
+      var canDeliberate = !!lsEvidenceContextElementType(item.kind);
       return '<article class="ls-course-evidence-card" data-evidence-key="' + escHtml(item.key) + '">' +
-        '<div class="ls-course-evidence-head">' +
+        // ヘッダは開閉トグル（クリックで文脈の遅延読み込み + 左ドラフトの該当箇所へ）。
+        '<button type="button" class="ls-course-evidence-head" data-evidence-toggle="' + escHtml(item.key) + '"' +
+          ' data-ui-anchor="lecture-studio.evidence-context" aria-expanded="false">' +
           '<span class="ls-evidence-kind">' + escHtml(lsEvidenceKindLabel(item.kind)) + '</span>' +
-          '<strong>' + escHtml(item.title) + '</strong>' +
-        '</div>' +
+          (lsEvidenceCardShowsTitle(item) ? '<strong>' + escHtml(item.title) + '</strong>' : '') +
+          '<span class="ls-course-evidence-caret" aria-hidden="true">▸</span>' +
+        '</button>' +
         (item.latex
           ? '<div class="ls-course-evidence-formula">' + lsRenderKatex(item.latex, true) + '</div>'
           : (item.summary ? '<div class="ls-course-evidence-summary">' + lsRenderTextWithFormulas(item.summary, lsTopicFormulas(topic)) + '</div>' : '')) +
         (metaLabel ? '<div class="ls-course-evidence-meta"><span>' + escHtml(metaLabel) + '</span></div>' : '') +
+        '<div class="ls-course-evidence-context-body" data-evidence-context="' + escHtml(item.key) + '" hidden></div>' +
+        '<div class="ls-course-evidence-actions">' +
+          '<button type="button" class="ls-course-evidence-link" data-evidence-draft="' + escHtml(item.key) + '">ドラフトの該当箇所へ</button>' +
+          (canDeliberate
+            ? '<button type="button" class="ls-course-evidence-link" data-evidence-deliberate="' + escHtml(item.key) + '"' +
+                ' data-ui-anchor="lecture-studio.component-deliberate" hidden>深く検討</button>'
+            : '') +
+        '</div>' +
       '</article>';
-    }).join("") + '</div>';
+  }
+
+  // ── Phase 2: 根拠リンクの構造アウトライン（論理要素ごとのグループ）────────────
+  // データ側の階層の正本は content_blocks の components ブロック item（rich 投影,
+  // course_content_builder._content_blocks）:
+  //   claims:    ["<claim_id>", ...]                                  — ID 文字列の配列
+  //   equations: [{ id: "<equation_id>", role: "input|output|... " }]  — 役割付きオブジェクト
+  // rich 投影を持たない旧データでは、コース components API 側の claim 参照
+  // （evidence_claims / linked_claim_ids / claim_ids のいずれか。数式参照はこの API に
+  // 無い）をフォールバックに使う。どちらも解決できない component はグループバー +
+  // 自身のカードだけになり、子アイテムは「その他の根拠」に必ず現れる（情報を落とさない）。
+  function lsEvidenceRefId(value) {
+    if (!value) return "";
+    if (typeof value === "string") return lsNormalizeEvidenceId(value);
+    return lsNormalizeEvidenceId(
+      value.id || value.claim_id || value.equation_id || value.target_id || "");
+  }
+
+  function lsComponentChildRefs(topic, componentId) {
+    var refs = { claims: {}, equations: {} };
+    var rich = lsTopicComponentById(topic, componentId) || {};
+    (rich.claims || []).forEach(function (value) {
+      var id = lsEvidenceRefId(value);
+      if (id) refs.claims[id] = true;
+    });
+    (rich.equations || []).forEach(function (value) {
+      var id = lsEvidenceRefId(value);
+      if (id) refs.equations[id] = true;
+    });
+    var component = lsCourseComponentById(componentId) || {};
+    ["evidence_claims", "linked_claim_ids", "claim_ids"].forEach(function (field) {
+      (component[field] || []).forEach(function (value) {
+        var id = lsEvidenceRefId(value);
+        if (id) refs.claims[id] = true;
+      });
+    });
+    return refs;
+  }
+
+  // 根拠アイテム列 → グループ列。component アイテムが無ければ null（＝フラット表示）。
+  // 同じ claim / equation が複数 component に属す場合は最初の component のグループに
+  // だけ置く（first-wins。重複表示に戻さない）。どのグループにも属さないアイテムは
+  // 末尾の「その他の根拠」に集める（全アイテムが必ずどこかに1回だけ現れる）。
+  function lsGroupCourseEvidenceItems(topic, items) {
+    var componentItems = [];
+    items.forEach(function (item) {
+      if (item.kind === "component") componentItems.push(item);
+    });
+    if (!componentItems.length) return null;
+    var placed = {};
+    var groups = [];
+    componentItems.forEach(function (comp) {
+      placed[comp.key] = true;
+      var refs = lsComponentChildRefs(topic, comp.id);
+      var children = [];
+      items.forEach(function (item) {
+        if (placed[item.key]) return;
+        if (item.kind !== "claim" && item.kind !== "equation") return;
+        var norm = lsNormalizeEvidenceId(item.id);
+        var owned = item.kind === "claim" ? refs.claims[norm] : refs.equations[norm];
+        if (!owned) return;
+        placed[item.key] = true;
+        children.push(item);
+      });
+      groups.push({ component: comp, children: children });
+    });
+    var others = [];
+    items.forEach(function (item) {
+      if (!placed[item.key]) others.push(item);
+    });
+    if (others.length) groups.push({ component: null, children: others });
+    return groups;
+  }
+
+  // グループバーの内訳は構成の件数だけ（評価数値ではない）。種別は固定順で並べる。
+  var LS_EVIDENCE_GROUP_KIND_ORDER = ["claim", "equation", "figure", "source", "component"];
+
+  function lsEvidenceGroupCountsLabel(children) {
+    var counts = {};
+    (children || []).forEach(function (item) {
+      counts[item.kind] = (counts[item.kind] || 0) + 1;
+    });
+    var parts = [];
+    LS_EVIDENCE_GROUP_KIND_ORDER.forEach(function (kind) {
+      if (counts[kind]) parts.push(lsEvidenceKindLabel(kind) + " " + counts[kind]);
+    });
+    return parts.join("・");
+  }
+
+  // グループバーはカードヘッダ（文脈の開閉トグル）とは別コントロール。折りたたみ
+  // だけを担当し、クリック責務を混ぜない。既定は展開（collapsed クラス無し）。
+  function lsEvidenceGroupHtml(topic, group) {
+    var isOthers = !group.component;
+    var groupKey = isOthers ? "others" : group.component.key;
+    var title = isOthers
+      ? "その他の根拠"
+      : lsEvidenceKindLabel("component") + ": " + (group.component.title || "無題");
+    var detail = lsEvidenceGroupCountsLabel(group.children) ||
+      (isOthers ? "" : "紐づく主張・数式はありません");
+    var childrenHtml = group.children.map(function (child) {
+      return lsCourseEvidenceCardHtml(topic, child);
+    }).join("");
+    var body;
+    if (isOthers) {
+      body = childrenHtml;
+    } else {
+      body = lsCourseEvidenceCardHtml(topic, group.component) +
+        (childrenHtml
+          ? '<div class="ls-evidence-group-children">' + childrenHtml + '</div>'
+          : "");
+    }
+    return '<section class="ls-evidence-group" data-evidence-group="' + escHtml(groupKey) + '">' +
+      '<button type="button" class="ls-evidence-group-bar"' +
+        ' data-evidence-group-toggle="' + escHtml(groupKey) + '"' +
+        ' data-ui-anchor="lecture-studio.evidence-group" aria-expanded="true">' +
+        '<span class="ls-evidence-group-title">' + escHtml(title) + '</span>' +
+        (detail ? '<span class="ls-evidence-group-detail">' + escHtml(detail) + '</span>' : '') +
+        '<span class="ls-evidence-group-caret" aria-hidden="true">▾</span>' +
+      '</button>' +
+      '<div class="ls-evidence-group-body" data-evidence-group-body="' + escHtml(groupKey) + '">' +
+        body +
+      '</div>' +
+    '</section>';
+  }
+
+  // フォーカス先が折りたたまれたグループ内にあるときは、先にグループを開く
+  // （左ドラフトチップ・つまづきタブ・ペイン内ジャンプの全経路で効く）。
+  function lsExpandEvidenceGroupFor(target) {
+    var group = target && target.closest ? target.closest(".ls-evidence-group") : null;
+    if (!group || !group.classList.contains("collapsed")) return;
+    group.classList.remove("collapsed");
+    var bar = group.querySelector("[data-evidence-group-toggle]");
+    if (bar) bar.setAttribute("aria-expanded", "true");
+    var body = group.querySelector("[data-evidence-group-body]");
+    if (body) body.hidden = false;
   }
 
   function lsFocusEvidence(key) {
@@ -2619,7 +2836,331 @@
       card.classList.toggle("active", card.getAttribute("data-evidence-key") === key);
     });
     var target = preview.querySelector('[data-evidence-key="' + CSS.escape(key) + '"]');
-    if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!target) return;
+    lsExpandEvidenceGroupFor(target);
+    target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }
+
+  // 右ペインの根拠カード → 左ドラフトの対応埋め込みへの逆リンク（双方向化）。
+  // 左ドラフト側の埋め込み・チップは既存の [data-evidence-ref] を担体にしているので、
+  // 同じキー（lsCourseEvidenceKey）で引き当てる。ドラフト末尾の根拠チップより本文中の
+  // 埋め込みを優先する（本文の該当箇所を見せるのが目的）。見つからなければ false。
+  function lsFocusDraftEvidence(key) {
+    var draft = document.getElementById("ls-source-text");
+    if (!draft || !key) return false;
+    draft.querySelectorAll(".ls-draft-evidence-focus").forEach(function (el) {
+      el.classList.remove("ls-draft-evidence-focus");
+    });
+    var targets = draft.querySelectorAll('[data-evidence-ref="' + CSS.escape(key) + '"]');
+    if (!targets.length) return false;
+    var target = null;
+    targets.forEach(function (el) {
+      if (target) return;
+      if (!el.classList.contains("ls-evidence-chip")) target = el;
+    });
+    if (!target) target = targets[0];
+    target.classList.add("ls-draft-evidence-focus");
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    return true;
+  }
+
+  // ── 根拠リンクカードの上位/下位コンテキスト（W層 context lens の遅延取得）─────
+  // 正本: docs/features/element_context_lens_design.md（W層の要素中心コンテキスト）。
+  // 根拠リンクの kind → W層 element_type の写像。source は問い合わせ対象にしない
+  // （出典抜粋は原文そのもので、上位/下位構造を持つ「要素」ではない）。
+  var LS_EVIDENCE_CONTEXT_ELEMENT_TYPES = {
+    component: "theory_component",
+    claim: "theory_claim",
+    equation: "equation",
+    figure: "figure",
+  };
+  // 逆写像（W層 element_type → 根拠リンクの kind）。ペイン内ジャンプの対応判定に使う。
+  var LS_EVIDENCE_CONTEXT_KINDS = {
+    theory_component: "component",
+    theory_claim: "claim",
+    equation: "equation",
+    figure: "figure",
+  };
+  // 関係の裏付け状態（内部語彙をそのまま出さず日本語ラベルにする）。
+  // 数値（confidence 等）は一切表示しない（W8）。
+  var LS_CONTEXT_STATUS_LABELS = {
+    source_backed: "出典に裏付け",
+    confirmed: "教員確定",
+    candidate: "AI候補",
+  };
+
+  function lsEvidenceContextElementType(kind) {
+    return LS_EVIDENCE_CONTEXT_ELEMENT_TYPES[kind] || "";
+  }
+
+  function lsEvidenceContextDocumentId(item) {
+    if (item && item.kind === "figure") return item.document_id || "";
+    return lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
+  }
+
+  function lsContextStatusBadgeHtml(status) {
+    var label = LS_CONTEXT_STATUS_LABELS[status];
+    if (!label) return "";
+    return '<span class="ls-context-status ls-context-status-' + escHtml(status) + '">' +
+      escHtml(label) + '</span>';
+  }
+
+  function lsEvidenceContextFactHtml(text) {
+    return '<div class="ls-course-muted">' + escHtml(text) + '</div>';
+  }
+
+  // カード展開時に一度だけ文脈を取得する。トピック/コース切替のステイル応答は
+  // courseId 照合 + 描画先コンテナが右ペインに残っているかで破棄する
+  // （lsLoadStumbleSummary と同型のキャッシュ・縮退方針）。
+  function lsLoadEvidenceContext(topic, item, container) {
+    if (!item || !container) return;
+    var elementType = lsEvidenceContextElementType(item.kind);
+    if (!elementType) {
+      container.innerHTML = lsEvidenceContextFactHtml(
+        "出典の抜粋です。上位・下位の構造の問い合わせは行いません。");
+      return;
+    }
+    var documentId = lsEvidenceContextDocumentId(item);
+    if (!documentId) {
+      container.innerHTML = lsEvidenceContextFactHtml(
+        "この要素に紐づく解析済みドキュメントが見つかりません。");
+      return;
+    }
+    var cacheKey = elementType + ":" + lsNormalizeEvidenceId(item.id) + "@" + documentId;
+    var cached = lsState.evidenceContextByKey[cacheKey];
+    if (cached) { lsRenderEvidenceContext(topic, item, container, cached); return; }
+    container.innerHTML = '<div class="ls-course-muted">文脈を読み込み中…</div>';
+    var courseId = lsState.courseId;
+    apiFetch("/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" +
+      encodeURIComponent(item.id) + "/context?document_id=" + encodeURIComponent(documentId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (courseId !== lsState.courseId) return; // コース切替後の古い応答は捨てる
+        if (!lsEvidenceContextStillVisible(container)) return; // トピック/タブ切替で破棄
+        if (!data) {
+          container.innerHTML = lsEvidenceContextFactHtml("コンテキストを取得できませんでした。");
+          return;
+        }
+        lsState.evidenceContextByKey[cacheKey] = data;
+        lsRenderEvidenceContext(topic, item, container, data);
+      })
+      .catch(function () {
+        if (!lsEvidenceContextStillVisible(container)) return;
+        container.innerHTML = lsEvidenceContextFactHtml("コンテキストを取得できませんでした。");
+      });
+  }
+
+  function lsEvidenceContextStillVisible(container) {
+    var preview = document.getElementById("ls-display-preview");
+    return !!(preview && container && preview.contains(container));
+  }
+
+  function lsRenderEvidenceContext(topic, item, container, data) {
+    if (!data || data.available === false) {
+      container.innerHTML = lsEvidenceContextFactHtml(
+        (data && data.note) || "この要素の文脈情報はまだありません。");
+      return;
+    }
+    var focus = data.focus || {};
+    var html = '<div class="ls-evidence-context">';
+    var roleStatus = focus.contextual_role_status || "";
+    if (focus.contextual_role && roleStatus !== "unidentified") {
+      html += '<div class="ls-evidence-context-role">' +
+        '<span class="ls-evidence-context-role-label">この論文での役割</span>' +
+        '<span class="ls-evidence-context-role-value">' + escHtml(focus.contextual_role) + '</span>' +
+        lsContextStatusBadgeHtml(roleStatus) +
+      '</div>';
+    }
+    if (focus.generic && (focus.generic.name || focus.generic.summary)) {
+      html += '<div class="ls-evidence-context-generic">一般には: ' +
+        escHtml(focus.generic.name || "") +
+        (focus.generic.summary ? ' — ' + escHtml(focus.generic.summary) : "") +
+      '</div>';
+    }
+    html += lsEvidenceContextLaneHtml(topic, "上位（この要素が支えるもの）", data.upper, "upper");
+    html += lsEvidenceContextLaneHtml(topic, "下位（この要素を支えるもの）", data.lower, "lower");
+    var notes = data.notes || [];
+    if (notes.length) {
+      html += '<ul class="ls-evidence-context-notes">' + notes.map(function (note) {
+        return '<li>' + escHtml(note) + '</li>';
+      }).join("") + '</ul>';
+    }
+    html += '</div>';
+    container.innerHTML = html;
+    lsBindEvidenceContextActions(container);
+    lsRevealEvidenceDeliberateButton(container, item, focus);
+  }
+
+  function lsEvidenceContextLaneHtml(topic, title, items, laneKind) {
+    items = items || [];
+    var rows;
+    if (!items.length) {
+      rows = lsEvidenceContextFactHtml(laneKind === "upper"
+        ? "この要素が支える上位の構造は、まだ同定されていません。"
+        : "この要素を支える下位の構造は見つかりませんでした。");
+    } else {
+      rows = items.map(function (ctxItem) {
+        return lsEvidenceContextItemHtml(topic, ctxItem);
+      }).join("");
+    }
+    return '<div class="ls-evidence-context-lane ls-evidence-context-lane-' + escHtml(laneKind) + '">' +
+      '<div class="ls-evidence-context-lane-title">' + escHtml(title) + '</div>' +
+      rows +
+    '</div>';
+  }
+
+  function lsEvidenceContextItemHtml(topic, ctxItem) {
+    ctxItem = ctxItem || {};
+    var localMatch = lsEvidenceContextLocalMatch(topic, ctxItem);
+    var action = "";
+    if (localMatch) {
+      action = '<button type="button" class="ls-course-evidence-link" data-context-jump="' +
+        escHtml(localMatch.key) + '">この根拠リンク内で見る</button>';
+    } else if (ctxItem.navigable && ctxItem.element_id && window.Deliberation) {
+      action = '<button type="button" class="ls-course-evidence-link"' +
+        ' data-ui-anchor="lecture-studio.component-deliberate"' +
+        ' data-context-deliberate-type="' + escHtml(ctxItem.element_type || "") + '"' +
+        ' data-context-deliberate-id="' + escHtml(ctxItem.element_id) + '"' +
+        ' data-context-deliberate-doc="' + escHtml(ctxItem.document_id || "") + '"' +
+        ' data-context-deliberate-title="' + escHtml(ctxItem.label || "") + '">深く検討</button>';
+    }
+    return '<div class="ls-evidence-context-item">' +
+      '<span class="ls-evidence-context-item-label">' + escHtml(ctxItem.label || "") + '</span>' +
+      (ctxItem.relation_label
+        ? '<span class="ls-evidence-context-relation">' + escHtml(ctxItem.relation_label) + '</span>'
+        : "") +
+      lsContextStatusBadgeHtml(ctxItem.relation_status) +
+      (action ? '<span class="ls-evidence-context-item-actions">' + action + '</span>' : "") +
+    '</div>';
+  }
+
+  // 同一トピックの根拠リンクに対応アイテムがあるか。(1) ID 一致 → (2) 同 kind の
+  // タイトル/サマリ先頭一致（ITEM.label はサーバ側で切り詰められるため前方一致）。
+  function lsEvidenceContextLocalMatch(topic, ctxItem) {
+    var kind = LS_EVIDENCE_CONTEXT_KINDS[ctxItem && ctxItem.element_type];
+    if (!kind) return null;
+    if (ctxItem.element_id) {
+      var byId = lsEvidenceItemByRef(topic, kind, ctxItem.element_id);
+      if (byId) return byId;
+    }
+    var label = String(ctxItem.label || "").replace(/\s+/g, " ").trim();
+    label = label.replace(/\.\.\.$/, "").replace(/…$/, "").trim();
+    if (label.length < 8) return null;
+    var found = null;
+    lsTopicEvidenceItems(topic).forEach(function (evi) {
+      if (found || evi.kind !== kind) return;
+      var summary = String(evi.summary || "").replace(/\s+/g, " ").trim();
+      var title = String(evi.title || "").replace(/\s+/g, " ").trim();
+      if ((summary && summary.indexOf(label) === 0) || (title && title.indexOf(label) === 0)) {
+        found = evi;
+      }
+    });
+    return found;
+  }
+
+  function lsBindEvidenceContextActions(container) {
+    container.querySelectorAll("[data-context-jump]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        lsFocusEvidence(this.getAttribute("data-context-jump"));
+      });
+    });
+    container.querySelectorAll("[data-context-deliberate-type]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var elementType = this.getAttribute("data-context-deliberate-type");
+        var elementId = this.getAttribute("data-context-deliberate-id");
+        var documentId = this.getAttribute("data-context-deliberate-doc") || "";
+        var title = this.getAttribute("data-context-deliberate-title") || "";
+        if (!elementType || !elementId) return;
+        if (window.Deliberation) {
+          window.Deliberation.openElement(elementType, elementId, {
+            documentId: documentId,
+            title: title,
+          });
+        }
+      });
+    });
+  }
+
+  // カードフッターの「深く検討」は、解決済みの element_id（focus）が取れてから出す。
+  function lsRevealEvidenceDeliberateButton(container, item, focus) {
+    var card = container.closest ? container.closest(".ls-course-evidence-card") : null;
+    if (!card) return;
+    var btn = card.querySelector("[data-evidence-deliberate]");
+    if (!btn) return;
+    var elementType = (focus && focus.element_type) || lsEvidenceContextElementType(item.kind);
+    var elementId = (focus && focus.element_id) || "";
+    if (!window.Deliberation || !elementType || !elementId) { btn.hidden = true; return; }
+    btn.hidden = false;
+    btn.setAttribute("data-context-deliberate-type", elementType);
+    btn.setAttribute("data-context-deliberate-id", elementId);
+    btn.setAttribute("data-context-deliberate-doc",
+      (focus && focus.document_id) || lsEvidenceContextDocumentId(item) || "");
+    btn.setAttribute("data-context-deliberate-title", item.title || "");
+  }
+
+  // 右ペイン根拠カードの配線（開閉トグル + 双方向リンク + フッター操作）。
+  function lsBindCourseEvidenceCards(topic, container) {
+    if (!container) return;
+    var itemsByKey = {};
+    lsTopicEvidenceItems(topic).forEach(function (item) { itemsByKey[item.key] = item; });
+    // Phase 2 のグループバー（構造アウトラインの折りたたみ）。カードヘッダとは別
+    // コントロールで、文脈の遅延ロード・ドラフト移動は行わない。
+    container.querySelectorAll("[data-evidence-group-toggle]").forEach(function (bar) {
+      bar.addEventListener("click", function () {
+        var group = this.closest(".ls-evidence-group");
+        if (!group) return;
+        var collapsed = group.classList.toggle("collapsed");
+        this.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        var body = group.querySelector("[data-evidence-group-body]");
+        if (body) body.hidden = collapsed;
+      });
+    });
+    container.querySelectorAll("[data-evidence-toggle]").forEach(function (head) {
+      head.addEventListener("click", function () {
+        var card = this.closest(".ls-course-evidence-card");
+        if (!card) return;
+        var key = card.getAttribute("data-evidence-key");
+        var body = card.querySelector("[data-evidence-context]");
+        if (card.classList.contains("expanded")) {
+          card.classList.remove("expanded");
+          this.setAttribute("aria-expanded", "false");
+          if (body) body.hidden = true;
+          return;
+        }
+        card.classList.add("expanded");
+        this.setAttribute("aria-expanded", "true");
+        if (body) {
+          body.hidden = false;
+          lsLoadEvidenceContext(topic, itemsByKey[key], body);
+        }
+        // 展開時に左ドラフトの対応箇所へスクロール + ハイライト（Phase 0 の双方向化）。
+        lsFocusDraftEvidence(key);
+      });
+    });
+    container.querySelectorAll("[data-evidence-draft]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        lsFocusDraftEvidence(this.getAttribute("data-evidence-draft"));
+      });
+    });
+    container.querySelectorAll("[data-evidence-deliberate]").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var elementType = this.getAttribute("data-context-deliberate-type");
+        var elementId = this.getAttribute("data-context-deliberate-id");
+        var documentId = this.getAttribute("data-context-deliberate-doc") || "";
+        var title = this.getAttribute("data-context-deliberate-title") || "";
+        if (!elementType || !elementId) return;
+        if (window.Deliberation) {
+          window.Deliberation.openElement(elementType, elementId, {
+            documentId: documentId,
+            title: title,
+          });
+        }
+      });
+    });
   }
 
   function lsRenderCourseListPreview(text, topic, emptyMessage) {
@@ -3205,7 +3746,7 @@
         '<div class="ls-theory-section"><b>source_scope</b> <span class="ls-theory-ref">' + escHtml(scopeText) + '</span></div>' +
         '<div class="ls-theory-section"><b>evidence</b><div class="ls-theory-muted">' + escHtml(claim.evidence_text || "") + '</div></div>' +
         '<div class="ls-theory-actions">' +
-          '<button class="admin-action-btn ls-claim-deliberate-btn" type="button" data-claim-id="' + escHtml(claim.claim_id) + '" data-document-id="' + escHtml(claim.document_id || "") + '">深く検討</button>' +
+          '<button class="admin-action-btn ls-claim-deliberate-btn" type="button" data-ui-anchor="lecture-studio.component-deliberate" data-claim-id="' + escHtml(claim.claim_id) + '" data-document-id="' + escHtml(claim.document_id || "") + '">深く検討</button>' +
         '</div>' +
       '</div>';
   }
@@ -3369,12 +3910,12 @@
         '<div class="ls-theory-section"><b>出典</b><div>' + lsTheorySourceHtml(c) + '</div></div>' +
         '<div class="ls-theory-section"><b>表示</b> ' + escHtml(level) + '</div>' +
         '<div class="ls-theory-actions">' +
-          '<button class="admin-action-btn" data-theory-action="open">開く</button>' +
-          '<button class="admin-action-btn" data-theory-action="insert">原稿に挿入</button>' +
-          '<button class="admin-action-btn" data-theory-action="approve"' + approveDisabled + '>承認</button>' +
-          '<button class="admin-action-btn" data-theory-action="reject">却下</button>' +
-          '<button class="admin-action-btn" data-theory-action="endorse">説明・承認の共有</button>' +
-          '<button class="admin-action-btn" data-theory-action="deliberate">深く検討</button>' +
+          '<button class="admin-action-btn" data-theory-action="open" data-ui-anchor="lecture-studio.component-open">開く</button>' +
+          '<button class="admin-action-btn" data-theory-action="insert" data-ui-anchor="lecture-studio.component-insert">原稿に挿入</button>' +
+          '<button class="admin-action-btn" data-theory-action="approve" data-ui-anchor="lecture-studio.component-approve"' + approveDisabled + '>承認</button>' +
+          '<button class="admin-action-btn" data-theory-action="reject" data-ui-anchor="lecture-studio.component-reject">却下</button>' +
+          '<button class="admin-action-btn" data-theory-action="endorse" data-ui-anchor="lecture-studio.component-endorse">説明・承認の共有</button>' +
+          '<button class="admin-action-btn" data-theory-action="deliberate" data-ui-anchor="lecture-studio.component-deliberate">深く検討</button>' +
         '</div>' +
       '</div>';
   }
@@ -6680,7 +7221,11 @@
 
     apiFetch("/admin/courses/" + lsState.courseId + "/lecture-scripts/generate", {
       method: "POST",
-      body: JSON.stringify({ override: false }),
+      // M層 Phase 3（§6.3）: 現時点でこの一括生成関数を呼び出す UI 導線は無い
+      // （原稿の一括生成は自動パイプライン kickAutoPipeline 経由のみが実運用経路。
+      // admin.js 側に委譲）。将来この関数を呼ぶ導線を復活・追加する場合に備え、
+      // 既存の「AIアシスタント」モデルチップの選択を here でも尊重しておく。
+      body: JSON.stringify({ override: false, model: _lsRewriteModel() }),
     })
       .then(function (res) {
         if (!res.ok) {
@@ -7121,6 +7666,8 @@
         narration_persona: lsState.settings.narration_persona || "",
         studio_view: view,
         theory_components: theoryComponents,
+        // M層 Phase 3（§6.3）: この実行だけのモデル上書き。未選択ならサーバ既定に委ねる。
+        model: _lsRewriteModel(),
       }),
     })
       .then(function (res) {
@@ -7179,6 +7726,8 @@
       spoken_script: (document.getElementById("ls-course-spoken-script") || {}).value || "",
       cautions: lsSplitLines((document.getElementById("ls-course-cautions") || {}).value),
       check_questions: lsCollectCheckQuestions(),
+      // M層 Phase 3（§6.3）: この実行だけのモデル上書き。未選択ならサーバ既定に委ねる。
+      model: _lsRewriteModel(),
     };
     document.getElementById("ls-rewrite-btn").disabled = true;
     lsShowActionStatus("AIで提案中...", "info");
@@ -7269,6 +7818,7 @@
     state = deps.state;
 
     initLectureStudio();
+    _lsInitRewriteModelChip();
     initialized = true;
   }
 

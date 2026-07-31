@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 import re
 
-from core.config import get_settings
 from core.llm import generate_text
+from core.llm_policy import resolve_for_setting
 
 
 def resolve_model(model_setting_key: str, *, fallback: str = "fast") -> str:
@@ -30,16 +30,13 @@ def resolve_model(model_setting_key: str, *, fallback: str = "fast") -> str:
     解決する。それ以外の値は ``ValueError``（正本:
     docs/features/assistant_common_infra_design.md §3。既定を変えずに tier を
     増やすための最小拡張）。
-    """
-    if fallback == "fast":
-        fallback_attr = "llm_fast_model"
-    elif fallback == "analysis":
-        fallback_attr = "llm_analysis_model"
-    else:
-        raise ValueError(f"unknown fallback tier: {fallback!r}")
 
-    settings = get_settings()
-    return getattr(settings, model_setting_key, "") or getattr(settings, fallback_attr)
+    実体は ``core.llm_policy.resolve_for_setting`` に委譲する（M層への一点集約。
+    正本: docs/features/llm_model_selection_design.md §8「既存 resolve_model と
+    各系統の resolve_model は policy 委譲に置き換える」）。外部シグネチャ・
+    後方互換の挙動（DB ポリシー行が無い Phase 0 では従来と完全に一致する）は不変。
+    """
+    return resolve_for_setting(model_setting_key, fallback=fallback)
 
 
 def parse_json_response(text: str) -> dict:

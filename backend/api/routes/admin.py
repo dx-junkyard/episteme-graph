@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import uuid
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -70,12 +71,16 @@ from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
     course_chapters,
+    course_focus,
+    course_llm_models,
     course_sources,
     course_title as _course_title,
     course_topics,
 )
 from core.document_pipeline.figure_images import load_document_figures
+from core.document_pipeline.orchestrator import PIPELINE_STAGES
 from core.document_pipeline.persistence import get_latest_analysis_run
+from core import llm_policy
 from core.llm import generate_text
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
@@ -285,10 +290,77 @@ def _backfill_missing_chunk_pages_from_pdf(material_id: str, pdf_bytes: bytes) -
 # ---------------------------------------------------------------------------
 
 
+def _validate_models_option(models: dict) -> dict:
+    """アップロード/再解析リクエストの ``models`` を fail-closed 検証する
+    （M層設計書 §7・M4/M5）。
+
+    許可するキーは ``"pipeline"`` / ``"pipeline.vision"`` /
+    ``"pipeline:<stage>"``（stage は ``orchestrator.PIPELINE_STAGES`` に実在する
+    もの）のみ。値は ``llm_policy.load_catalog()`` に載っているモデルで、かつ
+    現在の provider（``catalog_models()`` が既に絞り込み済み）と一致するものだけ
+    許可する。``"pipeline.vision"`` キー（および ``"pipeline:apparatus_semantics"``）
+    は capability に ``"vision"`` を含むモデルのみ許可する。
+
+    カタログ自体が未設定/読めない環境で ``models`` 指定があれば、検証不能なため
+    422 で拒否する（架空の候補を許可しない、M4）。``models`` が未指定/空の場合は
+    この関数を呼び出し側が呼ばない前提（従来どおり素通り）。
+    """
+    if not isinstance(models, dict) or not models:
+        raise HTTPException(status_code=422, detail="'models' must be a non-empty object")
+
+    catalog = llm_policy.load_catalog()
+    if not catalog:
+        raise HTTPException(
+            status_code=422,
+            detail="Model catalog is not configured; cannot validate 'models' selection",
+        )
+
+    text_model_ids = {entry.get("id") for entry in llm_policy.catalog_models()}
+    vision_model_ids = {
+        entry.get("id") for entry in llm_policy.catalog_models(capability="vision")
+    }
+
+    validated: dict[str, str] = {}
+    for key, value in models.items():
+        if not isinstance(key, str) or not key:
+            raise HTTPException(status_code=422, detail=f"invalid 'models' key: {key!r}")
+
+        if key == llm_policy.SCENE_PIPELINE_VISION:
+            allowed_ids = vision_model_ids
+        elif key == llm_policy.SCENE_PIPELINE:
+            allowed_ids = text_model_ids
+        elif key.startswith("pipeline:"):
+            stage_name = key.split(":", 1)[1]
+            if stage_name not in PIPELINE_STAGES:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"unknown pipeline stage in 'models' key: {key!r}",
+                )
+            allowed_ids = vision_model_ids if stage_name == "apparatus_semantics" else text_model_ids
+        else:
+            raise HTTPException(status_code=422, detail=f"invalid 'models' key: {key!r}")
+
+        if not isinstance(value, str) or not value.strip():
+            raise HTTPException(status_code=422, detail=f"invalid model value for {key!r}")
+        model_id = value.strip()
+        if model_id not in allowed_ids:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"model {model_id!r} is not available for {key!r} "
+                    "(not in catalog, provider mismatch, or missing 'vision' capability)"
+                ),
+            )
+        validated[key] = model_id
+
+    return validated
+
+
 @router.post("/materials/upload", status_code=202)
 def upload_material(
     file: UploadFile = File(...),
     analyze_images: bool = Form(False),
+    models: str | None = Form(None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
@@ -299,12 +371,29 @@ def upload_material(
     ステージ（vision LLM による装置図同定）が有効になる。既定 off（原則6:
     コスト fail-closed）。``figure_image_extraction``（非LLM の図画像抽出）は
     このフラグに関係なく常時実行される（決定 0-4-2）。
+
+    ``models``（M層設計書 §7・Phase 2）: JSON 文字列でエンコードされた
+    ``{"pipeline": "gpt-5.4-mini", "pipeline.vision": "gpt-4o", ...}`` 形式の
+    run 単位モデル上書き。未指定/空文字は従来どおり素通り（options に
+    ``models`` キーを含めない）。指定時は ``_validate_models_option`` で
+    fail-closed 検証し、``document_analysis_runs.options.models`` に保存する。
     """
     import datetime
 
     source_kind = _uploaded_source_kind(file.filename)
     if source_kind is None:
         raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
+
+    models_option: dict | None = None
+    if models:
+        try:
+            parsed_models = json.loads(models)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="'models' must be a JSON object") from exc
+        if not isinstance(parsed_models, dict):
+            raise HTTPException(status_code=422, detail="'models' must be a JSON object")
+        if parsed_models:
+            models_option = _validate_models_option(parsed_models)
 
     source_bytes = file.file.read()
     if len(source_bytes) == 0:
@@ -352,17 +441,21 @@ def upload_material(
 
     create_background_task(task_id, "material_processing", current_user["id"])
 
+    upload_options: dict = {"analyze_images": bool(analyze_images)}
+    if models_option:
+        upload_options["models"] = models_option
+
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
-        kwargs={"options": {"analyze_images": bool(analyze_images)}},
+        kwargs={"options": upload_options},
         daemon=True,
     )
     thread.start()
 
     logger.info(
-        "Material upload accepted: %s (%s) task=%s by user=%s analyze_images=%s",
-        material_id, file.filename, task_id, current_user["id"], analyze_images,
+        "Material upload accepted: %s (%s) task=%s by user=%s analyze_images=%s models=%s",
+        material_id, file.filename, task_id, current_user["id"], analyze_images, bool(models_option),
     )
 
     return {
@@ -385,8 +478,14 @@ class ReanalyzeRequest(BaseModel):
     ``reanalyze_document`` は ``options=None`` を渡す。明示 true/false のときのみ
     上書きする。かつては未指定でも常に ``{"analyze_images": False}`` を渡していた
     ため継承分岐が到達不能で、画像解析 ON で作った未レビューの AI 図分類
-    （suggested_mode / analysis_profile）が再解析のたびに無警告で消えていた。"""
+    （suggested_mode / analysis_profile）が再解析のたびに無警告で消えていた。
+
+    ``models``（M層設計書 §7・Phase 2）: run 単位モデル上書き
+    （``{"pipeline": "gpt-5.4-mini", ...}``）。``None``（未指定/空）は
+    ``analyze_images`` と同じ規則で「前回 run の値を引き継ぐ」。明示指定時は
+    ``_validate_models_option`` で fail-closed 検証する。"""
     analyze_images: bool | None = None
+    models: dict[str, str] | None = None
 
 
 @router.post("/documents/{document_id}/reanalyze", status_code=202)
@@ -479,7 +578,28 @@ def reanalyze_document(
     # None（body 無し / analyze_images 未指定）は options=None を渡し、orchestrator の
     # 「前回 run の options を引き継ぐ」分岐を生かす。明示 true/false のみ上書きする。
     analyze_images = body.analyze_images if body is not None else None
-    options = {"analyze_images": bool(analyze_images)} if analyze_images is not None else None
+    models_option: dict | None = None
+    if body is not None and body.models:
+        models_option = _validate_models_option(body.models)
+
+    if models_option is None:
+        # models 未指定: 従来どおりの規則をそのまま維持する（新規 DB 読み出しを
+        # 増やさない。既存の analyze_images-only 呼び出し経路の挙動を変えない）。
+        options = {"analyze_images": bool(analyze_images)} if analyze_images is not None else None
+    elif analyze_images is not None:
+        # 両方明示: 前回 run を読む必要が無いのでそのまま組み立てる。
+        options = {"analyze_images": bool(analyze_images), "models": models_option}
+    else:
+        # models だけ明示・analyze_images は未指定: analyze_images は前回 run の値を
+        # 引き継ぐ（models の指定が analyze_images を無警告でリセットしない）。
+        previous_run_for_options = get_latest_analysis_run(
+            document_id=document_id, material_id=material_id
+        )
+        previous_options = dict((previous_run_for_options or {}).get("options") or {})
+        options = dict(previous_options)
+        options.setdefault("analyze_images", False)
+        options["models"] = models_option
+
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
@@ -1827,6 +1947,18 @@ def course_builder_chat(
             detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
         )
 
+    # M層 Phase 3（§6.2）: この実行だけのモデル上書き（scene "course_builder"）。
+    # 未指定なら従来どおり resolve_model() の解決順序に委ねる（挙動不変）。
+    _requested_model = (body.model or "").strip()
+    if _requested_model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_COURSE_BUILDER, _requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+    _course_builder_override = (
+        llm_policy.model_override(_requested_model, source=llm_policy.SOURCE_RUN_OVERRIDE)
+        if _requested_model else nullcontext()
+    )
+
     messages: list[dict] = [
         {"role": "system", "content": _COURSE_BUILDER_SYSTEM_PROMPT},
     ]
@@ -1861,7 +1993,7 @@ def course_builder_chat(
     degraded = False
     course_draft: dict | None = None
     try:
-        with usage_context("admin:course_builder", user_id=current_user["id"]):
+        with usage_context("admin:course_builder", user_id=current_user["id"]), _course_builder_override:
             raw_answer = generate_text(
                 messages=messages,
                 temperature=0.4,
@@ -2246,6 +2378,16 @@ def list_teacher_courses(
             # description 列が空なら course_data 側の description に縮退する。
             "description": (str(r[10]) if len(r) > 10 and r[10] else "")
             or str(data.get("description") or ""),
+            # M層 Phase 3（§6.4）: コース単位のモデル上書き（現状 "learning_chat" のみ
+            # 意味を持つ）。教員向け（本ルートは _require_teacher）専用の投影で、
+            # 学生向け LearningCourseDetail には出さない（M9）。空 dict = 上書きなし
+            # （システム既定に従う）。実効モデル・出所は GET /api/admin/llm-models/catalog
+            # 側で解決するため、ここでは生の上書き値のみを返す。
+            "llm_models": course_llm_models(data),
+            # Phase 0b（discuss_opening_authoring_design.md §2 最下段）: discuss 開幕画面の
+            # 「このコースで議論したいこと」。教員の任意入力で、コース管理タブの編集
+            # モーダルが現在値の prefill に使う（保存は PUT /api/learning/courses/{id}）。
+            "course_focus": course_focus(data),
         })
     return result
 

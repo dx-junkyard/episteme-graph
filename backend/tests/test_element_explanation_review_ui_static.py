@@ -331,3 +331,139 @@ class TestExplanationReviewEs5RegressionGuard:
         src = _read(DELIBERATION_JS)
         region = _review_queue_region(src)
         assert "`" not in region
+
+
+class TestDiscussOpeningSeedGroup:
+    """discuss_opening_authoring_design.md §6.1: element_type='document' の候補を
+    先頭の独立グループ「この論文の議論のきっかけ」として出し、係留先の要素が無いので
+    「深く検討」ではなく本文のインライン編集 + 承認/却下を持つ。"""
+
+    def test_document_group_label_declared(self):
+        src = _read(DELIBERATION_JS)
+        assert 'EXPLANATION_DOCUMENT_GROUP_LABEL = "この論文の議論のきっかけ"' in src
+
+    def test_document_scope_predicate_matches_element_type_document(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_isDocumentScopeExplanation")
+        assert 'exp.element_type === "document"' in block
+
+    def test_document_group_is_placed_first(self):
+        """要素グループより上（unshift）に置く。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_groupExplanationsByElement")
+        assert "documentItems" in block
+        assert "groups.unshift(" in block
+        assert "EXPLANATION_DOCUMENT_GROUP_LABEL" in block
+
+    def test_document_group_has_no_deliberation_entry(self):
+        """このグループのカードは「深く検討」導線を持たない（係留先の要素が無い）。"""
+        src = _read(DELIBERATION_JS)
+        region = _review_queue_region(src)
+        # 「深く検討」モーダルを開く関数を呼ばない / そのラベルのボタンを描画しない
+        # （コメント中の言及は対象外なので、描画される markup の形で検査する）。
+        assert "openModal(" not in region
+        assert ">深く検討<" not in region
+
+    def test_inline_edit_uses_existing_patch_endpoint(self):
+        """編集は既存 PATCH（旧行 superseded → 教員名義の新行 INSERT）に乗せる。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_saveExplanationReviewBody")
+        assert '"/admin/element-explanations/"' in block
+        assert 'method: "PATCH"' in block
+        assert "body: newBody" in block
+
+    def test_inline_editor_rendered_only_for_document_scope_cards(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_explanationReviewCardHtml")
+        assert "editable = _isDocumentScopeExplanation(exp)" in block
+        assert "data-explanation-edit-input" in block
+        assert "data-explanation-edit-action" in block
+
+    def test_inline_edit_events_bound_with_open_cancel_save(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_bindExplanationReviewCardEvents")
+        assert "data-explanation-edit-action" in block
+        assert '"open"' in block
+        assert '"cancel"' in block
+
+    def test_edit_response_replaces_row_without_refetching_queue(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_saveExplanationReviewBody")
+        assert "_replaceExplanationInReviewQueue(" in block
+        assert "_loadExplanationReviewQueue(" not in block
+
+    def test_replacement_carries_selection_and_freshness_to_the_new_revision(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_replaceExplanationInReviewQueue")
+        assert "newRow.stale" in block
+        assert "explanationReviewState.selected[newRow.id]" in block
+
+    def test_empty_body_is_rejected_client_side(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_saveExplanationReviewBody")
+        assert "本文が空です" in block
+
+    def test_editor_markup_is_escaped(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_explanationReviewCardHtml")
+        assert block.count('escHtml(exp.body || "")') >= 2
+
+
+class TestDiscussOpeningSeedFreshness:
+    """§7.1: 元の解析結果が変わった承認済み素材も同じキューに事実文付きで出す
+    （自動で非承認に落とさないので、教員が気づける場所はキューだけ）。"""
+
+    def test_stale_notice_constant_is_a_factual_sentence(self):
+        src = _read(DELIBERATION_JS)
+        assert 'EXPLANATION_STALE_NOTICE = "元の解析結果が変わっています"' in src
+
+    def test_stale_badge_rendered_from_server_notice_with_local_fallback(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_explanationReviewCardHtml")
+        assert "exp.stale" in block
+        assert "exp.stale_notice || EXPLANATION_STALE_NOTICE" in block
+
+    def test_stale_approved_rows_fetched_via_document_scope_query(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_loadStaleApprovedDocumentExplanations")
+        assert '"?element_type=document&status=approved"' in block
+        assert "exp.stale === true" in block
+        assert 'method: "POST"' not in block
+
+    def test_stale_fetch_failure_keeps_candidate_queue(self):
+        """鮮度の取得に失敗してもキュー本体（候補一覧）は出す。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_loadStaleApprovedDocumentExplanations")
+        assert "return candidates;" in block
+
+    def test_queue_load_merges_candidates_and_stale_rows(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_loadExplanationReviewQueue")
+        assert "_loadStaleApprovedDocumentExplanations(documentId" in block
+
+    def test_only_candidates_are_selectable_for_bulk_review(self):
+        """approved の stale 行は一括承認・単件承認の対象にしない（candidate-only, E2）。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_explanationReviewSelectable")
+        assert '(exp.status || "candidate") === "candidate"' in block
+        card = _function_block(src, "_explanationReviewCardHtml")
+        assert "selectable = _explanationReviewSelectable(exp)" in card
+        selected_ids = _function_block(src, "_explanationReviewSelectedIds")
+        assert "_explanationReviewSelectable(exp)" in selected_ids
+
+    def test_select_all_skips_non_candidate_rows(self):
+        src = _read(DELIBERATION_JS)
+        start = src.index('id="deliberation-explanation-review-select-all"')
+        block = src[start:start + 1600]
+        assert "_explanationReviewSelectable(exp)" in block
+
+    def test_status_label_shown_for_non_candidate_rows(self):
+        src = _read(DELIBERATION_JS)
+        assert "EXPLANATION_REVIEW_STATUS_LABELS" in src
+        block = _function_block(src, "_explanationReviewCardHtml")
+        assert "EXPLANATION_REVIEW_STATUS_LABELS[exp.status]" in block
+
+    def test_modal_states_that_approval_is_not_revoked_automatically(self):
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_openExplanationReviewModal")
+        assert "元の解析結果が変わった承認済みの素材も一覧に含まれます" in block

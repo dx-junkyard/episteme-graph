@@ -22,6 +22,7 @@ import threading
 from collections import Counter
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 import services
@@ -53,6 +54,22 @@ except Exception:  # noqa: BLE001
     _help_kb_index = None
     _help_kb_validator = None
     _help_kb_store = None
+
+# 管理画面インスペクト・モード（❓ 使い方）の UI 論理アンカー表。上の try ブロックとは
+# 独立に import する（このモジュール単体の不在が guidance/manual 検索まで巻き添えに
+# ならないよう分離。fail-closed・捏造しない, P4）。
+try:  # pragma: no cover
+    from core.help_kb.admin_ui_anchors import (
+        KNOWN_ADMIN_UI_ANCHOR_IDS as _KNOWN_ADMIN_UI_ANCHOR_IDS,
+        resolve_admin_ui_anchor as _resolve_admin_ui_anchor,
+        resolve_admin_ui_anchors as _resolve_admin_ui_anchors,
+        split_manual_ref as _split_admin_manual_ref,
+    )
+except Exception:  # noqa: BLE001
+    _KNOWN_ADMIN_UI_ANCHOR_IDS = frozenset()  # type: ignore[assignment]
+    _resolve_admin_ui_anchor = None  # type: ignore[assignment]
+    _resolve_admin_ui_anchors = None  # type: ignore[assignment]
+    _split_admin_manual_ref = None  # type: ignore[assignment]
 from core.admin_assistant.actions import (
     ActionArgError,
     ActionContext,
@@ -584,6 +601,145 @@ def _status_query_response(message: str, current_user: dict) -> AssistantChatRes
 
 
 # ---------------------------------------------------------------------------
+# 管理画面インスペクト・モード（❓ 使い方, help-conventions.md）: UI 論理アンカーの
+# 配信 + 未整備アンカーへのホバー滞留（no_hit）記録 + chat の usage_help 分岐。
+# 学習画面側（routes/learning.py の GET/POST /help/ui-anchor* および
+# _usage_help_response）と同型・独立の実装。
+# ---------------------------------------------------------------------------
+
+# interest_traces.course_id は NOT NULL のため、コース文脈を伴わない UI 全体の
+# help_usage 記録には学習側と同じ予約疑似コースIDを使う（"_ui"。G層
+# manual.help_gaps_pending の需要側集計は course_id を見ないため実害はない）。
+_ADMIN_UI_ANCHOR_EVENT_COURSE_ID = "_ui"
+
+_ADMIN_UI_ANCHOR_EVENT_KINDS = frozenset({"no_hit"})
+
+# 同一ユーザー×同一アンカーの no_hit 記録を書きすぎない簡易スパム防止
+# （学習側 IH10/§5.4 と同じ既定30分、実体は services.recent_duplicate_ui_anchor_event に共通化）。
+_ADMIN_UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES = 30
+
+# chat リクエストの support_action がこの値のとき、意図分類より前に usage_help 応答へ分岐する。
+_SUPPORT_ACTION_USAGE_HELP = "usage_help"
+
+
+class AdminUiAnchorEventRequest(BaseModel):
+    anchor_id: str
+    kind: str = "no_hit"
+
+
+@admin_router.get("/help/ui-anchors")
+def get_admin_ui_anchors_route(current_user: dict = Depends(_require_teacher)) -> dict:
+    """インスペクト・モードの UI 論理アンカー配信（TEACHER/SYSTEM_ADMIN 共通、ロール別解決）。
+
+    読み取り専用・痕跡を書かない。クライアントはログイン時に1回フェッチして
+    キャッシュする前提で、ホバーごとに呼ばれることは想定しない。ロールから見える
+    audience の節のみを返す（fail-closed。SYSTEM_ADMIN 限定タブの節は TEACHER には
+    返らない）。
+    """
+    role = current_user["role"]
+    if _resolve_admin_ui_anchors is None:
+        return {"anchors": {}}
+    try:
+        return {"anchors": _resolve_admin_ui_anchors(role)}
+    except Exception:
+        logger.warning("resolve_admin_ui_anchors failed for ui-anchors endpoint", exc_info=True)
+        return {"anchors": {}}
+
+
+@admin_router.post("/help/ui-anchor-events", status_code=201)
+def record_admin_ui_anchor_event_route(
+    body: AdminUiAnchorEventRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """未整備 UI アンカーへのホバー滞留を help_usage 痕跡として記録する。
+
+    質問の逐語は積まない（anchor_id は固定の論理IDであり自由文ではない）。記録した行は
+    G層 ``manual.help_gaps_pending`` の需要側集計にそのまま乗る（学習画面側と同じ
+    ``ui:<anchor_id>`` バケツ単位）。
+    """
+    anchor_id = (body.anchor_id or "").strip()
+    if not anchor_id or anchor_id not in _KNOWN_ADMIN_UI_ANCHOR_IDS:
+        raise HTTPException(status_code=422, detail=f"未知の UI アンカー: {body.anchor_id!r}")
+    if body.kind not in _ADMIN_UI_ANCHOR_EVENT_KINDS:
+        raise HTTPException(status_code=422, detail=f"未知の kind: {body.kind!r}")
+
+    user_id = current_user["id"]
+    help_anchor = f"ui:{anchor_id}"
+
+    if services.recent_duplicate_ui_anchor_event(
+        user_id, help_anchor, window_minutes=_ADMIN_UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
+    ):
+        return {"ok": True, "recorded": False}
+
+    services.record_interest_trace(
+        user_id, _ADMIN_UI_ANCHOR_EVENT_COURSE_ID, None,
+        kind="help_usage",
+        text="UI要素の使い方（未整備）",
+        extra_payload={"help_anchor": help_anchor, "documented": False, "no_hit": True},
+    )
+    return {"ok": True, "recorded": True}
+
+
+def _usage_help_chat_response(
+    message: str, role: str, ui_anchor_id: str | None, screen_context: dict, user_id: str,
+) -> AssistantChatResponse:
+    """chat の usage_help 分岐（LLM を一切呼ばない, §該当の実装指示）。
+
+    ``ui_anchor_id`` が解決できればその節本文を最優先で返す（§9-1 と同型の優先順位）。
+    解決できなければ既存 ``_guidance_response``（capability KB + manual の非LLM検索）へ
+    委譲する — これが既存の「未整備なら例を提示する」フォールバックをそのまま担う。
+    どちらの経路でも help_usage 痕跡を1行記録する（質問の逐語は payload に積まない）。
+    """
+    resolved = None
+    if ui_anchor_id and _resolve_admin_ui_anchor is not None:
+        try:
+            resolved = _resolve_admin_ui_anchor(ui_anchor_id, role)
+        except Exception:
+            logger.warning(
+                "resolve_admin_ui_anchor failed for admin usage_help; "
+                "falling back to guidance search",
+                exc_info=True,
+            )
+            resolved = None
+
+    # ui_anchor 指定時は痕跡の anchor を常に "ui:<ui_anchor>" に一本化する（学習側と同じ規約）。
+    trace_anchor = f"ui:{ui_anchor_id}" if ui_anchor_id else None
+
+    if resolved and _split_admin_manual_ref is not None:
+        ref = resolved.get("manual_anchor", "") or ""
+        audience = ref.split("/", 1)[0] if ref else ""
+        manual_file, manual_anchor = _split_admin_manual_ref(ref)
+        citation = f"manual/{audience}/{manual_file}#{manual_anchor}" if audience else ""
+        resp = AssistantChatResponse(
+            answer=resolved.get("body", ""),
+            intent=INTENT_GUIDANCE,
+            citations=[{"doc": citation}] if citation else [],
+        )
+        services.record_interest_trace(
+            user_id, _ADMIN_UI_ANCHOR_EVENT_COURSE_ID, None,
+            kind="help_usage",
+            text=resolved.get("title") or "使い方の質問",
+            extra_payload={"help_anchor": trace_anchor, "documented": True, "no_hit": False},
+        )
+        return resp
+
+    resp = _guidance_response(message, role, None, screen_context)
+    top_citation = resp.citations[0].get("doc") if resp.citations else None
+    documented = bool(top_citation)
+    services.record_interest_trace(
+        user_id, _ADMIN_UI_ANCHOR_EVENT_COURSE_ID, None,
+        kind="help_usage",
+        text="使い方の質問",
+        extra_payload={
+            "help_anchor": trace_anchor or top_citation,
+            "documented": documented,
+            "no_hit": not documented,
+        },
+    )
+    return resp
+
+
+# ---------------------------------------------------------------------------
 # 8.1 POST /chat
 # ---------------------------------------------------------------------------
 
@@ -595,6 +751,14 @@ def assistant_chat(
 ) -> AssistantChatResponse:
     role = current_user["role"]
     screen_context = body.screen_context.model_dump() if body.screen_context else {}
+
+    # インスペクト・モード（❓ 使い方）からの usage_help 分岐は、既存の意図分類・LLM
+    # コールより前に処理する（LLM を一切呼ばない。既存 chat 動作は support_action 未指定
+    # 時のみ通る従来どおりのパスで一切変えない）。
+    if (body.support_action or "").strip() == _SUPPORT_ACTION_USAGE_HELP:
+        return _usage_help_chat_response(
+            body.message, role, body.ui_anchor, screen_context, str(current_user.get("id") or ""),
+        )
 
     allow_llm = _reserve_llm_quota(str(current_user.get("id") or ""))
     with usage_context("admin:assistant", user_id=current_user["id"]):

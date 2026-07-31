@@ -65,6 +65,7 @@
   function buildPanel() {
     panelEl = document.createElement("div");
     panelEl.className = "admin-next-steps-panel";
+    panelEl.setAttribute("data-ui-anchor", "header.next-steps");
     panelEl.setAttribute("hidden", "hidden");
     panelEl.innerHTML =
       '<div class="admin-next-steps-head">' +

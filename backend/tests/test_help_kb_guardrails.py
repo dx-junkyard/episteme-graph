@@ -77,6 +77,22 @@ _DENYLIST_TERMS = (
     "MAX_CALLS_PER_DAY",
 )
 
+# 改変履歴（開発経緯）の言い回し。機能語彙としての「廃止（retired 状態への遷移）」は
+# 正当なので含めない — 「以前は〜だった」型の履歴表現だけを列挙する。
+_REVISION_HISTORY_TERMS = (
+    "以前あった",
+    "かつては",
+    "旧仕様",
+    "従来どおり",
+    "は廃止され",
+    "廃止されました",
+    "撤去済み",
+    "統合されました",
+    "に変更されました",
+    "追加されました",
+    "新しくなりました",
+)
+
 
 @pytest.fixture(autouse=True)
 def _clear_manual_cache():
@@ -143,6 +159,23 @@ class TestDenylist:
                 if term in text:
                     violations.append(f"{md.name}: {term!r}")
         assert violations == [], f"denylist violations: {violations}"
+
+    def test_manuals_contain_no_revision_history_narrative(self):
+        """マニュアルは「いまの使い方・できること」だけを書く（改変履歴を書かない）。
+
+        マニュアルは AI アシスタントの知識源であり、節本文がそのままツールチップ・
+        HELP 回答として利用者に出る。「以前あった〇〇は廃止され」のような開発経緯は
+        利用者にとって不要な情報なので、機能語彙としての「廃止（retire 操作）」とは
+        区別して、履歴の言い回しだけを構造的に禁止する。
+        """
+        assert MANUAL_DIR.is_dir()
+        violations: list[str] = []
+        for md in sorted(MANUAL_DIR.rglob("*.md")):
+            text = md.read_text(encoding="utf-8")
+            for term in _REVISION_HISTORY_TERMS:
+                if term in text:
+                    violations.append(f"{md.relative_to(MANUAL_DIR)}: {term!r}")
+        assert violations == [], f"revision-history narrative in manuals: {violations}"
 
 
 # ===========================================================================

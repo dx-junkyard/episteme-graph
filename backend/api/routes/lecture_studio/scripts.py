@@ -53,6 +53,7 @@ from core.lecture import (
     lecture_uses_topic_material,
     split_slides,
 )
+from core import llm_policy
 from core.llm import generate_text, get_llm_params
 from core.llm_usage.context import bind_usage_context, usage_context
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
@@ -276,6 +277,7 @@ def _batch_generate_worker(
     auto_audio: bool = False,
     user_id: str | None = None,
     language: str | None = None,
+    model: str | None = None,
 ) -> None:
     """バックグラウンドスレッドでスクリプトを一括生成する。
 
@@ -283,6 +285,8 @@ def _batch_generate_worker(
     結果データの ``next_task_id`` に新タスクIDを格納する (Issue #139)。
     ``language`` 省略時はコース設定 (``lecture_language``) を使う (migration 040 Phase 4)。
     生成した各チャンクには ``chunks.spoken_language`` として生成言語を記録する。
+    ``model``: M層 Phase 3 の実行単位モデル上書き（呼び出し側で検証済み。scene
+    "lecture_studio"）。daemon thread のため contextvar ではなく明示引数で渡す。
     """
     bind_usage_context("admin:lecture_generate", user_id=user_id, course_id=course_id)
     total = len(chunks)
@@ -315,6 +319,7 @@ def _batch_generate_worker(
                     course_data=course_data,
                     persona_id=narration_persona,
                     language=effective_language,
+                    model=model,
                 )
                 display_text = result.get("display_text") or chunk["text"]
                 spoken_text = result["spoken_text"]
@@ -435,6 +440,14 @@ def batch_generate_scripts(
             ),
         )
 
+    # M層 Phase 3（§6.3）: この実行だけのモデル上書き（scene "lecture_studio"）。
+    # 未指定なら従来どおり fast tier。
+    requested_model = (body.model or "").strip() or None
+    if requested_model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_LECTURE_STUDIO, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+
     task_id = str(uuid.uuid4())[:12]
     create_background_task(task_id, "script_generation", current_user["id"])
     settings = _lecture_studio_settings(course_data)
@@ -452,6 +465,7 @@ def batch_generate_scripts(
             body.auto_audio,
             current_user["id"],
             body.language,
+            requested_model,
         ),
         daemon=True,
     )
@@ -923,13 +937,23 @@ def rewrite_lecture_script(
 
     params = get_llm_params("fast")
 
+    # M層 Phase 3（§6.3）: この実行だけのモデル上書き（scene "lecture_studio"）。
+    # 未指定なら従来どおり fast tier。
+    requested_model = (body.model or "").strip() or None
+    if requested_model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_LECTURE_STUDIO, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+    effective_model = requested_model or params["model"]
+    effective_effort = None if requested_model else params["reasoning_effort"]
+
     consume_lecture_rewrite_quota(current_user["id"])
     try:
         with usage_context("admin:lecture_rewrite", user_id=current_user["id"]):
             raw = generate_text(
                 messages=[{"role": "user", "content": prompt}],
-                model=params["model"],
-                reasoning_effort=params["reasoning_effort"],
+                model=effective_model,
+                reasoning_effort=effective_effort,
             )
         cleaned = raw.strip()
         if cleaned.startswith("```"):

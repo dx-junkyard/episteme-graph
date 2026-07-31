@@ -1,5 +1,10 @@
 """discuss モード「開幕画面」の投影（設計書 §3.3 / §6.3）。
 
+投影の是正は `docs/features/discuss_opening_authoring_design.md` §3（Phase 0）と
+§2 最下段（Phase 0b: `course_focus`）が正本。見出しは**主語ごとに固定**する
+（論文 / システム（解析） / AI の推測 / 教員）。混ぜない。
+
+
 白紙のチャット欄で始めないための3要素（中心命題・支持構造・最も脆い一手／理論の
 バックボーン／最初の一手は最初の一手のチップのみフロント側で描く）を、A層成果物
 （thesis_reconstruction artifact・TheoryOperationGraph の main 層）と D層台帳の投影
@@ -9,8 +14,14 @@
 - 純粋投影部（``project_thesis`` / ``project_backbone`` / ``project_fragile_points`` と
   その下請け）は fake の dict を渡すだけで単体テストできる（``core/personal_graph/derive.py``
   の「純粋関数と DB 読み出しの分離」を踏襲。参照: ``test_discuss_opening.py``）。
+- 「議論のきっかけ」（``discuss_opening_authoring_design.md`` §7、Phase 3）だけは投影では
+  なく、パイプラインが生成し**教員が承認した**素材（``element_explanations`` の
+  ``status='approved'`` / ``role='discussion_seed'`` 行）の配信である。承認済み以外は
+  一切載せない（OA2）。承認済みが無い document は投影のまま（OA4）。ここでも LLM は
+  呼ばない（読み出しのみ・OA3）。
 - DB 読み出し部（``_document_titles`` / ``_load_graph_nodes`` / `_claim_label_index`` /
-  ``_compile_open_assumptions``）はこのモジュール内で完結させ、都度セッションを開いて
+  ``_load_approved_discussion_seeds`` / ``_compile_open_assumptions``）はこのモジュール内で
+  完結させ、都度セッションを開いて
   ``finally`` で閉じる（``core/component_context.py`` と同じ流儀）。1文書の読み出し失敗が
   画面全体を壊さないよう、呼び出し側で fail-soft に握る。
 - confidence / load_score 等の生数値は一切レスポンスに含めない（DM6/W8）。射影する
@@ -24,6 +35,12 @@ import logging
 from typing import Any, Iterable
 
 from core.deliberation.refs import document_run_artifacts, equation_records
+from core.element_explanations import (
+    ELEMENT_TYPE_DOCUMENT,
+    ROLE_DISCUSSION_SEED,
+    STATUS_APPROVED,
+    list_for_document,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +50,36 @@ logger = logging.getLogger(__name__)
 
 _MAX_CENTRAL_ITEMS = 5
 _MAX_SUPPORT_ITEMS_PER_SECTION = 5
+_MAX_SUPPORT_ENTRIES_PER_SECTION = 5
 _MAX_BACKBONE_NODES = 12
 _MAX_FRAGILE_POINTS = 8
+# 「別の見方（AI の提示）」（discuss_opening_authoring_design.md §2）の上限。
+_MAX_ALTERNATIVES = 3
+# 「議論のきっかけ」（同 §2 / §7、承認済み素材の配信）の上限。生成側の
+# ``DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT``（既定4）と同じ桁に揃える。再解析を跨いで
+# 承認済み行が積み上がっても開幕画面が長くならないようにするための表示上限で、
+# 切ったこと自体を示す独立フラグは持たない（``project_thesis`` と同じ方針:
+# 設計契約に無いフィールドを増やさない）。
+_MAX_DISCUSSION_SEEDS = 4
+
+# alternative_theses は thesis_reconstruction artifact の中で唯一 claim_ids /
+# evidence_block_ids を持たない（agents/thesis_reconstruction/schema.py: text /
+# reason / confidence のみ）。したがって論文まで辿れない。DM1 / OA7 に従い
+# 「出さない」のではなく「そう表示する」ため、出所ラベルをサーバ側から必ず添える。
+_ALTERNATIVE_ATTRIBUTION_LABEL = "AI が提示した別の定式化（出典との対応は未確認）"
+
+# 承認済み素材（``element_explanations`` の ``status='approved'`` 行）に添える出所表示
+# （discuss_opening_authoring_design.md §7 の文言そのもの）。**投影のみの区画には
+# 付けない** — 署名は「人が見た」ことの表明なので、AI 投影に流用すると意味が壊れる。
+# 出所ラベルの持ち方は ``_ALTERNATIVE_ATTRIBUTION_LABEL`` と同じ「サーバ側の定数を
+# DTO に添える」方式に揃える（フロントの固定文にしない = 出所表示の正本を1箇所にする）。
+_AUTHORED_BY_LABEL = "この説明は、論文の解析結果をもとに担当教員が確認したものです。"
+
+# fragile point の主語（discuss_opening_authoring_design.md §2 / §3）。
+# 「論文についての言明」と「システム（解析）についての言明」を混ぜないための構造的な区別。
+# フロントはこの値（または kind）で区画を分け、1つの見出しに積まない。
+FRAGILE_SUBJECT_PAPER = "paper"
+FRAGILE_SUBJECT_SYSTEM = "system"
 
 # ---------------------------------------------------------------------------
 # theory stage 語彙（domain-neutral・A層コードを import しない写し）。
@@ -98,16 +143,26 @@ _SUPPORT_SECTION_LABELS = {
 
 # TheoryOperationGraph の review_reasons 語彙（CLAUDE.md「TheoryOperationGraph」節が正本）
 # の事実文化。未知の reason コードはコードそのものを表示する（情報を落とさない）。
+#
+# 文言は**学習者向けに平易化**する（discuss_opening_authoring_design.md §2 / §3）。
+# `atomic claim` / `リンク` / `出典に裏付けられて` のような内部語彙をそのまま出すと、
+# 「システムの解析状態」が「論文の弱点」に読み替えられてしまう。主語がシステム
+# （解析）であることは `_backbone_fact_line` の前置きが担い、ここは何が取れていない
+# かだけを平易に述べる。reason コードそのものは変えない（A層・graph 側の正本）。
 _REVIEW_REASON_FACT_PHRASES = {
-    "missing_atomic_claim": "裏付けとなる atomic claim が見つかっていません",
-    "missing_evidence_link": "根拠へのリンクが不足しています",
-    "missing_equation_link": "式へのリンクが不足しています",
-    "missing_derivation_link": "導出へのリンクが不足しています",
-    "equation_needs_math_review": "数式の確認が必要です",
-    "edge_not_source_backed": "関係の根拠が出典に裏付けられていません",
-    "fallback_or_inferred_node": "推定によって補われた箇所です",
-    "source_span_missing": "元テキストの範囲が特定されていません",
+    "missing_atomic_claim": "根拠となる文をまだ特定できていません",
+    "missing_evidence_link": "根拠となる箇所とのつながりを記録できていません",
+    "missing_equation_link": "関係する式とのつながりを記録できていません",
+    "missing_derivation_link": "導出の過程とのつながりを記録できていません",
+    "equation_needs_math_review": "式の内容をまだ確認できていません",
+    "edge_not_source_backed": "つながりの根拠を論文の中で確認できていません",
+    "fallback_or_inferred_node": "解析が推定で補った箇所です",
+    "source_span_missing": "元の文章のどこにあたるかを特定できていません",
 }
+
+# 「まだ確認できていないところ」の前置き。主語がシステム（解析）であることを文面で明示する
+# （旧「レビュー待ちの箇所です」は、誰が何を待っているのかが学習者に分からなかった）。
+_SYSTEM_UNCONFIRMED_PREFIX = "解析がこの箇所の裏付けをまだ取れていません"
 
 # 数値を一切見せない（W8/DM6）。射影後も念のため再帰的に除去するキー。
 _FORBIDDEN_NUMERIC_KEYS = ("confidence", "load_score", "score")
@@ -160,10 +215,27 @@ def _equation_ref_item(equation_id: str, equations_by_id: dict[str, dict]) -> di
     return {"id": equation_id, "label": label or equation_id}
 
 
+def _skeleton_entry_text(skeleton: dict[str, Any] | None, key: str) -> str:
+    """paper_skeleton artifact の1エントリ（``{"text","evidence_block_ids","reason",
+    "confidence"}``）から本文だけを取り出す。素の文字列で来る形にも耐える。
+
+    ``paper_goal`` は thesis_reconstruction artifact には無く（``ThesisLLMInput`` の
+    入力側にしか現れない）、``paper_skeleton`` artifact が正本のため、開幕画面の
+    「この論文が答えようとした問い」は2つの artifact を併読して組み立てる。
+    """
+    if not isinstance(skeleton, dict):
+        return ""
+    entry = skeleton.get(key)
+    if isinstance(entry, dict):
+        return str(entry.get("text") or "").strip()
+    return str(entry or "").strip()
+
+
 def project_thesis(
     thesis: dict[str, Any] | None,
     claim_label_index: dict[str, str],
     equations_by_id: dict[str, dict],
+    skeleton: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """thesis_reconstruction artifact → 開幕画面の thesis DTO（設計書 §3.3 の契約）。
 
@@ -171,6 +243,24 @@ def project_thesis(
     claim_ids・equation_ids をラベル解決込みで射影する。各リストは上限で切るが、
     切ったこと自体を示す独立フラグは持たない（documents[].truncated は backbone 専用。
     設計契約に無いフィールドを増やさない）。
+
+    ``skeleton``（paper_skeleton artifact、任意）を渡すと ``paper_goal`` /
+    ``central_question`` の縮退先として併読する。
+
+    投影の是正（``discuss_opening_authoring_design.md`` §3）で、agent が**合成した文**を
+    捨てずに出すようになったフィールド:
+
+    - ``central_question`` / ``paper_goal`` — 問いから始める（export の
+      バリデーションゲートは ``central_question`` 不在を error にしているのに、
+      学習者向け画面では使われていなかった）。
+    - ``central_thesis_text`` — ``central_thesis.text``。従来は claim_ids →
+      claim の生ラベル（論文原文）だけを出していた。
+    - ``support_sections[].entries[].text`` — ``SupportEntry.text``。
+    - ``alternatives`` — ``alternative_theses`` の text のみ。出典を持たない artifact
+      なので ``attribution_label`` を必ず添える（OA7: 選別せずラベルで区別する）。
+
+    **言語は変換しない**（A層のプロンプトに言語指定が無いため英語で保存されている
+    ことがある）。Phase 0 で直すのは構成と主語だけで、和訳・要約はしない（DM8）。
     """
     if not isinstance(thesis, dict):
         return None
@@ -193,42 +283,156 @@ def project_thesis(
         if not isinstance(entries, list):
             continue
         items: list[dict[str, str]] = []
+        # entries[] は agent が合成した1文（SupportEntry.text）とその参照の組。
+        # 従来の flat な items[] は残したまま（既存フロントのチップ表示が使う）、
+        # 合成文を落とさないための投影を並置する。
+        projected_entries: list[dict[str, Any]] = []
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
+            entry_text = str(entry.get("text") or "").strip()
+            entry_items: list[dict[str, str]] = []
             for cid in _dedupe_ids(entry.get("claim_ids")):
-                if len(items) >= _MAX_SUPPORT_ITEMS_PER_SECTION:
+                if len(entry_items) >= _MAX_SUPPORT_ITEMS_PER_SECTION:
                     break
-                items.append({"type": "claim", **_claim_ref_item(cid, claim_label_index)})
-            if len(items) >= _MAX_SUPPORT_ITEMS_PER_SECTION:
-                continue
+                entry_items.append({"type": "claim", **_claim_ref_item(cid, claim_label_index)})
             for eid in _dedupe_ids(entry.get("equation_ids")):
+                if len(entry_items) >= _MAX_SUPPORT_ITEMS_PER_SECTION:
+                    break
+                entry_items.append({"type": "equation", **_equation_ref_item(eid, equations_by_id)})
+            if (entry_text or entry_items) and len(projected_entries) < _MAX_SUPPORT_ENTRIES_PER_SECTION:
+                projected_entries.append({"text": entry_text, "items": entry_items})
+            for item in entry_items:
                 if len(items) >= _MAX_SUPPORT_ITEMS_PER_SECTION:
                     break
-                items.append({"type": "equation", **_equation_ref_item(eid, equations_by_id)})
-        if not items:
+                items.append(item)
+        if not items and not projected_entries:
             continue
         support_sections.append(
             {
                 "key": str(section_key),
                 "label": _SUPPORT_SECTION_LABELS.get(str(section_key), str(section_key)),
                 "items": items,
+                "entries": projected_entries,
             }
         )
 
+    alternatives: list[dict[str, str]] = []
+    for alt in thesis.get("alternative_theses") or []:
+        if len(alternatives) >= _MAX_ALTERNATIVES:
+            break
+        text = str(alt.get("text") or "").strip() if isinstance(alt, dict) else str(alt or "").strip()
+        if not text:
+            continue
+        alternatives.append({"text": text, "attribution_label": _ALTERNATIVE_ATTRIBUTION_LABEL})
+
     return {
+        # 「この論文が答えようとした問い」（主語=論文）。thesis artifact の
+        # central_question を優先し、無ければ paper_skeleton の同名エントリへ縮退する。
+        "central_question": (
+            str(thesis.get("central_question") or "").strip()
+            or _skeleton_entry_text(skeleton, "central_question")
+        ),
+        "paper_goal": _skeleton_entry_text(skeleton, "paper_goal"),
+        # 「この論文の主張」（主語=論文）。agent が合成した命題文。無ければ
+        # headline_claim（同じく合成値）へ縮退する。claim の生ラベルは
+        # central_claims 側に従来どおり残す（置き換えない）。
+        "central_thesis_text": (
+            str(central.get("text") or "").strip() or str(thesis.get("headline_claim") or "").strip()
+        ),
         "central_claims": central_claims,
         "central_equations": central_equations,
         "support_sections": support_sections,
+        # 「別の見方（AI の提示）」。出典を持たないため attribution_label 付き（OA7）。
+        "alternatives": alternatives,
     }
 
 
 def _thesis_is_empty(thesis: dict[str, Any] | None) -> bool:
+    """投影された thesis DTO が空か（``available`` 判定の下請け）。
+
+    投影の是正で追加した「問い」「合成命題文」「別の見方」も中身として数える
+    （claim リンクが1つも無くても、問いと命題文があれば開幕画面は成立する）。
+    """
     if not thesis:
         return True
     return not (
-        thesis.get("central_claims") or thesis.get("central_equations") or thesis.get("support_sections")
+        thesis.get("central_claims")
+        or thesis.get("central_equations")
+        or thesis.get("support_sections")
+        or thesis.get("central_question")
+        or thesis.get("paper_goal")
+        or thesis.get("central_thesis_text")
+        or thesis.get("alternatives")
     )
+
+
+def _seed_tiebreak_key(row: dict[str, Any]) -> tuple[str, str]:
+    """``created_at`` が同値の承認済み素材どうしの決定論的な並び（body → id）。
+
+    ``list_for_document`` の ``ORDER BY created_at DESC`` だけでは、同一トランザクションで
+    投入された兄弟行（1 document に 2〜3 件）の ``created_at`` が PostgreSQL の ``now()``
+    により**同値**になるため順序が決まらない。表示順が読み込みごとに揺れないよう、
+    ここで全順序に固定する。
+    """
+    return (str(row.get("body") or ""), str(row.get("id") or ""))
+
+
+def _sort_seed_rows(rows: list[dict[str, Any]]) -> None:
+    """新しい承認済み素材が先（``created_at`` の降順、同値なら body → id の昇順）。
+
+    降順にするのは表示上限（:data:`_MAX_DISCUSSION_SEEDS`）との組み合わせのため —
+    昇順で切ると、再解析後に新しく承認した素材が古い承認済み素材に押し出されて
+    永久に画面へ出なくなる。Python の sort は安定なので2段で書く。
+    """
+    rows.sort(key=_seed_tiebreak_key)
+    rows.sort(key=lambda row: str(row.get("created_at") or ""), reverse=True)
+
+
+def project_discussion_seeds(
+    rows: list[dict[str, Any]] | None,
+    *,
+    limit: int = _MAX_DISCUSSION_SEEDS,
+) -> list[dict[str, Any]]:
+    """``element_explanations`` 行 → 開幕画面「議論のきっかけ」DTO（設計書 §2 / §7）。
+
+    この区画だけは投影ではなく、解析パイプラインが生成し**教員が承認した**素材を配信する。
+    純粋関数（fake dict で単体テスト可）で、DB 読み出しは
+    :func:`_load_approved_discussion_seeds` 側に閉じる。
+
+    - **OA2**: ``status='approved'`` かつ ``role='discussion_seed'`` かつ
+      ``element_type='document'`` の行だけを通す。読み出し SQL 側でも同じ条件で絞るが、
+      candidate / dismissed / superseded を学習者に出さない保証を SQL の 1 条件だけに
+      依存させない（二重の関門）。
+    - **OA6**: ``evidence`` から取るのは ``evidence_quote`` のみ。``confidence`` /
+      ``reason`` 等は射影しない（``_strip_numeric_keys`` は最後の安全網であって
+      1次防壁にしない）。``evidence_quote`` は「論文まで辿れる」ことの明示なので出す（DM1）。
+    - 各件に ``authored`` / ``authored_by_label`` を添える（設計書 §7 の出所表示）。
+      本文が空の行は出さない（表示できる中身が無いので）。
+    """
+    usable = [
+        row
+        for row in (rows or [])
+        if isinstance(row, dict)
+        and str(row.get("status") or "") == STATUS_APPROVED
+        and str(row.get("role") or "") == ROLE_DISCUSSION_SEED
+        and str(row.get("element_type") or "") == ELEMENT_TYPE_DOCUMENT
+        and str(row.get("body") or "").strip()
+    ]
+    _sort_seed_rows(usable)
+
+    projected: list[dict[str, Any]] = []
+    for row in usable[: max(0, int(limit))]:
+        evidence = row.get("evidence") if isinstance(row.get("evidence"), dict) else {}
+        projected.append(
+            {
+                "body": str(row.get("body") or "").strip(),
+                "evidence_quote": str(evidence.get("evidence_quote") or "").strip(),
+                "authored": True,
+                "authored_by_label": _AUTHORED_BY_LABEL,
+            }
+        )
+    return projected
 
 
 def project_backbone(
@@ -299,28 +503,33 @@ def _is_fragile_backbone_node(node: dict[str, Any]) -> bool:
 
 
 def _backbone_fact_line(node: dict[str, Any]) -> str:
-    """review_required なバックボーンノードの事実文（煽らない・断定しない）。"""
+    """review_required なバックボーンノードの事実文（煽らない・断定しない）。
+
+    **主語はシステム（解析）**。これは論文の弱点ではなく、解析が裏付けを取れていない
+    箇所である（discuss_opening_authoring_design.md §0 欠陥1）。
+    """
     reasons = node.get("review_reasons") or []
     phrases = [_REVIEW_REASON_FACT_PHRASES.get(str(r), str(r)) for r in reasons if str(r or "").strip()]
     if phrases:
-        return "レビュー待ちの箇所です: " + "、".join(phrases)
-    return "レビュー待ちの箇所です。"
+        return _SYSTEM_UNCONFIRMED_PREFIX + ": " + "、".join(phrases)
+    return _SYSTEM_UNCONFIRMED_PREFIX + "。"
 
 
 def _assumption_fact_line(item: dict[str, Any]) -> str:
     """未検証合意リスト項目（``compile_open_assumptions`` の1件）の事実文。
 
-    ``routes/doubt.py::_learner_fact_line`` と同じ「検証済みも未記帳も同じ精度で
-    併記する」思想（§8-1/8-2）を、開幕画面向けの短い一文に凝縮したもの。
+    **主語は論文**（この論文が確かめていないこと）。``routes/doubt.py::_learner_fact_line``
+    と同じ「検証済みも未記帳も同じ精度で併記する」思想（§8-1/8-2）を、開幕画面向けの
+    短い一文に凝縮したもの。内部語彙（記帳・スコープ）は学習者向けに平易化する。
     """
     if bool(item.get("scope_count_is_zero")):
-        return "検証スコープは記録されていません。"
+        return "どの範囲で確かめたかが記録されていません。"
     status = str(item.get("verification_status") or "unknown")
     if status in ("untested", "unknown"):
-        return "未検証の前提です。"
+        return "検証の記録がない前提です。"
     if status == "refuted":
-        return "反証の記帳がある前提です。"
-    return "検証状況の記帳がある前提です。"
+        return "反証の記録がある前提です。"
+    return "検証状況の記録がある前提です。"
 
 
 def project_fragile_points(
@@ -329,7 +538,13 @@ def project_fragile_points(
     *,
     limit: int = _MAX_FRAGILE_POINTS,
 ) -> tuple[list[dict[str, Any]], bool]:
-    """「最も脆い一手」= 未検証合意（D層台帳の投影）+ backbone の review_required ノード。
+    """脆い箇所の投影 = 未検証合意（D層台帳の投影）+ backbone の review_required ノード。
+
+    **2種類は主語が違う**ので、``kind`` に加えて ``subject`` を明示して返す
+    （``assumption`` → ``paper``: この論文が確かめていないこと /
+    ``backbone_node`` → ``system``: 解析がまだ裏付けを取れていないところ）。
+    フロントはこの区別で見出しを分け、1つの区画に積まない
+    （discuss_opening_authoring_design.md §2 / §3）。
 
     順序は「台帳の投影（開幕画面が最初に見せるべき、教材横断の一次情報）→ document 順の
     backbone ノード」の決定論的な並びに固定する（賞レース化しない=順位づけの演出はしない。
@@ -347,6 +562,7 @@ def project_fragile_points(
         points.append(
             {
                 "kind": "assumption",
+                "subject": FRAGILE_SUBJECT_PAPER,
                 "label": label,
                 "fact_line": _assumption_fact_line(item),
                 "document_id": None,
@@ -366,6 +582,7 @@ def project_fragile_points(
             points.append(
                 {
                     "kind": "backbone_node",
+                    "subject": FRAGILE_SUBJECT_SYSTEM,
                     "label": label,
                     "fact_line": _backbone_fact_line(node),
                     "document_id": str(document_id),
@@ -376,7 +593,19 @@ def project_fragile_points(
     return points[:limit], truncated
 
 
-def _is_available(documents: list[dict[str, Any]], fragile_points: list[dict[str, Any]]) -> bool:
+def _is_available(
+    documents: list[dict[str, Any]],
+    fragile_points: list[dict[str, Any]],
+    course_focus: str = "",
+) -> bool:
+    """開幕画面を出せるか。
+
+    ``course_focus``（教員が入力した「このコースで議論したいこと」、Phase 0b）が
+    あるだけでも画面は成立する — 教員が書いたものを A層成果の有無で黙って落とさない
+    （投影が空だからといって教員の入力を捨てない）。
+    """
+    if str(course_focus or "").strip():
+        return True
     for doc in documents:
         if not _thesis_is_empty(doc.get("thesis")):
             return True
@@ -539,6 +768,42 @@ def _equations_index_for(
     }
 
 
+def _load_approved_discussion_seeds(document_id: str) -> list[dict[str, Any]]:
+    """document の**承認済み**「議論のきっかけ」行を読む（設計書 §7）。
+
+    ``element_explanations``（migration 062: ``element_type='document'`` /
+    ``role='discussion_seed'``、``element_id`` は ``document_id`` と同値）の
+    ``status='approved'`` 行だけを引く。``kind`` では絞らない — 素材の役割は ``role``
+    が担っており、``kind`` の語彙が将来増えても配信が黙って止まらないようにする。
+
+    未承認しか無い document・そもそも生成されていない document では空リストになり、
+    呼び出し側は投影のまま（Phase 0 の画面）に縮退する（OA4: 承認されるまで画面が
+    出ない設計にしない）。読み出し失敗も空リストで返す fail-soft（1 document の
+    読み出し失敗で画面全体を壊さない。``_load_graph_nodes`` 等と同じ流儀）。
+    """
+    from core.postgres import get_session
+
+    session = None
+    try:
+        session = get_session()
+        return list_for_document(
+            session,
+            document_id,
+            element_type=ELEMENT_TYPE_DOCUMENT,
+            status=STATUS_APPROVED,
+            role=ROLE_DISCUSSION_SEED,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "discuss opening: approved discussion seed read failed for %s",
+            document_id, exc_info=True,
+        )
+        return []
+    finally:
+        if session is not None:
+            session.close()
+
+
 def _compile_open_assumptions(course_id: str) -> list[dict[str, Any]]:
     """D層台帳の未検証合意リスト（``core.doubt.open_assumptions.compile_open_assumptions``）
     を学習者向け設定（``include_challenger_names=False``。既存の学習者向け
@@ -564,13 +829,29 @@ def _compile_open_assumptions(course_id: str) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def build_opening(course_id: str, document_ids: Iterable[str]) -> dict[str, Any]:
+def build_opening(
+    course_id: str,
+    document_ids: Iterable[str],
+    course_focus: str = "",
+) -> dict[str, Any]:
     """discuss モード開幕画面の DTO を組み立てる（設計書 §3.3 / §6.3）。
 
     呼び出し側（``routes/learning.py``）が受講ゲート（``get_course_data``）を通した後、
     ``services.list_course_source_document_ids(course_data)`` の結果を ``document_ids``
     として渡す。document 単位の読み出し失敗は fail-soft に握り、その文書だけ
     thesis=None / backbone=[] に縮退させて画面全体は返す。
+
+    ``documents[].discussion_seeds``（設計書 §7）は**教員が承認した**素材だけを載せる。
+    承認済みが1件も無い document ではキー自体を付けず、投影のまま返す（OA4）。
+    ``available`` の判定はこの素材の有無で変えない（設計書 §7: 開幕画面を出せるかは
+    従来どおり投影と教員入力だけで決める。承認待ちのあいだ画面が消えたり、
+    承認によって突然出現したりしない）。
+
+    ``course_focus``（Phase 0b、``discuss_opening_authoring_design.md`` §2 最下段
+    「このコースで議論したいこと」）は教員の任意入力で、AI 生成は一切関与しない。
+    呼び出し側が ``core.course_data.course_focus(course_data)`` で読んで渡す
+    （本モジュールは course_data の構造を知らない）。未入力なら空文字のまま返し、
+    フロントは区画ごと非表示にする。
     """
     ids = sorted({str(d) for d in document_ids if str(d or "").strip()})
     titles = _document_titles(ids)
@@ -587,6 +868,11 @@ def build_opening(course_id: str, document_ids: Iterable[str]) -> dict[str, Any]
             artifacts = {}
 
         thesis_artifact = artifacts.get("thesis_reconstruction")
+        # paper_goal / central_question の縮退先（paper_goal は thesis artifact に
+        # 存在しない — paper_skeleton artifact が正本）。同じ artifacts dict から読むので
+        # document_analysis_runs の追加 SELECT は発生しない。
+        skeleton_artifact = artifacts.get("paper_skeleton")
+        skeleton_artifact = skeleton_artifact if isinstance(skeleton_artifact, dict) else None
 
         try:
             equations_by_id = _equations_index_for(document_id, artifacts)
@@ -596,7 +882,7 @@ def build_opening(course_id: str, document_ids: Iterable[str]) -> dict[str, Any]
 
         claim_label_index = _claim_label_index(document_id, artifacts)
         thesis_dto = (
-            project_thesis(thesis_artifact, claim_label_index, equations_by_id)
+            project_thesis(thesis_artifact, claim_label_index, equations_by_id, skeleton_artifact)
             if isinstance(thesis_artifact, dict)
             else None
         )
@@ -605,22 +891,32 @@ def build_opening(course_id: str, document_ids: Iterable[str]) -> dict[str, Any]
         backbone_nodes, backbone_truncated = project_backbone(graph_nodes)
         backbone_by_document[document_id] = backbone_nodes
 
-        documents.append(
-            {
-                "document_id": document_id,
-                "title": titles.get(document_id, ""),
-                "thesis": thesis_dto,
-                "backbone": backbone_nodes,
-                "truncated": backbone_truncated,
-            }
-        )
+        document_dto: dict[str, Any] = {
+            "document_id": document_id,
+            "title": titles.get(document_id, ""),
+            "thesis": thesis_dto,
+            "backbone": backbone_nodes,
+            "truncated": backbone_truncated,
+        }
+
+        # 承認済み素材の配信（設計書 §7）。role 単位の**部分適用**なので、承認済みが
+        # 1件も無い document は投影のまま（＝Phase 0 の DTO と完全一致）にする —
+        # 空配列のキーすら足さない（劣化しない, OA4）。
+        seeds = project_discussion_seeds(_load_approved_discussion_seeds(document_id))
+        if seeds:
+            document_dto["discussion_seeds"] = seeds
+
+        documents.append(document_dto)
 
     assumption_items = _compile_open_assumptions(course_id)
     fragile_points, fragile_truncated = project_fragile_points(assumption_items, backbone_by_document)
 
+    focus = str(course_focus or "").strip()
     result = {
         "course_id": course_id,
-        "available": _is_available(documents, fragile_points),
+        "available": _is_available(documents, fragile_points, focus),
+        # 教員の任意入力（主語=教員）。未入力なら空文字（フロントは区画ごと非表示）。
+        "course_focus": focus,
         "documents": documents,
         "fragile_points": fragile_points,
         "truncated": fragile_truncated,

@@ -78,13 +78,21 @@ def _is_uuid(value: Any) -> bool:
         return False
 
 
-def _strip_confidence(value: Any) -> Any:
-    """レスポンスを再帰走査して ``"confidence"`` キーを除去する（数値非公開・W8 相当）。"""
+def strip_confidence(value: Any) -> Any:
+    """レスポンスを再帰走査して ``"confidence"`` キーを除去する（数値非公開・W8 相当）。
+
+    学習者向け文脈 API 共通のヘルパー。``core/element_context.py``（claim / equation の
+    文脈 API）も同じ規則を使うため、正本はここ1箇所に置く（W8 の実装をコピペしない）。
+    """
     if isinstance(value, dict):
-        return {k: _strip_confidence(v) for k, v in value.items() if k != "confidence"}
+        return {k: strip_confidence(v) for k, v in value.items() if k != "confidence"}
     if isinstance(value, list):
-        return [_strip_confidence(v) for v in value]
+        return [strip_confidence(v) for v in value]
     return value
+
+
+# 旧名（本モジュール内および既存テストからの参照）。公開名 ``strip_confidence`` の別名。
+_strip_confidence = strip_confidence
 
 
 def _json_dict(value: Any) -> dict:

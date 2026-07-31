@@ -48,6 +48,7 @@ KNOWN_FEATURES = (
     "pipeline:component_graph",
     "pipeline:narrative_annotator",
     "pipeline:contextual_explanation",
+    "pipeline:discuss_opening",
     "pipeline:course_mapping",
     "pipeline:blueprint",
     "pipeline:export_validation",

@@ -189,6 +189,7 @@ def generate_spoken_text_and_formulas(
     course_data: dict | None = None,
     persona_id: str | None = None,
     language: str = "ja",
+    model: str | None = None,
 ) -> dict:
     """チャンクテキストから display_text / spoken_text / formulas を LLM で生成する。
 
@@ -197,6 +198,12 @@ def generate_spoken_text_and_formulas(
     language : str
         spoken_text の生成言語 (``"ja"`` / ``"en"``)。既定は ``"ja"``（後方互換）。
         display_text（表示教材）はソースの言語のまま維持され、翻訳されない（§3-2）。
+    model : str | None
+        M層 Phase 3（この実行だけのモデル上書き, scene "lecture_studio"）。呼び出し側
+        （``routes/lecture_studio/scripts.py``）が :func:`core.llm_policy.validate_model_for_scene`
+        で検証済みの値のみを渡す前提。``None`` は従来どおり fast tier 固定
+        （挙動不変。バックグラウンドスレッド実行のため contextvar の
+        ``model_override`` ではなく明示引数で伝搬する）。
     """
     if not chunk_text or not chunk_text.strip():
         return {"display_text": "", "spoken_text": "", "formulas": []}
@@ -227,13 +234,16 @@ def generate_spoken_text_and_formulas(
         language_instruction=_language_instruction(language),
     )
 
+    effective_model = model or params["model"]
+    effective_effort = None if model else params["reasoning_effort"]
+
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):
         try:
             raw = generate_text(
                 messages=[{"role": "user", "content": prompt}],
-                model=params["model"],
-                reasoning_effort=params["reasoning_effort"],
+                model=effective_model,
+                reasoning_effort=effective_effort,
             )
             return _parse_spoken_text_response(raw)
         except (json.JSONDecodeError, ValueError) as exc:

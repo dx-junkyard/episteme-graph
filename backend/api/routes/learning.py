@@ -7,6 +7,7 @@ import logging
 import re
 import threading
 import uuid
+from contextlib import nullcontext
 from dataclasses import asdict
 from typing import Callable
 
@@ -43,11 +44,13 @@ from services import (
     get_accessible_course_data,
     get_anchor_digest,
     get_tension_digest,
+    resolve_course_source_titles,
     course_deletion_notice,
     enroll_user_in_course,
     get_course_chunks_ordered,
     get_course_completion,
     get_course_data,
+    get_course_live_llm_models,
     get_editable_course_data,
     get_viewable_course_data,
     get_chunk_passage,
@@ -60,6 +63,7 @@ from services import (
     log_unanswered_query,
     persist_chat_history,
     truncate_chat_and_supersede,
+    recent_duplicate_ui_anchor_event as _recent_duplicate_ui_anchor_event_shared,
     record_internalization,
     record_interest_trace,
     record_learner_articulated_tension,
@@ -77,6 +81,8 @@ from services import (
 )
 from pydantic import BaseModel
 from core.course_data import (
+    course_focus,
+    course_llm_models,
     course_source_material_ids,
     course_title as _course_title,
     course_topics,
@@ -85,6 +91,7 @@ from core.course_data import (
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import element_explanations
+from core import llm_policy
 from core.llm import generate_text, get_llm_params, transcribe_audio
 from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
@@ -109,6 +116,10 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.component_context import build_component_context
+from core.element_context import (
+    SUPPORTED_ELEMENT_TYPES as CONTEXT_ELEMENT_TYPES,
+    build_element_context,
+)
 from core.discuss.opening import build_opening as build_discussion_opening
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
@@ -178,6 +189,10 @@ router = APIRouter(prefix="/api/learning", tags=["Learning"])
 # 痕跡 context_label 用のラベル変換は topic_title 決定の1箇所でのみ行う。
 DISCUSSION_TOPIC_ID = "_discussion"
 DISCUSSION_TOPIC_LABEL = "論文との議論"
+
+# discuss 開幕画面の「このコースで議論したいこと」（Phase 0b）の入力上限。
+# 開幕画面の先頭に地の文として出す短い提示なので、長文（教材本文の代替）にはさせない。
+_MAX_COURSE_FOCUS_CHARS = 600
 
 # ---------------------------------------------------------------------------
 # チャット型 AI 支援の共通基盤整理 §1: 学習チャット本体のコスト上限
@@ -455,6 +470,49 @@ def list_courses(
     return unique_courses
 
 
+def _with_resolved_source_titles(data: dict) -> dict:
+    """出典タブ「登録済み教材」向けに ``sources[].title`` を論文の題名へ差し替えた
+    コピーを返す（保存データは変更しない）。
+
+    差し替えるのは **title が空 or material_id と同一** の場合のみ（コース作成時に
+    ファイル名相当がそのまま入ったケース）。教員が付けた題名は尊重して上書きしない。
+    差し替えたときは元の値を ``subtitle`` に残す（P4: 情報を落とさない）。
+    解決できなければ何もしない（fail-soft）。
+    """
+    if not isinstance(data, dict) or not data.get("sources"):
+        return data
+    try:
+        titles = resolve_course_source_titles(data)
+    except Exception:  # noqa: BLE001 — fail-soft
+        return data
+    if not titles:
+        return data
+
+    changed = False
+    sources: list[dict] = []
+    for src in data.get("sources") or []:
+        if not isinstance(src, dict):
+            sources.append(src)
+            continue
+        material_id = str(src.get("material_id") or "").strip()
+        resolved = titles.get(material_id, "")
+        stored = str(src.get("title") or "").strip()
+        if resolved and resolved != stored and (not stored or stored == material_id):
+            new_src = dict(src)
+            new_src["title"] = resolved
+            if stored and not str(src.get("subtitle") or "").strip():
+                new_src["subtitle"] = stored
+            sources.append(new_src)
+            changed = True
+        else:
+            sources.append(src)
+    if not changed:
+        return data
+    out = dict(data)
+    out["sources"] = sources
+    return out
+
+
 @router.get("/courses/{course_id}", response_model=LearningCourseLayeredResponse)
 def get_course(
     course_id: str,
@@ -471,7 +529,7 @@ def get_course(
 
     personal = get_personal_layer(current_user["id"], course_id)
     return LearningCourseLayeredResponse(
-        master_course=LearningCourseDetail(**data),
+        master_course=LearningCourseDetail(**_with_resolved_source_titles(data)),
         personal_layer=PersonalLayer(**personal),
     )
 
@@ -523,6 +581,48 @@ def update_course(
         data["concepts"] = [c.model_dump() for c in body.concepts]
     if body.sources is not None:
         data["sources"] = [s.model_dump() for s in body.sources]
+    if body.course_focus is not None:
+        # Phase 0b（discuss_opening_authoring_design.md §2 最下段）: discuss 開幕画面の
+        # 「このコースで議論したいこと」。教員の任意入力のみ（AI 生成なし）。空文字は
+        # 設定解除（キーごと削除 = 開幕画面から区画が消える）。
+        focus = str(body.course_focus).strip()
+        if len(focus) > _MAX_COURSE_FOCUS_CHARS:
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    f"「このコースで議論したいこと」は{_MAX_COURSE_FOCUS_CHARS}文字以内で入力してください"
+                ),
+            )
+        if focus:
+            data["course_focus"] = focus
+        else:
+            data.pop("course_focus", None)
+    if body.llm_models is not None:
+        # M層 Phase 3（§6.4）: コース単位のモデル上書き。v1 は "learning_chat" scene のみ
+        # 対応（他 scene のコース単位上書きは未実装 — 意味を持たない値を無警告で
+        # 保存しない、fail-closed）。空/null は当該キーの設定解除。
+        current_models = dict(course_llm_models(data))
+        for scene_key, model in body.llm_models.items():
+            if scene_key != llm_policy.SCENE_LEARNING_CHAT:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"llm_models[{scene_key!r}] はコース単位では未対応です"
+                        f"（対応 scene: {llm_policy.SCENE_LEARNING_CHAT!r} のみ）"
+                    ),
+                )
+            if model is None or not str(model).strip():
+                current_models.pop(scene_key, None)
+                continue
+            model = str(model).strip()
+            reason = llm_policy.validate_model_for_scene(scene_key, model)
+            if reason:
+                raise HTTPException(status_code=422, detail=reason)
+            current_models[scene_key] = model
+        if current_models:
+            data["llm_models"] = current_models
+        else:
+            data.pop("llm_models", None)
 
     save_course_data(current_user["id"], course_id, data)
     logger.info("Updated course %s for user=%s", course_id, current_user["id"])
@@ -918,6 +1018,12 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
     LaTeX・出典マーカー `[出典N]` はチューターモードと同様に使用する。DM4「即答＋生成
     プロンプト構造的必須」・DM1「範囲外の話題はこの論文由来ではないと明示」・
     DM6「数値・件数・網羅率を出さない」を必須要素として明記する。
+
+    対話進行（発話タイプ別 move / revoice ファースト / 学習者の選択権 / uptake 必須）は
+    `docs/features/discuss_dialogue_alignment_design.md`（DA1〜DA6）§5 が本文の正本。
+    DM4 の「出し惜しみ禁止」は質問への即答に限定され、解釈・立場の表明には
+    言い直し（revoice）で応じる（DA1/DA2）。末尾の生成プロンプトは学習者の直前の
+    発話を引用・組み込んだ固有の問いにする（DA4）。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
     persona_instruction = persona_prompt(response_persona, target="response")
@@ -925,22 +1031,40 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
     return f"""あなたは{domain_label}を専門とする研究者で、学生と1本の論文について対等に議論する「ディスカッション相手」です。
 学生は寄り道ではなく、この論文と正面から格闘することを選んでいます。学術的な検討に値する相手として遇してください。
 
-**対話のルール:**
-1. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
+**議論の進め方（全体の流れ）:**
+一方的な解説で会話を完結させないでください。議論は次の流れで進めます。
+- 係留: 学生が自分の読み・立場を述べたら、まず読みを突き合わせて理解の歩調を揃える。
+- ギャップの地図: 論文の主張と学生の読みの「重なる点」と「分かれる点」を事実として短く並べ、
+  どの点から検討するかを学生に選ばせる。
+- 共同検討: 歩調が揃ってから、前提・適用範囲・what-if を一緒に検討する。あなたも暫定的な
+  立場を示し、学生からの反論を歓迎してください。
+理解のズレは議論の途中でも繰り返し現れます。ズレに気づいたら、その都度この突き合わせに短く戻ってください。
+
+**発話タイプ別の応答ルール（毎ターン）:**
+1. 【質問には即答・出し惜しみ禁止】学生が情報を求めたときは、ためらわずすぐに答えてください。
+   1テンポ遅らせて考えさせてから答える、といった Socratic な出し惜しみは行わないでください。
+2. 【解釈には言い直しから】学生が自分の解釈・立場・読みを述べたときは、解説で応じないでください。
+   まず学生の読みをあなたの言葉で短く言い直し、その理解で合っているかを確認してください。
+   確認が取れてから、論文の主張との重なりとズレを事実として並べ、どのズレから埋めるかを
+   学生に選ばせてください。
+3. 【詰まりには一点だけの足場かけ】学生が混乱や詰まりを見せたときは、全体を解説し直すのではなく、
+   詰まっている一点だけを短く補い、学生自身の言葉での言い直しで埋まったかを確かめてください。
+
+**共通ルール:**
+4. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
    一方的な講義にせず対話として書いてください。数式は LaTeX 記法（インライン $...$、
    ディスプレイ $$...$$）を使い、教材を参照した場合はコンテキストに付された番号付き出典
    マーカー `[出典1]` `[出典2]` … を本文に自然に挿入してください。
-2. 【即答・出し惜しみ禁止】学生が求めた情報は、ためらわずすぐに答えてください。
-   1テンポ遅らせて考えさせてから答える、といった Socratic な出し惜しみは行わないでください。
-   answer は完全な形で提供したうえで、深める余地を次のルールで残します。
-3. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
+5. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
    （どちらか一つは毎回必須であり、気が向いたときだけ付ける確率的な付加は不可です）:
    - 学生自身の言葉での言い換え・予測・自己説明を促す短い誘い
    - why / how / what-if 型の問い返し（この結果が崩れるとしたら何が変わるか、等）
-4. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
+   いずれの場合も、学生の直前の発話の言葉を引用するか組み込んだ、その学生に固有の問いに
+   してください。どの学生にも使い回せる汎用の決まり文句は不可です。
+6. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
    「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
    のように、その部分がこの論文由来ではないことを一言明示してください。
-5. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
+7. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
 
 
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
@@ -1647,15 +1771,29 @@ def check_topic_understanding(
         "核心が抜けている、逆に理解している、空欄に近い場合は false。"
     )
 
+    # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書きが設定されていれば
+    # 採点にも適用する（live 設定、版ピンと独立）。未設定時は従来どおり fast tier 固定
+    # （params）を使う — 挙動を変えない。
+    _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+
     parsed: dict = {}
     try:
         with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
-            raw = generate_text(
-                messages=[{"role": "user", "content": prompt}],
-                model=params["model"],
-                reasoning_effort=params["reasoning_effort"],
-                temperature=0.1,
-            )
+            if _course_chat_model:
+                # override 時は呼び出し引数として直接渡す（call_argument が最優先, §3-1）。
+                # reasoning_effort は明示しない（カタログの既定 effort に委ねる）。
+                raw = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=_course_chat_model,
+                    temperature=0.1,
+                )
+            else:
+                raw = generate_text(
+                    messages=[{"role": "user", "content": prompt}],
+                    model=params["model"],
+                    reasoning_effort=params["reasoning_effort"],
+                    temperature=0.1,
+                )
         import json
         import re
         match = re.search(r"\{[\s\S]*\}", raw or "")
@@ -2558,8 +2696,18 @@ def learning_chat(
     # （intent 分類等ですでに消費済みなら no-op、§1）。
     _consume_quota()
     degraded = False
+    # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書き。運用パラメータのため
+    # 版ピン中の学習者にも所有者の live（HEAD）設定を適用する — course_data は非所有者に
+    # 版スナップショットを返しうるため、専用の live-only SELECT を別途使う
+    # （get_course_live_llm_models）。未設定なら resolve_model() 内の既存解決順序
+    # （user policy → system policy → env → tier既定）がそのまま効く（挙動不変）。
+    _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+    _course_chat_override = (
+        llm_policy.model_override(_course_chat_model, source=llm_policy.SOURCE_COURSE_OVERRIDE)
+        if _course_chat_model else nullcontext()
+    )
     try:
-        with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id):
+        with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id), _course_chat_override:
             answer = generate_text(
                 messages=messages,
                 temperature=0.3,
@@ -2743,6 +2891,19 @@ def get_discussion_opening(
     （TheoryOperationGraph の main 層・theory stage 順）／「最も脆い一手」
     （D層台帳の未検証合意リスト + review_required なバックボーンノードの事実提示）。
 
+    加えて投影の是正（`discuss_opening_authoring_design.md` §3 Phase 0）で、agent が
+    既に合成していた「この論文が答えようとした問い」（central_question / paper_goal）・
+    中心命題の合成文（central_thesis.text）・支持構造の合成文・「別の見方」
+    （alternative_theses、出所ラベル付き）も投影する。脆い箇所は主語ごとに
+    （論文 / システム）分離できる形（fragile_points[].subject）で返す。
+    Phase 0b の `course_focus`（教員の任意入力「このコースで議論したいこと」）も同梱する。
+
+    「議論のきっかけ」（同 §7 Phase 3、`documents[].discussion_seeds`）だけは投影ではなく、
+    解析パイプラインが生成し**教員が承認した**素材（`element_explanations` の
+    `status='approved'` / `role='discussion_seed'` 行）の配信で、各件に出所表示
+    （`authored` / `authored_by_label`）が付く。承認済みが1件も無い document は投影のまま
+    （Phase 0 と同一の DTO）で、`available` の判定もこの素材の有無では変わらない。
+
     LLM 呼び出し 0 回・痕跡記録なし・migration なし（DM8）。confidence / load_score
     等の生数値は一切含めない（``core/discuss/opening.py::build_opening`` が
     ホワイトリスト射影 + 再帰除去の二重で保証する）。
@@ -2752,7 +2913,11 @@ def get_discussion_opening(
         raise HTTPException(status_code=404, detail="Course not found")
 
     document_ids = list_course_source_document_ids(course_data)
-    return build_discussion_opening(course_id, document_ids)
+    # Phase 0b: 教員の任意入力（AI 生成なし）。course_data への素の dict アクセスは
+    # しない（Tier 3-18: 正本は core/course_data.py のアクセサ）。
+    return build_discussion_opening(
+        course_id, document_ids, course_focus=course_focus(course_data)
+    )
 
 
 class DiscussReflectionRequest(BaseModel):
@@ -3268,32 +3433,13 @@ class UiAnchorEventRequest(BaseModel):
 def _recent_duplicate_ui_anchor_event(user_id: str, help_anchor: str) -> bool:
     """直近（既定 30 分）に同一ユーザー×同一アンカーの no_hit 記録が無いかを確認する。
 
-    スパム防止（IH10/§5.4）の簡易実装。DB 障害時は False（fail-open — 記録自体は
-    止めない。ダブり抑制の失敗より記録漏れの方が実害が大きいため）。
+    スパム防止（IH10/§5.4）の簡易実装。実体は管理画面インスペクト・モード
+    （``routes/admin_assistant.py``）と共有する ``services.recent_duplicate_ui_anchor_event``
+    に委譲（外部挙動不変・DB 障害時 False で fail-open）。
     """
-    session = _pg_session()
-    try:
-        row = session.execute(
-            sa_text("""
-                SELECT 1 FROM interest_traces
-                WHERE user_id = CAST(:uid AS uuid)
-                  AND kind = 'help_usage'
-                  AND payload->>'help_anchor' = :anchor
-                  AND created_at > now() - (:minutes || ' minutes')::interval
-                LIMIT 1
-            """),
-            {
-                "uid": user_id,
-                "anchor": help_anchor,
-                "minutes": _UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
-            },
-        ).fetchone()
-        return row is not None
-    except Exception:
-        logger.warning("ui anchor event dedup check failed", exc_info=True)
-        return False
-    finally:
-        session.close()
+    return _recent_duplicate_ui_anchor_event_shared(
+        user_id, help_anchor, window_minutes=_UI_ANCHOR_EVENT_DEDUP_WINDOW_MINUTES,
+    )
 
 
 @router.post("/help/ui-anchor-events", status_code=201)
@@ -3524,4 +3670,43 @@ def get_course_component_context(
     explanation = _first_approved_component_explanation(context["component_id"], course_id)
     if explanation is not None:
         context["instance"]["explanation"] = explanation
+    return context
+
+
+@router.get("/courses/{course_id}/elements/{element_type}/{element_id}/context")
+def get_course_element_context(
+    course_id: str,
+    element_type: str,
+    element_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """学習者向け claim / equation 文脈 API（learner_element_context_design Phase 3）。
+
+    ``element_type`` は ``claim`` / ``equation`` のみ（それ以外は 404 — 学習者 API の
+    404 統一方針）。component 文脈 API（``get_course_component_context``）と同じ
+    3条件の fail-closed:
+    1. 受講ゲート（``get_accessible_course_data`` — 本人が当該コースを閲覧できる）
+    2. 要素の document がコースの document 集合（``_course_document_ids``）に含まれる
+       （``core.element_context`` 内で claim は SQL の
+       ``document_id = ANY(:doc_ids)``、equation はコース document 集合のみを
+       走査対象にすることで実施 — コース外文書の要素は解決自体が失敗する）
+    3. 要素自体が解決できる（claim は DB UUID / agent 側 legacy ID の両方を受理）
+
+    いずれかが欠ければ 404（fail-closed）。要素は解決できたが W層 context lens が
+    投影を返せない場合のみ ``{"available": false, "note": ...}`` を 200 で返す
+    （fail-soft。文脈が無いことは異常ではない）。``upper`` / ``lower`` から
+    ``relation_status == "candidate"`` は除外され、``confidence`` 等の数値は
+    再帰的に除去される（学習者に未確定の AI 候補と生数値を出さない）。
+    """
+    if element_type not in CONTEXT_ELEMENT_TYPES:
+        raise HTTPException(status_code=404, detail="Element not found")
+
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    course_document_ids = set(_course_document_ids(course_data))
+    context = build_element_context(element_type, element_id, course_document_ids)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Element not found")
     return context
