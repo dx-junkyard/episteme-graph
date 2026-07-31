@@ -474,6 +474,93 @@ class TestSourceFingerprint:
         assert collect_thesis_claim_ids(_artifacts()) == ["c1", "c2", "c3", "c4"]
 
 
+class TestFingerprintSourcePredicate:
+    """[D-3] 「指紋の素材が無い」と「素材が変わった」を同じ形にしない。
+
+    ``compute_source_fingerprint`` は空入力でも安定ハッシュを返す（生成側では正しい）。
+    鮮度の突合側はその前に素材の有無を確かめる必要があるため、述語を core 側に持つ。
+    """
+
+    def test_true_when_any_of_the_three_inputs_exists(self):
+        from core.discuss.authoring import has_fingerprint_source
+
+        assert has_fingerprint_source(_artifacts()) is True
+        assert has_fingerprint_source(
+            {"thesis_reconstruction": {"central_question": "Q?"}}
+        ) is True
+        assert has_fingerprint_source(
+            {"thesis_reconstruction": {"central_thesis": {"text": "T"}}}
+        ) is True
+        assert has_fingerprint_source(
+            {"thesis_reconstruction": {"central_thesis": {"claim_ids": ["c1"]}}}
+        ) is True
+
+    def test_false_when_the_run_or_artifact_is_missing(self):
+        from core.discuss.authoring import has_fingerprint_source
+
+        assert has_fingerprint_source({}) is False
+        assert has_fingerprint_source(None) is False
+        assert has_fingerprint_source({"thesis_reconstruction": {}}) is False
+        # 指紋の対象外ステージだけがある run（thesis が未生成）も「素材なし」。
+        assert has_fingerprint_source({"paper_skeleton": {"paper_goal": {"text": "G"}}}) is False
+
+    def test_blank_strings_do_not_count_as_material(self):
+        from core.discuss.authoring import has_fingerprint_source
+
+        assert has_fingerprint_source(
+            {"thesis_reconstruction": {"central_question": "   ",
+                                       "central_thesis": {"text": ""}}}
+        ) is False
+
+
+class TestFreshnessNeedsRealArtifacts:
+    """[D-3] artifact 不在（run 無し / ``_artifacts`` 欠落）で stale を誤表示しない。"""
+
+    def _rows_with(self, monkeypatch, artifacts, stored_fingerprint):
+        import pytest
+
+        pytest.importorskip("fastapi")
+        import routes.element_explanations as mod
+
+        monkeypatch.setattr(mod, "document_run_artifacts", lambda _doc: artifacts)
+        row = {
+            "id": "e1",
+            "document_id": "d1",
+            "element_type": "document",
+            "element_id": "d1",
+            "kind": "contextual",
+            "role": "discussion_seed",
+            "body": "この前提が崩れたら結論はどう変わると考えますか？",
+            "evidence": {"source_fingerprint": stored_fingerprint, "confidence": 0.7},
+            "status": "candidate",
+            "created_by": "pipeline",
+        }
+        return mod._public_rows_with_freshness("d1", [row])  # noqa: SLF001
+
+    def test_missing_run_does_not_mark_rows_stale(self, monkeypatch):
+        out = self._rows_with(monkeypatch, {}, "a" * 64)
+        assert "stale" not in out[0]
+        assert "stale_notice" not in out[0]
+
+    def test_run_without_thesis_artifact_does_not_mark_rows_stale(self, monkeypatch):
+        """candidate 挿入後に後続ステージが落ちて、completed run が古いものを
+        指しているケース（``_artifacts`` に thesis が無い）。"""
+        out = self._rows_with(monkeypatch, {"paper_skeleton": {}}, "a" * 64)
+        assert "stale" not in out[0]
+
+    def test_real_change_is_still_reported(self, monkeypatch):
+        out = self._rows_with(monkeypatch, _artifacts(), "a" * 64)
+        assert out[0]["stale"] is True
+        assert out[0]["stale_notice"]
+
+    def test_matching_fingerprint_is_not_stale(self, monkeypatch):
+        from core.discuss.authoring import compute_source_fingerprint
+
+        artifacts = _artifacts()
+        out = self._rows_with(monkeypatch, artifacts, compute_source_fingerprint(artifacts))
+        assert out[0]["stale"] is False
+
+
 # ---------------------------------------------------------------------------
 # 7. ステージ登録位置と M層 / U層カタログ
 # ---------------------------------------------------------------------------
@@ -849,3 +936,116 @@ class TestDeliveryAttribution:
         assert "renderDiscussionSeedsSection(doc)" in _DISCUSS_JS
         assert "s.authored_by_label" in _DISCUSS_JS
         assert "この説明は、論文の解析結果をもとに担当教員が確認したものです" not in _DISCUSS_JS
+
+
+# ---------------------------------------------------------------------------
+# 10. 2026-08-01 のレビュー修正（[D-1] 不透明 ID / [D-4] 台帳空 / [D-7] 修復指示）
+# ---------------------------------------------------------------------------
+
+
+class TestOpaqueIdsNeverBecomeMaterial:
+    """[D-1] 設計 §4.1「不透明 ID を渡さず解決済みテキストに展開する」を機械で守る。"""
+
+    def test_ledger_collection_filters_with_the_predicate(self):
+        source = extract_function_source(_AUTHORING_SRC, "collect_untested_assumptions")
+        assert "is_opaque_statement" in source
+
+    def test_fallback_collection_filters_with_the_predicate(self):
+        source = extract_function_source(
+            _AUTHORING_SRC, "derive_untested_assumptions_from_artifacts"
+        )
+        assert "is_opaque_statement" in source
+
+    def test_opaque_material_cannot_satisfy_the_quote_check(self):
+        """不透明 ID は MIN_EVIDENCE_QUOTE_CHARS を満たすため、素材に混ざると
+        verbatim 検査を通過して学習者に「引用」として出てしまう。素材段階で落とす。"""
+        from core.discuss.authoring import is_opaque_statement
+        from episteme_graph.agents.discuss_opening.schema import MIN_EVIDENCE_QUOTE_CHARS
+
+        for opaque in ("eq_2_7", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"):
+            assert len(opaque) >= MIN_EVIDENCE_QUOTE_CHARS
+            assert is_opaque_statement(opaque) is True
+
+    def test_doubt_layer_target_label_is_not_modified(self):
+        """D層は非改変（``target_label`` の戻り値契約は変えない）。フィルタは
+        authoring 側の責務。"""
+        doubt_src = (BACKEND / "core" / "doubt" / "open_assumptions.py").read_text(
+            encoding="utf-8"
+        )
+        label_src = extract_function_source(doubt_src, "target_label")
+        assert "return target_id" in label_src
+        assert "is_opaque_statement" not in doubt_src
+
+
+class TestLedgerFallbackDoesNotWriteToTheDoubtLayer:
+    """[D-4] 台帳が空でも素材を作るが、D層への記帳はしない（読むだけ）。"""
+
+    def test_authoring_never_writes_the_ledger(self):
+        assert_source_forbids(
+            _AUTHORING_SRC,
+            [
+                "INSERT INTO epistemic_ledger",
+                "UPDATE epistemic_ledger",
+                "DELETE FROM epistemic_ledger",
+                # backfill そのものを呼ばない（記帳の正本はパイプライン完了後のフック）。
+                # docstring での言及は許すが import はしない。
+                "import ledger_builder",
+                "from core.doubt.ledger_builder import",
+            ],
+            context="core/discuss/authoring.py",
+        )
+
+    def test_stage_records_which_source_the_material_came_from(self):
+        stage_src = extract_function_source(_ORCH_SRC, "_build_discuss_opening")
+        assert '"assumption_source"' in stage_src
+        assert '"ledger"' in stage_src
+        assert '"artifact_fallback"' in stage_src
+        assert "assumption_rows_skipped_opaque" in stage_src
+
+    def test_ledger_backfill_still_runs_after_the_pipeline(self):
+        """フォールバックは backfill の置き換えではない（完了後の記帳は残す）。"""
+        completed = extract_function_source(_ORCH_SRC, "_stage_completed")
+        assert "backfill_document_ledger" in completed
+
+
+class TestRepairInstructionMatchesTheValidator:
+    """[D-7] 「素材が足りなければ seeds を空に」は validator の hard error と矛盾する。"""
+
+    def test_repair_prompt_does_not_ask_for_empty_seeds(self):
+        from episteme_graph.agents.discuss_opening.repair import build_repair_prompt
+
+        prompt = build_repair_prompt("{}", ["seed_evidence_quote_not_verbatim: ..."])
+        assert "空にしない" in prompt
+        assert "`seeds` を空にし" not in prompt
+        assert "最低1件" in prompt
+
+    def test_empty_seeds_with_material_is_a_hard_error(self):
+        from episteme_graph.agents.discuss_opening.schema import (
+            AssumptionFact,
+            DiscussOpeningInput,
+        )
+        from episteme_graph.agents.discuss_opening.validator import DiscussOpeningValidator
+
+        item = DiscussOpeningInput(
+            document_id="doc-1",
+            untested_assumptions=[AssumptionFact(statement="The gain is constant.")],
+        )
+        result, errors, _warnings = DiscussOpeningValidator().validate({"seeds": []}, item)
+
+        assert result is None
+        assert any("empty_seeds_with_material" in e for e in errors)
+
+    def test_no_material_still_allows_an_empty_result(self):
+        """素材が無い document は空で返してよい（縮退は agent 側で先に効く）。"""
+        from episteme_graph.agents.discuss_opening.schema import DiscussOpeningInput
+        from episteme_graph.agents.discuss_opening.validator import DiscussOpeningValidator
+
+        item = DiscussOpeningInput(document_id="doc-1")
+        result, errors, _warnings = DiscussOpeningValidator().validate(
+            {"seeds": [], "skipped_reason": "no_source_material"}, item
+        )
+
+        assert errors == []
+        assert result is not None
+        assert result.seeds == []
+        assert result.skipped_reason == "no_source_material"

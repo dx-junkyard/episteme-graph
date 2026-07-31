@@ -699,3 +699,123 @@ Fable 5 指揮・Opus 5 実装3レーン（コア基盤 / API・統合 / フロ�
 - docker E2E（実 DB / MinIO / LLM。migration 063 実適用・SVG 実配信・blob レンダ）は未実施。
 - suggest.py の repair 分岐・degraded 経路の専用単体テストは未作成（ガードレール内の
   機能検査4件が現状の唯一のカバレッジ。必要なら `test_teaching_figures_suggest.py` を切る）。
+
+### 13.1 レビュー指摘の修正（2026-07-31、backend 6件）
+
+Opus 5 読み取り専用レビューの指摘を同日修正（migration 追加なし。回帰テストは
+`test_teaching_figures_{store,api,guardrails}.py` に追加）。
+
+1. **[Critical] PATCH が実 DB で全滅していた** — `store.update_teaching_figure` の SET 句が
+   無条件に `updated_by` を含んでいたが、migration 063 に `updated_by` 列は無い
+   （実 PostgreSQL で 42703 → 500）。採用 / 回収 / caption 修正 / SVG 差し替えの全 PATCH が
+   死んでいた。SET 句から除去（更新者は `revisions` エントリと監査記帳が正本）。
+   API テストのスタブが `if k != "updated_by"` で列を落として隠蔽していたのも修正。
+   **再発防止**: `TestStoreSqlColumnsExistInMigration` が store の全 SQL を fake session に
+   実発行させ、現れた列名（INSERT / SET / SELECT / RETURNING / WHERE）を migration 063 の
+   `CREATE TABLE` 定義と突き合わせる（存在しない列・タイプミスは実 DB 無しで落ちる。
+   変異テストで実効性確認済み）。
+2. **[Major] 提案生成の `degraded` を route が握り潰していた** — LLM 失敗が「候補ゼロ」に
+   見え（quota は消費済み）、教員に「この教材に提案は無い」と誤読させていた。応答に
+   `degraded: bool` と degraded 時のみ事実文 `note`（`SUGGEST_DEGRADED_NOTE`、数値なし）を
+   追加し、監査 metadata にも `degraded` を記録。
+3. **[Major] FG5「模式図」caption のサーバ側強制付与が未実装** — `schema.enforce_schematic_caption()`
+   を新設し、DB 書き込みの唯一の入口（store の create / update）で付与する
+   （`data_plot_schematic` かつ「模式図」を含まない caption に「（模式図）」を付加。空 caption は
+   語だけ。二重付加しない）。PATCH は現在行の `figure_kind` を見る。route は保存後の行の
+   caption を `evidence_links` / 応答に使う（本文カードと DB を食い違わせない）。
+4. **[Major] `set_suggestion_status` が course 非スコープだった** — id + `status='candidate'`
+   だけで一致していたため、自コースの POST に他コースの `suggestion_id` を混ぜると
+   他コースの候補を accepted にできた（turn 側 `_load_suggestion` / `_decide_suggestion` は
+   スコープ済み）。`course_id` を**必須キーワード引数**にして UPDATE に条件を追加。
+   POST 側は `get_suggestion` でスコープを確認し、スコープ外は無かったものとして続行
+   （turn 側と同じ扱い。`source_suggestion_id` にも残さず、監査に
+   `suggestion_out_of_scope: true` を記録）。
+5. **[Minor] 学習者・教員の画像配信が全行 SELECT だった** — `revisions`（旧版 SVG、
+   数MB 級）込みで引いていた。`store.get_teaching_figure_for_delivery()`（id / course_id /
+   status / minio_key / content_type / svg_source のみ）を新設し、教員向け配信を差し替え。
+   `routes/learning.py`（学習者配信の `_load_teaching_figure_row`）も同関数へ差し替え済み
+   （統合レーンで適用）。
+6. **[Minor] MinIO 再アップロードが DB 更新より前だった** — PATCH で先に配信物を上書きして
+   いたため、UPDATE 失敗時（上記1で頻発）に「配信物だけ新版・正本は旧版」が残った。
+   POST / PATCH とも **commit 後に `_upload_figure_snapshot()`（best-effort・失敗は WARN + 200）**
+   へ統一。失敗は応答 `image_snapshot_failed: bool` と監査 metadata に正直に出す。
+   ※ §8 の表と §2 の図にある「sanitize → MinIO → 行作成」の順序表記は、この項の
+   「sanitize → 行作成 → commit → MinIO」に読み替えること（正本は DB の `svg_source`）。
+   **既知の残課題**: 学習者向け配信は MinIO のみを読む（`svg_source` フォールバックが無い）
+   ため、アップロード失敗時に採用済み図が学習者に 404 になる。教員向けは DB フェイルソフト
+   済み。学習者側にも同じフォールバックを入れるのが望ましい（別レーン）。
+
+### 13.2 レビュー指摘の修正（2026-08-01、frontend + backend 小修正）
+
+同レビューの frontend 指摘（Major 2 / Minor 2）と §7.5 の未実装点を修正。migration 追加なし。
+回帰テストは `test_figure_studio_ui_static.py` / `test_teaching_figures_api.py` /
+`test_lecture_preview_split_api.py` に追加（管理UIアンカーは 236 → **240**）。
+
+1. **[Major] 図のライフサイクル UI が存在しなかった** — PATCH を呼ぶ UI がゼロで、
+   retire / draft→adopted / caption 修正が到達不能だった（draft カードは「採用済みに
+   するまで受講者には表示されません」と表示するのに出口が無かった）。「既存の図から選ぶ」
+   タブの**生成図カード**に状態操作を追加:
+   - draft → `[採用して挿入]`（採用 + トピック登録 + 本文挿入を1操作。行削除 API は無いので
+     「破棄」相当の操作は作らない — 下書きはそのまま残る）
+   - adopted → `[回収する]`（retire。押下時に**参照中トピック数**を数えて事実文 confirm。
+     件数はコース構造から**フロントで**数える = `lsCountTopicsReferencingFigure`（
+     `linked_figure_ids` ∪ `evidence_links(kind=figure)` ∪ 本文 embed の3経路。学習者配信ゲート
+     `_course_references_figure` と同じ観点）を `FigureStudio.open({countTopicReferences})` で
+     注入する。数えられない場合は件数を書かない）
+   - retired → `[採用に戻す]`（adopted 復帰。retired のカードには挿入ボタンを描かない）
+   - 生成図のみ `[キャプションを直す]`（インライン編集 → PATCH。**表示は応答の caption**を
+     使う — `data_plot_schematic` はサーバが「（模式図）」を付けるため 13.1-3 と食い違わせない）
+   - どの操作も `image_snapshot_failed: true` を事実文（「保存されました（配信用の画像の更新に
+     失敗したため、再保存をおすすめします）」）で提示し、カード操作は `cardBusy` で直列化する。
+2. **[Major] 既存図タブの挿入が §7.1b のトピック登録を経ていなかった** — 本文挿入のみ
+   （`onInsert(..., null)`）で status も見ていなかったため、①draft / retired の生成図を挿入でき
+   学習者に生 UUID が露出し得た ②`evidence_links` / `linked_figure_ids` 未登録のため AI 書き換えで
+   embed が恒久的に消えた。**生成図の挿入は必ずサーバ経由**にした:
+   - PATCH body に **`register_topic_id`** を追加（`TeachingFigurePatchRequest`）。指定トピックへ
+     `_register_figure_in_topic` を同一トランザクションで実行し、`learning_courses.data` を更新する。
+     **登録は `status='adopted'` の図に限る**（draft / retired の明示登録は 422 の fail-closed。
+     配信されない図の参照だけを残さない）。冪等。存在しない topic_id は 404（黙って無登録にしない）。
+     採用済みのままの図を**別トピックへ追加登録**できる（列の更新が無い PATCH は
+     `UPDATE course_teaching_figures` を発行せず現在行を返す — store の「更新フィールドなし」
+     ValueError を踏まないため）。監査 metadata に `registered_topic_id` を残す。
+   - フロントは draft を `[採用して挿入]`（`status='adopted'` + `register_topic_id`）に統一し、
+     adopted は `register_topic_id` のみ、retired は挿入不可。応答の `evidence_link` /
+     `linked_figure_ids` を既存の `onInsert` 第3引数経路でローカル topic に反映する。
+   - **抽出図（`document_figures`）は §6.2-3 のまま挿入のみ**（状態も登録も持たない）。
+3. **[Major] 提案ペインが `degraded` を表示していなかった** — 13.1-2 でサーバは
+   `degraded` / `note` を返すようになったが、フロントは空一覧を描いていた。生成応答の
+   `degraded` / `note` をペインのキャッシュに保持し、**候補ゼロ（「まだありません」）と
+   区別して**サーバの事実文を一覧上部に出す（`.ls-figure-suggestions-degraded`）。
+4. **[Minor] フロントの品質バグ6点**:
+   ① `[採用して挿入]` / `[下書きとして保存]` は保存後に無効化（`adoptedFigureId` /
+   `savedDraftId` を参照。図を作り直すと再度保存可 = 別の図として扱う）。二度押しでの
+   行・登録・embed の重複を塞いだ。② `lsInsertTextAtCursor` の `el.focus()` がモーダル背後の
+   textarea を奪っていたため、**モーダル表示中はフォーカスを保留**し `onClose`
+   （`FigureStudio.open` の新オプション）で復元する。③ 提案 accept の 409 を却下側と同型に
+   （detail 表示 + 一覧再取得）。④ accepted カードに `[却下]` を描かない（常に 409 になる操作を
+   押せる形にしない）。⑤ プレビュー差し替え時に旧 ObjectURL を revoke（サムネイルも
+   item 単位でキャッシュして再取得しない）。⑥ 背景クリック / × / Escape は未保存の図があるとき
+   事実文 confirm を通す（`[破棄]` は明示操作なので確認しない）。
+5. **[Minor] `preview-split` に `auto_paginate` オプションを追加**（§7.5 の明示約束）—
+   `split_slides` 直呼びのままだと `===` 無しトピックのスライド枚数インジケータが受講画面と
+   食い違った。`auto_paginate=true` で `core/lecture.py::auto_paginate_slides`（受講側
+   `_build_topic_slides` が使う正本）を通し、`auto_paginated` / `spoken_degraded` を返す
+   （既定 false で既存呼び出しは不変。リクエスト・レスポンスの拡張は `schemas.py` を
+   触らず `scripts.py` 内の派生モデル `LecturePreviewSplit{Request,Response}WithPagination` で行う
+   — プレビュー専用の入出力であって配信 DTO ではないため）。コーストピックのインジケータは
+   `auto_paginate=true` で呼び、spoken 縮退時は §7.5 の事実文（「読み上げはタイマー送りに
+   なります／`===` で明示分割すると解消できます」）を出す。**クライアント側に分割ロジックを
+   再実装しない**規約は維持（枚数はサーバ応答のみから描く）。
+   ※ 既知の残差: プレビューは textarea の生テキストを渡すため、`![[equation:id]]` は
+   `[[FORMULA_N]]`（60字換算）に解決されず素の文字数で数えられる。図（200字換算）は
+   `_display_length` が未解決 embed も同じ換算にするため一致する。
+6. 管理UI 3点セット: 新規アンカー4件（`lecture-studio.figure-studio-{insert,caption,retire,restore}`）を
+   `ADMIN_UI_ANCHORS` に登録し、`docs/manual/teacher/14-admin-lecture-studio.md` に
+   操作要素1つ=1節（`{#figure-studio-insert}` / `{#figure-studio-caption}` /
+   `{#figure-studio-retire}` / `{#figure-studio-restore}`。無効化・非表示の理由と解消方法つき）を追加。
+   既存節（`#figure-studio` / `#insert-figure` / `#figure-suggestions`）も本修正に追随。
+7. **統合レーンで適用済み**: 13.1-5 の学習者配信 `_load_teaching_figure_row` の最小投影化
+   （`get_teaching_figure_for_delivery` へ差し替え）と、13.1-6 の学習者配信への
+   `svg_source` フェイルソフト（MinIO 取得失敗時は DB 正本の svg_source を配信、
+   空なら従来どおり 404）は `routes/learning.py` に適用済み。
+   docker E2E（実 DB / MinIO / LLM）は未実施のまま。

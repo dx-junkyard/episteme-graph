@@ -69,14 +69,16 @@ class TestAdminUiAnchorsModule:
         assert set(admin_anchors_mod.ADMIN_UI_ANCHORS.keys()) <= admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS
 
     def test_all_anchors_currently_mapped(self):
-        # 2026-07-31 時点で全236アンカーがマップ済み（223 + discuss 開幕素材オーサリング
+        # 2026-08-01 時点で全240アンカーがマップ済み（223 + discuss 開幕素材オーサリング
         # の4件: 議論テーマのボタン/保存・説明レビューキューの開幕素材グループ/本文編集
         # + 原稿スタジオ 根拠リンクカードの開閉トグル lecture-studio.evidence-context
         # + 根拠リンクの構造アウトライン lecture-studio.evidence-group
-        # + 教材図スタジオ（teaching_figure_studio_design.md）の7件:
+        # + 教材図スタジオ（teaching_figure_studio_design.md）の11件:
         #   lecture-studio.insert-figure / .figure-suggestions{,-generate} /
-        #   .stumble-tab-figures / .figure-studio-{modal,send,adopt}）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 236
+        #   .stumble-tab-figures / .figure-studio-{modal,send,adopt}
+        #   + 生成図のライフサイクル UI（§7.1b / §7.4）の4件:
+        #     .figure-studio-{insert,caption,retire,restore}）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 240
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

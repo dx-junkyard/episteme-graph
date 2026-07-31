@@ -70,15 +70,20 @@ class _FakeResult:
 
 
 class _FakeSession:
-    """execute された SQL を記録するだけのフェイクセッション。"""
+    """execute された SQL を記録するだけのフェイクセッション。
 
-    def __init__(self, row=None):
+    ``events`` を渡すと commit の発生順を共有リストへ追記する（MinIO アップロードとの
+    前後関係を検証するため）。
+    """
+
+    def __init__(self, row=None, events=None):
         self.statements: list[str] = []
         self.params: list[dict] = []
         self.committed = 0
         self.rolled_back = 0
         self.closed = 0
         self._row = row
+        self._events = events if events is not None else []
 
     def execute(self, stmt, params=None):
         self.statements.append(str(stmt))
@@ -87,22 +92,29 @@ class _FakeSession:
 
     def commit(self):
         self.committed += 1
+        self._events.append("commit")
 
     def rollback(self):
         self.rolled_back += 1
+        self._events.append("rollback")
 
     def close(self):
         self.closed += 1
 
 
 class _FakeStorage:
-    def __init__(self, payload=b"<svg/>", fail_get=False):
+    def __init__(self, payload=b"<svg/>", fail_get=False, fail_upload=False, events=None):
         self.uploads: list[tuple] = []
         self.removed: list[tuple] = []
         self._payload = payload
         self._fail_get = fail_get
+        self._fail_upload = fail_upload
+        self._events = events if events is not None else []
 
     def upload_bytes(self, bucket, key, data, *, content_type="application/octet-stream"):
+        self._events.append("upload")
+        if self._fail_upload:
+            raise RuntimeError("minio down")
         self.uploads.append((bucket, key, data, content_type))
         return key
 
@@ -145,19 +157,43 @@ def _reset_cost_gates(monkeypatch):
     monkeypatch.setattr(module, "_figure_suggest_cost_gate", CostGate())
 
 
+#: ``store._row_to_figure`` が返すキー。テストスタブがこれ以外のキー（例: 実テーブルに
+#: 存在しない ``updated_by``）を行に混ぜると、実 DB では起きない挙動を隠してしまう。
+_FIGURE_ROW_KEYS = (
+    "id", "course_id", "topic_id", "created_by", "title", "caption", "figure_kind",
+    "svg_source", "minio_key", "content_type", "status", "source_suggestion_id",
+    "revisions", "revisions_truncated", "created_at", "updated_at",
+)
+
+#: ``store.update_teaching_figure`` が受け付けるキーワード（route が渡してよいもの）。
+_UPDATE_KWARGS = ("title", "caption", "svg_source", "minio_key", "status", "updated_by")
+
+
 @pytest.fixture
 def stub_create(tf, monkeypatch):
-    """保存経路の境界（store / MinIO / 監査）をまとめて差し替える。"""
-    state: dict = {"session": _FakeSession(), "storage": _FakeStorage(), "created": [], "audits": [],
-                   "suggestion_status": []}
+    """保存経路の境界（store / MinIO / 監査）をまとめて差し替える。
+
+    ``events`` には commit と MinIO アップロードの発生順を記録する（正本 = DB を先に
+    確定させる順序をテストで固定するため）。
+    """
+    events: list[str] = []
+    state: dict = {
+        "session": _FakeSession(events=events),
+        "storage": _FakeStorage(events=events),
+        "created": [], "audits": [], "audit_metadata": [], "suggestion_status": [],
+        "events": events,
+        "suggestion": None,
+    }
 
     def _create(session, **kw):
         state["created"].append(kw)
-        return {
+        row = {
             "id": kw.get("figure_id") or _FIG_ID,
             "course_id": kw["course_id"],
             "topic_id": kw.get("topic_id") or "",
             "title": kw.get("title") or "",
+            # 実 store は figure_kind に応じて caption を整える（FG5）。ここでは
+            # 引数をそのまま返し、route が「行の caption」を読むことだけを検証する。
             "caption": kw.get("caption") or "",
             "figure_kind": kw.get("figure_kind") or "",
             "status": kw.get("status") or "",
@@ -165,18 +201,23 @@ def stub_create(tf, monkeypatch):
             "content_type": kw.get("content_type") or "",
             "created_at": "2026-07-31T00:00:00+00:00",
         }
+        assert set(row) <= set(_FIGURE_ROW_KEYS)
+        return row
+
+    def _set_status(session, sid, status, *, course_id):
+        state["suggestion_status"].append((sid, status, course_id))
+        return {"id": sid, "course_id": course_id, "status": status, "figure_kind": "concept_map"}
+
+    def _record(*args, **kw):
+        state["audits"].append(args)
+        state["audit_metadata"].append(args[5] if len(args) > 5 else {})
 
     monkeypatch.setattr(tf, "_pg_session", lambda: state["session"])
     monkeypatch.setattr(tf, "get_storage_client", lambda: state["storage"])
     monkeypatch.setattr(tf, "create_teaching_figure", _create)
-    monkeypatch.setattr(
-        tf, "set_suggestion_status",
-        lambda session, sid, status: state["suggestion_status"].append((sid, status)),
-    )
-    monkeypatch.setattr(
-        tf, "record_review_event",
-        lambda *args, **kw: state["audits"].append(args),
-    )
+    monkeypatch.setattr(tf, "get_suggestion", lambda session, sid: state["suggestion"])
+    monkeypatch.setattr(tf, "set_suggestion_status", _set_status)
+    monkeypatch.setattr(tf, "record_review_event", _record)
     return state
 
 
@@ -298,10 +339,100 @@ class TestCreateTeachingFigureAdoption:
 
     def test_accepting_suggestion_transitions_it(self, tf, monkeypatch, stub_create):
         monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        stub_create["suggestion"] = {
+            "id": "sug-1", "course_id": _COURSE_ID, "status": "candidate",
+        }
         tf.create_course_teaching_figure(
             _COURSE_ID, self._body(tf, suggestion_id="sug-1"), _OWNER,
         )
-        assert stub_create["suggestion_status"] == [("sug-1", "accepted")]
+        # 遷移は必ずコーススコープ付きで発行する（store が id だけで一致させない）。
+        assert stub_create["suggestion_status"] == [("sug-1", "accepted", _COURSE_ID)]
+        assert stub_create["created"][0]["source_suggestion_id"] == "sug-1"
+
+    def test_other_course_suggestion_has_no_side_effect(self, tf, monkeypatch, stub_create):
+        """他コースの提案 id を送られても accepted にしない（副作用ゼロ）。
+
+        turn 側 ``_load_suggestion`` と同じ扱い（スコープ外は無かったものとして続行）。
+        図の作成自体は成功するが、由来としても記録しない（帰属の捏造をしない）。
+        """
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        stub_create["suggestion"] = {
+            "id": "sug-x", "course_id": "another-course", "status": "candidate",
+        }
+
+        result = tf.create_course_teaching_figure(
+            _COURSE_ID, self._body(tf, suggestion_id="sug-x"), _OWNER,
+        )
+
+        assert result["figure_id"]
+        assert stub_create["suggestion_status"] == []
+        assert stub_create["created"][0]["source_suggestion_id"] is None
+        # 事実は監査に残す（黙って捨てない）。
+        assert stub_create["audit_metadata"][0]["suggestion_out_of_scope"] is True
+        assert stub_create["audit_metadata"][0]["suggestion_id"] == ""
+
+    def test_unknown_suggestion_id_is_ignored(self, tf, monkeypatch, stub_create):
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        stub_create["suggestion"] = None
+        tf.create_course_teaching_figure(
+            _COURSE_ID, self._body(tf, suggestion_id="00000000-0000-0000-0000-000000000000"), _OWNER,
+        )
+        assert stub_create["suggestion_status"] == []
+        assert stub_create["created"][0]["source_suggestion_id"] is None
+
+    def test_evidence_link_uses_the_stored_caption(self, tf, monkeypatch, stub_create):
+        """FG5: store が caption を整える場合があるので、登録・応答は行の値を使う。"""
+        topic = _topic()
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([topic]))
+
+        def _create(session, **kw):
+            return {
+                "id": _FIG_ID, "course_id": kw["course_id"], "topic_id": kw.get("topic_id") or "",
+                "title": "", "caption": "傾向のイメージ（模式図）", "figure_kind": kw["figure_kind"],
+                "status": kw["status"], "minio_key": kw["minio_key"], "content_type": "",
+                "created_at": "",
+            }
+
+        monkeypatch.setattr(tf, "create_teaching_figure", _create)
+
+        result = tf.create_course_teaching_figure(
+            _COURSE_ID,
+            self._body(tf, caption="傾向のイメージ", figure_kind="data_plot_schematic"),
+            _OWNER,
+        )
+        assert result["evidence_link"]["caption"] == "傾向のイメージ（模式図）"
+        assert result["evidence_link"]["extra"]["caption"] == "傾向のイメージ（模式図）"
+        assert result["figure"]["caption"] == "傾向のイメージ（模式図）"
+
+    def test_snapshot_upload_happens_after_the_db_commit(self, tf, monkeypatch, stub_create):
+        """正本は DB。配信スナップショット（MinIO）は commit 後に上げる。
+
+        逆順だと DB 側が失敗したときに「配信物だけ新版・正本は旧版」が残る。
+        """
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        tf.create_course_teaching_figure(_COURSE_ID, self._body(tf), _OWNER)
+        assert stub_create["events"] == ["commit", "upload"]
+
+    def test_snapshot_upload_failure_still_saves_and_is_reported(self, tf, monkeypatch, stub_create):
+        """MinIO 失敗で保存を巻き戻さない（DB が正本）。事実は応答と監査に残す。"""
+        events = stub_create["events"]
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        monkeypatch.setattr(
+            tf, "get_storage_client", lambda: _FakeStorage(fail_upload=True, events=events),
+        )
+
+        result = tf.create_course_teaching_figure(_COURSE_ID, self._body(tf), _OWNER)
+
+        assert result["image_snapshot_failed"] is True
+        assert stub_create["session"].committed == 1
+        assert stub_create["session"].rolled_back == 0
+        assert stub_create["audit_metadata"][0]["image_snapshot_failed"] is True
+
+    def test_successful_save_reports_no_snapshot_failure(self, tf, monkeypatch, stub_create):
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        result = tf.create_course_teaching_figure(_COURSE_ID, self._body(tf), _OWNER)
+        assert result["image_snapshot_failed"] is False
+        assert "image_snapshot_failed" not in stub_create["audit_metadata"][0]
 
     def test_registration_is_idempotent_for_same_figure(self, tf, monkeypatch, stub_create):
         """同じ figure_id を二重登録しない（冪等）。"""
@@ -405,8 +536,10 @@ class TestCourseOwnerGate:
 class TestPatchTeachingFigure:
     @pytest.fixture
     def stub_patch(self, tf, monkeypatch):
-        state: dict = {"session": _FakeSession(), "storage": _FakeStorage(), "updates": [],
-                       "audits": [], "row": {
+        events: list[str] = []
+        state: dict = {"session": _FakeSession(events=events), "storage": _FakeStorage(events=events),
+                       "updates": [], "audits": [], "audit_metadata": [], "events": events,
+                       "row": {
                            "id": _FIG_ID, "course_id": _COURSE_ID, "topic_id": _TOPIC_ID,
                            "status": "draft", "caption": "図の説明", "title": "図",
                            "figure_kind": "concept_map", "minio_key": f"teaching/{_COURSE_ID}/{_FIG_ID}.svg",
@@ -415,13 +548,22 @@ class TestPatchTeachingFigure:
 
         def _update(session, figure_id, **fields):
             state["updates"].append(fields)
-            return {**state["row"], **{k: v for k, v in fields.items() if k != "updated_by"}}
+            unknown = set(fields) - set(_UPDATE_KWARGS)
+            assert not unknown, f"store が受け取らないキーワード: {sorted(unknown)}"
+            # ``updated_by`` は**列ではない**（migration 063）ので行に載らない。
+            # スタブが載せてしまうと、SET 句に混ぜる実装バグを隠す（実 DB は 42703）。
+            applied = {k: v for k, v in fields.items() if k in _FIGURE_ROW_KEYS}
+            return {**state["row"], **applied}
+
+        def _record(*args, **kw):
+            state["audits"].append(args)
+            state["audit_metadata"].append(args[5] if len(args) > 5 else {})
 
         monkeypatch.setattr(tf, "_pg_session", lambda: state["session"])
         monkeypatch.setattr(tf, "get_storage_client", lambda: state["storage"])
         monkeypatch.setattr(tf, "get_teaching_figure", lambda session, fid: state["row"])
         monkeypatch.setattr(tf, "update_teaching_figure", _update)
-        monkeypatch.setattr(tf, "record_review_event", lambda *a, **k: state["audits"].append(a))
+        monkeypatch.setattr(tf, "record_review_event", _record)
         return state
 
     def test_draft_to_adopted_registers_topic(self, tf, monkeypatch, stub_patch):
@@ -476,6 +618,74 @@ class TestPatchTeachingFigure:
         assert stub_patch["storage"].uploads[0][1] == f"teaching/{_COURSE_ID}/{_FIG_ID}.svg"
         assert "svg_source" in stub_patch["updates"][0]
 
+    def test_snapshot_upload_happens_after_the_db_commit(self, tf, monkeypatch, stub_patch):
+        """DB（正本）を確定させてから配信スナップショットを差し替える。
+
+        逆順（旧実装）だと UPDATE 失敗時に MinIO だけ新版になり、正本は旧版のまま残る。
+        """
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(svg_source=_VALID_SVG), _OWNER,
+        )
+        assert stub_patch["events"] == ["commit", "upload"]
+
+    def test_db_failure_leaves_the_snapshot_untouched(self, tf, monkeypatch, stub_patch):
+        """UPDATE が落ちたら MinIO は触らない（配信物だけ新版にしない）。"""
+        def _boom(session, figure_id, **fields):
+            raise RuntimeError("undefined column")
+
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        monkeypatch.setattr(tf, "update_teaching_figure", _boom)
+
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(svg_source=_VALID_SVG), _OWNER,
+            )
+        assert exc.value.status_code == 500
+        assert stub_patch["storage"].uploads == []
+        assert "upload" not in stub_patch["events"]
+        assert stub_patch["session"].rolled_back == 1
+
+    def test_snapshot_upload_failure_keeps_the_update_and_is_reported(
+        self, tf, monkeypatch, stub_patch,
+    ):
+        events = stub_patch["events"]
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        monkeypatch.setattr(
+            tf, "get_storage_client", lambda: _FakeStorage(fail_upload=True, events=events),
+        )
+
+        result = tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(svg_source=_VALID_SVG), _OWNER,
+        )
+
+        assert result["image_snapshot_failed"] is True
+        assert stub_patch["session"].committed == 1
+        assert stub_patch["audit_metadata"][0]["image_snapshot_failed"] is True
+
+    def test_metadata_only_patch_does_not_touch_minio(self, tf, monkeypatch, stub_patch):
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        result = tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(caption="別の説明"), _OWNER,
+        )
+        assert stub_patch["events"] == ["commit"]
+        assert result["image_snapshot_failed"] is False
+
+    def test_updated_by_is_passed_to_the_store_but_never_becomes_a_row_field(
+        self, tf, monkeypatch, stub_patch,
+    ):
+        """route は ``updated_by`` を store へ渡す（revisions の帰属に使われる）。
+
+        列ではないので行（＝応答）には現れない。スタブが行に混ぜないことで、
+        SET 句へ戻す改変が実 DB でしか出ない 42703 に化けるのを防ぐ。
+        """
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        result = tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(title="改題"), _OWNER,
+        )
+        assert stub_patch["updates"][0]["updated_by"] == _OWNER["id"]
+        assert "updated_by" not in result["figure"]
+
     def test_svg_rejection_is_422_without_upload(self, tf, monkeypatch, stub_patch):
         monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
         with pytest.raises(HTTPException) as exc:
@@ -500,6 +710,185 @@ class TestPatchTeachingFigure:
 
 
 # ---------------------------------------------------------------------------
+# PATCH の register_topic_id（既存図タブからの挿入。§7.1b）
+# ---------------------------------------------------------------------------
+
+
+class TestPatchRegisterTopic:
+    """既存の生成図を「このトピックにも登録する」経路。
+
+    本文への ``![[figure:id]]`` 挿入だけでは ``linked_figure_ids`` /
+    ``evidence_links`` が空のままで、①AI 書き換えで embed が消える ②未配信時に
+    学習者へ生 UUID が露出する（レビュー M3）。挿入 UI は必ずこの API を通す。
+    """
+
+    @pytest.fixture
+    def stub_patch(self, tf, monkeypatch):
+        events: list[str] = []
+        state: dict = {"session": _FakeSession(events=events), "storage": _FakeStorage(events=events),
+                       "updates": [], "audits": [], "audit_metadata": [], "events": events,
+                       "row": {
+                           "id": _FIG_ID, "course_id": _COURSE_ID, "topic_id": _TOPIC_ID,
+                           "status": "adopted", "caption": "図の説明", "title": "図",
+                           "figure_kind": "concept_map", "minio_key": f"teaching/{_COURSE_ID}/{_FIG_ID}.svg",
+                           "content_type": "image/svg+xml", "created_at": "",
+                       }}
+
+        def _update(session, figure_id, **fields):
+            state["updates"].append(fields)
+            unknown = set(fields) - set(_UPDATE_KWARGS)
+            assert not unknown, f"store が受け取らないキーワード: {sorted(unknown)}"
+            applied = {k: v for k, v in fields.items() if k in _FIGURE_ROW_KEYS}
+            return {**state["row"], **applied}
+
+        def _record(*args, **kw):
+            state["audits"].append(args)
+            state["audit_metadata"].append(args[5] if len(args) > 5 else {})
+
+        monkeypatch.setattr(tf, "_pg_session", lambda: state["session"])
+        monkeypatch.setattr(tf, "get_storage_client", lambda: state["storage"])
+        monkeypatch.setattr(tf, "get_teaching_figure", lambda session, fid: state["row"])
+        monkeypatch.setattr(tf, "update_teaching_figure", _update)
+        monkeypatch.setattr(tf, "record_review_event", _record)
+        return state
+
+    def test_adopted_figure_can_be_registered_into_another_topic(self, tf, monkeypatch, stub_patch):
+        """採用済みのまま（status 変更なし）でもトピック登録できる。"""
+        other = _topic("topic-2")
+        monkeypatch.setattr(
+            tf, "course_data_for_owner", lambda cid, user: _course_data([_topic(), other]),
+        )
+
+        result = tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id="topic-2"), _OWNER,
+        )
+
+        assert result["topic_registered"] is True
+        assert other["linked_figure_ids"] == [_FIG_ID]
+        assert other["evidence_links"][0]["figure_id"] == _FIG_ID
+        assert result["evidence_link"]["caption"] == "図の説明"
+        assert any("UPDATE learning_courses" in s for s in stub_patch["session"].statements)
+        # 列の更新は無いので UPDATE course_teaching_figures は発行しない
+        # （store の「更新フィールドなし」ValueError を踏まない）
+        assert stub_patch["updates"] == []
+        assert stub_patch["audit_metadata"][0]["registered_topic_id"] == "topic-2"
+
+    def test_registration_is_idempotent(self, tf, monkeypatch, stub_patch):
+        topic = _topic(
+            linked_figure_ids=[_FIG_ID],
+            evidence_links=[{"kind": "figure", "target_id": _FIG_ID, "figure_id": _FIG_ID}],
+        )
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([topic]))
+
+        tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+        )
+        tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+        )
+
+        assert topic["linked_figure_ids"] == [_FIG_ID]
+        assert len(topic["evidence_links"]) == 1
+
+    def test_draft_can_adopt_and_register_in_one_call(self, tf, monkeypatch, stub_patch):
+        stub_patch["row"]["status"] = "draft"
+        topic = _topic("topic-2")
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([topic]))
+
+        result = tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID,
+            tf.TeachingFigurePatchRequest(status="adopted", register_topic_id="topic-2"),
+            _OWNER,
+        )
+
+        assert result["topic_registered"] is True
+        assert stub_patch["updates"][0]["status"] == "adopted"
+        assert topic["linked_figure_ids"] == [_FIG_ID]
+
+    def test_draft_without_adoption_cannot_be_registered(self, tf, monkeypatch, stub_patch):
+        """採用済みでない図の登録は 422（配信されない図の参照だけを残さない）。"""
+        stub_patch["row"]["status"] = "draft"
+        topic = _topic()
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([topic]))
+
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+            )
+
+        assert exc.value.status_code == 422
+        assert "採用済み" in exc.value.detail
+        assert stub_patch["updates"] == []
+        assert "linked_figure_ids" not in topic
+        assert stub_patch["session"].committed == 0
+
+    def test_retired_figure_cannot_be_registered(self, tf, monkeypatch, stub_patch):
+        stub_patch["row"]["status"] = "retired"
+        topic = _topic()
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([topic]))
+
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+            )
+        assert exc.value.status_code == 422
+
+    def test_unknown_topic_is_404(self, tf, monkeypatch, stub_patch):
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id="nope"), _OWNER,
+            )
+        assert exc.value.status_code == 404
+        assert stub_patch["session"].committed == 0
+
+    def test_other_course_figure_cannot_be_registered(self, tf, monkeypatch, stub_patch):
+        """コーススコープ外の図は 404（他コースの図を自コースへ登録できない）。"""
+        stub_patch["row"]["course_id"] = "another-course"
+        topic = _topic()
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([topic]))
+
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+            )
+        assert exc.value.status_code == 404
+        assert "linked_figure_ids" not in topic
+
+    def test_non_owner_cannot_register(self, tf, monkeypatch, stub_patch):
+        def _deny(course_id, user):
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        monkeypatch.setattr(tf, "course_data_for_owner", _deny)
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+            )
+        assert exc.value.status_code == 403
+
+    def test_registration_only_patch_does_not_touch_minio(self, tf, monkeypatch, stub_patch):
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        result = tf.update_course_teaching_figure(
+            _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(register_topic_id=_TOPIC_ID), _OWNER,
+        )
+        assert stub_patch["events"] == ["commit"]
+        assert result["image_snapshot_failed"] is False
+
+    def test_empty_patch_body_is_still_422(self, tf, monkeypatch, stub_patch):
+        """登録指示も更新フィールドも無いボディは従来どおり store 側で 422。"""
+        def _no_fields(session, figure_id, **fields):
+            raise ValueError("no fields to update")
+
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        monkeypatch.setattr(tf, "update_teaching_figure", _no_fields)
+        with pytest.raises(HTTPException) as exc:
+            tf.update_course_teaching_figure(
+                _COURSE_ID, _FIG_ID, tf.TeachingFigurePatchRequest(), _OWNER,
+            )
+        assert exc.value.status_code == 422
+
+
+# ---------------------------------------------------------------------------
 # 教員向け画像配信（SVG ヘッダ・FG3 第3防御）
 # ---------------------------------------------------------------------------
 
@@ -510,8 +899,9 @@ class TestAdminFigureImageDelivery:
         monkeypatch.setattr(tf, "_course_data_for_studio_editable", lambda cid, user: _course_data())
         monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
         monkeypatch.setattr(tf, "get_storage_client", lambda: storage)
-        monkeypatch.setattr(tf, "get_teaching_figure", lambda session, fid: {
-            "id": _FIG_ID, "course_id": _COURSE_ID, "minio_key": "teaching/k.svg",
+        monkeypatch.setattr(tf, "get_teaching_figure_for_delivery", lambda session, fid: {
+            "id": _FIG_ID, "course_id": _COURSE_ID, "status": "adopted",
+            "minio_key": "teaching/k.svg",
             "content_type": "image/svg+xml", "svg_source": _VALID_SVG,
         })
 
@@ -526,8 +916,9 @@ class TestAdminFigureImageDelivery:
         monkeypatch.setattr(tf, "_course_data_for_studio_editable", lambda cid, user: _course_data())
         monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
         monkeypatch.setattr(tf, "get_storage_client", lambda: _FakeStorage(fail_get=True))
-        monkeypatch.setattr(tf, "get_teaching_figure", lambda session, fid: {
-            "id": _FIG_ID, "course_id": _COURSE_ID, "minio_key": "teaching/k.svg",
+        monkeypatch.setattr(tf, "get_teaching_figure_for_delivery", lambda session, fid: {
+            "id": _FIG_ID, "course_id": _COURSE_ID, "status": "draft",
+            "minio_key": "teaching/k.svg",
             "content_type": "image/svg+xml", "svg_source": _VALID_SVG,
         })
 
@@ -537,12 +928,30 @@ class TestAdminFigureImageDelivery:
     def test_other_course_figure_is_404(self, tf, monkeypatch):
         monkeypatch.setattr(tf, "_course_data_for_studio_editable", lambda cid, user: _course_data())
         monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
-        monkeypatch.setattr(tf, "get_teaching_figure", lambda session, fid: {
-            "id": _FIG_ID, "course_id": "another", "minio_key": "k", "content_type": "image/svg+xml",
+        monkeypatch.setattr(tf, "get_teaching_figure_for_delivery", lambda session, fid: {
+            "id": _FIG_ID, "course_id": "another", "status": "adopted", "minio_key": "k",
+            "content_type": "image/svg+xml",
         })
         with pytest.raises(HTTPException) as exc:
             tf.get_course_teaching_figure_image(_COURSE_ID, _FIG_ID, _OWNER)
         assert exc.value.status_code == 404
+
+    def test_delivery_does_not_load_the_revision_history(self, tf, monkeypatch):
+        """画像1枚のために旧版 SVG（``revisions``、数MB 級）を引かない。"""
+        def _unexpected(session, fid):
+            raise AssertionError("画像配信は full row（revisions 込み）を引いてはいけない")
+
+        monkeypatch.setattr(tf, "_course_data_for_studio_editable", lambda cid, user: _course_data())
+        monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
+        monkeypatch.setattr(tf, "get_storage_client", lambda: _FakeStorage(b"<svg/>"))
+        monkeypatch.setattr(tf, "get_teaching_figure", _unexpected)
+        monkeypatch.setattr(tf, "get_teaching_figure_for_delivery", lambda session, fid: {
+            "id": _FIG_ID, "course_id": _COURSE_ID, "status": "adopted",
+            "minio_key": "teaching/k.svg", "content_type": "image/svg+xml", "svg_source": "",
+        })
+
+        resp = tf.get_course_teaching_figure_image(_COURSE_ID, _FIG_ID, _OWNER)
+        assert resp.status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -596,9 +1005,59 @@ class TestFigureSuggestionsResponse:
         resp = tf.generate_course_figure_suggestions(_COURSE_ID, _TOPIC_ID, None, _OWNER)
 
         assert resp["dropped"] == 2
+        assert resp["degraded"] is False
+        assert "note" not in resp
         assert created_rows[0]["created_by"] == _OWNER["id"]
         # 学習者信号は事実文リストとしてのみ渡る（生値・逐語質問文は渡さない・FG8）
         assert captured["signal_lines"] == ["主張Aは誤り率:高（6-10人）"]
+
+    def test_llm_failure_is_reported_as_degraded_not_as_zero_candidates(self, tf, monkeypatch):
+        """core が ``degraded=True`` を返したら、それを応答・監査に通す。
+
+        握り潰すと「この教材に図の提案は無い」と読めてしまう（quota は消費済み）。
+        """
+        from types import SimpleNamespace
+
+        audits: list = []
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
+        monkeypatch.setattr(tf, "topic_gap_signals", lambda session, **kw: [])
+        monkeypatch.setattr(tf, "_primary_course_document_id", lambda data: _DOC_ID)
+        monkeypatch.setattr(
+            tf, "generate_suggestions",
+            lambda session, **kw: SimpleNamespace(suggestions=[], dropped=0, degraded=True),
+        )
+        monkeypatch.setattr(tf, "create_suggestions", lambda session, rows: 0)
+        monkeypatch.setattr(tf, "list_suggestions", lambda session, cid, tid, statuses=None: [])
+        monkeypatch.setattr(tf, "record_review_event", lambda *a, **k: audits.append(a))
+
+        resp = tf.generate_course_figure_suggestions(_COURSE_ID, _TOPIC_ID, None, _OWNER)
+
+        assert resp["degraded"] is True
+        assert resp["suggestions"] == []
+        assert resp["note"] == tf.SUGGEST_DEGRADED_NOTE
+        # 事実文に数値（回数・残数）は出さない（FG8）
+        assert not any(ch.isdigit() for ch in resp["note"])
+        assert audits[0][5]["degraded"] is True
+
+    def test_result_without_a_degraded_attribute_defaults_to_false(self, tf, monkeypatch):
+        """生成側の結果に属性が欠けても 500 にしない（getattr 既定）。"""
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data([_topic()]))
+        monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
+        monkeypatch.setattr(tf, "topic_gap_signals", lambda session, **kw: [])
+        monkeypatch.setattr(tf, "_primary_course_document_id", lambda data: _DOC_ID)
+        monkeypatch.setattr(
+            tf, "generate_suggestions", lambda session, **kw: SimpleNamespace(suggestions=[]),
+        )
+        monkeypatch.setattr(tf, "create_suggestions", lambda session, rows: 0)
+        monkeypatch.setattr(tf, "list_suggestions", lambda session, cid, tid, statuses=None: [])
+        monkeypatch.setattr(tf, "record_review_event", lambda *a, **k: None)
+
+        resp = tf.generate_course_figure_suggestions(_COURSE_ID, _TOPIC_ID, None, _OWNER)
+        assert resp["degraded"] is False
+        assert resp["dropped"] == 0
 
     def test_decide_rejects_other_course_suggestion_without_writing(self, tf, monkeypatch):
         monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data())
@@ -625,8 +1084,8 @@ class TestFigureSuggestionsResponse:
         monkeypatch.setattr(tf, "get_suggestion", lambda s, sid: {
             "id": sid, "course_id": _COURSE_ID, "status": "candidate", "figure_kind": "timeline",
         })
-        monkeypatch.setattr(tf, "set_suggestion_status", lambda s, sid, status: {
-            "id": sid, "course_id": _COURSE_ID, "status": status, "figure_kind": "timeline",
+        monkeypatch.setattr(tf, "set_suggestion_status", lambda s, sid, status, *, course_id: {
+            "id": sid, "course_id": course_id, "status": status, "figure_kind": "timeline",
         })
         monkeypatch.setattr(tf, "record_review_event", lambda *a, **k: audits.append(a))
 
@@ -666,11 +1125,30 @@ class TestFigureSuggestionsResponse:
         monkeypatch.setattr(tf, "get_suggestion", lambda s, sid: {
             "id": sid, "course_id": _COURSE_ID, "status": "candidate",
         })
-        monkeypatch.setattr(tf, "set_suggestion_status", lambda s, sid, status: None)
+        monkeypatch.setattr(tf, "set_suggestion_status", lambda s, sid, status, *, course_id: None)
 
         with pytest.raises(HTTPException) as exc:
             tf.dismiss_course_figure_suggestion(_COURSE_ID, "sug-1", _OWNER)
         assert exc.value.status_code == 409
+
+    def test_decide_passes_the_course_scope_to_the_store(self, tf, monkeypatch):
+        """遷移 SQL をコースにスコープする（id だけの一致で他コースを書き換えない）。"""
+        captured: dict = {}
+        monkeypatch.setattr(tf, "course_data_for_owner", lambda cid, user: _course_data())
+        monkeypatch.setattr(tf, "_pg_session", lambda: _FakeSession())
+        monkeypatch.setattr(tf, "get_suggestion", lambda s, sid: {
+            "id": sid, "course_id": _COURSE_ID, "status": "candidate",
+        })
+
+        def _set(session, sid, status, *, course_id):
+            captured.update({"id": sid, "status": status, "course_id": course_id})
+            return {"id": sid, "course_id": course_id, "status": status}
+
+        monkeypatch.setattr(tf, "set_suggestion_status", _set)
+        monkeypatch.setattr(tf, "record_review_event", lambda *a, **k: None)
+
+        tf.accept_course_figure_suggestion(_COURSE_ID, "sug-1", _OWNER)
+        assert captured == {"id": "sug-1", "status": "accepted", "course_id": _COURSE_ID}
 
 
 # ---------------------------------------------------------------------------

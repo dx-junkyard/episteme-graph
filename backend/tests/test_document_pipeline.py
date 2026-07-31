@@ -2257,7 +2257,7 @@ def test_reanalyze_without_body_passes_options_none_for_inheritance(monkeypatch)
     前回 run 継承分岐を生かす（従来は常に {"analyze_images": False} で上書きされ、
     未レビューの AI 図分類が無警告で消えていた）。"""
     captured, response = _reanalyze_with_mocks(monkeypatch, body=None)
-    assert captured["kwargs"] == {"options": None}
+    assert captured["kwargs"] == {"options": None, "user_id": "22222222-2222-2222-2222-222222222222"}
     assert response["status"] == "pending"
 
 
@@ -2265,7 +2265,7 @@ def test_reanalyze_with_unset_field_passes_options_none(monkeypatch):
     admin_mod = _import_admin_routes()
 
     captured, _ = _reanalyze_with_mocks(monkeypatch, body=admin_mod.ReanalyzeRequest())
-    assert captured["kwargs"] == {"options": None}
+    assert captured["kwargs"] == {"options": None, "user_id": "22222222-2222-2222-2222-222222222222"}
 
 
 def test_reanalyze_with_explicit_true_passes_true(monkeypatch):
@@ -2274,7 +2274,7 @@ def test_reanalyze_with_explicit_true_passes_true(monkeypatch):
     captured, _ = _reanalyze_with_mocks(
         monkeypatch, body=admin_mod.ReanalyzeRequest(analyze_images=True)
     )
-    assert captured["kwargs"] == {"options": {"analyze_images": True}}
+    assert captured["kwargs"] == {"options": {"analyze_images": True}, "user_id": "22222222-2222-2222-2222-222222222222"}
 
 
 def test_reanalyze_with_explicit_false_passes_false(monkeypatch):
@@ -2284,7 +2284,7 @@ def test_reanalyze_with_explicit_false_passes_false(monkeypatch):
     captured, _ = _reanalyze_with_mocks(
         monkeypatch, body=admin_mod.ReanalyzeRequest(analyze_images=False)
     )
-    assert captured["kwargs"] == {"options": {"analyze_images": False}}
+    assert captured["kwargs"] == {"options": {"analyze_images": False}, "user_id": "22222222-2222-2222-2222-222222222222"}
 
 
 # --- _build_figure_table_semantics claim_link_index (F1 cross-link) ----------

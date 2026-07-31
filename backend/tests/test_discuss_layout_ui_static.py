@@ -101,6 +101,29 @@ class TestDiscussLayoutClassToggling:
         block = _function_block(js, "async function selectTopic(topicId, opts) {")
         assert "applyDiscussLayout();" in block
 
+    def test_collapse_only_on_new_messages_not_on_every_render(self):
+        """[F-4] §9.7-3 は「新しいメッセージが来るたびに」要点ストリップへ畳む仕様。
+        renderChat はアンカープロンプトのタップ・編集状態の変化などメッセージが増えない
+        場面でも呼ばれるため、毎回 discuss-expanded を落とすと学習者が手動で開いた
+        「論文の要点」が新着なしに閉じてしまう。会話の指紋（件数 + 末尾メッセージ id）の
+        変化を検知したときだけ畳む。"""
+        js = _read(APP_JS)
+        assert "function _discussChatFingerprint() {" in js
+        fp = _function_block(js, "function _discussChatFingerprint() {")
+        # 件数だけでは、直前の往復と同数になる編集操作を取りこぼす
+        assert "msgs.length" in fp
+        assert ".id" in fp
+        block = _function_block(js, "function applyDiscussLayout(")
+        idx_remove = block.index('region.classList.remove("discuss-expanded")')
+        guard = block[:idx_remove]
+        assert "_discussChatFingerprint()" in guard
+        assert "_discussCollapseKey" in guard
+
+    def test_collapse_key_is_cleared_when_leaving_discuss(self):
+        js = _read(APP_JS)
+        block = _function_block(js, "function applyDiscussLayout(")
+        assert 'if (!on) _discussCollapseKey = "";' in block
+
     def test_no_hardcoded_flex_0_0_auto_on_material_region(self):
         """機能2由来の回帰ガード（test_learning_layout_static.py と同一趣旨）:
         discuss 対応の追加実装でも .material-region の flex-shrink を inline で

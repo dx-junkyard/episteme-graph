@@ -170,8 +170,9 @@ class TestGetCourseElementContextResponse:
         from api.routes.learning import get_course_element_context
 
         mock_course.return_value = _course_data()
+        monkeypatch.setattr(element_context, "document_run_artifacts", lambda doc: {})
         monkeypatch.setattr(
-            element_context, "equation_records", lambda doc: [{"equation_id": "eq_1"}]
+            element_context, "equation_records", lambda doc, artifacts=None: [{"equation_id": "eq_1"}]
         )
         monkeypatch.setattr(
             element_context.context_lens_mod,
@@ -221,6 +222,79 @@ class TestGetCourseElementContextResponse:
                     _walk(v)
 
         _walk(result)
+
+    @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])
+    @patch("api.routes.learning.get_accessible_course_data")
+    def test_no_bare_internal_ids_in_response_for_real_core(
+        self, mock_course, _mock_doc_ids, monkeypatch,
+    ):
+        """W層がラベルを引けなかった項目（図の DB UUID / evidence_id / synth claim ID）を
+        そのまま返しても、学習者向けレスポンスには裸の内部 ID が出ない（LE4）。
+        役割文に内部 ID が混ざる場合は role キーごと落ちる。"""
+        from core import element_context
+
+        from api.routes.learning import get_course_element_context
+
+        figure_uuid = "ffffffff-ffff-ffff-ffff-ffffffffffff"
+        mock_course.return_value = _course_data()
+        monkeypatch.setattr(element_context, "document_run_artifacts", lambda doc: {})
+        monkeypatch.setattr(
+            element_context, "equation_records", lambda doc, artifacts=None: [{"equation_id": "eq_1"}]
+        )
+        monkeypatch.setattr(
+            element_context.context_lens_mod,
+            "build",
+            lambda ref: {
+                "focus": {
+                    "label": "E=mc^2",
+                    "intrinsic_summary": "E=mc^2",
+                    "contextual_role": "synth_claim_0001を定量化する",
+                    "contextual_role_status": "source_backed",
+                    "provenance": ["equation_semantics:eq_1"],
+                    "generic": None,
+                },
+                "upper": [
+                    {
+                        "element_type": "theory_claim", "element_id": None, "document_id": "doc-1",
+                        "label": "synth_claim_0001", "relation": "quantifies",
+                        "relation_label": "を定量化する", "relation_status": "source_backed",
+                        "evidence_refs": [], "navigable": False,
+                    },
+                ],
+                "lower": [
+                    {
+                        "element_type": "figure", "element_id": figure_uuid,
+                        "document_id": "doc-1", "label": figure_uuid,
+                        "relation": "evidenced_by_figure", "relation_label": "を図で裏付ける",
+                        "relation_status": "source_backed", "evidence_refs": [], "navigable": True,
+                    },
+                    {
+                        "element_type": "evidence", "element_id": None, "document_id": "doc-1",
+                        "label": "ev_0012", "relation": "rests_on_evidence",
+                        "relation_label": "を根拠とする", "relation_status": "source_backed",
+                        "evidence_refs": ["ev_0012"], "navigable": False,
+                    },
+                ],
+                "notes": [],
+            },
+        )
+
+        result = get_course_element_context("c1", "equation", "eq_1", {"id": "u1"})
+
+        assert [i["label"] for i in result["upper"]] == ["関連する主張"]
+        assert [i["label"] for i in result["lower"]] == ["図", "本文の根拠箇所"]
+        # 関係情報は保持する（項目を丸ごと落とさない = 情報を落とさない）。
+        assert [i["relation_label"] for i in result["lower"]] == ["を図で裏付ける", "を根拠とする"]
+        # figure には学習者向け文脈 API が無いので navigable にしない。
+        assert [i["navigable"] for i in result["lower"]] == [False, False]
+        assert "contextual_role" not in result["focus"]
+
+        # ITEM.id は契約上残る（教材内ジャンプに使う）。禁じているのは *ラベル* と
+        # focus に裸の内部 ID が現れることなので、そこだけを走査する。
+        texts = [str(i["label"]) for i in result["upper"] + result["lower"]]
+        texts += [str(v) for v in result["focus"].values() if isinstance(v, str)]
+        for token in ("synth_claim_0001", "ev_0012", figure_uuid):
+            assert all(token not in t for t in texts), token
 
 
 class TestRouteRegistration:

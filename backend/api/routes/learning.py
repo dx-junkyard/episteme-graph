@@ -633,7 +633,14 @@ def update_course(
         else:
             data.pop("llm_models", None)
 
-    save_course_data(current_user["id"], course_id, data)
+    # レビュー確定の修正2（D-5）: この PUT は data 本体（title/chapters/topics/concepts/
+    # sources/course_focus/llm_models）のみを更新する。共有設定
+    # （visibility / group_id / description）はここでは受け取らないので、
+    # save_course_data の既定 UPSERT に上書きさせず既存値を温存する
+    # （公開コースが private に落ちて受講者全員がアクセスできなくなる事故を防ぐ）。
+    save_course_data(
+        current_user["id"], course_id, data, preserve_sharing_fields=True,
+    )
     logger.info("Updated course %s for user=%s", course_id, current_user["id"])
 
     return LearningCourseDetail(**data)
@@ -1033,6 +1040,12 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
     DM4 の「出し惜しみ禁止」は質問への即答に限定され、解釈・立場の表明には
     言い直し（revoice）で応じる（DA1/DA2）。末尾の生成プロンプトは学習者の直前の
     発話を引用・組み込んだ固有の問いにする（DA4）。
+
+    レビュー指摘 F3/F4/F5/F7 への対応（同設計書 §9）:
+      - F3 混在発話の優先順位（質問と解釈が同居するときは質問への即答が先）
+      - F4 revoice ターンでは確認の問い自体が末尾必須要素を満たす（問いを重ねない）
+      - F5 即答は要約でなく「完全な形で」提供する（DM4 の原意）
+      - F7 修復局面の完結（選ばれたズレだけを説明し、学習者の言い直しで確かめる）
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
     persona_instruction = persona_prompt(response_persona, target="response")
@@ -1044,36 +1057,43 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
 一方的な解説で会話を完結させないでください。議論は次の流れで進めます。
 - 係留: 学生が自分の読み・立場を述べたら、まず読みを突き合わせて理解の歩調を揃える。
 - ギャップの地図: 論文の主張と学生の読みの「重なる点」と「分かれる点」を事実として短く並べ、
-  どの点から検討するかを学生に選ばせる。
+  どの点から検討するかを学生に選ばせる。選ばれたズレだけを的を絞って説明し、そのズレが
+  埋まったかどうかを学生自身の言い直しで確かめてから次へ進む。
 - 共同検討: 歩調が揃ってから、前提・適用範囲・what-if を一緒に検討する。あなたも暫定的な
   立場を示し、学生からの反論を歓迎してください。
 理解のズレは議論の途中でも繰り返し現れます。ズレに気づいたら、その都度この突き合わせに短く戻ってください。
 
 **発話タイプ別の応答ルール（毎ターン）:**
 1. 【質問には即答・出し惜しみ禁止】学生が情報を求めたときは、ためらわずすぐに答えてください。
-   1テンポ遅らせて考えさせてから答える、といった Socratic な出し惜しみは行わないでください。
+   答えは要約や小出しにせず、その場で完全な形で提供してください。1テンポ遅らせて考えさせて
+   から答える、といった Socratic な出し惜しみは行わないでください。
 2. 【解釈には言い直しから】学生が自分の解釈・立場・読みを述べたときは、解説で応じないでください。
    まず学生の読みをあなたの言葉で短く言い直し、その理解で合っているかを確認してください。
    確認が取れてから、論文の主張との重なりとズレを事実として並べ、どのズレから埋めるかを
    学生に選ばせてください。
 3. 【詰まりには一点だけの足場かけ】学生が混乱や詰まりを見せたときは、全体を解説し直すのではなく、
    詰まっている一点だけを短く補い、学生自身の言葉での言い直しで埋まったかを確かめてください。
+4. 【質問と解釈が同居するとき】1つの発話に質問と解釈の表明が混在する場合は、まず質問の部分に
+   完全な形で即答し（ルール1を優先）、そのうえで解釈の部分の言い直しと確認に入ってください
+   （ルール2）。質問を保留にして言い直しから始めることはしないでください。
 
 **共通ルール:**
-4. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
+5. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
    一方的な講義にせず対話として書いてください。数式は LaTeX 記法（インライン $...$、
    ディスプレイ $$...$$）を使い、教材を参照した場合はコンテキストに付された番号付き出典
    マーカー `[出典1]` `[出典2]` … を本文に自然に挿入してください。
-5. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
+6. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
    （どちらか一つは毎回必須であり、気が向いたときだけ付ける確率的な付加は不可です）:
    - 学生自身の言葉での言い換え・予測・自己説明を促す短い誘い
    - why / how / what-if 型の問い返し（この結果が崩れるとしたら何が変わるか、等）
    いずれの場合も、学生の直前の発話の言葉を引用するか組み込んだ、その学生に固有の問いに
    してください。どの学生にも使い回せる汎用の決まり文句は不可です。
-6. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
+   なお、ルール2・3の言い直しのターンでは、「その理解で合っていますか」という確認の問い自体が
+   この必須要素を満たします。確認の問いに、さらに別の why / how 型の問いを重ねないでください。
+7. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
    「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
    のように、その部分がこの論文由来ではないことを一言明示してください。
-7. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
+8. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
 
 
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
@@ -1329,12 +1349,21 @@ def _generate_graph_element_explanation(
     if not body.chunk_id or not body.element_id:
         raise HTTPException(status_code=400, detail="EXPLAIN_GRAPH_ELEMENT requires chunk_id and element_id")
 
+    # レビュー確定の修正1（セキュリティ / DM2）: 主チャンク取得に可視性ゲートが無く、
+    # 受講中の学習者が任意の chunk_id を送るだけで他教員の Private 論文の本文・数式・
+    # 承認済み説明を引き出せていた。get_chunk_claim_refs と同じ複合集合
+    # （コース sources ∪ 本人可視 document）を必須引数として渡し、範囲外の chunk_id は
+    # 「チャンクが見つからない」（下の 404）へ落とす。
+    allowed_document_ids = set(list_course_source_document_ids(course_data)) | set(
+        list_visible_document_ids(user_id)
+    )
     context = get_graph_element_context(
         course_data,
         body.chunk_id,
         body.element_id,
         body.element_type,
         body.element_label,
+        allowed_document_ids=allowed_document_ids,
     )
     if not context:
         raise HTTPException(status_code=404, detail="Chunk not found")
@@ -1699,7 +1728,8 @@ def _load_teaching_figure_row(course_id: str, figure_id: str) -> dict | None:
     """
     session = _pg_session()
     try:
-        return teaching_figures_store.get_teaching_figure(session, figure_id)
+        # 配信に必要な列のみの lean 投影（revisions 数MB を読まない）
+        return teaching_figures_store.get_teaching_figure_for_delivery(session, figure_id)
     except Exception:
         logger.warning(
             "Failed to load teaching figure row course=%s figure=%s",
@@ -1779,11 +1809,17 @@ def get_course_figure_image(
     try:
         image_bytes = get_storage_client().get_object("figure-images", teaching_row["minio_key"])
     except Exception:
+        # 正本は DB の svg_source。MinIO スナップショットが未反映・欠落でも
+        # 採用済み図の配信を止めない（教員向けエンドポイントと同じフェイルソフト）。
         logger.warning(
-            "get_course_figure_image: MinIO fetch failed (teaching) course=%s figure=%s",
+            "get_course_figure_image: MinIO fetch failed (teaching), falling back to svg_source "
+            "course=%s figure=%s",
             course_id, figure_id, exc_info=True,
         )
-        raise HTTPException(status_code=404, detail="Figure image not found")
+        svg_source = teaching_row.get("svg_source") or ""
+        if not svg_source:
+            raise HTTPException(status_code=404, detail="Figure image not found")
+        image_bytes = svg_source.encode("utf-8")
 
     # 教材図は SVG（``figure_image_response`` が nosniff + CSP sandbox を付ける・FG3）。
     return figure_image_response(image_bytes, teaching_row.get("content_type"))
@@ -2730,17 +2766,35 @@ def learning_chat(
     _anchor_ladder_hint = _build_anchor_ladder_hint(body, body.history)
     if _anchor_ladder_hint:
         _system_prompt += "\n\n" + _anchor_ladder_hint
+    # レビュー確定の修正3（DA1/DA2）: 足場メッセージ（context 注入の user ターンと
+    # それを受ける assistant ターン）は全モード共通で「以下の質問に答えてください」/
+    # 「お答えします」という Q&A フレームを強制していた。system プロンプトが
+    # 「解釈には解説で応じない」（revoice ファースト）と指示した直後に、発話直近の
+    # 文脈がこのフレームを再導入するため、学習者が立場を述べても完全解説が返る
+    # （設計書 §0 の症状の再生産）。discuss のときだけ足場を中立化し、発話タイプ別の
+    # 応答ルールへ橋渡しする。casual・通常モードの足場は変更しない。
+    if _is_discuss:
+        _scaffold_user_instruction = (
+            "上記のコンテキストを踏まえ（不足している場合は補完して）、"
+            "発話タイプ別の応答ルールに従って、以下の学生の発話に応じてください。"
+        )
+        _scaffold_assistant_ack = (
+            "はい。学生の発話のタイプ（質問 / 解釈・立場の表明 / 詰まり）を見きわめて応じます。"
+        )
+    else:
+        _scaffold_user_instruction = (
+            "上記のコンテキストを踏まえ（不足している場合は補完して）、以下の質問に答えてください。"
+        )
+        _scaffold_assistant_ack = f"はい、「{topic_title}」についてですね。お答えします。"
     messages: list[dict] = [
         {"role": "system", "content": _system_prompt},
         {"role": "user", "content": (
             f"コース: {course_title}\n"
             f"現在のトピック: {topic_title}\n\n"
             f"{context_block}\n\n"
-            "上記のコンテキストを踏まえ（不足している場合は補完して）、以下の質問に答えてください。"
+            f"{_scaffold_user_instruction}"
         )},
-        {"role": "assistant", "content": (
-            f"はい、「{topic_title}」についてですね。お答えします。"
-        )},
+        {"role": "assistant", "content": _scaffold_assistant_ack},
     ]
     # チャット型AI支援の共通基盤整理 §2-2: 直近20メッセージ・2000字/件へウィンドウ化
     # （教材・RAGコンテキストは上の messages で毎回別途注入されるため先頭保護は不要, head_keep=0）。

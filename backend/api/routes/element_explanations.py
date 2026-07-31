@@ -22,7 +22,7 @@ from dependencies import _require_teacher
 from core import element_explanations as store
 from core.deliberation.identity_links import confidence_label
 from core.deliberation.refs import document_run_artifacts
-from core.discuss.authoring import compute_source_fingerprint
+from core.discuss.authoring import compute_source_fingerprint, has_fingerprint_source
 from core.postgres import get_session
 from core.schema import AUDIT_ENTITY_ELEMENT_EXPLANATION
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
@@ -114,9 +114,25 @@ def _current_source_fingerprint(document_id: str) -> str | None:
 
     artifact が読めない状況（run 無し・DB 不通等）で「変わっています」と誤って
     表示しないため、例外は握って鮮度判定そのものをスキップする。
+
+    [D-3] 例外だけでは足りない: ``document_run_artifacts`` は run が無い場合や
+    ``stage_outputs._artifacts`` が欠けている場合に**例外を投げず ``{}`` を返す**。
+    ``compute_source_fingerprint({})`` は空入力の安定ハッシュを返すため、そのまま
+    突合すると保存済み指紋と必ず食い違い「元の解析結果が変わっています」を誤表示する
+    （①完了 run が無い ②candidate 挿入後に後続ステージが落ちて completed run が前の
+    ものを指す、の両シナリオ）。指紋の素材が1つも無いときは判定不能として ``None``
+    を返す（``has_fingerprint_source`` が素材の有無の正本）。
     """
     try:
-        return compute_source_fingerprint(document_run_artifacts(document_id))
+        artifacts = document_run_artifacts(document_id)
+        if not has_fingerprint_source(artifacts):
+            logger.debug(
+                "element_explanations: no fingerprint source for document %s; "
+                "skipping freshness check",
+                document_id,
+            )
+            return None
+        return compute_source_fingerprint(artifacts)
     except Exception:  # noqa: BLE001
         logger.warning(
             "element_explanations: failed to compute source fingerprint for document %s",

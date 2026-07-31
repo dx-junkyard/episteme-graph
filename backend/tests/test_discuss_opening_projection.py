@@ -391,6 +391,111 @@ class TestFragileSubjectSeparation:
 
 
 # ---------------------------------------------------------------------------
+# [D-6] 上限で切るとき kind 別に枠を確保する（2026-08-01 のレビュー修正）
+# ---------------------------------------------------------------------------
+
+
+def _assumption_items(count):
+    return [
+        {"target_id": f"t{i}", "statement": f"前提の文{i}", "verification_status": "untested"}
+        for i in range(count)
+    ]
+
+
+def _backbone_map(count, document_id="doc1"):
+    return {
+        document_id: [
+            {
+                "node_id": f"n{i}",
+                "label": f"Stage {i}",
+                "review_status": "review_required",
+                "source_backing_status": "review_required",
+                "review_reasons": ["missing_atomic_claim"],
+            }
+            for i in range(count)
+        ]
+    }
+
+
+class TestFragilePointQuota:
+    def _kinds(self, points):
+        return [p["kind"] for p in points]
+
+    def test_many_assumptions_do_not_starve_the_system_section(self):
+        """assumption 9件 + backbone 1件でも「まだ確認できていないところ」が残る。"""
+        points, truncated = opening.project_fragile_points(
+            _assumption_items(9), _backbone_map(1)
+        )
+
+        assert len(points) == opening._MAX_FRAGILE_POINTS
+        assert truncated is True
+        assert "assumption" in self._kinds(points)
+        assert "backbone_node" in self._kinds(points)
+
+    def test_many_backbone_nodes_do_not_starve_the_paper_section(self):
+        points, truncated = opening.project_fragile_points(
+            _assumption_items(1), _backbone_map(9)
+        )
+
+        assert len(points) == opening._MAX_FRAGILE_POINTS
+        assert truncated is True
+        assert self._kinds(points).count("assumption") == 1
+        assert self._kinds(points).count("backbone_node") == 7
+
+    def test_spare_quota_is_lent_to_the_other_kind(self):
+        """片方しか無いときは上限まで使う（枠を余らせて情報を落とさない）。"""
+        only_assumptions, truncated = opening.project_fragile_points(_assumption_items(10), {})
+        assert len(only_assumptions) == opening._MAX_FRAGILE_POINTS
+        assert set(self._kinds(only_assumptions)) == {"assumption"}
+        assert truncated is True
+
+        only_backbone, truncated_b = opening.project_fragile_points([], _backbone_map(10))
+        assert len(only_backbone) == opening._MAX_FRAGILE_POINTS
+        assert set(self._kinds(only_backbone)) == {"backbone_node"}
+        assert truncated_b is True
+
+    def test_ledger_projection_still_comes_first(self):
+        points, _ = opening.project_fragile_points(_assumption_items(2), _backbone_map(2))
+        assert self._kinds(points) == ["assumption", "assumption", "backbone_node", "backbone_node"]
+
+    def test_not_truncated_when_everything_fits(self):
+        points, truncated = opening.project_fragile_points(
+            _assumption_items(3), _backbone_map(2)
+        )
+        assert len(points) == 5
+        assert truncated is False
+
+    def test_both_kinds_survive_a_small_limit(self):
+        points, truncated = opening.project_fragile_points(
+            _assumption_items(4), _backbone_map(4), limit=2
+        )
+        assert self._kinds(points) == ["assumption", "backbone_node"]
+        assert truncated is True
+
+    def test_limit_of_one_prefers_the_available_kind(self):
+        assumption_only, _ = opening.project_fragile_points([], _backbone_map(3), limit=1)
+        assert self._kinds(assumption_only) == ["backbone_node"]
+
+        both, _ = opening.project_fragile_points(_assumption_items(1), _backbone_map(3), limit=1)
+        assert self._kinds(both) == ["assumption"]
+
+    def test_zero_limit_returns_nothing(self):
+        points, truncated = opening.project_fragile_points(
+            _assumption_items(2), _backbone_map(2), limit=0
+        )
+        assert points == []
+        assert truncated is True
+
+    def test_quota_allocation_is_deterministic(self):
+        assert opening._allocate_fragile_quota(9, 1, 8) == (7, 1)
+        assert opening._allocate_fragile_quota(1, 9, 8) == (1, 7)
+        assert opening._allocate_fragile_quota(20, 20, 8) == (5, 3)
+        assert opening._allocate_fragile_quota(0, 20, 8) == (0, 8)
+        assert opening._allocate_fragile_quota(20, 0, 8) == (8, 0)
+        assert opening._allocate_fragile_quota(2, 2, 8) == (2, 2)
+
+
+# ---------------------------------------------------------------------------
 # Phase 0b: course_focus（教員の任意入力・AI 生成なし）
 # ---------------------------------------------------------------------------
 
@@ -556,7 +661,8 @@ class TestOpeningUiSubjectSections:
         assert "sec.entries" in fn
         assert "supportEntryHtml(entry)" in fn
         # entries が無い旧データは従来のチップ表示へ縮退する（劣化許容・落とさない）。
-        assert "discussChip(item && item.label)" in fn
+        # 第2引数の itemRef(item) は構造帰属（経路A）の明示アンカー用（DM3）。
+        assert "discussChip(item && item.label" in fn
 
     def test_new_text_is_escaped_not_summarised(self):
         for signature in (
@@ -590,15 +696,48 @@ class TestOpeningUiSubjectSections:
         assert 'if (!usable.length) return ""' in fn
         assert "議論のきっかけ" in fn
 
-    def test_seed_click_sends_the_question_verbatim(self):
-        """seed の body は「立場を求める問い」そのものなので askText() で包まない
-        （既存の data-discuss-ask 経路に乗せ、観測イベント名も増やさない）。"""
+    def test_seed_click_posts_the_question_as_an_assistant_turn(self):
+        """seed の body は「立場を求める問い」そのものなので askText() で包まない。
+
+        かつては学習者の発話としてそのまま送信していたが、それでは AI が発話タイプ別
+        ルール1（質問には即答・出し惜しみ禁止）でその問いに自分で答えきってしまい、
+        係留（学習者が先に立場を述べ、AI が revoice で言い直す）が起動しなかった
+        （docs/features/discuss_dialogue_alignment_design.md §3-1: 開幕の立場質問に
+        **学習者が応答したら** AI は言い直しと確認だけを返す）。現在は LLM を呼ばずに
+        （DM8）アシスタントの問いとしてチャット欄へ置き、学習者の入力を待つ。
+        """
         fn = _extract_js_function(_DISCUSS_JS, "function renderDiscussionSeedsSection(doc) {")
-        assert "data-discuss-ask=" in fn
         assert "esc(s.body)" in fn
         assert "askText(" not in fn
+        # 学習者発話として送る旧経路（data-discuss-ask）には戻さない。
+        assert "data-discuss-ask=" not in fn
+        assert "data-discuss-seed-ask=" in fn
         bind = _extract_js_function(_DISCUSS_JS, "function bindOpeningEvents(containerEl) {")
         assert "opening_starter_clicked" in bind
+        assert "data-discuss-seed-ask" in bind
+        assert "window.discussPostSeedPrompt" in bind
+
+    def test_seed_quote_is_not_labelled_as_the_paper_text(self):
+        """evidence_quote の照合先は A層が生成したテキスト（thesis 合成文・正規化済み
+        statement・導出の理由文）であって論文原文ではない。「論文の記述」と名乗らせない
+        （出所の正直さ, OA7）。"""
+        fn = _extract_js_function(_DISCUSS_JS, "function renderDiscussionSeedsSection(doc) {")
+        assert "s.evidence_quote" in fn
+        assert "論文の記述" not in fn
+        assert "解析結果にもとづく記述" in fn
+
+    def test_top_level_truncated_notice_names_the_right_thing(self):
+        """[D-6] トップレベルの ``truncated`` は fragile_points の切り詰め
+        （build_opening の fragile_truncated）を意味する。document 一覧の話に
+        すり替えない。件数・割合は出さない（DM6）。"""
+        fn = _extract_js_function(_DISCUSS_JS, "function buildOpeningHtml(data) {")
+        idx = fn.index("data.truncated")
+        notice = fn[idx:idx + 400]
+        assert "論文・資料の一覧" not in notice
+        assert "確かめていないこと" in notice
+        assert "確認できていないところ" in notice
+        for banned in ("件", "%"):
+            assert banned not in notice
 
     def test_seeds_section_shows_the_server_signature(self):
         fn = _extract_js_function(_DISCUSS_JS, "function renderDiscussionSeedsSection(doc) {")

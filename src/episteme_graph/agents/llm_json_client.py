@@ -1,6 +1,7 @@
 """Provider-aware JSON LLM client shared by document analysis agents."""
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -272,6 +273,23 @@ def recover_truncated_json(text: str) -> dict | None:
 
 
 def _call_with_wall_timeout(func, timeout_seconds: float, *args, **kwargs):
+    """Run ``func`` on a worker thread, giving up after ``timeout_seconds``.
+
+    The worker thread **must** inherit the caller's ``contextvars`` context.
+    ``threading.Thread`` starts with an empty context by default, and the
+    backend reads two contextvars at the ``core.llm`` entry point:
+
+    * ``core.llm_policy.model_override`` — the per-run model override the
+      pipeline runner loop wraps each stage in (M層 解決順②). Losing it makes
+      every LLM stage fall back to the tier default, so run options /
+      user policy / system policy never reach the agents.
+    * ``core.llm_usage.context`` — the U層 attribution context. Losing it
+      records the tokens as ``feature='unattributed'``.
+
+    Copying the context here keeps both alive inside the thread while leaving
+    the wall-timeout semantics untouched (the context copy is per-call, so the
+    worker cannot leak writes back into the caller).
+    """
     result_queue: queue.Queue[tuple[str, object]] = queue.Queue(maxsize=1)
 
     def target() -> None:
@@ -280,7 +298,8 @@ def _call_with_wall_timeout(func, timeout_seconds: float, *args, **kwargs):
         except Exception as exc:
             result_queue.put(("error", exc))
 
-    thread = threading.Thread(target=target, daemon=True)
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(target=lambda: ctx.run(target), daemon=True)
     thread.start()
     try:
         status, value = result_queue.get(timeout=timeout_seconds)

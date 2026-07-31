@@ -83,6 +83,7 @@ class _FakeSession:
     def __init__(self, ledger_rows):
         self._ledger_rows = ledger_rows
         self.inserted: list[dict] = []
+        self.statements: list[str] = []
         self.updates = 0
         self.committed = False
         self.rolled_back = False
@@ -90,6 +91,7 @@ class _FakeSession:
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        self.statements.append(sql)
         if "epistemic_ledger" in sql:
             return _Result(self._ledger_rows)
         if sql.strip().upper().startswith("UPDATE"):
@@ -362,3 +364,280 @@ class TestAuthoringHelpers:
         }
         choices = authoring.collect_author_choices(derivations, _EQUATIONS, limit=3)
         assert len(choices) == 3
+
+
+# ---------------------------------------------------------------------------
+# [D-1] 不透明 ID を素材にしない（2026-08-01 のレビュー修正）
+# ---------------------------------------------------------------------------
+
+_UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+class TestOpaqueStatementDetection:
+    def test_id_shaped_statements_are_opaque(self):
+        for value in ("eq_2_7", "eq_2", _UUID, "claim-12", "fig:2", "n_3", "c1", ""):
+            assert authoring.is_opaque_statement(value) is True, value
+
+    def test_resolved_text_is_not_opaque(self):
+        for value in (
+            _STATEMENT,
+            "この前提は検証されていない。",
+            "x'' + sin(x) = 0",
+            "linearization",
+        ):
+            assert authoring.is_opaque_statement(value) is False, value
+
+    def test_statement_equal_to_target_id_is_opaque(self):
+        """``target_label`` は引き当て空振り時に target_id をそのまま返す。"""
+        assert authoring.is_opaque_statement("Linear detector", "Linear detector") is True
+        assert authoring.is_opaque_statement(_STATEMENT, "some-other-id") is False
+
+
+class TestOpaqueLedgerRowsAreNotMaterial:
+    """equation 行 / 引き当て空振り行が素材化して LLM・引用照合に入らないこと。"""
+
+    def _session(self, rows):
+        return _FakeSession(rows)
+
+    def test_equation_and_uuid_rows_are_dropped(self, monkeypatch):
+        session = self._session([
+            ("eq_2_7", "equation", "unknown"),
+            (_UUID, "claim", "unknown"),
+        ])
+        # 実挙動の再現: target_label は equation の分岐を持たず、claim の引き当て
+        # 空振り時も target_id をそのまま返す。
+        monkeypatch.setattr(
+            "core.doubt.open_assumptions.target_label", lambda s, t, i: i
+        )
+        stats: dict = {}
+
+        items = authoring.collect_untested_assumptions(session, _DOCUMENT_ID, stats=stats)
+
+        assert items == []
+        assert stats == {"rows": 2, "opaque_skipped": 2, "kept": 0}
+
+    def test_stage_skips_llm_when_material_is_only_opaque_ids(self, monkeypatch, stage_env):
+        stage_env._ledger_rows = [  # noqa: SLF001
+            ("eq_2_7", "equation", "unknown"),
+            (_UUID, "claim", "unknown"),
+        ]
+        monkeypatch.setattr(
+            "core.doubt.open_assumptions.target_label", lambda s, t, i: i
+        )
+
+        payload = _run(derivations={"chains": []})
+
+        assert payload["assumption_count"] == 0
+        assert payload["author_choice_count"] == 0
+        assert payload["skipped_reason"] == "no_source_material"
+        assert payload["assumption_rows_skipped_opaque"] == 2
+        assert _FakeAgent.last_payload is None  # LLM を1コールも消費しない
+        assert stage_env.inserted == []
+
+    def test_opaque_rows_do_not_consume_the_material_budget(self, monkeypatch):
+        """equation 行が上限を食い潰して素材0件にならないこと（多めに引く）。"""
+        rows = [(f"eq_{i}", "equation", "unknown") for i in range(8)]
+        rows += [(f"a{i}", "assumption", "untested") for i in range(3)]
+        session = self._session(rows)
+        monkeypatch.setattr(
+            "core.doubt.open_assumptions.target_label",
+            lambda s, t, i: i if t == "equation" else f"{_STATEMENT} ({i})",
+        )
+        stats: dict = {}
+
+        items = authoring.collect_untested_assumptions(
+            session, _DOCUMENT_ID, limit=2, stats=stats
+        )
+
+        assert len(items) == 2  # limit は守る
+        assert stats["opaque_skipped"] == 8
+        assert all(_STATEMENT in i["statement"] for i in items)
+
+    def test_resolvable_rows_still_pass_through(self, monkeypatch, stage_env):
+        stage_env._ledger_rows = [  # noqa: SLF001
+            ("eq_2_7", "equation", "unknown"),
+            ("t1", "assumption", "untested"),
+        ]
+        monkeypatch.setattr(
+            "core.doubt.open_assumptions.target_label",
+            lambda s, t, i: _STATEMENT if i == "t1" else i,
+        )
+
+        payload = _run(derivations={"chains": []})
+
+        assert payload["assumption_count"] == 1
+        assert payload["assumption_source"] == "ledger"
+        assert payload["assumption_rows_skipped_opaque"] == 1
+        statements = [a["statement"] for a in _FakeAgent.last_payload["untested_assumptions"]]
+        assert statements == [_STATEMENT]
+
+
+# ---------------------------------------------------------------------------
+# [D-4] 台帳が空（初回解析）でも素材が得られる（2026-08-01 のレビュー修正）
+# ---------------------------------------------------------------------------
+
+
+def _claim(
+    claim_id="c1",
+    text="The detector gain is constant across the run.",
+    support_status="source_backed",
+    evidence_text="",
+    is_atomic=True,
+    normalized_text=None,
+):
+    return {
+        "claim_id": claim_id,
+        "text": text,
+        "normalized_text": text if normalized_text is None else normalized_text,
+        "support_status": support_status,
+        "evidence_text": evidence_text,
+        "is_atomic": is_atomic,
+    }
+
+
+class TestArtifactFallbackForUntestedAssumptions:
+    def test_claims_become_material_when_the_ledger_is_empty(self):
+        artifacts = dict(_ARTIFACTS)
+        artifacts["claim_object_builder"] = {"claims": [_claim(), _claim("c2", "A second claim text.")]}
+        stats: dict = {}
+
+        items = authoring.derive_untested_assumptions_from_artifacts(artifacts, stats=stats)
+
+        assert [i["statement"] for i in items] == [
+            "The detector gain is constant across the run.",
+            "A second claim text.",
+        ]
+        assert {i["target_type"] for i in items} == {"claim"}
+        assert {i["verification_status"] for i in items} == {"unknown"}
+        assert stats["kept"] == 2
+
+    def test_claims_with_evidence_text_are_treated_as_supported(self):
+        """backfill と同じ判定: evidence 付き source_backed は indirectly_supported
+        （= この論文が確かめていないこと ではない）ので素材にしない。"""
+        artifacts = {
+            "claim_object_builder": {
+                "claims": [
+                    _claim("c1", "Supported claim.", evidence_text="verbatim from the pdf"),
+                    _claim("c2", "Unsupported claim."),
+                ]
+            }
+        }
+        stats: dict = {}
+
+        items = authoring.derive_untested_assumptions_from_artifacts(artifacts, stats=stats)
+
+        assert [i["statement"] for i in items] == ["Unsupported claim."]
+        assert stats["skipped_supported"] == 1
+
+    def test_atomic_claims_come_first_but_others_are_kept(self):
+        artifacts = {
+            "claim_object_builder": {
+                "claims": [
+                    _claim("c1", "Compound claim.", is_atomic=False),
+                    _claim("c2", "Atomic claim."),
+                ]
+            }
+        }
+
+        items = authoring.derive_untested_assumptions_from_artifacts(artifacts)
+
+        assert [i["statement"] for i in items] == ["Atomic claim.", "Compound claim."]
+
+    def test_opaque_claim_text_is_dropped(self):
+        artifacts = {"claim_object_builder": {"claims": [_claim("c1", "eq_2_7")]}}
+        stats: dict = {}
+
+        items = authoring.derive_untested_assumptions_from_artifacts(artifacts, stats=stats)
+
+        assert items == []
+        assert stats["opaque_skipped"] == 1
+
+    def test_limit_and_dedup(self):
+        artifacts = {
+            "claim_object_builder": {
+                "claims": [_claim(f"c{i}", "The same statement text.") for i in range(5)]
+                + [_claim(f"d{i}", f"Statement number {i}.") for i in range(20)]
+            }
+        }
+
+        items = authoring.derive_untested_assumptions_from_artifacts(artifacts)
+
+        assert len(items) == authoring.MAX_UNTESTED_ASSUMPTIONS
+        assert len({i["statement"] for i in items}) == len(items)
+
+    def test_no_claims_yields_nothing(self):
+        assert authoring.derive_untested_assumptions_from_artifacts({}) == []
+        assert authoring.derive_untested_assumptions_from_artifacts(
+            {"claim_object_builder": {"claims": []}}
+        ) == []
+
+
+class TestStageUsesFallbackOnFirstAnalysis:
+    """初回解析（persist は後段なので台帳が空）で seed 生成まで進むこと。"""
+
+    def _artifacts_with_claims(self):
+        artifacts = dict(_ARTIFACTS)
+        artifacts["claim_object_builder"] = {
+            "claims": [_claim("c1", "The detector response stays linear above 5 GeV.")]
+        }
+        return artifacts
+
+    def test_empty_ledger_falls_back_to_artifacts(self, stage_env):
+        stage_env._ledger_rows = []  # noqa: SLF001
+
+        payload = _run(artifacts=self._artifacts_with_claims(), derivations={"chains": []})
+
+        assert payload["assumption_source"] == "artifact_fallback"
+        assert payload["assumption_count"] == 1
+        assert payload.get("skipped_reason") is None
+        assert payload["seed_count"] == 2
+        assert payload["saved_candidates"] == 2
+        statements = [a["statement"] for a in _FakeAgent.last_payload["untested_assumptions"]]
+        assert statements == ["The detector response stays linear above 5 GeV."]
+
+    def test_populated_ledger_wins_over_the_fallback(self, stage_env):
+        payload = _run(artifacts=self._artifacts_with_claims(), derivations={"chains": []})
+
+        assert payload["assumption_source"] == "ledger"
+        statements = [a["statement"] for a in _FakeAgent.last_payload["untested_assumptions"]]
+        assert statements == [_STATEMENT]
+
+    def test_ledger_failure_falls_back_to_artifacts(self, monkeypatch, stage_env):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("ledger unavailable")
+
+        monkeypatch.setattr(authoring, "collect_untested_assumptions", _boom)
+
+        payload = _run(artifacts=self._artifacts_with_claims(), derivations={"chains": []})
+
+        assert payload["assumption_lookup_failed"] is True
+        assert payload["assumption_source"] == "artifact_fallback"
+        assert payload["assumption_count"] == 1
+
+    def test_fallback_failure_is_non_fatal(self, monkeypatch, stage_env):
+        stage_env._ledger_rows = []  # noqa: SLF001
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("artifact shape unexpected")
+
+        monkeypatch.setattr(authoring, "derive_untested_assumptions_from_artifacts", _boom)
+
+        payload = _run(artifacts=self._artifacts_with_claims(), derivations={"chains": []})
+
+        assert payload["skipped_reason"] == "no_source_material"
+        assert payload["seed_count"] == 0
+
+    def test_fallback_does_not_write_to_the_ledger(self, stage_env):
+        """D層非改変: フォールバックは読むだけで台帳に記帳しない。"""
+        stage_env._ledger_rows = []  # noqa: SLF001
+
+        _run(artifacts=self._artifacts_with_claims(), derivations={"chains": []})
+
+        writes = [
+            sql for sql in stage_env.statements
+            if "epistemic_ledger" in sql and not sql.lstrip().upper().startswith("SELECT")
+        ]
+        assert writes == []
+        # 書き込みは element_explanations の supersede(UPDATE 1回) + INSERT だけ。
+        assert stage_env.updates == 1
+        assert len(stage_env.inserted) == 2

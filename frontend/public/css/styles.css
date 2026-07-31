@@ -6644,6 +6644,16 @@ body.admin-inspect-mode textarea:disabled {
   border-color: #ef4444;
   animation: mic-pulse 1.2s ease-in-out infinite;
 }
+/* discuss モード中は開始できない（設計 §6.4）。無効の見た目は控えめに
+   （警告色にしない）。理由は title と #discuss-voice-note の事実文が担う。 */
+.voice-mode-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.voice-mode-btn:disabled:hover {
+  background: transparent;
+  border-color: var(--color-border-secondary);
+}
 
 .voice-panel {
   display: none;
@@ -8845,6 +8855,17 @@ body.admin-inspect-mode textarea:disabled {
   color: #5b4b8a;
   font-weight: 600;
 }
+/* 音声会話の非対応を伝える1行（設計 §6.4）。静かな事実文に留め、狭い画面では
+   省略記号で切る（composer 直上のバーを2行に折り返させない）。 */
+.discuss-voice-note {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.discuss-voice-note[hidden] { display: none; }
 
 /* 教材区画: discuss モードのプレースホルダカード（Phase 2 で開幕画面に置き換わる前提）。 */
 .discuss-placeholder {
@@ -9157,6 +9178,19 @@ body.admin-inspect-mode textarea:disabled {
 }
 .discuss-truncated-note { margin-top: 4px; }
 .discuss-free-input-note { margin-top: 6px; }
+
+/* 開幕の「議論のきっかけ」を LLM 非経由で置いたアシスタントの問い
+   （app.js の window.discussPostSeedPrompt）。通常の回答と区別が付くよう左に細い
+   アクセントを引くだけに留める（強調色・バッジは使わない）。 */
+.mg.ai.discuss-prompt {
+  border-left: 2px solid var(--color-border-secondary);
+  padding-left: 10px;
+}
+.discuss-prompt-hint {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-top: 6px;
+}
 
 /* ── 分岐チップ（チャット区画・discuss モード限定）───────────────────── */
 .discuss-branch-chips {

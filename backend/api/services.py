@@ -771,12 +771,42 @@ def save_course_data(
     visibility: str = "private",
     group_id: str | None = None,
     description: str = "",
+    preserve_sharing_fields: bool = False,
 ) -> None:
-    """LearningCourse データを PostgreSQL に UPSERT する。"""
+    """LearningCourse データを PostgreSQL に UPSERT する。
+
+    レビュー確定の修正2（D-5）: 既定の UPSERT は ``ON CONFLICT`` で
+    ``visibility`` / ``group_id`` / ``description`` を無条件に上書きするため、
+    これらを引数で指定しない部分更新（``PUT /api/learning/courses/{id}`` の
+    course_focus / llm_models 保存など）が公開コースを ``visibility='private'`` に
+    落とし、受講者全員がコースを開けなくなっていた（``is_published`` は残るため
+    教員画面では公開済みのまま見える）。group 共有は ``group_id`` の NULL 化で失効し、
+    ``description`` も消えていた。
+
+    ``preserve_sharing_fields=True`` を渡すと、既存行がある場合に
+    ``visibility`` / ``group_id`` / ``description`` を SET 句から外して**温存**する
+    （既存行の読み取りを挟まないので TOCTOU も起きない）。新規行の INSERT 時のみ
+    引数の値が使われる。既定 ``False`` は従来挙動（明示的に共有設定を指定する
+    ``create_course`` 等）のまま。``is_template`` / ``is_published`` は従来どおり
+    ``ON CONFLICT`` の SET 句に含めない（更新で変えない）。
+    """
+    conflict_assignments = [
+        "data = CAST(EXCLUDED.data AS jsonb)",
+        "title = EXCLUDED.title",
+    ]
+    if not preserve_sharing_fields:
+        conflict_assignments += [
+            "visibility = EXCLUDED.visibility",
+            "group_id = EXCLUDED.group_id",
+            "description = EXCLUDED.description",
+        ]
+    conflict_assignments.append("updated_at = now()")
+    conflict_set_sql = ",\n                    ".join(conflict_assignments)
+
     session = _pg_session()
     try:
         session.execute(
-            sa_text("""
+            sa_text(f"""
                 INSERT INTO learning_courses
                     (id, user_id, title, data, is_template, is_published, owner_id,
                      visibility, group_id, description)
@@ -793,12 +823,7 @@ def save_course_data(
                     :description
                 )
                 ON CONFLICT (id) DO UPDATE
-                SET data = CAST(EXCLUDED.data AS jsonb),
-                    title = EXCLUDED.title,
-                    visibility = EXCLUDED.visibility,
-                    group_id = EXCLUDED.group_id,
-                    description = EXCLUDED.description,
-                    updated_at = now()
+                SET {conflict_set_sql}
             """),
             {
                 "course_id": course_id,
@@ -3512,22 +3537,53 @@ def get_graph_element_context(
     element_id: str,
     element_type: str | None = None,
     element_label: str | None = None,
+    *,
+    allowed_document_ids: "set[str] | list[str] | None",
 ) -> dict:
-    """EXPLAIN_GRAPH_ELEMENT 用にチャンク、グラフ説明、関連教材を集める。"""
+    """EXPLAIN_GRAPH_ELEMENT 用にチャンク、グラフ説明、関連教材を集める。
+
+    レビュー確定の修正1（セキュリティ / DM2）: 主チャンククエリは chunk_id だけで
+    引いており、受講中の学習者が任意の chunk_id を送るだけで他教員の Private 論文の
+    本文・数式・knowledge_graph 由来の説明を取得できていた（そこから
+    ``element_explanations`` の承認済み説明や ``student_stumble_events`` の記帳先まで
+    他人の document に届いていた）。``get_chunk_passage`` / ``get_chunk_claim_refs`` と
+    同じ流儀で ``allowed_document_ids`` を**必須キーワード引数**にし、主チャンククエリの
+    WHERE で強制する:
+
+      - ``None``: 無フィルタ（テスト・本番未接続コード専用）
+      - 空集合: SQL を発行せず即座に ``{}``（fail-closed）
+      - 非空集合: SQL 内 ``c.document_id = ANY(...)`` で強制
+
+    呼び出し元（``routes/learning.py::_generate_graph_element_explanation``）は
+    ``get_chunk_claim_refs`` と同じ意味論の複合集合（コース sources ∪ 本人可視 document）を
+    渡す。範囲外の chunk_id は「チャンクが見つからない」（呼び出し側 404）に落ちる。
+
+    secondary の ``related_chunks`` は従来どおり ``course_source_material_ids`` で
+    スコープ済み（コース教材のみ）。
+    """
+    if allowed_document_ids is not None and len(allowed_document_ids) == 0:
+        return {}
+
     material_ids = course_source_material_ids(course_data)
     session = _pg_session()
     try:
+        main_params: dict = {"chunk_id": chunk_id}
+        doc_filter_sql = ""
+        if allowed_document_ids is not None:
+            doc_filter_sql = "AND c.document_id = ANY(CAST(:doc_ids AS uuid[]))"
+            main_params["doc_ids"] = list(allowed_document_ids)
         row = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT c.id, c.text, c.display_text, c.formulas, c.material_id,
                        COALESCE(d.title, d.filename, '') AS source_title,
                        d.knowledge_graph, d.uploaded_by, c.source_metadata
                 FROM chunks c
                 LEFT JOIN documents d ON c.document_id = d.id
                 WHERE c.id = CAST(:chunk_id AS uuid)
+                {doc_filter_sql}
                 LIMIT 1
             """),
-            {"chunk_id": chunk_id},
+            main_params,
         ).fetchone()
         if not row:
             return {}
@@ -4364,6 +4420,7 @@ def process_material_background(
     cartridge_id: str | None = None,
     source_kind: str = "pdf",
     options: dict | None = None,
+    user_id: str | None = None,
 ) -> None:
     """バックグラウンドで新Agent Pipelineを実行する (issue #226)。
 
@@ -4425,6 +4482,7 @@ def process_material_background(
             filename=filename,
             source_kind=source_kind,
             cartridge_id=cartridge_id,
+            user_id=user_id,
             progress_callback=_on_stage,
             options=options,
         )

@@ -452,7 +452,7 @@ def upload_material(
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
-        kwargs={"options": upload_options},
+        kwargs={"options": upload_options, "user_id": str(current_user["id"])},
         daemon=True,
     )
     thread.start()
@@ -490,6 +490,25 @@ class ReanalyzeRequest(BaseModel):
     ``_validate_models_option`` で fail-closed 検証する。"""
     analyze_images: bool | None = None
     models: dict[str, str] | None = None
+
+
+def _previous_run_options(document_id: str, material_id: str) -> dict:
+    """前回 run の ``options`` を best-effort で読む（読めなければ空 dict）。
+
+    orchestrator は ``options`` を wholesale 置換するため、片方だけ明示された再解析でも
+    前回値を土台にする必要がある（レビュー指摘 J1）。ここで例外を伝播させると
+    「前回値が読めない」だけで再解析自体が 500 になってしまうので fail-open にする
+    （その場合は明示された値のみの options になる = 従来挙動）。
+    """
+    try:
+        previous_run = get_latest_analysis_run(document_id=document_id, material_id=material_id)
+    except Exception:  # noqa: BLE001 — fail-open（再解析を止めない）
+        logger.warning(
+            "reanalyze: failed to read previous run options for document=%s", document_id,
+            exc_info=True,
+        )
+        return {}
+    return dict((previous_run or {}).get("options") or {})
 
 
 @router.post("/documents/{document_id}/reanalyze", status_code=202)
@@ -586,28 +605,29 @@ def reanalyze_document(
     if body is not None and body.models:
         models_option = _validate_models_option(body.models)
 
-    if models_option is None:
-        # models 未指定: 従来どおりの規則をそのまま維持する（新規 DB 読み出しを
-        # 増やさない。既存の analyze_images-only 呼び出し経路の挙動を変えない）。
-        options = {"analyze_images": bool(analyze_images)} if analyze_images is not None else None
-    elif analyze_images is not None:
-        # 両方明示: 前回 run を読む必要が無いのでそのまま組み立てる。
-        options = {"analyze_images": bool(analyze_images), "models": models_option}
+    # orchestrator は options を **wholesale 置換**する（部分マージしない）ため、
+    # 片方だけを明示した再解析でも前回 run の options を土台にして組み立てる
+    # （レビュー指摘 J1: models 未指定 + analyze_images 明示のとき、前回 run の
+    # `options.models` が黙って捨てられ、モーダルが「前回と同じ」と表示しながら
+    # 実 run はモデル指定を失っていた。逆方向だけ温存されている非対称も解消する）。
+    if models_option is None and analyze_images is None:
+        # どちらも未指定: options=None を渡し、orchestrator の「前回 run の options を
+        # そのまま引き継ぐ」分岐に委ねる（従来どおり・DB 読み出しも増やさない）。
+        options = None
     else:
-        # models だけ明示・analyze_images は未指定: analyze_images は前回 run の値を
-        # 引き継ぐ（models の指定が analyze_images を無警告でリセットしない）。
-        previous_run_for_options = get_latest_analysis_run(
-            document_id=document_id, material_id=material_id
-        )
-        previous_options = dict((previous_run_for_options or {}).get("options") or {})
-        options = dict(previous_options)
-        options.setdefault("analyze_images", False)
-        options["models"] = models_option
+        options = dict(_previous_run_options(document_id, material_id))
+        if analyze_images is not None:
+            options["analyze_images"] = bool(analyze_images)
+        else:
+            options.setdefault("analyze_images", False)
+        if models_option is not None:
+            options["models"] = models_option
+        # models 未指定なら前回 run の `models` はそのまま温存される（コピー済み）。
 
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
-        kwargs={"options": options},
+        kwargs={"options": options, "user_id": str(current_user["id"])},
         daemon=True,
     )
     thread.start()

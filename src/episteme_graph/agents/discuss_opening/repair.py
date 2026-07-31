@@ -28,7 +28,16 @@ MAX_ERRORS_IN_PROMPT = 12
 
 
 def build_repair_prompt(previous_raw: str, errors: list[str]) -> str:
-    """直前の生出力と検証エラーを添えた修復指示（追記文）。"""
+    """直前の生出力と検証エラーを添えた修復指示（追記文）。
+
+    指示は validator の hard error と矛盾させない（2026-08-01, [D-7]）: 素材
+    （未検証前提 / 著者の選んだ手）が渡されている状態で ``seeds`` を空にすると
+    ``empty_seeds_with_material`` の hard error になり、修復が必ず失敗して LLM の
+    1周が無駄になる。よってここでは「空にしてよい」とは言わず、**素材の範囲内で
+    最低1件返す**ことを求める（素材そのものが無い document には
+    ``DiscussOpeningInput.has_material()`` の縮退でそもそも到達しない。素材が不透明
+    ID だけのケースも ``core/discuss/authoring.py`` 側で除外済み）。
+    """
     listed = "\n".join(f"- {e}" for e in (errors or [])[:MAX_ERRORS_IN_PROMPT])
     return (
         "## 直前の出力\n"
@@ -39,8 +48,9 @@ def build_repair_prompt(previous_raw: str, errors: list[str]) -> str:
         "- `evidence_quote` は素材の文字列を**そのままコピー**する"
         "（翻訳・要約・言い換えをしない）。\n"
         "- `body` は「？」または「?」で終わる疑問文にする。\n"
-        "- 素材に無いことは書かない。素材が足りなければ `seeds` を空にし "
-        "`skipped_reason` を入れる。\n"
+        "- 素材に無いことは書かない。ただし素材は渡されているので `seeds` は"
+        "空にしない — 確実に裏付けられる1件だけでもよいので、`evidence_quote` が"
+        "素材の文字列と一致する seed を最低1件返す。\n"
         "JSON のみを返してください。"
     )
 

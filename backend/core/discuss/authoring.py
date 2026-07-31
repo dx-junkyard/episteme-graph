@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, Iterable, Mapping
 
 from sqlalchemy import text as sa_text
@@ -40,10 +41,69 @@ MAX_EQUATION_LABEL_CHARS = 120
 # D層台帳のうち「この論文が確かめていないこと」に当たる状態（設計書 §2）。
 UNTESTED_VERIFICATION_STATUSES = ("untested", "unknown")
 
+# 台帳から引く行数の倍率（[D-1]）。statement が不透明 ID の行は素材にしないため、
+# ``limit`` 件ちょうど引くと equation 行ばかりの document で素材が0件になる。
+# 多めに引いて、解決できた行だけを ``limit`` 件まで採る（SQL 側の LIMIT は残す）。
+_LEDGER_FETCH_MULTIPLIER = 4
+
 # 汎用すぎて「著者が選んだ手」として提示しにくい operation（derivation_chain の
 # 語彙のうち抽象動詞。TheoryOperationGraph の generic 扱いと同じ考え方）。
 # 落とすのではなく**後ろに回す**（P4: 情報を落とさない）。
 _GENERIC_OPERATIONS = frozenset({"transform", "relate", "apply_equation", ""})
+
+# ---------------------------------------------------------------------------
+# 不透明 ID の検出（[D-1] 2026-08-01）
+#
+# ``core.doubt.open_assumptions.target_label`` は引き当てに失敗すると **target_id を
+# そのまま返す**（equation は分岐すら持たない）。その戻り値を statement にすると
+#
+#   (a) `eq_2_7` / UUID だけの素材で ``has_material()`` が True になり、skip すべき
+#       document に LLM を1コール消費する
+#   (b) `MIN_EVIDENCE_QUOTE_CHARS=6` を満たすため LLM が ID を evidence_quote に
+#       コピーすると verbatim 検査を通過し、承認されると学習者に「引用」として出る
+#   (c) 設計書 §4.1「不透明 ID を渡さず解決済みテキストに展開する」に正面から反する
+#
+# ので、素材にする前にここで落とす。D層（``core/doubt/``）は他にも読み手がいるため
+# 非改変（``target_label`` の戻り値契約は変えない）。
+# ---------------------------------------------------------------------------
+
+_UUID_RE = re.compile(
+    r"\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\Z", re.IGNORECASE
+)
+# 命題ではない単一トークン（`eq_2_7` / `claim-12` / `c1` / `fig:2` / `n_3`）。
+# 空白を含む文（=複数語）と CJK を含む文は対象外にして誤検出を避ける。
+_ID_TOKEN_RE = re.compile(r"\A[A-Za-z0-9]+(?:[_.:\-#/][A-Za-z0-9]+)*\Z")
+_ID_TOKEN_HINT_RE = re.compile(r"[0-9_.:\-#/]")
+_CJK_RE = re.compile(r"[぀-ヿ㐀-䶿一-鿿ｦ-ﾟ]")
+
+
+def is_opaque_statement(statement: Any, target_id: Any = "") -> bool:
+    """statement が「解決済みテキスト」ではなく不透明な ID か。
+
+    判定（保守的・決定論的）:
+
+    1. 空文字 → 不透明（引き当て失敗と同じ扱い）
+    2. ``target_id`` と一致 → 不透明（``target_label`` の引き当て空振りの主シグナル）
+    3. UUID 形 → 不透明
+    4. CJK を含む / 空白を含む（=複数語の文）→ **テキスト扱い**（誤検出させない）
+    5. 残った単一トークンのうち ID 形（英数 + ``_ . : - # /`` の区切り、かつ数字か
+       区切り文字を含む）→ 不透明
+    """
+    text = str(statement or "").strip()
+    if not text:
+        return True
+    tid = str(target_id or "").strip()
+    if tid and text == tid:
+        return True
+    if _UUID_RE.match(text):
+        return True
+    if _CJK_RE.search(text):
+        return False
+    if re.search(r"\s", text):
+        return False
+    if _ID_TOKEN_RE.match(text) and _ID_TOKEN_HINT_RE.search(text):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +208,30 @@ def compute_source_fingerprint(artifacts: Any) -> str:
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
     return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def has_fingerprint_source(artifacts: Any) -> bool:
+    """:func:`compute_source_fingerprint` が読む素材が1つでも入っているか（[D-3]）。
+
+    ``compute_source_fingerprint`` は空入力でも安定ハッシュを返す（「指紋が取れない」
+    ことをエラーにしない）。その性質は生成側では正しいが、**鮮度の突合側**では
+    「artifact が無い」と「artifact が変わった」を同じ形にしてしまう:
+    run が無い document や ``stage_outputs._artifacts`` が欠けた run では
+    ``document_run_artifacts`` が例外ではなく ``{}`` を返すため、空入力の指紋と
+    保存済み指紋が必ず食い違い「元の解析結果が変わっています」を誤表示する。
+
+    そのため突合側（``routes/element_explanations.py``）はこの述語で素材の有無を
+    先に確かめ、素材が無ければ鮮度判定そのものをスキップする。指紋の計算対象を
+    増やすときは :func:`compute_source_fingerprint` と**この関数を同時に**直す
+    （どちらも同じ3つを見るのが不変条件）。
+    """
+    thesis = _artifact(artifacts, "thesis_reconstruction")
+    central = _get(thesis, "central_thesis") or {}
+    if str(_get(thesis, "central_question") or "").strip():
+        return True
+    if str(_get(central, "text") or "").strip():
+        return True
+    return bool(collect_thesis_claim_ids(artifacts))
 
 
 # ---------------------------------------------------------------------------
@@ -263,6 +347,7 @@ def collect_untested_assumptions(
     document_id: str,
     *,
     limit: int = MAX_UNTESTED_ASSUMPTIONS,
+    stats: dict | None = None,
 ) -> list[dict]:
     """D層台帳（``epistemic_ledger``）の未検証行 → ``{statement, target_type,
     verification_status}``（statement は解決済みテキスト）。
@@ -272,6 +357,12 @@ def collect_untested_assumptions(
     ではないので入れない。statement の解決は
     ``core.doubt.open_assumptions.target_label`` に委譲する（claim / component /
     assumption の引き当て規則をここに再実装しない）。
+
+    ただし ``target_label`` は引き当てに失敗すると target_id を返し、``equation`` の
+    分岐すら持たないため、**戻り値が不透明 ID の行は素材にしない**
+    （:func:`is_opaque_statement`。[D-1]）。落とした件数は ``stats`` に正直に記録する
+    （P4: 黙って消さない）。``stats`` は与えられたときだけ
+    ``{"rows": int, "opaque_skipped": int, "kept": int}`` で埋める。
 
     セッションは呼び出し側が管理する（本モジュールは commit/close しない）。
     """
@@ -291,17 +382,24 @@ def collect_untested_assumptions(
         {
             "document_id": str(document_id),
             "statuses": list(UNTESTED_VERIFICATION_STATUSES),
-            "limit": max(0, int(limit)),
+            # 不透明 ID の行（equation 等）で枠を食い潰さないよう多めに引き、
+            # 解決できたものだけを limit 件まで採る（[D-1]）。
+            "limit": max(0, int(limit)) * _LEDGER_FETCH_MULTIPLIER,
         },
     ).fetchall()
 
     items: list[dict] = []
+    opaque_skipped = 0
+    kept_limit = max(0, int(limit))
     for row in rows:
         target_id = str(row[0] or "")
         target_type = str(row[1] or "")
         statement = _text(target_label(session, target_type, target_id))
-        if not statement:
-            # 引き当てできない行は素材にしない（不透明 ID を agent に渡さないため）。
+        if is_opaque_statement(statement, target_id):
+            # 引き当てできない行（空 / 生 ID / UUID / `eq_2_7` 等）は素材にしない。
+            opaque_skipped += 1
+            continue
+        if len(items) >= kept_limit:
             continue
         items.append(
             {
@@ -310,7 +408,102 @@ def collect_untested_assumptions(
                 "verification_status": str(row[2] or ""),
             }
         )
+    if stats is not None:
+        stats["rows"] = len(rows)
+        stats["opaque_skipped"] = opaque_skipped
+        stats["kept"] = len(items)
     return items
+
+
+# ---------------------------------------------------------------------------
+# 台帳が空のときのフォールバック（[D-4] 初回解析、2026-08-01）
+# ---------------------------------------------------------------------------
+
+# ``core.doubt.ledger_builder._claim_status`` の写像。evidence 付きの source_backed
+# claim は台帳では ``indirectly_supported`` になる = 「確かめていないこと」ではないので
+# 素材にしない。それ以外は ``unknown`` = 素材にする。
+_LEDGER_SOURCE_BACKED = "source_backed"
+_FALLBACK_VERIFICATION_STATUS = "unknown"
+
+
+def derive_untested_assumptions_from_artifacts(
+    artifacts: Any,
+    *,
+    limit: int = MAX_UNTESTED_ASSUMPTIONS,
+    stats: dict | None = None,
+) -> list[dict]:
+    """``epistemic_ledger`` が空のときの素材フォールバック（非LLM・決定論的）。
+
+    **なぜ必要か（[D-4]）**: D層台帳を書くのは ①パイプライン**完了後**の
+    ``core.doubt.ledger_builder.backfill_document_ledger`` ②教員の D層 API だけで、
+    ``discuss_opening`` ステージは ``course_mapping`` / ``persist_claims_components_graph``
+    の**前**に走る。したがって初回解析では台帳が構造的に空で、
+    :func:`collect_untested_assumptions` は必ず0件を返す。式の無い論文
+    （derivation 由来の author_choices も空）では ``has_material()`` が False になり
+    ``skipped_reason='no_source_material'`` が恒久化し、再解析を1回回すまで
+    「議論のきっかけ」が出ない — 設計書 §4.1 の主素材が初回で使えない状態だった。
+
+    **同じ判定を写像する（D層には書き込まない）**: backfill が読む DB 行
+    （``theory_claims``）はこの時点でまだ永続化されていない（persist ステージが後）。
+    そこで同じ内容の in-run artifact（``claim_object_builder``）から、backfill と同じ
+    保守的マッピング（``support_status='source_backed'`` かつ evidence 本文あり →
+    ``indirectly_supported`` = 素材にしない / それ以外 → ``unknown`` = 素材にする）で
+    未検証前提相当を導出する。**台帳への記帳は一切行わない**（D層非改変・記帳の正本は
+    パイプライン完了後の backfill のまま）。
+
+    claim 以外の台帳対象は写像しない:
+
+    - ``equation``: ``target_label`` に分岐が無く、台帳経路でも
+      :func:`is_opaque_statement` で落ちる（式ラベルは命題ではない）。
+    - ``component``: graph node は「解析がまだ裏付けを取れていないところ」= 主語が
+      システム側で、開幕画面では ``fragile_points`` の別区画（subject=system）が担う。
+      「この論文が確かめていないこと」に混ぜない（設計書 §0 欠陥1）。
+    - ``assumption``（D層 assumption_nodes）: 初回解析時点では存在しない。
+
+    ``atomic`` claim を先に並べる（CLAUDE.md: 非 atomic / split_pending は強い backing に
+    使わない）が、捨てはしない（P4）。
+    """
+    result = _artifact(artifacts, "claim_object_builder")
+    claims = _get(result, "claims") or []
+    atomic: list[dict] = []
+    non_atomic: list[dict] = []
+    seen: set[str] = set()
+    skipped_supported = 0
+    opaque_skipped = 0
+
+    for record in claims:
+        support_status = str(_get(record, "support_status") or "").strip()
+        evidence_text = str(_get(record, "evidence_text") or "").strip()
+        if support_status == _LEDGER_SOURCE_BACKED and evidence_text:
+            # backfill 側で indirectly_supported になる行（= 確かめていないこと ではない）。
+            skipped_supported += 1
+            continue
+        raw_statement = _get(record, "normalized_text") or _get(record, "text") or ""
+        statement = _text(raw_statement)
+        claim_id = str(_get(record, "claim_id") or "")
+        if is_opaque_statement(statement, claim_id):
+            opaque_skipped += 1
+            continue
+        if statement in seen:
+            continue
+        seen.add(statement)
+        item = {
+            "statement": statement,
+            "target_type": "claim",
+            "verification_status": _FALLBACK_VERIFICATION_STATUS,
+        }
+        if bool(_get(record, "is_atomic", True)):
+            atomic.append(item)
+        else:
+            non_atomic.append(item)
+
+    ordered = (atomic + non_atomic)[: max(0, int(limit))]
+    if stats is not None:
+        stats["claims"] = len(claims)
+        stats["opaque_skipped"] = opaque_skipped
+        stats["skipped_supported"] = skipped_supported
+        stats["kept"] = len(ordered)
+    return ordered
 
 
 def build_discuss_opening_input(

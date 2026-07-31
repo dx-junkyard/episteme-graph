@@ -266,6 +266,88 @@ class TestCreateTeachingFigure:
             self._create(session, figure_id="nope")
         assert session.calls == []
 
+    def test_insert_does_not_reference_a_nonexistent_updated_by_column(self):
+        """migration 063 に ``updated_by`` 列は無い（実 DB では 42703）。
+
+        列集合の網羅検査は
+        ``test_teaching_figures_guardrails.py::TestStoreSqlColumnsExistInMigration``。
+        """
+        session = _FakeSession([[_figure_row()]])
+        self._create(session, figure_id=_FIGURE_ID)
+        assert "updated_by" not in session.sql(0)
+
+
+class TestSchematicCaptionEnforcement:
+    """FG5: ``data_plot_schematic`` の caption に「模式図」表記を強制付与する。"""
+
+    def _create(self, session, **overrides):
+        kwargs = {
+            "course_id": "course-1",
+            "topic_id": "topic-1",
+            "created_by": _USER_ID,
+            "title": "依存関係の概略",
+            "caption": "x に対する y の増加",
+            "figure_kind": schema.FIGURE_KIND_DATA_PLOT_SCHEMATIC,
+            "svg_source": "<svg/>",
+            "minio_key": "teaching/course-1/fig.svg",
+            "content_type": schema.SVG_CONTENT_TYPE,
+            "status": schema.FIGURE_STATUS_DRAFT,
+        }
+        kwargs.update(overrides)
+        return store.create_teaching_figure(session, **kwargs)
+
+    def test_create_appends_the_marker(self):
+        session = _FakeSession([[_figure_row()]])
+        self._create(session)
+        assert session.params(0)["caption"] == "x に対する y の増加（模式図）"
+
+    def test_create_does_not_double_append(self):
+        session = _FakeSession([[_figure_row()]])
+        self._create(session, caption="y の増加の模式図")
+        assert session.params(0)["caption"] == "y の増加の模式図"
+
+    def test_create_with_empty_caption_gets_the_bare_marker(self):
+        session = _FakeSession([[_figure_row()]])
+        self._create(session, caption="")
+        assert session.params(0)["caption"] == "模式図"
+
+    def test_other_kinds_are_left_untouched(self):
+        session = _FakeSession([[_figure_row()]])
+        self._create(session, figure_kind=schema.FIGURE_KIND_PROCESS_FLOW)
+        assert session.params(0)["caption"] == "x に対する y の増加"
+
+    def test_update_appends_the_marker_using_the_stored_kind(self):
+        """PATCH は caption だけ来る（figure_kind は現在の行から読む）。"""
+        session = _FakeSession(
+            [
+                [_figure_row(figure_kind=schema.FIGURE_KIND_DATA_PLOT_SCHEMATIC)],
+                [_figure_row()],
+            ]
+        )
+        store.update_teaching_figure(session, _FIGURE_ID, caption="傾向だけを示す")
+        assert session.params(1)["caption"] == "傾向だけを示す（模式図）"
+
+    def test_update_does_not_double_append(self):
+        session = _FakeSession(
+            [
+                [_figure_row(figure_kind=schema.FIGURE_KIND_DATA_PLOT_SCHEMATIC)],
+                [_figure_row()],
+            ]
+        )
+        store.update_teaching_figure(session, _FIGURE_ID, caption="傾向の模式図です")
+        assert session.params(1)["caption"] == "傾向の模式図です"
+
+    def test_update_of_other_kind_is_untouched(self):
+        session = _FakeSession(
+            [[_figure_row(figure_kind=schema.FIGURE_KIND_TIMELINE)], [_figure_row()]]
+        )
+        store.update_teaching_figure(session, _FIGURE_ID, caption="発展段階")
+        assert session.params(1)["caption"] == "発展段階"
+
+    def test_helper_is_pure_and_domain_neutral(self):
+        assert schema.enforce_schematic_caption("", "data_plot_schematic") == "模式図"
+        assert schema.enforce_schematic_caption("A", "concept_map") == "A"
+
 
 class TestGetAndList:
     def test_get_returns_none_for_non_uuid_without_touching_db(self):
@@ -301,6 +383,56 @@ class TestGetAndList:
         session = _FakeSession()
         assert store.list_teaching_figures(session, "course-1", statuses=[]) == []
         assert session.calls == []
+
+
+class TestDeliveryProjection:
+    """画像配信は最小列だけを引く（旧版 SVG = ``revisions`` を引かない）。"""
+
+    def _row(self) -> tuple:
+        return (
+            _FIGURE_ID,
+            "course-1",
+            schema.FIGURE_STATUS_ADOPTED,
+            "teaching/course-1/fig.svg",
+            schema.SVG_CONTENT_TYPE,
+            "<svg/>",
+        )
+
+    def test_returns_only_delivery_fields(self):
+        session = _FakeSession([[self._row()]])
+        row = store.get_teaching_figure_for_delivery(session, _FIGURE_ID)
+        assert row == {
+            "id": _FIGURE_ID,
+            "course_id": "course-1",
+            "status": schema.FIGURE_STATUS_ADOPTED,
+            "minio_key": "teaching/course-1/fig.svg",
+            "content_type": schema.SVG_CONTENT_TYPE,
+            "svg_source": "<svg/>",
+        }
+
+    def test_sql_does_not_select_revisions(self):
+        session = _FakeSession([[self._row()]])
+        store.get_teaching_figure_for_delivery(session, _FIGURE_ID)
+        select_clause = session.sql(0).split("FROM")[0]
+        assert "revisions" not in select_clause
+        assert "svg_source" in select_clause  # 正本へのフェイルソフト用に必要
+
+    def test_missing_row_is_none(self):
+        session = _FakeSession([[]])
+        assert store.get_teaching_figure_for_delivery(session, _FIGURE_ID) is None
+
+    def test_non_uuid_id_does_not_touch_db(self):
+        session = _FakeSession()
+        assert store.get_teaching_figure_for_delivery(session, "../etc/passwd") is None
+        assert session.calls == []
+
+    def test_content_type_defaults_to_svg(self):
+        row = list(self._row())
+        row[4] = None
+        session = _FakeSession([[tuple(row)]])
+        result = store.get_teaching_figure_for_delivery(session, _FIGURE_ID)
+        assert result is not None
+        assert result["content_type"] == schema.SVG_CONTENT_TYPE
 
 
 class TestAdoptedFiguresMap:
@@ -347,6 +479,43 @@ class TestUpdateAndRevisions:
         assert revisions[0]["caption"] == "旧キャプション"
         assert revisions[0]["updated_by"] == _USER_ID
         assert revisions[0]["updated_at"]
+
+    def test_update_never_sets_a_nonexistent_updated_by_column(self):
+        """``course_teaching_figures`` に ``updated_by`` 列は無い（migration 063）。
+
+        SET 句に入れていた間は実 PostgreSQL で 42703（undefined_column）になり、
+        PATCH（採用 / 回収 / caption 修正 / SVG 差し替え）が全滅していた。
+        更新者は revisions エントリと監査記帳が持つ。
+        """
+        session = _FakeSession([[_figure_row()], [_figure_row(title="改題")]])
+        store.update_teaching_figure(
+            session, _FIGURE_ID, title="改題", updated_by=_USER_ID
+        )
+        assert "updated_by" not in session.sql(1)
+        # バインドパラメータにも残さない（未使用パラメータを渡さない）。
+        assert "updated_by" not in session.params(1)
+
+    def test_updated_by_is_still_recorded_in_the_revision_entry(self):
+        """列を落としても「誰が差し替えたか」は revisions に残る（FG7）。"""
+        session = _FakeSession(
+            [[_figure_row(svg_source="<svg>old</svg>")], [_figure_row()]]
+        )
+        store.update_teaching_figure(
+            session, _FIGURE_ID, svg_source="<svg>new</svg>", updated_by=_USER_ID
+        )
+        assert "updated_by" not in session.sql(1)
+        revisions = json.loads(session.params(1)["revisions"])
+        assert revisions[-1]["updated_by"] == _USER_ID
+
+    def test_non_uuid_updated_by_becomes_null_in_the_revision_entry(self):
+        session = _FakeSession(
+            [[_figure_row(svg_source="<svg>old</svg>")], [_figure_row()]]
+        )
+        store.update_teaching_figure(
+            session, _FIGURE_ID, svg_source="<svg>new</svg>", updated_by="not-a-uuid"
+        )
+        revisions = json.loads(session.params(1)["revisions"])
+        assert revisions[-1]["updated_by"] is None
 
     def test_metadata_only_update_does_not_touch_revisions(self):
         session = _FakeSession([[_figure_row()], [_figure_row(title="改題")]])
@@ -585,31 +754,83 @@ class TestSetSuggestionStatus:
     )
     def test_decidable_transitions_only_from_candidate(self, status):
         session = _FakeSession([[_suggestion_row(status=status)]])
-        row = store.set_suggestion_status(session, _SUGGESTION_ID, status)
+        row = store.set_suggestion_status(
+            session, _SUGGESTION_ID, status, course_id="course-1"
+        )
         assert row is not None
         assert row["status"] == status
         assert session.params(0)["current_status"] == schema.SUGGESTION_STATUS_CANDIDATE
         assert "status = :current_status" in session.sql(0)
 
+    def test_update_is_scoped_to_the_course(self):
+        """他コースの候補を id だけで書き換えられないこと（権限 fail-closed）。"""
+        session = _FakeSession([[_suggestion_row()]])
+        store.set_suggestion_status(
+            session,
+            _SUGGESTION_ID,
+            schema.SUGGESTION_STATUS_ACCEPTED,
+            course_id="course-1",
+        )
+        assert "course_id = :course_id" in session.sql(0)
+        assert session.params(0)["course_id"] == "course-1"
+
+    def test_course_id_is_required(self):
+        session = _FakeSession()
+        with pytest.raises(ValueError, match="course_id"):
+            store.set_suggestion_status(
+                session, _SUGGESTION_ID, schema.SUGGESTION_STATUS_ACCEPTED, course_id=""
+            )
+        assert session.calls == []
+
+    def test_course_id_is_keyword_only(self):
+        """位置引数で渡せる形に戻すと、渡し忘れがスコープ漏れになる。"""
+        import inspect
+
+        param = inspect.signature(store.set_suggestion_status).parameters["course_id"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+    def test_out_of_scope_id_has_no_effect(self):
+        """スコープ外（UPDATE が0行）は None を返し、他の文を発行しない。"""
+        session = _FakeSession([[]])
+        assert (
+            store.set_suggestion_status(
+                session,
+                _SUGGESTION_ID,
+                schema.SUGGESTION_STATUS_ACCEPTED,
+                course_id="course-2",
+            )
+            is None
+        )
+        assert len(session.calls) == 1
+
     def test_cannot_move_back_to_candidate(self):
         session = _FakeSession()
         with pytest.raises(ValueError, match="candidate"):
             store.set_suggestion_status(
-                session, _SUGGESTION_ID, schema.SUGGESTION_STATUS_CANDIDATE
+                session,
+                _SUGGESTION_ID,
+                schema.SUGGESTION_STATUS_CANDIDATE,
+                course_id="course-1",
             )
         assert session.calls == []
 
     def test_unknown_status_is_rejected(self):
         session = _FakeSession()
         with pytest.raises(ValueError):
-            store.set_suggestion_status(session, _SUGGESTION_ID, "approved")
+            store.set_suggestion_status(
+                session, _SUGGESTION_ID, "approved", course_id="course-1"
+            )
         assert session.calls == []
 
     def test_already_decided_row_returns_none(self):
         session = _FakeSession([[]])
         assert (
             store.set_suggestion_status(
-                session, _SUGGESTION_ID, schema.SUGGESTION_STATUS_DISMISSED
+                session,
+                _SUGGESTION_ID,
+                schema.SUGGESTION_STATUS_DISMISSED,
+                course_id="course-1",
             )
             is None
         )
@@ -617,7 +838,10 @@ class TestSetSuggestionStatus:
     def test_status_transition_is_an_update_not_a_delete(self):
         session = _FakeSession([[_suggestion_row(status=schema.SUGGESTION_STATUS_DISMISSED)]])
         store.set_suggestion_status(
-            session, _SUGGESTION_ID, schema.SUGGESTION_STATUS_DISMISSED
+            session,
+            _SUGGESTION_ID,
+            schema.SUGGESTION_STATUS_DISMISSED,
+            course_id="course-1",
         )
         assert session.sql(0).startswith("UPDATE teaching_figure_suggestions")
         assert "DELETE" not in session.sql(0)

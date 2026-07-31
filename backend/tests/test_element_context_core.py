@@ -37,20 +37,20 @@ _CLAIM_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 class _FakeMappingsResult:
-    def __init__(self, row):
-        self._row = row
+    def __init__(self, rows):
+        self._rows = rows
 
     def mappings(self):
         return self
 
-    def fetchone(self):
-        return dict(self._row) if self._row is not None else None
+    def fetchall(self):
+        return [dict(r) for r in self._rows]
 
 
 class _ClaimTableFakeSession:
     """実 SQL は評価せず、params（``doc_ids`` / ``raw_id`` / ``uuid_id``）を Python 側で
-    同じ意味論（document scope 制約・id 一致・legacy_ids 包含・id 一致優先の並び替え）で
-    再現する。"""
+    同じ意味論（document scope 制約・id 一致・legacy_ids 包含・``id_match`` 付きの
+    決定的な並び替え・候補件数の LIMIT）で再現する。"""
 
     def __init__(self, rows: list[dict]):
         self._rows = rows
@@ -70,9 +70,16 @@ class _ClaimTableFakeSession:
             matched_by_legacy = raw_id in legacy_ids
             matched_by_uuid = uuid_id is not None and str(row.get("id")) == str(uuid_id)
             if matched_by_legacy or matched_by_uuid:
-                matches.append(row)
-        matches.sort(key=lambda r: str(r.get("id")) == raw_id, reverse=True)
-        return _FakeMappingsResult(matches[0] if matches else None)
+                matches.append(
+                    {
+                        "id": row.get("id"),
+                        "document_id": row.get("document_id"),
+                        "id_match": str(row.get("id")) == raw_id,
+                    }
+                )
+        # ORDER BY (id::text = :raw_id) DESC, document_id ASC, created_at ASC, id::text ASC
+        matches.sort(key=lambda r: (not r["id_match"], str(r["document_id"]), str(r["id"])))
+        return _FakeMappingsResult(matches[: element_context._CLAIM_CANDIDATE_LIMIT])
 
     def close(self):
         self.closed = True
@@ -103,6 +110,20 @@ def _lens_result(**overrides) -> dict:
     }
     result.update(overrides)
     return result
+
+
+def _patch_equation_lookup(monkeypatch, records_fn) -> None:
+    """equation 解決の外界（artifact 読み取り）を差し替える。
+
+    ``_resolve_equation`` は document ごとに ``document_run_artifacts`` を1回読み、
+    その結果を ``equation_records(doc, artifacts=...)`` に渡す（二重 SELECT 回避）。
+    テストでは DB へ触らせないため両方を差し替え、``records_fn(doc)`` で
+    「その document の equation レコード」だけを与える。
+    """
+    monkeypatch.setattr(element_context, "document_run_artifacts", lambda doc: {})
+    monkeypatch.setattr(
+        element_context, "equation_records", lambda doc, artifacts=None: records_fn(doc)
+    )
 
 
 def _item(**overrides) -> dict:
@@ -175,6 +196,85 @@ class TestResolveClaim:
         assert "uuid_id" not in fake.execute_calls[0]
 
 
+class TestResolveClaimAmbiguity:
+    """agent 側 ID（``claim_span_001`` 等）は span_id が block ごとに振り直されるため
+    文書間・文書内で反復する。コース内で複数行に一致したら「たまたま最初の行」を返さず
+    解決を諦める（fail-closed。W層 ``refs._resolve_by_legacy_id`` の裁定と整合）。"""
+
+    def test_same_agent_id_in_two_course_documents_is_ambiguous(self, monkeypatch):
+        rows = [
+            _claim_row(id="11111111-1111-1111-1111-111111111111", document_id=_DOC_A),
+            _claim_row(id="22222222-2222-2222-2222-222222222222", document_id=_DOC_B),
+        ]
+        fake = _ClaimTableFakeSession(rows)
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+
+        assert element_context._resolve_claim("claim_span_007", {_DOC_A, _DOC_B}) is None
+
+    def test_same_agent_id_twice_in_one_document_is_ambiguous(self, monkeypatch):
+        rows = [
+            _claim_row(id="11111111-1111-1111-1111-111111111111", document_id=_DOC_A),
+            _claim_row(id="22222222-2222-2222-2222-222222222222", document_id=_DOC_A),
+        ]
+        fake = _ClaimTableFakeSession(rows)
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+
+        assert element_context._resolve_claim("claim_span_007", {_DOC_A}) is None
+
+    def test_single_matching_document_still_resolves(self, monkeypatch):
+        """曖昧なのは「一致行が複数」のときだけ。1行に定まるなら従来どおり解決する。"""
+        rows = [
+            _claim_row(id=_CLAIM_UUID, document_id=_DOC_A),
+            _claim_row(id="33333333-3333-3333-3333-333333333333", document_id=_DOC_B,
+                       legacy_ids=["claim_span_999"]),
+        ]
+        fake = _ClaimTableFakeSession(rows)
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+
+        assert element_context._resolve_claim("claim_span_007", {_DOC_A, _DOC_B}) == (
+            _CLAIM_UUID,
+            _DOC_A,
+        )
+
+    def test_uuid_match_wins_even_with_other_legacy_matches(self, monkeypatch):
+        """UUID 完全一致は一意なので即決（他文書に同じ文字列を legacy_ids に持つ行が
+        あっても曖昧扱いにしない）。"""
+        rows = [
+            _claim_row(id=_CLAIM_UUID, document_id=_DOC_A, legacy_ids=[]),
+            _claim_row(
+                id="44444444-4444-4444-4444-444444444444",
+                document_id=_DOC_B,
+                legacy_ids=[_CLAIM_UUID],
+            ),
+        ]
+        fake = _ClaimTableFakeSession(rows)
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+
+        assert element_context._resolve_claim(_CLAIM_UUID, {_DOC_A, _DOC_B}) == (
+            _CLAIM_UUID,
+            _DOC_A,
+        )
+
+    def test_ambiguous_agent_id_yields_none_from_build(self, monkeypatch):
+        """曖昧 → ``build_element_context`` も None（route が 404 → フロントは縮退）。"""
+        rows = [
+            _claim_row(id="11111111-1111-1111-1111-111111111111", document_id=_DOC_A),
+            _claim_row(id="22222222-2222-2222-2222-222222222222", document_id=_DOC_B),
+        ]
+        fake = _ClaimTableFakeSession(rows)
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+
+        def _boom(_ref):  # pragma: no cover - must not be called
+            raise AssertionError("context_lens must not be built for an ambiguous id")
+
+        monkeypatch.setattr(element_context.context_lens_mod, "build", _boom)
+
+        assert (
+            element_context.build_element_context("claim", "claim_span_007", {_DOC_A, _DOC_B})
+            is None
+        )
+
+
 # ---------------------------------------------------------------------------
 # equation の解決（コース document 集合の走査のみ = fail-closed）
 # ---------------------------------------------------------------------------
@@ -186,13 +286,13 @@ class TestResolveEquation:
             _DOC_A: [{"equation_id": "eq_1"}],
             _DOC_B: [{"equation_id": "eq_9"}],
         }
-        monkeypatch.setattr(element_context, "equation_records", lambda doc: records.get(doc, []))
+        _patch_equation_lookup(monkeypatch, lambda doc: records.get(doc, []))
 
         assert element_context._resolve_equation("eq_9", {_DOC_A, _DOC_B}) == ("eq_9", _DOC_B)
 
     def test_equation_only_in_out_of_course_document_is_not_resolved(self, monkeypatch):
         records = {_DOC_B: [{"equation_id": "eq_9"}]}
-        monkeypatch.setattr(element_context, "equation_records", lambda doc: records.get(doc, []))
+        _patch_equation_lookup(monkeypatch, lambda doc: records.get(doc, []))
 
         assert element_context._resolve_equation("eq_9", {_DOC_A}) is None
 
@@ -202,7 +302,26 @@ class TestResolveEquation:
                 raise RuntimeError("artifact read failed")
             return [{"equation_id": "eq_9"}]
 
-        monkeypatch.setattr(element_context, "equation_records", _records)
+        _patch_equation_lookup(monkeypatch, _records)
+
+        assert element_context._resolve_equation("eq_9", {_DOC_A, _DOC_B}) == ("eq_9", _DOC_B)
+
+    def test_artifact_read_exception_is_fail_soft(self, monkeypatch):
+        """``document_run_artifacts`` 自体が落ちても他 document の走査は続ける。"""
+        def _artifacts(doc):
+            if doc == _DOC_A:
+                raise RuntimeError("run read failed")
+            return {"equation_semantics": {"equations": [{"equation_id": "eq_9"}]}}
+
+        monkeypatch.setattr(element_context, "document_run_artifacts", _artifacts)
+        monkeypatch.setattr(
+            element_context,
+            "equation_records",
+            lambda doc, artifacts=None: ((artifacts or {}).get("equation_semantics") or {}).get(
+                "equations"
+            )
+            or [],
+        )
 
         assert element_context._resolve_equation("eq_9", {_DOC_A, _DOC_B}) == ("eq_9", _DOC_B)
 
@@ -210,9 +329,39 @@ class TestResolveEquation:
         def _boom(_doc):  # pragma: no cover - must not be called
             raise AssertionError("equation_records must not be called for an empty document set")
 
-        monkeypatch.setattr(element_context, "equation_records", _boom)
+        _patch_equation_lookup(monkeypatch, _boom)
+        monkeypatch.setattr(
+            element_context,
+            "document_run_artifacts",
+            lambda doc: (_ for _ in ()).throw(
+                AssertionError("artifacts must not be read for an empty document set")
+            ),
+        )
 
         assert element_context._resolve_equation("eq_1", set()) is None
+
+    def test_artifacts_are_read_once_per_document_and_reused(self, monkeypatch):
+        """``document_run_artifacts``（巨大 JSONB）は document ごとに1回だけ読み、
+        ``equation_records(doc, artifacts=...)`` に渡して二重読みを避ける。"""
+        artifact_reads = []
+        passed = []
+
+        def _artifacts(doc):
+            artifact_reads.append(doc)
+            return {"equation_semantics": {"equations": [{"equation_id": "eq_9"}]}}
+
+        def _records(doc, artifacts=None):
+            passed.append((doc, artifacts))
+            assert artifacts is not None, "artifacts must be reused, not re-read inside"
+            stage = artifacts.get("equation_semantics") or {}
+            return stage.get("equations") or []
+
+        monkeypatch.setattr(element_context, "document_run_artifacts", _artifacts)
+        monkeypatch.setattr(element_context, "equation_records", _records)
+
+        assert element_context._resolve_equation("eq_9", {_DOC_A}) == ("eq_9", _DOC_A)
+        assert artifact_reads == [_DOC_A]
+        assert [d for d, _ in passed] == [_DOC_A]
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +394,90 @@ class TestVisibleItems:
         assert element_context._visible_items(None) == []
 
 
+class TestInternalIdLabels:
+    """W層はラベル解決に失敗した項目に内部 ID をそのまま label として入れる
+    （図の DB UUID / ``ev_0001`` / ``synth_claim_0001`` / ``support:...``）。学習者向け
+    射影で一般ラベルへ置換する（LE4。関係情報は保持し項目自体は落とさない）。"""
+
+    def test_uuid_label_is_replaced_with_generic_label(self):
+        item = _item(
+            element_type="figure",
+            element_id="ffffffff-ffff-ffff-ffff-ffffffffffff",
+            label="ffffffff-ffff-ffff-ffff-ffffffffffff",
+            relation="evidenced_by_figure",
+            relation_label="を図で裏付ける",
+        )
+        projected = element_context._visible_items([item])[0]
+
+        assert projected["label"] == "図"
+        assert projected["relation_label"] == "を図で裏付ける"  # 関係情報は保持
+
+    def test_evidence_id_label_is_replaced(self):
+        item = _item(element_type="evidence", element_id=None, label="ev_0012")
+        assert element_context._visible_items([item])[0]["label"] == "本文の根拠箇所"
+
+    def test_synth_claim_and_agent_claim_labels_are_replaced(self):
+        for raw in ("synth_claim_0001", "claim_span_001", "claim_0004", "span_001"):
+            item = _item(element_type="theory_claim", element_id=None, label=raw)
+            assert element_context._visible_items([item])[0]["label"] == "関連する主張", raw
+
+    def test_support_node_id_label_is_replaced(self):
+        item = _item(
+            element_type="thesis",
+            element_id=None,
+            label="support:mechanism:3",
+            relation="supports_thesis",
+            relation_label="（中心命題）を支持する",
+        )
+        assert element_context._visible_items([item])[0]["label"] == "中心命題"
+
+    def test_label_equal_to_raw_id_is_replaced(self):
+        item = _item(element_type="figure", element_id="fig_5_2", label="fig_5_2")
+        assert element_context._visible_items([item])[0]["label"] == "図"
+
+    def test_equation_number_label_is_kept(self):
+        """``eq_2_7`` は論文の式番号由来で学習者にも可読なため置換しない（§4 の裁定）。"""
+        item = _item(
+            element_type="equation", element_id="eq_2_7", label="eq_2_7",
+            relation="quantified_by", relation_label="に定量化される",
+        )
+        assert element_context._visible_items([item])[0]["label"] == "eq_2_7"
+
+    def test_normal_labels_are_untouched(self):
+        for label in ("上位コンポーネント", "E=mc^2", "第3節 実験装置", "\\alpha"):
+            item = _item(label=label)
+            assert element_context._visible_items([item])[0]["label"] == label, label
+
+    def test_unknown_element_type_falls_back_to_generic_label(self):
+        item = _item(
+            element_type="mystery",
+            element_id="11111111-1111-1111-1111-111111111111",
+            label="11111111-1111-1111-1111-111111111111",
+        )
+        assert element_context._visible_items([item])[0]["label"] == "関連する要素"
+
+
+class TestNavigable:
+    """``navigable`` は「学習者が実際に再フェッチできるか」で作り直す（W層の値は
+    教員向けの可否なので、そのままでは契約が成立しない）。"""
+
+    def test_learner_fetchable_types_are_navigable(self):
+        for element_type in ("theory_claim", "equation", "theory_component"):
+            item = _item(element_type=element_type, element_id="x1", navigable=True)
+            assert element_context._visible_items([item])[0]["navigable"] is True, element_type
+
+    def test_types_without_learner_context_api_are_not_navigable(self):
+        for element_type in (
+            "figure", "section", "thesis", "derivation", "symbol", "evidence", "stage", "part",
+        ):
+            item = _item(element_type=element_type, element_id="x1", navigable=True)
+            assert element_context._visible_items([item])[0]["navigable"] is False, element_type
+
+    def test_missing_id_is_never_navigable(self):
+        item = _item(element_type="theory_claim", element_id=None, navigable=True)
+        assert element_context._visible_items([item])[0]["navigable"] is False
+
+
 class TestProjectFocus:
     def test_source_backed_role_is_kept(self):
         focus = element_context._project_focus(
@@ -267,6 +500,39 @@ class TestProjectFocus:
         focus = element_context._project_focus(raw, element_context.ELEMENT_TYPE_CLAIM, _CLAIM_UUID)
         assert "contextual_role" not in focus
         assert "contextual_role_status" not in focus
+
+    def test_role_containing_internal_id_is_dropped(self):
+        """役割文は W層が上位項目のラベルから合成するため、ラベル解決に失敗した項目の
+        内部 ID がそのまま「この論文での役割」に出る。含まれていたらキーごと落とす。"""
+        for role in (
+            "synth_claim_0001を定量化する",
+            "claim_span_001の下位主張である",
+            "ffffffff-ffff-ffff-ffff-ffffffffffffに証拠を与える",
+            "support:mechanism:3（中心命題）を支持する",
+            "ev_0012を根拠とする",
+        ):
+            raw = _lens_result()["focus"]
+            raw["contextual_role"] = role
+            raw["contextual_role_status"] = "source_backed"
+            focus = element_context._project_focus(
+                raw, element_context.ELEMENT_TYPE_CLAIM, _CLAIM_UUID
+            )
+            assert "contextual_role" not in focus, role
+            assert "contextual_role_status" not in focus, role
+
+    def test_role_without_internal_id_is_kept(self):
+        for role in (
+            "中心命題を支持する",
+            "エネルギー保存則を定量化する",
+            "支持構造「機構」: 観測値の再現に成功したを支持する",
+        ):
+            raw = _lens_result()["focus"]
+            raw["contextual_role"] = role
+            raw["contextual_role_status"] = "source_backed"
+            focus = element_context._project_focus(
+                raw, element_context.ELEMENT_TYPE_CLAIM, _CLAIM_UUID
+            )
+            assert focus["contextual_role"] == role, role
 
     def test_internal_provenance_is_dropped(self):
         focus = element_context._project_focus(
@@ -363,9 +629,7 @@ class TestBuildElementContext:
         assert ref.scope == "document"
 
     def test_equation_end_to_end(self, monkeypatch):
-        monkeypatch.setattr(
-            element_context, "equation_records", lambda doc: [{"equation_id": "eq_1"}]
-        )
+        _patch_equation_lookup(monkeypatch, lambda doc: [{"equation_id": "eq_1"}])
         monkeypatch.setattr(
             element_context.context_lens_mod,
             "build",
@@ -401,6 +665,74 @@ class TestBuildElementContext:
         result = element_context.build_element_context("claim", "claim_span_007", {_DOC_A})
 
         assert result == {"available": False, "note": element_context.NOTE_NO_CONTEXT}
+
+    def test_degenerate_lens_dict_yields_available_false(self, monkeypatch):
+        """``context_lens.build()`` は builder 失敗時にも dict（``_degenerate_result``）を
+        返す。これは投影ではなく「読めなかった」形なので、``available:true`` +
+        ``focus.label = "<uuid>"`` で出さない（LE8）。"""
+        fake = _ClaimTableFakeSession([_claim_row()])
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+        monkeypatch.setattr(
+            element_context.context_lens_mod,
+            "build",
+            lambda ref: {
+                "focus": {
+                    "element_type": "theory_claim",
+                    "element_id": ref.element_id,
+                    "document_id": ref.document_id,
+                    "label": ref.element_id,
+                    "intrinsic_summary": "",
+                    "contextual_role": None,
+                    "contextual_role_status": "unidentified",
+                    "provenance": [],
+                    "generic": None,
+                },
+                "upper": [],
+                "lower": [],
+                "notes": ["要素が見つからないか読み取りに失敗したため、文脈は表示できません"],
+            },
+        )
+
+        result = element_context.build_element_context("claim", "claim_span_007", {_DOC_A})
+
+        assert result == {"available": False, "note": element_context.NOTE_NO_CONTEXT}
+
+    def test_sparse_but_real_projection_is_not_treated_as_degenerate(self, monkeypatch):
+        """上位・下位が空でもラベル・本文が引けている投影は正常（縮退させない）。判定は
+        4条件すべてを要求する保守的な形にしてある。"""
+        fake = _ClaimTableFakeSession([_claim_row()])
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+        monkeypatch.setattr(
+            element_context.context_lens_mod,
+            "build",
+            lambda ref: _lens_result(
+                upper=[],
+                lower=[],
+                notes=["thesis_reconstruction artifact が無いため中心命題との関係を判定できません"],
+            ),
+        )
+
+        result = element_context.build_element_context("claim", "claim_span_007", {_DOC_A})
+
+        assert result["available"] is True
+        assert result["focus"]["label"] == "主張ラベル"
+
+    def test_empty_lanes_with_resolved_label_and_no_degenerate_note_stay_available(
+        self, monkeypatch
+    ):
+        """degenerate の目印（専用 note）が無ければ、レーンが空でも縮退させない。"""
+        fake = _ClaimTableFakeSession([_claim_row()])
+        monkeypatch.setattr(element_context, "get_session", lambda: fake)
+        monkeypatch.setattr(
+            element_context.context_lens_mod,
+            "build",
+            lambda ref: _lens_result(upper=[], lower=[], notes=[]),
+        )
+
+        assert (
+            element_context.build_element_context("claim", "claim_span_007", {_DOC_A})["available"]
+            is True
+        )
 
     def test_lens_exception_yields_available_false(self, monkeypatch):
         fake = _ClaimTableFakeSession([_claim_row()])

@@ -759,8 +759,15 @@
         }
         html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + anchorChip + msgActions + "</div>";
       } else {
-        html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) +
-          renderAnchorConfirmPrompt(msg) + "</div>";
+        // discuss モード（論文と話す）: 開幕の「議論のきっかけ」を LLM 非経由で置いた
+        // アシスタントの問い（discussPostSeedPrompt）。学習者に「次はあなたが書く」と
+        // 分かるよう、控えめな装飾と1行の事実文を添える（煽らない, DM6）。
+        var seedCls = msg.discuss_prompt ? " discuss-prompt" : "";
+        var seedHint = msg.discuss_prompt
+          ? '<div class="discuss-prompt-hint">この問いに、あなたの考えを書いてください。</div>'
+          : "";
+        html += '<div class="mg ai' + seedCls + '"' + idAttr + '>' + renderAiContent(msg.content, msg) +
+          seedHint + renderAnchorConfirmPrompt(msg) + "</div>";
       }
     });
 
@@ -1266,7 +1273,9 @@
 
     // discuss モード（論文と話す）Phase 2: 分岐チップ（深掘り／横展開）。
     // アシスタント応答の直後にのみ出す（discuss モード限定・設計 §3.4）。
-    if (isDiscussMode() && window.Discuss) {
+    // 開幕の立場質問を置いただけのターン（discuss_prompt）には出さない — 学習者に
+    // 求めているのは立場の表明なので、深掘り／横展開へ逃がす導線を並べない。
+    if (isDiscussMode() && window.Discuss && !(msg && msg.discuss_prompt)) {
       html += window.Discuss.renderBranchChips();
     }
 
@@ -2833,6 +2842,19 @@
     if (target) selectTopic(target);
   }
 
+  // discuss レイアウトが最後に「新着メッセージで要点ストリップへ畳んだ」時点の会話の
+  // 指紋（件数 + 末尾メッセージ id）。renderChat はアンカープロンプトのタップ・編集
+  // 状態の変化などメッセージが増えない場面でも呼ばれるため、毎回畳むと学習者が手動で
+  // 開いた「論文の要点」が新着なしに閉じてしまう（§9.7-3 は「新しいメッセージが
+  // 来るたびに」畳む仕様）。
+  var _discussCollapseKey = "";
+
+  function _discussChatFingerprint() {
+    var msgs = state.chatMessages || [];
+    var last = msgs.length ? (msgs[msgs.length - 1].id || "") : "";
+    return msgs.length + ":" + last;
+  }
+
   // discuss モード（論文と話す）の会話ファースト・レイアウト適用。
   // `.app` への discuss-on / discuss-chat-active の付与だけをここに一本化し、
   // 実際の表示切替（サイドバー折りたたみ・教材区画の折り返し等）は CSS 側の責務とする
@@ -2855,8 +2877,13 @@
         region.style.maxHeight = "";
         region.style.flex = "";
         if (hasChat) {
-          // 再描画のたびに開幕カードへ再収縮させる（開閉の維持は明示クリックのみ）。
-          region.classList.remove("discuss-expanded");
+          // 新着メッセージがあったときだけ要点ストリップへ再収縮させる（それ以外の
+          // 再描画では、学習者が明示的に開いた状態を維持する）。
+          var _key = _discussChatFingerprint();
+          if (_key !== _discussCollapseKey) {
+            _discussCollapseKey = _key;
+            region.classList.remove("discuss-expanded");
+          }
         }
       }
       // 自動圧縮サイクルは discuss レイアウトと無関係のため無効化し、世代を進めて
@@ -2877,6 +2904,12 @@
       }
       region.classList.remove("discuss-expanded");
     }
+    if (!on) _discussCollapseKey = "";
+
+    // discuss 中はハンズフリー音声会話を無効化する（DM1 / 設計 §6.4: 音声版 discuss は
+    // Phase 3 の非スコープ）。モード切替・トピック遷移・会話描画のすべてがこの関数を
+    // 通るので、有効/無効の反映も進行中セッションの終了もここ1箇所で足りる。
+    updateVoiceAvailability();
 
     var tbtn = document.getElementById("discuss-opening-toggle");
     if (tbtn) {
@@ -3900,12 +3933,42 @@
     if (el) el.textContent = text || "";
   }
 
+  // discuss モード（論文と話す）中はハンズフリー音声会話を使えない。音声経路は
+  // intent_mode:"casual" 固定で送るため（handleVoiceSegment）、discuss 中に使うと
+  //   - 画面のスコープ表示（このコースのソース論文）と実検索範囲（本人の全可視文書）が食い違う
+  //   - out_of_source_notice が casual 分岐で抑制され、出所の正直さが落ちる（DM1）
+  //   - 痕跡が casual として記録され、観測基盤の entry_mode='discuss' 集計から漏れる
+  // という3点が同時に起きる。音声版 discuss は設計 §6.4（Phase 3）の非スコープなので、
+  // ここでは開始を塞いで事実文を添えるだけに留める（fail-closed）。
+  var VOICE_DISCUSS_UNAVAILABLE_NOTE = "音声会話は「順番に学ぶ」モードで利用できます。";
+  var VOICE_BTN_DEFAULT_TITLE = "気軽に話せる先生とハンズフリーで会話";
+
+  // 音声ボタンの有効/無効を現在のモードに合わせる。discuss 中に既にハンズフリー中
+  // だった場合はその場でセッションを終了する（切替後も casual で送り続けさせない）。
+  function updateVoiceAvailability() {
+    var blocked = isDiscussMode();
+    var btn = document.getElementById("voice-mode-btn");
+    if (btn) {
+      btn.disabled = blocked;
+      btn.title = blocked ? VOICE_DISCUSS_UNAVAILABLE_NOTE : VOICE_BTN_DEFAULT_TITLE;
+    }
+    var note = document.getElementById("discuss-voice-note");
+    if (note) note.hidden = !blocked;
+    if (blocked && typeof voiceState !== "undefined" && voiceState.active) stopVoiceMode();
+  }
+
   function toggleVoiceMode() {
     if (voiceState.active) stopVoiceMode();
     else startVoiceMode();
   }
 
   async function startVoiceMode() {
+    // fail-closed: ボタンの disabled をすり抜けた経路（キーボード操作・古い DOM 状態）
+    // でも discuss 中は開始させない。
+    if (isDiscussMode()) {
+      alert(VOICE_DISCUSS_UNAVAILABLE_NOTE);
+      return;
+    }
     if (!state.currentTopicId) {
       alert("トピックを選択してから音声会話を開始してください。");
       return;
@@ -4063,6 +4126,14 @@
 
     setVoiceTranscript("あなた: " + text);
     setVoiceStatus("thinking", "先生が考えています…");
+    // fail-closed（DM1）: 文字起こし中に discuss モードへ切り替わっていたら
+    // intent_mode:"casual" では送らない（スコープ表示と実検索範囲が食い違い、痕跡も
+    // casual として記録されてしまう）。音声版 discuss は設計 §6.4 の非スコープ。
+    if (isDiscussMode()) {
+      setVoiceTranscript(VOICE_DISCUSS_UNAVAILABLE_NOTE);
+      stopVoiceMode();
+      return;
+    }
     // インスペクト・モード中の発話は無条件で usage_help ルートに確定する（§4.1）。
     // ホバー/ツールチップ表示中だった UI アンカーがあれば ui_anchor として添える。
     const data = _inspectState.active
@@ -4386,6 +4457,10 @@
     // 旧コースでの discuss セッションの無活動タイムアウト（15分）が、切替後の
     // 別コース画面上で着地モーダルとして誤発火する。
     if (window.Discuss) window.Discuss.reset();
+    // スコープ選択も持ち越さない。「閲覧できる周辺資料まで」は前のコースの文脈で
+    // 選ばれた設定なので、別コースの初期状態としては既定（このコースのソース論文）に
+    // 戻す（画面表示と実検索範囲を一致させる, DM1）。
+    state.discussScope = "course_sources";
 
     // Re-render with clean state
     renderSidebar();
@@ -4821,6 +4896,38 @@
   // チャット API へそのまま引き渡すためのもの (自由文のみに依存しない)。
   window.sendPrompt = function (text, payload) {
     sendMessage(text, payload);
+  };
+
+  // discuss モード（論文と話す）: 開幕画面の「議論のきっかけ」（教員が承認した
+  // 立場を求める問い）を **アシスタントの発話として** チャット欄へ置く。
+  //
+  // なぜ学習者の発話として送らないか（docs/features/discuss_dialogue_alignment_design.md
+  // §3-1 / §4）: seed の body は「あなたはどう考えるか」を問う文なので、これを学習者
+  // メッセージとして送ると AI は発話タイプ別ルール1（質問には即答・出し惜しみ禁止）で
+  // その問いに自分で答えきってしまい、係留（学習者が先に立場を述べ、AI が revoice で
+  // 言い直す）が起動しない。設計は「開幕の立場質問に**学習者が応答したら** AI は
+  // 言い直しと確認だけを返す」と定めている。
+  //
+  // 履歴の扱い: sendMessage は `history: state.chatMessages.slice(0, -1)` を送り、
+  // learning.py はその body.history を window_history 経由で LLM へ渡し、かつ
+  // persist_chat_history が body.history を土台に UPSERT する。つまりここで積んだ
+  // assistant ターンは (a) 次の学習者発話のときに「問い → 学習者の立場」の順で LLM に
+  // 届き revoice が成立し、(b) その送信時にサーバ正本の履歴へも保存される。
+  // 送信しなければ保存されない（＝画面上の下書きに留まる）。id を付けるので、
+  // 書き直し（replace_message_id）・以降削除の truncate 境界計算とも整合する。
+  // LLM は呼ばない（DM8）。着地判定の往復回数（Discuss.notifyActivity）も進めない
+  // — 実際の往復はまだ起きていないため。
+  window.discussPostSeedPrompt = function (text) {
+    if (!isDiscussMode() || !text || state.sending) return;
+    var msgs = state.chatMessages;
+    var last = msgs.length ? msgs[msgs.length - 1] : null;
+    // 未応答の注入ターンが末尾にあるだけなら差し替える（別のきっかけを続けて押した
+    // ときに問いだけが積み上がるのを防ぐ）。
+    if (last && last.role === "assistant" && last.discuss_prompt) msgs.pop();
+    msgs.push({ role: "assistant", content: text, id: genMsgId(), discuss_prompt: true });
+    renderChat();
+    var input = document.getElementById("chat-input");
+    if (input && !input.disabled) input.focus();
   };
 
   // discuss モード（論文と話す）Phase 2: 着地画面「このトピックで続きを学ぶ」用。

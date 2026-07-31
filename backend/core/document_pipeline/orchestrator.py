@@ -337,6 +337,7 @@ def run_document_pipeline(
     source_kind: str = "pdf",
     cartridge_id: str | None = None,
     course_id: str | None = None,
+    user_id: str | None = None,
     progress_callback: Callable[[str, dict], None] | None = None,
     agents: dict | None = None,
     resume: bool = True,
@@ -355,6 +356,10 @@ def run_document_pipeline(
         cartridge_id: 使用カートリッジ。指定なしなら EPISTEME_DEFAULT_CARTRIDGE_ID
             から決定。
         course_id: 任意。指定された場合のみ component graph を course にも紐づける。
+        user_id: 任意。この実行を起こした教員の users.id。U層の帰属（``usage_context``）に
+            bind され、M層のモデル解決（``core.llm_policy.resolve_scene_model`` の
+            解決順③ = ``scope='user'`` のポリシー行）が参照する。未指定でも従来どおり
+            動作する（user 行はスキップされ system 行 → env → tier 既定の順になる）。
         progress_callback: 各 stage 完了時に (stage_name, info_dict) で呼ばれる。
             background_tasks への進捗反映に使う。
         agents: テスト用に注入可能な agent インスタンス dict。
@@ -445,8 +450,15 @@ def run_document_pipeline(
     # U層（LLM 使用量帰属, 設計書 §6）: run_id 確定直後にこのスレッドの帰属文脈を
     # bind する。以降の generate_text 等の呼び出しは report_start() が差し替える
     # "pipeline:{stage}" feature で記録される。
+    #
+    # user_id も併せて bind する: M層（llm_model_selection_design.md §3）の解決順③
+    # （``scope='user'`` のポリシー行）は ``current_usage_context().user_id`` を見るため、
+    # ここで bind しないとユーザー別のモデル既定が pipeline 実行では常に無効になる
+    # （アップロード UI は run override を常送するため隠れるが、models 未指定の
+    # 再解析・API 直呼びでは解決層③に到達しない）。
     bind_usage_context(
         "pipeline",
+        user_id=str(user_id) if user_id else None,
         document_id=str(document_id),
         run_id=str(run_id),
         course_id=str(course_id) if course_id else None,
@@ -2931,26 +2943,35 @@ def _ctxexpl_max_calls_per_day() -> int:
 
 
 def _ctxexpl_model(effective_options: dict | None = None) -> str:
-    """run override（``options.models``）→ ``CTXEXPL_LLM_MODEL`` → fast tier の順。
+    """M層の正本（``core.llm_policy.resolve_scene_model``）でモデルを決める。
 
     ``ContextualExplanationAgent`` はモデル名を construction 時の明示引数
     (``llm_model=``) として受け取るため、``core.llm.py`` の呼び出し口で
     call-argument 扱いになり、M層設計書 §3 の解決順①（呼び出し側の明示引数）が
     最優先されてしまう。そのため、ランナーループが張る
-    ``core.llm_policy.model_override`` の contextvar（解決順②）はこの1コールには
-    素通り（stage の中身は変えない前提のため resolve_scene_model 経由の
-    contextvar 参照に置き換えない）。ここで ``effective_options["models"]`` を
-    先読みすることで run override を反映する
-    （``pipeline:contextual_explanation`` → ``pipeline`` の順）。
+    ``core.llm_policy.model_override`` の contextvar（解決順②）だけに任せられない。
+    ``_discuss_opening_model`` と同じく **同じ正本関数**を呼んで解決してから渡す
+    ことで、run override → user/system ポリシー →
+    ``CTXEXPL_LLM_MODEL``（``llm_policy`` の ``_FEATURE_DIRECT_ENV``）→ fast tier
+    の順が効く（M1: env をここで直読みしない）。
+
+    ``effective_options["models"]`` の先読みは従来どおり維持する
+    （``pipeline:contextual_explanation`` → ``pipeline`` の順）。ランナーループの
+    ``model_override`` と同じ値になるが、この関数が override コンテキストの外から
+    呼ばれても run 指定が効くようにしておく。
     """
     models = (effective_options or {}).get("models") if effective_options else None
     if isinstance(models, dict):
         override = models.get("pipeline:contextual_explanation") or models.get("pipeline")
         if isinstance(override, str) and override.strip():
             return override.strip()
-    explicit = os.getenv("CTXEXPL_LLM_MODEL", "").strip()
-    if explicit:
-        return explicit
+    try:
+        resolved = resolve_scene_model(f"{SCENE_PIPELINE}:contextual_explanation").model
+    except Exception:
+        logger.debug("failed to resolve contextual_explanation model", exc_info=True)
+        resolved = ""
+    if resolved:
+        return resolved
     from core.config import get_settings
 
     return get_settings().llm_fast_model
@@ -3151,11 +3172,18 @@ def _build_discuss_opening(
 
     素材が無い document は**生成しない**（``skipped_reason='no_source_material'`` を
     stage_outputs に正直に記録する。根拠の無い火種を創作させない — 設計書 §4.1）。
+
+    未検証前提の出所は2系統ある（``assumption_source`` に記録する）:
+
+    - ``"ledger"``: D層 ``epistemic_ledger``（再解析時。前 run の行がまだ残っている）
+    - ``"artifact_fallback"``: 台帳が空のとき（初回解析）に in-run artifact から
+      同じ保守的マッピングで導出したもの（[D-4]。台帳への記帳はしない）
     """
     from core.discuss.authoring import (
         build_discuss_opening_input,
         collect_untested_assumptions,
         compute_source_fingerprint,
+        derive_untested_assumptions_from_artifacts,
     )
 
     max_items = _discuss_opening_max_items_per_document()
@@ -3176,11 +3204,14 @@ def _build_discuss_opening(
 
     untested_assumptions: list[dict] = []
     session = None
+    ledger_stats: dict = {}
     try:
         from core.postgres import get_session as _pg_session
 
         session = _pg_session()
-        untested_assumptions = collect_untested_assumptions(session, document_id)
+        untested_assumptions = collect_untested_assumptions(
+            session, document_id, stats=ledger_stats
+        )
     except Exception:
         # 台帳未整備 / DB 不達でもステージは進める（operation だけで生成できる）。
         payload["assumption_lookup_failed"] = True
@@ -3191,6 +3222,35 @@ def _build_discuss_opening(
     finally:
         if session is not None:
             session.close()
+
+    if untested_assumptions:
+        payload["assumption_source"] = "ledger"
+    if int(ledger_stats.get("opaque_skipped") or 0):
+        # [D-1] 不透明 ID だけの台帳行は素材にしない（落とした件数は正直に残す, P4）。
+        payload["assumption_rows_skipped_opaque"] = int(ledger_stats["opaque_skipped"])
+
+    if not untested_assumptions:
+        # [D-4] 台帳は pipeline **完了後**の backfill が書くため、初回解析では構造的に
+        # 空になる。台帳と同じ保守的マッピングを in-run artifact に写像して素材を作る
+        # （D層への記帳はしない）。
+        fallback_stats: dict = {}
+        try:
+            untested_assumptions = derive_untested_assumptions_from_artifacts(
+                artifacts, stats=fallback_stats
+            )
+        except Exception:
+            logger.warning(
+                "discuss_opening: artifact fallback for untested assumptions failed "
+                "(non-fatal): document=%s",
+                document_id, exc_info=True,
+            )
+            untested_assumptions = []
+        if untested_assumptions:
+            payload["assumption_source"] = "artifact_fallback"
+        if int(fallback_stats.get("opaque_skipped") or 0):
+            payload["assumption_rows_skipped_opaque"] = int(
+                payload.get("assumption_rows_skipped_opaque") or 0
+            ) + int(fallback_stats["opaque_skipped"])
 
     agent_input = build_discuss_opening_input(
         document_id=document_id,

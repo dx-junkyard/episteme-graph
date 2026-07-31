@@ -614,3 +614,41 @@ class TestDisabledChangeButtonShowsReason:
         src = _read(LLM_MODELS_JS)
         render = _extract_function(src, "renderMaterialsSummaryError")
         assert "_setMaterialsSummaryNote" in render
+
+
+class TestReadOnlySceneRow:
+    """J5: 読み取り専用の場面（音声会話）は運用タブで表示のみにする。
+
+    サーバは ``read_only`` / ``read_only_reason`` を返し、PUT は 422 で拒否する。
+    フロントは「変更できません」＋理由の事実文を出し、[変更] / [既定に戻す] を出さない
+    （settable-but-inert な UI を作らない）。
+    """
+
+    def test_ops_table_respects_read_only_flag(self):
+        src = _read(LLM_MODELS_JS)
+        render = _extract_function(src, "renderOpsTable")
+        assert "scene.read_only" in render, "renderOpsTable は read_only を見て分岐すること"
+        assert "変更できません" in render
+        assert "read_only_reason" in render
+
+    def test_read_only_row_has_no_change_or_reset_button(self):
+        src = _read(LLM_MODELS_JS)
+        render = _extract_function(src, "renderOpsTable")
+        # read_only 分岐（actionsHtml の if 側）にボタンの生成が含まれないこと
+        read_only_branch = render.split("if (scene.read_only)", 1)[1].split("} else {", 1)[0]
+        assert "llm-models-ops-change-btn" not in read_only_branch
+        assert "llm-models-ops-reset-btn" not in read_only_branch
+
+    def test_change_row_shows_fact_sentence_for_read_only_scene(self):
+        src = _read(LLM_MODELS_JS)
+        change_row = _extract_function(src, "openOpsChangeRow")
+        assert "scene.read_only" in change_row, (
+            "openOpsChangeRow は read_only の場面で選択肢を描かないこと"
+        )
+
+    def test_no_tier_names_in_read_only_wording(self):
+        src = _read(LLM_MODELS_JS)
+        render = _extract_function(src, "renderOpsTable")
+        branch = render.split("if (scene.read_only)", 1)[1].split("} else {", 1)[0]
+        for tier in ("fast", "standard", "deep", "analysis"):
+            assert tier not in branch.lower()

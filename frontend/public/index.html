@@ -120,6 +120,9 @@
           <button type="button" class="discuss-scope-opt" data-discuss-scope="course_sources">このコースのソース論文</button>
           <button type="button" class="discuss-scope-opt" data-discuss-scope="all_visible">閲覧できる周辺資料まで</button>
         </div>
+        <!-- 音声会話の非対応を近傍に事実文で示す（設計 §6.4: 音声版はこのモードの
+             非スコープ。app.js の updateVoiceAvailability が hidden を切り替える）。 -->
+        <span class="discuss-voice-note" id="discuss-voice-note" hidden>音声会話は「順番に学ぶ」モードで利用できます。</span>
         <!-- Phase 2 着地画面トリガー①（明示終了）。押すと discuss.js が今日の議論を
              振り返る軽量モーダルを提示する（スキップ可・既定オン）。 -->
         <button type="button" class="discuss-end-btn" id="discuss-end-btn" data-ui-anchor="discuss.end" title="今日の議論を振り返って終える">議論を終える</button>

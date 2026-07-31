@@ -430,3 +430,273 @@ capability 不足は 422（フロントの絞り込みを信頼しない）。Ad
    （新機能の feature を追加したのに scene 未定義、を検出）。
 9. **ユーザー分離**: 教員 A の `scope='user'` 行が教員 B の解決結果・catalog レスポンスに
    一切影響しない。`my-policies` API が本人以外の user_id を受け付けない（fail-closed）。
+
+---
+
+## 12. 実装記録 — レビュー指摘 C1 / m4 / m6 / m7 の修正（2026-07-31）
+
+Phase 0〜4 実装後のレビューで、**パイプライン系だけモデル選択が実質無効**になっていた
+ことが判明した。4件をまとめて修正した（migration 不要・API 変更なし）。
+
+### C1（Critical）contextvars がウォールタイムアウトスレッドを越えていなかった
+
+`src/episteme_graph/agents/llm_json_client.py::_call_with_wall_timeout` が
+`threading.Thread(target=target)` を **`contextvars.copy_context()` なし**で起動していた。
+contextvars はスレッドをまたがないため、スレッド内では
+
+- `core.llm_policy.model_override`（§3 解決順②）が消え、
+- `core.llm_usage.context`（U層の帰属 = §3 解決順③④が読む `user_id` の出所）も消える。
+
+結果、`core/llm.py` の入口解決は `feature='unattributed'` → scene なし → 常に
+`LLM_ANALYSIS_MODEL`（tier 既定）になり、run の `options.models` / ユーザー既定 /
+システム既定のどれも **paper_skeleton / rhetorical_role / claim_qualification /
+equation_semantics / thesis_reconstruction / dsl_linking / component_assembly /
+narrative_annotator** に届いていなかった（`apparatus_semantics` と `discuss_opening` は
+モデルを事前解決して明示引数で渡すため無事だった）。さらに `_record_stage_model_if_used`
+（M7）は orchestrator スレッド側で解決するため、`stage_outputs._stage_models` には
+**実際には使われなかったモデルが記録される**という食い違いまで生じていた。
+
+修正: `ctx = contextvars.copy_context()` を取り
+`threading.Thread(target=lambda: ctx.run(target))` で実行する（壁時計タイムアウト・
+例外伝播・戻り値の扱いは不変。コンテキストはコピーなのでスレッド内の書き込みは
+呼び出し元へ漏れない）。
+
+> **教訓（M層の一般規則）**: 「LLM 呼び出しの手前でスレッド・executor を起こす」箇所は
+> すべて `contextvars.copy_context()` を通すこと。渡し忘れるとモデル選択と U層帰属が
+> **静かに** tier 既定 / unattributed へ落ちる。
+
+### m4（Medium）pipeline の `usage_context` に `user_id` が無く `scope='user'` が inert
+
+`run_document_pipeline` の `bind_usage_context` が document_id / run_id / course_id しか
+bind しておらず、§3 解決順③（`scope='user'` のポリシー行）に到達できなかった
+（アップロード UI が run override を常送するため隠れていたが、`models` 未指定の再解析・
+API 直呼びでは無効）。
+
+修正: `run_document_pipeline(..., user_id=None)` を追加し `bind_usage_context` に bind する
+（未指定でも従来どおり = system 行 → env → tier 既定）。呼び出し元は
+`api/services.py::process_material_background`（`user_id` を受けて透過的に渡す）と
+`api/routes/lecture_studio/pipeline.py` の2 worker（既に `user_id` を持っている）。
+
+### m6（Minor）`_ctxexpl_model` の env 直読み（M1 違反）
+
+`orchestrator._ctxexpl_model` が `os.getenv("CTXEXPL_LLM_MODEL")` を直読みし DB ポリシー層を
+素通ししていた。兄弟の `_discuss_opening_model` と同型に
+`resolve_scene_model("pipeline:contextual_explanation")` へ委譲した（`CTXEXPL_LLM_MODEL` は
+`llm_policy._FEATURE_DIRECT_ENV` 経由で従来どおり効き、未設定なら fast tier —
+env のみの環境では解決結果が完全に一致する）。run options（`pipeline:contextual_explanation`
+→ `pipeline`）の先読みは従来どおり維持。
+
+### m7（Minor）equation_semantics vision の settings 直読み
+
+`equation_semantics/llm_client.py` が `self.model or settings.llm_analysis_model` で
+env 由来値を明示引数化し、policy 層をバイパスしていた。テキスト経路は従来どおり
+`model=None` のまま `core.llm` 入口へ委ね、vision 経路（provider SDK を直接叩くため具体名が
+必要）は新設 `_resolve_vision_model(settings)` が
+`resolve_scene_model("pipeline:equation_semantics")` へ委譲する。同 feature の env マッピングは
+無いため fallback tier は `analysis` = 従来の `settings.llm_analysis_model` と一致し、
+`llm_policy` が使えない環境では settings へフェイルオープンする。
+
+### テスト
+
+- `backend/tests/test_pipeline_model_thread_propagation.py`（新規）— **実クライアント経由**の
+  統合テスト。既存 `test_pipeline_model_override.py` は fake step が orchestrator スレッド内で
+  `resolve_scene_model` を呼ぶため C1 を素通りしていた。ここでは実 `ProviderJSONLLMClient` を
+  `core.llm.generate_text` スタブで駆動し、(a) `model_override` が効く (b) `usage_context` の
+  feature / user_id / document_id / run_id がスレッド内に伝搬する (c) `_stage_models` の記録値が
+  実際に generate に渡ったモデルと一致する、を固定。m4 / m6 / m7 の解決順と挙動不変性も同ファイル。
+- `src/tests/agents/test_llm_json_client.py` — `_call_with_wall_timeout` の contextvars 伝搬・
+  非漏洩・例外/タイムアウト伝播（core 非依存の純ユニット）。
+- `src/tests/agents/equation_semantics/test_llm_client_model.py`（新規）— `_resolve_vision_model`
+  の委譲先 feature と フェイルオープン。
+
+### 未修正（別件として記録）
+
+`backend/core/theory_components.py` の `_EXTRACTION_EXECUTOR`
+（`ThreadPoolExecutor.submit(_call_llm)`、2箇所）も同じ形で contextvars を落とすため、
+原稿スタジオの理論コンポーネント抽出はモデル選択と U層帰属が効かない。C1 と同じ
+`copy_context` 対応が必要（本修正のスコープ外）。
+
+---
+
+## 13. 実装記録 — レビュー指摘 J1〜J6 / m1〜m3 の修正（policy・routes 系, 2026-07-31）
+
+§12（パイプライン系）と並行して、**policy 解決層と管理 API / 呼び出し側**のレビュー指摘を
+修正した（migration 不要・API のパス／レスポンス形状は互換のままフィールド追加のみ）。
+
+### J1（Major）再解析が前回 run の `options.models` を黙って捨てていた
+
+orchestrator は run の `options` を **wholesale 置換**する（部分マージしない）。にもかかわらず
+`routes/admin.py::reanalyze_document` は `analyze_images` だけを明示した場合に
+`options = {"analyze_images": ...}` を組み立てていたため、前回 run のモデル指定が消えていた
+（逆方向 = `models` だけ明示のケースは前回 run を読んで温存済みで、**非対称**だった）。
+再解析モーダルは `解析モデル: …（前回と同じ）` と表示するので、表示と実 run が食い違う（M6 違反）。
+
+修正: どちらか一方でも明示されたら**前回 run の options を土台にマージ**する
+（`_previous_run_options()` は best-effort = 読めなければ空 dict で従来挙動へフェイルオープン。
+両方未指定は従来どおり `options=None` を渡して orchestrator の継承分岐に委ねる）。
+
+### J2（Major）env シードが feature キーで書かれ scene 設定を恒久シャドウしていた
+
+`llm_policy_store.seed_env_policies` は env を **feature キー**（`pipeline:apparatus_semantics`
+など）で `scope='system'` 行に書いていた。一方 UI / API が編集するのは **scene キー**
+（`pipeline.vision`）で、`_pick_priority_row` の優先順は system+feature > system+scene。
+その結果、**運用タブで保存しても効かず、表示も古いまま**になっていた。
+`APPARATUS_LLM_MODEL` は既定 `gpt-4o`（非空）なので、全新規環境で必ず発生する。
+
+修正: **シードの書き込みキーを「UI が編集するキー」に揃える**。計画の正本は
+`core/llm_policy.py::iter_env_seeds()`（純関数・DB 非接触）:
+
+- scene の**代表 feature**（下記 m1）が env を持つ場合は **scene キー**で1行シードする
+  （その env を共有する feature 群を1行でカバー。例: `pipeline.vision` ← `APPARATUS_LLM_MODEL`、
+  `learning_chat` ← `LEARNING_CHAT_LLM_MODEL`）。
+- 同じ scene に**別の env 変数**を持つ feature がある場合（学習の裏方 = TENSION / ANCHOR /
+  RECON、前提の地図 = DOUBT_SCOPE / DOUBT_ASSUMPTION、要素検討 = DELIBERATION / STDPART）は、
+  その値を落とさないために従来どおり **feature キー**でシードする。これらは運用タブの
+  「ステージ別の指定（N件）」節に現れ、そこで変更・解除できる（= 既知の限界ではなく、
+  「env が feature 単位に分かれている」という事実をそのまま写している）。
+- `_FEATURE_DIRECT_ENV`（`CTXEXPL_LLM_MODEL` / `DISCUSS_OPENING_LLM_MODEL`）は運用タブの
+  ステージ別指定で編集できるキーそのものなので、従来どおり feature キー。
+- 読み取り専用 scene（下記 J5 の `learning_voice`）はシードしない。
+
+**既存 DB の移行**: 旧シード行は note（`seeded from env: <ENV_NAME>`）で識別できるため、
+scene キー行をシードする際に「同じ note **かつ** model が現在の env 値と一致する
+`scope='system'` の feature キー行」だけを冪等に削除する（`_delete_legacy_env_seed_rows`）。
+人が運用タブで編集した行（note が空 / model が env と異なる）は削除しない（P4 情報を落とさない）。
+削除と scene 行の追加は同じシード処理内で行われ、値が同じなので解決結果は不変。
+
+### J3 / J4（Major）原稿スタジオ・地図生成が policy を素通し（運用タブは効いていると表示）
+
+- `core/lecture.py::generate_spoken_text_and_formulas` と
+  `routes/lecture_studio/scripts.py::rewrite_lecture_script` が、モデル未指定時に
+  `get_llm_params("fast")["model"]` を **明示引数**で渡していた → 解決順①
+  （`call_argument`）に化けて user / system ポリシーが一切効かない。
+- `core/atlas_generator.py::generate_skeleton_draft` も `model or settings.llm_analysis_model` で同型。
+
+修正:
+- `scripts.py`（リクエストスレッド）は `model=None` のまま `generate_text` に渡し、
+  `core/llm.py` 入口の `resolve_scene_model` に委ねる（feature は既存 `usage_context` の
+  `admin:lecture_rewrite`）。`reasoning_effort` は従来どおり tier の値を渡す（挙動不変。
+  `effort_for_call` は呼び出し側指定を常に優先する）。
+- `core/lecture.py` は `llm_policy.resolve_scene_model("admin:lecture_generate")` で
+  **自分で解決してから明示引数として渡す**。`generate_text(model=None)` に委ねないのは、
+  学習側 `routes/lecture.py` の呼び出しが `usage_context` を張らず `unattributed` になり、
+  tier が analysis に化けてしまうため（バックグラウンドスレッドで contextvar が使えない
+  事情も同じ）。
+- `atlas_generator` も同様に `resolve_scene_model("admin:atlas_skeleton")` で解決してから渡す
+  （`generated_by: "model:<id>"` に実モデル名を残す必要があるため）。
+
+**Phase 0 不変性の担保**: `admin:lecture_rewrite` / `admin:lecture_generate` は専用 env を
+持たないため、そのままでは汎用既定（analysis tier）に落ちて従来（fast tier）と食い違う。
+`llm_policy._FEATURE_TIER_ONLY`（env なし・tier だけを宣言するマップ）を新設し、両 feature を
+`fast` に固定した。atlas は `admin:atlas_skeleton` → `ATLAS_ASSIST_LLM_MODEL`（既定空）→
+analysis tier なので、既定環境では従来と一致する（`ATLAS_ASSIST_LLM_MODEL` を明示設定している
+環境では、その値が骨格生成にも効くようになる = M層の feature→env マッピングの既定義に従う）。
+
+### J5（Major）`learning_voice` scene は settable-but-inert だった → **読み取り専用に変更**
+
+音声は STT（`core/llm.py::transcribe_audio` が `settings.llm_transcribe_model` を直参照）と
+TTS（`core/tts.py` が provider 別にモデルを固定）で構成され、**policy 解決経路を通らない**。
+カタログにも音声モデル（whisper 系 / `tts-1`）は無く、設定可能にしても選べる有効値が存在しない。
+さらに運用タブの「現在のモデル」は代表 feature の解決結果（= `LLM_ANALYSIS_MODEL`）で、
+**STT でも TTS でもないモデル名**を表示していた。
+
+**v1 の裁定（§6.3 の「TTS モデルの選択は運用タブのみ」からの差分）**: 設定できるのに何も
+起きない UI は M4（捏造しない）/ M5（fail-closed）の精神に反するため、`learning_voice` を
+**読み取り専用**にする。
+
+- `llm_policy.READ_ONLY_SCENE_KEYS` / `read_only_scene_reason()` / `voice_model_facts()` /
+  `voice_display_model()` を新設（正本）。
+- `PUT /policies/learning_voice` と `PUT /my-policies/learning_voice` は **422 + 事実文**
+  （「音声モデルの変更は v1 では対応していません（表示のみ）」）。
+- `GET /policies` / `GET /catalog` は当該 scene に `read_only` / `read_only_reason` を付け、
+  `current`（`effective`）に**実際の値**を出す（`whisper-1（音声認識） / tts-1（読み上げ）` +
+  `components: [{label, model}]`）。選択肢はその1件のみ（テキスト生成モデルを並べない）。
+  provider が音声非対応の組み合わせでは事実文（`（このプロバイダでは未対応）`）を出す。
+- フロント（`admin-llm-models.js`）は当該行を「変更できません」＋理由の表示のみにし、
+  `[変更]` / `[既定に戻す]` を出さない。
+- シード（J2）も当該 scene には行を作らない。
+
+音声モデルを本当に選べるようにする場合は、カタログへの音声モデル区分の追加 + `core/tts.py` /
+`transcribe_audio` を policy 経由にする作業が必要（v1 非スコープ）。
+
+### J6（Major）図再解析の監査記録が env 素読みだった
+
+`core/figure_reanalysis.py` の `IterativeConfig(model_name=settings.apparatus_llm_model)` は
+`iterative_analysis.model`（監査記録）の値で、実際の生成コールは
+`ApparatusSemanticsLLMClient(model=None)` → `core/llm.py` 入口解決なので、**記録と実使用が
+食い違う**（orchestrator は同じ問題を `resolve_scene_model("pipeline:apparatus_semantics")` で
+既に是正済み。M7）。修正して `resolve_scene_model("deliberation:figure_reanalysis")`（scene は
+`pipeline.vision`）の結果を記録する。user ポリシーを拾うため `usage_context` の内側で解決し、
+policy 行が無い（env / tier 由来の）ときはこのモジュールが読んでいる `settings` の値を優先する
+（本番では同値。差が出るのは settings を差し替えたテストのみ）。
+
+### m1（Minor）運用タブの代表 feature 選定が実効値と食い違っていた
+
+`_representative_feature` が `SCENES[scene]["features"][0]`（= `KNOWN_FEATURES` の登場順の
+先頭）を取っていたため、`deliberation` → `deliberation:cross_corpus`（embedding 用・env
+マッピングなし）、`assistant` → `admin:component_candidates` のように **その場面の主たる操作
+ではない feature** が代表になり、実際は fast tier で動く場面に analysis tier のモデル名を
+表示していた。
+
+修正: `llm_policy._SCENE_REPRESENTATIVE_FEATURE`（scene → 主たる操作の feature）を明示宣言し、
+`representative_feature_for_scene()` を正本にした（routes 側は委譲のみ）。1つの scene に tier の
+異なる feature が混在する場合、単一の値で全部を正しく表すことは原理的に不可能なので
+「主たる操作を選ぶ」規則にしてある（宣言漏れはテストが検出する）。
+
+### m2（Minor）非 vision の scene 既定を figure 対話が継承していた
+
+`core/deliberation/dialogue.py::run_turn` が `resolve_model()`（feature `deliberation:chat`
+固定・capability 制約なし）で解決していたため、scene `deliberation` のシステム既定に非 vision
+モデルを設定すると **画像付きコールが text モデルへ行き**、非LLM フォールバックに縮退していた
+（リクエストチップ経路は `routes/deliberation.py` が `deliberation:vision` で検証済みで、
+継承経路だけが無防備だった）。
+
+修正は2段:
+1. `dialogue.run_turn` は feature 単位で解決する（`resolve_turn_model(feature)`。画像ありは
+   `deliberation:vision`）。解決を `usage_context` の**内側**に移したので、`scope='user'` の
+   ポリシー（`current_usage_context().user_id` を見る層）もようやく効く。
+2. `resolve_scene_model` に **capability の fail-closed** を実装した（従来 `capability` 引数は
+   予約のみで未使用）。capability は `required_capability_for_feature(feature)`
+   （feature → 所属 scene の順で判定）から自動導出し、満たさない**ポリシー行はその層を
+   スキップ**して下位（env → tier 既定）へ落ちる。env / tier 層は既存設定なので capability で
+   無効化しない（カタログ外の既存モデルを使えなくする害が大きい）。カタログが読めない環境では
+   判定不能なのでフェイルオープン（ポリシー行はカタログ検証を通ってしか作られない）。
+   この結果、`pipeline.vision` / `pipeline:apparatus_semantics` / `deliberation:figure_reanalysis`
+   も同じ保護を受ける。
+
+### m3（Minor）キャッシュ無効化が commit 前だった
+
+`llm_policy_store.upsert_policy` / `delete_policy` 内の `invalidate()` は commit 前に走るため、
+「invalidate → 他スレッドが旧値を読んで 20 秒再キャッシュ → commit」の窓が残っていた。
+`routes/llm_models.py` の書き込み4経路（system / my × PUT / DELETE）で **commit 後に
+`invalidate()` を呼ぶ**（store 内の呼び出しは best-effort の保険として残す = 二重 invalidate）。
+
+### m8（best-effort）再解析モーダルの再利用告知は**未実装**（既知ギャップ）
+
+§6.1-D「前回の解析結果を再利用するステージがあります（… は `<model>` の結果）」は
+`stage_outputs._stage_models`（記録済み）を読めば出せるが、**モーダルへ document / material の
+id を渡す配線が無い**（`AdminLlmModels.initReanalyzePanel(containerEl, lastOpts)` は前回 options
+だけを受け取り、id は `admin.js` 側にしかない）。実装には `admin.js` の 1 行変更
+（id を渡す）+ 前回 run の `_stage_models` を返す小さな読み取り API が必要で、今回の担当範囲
+（`admin.js` 編集不可）では入れられなかったため未実装のまま記録する。
+§6.1-C「教材一覧の『解析モデル』列（表示のみ）」も同様に未実装。
+
+### テスト
+
+- `backend/tests/test_llm_policy.py` — 代表 feature の網羅・実効値一致（m1）/ 原稿スタジオの
+  fallback tier（J3 の Phase 0 不変性）/ capability fail-closed（m2）/ 読み取り専用 scene と
+  音声モデルの事実（J5。`core/tts.py` の `tts-1` リテラルとのずれ検出も）/ `iter_env_seeds`（J2）。
+- `backend/tests/test_llm_policy_store.py` — シードが scene キーで書かれること・別 env を持つ
+  feature は feature キーで残ること・旧シード行の移行削除・人が編集した行は削除しないこと・
+  読み取り専用 scene を作らないこと（J2 / J5）。
+- `backend/tests/test_llm_model_policy_api.py` — 再解析 options マージ（J1、fail-open 含む）/
+  `learning_voice` の 422 と正直な表示（J5）/ 代表 feature 表示（m1）/ commit 後 invalidate（m3）。
+- `backend/tests/test_llm_model_policy_guardrails.py` — 呼び出し側が tier モデルを明示引数で
+  渡していないことの静的検査 + 実際の解決（J3 / J4 / J6）、figure 対話の vision 継承（m2）。
+- `backend/tests/test_llm_models_ui_static.py` — 運用タブの読み取り専用行（J5）。
+
+### 同種の残課題（今回の担当範囲外）
+
+`routes/lecture_studio/topics.py::rewrite_lecture_studio_course_topic` も
+`requested_model or params["model"]` の形で J3 と同型のバイパスをしている
+（既存テストがその挙動を固定しているため、本修正では触っていない）。

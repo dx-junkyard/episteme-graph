@@ -78,6 +78,7 @@ from core.teaching_figures.store import (
     create_teaching_figure,
     get_suggestion,
     get_teaching_figure,
+    get_teaching_figure_for_delivery,
     list_suggestions,
     list_teaching_figures,
     set_suggestion_status,
@@ -125,6 +126,12 @@ _FIGURE_KIND_FALLBACK = "other"
 SUGGESTION_STATUS_CANDIDATE = "candidate"
 SUGGESTION_STATUS_ACCEPTED = "accepted"
 SUGGESTION_STATUS_DISMISSED = "dismissed"
+
+#: 提案生成の LLM 呼び出しが失敗したときの事実文（``degraded=true`` と一緒に返す）。
+#: 「候補ゼロ」と「生成できなかった」を区別するため（数値は出さない・FG8）。
+SUGGEST_DEGRADED_NOTE = (
+    "AIによる提案の生成に失敗しました。時間をおいて再度お試しください。"
+)
 
 # grounding の上限（FG6: 同期パスを重くしない・プロンプト膨張を防ぐ）
 _GROUNDING_MATERIAL_CHARS = 4000
@@ -289,6 +296,31 @@ def _save_course_data(session, course_id: str, course_data: dict) -> None:
         ),
         {"course_id": course_id, "data": json.dumps(course_data, ensure_ascii=False)},
     )
+
+
+def _upload_figure_snapshot(minio_key: str, svg: str, *, course_id: str, figure_id: str) -> bool:
+    """配信スナップショット（MinIO）を上書きする。**DB コミット後に呼ぶこと**。
+
+    正本は DB の ``svg_source`` なので、スナップショットの失敗で保存操作自体を
+    巻き戻さない（成功したら True・失敗は WARN + False）。順序を「DB → MinIO」に
+    固定するのは、逆順だと DB 更新が失敗したときに**配信物だけ新版・正本は旧版**という
+    最悪の食い違いが残るため（教員向け配信は DB へフェイルソフトするので、失敗時は
+    旧スナップショットが残るだけで正本は正しい）。
+    """
+    try:
+        get_storage_client().upload_bytes(
+            FIGURE_IMAGES_BUCKET,
+            minio_key,
+            svg.encode("utf-8"),
+            content_type=SVG_CONTENT_TYPE,
+        )
+        return True
+    except Exception:  # noqa: BLE001 — 正本は DB 側。配信スナップショットは best-effort
+        logger.warning(
+            "teaching figure snapshot upload failed course=%s figure=%s key=%s",
+            course_id, figure_id, minio_key, exc_info=True,
+        )
+        return False
 
 
 def _teaching_figure_image_url(course_id: str, figure_id: str) -> str:
@@ -555,10 +587,15 @@ def create_course_teaching_figure(
     """SVG をサニタイズして保存し、``adopt=true`` なら採用まで行う。
 
     処理順（DB 側は1トランザクション。MinIO アップロードのみ外部 I/O）:
-    サニタイズ（拒否は 422）→ id 採番 + MinIO アップロード → 行作成 →
-    採用時はトピック側登録 + ``learning_courses.data`` 更新 → 提案の accepted 遷移 →
-    commit → 監査記帳。id を先に採番するのは MinIO キー（``teaching/{course_id}/{id}.svg``）が
-    id 依存のため（アップロードが失敗すれば行は作られない = 参照先の無い行を残さない）。
+    サニタイズ（拒否は 422）→ id 採番 → 行作成 → 採用時はトピック側登録 +
+    ``learning_courses.data`` 更新 → 提案の accepted 遷移 → commit →
+    **MinIO アップロード**（best-effort）→ 監査記帳。id を先に採番するのは MinIO キー
+    （``teaching/{course_id}/{id}.svg``）が id 依存のため。
+
+    アップロードを commit の**後**に置くのは、正本が DB の ``svg_source`` だから
+    （PATCH と同じ順序に統一。逆順だと DB 側が失敗したときに配信物だけ先に変わる）。
+    アップロードが失敗しても保存は成立させ、``image_snapshot_failed: true`` で
+    正直に返す（教員向けプレビューは DB の SVG へフェイルソフトする）。
     """
     course_data = course_data_for_owner(course_id, current_user)
 
@@ -581,14 +618,23 @@ def create_course_teaching_figure(
     caption = str(body.caption or "")
     figure_id = new_figure_id()
     minio_key = minio_key_for(course_id, figure_id)
+    requested_suggestion_id = str(body.suggestion_id) if body.suggestion_id else ""
+    suggestion_id = ""
     session = _pg_session()
     try:
-        get_storage_client().upload_bytes(
-            FIGURE_IMAGES_BUCKET,
-            minio_key,
-            sanitized.svg.encode("utf-8"),
-            content_type=SVG_CONTENT_TYPE,
-        )
+        if requested_suggestion_id:
+            # 提案 id はクライアント由来なので、コーススコープを確認してから使う
+            # （他コースの候補を accepted にしない・由来として記録もしない）。
+            scoped = get_suggestion(session, requested_suggestion_id)
+            if scoped and str(scoped.get("course_id") or "") == str(course_id):
+                suggestion_id = requested_suggestion_id
+            else:
+                logger.warning(
+                    "teaching figure create: suggestion out of course scope "
+                    "course=%s suggestion=%s (ignored)",
+                    course_id, requested_suggestion_id,
+                )
+
         row = create_teaching_figure(
             session,
             figure_id=figure_id,
@@ -602,8 +648,11 @@ def create_course_teaching_figure(
             minio_key=minio_key,
             content_type=SVG_CONTENT_TYPE,
             status=status,
-            source_suggestion_id=str(body.suggestion_id) if body.suggestion_id else None,
+            source_suggestion_id=suggestion_id or None,
         )
+        # caption は store 側で「模式図」表記が付く場合がある（FG5）。トピック側登録・
+        # 応答は**保存された値**を使う（本文カードと DB の caption を食い違わせない）。
+        caption = str(row.get("caption") or caption)
 
         evidence_link: dict | None = None
         linked_figure_ids: list[str] = []
@@ -612,8 +661,10 @@ def create_course_teaching_figure(
             linked_figure_ids = list(topic.get("linked_figure_ids") or [])
             _save_course_data(session, course_id, course_data)
 
-        if body.suggestion_id:
-            set_suggestion_status(session, str(body.suggestion_id), SUGGESTION_STATUS_ACCEPTED)
+        if suggestion_id:
+            set_suggestion_status(
+                session, suggestion_id, SUGGESTION_STATUS_ACCEPTED, course_id=course_id,
+            )
 
         session.commit()
     except HTTPException:
@@ -630,40 +681,62 @@ def create_course_teaching_figure(
     finally:
         session.close()
 
+    # 配信スナップショットは commit 後に best-effort（正本は DB の svg_source）。
+    snapshot_ok = _upload_figure_snapshot(
+        minio_key, sanitized.svg, course_id=course_id, figure_id=figure_id,
+    )
+
+    metadata: dict[str, Any] = {
+        "action": "teaching_figure.create",
+        "course_id": course_id,
+        "topic_id": topic_id,
+        "figure_kind": figure_kind,
+        "adopted": bool(body.adopt),
+        "suggestion_id": suggestion_id,
+        # 「AI 生成物である」ことは検証できない（保存 API は教員クライアント由来の
+        # svg_source を受ける）。提出原文とサニタイズ後の両方の指紋を残す（§4.1）。
+        "svg_sha256": getattr(sanitized, "sha256", "") or "",
+        "source_svg_sha256": getattr(sanitized, "source_sha256", "") or "",
+    }
+    if requested_suggestion_id and not suggestion_id:
+        # 依頼された提案がコーススコープ外だった事実を落とさない。
+        metadata["suggestion_out_of_scope"] = True
+    if not snapshot_ok:
+        metadata["image_snapshot_failed"] = True
     record_review_event(
         AUDIT_ENTITY_TEACHING_FIGURE,
         figure_id,
         "",
         status,
         current_user.get("id"),
-        {
-            "action": "teaching_figure.create",
-            "course_id": course_id,
-            "topic_id": topic_id,
-            "figure_kind": figure_kind,
-            "adopted": bool(body.adopt),
-            "suggestion_id": str(body.suggestion_id) if body.suggestion_id else "",
-            # 「AI 生成物である」ことは検証できない（保存 API は教員クライアント由来の
-            # svg_source を受ける）。提出原文とサニタイズ後の両方の指紋を残す（§4.1）。
-            "svg_sha256": getattr(sanitized, "sha256", "") or "",
-            "source_svg_sha256": getattr(sanitized, "source_sha256", "") or "",
-        },
+        metadata,
     )
     return {
         "figure_id": figure_id,
         "figure": _figure_summary(course_id, row),
         "evidence_link": evidence_link,
         "linked_figure_ids": linked_figure_ids,
+        # 配信スナップショットの失敗を黙って隠さない（UI が再保存を促せる）。
+        "image_snapshot_failed": not snapshot_ok,
     }
 
 
 class TeachingFigurePatchRequest(BaseModel):
-    """title / caption / SVG の差し替えと status 遷移（行削除はしない・FG7）。"""
+    """title / caption / SVG の差し替えと status 遷移（行削除はしない・FG7）。
+
+    ``register_topic_id`` は「この図をこのトピックに登録する」指示（§7.1b）。既存図タブ
+    からの挿入がこれを使う — 本文への ``![[figure:id]]`` 挿入だけでは
+    ``linked_figure_ids`` / ``evidence_links`` が空のままになり、①AI 書き換えで embed が
+    黙って消える ②未配信時に学習者へ生 UUID が露出する、という 2 つの壊れ方をする
+    （設計書 §7.1b・レビュー M3）。登録は **status が adopted の図に限る**
+    （draft / retired を登録すると学習者に配信されない図の参照だけが残る）。
+    """
 
     title: str | None = None
     caption: str | None = None
     svg_source: str | None = None
     status: str | None = None
+    register_topic_id: str | None = None
 
 
 @router.patch("/courses/{course_id}/teaching-figures/{figure_id}")
@@ -675,17 +748,23 @@ def update_course_teaching_figure(
 ) -> dict:
     """図の修正・状態遷移。
 
-    - ``svg_source`` 差し替え: 再サニタイズ（拒否 422）+ MinIO 再アップロード
-      （旧版の ``revisions`` append は store 側の責務）。
+    - ``svg_source`` 差し替え: 再サニタイズ（拒否 422）→ DB 更新 → **commit 後に**
+      MinIO 再アップロード（旧版の ``revisions`` append は store 側の責務）。
+      アップロードは best-effort で、失敗しても 200 + ``image_snapshot_failed: true``
+      （正本は DB の ``svg_source``。逆順だと DB 更新の失敗時に配信物だけ新版になる）。
     - ``status``: ``draft → adopted`` は §7.1b のトピック側登録も実行。
       ``adopted → retired`` はトピック側登録を**削除しない**（§7.4: 生 UUID 露出を防ぎ
       「配信対象ではありません」カードへ落とすため）。``retired → adopted`` の復帰可。
+    - ``register_topic_id``: 指定トピックへの参照登録のみを行う（既存図タブからの挿入。
+      採用済みの図を別トピックにも登録できる）。冪等。``status`` と同時指定も可
+      （draft → adopted + 指定トピックへ登録）。登録は adopted の図に限る（422）。
     """
     course_data = course_data_for_owner(course_id, current_user)
 
     new_status = str(body.status or "").strip() or None
     if new_status is not None and new_status not in _FIGURE_STATUSES:
         raise HTTPException(status_code=422, detail=f"図の状態が不正です: {new_status}")
+    register_topic_id = str(body.register_topic_id or "").strip()
 
     sanitized = None
     if body.svg_source is not None:
@@ -695,12 +774,24 @@ def update_course_teaching_figure(
             raise HTTPException(status_code=422, detail=str(getattr(exc, "reason", None) or exc)) from exc
 
     session = _pg_session()
+    snapshot_key = ""
     try:
         existing = get_teaching_figure(session, figure_id)
         # 他コースの図・不在はどちらも 404（存在の有無を権限で区別しない・fail-closed）。
         if not existing or str(existing.get("course_id") or "") != str(course_id):
             raise HTTPException(status_code=404, detail="Teaching figure not found")
         old_status = str(existing.get("status") or "")
+
+        # 登録先トピックの決定（明示指定 > 図の provenance topic_id）と前提の検証。
+        # 検証は UPDATE の**前**に行う（422 のときは DB も MinIO も触らない）。
+        effective_status = new_status or old_status
+        topic_id_for_register = register_topic_id or str(existing.get("topic_id") or "")
+        wants_register = bool(register_topic_id) or new_status == STATUS_ADOPTED
+        if register_topic_id and effective_status != STATUS_ADOPTED:
+            raise HTTPException(
+                status_code=422,
+                detail="トピックに登録できるのは採用済みの図だけです。先に採用してください。",
+            )
 
         fields: dict[str, Any] = {"updated_by": current_user.get("id")}
         if body.title is not None:
@@ -710,32 +801,39 @@ def update_course_teaching_figure(
         if sanitized is not None:
             # 差し替えは同じキーへ上書きする（MinIO は配信スナップショット・正本は DB の
             # svg_source）。キー未設定の古い行は規約どおりのキーを付け直す。
-            minio_key = str(existing.get("minio_key") or "") or minio_key_for(course_id, figure_id)
-            get_storage_client().upload_bytes(
-                FIGURE_IMAGES_BUCKET,
-                minio_key,
-                sanitized.svg.encode("utf-8"),
-                content_type=SVG_CONTENT_TYPE,
-            )
+            # 実アップロードは commit 後（下）。
+            snapshot_key = str(existing.get("minio_key") or "") or minio_key_for(course_id, figure_id)
             fields["svg_source"] = sanitized.svg
-            fields["minio_key"] = minio_key
+            fields["minio_key"] = snapshot_key
         if new_status is not None:
             fields["status"] = new_status
 
-        try:
-            row = update_teaching_figure(session, figure_id, **fields)
-        except TeachingFigureNotFoundError as exc:
-            raise HTTPException(status_code=404, detail="Teaching figure not found") from exc
-        except ValueError as exc:
-            # store 側の語彙検証（figure_kind / status）に落ちた場合は 422（fail-closed）。
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        # 「登録だけ」の PATCH（採用済み図を別トピックに追加登録する）では列の更新が
+        # 1つも無い。store は「更新フィールドが空」を ValueError にするため、その場合は
+        # UPDATE を発行せず現在行をそのまま使う（空ボディの 422 は従来どおり store 側に任せる）。
+        has_column_update = any(
+            value is not None for value in (body.title, body.caption, sanitized, new_status)
+        )
+        if has_column_update or not register_topic_id:
+            try:
+                row = update_teaching_figure(session, figure_id, **fields)
+            except TeachingFigureNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="Teaching figure not found") from exc
+            except ValueError as exc:
+                # store 側の語彙検証（figure_kind / status）に落ちた場合は 422（fail-closed）。
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+        else:
+            row = dict(existing)
 
         evidence_link: dict | None = None
         linked_figure_ids: list[str] = []
         topic_registered = False
-        if new_status == STATUS_ADOPTED:
-            topic_id = str(existing.get("topic_id") or "").strip()
+        if wants_register and effective_status == STATUS_ADOPTED:
+            topic_id = topic_id_for_register.strip()
             topic = _find_topic(course_data, topic_id) if topic_id else None
+            if topic is None and register_topic_id:
+                # 明示指定のトピックが無いのは呼び出し側の誤り（黙って無登録にしない）。
+                raise HTTPException(status_code=404, detail="Topic not found")
             if topic is not None:
                 evidence_link = _register_figure_in_topic(
                     topic, figure_id, str(row.get("caption") or existing.get("caption") or "")
@@ -755,15 +853,27 @@ def update_course_teaching_figure(
     finally:
         session.close()
 
+    # 配信スナップショットは commit 後に best-effort（正本は DB の svg_source）。
+    snapshot_ok = True
+    if sanitized is not None and snapshot_key:
+        snapshot_ok = _upload_figure_snapshot(
+            snapshot_key, sanitized.svg, course_id=course_id, figure_id=figure_id,
+        )
+
     metadata: dict[str, Any] = {
         "action": "teaching_figure.update",
         "course_id": course_id,
         "svg_replaced": sanitized is not None,
         "topic_registered": topic_registered,
     }
+    if topic_registered:
+        # どのトピックへ登録したかを監査に残す（P5。既存図タブからの挿入もここを通る）。
+        metadata["registered_topic_id"] = topic_id_for_register
     if sanitized is not None:
         metadata["svg_sha256"] = getattr(sanitized, "sha256", "") or ""
         metadata["source_svg_sha256"] = getattr(sanitized, "source_sha256", "") or ""
+    if not snapshot_ok:
+        metadata["image_snapshot_failed"] = True
     if row.get("revisions_truncated"):
         # FG7: 旧版の間引きが起きたことを黙って落とさない（store が立てるフラグ）。
         metadata["revisions_truncated"] = True
@@ -783,6 +893,8 @@ def update_course_teaching_figure(
         "topic_registered": topic_registered,
         # 旧版の間引きが起きたことを UI にも正直に伝える（FG7）。
         "revisions_truncated": bool(row.get("revisions_truncated")),
+        # 配信スナップショットの失敗を黙って隠さない（UI が再保存を促せる）。
+        "image_snapshot_failed": not snapshot_ok,
     }
 
 
@@ -822,11 +934,14 @@ def get_course_teaching_figure_image(
 
     読み取り系は editor 共有教員にも開く（§7.3。studio プレビューの figures_index が
     この URL を指すため、owner 限定にすると editor のプレビューで画像が 403 になる）。
+
+    行の取得は配信用の最小投影（``get_teaching_figure_for_delivery``）を使う —
+    画像1枚のために旧版 SVG（``revisions``。数MB になり得る）を引かない。
     """
     _course_data_for_studio_editable(course_id, current_user)
     session = _pg_session()
     try:
-        row = get_teaching_figure(session, figure_id)
+        row = get_teaching_figure_for_delivery(session, figure_id)
     finally:
         session.close()
     if not row or str(row.get("course_id") or "") != str(course_id):
@@ -920,6 +1035,9 @@ def generate_course_figure_suggestions(
         if isinstance(row, dict)
     ]
     dropped = int(getattr(result, "dropped", 0) or 0)
+    # LLM 呼び出し自体が失敗した場合（core が degraded=True で返す）。「候補ゼロ」と
+    # 区別できないと、教員には「この教材に提案は無い」と読めてしまう（事実と違う）。
+    degraded = bool(getattr(result, "degraded", False))
 
     session = _pg_session()
     try:
@@ -950,15 +1068,21 @@ def generate_course_figure_suggestions(
             "topic_id": topic_id,
             "created": int(created or 0),
             "dropped": dropped,
+            "degraded": degraded,
             "used_learner_signals": bool(signal_lines),
         },
     )
-    return {
+    response: dict[str, Any] = {
         "course_id": course_id,
         "topic_id": topic_id,
         "suggestions": [_suggestion_response(row) for row in suggestions],
         "dropped": dropped,
+        "degraded": degraded,
     }
+    if degraded:
+        # 事実文のみ（回数・残数の数値を出さない・FG8）。
+        response["note"] = SUGGEST_DEGRADED_NOTE
+    return response
 
 
 def _primary_course_document_id(course_data: dict) -> str:
@@ -1026,7 +1150,8 @@ def _decide_suggestion(course_id: str, suggestion_id: str, status: str, current_
                 status_code=409,
                 detail="この提案はすでに判断済みです（採択または却下されています）。",
             )
-        row = set_suggestion_status(session, suggestion_id, status)
+        # course_id はここでも渡す（store 側の UPDATE をコースにスコープする二重防御）。
+        row = set_suggestion_status(session, suggestion_id, status, course_id=course_id)
         if not row:
             # 読み取りと更新の間に他の操作が確定させた場合（レース）。
             raise HTTPException(

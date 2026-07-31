@@ -685,17 +685,29 @@
       var current = scene.current || {};
       var hasSystemRow = false;
       opsPolicies.forEach(function (p) { if (p.scene_key === scene.scene_key) hasSystemRow = true; });
-      html += '<tr data-scene-key="' + escHtml(scene.scene_key) + '">' +
-        "<td>" + escHtml(scene.label) + "</td>" +
-        "<td>" + escHtml(current.model || "") + "</td>" +
-        "<td>" + escHtml(current.source_label || "") + "</td>" +
-        "<td>" +
+      // 読み取り専用の場面（音声会話）はサーバが read_only を立てる。ここでは表示だけを行い、
+      // 変更・既定に戻すのボタンを出さない（PUT はサーバ側でも 422。M層設計書 §12 J5）。
+      var actionsHtml;
+      if (scene.read_only) {
+        actionsHtml = '<span style="font-size:11px;color:var(--color-text-tertiary)">変更できません</span>';
+      } else {
+        actionsHtml =
           '<button type="button" class="admin-action-btn llm-models-ops-change-btn" data-ui-anchor="llm-models.change-scene-model" data-scene-key="' +
             escHtml(scene.scene_key) + '" style="font-size:11px;padding:2px 8px">変更</button> ' +
           '<button type="button" class="admin-action-btn llm-models-ops-reset-btn" data-ui-anchor="llm-models.reset-scene-model" data-scene-key="' +
             escHtml(scene.scene_key) + '" style="font-size:11px;padding:2px 8px"' +
-            (hasSystemRow ? "" : " disabled") + ">既定に戻す</button>" +
-        "</td>" +
+            (hasSystemRow ? "" : " disabled") + ">既定に戻す</button>";
+      }
+      var labelHtml = escHtml(scene.label);
+      if (scene.read_only && scene.read_only_reason) {
+        labelHtml += '<div style="font-size:11px;color:var(--color-text-tertiary);margin-top:2px">' +
+          escHtml(scene.read_only_reason) + "</div>";
+      }
+      html += '<tr data-scene-key="' + escHtml(scene.scene_key) + '">' +
+        "<td>" + labelHtml + "</td>" +
+        "<td>" + escHtml(current.model || "") + "</td>" +
+        "<td>" + escHtml(current.source_label || "") + "</td>" +
+        "<td>" + actionsHtml + "</td>" +
       "</tr>" +
       '<tr class="llm-models-ops-edit-row" data-scene-key-edit="' + escHtml(scene.scene_key) + '" hidden>' +
         '<td colspan="4"></td>' +
@@ -731,6 +743,12 @@
 
     _fetchJson("/admin/llm-models/catalog?scene=" + encodeURIComponent(sceneKey)).then(function (data) {
       var scene = (data.scenes || [])[0];
+      if (scene && scene.read_only) {
+        // 読み取り専用の場面（音声会話）は選択肢を出さない（J5）。
+        cell.innerHTML = '<div style="font-size:12px;color:var(--color-text-secondary)">' +
+          escHtml(scene.read_only_reason || "この場面のモデルは変更できません。") + "</div>";
+        return;
+      }
       if (!scene || !data.catalog_available) {
         cell.innerHTML = _unavailableNoteHtml();
         return;

@@ -104,10 +104,35 @@
     return "「" + label + "」について、この論文での位置づけと根拠を教えてください。";
   }
 
-  function discussChip(label) {
+  // 構造帰属（Structure-Anchored Questions, 経路A = 明示アンカー）の element_type 語彙。
+  // 正本の対応表は backend/core/structure_anchor/schema.py::ELEMENT_TYPE_TO_ANCHOR_TYPE。
+  // app.js の materialAnchorElementType と同じ規約に揃える — 数式だけ専用語彙
+  // ("formula" → anchor_type "equation") があり、claim / stage には対応語彙が無いので
+  // backend 側の既定フォールバック（"concept"）に委ねる（backend/core は変更しない）。
+  function anchorElementType(kind) {
+    return kind === "equation" ? "formula" : "concept";
+  }
+
+  // 開幕画面のチップ・ノードが指す元要素（{id, kind, label}）。id を持たないもの
+  // （agent が合成した文・定型文・教員の入力）にはアンカーを付けない — 実在しない
+  // 要素 id を捏造しない。DTO の items[] は type ("claim" | "equation") を持つ。
+  function itemRef(item, kind) {
+    if (!item || !item.id) return null;
+    return { id: item.id, kind: item.type || kind || "", label: item.label || "" };
+  }
+
+  // 送信時に structure_anchor 経路A（learner_selected）へ渡す属性。無ければ空文字。
+  function anchorAttrs(ref) {
+    if (!ref || !ref.id) return "";
+    return ' data-discuss-el-id="' + esc(ref.id) + '"' +
+      ' data-discuss-el-type="' + esc(anchorElementType(ref.kind)) + '"' +
+      ' data-discuss-el-label="' + esc(ref.label || ref.id) + '"';
+  }
+
+  function discussChip(label, ref) {
     if (!label) return "";
-    return '<button type="button" class="discuss-chip" data-discuss-ask="' + esc(askText(label)) + '">' +
-      esc(label) + '</button>';
+    return '<button type="button" class="discuss-chip" data-discuss-ask="' + esc(askText(label)) + '"' +
+      anchorAttrs(ref) + '>' + esc(label) + '</button>';
   }
 
   // 中心命題は「押すもの」ではなく「読むもの」として出す（claim の label は論文原文
@@ -123,7 +148,7 @@
     html += '<div class="discuss-claim-text">' + esc(label) + '</div>';
     html += '<div class="discuss-claim-actions">';
     html += '<button type="button" class="discuss-claim-ask" data-discuss-ask="' +
-      esc(askText(label)) + '">この主張について聞く</button>';
+      esc(askText(label)) + '"' + anchorAttrs(itemRef(item, "claim")) + '>この主張について聞く</button>';
     if (label.length > CLAIM_CLAMP_HINT_CHARS) {
       html += '<button type="button" class="discuss-claim-more" data-discuss-expand="1">全文を見る</button>';
     }
@@ -153,7 +178,7 @@
         entries.forEach(function (entry) { html += supportEntryHtml(entry); });
       } else {
         html += '<div class="discuss-chip-row">';
-        sec.items.forEach(function (item) { html += discussChip(item && item.label); });
+        sec.items.forEach(function (item) { html += discussChip(item && item.label, itemRef(item)); });
         html += '</div>';
       }
       html += '</div>';
@@ -172,7 +197,7 @@
     if (text) html += '<div class="discuss-support-entry-text">' + esc(text) + '</div>';
     if (items.length) {
       html += '<div class="discuss-chip-row">';
-      items.forEach(function (item) { html += discussChip(item && item.label); });
+      items.forEach(function (item) { html += discussChip(item && item.label, itemRef(item)); });
       html += '</div>';
     }
     html += '</div>';
@@ -222,7 +247,7 @@
       if (equations.length) {
         html += '<div class="discuss-section-sub discuss-central-eq-hd">中心となる式</div>';
         html += '<div class="discuss-chip-row">';
-        equations.forEach(function (e) { html += discussChip(e && e.label); });
+        equations.forEach(function (e) { html += discussChip(e && e.label, itemRef(e, "equation")); });
         html += '</div>';
       }
     } else {
@@ -237,8 +262,16 @@
   // （docs/features/discuss_opening_authoring_design.md §2 / §7）。
   //  - 承認済みが1件も無ければ区画ごと出さない（Phase 0 の画面と同一・OA4）。
   //  - 署名（authored_by_label）はサーバが付ける文をそのまま出す。ここで文を作らない。
-  //  - body は「立場を求める問い」そのものなので、押したらその文をそのまま送る
-  //    （askText() で包まない）。観測は既存の opening_starter_clicked に相乗りする。
+  //  - body は「立場を求める問い」そのものなので、**学習者の発話としては送らない**。
+  //    送ってしまうと AI が発話タイプ別ルール1（質問には即答）でその問いに自分で
+  //    答えきってしまい、係留（学習者が先に立場を述べ、AI が言い直す）が起動しない
+  //    （discuss_dialogue_alignment_design.md §3-1）。押したら LLM を呼ばずに
+  //    （DM8）アシスタント側の問いとしてチャット欄へ置き、学習者の入力を待つ
+  //    （app.js の window.discussPostSeedPrompt）。観測は既存の
+  //    opening_starter_clicked に相乗りする。
+  //  - evidence_quote の照合先は A層が生成したテキスト（thesis 合成文・正規化済み
+  //    statement・導出の理由文など）であって論文原文ではない。「論文の記述」と
+  //    名乗らせない（出所の正直さ, OA7）。
   function renderDiscussionSeedsSection(doc) {
     var seeds = (doc && Array.isArray(doc.discussion_seeds)) ? doc.discussion_seeds : [];
     var usable = seeds.filter(function (s) { return s && s.body; });
@@ -254,10 +287,10 @@
       html += '<div class="discuss-seed-item">';
       html += '<div class="discuss-seed-body">' + esc(s.body) + '</div>';
       if (s.evidence_quote) {
-        html += '<div class="discuss-seed-quote">論文の記述: 『' + esc(s.evidence_quote) + '』</div>';
+        html += '<div class="discuss-seed-quote">解析結果にもとづく記述: 『' + esc(s.evidence_quote) + '』</div>';
       }
       html += '<div class="discuss-claim-actions">';
-      html += '<button type="button" class="discuss-claim-ask discuss-seed-ask" data-discuss-ask="' +
+      html += '<button type="button" class="discuss-claim-ask discuss-seed-ask" data-discuss-seed-ask="' +
         esc(s.body) + '">この問いから話す</button>';
       html += '</div></div>';
     });
@@ -356,7 +389,10 @@
         var cls = "discuss-backbone-node" + (backed ? "" : " discuss-backbone-node--review");
         var label = (n && n.stage_label) || (n && n.label) || "";
         if (i > 0) html += '<span class="discuss-backbone-arrow" aria-hidden="true">›</span>';
+        // 構造帰属（経路A）: main 層のバックボーンノードは theory_component なので
+        // node_id をそのままアンカー id にする（anchor_type は concept）。
         html += '<button type="button" class="' + cls + '" data-discuss-ask="' + esc(askText(label)) + '"' +
+          anchorAttrs(n && n.node_id ? { id: n.node_id, kind: "concept", label: label } : null) +
           (n && n.description ? ' title="' + esc(n.description) + '"' : '') + '>';
         html += '<span class="discuss-backbone-num">' + (i + 1) + '</span>';
         html += '<span class="discuss-backbone-label">' + esc(label) + '</span>';
@@ -448,9 +484,12 @@
     });
     // D層台帳由来（コース全体の前提）は document に紐づかないので docs ループの外に出す。
     html += renderPaperUnverifiedSection(fragile);
+    // トップレベルの truncated は fragile_points（確かめていないこと／確認できていない
+    // ところ）の切り詰めを意味する（core/discuss/opening.py の fragile_truncated）。
+    // 論文・資料の一覧の話にすり替えない。
     if (data.truncated) {
       html += '<div class="discuss-muted discuss-truncated-note">' +
-        '論文・資料の一覧は主要なものに絞って表示しています。</div>';
+        '確かめていないこと・確認できていないところは、主要なものに絞って表示しています。</div>';
     }
     html += '</div>';
     return html;
@@ -466,7 +505,29 @@
         } else {
           sendDiscussMetric("opening_starter_clicked", {});
         }
-        if (text && window.sendPrompt) window.sendPrompt(text);
+        if (!text || !window.sendPrompt) return;
+        // 構造帰属（経路A・明示アンカー, DM3 / 設計 §3.4）: 元要素の id があれば
+        // 既存の element_id / element_type / element_label で添える。これで
+        // attribution_source='learner_selected' として同期確定し、開幕チップ起点の
+        // 問いも「どこへの問いか」が残る（doubt_type は unclassified のまま）。
+        var elId = this.getAttribute("data-discuss-el-id") || "";
+        if (!elId) { window.sendPrompt(text); return; }
+        window.sendPrompt(text, {
+          element_id: elId,
+          element_type: this.getAttribute("data-discuss-el-type") || "concept",
+          element_label: this.getAttribute("data-discuss-el-label") || elId,
+        });
+      });
+    });
+    // 「議論のきっかけ」（§7）は立場を求める問い。学習者の発話として送らず、
+    // アシスタントの問いとしてチャット欄へ置いて学習者の応答を待つ（係留の起動。
+    // discuss_dialogue_alignment_design.md §3-1）。LLM は呼ばない（DM8）。
+    // 係留対象は document 全体なので構造帰属（経路A）の対象にはしない。
+    containerEl.querySelectorAll("[data-discuss-seed-ask]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var text = this.getAttribute("data-discuss-seed-ask");
+        sendDiscussMetric("opening_starter_clicked", {});
+        if (text && window.discussPostSeedPrompt) window.discussPostSeedPrompt(text);
       });
     });
     // 中心命題の本文は既定で3行に抑える（CSS）。全文表示は明示操作のみ。
@@ -984,9 +1045,12 @@
     // コース切替・ログアウト時に呼ぶ。無活動タイマー・往復回数・開幕表示済み
     // フラグに加え、旧コースの discuss コンテキスト（ctx.courseId）も破棄する
     // （そうしないと reset 後に stale な courseId で着地判定が動きうる）。
+    // lastShownAt（抑制窓）も必ず落とす — 残すと切替後の新しいコースの着地画面が
+    // 最初の10分だけ「直近に出した」と誤判定されて出なくなる。
     reset: function () {
       clearInactivityTimer();
       turnCount = 0;
+      lastShownAt = 0;
       openingShownCourseId = "";
       ctx.courseId = "";
       closeLanding();

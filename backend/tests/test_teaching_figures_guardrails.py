@@ -831,6 +831,319 @@ class TestTeachingFigureMergeOrder:
 # ===========================================================================
 
 
+class TestStoreSqlColumnsExistInMigration:
+    """store が発行する SQL の列名が migration 063 の定義列に全て存在すること。
+
+    背景（2026-07-31 のレビュー指摘 = 実障害）: ``update_teaching_figure`` の SET 句に
+    実テーブルに無い ``updated_by`` が無条件で入っており、実 PostgreSQL では 42703
+    （undefined_column）で **PATCH が全滅**していた（採用 / 回収 / caption 修正 /
+    SVG 差し替え）。fake session はどんな列名でも受け取るため、単体テストでは
+    一切検出できなかった。
+
+    そこで「store の全 SQL を実際に発行させ、現れた列名を migration の CREATE TABLE
+    定義と突き合わせる」構造検査を置く。列名のタイプミス・存在しない列の追加は
+    実 DB を用意しなくてもここで落ちる。
+    """
+
+    # --- migration 063 の列定義 -------------------------------------------
+    _TYPE_RE = re.compile(
+        r"^([a-z_][a-z0-9_]*)\s+(UUID|TEXT|JSONB|TIMESTAMPTZ|REAL|BOOLEAN|INTEGER|BIGINT)\b"
+    )
+
+    @classmethod
+    def _table_columns(cls, table: str) -> set[str]:
+        match = re.search(
+            rf"CREATE TABLE IF NOT EXISTS {table}\s*\((.*?)\n\);", _MIGRATION_SQL, re.DOTALL
+        )
+        assert match, f"CREATE TABLE for {table} not found in migration 063"
+        columns: set[str] = set()
+        for line in match.group(1).splitlines():
+            found = cls._TYPE_RE.match(line.strip())
+            if found:
+                columns.add(found.group(1))
+        assert columns, f"no columns parsed for {table}"
+        return columns
+
+    # --- 発行された SQL から列名を取り出す --------------------------------
+    _IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+    _NON_COLUMN_WORDS = frozenset(
+        {
+            "and", "or", "not", "null", "true", "false", "cast", "as", "any", "now",
+            "jsonb", "uuid", "text", "select", "from", "where", "set", "values",
+            "returning", "order", "by", "limit", "asc", "desc", "insert", "into",
+            "update", "delete", "on", "conflict", "distinct", "count",
+        }
+    )
+
+    @classmethod
+    def _clean(cls, token: str) -> str | None:
+        token = token.strip().split("::")[0].strip().strip("()").strip().lower()
+        if not cls._IDENT_RE.match(token) or token in cls._NON_COLUMN_WORDS:
+            return None
+        return token
+
+    @classmethod
+    def _split_top_level(cls, text: str) -> list[str]:
+        parts, depth, current = [], 0, ""
+        for char in text:
+            if char == "(":
+                depth += 1
+            elif char == ")":
+                depth -= 1
+            if char == "," and depth == 0:
+                parts.append(current)
+                current = ""
+            else:
+                current += char
+        parts.append(current)
+        return parts
+
+    @classmethod
+    def _table_and_columns(cls, sql: str) -> tuple[str, set[str]]:
+        flat = re.sub(r"\s+", " ", sql).strip()
+        table = ""
+        for pattern in (r"INSERT INTO (\w+)", r"UPDATE (\w+)", r"DELETE FROM (\w+)", r"FROM (\w+)"):
+            found = re.search(pattern, flat)
+            if found:
+                table = found.group(1)
+                break
+        assert table, f"could not determine the table for: {flat}"
+
+        columns: set[str] = set()
+
+        insert_cols = re.search(r"INSERT INTO \w+ \(([^)]*)\)", flat)
+        if insert_cols:
+            columns |= {c for c in map(cls._clean, cls._split_top_level(insert_cols.group(1))) if c}
+
+        set_clause = re.search(r"UPDATE \w+ SET (.*?)(?: WHERE | RETURNING |$)", flat)
+        if set_clause:
+            for assignment in cls._split_top_level(set_clause.group(1)):
+                cleaned = cls._clean(assignment.split("=")[0])
+                if cleaned:
+                    columns.add(cleaned)
+
+        select_list = re.search(r"SELECT (.*?) FROM ", flat)
+        if select_list:
+            columns |= {c for c in map(cls._clean, cls._split_top_level(select_list.group(1))) if c}
+
+        returning = re.search(r"RETURNING (.*?)$", flat)
+        if returning:
+            columns |= {c for c in map(cls._clean, cls._split_top_level(returning.group(1))) if c}
+
+        where = re.search(r" WHERE (.*?)(?: RETURNING | ORDER BY | LIMIT |$)", flat)
+        if where:
+            for token in re.findall(r"(\w+)\s*(?:=|IN\b)", where.group(1)):
+                cleaned = cls._clean(token)
+                if cleaned:
+                    columns.add(cleaned)
+
+        return table, columns
+
+    # --- store の全 SQL を発行させる --------------------------------------
+    @staticmethod
+    def _emitted_sql() -> list[str]:
+        from core.teaching_figures import schema, store
+
+        row = tuple([None] * 16)  # 最も列数の多い投影に合わせた汎用行
+
+        class _Result:
+            def fetchone(self):
+                return row
+
+            def fetchall(self):
+                return [row]
+
+        class _Session:
+            def __init__(self):
+                self.calls: list[str] = []
+
+            def execute(self, stmt, params=None):
+                self.calls.append(str(stmt))
+                return _Result()
+
+        session = _Session()
+        figure_id = "11111111-2222-3333-4444-555555555555"
+        suggestion_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+        store.create_teaching_figure(
+            session,
+            course_id="c",
+            topic_id="t",
+            created_by=None,
+            title="title",
+            caption="caption",
+            figure_kind=schema.FIGURE_KIND_CONCEPT_MAP,
+            svg_source="<svg/>",
+            minio_key="teaching/c/f.svg",
+            content_type=schema.SVG_CONTENT_TYPE,
+            status=schema.FIGURE_STATUS_DRAFT,
+            figure_id=figure_id,
+        )
+        store.create_teaching_figure(
+            session,
+            course_id="c",
+            topic_id=None,
+            created_by=None,
+            title="",
+            caption="",
+            figure_kind=schema.FIGURE_KIND_CONCEPT_MAP,
+            svg_source="<svg/>",
+            minio_key="teaching/c/f.svg",
+            content_type=schema.SVG_CONTENT_TYPE,
+            status=schema.FIGURE_STATUS_ADOPTED,
+        )
+        store.get_teaching_figure(session, figure_id)
+        store.get_teaching_figure_for_delivery(session, figure_id)
+        store.list_teaching_figures(session, "c")
+        store.list_teaching_figures(session, "c", statuses=[schema.FIGURE_STATUS_ADOPTED])
+        store.adopted_figures_map(session, "c")
+        # 全更新フィールドを1回で（SET 句に現れうる列を網羅する）
+        store.update_teaching_figure(
+            session,
+            figure_id,
+            title="t2",
+            caption="c2",
+            svg_source="<svg>new</svg>",
+            minio_key="teaching/c/f.svg",
+            status=schema.FIGURE_STATUS_ADOPTED,
+            updated_by=None,
+        )
+        store.delete_figures_for_course(session, "c")
+        store.create_suggestions(
+            session,
+            [
+                {
+                    "course_id": "c",
+                    "topic_id": "t",
+                    "anchor_excerpt": "excerpt",
+                    "gap_reason": "reason",
+                    "signal_basis": schema.SIGNAL_BASIS_TEXT_ANALYSIS,
+                    "figure_kind": schema.FIGURE_KIND_CONCEPT_MAP,
+                    "figure_brief": "brief",
+                    "confidence": 0.5,
+                }
+            ],
+        )
+        store.list_suggestions(session, "c", "t")
+        store.get_suggestion(session, suggestion_id)
+        store.set_suggestion_status(
+            session, suggestion_id, schema.SUGGESTION_STATUS_ACCEPTED, course_id="c"
+        )
+        return session.calls
+
+    def test_every_emitted_column_exists_in_the_migration(self):
+        known = {
+            "course_teaching_figures": self._table_columns("course_teaching_figures"),
+            "teaching_figure_suggestions": self._table_columns("teaching_figure_suggestions"),
+        }
+        statements = self._emitted_sql()
+        assert len(statements) >= 13, "store の SQL を網羅できていない（関数追加時は追記する）"
+        for sql in statements:
+            table, columns = self._table_and_columns(sql)
+            assert table in known, f"unexpected table in store SQL: {table}"
+            unknown = sorted(columns - known[table])
+            assert unknown == [], (
+                f"migration 063 の {table} に存在しない列を SQL が参照している: {unknown}\n"
+                f"（実 PostgreSQL では 42703 になる）\nSQL: {re.sub(r'  +', ' ', sql)}"
+            )
+
+    def test_the_check_detects_a_column_that_does_not_exist(self):
+        """検査そのものの実効性（updated_by の再侵入を必ず捕まえる）。"""
+        known = self._table_columns("course_teaching_figures")
+        assert "updated_by" not in known
+        _table, columns = self._table_and_columns(
+            "UPDATE course_teaching_figures SET updated_by = CAST(:updated_by AS uuid), "
+            "updated_at = now() WHERE id = CAST(:id AS uuid) RETURNING id::text"
+        )
+        assert "updated_by" in columns
+        assert columns - known == {"updated_by"}
+
+    def test_figure_row_projection_matches_the_table(self):
+        """``_FIGURE_COLUMNS_SQL`` / 配信投影が定義列だけを SELECT していること。"""
+        known = self._table_columns("course_teaching_figures")
+        from core.teaching_figures import store
+
+        for constant in (store._FIGURE_COLUMNS_SQL, store._FIGURE_DELIVERY_COLUMNS_SQL):
+            columns = {
+                c
+                for c in (self._clean(part) for part in constant.split(","))
+                if c
+            }
+            assert columns <= known, sorted(columns - known)
+
+
+# ===========================================================================
+# 12. レビュー指摘の再発防止（2026-07-31）
+# ===========================================================================
+
+
+class TestReviewFixesStayFixed:
+    def test_delivery_endpoint_uses_the_lean_projection(self):
+        """画像1枚のために ``revisions``（旧版 SVG）を引かない。"""
+        body = extract_function_source(_ROUTE_SRC, "get_course_teaching_figure_image")
+        assert "get_teaching_figure_for_delivery(" in body
+        assert "get_teaching_figure(" not in _code_only(body)
+        delivery = extract_function_source(_STORE_SRC, "get_teaching_figure_for_delivery")
+        assert "revisions" not in _code_only(delivery)
+
+    def test_schematic_caption_is_enforced_in_the_store(self):
+        """FG5: 「模式図」表記の付与は DB 書き込みの唯一の入口（store）で行う。"""
+        for fn in ("create_teaching_figure", "update_teaching_figure"):
+            body = extract_function_source(_STORE_SRC, fn)
+            assert "enforce_schematic_caption(" in body, fn
+        # route 側で文字列を組み立て直さない（付与規則を二重化しない）。
+        assert_source_forbids(
+            _code_only(_ROUTE_SRC), ("模式図",), context="routes/teaching_figures.py (code only)"
+        )
+
+    def test_suggestion_status_writes_are_course_scoped(self):
+        """提案の状態遷移は必ずコーススコープ付き（id だけで他コースを書き換えない）。"""
+        import inspect
+
+        from core.teaching_figures.store import set_suggestion_status
+
+        param = inspect.signature(set_suggestion_status).parameters["course_id"]
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY
+        assert param.default is inspect.Parameter.empty
+
+        body = extract_function_source(_STORE_SRC, "set_suggestion_status")
+        assert "course_id = :course_id" in body
+
+        # route の全呼び出し箇所が course_id を渡す。
+        for call in re.findall(r"set_suggestion_status\(([\s\S]{0,200}?)\)", _code_only(_ROUTE_SRC)):
+            assert "course_id=" in call, f"course_id を渡していない呼び出し: {call!r}"
+
+    def test_degraded_generation_is_not_swallowed(self):
+        """LLM 失敗（degraded）を「候補ゼロ」に見せない。"""
+        body = extract_function_source(_ROUTE_SRC, "generate_course_figure_suggestions")
+        assert 'getattr(result, "degraded", False)' in body
+        assert '"degraded": degraded' in body
+        assert "SUGGEST_DEGRADED_NOTE" in body
+        note = _module_constants(_ROUTE_SRC)["SUGGEST_DEGRADED_NOTE"]
+        assert note and not re.search(r"\d", note), "事実文に数値を出さない（FG8）"
+
+    def test_snapshot_upload_happens_after_the_db_commit(self):
+        """正本（DB）を確定させてから配信スナップショット（MinIO）を上げる。
+
+        逆順だと DB 側の失敗時に「配信物だけ新版・正本は旧版」が残る。
+        """
+        for fn in ("create_course_teaching_figure", "update_course_teaching_figure"):
+            body = extract_function_source(_ROUTE_SRC, fn)
+            commit_at = body.index("session.commit()")
+            upload_at = body.index("_upload_figure_snapshot(")
+            assert commit_at < upload_at, f"{fn}: MinIO アップロードは commit の後に置く"
+        # アップロード呼び出しは1箇所に集約する（ヘッダ・失敗処理の二重化を防ぐ）。
+        assert _ROUTE_SRC.count("upload_bytes(") == 1
+        helper = extract_function_source(_ROUTE_SRC, "_upload_figure_snapshot")
+        assert "upload_bytes(" in helper
+        assert "return False" in helper  # 失敗は例外にせず False（正本は DB）
+
+    def test_snapshot_failure_is_reported_not_hidden(self):
+        for fn in ("create_course_teaching_figure", "update_course_teaching_figure"):
+            body = extract_function_source(_ROUTE_SRC, fn)
+            assert '"image_snapshot_failed"' in body, fn
+
+
 class TestAdminUiThreePointSet:
     _INSPECT_TEST = BACKEND / "tests" / "test_admin_help_inspect_ui_static.py"
     _FIGURE_STUDIO_JS = ROOT / "frontend" / "public" / "js" / "admin-figure-studio.js"

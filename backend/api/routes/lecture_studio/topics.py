@@ -566,13 +566,18 @@ def rewrite_lecture_studio_course_topic(
 
     params = get_llm_params("fast")
     # M層 Phase 3（§6.3）: この実行だけのモデル上書き（scene "lecture_studio"）。
-    # 未指定なら従来どおり fast tier。
+    # **未指定のときは model=None のまま渡し、入口（core/llm.py）の resolve_scene_model に
+    # 解決を委ねる**（scripts.py の rewrite と同じ裁定・レビュー指摘 J3 同型。以前は
+    # fast tier のモデルを明示引数で渡していたため解決順①に化けて、運用タブ・本人既定の
+    # 設定が効かなかった）。feature は下の usage_context が張る "admin:lecture_rewrite" で、
+    # ポリシー行も env も無い環境では llm_policy._FEATURE_TIER_ONLY により従来と同じ
+    # fast tier に解決される。
     requested_model = str(body.get("model") or "").strip() or None
     if requested_model:
         reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_LECTURE_STUDIO, requested_model)
         if reason:
             raise HTTPException(status_code=422, detail=reason)
-    effective_model = requested_model or params["model"]
+    effective_model = requested_model
     effective_effort = None if requested_model else params["reasoning_effort"]
 
     parsed: object = {}

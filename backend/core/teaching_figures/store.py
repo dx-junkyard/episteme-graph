@@ -17,6 +17,17 @@
   ``confidence_label``（段階ラベル）へ変換する。
 - **FG2 確定は人間**: :func:`create_suggestions` は常に ``status='candidate'`` で挿入する
   （引数で status を受け取らない）。
+- **FG5 模式図の表記**: ``figure_kind='data_plot_schematic'`` の caption には
+  「模式図」表記をここで強制付与する（:func:`schema.enforce_schematic_caption`）。
+  DB 書き込みの**唯一の入口**である store に置くことで、route を経由しない将来の
+  呼び出し元でも実データと誤読される caption が保存されない
+  （sanitizer と同じ「唯一の入口」原則）。
+
+**発行する SQL の列は migration 063 の定義列だけ**（``updated_by`` 列は存在しない —
+更新者は ``revisions`` エントリと ``theory_review_events`` の監査に残す設計）。
+実 PostgreSQL でしか出ない 42703 を fake session が隠さないよう、列名の包含検査は
+``tests/test_teaching_figures_guardrails.py::TestStoreSqlColumnsExistInMigration`` が
+構造的に固定する。
 
 FastAPI は import しない（core/ 共通ルール）。
 """
@@ -138,12 +149,16 @@ def create_teaching_figure(
 
     ``status`` は ``draft``（ストック）/ ``adopted``（配信対象）のいずれか。
     採用時のトピック側登録（設計書 §7.1b）は呼び出し側が同一トランザクションで行う。
+    ``caption`` は ``figure_kind='data_plot_schematic'`` のとき「模式図」表記を
+    強制付与して保存する（FG5。**保存後の caption は戻り値の行から読むこと** —
+    引数の caption と一致しない場合がある）。
 
     ``figure_id`` は任意。MinIO キーが ``teaching/{course_id}/{id}.svg``（id 依存）で
-    あるため、**呼び出し側が id を先に決めて MinIO へ上げてから行を作れる**ように
-    受け口を開けている（``schema.new_figure_id()`` +
-    ``schema.minio_key_for(course_id, figure_id)`` を使う）。省略時は DB 既定の
-    ``gen_random_uuid()`` が採番する。
+    あるため、**呼び出し側が id とキーを先に決められる**ように受け口を開けている
+    （``schema.new_figure_id()`` + ``schema.minio_key_for(course_id, figure_id)``）。
+    省略時は DB 既定の ``gen_random_uuid()`` が採番する。
+    配信スナップショットの実アップロードは**行の commit 後**に行う
+    （正本は DB の ``svg_source``。``routes/teaching_figures.py::_upload_figure_snapshot``）。
 
     Raises:
         ValueError: 語彙外の ``figure_kind`` / ``status`` / ``figure_id``、または必須値が空。
@@ -187,7 +202,8 @@ def create_teaching_figure(
             "topic_id": str(topic_id) if topic_id else None,
             "created_by": created_by if _is_uuid(created_by) else None,
             "title": str(title or ""),
-            "caption": str(caption or ""),
+            # FG5: 模式グラフは caption でも模式であることを示す（唯一の入口で強制）。
+            "caption": schema.enforce_schematic_caption(caption, figure_kind),
             "figure_kind": figure_kind,
             "svg_source": svg_source,
             "minio_key": str(minio_key),
@@ -217,6 +233,47 @@ def get_teaching_figure(session: Any, figure_id: str) -> dict | None:
         {"id": str(figure_id)},
     ).fetchone()
     return _row_to_figure(row) if row else None
+
+
+#: 画像配信に必要な最小列（**``revisions`` を含めない**）。旧版 SVG は数MB になり得るので、
+#: 画像1枚を返すだけのリクエストで引かない（設計書 §7.2 の配信経路）。
+_FIGURE_DELIVERY_COLUMNS_SQL = """
+    id::text, course_id, status, minio_key, content_type, svg_source
+"""
+
+
+def get_teaching_figure_for_delivery(session: Any, figure_id: str) -> dict | None:
+    """画像配信用の最小投影で1件取得する（``revisions`` を SELECT しない）。
+
+    返すキーは ``id`` / ``course_id`` / ``status`` / ``minio_key`` / ``content_type`` /
+    ``svg_source`` のみ。配信ゲート（course_id 一致・``status='adopted'``）と MinIO 取得、
+    正本 ``svg_source`` へのフェイルソフトに必要なものだけを載せる。
+
+    メタデータ編集や revisions の検査が必要な経路は :func:`get_teaching_figure` を使う。
+    """
+    if not _is_uuid(figure_id):
+        return None
+    row = session.execute(
+        sa_text(
+            f"""
+            SELECT {_FIGURE_DELIVERY_COLUMNS_SQL}
+              FROM course_teaching_figures
+             WHERE id = CAST(:id AS uuid)
+             LIMIT 1
+            """
+        ),
+        {"id": str(figure_id)},
+    ).fetchone()
+    if not row:
+        return None
+    return {
+        "id": str(row[0]),
+        "course_id": row[1] or "",
+        "status": row[2] or "",
+        "minio_key": row[3] or "",
+        "content_type": row[4] or schema.SVG_CONTENT_TYPE,
+        "svg_source": row[5] or "",
+    }
 
 
 def list_teaching_figures(
@@ -320,6 +377,12 @@ def update_teaching_figure(
     （上限 :data:`MAX_REVISIONS`・古い順に間引き、間引いた事実を残す）。
     ``svg_source`` はサニタイズ済みであること（サニタイズは呼び出し側の責務）。
 
+    ``caption`` は現在の ``figure_kind`` に応じて「模式図」表記を強制付与する（FG5）。
+
+    ``updated_by`` は **UPDATE 文の列にしない**（migration 063 に ``updated_by`` 列は
+    無い。実 PostgreSQL では 42703 で全 PATCH が落ちる）。更新者は ``revisions``
+    エントリと ``theory_review_events`` の監査記帳に残す。
+
     Raises:
         ValueError: 語彙外の ``status`` / 更新フィールドが1つも無い。
         TeachingFigureNotFoundError: 対象行が無い（UUID でない id も同様）。
@@ -335,14 +398,16 @@ def update_teaching_figure(
     if current is None:
         raise TeachingFigureNotFoundError(f"teaching figure not found: {figure_id}")
 
-    set_clauses = [
-        "updated_by = CAST(:updated_by AS uuid)",
-        "updated_at = now()",
-    ]
-    params: dict[str, Any] = {
-        "id": str(figure_id),
-        "updated_by": updated_by if _is_uuid(updated_by) else None,
-    }
+    # 更新者は列に持たない（migration 063 に updated_by 列は無い）。revisions エントリと
+    # 監査記帳が帰属の正本。
+    updated_by_id = updated_by if _is_uuid(updated_by) else None
+    if caption is not None:
+        caption = schema.enforce_schematic_caption(
+            caption, str(current.get("figure_kind") or "")
+        )
+
+    set_clauses = ["updated_at = now()"]
+    params: dict[str, Any] = {"id": str(figure_id)}
     for column, value in (
         ("title", title),
         ("caption", caption),
@@ -362,7 +427,7 @@ def update_teaching_figure(
                 current.get("revisions") or [],
                 svg_source=current.get("svg_source") or "",
                 caption=current.get("caption") or "",
-                updated_by=params["updated_by"],
+                updated_by=updated_by_id,
             )
         )
 
@@ -574,17 +639,30 @@ def list_suggestions(
     return [_row_to_suggestion(row) for row in rows]
 
 
-def set_suggestion_status(session: Any, suggestion_id: str, status: str) -> dict | None:
+def set_suggestion_status(
+    session: Any,
+    suggestion_id: str,
+    status: str,
+    *,
+    course_id: str,
+) -> dict | None:
     """候補を ``accepted`` / ``dismissed`` / ``superseded`` へ遷移させる。
 
     遷移元は ``candidate`` のみ（教員が判断済みの行は書き換えない・行削除しない。P4）。
     対象が無い・既に candidate でない場合は ``None``（呼び出し側が 404/409 にマッピング）。
 
+    ``course_id`` は**必須キーワード**（権限の fail-closed）。id だけで一致させると、
+    自コースの操作から**他コースの候補**を accepted / dismissed にできてしまう
+    （提案 id はクライアント由来なので id の秘匿を前提にしない）。スコープ外の id は
+    UPDATE が0行 = ``None`` になり、副作用ゼロで返る。
+
     Raises:
-        ValueError: ``candidate`` へ戻す等の受理しない遷移先。
+        ValueError: ``candidate`` へ戻す等の受理しない遷移先 / ``course_id`` が空。
     """
     if status not in schema.SUGGESTION_DECIDABLE_STATUSES:
         raise ValueError(f"invalid status for set_suggestion_status(): {status!r}")
+    if not str(course_id or "").strip():
+        raise ValueError("course_id is required for set_suggestion_status()")
     if not _is_uuid(suggestion_id):
         return None
     row = session.execute(
@@ -592,12 +670,14 @@ def set_suggestion_status(session: Any, suggestion_id: str, status: str) -> dict
             f"""
             UPDATE teaching_figure_suggestions
                SET status = :status
-             WHERE id = CAST(:id AS uuid) AND status = :current_status
+             WHERE id = CAST(:id AS uuid) AND course_id = :course_id
+               AND status = :current_status
             RETURNING {_SUGGESTION_COLUMNS_SQL}
             """
         ),
         {
             "id": str(suggestion_id),
+            "course_id": str(course_id),
             "status": status,
             "current_status": schema.SUGGESTION_STATUS_CANDIDATE,
         },
@@ -632,6 +712,7 @@ __all__ = [
     "delete_figures_for_course",
     "get_suggestion",
     "get_teaching_figure",
+    "get_teaching_figure_for_delivery",
     "list_suggestions",
     "list_teaching_figures",
     "set_suggestion_status",

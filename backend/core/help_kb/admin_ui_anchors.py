@@ -179,7 +179,11 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.extract-claims-btn",
         "lecture-studio.extract-theory-btn",
         "lecture-studio.figure-studio-adopt",
+        "lecture-studio.figure-studio-caption",
+        "lecture-studio.figure-studio-insert",
         "lecture-studio.figure-studio-modal",
+        "lecture-studio.figure-studio-restore",
+        "lecture-studio.figure-studio-retire",
         "lecture-studio.figure-studio-send",
         "lecture-studio.figure-suggestions",
         "lecture-studio.figure-suggestions-generate",
@@ -589,8 +593,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.extract-theory-btn": "teacher/14-admin-lecture-studio.md#extract-theory-btn",
     # 採用して挿入（教材図スタジオ）
     "lecture-studio.figure-studio-adopt": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # キャプションを直す（既存の図から選ぶタブ / このコースで作った図）
+    "lecture-studio.figure-studio-caption": "teacher/14-admin-lecture-studio.md#figure-studio-caption",
+    # 教材に挿入 / 採用して挿入（既存の図から選ぶタブ）
+    "lecture-studio.figure-studio-insert": "teacher/14-admin-lecture-studio.md#figure-studio-insert",
     # 教材図スタジオ（モーダル本体 / 既存の図から選ぶタブ）
     "lecture-studio.figure-studio-modal": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # 採用に戻す（回収済みの図）
+    "lecture-studio.figure-studio-restore": "teacher/14-admin-lecture-studio.md#figure-studio-restore",
+    # 回収する（採用済みの図）
+    "lecture-studio.figure-studio-retire": "teacher/14-admin-lecture-studio.md#figure-studio-retire",
     # 送信（教材図スタジオの AI との相談）
     "lecture-studio.figure-studio-send": "teacher/14-admin-lecture-studio.md#figure-studio",
     # 図の提案ペイン

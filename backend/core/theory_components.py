@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 import os
@@ -14,6 +15,21 @@ from core.llm import generate_text, get_llm_params
 logger = logging.getLogger(__name__)
 
 _EXTRACTION_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="theory-extract")
+
+
+def _submit_with_context(fn):
+    """呼び出し元の contextvars（U層 usage_context / M層 model_override）を
+    プールスレッドへ伝搬させて submit する。
+
+    ThreadPoolExecutor はスレッドを再利用するため、素の submit では
+    ①モデル選択・トークン帰属の文脈が消える ②前のリクエストの文脈が
+    残留し得る。submit ごとに copy_context() のスナップショットで実行する
+    （agents/llm_json_client.py の壁時計タイムアウトスレッドと同じ裁定）。
+    """
+    ctx = contextvars.copy_context()
+    return _EXTRACTION_EXECUTOR.submit(ctx.run, fn)
+
+
 _DEFAULT_TIMEOUT_SECONDS = 45
 _MAX_SOURCE_CHARS = 6000
 _MAX_CONTEXT_CHARS = 3000
@@ -454,7 +470,7 @@ def enrich_theory_components_with_llm(
         )
 
     try:
-        future = _EXTRACTION_EXECUTOR.submit(_call_llm)
+        future = _submit_with_context(_call_llm)
         raw = future.result(timeout=timeout_seconds)
     except TimeoutError:
         future.cancel()
@@ -555,7 +571,7 @@ def extract_theory_components_from_chunk(chunk: dict[str, Any]) -> list[dict[str
         )
 
     try:
-        future = _EXTRACTION_EXECUTOR.submit(_call_llm)
+        future = _submit_with_context(_call_llm)
         raw = future.result(timeout=timeout_seconds)
     except TimeoutError:
         future.cancel()

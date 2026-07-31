@@ -1843,6 +1843,10 @@
     '</div>';
   }
 
+  // サーバが note を返さなかった場合の控えの事実文（数値・原因の推測を書かない）。
+  var LS_FIGURE_SUGGEST_DEGRADED_FALLBACK =
+    "AIによる提案の生成に失敗しました。時間をおいて再度お試しください。";
+
   function lsFigureSuggestionsToolbarHtml() {
     return '<div class="ls-figure-suggestions-toolbar">' +
       '<button type="button" class="ls-mini-tab" id="ls-figure-suggest-generate" ' +
@@ -1861,7 +1865,10 @@
         ? (window.FigureStudio.FIGURE_KIND_LABELS[suggestion.figure_kind] || suggestion.figure_kind || "")
         : (suggestion.figure_kind || ""));
     var status = suggestion.status || "candidate";
-    var actionable = status === "candidate" || status === "accepted";
+    // [この図を作る] は候補・作成中の両方で押せる。[却下] は候補のみ
+    // （accepted / dismissed への再判断はサーバが 409 を返すため、押せる形にしない）。
+    var buildable = status === "candidate" || status === "accepted";
+    var dismissable = status === "candidate";
     return '<div class="ls-figure-suggestion-card" data-figure-suggestion-id="' + escHtml(suggestion.id) + '">' +
       '<div class="ls-figure-suggestion-head">' +
         '<span class="ls-figure-suggestion-kind">' + escHtml(kindLabel) + '</span>' +
@@ -1887,12 +1894,16 @@
       (suggestion.signal_basis
         ? '<div class="ls-figure-suggestion-basis">' + escHtml(lsFigureSignalBasisLabel(suggestion.signal_basis)) + '</div>'
         : '') +
-      (actionable
+      (buildable || dismissable
         ? '<div class="ls-figure-suggestion-actions">' +
-            '<button type="button" class="admin-action-btn" data-figure-suggestion-build="' +
-              escHtml(suggestion.id) + '">この図を作る</button>' +
-            '<button type="button" class="admin-action-btn" data-figure-suggestion-dismiss="' +
-              escHtml(suggestion.id) + '">却下</button>' +
+            (buildable
+              ? '<button type="button" class="admin-action-btn" data-figure-suggestion-build="' +
+                  escHtml(suggestion.id) + '">この図を作る</button>'
+              : '') +
+            (dismissable
+              ? '<button type="button" class="admin-action-btn" data-figure-suggestion-dismiss="' +
+                  escHtml(suggestion.id) + '">却下</button>'
+              : '') +
           '</div>'
         : '') +
     '</div>';
@@ -1913,9 +1924,18 @@
       return s && s.status !== "superseded";
     });
     var html = lsFigureSuggestionsToolbarHtml();
+    // 生成失敗（degraded）は「候補ゼロ」と区別して、サーバの事実文をそのまま出す。
+    // 黙って空一覧にすると「この教材に提案は無い」と誤読される（レビュー M4）。
+    if (data && data.degraded) {
+      html += '<div class="ls-course-muted ls-figure-suggestions-degraded">' +
+        escHtml(data.note || LS_FIGURE_SUGGEST_DEGRADED_FALLBACK) +
+        '</div>';
+    }
     if (!visible.length) {
-      html += '<div class="ls-course-muted">このトピックの図の提案はまだありません。' +
-        '<br>[提案を生成] を押すと、教材本文と学習者の記録の集計から候補を作ります。</div>';
+      if (!(data && data.degraded)) {
+        html += '<div class="ls-course-muted">このトピックの図の提案はまだありません。' +
+          '<br>[提案を生成] を押すと、教材本文と学習者の記録の集計から候補を作ります。</div>';
+      }
       return lsFigureSuggestionsWrapperHtml(html);
     }
     html += '<div class="ls-figure-suggestions-list">' +
@@ -1999,8 +2019,18 @@
           });
         })
         .then(function (data) {
-          lsState.figureSuggestionsByTopic[topicId] = { suggestions: (data && data.suggestions) || [] };
-          if (data && data.dropped) {
+          var degraded = !!(data && data.degraded);
+          lsState.figureSuggestionsByTopic[topicId] = {
+            suggestions: (data && data.suggestions) || [],
+            // degraded = 生成そのものが失敗（候補ゼロではない）。ペインにも残す。
+            degraded: degraded,
+            note: (data && data.note) || ""
+          };
+          if (degraded) {
+            lsShowActionStatus(
+              (data && data.note) || LS_FIGURE_SUGGEST_DEGRADED_FALLBACK, "error",
+            );
+          } else if (data && data.dropped) {
             lsShowActionStatus("提案を生成しました（本文と対応が取れなかった候補は保存していません）", "info");
           } else {
             lsShowActionStatus("提案を生成しました", "success");
@@ -2075,17 +2105,34 @@
       existingOnly: false,
       figuresIndex: lsState.figuresIndex,
       documentIds: lsCourseDocumentIds(),
+      countTopicReferences: lsCountTopicsReferencingFigure,
       onInsert: function (figureId, embedText, result) {
         if (!materialEl) return;
         lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
         lsState.figureSuggestionsByTopic[topicId] = null;
-      }
+      },
+      onClose: lsRestoreDeferredTextareaFocus
     });
-    // 提案の accepted 遷移（監査記帳はサーバ側）。失敗しても図の作成は続行できる。
+    // 提案の accepted 遷移（監査記帳はサーバ側）。失敗しても図の作成は続行できるが、
+    // 409（すでに判断済み = 右ペインのキャッシュが古い）は却下側と同型に扱う:
+    // サーバの事実文を表示し、一覧を取り直す（黙って握り潰さない）。
     apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
       "/figure-suggestions/" + encodeURIComponent(suggestionId) + "/accept", { method: "POST" })
-      .then(function () { lsState.figureSuggestionsByTopic[topicId] = null; })
-      .catch(function () { /* 事実の記録のみ。UI は止めない */ });
+      .then(function (res) {
+        lsState.figureSuggestionsByTopic[topicId] = null;
+        if (res.ok) return null;
+        return res.json().catch(function () { return null; }).then(function (body) {
+          var detail = body && body.detail;
+          if (res.status === 409) {
+            lsShowActionStatus(detail || "この提案はすでに判断済みです。", "info");
+          } else {
+            lsShowActionStatus(detail || "提案の状態を更新できませんでした", "error");
+          }
+          if (lsState.rightPaneMode === "figures") lsRenderRightPaneForTopic(topic);
+          return null;
+        });
+      })
+      .catch(function () { /* 通信失敗は図の作成を止めない（記録のみ） */ });
   }
 
   // 本文中の逐語引用の位置（見つからなければ先頭40字で再試行 → -1）。
@@ -2755,7 +2802,9 @@
       var dText = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
       var sText = spokenScriptEl ? spokenScriptEl.value : (topic.spoken_script || topic.content || "");
       var seq = ++courseSlideRequestSeq;
-      lsFetchSplitSlides(dText, sText, []).then(function (split) {
+      // コーストピックは受講側と同じ自動ページ分割で数える（教材図スタジオ §7.5:
+      // 図1個=200字換算でページ境界が動くため、`===` 無しのトピックでも実際の枚数を出す）。
+      lsFetchSplitSlides(dText, sText, [], true).then(function (split) {
         if (seq !== courseSlideRequestSeq) return; // 古いレスポンスは無視
         lsRenderSlideIndicatorEl(indicatorEl, split);
       });
@@ -2807,11 +2856,13 @@
           existingOnly: false,
           figuresIndex: lsState.figuresIndex,
           documentIds: lsCourseDocumentIds(),
+          countTopicReferences: lsCountTopicsReferencingFigure,
           onInsert: function (figureId, embedText, result) {
             lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
             updateTopic();
             updateCourseSlideIndicator();
-          }
+          },
+          onClose: lsRestoreDeferredTextareaFocus
         });
       });
     }
@@ -2859,6 +2910,43 @@
     var text = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
     previewEl.innerHTML = lsRenderCourseMaterialPreview(text, topic);
     lsHydrateFigureEmbeds(previewEl);
+  }
+
+  // 図の参照数（教材図スタジオ §7.4: 回収前の事実文用）。コース構造の各トピックが
+  // その図を参照しているかを、①linked_figure_ids ②evidence_links(kind=figure)
+  // ③教材本文の ![[figure:id]] 埋め込み の3経路で数える（学習者配信ゲート
+  // `_course_references_figure` と同じ観点）。構造が未取得なら 0 を返し、
+  // 呼び出し側（FigureStudio）は件数を書かない文面に落とす。
+  function lsTopicReferencesFigure(topic, figureId) {
+    if (!topic) return false;
+    var linked = topic.linked_figure_ids || [];
+    for (var i = 0; i < linked.length; i++) {
+      if (String(linked[i]) === figureId) return true;
+    }
+    var links = topic.evidence_links || [];
+    for (var j = 0; j < links.length; j++) {
+      var link = links[j] || {};
+      if (link.kind !== "figure") continue;
+      var extra = link.extra || {};
+      var target = String(link.figure_id || link.target_id || extra.figure_id || "");
+      if (target === figureId) return true;
+    }
+    var text = lsTopicStudentMaterialSource(topic) || "";
+    return text.indexOf("![[figure:" + figureId + "]]") >= 0;
+  }
+
+  function lsCountTopicsReferencingFigure(figureId) {
+    var id = String(figureId || "");
+    if (!id) return 0;
+    var chapters = (lsState.courseStructure && lsState.courseStructure.chapters) || [];
+    var count = 0;
+    chapters.forEach(function (chapter) {
+      var topics = (chapter && chapter.topics) || [];
+      topics.forEach(function (topic) {
+        if (lsTopicReferencesFigure(topic, id)) count += 1;
+      });
+    });
+    return count;
   }
 
   // コースの source document id 群（既存図タブのフォールバック取得に使う）。
@@ -6931,13 +7019,18 @@
   //
   // (displayText, spokenText, formulas) -> Promise<{ slides: [{slide_index, display, spoken}],
   //   mismatch, displayCount, spokenCount, error }>
-  function lsFetchSplitSlides(displayText, spokenText, formulas) {
+  // autoPaginate=true のときは、受講画面と同じ自動ページ分割（core/lecture.py の
+  // auto_paginate_slides）を通した結果を返す（教材図スタジオ設計書 §7.5: 図を入れると
+  // ページ境界が動くため、コーストピックのスライド枚数インジケータは実際の配信と
+  // 一致させる）。既定 false で従来の呼び出し（チャンク編集）は不変。
+  function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate) {
     return apiFetch("/admin/lecture-studio/preview-split", {
       method: "POST",
       body: JSON.stringify({
         display_text: displayText || "",
         spoken_text: spokenText || null,
         formulas: formulas || [],
+        auto_paginate: !!autoPaginate,
       }),
     })
       .then(function (res) {
@@ -6953,6 +7046,8 @@
           mismatch: !!data.mismatch,
           displayCount: data.display_segment_count || 0,
           spokenCount: data.spoken_segment_count || 0,
+          autoPaginated: !!data.auto_paginated,
+          spokenDegraded: !!data.spoken_degraded,
         };
       })
       .catch(function (err) {
@@ -6989,10 +7084,18 @@
       el.textContent = "⚠ 表示 " + split.displayCount + " / 読み上げ " + split.spokenCount +
         " — 1枚に統合して配信されます";
       el.classList.add("ls-slides-indicator-warn");
+    } else if (split.spokenDegraded) {
+      // 教材図スタジオ設計書 §7.5 の事実文（自動ページ分割で読み上げが同数に割れない）。
+      el.textContent = "⚠ 表示 " + split.displayCount +
+        " 枚に対し読み上げが分割できないため、このトピックの読み上げはタイマー送りになります" +
+        "（=== で明示分割すると解消できます）";
+      el.classList.add("ls-slides-indicator-warn");
     } else if (split.spokenCount === 0) {
       el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ未入力";
     } else {
-      el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ " + split.spokenCount + " 区切り ✓";
+      el.textContent = "表示 " + split.displayCount + " 枚" +
+        (split.autoPaginated ? "（自動ページ分割）" : "") +
+        " / 読み上げ " + split.spokenCount + " 区切り ✓";
       el.classList.add("ls-slides-indicator-ok");
     }
   }
@@ -7180,8 +7283,32 @@
     el.value = value.slice(0, start) + insert + value.slice(end);
     var newPos = start + insert.length;
     el.selectionStart = el.selectionEnd = newPos;
-    el.focus();
+    // モーダル（教材図スタジオ）が開いている間は、背後に隠れた textarea へフォーカスを
+    // 移さない（以降のキー入力が見えない欄に入ってしまう）。閉じたときに復元する。
+    if (lsModalBlocksTextareaFocus()) {
+      lsDeferredTextareaFocus = { el: el, pos: newPos };
+    } else {
+      el.focus();
+    }
     el.dispatchEvent(new Event("input"));
+  }
+
+  // 図スタジオのモーダル表示中に発生したフォーカス移動の保留・復元。
+  var lsDeferredTextareaFocus = null;
+
+  function lsModalBlocksTextareaFocus() {
+    return !!(window.FigureStudio && typeof window.FigureStudio.isOpen === "function" &&
+      window.FigureStudio.isOpen());
+  }
+
+  function lsRestoreDeferredTextareaFocus() {
+    var pending = lsDeferredTextareaFocus;
+    lsDeferredTextareaFocus = null;
+    if (!pending || !pending.el) return;
+    try {
+      pending.el.focus();
+      pending.el.selectionStart = pending.el.selectionEnd = pending.pos;
+    } catch (e) { /* noop */ }
   }
 
   // 「スライド区切りを挿入」ボタン: 最後にフォーカスしていた textarea のカーソル位置に

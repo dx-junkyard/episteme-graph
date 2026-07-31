@@ -22,6 +22,11 @@
 バリデーションはすべてサーバ側で fail-closed（M4/M5）: 未知の scene_key、カタログに
 無い model、provider 不一致、capability 不足、カタログ未設定はすべて 422。
 
+**読み取り専用の場面**（``learning_voice``。設計書 §13 J5）: 音声は STT / TTS が policy 解決
+経路を通らないため、書き込み（PUT）は 422 + 事実文で拒否し、一覧・catalog では
+``read_only`` / ``read_only_reason`` を付けて**実際に使われる値**（STT の設定値と TTS の
+固定モデル）を表示する。
+
 ``llm_usage_events`` には一切触れない（U6 の append-only を侵さない）。
 """
 
@@ -72,13 +77,42 @@ def _required_capability(scene_key: str) -> str | None:
 
 
 def _representative_feature(scene_key: str) -> str:
-    """scene 表示に使う代表 feature を返す。scene_key がステージ別 feature 単独
-    指定（``pipeline:claim_qualification`` 等）の場合はそれ自身を返す。"""
-    entry = llm_policy.SCENES.get(scene_key)
-    if entry is not None:
-        features = entry.get("features") or ()
-        return features[0] if features else scene_key
-    return scene_key
+    """scene 表示に使う代表 feature を返す（正本は
+    :func:`core.llm_policy.representative_feature_for_scene`）。
+
+    scene_key がステージ別 feature 単独指定（``pipeline:claim_qualification`` 等）の
+    場合はそれ自身が返る。**「features[0] を取る」独自規則をここに書き戻さないこと**
+    （レビュー指摘 m1: KNOWN_FEATURES の登場順先頭が場面の主たる操作とは限らず、
+    実効モデルと違う値を表示していた）。
+    """
+    return llm_policy.representative_feature_for_scene(scene_key)
+
+
+def _read_only_scene_current(scene_key: str) -> dict | None:
+    """読み取り専用 scene（``learning_voice``）の「現在の値」を正直に組み立てる。
+
+    代表 feature の resolve 結果（= 実際には使われないテキスト生成モデル）ではなく、
+    STT / TTS で実際に使われるモデルを出す（レビュー指摘 J5）。書き込み可能な scene は None。
+    """
+    if not llm_policy.is_read_only_scene(scene_key):
+        return None
+    return {
+        "model": llm_policy.voice_display_model(),
+        "source": llm_policy.SOURCE_ENV,
+        "source_label": llm_policy._SOURCE_LABELS[llm_policy.SOURCE_ENV],  # noqa: SLF001
+        "components": llm_policy.voice_model_facts(),
+    }
+
+
+def _reject_if_read_only(scene_key: str) -> None:
+    """読み取り専用 scene への書き込みを 422 + 事実文で拒否する（J5）。
+
+    settable-but-inert（設定できるのに何にも効かない）は M4/M5 の精神に反するため、
+    v1 は音声（``learning_voice``）を読み取り専用にする。
+    """
+    reason = llm_policy.read_only_scene_reason(scene_key)
+    if reason:
+        raise HTTPException(status_code=422, detail=reason)
 
 
 def _validate_scene_key(scene_key: str) -> None:
@@ -121,6 +155,27 @@ def _label_for_scene_key(scene_key: str) -> str:
 
 def _build_scene_payload(scene_key: str, *, user_id: str | None, catalog_available: bool) -> dict:
     feature = _representative_feature(scene_key)
+    read_only_current = _read_only_scene_current(scene_key)
+    if read_only_current is not None:
+        # 読み取り専用 scene（J5）: 選択肢を出さない（変更できないものを選ばせない）。
+        # options は「現在の値」1件のみ（カタログのテキスト生成モデルを並べても
+        # STT/TTS には一切効かないため、並べること自体が嘘になる）。
+        return {
+            "scene_key": scene_key,
+            "label": _scene_label(scene_key),
+            "read_only": True,
+            "read_only_reason": llm_policy.read_only_scene_reason(scene_key) or "",
+            "effective": read_only_current,
+            "options": [
+                {
+                    "id": read_only_current["model"],
+                    "cost_hint": None,
+                    "note": "",
+                    "is_current": True,
+                }
+            ],
+        }
+
     with usage_context(feature, user_id=user_id):
         resolved = llm_policy.resolve_scene_model(feature)
 
@@ -145,6 +200,7 @@ def _build_scene_payload(scene_key: str, *, user_id: str | None, catalog_availab
     return {
         "scene_key": scene_key,
         "label": _scene_label(scene_key),
+        "read_only": False,
         "effective": {
             "model": resolved.model,
             "source": resolved.source,
@@ -251,6 +307,23 @@ def list_system_policies(current_user: dict = Depends(_require_system_admin)) ->
     scenes = []
     for scene_key, entry in llm_policy.SCENES.items():
         feature = _representative_feature(scene_key)
+        read_only_current = _read_only_scene_current(scene_key)
+        if read_only_current is not None:
+            # J5: 音声は policy 経路を通らない（STT は settings.llm_transcribe_model 直参照、
+            # TTS は provider 側の固定モデル）。代表 feature の resolve 結果を出すと
+            # STT でも TTS でもないモデル名を「現在のモデル」として表示してしまうため、
+            # 実際の値をそのまま出し、変更不可であることを明示する。
+            scenes.append(
+                {
+                    "scene_key": scene_key,
+                    "label": entry["label"],
+                    "env_value": None,
+                    "read_only": True,
+                    "read_only_reason": llm_policy.read_only_scene_reason(scene_key) or "",
+                    "current": read_only_current,
+                }
+            )
+            continue
         # 運用タブの「システム既定」表示は本人（SYSTEM_ADMIN)の個人上書きを無視し、
         # system/env/tier の視点で見せる。usage_context を張らない = user_id なしの
         # resolve_scene_model を呼ぶことで scope='user' 層をスキップさせる。
@@ -261,6 +334,7 @@ def list_system_policies(current_user: dict = Depends(_require_system_admin)) ->
                 "scene_key": scene_key,
                 "label": entry["label"],
                 "env_value": env_model,
+                "read_only": False,
                 "current": {
                     "model": resolved.model,
                     "source": resolved.source,
@@ -279,6 +353,7 @@ def put_system_policy(
 ) -> dict:
     uid = _uid(current_user)
     _validate_scene_key(scene_key)
+    _reject_if_read_only(scene_key)
     _validate_model_choice(scene_key, payload.model)
 
     session = get_session()
@@ -300,6 +375,10 @@ def put_system_policy(
         raise
     finally:
         session.close()
+
+    # m3: commit 後にもう一度キャッシュを捨てる（store 内の invalidate は commit 前で、
+    # その窓に走った lookup が旧値を 20 秒キャッシュしてしまうため）。
+    llm_policy_store.invalidate()
 
     _audit(
         scene_key,
@@ -332,6 +411,8 @@ def delete_system_policy(
     finally:
         session.close()
 
+    llm_policy_store.invalidate()  # m3: commit 後に再度キャッシュを捨てる
+
     _audit(scene_key, existing["model"], "", uid, {"scope": "system"})
     return {"deleted": True}
 
@@ -351,6 +432,8 @@ def put_my_policy(
     if not uid:
         raise HTTPException(status_code=401, detail="user id not found in token")
     _validate_scene_key(scene_key)
+    # J5: 読み取り専用 scene は user 既定も作らせない（system 既定と同じ理由で完全 inert）。
+    _reject_if_read_only(scene_key)
     _validate_model_choice(scene_key, payload.model)
 
     session = get_session()
@@ -372,6 +455,8 @@ def put_my_policy(
         raise
     finally:
         session.close()
+
+    llm_policy_store.invalidate()  # m3: commit 後に再度キャッシュを捨てる
 
     _audit(
         scene_key,
@@ -404,6 +489,8 @@ def delete_my_policy(scene_key: str, current_user: dict = Depends(_require_teach
         raise
     finally:
         session.close()
+
+    llm_policy_store.invalidate()  # m3: commit 後に再度キャッシュを捨てる
 
     _audit(scene_key, existing["model"], "", uid, {"scope": "user"})
     return {"deleted": True}

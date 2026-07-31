@@ -72,6 +72,33 @@ def figure_kind_label(value: str) -> str:
     return FIGURE_KIND_LABELS.get(value, value)
 
 
+# ── FG5: 模式グラフの caption に「模式図」表記を強制付与する ────────────────────
+#: ``data_plot_schematic`` の caption に必須の語（実データのプロットと誤読させない）。
+SCHEMATIC_CAPTION_MARKER = "模式図"
+
+
+def enforce_schematic_caption(caption: str, figure_kind: str) -> str:
+    """``data_plot_schematic`` の caption に「模式図」表記を付与して返す（FG5）。
+
+    生成図の ``data_plot_schematic`` は**実測値を描かない**（プロンプト側の
+    ``DATA_PLOT_CONSTRAINT`` で捏造を禁止している）。学習者が実データのグラフと
+    誤読しないよう、キャプションでも必ず模式であることを示す。教員が既に
+    「模式図」と書いていれば二重に付けない。
+
+    ``figure_kind`` が他の語彙なら caption はそのまま返す（教員の文面に触らない）。
+    """
+    original = str(caption or "")
+    if figure_kind != FIGURE_KIND_DATA_PLOT_SCHEMATIC:
+        return original
+    text = original.strip()
+    if SCHEMATIC_CAPTION_MARKER in text:
+        return original
+    if not text:
+        # 空 caption に「（模式図）」だけを付けると括弧が浮くので語だけを入れる。
+        return SCHEMATIC_CAPTION_MARKER
+    return f"{text}（{SCHEMATIC_CAPTION_MARKER}）"
+
+
 # ── 生成図の状態（FG7: 削除しない。行削除 API は作らない）────────────────────
 # draft   = 保存済みだが未採用（教員のストック。挿入タブに出る・学習者非配信）
 # adopted = 配信対象（学習者配信ゲートの条件4）
@@ -216,6 +243,7 @@ __all__ = [
     "FIGURE_STATUS_ADOPTED",
     "FIGURE_STATUS_DRAFT",
     "FIGURE_STATUS_RETIRED",
+    "SCHEMATIC_CAPTION_MARKER",
     "SIGNAL_BASES",
     "SIGNAL_BASIS_BOTH",
     "SIGNAL_BASIS_LEARNER_SIGNALS",
@@ -229,6 +257,7 @@ __all__ = [
     "SUGGESTION_VISIBLE_STATUSES",
     "SVG_CONTENT_TYPE",
     "confidence_label",
+    "enforce_schematic_caption",
     "figure_kind_label",
     "is_valid_figure_kind",
     "is_valid_figure_status",

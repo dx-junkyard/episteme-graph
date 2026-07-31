@@ -414,3 +414,276 @@ class TestCatalog:
         ids = {m["id"] for m in models}
         assert {"gpt-5.2", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4o"} <= ids
         assert all(m.get("provider") == "openai" for m in models)
+
+
+# ===========================================================================
+# 7. 代表 feature（レビュー指摘 m1）— scene の「現在のモデル」表示に使う feature
+# ===========================================================================
+
+
+class TestRepresentativeFeature:
+    def test_every_scene_declares_a_representative_that_belongs_to_it(self):
+        """新 scene 追加時に宣言漏れ（= features[0] への暗黙フォールバック）を検出する。"""
+        for scene_key, entry in llm_policy.SCENES.items():
+            features = tuple(entry["features"])
+            declared = llm_policy._SCENE_REPRESENTATIVE_FEATURE.get(scene_key)  # noqa: SLF001
+            assert declared is not None, f"scene {scene_key!r} has no representative feature"
+            assert declared in features, (
+                f"representative {declared!r} is not a member of scene {scene_key!r}"
+            )
+            assert llm_policy.representative_feature_for_scene(scene_key) == declared
+
+    def test_feature_level_scene_key_returns_itself(self):
+        assert (
+            llm_policy.representative_feature_for_scene("pipeline:claim_qualification")
+            == "pipeline:claim_qualification"
+        )
+
+    def test_deliberation_representative_is_the_chat_feature(self, monkeypatch):
+        """旧実装は KNOWN_FEATURES 順の先頭 ``deliberation:cross_corpus``（embedding 用・
+        env マッピングなし）を代表にしていたため、実際は fast tier で動く対話に
+        analysis tier のモデル名を表示していた（m1）。"""
+        monkeypatch.delenv("DELIBERATION_LLM_MODEL", raising=False)
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m1")
+        monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-m1")
+        _real_get_settings.cache_clear()
+
+        feature = llm_policy.representative_feature_for_scene(llm_policy.SCENE_DELIBERATION)
+        assert feature == "deliberation:chat"
+        # 表示される実効モデルが、実際の対話（deliberation:chat）の解決結果と一致する
+        assert llm_policy.resolve_scene_model(feature).model == "fast-model-m1"
+        assert llm_policy.resolve_scene_model("deliberation:chat").model == "fast-model-m1"
+
+    def test_assistant_representative_is_the_copilot_feature(self, monkeypatch):
+        monkeypatch.delenv("ASSISTANT_LLM_MODEL", raising=False)
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m1")
+        monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-m1")
+        _real_get_settings.cache_clear()
+
+        feature = llm_policy.representative_feature_for_scene(llm_policy.SCENE_ASSISTANT)
+        assert feature == "admin:assistant"
+        assert llm_policy.resolve_scene_model(feature).model == "fast-model-m1"
+
+    def test_pipeline_representative_keeps_the_generic_stage_default(self, monkeypatch):
+        """汎用ステージ（大多数）は analysis tier。ステージ別 env を持つ
+        contextual_explanation（fast）を代表にしてはいけない。"""
+        monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-m1")
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m1")
+        _real_get_settings.cache_clear()
+
+        feature = llm_policy.representative_feature_for_scene(llm_policy.SCENE_PIPELINE)
+        assert feature == "pipeline"
+        assert llm_policy.resolve_scene_model(feature).model == "analysis-model-m1"
+
+    def test_lecture_studio_representative_resolves_to_fast_tier(self, monkeypatch):
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m1")
+        monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-m1")
+        _real_get_settings.cache_clear()
+
+        feature = llm_policy.representative_feature_for_scene(llm_policy.SCENE_LECTURE_STUDIO)
+        assert feature == "admin:lecture_rewrite"
+        assert llm_policy.resolve_scene_model(feature).model == "fast-model-m1"
+
+
+# ===========================================================================
+# 8. 原稿スタジオの fallback tier（レビュー指摘 J3 の Phase 0 不変性）
+# ===========================================================================
+
+
+class TestLectureFeatureFallbackTier:
+    @pytest.mark.parametrize("feature", ["admin:lecture_rewrite", "admin:lecture_generate"])
+    def test_lecture_features_fall_back_to_fast_tier(self, feature, monkeypatch):
+        """policy 行も env も無い環境では従来（``get_llm_params("fast")``）と同じモデル。"""
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-j3")
+        monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-j3")
+        _real_get_settings.cache_clear()
+        resolved = llm_policy.resolve_scene_model(feature)
+        assert resolved.model == "fast-model-j3"
+        assert resolved.source == llm_policy.SOURCE_TIER_DEFAULT
+
+    def test_system_policy_on_the_scene_applies_to_lecture_generation(self, monkeypatch):
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-j3")
+        _real_get_settings.cache_clear()
+        llm_policy.set_policy_backend(
+            _FakeBackend(system=llm_policy.PolicyRow(model="system-model-j3", scope="system"))
+        )
+        resolved = llm_policy.resolve_scene_model("admin:lecture_generate")
+        assert resolved.model == "system-model-j3"
+        assert resolved.source == llm_policy.SOURCE_SYSTEM_POLICY
+
+
+# ===========================================================================
+# 9. capability の fail-closed（レビュー指摘 m2）
+# ===========================================================================
+
+
+_VISION_CATALOG = {
+    "models": [
+        {"id": "vision-model", "provider": "openai", "capabilities": ["text", "structured", "vision"]},
+        {"id": "text-only-model", "provider": "openai", "capabilities": ["text", "structured"]},
+    ]
+}
+
+
+class TestCapabilityFailClosed:
+    def test_required_capability_for_feature_covers_vision_features(self):
+        assert llm_policy.required_capability_for_feature("deliberation:vision") == "vision"
+        assert llm_policy.required_capability_for_feature("deliberation:figure_reanalysis") == "vision"
+        assert llm_policy.required_capability_for_feature("pipeline:apparatus_semantics") == "vision"
+        assert llm_policy.required_capability_for_feature("deliberation:chat") is None
+        assert llm_policy.required_capability_for_feature("learning:chat") is None
+
+    def test_non_vision_scene_policy_is_skipped_for_vision_feature(self, monkeypatch):
+        """scene ``deliberation`` の既定に非 vision モデルが入っていても、画像付き
+        コール（``deliberation:vision``）は env / tier 既定へ落ちる（M5）。"""
+        monkeypatch.setattr(llm_policy, "load_catalog", lambda: _VISION_CATALOG)
+        monkeypatch.delenv("DELIBERATION_LLM_MODEL", raising=False)
+        monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m2")
+        _real_get_settings.cache_clear()
+        llm_policy.set_policy_backend(
+            _FakeBackend(system=llm_policy.PolicyRow(model="text-only-model", scope="system"))
+        )
+
+        # text 経路はそのまま適用される
+        assert llm_policy.resolve_scene_model("deliberation:chat").model == "text-only-model"
+        # vision 経路は capability 不足でスキップ → tier 既定
+        vision_resolved = llm_policy.resolve_scene_model("deliberation:vision")
+        assert vision_resolved.model == "fast-model-m2"
+        assert vision_resolved.source == llm_policy.SOURCE_TIER_DEFAULT
+
+    def test_vision_capable_policy_is_applied_to_vision_feature(self, monkeypatch):
+        monkeypatch.setattr(llm_policy, "load_catalog", lambda: _VISION_CATALOG)
+        _real_get_settings.cache_clear()
+        llm_policy.set_policy_backend(
+            _FakeBackend(system=llm_policy.PolicyRow(model="vision-model", scope="system"))
+        )
+        resolved = llm_policy.resolve_scene_model("deliberation:vision")
+        assert resolved.model == "vision-model"
+        assert resolved.source == llm_policy.SOURCE_SYSTEM_POLICY
+
+    def test_user_policy_lacking_capability_falls_through_to_system_policy(self, monkeypatch):
+        monkeypatch.setattr(llm_policy, "load_catalog", lambda: _VISION_CATALOG)
+        _real_get_settings.cache_clear()
+        llm_policy.set_policy_backend(
+            _FakeBackend(
+                system=llm_policy.PolicyRow(model="vision-model", scope="system"),
+                user=llm_policy.PolicyRow(model="text-only-model", scope="user"),
+            )
+        )
+        with usage_context("deliberation:vision", user_id="teacher-1"):
+            resolved = llm_policy.resolve_scene_model("deliberation:vision")
+        assert resolved.model == "vision-model"
+        assert resolved.source == llm_policy.SOURCE_SYSTEM_POLICY
+
+    def test_catalog_unavailable_is_fail_open_for_existing_rows(self, monkeypatch):
+        """カタログが読めない環境では capability 判定不能 → 既存のポリシー行を無効化しない。"""
+        monkeypatch.setattr(llm_policy, "load_catalog", lambda: None)
+        _real_get_settings.cache_clear()
+        llm_policy.set_policy_backend(
+            _FakeBackend(system=llm_policy.PolicyRow(model="text-only-model", scope="system"))
+        )
+        assert llm_policy.resolve_scene_model("deliberation:vision").model == "text-only-model"
+
+    def test_explicit_call_argument_is_never_overridden_by_capability(self, monkeypatch):
+        monkeypatch.setattr(llm_policy, "load_catalog", lambda: _VISION_CATALOG)
+        _real_get_settings.cache_clear()
+        resolved = llm_policy.resolve_scene_model("deliberation:vision", requested="text-only-model")
+        assert resolved.model == "text-only-model"
+        assert resolved.source == llm_policy.SOURCE_CALL_ARGUMENT
+
+
+# ===========================================================================
+# 10. 読み取り専用 scene（レビュー指摘 J5）— 音声は policy 経路を通らない
+# ===========================================================================
+
+
+class TestVoiceSceneFacts:
+    def test_learning_voice_is_read_only(self):
+        assert llm_policy.is_read_only_scene(llm_policy.SCENE_LEARNING_VOICE) is True
+        assert llm_policy.read_only_scene_reason(llm_policy.SCENE_LEARNING_VOICE)
+        for scene_key in llm_policy.SCENES:
+            if scene_key == llm_policy.SCENE_LEARNING_VOICE:
+                continue
+            assert llm_policy.is_read_only_scene(scene_key) is False
+            assert llm_policy.read_only_scene_reason(scene_key) is None
+
+    def test_openai_facts_show_transcribe_setting_and_tts_model(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+        monkeypatch.setenv("LLM_TRANSCRIBE_MODEL", "whisper-x")
+        _real_get_settings.cache_clear()
+        facts = llm_policy.voice_model_facts()
+        assert [f["label"] for f in facts] == ["音声認識", "読み上げ"]
+        assert facts[0]["model"] == "whisper-x"
+        assert facts[1]["model"] == "tts-1"
+        display = llm_policy.voice_display_model()
+        assert "whisper-x" in display and "tts-1" in display
+
+    def test_tts_model_literal_matches_core_tts_source(self):
+        """``core/tts.py`` のハードコード値とのずれを検出する（表示の正直さ）。"""
+        tts_src = (Path(__file__).resolve().parents[1] / "core" / "tts.py").read_text(encoding="utf-8")
+        assert f'model="{llm_policy._OPENAI_TTS_MODEL}"' in tts_src  # noqa: SLF001
+
+    def test_non_openai_provider_is_honest_about_stt(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "google")
+        _real_get_settings.cache_clear()
+        facts = llm_policy.voice_model_facts()
+        assert facts[0]["model"] == llm_policy._VOICE_UNSUPPORTED_LABEL  # noqa: SLF001
+        assert facts[1]["model"] == "google-tts"
+
+    def test_voice_facts_do_not_leak_tier_names(self, monkeypatch):
+        monkeypatch.setenv("LLM_PROVIDER", "openai")
+        _real_get_settings.cache_clear()
+        text = llm_policy.voice_display_model().lower()
+        for tier in ("fast", "standard", "deep", "analysis"):
+            assert tier not in text
+
+
+# ===========================================================================
+# 11. iter_env_seeds（レビュー指摘 J2）— シードの書き込みキーの正本
+# ===========================================================================
+
+
+class TestIterEnvSeeds:
+    def _seed_map(self):
+        return {seed.scene_key: seed for seed in llm_policy.iter_env_seeds()}
+
+    def test_apparatus_env_seeds_the_scene_key_not_the_feature_key(self, monkeypatch):
+        monkeypatch.setenv("APPARATUS_LLM_MODEL", "gpt-4o")
+        _real_get_settings.cache_clear()
+        seeds = self._seed_map()
+        assert llm_policy.SCENE_PIPELINE_VISION in seeds
+        assert "pipeline:apparatus_semantics" not in seeds
+        seed = seeds[llm_policy.SCENE_PIPELINE_VISION]
+        assert seed.model == "gpt-4o"
+        assert seed.env_label == "APPARATUS_LLM_MODEL"
+        # 旧実装が書いた feature キーは移行対象として列挙される
+        assert set(seed.legacy_scene_keys) == {
+            "pipeline:apparatus_semantics",
+            "deliberation:figure_reanalysis",
+        }
+
+    def test_direct_env_features_keep_feature_keys(self, monkeypatch):
+        monkeypatch.setenv("CTXEXPL_LLM_MODEL", "ctx-model")
+        _real_get_settings.cache_clear()
+        seeds = self._seed_map()
+        assert seeds["pipeline:contextual_explanation"].model == "ctx-model"
+        assert seeds["pipeline:contextual_explanation"].legacy_scene_keys == ()
+
+    def test_empty_env_values_are_not_seeded(self, monkeypatch):
+        monkeypatch.delenv("TENSION_LLM_MODEL", raising=False)
+        _real_get_settings.cache_clear()
+        assert llm_policy.SCENE_LEARNING_BACKGROUND not in self._seed_map()
+
+    def test_read_only_scene_is_not_seeded(self, monkeypatch):
+        monkeypatch.setenv("LLM_TRANSCRIBE_MODEL", "whisper-1")
+        _real_get_settings.cache_clear()
+        assert llm_policy.SCENE_LEARNING_VOICE not in self._seed_map()
+
+    def test_seed_keys_are_all_writable_scene_or_feature_keys(self, monkeypatch):
+        monkeypatch.setenv("APPARATUS_LLM_MODEL", "gpt-4o")
+        monkeypatch.setenv("TENSION_LLM_MODEL", "t-model")
+        monkeypatch.setenv("ANCHOR_LLM_MODEL", "a-model")
+        _real_get_settings.cache_clear()
+        for seed in llm_policy.iter_env_seeds():
+            assert llm_policy.is_known_scene_key(seed.scene_key), seed.scene_key
+            assert not llm_policy.is_read_only_scene(seed.scene_key)

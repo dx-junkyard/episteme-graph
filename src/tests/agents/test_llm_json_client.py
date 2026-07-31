@@ -1,11 +1,16 @@
 """Tests for provider-aware agent LLM client."""
 from __future__ import annotations
 
+import contextvars
 import sys
+import threading
 from types import ModuleType
+
+import pytest
 
 from episteme_graph.agents.llm_json_client import (
     ProviderJSONLLMClient,
+    _call_with_wall_timeout,
     recover_truncated_json,
 )
 
@@ -168,6 +173,70 @@ def test_resolve_max_tokens_env_override_takes_precedence(monkeypatch):
     monkeypatch.setenv("AGENT_LLM_MAX_TOKENS", "5000")
     client = ProviderJSONLLMClient(model="deep-m")
     assert client._resolve_max_tokens() == 5000
+
+
+# --- wall-timeout thread must inherit the caller's contextvars ---------------
+#
+# 背景: backend 側の ``core.llm`` 入口は model 未指定のとき
+# ``core.llm_policy.model_override`` / ``core.llm_usage.context`` の contextvar を
+# 読んでモデルと帰属を決める（M層 §3 / U層 §6）。素の ``threading.Thread`` は
+# 空のコンテキストで始まるため、ここでコピーしないと M層のモデル選択が
+# パイプライン主要ステージ全部で無効化され、U層の帰属も unattributed になる。
+
+
+def test_wall_timeout_thread_inherits_contextvars():
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "agent_wall_timeout_probe", default="unset"
+    )
+    seen: dict = {}
+
+    def inner():
+        seen["value"] = probe.get()
+        seen["thread"] = threading.current_thread().name
+        return "done"
+
+    token = probe.set("carried-into-thread")
+    try:
+        caller_thread = threading.current_thread().name
+        assert _call_with_wall_timeout(inner, 10.0) == "done"
+    finally:
+        probe.reset(token)
+
+    assert seen["value"] == "carried-into-thread"
+    # 本当に別スレッドで走っている（= copy_context に意味がある）。
+    assert seen["thread"] != caller_thread
+
+
+def test_wall_timeout_thread_does_not_leak_context_writes_back():
+    probe: contextvars.ContextVar[str] = contextvars.ContextVar(
+        "agent_wall_timeout_probe_leak", default="unset"
+    )
+
+    def inner():
+        probe.set("written-in-thread")
+        return probe.get()
+
+    token = probe.set("caller-value")
+    try:
+        assert _call_with_wall_timeout(inner, 10.0) == "written-in-thread"
+        # コピーなので呼び出し元のコンテキストは汚れない。
+        assert probe.get() == "caller-value"
+    finally:
+        probe.reset(token)
+
+
+def test_wall_timeout_propagates_exceptions_and_timeouts():
+    def boom():
+        raise ValueError("inner failure")
+
+    with pytest.raises(ValueError, match="inner failure"):
+        _call_with_wall_timeout(boom, 10.0)
+
+    def slow():
+        threading.Event().wait(5.0)
+
+    with pytest.raises(TimeoutError):
+        _call_with_wall_timeout(slow, 0.05)
 
 
 def test_resolve_max_tokens_falls_back_when_core_unavailable(monkeypatch):

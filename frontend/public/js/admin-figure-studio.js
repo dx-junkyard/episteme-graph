@@ -8,11 +8,15 @@
  * 正本: docs/features/teaching_figure_studio_design.md
  *   §6.1 フロント（2ペインモーダル・状態はブラウザ内のみ）
  *   §6.2 起動導線（ツールバーの [🖼 図を挿入] / 提案カードの [この図を作る] / 既存図タブ）
+ *   §7.1b 採用時の参照登録（本文挿入と同時に topic へ登録する。サーバ側で行う）
+ *   §7.4 回収（retire）前の事実文確認と、回収後の学習者側の見え方
  *   §8 API:
- *     POST /api/admin/courses/{course_id}/figure-studio/turn
- *     POST /api/admin/courses/{course_id}/teaching-figures
- *     GET  /api/admin/courses/{course_id}/teaching-figures
- *     GET  /api/admin/courses/{course_id}/teaching-figures/{fid}/image
+ *     POST  /api/admin/courses/{course_id}/figure-studio/turn
+ *     POST  /api/admin/courses/{course_id}/teaching-figures
+ *     PATCH /api/admin/courses/{course_id}/teaching-figures/{fid}
+ *           （caption 修正 / status 遷移 / register_topic_id によるトピック登録）
+ *     GET   /api/admin/courses/{course_id}/teaching-figures
+ *     GET   /api/admin/courses/{course_id}/teaching-figures/{fid}/image
  *
  * 不変条項（本 UI での担保）:
  *   FG2 確定は人間 — 生成した図は「採用して挿入」を押すまで教材に入らず、さらに
@@ -61,6 +65,16 @@
 
   var DRAFT_INSERT_NOTICE = "下書きの図は、採用済みにするまで受講者には表示されません。";
 
+  var RETIRED_INSERT_NOTICE =
+    "回収済みの図は受講者に表示されません。挿入するには先に [採用に戻す] を押してください。";
+
+  // 配信スナップショット（MinIO）の更新に失敗したときの事実文。保存自体は成立している。
+  var SNAPSHOT_FAILED_NOTICE =
+    "保存されました（配信用の画像の更新に失敗したため、再保存をおすすめします）。";
+
+  // 未保存の作業を捨てる前の確認（背景クリック / × / Escape）。
+  var CLOSE_CONFIRM_MESSAGE = "作成中の図は保存されていません。閉じますか？";
+
   // モーダル1つ分の状態。すべてモジュール内メモリで、閉じたら破棄する（§6.1）。
   var studio = null;
 
@@ -72,6 +86,8 @@
       preset: null,
       existingOnly: false,
       onInsert: null,
+      onClose: null,
+      countTopicReferences: null,
       figuresIndex: {},
       documentIds: [],
       tab: "generate",
@@ -85,7 +101,10 @@
       sending: false,
       saving: false,
       adoptedFigureId: null,
+      savedDraftId: null,
+      cardBusy: false,
       objectUrls: [],
+      previewUrl: null,
       existingLoading: false,
       existingLoaded: false,
       existingItems: [],
@@ -162,8 +181,38 @@
   function _closeModal() {
     _revokeObjectUrls();
     var modal = document.getElementById(MODAL_ID);
+    var onClose = modal && studio ? studio.onClose : null;
+    document.removeEventListener("keydown", _onModalKeyDown);
     if (modal) modal.remove();
     studio = _emptyState();
+    // 呼び出し元の後始末（隠れた textarea へのフォーカス復帰など）は閉じた後に行う。
+    if (typeof onClose === "function") onClose();
+  }
+
+  // 未保存の図があるときだけ確認する（保存済み・図なしはそのまま閉じる）。
+  // 確認は admin.js の共通2段確認モーダル（z-index 9999）を使い、無ければ confirm へ。
+  function _requestClose() {
+    var unsaved = !!(studio && studio.currentSvg && !studio.adoptedFigureId && !studio.savedDraftId);
+    if (!unsaved) { _closeModal(); return; }
+    if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+      window.AdminDangerConfirm.open({
+        title: "教材図スタジオを閉じる",
+        message: CLOSE_CONFIRM_MESSAGE,
+        confirmLabel: "閉じる"
+      }, _closeModal);
+      return;
+    }
+    if (window.confirm(CLOSE_CONFIRM_MESSAGE)) _closeModal();
+  }
+
+  function _onModalKeyDown(e) {
+    if (!document.getElementById(MODAL_ID)) return;
+    // 確認モーダル（admin.js の2段確認）が前面にあるときは、そちらの操作に任せる。
+    if (document.getElementById("danger-confirm-modal")) return;
+    if (e.key === "Escape" || e.keyCode === 27) {
+      e.preventDefault();
+      _requestClose();
+    }
   }
 
   function _tabsHtml() {
@@ -267,9 +316,10 @@
       '</div>';
     document.body.appendChild(overlay);
 
-    overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeModal(); });
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) _requestClose(); });
     var closeBtn = document.getElementById("figure-studio-close");
-    if (closeBtn) closeBtn.addEventListener("click", _closeModal);
+    if (closeBtn) closeBtn.addEventListener("click", _requestClose);
+    document.addEventListener("keydown", _onModalKeyDown);
 
     Array.prototype.forEach.call(
       overlay.querySelectorAll("[data-figure-studio-tab]"),
@@ -308,6 +358,7 @@
     var discardBtn = document.getElementById("figure-studio-discard");
     if (adoptBtn) adoptBtn.addEventListener("click", function () { _saveFigure(true); });
     if (draftBtn) draftBtn.addEventListener("click", function () { _saveFigure(false); });
+    // [破棄] は「捨てて閉じる」ことが明示された操作なので確認を挟まない。
     if (discardBtn) discardBtn.addEventListener("click", _closeModal);
 
     // M層 Phase 3（§6.5 の共通部品）: この対話1回だけのモデル上書き。
@@ -355,8 +406,18 @@
       _appendNote("図のプレビューを作成できませんでした。");
       return;
     }
+    // 差し替え時は前のプレビュー URL を解放する（何ターンも回すと blob が溜まるため。
+    // 閉じたときの一括解放だけに頼らない）。
+    if (studio.previewUrl) {
+      var stale = studio.previewUrl;
+      var pos = studio.objectUrls.indexOf(stale);
+      if (pos >= 0) studio.objectUrls.splice(pos, 1);
+      try { URL.revokeObjectURL(stale); } catch (e2) { /* noop */ }
+      studio.previewUrl = null;
+    }
     var url = URL.createObjectURL(blob);
     studio.objectUrls.push(url);
+    studio.previewUrl = url;
     img.src = url;
     img.hidden = false;
     if (empty) empty.hidden = true;
@@ -371,13 +432,23 @@
       : '';
   }
 
+  // 保存済み（採用 / 下書き）の図をもう一度押せると、行・トピック登録・本文の埋め込みが
+  // 二重になる。保存後は無効化し、次のターンで図が変わったら（= 別の図になったら）
+  // ふたたび保存できるようにする（_sendTurn で保存済みフラグを落とす）。
   function _updateActionButtons() {
     var adoptBtn = document.getElementById("figure-studio-adopt");
     var draftBtn = document.getElementById("figure-studio-save-draft");
     var hasSvg = !!(studio && studio.currentSvg);
     var busy = !!(studio && (studio.saving || studio.sending));
-    if (adoptBtn) adoptBtn.disabled = !hasSvg || busy;
-    if (draftBtn) draftBtn.disabled = !hasSvg || busy;
+    var saved = !!(studio && (studio.adoptedFigureId || studio.savedDraftId));
+    if (adoptBtn) {
+      adoptBtn.disabled = !hasSvg || busy || saved;
+      adoptBtn.textContent = studio && studio.adoptedFigureId ? "採用済み" : "採用して挿入";
+    }
+    if (draftBtn) {
+      draftBtn.disabled = !hasSvg || busy || saved;
+      draftBtn.textContent = studio && studio.savedDraftId ? "保存済み" : "下書きとして保存";
+    }
   }
 
   function _setStatus(text) {
@@ -455,6 +526,9 @@
         // svg_source が空文字のターンは「変更なし」。前回のプレビューを保持する。
         if (data && data.svg_source) {
           studio.currentSvg = data.svg_source;
+          // 図が変わったら別の図として保存できる（保存済みフラグを落とす）。
+          studio.adoptedFigureId = null;
+          studio.savedDraftId = null;
           _setPreviewSvg(data.svg_source);
         } else {
           _appendNote("この応答では図は変わっていません。");
@@ -511,17 +585,20 @@
       .then(function (data) {
         if (!studio) return;
         var figureId = (data && data.figure_id) || "";
+        // 配信スナップショットの失敗はサーバが正直に返す。保存は成立しているので
+        // エラーにせず、再保存を勧める事実文を添える。
+        var snapshotNote = data && data.image_snapshot_failed ? " " + SNAPSHOT_FAILED_NOTICE : "";
+        studio.existingLoaded = false;
         if (!adopt) {
-          _setStatus(DRAFT_NOTICE);
-          studio.existingLoaded = false;
+          studio.savedDraftId = figureId;
+          _setStatus(DRAFT_NOTICE + snapshotNote);
           return;
         }
         studio.adoptedFigureId = figureId;
-        studio.existingLoaded = false;
         if (figureId && typeof studio.onInsert === "function") {
           studio.onInsert(figureId, "![[figure:" + figureId + "]]", data || null);
         }
-        _setStatus(ADOPT_NOTICE);
+        _setStatus(ADOPT_NOTICE + snapshotNote);
       })
       .catch(function (err) {
         _setStatus(_errorText(err, "保存に失敗しました"));
@@ -659,7 +736,10 @@
     var statusLabel = item.status ? (TEACHING_STATUS_LABELS[item.status] || item.status) : "";
     var originLabel = item.teaching ? "この教材で作った図" : "論文から抽出した図";
     var inserted = !!studio.insertedIds[item.id];
-    return '<div class="figure-studio-card" data-figure-card-idx="' + idx + '">' +
+    var busy = !!(studio && studio.cardBusy);
+    var retired = item.teaching && item.status === "retired";
+    var captionText = item.caption || "";
+    var html = '<div class="figure-studio-card" data-figure-card-idx="' + idx + '">' +
       '<div class="figure-studio-card-thumb">' +
         '<img class="figure-studio-card-img" data-figure-thumb-idx="' + idx + '" alt="" hidden>' +
         '<span class="figure-studio-card-placeholder">読込中…</span>' +
@@ -671,15 +751,63 @@
           (item.kind ? ' / ' + escHtml(_kindLabel(item.kind)) : '') +
         '</div>' +
         '<div class="figure-studio-card-caption">' +
-          escHtml(_shorten(item.caption, 160) || "(キャプションなし)") +
-        '</div>' +
-        (item.status === "draft" ? '<div class="figure-studio-card-note">' + escHtml(DRAFT_INSERT_NOTICE) + '</div>' : '') +
-        '<button type="button" class="admin-action-btn figure-studio-insert-btn" ' +
-          'data-figure-insert-idx="' + idx + '"' + (inserted ? ' disabled' : '') + '>' +
-          (inserted ? '挿入済み' : '教材に挿入') +
-        '</button>' +
+          escHtml(_shorten(captionText, 160) || "(キャプションなし)") +
+        '</div>';
+
+    // キャプションのインライン編集（生成図のみ。PATCH で保存し、応答の値で表示を更新する
+    // — サーバが「（模式図）」を付けることがあるため、送った文字列では上書きしない）。
+    if (item.teaching) {
+      // 既存クラス（.figure-studio-actions = flex + gap、[hidden] で非表示）を再利用する。
+      html += '<div class="figure-studio-actions figure-studio-card-caption-edit" ' +
+          'data-figure-caption-row-idx="' + idx + '" hidden>' +
+        '<input type="text" class="figure-studio-input" data-figure-caption-input-idx="' + idx + '" ' +
+          'value="' + escHtml(captionText) + '">' +
+        '<button type="button" class="admin-action-btn" data-figure-caption-save-idx="' + idx + '">' +
+          'キャプションを保存</button>' +
+        '<button type="button" class="admin-action-btn" data-figure-caption-cancel-idx="' + idx + '">やめる</button>' +
+      '</div>';
+    }
+
+    if (item.status === "draft") {
+      html += '<div class="figure-studio-card-note">' + escHtml(DRAFT_INSERT_NOTICE) + '</div>';
+    } else if (retired) {
+      html += '<div class="figure-studio-card-note">' + escHtml(RETIRED_INSERT_NOTICE) + '</div>';
+    }
+    if (item.notice) {
+      html += '<div class="figure-studio-card-note" data-figure-card-notice-idx="' + idx + '">' +
+        escHtml(item.notice) + '</div>';
+    }
+
+    html += '<div class="figure-studio-actions figure-studio-card-actions">';
+    if (!retired) {
+      html += '<button type="button" class="admin-action-btn figure-studio-insert-btn" ' +
+        'data-figure-insert-idx="' + idx + '" ' +
+        'data-ui-anchor="lecture-studio.figure-studio-insert"' +
+        (inserted || busy ? ' disabled' : '') + '>' +
+        (inserted ? '挿入済み' : (item.status === "draft" ? '採用して挿入' : '教材に挿入')) +
+      '</button>';
+    }
+    if (item.teaching) {
+      html += '<button type="button" class="admin-action-btn" ' +
+        'data-figure-caption-edit-idx="' + idx + '" ' +
+        'data-ui-anchor="lecture-studio.figure-studio-caption"' + (busy ? ' disabled' : '') + '>' +
+        'キャプションを直す</button>';
+      if (item.status === "adopted") {
+        html += '<button type="button" class="admin-action-btn" ' +
+          'data-figure-retire-idx="' + idx + '" ' +
+          'data-ui-anchor="lecture-studio.figure-studio-retire"' + (busy ? ' disabled' : '') + '>' +
+          '回収する</button>';
+      } else if (item.status === "retired") {
+        html += '<button type="button" class="admin-action-btn" ' +
+          'data-figure-restore-idx="' + idx + '" ' +
+          'data-ui-anchor="lecture-studio.figure-studio-restore"' + (busy ? ' disabled' : '') + '>' +
+          '採用に戻す</button>';
+      }
+    }
+    html += '</div>' +
       '</div>' +
     '</div>';
+    return html;
   }
 
   function _renderExistingList() {
@@ -696,23 +824,65 @@
       return _existingCardHtml(item, idx);
     }).join("");
 
-    Array.prototype.forEach.call(
-      container.querySelectorAll("[data-figure-insert-idx]"),
-      function (btn) {
-        btn.addEventListener("click", function () {
-          var idx = parseInt(btn.getAttribute("data-figure-insert-idx"), 10);
-          _insertExisting(items[idx]);
-        });
-      }
-    );
+    _bindCardButtons(container, items, "data-figure-insert-idx", function (item) {
+      _insertExisting(item);
+    });
+    _bindCardButtons(container, items, "data-figure-retire-idx", function (item) {
+      _retireFigure(item);
+    });
+    _bindCardButtons(container, items, "data-figure-restore-idx", function (item) {
+      _restoreFigure(item);
+    });
+    _bindCardButtons(container, items, "data-figure-caption-edit-idx", function (item, idx) {
+      _toggleCaptionEdit(idx, true);
+    });
+    _bindCardButtons(container, items, "data-figure-caption-cancel-idx", function (item, idx) {
+      _toggleCaptionEdit(idx, false);
+    });
+    _bindCardButtons(container, items, "data-figure-caption-save-idx", function (item, idx) {
+      _saveCaption(item, idx);
+    });
 
     items.forEach(function (item, idx) { _loadExistingThumb(item, idx); });
   }
 
+  function _bindCardButtons(container, items, attr, handler) {
+    Array.prototype.forEach.call(
+      container.querySelectorAll("[" + attr + "]"),
+      function (btn) {
+        btn.addEventListener("click", function () {
+          var idx = parseInt(btn.getAttribute(attr), 10);
+          var item = items[idx];
+          if (!item) return;
+          handler(item, idx);
+        });
+      }
+    );
+  }
+
+  function _toggleCaptionEdit(idx, open) {
+    var row = document.querySelector('[data-figure-caption-row-idx="' + idx + '"]');
+    if (!row) return;
+    row.hidden = !open;
+    if (!open) return;
+    var input = document.querySelector('[data-figure-caption-input-idx="' + idx + '"]');
+    if (input) input.focus();
+  }
+
+  function _showThumb(img, url) {
+    img.src = url;
+    img.hidden = false;
+    var placeholder = img.parentNode && img.parentNode.querySelector(".figure-studio-card-placeholder");
+    if (placeholder) placeholder.remove();
+  }
+
   function _loadExistingThumb(item, idx) {
-    var path = _figureImagePath(item);
     var img = document.querySelector('.figure-studio-card-img[data-figure-thumb-idx="' + idx + '"]');
     if (!img) return;
+    // 一覧は状態操作のたびに再描画するため、取得済みの blob URL は使い回す
+    // （同じ画像を何度も取りに行かない・URL を溜めない）。
+    if (item.thumbUrl) { _showThumb(img, item.thumbUrl); return; }
+    var path = _figureImagePath(item);
     if (!path) { _markThumbFailed(img, "取得先がありません"); return; }
     apiFetchRaw(path, { _noJson: true })
       .then(function (res) {
@@ -723,10 +893,8 @@
         if (!studio || !document.getElementById(MODAL_ID)) return;
         var url = URL.createObjectURL(blob);
         studio.objectUrls.push(url);
-        img.src = url;
-        img.hidden = false;
-        var placeholder = img.parentNode && img.parentNode.querySelector(".figure-studio-card-placeholder");
-        if (placeholder) placeholder.remove();
+        item.thumbUrl = url;
+        _showThumb(img, url);
       })
       .catch(function () {
         _markThumbFailed(img, "表示できません");
@@ -739,14 +907,171 @@
     if (placeholder) placeholder.textContent = message;
   }
 
-  function _insertExisting(item) {
-    if (!item || !item.id || !studio) return;
+  // ── 生成図のライフサイクル操作（PATCH。設計書 §7.1b / §7.4 / §8）─────────
+  //
+  // 行削除 API は無い（FG7）。カードからできるのは
+  //   draft → adopted（採用して挿入）/ adopted → retired（回収）/ retired → adopted（採用に戻す）
+  //   + キャプションの修正 + トピックへの参照登録
+  // だけで、いずれも教員の明示操作（FG2）。
+  //
+  // **挿入は必ずサーバ経由でトピック登録まで行う**（§7.1b の要石）。本文へ
+  // 図の埋め込み（![[figure:id]]）を書くだけだと ①AI 書き換えで embed が消える
+  // ②未配信時に学習者へ生 UUID が露出する、という 2 つの壊れ方をする。
+
+  function _teachingFigurePath(figureId) {
+    return "/admin/courses/" + encodeURIComponent(studio.courseId) +
+      "/teaching-figures/" + encodeURIComponent(figureId);
+  }
+
+  function _patchTeachingFigure(item, body) {
+    return apiFetch(_teachingFigurePath(item.id), {
+      method: "PATCH",
+      body: JSON.stringify(body || {})
+    }).then(_parseJson);
+  }
+
+  function _setCardNotice(item, message) {
+    if (item) item.notice = message || "";
+  }
+
+  // カード操作は1つずつ（二重送信でトピック登録・埋め込みが重複しないように）。
+  function _runCardAction(item, busyMessage, run) {
+    if (!studio || studio.cardBusy) return;
+    studio.cardBusy = true;
+    _setCardNotice(item, busyMessage);
+    _renderExistingList();
+    run()
+      .catch(function (err) {
+        _setCardNotice(item, _errorText(err, "操作に失敗しました"));
+      })
+      .then(function () {
+        if (!studio) return;
+        studio.cardBusy = false;
+        if (document.getElementById(MODAL_ID)) _renderExistingList();
+      });
+  }
+
+  function _confirmThen(title, message, confirmLabel, onConfirm) {
+    if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+      window.AdminDangerConfirm.open({
+        title: title, message: message, confirmLabel: confirmLabel
+      }, onConfirm);
+      return;
+    }
+    if (window.confirm(message)) onConfirm();
+  }
+
+  // 回収前の事実文（§7.4）。参照中のトピック数は呼び出し元（原稿スタジオ）が
+  // コース構造から数えて渡す。数えられない場合は件数を書かない（推測しない）。
+  function _countTopicReferences(figureId) {
+    if (!studio || typeof studio.countTopicReferences !== "function") return -1;
+    var count = studio.countTopicReferences(figureId);
+    return typeof count === "number" && count >= 0 ? count : -1;
+  }
+
+  function _retireMessage(count) {
+    var tail = "回収しても図は削除されず、あとから [採用に戻す] で戻せます。";
+    if (count > 0) {
+      return "この図を参照中のトピックが " + count + " 件あります。" +
+        "回収すると学習者には「配信対象ではありません」カードが表示されます。" + tail;
+    }
+    if (count === 0) {
+      return "この図を参照しているトピックは、いま確認できる範囲ではありません。" +
+        "回収すると、この図は受講者に表示されなくなります。" + tail;
+    }
+    return "回収すると、この図を参照しているトピックでは学習者に" +
+      "「配信対象ではありません」カードが表示されます。" + tail;
+  }
+
+  function _finishInsert(item, result) {
     if (typeof studio.onInsert === "function") {
-      studio.onInsert(item.id, "![[figure:" + item.id + "]]", null);
+      studio.onInsert(item.id, "![[figure:" + item.id + "]]", result || null);
     }
     studio.insertedIds[item.id] = true;
     _setStatus(ADOPT_NOTICE);
-    _renderExistingList();
+  }
+
+  function _insertExisting(item) {
+    if (!item || !item.id || !studio) return;
+    if (!item.teaching) {
+      // 論文から抽出した図は本文への挿入のみ（設計書 §6.2-3。状態も登録も持たない）。
+      _finishInsert(item, null);
+      _renderExistingList();
+      return;
+    }
+    if (item.status === "retired") {
+      _setCardNotice(item, RETIRED_INSERT_NOTICE);
+      _renderExistingList();
+      return;
+    }
+    if (!studio.topicId) {
+      _setCardNotice(item, "挿入先のトピックが分かりません。トピックを選び直してから挿入してください。");
+      _renderExistingList();
+      return;
+    }
+    var body = { register_topic_id: studio.topicId };
+    // 下書きは「採用して挿入」（採用と登録を同じ操作で済ませる）。
+    if (item.status !== "adopted") body.status = "adopted";
+    _runCardAction(item, "挿入しています…", function () {
+      return _patchTeachingFigure(item, body).then(function (data) {
+        item.status = "adopted";
+        if (data && data.figure && data.figure.caption) item.caption = data.figure.caption;
+        _finishInsert(item, data || null);
+        _setCardNotice(item, data && data.image_snapshot_failed ? SNAPSHOT_FAILED_NOTICE : "");
+      });
+    });
+  }
+
+  function _retireFigure(item) {
+    if (!item || !item.id || !studio) return;
+    _confirmThen("図を回収する", _retireMessage(_countTopicReferences(item.id)), "回収する", function () {
+      _runCardAction(item, "回収しています…", function () {
+        return _patchTeachingFigure(item, { status: "retired" }).then(function (data) {
+          item.status = (data && data.figure && data.figure.status) || "retired";
+          _setCardNotice(
+            item,
+            data && data.image_snapshot_failed
+              ? SNAPSHOT_FAILED_NOTICE
+              : "回収しました。受講者には表示されません（本文の埋め込みはそのまま残ります）。"
+          );
+        });
+      });
+    });
+  }
+
+  function _restoreFigure(item) {
+    if (!item || !item.id || !studio) return;
+    _runCardAction(item, "採用に戻しています…", function () {
+      return _patchTeachingFigure(item, { status: "adopted" }).then(function (data) {
+        item.status = (data && data.figure && data.figure.status) || "adopted";
+        _setCardNotice(
+          item,
+          data && data.image_snapshot_failed
+            ? SNAPSHOT_FAILED_NOTICE
+            : "採用に戻しました。トピックを保存したあとに受講者へ表示されます。"
+        );
+      });
+    });
+  }
+
+  function _saveCaption(item, idx) {
+    if (!item || !item.id || !studio) return;
+    var input = document.querySelector('[data-figure-caption-input-idx="' + idx + '"]');
+    if (!input) return;
+    var value = input.value;
+    _runCardAction(item, "キャプションを保存しています…", function () {
+      return _patchTeachingFigure(item, { caption: value }).then(function (data) {
+        // 表示は応答の caption を使う（サーバが「（模式図）」を付けることがある・FG5）。
+        var saved = data && data.figure ? data.figure.caption : value;
+        item.caption = saved || "";
+        _setCardNotice(
+          item,
+          data && data.image_snapshot_failed
+            ? SNAPSHOT_FAILED_NOTICE
+            : "キャプションを保存しました。"
+        );
+      });
+    });
   }
 
   // ── 公開 API ──────────────────────────────────────────────────────────
@@ -756,6 +1081,8 @@
   //   preset: {figureBrief, figureKind, anchorExcerpt, suggestionId} | null,
   //   existingOnly: bool,
   //   onInsert: function(figureId, embedText, result|null),
+  //   onClose: function(),            // モーダルを閉じた後の後始末（フォーカス復帰など）
+  //   countTopicReferences: function(figureId) -> number,  // 回収前の事実文用（§7.4）
   //   figuresIndex: {figure_id: {caption, image_url, document_id, teaching}},
   //   documentIds: [document_id]
   // }
@@ -770,6 +1097,9 @@
     studio.preset = opts.preset || null;
     studio.existingOnly = !!opts.existingOnly;
     studio.onInsert = typeof opts.onInsert === "function" ? opts.onInsert : null;
+    studio.onClose = typeof opts.onClose === "function" ? opts.onClose : null;
+    studio.countTopicReferences =
+      typeof opts.countTopicReferences === "function" ? opts.countTopicReferences : null;
     studio.figuresIndex = opts.figuresIndex || {};
     studio.documentIds = opts.documentIds || [];
     studio.tab = studio.existingOnly ? "existing" : "generate";

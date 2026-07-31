@@ -53,6 +53,11 @@ _MAX_SUPPORT_ITEMS_PER_SECTION = 5
 _MAX_SUPPORT_ENTRIES_PER_SECTION = 5
 _MAX_BACKBONE_NODES = 12
 _MAX_FRAGILE_POINTS = 8
+# [D-6] 2種類の脆い箇所（主語が違う）の枠。合計は ``_MAX_FRAGILE_POINTS`` のまま。
+# 単純に「assumption を先に積んで末尾を切る」と、台帳行が多い document では
+# backbone（subject=system）区画が丸ごと空になり「この画面に出ない情報がどこにも無い
+# 状態は作らない」（OA7）に反する。片方が枠を使い切らないときは残枠を融通する。
+_FRAGILE_BACKBONE_QUOTA = 3
 # 「別の見方（AI の提示）」（discuss_opening_authoring_design.md §2）の上限。
 _MAX_ALTERNATIVES = 3
 # 「議論のきっかけ」（同 §2 / §7、承認済み素材の配信）の上限。生成側の
@@ -551,15 +556,20 @@ def project_fragile_points(
     D3-2 の「並び順は負荷段階→依存数」の精神を踏襲し、ここでは情報源の種類で1段階だけ分ける）。
     同一対象が両方の経路から出ても id 体系が異なる（台帳 target_id と backbone node_id）ため
     unify はせず両方保持する（情報を落とさない, P4）。
+
+    上限（``limit``）は **kind ごとに枠を確保して**切る（[D-6]）: 一方の kind だけで
+    上限に達しても他方が丸ごと消えないようにし、両方に候補があるときは両方から必ず
+    1件以上残す。余った枠は他方へ融通する（台帳の投影を優先）。``truncated`` の意味は
+    従来どおり「候補が上限を超えて切られた」。
     """
-    points: list[dict[str, Any]] = []
+    assumption_points: list[dict[str, Any]] = []
     for item in assumption_items or []:
         if not isinstance(item, dict):
             continue
         label = str(item.get("statement") or item.get("target_id") or "").strip()
         if not label:
             continue
-        points.append(
+        assumption_points.append(
             {
                 "kind": "assumption",
                 "subject": FRAGILE_SUBJECT_PAPER,
@@ -572,6 +582,7 @@ def project_fragile_points(
     items_view = (
         backbone_by_document.items() if isinstance(backbone_by_document, dict) else backbone_by_document
     )
+    backbone_points: list[dict[str, Any]] = []
     for document_id, nodes in items_view or []:
         for node in nodes or []:
             if not isinstance(node, dict) or not _is_fragile_backbone_node(node):
@@ -579,7 +590,7 @@ def project_fragile_points(
             label = str(node.get("label") or node.get("node_id") or "").strip()
             if not label:
                 continue
-            points.append(
+            backbone_points.append(
                 {
                     "kind": "backbone_node",
                     "subject": FRAGILE_SUBJECT_SYSTEM,
@@ -589,8 +600,38 @@ def project_fragile_points(
                 }
             )
 
-    truncated = len(points) > limit
-    return points[:limit], truncated
+    limit = max(0, int(limit))
+    take_assumption, take_backbone = _allocate_fragile_quota(
+        len(assumption_points), len(backbone_points), limit
+    )
+    points = assumption_points[:take_assumption] + backbone_points[:take_backbone]
+    truncated = (len(assumption_points) + len(backbone_points)) > len(points)
+    return points, truncated
+
+
+def _allocate_fragile_quota(
+    assumption_count: int, backbone_count: int, limit: int
+) -> tuple[int, int]:
+    """[D-6] kind 別の枠配分（決定論的）。
+
+    backbone に ``_FRAGILE_BACKBONE_QUOTA``（既定3、``limit`` が小さいときは半分まで）、
+    残りを assumption に割り当て、使われなかった枠は他方へ融通する（assumption 優先）。
+    両方に候補があり ``limit >= 2`` なら両方から必ず1件以上取る。
+    """
+    if limit <= 0:
+        return 0, 0
+    backbone_quota = min(_FRAGILE_BACKBONE_QUOTA, max(0, limit // 2))
+    assumption_quota = limit - backbone_quota
+    take_assumption = min(assumption_count, assumption_quota)
+    take_backbone = min(backbone_count, backbone_quota)
+    spare = limit - take_assumption - take_backbone
+    if spare > 0:
+        extra = min(assumption_count - take_assumption, spare)
+        take_assumption += extra
+        spare -= extra
+    if spare > 0:
+        take_backbone += min(backbone_count - take_backbone, spare)
+    return take_assumption, take_backbone
 
 
 def _is_available(
