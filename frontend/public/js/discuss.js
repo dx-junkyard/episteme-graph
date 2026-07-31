@@ -421,9 +421,12 @@
     var html = '<div class="discuss-opening">';
     // 教員の提示を最初に読ませる（誰が開いても同じ画面、を非LLMで解く唯一の手段）。
     html += renderCourseFocusSection(focus);
+    // 進行の型を先に予告する（discuss_dialogue_alignment_design.md §6）。序盤の
+    // 「言い直し＋確認」の往復が冗長に見えないよう、静的文言で流れだけ伝える（DM6）。
     html += '<div class="discuss-opening-note">' +
       'トピック順に縛られず、論文全体について話せます。' +
-      '回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。</div>';
+      '回答の根拠（教材由来か、AIの一般知識か）は各回答に表示されます。' +
+      'まず互いの読みを突き合わせてから、論文の主張を一緒に検討します。</div>';
     // 行動の起点（最初の一手）を最上部に置く。以前は最下部にあり、初見の学習者が
     // 最初に取れる操作が折り返し線の外にあった。
     html += renderFirstMoveSection();

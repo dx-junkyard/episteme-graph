@@ -2756,6 +2756,9 @@
     state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
     hideEditIndicator();
     state.topicMaterial = [];
+    // claim / equation 文脈（learner element context）のメモリキャッシュはトピック単位。
+    // 教材が入れ替わると担体（教材内ジャンプの対象）も変わるため持ち越さない。
+    clearMaterialElementContextCache();
     // P1: トピック切替で「直前の check 応答の course_completed」を持ち越さない。
     state.lastCheckCourseCompleted = false;
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
@@ -5345,6 +5348,50 @@
     unknown: "未判定",
   };
 
+  // ── claim / equation の上位・下位文脈（learner element context, Phase 3）──────
+  // GET /api/learning/courses/{courseId}/elements/{claim|equation}/{id}/context
+  // の DTO を描くための語彙とキャッシュ。ITEM は
+  // { id, element_type, label, relation_label, relation_status, navigable } のみで、
+  // relation（内部語彙）・document_id・confidence は API 側で除去済み。
+  var MATERIAL_ELEMENT_CONTEXT_TYPES = ["claim", "equation"];
+
+  // 許可された element_type だけ API パスを組む（fail-closed。source / figure / component
+  // からはこの API を呼ばない）。
+  var MATERIAL_ELEMENT_CONTEXT_PATHS = {
+    claim: "/elements/claim/",
+    equation: "/elements/equation/",
+  };
+
+  // relation_status は source_backed / confirmed の2値のみ（candidate は API 側で除外）。
+  var MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS = {
+    source_backed: "出典に裏付け",
+    confirmed: "教員確定",
+  };
+
+  // レーン見出し（focus の型ごとに主語を変える。事実文のみ・煽らない）。
+  var MATERIAL_ELEMENT_CONTEXT_LANE_LABELS = {
+    claim: { upper: "この主張が支えるもの", lower: "この主張の根拠" },
+    equation: { upper: "この数式が支えるもの", lower: "この数式の根拠" },
+  };
+
+  // ITEM.element_type（W層の内部語彙）→ 教材本文の data-evidence-ref の kind。
+  // shared_part は教材本文に担体を持たないため意図的に含めない（ジャンプ不可）。
+  var MATERIAL_ELEMENT_CONTEXT_REF_KINDS = {
+    theory_component: "component",
+    theory_claim: "claim",
+    equation: "equation",
+    figure: "figure",
+  };
+
+  var MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE = "文脈情報はまだありません。";
+
+  // トピック単位のメモリキャッシュ（"claim:id" → DTO）。トピック切替でクリアする。
+  var materialElementContextCache = {};
+
+  function clearMaterialElementContextCache() {
+    materialElementContextCache = {};
+  }
+
   // チップ ref（"kind:id"）→ { item, resolver } のレジストリ。renderMaterialChunk は
   // 教材区画・出典ポップアップ・ボイスパネル・レクチャースライドの複数箇所から呼ばれるため、
   // クリック配線は document への委譲リスナー1本（initMaterialEvidenceChipDelegation）にし、
@@ -5360,6 +5407,19 @@
     if (_materialEvidenceChipDelegationWired) return;
     _materialEvidenceChipDelegationWired = true;
     document.addEventListener("click", function (e) {
+      // 数式ブロックカードの「文脈を見る」（claim/equation 文脈 API）。数式カード自体は
+      // チップではないため、同じ委譲リスナー内で先に処理する。
+      var ctxBtn = e.target && e.target.closest ? e.target.closest(".ls-material-context-btn") : null;
+      if (ctxBtn) {
+        e.preventDefault();
+        e.stopPropagation();
+        openElementContextPopover(
+          ctxBtn,
+          ctxBtn.getAttribute("data-element-context-type") || "",
+          ctxBtn.getAttribute("data-element-context-id") || ""
+        );
+        return;
+      }
       var chip = e.target && e.target.closest ? e.target.closest(".ls-material-evidence-chip") : null;
       if (!chip) return;
       var ref = chip.getAttribute("data-evidence-ref") || "";
@@ -5508,8 +5568,11 @@
           (evidenceItem && (evidenceItem.latex || evidenceItem.plain_text || evidenceItem.raw_text) ? evidenceItem : null);
         var body = renderMaterialEquationBody(formula);
         if (body) {
+          // 数式カードの隅に控えめな「文脈を見る」（claim/equation 文脈 API）。
+          // 自動では開かない・数式が多い教材でも本文の邪魔をしない小さなボタンに留める。
           return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
             body +
+            renderMaterialElementContextButton("equation", embedId) +
           '</span>';
         }
         // 本体（LaTeX/reading/原文）が無い数式埋め込みは、学習者には不安を与える
@@ -5599,6 +5662,16 @@
     '</button>';
   }
 
+  // 教材本文の数式カードに添える「文脈を見る」ボタン。押されるまで API を呼ばない
+  // （ページ描画では文脈を取得しない）。
+  function renderMaterialElementContextButton(elementType, elementId) {
+    if (MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(elementType) < 0 || !elementId) return "";
+    return '<button type="button" class="ls-material-context-btn"' +
+      ' data-element-context-type="' + escHtml(elementType) + '"' +
+      ' data-element-context-id="' + escHtml(elementId) + '"' +
+      ' aria-label="この数式の文脈を見る">文脈を見る</button>';
+  }
+
   // ── チップ ポップオーバー（Phase 1: トピック snapshot 内で完結）────────────
   // 既存の出典ポップアップ基盤（.src-popup / _positionSourcePopup / closeSourcePopup /
   // 外側クリック・Esc）を踏襲する。
@@ -5635,11 +5708,36 @@
         openEvidenceChipContextPanel(pop, item, entry.resolver);
       });
     }
+
+    // claim チップの「詳しく見る」（claim/equation 文脈 API）。component の
+    // .evidence-chip-popover-more-btn（component 文脈 API）とは別ボタンで、
+    // 呼ぶ API も別（混同しないようクラス名を分ける）。
+    var ctxMoreBtn = pop.querySelector(".evidence-chip-popover-context-btn");
+    if (ctxMoreBtn) {
+      ctxMoreBtn.addEventListener("click", function () {
+        openElementContextPanel(
+          pop,
+          ctxMoreBtn.getAttribute("data-element-context-type") || "",
+          ctxMoreBtn.getAttribute("data-element-context-id") || ""
+        );
+      });
+    }
   }
 
   function renderClaimChipPopoverBody(item) {
     var summary = (item && item.summary) || "この主張の詳細はまだ登録されていません。";
-    return '<div class="evidence-chip-popover-claim">' + escHtml(summary) + '</div>';
+    return '<div class="evidence-chip-popover-claim">' + escHtml(summary) + '</div>' +
+      elementContextMoreButton("claim", item && item.id);
+  }
+
+  // claim / equation 文脈パネルへの導線。押されるまで API を呼ばない。
+  function elementContextMoreButton(elementType, elementId) {
+    if (MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(elementType) < 0 || !elementId) return "";
+    return '<div class="evidence-chip-popover-footer">' +
+      '<button type="button" class="evidence-chip-popover-context-btn"' +
+      ' data-element-context-type="' + escHtml(elementType) + '"' +
+      ' data-element-context-id="' + escHtml(elementId) + '">詳しく見る</button>' +
+    '</div>';
   }
 
   function renderComponentChipPopoverBody(item, resolver) {
@@ -5924,6 +6022,181 @@
       html += '<div class="evidence-chip-context-shared-count">他 ' + escHtml(String(entry.other_documents_count)) + ' 論文でも使用</div>';
     }
     return html || '<div class="evidence-chip-popover-position">共通部品としての情報はまだ登録されていません。</div>';
+  }
+
+  // ── claim / equation の上位・下位文脈パネル（learner element context, Phase 3）───
+  // claim チップの「詳しく見る」・数式カードの「文脈を見る」から開く。要素そのものの
+  // 内訳ではなく「この論文でどこにつながっているか」を事実文で並べる。教員向けの
+  // deliberation 導線・notes（運用語彙）・confidence 等の数値は出さない。
+
+  // 既存ポップオーバーの本体を文脈パネルに差し替える（claim チップ経路）。
+  function openElementContextPanel(pop, elementType, elementId) {
+    var body = pop && pop.querySelector(".evidence-chip-popover-body");
+    if (!body) return;
+    body.innerHTML = '<div class="evidence-chip-popover-loading">読み込み中…</div>';
+    fetchElementContextAndRender(pop, body, elementType, elementId);
+  }
+
+  // 数式カード等、チップ以外のアンカーから新しくポップオーバーを開く（equation 経路）。
+  function openElementContextPopover(anchor, elementType, elementId) {
+    if (!anchor || MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(elementType) < 0 || !elementId) return;
+    // 出典ポップアップ内の教材本文から押された場合、closeSourcePopup で anchor 自身が
+    // DOM から外れて矩形が取れなくなる。閉じる前に矩形を控えて位置決めに使う。
+    var anchorRect = anchor.getBoundingClientRect();
+    var anchorLike = { getBoundingClientRect: function () { return anchorRect; } };
+    closeSourcePopup();
+    var kind = elementType === "claim" ? "claim" : "equation";
+    var pop = document.createElement("div");
+    pop.className = "src-popup evidence-chip-popover";
+    pop.id = "src-popup";
+    pop.innerHTML = evidenceChipPopoverHead(kind, elementId) +
+      '<div class="src-popup-body evidence-chip-popover-body">' +
+        '<div class="evidence-chip-popover-loading">読み込み中…</div>' +
+      '</div>';
+    document.body.appendChild(pop);
+    _positionSourcePopup(pop, anchorLike);
+    pop.querySelector(".src-popup-close").addEventListener("click", closeSourcePopup);
+    document.addEventListener("mousedown", _srcOutsideClose, true);
+    document.addEventListener("keydown", _srcEscClose, true);
+    fetchElementContextAndRender(pop, pop.querySelector(".evidence-chip-popover-body"), elementType, elementId);
+  }
+
+  // 許可された element_type（claim / equation）だけ API パスを組む（fail-closed）。
+  function elementContextApiPath(elementType, elementId) {
+    var seg = MATERIAL_ELEMENT_CONTEXT_PATHS[elementType];
+    if (!seg || !elementId || !state.courseId) return "";
+    return "/learning/courses/" + state.courseId + seg + encodeURIComponent(elementId) + "/context";
+  }
+
+  async function fetchElementContextAndRender(pop, body, elementType, elementId) {
+    if (!body) return;
+    var path = elementContextApiPath(elementType, elementId);
+    if (!path) { body.textContent = MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE; return; }
+    var cacheKey = elementType + ":" + elementId;
+    if (Object.prototype.hasOwnProperty.call(materialElementContextCache, cacheKey)) {
+      renderElementContextPanel(pop, body, elementType, materialElementContextCache[cacheKey]);
+      return;
+    }
+    try {
+      var res = await apiFetch(path);
+      // 404（未受講・コース外・解決不能）も含め、失敗は同じ事実文に縮退する。
+      if (!res.ok) { body.textContent = MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE; return; }
+      var data = await res.json();
+      materialElementContextCache[cacheKey] = data;
+      renderElementContextPanel(pop, body, elementType, data);
+    } catch (_) {
+      body.textContent = MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE;
+    }
+  }
+
+  function renderElementContextPanel(pop, body, elementType, data) {
+    if (!data || data.available !== true) {
+      // available:false の note はサーバ側の事実文。無ければ既定の事実文に縮退。
+      var note = data && typeof data.note === "string" ? data.note.trim() : "";
+      body.textContent = note || MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE;
+      return;
+    }
+    var focus = data.focus || {};
+    var lanes = MATERIAL_ELEMENT_CONTEXT_LANE_LABELS[elementType] ||
+      MATERIAL_ELEMENT_CONTEXT_LANE_LABELS.claim;
+
+    var headTitle = pop && pop.querySelector(".src-popup-title");
+    if (headTitle && focus.label) {
+      var kindLabel = MATERIAL_EVIDENCE_KIND_LABELS[elementType] || elementType;
+      headTitle.textContent = kindLabel + " ・ " + focus.label;
+    }
+
+    var html = "";
+    if (focus.intrinsic_summary) {
+      html += '<div class="evidence-chip-popover-position">' + escHtml(focus.intrinsic_summary) + '</div>';
+    }
+    // contextual_role は表示してよいときだけ両方のキーが来る（AI 候補・未同定は
+    // キーごと落ちてくる）ので、存在すればそのまま出す。
+    if (focus.contextual_role) {
+      html += '<div class="evidence-chip-context-role">' +
+        '<div class="evidence-chip-popover-section-title">この論文での役割</div>' +
+        '<div class="evidence-chip-context-role-body">' + escHtml(focus.contextual_role) + '</div>' +
+        elementContextStatusBadge(focus.contextual_role_status) +
+      '</div>';
+    }
+    if (focus.generic && (focus.generic.name || focus.generic.summary)) {
+      var genericText = focus.generic.name || "";
+      if (focus.generic.summary) {
+        genericText = genericText ? (genericText + " — " + focus.generic.summary) : focus.generic.summary;
+      }
+      html += '<div class="evidence-chip-context-generic">一般には: ' + escHtml(genericText) + '</div>';
+    }
+    html += renderElementContextLane(lanes.upper, data.upper);
+    html += renderElementContextLane(lanes.lower, data.lower);
+    if (!html) {
+      html = '<div class="evidence-chip-popover-position">' +
+        escHtml(MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE) + '</div>';
+    }
+    body.innerHTML = html;
+
+    body.querySelectorAll(".evidence-chip-context-jump-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        jumpToMaterialEvidenceRef(btn.getAttribute("data-jump-ref") || "");
+      });
+    });
+  }
+
+  function elementContextStatusBadge(status) {
+    var label = MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS[status];
+    if (!label) return "";
+    return '<span class="evidence-chip-context-status">' + escHtml(label) + '</span>';
+  }
+
+  // 1レーン（upper か lower）。各行 = ラベル + relation_label（「focus が〜する」の
+  // 動詞句なのでそのまま連結）+ 裏付けラベル + 教材内ジャンプ（担体があるときだけ）。
+  function renderElementContextLane(title, items) {
+    var rows = (items || []).map(function (item) {
+      if (!item) return "";
+      var label = item.label || "";
+      if (!label) return "";
+      var jumpRef = materialElementContextJumpRef(item);
+      return '<li class="evidence-chip-context-lane-item">' +
+        '<span class="evidence-chip-context-lane-label">' + escHtml(label) + '</span>' +
+        (item.relation_label
+          ? '<span class="evidence-chip-context-lane-relation">' + escHtml(item.relation_label) + '</span>'
+          : "") +
+        elementContextStatusBadge(item.relation_status) +
+        (jumpRef
+          ? '<button type="button" class="evidence-chip-context-jump-btn" data-jump-ref="' +
+            escHtml(jumpRef) + '">教材内で見る</button>'
+          : "") +
+      '</li>';
+    }).filter(Boolean);
+    if (!rows.length) return "";
+    return '<div class="evidence-chip-popover-section evidence-chip-context-lane">' +
+      '<div class="evidence-chip-popover-section-title">' + escHtml(title) + '</div>' +
+      '<ul class="evidence-chip-popover-list evidence-chip-context-lane-list">' + rows.join("") + '</ul>' +
+    '</div>';
+  }
+
+  // ITEM が現在トピックの教材本文に担体（[data-evidence-ref]）を持つかを調べ、持つ
+  // ときだけ ref を返す。claim の id は DB UUID のことがあり教材側 ref（agent 側 ID）と
+  // 一致しない場合がある — 一致しなければジャンプボタンを出さない（表示のみ）。
+  function materialElementContextJumpRef(item) {
+    if (!item || !item.id) return "";
+    var kind = MATERIAL_ELEMENT_CONTEXT_REF_KINDS[item.element_type];
+    if (!kind) return "";
+    var ref = kind + ":" + normalizeMaterialEvidenceId(item.id);
+    if (!/^[a-z_]+:[A-Za-z0-9_.\-]+$/.test(ref)) return "";
+    return document.querySelector('[data-evidence-ref="' + ref + '"]') ? ref : "";
+  }
+
+  // 教材内ジャンプ: ポップオーバーを閉じて該当担体までスクロールし、一時的に光らせる。
+  function jumpToMaterialEvidenceRef(ref) {
+    if (!ref || !/^[a-z_]+:[A-Za-z0-9_.\-]+$/.test(ref)) return;
+    var el = document.querySelector('[data-evidence-ref="' + ref + '"]');
+    if (!el) return;
+    closeSourcePopup();
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    el.classList.add("ls-material-evidence-jump");
+    window.setTimeout(function () {
+      el.classList.remove("ls-material-evidence-jump");
+    }, 1600);
   }
 
   // ── 1-hop 近傍グラフ（Phase 3・「グラフで見る」・「旅」の実装）───────────────

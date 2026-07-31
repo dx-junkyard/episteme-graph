@@ -1,5 +1,6 @@
 """原稿スタジオ「根拠リンク」ペイン改善（Phase 0 重複解消・双方向化 / Phase 1 上位下位
-コンテキストの遅延ロード）に対する静的ガードレール。
+コンテキストの遅延ロード / Phase 2 論理要素単位の構造アウトライン）に対する静的
+ガードレール。
 
 対象は `frontend/public/js/admin-lecture-studio.js` と `frontend/public/css/styles.css`
 のみ（バックエンドの `/context` エンドポイントは並行作業の別担当なので、本テストは
@@ -13,6 +14,10 @@
   `[data-evidence-ref]` へスクロール + ハイライトする（双方向化）。
 - Phase 1: 展開時に W層 context lens を遅延フェッチ（初回のみ・キャッシュ・コース切替の
   ステイル応答破棄）し、上位/下位レーンと裏付けラベルを描く。source はフェッチしない。
+- Phase 2: 論理要素（component）ごとのグループにカードを束ね（first-wins・「その他の根拠」
+  への回収・component が無いトピックはフラット表示へフォールバック）、グループバーは
+  カードヘッダとは別コントロールとして折りたたみだけを担当する。カードの
+  `data-evidence-key` 等の DOM 契約は Phase 0/1 のまま維持する。
 - confidence 等の生数値を描画しないこと（W8）。
 - 追加領域が ES5 準拠（開発ルール5: アロー関数・const/let・テンプレートリテラル禁止）。
 """
@@ -228,6 +233,158 @@ class TestContextLazyLoad:
         assert "focus.element_id" in reveal
         assert "btn.hidden = true" in reveal
         assert "!window.Deliberation" in reveal
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: 論理要素単位の構造アウトライン（グループ化）
+# ---------------------------------------------------------------------------
+
+
+class TestEvidenceOutlineGrouping:
+    def _group_block(self) -> str:
+        src = _read()
+        return _block(
+            src,
+            "function lsGroupCourseEvidenceItems(topic, items) {",
+            "var LS_EVIDENCE_GROUP_KIND_ORDER",
+        )
+
+    def test_grouping_helper_exists_and_is_used_by_renderer(self):
+        src = _read()
+        assert "function lsGroupCourseEvidenceItems(topic, items) {" in src
+        block = _block(src, "function lsCourseEvidenceHtml(topic) {", "function lsCourseEvidenceCardHtml(")
+        assert "lsGroupCourseEvidenceItems(topic, items)" in block
+        assert "lsEvidenceGroupHtml(topic, group)" in block
+
+    def test_flat_fallback_when_no_component_items(self):
+        """component アイテムが無いトピックはグループバーなしの従来表示に落ちる。"""
+        group = self._group_block()
+        assert 'if (item.kind === "component") componentItems.push(item);' in group
+        assert "if (!componentItems.length) return null;" in group
+        render = _block(
+            _read(), "function lsCourseEvidenceHtml(topic) {", "function lsCourseEvidenceCardHtml("
+        )
+        # null（= component 無し）のときはフラットなカードリストを返す
+        assert "if (!groups) {" in render
+        assert "'<div class=\"ls-course-evidence-list\">'" in render
+
+    def test_children_are_claims_and_equations_only(self):
+        group = self._group_block()
+        assert 'if (item.kind !== "claim" && item.kind !== "equation") return;' in group
+        assert 'item.kind === "claim" ? refs.claims[norm] : refs.equations[norm]' in group
+
+    def test_first_wins_prevents_duplicate_placement(self):
+        """同一 claim/equation は最初の component グループにのみ置く（重複表示禁止）。"""
+        group = self._group_block()
+        assert "if (placed[item.key]) return;" in group
+        assert "placed[item.key] = true;" in group
+
+    def test_unassigned_items_go_to_others_group(self):
+        group = self._group_block()
+        assert "if (!placed[item.key]) others.push(item);" in group
+        assert "groups.push({ component: null, children: others });" in group
+        html = _block(
+            _read(), "function lsEvidenceGroupHtml(topic, group) {", "function lsExpandEvidenceGroupFor("
+        )
+        assert '"その他の根拠"' in html
+
+    def test_child_refs_read_rich_projection_then_fallback(self):
+        """rich 投影（claims / equations[].id）を主経路に、旧データは components API へ。"""
+        block = _block(
+            _read(),
+            "function lsComponentChildRefs(topic, componentId) {",
+            "// 根拠アイテム列 → グループ列。",
+        )
+        assert "lsTopicComponentById(topic, componentId)" in block
+        assert "(rich.claims || [])" in block
+        assert "(rich.equations || [])" in block
+        assert "lsCourseComponentById(componentId)" in block
+        assert '"evidence_claims", "linked_claim_ids", "claim_ids"' in block
+
+    def test_group_bar_is_a_separate_control_with_anchor(self):
+        html = _block(
+            _read(), "function lsEvidenceGroupHtml(topic, group) {", "function lsExpandEvidenceGroupFor("
+        )
+        assert 'class="ls-evidence-group-bar"' in html
+        assert "data-evidence-group-toggle=" in html
+        assert 'data-ui-anchor="lecture-studio.evidence-group"' in html
+        assert 'aria-expanded="true"' in html  # 既定は展開
+        # グループバーはカードヘッダ（文脈トグル）と責務を混ぜない
+        assert "data-evidence-toggle=" not in html
+
+    def test_group_bar_shows_kind_counts_only(self):
+        src = _read()
+        counts = _block(
+            src,
+            "function lsEvidenceGroupCountsLabel(children) {",
+            "function lsEvidenceGroupHtml(",
+        )
+        assert "counts[item.kind]" in counts
+        assert "lsEvidenceKindLabel(kind)" in counts
+        html = _block(src, "function lsEvidenceGroupHtml(topic, group) {", "function lsExpandEvidenceGroupFor(")
+        assert "紐づく主張・数式はありません" in html
+
+    def test_cards_keep_evidence_key_contract_inside_groups(self):
+        """グループの中身も Phase 0/1 と同じカード関数で描く（DOM 契約の維持）。"""
+        src = _read()
+        card = _block(src, "function lsCourseEvidenceCardHtml(topic, item) {", "// ── Phase 2:")
+        assert re.search(
+            r'<article class="ls-course-evidence-card" data-evidence-key="\'\s*\+\s*escHtml\(item\.key\)',
+            card,
+        )
+        assert "data-evidence-toggle=" in card
+        assert "data-evidence-context=" in card
+        assert "data-evidence-draft=" in card
+        html = _block(src, "function lsEvidenceGroupHtml(topic, group) {", "function lsExpandEvidenceGroupFor(")
+        assert "lsCourseEvidenceCardHtml(topic, child)" in html
+        assert "lsCourseEvidenceCardHtml(topic, group.component)" in html
+        assert 'class="ls-evidence-group-children"' in html
+
+    def test_focus_expands_collapsed_group_before_scrolling(self):
+        src = _read()
+        focus = _block(src, "function lsFocusEvidence(key) {", "// 右ペインの根拠カード → 左ドラフト")
+        assert "lsExpandEvidenceGroupFor(target)" in focus
+        idx_expand = focus.index("lsExpandEvidenceGroupFor(target)")
+        idx_scroll = focus.index("scrollIntoView")
+        assert idx_expand < idx_scroll
+        expand = _block(src, "function lsExpandEvidenceGroupFor(target) {", "function lsFocusEvidence(key) {")
+        assert 'closest(".ls-evidence-group")' in expand
+        assert 'classList.contains("collapsed")' in expand
+        assert 'setAttribute("aria-expanded", "true")' in expand
+        assert "body.hidden = false" in expand
+
+    def test_group_toggle_is_bound(self):
+        block = _block(
+            _read(),
+            "function lsBindCourseEvidenceCards(topic, container) {",
+            "\n  function lsRenderCourseListPreview(",
+        )
+        assert "[data-evidence-group-toggle]" in block
+        assert 'classList.toggle("collapsed")' in block
+        assert 'setAttribute("aria-expanded", collapsed ? "false" : "true")' in block
+        assert "body.hidden = collapsed" in block
+
+    def test_group_styles_defined(self):
+        css = STYLES_CSS.read_text(encoding="utf-8")
+        assert ".ls-evidence-group-bar" in css
+        assert ".ls-evidence-group-children" in css
+        assert ".ls-evidence-group.collapsed .ls-evidence-group-caret" in css
+
+    def test_group_anchor_registered_with_carrier(self):
+        """新アンカーが admin_ui_anchors の表と JS の担体の両方に存在すること。"""
+        anchors_py = (
+            ROOT / "backend" / "core" / "help_kb" / "admin_ui_anchors.py"
+        ).read_text(encoding="utf-8")
+        assert '"lecture-studio.evidence-group",' in anchors_py  # KNOWN 側
+        assert (
+            '"lecture-studio.evidence-group": "teacher/14-admin-lecture-studio.md#evidence-group"'
+            in anchors_py
+        )
+        assert 'data-ui-anchor="lecture-studio.evidence-group"' in _read()
+        manual = (
+            ROOT / "docs" / "manual" / "teacher" / "14-admin-lecture-studio.md"
+        ).read_text(encoding="utf-8")
+        assert "{#evidence-group}" in manual
 
 
 # ---------------------------------------------------------------------------

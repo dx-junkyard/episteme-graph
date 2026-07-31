@@ -2649,7 +2649,26 @@
     if (!items.length) {
       return '<div class="ls-course-evidence-empty">このトピックに対応する根拠リンク候補はまだありません。</div>';
     }
-    return '<div class="ls-course-evidence-list">' + items.map(function (item) {
+    // Phase 2: 論理要素（component）が1つ以上あるトピックは、その配下に主張・数式を
+    // 束ねた構造アウトラインで描く。component アイテムが無いトピックは
+    // 従来どおりフラットなカードリスト（グループバーなし）。
+    var groups = lsGroupCourseEvidenceItems(topic, items);
+    if (!groups) {
+      return '<div class="ls-course-evidence-list">' + items.map(function (item) {
+        return lsCourseEvidenceCardHtml(topic, item);
+      }).join("") + '</div>';
+    }
+    return '<div class="ls-course-evidence-list ls-course-evidence-outline">' +
+      groups.map(function (group) {
+        return lsEvidenceGroupHtml(topic, group);
+      }).join("") +
+    '</div>';
+  }
+
+  // 根拠リンクカード1枚。Phase 0/1 の DOM 契約（data-evidence-key /
+  // data-evidence-toggle / data-evidence-context / フッター操作）はそのまま。
+  // グループ化はこのカードを包む DOM を足すだけで、カード自身は変えない。
+  function lsCourseEvidenceCardHtml(topic, item) {
       var metaLabel = lsEvidenceMetaLabel(item.role, item.confidence);
       var canDeliberate = !!lsEvidenceContextElementType(item.kind);
       return '<article class="ls-course-evidence-card" data-evidence-key="' + escHtml(item.key) + '">' +
@@ -2673,7 +2692,141 @@
             : '') +
         '</div>' +
       '</article>';
-    }).join("") + '</div>';
+  }
+
+  // ── Phase 2: 根拠リンクの構造アウトライン（論理要素ごとのグループ）────────────
+  // データ側の階層の正本は content_blocks の components ブロック item（rich 投影,
+  // course_content_builder._content_blocks）:
+  //   claims:    ["<claim_id>", ...]                                  — ID 文字列の配列
+  //   equations: [{ id: "<equation_id>", role: "input|output|... " }]  — 役割付きオブジェクト
+  // rich 投影を持たない旧データでは、コース components API 側の claim 参照
+  // （evidence_claims / linked_claim_ids / claim_ids のいずれか。数式参照はこの API に
+  // 無い）をフォールバックに使う。どちらも解決できない component はグループバー +
+  // 自身のカードだけになり、子アイテムは「その他の根拠」に必ず現れる（情報を落とさない）。
+  function lsEvidenceRefId(value) {
+    if (!value) return "";
+    if (typeof value === "string") return lsNormalizeEvidenceId(value);
+    return lsNormalizeEvidenceId(
+      value.id || value.claim_id || value.equation_id || value.target_id || "");
+  }
+
+  function lsComponentChildRefs(topic, componentId) {
+    var refs = { claims: {}, equations: {} };
+    var rich = lsTopicComponentById(topic, componentId) || {};
+    (rich.claims || []).forEach(function (value) {
+      var id = lsEvidenceRefId(value);
+      if (id) refs.claims[id] = true;
+    });
+    (rich.equations || []).forEach(function (value) {
+      var id = lsEvidenceRefId(value);
+      if (id) refs.equations[id] = true;
+    });
+    var component = lsCourseComponentById(componentId) || {};
+    ["evidence_claims", "linked_claim_ids", "claim_ids"].forEach(function (field) {
+      (component[field] || []).forEach(function (value) {
+        var id = lsEvidenceRefId(value);
+        if (id) refs.claims[id] = true;
+      });
+    });
+    return refs;
+  }
+
+  // 根拠アイテム列 → グループ列。component アイテムが無ければ null（＝フラット表示）。
+  // 同じ claim / equation が複数 component に属す場合は最初の component のグループに
+  // だけ置く（first-wins。重複表示に戻さない）。どのグループにも属さないアイテムは
+  // 末尾の「その他の根拠」に集める（全アイテムが必ずどこかに1回だけ現れる）。
+  function lsGroupCourseEvidenceItems(topic, items) {
+    var componentItems = [];
+    items.forEach(function (item) {
+      if (item.kind === "component") componentItems.push(item);
+    });
+    if (!componentItems.length) return null;
+    var placed = {};
+    var groups = [];
+    componentItems.forEach(function (comp) {
+      placed[comp.key] = true;
+      var refs = lsComponentChildRefs(topic, comp.id);
+      var children = [];
+      items.forEach(function (item) {
+        if (placed[item.key]) return;
+        if (item.kind !== "claim" && item.kind !== "equation") return;
+        var norm = lsNormalizeEvidenceId(item.id);
+        var owned = item.kind === "claim" ? refs.claims[norm] : refs.equations[norm];
+        if (!owned) return;
+        placed[item.key] = true;
+        children.push(item);
+      });
+      groups.push({ component: comp, children: children });
+    });
+    var others = [];
+    items.forEach(function (item) {
+      if (!placed[item.key]) others.push(item);
+    });
+    if (others.length) groups.push({ component: null, children: others });
+    return groups;
+  }
+
+  // グループバーの内訳は構成の件数だけ（評価数値ではない）。種別は固定順で並べる。
+  var LS_EVIDENCE_GROUP_KIND_ORDER = ["claim", "equation", "figure", "source", "component"];
+
+  function lsEvidenceGroupCountsLabel(children) {
+    var counts = {};
+    (children || []).forEach(function (item) {
+      counts[item.kind] = (counts[item.kind] || 0) + 1;
+    });
+    var parts = [];
+    LS_EVIDENCE_GROUP_KIND_ORDER.forEach(function (kind) {
+      if (counts[kind]) parts.push(lsEvidenceKindLabel(kind) + " " + counts[kind]);
+    });
+    return parts.join("・");
+  }
+
+  // グループバーはカードヘッダ（文脈の開閉トグル）とは別コントロール。折りたたみ
+  // だけを担当し、クリック責務を混ぜない。既定は展開（collapsed クラス無し）。
+  function lsEvidenceGroupHtml(topic, group) {
+    var isOthers = !group.component;
+    var groupKey = isOthers ? "others" : group.component.key;
+    var title = isOthers
+      ? "その他の根拠"
+      : lsEvidenceKindLabel("component") + ": " + (group.component.title || "無題");
+    var detail = lsEvidenceGroupCountsLabel(group.children) ||
+      (isOthers ? "" : "紐づく主張・数式はありません");
+    var childrenHtml = group.children.map(function (child) {
+      return lsCourseEvidenceCardHtml(topic, child);
+    }).join("");
+    var body;
+    if (isOthers) {
+      body = childrenHtml;
+    } else {
+      body = lsCourseEvidenceCardHtml(topic, group.component) +
+        (childrenHtml
+          ? '<div class="ls-evidence-group-children">' + childrenHtml + '</div>'
+          : "");
+    }
+    return '<section class="ls-evidence-group" data-evidence-group="' + escHtml(groupKey) + '">' +
+      '<button type="button" class="ls-evidence-group-bar"' +
+        ' data-evidence-group-toggle="' + escHtml(groupKey) + '"' +
+        ' data-ui-anchor="lecture-studio.evidence-group" aria-expanded="true">' +
+        '<span class="ls-evidence-group-title">' + escHtml(title) + '</span>' +
+        (detail ? '<span class="ls-evidence-group-detail">' + escHtml(detail) + '</span>' : '') +
+        '<span class="ls-evidence-group-caret" aria-hidden="true">▾</span>' +
+      '</button>' +
+      '<div class="ls-evidence-group-body" data-evidence-group-body="' + escHtml(groupKey) + '">' +
+        body +
+      '</div>' +
+    '</section>';
+  }
+
+  // フォーカス先が折りたたまれたグループ内にあるときは、先にグループを開く
+  // （左ドラフトチップ・つまづきタブ・ペイン内ジャンプの全経路で効く）。
+  function lsExpandEvidenceGroupFor(target) {
+    var group = target && target.closest ? target.closest(".ls-evidence-group") : null;
+    if (!group || !group.classList.contains("collapsed")) return;
+    group.classList.remove("collapsed");
+    var bar = group.querySelector("[data-evidence-group-toggle]");
+    if (bar) bar.setAttribute("aria-expanded", "true");
+    var body = group.querySelector("[data-evidence-group-body]");
+    if (body) body.hidden = false;
   }
 
   function lsFocusEvidence(key) {
@@ -2683,7 +2836,9 @@
       card.classList.toggle("active", card.getAttribute("data-evidence-key") === key);
     });
     var target = preview.querySelector('[data-evidence-key="' + CSS.escape(key) + '"]');
-    if (target) target.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    if (!target) return;
+    lsExpandEvidenceGroupFor(target);
+    target.scrollIntoView({ block: "nearest", behavior: "smooth" });
   }
 
   // 右ペインの根拠カード → 左ドラフトの対応埋め込みへの逆リンク（双方向化）。
@@ -2950,6 +3105,18 @@
     if (!container) return;
     var itemsByKey = {};
     lsTopicEvidenceItems(topic).forEach(function (item) { itemsByKey[item.key] = item; });
+    // Phase 2 のグループバー（構造アウトラインの折りたたみ）。カードヘッダとは別
+    // コントロールで、文脈の遅延ロード・ドラフト移動は行わない。
+    container.querySelectorAll("[data-evidence-group-toggle]").forEach(function (bar) {
+      bar.addEventListener("click", function () {
+        var group = this.closest(".ls-evidence-group");
+        if (!group) return;
+        var collapsed = group.classList.toggle("collapsed");
+        this.setAttribute("aria-expanded", collapsed ? "false" : "true");
+        var body = group.querySelector("[data-evidence-group-body]");
+        if (body) body.hidden = collapsed;
+      });
+    });
     container.querySelectorAll("[data-evidence-toggle]").forEach(function (head) {
       head.addEventListener("click", function () {
         var card = this.closest(".ls-course-evidence-card");

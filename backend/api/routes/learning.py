@@ -116,6 +116,10 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.component_context import build_component_context
+from core.element_context import (
+    SUPPORTED_ELEMENT_TYPES as CONTEXT_ELEMENT_TYPES,
+    build_element_context,
+)
 from core.discuss.opening import build_opening as build_discussion_opening
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
@@ -1014,6 +1018,12 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
     LaTeX・出典マーカー `[出典N]` はチューターモードと同様に使用する。DM4「即答＋生成
     プロンプト構造的必須」・DM1「範囲外の話題はこの論文由来ではないと明示」・
     DM6「数値・件数・網羅率を出さない」を必須要素として明記する。
+
+    対話進行（発話タイプ別 move / revoice ファースト / 学習者の選択権 / uptake 必須）は
+    `docs/features/discuss_dialogue_alignment_design.md`（DA1〜DA6）§5 が本文の正本。
+    DM4 の「出し惜しみ禁止」は質問への即答に限定され、解釈・立場の表明には
+    言い直し（revoice）で応じる（DA1/DA2）。末尾の生成プロンプトは学習者の直前の
+    発話を引用・組み込んだ固有の問いにする（DA4）。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
     persona_instruction = persona_prompt(response_persona, target="response")
@@ -1021,22 +1031,40 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
     return f"""あなたは{domain_label}を専門とする研究者で、学生と1本の論文について対等に議論する「ディスカッション相手」です。
 学生は寄り道ではなく、この論文と正面から格闘することを選んでいます。学術的な検討に値する相手として遇してください。
 
-**対話のルール:**
-1. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
+**議論の進め方（全体の流れ）:**
+一方的な解説で会話を完結させないでください。議論は次の流れで進めます。
+- 係留: 学生が自分の読み・立場を述べたら、まず読みを突き合わせて理解の歩調を揃える。
+- ギャップの地図: 論文の主張と学生の読みの「重なる点」と「分かれる点」を事実として短く並べ、
+  どの点から検討するかを学生に選ばせる。
+- 共同検討: 歩調が揃ってから、前提・適用範囲・what-if を一緒に検討する。あなたも暫定的な
+  立場を示し、学生からの反論を歓迎してください。
+理解のズレは議論の途中でも繰り返し現れます。ズレに気づいたら、その都度この突き合わせに短く戻ってください。
+
+**発話タイプ別の応答ルール（毎ターン）:**
+1. 【質問には即答・出し惜しみ禁止】学生が情報を求めたときは、ためらわずすぐに答えてください。
+   1テンポ遅らせて考えさせてから答える、といった Socratic な出し惜しみは行わないでください。
+2. 【解釈には言い直しから】学生が自分の解釈・立場・読みを述べたときは、解説で応じないでください。
+   まず学生の読みをあなたの言葉で短く言い直し、その理解で合っているかを確認してください。
+   確認が取れてから、論文の主張との重なりとズレを事実として並べ、どのズレから埋めるかを
+   学生に選ばせてください。
+3. 【詰まりには一点だけの足場かけ】学生が混乱や詰まりを見せたときは、全体を解説し直すのではなく、
+   詰まっている一点だけを短く補い、学生自身の言葉での言い直しで埋まったかを確かめてください。
+
+**共通ルール:**
+4. 【学術ディスカッション調】雑談調にはしないでください。用語・論理展開を厳密に保ちつつ、
    一方的な講義にせず対話として書いてください。数式は LaTeX 記法（インライン $...$、
    ディスプレイ $$...$$）を使い、教材を参照した場合はコンテキストに付された番号付き出典
    マーカー `[出典1]` `[出典2]` … を本文に自然に挿入してください。
-2. 【即答・出し惜しみ禁止】学生が求めた情報は、ためらわずすぐに答えてください。
-   1テンポ遅らせて考えさせてから答える、といった Socratic な出し惜しみは行わないでください。
-   answer は完全な形で提供したうえで、深める余地を次のルールで残します。
-3. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
+5. 【生成プロンプトの構造的必須化】回答の末尾には、必ず次のいずれか一つを添えてください
    （どちらか一つは毎回必須であり、気が向いたときだけ付ける確率的な付加は不可です）:
    - 学生自身の言葉での言い換え・予測・自己説明を促す短い誘い
    - why / how / what-if 型の問い返し（この結果が崩れるとしたら何が変わるか、等）
-4. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
+   いずれの場合も、学生の直前の発話の言葉を引用するか組み込んだ、その学生に固有の問いに
+   してください。どの学生にも使い回せる汎用の決まり文句は不可です。
+6. 【出所の正直さ】提供される「教材からのコンテキスト」に無い内容を話すときは、
    「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
    のように、その部分がこの論文由来ではないことを一言明示してください。
-5. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
+7. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
 
 
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
@@ -3642,4 +3670,43 @@ def get_course_component_context(
     explanation = _first_approved_component_explanation(context["component_id"], course_id)
     if explanation is not None:
         context["instance"]["explanation"] = explanation
+    return context
+
+
+@router.get("/courses/{course_id}/elements/{element_type}/{element_id}/context")
+def get_course_element_context(
+    course_id: str,
+    element_type: str,
+    element_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """学習者向け claim / equation 文脈 API（learner_element_context_design Phase 3）。
+
+    ``element_type`` は ``claim`` / ``equation`` のみ（それ以外は 404 — 学習者 API の
+    404 統一方針）。component 文脈 API（``get_course_component_context``）と同じ
+    3条件の fail-closed:
+    1. 受講ゲート（``get_accessible_course_data`` — 本人が当該コースを閲覧できる）
+    2. 要素の document がコースの document 集合（``_course_document_ids``）に含まれる
+       （``core.element_context`` 内で claim は SQL の
+       ``document_id = ANY(:doc_ids)``、equation はコース document 集合のみを
+       走査対象にすることで実施 — コース外文書の要素は解決自体が失敗する）
+    3. 要素自体が解決できる（claim は DB UUID / agent 側 legacy ID の両方を受理）
+
+    いずれかが欠ければ 404（fail-closed）。要素は解決できたが W層 context lens が
+    投影を返せない場合のみ ``{"available": false, "note": ...}`` を 200 で返す
+    （fail-soft。文脈が無いことは異常ではない）。``upper`` / ``lower`` から
+    ``relation_status == "candidate"`` は除外され、``confidence`` 等の数値は
+    再帰的に除去される（学習者に未確定の AI 候補と生数値を出さない）。
+    """
+    if element_type not in CONTEXT_ELEMENT_TYPES:
+        raise HTTPException(status_code=404, detail="Element not found")
+
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    course_document_ids = set(_course_document_ids(course_data))
+    context = build_element_context(element_type, element_id, course_document_ids)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Element not found")
     return context

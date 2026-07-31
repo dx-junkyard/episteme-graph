@@ -84,6 +84,20 @@ class TestOpeningScreenSections:
         js = _read(DISCUSS_JS)
         assert "自由に入力してもかまいません。" in js
 
+    def test_opening_note_previews_dialogue_flow(self):
+        """discuss_dialogue_alignment_design.md §6: 開幕ノートは対話の進行の型
+        （まず理解の突き合わせ → それから一緒に検討）を予告する。序盤の言い直し・
+        確認の往復を学習者が冗長と感じないための静的文言。数値は含めない（DM6）。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function buildOpeningHtml(data) {")
+        note_start = block.index('discuss-opening-note')
+        note = block[note_start:block.index("</div>'", note_start)]
+        assert "突き合わせ" in note
+        assert "一緒に検討" in note
+        # 命令形・煽り・数値は入れない（D層禁止語彙 / DM6）。
+        for banned in ("疑え", "崩壊させよ", "%", "件"):
+            assert banned not in note
+
     def test_backbone_node_click_starts_conversation(self):
         """ノードクリック = そこから対話開始（sendPrompt 経由・事実ベースの定型文）。"""
         js = _read(DISCUSS_JS)

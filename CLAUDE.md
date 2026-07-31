@@ -1237,7 +1237,12 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
   `DISCUSSION_TOPIC_LABEL="論文との議論"` へ1箇所で変換）。応答は casual と違い
   **学術ディスカッション調**（`_get_discuss_system_prompt`: 即答・出し惜しみ禁止 +
   **生成プロンプト構造的必須**（応答末尾に言い換え/予測/自己説明の誘い or why/how/what-if
-  問い返しを必ず1つ — DM4））。スコープ2段 `LearningChatRequest.discuss_scope`
+  問い返しを必ず1つ — DM4））。**対話進行は歩調合わせ型（2026-07-31、正本は
+  `docs/features/discuss_dialogue_alignment_design.md` DA1〜DA6）**: 発話タイプ別 move
+  （質問=即答維持 / 解釈表明=revoice（言い直し＋確認）→ギャップ提示→学習者が検討箇所を選ぶ /
+  詰まり=一点だけの足場かけ）+ マクロ3局面（係留→ギャップの地図→共同検討）+ 末尾必須問いの
+  uptake 化（学習者の直前の発話を引用・組み込み、汎用文禁止）。局面状態はサーバに持たない
+  （プロンプト自己管理・migration 0）。スコープ2段 `LearningChatRequest.discuss_scope`
   （`course_sources` 既定 / `all_visible`、不正値 422）。該当チャンクゼロでも他スコープへ
   **無断フォールバックしない**（DM1。事実文の context_block に置換）。out_of_source_notice は
   casual と違い discuss では維持（DM1 の明示）。痕跡 payload に `entry_mode: 'discuss'`。
