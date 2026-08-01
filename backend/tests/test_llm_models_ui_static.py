@@ -14,8 +14,9 @@
   - 運用タブでのシステム既定変更は confirm を経由すること。
   - Phase 4（ステージ別指定, §6.1「▸ ステージ別に指定する（詳細）」・
     §6.6「▸ ステージ別の指定（N件）」）: 教材管理パネルの詳細折りたたみは既定で閉じており、
-    `GET /pipeline-stages` を叩き、vision ステージは vision カタログを使い、選択は
-    pipeline:<stage> キーとして run-only で models に乗る。運用タブのステージ別セクションは
+    `GET /pipeline-stages` を叩き、vision ステージはテーブルから除外され
+    （admin_ux_issues_2026-08-01.md §1.5 — vision の指定はパネル上部の専用 select 1本）、
+    選択は pipeline:<stage> キーとして run-only で models に乗る。運用タブのステージ別セクションは
     0件のとき非表示で、変更は confirm 経由の既存 doOpsSave/doOpsReset を再利用する。
 
 すべて静的解析（正規表現・部分文字列検索）。外部 API / 実 DOM は使わない。
@@ -498,10 +499,28 @@ class TestMaterialsStageDetailPanel:
         assert "取得できませんでした" in body
         assert ".catch(" in body
 
-    def test_vision_stage_uses_vision_catalog(self):
-        """vision:true の行は mtCatalog.vision（pipeline.vision の options）を使う。"""
-        body = _extract_function(self.js, "_renderMaterialsStagesBody")
-        assert "stage.vision ? mtCatalog.vision : mtCatalog.pipeline" in body
+    def test_vision_stage_excluded_from_table(self):
+        """vision:true のステージはテーブルに出さない（admin_ux_issues_2026-08-01.md §1.5）。
+
+        vision の指定はパネル上部の専用 select（scene `pipeline.vision`）に一本化した。
+        テーブルはテキスト系ステージの微調整専用なので、vision カタログの分岐も残らない。
+        """
+        filter_body = _extract_function(self.js, "_textStagesForTable")
+        assert "stage.vision" in filter_body
+        # 残留した run-only 上書きは描画時に取り除く（UI から消えた設定を送らない）。
+        assert "delete mtStagesOverrides[stage.feature]" in filter_body
+
+        render_body = _extract_function(self.js, "_renderMaterialsStagesBody")
+        assert "_textStagesForTable()" in render_body
+        assert "mtCatalog.vision" not in render_body
+        assert "stage.vision" not in render_body
+
+    def test_vision_stage_keys_not_sent_on_upload(self):
+        """getUploadModels は vision ステージの feature キーを送らない（防御）。"""
+        body = _extract_function(self.js, "getUploadModels")
+        assert "_isVisionStageFeature(feature)" in body
+        helper = _extract_function(self.js, "_isVisionStageFeature")
+        assert "stage.vision" in helper and "stage.feature === feature" in helper
 
     def test_inherit_option_is_default_and_shows_effective_model(self):
         body = _extract_function(self.js, "_renderMaterialsStagesBody")

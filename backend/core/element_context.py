@@ -49,7 +49,9 @@ from core.deliberation.schema import (
     CONTEXT_STATUS_CANDIDATE,
     CONTEXT_STATUS_CONFIRMED,
     CONTEXT_STATUS_SOURCE_BACKED,
+    ELEMENT_DERIVATION,
     ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
     SCOPE_DOCUMENT,
@@ -89,6 +91,17 @@ _LEARNER_NAVIGABLE_ELEMENT_TYPES = (
     ELEMENT_THEORY_CLAIM,
     ELEMENT_EQUATION,
     ELEMENT_THEORY_COMPONENT,
+)
+
+# W層設計書 §16 で evidence / derivation が教員向けには navigable になった
+# （``context_lens._NAVIGABLE_ELEMENT_TYPES`` に追加）。**学習者の旅の対象は
+# claim / equation / component のまま**なので、ホワイトリスト方式に加えて明示的な
+# 拒否リストとしても書いておく（W層が語彙を増やしたときに学習者側へ黙って波及しない
+# ための二重の fail-closed。学習者向けには対応する文脈取得 API が存在しないため、
+# navigable を立てると押しても何も起きない導線になる）。
+_LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES = (
+    ELEMENT_EVIDENCE,
+    ELEMENT_DERIVATION,
 )
 
 # context_lens が投影を返せない / 例外だった場合の事実文（available:false 時の note）。
@@ -322,20 +335,26 @@ def _project_item(item: dict) -> dict:
     ``label`` が裸の内部 ID 形なら element_type 別の一般ラベルへ置換する（LE4。
     関係情報は保持するので項目自体は落とさない = 情報を落とさない）。
     ``navigable`` は W層の値（教員向けの可否）を信用せず、学習者が実際に再フェッチ
-    できる型かで作り直す。
+    できる型かで作り直す（さらに evidence / derivation は明示的に拒否する —
+    ``_LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES``）。
     """
     element_type = str(item.get("element_type") or "")
     element_id = item.get("element_id")
     label = str(item.get("label") or "")
     if _is_internal_id_label(label, element_type, element_id):
         label = _generic_item_label(element_type)
+    navigable = (
+        bool(element_id)
+        and element_type in _LEARNER_NAVIGABLE_ELEMENT_TYPES
+        and element_type not in _LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES
+    )
     return {
         "id": element_id,
         "element_type": item.get("element_type"),
         "label": label,
         "relation_label": item.get("relation_label"),
         "relation_status": item.get("relation_status"),
-        "navigable": bool(element_id) and element_type in _LEARNER_NAVIGABLE_ELEMENT_TYPES,
+        "navigable": navigable,
     }
 
 

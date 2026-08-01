@@ -5428,13 +5428,14 @@
   // 設計書: docs/features/component_evidence_redesign.md。component/claim は本文を壊す
   // ブロックカードをやめ、内容を持たないインラインチップにする（それ自体が内容を持つ
   // equation/figure/source はブロックカードのまま維持する）。
-  var MATERIAL_EVIDENCE_KIND_LABELS = {
-    component: "論理要素",
-    claim: "主張",
-    equation: "数式",
-    figure: "図",
-    source: "出典",
-  };
+  // 種別（kind）の表示名は element-vocab.js（window.ElementVocab）が正本。ここに独自辞書は
+  // 持たず委譲する（docs/architecture/admin_ux_issues_2026-08-01.md §3.3 Phase 0）。
+  // 未読み込み時はキー文字列へフォールバックする（fail-soft）。
+  function materialEvidenceKindLabel(kind) {
+    const vocab = window.ElementVocab;
+    if (vocab && vocab.kindLabel) return vocab.kindLabel(kind);
+    return kind == null ? "" : String(kind);
+  }
 
   // supports.equations[].role（component_assembly 由来）の日本語バッジ。
   var MATERIAL_EVIDENCE_EQUATION_ROLE_LABELS = {
@@ -5469,17 +5470,10 @@
     equation: "/elements/equation/",
   };
 
-  // relation_status は source_backed / confirmed の2値のみ（candidate は API 側で除外）。
-  var MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS = {
-    source_backed: "出典に裏付け",
-    confirmed: "教員確定",
-  };
-
-  // レーン見出し（focus の型ごとに主語を変える。事実文のみ・煽らない）。
-  var MATERIAL_ELEMENT_CONTEXT_LANE_LABELS = {
-    claim: { upper: "この主張が支えるもの", lower: "この主張の根拠" },
-    equation: { upper: "この数式が支えるもの", lower: "この数式の根拠" },
-  };
+  // 裏付け状態（relation_status = source_backed / confirmed。candidate は API 側で除外）の
+  // 段階ラベルとレーン見出しは、統一パーツカード（element-card.js）と語彙の正本
+  // （element-vocab.js）が持つ。ここに辞書を持たない
+  // （docs/architecture/admin_ux_issues_2026-08-01.md §3.2 P1/P2）。
 
   // ITEM.element_type（W層の内部語彙）→ 教材本文の data-evidence-ref の kind。
   // shared_part は教材本文に担体を持たないため意図的に含めない（ジャンプ不可）。
@@ -5497,6 +5491,127 @@
 
   function clearMaterialElementContextCache() {
     materialElementContextCache = {};
+  }
+
+  // ── 統一パーツカード（編集不可バリアント）への配線 ──────────────────────────
+  // 正本は frontend/public/js/element-card.js（window.ElementCard）。
+  // docs/architecture/admin_ux_issues_2026-08-01.md §3.2 / §3.3 Phase 4。
+  // 学習者側は VARIANT_READONLY 固定で、role/confidence の来歴・candidate 関係・
+  // review_status・教員向けの操作行はカード側が構造的に描かない。
+  // 加えて **呼び出し側でも dto に詰めない**（二重ガード。§3.2 の差分表）。
+  // notes は教員向け運用語彙が混ざる余地があるため学習者カードには渡さない
+  // （カードは dto.notes をそのまま描くので、渡さないことが唯一のガードになる）。
+
+  // 学習者が実際に文脈 API を再フェッチできる element_type（旅の続きを開ける型）。
+  // theory_claim / equation は claim・equation 文脈 API、theory_component は
+  // component 文脈 API。それ以外（figure / section / thesis / derivation / symbol /
+  // evidence / stage / part）は開き先が無いので navigable にしない（fail-closed）。
+  var LEARNER_CARD_TRAVEL_TYPES = ["theory_claim", "theory_component", "equation"];
+
+  // 公開語彙（API パスの claim / equation）→ W層内部語彙。カードの種別チップは
+  // ElementVocab.elementTypeLabel（キーは backend の element_type）を引くため、
+  // focus.element_type は内部語彙へ寄せる（"claim" のまま渡すと生キーが表示される）。
+  var LEARNER_CARD_FOCUS_TYPES = {
+    claim: "theory_claim",
+    equation: "equation",
+  };
+
+  // カードの render と bind には**同一の opts** を渡さなければならない
+  // （navigable チップは onCenter が設定されているときだけ描かれるため）。
+  function learnerElementCardOpts(onCenter) {
+    var card = window.ElementCard;
+    return {
+      variant: card ? card.VARIANT_READONLY : "readonly",
+      escapeHtml: escHtml,
+      renderMath: renderMaterialKatex,
+      onCenter: typeof onCenter === "function" ? onCenter : null,
+    };
+  }
+
+  function learnerElementCardHtml(dto, opts) {
+    var card = window.ElementCard;
+    if (!card || !card.render) return "";
+    return card.render(dto, opts);
+  }
+
+  // render 済み DOM にイベントを張り、教材内ジャンプを添える。
+  function bindLearnerElementCard(container, dto, opts) {
+    var card = window.ElementCard;
+    if (!card || !card.bind || !container) return;
+    card.bind(container, dto, opts);
+    augmentLearnerElementCardJumps(container, dto);
+  }
+
+  // ITEM を学習者カード用に射影する。candidate はサーバ側で除去済みだが呼び出し側でも
+  // 落とし、navigable は「学習者が実際に開ける型か」で作り直す（W層の navigable は
+  // 教員向けの可否なのでそのままでは契約が成立しない）。confidence 等は詰めない。
+  function learnerElementCardItems(items) {
+    var out = [];
+    (items || []).forEach(function (item) {
+      if (!item) return;
+      if (item.relation_status === "candidate") return;
+      var id = item.id || "";
+      out.push({
+        id: id,
+        element_type: item.element_type,
+        label: item.label,
+        relation_label: item.relation_label,
+        relation_status: item.relation_status,
+        navigable: !!item.navigable && !!id &&
+          LEARNER_CARD_TRAVEL_TYPES.indexOf(item.element_type) >= 0,
+      });
+    });
+    return out;
+  }
+
+  // 近傍チップの「旅」。押された ITEM の文脈 API を再フェッチし、同じポップオーバーの
+  // 本体を差し替える（W層のパンくず中心移動と同じ発想。既存の「グラフで見る」内
+  // ノードクリックと同じく、パンくずは持たずその場で置き換える）。再フェッチ口の無い
+  // 型では何もしない（fail-soft）。
+  function travelToElementContext(pop, body, item) {
+    if (!pop || !body || !item || !item.id) return;
+    var type = item.element_type;
+    if (LEARNER_CARD_TRAVEL_TYPES.indexOf(type) < 0) return;
+    body.innerHTML = '<div class="evidence-chip-popover-loading">読み込み中…</div>';
+    if (type === "theory_component") {
+      fetchComponentContextAndRender(pop, body, item.id, null);
+      return;
+    }
+    fetchElementContextAndRender(pop, body, type === "equation" ? "equation" : "claim", item.id);
+  }
+
+  // カードは教材本文の存在を知らないため、mount 後に「教材内で見る」を該当行の直後へ
+  // 差し込む（担体 [data-evidence-ref] が現在の DOM にある ITEM だけ。既存挙動を維持）。
+  function augmentLearnerElementCardJumps(container, dto) {
+    if (!container || !container.querySelector) return;
+    ["upper", "lower"].forEach(function (lane) {
+      var laneEl = container.querySelector(".element-card-lane-" + lane + " .element-card-items");
+      if (!laneEl) return;
+      var items = (dto && dto[lane]) || [];
+      var rows = laneEl.querySelectorAll(".element-card-item");
+      for (var i = 0; i < rows.length && i < items.length; i++) {
+        var ref = materialElementContextJumpRef(items[i]);
+        if (!ref) continue;
+        laneEl.insertBefore(buildMaterialJumpRow(ref), rows[i].nextSibling);
+      }
+    });
+  }
+
+  function buildMaterialJumpRow(ref) {
+    // 行の体裁はカードの近傍行（.element-card-item）を借りる（CSS を増やさない）。
+    var row = document.createElement("div");
+    row.className = "element-card-item";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "evidence-chip-context-jump-btn";
+    btn.setAttribute("data-jump-ref", ref);
+    btn.textContent = "教材内で見る";
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      jumpToMaterialEvidenceRef(ref);
+    });
+    row.appendChild(btn);
+    return row;
   }
 
   // チップ ref（"kind:id"）→ { item, resolver } のレジストリ。renderMaterialChunk は
@@ -5699,7 +5814,7 @@
           // Phase 3: 図カード（画像なし・caption のみ）もホバー対象にする（IH2: 既存データのみ）。
           registerMaterialEvidenceChipEntry("figure:" + embedId, evidenceItem, null);
           return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="figure:' + escHtml(embedId) + '">' +
-            '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS.figure || "図") + '</span>' +
+            '<span class="ls-material-embed-kind">' + escHtml(materialEvidenceKindLabel("figure")) + '</span>' +
             '<strong>' + escHtml(evidenceItem.title || ("図: " + (evidenceItem.caption || embedId))) + '</strong>' +
             '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.caption || evidenceItem.summary) || "この図の画像は現在配信対象ではありません。") + '</span>' +
           '</span>';
@@ -5725,7 +5840,7 @@
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
         return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
-          '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS[evidenceItem.kind] || evidenceItem.kind) + '</span>' +
+          '<span class="ls-material-embed-kind">' + escHtml(materialEvidenceKindLabel(evidenceItem.kind)) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           cardBody +
         '</span>';
@@ -5783,7 +5898,7 @@
   // 既存の出典ポップアップ基盤（.src-popup / _positionSourcePopup / closeSourcePopup /
   // 外側クリック・Esc）を踏襲する。
   function evidenceChipPopoverHead(kind, title) {
-    var kindLabel = MATERIAL_EVIDENCE_KIND_LABELS[kind] || kind;
+    var kindLabel = materialEvidenceKindLabel(kind);
     return '<div class="src-popup-head">' +
       '<span class="src-popup-title">' + escHtml(kindLabel) + ' ・ ' + escHtml(title || "") + '</span>' +
       '<button class="src-popup-close" aria-label="閉じる">×</button></div>';
@@ -5979,6 +6094,43 @@
     }
   }
 
+  // component_context の三層 DTO（instance / shared_part / graph）→ 統一パーツカードの
+  // DTO。カードは `{focus, upper, lower}` の context_lens 形しか受けないため、
+  //   instance.component + instance.in_paper → focus（本文は既存の優先順を維持）
+  //   graph.upper / graph.lower           → 近傍 ITEM（旅の起点）
+  // だけを写し、カードで表現できない三層固有の情報（supports の内訳・出典論文・
+  // 教員の説明・shared_part の別名/標準化状況）はカード直後の詳細セクションと
+  // 「共通部品として」タブに残す（情報を落とさない）。
+  function componentContextToCardDto(data) {
+    var instance = (data && data.instance) || {};
+    var component = instance.component || {};
+    var inPaper = instance.in_paper || {};
+    var graph = (data && data.graph) || {};
+    var graphFocus = graph.focus || {};
+    return {
+      focus: {
+        element_type: "theory_component",
+        element_id: (data && data.component_id) || graphFocus.id || "",
+        label: component.label || graphFocus.label || "",
+        // 「この論文での位置づけ」の優先順（narrative_role → teaching_takeaway →
+        // summary）は既存表示と同一。
+        intrinsic_summary: inPaper.narrative_role || component.teaching_takeaway ||
+          component.summary || "",
+      },
+      upper: learnerElementCardItems(graph.upper),
+      lower: learnerElementCardItems(graph.lower),
+    };
+  }
+
+  // element-card.js が読み込めていない場合でも位置づけ本文だけは出す（fail-soft）。
+  function componentContextCardOrFallbackHtml(cardDto, cardOpts) {
+    var html = learnerElementCardHtml(cardDto, cardOpts);
+    if (html) return html;
+    var summary = (cardDto.focus && cardDto.focus.intrinsic_summary) || "";
+    return '<div class="evidence-chip-popover-position">' +
+      escHtml(summary || "この論文での位置づけはまだ登録されていません。") + '</div>';
+  }
+
   function renderComponentContextPanel(pop, body, data, resolver) {
     var instance = (data && data.instance) || {};
     var sharedPart = data && data.shared_part;
@@ -5986,20 +6138,29 @@
 
     var headTitle = pop.querySelector(".src-popup-title");
     if (headTitle && instance.component && instance.component.label) {
-      headTitle.textContent = (MATERIAL_EVIDENCE_KIND_LABELS.component || "論理要素") + " ・ " + instance.component.label;
+      headTitle.textContent = materialEvidenceKindLabel("component") + " ・ " + instance.component.label;
     }
+
+    var cardDto = componentContextToCardDto(data);
+    var cardOpts = learnerElementCardOpts(function (item) {
+      travelToElementContext(pop, body, item);
+    });
 
     var html = '<div class="evidence-chip-context-tabs" role="tablist">' +
       '<button type="button" class="evidence-chip-context-tab active" data-tab="instance">この論文では</button>' +
       (sharedPart ? '<button type="button" class="evidence-chip-context-tab" data-tab="shared">共通部品として</button>' : "") +
     '</div>' +
-    '<div class="evidence-chip-context-pane" data-pane="instance">' + renderContextInstancePane(instance, resolver) + '</div>' +
+    '<div class="evidence-chip-context-pane" data-pane="instance">' +
+      componentContextCardOrFallbackHtml(cardDto, cardOpts) +
+      renderContextInstanceDetails(instance, resolver) +
+    '</div>' +
     (sharedPart ? '<div class="evidence-chip-context-pane" data-pane="shared" hidden>' + renderContextSharedPane(sharedPart) + '</div>' : "") +
     (graph ? '<div class="evidence-chip-context-graph-toggle">' +
         '<button type="button" class="evidence-chip-context-graph-btn">グラフで見る</button>' +
       '</div><div class="evidence-chip-context-graph" hidden></div>' : "");
 
     body.innerHTML = html;
+    bindLearnerElementCard(body.querySelector('[data-pane="instance"]'), cardDto, cardOpts);
 
     var tabs = body.querySelectorAll(".evidence-chip-context-tab");
     tabs.forEach(function (tabBtn) {
@@ -6037,13 +6198,13 @@
     fetchComponentContextAndRender(pop, body, node.id, null);
   }
 
-  function renderContextInstancePane(instance, resolver) {
+  // 統一パーツカードで表現できない component 固有の内訳（supports / 出典論文 /
+  // 教員の説明）。「この論文での位置づけ」本文と近傍レーンはカード側が描くため、
+  // ここでは繰り返さない。
+  function renderContextInstanceDetails(instance, resolver) {
     var inPaper = instance.in_paper || {};
     var supports = instance.supports || {};
-    var component = instance.component || {};
     var html = "";
-    var position = inPaper.narrative_role || component.teaching_takeaway || component.summary || "";
-    if (position) html += '<div class="evidence-chip-popover-position">' + escHtml(position) + '</div>';
     if (inPaper.graph_summary_excerpt) {
       html += '<div class="evidence-chip-context-graph-summary">' + escHtml(inPaper.graph_summary_excerpt) + '</div>';
     }
@@ -6066,7 +6227,9 @@
         (instance.explanation.endorsement_label ? '<div class="evidence-chip-context-explanation-endorsement">' + escHtml(instance.explanation.endorsement_label) + '</div>' : "") +
       '</div>';
     }
-    return html || '<div class="evidence-chip-popover-position">この論文での位置づけはまだ登録されていません。</div>';
+    // 内訳が無い場合は空を返す（「位置づけが未登録」の事実文はカード本文側の縮退
+    // 表示が担う。同じ趣旨の文を二重に出さない）。
+    return html;
   }
 
   // Phase2 API は equations に label を持つため、latex が解決できなくても label + role は
@@ -6196,6 +6359,39 @@
     }
   }
 
+  // element_context の DTO（{focus, upper, lower, notes}）→ 統一パーツカードの DTO。
+  // サーバ側（core/element_context.py）で candidate 除去・confidence 除去・内部ID遮断は
+  // 済んでいるため、ここは形の写し替えだけで足りる。notes は渡さない（学習者に教員向け
+  // 運用語彙を出さない既存不変条項）。
+  function elementContextToCardDto(elementType, data) {
+    var focus = (data && data.focus) || {};
+    var cardFocus = {
+      element_type: LEARNER_CARD_FOCUS_TYPES[elementType] || elementType,
+      element_id: focus.element_id,
+      label: focus.label,
+      intrinsic_summary: focus.intrinsic_summary,
+    };
+    // equation の label と intrinsic_summary は同一値（context_lens の
+    // _build_equation は式本文を両方に入れる）。カード見出しと本文で同じ式を二度
+    // 出さないよう、その場合は見出しを種別チップだけにする（式本文は本文側で
+    // KaTeX 表示され、ポップオーバーの見出しにも出ている）。
+    if (cardFocus.label && cardFocus.label === cardFocus.intrinsic_summary) {
+      cardFocus.label = "";
+    }
+    // contextual_role は表示してよいときだけ両方のキーが来る（AI 候補・未同定は
+    // サーバ側でキーごと落ちてくる）ので、存在すればそのまま渡す。
+    if (focus.contextual_role) {
+      cardFocus.contextual_role = focus.contextual_role;
+      cardFocus.contextual_role_status = focus.contextual_role_status;
+    }
+    if (focus.generic) cardFocus.generic = focus.generic;
+    return {
+      focus: cardFocus,
+      upper: learnerElementCardItems(data && data.upper),
+      lower: learnerElementCardItems(data && data.lower),
+    };
+  }
+
   function renderElementContextPanel(pop, body, elementType, data) {
     if (!data || data.available !== true) {
       // available:false の note はサーバ側の事実文。無ければ既定の事実文に縮退。
@@ -6204,81 +6400,24 @@
       return;
     }
     var focus = data.focus || {};
-    var lanes = MATERIAL_ELEMENT_CONTEXT_LANE_LABELS[elementType] ||
-      MATERIAL_ELEMENT_CONTEXT_LANE_LABELS.claim;
 
     var headTitle = pop && pop.querySelector(".src-popup-title");
     if (headTitle && focus.label) {
-      var kindLabel = MATERIAL_EVIDENCE_KIND_LABELS[elementType] || elementType;
+      var kindLabel = materialEvidenceKindLabel(elementType);
       headTitle.textContent = kindLabel + " ・ " + focus.label;
     }
 
-    var html = "";
-    if (focus.intrinsic_summary) {
-      html += '<div class="evidence-chip-popover-position">' + escHtml(focus.intrinsic_summary) + '</div>';
-    }
-    // contextual_role は表示してよいときだけ両方のキーが来る（AI 候補・未同定は
-    // キーごと落ちてくる）ので、存在すればそのまま出す。
-    if (focus.contextual_role) {
-      html += '<div class="evidence-chip-context-role">' +
-        '<div class="evidence-chip-popover-section-title">この論文での役割</div>' +
-        '<div class="evidence-chip-context-role-body">' + escHtml(focus.contextual_role) + '</div>' +
-        elementContextStatusBadge(focus.contextual_role_status) +
-      '</div>';
-    }
-    if (focus.generic && (focus.generic.name || focus.generic.summary)) {
-      var genericText = focus.generic.name || "";
-      if (focus.generic.summary) {
-        genericText = genericText ? (genericText + " — " + focus.generic.summary) : focus.generic.summary;
-      }
-      html += '<div class="evidence-chip-context-generic">一般には: ' + escHtml(genericText) + '</div>';
-    }
-    html += renderElementContextLane(lanes.upper, data.upper);
-    html += renderElementContextLane(lanes.lower, data.lower);
+    var dto = elementContextToCardDto(elementType, data);
+    var opts = learnerElementCardOpts(function (item) {
+      travelToElementContext(pop, body, item);
+    });
+    var html = learnerElementCardHtml(dto, opts);
     if (!html) {
-      html = '<div class="evidence-chip-popover-position">' +
-        escHtml(MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE) + '</div>';
+      body.textContent = MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE;
+      return;
     }
     body.innerHTML = html;
-
-    body.querySelectorAll(".evidence-chip-context-jump-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        jumpToMaterialEvidenceRef(btn.getAttribute("data-jump-ref") || "");
-      });
-    });
-  }
-
-  function elementContextStatusBadge(status) {
-    var label = MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS[status];
-    if (!label) return "";
-    return '<span class="evidence-chip-context-status">' + escHtml(label) + '</span>';
-  }
-
-  // 1レーン（upper か lower）。各行 = ラベル + relation_label（「focus が〜する」の
-  // 動詞句なのでそのまま連結）+ 裏付けラベル + 教材内ジャンプ（担体があるときだけ）。
-  function renderElementContextLane(title, items) {
-    var rows = (items || []).map(function (item) {
-      if (!item) return "";
-      var label = item.label || "";
-      if (!label) return "";
-      var jumpRef = materialElementContextJumpRef(item);
-      return '<li class="evidence-chip-context-lane-item">' +
-        '<span class="evidence-chip-context-lane-label">' + escHtml(label) + '</span>' +
-        (item.relation_label
-          ? '<span class="evidence-chip-context-lane-relation">' + escHtml(item.relation_label) + '</span>'
-          : "") +
-        elementContextStatusBadge(item.relation_status) +
-        (jumpRef
-          ? '<button type="button" class="evidence-chip-context-jump-btn" data-jump-ref="' +
-            escHtml(jumpRef) + '">教材内で見る</button>'
-          : "") +
-      '</li>';
-    }).filter(Boolean);
-    if (!rows.length) return "";
-    return '<div class="evidence-chip-popover-section evidence-chip-context-lane">' +
-      '<div class="evidence-chip-popover-section-title">' + escHtml(title) + '</div>' +
-      '<ul class="evidence-chip-popover-list evidence-chip-context-lane-list">' + rows.join("") + '</ul>' +
-    '</div>';
+    bindLearnerElementCard(body, dto, opts);
   }
 
   // ITEM が現在トピックの教材本文に担体（[data-evidence-ref]）を持つかを調べ、持つ

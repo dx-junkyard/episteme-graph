@@ -45,6 +45,7 @@
       "element_type": "theory_claim"|"theory_component"|"equation"|"figure"|
                        "section"|"thesis"|"derivation"|"symbol"|"evidence"|"part"|"stage",
       "element_id": str | None,       # None = 表示のみ（非ナビゲーション）
+                                      # evidence / derivation も §16 以降は ID を持ち得る
       "document_id": str | None,
       "label": str,
       "relation": str,                # RELATION_LABELS のキーである保証あり
@@ -55,8 +56,9 @@
     }
 
 `build(ref)` は `shared_part`（scope='domain'）のときのみ ``None`` を返す（設計書の
-対象は document-scoped 4要素型）。それ以外は例外を握って fail-soft の縮退結果を返し、
-呼び出し元が 500 を気にしなくてよいようにする。
+対象は document-scoped 要素型 = figure / theory_component / theory_claim / equation +
+W層設計書 §16 で追加した evidence / derivation）。それ以外は例外を握って fail-soft の
+縮退結果を返し、呼び出し元が 500 を気にしなくてよいようにする。
 """
 
 from __future__ import annotations
@@ -83,7 +85,9 @@ from core.deliberation.schema import (
     CONTEXT_STATUS_CANDIDATE,
     CONTEXT_STATUS_CONFIRMED,
     CONTEXT_STATUS_SOURCE_BACKED,
+    ELEMENT_DERIVATION,
     ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
     ELEMENT_THEORY_CLAIM,
@@ -99,12 +103,17 @@ logger = logging.getLogger(__name__)
 # 黙って切り捨てず notes に事実として記録する。
 _CONTEXT_LANE_MAX = 20
 
-# ITEM.navigable は element_type がこの4種のときだけ True になり得る（設計書 §5）。
+# ITEM.navigable は element_type がこの6種のときだけ True になり得る（設計書 §5 +
+# W層設計書 §16。evidence / derivation は ``refs.py`` の解決対象に入ったため中心に
+# できる = navigable になり得る。section / thesis / symbol / stage / part は解決対象
+# ではないので引き続き表示のみ）。
 _NAVIGABLE_ELEMENT_TYPES = (
     ELEMENT_FIGURE,
     ELEMENT_THEORY_COMPONENT,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
+    ELEMENT_DERIVATION,
 )
 
 # ── 関係語彙（内部語彙 → 読み手向け動詞句）。主語は常に focus（設計書 §3.2）。────────
@@ -646,14 +655,21 @@ def _derivation_membership_facts(
     chains: list[dict[str, Any]], document_id: str | None, member_check: Callable[[str], bool]
 ) -> list[dict[str, Any]]:
     """対象（claim または equation の id）が derivation_chain artifact のどこに
-    現れるかの事実項目（非ナビゲーション）。``member_check`` は生の id 文字列を
-    受け取り一致判定する（claim は翻訳込みの判定を呼び出し側が渡す）。
+    現れるかの事実項目。``member_check`` は生の id 文字列を受け取り一致判定する
+    （claim は翻訳込みの判定を呼び出し側が渡す）。
+
+    ``element_id`` には chain の ``derivation_id`` を入れる（設計書 §16 で derivation が
+    ``refs.py`` の解決対象になったため、この項目から導出そのものを中心に据えられる）。
+    step まで特定できた場合も element_id は chain 単位のまま（step は独立の要素にしない）で、
+    step_id は ``evidence_refs`` に残す。``derivation_id`` が空の chain は従来どおり
+    非ナビゲーション（``_item`` が element_id 空で navigable=False にする）。
     """
     items: list[dict[str, Any]] = []
     for chain in chains:
         if not isinstance(chain, dict):
             continue
         derivation_id = str(chain.get("derivation_id") or "")
+        nav_id = derivation_id or None
         chain_ids: list[str] = []
         for key in (
             "input_claim_ids", "output_claim_ids", "assumption_ids",
@@ -677,7 +693,7 @@ def _derivation_membership_facts(
             label = f"導出「{derivation_id}」のステップ「{step_hit}」"
             items.append(
                 _item(
-                    "derivation", None, document_id, label, "belongs_to_derivation",
+                    "derivation", nav_id, document_id, label, "belongs_to_derivation",
                     _status_for_link("explicit"), evidence_refs=[step_hit],
                 )
             )
@@ -685,7 +701,7 @@ def _derivation_membership_facts(
             label = f"導出「{derivation_id}」"
             items.append(
                 _item(
-                    "derivation", None, document_id, label, "belongs_to_derivation",
+                    "derivation", nav_id, document_id, label, "belongs_to_derivation",
                     _status_for_link("explicit"), evidence_refs=[derivation_id],
                 )
             )
@@ -753,6 +769,119 @@ def _evidence_quote(artifacts: dict[str, Any], evidence_id: str) -> str:
         if str(item.get("evidence_id") or "") == str(evidence_id):
             return str(item.get("evidence_text") or "").strip()
     return ""
+
+
+def _evidence_record_for(artifacts: dict[str, Any], evidence_id: str) -> dict[str, Any] | None:
+    """evidence_registry artifact から1件の evidence レコードを引く（純粋関数・§16）。"""
+    for record in _list(artifacts.get("evidence_registry"), "records"):
+        if str(record.get("evidence_id") or "") == str(evidence_id):
+            return record
+    return None
+
+
+def _derivation_chain_for(
+    chains: list[dict[str, Any]], derivation_id: str
+) -> dict[str, Any] | None:
+    """derivation_chain artifact から1本の chain を引く（純粋関数・§16）。"""
+    for chain in chains:
+        if isinstance(chain, dict) and str(chain.get("derivation_id") or "") == str(derivation_id):
+            return chain
+    return None
+
+
+def _derivation_label(chain: dict[str, Any]) -> str:
+    """導出の表示ラベル（純粋関数）。操作名（domain-neutral な operation 語彙）が
+    あればそれを添え、無ければ derivation_id のみ。特定分野の語をここで作らない。
+    """
+    derivation_id = str((chain or {}).get("derivation_id") or "").strip()
+    operation = str((chain or {}).get("operation") or "").strip()
+    if not operation:
+        operation = str((chain or {}).get("operation_family") or "").strip()
+    if derivation_id and operation:
+        return f"導出「{derivation_id}」({operation})"
+    return f"導出「{derivation_id}」" if derivation_id else "導出"
+
+
+def _derivation_operation_summary(chain: dict[str, Any]) -> str:
+    """chain の step 操作列を「op1 → op2 → …」に連結する（純粋関数・非LLM）。"""
+    operations: list[str] = []
+    for step in (chain or {}).get("steps") or []:
+        if not isinstance(step, dict):
+            continue
+        operation = str(step.get("operation_subtype") or step.get("operation") or "").strip()
+        if operation:
+            operations.append(operation)
+    return " → ".join(operations)
+
+
+def _evidence_ids_of_chain(chain: dict[str, Any]) -> list[str]:
+    """chain 本体 + 各 step の ``source_evidence_ids`` を重複なく集める（純粋関数）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(values: Any) -> None:
+        for raw in values or []:
+            key = str(raw or "").strip()
+            if key and key not in seen:
+                seen.add(key)
+                out.append(key)
+
+    _add((chain or {}).get("source_evidence_ids"))
+    for step in (chain or {}).get("steps") or []:
+        if isinstance(step, dict):
+            _add(step.get("source_evidence_ids"))
+    return out
+
+
+def _chain_ids_of(chain: dict[str, Any], keys: tuple[str, ...]) -> list[str]:
+    """chain 本体 + 各 step の指定キーの ID を重複なく集める（純粋関数）。"""
+    out: list[str] = []
+    seen: set[str] = set()
+    for source in [chain or {}] + [s for s in (chain or {}).get("steps") or [] if isinstance(s, dict)]:
+        for key in keys:
+            for raw in source.get(key) or []:
+                value = str(raw or "").strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    out.append(value)
+    return out
+
+
+def _chains_referencing_evidence(
+    chains: list[dict[str, Any]], document_id: str | None, evidence_id: str
+) -> list[dict[str, Any]]:
+    """当該 evidence を根拠に挙げている導出の上位項目（純粋関数・§16）。"""
+    items: list[dict[str, Any]] = []
+    for chain in chains:
+        if not isinstance(chain, dict):
+            continue
+        if str(evidence_id) not in _evidence_ids_of_chain(chain):
+            continue
+        derivation_id = str(chain.get("derivation_id") or "")
+        items.append(
+            _item(
+                "derivation", derivation_id or None, document_id, _derivation_label(chain),
+                "belongs_to_derivation", _status_for_link("explicit"),
+                evidence_refs=[derivation_id] if derivation_id else [],
+            )
+        )
+    return items
+
+
+def _claim_ids_resting_on_evidence(
+    claim_objects: list[dict[str, Any]], evidence_id: str
+) -> list[str]:
+    """``source_evidence_ids`` に当該 evidence を含む claim の生 ID（純粋関数・§16）。"""
+    out: list[str] = []
+    for claim in claim_objects:
+        if not isinstance(claim, dict):
+            continue
+        ids = [str(x or "").strip() for x in (claim.get("source_evidence_ids") or [])]
+        if str(evidence_id) in ids:
+            raw_id = str(claim.get("claim_id") or "").strip()
+            if raw_id and raw_id not in out:
+                out.append(raw_id)
+    return out
 
 
 def _safe(value_fn: Callable[[], Any], default: Any) -> Any:
@@ -1176,9 +1305,12 @@ def _build_claim(ref: ElementRef) -> dict[str, Any] | None:
 
         for evidence_id in claim_obj.get("source_evidence_ids") or []:
             quote = _evidence_quote(artifacts, evidence_id)
+            # §16: evidence は解決対象になったので element_id を入れて中心に据えられる
+            # ようにする（引用が artifact に見つからない ID も落とさず表示は残す）。
             lower.append(
                 _item(
-                    "evidence", None, document_id, quote or str(evidence_id), "rests_on_evidence",
+                    "evidence", str(evidence_id) or None, document_id,
+                    quote or str(evidence_id), "rests_on_evidence",
                     _status_for_link("explicit"), evidence_refs=[str(evidence_id)],
                 )
             )
@@ -1717,6 +1849,216 @@ def _build_figure(ref: ElementRef) -> dict[str, Any] | None:
     return {"focus": focus, "upper": upper, "lower": lower, "notes": notes}
 
 
+def _build_evidence(ref: ElementRef) -> dict[str, Any] | None:
+    """evidence（PDF 原文の引用）を中心に据えた投影（設計書 §16）。
+
+    上位 = この引用に依拠する claim / この引用を根拠に挙げる導出・グラフノード /
+    掲載セクション。下位 = 空（原文の引用そのものが最下層であり、これ以上の内訳は
+    無い）。空であることは事実文（notes）で明示し、推測で埋めない。
+    """
+    document_id = ref.document_id or ""
+    artifacts = refs_mod.document_run_artifacts(document_id)
+    record = _evidence_record_for(artifacts, ref.element_id)
+    if record is None:
+        return None
+    notes: list[str] = []
+    claim_lookup = _safe(lambda: _claim_id_lookup(document_id), {})
+
+    upper: list[dict[str, Any]] = []
+
+    claim_objects = _list(artifacts.get("claim_object_builder"), "claims")
+    if "claim_object_builder" not in artifacts:
+        notes.append("旧 run のため claim_object_builder artifact が無く、依拠する主張を判定できません")
+    for raw_claim_id in _claim_ids_resting_on_evidence(claim_objects, ref.element_id):
+        claim_db = claim_lookup.get(raw_claim_id)
+        label = raw_claim_id
+        if claim_db:
+            claim_row = _safe(lambda: _claims_by_id([claim_db]), {}).get(claim_db)
+            if claim_row:
+                label = claim_row.get("text") or label
+        upper.append(
+            _item(
+                "theory_claim", claim_db, document_id, str(label)[:80],
+                "provides_evidence_for", _status_for_link("explicit"),
+            )
+        )
+
+    chains = _list(artifacts.get("derivation_chain"), "chains")
+    upper.extend(_chains_referencing_evidence(chains, document_id, ref.element_id))
+
+    graph = _safe(lambda: _load_component_graph(document_id), {"nodes": [], "edges": []})
+    for node in graph.get("nodes", []):
+        linked = [str(x) for x in (node.get("linked_evidence_ids") or [])]
+        if ref.element_id in linked:
+            status = _status_for_link(_link_kind_from_backing_status(node.get("source_backing_status")))
+            upper.append(
+                _item(
+                    "theory_component", node.get("id"), document_id,
+                    str(node.get("label") or node.get("id") or ""), "supports_component", status,
+                )
+            )
+
+    source = record.get("source") if isinstance(record.get("source"), dict) else {}
+    section_id = str(source.get("section_id") or "").strip()
+    if not section_id:
+        block = _blocks_by_id(artifacts).get(str(source.get("block_id") or ""))
+        section_id = str((block or {}).get("section_id") or "").strip()
+    if section_id:
+        label = _section_label(_sections_by_id(artifacts).get(section_id))
+        if label:
+            upper.append(
+                _item("section", None, document_id, label, "appears_in_section", _status_for_link("explicit"))
+            )
+
+    upper = _cap_lane(_dedupe_items(upper), notes, "上位構造")
+    notes.append("この要素は原文の引用そのものです（下位構造はありません）")
+
+    annotations = _annotations_for(ELEMENT_EVIDENCE, ref.element_id, document_id)
+    role_text, role_status = _derive_contextual_role(upper, annotations)
+
+    quote = str(record.get("evidence_text") or "").strip()
+    provenance = [f"evidence_registry:{ref.element_id}"]
+    block_id = str(source.get("block_id") or "").strip()
+    if block_id:
+        provenance.append(f"block:{block_id}")
+
+    focus = {
+        "element_type": ELEMENT_EVIDENCE,
+        "element_id": ref.element_id,
+        "document_id": document_id,
+        "label": (quote[:80] or ref.element_id),
+        "intrinsic_summary": quote,
+        "contextual_role": role_text,
+        "contextual_role_status": role_status,
+        "provenance": provenance,
+    }
+    return {"focus": focus, "upper": upper, "lower": [], "notes": notes}
+
+
+def _build_derivation(ref: ElementRef) -> dict[str, Any] | None:
+    """derivation（導出チェーン）を中心に据えた投影（設計書 §16）。
+
+    上位 = この導出にリンクするグラフノード・コンポーネント / 導出が産出する claim /
+    掲載セクション。下位 = chain 内の数式 step（navigable な equation）/ 前提となる
+    claim / 根拠 evidence。
+    """
+    document_id = ref.document_id or ""
+    artifacts = refs_mod.document_run_artifacts(document_id)
+    chains = _list(artifacts.get("derivation_chain"), "chains")
+    chain = _derivation_chain_for(chains, ref.element_id)
+    if chain is None:
+        return None
+    notes: list[str] = []
+    claim_lookup = _safe(lambda: _claim_id_lookup(document_id), {})
+    component_lookup = _safe(lambda: _component_id_lookup(document_id), {})
+    eq_index = _equation_by_id(refs_mod.equation_records(document_id, artifacts=artifacts))
+
+    upper: list[dict[str, Any]] = []
+    lower: list[dict[str, Any]] = []
+
+    def _claim_item(raw_id: str, relation: str) -> dict[str, Any]:
+        db_id = claim_lookup.get(str(raw_id))
+        label = str(raw_id)
+        if db_id:
+            claim_row = _safe(lambda: _claims_by_id([db_id]), {}).get(db_id)
+            if claim_row:
+                label = claim_row.get("text") or label
+        return _item(
+            "theory_claim", db_id, document_id, str(label)[:80], relation,
+            _status_for_link("explicit"),
+        )
+
+    graph = _safe(lambda: _load_component_graph(document_id), {"nodes": [], "edges": []})
+    if not graph.get("nodes") and "component_graph" not in artifacts:
+        notes.append("component_graph が保存されていないため、理論コンポーネントとの関係を判定できません")
+    for node in graph.get("nodes", []):
+        linked = [str(x) for x in (node.get("linked_derivation_ids") or [])]
+        linked += [str(x) for x in (node.get("supporting_derivation_ids") or [])]
+        if ref.element_id in linked:
+            status = _status_for_link(_link_kind_from_backing_status(node.get("source_backing_status")))
+            upper.append(
+                _item(
+                    "theory_component", node.get("id"), document_id,
+                    str(node.get("label") or node.get("id") or ""), "supports_component", status,
+                )
+            )
+
+    for raw_component_id in chain.get("linked_component_ids") or []:
+        component_db = component_lookup.get(str(raw_component_id))
+        label = str(raw_component_id)
+        if component_db:
+            component_row = _safe(lambda: _components_by_id([component_db]), {}).get(component_db)
+            if component_row:
+                label = component_row.get("name") or label
+        upper.append(
+            _item(
+                "theory_component", component_db, document_id, str(label)[:80],
+                "supports_component", _status_for_link("explicit"),
+            )
+        )
+
+    for raw_claim_id in _chain_ids_of(chain, ("output_claim_ids",)):
+        upper.append(_claim_item(raw_claim_id, "provides_evidence_for"))
+
+    upper.extend(
+        _safe(
+            lambda: _section_items_from_ids(
+                [str(s) for s in (chain.get("source_section_ids") or [])],
+                _sections_by_id(artifacts),
+                document_id,
+            ),
+            [],
+        )
+    )
+
+    for equation_id in _chain_ids_of(
+        chain, ("input_equation_ids", "intermediate_equation_ids", "output_equation_ids")
+    ):
+        record = eq_index.get(equation_id)
+        lower.append(
+            _item(
+                "equation", equation_id if record else None, document_id,
+                _equation_label(record) or equation_id, "uses_equation",
+                _status_for_link("explicit"),
+            )
+        )
+
+    for raw_claim_id in _chain_ids_of(chain, ("input_claim_ids", "required_claim_ids", "assumption_ids")):
+        lower.append(_claim_item(raw_claim_id, "requires"))
+
+    for evidence_id in _evidence_ids_of_chain(chain):
+        quote = _evidence_quote(artifacts, evidence_id)
+        lower.append(
+            _item(
+                "evidence", evidence_id, document_id, quote or evidence_id,
+                "rests_on_evidence", _status_for_link("explicit"),
+                evidence_refs=[evidence_id],
+            )
+        )
+
+    upper = _cap_lane(_dedupe_items(upper), notes, "上位構造")
+    lower = _cap_lane(_dedupe_items(lower), notes, "下位構造")
+
+    annotations = _annotations_for(ELEMENT_DERIVATION, ref.element_id, document_id)
+    role_text, role_status = _derive_contextual_role(upper, annotations)
+
+    takeaway = str(chain.get("teaching_takeaway") or "").strip()
+    operations = _derivation_operation_summary(chain)
+    summary = takeaway or (f"操作: {operations}" if operations else "")
+
+    focus = {
+        "element_type": ELEMENT_DERIVATION,
+        "element_id": ref.element_id,
+        "document_id": document_id,
+        "label": _derivation_label(chain),
+        "intrinsic_summary": summary,
+        "contextual_role": role_text,
+        "contextual_role_status": role_status,
+        "provenance": [f"derivation_chain:{ref.element_id}"],
+    }
+    return {"focus": focus, "upper": upper, "lower": lower, "notes": notes}
+
+
 # ---------------------------------------------------------------------------
 # 合成
 # ---------------------------------------------------------------------------
@@ -1727,6 +2069,8 @@ _BUILDERS: dict[str, Callable[[ElementRef], dict[str, Any] | None]] = {
     ELEMENT_THEORY_COMPONENT: _build_component,
     ELEMENT_EQUATION: _build_equation,
     ELEMENT_FIGURE: _build_figure,
+    ELEMENT_EVIDENCE: _build_evidence,
+    ELEMENT_DERIVATION: _build_derivation,
 }
 
 

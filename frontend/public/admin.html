@@ -938,6 +938,13 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <!-- 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。
+       これを参照する全スクリプト（admin-lecture-studio.js / deliberation.js / admin.js）より前。 -->
+  <script src="/js/element-vocab.js?v=element-vocab-20260801-1"></script>
+  <!-- 統一パーツカード（admin_ux_issues_2026-08-01.md §3.2 / Phase 1）。element-vocab.js
+       へ委譲するので後、これを使う全スクリプト（deliberation.js / admin-lecture-studio.js /
+       admin.js）より前。カード自身は fetch も data-ui-anchor 直書きもしない。 -->
+  <script src="/js/element-card.js?v=element-card-20260801-1"></script>
   <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
   <script src="/js/doubt-atlas.js?v=gap-fixes-20260716-1"></script>
   <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->

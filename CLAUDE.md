@@ -1604,7 +1604,12 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
 - **ElementRef と2スコープ**: `(scope, element_type, element_id, anchor)`。
   `scope='document'`（1論文からの出現: figure=document_figures.id /
   theory_component・theory_claim=DB UUID / equation=equations.json の equation_id —
-  テーブル無しのため `stage_outputs` を索く）と `scope='domain'`（共通部品
+  テーブル無しのため `stage_outputs` を索く。**Phase 5（2026-08-01, migration 064）で
+  `evidence`（evidence_registry）と `derivation`（derivation_chain）も同方式で解決対象化** —
+  document_id 必須。中心移動・文脈レンズ focus・内訳・対話・候補注釈は可、
+  位置づけ4レンズ・注釈 commit・共通部品化（identity/standardization）は v1 不可＝422、
+  学習者投影（`core/element_context.py`）では navigable を強制 false。正本は
+  `element_deliberation_workspace_design.md` §16）と `scope='domain'`（共通部品
   `shared_part` = **L層 `library_entries.id`**。W層は共通部品テーブルを新設しない）。
 - **3つの面**: ①内訳・同定（`decomposition.py`、A層成果の読み出しのみ。figure は #496 の
   presentation 分類を同梱）②文脈的位置づけ（`positioning.py` の4レンズ = 論文内 /

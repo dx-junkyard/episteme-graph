@@ -101,6 +101,15 @@ class TestRelationLabelsCompleteness:
         stage_nodes = [{"id": "theory_op_0001", "graph_layer": "main", "label": "Equation system", "linked_claim_ids": ["c1"]}]
         for item in context_lens._stage_participation_items(stage_nodes, {"c1": "c1"}, ["c1"], "doc-1"):
             emitted_relations.add(item["relation"])
+        # W層設計書 §16 で追加した evidence / derivation 用ヘルパも同じ語彙に収まること。
+        for item in context_lens._chains_referencing_evidence(
+            [{"derivation_id": "d1", "source_evidence_ids": ["ev_1"], "steps": []}], "doc-1", "ev_1"
+        ):
+            emitted_relations.add(item["relation"])
+        for item in context_lens._section_items_from_ids(
+            ["sec_1"], {"sec_1": {"section_id": "sec_1", "title": "Theory"}}, "doc-1"
+        ):
+            emitted_relations.add(item["relation"])
 
         assert emitted_relations
         assert emitted_relations <= set(context_lens.RELATION_LABELS)
@@ -123,10 +132,14 @@ class TestItemConstructor:
         assert item["navigable"] is False
 
     def test_navigable_false_for_non_navigable_type_even_with_id(self):
-        # "part"/"thesis"/"section"/"derivation"/"symbol"/"evidence" は仕様上
-        # navigable になり得ない要素型（設計書 §5 の ITEM 契約）。
-        item = context_lens._item("part", "some-id", "doc-1", "label", "contains", CONTEXT_STATUS_CANDIDATE)
-        assert item["navigable"] is False
+        # "part"/"thesis"/"section"/"symbol"/"stage" は仕様上 navigable になり得ない
+        # 要素型（設計書 §5 の ITEM 契約）。evidence / derivation は W層設計書 §16 で
+        # 解決対象になったため navigable になり得る（test_deliberation_evidence_derivation.py）。
+        for element_type in ("part", "thesis", "section", "symbol", "stage"):
+            item = context_lens._item(
+                element_type, "some-id", "doc-1", "label", "contains", CONTEXT_STATUS_CANDIDATE
+            )
+            assert item["navigable"] is False, element_type
 
     def test_evidence_refs_strips_blank_entries(self):
         item = context_lens._item(
@@ -544,7 +557,12 @@ class TestDerivationMembershipFacts:
         assert len(items) == 1
         item = items[0]
         assert item["element_type"] == "derivation"
-        assert item["element_id"] is None
+        # W層設計書 §16: derivation は refs.py の解決対象になったため element_id
+        # （= chain の derivation_id）を持ち、navigable になる。step は独立の要素に
+        # しないので element_id は chain 単位で、step_id は evidence_refs に残る。
+        assert item["element_id"] == "d1"
+        assert item["navigable"] is True
+        assert item["evidence_refs"] == ["s1"]
         assert item["relation"] == "belongs_to_derivation"
         assert "d1" in item["label"] and "s1" in item["label"]
         assert item["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED
@@ -554,6 +572,16 @@ class TestDerivationMembershipFacts:
         items = context_lens._derivation_membership_facts(chains, "doc-1", lambda x: x == "c9")
         assert len(items) == 1
         assert "d2" in items[0]["label"]
+        assert items[0]["element_id"] == "d2"
+        assert items[0]["navigable"] is True
+
+    def test_chain_without_derivation_id_is_not_navigable(self):
+        # derivation_id が空の chain は中心に据えられない（推測で ID を作らない）。
+        chains = [{"derivation_id": "", "steps": [], "assumption_ids": ["c9"]}]
+        items = context_lens._derivation_membership_facts(chains, "doc-1", lambda x: x == "c9")
+        assert len(items) == 1
+        assert items[0]["element_id"] is None
+        assert items[0]["navigable"] is False
 
     def test_no_match_returns_empty(self):
         chains = [{"derivation_id": "d1", "steps": []}]

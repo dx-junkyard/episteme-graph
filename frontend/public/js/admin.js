@@ -380,6 +380,17 @@
       // 対称のバッジ様式でインライン表示する（変更は従来どおり「共有設定」モーダルから）。
       html += "<td>" + escHtml(m.title) +
         '<div style="margin-top:2px">' + courseVisibilityBadgeHtml({ visibility: m.visibility || "private" }) + '</div></td>';
+      var hasPdf = m.has_pdf === true;
+      var chunkCount = typeof m.chunk_count === "number" ? m.chunk_count : null;
+      // status=failed のみ PDF 再登録を促す。縮退(completed)はチャンクが存在するため不要
+      var pdfRegistrationFailed = m.status === "failed" && chunkCount === 0;
+      var pdfBtnLabel = pdfRegistrationFailed ? "失敗 (PDF再登録)" : (hasPdf ? "PDF再登録（登録済）" : "PDF再登録");
+      var pdfBtnClass = pdfRegistrationFailed ? " admin-pdf-reupload-btn-failed" : "";
+      var pdfBtnTitle = pdfRegistrationFailed
+        ? "チャンク作成に失敗しました。PDFを再登録してください"
+        : "PDFのみ再登録";
+      var canResume = m.status === "failed" && !!m.document_id;
+
       html += '<td><span class="admin-status ' + statusClass + '" title="' +
         (isDegraded ? "利用可能な機能: " + availableFeatures.join(", ") + "\n機能制限中のステージ: " + degradedStages.join(", ") : "") +
         '">' + statusLabel + "</span>";
@@ -389,53 +400,66 @@
           (retryStage ? ' <a href="#" class="admin-retry-stage-link" data-ui-anchor="materials.row-retry-stage" data-material-id="' + escHtml(m.material_id) + '" data-stage="' + escHtml(retryStage) + '" style="text-decoration:underline;cursor:pointer;">ステージ再実行</a>' : '') +
           '</div>';
       }
+      // 異常時の導線は「⋯」メニューに畳まない（admin_ux_issues_2026-08-01.md §2.3-3）。
+      // 解析失敗・PDF再登録要の行では、ステータス列にも同じ操作をインラインリンクで出す
+      // （クリック挙動はメニュー項目と同一ハンドラ。data-ui-anchor はメニュー項目側が担体）。
+      var failedLinks = "";
+      if (canResume) {
+        failedLinks += '<button type="button" class="admin-inline-link admin-resume-analysis-inline" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '">解析を再開</button>';
+      }
+      if (pdfRegistrationFailed) {
+        if (failedLinks) failedLinks += " / ";
+        failedLinks += '<button type="button" class="admin-inline-link admin-pdf-reupload-inline" data-material-id="' + escHtml(m.material_id) + '" data-reset-label="PDFを再登録">PDFを再登録</button>';
+      }
+      if (failedLinks) {
+        html += '<div class="admin-failed-hint">' + failedLinks + '</div>';
+      }
       html += "</td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
-      var hasPdf = m.has_pdf === true;
-      var chunkCount = typeof m.chunk_count === "number" ? m.chunk_count : null;
-      // status=failed のみ PDF 再登録を促す。縮退(completed)はチャンクが存在するため不要
-      var pdfRegistrationFailed = m.status === "failed" && chunkCount === 0;
-      var pdfBtnLabel = pdfRegistrationFailed ? "失敗 (PDF再登録)" : (hasPdf ? "登録済" : "PDF再登録");
-      var pdfBtnClass = pdfRegistrationFailed ? " admin-pdf-reupload-btn-failed" : "";
-      var pdfBtnTitle = pdfRegistrationFailed
-        ? "チャンク作成に失敗しました。PDFを再登録してください"
-        : "PDFのみ再登録";
-      var resumeBtn = "";
-      if (m.status === "failed" && m.document_id) {
-        resumeBtn = '<button class="admin-resume-analysis-btn" data-ui-anchor="materials.row-resume-analysis" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>';
-      }
+      var resumeBtn = canResume
+        ? '<button class="ls-menu-item admin-resume-analysis-btn" type="button" data-ui-anchor="materials.row-resume-analysis" data-document-id="' + escHtml(m.document_id) + '" data-filename="' + escHtml(m.filename || m.title || "教材") + '" title="保存済みPDFから解析を再開">解析再開</button>'
+        : "";
       // 機能1: 解析成果のグループ共有 + 開示範囲（G1-1）（document_id が必要）
       var shareBtn = m.document_id
-        ? '<button class="admin-share-doc-btn" data-ui-anchor="materials.row-share" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">共有設定</button>'
+        ? '<button class="ls-menu-item admin-share-doc-btn" type="button" data-ui-anchor="materials.row-share" data-document-id="' + escHtml(m.document_id) + '" data-material-id="' + escHtml(m.material_id || "") + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" data-visibility="' + escHtml(m.visibility || "private") + '" data-group-id="' + escHtml(m.group_id || "") + '" title="グループ共有・開示範囲（公開/グループ限定/非公開）を設定します">共有設定…</button>'
         : "";
       // V層: 共有版（リリース）の発行・履歴・削除予約（document_id が必要。上の「共有設定」とは別機能）
       var versionBtn = m.document_id
-        ? '<button class="admin-version-doc-btn" data-ui-anchor="materials.row-version" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果を版（リリース）として発行・履歴管理します（共有設定とは別機能）" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">版の管理</button>'
+        ? '<button class="ls-menu-item admin-version-doc-btn" type="button" data-ui-anchor="materials.row-version" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="解析成果を版（リリース）として発行・履歴管理します（共有設定とは別機能）">版の管理…</button>'
         : "";
       // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
       var figuresBtn = m.document_id
-        ? '<button class="admin-figures-btn" data-ui-anchor="materials.row-figures" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">図・画像</button>'
+        ? '<button class="ls-menu-item admin-figures-btn" type="button" data-ui-anchor="materials.row-figures" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示">図・画像</button>'
         : "";
       // 要素インベントリ（W層の教材単位の統合入口）: この教材からパイプラインが検出した
       // theory_component / theory_claim / equation / figure の全件を一覧表示する
       // （document_id が必要。図・画像ボタンと同条件・その隣に並べる）。
       var inventoryBtn = m.document_id
-        ? '<button class="admin-inventory-btn" data-ui-anchor="materials.row-inventory" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示" style="background:none;border:1px solid var(--color-text-info);color:var(--color-text-info);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">検出要素</button>'
+        ? '<button class="ls-menu-item admin-inventory-btn" type="button" data-ui-anchor="materials.row-inventory" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示">検出要素</button>'
         : "";
       // U層（LLM使用量推計, migration 043）: 解析前の事前トークン見積り（TEACHER・レンジのみ・金額なし, G2-U）
       var estimateBtn = m.material_id
-        ? '<button class="admin-estimate-btn" data-ui-anchor="materials.row-estimate" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）" style="background:none;border:1px solid var(--color-text-tertiary);color:var(--color-text-secondary);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">解析コスト見積り</button>'
+        ? '<button class="ls-menu-item admin-estimate-btn" type="button" data-ui-anchor="materials.row-estimate" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）">解析コスト見積り…</button>'
         : "";
+      var pdfBtn = '<button class="ls-menu-item admin-pdf-reupload-btn' + pdfBtnClass + '" type="button" data-ui-anchor="materials.row-pdf-reupload" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>';
+      var deleteBtn = '<button class="ls-menu-item ls-menu-item-danger admin-delete-btn" type="button" data-ui-anchor="materials.row-delete" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" title="この教材と紐づく解析成果・コースを削除します">削除…</button>';
+      // §2.3: 行に出しっぱなしにするのは「パイプラインを実行 ▼」と「⋯」の2つだけ。
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
-        '<button class="admin-pdf-reupload-btn' + pdfBtnClass + '" data-ui-anchor="materials.row-pdf-reupload" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>' +
-        resumeBtn +
-        figuresBtn +
-        inventoryBtn +
-        shareBtn +
-        versionBtn +
-        estimateBtn +
-        '<button class="admin-delete-btn" data-ui-anchor="materials.row-delete" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" style="background:none;border:1px solid var(--color-text-danger);color:var(--color-text-danger);padding:2px 8px;border-radius:4px;cursor:pointer;font-size:12px">削除</button>' +
+        '<div class="material-more-menu ls-action-menu" data-material-id="' + escHtml(m.material_id) + '">' +
+          '<button class="admin-action-btn ls-menu-trigger material-more-trigger" type="button" data-ui-anchor="materials.row-more-menu" title="この教材のその他の操作" aria-label="その他の操作">⋯</button>' +
+          '<div class="ls-menu material-more-panel" hidden>' +
+            figuresBtn +
+            inventoryBtn +
+            shareBtn +
+            versionBtn +
+            estimateBtn +
+            pdfBtn +
+            resumeBtn +
+            '<div class="ls-menu-divider"></div>' +
+            deleteBtn +
+          '</div>' +
+        '</div>' +
         '</div></td>';
       html += "</tr>";
     });
@@ -445,6 +469,7 @@
       if (mid) loadMaterialPipelineStatus(mid);
     });
     bindMaterialPipelineMenus(tbody);
+    bindMaterialMoreMenus(tbody);
 
     // Attach delete handlers
     tbody.querySelectorAll(".admin-delete-btn").forEach(function (btn) {
@@ -505,9 +530,12 @@
     });
 
     // Attach PDF re-upload handlers
-    tbody.querySelectorAll(".admin-pdf-reupload-btn").forEach(function (btn) {
+    // 「⋯」メニュー項目（.admin-pdf-reupload-btn）と、失敗行のステータス列インライン導線
+    // （.admin-pdf-reupload-inline, §2.3-3）の両方に同一の処理を張る。
+    tbody.querySelectorAll(".admin-pdf-reupload-btn, .admin-pdf-reupload-inline").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var mid = this.getAttribute("data-material-id");
+        var resetLabel = this.getAttribute("data-reset-label") || "PDF再登録";
         var input = document.createElement("input");
         input.type = "file";
         input.accept = ".pdf,application/pdf";
@@ -528,7 +556,7 @@
               if (!res.ok) throw { message: "status " + res.status };
               btn.textContent = "完了";
               btn.classList.remove("admin-pdf-reupload-btn-failed");
-              setTimeout(function () { btn.textContent = "PDF再登録"; btn.disabled = false; }, 2000);
+              setTimeout(function () { btn.textContent = resetLabel; btn.disabled = false; }, 2000);
             })
             .catch(function (err) {
               btn.textContent = "失敗";
@@ -545,7 +573,8 @@
       });
     });
 
-    tbody.querySelectorAll(".admin-resume-analysis-btn").forEach(function (btn) {
+    // 「⋯」メニュー項目と、失敗行のステータス列インライン導線（§2.3-3）の両方。
+    tbody.querySelectorAll(".admin-resume-analysis-btn, .admin-resume-analysis-inline").forEach(function (btn) {
       btn.addEventListener("click", function () {
         var docId = this.getAttribute("data-document-id");
         var filename = this.getAttribute("data-filename") || "教材";
@@ -658,8 +687,36 @@
     });
   }
 
+  // §2.3: 教材行の「⋯」メニュー（図・画像 / 検出要素 / 共有設定 / 版の管理 /
+  // 解析コスト見積り / PDF再登録 / 解析再開 / 区切り線 / 削除）。開閉と外側クリックの
+  // 挙動はパイプラインメニューと共通（closeMaterialPipelineMenus / 下の capture リスナ）。
+  function bindMaterialMoreMenus(root) {
+    root.querySelectorAll(".material-more-trigger").forEach(function (btn) {
+      btn.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var menu = this.closest(".material-more-menu");
+        var panel = menu && menu.querySelector(".material-more-panel");
+        if (!panel) return;
+        var willOpen = panel.hidden;
+        document.querySelectorAll(".ls-menu").forEach(function (m) { m.hidden = true; });
+        panel.hidden = !willOpen;
+      });
+    });
+    root.querySelectorAll(".material-more-panel").forEach(function (panel) {
+      panel.addEventListener("click", function (e) {
+        e.stopPropagation();
+        var item = e.target && e.target.closest ? e.target.closest(".ls-menu-item") : null;
+        if (!item) return;
+        // PDF再登録は項目ラベル上で進捗（登録中... / 完了 / 失敗）を返すため開いたままにする。
+        if (item.classList.contains("admin-pdf-reupload-btn")) return;
+        panel.hidden = true;
+      });
+    });
+  }
+
   function closeMaterialPipelineMenus() {
-    document.querySelectorAll(".material-pipeline-panel").forEach(function (panel) {
+    // 行のドロップダウン（パイプライン実行 / ⋯）をまとめて閉じる。
+    document.querySelectorAll(".material-pipeline-panel, .material-more-panel").forEach(function (panel) {
       panel.hidden = true;
     });
   }
@@ -669,6 +726,7 @@
     state.materialPipelineOutsideClickBound = true;
     document.addEventListener("click", function (e) {
       if (e.target && e.target.closest && e.target.closest(".material-pipeline-menu")) return;
+      if (e.target && e.target.closest && e.target.closest(".material-more-menu")) return;
       closeMaterialPipelineMenus();
     }, true);
   }
@@ -7526,6 +7584,21 @@
   // _cmLastAnchoredCourseId と同型）。
   var _matLastAnchoredMaterialId = null;
 
+  // §2.3 の2層化で行操作の多くが「⋯」メニュー内へ移ったため、道案内（locate）の
+  // 点灯先を解決するときは、対象項目を含むメニューを開いてから返す（P8: 誘導まで。
+  // 値入力・実行は本人）。行 id 指定があればその行、無ければ先頭行にフォールバック。
+  function _matRowActionAnchor(id, selector) {
+    if (id) _matLastAnchoredMaterialId = id;
+    var mid = id || _matLastAnchoredMaterialId;
+    var el = (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] ' + selector))
+      || document.querySelector('#materials-tbody ' + selector);
+    if (el && el.closest) {
+      var panel = el.closest(".ls-menu");
+      if (panel && panel.hidden) panel.hidden = false;
+    }
+    return el;
+  }
+
   function openDocumentShareModal(documentId, title, materialId, visibility, groupId) {
     _docShareState.documentId = documentId;
     _docShareState.materialId = materialId || "";
@@ -8289,31 +8362,19 @@
       material_visibility_control: function () { return document.getElementById("doc-visibility-select"); },
       // U層（G2-U）: 教材行の解析コスト見積り導線。行 id 指定があればその行、無ければ先頭行。
       material_estimate_button: function (id) {
-        if (id) _matLastAnchoredMaterialId = id;
-        var mid = id || _matLastAnchoredMaterialId;
-        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-estimate-btn'))
-          || document.querySelector('#materials-tbody .admin-estimate-btn');
+        return _matRowActionAnchor(id, ".admin-estimate-btn");
       },
       // V層（G6）: 教材行の「版の管理」ボタン（共有版の発行・削除予約）。
       shared_version_button: function (id) {
-        if (id) _matLastAnchoredMaterialId = id;
-        var mid = id || _matLastAnchoredMaterialId;
-        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-version-doc-btn'))
-          || document.querySelector('#materials-tbody .admin-version-doc-btn');
+        return _matRowActionAnchor(id, ".admin-version-doc-btn");
       },
       // 図分類レビュー（#496 / N13）: 教材行の「図・画像」ボタン（図モーダルを開く）。
       material_figures_button: function (id) {
-        if (id) _matLastAnchoredMaterialId = id;
-        var mid = id || _matLastAnchoredMaterialId;
-        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-figures-btn'))
-          || document.querySelector('#materials-tbody .admin-figures-btn');
+        return _matRowActionAnchor(id, ".admin-figures-btn");
       },
       // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
       material_inventory_button: function (id) {
-        if (id) _matLastAnchoredMaterialId = id;
-        var mid = id || _matLastAnchoredMaterialId;
-        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .admin-inventory-btn'))
-          || document.querySelector('#materials-tbody .admin-inventory-btn');
+        return _matRowActionAnchor(id, ".admin-inventory-btn");
       },
       // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
       // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、

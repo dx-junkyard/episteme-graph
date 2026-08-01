@@ -44,6 +44,14 @@ function extractFrom(src, name){
 function extractMany(src, names){ return names.map(function(n){ return extractFrom(src,n); }).join("\n"); }
 // function ではない "var NAME = { ... };" / "var NAME = [ ... ];" 形式のモジュール
 // 定数（例: MATERIAL_EVIDENCE_KIND_LABELS / MATERIAL_ELEMENT_CONTEXT_TYPES）を抽出する。
+// element-vocab.js（要素種別の表示名の正本 / window.ElementVocab）を app.js と同じ
+// ディレクトリから読み込む。app.js は独自の種別辞書を持たず ElementVocab へ委譲するため、
+// 表示名を検証する harness は必ずトップレベルで
+// eval(loadElementVocab(process.argv[2])) すること（var window の宣言より後）。
+function loadElementVocab(appPath){
+  const pathmod=require("path");
+  return require("fs").readFileSync(pathmod.join(pathmod.dirname(appPath),"element-vocab.js"),"utf8");
+}
 function extractVar(src, name){
   const s = src.indexOf("var " + name + " = ");
   if (s<0) throw new Error("missing var "+name);
@@ -124,7 +132,8 @@ const app=fs.readFileSync(process.argv[2],"utf8");
 var window={katex:null};
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 var materialEvidenceChipItems = {};
-eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
+eval(loadElementVocab(process.argv[2]));
+eval(extractFrom(app,"materialEvidenceKindLabel"));
 eval(extractVar(app,"MATERIAL_ELEMENT_CONTEXT_TYPES"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",
@@ -180,7 +189,8 @@ const app=fs.readFileSync(process.argv[2],"utf8");
 var window={katex:null};
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");}
 var materialEvidenceChipItems = {};
-eval(extractVar(app,"MATERIAL_EVIDENCE_KIND_LABELS"));
+eval(loadElementVocab(process.argv[2]));
+eval(extractFrom(app,"materialEvidenceKindLabel"));
 eval(extractVar(app,"MATERIAL_ELEMENT_CONTEXT_TYPES"));
 eval(extractMany(app,["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
  "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",

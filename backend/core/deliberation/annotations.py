@@ -61,6 +61,7 @@ from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
     ELEMENT_THEORY_COMPONENT,
+    IDENTITY_LINKABLE_ELEMENT_TYPES,
     SCOPE_DOCUMENT,
     SCOPE_DOMAIN,
     ElementRef,
@@ -343,6 +344,11 @@ def _commit_meaning_or_decomposition(annotation: dict, current_user_id: str | No
 def _commit_identity(annotation: dict, current_user_id: str | None) -> dict:
     if annotation["scope"] != SCOPE_DOCUMENT:
         raise CommitRoutingError("identity source must be a document-scoped instance", kind="invalid")
+    if annotation["element_type"] not in IDENTITY_LINKABLE_ELEMENT_TYPES:
+        # 設計書 §16: evidence / derivation は共通部品化の対象外（v1）。
+        raise CommitRoutingError(
+            "この要素型は共通部品と結びつけられません（設計書 §16）", kind="unsupported"
+        )
     body = annotation.get("body") or {}
     shared_part_id = str(body.get("shared_part_id") or "").strip()
     if not shared_part_id:
@@ -455,7 +461,9 @@ def commit_capability(annotation: dict) -> tuple[bool, str]:
             return False, "旧形式の候補です。図を再解析すると構造化候補を確定できます"
         return False, "この候補は現在の要素には反映できません"
     if kind == ANNOTATION_KIND_IDENTITY:
-        return (scope == SCOPE_DOCUMENT, "" if scope == SCOPE_DOCUMENT else "対象外の候補です")
+        # 設計書 §16: evidence / derivation は共通部品化の単位ではないため確定先が無い。
+        supported = scope == SCOPE_DOCUMENT and element_type in IDENTITY_LINKABLE_ELEMENT_TYPES
+        return supported, "" if supported else "対象外の候補です"
     if kind == ANNOTATION_KIND_STANDARDIZATION:
         supported = element_type == ELEMENT_SHARED_PART and scope == SCOPE_DOMAIN
         return supported, "" if supported else "対象外の候補です"

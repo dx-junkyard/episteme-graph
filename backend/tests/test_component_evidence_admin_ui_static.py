@@ -2,10 +2,12 @@
 のうち、原稿スタジオ（admin-lecture-studio.js）担当分に対する静的ガードレール。
 
 対象:
-- 語彙マップ（LS_EVIDENCE_KIND_LABELS / LS_EVIDENCE_ROLE_LABELS /
-  LS_EVIDENCE_CONFIDENCE_LABELS）+ ヘルパー（lsEvidenceKindLabel /
-  lsEvidenceMetaLabel）が内部語彙（"component" / "support" / "title_similarity" 等）を
-  日本語ラベルへ変換すること。
+- 語彙マップ（LS_EVIDENCE_ROLE_LABELS / LS_EVIDENCE_CONFIDENCE_LABELS）+ ヘルパー
+  （lsEvidenceKindLabel / lsEvidenceMetaLabel）が内部語彙（"component" / "support" /
+  "title_similarity" 等）を日本語ラベルへ変換すること。
+  なお種別（kind）の訳語そのものは element-vocab.js（window.ElementVocab）が正本で、
+  lsEvidenceKindLabel はそこへ委譲する（admin_ux_issues_2026-08-01.md §3.3 Phase 0。
+  正本側の内容は test_element_vocab_ui_static.py が検証する）。
 - lsRenderCourseMaterialPreview の evidence 分岐で component/claim がブロックカードでは
   なくインラインチップ（`ls-material-evidence-chip`）に格下げされていること。
 - 一方で equation/figure/source 側のブロックカードは維持され、
@@ -40,20 +42,15 @@ def _read() -> str:
 
 
 class TestEvidenceVocabulary:
-    def test_kind_label_map_defined_with_japanese_labels(self):
+    def test_kind_labels_delegated_to_element_vocab(self):
+        """種別の訳語辞書をこのファイルに再定義しない（正本 = element-vocab.js）。"""
         src = _read()
-        start = src.index("var LS_EVIDENCE_KIND_LABELS")
-        end = src.index("function lsCourseComponentById(componentId) {")
-        block = src[start:end]
-        assert "論理要素" in block
-        assert "主張" in block
-        assert "数式" in block
-        assert "図" in block
-        assert "出典" in block
+        assert "var LS_EVIDENCE_KIND_LABELS" not in src
+        assert "window.ElementVocab" in src
 
     def test_confidence_label_map_defined_with_japanese_labels(self):
         src = _read()
-        start = src.index("var LS_EVIDENCE_KIND_LABELS")
+        start = src.index("var LS_EVIDENCE_ROLE_LABELS")
         end = src.index("function lsCourseComponentById(componentId) {")
         block = src[start:end]
         assert "タイトル類似" in block
@@ -67,13 +64,15 @@ class TestEvidenceVocabulary:
         block = src[start:end]
         assert "根拠" in block
 
-    def test_kind_label_helper_falls_back_to_raw_value(self):
-        """未知の kind はマップに無くても原文へフォールバックする（情報を落とさない）。"""
+    def test_kind_label_helper_delegates_and_falls_back(self):
+        """kind の表示名は正本へ委譲し、正本未読み込み時は原文へフォールバックする
+        （情報を落とさない）。"""
         src = _read()
         start = src.index("function lsEvidenceKindLabel(kind) {")
         end = src.index("\n  }\n", start)
         body = src[start:end]
-        assert "LS_EVIDENCE_KIND_LABELS[kind] || kind" in body
+        assert "vocab.kindLabel(kind)" in body
+        assert "return kind;" in body
 
     def test_meta_label_helper_combines_role_and_confidence(self):
         src = _read()
@@ -187,7 +186,7 @@ class TestEs5Guard:
 
     def _regions(self):
         src = _read()
-        r1_start = src.index("var LS_EVIDENCE_KIND_LABELS")
+        r1_start = src.index("var LS_EVIDENCE_ROLE_LABELS")
         r1_end = src.index("function lsCourseComponentById(componentId) {")
         r2_start = src.index("function lsCourseEvidenceChipsHtml(topic) {")
         r2_end = src.index("function lsFocusEvidence(key) {")

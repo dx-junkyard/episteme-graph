@@ -1,21 +1,52 @@
-# 管理画面 UX 課題（2026-08-01 起票 / 同日 方針確定）
+# 管理画面 UX 課題（2026-08-01 起票 / 同日 方針確定・全件実装完了）
 
-オーナー指摘の6件を実装調査のうえ分類した。**Q1〜Q3 は実装済み。I1〜I3 は方針確定・未実装。**
+オーナー指摘の6件を実装調査のうえ分類した。**Q1〜Q3・I1〜I3 とも実装済み**（2026-08-01、
+Fable 5 指揮 + Opus 5 サブエージェント A〜H。backend 7,659 + src 1,669 tests pass・0 fail。
+docker E2E と migration 064 の実適用確認は未実施 — docker 復帰後に）。
 
 | # | 対象 | 区分 | 状態 |
 |---|---|---|---|
 | Q1 | 教材アップロード「解析モデル」パネルの開閉が分かりにくい | すぐ直せる | **実装済み**（付録参照） |
-| Q2 | 原稿スタジオ「AI アシスタント」ボタン（右下ロボットとの重複疑い） | すぐ直せる | **実装済み**（別機能 → リネーム） |
-| Q3 | コース設定「音声生成」が即実行に見える | すぐ直せる | **実装済み**（確認パネルは既存 → ラベルのみ） |
-| **I1** | vision モデル指定の二重化とモデルカタログの意味論 | **方針確定・未実装** | §1（決定 = §1.5） |
-| **I2** | アップロード済み教材「操作」列のボタン過多 | **方針確定・未実装** | §2（決定 = §2.3） |
-| **I3** | パーツ表示の統一（起票元＝理論グラフのノード詳細ペイン） | **方針確定・未実装** | §3（方針 P1〜P5 / 決定 = §3.4 / 段階 = §3.3） |
+| Q2 | 原稿スタジオ「AI アシスタント」ボタン（右下ロボットとの重複疑い） | すぐ直せる | **実装済み**（別機能 → 「AI で書き換え」にリネーム） |
+| Q3 | コース設定「音声生成」が即実行に見える | すぐ直せる | **実装済み**（確認パネルは既存 → 「音声生成…」） |
+| **I1** | vision モデル指定の二重化とモデルカタログの意味論 | 方針確定 | **実装済み**（手番 A） |
+| **I2** | アップロード済み教材「操作」列のボタン過多 | 方針確定 | **実装済み**（手番 B） |
+| **I3** | パーツ表示の統一（起票元＝理論グラフのノード詳細ペイン） | 方針確定 | **実装済み**（手番 C〜H・全 Phase） |
 
 ---
 
-## §0 実施計画（何をどうするのか）
+## §0 実施計画（何をどうするのか）— 全手番 実施済み
 
 I1〜I3 の決定事項を実施順に1箇所へまとめたもの。詳細と根拠は各節。
+**A〜H すべて 2026-08-01 に実装済み。** 実装で確定した主な追加事項:
+
+- **C**: 語彙正本は `frontend/public/js/element-vocab.js`（`window.ElementVocab`:
+  kindLabel / elementTypeLabel / statusLabel）。旧6辞書は撤去済み（再定義はテストが禁止）。
+- **D**: カードは `frontend/public/js/element-card.js`（`window.ElementCard`:
+  render / bind / mount、VARIANT_EDITABLE / VARIANT_READONLY）。追加 opts =
+  itemActions（ITEM 行の操作）/ laneTitles / metaBadges / reviewNotes。notes は
+  editable のみ描画。readonly は candidate ITEM 非描画・confidence 非表示の二重ガード。
+- **E**: グラフ詳細は「ローカル DTO 即時表示 → サーバ文脈の遅延マージ」（nodeId 照合の
+  競合ガード付き）。ステージ日本語辞書は `LS_THEORY_STAGE_LABELS_JA`（旧 #337 の
+  `LS_STAGE_LABELS_JA` を §3.4(b) の訳語で置換・統合）。DB UUID ⇄ graph node ID の
+  不一致は `lsGraphCenterOnItem`（グラフ内選択 → 失敗時 W層オープン）で解決。
+  エッジ詳細の「確信度」生数値は撤去（W8 と同旨）。
+- **H**: migration **064**（deliberation_sessions / element_annotations の element_type
+  CHECK に evidence / derivation を追加）。できること／できないことの表は
+  `element_deliberation_workspace_design.md` **§16** が正本。学習者投影は
+  `core/element_context.py` が navigable を強制 false（app.js のホワイトリストと二重）。
+
+**後続候補の実施状況（2026-08-01 追補）**: element-card.js の改善3件は**実装済み** —
+① `hideHead` / `hideBody` opts（原稿スタジオ根拠リンクで使用。外殻カードとの
+種別チップ・タイトル・要約の再掲を解消）② ITEM の `evidence_refs` を
+カード本体が editable 限定の折りたたみ（`element-card-item-refs`）で描画
+（W層の mount 後 DOM 後付け `_augmentContextEvidenceRefs` は撤去。グラフ詳細ペインにも
+自動で効く = P2 の一貫性向上）③ `roleLabel` opts（根拠リンクは document スコープの
+正確な主語「この論文での役割」に復帰。W層は既定の「この文脈での役割」のまま）。
+
+**残る後続候補（未実施・必要になったら）**: E が残した旧グラフ詳細 CSS 約25ルールの削除
+（background chip 起票済み）/ 面②位置づけ4レンズの evidence 対応
+（技術的には可能・v1 は縮退のまま）。
 
 | 手番 | やること | 対象ファイル | backend 変更 | 依存 |
 |---|---|---|---|---|

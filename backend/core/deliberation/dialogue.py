@@ -61,6 +61,7 @@ from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
+    IDENTITY_LINKABLE_ELEMENT_TYPES,
     ElementRef,
     SCOPE_DOCUMENT,
 )
@@ -236,7 +237,9 @@ def identity_entry_type_for_element(element_type: str) -> str | None:
 def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     """同分野の凍結済み library_entries 上位k件を同一性候補の材料として返す（N2）。
 
-    - 対象は document-scoped のインスタンス要素のみ（identity link の source 制約と同じ）。
+    - 対象は document-scoped かつ共通部品化しうるインスタンス要素のみ（identity link の
+      source 制約と同じ = ``IDENTITY_LINKABLE_ELEMENT_TYPES``。evidence / derivation は §16 で
+      対象外）。
     - domain_key は対象要素の document → 最新解析 run の cartridge_id から決定論的に解決
       （cartridge_id = library domain_key の同一名前空間。apparatus retrieval と同じ規約）。
     - 検索は ``core.library.search.search_frozen_entries``（凍結版のみ・失敗時空リスト）を
@@ -245,6 +248,10 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
       （LLM に同一視の判断材料を与えすぎない・KN-3）。
     """
     if ref.scope != SCOPE_DOCUMENT:
+        return []
+    if ref.element_type not in IDENTITY_LINKABLE_ELEMENT_TYPES:
+        # 設計書 §16: evidence / derivation は共通部品化の対象外なので、同一性候補の
+        # 材料自体を供給しない（LLM に「共通部品と同じもの」提案の余地を与えない）。
         return []
     domain_key = document_domain_key(ref.document_id or "")
     if not domain_key:

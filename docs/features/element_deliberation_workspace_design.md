@@ -142,7 +142,11 @@ W層は A層成果（`theory_components` / `theory_claims` / `theory_component_g
 
 ## §1 スコープ（v1）
 
-### 対象要素型（4つ）
+### 対象要素型（4つ + §16 で2つ追加）
+
+> **§16 追補（2026-08-01）**: `evidence`（根拠箇所）と `derivation`（導出）も
+> `refs.py` の解決対象に加え「中心にできる」要素にした。できること／できないことの
+> 一覧は **§16** を参照（面②位置づけ・共通部品化・commit は v1 対象外）。
 
 | element_type | 実体 | 由来 |
 |---|---|---|
@@ -200,6 +204,8 @@ scope='domain'   → element_type ∈ {shared_part},                            
 | `theory_component` | `theory_components.id` (UUID) | 直接 |
 | `theory_claim` | `theory_claims.id` (UUID) | 直接 |
 | `equation` | equations.json の `equation_id`（**テーブル無し**） | run の `stage_outputs.equations` を索く + 逆に `theory_claims.equation` / graph の `linked_equation_ids` から参照元を辿る |
+| `evidence` | evidence_registry の `evidence_id`（**テーブル無し**・§16） | run の `stage_outputs._artifacts.evidence_registry.records` を索く（`document_id` 必須） |
+| `derivation` | derivation_chain の `derivation_id`（**テーブル無し**・§16） | run の `stage_outputs._artifacts.derivation_chain.chains` を索く（`document_id` 必須） |
 
 **domain-scoped**:
 
@@ -547,3 +553,118 @@ W層の新規価値は **①統合入口（4要素型を1つの場に）②コ�
 5. **昇格 vs 統合の既定挙動**: インスタンスを共通部品化するとき、新規 library_entry 作成と
    既存エントリへの統合（source_document_ids 追記）のどちらを既定提示にするか。cross-corpus
    類似ヒットがあれば統合を優先提示するのが自然。
+
+---
+
+## §16 `evidence` / `derivation` の第一級要素化（Phase 5・2026-08-01）
+
+起票元は `docs/architecture/admin_ux_issues_2026-08-01.md` §3（方針 P5「evidence と
+derivation も備える」/ 実施決定 §3.4(d) / 段階 §3.3 Phase 5）。
+
+### 何が問題だったか
+
+W層には**役割の違う語彙が2つ**あり、両者が食い違っていた。
+
+| 語彙 | 正本 | 用途 | `evidence` / `derivation` |
+|---|---|---|---|
+| 表示・近傍の語彙（11種） | `context_lens.py` の ITEM | パーツを描き、関係を名付け、近傍を辿る | **含む**（`rests_on_evidence` / `belongs_to_derivation` として実際に出力） |
+| 解決対象の語彙（5種） | `refs.py` の `element_type` | 「深く検討」の対象として同定・注釈を積む | **含まなかった** |
+
+そのため両型は「表示され関係名も付くが、`element_id=None` / `navigable=false` のため
+その要素を中心にした再探索の起点にできない」状態だった（P1〜P3 がこの2種別で破れる）。
+本節はこのギャップを埋め、**両型を `refs.py` の解決対象に加える**。
+
+### ElementRef の拡張
+
+`scope='document'` の `element_type` に2つ足す（`schema.py` の `DOCUMENT_ELEMENT_TYPES`）。
+どちらも **equation と同じく独立テーブルを持たない**ため、`document_id` が必須
+（`schema.DOCUMENT_ID_REQUIRED_ELEMENT_TYPES` = equation / evidence / derivation）。
+
+| element_type | element_id の実体 | 解決ソース（`refs.py`） |
+|---|---|---|
+| `evidence` | evidence_registry の `evidence_id` | run の `stage_outputs._artifacts.evidence_registry.records[]`（`refs.evidence_records`） |
+| `derivation` | derivation_chain の `derivation_id` | run の `stage_outputs._artifacts.derivation_chain.chains[]`（`refs.derivation_records`） |
+
+`document_id` 無し・artifact 無し（旧 run）・ID 不一致はすべて
+`ElementResolutionError(kind="not_found")` → API 404（equation と完全に同じ作法）。
+**step_id は独立の要素にしない**（導出の単位は chain。step は ITEM の `evidence_refs` に残る）。
+
+### できること / できないこと
+
+| 機能 | `evidence` | `derivation` | 備考 |
+|---|---|---|---|
+| `refs.resolve()` で同定 | **可**（document_id 必須） | **可**（document_id 必須） | agent 側 ID 変換（legacy_ids）は不要 — artifact 内 ID が正準 |
+| ITEM として表示・関係名 | 可（従来から） | 可（従来から） | `rests_on_evidence` / `belongs_to_derivation` |
+| ITEM から中心移動（`navigable`） | **可**（新規） | **可**（新規） | `context_lens._NAVIGABLE_ELEMENT_TYPES` に追加 |
+| 面③ 文脈レンズの focus | **可**（新規） | **可**（新規） | 下表参照 |
+| 面① 内訳（decomposition） | **可**（最小） | **可**（最小） | artifact 由来の best-effort。引用本文・原文位置 / chain の操作列 |
+| 面② 位置づけ（4レンズ） | **不可（v1）** | **不可（v1）** | 空レーン + 事実文へ縮退。コーパス横断は chunk-proxy なので原理的には適用可能だが v1 では対応しない |
+| 対話（面③ chat） | **可**（text のみ） | **可**（text のみ） | grounding は 面① + 面③ から。1応答=1コール・既存コスト上限のまま |
+| 候補注釈を積む（`element_annotations`） | **可** | **可** | migration 064 で CHECK 語彙拡張。常に `status='candidate'`（W2） |
+| 注釈の commit | **不可（v1）** | **不可（v1）** | `positioning_note` と同じ 422（`meaning`/`decomposition`/`interpretation` は theory_component / figure 専用のまま） |
+| 共通部品化（identity link / standardization） | **不可（v1）** | **不可（v1）** | 原文の引用そのもの・この論文の導出手順は共通化の単位ではない。API は 422（`_require_identity_linkable`） |
+| 二層説明（`element_explanations`） | **不可** | **不可** | 生成対象は A層パイプラインが決める。読みは 0 件へ縮退 |
+| 学習者向け navigable | **不可（明示的に false）** | **不可（明示的に false）** | 学習者の旅は claim / equation / component のまま（下記） |
+
+### 面③ 文脈レンズの投影（`context_lens.py`）
+
+- **`evidence` focus**: label = 引用の冒頭、`intrinsic_summary` = 引用全文。
+  upper = ①この引用に依拠する claim（`claim_object_builder` の `source_evidence_ids` 逆引き
+  → `claim_lookup` で DB UUID へ）②この引用を根拠に挙げる導出 ③`linked_evidence_ids` を
+  持つグラフノード ④掲載セクション。**lower は空**（原文の引用そのものが最下層）で、
+  そのことを事実文（notes）に明示する — 推測で埋めない。
+- **`derivation` focus**: label = `導出「id」(operation)`、`intrinsic_summary` =
+  `teaching_takeaway` か操作列（`op1 → op2 → …`、非LLM 連結）。
+  upper = リンクするグラフノード / `linked_component_ids` / 産出 claim（`output_claim_ids`）/
+  掲載セクション。lower = chain 内の数式（navigable な equation）/ 前提 claim
+  （`input_claim_ids` / `required_claim_ids` / `assumption_ids`）/ 根拠 evidence（navigable）。
+- 既存 ITEM の navigable 化: `_derivation_membership_facts` は `element_id = derivation_id`
+  を入れ（step まで特定できた場合も chain 単位。step_id は `evidence_refs`）、claim focus の
+  evidence 項目は `element_id = evidence_id` を入れる。**ID が引けないものは従来どおり
+  `None` / `navigable=false`**（発明しない）。
+- fail-soft は既存どおり（artifact 欠損・関係なしは空レーン + notes、例外は `build()` が
+  握って `_degenerate_result`）。
+
+### 学習者側は変えない（fail-closed）
+
+`core/element_context.py` の学習者向け射影は、W層の `navigable` を信用せず学習者が実際に
+再フェッチできる型で作り直す既存方針（LE4/LE6）をそのまま維持する。加えて
+`_LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES = (evidence, derivation)` を明示の拒否リストと
+して置き、W層が語彙を増やしたときに学習者側へ黙って波及しないよう**二重に**塞ぐ
+（学習者向けには対応する文脈取得 API が無く、navigable を立てると押しても何も起きない
+導線になる）。`app.js` は変更しない。
+
+### DB（migration 064）
+
+`deliberation_sessions.element_type` / `element_annotations.element_type` の CHECK に
+`'evidence'` / `'derivation'` を追加する（migration 062 と同型の DO ブロック・冪等）。
+**`element_identity_links`（048）と `element_explanations`（056/062）の CHECK は変更しない**
+（上表「できないこと」の DB 側の裏づけ。コード側の正本は
+`core/deliberation/schema.py::IDENTITY_LINKABLE_ELEMENT_TYPES`）。両テーブルの行はこれまで
+どおりポリモーフィック（document_id への FK なし）で、孤児掃除は既存の document 削除経路が
+element_type を問わず `document_id` で消すため追加経路は不要。
+
+### 不変条項との整合
+
+- **W1（A層非改変）**: `evidence_registry` / `derivation_chain` の artifact は**読むだけ**。
+  agent 側のスキーマ・出力は一切変えない。
+- **W2（確定は人間・AI は候補のみ）**: 新要素型でも注釈は `status='candidate'` 固定。
+  commit 経路は増やしていない（v1 は 422）。
+- **W3/W8**: 内訳・投影とも確度の生値を出さない（`decomposition` の step 投影は
+  `step_id` / `operation` / `review_status` のみ。`context_lens.py` はソースに確度の語を持たない）。
+- **W4（情報を落とさない）**: 削除 API は追加しない。解決できない ID は落とさず
+  `element_id=None` の表示のみ項目として残す。
+- **W5（権限 fail-closed）**: 解決後の `ref.document_id` に対する
+  `_ensure_document_viewable` / `_ensure_document_editable` を既存経路のまま通す。
+- **W6（同期パスを重くしない）**: 対話は 1応答=1コール・既存コスト上限
+  （`DELIBERATION_MAX_CALLS_*`）のまま。新しい LLM 呼び出しは追加していない。
+- **W7（監査）**: `entity_type='deliberation'` のまま（語彙追加なし）。
+- **W9（U層計測）**: `deliberation:chat` のまま（vision は figure 専用なので変化なし）。
+
+### ガードレール
+
+`test_deliberation_evidence_derivation.py`（refs 解決・focus DTO・fail-soft・
+overview 非 500・commit 422・identity 422）+ 既存
+`test_deliberation_guardrails.py` / `test_deliberation_context_lens.py` /
+`test_element_context_core.py` / `test_deliberation_ui_static.py` /
+`test_lecture_evidence_context_ui_static.py` / `test_graph_reference_resolution_ui_static.py`。

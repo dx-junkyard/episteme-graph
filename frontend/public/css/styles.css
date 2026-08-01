@@ -2023,6 +2023,50 @@ html.learn-page > body {
   white-space: nowrap;
 }
 
+/* 教材行の「⋯」メニュー（admin_ux_issues_2026-08-01.md §2.3）。
+   行に出しっぱなしにするのは「パイプラインを実行 ▼」とこのトリガーの2つだけ。 */
+.material-more-trigger {
+  min-width: 0;
+  padding: 6px 12px;
+  line-height: 1;
+  font-size: 15px;
+  letter-spacing: 1px;
+}
+
+.material-more-panel {
+  min-width: 220px;
+}
+
+/* 破壊的操作のメニュー項目（削除）。区切り線の下＋赤字で分離する。 */
+.ls-menu-item-danger {
+  color: var(--color-text-danger);
+}
+
+/* §2.3-3: 異常時（解析失敗・PDF再登録要）の導線はメニューに畳まず、
+   ステータス列にインラインリンクとしても出す。 */
+.admin-failed-hint {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--color-text-danger);
+}
+
+.admin-inline-link {
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.admin-inline-link:disabled {
+  cursor: default;
+  opacity: 0.6;
+  text-decoration: none;
+}
+
 .admin-status {
   display: inline-block;
   padding: 2px 10px;
@@ -4459,96 +4503,13 @@ button.ls-course-evidence-head {
   border-left: 2px solid var(--color-border);
 }
 
-.ls-evidence-context {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  font-size: 12px;
-}
-
-.ls-evidence-context-role,
-.ls-evidence-context-generic {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px;
-  color: var(--color-text-primary);
-  line-height: 1.6;
-}
-
-.ls-evidence-context-role-label {
-  color: var(--color-text-tertiary);
-  font-size: 11px;
-}
-
-.ls-evidence-context-generic {
-  color: var(--color-text-secondary);
-}
-
-.ls-evidence-context-lane {
-  border-left: 3px solid var(--color-border);
-  padding: 4px 0 4px 8px;
-}
-
-.ls-evidence-context-lane-title {
-  color: var(--color-text-tertiary);
-  font-size: 11px;
-  font-weight: 700;
-  margin-bottom: 4px;
-}
-
-.ls-evidence-context-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 6px;
-  padding: 3px 0;
-  line-height: 1.6;
-}
-
-.ls-evidence-context-item-label {
-  color: var(--color-text-primary);
-}
-
-.ls-evidence-context-relation {
-  color: var(--color-text-secondary);
-}
-
-.ls-evidence-context-item-actions {
-  margin-left: auto;
-}
-
-.ls-evidence-context-notes {
-  margin: 0;
-  padding-left: 16px;
-  color: var(--color-text-tertiary);
-  font-size: 11px;
-  line-height: 1.6;
-}
-
-/* 関係の裏付け状態バッジ（段階ラベルのみ。数値は出さない）。
-   出典に裏付け=実線の落ち着いた緑 / 教員確定=通常枠 / AI候補=点線・薄色。 */
-.ls-context-status {
-  border-radius: 999px;
-  padding: 1px 7px;
-  font-size: 10px;
-  font-weight: 700;
-  border: 1px solid var(--color-border);
-  background: var(--color-background-secondary);
-  color: var(--color-text-secondary);
-  white-space: nowrap;
-}
-
-.ls-context-status-source_backed {
-  background: #ecfdf5;
-  color: #047857;
-  border-color: #a7f3d0;
-}
-
-.ls-context-status-candidate {
-  border-style: dashed;
-  color: var(--color-text-tertiary);
+/* 根拠リンクカードの文脈表示は統一パーツカード（.element-card）が描く
+   （admin_ux_issues_2026-08-01.md §3.3 Phase 3）。旧 .ls-evidence-context-* 系の
+   レーン/バッジ CSS は撤去し、外殻カードの中に馴染ませる調整だけを残す。 */
+.ls-evidence-context-card.element-card {
+  border: none;
   background: transparent;
+  padding: 0;
 }
 
 /* 右カード展開・「ドラフトの該当箇所へ」で左ドラフト側の対応埋め込みを示す
@@ -6349,48 +6310,8 @@ button.ls-course-evidence-head {
   display: none;
 }
 
-.evidence-chip-context-role {
-  margin-bottom: 10px;
-}
-.evidence-chip-context-role-body {
-  font-size: 13px;
-  line-height: 1.6;
-}
-.evidence-chip-context-generic {
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--color-text-secondary, #6e6e73);
-  margin-bottom: 10px;
-}
-.evidence-chip-context-status {
-  display: inline-block;
-  margin-left: 6px;
-  border-radius: 999px;
-  padding: 1px 7px;
-  background: var(--color-background-secondary, #f5f5f7);
-  color: var(--color-text-secondary, #6e6e73);
-  font-size: 10px;
-  white-space: nowrap;
-}
-.evidence-chip-context-lane-list {
-  list-style: none;
-  padding-left: 0;
-}
-.evidence-chip-context-lane-item {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px;
-  margin-bottom: 5px;
-}
-.evidence-chip-context-lane-label {
-  font-size: 12px;
-  line-height: 1.5;
-}
-.evidence-chip-context-lane-relation {
-  font-size: 11px;
-  color: var(--color-text-secondary, #6e6e73);
-}
+/* 旧チップ展開の独自レーン描画（role/generic/status/lane 系）は統一パーツカード
+   （element-card.js）への移行で撤去済み（§3.3 Phase 4）。 */
 .evidence-chip-context-jump-btn {
   appearance: none;
   border: 1px solid var(--color-border-secondary, #d2d2d7);
@@ -8305,51 +8226,20 @@ body.admin-inspect-mode textarea:disabled {
 }
 .deliberation-context-lens-unavailable { padding-bottom: 8px; }
 
-.deliberation-context-lane {
-  border: 1px solid var(--color-border-tertiary, #e5e5ea);
-  border-radius: 8px;
-  padding: 8px 10px;
-  background: var(--color-background-secondary, #f5f5f7);
-}
-.deliberation-context-lane-title {
-  font-size: 11.5px;
-  font-weight: 600;
-  color: var(--color-text-secondary, #6e6e73);
-  margin-bottom: 6px;
+/* 上位/下位レーン・中心カード・近傍チップ・裏付けバッジは統一パーツカード
+   （.element-card / element-card.js）が描く。旧 .deliberation-context-lane /
+   -item / -relation / -nav / -status 系は §3.3 Phase 3 で撤去した。 */
+.deliberation-context-card.element-card {
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .04);
 }
 
-.deliberation-context-item {
-  padding: 5px 0;
-  font-size: 12.5px;
-  line-height: 1.55;
-  border-top: 1px solid var(--color-border-subtle, #dfe1e5);
-}
-.deliberation-context-item:first-of-type { border-top: none; padding-top: 0; }
-.deliberation-context-relation { color: var(--color-text-secondary, #6e6e73); }
-.deliberation-context-item-label {
-  color: var(--color-text-primary, #1d1d1f);
-  font-weight: 600;
-}
-.deliberation-context-evidence {
-  margin-top: 3px;
-  font-size: 11.5px;
-}
-.deliberation-context-evidence > summary {
-  cursor: pointer;
-  color: var(--color-text-tertiary, #8b949e);
-}
-.deliberation-context-evidence ul {
-  margin: 4px 0 0 16px;
-  padding: 0;
-  color: var(--color-text-tertiary, #8b949e);
-}
+/* ITEM の根拠参照はカード本体（.element-card-item-refs）が描く。
+   旧 .deliberation-context-evidence（mount 後の DOM 後付け）は撤去済み。 */
 .deliberation-context-fact {
   margin: 2px 0;
   font-size: 12px;
   color: var(--color-text-tertiary, #8b949e);
 }
-.deliberation-context-notes { margin-top: 2px; }
-
 .deliberation-context-focus {
   border: 1px solid var(--color-border-secondary, #d2d2d7);
   border-radius: 10px;
@@ -8370,66 +8260,16 @@ body.admin-inspect-mode textarea:disabled {
   color: var(--color-text-tertiary, #8b949e);
   margin-bottom: 3px;
 }
-.deliberation-context-focus-value {
-  font-size: 13px;
-  color: var(--color-text-primary, #1d1d1f);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 .deliberation-context-provenance {
   margin: 4px 0 0;
   padding: 0 0 0 16px;
   font-size: 11.5px;
   color: var(--color-text-tertiary, #8b949e);
 }
-
-.deliberation-context-nav {
-  appearance: none;
-  border: none;
-  background: none;
-  padding: 0;
-  color: var(--color-text-info, #378add);
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  white-space: normal;
-  word-break: break-word;
-  overflow-wrap: anywhere;
-}
-.deliberation-context-nav:hover { color: var(--color-text-primary, #1d1d1f); }
-
-.deliberation-context-status {
+.deliberation-context-generic-status {
   display: inline-block;
-  font-size: 11px;
-  padding: 1px 7px;
-  border-radius: 9px;
-  border: 1px solid var(--color-border-secondary, #d2d2d7);
-  background: var(--color-background-tertiary, #eeeef0);
+  font-size: 11.5px;
   color: var(--color-text-secondary, #6e6e73);
-  white-space: nowrap;
-}
-.deliberation-context-status--source_backed {
-  border-color: var(--color-text-success, #1e7e34);
-  color: var(--color-text-success, #1e7e34);
-  background: var(--color-background-success, #e6f4ea);
-}
-.deliberation-context-status--confirmed {
-  border-style: solid;
-  border-color: var(--color-text-info, #378add);
-  color: var(--color-text-info, #378add);
-  background: var(--color-background-info, #eef4fb);
-}
-.deliberation-context-status--candidate {
-  border-style: dashed;
-  color: var(--color-text-secondary, #6e6e73);
-  background: none;
-}
-.deliberation-context-status--unidentified {
-  border-style: dotted;
-  color: var(--color-text-tertiary, #aeaeb2);
-  background: none;
 }
 
 /* ── パンくず（中心移動の履歴。設計書 §2.3）───────────────────────────── */
@@ -8677,7 +8517,6 @@ body.admin-inspect-mode textarea:disabled {
   .deliberation-observation-list > li {
     grid-template-columns: 1fr;
   }
-  .deliberation-context-lane,
   .deliberation-context-focus {
     padding: 8px;
   }
@@ -9862,4 +9701,318 @@ body.admin-inspect-mode textarea:disabled {
   color: var(--color-text-tertiary);
   padding: 10px;
   line-height: 1.6;
+}
+
+/* ── 統一パーツカード（element-card.js / admin_ux_issues_2026-08-01.md §3.2）─────
+   原稿スタジオ根拠リンクカード（.ls-course-evidence-card）を下敷きにした共通見た目。
+   色は既存の CSS 変数だけで書き、ダーク/ライトの切替に自動追従させる。
+   admin（編集可）と学習画面（編集不可）の両方から使うので prefix は element-card-。 */
+.element-card {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-background-primary);
+  padding: 10px;
+}
+
+.element-card-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  font-size: 13px;
+}
+
+.element-card-kind {
+  border-radius: 999px;
+  padding: 2px 7px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.element-card-title {
+  color: var(--color-text-primary);
+  font-weight: 700;
+}
+
+.element-card-head-note {
+  margin-left: auto;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+/* 出所バッジの行。§3.4(c) により meta 行は上部（本文より前）に置く。 */
+.element-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.element-card-body {
+  margin-top: 8px;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.element-card-formula {
+  overflow-x: auto;
+  padding: 6px 0;
+}
+
+.element-card-fact {
+  color: var(--color-text-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.element-card-role {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.element-card-role-label {
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.element-card-role-value {
+  color: var(--color-text-primary);
+}
+
+.element-card-generic {
+  margin-top: 6px;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 近傍（P3）。上位/下位の2レーン。 */
+.element-card-lanes {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.element-card-lane-title {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.element-card-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.element-card-item {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 0;
+  border: none;
+  background: none;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+button.element-card-item {
+  cursor: pointer;
+}
+
+button.element-card-item:hover .element-card-item-label,
+button.element-card-item:focus-visible .element-card-item-label {
+  text-decoration: underline;
+}
+
+.element-card-item-kind {
+  border-radius: 999px;
+  padding: 1px 6px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.element-card-item-relation {
+  color: var(--color-text-secondary);
+}
+
+.element-card-item-label {
+  color: var(--color-text-primary);
+}
+
+.element-card-notes,
+.element-card-review {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.element-card-review {
+  color: var(--color-text-secondary);
+}
+
+/* 操作行は編集可バリアントのみ（P4）。 */
+.element-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.element-card-action {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--lx-brand, var(--color-text-info));
+  text-decoration: underline;
+}
+
+/* 裏付け状態バッジ（段階ラベルのみ。数値は出さない — W8）。
+   出典に裏付け=落ち着いた success トーン / 教員確定=通常枠 / AI候補=点線・薄色。 */
+.element-card-status {
+  border-radius: 999px;
+  padding: 1px 7px;
+  border: 1px solid var(--color-border);
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.element-card-status-source_backed {
+  background: var(--color-background-success);
+  border-color: var(--color-border-success);
+  color: var(--color-text-primary);
+}
+
+.element-card-status-candidate {
+  border-style: dashed;
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+/* 教員確定=実線で情報トーン / 未同定=点線でより淡く（W層の既存視覚言語を継承。
+   candidate=点線 dashed より弱い dotted で「まだ何も言えない」を表す）。 */
+.element-card-status-confirmed {
+  border-style: solid;
+  border-color: var(--color-text-info);
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+}
+
+.element-card-status-unidentified {
+  border-style: dotted;
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+/* 理論グラフ詳細ペインの出所バッジ（source_backing_status）。ネットワーク上の
+   ノード表現（細線 / 点線枠 / 薄色）と同じ段階付けを meta バッジでも表す。
+   煽らない・数値を出さない方針は維持し、段階ラベル文字列だけで区別する。 */
+.element-card-status-partially_source_backed {
+  border-style: dashed;
+  background: var(--color-background-secondary);
+}
+
+.element-card-status-inferred,
+.element-card-status-review_required {
+  border-style: dotted;
+  background: transparent;
+  color: var(--color-text-tertiary);
+}
+
+/* ITEM 行の追加操作（itemActions）。操作付き ITEM だけがこのラッパーで包まれる。 */
+.element-card-item-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.element-card-item-row .element-card-item {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.element-card-item-action {
+  appearance: none;
+  border: 1px solid var(--color-border);
+  background: none;
+  color: var(--color-text-secondary);
+  border-radius: 6px;
+  padding: 1px 7px;
+  font-size: 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.element-card-item-action:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-text-tertiary);
+}
+
+/* 参照先の名称が解決できず ID のまま表示している ITEM（淡色 + ツールチップ）。 */
+.element-card-item-unresolved {
+  opacity: 0.65;
+}
+
+/* ITEM + 根拠参照（editable のみ）のブロック。refs は折りたたみで小さく出す。 */
+.element-card-item-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.element-card-item-refs {
+  margin: 0 0 2px 8px;
+  font-size: 11.5px;
+}
+
+.element-card-item-refs > summary {
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+}
+
+.element-card-item-refs ul {
+  margin: 4px 0 0 16px;
+  padding: 0;
+  color: var(--color-text-tertiary);
+}
+
+/* ── 理論グラフ詳細ペインのカード枠（admin_ux_issues_2026-08-01.md §3.3 Phase 2）── */
+.ls-graph-detail-card {
+  margin-bottom: 10px;
+}
+
+.ls-graph-detail-card .element-card {
+  background: transparent;
+  border: none;
+  padding: 0;
 }

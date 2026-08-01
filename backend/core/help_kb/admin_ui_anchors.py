@@ -240,6 +240,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-estimate",
         "materials.row-figures",
         "materials.row-inventory",
+        "materials.row-more-menu",
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
         "materials.row-resume-analysis",
@@ -723,6 +724,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-figures": "teacher/11-admin-materials.md#row-figures",
     # 検出要素
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
+    # 操作メニュー（⋯）— 行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）
+    "materials.row-more-menu": "teacher/11-admin-materials.md#row-more-menu",
     # PDF再登録
     "materials.row-pdf-reupload": "teacher/11-admin-materials.md#pdf-reupload",
     # パイプラインを実行 ▼

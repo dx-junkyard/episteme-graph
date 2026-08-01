@@ -53,6 +53,14 @@ overview は面②のコーパス横断ベクトル検索まで走るため、�
 agent 側 ID（`comp_001` 等）でも呼べるよう `refs.resolve_with_agent_id` を通す（agent 側 ID は
 必ず `document_id` スコープ内で解決される）。権限ゲート・fail-soft の作法は overview と同型。
 
+evidence / derivation の第一級要素化（本増分、設計書 §16、migration 064）: 既に文脈レンズの
+ITEM 語彙には居た `evidence` / `derivation` を `refs.py` の解決対象に加え、overview /
+context / sessions / annotations の各経路で「中心にできる」ようにした。両型は equation と
+同じく独立テーブルを持たないため **`document_id` が必須**（無ければ 404）。共通部品化
+（identity-links / standardization）の対象にはしない（`_require_identity_linkable` が 422。
+語彙の正本は `core.deliberation.schema.IDENTITY_LINKABLE_ELEMENT_TYPES`）。面②位置づけは
+両型に対応するレンズを持たないため空レーン + 事実文へ縮退する（v1・§16）。
+
 core 側（`core.deliberation`）は FastAPI を import しない。
 """
 
@@ -86,6 +94,7 @@ from core.llm_worker.history import window_history
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
+    IDENTITY_LINKABLE_ELEMENT_TYPES,
     IDENTITY_LINK_STATUS_CONFIRMED,
     IDENTITY_LINK_STATUS_REJECTED,
     SCOPE_DOCUMENT,
@@ -103,6 +112,21 @@ router = APIRouter(prefix="/deliberation", tags=["deliberation"])
 def _http_from_resolution_error(exc: ElementResolutionError) -> HTTPException:
     status = 422 if getattr(exc, "kind", "not_found") == "invalid" else 404
     return HTTPException(status_code=status, detail=str(exc))
+
+
+def _require_identity_linkable(element_type: str) -> None:
+    """共通部品（shared_part）との同一性リンク対象になり得る要素型か（fail-closed・§16）。
+
+    evidence（原文の引用そのもの）と derivation（この論文の導出手順）は「深く検討」の
+    対象にはなるが共通部品化の単位ではないため、同一性リンク系の経路では 422 を返す
+    （migration 048 の CHECK に到達させて 500 にしない。語彙の正本は
+    ``core.deliberation.schema.IDENTITY_LINKABLE_ELEMENT_TYPES``）。
+    """
+    if element_type not in IDENTITY_LINKABLE_ELEMENT_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail="この要素型は共通部品（shared_part）と結びつけられません",
+        )
 
 
 def _identity_link_response(link: dict[str, Any]) -> dict[str, Any]:
@@ -285,7 +309,7 @@ def get_element_overview(
     element_id: str,
     document_id: str | None = Query(
         default=None,
-        description="equation 要素で必須（独立テーブルを持たないため document で一意化）。"
+        description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化）。"
         "他型では無視される。",
     ),
     current_user: dict = Depends(_require_teacher),
@@ -409,7 +433,7 @@ def get_element_context(
     element_id: str,
     document_id: str | None = Query(
         default=None,
-        description="equation 要素で必須（独立テーブルを持たないため document で一意化）。"
+        description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化）。"
         "theory_claim / theory_component は agent 側 ID（comp_001 等）の解決スコープにも使う。",
     ),
     current_user: dict = Depends(_require_teacher),
@@ -469,7 +493,7 @@ class IdentityLinkCreateRequest(BaseModel):
     instance_element_id: str
     document_id: str | None = Field(
         default=None,
-        description="equation 要素で必須（refs.resolve の一意化に使う）。他型では無視される。",
+        description="equation / evidence / derivation 要素で必須（refs.resolve の一意化に使う）。他型では無視される。",
     )
     shared_part_id: str
     local_expression: dict[str, Any] = Field(default_factory=dict)
@@ -498,6 +522,7 @@ def create_identity_link(
             status_code=422,
             detail="identity link source must be a document-scoped instance element",
         )
+    _require_identity_linkable(instance_ref.element_type)
     _ensure_document_editable(instance_ref.document_id or "", current_user)
 
     try:
@@ -575,7 +600,7 @@ def list_identity_links_for_element(
     element_id: str,
     document_id: str | None = Query(
         default=None,
-        description="equation 要素で必須。他型では無視される。",
+        description="equation / evidence / derivation 要素で必須。他型では無視される。",
     ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
@@ -593,6 +618,7 @@ def list_identity_links_for_element(
             status_code=422,
             detail="use GET /shared-parts/{shared_part_id}/identity-links for shared_part elements",
         )
+    _require_identity_linkable(ref.element_type)
     _ensure_document_viewable(ref.document_id or "", current_user)
 
     links = identity_links.list_for_instance(ref.element_type, ref.element_id, ref.document_id or "")
@@ -608,7 +634,7 @@ def list_shared_part_candidates_for_element(
     element_id: str,
     document_id: str | None = Query(
         default=None,
-        description="equation 要素で必須。他型では無視される。",
+        description="equation / evidence / derivation 要素で必須。他型では無視される。",
     ),
     q: str = Query(
         default="",
@@ -638,6 +664,7 @@ def list_shared_part_candidates_for_element(
             status_code=422,
             detail="identity link source must be a document-scoped instance element",
         )
+    _require_identity_linkable(ref.element_type)
     _ensure_document_viewable(ref.document_id or "", current_user)
 
     domain_key = dialogue.document_domain_key(ref.document_id or "")
@@ -727,7 +754,7 @@ class SessionCreateRequest(BaseModel):
     element_id: str
     document_id: str | None = Field(
         default=None,
-        description="equation 要素で必須（refs.resolve の一意化に使う）。他型では無視される。",
+        description="equation / evidence / derivation 要素で必須（refs.resolve の一意化に使う）。他型では無視される。",
     )
     title: str = ""
 
@@ -969,7 +996,7 @@ def list_element_annotations(
     element_id: str,
     document_id: str | None = Query(
         default=None,
-        description="equation 要素で必須（独立テーブルを持たないため document で一意化)。"
+        description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化)。"
         "他型では無視される。",
     ),
     current_user: dict = Depends(_require_teacher),

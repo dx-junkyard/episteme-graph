@@ -1,6 +1,6 @@
 """原稿スタジオ「根拠リンク」ペイン改善（Phase 0 重複解消・双方向化 / Phase 1 上位下位
-コンテキストの遅延ロード / Phase 2 論理要素単位の構造アウトライン）に対する静的
-ガードレール。
+コンテキストの遅延ロード / Phase 2 論理要素単位の構造アウトライン / 統一パーツカードへの
+収斂 = admin_ux_issues_2026-08-01.md §3.3 Phase 3）に対する静的ガードレール。
 
 対象は `frontend/public/js/admin-lecture-studio.js` と `frontend/public/css/styles.css`
 のみ（バックエンドの `/context` エンドポイントは並行作業の別担当なので、本テストは
@@ -13,7 +13,12 @@
 - Phase 0-2: 右カードヘッダが開閉トグルとして配線され、展開時に左ドラフトの
   `[data-evidence-ref]` へスクロール + ハイライトする（双方向化）。
 - Phase 1: 展開時に W層 context lens を遅延フェッチ（初回のみ・キャッシュ・コース切替の
-  ステイル応答破棄）し、上位/下位レーンと裏付けラベルを描く。source はフェッチしない。
+  ステイル応答破棄）する。source はフェッチしない。
+- §3.3 Phase 3: 取得した文脈 DTO の描画は統一パーツカード（`element-card.js` /
+  `window.ElementCard`）へ委譲する。独自のレーン HTML（旧 `ls-evidence-context-lane` 系）を
+  復活させないこと。ITEM 行の操作（「この根拠リンク内で見る」/「深く検討」）は
+  `itemActions`、カード自身の「深く検討」は `opts.onDeliberate`（解決済み element_id が
+  取れたときだけ渡す fail-closed）で載せる。
 - Phase 2: 論理要素（component）ごとのグループにカードを束ね（first-wins・「その他の根拠」
   への回収・component が無いトピックはフラット表示へフォールバック）、グループバーは
   カードヘッダとは別コントロールとして折りたたみだけを担当する。カードの
@@ -118,9 +123,13 @@ class TestCardToDraftWiring:
         css = STYLES_CSS.read_text(encoding="utf-8")
         assert ".ls-draft-evidence-focus" in css
         assert "button.ls-course-evidence-head" in css
-        assert ".ls-evidence-context-lane" in css
-        assert ".ls-context-status-source_backed" in css
-        assert ".ls-context-status-candidate" in css
+        # §3.3 Phase 3: レーン・裏付けバッジの CSS は統一パーツカード側が正本。
+        # 原稿スタジオ側は外殻カードに馴染ませる調整だけを持つ。
+        assert ".ls-evidence-context-card.element-card" in css
+        assert ".ls-evidence-context-lane" not in css
+        assert ".ls-context-status" not in css
+        assert ".element-card-status-source_backed" in css
+        assert ".element-card-status-candidate" in css
 
 
 # ---------------------------------------------------------------------------
@@ -130,12 +139,18 @@ class TestCardToDraftWiring:
 
 class TestContextLazyLoad:
     def test_kind_to_element_type_map_excludes_source(self):
-        """source は文脈フェッチ対象にしない（原文抜粋は「要素」ではない）。"""
+        """source は文脈フェッチ対象にしない（kind='source' の根拠カードには evidence_id
+        でない ID — トピック概要・原文抜粋 — も混ざるため。W層設計書 §16 で evidence が
+        解決対象になっても、この forward 写像には足さない）。
+
+        判定対象はオブジェクトリテラル本体のみ（コメント行は逆写像の説明で "source" に
+        言及するため、`};` までで区切る）。
+        """
         src = _read()
         block = _block(
             src,
             "var LS_EVIDENCE_CONTEXT_ELEMENT_TYPES = {",
-            "var LS_EVIDENCE_CONTEXT_KINDS = {",
+            "};",
         )
         assert "component: \"theory_component\"" in block
         assert "claim: \"theory_claim\"" in block
@@ -145,16 +160,28 @@ class TestContextLazyLoad:
 
     def test_reverse_map_defined_for_local_jump(self):
         src = _read()
-        block = _block(src, "var LS_EVIDENCE_CONTEXT_KINDS = {", "var LS_CONTEXT_STATUS_LABELS = {")
+        block = _block(
+            src, "var LS_EVIDENCE_CONTEXT_KINDS = {", "function lsEvidenceContextElementType(kind) {"
+        )
         assert "theory_component:" in block
         assert "theory_claim:" in block
+        # §16: W層が返す evidence ITEM は同一トピックの出典カード（kind='source'、
+        # target_id = evidence_id）と突合できる。
+        assert "evidence: \"source\"," in block
 
     def test_relation_status_labels_are_japanese(self):
+        """段階ラベルの正本は element-vocab.js（ElementVocab.statusLabel）で、描画は
+        統一パーツカードが行う（admin_ux_issues_2026-08-01.md §3.3 Phase 0/3）。
+        原稿スタジオ側は独自のラベル辞書・バッジ関数を一切持たない。"""
         src = _read()
-        block = _block(src, "var LS_CONTEXT_STATUS_LABELS = {", "function lsEvidenceContextElementType(kind) {")
-        assert "出典に裏付け" in block
-        assert "教員確定" in block
-        assert "AI候補" in block
+        assert "LS_CONTEXT_STATUS_LABELS" not in src
+        assert "function lsContextStatusLabel" not in src
+        assert "function lsContextStatusBadgeHtml" not in src
+        vocab = (ROOT / "frontend" / "public" / "js" / "element-vocab.js").read_text(
+            encoding="utf-8"
+        )
+        for label in ("出典に裏付け", "教員確定", "AI候補"):
+            assert label in vocab, label
 
     def test_fetch_hits_context_endpoint_with_document_id(self):
         src = _read()
@@ -190,49 +217,111 @@ class TestContextLazyLoad:
         assert "コンテキストを取得できませんでした。" in block
         assert ".catch(function () {" in block
 
-    def test_lanes_render_upper_and_lower_with_status_badge(self):
+    def test_context_is_rendered_by_the_unified_element_card(self):
+        """§3.3 Phase 3: 取得した DTO はそのまま ElementCard へ渡す（カードは独自の
+        取得をしない・呼び出し側は独自のレーン HTML を組まない）。"""
         src = _read()
-        block = _block(src, "function lsRenderEvidenceContext(topic, item, container, data) {", "function lsEvidenceContextLocalMatch(")
+        block = _block(
+            src,
+            "function lsRenderEvidenceContext(topic, item, container, data) {",
+            "// 同一トピックの根拠リンクに対応アイテムがあるか。",
+        )
+        assert "window.ElementCard.mount(" in block
+        assert "lsEvidenceContextCardOpts(topic, item, data.focus || {})" in block
+        # カード未読み込みは事実文へ縮退する（独自 HTML の二重実装を持たない）
+        assert "if (!window.ElementCard) {" in block
+        assert "lsEvidenceContextFactHtml(" in block
+
+    def test_bespoke_lane_renderers_are_gone(self):
+        """独自レーン HTML（旧 ls-evidence-context-lane 系）を復活させないこと。"""
+        src = _read()
+        for name in (
+            "function lsEvidenceContextLaneHtml",
+            "function lsEvidenceContextItemHtml",
+            "function lsBindEvidenceContextActions",
+            "function lsRevealEvidenceDeliberateButton",
+        ):
+            assert name not in src, name
+        # コメント（撤去の申し送り）は残るのでコード行だけを見る。
+        code = "\n".join(
+            line for line in src.splitlines() if not line.strip().startswith("//")
+        )
+        for marker in (
+            "ls-evidence-context-lane",
+            "ls-evidence-context-item",
+            "ls-evidence-context-role",
+            "ls-evidence-context-notes",
+            "data-context-jump",
+            "data-context-deliberate",
+        ):
+            assert marker not in code, marker
+
+    def test_card_opts_keep_lane_titles_and_variant(self):
+        src = _read()
+        block = _block(
+            src,
+            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsRenderEvidenceContext(",
+        )
+        assert "VARIANT_EDITABLE" in block
         assert "上位（この要素が支えるもの）" in block
         assert "下位（この要素を支えるもの）" in block
-        assert "lsContextStatusBadgeHtml(ctxItem.relation_status)" in block
-        assert "relation_label" in block
-        assert "一般には: " in block
-
-    def test_unidentified_role_is_not_rendered(self):
-        src = _read()
-        block = _block(src, "function lsRenderEvidenceContext(topic, item, container, data) {", "function lsEvidenceContextLaneHtml(")
-        assert 'roleStatus !== "unidentified"' in block
+        assert "renderMath: lsRenderKatex" in block
 
     def test_local_match_uses_id_then_prefix_heuristic(self):
         src = _read()
-        block = _block(src, "function lsEvidenceContextLocalMatch(topic, ctxItem) {", "function lsBindEvidenceContextActions(")
+        block = _block(
+            src,
+            "function lsEvidenceContextLocalMatch(topic, ctxItem) {",
+            "// 右ペイン根拠カードの配線",
+        )
         assert "lsEvidenceItemByRef(topic, kind, ctxItem.element_id)" in block
         assert "indexOf(label) === 0" in block
 
-    def test_item_navigation_prefers_pane_jump_then_deliberation(self):
+    def test_item_actions_prefer_pane_jump_then_deliberation(self):
+        """ITEM 行の操作は itemActions に載る。ローカル対応があれば「この根拠リンク内で
+        見る」、無ければ（かつ W層で開けるなら）「深く検討」。両者は排他。"""
         src = _read()
-        block = _block(src, "function lsEvidenceContextItemHtml(topic, ctxItem) {", "function lsEvidenceContextLocalMatch(")
-        assert "data-context-jump=" in block
+        block = _block(
+            src,
+            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsRenderEvidenceContext(",
+        )
+        assert "itemActions:" in block
+        assert "この根拠リンク内で見る" in block
+        assert "lsFocusEvidence(match.key)" in block
+        # 「深く検討」は対応が無い ITEM のみ（排他条件）
+        assert "if (matchOf(ctxItem)) return false;" in block
         assert "ctxItem.navigable && ctxItem.element_id && window.Deliberation" in block
-        assert 'data-ui-anchor="lecture-studio.component-deliberate"' in block
+        assert 'anchor: "lecture-studio.component-deliberate"' in block
 
     def test_deliberation_open_uses_document_and_title_options(self):
         src = _read()
-        block = _block(src, "function lsBindEvidenceContextActions(container) {", "function lsRevealEvidenceDeliberateButton(")
+        block = _block(
+            src,
+            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsRenderEvidenceContext(",
+        )
         assert "window.Deliberation.openElement(" in block
         assert "documentId:" in block
         assert "title:" in block
 
-    def test_footer_deliberate_button_hidden_until_focus_resolved(self):
+    def test_card_deliberate_action_is_fail_closed_on_resolution(self):
+        """カード自身の「深く検討」は解決済み element_id が取れたときだけ渡す。
+        外殻カードに hidden ボタンを置く旧方式（lsRevealEvidenceDeliberateButton）は撤去。"""
         src = _read()
-        html_block = _block(src, "function lsCourseEvidenceHtml(topic) {", "function lsFocusEvidence(key) {")
-        assert "data-evidence-deliberate=" in html_block
-        assert "hidden>深く検討" in html_block
-        reveal = _block(src, "function lsRevealEvidenceDeliberateButton(container, item, focus) {", "// 右ペイン根拠カードの配線")
-        assert "focus.element_id" in reveal
-        assert "btn.hidden = true" in reveal
-        assert "!window.Deliberation" in reveal
+        html_block = _block(
+            src, "function lsCourseEvidenceHtml(topic) {", "function lsFocusEvidence(key) {"
+        )
+        assert "data-evidence-deliberate=" not in html_block
+        block = _block(
+            src,
+            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsRenderEvidenceContext(",
+        )
+        assert "if (!elementType || !elementId) return opts;" in block
+        assert "opts.onDeliberate = function () {" in block
+        assert 'opts.deliberateAnchor = "lecture-studio.component-deliberate";' in block
 
 
 # ---------------------------------------------------------------------------
@@ -407,11 +496,15 @@ class TestNoRawNumbers:
         assert "confidence" not in code
 
     def test_context_status_badge_only_emits_stage_labels(self):
-        src = _read()
-        block = _block(src, "function lsContextStatusBadgeHtml(status) {", "function lsEvidenceContextFactHtml(")
-        assert "LS_CONTEXT_STATUS_LABELS[status]" in block
-        # マップに無い値は何も描かない（生の内部語彙・数値を出さない）
-        assert 'if (!label) return "";' in block
+        """段階ラベル・バッジは統一パーツカードが element-vocab.js 経由で描き、
+        マップに無い値は何も描かない（生の内部語彙・数値を出さない）。"""
+        card = (ROOT / "frontend" / "public" / "js" / "element-card.js").read_text(
+            encoding="utf-8"
+        )
+        assert "vocabStatusLabel" in card
+        assert "confidence" not in "\n".join(
+            line for line in card.splitlines() if not line.strip().startswith(("//", "*", "/*"))
+        )
 
 
 # ---------------------------------------------------------------------------

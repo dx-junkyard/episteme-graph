@@ -315,18 +315,52 @@
     });
   }
 
+  // vision ステージ（図の解析＝apparatus_semantics）はこのテーブルに載せない。
+  // vision の指定はパネル上部の専用選択欄「図の解析（vision）」に一本化した
+  // （docs/architecture/admin_ux_issues_2026-08-01.md §1.5）。同じ1ステージを2つの UI が
+  // 指していると、どちらが勝つかが画面に出ず、「図面・画像を解析する」が off のときに
+  // 効かない設定を置けてしまう。このテーブルはテキスト系ステージの微調整専用。
+  // バックエンドの /pipeline-stages は vision ステージを返し続ける（除外はフロント側）。
+  function _textStagesForTable() {
+    var out = [];
+    if (!mtStagesList) return out;
+    mtStagesList.forEach(function (stage) {
+      if (stage && stage.vision) {
+        // UI から消えた設定を黙って送らない（残留した run-only 上書きは取り除く）。
+        if (stage.feature && mtStagesOverrides.hasOwnProperty(stage.feature)) {
+          delete mtStagesOverrides[stage.feature];
+        }
+        return;
+      }
+      out.push(stage);
+    });
+    return out;
+  }
+
+  // feature キーが vision ステージのものかを判定する（getUploadModels の防御用）。
+  function _isVisionStageFeature(feature) {
+    if (!mtStagesList) return false;
+    for (var i = 0; i < mtStagesList.length; i++) {
+      var stage = mtStagesList[i];
+      if (stage && stage.vision && stage.feature === feature) return true;
+    }
+    return false;
+  }
+
   // ステージ別テーブル本体を描画する。各行の既定値は「継承（そのステージの実効モデル）」で、
   // 変更した行だけ mtStagesOverrides に積む（run-only。scope='user' には保存しない）。
   function _renderMaterialsStagesBody() {
     var bodyEl = document.getElementById("llm-model-stages-body");
     if (!bodyEl) return;
-    if (!mtStagesList || !mtStagesList.length) {
+    var stages = _textStagesForTable();
+    if (!stages.length) {
       bodyEl.innerHTML = '<div style="font-size:12px;color:var(--color-text-tertiary)">ステージ情報がありません。</div>';
       return;
     }
+    // テキスト系ステージだけを並べるので、選択肢は pipeline カタログ1本で足りる。
+    var scene = mtCatalog.pipeline;
     var html = '<table style="width:100%;font-size:12px;margin-top:4px;border-collapse:collapse"><tbody>';
-    mtStagesList.forEach(function (stage) {
-      var scene = stage.vision ? mtCatalog.vision : mtCatalog.pipeline;
+    stages.forEach(function (stage) {
       html += "<tr>" +
         '<td style="padding:2px 8px 2px 0;color:var(--color-text-secondary)">' + escHtml(stage.label) + "</td>" +
         '<td><select class="llm-model-stage-select" data-feature="' + escHtml(stage.feature) + '">' +
@@ -337,7 +371,9 @@
     });
     html += "</tbody></table>" +
       '<p style="font-size:11px;color:var(--color-text-tertiary);margin:6px 0 0">' +
-        "ここでの変更は今回の実行だけに適用され、既定としては保存されません。</p>";
+        "ここでの変更は今回の実行だけに適用され、既定としては保存されません。" +
+        "図の解析（vision）のモデルはこの表には出ません（「図面・画像を解析する」を選ぶと" +
+        "上に表示される「図の解析（vision）」で選びます）。</p>";
     bodyEl.innerHTML = html;
 
     var selects = bodyEl.querySelectorAll(".llm-model-stage-select");
@@ -472,8 +508,10 @@
     }
     // ステージ別に指定する（詳細）で変更した行だけ pipeline:<stage> キーとして乗せる
     // （run-only。§6.1「ステージ別の選択はその実行だけ」）。
+    // vision ステージのキーはテーブルから外したので送らない
+    // （docs/architecture/admin_ux_issues_2026-08-01.md §1.5。vision は "pipeline.vision" 1本）。
     for (var feature in mtStagesOverrides) {
-      if (mtStagesOverrides.hasOwnProperty(feature)) {
+      if (mtStagesOverrides.hasOwnProperty(feature) && !_isVisionStageFeature(feature)) {
         models[feature] = mtStagesOverrides[feature];
       }
     }

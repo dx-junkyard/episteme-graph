@@ -77,8 +77,10 @@ class TestAdminUiAnchorsModule:
         #   lecture-studio.insert-figure / .figure-suggestions{,-generate} /
         #   .stumble-tab-figures / .figure-studio-{modal,send,adopt}
         #   + 生成図のライフサイクル UI（§7.1b / §7.4）の4件:
-        #     .figure-studio-{insert,caption,retire,restore}）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 240
+        #     .figure-studio-{insert,caption,retire,restore}）
+        # + 教材行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）の1件:
+        #   materials.row-more-menu。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 241
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""
