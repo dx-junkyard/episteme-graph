@@ -222,9 +222,13 @@ class TestTravelIsFailClosed:
 
 class TestNoDisplayRegression:
     def test_math_renderer_is_injected(self):
+        """数式レンダラは注入されたまま。ただし TeX と判定できる文字列だけを通す
+        （EC2, equation_context_panel_display_design.md — KaTeX の throwOnError:false は
+        平文・壊れた TeX を赤いエラーとして描いてしまうため）。"""
         src = _read(APP_JS)
         block = _block(src, "function learnerElementCardOpts(onCenter)", "\n  }\n")
-        assert "renderMath: renderMaterialKatex" in block
+        assert "renderMaterialKatex(expr, display)" in block
+        assert "looksLikeRenderableTex(expr)" in block
         assert "escapeHtml: escHtml" in block
 
     def test_component_rich_projection_is_kept_next_to_the_card(self):

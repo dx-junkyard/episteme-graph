@@ -9756,6 +9756,10 @@ body.admin-inspect-mode textarea:disabled {
   color: var(--color-text-primary);
   font-size: 13px;
   line-height: 1.6;
+  /* 数式カードの本文は「役割 / 意味の要約 / 記号の意味」を改行で並べる
+     （equation_context_panel_display_design.md §3）。ツールチップ本文
+     （.inspect-tooltip-body）と同じ扱いにする。 */
+  white-space: pre-wrap;
 }
 
 .element-card-formula {

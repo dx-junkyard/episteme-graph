@@ -808,3 +808,138 @@ class TestGuardrails:
         """candidate 除外が「表示可能ホワイトリスト」ではなく candidate の明示除外で
         実装されていても、可視語彙に candidate が含まれないことを固定する。"""
         assert "candidate" not in element_context._LEARNER_VISIBLE_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# EC1〜EC5: 数式「文脈を見る」パネルの表示是正
+# docs/features/equation_context_panel_display_design.md
+# ---------------------------------------------------------------------------
+
+
+class TestEquationPanelDisplay:
+    """W層 ``_equation_label`` は plain_text の無い式で latex を採用し 80 字で
+    切り詰めるため、focus.label / intrinsic_summary に「コマンド途中で切れた TeX」が
+    入る。KaTeX に渡せば赤いエラー、素で出せば読めない文字列にしかならないので、
+    学習者向け射影で落とす（式そのものは教材本文に整形表示されている）。
+    """
+
+    _TRUNCATED_TEX = (
+        "\\begin{aligned} \\delta(t, {\\bm{x}}) {} \\overset{\\mathrm{}}{{}:={}}{} \\frac{\\rho("
+    )
+
+    def test_truncated_tex_is_dropped_from_label_and_summary(self):
+        focus = element_context._project_focus(
+            {"label": self._TRUNCATED_TEX, "intrinsic_summary": self._TRUNCATED_TEX},
+            element_context.ELEMENT_TYPE_EQUATION,
+            "eq_tex_b14",
+        )
+        assert "\\begin" not in focus["label"]
+        assert "\\begin" not in focus["intrinsic_summary"]
+
+    def test_synthetic_id_yields_empty_label(self):
+        """EC1: 合成 ID は見出しにしない（種別チップだけになる）。"""
+        focus = element_context._project_focus(
+            {"label": self._TRUNCATED_TEX, "intrinsic_summary": self._TRUNCATED_TEX},
+            element_context.ELEMENT_TYPE_EQUATION,
+            "eq_tex_b14",
+        )
+        assert focus["label"] == ""
+
+    def test_paper_equation_number_is_kept_as_label(self):
+        focus = element_context._project_focus(
+            {"label": self._TRUNCATED_TEX, "intrinsic_summary": self._TRUNCATED_TEX},
+            element_context.ELEMENT_TYPE_EQUATION,
+            "eq_2_7",
+        )
+        assert focus["label"] == "eq_2_7"
+
+    def test_readable_reading_is_preserved(self):
+        """読み下し（plain_text 由来）は TeX ではないので残す。"""
+        focus = element_context._project_focus(
+            {"label": "デルタは密度コントラスト", "intrinsic_summary": "デルタは密度コントラスト"},
+            element_context.ELEMENT_TYPE_EQUATION,
+            "eq_2_7",
+        )
+        assert focus["label"] == "デルタは密度コントラスト"
+        assert focus["intrinsic_summary"] == "デルタは密度コントラスト"
+
+    def test_explanatory_fields_come_from_the_equation_record(self):
+        """EC5: ホバーと同じ材料（役割 / 意味の要約 / 記号の意味）を focus に載せる。"""
+        focus = element_context._project_focus(
+            {"label": self._TRUNCATED_TEX, "intrinsic_summary": self._TRUNCATED_TEX},
+            element_context.ELEMENT_TYPE_EQUATION,
+            "eq_2_7",
+            equation_record={
+                "equation_id": "eq_2_7",
+                "semantics": {
+                    "role_in_argument": "definition",
+                    "summary": "密度揺らぎの定義",
+                    "defined_symbols": [
+                        {"symbol": "\\delta", "meaning": "物質密度揺らぎ"},
+                        {"symbol": "k"},  # meaning 無しは落とす
+                    ],
+                },
+            },
+        )
+        assert focus["role_in_argument"] == "definition"
+        assert focus["semantic_kind"] == "密度揺らぎの定義"
+        assert focus["symbols"] == [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}]
+
+    def test_explanatory_fields_absent_when_no_record(self):
+        """材料が無ければキーごと出さない（推測で埋めない）。"""
+        focus = element_context._project_focus(
+            {"label": "", "intrinsic_summary": ""},
+            element_context.ELEMENT_TYPE_EQUATION,
+            "eq_2_7",
+        )
+        assert "role_in_argument" not in focus
+        assert "symbols" not in focus
+
+    def test_lane_equation_label_drops_tex(self):
+        """EC1: 上位・下位レーンの相手式ラベルも同じ経路で TeX になる。"""
+        item = element_context._project_item({
+            "element_type": "equation",
+            "element_id": "eq_tex_b16",
+            "label": self._TRUNCATED_TEX,
+            "relation_label": "につながる",
+            "relation_status": element_context.CONTEXT_STATUS_SOURCE_BACKED,
+        })
+        assert "\\begin" not in item["label"]
+        assert item["label"] == "関連する数式"
+        assert item["relation_label"] == "につながる"
+
+    def test_derivation_sentence_with_internal_ids_is_replaced(self):
+        """EC3: ID を埋め込んだ事実文も遮る。関係の意味は保持する。"""
+        item = element_context._project_item({
+            "element_type": "derivation",
+            "element_id": "derivation_eq_tex_b16",
+            "label": "導出「derivation_eq_tex_b16」のステップ「step_001」",
+            "relation_label": "の導出に属する",
+            "relation_status": element_context.CONTEXT_STATUS_SOURCE_BACKED,
+        })
+        assert "derivation_eq_tex_b16" not in item["label"]
+        assert "step_001" not in item["label"]
+        assert item["label"] == "導出の流れ"
+        assert item["relation_label"] == "の導出に属する"
+
+    def test_system_derivation_sentence_is_replaced(self):
+        item = element_context._project_item({
+            "element_type": "derivation",
+            "element_id": "system_derivation_0001",
+            "label": "導出「system_derivation_0001」のステップ「sys_001_step_1」",
+            "relation_label": "の導出に属する",
+            "relation_status": element_context.CONTEXT_STATUS_SOURCE_BACKED,
+        })
+        assert "system_derivation_0001" not in item["label"]
+        assert "sys_001_step_1" not in item["label"]
+
+    def test_human_derivation_label_is_not_touched(self):
+        """内部 ID を含まない導出ラベルはそのまま残す（過剰置換しない）。"""
+        item = element_context._project_item({
+            "element_type": "derivation",
+            "element_id": "derivation_eq_tex_b16",
+            "label": "線形化から成長方程式までの導出",
+            "relation_label": "の導出に属する",
+            "relation_status": element_context.CONTEXT_STATUS_SOURCE_BACKED,
+        })
+        assert item["label"] == "線形化から成長方程式までの導出"

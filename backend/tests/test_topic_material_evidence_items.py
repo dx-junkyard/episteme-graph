@@ -429,3 +429,213 @@ class TestGetTopicMaterialResponse:
 
         resp = get_topic_material("c1", "topic-1", {"id": "u1"})
         assert resp.chunks[0].evidence_items == []
+
+
+class TestEquationExplanatoryProjection:
+    """数式の説明材料（役割 / 意味の要約 / 記号の意味）の投影。
+
+    設計正本: docs/features/equation_hover_content_design.md（EH1〜EH5）。
+    背景: equations.json は役割・記号の意味を持つのに、コーススナップショットへは
+    latex / plain_text / raw_text しか落ちておらず、学習画面の数式ホバーが
+    「生 TeX の再掲」しかできなかった（設計書 §1.3）。
+    """
+
+    def test_projection_flattens_nested_semantics(self):
+        from core.course_content_builder import _equation_semantic_projection
+
+        projected = _equation_semantic_projection({
+            "equation_id": "eq_2_7",
+            "semantics": {
+                "equation_type": "definition",
+                "summary": "密度揺らぎの定義",
+                "defined_symbols": [
+                    {"symbol": "\\delta", "meaning": "物質密度揺らぎ"},
+                    {"symbol": "\\bar\\rho", "meaning": "平均密度"},
+                ],
+            },
+        })
+        assert projected["role_in_argument"] == "definition"
+        assert projected["semantic_kind"] == "密度揺らぎの定義"
+        assert projected["symbols"] == [
+            {"symbol": "\\delta", "meaning": "物質密度揺らぎ"},
+            {"symbol": "\\bar\\rho", "meaning": "平均密度"},
+        ]
+
+    def test_symbols_without_meaning_are_dropped(self):
+        """EH2: 意味が解決できていない記号を推測で埋めない。"""
+        from core.course_content_builder import _equation_semantic_projection
+
+        projected = _equation_semantic_projection({
+            "semantics": {
+                "equation_type": "relation",
+                "defined_symbols": [{"symbol": "k"}, {"symbol": "P", "meaning": "パワースペクトル"}],
+            },
+        })
+        assert projected["symbols"] == [{"symbol": "P", "meaning": "パワースペクトル"}]
+
+    def test_role_derived_from_equation_type_when_missing(self):
+        from core.course_content_builder import _equation_semantic_projection
+
+        projected = _equation_semantic_projection({
+            "semantics": {"equation_type": "transformation", "input_equation_ids": ["eq_1"]},
+        })
+        assert projected["role_in_argument"] == "derived"
+
+    def test_no_semantics_yields_empty_role_not_a_guess(self):
+        """EH2: equation_type が無い式（チャンク由来）に既定の「前提」を貼らない。"""
+        from core.course_content_builder import _equation_semantic_projection
+
+        projected = _equation_semantic_projection({"latex": "a=b"})
+        assert projected["role_in_argument"] == ""
+        assert projected["semantic_kind"] == ""
+        assert projected["symbols"] == []
+
+    def test_projection_carries_no_raw_numbers(self):
+        """EH4: confidence 等の生数値を投影に持ち込まない。"""
+        from core.course_content_builder import _equation_semantic_projection
+
+        projected = _equation_semantic_projection({
+            "semantics": {"equation_type": "result", "confidence": 0.91, "summary": "結果"},
+            "confidence": 0.42,
+        })
+        assert "confidence" not in projected
+
+    def test_content_blocks_carry_explanatory_fields(self):
+        from core.course_content_builder import _content_blocks
+
+        blocks = _content_blocks("", [], [], [{
+            "equation_id": "eq_2_7",
+            "latex": "\\delta = 1",
+            "semantics": {
+                "equation_type": "definition",
+                "summary": "密度揺らぎの定義",
+                "defined_symbols": [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}],
+            },
+        }], [])
+        item = next(b for b in blocks if b["type"] == "equations")["items"][0]
+        assert item["role_in_argument"] == "definition"
+        assert item["semantic_kind"] == "密度揺らぎの定義"
+        assert item["symbols"] == [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}]
+
+    def test_evidence_links_carry_role_and_symbols(self):
+        from core.course_content_builder import _topic_evidence_links
+
+        links = _topic_evidence_links([], [{
+            "equation_id": "eq_2_7",
+            "latex": "\\delta = 1",
+            "semantics": {
+                "equation_type": "definition",
+                "summary": "密度揺らぎの定義",
+                "defined_symbols": [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}],
+            },
+        }], {}, {}, "high")
+        link = next(link for link in links if link["kind"] == "equation")
+        assert link["role_in_argument"] == "definition"
+        assert link["symbols"] == [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}]
+
+    def test_tex_like_summary_never_leaks_into_equation_link(self):
+        """EH1: semantics.summary が TeX 混じりでも summary には残さない。
+
+        equation 分岐は必ず latex= を渡すため、TeX ガードが「latex 未指定のときだけ」
+        だと素通りし、link.summary → ホバー本文に生 TeX が出る（レビュー指摘）。
+        """
+        from core.course_content_builder import _topic_evidence_links
+
+        links = _topic_evidence_links([], [{
+            "equation_id": "eq_2_7",
+            "latex": "\\delta = 1",
+            "semantics": {
+                "equation_type": "definition",
+                "summary": "\\begin{aligned} x = y \\end{aligned}",
+            },
+        }], {}, {}, "high")
+        link = next(link for link in links if link["kind"] == "equation")
+        assert link["summary"] == ""
+        # latex は元の式のまま（TeX 風 summary で上書きしない）。
+        assert link["latex"] == "\\delta = 1"
+        assert "\\begin{aligned}" not in link["summary"]
+
+    def test_stored_tex_summary_is_dropped_at_read_time(self):
+        """EH1/EH2: リンク生成時ガード導入前に freeze された既存コースの防衛。
+
+        既存スナップショットの evidence_link には TeX 混じり summary が保存され得る。
+        読み取り時（build_topic_evidence_items）にも落とさないと、コースを再構築する
+        まで数式ホバーの「意味の要約」行に生 TeX が出続ける。
+        """
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = {
+            "evidence_links": [{
+                "kind": "equation",
+                "target_id": "eq_tex_b14",
+                "summary": "\\begin{aligned} \\delta := \\frac{\\rho-\\bar\\rho}{\\bar\\rho} \\end{aligned}",
+                "latex": "\\delta := \\frac{\\rho-\\bar\\rho}{\\bar\\rho}",
+            }],
+        }
+        items = build_topic_evidence_items(topic)
+        item = next(i for i in items if i["kind"] == "equation")
+        assert item["summary"] == ""
+        # latex 自体は本文カードの描画用に保持する（ツールチップは参照しない）。
+        assert item["latex"].startswith("\\delta")
+
+    def test_evidence_link_without_semantics_omits_empty_keys(self):
+        from core.course_content_builder import _topic_evidence_links
+
+        links = _topic_evidence_links([], [{"equation_id": "eq_9", "latex": "a=b"}], {}, {}, "high")
+        link = next(link for link in links if link["kind"] == "equation")
+        assert "symbols" not in link
+        assert link.get("role_in_argument", "") == ""
+
+
+class TestEquationDisplayTitle:
+    """EH2: 裸の内部 ID をタイトルに出さない。"""
+
+    def test_label_wins(self):
+        from core.course_content_builder import _equation_display_title
+
+        assert _equation_display_title("物質密度揺らぎの定義", "eq_tex_b14") == "物質密度揺らぎの定義"
+
+    def test_paper_equation_number_is_kept(self):
+        from core.course_content_builder import _equation_display_title
+
+        assert _equation_display_title("", "eq_2_7") == "eq_2_7"
+
+    def test_synthetic_id_falls_back_to_generic_label(self):
+        from core.course_content_builder import _equation_display_title
+
+        assert _equation_display_title("", "eq_tex_b14") == "数式"
+        assert _equation_display_title(None, "") == "数式"
+
+    def test_evidence_item_title_and_fields(self):
+        from core.course_content_builder import build_topic_evidence_items
+
+        items = build_topic_evidence_items({
+            "content_blocks": [{
+                "type": "equations",
+                "items": [{
+                    "equation_id": "eq_tex_b14",
+                    "latex": "\\delta = 1",
+                    "role_in_argument": "definition",
+                    "semantic_kind": "密度揺らぎの定義",
+                    "symbols": [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}],
+                }],
+            }],
+        })
+        item = next(i for i in items if i["kind"] == "equation")
+        assert item["title"] == "数式"
+        assert item["role_in_argument"] == "definition"
+        assert item["symbols"] == [{"symbol": "\\delta", "meaning": "物質密度揺らぎ"}]
+
+    def test_summary_is_never_the_latex(self):
+        """EH1: content_blocks 経路の summary に latex を流し込まない。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        items = build_topic_evidence_items({
+            "content_blocks": [{
+                "type": "equations",
+                "items": [{"equation_id": "eq_9", "latex": "\\frac{a}{b}"}],
+            }],
+        })
+        item = next(i for i in items if i["kind"] == "equation")
+        assert item["summary"] == ""
+        assert item["latex"] == "\\frac{a}{b}"  # 本文カード用には保持する

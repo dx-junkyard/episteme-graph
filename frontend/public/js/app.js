@@ -3675,11 +3675,50 @@
   // ツールチップに出す {label, body} を作る。フィールド名の形が異なる2系統
   // （title/summary 系と caption/explanation 系）を緩く正規化するだけで、
   // 新しい取得は一切行わない（IH2）。
+  //
+  // **要素そのものを再掲しない**（EH1, docs/features/equation_hover_content_design.md）:
+  // 数式は本文カードが KaTeX で整形表示しているので、latex / raw_text をここに出すと
+  // 「未レンダリングの同じ式」という劣化コピーにしかならない。ホバーが答えるのは
+  // 「この式は何で、なぜここにあるか」だけ — 役割 / 意味の要約 / 記号の意味 / 読み下し。
+  // 表示できる材料が何も無ければ null を返し、呼び出し側が IH8 の固定文へ落とす。
+  // 数式を*読むための*材料を行に組み立てる共通関数。ホバー（evidence_item 由来）と
+  // 「文脈を見る」パネル（element_context の focus 由来）が**同じことを言う**ための
+  // 単一実装（EC5, docs/features/equation_context_panel_display_design.md §3）。
+  // 入力は {role_in_argument, semantic_kind|summary|explanation, symbols, plain_text}。
+  function equationExplanatoryLines(src, skipText) {
+    var lines = [];
+    if (!src) return lines;
+    // 役割（A層 role_in_argument の統制語彙 → 表示名は ElementVocab が正本）。
+    var vocab = window.ElementVocab;
+    var roleLabel = vocab && vocab.equationRoleLabel ? vocab.equationRoleLabel(src.role_in_argument) : "";
+    if (roleLabel) lines.push("この節での役割: " + roleLabel);
+    // 意味の要約。evidence_item は summary / semantic_kind、element_context の focus は
+    // semantic_kind（無ければ W層の読み下し intrinsic_summary）を持つ。
+    var text = src.explanation || src.summary || src.semantic_kind || src.intrinsic_summary
+      || src.caption || "";
+    if (text && text !== skipText) lines.push(text);
+    // 記号の意味（意味が解決できている記号だけ。最大4件）。
+    var symbols = [];
+    var rawSymbols = src.symbols || [];
+    for (var i = 0; i < rawSymbols.length && symbols.length < 4; i++) {
+      var sym = rawSymbols[i];
+      if (sym && sym.symbol && sym.meaning) symbols.push(sym.symbol + ": " + sym.meaning);
+    }
+    if (symbols.length) lines.push("記号 — " + symbols.join(" / "));
+    // 読み下し（音声用に生成済みの plain_text。式が読めない学習者への補助）。
+    if (src.plain_text && src.plain_text !== text) lines.push("読み: " + src.plain_text);
+    return lines;
+  }
+
   function materialAnchorTooltipContent(item) {
     if (!item) return null;
     var label = item.title || item.label || item.caption || item.figure_id || item.id || "";
-    var body = item.explanation || item.summary || item.plain_text || item.caption || item.raw_text || "";
-    if (body && body === label) body = ""; // caption などがラベルと重複するだけの場合は省く
+    var body = equationExplanatoryLines(item, label).join("\n");
+    // .inspect-tooltip-body は white-space: pre-wrap なので改行で足りる。
+    // 数式は表示タイトルが常に非空（最悪「数式」）なので、説明材料が無いときに
+    // ラベル単独の空箱を出さず IH8 の固定文へ落とす（§3.1。他 kind は従来どおり
+    // タイトルのみの content を許容する）。
+    if (item.kind === "equation" && !body) return null;
     if (!label && !body) return null;
     return { label: label, body: body };
   }
@@ -5518,12 +5557,34 @@
 
   // カードの render と bind には**同一の opts** を渡さなければならない
   // （navigable チップは onCenter が設定されているときだけ描かれるため）。
+  // KaTeX に渡してよい文字列か（EC2, equation_context_panel_display_design.md）。
+  // element-card.js は equation focus の本文を無条件に renderMath へ回すが、本文には
+  // 平文（役割 / 意味の要約 / 記号の意味）が入るようになった。TeX でない文字列や
+  // 切り詰めで壊れた TeX を KaTeX（throwOnError:false）に渡すと**赤いエラーが描かれる**
+  // ため、その手前で弾く。判定の発想は backend の
+  // course_content_builder.looks_like_tex_math と同じで、波括弧の均衡検査を足してある。
+  function looksLikeRenderableTex(text) {
+    var t = String(text == null ? "" : text).trim();
+    if (!t) return false;
+    var hasEnv = /\\begin\{[a-zA-Z*]+\}/.test(t);
+    var commands = t.match(/\\[a-zA-Z]+/g) || [];
+    if (!hasEnv && commands.length < 2) return false;
+    if (hasEnv && !/\\end\{[a-zA-Z*]+\}/.test(t)) return false; // 環境が閉じていない
+    var opens = (t.match(/(^|[^\\])\{/g) || []).length;
+    var closes = (t.match(/(^|[^\\])\}/g) || []).length;
+    return opens === closes; // 切り詰めで壊れた TeX を弾く
+  }
+
   function learnerElementCardOpts(onCenter) {
     var card = window.ElementCard;
     return {
       variant: card ? card.VARIANT_READONLY : "readonly",
       escapeHtml: escHtml,
-      renderMath: renderMaterialKatex,
+      // TeX と判定できるときだけレンダラへ回す。それ以外は "" を返し、
+      // element-card 側の素のテキスト表示へ落とす（赤いエラーを出さない）。
+      renderMath: function (expr, display) {
+        return looksLikeRenderableTex(expr) ? renderMaterialKatex(expr, display) : "";
+      },
       onCenter: typeof onCenter === "function" ? onCenter : null,
     };
   }
@@ -5899,8 +5960,9 @@
   // 外側クリック・Esc）を踏襲する。
   function evidenceChipPopoverHead(kind, title) {
     var kindLabel = materialEvidenceKindLabel(kind);
+    var text = String(title == null ? "" : title).trim();
     return '<div class="src-popup-head">' +
-      '<span class="src-popup-title">' + escHtml(kindLabel) + ' ・ ' + escHtml(title || "") + '</span>' +
+      '<span class="src-popup-title">' + escHtml(text ? kindLabel + " ・ " + text : kindLabel) + '</span>' +
       '<button class="src-popup-close" aria-label="閉じる">×</button></div>';
   }
 
@@ -6319,7 +6381,9 @@
     var pop = document.createElement("div");
     pop.className = "src-popup evidence-chip-popover";
     pop.id = "src-popup";
-    pop.innerHTML = evidenceChipPopoverHead(kind, elementId) +
+    // 読み込み中は種別ラベルだけにする（内部 ID（eq_tex_b14 等）を見出しに出さない。
+    // 読める見出しは取得後に renderElementContextPanel が差し替える）。
+    pop.innerHTML = evidenceChipPopoverHead(kind, "") +
       '<div class="src-popup-body evidence-chip-popover-body">' +
         '<div class="evidence-chip-popover-loading">読み込み中…</div>' +
       '</div>';
@@ -6371,10 +6435,15 @@
       label: focus.label,
       intrinsic_summary: focus.intrinsic_summary,
     };
-    // equation の label と intrinsic_summary は同一値（context_lens の
-    // _build_equation は式本文を両方に入れる）。カード見出しと本文で同じ式を二度
-    // 出さないよう、その場合は見出しを種別チップだけにする（式本文は本文側で
-    // KaTeX 表示され、ポップオーバーの見出しにも出ている）。
+    // 数式は式そのものを再掲しない（EC1）。本文は「役割 / 意味の要約 / 記号の意味」に
+    // 差し替える（ホバーと同じ材料・同じ順序 = EC5）。サーバ側（core/element_context.py）
+    // が TeX を落として役割・記号を載せてくるので、ここは組み立てるだけ。
+    if (elementType === "equation") {
+      var eqLines = equationExplanatoryLines(focus, cardFocus.label);
+      cardFocus.intrinsic_summary = eqLines.join("\n");
+    }
+    // 旧サーバ / 旧スナップショット防御: label と intrinsic_summary が同一値のときは
+    // 見出しを種別チップだけにする（同じ文字列を二度出さない）。
     if (cardFocus.label && cardFocus.label === cardFocus.intrinsic_summary) {
       cardFocus.label = "";
     }
@@ -6401,10 +6470,14 @@
     }
     var focus = data.focus || {};
 
+    // タイトルは種別ラベル（+ 読める見出しがあるときだけ ・ で連結）。数式は
+    // サーバ側で TeX を落として式番号 or 空になっているため、生 TeX が出ることは無い
+    // （EC1）。空のときは「数式 ・ 」の宙ぶらりんを作らない。
     var headTitle = pop && pop.querySelector(".src-popup-title");
-    if (headTitle && focus.label) {
+    if (headTitle) {
       var kindLabel = materialEvidenceKindLabel(elementType);
-      headTitle.textContent = kindLabel + " ・ " + focus.label;
+      var focusLabel = typeof focus.label === "string" ? focus.label.trim() : "";
+      headTitle.textContent = focusLabel ? kindLabel + " ・ " + focusLabel : kindLabel;
     }
 
     var dto = elementContextToCardDto(elementType, data);

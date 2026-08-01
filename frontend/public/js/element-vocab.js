@@ -59,6 +59,18 @@
     candidate: "AI候補"
   };
 
+  // 数式の「論証における役割」（A層 ROLE_IN_ARGUMENT_VOCAB）の表示名。正本の語彙は
+  // src/episteme_graph/agents/equation_semantics/schema.py にあり、スナップショットには
+  // キーのまま載る（訳語を焼き込まない）。ここが唯一の訳語表。
+  // docs/features/equation_hover_content_design.md §3.1。
+  var EQUATION_ROLE_LABELS = {
+    premise: "前提",
+    definition: "定義",
+    derived: "導出結果",
+    result: "結果",
+    constraint: "制約"
+  };
+
   function lookup(table, key) {
     var raw = String(key == null ? "" : key);
     if (Object.prototype.hasOwnProperty.call(table, raw)) return table[raw];
@@ -81,9 +93,19 @@
     return "";
   }
 
+  // 未知の役割キーは "" を返す（内部語彙を画面に漏らさない。statusLabel と同じ規約）。
+  function equationRoleLabel(role) {
+    var raw = String(role == null ? "" : role);
+    if (Object.prototype.hasOwnProperty.call(EQUATION_ROLE_LABELS, raw)) {
+      return EQUATION_ROLE_LABELS[raw];
+    }
+    return "";
+  }
+
   global.ElementVocab = {
     kindLabel: kindLabel,
     elementTypeLabel: elementTypeLabel,
-    statusLabel: statusLabel
+    statusLabel: statusLabel,
+    equationRoleLabel: equationRoleLabel
   };
 })(typeof window !== "undefined" ? window : this);

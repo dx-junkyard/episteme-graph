@@ -16,6 +16,10 @@ from core.course_data import course_chapters, course_source_material_ids, course
 from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.postgres import get_session as _pg_session
+from episteme_graph.agents.equation_semantics.schema import (
+    ROLE_IN_ARGUMENT_VOCAB,
+    derive_role_in_argument,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +220,97 @@ def _equation_display_math(equation: dict) -> tuple[str | None, str | None]:
         plain_text = None
 
     return latex, plain_text
+
+
+# ── 数式の説明材料（equation_hover_content_design.md §3.1 / EH1〜EH5）─────────
+# equation_semantics の生成物は役割・記号の意味を ``semantics``（EquationSemantics）
+# 配下に持つのに、コーススナップショットへは latex / plain_text / raw_text しか
+# 落ちていなかった。そのため学習画面の数式ホバーが「生 TeX の再掲」しかできず、
+# 情報量ゼロの劣化コピーになっていた（設計書 §1.3）。ここで役割・意味要約・記号の
+# 意味を平坦化して snapshot に載せる。役割語彙とその導出規則は A層が正本なので
+# import して使い（EH5: A層は読むだけ）、日本語表示名への変換は
+# ``frontend/public/js/element-vocab.js`` が正本（スナップショットに訳語を焼かない）。
+_EQUATION_SYMBOL_LIMIT = 6
+
+# 論文の式番号（``eq_2_7`` 等）は学習者にも可読なのでタイトルに出す。``eq_tex_b14``
+# のような合成 ID はタイトルにしない（``core/element_context.py`` LE4 と同じ判断）。
+_PAPER_EQUATION_NUMBER_RE = re.compile(r"^eq[_\-.]?[0-9]", re.IGNORECASE)
+_GENERIC_EQUATION_TITLE = "数式"
+
+
+def _equation_symbol_meanings(eq: dict) -> list[dict]:
+    """式の記号 → 意味を ``[{"symbol", "meaning"}]`` にまとめる。
+
+    供給元は ``semantics.defined_symbols[].meaning``（issue #439 で SymbolRegistry
+    から投影済み）と equations.json export 形の ``symbols[]`` の両方。**意味が解決
+    できていない記号は推測で埋めずに落とす**（EH2 捏造禁止）。
+    """
+    semantics = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+    out: list[dict] = []
+    seen: set[str] = set()
+    for raw in _as_list(eq.get("symbols")) + _as_list(semantics.get("defined_symbols")):
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or "").strip()
+        meaning = str(raw.get("meaning") or "").strip()
+        if not symbol or not meaning or symbol in seen:
+            continue
+        seen.add(symbol)
+        out.append({"symbol": symbol, "meaning": _short_excerpt(meaning, limit=60)})
+        if len(out) >= _EQUATION_SYMBOL_LIMIT:
+            break
+    return out
+
+
+def _equation_semantic_projection(eq: dict) -> dict:
+    """式の「役割 / 意味の要約 / 記号の意味」をスナップショット用に平坦化する。
+
+    ``role_in_argument`` は A層の統制語彙（``ROLE_IN_ARGUMENT_VOCAB``）のまま運ぶ。
+    上流が空のときは equation_type から A層と同じ規則で導出するが、equation_type
+    自体が無い / unknown な式（チャンク由来の fallback formula 等）では **導出せず
+    空にする** — 既定値の「前提」を勝手に貼らない（EH2 捏造禁止）。
+    """
+    semantics = eq.get("semantics") if isinstance(eq.get("semantics"), dict) else {}
+    role = str(eq.get("role_in_argument") or semantics.get("role_in_argument") or "").strip()
+    if role not in ROLE_IN_ARGUMENT_VOCAB:
+        equation_type = str(semantics.get("equation_type") or eq.get("equation_type") or "").strip()
+        if equation_type and equation_type != "unknown":
+            role = derive_role_in_argument(
+                equation_type,
+                input_equation_ids=[
+                    str(i) for i in _as_list(
+                        semantics.get("input_equation_ids") or eq.get("input_equation_ids")
+                    )
+                ],
+                output_equation_ids=[
+                    str(i) for i in _as_list(
+                        semantics.get("output_equation_ids") or eq.get("output_equation_ids")
+                    )
+                ],
+            )
+        else:
+            role = ""
+    semantic_kind = str(eq.get("semantic_kind") or semantics.get("summary") or "").strip()
+    return {
+        "role_in_argument": role if role in ROLE_IN_ARGUMENT_VOCAB else "",
+        "semantic_kind": _short_excerpt(semantic_kind, limit=120) if semantic_kind else "",
+        "symbols": _equation_symbol_meanings(eq),
+    }
+
+
+def _equation_display_title(label: str | None, normalized_id: str) -> str:
+    """数式アイテムの表示タイトル（EH2: 裸の内部 ID を出さない）。
+
+    ラベルがあればそれ、無ければ論文の式番号形（``eq_2_7``）のときだけ ID を出し、
+    それ以外の合成 ID（``eq_tex_b14`` 等）は一般ラベル「数式」に落とす。
+    """
+    text = str(label or "").strip()
+    if text:
+        return text
+    norm = str(normalized_id or "").strip()
+    if norm and _PAPER_EQUATION_NUMBER_RE.match(norm):
+        return norm
+    return _GENERIC_EQUATION_TITLE
 
 
 def _fill_equation_display_math(eq: dict) -> None:
@@ -538,7 +633,7 @@ _TEX_MATH_ENV_RE = re.compile(
 _TEX_COMMAND_RE = re.compile(r"\\[a-zA-Z]+")
 
 
-def _looks_like_tex_math(text: str) -> bool:
+def looks_like_tex_math(text: str) -> bool:
     """テキストが散文ではなく生の TeX 数式かどうかを判定する。
 
     equation_quote evidence や TeX ソース由来の equation block の本文を、
@@ -556,6 +651,12 @@ def _looks_like_tex_math(text: str) -> bool:
         return False
     covered = sum(len(cmd) + 1 for cmd in commands)
     return covered >= max(10, int(len(t) * 0.2))
+
+
+# 旧称（本モジュール内の呼び出し・既存テスト用）。判定規則の正本は上の公開名で、
+# 学習者向け射影（``core/element_context.py``）もこれを import して使う
+# — TeX 判定を第2実装でコピペしない（equation_context_panel_display_design.md §5.1）。
+_looks_like_tex_math = looks_like_tex_math
 
 
 def _topic_evidence_links(
@@ -609,10 +710,13 @@ def _topic_evidence_links(
             return
         seen.add(key)
         # 生 TeX の summary を 220 字で機械的に切ると数式が途中で壊れて描画不能に
-        # なる（例: "\end{a..."）。TeX とみなせる summary は全文を latex に移し、
-        # UI に数式として描画させる（equation_quote に限らず全 kind に効く汎用ガード）。
-        if not latex and _looks_like_tex_math(summary):
-            latex = summary.strip()
+        # なる（例: "\end{a..."）。TeX とみなせる summary は latex の有無に関わらず
+        # summary から除去し（EH1: 説明欄に生 TeX を漏らさない）、latex が未指定の
+        # ときだけ latex へ移して UI に数式として描画させる（equation_quote に
+        # 限らず全 kind に効く汎用ガード）。
+        if _looks_like_tex_math(summary):
+            if not latex:
+                latex = summary.strip()
             summary = ""
         link = {
             "kind": kind,
@@ -648,6 +752,9 @@ def _topic_evidence_links(
         semantics = equation.get("semantics") if isinstance(equation.get("semantics"), dict) else {}
         # summary は生 LaTeX ではなく、意味要約 / ラベルなど人間向けの説明にする。
         eq_summary = semantics.get("summary") or equation.get("label") or ""
+        # 役割 / 意味の要約 / 記号の意味も根拠リンクに載せる（equation_hover_content_design.md
+        # §5 Phase 2）。content_blocks 側と同じ投影を使い、空の値は add() が落とす。
+        eq_semantics = _equation_semantic_projection(equation)
         add(
             "equation",
             equation.get("equation_id") or equation.get("id") or "",
@@ -656,6 +763,11 @@ def _topic_evidence_links(
             latex=equation.get("latex") or equation.get("latex_canonical") or equation.get("normalized_latex") or "",
             plain_text=equation.get("plain_text") or "",
             label=equation.get("label") or "",
+            extra={
+                "role_in_argument": eq_semantics["role_in_argument"],
+                "semantic_kind": eq_semantics["semantic_kind"],
+                "symbols": eq_semantics["symbols"] or None,
+            },
         )
 
     # claim は component の linked_claim_ids 経由で参照される。claims.json に実体が
@@ -801,6 +913,13 @@ def _topic_content_block_formulas(topic: dict) -> list[dict]:
                 "latex": item.get("latex") or "",
                 "plain_text": item.get("plain_text") or "",
                 "raw_text": item.get("raw_text") or "",
+                # equation_hover_content_design.md §5 Phase 2: 説明材料を透過する。
+                # 再生成前のコース（旧スナップショット）はキーを持たないので空になる。
+                "role_in_argument": item.get("role_in_argument") or "",
+                "semantic_kind": item.get("semantic_kind") or "",
+                "symbols": [
+                    s for s in _as_list(item.get("symbols")) if isinstance(s, dict)
+                ][:_EQUATION_SYMBOL_LIMIT],
             })
     return formulas
 
@@ -906,16 +1025,28 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
         if kind == "equation":
             norm = normalize_evidence_id(raw_id)
             formula = formula_by_norm.get(norm) or {}
+            # リンク生成時の TeX ガード導入前に freeze された既存コースの
+            # evidence_link には TeX 混じりの summary が保存され得る。読み取り時にも
+            # 落とし、ホバーの「意味の要約」行に生 TeX を出さない（EH1/EH2 —
+            # 再 freeze なしで既存スナップショットに効かせる防衛）。
+            summary = link.get("summary") or ""
+            if _looks_like_tex_math(summary):
+                summary = ""
             items.append({
                 "kind": "equation",
                 "id": norm,
-                # 生 LaTeX をタイトルに出さない（ラベル or 正規化 ID）。
-                "title": link.get("label") or formula.get("label") or norm,
-                "summary": link.get("summary") or "",
+                # 生 LaTeX をタイトルに出さない。裸の内部 ID も出さない（EH2）。
+                "title": _equation_display_title(link.get("label") or formula.get("label"), norm),
+                "summary": summary,
                 "latex": link.get("latex") or formula.get("latex") or "",
                 "plain_text": link.get("plain_text") or formula.get("plain_text") or "",
                 "raw_text": formula.get("raw_text") or "",
                 "role": link.get("support_role") or "equation",
+                # equation_hover_content_design.md §3.1: 式を*読むための*材料。
+                # ホバーはこれだけを見せ、式そのものを再掲しない（EH1）。
+                "role_in_argument": link.get("role_in_argument") or formula.get("role_in_argument") or "",
+                "semantic_kind": link.get("semantic_kind") or formula.get("semantic_kind") or "",
+                "symbols": _as_list(link.get("symbols")) or _as_list(formula.get("symbols")),
                 "confidence": link.get("confidence") or "",
             })
             continue
@@ -989,12 +1120,17 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
         items.append({
             "kind": "equation",
             "id": norm,
-            "title": formula.get("label") or norm,
-            "summary": formula.get("plain_text") or formula.get("latex") or "",
+            "title": _equation_display_title(formula.get("label"), norm),
+            # summary に latex を入れない（EH1: 数式の再掲を作らない。かつて
+            # ここが生 TeX の供給源になっていた）。意味の要約か読み下しだけを使う。
+            "summary": formula.get("semantic_kind") or formula.get("plain_text") or "",
             "latex": formula.get("latex") or "",
             "plain_text": formula.get("plain_text") or "",
             "raw_text": formula.get("raw_text") or "",
             "role": "equation",
+            "role_in_argument": formula.get("role_in_argument") or "",
+            "semantic_kind": formula.get("semantic_kind") or "",
+            "symbols": _as_list(formula.get("symbols")),
             "confidence": confidence,
         })
 
@@ -1278,6 +1414,10 @@ def _content_blocks(
             # show a reading when LaTeX is absent (e.g. needs_math_review), instead
             # of an empty "LaTeX を取得できませんでした" box.
             "raw_text": e.get("raw_text") or e.get("text"),
+            # equation_hover_content_design.md §5 Phase 2: 式を*読むための*材料
+            # （役割 / 意味の要約 / 記号の意味）。無ければ空のまま運ぶ（UI 側が
+            # IH8 の固定文へ落ちる）。
+            **_equation_semantic_projection(e),
         }
         for e in equations
     ]
@@ -1294,6 +1434,9 @@ def _content_blocks(
             "latex": latex,
             "plain_text": f.get("plain_text") or f.get("spoken") or f.get("reading") or "",
             "raw_text": f.get("raw_text") or f.get("text") or "",
+            # チャンク由来の fallback formula は equation_semantics を通っていないため
+            # 説明材料を持たない。空で運ぶ（推測で埋めない, EH2）。
+            **_equation_semantic_projection(f),
         })
     if equation_items:
         blocks.append({

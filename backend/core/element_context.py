@@ -43,6 +43,7 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core.component_context import strip_confidence
+from core.course_content_builder import looks_like_tex_math
 from core.deliberation import context_lens as context_lens_mod
 from core.deliberation.refs import document_run_artifacts, equation_records
 from core.deliberation.schema import (
@@ -126,6 +127,19 @@ _INTERNAL_ID_LABEL_RES = (
     re.compile(r"^span_[0-9]", re.IGNORECASE),           # rhetorical_role: span_001
     re.compile(r"^support:"),                             # thesis support node: support:<section>:<idx>
     re.compile(r"^node_", re.IGNORECASE),                 # graph node id
+)
+
+# ラベル**全体**ではなく「内部 ID を埋め込んだ事実文」も遮る（EC3。
+# equation_context_panel_display_design.md §1.5）。W層 ``_derivation_membership_facts``
+# は「導出「derivation_eq_tex_b16」のステップ「step_001」」のような文をラベルにするため、
+# 先頭一致の ``_INTERNAL_ID_LABEL_RES`` では検出できない。関係の意味（relation_label
+# 「の導出に属する」）は保持したまま、ラベルだけ一般ラベルへ置換する。
+_EMBEDDED_INTERNAL_ID_RE = re.compile(
+    r"derivation_[A-Za-z0-9_]+"
+    r"|system_derivation_[0-9]+"
+    r"|(?:^|[^A-Za-z0-9])sys_[0-9]+_step_[0-9]+"
+    r"|(?:^|[^A-Za-z0-9])step_[0-9]+",
+    re.IGNORECASE,
 )
 
 # ``eq_2_7`` 形は論文の式番号由来で学習者にも可読なため v1 では置換しない（設計書 §4 の裁定）。
@@ -319,12 +333,91 @@ def _is_internal_id_label(label: str, element_type: str, element_id: Any) -> boo
         return True
     if any(pattern.match(text) for pattern in _INTERNAL_ID_LABEL_RES):
         return True
+    if _EMBEDDED_INTERNAL_ID_RE.search(text):  # EC3: 文中に埋め込まれた内部 ID
+        return True
     raw_id = str(element_id or "").strip()
     return bool(raw_id) and text == raw_id
 
 
 def _generic_item_label(element_type: str) -> str:
     return _GENERIC_ITEM_LABELS.get(str(element_type or ""), _GENERIC_ITEM_LABEL_FALLBACK)
+
+
+# ── TeX 文字列の遮断（EC1/EC2, equation_context_panel_display_design.md）──────
+# W層 ``context_lens._equation_label`` は plain_text（読み下し）が無い式で latex を
+# 採用し、さらに 80 字で機械的に切り詰める。結果は「コマンド途中で切れた TeX」で、
+# KaTeX に渡せば赤いエラー、素で出せば読めない文字列にしかならない。学習者向けには
+# 式そのものを再掲する意味も無い（式は教材本文に整形表示されている）ため、
+# TeX と判定できるラベル・本文はここで落とす。
+
+
+def _equation_focus_label(label: str, element_id: str) -> str:
+    """数式 focus の見出し（EC1: TeX を出さない）。
+
+    ラベルが TeX なら捨て、``eq_2_7`` のような論文の式番号だけを残す。
+    ``eq_tex_b14`` のような合成 ID は見出しにしない（空 = 種別チップのみ）。
+    """
+    text = str(label or "").strip()
+    if text and not looks_like_tex_math(text) and not _is_internal_id_label(
+        text, ELEMENT_EQUATION, element_id
+    ):
+        return text
+    raw_id = str(element_id or "").strip()
+    if raw_id and _EQUATION_NUMBER_LABEL_RE.match(raw_id):
+        return raw_id
+    return ""
+
+
+def _equation_explanatory_fields(record: Any) -> dict:
+    """equations.json のレコードから「役割 / 意味の要約 / 記号の意味」を取り出す。
+
+    ホバー（``equation_hover_content_design.md`` §3.1）と**同じ材料**を返す（EC5）。
+    語彙キーのまま返し、日本語表示名への変換はフロント（``element-vocab.js``）に
+    委ねる。意味が解決できていない記号は落とす（推測で埋めない）。数値
+    （confidence）は載せない。
+    """
+    if not isinstance(record, dict):
+        return {}
+    semantics = record.get("semantics") if isinstance(record.get("semantics"), dict) else {}
+    out: dict[str, Any] = {}
+    role = str(record.get("role_in_argument") or semantics.get("role_in_argument") or "").strip()
+    if role:
+        out["role_in_argument"] = role
+    semantic_kind = str(record.get("semantic_kind") or semantics.get("summary") or "").strip()
+    if semantic_kind:
+        out["semantic_kind"] = semantic_kind[:120]
+    symbols: list[dict] = []
+    seen: set[str] = set()
+    raw_symbols = _json_list(record.get("symbols")) + _json_list(semantics.get("defined_symbols"))
+    for raw in raw_symbols:
+        if not isinstance(raw, dict):
+            continue
+        symbol = str(raw.get("symbol") or "").strip()
+        meaning = str(raw.get("meaning") or "").strip()
+        if not symbol or not meaning or symbol in seen:
+            continue
+        seen.add(symbol)
+        symbols.append({"symbol": symbol, "meaning": meaning[:60]})
+        if len(symbols) >= 6:
+            break
+    if symbols:
+        out["symbols"] = symbols
+    return out
+
+
+def _equation_record_in_course(element_id: str, document_id: str) -> dict | None:
+    """解決済みの数式レコードを1件読む（説明材料の取り出し用・fail-soft）。"""
+    try:
+        records = equation_records(document_id, artifacts=document_run_artifacts(document_id))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "element_context: equation record read failed for document %s", document_id, exc_info=True
+        )
+        return None
+    for record in records:
+        if isinstance(record, dict) and str(record.get("equation_id") or "") == str(element_id):
+            return record
+    return None
 
 
 def _project_item(item: dict) -> dict:
@@ -341,7 +434,11 @@ def _project_item(item: dict) -> dict:
     element_type = str(item.get("element_type") or "")
     element_id = item.get("element_id")
     label = str(item.get("label") or "")
-    if _is_internal_id_label(label, element_type, element_id):
+    # EC1/EC2: レーンの相手式ラベルも W層 ``_equation_label`` 由来なので、切り詰め
+    # TeX が混ざる。式番号があればそれ、無ければ一般ラベルへ落とす（式は再掲しない）。
+    if element_type == ELEMENT_EQUATION and looks_like_tex_math(label):
+        label = _equation_focus_label("", str(element_id or "")) or _generic_item_label(element_type)
+    elif _is_internal_id_label(label, element_type, element_id):
         label = _generic_item_label(element_type)
     navigable = (
         bool(element_id)
@@ -368,7 +465,9 @@ def _visible_items(items: Any) -> list[dict]:
     return projected[:_LANE_MAX]
 
 
-def _project_focus(focus: Any, element_type: str, element_id: str) -> dict:
+def _project_focus(
+    focus: Any, element_type: str, element_id: str, *, equation_record: Any = None
+) -> dict:
     """focus を学習者向けに射影する。
 
     ``contextual_role`` は ``contextual_role_status`` が source_backed / confirmed の
@@ -378,13 +477,25 @@ def _project_focus(focus: Any, element_type: str, element_id: str) -> dict:
     そのまま「この論文での役割」に現れる）。``provenance``（内部 ID 列）は落とす。
     """
     focus = focus if isinstance(focus, dict) else {}
+    label = str(focus.get("label") or "")
+    intrinsic_summary = str(focus.get("intrinsic_summary") or "")
+    if element_type == ELEMENT_TYPE_EQUATION:
+        # EC1/EC2: W層は latex（80字で切り詰め済み）を label / intrinsic_summary の
+        # 両方に入れる。壊れた TeX は KaTeX で赤いエラーになるだけなので落とし、
+        # 式番号（あれば）と、式を*読むための*材料に置き換える。
+        label = _equation_focus_label(label, element_id)
+        if looks_like_tex_math(intrinsic_summary):
+            intrinsic_summary = ""
     result: dict[str, Any] = {
         "element_type": element_type,
         "element_id": element_id,
         "document_id": focus.get("document_id"),
-        "label": str(focus.get("label") or ""),
-        "intrinsic_summary": str(focus.get("intrinsic_summary") or ""),
+        "label": label,
+        "intrinsic_summary": intrinsic_summary,
     }
+    if element_type == ELEMENT_TYPE_EQUATION:
+        # 役割 / 意味の要約 / 記号の意味（ホバーと同じ材料。表示名の変換はフロント）。
+        result.update(_equation_explanatory_fields(equation_record))
     role = str(focus.get("contextual_role") or "").strip()
     if role and _ROLE_INTERNAL_TOKEN_RE.search(role):
         # 上位項目のラベルが内部 ID だったため役割文に ID が混ざっている
@@ -482,7 +593,16 @@ def build_element_context(
         "available": True,
         "element_type": element_type,
         "element_id": resolved_id,
-        "focus": _project_focus(lens.get("focus"), element_type, resolved_id),
+        "focus": _project_focus(
+            lens.get("focus"),
+            element_type,
+            resolved_id,
+            equation_record=(
+                _equation_record_in_course(resolved_id, document_id)
+                if element_type == ELEMENT_TYPE_EQUATION
+                else None
+            ),
+        ),
         "upper": _visible_items(lens.get("upper")),
         "lower": _visible_items(lens.get("lower")),
         "notes": _notes(lens.get("notes")),
