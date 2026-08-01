@@ -231,8 +231,15 @@
     var analyzeImagesEl = document.getElementById("upload-analyze-images");
     var showVision = !!(analyzeImagesEl && analyzeImagesEl.checked);
 
+    // パネル冒頭の見出しは直上のサマリ行（「解析モデル: 〇〇 [変更]」）と重複させない。
+    // 閉じ方が分からなくなるのを防ぐため、見出し行の右端に明示的な [閉じる] を置く
+    // （[変更] ボタン側のラベルも開いている間は「閉じる」に切り替わる）。
     var html = '<div style="border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-top:8px">' +
-      '<div style="font-size:12.5px;font-weight:600;margin-bottom:6px;color:var(--color-text-primary)">解析モデル</div>' +
+      '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px">' +
+        '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">解析モデルを選ぶ</div>' +
+        '<button type="button" id="llm-model-panel-close" class="admin-action-btn" ' +
+          'style="padding:1px 8px;font-size:11px" title="このパネルを閉じます">閉じる</button>' +
+      "</div>" +
       '<div id="llm-model-pipeline-options">' + _buildRadioOptionsHtml(pipelineScene, "llm-model-pipeline-radio") + "</div>";
     if (showVision) {
       html += '<div style="margin-top:8px;font-size:12.5px;color:var(--color-text-secondary)">図の解析（vision）: ' +
@@ -240,10 +247,14 @@
     }
     html += '<p style="font-size:11px;color:var(--color-text-tertiary);margin:8px 0 0">' +
       "ここで選んだモデルは、あなたのアップロード・再解析の既定として保存されます（他の教員には影響しません）。</p>" +
+      // 折りたたみのトグルは <button> で描く（cursor:pointer だけの <div> は
+      // 押せる要素だと分からない）。ラベル文字列は変えない。
       '<div style="margin-top:10px">' +
-        '<div id="llm-model-stages-toggle" style="cursor:pointer;font-size:12px;color:var(--color-text-secondary)">' +
+        '<button type="button" id="llm-model-stages-toggle" class="admin-action-btn" ' +
+          'aria-expanded="' + (mtStagesOpen ? "true" : "false") + '" ' +
+          'style="padding:2px 8px;font-size:12px">' +
           (mtStagesOpen ? "▾" : "▸") + " ステージ別に指定する（詳細）" +
-        "</div>" +
+        "</button>" +
         '<div id="llm-model-stages-body"' + (mtStagesOpen ? "" : " hidden") + "></div>" +
       "</div>" +
       '<div style="margin-top:8px;display:flex;gap:8px">' +
@@ -260,6 +271,8 @@
     if (resetBtn) resetBtn.addEventListener("click", resetMaterialsSelection);
     var stagesToggle = document.getElementById("llm-model-stages-toggle");
     if (stagesToggle) stagesToggle.addEventListener("click", toggleMaterialsStages);
+    var panelCloseBtn = document.getElementById("llm-model-panel-close");
+    if (panelCloseBtn) panelCloseBtn.addEventListener("click", closeMaterialsPanel);
     if (mtStagesOpen) {
       if (mtStagesLoaded) {
         _renderMaterialsStagesBody();
@@ -276,7 +289,10 @@
     if (!bodyEl) return;
     mtStagesOpen = !mtStagesOpen;
     bodyEl.hidden = !mtStagesOpen;
-    if (toggleEl) toggleEl.textContent = (mtStagesOpen ? "▾" : "▸") + " ステージ別に指定する（詳細）";
+    if (toggleEl) {
+      toggleEl.textContent = (mtStagesOpen ? "▾" : "▸") + " ステージ別に指定する（詳細）";
+      toggleEl.setAttribute("aria-expanded", mtStagesOpen ? "true" : "false");
+    }
     if (mtStagesOpen) {
       if (mtStagesLoaded) {
         _renderMaterialsStagesBody();
@@ -339,16 +355,35 @@
     });
   }
 
-  function toggleMaterialsPanel() {
+  // サマリ行の [変更] は開閉トグルなので、開いている間はラベルを「閉じる」にする
+  // （「変更」のまま据え置くと閉じ方が分からない）。
+  function _syncMaterialsChangeBtn() {
+    var btn = document.getElementById("llm-model-change-btn");
+    if (!btn) return;
+    btn.textContent = mtPanelOpen ? "閉じる" : "変更";
+    btn.setAttribute("aria-expanded", mtPanelOpen ? "true" : "false");
+    btn.title = mtPanelOpen ? "モデル選択パネルを閉じます" : "解析モデルを選び直します";
+  }
+
+  function openMaterialsPanel() {
     var panel = document.getElementById("llm-model-panel");
     if (!panel) return;
-    mtPanelOpen = !mtPanelOpen;
-    if (mtPanelOpen) {
-      renderMaterialsPanel();
-      panel.hidden = false;
-    } else {
-      panel.hidden = true;
-    }
+    mtPanelOpen = true;
+    renderMaterialsPanel();
+    panel.hidden = false;
+    _syncMaterialsChangeBtn();
+  }
+
+  function closeMaterialsPanel() {
+    var panel = document.getElementById("llm-model-panel");
+    mtPanelOpen = false;
+    if (panel) panel.hidden = true;
+    _syncMaterialsChangeBtn();
+  }
+
+  function toggleMaterialsPanel() {
+    if (mtPanelOpen) closeMaterialsPanel();
+    else openMaterialsPanel();
   }
 
   function putMyPolicy(sceneKey, model) {
@@ -387,9 +422,7 @@
     if (statusEl) statusEl.textContent = "保存しています...";
     Promise.all(tasks).then(function () {
       loadMaterialsCatalog(function () {
-        mtPanelOpen = false;
-        var panel = document.getElementById("llm-model-panel");
-        if (panel) panel.hidden = true;
+        closeMaterialsPanel();
       });
     }).catch(function () {
       if (statusEl) statusEl.textContent = "保存に失敗しました。";
@@ -416,6 +449,7 @@
     if (!summaryEl) return;
     var changeBtn = document.getElementById("llm-model-change-btn");
     if (changeBtn) changeBtn.addEventListener("click", toggleMaterialsPanel);
+    _syncMaterialsChangeBtn();
     var analyzeImagesEl = document.getElementById("upload-analyze-images");
     if (analyzeImagesEl) {
       analyzeImagesEl.addEventListener("change", function () {

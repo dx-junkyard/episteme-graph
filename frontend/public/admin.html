@@ -460,7 +460,8 @@
               <div id="ls-more-menu" class="ls-menu" hidden>
                 <button id="ls-settings-btn" data-ui-anchor="lecture-studio.settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
                 <button id="ls-course-content-btn" data-ui-anchor="lecture-studio.course-content-btn" class="ls-menu-item" type="button" disabled><span>コース内容生成</span></button>
-                <button id="ls-audio-all-btn" data-ui-anchor="lecture-studio.audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成</span></button>
+                <!-- 「…」は押すとダイアログ（#ls-audio-lang-modal）が開き即実行ではないことを示す -->
+                <button id="ls-audio-all-btn" data-ui-anchor="lecture-studio.audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成…</span></button>
                 <!-- 音声準備確認フロー (Issue #491) §3-2: 音声生成が無効なとき、理由と次の操作を近傍に示す -->
                 <div id="ls-audio-readiness-note" class="ls-audio-readiness-note" hidden>
                   <span id="ls-audio-readiness-reason" class="ls-audio-readiness-reason"></span>
@@ -501,7 +502,9 @@
             </div>
             <div class="ls-toolbar-spacer"></div>
             <button id="ls-right-pane-toggle" data-ui-anchor="lecture-studio.right-pane-toggle" class="admin-action-btn ls-toolbar-btn" type="button" disabled>右ペインを隠す</button>
-            <button id="ls-ai-assistant-btn" data-ui-anchor="lecture-studio.ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI アシスタント</button>
+            <!-- 右下の操作アシスタント（Admin Copilot）とは別機能。こちらは編集対象の
+                 原稿を AI で書き換えるモーダル（#ls-assistant-modal）を開く。 -->
+            <button id="ls-ai-assistant-btn" data-ui-anchor="lecture-studio.ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI で書き換え</button>
             <button id="ls-save-btn" data-ui-anchor="lecture-studio.save-btn" class="admin-action-btn ls-toolbar-btn ls-save-toolbar-btn" type="button" disabled>原稿を保存</button>
           </div>
           <div class="ls-work-meta-row">
@@ -638,7 +641,7 @@
         <div id="ls-assistant-modal" class="ls-assistant-modal" hidden data-ui-anchor="lecture-studio.assistant-modal">
           <div class="ls-assistant-dialog">
             <div class="ls-assistant-head">
-              <h3>AI アシスタント</h3>
+              <h3>AI で書き換え</h3>
               <button id="ls-assistant-close" class="lecture-chat-close" type="button">&times;</button>
             </div>
             <div class="ls-assistant-body">
