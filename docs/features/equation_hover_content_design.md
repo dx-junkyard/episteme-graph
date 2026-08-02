@@ -296,6 +296,25 @@ equation 分岐）が返すのは:
 volume mount 無しのビルド配信 + `app.js` にキャッシュバスターが無いため、反映には
 `docker compose up -d --build frontend` とブラウザのハードリロードが必要。
 
+### 実機確認フォローアップ2（2026-08-02、第3の穴）
+
+実機 DB（コース 5969a478 / topic t0 / `eq_tex_b14`）の追跡で、evidence_links でも
+`raw_text` でもない**第3の生 TeX 供給源**を確認: チャンク由来の fallback formula は
+読み上げ原稿を持たず、freeze 時に **`plain_text` へ原文 TeX がそのまま**入る。
+`build_topic_evidence_items` branch 3 の `summary = semantic_kind || plain_text` が
+これを拾い、フロントの「意味の要約」行に出ていた（フロント・api-server とも最新でも
+再現する）。`_spoken_plain_text()`（TeX とみなせる plain_text を空に落とす読み取り時
+フィルタ）を新設し、branch 1 / branch 3 の `plain_text`・branch 3 の `summary` に適用。
+表示カード用の `latex` / `raw_text` は温存。実データで全数式の hover フィールドに
+TeX 漏れゼロを確認済み。ガードレール:
+`TestEquationExplanatoryProjection::test_tex_plain_text_is_not_used_as_summary_or_reading`。
+
+運用注意: ローカル環境の起動・リビルドは
+`docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build` の
+**2ファイル指定が必須**（postgres 定義は local 側にのみあり、素の
+`docker compose up --build` は「service depends on undefined service postgres」で
+何もビルドされずに失敗する）。
+
 ### 残作業
 
 - docker 実機での目視確認（トピック再生成後に役割・記号の意味が出ること）。

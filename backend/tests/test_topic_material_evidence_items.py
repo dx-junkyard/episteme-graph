@@ -578,6 +578,36 @@ class TestEquationExplanatoryProjection:
         # latex 自体は本文カードの描画用に保持する（ツールチップは参照しない）。
         assert item["latex"].startswith("\\delta")
 
+    def test_tex_plain_text_is_not_used_as_summary_or_reading(self):
+        """EH1/EH2: チャンク由来 formula の plain_text = 原文 TeX を表示に使わない。
+
+        読み上げ原稿を持たない fallback formula は freeze 時に plain_text へ生 TeX が
+        入ることがある（実機 2026-08-02 で観測: eq_tex_b14）。branch 3 の
+        summary（semantic_kind || plain_text）と「読み:」行の両方から落とし、
+        ホバーを IH8 固定文へ縮退させる。latex は本文カード用に温存する。
+        """
+        from core.course_content_builder import build_topic_evidence_items
+
+        tex = "\\begin{aligned} \\delta(t, {\\bm{x}}) := \\frac{\\rho-\\bar\\rho}{\\bar\\rho} \\end{aligned}"
+        topic = {
+            "content_blocks": [{
+                "type": "equations",
+                "items": [{
+                    "equation_id": "eq_tex_b14",
+                    "label": "",
+                    "latex": tex,
+                    "plain_text": tex,
+                    "raw_text": tex,
+                }],
+            }],
+        }
+        items = build_topic_evidence_items(topic)
+        item = next(i for i in items if i["kind"] == "equation")
+        assert item["title"] == "数式"
+        assert item["summary"] == ""
+        assert item["plain_text"] == ""
+        assert item["latex"] == tex
+
     def test_evidence_link_without_semantics_omits_empty_keys(self):
         from core.course_content_builder import _topic_evidence_links
 

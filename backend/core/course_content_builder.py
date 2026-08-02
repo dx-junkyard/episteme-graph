@@ -313,6 +313,20 @@ def _equation_display_title(label: str | None, normalized_id: str) -> str:
     return _GENERIC_EQUATION_TITLE
 
 
+def _spoken_plain_text(value) -> str:
+    """読み下し（音声用テキスト）として使える plain_text だけを返す。
+
+    チャンク由来の fallback formula は読み上げ原稿を持たず、freeze 時に
+    plain_text へ原文 TeX がそのまま入っていることがある。数式ホバーは
+    plain_text を「意味の要約 / 読み」として表示するため、TeX とみなせる
+    値は空へ落とす（EH1/EH2 — 表示用の latex / raw_text は温存する）。
+    """
+    text = str(value or "")
+    if _looks_like_tex_math(text):
+        return ""
+    return text
+
+
 def _fill_equation_display_math(eq: dict) -> None:
     """equation dict にトップレベル latex / plain_text / raw_text を補完する（in-place）。
 
@@ -1039,7 +1053,7 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
                 "title": _equation_display_title(link.get("label") or formula.get("label"), norm),
                 "summary": summary,
                 "latex": link.get("latex") or formula.get("latex") or "",
-                "plain_text": link.get("plain_text") or formula.get("plain_text") or "",
+                "plain_text": _spoken_plain_text(link.get("plain_text") or formula.get("plain_text")),
                 "raw_text": formula.get("raw_text") or "",
                 "role": link.get("support_role") or "equation",
                 # equation_hover_content_design.md §3.1: 式を*読むための*材料。
@@ -1117,15 +1131,16 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
     # 3) content_blocks の equations（本文が式を直接埋め込むケース）。
     for formula in _topic_content_block_formulas(topic):
         norm = normalize_evidence_id(formula.get("id"))
+        spoken = _spoken_plain_text(formula.get("plain_text"))
         items.append({
             "kind": "equation",
             "id": norm,
             "title": _equation_display_title(formula.get("label"), norm),
             # summary に latex を入れない（EH1: 数式の再掲を作らない。かつて
             # ここが生 TeX の供給源になっていた）。意味の要約か読み下しだけを使う。
-            "summary": formula.get("semantic_kind") or formula.get("plain_text") or "",
+            "summary": formula.get("semantic_kind") or spoken,
             "latex": formula.get("latex") or "",
-            "plain_text": formula.get("plain_text") or "",
+            "plain_text": spoken,
             "raw_text": formula.get("raw_text") or "",
             "role": "equation",
             "role_in_argument": formula.get("role_in_argument") or "",
