@@ -105,9 +105,15 @@ class TestNoOwnFetch:
             assert forbidden not in code, forbidden
 
     def test_no_direct_katex_dependency(self):
-        """数式レンダラは opts.renderMath で注入する（katex を直接触らない）。"""
+        """数式レンダラは opts.renderMath で注入する（katex の API を直接呼ばない）。
+
+        ※ 出力 HTML の katex-error クラス検査（EC2: 未知マクロの赤字エラーを
+        素のテキストへ落とすフォールバック）はレンダラ API の呼び出しではないので
+        許容する。禁止するのは katex オブジェクト・API への直接依存。"""
         code = _code_lines(_read(CARD_JS))
-        assert "katex" not in code
+        assert "window.katex" not in code
+        assert "katex.render" not in code
+        assert "katex" not in code.replace("katex-error", "")
         assert "typeof opts.renderMath" in _read(CARD_JS)
 
 

@@ -10090,14 +10090,18 @@ button.element-card-item:focus-visible .element-card-item-label {
 
 .element-card-symbol {
   display: inline-flex;
+  /* nowrap だと長い英語の意味文が折り返せずコンテナ端でクリップされる
+     （切れたことすら分からない）。記号名だけ nowrap で束ね、意味文は折り返す。 */
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 4px;
   margin-right: 10px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .element-card-symbol-name {
   color: var(--color-text-primary);
+  white-space: nowrap;
 }
 
 .element-card-symbol-meaning {

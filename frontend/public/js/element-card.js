@@ -219,6 +219,14 @@
 
   // ゲートを通ったときだけ opts.renderMath を呼ぶ。失敗・非 TeX は "" を返し、
   // 呼び出し側が素のテキスト表示へ落とす。
+  //
+  // KaTeX は throwOnError:false のとき例外を投げず、未知マクロ（論文独自の
+  // \bmx 等）を **赤いエラー表示の HTML として正常返却**する。形のゲート
+  // （looksLikeRenderableTex）では検出できないため、出力側でもエラー痕
+  // （katex-error クラス）を検査し、検出したら描画失敗として素のテキストへ
+  // 落とす（EC2: 壊れた TeX を赤字で学習者に見せない）。
+  var KATEX_ERROR_MARK = /katex-error/;
+
   function renderMathGated(ctx, expr, display, symbolMode) {
     if (!ctx.renderMath) return "";
     if (!looksLikeRenderableTex(expr, symbolMode)) return "";
@@ -228,6 +236,7 @@
     } catch (e) {
       rendered = "";
     }
+    if (rendered && KATEX_ERROR_MARK.test(rendered)) return "";
     return rendered || "";
   }
 

@@ -491,6 +491,15 @@ class TestEquationTooltipNeverRepeatsTheEquation:
         assert "opens === closes" in gate  # 切り詰めで壊れた TeX を弾く
         assert "if (!looksLikeRenderableTex(expr, symbolMode)) return \"\";" in card
 
+    def test_katex_error_output_falls_back_to_plain_text(self):
+        """EC2: KaTeX は throwOnError:false のとき未知マクロ（論文独自の \\bmx 等）を
+        例外ではなく「赤いエラー表示の HTML」として正常返却する。形のゲートでは
+        検出できないため、出力側でも katex-error を検査し素のテキストへ落とす。"""
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        rendered = _extract_function_body(card, "function renderMathGated(ctx, expr, display, symbolMode) {")
+        assert "KATEX_ERROR_MARK.test(rendered)" in rendered
+        assert "var KATEX_ERROR_MARK = /katex-error/;" in card
+
     def test_context_panel_title_has_no_dangling_separator(self):
         """EC1: 見出しが空のときに「数式 ・ 」を作らない（生 TeX も出さない）。"""
         js = _read(APP_JS)

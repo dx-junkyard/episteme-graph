@@ -633,6 +633,26 @@ A層非改変のまま日本語 headline が手に入る唯一の経路。
 4. `focus.headline` は snapshot には二重化しない（`item.title` がラダー委譲済みのため）
 5. TeX 遮断は学習者射影で記号以外の全型に拡大（要求ガードレール「DTO 全文字列に TeX ゼロ」の構造的充足）
 
+### 10.4b docker 実機確認での是正（2026-08-03）
+
+実機（DHOST 論文・eq_tex_b14 の「文脈を見る」）で2件を検出し修正。テスト 8,005 pass。
+
+1. **KaTeX 未知マクロの赤字（EC2 違反）**: 論文独自マクロ（`\bmx` = `\bm{x}`）は
+   `throwOnError:false` の KaTeX が**例外を投げず赤いエラー HTML を正常返却**するため、
+   形のゲート（`looksLikeRenderableTex`）を素通りしていた。`renderMathGated` に出力側検査
+   （`katex-error` クラス検出 → 素のテキストへフォールバック）を追加。
+   `test_no_direct_katex_dependency` は「API 直接呼び出し禁止」の真意へ精緻化。
+2. **記号の意味文が端でクリップ**: `.element-card-symbol { white-space: nowrap }` により
+   長い英語の意味文が折り返せず「切れたことすら分からない」状態だった。記号名のみ nowrap、
+   意味文は折り返しへ変更（切り詰め処理自体は正常＝excerpt の「…」付き）。
+
+実機で確認された仕様どおりの挙動（バグではない）:
+- 見出しが英語（`Defines the matter density contrast…`）: 記号+役割合成（ラダー③）が
+  記号名の TeX（`\bmx`）により EH1 ガードで棄却され、意味の一行（ラダー④・原文）へ縮退。
+  日本語一行化は Phase 3（二層説明結線）が本命
+- δ に「（この式で定義）」が付かない: SymbolRegistry の `defining_equation_ids` に
+  当該式が記録されていないデータ側の状態（配線はレンズ→射影→カードまで実装済み）
+
 ### 10.5 既知の残作業・申し送り
 
 - **Phase 3（二層説明の結線）未着手**: `labels.equation_label(explanation=)` の口は開いている。
