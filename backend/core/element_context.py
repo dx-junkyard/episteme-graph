@@ -26,10 +26,30 @@ component の文脈 DTO が instance / shared_part / graph の三層構造を持
   内部参照）と ``focus.provenance``（``theory_claims:<uuid>`` 等）は落とし、さらに
   **ラベルそのものが内部 ID 形の場合は一般ラベルへ置換する**（W層はラベル解決に
   失敗した項目に内部 ID をそのまま入れる — 図の DB UUID・``ev_0001``・
-  ``synth_claim_0001`` 等。W層を変更しない（LE6）ため学習者向け側で遮る）。
+  ``synth_claim_0001`` 等）。
 - **書き込みを行わない**: A層（``src/episteme_graph/agents/``）・W層のコードは
   読むだけで変更しない。本モジュールに書き込み経路は無い。
 - 本モジュールは FastAPI を import しない（開発ルール2 / core/ 共通ルール）。
+
+ITEM v2 / focus v2（``docs/features/element_context_presentation_redesign.md`` §4）:
+
+W層 ``context_lens`` が ``sublabel`` / ``qualifier`` / ``group`` / ``unresolved`` /
+``label_source`` と、focus の ``headline`` / ``intrinsic`` / ``placement`` /
+``contextual_role_source`` / ``review_notes`` / ``derivations`` を載せるようになった。
+本モジュールは**権限フィルタ**として次を行う（LE6′「可読性の正本は W層、射影側は
+権限フィルタのみ」。遮断層は W層の改修後も**二重防御として維持**する）:
+
+- 透過: ``sublabel`` / ``qualifier`` / ``group`` / ``unresolved`` / ``headline`` /
+  ``intrinsic`` / ``placement`` / ``contextual_role_source`` / ``derivations``
+- 落とす: ``label_source``（来歴は教員のみ）/ ``review_notes``（要確認は教員のみ）/
+  ``evidence_refs``・``relation``（内部参照・内部語彙）/ ``qualifier ==
+  "equation_detail"`` の ITEM **全体**（traceability 層は学習者に見せない・CP3）/
+  ``derivations[].derivation_id``・``evidence_refs``
+- 遮断（EC3′ の「最後の砦」）: 内部 ID / 生 TeX を含む表示文字列は空にする。
+  ただし**記号（symbol）の label は TeX でも遮断しない** — 記号は式の再掲ではなく
+  読解の部品で、レンダリング可否はフロントの ``looksLikeRenderableTex`` ゲートが
+  判断する（§5.4）。一般ラベルへ置換したときは ``unresolved`` を立て、
+  **``sublabel`` は保持する**（「関連する数式」が2件並んで区別不能になる RC6 の再発防止）。
 """
 
 from __future__ import annotations
@@ -43,10 +63,11 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core.component_context import strip_confidence
-from core.course_content_builder import looks_like_tex_math
+from core.text_excerpt import excerpt, looks_like_tex_math
 from core.deliberation import context_lens as context_lens_mod
 from core.deliberation.refs import document_run_artifacts, equation_records
 from core.deliberation.schema import (
+    CONTEXT_ROLE_STATUS_UNIDENTIFIED,
     CONTEXT_STATUS_CANDIDATE,
     CONTEXT_STATUS_CONFIRMED,
     CONTEXT_STATUS_SOURCE_BACKED,
@@ -104,6 +125,36 @@ _LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES = (
     ELEMENT_EVIDENCE,
     ELEMENT_DERIVATION,
 )
+
+# W層 ITEM の表示専用 element_type（``deliberation/schema.py`` の解決対象語彙には無い）。
+_ITEM_TYPE_SYMBOL = "symbol"
+
+# ITEM v2 の ``qualifier``: 式単位の操作ノード（TheoryOperationGraph の
+# ``graph_layer='equation_detail'``）の目印。traceability のための層なので**学習者には
+# 項目ごと出さない**（CP3。教員向けは折りたたみ「式の詳細層」で残る）。
+QUALIFIER_EQUATION_DETAIL = "equation_detail"
+
+# ITEM v2 の ``group``（区画キー。設計書 §4.3）。未知値・空は「関連」区画へ寄せる
+# （P4: 項目自体は落とさない）。
+ITEM_GROUPS = (
+    "stage",
+    "thesis",
+    "claim",
+    "section",
+    "symbol_defined",
+    "symbol_used",
+    "equation_up",
+    "equation_down",
+    "derivation_in",
+    "derivation_out",
+    "claim_required",
+    "evidence",
+    "operation",
+    "figure",
+    "component",
+    "related",
+)
+ITEM_GROUP_FALLBACK = "related"
 
 # context_lens が投影を返せない / 例外だった場合の事実文（available:false 時の note）。
 NOTE_NO_CONTEXT = "この要素の文脈情報は現在表示できません。"
@@ -174,6 +225,15 @@ _ROLE_INTERNAL_TOKEN_RE = re.compile(
     r"|ev(?:idence)?_[0-9]{3,}"
     r"|span_[0-9]{3,}"
     r"|support:",
+    re.IGNORECASE,
+)
+
+# TheoryOperationGraph のノード ID（``theory_op_0001`` / ``eq_op_0007``）と
+# コンポーネントの agent 側 ID。ITEM v2 の ``sublabel`` / ``intrinsic`` の事実文は
+# ラベルと違い自由文なので、**文中のどこに現れても**遮断する。
+_EXTRA_INTERNAL_TOKEN_RE = re.compile(
+    r"(?:^|[^A-Za-z0-9])(?:theory_op|eq_op)_[0-9]"
+    r"|(?:^|[^A-Za-z0-9])comp_[0-9]",
     re.IGNORECASE,
 )
 
@@ -343,6 +403,50 @@ def _generic_item_label(element_type: str) -> str:
     return _GENERIC_ITEM_LABELS.get(str(element_type or ""), _GENERIC_ITEM_LABEL_FALLBACK)
 
 
+def _contains_internal_id(value: Any) -> bool:
+    """自由文（sublabel / 事実文 / 役割文）**のどこか**に内部 ID が含まれるか。
+
+    ``_is_internal_id_label`` が「ラベル全体が内部 ID 形か」を見るのに対し、こちらは
+    説明文の途中に混ざった ID（「導出「derivation_x」のステップ「step_001」」/
+    「synth_claim_0001 を定量化する」）を遮るための判定。W層がラベルラダーで
+    生成時点から ID を排除しても（EC3′）、射影側は最後の砦として残す。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if any(pattern.match(text) for pattern in _INTERNAL_ID_LABEL_RES):
+        return True
+    if _UUID_LABEL_RE.match(text):
+        return True
+    if _EMBEDDED_INTERNAL_ID_RE.search(text):
+        return True
+    if _ROLE_INTERNAL_TOKEN_RE.search(text):  # UUID / synth_ / ev_ / span_ / support:
+        return True
+    return bool(_EXTRA_INTERNAL_TOKEN_RE.search(text))
+
+
+def _safe_text(value: Any, *, allow_tex: bool = False) -> str:
+    """学習者に出してよい表示文字列だけを通す（内部 ID / 生 TeX を空へ落とす）。
+
+    ``allow_tex=True`` は**記号**専用（``canonical_symbol`` は TeX 形のまま渡し、
+    レンダリング可否はフロントの ``looksLikeRenderableTex`` ゲートに委ねる。§5.4）。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if _contains_internal_id(text):
+        return ""
+    if not allow_tex and looks_like_tex_math(text):
+        return ""
+    return text
+
+
+def _normalized_group(value: Any) -> str:
+    """ITEM の区画キー。未知値・空は「関連」区画へ寄せる（§4.1 / P4）。"""
+    group = str(value or "").strip()
+    return group if group in ITEM_GROUPS else ITEM_GROUP_FALLBACK
+
+
 # ── TeX 文字列の遮断（EC1/EC2, equation_context_panel_display_design.md）──────
 # W層 ``context_lens._equation_label`` は plain_text（読み下し）が無い式で latex を
 # 採用し、さらに 80 字で機械的に切り詰める。結果は「コマンド途中で切れた TeX」で、
@@ -385,7 +489,7 @@ def _equation_explanatory_fields(record: Any) -> dict:
         out["role_in_argument"] = role
     semantic_kind = str(record.get("semantic_kind") or semantics.get("summary") or "").strip()
     if semantic_kind:
-        out["semantic_kind"] = semantic_kind[:120]
+        out["semantic_kind"] = excerpt(semantic_kind, 120)
     symbols: list[dict] = []
     seen: set[str] = set()
     raw_symbols = _json_list(record.get("symbols")) + _json_list(semantics.get("defined_symbols"))
@@ -397,7 +501,7 @@ def _equation_explanatory_fields(record: Any) -> dict:
         if not symbol or not meaning or symbol in seen:
             continue
         seen.add(symbol)
-        symbols.append({"symbol": symbol, "meaning": meaning[:60]})
+        symbols.append({"symbol": symbol, "meaning": excerpt(meaning, 60)})
         if len(symbols) >= 6:
             break
     if symbols:
@@ -420,91 +524,324 @@ def _equation_record_in_course(element_id: str, document_id: str) -> dict | None
     return None
 
 
-def _project_item(item: dict) -> dict:
-    """ITEM を学習者向けに射影する（``component_context._project_context_item`` と同形）。
+def _learner_navigable(element_type: Any, element_id: Any) -> bool:
+    """学習者が実際に再フェッチできる型・ID か（W層の ``navigable`` は信用しない）。"""
+    kind = str(element_type or "")
+    return (
+        bool(str(element_id or "").strip())
+        and kind in _LEARNER_NAVIGABLE_ELEMENT_TYPES
+        and kind not in _LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES
+    )
 
-    ``evidence_refs``（evidence_id / step_id 等の内部参照）と ``relation``
-    （内部語彙キー）は落とし、読み手向けの ``relation_label`` のみ残す。
-    ``label`` が裸の内部 ID 形なら element_type 別の一般ラベルへ置換する（LE4。
-    関係情報は保持するので項目自体は落とさない = 情報を落とさない）。
-    ``navigable`` は W層の値（教員向けの可否）を信用せず、学習者が実際に再フェッチ
-    できる型かで作り直す（さらに evidence / derivation は明示的に拒否する —
-    ``_LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES``）。
+
+def _project_item(item: dict) -> dict | None:
+    """ITEM（v2）を学習者向けに射影する。``None`` は「学習者に出さない項目」。
+
+    ``evidence_refs``（evidence_id / step_id 等の内部参照）・``relation``（内部語彙
+    キー）・``label_source``（来歴 = 教員のみ）は落とし、読み手向けの
+    ``relation_label`` と v2 の区別材料（``sublabel`` / ``qualifier`` / ``group`` /
+    ``unresolved``）を残す。
+
+    - ``qualifier == "equation_detail"``（式単位の操作ノード）は**項目ごと除外**する
+      （CP3。traceability 層は学習者に見せない）。
+    - ``label`` が裸の内部 ID 形なら element_type 別の一般ラベルへ置換し
+      ``unresolved`` を立てる。このとき **``sublabel`` は保持する**（一般ラベルが
+      2件並んでも区別できるようにする = RC6 の再発防止）。
+    - ``sublabel`` に内部 ID / 生 TeX が混ざっていればその欄だけ空にする（項目は残す）。
+    - 生 TeX のラベルは一般ラベルへ落とす（式は再掲しない = EH1。equation は先に
+      論文の式番号を試す）。**記号（``symbol``）だけは TeX でも遮断しない** —
+      記号は式の再掲ではなく読解の部品で、レンダリング可否はフロントの
+      ``looksLikeRenderableTex`` ゲートが判断する（§5.4）。
+    - ``navigable`` は学習者が実際に再フェッチできる型かで作り直す（さらに
+      evidence / derivation は明示的に拒否する —
+      ``_LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES``）。
     """
     element_type = str(item.get("element_type") or "")
     element_id = item.get("element_id")
+    qualifier = str(item.get("qualifier") or "").strip()
+    if qualifier == QUALIFIER_EQUATION_DETAIL:
+        return None
+
     label = str(item.get("label") or "")
-    # EC1/EC2: レーンの相手式ラベルも W層 ``_equation_label`` 由来なので、切り詰め
-    # TeX が混ざる。式番号があればそれ、無ければ一般ラベルへ落とす（式は再掲しない）。
-    if element_type == ELEMENT_EQUATION and looks_like_tex_math(label):
-        label = _equation_focus_label("", str(element_id or "")) or _generic_item_label(element_type)
+    unresolved = bool(item.get("unresolved"))
+    # EC1/EC2: レーンの相手ラベルにも生 TeX が混ざり得る（equation は式番号があれば
+    # それを、無ければ一般ラベルへ）。記号だけは TeX でも遮断しない（§5.4）。
+    is_symbol = element_type == _ITEM_TYPE_SYMBOL
+    if not is_symbol and looks_like_tex_math(label):
+        replacement = (
+            _equation_focus_label("", str(element_id or ""))
+            if element_type == ELEMENT_EQUATION
+            else ""
+        )
+        if replacement:
+            label = replacement
+        else:
+            label, unresolved = _generic_item_label(element_type), True
     elif _is_internal_id_label(label, element_type, element_id):
-        label = _generic_item_label(element_type)
-    navigable = (
-        bool(element_id)
-        and element_type in _LEARNER_NAVIGABLE_ELEMENT_TYPES
-        and element_type not in _LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES
-    )
+        label, unresolved = _generic_item_label(element_type), True
+
     return {
         "id": element_id,
         "element_type": item.get("element_type"),
         "label": label,
+        "sublabel": _safe_text(item.get("sublabel")),
+        "qualifier": qualifier,
+        "group": _normalized_group(item.get("group")),
+        "unresolved": unresolved,
         "relation_label": item.get("relation_label"),
         "relation_status": item.get("relation_status"),
-        "navigable": navigable,
+        "navigable": _learner_navigable(element_type, element_id),
     }
 
 
 def _visible_items(items: Any) -> list[dict]:
-    """candidate を除外して射影し、レーン上限で切る。"""
-    projected = [
-        _project_item(item)
-        for item in _json_list(items)
-        if isinstance(item, dict) and item.get("relation_status") != CONTEXT_STATUS_CANDIDATE
-    ]
-    return projected[:_LANE_MAX]
+    """candidate（LE2）と式の詳細層（CP3）を除外して射影し、レーン上限で切る。"""
+    projected: list[dict] = []
+    for item in _json_list(items):
+        if not isinstance(item, dict) or item.get("relation_status") == CONTEXT_STATUS_CANDIDATE:
+            continue
+        entry = _project_item(item)
+        if entry is None:
+            continue
+        projected.append(entry)
+        if len(projected) >= _LANE_MAX:
+            break
+    return projected
+
+
+def _project_intrinsic(value: Any) -> dict:
+    """focus.intrinsic（①これは何か）を射影する（§4.2）。
+
+    統制語彙キー（``kind_key`` / ``role_key`` / ``definition_status``）はそのまま渡し、
+    訳はフロント（``element-vocab.js``）に委ねる（CP4）。自由文は内部 ID / 生 TeX を
+    遮断する。**記号そのもの（``symbols[].symbol``）だけは TeX でも通す**（§5.4）。
+    値が無いキーは載せない（推測で穴埋めしない）。
+    """
+    data = value if isinstance(value, dict) else {}
+    out: dict[str, Any] = {}
+
+    for key in ("kind_key", "role_key"):
+        raw = str(data.get(key) or "").strip()
+        if raw:
+            out[key] = raw
+
+    summary = _safe_text(data.get("summary"))
+    if summary:
+        out["summary"] = summary
+        # 「（論文の原文）」注記の出し分け（表示側の責務。値そのものは訳さない）。
+        out["summary_is_source_language"] = bool(data.get("summary_is_source_language"))
+
+    reading = _safe_text(data.get("reading"))
+    if reading:
+        out["reading"] = reading
+
+    symbols: list[dict] = []
+    for raw in _json_list(data.get("symbols")):
+        if not isinstance(raw, dict):
+            continue
+        symbol = _safe_text(raw.get("symbol"), allow_tex=True)
+        if not symbol:
+            continue
+        entry: dict[str, Any] = {"symbol": symbol}
+        meaning = _safe_text(raw.get("meaning"))
+        if meaning:
+            entry["meaning"] = meaning
+        if raw.get("defined_here") is not None:
+            entry["defined_here"] = bool(raw.get("defined_here"))
+        definition_status = str(raw.get("definition_status") or "").strip()
+        if definition_status:
+            entry["definition_status"] = definition_status
+        symbols.append(entry)
+    if symbols:
+        out["symbols"] = symbols
+
+    for key in ("conditions", "facts"):
+        values = [_safe_text(v) for v in _json_list(data.get(key))]
+        values = [v for v in values if v]
+        if values:
+            out[key] = values
+
+    return out
+
+
+def _project_placement(value: Any) -> dict:
+    """focus.placement（②この論文での位置づけ）を射影する（§4.2）。"""
+    data = value if isinstance(value, dict) else {}
+    out: dict[str, Any] = {}
+
+    section_label = _safe_text(data.get("section_label"))
+    if section_label:
+        out["section_label"] = section_label
+
+    stage = data.get("stage") if isinstance(data.get("stage"), dict) else {}
+    stage_key = str(stage.get("key") or "").strip()
+    stage_description = _safe_text(stage.get("description"))
+    if stage_key or stage_description:
+        projected_stage: dict[str, Any] = {}
+        if stage_key:
+            projected_stage["key"] = stage_key
+        if stage_description:
+            projected_stage["description"] = stage_description
+        out["stage"] = projected_stage
+
+    thesis_role = _safe_text(data.get("thesis_role"))
+    if thesis_role:
+        out["thesis_role"] = thesis_role
+
+    return out
+
+
+def _project_mini_ref(value: Any) -> dict | None:
+    """derivations[].inputs / outputs の MINI 参照を射影する。
+
+    ``navigable`` は学習者ホワイトリストで再計算し、TeX ラベル・内部 ID ラベルは
+    element_type 別の一般ラベルへ置換する（項目自体は落とさない）。
+    """
+    data = value if isinstance(value, dict) else {}
+    element_type = str(data.get("element_type") or "")
+    element_id = data.get("element_id")
+    label = str(data.get("label") or "")
+    if not element_type and not str(element_id or "").strip() and not label:
+        return None
+    is_symbol = element_type == _ITEM_TYPE_SYMBOL  # 記号は TeX でも遮断しない（§5.4）
+    if (not is_symbol and looks_like_tex_math(label)) or _is_internal_id_label(
+        label, element_type, element_id
+    ):
+        label = _generic_item_label(element_type)
+    return {
+        "element_type": element_type,
+        "element_id": element_id,
+        "label": label,
+        "navigable": _learner_navigable(element_type, element_id),
+    }
+
+
+def _project_derivation(value: Any) -> dict | None:
+    """focus.derivations[] のストーリーカード1件を射影する（§4.4）。
+
+    candidate（AI 候補の関係）は出さない（LE2）。``derivation_id`` / ``evidence_refs``
+    は内部参照なので落とす。``chain_type`` / ``focus_role`` は統制語彙キーのまま渡す。
+    """
+    data = value if isinstance(value, dict) else {}
+    if not data:
+        return None
+    relation_status = data.get("relation_status")
+    if relation_status == CONTEXT_STATUS_CANDIDATE:
+        return None
+
+    label = _safe_text(data.get("label")) or _generic_item_label(ELEMENT_DERIVATION)
+    out: dict[str, Any] = {
+        "label": label,
+        "sublabel": _safe_text(data.get("sublabel")),
+        "chain_type": str(data.get("chain_type") or "").strip(),
+        "operation_text": _safe_text(data.get("operation_text")),
+        "focus_role": str(data.get("focus_role") or "").strip(),
+        "inputs": [],
+        "outputs": [],
+        "reason": _safe_text(data.get("reason")),
+        "relation_status": relation_status,
+        # 導出には学習者向けの文脈取得 API が無い（旅の対象は claim / equation /
+        # component のみ）。W層の値に関わらず倒す。
+        "navigable": False,
+    }
+    for key in ("inputs", "outputs"):
+        refs = []
+        for raw in _json_list(data.get(key)):
+            projected = _project_mini_ref(raw)
+            if projected is not None:
+                refs.append(projected)
+        out[key] = refs
+    for key in ("eliminated_symbols", "retained_symbols"):
+        # 記号は TeX 形のまま渡す（レンダリング可否はフロントのゲート。§5.4）。
+        symbols = [_safe_text(v, allow_tex=True) for v in _json_list(data.get(key))]
+        symbols = [s for s in symbols if s]
+        if symbols:
+            out[key] = symbols
+    return out
+
+
+def _project_derivations(value: Any) -> list[dict]:
+    projected: list[dict] = []
+    for raw in _json_list(value):
+        entry = _project_derivation(raw)
+        if entry is None:
+            continue
+        projected.append(entry)
+        if len(projected) >= _LANE_MAX:
+            break
+    return projected
 
 
 def _project_focus(
     focus: Any, element_type: str, element_id: str, *, equation_record: Any = None
 ) -> dict:
-    """focus を学習者向けに射影する。
+    """focus（v2）を学習者向けに射影する。
 
-    ``contextual_role`` は ``contextual_role_status`` が source_backed / confirmed の
-    ときだけ残す（candidate = AI 候補 / unidentified = 未同定は、役割を語らずキー自体を
-    落とす — 推測で穴埋めしない）。役割文に内部 ID が混ざっている場合も同様に落とす
-    （W層は上位項目のラベルから役割文を合成するため、ラベル解決に失敗した項目が
-    そのまま「この論文での役割」に現れる）。``provenance``（内部 ID 列）は落とす。
+    ``contextual_role`` は ``contextual_role_source``（§4.4 の自己記述優先の来歴）が
+    ``unidentified`` のときだけ落とす。committed / self_described / structural は
+    残す（従来は candidate 判定で落としていたため、AI 候補ではない自己記述の役割まで
+    空欄になっていた）。来歴を持たない旧形の投影では従来どおり
+    ``contextual_role_status`` で判定する（後方互換の fail-soft）。役割文に内部 ID が
+    混ざっている場合はどちらの経路でもキーごと落とす。
+
+    ``provenance``（内部 ID 列）と ``review_notes``（要確認事項 = 教員のみ）は落とす。
     """
     focus = focus if isinstance(focus, dict) else {}
     label = str(focus.get("label") or "")
     intrinsic_summary = str(focus.get("intrinsic_summary") or "")
     if element_type == ELEMENT_TYPE_EQUATION:
-        # EC1/EC2: W層は latex（80字で切り詰め済み）を label / intrinsic_summary の
-        # 両方に入れる。壊れた TeX は KaTeX で赤いエラーになるだけなので落とし、
+        # EC1/EC2: 旧 W層は latex（80字で切り詰め済み）を label / intrinsic_summary の
+        # 両方に入れていた。壊れた TeX は KaTeX で赤いエラーになるだけなので落とし、
         # 式番号（あれば）と、式を*読むための*材料に置き換える。
         label = _equation_focus_label(label, element_id)
-        if looks_like_tex_math(intrinsic_summary):
-            intrinsic_summary = ""
+    else:
+        label = _safe_text(label)
+    intrinsic_summary = _safe_text(intrinsic_summary)
+
+    headline = _safe_text(focus.get("headline")) or label
+
     result: dict[str, Any] = {
         "element_type": element_type,
         "element_id": element_id,
         "document_id": focus.get("document_id"),
         "label": label,
+        "headline": headline,
         "intrinsic_summary": intrinsic_summary,
     }
     if element_type == ELEMENT_TYPE_EQUATION:
         # 役割 / 意味の要約 / 記号の意味（ホバーと同じ材料。表示名の変換はフロント）。
         result.update(_equation_explanatory_fields(equation_record))
+
+    intrinsic = _project_intrinsic(focus.get("intrinsic"))
+    if intrinsic:
+        result["intrinsic"] = intrinsic
+    placement = _project_placement(focus.get("placement"))
+    if placement:
+        result["placement"] = placement
+    derivations = _project_derivations(focus.get("derivations"))
+    if derivations:
+        result["derivations"] = derivations
+
     role = str(focus.get("contextual_role") or "").strip()
-    if role and _ROLE_INTERNAL_TOKEN_RE.search(role):
+    if role and (_ROLE_INTERNAL_TOKEN_RE.search(role) or _contains_internal_id(role)):
         # 上位項目のラベルが内部 ID だったため役割文に ID が混ざっている
         # （「synth_claim_0001を定量化する」等）。役割を語らずキーごと落とす。
         role = ""
+    if role and looks_like_tex_math(role):
+        role = ""
+    role_source = str(focus.get("contextual_role_source") or "").strip()
     role_status = str(focus.get("contextual_role_status") or "")
-    if role and role_status in _LEARNER_VISIBLE_STATUSES:
+    if role_source:
+        role_visible = role_source != CONTEXT_ROLE_STATUS_UNIDENTIFIED
+    else:  # 旧形の投影（来歴キーが無い）は従来の status 判定へ縮退する。
+        role_visible = role_status in _LEARNER_VISIBLE_STATUSES
+    if role and role_visible:
         result["contextual_role"] = role
-        result["contextual_role_status"] = role_status
+        if role_status:
+            result["contextual_role_status"] = role_status
+        if role_source:
+            result["contextual_role_source"] = role_source
+
     generic = focus.get("generic")
     if isinstance(generic, dict):
         result["generic"] = generic
@@ -513,6 +850,11 @@ def _project_focus(
 
 def _notes(value: Any) -> list[str]:
     return [str(n) for n in _json_list(value) if str(n or "").strip()]
+
+
+def _learner_notes(value: Any) -> list[str]:
+    """学習者に出す notes（事実文）。内部 ID / 生 TeX を含む行だけ落とす（最後の砦）。"""
+    return [note for note in (_safe_text(n) for n in _notes(value)) if note]
 
 
 def _is_degenerate_lens(lens: dict, resolved_id: str) -> bool:
@@ -605,7 +947,7 @@ def build_element_context(
         ),
         "upper": _visible_items(lens.get("upper")),
         "lower": _visible_items(lens.get("lower")),
-        "notes": _notes(lens.get("notes")),
+        "notes": _learner_notes(lens.get("notes")),
         "provenance": PROVENANCE_COURSE_FREEZE,
     }
     return strip_confidence(result)

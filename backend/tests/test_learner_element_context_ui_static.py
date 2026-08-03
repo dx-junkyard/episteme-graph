@@ -273,8 +273,11 @@ class TestInMaterialJump:
         assert 'return ""' in block  # 担体が無ければ ref を返さない = ボタンを出さない
 
         # カード本体は教材本文を知らないため、mount 後に該当行の直後へ差し込む。
+        # 行 → ITEM の対応はカードが全行に付ける data-element-card-itemref で引く
+        # （ゾーン描画では ITEM が元のレーン順に並ばないため）。
         aug = _block(src, "function augmentLearnerElementCardJumps(container, dto)", "\n  }\n")
-        assert "materialElementContextJumpRef(items[i])" in aug
+        assert "[data-element-card-itemref]" in aug
+        assert "materialElementContextJumpRef(item)" in aug
         assert "if (!ref) continue;" in aug
         assert "buildMaterialJumpRow(ref)" in aug
         row = _block(src, "function buildMaterialJumpRow(ref)", "\n  }\n")

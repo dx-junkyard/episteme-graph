@@ -351,6 +351,26 @@
   // onCenter が設定されているときだけ描かれるため、食い違うと配線が消える）。
   var contextLensRender = null;
 
+  // 管理画面（admin.html）は KaTeX を CDN から読み込む（window.katex）。カード側に
+  // ゲート（looksLikeRenderableTex）があるので、ここは素の描画関数を渡すだけでよい
+  // — かつて renderMath 未注入だったため W層モーダルだけ生 TeX が出ていた
+  // （element_context_presentation_redesign.md RC8 / §6 S4）。
+  function _renderMath(expr, display) {
+    var text = String(expr == null ? "" : expr);
+    if (!text || !window.katex) return "";
+    try {
+      return '<span class="' + (display ? "lecture-formula-block visible" : "lecture-formula visible") + '">' +
+        window.katex.renderToString(text, {
+          displayMode: !!display,
+          throwOnError: false,
+          strict: "ignore",
+          trust: false
+        }) + '</span>';
+    } catch (e) {
+      return "";
+    }
+  }
+
   function _contextLensOpts(focus) {
     focus = focus || {};
     var card = window.ElementCard;
@@ -361,6 +381,7 @@
     return {
       variant: card ? card.VARIANT_EDITABLE : "editable",
       escapeHtml: escHtml,
+      renderMath: _renderMath,
       className: "deliberation-context-card",
       laneTitles: CONTEXT_LANE_TITLES,
       metaBadges: metaBadges,
@@ -449,7 +470,9 @@
       focus: focus,
       upper: context.upper || [],
       lower: context.lower || [],
-      notes: context.notes || []
+      notes: context.notes || [],
+      // 導出ストーリー（DTO v2）。focus 配下で来る場合はカード側が拾う。
+      derivations: context.derivations || []
     };
     var opts = _contextLensOpts(focus);
     contextLensRender = { dto: dto, opts: opts };

@@ -11,8 +11,9 @@
   `learner_element_context_design.md`（LE1〜LE8）/
   `element_context_lens_design.md`（W層 context lens）/
   `component_evidence_redesign.md`（component チップ = 良い先例）
-- 状態: **提案（オーナーレビュー待ち）**。調査は Fable 5 指揮 + Opus 5 サブエージェント
-  8体（現状調査5 + 設計3レンズ）で実施（2026-08-02）。
+- 状態: **Phase 0〜2 実装済み（2026-08-03）** — §10 実装記録を参照。Phase 3（二層説明の結線）は未着手。
+  調査は Fable 5 指揮 + Opus 5 サブエージェント8体（現状調査5 + 設計3レンズ）、
+  実装は同体制の3 Wave + 統合（2026-08-02〜03）。
 
 ---
 
@@ -562,6 +563,84 @@ A層非改変のまま日本語 headline が手に入る唯一の経路。
 
 ---
 
-## 10. 実装記録
+## 10. 実装記録（2026-08-03、Phase 0〜2）
 
-（実装時に追記）
+§9 の Q1〜Q9 は全て推奨案で承認済み。テスト: **backend 8,004 passed / 25 skipped、src 1,669 passed**
+（着手前 7,810 → +194 テスト）。**未コミット**。
+
+### 10.1 新設モジュール（Wave A）
+
+| ファイル | 内容 |
+|---|---|
+| `backend/core/text_excerpt.py` | 切り詰め正本 `excerpt(text, limit)`（文境界→語境界→文字数・常に「…」・TeX トークン保護）+ `first_sentence` / `normalize_whitespace` + **`looks_like_tex_math` の正本を移設**（`course_content_builder` は再エクスポートで import 面不変） |
+| `backend/core/element_vocab.py` | 訳語サーバ正本。stage（**理論の土台**等の統一訳・英語表示名からの逆引き付き）/ operation（40語）/ chain_type / link_status_**fact**（事実文）/ definition_status / symbol_scope / claim_type / equation_role。未知キーは `""`（fail-closed） |
+| `backend/core/deliberation/labels.py` | 種別別ラベルラダー（`Label(text, sublabel, qualifier, label_source, unresolved)`）。latex・内部ID・英語stage生名はどの段でも不採用。`needs_math_review` ゲート・teaching_takeaway の英語テンプレ除外・`Define eq_tex_b16` 型除外・`self_described_role` 合成 |
+| `frontend/public/js/element-vocab.js` | Python 正本のミラー7関数 + zoneForGroup / zoneHeading / groupHeading / qualifierLabel（フロント専用写像）。**キー集合・訳語の一致は `test_element_vocab_mirror.py` が固定** |
+
+### 10.2 W層・射影・フロント（Wave B）
+
+- **context_lens.py**: `_equation_label` の latex[:80] 廃止 → labels 委譲 / ITEM v2
+  （sublabel・qualifier・group・unresolved・label_source を additive 追加）/
+  RELATION_LABELS に向き付き6語彙追加（feeds_derivation・produced_by_derivation・used_in_derivation・
+  belongs_to_stage・used_in_operation_step・defines_symbol。uses_symbol 訳語は「を用いる」へ）/
+  `_derivation_membership_facts` を入出力別判定に全面改訂 / equation focus に **derivations[]
+  ストーリーブロック** / graph_layer 3分岐（main=stage 訳+description、equation_detail=操作合成ラベル、
+  debug=notes 件数のみ）/ 記号 defines・uses 分離 + 意味を sublabel へ / 掲載節・原文根拠 ITEM 追加（RC12）/
+  focus v2（headline・intrinsic・placement・contextual_role_source・review_notes）/
+  `_derive_contextual_role` は committed → **self_described** → 構造要約（制限付き）→ unidentified /
+  navigable fail-closed（agent ID ノード）/ `_dedupe_items` キー変更。
+  ガードレール新設 `test_context_lens_readability.py`（TeX 不在・層分離・向き語彙・素スライス不在ほか）
+- **element_context.py**: 新キー透過（内部ID・TeX の値ゲート付き）/ `qualifier=="equation_detail"` の
+  ITEM を学習者から除外 / 一般ラベル置換時に unresolved=True + **sublabel 保持**（RC6 の根治）/
+  derivations 射影（candidate 除外・ID 除去・MINI navigable 再計算）/ contextual_role_source ベースの
+  役割表示（unidentified のみ落とす・旧形は status 判定へ縮退）/ 記号 label のみ TeX 遮断免除 /
+  学習者 DTO 全体の再帰走査で内部ID・TeX ゼロをテスト固定
+- **element-card.js**: group による4区画ゾーン描画（0件ゾーン非表示・group ごと上限5件+「▸ ほかN件」）/
+  sublabel 2行目 / qualifier チップ / intrinsic・placement の「これは何か」「位置づけ」描画 /
+  derivations ストーリーカード（重複描画防止）/ 式の詳細層は editable 限定の既定折りたたみ /
+  **renderMath ゲート（looksLikeRenderableTex）を内製化**（3画面で同一データが別々に壊れる問題の終了）/
+  readonly でも sublabel は描く（evidence_refs / reviewNotes は editable 限定を維持）
+- **app.js**: 新 DTO 透過 / headline 優先タイトル / ホバーに「掲載:」「成立条件:」行 +
+  「▸ 文脈を見る（どこから来て、どこへ行くか）」導線（EH3 維持） / 重複 TeX ゲート撤去（element-card へ委譲）
+- **deliberation.js**: renderMath 注入（W層モーダルの生 TeX 解消）
+
+### 10.3 admin 正本化・snapshot 拡張（Wave C）
+
+- **topics.py**: course-structure の各 topic DTO に `evidence_items = build_topic_evidence_items(topic)` 同梱
+  （並行実装の解消 = RC8。学習画面と同一の純関数）
+- **admin-lecture-studio.js**: `lsTopicEvidenceItems` はサーバ evidence_items 優先 + ローカル合成フォールバック
+  （生ID タイトル・`plain_text||latex` 生TeX経路は フォールバック側でも撤去。写像は
+  `test_learning_material_embed_resolution.py` の node harness 契約のため**関数内ローカル関数式**に閉じる —
+  トップレベル切り出し禁止）/ `lsEvidenceMetaLabel` 単一引数化 +「対応付け」撤去（CP9）→
+  `lsTopicMappingNoteHtml` がペインヘッダに1回だけ3値表示 / alt_ids 解決（source 別名の畳み込み = CP7）/
+  **onCenter（`lsEvidenceCenterOnItem` = ペイン内中心移動 + trail パンくず + 戻る）・
+  metaBadges（contextual_role_status）・reviewNotes（focus.review_notes）を配線** /
+  `LS_THEORY_STAGE_LABELS_JA` 削除 → ElementVocab 委譲（colon 形は先に分解・未知は raw 素通し）
+- **course_content_builder.py**: `_equation_display_title` を labels ラダーへ委譲（`eq_2_7` は
+  「式 (2.7)」表記へ統一 — W層 headline と同一文字列になり S1〜S4 の見出しが揃う。明示ラベルは
+  unresolved 時のみ1段フォールバック = P4）/ 掲載節 `section_label`（document_structure の節見出しへ
+  解決できた場合のみ）/ `link_status`（統制語彙キー）/ `assumptions`（先頭2件）/ `symbols[].defined_here` /
+  `_short_excerpt` → text_excerpt 委譲 / **第4の生TeX供給源**（`semantics.summary` → `semantic_kind`）を
+  `_explanatory_text()` で封鎖
+- **equation_hover_content_design.md**: §3.1 の読み下し行に断念注記（Q6・2026-08-03 確定）
+
+### 10.4 実装上の主な裁定
+
+1. 式番号の表記は「式 (2.7)」に統一（既存契約 `eq_2_7` 素通しから変更。式番号情報は保持）
+2. サーバ evidence_items の source 別名2件（topic_summary / summary）は signature で1枚に畳み
+   `alt_ids` で両 ID 参照を維持（CP7 と P4 の両立）
+3. パンくず・ヘッダ注記には `data-ui-anchor` を付けず管理UI 3点セットの対象外とした（anchor 網羅テスト 59 passed）
+4. `focus.headline` は snapshot には二重化しない（`item.title` がラダー委譲済みのため）
+5. TeX 遮断は学習者射影で記号以外の全型に拡大（要求ガードレール「DTO 全文字列に TeX ゼロ」の構造的充足）
+
+### 10.5 既知の残作業・申し送り
+
+- **Phase 3（二層説明の結線）未着手**: `labels.equation_label(explanation=)` の口は開いている。
+  equation の contextual 説明選抜是正 + approved のみ結線で日本語一行の headline になる
+- **docker 実機 E2E 未実施**（S1〜S4 の目視。トピック再生成後に掲載節・成立条件が hover に出ること）
+- node harness テスト4件はこの環境では skip（node 不在）。CI で実走確認を推奨
+- 旧スナップショットのコースは S1/S3 外殻が旧形のまま（劣化許容・再生成で改善）。S2/S3展開/S4 は
+  live 読みのためデプロイ即時反映
+- element-vocab.js に link_status の**事実文**ミラーは未追加（S3 外殻カードで「前段が無い理由」を
+  出す場合に必要。現状は展開部の intrinsic.facts / review_notes がサーバ合成で供給するため非必須）
+- W層 dialogue.py の grounding は新キーを自動で受けて改善（追加コールなし）。明示的な区画化注入は将来課題

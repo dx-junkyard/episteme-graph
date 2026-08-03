@@ -25,6 +25,21 @@
   `data-evidence-key` 等の DOM 契約は Phase 0/1 のまま維持する。
 - confidence 等の生数値を描画しないこと（W8）。
 - 追加領域が ES5 準拠（開発ルール5: アロー関数・const/let・テンプレートリテラル禁止）。
+
+`docs/features/element_context_presentation_redesign.md` §6 S3 / §8 Phase 2 の追加契約:
+- **サーバ正本の evidence_items を最優先で使う（S3-1 / RC8）**: course-structure の各
+  topic DTO は `build_topic_evidence_items`（学習画面と同一の純関数）の結果を同梱し、
+  原稿スタジオはそれを使う。ローカル合成は evidence_items を返さない旧応答向けの
+  フォールバックに留める（同じ根拠が画面ごとに別の見出し・別の欠落で出る並行実装に
+  戻さない）。見出しに生の内部 ID・生 TeX を出さない（EH1/EH2）。
+- **CP9**: 各カードのメタ行は役割のみ。トピック↔論文の照合来歴はペイン見出しの注記
+  （`lsTopicMappingNoteHtml`）が1回だけ出す。
+- **中心移動（旅）**: 文脈カードの ITEM 見出しから中心を据え直せる（`onCenter`）。
+  辿った経路はパンくずに積み「← 戻る」で戻す。取得・キャッシュ・ステイル破棄は初回
+  描画と共通の再入可能ローダ（`lsLoadEvidenceContextAt`）を通す。
+- **状態バッジ・要確認事項**: `metaBadges`（`focus.contextual_role_status`）と
+  `reviewNotes`（`focus.review_notes`）を統一パーツカードへ渡すだけにする
+  （段階ラベル・事実文の描画は element-card.js / element-vocab.js が正本）。
 """
 
 from __future__ import annotations
@@ -35,6 +50,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 ADMIN_LS_JS = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
 STYLES_CSS = ROOT / "frontend" / "public" / "css" / "styles.css"
+TOPICS_PY = ROOT / "backend" / "api" / "routes" / "lecture_studio" / "topics.py"
 
 
 def _read() -> str:
@@ -45,6 +61,13 @@ def _block(src: str, start_marker: str, end_marker: str) -> str:
     start = src.index(start_marker)
     end = src.index(end_marker, start)
     return src[start:end]
+
+
+def _code(block: str) -> str:
+    """行コメントを落とした JS（申し送りコメントは残るのでコードだけを見る）。"""
+    return "\n".join(
+        line for line in block.splitlines() if not line.strip().startswith("//")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -223,14 +246,16 @@ class TestContextLazyLoad:
         src = _read()
         block = _block(
             src,
-            "function lsRenderEvidenceContext(topic, item, container, data) {",
+            "function lsRenderEvidenceContext(topic, item, container, data, nav) {",
             "// 同一トピックの根拠リンクに対応アイテムがあるか。",
         )
         assert "window.ElementCard.mount(" in block
-        assert "lsEvidenceContextCardOpts(topic, item, data.focus || {})" in block
+        assert "lsEvidenceContextCardOpts(topic, item, data.focus || {}, nav)" in block
+        # mount 先はパンくずを残すための内側ホスト（コンテナ全置換に耐える）。
+        assert "lsEvidenceContextHost(topic, item, nav)" in block
         # カード未読み込みは事実文へ縮退する（独自 HTML の二重実装を持たない）
         assert "if (!window.ElementCard) {" in block
-        assert "lsEvidenceContextFactHtml(" in block
+        assert "lsRenderEvidenceContextFact(topic, item, nav, " in block
 
     def test_bespoke_lane_renderers_are_gone(self):
         """独自レーン HTML（旧 ls-evidence-context-lane 系）を復活させないこと。"""
@@ -260,7 +285,7 @@ class TestContextLazyLoad:
         src = _read()
         block = _block(
             src,
-            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsEvidenceContextCardOpts(topic, item, focus, nav) {",
             "function lsRenderEvidenceContext(",
         )
         assert "VARIANT_EDITABLE" in block
@@ -284,7 +309,7 @@ class TestContextLazyLoad:
         src = _read()
         block = _block(
             src,
-            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsEvidenceContextCardOpts(topic, item, focus, nav) {",
             "function lsRenderEvidenceContext(",
         )
         assert "itemActions:" in block
@@ -299,7 +324,7 @@ class TestContextLazyLoad:
         src = _read()
         block = _block(
             src,
-            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsEvidenceContextCardOpts(topic, item, focus, nav) {",
             "function lsRenderEvidenceContext(",
         )
         assert "window.Deliberation.openElement(" in block
@@ -316,7 +341,7 @@ class TestContextLazyLoad:
         assert "data-evidence-deliberate=" not in html_block
         block = _block(
             src,
-            "function lsEvidenceContextCardOpts(topic, item, focus) {",
+            "function lsEvidenceContextCardOpts(topic, item, focus, nav) {",
             "function lsRenderEvidenceContext(",
         )
         assert "if (!elementType || !elementId) return opts;" in block
@@ -505,6 +530,234 @@ class TestNoRawNumbers:
         assert "confidence" not in "\n".join(
             line for line in card.splitlines() if not line.strip().startswith(("//", "*", "/*"))
         )
+
+
+# ---------------------------------------------------------------------------
+# §6 S3-1 / RC8: サーバ正本の evidence_items を最優先で使う
+# ---------------------------------------------------------------------------
+
+
+class TestServerEvidenceItemsArePreferred:
+    def _items_block(self) -> str:
+        return _block(
+            _read(), "function lsTopicEvidenceItems(topic) {", "function lsEvidenceItemHasAltId("
+        )
+
+    def test_course_structure_dto_embeds_evidence_items(self):
+        """course-structure の各 topic DTO にサーバ正本の evidence_items を同梱する
+        （正本 = core/course_content_builder.build_topic_evidence_items で、学習画面の
+        DTO と同一の純関数）。"""
+        src = TOPICS_PY.read_text(encoding="utf-8")
+        assert "build_topic_evidence_items" in src
+        assert '"evidence_items": build_topic_evidence_items(t)' in src
+
+    def test_client_prefers_server_items_and_local_synthesis_is_fallback(self):
+        block = self._items_block()
+        assert "var serverItems = topic.evidence_items;" in block
+        assert "if (mapped.length) return mapped;" in block
+        assert "server_item: true" in block
+        # サーバ値の採用がローカル合成より前にあること（= 合成はフォールバック）。
+        assert block.index("var serverItems = topic.evidence_items;") < block.index(
+            "(topic.evidence_links || []).forEach("
+        )
+
+    def test_helpers_stay_local_to_keep_the_node_harness_contract(self):
+        """写像ヘルパーは関数内ローカル関数式に閉じる。tests/
+        test_learning_material_embed_resolution.py の node harness が
+        lsTopicEvidenceItems だけを抽出して評価するため、トップレベルへ切り出すと
+        ReferenceError で落ちる（構造を変えないこと）。"""
+        block = self._items_block()
+        for decl in (
+            "var genericTitle = function (kind) {",
+            "var equationTitle = function (label, normId) {",
+            "var spokenText = function (value) {",
+        ):
+            assert decl in block, decl
+        src = _read()
+        for name in (
+            "function genericTitle(",
+            "function equationTitle(",
+            "function spokenText(",
+        ):
+            assert name not in src, name
+
+    def test_titles_never_show_raw_internal_ids(self):
+        """見出しに裸の内部 ID を出さない（EH2）。論文の式番号形だけを例外にする。"""
+        block = self._items_block()
+        assert "if (norm && /^eq[_\\-.]?[0-9]/i.test(norm)) return norm;" in block
+        assert "return genericTitles.equation;" in block
+        # サーバ値の title が ID そのままのときも一般ラベルへ落とす。
+        assert "if (!sTitle || sTitle === sId) {" in block
+
+    def test_raw_tex_never_becomes_summary_or_plain_text(self):
+        """生 TeX を意味の一行・読み下しの欄に流さない（EH1）。かつて
+        `plain_text || latex` が生 TeX の供給源だった経路が復活していないこと。"""
+        block = self._items_block()
+        assert "return lsLooksLikeTexMath(text) ? \"\" : text;" in block
+        assert "summary: spokenText(formula.plain_text)" in block
+        assert "plain_text: spokenText(raw.plain_text)" in block
+        code = _code(block)
+        assert "plain_text || formula.latex" not in code
+        assert "formula.plain_text || formula.latex" not in code
+
+
+# ---------------------------------------------------------------------------
+# §6 S3 / §8 Phase 2: 中心移動（旅）・状態バッジ・要確認事項の配線
+# ---------------------------------------------------------------------------
+
+
+class TestCenterMoveAndCardWiring:
+    def _opts_block(self) -> str:
+        return _block(
+            _read(),
+            "function lsEvidenceContextCardOpts(topic, item, focus, nav) {",
+            "function lsRenderEvidenceContext(",
+        )
+
+    def test_meta_badges_and_review_notes_are_delegated_to_the_card(self):
+        """段階ラベル・事実文の描画は統一パーツカード（+ element-vocab.js）が行い、
+        原稿スタジオは値を渡すだけ。未知・空の status はカード側が行ごと落とす。"""
+        block = self._opts_block()
+        assert 'metaBadges: [{ status: (focus && focus.contextual_role_status) || "" }]' in block
+        assert "reviewNotes: (focus && focus.review_notes) || []" in block
+
+    def test_card_opts_never_pass_raw_numbers(self):
+        """W8: confidence 等の生数値をカードへ渡さない。"""
+        assert "confidence" not in _code(self._opts_block())
+
+    def test_on_center_is_wired_and_fail_closed_without_a_current_focus(self):
+        """現在の中心（nav.focusRef）が無い呼び出しでは戻り先を作れないため、
+        中心移動そのものを出さない（fail-closed）。"""
+        block = self._opts_block()
+        assert "onCenter: nav && nav.focusRef ? function (ctxItem) {" in block
+        assert "lsEvidenceCenterOnItem(topic, item, nav, ctxItem);" in block
+        assert "} : null," in block
+
+    def test_center_move_reenters_the_shared_loader_and_pushes_the_trail(self):
+        block = _block(
+            _read(),
+            "function lsEvidenceCenterOnItem(topic, item, nav, ctxItem) {",
+            "// ローカル対応判定の memo",
+        )
+        # 推測でジャンプ先を作らない（navigable / element_id が無ければ何もしない）。
+        assert "if (!ctxItem || !ctxItem.navigable) return;" in block
+        assert "if (!elementType || !elementId) return;" in block
+        assert "lsLoadEvidenceContextAt(topic, item, nav.container, next," in block
+        assert "(nav.trail || []).concat([nav.focusRef])" in block
+
+    def test_loader_is_reentrant_on_element_type_id_and_document(self):
+        """初回描画と中心移動が同じローダを通る（取得・キャッシュ・ステイル破棄の
+        方針が2つに分かれない）。"""
+        src = _read()
+        entry = _block(
+            src,
+            "function lsLoadEvidenceContext(topic, item, container) {",
+            "function lsLoadEvidenceContextAt(",
+        )
+        assert "lsLoadEvidenceContextAt(topic, item, container, {" in entry
+        assert "elementType: lsEvidenceContextElementType(item.kind)," in entry
+        assert "documentId: lsEvidenceContextDocumentId(item)," in entry
+        loader = _block(
+            src,
+            "function lsLoadEvidenceContextAt(topic, item, container, focusRef, trail) {",
+            "function lsEvidenceContextStillVisible(",
+        )
+        for field in ("focusRef.elementType", "focusRef.documentId", "focusRef.elementId"):
+            assert field in loader, field
+        assert "var nav = { container: container, focusRef: focusRef, trail: trail || [] };" in loader
+
+    def test_breadcrumb_lives_outside_the_card_mount_host(self):
+        """ElementCard.mount はコンテナの innerHTML を全置換するので、パンくずを残す
+        にはコンテナ内にホスト div を作ってそこへ mount する。"""
+        src = _read()
+        host = _block(
+            src,
+            "function lsEvidenceContextHost(topic, item, nav) {",
+            "function lsRenderEvidenceContextFact(",
+        )
+        assert "nav.container.innerHTML = lsEvidenceTrailHtml(nav.trail) +" in host
+        assert '<div class="ls-evidence-context-host"></div>' in host
+        assert "lsBindEvidenceTrail(topic, item, nav);" in host
+        assert 'nav.container.querySelector(".ls-evidence-context-host") || nav.container' in host
+        # 外殻カードの DOM 契約（data-evidence-context のコンテナ）は変えない。
+        assert "data-evidence-context=" in _read()
+
+    def test_breadcrumb_html_is_factual_and_has_a_back_control(self):
+        trail = _block(
+            _read(),
+            "function lsEvidenceTrailHtml(trail) {",
+            "function lsBindEvidenceTrail(",
+        )
+        # 経路が無いときは欄ごと出さない。
+        assert 'if (!trail || !trail.length) return "";' in trail
+        assert "data-evidence-context-back=" in trail
+        assert "← 戻る" in trail
+        assert "たどった経路: " in trail
+        # 数値・進捗・煽り文言は出さない（事実のみ）。
+        assert "%" not in trail
+
+    def test_back_control_pops_one_step(self):
+        bind = _block(
+            _read(),
+            "function lsBindEvidenceTrail(topic, item, nav) {",
+            "function lsEvidenceContextHost(",
+        )
+        assert "var trail = (nav.trail || []).slice();" in bind
+        assert "var prev = trail.pop();" in bind
+        assert "lsLoadEvidenceContextAt(topic, item, nav.container, prev, trail);" in bind
+
+    def test_trail_label_falls_back_to_the_type_vocabulary(self):
+        """ラベルが無い中心は種別語彙（正本 element-vocab.js 経由）へ落とし、
+        生の内部 ID をパンくずに出さない。"""
+        label = _block(
+            _read(),
+            "function lsEvidenceTrailLabel(ref) {",
+            "function lsEvidenceTrailHtml(",
+        )
+        assert "lsShortSummary(label, 24)" in label
+        assert "lsElementTypeLabel(" in label
+        assert "ref.elementId" not in label
+
+    def test_breadcrumb_styles_defined(self):
+        css = STYLES_CSS.read_text(encoding="utf-8")
+        assert ".ls-evidence-context-trail" in css
+        assert ".ls-evidence-context-back" in css
+
+
+# ---------------------------------------------------------------------------
+# CP9: 照合来歴はカードのメタ行ではなくペイン見出しの注記
+# ---------------------------------------------------------------------------
+
+
+class TestMappingNoteInPaneHeader:
+    def test_card_meta_row_shows_role_only(self):
+        card = _block(
+            _read(),
+            "function lsCourseEvidenceCardHtml(topic, item) {",
+            "// ── Phase 2:",
+        )
+        assert "var metaLabel = lsEvidenceMetaLabel(item.role);" in card
+        assert "対応付け" not in _code(card)
+
+    def test_pane_header_carries_the_mapping_note(self):
+        src = _read()
+        note = _block(
+            src, "function lsTopicMappingNoteHtml(topic) {", "function lsCourseComponentById("
+        )
+        assert "このトピックと論文の対応付け: " in note
+        assert "ls-evidence-mapping-note" in note
+        assert 'if (!confidence) return "";' in note  # 旧データでは欄ごと出さない
+        render = _block(
+            src, "function lsCourseEvidenceHtml(topic) {", "function lsCourseEvidenceCardHtml("
+        )
+        assert "var mappingNote = lsTopicMappingNoteHtml(topic);" in render
+        # 空リスト / フラット / アウトラインの3経路すべてに1回だけ付く。
+        assert render.count("mappingNote +") == 3
+
+    def test_meta_label_helper_takes_role_only(self):
+        src = _read()
+        assert "function lsEvidenceMetaLabel(role) {" in src
+        assert "function lsEvidenceMetaLabel(role, confidence) {" not in src
 
 
 # ---------------------------------------------------------------------------

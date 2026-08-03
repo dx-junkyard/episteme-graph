@@ -10,6 +10,7 @@ DB 実接続は使わず、``get_session`` を monkeypatch した最小限のフ
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -379,12 +380,15 @@ class TestVisibleItems:
         assert [i["id"] for i in element_context._visible_items(items)] == ["up-1", "up-3"]
 
     def test_internal_reference_keys_are_dropped(self):
-        projected = element_context._visible_items([_item()])[0]
+        projected = element_context._visible_items([_item(label_source="text")])[0]
         assert set(projected) == {
-            "id", "element_type", "label", "relation_label", "relation_status", "navigable",
+            "id", "element_type", "label", "sublabel", "qualifier", "group", "unresolved",
+            "relation_label", "relation_status", "navigable",
         }
         assert "evidence_refs" not in projected
         assert "relation" not in projected
+        # 来歴（label_source）は教員のみ（§6 の学習者/教員差分表）。
+        assert "label_source" not in projected
 
     def test_lane_capped_at_max(self):
         items = [_item(element_id=f"e{i}") for i in range(30)]
@@ -943,3 +947,749 @@ class TestEquationPanelDisplay:
             "relation_status": element_context.CONTEXT_STATUS_SOURCE_BACKED,
         })
         assert item["label"] == "線形化から成長方程式までの導出"
+
+
+# ---------------------------------------------------------------------------
+# ITEM v2 / focus v2 の学習者射影
+# docs/features/element_context_presentation_redesign.md §4（DTO 契約 v2）/ §6
+# ---------------------------------------------------------------------------
+
+
+_TRUNCATED_TEX = (
+    "\\begin{aligned} \\delta(t, {\\bm{x}}) {} \\overset{\\mathrm{}}{{}:={}}{} \\frac{\\rho("
+)
+
+
+def _v2_item(**overrides) -> dict:
+    """ITEM v2（追加キー込み）の素材。"""
+    item = _item()
+    item.update(
+        {
+            "sublabel": "この節で導入される観測量",
+            "qualifier": "definition",
+            "group": "claim",
+            "unresolved": False,
+            "label_source": "text",
+        }
+    )
+    item.update(overrides)
+    return item
+
+
+class TestItemV2Keys:
+    """W層が新しく載せる区別材料（sublabel / qualifier / group / unresolved）を
+    透過し、来歴（label_source）だけを落とす。"""
+
+    def test_new_keys_are_passed_through(self):
+        projected = element_context._project_item(_v2_item())
+
+        assert projected["sublabel"] == "この節で導入される観測量"
+        assert projected["qualifier"] == "definition"
+        assert projected["group"] == "claim"
+        assert projected["unresolved"] is False
+
+    def test_missing_new_keys_yield_defaults(self):
+        """旧形の ITEM（v1）でもキーは必ず生える（フロントの分岐を単純にする）。"""
+        projected = element_context._project_item(_item())
+
+        assert projected["sublabel"] == ""
+        assert projected["qualifier"] == ""
+        assert projected["group"] == element_context.ITEM_GROUP_FALLBACK
+        assert projected["unresolved"] is False
+
+    def test_unknown_group_falls_back_to_related(self):
+        for raw in ("", None, "mystery_group"):
+            projected = element_context._project_item(_v2_item(group=raw))
+            assert projected["group"] == "related", raw
+
+    def test_known_groups_are_preserved(self):
+        for group in element_context.ITEM_GROUPS:
+            projected = element_context._project_item(_v2_item(group=group))
+            assert projected["group"] == group, group
+
+    def test_unresolved_flag_from_lens_is_preserved(self):
+        projected = element_context._project_item(_v2_item(unresolved=True))
+        assert projected["unresolved"] is True
+
+
+class TestEquationDetailLayerIsHiddenFromLearners:
+    """CP3: 式単位の操作ノード（traceability 層）は学習者に出さない。"""
+
+    def test_equation_detail_item_is_dropped_entirely(self):
+        item = _v2_item(
+            element_type="theory_component",
+            element_id="theory-op-uuid",
+            label="消去: 背景密度",
+            qualifier=element_context.QUALIFIER_EQUATION_DETAIL,
+            group="operation",
+        )
+        assert element_context._project_item(item) is None
+
+    def test_lane_keeps_other_items_and_drops_only_detail_layer(self):
+        items = [
+            _v2_item(element_id="keep-1", qualifier="definition", group="claim"),
+            _v2_item(
+                element_id="detail-1",
+                qualifier=element_context.QUALIFIER_EQUATION_DETAIL,
+                group="operation",
+            ),
+            _v2_item(element_id="keep-2", qualifier="", group="stage"),
+        ]
+        assert [i["id"] for i in element_context._visible_items(items)] == ["keep-1", "keep-2"]
+
+    def test_main_stage_item_is_kept(self):
+        """main 層（理論段階）は学習者にも出す（区画②）。"""
+        item = _v2_item(
+            element_type="stage",
+            element_id=None,
+            label="理論の土台",
+            sublabel="観測量を密度ゆらぎとして定義する",
+            qualifier="theory_basis",
+            group="stage",
+            relation_label="の理論段階に属する",
+        )
+        projected = element_context._project_item(item)
+
+        assert projected["label"] == "理論の土台"
+        assert projected["sublabel"] == "観測量を密度ゆらぎとして定義する"
+        assert projected["qualifier"] == "theory_basis"
+        assert projected["navigable"] is False
+
+
+class TestSublabelGating:
+    """sublabel は区別材料なので**項目は落とさず欄だけ**を遮断する。"""
+
+    def test_sublabel_with_embedded_internal_id_is_emptied(self):
+        for sublabel in (
+            "導出「derivation_eq_tex_b16」のステップ「step_001」",
+            "synth_claim_0001 に由来する",
+            "ffffffff-ffff-ffff-ffff-ffffffffffff の図に対応",
+            "ev_0012 を根拠とする",
+            "theory_op_0001 のノード",
+        ):
+            projected = element_context._project_item(_v2_item(sublabel=sublabel))
+            assert projected["sublabel"] == "", sublabel
+            assert projected["label"] == "上位コンポーネント", sublabel  # 項目は残す
+
+    def test_sublabel_with_raw_tex_is_emptied(self):
+        projected = element_context._project_item(_v2_item(sublabel=_TRUNCATED_TEX))
+        assert projected["sublabel"] == ""
+
+    def test_plain_sublabel_is_kept(self):
+        for sublabel in (
+            "操作: transform → linearize",
+            "式 (2.7) から導かれる",
+            "第3.2節",
+            "系レベルの操作 ／ 条件: 線形領域",
+        ):
+            projected = element_context._project_item(_v2_item(sublabel=sublabel))
+            assert projected["sublabel"] == sublabel, sublabel
+
+
+class TestGenericLabelKeepsSublabel:
+    """RC6 の回帰テスト: 一般ラベルへ縮退しても sublabel で区別できること。"""
+
+    def test_generic_replacement_sets_unresolved_and_keeps_sublabel(self):
+        item = _v2_item(
+            element_type="theory_claim",
+            element_id=None,
+            label="synth_claim_0001",
+            sublabel="密度コントラストの定義に依存する",
+            group="claim",
+        )
+        projected = element_context._project_item(item)
+
+        assert projected["label"] == "関連する主張"
+        assert projected["unresolved"] is True
+        assert projected["sublabel"] == "密度コントラストの定義に依存する"
+
+    def test_two_generic_derivation_items_stay_distinguishable(self):
+        """スクショの「導出の流れ」×2（区別不能）が、sublabel + qualifier で解ける。"""
+        items = [
+            _v2_item(
+                element_type="derivation",
+                element_id="derivation_eq_tex_b16",
+                label="導出「derivation_eq_tex_b16」のステップ「step_001」",
+                sublabel="操作: transform → linearize",
+                qualifier="equation_chain",
+                group="derivation_out",
+                relation_label="の導出に入力として使われる",
+            ),
+            _v2_item(
+                element_type="derivation",
+                element_id="system_derivation_0001",
+                label="導出「system_derivation_0001」のステップ「sys_001_step_1」",
+                sublabel="操作: eliminate ／ 消える記号: b_s",
+                qualifier="system_level",
+                group="derivation_out",
+                relation_label="の導出に入力として使われる",
+            ),
+        ]
+        projected = element_context._visible_items(items)
+
+        assert [i["label"] for i in projected] == ["導出の流れ", "導出の流れ"]
+        assert [i["unresolved"] for i in projected] == [True, True]
+        # CP7: label + sublabel の組が同一になる2件を作らない。
+        pairs = {(i["label"], i["sublabel"]) for i in projected}
+        assert len(pairs) == 2
+        assert [i["qualifier"] for i in projected] == ["equation_chain", "system_level"]
+
+    def test_equation_tex_label_without_paper_number_sets_unresolved(self):
+        projected = element_context._project_item(
+            _v2_item(
+                element_type="equation",
+                element_id="eq_tex_b16",
+                label=_TRUNCATED_TEX,
+                sublabel="フーリエ空間の密度コントラスト",
+                group="equation_down",
+            )
+        )
+        assert projected["label"] == "関連する数式"
+        assert projected["unresolved"] is True
+        assert projected["sublabel"] == "フーリエ空間の密度コントラスト"
+
+    def test_equation_tex_label_with_paper_number_is_not_unresolved(self):
+        projected = element_context._project_item(
+            _v2_item(
+                element_type="equation", element_id="eq_2_7", label=_TRUNCATED_TEX, group="equation_up"
+            )
+        )
+        assert projected["label"] == "eq_2_7"
+        assert projected["unresolved"] is False
+
+
+class TestSymbolItems:
+    """記号は式の再掲ではなく読解の部品（§5.4）。label は TeX でも遮断しない。"""
+
+    def test_tex_symbol_label_is_not_blocked(self):
+        projected = element_context._project_item(
+            _v2_item(
+                element_type="symbol",
+                element_id=None,
+                label="\\delta(t,\\bm{x})",
+                sublabel="密度コントラスト",
+                qualifier="defined",
+                group="symbol_defined",
+                relation_label="で記号を定義する",
+            )
+        )
+        assert projected["label"] == "\\delta(t,\\bm{x})"
+        assert projected["sublabel"] == "密度コントラスト"
+        assert projected["group"] == "symbol_defined"
+        assert projected["navigable"] is False
+
+    def test_non_symbol_tex_labels_fall_back_to_generic(self):
+        """記号以外の型は生 TeX を出さない（EC1。equation 以外の型でも同じ）。"""
+        projected = element_context._project_item(
+            _v2_item(
+                element_type="evidence",
+                element_id=None,
+                label=_TRUNCATED_TEX,
+                sublabel="2.1 Density contrast",
+                group="evidence",
+            )
+        )
+        assert projected["label"] == "本文の根拠箇所"
+        assert projected["unresolved"] is True
+        assert projected["sublabel"] == "2.1 Density contrast"
+
+    def test_defined_and_used_symbols_are_separate_groups(self):
+        items = [
+            _v2_item(element_type="symbol", element_id=None, label="δ", group="symbol_defined",
+                     relation_label="で記号を定義する", sublabel="密度コントラスト"),
+            _v2_item(element_type="symbol", element_id=None, label="ρ", group="symbol_used",
+                     relation_label="を用いる", sublabel="物質密度"),
+        ]
+        projected = element_context._visible_items(items)
+        assert [i["group"] for i in projected] == ["symbol_defined", "symbol_used"]
+        assert [i["relation_label"] for i in projected] == ["で記号を定義する", "を用いる"]
+
+
+# ---------------------------------------------------------------------------
+# focus v2（headline / intrinsic / placement / contextual_role_source / derivations）
+# ---------------------------------------------------------------------------
+
+
+def _v2_focus(**overrides) -> dict:
+    focus = {
+        "element_type": "equation",
+        "element_id": "eq_2_7",
+        "document_id": _DOC_A,
+        "label": "δ(t,x) を定義する式",
+        "headline": "δ(t,x) を定義する式",
+        "intrinsic_summary": "",
+        "intrinsic": {
+            "kind_key": "definition",
+            "role_key": "definition",
+            "summary": "Definition of the matter density contrast.",
+            "summary_is_source_language": True,
+            "reading": "",
+            "symbols": [
+                {
+                    "symbol": "\\delta(t,\\bm{x})",
+                    "meaning": "密度コントラスト",
+                    "defined_here": True,
+                    "definition_status": "defined",
+                },
+                {"symbol": "\\rho(t)", "meaning": "物質密度", "defined_here": False},
+            ],
+            "conditions": ["線形領域であること"],
+            "facts": ["この式は定義であり、前段の式を持ちません。"],
+        },
+        "placement": {
+            "section_label": "2.1 Density contrast",
+            "stage": {"key": "theory_basis", "description": "観測量を密度ゆらぎとして定義する"},
+            "thesis_role": "中心命題の観測量を定義する",
+        },
+        "contextual_role": "理論の土台の段階で使われる定義式",
+        "contextual_role_status": "source_backed",
+        "contextual_role_source": "self_described",
+        "review_notes": ["atomic claim が紐づいていません"],
+        "provenance": ["equation_semantics:eq_2_7"],
+        "generic": None,
+    }
+    focus.update(overrides)
+    return focus
+
+
+def _project_equation_focus(focus: dict) -> dict:
+    return element_context._project_focus(
+        focus, element_context.ELEMENT_TYPE_EQUATION, "eq_2_7"
+    )
+
+
+class TestFocusV2Keys:
+    def test_headline_intrinsic_placement_are_passed_through(self):
+        projected = _project_equation_focus(_v2_focus())
+
+        assert projected["headline"] == "δ(t,x) を定義する式"
+        assert projected["intrinsic"]["role_key"] == "definition"
+        assert projected["intrinsic"]["summary"].startswith("Definition of the matter")
+        assert projected["intrinsic"]["summary_is_source_language"] is True
+        assert projected["intrinsic"]["conditions"] == ["線形領域であること"]
+        assert projected["intrinsic"]["facts"] == ["この式は定義であり、前段の式を持ちません。"]
+        assert projected["placement"]["section_label"] == "2.1 Density contrast"
+        assert projected["placement"]["stage"] == {
+            "key": "theory_basis",
+            "description": "観測量を密度ゆらぎとして定義する",
+        }
+        assert projected["placement"]["thesis_role"] == "中心命題の観測量を定義する"
+
+    def test_review_notes_are_dropped(self):
+        """要確認事項は教員のみ（§6 の差分表）。"""
+        assert "review_notes" not in _project_equation_focus(_v2_focus())
+
+    def test_headline_falls_back_to_label(self):
+        projected = _project_equation_focus(_v2_focus(headline=""))
+        assert projected["headline"] == "δ(t,x) を定義する式"
+
+    def test_headline_with_raw_tex_falls_back_to_label(self):
+        projected = _project_equation_focus(
+            _v2_focus(headline=_TRUNCATED_TEX, label="式 (2.7)")
+        )
+        assert projected["headline"] == "式 (2.7)"
+
+    def test_symbol_meanings_survive_and_tex_symbols_are_not_blocked(self):
+        """RC5: 記号の意味が evidence_refs に押し込まれて消える問題の回帰テスト。"""
+        symbols = _project_equation_focus(_v2_focus())["intrinsic"]["symbols"]
+
+        assert symbols[0]["symbol"] == "\\delta(t,\\bm{x})"
+        assert symbols[0]["meaning"] == "密度コントラスト"
+        assert symbols[0]["defined_here"] is True
+        assert symbols[0]["definition_status"] == "defined"
+
+    def test_reading_with_tex_is_dropped(self):
+        projected = _project_equation_focus(_v2_focus(
+            intrinsic={"reading": _TRUNCATED_TEX, "summary": "密度コントラストの定義"}
+        ))
+        assert "reading" not in projected["intrinsic"]
+        assert projected["intrinsic"]["summary"] == "密度コントラストの定義"
+
+    def test_readable_reading_is_kept(self):
+        projected = _project_equation_focus(_v2_focus(
+            intrinsic={"reading": "デルタは、密度から背景密度を引いて背景密度で割った量"}
+        ))
+        assert projected["intrinsic"]["reading"].startswith("デルタは")
+
+    def test_internal_ids_are_dropped_from_summary_facts_and_stage_description(self):
+        projected = _project_equation_focus(_v2_focus(
+            intrinsic={
+                "summary": "synth_claim_0001 の定義",
+                "facts": ["ev_0012 に対応する", "この式は定義であり、前段の式を持ちません。"],
+                "conditions": ["step_001 の直後に成立"],
+            },
+            placement={
+                "section_label": "2.1 Density contrast",
+                "stage": {"key": "theory_basis", "description": "theory_op_0001 のノード"},
+            },
+        ))
+
+        assert "summary" not in projected["intrinsic"]
+        assert projected["intrinsic"]["facts"] == ["この式は定義であり、前段の式を持ちません。"]
+        assert "conditions" not in projected["intrinsic"]
+        assert projected["placement"]["stage"] == {"key": "theory_basis"}
+
+    def test_empty_intrinsic_and_placement_keys_are_omitted(self):
+        projected = _project_equation_focus(_v2_focus(intrinsic={}, placement={}))
+        assert "intrinsic" not in projected
+        assert "placement" not in projected
+
+
+class TestContextualRoleSource:
+    """§4.4: 学習者射影が落とすのは ``unidentified`` のみ（candidate 判定からの移行）。"""
+
+    def test_self_described_role_is_kept_even_with_candidate_status(self):
+        projected = _project_equation_focus(
+            _v2_focus(contextual_role_source="self_described", contextual_role_status="candidate")
+        )
+        assert projected["contextual_role"] == "理論の土台の段階で使われる定義式"
+        assert projected["contextual_role_source"] == "self_described"
+
+    def test_committed_and_structural_roles_are_kept(self):
+        for source in ("committed", "structural"):
+            projected = _project_equation_focus(_v2_focus(contextual_role_source=source))
+            assert projected["contextual_role_source"] == source, source
+            assert projected["contextual_role"], source
+
+    def test_unidentified_source_drops_the_whole_role_block(self):
+        projected = _project_equation_focus(
+            _v2_focus(contextual_role_source="unidentified", contextual_role_status="source_backed")
+        )
+        assert "contextual_role" not in projected
+        assert "contextual_role_status" not in projected
+        assert "contextual_role_source" not in projected
+
+    def test_role_with_internal_id_is_dropped_regardless_of_source(self):
+        projected = _project_equation_focus(
+            _v2_focus(contextual_role="synth_claim_0001を定量化する",
+                      contextual_role_source="structural")
+        )
+        assert "contextual_role" not in projected
+        assert "contextual_role_source" not in projected
+
+    def test_legacy_focus_without_source_falls_back_to_status(self):
+        """来歴キーを持たない旧形の投影は従来どおり status で判定する（後方互換）。"""
+        kept = _project_equation_focus(
+            _v2_focus(contextual_role_source="", contextual_role_status="source_backed")
+        )
+        dropped = _project_equation_focus(
+            _v2_focus(contextual_role_source="", contextual_role_status="candidate")
+        )
+        assert kept["contextual_role"] == "理論の土台の段階で使われる定義式"
+        assert "contextual_role_source" not in kept
+        assert "contextual_role" not in dropped
+
+
+class TestDerivationsProjection:
+    """§4.4 derivations[] ストーリーブロックの学習者射影。"""
+
+    def _derivation(self, **overrides) -> dict:
+        entry = {
+            "derivation_id": "derivation_eq_tex_b16",
+            "label": "フーリエ変換による書き換え（式の導出）",
+            "sublabel": "操作: transform → linearize",
+            "chain_type": "equation_chain",
+            "operation_text": "transform → linearize",
+            "focus_role": "input",
+            "inputs": [
+                {
+                    "element_type": "equation",
+                    "element_id": "eq_2_7",
+                    "label": "δ(t,x) を定義する式",
+                    "navigable": True,
+                }
+            ],
+            "outputs": [
+                {
+                    "element_type": "equation",
+                    "element_id": "eq_tex_b16",
+                    "label": _TRUNCATED_TEX,
+                    "navigable": True,
+                }
+            ],
+            "eliminated_symbols": ["b_s"],
+            "retained_symbols": ["\\delta_k"],
+            "reason": "フーリエ空間での表現へ移す",
+            "relation_status": "source_backed",
+            "evidence_refs": ["step_001"],
+            "navigable": True,
+        }
+        entry.update(overrides)
+        return entry
+
+    def test_candidate_derivations_are_excluded(self):
+        focus = _v2_focus(derivations=[
+            self._derivation(relation_status="candidate"),
+            self._derivation(label="系レベルの消去", relation_status="source_backed"),
+        ])
+        projected = _project_equation_focus(focus)
+
+        assert [d["label"] for d in projected["derivations"]] == ["系レベルの消去"]
+
+    def test_internal_reference_keys_are_dropped(self):
+        projected = _project_equation_focus(_v2_focus(derivations=[self._derivation()]))
+        entry = projected["derivations"][0]
+
+        assert "derivation_id" not in entry
+        assert "evidence_refs" not in entry
+        assert entry["chain_type"] == "equation_chain"
+        assert entry["focus_role"] == "input"
+        assert entry["operation_text"] == "transform → linearize"
+        assert entry["reason"] == "フーリエ空間での表現へ移す"
+
+    def test_derivation_is_never_navigable_for_learners(self):
+        projected = _project_equation_focus(_v2_focus(derivations=[self._derivation()]))
+        assert projected["derivations"][0]["navigable"] is False
+
+    def test_mini_refs_recompute_navigable_and_replace_tex_labels(self):
+        entry = _project_equation_focus(
+            _v2_focus(derivations=[self._derivation()])
+        )["derivations"][0]
+
+        assert entry["inputs"][0]["navigable"] is True  # equation は旅の対象
+        assert entry["outputs"][0]["label"] == "関連する数式"
+        assert entry["outputs"][0]["navigable"] is True
+
+    def test_mini_refs_of_non_navigable_types_are_forced_false(self):
+        entry = _project_equation_focus(_v2_focus(derivations=[self._derivation(
+            inputs=[
+                {"element_type": "symbol", "element_id": None, "label": "b_s", "navigable": True},
+                {"element_type": "evidence", "element_id": "ev_0012", "label": "ev_0012",
+                 "navigable": True},
+            ],
+        )]))["derivations"][0]
+
+        assert [i["navigable"] for i in entry["inputs"]] == [False, False]
+        assert entry["inputs"][1]["label"] == "本文の根拠箇所"
+
+    def test_reason_and_sublabel_with_internal_ids_are_emptied(self):
+        entry = _project_equation_focus(_v2_focus(derivations=[self._derivation(
+            reason="step_001 で b_s を消去する",
+            sublabel="導出「derivation_eq_tex_b16」の一部",
+        )]))["derivations"][0]
+
+        assert entry["reason"] == ""
+        assert entry["sublabel"] == ""
+        assert entry["label"] == "フーリエ変換による書き換え（式の導出）"  # 項目は残す
+
+    def test_label_with_internal_id_falls_back_to_generic(self):
+        entry = _project_equation_focus(_v2_focus(derivations=[self._derivation(
+            label="導出「derivation_eq_tex_b16」のステップ「step_001」",
+        )]))["derivations"][0]
+
+        assert entry["label"] == "導出の流れ"
+
+    def test_symbol_lists_keep_tex_forms(self):
+        entry = _project_equation_focus(_v2_focus(derivations=[self._derivation()]))["derivations"][0]
+
+        assert entry["eliminated_symbols"] == ["b_s"]
+        assert entry["retained_symbols"] == ["\\delta_k"]
+
+    def test_absent_derivations_key_is_omitted(self):
+        assert "derivations" not in _project_equation_focus(_v2_focus())
+
+
+# ---------------------------------------------------------------------------
+# 学習者 DTO 全体の再帰走査（内部 ID / 生 TeX がゼロであること）
+# ---------------------------------------------------------------------------
+
+
+# 内部 ID の形（テスト側で独立に定義する — 実装の正規表現を流用すると
+# 「実装が見落とす形」を検出できないため）。
+_INTERNAL_ID_TOKEN_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+    r"|synth_[A-Za-z0-9_]*[0-9]"
+    r"|claim_span_[0-9]"
+    r"|(?:^|[^A-Za-z0-9])(?:ev|evidence)_[0-9]{3,}"
+    r"|(?:^|[^A-Za-z0-9])span_[0-9]{3,}"
+    r"|(?:^|[^A-Za-z0-9])step_[0-9]"
+    r"|(?:^|[^A-Za-z0-9])(?:system_)?derivation_[A-Za-z0-9_]+"
+    r"|(?:^|[^A-Za-z0-9])(?:theory_op|eq_op)_[0-9]"
+    r"|support:",
+)
+
+# ITEM.id / element_id / document_id は契約上残る（教材内ジャンプ・再フェッチに使う）。
+# 禁じているのは**表示文字列**に内部 ID が現れることなので、ID キーは走査から外す。
+_ID_KEYS = frozenset({"id", "element_id", "document_id"})
+
+# 記号は TeX 形のまま渡す（§5.4。レンダリング可否はフロントのゲート）。
+_SYMBOL_TEXT_KEYS = frozenset({"symbol", "eliminated_symbols", "retained_symbols"})
+
+
+def _walk_learner_strings(value, path="", *, symbol_slot=False):
+    """(path, text, symbol_slot) を列挙する再帰走査。"""
+    if isinstance(value, dict):
+        is_symbol_item = str(value.get("element_type") or "") == "symbol"
+        for key, child in value.items():
+            if key in _ID_KEYS:
+                continue
+            child_symbol = (
+                key in _SYMBOL_TEXT_KEYS or (is_symbol_item and key == "label")
+            )
+            yield from _walk_learner_strings(
+                child, f"{path}.{key}", symbol_slot=child_symbol
+            )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from _walk_learner_strings(child, f"{path}[{index}]", symbol_slot=symbol_slot)
+    elif isinstance(value, str):
+        yield path, value, symbol_slot
+
+
+class TestLearnerDtoHasNoInternalIdsOrTex:
+    """DTO 全体（v2 の新キーを含む）を再帰走査し、内部 ID と生 TeX がゼロであること。"""
+
+    def _dirty_lens(self) -> dict:
+        """W層のラベル解決が総崩れした最悪ケース（遮断層＝最後の砦の検証）。"""
+        return {
+            "focus": {
+                "element_type": "equation",
+                "element_id": "eq_tex_b14",
+                "document_id": _DOC_A,
+                "label": _TRUNCATED_TEX,
+                "headline": _TRUNCATED_TEX,
+                "intrinsic_summary": _TRUNCATED_TEX,
+                "intrinsic": {
+                    "kind_key": "definition",
+                    "summary": "synth_claim_0001 の定義",
+                    "reading": _TRUNCATED_TEX,
+                    "symbols": [
+                        {"symbol": "\\delta", "meaning": "ev_0012 に定義がある"},
+                        {"symbol": "\\rho", "meaning": "物質密度"},
+                    ],
+                    "conditions": [_TRUNCATED_TEX, "線形領域であること"],
+                    "facts": ["step_001 の直後", "この式は定義であり、前段の式を持ちません。"],
+                },
+                "placement": {
+                    "section_label": "2.1 Density contrast",
+                    "stage": {"key": "theory_basis", "description": "theory_op_0001"},
+                    "thesis_role": "support:mechanism:3",
+                },
+                "contextual_role": "synth_claim_0001を定量化する",
+                "contextual_role_source": "structural",
+                "contextual_role_status": "source_backed",
+                "review_notes": ["derivation_eq_tex_b16 の要確認"],
+                "provenance": ["equation_semantics:eq_tex_b14"],
+                "derivations": [
+                    {
+                        "derivation_id": "derivation_eq_tex_b16",
+                        "label": "導出「derivation_eq_tex_b16」のステップ「step_001」",
+                        "sublabel": _TRUNCATED_TEX,
+                        "chain_type": "equation_chain",
+                        "operation_text": "transform → linearize",
+                        "focus_role": "input",
+                        "inputs": [
+                            {"element_type": "equation", "element_id": "eq_tex_b14",
+                             "label": _TRUNCATED_TEX, "navigable": True},
+                        ],
+                        "outputs": [
+                            {"element_type": "theory_claim", "element_id": None,
+                             "label": "synth_claim_0001", "navigable": True},
+                        ],
+                        "eliminated_symbols": ["b_s"],
+                        "retained_symbols": ["\\delta_k"],
+                        "reason": "step_001 の操作",
+                        "relation_status": "source_backed",
+                        "evidence_refs": ["step_001"],
+                        "navigable": True,
+                    }
+                ],
+                "generic": None,
+            },
+            "upper": [
+                {
+                    "element_type": "theory_claim", "element_id": None, "document_id": _DOC_A,
+                    "label": "synth_claim_0001", "sublabel": "ev_0012 を根拠とする",
+                    "qualifier": "definition", "group": "claim", "unresolved": False,
+                    "label_source": "generic", "relation": "quantifies",
+                    "relation_label": "を定量化する", "relation_status": "source_backed",
+                    "evidence_refs": ["ev_0012"], "navigable": True,
+                },
+                {
+                    "element_type": "stage", "element_id": None, "document_id": _DOC_A,
+                    "label": "理論の土台", "sublabel": "観測量を密度ゆらぎとして定義する",
+                    "qualifier": "theory_basis", "group": "stage", "unresolved": False,
+                    "label_source": "controlled_vocab", "relation": "belongs_to_stage",
+                    "relation_label": "の理論段階に属する", "relation_status": "source_backed",
+                    "evidence_refs": [], "navigable": False,
+                },
+            ],
+            "lower": [
+                {
+                    "element_type": "symbol", "element_id": None, "document_id": _DOC_A,
+                    "label": "\\delta(t,\\bm{x})", "sublabel": "密度コントラスト",
+                    "qualifier": "defined", "group": "symbol_defined", "unresolved": False,
+                    "label_source": "text", "relation": "defines_symbol",
+                    "relation_label": "で記号を定義する", "relation_status": "source_backed",
+                    "evidence_refs": [], "navigable": False,
+                },
+                {
+                    "element_type": "theory_component", "element_id": "op-uuid",
+                    "document_id": _DOC_A, "label": "Define eq_tex_b16",
+                    "sublabel": "式の詳細層", "qualifier": "equation_detail",
+                    "group": "operation", "unresolved": False, "label_source": "text",
+                    "relation": "used_in_operation_step",
+                    "relation_label": "の操作ステップで使われる",
+                    "relation_status": "source_backed", "evidence_refs": [], "navigable": True,
+                },
+            ],
+            "notes": [
+                "derivation_eq_tex_b16 に他 3 件あります",
+                "上位に他 2 件あるが表示上限のため省略しました",
+            ],
+        }
+
+    def _build(self, monkeypatch) -> dict:
+        _patch_equation_lookup(monkeypatch, lambda doc: [{"equation_id": "eq_tex_b14"}])
+        monkeypatch.setattr(
+            element_context.context_lens_mod, "build", lambda ref: self._dirty_lens()
+        )
+        return element_context.build_element_context("equation", "eq_tex_b14", {_DOC_A})
+
+    def test_no_internal_ids_anywhere(self, monkeypatch):
+        result = self._build(monkeypatch)
+
+        offenders = [
+            (path, text)
+            for path, text, _ in _walk_learner_strings(result)
+            if _INTERNAL_ID_TOKEN_RE.search(text)
+        ]
+        assert offenders == []
+
+    def test_no_raw_tex_outside_symbol_slots(self, monkeypatch):
+        from core.text_excerpt import looks_like_tex_math
+
+        result = self._build(monkeypatch)
+
+        offenders = [
+            (path, text)
+            for path, text, symbol_slot in _walk_learner_strings(result)
+            if not symbol_slot and looks_like_tex_math(text)
+        ]
+        assert offenders == []
+
+    def test_equation_detail_item_never_reaches_the_learner(self, monkeypatch):
+        result = self._build(monkeypatch)
+
+        assert [i["qualifier"] for i in result["lower"]] == ["defined"]
+        assert all("式の詳細層" != i["sublabel"] for i in result["lower"])
+
+    def test_symbol_meaning_and_stage_description_survive(self, monkeypatch):
+        """遮断が過剰にならないこと（区別材料は残す）。"""
+        result = self._build(monkeypatch)
+
+        assert result["lower"][0]["label"] == "\\delta(t,\\bm{x})"
+        assert result["lower"][0]["sublabel"] == "密度コントラスト"
+        stage_item = [i for i in result["upper"] if i["group"] == "stage"][0]
+        assert stage_item["sublabel"] == "観測量を密度ゆらぎとして定義する"
+
+    def test_notes_with_internal_ids_are_filtered(self, monkeypatch):
+        result = self._build(monkeypatch)
+
+        assert result["notes"] == ["上位に他 2 件あるが表示上限のため省略しました"]
+
+    def test_role_with_internal_id_is_dropped_end_to_end(self, monkeypatch):
+        result = self._build(monkeypatch)
+
+        assert "contextual_role" not in result["focus"]
+        assert "contextual_role_source" not in result["focus"]

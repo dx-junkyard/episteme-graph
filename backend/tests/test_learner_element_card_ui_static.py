@@ -222,14 +222,43 @@ class TestTravelIsFailClosed:
 
 class TestNoDisplayRegression:
     def test_math_renderer_is_injected(self):
-        """数式レンダラは注入されたまま。ただし TeX と判定できる文字列だけを通す
-        （EC2, equation_context_panel_display_design.md — KaTeX の throwOnError:false は
-        平文・壊れた TeX を赤いエラーとして描いてしまうため）。"""
+        """数式レンダラは注入されたまま。TeX 判定のゲート（EC2）は
+        **element-card.js が内製**するので、app.js 側に重複実装を置かない
+        （element_context_presentation_redesign.md §6 S3-5）。"""
         src = _read(APP_JS)
         block = _block(src, "function learnerElementCardOpts(onCenter)", "\n  }\n")
-        assert "renderMaterialKatex(expr, display)" in block
-        assert "looksLikeRenderableTex(expr)" in block
+        assert "renderMath: renderMaterialKatex," in block
         assert "escapeHtml: escHtml" in block
+        assert "looksLikeRenderableTex" not in src, "TeX 判定の二重実装が復活している"
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        assert "function looksLikeRenderableTex(text, symbolMode) {" in card
+
+    def test_new_item_keys_are_passed_through_but_label_source_is_not(self):
+        """DTO v2 の区別材料（sublabel / qualifier / group / unresolved）は学習者にも
+        渡す。来歴（label_source）は教員のみなので詰めない（§6 の差分表）。"""
+        src = _read(APP_JS)
+        block = _block(src, "function learnerElementCardItems(items)", "\n  }\n")
+        for key in ("item.sublabel", "item.qualifier", "item.group", "item.unresolved"):
+            assert key in block, key
+        assert "item.label_source" not in src
+        assert "label_source:" not in src
+
+    def test_equation_detail_items_are_dropped_by_the_adapter(self):
+        """式の詳細層は学習者に出さない。アダプタで落とすことでカードの可視 ITEM 列と
+        添字が一致し、教材内ジャンプ（itemref 参照）が成立する。"""
+        src = _read(APP_JS)
+        block = _block(src, "function learnerElementCardItems(items)", "\n  }\n")
+        assert 'if (item.group === "operation") return;' in block
+
+    def test_intrinsic_and_derivations_are_forwarded_to_the_card(self):
+        src = _read(APP_JS)
+        block = _block(src, "function elementContextToCardDto(elementType, data)", "\n  }\n")
+        assert "cardFocus.intrinsic = focus.intrinsic" in block
+        assert "cardFocus.placement = focus.placement" in block
+        assert "headline: focus.headline" in block
+        assert "derivations: derivations," in block
+        # DTO v2 が来ているときは平文連結（旧サーバ互換パス）へ落とさない。
+        assert 'if (elementType === "equation" && !focus.intrinsic)' in block
 
     def test_component_rich_projection_is_kept_next_to_the_card(self):
         """supports の内訳・出典論文・教員の説明・共通部品タブを落とさない。"""
@@ -261,7 +290,10 @@ class TestNoDisplayRegression:
     def test_in_material_jump_is_preserved(self):
         src = _read(APP_JS)
         aug = _block(src, "function augmentLearnerElementCardJumps(container, dto)", "\n  }\n")
-        assert "materialElementContextJumpRef(items[i])" in aug
+        # ゾーン描画では ITEM が元のレーン順に並ばないため、行→ITEM はカードが
+        # 全行に付ける data-element-card-itemref から引く。
+        assert "[data-element-card-itemref]" in aug
+        assert "materialElementContextJumpRef(item)" in aug
         row = _block(src, "function buildMaterialJumpRow(ref)", "\n  }\n")
         assert "教材内で見る" in row
         assert "jumpToMaterialEvidenceRef(ref)" in row

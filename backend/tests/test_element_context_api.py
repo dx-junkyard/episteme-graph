@@ -297,6 +297,175 @@ class TestGetCourseElementContextResponse:
             assert all(token not in t for t in texts), token
 
 
+class TestElementContextV2ThroughRoute:
+    """ITEM v2 / focus v2（``element_context_presentation_redesign.md`` §4）の
+    追加キーが route 経由でもそのまま届き、教員限定キーは届かないこと。"""
+
+    _TRUNCATED_TEX = (
+        "\\begin{aligned} \\delta(t, {\\bm{x}}) {} \\overset{\\mathrm{}}{{}:={}}{} \\frac{\\rho("
+    )
+
+    def _lens(self):
+        return {
+            "focus": {
+                "element_type": "equation",
+                "element_id": "eq_1",
+                "document_id": "doc-1",
+                "label": "δ(t,x) を定義する式",
+                "headline": "δ(t,x) を定義する式",
+                "intrinsic_summary": "",
+                "intrinsic": {
+                    "kind_key": "definition",
+                    "role_key": "definition",
+                    "summary": "Definition of the matter density contrast.",
+                    "summary_is_source_language": True,
+                    "symbols": [
+                        {"symbol": "\\delta", "meaning": "密度コントラスト", "defined_here": True},
+                    ],
+                    "facts": ["この式は定義であり、前段の式を持ちません。"],
+                },
+                "placement": {
+                    "section_label": "2.1 Density contrast",
+                    "stage": {"key": "theory_basis", "description": "観測量を密度ゆらぎとして定義する"},
+                },
+                "contextual_role": "理論の土台の段階で使われる定義式",
+                "contextual_role_status": "candidate",
+                "contextual_role_source": "self_described",
+                "review_notes": ["atomic claim が紐づいていません"],
+                "provenance": ["equation_semantics:eq_1"],
+                "derivations": [
+                    {
+                        "derivation_id": "derivation_eq_tex_b16",
+                        "label": "フーリエ変換による書き換え（式の導出）",
+                        "sublabel": "操作: transform → linearize",
+                        "chain_type": "equation_chain",
+                        "operation_text": "transform → linearize",
+                        "focus_role": "input",
+                        "inputs": [],
+                        "outputs": [
+                            {"element_type": "equation", "element_id": "eq_2",
+                             "label": "フーリエ空間の密度コントラスト", "navigable": True},
+                        ],
+                        "reason": "フーリエ空間での表現へ移す",
+                        "relation_status": "source_backed",
+                        "evidence_refs": ["step_001"],
+                        "navigable": True,
+                    },
+                    {
+                        "derivation_id": "derivation_candidate",
+                        "label": "AI が候補として挙げた導出",
+                        "relation_status": "candidate",
+                        "navigable": True,
+                    },
+                ],
+                "generic": None,
+            },
+            "upper": [
+                {
+                    "element_type": "stage", "element_id": None, "document_id": "doc-1",
+                    "label": "理論の土台", "sublabel": "観測量を密度ゆらぎとして定義する",
+                    "qualifier": "theory_basis", "group": "stage", "unresolved": False,
+                    "label_source": "controlled_vocab", "relation": "belongs_to_stage",
+                    "relation_label": "の理論段階に属する", "relation_status": "source_backed",
+                    "evidence_refs": [], "navigable": False,
+                },
+            ],
+            "lower": [
+                {
+                    "element_type": "symbol", "element_id": None, "document_id": "doc-1",
+                    "label": "\\delta(t,\\bm{x})", "sublabel": "密度コントラスト",
+                    "qualifier": "defined", "group": "symbol_defined", "unresolved": False,
+                    "label_source": "text", "relation": "defines_symbol",
+                    "relation_label": "で記号を定義する", "relation_status": "source_backed",
+                    "evidence_refs": [], "navigable": False,
+                },
+                {
+                    "element_type": "theory_component", "element_id": "op-uuid",
+                    "document_id": "doc-1", "label": "消去: 背景密度", "sublabel": "式の詳細層",
+                    "qualifier": "equation_detail", "group": "operation", "unresolved": False,
+                    "label_source": "text", "relation": "used_in_operation_step",
+                    "relation_label": "の操作ステップで使われる", "relation_status": "source_backed",
+                    "evidence_refs": [], "navigable": True,
+                },
+            ],
+            "notes": [],
+        }
+
+    def _call(self, monkeypatch):
+        from core import element_context
+
+        from api.routes.learning import get_course_element_context
+
+        monkeypatch.setattr(element_context, "document_run_artifacts", lambda doc: {})
+        monkeypatch.setattr(
+            element_context, "equation_records",
+            lambda doc, artifacts=None: [{"equation_id": "eq_1"}],
+        )
+        monkeypatch.setattr(element_context.context_lens_mod, "build", lambda ref: self._lens())
+        return get_course_element_context("c1", "equation", "eq_1", {"id": "u1"})
+
+    @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])
+    @patch("api.routes.learning.get_accessible_course_data")
+    def test_v2_item_keys_reach_the_learner(self, mock_course, _mock_doc_ids, monkeypatch):
+        mock_course.return_value = _course_data()
+
+        result = self._call(monkeypatch)
+
+        stage = result["upper"][0]
+        assert stage["sublabel"] == "観測量を密度ゆらぎとして定義する"
+        assert stage["qualifier"] == "theory_basis"
+        assert stage["group"] == "stage"
+        assert stage["unresolved"] is False
+        # 記号の意味（RC5）と TeX 記号ラベル（§5.4）。
+        assert [i["label"] for i in result["lower"]] == ["\\delta(t,\\bm{x})"]
+        assert result["lower"][0]["sublabel"] == "密度コントラスト"
+
+    @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])
+    @patch("api.routes.learning.get_accessible_course_data")
+    def test_v2_focus_keys_reach_the_learner(self, mock_course, _mock_doc_ids, monkeypatch):
+        mock_course.return_value = _course_data()
+
+        focus = self._call(monkeypatch)["focus"]
+
+        assert focus["headline"] == "δ(t,x) を定義する式"
+        assert focus["intrinsic"]["summary_is_source_language"] is True
+        assert focus["placement"]["stage"]["description"] == "観測量を密度ゆらぎとして定義する"
+        # self_described は candidate status でも残す（§4.4）。
+        assert focus["contextual_role"] == "理論の土台の段階で使われる定義式"
+        assert focus["contextual_role_source"] == "self_described"
+        assert [d["label"] for d in focus["derivations"]] == [
+            "フーリエ変換による書き換え（式の導出）"
+        ]
+
+    @patch("api.routes.learning._course_document_ids", return_value=["doc-1"])
+    @patch("api.routes.learning.get_accessible_course_data")
+    def test_teacher_only_keys_never_reach_the_learner(
+        self, mock_course, _mock_doc_ids, monkeypatch,
+    ):
+        mock_course.return_value = _course_data()
+
+        result = self._call(monkeypatch)
+
+        def _walk(value):
+            if isinstance(value, dict):
+                for key in (
+                    "label_source", "review_notes", "evidence_refs", "relation",
+                    "derivation_id", "provenance",
+                ):
+                    if key == "provenance" and value is result:
+                        continue  # DTO 直下の provenance（"course_freeze"）は契約上残る
+                    assert key not in value, key
+                assert value.get("relation_status") != "candidate"
+                assert value.get("qualifier") != "equation_detail"
+                for child in value.values():
+                    _walk(child)
+            elif isinstance(value, list):
+                for child in value:
+                    _walk(child)
+
+        _walk(result)
+
+
 class TestRouteRegistration:
     def test_route_is_registered_on_learning_router(self):
         from api.routes.learning import router

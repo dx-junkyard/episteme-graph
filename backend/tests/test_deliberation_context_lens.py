@@ -182,27 +182,73 @@ class TestStatusForLink:
 
 
 class TestDeriveContextualRole:
+    """優先順位（提示再設計 §4.4）: committed → self_described → structural →
+    unidentified。3値タプル ``(text, status, source)`` を返し、``source`` が
+    ``focus.contextual_role_source`` になる。"""
+
+    def _stage_item(self, label="理論の土台", status=CONTEXT_STATUS_SOURCE_BACKED):
+        return context_lens._item(
+            "stage", None, "doc-1", label, "belongs_to_stage", status,
+            group=context_lens.GROUP_STAGE,
+        )
+
     def test_no_upper_items_and_no_annotations_is_unidentified(self):
-        role, status = context_lens._derive_contextual_role([], [])
+        role, status, source = context_lens._derive_contextual_role([], [])
         assert role is None
         assert status == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+        assert source == context_lens.ROLE_SOURCE_UNIDENTIFIED
 
-    def test_uses_top_upper_item_when_no_committed_annotation(self):
-        upper = [
-            context_lens._item(
-                "theory_claim", "c1", "doc-1", "Claim C12", "provides_evidence_for", CONTEXT_STATUS_SOURCE_BACKED,
-            )
-        ]
-        role, status = context_lens._derive_contextual_role(upper, [])
-        assert role == "Claim C12" + context_lens.RELATION_LABELS["provides_evidence_for"]
+    def test_structural_summary_uses_a_template_not_machine_concatenation(self):
+        # RC7 の是正: 「label + relation_label」の機械連結は作らない。
+        upper = [self._stage_item()]
+        role, status, source = context_lens._derive_contextual_role(upper, [])
+        assert role == "理論の土台の段階に位置づけられる"
+        assert context_lens.RELATION_LABELS["belongs_to_stage"] not in role
         assert status == CONTEXT_STATUS_SOURCE_BACKED
+        assert source == context_lens.ROLE_SOURCE_STRUCTURAL
 
-    def test_committed_annotation_overrides_upper_derivation(self):
+    def test_structural_summary_ignores_groups_that_cannot_speak_of_placement(self):
+        # 掲載節・記号・導出は「位置づけ」を語れないので役割の素材にしない。
         upper = [
             context_lens._item(
-                "theory_claim", "c1", "doc-1", "Claim C12", "provides_evidence_for", CONTEXT_STATUS_SOURCE_BACKED,
+                "section", None, "doc-1", "2.1 節", "appears_in_section",
+                CONTEXT_STATUS_SOURCE_BACKED, group=context_lens.GROUP_SECTION,
             )
         ]
+        role, status, source = context_lens._derive_contextual_role(upper, [])
+        assert role is None
+        assert status == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+        assert source == context_lens.ROLE_SOURCE_UNIDENTIFIED
+
+    def test_structural_summary_ignores_candidate_and_unresolved_items(self):
+        upper = [
+            self._stage_item(status=CONTEXT_STATUS_CANDIDATE),
+            context_lens._item(
+                "thesis", None, "doc-1", "中心命題", "supports_thesis",
+                CONTEXT_STATUS_SOURCE_BACKED, group=context_lens.GROUP_THESIS, unresolved=True,
+            ),
+        ]
+        role, _status, source = context_lens._derive_contextual_role(upper, [])
+        assert role is None
+        assert source == context_lens.ROLE_SOURCE_UNIDENTIFIED
+
+    def test_structural_summary_prefers_stage_over_thesis_and_claim(self):
+        upper = [
+            context_lens._item(
+                "theory_claim", "c1", "doc-1", "主張A", "quantifies",
+                CONTEXT_STATUS_SOURCE_BACKED, group=context_lens.GROUP_CLAIM,
+            ),
+            context_lens._item(
+                "thesis", None, "doc-1", "中心命題", "supports_thesis",
+                CONTEXT_STATUS_SOURCE_BACKED, group=context_lens.GROUP_THESIS,
+            ),
+            self._stage_item(),
+        ]
+        role, _status, _source = context_lens._derive_contextual_role(upper, [])
+        assert role == "理論の土台の段階に位置づけられる"
+
+    def test_committed_annotation_overrides_structural_summary(self):
+        upper = [self._stage_item()]
         annotations = [
             {
                 "status": ANNOTATION_STATUS_COMMITTED,
@@ -210,13 +256,13 @@ class TestDeriveContextualRole:
                 "body": {"text": "教員による人間確定の役割説明"},
             }
         ]
-        role, status = context_lens._derive_contextual_role(upper, annotations)
+        role, status, source = context_lens._derive_contextual_role(upper, annotations)
         assert role == "教員による人間確定の役割説明"
         assert status == CONTEXT_STATUS_CONFIRMED
+        assert source == context_lens.ROLE_SOURCE_COMMITTED
 
     def test_candidate_annotation_is_ignored(self):
         # candidate 状態の注釈は文脈上の役割として採用しない（W2: AI 出力は確定しない）。
-        upper = []
         annotations = [
             {
                 "status": ANNOTATION_STATUS_CANDIDATE,
@@ -224,52 +270,62 @@ class TestDeriveContextualRole:
                 "body": {"text": "まだ候補の説明"},
             }
         ]
-        role, status = context_lens._derive_contextual_role(upper, annotations)
+        role, status, source = context_lens._derive_contextual_role([], annotations)
         assert role is None
         assert status == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+        assert source == context_lens.ROLE_SOURCE_UNIDENTIFIED
 
-    def test_blank_committed_text_falls_back_to_upper(self):
+    def test_blank_committed_text_falls_back_to_structural_summary(self):
         upper = [
-            context_lens._item("thesis", None, "doc-1", "中心命題", "supports_thesis", CONTEXT_STATUS_SOURCE_BACKED)
+            context_lens._item(
+                "thesis", None, "doc-1", "中心命題", "supports_thesis",
+                CONTEXT_STATUS_SOURCE_BACKED, group=context_lens.GROUP_THESIS,
+            )
         ]
         annotations = [
             {"status": ANNOTATION_STATUS_COMMITTED, "kind": ANNOTATION_KIND_MEANING, "body": {"text": "   "}}
         ]
-        role, status = context_lens._derive_contextual_role(upper, annotations)
-        assert role == "中心命題" + context_lens.RELATION_LABELS["supports_thesis"]
+        role, status, source = context_lens._derive_contextual_role(upper, annotations)
+        assert role == "中心命題を支える"
         assert status == CONTEXT_STATUS_SOURCE_BACKED
+        assert source == context_lens.ROLE_SOURCE_STRUCTURAL
 
-    def test_fallback_role_used_over_upper_item_sentence(self):
-        # fallback_role（例: component の role_in_thesis）は「この文脈での役割」そのもの
-        # なので、上位項目から機械的に組み立てる事実文より優先する。
-        upper = [
-            context_lens._item("thesis", None, "doc-1", "中心命題", "supports_thesis", CONTEXT_STATUS_SOURCE_BACKED)
-        ]
-        role, status = context_lens._derive_contextual_role(
-            upper, [], fallback_role="Provides the theoretical basis", fallback_status=CONTEXT_STATUS_SOURCE_BACKED
+    def test_self_described_role_wins_over_structural_summary(self):
+        # 要素が自分で名乗る役割（equation の role_in_argument + stage 訳、component の
+        # role_in_thesis）は構造要約より優先する（人間確定注釈には劣後）。
+        upper = [self._stage_item()]
+        role, status, source = context_lens._derive_contextual_role(
+            upper, [], fallback_role="Provides the theoretical basis",
+            fallback_status=CONTEXT_STATUS_SOURCE_BACKED,
         )
         assert role == "Provides the theoretical basis"
         assert status == CONTEXT_STATUS_SOURCE_BACKED
+        assert source == context_lens.ROLE_SOURCE_SELF_DESCRIBED
 
     def test_committed_annotation_overrides_fallback_role(self):
         annotations = [
             {"status": ANNOTATION_STATUS_COMMITTED, "kind": ANNOTATION_KIND_INTERPRETATION, "body": {"text": "人間確定"}}
         ]
-        role, status = context_lens._derive_contextual_role(
+        role, status, source = context_lens._derive_contextual_role(
             [], annotations, fallback_role="Provides the theoretical basis"
         )
         assert role == "人間確定"
         assert status == CONTEXT_STATUS_CONFIRMED
+        assert source == context_lens.ROLE_SOURCE_COMMITTED
 
     def test_fallback_role_prevents_unidentified_even_with_no_upper(self):
-        role, status = context_lens._derive_contextual_role([], [], fallback_role="States the central result")
+        role, status, source = context_lens._derive_contextual_role(
+            [], [], fallback_role="States the central result"
+        )
         assert role == "States the central result"
         assert status == CONTEXT_STATUS_SOURCE_BACKED
+        assert source == context_lens.ROLE_SOURCE_SELF_DESCRIBED
 
     def test_blank_fallback_role_is_ignored(self):
-        role, status = context_lens._derive_contextual_role([], [], fallback_role="   ")
+        role, status, source = context_lens._derive_contextual_role([], [], fallback_role="   ")
         assert role is None
         assert status == CONTEXT_ROLE_STATUS_UNIDENTIFIED
+        assert source == context_lens.ROLE_SOURCE_UNIDENTIFIED
 
 
 # ---------------------------------------------------------------------------
@@ -546,10 +602,14 @@ class TestSectionItemsFromIds:
 
 
 class TestDerivationMembershipFacts:
-    def test_step_level_hit_mentions_step_id(self):
+    """§5.2 / CP2: 内部 ID をラベルに出さず、equation は向きを分けて判定する。"""
+
+    def test_step_level_hit_keeps_step_id_out_of_the_label(self):
         chains = [
             {
                 "derivation_id": "d1",
+                "chain_type": "claim_chain",
+                "operation": "derive",
                 "steps": [{"step_id": "s1", "input_claim_ids": ["c1"]}],
             }
         ]
@@ -562,18 +622,37 @@ class TestDerivationMembershipFacts:
         # しないので element_id は chain 単位で、step_id は evidence_refs に残る。
         assert item["element_id"] == "d1"
         assert item["navigable"] is True
-        assert item["evidence_refs"] == ["s1"]
+        assert item["evidence_refs"] == ["d1", "s1"]
         assert item["relation"] == "belongs_to_derivation"
-        assert "d1" in item["label"] and "s1" in item["label"]
+        # EC3′: 「導出「d1」のステップ「s1」」という内部 ID2連の機械連結は作らない。
+        assert "d1" not in item["label"] and "s1" not in item["label"]
+        assert item["label"] == "導出（主張の導出）"
+        assert item["qualifier"] == "claim_chain"
         assert item["relation_status"] == CONTEXT_STATUS_SOURCE_BACKED
 
+    def test_all_matching_steps_are_recorded_not_only_the_first(self):
+        # RC3: break で最初の1件に潰さない（複数ステップ関与は evidence_refs に残す）。
+        chains = [
+            {
+                "derivation_id": "d1",
+                "chain_type": "claim_chain",
+                "steps": [
+                    {"step_id": "s1", "input_claim_ids": ["c1"]},
+                    {"step_id": "s2", "output_claim_ids": ["c1"]},
+                ],
+            }
+        ]
+        items = context_lens._derivation_membership_facts(chains, "doc-1", lambda x: x == "c1")
+        assert len(items) == 1
+        assert items[0]["evidence_refs"] == ["d1", "s1", "s2"]
+
     def test_chain_level_hit_without_step_match(self):
-        chains = [{"derivation_id": "d2", "steps": [], "assumption_ids": ["c9"]}]
+        chains = [{"derivation_id": "d2", "chain_type": "claim_chain", "steps": [], "assumption_ids": ["c9"]}]
         items = context_lens._derivation_membership_facts(chains, "doc-1", lambda x: x == "c9")
         assert len(items) == 1
-        assert "d2" in items[0]["label"]
         assert items[0]["element_id"] == "d2"
         assert items[0]["navigable"] is True
+        assert "d2" not in items[0]["label"]
 
     def test_chain_without_derivation_id_is_not_navigable(self):
         # derivation_id が空の chain は中心に据えられない（推測で ID を作らない）。
@@ -589,6 +668,65 @@ class TestDerivationMembershipFacts:
 
     def test_non_dict_chain_entries_are_skipped(self):
         assert context_lens._derivation_membership_facts([None, "bogus"], "doc-1", lambda x: True) == []
+
+    def test_equation_kind_splits_input_and_output_directions(self):
+        chains = [
+            {"derivation_id": "d_in", "chain_type": "equation_chain", "steps": [],
+             "input_equation_ids": ["eq_a"], "output_equation_ids": ["eq_b"]},
+            {"derivation_id": "d_out", "chain_type": "equation_chain", "steps": [],
+             "input_equation_ids": ["eq_z"], "output_equation_ids": ["eq_a"]},
+        ]
+        items = context_lens._derivation_membership_facts(
+            chains, "doc-1", lambda x: x == "eq_a", kind="equation"
+        )
+        by_id = {i["element_id"]: i for i in items}
+        assert by_id["d_in"]["relation"] == "feeds_derivation"
+        assert by_id["d_in"]["group"] == context_lens.GROUP_DERIVATION_OUT
+        assert by_id["d_out"]["relation"] == "produced_by_derivation"
+        assert by_id["d_out"]["group"] == context_lens.GROUP_DERIVATION_IN
+
+    def test_equation_that_is_both_input_and_output_is_intermediate(self):
+        chains = [
+            {"derivation_id": "d1", "chain_type": "equation_chain", "steps": [],
+             "input_equation_ids": ["eq_a"], "output_equation_ids": ["eq_a"]},
+        ]
+        items = context_lens._derivation_membership_facts(
+            chains, "doc-1", lambda x: x == "eq_a", kind="equation"
+        )
+        assert items[0]["relation"] == "used_in_derivation"
+        assert "中間量として" in items[0]["sublabel"]
+
+    def test_declared_intermediate_equation_is_intermediate(self):
+        chains = [
+            {"derivation_id": "d1", "chain_type": "equation_chain", "steps": [],
+             "intermediate_equation_ids": ["eq_a"]},
+        ]
+        items = context_lens._derivation_membership_facts(
+            chains, "doc-1", lambda x: x == "eq_a", kind="equation"
+        )
+        assert items[0]["relation"] == "used_in_derivation"
+
+    def test_claim_kind_keeps_the_neutral_membership_relation(self):
+        # 向きの契約は equation focus のためのもの。claim は従来どおり所属を述べる。
+        chains = [{"derivation_id": "d1", "chain_type": "claim_chain", "steps": [],
+                   "output_claim_ids": ["c1"]}]
+        items = context_lens._derivation_membership_facts(chains, "doc-1", lambda x: x == "c1")
+        assert items[0]["relation"] == "belongs_to_derivation"
+
+    def test_conditions_and_operations_go_to_the_sublabel(self):
+        chains = [
+            {
+                "derivation_id": "d1", "chain_type": "equation_chain", "operation": "transform",
+                "conditions": ["Perturbations stay small."],
+                "steps": [{"step_id": "s1", "operation": "linearize", "input_equation_ids": ["eq_a"]}],
+            }
+        ]
+        items = context_lens._derivation_membership_facts(
+            chains, "doc-1", lambda x: x == "eq_a", kind="equation"
+        )
+        sublabel = items[0]["sublabel"]
+        assert "操作: 線形化" in sublabel
+        assert "条件: Perturbations stay small." in sublabel
 
 
 # ---------------------------------------------------------------------------
@@ -616,7 +754,10 @@ class TestStageParticipationItems:
         assert item["element_type"] == "stage"
         assert item["element_id"] is None
         assert item["navigable"] is False
-        assert item["label"] == "Equation system"
+        # CP4 / RC10: 英語 stage 表示名ではなく訳語（element_vocab が正本）。
+        assert item["label"] == "式の体系"
+        assert item["qualifier"] == "equation_system"
+        assert item["group"] == context_lens.GROUP_STAGE
         assert item["relation"] == "participates_in_stage"
         assert item["relation_status"] == CONTEXT_STATUS_CANDIDATE
         assert item["evidence_refs"] == ["claim-db-1"]
@@ -638,10 +779,13 @@ class TestStageParticipationItems:
         graph_nodes = [{"id": "theory_op_0003", "graph_layer": "main", "linked_claim_ids": ["c1"], "label": "X"}]
         assert context_lens._stage_participation_items(graph_nodes, {}, [], "doc-1") == []
 
-    def test_falls_back_to_node_id_when_label_blank(self):
+    def test_blank_label_degrades_to_a_generic_stage_label_not_the_node_id(self):
+        # EC3′: 解決できないときも内部 ID（theory_op_0004）はラベルにしない。
         graph_nodes = [{"id": "theory_op_0004", "graph_layer": "main", "linked_claim_ids": ["c1"], "label": ""}]
         items = context_lens._stage_participation_items(graph_nodes, {"c1": "c1"}, ["c1"], "doc-1")
-        assert items[0]["label"] == "theory_op_0004"
+        assert items[0]["label"] == "理論の段階"
+        assert items[0]["unresolved"] is True
+        assert items[0]["evidence_refs"] == ["c1"]
 
     def test_missing_graph_layer_defaults_to_main(self):
         # normalizer.py の既存規約（getattr default "main"）に合わせ、graph_layer が
@@ -1464,7 +1608,7 @@ class TestBuildComponentStageParticipation:
 
         stage_items = [i for i in result["upper"] if i["element_type"] == "stage"]
         assert len(stage_items) == 1
-        assert stage_items[0]["label"] == "Equation system"
+        assert stage_items[0]["label"] == "式の体系"
         assert stage_items[0]["element_id"] is None
         assert stage_items[0]["navigable"] is False
         assert stage_items[0]["relation"] == "participates_in_stage"
@@ -1503,23 +1647,43 @@ class TestEquationByIdAndLabel:
         records = [{"label": "no id"}]
         assert context_lens._equation_by_id(records) == {}
 
-    def test_equation_label_prefers_reconstruction_plain_text(self):
+    def test_equation_label_never_uses_the_formula_itself(self):
+        """RC2 / EH1: plain_text / latex / raw_text はどの段でもラベルにしない。"""
         record = {
+            "equation_id": "eq_tex_b14",
             "reconstruction": {"plain_text": "F equals m a"},
-            "source_extraction": {"plain_text": "F = m*a (raw)"},
+            "source_extraction": {"plain_text": "F = m*a (raw)", "latex": "F=ma"},
+            "semantics": {"summary": "Force relates to acceleration."},
         }
-        assert context_lens._equation_label(record) == "F equals m a"
+        label = context_lens._equation_label(record)
+        assert label.text == "Force relates to acceleration."
+        assert "F equals m a" not in label.text
+        assert "F=ma" not in label.text
 
-    def test_equation_label_falls_back_to_source_extraction(self):
-        record = {"reconstruction": {}, "source_extraction": {"latex": "F=ma"}}
-        assert context_lens._equation_label(record) == "F=ma"
+    def test_equation_label_uses_the_paper_equation_number_when_present(self):
+        record = {"equation_id": "eq_2_7", "semantics": {}}
+        assert context_lens._equation_label(record).text == "式 (2.7)"
 
-    def test_equation_label_falls_back_to_equation_id(self):
-        record = {"equation_id": "eq_7"}
-        assert context_lens._equation_label(record) == "eq_7"
+    def test_equation_label_composes_symbol_and_role(self):
+        record = {
+            "equation_id": "eq_tex_b14",
+            "semantics": {
+                "role_in_argument": "definition",
+                "defined_symbols": [{"symbol": "delta", "definition_status": "defined"}],
+            },
+        }
+        assert context_lens._equation_label(record).text == "delta を定義する式"
 
-    def test_equation_label_none_record_returns_empty_string(self):
-        assert context_lens._equation_label(None) == ""
+    def test_equation_label_degrades_to_a_generic_label_with_unresolved(self):
+        # 合成 ID（eq_tex_*）は式番号ではないので、素材が尽きたら一般ラベル。
+        label = context_lens._equation_label({"equation_id": "eq_tex_b14", "semantics": {}})
+        assert label.text == "数式"
+        assert label.unresolved is True
+
+    def test_equation_label_none_record_is_a_generic_unresolved_label(self):
+        label = context_lens._equation_label(None)
+        assert label.text == "数式"
+        assert label.unresolved is True
 
 
 # ---------------------------------------------------------------------------
@@ -1527,17 +1691,23 @@ class TestEquationByIdAndLabel:
 # ---------------------------------------------------------------------------
 
 
-class TestEvidenceQuote:
-    def test_finds_matching_evidence_text(self):
+class TestEvidenceRecordLookup:
+    """§5.6: evidence の逐語は ``_evidence_record_for`` でレコードごと引き、
+    ``labels.evidence_label`` が「逐語そのもの」をラベルにする（旧 ``_evidence_quote``
+    の文字列だけ返すヘルパは、意味を evidence_refs に押し込む経路とともに廃止した）。"""
+
+    def test_finds_matching_evidence_record(self):
         artifacts = {"evidence_registry": {"records": [{"evidence_id": "ev1", "evidence_text": "原文引用"}]}}
-        assert context_lens._evidence_quote(artifacts, "ev1") == "原文引用"
+        record = context_lens._evidence_record_for(artifacts, "ev1")
+        assert record is not None
+        assert record["evidence_text"] == "原文引用"
 
-    def test_no_match_returns_empty_string(self):
+    def test_no_match_returns_none(self):
         artifacts = {"evidence_registry": {"records": [{"evidence_id": "ev1", "evidence_text": "x"}]}}
-        assert context_lens._evidence_quote(artifacts, "ev999") == ""
+        assert context_lens._evidence_record_for(artifacts, "ev999") is None
 
-    def test_missing_artifact_returns_empty_string(self):
-        assert context_lens._evidence_quote({}, "ev1") == ""
+    def test_missing_artifact_returns_none(self):
+        assert context_lens._evidence_record_for({}, "ev1") is None
 
 
 class TestStructureIndexHelpers:

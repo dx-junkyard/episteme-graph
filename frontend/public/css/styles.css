@@ -4512,6 +4512,26 @@ button.ls-course-evidence-head {
   padding: 0;
 }
 
+/* カード内で中心を移したときのパンくず（ElementCard の mount 先はこの直後の
+   .ls-evidence-context-host なので、パンくずは全置換の外に残る）。 */
+.ls-evidence-context-trail {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.ls-evidence-context-back {
+  border: none;
+  background: none;
+  padding: 0;
+  cursor: pointer;
+  font: inherit;
+  color: var(--lx-brand, var(--color-primary, #2563eb));
+  text-decoration: underline;
+}
+
 /* 右カード展開・「ドラフトの該当箇所へ」で左ドラフト側の対応埋め込みを示す
    （既存 .active と同じトーンの控えめな強調）。 */
 .ls-draft-evidence-focus {
@@ -6455,6 +6475,21 @@ body.inspect-mode [data-ui-anchor]:hover {
 .inspect-tooltip.pinned .inspect-tooltip-close {
   display: inline-block;
   pointer-events: auto; /* 容器は pointer-events:none だが ✕ だけは押せるようにする */
+}
+/* ホバー最終行の「▸ 文脈を見る」導線（element_context_presentation_redesign.md §6 S1）。
+   ホバーは①「これは何か」で完結するため、残り3問への出口を明示する。容器は
+   pointer-events:none だが、この行だけは押せるようにする（✕ と同じ扱い）。 */
+.inspect-tooltip-context-btn {
+  display: block;
+  margin: 6px 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  pointer-events: auto;
+  font-size: 11.5px;
+  color: var(--lx-brand, var(--color-text-info));
 }
 
 /* ============ 管理画面「？使い方」インスペクト・モード（admin-help-inspect.js） ============ */
@@ -10008,6 +10043,173 @@ button.element-card-item:focus-visible .element-card-item-label {
   margin: 4px 0 0 16px;
   padding: 0;
   color: var(--color-text-tertiary);
+}
+
+/* ── 要素文脈の提示再設計（element_context_presentation_redesign.md §6〜§7）──
+   ①これは何か（定義リスト）/ ②〜④ の4区画ゾーン + group 小見出し / ITEM の
+   2行目（sublabel）と qualifier チップ / 導出ストーリーカード。
+   色は既存の CSS 変数のみ（ダーク/ライト追従）。 */
+
+/* ①これは何か: ラベル + 値の定義リスト。値の無い行はそもそも描かれない。 */
+.element-card-intrinsic {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.element-card-def-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.element-card-def-label {
+  flex: 0 0 auto;
+  min-width: 4.5em;
+  color: var(--color-text-secondary);
+  font-weight: 700;
+}
+
+.element-card-def-value {
+  flex: 1 1 12em;
+  min-width: 0;
+  color: var(--color-text-primary);
+}
+
+/* 英語自由文の出所注記「（論文の原文）」・段階ノードの説明文。 */
+.element-card-source-note,
+.element-card-def-note {
+  margin-left: 6px;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+.element-card-symbol {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-right: 10px;
+  white-space: nowrap;
+}
+
+.element-card-symbol-name {
+  color: var(--color-text-primary);
+}
+
+.element-card-symbol-meaning {
+  color: var(--color-text-secondary);
+}
+
+.element-card-symbol-note {
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+}
+
+/* ②〜④ の区画（ゾーン）。0件のゾーンは描かれないので空枠は出ない。 */
+.element-card-zone {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.element-card-zone + .element-card-zone {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--color-border);
+}
+
+.element-card-zone-title {
+  color: var(--color-text-primary);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.element-card-group-title {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+
+.element-card-group-more,
+.element-card-group-operation {
+  font-size: 11.5px;
+}
+
+.element-card-group-more > summary,
+.element-card-group-operation > summary {
+  cursor: pointer;
+  color: var(--color-text-tertiary);
+}
+
+/* ITEM の2行目（区別材料の事実文）と qualifier チップ。 */
+.element-card-item-sub {
+  flex: 1 0 100%;
+  padding-left: 4px;
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.element-card-item-qualifier {
+  border-radius: 999px;
+  padding: 1px 6px;
+  border: 1px solid var(--color-border);
+  color: var(--color-text-secondary);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+/* 導出ストーリーカード（入力 →[操作]→ 出力 + この要素の役割）。 */
+.element-card-derivations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.element-card-derivation {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: var(--color-background-secondary);
+}
+
+.element-card-derivation-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.element-card-derivation-title {
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.element-card-derivation-flow {
+  margin-top: 4px;
+  color: var(--color-text-primary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.element-card-derivation-meta,
+.element-card-derivation-sub {
+  color: var(--color-text-tertiary);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.element-card-derivation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
 }
 
 /* ── 理論グラフ詳細ペインのカード枠（admin_ux_issues_2026-08-01.md §3.3 Phase 2）── */

@@ -29,6 +29,7 @@ from core import llm_policy
 from core.course_content_builder import (
     _ensure_required_figures_in_material,
     _required_figure_items,
+    build_topic_evidence_items,
 )
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
@@ -174,6 +175,12 @@ def get_lecture_studio_course_structure(
                 "source_evidence_ids": t.get("source_evidence_ids", []),
                 "linked_chunk_ids": t.get("linked_chunk_ids", []) or t.get("material_chunk_ids", []),
                 "status": "generated" if (t.get("content") or t.get("summary")) else "draft",
+                # 根拠リンクの正本（element_context_presentation_redesign.md §6 S3-1 / RC8）:
+                # 学習画面と**同一の純関数**が組み立てた evidence DTO を同梱する。原稿スタジオの
+                # `lsTopicEvidenceItems` はこれを優先して使い、同じ根拠が画面ごとに別の見出し・
+                # 別の欠落で表示される並行実装を終わらせる。DB 追加アクセスなし（トピックに
+                # 公開済みの参照だけを読む純関数）。既存キーは不変・純増。
+                "evidence_items": build_topic_evidence_items(t),
             })
         chapters_out.append({
             "chapter_index": ci,

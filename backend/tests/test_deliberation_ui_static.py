@@ -1505,6 +1505,28 @@ class TestElementContextLens:
         block = _function_block(card, "genericHtml")
         assert 'if (!generic) return "";' in block
 
+    def test_math_renderer_is_injected_into_the_card(self):
+        """RC8 / §6 S4: W層モーダルだけ renderMath 未注入で生 TeX が出ていた問題の解消。
+        TeX 判定のゲートは element-card.js が内製するので、ここは素の描画関数を渡す
+        （deliberation.js 側に第2のゲートを実装しない）。"""
+        src = _read(DELIBERATION_JS)
+        opts = _function_block(src, "_contextLensOpts")
+        assert "renderMath: _renderMath" in opts
+        render = _function_block(src, "_renderMath")
+        assert "window.katex" in render
+        assert "throwOnError: false" in render
+        assert "try {" in render  # レンダラの例外でモーダルを壊さない
+        code = "\n".join(
+            line for line in src.splitlines() if not line.strip().startswith("//")
+        )
+        assert "looksLikeRenderableTex" not in code, "TeX 判定の二重実装は置かない"
+
+    def test_derivations_are_forwarded_to_the_card(self):
+        """DTO v2 の導出ストーリー。focus 配下で来る場合はカード側が拾う。"""
+        src = _read(DELIBERATION_JS)
+        render = _function_block(src, "_contextLensHtml")
+        assert "derivations: context.derivations || []" in render
+
     def test_generic_standardization_status_kept_in_supplement(self):
         """カードは L層の標準化判定を描かないので、補足欄で落とさず保持する。"""
         src = _read(DELIBERATION_JS)

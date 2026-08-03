@@ -17,7 +17,6 @@
 
 from __future__ import annotations
 
-import re
 import sys
 from pathlib import Path
 
@@ -30,11 +29,15 @@ if _SRC not in sys.path:
 
 
 # §3.4(b) の決定表。キーは backend が返す英語ラベル文字列。
+# 訳語は統制語彙の正本（backend/core/element_vocab.py ⇄
+# frontend/public/js/element-vocab.js）の**統一訳**で、原稿スタジオ側に独自辞書を
+# 置かない（element_context_presentation_redesign.md RC10 = 訳語が3箇所に分裂して
+# "理論的前提" / "式系" と不一致になっていた件の解消先）。
 STAGE_LABELS_JA = {
-    "Theory basis": "理論的前提",
+    "Theory basis": "理論の土台",
     "Observation model": "観測モデル",
     "Observable construction": "観測量の構成",
-    "Equation system": "式系",
+    "Equation system": "式の体系",
     "Elimination": "消去",
     "Consistency relation": "整合関係",
     "Diagnostic / application": "診断・応用",
@@ -45,15 +48,18 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _code_lines(source: str) -> str:
+    """行コメントを落とした JS（申し送りコメントは残るため、コードだけを見る）。"""
+    return "\n".join(
+        line for line in source.splitlines() if not line.strip().startswith("//")
+    )
+
+
 def _fn_body(source: str, name: str) -> str:
     start = source.index("function " + name)
     nxt = source.find("\n  function ", start + 1)
     return source[start:nxt] if nxt > 0 else source[start:]
 
-
-def _var_block(source: str, name: str) -> str:
-    start = source.index("var " + name + " = {")
-    return source[start:source.index("\n  };\n", start)]
 
 
 # --- ① 統一パーツカードを使っている --------------------------------------------
@@ -89,10 +95,31 @@ class TestCardIsUsed:
 
 
 class TestStageLabelsJa:
-    def test_dictionary_matches_the_decision_table(self):
-        block = _var_block(_read(ADMIN_LS_JS), "LS_THEORY_STAGE_LABELS_JA")
-        found = dict(re.findall(r'"([^"]+)":\s*"([^"]+)"', block))
+    def test_labels_come_from_the_shared_vocabulary(self):
+        """訳語は正本（core/element_vocab.py ⇄ element-vocab.js）から引き、決定表と
+        一致すること。JS ミラーとの完全一致は test_element_vocab_mirror.py が固定する。"""
+        from core import element_vocab
+
+        found = {
+            display: element_vocab.theory_stage_label(
+                element_vocab.theory_stage_key(display)
+            )
+            for display in STAGE_LABELS_JA
+        }
         assert found == STAGE_LABELS_JA, found
+
+    def test_studio_has_no_private_stage_dictionary(self):
+        """原稿スタジオは stage 訳語辞書を持たず、正本の theoryStageLabel へ委譲する。"""
+        src = _read(ADMIN_LS_JS)
+        code = _code_lines(src)
+        assert "LS_THEORY_STAGE_LABELS_JA" not in code
+        body = _fn_body(src, "lsTheoryStageLabelJa")
+        assert "window.ElementVocab" in body
+        assert "vocab.theoryStageLabel(raw)" in body
+        # 正本未読み込み時は何も訳さない（内部語彙を画面に漏らさない fail-closed）。
+        assert 'if (!vocab || !vocab.theoryStageLabel) return "";' in body
+        # 操作動詞の日本語化も同じ委譲を使う（辞書を2つに増やさない）。
+        assert "lsTheoryStageLabelJa(label)" in _fn_body(src, "lsGraphOperationLabelJa")
 
     def test_keys_match_backend_theory_stage_labels(self):
         """キーは backend の THEORY_STAGE_LABELS の値（英語）と完全一致すること。"""
@@ -122,6 +149,17 @@ class TestStageLabelsJa:
         """未知の英語ラベルはそのまま返す（fail-soft・情報を落とさない）。"""
         body = _fn_body(_read(ADMIN_LS_JS), "lsGraphStageLabelJa")
         assert "return raw;" in body
+
+    def test_colon_form_is_split_before_delegation(self):
+        """"<Stage>: <対象>" 形は colon で分解してから訳す。正本の theoryStageKey は
+        colon 形も stage キーへ解決するため、丸ごと渡すと ": <対象>" 側が消える（P4）。"""
+        body = _fn_body(_read(ADMIN_LS_JS), "lsGraphStageLabelJa")
+        assert 'var colon = raw.indexOf(":");' in body
+        assert "lsTheoryStageLabelJa(raw.slice(0, colon))" in body
+        assert 'headLabel + ": " + rest' in body
+        # 委譲側は colon 形を受け取らない（呼び出し側で分解する契約）。
+        helper = _fn_body(_read(ADMIN_LS_JS), "lsTheoryStageLabelJa")
+        assert 'raw.indexOf(":") >= 0' in helper
 
     def test_no_competing_stage_dictionary(self):
         """stage の訳語辞書を2つに増やさない（旧 LS_STAGE_LABELS_JA は統合済み）。"""

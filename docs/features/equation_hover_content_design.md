@@ -101,6 +101,15 @@ equation 分岐）が返すのは:
 | 1 | **役割の一行** | `role_in_argument` / `equation_type` / `semantic_kind` | 「この節での役割: 定義」 |
 | 2 | **記号の意味 2〜4個** | `symbols[]`（meaning のみ） | 「δ: 密度揺らぎ / ρ̄: 平均密度」 |
 | 3 | **読み下し** | `plain_text`（音声用に既存の枠） | 「デルタは、ロー引くローバーをローバーで割ったもの」 |
+| 4 | **掲載節**（2026-08-03 追加） | `source_location.section_id` → document_structure の節見出し | 「掲載: 2.1 Density contrast」 |
+
+> **3（読み下し / `plain_text`）は断念（2026-08-03 確定）** — 数式の自然言語読み下しを
+> 生成する器はリポジトリに存在せず、この枠は実質的に常に空である（TeX ソース由来の
+> 論文では原文 TeX が入り込むため、読み取り時フィルタ `_spoken_plain_text()` で空へ
+> 落としている）。生成器の新設は品質が不安定で EH2（未整備は事実文・捏造しない）と
+> 正面衝突するため作らない。**「役割 + 意味 + 記号の意味」の3点で読解を成立させる**
+> （`element_context_presentation_redesign.md` §9 Q6 / §8 「A層の扱い」）。行自体は
+> 残す（値が入っていれば表示する）が、これを埋めることを前提に設計しない。
 
 - ラベルは `label` を優先し、**内部 ID 形（`eq_tex_b14` 等）なら一般ラベル「数式」へ置換**する。
   置換規則は `backend/core/element_context.py` に既にある（LE6 の「裸の内部 ID を出さない」）ため、
@@ -166,8 +175,10 @@ equation 分岐）が返すのは:
   （`premise/definition/derived/result/constraint` → 前提/定義/導出結果/結果/制約）。
   **訳語表はここが唯一** — スナップショットには語彙キーのまま載せる。
 - `frontend/public/js/app.js` `materialAnchorTooltipContent()`: 本文を行の配列で組み立て、
-  `latex` / `raw_text` を一切参照しない。行は「役割 → 意味の要約 → 記号 → 読み」の順。
+  `latex` / `raw_text` を一切参照しない。行は「役割 → 意味の要約 → 記号 → 読み → 掲載節」の順。
   `.inspect-tooltip-body` は既に `white-space: pre-wrap` なので改行で足りる。
+  **「読み」の行は断念済みの枠**（§3.1 の注記）で、生成器が無いため実運用では出ない。
+  読解は役割・意味・記号の3点で成立させる前提にする。
 
 ### 5.3 後方互換と副作用
 
@@ -315,7 +326,29 @@ TeX 漏れゼロを確認済み。ガードレール:
 `docker compose up --build` は「service depends on undefined service postgres」で
 何もビルドされずに失敗する）。
 
+### スナップショット拡張（2026-08-03、提示再設計 Phase 2）
+
+`element_context_presentation_redesign.md` §6 S1 / §8 Phase 2 に沿って
+`core/course_content_builder.py` を拡張した（EH1〜EH5 は不変）。
+
+| 変更 | 内容 |
+|---|---|
+| 見出し | `_equation_display_title` を **`core/deliberation/labels.py` のラベルラダーへ委譲**（式番号 → 記号+役割の決定論合成「δ(t,x) を定義する式」→ 意味の一行 → 役割訳+「式」→「数式」）。合成 ID・生 TeX はどの段でも使わない。ラダーが尽きたときだけ、人間可読な明示ラベルを見出しに使う（読めるラベルを「数式」に潰さない, P4） |
+| 掲載節 | `source_extraction.source_location.section_id` を **document_structure の節見出しへ解決できた場合だけ** `section_label` として投影（`_collect_structured_content`）。解決できなければキーごと省く（section_id の生値は出さない） |
+| 成立条件・前段が無い理由 | `semantics.assumptions`（先頭2件・自然文・生 TeX は落とす）と `link_status`（`LINK_STATUSES` の統制語彙キーのみ。訳語は `element_vocab.link_status_fact` が正本で snapshot に焼かない） |
+| 記号 | この式が定義する記号にだけ `defined_here: true` を追加（ラダー③の材料。定義でない記号にキーを足さないので既存形との差分は純増のみ） |
+| 切り詰め | `_short_excerpt` を `core/text_excerpt.excerpt` への委譲に変更（CP5。素スライスを残さない） |
+
+**第4の生 TeX 供給源**（`semantic_kind`）もこの作業で塞いだ: `semantics.summary` が
+TeX ソース由来で式そのものだと、`semantic_kind` 経由でホバーの「意味の要約」行に
+生 TeX が出ていた（`add()` の TeX ガードは `summary` しか見ておらず `extra` は素通り）。
+`_explanatory_text()` を新設し、投影時と読み取り時の両方で落とす（EH1）。
+
+後方互換: 既存コースは再生成まで `section_label` / `link_status` / `assumptions` を
+持たない（キー欠落 = 表示しない、劣化許容 = §5.3 と同方針）。見出しの改善と
+TeX 落としは**読み取り時**に効くので再生成なしで届く。
+
 ### 残作業
 
-- docker 実機での目視確認（トピック再生成後に役割・記号の意味が出ること）。
+- docker 実機での目視確認（トピック再生成後に役割・記号の意味・掲載節が出ること）。
 - 既存コースの再生成タイミング（教員操作）は運用判断。再生成前は IH8 固定文。

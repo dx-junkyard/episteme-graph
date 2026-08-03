@@ -456,6 +456,20 @@ class TestEquationTooltipNeverRepeatsTheEquation:
         assert "src.latex" not in shared
         assert "src.raw_text" not in shared
 
+    def test_tooltip_includes_assumptions_and_section(self):
+        """§6 S1（element_context_presentation_redesign.md）: ホバーの行構成は
+        役割 → 意味 → 記号 → 読み → 成立条件1件 → 掲載節。成立条件は snapshot の
+        assumptions（focus 側は intrinsic.conditions）先頭1件を原文のまま出す。"""
+        js = _read(APP_JS)
+        shared = _extract_function_body(js, "function equationExplanatoryLines(src, skipText) {")
+        assert "src.assumptions" in shared
+        assert "src.conditions" in shared
+        assert '"成立条件: "' in shared
+        assert "src.section_label" in shared
+        assert '"掲載: "' in shared
+        # 順序: 成立条件は読み（plain_text）の後・掲載節の前。
+        assert shared.index("src.plain_text") < shared.index('"成立条件: "') < shared.index('"掲載: "')
+
     def test_context_panel_reuses_the_same_lines(self):
         """EC5: パネル本文もホバーと同じ材料・同じ順序で組む。"""
         js = _read(APP_JS)
@@ -464,12 +478,18 @@ class TestEquationTooltipNeverRepeatsTheEquation:
 
     def test_card_math_rendering_is_gated(self):
         """EC2: KaTeX(throwOnError:false) に平文・壊れた TeX を渡さない
-        （渡すと赤いエラーがそのまま学習者に見える）。"""
+        （渡すと赤いエラーがそのまま学習者に見える）。
+
+        ゲートの実装は **element-card.js 内製**（element_context_presentation_redesign.md
+        §6 S3-5）。app.js は素のレンダラを渡すだけで、判定を二重実装しない。"""
         js = _read(APP_JS)
         opts = _extract_function_body(js, "function learnerElementCardOpts(onCenter) {")
-        assert "looksLikeRenderableTex(expr)" in opts
-        gate = _extract_function_body(js, "function looksLikeRenderableTex(text) {")
+        assert "renderMath: renderMaterialKatex," in opts
+        assert "looksLikeRenderableTex" not in js
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        gate = _extract_function_body(card, "function looksLikeRenderableTex(text, symbolMode) {")
         assert "opens === closes" in gate  # 切り詰めで壊れた TeX を弾く
+        assert "if (!looksLikeRenderableTex(expr, symbolMode)) return \"\";" in card
 
     def test_context_panel_title_has_no_dangling_separator(self):
         """EC1: 見出しが空のときに「数式 ・ 」を作らない（生 TeX も出さない）。"""
@@ -485,3 +505,55 @@ class TestEquationTooltipNeverRepeatsTheEquation:
             assert role + ":" in vocab
         block = _extract_function_body(vocab, "function equationRoleLabel(role) {")
         assert 'return "";' in block  # 未知キーで内部語彙を漏らさない
+
+
+class TestHoverContextExit:
+    """§6 S1（element_context_presentation_redesign.md）: ホバーは①「これは何か」で
+    完結するため、残り3問（位置づけ / 構成 / 導出）への出口を最終行に明示する。
+    EH3（無フェッチ）は維持 — snapshot に載っている値だけを見せ、押されるまで
+    何も取得しない。"""
+
+    def test_section_line_is_added_only_when_the_snapshot_has_it(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function equationExplanatoryLines(src, skipText) {")
+        assert 'if (src.section_label) lines.push("掲載: " + src.section_label);' in block
+        assert "apiFetch(" not in block
+        assert "fetch(" not in block
+
+    def test_context_cta_is_fail_closed_to_openable_types(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function materialAnchorTooltipContent(item) {")
+        assert "MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(item.kind) >= 0" in block
+        assert "cta = { type: item.kind, id: String(item.id) };" in block
+        assert "cta: cta" in block
+
+    def test_context_cta_reuses_the_existing_delegation(self):
+        """クリック処理は既存の .ls-material-context-btn 委譲リスナー
+        （openElementContextPopover）を再利用する。第2の配線を作らない。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function materialTooltipContextCtaHtml(cta) {")
+        assert "ls-material-context-btn" in block
+        assert "data-element-context-type" in block
+        assert "data-element-context-id" in block
+        assert "MATERIAL_HOVER_CONTEXT_CTA" in block
+        assert 'var MATERIAL_HOVER_CONTEXT_CTA = "▸ 文脈を見る（どこから来て、どこへ行くか）";' in js
+        show = _extract_function_body(js, "function showMaterialTooltip(anchorEl, ref) {")
+        assert "materialTooltipContextCtaHtml(content.cta)" in show
+        # ホバー自体は依然として何も取得しない（IH2 / EH3）。
+        assert "apiFetch(" not in show
+        assert "fetch(" not in show
+
+    def test_cta_is_clickable_even_though_the_tooltip_is_pointer_events_none(self):
+        css = _read(STYLES_CSS)
+        start = css.index(".inspect-tooltip-context-btn {")
+        block = css[start:css.index("}", start)]
+        assert "pointer-events: auto;" in block
+
+
+class TestContextPanelUsesTheHeadline:
+    def test_panel_title_prefers_the_headline(self):
+        """DTO v2 はラベルラダーの結果を headline に載せる（旧サーバは label のみ）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderElementContextPanel(pop, body, elementType, data) {")
+        assert "focus.headline" in block
+        assert "focus.label" in block  # 旧応答へのフォールバックを残す

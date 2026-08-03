@@ -3707,20 +3707,46 @@
     if (symbols.length) lines.push("記号 — " + symbols.join(" / "));
     // 読み下し（音声用に生成済みの plain_text。式が読めない学習者への補助）。
     if (src.plain_text && src.plain_text !== text) lines.push("読み: " + src.plain_text);
+    // 成立条件（A層 assumptions の先頭1件。原文のまま出す — 訳さない。§6 S1。
+    // element_context の focus は intrinsic.conditions 側に持つため両キーを受ける）。
+    var conds = src.assumptions || src.conditions || [];
+    if (conds.length && conds[0]) lines.push("成立条件: " + conds[0]);
+    // 掲載節（snapshot に載っているときだけ。EH3: ここで新たに取得はしない）。
+    if (src.section_label) lines.push("掲載: " + src.section_label);
     return lines;
   }
+
+  // ホバーの最終行に置く「文脈を見る」導線（§6 S1）。ホバーは①「これは何か」で
+  // 完結するため、残り3問（位置づけ / 構成 / 導出）への出口を明示する。
+  var MATERIAL_HOVER_CONTEXT_CTA = "▸ 文脈を見る（どこから来て、どこへ行くか）";
 
   function materialAnchorTooltipContent(item) {
     if (!item) return null;
     var label = item.title || item.label || item.caption || item.figure_id || item.id || "";
     var body = equationExplanatoryLines(item, label).join("\n");
+    // 文脈パネルを開ける種別（claim / equation）のときだけ導線を添える（fail-closed）。
+    var cta = null;
+    if (item.id && MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(item.kind) >= 0) {
+      cta = { type: item.kind, id: String(item.id) };
+    }
     // .inspect-tooltip-body は white-space: pre-wrap なので改行で足りる。
     // 数式は表示タイトルが常に非空（最悪「数式」）なので、説明材料が無いときに
     // ラベル単独の空箱を出さず IH8 の固定文へ落とす（§3.1。他 kind は従来どおり
     // タイトルのみの content を許容する）。
     if (item.kind === "equation" && !body) return null;
     if (!label && !body) return null;
-    return { label: label, body: body };
+    return { label: label, body: body, cta: cta };
+  }
+
+  // ツールチップ内の「文脈を見る」ボタン。クリック処理は既存の委譲リスナー
+  // （initMaterialEvidenceChipDelegation の .ls-material-context-btn）が拾い、
+  // openElementContextPopover へ流れる。ホバー時点では何も取得しない（EH3）。
+  function materialTooltipContextCtaHtml(cta) {
+    if (!cta) return "";
+    return '<button type="button" class="ls-material-context-btn inspect-tooltip-context-btn"' +
+      ' data-element-context-type="' + escHtml(cta.type) + '"' +
+      ' data-element-context-id="' + escHtml(cta.id) + '">' +
+      escHtml(MATERIAL_HOVER_CONTEXT_CTA) + '</button>';
   }
 
   // ラッチ対象の要素が属するチャンク（.material-chunk / .lecture-slide-text）の
@@ -3751,7 +3777,8 @@
       '<div class="inspect-tooltip-source">📄 教材</div>' +
       (content
         ? (content.label ? '<div class="inspect-tooltip-title">' + escHtml(content.label) + '</div>' : '') +
-          (content.body ? '<div class="inspect-tooltip-body">' + escHtml(content.body) + '</div>' : '')
+          (content.body ? '<div class="inspect-tooltip-body">' + escHtml(content.body) + '</div>' : '') +
+          materialTooltipContextCtaHtml(content.cta)
         // IH8: 表示できる説明が何も無い要素は固定事実文（捏造しない）。
         : '<div class="inspect-tooltip-body">この部分の説明はまだ用意されていません</div>');
     tip.hidden = false;
@@ -5557,34 +5584,17 @@
 
   // カードの render と bind には**同一の opts** を渡さなければならない
   // （navigable チップは onCenter が設定されているときだけ描かれるため）。
-  // KaTeX に渡してよい文字列か（EC2, equation_context_panel_display_design.md）。
-  // element-card.js は equation focus の本文を無条件に renderMath へ回すが、本文には
-  // 平文（役割 / 意味の要約 / 記号の意味）が入るようになった。TeX でない文字列や
-  // 切り詰めで壊れた TeX を KaTeX（throwOnError:false）に渡すと**赤いエラーが描かれる**
-  // ため、その手前で弾く。判定の発想は backend の
-  // course_content_builder.looks_like_tex_math と同じで、波括弧の均衡検査を足してある。
-  function looksLikeRenderableTex(text) {
-    var t = String(text == null ? "" : text).trim();
-    if (!t) return false;
-    var hasEnv = /\\begin\{[a-zA-Z*]+\}/.test(t);
-    var commands = t.match(/\\[a-zA-Z]+/g) || [];
-    if (!hasEnv && commands.length < 2) return false;
-    if (hasEnv && !/\\end\{[a-zA-Z*]+\}/.test(t)) return false; // 環境が閉じていない
-    var opens = (t.match(/(^|[^\\])\{/g) || []).length;
-    var closes = (t.match(/(^|[^\\])\}/g) || []).length;
-    return opens === closes; // 切り詰めで壊れた TeX を弾く
-  }
-
+  //
+  // KaTeX に渡してよい文字列かのゲート（EC2）は **element-card.js が内製**する
+  // （element_context_presentation_redesign.md §6 S3-5: admin=無ガードで赤いエラー /
+  // W層=未注入で生 TeX / 学習=ガード付き、という3通りの壊れ方を1実装で終わらせる）。
+  // ここに同じ判定を再実装しないこと — 素のレンダラをそのまま渡す。
   function learnerElementCardOpts(onCenter) {
     var card = window.ElementCard;
     return {
       variant: card ? card.VARIANT_READONLY : "readonly",
       escapeHtml: escHtml,
-      // TeX と判定できるときだけレンダラへ回す。それ以外は "" を返し、
-      // element-card 側の素のテキスト表示へ落とす（赤いエラーを出さない）。
-      renderMath: function (expr, display) {
-        return looksLikeRenderableTex(expr) ? renderMaterialKatex(expr, display) : "";
-      },
+      renderMath: renderMaterialKatex,
       onCenter: typeof onCenter === "function" ? onCenter : null,
     };
   }
@@ -5606,16 +5616,28 @@
   // ITEM を学習者カード用に射影する。candidate はサーバ側で除去済みだが呼び出し側でも
   // 落とし、navigable は「学習者が実際に開ける型か」で作り直す（W層の navigable は
   // 教員向けの可否なのでそのままでは契約が成立しない）。confidence 等は詰めない。
+  //
+  // DTO v2（element_context_presentation_redesign.md §4.1）で増えた
+  // sublabel / qualifier / group / unresolved はそのまま透過する（区別材料なので
+  // 学習者にも出す）。label_source は教員のみなので**詰めない**。
   function learnerElementCardItems(items) {
     var out = [];
     (items || []).forEach(function (item) {
       if (!item) return;
       if (item.relation_status === "candidate") return;
+      // 式の詳細層（traceability）は学習者に出さない。サーバ射影でも除去されるが、
+      // ここで落としておくことでカードの可視 ITEM 列と添字が完全に一致する
+      // （教材内ジャンプが data-element-card-itemref で引けるための前提）。
+      if (item.group === "operation") return;
       var id = item.id || "";
       out.push({
         id: id,
         element_type: item.element_type,
         label: item.label,
+        sublabel: item.sublabel,
+        qualifier: item.qualifier,
+        group: item.group,
+        unresolved: !!item.unresolved,
         relation_label: item.relation_label,
         relation_status: item.relation_status,
         navigable: !!item.navigable && !!id &&
@@ -5643,19 +5665,25 @@
 
   // カードは教材本文の存在を知らないため、mount 後に「教材内で見る」を該当行の直後へ
   // 差し込む（担体 [data-evidence-ref] が現在の DOM にある ITEM だけ。既存挙動を維持）。
+  // ゾーン描画（DTO v2）では ITEM が元のレーン順に並ばないため、行 → ITEM の対応は
+  // カードが全行に付ける data-element-card-itemref="lane:index" から引く
+  // （index はカードの可視 ITEM 列 = learnerElementCardItems の結果と一致する）。
   function augmentLearnerElementCardJumps(container, dto) {
-    if (!container || !container.querySelector) return;
-    ["upper", "lower"].forEach(function (lane) {
-      var laneEl = container.querySelector(".element-card-lane-" + lane + " .element-card-items");
-      if (!laneEl) return;
-      var items = (dto && dto[lane]) || [];
-      var rows = laneEl.querySelectorAll(".element-card-item");
-      for (var i = 0; i < rows.length && i < items.length; i++) {
-        var ref = materialElementContextJumpRef(items[i]);
-        if (!ref) continue;
-        laneEl.insertBefore(buildMaterialJumpRow(ref), rows[i].nextSibling);
-      }
-    });
+    if (!container || !container.querySelectorAll) return;
+    var rows = container.querySelectorAll("[data-element-card-itemref]");
+    for (var i = 0; i < rows.length; i++) {
+      var parts = String(rows[i].getAttribute("data-element-card-itemref") || "").split(":");
+      var items = (dto && dto[parts[0]]) || [];
+      var item = items[parseInt(parts[1], 10)];
+      if (!item) continue;
+      var ref = materialElementContextJumpRef(item);
+      if (!ref) continue;
+      var row = rows[i];
+      var anchorEl = (row.closest && (row.closest(".element-card-item-block") ||
+        row.closest(".element-card-item-row"))) || row;
+      if (!anchorEl.parentNode) continue;
+      anchorEl.parentNode.insertBefore(buildMaterialJumpRow(ref), anchorEl.nextSibling);
+    }
   }
 
   function buildMaterialJumpRow(ref) {
@@ -6433,12 +6461,22 @@
       element_type: LEARNER_CARD_FOCUS_TYPES[elementType] || elementType,
       element_id: focus.element_id,
       label: focus.label,
+      // DTO v2: ラベルラダーの結果（headline）と「これは何か / 位置づけ」の
+      // 構造化ブロック。旧サーバは持たないのでキーが無ければ渡さない。
+      headline: focus.headline,
       intrinsic_summary: focus.intrinsic_summary,
     };
+    if (focus.intrinsic) cardFocus.intrinsic = focus.intrinsic;
+    if (focus.placement) cardFocus.placement = focus.placement;
+    if (focus.contextual_role_source) {
+      cardFocus.contextual_role_source = focus.contextual_role_source;
+    }
     // 数式は式そのものを再掲しない（EC1）。本文は「役割 / 意味の要約 / 記号の意味」に
     // 差し替える（ホバーと同じ材料・同じ順序 = EC5）。サーバ側（core/element_context.py）
     // が TeX を落として役割・記号を載せてくるので、ここは組み立てるだけ。
-    if (elementType === "equation") {
+    // DTO v2 の intrinsic が来ているときはカードが同じ材料を構造化して描くため、
+    // 平文の連結（旧サーバ互換パス）は行わない。
+    if (elementType === "equation" && !focus.intrinsic) {
       var eqLines = equationExplanatoryLines(focus, cardFocus.label);
       cardFocus.intrinsic_summary = eqLines.join("\n");
     }
@@ -6454,10 +6492,14 @@
       cardFocus.contextual_role_status = focus.contextual_role_status;
     }
     if (focus.generic) cardFocus.generic = focus.generic;
+    // 導出ストーリー（equation focus のみ）。トップレベル / focus 配下の
+    // どちらで来ても受ける（サーバ実装の置き場所に依存しない）。
+    var derivations = (focus.derivations || (data && data.derivations)) || [];
     return {
       focus: cardFocus,
       upper: learnerElementCardItems(data && data.upper),
       lower: learnerElementCardItems(data && data.lower),
+      derivations: derivations,
     };
   }
 
@@ -6476,7 +6518,10 @@
     var headTitle = pop && pop.querySelector(".src-popup-title");
     if (headTitle) {
       var kindLabel = materialEvidenceKindLabel(elementType);
-      var focusLabel = typeof focus.label === "string" ? focus.label.trim() : "";
+      // DTO v2 はラベルラダーの結果を headline に載せる（label と同値の契約だが、
+      // 旧サーバは headline を持たないので label へフォールバックする）。
+      var focusLabel = typeof focus.headline === "string" ? focus.headline.trim() : "";
+      if (!focusLabel) focusLabel = typeof focus.label === "string" ? focus.label.trim() : "";
       headTitle.textContent = focusLabel ? kindLabel + " ・ " + focusLabel : kindLabel;
     }
 
