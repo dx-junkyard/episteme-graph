@@ -162,6 +162,7 @@ PIPELINE_STAGE_LABELS: dict[str, str] = {
     "narrative_annotator": "ナラティブ注釈",
     "contextual_explanation": "文脈的説明の生成",
     "discuss_opening": "議論のきっかけの生成",
+    "landscape_placement": "分野マップ配置候補の生成",
 }
 
 
@@ -342,6 +343,9 @@ _FEATURE_DIRECT_ENV: dict[str, tuple[str, str]] = {
     # discuss 開幕素材の生成（discuss_opening_authoring_design.md §4.1）。専用の
     # Settings フィールドを持たず env 直読みなのは contextual_explanation と同じ。
     "pipeline:discuss_opening": ("DISCUSS_OPENING_LLM_MODEL", "fast"),
+    # 知識ランドスケープの配置候補生成（knowledge_landscape_design.md §7.4）。専用の
+    # Settings フィールドを持たず env 直読みなのは contextual_explanation と同じ。
+    "pipeline:landscape_placement": ("LANDSCAPE_PLACEMENT_LLM_MODEL", "fast"),
 }
 
 # 専用の env 設定を持たないが、**歴史的な既定 tier が汎用の analysis tier ではない**

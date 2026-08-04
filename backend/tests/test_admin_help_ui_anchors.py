@@ -80,7 +80,11 @@ class TestAdminUiAnchorsModule:
         #     .figure-studio-{insert,caption,retire,restore}）
         # + 教材行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）の1件:
         #   materials.row-more-menu。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 241
+        # + 知識ランドスケープ（knowledge_landscape_design.md §10.3）の3件:
+        #   materials.row-landscape（⋯メニューの「位置づけ（分野マップ）…」）/
+        #   materials.landscape-modal（配置レビューモーダル）/
+        #   materials.landscape-propose（AIで再提案）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 244
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

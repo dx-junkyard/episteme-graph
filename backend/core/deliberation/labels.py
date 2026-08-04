@@ -42,6 +42,11 @@ from core.element_vocab import (
 )
 from core.text_excerpt import excerpt, first_sentence, looks_like_tex_math, normalize_whitespace
 
+# 記号の表記ゆれ照合キー（A層 normalize_symbol）は core/symbol_notation.py の
+# seam 経由で読む（core/deliberation は A層 direct import 禁止 — W1 ガードレール。
+# element_vocab 経由の間接依存と同じ公認パターン）。表示用変種の同一性判定に使う。
+from core.symbol_notation import normalize_symbol
+
 __all__ = [
     "LABEL_SOURCE_CONTROLLED_VOCAB",
     "LABEL_SOURCE_EXPLANATION",
@@ -343,7 +348,9 @@ def _equation_defined_symbols(
         entry = _dict(raw)
         defining = [_text(x) for x in _list(entry.get("defining_equation_ids"))]
         if equation_id and equation_id in defining:
-            _add(entry.get("canonical_symbol"))
+            # 照合キー（canonical_symbol）ではなく表示用の原表記を合成材料にする。
+            # TeX を含む場合はラダー③がガードで棄却され次段へ落ちる（設計どおり）。
+            _add(symbol_display_text(entry))
     return out
 
 
@@ -708,21 +715,60 @@ _SYMBOL_MEANING_UNKNOWN_FACT = "この論文での意味は同定できていま
 _SYMBOL_DEFINED_HERE_NOTE = "この式で定義"
 
 
+def _braces_balanced(text: str) -> bool:
+    """エスケープされていない波括弧の開閉が釣り合っているか。"""
+    opens = len(re.findall(r"(?<!\\)\{", text))
+    closes = len(re.findall(r"(?<!\\)\}", text))
+    return opens == closes
+
+
+def symbol_display_text(record: dict[str, Any] | None) -> str:
+    """表示用の記号表記を選ぶ（表示は原表記・照合はキー、の分離）。
+
+    ``canonical_symbol`` は表記ゆれ照合用の**正規化キー**である —
+    SymbolRegistry の ``normalize_symbol`` が波括弧・空白を全除去するため、
+    ``{\\bm{x}}`` は ``\\bmx`` になる。これは ``\\bm`` マクロ名を壊した文字列で
+    あり、TeX としてレンダリング不能（実機で赤字/素通しとして発覚）。
+    **キーを表示に流用しない**のが根治で、表示には ``notation_variants`` に
+    保存されている原表記（``add_variant(raw)`` がそのまま積む）を使う。
+
+    選択規則（決定論）:
+    1. canonical にバックスラッシュが無い → canonical（既に平文。β / b_1 / t）
+    2. notation_variants のうち、①波括弧の対応が取れていて、かつ
+       ②**正規化すると canonical と同一記号になる**最初の変種（外側の ``$`` は
+       剥がす。同一性判定は SymbolRegistry の ``normalize_symbol`` そのもの —
+       第2実装しない。``{\\bm{x}}`` は KaTeX が \\bm を標準サポートするので
+       これで描画できる。②が無いと「delta」のような部分表記の変種が
+       ``\\delta(t,x)`` を上書きして情報が落ちる）
+    3. それも無ければ canonical（最後の砦。フロントのレンダリングゲートと
+       エラー検出が素のテキスト表示へ落とす）
+    """
+    data = _dict(record)
+    canonical = _text(data.get("canonical_symbol"))
+    if canonical and "\\" not in canonical:
+        return canonical
+    canonical_key = normalize_symbol(canonical)
+    for raw in _list(data.get("notation_variants")):
+        variant = _text(raw).strip("$").strip()
+        if not variant or not _braces_balanced(variant):
+            continue
+        if normalize_symbol(variant) == canonical_key:
+            return variant
+    return canonical
+
+
 def symbol_label(record: dict[str, Any] | None, *, defined_by_focus: bool = False) -> Label:
     """記号のラベル（§5.4）。
 
-    ``text`` は ``canonical_symbol`` **そのまま**（記号は式の再掲ではなく読解の部品
-    なので表示する。TeX 形もそのまま渡し、レンダリング可否はフロントの
-    ``looksLikeRenderableTex`` ゲートに委ねる）。
+    ``text`` は ``symbol_display_text``（表示は原表記・照合はキーの分離。
+    記号は式の再掲ではなく読解の部品なので表示する。TeX 形もそのまま渡し、
+    レンダリング可否はフロントの ``looksLikeRenderableTex`` ゲートに委ねる）。
 
     ``sublabel`` は**意味**（本修正の核・RC5）: ``definition_evidence_texts[0]``
     の第1文 → ``meaning`` → 定義なしの事実文 → 定義状態の訳。空にはしない（CP10）。
     """
     data = _dict(record)
-    symbol = _text(data.get("canonical_symbol"))
-    if not symbol:
-        variants = [_text(v) for v in _list(data.get("notation_variants")) if _text(v)]
-        symbol = variants[0] if variants else ""
+    symbol = symbol_display_text(data)
 
     definition_status = _text(data.get("definition_status"))
     review_reasons = [_text(r) for r in _list(data.get("review_reasons"))]

@@ -804,3 +804,128 @@
   cursor: pointer;
   line-height: 1;
 }
+
+/* ── 知識ランドスケープ (Knowledge Landscape) — 「論文の位置」レイヤー ────────
+ * 設計正本: docs/features/knowledge_landscape_design.md §4.2 / §10.1 / §10.4。
+ * 既定 OFF・配置データが無ければ landscape-layer.js が .landscape-controls を
+ * hidden にする (LS6 fail-closed)。weight / confidence の生数値は描かない (LS5) —
+ * 表示はサーバが返す段階ラベル・出所ラベル・件数・骨格版のみ (LS8)。 */
+.landscape-controls {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 0.5px dashed var(--color-border, #e5e5ea);
+}
+.landscape-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
+}
+.landscape-toggle input { cursor: pointer; }
+/* コーパス事実行 (LS8) — 煽らず、件数と版だけを事実として置く */
+.landscape-fact {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+
+/* L1 地図に重ねる 📄 マーカー (既存ノード・エッジには触らない・LS7) */
+.landscape-marker { cursor: pointer; }
+.landscape-marker:focus { outline: none; }
+.landscape-marker:focus-visible .landscape-marker-bg {
+  stroke: #185fa5;
+  stroke-width: 2;
+}
+.landscape-marker-bg {
+  fill: var(--color-background, #fff);
+  stroke: #5f5e5a;
+  stroke-width: 0.75;
+}
+.landscape-marker-icon {
+  font-size: 9px;
+  pointer-events: none;
+}
+/* 同一ノードに 5 件以上あるときの集約バッジ (「+N」。件数のみ・順位や強さではない) */
+.landscape-marker-badge {
+  font-size: 9px;
+  fill: var(--color-text-secondary, #6e6e73);
+  pointer-events: none;
+}
+
+/* マーカークリックのポップオーバー (src-popup と同型の外側クリック / Esc クローズ) */
+.landscape-popup {
+  position: fixed;
+  z-index: 1400;
+  max-width: 330px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--color-background, #fff);
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+  padding: 10px 12px;
+}
+.landscape-popup-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary, #aeaeb2);
+  font-size: 14px;
+  cursor: pointer;
+  line-height: 1;
+}
+.landscape-popup-head {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-bottom: 6px;
+}
+.landscape-popup-doc {
+  padding-bottom: 6px;
+  margin-bottom: 6px;
+  border-bottom: 0.5px solid var(--color-border, #e5e5ea);
+}
+.landscape-popup-doc:last-of-type { border-bottom: none; }
+.landscape-popup-title {
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+  margin-bottom: 3px;
+}
+.landscape-popup-row { margin-top: 4px; }
+.landscape-popup-meta {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+/* 出所ラベル (「AIによる推定（未確認）」/「教員確認済み」) — 必ず表示する (LS8/AC-005) */
+.landscape-provenance {
+  display: inline-block;
+  margin-top: 2px;
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border: 0.5px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 999px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.landscape-popup-reason {
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--color-text-primary, #1d1d1f);
+}
+/* 原文逐語 quote (LS4) */
+.landscape-popup-quote {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+  border-left: 2px solid var(--color-border, #e5e5ea);
+  padding-left: 6px;
+}
+.landscape-popup-fact {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 0.5px dashed var(--color-border, #e5e5ea);
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+}

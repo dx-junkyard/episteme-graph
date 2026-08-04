@@ -22,14 +22,26 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any
 
+import yaml
 from sqlalchemy import text as sa_text
 
 from core import atlas as atlas_module
 from core import revision_store
 
 logger = logging.getLogger(__name__)
+
+# 骨格専用バンドルドメイン (knowledge_landscape_design.md §6.1)。
+# カートリッジ一式 (ontology.json 等) を持たない「骨格だけのドメイン」を
+# `backend/atlas_domains/<domain_key>/skeleton.yaml` (+ 任意 `domain.json`) で同梱する
+# ためのディレクトリ。既存のカートリッジ同梱経路 (cartridges/<id>/atlas/skeleton.yaml) は
+# 不変で、こちらは見つからなかった場合のフォールバック経路として追加する。
+# core/atlas_store.py → backend/
+ATLAS_BUNDLED_DOMAINS_DIR = Path(__file__).resolve().parent.parent / "atlas_domains"
+_BUNDLED_DOMAIN_SKELETON_FILENAME = "skeleton.yaml"
+_BUNDLED_DOMAIN_META_FILENAME = "domain.json"
 
 
 class DraftRevisionConflict(revision_store.RevisionConflictError):
@@ -80,8 +92,8 @@ def load_frozen_skeleton(session, domain_key: str) -> atlas_module.AtlasSkeleton
         return None
 
 
-def _bundled_skeleton(domain_key: str) -> atlas_module.AtlasSkeleton | None:
-    """カートリッジ同梱の凍結骨格 (フォールバック / シード)。"""
+def _cartridge_bundled_skeleton(domain_key: str) -> atlas_module.AtlasSkeleton | None:
+    """カートリッジ同梱の凍結骨格 (`cartridges/<id>/atlas/skeleton.yaml`)。"""
     try:
         from core import cartridges as cartridges_module
 
@@ -91,6 +103,85 @@ def _bundled_skeleton(domain_key: str) -> atlas_module.AtlasSkeleton | None:
     except ValueError:
         logger.error("invalid bundled atlas skeleton for %s", domain_key, exc_info=True)
         return None
+
+
+def _domain_dir_skeleton(domain_key: str) -> atlas_module.AtlasSkeleton | None:
+    """骨格専用バンドルドメインの凍結骨格 (`atlas_domains/<key>/skeleton.yaml`)。
+
+    ファイルが無ければ None (カートリッジ経路と同じ扱い)。YAML/スキーマが壊れている
+    場合も None + error ログに留める (fail-soft。既存の `_cartridge_bundled_skeleton` と
+    同じ流儀で、シード不能でも起動を止めない)。
+    """
+    if not domain_key:
+        return None
+    path = ATLAS_BUNDLED_DOMAINS_DIR / domain_key / _BUNDLED_DOMAIN_SKELETON_FILENAME
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError:
+        logger.error("cannot read bundled domain skeleton for %s", domain_key, exc_info=True)
+        return None
+    try:
+        skeleton = atlas_module.parse_skeleton(yaml.safe_load(raw))
+    except Exception:  # noqa: BLE001
+        logger.error(
+            "invalid bundled domain atlas skeleton for %s", domain_key, exc_info=True
+        )
+        return None
+    # 同梱ドメインのファイルは「凍結版のシード」であることが前提 (§6.1)。draft や
+    # レビュー帰属の無い骨格をここから読ませない (LS6: 読む骨格は凍結版のみ)。
+    if not skeleton.is_learner_visible:
+        logger.warning(
+            "bundled domain skeleton for %s is not a reviewed frozen version; ignored",
+            domain_key,
+        )
+        return None
+    return skeleton
+
+
+def _bundled_domain_keys() -> list[str]:
+    """`atlas_domains/` 配下の骨格を持つ domain_key 一覧 (ソート済み)。"""
+    try:
+        entries = sorted(p for p in ATLAS_BUNDLED_DOMAINS_DIR.iterdir() if p.is_dir())
+    except (FileNotFoundError, NotADirectoryError, OSError):
+        return []
+    return [
+        p.name
+        for p in entries
+        if (p / _BUNDLED_DOMAIN_SKELETON_FILENAME).is_file()
+    ]
+
+
+def _bundled_domain_meta(domain_key: str) -> dict | None:
+    """`atlas_domains/<key>/domain.json` (任意)。無い・壊れていれば None。"""
+    path = ATLAS_BUNDLED_DOMAINS_DIR / domain_key / _BUNDLED_DOMAIN_META_FILENAME
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        logger.error("invalid bundled domain meta for %s", domain_key, exc_info=True)
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "name": str(data.get("name") or domain_key),
+        "description": str(data.get("description") or ""),
+    }
+
+
+def _bundled_skeleton(domain_key: str) -> atlas_module.AtlasSkeleton | None:
+    """同梱の凍結骨格 (フォールバック / シード)。
+
+    ① カートリッジ同梱 (`cartridges/<id>/atlas/skeleton.yaml`) を優先し、
+    ② 見つからなければ骨格専用バンドルドメイン (`atlas_domains/<key>/skeleton.yaml`)
+    を読む (knowledge_landscape_design.md §6.1)。
+    """
+    skeleton = _cartridge_bundled_skeleton(domain_key)
+    if skeleton is not None:
+        return skeleton
+    return _domain_dir_skeleton(domain_key)
 
 
 def load_learner_skeleton(
@@ -215,29 +306,38 @@ def list_domains(session) -> list[dict]:
         except Exception:  # noqa: BLE001
             logger.warning("atlas domain_meta listing failed", exc_info=True)
 
+    def _add_bundled(key: str) -> None:
+        if not key or key in domains:
+            return
+        skeleton = _bundled_skeleton(key)
+        if skeleton is None:
+            return
+        name, lifecycle = meta_by_key.get(key, ("", "active"))
+        domains[key] = {
+            "domain_key": key,
+            "domain_name": name,
+            "frozen_version": skeleton.version,
+            "has_draft": False,
+            "draft_revision": None,
+            "source": "bundled",
+            "lifecycle": lifecycle,
+        }
+
     # 同梱カートリッジ (未取込環境のフォールバック表示)
     try:
         from core import cartridges as cartridges_module
 
         for summary in cartridges_module.list_cartridges():
-            key = summary.cartridge_id
-            if key in domains:
-                continue
-            skeleton = _bundled_skeleton(key)
-            if skeleton is None:
-                continue
-            _name, lifecycle = meta_by_key.get(key, ("", "active"))
-            domains[key] = {
-                "domain_key": key,
-                "domain_name": "",
-                "frozen_version": skeleton.version,
-                "has_draft": False,
-                "draft_revision": None,
-                "source": "bundled",
-                "lifecycle": lifecycle,
-            }
+            _add_bundled(summary.cartridge_id)
     except Exception:  # noqa: BLE001
         logger.warning("bundled cartridge listing failed", exc_info=True)
+
+    # 骨格専用バンドルドメイン (atlas_domains/<key>/skeleton.yaml。§6.1)
+    try:
+        for key in _bundled_domain_keys():
+            _add_bundled(key)
+    except Exception:  # noqa: BLE001
+        logger.warning("bundled domain listing failed", exc_info=True)
 
     return sorted(domains.values(), key=lambda d: d["domain_key"])
 
@@ -547,9 +647,30 @@ def insert_frozen(
 # ---------------------------------------------------------------------------
 
 
-def import_bundled_skeletons(session) -> int:
-    """カートリッジ同梱の凍結骨格を DB へ取り込む (無い版のみ・冪等)。
+def _seed_bundled_domain_meta(session, domain_key: str) -> None:
+    """`domain.json` の name/description を `atlas_domain_meta` へ **行が無いときだけ** 入れる。
 
+    既存行は上書きしない (教員が管理画面で付けた表示名・説明を同梱ファイルで
+    巻き戻さない。§6.1-3)。失敗しても骨格の取り込み自体は続行する (fail-soft)。
+    """
+    meta = _bundled_domain_meta(domain_key)
+    if not meta:
+        return
+    try:
+        if load_domain_meta(session, domain_key) is not None:
+            return
+        save_domain_meta(session, domain_key, meta)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "bundled domain meta seed failed for %s", domain_key, exc_info=True
+        )
+
+
+def import_bundled_skeletons(session) -> int:
+    """同梱の凍結骨格を DB へ取り込む (無い版のみ・冪等)。
+
+    対象は ① カートリッジ同梱 (`cartridges/<id>/atlas/skeleton.yaml`) と
+    ② 骨格専用バンドルドメイン (`atlas_domains/<key>/skeleton.yaml`。§6.1)。
     以後 DB が正本。同梱ファイルは新規環境のシードとして残す。
     """
     if session is None:
@@ -560,15 +681,23 @@ def import_bundled_skeletons(session) -> int:
         summaries = cartridges_module.list_cartridges()
     except Exception:  # noqa: BLE001
         logger.warning("bundled cartridge listing failed for import", exc_info=True)
-        return 0
+        summaries = []
+
+    domain_keys: list[str] = [s.cartridge_id for s in summaries]
+    try:
+        for key in _bundled_domain_keys():
+            if key not in domain_keys:
+                domain_keys.append(key)
+    except Exception:  # noqa: BLE001
+        logger.warning("bundled domain listing failed for import", exc_info=True)
 
     candidates: list[tuple[str, atlas_module.AtlasSkeleton]] = []
-    for summary in summaries:
-        domain_key = summary.cartridge_id
+    for domain_key in domain_keys:
         skeleton = _bundled_skeleton(domain_key)
         if skeleton is None or not skeleton.version:
             continue
         candidates.append((domain_key, skeleton))
+        _seed_bundled_domain_meta(session, domain_key)
 
     def _exists(candidate: tuple[str, atlas_module.AtlasSkeleton]) -> bool:
         domain_key, skeleton = candidate

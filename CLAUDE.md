@@ -546,6 +546,58 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
   `GET /api/learning/atlas/cues/state`）は Stage 2 ゲート判断の材料。
   **数値をユーザーに見せる API・UI は作らない**。
 
+### 知識ランドスケープ（Knowledge Landscape 配置層, migration 065, 2026-08-04）
+
+論文（document）を分野の地図（atlas 骨格）のアンカーへ**複数観点（perspective）で配置**する層。
+正本は `docs/features/knowledge_landscape_design.md`（不変条項 LS1〜LS10。地図は正解でなく投影 /
+AI配置は inferred 止まり・確定は教員 / evidence 必須・verbatim 検査 / **数値非表示（教員含む。
+weight・confidence は DB のみ、表示は段階ラベル）** / 配置不能は失敗でなく信号）。骨格＝座標系は
+atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変**で使い、本層は配置だけを持つ。
+
+- **DB**: `landscape_placements`（065。`documents(id)` FK CASCADE — 削除2経路とも documents 行
+  削除で自動掃除。一意制約は `status <> 'superseded'` の部分インデックス）。語彙・ラベルの正本は
+  `core/landscape/schema.py`（perspective 6語彙 = subject/question/method/theory/observation/
+  application、status = inferred/confirmed/rejected/review_required/superseded）。
+- **再解析セマンティクス（LS3）**: inferred のみ superseded → 新候補挿入。confirmed / rejected は
+  AI が上書き・再提案で復活させられない。**空 candidates は SQL 非発行**（0件配置の解析が生きた
+  inferred を消さない）。store に DELETE 文なし（P4）。
+- **生成**: パイプラインステージ `landscape_placement`（`LLM_STAGE_NAMES`、discuss_opening の直後）。
+  agent は `src/episteme_graph/agents/landscape_placement/`（discuss_opening 同型。node 実在・
+  evidence_quote verbatim・perspective 語彙を hard error 検査、**無理に配置せず**
+  `unplaced_domains` に理由付き申告）。実体は `core/landscape/builder.py::
+  build_and_store_placements` — **pipeline と教員の手動再提案が同一経路・同一 CostGate**。
+  モデル解決も builder 側（`pipeline:landscape_placement`、M層 run override 有効）。
+  skip 語彙: `no_frozen_skeleton` / `no_source_material` / `daily_call_limit_reached` /
+  `placement_limit_is_zero`（いずれも `llm_calls:0` か `skipped_by_limit` を伴う）。
+- **基準骨格のバンドルドメイン経路（新設）**: `backend/atlas_domains/<domain_key>/skeleton.yaml`
+  （+ `domain.json`）— カートリッジ一式なしの骨格専用ドメインを起動時に冪等シード
+  （`atlas_store` が cartridges と併せて走査。frozen + reviewed のみ受理・meta は既存行を
+  上書きしない）。**宇宙物理 `astrophysics`（10領域・49概念・19エッジ）を同梱**。
+  `atlas.py MAX_REGIONS` は 7→12（フロント `atlas-overlay.js LIMITS.l1Regions` も 12 に同期）。
+  backend/Dockerfile が `atlas_domains/` を COPY。
+- **API**（`routes/landscape.py`、main.py 直接登録）: admin =
+  `GET /api/admin/landscape/documents/{ref}/placements`（unplaced_domains・骨格版・last_run_at
+  同梱）/ `PATCH .../placements/{id}`（確認/却下/再検討。監査
+  `AUDIT_ENTITY_LANDSCAPE_PLACEMENT`）/ `POST .../placements/propose`（手動再提案。429=日次上限・
+  422=素材/骨格なし、detail は数値なしの事実文）/ `GET /api/admin/landscape/overview?domain_key=`。
+  学習者 = `GET /api/learning/courses/{id}/landscape`（受講ゲート + コース sources のみ。
+  表示 status は confirmed/inferred/review_required、**weight・confidence・claim_id 非漏洩**、
+  出所ラベル「AIによる推定（未確認）」「教員確認済み」必須）。DELETE ルートなし。
+- **UI**: 学習者 = atlas オーバーレイ「論文の位置」レイヤー（`landscape-layer.js`、
+  personal-map と同じ3フック型・fail-closed・`getData(courseId)` を app.js と共有）+
+  出典タブ「分野の中の位置づけ」セクション + コーパス事実行（LS8）。教員 = 教材管理⋯メニュー
+  「位置づけ（分野マップ）…」→ レビューモーダル（ドメイン別グループ・status チップ・
+  [確認][却下][再検討]・[AIで再提案]・unplaced 事実文）。アンカー3点セット登録済み
+  （`materials.row-landscape` / `landscape-modal` / `landscape-propose`、カウント 244）。
+- **env**: `LANDSCAPE_PLACEMENT_LLM_MODEL`（fast 既定）/ `LANDSCAPE_MAX_CALLS_PER_DAY`(20) /
+  `LANDSCAPE_MAX_PLACEMENTS_PER_DOCUMENT`(8)。
+- **ガードレール**: `test_landscape_guardrails.py`（core 非FastAPI・DELETE 不在・migration⇄schema
+  語彙一致・数値非漏洩・骨格 valid）+ `test_landscape_{store,stage,api,ui_static,admin_ui_static}.py`
+  + `src/tests/agents/landscape_placement/`。
+- **非スコープ（Phase 2〜4 は設計書 §12）**: 橋渡し概念の一級ノード化 / EmergentRegion・
+  コーパス別地図・MapSnapshot / 問い・方法・系譜ビュー / G層 `material.landscape_unreviewed` /
+  W層 positioning レンズへの合流 / 学習者の配置異議。
+
 ### D層（Doubt Layer, migration 029〜033）
 
 A層（構造化）・B層（学習）・C層（承認）に続く第四の層。「合意の強さ」と「検証の強さ」を

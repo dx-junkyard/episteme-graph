@@ -212,20 +212,31 @@
     var commands = t.match(/\\[a-zA-Z]+/g) || [];
     if (!hasEnv && commands.length < (symbolMode ? 1 : 2)) return false;
     if (hasEnv && !/\\end\{[a-zA-Z*]+\}/.test(t)) return false; // 環境が閉じていない
-    var opens = (t.match(/(^|[^\\])\{/g) || []).length;
-    var closes = (t.match(/(^|[^\\])\}/g) || []).length;
+    // 波括弧の開閉数はエスケープ済み括弧を除去してから単純カウントする。
+    // 旧実装は「直前がバックスラッシュでない閉じ括弧」を /g 走査しており、
+    // 連続する閉じ括弧では1個目のマッチが直前文字を消費して2個目を
+    // 数え落とすため、bm マクロの記号表記を不均衡と誤判定して
+    // **正当な TeX を弾いていた**（2026-08-03 実機で発覚）。
+    var stripped = t.replace(/\\[{}]/g, "");
+    var opens = (stripped.match(/\{/g) || []).length;
+    var closes = (stripped.match(/\}/g) || []).length;
     return opens === closes; // 切り詰めで壊れた TeX を弾く
   }
 
   // ゲートを通ったときだけ opts.renderMath を呼ぶ。失敗・非 TeX は "" を返し、
   // 呼び出し側が素のテキスト表示へ落とす。
   //
-  // KaTeX は throwOnError:false のとき例外を投げず、未知マクロ（論文独自の
-  // \bmx 等）を **赤いエラー表示の HTML として正常返却**する。形のゲート
-  // （looksLikeRenderableTex）では検出できないため、出力側でもエラー痕
-  // （katex-error クラス）を検査し、検出したら描画失敗として素のテキストへ
+  // KaTeX は throwOnError:false のとき例外を投げず、エラーを **赤い表示の HTML
+  // として正常返却**する。しかもエラー経路は2つある:
+  //   1) 式全体のパース失敗 → class="katex-error" の全体赤字
+  //   2) 未知コマンド（論文独自マクロ \bmx 等）のインライン回復
+  //      （Parser.formatUnsupportedCmd）→ 該当トークンだけ errorColor
+  //      （既定 #cc0000）の赤テキストで式の中に埋め込まれ、**katex-error
+  //      クラスは付かない**
+  // 形のゲート（looksLikeRenderableTex）ではどちらも検出できないため、
+  // 出力側で両方の痕跡を検査し、検出したら描画失敗として素のテキストへ
   // 落とす（EC2: 壊れた TeX を赤字で学習者に見せない）。
-  var KATEX_ERROR_MARK = /katex-error/;
+  var KATEX_ERROR_MARK = /katex-error|#cc0000/;
 
   function renderMathGated(ctx, expr, display, symbolMode) {
     if (!ctx.renderMath) return "";

@@ -228,6 +228,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.figure-overlay",
         "materials.figure-promote",
         "materials.figures-modal",
+        "materials.landscape-modal",
+        "materials.landscape-propose",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
@@ -240,6 +242,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-estimate",
         "materials.row-figures",
         "materials.row-inventory",
+        "materials.row-landscape",
         "materials.row-more-menu",
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
@@ -700,6 +703,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.figure-promote": "teacher/11-admin-materials.md#figure-promote",
     # 図・画像モーダル
     "materials.figures-modal": "teacher/11-admin-materials.md#figures-modal",
+    # 位置づけ（分野マップ）モーダル
+    "materials.landscape-modal": "teacher/11-admin-materials.md#landscape-modal",
+    # AIで再提案（配置候補の再生成）
+    "materials.landscape-propose": "teacher/11-admin-materials.md#landscape-propose",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス
     "materials.library-entry-merge-target": "teacher/11-admin-materials.md#library-entry-merge-target",
     # ライブラリへ昇格モーダル
@@ -724,6 +731,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-figures": "teacher/11-admin-materials.md#row-figures",
     # 検出要素
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
+    # 位置づけ（分野マップ）…
+    "materials.row-landscape": "teacher/11-admin-materials.md#landscape-open",
     # 操作メニュー（⋯）— 行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）
     "materials.row-more-menu": "teacher/11-admin-materials.md#row-more-menu",
     # PDF再登録

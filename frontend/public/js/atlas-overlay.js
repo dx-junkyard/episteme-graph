@@ -20,7 +20,9 @@
   const SVG_NS = "http://www.w3.org/2000/svg";
 
   // ノード数上限 (§13)。超過分は先頭から採用し、残りは描画しない (代表選出は E系)
-  const LIMITS = { l1Regions: 7, l1ConceptsPerRegion: 6, l2Nodes: 20, l3Nodes: 12 };
+  // 知識ランドスケープ (docs/features/knowledge_landscape_design.md §6.2): 基準地図の
+  // 領域数上限を 7 → 12 に引き上げ (backend/core/atlas.py MAX_REGIONS と同期)。
+  const LIMITS = { l1Regions: 12, l1ConceptsPerRegion: 6, l2Nodes: 20, l3Nodes: 12 };
 
   // §5 の視覚言語 (仕様の定数。テーマ変数ではない)
   const C = {
@@ -146,6 +148,9 @@
     // 個人知識ネットワーク (Phase P-1): 「わたしの地図」トグル + 凡例 + 「まだ地図にない」トレイ。
     // PersonalMap が無い環境 (未読み込み等) では従来どおり何も差し込まれない。
     if (window.PersonalMap) window.PersonalMap.mountControls(sheet);
+    // 知識ランドスケープ (§10.1): 「論文の位置」トグル。配置データが無ければ
+    // LandscapeLayer 側が領域ごと隠す (fail-closed)。
+    if (window.LandscapeLayer) window.LandscapeLayer.mountControls(sheet);
 
     ov.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { e.stopPropagation(); closeOverlay(); }
@@ -480,6 +485,9 @@
     // 個人知識ネットワーク (Phase P-1): L1 かつ「わたしの地図」ON のときだけ本人の痕跡ドットを
     // 重ね描く。判定・描画は PersonalMap 側の責務 (§9)。
     if (window.PersonalMap) window.PersonalMap.onLevelRendered(level, canvas);
+    // 知識ランドスケープ (§10.1): L1 かつ「論文の位置」ON のときだけ 📄 マーカーを
+    // 1レイヤー重ねる。既存ノード・エッジ・ミニマップには触らない (LS7)。
+    if (window.LandscapeLayer) window.LandscapeLayer.onLevelRendered(level, canvas);
   }
 
   function selectNode(id, opts) {
@@ -607,6 +615,8 @@
     if (state.lastFocus && typeof state.lastFocus.focus === "function") state.lastFocus.focus();
     // 個人知識ネットワーク (Phase P-1): マーカーの小ポップ等を後始末する。
     if (window.PersonalMap) window.PersonalMap.onOverlayClosed();
+    // 知識ランドスケープ (§10.1): マーカーのポップオーバー等を後始末する。
+    if (window.LandscapeLayer) window.LandscapeLayer.onOverlayClosed();
   }
 
   window.AtlasOverlay = {

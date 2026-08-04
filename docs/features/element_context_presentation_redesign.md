@@ -639,12 +639,41 @@ A層非改変のまま日本語 headline が手に入る唯一の経路。
 
 1. **KaTeX 未知マクロの赤字（EC2 違反）**: 論文独自マクロ（`\bmx` = `\bm{x}`）は
    `throwOnError:false` の KaTeX が**例外を投げず赤いエラー HTML を正常返却**するため、
-   形のゲート（`looksLikeRenderableTex`）を素通りしていた。`renderMathGated` に出力側検査
-   （`katex-error` クラス検出 → 素のテキストへフォールバック）を追加。
+   形のゲート（`looksLikeRenderableTex`）を素通りしていた。エラー経路は2つあり
+   （①式全体のパース失敗 = `katex-error` クラスの全体赤字 ②未知コマンドの
+   **インライン回復** = `Parser.formatUnsupportedCmd` が該当トークンだけを
+   errorColor（既定 `#cc0000`）の赤テキストで式中に埋め込む。**katex-error クラスは
+   付かない** — スクリーンショットの「δ(t, は正常・\bmx だけ赤」はこちら）、
+   `renderMathGated` の出力側検査は両方の痕跡（`/katex-error|#cc0000/`）を検出して
+   素のテキストへフォールバックする。初回修正（katex-error のみ）は経路②を
+   取りこぼしており、実機確認で発覚→両経路対応に是正（2026-08-03）。
    `test_no_direct_katex_dependency` は「API 直接呼び出し禁止」の真意へ精緻化。
 2. **記号の意味文が端でクリップ**: `.element-card-symbol { white-space: nowrap }` により
    長い英語の意味文が折り返せず「切れたことすら分からない」状態だった。記号名のみ nowrap、
    意味文は折り返しへ変更（切り詰め処理自体は正常＝excerpt の「…」付き）。
+3. **記号表示に照合キーを流用していた（真の根本原因）**: `canonical_symbol` は
+   SymbolRegistry の `normalize_symbol` が**波括弧・空白を全除去**した表記ゆれ照合用の
+   キーであり（`{\bm{x}}` → `\bmx`、`\delta(t,{\bm{x}})` → `δ(t,\bmx)`）、TeX マクロ名を
+   壊した文字列になる。これを表示に使っていたため、フォールバック（1・2 の修正）では
+   「赤字が黒字になるだけ」で `\bmx` の表示自体は直らなかった。根治は
+   **表示は原表記・照合はキー、の分離**: `labels.symbol_display_text()` が
+   `notation_variants`（`add_variant(raw)` が原表記をそのまま保存）から、
+   ①波括弧の対応が取れていて ②正規化すると canonical と同一記号になる変種を選ぶ
+   （同一性判定は A層 `normalize_symbol` そのもの — `core/symbol_notation.py` を
+   element_vocab と同型の公認 seam として新設し、core/deliberation の A層 direct
+   import 禁止ガードレールを保ったまま共有。第2実装しない）。`{\bm{x}}` は KaTeX が
+   `\bm` を標準サポートするため太字の x として正しく描画される。適用点は
+   `labels.symbol_label`（レーン・intrinsic の共通正本）+ W層 positioning の記号説明の
+   計1+1箇所で、記号を表示する全画面に一括で効く。1・2 の修正は最後の砦として維持。
+4. **フロントのレンダリングゲートが正当な TeX を弾いていた**: `looksLikeRenderableTex` の
+   波括弧カウント（「直前が非バックスラッシュの閉じ括弧」の `/g` 走査）は、連続する
+   閉じ括弧で1個目のマッチが直前文字を消費して2個目を数え落とす。このため 3 で正しく
+   届くようになった `{\bm{x}}` を「開き2・閉じ1」の不均衡と誤判定し、KaTeX に渡さず
+   素通し表示していた（旧表示 `\bmx` は括弧ゼロでゲートを**通過して**赤字になり、正しい
+   表記が**弾かれる**という逆転）。エスケープ済み括弧を除去してからの単純カウントへ修正
+   （JavaScriptCore で実挙動を検証: `{\bm{x}}` / `\delta(t,{\bm{x}})` = 通過、
+   切り詰め TeX `\frac{\rho(` = 拒否、`\bmx` 単独 = 通過→KaTeX インライン赤→
+   #cc0000 検出→素テキスト、の安全網チェーンを確認）。
 
 実機で確認された仕様どおりの挙動（バグではない）:
 - 見出しが英語（`Defines the matter density contrast…`）: 記号+役割合成（ラダー③）が

@@ -49,6 +49,7 @@ KNOWN_FEATURES = (
     "pipeline:narrative_annotator",
     "pipeline:contextual_explanation",
     "pipeline:discuss_opening",
+    "pipeline:landscape_placement",
     "pipeline:course_mapping",
     "pipeline:blueprint",
     "pipeline:export_validation",

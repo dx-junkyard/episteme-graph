@@ -50,6 +50,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "rightpanel.clear-history",
         "discuss.scope-toggle",
         "discuss.end",
+        # 知識ランドスケープ（docs/features/knowledge_landscape_design.md §10.2）:
+        # 出典タブの「分野の中の位置づけ」セクション。
+        "sources.paper-placement",
     }
 )
 
@@ -58,7 +61,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 #
 # docs/manual/student/02-student.md に実在する節にのみマップする。2026-07-26 に
 # 学習UI再編（learning_ui_inspect_hover_design.md）に追随してマニュアルへ6節を
-# 追記し、KNOWN_UI_ANCHOR_IDS の全17種がここにマップ済みになった。
+# 追記し、KNOWN_UI_ANCHOR_IDS の全17種がここにマップ済みになった。2026-08-04 に
+# 知識ランドスケープ（knowledge_landscape_design.md §10.2）の
+# sources.paper-placement を追加し、全18種がマップ済みの状態を保っている。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
 # （composer.input / composer.send が同じ #ai-chat を指すのと同じパターン）。
@@ -98,6 +103,8 @@ UI_ANCHORS: dict[str, str] = {
     "discuss.scope-toggle": "student/02-student.md#discuss-scope-toggle",
     # discuss モードの「議論を終える」ボタン。
     "discuss.end": "student/02-student.md#discuss-end",
+    # 出典タブの「分野の中の位置づけ」（知識ランドスケープ・論文の位置づけ）。
+    "sources.paper-placement": "student/02-student.md#paper-placement",
 }
 
 

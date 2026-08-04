@@ -2234,6 +2234,11 @@
       });
       html += "</div>";
     }
+    // 知識ランドスケープ（docs/features/knowledge_landscape_design.md §4.2/§10.2）:
+    // 「分野の中の位置づけ」。データは LandscapeLayer と同一 fetch を共有し、配置が
+    // 1件も無い / 取得失敗のときはセクションごと消す（fail-closed・LS6）。
+    html += '<div class="ps lx-paper-placement" id="lx-paper-placement" ' +
+      'data-ui-anchor="sources.paper-placement" hidden></div>';
     // このトピックの論理要素（2026-07-26 差し替え）。
     // 旧「本セッションで参照されたセクション」は course.referenced_sections（トピック→
     // component_id の内部対応表）をそのまま描画しており、学習者には内部ID（comp_001）と
@@ -2284,6 +2289,96 @@
 
     // D層 (D3-6): 根拠カードへ台帳の検証状態を一行併記（非同期・fail-closed）。
     annotateSourceCardsWithLedger(el);
+
+    // 知識ランドスケープ: 「分野の中の位置づけ」を非同期で埋める（annotateSourceCardsWithLedger
+    // と同じ後付け方式。データが揃うまでセクションは hidden のまま）。
+    renderPaperPlacementSection(el);
+  }
+
+  // ============ 分野の中の位置づけ（知識ランドスケープ, 学習者側）============
+  // 設計正本: docs/features/knowledge_landscape_design.md §4.2（受講者 UX）・§10.2。
+  // 不変条項: LS1（断定しない）/ LS4（reason + 原文逐語 quote を必ず併記）/
+  // LS5（weight・confidence の生数値を出さない — サーバが返す段階ラベルのみ）/
+  // LS6（データ無し・取得失敗はセクションごと非表示）/ LS8（コーパス事実行）。
+  // 取得は window.LandscapeLayer.getData(courseId)（オーバーレイの「論文の位置」
+  // レイヤーと同一 fetch・コース単位キャッシュを共有する）。
+  function renderPaperPlacementSection(root) {
+    if (!root) return;
+    var box = root.querySelector("#lx-paper-placement");
+    if (!box) return;
+    if (!window.LandscapeLayer || !state.courseId) { box.remove(); return; }
+    var courseId = state.courseId;
+    Promise.resolve(window.LandscapeLayer.getData(courseId))
+      .then(function (data) {
+        // コース切替後に届いた遅延応答は破棄する（別コースの出典タブに描かない）。
+        if (courseId !== state.courseId) return;
+        if (!box.isConnected) return;
+        var docs = (data && data.documents) || [];
+        var placed = docs.filter(function (d) {
+          return d && Array.isArray(d.placements) && d.placements.length;
+        });
+        if (!placed.length) { box.remove(); return; } // fail-closed: 節ごと出さない
+        box.innerHTML = buildPaperPlacementHtml(data, placed);
+        box.hidden = false;
+      })
+      .catch(function () {
+        if (box.isConnected) box.remove(); // fail-closed
+      });
+  }
+
+  function buildPaperPlacementHtml(data, placedDocs) {
+    var html = "<h4>分野の中の位置づけ</h4>";
+    html += '<p class="lx-note" style="margin-top:0">この論文が分野の地図のどのあたりと' +
+      'つながるかの一覧です。ひとつの論文が複数の領域に載ることがあります。</p>';
+    placedDocs.forEach(function (doc) {
+      html += '<div class="lx-placement-doc">';
+      html += '<div class="lx-placement-title">' + escHtml(doc.title || "無題の論文") + "</div>";
+      (doc.placements || []).forEach(function (p) {
+        var chipBits = [];
+        if (p.perspective_label) chipBits.push(p.perspective_label);
+        if (p.weight_label) chipBits.push(p.weight_label);
+        html += '<div class="lx-placement-row">';
+        html += '<span class="lx-placement-chip">' + escHtml(p.node_label || p.node_id || "") +
+          (chipBits.length ? "（" + escHtml(chipBits.join("・")) + "）" : "") + "</span>";
+        if (p.provenance_label) {
+          html += '<span class="lx-placement-prov">' + escHtml(p.provenance_label) + "</span>";
+        }
+        var evidence = (p.evidence || []).filter(function (ev) { return ev && ev.quote; });
+        if (p.reason || evidence.length) {
+          html += '<details class="lx-placement-detail"><summary>根拠を見る</summary>';
+          if (p.reason) html += '<div class="lx-placement-reason">' + escHtml(p.reason) + "</div>";
+          evidence.forEach(function (ev) {
+            html += '<div class="lx-placement-quote">「' + escHtml(ev.quote) + "」</div>";
+          });
+          html += "</details>";
+        }
+        html += "</div>";
+      });
+      html += "</div>";
+    });
+    // LS8: 何件のコーパス・どの骨格版・AI推定を含むかを事実文で明示する。
+    html += '<p class="lx-placement-fact">' + escHtml(paperPlacementCorpusFact(data)) + "</p>";
+    return html;
+  }
+
+  // LS8 のコーパス事実行（landscape-layer.js の corpusFactText と同じ文面）。
+  function paperPlacementCorpusFact(data) {
+    var corpus = (data && data.corpus) || {};
+    var n = typeof corpus.source_document_count === "number" ? corpus.source_document_count : 0;
+    var domains = (data && data.domains) || [];
+    var picked = null;
+    domains.forEach(function (d) { if (!picked && d && d.is_course_map) picked = d; });
+    if (!picked && domains.length) picked = domains[0];
+    var version = (picked && picked.frozen_version) ? String(picked.frozen_version) : "";
+    var inferred = ((data && data.documents) || []).some(function (d) {
+      return ((d && d.placements) || []).some(function (p) { return p && p.status !== "confirmed"; });
+    });
+    var notes = [];
+    if (version) notes.push("骨格版 " + version);
+    if (inferred) notes.push("AI推定を含む");
+    var text = "登録済み論文 " + n + " 件の解析から生成";
+    if (notes.length) text += "（" + notes.join("・") + "）";
+    return text;
   }
 
   // D層 (D3-6): 出典タブの根拠カードに、そのチャンクに含まれる数式（equation）・
@@ -4518,6 +4613,9 @@
     // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
     // コース横断ネットワークだが、コース切替のたびに古い表示を残さないよう揃える）。
     if (window.PersonalMapHome) window.PersonalMapHome.invalidate();
+    // 知識ランドスケープ: コース切替で「論文の位置」のキャッシュ・トグル状態を破棄する
+    // （前コースの配置を別コースの地図・出典タブに持ち越さない）。
+    if (window.LandscapeLayer) window.LandscapeLayer.invalidate();
     // discuss モード（論文と話す）: コース切替で旧コースの discuss 内部状態
     // （無活動タイマー・往復回数・ctx.courseId）を持ち越さない。これを怠ると、
     // 旧コースでの discuss セッションの無活動タイムアウト（15分）が、切替後の

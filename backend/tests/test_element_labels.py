@@ -470,6 +470,58 @@ class TestGraphNodeLabel:
 # ---------------------------------------------------------------------------
 
 
+class TestSymbolDisplayText:
+    """表示は原表記・照合はキー、の分離（2026-08-03 実機是正）。
+
+    canonical_symbol は SymbolRegistry の normalize_symbol が波括弧・空白を
+    全除去した**照合キー**（{\\bm{x}} → \\bmx）。キーを表示に流用すると
+    TeX マクロ名が壊れる。表示は notation_variants の原表記を使う。
+    """
+
+    def test_plain_canonical_is_used_directly(self):
+        rec = {"canonical_symbol": "b_1", "notation_variants": ["$b_1$", "b_1"]}
+        assert L.symbol_display_text(rec) == "b_1"
+
+    def test_tex_canonical_prefers_original_variant(self):
+        rec = {
+            "canonical_symbol": "\\bmx",  # 波括弧除去で壊れたキー
+            "notation_variants": ["{\\bm{x}}", "\\bm{x}"],
+        }
+        assert L.symbol_display_text(rec) == "{\\bm{x}}"
+
+    def test_composite_symbol_prefers_variant(self):
+        rec = {
+            "canonical_symbol": "δ(t,\\bmx)",
+            "notation_variants": ["\\delta(t,{\\bm{x}})"],
+        }
+        assert L.symbol_display_text(rec) == "\\delta(t,{\\bm{x}})"
+
+    def test_unbalanced_variants_are_skipped(self):
+        rec = {
+            "canonical_symbol": "\\bmx",
+            "notation_variants": ["{\\bm{x}", "{\\bm{x}}"],  # 先頭は括弧が閉じない
+        }
+        assert L.symbol_display_text(rec) == "{\\bm{x}}"
+
+    def test_dollar_wrapping_is_stripped(self):
+        rec = {"canonical_symbol": "\\bmx", "notation_variants": ["$\\bm{x}$"]}
+        assert L.symbol_display_text(rec) == "\\bm{x}"
+
+    def test_no_usable_variant_falls_back_to_canonical(self):
+        rec = {"canonical_symbol": "\\bmx", "notation_variants": ["{\\bm{x}"]}
+        assert L.symbol_display_text(rec) == "\\bmx"
+
+    def test_symbol_label_uses_display_text(self):
+        label = L.symbol_label(
+            {
+                "canonical_symbol": "\\bmx",
+                "notation_variants": ["{\\bm{x}}"],
+                "meaning": "共動座標",
+            }
+        )
+        assert label.text == "{\\bm{x}}"
+
+
 class TestSymbolLabel:
     def test_symbol_is_shown_as_is_and_meaning_becomes_the_sublabel(self):
         label = L.symbol_label(

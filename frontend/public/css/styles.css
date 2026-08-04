@@ -10226,3 +10226,66 @@ button.element-card-item:focus-visible .element-card-item-label {
   border: none;
   padding: 0;
 }
+
+/* ── 出典タブ「分野の中の位置づけ」（知識ランドスケープ, 学習者側）─────────────
+ * 設計正本: docs/features/knowledge_landscape_design.md §4.2 / §10.2。
+ * 配置が無い / 取得失敗のときは app.js がセクションごと削除する（LS6 fail-closed）。
+ * weight・confidence の生数値は描かない（LS5）。表示はサーバの段階ラベル・出所ラベル・
+ * reason・原文逐語 quote（LS4）と、コーパス事実行（LS8）のみ。 */
+.lx-placement-doc {
+  padding: 8px 0;
+  border-bottom: 0.5px solid var(--color-border-tertiary);
+}
+.lx-placement-doc:last-of-type { border-bottom: none; }
+.lx-placement-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  line-height: 1.5;
+}
+.lx-placement-row {
+  margin-top: 5px;
+}
+.lx-placement-chip {
+  display: inline-block;
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border: 0.5px solid var(--color-border-secondary);
+  border-radius: 999px;
+  color: var(--color-text-primary);
+  background: var(--color-background-tertiary);
+}
+/* 出所ラベル（「AIによる推定（未確認）」/「教員確認済み」）— 必ず併記する（AC-005） */
+.lx-placement-prov {
+  display: inline-block;
+  margin-left: 6px;
+  font-size: 10.5px;
+  color: var(--color-text-secondary);
+}
+.lx-placement-detail {
+  margin-top: 3px;
+}
+.lx-placement-detail > summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+}
+.lx-placement-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  line-height: 1.55;
+}
+.lx-placement-quote {
+  margin-top: 3px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  border-left: 2px solid var(--color-border-tertiary);
+  padding-left: 6px;
+}
+/* コーパス事実行（LS8）— 煽らず、件数と骨格版だけを事実として置く */
+.lx-placement-fact {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}

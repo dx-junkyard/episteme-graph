@@ -151,6 +151,9 @@ class TestImportBundled:
         import core.cartridges as cartridges_module
 
         monkeypatch.setattr(cartridges_module, "list_cartridges", lambda: [_Summary()])
+        # 骨格専用バンドルドメイン (atlas_domains/) は本ケースの対象外にする
+        # (実ディレクトリの astrophysics を数に混ぜない)。
+        monkeypatch.setattr(atlas_store, "_bundled_domain_keys", lambda: [])
         monkeypatch.setattr(
             atlas_store, "_bundled_skeleton", lambda key: _skeleton("frozen", "2026.1")
         )
@@ -158,3 +161,100 @@ class TestImportBundled:
         # 2回目は取り込まない (冪等)
         assert atlas_store.import_bundled_skeletons(db) == 0
         assert len(db.skeleton_rows) == 1
+
+
+class TestBundledDomainDirectory:
+    """骨格専用バンドルドメイン (`backend/atlas_domains/<key>/`) のシード経路。
+
+    正本: docs/features/knowledge_landscape_design.md §6.1。カートリッジ一式を持たない
+    分野の骨格をファイルから取り込めること・`domain.json` は **行が無いときだけ**
+    meta へ入ること (既存の表示名を上書きしない) を検証する。
+    """
+
+    @staticmethod
+    def _write_domain(root: Path, key: str, *, version: str, meta: dict | None) -> None:
+        import json as _json
+
+        d = root / key
+        d.mkdir(parents=True, exist_ok=True)
+        atlas.write_skeleton(
+            atlas.AtlasSkeleton(
+                cartridge=key,
+                status="frozen",
+                version=version,
+                generated_by="reference_map:test",
+                reviewed_by=("faculty:t",),
+                changelog=(atlas.ChangelogEntry(version=version, note="t"),),
+                regions=(
+                    atlas.SkeletonRegion(
+                        id="r1",
+                        label="領域",
+                        layout=atlas.RegionLayout(x=0.1, y=0.1, w=0.4, h=0.4),
+                        concepts=(),
+                    ),
+                ),
+            ),
+            d / "skeleton.yaml",
+        )
+        if meta is not None:
+            (d / "domain.json").write_text(
+                _json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+            )
+
+    @pytest.fixture
+    def domains_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(atlas_store, "ATLAS_BUNDLED_DOMAINS_DIR", tmp_path)
+        import core.cartridges as cartridges_module
+
+        monkeypatch.setattr(cartridges_module, "list_cartridges", lambda: [])
+        return tmp_path
+
+    def test_skeleton_is_read_from_domain_directory(self, domains_dir):
+        self._write_domain(domains_dir, "astro_test", version="2026.9", meta=None)
+        skeleton = atlas_store._bundled_skeleton("astro_test")
+        assert skeleton is not None and skeleton.version == "2026.9"
+        assert atlas_store._bundled_domain_keys() == ["astro_test"]
+
+    def test_missing_and_invalid_files_are_fail_soft(self, domains_dir):
+        assert atlas_store._bundled_skeleton("nope") is None
+        # YAML/スキーマが壊れている → None (例外を投げず起動を止めない)
+        (domains_dir / "broken").mkdir()
+        (domains_dir / "broken" / "skeleton.yaml").write_text(
+            "atlas_skeleton: {regions: [{id: r1, layout: {x: nope}}]}", encoding="utf-8"
+        )
+        assert atlas_store._bundled_skeleton("broken") is None
+        # draft (未凍結・レビュー帰属なし) は読まない (LS6)
+        self._write_domain(domains_dir, "unfrozen", version="2026.1", meta=None)
+        (domains_dir / "unfrozen" / "skeleton.yaml").write_text(
+            (domains_dir / "unfrozen" / "skeleton.yaml")
+            .read_text(encoding="utf-8")
+            .replace("status: frozen", "status: draft"),
+            encoding="utf-8",
+        )
+        assert atlas_store._bundled_skeleton("unfrozen") is None
+
+    def test_import_seeds_skeleton_and_domain_meta(self, db, domains_dir):
+        self._write_domain(
+            domains_dir, "astro_test", version="2026.9", meta={"name": "宇宙物理", "description": "地図"}
+        )
+        assert atlas_store.import_bundled_skeletons(db) == 1
+        assert atlas_store.load_frozen_skeleton(db, "astro_test").version == "2026.9"
+        assert db.domain_meta["astro_test"]["name"] == "宇宙物理"
+        # 冪等: 2回目は骨格も meta も増やさない
+        assert atlas_store.import_bundled_skeletons(db) == 0
+        assert len(db.skeleton_rows) == 1
+
+    def test_import_never_overwrites_existing_domain_meta(self, db, domains_dir):
+        self._write_domain(
+            domains_dir, "astro_test", version="2026.9", meta={"name": "宇宙物理", "description": "地図"}
+        )
+        atlas_store.save_domain_meta(db, "astro_test", {"name": "教員が付けた名前"})
+        atlas_store.import_bundled_skeletons(db)
+        assert db.domain_meta["astro_test"]["name"] == "教員が付けた名前"
+
+    def test_list_domains_includes_bundled_domain_directories(self, db, domains_dir):
+        self._write_domain(domains_dir, "astro_test", version="2026.9", meta=None)
+        domains = {d["domain_key"]: d for d in atlas_store.list_domains(db)}
+        assert domains["astro_test"]["source"] == "bundled"
+        assert domains["astro_test"]["frozen_version"] == "2026.9"
+        assert domains["astro_test"]["lifecycle"] == "active"

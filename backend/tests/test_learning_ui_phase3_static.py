@@ -489,16 +489,24 @@ class TestEquationTooltipNeverRepeatsTheEquation:
         card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
         gate = _extract_function_body(card, "function looksLikeRenderableTex(text, symbolMode) {")
         assert "opens === closes" in gate  # 切り詰めで壊れた TeX を弾く
+        # 波括弧カウントはエスケープ除去後の単純カウントで行う。
+        # 「直前が非バックスラッシュの閉じ括弧」の /g 走査は連続する閉じ括弧を
+        # 数え落とし、{\bm{x}} 形の正当な TeX を不均衡と誤判定して弾く
+        # （2026-08-03 実機で発覚した回帰）。
+        assert 't.replace(/\\\\[{}]/g, "")' in gate
+        assert "(^|[^\\\\])" not in gate
         assert "if (!looksLikeRenderableTex(expr, symbolMode)) return \"\";" in card
 
     def test_katex_error_output_falls_back_to_plain_text(self):
-        """EC2: KaTeX は throwOnError:false のとき未知マクロ（論文独自の \\bmx 等）を
-        例外ではなく「赤いエラー表示の HTML」として正常返却する。形のゲートでは
-        検出できないため、出力側でも katex-error を検査し素のテキストへ落とす。"""
+        """EC2: KaTeX は throwOnError:false のとき例外を投げず「赤い表示の HTML」を
+        正常返却する。経路は2つ — ①式全体のパース失敗（class="katex-error"）
+        ②未知コマンドのインライン回復（errorColor #cc0000 の赤テキストのみ・
+        katex-error クラス無し。論文独自マクロ \\bmx がこれ）。形のゲートでは
+        どちらも検出できないため、出力側で両方の痕跡を検査し素のテキストへ落とす。"""
         card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
         rendered = _extract_function_body(card, "function renderMathGated(ctx, expr, display, symbolMode) {")
         assert "KATEX_ERROR_MARK.test(rendered)" in rendered
-        assert "var KATEX_ERROR_MARK = /katex-error/;" in card
+        assert "var KATEX_ERROR_MARK = /katex-error|#cc0000/;" in card
 
     def test_context_panel_title_has_no_dangling_separator(self):
         """EC1: 見出しが空のときに「数式 ・ 」を作らない（生 TeX も出さない）。"""

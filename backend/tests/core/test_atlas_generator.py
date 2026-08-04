@@ -32,8 +32,12 @@ class TestGenerationPostProcessing:
                 GeneratedRegion(
                     id=f"Region {i}!",
                     label=f"領域{i}",
-                    x=0.1 * i,
-                    y=0.05,
+                    # 領域はキャンバス内のグリッドに置く (x/y は正規化座標)。
+                    # 一列に並べると MAX_REGIONS の引き上げ (7→12,
+                    # knowledge_landscape_design.md §6.2) でキャンバス右端を
+                    # 越えてしまうため、行方向へ折り返す。
+                    x=0.24 * (i % 4),
+                    y=0.24 * (i // 4),
                     w=0.2,
                     h=0.2,
                     concepts=[

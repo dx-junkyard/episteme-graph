@@ -91,6 +91,7 @@ LLM_STAGE_NAMES = frozenset({
     "narrative_annotator",
     "contextual_explanation",
     "discuss_opening",
+    "landscape_placement",
 })
 
 # 後方互換エイリアス（Phase 4 で `LLM_STAGE_NAMES` へ昇格・公開。旧名を参照する
@@ -177,6 +178,7 @@ PIPELINE_STAGES = [
     "narrative_annotator",
     "contextual_explanation",
     "discuss_opening",
+    "landscape_placement",
     "course_mapping",
     "blueprint",
     "export_validation",
@@ -1652,6 +1654,36 @@ def _stage_discuss_opening(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("discuss_opening", dict(discuss_payload))
 
 
+def _stage_landscape_placement(ctx: PipelineContext) -> bool:
+    # ── Stage 12a.4: landscape_placement (knowledge_landscape_design.md §7.1).
+    # Registered after discuss_opening and before course_mapping: thesis /
+    # claim_object_builder / paper_skeleton have all run by now, so the paper can be
+    # placed onto the frozen reference maps (atlas_skeletons) with resolved text as
+    # the only material. Non-fatal: a failure here never blocks course_mapping /
+    # persistence, and placements are always written as `inferred` (LS3 — a teacher
+    # confirms them later).
+    landscape_artifact = ctx.artifact("landscape_placement")
+    if ctx.should_use_artifact("landscape_placement"):
+        landscape_payload = dict(landscape_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded landscape_placement artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("landscape_placement", total=1, unit="builder")
+        try:
+            landscape_payload = _build_landscape_placement(ctx)
+        except Exception as exc:
+            logger.warning(
+                "landscape_placement stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            landscape_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("landscape_placement", landscape_payload)
+    ctx.report_done("landscape_placement", dict(landscape_payload))
+    return ctx.finish_target_stage("landscape_placement", dict(landscape_payload))
+
+
 def _stage_course_mapping(ctx: PipelineContext) -> bool:
     # ── Stage 12b: course_mapping (deterministic component → topic map) ─
     course_mapping_artifact = ctx.artifact("course_mapping")
@@ -2018,6 +2050,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
     PipelineStageDef("contextual_explanation", _stage_contextual_explanation),
     PipelineStageDef("discuss_opening", _stage_discuss_opening),
+    PipelineStageDef("landscape_placement", _stage_landscape_placement),
     PipelineStageDef("course_mapping", _stage_course_mapping),
     PipelineStageDef("blueprint", _stage_blueprint),
     PipelineStageDef("export_validation", _stage_export_validation),
@@ -3363,6 +3396,24 @@ def _build_discuss_opening(
         session.close()
 
     return payload
+
+
+def _build_landscape_placement(ctx: PipelineContext) -> dict:
+    """landscape_placement ステージ本体（``knowledge_landscape_design.md`` §7.1）。
+
+    実体は ``core.landscape.builder.build_and_store_placements`` への薄い委譲で、
+    admin の手動再提案（``.../placements/propose``）と**同一コードパス・同一日次
+    予算**を通る（§7.1）。コスト上限・モデル解決（M層）・骨格列挙・永続化はすべて
+    builder 側に置き、ここでは in-run artifact を渡すだけにする（未指定なら builder が
+    ``core.deliberation.refs.document_run_artifacts`` で DB から読む）。
+    """
+    from core.landscape.builder import build_and_store_placements
+
+    return build_and_store_placements(
+        document_id=ctx.document_id,
+        artifacts=ctx.all_artifacts(),
+        run_id=ctx.run_id,
+    )
 
 
 def _build_course_mapping(
