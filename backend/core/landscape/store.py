@@ -409,7 +409,62 @@ def update_status(
     return _row_to_dict(row)
 
 
+def accept_inferred_for_documents(
+    session: Any,
+    document_ids: Iterable[str],
+    *,
+    reviewer_id: str,
+    note: str = "",
+) -> list[dict]:
+    """複数 document の ``inferred`` 行を一括で ``confirmed`` にする。
+
+    正本: ``docs/features/release_review_flow_design.md`` §3.1（不変条項 RR2 / RR3 / RR4）。
+    リリース前の確認画面の「次へ」の実体で、教員が提示を見て進めた明示操作を承認として
+    記帳する（AI がこの関数を呼ぶ経路は作らない — LS3）。
+
+    - 遷移するのは ``status='inferred'`` の行**だけ**。``rejected`` / ``review_required`` /
+      ``confirmed`` / ``superseded`` には触らない（RR4: 教員個別の判断を一括操作が
+      上書きしない）。
+    - ``document_ids`` が空なら **SQL を発行せず** ``[]``（fail-closed。「空集合 = 全件」に
+      転ばせない — :func:`list_for_documents` と同じ作法）。
+    - ``note`` は空文字なら既存の ``review_note`` を保持する（P4。:func:`update_status`
+      と同じ規則）。
+    - DELETE は行わない（P4 / RR5）。
+
+    戻り値は遷移した行の dict 列（呼び出し側が件数と監査記帳に使う）。
+    """
+    if not str(reviewer_id or "").strip():
+        raise ValueError("reviewer_id is required")
+    ids = [str(d).strip() for d in (document_ids or []) if str(d or "").strip()]
+    if not ids:
+        return []
+    rows = session.execute(
+        sa_text(
+            f"""
+            UPDATE landscape_placements
+               SET status = :confirmed,
+                   reviewed_by = CAST(:reviewer_id AS uuid),
+                   reviewed_at = now(),
+                   review_note = CASE WHEN :note <> '' THEN :note ELSE review_note END,
+                   updated_at = now()
+             WHERE document_id::text = ANY(:ids)
+               AND status = :inferred
+            RETURNING {_COLUMNS_SQL}
+            """
+        ),
+        {
+            "ids": ids,
+            "confirmed": schema.STATUS_CONFIRMED,
+            "inferred": schema.STATUS_INFERRED,
+            "reviewer_id": reviewer_id,
+            "note": str(note or ""),
+        },
+    ).fetchall()
+    return [_row_to_dict(r) for r in rows]
+
+
 __all__ = [
+    "accept_inferred_for_documents",
     "get_placement",
     "list_for_document",
     "list_for_documents",

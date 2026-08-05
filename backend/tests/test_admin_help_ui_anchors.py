@@ -84,7 +84,11 @@ class TestAdminUiAnchorsModule:
         #   materials.row-landscape（⋯メニューの「位置づけ（分野マップ）…」）/
         #   materials.landscape-modal（配置レビューモーダル）/
         #   materials.landscape-propose（AIで再提案）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 244
+        # + リリース前の確認（release_review_flow_design.md §3.3）の4件:
+        #   course-management.release-review-btn（コース管理の「確認して公開」）/
+        #   release-review.modal（ウィザード本体）/ release-review.next（各ステップの
+        #   主ボタン＝確認の記録）/ release-review.publish（公開する）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 248
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

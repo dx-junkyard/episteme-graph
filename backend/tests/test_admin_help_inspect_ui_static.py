@@ -210,6 +210,7 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-figure-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-models.js",
+    ROOT / "frontend" / "public" / "js" / "admin-release-review.js",
     ROOT / "frontend" / "public" / "js" / "admin-next-steps.js",
     ROOT / "frontend" / "public" / "js" / "admin-manual-editor.js",
     ROOT / "frontend" / "public" / "js" / "admin-discuss-observation.js",

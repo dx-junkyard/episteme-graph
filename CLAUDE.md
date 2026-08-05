@@ -598,6 +598,41 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   コーパス別地図・MapSnapshot / 問い・方法・系譜ビュー / G層 `material.landscape_unreviewed` /
   W層 positioning レンズへの合流 / 学習者の配置異議。
 
+### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
+
+「AI が作った地図をリリース前に提示し、教員が明示的に直さなければそのまま公開される」ための
+ウィザード層。正本は `docs/features/release_review_flow_design.md`（不変条項 RR1〜RR7:
+既定は提示されたものが出る / 「次へ」＝人間の1操作を承認とみなす / 一括承認の出所を偽らない /
+修正はいつでも / 情報を落とさない / 数値を見せない / **リリースを止めない**）。新テーブル・
+新ステージ・新 LLM 呼び出しは無く、既存 API（atlas-binding / landscape / visibility）を
+束ねるだけ。
+
+- **3ステップ**: ①学習マップの割り当て（既存 `atlasBindingRenderEditor` をそのまま埋め込み、
+  保存ボタンを `options.saveLabel` / `options.saveAnchor` で「この対応で次へ」に差し替える —
+  **分割・保存ペイロードをクライアントに再実装しない**）②論文の位置づけ（コースのソース論文の
+  live 配置をドメイン別に提示。各行に [却下][再検討]）③公開（`PUT .../visibility` public）。
+  各ステップに「あとで」があり、飛ばしても学習者側の表示は変わらない（RR1）。
+- **API**（`routes/landscape.py`）: `GET /api/admin/landscape/courses/{course_id}/placements`
+  （course-scoped の教員ビュー。`pending_count` / document 別 `editable` / `unplaced_domains` /
+  骨格版。生 weight・confidence は `projection` が落とす）/
+  `POST .../courses/{course_id}/placements/accept`（「次へ」の実体。**edit 権限のある
+  document の `inferred` のみ** `confirmed` へ。実体は
+  `core/landscape/store.py::accept_inferred_for_documents`）。DELETE ルートは無い。
+  権限の無いソース論文は 403 にせず静かに除外し件数だけ返す（RR7）。
+- **RR3 の記録**: 一括確認は `review_note="リリース前の確認画面で一括確認"` +
+  監査 `action="accept_on_release"`（個別レビューの `action="review"` と混ぜない）。
+  学習者向けラベルは個別確認と区別しない（内部事情を学習者に見せない）。
+- **入口2つ**: コースビルダーの登録直後（自動。ウィザード未ロード時は従来のインライン
+  atlas-binding パネルへ縮退）/ コース管理の所有行「確認して公開」。
+- **UI**: `frontend/public/js/admin-release-review.js`（ES5・`window.AdminReleaseReview`・
+  admin.js から DI 注入）。ポーリングしない。アンカー4点登録済み
+  （`course-management.release-review-btn` / `release-review.{modal,next,publish}`、カウント 248）。
+- **ガードレール**: `test_release_review.py`（accept が inferred 限定・空入力で SQL 非発行・
+  監査語彙・404 統一）+ `test_release_review_ui_static.py`（3ステップ・「次へ」の意味の明示・
+  既存 UI への委譲・数値非表示・fail-open で公開を止めない）。
+- **非スコープ**: 教材／コース一覧の行インジケータ / G層 `material.landscape_unreviewed` /
+  `GET /api/admin/landscape/overview` の UI 配線（API は実装済み・UI ゼロ）。
+
 ### D層（Doubt Layer, migration 029〜033）
 
 A層（構造化）・B層（学習）・C層（承認）に続く第四の層。「合意の強さ」と「検証の強さ」を

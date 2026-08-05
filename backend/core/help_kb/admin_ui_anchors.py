@@ -77,6 +77,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "course-management.perm-add",
         "course-management.quick-publish-btn",
         "course-management.refresh",
+        "course-management.release-review-btn",
         "course-management.sharing-dashboard-btn",
         "course-management.version-btn",
         "course-management.visibility-apply",
@@ -251,6 +252,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-share",
         "materials.row-version",
         "materials.upload-zone",
+        "release-review.modal",
+        "release-review.next",
+        "release-review.publish",
         "schema-proposals.approve-canary-btn",
         "schema-proposals.approve-full-btn",
         "schema-proposals.canary-confirm-btn",
@@ -375,6 +379,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "course-management.quick-publish-btn": "teacher/13-admin-course-management.md#quick-publish-btn",
     # 更新
     "course-management.refresh": "teacher/13-admin-course-management.md#refresh",
+    # 確認して公開（リリース前の確認ウィザードを開く）
+    "course-management.release-review-btn": "teacher/13-admin-course-management.md#release-review-btn",
     # 共有ダッシュボード
     "course-management.sharing-dashboard-btn": "teacher/13-admin-course-management.md#sharing-dashboard-btn",
     # 版の管理
@@ -749,6 +755,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-version": "teacher/11-admin-materials.md#row-version",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
+
+    # --- release-review.* — リリース前の確認ウィザード（release_review_flow_design.md。コース管理/コースビルダーから開く横断UI） -
+    # ウィザード本体（3ステップ: 学習マップ → 論文の位置づけ → 公開）
+    "release-review.modal": "teacher/13-admin-course-management.md#release-review-modal",
+    # 各ステップの主ボタン（＝確認したものとして記録する）
+    "release-review.next": "teacher/13-admin-course-management.md#release-review-next",
+    # 公開する
+    "release-review.publish": "teacher/13-admin-course-management.md#release-review-publish",
 
     # --- schema-proposals.* — スキーマ提案タブ --------------------------------------------
     # カナリアリリース（特定コースのみ）

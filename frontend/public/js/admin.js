@@ -3859,17 +3859,24 @@
         // G層: コース登録完了で material.no_course が消え course.* 系が現れ得るため再取得する。
         if (window.AdminNextSteps) window.AdminNextSteps.refresh();
 
-        // S2: コース登録直後に分野の地図への配置を提案する (教員が承認するまで確定しない)
-        var cbAtlasArea = document.getElementById("cb-atlas-binding-area");
-        if (cbAtlasArea) {
-          cbAtlasArea.style.display = "";
-          atlasBindingPropose(
-            newCourseId,
-            document.getElementById("cb-atlas-binding-body"),
-            document.getElementById("cb-atlas-binding-status"),
-            null,
-            { courseTitle: draft.title || "", courseDescription: draft.description || "" }
-          );
+        // リリース前の確認（release_review_flow_design.md §2 の入口1）: 登録直後に
+        // 「AI が作った地図を提示 → 次へ（＝承認）→ 公開」のウィザードを開く。
+        // ウィザードが読み込まれていない環境では従来のインラインパネルへ縮退する（RR7）。
+        if (window.AdminReleaseReview) {
+          window.AdminReleaseReview.open(newCourseId, draft.title || "", { autoOpened: true });
+        } else {
+          // S2: コース登録直後に分野の地図への配置を提案する (教員が承認するまで確定しない)
+          var cbAtlasArea = document.getElementById("cb-atlas-binding-area");
+          if (cbAtlasArea) {
+            cbAtlasArea.style.display = "";
+            atlasBindingPropose(
+              newCourseId,
+              document.getElementById("cb-atlas-binding-body"),
+              document.getElementById("cb-atlas-binding-status"),
+              null,
+              { courseTitle: draft.title || "", courseDescription: draft.description || "" }
+            );
+          }
         }
 
         // セッションの status を published に更新
@@ -5338,7 +5345,11 @@
     html += "</div>";
     html += "<div data-role='ab-table'></div>";
     html += "<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap;align-items:center'>" +
-      "<button data-role='ab-save' data-ui-anchor='atlas.binding-save' class='admin-action-btn'>この対応で反映</button>" +
+      // リリース前の確認ウィザード（release_review_flow_design.md §3.2）は、この保存
+      // ボタンをそのまま「次へ」として使う（保存ペイロードを再実装しない）。ラベルと
+      // 追加アンカーだけ options で差し替える。既定は従来どおり。
+      "<button data-role='ab-save' data-ui-anchor='" + escHtml(options.saveAnchor || "atlas.binding-save") +
+        "' class='admin-action-btn'>" + escHtml(options.saveLabel || "この対応で反映") + "</button>" +
       "<button type='button' data-role='ab-new-domain-toggle' data-ui-anchor='atlas.binding-new-domain' class='admin-action-btn'>このコースから新しい分野マップを作る</button>" +
       "</div>";
 
@@ -7345,7 +7356,12 @@
         var focusBtn = '<button class="cm-focus-btn admin-action-btn" data-ui-anchor="course-management.focus-btn" data-course-id="' + escHtml(c.id) +
           '" data-course-title="' + escHtml(c.title) + '" style="font-size:11px;padding:2px 8px" ' +
           'title="「論文と議論する」の開幕画面に出す、このコースで議論したいことを入力します">議論テーマ</button>';
-        actionHtml = '<button class="cm-manage-btn admin-action-btn" data-ui-anchor="course-management.manage-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="開示範囲・グループ共有を設定します">共有設定</button>' +
+        // リリース前の確認（release_review_flow_design.md §2）: AI が作った地図を提示し、
+        // 「次へ」で承認、そのまま公開まで進めるウィザード。所有者のみ。
+        var releaseReviewBtn = '<button class="cm-release-review-btn admin-action-btn" data-ui-anchor="course-management.release-review-btn" data-course-id="' + escHtml(c.id) +
+          '" data-course-title="' + escHtml(c.title) + '" style="font-size:11px;padding:2px 8px" ' +
+          'title="AIが作成した学習マップ・論文の位置づけを確認して公開まで進めます">確認して公開</button>';
+        actionHtml = releaseReviewBtn + ' <button class="cm-manage-btn admin-action-btn" data-ui-anchor="course-management.manage-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="開示範囲・グループ共有を設定します">共有設定</button>' +
           ' <button class="cm-version-btn admin-action-btn" data-ui-anchor="course-management.version-btn" data-course-id="' + escHtml(c.id) + '" data-course-title="' + escHtml(c.title) + '" title="コースを版（リリース）として発行・履歴管理します（共有設定とは別機能）">版の管理</button>' +
           ' ' + sharingDashboardBtn + ' ' + llmModelBtn + ' ' + focusBtn;
         var isPublic = c.visibility === "public";
@@ -7380,6 +7396,17 @@
     tbody.querySelectorAll(".cm-manage-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openPermissionModal(this.getAttribute("data-course-id"), this.getAttribute("data-course-title"));
+      });
+    });
+    // リリース前の確認ウィザード（release_review_flow_design.md §2 の入口2）
+    tbody.querySelectorAll(".cm-release-review-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (!window.AdminReleaseReview) return;
+        window.AdminReleaseReview.open(
+          this.getAttribute("data-course-id"),
+          this.getAttribute("data-course-title"),
+          {}
+        );
       });
     });
     // V層: コースの共有バージョン管理
@@ -8605,6 +8632,21 @@
       if (window.AdminLlmModels) window.AdminLlmModels.initMaterialsPanel();
       initCourseBuilder();
       initCourseManagement();
+      // リリース前の確認ウィザード（release_review_flow_design.md §3.2）— DI 注入して
+      // 疎結合に起動する。ステップ1は既存の atlas-binding UI をそのまま埋め込む。
+      if (window.AdminReleaseReview) {
+        window.AdminReleaseReview.init({
+          apiFetch: apiFetch,
+          escHtml: escHtml,
+          atlasBindingPropose: atlasBindingPropose,
+          refreshNextSteps: function () {
+            if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+          },
+          onPublished: function () {
+            loadCourseManagement();
+          },
+        });
+      }
       if (window.LectureStudio) {
         window.LectureStudio.init({
           apiFetch: apiFetch,

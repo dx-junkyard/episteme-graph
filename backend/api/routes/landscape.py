@@ -445,6 +445,185 @@ def propose_landscape_placements(
     return payload
 
 
+# ---------------------------------------------------------------------------
+# リリース前の確認（Release Review。正本 docs/features/release_review_flow_design.md）
+# ---------------------------------------------------------------------------
+
+
+class AcceptPlacementsRequest(BaseModel):
+    """一括確認 body。v1 は入力パラメータを持たない（空 body / body なしを許す）。"""
+
+
+#: RR3: 「次へ」経由の確認を個別レビューと区別するための事実文（review_note に残す）。
+RELEASE_ACCEPT_NOTE = "リリース前の確認画面で一括確認"
+#: RR3: 監査の action。個別レビュー（"review"）と混ぜない。
+RELEASE_ACCEPT_ACTION = "accept_on_release"
+
+
+def _course_source_access(
+    course_id: str, current_user: dict
+) -> tuple[dict, list[str], set[str], int]:
+    """コースのソース論文の権限を1パスで解決する。
+
+    戻り値は ``(course_data, 閲覧できる document_id 列, edit できる id の集合,
+    除外件数)``。
+
+    RR7（リリースを止めない）: 権限の無い document は **403 にせず静かに除外**し、件数だけ
+    正直に返す（共同編集コースに自分の権限外の論文が混ざっていても確認・公開を止めない）。
+    コース自体が見えない場合だけ 404（LS6 の fail-closed）。document ごとの解決は
+    ``services.resolve_document_access`` 1回で view / edit / owner を得る（N+1 を作らない）。
+    """
+    course_data = services.get_accessible_course_data(current_user.get("id"), course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="コースが見つかりません")
+
+    is_system_admin = str(current_user.get("role") or "") == ROLE_SYSTEM_ADMIN
+    viewable: list[str] = []
+    editable: set[str] = set()
+    hidden = 0
+    for ref in services.list_course_source_document_ids(course_data):
+        access = services.resolve_document_access(current_user.get("id"), str(ref))
+        document_id = str(access.document_id or "")
+        if not access.found or not document_id:
+            hidden += 1
+            continue
+        if is_system_admin or access.can_view:
+            viewable.append(document_id)
+        else:
+            hidden += 1
+            continue
+        if is_system_admin or access.can_edit:
+            editable.add(document_id)
+    return course_data, viewable, editable, hidden
+
+
+@router.get("/courses/{course_id}/placements")
+def list_course_landscape_placements(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コースのソース論文の live 配置をまとめて返す（リリース前の確認 ステップ2）。
+
+    document 単位のグループに ``unplaced_domains``（LS10）を同梱し、未確認件数
+    （``pending_count``）を事実として返す。生 weight / confidence は
+    ``projection.admin_placement_dto`` が構造的に落とす（LS5 / RR6）。
+    """
+    course_data, document_ids, editable_ids, hidden = _course_source_access(
+        course_id, current_user
+    )
+
+    session = _session()
+    try:
+        rows = landscape_store.list_for_documents(
+            session, document_ids, statuses=landscape_schema.LIVE_STATUSES
+        )
+        titles = _document_titles(session, document_ids)
+        names = _domain_names(session)
+        unplaced_by_document = {
+            document_id: _unplaced_from_artifacts(document_id, names)
+            for document_id in document_ids
+        }
+        domain_keys = {str(r.get("domain_key") or "") for r in rows}
+        for entries in unplaced_by_document.values():
+            domain_keys.update(str(u.get("domain_key") or "") for u in entries)
+        skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+    finally:
+        session.close()
+
+    node_index = projection.skeleton_node_index(skeletons)
+    by_document: dict[str, list[dict]] = {}
+    pending = 0
+    for row in rows:
+        document_id = str(row.get("document_id") or "")
+        by_document.setdefault(document_id, []).append(
+            projection.admin_placement_dto(row, node_index, domain_names=names)
+        )
+        if str(row.get("status") or "") == landscape_schema.STATUS_INFERRED:
+            pending += 1
+
+    documents = [
+        {
+            "document_id": document_id,
+            "title": titles.get(document_id, ""),
+            "placements": by_document.get(document_id, []),
+            "unplaced_domains": unplaced_by_document.get(document_id, []),
+            "editable": document_id in editable_ids,
+        }
+        for document_id in document_ids
+    ]
+
+    return {
+        "course_id": course_id,
+        "course_title": str((course_data or {}).get("title") or ""),
+        "cartridge_id": course_cartridge_id(course_data) or "",
+        "documents": documents,
+        "domains": _domain_facts(skeletons, names),
+        "placement_count": len(rows),
+        "pending_count": pending,
+        "source_document_count": len(document_ids) + hidden,
+        "hidden_document_count": hidden,
+        "editable": bool(editable_ids),
+    }
+
+
+@router.post("/courses/{course_id}/placements/accept")
+def accept_course_landscape_placements(
+    course_id: str,
+    body: AcceptPlacementsRequest | None = None,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """未確認（``inferred``）の配置を一括で ``confirmed`` にする（「次へ」= 承認。RR2）。
+
+    - 対象は **edit 権限のある** ソース論文のみ。権限外は静かに除外して件数で返す（RR7）。
+    - 教員が個別に却下・再検討した行は動かさない（``store`` 側で ``inferred`` 限定。RR4）。
+    - 監査は1件ごとに ``theory_review_events``（``action='accept_on_release'``）で、
+      個別レビューと区別できる形で残す（RR3）。
+    """
+    del body  # v1 はパラメータなし（将来の拡張のために受け口だけ残す）
+    _, viewable, editable_ids, hidden = _course_source_access(course_id, current_user)
+    # edit できないソース論文は確認の対象外（除外件数として正直に返す — RR7）。
+    skipped_documents = hidden + len([d for d in viewable if d not in editable_ids])
+    reviewer_id = str(current_user.get("id") or "").strip()
+
+    session = _session()
+    try:
+        updated = landscape_store.accept_inferred_for_documents(
+            session,
+            sorted(editable_ids),
+            reviewer_id=reviewer_id,
+            note=RELEASE_ACCEPT_NOTE,
+        )
+        session.commit()
+    except ValueError as exc:
+        session.rollback()
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    for row in updated:
+        services.record_review_event(
+            AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
+            str(row.get("id") or ""),
+            landscape_schema.STATUS_INFERRED,
+            landscape_schema.STATUS_CONFIRMED,
+            current_user.get("id"),
+            {
+                "action": RELEASE_ACCEPT_ACTION,
+                "course_id": course_id,
+                "document_id": str(row.get("document_id") or ""),
+            },
+        )
+
+    return {
+        "course_id": course_id,
+        "confirmed": len(updated),
+        "skipped_documents": skipped_documents,
+    }
+
+
 @router.get("/overview")
 def get_landscape_overview(
     domain_key: str = Query("", description="集約する分野の domain_key（凍結済みのみ）"),
