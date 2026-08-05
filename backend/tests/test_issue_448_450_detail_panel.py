@@ -205,13 +205,17 @@ const fs = require("fs");
 const src = fs.readFileSync(process.argv[2], "utf8");
 function extract(marker){const s=src.indexOf(marker);const e=src.indexOf("\n  }\n",s)+5;return src.slice(s,e);}
 function extractVar(marker){const s=src.indexOf(marker);const e=src.indexOf("\n  };\n",s)+6;return src.slice(s,e);}
+function extractArrayVar(marker){const s=src.indexOf(marker);const e=src.indexOf("];",s)+2;return src.slice(s,e);}
 function escHtml(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 function lsGraphNodeId(n){return n&&(n.component_id||n.id||n.node_id);}
 function lsGraphSemanticLabel(n){return n?(n.visual_label||n.label||lsGraphNodeId(n)||""):"";}
 function lsRenderKatex(e){return '<span class="katex">'+escHtml(e)+'</span>';}
+function lsGraphActiveDocumentId(){return "doc-1";}
 var lsState={claimsByChunk:{}};
 eval(extractVar("var LS_GRAPH_ROLE_LABELS = {"));
 eval(extractVar("var LS_GRAPH_REF_ELEMENT_TYPES = {"));
+eval(extractArrayVar("var LS_GRAPH_DELIBERABLE_ELEMENT_TYPES = ["));
+eval(extractArrayVar("var LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES = ["));
 eval(extract("function lsGraphNodeGroup(node)"));
 eval(extract("function lsGraphRoleLabel(node)"));
 eval(extract("function lsGraphBuildResolver(graph)"));
@@ -288,6 +292,7 @@ function extractFn(name){
   throw new Error("unbalanced " + name);
 }
 function extractVar(marker){const s=src.indexOf(marker);const e=src.indexOf("\n  };\n",s)+6;return src.slice(s,e);}
+function extractArrayVar(marker){const s=src.indexOf(marker);const e=src.indexOf("];",s)+2;return src.slice(s,e);}
 // 実物の統一パーツカード + 語彙正本を読み込む（描き方の二重実装が無いことの担保）。
 global.window = {};
 eval(fs.readFileSync(process.argv[3], "utf8")); // element-vocab.js
@@ -299,6 +304,7 @@ function lsGraphSemanticLabel(n){return n?(n.visual_label||n.label||lsGraphNodeI
 function lsElementTypeLabel(t){return window.ElementVocab.elementTypeLabel(t);}
 function lsGraphNavigateToNode(){return false;}
 function lsGraphCenterOnItem(){}
+function lsGraphActiveDocumentId(){return "doc-1";}
 var lsState={claimsByChunk:{}};
 var lsGraphSelectedNodeId="";
 var LS_GRAPH_CARD_HOST_ID="ls-graph-detail-card";
@@ -307,6 +313,8 @@ function fakeEl(){return {innerHTML:"",classList:{contains:function(){return fal
 var detailEl=fakeEl(), hostEl=fakeEl();
 global.document={getElementById:function(id){return id===LS_GRAPH_CARD_HOST_ID?hostEl:detailEl;}};
 eval(extractVar("var LS_GRAPH_REF_ELEMENT_TYPES = {"));
+eval(extractArrayVar("var LS_GRAPH_DELIBERABLE_ELEMENT_TYPES = ["));
+eval(extractArrayVar("var LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES = ["));
 var names=["lsGraphEdgeLabel","lsGraphSourceBackingLabel","lsGraphReviewReasonLabel",
   "lsGraphBuildResolver","lsGraphSnippet","lsGraphResolveRef","lsGraphUniqueIds",
   "lsGraphRefItem","lsGraphPushRefItems","lsGraphUnresolvedNote","lsGraphEdgeToCardDto",
@@ -325,7 +333,8 @@ out.pIsCard=h1.indexOf('class="element-card')>=0;
 out.pHeaderNote=h1.indexOf("選択中の関係")>=0;
 out.pTitle=h1.indexOf("導出")>=0;
 out.pBody=h1.indexOf("From locality.")>=0;
-out.pLanes=(h1.match(/element-card-lane-/g)||[]).length===2;
+// レーン本体の数（見出し要素 element-card-lane-title を数えないよう容器で数える）。
+out.pLanes=(h1.match(/element-card-lane element-card-lane-/g)||[]).length===2;
 out.pNav=(h1.match(/data-element-card-item=/g)||[]).length>=2;
 out.pVocab=h1.indexOf("数式")>=0&&h1.indexOf("主張")>=0&&h1.indexOf("根拠箇所")>=0;
 out.pUnresolvedNote=h1.indexOf("ev_x")>=0;
@@ -339,7 +348,7 @@ const be={edge_id:"e2",source_component_id:"G",target_component_id:"R",relation:
 lsRenderGraphEdgeDetail(be,bg);
 const h2=hostEl.innerHTML;
 out.bIsCard=h2.indexOf('class="element-card')>=0;
-out.bLanes=(h2.match(/element-card-lane-/g)||[]).length===2;
+out.bLanes=(h2.match(/element-card-lane element-card-lane-/g)||[]).length===2;
 out.bNav=(h2.match(/data-element-card-item=/g)||[]).length===2;
 out.bEndpoints=h2.indexOf("Gene model")>=0&&h2.indexOf("Growth result")>=0;
 process.stdout.write(JSON.stringify(out));
