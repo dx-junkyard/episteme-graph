@@ -9,6 +9,29 @@ from episteme_graph.agents.llm_json_client import ProviderJSONLLMClient
 logger = logging.getLogger(__name__)
 
 
+def _resolve_vision_model(settings: Any) -> str:
+    """Resolve the model for the vision branch through the M層 policy source of truth.
+
+    The vision providers need a concrete model name (they are called directly,
+    not through ``core.llm.generate_text``), so ``None`` is not an option here.
+    Reading ``settings.llm_analysis_model`` directly would bypass the run
+    override / user policy / system policy layers, so delegate to
+    ``core.llm_policy.resolve_scene_model`` — its fallback for
+    ``pipeline:equation_semantics`` is the analysis tier, i.e. exactly the
+    previous ``settings.llm_analysis_model`` behaviour when no policy row and no
+    override exist.
+    """
+    try:
+        from core.llm_policy import SCENE_PIPELINE, resolve_scene_model
+
+        resolved = resolve_scene_model(f"{SCENE_PIPELINE}:equation_semantics").model
+        if resolved:
+            return resolved
+    except Exception:
+        logger.debug("equation vision: llm_policy unavailable", exc_info=True)
+    return settings.llm_analysis_model
+
+
 class EquationSemanticsLLMClient(ProviderJSONLLMClient):
     """Provider-aware JSON client with optional vision input."""
 
@@ -19,12 +42,14 @@ class EquationSemanticsLLMClient(ProviderJSONLLMClient):
         image: dict | None = None,
     ) -> dict:
         if not image:
+            # Text path: keep ``model`` unset so ``core.llm`` resolves it at its own
+            # entry point (M層 §3 の解決順②〜⑥ がそのまま効く)。
             return super().generate(messages, response_schema=response_schema)
         try:
             from core.config import get_settings
             settings = get_settings()
             provider = settings.llm_provider
-            model = self.model or settings.llm_analysis_model
+            model = self.model or _resolve_vision_model(settings)
         except Exception:
             logger.warning("Equation vision fallback: settings unavailable", exc_info=True)
             return self._text_fallback_with_vision_meta(

@@ -74,32 +74,26 @@
   };
   var LENS_ORDER = ["intra_document", "cross_corpus", "atlas", "endorsement", "epistemic"];
 
-  var ELEMENT_TYPE_LABELS = {
-    figure: "図",
-    theory_component: "コンポーネント",
-    theory_claim: "claim",
-    equation: "数式",
-    shared_part: "共通部品"
-  };
+  // 要素種別の表示名は element-vocab.js（window.ElementVocab）が正本。ここに独自辞書は
+  // 持たない（admin_ux_issues_2026-08-01.md §3.3 Phase 0。かつて theory_component=
+  // 「コンポーネント」/ theory_claim="claim" と他画面と食い違っていた）。
+  function elementTypeLabel(elementType) {
+    var vocab = window.ElementVocab;
+    if (vocab && vocab.elementTypeLabel) return vocab.elementTypeLabel(elementType);
+    return elementType == null ? "" : String(elementType);
+  }
 
   // ── 要素インベントリ（Element Inventory / 検出要素の一覧）─────────────────
   // 正本: docs/features/element_inventory_design.md §4/§6/§7/§9。
   // 教材単位の統合入口。種別チップ + キーワードのフィルタは全面クライアントサイド
   // （§6: 1回のフェッチで全件を取得し、キー入力ごとの再フェッチをしない）。
   var INVENTORY_TYPE_ORDER = ["all", "theory_component", "theory_claim", "equation", "figure"];
-  var INVENTORY_TYPE_CHIP_LABELS = {
-    all: "すべて",
-    theory_component: "論理要素",
-    theory_claim: "主張",
-    equation: "数式",
-    figure: "図・画像"
-  };
-  var INVENTORY_TYPE_BADGE_LABELS = {
-    theory_component: "論理要素",
-    theory_claim: "主張",
-    equation: "数式",
-    figure: "図"
-  };
+  // 種別の表示名は正本（element-vocab.js）へ委譲し、語彙外の "all"（フィルタの
+  // 「すべて」）だけをここで扱う。
+  function inventoryTypeLabel(type) {
+    if (type === "all") return "すべて";
+    return elementTypeLabel(type);
+  }
 
   // 面③ 候補注釈の kind → 日本語ラベル（設計書 §5 コミットルーティング表 / §6）。
   var ANNOTATION_KIND_LABELS = {
@@ -142,6 +136,39 @@
     novel: "新規",
     unknown: "未評価"
   };
+
+  // ── 要素型の性質（backend core/deliberation/schema.py の語彙に対応）──────────
+  // DOCUMENT_ID_REQUIRED: 独立テーブルを持たず artifact 内 ID で一意化する要素型。
+  //   API 呼び出しに document_id を必ず添える（無いと backend が 404 を返す）。
+  //   equation は従来から、evidence / derivation は設計書 §16 で追加。
+  var DOCUMENT_ID_REQUIRED_ELEMENT_TYPES = {
+    equation: true,
+    evidence: true,
+    derivation: true
+  };
+  // IDENTITY_LINKABLE: 共通部品（shared_part）との同一性リンク・標準化判定の対象。
+  //   evidence（原文の引用そのもの）と derivation（この論文の導出手順）は共通部品化の
+  //   単位ではないため対象外（§16。backend は 422 を返す）。
+  var IDENTITY_LINKABLE_ELEMENT_TYPES = {
+    figure: true,
+    theory_component: true,
+    theory_claim: true,
+    equation: true
+  };
+
+  function _needsDocumentId(elementType) {
+    return !!DOCUMENT_ID_REQUIRED_ELEMENT_TYPES[String(elementType || "")];
+  }
+
+  function _isIdentityLinkable(elementType) {
+    return !!IDENTITY_LINKABLE_ELEMENT_TYPES[String(elementType || "")];
+  }
+
+  function _documentIdQuery(ref) {
+    ref = ref || {};
+    if (!_needsDocumentId(ref.elementType) || !ref.documentId) return "";
+    return "?document_id=" + encodeURIComponent(ref.documentId);
+  }
 
   // 面③ 対話状態。モーダルを開くたび（_closeModal で）リセットする単一セッション分の状態
   // （1モーダル=1対話。複数セッションの並行管理は v1 では行わない）。
@@ -300,162 +327,172 @@
   // 正本: docs/features/element_context_lens_design.md §2.3/§3/§6 Phase 2/§8。
   // overview.context を、選択要素を中心に上位構造（Why）/ 選択要素（What）/
   // 下位構造（How）へ投影する。AI の解釈を原文事実に昇格させない（§2.2）:
-  // 関係が得られない場合は「上位構造との関係は未同定」と明示し、非表示にしない。
-  var CONTEXT_STATUS_LABELS = {
-    source_backed: "原文根拠",
-    candidate: "AI候補",
-    confirmed: "教員確認済み",
-    unidentified: "未同定"
-  };
+  // 関係が得られない場合もレーンを消さず、カード側の事実文（「まだ同定されていません」）
+  // と「未同定」バッジで明示する。
+  // 描画は統一パーツカード（element-card.js / window.ElementCard）へ委譲する
+  // （admin_ux_issues_2026-08-01.md §3.2 / §3.3 Phase 3。P2「パーツ1個の描き方は
+  // 出現箇所によらず同一」）。旧 .deliberation-context-lane / -item / -focus / -nav /
+  // -status 系の独自レーン HTML は撤去した — **ここに再実装しないこと。**
+  // カードが構造的に描かない情報は落とさず、カード直後の補足欄に残す:
+  //   - focus.provenance（内部参照の列。カードは §3.2 の表示契約により描かない）
+  //   - focus.generic.standardization_status（L層エントリの標準化判定ラベル）
+  //   - ITEM の evidence_refs（カード本体が editable 限定の折りたたみで描く）
+  var CONTEXT_LENS_ID = "deliberation-context-lens";
+  var CONTEXT_LANE_TITLES = { upper: "上位構造（Why）", lower: "下位構造（How）" };
+  // "unidentified" は ElementVocab.statusLabel が語彙に持たない（バッジ自体を出さない
+  // 判断に使うため）。W層は「未同定」を事実として明示する画面なので、明示ラベルを
+  // metaBadges の fallback として渡す（§2.2: 推測で穴埋めせず未同定と書く）。
+  var CONTEXT_STATUS_UNIDENTIFIED = "unidentified";
+  var CONTEXT_STATUS_UNIDENTIFIED_LABEL = "未同定";
+  // 語彙外・未知の状態は「未同定」へ寄せる（内部語彙をクラス名にも文字列にも漏らさない。
+  // 旧 _contextStatusBadgeHtml の modifier フォールバックと同じ挙動）。
+  var CONTEXT_KNOWN_STATUSES = { source_backed: true, candidate: true, confirmed: true };
+  // render と bind には同一の dto / opts を渡さなければならない（近傍チップは
+  // onCenter が設定されているときだけ描かれるため、食い違うと配線が消える）。
+  var contextLensRender = null;
 
-  function _contextStatusBadgeHtml(status) {
-    var known = !!CONTEXT_STATUS_LABELS[status];
-    var modifier = known ? status : "unidentified";
-    var label = known ? CONTEXT_STATUS_LABELS[status] : CONTEXT_STATUS_LABELS.unidentified;
-    return '<span class="deliberation-context-status deliberation-context-status--' +
-      escHtml(modifier) + '">' + escHtml(label) + '</span>';
-  }
-
-  function _contextLaneItemHtml(item) {
-    item = item || {};
-    var label = item.label || "";
-    var labelHtml;
-    if (item.navigable && item.element_id) {
-      labelHtml = '<button type="button" class="deliberation-context-nav" ' +
-        'data-context-element-type="' + escHtml(item.element_type) + '" ' +
-        'data-context-element-id="' + escHtml(item.element_id) + '" ' +
-        'data-context-document-id="' + escHtml(item.document_id || "") + '" ' +
-        'data-context-label="' + escHtml(label) + '">' +
-        escHtml(label) +
-      '</button>';
-    } else {
-      labelHtml = '<span class="deliberation-context-item-label">' + escHtml(label) + '</span>';
+  // 管理画面（admin.html）は KaTeX を CDN から読み込む（window.katex）。カード側に
+  // ゲート（looksLikeRenderableTex）があるので、ここは素の描画関数を渡すだけでよい
+  // — かつて renderMath 未注入だったため W層モーダルだけ生 TeX が出ていた
+  // （element_context_presentation_redesign.md RC8 / §6 S4）。
+  function _renderMath(expr, display) {
+    var text = String(expr == null ? "" : expr);
+    if (!text || !window.katex) return "";
+    try {
+      return '<span class="' + (display ? "lecture-formula-block visible" : "lecture-formula visible") + '">' +
+        window.katex.renderToString(text, {
+          displayMode: !!display,
+          throwOnError: false,
+          strict: "ignore",
+          trust: false
+        }) + '</span>';
+    } catch (e) {
+      return "";
     }
-    var refs = item.evidence_refs || [];
-    var evidenceHtml = refs.length
-      ? '<details class="deliberation-context-evidence"><summary>根拠</summary><ul>' +
-          refs.map(function (ref) { return '<li>' + escHtml(ref) + '</li>'; }).join("") +
-        '</ul></details>'
-      : "";
-    return '<div class="deliberation-context-item">' +
-      '<span class="deliberation-context-relation">' + escHtml(item.relation_label || "") + '</span> ' +
-      labelHtml + ' ' +
-      _contextStatusBadgeHtml(item.relation_status) +
-      evidenceHtml +
-    '</div>';
   }
 
-  // laneTitle で上位/下位を判別し、階層それぞれの空欄事実文を出し分ける
-  // （§2.2/§7: 関係が得られなくても非表示にせず「未同定」等の事実文で保持する）。
-  function _contextLaneHtml(items, laneTitle) {
-    items = items || [];
-    var isUpper = String(laneTitle || "").indexOf("上位") !== -1;
-    var emptyFact = isUpper ? "上位構造との関係は未同定" : "下位構造の情報はありません";
-    var rowsHtml = items.length
-      ? items.map(_contextLaneItemHtml).join("")
-      : '<p class="deliberation-context-fact">' + escHtml(emptyFact) + '</p>';
-    return '<div class="deliberation-context-lane ' +
-        (isUpper ? "deliberation-context-lane-upper" : "deliberation-context-lane-lower") + '">' +
-      '<div class="deliberation-context-lane-title">' + escHtml(laneTitle) + '</div>' +
-      rowsHtml +
-    '</div>';
-  }
-
-  // Phase 3（設計書 §6）: focus.generic — confirmed な同一性リンク先の L層エントリの
-  // 汎用説明（「一般に何か」）。文脈上の役割（「この論文で何の役割か」）とは別欄に保つ
-  // （§2.1 の固有情報・文脈依存情報の分離）。リンク無し・非active・読み取り失敗は
-  // null なので、その場合はこのセクション自体を出さない（fail-soft・煽らない）。
-  function _contextGenericHtml(generic) {
-    if (!generic) return "";
-    var statusLabel = STANDARDIZATION_STATUS_LABELS[generic.standardization_status] ||
-      generic.standardization_status || "";
-    return '<div class="deliberation-context-focus-section deliberation-context-generic">' +
-      '<div class="deliberation-context-focus-label">汎用説明（共通部品）</div>' +
-      '<div class="deliberation-context-focus-value">' +
-        escHtml(generic.name || "") +
-        (generic.summary ? '：' + escHtml(generic.summary) : "") +
-      '</div>' +
-      (statusLabel
-        ? '<span class="deliberation-context-generic-status">' + escHtml(statusLabel) + '</span>'
-        : "") +
-    '</div>';
-  }
-
-  // 中央カード（§3.1）: 要素自体 / この文脈での役割 / 根拠・状態を別欄で並べる。
-  // contextual_role が無い、または status が unidentified のときは「未同定」を出す
-  // だけで、役割を推測で埋めない。
-  function _contextFocusHtml(focus) {
+  function _contextLensOpts(focus) {
     focus = focus || {};
-    var status = focus.contextual_role_status || "unidentified";
-    var roleText = (focus.contextual_role && status !== "unidentified") ? focus.contextual_role : "未同定";
+    var card = window.ElementCard;
+    // 既知の状態だけをバッジにする（ラベルは正本 ElementVocab.statusLabel が引く）。
+    // 未同定はバッジではなく補足欄の事実文で明示する（_contextSupplementHtml）。
+    var status = focus.contextual_role_status || CONTEXT_STATUS_UNIDENTIFIED;
+    var metaBadges = CONTEXT_KNOWN_STATUSES[status] ? [{ status: status }] : [];
+    return {
+      variant: card ? card.VARIANT_EDITABLE : "editable",
+      escapeHtml: escHtml,
+      renderMath: _renderMath,
+      className: "deliberation-context-card",
+      laneTitles: CONTEXT_LANE_TITLES,
+      metaBadges: metaBadges,
+      // 隣接 ITEM を選ぶと、その要素を新しい中心に再配置する（設計書 §2.3。
+      // モーダルは破棄せずパンくずに積む）。
+      onCenter: function (item) {
+        item = item || {};
+        _navigateToElement(
+          item.element_type,
+          item.element_id || item.id,
+          item.document_id || null,
+          item.label
+        );
+      }
+    };
+  }
+
+  // カード直後の補足欄（カードが描かない事実だけを持つ。既存 CSS を流用する）。
+  // 役割が未同定のときカードは role 行を描かない（推測で埋めない設計）ので、
+  // 「この文脈での役割 = 未同定」という事実文はここで明示して落とさない（§2.2）。
+  function _contextSupplementHtml(focus) {
+    focus = focus || {};
+    var status = focus.contextual_role_status || CONTEXT_STATUS_UNIDENTIFIED;
+    var roleUnidentified = !focus.contextual_role || !CONTEXT_KNOWN_STATUSES[status];
+    var generic = focus.generic;
+    var stdLabel = generic
+      ? (STANDARDIZATION_STATUS_LABELS[generic.standardization_status] ||
+         generic.standardization_status || "")
+      : "";
     var provenance = focus.provenance || [];
-    var provenanceHtml = provenance.length
-      ? '<ul class="deliberation-context-provenance">' +
-          provenance.map(function (p) { return '<li>' + escHtml(p) + '</li>'; }).join("") +
-        '</ul>'
-      : '<p class="deliberation-context-fact">出典情報はありません</p>';
     return '<div class="deliberation-context-focus">' +
+      (roleUnidentified
+        ? '<div class="deliberation-context-focus-section">' +
+            '<div class="deliberation-context-focus-label">この文脈での役割</div>' +
+            '<p class="deliberation-context-fact">' +
+              escHtml(CONTEXT_STATUS_UNIDENTIFIED_LABEL) + '</p>' +
+          '</div>'
+        : "") +
+      (stdLabel
+        ? '<div class="deliberation-context-focus-section">' +
+            '<div class="deliberation-context-focus-label">共通部品の標準化判定</div>' +
+            '<span class="deliberation-context-generic-status">' + escHtml(stdLabel) + '</span>' +
+          '</div>'
+        : "") +
       '<div class="deliberation-context-focus-section">' +
-        '<div class="deliberation-context-focus-label">要素自体</div>' +
-        '<div class="deliberation-context-focus-value">' + escHtml(focus.intrinsic_summary || "") + '</div>' +
-      '</div>' +
-      _contextGenericHtml(focus.generic) +
-      '<div class="deliberation-context-focus-section">' +
-        '<div class="deliberation-context-focus-label">この文脈での役割</div>' +
-        '<div class="deliberation-context-focus-value">' + escHtml(roleText) + '</div>' +
-      '</div>' +
-      '<div class="deliberation-context-focus-section">' +
-        '<div class="deliberation-context-focus-label">根拠・状態</div>' +
-        _contextStatusBadgeHtml(status) +
-        provenanceHtml +
+        '<div class="deliberation-context-focus-label">出典・内部参照</div>' +
+        (provenance.length
+          ? '<ul class="deliberation-context-provenance">' +
+              provenance.map(function (p) { return '<li>' + escHtml(p) + '</li>'; }).join("") +
+            '</ul>'
+          : '<p class="deliberation-context-fact">出典情報はありません</p>') +
       '</div>' +
     '</div>';
   }
 
-  // 上位構造（Why）→ 中心カード（What）→ 下位構造（How）→ notes の順で描画する
-  // （設計書 §3 共通UI）。context が無い run（旧run・fail-closed）は空文字で
-  // 縮退し、呼び出し側は従来の内訳・位置づけ表示にフォールバックする。
+  function _contextLensShellHtml(inner, extraClass) {
+    return '<div id="' + CONTEXT_LENS_ID + '" class="deliberation-context-lens' +
+        (extraClass ? " " + extraClass : "") + '" data-ui-anchor="deliberation.context-lens">' +
+      inner +
+    '</div>';
+  }
+
+  // 中心カード（focus + 上位/下位レーン + notes）+ 補足欄の順で描画する。
+  // context が無い run（旧run・fail-closed）は空文字で縮退し、呼び出し側は従来の
+  // 内訳・位置づけ表示にフォールバックする。
   function _contextLensHtml(context) {
+    contextLensRender = null;
     if (!context) return "";
     if (!context.available) {
       if (!context.note) return "";
-      return '<div id="deliberation-context-lens" class="deliberation-context-lens deliberation-context-lens-unavailable" data-ui-anchor="deliberation.context-lens">' +
-        '<p class="deliberation-context-fact">' + escHtml(context.note) + '</p>' +
-      '</div>';
+      return _contextLensShellHtml(
+        '<p class="deliberation-context-fact">' + escHtml(context.note) + '</p>',
+        "deliberation-context-lens-unavailable");
     }
-    var upperHtml = _contextLaneHtml(context.upper, "上位構造（Why）");
-    var lowerHtml = _contextLaneHtml(context.lower, "下位構造（How）");
-    var focusHtml = _contextFocusHtml(context.focus);
-    var notes = context.notes || [];
-    var notesHtml = notes.length
-      ? '<div class="deliberation-context-notes">' +
-          notes.map(function (n) { return '<p class="deliberation-context-fact">・' + escHtml(n) + '</p>'; }).join("") +
-        '</div>'
-      : "";
-    return '<div id="deliberation-context-lens" class="deliberation-context-lens" data-ui-anchor="deliberation.context-lens">' +
-      upperHtml +
-      focusHtml +
-      lowerHtml +
-      notesHtml +
-    '</div>';
+    var focus = context.focus || {};
+    var card = window.ElementCard;
+    if (!card || !card.render) {
+      // 部品未読み込みは事実文へ縮退する（独自レーン HTML の二重実装は持たない）。
+      return _contextLensShellHtml(
+        '<p class="deliberation-context-fact">' +
+          escHtml(focus.intrinsic_summary || "この要素の文脈情報を表示できませんでした") +
+        '</p>' + _contextSupplementHtml(focus),
+        "deliberation-context-lens-unavailable");
+    }
+    var dto = {
+      focus: focus,
+      upper: context.upper || [],
+      lower: context.lower || [],
+      notes: context.notes || [],
+      // 導出ストーリー（DTO v2）。focus 配下で来る場合はカード側が拾う。
+      derivations: context.derivations || []
+    };
+    var opts = _contextLensOpts(focus);
+    contextLensRender = { dto: dto, opts: opts };
+    return _contextLensShellHtml(card.render(dto, opts) + _contextSupplementHtml(focus));
   }
 
-  // .deliberation-context-nav（上位/下位レーンの隣接ノード）クリックで中心移動する。
-  // 再描画のたびに呼ばれるため data-context-nav-bound で二重バインドを防ぐ
+  // ITEM の evidence_refs はカード本体（element-card.js の itemRefsHtml、editable のみ）が
+  // 折りたたみで描く。かつてここにあった mount 後の DOM 後付け
+  // （_augmentContextEvidenceRefs）は撤去済み — 再実装しないこと。
+
+  // カードの近傍チップ（上位/下位レーン）クリックで中心移動する配線。再描画のたびに
+  // 呼ばれるため data-context-nav-bound で二重バインドを防ぐ
   // （_bindFigureContextActions と同型の idempotent bind パターン）。
   function _bindContextNavigation() {
-    Array.prototype.forEach.call(document.querySelectorAll(".deliberation-context-nav"), function (btn) {
-      if (btn.getAttribute("data-context-nav-bound") === "true") return;
-      btn.setAttribute("data-context-nav-bound", "true");
-      btn.addEventListener("click", function () {
-        _navigateToElement(
-          btn.getAttribute("data-context-element-type"),
-          btn.getAttribute("data-context-element-id"),
-          btn.getAttribute("data-context-document-id") || null,
-          btn.getAttribute("data-context-label")
-        );
-      });
-    });
+    var container = document.getElementById(CONTEXT_LENS_ID);
+    var card = window.ElementCard;
+    if (!container || !card || !card.bind || !contextLensRender) return;
+    if (container.getAttribute("data-context-nav-bound") === "true") return;
+    container.setAttribute("data-context-nav-bound", "true");
+    card.bind(container, contextLensRender.dto, contextLensRender.opts);
   }
 
   // ── 図・画像の読み解き UI（Issue #496）─────────────────────────────
@@ -1319,7 +1356,7 @@
     var body = document.getElementById("deliberation-modal-body");
     if (!body) return;
     var decomposition = data.decomposition || {};
-    var typeLabel = ELEMENT_TYPE_LABELS[decomposition.element_type] || decomposition.element_type || "";
+    var typeLabel = elementTypeLabel(decomposition.element_type);
     var isFigure = decomposition.element_type === "figure";
     // 要素中心コンテキストビュー（Issue #498）: context が利用可能なら論文内レンズ
     // （intra_document）は上位/下位構造投影に再構成されるため二重表示しない
@@ -1700,6 +1737,12 @@
   // source は常にインスタンス側）。作成されるのは常に候補（candidate）で、
   // 確定は既存の確定/却下ボタンが担う（KN-3）。
   function _identityLinksSectionHtml(elementType) {
+    // §16: evidence / derivation は共通部品化の単位ではないためセクションごと出さない
+    // （backend も identity-links 系を 422 で拒否する）。shared_part 自身はリンク先
+    // なのでセクションは出すが作成導線は出さない（従来どおり）。
+    if (elementType && elementType !== "shared_part" && !_isIdentityLinkable(elementType)) {
+      return "";
+    }
     var createHtml = "";
     if (elementType && elementType !== "shared_part") {
       createHtml =
@@ -1769,7 +1812,7 @@
     var path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" +
       encodeURIComponent(ref.elementId) + "/shared-part-candidates";
     var params = [];
-    if (ref.elementType === "equation" && ref.documentId) {
+    if (_needsDocumentId(ref.elementType) && ref.documentId) {
       params.push("document_id=" + encodeURIComponent(ref.documentId));
     }
     if (q) params.push("q=" + encodeURIComponent(q));
@@ -1951,10 +1994,8 @@
     if (ref.elementType === "shared_part") {
       path = "/admin/deliberation/shared-parts/" + encodeURIComponent(ref.elementId) + "/identity-links";
     } else {
-      path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" + encodeURIComponent(ref.elementId) + "/identity-links";
-      if (ref.elementType === "equation" && ref.documentId) {
-        path += "?document_id=" + encodeURIComponent(ref.documentId);
-      }
+      path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" +
+        encodeURIComponent(ref.elementId) + "/identity-links" + _documentIdQuery(ref);
     }
     apiFetch(path)
       .then(_parseJsonResponse)
@@ -2380,10 +2421,9 @@
 
   // モーダル再オープン時に既存注釈（candidate/committed/dismissed すべて）を復元する（W4）。
   function _loadAnnotations(elementType, elementId, documentId) {
-    var path = "/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" + encodeURIComponent(elementId) + "/annotations";
-    if (elementType === "equation" && documentId) {
-      path += "?document_id=" + encodeURIComponent(documentId);
-    }
+    var path = "/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" +
+      encodeURIComponent(elementId) + "/annotations" +
+      _documentIdQuery({ elementType: elementType, documentId: documentId });
     apiFetch(path)
       .then(_parseJsonResponse)
       .then(function (data) {
@@ -2396,12 +2436,8 @@
 
   function _overviewPath(ref) {
     ref = ref || {};
-    var path = "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" +
-      encodeURIComponent(ref.elementId) + "/overview";
-    if (ref.elementType === "equation" && ref.documentId) {
-      path += "?document_id=" + encodeURIComponent(ref.documentId);
-    }
-    return path;
+    return "/admin/deliberation/elements/" + encodeURIComponent(ref.elementType) + "/" +
+      encodeURIComponent(ref.elementId) + "/overview" + _documentIdQuery(ref);
   }
 
   function _reloadOverview() {
@@ -2510,7 +2546,7 @@
       return;
     }
     var crumbsHtml = trail.map(function (entry, index) {
-      var label = entry.title || ELEMENT_TYPE_LABELS[entry.elementType] || entry.elementType || "";
+      var label = entry.title || elementTypeLabel(entry.elementType);
       if (index === trail.length - 1) {
         return '<span class="deliberation-breadcrumb-current">' + escHtml(label) + '</span>';
       }
@@ -2534,11 +2570,12 @@
 
   // ── 公開 API: openElement ────────────────────────────────────────────
   // opts = { documentId: string|null, title: string|null }
-  // equation は document_id が必須（無ければ何もしない。設計書 §2 の equation 一意化の要件）。
+  // equation / evidence / derivation は document_id が必須（無ければ何もしない。
+  // 設計書 §2 の equation 一意化の要件 + §16 で evidence / derivation にも適用）。
   function openElement(elementType, elementId, opts) {
     opts = opts || {};
     if (!deps.apiFetch && !window.apiFetch) return;
-    if (elementType === "equation" && !opts.documentId) return;
+    if (_needsDocumentId(elementType) && !opts.documentId) return;
 
     _closeModal();
     chatState.ref = {
@@ -2690,7 +2727,7 @@
         return el.label || elementId;
       }
     }
-    var typeLabel = INVENTORY_TYPE_BADGE_LABELS[elementType] || ELEMENT_TYPE_LABELS[elementType] || elementType || "";
+    var typeLabel = elementTypeLabel(elementType);
     return (typeLabel ? typeLabel + " " : "") + String(elementId || "").substring(0, 8);
   }
 
@@ -3229,7 +3266,7 @@
     return '<article class="deliberation-annotation-card">' +
       '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' +
         '<span class="admin-status" style="background:var(--color-background-info);color:var(--color-text-info)">' +
-          escHtml(INVENTORY_TYPE_BADGE_LABELS[el.element_type] || el.element_type || "") +
+          escHtml(elementTypeLabel(el.element_type)) +
         '</span>' +
         _inventoryStatusBadgeHtml(el.deliberation) +
       '</div>' +
@@ -3308,7 +3345,7 @@
         'border:1px solid ' + (active ? "var(--color-text-info)" : "var(--color-border-secondary,#d2d2d7)") + ';' +
         'background:' + (active ? "var(--color-background-info,#eef6ff)" : "none") + ';' +
         'color:' + (active ? "var(--color-text-info)" : "var(--color-text-secondary)") + '">' +
-        escHtml(INVENTORY_TYPE_CHIP_LABELS[key]) + '（' + count + '）</button>';
+        escHtml(inventoryTypeLabel(key)) + '（' + count + '）</button>';
     }).join("");
 
     toolbar.innerHTML = chipsHtml +
@@ -3343,7 +3380,7 @@
     if (truncatedNote) {
       truncatedNote.textContent = truncatedTypes.length
         ? truncatedTypes.map(function (t) {
-            return (INVENTORY_TYPE_CHIP_LABELS[t] || t) + "は500件で省略されています";
+            return inventoryTypeLabel(t) + "は500件で省略されています";
           }).join(" / ")
         : "";
     }

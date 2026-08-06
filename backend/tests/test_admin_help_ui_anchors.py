@@ -69,11 +69,26 @@ class TestAdminUiAnchorsModule:
         assert set(admin_anchors_mod.ADMIN_UI_ANCHORS.keys()) <= admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS
 
     def test_all_anchors_currently_mapped(self):
-        # 2026-07-31 時点で全229アンカーがマップ済み（223 + discuss 開幕素材オーサリング
+        # 2026-08-01 時点で全240アンカーがマップ済み（223 + discuss 開幕素材オーサリング
         # の4件: 議論テーマのボタン/保存・説明レビューキューの開幕素材グループ/本文編集
         # + 原稿スタジオ 根拠リンクカードの開閉トグル lecture-studio.evidence-context
-        # + 根拠リンクの構造アウトライン lecture-studio.evidence-group）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 229
+        # + 根拠リンクの構造アウトライン lecture-studio.evidence-group
+        # + 教材図スタジオ（teaching_figure_studio_design.md）の11件:
+        #   lecture-studio.insert-figure / .figure-suggestions{,-generate} /
+        #   .stumble-tab-figures / .figure-studio-{modal,send,adopt}
+        #   + 生成図のライフサイクル UI（§7.1b / §7.4）の4件:
+        #     .figure-studio-{insert,caption,retire,restore}）
+        # + 教材行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）の1件:
+        #   materials.row-more-menu。
+        # + 知識ランドスケープ（knowledge_landscape_design.md §10.3）の3件:
+        #   materials.row-landscape（⋯メニューの「位置づけ（分野マップ）…」）/
+        #   materials.landscape-modal（配置レビューモーダル）/
+        #   materials.landscape-propose（AIで再提案）。
+        # + リリース前の確認（release_review_flow_design.md §3.3）の4件:
+        #   course-management.release-review-btn（コース管理の「確認して公開」）/
+        #   release-review.modal（ウィザード本体）/ release-review.next（各ステップの
+        #   主ボタン＝確認の記録）/ release-review.publish（公開する）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 248
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

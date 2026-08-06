@@ -3,7 +3,8 @@
 `ElementRef` は全要素型を1つの多態参照で扱うための抽象。要素には2つの **スコープ** がある:
 
 - ``scope='document'`` : ある1論文から抽出された具体的な出現（インスタンス）。
-  ``element_type ∈ {figure, theory_component, theory_claim, equation}``、anchor = ``document_id``。
+  ``element_type ∈ {figure, theory_component, theory_claim, equation, evidence, derivation}``、
+  anchor = ``document_id``（evidence / derivation は設計書 §16 で追加）。
 - ``scope='domain'``   : 複数論文にまたがって再利用したい抽象（共通部品）。1論文に紐づけない。
   ``element_type ∈ {shared_part}``、anchor = ``domain_key``。共通部品の実体は L層 ``library_entries``。
 
@@ -26,15 +27,44 @@ ELEMENT_THEORY_COMPONENT = "theory_component"
 ELEMENT_THEORY_CLAIM = "theory_claim"
 ELEMENT_EQUATION = "equation"
 ELEMENT_SHARED_PART = "shared_part"
+# 設計書 §16（evidence / derivation の第一級要素化）。equation と同じく独立テーブルを
+# 持たず、run の ``stage_outputs`` （evidence_registry / derivation_chain artifact）で
+# 存在確認する document-scoped 要素。
+ELEMENT_EVIDENCE = "evidence"
+ELEMENT_DERIVATION = "derivation"
 
 DOCUMENT_ELEMENT_TYPES = (
     ELEMENT_FIGURE,
     ELEMENT_THEORY_COMPONENT,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
+    ELEMENT_DERIVATION,
 )
 DOMAIN_ELEMENT_TYPES = (ELEMENT_SHARED_PART,)
 ELEMENT_TYPES = DOCUMENT_ELEMENT_TYPES + DOMAIN_ELEMENT_TYPES
+
+# ``document_id`` をクエリ/引数で渡さないと解決できない要素型（独立テーブルを持たず
+# artifact 内 ID で一意化するもの）。equation の既存要件（設計書 §2）と同じ扱いを
+# evidence / derivation にも適用する（§16）。
+DOCUMENT_ID_REQUIRED_ELEMENT_TYPES = (
+    ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
+    ELEMENT_DERIVATION,
+)
+
+# ── 共通部品化（同一性リンク / 標準化判定）の対象要素型（設計書 §5.5 / §16）─────────
+# instance ↔ shared_part の同一性リンクは「共通部品として再利用しうる出現」のみが
+# source になる。evidence（原文の引用そのもの）と derivation（この論文の導出手順）は
+# v1 では対象外 — 共通化の単位ではないため（§16 の「できないこと」）。
+# migration 048 の ``element_identity_links.instance_element_type`` CHECK と同じ集合で
+# なければならない（DB とコードの二重管理を避けるためここがコード側の正本）。
+IDENTITY_LINKABLE_ELEMENT_TYPES = (
+    ELEMENT_FIGURE,
+    ELEMENT_THEORY_COMPONENT,
+    ELEMENT_THEORY_CLAIM,
+    ELEMENT_EQUATION,
+)
 
 # ── 同一性リンク状態語彙（Phase W-β。知識ネットワークビジョン §4 KN-3 / W層設計 §5.5）───────
 # instance（scope='document'）↔ shared_part（library_entries）の同一性リンクは常に
@@ -149,10 +179,11 @@ class ElementRef:
     - ``scope='document'`` のとき ``document_id`` が非空・``domain_key`` は None。
     - ``scope='domain'``   のとき ``domain_key`` が非空・``document_id`` は None。
 
-    ``element_id`` の実体は要素型ごとに異なる（設計書 §2 の表）:
+    ``element_id`` の実体は要素型ごとに異なる（設計書 §2 / §16 の表）:
     figure=document_figures.id / theory_component=theory_components.id(UUID) /
     theory_claim=theory_claims.id(UUID) / equation=equations.json の equation_id /
-    shared_part=library_entries.id。
+    evidence=evidence_registry の evidence_id / derivation=derivation_chain の
+    derivation_id / shared_part=library_entries.id。
     """
 
     scope: str

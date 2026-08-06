@@ -185,6 +185,90 @@ class TestDiscussSystemPrompt:
         assert "共同検討" in body
         assert "突き合わせ" in body
 
+    # -- 2026-07-31 レビュー指摘 F3/F4/F5/F7 への対応（設計書 §5・§9） ------------
+
+    def test_prompt_resolves_mixed_utterance_priority(self):
+        """F3: 質問と解釈が同居する発話では、まず質問に即答してから言い直しに入る。"""
+        body = self._prompt_body()
+        assert "混在" in body
+        assert "ルール1を優先" in body
+        assert "質問を保留にして言い直しから始めることはしないでください" in body
+
+    def test_prompt_says_confirmation_question_satisfies_closing_requirement(self):
+        """F4: 言い直しターンでは確認の問い自体が末尾必須要素を満たす（問いを重ねない）。"""
+        body = self._prompt_body()
+        assert "確認の問い自体" in body
+        assert "重ねないでください" in body
+
+    def test_prompt_requires_complete_answer_for_questions(self):
+        """F5: 即答は要約・小出しでなく「完全な形で」提供する（DM4 の原意の復活）。"""
+        body = self._prompt_body()
+        assert "完全な形で" in body
+        assert "要約や小出しにせず" in body
+
+    def test_prompt_completes_the_repair_phase(self):
+        """F7: ギャップの地図は「選ばれたズレだけを説明 → 学習者の言い直しで確かめる」まで。"""
+        body = self._prompt_body()
+        assert "選ばれたズレだけを的を絞って説明" in body
+        assert "学生自身の言い直しで確かめて" in body
+
+    def test_prompt_keeps_all_da6_contract_phrases(self):
+        """DA6: 既存テスト契約の必須フレーズ11件を1つのアサーションでまとめて固定する
+        （個別テストが将来削られても契約が崩れないようにする）。"""
+        body = self._prompt_body()
+        for phrase in (
+            "すぐに答えて", "出し惜しみ", "雑談調にはしないでください", "LaTeX", "出典",
+            "必ず", "確率的な付加は不可", "言い換え", "why / how",
+            "この論文に書かれている内容ではなく", "数値スコア",
+        ):
+            assert phrase in body, f"DA6 契約フレーズが欠落: {phrase}"
+
+
+class TestDiscussScaffoldMessages:
+    """レビュー指摘 F1（設計書 §5-1）: RAG コンテキストを載せる足場メッセージが
+    discuss で「以下の質問に答えてください」/「お答えします」の Q&A フレームを
+    強制しないこと（system プロンプトの revoice ファーストを打ち消さないこと）。
+    casual・通常モードの足場は従来どおり。
+    """
+
+    _BRANCH_START = "if _is_discuss:\n        _scaffold_user_instruction = ("
+    _BRANCH_END = "messages: list[dict] = ["
+
+    def _scaffold_branch(self) -> str:
+        """足場の if/else 分岐（messages 構築の直前まで）を切り出す。"""
+        source = _read(LEARNING)
+        assert self._BRANCH_START in source
+        return source.split(self._BRANCH_START)[1].split(self._BRANCH_END)[0]
+
+    def test_scaffold_branches_on_discuss(self):
+        branch = self._scaffold_branch()
+        assert "_scaffold_assistant_ack" in branch
+        assert "else:" in branch
+
+    def test_discuss_scaffold_is_not_a_qa_frame(self):
+        discuss_part = self._scaffold_branch().split("else:")[0]
+        assert "以下の質問に答えてください" not in discuss_part
+        assert "お答えします" not in discuss_part
+        assert "発話タイプ別の応答ルールに従って" in discuss_part
+        assert "以下の学生の発話に応じてください" in discuss_part
+        assert "質問 / 解釈・立場の表明 / 詰まり" in discuss_part
+
+    def test_non_discuss_scaffold_is_unchanged(self):
+        else_part = self._scaffold_branch().split("else:")[1]
+        assert "以下の質問に答えてください" in else_part
+        assert "はい、「{topic_title}」についてですね。お答えします。" in else_part
+
+    def test_messages_use_the_scaffold_variables(self):
+        source = _read(LEARNING)
+        block = source.split(self._BRANCH_END)[1][:700]
+        assert 'f"{_scaffold_user_instruction}"' in block
+        assert '"content": _scaffold_assistant_ack' in block
+
+    def test_history_window_unchanged(self):
+        """設計 §8-② の保留どおり、履歴ウィンドウ（20 messages / 2000 chars）は変えない。"""
+        source = _read(LEARNING)
+        assert "window_history(body.history, max_messages=20, max_chars=2000)" in source
+
 
 class TestDiscussSelectedBeforeCasualForPrompt:
     def test_system_prompt_selection_checks_discuss_first(self):

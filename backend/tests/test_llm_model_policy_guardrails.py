@@ -369,3 +369,206 @@ class TestNoModelFieldInLearnerFacingResponses:
 
         assert "model" not in LearningCourseDetail.model_fields
         assert "llm_models" not in LearningCourseDetail.model_fields
+
+
+# ===========================================================================
+# 10. 呼び出し側が policy を素通ししない（レビュー指摘 J3 / J4 / J6 / m2）
+#
+# 「未指定のときに tier のモデル名を **明示引数** で渡す」と解決順①
+# （call_argument）に化け、ユーザー別/システム既定が一切効かなくなる（M1 違反）。
+# 静的検査 + 振る舞いの両方で固定する。ポリシー行が無い環境では従来と同じモデルに
+# 解決されること（Phase 0 の挙動不変, §11-6）も同時に確認する。
+# ===========================================================================
+
+_CORE_LECTURE_SRC = (BACKEND / "core" / "lecture.py").read_text(encoding="utf-8")
+_SCRIPTS_SRC = (BACKEND / "api" / "routes" / "lecture_studio" / "scripts.py").read_text(encoding="utf-8")
+_ATLAS_GENERATOR_SRC = (BACKEND / "core" / "atlas_generator.py").read_text(encoding="utf-8")
+_FIGURE_REANALYSIS_SRC = (BACKEND / "core" / "figure_reanalysis.py").read_text(encoding="utf-8")
+
+
+class _StaticSystemBackend:
+    """全 scene / feature に同じ system ポリシー行を返すバックエンド。"""
+
+    def __init__(self, model: str):
+        self._row = llm_policy.PolicyRow(model=model, scope="system")
+
+    def lookup(self, scene_key, feature, user_id):
+        return None if user_id else self._row
+
+
+class TestCallSitesDoNotBypassPolicy:
+    def test_core_lecture_does_not_pass_tier_model_as_explicit_argument(self):
+        assert 'model or params["model"]' not in _CORE_LECTURE_SRC, (
+            "core/lecture.py は未指定時に tier のモデル名を明示引数で渡さないこと（J3）"
+        )
+        assert "llm_policy.resolve_scene_model(" in _CORE_LECTURE_SRC
+
+    def test_lecture_studio_rewrite_does_not_pass_tier_model_as_explicit_argument(self):
+        assert 'requested_model or params["model"]' not in _SCRIPTS_SRC, (
+            "lecture_studio/scripts.py は未指定時に tier のモデル名を明示引数で渡さないこと（J3）"
+        )
+
+    def test_atlas_generator_does_not_read_analysis_model_directly(self):
+        assert "settings.llm_analysis_model" not in _ATLAS_GENERATOR_SRC, (
+            "core/atlas_generator.py は env / tier を直読みせず policy に解決させること（J4）"
+        )
+        assert "resolve_scene_model(" in _ATLAS_GENERATOR_SRC
+
+    def test_figure_reanalysis_does_not_read_apparatus_env_for_the_model(self):
+        assert "model_name=settings.apparatus_llm_model" not in _FIGURE_REANALYSIS_SRC, (
+            "core/figure_reanalysis.py は env 素読みではなく解決結果を記録すること（J6）"
+        )
+        assert "resolve_scene_model(" in _FIGURE_REANALYSIS_SRC
+
+    def test_figure_reanalysis_records_the_resolved_model(self, monkeypatch):
+        """policy 行があるときは監査記録のモデル名も解決結果になる（M7 / J6）。"""
+        import core.figure_reanalysis as figure_reanalysis
+
+        llm_policy.set_policy_backend(_StaticSystemBackend("gpt-4o"))
+        # gpt-4o は同梱カタログで vision 対応なので policy 行が採用される。
+        resolved = llm_policy.resolve_scene_model("deliberation:figure_reanalysis")
+        assert resolved.model == "gpt-4o"
+        assert resolved.source == llm_policy.SOURCE_SYSTEM_POLICY
+        # モジュールが同じ feature 定数を使っていること（scene は pipeline.vision）
+        assert figure_reanalysis._FIGURE_REANALYSIS_FEATURE == "deliberation:figure_reanalysis"  # noqa: SLF001
+        assert (
+            llm_policy.scene_for_feature(figure_reanalysis._FIGURE_REANALYSIS_FEATURE)  # noqa: SLF001
+            == llm_policy.SCENE_PIPELINE_VISION
+        )
+
+    def test_deliberation_dialogue_resolves_per_feature(self):
+        src = (BACKEND / "core" / "deliberation" / "dialogue.py").read_text(encoding="utf-8")
+        assert "resolve_turn_model(feature)" in src, (
+            "core/deliberation/dialogue.py は feature 単位で解決すること（m2: vision 継承）"
+        )
+
+
+class TestLectureScriptGenerationResolution:
+    def _run(self, monkeypatch, *, model=None):
+        import core.lecture as lecture_mod
+
+        captured: dict = {}
+
+        def _fake_generate_text(*, messages, model, reasoning_effort=None):
+            captured["model"] = model
+            captured["reasoning_effort"] = reasoning_effort
+            return '{"display_text": "d", "spoken_text": "s", "formulas": []}'
+
+        monkeypatch.setattr(lecture_mod, "generate_text", _fake_generate_text)
+        result = lecture_mod.generate_spoken_text_and_formulas("some source text", model=model)
+        assert result["spoken_text"] == "s"
+        return captured
+
+    def test_without_policy_rows_keeps_the_previous_fast_tier_model(self, monkeypatch):
+        expected = llm_policy.resolve_scene_model("admin:lecture_generate").model
+        settings = _real_get_settings()
+        assert expected == settings.llm_fast_model  # Phase 0 不変（従来は fast tier 固定）
+        captured = self._run(monkeypatch)
+        assert captured["model"] == expected
+
+    def test_system_policy_is_applied(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("policy-model-j3"))
+        captured = self._run(monkeypatch)
+        assert captured["model"] == "policy-model-j3"
+
+    def test_explicit_model_still_wins(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("policy-model-j3"))
+        captured = self._run(monkeypatch, model="teacher-chosen-model")
+        assert captured["model"] == "teacher-chosen-model"
+        assert captured["reasoning_effort"] is None
+
+
+class TestAtlasSkeletonGenerationResolution:
+    def _run(self, monkeypatch, *, model=None):
+        import core.atlas_generator as atlas_generator
+
+        captured: dict = {}
+
+        def _fake_structured(*, messages, response_format, model):
+            captured["model"] = model
+            return response_format(regions=[])
+
+        monkeypatch.setattr(
+            atlas_generator, "build_generation_prompt_from_meta", lambda **kwargs: "prompt"
+        )
+        import core.llm as llm_mod
+
+        monkeypatch.setattr(llm_mod, "generate_text_with_structured_output", _fake_structured)
+        monkeypatch.setattr(atlas_generator, "normalize_generated", lambda generated, **kwargs: generated)
+        atlas_generator.generate_skeleton_draft(
+            "modified_gravity", model=model, domain_meta={"name": "Modified gravity"}
+        )
+        return captured
+
+    def test_without_policy_rows_keeps_the_previous_analysis_tier_model(self, monkeypatch):
+        settings = _real_get_settings()
+        captured = self._run(monkeypatch)
+        # ATLAS_ASSIST_LLM_MODEL 未設定（既定）なら従来どおり analysis tier に解決される。
+        assert captured["model"] == (
+            settings.atlas_assist_llm_model or settings.llm_analysis_model
+        )
+
+    def test_system_policy_is_applied(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("policy-model-j4"))
+        captured = self._run(monkeypatch)
+        assert captured["model"] == "policy-model-j4"
+
+    def test_explicit_model_still_wins(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("policy-model-j4"))
+        captured = self._run(monkeypatch, model="teacher-chosen-model")
+        assert captured["model"] == "teacher-chosen-model"
+
+
+class TestDeliberationVisionInheritance:
+    """m2: scene ``deliberation`` の既定に非 vision モデルが入っていても、figure 要素の
+    対話（画像付き）が text モデルへ落ちない。"""
+
+    _CATALOG = {
+        "models": [
+            {"id": "vision-model", "provider": "openai", "capabilities": ["text", "vision"]},
+            {"id": "text-only-model", "provider": "openai", "capabilities": ["text"]},
+        ]
+    }
+
+    def _run(self, monkeypatch, *, images):
+        import core.deliberation.dialogue as dialogue
+        from core.deliberation.schema import ElementRef
+
+        captured: dict = {}
+
+        class _Parsed:
+            reply = "ok"
+            annotations: list = []
+
+        def _fake_turn(messages, output_model, *, images=None, model=None):
+            captured["model"] = model
+            return _Parsed()
+
+        monkeypatch.setattr(dialogue, "generate_conversation_turn", _fake_turn)
+        monkeypatch.setattr(llm_policy, "load_catalog", lambda: self._CATALOG)
+        ref = ElementRef(scope="document", element_type="figure", element_id="fig-1", document_id="doc-1")
+        dialogue.run_turn(
+            ref,
+            prior_messages=[],
+            user_content="hello",
+            grounding_text="grounding",
+            images=images,
+            user_id="teacher-1",
+        )
+        return captured
+
+    def test_vision_turn_skips_non_vision_scene_default(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("text-only-model"))
+        captured = self._run(monkeypatch, images=[b"\x89PNG"])
+        assert captured["model"] != "text-only-model"
+        assert captured["model"] == llm_policy.resolve_scene_model("deliberation:vision").model
+
+    def test_text_turn_uses_the_scene_default(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("text-only-model"))
+        captured = self._run(monkeypatch, images=None)
+        assert captured["model"] == "text-only-model"
+
+    def test_vision_capable_policy_is_used_for_vision_turn(self, monkeypatch):
+        llm_policy.set_policy_backend(_StaticSystemBackend("vision-model"))
+        captured = self._run(monkeypatch, images=[b"\x89PNG"])
+        assert captured["model"] == "vision-model"

@@ -14,8 +14,9 @@
   - 運用タブでのシステム既定変更は confirm を経由すること。
   - Phase 4（ステージ別指定, §6.1「▸ ステージ別に指定する（詳細）」・
     §6.6「▸ ステージ別の指定（N件）」）: 教材管理パネルの詳細折りたたみは既定で閉じており、
-    `GET /pipeline-stages` を叩き、vision ステージは vision カタログを使い、選択は
-    pipeline:<stage> キーとして run-only で models に乗る。運用タブのステージ別セクションは
+    `GET /pipeline-stages` を叩き、vision ステージはテーブルから除外され
+    （admin_ux_issues_2026-08-01.md §1.5 — vision の指定はパネル上部の専用 select 1本）、
+    選択は pipeline:<stage> キーとして run-only で models に乗る。運用タブのステージ別セクションは
     0件のとき非表示で、変更は confirm 経由の既存 doOpsSave/doOpsReset を再利用する。
 
 すべて静的解析（正規表現・部分文字列検索）。外部 API / 実 DOM は使わない。
@@ -498,10 +499,28 @@ class TestMaterialsStageDetailPanel:
         assert "取得できませんでした" in body
         assert ".catch(" in body
 
-    def test_vision_stage_uses_vision_catalog(self):
-        """vision:true の行は mtCatalog.vision（pipeline.vision の options）を使う。"""
-        body = _extract_function(self.js, "_renderMaterialsStagesBody")
-        assert "stage.vision ? mtCatalog.vision : mtCatalog.pipeline" in body
+    def test_vision_stage_excluded_from_table(self):
+        """vision:true のステージはテーブルに出さない（admin_ux_issues_2026-08-01.md §1.5）。
+
+        vision の指定はパネル上部の専用 select（scene `pipeline.vision`）に一本化した。
+        テーブルはテキスト系ステージの微調整専用なので、vision カタログの分岐も残らない。
+        """
+        filter_body = _extract_function(self.js, "_textStagesForTable")
+        assert "stage.vision" in filter_body
+        # 残留した run-only 上書きは描画時に取り除く（UI から消えた設定を送らない）。
+        assert "delete mtStagesOverrides[stage.feature]" in filter_body
+
+        render_body = _extract_function(self.js, "_renderMaterialsStagesBody")
+        assert "_textStagesForTable()" in render_body
+        assert "mtCatalog.vision" not in render_body
+        assert "stage.vision" not in render_body
+
+    def test_vision_stage_keys_not_sent_on_upload(self):
+        """getUploadModels は vision ステージの feature キーを送らない（防御）。"""
+        body = _extract_function(self.js, "getUploadModels")
+        assert "_isVisionStageFeature(feature)" in body
+        helper = _extract_function(self.js, "_isVisionStageFeature")
+        assert "stage.vision" in helper and "stage.feature === feature" in helper
 
     def test_inherit_option_is_default_and_shows_effective_model(self):
         body = _extract_function(self.js, "_renderMaterialsStagesBody")
@@ -614,3 +633,41 @@ class TestDisabledChangeButtonShowsReason:
         src = _read(LLM_MODELS_JS)
         render = _extract_function(src, "renderMaterialsSummaryError")
         assert "_setMaterialsSummaryNote" in render
+
+
+class TestReadOnlySceneRow:
+    """J5: 読み取り専用の場面（音声会話）は運用タブで表示のみにする。
+
+    サーバは ``read_only`` / ``read_only_reason`` を返し、PUT は 422 で拒否する。
+    フロントは「変更できません」＋理由の事実文を出し、[変更] / [既定に戻す] を出さない
+    （settable-but-inert な UI を作らない）。
+    """
+
+    def test_ops_table_respects_read_only_flag(self):
+        src = _read(LLM_MODELS_JS)
+        render = _extract_function(src, "renderOpsTable")
+        assert "scene.read_only" in render, "renderOpsTable は read_only を見て分岐すること"
+        assert "変更できません" in render
+        assert "read_only_reason" in render
+
+    def test_read_only_row_has_no_change_or_reset_button(self):
+        src = _read(LLM_MODELS_JS)
+        render = _extract_function(src, "renderOpsTable")
+        # read_only 分岐（actionsHtml の if 側）にボタンの生成が含まれないこと
+        read_only_branch = render.split("if (scene.read_only)", 1)[1].split("} else {", 1)[0]
+        assert "llm-models-ops-change-btn" not in read_only_branch
+        assert "llm-models-ops-reset-btn" not in read_only_branch
+
+    def test_change_row_shows_fact_sentence_for_read_only_scene(self):
+        src = _read(LLM_MODELS_JS)
+        change_row = _extract_function(src, "openOpsChangeRow")
+        assert "scene.read_only" in change_row, (
+            "openOpsChangeRow は read_only の場面で選択肢を描かないこと"
+        )
+
+    def test_no_tier_names_in_read_only_wording(self):
+        src = _read(LLM_MODELS_JS)
+        render = _extract_function(src, "renderOpsTable")
+        branch = render.split("if (scene.read_only)", 1)[1].split("} else {", 1)[0]
+        for tier in ("fast", "standard", "deep", "analysis"):
+            assert tier not in branch.lower()

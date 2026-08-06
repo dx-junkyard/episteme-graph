@@ -393,7 +393,74 @@ backend 全スイート + src スイート green。docker E2E（migration 062 �
   生成側の denylist・skipped・truncated）+ `test_discuss_opening_projection.py` +
   `test_discuss_opening_stage.py`。
 
-### 12.5 残課題
+### 12.5 レビュー修正（2026-08-01、backend の D-1 / D-3 / D-4 / D-6 / D-7）
+
+実装レビューで裏取りされた backend 側の5件。いずれも既存の不変条項（OA1〜OA8）と
+ステージ追加規約（`_stage_<name>` + `_PIPELINE_STEPS`）は不変。
+
+- **[D-1] 不透明 ID が「未検証前提の statement」として LLM・引用照合に入っていた**:
+  `collect_untested_assumptions` は D層 `doubt/open_assumptions.py::target_label` の
+  戻り値を statement にしていたが、`target_label` は ①`target_type='equation'` の分岐を
+  持たない ②claim / component / assumption の引き当て空振り時に `return target_id` する
+  ため、`eq_2_7` / UUID がそのまま素材化していた（`MIN_EVIDENCE_QUOTE_CHARS=6` を満たすので
+  LLM が引用にコピーすると verbatim 検査を通過し、承認されると学習者に「引用」として出る）。
+  **D層は非改変**（`target_label` の戻り値契約は他の読み手がいるため変えない）とし、
+  `core/discuss/authoring.py::is_opaque_statement`（statement == target_id / UUID 形 /
+  単一トークンの ID 形。CJK・複数語はテキスト扱いで誤検出させない）で**素材段階で落とす**。
+  落とした件数は `stats` 経由で stage payload の `assumption_rows_skipped_opaque` に
+  正直に残す（P4）。素材が opaque だけの document は LLM を1コールも消費せず
+  `skipped_reason='no_source_material'`。
+- **[D-3] artifact 不在なだけで approved 素材が stale 表示になっていた**:
+  `routes/element_explanations.py::_current_source_fingerprint` は例外のみ fail-open だったが、
+  `document_run_artifacts` は run 無し / `stage_outputs._artifacts` 無しで**例外を投げず `{}`**
+  を返し、`compute_source_fingerprint({})` は空入力の安定ハッシュを返すため保存指紋と必ず
+  不一致 → 「元の解析結果が変わっています」の誤表示（①完了 run が無い ②candidate 挿入後に
+  後続ステージが落ち completed run が前のものを指す、の両シナリオ）。指紋の素材の有無を
+  判定する述語 `authoring.has_fingerprint_source(artifacts)` を core 側に置き（`compute_source_fingerprint`
+  と同じ3つを見るのが不変条件＝両者は同時に直す）、素材が無ければ鮮度判定そのものを
+  スキップする（stale キーを付けない = 「鮮度不明」と「新鮮」を同じ形で返さない）。
+  実変化の stale 検出・approved を自動で落とさない挙動（§7.1）は不変。
+- **[D-4] 初回解析では D層台帳が構造的に空で、主素材が使えなかった**:
+  `epistemic_ledger` を書くのは ①パイプライン**完了後**の `backfill_document_ledger`
+  （`_stage_completed`）②教員の D層 API のみ。`_stage_discuss_opening` は course_mapping /
+  persist の**前**に走るため、初回解析では `collect_untested_assumptions` が必ず0件を返し、
+  式の無い論文（author_choices も空）は `skipped_reason='no_source_material'` が恒久化して
+  再解析を1回回すまで seed が出なかった。
+  **採った方式 = 「artifact フォールバック」（`_stage_discuss_opening` 前の backfill 先行実行は
+  採らない）**。理由: `_PIPELINE_STEPS` の順序を確認したところ `persist_claims_components_graph`
+  は discuss_opening の**後**であり、backfill が読む `theory_claims` /
+  `theory_component_graphs` はこの時点でまだ永続化されていない（先行実行しても空のまま
+  = 効果ゼロ・D層に無意味な記帳を増やすだけ）。よって
+  `authoring.derive_untested_assumptions_from_artifacts(artifacts)` が in-run artifact
+  （`claim_object_builder`）から **backfill と同じ保守的マッピング**（`support_status='source_backed'`
+  かつ evidence 本文あり → `indirectly_supported` = 素材にしない / それ以外 → `unknown` =
+  素材にする）で未検証前提相当を導出する。**D層への記帳は行わない**（記帳の正本は完了後の
+  backfill のまま。`_stage_completed` の既存呼び出しも残す＝冪等）。台帳に行があるとき
+  （再解析）は従来どおり台帳が勝ち、出所は stage payload の
+  `assumption_source: "ledger" | "artifact_fallback"` に記録する。
+  claim 以外を写像しない理由: `equation` は台帳経路でも [D-1] で落ちる（式ラベルは命題ではない）/
+  `component`（graph node）は主語がシステム側で `fragile_points` の subject=system 区画が担う
+  （§0 欠陥1 の主語混同を避ける）/ `assumption_nodes` は初回解析時点で存在しない。
+  atomic claim を先に並べる（非 atomic も捨てない, P4）。
+- **[D-6] `fragile_points` の上限8で backbone(system) が全滅し得た**: assumption を先に積んで
+  末尾を切っていたため、assumption 9件 + backbone 1件で「まだ確認できていないところ」区画が
+  丸ごと空になった（OA7 違反）。`project_fragile_points` を kind 別の枠配分
+  （`_allocate_fragile_quota`: backbone に最大3、残りを assumption、余枠は他方へ融通・
+  assumption 優先）に変更。合計上限8と `truncated` の意味（候補が上限を超えて切られた）は不変。
+- **[D-7] repair 指示が validator の hard error と矛盾していた**: 「素材が足りなければ `seeds` を
+  空にし `skipped_reason` を」という指示は、素材がある状態では validator の
+  `empty_seeds_with_material`（hard error）に必ず落ちて LLM の1周を無駄にしていた。
+  指示を「素材は渡されているので空にしない — `evidence_quote` が素材と一致する seed を
+  最低1件」に改めた（素材そのものが無い document には `has_material()` の縮退で到達しない。
+  素材が opaque だけのケースも [D-1] で LLM に到達しない）。validator は緩めていない。
+
+回帰テスト: `test_discuss_opening_stage.py`（opaque 除外・LLM 非消費・fallback の各経路・
+台帳への非書き込み）/ `test_discuss_opening_projection.py`（kind 別枠・truncated・枠配分の
+決定論）/ `test_discuss_opening_authoring_guardrails.py`（`has_fingerprint_source`・run 無しで
+stale を付けない・D層非改変・repair 指示と validator の整合）/
+`src/tests/agents/discuss_opening/test_repair.py`。
+
+### 12.6 残課題
 
 - docker 実機 E2E（migration 062 適用・実 LLM での生成・レビュー→配信の一巡）。
 - §7.2 の V層 freeze 非カバー（既知の限界として維持）。

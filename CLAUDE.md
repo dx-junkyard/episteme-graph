@@ -546,6 +546,93 @@ C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣�
   `GET /api/learning/atlas/cues/state`）は Stage 2 ゲート判断の材料。
   **数値をユーザーに見せる API・UI は作らない**。
 
+### 知識ランドスケープ（Knowledge Landscape 配置層, migration 065, 2026-08-04）
+
+論文（document）を分野の地図（atlas 骨格）のアンカーへ**複数観点（perspective）で配置**する層。
+正本は `docs/features/knowledge_landscape_design.md`（不変条項 LS1〜LS10。地図は正解でなく投影 /
+AI配置は inferred 止まり・確定は教員 / evidence 必須・verbatim 検査 / **数値非表示（教員含む。
+weight・confidence は DB のみ、表示は段階ラベル）** / 配置不能は失敗でなく信号）。骨格＝座標系は
+atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変**で使い、本層は配置だけを持つ。
+
+- **DB**: `landscape_placements`（065。`documents(id)` FK CASCADE — 削除2経路とも documents 行
+  削除で自動掃除。一意制約は `status <> 'superseded'` の部分インデックス）。語彙・ラベルの正本は
+  `core/landscape/schema.py`（perspective 6語彙 = subject/question/method/theory/observation/
+  application、status = inferred/confirmed/rejected/review_required/superseded）。
+- **再解析セマンティクス（LS3）**: inferred のみ superseded → 新候補挿入。confirmed / rejected は
+  AI が上書き・再提案で復活させられない。**空 candidates は SQL 非発行**（0件配置の解析が生きた
+  inferred を消さない）。store に DELETE 文なし（P4）。
+- **生成**: パイプラインステージ `landscape_placement`（`LLM_STAGE_NAMES`、discuss_opening の直後）。
+  agent は `src/episteme_graph/agents/landscape_placement/`（discuss_opening 同型。node 実在・
+  evidence_quote verbatim・perspective 語彙を hard error 検査、**無理に配置せず**
+  `unplaced_domains` に理由付き申告）。実体は `core/landscape/builder.py::
+  build_and_store_placements` — **pipeline と教員の手動再提案が同一経路・同一 CostGate**。
+  モデル解決も builder 側（`pipeline:landscape_placement`、M層 run override 有効）。
+  skip 語彙: `no_frozen_skeleton` / `no_source_material` / `daily_call_limit_reached` /
+  `placement_limit_is_zero`（いずれも `llm_calls:0` か `skipped_by_limit` を伴う）。
+- **基準骨格のバンドルドメイン経路（新設）**: `backend/atlas_domains/<domain_key>/skeleton.yaml`
+  （+ `domain.json`）— カートリッジ一式なしの骨格専用ドメインを起動時に冪等シード
+  （`atlas_store` が cartridges と併せて走査。frozen + reviewed のみ受理・meta は既存行を
+  上書きしない）。**宇宙物理 `astrophysics`（10領域・49概念・19エッジ）を同梱**。
+  `atlas.py MAX_REGIONS` は 7→12（フロント `atlas-overlay.js LIMITS.l1Regions` も 12 に同期）。
+  backend/Dockerfile が `atlas_domains/` を COPY。
+- **API**（`routes/landscape.py`、main.py 直接登録）: admin =
+  `GET /api/admin/landscape/documents/{ref}/placements`（unplaced_domains・骨格版・last_run_at
+  同梱）/ `PATCH .../placements/{id}`（確認/却下/再検討。監査
+  `AUDIT_ENTITY_LANDSCAPE_PLACEMENT`）/ `POST .../placements/propose`（手動再提案。429=日次上限・
+  422=素材/骨格なし、detail は数値なしの事実文）/ `GET /api/admin/landscape/overview?domain_key=`。
+  学習者 = `GET /api/learning/courses/{id}/landscape`（受講ゲート + コース sources のみ。
+  表示 status は confirmed/inferred/review_required、**weight・confidence・claim_id 非漏洩**、
+  出所ラベル「AIによる推定（未確認）」「教員確認済み」必須）。DELETE ルートなし。
+- **UI**: 学習者 = atlas オーバーレイ「論文の位置」レイヤー（`landscape-layer.js`、
+  personal-map と同じ3フック型・fail-closed・`getData(courseId)` を app.js と共有）+
+  出典タブ「分野の中の位置づけ」セクション + コーパス事実行（LS8）。教員 = 教材管理⋯メニュー
+  「位置づけ（分野マップ）…」→ レビューモーダル（ドメイン別グループ・status チップ・
+  [確認][却下][再検討]・[AIで再提案]・unplaced 事実文）。アンカー3点セット登録済み
+  （`materials.row-landscape` / `landscape-modal` / `landscape-propose`、カウント 244）。
+- **env**: `LANDSCAPE_PLACEMENT_LLM_MODEL`（fast 既定）/ `LANDSCAPE_MAX_CALLS_PER_DAY`(20) /
+  `LANDSCAPE_MAX_PLACEMENTS_PER_DOCUMENT`(8)。
+- **ガードレール**: `test_landscape_guardrails.py`（core 非FastAPI・DELETE 不在・migration⇄schema
+  語彙一致・数値非漏洩・骨格 valid）+ `test_landscape_{store,stage,api,ui_static,admin_ui_static}.py`
+  + `src/tests/agents/landscape_placement/`。
+- **非スコープ（Phase 2〜4 は設計書 §12）**: 橋渡し概念の一級ノード化 / EmergentRegion・
+  コーパス別地図・MapSnapshot / 問い・方法・系譜ビュー / G層 `material.landscape_unreviewed` /
+  W層 positioning レンズへの合流 / 学習者の配置異議。
+
+### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
+
+「AI が作った地図をリリース前に提示し、教員が明示的に直さなければそのまま公開される」ための
+ウィザード層。正本は `docs/features/release_review_flow_design.md`（不変条項 RR1〜RR7:
+既定は提示されたものが出る / 「次へ」＝人間の1操作を承認とみなす / 一括承認の出所を偽らない /
+修正はいつでも / 情報を落とさない / 数値を見せない / **リリースを止めない**）。新テーブル・
+新ステージ・新 LLM 呼び出しは無く、既存 API（atlas-binding / landscape / visibility）を
+束ねるだけ。
+
+- **3ステップ**: ①学習マップの割り当て（既存 `atlasBindingRenderEditor` をそのまま埋め込み、
+  保存ボタンを `options.saveLabel` / `options.saveAnchor` で「この対応で次へ」に差し替える —
+  **分割・保存ペイロードをクライアントに再実装しない**）②論文の位置づけ（コースのソース論文の
+  live 配置をドメイン別に提示。各行に [却下][再検討]）③公開（`PUT .../visibility` public）。
+  各ステップに「あとで」があり、飛ばしても学習者側の表示は変わらない（RR1）。
+- **API**（`routes/landscape.py`）: `GET /api/admin/landscape/courses/{course_id}/placements`
+  （course-scoped の教員ビュー。`pending_count` / document 別 `editable` / `unplaced_domains` /
+  骨格版。生 weight・confidence は `projection` が落とす）/
+  `POST .../courses/{course_id}/placements/accept`（「次へ」の実体。**edit 権限のある
+  document の `inferred` のみ** `confirmed` へ。実体は
+  `core/landscape/store.py::accept_inferred_for_documents`）。DELETE ルートは無い。
+  権限の無いソース論文は 403 にせず静かに除外し件数だけ返す（RR7）。
+- **RR3 の記録**: 一括確認は `review_note="リリース前の確認画面で一括確認"` +
+  監査 `action="accept_on_release"`（個別レビューの `action="review"` と混ぜない）。
+  学習者向けラベルは個別確認と区別しない（内部事情を学習者に見せない）。
+- **入口2つ**: コースビルダーの登録直後（自動。ウィザード未ロード時は従来のインライン
+  atlas-binding パネルへ縮退）/ コース管理の所有行「確認して公開」。
+- **UI**: `frontend/public/js/admin-release-review.js`（ES5・`window.AdminReleaseReview`・
+  admin.js から DI 注入）。ポーリングしない。アンカー4点登録済み
+  （`course-management.release-review-btn` / `release-review.{modal,next,publish}`、カウント 248）。
+- **ガードレール**: `test_release_review.py`（accept が inferred 限定・空入力で SQL 非発行・
+  監査語彙・404 統一）+ `test_release_review_ui_static.py`（3ステップ・「次へ」の意味の明示・
+  既存 UI への委譲・数値非表示・fail-open で公開を止めない）。
+- **非スコープ**: 教材／コース一覧の行インジケータ / G層 `material.landscape_unreviewed` /
+  `GET /api/admin/landscape/overview` の UI 配線（API は実装済み・UI ゼロ）。
+
 ### D層（Doubt Layer, migration 029〜033）
 
 A層（構造化）・B層（学習）・C層（承認）に続く第四の層。「合意の強さ」と「検証の強さ」を
@@ -1322,6 +1409,68 @@ discuss 開幕画面の情報を「主語で分けて全部出す」層。正本
   `test_discuss_opening_authoring_guardrails.py` / `test_discuss_opening_stage.py` +
   `test_next_steps_guardrails.py`（全却下抑止）+ `test_element_explanation_review_ui_static.py`。
 
+### 教材図スタジオ（Teaching Figure Studio, migration 063, 2026-07-31）
+
+わかりづらい箇所に AI 対話で説明図（SVG）を生成し、既存の `![[figure:id]]` 記法で教材に
+埋め込む層。正本は `docs/features/teaching_figure_studio_design.md`（不変条項 FG1〜FG9、
+§13 に実装記録）。実装は `backend/core/teaching_figures/`（FastAPI 非 import）+
+`backend/api/routes/teaching_figures.py`（`/api/admin/...`、main.py 直接登録）+
+`frontend/public/js/admin-figure-studio.js`（ES5・`window.FigureStudio`、init は
+`LectureStudio.init()` から DI）。
+
+- **SVG-first（FG3）**: 生成図は SVG のみ（ラスター生成 API 不使用）。**保存の唯一の入口は
+  `core/teaching_figures/sanitizer.py`**（lxml 固定・`resolve_entities=False` 等 +
+  `<!DOCTYPE`/`<!ENTITY` 事前拒否 + 要素/属性許可リスト + 外部参照/script/foreignObject/
+  image/on* 拒否 = 422、viewBox 必須・width/height 正規化付与。stdlib xml.etree への
+  フォールバック禁止）。SVG 配信は学習者・教員とも `nosniff` + CSP sandbox ヘッダ必須。
+- **DB（migration 063）**: `course_teaching_figures`（`svg_source` が正本、MinIO
+  `figure-images` の `teaching/{course_id}/{id}.svg` は配信スナップショット。
+  `status ∈ {draft, adopted, retired}`・行削除 API なし・revisions JSONB に旧版 append）+
+  `teaching_figure_suggestions`（ギャップ候補。再生成は candidate のみ superseded）。
+  孤児掃除はコース物理削除の **5 経路**（`delete_course_data` / `_purge_course` /
+  `_purge_document` 内ループ / `delete_material` / `delete_course`）に同乗、
+  `StorageManager.remove_object`（新設）で MinIO も best-effort 削除。
+- **採用時の参照登録が要石（§7.1b）**: adopt で本文挿入と同時に `topic.linked_figure_ids` +
+  `topic.evidence_links`（トップレベルに figure_id/caption + `extra.teaching:true`）へ
+  サーバ側登録。これで ①AI 書き換え（本文丸ごと再生成）後も `_required_figure_items`
+  （evidence_links ∪ linked_figure_ids に拡張済み）の決定論復元が効く（rewrite 応答
+  `figures_restored`）②retired 時に学習者へ生 UUID が出ず「配信対象ではありません」カードに
+  落ちる ③配信ゲート条件3が本文 embed 消失後も成立する。
+- **解決・配信は既存資産へ相乗り（FG9）**: `_load_course_figures_by_id` に adopted 図を
+  **document 走査の早期 return より前に**マージ（`document_id: None` / `teaching: true`）。
+  学習者配信 `GET /api/learning/courses/{id}/figures/{fid}/image` は document_figures に
+  無ければ教材図を 4 条件（受講 / course_id 一致 / `_course_references_figure` / adopted）で
+  fail-closed 配信、media_type は行の content_type（抽出図は PNG 不変）。
+  `_course_references_figure` は `iter_all_topics` 化済み（章ネスト取りこぼしの既存バグ修正）。
+  studio プレビューは course-structure の `figures_index`（admin 経路 URL）で2段フォール
+  バック解決。
+- **権限**: 書き込み系（turn / 保存 / PATCH / 提案 generate・確定）= コース所有者 /
+  SYSTEM_ADMIN（`_shared.course_data_for_owner`。トピック保存の権限と同水準）。
+  読み取り系（一覧 / 画像 / 提案一覧）= editor 共有教員も可
+  （`_course_data_for_studio_editable`、`_shared.py` へ移設済み）。
+- **対話生成**: `generate_conversation_turn` + structured output（毎ターン完全 SVG、
+  差分パッチにしない）。sanitize 失敗は同一コール内 1 回修復 → 失敗時は前回版維持。
+  LLM 失敗は degraded 事実文 + 200。履歴はブラウザ内のみ（atlas-assist 前例）。
+  会話 grounding の図制約 = 「grounding に現れる関係のみ描く」+ data_plot は
+  実測値捏造禁止（プロンプト制約文はガードレールが grep）。
+- **ギャップ検出（candidate-only）**: 入力 = 本文 + stumble 4軸 / naive signals の
+  **k-匿名通過済みレンジ・段階ラベルのみ**（生値・個人行・逐語質問文を LLM に渡さない、
+  FG8。signals.py は個人行テーブルを直接 SELECT しない）。`anchor_excerpt` は verbatim
+  検査（捏造ガード）。提示は原稿スタジオ右ペイン第3トグル「図の提案」。
+- **M層/U層/コスト**: scene `figure_studio`・feature `admin:figure_studio` /
+  `admin:figure_suggest`・`FIGURE_STUDIO_MAX_CALLS_PER_DAY`(60) /
+  `FIGURE_SUGGEST_MAX_CALLS_PER_DAY`(20)・fast tier 既定（`FIGURE_STUDIO_LLM_MODEL`）。
+  監査 `AUDIT_ENTITY_TEACHING_FIGURE`。
+- **副作用の正直な提示**: トピック保存で音声キャッシュ全消去（既存挙動を変えない・
+  事前告知）/ 図 1 個 = 200 字換算でページ分割が動き得る（spoken 縮退の警告）。
+- **ガードレール**: `test_teaching_figures_guardrails.py` +
+  `test_teaching_figures_{sanitizer,store,api}.py` + `test_figure_studio_ui_static.py`。
+  管理UI 3点セット（マニュアル節 `docs/manual/teacher/14-admin-lecture-studio.md` +
+  ADMIN_UI_ANCHORS 7件 + data-ui-anchor + `_ADMIN_FRONTEND_SOURCES` 登録）実施済み。
+- **非スコープ（v1）**: ラスター生成 / 学習者起点の図リクエスト / 版ピン学習者への図スナップ
+  ショット / data_plot への実データ接続 / mermaid 等の図 DSL / 図の読み上げ /
+  figure_presentation・W層モード分類の対象化。
+
 ### 学習チャットのメッセージ書き直し・削除（機能3, B層）
 
 学習チャットで、学習者が自分の入力メッセージを **書き直し（✏️）／以降削除（🗑）** できる。
@@ -1542,7 +1691,12 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
 - **ElementRef と2スコープ**: `(scope, element_type, element_id, anchor)`。
   `scope='document'`（1論文からの出現: figure=document_figures.id /
   theory_component・theory_claim=DB UUID / equation=equations.json の equation_id —
-  テーブル無しのため `stage_outputs` を索く）と `scope='domain'`（共通部品
+  テーブル無しのため `stage_outputs` を索く。**Phase 5（2026-08-01, migration 064）で
+  `evidence`（evidence_registry）と `derivation`（derivation_chain）も同方式で解決対象化** —
+  document_id 必須。中心移動・文脈レンズ focus・内訳・対話・候補注釈は可、
+  位置づけ4レンズ・注釈 commit・共通部品化（identity/standardization）は v1 不可＝422、
+  学習者投影（`core/element_context.py`）では navigable を強制 false。正本は
+  `element_deliberation_workspace_design.md` §16）と `scope='domain'`（共通部品
   `shared_part` = **L層 `library_entries.id`**。W層は共通部品テーブルを新設しない）。
 - **3つの面**: ①内訳・同定（`decomposition.py`、A層成果の読み出しのみ。figure は #496 の
   presentation 分類を同梱）②文脈的位置づけ（`positioning.py` の4レンズ = 論文内 /

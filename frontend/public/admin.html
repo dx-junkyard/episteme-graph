@@ -460,7 +460,8 @@
               <div id="ls-more-menu" class="ls-menu" hidden>
                 <button id="ls-settings-btn" data-ui-anchor="lecture-studio.settings-btn" class="ls-menu-item" type="button" disabled><span>設定</span></button>
                 <button id="ls-course-content-btn" data-ui-anchor="lecture-studio.course-content-btn" class="ls-menu-item" type="button" disabled><span>コース内容生成</span></button>
-                <button id="ls-audio-all-btn" data-ui-anchor="lecture-studio.audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成</span></button>
+                <!-- 「…」は押すとダイアログ（#ls-audio-lang-modal）が開き即実行ではないことを示す -->
+                <button id="ls-audio-all-btn" data-ui-anchor="lecture-studio.audio-all-btn" class="ls-menu-item" type="button" disabled><span class="ls-step-mark"></span><span>音声生成…</span></button>
                 <!-- 音声準備確認フロー (Issue #491) §3-2: 音声生成が無効なとき、理由と次の操作を近傍に示す -->
                 <div id="ls-audio-readiness-note" class="ls-audio-readiness-note" hidden>
                   <span id="ls-audio-readiness-reason" class="ls-audio-readiness-reason"></span>
@@ -501,7 +502,9 @@
             </div>
             <div class="ls-toolbar-spacer"></div>
             <button id="ls-right-pane-toggle" data-ui-anchor="lecture-studio.right-pane-toggle" class="admin-action-btn ls-toolbar-btn" type="button" disabled>右ペインを隠す</button>
-            <button id="ls-ai-assistant-btn" data-ui-anchor="lecture-studio.ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI アシスタント</button>
+            <!-- 右下の操作アシスタント（Admin Copilot）とは別機能。こちらは編集対象の
+                 原稿を AI で書き換えるモーダル（#ls-assistant-modal）を開く。 -->
+            <button id="ls-ai-assistant-btn" data-ui-anchor="lecture-studio.ai-assistant-btn" class="admin-action-btn ls-toolbar-btn" type="button" disabled>AI で書き換え</button>
             <button id="ls-save-btn" data-ui-anchor="lecture-studio.save-btn" class="admin-action-btn ls-toolbar-btn ls-save-toolbar-btn" type="button" disabled>原稿を保存</button>
           </div>
           <div class="ls-work-meta-row">
@@ -564,6 +567,8 @@
                     <div class="ls-mini-tabs" id="ls-stumble-tabs" hidden>
                       <button class="ls-mini-tab active" data-ls-rightmode="evidence" data-ui-anchor="lecture-studio.stumble-tab-evidence">根拠リンク</button>
                       <button class="ls-mini-tab" data-ls-rightmode="stumble" data-ui-anchor="lecture-studio.stumble-tab-stumble">つまづき</button>
+                      <!-- 教材図スタジオ（teaching_figure_studio_design.md §5.3）: 図の提案 -->
+                      <button class="ls-mini-tab" data-ls-rightmode="figures" data-ui-anchor="lecture-studio.stumble-tab-figures">図の提案</button>
                     </div>
                   </div>
                   <!-- レクチャースライド同期 (migration 040 Phase 3): 表示/読み上げテキストの
@@ -636,7 +641,7 @@
         <div id="ls-assistant-modal" class="ls-assistant-modal" hidden data-ui-anchor="lecture-studio.assistant-modal">
           <div class="ls-assistant-dialog">
             <div class="ls-assistant-head">
-              <h3>AI アシスタント</h3>
+              <h3>AI で書き換え</h3>
               <button id="ls-assistant-close" class="lecture-chat-close" type="button">&times;</button>
             </div>
             <div class="ls-assistant-body">
@@ -933,6 +938,13 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <!-- 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。
+       これを参照する全スクリプト（admin-lecture-studio.js / deliberation.js / admin.js）より前。 -->
+  <script src="/js/element-vocab.js?v=element-vocab-20260801-2"></script>
+  <!-- 統一パーツカード（admin_ux_issues_2026-08-01.md §3.2 / Phase 1）。element-vocab.js
+       へ委譲するので後、これを使う全スクリプト（deliberation.js / admin-lecture-studio.js /
+       admin.js）より前。カード自身は fetch も data-ui-anchor 直書きもしない。 -->
+  <script src="/js/element-card.js?v=element-card-20260801-1"></script>
   <!-- D層（Doubt Layer）管理 UI — 「分野の地図」(atlas-*) とは別機能 -->
   <script src="/js/doubt-atlas.js?v=gap-fixes-20260716-1"></script>
   <!-- Field Atlas 骨格エディタ改善: ビジュアルプレビュー + AIアシスト編集 -->
@@ -947,8 +959,11 @@
   <script src="/js/admin-next-steps.js?v=copilot-fab-20260716-1"></script>
   <!-- V層（共有物のバージョン管理 + 更新通知 + 削除猶予, migration 037）-->
   <script src="/js/versioning.js?v=copilot-fab-20260716-1"></script>
+  <!-- 教材図スタジオ（Teaching Figure Studio）— 図の生成・調整・挿入モーダル。
+       原稿スタジオ（admin-lecture-studio.js）の init() から init される。 -->
+  <script src="/js/admin-figure-studio.js?v=teaching-figure-studio-20260731-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
-  <script src="/js/admin-lecture-studio.js?v=figure-course-flow-20260719-1"></script>
+  <script src="/js/admin-lecture-studio.js?v=teaching-figure-studio-20260731-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
   <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
   <!-- U層（LLM トークン使用量推計, migration 043）管理 UI — SYSTEM_ADMIN メトリクス + TEACHER 事前見積り -->
@@ -959,6 +974,9 @@
   <script src="/js/admin-discuss-observation.js?v=discuss-observation-20260725-1"></script>
   <!-- M層（LLM モデル選択, migration 061）— 教材管理の解析モデル選択 + 運用タブ「AIモデル」 -->
   <script src="/js/admin-llm-models.js?v=llm-model-select-20260728-3"></script>
+  <!-- リリース前の確認（release_review_flow_design.md）— AI が作った地図を提示し
+       「次へ」で承認、そのまま公開まで進めるウィザード。admin.js から init/open される。 -->
+  <script src="/js/admin-release-review.js?v=release-review-20260805-1"></script>
   <script src="/js/admin.js?v=llm-model-select-20260728-1"></script>
 </body>
 </html>

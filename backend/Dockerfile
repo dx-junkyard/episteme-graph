@@ -9,6 +9,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY backend/core/ /app/core/
 COPY backend/db/ /app/db/
 COPY backend/cartridges/ /app/cartridges/
+# 骨格専用バンドルドメイン（分野の地図のシード。knowledge_landscape_design.md §6.1）。
+# core/atlas_store.py::ATLAS_BUNDLED_DOMAINS_DIR が /app/atlas_domains を見るため、
+# ここを COPY しないと宇宙物理の基準地図が本番イメージに入らない。
+COPY backend/atlas_domains/ /app/atlas_domains/
 COPY backend/config/ /app/config/
 COPY backend/api/ /app/
 COPY src/ /app/src/

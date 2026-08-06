@@ -13,6 +13,7 @@ import time
 
 from sqlalchemy import text as sa_text
 
+from core import llm_policy
 from core.course_data import (
     course_chapters,
     course_source_material_ids,
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # spoken_text / formulas 生成
 # ---------------------------------------------------------------------------
+
+# M層（設計書 §2 scene "lecture_studio"）: 原稿生成の feature。ここで固定するのは、
+# 呼び出し側の usage_context に依存せず**常に同じ場面として解決する**ため
+# （学習側 routes/lecture.py の呼び出しは usage_context を張らないので、
+# generate_text の入口解決に委ねると unattributed 扱いになってしまう）。
+_SCRIPT_GENERATION_FEATURE = "admin:lecture_generate"
 
 _SPOKEN_TEXT_PROMPT = """あなたは大学院レベルの学習を支援する教育者AIです。
 
@@ -201,9 +208,16 @@ def generate_spoken_text_and_formulas(
     model : str | None
         M層 Phase 3（この実行だけのモデル上書き, scene "lecture_studio"）。呼び出し側
         （``routes/lecture_studio/scripts.py``）が :func:`core.llm_policy.validate_model_for_scene`
-        で検証済みの値のみを渡す前提。``None`` は従来どおり fast tier 固定
-        （挙動不変。バックグラウンドスレッド実行のため contextvar の
-        ``model_override`` ではなく明示引数で伝搬する）。
+        で検証済みの値のみを渡す前提。**``None`` のときは M層の正本
+        （:func:`core.llm_policy.resolve_scene_model`）で解決する** — ユーザー別/システム
+        既定 → env → fast tier の順（レビュー指摘 J3。以前は
+        ``get_llm_params("fast")["model"]`` を明示引数で渡していたため解決順①
+        （呼び出し時指定）に化けて policy が一切効かなかった）。ポリシー行も env も
+        無い環境では従来と同じ fast tier に解決される（設計書 §11-6 の挙動不変）。
+        （バックグラウンドスレッド実行のため contextvar の ``model_override`` ではなく
+        明示引数で伝搬する。``generate_text(model=None)`` に委ねないのは、学習側
+        （``routes/lecture.py``）からの呼び出しが usage_context を張らず
+        ``unattributed`` になり、tier が analysis に化けてしまうため。）
     """
     if not chunk_text or not chunk_text.strip():
         return {"display_text": "", "spoken_text": "", "formulas": []}
@@ -234,8 +248,16 @@ def generate_spoken_text_and_formulas(
         language_instruction=_language_instruction(language),
     )
 
-    effective_model = model or params["model"]
-    effective_effort = None if model else params["reasoning_effort"]
+    if model:
+        effective_model = model
+        effective_effort = None
+    else:
+        resolved = llm_policy.resolve_scene_model(_SCRIPT_GENERATION_FEATURE)
+        effective_model = resolved.model
+        effective_effort = (
+            llm_policy.effort_for_call(resolved, requested_effort=None)
+            or params["reasoning_effort"]
+        )
 
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_LLM_ATTEMPTS + 1):

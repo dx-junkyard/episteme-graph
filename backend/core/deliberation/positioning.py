@@ -33,6 +33,7 @@ from sqlalchemy import text as sa_text
 
 from core import atlas as atlas_module
 from core import embedder as embedder_module
+from core.deliberation import labels as labels_mod
 from core.atlas_store import load_learner_skeleton
 from core.llm_usage import usage_context
 from core.postgres import get_session
@@ -641,7 +642,9 @@ def _equation_symbol_descriptions(artifacts: dict[str, Any], equation_id: str) -
         used = [str(x) for x in (rec.get("used_in_equation_ids") or [])]
         if equation_id not in defining and equation_id not in used:
             continue
-        symbol = str(rec.get("canonical_symbol") or "").strip()
+        # 照合キー（canonical_symbol）を表示に流用しない — 波括弧除去済みの
+        # キーは TeX マクロ名を壊す（labels.symbol_display_text が正本）。
+        symbol = labels_mod.symbol_display_text(rec)
         if not symbol:
             continue
         evidences = [

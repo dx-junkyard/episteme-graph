@@ -442,6 +442,9 @@ def _material_document_pipeline_worker(
             filename=document["filename"],
             source_kind=source_kind,
             course_id=None,
+            # M層 §3 解決順③ / U層帰属: この再実行を起こした教員を渡す
+            # （ユーザー別のモデル既定を pipeline 実行にも効かせる）。
+            user_id=user_id,
             progress_callback=on_stage,
             target_stage=target_stage,
             start_stage=start_stage,
@@ -543,6 +546,8 @@ def _course_document_pipeline_worker(
                 filename=doc["filename"],
                 source_kind=source_kind,
                 course_id=course_id,
+                # M層 §3 解決順③ / U層帰属: この再実行を起こした教員を渡す。
+                user_id=user_id,
                 progress_callback=on_stage,
                 target_stage=target_stage,
                 start_stage=start_stage,

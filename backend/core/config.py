@@ -299,6 +299,35 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DELIBERATION_IDENTITY_CANDIDATES_TOP_K"),
     )
 
+    # --- 教材図スタジオ（Teaching Figure Studio, migration 063） — コスト制御・上限 ---
+    # 正本: docs/features/teaching_figure_studio_design.md §4.3
+    # 空文字なら fast tier（llm_fast_model）に委譲。図の対話生成とギャップ提案で共有する
+    # （同一設定キーの共有は atlas / deliberation に前例あり）
+    figure_studio_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("FIGURE_STUDIO_LLM_MODEL"),
+    )
+    # 図の対話生成（1教員1日あたり。1図あたり数ターンの往復を想定）
+    figure_studio_max_calls_per_day: int = Field(
+        default=60,
+        validation_alias=AliasChoices("FIGURE_STUDIO_MAX_CALLS_PER_DAY"),
+    )
+    # ギャップ提案の生成（1教員1日あたり。対話とは独立のカウンタ）
+    figure_suggest_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("FIGURE_SUGGEST_MAX_CALLS_PER_DAY"),
+    )
+    # 保存できる SVG のサイズ上限（サニタイザが入力・出力の両方で検査する）
+    teaching_figure_max_svg_bytes: int = Field(
+        default=200_000,
+        validation_alias=AliasChoices("TEACHING_FIGURE_MAX_SVG_BYTES"),
+    )
+    # 1トピックあたりのギャップ提案の最大件数（1コールで返させる上限）
+    teaching_figure_max_suggestions: int = Field(
+        default=4,
+        validation_alias=AliasChoices("TEACHING_FIGURE_MAX_SUGGESTIONS"),
+    )
+
     # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
     # 三角測量の証拠①（LLM 事前知識）の 1 日あたり LLM コール上限
     stdpart_max_calls_per_day: int = Field(

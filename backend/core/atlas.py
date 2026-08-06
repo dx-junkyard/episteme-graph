@@ -40,7 +40,13 @@ SKELETON_STATUSES = (STATUS_DRAFT, STATUS_FROZEN)
 SEED_STATUS_VALUES = ("verified", "contested", "assumed")
 
 # ノード数上限 (仕様書 §13)
-MAX_REGIONS = 7
+#
+# MAX_REGIONS は 2026-08 の知識ランドスケープ (knowledge_landscape_design.md §6.2) で
+# 7 → 12 に引き上げた。宇宙物理の基準地図 v0.1 が 10 領域を持つため。
+# フロントの `atlas-overlay.js` の `LIMITS.l1Regions` と一致させること
+# (超過分は描画時に切り捨てられ、地図が黙って欠ける)。
+# MAX_CONCEPTS_PER_REGION は据え置き (骨格側を6個以内で設計する)。
+MAX_REGIONS = 12
 MAX_CONCEPTS_PER_REGION = 6
 
 # エッジ種別

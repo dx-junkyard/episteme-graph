@@ -6,8 +6,13 @@
     GET /api/learning/courses/{courseId}/elements/claim/{id}/context
   - 数式ブロックカードの「文脈を見る」→ 同 API の equation 版
   - ITEM（{id, element_type, label, relation_label, relation_status, navigable}）の
-    レーン描画・裏付けラベル・教材内ジャンプ（担体があるときだけ）
-- frontend/public/css/styles.css: レーン・裏付けラベル・数式カードの文脈ボタン
+    描画・裏付けラベル・教材内ジャンプ（担体があるときだけ）
+- frontend/public/css/styles.css: 裏付けラベル・数式カードの文脈ボタン
+
+**2026-08-01 の統一パーツカード適用（admin_ux_issues_2026-08-01.md §3.3 Phase 4）で、
+DTO の描画は element-card.js（`window.ElementCard`・VARIANT_READONLY）へ移った。**
+本ファイルは「導線と DTO の受け渡し」を守り、レーン/バッジの描画そのものは
+test_element_card_ui_static.py / test_learner_element_card_ui_static.py が守る。
 
 不変条項の構造的検証:
 - source / figure / component からこの API を呼ばない（component は専用の
@@ -32,6 +37,8 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 APP_JS = ROOT / "frontend" / "public" / "js" / "app.js"
+CARD_JS = ROOT / "frontend" / "public" / "js" / "element-card.js"
+VOCAB_JS = ROOT / "frontend" / "public" / "js" / "element-vocab.js"
 STYLES_CSS = ROOT / "frontend" / "public" / "css" / "styles.css"
 
 
@@ -64,23 +71,27 @@ class TestVocabulary:
         for forbidden in ("/elements/source/", "/elements/figure/", "/elements/component/"):
             assert forbidden not in src, f"{forbidden} を叩く経路があってはならない"
 
-    def test_relation_status_labels_are_two_values_only(self):
-        """relation_status は source_backed / confirmed の2値のみ（candidate は API 側で除外）。"""
+    def test_status_labels_delegated_to_element_vocab(self):
+        """裏付け状態（relation_status）の段階ラベルは element-vocab.js が正本。
+        app.js に独自辞書を持たない（§3.2 P1）。"""
         src = _read(APP_JS)
-        block = _block(src, "var MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS = {", "};")
+        assert "var MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS" not in src
+        vocab = _read(VOCAB_JS)
+        block = _block(vocab, "var STATUS_LABELS = {", "};")
         assert "source_backed:" in block
         assert "confirmed:" in block
         assert "出典に裏付け" in block
         assert "教員確定" in block
-        assert "candidate" not in block
 
-    def test_lane_labels_use_subject_specific_factual_wording(self):
+    def test_lane_titles_delegated_to_element_card(self):
+        """レーン見出しは統一パーツカード（element-card.js）が正本。app.js に
+        画面固有の見出し辞書を持たない（§3.2 P2「パーツ1個の描き方は同じ」）。"""
         src = _read(APP_JS)
-        block = _block(src, "var MATERIAL_ELEMENT_CONTEXT_LANE_LABELS = {", "};")
-        assert "この主張が支えるもの" in block
-        assert "この主張の根拠" in block
-        assert "この数式が支えるもの" in block
-        assert "この数式の根拠" in block
+        assert "var MATERIAL_ELEMENT_CONTEXT_LANE_LABELS" not in src
+        card = _read(CARD_JS)
+        block = _block(card, "var LANE_TITLES = {", "};")
+        assert "この要素が支えるもの" in block
+        assert "この要素を支えるもの" in block
 
     def test_ref_kind_reverse_map_excludes_shared_part(self):
         """ITEM.element_type → 教材本文の data-evidence-ref kind の逆写像。
@@ -190,39 +201,52 @@ class TestFetchAndRender:
         assert "data.note" in block
         assert "MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE" in block
 
-    def test_focus_role_and_generic_rendered_without_status_gating(self):
-        """contextual_role は表示可能なときだけ両キーが来るので、存在すれば出す。"""
+    def test_panel_renders_through_the_shared_readonly_card(self):
+        """描画は統一パーツカード（VARIANT_READONLY）に委譲する（§3.3 Phase 4）。"""
         src = _read(APP_JS)
         block = _block(src, "function renderElementContextPanel(pop, body, elementType, data)", "\n  }\n")
+        assert "elementContextToCardDto(elementType, data)" in block
+        assert "learnerElementCardOpts(" in block
+        assert "learnerElementCardHtml(dto, opts)" in block
+        assert "bindLearnerElementCard(body, dto, opts)" in block
+
+    def test_focus_role_and_generic_passed_without_status_gating(self):
+        """contextual_role は表示可能なときだけ両キーが来るので、存在すれば渡す。"""
+        src = _read(APP_JS)
+        block = _block(src, "function elementContextToCardDto(elementType, data)", "\n  }\n")
         assert "focus.contextual_role" in block
-        assert "この論文での役割" in block
-        assert "elementContextStatusBadge(focus.contextual_role_status)" in block
+        assert "focus.contextual_role_status" in block
         assert "focus.generic" in block
-        assert "一般には: " in block
         assert "focus.intrinsic_summary" in block
 
-    def test_both_lanes_rendered(self):
+    def test_both_lanes_passed_to_the_card(self):
         src = _read(APP_JS)
-        block = _block(src, "function renderElementContextPanel(pop, body, elementType, data)", "\n  }\n")
-        assert "renderElementContextLane(lanes.upper, data.upper)" in block
-        assert "renderElementContextLane(lanes.lower, data.lower)" in block
+        block = _block(src, "function elementContextToCardDto(elementType, data)", "\n  }\n")
+        assert "learnerElementCardItems(data && data.upper)" in block
+        assert "learnerElementCardItems(data && data.lower)" in block
 
-    def test_lane_row_uses_label_relation_label_and_status_badge(self):
+    def test_card_item_carries_label_relation_label_and_status(self):
         src = _read(APP_JS)
-        block = _block(src, "function renderElementContextLane(title, items)", "\n  }\n")
+        block = _block(src, "function learnerElementCardItems(items)", "\n  }\n")
         assert "item.label" in block
         assert "item.relation_label" in block
-        assert "elementContextStatusBadge(item.relation_status)" in block
+        assert "item.relation_status" in block
         # 内部語彙 relation / document_id は DTO に無く、参照もしない
         assert "item.relation " not in block
         assert "item.document_id" not in block
 
     def test_notes_are_not_rendered_to_learners(self):
-        """notes には教員向け運用語彙が混ざる余地があるため学習者 UI では出さない。"""
+        """notes には教員向け運用語彙が混ざる余地があるため学習者 UI では出さない。
+        カード（element-card.js）は dto.notes をそのまま描くので、**アダプタが
+        notes を詰めないこと**が唯一のガードになる。"""
         src = _read(APP_JS)
-        block = _block(src, "function renderElementContextPanel(pop, body, elementType, data)", "\n  }\n")
-        assert "data.notes" not in block
-        assert ".notes" not in block
+        for fn in (
+            "function elementContextToCardDto(elementType, data)",
+            "function componentContextToCardDto(data)",
+            "function renderElementContextPanel(pop, body, elementType, data)",
+        ):
+            block = _block(src, fn, "\n  }\n")
+            assert "notes" not in block, f"{fn} が notes を学習者カードへ渡している"
 
     def test_topic_scoped_memory_cache_cleared_on_topic_switch(self):
         src = _read(APP_JS)
@@ -248,10 +272,18 @@ class TestInMaterialJump:
         assert 'document.querySelector(\'[data-evidence-ref="\' + ref + \'"]\')' in block
         assert 'return ""' in block  # 担体が無ければ ref を返さない = ボタンを出さない
 
-        lane = _block(src, "function renderElementContextLane(title, items)", "\n  }\n")
-        assert "jumpRef" in lane
-        assert "evidence-chip-context-jump-btn" in lane
-        assert "教材内で見る" in lane
+        # カード本体は教材本文を知らないため、mount 後に該当行の直後へ差し込む。
+        # 行 → ITEM の対応はカードが全行に付ける data-element-card-itemref で引く
+        # （ゾーン描画では ITEM が元のレーン順に並ばないため）。
+        aug = _block(src, "function augmentLearnerElementCardJumps(container, dto)", "\n  }\n")
+        assert "[data-element-card-itemref]" in aug
+        assert "materialElementContextJumpRef(item)" in aug
+        assert "if (!ref) continue;" in aug
+        assert "buildMaterialJumpRow(ref)" in aug
+        row = _block(src, "function buildMaterialJumpRow(ref)", "\n  }\n")
+        assert "evidence-chip-context-jump-btn" in row
+        assert "教材内で見る" in row
+        assert "jumpToMaterialEvidenceRef(ref)" in row
 
     def test_jump_closes_popover_scrolls_and_highlights_temporarily(self):
         src = _read(APP_JS)
@@ -278,10 +310,11 @@ class TestNoNumbersNoAutoOpen:
         src = _read(APP_JS)
         for fn in (
             "function renderElementContextPanel(pop, body, elementType, data)",
-            "function renderElementContextLane(title, items)",
-            "function elementContextStatusBadge(status)",
+            "function elementContextToCardDto(elementType, data)",
+            "function componentContextToCardDto(data)",
+            "function learnerElementCardItems(items)",
         ):
-            block = _block(src, fn, "\n  }\n") if fn.endswith("data)") or fn.endswith("items)") else _block(src, fn)
+            block = _block(src, fn, "\n  }\n")
             assert "confidence" not in block, f"{fn} が confidence を描いている"
             assert "score" not in block
 
@@ -306,9 +339,11 @@ class TestNoNumbersNoAutoOpen:
             assert "openElementContextPopover" not in block
             assert "openElementContextPanel" not in block
 
-        # 取得の呼び出し元は open* の2関数のみ（claim チップ経路 / 数式カード経路）。
-        # どちらも押下ハンドラからしか呼ばれない。
-        assert src.count("fetchElementContextAndRender(") == 3  # 定義1 + 呼び出し2
+        # 取得の呼び出し元は open* の2関数（claim チップ経路 / 数式カード経路）と
+        # 近傍チップの「旅」1箇所のみ。いずれも押下ハンドラからしか呼ばれない。
+        assert src.count("fetchElementContextAndRender(") == 4  # 定義1 + 呼び出し3
+        travel = _block(src, "function travelToElementContext(pop, body, item)", "\n  }\n")
+        assert "LEARNER_CARD_TRAVEL_TYPES.indexOf(type) < 0) return;" in travel
 
 
 # ---------------------------------------------------------------------------
@@ -317,19 +352,28 @@ class TestNoNumbersNoAutoOpen:
 
 
 class TestStyles:
-    def test_lane_and_badge_and_toggle_styles_defined(self):
+    def test_entry_and_jump_styles_defined(self):
+        """導線（文脈を見る / 詳しく見る / 教材内で見る）と一時ハイライトの体裁。
+        レーン・裏付けバッジ・役割行の体裁は統一パーツカード側（.element-card-*）に
+        移ったため、ここでは検証しない（旧 .evidence-chip-context-lane-* は未使用）。"""
         src = _read(STYLES_CSS)
         for selector in (
             ".evidence-chip-popover-context-btn {",
             ".ls-material-context-btn {",
-            ".evidence-chip-context-role {",
-            ".evidence-chip-context-generic {",
-            ".evidence-chip-context-status {",
-            ".evidence-chip-context-lane-item {",
-            ".evidence-chip-context-lane-label {",
-            ".evidence-chip-context-lane-relation {",
             ".evidence-chip-context-jump-btn {",
             ".ls-material-evidence-jump {",
+        ):
+            assert selector in src, f"{selector} が styles.css に見つかりません"
+
+    def test_card_styles_used_by_the_learner_panel_exist(self):
+        """学習者パネルが借用するカード側セレクタ（近傍レーンと差し込み行）。"""
+        src = _read(STYLES_CSS)
+        for selector in (
+            ".element-card {",
+            ".element-card-lanes {",
+            ".element-card-items {",
+            ".element-card-item {",
+            ".element-card-status {",
         ):
             assert selector in src, f"{selector} が styles.css に見つかりません"
 
@@ -358,49 +402,95 @@ function extractFrom(src, name){
   throw new Error("unbalanced "+name);
 }
 function extractMany(src, names){ return names.map(function(n){ return extractFrom(src,n); }).join("\n"); }
+// "var NAME = { ... };" / "var NAME = [ ... ];" の両方に対応する。
 function extractVar(src, name){
-  const s = src.indexOf("var " + name + " = {");
+  const s = src.indexOf("var " + name + " = ");
   if (s<0) throw new Error("missing var "+name);
-  let d=0,st=false;
-  for(let j=src.indexOf("{",s);j<src.length;j++){const c=src[j];if(c==="{"){d++;st=true;}else if(c==="}"){d--;if(st&&d===0)return src.slice(s,j+1)+";";}}
+  let open=-1,oc="",cc="";
+  for(let j=src.indexOf("=",s)+1;j<src.length;j++){
+    const c=src[j];
+    if(c===" "||c==="\n"||c==="\r"||c==="\t") continue;
+    if(c==="{"){open=j;oc="{";cc="}";}
+    else if(c==="["){open=j;oc="[";cc="]";}
+    break;
+  }
+  if(open<0) throw new Error("unsupported initializer for var "+name);
+  let d=0;
+  for(let j=open;j<src.length;j++){const c=src[j];if(c===oc){d++;}else if(c===cc){d--;if(d===0)return src.slice(s,j+1)+";";}}
   throw new Error("unbalanced var "+name);
+}
+// 語彙の正本（element-vocab.js）と統一パーツカード（element-card.js）を app.js と
+// 同じディレクトリから読み込む。どちらも window に生やす IIFE なので、harness 側で
+// var window を宣言した後に eval すること。
+function loadSibling(appPath, name){
+  const pathmod=require("path");
+  return require("fs").readFileSync(pathmod.join(pathmod.dirname(appPath),name),"utf8");
 }
 """
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node unavailable")
-def test_lane_rendering_behaviour_node(tmp_path):
-    """レーン描画を実評価し、ラベル+relation_label+裏付けラベルが出て、担体の無い
-    ITEM には「教材内で見る」が付かないこと、confidence が漏れないことを確認する。"""
+def test_readonly_card_rendering_behaviour_node(tmp_path):
+    """claim 文脈 DTO → カード DTO → 統一パーツカード（readonly）の実描画を検証する。
+
+    - 種別チップ・関係語・裏付けラベルが日本語で出る（語彙は element-vocab.js が正本）
+    - confidence は一切出ない（W8）
+    - candidate 関係はアダプタ段階で落ちる（サーバ除去との二重ガード）
+    - 学習者が開けない型（shared_part / figure）は navigable にしない
+    - 操作行（「深く検討」等）は readonly では出ない
+    """
     script = _EXTRACT + r"""
 const fs = require("fs");
 const app = fs.readFileSync(process.argv[2], "utf8");
+var window = {};
 function escHtml(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
-// 担体は「存在しない」= どの ref も見つからない DOM スタブ。
-var document = { querySelector: function(){ return null; } };
-eval(extractVar(app, "MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS"));
-eval(extractVar(app, "MATERIAL_ELEMENT_CONTEXT_REF_KINDS"));
-eval(extractMany(app, ["normalizeMaterialEvidenceId","elementContextStatusBadge",
-  "materialElementContextJumpRef","renderElementContextLane"]));
+function renderMaterialKatex(expr, display){ return '<span class="fake-katex">'+escHtml(expr)+'</span>'; }
+eval(loadSibling(process.argv[2], "element-vocab.js"));
+eval(loadSibling(process.argv[2], "element-card.js"));
+eval(extractVar(app, "LEARNER_CARD_TRAVEL_TYPES"));
+eval(extractVar(app, "LEARNER_CARD_FOCUS_TYPES"));
+eval(extractMany(app, ["learnerElementCardOpts","learnerElementCardHtml",
+  "learnerElementCardItems","elementContextToCardDto"]));
 
-const html = renderElementContextLane("この主張が支えるもの", [
-  {id:"comp_1", element_type:"theory_component", label:"共鳴条件",
-   relation_label:"を支持する", relation_status:"source_backed", navigable:true, confidence:0.91},
-  {id:"cl_2", element_type:"theory_claim", label:"主張2",
-   relation_label:"の前提になる", relation_status:"confirmed", navigable:false},
-  {id:"sp_3", element_type:"shared_part", label:"共通部品", relation_label:"に対応する",
-   relation_status:"confirmed", navigable:true}
-]);
-const empty = renderElementContextLane("この主張の根拠", []);
+const data = {
+  available: true,
+  element_type: "claim",
+  element_id: "cl_focus",
+  focus: {element_type:"claim", element_id:"cl_focus", label:"焦点の主張",
+          intrinsic_summary:"焦点の主張の本文", contextual_role:"観測量を定義する",
+          contextual_role_status:"source_backed"},
+  upper: [
+    {id:"comp_1", element_type:"theory_component", label:"共鳴条件",
+     relation_label:"を支持する", relation_status:"source_backed", navigable:true, confidence:0.91},
+    {id:"sp_3", element_type:"shared_part", label:"共通部品",
+     relation_label:"に対応する", relation_status:"confirmed", navigable:true}
+  ],
+  lower: [
+    {id:"cl_2", element_type:"theory_claim", label:"主張2",
+     relation_label:"の前提になる", relation_status:"confirmed", navigable:true},
+    {id:"cand", element_type:"theory_claim", label:"AI候補の関係",
+     relation_label:"に関連する", relation_status:"candidate", navigable:true}
+  ],
+  notes: ["教員向けの運用メモ"]
+};
+const dto = elementContextToCardDto("claim", data);
+const opts = learnerElementCardOpts(function(){});
+const html = learnerElementCardHtml(dto, opts);
 process.stdout.write(JSON.stringify({
-  hasTitle: html.indexOf("この主張が支えるもの") >= 0,
+  variantIsReadonly: opts.variant === "readonly" && html.indexOf("element-card-readonly") >= 0,
+  hasKindChip: html.indexOf(">主張<") >= 0,
+  hasBody: html.indexOf("焦点の主張の本文") >= 0,
+  hasRole: html.indexOf("観測量を定義する") >= 0,
   hasLabels: html.indexOf("共鳴条件") >= 0 && html.indexOf("主張2") >= 0,
   hasRelationLabel: html.indexOf("を支持する") >= 0,
   hasStatusLabels: html.indexOf("出典に裏付け") >= 0 && html.indexOf("教員確定") >= 0,
-  noRawStatus: html.indexOf("source_backed") < 0 && html.indexOf("confirmed") < 0,
+  noRawStatusText: html.indexOf(">source_backed<") < 0 && html.indexOf(">confirmed<") < 0,
   noConfidence: html.indexOf("0.91") < 0 && html.indexOf("confidence") < 0,
-  noJumpButtonWithoutCarrier: html.indexOf("教材内で見る") < 0,
-  emptyLaneIsEmpty: empty === ""
+  candidateDropped: html.indexOf("AI候補の関係") < 0 && dto.lower.length === 1,
+  travelOnlyForOpenableTypes:
+    dto.upper[0].navigable === true && dto.upper[1].navigable === false,
+  notesNotPassed: !("notes" in dto) && html.indexOf("教員向けの運用メモ") < 0,
+  noActionRow: html.indexOf("element-card-actions") < 0 && html.indexOf("深く検討") < 0
 }));
 """
     harness = tmp_path / "h.js"
@@ -408,11 +498,16 @@ process.stdout.write(JSON.stringify({
     proc = subprocess.run(["node", str(harness), str(APP_JS)], capture_output=True, text=True, timeout=30)
     assert proc.returncode == 0, proc.stderr
     out = json.loads(proc.stdout)
-    assert out["hasTitle"]
+    assert out["variantIsReadonly"], "学習者カードは VARIANT_READONLY で描く"
+    assert out["hasKindChip"], "種別チップは日本語（ElementVocab 正本）"
+    assert out["hasBody"]
+    assert out["hasRole"]
     assert out["hasLabels"]
     assert out["hasRelationLabel"]
     assert out["hasStatusLabels"], "relation_status は段階ラベルで表示する"
-    assert out["noRawStatus"], "内部語彙（source_backed 等）を素で出さない"
+    assert out["noRawStatusText"], "内部語彙（source_backed 等）を本文として出さない"
     assert out["noConfidence"], "confidence を学習者に出さない"
-    assert out["noJumpButtonWithoutCarrier"], "担体が無い ITEM にジャンプボタンを出さない"
-    assert out["emptyLaneIsEmpty"], "空レーンは見出しごと出さない"
+    assert out["candidateDropped"], "candidate 関係はアダプタで落とす"
+    assert out["travelOnlyForOpenableTypes"], "学習者が開けない型を navigable にしない"
+    assert out["notesNotPassed"], "notes を学習者カードへ渡さない"
+    assert out["noActionRow"], "readonly バリアントに操作行を出さない"

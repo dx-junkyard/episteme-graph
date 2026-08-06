@@ -56,6 +56,9 @@ from core.lecture import (
 )
 from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
+# 教材図スタジオ（teaching_figure_studio_design.md §7.1）: 採用済み生成図を既存の
+# figures_by_id マップへ合流させる（記法・解決・配信は既存資産に相乗り・FG9）。
+from core.teaching_figures.store import adopted_figures_map
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core import element_explanations
@@ -644,22 +647,57 @@ def _course_document_ids(course_data: dict) -> list[str]:
     return list(list_course_source_document_ids(course_data))
 
 
-def _load_course_figures_by_id(course_id: str, course_data: dict) -> dict[str, dict]:
-    """コースのソース教材に属する ``document_figures`` を、``core.lecture`` の記法解決
-    （``resolve_figure_embeds``）が使う ``figure_id -> {"caption", "image_url"}`` へ変換する
-    （Phase 4 図のコース流通 §7.1/§7.2）。
+def _load_course_teaching_figures(course_id: str) -> dict[str, dict]:
+    """コースの**採用済み教材図**（``course_teaching_figures``、教材図スタジオ設計書 §7.1）を
+    ``figure_id -> {"caption", "content_type", "title"}`` で返す（``status='adopted'`` のみ）。
 
-    ``core/`` は DB を読まない方針のため、この供給は routes 層の責務。学習者向け
-    ``image_url`` は 3条件 fail-closed ゲート付きの学習者エンドポイント
-    （``GET /api/learning/courses/{course_id}/figures/{figure_id}/image``）を指す。
-
-    ``document_id`` も同梱する（``core.lecture`` の記法解決自体は使わないが、
-    Phase 2 §5.3 の説明充填 ``_attach_figure_explanations`` が element_explanations を
-    document 単位でグルーピングして読むために必要）。
+    取得に失敗しても図の解決全体を止めない（fail-soft で空 dict）。
     """
+    session = _pg_session()
+    try:
+        return dict(adopted_figures_map(session, course_id) or {})
+    except Exception:
+        logger.warning(
+            "Failed to load teaching figures for course %s", course_id, exc_info=True
+        )
+        return {}
+    finally:
+        session.close()
+
+
+def _course_figures_index(
+    course_id: str,
+    course_data: dict,
+    *,
+    teaching_image_url,
+    extracted_image_url,
+) -> dict[str, dict]:
+    """コースで解決できる図（採用済み教材図 + ソース教材の抽出図）のマップを組み立てる。
+
+    ``image_url`` の組み立てだけを注入で差し替えられるようにして、学習者向け
+    （``_load_course_figures_by_id``）と管理画面向け（``load_course_figures_index_for_admin``）
+    で解決規則そのものを二重実装しない（教材図スタジオ設計書 §7.3 の非対称解消）。
+
+    **教材図のマージは document 走査より前**に行う（§7.1）。現実装は document_ids が
+    空だと早期 return するため、後置するとソース教材の無いコースで生成図が解決不能に
+    なる。DB 例外時のフォールバックでも教材図のマージ結果は保持する。
+    """
+    figures_by_id: dict[str, dict] = {}
+    for fig_id, info in _load_course_teaching_figures(course_id).items():
+        fig_id = str(fig_id)
+        figures_by_id[fig_id] = {
+            "caption": (info or {}).get("caption") or "",
+            "image_url": teaching_image_url(fig_id),
+            # 教材図は document に属さない（コース教材の付属物・FG1）。説明充填
+            # （``_attach_figure_explanations``）は document 単位で読むため、None で
+            # 「document スコープの説明を持たない」ことを明示する。
+            "document_id": None,
+            "teaching": True,
+        }
+
     document_ids = _course_document_ids(course_data)
     if not document_ids:
-        return {}
+        return figures_by_id
 
     session = _pg_session()
     try:
@@ -675,19 +713,63 @@ def _load_course_figures_by_id(course_id: str, course_data: dict) -> dict[str, d
         ).fetchall()
     except Exception:
         logger.warning("Failed to load course figures for course %s", course_id, exc_info=True)
-        return {}
+        return figures_by_id
     finally:
         session.close()
 
-    figures_by_id: dict[str, dict] = {}
     for row in rows:
         fig_id = str(row[0])
+        document_id = str(row[2]) if row[2] else None
         figures_by_id[fig_id] = {
             "caption": row[1],
-            "image_url": f"/api/learning/courses/{course_id}/figures/{fig_id}/image",
-            "document_id": str(row[2]) if row[2] else None,
+            "image_url": extracted_image_url(fig_id, document_id),
+            "document_id": document_id,
+            "teaching": False,
         }
     return figures_by_id
+
+
+def _load_course_figures_by_id(course_id: str, course_data: dict) -> dict[str, dict]:
+    """コースで解決できる図を、``core.lecture`` の記法解決（``resolve_figure_embeds``）が
+    使う ``figure_id -> {"caption", "image_url"}`` へ変換する
+    （Phase 4 図のコース流通 §7.1/§7.2 + 教材図スタジオ §7.1）。
+
+    ``core/`` は DB を読まない方針のため、この供給は routes 層の責務。学習者向け
+    ``image_url`` は 4条件 fail-closed ゲート付きの学習者エンドポイント
+    （``GET /api/learning/courses/{course_id}/figures/{figure_id}/image``）を指す
+    （抽出図・教材図で同一パス。図の出自は配信側が判定する）。
+
+    ``document_id`` も同梱する（``core.lecture`` の記法解決自体は使わないが、
+    Phase 2 §5.3 の説明充填 ``_attach_figure_explanations`` が element_explanations を
+    document 単位でグルーピングして読むために必要）。採用済み教材図は
+    ``document_id=None`` / ``teaching=True``。
+    """
+    learner_url = f"/api/learning/courses/{course_id}/figures/{{fid}}/image"
+    return _course_figures_index(
+        course_id,
+        course_data,
+        teaching_image_url=lambda fid: learner_url.format(fid=fid),
+        extracted_image_url=lambda fid, _document_id: learner_url.format(fid=fid),
+    )
+
+
+def load_course_figures_index_for_admin(course_id: str, course_data: dict) -> dict[str, dict]:
+    """管理画面（原稿スタジオプレビュー）向けの図マップ（教材図スタジオ設計書 §7.3）。
+
+    学習画面と**同じ解決規則**だが ``image_url`` は admin 経路を指す:
+    教材図は ``/api/admin/courses/{course_id}/teaching-figures/{fid}/image``、
+    抽出図は ``/api/admin/documents/{document_id}/figures/{fid}/image``。
+    document_id が引けない抽出図（通常起きない）は ``image_url`` を空にする
+    （存在しない URL を捏造しない）。
+    """
+    return _course_figures_index(
+        course_id,
+        course_data,
+        teaching_image_url=lambda fid: f"/api/admin/courses/{course_id}/teaching-figures/{fid}/image",
+        extracted_image_url=lambda fid, document_id: (
+            f"/api/admin/documents/{document_id}/figures/{fid}/image" if document_id else ""
+        ),
+    )
 
 
 def _attach_figure_explanations(

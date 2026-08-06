@@ -475,6 +475,12 @@ AUDIT_ENTITY_DISCUSS_OBSERVATION = "discuss_observation"
 # M層（LLM モデル選択, migration 061）
 AUDIT_ENTITY_LLM_MODEL_POLICY = "llm_model_policy"
 
+# 教材図スタジオ（生成図の採用・retire / 提案の accept・dismiss・生成, migration 063）
+AUDIT_ENTITY_TEACHING_FIGURE = "teaching_figure"
+
+# 知識ランドスケープ（論文 ⇄ 基準地図の配置。status 遷移・手動再提案, migration 065）
+AUDIT_ENTITY_LANDSCAPE_PLACEMENT = "landscape_placement"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -509,4 +515,6 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_MANUAL,
     AUDIT_ENTITY_DISCUSS_OBSERVATION,
     AUDIT_ENTITY_LLM_MODEL_POLICY,
+    AUDIT_ENTITY_TEACHING_FIGURE,
+    AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
 )

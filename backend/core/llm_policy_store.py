@@ -18,7 +18,6 @@ FastAPI 非 import・LLM SDK 非 import（開発ルール2 / M1）。
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from typing import Any
@@ -43,7 +42,14 @@ _cache: dict[tuple[str, str, str | None], tuple[float, "llm_policy.PolicyRow | N
 
 
 def invalidate() -> None:
-    """キャッシュを全消去する。書き込み API（upsert/delete/seed）から呼ぶこと。"""
+    """キャッシュを全消去する。書き込み API（upsert/delete/seed）から呼ぶこと。
+
+    **呼び出し側は commit の後にもう一度呼ぶこと**（レビュー指摘 m3）。
+    ``upsert_policy`` / ``delete_policy`` の中で呼ぶ invalidate は commit 前なので、
+    「invalidate → 他スレッドが旧値を読んで 20 秒再キャッシュ → commit」の窓が残る。
+    commit 後の invalidate がその窓を閉じる（正本は route 側の commit 直後の呼び出し、
+    store 内の呼び出しは best-effort な保険）。
+    """
     with _cache_lock:
         _cache.clear()
 
@@ -331,33 +337,62 @@ def seed_env_policies(session: Session) -> int:
     既存の DB 行は絶対に上書きしない（存在しない scene_key のときのみ INSERT）。
     起動のたびに呼ばれる想定（atlas_skeletons / library の同梱シードと同じパターン）。
     返り値は新規に挿入した行数。
+
+    **書き込みキーの正本は** :func:`core.llm_policy.iter_env_seeds`（レビュー指摘 J2）。
+    旧実装は env をすべて feature キーで書いていたため、UI/API が編集する scene キー行を
+    `_pick_priority_row`（system+feature > system+scene）が恒久的にシャドウしていた。
+    現在は「UI が編集するキー」に揃えてシードし、**同じ env・同じ値の旧シード行**
+    （人が触っていないと機械的に判定できる行）だけを冪等に削除して移行する。
     """
     inserted = 0
 
-    for feature, (attr, _fallback_tier) in llm_policy._FEATURE_ENV_SETTINGS.items():  # noqa: SLF001
-        settings = _settings()
-        value = (getattr(settings, attr, "") or "").strip()
-        if not value:
-            continue
-        if _seed_one(session, scene_key=feature, model=value, note=f"seeded from env: {attr.upper()}"):
+    for seed in llm_policy.iter_env_seeds():
+        note = f"seeded from env: {seed.env_label}"
+        if _seed_one(session, scene_key=seed.scene_key, model=seed.model, note=note):
             inserted += 1
-
-    for feature, (env_name, _fallback_tier) in llm_policy._FEATURE_DIRECT_ENV.items():  # noqa: SLF001
-        value = (os.getenv(env_name, "") or "").strip()
-        if not value:
-            continue
-        if _seed_one(session, scene_key=feature, model=value, note=f"seeded from env: {env_name}"):
-            inserted += 1
+        _delete_legacy_env_seed_rows(session, seed=seed, note=note)
 
     if inserted:
         invalidate()
     return inserted
 
 
-def _settings():
-    from core.config import get_settings
+def _delete_legacy_env_seed_rows(session: Session, *, seed: "llm_policy.EnvSeed", note: str) -> int:
+    """旧実装が同じ env から書いた feature キーのシード行を削除する（冪等・移行専用）。
 
-    return get_settings()
+    削除条件は3つすべて（fail-safe）:
+      1. ``scope='system'`` かつ scene_key が旧 feature キーのいずれか
+      2. ``note`` が同じ env 由来のシード note と一致（= シードが作った行）
+      3. ``model`` が現在の env 値と一致（= 人が UI で変更していない）
+
+    人が運用タブで編集した行（note が変わる / model が env と異なる）は削除しない
+    （情報を落とさない）。削除後は scene キー行が同じ値を供給するので解決結果は不変。
+    """
+    keys = [k for k in (seed.legacy_scene_keys or ()) if k and k != seed.scene_key]
+    if not keys:
+        return 0
+    result = session.execute(
+        sa_text(
+            """
+            DELETE FROM llm_model_policies
+            WHERE scope = 'system'
+              AND scene_key = ANY(:keys)
+              AND note = :note
+              AND model = :model
+            """
+        ),
+        {"keys": keys, "note": note, "model": seed.model},
+    )
+    removed = result.rowcount or 0
+    if removed:
+        logger.info(
+            "llm_policy_store: migrated %d legacy env-seed row(s) %s -> %s",
+            removed,
+            keys,
+            seed.scene_key,
+        )
+        invalidate()
+    return removed
 
 
 def _seed_one(session: Session, *, scene_key: str, model: str, note: str) -> bool:

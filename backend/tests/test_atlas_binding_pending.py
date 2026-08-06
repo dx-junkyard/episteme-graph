@@ -99,10 +99,14 @@ def _no_bundled_cartridges(monkeypatch):
 
     list_domains() / propose の domains_checked は同梱カートリッジも合成対象にするため、
     これを外さないとリポジトリの実ファイルの有無でテストの期待値が変わってしまう。
+    骨格専用バンドルドメイン (`backend/atlas_domains/<key>/skeleton.yaml`。例: astrophysics。
+    knowledge_landscape_design.md §6.1) も同じ理由で対象外にする。
     """
+    import core.atlas_store as atlas_store_module
     import core.cartridges as cartridges_module
 
     monkeypatch.setattr(cartridges_module, "list_cartridges", lambda: [])
+    monkeypatch.setattr(atlas_store_module, "_bundled_domain_keys", lambda: [])
     cartridges_module.clear_cache()
     yield
     cartridges_module.clear_cache()

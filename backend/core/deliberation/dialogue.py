@@ -40,6 +40,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from core import llm_policy
 from core.config import get_settings
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core.library.schema import ENTRY_TYPE_APPARATUS, ENTRY_TYPE_THEORY_COMPONENT
@@ -60,6 +61,7 @@ from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
+    IDENTITY_LINKABLE_ELEMENT_TYPES,
     ElementRef,
     SCOPE_DOCUMENT,
 )
@@ -122,8 +124,24 @@ _IDENTITY_GUARD_NO_CANDIDATES = (
 
 
 def resolve_model() -> str:
-    """DELIBERATION_LLM_MODEL があればそれを、無ければ fast tier のモデルを使う。"""
+    """DELIBERATION_LLM_MODEL があればそれを、無ければ fast tier のモデルを使う。
+
+    後方互換のため残す（外部シグネチャ不変）。**1ターンの解決には
+    :func:`resolve_turn_model` を使う** — 画像付き（vision）と text で必要な
+    capability が違うため（m2）。
+    """
     return _resolve_model_key(_MODEL_SETTING_KEY)
+
+
+def resolve_turn_model(feature: str) -> str:
+    """1ターンのモデルを feature 単位で解決する（M層の正本経由, m2）。
+
+    ``deliberation:vision``（画像付き）は ``llm_policy`` 側で vision capability が
+    必須になり、満たさないポリシー行はスキップされる。``DELIBERATION_LLM_MODEL`` →
+    fast tier のフォールバックは feature マッピング（``_FEATURE_ENV_SETTINGS``）に
+    定義済みなので、ポリシー行が無い環境の結果は :func:`resolve_model` と一致する。
+    """
+    return llm_policy.resolve_scene_model(feature).model
 
 
 # ---------------------------------------------------------------------------
@@ -219,7 +237,9 @@ def identity_entry_type_for_element(element_type: str) -> str | None:
 def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> list[dict[str, Any]]:
     """同分野の凍結済み library_entries 上位k件を同一性候補の材料として返す（N2）。
 
-    - 対象は document-scoped のインスタンス要素のみ（identity link の source 制約と同じ）。
+    - 対象は document-scoped かつ共通部品化しうるインスタンス要素のみ（identity link の
+      source 制約と同じ = ``IDENTITY_LINKABLE_ELEMENT_TYPES``。evidence / derivation は §16 で
+      対象外）。
     - domain_key は対象要素の document → 最新解析 run の cartridge_id から決定論的に解決
       （cartridge_id = library domain_key の同一名前空間。apparatus retrieval と同じ規約）。
     - 検索は ``core.library.search.search_frozen_entries``（凍結版のみ・失敗時空リスト）を
@@ -228,6 +248,10 @@ def collect_identity_candidates(ref: ElementRef, breakdown: dict[str, Any]) -> l
       （LLM に同一視の判断材料を与えすぎない・KN-3）。
     """
     if ref.scope != SCOPE_DOCUMENT:
+        return []
+    if ref.element_type not in IDENTITY_LINKABLE_ELEMENT_TYPES:
+        # 設計書 §16: evidence / derivation は共通部品化の対象外なので、同一性候補の
+        # 材料自体を供給しない（LLM に「共通部品と同じもの」提案の余地を与えない）。
         return []
     domain_key = document_domain_key(ref.document_id or "")
     if not domain_key:
@@ -590,11 +614,18 @@ def run_turn(
     返す（同期パスを重くしない）。
     """
     llm_messages = build_llm_messages(prior_messages, user_content, grounding_text)
-    resolved_model = model or resolve_model()
     feature = _FEATURE_VISION if images else _FEATURE_CHAT
     document_id = ref.document_id if ref.scope == SCOPE_DOCUMENT else None
 
     with usage_context(feature, user_id=user_id, document_id=document_id):
+        # M層（レビュー指摘 m2）: feature 単位で解決する。画像付き（figure 要素）は
+        # ``deliberation:vision`` として解決され、``llm_policy`` が vision capability を
+        # 要求するため、scene ``deliberation`` のシステム既定に非 vision モデルが
+        # 入っていても画像付きコールが text モデルへ落ちない（M5 の fail-closed。
+        # 満たさないポリシー行はスキップされ env → tier 既定へ落ちる）。
+        # 解決を usage_context の**内側**で行うのは、user 別ポリシー（解決順③）が
+        # ``current_usage_context().user_id`` を見るため（外側では常に None だった）。
+        resolved_model = model or resolve_turn_model(feature)
         try:
             parsed = generate_conversation_turn(
                 llm_messages, _DialogueTurnOutput, images=images, model=resolved_model,
@@ -623,5 +654,6 @@ __all__ = [
     "run_turn",
     "figure_image_bytes",
     "resolve_model",
+    "resolve_turn_model",
     "check_and_count_llm_call",
 ]

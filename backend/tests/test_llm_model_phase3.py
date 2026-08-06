@@ -187,7 +187,7 @@ class TestCourseUpdateLlmModels:
         data = self._course_data()
         monkeypatch.setattr(learning_mod, "get_editable_course_data", lambda uid, cid: data)
         saved = {}
-        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d: saved.update(d))
+        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d, **kw: saved.update(d))
 
         body = CourseUpdateRequest(llm_models={"learning_chat": "gpt-5.4-mini"})
         result = learning_mod.update_course("course-1", body, current_user=self.CURRENT_USER)
@@ -235,7 +235,7 @@ class TestCourseUpdateLlmModels:
         data = self._course_data(llm_models={"learning_chat": "gpt-5.2"})
         monkeypatch.setattr(learning_mod, "get_editable_course_data", lambda uid, cid: data)
         saved = {}
-        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d: saved.update(d))
+        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d, **kw: saved.update(d))
 
         body = CourseUpdateRequest(llm_models={"learning_chat": None})
         learning_mod.update_course("course-1", body, current_user=self.CURRENT_USER)
@@ -250,7 +250,7 @@ class TestCourseUpdateLlmModels:
         data = self._course_data(llm_models={"learning_chat": "gpt-5.2"})
         monkeypatch.setattr(learning_mod, "get_editable_course_data", lambda uid, cid: data)
         saved = {}
-        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d: saved.update(d))
+        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d, **kw: saved.update(d))
 
         body = CourseUpdateRequest(title="新タイトル")
         learning_mod.update_course("course-1", body, current_user=self.CURRENT_USER)
@@ -569,7 +569,7 @@ class TestM9NoModelLeakToStudent:
 
         data = {"id": "course-1", "title": "コース", "topics": [], "chapters": [], "concepts": [], "sources": []}
         monkeypatch.setattr(learning_mod, "get_editable_course_data", lambda uid, cid: data)
-        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d: None)
+        monkeypatch.setattr(learning_mod, "save_course_data", lambda uid, cid, d, **kw: None)
 
         body = CourseUpdateRequest(llm_models={"learning_chat": "gpt-5.4-mini"})
         result = learning_mod.update_course(
@@ -650,10 +650,12 @@ class TestLectureStudioModelParam:
     TEACHER = {"id": "teacher-1", "username": "t1", "email": "t1@test.local", "role": "TEACHER"}
 
     def test_course_topic_draft_rewrite_uses_requested_model(self, fake_catalog, monkeypatch):
+        import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
         course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: course_data)
+        # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
 
         captured = {}
@@ -673,10 +675,12 @@ class TestLectureStudioModelParam:
         assert result["key_concepts"] == ["a"]
 
     def test_course_topic_draft_rewrite_invalid_model_422(self, fake_catalog, monkeypatch):
+        import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
         course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: course_data)
+        # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
 
         def _unexpected(*a, **k):
@@ -693,15 +697,24 @@ class TestLectureStudioModelParam:
             )
         assert exc.value.status_code == 422
 
-    def test_course_topic_draft_rewrite_unspecified_model_keeps_fast_tier(self, fake_catalog, monkeypatch):
+    def test_course_topic_draft_rewrite_unspecified_model_delegates_to_entry_resolution(
+        self, fake_catalog, monkeypatch,
+    ):
+        """未指定なら model=None を渡し、入口（resolve_scene_model）に解決を委ねる。
+
+        scripts.py の rewrite と同じ裁定（M層レビュー指摘 J3 同型）。以前は
+        fast tier のモデルを明示引数で渡していたため解決順①（呼び出し時指定）に
+        化けて、運用タブ・本人既定の設定が効かなかった。ポリシー行も env も無い
+        環境では llm_policy._FEATURE_TIER_ONLY（admin:lecture_rewrite → fast）により
+        従来と同じ fast tier に解決される。
+        """
+        import routes.lecture_studio._shared as shared_mod
         import routes.lecture_studio.topics as topics_mod
 
         course_data = {"id": "course-1", "title": "コース", "topics": [{"id": "topic-1", "title": "T"}]}
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: course_data)
+        # 権限ゲートの seam は _shared._course_data_for_studio_editable（教材図スタジオ §8 で共有化）。
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: course_data)
         monkeypatch.setattr(topics_mod, "consume_lecture_rewrite_quota", lambda *a, **k: None)
-        monkeypatch.setattr(
-            topics_mod, "get_llm_params", lambda mode: {"model": "fast-model-x", "reasoning_effort": "low"},
-        )
 
         captured = {}
 
@@ -714,7 +727,7 @@ class TestLectureStudioModelParam:
         topics_mod.rewrite_lecture_studio_course_topic(
             "course-1", "topic-1", {"prompt": "教員の指示"}, current_user=self.TEACHER,
         )
-        assert captured["model"] == "fast-model-x"
+        assert captured["model"] is None
 
     @patch("api.routes.lecture_studio.scripts.threading.Thread")
     @patch("api.routes.lecture_studio.scripts.create_background_task")

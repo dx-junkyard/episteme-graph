@@ -54,6 +54,7 @@ from services import (
     create_background_task,
     extract_pdf_pages,
     get_background_task,
+    remove_teaching_figure_objects as _remove_teaching_figure_objects,
     get_course_group_permissions,
     get_document_group_permissions,
     get_user_group_ids,
@@ -104,6 +105,9 @@ from core.schema_registry import (
 from core.status import projector as status_projector
 from core.status import schema as status_schema
 from core.storage import get_storage_client
+# 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
+# コース物理削除の全経路で明示削除する（delete_material の巻き添え削除・delete_course）。
+from core.teaching_figures import store as _teaching_figures_store
 # 画像パイプライン §7: 図画像 API は theory_components.py の
 # _ensure_document_viewable（document_id は UUID / material_id 両対応）を必ず通す。
 from routes.theory_components import _ensure_document_viewable
@@ -448,7 +452,7 @@ def upload_material(
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
-        kwargs={"options": upload_options},
+        kwargs={"options": upload_options, "user_id": str(current_user["id"])},
         daemon=True,
     )
     thread.start()
@@ -486,6 +490,25 @@ class ReanalyzeRequest(BaseModel):
     ``_validate_models_option`` で fail-closed 検証する。"""
     analyze_images: bool | None = None
     models: dict[str, str] | None = None
+
+
+def _previous_run_options(document_id: str, material_id: str) -> dict:
+    """前回 run の ``options`` を best-effort で読む（読めなければ空 dict）。
+
+    orchestrator は ``options`` を wholesale 置換するため、片方だけ明示された再解析でも
+    前回値を土台にする必要がある（レビュー指摘 J1）。ここで例外を伝播させると
+    「前回値が読めない」だけで再解析自体が 500 になってしまうので fail-open にする
+    （その場合は明示された値のみの options になる = 従来挙動）。
+    """
+    try:
+        previous_run = get_latest_analysis_run(document_id=document_id, material_id=material_id)
+    except Exception:  # noqa: BLE001 — fail-open（再解析を止めない）
+        logger.warning(
+            "reanalyze: failed to read previous run options for document=%s", document_id,
+            exc_info=True,
+        )
+        return {}
+    return dict((previous_run or {}).get("options") or {})
 
 
 @router.post("/documents/{document_id}/reanalyze", status_code=202)
@@ -582,28 +605,29 @@ def reanalyze_document(
     if body is not None and body.models:
         models_option = _validate_models_option(body.models)
 
-    if models_option is None:
-        # models 未指定: 従来どおりの規則をそのまま維持する（新規 DB 読み出しを
-        # 増やさない。既存の analyze_images-only 呼び出し経路の挙動を変えない）。
-        options = {"analyze_images": bool(analyze_images)} if analyze_images is not None else None
-    elif analyze_images is not None:
-        # 両方明示: 前回 run を読む必要が無いのでそのまま組み立てる。
-        options = {"analyze_images": bool(analyze_images), "models": models_option}
+    # orchestrator は options を **wholesale 置換**する（部分マージしない）ため、
+    # 片方だけを明示した再解析でも前回 run の options を土台にして組み立てる
+    # （レビュー指摘 J1: models 未指定 + analyze_images 明示のとき、前回 run の
+    # `options.models` が黙って捨てられ、モーダルが「前回と同じ」と表示しながら
+    # 実 run はモデル指定を失っていた。逆方向だけ温存されている非対称も解消する）。
+    if models_option is None and analyze_images is None:
+        # どちらも未指定: options=None を渡し、orchestrator の「前回 run の options を
+        # そのまま引き継ぐ」分岐に委ねる（従来どおり・DB 読み出しも増やさない）。
+        options = None
     else:
-        # models だけ明示・analyze_images は未指定: analyze_images は前回 run の値を
-        # 引き継ぐ（models の指定が analyze_images を無警告でリセットしない）。
-        previous_run_for_options = get_latest_analysis_run(
-            document_id=document_id, material_id=material_id
-        )
-        previous_options = dict((previous_run_for_options or {}).get("options") or {})
-        options = dict(previous_options)
-        options.setdefault("analyze_images", False)
-        options["models"] = models_option
+        options = dict(_previous_run_options(document_id, material_id))
+        if analyze_images is not None:
+            options["analyze_images"] = bool(analyze_images)
+        else:
+            options.setdefault("analyze_images", False)
+        if models_option is not None:
+            options["models"] = models_option
+        # models 未指定なら前回 run の `models` はそのまま温存される（コピー済み）。
 
     thread = threading.Thread(
         target=process_material_background,
         args=(material_id, document_id, filename, source_bytes, task_id, None, source_kind or "pdf"),
-        kwargs={"options": options},
+        kwargs={"options": options, "user_id": str(current_user["id"])},
         daemon=True,
     )
     thread.start()
@@ -1344,6 +1368,7 @@ def delete_material(
         ).fetchall()
 
         deleted_course_ids: list[str] = []
+        teaching_figure_keys: list[str] = []
         for row in course_rows:
             course_id = row[0]
             course_data_row = session.execute(
@@ -1371,6 +1396,13 @@ def delete_material(
                         "WHERE object_type = 'course' AND object_id = :cid"
                     ),
                     {"cid": course_id},
+                )
+                # 教材図（course_teaching_figures / teaching_figure_suggestions、
+                # migration 063）も course_id への FK が無いため明示削除する
+                # （教材図スタジオ設計書 §3.1。MinIO オブジェクトは commit 後に
+                # best-effort で削除する）。
+                teaching_figure_keys.extend(
+                    _teaching_figures_store.delete_figures_for_course(session, course_id) or []
                 )
                 # コース削除
                 session.execute(
@@ -1447,6 +1479,10 @@ def delete_material(
         raise
     finally:
         session.close()
+
+    # 教材図の MinIO オブジェクトは DB 削除の commit 後に best-effort で消す
+    # （ロールバック時に画像だけ消える事故を防ぐ）。
+    _remove_teaching_figure_objects(teaching_figure_keys)
 
     logger.info(
         "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
@@ -2932,6 +2968,11 @@ def delete_course(
             ),
             {"course_id": course_id},
         )
+        # 教材図（course_teaching_figures / teaching_figure_suggestions、migration 063）も
+        # course_id への FK が無いため明示削除する（教材図スタジオ設計書 §3.1）。
+        teaching_figure_keys = list(
+            _teaching_figures_store.delete_figures_for_course(session, course_id) or []
+        )
         # コース削除
         session.execute(
             sa_text("DELETE FROM learning_courses WHERE id = :course_id"),
@@ -2945,6 +2986,9 @@ def delete_course(
         raise
     finally:
         session.close()
+
+    # MinIO オブジェクトは commit 後に best-effort で削除する。
+    _remove_teaching_figure_objects(teaching_figure_keys)
 
     logger.info("Course %s (%s) deleted by user=%s", course_id, course_title, current_user["id"])
     # V層（migration 037）: コースの共有版状態を掃除し購読者へ通知する（orphan gap 解消）

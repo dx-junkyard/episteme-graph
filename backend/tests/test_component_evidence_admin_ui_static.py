@@ -2,10 +2,19 @@
 のうち、原稿スタジオ（admin-lecture-studio.js）担当分に対する静的ガードレール。
 
 対象:
-- 語彙マップ（LS_EVIDENCE_KIND_LABELS / LS_EVIDENCE_ROLE_LABELS /
-  LS_EVIDENCE_CONFIDENCE_LABELS）+ ヘルパー（lsEvidenceKindLabel /
-  lsEvidenceMetaLabel）が内部語彙（"component" / "support" / "title_similarity" 等）を
-  日本語ラベルへ変換すること。
+- 語彙マップ（LS_EVIDENCE_ROLE_LABELS / LS_EVIDENCE_CONFIDENCE_LABELS）+ ヘルパー
+  （lsEvidenceKindLabel / lsEvidenceMetaLabel / lsTopicMappingNoteHtml）が内部語彙
+  （"component" / "support" / "title_similarity" 等）を日本語ラベルへ変換すること。
+  なお種別（kind）の訳語そのものは element-vocab.js（window.ElementVocab）が正本で、
+  lsEvidenceKindLabel はそこへ委譲する（admin_ux_issues_2026-08-01.md §3.3 Phase 0。
+  正本側の内容は test_element_vocab_ui_static.py が検証する）。
+- **CP9（element_context_presentation_redesign.md §3.2 / §6 S3）**: 各根拠カードの
+  メタ行は「役割」だけを出し（lsEvidenceMetaLabel は単一引数）、トピック↔論文の
+  照合来歴（content_confidence）は転写しない。来歴は要素の性質ではなくトピックの属性
+  なので、ペイン見出しの注記（lsTopicMappingNoteHtml）が「このトピックと論文の
+  対応付け: タイトル一致 / タイトル類似（教員確認を推奨） / 対応付けなし」として
+  1回だけ描く。旧実装は全カードに「対応付け: 対応付けなし」を並べており、要素側の
+  欠陥に見える誤読を生んでいた。
 - lsRenderCourseMaterialPreview の evidence 分岐で component/claim がブロックカードでは
   なくインラインチップ（`ls-material-evidence-chip`）に格下げされていること。
 - 一方で equation/figure/source 側のブロックカードは維持され、
@@ -40,20 +49,15 @@ def _read() -> str:
 
 
 class TestEvidenceVocabulary:
-    def test_kind_label_map_defined_with_japanese_labels(self):
+    def test_kind_labels_delegated_to_element_vocab(self):
+        """種別の訳語辞書をこのファイルに再定義しない（正本 = element-vocab.js）。"""
         src = _read()
-        start = src.index("var LS_EVIDENCE_KIND_LABELS")
-        end = src.index("function lsCourseComponentById(componentId) {")
-        block = src[start:end]
-        assert "論理要素" in block
-        assert "主張" in block
-        assert "数式" in block
-        assert "図" in block
-        assert "出典" in block
+        assert "var LS_EVIDENCE_KIND_LABELS" not in src
+        assert "window.ElementVocab" in src
 
     def test_confidence_label_map_defined_with_japanese_labels(self):
         src = _read()
-        start = src.index("var LS_EVIDENCE_KIND_LABELS")
+        start = src.index("var LS_EVIDENCE_ROLE_LABELS")
         end = src.index("function lsCourseComponentById(componentId) {")
         block = src[start:end]
         assert "タイトル類似" in block
@@ -67,21 +71,76 @@ class TestEvidenceVocabulary:
         block = src[start:end]
         assert "根拠" in block
 
-    def test_kind_label_helper_falls_back_to_raw_value(self):
-        """未知の kind はマップに無くても原文へフォールバックする（情報を落とさない）。"""
+    def test_kind_label_helper_delegates_and_falls_back(self):
+        """kind の表示名は正本へ委譲し、正本未読み込み時は原文へフォールバックする
+        （情報を落とさない）。"""
         src = _read()
         start = src.index("function lsEvidenceKindLabel(kind) {")
         end = src.index("\n  }\n", start)
         body = src[start:end]
-        assert "LS_EVIDENCE_KIND_LABELS[kind] || kind" in body
+        assert "vocab.kindLabel(kind)" in body
+        assert "return kind;" in body
 
-    def test_meta_label_helper_combines_role_and_confidence(self):
+    def test_meta_label_helper_emits_role_only(self):
+        """CP9（element_context_presentation_redesign.md §3.2）: 根拠カードのメタ行は
+        「この根拠がトピックに対して果たす役割」だけを出す。トピック↔論文の照合来歴
+        （content_confidence）は要素の性質ではないため転写しない — 全カードに
+        「対応付け: 対応付けなし」が並び、要素側の欠陥に見える誤読を生んでいた。
+        来歴はペイン見出しの lsTopicMappingNoteHtml が1回だけ出す（下記クラス参照）。"""
         src = _read()
-        start = src.index("function lsEvidenceMetaLabel(role, confidence) {")
+        # 単一引数（role のみ）であること = confidence を受け取る余地がない。
+        assert "function lsEvidenceMetaLabel(role, confidence) {" not in src
+        start = src.index("function lsEvidenceMetaLabel(role) {")
         end = src.index("\n  }\n", start)
         body = src[start:end]
-        assert "対応付け: " in body
-        assert "roleLabel && confidenceLabel" in body
+        assert "LS_EVIDENCE_ROLE_LABELS[role]" in body
+        assert "対応付け" not in body
+        assert "confidence" not in body
+
+
+class TestMappingNoteMovedToPaneHeader:
+    """CP9 の移設先: 照合来歴はペイン見出しの注記として1回だけ描く。"""
+
+    def _note_block(self, src: str) -> str:
+        start = src.index("function lsTopicMappingNoteHtml(topic) {")
+        end = src.index("\n  }\n", start)
+        return src[start:end]
+
+    def test_note_helper_renders_confidence_as_a_header_fact(self):
+        src = _read()
+        block = self._note_block(src)
+        assert "topic.content_confidence" in block
+        assert "LS_EVIDENCE_CONFIDENCE_LABELS[confidence]" in block
+        assert "このトピックと論文の対応付け: " in block
+        assert "ls-evidence-mapping-note" in block
+
+    def test_note_is_omitted_when_confidence_is_unknown(self):
+        """旧コースデータ（content_confidence なし）では欄ごと出さない
+        = 事実を捏造しない。"""
+        block = self._note_block(_read())
+        assert 'if (!confidence) return "";' in block
+
+    def test_note_is_rendered_once_by_the_pane_renderer(self):
+        """ペイン見出しに1回だけ（カード側には出さない）。空リスト・フラット・
+        アウトラインの3経路すべてに同じ注記が付く。"""
+        src = _read()
+        start = src.index("function lsCourseEvidenceHtml(topic) {")
+        end = src.index("function lsCourseEvidenceCardHtml(", start)
+        block = src[start:end]
+        assert "var mappingNote = lsTopicMappingNoteHtml(topic);" in block
+        assert block.count("mappingNote +") == 3
+        card_start = src.index("function lsCourseEvidenceCardHtml(topic, item) {")
+        card_end = src.index("// ── Phase 2:", card_start)
+        assert "lsTopicMappingNoteHtml" not in src[card_start:card_end]
+
+    def test_confidence_labels_are_the_three_documented_values(self):
+        src = _read()
+        start = src.index("var LS_EVIDENCE_CONFIDENCE_LABELS")
+        end = src.index("\n  };\n", start)
+        block = src[start:end]
+        assert 'exact_title: "タイトル一致"' in block
+        assert 'title_similarity: "タイトル類似（教員確認を推奨）"' in block
+        assert 'none: "対応付けなし"' in block
 
 
 # ---------------------------------------------------------------------------
@@ -123,7 +182,9 @@ class TestMaterialPreviewChipification:
         assert "ls-material-evidence-card" in block
         assert "ls-material-embed-meta" in block
         assert "lsEvidenceKindLabel(evidenceItem.kind)" in block
-        assert "lsEvidenceMetaLabel(evidenceItem.role, evidenceItem.confidence)" in block
+        # CP9: メタ行は役割のみ（照合来歴はペイン見出しへ移設済み）。
+        assert "lsEvidenceMetaLabel(evidenceItem.role)" in block
+        assert "lsEvidenceMetaLabel(evidenceItem.role, evidenceItem.confidence)" not in block
         # 内部語彙（英語の role/confidence 生値）をそのまま結合する旧実装には戻っていない
         assert "[evidenceItem.role, evidenceItem.confidence].filter(Boolean).join" not in block
 
@@ -149,13 +210,22 @@ class TestRightPaneEvidenceList:
         block = src[start:end]
         assert "lsEvidenceKindLabel(item.kind)" in block
 
-    def test_evidence_cards_use_kind_and_meta_labels(self):
+    def test_evidence_cards_use_kind_and_role_only_meta_labels(self):
+        """右ペインのカードも kind は正本語彙、メタ行は役割のみ（CP9）。
+        照合来歴はカードではなくペイン見出しの注記が担う。"""
         src = _read()
         start = src.index("function lsCourseEvidenceHtml(topic) {")
         end = src.index("function lsFocusEvidence(key) {")
         block = src[start:end]
         assert "lsEvidenceKindLabel(item.kind)" in block
-        assert "lsEvidenceMetaLabel(item.role, item.confidence)" in block
+        assert "lsEvidenceMetaLabel(item.role)" in block
+        assert "lsEvidenceMetaLabel(item.role, item.confidence)" not in block
+        # カード本体のコードに「対応付け」の文言が混ざらない
+        # （申し送りコメントは残るのでコード行だけを見る）。
+        code = "\n".join(
+            line for line in block.splitlines() if not line.strip().startswith("//")
+        )
+        assert "対応付け" not in code
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +257,7 @@ class TestEs5Guard:
 
     def _regions(self):
         src = _read()
-        r1_start = src.index("var LS_EVIDENCE_KIND_LABELS")
+        r1_start = src.index("var LS_EVIDENCE_ROLE_LABELS")
         r1_end = src.index("function lsCourseComponentById(componentId) {")
         r2_start = src.index("function lsCourseEvidenceChipsHtml(topic) {")
         r2_end = src.index("function lsFocusEvidence(key) {")

@@ -15,6 +15,8 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
+from core.storage import get_storage_client
+from core.teaching_figures import store as teaching_figures_store
 
 from . import schema
 
@@ -125,8 +127,38 @@ def cancel_deletion(*, object_type: str, object_id: str, cancelled_by: str | Non
 # 物理削除（冪等）
 # ---------------------------------------------------------------------------
 
-def _purge_course(session, course_id: str) -> None:
+def _purge_teaching_figures(session, course_id: str) -> list[str]:
+    """教材図（``course_teaching_figures`` + ``teaching_figure_suggestions``、migration 063）を
+    削除し、MinIO キー一覧を返す（教材図スタジオ設計書 §3.1）。
+
+    どちらのテーブルも course_id への FK を持たないため CASCADE では消えない
+    （object_group_permissions と同じ orphan gap パターン）。MinIO オブジェクトの削除は
+    purge の commit 後に呼び出し側が best-effort で行う。
+    """
+    return list(teaching_figures_store.delete_figures_for_course(session, course_id) or [])
+
+
+def _remove_teaching_figure_objects(minio_keys: list[str]) -> None:
+    """教材図の MinIO オブジェクトを best-effort で削除する（失敗は WARN のみ）。"""
+    if not minio_keys:
+        return
+    try:
+        storage = get_storage_client()
+    except Exception:  # noqa: BLE001 — ストレージ不達でも DB 削除は有効
+        logger.warning("teaching figure object cleanup skipped (storage unavailable)", exc_info=True)
+        return
+    for key in minio_keys:
+        if not key:
+            continue
+        try:
+            storage.remove_object("figure-images", key)
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.warning("Failed to remove teaching figure object %s", key, exc_info=True)
+
+
+def _purge_course(session, course_id: str) -> list[str]:
     session.execute(sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"), {"cid": course_id})
+    figure_keys = _purge_teaching_figures(session, course_id)
     # object_group_permissions（migration 044）は course_id への FK を持たない
     # ポリモーフィックテーブルなので、CASCADE には頼れず明示的に削除する
     # （統合前の専用テーブル=migration 010 は learning_courses への FK CASCADE で
@@ -140,9 +172,10 @@ def _purge_course(session, course_id: str) -> None:
     )
     # CASCADE で learning_states / course スコープ theory_* も削除される
     session.execute(sa_text("DELETE FROM learning_courses WHERE id = :cid"), {"cid": course_id})
+    return figure_keys
 
 
-def _purge_document(session, document_id: str) -> None:
+def _purge_document(session, document_id: str) -> list[str]:
     doc = session.execute(
         sa_text("SELECT source_path, uploaded_by::text FROM documents WHERE id = CAST(:id AS uuid)"),
         {"id": document_id},
@@ -152,6 +185,7 @@ def _purge_document(session, document_id: str) -> None:
     id_forms = {"a": document_id, "b": source_path or document_id}
 
     # 1) この教材を source に含む所有者のコースを削除（delete_material と同スコープ）
+    figure_keys: list[str] = []
     if owner and source_path:
         needle = json.dumps([{"material_id": source_path}])
         course_ids = session.execute(
@@ -174,6 +208,10 @@ def _purge_document(session, document_id: str) -> None:
                 ),
                 {"cid": cid},
             )
+            # 教材図（migration 063）も course_id への FK が無いため明示削除する
+            # （_purge_course と同じ理由。ここは _purge_course を経由しない独立した
+            # コース削除経路なので、同じ後始末をここでも行う必要がある）。
+            figure_keys.extend(_purge_teaching_figures(session, cid))
             session.execute(sa_text("DELETE FROM learning_courses WHERE id = :cid"), {"cid": cid})
 
     # 2) document スコープの成果物（orphan gap 解消。document_id は UUID / material_id 両形）
@@ -231,6 +269,7 @@ def _purge_document(session, document_id: str) -> None:
     session.execute(sa_text("DELETE FROM chunks WHERE document_id = CAST(:a AS uuid)"), {"a": document_id})
     session.execute(sa_text("DELETE FROM documents WHERE id = CAST(:a AS uuid)"), {"a": document_id})
     session.execute(sa_text("DELETE FROM document_analysis_runs WHERE document_id IN (:a, :b)"), id_forms)
+    return figure_keys
 
 
 def _cleanup_version_tables(session, object_type: str, object_id: str) -> None:
@@ -287,12 +326,15 @@ def purge_object(*, object_type: str, object_id: str) -> dict:
             return {"purged": False, "already_purged": True}
 
         if object_type == schema.OBJECT_TYPE_COURSE:
-            _purge_course(session, object_id)
+            figure_keys = _purge_course(session, object_id)
         else:
-            _purge_document(session, object_id)
+            figure_keys = _purge_document(session, object_id)
 
         _cleanup_version_tables(session, object_type, object_id)
         session.commit()
+        # MinIO オブジェクトは commit 後に best-effort で削除する（DB 削除が確定して
+        # から消す — ロールバック時に画像だけ消える事故を防ぐ）。
+        _remove_teaching_figure_objects(figure_keys)
         return {"purged": True}
     except Exception:
         session.rollback()

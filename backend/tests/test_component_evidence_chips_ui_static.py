@@ -4,7 +4,7 @@
 対象:
 - frontend/public/js/app.js: component/claim をブロックカードではなくインライン
   チップに解決する renderMaterialEvidenceChip、kind の日本語ラベル
-  MATERIAL_EVIDENCE_KIND_LABELS、チップのクリック配線
+  materialEvidenceKindLabel（訳語の正本は element-vocab.js）、チップのクリック配線
   initMaterialEvidenceChipDelegation、文脈ポップオーバー
   openEvidenceChipPopover、Phase 2 文脈API 呼び出し
   fetchComponentContextAndRender、Phase 3 の 1-hop 近傍グラフ
@@ -40,21 +40,19 @@ def _read(p: Path) -> str:
 
 
 class TestKindLabelsAndMetaRemoval:
-    def test_kind_labels_map_defined_in_japanese(self):
+    def test_kind_labels_delegated_to_element_vocab(self):
+        """種別の訳語は element-vocab.js（window.ElementVocab）が正本。app.js に独自辞書を
+        再定義しない（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。訳語そのものは
+        test_element_vocab_ui_static.py が検証する。"""
         src = _read(APP_JS)
-        assert "var MATERIAL_EVIDENCE_KIND_LABELS = {" in src
-        start = src.index("var MATERIAL_EVIDENCE_KIND_LABELS = {")
-        end = src.index("};", start)
-        block = src[start:end]
-        assert "論理要素" in block  # component
-        assert "主張" in block      # claim
-        assert "出典" in block      # source
-        assert "図" in block        # figure
+        assert "var MATERIAL_EVIDENCE_KIND_LABELS" not in src
+        assert "function materialEvidenceKindLabel(kind) {" in src
+        assert "vocab.kindLabel(kind)" in src
 
-    def test_figure_and_source_cards_use_kind_label_map(self):
+    def test_figure_and_source_cards_use_kind_label_helper(self):
         src = _read(APP_JS)
-        assert "MATERIAL_EVIDENCE_KIND_LABELS.figure" in src
-        assert "MATERIAL_EVIDENCE_KIND_LABELS[evidenceItem.kind]" in src
+        assert 'materialEvidenceKindLabel("figure")' in src
+        assert "materialEvidenceKindLabel(evidenceItem.kind)" in src
 
     def test_learner_ui_never_prints_internal_meta(self):
         """role/confidence（パイプライン照合の来歴メタデータ）は学習UIに一切出さない。"""
@@ -273,6 +271,14 @@ function extractFrom(src, name){
 function extractMany(src, names){ return names.map(function(n){ return extractFrom(src,n); }).join("\n"); }
 // function ではない "var NAME = { ... };" / "var NAME = [ ... ];" 形式のモジュール
 // 定数を抽出する（オブジェクト・配列どちらの初期化子にも対応する）。
+// element-vocab.js（要素種別の表示名の正本 / window.ElementVocab）を app.js と同じ
+// ディレクトリから読み込む。app.js は独自の種別辞書を持たず ElementVocab へ委譲するため、
+// 表示名を検証する harness は必ずトップレベルで
+// eval(loadElementVocab(process.argv[2])) すること（var window の宣言より後）。
+function loadElementVocab(appPath){
+  const pathmod=require("path");
+  return require("fs").readFileSync(pathmod.join(pathmod.dirname(appPath),"element-vocab.js"),"utf8");
+}
 function extractVar(src, name){
   const s = src.indexOf("var " + name + " = ");
   if (s<0) throw new Error("missing var "+name);
@@ -302,7 +308,8 @@ const app = fs.readFileSync(process.argv[2], "utf8");
 var window = { katex: null };
 function escHtml(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 var materialEvidenceChipItems = {};
-eval(extractVar(app, "MATERIAL_EVIDENCE_KIND_LABELS"));
+eval(loadElementVocab(process.argv[2]));
+eval(extractFrom(app, "materialEvidenceKindLabel"));
 eval(extractVar(app, "MATERIAL_ELEMENT_CONTEXT_TYPES"));
 eval(extractMany(app, ["normalizeMaterialEvidenceId","normalizeMaterialLineBreaks","normalizeKatexFormula",
   "renderMaterialKatex","renderMaterialEquationBody","renderMaterialMissingEmbed",

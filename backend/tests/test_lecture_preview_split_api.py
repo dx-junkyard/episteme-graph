@@ -174,6 +174,132 @@ class TestPreviewSplitEndpointBehavior:
         assert data["slides"][0]["formulas"][0]["latex"] == "E=mc^2"
         assert data["slides"][1]["formulas"] == []
 
+    def test_auto_paginate_defaults_to_off(self, client):
+        """既定は従来どおり（マーカー分割のみ）。既存の呼び出しは不変。"""
+        long_text = "\n\n".join(["段落" + str(i) + "。" + "あ" * 300 for i in range(4)])
+        r = client.post(
+            "/api/admin/lecture-studio/preview-split",
+            headers=_headers("TEACHER"),
+            json={"display_text": long_text, "spoken_text": None, "formulas": []},
+        )
+        data = r.json()
+        assert len(data["slides"]) == 1
+        assert data["auto_paginated"] is False
+        assert data["spoken_degraded"] is False
+
+
+class TestPreviewSplitAutoPaginate:
+    """教材図スタジオ §7.5: 受講画面と同じ自動ページ分割を反映するオプション。
+
+    ``core.lecture.auto_paginate_slides``（``_build_topic_slides`` が使う正本）を
+    そのまま通すことを確認する（クライアント側に分割ロジックを再実装しないため）。
+    """
+
+    def _post(self, client, **body):
+        payload = {"display_text": "", "spoken_text": None, "formulas": []}
+        payload.update(body)
+        return client.post(
+            "/api/admin/lecture-studio/preview-split",
+            headers=_headers("TEACHER"),
+            json=payload,
+        )
+
+    def test_long_material_without_markers_is_paginated(self, client):
+        from core.lecture import auto_paginate_slides
+
+        display = "\n\n".join(["段落" + str(i) + "。" + "あ" * 300 for i in range(4)])
+        spoken = "\n\n".join(["よみ" + str(i) + "。" + "い" * 300 for i in range(4)])
+        expected, _mismatch = auto_paginate_slides(display, spoken, [])
+
+        r = self._post(client, display_text=display, spoken_text=spoken, auto_paginate=True)
+        data = r.json()
+
+        assert len(data["slides"]) == len(expected) > 1
+        assert [s["display_text"] for s in data["slides"]] == [s["display_text"] for s in expected]
+        assert data["auto_paginated"] is True
+        assert data["display_segment_count"] == len(expected)
+        assert data["spoken_degraded"] is False
+
+    def test_figure_embeds_count_toward_the_page_boundary(self, client):
+        """図1個=200字換算のため、図を入れるとページ境界が動く（§7.5）。"""
+        base = "\n\n".join(["段落" + str(i) + "。" + "あ" * 120 for i in range(4)])
+        with_figures = "\n\n".join(
+            ["段落" + str(i) + "。" + "あ" * 120 + "\n\n![[figure:fig-" + str(i) + "]]" for i in range(4)]
+        )
+        plain = self._post(client, display_text=base, auto_paginate=True).json()
+        figured = self._post(client, display_text=with_figures, auto_paginate=True).json()
+        assert len(figured["slides"]) > len(plain["slides"])
+
+    def test_spoken_degradation_is_reported(self, client):
+        """読み上げが同数ページに割れないと spoken は空（タイマー送り）に縮退する。"""
+        display = "\n\n".join(["段落" + str(i) + "。" + "あ" * 300 for i in range(4)])
+        r = self._post(
+            client, display_text=display, spoken_text="ひとかたまりの読み上げ原稿", auto_paginate=True,
+        )
+        data = r.json()
+        assert len(data["slides"]) > 1
+        assert data["spoken_degraded"] is True
+        assert data["spoken_segment_count"] == 0
+        assert all(not (s["spoken_text"] or "") for s in data["slides"])
+
+    def test_explicit_markers_take_precedence(self, client):
+        r = self._post(
+            client,
+            display_text="Slide A\n===\nSlide B",
+            spoken_text="Speak A\n===\nSpeak B",
+            auto_paginate=True,
+        )
+        data = r.json()
+        assert len(data["slides"]) == 2
+        assert data["auto_paginated"] is False
+        assert data["spoken_degraded"] is False
+        assert data["display_segment_count"] == 2
+        assert data["spoken_segment_count"] == 2
+
+    def test_marker_mismatch_still_reports_the_collapse(self, client):
+        """マーカー分割数の不一致は既存どおり「1枚に統合」+ 縮退前の区切り数を返す。"""
+        r = self._post(
+            client,
+            display_text="Slide A\n===\nSlide B",
+            spoken_text="Speak only one block",
+            auto_paginate=True,
+        )
+        data = r.json()
+        assert data["mismatch"] is True
+        assert len(data["slides"]) == 1
+        assert data["display_segment_count"] == 2
+        assert data["spoken_segment_count"] == 1
+        assert data["auto_paginated"] is False
+
+    def test_short_material_is_a_single_slide(self, client):
+        r = self._post(client, display_text="短い本文", spoken_text="読み上げ", auto_paginate=True)
+        data = r.json()
+        assert len(data["slides"]) == 1
+        assert data["auto_paginated"] is False
+        assert data["spoken_degraded"] is False
+        assert data["display_segment_count"] == 1
+        assert data["spoken_segment_count"] == 1
+
+    def test_auto_paginate_does_not_touch_the_database(self, client, monkeypatch):
+        import core.postgres as postgres_mod
+
+        def _boom(*_a, **_k):
+            raise AssertionError("preview-split must not touch the database")
+
+        monkeypatch.setattr(postgres_mod, "get_session", _boom)
+        display = "\n\n".join(["段落" + str(i) + "。" + "あ" * 300 for i in range(4)])
+        assert self._post(client, display_text=display, auto_paginate=True).status_code == 200
+
+    def test_student_is_still_forbidden(self, client):
+        r = client.post(
+            "/api/admin/lecture-studio/preview-split",
+            headers=_headers("STUDENT"),
+            json={"display_text": "A", "auto_paginate": True},
+        )
+        assert r.status_code == 403
+
+
+class TestPreviewSplitDatabaseIsolation:
     def test_does_not_touch_database(self, client, monkeypatch):
         """DB 非変更エンドポイントであることの回帰確認。"""
         import core.postgres as postgres_mod

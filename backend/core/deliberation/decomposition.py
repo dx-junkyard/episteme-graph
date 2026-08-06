@@ -27,7 +27,9 @@ from core.document_pipeline.persistence import get_latest_analysis_run
 from core.deliberation import identity_links as identity_links_mod
 from core.deliberation import refs as refs_mod
 from core.deliberation.schema import (
+    ELEMENT_DERIVATION,
     ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
     ELEMENT_THEORY_CLAIM,
@@ -98,7 +100,9 @@ def _agent_id_candidates_for_focus(session: Any, ref: ElementRef) -> set[str]:
     elif ref.element_type == ELEMENT_THEORY_CLAIM:
         sql = "SELECT source_scope FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
     else:
-        # figure / equation / shared_part: element_explanations は既に正準 ID なので
+        # figure / equation / evidence / derivation / shared_part: element_explanations は
+        # 既に正準 ID なので（evidence / derivation は element_explanations の語彙自体に
+        # 無いため常に 0 件に縮退する）
         # legacy_ids 展開は不要（呼び出し元でも shared_part は既に scope ガードで弾かれる）。
         return match_ids
     try:
@@ -410,6 +414,91 @@ def _decompose_equation(ref: ElementRef) -> dict[str, Any]:
     }
 
 
+def _decompose_evidence(ref: ElementRef) -> dict[str, Any]:
+    """evidence（PDF 原文の引用）の内訳（設計書 §16）。
+
+    独立テーブル無し・artifact（evidence_registry）由来の best-effort。引用本文と
+    原文上の位置（page / section_id / block_id / span）だけを事実として並べ、
+    確度の生値は載せない（W8）。
+    """
+    for record in refs_mod.evidence_records(ref.document_id or ""):
+        if str(record.get("evidence_id") or "") != str(ref.element_id):
+            continue
+        source = _json(record.get("source"), {})
+        quote = str(record.get("evidence_text") or "")
+        return {
+            "element_type": ELEMENT_EVIDENCE,
+            "label": (quote[:80] or str(ref.element_id)),
+            "fields": {
+                "evidence_id": str(ref.element_id),
+                "evidence_text": quote,
+                "evidence_role": str(record.get("evidence_role") or ""),
+                "page": source.get("page"),
+                "section_id": source.get("section_id"),
+                "block_id": source.get("block_id"),
+                "span": (
+                    f"{source.get('span_start')}–{source.get('span_end')}"
+                    if source.get("span_end") not in (None, "")
+                    else ""
+                ),
+                "parent_evidence_id": record.get("parent_evidence_id"),
+            },
+            "notes": ["evidence は独立テーブル無し・artifact 由来の best-effort（設計書 §16）"],
+        }
+    raise ElementResolutionError(
+        f"evidence not found: {ref.element_id}", kind="not_found"
+    )
+
+
+def _decompose_derivation(ref: ElementRef) -> dict[str, Any]:
+    """derivation（導出チェーン）の内訳（設計書 §16）。
+
+    独立テーブル無し・artifact（derivation_chain）由来の best-effort。step 列は
+    ``step_id`` / ``operation``（+ domain 固有名は ``operation_subtype``）/ 入出力式のみを
+    並べる。step の確度の生値は載せない（W8）。
+    """
+    for chain in refs_mod.derivation_records(ref.document_id or ""):
+        if str(chain.get("derivation_id") or "") != str(ref.element_id):
+            continue
+        steps: list[dict[str, Any]] = []
+        for step in _json(chain.get("steps"), []):
+            if not isinstance(step, dict):
+                continue
+            steps.append(
+                {
+                    "step_id": str(step.get("step_id") or ""),
+                    "operation": str(step.get("operation") or ""),
+                    "operation_subtype": step.get("operation_subtype"),
+                    "input_equation_ids": _json(step.get("input_equation_ids"), []),
+                    "output_equation_ids": _json(step.get("output_equation_ids"), []),
+                    "review_status": str(step.get("review_status") or ""),
+                }
+            )
+        notes = ["derivation は独立テーブル無し・artifact 由来の best-effort（設計書 §16）"]
+        if chain.get("review_reasons"):
+            notes.append("チェーンに review_reasons あり")
+        return {
+            "element_type": ELEMENT_DERIVATION,
+            "label": f"導出「{ref.element_id}」",
+            "fields": {
+                "derivation_id": str(ref.element_id),
+                "chain_type": str(chain.get("chain_type") or ""),
+                "operation": str(chain.get("operation") or ""),
+                "operation_family": str(chain.get("operation_family") or ""),
+                "teaching_takeaway": str(chain.get("teaching_takeaway") or ""),
+                "review_status": str(chain.get("review_status") or ""),
+                "source_section_ids": _json(chain.get("source_section_ids"), []),
+                "input_equation_ids": _json(chain.get("input_equation_ids"), []),
+                "output_equation_ids": _json(chain.get("output_equation_ids"), []),
+                "steps": steps,
+            },
+            "notes": notes,
+        }
+    raise ElementResolutionError(
+        f"derivation not found: {ref.element_id}", kind="not_found"
+    )
+
+
 def _approved_contextual_explanation_for_instance(
     element_type: str, element_id: str, document_id: str
 ) -> str | None:
@@ -543,6 +632,8 @@ _DISPATCH = {
     ELEMENT_THEORY_COMPONENT: _decompose_theory_component,
     ELEMENT_FIGURE: _decompose_figure,
     ELEMENT_EQUATION: _decompose_equation,
+    ELEMENT_EVIDENCE: _decompose_evidence,
+    ELEMENT_DERIVATION: _decompose_derivation,
     ELEMENT_SHARED_PART: _decompose_shared_part,
 }
 

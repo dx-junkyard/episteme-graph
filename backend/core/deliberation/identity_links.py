@@ -25,6 +25,7 @@ from core.postgres import get_session
 from core.deliberation.schema import (
     ElementRef,
     ElementResolutionError,
+    IDENTITY_LINKABLE_ELEMENT_TYPES,
     IDENTITY_LINK_DECIDABLE_STATUSES,
     IDENTITY_LINK_STATUS_CANDIDATE,
     SCOPE_DOCUMENT,
@@ -119,6 +120,15 @@ def create_candidate(
         raise ElementResolutionError(
             "identity link source must be a document-scoped instance "
             f"(got scope={instance_ref.scope!r})",
+            kind="invalid",
+        )
+    if instance_ref.element_type not in IDENTITY_LINKABLE_ELEMENT_TYPES:
+        # 設計書 §16: evidence（原文の引用）/ derivation（この論文の導出手順）は
+        # 共通部品化の単位ではないため同一性リンクの source にしない。migration 048 の
+        # CHECK 制約と同じ集合をコード側でも fail-closed に強制する（DB エラーで 500 に
+        # なる前に ElementResolutionError へ倒す）。
+        raise ElementResolutionError(
+            f"element_type {instance_ref.element_type!r} cannot be linked to a shared part",
             kind="invalid",
         )
     if not str(shared_part_id or "").strip():

@@ -1,0 +1,548 @@
+# 宇宙物理基準地図 v0.1 — 骨格専用バンドルドメイン（カートリッジ一式は持たない）。
+# 正本: docs/features/knowledge_landscape_design.md §6.3（10アンカー = 入力仕様書 §6）。
+# 起動時に core/atlas_store.py::import_bundled_skeletons が DB へ冪等シードし、
+# 以後は DB（atlas_skeletons）が正本になる（本ファイルは新規環境のシード兼フォールバック）。
+# 概念の layout は「領域内相対座標」（既存規約）。編集は draft→freeze フローで行うこと。
+atlas_skeleton:
+  version: '2026.1'
+  cartridge: astrophysics
+  status: frozen
+  generated_by: reference_map:astrophysics_v0.1_spec_2026-08-04
+  reviewed_by:
+  - faculty:reference_import
+  changelog:
+  - version: '2026.1'
+    note: 宇宙物理基準地図 v0.1（入力仕様書 §6 の10アンカーを初期座標として取込）
+    credits: []
+  regions:
+  - id: cosmology
+    label: 宇宙論・大規模構造
+    layout:
+      x: 0.03
+      y: 0.05
+      w: 0.3
+      h: 0.26
+    concepts:
+    - id: early_universe_inflation
+      label: 初期宇宙・インフレーション
+      layout:
+        x: 0.26
+        y: 0.18
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: cmb
+      label: 宇宙背景放射
+      layout:
+        x: 0.72
+        y: 0.18
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: cosmic_expansion
+      label: 宇宙膨張
+      layout:
+        x: 0.26
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: dark_matter
+      label: 暗黒物質
+      layout:
+        x: 0.72
+        y: 0.5
+      seed_status:
+        value: assumed
+        reviewed: true
+    - id: dark_energy
+      label: 暗黒エネルギー
+      layout:
+        x: 0.26
+        y: 0.82
+      seed_status:
+        value: assumed
+        reviewed: true
+    - id: large_scale_structure
+      label: 大規模構造形成
+      layout:
+        x: 0.72
+        y: 0.82
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: galaxies
+    label: 銀河・銀河団
+    layout:
+      x: 0.36
+      y: 0.05
+      w: 0.28
+      h: 0.26
+    concepts:
+    - id: galaxy_formation_evolution
+      label: 銀河形成・進化
+      layout:
+        x: 0.26
+        y: 0.2
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: agn
+      label: 活動銀河核
+      layout:
+        x: 0.72
+        y: 0.2
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: supermassive_black_holes
+      label: 超大質量ブラックホール
+      layout:
+        x: 0.26
+        y: 0.52
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: galaxy_clusters
+      label: 銀河団
+      layout:
+        x: 0.72
+        y: 0.52
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: gravitational_lensing
+      label: 重力レンズ
+      layout:
+        x: 0.49
+        y: 0.84
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: ism_star_formation
+    label: 星間物質・星形成
+    layout:
+      x: 0.67
+      y: 0.05
+      w: 0.3
+      h: 0.26
+    concepts:
+    - id: molecular_clouds
+      label: 分子雲
+      layout:
+        x: 0.28
+        y: 0.28
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: interstellar_dust
+      label: ダスト
+      layout:
+        x: 0.72
+        y: 0.28
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: star_formation
+      label: 星形成
+      layout:
+        x: 0.28
+        y: 0.75
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: stellar_feedback
+      label: フィードバック
+      layout:
+        x: 0.72
+        y: 0.75
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: high_energy
+    label: 高エネルギー天体・コンパクト天体
+    layout:
+      x: 0.36
+      y: 0.36
+      w: 0.28
+      h: 0.26
+    concepts:
+    - id: black_holes
+      label: ブラックホール
+      layout:
+        x: 0.26
+        y: 0.18
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: neutron_stars
+      label: 中性子星
+      layout:
+        x: 0.72
+        y: 0.18
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: supernovae
+      label: 超新星
+      layout:
+        x: 0.26
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: gamma_ray_bursts
+      label: ガンマ線バースト
+      layout:
+        x: 0.72
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: cosmic_rays
+      label: 宇宙線
+      layout:
+        x: 0.26
+        y: 0.82
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: accretion_and_jets
+      label: 降着・ジェット
+      layout:
+        x: 0.72
+        y: 0.82
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: stars
+    label: 恒星・恒星進化
+    layout:
+      x: 0.67
+      y: 0.36
+      w: 0.3
+      h: 0.26
+    concepts:
+    - id: stellar_interiors
+      label: 恒星内部構造
+      layout:
+        x: 0.26
+        y: 0.18
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: stellar_atmospheres
+      label: 恒星大気
+      layout:
+        x: 0.72
+        y: 0.18
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: binary_stars
+      label: 連星
+      layout:
+        x: 0.26
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: variable_stars
+      label: 変光星
+      layout:
+        x: 0.72
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: nucleosynthesis
+      label: 元素合成
+      layout:
+        x: 0.26
+        y: 0.82
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: late_stellar_evolution
+      label: 晩期進化
+      layout:
+        x: 0.72
+        y: 0.82
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: fundamental_physics
+    label: 基礎物理・重力・素粒子宇宙
+    layout:
+      x: 0.03
+      y: 0.36
+      w: 0.3
+      h: 0.26
+    concepts:
+    - id: general_relativity
+      label: 一般相対論
+      layout:
+        x: 0.26
+        y: 0.2
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: gravitational_waves
+      label: 重力波
+      layout:
+        x: 0.72
+        y: 0.2
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: particles_and_fields
+      label: 素粒子・場
+      layout:
+        x: 0.26
+        y: 0.52
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: dark_sector_physics
+      label: 暗黒成分の物理
+      layout:
+        x: 0.72
+        y: 0.52
+      seed_status:
+        value: assumed
+        reviewed: true
+    - id: early_universe_physics
+      label: 初期宇宙の物理
+      layout:
+        x: 0.49
+        y: 0.84
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: sun_heliosphere
+    label: 太陽・太陽圏
+    layout:
+      x: 0.36
+      y: 0.67
+      w: 0.28
+      h: 0.26
+    concepts:
+    - id: solar_magnetism_atmosphere
+      label: 太陽磁場・太陽大気
+      layout:
+        x: 0.28
+        y: 0.28
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: solar_wind
+      label: 太陽風
+      layout:
+        x: 0.72
+        y: 0.28
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: space_weather
+      label: 宇宙天気
+      layout:
+        x: 0.5
+        y: 0.75
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: planetary
+    label: 惑星系・系外惑星
+    layout:
+      x: 0.67
+      y: 0.67
+      w: 0.3
+      h: 0.26
+    concepts:
+    - id: planet_formation
+      label: 惑星形成
+      layout:
+        x: 0.26
+        y: 0.2
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: exoplanets
+      label: 系外惑星
+      layout:
+        x: 0.72
+        y: 0.2
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: protoplanetary_disks
+      label: 原始惑星系円盤
+      layout:
+        x: 0.26
+        y: 0.52
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: planetary_atmospheres
+      label: 惑星大気
+      layout:
+        x: 0.72
+        y: 0.52
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: habitability
+      label: 生命可能性
+      layout:
+        x: 0.49
+        y: 0.84
+      seed_status:
+        value: assumed
+        reviewed: true
+  - id: fundamental_astronomy
+    label: 基礎天文学・天体力学
+    layout:
+      x: 0.03
+      y: 0.67
+      w: 0.3
+      h: 0.12
+    concepts:
+    - id: astrometry
+      label: 位置天文学
+      layout:
+        x: 0.18
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: orbital_dynamics
+      label: 軌道力学
+      layout:
+        x: 0.5
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: distance_scale
+      label: 距離尺度
+      layout:
+        x: 0.82
+        y: 0.5
+      seed_status:
+        value: verified
+        reviewed: true
+  - id: observation_methods
+    label: 観測・装置・データ解析
+    layout:
+      x: 0.03
+      y: 0.82
+      w: 0.3
+      h: 0.13
+    concepts:
+    - id: multiwavelength_observation
+      label: 多波長観測
+      layout:
+        x: 0.18
+        y: 0.3
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: time_domain_astronomy
+      label: 時間領域天文学
+      layout:
+        x: 0.5
+        y: 0.3
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: spectroscopy_photometry
+      label: 分光・測光
+      layout:
+        x: 0.82
+        y: 0.3
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: statistical_inference
+      label: 統計推論
+      layout:
+        x: 0.18
+        y: 0.76
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: numerical_simulation
+      label: シミュレーション
+      layout:
+        x: 0.5
+        y: 0.76
+      seed_status:
+        value: verified
+        reviewed: true
+    - id: instruments_and_detectors
+      label: 装置・検出器
+      layout:
+        x: 0.82
+        y: 0.76
+      seed_status:
+        value: verified
+        reviewed: true
+  edges:
+  - from: cosmology
+    to: galaxies
+    kind: adjacent
+  - from: galaxies
+    to: ism_star_formation
+    kind: adjacent
+  - from: ism_star_formation
+    to: stars
+    kind: adjacent
+  - from: stars
+    to: high_energy
+    kind: adjacent
+  - from: stars
+    to: planetary
+    kind: adjacent
+  - from: stars
+    to: sun_heliosphere
+    kind: adjacent
+  - from: cosmology
+    to: fundamental_physics
+    kind: related
+  - from: high_energy
+    to: fundamental_physics
+    kind: related
+  - from: galaxies
+    to: fundamental_physics
+    kind: related
+  - from: planetary
+    to: fundamental_astronomy
+    kind: related
+  - from: sun_heliosphere
+    to: fundamental_astronomy
+    kind: related
+  - from: galaxies
+    to: fundamental_astronomy
+    kind: related
+  - from: observation_methods
+    to: cosmology
+    kind: related
+  - from: observation_methods
+    to: galaxies
+    kind: related
+  - from: observation_methods
+    to: ism_star_formation
+    kind: related
+  - from: observation_methods
+    to: stars
+    kind: related
+  - from: observation_methods
+    to: high_energy
+    kind: related
+  - from: observation_methods
+    to: planetary
+    kind: related
+  - from: observation_methods
+    to: sun_heliosphere
+    kind: related
+  concept_bindings: []

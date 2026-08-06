@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。2026-07-31 時点では全229アンカーがマップ済み
+no_hit 経路で需要を計測する）。2026-07-31 時点では全236アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -77,6 +77,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "course-management.perm-add",
         "course-management.quick-publish-btn",
         "course-management.refresh",
+        "course-management.release-review-btn",
         "course-management.sharing-dashboard-btn",
         "course-management.version-btn",
         "course-management.visibility-apply",
@@ -178,6 +179,16 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.evidence-tab-pdf",
         "lecture-studio.extract-claims-btn",
         "lecture-studio.extract-theory-btn",
+        "lecture-studio.figure-studio-adopt",
+        "lecture-studio.figure-studio-caption",
+        "lecture-studio.figure-studio-insert",
+        "lecture-studio.figure-studio-modal",
+        "lecture-studio.figure-studio-restore",
+        "lecture-studio.figure-studio-retire",
+        "lecture-studio.figure-studio-send",
+        "lecture-studio.figure-suggestions",
+        "lecture-studio.figure-suggestions-generate",
+        "lecture-studio.insert-figure",
         "lecture-studio.insert-slide-marker-btn",
         "lecture-studio.more-menu",
         "lecture-studio.nav-components",
@@ -189,6 +200,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.save-btn",
         "lecture-studio.settings-btn",
         "lecture-studio.stumble-tab-evidence",
+        "lecture-studio.stumble-tab-figures",
         "lecture-studio.stumble-tab-stumble",
         "lecture-studio.theory-tab-claims",
         "lecture-studio.theory-tab-graph",
@@ -217,6 +229,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.figure-overlay",
         "materials.figure-promote",
         "materials.figures-modal",
+        "materials.landscape-modal",
+        "materials.landscape-propose",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
@@ -229,6 +243,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-estimate",
         "materials.row-figures",
         "materials.row-inventory",
+        "materials.row-landscape",
+        "materials.row-more-menu",
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
         "materials.row-resume-analysis",
@@ -236,6 +252,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-share",
         "materials.row-version",
         "materials.upload-zone",
+        "release-review.modal",
+        "release-review.next",
+        "release-review.publish",
         "schema-proposals.approve-canary-btn",
         "schema-proposals.approve-full-btn",
         "schema-proposals.canary-confirm-btn",
@@ -360,6 +379,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "course-management.quick-publish-btn": "teacher/13-admin-course-management.md#quick-publish-btn",
     # 更新
     "course-management.refresh": "teacher/13-admin-course-management.md#refresh",
+    # 確認して公開（リリース前の確認ウィザードを開く）
+    "course-management.release-review-btn": "teacher/13-admin-course-management.md#release-review-btn",
     # 共有ダッシュボード
     "course-management.sharing-dashboard-btn": "teacher/13-admin-course-management.md#sharing-dashboard-btn",
     # 版の管理
@@ -580,6 +601,26 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.extract-claims-btn": "teacher/14-admin-lecture-studio.md#extract-claims-btn",
     # 論理要素候補を抽出
     "lecture-studio.extract-theory-btn": "teacher/14-admin-lecture-studio.md#extract-theory-btn",
+    # 採用して挿入（教材図スタジオ）
+    "lecture-studio.figure-studio-adopt": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # キャプションを直す（既存の図から選ぶタブ / このコースで作った図）
+    "lecture-studio.figure-studio-caption": "teacher/14-admin-lecture-studio.md#figure-studio-caption",
+    # 教材に挿入 / 採用して挿入（既存の図から選ぶタブ）
+    "lecture-studio.figure-studio-insert": "teacher/14-admin-lecture-studio.md#figure-studio-insert",
+    # 教材図スタジオ（モーダル本体 / 既存の図から選ぶタブ）
+    "lecture-studio.figure-studio-modal": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # 採用に戻す（回収済みの図）
+    "lecture-studio.figure-studio-restore": "teacher/14-admin-lecture-studio.md#figure-studio-restore",
+    # 回収する（採用済みの図）
+    "lecture-studio.figure-studio-retire": "teacher/14-admin-lecture-studio.md#figure-studio-retire",
+    # 送信（教材図スタジオの AI との相談）
+    "lecture-studio.figure-studio-send": "teacher/14-admin-lecture-studio.md#figure-studio",
+    # 図の提案ペイン
+    "lecture-studio.figure-suggestions": "teacher/14-admin-lecture-studio.md#figure-suggestions",
+    # 提案を生成
+    "lecture-studio.figure-suggestions-generate": "teacher/14-admin-lecture-studio.md#figure-suggestions",
+    # 🖼 図を挿入
+    "lecture-studio.insert-figure": "teacher/14-admin-lecture-studio.md#insert-figure",
     # + スライド区切りを挿入
     "lecture-studio.insert-slide-marker-btn": "teacher/14-admin-lecture-studio.md#insert-slide-marker-btn",
     # コース設定 ▼
@@ -602,6 +643,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.settings-btn": "teacher/14-admin-lecture-studio.md#settings-btn",
     # 根拠リンク
     "lecture-studio.stumble-tab-evidence": "teacher/14-admin-lecture-studio.md#stumble-tabs",
+    # 図の提案（右ペイン第3トグル）
+    "lecture-studio.stumble-tab-figures": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # つまづき
     "lecture-studio.stumble-tab-stumble": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # 主張
@@ -666,6 +709,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.figure-promote": "teacher/11-admin-materials.md#figure-promote",
     # 図・画像モーダル
     "materials.figures-modal": "teacher/11-admin-materials.md#figures-modal",
+    # 位置づけ（分野マップ）モーダル
+    "materials.landscape-modal": "teacher/11-admin-materials.md#landscape-modal",
+    # AIで再提案（配置候補の再生成）
+    "materials.landscape-propose": "teacher/11-admin-materials.md#landscape-propose",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス
     "materials.library-entry-merge-target": "teacher/11-admin-materials.md#library-entry-merge-target",
     # ライブラリへ昇格モーダル
@@ -690,6 +737,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-figures": "teacher/11-admin-materials.md#row-figures",
     # 検出要素
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
+    # 位置づけ（分野マップ）…
+    "materials.row-landscape": "teacher/11-admin-materials.md#landscape-open",
+    # 操作メニュー（⋯）— 行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）
+    "materials.row-more-menu": "teacher/11-admin-materials.md#row-more-menu",
     # PDF再登録
     "materials.row-pdf-reupload": "teacher/11-admin-materials.md#pdf-reupload",
     # パイプラインを実行 ▼
@@ -704,6 +755,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-version": "teacher/11-admin-materials.md#row-version",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
+
+    # --- release-review.* — リリース前の確認ウィザード（release_review_flow_design.md。コース管理/コースビルダーから開く横断UI） -
+    # ウィザード本体（3ステップ: 学習マップ → 論文の位置づけ → 公開）
+    "release-review.modal": "teacher/13-admin-course-management.md#release-review-modal",
+    # 各ステップの主ボタン（＝確認したものとして記録する）
+    "release-review.next": "teacher/13-admin-course-management.md#release-review-next",
+    # 公開する
+    "release-review.publish": "teacher/13-admin-course-management.md#release-review-publish",
 
     # --- schema-proposals.* — スキーマ提案タブ --------------------------------------------
     # カナリアリリース（特定コースのみ）

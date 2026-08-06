@@ -77,7 +77,10 @@ class TestLlmUsageAdminJsWiring:
         assert "tab-btn-llm-usage" in body
 
     def test_material_row_has_estimate_button(self):
-        assert 'class="admin-estimate-btn"' in self.js
+        # 教材行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）で、見積り導線は
+        # 行の裸のボタンから「⋯」メニューの項目（ls-menu-item）へ移った。
+        # 担体のクラス（.admin-estimate-btn = バインド先）とラベルの存在を固定する。
+        assert 'class="ls-menu-item admin-estimate-btn"' in self.js
         assert "解析コスト見積り" in self.js
 
     def test_estimate_button_no_cost_wording_near_definition(self):

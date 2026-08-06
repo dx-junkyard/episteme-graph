@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import timedelta
 from functools import lru_cache
 
 from minio import Minio
 
 from core.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 BUCKETS = ("raw-papers", "raw-texts", "figure-images")
 
@@ -68,6 +71,21 @@ class StorageManager:
             content_type=content_type,
         )
         return object_name
+
+    def remove_object(self, bucket: str, object_name: str) -> None:
+        """Delete an object from MinIO (best-effort).
+
+        教材図スタジオ（``course_teaching_figures``）等の孤児掃除で使う。DB 行の削除を
+        止めないため、失敗は WARN ログのみで例外を伝播させない（設計書
+        ``docs/features/teaching_figure_studio_design.md`` §3.1）。
+        """
+        try:
+            self.client.remove_object(bucket, object_name)
+        except Exception:  # noqa: BLE001 — best-effort（呼び出し側の削除処理を止めない）
+            logger.warning(
+                "failed to remove MinIO object %s/%s (ignored)", bucket, object_name,
+                exc_info=True,
+            )
 
     def get_object(self, bucket: str, object_name: str) -> bytes:
         """Download an object from MinIO and return its bytes."""

@@ -93,9 +93,17 @@
     // コース分だけ揃うまで音声生成を有効化しない（それまでは「読み込み中」扱い）。
     scriptsLoaded: false,
     structureLoaded: false,
-    // 再構成ループ (R層): コーストピック右ペインの表示 ("evidence" | "stumble")
+    // 再構成ループ (R層): コーストピック右ペインの表示
+    // ("evidence" | "stumble" | "figures"。figures = 教材図スタジオの「図の提案」)
     rightPaneMode: "evidence",
     stumbleByDocument: {},
+    // 教材図スタジオ（teaching_figure_studio_design.md §7.3）: コース単位の
+    // figure_id → {caption, image_url, document_id, teaching} マップ。
+    // course-structure レスポンスの figures_index をそのまま保持し、
+    // ![[figure:id]] プレビューの 2段目フォールバックに使う。コース切替でクリアする。
+    figuresIndex: {},
+    // 図の提案（同 §5.3）の取得キャッシュ。キーは topic_id。コース切替でクリアする。
+    figureSuggestionsByTopic: {},
     // 根拠リンクカードの上位/下位コンテキスト（W層 context lens）の遅延取得キャッシュ。
     // キーは "<element_type>:<正規化id>@<document_id>"。コース切替でクリアする。
     evidenceContextByKey: {},
@@ -298,6 +306,9 @@
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
         lsState.evidenceContextByKey = {};
+        // 教材図スタジオ: コース単位のキャッシュ（figures_index / 図の提案）もクリアする。
+        lsState.figuresIndex = {};
+        lsState.figureSuggestionsByTopic = {};
         lsCloseAudioLangModal();
         // ボタンはチャンク読み込み完了後に lsRenderChunkList で制御するため
         // ここでは一旦無効化して読み込みを待つ
@@ -333,6 +344,9 @@
         lsState.reconReviewCount = null;
         lsState.stumbleByDocument = {};
         lsState.evidenceContextByKey = {};
+        // 教材図スタジオ: コース単位のキャッシュ（figures_index / 図の提案）もクリアする。
+        lsState.figuresIndex = {};
+        lsState.figureSuggestionsByTopic = {};
         lsCloseAudioLangModal();
         if (audioAllBtn) audioAllBtn.disabled = true;
         settingsBtn.disabled = true;
@@ -923,6 +937,10 @@
         if (lsState.courseId !== courseId) return;
         lsState.structureLoaded = true;
         lsState.courseStructure = data || null;
+        // 教材図スタジオ（§7.3）: コース単位の figures_index を保持する。
+        // 未対応バックエンドでは空オブジェクトに縮退する（プレビューは従来どおり
+        // evidence_links 由来の図のみ解決する）。
+        lsState.figuresIndex = (data && data.figures_index) || {};
         lsUpdateCourseControls();
         if (lsState.leftTab === "course") lsRenderCourseStructure();
       })
@@ -1758,7 +1776,11 @@
       });
     }
     if (!preview) return;
-    if (lsState.rightPaneMode === "stumble") {
+    if (lsState.rightPaneMode === "figures") {
+      // 教材図スタジオ（teaching_figure_studio_design.md §5.3）: 図の提案ペイン。
+      if (rightTitle) rightTitle.textContent = "図の提案";
+      lsRenderFigureSuggestionsPane(topic, preview);
+    } else if (lsState.rightPaneMode === "stumble") {
       if (rightTitle) rightTitle.textContent = "つまづき";
       preview.innerHTML = '<div class="ls-course-muted">つまづきの集計を読み込み中…</div>';
       lsLoadStumbleSummary(topic, preview);
@@ -1767,6 +1789,402 @@
       preview.innerHTML = lsCourseEvidenceHtml(topic);
       lsBindCourseEvidenceCards(topic, preview);
     }
+  }
+
+  // ── 図の提案（教材図スタジオ, teaching_figure_studio_design.md §5.3）─────────
+  // 右ペイン第3トグル。保存済み候補の一覧 + [提案を生成] + カードごとの
+  // [この図を作る] / [却下]。confidence は API が返す段階ラベルのみ描画する（FG8）。
+  // 取得はトグルを開いた最初の1回だけ（ポーリングしない・FG6）。
+
+  function lsFigureSuggestionsBasePath(topicId) {
+    return "/admin/courses/" + encodeURIComponent(lsState.courseId) +
+      "/topics/" + encodeURIComponent(topicId) + "/figure-suggestions";
+  }
+
+  function lsRenderFigureSuggestionsPane(topic, container) {
+    var topicId = topic.id || "";
+    if (!lsState.courseId || !topicId) {
+      container.innerHTML = '<div class="ls-course-muted">トピックを選ぶと図の提案を確認できます。</div>';
+      return;
+    }
+    var cached = lsState.figureSuggestionsByTopic[topicId];
+    if (!cached) {
+      container.innerHTML = '<div class="ls-course-muted">図の提案を読み込み中…</div>';
+      lsLoadFigureSuggestions(topic, container);
+      return;
+    }
+    container.innerHTML = lsFigureSuggestionsHtml(cached);
+    lsBindFigureSuggestions(topic, container);
+  }
+
+  function lsLoadFigureSuggestions(topic, container) {
+    var topicId = topic.id || "";
+    apiFetch(lsFigureSuggestionsBasePath(topicId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (lsState.rightPaneMode !== "figures") return;
+        lsState.figureSuggestionsByTopic[topicId] = data || { suggestions: [] };
+        lsRenderFigureSuggestionsPane(topic, container);
+      })
+      .catch(function () {
+        container.innerHTML = lsFigureSuggestionsWrapperHtml(
+          lsFigureSuggestionsToolbarHtml() +
+          '<div class="ls-course-muted">図の提案を取得できませんでした。' +
+          '<br>[提案を生成] で作成できます。</div>'
+        );
+        lsBindFigureSuggestions(topic, container);
+      });
+  }
+
+  // ペイン全体を包む担体（インスペクト・モードのアンカー）。
+  function lsFigureSuggestionsWrapperHtml(inner) {
+    return '<div class="ls-figure-suggestions" data-ui-anchor="lecture-studio.figure-suggestions">' +
+      inner +
+    '</div>';
+  }
+
+  // サーバが note を返さなかった場合の控えの事実文（数値・原因の推測を書かない）。
+  var LS_FIGURE_SUGGEST_DEGRADED_FALLBACK =
+    "AIによる提案の生成に失敗しました。時間をおいて再度お試しください。";
+
+  function lsFigureSuggestionsToolbarHtml() {
+    return '<div class="ls-figure-suggestions-toolbar">' +
+      '<button type="button" class="ls-mini-tab" id="ls-figure-suggest-generate" ' +
+        'data-ui-anchor="lecture-studio.figure-suggestions-generate">提案を生成</button>' +
+    '</div>';
+  }
+
+  function lsFigureSuggestionStatusLabel(status) {
+    var labels = { candidate: "候補", accepted: "作成中", dismissed: "却下", superseded: "差し替え済み" };
+    return labels[status] || status || "";
+  }
+
+  function lsFigureSuggestionCardHtml(suggestion) {
+    var kindLabel = suggestion.figure_kind_label ||
+      (window.FigureStudio && window.FigureStudio.FIGURE_KIND_LABELS
+        ? (window.FigureStudio.FIGURE_KIND_LABELS[suggestion.figure_kind] || suggestion.figure_kind || "")
+        : (suggestion.figure_kind || ""));
+    var status = suggestion.status || "candidate";
+    // [この図を作る] は候補・作成中の両方で押せる。[却下] は候補のみ
+    // （accepted / dismissed への再判断はサーバが 409 を返すため、押せる形にしない）。
+    var buildable = status === "candidate" || status === "accepted";
+    var dismissable = status === "candidate";
+    return '<div class="ls-figure-suggestion-card" data-figure-suggestion-id="' + escHtml(suggestion.id) + '">' +
+      '<div class="ls-figure-suggestion-head">' +
+        '<span class="ls-figure-suggestion-kind">' + escHtml(kindLabel) + '</span>' +
+        (status !== "candidate"
+          ? '<span class="ls-figure-suggestion-status">' + escHtml(lsFigureSuggestionStatusLabel(status)) + '</span>'
+          : '') +
+        (suggestion.confidence_label
+          ? '<span class="ls-figure-suggestion-confidence">' + escHtml(suggestion.confidence_label) + '</span>'
+          : '') +
+      '</div>' +
+      (suggestion.gap_reason
+        ? '<div class="ls-figure-suggestion-reason">' + escHtml(suggestion.gap_reason) + '</div>'
+        : '') +
+      (suggestion.figure_brief
+        ? '<div class="ls-figure-suggestion-brief">' + escHtml(suggestion.figure_brief) + '</div>'
+        : '') +
+      (suggestion.anchor_excerpt
+        ? '<button type="button" class="ls-figure-suggestion-anchor" data-figure-suggestion-anchor="' +
+            escHtml(suggestion.anchor_excerpt) + '" title="教材の該当箇所へ移動します">' +
+            '「' + escHtml(lsShortSummary(suggestion.anchor_excerpt, 120)) + '」' +
+          '</button>'
+        : '') +
+      (suggestion.signal_basis
+        ? '<div class="ls-figure-suggestion-basis">' + escHtml(lsFigureSignalBasisLabel(suggestion.signal_basis)) + '</div>'
+        : '') +
+      (buildable || dismissable
+        ? '<div class="ls-figure-suggestion-actions">' +
+            (buildable
+              ? '<button type="button" class="admin-action-btn" data-figure-suggestion-build="' +
+                  escHtml(suggestion.id) + '">この図を作る</button>'
+              : '') +
+            (dismissable
+              ? '<button type="button" class="admin-action-btn" data-figure-suggestion-dismiss="' +
+                  escHtml(suggestion.id) + '">却下</button>'
+              : '') +
+          '</div>'
+        : '') +
+    '</div>';
+  }
+
+  function lsFigureSignalBasisLabel(basis) {
+    var labels = {
+      text_analysis: "根拠: 教材本文の解析",
+      learner_signals: "根拠: 学習者の記録の集計",
+      both: "根拠: 教材本文の解析と学習者の記録の集計"
+    };
+    return labels[basis] || basis || "";
+  }
+
+  function lsFigureSuggestionsHtml(data) {
+    var suggestions = (data && data.suggestions) || [];
+    var visible = suggestions.filter(function (s) {
+      return s && s.status !== "superseded";
+    });
+    var html = lsFigureSuggestionsToolbarHtml();
+    // 生成失敗（degraded）は「候補ゼロ」と区別して、サーバの事実文をそのまま出す。
+    // 黙って空一覧にすると「この教材に提案は無い」と誤読される（レビュー M4）。
+    if (data && data.degraded) {
+      html += '<div class="ls-course-muted ls-figure-suggestions-degraded">' +
+        escHtml(data.note || LS_FIGURE_SUGGEST_DEGRADED_FALLBACK) +
+        '</div>';
+    }
+    if (!visible.length) {
+      if (!(data && data.degraded)) {
+        html += '<div class="ls-course-muted">このトピックの図の提案はまだありません。' +
+          '<br>[提案を生成] を押すと、教材本文と学習者の記録の集計から候補を作ります。</div>';
+      }
+      return lsFigureSuggestionsWrapperHtml(html);
+    }
+    html += '<div class="ls-figure-suggestions-list">' +
+      visible.map(function (s) { return lsFigureSuggestionCardHtml(s); }).join("") +
+    '</div>';
+    return lsFigureSuggestionsWrapperHtml(html);
+  }
+
+  function lsBindFigureSuggestions(topic, container) {
+    var generateBtn = container.querySelector("#ls-figure-suggest-generate");
+    if (generateBtn) {
+      generateBtn.addEventListener("click", function () {
+        lsGenerateFigureSuggestions(topic, container, generateBtn);
+      });
+    }
+    container.querySelectorAll("[data-figure-suggestion-anchor]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        lsFocusDraftText(btn.getAttribute("data-figure-suggestion-anchor"));
+      });
+    });
+    container.querySelectorAll("[data-figure-suggestion-build]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-figure-suggestion-build");
+        lsOpenFigureStudioForSuggestion(topic, id);
+      });
+    });
+    container.querySelectorAll("[data-figure-suggestion-dismiss]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var id = btn.getAttribute("data-figure-suggestion-dismiss");
+        btn.disabled = true;
+        apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
+          "/figure-suggestions/" + encodeURIComponent(id) + "/dismiss", { method: "POST" })
+          .then(function (res) {
+            if (res.ok) {
+              lsState.figureSuggestionsByTopic[topic.id || ""] = null;
+              lsRenderRightPaneForTopic(topic);
+              return null;
+            }
+            // 409 = 右ペインのキャッシュが古く、既に判断済み（サーバの事実文を見せて
+            // 一覧を再取得する。エラー扱いにしない）
+            return res.json().catch(function () { return null; }).then(function (body) {
+              var detail = body && body.detail;
+              if (res.status === 409) {
+                lsShowActionStatus(detail || "この提案はすでに判断済みです。", "info");
+                lsState.figureSuggestionsByTopic[topic.id || ""] = null;
+                lsRenderRightPaneForTopic(topic);
+                return null;
+              }
+              var err = new Error(detail || ("status " + res.status));
+              err.detail = detail;
+              throw err;
+            });
+          })
+          .catch(function (err) {
+            btn.disabled = false;
+            lsShowActionStatus((err && err.detail) || "提案の却下に失敗しました", "error");
+          });
+      });
+    });
+  }
+
+  function lsGenerateFigureSuggestions(topic, container, btn) {
+    var topicId = topic.id || "";
+    var cached = lsState.figureSuggestionsByTopic[topicId];
+    var hasCandidate = ((cached && cached.suggestions) || []).some(function (s) {
+      return s && s.status === "candidate";
+    });
+
+    function doGenerate() {
+      btn.disabled = true;
+      btn.textContent = "生成中…";
+      apiFetch(lsFigureSuggestionsBasePath(topicId) + "/generate", { method: "POST" })
+        .then(function (res) {
+          return res.json().catch(function () { return {}; }).then(function (body) {
+            if (!res.ok) {
+              var err = new Error((body && body.detail) || ("status " + res.status));
+              err.detail = body && body.detail;
+              throw err;
+            }
+            return body;
+          });
+        })
+        .then(function (data) {
+          var degraded = !!(data && data.degraded);
+          lsState.figureSuggestionsByTopic[topicId] = {
+            suggestions: (data && data.suggestions) || [],
+            // degraded = 生成そのものが失敗（候補ゼロではない）。ペインにも残す。
+            degraded: degraded,
+            note: (data && data.note) || ""
+          };
+          if (degraded) {
+            lsShowActionStatus(
+              (data && data.note) || LS_FIGURE_SUGGEST_DEGRADED_FALLBACK, "error",
+            );
+          } else if (data && data.dropped) {
+            lsShowActionStatus("提案を生成しました（本文と対応が取れなかった候補は保存していません）", "info");
+          } else {
+            lsShowActionStatus("提案を生成しました", "success");
+          }
+          lsRenderRightPaneForTopic(topic);
+        })
+        .catch(function (err) {
+          btn.disabled = false;
+          btn.textContent = "提案を生成";
+          lsShowActionStatus((err && err.detail) || "提案の生成に失敗しました", "error");
+        });
+    }
+
+    if (!hasCandidate) {
+      doGenerate();
+      return;
+    }
+    // 再生成は既存の候補を差し替える（判断済みの accepted / dismissed は変わらない）。
+    // 事実文の確認は admin.js の共通2段確認モーダルに委ね、無ければ window.confirm へ
+    // フォールバックする（deliberation.js の一括承認と同型）。
+    var confirmMessage = "提案を作り直すと、まだ判断していない候補は差し替え済みになります。" +
+      "作成済みの図と、却下した候補はそのまま残ります。";
+    if (window.AdminDangerConfirm && typeof window.AdminDangerConfirm.open === "function") {
+      window.AdminDangerConfirm.open({
+        title: "図の提案の作り直し",
+        message: confirmMessage,
+        confirmLabel: "作り直す"
+      }, doGenerate);
+    } else {
+      if (!window.confirm(confirmMessage)) return;
+      doGenerate();
+    }
+  }
+
+  function lsFindFigureSuggestion(topicId, suggestionId) {
+    var cached = lsState.figureSuggestionsByTopic[topicId];
+    var suggestions = (cached && cached.suggestions) || [];
+    for (var i = 0; i < suggestions.length; i++) {
+      if (suggestions[i] && suggestions[i].id === suggestionId) return suggestions[i];
+    }
+    return null;
+  }
+
+  // 提案カードの [この図を作る]: brief をプリセットにスタジオを起動する（§6.2-2）。
+  // 挿入先は教材欄で、anchor_excerpt が本文にあればその位置を既定のカーソル位置にする。
+  function lsOpenFigureStudioForSuggestion(topic, suggestionId) {
+    if (!window.FigureStudio) return;
+    var topicId = topic.id || "";
+    var suggestion = lsFindFigureSuggestion(topicId, suggestionId) || {};
+    var materialEl = document.getElementById("ls-course-material-text");
+    var recorded = null;
+    if (materialEl) {
+      var pos = lsDraftOffsetForExcerpt(materialEl.value || "", suggestion.anchor_excerpt);
+      if (pos < 0) {
+        pos = typeof materialEl.selectionStart === "number"
+          ? materialEl.selectionStart : (materialEl.value || "").length;
+      }
+      recorded = { selectionStart: pos, selectionEnd: pos, consumed: false };
+    }
+    window.FigureStudio.open({
+      courseId: lsState.courseId,
+      topicId: topicId,
+      insertTarget: materialEl
+        ? { textarea: materialEl, selectionStart: recorded.selectionStart, selectionEnd: recorded.selectionEnd }
+        : null,
+      preset: {
+        figureBrief: suggestion.figure_brief || "",
+        figureKind: suggestion.figure_kind || "",
+        anchorExcerpt: suggestion.anchor_excerpt || "",
+        suggestionId: suggestionId
+      },
+      existingOnly: false,
+      figuresIndex: lsState.figuresIndex,
+      documentIds: lsCourseDocumentIds(),
+      countTopicReferences: lsCountTopicsReferencingFigure,
+      onInsert: function (figureId, embedText, result) {
+        if (!materialEl) return;
+        lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
+        lsState.figureSuggestionsByTopic[topicId] = null;
+      },
+      onClose: lsRestoreDeferredTextareaFocus
+    });
+    // 提案の accepted 遷移（監査記帳はサーバ側）。失敗しても図の作成は続行できるが、
+    // 409（すでに判断済み = 右ペインのキャッシュが古い）は却下側と同型に扱う:
+    // サーバの事実文を表示し、一覧を取り直す（黙って握り潰さない）。
+    apiFetch("/admin/courses/" + encodeURIComponent(lsState.courseId) +
+      "/figure-suggestions/" + encodeURIComponent(suggestionId) + "/accept", { method: "POST" })
+      .then(function (res) {
+        lsState.figureSuggestionsByTopic[topicId] = null;
+        if (res.ok) return null;
+        return res.json().catch(function () { return null; }).then(function (body) {
+          var detail = body && body.detail;
+          if (res.status === 409) {
+            lsShowActionStatus(detail || "この提案はすでに判断済みです。", "info");
+          } else {
+            lsShowActionStatus(detail || "提案の状態を更新できませんでした", "error");
+          }
+          if (lsState.rightPaneMode === "figures") lsRenderRightPaneForTopic(topic);
+          return null;
+        });
+      })
+      .catch(function () { /* 通信失敗は図の作成を止めない（記録のみ） */ });
+  }
+
+  // 本文中の逐語引用の位置（見つからなければ先頭40字で再試行 → -1）。
+  function lsDraftOffsetForExcerpt(text, excerpt) {
+    var needle = String(excerpt || "").trim();
+    if (!needle || !text) return -1;
+    var idx = text.indexOf(needle);
+    if (idx >= 0) return idx;
+    var head = needle.slice(0, 40);
+    return head ? text.indexOf(head) : -1;
+  }
+
+  // 提案の anchor_excerpt → 左ドラフトの該当箇所へジャンプする
+  // （lsFocusDraftEvidence と同型。編集タブでは textarea のカーソル移動、
+  //  プレビュー表示中は該当要素のハイライト + スクロール）。
+  function lsFocusDraftText(excerpt) {
+    var needle = String(excerpt || "").trim();
+    if (!needle) return false;
+    var materialEl = document.getElementById("ls-course-material-text");
+    if (materialEl && !materialEl.hidden) {
+      var idx = lsDraftOffsetForExcerpt(materialEl.value || "", needle);
+      if (idx < 0) return false;
+      materialEl.focus();
+      materialEl.selectionStart = idx;
+      materialEl.selectionEnd = Math.min(idx + needle.length, (materialEl.value || "").length);
+      // textarea は scrollIntoView が効かないため、行数から概算スクロールする。
+      var before = (materialEl.value || "").slice(0, idx).split("\n").length - 1;
+      var lineHeight = 20;
+      try {
+        var computed = window.getComputedStyle(materialEl);
+        var parsed = parseFloat(computed.lineHeight);
+        if (parsed > 0) lineHeight = parsed;
+      } catch (e) { /* 既定値を使う */ }
+      materialEl.scrollTop = Math.max(0, (before * lineHeight) - (materialEl.clientHeight / 3));
+      return true;
+    }
+    var preview = document.getElementById("ls-course-material-preview");
+    if (!preview) return false;
+    preview.querySelectorAll(".ls-draft-evidence-focus").forEach(function (el) {
+      el.classList.remove("ls-draft-evidence-focus");
+    });
+    var head = needle.slice(0, 40);
+    var target = null;
+    preview.querySelectorAll("p, li, div, td, h1, h2, h3, h4").forEach(function (el) {
+      if (target) return;
+      var text = el.textContent || "";
+      if (text.indexOf(needle) >= 0 || (head && text.indexOf(head) >= 0)) target = el;
+    });
+    if (!target) return false;
+    target.classList.add("ls-draft-evidence-focus");
+    target.scrollIntoView({ block: "center", behavior: "smooth" });
+    return true;
   }
 
   // つまづきサマリーを document 単位で取得（キャッシュ）し、トピックの claim に絞って描画。
@@ -2284,6 +2702,10 @@
         '<div class="ls-course-slide-tools-row"' + editHidden + '>' +
           '<button type="button" id="ls-course-insert-slide-marker-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-slide-marker-btn" ' +
             'title="最後にフォーカスしていた入力欄（教材 or 本文説明）のカーソル位置に区切りを挿入します。もう一方には自動挿入されないため、対応する位置には手動で追加してください。">+ スライド区切りを挿入</button>' +
+          // 教材図スタジオ（teaching_figure_studio_design.md §6.2-1）: 教材欄の
+          // カーソル位置に図を挿入する。読み上げ原稿にフォーカス中は無効化する
+          // （図は読み上げから除去されるため、入口で無意味な操作を塞ぐ）。
+          '<button type="button" id="ls-course-insert-figure-btn" class="ls-mini-tab" data-ui-anchor="lecture-studio.insert-figure">🖼 図を挿入</button>' +
           '<span id="ls-course-slides-indicator" class="ls-slides-indicator ls-slides-indicator-inline"></span>' +
         '</div>' +
         '<section class="ls-course-draft-section">' +
@@ -2348,8 +2770,28 @@
     // 「スライド区切りを挿入」ボタン + 整合インジケータ。
     var spokenScriptEl = document.getElementById("ls-course-spoken-script");
     var courseSlideLastFocus = "ls-course-material-text";
-    if (materialEl) materialEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-material-text"; });
-    if (spokenScriptEl) spokenScriptEl.addEventListener("focus", function () { courseSlideLastFocus = "ls-course-spoken-script"; });
+
+    // 教材図スタジオ（§6.2-1）: [🖼 図を挿入] は教材欄のみが対象。読み上げ原稿に
+    // フォーカス中は disabled + title で理由を出す（図は読み上げから除去される）。
+    var insertFigureBtn = document.getElementById("ls-course-insert-figure-btn");
+    function updateInsertFigureBtnState() {
+      if (!insertFigureBtn) return;
+      var onSpoken = courseSlideLastFocus === "ls-course-spoken-script";
+      insertFigureBtn.disabled = onSpoken;
+      insertFigureBtn.title = onSpoken
+        ? "読み上げ原稿には図を挿入できません（図は読み上げから除去されます）"
+        : "教材欄のカーソル位置に図の埋め込み（![[figure:id]]）を挿入します。";
+    }
+    updateInsertFigureBtnState();
+
+    if (materialEl) materialEl.addEventListener("focus", function () {
+      courseSlideLastFocus = "ls-course-material-text";
+      updateInsertFigureBtnState();
+    });
+    if (spokenScriptEl) spokenScriptEl.addEventListener("focus", function () {
+      courseSlideLastFocus = "ls-course-spoken-script";
+      updateInsertFigureBtnState();
+    });
 
     // サーバへの分割問い合わせは非同期になるため、連続入力時に古いレスポンスが
     // 新しい入力内容を上書きしないよう世代を振って捨てる（lsUpdateSlideIndicatorsNow と同型）。
@@ -2360,7 +2802,9 @@
       var dText = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
       var sText = spokenScriptEl ? spokenScriptEl.value : (topic.spoken_script || topic.content || "");
       var seq = ++courseSlideRequestSeq;
-      lsFetchSplitSlides(dText, sText, []).then(function (split) {
+      // コーストピックは受講側と同じ自動ページ分割で数える（教材図スタジオ §7.5:
+      // 図1個=200字換算でページ境界が動くため、`===` 無しのトピックでも実際の枚数を出す）。
+      lsFetchSplitSlides(dText, sText, [], true).then(function (split) {
         if (seq !== courseSlideRequestSeq) return; // 古いレスポンスは無視
         lsRenderSlideIndicatorEl(indicatorEl, split);
       });
@@ -2386,6 +2830,140 @@
         updateCourseSlideIndicator();
       });
     }
+
+    // 教材図スタジオの起動（§6.2-1）。挿入位置は押下時点の教材欄の選択範囲を記憶し、
+    // 最初の挿入でだけそれを復元する（2件目以降は直前の挿入で進んだ位置を使う）。
+    if (insertFigureBtn) {
+      insertFigureBtn.addEventListener("click", function () {
+        if (insertFigureBtn.disabled) return;
+        if (!materialEl || !window.FigureStudio) return;
+        var recorded = {
+          selectionStart: typeof materialEl.selectionStart === "number"
+            ? materialEl.selectionStart : (materialEl.value || "").length,
+          selectionEnd: typeof materialEl.selectionEnd === "number"
+            ? materialEl.selectionEnd : (materialEl.value || "").length,
+          consumed: false
+        };
+        window.FigureStudio.open({
+          courseId: lsState.courseId,
+          topicId: topic.id || "",
+          insertTarget: {
+            textarea: materialEl,
+            selectionStart: recorded.selectionStart,
+            selectionEnd: recorded.selectionEnd
+          },
+          preset: null,
+          existingOnly: false,
+          figuresIndex: lsState.figuresIndex,
+          documentIds: lsCourseDocumentIds(),
+          countTopicReferences: lsCountTopicsReferencingFigure,
+          onInsert: function (figureId, embedText, result) {
+            lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result);
+            updateTopic();
+            updateCourseSlideIndicator();
+          },
+          onClose: lsRestoreDeferredTextareaFocus
+        });
+      });
+    }
+  }
+
+  // 図の挿入（教材図スタジオ / 既存図の選択に共通）。本文へ埋め込みを差し込み、
+  // サーバが返した topic 側登録（evidence_link / linked_figure_ids）と figures_index を
+  // ローカルにも反映して、その場のプレビューで画像が引けるようにする。
+  // トピック本体の保存は既存の [原稿を保存] のみが行う（ここでは PUT しない）。
+  function lsApplyFigureInsert(topic, materialEl, recorded, figureId, embedText, result) {
+    if (!materialEl || !figureId) return;
+    if (recorded && !recorded.consumed) {
+      if (typeof recorded.selectionStart === "number") {
+        materialEl.selectionStart = recorded.selectionStart;
+        materialEl.selectionEnd = typeof recorded.selectionEnd === "number"
+          ? recorded.selectionEnd : recorded.selectionStart;
+      }
+      recorded.consumed = true;
+    }
+    lsInsertTextAtCursor(materialEl, embedText || ("![[figure:" + figureId + "]]"));
+
+    if (result) {
+      if (result.evidence_link) {
+        topic.evidence_links = (topic.evidence_links || []).concat([result.evidence_link]);
+      }
+      if (result.linked_figure_ids) topic.linked_figure_ids = result.linked_figure_ids;
+      // 生成図はコース単位の figures_index にも載る（サーバ側は次回の
+      // course-structure 取得で返す）。挿入直後のプレビュー用に先行登録する。
+      if (!lsState.figuresIndex) lsState.figuresIndex = {};
+      if (!lsState.figuresIndex[figureId]) {
+        lsState.figuresIndex[figureId] = {
+          caption: (result.evidence_link && result.evidence_link.caption) || "",
+          teaching: true
+        };
+      }
+    }
+    lsRefreshCourseMaterialPreview(topic, materialEl);
+  }
+
+  // 教材プレビュー区画だけを再描画する（ドラフト全体を作り直すと textarea の
+  // イベント配線・カーソル位置が失われるため、対象を preview 要素に限定する）。
+  function lsRefreshCourseMaterialPreview(topic, materialEl) {
+    var previewEl = document.getElementById("ls-course-material-preview");
+    if (!previewEl) return;
+    var text = materialEl ? materialEl.value : lsTopicStudentMaterialSource(topic);
+    previewEl.innerHTML = lsRenderCourseMaterialPreview(text, topic);
+    lsHydrateFigureEmbeds(previewEl);
+  }
+
+  // 図の参照数（教材図スタジオ §7.4: 回収前の事実文用）。コース構造の各トピックが
+  // その図を参照しているかを、①linked_figure_ids ②evidence_links(kind=figure)
+  // ③教材本文の ![[figure:id]] 埋め込み の3経路で数える（学習者配信ゲート
+  // `_course_references_figure` と同じ観点）。構造が未取得なら 0 を返し、
+  // 呼び出し側（FigureStudio）は件数を書かない文面に落とす。
+  function lsTopicReferencesFigure(topic, figureId) {
+    if (!topic) return false;
+    var linked = topic.linked_figure_ids || [];
+    for (var i = 0; i < linked.length; i++) {
+      if (String(linked[i]) === figureId) return true;
+    }
+    var links = topic.evidence_links || [];
+    for (var j = 0; j < links.length; j++) {
+      var link = links[j] || {};
+      if (link.kind !== "figure") continue;
+      var extra = link.extra || {};
+      var target = String(link.figure_id || link.target_id || extra.figure_id || "");
+      if (target === figureId) return true;
+    }
+    var text = lsTopicStudentMaterialSource(topic) || "";
+    return text.indexOf("![[figure:" + figureId + "]]") >= 0;
+  }
+
+  function lsCountTopicsReferencingFigure(figureId) {
+    var id = String(figureId || "");
+    if (!id) return 0;
+    var chapters = (lsState.courseStructure && lsState.courseStructure.chapters) || [];
+    var count = 0;
+    chapters.forEach(function (chapter) {
+      var topics = (chapter && chapter.topics) || [];
+      topics.forEach(function (topic) {
+        if (lsTopicReferencesFigure(topic, id)) count += 1;
+      });
+    });
+    return count;
+  }
+
+  // コースの source document id 群（既存図タブのフォールバック取得に使う）。
+  function lsCourseDocumentIds() {
+    var course = lsState.courseStructure || {};
+    var sources = course.sources || (course.data && course.data.sources) || [];
+    var ids = [];
+    var seen = {};
+    sources.forEach(function (source) {
+      var id = source && (source.material_id || source.document_id);
+      if (!id || seen[id]) return;
+      seen[id] = true;
+      ids.push(id);
+    });
+    var current = lsCurrentDocumentId();
+    if (current && !seen[current]) ids.push(current);
+    return ids;
   }
 
   function lsNormalizeEvidenceId(id) {
@@ -2406,36 +2984,55 @@
   // 根拠リンクの表示語彙（component_evidence_redesign.md）。パイプライン由来の
   // 内部語彙（kind / support_role / confidence 手法名）をそのまま画面に出さず、
   // 日本語ラベルに変換する。未知の値は原文へフォールバックする（情報を落とさない）。
-  var LS_EVIDENCE_KIND_LABELS = {
-    component: "論理要素",
-    claim: "主張",
-    equation: "数式",
-    figure: "図",
-    source: "出典",
-  };
+  // 種別（kind / element_type）の表示名は element-vocab.js（window.ElementVocab）が正本で、
+  // ここに独自辞書は持たない（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。
   var LS_EVIDENCE_ROLE_LABELS = {
     support: "根拠",
     equation: "数式",
     equation_quote: "数式引用",
     figure: "図",
   };
+  // トピック↔CourseMapping の**照合来歴**（course_content_builder._best_mapping）。
+  // CP9（element_context_presentation_redesign.md §3.2）: これは要素の性質ではなく
+  // トピックの属性なので、各根拠カードのメタ行には出さず（誤読の原因）、
+  // 根拠リンクペインの見出し行に1回だけ出す（lsTopicMappingNoteHtml）。
   var LS_EVIDENCE_CONFIDENCE_LABELS = {
     exact_title: "タイトル一致",
-    title_similarity: "タイトル類似",
+    title_similarity: "タイトル類似（教員確認を推奨）",
     none: "対応付けなし",
   };
 
+  // kind / element_type の表示名は正本（element-vocab.js）へ委譲する。未読み込み時は
+  // 原文へフォールバックする（fail-soft）。
   function lsEvidenceKindLabel(kind) {
-    return LS_EVIDENCE_KIND_LABELS[kind] || kind;
+    var vocab = window.ElementVocab;
+    if (vocab && vocab.kindLabel) return vocab.kindLabel(kind);
+    return kind;
   }
 
-  function lsEvidenceMetaLabel(role, confidence) {
-    var roleLabel = role ? (LS_EVIDENCE_ROLE_LABELS[role] || role) : "";
-    var confidenceLabel = confidence ? (LS_EVIDENCE_CONFIDENCE_LABELS[confidence] || confidence) : "";
-    if (roleLabel && confidenceLabel) return roleLabel + " / 対応付け: " + confidenceLabel;
-    if (roleLabel) return roleLabel;
-    if (confidenceLabel) return "対応付け: " + confidenceLabel;
-    return "";
+  function lsElementTypeLabel(elementType) {
+    var vocab = window.ElementVocab;
+    if (vocab && vocab.elementTypeLabel) return vocab.elementTypeLabel(elementType);
+    return elementType;
+  }
+
+  // 根拠カードのメタ行は「この根拠がトピックに対して果たす役割」だけを出す。
+  // CP9: トピック↔論文の照合来歴（content_confidence）はここに転写しない
+  // — 全カードに「対応付け: 対応付けなし」が並び、要素側の欠陥に見える誤読を生む。
+  // 来歴はペイン見出しの lsTopicMappingNoteHtml が1回だけ出す。
+  function lsEvidenceMetaLabel(role) {
+    if (!role) return "";
+    return LS_EVIDENCE_ROLE_LABELS[role] || role;
+  }
+
+  // 根拠リンクペインの見出し注記（CP9 の移設先）。content_confidence が無ければ
+  // 何も出さない（旧コースデータでは欄ごと非表示 = 事実を捏造しない）。
+  function lsTopicMappingNoteHtml(topic) {
+    var confidence = String((topic && topic.content_confidence) || "");
+    if (!confidence) return "";
+    var label = LS_EVIDENCE_CONFIDENCE_LABELS[confidence] || confidence;
+    return '<div class="ls-course-muted ls-evidence-mapping-note">' +
+      escHtml("このトピックと論文の対応付け: " + label) + '</div>';
   }
 
   function lsCourseComponentById(componentId) {
@@ -2468,7 +3065,107 @@
   }
 
   function lsTopicEvidenceItems(topic) {
+    topic = topic || {};
     var items = [];
+
+    // ── 種別ごとの一般ラベル・数式見出し（生の内部 ID を見出しに出さない, EH2）─────
+    // サーバ（core/course_content_builder._equation_display_title）と同じ規則:
+    // ラベルがあればそれ、無ければ論文の式番号形（eq_2_7）のときだけ ID を出し、
+    // 合成 ID（eq_tex_b14 等）は一般ラベル「数式」に落とす。
+    // 本関数だけを抽出して評価する node harness
+    // （tests/test_learning_material_embed_resolution.py）の契約を保つため、
+    // ヘルパーはトップレベル関数ではなくローカル関数式として持つ。
+    var genericTitles = {
+      component: "論理要素",
+      claim: "主張",
+      equation: "数式",
+      figure: "図",
+      source: "出典",
+      evidence: "根拠箇所"
+    };
+    var genericTitle = function (kind) { return genericTitles[kind] || "根拠"; };
+    var equationTitle = function (label, normId) {
+      var text = String(label || "").trim();
+      if (text) return text;
+      var norm = String(normId || "").trim();
+      if (norm && /^eq[_\-.]?[0-9]/i.test(norm)) return norm;
+      return genericTitles.equation;
+    };
+    // 読み下し（plain_text）として使える値だけを返す。生 TeX は表示候補にしない
+    // （サーバ _spoken_plain_text と同規則・EH1/EH2）。
+    var spokenText = function (value) {
+      var text = String(value || "");
+      return lsLooksLikeTexMath(text) ? "" : text;
+    };
+
+    // ── サーバ正本の evidence_items を最優先で使う（設計書 §6 S3-1 / RC8）─────────
+    // 正本は core/course_content_builder.build_topic_evidence_items（学習画面と同一の
+    // 純関数）で、course-structure DTO の各トピックに同梱されている。**以降の
+    // ローカル合成は、evidence_items を返さない旧応答向けのフォールバック**であり、
+    // 同じ根拠が画面ごとに別の見出し・別の欠落で表示される並行実装には戻さないこと。
+    var serverItems = topic.evidence_items;
+    if (serverItems && serverItems.length) {
+      var mapped = [];
+      var seenServerKey = {};
+      var sourceBySignature = {};
+      for (var si = 0; si < serverItems.length; si++) {
+        var raw = serverItems[si];
+        if (!raw) continue;
+        var sKind = String(raw.kind || "source");
+        var sId = String((sKind === "figure" ? (raw.figure_id || raw.id) : raw.id) || "");
+        var sKey = lsCourseEvidenceKey(sKind, sId);
+        if (seenServerKey[sKey]) continue;
+        seenServerKey[sKey] = true;
+        var sLatex = String(raw.latex || "");
+        var sSummary = String(raw.summary || "");
+        var sTitle = String(raw.title || "");
+        if (!sTitle || sTitle === sId) {
+          sTitle = sKind === "equation"
+            ? equationTitle("", lsNormalizeEvidenceId(sId))
+            : genericTitle(sKind);
+        }
+        // サーバは本文（summary）をそのまま title に流用することがある（claim / source）。
+        // チップ用に短い抜粋へ落とし、カードの太字ヘッダは抑止する（重複表示の解消）。
+        var sIsExcerpt = false;
+        if (!sLatex && sSummary && sTitle === sSummary) {
+          sTitle = lsShortSummary(sSummary, 60);
+          sIsExcerpt = true;
+        }
+        var sItem = {
+          key: sKey,
+          kind: sKind,
+          id: sId,
+          title: sTitle,
+          title_is_excerpt: sIsExcerpt,
+          summary: sSummary,
+          latex: sLatex,
+          plain_text: spokenText(raw.plain_text),
+          document_id: String(raw.document_id || ""),
+          role: String(raw.role || ""),
+          confidence: String(raw.confidence || ""),
+          server_item: true
+        };
+        if (sKind === "figure") {
+          sItem.figure_id = String(raw.figure_id || sId);
+          sItem.figure_key = String(raw.figure_key || "");
+          sItem.caption = String(raw.caption || "");
+        }
+        // 同内容の別名 ID（source:topic_summary / source:summary）はカードを2枚作らず、
+        // 別名を alt_ids に畳む（参照解決は lsEvidenceItemByRef が alt_ids も引く）。
+        if (sKind === "source" && sSummary) {
+          var sig = sTitle + " " + sSummary;
+          if (sourceBySignature[sig]) {
+            var host = sourceBySignature[sig];
+            host.alt_ids = (host.alt_ids || []).concat([sId]);
+            continue;
+          }
+          sourceBySignature[sig] = sItem;
+        }
+        mapped.push(sItem);
+      }
+      if (mapped.length) return mapped;
+    }
+
     // 数式は content_blocks 由来の formula（latex を持つ）で本文をレンダリングする。
     // evidence_links 由来の数式アイテムにも latex / label を引き当てて、根拠リンク
     // カード・チップが生 LaTeX 文字列ではなく数式・ラベルとして表示されるようにする。
@@ -2483,16 +3180,20 @@
       if (kind === "equation") {
         var f = formulaByNorm[lsNormalizeEvidenceId(id)];
         var eqLatex = link.latex || (f && f.latex) || "";
-        var eqLabel = link.label || (f && f.label) || lsNormalizeEvidenceId(id);
+        // タイトルに生 LaTeX も裸の内部 ID も出さない（EH2）。合成 ID は一般ラベルへ。
+        var eqLabel = equationTitle(link.label || (f && f.label), lsNormalizeEvidenceId(id));
+        // 旧 freeze データは summary / plain_text に生 TeX を持ちうる。意味の一行と
+        // 読み下しの欄に TeX を出さない（サーバ側の同名ガードと同規則）。
+        var eqSummary = link.summary || "";
+        if (lsLooksLikeTexMath(eqSummary)) eqSummary = "";
         items.push({
           key: lsCourseEvidenceKey(kind, id),
           kind: kind,
           id: id,
-          // タイトルに生 LaTeX を出さない。ラベル（無ければ正規化ID）を使う。
           title: eqLabel,
-          summary: link.summary || "",
+          summary: eqSummary,
           latex: eqLatex,
-          plain_text: link.plain_text || (f && f.plain_text) || "",
+          plain_text: spokenText(link.plain_text || (f && f.plain_text)),
           role: link.support_role || "equation",
           confidence: link.confidence || "",
         });
@@ -2545,7 +3246,8 @@
         srcTitle = lsShortSummary(srcSummary, 60);
         srcTitleIsExcerpt = true;
       } else {
-        srcTitle = id || kind;
+        // 見出しに裸の内部 ID を出さない（EH2）。種別の一般ラベルへ落とす。
+        srcTitle = genericTitle(kind);
       }
       items.push({
         key: lsCourseEvidenceKey(kind, id),
@@ -2570,7 +3272,7 @@
         key: lsCourseEvidenceKey("component", id),
         kind: "component",
         id: lsNormalizeEvidenceId(id),
-        title: title || id,
+        title: title || genericTitle("component"),
         summary: summary || "このトピックに関連付けられた論理コンポーネントです。要約はまだ生成されていません。",
         role: "support",
         confidence: topic.content_confidence || "",
@@ -2581,8 +3283,10 @@
         key: lsCourseEvidenceKey("equation", formula.id),
         kind: "equation",
         id: lsNormalizeEvidenceId(formula.id),
-        title: formula.label || lsNormalizeEvidenceId(formula.id),
-        summary: formula.plain_text || formula.latex || "",
+        title: equationTitle(formula.label, lsNormalizeEvidenceId(formula.id)),
+        // summary に生 TeX を入れない（EH1: 数式の再掲を作らない。かつてここの
+        // `plain_text || latex` が生 TeX の供給源だった）。読み下しだけを使う。
+        summary: spokenText(formula.plain_text),
         latex: formula.latex || "",
         role: "equation",
         confidence: topic.content_confidence || "",
@@ -2607,12 +3311,24 @@
     });
   }
 
+  // 同内容の別名 ID（サーバ DTO の source:topic_summary / source:summary）で畳んだ
+  // アイテムを、別名側の参照からも解決できるようにする（カードは1枚のまま）。
+  function lsEvidenceItemHasAltId(item, normalizedId) {
+    var alts = (item && item.alt_ids) || [];
+    for (var i = 0; i < alts.length; i++) {
+      if (lsNormalizeEvidenceId(alts[i]) === normalizedId) return true;
+    }
+    return false;
+  }
+
   function lsEvidenceItemByRef(topic, kind, id) {
     var key = lsCourseEvidenceKey(kind, id);
     var normalizedId = lsNormalizeEvidenceId(id);
     var items = lsTopicEvidenceItems(topic);
     var exact = items.find(function (item) {
-      return item.key === key || (item.kind === kind && lsNormalizeEvidenceId(item.id) === normalizedId);
+      return item.key === key ||
+        (item.kind === kind && lsNormalizeEvidenceId(item.id) === normalizedId) ||
+        (item.kind === kind && lsEvidenceItemHasAltId(item, normalizedId));
     });
     if (exact) return exact;
     // kind フォールバック: 本文の埋め込みが kind を取り違えていても（例: 実体は
@@ -2646,19 +3362,22 @@
 
   function lsCourseEvidenceHtml(topic) {
     var items = lsTopicEvidenceItems(topic);
+    // CP9: トピック↔論文の対応付け来歴はペインの見出し行に1回だけ（カードには出さない）。
+    var mappingNote = lsTopicMappingNoteHtml(topic);
     if (!items.length) {
-      return '<div class="ls-course-evidence-empty">このトピックに対応する根拠リンク候補はまだありません。</div>';
+      return mappingNote +
+        '<div class="ls-course-evidence-empty">このトピックに対応する根拠リンク候補はまだありません。</div>';
     }
     // Phase 2: 論理要素（component）が1つ以上あるトピックは、その配下に主張・数式を
     // 束ねた構造アウトラインで描く。component アイテムが無いトピックは
     // 従来どおりフラットなカードリスト（グループバーなし）。
     var groups = lsGroupCourseEvidenceItems(topic, items);
     if (!groups) {
-      return '<div class="ls-course-evidence-list">' + items.map(function (item) {
+      return mappingNote + '<div class="ls-course-evidence-list">' + items.map(function (item) {
         return lsCourseEvidenceCardHtml(topic, item);
       }).join("") + '</div>';
     }
-    return '<div class="ls-course-evidence-list ls-course-evidence-outline">' +
+    return mappingNote + '<div class="ls-course-evidence-list ls-course-evidence-outline">' +
       groups.map(function (group) {
         return lsEvidenceGroupHtml(topic, group);
       }).join("") +
@@ -2669,8 +3388,7 @@
   // data-evidence-toggle / data-evidence-context / フッター操作）はそのまま。
   // グループ化はこのカードを包む DOM を足すだけで、カード自身は変えない。
   function lsCourseEvidenceCardHtml(topic, item) {
-      var metaLabel = lsEvidenceMetaLabel(item.role, item.confidence);
-      var canDeliberate = !!lsEvidenceContextElementType(item.kind);
+      var metaLabel = lsEvidenceMetaLabel(item.role);
       return '<article class="ls-course-evidence-card" data-evidence-key="' + escHtml(item.key) + '">' +
         // ヘッダは開閉トグル（クリックで文脈の遅延読み込み + 左ドラフトの該当箇所へ）。
         '<button type="button" class="ls-course-evidence-head" data-evidence-toggle="' + escHtml(item.key) + '"' +
@@ -2684,12 +3402,11 @@
           : (item.summary ? '<div class="ls-course-evidence-summary">' + lsRenderTextWithFormulas(item.summary, lsTopicFormulas(topic)) + '</div>' : '')) +
         (metaLabel ? '<div class="ls-course-evidence-meta"><span>' + escHtml(metaLabel) + '</span></div>' : '') +
         '<div class="ls-course-evidence-context-body" data-evidence-context="' + escHtml(item.key) + '" hidden></div>' +
+        // 「深く検討」は文脈カード（ElementCard の操作行 = opts.onDeliberate）側に置く。
+        // 解決済み element_id が取れたときだけ描かれる fail-closed なので、外殻に
+        // hidden ボタンを置いて後から見せる必要は無くなった（§3.3 Phase 3）。
         '<div class="ls-course-evidence-actions">' +
           '<button type="button" class="ls-course-evidence-link" data-evidence-draft="' + escHtml(item.key) + '">ドラフトの該当箇所へ</button>' +
-          (canDeliberate
-            ? '<button type="button" class="ls-course-evidence-link" data-evidence-deliberate="' + escHtml(item.key) + '"' +
-                ' data-ui-anchor="lecture-studio.component-deliberate" hidden>深く検討</button>'
-            : '') +
         '</div>' +
       '</article>';
   }
@@ -2875,19 +3592,22 @@
     figure: "figure",
   };
   // 逆写像（W層 element_type → 根拠リンクの kind）。ペイン内ジャンプの対応判定に使う。
+  // evidence → source: 根拠リンクの kind='source' の target_id は evidence_registry の
+  // evidence_id（course_content_builder が linked_evidence_ids から起こす）なので、
+  // W層が返す evidence ITEM は同一トピックの出典カードと突合できる（§16）。
+  // 逆向き（kind='source' → 文脈フェッチ）は足さない — source カードには
+  // トピック概要・原文抜粋のような evidence_id でない ID も混ざるため。
   var LS_EVIDENCE_CONTEXT_KINDS = {
     theory_component: "component",
     theory_claim: "claim",
     equation: "equation",
     figure: "figure",
+    evidence: "source",
   };
-  // 関係の裏付け状態（内部語彙をそのまま出さず日本語ラベルにする）。
-  // 数値（confidence 等）は一切表示しない（W8）。
-  var LS_CONTEXT_STATUS_LABELS = {
-    source_backed: "出典に裏付け",
-    confirmed: "教員確定",
-    candidate: "AI候補",
-  };
+  // 関係の裏付け状態バッジ（段階ラベルのみ・数値は出さない, W8）は統一パーツカードが
+  // element-vocab.js（window.ElementVocab.statusLabel）経由で描く。原稿スタジオ側の
+  // 独自バッジ関数（lsContextStatusLabel / lsContextStatusBadgeHtml）は §3.3 Phase 3 で
+  // 撤去した — ここに再実装しないこと。
 
   function lsEvidenceContextElementType(kind) {
     return LS_EVIDENCE_CONTEXT_ELEMENT_TYPES[kind] || "";
@@ -2896,13 +3616,6 @@
   function lsEvidenceContextDocumentId(item) {
     if (item && item.kind === "figure") return item.document_id || "";
     return lsCurrentDocumentId() || lsCoursePrimaryDocumentId();
-  }
-
-  function lsContextStatusBadgeHtml(status) {
-    var label = LS_CONTEXT_STATUS_LABELS[status];
-    if (!label) return "";
-    return '<span class="ls-context-status ls-context-status-' + escHtml(status) + '">' +
-      escHtml(label) + '</span>';
   }
 
   function lsEvidenceContextFactHtml(text) {
@@ -2914,39 +3627,54 @@
   // （lsLoadStumbleSummary と同型のキャッシュ・縮退方針）。
   function lsLoadEvidenceContext(topic, item, container) {
     if (!item || !container) return;
-    var elementType = lsEvidenceContextElementType(item.kind);
+    lsLoadEvidenceContextAt(topic, item, container, {
+      elementType: lsEvidenceContextElementType(item.kind),
+      elementId: String(item.id || ""),
+      documentId: lsEvidenceContextDocumentId(item),
+      label: String(item.title || "")
+    }, []);
+  }
+
+  // 中心（focusRef）を差し替えながら同じ枠へ描き直せる再入可能版。trail は
+  // ここまで辿ってきた中心の配列（パンくず。先頭が最初の中心）。取得・キャッシュ・
+  // ステイル破棄の方針は初回描画と中心移動で共通にする（経路が2つに分かれない）。
+  function lsLoadEvidenceContextAt(topic, item, container, focusRef, trail) {
+    if (!container || !focusRef) return;
+    var nav = { container: container, focusRef: focusRef, trail: trail || [] };
+    var elementType = String(focusRef.elementType || "");
     if (!elementType) {
-      container.innerHTML = lsEvidenceContextFactHtml(
+      lsRenderEvidenceContextFact(topic, item, nav,
         "出典の抜粋です。上位・下位の構造の問い合わせは行いません。");
       return;
     }
-    var documentId = lsEvidenceContextDocumentId(item);
+    var documentId = String(focusRef.documentId || "");
     if (!documentId) {
-      container.innerHTML = lsEvidenceContextFactHtml(
+      lsRenderEvidenceContextFact(topic, item, nav,
         "この要素に紐づく解析済みドキュメントが見つかりません。");
       return;
     }
-    var cacheKey = elementType + ":" + lsNormalizeEvidenceId(item.id) + "@" + documentId;
+    var elementId = String(focusRef.elementId || "");
+    var cacheKey = elementType + ":" + lsNormalizeEvidenceId(elementId) + "@" + documentId;
     var cached = lsState.evidenceContextByKey[cacheKey];
-    if (cached) { lsRenderEvidenceContext(topic, item, container, cached); return; }
-    container.innerHTML = '<div class="ls-course-muted">文脈を読み込み中…</div>';
+    if (cached) { lsRenderEvidenceContext(topic, item, container, cached, nav); return; }
+    lsRenderEvidenceContextFact(topic, item, nav, "文脈を読み込み中…");
     var courseId = lsState.courseId;
     apiFetch("/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" +
-      encodeURIComponent(item.id) + "/context?document_id=" + encodeURIComponent(documentId))
+      encodeURIComponent(elementId) + "/context?document_id=" + encodeURIComponent(documentId))
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
         if (courseId !== lsState.courseId) return; // コース切替後の古い応答は捨てる
         if (!lsEvidenceContextStillVisible(container)) return; // トピック/タブ切替で破棄
         if (!data) {
-          container.innerHTML = lsEvidenceContextFactHtml("コンテキストを取得できませんでした。");
+          lsRenderEvidenceContextFact(topic, item, nav, "コンテキストを取得できませんでした。");
           return;
         }
         lsState.evidenceContextByKey[cacheKey] = data;
-        lsRenderEvidenceContext(topic, item, container, data);
+        lsRenderEvidenceContext(topic, item, container, data, nav);
       })
       .catch(function () {
         if (!lsEvidenceContextStillVisible(container)) return;
-        container.innerHTML = lsEvidenceContextFactHtml("コンテキストを取得できませんでした。");
+        lsRenderEvidenceContextFact(topic, item, nav, "コンテキストを取得できませんでした。");
       });
   }
 
@@ -2955,83 +3683,197 @@
     return !!(preview && container && preview.contains(container));
   }
 
-  function lsRenderEvidenceContext(topic, item, container, data) {
+  // ── 文脈の描画は統一パーツカード（element-card.js）に委譲する ────────────────
+  // 正本: docs/architecture/admin_ux_issues_2026-08-01.md §3.2 / §3.3 Phase 3。
+  // かつてここには根拠リンク専用のレーン HTML（ls-evidence-context-lane 系）があったが、
+  // 「パーツ1個の描き方は出現箇所によらず同一」（P2）に寄せるため撤去した。
+  // **独自のレーン HTML をここに再実装しないこと。**
+  //
+  // 外殻カード（lsCourseEvidenceCardHtml）の DOM 契約（data-evidence-key /
+  // data-evidence-toggle / data-evidence-context / data-evidence-draft）は不変で、
+  // 差し替えたのは data-evidence-context の中身だけ。
+  //
+  // ITEM 行の操作は itemActions に載せる（従来の2択をそのまま保つ）:
+  //   - 同一トピックの根拠リンクに対応がある ITEM → 「この根拠リンク内で見る」
+  //   - 対応が無く W層で中心に据えられる ITEM     → 「深く検討」
+  // カード自身（focus）の「深く検討」は opts.onDeliberate。解決済み element_id が
+  // 取れたときだけ渡す fail-closed なので、外殻の hidden ボタンは不要になった。
+
+  // ── カード内の中心移動（パンくず）─────────────────────────────────────────
+  // 文脈カードの ITEM 見出しをクリックすると、その要素を中心に据え直して同じ枠へ
+  // 描き直す（モーダルを開かずに近傍を辿れる）。辿ってきた中心は trail に積み、
+  // 「← 戻る」で1つずつ戻す。推測でジャンプ先は作らない（navigable の ITEM のみ）。
+  //
+  // ElementCard.mount は渡されたコンテナの innerHTML を全置換するため、パンくずを
+  // 残すにはコンテナ内にホスト div を作ってそこへ mount する（外殻カードの DOM 契約
+  // = data-evidence-context のコンテナ自体は変えない）。
+  function lsEvidenceTrailLabel(ref) {
+    var label = String((ref && ref.label) || "").replace(/\s+/g, " ").trim();
+    if (label) return lsShortSummary(label, 24);
+    var typeLabel = lsElementTypeLabel(String((ref && ref.elementType) || ""));
+    return typeLabel || "要素";
+  }
+
+  function lsEvidenceTrailHtml(trail) {
+    if (!trail || !trail.length) return "";
+    var parts = [];
+    for (var i = 0; i < trail.length; i++) {
+      parts.push(escHtml(lsEvidenceTrailLabel(trail[i])));
+    }
+    return '<div class="ls-course-muted ls-evidence-context-trail">' +
+      '<button type="button" class="ls-evidence-context-back" data-evidence-context-back="1">' +
+        '← 戻る' +
+      '</button>' +
+      '<span>' + escHtml("たどった経路: ") + parts.join(escHtml(" › ")) + '</span>' +
+    '</div>';
+  }
+
+  function lsBindEvidenceTrail(topic, item, nav) {
+    var back = nav.container.querySelector("[data-evidence-context-back]");
+    if (!back) return;
+    back.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var trail = (nav.trail || []).slice();
+      var prev = trail.pop();
+      if (!prev) return;
+      lsLoadEvidenceContextAt(topic, item, nav.container, prev, trail);
+    });
+  }
+
+  // パンくず + カードのホストを用意して、mount 先（内側の div）を返す。
+  function lsEvidenceContextHost(topic, item, nav) {
+    nav.container.innerHTML = lsEvidenceTrailHtml(nav.trail) +
+      '<div class="ls-evidence-context-host"></div>';
+    lsBindEvidenceTrail(topic, item, nav);
+    return nav.container.querySelector(".ls-evidence-context-host") || nav.container;
+  }
+
+  function lsRenderEvidenceContextFact(topic, item, nav, text) {
+    lsEvidenceContextHost(topic, item, nav).innerHTML = lsEvidenceContextFactHtml(text);
+  }
+
+  function lsEvidenceCenterOnItem(topic, item, nav, ctxItem) {
+    if (!ctxItem || !ctxItem.navigable) return;
+    var elementType = String(ctxItem.element_type || "");
+    var elementId = String(ctxItem.element_id || ctxItem.id || "");
+    if (!elementType || !elementId) return;
+    var next = {
+      elementType: elementType,
+      elementId: elementId,
+      documentId: String(ctxItem.document_id || "") ||
+        String((nav.focusRef && nav.focusRef.documentId) || "") ||
+        lsEvidenceContextDocumentId(item),
+      label: String(ctxItem.label || "")
+    };
+    lsLoadEvidenceContextAt(topic, item, nav.container, next,
+      (nav.trail || []).concat([nav.focusRef]));
+  }
+
+  // ローカル対応判定の memo（when / onClick から同じ ITEM で何度も引かれるため）。
+  function lsEvidenceContextMatcher(topic) {
+    var cache = {};
+    return function (ctxItem) {
+      ctxItem = ctxItem || {};
+      var key = String(ctxItem.element_type || "") + "|" +
+        String(ctxItem.element_id || ctxItem.id || "") + "|" + String(ctxItem.label || "");
+      if (!Object.prototype.hasOwnProperty.call(cache, key)) {
+        cache[key] = lsEvidenceContextLocalMatch(topic, ctxItem) || null;
+      }
+      return cache[key];
+    };
+  }
+
+  function lsEvidenceContextCardOpts(topic, item, focus, nav) {
+    var matchOf = lsEvidenceContextMatcher(topic);
+    var opts = {
+      variant: window.ElementCard ? window.ElementCard.VARIANT_EDITABLE : "editable",
+      escapeHtml: escHtml,
+      renderMath: lsRenderKatex,
+      className: "ls-evidence-context-card",
+      // 中心の状態バッジと要確認事項は統一パーツカードが element-vocab.js 経由で描く
+      // （段階ラベルのみ・生数値は渡さない, W8）。未知・空の status は
+      // ElementCard 側の statusBadgeHtml が "" に落として行ごと出さない。
+      metaBadges: [{ status: (focus && focus.contextual_role_status) || "" }],
+      reviewNotes: (focus && focus.review_notes) || [],
+      // ITEM 見出しのクリックで中心を移す（パンくず付き）。現在の中心（nav.focusRef）が
+      // 無い呼び出しでは戻り先を作れないので中心移動を出さない（fail-closed）。
+      onCenter: nav && nav.focusRef ? function (ctxItem) {
+        lsEvidenceCenterOnItem(topic, item, nav, ctxItem);
+      } : null,
+      // 外殻カード（lsCourseEvidenceCardHtml）が既に種別チップ・タイトル・要約/数式を
+      // 表示しているため、内側カードの頭と本文は出さない（同じ内容の再掲を防ぐ）。
+      hideHead: true,
+      hideBody: true,
+      // document スコープの画面なので、役割見出しは既存文言「この論文での役割」を使う。
+      roleLabel: "この論文での役割",
+      // cardId は付けない。1つの data-evidence-context コンテナに1枚しか mount しない
+      // ので不要で、根拠キー（任意文字列）を属性セレクタに混ぜることも避けられる。
+      // 主語が根拠リンクの要素であることを示す既存文言をそのまま維持する。
+      laneTitles: {
+        upper: "上位（この要素が支えるもの）",
+        lower: "下位（この要素を支えるもの）"
+      },
+      itemActions: [
+        {
+          label: "この根拠リンク内で見る",
+          className: "ls-evidence-context-jump",
+          when: function (ctxItem) { return !!matchOf(ctxItem); },
+          onClick: function (ctxItem) {
+            var match = matchOf(ctxItem);
+            if (match) lsFocusEvidence(match.key);
+          }
+        },
+        {
+          label: "深く検討",
+          anchor: "lecture-studio.component-deliberate",
+          when: function (ctxItem) {
+            if (matchOf(ctxItem)) return false;
+            return !!(ctxItem && ctxItem.navigable && ctxItem.element_id && window.Deliberation);
+          },
+          onClick: function (ctxItem) {
+            if (window.Deliberation) {
+              window.Deliberation.openElement(
+                String(ctxItem.element_type || ""), String(ctxItem.element_id || ""), {
+                  documentId: ctxItem.document_id || "",
+                  title: String(ctxItem.label || "")
+                });
+            }
+          }
+        }
+      ]
+    };
+    // カード自身の「深く検討」は、解決済みの element_id が取れたときだけ渡す
+    // （旧 lsRevealEvidenceDeliberateButton の fail-closed をそのまま引き継ぐ）。
+    var elementType = (focus && focus.element_type) || lsEvidenceContextElementType(item.kind);
+    var elementId = (focus && focus.element_id) || "";
+    if (!elementType || !elementId) return opts;
+    if (window.Deliberation) {
+      opts.deliberateAnchor = "lecture-studio.component-deliberate";
+      opts.onDeliberate = function () {
+        window.Deliberation.openElement(String(elementType), String(elementId), {
+          documentId: (focus && focus.document_id) || lsEvidenceContextDocumentId(item) || "",
+          // 中心移動後は外殻カードの item ではなく現在の中心の見出しを渡す。
+          title: String((focus && (focus.headline || focus.label)) || item.title || "")
+        });
+      };
+    }
+    return opts;
+  }
+
+  function lsRenderEvidenceContext(topic, item, container, data, nav) {
+    nav = nav || { container: container, focusRef: null, trail: [] };
     if (!data || data.available === false) {
-      container.innerHTML = lsEvidenceContextFactHtml(
+      lsRenderEvidenceContextFact(topic, item, nav,
         (data && data.note) || "この要素の文脈情報はまだありません。");
       return;
     }
-    var focus = data.focus || {};
-    var html = '<div class="ls-evidence-context">';
-    var roleStatus = focus.contextual_role_status || "";
-    if (focus.contextual_role && roleStatus !== "unidentified") {
-      html += '<div class="ls-evidence-context-role">' +
-        '<span class="ls-evidence-context-role-label">この論文での役割</span>' +
-        '<span class="ls-evidence-context-role-value">' + escHtml(focus.contextual_role) + '</span>' +
-        lsContextStatusBadgeHtml(roleStatus) +
-      '</div>';
+    if (!window.ElementCard) {
+      // 部品未読み込みは事実文へ縮退する（独自レーン HTML の二重実装は持たない）。
+      lsRenderEvidenceContextFact(topic, item, nav, "文脈の表示部品を読み込めませんでした。");
+      return;
     }
-    if (focus.generic && (focus.generic.name || focus.generic.summary)) {
-      html += '<div class="ls-evidence-context-generic">一般には: ' +
-        escHtml(focus.generic.name || "") +
-        (focus.generic.summary ? ' — ' + escHtml(focus.generic.summary) : "") +
-      '</div>';
-    }
-    html += lsEvidenceContextLaneHtml(topic, "上位（この要素が支えるもの）", data.upper, "upper");
-    html += lsEvidenceContextLaneHtml(topic, "下位（この要素を支えるもの）", data.lower, "lower");
-    var notes = data.notes || [];
-    if (notes.length) {
-      html += '<ul class="ls-evidence-context-notes">' + notes.map(function (note) {
-        return '<li>' + escHtml(note) + '</li>';
-      }).join("") + '</ul>';
-    }
-    html += '</div>';
-    container.innerHTML = html;
-    lsBindEvidenceContextActions(container);
-    lsRevealEvidenceDeliberateButton(container, item, focus);
-  }
-
-  function lsEvidenceContextLaneHtml(topic, title, items, laneKind) {
-    items = items || [];
-    var rows;
-    if (!items.length) {
-      rows = lsEvidenceContextFactHtml(laneKind === "upper"
-        ? "この要素が支える上位の構造は、まだ同定されていません。"
-        : "この要素を支える下位の構造は見つかりませんでした。");
-    } else {
-      rows = items.map(function (ctxItem) {
-        return lsEvidenceContextItemHtml(topic, ctxItem);
-      }).join("");
-    }
-    return '<div class="ls-evidence-context-lane ls-evidence-context-lane-' + escHtml(laneKind) + '">' +
-      '<div class="ls-evidence-context-lane-title">' + escHtml(title) + '</div>' +
-      rows +
-    '</div>';
-  }
-
-  function lsEvidenceContextItemHtml(topic, ctxItem) {
-    ctxItem = ctxItem || {};
-    var localMatch = lsEvidenceContextLocalMatch(topic, ctxItem);
-    var action = "";
-    if (localMatch) {
-      action = '<button type="button" class="ls-course-evidence-link" data-context-jump="' +
-        escHtml(localMatch.key) + '">この根拠リンク内で見る</button>';
-    } else if (ctxItem.navigable && ctxItem.element_id && window.Deliberation) {
-      action = '<button type="button" class="ls-course-evidence-link"' +
-        ' data-ui-anchor="lecture-studio.component-deliberate"' +
-        ' data-context-deliberate-type="' + escHtml(ctxItem.element_type || "") + '"' +
-        ' data-context-deliberate-id="' + escHtml(ctxItem.element_id) + '"' +
-        ' data-context-deliberate-doc="' + escHtml(ctxItem.document_id || "") + '"' +
-        ' data-context-deliberate-title="' + escHtml(ctxItem.label || "") + '">深く検討</button>';
-    }
-    return '<div class="ls-evidence-context-item">' +
-      '<span class="ls-evidence-context-item-label">' + escHtml(ctxItem.label || "") + '</span>' +
-      (ctxItem.relation_label
-        ? '<span class="ls-evidence-context-relation">' + escHtml(ctxItem.relation_label) + '</span>'
-        : "") +
-      lsContextStatusBadgeHtml(ctxItem.relation_status) +
-      (action ? '<span class="ls-evidence-context-item-actions">' + action + '</span>' : "") +
-    '</div>';
+    window.ElementCard.mount(lsEvidenceContextHost(topic, item, nav), data,
+      lsEvidenceContextCardOpts(topic, item, data.focus || {}, nav));
   }
 
   // 同一トピックの根拠リンクに対応アイテムがあるか。(1) ID 一致 → (2) 同 kind の
@@ -3056,48 +3898,6 @@
       }
     });
     return found;
-  }
-
-  function lsBindEvidenceContextActions(container) {
-    container.querySelectorAll("[data-context-jump]").forEach(function (btn) {
-      btn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        lsFocusEvidence(this.getAttribute("data-context-jump"));
-      });
-    });
-    container.querySelectorAll("[data-context-deliberate-type]").forEach(function (btn) {
-      btn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        var elementType = this.getAttribute("data-context-deliberate-type");
-        var elementId = this.getAttribute("data-context-deliberate-id");
-        var documentId = this.getAttribute("data-context-deliberate-doc") || "";
-        var title = this.getAttribute("data-context-deliberate-title") || "";
-        if (!elementType || !elementId) return;
-        if (window.Deliberation) {
-          window.Deliberation.openElement(elementType, elementId, {
-            documentId: documentId,
-            title: title,
-          });
-        }
-      });
-    });
-  }
-
-  // カードフッターの「深く検討」は、解決済みの element_id（focus）が取れてから出す。
-  function lsRevealEvidenceDeliberateButton(container, item, focus) {
-    var card = container.closest ? container.closest(".ls-course-evidence-card") : null;
-    if (!card) return;
-    var btn = card.querySelector("[data-evidence-deliberate]");
-    if (!btn) return;
-    var elementType = (focus && focus.element_type) || lsEvidenceContextElementType(item.kind);
-    var elementId = (focus && focus.element_id) || "";
-    if (!window.Deliberation || !elementType || !elementId) { btn.hidden = true; return; }
-    btn.hidden = false;
-    btn.setAttribute("data-context-deliberate-type", elementType);
-    btn.setAttribute("data-context-deliberate-id", elementId);
-    btn.setAttribute("data-context-deliberate-doc",
-      (focus && focus.document_id) || lsEvidenceContextDocumentId(item) || "");
-    btn.setAttribute("data-context-deliberate-title", item.title || "");
   }
 
   // 右ペイン根拠カードの配線（開閉トグル + 双方向リンク + フッター操作）。
@@ -3143,22 +3943,6 @@
       btn.addEventListener("click", function (e) {
         e.stopPropagation();
         lsFocusDraftEvidence(this.getAttribute("data-evidence-draft"));
-      });
-    });
-    container.querySelectorAll("[data-evidence-deliberate]").forEach(function (btn) {
-      btn.addEventListener("click", function (e) {
-        e.stopPropagation();
-        var elementType = this.getAttribute("data-context-deliberate-type");
-        var elementId = this.getAttribute("data-context-deliberate-id");
-        var documentId = this.getAttribute("data-context-deliberate-doc") || "";
-        var title = this.getAttribute("data-context-deliberate-title") || "";
-        if (!elementType || !elementId) return;
-        if (window.Deliberation) {
-          window.Deliberation.openElement(elementType, elementId, {
-            documentId: documentId,
-            title: title,
-          });
-        }
       });
     });
   }
@@ -3329,15 +4113,30 @@
       // （admin.js の図サムネイル読込 loadFigureThumbnail と同じ方式）。
       if (embed.kind === "figure") {
         var figureItem = evidenceItem && evidenceItem.kind === "figure" ? evidenceItem : null;
+        // 教材図スタジオ（teaching_figure_studio_design.md §7.3）: 2段フォールバック。
+        // ① evidence_links 由来 item（document_id 付き）→ ② コース構造の figures_index
+        // （教員が手で挿入した図・採用済みの生成図もここで解決する。学習画面との整合）。
+        var figureFetchPath = "";
+        var figureCaption = (figureItem && figureItem.caption) || "";
         if (figureItem && figureItem.figure_id && figureItem.document_id) {
-          var fetchPath = "/admin/documents/" + encodeURIComponent(figureItem.document_id) +
+          figureFetchPath = "/admin/documents/" + encodeURIComponent(figureItem.document_id) +
             "/figures/" + encodeURIComponent(figureItem.figure_id) + "/image";
+        } else {
+          var indexed = lsFigureIndexFetch(
+            (figureItem && figureItem.figure_id) ? figureItem.figure_id : embedId
+          );
+          if (indexed) {
+            figureFetchPath = indexed.path;
+            if (!figureCaption) figureCaption = indexed.caption;
+          }
+        }
+        if (figureFetchPath) {
           return '<figure class="material-figure ls-material-figure" data-evidence-ref="' + escHtml(key) + '">' +
             '<span class="material-figure-frame">' +
-              '<img class="material-figure-img ls-figure-embed-img" data-figure-fetch-path="' + escHtml(fetchPath) + '" style="display:none" alt="' + escHtml(figureItem.caption || "図") + '">' +
+              '<img class="material-figure-img ls-figure-embed-img" data-figure-fetch-path="' + escHtml(figureFetchPath) + '" style="display:none" alt="' + escHtml(figureCaption || "図") + '">' +
               '<span class="material-figure-placeholder">画像を読み込み中…</span>' +
             '</span>' +
-            (figureItem.caption ? '<figcaption class="material-figure-caption">' + escHtml(lsShortSummary(figureItem.caption, 200)) + '</figcaption>' : "") +
+            (figureCaption ? '<figcaption class="material-figure-caption">' + escHtml(lsShortSummary(figureCaption, 200)) + '</figcaption>' : "") +
           '</figure>';
         }
         return '<button type="button" class="ls-material-embed ls-material-missing" data-evidence-ref="' + escHtml(key) + '">' +
@@ -3371,13 +4170,14 @@
         var embedBody = evidenceItem.latex
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + lsRenderKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(lsShortSummary(evidenceItem.summary, 260) || "この教材要素に紐づく根拠リンクです。右ペインで詳細を確認できます。") + '</span>';
-        // admin ドラフト画面では grounding 検証情報（対応付け方法等）を維持する
+        // admin ドラフト画面では grounding 情報（この根拠が果たす役割）を維持する
         // （学習UI側は ls-material-embed-meta を出さない方針。§受け入れ基準）。
+        // CP9: 照合来歴（対応付け）はここには出さない — ペイン見出しに1回だけ。
         return '<button type="button" class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(key) + '">' +
           '<span class="ls-material-embed-kind">' + escHtml(lsEvidenceKindLabel(evidenceItem.kind)) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           embedBody +
-          '<span class="ls-material-embed-meta">' + escHtml(lsEvidenceMetaLabel(evidenceItem.role, evidenceItem.confidence)) + '</span>' +
+          '<span class="ls-material-embed-meta">' + escHtml(lsEvidenceMetaLabel(evidenceItem.role)) + '</span>' +
         '</button>';
       }
       if (embed.kind === "source" && topic.source_excerpt) {
@@ -3394,6 +4194,29 @@
       '</button>';
     });
     return html || '<div class="ls-course-muted">教材プレビューは空です。</div>';
+  }
+
+  // 教材図スタジオ（§7.3）: コース構造の figures_index から画像取得パスを引く
+  // （プレビュー解決の2段目）。抽出図は document 経路、生成図（teaching）はコース経路。
+  // image_url が返っていればそれを使う（"/api" プレフィックスは apiFetchRaw と
+  // 整合させるため剥がす。admin.js の loadFigureThumbnail と同じ流儀）。
+  function lsFigureIndexFetch(figureId) {
+    var id = lsNormalizeEvidenceId(figureId);
+    var index = lsState.figuresIndex || {};
+    var entry = index[id] || index[figureId];
+    if (!entry) return null;
+    var path = entry.image_url || "";
+    if (path && path.indexOf("/api/") === 0) path = path.substring(4);
+    if (!path && entry.teaching && lsState.courseId) {
+      path = "/admin/courses/" + encodeURIComponent(lsState.courseId) +
+        "/teaching-figures/" + encodeURIComponent(id) + "/image";
+    }
+    if (!path && entry.document_id) {
+      path = "/admin/documents/" + encodeURIComponent(entry.document_id) +
+        "/figures/" + encodeURIComponent(id) + "/image";
+    }
+    if (!path) return null;
+    return { path: path, caption: entry.caption || "" };
   }
 
   // lsCourseDraftHtml(topic) の innerHTML 差し替え後に呼ぶ。container 内の未取得
@@ -4082,6 +4905,8 @@
   function lsRenderGraphPanel(documentId) {
     var container = document.getElementById("ls-component-graph");
     if (!container) return;
+    lsActiveComponentGraphDocumentId = documentId || "";
+    lsGraphSelectedNodeId = "";
     if (!documentId) {
       container.innerHTML = '<div class="ls-empty-state">論文を選択すると論理グラフが表示されます。</div>';
       return;
@@ -4366,16 +5191,20 @@
   // navigate (select + focus) to neighbouring / referenced nodes.
   var lsActiveComponentNetwork = null;
   var lsActiveComponentGraph = null;
+  // 表示中グラフのドキュメント（詳細ペインのサーバ文脈問い合わせに使う）。
+  var lsActiveComponentGraphDocumentId = "";
 
+  // 現在のグラフ内でノードを選択・フォーカスする。グラフ内に無ければ false を返し、
+  // 呼び出し側（lsGraphCenterOnItem）が別の中心移動手段へ委ねる。
   function lsGraphNavigateToNode(nodeId) {
     var graph = lsActiveComponentGraph;
-    if (!graph || !nodeId) return;
+    if (!graph || !nodeId) return false;
     var target = null;
     (graph.nodes || []).some(function (n) {
       if (lsGraphNodeId(n) === nodeId) { target = n; return true; }
       return false;
     });
-    if (!target) return;
+    if (!target) return false;
     if (lsActiveComponentNetwork) {
       try {
         lsActiveComponentNetwork.selectNodes([nodeId]);
@@ -4383,6 +5212,7 @@
       } catch (e) { /* node may be filtered out of the current layer */ }
     }
     lsRenderGraphNodeDetail(target, graph);
+    return true;
   }
 
   function lsInitComponentGraphNetwork(graph, readingPath) {
@@ -4532,6 +5362,7 @@
         var edge = edgeById[params.edges[0]];
         if (edge) { lsRenderGraphEdgeDetail(edge, graph); return; }
       }
+      lsGraphSelectedNodeId = "";
       if (detail) detail.innerHTML = lsGraphEmptyDetailHtml(nodes.length, edges.length);
     });
   }
@@ -4644,174 +5475,281 @@
     return ref;
   }
 
-  function lsGraphRefChipHtml(ref) {
-    if (ref.resolved && ref.navNodeId) {
-      return '<button type="button" class="ls-graph-ref ls-graph-ref-nav" data-ls-nav-node="' +
-        escHtml(ref.navNodeId) + '">' + escHtml(ref.label) + '</button>';
-    }
-    if (ref.resolved) {
-      if (ref.kind === "equation" && ref.latex) {
-        return '<span class="ls-graph-ref ls-graph-ref-resolved">' + lsRenderKatex(ref.latex, false) +
-          ' <span class="ls-graph-ref-id">' + escHtml(ref.id) + '</span></span>';
-      }
-      if (ref.kind === "evidence" || ref.kind === "derivation") {
-        return '<span class="ls-graph-ref ls-graph-ref-resolved">' + escHtml(ref.label) +
-          ' <span class="ls-graph-ref-id">' + escHtml(ref.id) + '</span></span>';
-      }
-      return '<span class="ls-graph-ref ls-graph-ref-resolved">' + escHtml(ref.label) + '</span>';
-    }
-    return '<span class="ls-graph-ref ls-graph-ref-unresolved" title="参照先を解決できませんでした">' +
-      escHtml(ref.id) + ' <span class="ls-graph-ref-flag">未解決</span></span>';
-  }
+  // ══ 統一パーツカードへのローカルアダプタ（admin_ux_issues_2026-08-01.md §3.3 Phase 2）══
+  //
+  // 詳細ペインは「ローカル即時表示 → サーバ文脈の遅延マージ」の2段構え。
+  //   1. ノード/エッジ選択時、その場で持っている情報（node オブジェクト + graph.edges +
+  //      lsGraphResolveRef）から **context_lens と同じ DTO 形** を合成し ElementCard で即時描画。
+  //   2. ノードは続けて GET /api/admin/deliberation/elements/theory_component/{id}/context を
+  //      引き、upper / lower を高品質版（サーバ側で解決済みのラベル・関係名）へ差し替える。
+  //      404・エラー時はローカル版のまま（fail-soft）。main 層の stage 集約ノードは
+  //      theory_components に実体が無く解決できないことがあり、それが正常系。
+  // エッジはサーバ側の要素ではないため（refs.py の element_type に edge は無い）
+  // フェッチせずローカル DTO のみで描く。
+  //
+  // 旧実装（lsGraphRefChipHtml / lsGraphRefRowHtml / lsGraphNeighborListHtml による
+  // 独自 HTML 組み立て）は撤去済み。パーツ1個の描き方は ElementCard に一本化する（P2）。
 
-  // Render a labelled row of resolved/unresolved reference chips. Returns "" when
-  // there are no ids, so the caller can decide overall section emptiness.
-  function lsGraphRefRowHtml(resolver, label, kind, ids) {
+  var LS_GRAPH_CARD_HOST_ID = "ls-graph-detail-card";
+
+  // kind（lsGraphResolveRef の語彙）→ backend element_type（表示名は element-vocab.js）。
+  var LS_GRAPH_REF_ELEMENT_TYPES = {
+    component: "theory_component",
+    equation: "equation",
+    claim: "theory_claim",
+    evidence: "evidence",
+    derivation: "derivation"
+  };
+
+  // W層「深く検討」で中心に据えられる要素種別（core/deliberation/refs.py の解決対象）。
+  // evidence / derivation は W層設計書 §16 で解決対象に加わった（グラフ詳細の根拠リンク
+  // から、その根拠箇所・導出そのものを中心に据えられる）。
+  var LS_GRAPH_DELIBERABLE_ELEMENT_TYPES = [
+    "theory_component", "theory_claim", "equation", "figure", "evidence", "derivation"
+  ];
+  // うち document_id が必須の種別（独立テーブルを持たず artifact 内 ID で一意化する）。
+  // openElement は documentId 無しでは何もしないため、必ず添えて渡す。
+  var LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES = ["equation", "evidence", "derivation"];
+
+  // 選択中の要素（サーバ応答の競合ガードに使う）。ノード切替・連打では
+  // 「現在選択中の nodeId と応答の nodeId が一致するときだけ反映」する。
+  var lsGraphSelectedNodeId = "";
+  // 文脈 DTO のキャッシュ（キーは element_type:id@document_id）。
+  var lsGraphNodeContextCache = {};
+
+  function lsGraphUniqueIds(ids) {
     var unique = [];
     var seen = {};
     (ids || []).forEach(function (id) {
-      var key = String(id || "");
+      var key = String(id == null ? "" : id);
       if (!key || seen[key]) return;
       seen[key] = true;
       unique.push(key);
     });
-    if (!unique.length) return "";
-    var chips = unique.map(function (id) {
-      return lsGraphRefChipHtml(lsGraphResolveRef(resolver, kind, id));
-    }).join(" ");
-    return '<div class="ls-graph-detail-refrow"><span class="ls-graph-detail-reflabel">' + escHtml(label) +
-      '</span><div class="ls-graph-ref-chips">' + chips + '</div></div>';
+    return unique;
   }
 
-  // Issue #450: render incoming/outgoing neighbours with their relation type and a
-  // navigable chip to the neighbour node.
-  function lsGraphNeighborListHtml(list, heading, resolver, graphNarrative) {
-    if (!list.length) return "";
-    var html = '<div class="ls-graph-detail-neighbor-group">' +
-      '<div class="ls-graph-detail-neighbor-head">' + escHtml(heading) + '</div>' +
-      '<ul class="ls-graph-detail-edges">';
-    list.forEach(function (item) {
-      var edge = item.edge;
-      var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
-      var ref = lsGraphResolveRef(resolver, "component", item.other);
-      html += '<li><span>' + escHtml(lsGraphEdgeLabel(relation)) + '</span>' + lsGraphRefChipHtml(ref);
-      var evidence = edge.evidence || {};
-      var reason = String(evidence.reason || "").trim();
-      if (reason) {
-        html += '<div class="ls-graph-detail-edge-reason">' + escHtml(reason) + '</div>';
-      }
-      var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
-      var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
-      if (transition) {
-        html += '<div class="ls-graph-detail-edge-narrative">' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></div>';
-      }
-      html += '</li>';
+  // 1件の参照 → ITEM。解決できたものだけラベルを置換し、解決できないものは ID の
+  // まま出して unresolved に積む（情報を落とさない — 事実文で後から告知する）。
+  // navigable は「グラフ内ノードとして解決できた component」または「W層が中心に
+  // 据えられる種別として参照インデックスで解決できたもの」（§16 の evidence /
+  // derivation がこれに当たる）。解決できなかった参照は navigable にしない
+  // （押しても開けない導線を作らない = 推測でジャンプ先を作らない）。
+  function lsGraphRefItem(resolver, kind, id, relationLabel, unresolved) {
+    var ref = lsGraphResolveRef(resolver, kind, id);
+    if (!ref.resolved && unresolved) unresolved.push(id);
+    var elementType = LS_GRAPH_REF_ELEMENT_TYPES[kind] || kind;
+    var deliberable = ref.resolved &&
+      LS_GRAPH_DELIBERABLE_ELEMENT_TYPES.indexOf(elementType) >= 0 &&
+      LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES.indexOf(elementType) >= 0 &&
+      !!lsGraphActiveDocumentId();
+    return {
+      element_type: elementType,
+      element_id: id,
+      label: ref.resolved ? ref.label : id,
+      relation_label: relationLabel || "",
+      navigable: !!ref.navNodeId || deliberable
+    };
+  }
+
+  function lsGraphPushRefItems(out, resolver, kind, ids, relationLabel, unresolved) {
+    lsGraphUniqueIds(ids).forEach(function (id) {
+      out.push(lsGraphRefItem(resolver, kind, id, relationLabel, unresolved));
     });
-    html += '</ul></div>';
-    return html;
   }
 
-  function lsRenderGraphNodeDetail(node, graph) {
-    var detail = document.getElementById("ls-component-graph-detail");
-    if (!detail) return;
+  function lsGraphUnresolvedNote(unresolved) {
+    var unique = lsGraphUniqueIds(unresolved);
+    if (!unique.length) return "";
+    return "参照先の名称を解決できませんでした（ID のまま表示しています）: " + unique.join(" / ");
+  }
+
+  // ノード → context_lens 形の DTO。
+  //   upper = このノードが支えるもの（出ていくエッジの先 + 所属先）
+  //   lower = このノードを支えるもの（入ってくるエッジの元 + 根拠リンク）
+  function lsGraphNodeToCardDto(node, graph) {
     var nodeId = lsGraphNodeId(node);
-    var backing = String(node.source_backing_status || "").toLowerCase();
     var resolver = lsGraphBuildResolver(graph);
     var graphNarrative = (graph && graph.narrative) || {};
-    var anchorMark = node.is_thesis_anchor
-      ? '<span class="ls-graph-detail-anchor" title="主張の到達点（アンカー）">★</span> ' : "";
+    var unresolved = [];
+    var upper = [];
+    var lower = [];
 
-    // Header: role badge (issue #448 — user-facing role name, no internal type) + title.
-    var html =
-      '<div class="ls-graph-detail-badge ' + escHtml(lsGraphNodeGroup(node)) + '">' +
-      escHtml(lsGraphRoleLabel(node)) + '</div>' +
-      '<h4>' + anchorMark + escHtml((lsGraphNodeDisplayLabel(node, nodeId) || nodeId || "無題").replace(/\n/g, " — ")) + '</h4>';
+    ((graph && graph.edges) || []).forEach(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+      if (source === nodeId) {
+        upper.push(lsGraphRefItem(resolver, "component", target, lsGraphEdgeLabel(relation), unresolved));
+      } else if (target === nodeId) {
+        lower.push(lsGraphRefItem(resolver, "component", source, lsGraphEdgeLabel(relation), unresolved));
+      }
+    });
 
-    // ── (a) 説明: 何を表すか（平文）─────────────────────────────────
-    html += '<div class="ls-graph-detail-section"><b>説明</b>';
-    html += '<p class="ls-graph-detail-role">役割: ' + escHtml(lsGraphRoleLabel(node)) + '</p>';
-    var description = String(node.description || "").trim();
-    if (description) {
-      html += '<p>' + escHtml(description) + '</p>';
-    } else {
-      var fallbackText = (lsGraphNodeDisplayLabel(node, nodeId) || "").replace(/\n/g, " ").trim();
-      html += '<p class="ls-theory-muted">' + escHtml(fallbackText || "説明文はありません。") + '</p>';
+    if (node.parent_component_id) {
+      lsGraphPushRefItems(upper, resolver, "component", [node.parent_component_id], "所属先", unresolved);
     }
-    var nodeNarrative = (graphNarrative.node_narratives || {})[nodeId];
-    if (nodeNarrative && String(nodeNarrative.narrative_role || "").trim()) {
-      html += '<p>議論での役割: ' + escHtml(nodeNarrative.narrative_role) + ' <span class="ls-graph-narrative-badge">AI提案</span></p>';
-    }
-    var reviewReason = String(node.review_reason || "").trim();
-    if (reviewReason) {
-      html += '<p class="ls-graph-detail-memo">' + escHtml(reviewReason) + '</p>';
-    }
-    html += '</div>';
 
-    // ── (b) 根拠リンク: 何に支えられるか（共通の参照解決を介す）──────────
-    var equationIds = []
+    // 根拠リンク（何に支えられるか）。かつて行ラベルを引数直書きしていた箇所は
+    // element_type に置き換わり、表示名は element-vocab.js が一手に引く（P1）。
+    lsGraphPushRefItems(lower, resolver, "equation", []
       .concat(node.linked_equation_ids || [])
       .concat(node.input_equation_ids || [])
-      .concat(node.output_equation_ids || []);
-    var claimIds = []
+      .concat(node.output_equation_ids || []), "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "claim", []
       .concat(node.linked_claim_ids || [])
       .concat(node.input_claim_ids || [])
       .concat(node.output_claim_ids || [])
-      .concat(node.required_claim_ids || []);
-    var derivationIds = []
+      .concat(node.required_claim_ids || []), "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "evidence", node.linked_evidence_ids, "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "derivation", []
       .concat(node.linked_derivation_ids || [])
-      .concat(node.supporting_derivation_ids || []);
-    var componentIds = []
-      .concat(node.representative_component_id ? [node.representative_component_id] : [])
-      .concat(node.parent_component_id ? [node.parent_component_id] : [])
-      .concat(node.linked_component_ids || [])
-      .concat(node.member_component_ids || []);
-    var refRows =
-      lsGraphRefRowHtml(resolver, "式", "equation", equationIds) +
-      lsGraphRefRowHtml(resolver, "claim", "claim", claimIds) +
-      lsGraphRefRowHtml(resolver, "evidence", "evidence", node.linked_evidence_ids) +
-      lsGraphRefRowHtml(resolver, "derivation", "derivation", derivationIds) +
-      lsGraphRefRowHtml(resolver, "関連要素", "component", componentIds);
-    html += '<div class="ls-graph-detail-section"><b>根拠リンク</b>' +
-      (refRows || '<p class="ls-theory-muted">根拠リンクはありません。</p>') + '</div>';
+      .concat(node.supporting_derivation_ids || []), "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "component",
+      node.representative_component_id ? [node.representative_component_id] : [], "代表", unresolved);
+    lsGraphPushRefItems(lower, resolver, "component", node.member_component_ids, "集約", unresolved);
+    lsGraphPushRefItems(lower, resolver, "component", node.linked_component_ids, "関連", unresolved);
 
-    // ── (c) 隣接: 何と繋がるか（入る／出るエッジ、関係種別付き）────────────
-    var incoming = [];
-    var outgoing = [];
-    (graph.edges || []).forEach(function (edge) {
-      var source = edge.source_component_id || edge.source || edge.from;
-      var target = edge.target_component_id || edge.target || edge.to;
-      if (source === nodeId) outgoing.push({ edge: edge, other: target });
-      else if (target === nodeId) incoming.push({ edge: edge, other: source });
-    });
-    html += '<div class="ls-graph-detail-section"><b>隣接</b>';
-    if (!incoming.length && !outgoing.length) {
-      html += '<p class="ls-theory-muted">接続エッジはありません。</p>';
-    } else {
-      html += lsGraphNeighborListHtml(outgoing, "→ 出力（このノードから）", resolver, graphNarrative);
-      html += lsGraphNeighborListHtml(incoming, "← 入力（このノードへ）", resolver, graphNarrative);
+    var notes = [];
+    var nodeNarrative = (graphNarrative.node_narratives || {})[nodeId];
+    if (nodeNarrative && String(nodeNarrative.narrative_role || "").trim()) {
+      notes.push("議論での役割: " + String(nodeNarrative.narrative_role).trim() + "（AI提案）");
     }
-    html += '</div>';
+    var reviewReason = String(node.review_reason || "").trim();
+    if (reviewReason) notes.push(reviewReason);
+    var unresolvedNote = lsGraphUnresolvedNote(unresolved);
+    if (unresolvedNote) notes.push(unresolvedNote);
 
-    // 要確認事項
-    var hasReview = backing || (node.review_reasons || []).length;
-    if (hasReview) {
-      html += '<div class="ls-graph-detail-section"><b>要確認事項</b>';
-      if (backing) {
-        html += '<p class="ls-graph-backing ls-graph-backing-' + escHtml(backing) + '">' +
-          escHtml(lsGraphSourceBackingLabel(backing)) + '</p>';
-      }
-      if ((node.review_reasons || []).length) {
-        html += '<ul class="ls-graph-detail-reasons">';
-        node.review_reasons.forEach(function (reason) {
-          html += '<li>' + escHtml(lsGraphReviewReasonLabel(reason)) + '</li>';
-        });
-        html += '</ul>';
-      }
-      html += '</div>';
+    return {
+      focus: {
+        element_type: "theory_component",
+        element_id: nodeId,
+        document_id: lsGraphActiveDocumentId(),
+        label: lsGraphDetailHeading(node, nodeId),
+        // §3.1(4)(d): description が空でも見出しの再掲はしない。空のまま渡して
+        // カード側の事実文（「説明文はありません。」）に任せる。
+        intrinsic_summary: String(node.description || "").trim()
+      },
+      upper: upper,
+      lower: lower,
+      notes: notes
+    };
+  }
+
+  // エッジ → context_lens 形の DTO。始点がこの関係を支え、この関係が終点を支える。
+  function lsGraphEdgeToCardDto(edge, graph) {
+    var resolver = lsGraphBuildResolver(graph);
+    var graphNarrative = (graph && graph.narrative) || {};
+    var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+    var sourceId = edge.source_component_id || edge.source || edge.from;
+    var targetId = edge.target_component_id || edge.target || edge.to;
+    var evidence = edge.evidence || {};
+    var unresolved = [];
+    var upper = [];
+    var lower = [];
+
+    lsGraphPushRefItems(upper, resolver, "component", targetId ? [targetId] : [], "終点", unresolved);
+    lsGraphPushRefItems(lower, resolver, "component", sourceId ? [sourceId] : [], "始点", unresolved);
+    lsGraphPushRefItems(lower, resolver, "equation", evidence.evidence_equation_ids, "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "claim", []
+      .concat(evidence.evidence_claim_ids || [])
+      .concat(evidence.evidence_claims || []), "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "derivation", evidence.evidence_derivation_ids, "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "evidence", evidence.source_evidence_ids, "根拠", unresolved);
+    lsGraphPushRefItems(lower, resolver, "component", evidence.thesis_refs, lsElementTypeLabel("thesis"), unresolved);
+
+    var notes = [];
+    var domainVerb = String(edge.domain_verb || "").trim();
+    if (domainVerb) notes.push("動詞: " + domainVerb);
+    var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
+    var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
+    if (transition) notes.push("遷移: " + transition + "（AI提案）");
+    var unresolvedNote = lsGraphUnresolvedNote(unresolved);
+    if (unresolvedNote) notes.push(unresolvedNote);
+
+    return {
+      focus: {
+        // 関係は W層の要素種別（refs.py の element_type）ではないので element_type は
+        // 空にする。内部語彙（"edge" 等）を種別チップに出さないため（fail-soft）。
+        element_type: "",
+        element_id: edge.edge_id || "",
+        label: lsGraphEdgeLabel(relation),
+        intrinsic_summary: String(evidence.reason || edge.reasoning || "").trim()
+      },
+      upper: upper,
+      lower: lower,
+      notes: notes
+    };
+  }
+
+  // サーバ文脈（context_lens の DTO）をローカル DTO へマージする。
+  // 見出しラベルはローカルの日本語 stage ラベルを優先維持し、upper / lower は
+  // サーバ側の解決済み ITEM へ差し替える。ローカルだけが持つ notes は残す。
+  function lsGraphMergeServerContext(localDto, serverDto) {
+    if (!serverDto || serverDto.available === false) return localDto;
+    var localFocus = localDto.focus || {};
+    var serverFocus = serverDto.focus || {};
+    var focus = {
+      element_type: localFocus.element_type,
+      element_id: localFocus.element_id,
+      document_id: localFocus.document_id,
+      label: localFocus.label || serverFocus.label || "",
+      intrinsic_summary: localFocus.intrinsic_summary || serverFocus.intrinsic_summary || "",
+      contextual_role: serverFocus.contextual_role,
+      contextual_role_status: serverFocus.contextual_role_status,
+      generic: serverFocus.generic
+    };
+    var upper = (serverDto.upper || []).length ? serverDto.upper : (localDto.upper || []);
+    var lower = (serverDto.lower || []).length ? serverDto.lower : (localDto.lower || []);
+    var notes = (localDto.notes || []).concat(serverDto.notes || []);
+    return { focus: focus, upper: upper, lower: lower, notes: notes };
+  }
+
+  // 詳細ペイン見出し。内部 ID は lsGraphSemanticLabel が除去し、theory stage は
+  // §3.4(b) の日本語ラベルになっている。改行（ネットワーク表示用の折り返し）は畳む。
+  function lsGraphDetailHeading(node, nodeId) {
+    var label = String(lsGraphNodeDisplayLabel(node, nodeId) || nodeId || "無題");
+    return label.replace(/\s*\n\s*/g, " ").trim() || "無題";
+  }
+
+  // 現在グラフを表示しているドキュメント。サーバ文脈の問い合わせに使う。
+  function lsGraphActiveDocumentId() {
+    return lsActiveComponentGraphDocumentId || lsCurrentDocumentId() || "";
+  }
+
+  // 近傍 ITEM のクリック（P3「どこに出してもグラフ近傍が辿れる」）。まず現在のグラフ内で
+  // ノード選択を試み、グラフ内に無い要素は W層「深く検討」で中心に据える。ローカル DTO の
+  // component は agent の component_id なのでグラフ内で解決でき、サーバ文脈が返す
+  // DB UUID の主張・数式・別層のコンポーネントは後者の経路に落ちる。
+  // どちらもできない項目は何もしない（推測でジャンプ先を作らない）。
+  function lsGraphCenterOnItem(item) {
+    var targetId = item && (item.element_id || item.id);
+    if (!targetId) return;
+    if (lsGraphNavigateToNode(String(targetId))) return;
+    if (!item.navigable) return;
+    var elementType = String(item.element_type || "");
+    if (LS_GRAPH_DELIBERABLE_ELEMENT_TYPES.indexOf(elementType) < 0) return;
+    if (window.Deliberation) {
+      window.Deliberation.openElement(elementType, String(targetId), {
+        documentId: item.document_id || lsGraphActiveDocumentId(),
+        title: String(item.label || "")
+      });
     }
+  }
 
-    // システム情報（折りたたみ。内部 type 名はユーザー向けには出さず、ここにのみ残す — issue #448）
-    html += '<div class="ls-graph-detail-section ls-graph-detail-system">' +
+  // meta 行のバッジ（§3.4(c) 出所バッジは上部・段階ラベルのみで数値は出さない）。
+  // ElementVocab.statusLabel が持たない partially_source_backed / inferred /
+  // review_required は既存の段階ラベル（lsGraphSourceBackingLabel）を label で渡す。
+  function lsGraphBackingBadge(status) {
+    var raw = String(status || "").toLowerCase();
+    if (!raw) return null;
+    return { status: raw, label: lsGraphSourceBackingLabel(raw) };
+  }
+
+  function lsGraphNodeSystemInfoHtml(node, nodeId) {
+    // 情報を落とさないため、内部 type / レイヤー / ステータスは折りたたみで残す
+    // （ユーザー向けの主表示には出さない — issue #448）。
+    var html = '<div class="ls-graph-detail-section ls-graph-detail-system">' +
       '<details><summary>システム情報</summary>' +
       '<div class="ls-graph-detail-link"><b>ID</b> <code>' + escHtml(nodeId || "") + '</code></div>' +
       '<div class="ls-graph-detail-link"><b>内部type</b> <code>' + escHtml(node.component_type || node.type || "") + '</code></div>' +
@@ -4819,109 +5757,127 @@
       '<div class="ls-graph-detail-link"><b>ステータス</b> ' + escHtml(node.review_status || node.origin || "paper") + '</div>';
     var linkage = lsGraphLayerLinkageHtml(node);
     if (linkage) html += linkage;
-    html += '</details></div>';
+    return html + '</details></div>';
+  }
 
-    detail.innerHTML = html;
-    lsGraphBindDetailNav(detail);
+  // カードのマウント。ElementCard 未読み込み時は事実文へ縮退する（fail-soft）。
+  function lsGraphMountCard(dto, opts) {
+    var host = document.getElementById(LS_GRAPH_CARD_HOST_ID);
+    if (!host) return;
+    if (!window.ElementCard) {
+      var focus = (dto && dto.focus) || {};
+      host.innerHTML = '<div class="ls-graph-detail-section"><b>' +
+        escHtml(String(focus.label || "無題")) + '</b><p>' +
+        escHtml(String(focus.intrinsic_summary || "説明文はありません。")) + '</p></div>';
+      return;
+    }
+    window.ElementCard.mount(host, dto, opts);
+  }
+
+  function lsGraphNodeCardOpts(node, nodeId) {
+    var metaBadges = [];
+    var backingBadge = lsGraphBackingBadge(node.source_backing_status);
+    if (backingBadge) metaBadges.push(backingBadge);
+    // §3.1(4)(c): ロールバッジに一本化し「役割: 〇〇」行は出さない。
+    metaBadges.push({ label: lsGraphRoleLabel(node) });
+    if (node.is_thesis_anchor) metaBadges.push({ label: "★ 主張の到達点" });
+    var opts = {
+      variant: window.ElementCard ? window.ElementCard.VARIANT_EDITABLE : "editable",
+      escapeHtml: escHtml,
+      renderMath: lsRenderKatex,
+      className: "ls-graph-detail-card-body",
+      cardId: "graph-node",
+      headerNote: "選択中の要素",
+      metaBadges: metaBadges,
+      reviewNotes: (node.review_reasons || []).map(lsGraphReviewReasonLabel),
+      onCenter: lsGraphCenterOnItem
+    };
+    if (window.Deliberation) {
+      opts.deliberateAnchor = "lecture-studio.component-deliberate";
+      opts.onDeliberate = function () {
+        if (!nodeId) return;
+        window.Deliberation.openElement("theory_component", nodeId, {
+          documentId: lsGraphActiveDocumentId(),
+          title: lsGraphDetailHeading(node, nodeId)
+        });
+      };
+    }
+    return opts;
+  }
+
+  function lsRenderGraphNodeDetail(node, graph) {
+    var detail = document.getElementById("ls-component-graph-detail");
+    if (!detail) return;
+    var nodeId = lsGraphNodeId(node);
+    lsGraphSelectedNodeId = String(nodeId || "");
+    detail.innerHTML = '<div id="' + LS_GRAPH_CARD_HOST_ID + '" class="ls-graph-detail-card"></div>' +
+      lsGraphNodeSystemInfoHtml(node, nodeId);
+    var localDto = lsGraphNodeToCardDto(node, graph);
+    lsGraphMountCard(localDto, lsGraphNodeCardOpts(node, nodeId));
     // D層 (D1-4/D1-5/D3-1): 認識的地位台帳セクションを静かに追記する。
     // fail-closed — 取得失敗時はセクション自体を出さず既存表示を壊さない。
     if (window.DoubtAtlas && nodeId) {
       window.DoubtAtlas.renderNodeLedgerSection(detail, "component", nodeId);
     }
+    lsGraphLoadNodeContext(node, graph, localDto);
   }
 
-  // Issue #450: wire navigable reference chips to select + focus the target node.
-  function lsGraphBindDetailNav(detail) {
-    var navEls = detail.querySelectorAll("[data-ls-nav-node]");
-    for (var ni = 0; ni < navEls.length; ni++) {
-      (function (el) {
-        el.addEventListener("click", function () {
-          lsGraphNavigateToNode(el.getAttribute("data-ls-nav-node"));
-        });
-      })(navEls[ni]);
+  // サーバ文脈（W層 context_lens）を遅延取得して upper / lower を差し替える。
+  // 競合ガード: 応答時点で選択中のノードが変わっていたら破棄する。
+  function lsGraphLoadNodeContext(node, graph, localDto) {
+    var nodeId = String(lsGraphNodeId(node) || "");
+    var documentId = lsGraphActiveDocumentId();
+    if (!nodeId || !documentId) return;
+    var cacheKey = "theory_component:" + nodeId + "@" + documentId;
+    var cached = lsGraphNodeContextCache[cacheKey];
+    if (cached) {
+      lsGraphMountCard(lsGraphMergeServerContext(localDto, cached), lsGraphNodeCardOpts(node, nodeId));
+      return;
     }
+    apiFetch("/admin/deliberation/elements/theory_component/" + encodeURIComponent(nodeId) +
+      "/context?document_id=" + encodeURIComponent(documentId))
+      .then(function (res) { return res.ok ? res.json() : null; })
+      .then(function (data) {
+        if (lsGraphSelectedNodeId !== nodeId) return; // ノード切替後の古い応答は捨てる
+        if (!data || data.available === false) return; // 解決できないのは正常系（fail-soft）
+        lsGraphNodeContextCache[cacheKey] = data;
+        lsGraphMountCard(lsGraphMergeServerContext(localDto, data), lsGraphNodeCardOpts(node, nodeId));
+      })
+      .catch(function () { /* ローカル版のまま維持（fail-soft） */ });
   }
 
-  // Issue #450: edge detail panel — same three tiers as nodes (説明 → 根拠リンク →
-  // 隣接), so selecting ANY element yields a structured, navigable detail view.
+  // Issue #450 / §3.3 Phase 2: エッジ詳細もノードと同じ統一パーツカードで描く。
+  // エッジは W層の解決対象（refs.py の element_type）ではないためサーバ文脈は引かず、
+  // ローカル DTO だけで完結する（「深く検討」も出さない）。
+  function lsGraphEdgeSystemInfoHtml(edge) {
+    // 内部 relation 名はここにのみ残す（issue #448）。
+    // 確信度の生数値は表示しない（段階ラベルのみの原則。W8 と同旨）。
+    return '<div class="ls-graph-detail-section ls-graph-detail-system"><details><summary>システム情報</summary>' +
+      '<div class="ls-graph-detail-link"><b>edge ID</b> <code>' + escHtml(edge.edge_id || "") + '</code></div>' +
+      '<div class="ls-graph-detail-link"><b>内部relation</b> <code>' + escHtml(edge.edge_type || edge.relation || "") + '</code></div>' +
+      '</details></div>';
+  }
+
   function lsRenderGraphEdgeDetail(edge, graph) {
     var detail = document.getElementById("ls-component-graph-detail");
     if (!detail) return;
-    var resolver = lsGraphBuildResolver(graph);
-    var graphNarrative = (graph && graph.narrative) || {};
-    var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
-    var sourceId = edge.source_component_id || edge.source || edge.from;
-    var targetId = edge.target_component_id || edge.target || edge.to;
-    var evidence = edge.evidence || {};
-    var backing = String(edge.source_backing_status || "").toLowerCase();
-    var srcRef = lsGraphResolveRef(resolver, "component", sourceId);
-    var tgtRef = lsGraphResolveRef(resolver, "component", targetId);
-
-    // Header: relation badge + relation label.
-    var html =
-      '<div class="ls-graph-detail-badge relation">関係</div>' +
-      '<h4>' + escHtml(lsGraphEdgeLabel(relation)) + '</h4>';
-
-    // ── (a) 説明 ─────────────────────────────────────────────────────
-    html += '<div class="ls-graph-detail-section"><b>説明</b>';
-    html += '<p class="ls-graph-detail-role">関係種別: ' + escHtml(lsGraphEdgeLabel(relation)) + '</p>';
-    var domainVerb = String(edge.domain_verb || "").trim();
-    if (domainVerb) html += '<p>動詞: ' + escHtml(domainVerb) + '</p>';
-    var reasoning = String(evidence.reason || edge.reasoning || "").trim();
-    if (reasoning) html += '<p>' + escHtml(reasoning) + '</p>';
-    html += '<p class="ls-theory-muted">' +
-      escHtml((srcRef.label || sourceId || "?")) + ' → ' + escHtml((tgtRef.label || targetId || "?")) + '</p>';
-    var edgeNarrative = (graphNarrative.edge_narratives || {})[edge.edge_id];
-    var transition = edgeNarrative ? String(edgeNarrative.transition_text || "").trim() : "";
-    if (transition) {
-      html += '<p>遷移: ' + escHtml(transition) + ' <span class="ls-graph-narrative-badge">AI提案</span></p>';
-    }
-    html += '</div>';
-
-    // ── (b) 根拠リンク（evidence_refs を共通の参照解決で解決）──────────────
-    var claimIds = [].concat(evidence.evidence_claim_ids || []).concat(evidence.evidence_claims || []);
-    var refRows =
-      lsGraphRefRowHtml(resolver, "式", "equation", evidence.evidence_equation_ids) +
-      lsGraphRefRowHtml(resolver, "claim", "claim", claimIds) +
-      lsGraphRefRowHtml(resolver, "derivation", "derivation", evidence.evidence_derivation_ids) +
-      lsGraphRefRowHtml(resolver, "evidence", "evidence", evidence.source_evidence_ids) +
-      lsGraphRefRowHtml(resolver, "thesis", "component", evidence.thesis_refs);
-    html += '<div class="ls-graph-detail-section"><b>根拠リンク</b>' +
-      (refRows || '<p class="ls-theory-muted">根拠リンクはありません。</p>') + '</div>';
-
-    // ── (c) 隣接（始点・終点ノード、ともに遷移可能）────────────────────────
-    html += '<div class="ls-graph-detail-section"><b>隣接</b>' +
-      '<div class="ls-graph-detail-neighbor-group"><div class="ls-graph-detail-neighbor-head">始点</div>' +
-      '<div class="ls-graph-ref-chips">' + lsGraphRefChipHtml(srcRef) + '</div></div>' +
-      '<div class="ls-graph-detail-neighbor-group"><div class="ls-graph-detail-neighbor-head">終点</div>' +
-      '<div class="ls-graph-ref-chips">' + lsGraphRefChipHtml(tgtRef) + '</div></div></div>';
-
-    // 要確認事項
-    var reasons = edge.review_reasons || [];
-    if (backing || reasons.length) {
-      html += '<div class="ls-graph-detail-section"><b>要確認事項</b>';
-      if (backing) {
-        html += '<p class="ls-graph-backing ls-graph-backing-' + escHtml(backing) + '">' +
-          escHtml(lsGraphSourceBackingLabel(backing)) + '</p>';
-      }
-      if (reasons.length) {
-        html += '<ul class="ls-graph-detail-reasons">';
-        reasons.forEach(function (r) { html += '<li>' + escHtml(lsGraphReviewReasonLabel(r)) + '</li>'; });
-        html += '</ul>';
-      }
-      html += '</div>';
-    }
-
-    // システム情報（折りたたみ。内部 relation 名はここにのみ残す — issue #448）
-    var confidence = edge.confidence != null ? String(edge.confidence) : "";
-    html += '<div class="ls-graph-detail-section ls-graph-detail-system"><details><summary>システム情報</summary>' +
-      '<div class="ls-graph-detail-link"><b>edge ID</b> <code>' + escHtml(edge.edge_id || "") + '</code></div>' +
-      '<div class="ls-graph-detail-link"><b>内部relation</b> <code>' + escHtml(edge.edge_type || edge.relation || "") + '</code></div>' +
-      (confidence ? '<div class="ls-graph-detail-link"><b>確信度</b> ' + escHtml(confidence) + '</div>' : '') +
-      '</details></div>';
-
-    detail.innerHTML = html;
-    lsGraphBindDetailNav(detail);
+    lsGraphSelectedNodeId = ""; // エッジ選択中はノード文脈の遅延応答を反映させない
+    var metaBadges = [{ label: "関係" }];
+    var backingBadge = lsGraphBackingBadge(edge.source_backing_status);
+    if (backingBadge) metaBadges.push(backingBadge);
+    detail.innerHTML = '<div id="' + LS_GRAPH_CARD_HOST_ID + '" class="ls-graph-detail-card"></div>' +
+      lsGraphEdgeSystemInfoHtml(edge);
+    lsGraphMountCard(lsGraphEdgeToCardDto(edge, graph), {
+      variant: window.ElementCard ? window.ElementCard.VARIANT_EDITABLE : "editable",
+      escapeHtml: escHtml,
+      renderMath: lsRenderKatex,
+      className: "ls-graph-detail-card-body",
+      cardId: "graph-edge",
+      headerNote: "選択中の関係",
+      metaBadges: metaBadges,
+      reviewNotes: (edge.review_reasons || []).map(lsGraphReviewReasonLabel),
+      onCenter: lsGraphCenterOnItem
+    });
   }
 
   function lsRenderGraphFallback(container, graph) {
@@ -5057,21 +6013,49 @@
     "Introduce": "導入",
   };
 
-  // Issue #337: Japanese stage labels for main graph nodes.
-  var LS_STAGE_LABELS_JA = {
-    "Theory basis": "理論の前提",
-    "Observation model": "観測モデル",
-    "Observable construction": "観測量の構成",
-    "Equation system": "方程式系",
-    "Elimination": "消去",
-    "Consistency relation": "整合条件",
-    "Diagnostic / application": "診断・応用",
-  };
+  // Issue #337 / admin_ux_issues_2026-08-01.md §3.4(b): theory stage の日本語表示名。
+  // **訳語の正本は element-vocab.js（ElementVocab.theoryStageLabel）+ その Python ミラー
+  // core/element_vocab.py の1組**で、原稿スタジオは辞書を持たない（かつてここに
+  // LS_THEORY_STAGE_LABELS_JA があり、正本と別訳（"理論的前提" / "式系"）で分裂していた —
+  // element_context_presentation_redesign.md RC10。再定義しないこと）。
+  // **変換は表示層のみ** — backend（src/episteme_graph/agents/component_graph/schema.py の
+  // THEORY_STAGE_LABELS）・API・agent 出力は英語のままで、CLAUDE.md の
+  // 「main label は短い stage label」原則も保つ。
+  //
+  // colon 形（"<Stage>: <対象>"）は呼び出し側が先に分解してから渡す。正本の
+  // theoryStageKey は colon 形も stage キーへ解決するため、そのまま渡すと
+  // ": <対象>" 側が落ちる（情報を落とさない, P4）。未知・正本未読み込みは "" を返す。
+  function lsTheoryStageLabelJa(text) {
+    var raw = String(text == null ? "" : text).trim();
+    if (!raw || raw.indexOf(":") >= 0) return "";
+    var vocab = window.ElementVocab;
+    if (!vocab || !vocab.theoryStageLabel) return "";
+    return vocab.theoryStageLabel(raw) || "";
+  }
+
+  // 英語 stage ラベル（単体 or "<Stage>: <対象>" 形）を日本語化する。未知のラベルは
+  // そのまま返す（fail-soft・情報を落とさない）。
+  function lsGraphStageLabelJa(text) {
+    var raw = String(text == null ? "" : text).trim();
+    if (!raw) return raw;
+    var colon = raw.indexOf(":");
+    if (colon > 0) {
+      var headLabel = lsTheoryStageLabelJa(raw.slice(0, colon));
+      if (headLabel) {
+        var rest = raw.slice(colon + 1).trim();
+        return rest ? headLabel + ": " + rest : headLabel;
+      }
+    }
+    var label = lsTheoryStageLabelJa(raw);
+    if (label) return label;
+    return raw;
+  }
 
   function lsGraphOperationLabelJa(verb) {
     var label = String(verb || "").trim();
     if (LS_OPERATION_VERB_JA[label]) return LS_OPERATION_VERB_JA[label];
-    if (LS_STAGE_LABELS_JA[label]) return LS_STAGE_LABELS_JA[label];
+    var stageLabel = lsTheoryStageLabelJa(label);
+    if (stageLabel) return stageLabel;
     var parts = label.split(" ");
     if (parts.length >= 2 && LS_OPERATION_VERB_JA[parts[0]]) {
       return LS_OPERATION_VERB_JA[parts[0]] + ": " + parts.slice(1).join(" ");
@@ -5148,7 +6132,14 @@
   // Issue #447: resolve a node's human-readable label without ever leaking an
   // internal ID. Priority: visual_label -> display_label -> operation semantic
   // -> stage/theory_object -> stage -> generic. Every branch is ID-stripped.
+  // §3.4(b): 表示層のみで theory stage を日本語化する。ネットワークのノードラベル
+  // （lsGraphNodeDisplayLabel）・詳細ペインの見出し・推奨読解経路バナーはすべて
+  // この関数を通るため、1箇所の変換で表示の一貫性が取れる。
   function lsGraphSemanticLabel(node) {
+    return lsGraphStageLabelJa(lsGraphSemanticLabelRaw(node));
+  }
+
+  function lsGraphSemanticLabelRaw(node) {
     if (!node) return "";
     var cand;
     var visualLabel = String(node.visual_label || "").trim();
@@ -5481,6 +6472,7 @@
       })
       .then(function (graph) {
         lsState.graphByDocument[documentId] = graph;
+        lsGraphNodeContextCache = {}; // 再読込でノード文脈のキャッシュを捨てる
         lsSetPanelStatus("ls-graph-status", "更新しました", "success");
         if (forceRender || lsState.view === "graph") lsRenderWorkspace();
         lsRenderChunkList();
@@ -6403,13 +7395,18 @@
   //
   // (displayText, spokenText, formulas) -> Promise<{ slides: [{slide_index, display, spoken}],
   //   mismatch, displayCount, spokenCount, error }>
-  function lsFetchSplitSlides(displayText, spokenText, formulas) {
+  // autoPaginate=true のときは、受講画面と同じ自動ページ分割（core/lecture.py の
+  // auto_paginate_slides）を通した結果を返す（教材図スタジオ設計書 §7.5: 図を入れると
+  // ページ境界が動くため、コーストピックのスライド枚数インジケータは実際の配信と
+  // 一致させる）。既定 false で従来の呼び出し（チャンク編集）は不変。
+  function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate) {
     return apiFetch("/admin/lecture-studio/preview-split", {
       method: "POST",
       body: JSON.stringify({
         display_text: displayText || "",
         spoken_text: spokenText || null,
         formulas: formulas || [],
+        auto_paginate: !!autoPaginate,
       }),
     })
       .then(function (res) {
@@ -6425,6 +7422,8 @@
           mismatch: !!data.mismatch,
           displayCount: data.display_segment_count || 0,
           spokenCount: data.spoken_segment_count || 0,
+          autoPaginated: !!data.auto_paginated,
+          spokenDegraded: !!data.spoken_degraded,
         };
       })
       .catch(function (err) {
@@ -6461,10 +7460,18 @@
       el.textContent = "⚠ 表示 " + split.displayCount + " / 読み上げ " + split.spokenCount +
         " — 1枚に統合して配信されます";
       el.classList.add("ls-slides-indicator-warn");
+    } else if (split.spokenDegraded) {
+      // 教材図スタジオ設計書 §7.5 の事実文（自動ページ分割で読み上げが同数に割れない）。
+      el.textContent = "⚠ 表示 " + split.displayCount +
+        " 枚に対し読み上げが分割できないため、このトピックの読み上げはタイマー送りになります" +
+        "（=== で明示分割すると解消できます）";
+      el.classList.add("ls-slides-indicator-warn");
     } else if (split.spokenCount === 0) {
       el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ未入力";
     } else {
-      el.textContent = "表示 " + split.displayCount + " 枚 / 読み上げ " + split.spokenCount + " 区切り ✓";
+      el.textContent = "表示 " + split.displayCount + " 枚" +
+        (split.autoPaginated ? "（自動ページ分割）" : "") +
+        " / 読み上げ " + split.spokenCount + " 区切り ✓";
       el.classList.add("ls-slides-indicator-ok");
     }
   }
@@ -6639,19 +7646,51 @@
     }, 300);
   }
 
-  // 「スライド区切りを挿入」ボタン: 最後にフォーカスしていた textarea のカーソル位置に
-  // \n===\n を挿入する。もう一方の textarea には挿入しない（対応位置の自動推定は不確実）。
-  function lsInsertSlideMarkerIntoTextarea(el) {
+  // textarea のカーソル位置に任意のテキストを挿入する汎用ユーティリティ。
+  // スライド区切り（`===`）と教材図スタジオの `![[figure:id]]` 挿入が共有する
+  // （teaching_figure_studio_design.md §6.1: lsInsertSlideMarkerIntoTextarea の汎用化）。
+  // input イベントを発火させることで既存の updateTopic / インジケータ更新に届ける。
+  function lsInsertTextAtCursor(el, text) {
     if (!el) return;
-    var marker = "\n===\n";
+    var insert = String(text === null || text === undefined ? "" : text);
     var start = typeof el.selectionStart === "number" ? el.selectionStart : (el.value || "").length;
     var end = typeof el.selectionEnd === "number" ? el.selectionEnd : start;
     var value = el.value || "";
-    el.value = value.slice(0, start) + marker + value.slice(end);
-    var newPos = start + marker.length;
+    el.value = value.slice(0, start) + insert + value.slice(end);
+    var newPos = start + insert.length;
     el.selectionStart = el.selectionEnd = newPos;
-    el.focus();
+    // モーダル（教材図スタジオ）が開いている間は、背後に隠れた textarea へフォーカスを
+    // 移さない（以降のキー入力が見えない欄に入ってしまう）。閉じたときに復元する。
+    if (lsModalBlocksTextareaFocus()) {
+      lsDeferredTextareaFocus = { el: el, pos: newPos };
+    } else {
+      el.focus();
+    }
     el.dispatchEvent(new Event("input"));
+  }
+
+  // 図スタジオのモーダル表示中に発生したフォーカス移動の保留・復元。
+  var lsDeferredTextareaFocus = null;
+
+  function lsModalBlocksTextareaFocus() {
+    return !!(window.FigureStudio && typeof window.FigureStudio.isOpen === "function" &&
+      window.FigureStudio.isOpen());
+  }
+
+  function lsRestoreDeferredTextareaFocus() {
+    var pending = lsDeferredTextareaFocus;
+    lsDeferredTextareaFocus = null;
+    if (!pending || !pending.el) return;
+    try {
+      pending.el.focus();
+      pending.el.selectionStart = pending.el.selectionEnd = pending.pos;
+    } catch (e) { /* noop */ }
+  }
+
+  // 「スライド区切りを挿入」ボタン: 最後にフォーカスしていた textarea のカーソル位置に
+  // \n===\n を挿入する。もう一方の textarea には挿入しない（対応位置の自動推定は不確実）。
+  function lsInsertSlideMarkerIntoTextarea(el) {
+    lsInsertTextAtCursor(el, "\n===\n");
   }
 
   function lsInsertSlideMarker() {
@@ -7816,6 +8855,17 @@
     deps.onTabActivate = options.onTabActivate || null;
     deps.state = options.state || null;
     state = deps.state;
+
+    // 教材図スタジオ（teaching_figure_studio_design.md §6.1）: 呼び出し元は
+    // 本モジュールだけなので、依存の注入もここで行う（admin.js から見た
+    // 起動点を増やさない）。init は冪等。
+    if (window.FigureStudio && window.FigureStudio.init) {
+      window.FigureStudio.init({
+        apiFetch: deps.apiFetch,
+        apiFetchRaw: deps.apiFetchRaw,
+        escHtml: deps.escHtml
+      });
+    }
 
     initLectureStudio();
     _lsInitRewriteModelChip();

@@ -11,8 +11,8 @@
   <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"></script>
   <!-- ?v=: レイアウト（1画面に収める）系の修正は CSS が古いままだと効かないので、
        atlas.css と同じくバージョンクエリでキャッシュを切る。 -->
-  <link rel="stylesheet" href="/css/styles.css?v=discuss-layout-20260726">
-  <link rel="stylesheet" href="/css/atlas.css?v=field-atlas-20260713-1">
+  <link rel="stylesheet" href="/css/styles.css?v=knowledge-landscape-20260804">
+  <link rel="stylesheet" href="/css/atlas.css?v=knowledge-landscape-20260804">
 </head>
 <body>
   <div class="app">
@@ -120,6 +120,9 @@
           <button type="button" class="discuss-scope-opt" data-discuss-scope="course_sources">このコースのソース論文</button>
           <button type="button" class="discuss-scope-opt" data-discuss-scope="all_visible">閲覧できる周辺資料まで</button>
         </div>
+        <!-- 音声会話の非対応を近傍に事実文で示す（設計 §6.4: 音声版はこのモードの
+             非スコープ。app.js の updateVoiceAvailability が hidden を切り替える）。 -->
+        <span class="discuss-voice-note" id="discuss-voice-note" hidden>音声会話は「順番に学ぶ」モードで利用できます。</span>
         <!-- Phase 2 着地画面トリガー①（明示終了）。押すと discuss.js が今日の議論を
              振り返る軽量モーダルを提示する（スキップ可・既定オン）。 -->
         <button type="button" class="discuss-end-btn" id="discuss-end-btn" data-ui-anchor="discuss.end" title="今日の議論を振り返って終える">議論を終える</button>
@@ -165,6 +168,10 @@
     <div class="discuss-landing-overlay" id="discuss-landing-region" hidden></div>
   </div>
 
+  <script src="/js/element-vocab.js?v=element-vocab-20260801-2"></script>
+  <!-- ↑ 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。app.js より前に読み込む。 -->
+  <script src="/js/element-card.js?v=element-card-20260801-1"></script>
+  <!-- ↑ 統一パーツカード（§3.2）の編集不可バリアント。element-vocab.js の後・app.js より前。 -->
   <script src="/js/app.js"></script>
   <script src="/js/atlas-fixture.js"></script>
   <script src="/js/atlas-data.js"></script>
@@ -175,6 +182,10 @@
   <script src="/js/atlas-cues.js"></script>
   <script src="/js/personal-map.js"></script>
   <script src="/js/personal-map-home.js"></script>
+  <!-- 知識ランドスケープ（docs/features/knowledge_landscape_design.md §10.1）:
+       地図オーバーレイの「論文の位置」レイヤー + 出典タブへのデータ供給。
+       atlas-overlay.js のフックから呼ばれるので personal-map.js の後に読み込む。 -->
+  <script src="/js/landscape-layer.js?v=knowledge-landscape-20260804"></script>
   <script src="/js/reconstruction.js"></script>
   <script src="/js/discuss.js"></script>
 </body>

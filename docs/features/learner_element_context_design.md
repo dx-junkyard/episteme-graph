@@ -1,6 +1,7 @@
 # 学習者向け claim / equation 文脈API — 要素中心コンテキストの学習者提示
 
-> 状態: バックエンド実装済み(2026-07-31)。実装記録は §8。
+> 状態: バックエンド + フロントエンド実装済み(2026-07-31)。実装記録は §8、
+> レビュー指摘対応は §8.4。
 > 対象: 学習UI教材内の `![[claim:id]]` / `![[equation:id]]` 埋め込み要素からの文脈展開。
 > 関連文書: `docs/features/component_evidence_redesign.md`(component 版の先行実装・
 > Phase 2/3)、`docs/features/element_context_lens_design.md`(W層の要素中心コンテキスト
@@ -76,7 +77,8 @@ GET /api/learning/courses/{course_id}/elements/{element_type}/{element_id}/conte
   (W層の内部語彙 `theory_claim` も 404 — 公開語彙は短い `claim` だけ)
 - `element_id`:
   - `claim` … `theory_claims.id`(DB UUID) と agent 側 ID(`claim_span_007` 等、
-    `source_scope.legacy_ids`)の**両対応**
+    `source_scope.legacy_ids`)の**両対応**。ただし agent 側 ID がコース内で複数行に
+    一致する場合は解決しない(下記「曖昧時 fail-closed」)
   - `equation` … `equations.json` の `equation_id`(`eq_2_7` 等)
 
 ### ゲート(3条件・fail-closed)
@@ -93,6 +95,28 @@ component 文脈 API / 学習者向け図配信 API(Phase 4)と同一:
 条件2を SQL 側で強制する理由: agent 側 ID(`claim_span_007` / `eq_2_7`)は論文ごとに
 独立採番されるため文書間で衝突しうる。コース外文書の同名要素へ誤って一致する余地を
 構造的に断つ(`component_context._resolve_component_row` と同型)。
+
+#### 曖昧時 fail-closed(claim の agent 側 ID)
+
+コース document スコープに絞っても **コース内で複数一致する** ケースが残る。claim の
+agent 側 ID は `claim_object_builder/builder.py::_make_claim_id` が span_id から作るが、
+span_id は block ごとに振り直されるため文書内でも文書間でも反復し、`legacy_ids` は
+重複回避のカウンタ接尾辞を持たない。したがって複数文書をソースに持つコースでは
+`claim_span_001` が**別論文の別 claim** に一致し得る。
+
+そこで解決規則を次のように確定する(W層 `core/deliberation/refs.py::_resolve_by_legacy_id`
+が「単一 document 必須」で同じ問題を断っているのと整合させる):
+
+| 一致の形 | 扱い |
+|---|---|
+| `theory_claims.id`(UUID)完全一致 | 一意なので**即決**(他文書が同じ文字列を `legacy_ids` に持っていても曖昧扱いにしない) |
+| `legacy_ids` 一致が **ちょうど1行** | 解決 |
+| `legacy_ids` 一致が **複数行**(別 document にまたがる / 同一 document 内で複数) | **解決しない**(`None` → 404 → フロントは既存の「文脈情報はまだありません。」へ縮退) |
+
+「たまたま最初に返った行」を *出典に裏付け* バッジ付きの文脈として学習者に見せない
+(誤った論文の主張を確定情報として提示するのは、文脈が出ないことより有害)。候補取得の
+`ORDER BY` は `(id::text = :raw_id) DESC, document_id ASC, created_at ASC, id::text ASC` で
+**決定的**にし、実行計画依存の非決定を排除する。
 
 ### レスポンス 200(成功)
 
@@ -126,12 +150,27 @@ ITEM = {
   "id": str | null,            // null = 表示のみ(非ナビゲーション)
   "element_type": "theory_claim"|"theory_component"|"equation"|"figure"|
                   "section"|"thesis"|"derivation"|"symbol"|"evidence"|"stage"|...,
-  "label": str,
+  "label": str,                // 裸の内部ID形は一般ラベルへ置換済み(§4)
   "relation_label": str,       // 「を定量化する」等の読み手向け動詞句(主語は常に focus)
   "relation_status": "source_backed"|"confirmed",   // candidate は現れない
-  "navigable": bool            // true のとき同APIで再フェッチできる(= 旅の続き)
+  "navigable": bool            // true のとき本APIまたは component 文脈APIで
+                               // 学習者が再フェッチできる(= 旅の続き)
 }
 ```
+
+`element_type` は W層の内部語彙をそのまま通す(フロントが自前で表示語彙・
+`data-evidence-ref` の kind へ変換している)。一方 `navigable` は**学習者側の実フェッチ
+可能性**で作り直す(W層の `_NAVIGABLE_ELEMENT_TYPES` は教員向け deliberation モーダルで
+開けるかどうかの値で、学習者向けの取得口とは一致しない):
+
+| element_type | navigable | 学習者の取得口 |
+|---|---|---|
+| `theory_claim` | ✓ | 本API(`element_type=claim` として) |
+| `equation` | ✓ | 本API |
+| `theory_component` | ✓ | `/api/learning/courses/{id}/components/{cid}/context` |
+| `figure` / `section` / `thesis` / `derivation` / `symbol` / `evidence` / `stage` / `part` | — | 学習者向けの文脈取得口が無い(図は配信APIのみで文脈APIが無い) |
+
+`id` が空の項目は型に関わらず `navigable:false`。
 
 ### レスポンス 200(縮退)
 
@@ -142,10 +181,24 @@ ITEM = {
 要素は解決できた(= 権限は通った)が W層 context lens が投影を返せない / 例外だった
 場合。フロントは文脈欄ごと非表示にすればよい(LE8)。
 
+**`context_lens.build()` の内部 fail-soft 形も縮退に含める**: `build()` は builder が
+`None` を返した / 例外だった場合にも **dict** (`_degenerate_result`)を返す(`focus.label`
+= 生の element_id、レーン空、専用 note 1件)。これは投影ではなく「読めなかった」という
+表明なので `available:true` で出してはならない(出すと `focus.label` が生 UUID になる)。
+W層は変更しない(LE6)ため、`element_context` 側で**形状から検出**する。判定は保守的に
+次の4条件**すべて**を要求し、正常だが疎な投影(上位・下位が空でもラベル・本文が
+引けている投影)を誤って縮退させない:
+
+1. `notes` に degenerate 専用の文言が含まれる(`context_lens.py` 内でこの文言を使うのは
+   `_degenerate_result` の1箇所だけ = 実質的なマーカー)
+2. `focus.label` が解決済み element_id の生値そのもの
+3. `focus.intrinsic_summary` が空
+4. `upper` / `lower` がともに空
+
 ## 4. フィルタ仕様
 
 `core/deliberation/context_lens.py` の生の投影に対し、`core/element_context.py` が
-以下の変換を行う。**この4点が学習者向けAPIと教員向けAPIの唯一の差分**である。
+以下の変換を行う。**これが学習者向けAPIと教員向けAPIの唯一の差分**である。
 
 | 対象 | 規則 | 理由 |
 |---|---|---|
@@ -153,8 +206,55 @@ ITEM = {
 | `focus.contextual_role` / `contextual_role_status` | `contextual_role_status ∈ {source_backed, confirmed}` かつ role が非空のときのみ残す。candidate / unidentified は**キー自体を落とす** | 推測で穴埋めしない。「未同定」という内部状態語彙を学習者に見せる必要も無い |
 | 全レスポンス | `confidence` キーを**再帰除去**(`component_context.strip_confidence`) | W8。数値は段階ラベルすら出さない |
 | ITEM の `evidence_refs` / `relation` / `document_id`、`focus.provenance` | **落とす** | 内部参照ID(evidence_id / step_id / span_id)と内部語彙キーを学習者に出さない。`focus.document_id` のみ残す(component 版が `in_paper.document.id` を既に出しているため整合) |
+| ITEM の `label` | **裸の内部ID形なら element_type 別の一般ラベルへ置換**(下表)。`relation_label` は保持し項目自体は落とさない | W層はラベル(caption / claim 本文 / 記号)を引けなかった項目に内部IDをそのまま `label` として入れる(`_build_claim` の図 DB UUID・`ev_0001`・subclaim の agent 側ID、`_build_equation` の `synth_claim_0001`、thesis の `support:<section>:<idx>`)。W層は変更しない(LE6)ので学習者向け射影で遮る |
+| `focus.contextual_role` | 内部IDトークンを含むなら**キーごと落とす** | 役割文は W層 `_derive_contextual_role` が `upper[0]` のラベルから合成するため、ラベル解決に失敗した項目がそのまま「この論文での役割」に出る(「synth_claim_0001を定量化する」)。candidate / unidentified と同じ「推測で穴埋めしない」縮退 |
+| ITEM の `navigable` | 学習者の実フェッチ可能性で**再計算**(§3 の表) | W層の値は教員向けの可否。そのままでは `navigable:true` の契約(再フェッチできる)が成立しない |
 
-レーン上限は component 版と同じ 20 件(candidate 除外後の件数に対して適用)。
+#### label 規則の詳細
+
+「裸の内部ID形」= 次のいずれかに単独で一致する label。
+
+- UUID(`ffffffff-ffff-…`)
+- `ev_0001` / `evidence_0001`(evidence_registry の採番)
+- `synth_…`(合成 claim `synth_claim_0001`)
+- `claim_…`(claim 生ID `claim_span_001` / `claim_0004`)
+- `span_001`(rhetorical_role の span ID)
+- `support:` 接頭(thesis の support node ID)
+- `node_` 接頭(グラフノードID)
+- label が ITEM の `id` の生値そのもの
+
+置換先(関係語は保持するので「図 / を根拠とする」の形で意味は残る):
+
+| element_type | 一般ラベル |
+|---|---|
+| `theory_claim` | 関連する主張 |
+| `theory_component` | 関連する論理要素 |
+| `equation` | 関連する数式 |
+| `figure` | 図 |
+| `evidence` | 本文の根拠箇所 |
+| `section` | 掲載セクション |
+| `thesis` | 中心命題 |
+| `derivation` | 導出の流れ |
+| `symbol` | 記号 |
+| `stage` | 理論の段階 |
+| `part` | 構成部品 |
+| その他 | 関連する要素 |
+
+**裁定(v1)**: `eq_2_7` 形(equation の式番号)は**置換しない**。論文の式番号に由来し
+学習者にも可読で、`![[equation:eq_2_7]]` として教材本文にも現れる識別子だからである
+(「内部ID」ではなく「論文の呼び名」として扱う)。
+
+**既知の限界(v1)**: `導出「der_001」のステップ「step_003」` のように内部IDが日本語の
+事実文に**埋め込まれた**ラベルは置換対象外(裸のID形ではないため)。W層の文面生成側で
+直すべき問題なので LE6 の下では触らず、必要になったら別issueで W層に手を入れる。
+
+レーン上限は component 版と同じ 20 件だが、**適用順序は「W層の cap → 学習者フィルタ」**
+である。W層 `context_lens._cap_lane` が candidate を含んだまま 20 件へ切り、そのあとで
+本モジュールが candidate を除外するため、**実際の表示件数は 20 件未満になり得る**
+(candidate が上位20件に多く含まれていた場合)。これは W層を変更しない(LE6)ことを
+優先した結果で、「candidate 除外後に 20 件」を保証するには W層の cap にフィルタを
+渡す必要があるため v1 では採らない。
+
 `notes`(「figure_table_semantics artifact が無いため図との関係を判定できません」等)は
 事実文なのでそのまま通す。
 
@@ -164,9 +264,14 @@ ITEM = {
 backend/core/element_context.py                 ← 新規(FastAPI 非 import)
   SUPPORTED_ELEMENT_TYPES = ("claim", "equation")
   build_element_context(element_type, element_id, course_document_ids) -> dict | None
-  _resolve_claim()      ← theory_claims を doc スコープ SQL で1行解決(UUID/legacy_ids)
-  _resolve_equation()   ← コース document 集合を equation_records で線形走査
+  _resolve_claim()      ← theory_claims を doc スコープ SQL で解決(UUID即決 /
+                          legacy_ids は1行に定まるときのみ・複数一致は None)
+  _resolve_equation()   ← コース document 集合を線形走査
+                          (document ごとに document_run_artifacts を1回読み、
+                           equation_records(doc, artifacts=…) へ渡す)
+  _is_degenerate_lens() ← W層の fail-soft 形の検出(§3 の縮退)
   _visible_items() / _project_item() / _project_focus()   ← §4 のフィルタ
+  _is_internal_id_label() / _generic_item_label()          ← §4 の label 規則
 
 backend/core/component_context.py               ← 変更(strip_confidence を公開名に昇格)
 backend/api/routes/learning.py                  ← 変更(endpoint 追加)
@@ -181,18 +286,32 @@ backend/api/routes/learning.py                  ← 変更(endpoint 追加)
   SQL 条件として渡す必要がある**ため(`refs.resolve()` は単体の存在確認しか行わない)。
   構築後に `ref.validate()` を通し、context lens には教員向けと同じ ref を渡す。
 - equation の document 走査は v1 では線形(コースの sources は通常数件)。document 数が
-  増えて問題になるなら equation_id → document_id の索引化を検討する(§7)。
+  増えて問題になるなら equation_id → document_id の索引化を検討する(§7)。走査中の
+  `document_run_artifacts`(巨大 JSONB の SELECT)は document ごとに1回に抑える
+  (`refs.equation_records(doc, artifacts=…)` の再利用引数を使う)。**既知の限界**:
+  解決後に呼ぶ `context_lens.build()` が内部で同じ artifact を読み直す。W層を変更しない
+  (LE6)ため v1 では受け入れる(1要求あたりの重複は1回)。
 
 ## 6. 受け入れ基準
 
 - [x] 未受講コース / コース外 document の要素 / 未知の element_type がすべて 404
 - [x] agent 側 claim ID(`claim_span_007`)が DB UUID と同様に解決できる
 - [x] 同じ agent 側 ID がコース外文書にも存在するとき、コース内文書の行だけが解決される
+- [x] **同じ agent 側 ID がコース内の2文書(または同一文書内の2行)に存在するときは
+  解決せず 404**(曖昧時 fail-closed。別論文の claim を「出典に裏付け」として出さない)
+- [x] **UUID 指定は複数文書環境でも常に当該行に解決される**(他文書が同じ文字列を
+  `legacy_ids` に持っていても曖昧扱いにしない)
 - [x] `relation_status == "candidate"` の関係がレスポンスに一切現れない
 - [x] `contextual_role_status` が candidate / unidentified のとき role が現れない
+- [x] **役割文に内部ID(`synth_claim_0001` / UUID / `support:` 等)が混ざるとき role が
+  現れない**
+- [x] **ITEM の label が裸の内部ID形のとき一般ラベルへ置換される**(項目自体は
+  `relation_label` 付きで残る)。`eq_2_7` 形と通常のラベルは不変
 - [x] `confidence` キーがレスポンスのどの深さにも現れない
 - [x] `evidence_refs` がレスポンスに現れない
-- [x] context lens が None / 例外のとき 200 + `available:false`
+- [x] `navigable:true` は claim / equation / theory_component のみ(figure ほかは false)
+- [x] context lens が None / 例外 / **内部 fail-soft 形(`_degenerate_result`)**のとき
+  200 + `available:false`(疎だが正常な投影は縮退させない)
 - [x] `core/element_context.py` が FastAPI / routes を import しない
 - [x] `core/element_context.py` に書き込み(INSERT/UPDATE/DELETE)経路が無い
 
@@ -204,8 +323,9 @@ backend/api/routes/learning.py                  ← 変更(endpoint 追加)
 - **figure / component の本APIへの統合**: component は既に専用API
   (`/components/{id}/context`)を持ち DTO 構造が異なる。figure は学習者向け配信API
   (Phase 4)が別系統で存在する。統合するとしても本APIの契約を確定させた後の別issue。
-- **フロントエンド実装**: チップのクリック展開・「旅」の遷移UIは後続。本文書は
-  バックエンド契約の確定までを扱う。
+- **フロントエンド実装**: チップのクリック展開・「旅」の遷移UIは `app.js` に実装済み
+  (コミット `737a725`。§8.1)。本文書の主題はバックエンド契約なので、UI の詳細仕様は
+  `component_evidence_redesign.md` のチップ設計に従う。
 - **Phase 2 アウトライン(管理画面側)との関係**: 教員向けの根拠リンク/アウトライン改善
   (`evidence_pane_context` Phase 2)は同じ context lens を下地とするが、あちらは
   **教員向けなので candidate を出す**(確定作業のための候補提示が目的)。本APIの
@@ -225,8 +345,10 @@ backend/api/routes/learning.py                  ← 変更(endpoint 追加)
 | `backend/core/component_context.py` | `_strip_confidence` を公開名 `strip_confidence` へ昇格(旧名は別名として維持し既存参照を壊さない)。W8 の実装を2箇所に増やさないため |
 | `backend/api/routes/learning.py` | `get_course_element_context` を `get_course_component_context` の直後に追加。import 2行 |
 | `docs/features/learner_element_context_design.md` | 本文書(新規) |
-| `backend/tests/test_element_context_core.py` | 新規。core の単体(解決・フィルタ・縮退・ガードレール) |
-| `backend/tests/test_element_context_api.py` | 新規。route のゲート・契約形・実 core 通しでの非漏洩 |
+| `backend/tests/test_element_context_core.py` | 新規。core の単体(解決・曖昧時 fail-closed・フィルタ・label 規則・navigable・縮退・ガードレール) |
+| `backend/tests/test_element_context_api.py` | 新規。route のゲート・契約形・実 core 通しでの非漏洩(candidate / confidence / 裸の内部ID) |
+| `frontend/public/js/app.js` + `css/styles.css` | チップのクリック展開・上位/下位レーン描画・教材内ジャンプ・「旅」の再フェッチ |
+| `backend/tests/test_learner_element_context_ui_static.py` | 新規。フロント側の契約(API パス・許可 element_type・縮退文言・内部語彙の非表示)の静的検査 |
 
 ### 8.2 設計上の確定判断
 
@@ -241,8 +363,23 @@ backend/api/routes/learning.py                  ← 変更(endpoint 追加)
 
 ### 8.3 残課題
 
-- フロントエンド(チップ展開・旅の遷移)は未実装。
-- equation の document 走査が線形。
+- equation の document 走査が線形。解決後の `context_lens.build()` が同じ artifact を
+  読み直す(§5 の既知の限界)。
 - `notes` の文面は教員向け context lens のものをそのまま通しており、「旧 run のため
-  artifact が無く」等の運用語彙が学習者に出る余地がある。文面の学習者向け言い換えは
-  フロント実装時に実文を見て判断する(現状は事実文であり誤情報ではないため保留)。
+  artifact が無く」等の運用語彙が学習者に出る余地がある(現状は事実文であり誤情報では
+  ないため保留)。
+- 内部IDが日本語の事実文に埋め込まれたラベル(`導出「der_001」のステップ「step_003」`)は
+  label 置換の対象外(§4 の既知の限界)。
+- レーン上限の適用順序が「W層 cap(candidate 込み) → 学習者フィルタ」で、表示件数が
+  20 件未満になり得る(§4)。
+
+### 8.4 レビュー指摘対応(2026-07-31)
+
+| # | 指摘 | 対応 |
+|---|---|---|
+| 1 | agent 側 claim ID の解決が非決定で、複数文書ソースのコースでは**別論文の claim** が「出典に裏付け」付きで返り得た(`ORDER BY (id::text = :raw_id) DESC LIMIT 1`) | 候補を決定的 `ORDER BY` で取得し、UUID 一致は即決 / legacy_ids 一致は1行に定まるときのみ解決 / 複数一致は `None` の**曖昧時 fail-closed**(§3) |
+| 2 | W層がラベル解決に失敗した項目の内部ID(図の DB UUID / `ev_0001` / `synth_claim_0001` / `support:…`)が label としてそのまま学習者に出ていた。`focus.contextual_role` も `upper[0]` の label 由来なので同じIDが役割文に出ていた | label の内部ID形を一般ラベルへ置換(関係語は保持)、役割文に内部IDトークンを含むときは role をキーごと落とす(§4)。`eq_2_7` は対象外の裁定 |
+| 3 | `context_lens.build()` の内部 fail-soft 形(`_degenerate_result`、**dict**)が `available:true` + `focus.label = "<uuid>"` で通っていた(最頻の失敗形で LE8 が不発) | 4条件の保守的な形状判定 `_is_degenerate_lens()` で `available:false` に写像(§3) |
+| 4 | equation 走査が document ごとに巨大 JSONB を二重読みしていた | `document_run_artifacts` を1回読み `equation_records(doc, artifacts=…)` へ渡す(§5) |
+| 5 | `navigable:true` の契約(再フェッチできる)が equation 以外で成立していなかった | 学習者の実フェッチ可能性で再計算(§3 の表) |
+| 6 | 設計書のレーン上限の記述と実挙動が食い違い、§8.3 のフロント未実装記述が古かった | §4 に適用順序と理由(LE6)を明記、フロント実装済みに更新 |

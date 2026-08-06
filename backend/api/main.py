@@ -65,6 +65,7 @@ from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
 from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
+from routes import landscape as landscape_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 13個の子ルーターを、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -78,6 +79,7 @@ from routes.versioning import router as _versioning_router
 from routes.status import router as _status_router
 from routes.notifications import router as _notifications_router
 from routes.deliberation import router as _deliberation_router
+from routes.teaching_figures import router as _teaching_figures_router
 from core.config import get_settings as _get_settings
 from core.postgres import get_session as _pg_session, check_connection as _pg_check
 from core.migrations import run_migrations
@@ -316,6 +318,9 @@ app.include_router(llm_usage_routes.router)
 app.include_router(llm_models_routes.router)
 app.include_router(personal_map_routes.router)
 app.include_router(personal_map_routes.me_router)
+# 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
+# ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
+app.include_router(landscape_routes.learning_router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下13ルーターは admin.router と同じ "/api/admin" prefix で
@@ -335,6 +340,12 @@ app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")
 app.include_router(_deliberation_router, prefix="/api/admin")
+# 教材図スタジオ（teaching_figure_studio_design.md §8）。既存 admin ルーターと
+# パスが衝突しないため登録順に依存しない（Tier 3-17c と同じフラット登録）。
+app.include_router(_teaching_figures_router, prefix="/api/admin")
+# 知識ランドスケープの配置レビュー（knowledge_landscape_design.md §9.1）。
+# 既存 admin ルーターとパスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
+app.include_router(landscape_routes.router, prefix="/api/admin")
 # 利用者マニュアル KB（help_kb, Phase 2 §2-2）の手動更新トリガー。
 # admin_router（/assistant 配下）とは別ルーター（最終パス /api/admin/help-kb/refresh）。
 app.include_router(_help_kb_router, prefix="/api/admin")

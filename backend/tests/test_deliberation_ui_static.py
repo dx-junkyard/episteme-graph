@@ -181,9 +181,30 @@ class TestDeliberationModule:
         assert re.search(r"(?<!api)fetch\(", src) is None
 
     def test_equation_requires_document_id(self):
-        """設計書 §2: equation は document_id で一意化するため必須。"""
+        """設計書 §2 / §16: 独立テーブルを持たない要素型（equation / evidence /
+        derivation）は document_id で一意化するため必須。判定は
+        ``DOCUMENT_ID_REQUIRED_ELEMENT_TYPES``（backend
+        ``core/deliberation/schema.py`` の同名語彙に対応）へ一本化する。"""
         src = _read(DELIBERATION_JS)
-        assert 'elementType === "equation" && !opts.documentId' in src
+        assert "var DOCUMENT_ID_REQUIRED_ELEMENT_TYPES = {" in src
+        block = src[src.index("var DOCUMENT_ID_REQUIRED_ELEMENT_TYPES = {"):]
+        block = block[: block.index("}")]
+        for element_type in ("equation", "evidence", "derivation"):
+            assert element_type + ": true" in block, element_type
+        assert "_needsDocumentId(elementType) && !opts.documentId" in src
+
+    def test_identity_link_section_hidden_for_non_linkable_types(self):
+        """§16: evidence / derivation は共通部品化の単位ではないため、同一性リンクの
+        セクション自体を出さない（backend も 422 で拒否する）。"""
+        src = _read(DELIBERATION_JS)
+        assert "var IDENTITY_LINKABLE_ELEMENT_TYPES = {" in src
+        block = src[src.index("var IDENTITY_LINKABLE_ELEMENT_TYPES = {"):]
+        block = block[: block.index("}")]
+        for element_type in ("figure", "theory_component", "theory_claim", "equation"):
+            assert element_type + ": true" in block, element_type
+        assert "evidence" not in block
+        assert "derivation" not in block
+        assert "!_isIdentityLinkable(elementType)" in src
 
     def test_cross_corpus_lens_is_registered(self):
         """Phase 1（§4.2）: cross_corpus レンズが LENS_LABELS / LENS_ORDER の両方にあること。
@@ -518,8 +539,9 @@ class TestManualIdentityLinkCreation:
         block = self._function_block(src, "_searchSharedPartCandidates")
         assert '"/shared-part-candidates"' in block
         assert '"/admin/deliberation/elements/"' in block
-        # equation は document_id で一意化する（既存の一覧・注釈と同じ規約）。
-        assert 'ref.elementType === "equation" && ref.documentId' in block
+        # equation / evidence / derivation は document_id で一意化する（既存の一覧・
+        # 注釈と同じ規約。判定は _needsDocumentId に一本化した — §16）。
+        assert "_needsDocumentId(ref.elementType) && ref.documentId" in block
 
     def test_create_posts_existing_identity_links_endpoint(self):
         src = _read(DELIBERATION_JS)
@@ -1058,11 +1080,19 @@ class TestElementInventoryDeliberationJs:
         assert int(inventory_modal_z.group(1)) < int(element_modal_z.group(1))
 
     def test_type_filter_chips_match_design(self):
-        """§6: すべて / 論理要素 / 主張 / 数式 / 図・画像 の5チップ。"""
+        """§6: すべて / 論理要素 / 主張 / 数式 / 図 の5チップ。
+
+        種別の訳語は element-vocab.js（window.ElementVocab）が正本になったため
+        （admin_ux_issues_2026-08-01.md §3.3 Phase 0）、deliberation.js 側は
+        語彙外の "すべて" だけを持ち、種別は正本へ委譲する。figure の表示名は
+        他画面と統一され「図・画像」→「図」になった。"""
         src = _read(DELIBERATION_JS)
-        assert "INVENTORY_TYPE_CHIP_LABELS" in src
-        for label in ("すべて", "論理要素", "主張", "数式", "図・画像"):
-            assert label in src
+        assert "var INVENTORY_TYPE_CHIP_LABELS" not in src
+        assert "var ELEMENT_TYPE_LABELS" not in src
+        assert "function inventoryTypeLabel(type) {" in src
+        assert "vocab.elementTypeLabel(elementType)" in src
+        assert '"すべて"' in src
+        assert "INVENTORY_TYPE_ORDER" in src
 
     def test_deliberation_status_badge_three_levels_only(self):
         """§7: 検討済み/候補あり/未検討の3段階のみ。dismissed 件数は判定材料に
@@ -1096,6 +1126,19 @@ class TestElementInventoryDeliberationJs:
         m = re.search(r"function _inventoryCardHtml[\s\S]+?\n  \}\n", src)
         assert m
         assert m.group(0).count("escHtml(") >= 3
+
+    def test_inventory_rows_are_not_element_cards(self):
+        """§3.3 Phase 3 の決定: 一覧行は統一パーツカードにしない。
+
+        一覧は文脈 DTO を持たず、N 件分の文脈フェッチは「自動では開かない」原則に
+        反するため（学習者側の出典タブと同じ判断）。P2 は、行から開く検討モーダル側が
+        カード表示であることで満たす。行の種別ラベルは正本（ElementVocab）へ委譲済み。
+        """
+        src = _read(DELIBERATION_JS)
+        m = re.search(r"function _inventoryCardHtml[\s\S]+?\n  \}\n", src)
+        assert m
+        assert "ElementCard" not in m.group(0)
+        assert "elementTypeLabel(el.element_type)" in m.group(0)
 
 
 class TestElementInventoryAdminJsIntegration:
@@ -1222,14 +1265,79 @@ class TestElementContextLens:
     中心移動（隣接ノード選択・パンくず）の受け入れ条件。"""
 
     def test_rendering_functions_present(self):
+        """§3.3 Phase 3 以降、中心カード・レーン・バッジの描画は統一パーツカード
+        （element-card.js）が担う。deliberation.js が持つのはシェル・補足欄・配線のみ。"""
         src = _read(DELIBERATION_JS)
         for name in (
             "_contextLensHtml",
-            "_contextLaneHtml",
-            "_contextFocusHtml",
-            "_contextStatusBadgeHtml",
+            "_contextLensShellHtml",
+            "_contextLensOpts",
+            "_contextSupplementHtml",
         ):
             assert f"function {name}" in src, f"function {name} が見つかりません"
+
+    def test_bespoke_lane_renderers_are_gone(self):
+        """独自レーン HTML（旧 deliberation-context-lane / -item / -focus / -nav /
+        -status 系）を復活させないこと（P2: パーツ1個の描き方は1つ）。"""
+        src = _read(DELIBERATION_JS)
+        for name in (
+            "function _contextLaneHtml",
+            "function _contextLaneItemHtml",
+            "function _contextFocusHtml",
+            "function _contextGenericHtml",
+            "function _contextStatusBadgeHtml",
+        ):
+            assert name not in src, name
+        code = "\n".join(
+            line for line in src.splitlines() if not line.strip().startswith("//")
+        )
+        for marker in (
+            "deliberation-context-lane",
+            "deliberation-context-item",
+            "deliberation-context-nav",
+            "deliberation-context-status",
+            "CONTEXT_STATUS_LABELS",
+        ):
+            assert marker not in code, marker
+
+    def test_context_lens_renders_and_binds_through_element_card(self):
+        """render と bind に同一の dto / opts を渡す（近傍チップは onCenter が
+        設定されているときだけ描かれるため、食い違うと配線が消える）。"""
+        src = _read(DELIBERATION_JS)
+        render = _function_block(src, "_contextLensHtml")
+        assert "card.render(dto, opts)" in render
+        assert "contextLensRender = { dto: dto, opts: opts };" in render
+        bind = _function_block(src, "_bindContextNavigation")
+        assert "card.bind(container, contextLensRender.dto, contextLensRender.opts)" in bind
+
+    def test_element_card_missing_degrades_to_a_factual_line(self):
+        """部品未読み込みは事実文へ縮退する（独自レーン HTML の二重実装は持たない）。"""
+        src = _read(DELIBERATION_JS)
+        render = _function_block(src, "_contextLensHtml")
+        assert "if (!card || !card.render) {" in render
+        assert "deliberation-context-lens-unavailable" in render
+
+    def test_evidence_refs_are_rendered_by_the_card_itself(self):
+        """ITEM の evidence_refs はカード本体（element-card.js の itemRefsHtml、
+        editable 限定の折りたたみ）が描く。旧 DOM 後付け
+        （_augmentContextEvidenceRefs）を復活させないこと。"""
+        src = _read(DELIBERATION_JS)
+        # 関数定義・呼び出しとしては存在しない（撤去の経緯コメントには名前が残る）。
+        assert "function _augmentContextEvidenceRefs" not in src
+        assert "_augmentContextEvidenceRefs(" not in src
+        assert "function _contextEvidenceRefsNode" not in src
+        assert "_contextEvidenceRefsNode(" not in src
+        card_src = _read(DELIBERATION_JS.parent / "element-card.js")
+        assert "function itemRefsHtml" in card_src
+        assert "element-card-item-refs" in card_src
+
+    def test_provenance_is_kept_outside_the_card(self):
+        """focus.provenance はカードの表示契約（§3.2）に無いので補足欄に残す。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_contextSupplementHtml")
+        assert "deliberation-context-provenance" in block
+        assert "出典情報はありません" in block
+        assert "STANDARDIZATION_STATUS_LABELS" in block
 
     def test_navigation_functions_present(self):
         """設計書 §2.3/§6 Phase 2: 中心移動・パンくずの本体関数。"""
@@ -1239,41 +1347,58 @@ class TestElementContextLens:
 
     def test_dom_ids_and_classes_present(self):
         src = _read(DELIBERATION_JS)
-        assert 'id="deliberation-context-lens"' in src
-        assert "deliberation-context-nav" in src
+        assert 'var CONTEXT_LENS_ID = "deliberation-context-lens";' in src
+        assert 'id="\' + CONTEXT_LENS_ID + \'"' in src
         assert 'id="deliberation-breadcrumb"' in src
 
-    def test_unidentified_upper_relation_is_a_factual_line_not_hidden(self):
-        """設計書 §2.2/§7: 上位構造の関係が得られない場合も非表示にせず、
-        「上位構造との関係は未同定」という事実文で保持する（推測で穴埋めしない）。"""
+    def test_lane_titles_are_why_and_how(self):
+        """設計書 §3: 上位構造（Why）/ 下位構造（How）の見出し文言を維持する
+        （カードの laneTitles で上書きする）。"""
         src = _read(DELIBERATION_JS)
-        assert "上位構造との関係は未同定" in src
+        assert '{ upper: "上位構造（Why）", lower: "下位構造（How）" }' in src
 
-    def test_lower_lane_empty_fact_line_present(self):
-        """下位構造が0件のときも事実文で保持する（情報を落とさない）。"""
-        src = _read(DELIBERATION_JS)
-        assert "下位構造の情報はありません" in src
+    def test_empty_lane_is_a_factual_line_not_hidden(self):
+        """設計書 §2.2/§7: 関係が得られない場合も非表示にせず事実文で保持する
+        （推測で穴埋めしない）。文言の正本は統一パーツカード側。"""
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        assert "この要素が支える上位の構造は、まだ同定されていません。" in card
+        assert "この要素を支える下位の構造は見つかりませんでした。" in card
 
-    def test_status_badge_labels_present(self):
-        """W8: 数値・スコアを見せない。状態はラベルのみ
-        （原文根拠/AI候補/教員確認済み。§2.2「AIの解釈を原文事実に昇格させない」）。"""
+    def test_unidentified_role_is_stated_as_a_fact(self):
+        """役割が未同定のときカードは role 行を描かない（推測で埋めない）。
+        「この文脈での役割 = 未同定」の事実文は補足欄が持つ。"""
         src = _read(DELIBERATION_JS)
-        for label in ("原文根拠", "AI候補", "教員確認済み"):
-            assert label in src
+        assert 'var CONTEXT_STATUS_UNIDENTIFIED_LABEL = "未同定";' in src
+        block = _function_block(src, "_contextSupplementHtml")
+        assert "roleUnidentified" in block
+        assert "この文脈での役割" in block
+
+    def test_status_badge_labels_come_from_the_single_vocabulary(self):
+        """W8: 数値・スコアを見せない。状態は段階ラベルのみで、語彙の正本は
+        element-vocab.js（§3.3 Phase 0）。deliberation.js に独自辞書を持たない。"""
+        src = _read(DELIBERATION_JS)
+        assert "CONTEXT_STATUS_LABELS" not in src
+        assert "CONTEXT_KNOWN_STATUSES" in src
+        vocab = _read(ROOT / "frontend" / "public" / "js" / "element-vocab.js")
+        for label in ("出典に裏付け", "教員確定", "AI候補"):
+            assert label in vocab, label
 
     def test_relation_label_is_the_rendered_relation_text(self):
         """設計書 §3.2: 関係は動詞（relation_label、主語は焦点要素）で示す。
-        サーバ契約の relation_label をそのまま描画に使うこと。"""
-        src = _read(DELIBERATION_JS)
-        assert "relation_label" in src
+        サーバ契約の relation_label をそのまま描画に使うこと（正本はカード側）。"""
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        assert "item.relation_label" in card
 
-    def test_esc_html_used_in_lane_and_focus_renderers(self):
-        """XSS対策: 上位/下位レーン・中央カードの動的テキストは escHtml 経由で描画する。"""
+    def test_esc_html_used_in_lens_shell_and_supplement(self):
+        """XSS対策: deliberation.js 側が組む動的テキスト（note・補足欄）は escHtml 経由。
+        カード本体は opts.escapeHtml として同じ escHtml を受け取る。"""
         src = _read(DELIBERATION_JS)
-        lane_block = _function_block(src, "_contextLaneHtml")
-        assert "escHtml(" in lane_block
-        focus_block = _function_block(src, "_contextFocusHtml")
-        assert "escHtml(" in focus_block
+        lens_block = _function_block(src, "_contextLensHtml")
+        assert "escHtml(" in lens_block
+        supplement_block = _function_block(src, "_contextSupplementHtml")
+        assert "escHtml(" in supplement_block
+        opts_block = _function_block(src, "_contextLensOpts")
+        assert "escapeHtml: escHtml" in opts_block
 
     def test_navigate_does_not_close_modal(self):
         """設計書 §2.3: 隣接ノード選択はモーダルを破棄せず中心だけを差し替える。
@@ -1305,22 +1430,38 @@ class TestElementContextLens:
         css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
         for selector in (
             ".deliberation-context-lens",
-            ".deliberation-context-lane",
+            ".deliberation-context-card.element-card",
             ".deliberation-context-focus",
-            ".deliberation-context-nav",
-            ".deliberation-context-status",
+            ".element-card-item-refs",
+            ".element-card-lane-title",
             ".deliberation-breadcrumb",
         ):
             assert selector in css, f"{selector} が styles.css に見つかりません"
+        # 撤去した独自レーン CSS が復活していないこと（申し送りコメントは残るので
+        # 行頭のルール宣言として現れないことを見る）。
+        for selector in (
+            ".deliberation-context-lane",
+            ".deliberation-context-item",
+            ".deliberation-context-nav",
+            ".deliberation-context-status",
+            ".deliberation-context-evidence",
+        ):
+            assert not re.search(
+                r"^\s*" + re.escape(selector) + r"[\s,{:-]*[,{]", css, re.M
+            ), f"{selector} は撤去済みのはず"
 
     def test_css_status_modifier_classes_distinguish_candidate_from_confirmed(self):
-        """W-層の既存視覚言語（candidate=点線・淡色 / confirmed=通常）と整合させる。"""
+        """W-層の既存視覚言語（candidate=点線・淡色 / confirmed=通常 / 未同定=点）を
+        統一パーツカードのバッジ CSS で維持する。"""
         css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
-        assert ".deliberation-context-status--candidate" in css
-        assert ".deliberation-context-status--confirmed" in css
-        candidate_idx = css.index(".deliberation-context-status--candidate")
+        assert ".element-card-status-confirmed" in css
+        assert ".element-card-status-unidentified" in css
+        candidate_idx = css.index(".element-card-status-candidate")
         candidate_block = css[candidate_idx : css.index("}", candidate_idx)]
         assert "dashed" in candidate_block
+        unidentified_idx = css.index(".element-card-status-unidentified")
+        unidentified_block = css[unidentified_idx : css.index("}", unidentified_idx)]
+        assert "dotted" in unidentified_block
 
     def test_no_new_admin_documents_fetch_literal_introduced(self):
         """既存の許可リスト（test_fetch_targets_use_exact_allowlist）を壊していない
@@ -1351,26 +1492,47 @@ class TestElementContextLens:
         assert re.search(r"\bfocus\.confidence\b(?!_label)", src) is None
         assert re.search(r"\bitem\.confidence\b(?!_label)", src) is None
 
-    def test_generic_block_rendering_function_present(self):
-        """Phase 3（設計書 §6）: focus.generic（confirmed 同一性リンク先の L層エントリ）
-        を中央カードの別欄として表示する。"""
-        src = _read(DELIBERATION_JS)
-        assert "function _contextGenericHtml" in src
-
     def test_generic_block_is_a_separate_section_from_contextual_role(self):
-        """§2.1: 汎用説明と文脈上の役割を混ぜない — 中央カード内の別セクションにする。"""
-        src = _read(DELIBERATION_JS)
-        block = _function_block(src, "_contextFocusHtml")
-        assert "_contextGenericHtml(focus.generic)" in block
+        """§2.1: 汎用説明（「一般には」）と文脈上の役割を混ぜない。統一パーツカードが
+        generic 行と role 行を別行として描く。"""
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        assert "function genericHtml(focus, ctx)" in card
+        assert "function roleHtml(focus, ctx)" in card
+        assert 'GENERIC_PREFIX = "一般には: "' in card
 
     def test_generic_block_omitted_when_null(self):
-        src = _read(DELIBERATION_JS)
-        block = _function_block(src, "_contextGenericHtml")
-        assert "if (!generic) return \"\";" in block
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        block = _function_block(card, "genericHtml")
+        assert 'if (!generic) return "";' in block
 
-    def test_generic_block_uses_esc_html(self):
+    def test_math_renderer_is_injected_into_the_card(self):
+        """RC8 / §6 S4: W層モーダルだけ renderMath 未注入で生 TeX が出ていた問題の解消。
+        TeX 判定のゲートは element-card.js が内製するので、ここは素の描画関数を渡す
+        （deliberation.js 側に第2のゲートを実装しない）。"""
         src = _read(DELIBERATION_JS)
-        block = _function_block(src, "_contextGenericHtml")
+        opts = _function_block(src, "_contextLensOpts")
+        assert "renderMath: _renderMath" in opts
+        render = _function_block(src, "_renderMath")
+        assert "window.katex" in render
+        assert "throwOnError: false" in render
+        assert "try {" in render  # レンダラの例外でモーダルを壊さない
+        code = "\n".join(
+            line for line in src.splitlines() if not line.strip().startswith("//")
+        )
+        assert "looksLikeRenderableTex" not in code, "TeX 判定の二重実装は置かない"
+
+    def test_derivations_are_forwarded_to_the_card(self):
+        """DTO v2 の導出ストーリー。focus 配下で来る場合はカード側が拾う。"""
+        src = _read(DELIBERATION_JS)
+        render = _function_block(src, "_contextLensHtml")
+        assert "derivations: context.derivations || []" in render
+
+    def test_generic_standardization_status_kept_in_supplement(self):
+        """カードは L層の標準化判定を描かないので、補足欄で落とさず保持する。"""
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_contextSupplementHtml")
+        assert "standardization_status" in block
+        assert "共通部品の標準化判定" in block
         assert "escHtml(" in block
 
 

@@ -87,10 +87,13 @@ def skeleton_db(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_bundled_cartridges(monkeypatch):
-    """実カートリッジ (particle_physics 等) の同梱骨格をテストの対象外にする。"""
+    """実カートリッジ (particle_physics 等) と骨格専用バンドルドメイン
+    (`backend/atlas_domains/`。例: astrophysics) の同梱骨格をテストの対象外にする。"""
+    import core.atlas_store as atlas_store_module
     import core.cartridges as cartridges_module
 
     monkeypatch.setattr(cartridges_module, "list_cartridges", lambda: [])
+    monkeypatch.setattr(atlas_store_module, "_bundled_domain_keys", lambda: [])
     cartridges_module.clear_cache()
     yield
     cartridges_module.clear_cache()

@@ -46,6 +46,7 @@ from core.course_data import (
     lecture_studio_settings as _lecture_studio_settings,
 )
 from core.lecture import (
+    auto_paginate_slides,
     build_topic_slides,
     count_slide_marker_segments,
     generate_spoken_text_and_formulas,
@@ -555,25 +556,75 @@ def get_course_scripts(
 # ---------------------------------------------------------------------------
 
 
+class LecturePreviewSplitRequestWithPagination(LecturePreviewSplitRequest):
+    """``auto_paginate`` オプション付きのプレビュー分割リクエスト。
+
+    教材図スタジオ設計書 §7.5: ``===`` の明示分割が無いトピックに図を入れると
+    ``auto_paginate_slides`` のページ境界が動くため、コーストピックのスライド枚数
+    インジケータは受講画面と同じ自動ページ分割を反映する必要がある。
+    既定 ``False`` なので既存の呼び出し（チャンク編集）は完全に不変。
+
+    ``schemas.py`` 側のモデルを拡張せずここで派生させているのは、この差分が
+    「原稿スタジオのプレビュー専用の追加入力」であって配信 DTO ではないため。
+    """
+
+    auto_paginate: bool = False
+
+
+class LecturePreviewSplitResponseWithPagination(LecturePreviewSplitResponse):
+    """自動ページ分割の結果を正直に伝える追加フィールド付きレスポンス。
+
+    - ``auto_paginated``: マーカー由来の区切り数より多いページに分割された
+      （＝自動ページ分割が実際に働いた）。
+    - ``spoken_degraded``: 読み上げ原稿が同数ページに割れず、空（タイマー送り）へ
+      縮退した（§7.5 の事実文をクライアントが出すための材料）。
+    """
+
+    auto_paginated: bool = False
+    spoken_degraded: bool = False
+
+
 @router.post(
     "/lecture-studio/preview-split",
-    response_model=LecturePreviewSplitResponse,
+    response_model=LecturePreviewSplitResponseWithPagination,
 )
 def preview_split_slides(
-    body: LecturePreviewSplitRequest,
+    body: LecturePreviewSplitRequestWithPagination,
     current_user: dict = Depends(_require_teacher),
-) -> LecturePreviewSplitResponse:
+) -> LecturePreviewSplitResponseWithPagination:
     """原稿スタジオのプレビュー用スライド分割を返す（DB は一切変更しない）。
 
-    ``core.lecture.split_slides`` をそのまま呼ぶことで、プレビュー（本エンドポイント）と
+    ``core.lecture`` の分割関数をそのまま呼ぶことで、プレビュー（本エンドポイント）と
     配信（``get_lecture_sequence`` 等）が同一の分割ロジックを共有する
     （docs/features/lecture_slide_sync_design.md の設計原則）。admin.js の
     `lsSplitSlides` ローカル実装（クライアント側の並行再実装）はこの API 呼び出しに
     置き換え、削除する（Tier2-11）。教員（``_require_teacher``）のみ利用可能。
+
+    ``auto_paginate=True`` のときは ``auto_paginate_slides``（受講側
+    ``routes/lecture.py::_build_topic_slides`` が使う正本）を通す。**分割ロジックを
+    クライアントに再実装しないこと**（設計ルール）。
     """
-    slides, mismatch = split_slides(body.display_text, body.spoken_text, body.formulas)
     display_count, spoken_count = count_slide_marker_segments(body.display_text, body.spoken_text)
-    return LecturePreviewSplitResponse(
+    auto_paginated = False
+    spoken_degraded = False
+
+    if body.auto_paginate:
+        slides, mismatch = auto_paginate_slides(body.display_text, body.spoken_text, body.formulas)
+        if not mismatch:
+            # マーカー分割が無く自動ページ分割が働いた場合、実効ページ数（受講画面で
+            # 実際に出る枚数）を返す。mismatch=True のときはマーカー由来の区切り数を
+            # そのまま返す（既存の「1枚に統合して配信されます」警告のため）。
+            effective_pages = len(slides)
+            spoken_pages = sum(1 for sd in slides if str(sd.get("spoken_text") or "").strip())
+            auto_paginated = effective_pages > display_count
+            spoken_degraded = bool(
+                auto_paginated and str(body.spoken_text or "").strip() and spoken_pages == 0
+            )
+            display_count, spoken_count = effective_pages, spoken_pages
+    else:
+        slides, mismatch = split_slides(body.display_text, body.spoken_text, body.formulas)
+
+    return LecturePreviewSplitResponseWithPagination(
         slides=[
             LectureSlide(
                 slide_index=sd["slide_index"],
@@ -586,6 +637,8 @@ def preview_split_slides(
         mismatch=mismatch,
         display_segment_count=display_count,
         spoken_segment_count=spoken_count,
+        auto_paginated=auto_paginated,
+        spoken_degraded=spoken_degraded,
     )
 
 
@@ -938,13 +991,20 @@ def rewrite_lecture_script(
     params = get_llm_params("fast")
 
     # M層 Phase 3（§6.3）: この実行だけのモデル上書き（scene "lecture_studio"）。
-    # 未指定なら従来どおり fast tier。
+    # **未指定のときは model=None のまま generate_text に渡し、入口（core/llm.py）の
+    # resolve_scene_model に解決を委ねる**（レビュー指摘 J3。以前は
+    # `get_llm_params("fast")["model"]` を明示引数で渡していたため解決順①
+    # （呼び出し時指定）に化けて、運用タブ・本人既定の設定が一切効かなかった）。
+    # feature は下の usage_context が張る "admin:lecture_rewrite" で、ポリシー行も env も
+    # 無い環境では llm_policy._FEATURE_TIER_ONLY により従来と同じ fast tier に解決される。
+    # reasoning_effort は従来どおり tier の値を渡す（挙動不変。effort_for_call は
+    # 呼び出し側指定を常に優先する）。
     requested_model = (body.model or "").strip() or None
     if requested_model:
         reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_LECTURE_STUDIO, requested_model)
         if reason:
             raise HTTPException(status_code=422, detail=reason)
-    effective_model = requested_model or params["model"]
+    effective_model = requested_model
     effective_effort = None if requested_model else params["reasoning_effort"]
 
     consume_lecture_rewrite_quota(current_user["id"])

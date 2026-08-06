@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from core import atlas
 from core.cartridges import DomainCartridge, load_cartridge
-from core.config import get_settings
+from core.llm_policy import resolve_scene_model
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 
@@ -271,11 +271,15 @@ def generate_skeleton_draft(
         cartridge = load_cartridge(cartridge_id)
         prompt = build_generation_prompt(cartridge)
 
-    settings = get_settings()
-    model_name = model or settings.llm_analysis_model
     batch = batch_id or uuid.uuid4().hex[:12]
 
+    # M層: 教員がチップで選んだ model は最優先（解決順①）。未指定のときは
+    # **M層の正本に解決させる** — ユーザー別/システム既定 → ATLAS_ASSIST_LLM_MODEL →
+    # analysis tier（レビュー指摘 J4。以前は env / tier の値（LLM_ANALYSIS_MODEL）を
+    # 明示引数として渡していたため解決順①に化け、運用タブ・本人既定が効かなかった）。
+    # `generated_by` に実モデル名を残すため、ここで解決して明示引数として渡す。
     with usage_context("admin:atlas_skeleton"):
+        model_name = model or resolve_scene_model("admin:atlas_skeleton").model
         generated = generate_text_with_structured_output(
             messages=[{"role": "user", "content": prompt}],
             response_format=GeneratedSkeleton,

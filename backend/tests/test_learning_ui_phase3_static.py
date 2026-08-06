@@ -416,3 +416,161 @@ class TestMaterialTooltipSourceChip:
         js = _read(APP_JS)
         block = _extract_function_body(js, "function showMaterialTooltip(anchorEl, ref) {")
         assert "confidence" not in block
+
+
+class TestEquationTooltipNeverRepeatsTheEquation:
+    """EH1/EH2/EH5: 数式ホバーは式を再掲しない。
+
+    設計正本: docs/features/equation_hover_content_design.md。
+    数式は本文カードが KaTeX で整形表示しているため、ツールチップ（escHtml のみ）に
+    latex / raw_text を入れると「未レンダリングの同じ式」という劣化コピーになる。
+    """
+
+    def test_tooltip_body_does_not_use_latex_or_raw_text(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function materialAnchorTooltipContent(item) {")
+        assert "item.latex" not in block
+        assert "item.raw_text" not in block
+
+    def test_equation_without_explanatory_lines_falls_back_to_ih8(self):
+        """IH8/§3.1: 説明材料が1つも無い数式は「数式」ラベル単独の空箱を出さず、
+        固定文（この部分の説明はまだ用意されていません）へ落とす。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function materialAnchorTooltipContent(item) {")
+        assert 'if (item.kind === "equation" && !body) return null;' in block, (
+            "equation で body が空なら null を返す契約が失われている"
+        )
+        show = _extract_function_body(js, "function showMaterialTooltip(anchorEl, ref) {")
+        assert "この部分の説明はまだ用意されていません" in show
+
+    def test_tooltip_uses_role_symbols_and_reading(self):
+        """出すのは役割 / 記号の意味 / 読み下し（設計書 §3.1）。組み立ては
+        ホバーと「文脈を見る」パネルで共有する単一実装（EC5）。"""
+        js = _read(APP_JS)
+        tooltip = _extract_function_body(js, "function materialAnchorTooltipContent(item) {")
+        assert "equationExplanatoryLines(" in tooltip
+        shared = _extract_function_body(js, "function equationExplanatoryLines(src, skipText) {")
+        assert "equationRoleLabel" in shared
+        assert "src.symbols" in shared
+        assert "src.plain_text" in shared
+        assert "src.latex" not in shared
+        assert "src.raw_text" not in shared
+
+    def test_tooltip_includes_assumptions_and_section(self):
+        """§6 S1（element_context_presentation_redesign.md）: ホバーの行構成は
+        役割 → 意味 → 記号 → 読み → 成立条件1件 → 掲載節。成立条件は snapshot の
+        assumptions（focus 側は intrinsic.conditions）先頭1件を原文のまま出す。"""
+        js = _read(APP_JS)
+        shared = _extract_function_body(js, "function equationExplanatoryLines(src, skipText) {")
+        assert "src.assumptions" in shared
+        assert "src.conditions" in shared
+        assert '"成立条件: "' in shared
+        assert "src.section_label" in shared
+        assert '"掲載: "' in shared
+        # 順序: 成立条件は読み（plain_text）の後・掲載節の前。
+        assert shared.index("src.plain_text") < shared.index('"成立条件: "') < shared.index('"掲載: "')
+
+    def test_context_panel_reuses_the_same_lines(self):
+        """EC5: パネル本文もホバーと同じ材料・同じ順序で組む。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function elementContextToCardDto(elementType, data) {")
+        assert "equationExplanatoryLines(" in block
+
+    def test_card_math_rendering_is_gated(self):
+        """EC2: KaTeX(throwOnError:false) に平文・壊れた TeX を渡さない
+        （渡すと赤いエラーがそのまま学習者に見える）。
+
+        ゲートの実装は **element-card.js 内製**（element_context_presentation_redesign.md
+        §6 S3-5）。app.js は素のレンダラを渡すだけで、判定を二重実装しない。"""
+        js = _read(APP_JS)
+        opts = _extract_function_body(js, "function learnerElementCardOpts(onCenter) {")
+        assert "renderMath: renderMaterialKatex," in opts
+        assert "looksLikeRenderableTex" not in js
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        gate = _extract_function_body(card, "function looksLikeRenderableTex(text, symbolMode) {")
+        assert "opens === closes" in gate  # 切り詰めで壊れた TeX を弾く
+        # 波括弧カウントはエスケープ除去後の単純カウントで行う。
+        # 「直前が非バックスラッシュの閉じ括弧」の /g 走査は連続する閉じ括弧を
+        # 数え落とし、{\bm{x}} 形の正当な TeX を不均衡と誤判定して弾く
+        # （2026-08-03 実機で発覚した回帰）。
+        assert 't.replace(/\\\\[{}]/g, "")' in gate
+        assert "(^|[^\\\\])" not in gate
+        assert "if (!looksLikeRenderableTex(expr, symbolMode)) return \"\";" in card
+
+    def test_katex_error_output_falls_back_to_plain_text(self):
+        """EC2: KaTeX は throwOnError:false のとき例外を投げず「赤い表示の HTML」を
+        正常返却する。経路は2つ — ①式全体のパース失敗（class="katex-error"）
+        ②未知コマンドのインライン回復（errorColor #cc0000 の赤テキストのみ・
+        katex-error クラス無し。論文独自マクロ \\bmx がこれ）。形のゲートでは
+        どちらも検出できないため、出力側で両方の痕跡を検査し素のテキストへ落とす。"""
+        card = _read(ROOT / "frontend" / "public" / "js" / "element-card.js")
+        rendered = _extract_function_body(card, "function renderMathGated(ctx, expr, display, symbolMode) {")
+        assert "KATEX_ERROR_MARK.test(rendered)" in rendered
+        assert "var KATEX_ERROR_MARK = /katex-error|#cc0000/;" in card
+
+    def test_context_panel_title_has_no_dangling_separator(self):
+        """EC1: 見出しが空のときに「数式 ・ 」を作らない（生 TeX も出さない）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function evidenceChipPopoverHead(kind, title) {")
+        assert "text ? kindLabel" in block
+
+    def test_role_labels_come_from_element_vocab_only(self):
+        """EH5: 訳語表は ElementVocab が唯一。app.js に日本語の役割辞書を作らない。"""
+        vocab = _read(ROOT / "frontend" / "public" / "js" / "element-vocab.js")
+        assert "equationRoleLabel: equationRoleLabel" in vocab
+        for role in ("premise", "definition", "derived", "result", "constraint"):
+            assert role + ":" in vocab
+        block = _extract_function_body(vocab, "function equationRoleLabel(role) {")
+        assert 'return "";' in block  # 未知キーで内部語彙を漏らさない
+
+
+class TestHoverContextExit:
+    """§6 S1（element_context_presentation_redesign.md）: ホバーは①「これは何か」で
+    完結するため、残り3問（位置づけ / 構成 / 導出）への出口を最終行に明示する。
+    EH3（無フェッチ）は維持 — snapshot に載っている値だけを見せ、押されるまで
+    何も取得しない。"""
+
+    def test_section_line_is_added_only_when_the_snapshot_has_it(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function equationExplanatoryLines(src, skipText) {")
+        assert 'if (src.section_label) lines.push("掲載: " + src.section_label);' in block
+        assert "apiFetch(" not in block
+        assert "fetch(" not in block
+
+    def test_context_cta_is_fail_closed_to_openable_types(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function materialAnchorTooltipContent(item) {")
+        assert "MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(item.kind) >= 0" in block
+        assert "cta = { type: item.kind, id: String(item.id) };" in block
+        assert "cta: cta" in block
+
+    def test_context_cta_reuses_the_existing_delegation(self):
+        """クリック処理は既存の .ls-material-context-btn 委譲リスナー
+        （openElementContextPopover）を再利用する。第2の配線を作らない。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function materialTooltipContextCtaHtml(cta) {")
+        assert "ls-material-context-btn" in block
+        assert "data-element-context-type" in block
+        assert "data-element-context-id" in block
+        assert "MATERIAL_HOVER_CONTEXT_CTA" in block
+        assert 'var MATERIAL_HOVER_CONTEXT_CTA = "▸ 文脈を見る（どこから来て、どこへ行くか）";' in js
+        show = _extract_function_body(js, "function showMaterialTooltip(anchorEl, ref) {")
+        assert "materialTooltipContextCtaHtml(content.cta)" in show
+        # ホバー自体は依然として何も取得しない（IH2 / EH3）。
+        assert "apiFetch(" not in show
+        assert "fetch(" not in show
+
+    def test_cta_is_clickable_even_though_the_tooltip_is_pointer_events_none(self):
+        css = _read(STYLES_CSS)
+        start = css.index(".inspect-tooltip-context-btn {")
+        block = css[start:css.index("}", start)]
+        assert "pointer-events: auto;" in block
+
+
+class TestContextPanelUsesTheHeadline:
+    def test_panel_title_prefers_the_headline(self):
+        """DTO v2 はラベルラダーの結果を headline に載せる（旧サーバは label のみ）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderElementContextPanel(pop, body, elementType, data) {")
+        assert "focus.headline" in block
+        assert "focus.label" in block  # 旧応答へのフォールバックを残す

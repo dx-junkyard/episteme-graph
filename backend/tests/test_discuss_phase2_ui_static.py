@@ -390,6 +390,172 @@ class TestCourseSwitchResetsDiscussState:
         block = _extract_function_body(js, "reset: function () {")
         assert 'ctx.courseId = "";' in block
 
+    def test_discuss_reset_clears_landing_suppression_window(self):
+        """reset() は抑制窓 lastShownAt も落とす。残すと切替後の新しいコースの着地画面が
+        最初の SUPPRESS_MS（10分）だけ「直近に出した」と誤判定されて出なくなる。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "reset: function () {")
+        assert "lastShownAt = 0;" in block
+
+    def test_switch_course_resets_discuss_scope_to_default(self):
+        """スコープ選択（course_sources / all_visible）もコースを跨いで持ち越さない。
+        「閲覧できる周辺資料まで」は前のコースの文脈で選ばれた設定なので、別コースでは
+        既定に戻す（画面表示と実検索範囲を一致させる, DM1）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "async function switchCourse(courseId) {")
+        assert 'state.discussScope = "course_sources";' in block
+
+
+class TestSeedPromptIsPostedAsAssistantTurn:
+    """[B-F2] 開幕の「議論のきっかけ」（教員が承認した立場を求める問い）は、学習者の
+    発話として送らずアシスタントの発話としてチャット欄へ置く。
+
+    学習者メッセージとして送ると AI は発話タイプ別ルール1（質問には即答・出し惜しみ
+    禁止）でその問いに自分で答えきってしまい、係留（学習者が先に立場を述べ、AI が
+    revoice で言い直す）が起動しない（docs/features/discuss_dialogue_alignment_design.md
+    §3-1）。注入は LLM を呼ばない（DM8）。
+    """
+
+    def test_app_js_exposes_post_seed_prompt(self):
+        js = _read(APP_JS)
+        assert "window.discussPostSeedPrompt = function (text) {" in js
+
+    def test_post_seed_prompt_injects_assistant_role_and_focuses_input(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "window.discussPostSeedPrompt = function (text) {")
+        # discuss モード限定（fail-closed）
+        assert "if (!isDiscussMode()" in block
+        # assistant ロールで積む（user として送らない）
+        assert 'role: "assistant"' in block
+        assert "discuss_prompt: true" in block
+        # 書き直し・以降削除の truncate 境界計算と整合させるため id を焼き込む
+        assert "genMsgId()" in block
+        # 学習者の入力を促す
+        assert "renderChat();" in block
+        assert "input.focus()" in block
+        # LLM を呼ばない（送信経路を通さない）
+        assert "sendMessage" not in block
+        assert "apiFetch" not in block
+
+    def test_post_seed_prompt_replaces_an_unanswered_injected_turn(self):
+        """別のきっかけを続けて押しても問いだけが積み上がらない。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "window.discussPostSeedPrompt = function (text) {")
+        assert "last.discuss_prompt" in block
+        assert "msgs.pop()" in block
+
+    def test_injected_turn_does_not_get_branch_chips(self):
+        """立場の表明を求めているターンに「深掘り／横展開」を並べない。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderAiContent(text, msg)")
+        idx = block.index("window.Discuss.renderBranchChips()")
+        guard = block[:idx]
+        assert "msg.discuss_prompt" in guard[guard.rindex("if (isDiscussMode()"):]
+
+    def test_injected_turn_is_visually_marked_with_a_fact_sentence(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderChat() {")
+        assert "msg.discuss_prompt" in block
+        assert "discuss-prompt-hint" in block
+        css = _read(STYLES_CSS)
+        assert ".mg.ai.discuss-prompt {" in css
+        assert ".discuss-prompt-hint {" in css
+
+
+class TestOpeningChipsCarryStructureAnchors:
+    """[F-5] DM3 / 設計 §3.4: 開幕チップ・バックボーンノード起点の問いは、元要素の
+    id を明示アンカー（structure_anchor 経路A = learner_selected）として添える。
+
+    element_type の語彙は既存の方法A（app.js の materialAnchorElementType と同じ規約）
+    に揃える — 数式のみ専用語彙 "formula" があり、claim / stage には無いので backend の
+    既定フォールバック（"concept"）に委ねる（backend/core は変更しない）。
+    """
+
+    def test_element_type_mapping_follows_the_existing_convention(self):
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function anchorElementType(kind) {")
+        assert 'kind === "equation" ? "formula" : "concept"' in block
+
+    def test_anchor_attrs_are_omitted_without_a_real_element_id(self):
+        """agent が合成した文・定型文（最初の一手・中心命題の合成文）は id を持たない。
+        存在しない要素 id を捏造してアンカーにしない。"""
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function anchorAttrs(ref) {")
+        assert 'if (!ref || !ref.id) return ""' in block
+        ref_block = _extract_function_body(js, "function itemRef(item, kind) {")
+        assert "if (!item || !item.id) return null;" in ref_block
+
+    def test_backbone_nodes_anchor_on_node_id(self):
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function renderBackboneSection(doc) {")
+        assert "anchorAttrs(" in block
+        assert "n.node_id" in block
+
+    def test_claim_and_equation_chips_anchor_on_their_ids(self):
+        js = _read(DISCUSS_JS)
+        claim_block = _extract_function_body(js, "function claimBlockHtml(item) {")
+        assert 'anchorAttrs(itemRef(item, "claim"))' in claim_block
+        thesis_block = _extract_function_body(js, "function renderThesisSection(doc) {")
+        assert 'itemRef(e, "equation")' in thesis_block
+
+    def test_bind_opening_events_sends_the_anchor_fields(self):
+        js = _read(DISCUSS_JS)
+        block = _extract_function_body(js, "function bindOpeningEvents(containerEl) {")
+        for field in ("element_id:", "element_type:", "element_label:"):
+            assert field in block, field
+        # アンカーが無いチップは従来どおり自由文のみで送る
+        assert "if (!elId) { window.sendPrompt(text); return; }" in block
+
+
+class TestVoiceDisabledInDiscussMode:
+    """[F-2] DM1 / 設計 §6.4: 音声版 discuss は Phase 3 の非スコープ。音声経路は
+    intent_mode:"casual" 固定で送るため、discuss 中に使うと画面のスコープ表示と実検索
+    範囲が食い違い（DM1 違反）、痕跡も casual として記録されて観測基盤の
+    entry_mode='discuss' 集計から漏れる。開始を塞ぐ（fail-closed）。
+    """
+
+    def test_start_voice_mode_refuses_in_discuss(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "async function startVoiceMode() {")
+        assert "if (isDiscussMode()) {" in block
+        idx_guard = block.index("if (isDiscussMode()) {")
+        idx_media = block.index("getUserMedia")
+        assert idx_guard < idx_media
+
+    def test_update_voice_availability_disables_button_and_stops_active_session(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function updateVoiceAvailability() {")
+        assert "btn.disabled = blocked;" in block
+        # 既にハンズフリー中に discuss へ切り替えたらセッションを終了する
+        assert "stopVoiceMode()" in block
+        assert "voiceState.active" in block
+
+    def test_voice_segment_never_sends_casual_while_in_discuss(self):
+        """文字起こし中にモードが切り替わっても casual として送らない（fail-closed）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "async function handleVoiceSegment() {")
+        idx_guard = block.index("if (isDiscussMode()) {")
+        idx_send = block.index('intent_mode: "casual"')
+        assert idx_guard < idx_send
+
+    def test_availability_is_refreshed_from_the_single_layout_entry_point(self):
+        """モード切替・トピック遷移・会話描画のすべてが applyDiscussLayout を通る。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function applyDiscussLayout(")
+        assert "updateVoiceAvailability();" in block
+
+    def test_fact_sentence_is_shown_near_the_composer(self):
+        js = _read(APP_JS)
+        html = _read(INDEX_HTML)
+        assert "音声会話は「順番に学ぶ」モードで利用できます。" in js
+        assert 'id="discuss-voice-note"' in html
+        # 既定は非表示（discuss 中だけ出す）
+        idx = html.index('id="discuss-voice-note"')
+        assert "hidden" in html[idx:idx + 160]
+        css = _read(STYLES_CSS)
+        assert ".discuss-voice-note {" in css
+        assert ".voice-mode-btn:disabled {" in css
+
 
 class TestLandingConnectNote:
     """設計 §9.1 軌道修正 #5: 着地モーダルは connect 機能そのものは持たず、

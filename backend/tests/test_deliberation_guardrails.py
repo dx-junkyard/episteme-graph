@@ -76,6 +76,7 @@ _CORE_DIR = BACKEND / "core" / "deliberation"
 _ROUTE_SRC = (BACKEND / "api" / "routes" / "deliberation.py").read_text(encoding="utf-8")
 _POSITIONING_SRC = (BACKEND / "core" / "deliberation" / "positioning.py").read_text(encoding="utf-8")
 _CONTEXT_LENS_SRC = (BACKEND / "core" / "deliberation" / "context_lens.py").read_text(encoding="utf-8")
+_LABELS_SRC = (BACKEND / "core" / "deliberation" / "labels.py").read_text(encoding="utf-8")
 _IDENTITY_LINKS_SRC = (BACKEND / "core" / "deliberation" / "identity_links.py").read_text(encoding="utf-8")
 _STORE_SRC = (BACKEND / "core" / "deliberation" / "store.py").read_text(encoding="utf-8")
 _DIALOGUE_SRC = (BACKEND / "core" / "deliberation" / "dialogue.py").read_text(encoding="utf-8")
@@ -240,6 +241,34 @@ class TestContextLensLayering:
             ["fastapi", "routes", "services", "episteme_graph.agents"],
             context="core/deliberation/context_lens.py",
         )
+
+
+class TestLabelsLayering:
+    """``labels.py``（種別別ラベルラダーの正本、element_context_presentation_redesign.md
+    §8 Phase 0）は**純粋関数のみ**であること。
+
+    可読ラベルの供給責任を W層に置く（LE6′）以上、この層は学習者射影・原稿スタジオ・
+    W層モーダルの共有正本になる。DB / FastAPI / LLM への依存を持ち込むと、共有できる
+    範囲がその瞬間に狭まる（context_lens.py と同じ制約を単一ファイルでも固定する）。
+    """
+
+    def test_labels_module_has_no_disallowed_imports(self):
+        assert_source_does_not_import(
+            _LABELS_SRC,
+            ["fastapi", "routes", "services", "episteme_graph.agents", "sqlalchemy"],
+            context="core/deliberation/labels.py",
+        )
+
+    def test_labels_module_does_not_open_db_sessions(self):
+        assert_source_forbids(
+            _LABELS_SRC,
+            ["get_session", "core.postgres"],
+            context="core/deliberation/labels.py",
+        )
+
+    def test_labels_module_has_no_raw_numbers_or_hype(self):
+        # W8 / EH4: 段階ラベルのみ。確度の生値を扱う経路を作らない。
+        assert_source_forbids(_LABELS_SRC, ["踏破", "達成率", "ランキング"])
 
 
 class TestContextLensNoRawNumbersOrHype:

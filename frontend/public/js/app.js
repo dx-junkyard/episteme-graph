@@ -759,8 +759,15 @@
         }
         html += '<div class="mg usr"' + idAttr + '>' + escHtml(msg.content) + anchorChip + msgActions + "</div>";
       } else {
-        html += '<div class="mg ai"' + idAttr + '>' + renderAiContent(msg.content, msg) +
-          renderAnchorConfirmPrompt(msg) + "</div>";
+        // discuss モード（論文と話す）: 開幕の「議論のきっかけ」を LLM 非経由で置いた
+        // アシスタントの問い（discussPostSeedPrompt）。学習者に「次はあなたが書く」と
+        // 分かるよう、控えめな装飾と1行の事実文を添える（煽らない, DM6）。
+        var seedCls = msg.discuss_prompt ? " discuss-prompt" : "";
+        var seedHint = msg.discuss_prompt
+          ? '<div class="discuss-prompt-hint">この問いに、あなたの考えを書いてください。</div>'
+          : "";
+        html += '<div class="mg ai' + seedCls + '"' + idAttr + '>' + renderAiContent(msg.content, msg) +
+          seedHint + renderAnchorConfirmPrompt(msg) + "</div>";
       }
     });
 
@@ -1266,7 +1273,9 @@
 
     // discuss モード（論文と話す）Phase 2: 分岐チップ（深掘り／横展開）。
     // アシスタント応答の直後にのみ出す（discuss モード限定・設計 §3.4）。
-    if (isDiscussMode() && window.Discuss) {
+    // 開幕の立場質問を置いただけのターン（discuss_prompt）には出さない — 学習者に
+    // 求めているのは立場の表明なので、深掘り／横展開へ逃がす導線を並べない。
+    if (isDiscussMode() && window.Discuss && !(msg && msg.discuss_prompt)) {
       html += window.Discuss.renderBranchChips();
     }
 
@@ -2225,6 +2234,11 @@
       });
       html += "</div>";
     }
+    // 知識ランドスケープ（docs/features/knowledge_landscape_design.md §4.2/§10.2）:
+    // 「分野の中の位置づけ」。データは LandscapeLayer と同一 fetch を共有し、配置が
+    // 1件も無い / 取得失敗のときはセクションごと消す（fail-closed・LS6）。
+    html += '<div class="ps lx-paper-placement" id="lx-paper-placement" ' +
+      'data-ui-anchor="sources.paper-placement" hidden></div>';
     // このトピックの論理要素（2026-07-26 差し替え）。
     // 旧「本セッションで参照されたセクション」は course.referenced_sections（トピック→
     // component_id の内部対応表）をそのまま描画しており、学習者には内部ID（comp_001）と
@@ -2275,6 +2289,96 @@
 
     // D層 (D3-6): 根拠カードへ台帳の検証状態を一行併記（非同期・fail-closed）。
     annotateSourceCardsWithLedger(el);
+
+    // 知識ランドスケープ: 「分野の中の位置づけ」を非同期で埋める（annotateSourceCardsWithLedger
+    // と同じ後付け方式。データが揃うまでセクションは hidden のまま）。
+    renderPaperPlacementSection(el);
+  }
+
+  // ============ 分野の中の位置づけ（知識ランドスケープ, 学習者側）============
+  // 設計正本: docs/features/knowledge_landscape_design.md §4.2（受講者 UX）・§10.2。
+  // 不変条項: LS1（断定しない）/ LS4（reason + 原文逐語 quote を必ず併記）/
+  // LS5（weight・confidence の生数値を出さない — サーバが返す段階ラベルのみ）/
+  // LS6（データ無し・取得失敗はセクションごと非表示）/ LS8（コーパス事実行）。
+  // 取得は window.LandscapeLayer.getData(courseId)（オーバーレイの「論文の位置」
+  // レイヤーと同一 fetch・コース単位キャッシュを共有する）。
+  function renderPaperPlacementSection(root) {
+    if (!root) return;
+    var box = root.querySelector("#lx-paper-placement");
+    if (!box) return;
+    if (!window.LandscapeLayer || !state.courseId) { box.remove(); return; }
+    var courseId = state.courseId;
+    Promise.resolve(window.LandscapeLayer.getData(courseId))
+      .then(function (data) {
+        // コース切替後に届いた遅延応答は破棄する（別コースの出典タブに描かない）。
+        if (courseId !== state.courseId) return;
+        if (!box.isConnected) return;
+        var docs = (data && data.documents) || [];
+        var placed = docs.filter(function (d) {
+          return d && Array.isArray(d.placements) && d.placements.length;
+        });
+        if (!placed.length) { box.remove(); return; } // fail-closed: 節ごと出さない
+        box.innerHTML = buildPaperPlacementHtml(data, placed);
+        box.hidden = false;
+      })
+      .catch(function () {
+        if (box.isConnected) box.remove(); // fail-closed
+      });
+  }
+
+  function buildPaperPlacementHtml(data, placedDocs) {
+    var html = "<h4>分野の中の位置づけ</h4>";
+    html += '<p class="lx-note" style="margin-top:0">この論文が分野の地図のどのあたりと' +
+      'つながるかの一覧です。ひとつの論文が複数の領域に載ることがあります。</p>';
+    placedDocs.forEach(function (doc) {
+      html += '<div class="lx-placement-doc">';
+      html += '<div class="lx-placement-title">' + escHtml(doc.title || "無題の論文") + "</div>";
+      (doc.placements || []).forEach(function (p) {
+        var chipBits = [];
+        if (p.perspective_label) chipBits.push(p.perspective_label);
+        if (p.weight_label) chipBits.push(p.weight_label);
+        html += '<div class="lx-placement-row">';
+        html += '<span class="lx-placement-chip">' + escHtml(p.node_label || p.node_id || "") +
+          (chipBits.length ? "（" + escHtml(chipBits.join("・")) + "）" : "") + "</span>";
+        if (p.provenance_label) {
+          html += '<span class="lx-placement-prov">' + escHtml(p.provenance_label) + "</span>";
+        }
+        var evidence = (p.evidence || []).filter(function (ev) { return ev && ev.quote; });
+        if (p.reason || evidence.length) {
+          html += '<details class="lx-placement-detail"><summary>根拠を見る</summary>';
+          if (p.reason) html += '<div class="lx-placement-reason">' + escHtml(p.reason) + "</div>";
+          evidence.forEach(function (ev) {
+            html += '<div class="lx-placement-quote">「' + escHtml(ev.quote) + "」</div>";
+          });
+          html += "</details>";
+        }
+        html += "</div>";
+      });
+      html += "</div>";
+    });
+    // LS8: 何件のコーパス・どの骨格版・AI推定を含むかを事実文で明示する。
+    html += '<p class="lx-placement-fact">' + escHtml(paperPlacementCorpusFact(data)) + "</p>";
+    return html;
+  }
+
+  // LS8 のコーパス事実行（landscape-layer.js の corpusFactText と同じ文面）。
+  function paperPlacementCorpusFact(data) {
+    var corpus = (data && data.corpus) || {};
+    var n = typeof corpus.source_document_count === "number" ? corpus.source_document_count : 0;
+    var domains = (data && data.domains) || [];
+    var picked = null;
+    domains.forEach(function (d) { if (!picked && d && d.is_course_map) picked = d; });
+    if (!picked && domains.length) picked = domains[0];
+    var version = (picked && picked.frozen_version) ? String(picked.frozen_version) : "";
+    var inferred = ((data && data.documents) || []).some(function (d) {
+      return ((d && d.placements) || []).some(function (p) { return p && p.status !== "confirmed"; });
+    });
+    var notes = [];
+    if (version) notes.push("骨格版 " + version);
+    if (inferred) notes.push("AI推定を含む");
+    var text = "登録済み論文 " + n + " 件の解析から生成";
+    if (notes.length) text += "（" + notes.join("・") + "）";
+    return text;
   }
 
   // D層 (D3-6): 出典タブの根拠カードに、そのチャンクに含まれる数式（equation）・
@@ -2833,6 +2937,19 @@
     if (target) selectTopic(target);
   }
 
+  // discuss レイアウトが最後に「新着メッセージで要点ストリップへ畳んだ」時点の会話の
+  // 指紋（件数 + 末尾メッセージ id）。renderChat はアンカープロンプトのタップ・編集
+  // 状態の変化などメッセージが増えない場面でも呼ばれるため、毎回畳むと学習者が手動で
+  // 開いた「論文の要点」が新着なしに閉じてしまう（§9.7-3 は「新しいメッセージが
+  // 来るたびに」畳む仕様）。
+  var _discussCollapseKey = "";
+
+  function _discussChatFingerprint() {
+    var msgs = state.chatMessages || [];
+    var last = msgs.length ? (msgs[msgs.length - 1].id || "") : "";
+    return msgs.length + ":" + last;
+  }
+
   // discuss モード（論文と話す）の会話ファースト・レイアウト適用。
   // `.app` への discuss-on / discuss-chat-active の付与だけをここに一本化し、
   // 実際の表示切替（サイドバー折りたたみ・教材区画の折り返し等）は CSS 側の責務とする
@@ -2855,8 +2972,13 @@
         region.style.maxHeight = "";
         region.style.flex = "";
         if (hasChat) {
-          // 再描画のたびに開幕カードへ再収縮させる（開閉の維持は明示クリックのみ）。
-          region.classList.remove("discuss-expanded");
+          // 新着メッセージがあったときだけ要点ストリップへ再収縮させる（それ以外の
+          // 再描画では、学習者が明示的に開いた状態を維持する）。
+          var _key = _discussChatFingerprint();
+          if (_key !== _discussCollapseKey) {
+            _discussCollapseKey = _key;
+            region.classList.remove("discuss-expanded");
+          }
         }
       }
       // 自動圧縮サイクルは discuss レイアウトと無関係のため無効化し、世代を進めて
@@ -2877,6 +2999,12 @@
       }
       region.classList.remove("discuss-expanded");
     }
+    if (!on) _discussCollapseKey = "";
+
+    // discuss 中はハンズフリー音声会話を無効化する（DM1 / 設計 §6.4: 音声版 discuss は
+    // Phase 3 の非スコープ）。モード切替・トピック遷移・会話描画のすべてがこの関数を
+    // 通るので、有効/無効の反映も進行中セッションの終了もここ1箇所で足りる。
+    updateVoiceAvailability();
 
     var tbtn = document.getElementById("discuss-opening-toggle");
     if (tbtn) {
@@ -3642,13 +3770,78 @@
   // ツールチップに出す {label, body} を作る。フィールド名の形が異なる2系統
   // （title/summary 系と caption/explanation 系）を緩く正規化するだけで、
   // 新しい取得は一切行わない（IH2）。
+  //
+  // **要素そのものを再掲しない**（EH1, docs/features/equation_hover_content_design.md）:
+  // 数式は本文カードが KaTeX で整形表示しているので、latex / raw_text をここに出すと
+  // 「未レンダリングの同じ式」という劣化コピーにしかならない。ホバーが答えるのは
+  // 「この式は何で、なぜここにあるか」だけ — 役割 / 意味の要約 / 記号の意味 / 読み下し。
+  // 表示できる材料が何も無ければ null を返し、呼び出し側が IH8 の固定文へ落とす。
+  // 数式を*読むための*材料を行に組み立てる共通関数。ホバー（evidence_item 由来）と
+  // 「文脈を見る」パネル（element_context の focus 由来）が**同じことを言う**ための
+  // 単一実装（EC5, docs/features/equation_context_panel_display_design.md §3）。
+  // 入力は {role_in_argument, semantic_kind|summary|explanation, symbols, plain_text}。
+  function equationExplanatoryLines(src, skipText) {
+    var lines = [];
+    if (!src) return lines;
+    // 役割（A層 role_in_argument の統制語彙 → 表示名は ElementVocab が正本）。
+    var vocab = window.ElementVocab;
+    var roleLabel = vocab && vocab.equationRoleLabel ? vocab.equationRoleLabel(src.role_in_argument) : "";
+    if (roleLabel) lines.push("この節での役割: " + roleLabel);
+    // 意味の要約。evidence_item は summary / semantic_kind、element_context の focus は
+    // semantic_kind（無ければ W層の読み下し intrinsic_summary）を持つ。
+    var text = src.explanation || src.summary || src.semantic_kind || src.intrinsic_summary
+      || src.caption || "";
+    if (text && text !== skipText) lines.push(text);
+    // 記号の意味（意味が解決できている記号だけ。最大4件）。
+    var symbols = [];
+    var rawSymbols = src.symbols || [];
+    for (var i = 0; i < rawSymbols.length && symbols.length < 4; i++) {
+      var sym = rawSymbols[i];
+      if (sym && sym.symbol && sym.meaning) symbols.push(sym.symbol + ": " + sym.meaning);
+    }
+    if (symbols.length) lines.push("記号 — " + symbols.join(" / "));
+    // 読み下し（音声用に生成済みの plain_text。式が読めない学習者への補助）。
+    if (src.plain_text && src.plain_text !== text) lines.push("読み: " + src.plain_text);
+    // 成立条件（A層 assumptions の先頭1件。原文のまま出す — 訳さない。§6 S1。
+    // element_context の focus は intrinsic.conditions 側に持つため両キーを受ける）。
+    var conds = src.assumptions || src.conditions || [];
+    if (conds.length && conds[0]) lines.push("成立条件: " + conds[0]);
+    // 掲載節（snapshot に載っているときだけ。EH3: ここで新たに取得はしない）。
+    if (src.section_label) lines.push("掲載: " + src.section_label);
+    return lines;
+  }
+
+  // ホバーの最終行に置く「文脈を見る」導線（§6 S1）。ホバーは①「これは何か」で
+  // 完結するため、残り3問（位置づけ / 構成 / 導出）への出口を明示する。
+  var MATERIAL_HOVER_CONTEXT_CTA = "▸ 文脈を見る（どこから来て、どこへ行くか）";
+
   function materialAnchorTooltipContent(item) {
     if (!item) return null;
     var label = item.title || item.label || item.caption || item.figure_id || item.id || "";
-    var body = item.explanation || item.summary || item.plain_text || item.caption || item.raw_text || "";
-    if (body && body === label) body = ""; // caption などがラベルと重複するだけの場合は省く
+    var body = equationExplanatoryLines(item, label).join("\n");
+    // 文脈パネルを開ける種別（claim / equation）のときだけ導線を添える（fail-closed）。
+    var cta = null;
+    if (item.id && MATERIAL_ELEMENT_CONTEXT_TYPES.indexOf(item.kind) >= 0) {
+      cta = { type: item.kind, id: String(item.id) };
+    }
+    // .inspect-tooltip-body は white-space: pre-wrap なので改行で足りる。
+    // 数式は表示タイトルが常に非空（最悪「数式」）なので、説明材料が無いときに
+    // ラベル単独の空箱を出さず IH8 の固定文へ落とす（§3.1。他 kind は従来どおり
+    // タイトルのみの content を許容する）。
+    if (item.kind === "equation" && !body) return null;
     if (!label && !body) return null;
-    return { label: label, body: body };
+    return { label: label, body: body, cta: cta };
+  }
+
+  // ツールチップ内の「文脈を見る」ボタン。クリック処理は既存の委譲リスナー
+  // （initMaterialEvidenceChipDelegation の .ls-material-context-btn）が拾い、
+  // openElementContextPopover へ流れる。ホバー時点では何も取得しない（EH3）。
+  function materialTooltipContextCtaHtml(cta) {
+    if (!cta) return "";
+    return '<button type="button" class="ls-material-context-btn inspect-tooltip-context-btn"' +
+      ' data-element-context-type="' + escHtml(cta.type) + '"' +
+      ' data-element-context-id="' + escHtml(cta.id) + '">' +
+      escHtml(MATERIAL_HOVER_CONTEXT_CTA) + '</button>';
   }
 
   // ラッチ対象の要素が属するチャンク（.material-chunk / .lecture-slide-text）の
@@ -3679,7 +3872,8 @@
       '<div class="inspect-tooltip-source">📄 教材</div>' +
       (content
         ? (content.label ? '<div class="inspect-tooltip-title">' + escHtml(content.label) + '</div>' : '') +
-          (content.body ? '<div class="inspect-tooltip-body">' + escHtml(content.body) + '</div>' : '')
+          (content.body ? '<div class="inspect-tooltip-body">' + escHtml(content.body) + '</div>' : '') +
+          materialTooltipContextCtaHtml(content.cta)
         // IH8: 表示できる説明が何も無い要素は固定事実文（捏造しない）。
         : '<div class="inspect-tooltip-body">この部分の説明はまだ用意されていません</div>');
     tip.hidden = false;
@@ -3900,12 +4094,42 @@
     if (el) el.textContent = text || "";
   }
 
+  // discuss モード（論文と話す）中はハンズフリー音声会話を使えない。音声経路は
+  // intent_mode:"casual" 固定で送るため（handleVoiceSegment）、discuss 中に使うと
+  //   - 画面のスコープ表示（このコースのソース論文）と実検索範囲（本人の全可視文書）が食い違う
+  //   - out_of_source_notice が casual 分岐で抑制され、出所の正直さが落ちる（DM1）
+  //   - 痕跡が casual として記録され、観測基盤の entry_mode='discuss' 集計から漏れる
+  // という3点が同時に起きる。音声版 discuss は設計 §6.4（Phase 3）の非スコープなので、
+  // ここでは開始を塞いで事実文を添えるだけに留める（fail-closed）。
+  var VOICE_DISCUSS_UNAVAILABLE_NOTE = "音声会話は「順番に学ぶ」モードで利用できます。";
+  var VOICE_BTN_DEFAULT_TITLE = "気軽に話せる先生とハンズフリーで会話";
+
+  // 音声ボタンの有効/無効を現在のモードに合わせる。discuss 中に既にハンズフリー中
+  // だった場合はその場でセッションを終了する（切替後も casual で送り続けさせない）。
+  function updateVoiceAvailability() {
+    var blocked = isDiscussMode();
+    var btn = document.getElementById("voice-mode-btn");
+    if (btn) {
+      btn.disabled = blocked;
+      btn.title = blocked ? VOICE_DISCUSS_UNAVAILABLE_NOTE : VOICE_BTN_DEFAULT_TITLE;
+    }
+    var note = document.getElementById("discuss-voice-note");
+    if (note) note.hidden = !blocked;
+    if (blocked && typeof voiceState !== "undefined" && voiceState.active) stopVoiceMode();
+  }
+
   function toggleVoiceMode() {
     if (voiceState.active) stopVoiceMode();
     else startVoiceMode();
   }
 
   async function startVoiceMode() {
+    // fail-closed: ボタンの disabled をすり抜けた経路（キーボード操作・古い DOM 状態）
+    // でも discuss 中は開始させない。
+    if (isDiscussMode()) {
+      alert(VOICE_DISCUSS_UNAVAILABLE_NOTE);
+      return;
+    }
     if (!state.currentTopicId) {
       alert("トピックを選択してから音声会話を開始してください。");
       return;
@@ -4063,6 +4287,14 @@
 
     setVoiceTranscript("あなた: " + text);
     setVoiceStatus("thinking", "先生が考えています…");
+    // fail-closed（DM1）: 文字起こし中に discuss モードへ切り替わっていたら
+    // intent_mode:"casual" では送らない（スコープ表示と実検索範囲が食い違い、痕跡も
+    // casual として記録されてしまう）。音声版 discuss は設計 §6.4 の非スコープ。
+    if (isDiscussMode()) {
+      setVoiceTranscript(VOICE_DISCUSS_UNAVAILABLE_NOTE);
+      stopVoiceMode();
+      return;
+    }
     // インスペクト・モード中の発話は無条件で usage_help ルートに確定する（§4.1）。
     // ホバー/ツールチップ表示中だった UI アンカーがあれば ui_anchor として添える。
     const data = _inspectState.active
@@ -4381,11 +4613,18 @@
     // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
     // コース横断ネットワークだが、コース切替のたびに古い表示を残さないよう揃える）。
     if (window.PersonalMapHome) window.PersonalMapHome.invalidate();
+    // 知識ランドスケープ: コース切替で「論文の位置」のキャッシュ・トグル状態を破棄する
+    // （前コースの配置を別コースの地図・出典タブに持ち越さない）。
+    if (window.LandscapeLayer) window.LandscapeLayer.invalidate();
     // discuss モード（論文と話す）: コース切替で旧コースの discuss 内部状態
     // （無活動タイマー・往復回数・ctx.courseId）を持ち越さない。これを怠ると、
     // 旧コースでの discuss セッションの無活動タイムアウト（15分）が、切替後の
     // 別コース画面上で着地モーダルとして誤発火する。
     if (window.Discuss) window.Discuss.reset();
+    // スコープ選択も持ち越さない。「閲覧できる周辺資料まで」は前のコースの文脈で
+    // 選ばれた設定なので、別コースの初期状態としては既定（このコースのソース論文）に
+    // 戻す（画面表示と実検索範囲を一致させる, DM1）。
+    state.discussScope = "course_sources";
 
     // Re-render with clean state
     renderSidebar();
@@ -4821,6 +5060,38 @@
   // チャット API へそのまま引き渡すためのもの (自由文のみに依存しない)。
   window.sendPrompt = function (text, payload) {
     sendMessage(text, payload);
+  };
+
+  // discuss モード（論文と話す）: 開幕画面の「議論のきっかけ」（教員が承認した
+  // 立場を求める問い）を **アシスタントの発話として** チャット欄へ置く。
+  //
+  // なぜ学習者の発話として送らないか（docs/features/discuss_dialogue_alignment_design.md
+  // §3-1 / §4）: seed の body は「あなたはどう考えるか」を問う文なので、これを学習者
+  // メッセージとして送ると AI は発話タイプ別ルール1（質問には即答・出し惜しみ禁止）で
+  // その問いに自分で答えきってしまい、係留（学習者が先に立場を述べ、AI が revoice で
+  // 言い直す）が起動しない。設計は「開幕の立場質問に**学習者が応答したら** AI は
+  // 言い直しと確認だけを返す」と定めている。
+  //
+  // 履歴の扱い: sendMessage は `history: state.chatMessages.slice(0, -1)` を送り、
+  // learning.py はその body.history を window_history 経由で LLM へ渡し、かつ
+  // persist_chat_history が body.history を土台に UPSERT する。つまりここで積んだ
+  // assistant ターンは (a) 次の学習者発話のときに「問い → 学習者の立場」の順で LLM に
+  // 届き revoice が成立し、(b) その送信時にサーバ正本の履歴へも保存される。
+  // 送信しなければ保存されない（＝画面上の下書きに留まる）。id を付けるので、
+  // 書き直し（replace_message_id）・以降削除の truncate 境界計算とも整合する。
+  // LLM は呼ばない（DM8）。着地判定の往復回数（Discuss.notifyActivity）も進めない
+  // — 実際の往復はまだ起きていないため。
+  window.discussPostSeedPrompt = function (text) {
+    if (!isDiscussMode() || !text || state.sending) return;
+    var msgs = state.chatMessages;
+    var last = msgs.length ? msgs[msgs.length - 1] : null;
+    // 未応答の注入ターンが末尾にあるだけなら差し替える（別のきっかけを続けて押した
+    // ときに問いだけが積み上がるのを防ぐ）。
+    if (last && last.role === "assistant" && last.discuss_prompt) msgs.pop();
+    msgs.push({ role: "assistant", content: text, id: genMsgId(), discuss_prompt: true });
+    renderChat();
+    var input = document.getElementById("chat-input");
+    if (input && !input.disabled) input.focus();
   };
 
   // discuss モード（論文と話す）Phase 2: 着地画面「このトピックで続きを学ぶ」用。
@@ -5321,13 +5592,14 @@
   // 設計書: docs/features/component_evidence_redesign.md。component/claim は本文を壊す
   // ブロックカードをやめ、内容を持たないインラインチップにする（それ自体が内容を持つ
   // equation/figure/source はブロックカードのまま維持する）。
-  var MATERIAL_EVIDENCE_KIND_LABELS = {
-    component: "論理要素",
-    claim: "主張",
-    equation: "数式",
-    figure: "図",
-    source: "出典",
-  };
+  // 種別（kind）の表示名は element-vocab.js（window.ElementVocab）が正本。ここに独自辞書は
+  // 持たず委譲する（docs/architecture/admin_ux_issues_2026-08-01.md §3.3 Phase 0）。
+  // 未読み込み時はキー文字列へフォールバックする（fail-soft）。
+  function materialEvidenceKindLabel(kind) {
+    const vocab = window.ElementVocab;
+    if (vocab && vocab.kindLabel) return vocab.kindLabel(kind);
+    return kind == null ? "" : String(kind);
+  }
 
   // supports.equations[].role（component_assembly 由来）の日本語バッジ。
   var MATERIAL_EVIDENCE_EQUATION_ROLE_LABELS = {
@@ -5362,17 +5634,10 @@
     equation: "/elements/equation/",
   };
 
-  // relation_status は source_backed / confirmed の2値のみ（candidate は API 側で除外）。
-  var MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS = {
-    source_backed: "出典に裏付け",
-    confirmed: "教員確定",
-  };
-
-  // レーン見出し（focus の型ごとに主語を変える。事実文のみ・煽らない）。
-  var MATERIAL_ELEMENT_CONTEXT_LANE_LABELS = {
-    claim: { upper: "この主張が支えるもの", lower: "この主張の根拠" },
-    equation: { upper: "この数式が支えるもの", lower: "この数式の根拠" },
-  };
+  // 裏付け状態（relation_status = source_backed / confirmed。candidate は API 側で除外）の
+  // 段階ラベルとレーン見出しは、統一パーツカード（element-card.js）と語彙の正本
+  // （element-vocab.js）が持つ。ここに辞書を持たない
+  // （docs/architecture/admin_ux_issues_2026-08-01.md §3.2 P1/P2）。
 
   // ITEM.element_type（W層の内部語彙）→ 教材本文の data-evidence-ref の kind。
   // shared_part は教材本文に担体を持たないため意図的に含めない（ジャンプ不可）。
@@ -5390,6 +5655,150 @@
 
   function clearMaterialElementContextCache() {
     materialElementContextCache = {};
+  }
+
+  // ── 統一パーツカード（編集不可バリアント）への配線 ──────────────────────────
+  // 正本は frontend/public/js/element-card.js（window.ElementCard）。
+  // docs/architecture/admin_ux_issues_2026-08-01.md §3.2 / §3.3 Phase 4。
+  // 学習者側は VARIANT_READONLY 固定で、role/confidence の来歴・candidate 関係・
+  // review_status・教員向けの操作行はカード側が構造的に描かない。
+  // 加えて **呼び出し側でも dto に詰めない**（二重ガード。§3.2 の差分表）。
+  // notes は教員向け運用語彙が混ざる余地があるため学習者カードには渡さない
+  // （カードは dto.notes をそのまま描くので、渡さないことが唯一のガードになる）。
+
+  // 学習者が実際に文脈 API を再フェッチできる element_type（旅の続きを開ける型）。
+  // theory_claim / equation は claim・equation 文脈 API、theory_component は
+  // component 文脈 API。それ以外（figure / section / thesis / derivation / symbol /
+  // evidence / stage / part）は開き先が無いので navigable にしない（fail-closed）。
+  var LEARNER_CARD_TRAVEL_TYPES = ["theory_claim", "theory_component", "equation"];
+
+  // 公開語彙（API パスの claim / equation）→ W層内部語彙。カードの種別チップは
+  // ElementVocab.elementTypeLabel（キーは backend の element_type）を引くため、
+  // focus.element_type は内部語彙へ寄せる（"claim" のまま渡すと生キーが表示される）。
+  var LEARNER_CARD_FOCUS_TYPES = {
+    claim: "theory_claim",
+    equation: "equation",
+  };
+
+  // カードの render と bind には**同一の opts** を渡さなければならない
+  // （navigable チップは onCenter が設定されているときだけ描かれるため）。
+  //
+  // KaTeX に渡してよい文字列かのゲート（EC2）は **element-card.js が内製**する
+  // （element_context_presentation_redesign.md §6 S3-5: admin=無ガードで赤いエラー /
+  // W層=未注入で生 TeX / 学習=ガード付き、という3通りの壊れ方を1実装で終わらせる）。
+  // ここに同じ判定を再実装しないこと — 素のレンダラをそのまま渡す。
+  function learnerElementCardOpts(onCenter) {
+    var card = window.ElementCard;
+    return {
+      variant: card ? card.VARIANT_READONLY : "readonly",
+      escapeHtml: escHtml,
+      renderMath: renderMaterialKatex,
+      onCenter: typeof onCenter === "function" ? onCenter : null,
+    };
+  }
+
+  function learnerElementCardHtml(dto, opts) {
+    var card = window.ElementCard;
+    if (!card || !card.render) return "";
+    return card.render(dto, opts);
+  }
+
+  // render 済み DOM にイベントを張り、教材内ジャンプを添える。
+  function bindLearnerElementCard(container, dto, opts) {
+    var card = window.ElementCard;
+    if (!card || !card.bind || !container) return;
+    card.bind(container, dto, opts);
+    augmentLearnerElementCardJumps(container, dto);
+  }
+
+  // ITEM を学習者カード用に射影する。candidate はサーバ側で除去済みだが呼び出し側でも
+  // 落とし、navigable は「学習者が実際に開ける型か」で作り直す（W層の navigable は
+  // 教員向けの可否なのでそのままでは契約が成立しない）。confidence 等は詰めない。
+  //
+  // DTO v2（element_context_presentation_redesign.md §4.1）で増えた
+  // sublabel / qualifier / group / unresolved はそのまま透過する（区別材料なので
+  // 学習者にも出す）。label_source は教員のみなので**詰めない**。
+  function learnerElementCardItems(items) {
+    var out = [];
+    (items || []).forEach(function (item) {
+      if (!item) return;
+      if (item.relation_status === "candidate") return;
+      // 式の詳細層（traceability）は学習者に出さない。サーバ射影でも除去されるが、
+      // ここで落としておくことでカードの可視 ITEM 列と添字が完全に一致する
+      // （教材内ジャンプが data-element-card-itemref で引けるための前提）。
+      if (item.group === "operation") return;
+      var id = item.id || "";
+      out.push({
+        id: id,
+        element_type: item.element_type,
+        label: item.label,
+        sublabel: item.sublabel,
+        qualifier: item.qualifier,
+        group: item.group,
+        unresolved: !!item.unresolved,
+        relation_label: item.relation_label,
+        relation_status: item.relation_status,
+        navigable: !!item.navigable && !!id &&
+          LEARNER_CARD_TRAVEL_TYPES.indexOf(item.element_type) >= 0,
+      });
+    });
+    return out;
+  }
+
+  // 近傍チップの「旅」。押された ITEM の文脈 API を再フェッチし、同じポップオーバーの
+  // 本体を差し替える（W層のパンくず中心移動と同じ発想。既存の「グラフで見る」内
+  // ノードクリックと同じく、パンくずは持たずその場で置き換える）。再フェッチ口の無い
+  // 型では何もしない（fail-soft）。
+  function travelToElementContext(pop, body, item) {
+    if (!pop || !body || !item || !item.id) return;
+    var type = item.element_type;
+    if (LEARNER_CARD_TRAVEL_TYPES.indexOf(type) < 0) return;
+    body.innerHTML = '<div class="evidence-chip-popover-loading">読み込み中…</div>';
+    if (type === "theory_component") {
+      fetchComponentContextAndRender(pop, body, item.id, null);
+      return;
+    }
+    fetchElementContextAndRender(pop, body, type === "equation" ? "equation" : "claim", item.id);
+  }
+
+  // カードは教材本文の存在を知らないため、mount 後に「教材内で見る」を該当行の直後へ
+  // 差し込む（担体 [data-evidence-ref] が現在の DOM にある ITEM だけ。既存挙動を維持）。
+  // ゾーン描画（DTO v2）では ITEM が元のレーン順に並ばないため、行 → ITEM の対応は
+  // カードが全行に付ける data-element-card-itemref="lane:index" から引く
+  // （index はカードの可視 ITEM 列 = learnerElementCardItems の結果と一致する）。
+  function augmentLearnerElementCardJumps(container, dto) {
+    if (!container || !container.querySelectorAll) return;
+    var rows = container.querySelectorAll("[data-element-card-itemref]");
+    for (var i = 0; i < rows.length; i++) {
+      var parts = String(rows[i].getAttribute("data-element-card-itemref") || "").split(":");
+      var items = (dto && dto[parts[0]]) || [];
+      var item = items[parseInt(parts[1], 10)];
+      if (!item) continue;
+      var ref = materialElementContextJumpRef(item);
+      if (!ref) continue;
+      var row = rows[i];
+      var anchorEl = (row.closest && (row.closest(".element-card-item-block") ||
+        row.closest(".element-card-item-row"))) || row;
+      if (!anchorEl.parentNode) continue;
+      anchorEl.parentNode.insertBefore(buildMaterialJumpRow(ref), anchorEl.nextSibling);
+    }
+  }
+
+  function buildMaterialJumpRow(ref) {
+    // 行の体裁はカードの近傍行（.element-card-item）を借りる（CSS を増やさない）。
+    var row = document.createElement("div");
+    row.className = "element-card-item";
+    var btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "evidence-chip-context-jump-btn";
+    btn.setAttribute("data-jump-ref", ref);
+    btn.textContent = "教材内で見る";
+    btn.addEventListener("click", function (e) {
+      e.stopPropagation();
+      jumpToMaterialEvidenceRef(ref);
+    });
+    row.appendChild(btn);
+    return row;
   }
 
   // チップ ref（"kind:id"）→ { item, resolver } のレジストリ。renderMaterialChunk は
@@ -5592,7 +6001,7 @@
           // Phase 3: 図カード（画像なし・caption のみ）もホバー対象にする（IH2: 既存データのみ）。
           registerMaterialEvidenceChipEntry("figure:" + embedId, evidenceItem, null);
           return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="figure:' + escHtml(embedId) + '">' +
-            '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS.figure || "図") + '</span>' +
+            '<span class="ls-material-embed-kind">' + escHtml(materialEvidenceKindLabel("figure")) + '</span>' +
             '<strong>' + escHtml(evidenceItem.title || ("図: " + (evidenceItem.caption || embedId))) + '</strong>' +
             '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.caption || evidenceItem.summary) || "この図の画像は現在配信対象ではありません。") + '</span>' +
           '</span>';
@@ -5618,7 +6027,7 @@
           ? '<span class="ls-material-embed-summary ls-material-embed-formula">' + renderMaterialKatex(evidenceItem.latex, true) + '</span>'
           : '<span class="ls-material-embed-summary">' + escHtml(shortMaterialEvidenceSummary(evidenceItem.summary) || "この教材要素に紐づく根拠です。") + '</span>';
         return '<span class="ls-material-embed ls-material-evidence-card" data-evidence-ref="' + escHtml(embed.kind + ":" + embedId) + '">' +
-          '<span class="ls-material-embed-kind">' + escHtml(MATERIAL_EVIDENCE_KIND_LABELS[evidenceItem.kind] || evidenceItem.kind) + '</span>' +
+          '<span class="ls-material-embed-kind">' + escHtml(materialEvidenceKindLabel(evidenceItem.kind)) + '</span>' +
           '<strong>' + escHtml(evidenceItem.title || evidenceItem.id) + '</strong>' +
           cardBody +
         '</span>';
@@ -5676,9 +6085,10 @@
   // 既存の出典ポップアップ基盤（.src-popup / _positionSourcePopup / closeSourcePopup /
   // 外側クリック・Esc）を踏襲する。
   function evidenceChipPopoverHead(kind, title) {
-    var kindLabel = MATERIAL_EVIDENCE_KIND_LABELS[kind] || kind;
+    var kindLabel = materialEvidenceKindLabel(kind);
+    var text = String(title == null ? "" : title).trim();
     return '<div class="src-popup-head">' +
-      '<span class="src-popup-title">' + escHtml(kindLabel) + ' ・ ' + escHtml(title || "") + '</span>' +
+      '<span class="src-popup-title">' + escHtml(text ? kindLabel + " ・ " + text : kindLabel) + '</span>' +
       '<button class="src-popup-close" aria-label="閉じる">×</button></div>';
   }
 
@@ -5872,6 +6282,43 @@
     }
   }
 
+  // component_context の三層 DTO（instance / shared_part / graph）→ 統一パーツカードの
+  // DTO。カードは `{focus, upper, lower}` の context_lens 形しか受けないため、
+  //   instance.component + instance.in_paper → focus（本文は既存の優先順を維持）
+  //   graph.upper / graph.lower           → 近傍 ITEM（旅の起点）
+  // だけを写し、カードで表現できない三層固有の情報（supports の内訳・出典論文・
+  // 教員の説明・shared_part の別名/標準化状況）はカード直後の詳細セクションと
+  // 「共通部品として」タブに残す（情報を落とさない）。
+  function componentContextToCardDto(data) {
+    var instance = (data && data.instance) || {};
+    var component = instance.component || {};
+    var inPaper = instance.in_paper || {};
+    var graph = (data && data.graph) || {};
+    var graphFocus = graph.focus || {};
+    return {
+      focus: {
+        element_type: "theory_component",
+        element_id: (data && data.component_id) || graphFocus.id || "",
+        label: component.label || graphFocus.label || "",
+        // 「この論文での位置づけ」の優先順（narrative_role → teaching_takeaway →
+        // summary）は既存表示と同一。
+        intrinsic_summary: inPaper.narrative_role || component.teaching_takeaway ||
+          component.summary || "",
+      },
+      upper: learnerElementCardItems(graph.upper),
+      lower: learnerElementCardItems(graph.lower),
+    };
+  }
+
+  // element-card.js が読み込めていない場合でも位置づけ本文だけは出す（fail-soft）。
+  function componentContextCardOrFallbackHtml(cardDto, cardOpts) {
+    var html = learnerElementCardHtml(cardDto, cardOpts);
+    if (html) return html;
+    var summary = (cardDto.focus && cardDto.focus.intrinsic_summary) || "";
+    return '<div class="evidence-chip-popover-position">' +
+      escHtml(summary || "この論文での位置づけはまだ登録されていません。") + '</div>';
+  }
+
   function renderComponentContextPanel(pop, body, data, resolver) {
     var instance = (data && data.instance) || {};
     var sharedPart = data && data.shared_part;
@@ -5879,20 +6326,29 @@
 
     var headTitle = pop.querySelector(".src-popup-title");
     if (headTitle && instance.component && instance.component.label) {
-      headTitle.textContent = (MATERIAL_EVIDENCE_KIND_LABELS.component || "論理要素") + " ・ " + instance.component.label;
+      headTitle.textContent = materialEvidenceKindLabel("component") + " ・ " + instance.component.label;
     }
+
+    var cardDto = componentContextToCardDto(data);
+    var cardOpts = learnerElementCardOpts(function (item) {
+      travelToElementContext(pop, body, item);
+    });
 
     var html = '<div class="evidence-chip-context-tabs" role="tablist">' +
       '<button type="button" class="evidence-chip-context-tab active" data-tab="instance">この論文では</button>' +
       (sharedPart ? '<button type="button" class="evidence-chip-context-tab" data-tab="shared">共通部品として</button>' : "") +
     '</div>' +
-    '<div class="evidence-chip-context-pane" data-pane="instance">' + renderContextInstancePane(instance, resolver) + '</div>' +
+    '<div class="evidence-chip-context-pane" data-pane="instance">' +
+      componentContextCardOrFallbackHtml(cardDto, cardOpts) +
+      renderContextInstanceDetails(instance, resolver) +
+    '</div>' +
     (sharedPart ? '<div class="evidence-chip-context-pane" data-pane="shared" hidden>' + renderContextSharedPane(sharedPart) + '</div>' : "") +
     (graph ? '<div class="evidence-chip-context-graph-toggle">' +
         '<button type="button" class="evidence-chip-context-graph-btn">グラフで見る</button>' +
       '</div><div class="evidence-chip-context-graph" hidden></div>' : "");
 
     body.innerHTML = html;
+    bindLearnerElementCard(body.querySelector('[data-pane="instance"]'), cardDto, cardOpts);
 
     var tabs = body.querySelectorAll(".evidence-chip-context-tab");
     tabs.forEach(function (tabBtn) {
@@ -5930,13 +6386,13 @@
     fetchComponentContextAndRender(pop, body, node.id, null);
   }
 
-  function renderContextInstancePane(instance, resolver) {
+  // 統一パーツカードで表現できない component 固有の内訳（supports / 出典論文 /
+  // 教員の説明）。「この論文での位置づけ」本文と近傍レーンはカード側が描くため、
+  // ここでは繰り返さない。
+  function renderContextInstanceDetails(instance, resolver) {
     var inPaper = instance.in_paper || {};
     var supports = instance.supports || {};
-    var component = instance.component || {};
     var html = "";
-    var position = inPaper.narrative_role || component.teaching_takeaway || component.summary || "";
-    if (position) html += '<div class="evidence-chip-popover-position">' + escHtml(position) + '</div>';
     if (inPaper.graph_summary_excerpt) {
       html += '<div class="evidence-chip-context-graph-summary">' + escHtml(inPaper.graph_summary_excerpt) + '</div>';
     }
@@ -5959,7 +6415,9 @@
         (instance.explanation.endorsement_label ? '<div class="evidence-chip-context-explanation-endorsement">' + escHtml(instance.explanation.endorsement_label) + '</div>' : "") +
       '</div>';
     }
-    return html || '<div class="evidence-chip-popover-position">この論文での位置づけはまだ登録されていません。</div>';
+    // 内訳が無い場合は空を返す（「位置づけが未登録」の事実文はカード本文側の縮退
+    // 表示が担う。同じ趣旨の文を二重に出さない）。
+    return html;
   }
 
   // Phase2 API は equations に label を持つため、latex が解決できなくても label + role は
@@ -6049,7 +6507,9 @@
     var pop = document.createElement("div");
     pop.className = "src-popup evidence-chip-popover";
     pop.id = "src-popup";
-    pop.innerHTML = evidenceChipPopoverHead(kind, elementId) +
+    // 読み込み中は種別ラベルだけにする（内部 ID（eq_tex_b14 等）を見出しに出さない。
+    // 読める見出しは取得後に renderElementContextPanel が差し替える）。
+    pop.innerHTML = evidenceChipPopoverHead(kind, "") +
       '<div class="src-popup-body evidence-chip-popover-body">' +
         '<div class="evidence-chip-popover-loading">読み込み中…</div>' +
       '</div>';
@@ -6089,6 +6549,58 @@
     }
   }
 
+  // element_context の DTO（{focus, upper, lower, notes}）→ 統一パーツカードの DTO。
+  // サーバ側（core/element_context.py）で candidate 除去・confidence 除去・内部ID遮断は
+  // 済んでいるため、ここは形の写し替えだけで足りる。notes は渡さない（学習者に教員向け
+  // 運用語彙を出さない既存不変条項）。
+  function elementContextToCardDto(elementType, data) {
+    var focus = (data && data.focus) || {};
+    var cardFocus = {
+      element_type: LEARNER_CARD_FOCUS_TYPES[elementType] || elementType,
+      element_id: focus.element_id,
+      label: focus.label,
+      // DTO v2: ラベルラダーの結果（headline）と「これは何か / 位置づけ」の
+      // 構造化ブロック。旧サーバは持たないのでキーが無ければ渡さない。
+      headline: focus.headline,
+      intrinsic_summary: focus.intrinsic_summary,
+    };
+    if (focus.intrinsic) cardFocus.intrinsic = focus.intrinsic;
+    if (focus.placement) cardFocus.placement = focus.placement;
+    if (focus.contextual_role_source) {
+      cardFocus.contextual_role_source = focus.contextual_role_source;
+    }
+    // 数式は式そのものを再掲しない（EC1）。本文は「役割 / 意味の要約 / 記号の意味」に
+    // 差し替える（ホバーと同じ材料・同じ順序 = EC5）。サーバ側（core/element_context.py）
+    // が TeX を落として役割・記号を載せてくるので、ここは組み立てるだけ。
+    // DTO v2 の intrinsic が来ているときはカードが同じ材料を構造化して描くため、
+    // 平文の連結（旧サーバ互換パス）は行わない。
+    if (elementType === "equation" && !focus.intrinsic) {
+      var eqLines = equationExplanatoryLines(focus, cardFocus.label);
+      cardFocus.intrinsic_summary = eqLines.join("\n");
+    }
+    // 旧サーバ / 旧スナップショット防御: label と intrinsic_summary が同一値のときは
+    // 見出しを種別チップだけにする（同じ文字列を二度出さない）。
+    if (cardFocus.label && cardFocus.label === cardFocus.intrinsic_summary) {
+      cardFocus.label = "";
+    }
+    // contextual_role は表示してよいときだけ両方のキーが来る（AI 候補・未同定は
+    // サーバ側でキーごと落ちてくる）ので、存在すればそのまま渡す。
+    if (focus.contextual_role) {
+      cardFocus.contextual_role = focus.contextual_role;
+      cardFocus.contextual_role_status = focus.contextual_role_status;
+    }
+    if (focus.generic) cardFocus.generic = focus.generic;
+    // 導出ストーリー（equation focus のみ）。トップレベル / focus 配下の
+    // どちらで来ても受ける（サーバ実装の置き場所に依存しない）。
+    var derivations = (focus.derivations || (data && data.derivations)) || [];
+    return {
+      focus: cardFocus,
+      upper: learnerElementCardItems(data && data.upper),
+      lower: learnerElementCardItems(data && data.lower),
+      derivations: derivations,
+    };
+  }
+
   function renderElementContextPanel(pop, body, elementType, data) {
     if (!data || data.available !== true) {
       // available:false の note はサーバ側の事実文。無ければ既定の事実文に縮退。
@@ -6097,81 +6609,31 @@
       return;
     }
     var focus = data.focus || {};
-    var lanes = MATERIAL_ELEMENT_CONTEXT_LANE_LABELS[elementType] ||
-      MATERIAL_ELEMENT_CONTEXT_LANE_LABELS.claim;
 
+    // タイトルは種別ラベル（+ 読める見出しがあるときだけ ・ で連結）。数式は
+    // サーバ側で TeX を落として式番号 or 空になっているため、生 TeX が出ることは無い
+    // （EC1）。空のときは「数式 ・ 」の宙ぶらりんを作らない。
     var headTitle = pop && pop.querySelector(".src-popup-title");
-    if (headTitle && focus.label) {
-      var kindLabel = MATERIAL_EVIDENCE_KIND_LABELS[elementType] || elementType;
-      headTitle.textContent = kindLabel + " ・ " + focus.label;
+    if (headTitle) {
+      var kindLabel = materialEvidenceKindLabel(elementType);
+      // DTO v2 はラベルラダーの結果を headline に載せる（label と同値の契約だが、
+      // 旧サーバは headline を持たないので label へフォールバックする）。
+      var focusLabel = typeof focus.headline === "string" ? focus.headline.trim() : "";
+      if (!focusLabel) focusLabel = typeof focus.label === "string" ? focus.label.trim() : "";
+      headTitle.textContent = focusLabel ? kindLabel + " ・ " + focusLabel : kindLabel;
     }
 
-    var html = "";
-    if (focus.intrinsic_summary) {
-      html += '<div class="evidence-chip-popover-position">' + escHtml(focus.intrinsic_summary) + '</div>';
-    }
-    // contextual_role は表示してよいときだけ両方のキーが来る（AI 候補・未同定は
-    // キーごと落ちてくる）ので、存在すればそのまま出す。
-    if (focus.contextual_role) {
-      html += '<div class="evidence-chip-context-role">' +
-        '<div class="evidence-chip-popover-section-title">この論文での役割</div>' +
-        '<div class="evidence-chip-context-role-body">' + escHtml(focus.contextual_role) + '</div>' +
-        elementContextStatusBadge(focus.contextual_role_status) +
-      '</div>';
-    }
-    if (focus.generic && (focus.generic.name || focus.generic.summary)) {
-      var genericText = focus.generic.name || "";
-      if (focus.generic.summary) {
-        genericText = genericText ? (genericText + " — " + focus.generic.summary) : focus.generic.summary;
-      }
-      html += '<div class="evidence-chip-context-generic">一般には: ' + escHtml(genericText) + '</div>';
-    }
-    html += renderElementContextLane(lanes.upper, data.upper);
-    html += renderElementContextLane(lanes.lower, data.lower);
+    var dto = elementContextToCardDto(elementType, data);
+    var opts = learnerElementCardOpts(function (item) {
+      travelToElementContext(pop, body, item);
+    });
+    var html = learnerElementCardHtml(dto, opts);
     if (!html) {
-      html = '<div class="evidence-chip-popover-position">' +
-        escHtml(MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE) + '</div>';
+      body.textContent = MATERIAL_ELEMENT_CONTEXT_UNAVAILABLE;
+      return;
     }
     body.innerHTML = html;
-
-    body.querySelectorAll(".evidence-chip-context-jump-btn").forEach(function (btn) {
-      btn.addEventListener("click", function () {
-        jumpToMaterialEvidenceRef(btn.getAttribute("data-jump-ref") || "");
-      });
-    });
-  }
-
-  function elementContextStatusBadge(status) {
-    var label = MATERIAL_ELEMENT_CONTEXT_STATUS_LABELS[status];
-    if (!label) return "";
-    return '<span class="evidence-chip-context-status">' + escHtml(label) + '</span>';
-  }
-
-  // 1レーン（upper か lower）。各行 = ラベル + relation_label（「focus が〜する」の
-  // 動詞句なのでそのまま連結）+ 裏付けラベル + 教材内ジャンプ（担体があるときだけ）。
-  function renderElementContextLane(title, items) {
-    var rows = (items || []).map(function (item) {
-      if (!item) return "";
-      var label = item.label || "";
-      if (!label) return "";
-      var jumpRef = materialElementContextJumpRef(item);
-      return '<li class="evidence-chip-context-lane-item">' +
-        '<span class="evidence-chip-context-lane-label">' + escHtml(label) + '</span>' +
-        (item.relation_label
-          ? '<span class="evidence-chip-context-lane-relation">' + escHtml(item.relation_label) + '</span>'
-          : "") +
-        elementContextStatusBadge(item.relation_status) +
-        (jumpRef
-          ? '<button type="button" class="evidence-chip-context-jump-btn" data-jump-ref="' +
-            escHtml(jumpRef) + '">教材内で見る</button>'
-          : "") +
-      '</li>';
-    }).filter(Boolean);
-    if (!rows.length) return "";
-    return '<div class="evidence-chip-popover-section evidence-chip-context-lane">' +
-      '<div class="evidence-chip-popover-section-title">' + escHtml(title) + '</div>' +
-      '<ul class="evidence-chip-popover-list evidence-chip-context-lane-list">' + rows.join("") + '</ul>' +
-    '</div>';
+    bindLearnerElementCard(body, dto, opts);
   }
 
   // ITEM が現在トピックの教材本文に担体（[data-evidence-ref]）を持つかを調べ、持つ

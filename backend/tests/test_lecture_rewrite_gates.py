@@ -448,24 +448,32 @@ def _stub_topic_rewrite_llm(monkeypatch):
 
 
 class TestRewriteCourseTopicPermissionGate:
+    """権限ゲートの seam は ``_shared._course_data_for_studio_editable``。
+
+    教材図スタジオ（`teaching_figure_studio_design.md` §8）で同じ編集権限ゲートを共有する
+    ため、実装は topics.py から ``_shared.py`` へ移った（topics.py は委譲。挙動・URL・
+    ステータスコードは不変）。よって ``get_editable_course_data`` /
+    ``_get_system_admin_course_data`` のパッチ先も ``shared_mod`` である。
+    """
+
     PATH = "/api/admin/courses/course-1/lecture-studio/course-topics/t1/draft/rewrite"
 
     def test_viewer_only_teacher_gets_404(self, client_and_tokens, monkeypatch):
         """editor 権限が無い（閲覧のみの）教員は 404（旧実装は viewable のみで通っていた欠如の是正）。"""
         client, _owner, _editor, other, _admin = client_and_tokens
-        import routes.lecture_studio.topics as topics_mod
+        import routes.lecture_studio._shared as shared_mod
 
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: None)
-        monkeypatch.setattr(topics_mod, "_get_system_admin_course_data", lambda cid: None)
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: None)
+        monkeypatch.setattr(shared_mod, "_get_system_admin_course_data", lambda cid: None)
 
         r = client.post(self.PATH, headers=_auth(other), json={"prompt": "書き換えて"})
         assert r.status_code == 404
 
     def test_owner_can_rewrite(self, client_and_tokens, monkeypatch):
         client, owner, _editor, _other, _admin = client_and_tokens
-        import routes.lecture_studio.topics as topics_mod
+        import routes.lecture_studio._shared as shared_mod
 
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
         _stub_topic_rewrite_llm(monkeypatch)
 
         r = client.post(self.PATH, headers=_auth(owner), json={"prompt": "書き換えて"})
@@ -474,9 +482,9 @@ class TestRewriteCourseTopicPermissionGate:
 
     def test_editor_via_group_share_can_rewrite(self, client_and_tokens, monkeypatch):
         client, _owner, editor, _other, _admin = client_and_tokens
-        import routes.lecture_studio.topics as topics_mod
+        import routes.lecture_studio._shared as shared_mod
 
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
         _stub_topic_rewrite_llm(monkeypatch)
 
         r = client.post(self.PATH, headers=_auth(editor), json={"prompt": "書き換えて"})
@@ -484,10 +492,10 @@ class TestRewriteCourseTopicPermissionGate:
 
     def test_system_admin_can_rewrite_via_fallback(self, client_and_tokens, monkeypatch):
         client, _owner, _editor, _other, admin = client_and_tokens
-        import routes.lecture_studio.topics as topics_mod
+        import routes.lecture_studio._shared as shared_mod
 
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: None)
-        monkeypatch.setattr(topics_mod, "_get_system_admin_course_data", lambda cid: _fake_course_data())
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: None)
+        monkeypatch.setattr(shared_mod, "_get_system_admin_course_data", lambda cid: _fake_course_data())
         _stub_topic_rewrite_llm(monkeypatch)
 
         r = client.post(self.PATH, headers=_auth(admin), json={"prompt": "書き換えて"})
@@ -495,7 +503,6 @@ class TestRewriteCourseTopicPermissionGate:
 
     def test_exceeding_daily_cap_returns_429(self, client_and_tokens, monkeypatch):
         import routes.lecture_studio._shared as shared_mod
-        import routes.lecture_studio.topics as topics_mod
 
         client, owner, _editor, _other, _admin = client_and_tokens
 
@@ -503,7 +510,7 @@ class TestRewriteCourseTopicPermissionGate:
             lecture_rewrite_max_calls_per_day = 1
 
         monkeypatch.setattr(shared_mod, "get_settings", lambda: _FakeSettings())
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
         _stub_topic_rewrite_llm(monkeypatch)
 
         r1 = client.post(self.PATH, headers=_auth(owner), json={"prompt": "1"})
@@ -538,7 +545,7 @@ class TestSharedCostGateAcrossScriptsAndTopics:
         )
         assert r1.status_code == 200
 
-        monkeypatch.setattr(topics_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
+        monkeypatch.setattr(shared_mod, "get_editable_course_data", lambda uid, cid: _fake_course_data())
 
         def _boom(**kw):
             raise AssertionError("quota 超過時に LLM を呼んではいけない（topics.py 経路）")

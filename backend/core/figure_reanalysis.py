@@ -32,6 +32,7 @@ from core.figure_presentation import (
     normalize_figure_analysis_candidate,
     persist_suggestions,
 )
+from core.llm_policy import SOURCE_ENV, SOURCE_TIER_DEFAULT, resolve_scene_model
 from core.llm_usage import usage_context
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.storage import get_storage_client
@@ -46,6 +47,11 @@ except ImportError:  # pragma: no cover - PyMuPDF is a hard runtime dependency
 
 _cost_gate = CostGate()
 logger = logging.getLogger(__name__)
+
+# U層の feature / M層の scene キー（``deliberation:figure_reanalysis`` は
+# ``core/llm_policy.py::scene_for_feature`` が ``pipeline.vision`` に束ねる — 実体は
+# apparatus vision エンジンそのものなので、非 vision モデルへ落とさないため）。
+_FIGURE_REANALYSIS_FEATURE = "deliberation:figure_reanalysis"
 
 # Guidance validation bounds (§3/§4-1 of the design doc). No new env vars
 # (GF6) — these are structural input bounds, not a cost/rate limit.
@@ -652,15 +658,32 @@ def reanalyze_figure(
                 daily_key=_daily_budget_key(created_by),
             )
             vision_call_budget = 1 + remaining
+        # M層（レビュー指摘 J6）: 監査記録に残すモデル名は env の素読みではなく
+        # **実際に解決されるモデル** にする（orchestrator の apparatus ステージと同型）。
+        # 実行時の生成コール自体は ``ApparatusSemanticsLLMClient(model=None)`` →
+        # ``core/llm.py`` の入口が同じ feature で解決するため、ここで解決結果を
+        # 再現しておかないと「記録上のモデル」と「実際に使ったモデル」が食い違う。
+        # user ポリシーを拾うため usage_context の内側で解決する（vision capability の
+        # fail-closed は llm_policy が feature から導出する）。
+        # ポリシー行が無い（env / tier 既定に落ちた）ときは、このモジュールが読んでいる
+        # settings の値を優先する — 本番では llm_policy 側の解決結果と同一で、
+        # 差が出るのは settings を差し替えたテストのみ（env 層の正本は settings のまま）。
+        with usage_context(
+            _FIGURE_REANALYSIS_FEATURE, user_id=created_by, document_id=document_id
+        ):
+            _resolved_vision = resolve_scene_model(_FIGURE_REANALYSIS_FEATURE)
+        audit_model_name = _resolved_vision.model
+        if _resolved_vision.source in (SOURCE_ENV, SOURCE_TIER_DEFAULT):
+            audit_model_name = getattr(settings, "apparatus_llm_model", "") or audit_model_name
         iterative_config = IterativeConfig(
             enabled=(settings.apparatus_analysis_mode != "one_shot"),
             max_iterations=settings.apparatus_reanalyze_max_iterations,
             vision_call_budget=vision_call_budget,
-            model_name=settings.apparatus_llm_model,
+            model_name=audit_model_name,
         )
         analyzer = ApparatusSemanticsAgent(cartridge_id=cartridge_id, iterative_config=iterative_config)
     with usage_context(
-        "deliberation:figure_reanalysis",
+        _FIGURE_REANALYSIS_FEATURE,
         user_id=created_by,
         document_id=document_id,
     ):
