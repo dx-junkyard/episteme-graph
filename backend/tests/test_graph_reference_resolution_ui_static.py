@@ -92,6 +92,13 @@ function extractVar(src, name){
   if (e<0) throw new Error("unbalanced var "+name);
   return src.slice(s, e + 6);
 }
+function extractArrayVar(src, name){
+  const s = src.indexOf("var " + name + " = [");
+  if (s<0) throw new Error("missing var "+name);
+  const e = src.indexOf("];", s);
+  if (e<0) throw new Error("unbalanced var "+name);
+  return src.slice(s, e + 2);
+}
 """
 
 
@@ -106,7 +113,12 @@ var window = {};
 var lsState = { claimsByChunk: {} };
 function escHtml(s){ return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;"); }
 function lsGraphNodeId(n){ return n && n.id; }
+// W層 §16: 解決できた evidence / derivation は「深く検討」で中心に据えられるため
+// navigable になる。その判定は document スコープ（開いている解析結果）を要求する。
+function lsGraphActiveDocumentId(){ return "doc-1"; }
 eval(extractVar(src, "LS_GRAPH_REF_ELEMENT_TYPES"));
+eval(extractArrayVar(src, "LS_GRAPH_DELIBERABLE_ELEMENT_TYPES"));
+eval(extractArrayVar(src, "LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES"));
 eval(extractMany(src, ["lsGraphBuildResolver","lsGraphSnippet","lsGraphResolveRef",
   "lsGraphUniqueIds","lsGraphRefItem","lsGraphUnresolvedNote"]));
 
@@ -143,6 +155,7 @@ const out = {
   resolvedItemElementType: resolvedItem.element_type,
   unknownItemKeepsId: unknownItem.label === "ev_does_not_exist",
   unknownItemNotNavigable: unknownItem.navigable === false,
+  resolvedItemNavigable: resolvedItem.navigable === true,
   unresolvedTracked: unresolved.length === 1 && unresolved[0] === "ev_does_not_exist",
   unresolvedNoteMentionsId:
     lsGraphUnresolvedNote(unresolved).indexOf("ev_does_not_exist") >= 0,
@@ -166,6 +179,9 @@ process.stdout.write(JSON.stringify(out));
     assert out["resolvedItemElementType"] == "evidence", out["resolvedItemElementType"]
     assert out["unknownItemKeepsId"], "unresolved refs must keep the raw id (no fabrication)"
     assert out["unknownItemNotNavigable"], "unresolved refs must not be navigable"
+    assert out["resolvedItemNavigable"], (
+        "W層 §16: 解決できた evidence は「深く検討」で中心に据えられるため navigable"
+    )
     assert out["unresolvedTracked"], "unresolved ids must be collected for the honest note"
     assert out["unresolvedNoteMentionsId"], "the fact sentence must name the unresolved id"
     assert out["resolvedOnlyNoteIsEmpty"], "no note when every ref resolved"
