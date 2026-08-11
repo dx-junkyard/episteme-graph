@@ -16,6 +16,9 @@
 5. 結果を ``landscape_placements`` に ``status='inferred'`` で保存する
    （再解析セマンティクスは ``store.supersede_and_insert_candidates``。教員の
    confirmed / rejected は AI が上書きできない, LS3）
+6. 同じ LLM コールに相乗りしたカテゴリギャップ信号を ``landscape_gap_signals`` へ
+   保存する（``docs/features/category_gap_candidates_design.md`` §5.1 / §5.3。
+   **配置と同一トランザクション**。追加ステージ・追加 LLM コールは無い）
 
 このモジュールは **status を渡さない**（store 側の既定 ``inferred`` のみ）。
 FastAPI は import しない（設計書 §8）。
@@ -35,6 +38,9 @@ _landscape_cost_gate = CostGate()
 
 DEFAULT_MAX_CALLS_PER_DAY = 20
 DEFAULT_MAX_PLACEMENTS_PER_DOCUMENT = 8
+# カテゴリギャップ候補の1 document 上限（category_gap_candidates_design.md §5.1）。
+# 正本は ``core.config.Settings.landscape_gap_max_per_document``。
+DEFAULT_MAX_GAPS_PER_DOCUMENT = 3
 
 # ステージ skip 語彙（設計書 §7.2。``_stage_artifact_indicates_llm_skip`` 準拠）。
 SKIPPED_REASON_NO_SKELETON = "no_frozen_skeleton"
@@ -74,6 +80,31 @@ def _max_placements_per_document() -> int:
         )
     except (TypeError, ValueError):
         return DEFAULT_MAX_PLACEMENTS_PER_DOCUMENT
+
+
+def _max_gaps_per_document() -> int:
+    """1 document あたりのカテゴリギャップ候補の上限（``core.config`` が正本）。
+
+    設定を読めないときは既定値へ fail-open する（gap は配置の付随情報なので、
+    設定不達で配置の生成まで止めない）。
+    """
+    try:
+        from core.config import get_settings
+
+        return max(
+            0,
+            int(
+                getattr(
+                    get_settings(),
+                    "landscape_gap_max_per_document",
+                    DEFAULT_MAX_GAPS_PER_DOCUMENT,
+                )
+                or 0
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to read landscape_gap_max_per_document", exc_info=True)
+        return DEFAULT_MAX_GAPS_PER_DOCUMENT
 
 
 def _landscape_model() -> str:
@@ -232,6 +263,7 @@ def build_placement_input(
     artifacts: Any,
     domains: list[dict],
     max_placements: int,
+    max_gaps: int = DEFAULT_MAX_GAPS_PER_DOCUMENT,
 ) -> dict:
     """agent 入力（``LandscapePlacementInput.from_dict`` が読める dict）を組む。
 
@@ -264,6 +296,9 @@ def build_placement_input(
         "claim_summaries": collect_claim_summaries(artifacts),
         "domains": domains,
         "max_placements": max_placements,
+        # カテゴリギャップ候補の上限（0 なら申告させない）。placements 最優先・
+        # gap は最後・任意という契約は agent 側プロンプトが持つ（§5.1）。
+        "max_gaps_per_document": max(0, int(max_gaps or 0)),
     }
 
 
@@ -318,6 +353,7 @@ def build_and_store_placements(
     ``skipped_reason`` に正直に残す（P4）。
     """
     max_placements = _max_placements_per_document()
+    max_gaps = _max_gaps_per_document()
 
     payload: dict[str, Any] = {
         "status": "completed",
@@ -362,6 +398,7 @@ def build_and_store_placements(
         artifacts=artifacts,
         domains=domains,
         max_placements=max_placements or DEFAULT_MAX_PLACEMENTS_PER_DOCUMENT,
+        max_gaps=max_gaps,
     )
     payload["claim_count"] = len(agent_input["claim_summaries"])
 
@@ -415,11 +452,31 @@ def build_and_store_placements(
     if result.review_notes:
         payload["review_notes"] = list(result.review_notes)
 
-    if not result.placements:
+    # カテゴリギャップ信号（設計書 §5.1）。並行実装中でも壊れないよう防御アクセスで
+    # 読む。配置とは独立で、**配置が空でも保存する**（「置けなかった」ことこそ信号）。
+    gaps = list(getattr(result, "category_gaps", None) or [])
+    payload["category_gaps_total"] = len(gaps)
+
+    candidates = (
+        _to_store_candidates(result, domains, created_by=created_by)
+        if result.placements
+        else []
+    )
+    if not candidates and not gaps:
         return payload
 
-    candidates = _to_store_candidates(result, domains, created_by=created_by)
-    payload.update(_persist(document_id, run_id, candidates))
+    payload.update(
+        _persist(
+            document_id,
+            run_id,
+            candidates,
+            gaps=gaps,
+            skeleton_versions={
+                d["domain_key"]: d.get("skeleton_version", "") for d in domains
+            },
+            max_gaps=max_gaps,
+        )
+    )
     return payload
 
 
@@ -490,8 +547,61 @@ def _to_store_candidates(
     return candidates
 
 
-def _persist(document_id: str, run_id: str | None, candidates: list[dict]) -> dict:
-    """1トランザクションで supersede + insert（失敗は非致命・生成記録は残す）。"""
+def _persist_gaps(
+    session: Any,
+    document_id: str,
+    run_id: str | None,
+    gaps: list[Any],
+    *,
+    skeleton_versions: Mapping[str, str] | None = None,
+    max_gaps: int = DEFAULT_MAX_GAPS_PER_DOCUMENT,
+) -> dict:
+    """カテゴリギャップ信号を保存し、検出を監査へ記帳する（呼び出し側の tx に同乗）。
+
+    正本: ``docs/features/category_gap_candidates_design.md`` §5.2 / §5.7。
+    再解析セマンティクス（active のみ supersede）と上限は
+    ``core/atlas_gaps/store.py::record_signals`` が持つ。ここは配線だけを行う。
+
+    監査は **1 run 1 event**（``entity_type='category_gap'`` /
+    ``metadata.action='detect'``）。1件も保存されなかった run では記帳しない
+    （何も起きていない run の空記録を積まない）。
+    """
+    from core.atlas_gaps.store import record_detect_audit, record_signals
+
+    created = record_signals(
+        session,
+        document_id=str(document_id or ""),
+        run_id=run_id,
+        gaps=gaps,
+        skeleton_versions=skeleton_versions or {},
+        max_signals=max_gaps,
+    )
+    if created:
+        record_detect_audit(
+            session,
+            document_id=str(document_id or ""),
+            run_id=run_id,
+            created=created,
+            domain_keys=[_clean(_get(g, "domain_key")) for g in gaps],
+        )
+    return {"gap_signals_created": int(created)}
+
+
+def _persist(
+    document_id: str,
+    run_id: str | None,
+    candidates: list[dict],
+    *,
+    gaps: list[Any] | None = None,
+    skeleton_versions: Mapping[str, str] | None = None,
+    max_gaps: int = DEFAULT_MAX_GAPS_PER_DOCUMENT,
+) -> dict:
+    """1トランザクションで supersede + insert（失敗は非致命・生成記録は残す）。
+
+    カテゴリギャップ信号（``landscape_gap_signals``）も**同じトランザクション**で
+    保存する（設計書 §3-3: 保存は ``_persist`` と同一トランザクション）。gap の保存に
+    失敗した場合は配置の保存も巻き戻る（部分適用で「配置だけ新しい」状態を作らない）。
+    """
     from core.postgres import get_session
 
     session = get_session()
@@ -501,12 +611,24 @@ def _persist(document_id: str, run_id: str | None, candidates: list[dict]) -> di
         stats = supersede_and_insert_candidates(
             session, document_id, run_id, candidates
         )
-        session.commit()
-        return {
+        out = {
             "created": int((stats or {}).get("created") or 0),
             "superseded": int((stats or {}).get("superseded") or 0),
             "skipped_existing": int((stats or {}).get("skipped_existing") or 0),
         }
+        if gaps:
+            out.update(
+                _persist_gaps(
+                    session,
+                    document_id,
+                    run_id,
+                    gaps,
+                    skeleton_versions=skeleton_versions,
+                    max_gaps=max_gaps,
+                )
+            )
+        session.commit()
+        return out
     except Exception:
         try:
             session.rollback()

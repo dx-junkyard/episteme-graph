@@ -220,6 +220,45 @@ def _domain_facts(
     ]
 
 
+def _displayed_skeleton_version(domain_dtos: Iterable[Mapping[str, Any]]) -> str:
+    """学習者に見せている地図の凍結版文字列（引けなければ空文字）。
+
+    選び方はフロントの事実行（``landscape-layer.js`` の ``skeletonVersionText`` /
+    ``app.js`` の ``paperPlacementCorpusFact``）と同じ — コースがバインドされた
+    ドメイン（``is_course_map``）を優先し、無ければ先頭のドメイン。版が確認できない
+    ときは**空文字を返す**（推測した版番号を事実文に書かせない）。
+    """
+    entries = [e for e in (domain_dtos or []) if isinstance(e, Mapping)]
+    for entry in entries:
+        if entry.get("is_course_map"):
+            return str(entry.get("frozen_version") or "")
+    return str(entries[0].get("frozen_version") or "") if entries else ""
+
+
+def _gap_signal_domains(session, document_id: str) -> set[str]:
+    """この論文について記録されている gap 信号の domain_key 集合（**件数は返さない**）。
+
+    正本: ``docs/features/category_gap_candidates_design.md`` §4.1 裁定 — 1論文の画面に
+    「地図を直す」ボタンは置かず、「この分野の地図への候補として記録されています →
+    分野の地図タブで確認」の**案内一行**だけを出す。そのための真偽値の材料である。
+
+    信号は反復閾値（2論文以上）に届く前から保存されるので、ここに現れることと
+    レビューキューに出ることは別（LS5: 件数・閾値までの残りを出さない）。
+    照会に失敗しても配置一覧は返す（fail-soft・案内が出ないだけ）。
+    """
+    try:
+        from core.atlas_gaps import store as gap_store
+
+        rows = gap_store.list_active_signals(session, document_id=str(document_id or ""))
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "landscape: failed to read category gap signals for %s (non-fatal)",
+            document_id, exc_info=True,
+        )
+        return set()
+    return {str(row.get("domain_key") or "") for row in rows if row.get("domain_key")}
+
+
 def _unplaced_from_artifacts(document_id: str, names: Mapping[str, str]) -> list[dict]:
     """最新 run の ``landscape_placement`` artifact から ``unplaced_domains``（LS10）。
 
@@ -289,8 +328,12 @@ def list_document_landscape_placements(
     """1 document の配置一覧（§9.1）。``document_ref`` は UUID / source_path 両対応。
 
     返す形:
-    ``{document_id, title, placements[], unplaced_domains[], domains[], last_run_at}``。
+    ``{document_id, title, placements[], unplaced_domains[], domains[], last_run_at,
+    gap_signals_recorded}``。
     ``placements`` は ``projection.admin_placement_dto``（生 weight / confidence なし・LS5）。
+    ``gap_signals_recorded`` は「この論文から地図への候補が記録されているか」の真偽値
+    （``unplaced_domains`` の各要素にも分野ごとの真偽値を載せる。件数は返さない —
+    ``category_gap_candidates_design.md`` §4.1 / §5.4 の案内一行のため）。
     """
     access = _document_access_or_404(document_ref, current_user, need_edit=False)
     document_id = str(access.document_id or "")
@@ -302,11 +345,15 @@ def list_document_landscape_placements(
         last_run_at = _last_run_at(session, document_id)
         names = _domain_names(session)
         unplaced = _unplaced_from_artifacts(document_id, names)
+        gap_domains = _gap_signal_domains(session, document_id)
         domain_keys = {str(r.get("domain_key") or "") for r in rows}
         domain_keys.update(str(u.get("domain_key") or "") for u in unplaced)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
     finally:
         session.close()
+
+    for entry in unplaced:
+        entry["gap_signals_recorded"] = entry.get("domain_key") in gap_domains
 
     node_index = projection.skeleton_node_index(skeletons)
     return {
@@ -319,6 +366,7 @@ def list_document_landscape_placements(
         "unplaced_domains": unplaced,
         "domains": _domain_facts(skeletons, names),
         "last_run_at": last_run_at,
+        "gap_signals_recorded": bool(gap_domains),
     }
 
 
@@ -733,6 +781,12 @@ def get_course_landscape(
     - 配置ゼロ・骨格なしでも **200 で空構造**（非表示への縮退はフロントの責務）
     - 数値は corpus の件数のみ。weight / confidence / claim_id は
       ``projection.learner_landscape_dto`` が構造的に落とす（LS5・§9.2）
+    - ``unplaced_documents``: コースのソースのうち、現行の凍結骨格のどの領域にも
+      配置が無い論文（``document_id`` / ``title`` だけ）。``skeleton_version`` は
+      いま見せている地図の版。**「置けなかった」ことを取得失敗と同じ沈黙に潰さない**
+      ための事実材料で（AB1 / LS10。正本 ``category_gap_candidates_design.md`` §4.5）、
+      配置済みが1件も無いとき節ごと非表示にする fail-closed はフロント側に残る。
+      gap / 候補の語彙・件数は載せない（候補機構は教員側の別実装）。
     """
     course_data = services.get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
@@ -778,4 +832,21 @@ def get_course_landscape(
         document_titles=titles,
         source_document_count=len(document_ids),
     )
-    return {"course_id": course_id, **dto}
+
+    # 配置ゼロの論文（LS10 / AB1）。DTO の documents に載らなかったソース論文がそれで、
+    # 骨格に無いノードの配置しか持たない論文（改版で消えた等）もここに入る — 学習者が
+    # 見ている「現在の地図」にはどの領域も無い、という事実は同じだからである。
+    # 件数・理由・候補は出さない（タイトルの列挙だけ。LS5 / 候補機構は教員側）。
+    placed_ids = {str(d.get("document_id") or "") for d in dto.get("documents") or []}
+    unplaced_documents = [
+        {"document_id": document_id, "title": titles.get(document_id, "")}
+        for document_id in ordered
+        if document_id not in placed_ids
+    ]
+
+    return {
+        "course_id": course_id,
+        **dto,
+        "unplaced_documents": unplaced_documents,
+        "skeleton_version": _displayed_skeleton_version(dto.get("domains") or []),
+    }

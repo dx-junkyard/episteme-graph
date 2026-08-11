@@ -1,7 +1,9 @@
 # カテゴリギャップ候補 — 論文カテゴリ判定から地図カテゴリを育てる機能の仕様・UX検討まとめ
 
-- 状態: **検討まとめ（多観点パネルによる設計検討。実装未着手・オーナー裁定待ちの未決事項あり — §8）**
-- 日付: 2026-08-09
+- 状態: **実装済み（v1-a / v1-b / v1-c / v1-d + 個人地図の暫定ノード、2026-08-11 — §10 実装記録参照。
+  §8 の未決4件はオーナーの実装指示（2026-08-11「添付のように実装を修正せよ」）を裁定とみなし、
+  パネル推奨どおり確定 — §10-2）**
+- 日付: 2026-08-09（検討まとめ納品）/ 2026-08-11（実装）
 - 親文書: `knowledge_landscape_design.md`（本機能は同 §12 ロードマップ **Phase 4「スキーマ進化」の最小実装**に位置づく）
 - 関連: `field_atlas_skeleton.md` / `atlas_binding_lifecycle_design.md` / `knowledge_network_vision.md`
 - 検討体制: Fable 5 指揮。Opus 5 調査班4系統（vision原則 / atlas不変条項 / candidate前例 / パイプライン配管）→
@@ -369,3 +371,43 @@ decided_by UUID / decided_at / created_at / updated_at
 
 （各観点の全文・調査班4系統のダイジェストはセッション成果物として別途保存。実装着手時は本文書を
 正式な設計書に昇格させ、migration コメント・ガードレールテストから本ファイル名を参照すること。）
+
+---
+
+## 10. 実装記録（2026-08-11, Fable 5 指揮 / Opus 5 実働 6 タスク・3ウェーブ）
+
+### 10-1. 実装範囲と置き場所
+
+§6 の v1-a〜v1-d と §4.4 の個人地図の暫定ノードを一括実装した（migration は **066**）。
+
+| 層 | 実体 |
+|---|---|
+| 生成（§5.1） | `src/episteme_graph/agents/landscape_placement/` — `CategoryGapRecord` / region→concepts ネスト提示 + `concept_slots_remaining` / `_collect_category_gaps`（warning-only soft collector・errors 非接触を構造テストで固定）/ `max_gaps_per_document`（既定3） |
+| データ（§5.2） | `backend/db/066_category_gap_signals.sql`（`landscape_gap_signals` + `atlas_gap_decisions`）+ `backend/core/atlas_gaps/`（schema / store / patching）。保存は `core/landscape/builder.py` の `_persist` と同一トランザクション・document 単位 supersede・空入力 SQL 非発行。detect 監査は builder トランザクション同乗の直接 INSERT（persistence.py と同じ例外扱い） |
+| 管理 API | `backend/api/routes/atlas_gaps.py`（gap-candidates 読み時導出 / decide / incorporate-preview（DB 非変更）/ mark-incorporated）+ `routes/atlas.py`（`draft/from-frozen` 決定論複製・freeze の公開前チェック 409 `{message, pending_labels}`・凍結と同一トランザクションでの `applied_version` 刻印）+ `core/atlas_lifecycle.py`（freeze impact の件数なし事実文 `facts[]`）+ admin placements の `gap_signals_recorded` フラグ |
+| 管理 UI（§5.4） | `admin.js` — atlas-reports-section 内 第2グループ「論文の解析から見つかった候補」。取り込みは preview → 既存 `applyAssistProposal` + `saveDraft()`（PUT draft）→ mark-incorporated の3手で、gap 系 UI から骨格への直接書き込みなし。アンカー7件（`atlas.gap-*`）+ マニュアル節（teacher/17-admin-atlas.md 7節 / 11-admin-materials.md 1節）で3点セット完備（アンカー総数 248→255） |
+| 学習者 v1-a（§4.5） | 学習者 landscape API に `unplaced_documents` + `skeleton_version`、出典タブに配置ゼロ事実文（版が引けないときは出さない fail-closed。節内に配置済み論文ゼロなら従来どおり節ごと非表示）。student マニュアル追記 |
+| 学習者 v1-b（§4.4） | `backend/core/personal_graph/provisional.py` + コースビュー `personal-network` の `provisional_nodes`（読み時導出・上限12・キーは id/label/documents[].title/evidence_quote/source_label の5つ厳密）。personal-map.js の骨格外ストリップ「地図の外の主題（あなたの教材から）」+ 事実カード |
+
+### 10-2. §8 未決事項の確定
+
+1. **反復閾値**: 採用（`MIN_DOCUMENTS_FOR_CANDIDATE = 2`）。単発の出口は既存の骨格編集。
+2. **個人地図の暫定ノードの寿命**: 読み時導出により「①現行凍結骨格に同名（正規化一致）の領域・概念が現れた時点 ②当該 document の再解析で signal が superseded になった時点」の早い方で自然消滅。共有ノードへの解決表示は作らない（学習者に改版・貢献を告知しない §5.6 を維持）。
+3. **v1-a の先行実装**: 実施（独立タスクとして実装・全体と同時納品）。
+4. **G層 To-Do**: 見送り（§4.6 裁定どおり）。
+
+### 10-3. 設計書からの意図的逸脱
+
+- `atlas_gap_decisions.status` に **`'candidate'` を追加**（restore を行削除なしで実現するための最小逸脱。P4/AB3 と restore 監査アクションの両立）。
+- decide の `merge` は v1 では **422**（語彙・列は予約済みだが導線を作らない — §7 非スコープ）。
+- ラベル正規化は**二重実装を意図的に併存**: agent 側 `normalize_gap_label`（言い換え申告の保守的 drop 用・強い同一視）と backend `core/atlas_gaps/schema.py::normalize_label`（cluster_key の正本・NFKC+casefold+空白畳み込み）。
+- `record_signals` は不正 1 件を drop（raise しない）— gap ノイズで placements の保存を巻き戻さない。
+- cluster_key とパスの分野の食い違い操作は 422（fail-closed の追加）。incorporate-preview は `proposed_label` 上書き受け口を持つ（§5.4 のインライン編集）。
+- `SkeletonCapacityError` は概念満杯に加え領域満杯（MAX_REGIONS）でも送出。
+- from-frozen 複製は `changelog` を引き継ぎ **`id_migrations` は引き継がない**（次版での二重付け替え防止）。
+
+### 10-4. 検証状態
+
+- backend **8,708 passed / 25 skipped**・src **1,803 passed**（2026-08-11、backend/.venv ローカル実行）。
+- ガードレール `test_atlas_gaps_guardrails.py`（12 クラス）が §5.7 の①〜⑩を網羅（⑤ soft collector の構造検査は `src/tests/agents/landscape_placement/test_category_gaps.py` 側にも保持）。
+- 未実施: docker 実機 E2E（066 の実 DB 適用・実 LLM での gap 申告品質）・コミット分割。

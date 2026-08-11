@@ -55,6 +55,7 @@ from core.personal_graph.derive import (
     group_nodes_by_anchor,
 )
 from core.personal_graph.journey import journey_for_node
+from core.personal_graph.provisional import derive_provisional_nodes
 from core.personal_graph.queries import fetch_course_titles
 from core.personal_graph.schema import PersonalNetwork
 
@@ -80,13 +81,24 @@ def get_personal_network(
     (user_id, course_id) スコープで読み、本人確定済みの痕跡のみをノード化する（設計書 §2）。
     candidate / dismissed / superseded / llm_candidate 帰属のノードは含まれない（PN-3）。
     集計数値（件数・網羅率等）は含めない（PN-4）。
+
+    ``provisional_nodes``（カテゴリギャップ候補 v1-b。正本は
+    ``docs/features/category_gap_candidates_design.md`` §4.4 裁定 / §5.6）: このコースの
+    sources 由来 document について、共有骨格に置けなかった主題を**本人にだけ**見せる
+    暫定ノード。``core.personal_graph.provisional`` が ``landscape_gap_signals`` の
+    ``active`` 行から読み時に導出するだけで、共有骨格・共有候補（``atlas_gap_decisions``）
+    には一切書き込まない・読まない。骨格の無いコース・取得失敗は空リスト（fail-closed）で、
+    ``confidence`` / ``weight`` / 件数などの数値は載せない（PN-4 / LS5）。
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
         raise HTTPException(status_code=404, detail="Course not found")
 
     network = derive_personal_network(current_user["id"], course_id)
-    return network.to_dict()
+    payload = network.to_dict()
+    # 読み取り専用の追加フィールド（DB 非変更・PN-2）。導出失敗は [] へ縮退する。
+    payload["provisional_nodes"] = derive_provisional_nodes(course_id)
+    return payload
 
 
 @router.get("/courses/{course_id}/personal-network/journey")

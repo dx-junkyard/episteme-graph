@@ -9,12 +9,22 @@ into text and read the **frozen** skeletons, so this module's job is narrow:
 2. Bound the number of items per section (claims / domains / nodes per domain).
 3. Provide the whitespace-normalized haystack the validator uses to check that
    ``evidence_quote`` was really copied from the material (LS4 の捏造ガード).
+4. Present the skeleton as a **closed world**: ``region → concepts[]`` nested,
+   with a deterministic ``concept_slots_remaining`` per region
+   (``docs/features/category_gap_candidates_design.md`` §5.1). A flat node list
+   cannot say "この領域の概念はこの N 件だけ", which is exactly the judgement the
+   category gap candidates need（「領域には当たるが概念が無い」）.
 """
 from __future__ import annotations
 
 import re
 
-from .schema import LandscapePlacementInput
+from .schema import (
+    LandscapePlacementInput,
+    MAX_CONCEPTS_PER_REGION,
+    NODE_KIND_CONCEPT,
+    SkeletonNodeOption,
+)
 
 # Defensive prompt-size bounds (generous on purpose — guard pathological
 # inputs, do not compress normal ones). The astrophysics v0.1 skeleton has 10
@@ -65,23 +75,64 @@ class LandscapePlacementInputBuilder:
                 if c.text
             ],
             "domains": [
-                {
-                    "domain_key": d.domain_key,
-                    "domain_name": d.domain_name,
-                    "nodes": [
-                        {
-                            "node_id": n.node_id,
-                            "label": n.label,
-                            "kind": n.kind,
-                            "region_id": n.region_id,
-                        }
-                        for n in d.nodes[:MAX_NODES_PER_DOMAIN]
-                    ],
-                }
+                self._prepare_domain(d)
                 for d in item.domains[:MAX_DOMAINS]
                 if d.nodes
             ],
         }
+
+    def _prepare_domain(self, domain) -> dict:
+        """1ドメインを ``regions[] → concepts[]`` のネストに組み替える（決定論）。
+
+        ノード数の上限は従来どおりフラットな入力順で切ってから grouping する
+        （切り方を変えると同じ骨格に対する提示が run ごとに揺れる）。親領域が
+        提示されていない概念は落とさず ``other_concepts`` に残す（P4）。
+        """
+        nodes: list[SkeletonNodeOption] = list(domain.nodes[:MAX_NODES_PER_DOMAIN])
+        regions = [n for n in nodes if n.kind != NODE_KIND_CONCEPT]
+        region_ids = {n.node_id for n in regions}
+
+        grouped: dict[str, list[SkeletonNodeOption]] = {}
+        orphans: list[SkeletonNodeOption] = []
+        for node in nodes:
+            if node.kind != NODE_KIND_CONCEPT:
+                continue
+            if node.region_id in region_ids:
+                grouped.setdefault(node.region_id, []).append(node)
+            else:
+                orphans.append(node)
+
+        prepared = {
+            "domain_key": domain.domain_key,
+            "domain_name": domain.domain_name,
+            "regions": [
+                {
+                    "node_id": region.node_id,
+                    "label": region.label,
+                    "kind": region.kind,
+                    "concepts": [
+                        {"node_id": c.node_id, "label": c.label, "kind": c.kind}
+                        for c in grouped.get(region.node_id, ())
+                    ],
+                    "concept_slots_remaining": max(
+                        0,
+                        MAX_CONCEPTS_PER_REGION - len(grouped.get(region.node_id, ())),
+                    ),
+                }
+                for region in regions
+            ],
+        }
+        if orphans:
+            prepared["other_concepts"] = [
+                {
+                    "node_id": c.node_id,
+                    "label": c.label,
+                    "kind": c.kind,
+                    "region_id": c.region_id,
+                }
+                for c in orphans
+            ]
+        return prepared
 
     def quote_haystack(self, item: LandscapePlacementInput) -> str:
         """``evidence_quote`` の verbatim 照合に使う正規化済みテキストの連結。
@@ -102,3 +153,13 @@ class LandscapePlacementInputBuilder:
     @staticmethod
     def claim_ids(item: LandscapePlacementInput) -> set[str]:
         return item.claim_ids()
+
+    @staticmethod
+    def region_index(item: LandscapePlacementInput):
+        """``(domain_key, region_id) -> region node``（gap の親領域検査が使う）。"""
+        return item.region_index()
+
+    @staticmethod
+    def existing_labels(item: LandscapePlacementInput) -> dict[str, set[str]]:
+        """``domain_key -> 既存ノードの正規化ラベル集合``（言い換え申告の検出）。"""
+        return item.existing_labels()

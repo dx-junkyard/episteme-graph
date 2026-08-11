@@ -2318,6 +2318,9 @@
           return d && Array.isArray(d.placements) && d.placements.length;
         });
         if (!placed.length) { box.remove(); return; } // fail-closed: 節ごと出さない
+        // 節が出るときだけ、配置ゼロの論文の事実文を併記する（AB1: 一致ゼロは発見）。
+        // 節内に配置済みが1件も無い場合は上で消える — データ無しと取得失敗の区別が
+        // つかないため（category_gap_candidates_design.md §4.5 の裁定）。
         box.innerHTML = buildPaperPlacementHtml(data, placed);
         box.hidden = false;
       })
@@ -2356,20 +2359,50 @@
       });
       html += "</div>";
     });
+    // AB1（一致ゼロは発見）: 配置ゼロの論文を沈黙で飛ばさず、同じ通常テキストで並べる。
+    html += buildPaperPlacementUnplacedHtml(data);
     // LS8: 何件のコーパス・どの骨格版・AI推定を含むかを事実文で明示する。
     html += '<p class="lx-placement-fact">' + escHtml(paperPlacementCorpusFact(data)) + "</p>";
     return html;
+  }
+
+  // 配置ゼロの論文の事実文（category_gap_candidates_design.md §4.5 の裁定）。
+  // アイコン・エラー色・行動喚起・件数は付けない（LS1 / LS5 / AB1）。地図の版が
+  // 引けないときは何も出さない（推測した版番号を事実文に書かない = fail-closed）。
+  function buildPaperPlacementUnplacedHtml(data) {
+    var unplaced = (data && data.unplaced_documents) || [];
+    if (!unplaced.length) return "";
+    var version = paperPlacementSkeletonVersion(data);
+    if (!version) return "";
+    var html = "";
+    unplaced.forEach(function (doc) {
+      if (!doc) return;
+      html += '<div class="lx-placement-doc">';
+      html += '<div class="lx-placement-title">' + escHtml(doc.title || "無題の論文") + "</div>";
+      html += '<div class="lx-placement-fact">この論文は、現在の分野の地図（版 ' +
+        escHtml(version) + "）のどの領域にも配置されていません。</div>";
+      html += "</div>";
+    });
+    return html;
+  }
+
+  // 表示している地図の骨格版（landscape-layer.js の skeletonVersionText と同じ選び方。
+  // サーバが skeleton_version を返すならそれを使う — 事実文の版を二重に導出しない）。
+  function paperPlacementSkeletonVersion(data) {
+    var direct = data && data.skeleton_version ? String(data.skeleton_version) : "";
+    if (direct) return direct;
+    var domains = (data && data.domains) || [];
+    var picked = null;
+    domains.forEach(function (d) { if (!picked && d && d.is_course_map) picked = d; });
+    if (!picked && domains.length) picked = domains[0];
+    return picked && picked.frozen_version ? String(picked.frozen_version) : "";
   }
 
   // LS8 のコーパス事実行（landscape-layer.js の corpusFactText と同じ文面）。
   function paperPlacementCorpusFact(data) {
     var corpus = (data && data.corpus) || {};
     var n = typeof corpus.source_document_count === "number" ? corpus.source_document_count : 0;
-    var domains = (data && data.domains) || [];
-    var picked = null;
-    domains.forEach(function (d) { if (!picked && d && d.is_course_map) picked = d; });
-    if (!picked && domains.length) picked = domains[0];
-    var version = (picked && picked.frozen_version) ? String(picked.frozen_version) : "";
+    var version = paperPlacementSkeletonVersion(data);
     var inferred = ((data && data.documents) || []).some(function (d) {
       return ((d && d.placements) || []).some(function (p) { return p && p.status !== "confirmed"; });
     });

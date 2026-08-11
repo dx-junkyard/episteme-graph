@@ -17,6 +17,11 @@ What this agent does NOT do:
 - It does not force a fit. A document that matches no anchor yields
   ``placements=[]`` with ``unplaced_domains`` reasons — recorded, not hidden
   (LS10 / P4).
+- It does not grow the map. ``category_gaps``
+  (``docs/features/category_gap_candidates_design.md`` §5.1) are *candidate*
+  categories declared on the same LLM call; they are validated by a
+  warning-only collector (a bad candidate never costs a placement) and the
+  teacher-side decision / skeleton edit lives entirely outside this agent.
 """
 from __future__ import annotations
 
@@ -80,6 +85,7 @@ class LandscapePlacementAgent:
         )
 
         max_placements = self._resolve_max_placements(item, config)
+        max_gaps = self._resolve_max_gaps(item, config)
 
         if not item.has_domains():
             # 凍結骨格が無ければ配置先が無い（設計書 §7.2 の no_frozen_skeleton）。
@@ -113,7 +119,8 @@ class LandscapePlacementAgent:
         content = self._prompt_factory.build_content(item, cartridge)
         result = self._run_with_repair(item, content, resolved_cartridge_id)
         result.llm_call_count = int(getattr(self._llm_client, "calls", 0) or 0)
-        return self._apply_placement_cap(result, max_placements)
+        result = self._apply_placement_cap(result, max_placements)
+        return self._apply_gap_cap(result, max_gaps)
 
     # -- internals ---------------------------------------------------------
 
@@ -164,6 +171,48 @@ class LandscapePlacementAgent:
         except (TypeError, ValueError):
             configured = int(item.max_placements)
         return configured if configured > 0 else item.max_placements
+
+    @staticmethod
+    def _resolve_max_gaps(item: LandscapePlacementInput, config: dict | None) -> int:
+        """カテゴリギャップ候補の上限（設計書 §5.1 の ``max_gaps_per_document``）。
+
+        ``max_placements`` と同じ流儀: 既定は入力（builder が env
+        ``LANDSCAPE_GAP_MAX_PER_DOCUMENT`` から解決して渡す）で、``config`` に
+        入っていればそちらを優先する。**0 は「候補を作らない」という有効な設定**
+        なので既定値へ戻さない。
+        """
+        raw = (config or {}).get("max_gaps_per_document")
+        try:
+            configured = (
+                int(raw) if raw is not None else int(item.max_gaps_per_document)
+            )
+        except (TypeError, ValueError):
+            try:
+                configured = int(item.max_gaps_per_document)
+            except (TypeError, ValueError):
+                configured = 0
+        return max(0, configured)
+
+    @staticmethod
+    def _apply_gap_cap(
+        result: LandscapePlacementResult, max_gaps: int
+    ) -> LandscapePlacementResult:
+        """候補件数の上限で切る（validator と同じ入力順・冪等）。
+
+        validator は入力の ``max_gaps_per_document`` で既に切っているので、ここが
+        実際に効くのは ``config`` でより小さい上限を渡した場合だけ。候補は配置と
+        独立なので ``truncated``（配置の切り詰めフラグ）には数えない。
+        """
+        cap = max(0, int(max_gaps or 0))
+        gaps = list(result.category_gaps or [])
+        if len(gaps) > cap:
+            dropped = len(gaps) - cap
+            result.category_gaps = gaps[:cap]
+            result.review_notes.append(
+                f"{dropped} category gap candidate(s) beyond the per-document cap "
+                f"({cap}) were not kept"
+            )
+        return result
 
     @staticmethod
     def _apply_placement_cap(

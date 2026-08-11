@@ -328,6 +328,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TEACHING_FIGURE_MAX_SUGGESTIONS"),
     )
 
+    # --- カテゴリギャップ候補（migration 066） ---
+    # 正本: docs/features/category_gap_candidates_design.md §5.1
+    # 1 document あたりに保存するギャップ信号の上限（追加 LLM コールは無く、
+    # landscape_placement の同一コールに相乗りする。0 で申告させない）
+    landscape_gap_max_per_document: int = Field(
+        default=3,
+        validation_alias=AliasChoices("LANDSCAPE_GAP_MAX_PER_DOCUMENT"),
+    )
+
     # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
     # 三角測量の証拠①（LLM 事前知識）の 1 日あたり LLM コール上限
     stdpart_max_calls_per_day: int = Field(

@@ -598,6 +598,67 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   コーパス別地図・MapSnapshot / 問い・方法・系譜ビュー / G層 `material.landscape_unreviewed` /
   W層 positioning レンズへの合流 / 学習者の配置異議。
 
+### カテゴリギャップ候補（分野マップを論文から育てる, migration 066, 2026-08-11）
+
+論文カテゴリ判定（landscape_placement）の「置けなかった」を構造化信号として永続化し、
+反復（2論文以上）した主題だけを教員レビュー候補に浮上させ、教員の明示操作でのみ骨格
+（分野の地図）へ additive に反映する層。正本は
+`docs/features/category_gap_candidates_design.md`（多観点パネルの裁定込み。§3 合意12項・
+§4 裁定5件が確定仕様）。**個人地図・集合候補・共有骨格の層分離**が主題 — 論文由来の
+反復信号だけを集約し、共有骨格への流路に人間の弁を置く。
+
+- **生成（§5.1）**: `landscape_placement` の**同一 LLM コール**に出力 `category_gaps` を追加
+  （新ステージ・新コールなし。1件 = `layer`(region|concept) / `domain_key` /
+  `parent_region_id`（concept で必須）/ `proposed_label` / `reason` / `evidence_quote` /
+  `confidence`（DB のみ））。プロンプトは骨格を region→concepts ネスト+
+  `concept_slots_remaining` の閉世界で提示し「既存概念の言い換えを新概念にしない」
+  （捏造ガード）・「placements 最優先・gap は最後・任意・上限3件」を明示。検証は
+  `_collect_unplaced` 同型の **warning-only soft collector**（hard error にすると配置が
+  全滅する）。evidence_quote は verbatim 検査、不一致はその gap のみ drop。
+- **DB（migration 066・2層分離, §4.3 裁定）**: `landscape_gap_signals`（論文単位の信号。
+  documents FK CASCADE・再解析は LS3 同型 supersede・空入力 SQL 非発行）+
+  `atlas_gap_decisions`（cluster 単位の教員判断のみ。`cluster_key UNIQUE` =
+  `gap|{domain_key}|{parent_region_id}|{normalize_label(label)}` — **版非依存**（§4.2 裁定:
+  却下ゾンビ防止。skeleton_version は signal 側の刻印列）。status =
+  candidate/accepted/dismissed/merged — 'candidate' は restore を行削除なしで実現する追加語彙。
+  `draft_node_id` / `applied_version` で採用と反映を分離）。**レビューキュー（候補）は毎回
+  読み時導出**: active 信号を cluster 化 → distinct document ≥ 2
+  （`MIN_DOCUMENTS_FOR_CANDIDATE`）→ 現行凍結版で解消済みを除外 → dismissed 抑止。
+  完了フラグ・掃除バッチを持たない（G1/PN-2）。
+- **実装**: `backend/core/atlas_gaps/`（schema=語彙・normalize_label・cluster_key の正本 /
+  store=DELETE FROM なし / patching=決定論 JSON Patch 生成・**op は add のみ**。FastAPI 非
+  import）。保存は `core/landscape/builder.py` の `_persist` と同一トランザクション
+  （agent 出力は `getattr(result, "category_gaps", [])` の防御アクセス）。
+  env `LANDSCAPE_GAP_MAX_PER_DOCUMENT`(3)。監査は `AUDIT_ENTITY_CATEGORY_GAP`
+  （action: detect/accept/dismiss/restore/merge/incorporate）。
+- **骨格への反映（§5.5）**: 新設 `POST /api/admin/cartridges/{id}/atlas/skeleton/draft/from-frozen`
+  （現行凍結版→次版 draft の決定論複製。既存 draft あり / retired は 409）→ 決定論 patch
+  プレビュー → 教員の既存 `PUT draft`（revision 楽観ロック）→ mark-incorporated 刻印。
+  **AI/サーバが draft を書く経路は作らない**（KN-3/AB4。gap 系コードから `atlas_skeletons`
+  への INSERT/UPDATE 不在をガードレールで証明 — LS7）。freeze は「採用済み未反映候補」を
+  修正報告ゲートと同列で中止し、凍結成功時に `applied_version` を刻印。満杯領域
+  （概念 6/6）への取り込みは非活性 + 事実文。
+- **レビュー UI**: 分野の地図タブの `atlas-reports-section` 内 第2グループ
+  「論文の解析から見つかった候補」（専用タブを新設しない）。支持論文は**タイトル列挙**
+  （件数バッジなし — LS5。教員にも数値を見せない）。却下は理由必須・
+  「見送り済み」フィルタから restore 可。教材管理 landscape モーダルの unplaced 行には
+  案内一行のみ（1論文の画面に「地図を直す」ボタンを置かない — §4.1 裁定）。
+- **学習者側（§5.6）**: 共有候補・教員判断・集約は学習者に一切出さない（gap 語彙の再帰
+  キー走査ガードレール）。①v1-a: 出典タブの**配置ゼロ事実文**「この論文は、現在の分野の
+  地図（版 {version}）のどの領域にも配置されていません。」（配置済み論文が1件もない場合は
+  節ごと非表示のまま）②v1-b: **個人地図の暫定ノード**（本人のコース sources の未配置主題を
+  personal map に読み時導出で表示。共有骨格・共有候補へ書かない・数値なし・出所ラベル付き）。
+  版更新の告知・NEW バッジ・貢献演出は作らない（新ノードは霧として静かに現れる）。
+- **ガードレール**: `test_atlas_gaps_guardrails.py`（§5.7 の10項: core 非 FastAPI・DELETE 不在・
+  migration⇄schema 語彙一致・DTO 非漏洩・soft collector・骨格書込不在証明・監査語彙・
+  dismiss 理由必須・捏造ガード文言・禁止語彙）+
+  `test_atlas_gaps_{schema,store,patching,api,admin_ui_static}.py` +
+  `test_personal_graph_provisional.py` + `src/tests/agents/landscape_placement/test_category_gaps.py`。
+  管理UI アンカー7件（`atlas.gap-*`、カウント 255）+ teacher マニュアル節はA5実装時に3点セット済み。
+- **非スコープ（v1, §7）**: 削除/改名/統合の候補化（additive-only）/ 学習者信号の入力混合
+  （KN-4）/ 件数バッジ・カバー率・横断ダッシュボード / 過去論文の自動再配置 / 浮遊アンカー・
+  EmergentRegion（Phase 2/3）/ G層 To-Do（運用実測後に判断 — §4.6 裁定）。
+
 ### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
 
 「AI が作った地図をリリース前に提示し、教員が明示的に直さなければそのまま公開される」ための

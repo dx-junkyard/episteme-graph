@@ -24,6 +24,15 @@
  * `/api/me/personal-network/journey` を叩いてコース横断版の旅へ差し替える（自動では
  * 開かない。提案書「本人が選んだ場合のみ」）。
  *
+ * 暫定ノード（カテゴリギャップ候補 v1-b, docs/features/category_gap_candidates_design.md
+ * §4.4 裁定・§5.6）: 共有骨格に置けなかった論文の主題を、骨格ノードとは混ざらない
+ * 「地図の外の帯」（マップ下端の専用ストリップ）として本人にだけ点線・淡色で描く。
+ * データはコースビュー personal-network 応答の `provisional_nodes`（サーバが読み時導出。
+ * 共有骨格にも共有候補にも書き込まない）で、キーが無い・空なら何も描かない（fail-closed）。
+ * 帯・カードとも事実文のみで、共有の地図への言及・行動喚起・更新告知バッジ・数値は
+ * 出さない（AB1「一致ゼロは発見」— 欠陥として見せない）。禁止語の一覧の正本は
+ * backend/tests/test_personal_map_ui_guardrails.py。
+ *
  * 本人による訂正（提案書 §6）: マーカー小ポップに「地図には反映しない」
  * （tension/question のみ・POST /api/learning/traces/{id}/map-exclude）、問いの軌跡の
  * 除外済み項目（`data-map-excluded="1"`。付与元は app.js）に「地図に戻す」
@@ -52,6 +61,11 @@
     bridge: { label: "橋" }, // tension のうち bridge 辺の from になっているものの variant
   };
   const KIND_DISPLAY_ORDER = ["question", "tension", "reconstruction", "bridge"];
+  // 暫定ノードの帯（カテゴリギャップ候補 v1-b, §5.6）の文言。事実文のみで、
+  // 欠陥・督励を思わせる語彙は使わない（AB1 / LS1。禁止語の正本は
+  // backend/tests/test_personal_map_ui_guardrails.py）。
+  const PROVISIONAL_STRIP_HEADING = "地図の外の主題（あなたの教材から）";
+  const PROVISIONAL_DOCUMENTS_HEADING = "この主題が出てくる論文";
   // atlas ノード中心からの固定オフセット（kind ごとに位置を固定し、地図全体で視覚言語を揃える）
   const MARKER_OFFSETS = {
     tension: [-9, -9],
@@ -199,6 +213,9 @@
   }
 
   function renderDotsLayer(canvasEl) {
+    // 暫定ノードの帯は骨格ノードの有無と独立に描く（本関数の早期 return に巻き込まない）。
+    // 描画条件・fail-closed は renderProvisionalStrip 側が自前で判定する。
+    renderProvisionalStrip(canvasEl);
     if (!canvasEl) return;
     const svg = canvasEl.querySelector("svg");
     if (!svg) return;
@@ -244,6 +261,172 @@
       layer.appendChild(g);
     });
     svg.appendChild(layer);
+  }
+
+  // -------------------------------------------------------------------
+  // 暫定ノードの帯（カテゴリギャップ候補 v1-b, §4.4 裁定 / §5.6）
+  //
+  // 共有骨格の「外側」に置く帯なので、骨格ノード（L1 の SVG）には一切重ねない。
+  // マップ下端（.atlas-canvas の svg の直後）に専用ストリップとして差し込み、
+  // 点線輪郭・淡色のチップで既存ノードと視覚的に混ざらないようにする。
+  // サーバ応答に provisional_nodes が無い/空なら何も描かない（後方互換・fail-closed）。
+  // ポーリングしない（既存 personal-network の応答に相乗りするだけ・PN-5）。
+  // -------------------------------------------------------------------
+
+  function provisionalNodes(data) {
+    return data && Array.isArray(data.provisional_nodes) ? data.provisional_nodes : [];
+  }
+
+  function removeProvisionalStrip(canvasEl) {
+    if (!canvasEl || typeof canvasEl.querySelector !== "function") return;
+    const existing = canvasEl.querySelector(".personal-map-provisional-strip");
+    if (existing) existing.remove();
+  }
+
+  function buildProvisionalChip(node) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "personal-map-provisional-chip";
+    // 点線輪郭・淡色（骨格ノードの視覚言語と混ざらないこと。CSS 追加なしで完結させる）
+    chip.style.border = "1px dashed var(--color-border-secondary, #d2d2d7)";
+    chip.style.borderRadius = "999px";
+    chip.style.background = "transparent";
+    chip.style.color = "var(--color-text-secondary, #6e6e73)";
+    chip.style.padding = "3px 10px";
+    chip.style.cursor = "pointer";
+    chip.style.opacity = "0.85";
+    chip.style.display = "inline-flex";
+    chip.style.flexDirection = "column";
+    chip.style.alignItems = "flex-start";
+    chip.style.gap = "1px";
+
+    const label = document.createElement("span");
+    label.className = "personal-map-provisional-chip-label";
+    label.style.fontSize = "11.5px";
+    label.textContent = node.label || "";
+    chip.appendChild(label);
+
+    const origin = document.createElement("span");
+    origin.className = "personal-map-provisional-chip-origin";
+    origin.style.fontSize = "10px";
+    origin.style.opacity = "0.75";
+    origin.textContent = node.source_label || "";
+    chip.appendChild(origin);
+
+    chip.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showProvisionalCard(node, e);
+    });
+    return chip;
+  }
+
+  function renderProvisionalStrip(canvasEl) {
+    if (!canvasEl || typeof canvasEl.querySelector !== "function") return;
+    removeProvisionalStrip(canvasEl);
+    if (!state.enabled) return; // トグル OFF では帯ごと出さない
+    if (state.lastLevel !== 1) return; // 骨格表示（L1）のときだけ
+    const nodes = provisionalNodes(cachedData(state.courseId));
+    if (!nodes.length) return; // データ無し・キー無し・取得失敗はすべて非表示
+
+    const strip = document.createElement("div");
+    strip.className = "personal-map-provisional-strip";
+    strip.style.borderTop = "1px dashed var(--color-border, #d2d2d7)";
+    strip.style.padding = "8px 10px";
+
+    const heading = document.createElement("div");
+    heading.className = "personal-map-provisional-heading";
+    heading.style.fontSize = "10.5px";
+    heading.style.color = "var(--color-text-tertiary, #aeaeb2)";
+    heading.style.marginBottom = "5px";
+    heading.textContent = PROVISIONAL_STRIP_HEADING;
+    strip.appendChild(heading);
+
+    const chips = document.createElement("div");
+    chips.className = "personal-map-provisional-chips";
+    chips.style.display = "flex";
+    chips.style.flexWrap = "wrap";
+    chips.style.alignItems = "center";
+    chips.style.gap = "6px";
+    nodes.forEach((node) => {
+      if (!node || !node.id) return;
+      chips.appendChild(buildProvisionalChip(node));
+    });
+    strip.appendChild(chips);
+
+    canvasEl.appendChild(strip);
+  }
+
+  // クリックで開く小さな事実カード（ラベル / 出所論文 / 逐語引用 / 出所ラベル）。
+  // 共有の地図への言及・行動喚起・更新告知バッジ・数値・進捗表現は出さない（§5.6）。
+  function showProvisionalCard(node, evt) {
+    closePopup();
+    const card = document.createElement("div");
+    // 既存ポップの見た目をそのまま借りる（CSS を増やさない）。
+    card.className = "personal-map-popup personal-map-provisional-card";
+    card.setAttribute("role", "dialog");
+
+    const heading = document.createElement("div");
+    heading.className = "personal-map-provisional-card-label";
+    heading.style.fontSize = "12.5px";
+    heading.style.paddingRight = "14px"; // 右上の閉じるボタン（絶対配置）と重ねない
+    heading.textContent = node.label || "";
+    card.appendChild(heading);
+
+    const origin = document.createElement("div");
+    origin.className = "personal-map-provisional-card-origin";
+    origin.style.fontSize = "10.5px";
+    origin.style.color = "var(--color-text-tertiary, #aeaeb2)";
+    origin.textContent = node.source_label || "";
+    card.appendChild(origin);
+
+    const documents = Array.isArray(node.documents) ? node.documents : [];
+    if (documents.length) {
+      const docsHeading = document.createElement("div");
+      docsHeading.className = "personal-map-provisional-card-docs-heading";
+      docsHeading.style.fontSize = "10.5px";
+      docsHeading.style.color = "var(--color-text-tertiary, #aeaeb2)";
+      docsHeading.style.marginTop = "6px";
+      docsHeading.textContent = PROVISIONAL_DOCUMENTS_HEADING;
+      card.appendChild(docsHeading);
+
+      const docList = document.createElement("div");
+      docList.className = "personal-map-provisional-card-docs";
+      documents.forEach((doc) => {
+        if (!doc || !doc.title) return;
+        const row = document.createElement("div");
+        row.className = "personal-map-provisional-card-doc";
+        row.style.fontSize = "11.5px";
+        row.textContent = doc.title;
+        docList.appendChild(row);
+      });
+      card.appendChild(docList);
+    }
+
+    if (node.evidence_quote) {
+      const quote = document.createElement("blockquote");
+      quote.className = "personal-map-provisional-card-quote";
+      quote.style.margin = "6px 0 0";
+      quote.style.padding = "0 0 0 8px";
+      quote.style.borderLeft = "2px solid var(--color-border, #e5e5ea)";
+      quote.style.fontSize = "11.5px";
+      quote.style.color = "var(--color-text-secondary, #6e6e73)";
+      quote.textContent = node.evidence_quote;
+      card.appendChild(quote);
+    }
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "personal-map-popup-close";
+    closeBtn.setAttribute("aria-label", "閉じる");
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", closePopup);
+    card.appendChild(closeBtn);
+
+    document.body.appendChild(card);
+    positionPopup(card, evt);
+    state.popupEl = card;
+    setTimeout(() => document.addEventListener("click", onDocClickClosePopup, true), 0);
   }
 
   // -------------------------------------------------------------------

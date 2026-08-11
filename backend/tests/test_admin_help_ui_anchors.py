@@ -88,7 +88,11 @@ class TestAdminUiAnchorsModule:
         #   course-management.release-review-btn（コース管理の「確認して公開」）/
         #   release-review.modal（ウィザード本体）/ release-review.next（各ステップの
         #   主ボタン＝確認の記録）/ release-review.publish（公開する）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 248
+        # + カテゴリギャップ候補（category_gap_candidates_design.md §5.4）の7件:
+        #   atlas.gap-candidates（修正報告セクション内の第2グループ）/ atlas.gap-accept /
+        #   atlas.gap-dismiss / atlas.gap-restore / atlas.gap-incorporate /
+        #   atlas.gap-draft-from-frozen / atlas.gap-dismissed-filter。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 255
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

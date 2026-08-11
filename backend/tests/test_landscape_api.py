@@ -16,6 +16,8 @@ monkeypatch）を踏襲する。DB には触らず、``routes.landscape._session
      detail に数値を書かないこと（LS5）
   5. overview が本人可視 document のみを集約すること
   6. 学習者 DTO が可視 status のみ・コースのソースのみ・数値キー非漏洩（LS5）
+  7. 学習者 DTO の ``unplaced_documents`` / ``skeleton_version``（配置ゼロを沈黙に
+     潰さない事実材料。``category_gap_candidates_design.md`` §4.5 の裁定・AB1 / LS10）
 """
 
 from __future__ import annotations
@@ -117,6 +119,10 @@ class FakeSession:
             if self.last_run_at is None:
                 return _Result([])
             return _Result([(self.last_run_at,)])
+        if "FROM landscape_gap_signals" in sql:
+            # category_gap_candidates_design.md §4.1: 教材管理の unplaced 行に出す
+            # 案内一行の材料（真偽値だけ）。既定は「記録なし」。
+            return _Result([])
         raise AssertionError(f"unexpected SQL in route layer: {sql!r}")
 
     def commit(self):
@@ -250,8 +256,13 @@ class TestAdminListPlacements:
         assert response.status_code == 200
         body = response.json()
         assert set(body) == {
-            "document_id", "title", "placements", "unplaced_domains", "domains", "last_run_at",
+            "document_id", "title", "placements", "unplaced_domains", "domains",
+            "last_run_at",
+            # category_gap_candidates_design.md §4.1 / §5.4: 教材管理の案内一行の材料
+            # （真偽値のみ。件数は返さない）。
+            "gap_signals_recorded",
         }
+        assert body["gap_signals_recorded"] is False
         assert body["document_id"] == _DOC
         assert body["title"] == "重力波観測の系統誤差"
         assert body["last_run_at"] == _LAST_RUN
@@ -268,7 +279,12 @@ class TestAdminListPlacements:
 
         # unplaced は domain_name を補って返す（LS10 の事実文をフロントが組める）。
         assert body["unplaced_domains"] == [
-            {"domain_key": _DOMAIN, "domain_name": "宇宙物理", "reason": "対象が一致しません"}
+            {
+                "domain_key": _DOMAIN,
+                "domain_name": "宇宙物理",
+                "reason": "対象が一致しません",
+                "gap_signals_recorded": False,
+            }
         ]
         assert body["domains"] == [
             {"domain_key": _DOMAIN, "domain_name": "宇宙物理", "frozen_version": "2026.1"}
@@ -838,7 +854,8 @@ class TestLearnerLandscape:
         assert response.status_code == 200
         body = response.json()
         assert set(body) == {
-            "course_id", "course_domain_key", "domains", "documents", "corpus"
+            "course_id", "course_domain_key", "domains", "documents", "corpus",
+            "unplaced_documents", "skeleton_version",
         }
         assert body["course_id"] == "course-1"
         assert body["course_domain_key"] == _DOMAIN
@@ -871,6 +888,10 @@ class TestLearnerLandscape:
         assert "confidence" not in keys
         # 学習者 DTO は claim_id を落とす（chunk 遡及は Phase 2）。
         assert "claim_id" not in keys
+
+        # 全論文が配置済みなら「配置ゼロ」の行は出ない（§4.5）。
+        assert body["unplaced_documents"] == []
+        assert body["skeleton_version"] == "2026.1"
 
     def test_only_course_source_documents_are_queried(self, client_and_tokens, env):
         client, student, _teacher = client_and_tokens
@@ -908,6 +929,9 @@ class TestLearnerLandscape:
             "domains": [],
             "documents": [],
             "corpus": {"source_document_count": 0, "placed_document_count": 0},
+            # ソース論文が無いコースは「配置ゼロの論文」も存在しない（骨格版も引けない）。
+            "unplaced_documents": [],
+            "skeleton_version": "",
         }
 
     def test_course_map_domain_is_listed_even_without_placements(
@@ -952,6 +976,136 @@ class TestLearnerLandscape:
         )
         assert response.status_code == 200
         assert response.json()["documents"] == []
+
+    # -- 配置ゼロの事実文（category_gap_candidates_design.md §4.5 / AB1・LS10）------
+
+    def _patch_two_source_course(self, env):
+        """mat-1（配置あり）/ mat-2（配置ゼロ）の2論文コースを組む。"""
+        self._patch_course(
+            env,
+            {
+                "cartridge_id": _DOMAIN,
+                "sources": [{"material_id": "mat-1"}, {"material_id": "mat-2"}],
+            },
+            {_DOC, _DOC_OTHER},
+        )
+        env["session"].documents = [
+            (_DOC, "重力波観測の系統誤差", "mat-1"),
+            (_DOC_OTHER, "室内実験による較正法", "mat-2"),
+        ]
+
+    def test_documents_without_placements_are_reported_as_unplaced(
+        self, client_and_tokens, env
+    ):
+        """配置ゼロの論文を silent 非表示に潰さず、事実として返す（§4.5 の裁定）。"""
+        client, student, _teacher = client_and_tokens
+        routes = env["routes"]
+        self._patch_two_source_course(env)
+        env["monkeypatch"].setattr(
+            routes.landscape_store,
+            "list_for_documents",
+            lambda *a, **k: [_placement_row()],  # _DOC だけ配置がある
+        )
+
+        body = client.get(
+            "/api/learning/courses/course-1/landscape", headers=_auth(student)
+        ).json()
+
+        assert [d["document_id"] for d in body["documents"]] == [_DOC]
+        assert body["unplaced_documents"] == [
+            {"document_id": _DOC_OTHER, "title": "室内実験による較正法"}
+        ]
+        # 事実文に使う版は「いま見せている地図」（コースがバインドされた分野）の凍結版。
+        assert body["skeleton_version"] == "2026.1"
+
+    def test_unplaced_entries_carry_no_numbers_or_gap_vocabulary(
+        self, client_and_tokens, env
+    ):
+        """LS5: 新フィールドに weight / confidence / 件数を混ぜない。
+
+        gap / candidate 語彙も学習者 DTO には出さない（候補機構は教員側の別実装）。
+        """
+        client, student, _teacher = client_and_tokens
+        routes = env["routes"]
+        self._patch_two_source_course(env)
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents", lambda *a, **k: [_placement_row()]
+        )
+
+        body = client.get(
+            "/api/learning/courses/course-1/landscape", headers=_auth(student)
+        ).json()
+
+        assert set(body["unplaced_documents"][0]) == {"document_id", "title"}
+        keys = _keys_recursive(body["unplaced_documents"])
+        for forbidden in ("weight", "weight_label", "confidence", "count", "reason"):
+            assert forbidden not in keys
+        payload = str(body)
+        for forbidden in ("gap", "candidate", "unplaced_count"):
+            assert forbidden not in payload
+
+    def test_all_documents_unplaced_keeps_the_existing_envelope(
+        self, client_and_tokens, env
+    ):
+        """全論文が配置ゼロでも 200 のまま（節ごと非表示の fail-closed はフロント側）。"""
+        client, student, _teacher = client_and_tokens
+        routes = env["routes"]
+        self._patch_two_source_course(env)
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents", lambda *a, **k: []
+        )
+
+        response = client.get(
+            "/api/learning/courses/course-1/landscape", headers=_auth(student)
+        )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["documents"] == []
+        assert [d["document_id"] for d in body["unplaced_documents"]] == [_DOC, _DOC_OTHER]
+        assert body["corpus"] == {"source_document_count": 2, "placed_document_count": 0}
+
+    def test_ghost_node_documents_count_as_unplaced_on_the_current_map(
+        self, client_and_tokens, env
+    ):
+        """現行骨格に無いノードの配置しか無い論文は「現在の地図に配置なし」と同義。"""
+        client, student, _teacher = client_and_tokens
+        routes = env["routes"]
+        self._patch_two_source_course(env)
+        env["monkeypatch"].setattr(
+            routes.landscape_store,
+            "list_for_documents",
+            lambda *a, **k: [
+                _placement_row(),
+                _placement_row(
+                    id="77777777-7777-7777-7777-777777777777",
+                    document_id=_DOC_OTHER,
+                    node_id="ghost_node",
+                ),
+            ],
+        )
+
+        body = client.get(
+            "/api/learning/courses/course-1/landscape", headers=_auth(student)
+        ).json()
+
+        assert [d["document_id"] for d in body["documents"]] == [_DOC]
+        assert [d["document_id"] for d in body["unplaced_documents"]] == [_DOC_OTHER]
+
+    def test_skeleton_version_is_empty_when_no_map_is_shown(self, client_and_tokens, env):
+        """版が引けないときは空文字（推測した版番号を事実文に渡さない）。"""
+        client, student, _teacher = client_and_tokens
+        routes = env["routes"]
+        self._patch_course(env, {"sources": [{"material_id": "mat-1"}]}, {_DOC})
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents", lambda *a, **k: []
+        )
+
+        body = client.get(
+            "/api/learning/courses/course-1/landscape", headers=_auth(student)
+        ).json()
+        assert body["domains"] == []
+        assert body["skeleton_version"] == ""
+        assert [d["document_id"] for d in body["unplaced_documents"]] == [_DOC]
 
     def test_student_role_is_allowed(self, client_and_tokens, env):
         """学習者向けエンドポイントは STUDENT でも通る（受講ゲートのみ）。"""

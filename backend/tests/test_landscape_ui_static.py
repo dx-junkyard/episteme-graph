@@ -490,6 +490,103 @@ class TestSourcesTabSection:
 
 
 # ===========================================================================
+# 9b. 配置ゼロの事実文（category_gap_candidates_design.md §4.5 / AB1 / LS10）
+# ===========================================================================
+
+
+class TestUnplacedFactLine:
+    """「置けなかった」を取得失敗と同じ沈黙に潰さないための表示（§4.5 の裁定）。
+
+    - 事実文はリテラルで固定する（言い換えで欠陥語彙・行動喚起に滑らせない）
+    - アイコン・エラー色・「追加してください」等の誘導を付けない（AB1）
+    - 節内に配置済みが1件も無い場合は節ごと非表示のまま（fail-closed は不変）
+    """
+
+    FACT_LITERAL = "どの領域にも配置されていません"
+
+    def test_fact_line_literal_exists(self):
+        js = _read(APP_JS)
+        assert self.FACT_LITERAL in js, "配置ゼロの事実文がありません（§4.5）"
+        assert "この論文は、現在の分野の地図（版 " in js
+
+    def test_fact_line_is_built_from_contract_field(self):
+        """サーバの ``unplaced_documents`` から組む（クライアントで差集合を再計算しない）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function buildPaperPlacementUnplacedHtml(data) {")
+        assert "unplaced_documents" in block
+        assert self.FACT_LITERAL in block
+        assert "escHtml(doc.title" in block
+
+    def test_fact_line_rendered_inside_the_section(self):
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function buildPaperPlacementHtml(data, placedDocs) {")
+        assert "buildPaperPlacementUnplacedHtml(data)" in block
+
+    def test_version_comes_from_shared_helper(self):
+        """版は「いま見せている地図」の版（サーバの skeleton_version を優先）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function paperPlacementSkeletonVersion(data) {")
+        assert "skeleton_version" in block
+        assert "is_course_map" in block
+        assert "frozen_version" in block
+        # コーパス事実行と同じ版を使う（表示される版が2箇所で食い違わない）
+        fact = _extract_function_body(js, "function paperPlacementCorpusFact(data) {")
+        assert "paperPlacementSkeletonVersion(data)" in fact
+
+    def test_no_line_without_a_known_version(self):
+        """版が引けないときは何も出さない（推測した版番号を事実文に書かない）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function buildPaperPlacementUnplacedHtml(data) {")
+        assert "if (!version) return \"\";" in block
+        assert "if (!unplaced.length) return \"\";" in block
+
+    def test_section_stays_hidden_when_nothing_is_placed(self):
+        """配置済みゼロなら節ごと非表示のまま（データ無しと取得失敗を区別できない）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function renderPaperPlacementSection(root) {")
+        assert "if (!placed.length) { box.remove(); return; }" in block
+
+    def test_no_error_styling_or_icons(self):
+        """AB1: エラー色・警告アイコン・強調クラスを付けない（通常テキストのみ）。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function buildPaperPlacementUnplacedHtml(data) {")
+        for banned in (
+            "⚠", "❗", "❌", "🚨", "警告", "error", "danger", "alert", "warn",
+            "color:var(--color-danger", "color: var(--color-danger",
+        ):
+            assert banned not in block, f"配置ゼロの行に {banned} を付けています（AB1 違反）"
+        # 既存の中立クラスだけを使う（新しい強調スタイルを持ち込まない）
+        classes = set(re.findall(r'class="([a-zA-Z0-9_\- ]+)"', block))
+        assert classes <= {"lx-placement-doc", "lx-placement-title", "lx-placement-fact"}
+
+    def test_no_call_to_action_or_deficiency_wording(self):
+        """AB1 / LS1: 埋めさせる誘導・欠陥語彙を使わない。"""
+        js = _read(APP_JS)
+        block = _extract_function_body(js, "function buildPaperPlacementUnplacedHtml(data) {")
+        for banned in (
+            "追加してください", "登録してください", "してください", "不足", "未整備",
+            "欠け", "穴", "改善", "<button",
+        ):
+            assert banned not in block, f"配置ゼロの行に {banned}（AB1 / LS1 違反）"
+
+    def test_no_numeric_exposure_in_the_fact_line(self):
+        """LS5: 件数バッジ・weight・confidence を出さない。"""
+        js = _strip_js_comments(_read(APP_JS))
+        block = _extract_function_body(js, "function buildPaperPlacementUnplacedHtml(data) {")
+        assert "confidence" not in block
+        assert not re.search(r"\.weight\b", block)
+        assert "unplaced.length +" not in block
+        assert "件" not in block
+
+    def test_no_gap_or_candidate_vocabulary_in_learner_ui(self):
+        """候補機構（教員側）の語彙を学習者 UI に持ち込まない。"""
+        js = _strip_js_comments(_read(APP_JS))
+        block = _extract_function_body(js, "function buildPaperPlacementUnplacedHtml(data) {")
+        for banned in ("候補", "gap", "candidate"):
+            assert banned not in block, f"学習者 UI に {banned} が出ています"
+
+
+# ===========================================================================
 # 10. 学習者ヘルプアンカー（正本 = core/help_kb/ui_anchors.py）
 # ===========================================================================
 

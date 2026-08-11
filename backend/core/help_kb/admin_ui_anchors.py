@@ -51,6 +51,13 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.domain-restore",
         "atlas.domain-retire",
         "atlas.freeze",
+        "atlas.gap-accept",
+        "atlas.gap-candidates",
+        "atlas.gap-dismiss",
+        "atlas.gap-dismissed-filter",
+        "atlas.gap-draft-from-frozen",
+        "atlas.gap-incorporate",
+        "atlas.gap-restore",
         "atlas.generate",
         "atlas.refresh",
         "atlas.report-incorporate",
@@ -323,6 +330,20 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.domain-retire": "teacher/17-admin-atlas.md#domain-retire",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
+    # 論文の解析から見つかった候補 — 採用
+    "atlas.gap-accept": "teacher/17-admin-atlas.md#gap-accept",
+    # 論文の解析から見つかった候補（グループ全体）
+    "atlas.gap-candidates": "teacher/17-admin-atlas.md#gap-candidates",
+    # 却下…（理由必須）
+    "atlas.gap-dismiss": "teacher/17-admin-atlas.md#gap-dismiss",
+    # 見送り済みも表示
+    "atlas.gap-dismissed-filter": "teacher/17-admin-atlas.md#gap-dismissed-filter",
+    # 現在の版から次版の下書きを作る
+    "atlas.gap-draft-from-frozen": "teacher/17-admin-atlas.md#gap-draft-from-frozen",
+    # 次版の下書きに取り込む…
+    "atlas.gap-incorporate": "teacher/17-admin-atlas.md#gap-incorporate",
+    # 見送りから戻す
+    "atlas.gap-restore": "teacher/17-admin-atlas.md#gap-restore",
     # 次版の編集を始める
     "atlas.generate": "teacher/17-admin-atlas.md#generate",
     # 更新

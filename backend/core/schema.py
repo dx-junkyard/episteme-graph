@@ -481,6 +481,10 @@ AUDIT_ENTITY_TEACHING_FIGURE = "teaching_figure"
 # 知識ランドスケープ（論文 ⇄ 基準地図の配置。status 遷移・手動再提案, migration 065）
 AUDIT_ENTITY_LANDSCAPE_PLACEMENT = "landscape_placement"
 
+# カテゴリギャップ候補（検出 detect / 採用 accept / 見送り dismiss / 復帰 restore /
+# 統合 merge / 下書き取り込み incorporate。metadata.action で区別, migration 066）
+AUDIT_ENTITY_CATEGORY_GAP = "category_gap"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -517,4 +521,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_LLM_MODEL_POLICY,
     AUDIT_ENTITY_TEACHING_FIGURE,
     AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
+    AUDIT_ENTITY_CATEGORY_GAP,
 )
