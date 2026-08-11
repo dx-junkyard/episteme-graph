@@ -115,7 +115,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | GET | `/api/learning/courses/{cid}/topics/{tid}/chat` | 本人の履歴のみ | チャット履歴取得 |
 | DELETE | `/api/learning/courses/{cid}/topics/{tid}/chat` | 所有者 or 受講者（本人の行のみ） | 本人のトピック別チャット履歴を全削除 |
 | DELETE | `/api/learning/courses/{cid}/topics/{tid}/chat/messages/{mid}` | 所有者 or 受講者（本人の履歴のみ） | 指定メッセージ以降の往復を truncate（派生 interest_traces は `superseded` 化。機能3） |
-| GET | `/api/learning/courses/{cid}/source-chunk/{chunk_id}` | 要ログイン | 出典ポップアップ用のチャンク本文・数式・出典名（音声会話の教材パネルにも使用） |
+| GET | `/api/learning/courses/{cid}/source-chunk/{chunk_id}` | 所有者 or 受講者 **かつ chunk の document が当該コースの source** | 出典ポップアップ用のチャンク本文・数式・出典名（音声会話の教材パネルにも使用）。スコープは `list_course_source_document_ids(course_data)` を `get_chunk_passage(..., allowed_document_ids=)` の SQL 内 `ANY(...)` で強制。コース非アクセス・コース source 外・不明 chunk はすべて同一 404 |
 
 #### 問いの軌跡（interest_traces）・地図導線
 
@@ -242,11 +242,11 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | POST | `/api/admin/materials/upload` | TEACHER | PDF/TeX を MinIO へ保存しバックグラウンドで解析パイプライン起動、task_id を即時返却（`analyze_images` で装置図解析をオプトイン） |
-| POST | `/api/admin/documents/{id}/reanalyze` | TEACHER | 保存済み PDF を Agent パイプラインで再解析（`analyze_images` 未指定時は前回 run の options を継承） |
+| POST | `/api/admin/documents/{id}/reanalyze` | TEACHER + document 編集権（所有者 / document editor / SYSTEM_ADMIN） | 保存済み PDF を Agent パイプラインで再解析（`analyze_images` 未指定時は前回 run の options を継承）。認可は MinIO 取得・background task 起動より前。閲覧のみ（public / viewer / コース経由）と不明 ID は同一 404 |
 | GET | `/api/admin/materials` | TEACHER（自分 + public + group/document 共有 + コース参照） | 教材一覧（status は projector 正本。`?include=summary` でサマリ付加） |
 | GET | `/api/admin/materials/{id}` | TEACHER（一覧と同じポリシー） | 教材詳細（ナレッジグラフ含む） |
 | GET | `/api/admin/materials/{id}/pdf` | TEACHER（閲覧権） | 教材 PDF を MinIO からプロキシ配信 |
-| PUT | `/api/admin/materials/{id}/pdf` | TEACHER（閲覧権） | PDF の再登録（テキスト類似度 <0.3 は 409。欠落ページ情報を推定補完） |
+| PUT | `/api/admin/materials/{id}/pdf` | TEACHER + document 編集権（所有者 / document editor / SYSTEM_ADMIN） | PDF の再登録（テキスト類似度 <0.3 は 409。欠落ページ情報を推定補完）。認可はファイル読取・PDF パース・MinIO upload より前。閲覧のみ（public / viewer / コース経由）と不明 material は同一 404 |
 | PUT | `/api/admin/materials/{id}/visibility` | 教材所有者のみ | 開示範囲（public/group/private）を更新 |
 | DELETE | `/api/admin/materials/{id}` | 教材所有者 + `confirm_name` 一致必須 | 教材削除（参照コース・チャンク・W層孤児行も削除、V層 teardown 通知） |
 | GET | `/api/admin/tasks/{task_id}` | TEACHER | バックグラウンドタスクのステータス（ポーリング用） |
@@ -269,7 +269,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | GET | `/api/admin/courses/{cid}/draft-format` | 所有者 or editor | 登録済みコースを course_draft 形式へ変換（ビルダー再インポート用） |
 | PUT | `/api/admin/courses/{cid}/visibility` | コース所有者のみ | 開示範囲更新（`is_published` を実態と同期） |
 | DELETE | `/api/admin/courses/{cid}` | 所有者 or editor + `confirm_name` 一致必須 | コース削除（チャット履歴・group 権限行も明示削除、V層 teardown 通知） |
-| GET | `/api/admin/courses/{cid}/unanswered-queries` | TEACHER | コースの RAG 未回答クエリ（最大200件） |
+| GET | `/api/admin/courses/{cid}/unanswered-queries` | TEACHER + コース編集権（所有者 / course editor / SYSTEM_ADMIN） | コースの RAG 未回答クエリ（最大200件・学生表示名を含む）。認可は SQL 実行より前。権限なし・不明コースは空配列ではなく同一 404 |
 | GET | `/api/admin/courses/{cid}/groups` | 閲覧可能な者 | コースのグループ権限一覧 |
 | POST | `/api/admin/courses/{cid}/groups` | コース所有者のみ | グループ権限（viewer/editor）の付与・更新 |
 | DELETE | `/api/admin/courses/{cid}/groups/{gid}` | コース所有者のみ | グループ権限の削除 |
@@ -322,7 +322,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/admin/interest-dashboard` | TEACHER | interest_traces の集団集計（件数・比率・関与人数のみ。個人特定情報なし） |
-| GET | `/api/admin/courses/{cid}/bridge-insights` | TEACHER | 学習者が connect した橋候補の k-匿名集約（k=3・人数レンジ表示） |
+| GET | `/api/admin/courses/{cid}/bridge-insights` | TEACHER + コース編集権（所有者 / course editor / SYSTEM_ADMIN） | 学習者が connect した橋候補の k-匿名集約（k=3・人数レンジ表示）。認可は `aggregate_bridge_candidates()` より前（権限のない教員へ集約の存在・空非空を開示しない）。権限なし・不明コースは同一 404 |
 
 ### 図の表示分類 `/api/admin`（`routes/figure_presentation.py`、#496）
 

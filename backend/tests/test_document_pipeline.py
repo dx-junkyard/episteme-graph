@@ -2223,10 +2223,22 @@ def _reanalyze_with_mocks(monkeypatch, body):
         def start(self):
             pass
 
-    select_session = MagicMock()
-    select_session.execute.return_value.fetchone.return_value = (
-        "dddddddd-dddd-dddd-dddd-dddddddddddd", "Title", "file.pdf", "mat-1",
+    # P0（オブジェクトスコープ権限）: reanalyze は document owner/editor ゲートを
+    # 通ってから canonical document_id / source_path を再利用する。実 DB を引かせない。
+    from services import DocumentAccess
+
+    monkeypatch.setattr(
+        admin_mod, "resolve_document_access",
+        lambda uid, ref: DocumentAccess(
+            document_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+            source_path="mat-1", uploaded_by=uid, is_owner=True,
+            can_view=True, can_edit=True,
+        ),
     )
+
+    # ゲート通過後の最小 SELECT（title, filename）。
+    select_session = MagicMock()
+    select_session.execute.return_value.fetchone.return_value = ("Title", "file.pdf")
     update_session = MagicMock()
     fake_pg = MagicMock(side_effect=[select_session, update_session])
 

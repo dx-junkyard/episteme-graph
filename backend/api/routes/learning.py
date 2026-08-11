@@ -3044,12 +3044,24 @@ def get_source_chunk_route(
 ) -> dict:
     """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。
 
-    レビュー確定の修正1（セキュリティ）: 従来は chunk_id のみで本人の可視性を検証せず
-    任意の Private 文書本文が読めてしまっていた。`list_visible_document_ids` の正本
-    （所有/public/group/object_group_permissions ∪ アクセス可能コースの sources 経由）で
-    fail-closed に絞る。
+    スコープは **URL の course の sources に限定**する（P0 オブジェクトスコープ是正）。
+
+    1. `get_accessible_course_data` — 本人がその course にアクセスできること（不可なら 404）。
+    2. `list_course_source_document_ids(course_data)` — その course の source document 集合。
+    3. `get_chunk_passage(..., allowed_document_ids=...)` の SQL 内
+       `document_id = ANY(...)` でスコープを強制する（取得後の Python 判定にしない）。
+       sources が空なら SQL を発行せず None → 404（fail-closed）。
+
+    かつては `list_visible_document_ids`（本人の全域可視集合）で絞っていたため、
+    course に紐づかない別コース・public 文書のチャンクも URL の course 経由で読めていた。
+    course への正規アクセスが source 文書の開示根拠であるという設計はそのまま
+    （`list_visible_document_ids` との積集合は取らない — 取ると教員 private のコース教材が
+    受講者から読めなくなり、コース経由開示が壊れる）。
     """
-    allowed_document_ids = list_visible_document_ids(current_user["id"])
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="Source chunk not found")
+    allowed_document_ids = list_course_source_document_ids(course_data)
     passage = get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)
     if not passage:
         raise HTTPException(status_code=404, detail="Source chunk not found")

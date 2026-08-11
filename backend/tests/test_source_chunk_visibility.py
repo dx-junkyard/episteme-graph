@@ -19,7 +19,10 @@ document の承認済み ``element_explanations`` を取得でき、``record_stu
     即座に None（fail-closed）/ 集合=SQL 内 ``c.document_id = ANY(...)`` で強制）
   - ``backend/api/services.py::get_graph_element_context``（同じ流儀・空集合は ``{}``）
   - ``backend/api/routes/learning.py::get_source_chunk_route``
-    （``list_visible_document_ids(current_user["id"])`` を渡す）
+    （P0 オブジェクトスコープ是正: 全域可視集合ではなく **URL の course の sources**
+    に限定する。``get_accessible_course_data`` → ``list_course_source_document_ids``
+    → ``get_chunk_passage(..., allowed_document_ids=...)`` の順。詳細な権限マトリクスは
+    ``test_object_scope_authorization.py`` を参照）
   - ``backend/api/routes/learning.py::_generate_graph_element_explanation``
     （``get_chunk_claim_refs`` と同じ複合集合 = コース sources ∪ 本人可視 document を渡す）
 
@@ -171,11 +174,19 @@ class TestNoRouteExplicitlyDisablesTheFilter:
     def test_routes_never_pass_none_explicitly(self):
         assert_module_tree_forbids(_ROUTES_DIR, ["allowed_document_ids=None"])
 
-    def test_learning_wires_list_visible_document_ids_for_source_chunk(self):
+    def test_learning_wires_course_source_scope_for_source_chunk(self):
+        """P0: source-chunk は course sources スコープで fail-closed に絞る。
+
+        全域可視集合（``list_visible_document_ids``）に戻すと、URL の course に
+        紐づかない別 course / public 文書のチャンクまで読めてしまう。
+        """
         learning_src = (_ROUTES_DIR / "learning.py").read_text(encoding="utf-8")
-        block = learning_src.split("def get_source_chunk_route(")[1][:900]
-        assert 'list_visible_document_ids(current_user["id"])' in block
+        block = learning_src.split("def get_source_chunk_route(")[1][:2000]
+        assert 'get_accessible_course_data(current_user["id"], course_id)' in block
+        assert "allowed_document_ids = list_course_source_document_ids(course_data)" in block
         assert "get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)" in block
+        # 全域可視集合を混ぜない（積集合も和集合も取らない）。
+        assert "list_visible_document_ids(current_user" not in block
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +199,12 @@ class TestGetSourceChunkRoute:
         from fastapi import HTTPException
         from api.routes import learning as learning_module
 
-        monkeypatch.setattr(learning_module, "list_visible_document_ids", lambda uid: {"doc-1"})
+        monkeypatch.setattr(
+            learning_module, "get_accessible_course_data", lambda uid, cid: {"sources": []},
+        )
+        monkeypatch.setattr(
+            learning_module, "list_course_source_document_ids", lambda cd: {"doc-1"},
+        )
         monkeypatch.setattr(
             learning_module, "get_chunk_passage",
             lambda chunk_id, allowed_document_ids=None: None,
@@ -200,13 +216,16 @@ class TestGetSourceChunkRoute:
             )
         assert exc_info.value.status_code == 404
 
-    def test_passes_visible_document_ids_to_service(self, monkeypatch):
+    def test_passes_course_source_document_ids_to_service(self, monkeypatch):
         from api.routes import learning as learning_module
 
         captured: dict = {}
 
         monkeypatch.setattr(
-            learning_module, "list_visible_document_ids", lambda uid: {"doc-a", "doc-b"},
+            learning_module, "get_accessible_course_data", lambda uid, cid: {"sources": []},
+        )
+        monkeypatch.setattr(
+            learning_module, "list_course_source_document_ids", lambda cd: {"doc-a", "doc-b"},
         )
 
         def _fake_get_chunk_passage(chunk_id, allowed_document_ids=None):
@@ -223,8 +242,8 @@ class TestGetSourceChunkRoute:
         assert result["chunk_id"] == "chunk-1"
         assert captured["allowed_document_ids"] == {"doc-a", "doc-b"}
 
-    def test_invisible_document_chunk_yields_404_via_empty_allowed_set(self, monkeypatch):
-        """本人が閲覧可能な document が0件（＝チャンクの document が可視集合外）なら、
+    def test_out_of_course_chunk_yields_404_via_empty_allowed_set(self, monkeypatch):
+        """コースの sources が0件（＝チャンクの document が course スコープ外）なら、
         get_chunk_passage は空集合の fail-closed 短絡で None を返し、ルートは 404 にする。
         （learning.py の `from services import get_chunk_passage` は top-level `services`
         モジュールとして再ロードされるため、ここでは `services._pg_session` の差し替えではなく
@@ -233,7 +252,12 @@ class TestGetSourceChunkRoute:
         from fastapi import HTTPException
         from api.routes import learning as learning_module
 
-        monkeypatch.setattr(learning_module, "list_visible_document_ids", lambda uid: set())
+        monkeypatch.setattr(
+            learning_module, "get_accessible_course_data", lambda uid, cid: {"sources": []},
+        )
+        monkeypatch.setattr(
+            learning_module, "list_course_source_document_ids", lambda cd: set(),
+        )
 
         with pytest.raises(HTTPException) as exc_info:
             learning_module.get_source_chunk_route(
