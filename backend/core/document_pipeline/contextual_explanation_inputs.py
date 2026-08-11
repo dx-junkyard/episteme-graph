@@ -37,8 +37,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, is_dataclass
-from typing import Any, Callable
+from typing import Any, Callable, Iterable
 
 from episteme_graph.agents.contextual_explanation.schema import ElementExplanationInput
 
@@ -57,8 +58,20 @@ MAX_TEXT_CHARS = 400
 # very long observation log doesn't crowd out its other lower-context entries.
 MAX_ALIGNMENT_ITEMS = 8
 MAX_INNER_LABELS = 10
+# Bound on the reverse "which courses use this document" lookup (see
+# ``build_course_snapshot_equation_ids``): a document reused by dozens of
+# courses must not turn one pipeline stage into an unbounded scan.
+MAX_COURSE_SNAPSHOTS = 20
 
 SKIP_REASON_NO_CONCEPT_LINK = "no_concept_link"
+# A required equation id (referenced by teaching material / evidence links)
+# that has no counterpart in this document's ``equation_semantics`` artifact.
+# Recorded, never fabricated into an input (指示書 §5.2).
+SKIP_REASON_EQUATION_NOT_RESOLVED = "equation_not_resolved"
+
+# ``![[equation:id]]`` / ``[[equation:id]]`` embeds in course snapshot text
+# (same two forms ``core/lecture.py::_resolve_equation_embeds`` resolves).
+_EQUATION_EMBED_RE = re.compile(r"!?\[\[\s*equation\s*:\s*([^\]]+)\]\]", re.IGNORECASE)
 
 
 def _clip(text: Any, limit: int = MAX_TEXT_CHARS) -> str:
@@ -587,6 +600,230 @@ def build_figure_element(
 
 
 # ---------------------------------------------------------------------------
+# Required equations (Phase 3 selection fix — 指示書 §5.2 /
+# element_context_presentation_redesign.md §8 Phase 3: "教材本文に
+# ``![[equation:id]]`` で埋め込まれた式は必ず対象").
+#
+# Equations used to sit last in a single ``component -> figure -> claim ->
+# equation`` concatenation that was then sliced by ``max_elements``, so on any
+# sizeable document *every* equation fell off the end and never got a
+# contextual explanation — precisely the elements whose readable one-line
+# headline Phase 3 exists to produce. Equations that the teaching material
+# actually shows are now collected up front and reserved outside the cap.
+# ---------------------------------------------------------------------------
+
+
+def _normalize_equation_id(value: Any) -> str:
+    """Fold an equation reference into the shared ``![[kind:id]]`` key space.
+
+    The normalization rule itself lives in
+    ``core.course_content_builder.normalize_evidence_id`` (the single source of
+    truth shared with ``lsNormalizeEvidenceId`` / ``normalizeMaterialEvidenceId``
+    on the frontend); this stage must not re-implement it (指示書 §5.2 "ID
+    正規化規則を course builder と二重実装しない"). Imported lazily — the course
+    builder pulls in the LLM / DB stack that this module has no other reason to
+    load — and fail-soft to a plain trim so a broken import degrades matching
+    rather than killing the stage.
+    """
+    try:
+        from core.course_content_builder import normalize_evidence_id
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "contextual_explanation: normalize_evidence_id unavailable; "
+            "falling back to trim-only equation id matching (non-fatal)",
+            exc_info=True,
+        )
+        return str(value or "").strip()
+    return normalize_evidence_id(value)
+
+
+def build_course_snapshot_equation_ids(material_id: str) -> list[str]:
+    """Normalized equation ids embedded as ``![[equation:id]]`` in course text.
+
+    The strongest possible evidence that a given equation is *presented to a
+    learner* is that a course snapshot already embeds it — including embeds a
+    teacher authored by hand, which no artifact-side link can reproduce. This
+    is the only reason the stage looks at ``learning_courses`` at all; the
+    lookup is bounded (:data:`MAX_COURSE_SNAPSHOTS`), read-only and fail-soft
+    (any error yields ``[]``, i.e. the other required sources still apply).
+
+    On a document's *first* analysis no course references it yet, so this
+    returns nothing; the value shows up on re-analysis of an in-use document.
+    """
+    material_id = str(material_id or "").strip()
+    if not material_id:
+        return []
+    try:
+        from sqlalchemy import text as sa_text
+
+        from core.course_data import iter_all_topics
+        from core.lecture import topic_spoken_script, topic_student_material
+        from core.postgres import get_session
+    except Exception:  # noqa: BLE001
+        return []
+
+    try:
+        session = get_session()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "contextual_explanation: course snapshot lookup unavailable for material=%s (non-fatal)",
+            material_id, exc_info=True,
+        )
+        return []
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT lc.data
+                FROM learning_courses lc
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM jsonb_array_elements(COALESCE(lc.data->'sources', '[]'::jsonb)) AS src
+                    WHERE src->>'material_id' = :material_id
+                )
+                LIMIT :limit
+                """
+            ),
+            {"material_id": material_id, "limit": MAX_COURSE_SNAPSHOTS},
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "contextual_explanation: course snapshot lookup failed for material=%s (non-fatal)",
+            material_id, exc_info=True,
+        )
+        return []
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for row in rows or []:
+        data = row[0] if not isinstance(row, dict) else row.get("data")
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except Exception:  # noqa: BLE001
+                continue
+        if not isinstance(data, dict):
+            continue
+        for topic in iter_all_topics(data):
+            for chunk in (topic_student_material(topic), topic_spoken_script(topic)):
+                for match in _EQUATION_EMBED_RE.finditer(chunk or ""):
+                    eq_id = _normalize_equation_id(match.group(1))
+                    if eq_id and eq_id not in seen:
+                        seen.add(eq_id)
+                        ordered.append(eq_id)
+    return ordered
+
+
+def _component_equation_refs(component_result: Any) -> list[str]:
+    """Equation ids the course builder's material rule reaches from components.
+
+    Mirrors ``course_content_builder._equations_for_components``: component
+    ``linked_equation_ids`` plus ``evidence_refs.equation_ids``. (The course
+    builder additionally keeps only the first 5 *per topic*; that cap belongs
+    to one topic's presentation, not to "is this equation ever shown", so it is
+    deliberately not applied here.)
+    """
+    refs: list[str] = []
+    for comp in getattr(component_result, "components", []) or []:
+        refs.extend(getattr(comp, "linked_equation_ids", []) or [])
+        evidence_refs = getattr(comp, "evidence_refs", None)
+        if isinstance(evidence_refs, dict):
+            refs.extend(evidence_refs.get("equation_ids") or [])
+    return [str(ref) for ref in refs if ref]
+
+
+def _thesis_equation_refs(thesis: Any) -> list[str]:
+    """``central_thesis`` / ``support_structure[]`` の ``equation_ids``.
+
+    Same flattening as ``persistence._thesis_ref_nodes`` (central node +
+    every support entry), reading the one field that helper drops.
+    """
+    refs: list[str] = []
+    central = getattr(thesis, "central_thesis", None)
+    if isinstance(central, dict):
+        refs.extend(central.get("equation_ids") or [])
+    support_structure = getattr(thesis, "support_structure", None)
+    if isinstance(support_structure, dict):
+        for entries in support_structure.values():
+            if not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if isinstance(entry, dict):
+                    refs.extend(entry.get("equation_ids") or [])
+    return [str(ref) for ref in refs if ref]
+
+
+def _derivation_result_equation_refs(derivations: Any) -> list[str]:
+    """Each derivation chain's **terminal output** equations.
+
+    Deliberately narrow: a chain's steps touch nearly every equation in the
+    document (each step's output is the next step's input), so treating the
+    whole chain as "教材提示対象" would make the required set ≈ all equations and
+    empty the reserved-quota design of meaning. What the material presents as a
+    derivation is its *result*, so only the chain-level ``output_equation_ids``
+    (system-level chains) — or, failing that, the last step's outputs — count.
+    Inputs and intermediates still reach the required set whenever a component,
+    claim, thesis node or course embed actually references them.
+    """
+    refs: list[str] = []
+    for chain in getattr(derivations, "chains", []) or []:
+        chain_outputs = [str(e) for e in (getattr(chain, "output_equation_ids", []) or []) if e]
+        if chain_outputs:
+            refs.extend(chain_outputs)
+            continue
+        steps = getattr(chain, "steps", []) or []
+        for step in reversed(steps):
+            step_outputs = [str(e) for e in (getattr(step, "output_equation_ids", []) or []) if e]
+            if step_outputs:
+                refs.extend(step_outputs)
+                break
+    return refs
+
+
+def collect_required_equation_ids(
+    *,
+    component_result: Any,
+    claim_objects: Any,
+    thesis: Any,
+    derivations: Any = None,
+    course_equation_ids: Iterable[str] | None = None,
+) -> list[str]:
+    """Normalized ids of equations the teaching material presents, in priority order.
+
+    Sources, strongest evidence first: course snapshot embeds, the component
+    rule the course builder itself uses, claim ``equation_ids``, thesis nodes,
+    and derivation results. Order-preserving and de-duplicated so one equation
+    is only ever built once (指示書 §5.2 "同じ equation は1回だけ入力する").
+    """
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        eq_id = _normalize_equation_id(raw)
+        if eq_id and eq_id not in seen:
+            seen.add(eq_id)
+            ordered.append(eq_id)
+
+    for raw in course_equation_ids or []:
+        _add(raw)
+    for raw in _component_equation_refs(component_result):
+        _add(raw)
+    for claim in getattr(claim_objects, "claims", []) or []:
+        for raw in getattr(claim, "equation_ids", []) or []:
+            _add(raw)
+    for raw in _thesis_equation_refs(thesis):
+        _add(raw)
+    for raw in _derivation_result_equation_refs(derivations):
+        _add(raw)
+    return ordered
+
+
+# ---------------------------------------------------------------------------
 # Top-level orchestration
 # ---------------------------------------------------------------------------
 
@@ -602,13 +839,32 @@ def build_contextual_explanation_inputs(
     apparatus_result: Any,
     thesis: Any,
     max_elements: int,
+    material_id: str | None = None,
+    derivations: Any = None,
 ) -> tuple[list[ElementExplanationInput], dict]:
     """Build the (priority-ordered, capped) element list + a stage_outputs meta dict.
 
-    Priority order (design §5.1 "選抜と上限"): component -> figure ->
-    claim (thesis-anchored first) -> equation. ``max_elements`` caps the
-    combined list; anything beyond the cap is recorded as ``truncated`` in
-    the returned meta, never silently lost from the count (P4).
+    Selection order (指示書 §5.2, superseding the flat concatenation of design
+    §5.1 "選抜と上限"):
+
+    1. **required equations** — equations the teaching material presents
+       (:func:`collect_required_equation_ids`). Reserved *outside*
+       ``max_elements``: they must not lose a priority contest to elements that
+       merely happen to sort earlier.
+    2. **priority elements** — component -> figure -> claim (thesis-anchored
+       first), i.e. the existing order, unchanged.
+    3. **optional equations** — every remaining equation, in artifact order.
+
+    ``max_elements`` caps (2)+(3); anything beyond it is recorded as
+    ``truncated`` in the returned meta, never silently lost from the count
+    (P4). ``max_elements <= 0`` stays a hard operator kill switch ("select zero
+    elements", matching apparatus_semantics's max-images-per-document
+    convention) and disables the stage outright, reservation included.
+
+    ``material_id`` (optional) enables the course-snapshot required source;
+    ``derivations`` (optional) the derivation-result one. Both degrade to
+    "source contributes nothing" when absent, so callers that cannot supply
+    them still get the other required sources.
     """
     del cartridge_id  # not needed for input construction; kept for call-site symmetry
 
@@ -674,24 +930,85 @@ def build_contextual_explanation_inputs(
             claim_elements_other.append(element)
     claim_elements = claim_elements_thesis + claim_elements_other
 
-    equation_elements = [
-        build_equation_element(
+    def _equation_element(eq: Any) -> ElementExplanationInput:
+        return build_equation_element(
             eq,
             claim_map=claim_map,
             equation_map=equation_map,
             thesis_ref_index=thesis_ref_index,
             resolve_library=resolve_library,
         )
+
+    # Artifact equations indexed by *normalized* id, so a reference written as
+    # ``eq_eq_F2`` in a course embed resolves to the artifact's ``eq_F2``
+    # (first occurrence wins if two raw ids normalize to the same key).
+    equation_by_normalized_id: dict[str, tuple[str, Any]] = {}
+    for raw_eq_id, eq in equation_map.items():
+        key = _normalize_equation_id(raw_eq_id)
+        if key and key not in equation_by_normalized_id:
+            equation_by_normalized_id[key] = (raw_eq_id, eq)
+
+    # A course spans several documents, so most of its embeds legitimately name
+    # equations from a *sibling* document. Those are not this document's
+    # business: keep only the ones this artifact can resolve, rather than
+    # reporting them as unresolved on every re-analysis.
+    course_equation_ids = [
+        eq_id
+        for eq_id in (
+            _normalize_equation_id(raw)
+            for raw in build_course_snapshot_equation_ids(material_id or "")
+        )
+        if eq_id in equation_by_normalized_id
+    ]
+    required_equation_ids = collect_required_equation_ids(
+        component_result=component_result,
+        claim_objects=claim_objects,
+        thesis=thesis,
+        derivations=derivations,
+        course_equation_ids=course_equation_ids,
+    )
+
+    required_equation_elements: list[ElementExplanationInput] = []
+    required_raw_ids: set[str] = set()
+    required_unresolved = 0
+    for eq_id in required_equation_ids:
+        entry = equation_by_normalized_id.get(eq_id)
+        if entry is None:
+            # Never fabricate an input for an id the artifact does not have
+            # (指示書 §5.2); record it instead (P4).
+            required_unresolved += 1
+            skipped.append({
+                "element_type": ELEMENT_TYPE_EQUATION,
+                "element_id": eq_id,
+                "reason": SKIP_REASON_EQUATION_NOT_RESOLVED,
+            })
+            continue
+        raw_eq_id, eq = entry
+        required_raw_ids.add(raw_eq_id)
+        required_equation_elements.append(_equation_element(eq))
+
+    optional_equation_elements = [
+        _equation_element(eq)
         for eq in getattr(equations, "equations", []) or []
         if str(getattr(eq, "equation_id", "") or "")
+        and str(getattr(eq, "equation_id", "")) not in required_raw_ids
     ]
 
-    combined = component_elements + figure_elements + claim_elements + equation_elements
+    capped_pool = (
+        component_elements + figure_elements + claim_elements + optional_equation_elements
+    )
+    combined = required_equation_elements + capped_pool
     # max_elements=0 means "select zero elements" (a hard operator override,
     # matching apparatus_semantics's max-images-per-document convention), not
-    # "cap disabled" — so this must not special-case 0 as unlimited.
-    truncated = len(combined) > max_elements
-    elements = combined[:max_elements] if truncated else combined
+    # "cap disabled" — so this must not special-case 0 as unlimited, and the
+    # required reservation does not survive the stage being switched off.
+    if max_elements <= 0:
+        elements: list[ElementExplanationInput] = []
+        required_selected = 0
+    else:
+        elements = required_equation_elements + capped_pool[:max_elements]
+        required_selected = len(required_equation_elements)
+    truncated = len(elements) < len(combined)
 
     meta = {
         "considered": len(combined),
@@ -702,8 +1019,15 @@ def build_contextual_explanation_inputs(
             "component": len(component_elements),
             "figure": len(figure_elements),
             "claim": len(claim_elements),
-            "equation": len(equation_elements),
+            "equation": len(required_equation_elements) + len(optional_equation_elements),
         },
         "skipped": skipped,
+        # 指示書 §5.2: required 数式の選抜を stage artifact から追跡できるようにする
+        # （既存キーの意味は変えない）。considered = 教材提示対象として集めた
+        # 正規化済み ID 数、selected = 実際に入力化した数、unresolved = artifact に
+        # 実体が無く ``equation_not_resolved`` として skipped に記録した数。
+        "required_equations_considered": len(required_equation_ids),
+        "required_equations_selected": required_selected,
+        "required_equations_unresolved": required_unresolved,
     }
     return elements, meta

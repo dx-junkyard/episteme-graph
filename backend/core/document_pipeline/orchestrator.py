@@ -1606,6 +1606,10 @@ def _stage_contextual_explanation(ctx: PipelineContext) -> bool:
                 fig_tbl=ctx.fig_tbl,
                 apparatus_result=ctx.apparatus_result,
                 thesis=ctx.thesis,
+                # 指示書 §5.2 の required equation 導出に使う（material_id =
+                # 既存コース snapshot の逆引きキー、derivations = 導出結果の式）。
+                material_id=ctx.material_id,
+                derivations=ctx.derivations,
                 effective_options=ctx.effective_options,
             )
         except Exception as exc:
@@ -3020,6 +3024,8 @@ def _build_contextual_explanation(
     fig_tbl: Any,
     apparatus_result: Any,
     thesis: Any,
+    material_id: str | None = None,
+    derivations: Any = None,
     effective_options: dict | None = None,
 ) -> dict:
     """contextual_explanation ステージ本体（design doc §5.1）。
@@ -3045,6 +3051,8 @@ def _build_contextual_explanation(
         apparatus_result=apparatus_result,
         thesis=thesis,
         max_elements=max_elements,
+        material_id=material_id,
+        derivations=derivations,
     )
 
     payload: dict[str, Any] = {
@@ -3055,6 +3063,11 @@ def _build_contextual_explanation(
         "truncated_count": meta.get("truncated_count", 0),
         "counts_by_kind": meta.get("counts_by_kind", {}),
         "skipped": meta.get("skipped", []),
+        # 指示書 §5.2: 教材提示対象の数式が何件あり、何件を入力化し、何件が
+        # artifact 未解決だったか。CostGate 到達で生成を諦めた run でも残る。
+        "required_equations_considered": meta.get("required_equations_considered", 0),
+        "required_equations_selected": meta.get("required_equations_selected", 0),
+        "required_equations_unresolved": meta.get("required_equations_unresolved", 0),
         "llm_calls": 0,
         "saved_candidates": 0,
         "agent_skipped": [],
