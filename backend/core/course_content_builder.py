@@ -12,6 +12,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from core import element_explanations as element_explanations_store
 from core.course_data import course_chapters, course_source_material_ids, course_title, course_topics
 from core.deliberation import labels as labels_mod
 from core.document_pipeline.figure_images import normalize_figure_join_key
@@ -88,7 +89,12 @@ def build_course_content(user_id: str, course_id: str) -> dict:
             return {"status": "waiting_for_pipeline", "updated_topics": 0}
 
         artifacts_by_doc = _load_latest_artifacts(session, document_ids)
-        bundle = _collect_structured_content(artifacts_by_doc)
+        # 承認済み contextual 説明（数式）を **document 集合まとめて1回**読む
+        # （element_context_presentation_redesign.md §8 Phase 3）。索引キーは
+        # (document_id, equation_id) — agent 側の equation ID は論文間で再利用され
+        # 得るため、equation ID 単独では別論文の説明と混線する。
+        equation_explanations = _load_approved_equation_explanations(session, document_ids)
+        bundle = _collect_structured_content(artifacts_by_doc, equation_explanations)
         if not bundle["mapping_topics"] and not bundle["components"]:
             _set_content_status(
                 course,
@@ -179,6 +185,33 @@ def _load_document_ids(session, material_ids: list[str]) -> list[str]:
     return [str(row[0]) for row in rows if row[0]]
 
 
+def _load_approved_equation_explanations(session, document_ids: list[str]) -> dict[tuple[str, str], str]:
+    """``(document_id, equation_id) -> 承認済み contextual 説明の本文``（1クエリ）。
+
+    数式見出しのラダー①（``labels.equation_label(explanation=...)``）の材料。
+    読み出し条件（approved / contextual / role IS NULL）の正本は
+    ``core.element_explanations.approved_contextual_bodies`` にあり、ここは呼ぶだけ。
+
+    **course build を止めない**（設計書 §5.4-6）: 旧 DB スキーマ・接続失敗などで
+    読めなければ空 dict へ縮退し、見出しは既存の決定論ラベルのままになる。失敗した
+    SELECT でトランザクションが中断状態になり得るため、後続の読み書きのために
+    rollback してから縮退する（この時点までの変更は無い）。
+    """
+    try:
+        return element_explanations_store.approved_contextual_bodies(
+            session,
+            document_ids,
+            element_type=element_explanations_store.ELEMENT_TYPE_EQUATION,
+        )
+    except Exception:
+        logger.warning("approved contextual equation explanations unavailable", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:
+            logger.warning("rollback after explanation lookup failed", exc_info=True)
+        return {}
+
+
 def _load_latest_artifacts(session, document_ids: list[str]) -> dict[str, dict]:
     """Load each document's adopted (active) run artifacts for course content (#408).
 
@@ -242,6 +275,12 @@ _GENERIC_EQUATION_TITLE = "数式"
 _EQUATION_SECTION_LABEL_LIMIT = 80
 _EQUATION_ASSUMPTION_LIMIT = 2
 _EQUATION_ASSUMPTION_TEXT_LIMIT = 120
+
+# 承認済み contextual 説明の本文を、ビルド中だけ equation レコードへ添えるための
+# 内部キー（element_context_presentation_redesign.md §8 Phase 3）。**スナップショット
+# には出さない** — ここから作った可読見出し（``headline``）だけを保存する（§5.4-5:
+# reviewer / status / 確度をスナップショットに焼かない）。
+_APPROVED_EXPLANATION_KEY = "_approved_contextual_explanation"
 
 
 def _defined_symbol_names(eq: dict) -> set[str]:
@@ -403,6 +442,12 @@ def _equation_semantic_projection(eq: dict) -> dict:
         "semantic_kind": _short_excerpt(semantic_kind, limit=120) if semantic_kind else "",
         "symbols": _equation_symbol_meanings(eq),
     }
+    # 承認済み contextual 説明が見出しとして採用できた場合のみ、その可読な一行を
+    # スナップショットへ載せる（§8 Phase 3）。未承認・棄却された説明は候補ごと
+    # 落ちるので、キー自体が現れない = 読み取り側は既存ラダーのまま。
+    headline = _equation_approved_headline(eq)
+    if headline:
+        projection["headline"] = headline
     section_label = _short_excerpt(
         str(eq.get("section_label") or ""), limit=_EQUATION_SECTION_LABEL_LIMIT
     )
@@ -466,25 +511,18 @@ def _equation_item_assumptions(link: dict | None, formula: dict | None) -> list[
     return out
 
 
-def _equation_display_title(
+def _equation_label_resolved(
     label: str | None,
     normalized_id: str,
     *,
     record: dict | None = None,
-) -> str:
-    """数式アイテムの表示タイトル（EH2: 裸の内部 ID を出さない）。
+    explanation: str | None = None,
+) -> "labels_mod.Label":
+    """ラベルラダー本体の呼び出し（``_equation_display_title`` と headline 判定の
+    共通経路）。**第2のラベル生成器を作らない**ため、materials 側の入口はここ1つ。
 
-    ラベル生成の正本は ``core/deliberation/labels.py`` のラベルラダー
-    （element_context_presentation_redesign.md §5.1）で、ここは**その委譲**である
-    — 第2のラベル生成器を持たない（CP1 / LE6′）。ラダーは
-    ① 論文の式番号（``eq_2_7`` → 「式 (2.7)」。合成 ID ``eq_tex_b14`` は式番号では
-    ないので採らない）② 記号 + 役割の決定論合成（「δ(t,x) を定義する式」）
-    ③ ``semantic_kind`` の第1文 ④ 役割訳 + 「式」 ⑤ 一般ラベル「数式」の順。
-
-    ``record`` は ``_equation_title_record`` が作る最小レコード（省略可）。
-    ラダーが尽きた（一般ラベルに落ちた）ときに限り、人間可読な明示ラベル
-    （内部 ID でも生 TeX でもないもの）を見出しに使う — 教員・A層が付けた読める
-    ラベルを「数式」に潰さないため（P4）。
+    ``explanation`` は教員が承認した contextual 説明の本文（ラダー①）。呼び出し側が
+    approved であることを確認して渡すこと（candidate を渡さない — 指示書 §2-8）。
     """
     text = str(label or "").strip()
     data = dict(record) if isinstance(record, dict) else {}
@@ -493,7 +531,77 @@ def _equation_display_title(
     norm = str(normalized_id or "").strip()
     if norm and not data.get("equation_id"):
         data["equation_id"] = norm
-    resolved = labels_mod.equation_label(data)
+    return labels_mod.equation_label(data, explanation=explanation or None)
+
+
+def _equation_approved_headline(eq: dict) -> str:
+    """承認済み contextual 説明が見出しに**採用されたときだけ**その一行を返す。
+
+    採否は ``labels.equation_label`` のラダー（第1文の切り出し・TeX / 内部 ID の
+    棄却）に委ね、``label_source`` が ``explanation`` になったかどうかだけを見る。
+    採用されなければ空文字を返し、スナップショットに ``headline`` キーを載せない
+    （＝読み取り側は従来どおり式番号・記号+役割・意味の要約のラダーで見出しを作る）。
+    """
+    if not isinstance(eq, dict):
+        return ""
+    body = str(eq.get(_APPROVED_EXPLANATION_KEY) or "").strip()
+    if not body:
+        return ""
+    resolved = _equation_label_resolved(
+        eq.get("label"),
+        str(eq.get("equation_id") or eq.get("id") or ""),
+        record=eq,
+        explanation=body,
+    )
+    if resolved.label_source != labels_mod.LABEL_SOURCE_EXPLANATION:
+        return ""
+    return resolved.text
+
+
+def _snapshot_headline(*candidates) -> str:
+    """スナップショットに保存済みの可読見出しのうち、そのまま表示してよい最初の1つ。
+
+    保存値はビルド時にラダーが作ったものなので通常は安全だが、旧データ・手編集を
+    考慮して読み取り時にも生 TeX・内部 ID を落とす（``_spoken_plain_text`` と同じ
+    「読み取り時の防衛」方針）。
+    """
+    for raw in candidates:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if _looks_like_tex_math(text) or labels_mod.is_internal_id_like(text):
+            continue
+        return text
+    return ""
+
+
+def _equation_display_title(
+    label: str | None,
+    normalized_id: str,
+    *,
+    record: dict | None = None,
+    explanation: str | None = None,
+) -> str:
+    """数式アイテムの表示タイトル（EH2: 裸の内部 ID を出さない）。
+
+    ラベル生成の正本は ``core/deliberation/labels.py`` のラベルラダー
+    （element_context_presentation_redesign.md §5.1）で、ここは**その委譲**である
+    — 第2のラベル生成器を持たない（CP1 / LE6′）。ラダーは
+    ① 承認済み contextual 説明の第1文（``explanation``。Phase 3 で結線。ビルド時
+    のみ渡す — 読み取り時は保存済み ``headline`` を使う）② 論文の式番号
+    （``eq_2_7`` → 「式 (2.7)」。合成 ID ``eq_tex_b14`` は式番号ではないので採らない）
+    ③ 記号 + 役割の決定論合成（「δ(t,x) を定義する式」）④ ``semantic_kind`` の第1文
+    ⑤ 役割訳 + 「式」 ⑥ 一般ラベル「数式」の順。
+
+    ``record`` は ``_equation_title_record`` が作る最小レコード（省略可）。
+    ラダーが尽きた（一般ラベルに落ちた）ときに限り、人間可読な明示ラベル
+    （内部 ID でも生 TeX でもないもの）を見出しに使う — 教員・A層が付けた読める
+    ラベルを「数式」に潰さないため（P4）。
+    """
+    text = str(label or "").strip()
+    resolved = _equation_label_resolved(
+        label, normalized_id, record=record, explanation=explanation
+    )
     if resolved.text and not resolved.unresolved:
         return resolved.text
     if text and not _looks_like_tex_math(text) and not labels_mod.is_internal_id_like(text):
@@ -567,7 +675,19 @@ def _equation_section_id(eq: dict) -> str:
     return str(eq.get("section_id") or "").strip()
 
 
-def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
+def _collect_structured_content(
+    artifacts_by_doc: dict[str, dict],
+    equation_explanations: dict[tuple[str, str], str] | None = None,
+) -> dict:
+    """artifact 群から course snapshot の素材を集める。
+
+    ``equation_explanations`` は ``_load_approved_equation_explanations`` が返す
+    ``(document_id, equation_id) -> 承認済み contextual 説明の本文``。**この関数の
+    中だけ**で equation レコードへ添え、見出し生成の材料にする（省略時は従来どおり
+    説明なしのラダー）。document ごとのループ内で引くため、別論文の同名 equation ID
+    と混線しない。
+    """
+    equation_explanations = equation_explanations or {}
     mapping_topics: list[dict] = []
     components: dict[str, dict] = {}
     equations: dict[str, dict] = {}
@@ -639,6 +759,9 @@ def _collect_structured_content(artifacts_by_doc: dict[str, dict]) -> dict:
             _fill_equation_display_math(eq)
             eq_id = str(eq.get("equation_id") or eq.get("id") or "")
             if eq_id:
+                approved_body = equation_explanations.get((str(document_id), eq_id))
+                if approved_body:
+                    eq[_APPROVED_EXPLANATION_KEY] = approved_body
                 equations[eq_id] = eq
 
         # claims.json (ClaimObjectBuilder) を取り込み、claim を根拠アイテム化できるようにする。
@@ -991,6 +1114,9 @@ def _topic_evidence_links(
                 "role_in_argument": eq_semantics["role_in_argument"],
                 "semantic_kind": eq_semantics["semantic_kind"],
                 "symbols": eq_semantics["symbols"] or None,
+                # §8 Phase 3: 承認済み contextual 説明から作った可読見出し。
+                # 説明が無い / 採用されなかった式ではキーごと落ちる。
+                "headline": eq_semantics.get("headline") or None,
                 # §8 Phase 2: 掲載節・前段リンク状態・成立条件。事実が無いキーは
                 # add() が落とす（空欄のキーを snapshot に増やさない）。
                 "section_label": eq_semantics.get("section_label") or None,
@@ -1149,6 +1275,10 @@ def _topic_content_block_formulas(topic: dict) -> list[dict]:
                 "symbols": [
                     s for s in _as_list(item.get("symbols")) if isinstance(s, dict)
                 ][:_EQUATION_SYMBOL_LIMIT],
+                # element_context_presentation_redesign.md §8 Phase 3 の追加分
+                # （承認済み contextual 説明由来の可読見出し。旧スナップショット・
+                # 未承認の式では空）。
+                "headline": item.get("headline") or "",
                 # element_context_presentation_redesign.md §8 Phase 2 の追加分。
                 "section_label": item.get("section_label") or "",
                 "link_status": item.get("link_status") or "",
@@ -1272,8 +1402,12 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
                 "kind": "equation",
                 "id": norm,
                 # 生 LaTeX をタイトルに出さない。裸の内部 ID も出さない（EH2）。
-                # 見出しはラベルラダー（labels.equation_label）へ委譲する。
-                "title": _equation_display_title(
+                # 見出しはラベルラダー（labels.equation_label）へ委譲する。ビルド時に
+                # 承認済み contextual 説明から作った ``headline`` が保存されていれば
+                # それがラダー①の結果なのでそのまま使う（§8 Phase 3。ここで DB は
+                # 引かない — 本関数はスナップショットだけを読む純粋 helper）。
+                "title": _snapshot_headline(link.get("headline"), formula.get("headline"))
+                or _equation_display_title(
                     link.get("label") or formula.get("label"), norm, record=title_record
                 ),
                 "summary": summary,
@@ -1367,7 +1501,8 @@ def build_topic_evidence_items(topic: dict) -> list[dict]:
         items.append({
             "kind": "equation",
             "id": norm,
-            "title": _equation_display_title(formula.get("label"), norm, record=title_record),
+            "title": _snapshot_headline(formula.get("headline"))
+            or _equation_display_title(formula.get("label"), norm, record=title_record),
             # summary に latex を入れない（EH1: 数式の再掲を作らない。かつて
             # ここが生 TeX の供給源になっていた）。意味の要約か読み下しだけを使う。
             "summary": title_record["semantic_kind"] or spoken,

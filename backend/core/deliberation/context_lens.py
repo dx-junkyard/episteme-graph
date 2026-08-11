@@ -86,6 +86,7 @@ from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
 from core.document_pipeline.figure_images import normalize_figure_join_key
+from core import element_explanations as element_explanations_store
 from core.element_vocab import link_status_fact, theory_stage_key
 from core.figure_presentation import presentation_payload
 from core.library import schema as library_schema
@@ -645,15 +646,27 @@ def _equation_by_id(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 
 def _equation_label(
-    record: dict[str, Any] | None, *, symbols: list[dict[str, Any]] | None = None
+    record: dict[str, Any] | None,
+    *,
+    symbols: list[dict[str, Any]] | None = None,
+    explanations: dict[str, str] | None = None,
 ) -> "labels_mod.Label":
     """数式のラベルラダー（§5.1）。**生 TeX・内部 ID をラベル素材にしない**。
 
     旧実装は ``plain_text → latex → …`` の 80 字機械切りだったため、読み下しの無い
     式では必ず「コマンド途中で切れた生 TeX」がラベルになっていた（RC2）。正本は
     ``core/deliberation/labels.py`` の ``equation_label``。
+
+    ``explanations`` は ``_approved_equation_explanations()`` が作る
+    ``{equation_id: 承認済み contextual 説明の本文}``（Phase 3 のラベル結線）。
+    ラダー① の材料として渡すだけで、採否（TeX・内部 ID だけの本文の棄却、第1文の
+    切り出し）は ``labels.equation_label`` 側が判断する — ここで第2の採否規則を
+    作らない。索引に無い式は従来どおりラダー②以降へ落ちる。
     """
-    return labels_mod.equation_label(record, symbols=symbols)
+    body = ""
+    if explanations and isinstance(record, dict):
+        body = str(explanations.get(str(record.get("equation_id") or "")) or "").strip()
+    return labels_mod.equation_label(record, symbols=symbols, explanation=body or None)
 
 
 def _artifact_claim_text_index(claim_objects: list[dict[str, Any]]) -> dict[str, str]:
@@ -1252,11 +1265,13 @@ def _equation_focus_role(chain: dict[str, Any], equation_id: str) -> str:
 
 
 def _equation_mini(
-    eq_index: dict[str, dict[str, Any]], equation_id: str
+    eq_index: dict[str, dict[str, Any]],
+    equation_id: str,
+    explanations: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """derivations[] の入出力に載せる最小の式参照（MINI。§4.2）。"""
     record = eq_index.get(equation_id)
-    label = _equation_label(record)
+    label = _equation_label(record, explanations=explanations)
     return {
         "element_type": ELEMENT_EQUATION,
         "element_id": equation_id if record else None,
@@ -1282,6 +1297,7 @@ def _equation_derivation_stories(
     chains: list[dict[str, Any]],
     equation_id: str,
     eq_index: dict[str, dict[str, Any]],
+    explanations: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """equation focus の「入力 →[操作]→ 出力 + この式の役割」カード（§4.4 derivations[]）。
 
@@ -1306,8 +1322,8 @@ def _equation_derivation_stories(
                 "chain_type": str(chain.get("chain_type") or ""),
                 "operation_text": labels_mod.derivation_operation_summary(chain, translate=True),
                 "focus_role": _equation_focus_role(chain, equation_id),
-                "inputs": [_equation_mini(eq_index, eid) for eid in inputs],
-                "outputs": [_equation_mini(eq_index, eid) for eid in outputs],
+                "inputs": [_equation_mini(eq_index, eid, explanations) for eid in inputs],
+                "outputs": [_equation_mini(eq_index, eid, explanations) for eid in outputs],
                 "eliminated_symbols": [
                     str(s) for s in (chain.get("eliminated_symbols") or []) if str(s or "").strip()
                 ],
@@ -1709,6 +1725,31 @@ def _annotations_for(element_type: str, element_id: str, document_id: str | None
     )
 
 
+def _approved_equation_explanations(document_id: str) -> dict[str, str]:
+    """この document の数式について、教員が**承認した** contextual 説明の本文を
+    ``{equation_id: body}`` で返す（Phase 3 のラベル結線。§5.1 ラダー①）。
+
+    1つの投影で複数の式にラベルを付けるため（focus 見出し・入出力式・グラフノード
+    ラベル）、式ごとに DB を引かず **document 単位で1回**だけ引いて呼び出し側で
+    使い回す。読み出し条件（approved / contextual / role IS NULL）の正本は
+    ``core.element_explanations`` 側にあり、ここでは status 語彙も SQL も持たない。
+
+    呼び出し側は ``_safe()`` で包むこと。取得できなければ ``{}`` へ縮退し、
+    ラベルは既存ラダー（式番号 → 記号+役割 → 意味の要約 → 一般ラベル）のままになる。
+    """
+    doc = str(document_id or "").strip()
+    if not doc:
+        return {}
+    session = get_session()
+    try:
+        index = element_explanations_store.approved_contextual_bodies(
+            session, [doc], element_type=element_explanations_store.ELEMENT_TYPE_EQUATION
+        )
+    finally:
+        session.close()
+    return {element_id: body for (_doc_id, element_id), body in index.items()}
+
+
 # ---------------------------------------------------------------------------
 # focus.generic（設計書 §6 Phase 3: 汎用×固有の結線）
 # ---------------------------------------------------------------------------
@@ -1860,6 +1901,7 @@ def _build_claim(ref: ElementRef) -> dict[str, Any] | None:
 
         eq_index = _equation_by_id(refs_mod.equation_records(document_id, artifacts=artifacts))
         symbol_records = _list(artifacts.get("symbol_registry"), "records")
+        eq_explanations = _safe(lambda: _approved_equation_explanations(document_id), {})
         for eq_id, status in [
             (eq_id, _status_for_link("explicit")) for eq_id in claim_obj.get("equation_ids") or []
         ] + [
@@ -1870,7 +1912,10 @@ def _build_claim(ref: ElementRef) -> dict[str, Any] | None:
             lower.append(
                 _item_from_label(
                     "equation", str(eq_id) if eq_record else None, document_id,
-                    _equation_label(eq_record, symbols=symbol_records), "quantified_by", status,
+                    _equation_label(
+                        eq_record, symbols=symbol_records, explanations=eq_explanations
+                    ),
+                    "quantified_by", status,
                     evidence_refs=[str(eq_id)], group=GROUP_EQUATION_DOWN,
                 )
             )
@@ -1985,6 +2030,9 @@ def _build_equation(ref: ElementRef) -> dict[str, Any] | None:
         record.get("reconstruction") if isinstance(record.get("reconstruction"), dict) else {}
     )
     symbol_records = _list(artifacts.get("symbol_registry"), "records")
+    # 承認済み contextual 説明（この document の全式ぶんを1回だけ読む）。取得できな
+    # ければ {} で、ラベルは既存ラダーのまま（fail-soft）。
+    explanations = _safe(lambda: _approved_equation_explanations(document_id), {})
 
     upper: list[dict[str, Any]] = []
     lower: list[dict[str, Any]] = []
@@ -2002,7 +2050,9 @@ def _build_equation(ref: ElementRef) -> dict[str, Any] | None:
         )
 
     def _equation_item_label(equation_id: str) -> "labels_mod.Label":
-        return _equation_label(eq_index.get(str(equation_id)), symbols=symbol_records)
+        return _equation_label(
+            eq_index.get(str(equation_id)), symbols=symbol_records, explanations=explanations
+        )
 
     for cid in sem.get("linked_claim_ids") or []:
         upper.append(_claim_item(cid, "quantifies", _status_for_link("explicit"), GROUP_CLAIM))
@@ -2117,7 +2167,7 @@ def _build_equation(ref: ElementRef) -> dict[str, Any] | None:
         fallback_status=CONTEXT_STATUS_SOURCE_BACKED,
     )
 
-    headline = _equation_label(record, symbols=symbol_records)
+    headline = _equation_label(record, symbols=symbol_records, explanations=explanations)
     summary = str(sem.get("summary") or "").strip()
     needs_math_review = bool(source_extraction.get("needs_math_review"))
     reading = str(reconstruction.get("plain_text") or source_extraction.get("plain_text") or "").strip()
@@ -2165,7 +2215,9 @@ def _build_equation(ref: ElementRef) -> dict[str, Any] | None:
             "stage": {"key": stage_key, "description": stage_description} if stage_key else None,
             "thesis_role": thesis_items[0]["label"] if thesis_items else "",
         },
-        "derivations": _equation_derivation_stories(chains, ref.element_id, eq_index),
+        "derivations": _equation_derivation_stories(
+            chains, ref.element_id, eq_index, explanations
+        ),
         "contextual_role": role_text,
         "contextual_role_status": role_status,
         "contextual_role_source": role_source,
@@ -2205,9 +2257,12 @@ def _build_component(ref: ElementRef) -> dict[str, Any] | None:
         _safe(lambda: refs_mod.equation_records(document_id, artifacts=artifacts), [])
     )
     symbol_records = _list(artifacts.get("symbol_registry"), "records")
+    explanations = _safe(lambda: _approved_equation_explanations(document_id), {})
 
     def _equation_item_label(equation_id: Any) -> "labels_mod.Label":
-        return _equation_label(eq_index.get(str(equation_id)), symbols=symbol_records)
+        return _equation_label(
+            eq_index.get(str(equation_id)), symbols=symbol_records, explanations=explanations
+        )
 
     upper: list[dict[str, Any]] = []
     lower: list[dict[str, Any]] = []
@@ -2788,9 +2843,12 @@ def _build_derivation(ref: ElementRef) -> dict[str, Any] | None:
     component_lookup = _safe(lambda: _component_id_lookup(document_id), {})
     eq_index = _equation_by_id(refs_mod.equation_records(document_id, artifacts=artifacts))
     symbol_records = _list(artifacts.get("symbol_registry"), "records")
+    explanations = _safe(lambda: _approved_equation_explanations(document_id), {})
 
     def _equation_item_label(equation_id: Any) -> "labels_mod.Label":
-        return _equation_label(eq_index.get(str(equation_id)), symbols=symbol_records)
+        return _equation_label(
+            eq_index.get(str(equation_id)), symbols=symbol_records, explanations=explanations
+        )
 
     upper: list[dict[str, Any]] = []
     lower: list[dict[str, Any]] = []

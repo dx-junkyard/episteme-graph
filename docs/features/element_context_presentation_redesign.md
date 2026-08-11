@@ -11,7 +11,8 @@
   `learner_element_context_design.md`（LE1〜LE8）/
   `element_context_lens_design.md`（W層 context lens）/
   `component_evidence_redesign.md`（component チップ = 良い先例）
-- 状態: **Phase 0〜2 実装済み（2026-08-03）** — §10 実装記録を参照。Phase 3（二層説明の結線）は未着手。
+- 状態: **Phase 0〜3 実装済み（Phase 0〜2: 2026-08-03 / Phase 3: 2026-08-11）** —
+  §10 実装記録を参照（Phase 3 は §10.6）。
   調査は Fable 5 指揮 + Opus 5 サブエージェント8体（現状調査5 + 設計3レンズ）、
   実装は同体制の3 Wave + 統合（2026-08-02〜03）。
 
@@ -501,6 +502,8 @@ derivations[] ストーリーブロック（v2 提示）。
 `label_source="explanation"`（**approved のみ**）をラダー最上位に結線。
 A層非改変のまま日本語 headline が手に入る唯一の経路。
 
+**実装済み（2026-08-11）— 実装記録は §10.6。**
+
 ### A層の扱い（総合判定: **今回は一切手を入れない**）
 - `teaching_takeaway` の英語テンプレ+生ID → 投影側の決定論合成（chain_type + operation +
   可読式ラベル）の方が安く良い。
@@ -684,8 +687,7 @@ A層非改変のまま日本語 headline が手に入る唯一の経路。
 
 ### 10.5 既知の残作業・申し送り
 
-- **Phase 3（二層説明の結線）未着手**: `labels.equation_label(explanation=)` の口は開いている。
-  equation の contextual 説明選抜是正 + approved のみ結線で日本語一行の headline になる
+- ~~**Phase 3（二層説明の結線）未着手**~~ → **2026-08-11 に実装済み（§10.6）**
 - **docker 実機 E2E 未実施**（S1〜S4 の目視。トピック再生成後に掲載節・成立条件が hover に出ること）
 - node harness テスト4件はこの環境では skip（node 不在）。CI で実走確認を推奨
 - 旧スナップショットのコースは S1/S3 外殻が旧形のまま（劣化許容・再生成で改善）。S2/S3展開/S4 は
@@ -693,3 +695,76 @@ A層非改変のまま日本語 headline が手に入る唯一の経路。
 - element-vocab.js に link_status の**事実文**ミラーは未追加（S3 外殻カードで「前段が無い理由」を
   出す場合に必要。現状は展開部の intrinsic.facts / review_notes がサーバ合成で供給するため非必須）
 - W層 dialogue.py の grounding は新キーを自動で受けて改善（追加コールなし）。明示的な区画化注入は将来課題
+
+---
+
+## 10.6 実装記録（2026-08-11、Phase 3 = 承認済み contextual 説明のラベル結線）
+
+正本の作業指示は `security_and_context_phase3_implementation_directive.md` §5.3〜§5.7。
+本節は同 §5.3〜§5.5（**approved contextual 説明 → 数式ラベルラダー① の結線**）の記録である。
+同フェーズのもう半分（§5.2 contextual 生成の equation 選抜是正、
+`document_pipeline/contextual_explanation_inputs.py`）は別作業単位。
+
+**A層・DB スキーマ・migration の変更なし**（新テーブル・新列・新エンドポイントもゼロ）。
+
+### 変更ファイル
+
+| ファイル | 内容 |
+|---|---|
+| `backend/core/element_explanations.py` | 読み取り専用の一括 helper `approved_contextual_bodies(session, document_ids, *, element_type)` を新設。**1クエリ**で `(document_id, element_id) -> body` を返す（条件は `status='approved'` / `kind='contextual'` / `role IS NULL` / 本文非空。同一キーに複数 approved があれば created_at 最新を1本だけ採る）。空入力は SQL 非発行。既存 `approved_for_elements`（1 document + ID 明示集合）は不変 |
+| `backend/core/deliberation/context_lens.py` | `_approved_equation_explanations(document_id)`（document 単位で1回だけ読む薄いラッパ・store へ委譲し status 語彙も SQL も持たない）+ `_equation_label(..., explanations=)` を新設し、`labels.equation_label(explanation=)` へ橋渡し。`_build_equation` / `_build_claim` / `_build_component` / `_build_derivation` の4レンズが**投影1回につき1クエリ**で索引を作り、focus 見出し・関連式 ITEM・`derivations[]` の MINI 参照すべてに同じ見出しを供給する（式ごとに DB を引かない）。取得は全て `_safe()` 包み = 失敗時 `{}` へ縮退 |
+| `backend/core/course_content_builder.py` | `build_course_content` が `document_ids` 解決後に `_load_approved_equation_explanations(session, document_ids)` で**まとめて1回**取得 → `_collect_structured_content(artifacts_by_doc, equation_explanations)` が document ループ内で `(document_id, equation_id)` 一致の本文だけを equation レコードへ添える（内部キー `_APPROVED_EXPLANATION_KEY`）。`_equation_semantic_projection` が採用された見出しだけを `headline` として投影し、`_content_blocks` の equations アイテムと `_topic_evidence_links` の equation link に載る。読み取り側（`build_topic_evidence_items` / `_topic_content_block_formulas`）は保存済み `headline` を優先し、**DB を引かない純粋 helper のまま**。ラダー呼び出しは `_equation_label_resolved` に一本化（`_equation_display_title` はその委譲・`explanation=` を追加） |
+
+### 設計上の裁定
+
+- **スナップショットに焼くのは可読見出しだけ**（§5.4-5）。`headline` は
+  「承認済み説明がラダー①として**採用された**（`label_source == "explanation"`）」ときだけ
+  キーごと載せる。未承認・TeX だけ・内部 ID だけの説明はキー自体が現れず、読み取り側は
+  従来のラダー（式番号 → 記号+役割 → 意味の要約 → 役割訳 → 一般ラベル）のまま。
+  reviewer / status / 確度・**説明本文の全文**は保存しない（第1文の見出しのみ）。
+- **索引キーは必ず `(document_id, equation_id)`**。agent 側の equation ID
+  （`eq_tex_b14` 等）は論文間で再利用され得るため、bundle の `equations` が
+  equation_id 単独キーであっても、説明の解決は document ループ内で行う。
+- **切り出し・採否はラベルラダーの1実装に委ねる**。第1文の抽出は
+  `core/text_excerpt.first_sentence`、TeX・内部 ID の棄却は `labels._usable()`。
+  course_content_builder 側に第2の採否規則を書かない（CP5 / CP1）。
+- **CP1**: 説明全文を `focus.intrinsic_summary` / `semantic_kind` へ複製しない
+  （見出しと意味の一行が同一文字列にならないことをテストで固定）。
+- **CP6**: 関係集合 `(element_type, element_id, relation, relation_status)` は
+  説明の有無で完全に不変（説明は見出しの材料であって関係ではない）。
+- **fail-soft を2段で**: lens は `_safe()`、course build は try/except + `session.rollback()`
+  （失敗 SELECT でトランザクションが中断状態になった場合に後続の読み書きを巻き込まないため。
+  この時点までに書き込みは無い）。どちらも course build / lens 全体を止めない。
+- **読み取り時の防衛**: 保存済み `headline` も `_snapshot_headline()` が生 TeX・内部 ID を
+  弾いてから使う（旧データ・手編集をそのまま信じない）。
+
+### 届き方（後方互換）
+
+| 経路 | 反映タイミング |
+|---|---|
+| S2 文脈パネル / S3 展開 / S4 深く検討 | **デプロイ即時**（live lens が毎回 approved を読む） |
+| S1 ホバー / S3 外殻 | **トピック再生成後**（snapshot の `headline`）。旧コースは従来ラベルのまま＝劣化許容 |
+| 未承認（candidate のみ）の式 | 従来ラベルへ縮退。候補の存在自体を学習者・教員 UI に出さない |
+
+### テスト
+
+`backend/tests/test_deliberation_context_lens.py`（+27）/
+`test_context_lens_readability.py`（+11）/ `test_topic_material_evidence_items.py`（+21）:
+
+- approved contextual の**第1文**が headline になり `label_source='explanation'`
+- candidate / dismissed / superseded / **approved generic** / `role='discussion_seed'` は読まれない
+- approved 無しは既存ラダー順を維持・別 document の同名 equation ID と混線しない
+- lens / course build とも取得失敗で DTO・snapshot 生成が壊れない（既存ラベルへ縮退）
+- course build が `(document_id, equation_id)` で解決し snapshot title に反映（end-to-end）
+- 学習者 DTO に `label_source` / reviewer / 説明 status / 説明本文が漏れない
+- headline に TeX・UUID・`eq_tex_*` が出ない / CP6 関係集合が不変
+
+結果: **backend 8,837 passed / 25 skipped、src 1,803 passed**（回帰なし）。**未コミット**。
+
+### 残作業
+
+- docker 実機 E2E（承認済み説明のある式が S2 / S3展開 / S4 で同じ見出しになること、
+  トピック再生成後に S1 / S3外殻が追随すること、candidate しかない式が従来ラベルへ縮退すること）
+- 教材本文の決定論注入（`_ensure_required_equations_in_material` の「この節で使う数式」行）は
+  `label or equation_id` のままで `headline` を使っていない。指示書 §5.1 が挙げた4画面
+  （S1〜S4）の外なので今回は変更しなかった
