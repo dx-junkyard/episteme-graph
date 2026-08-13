@@ -520,21 +520,48 @@ def _backbone_fact_line(node: dict[str, Any]) -> str:
     return _SYSTEM_UNCONFIRMED_PREFIX + "。"
 
 
+def _join_fact_sentences(base: str, addition: str) -> str:
+    """事実文を「。」区切りで連結する（末尾の句点を重複させない）。"""
+    base = (base or "").rstrip()
+    if not base:
+        return addition
+    if not base.endswith("。"):
+        base += "。"
+    return base + addition
+
+
 def _assumption_fact_line(item: dict[str, Any]) -> str:
     """未検証合意リスト項目（``compile_open_assumptions`` の1件）の事実文。
 
     **主語は論文**（この論文が確かめていないこと）。``routes/doubt.py::_learner_fact_line``
     と同じ「検証済みも未記帳も同じ精度で併記する」思想（§8-1/8-2）を、開幕画面向けの
     短い一文に凝縮したもの。内部語彙（記帳・スコープ）は学習者向けに平易化する。
+
+    SL-1（賭け金の台帳, §7）: ``compile_open_assumptions`` が付与する
+    ``has_falsification_condition`` / ``falsification_not_formulable`` キーが**存在する**
+    ときだけ、覆る条件の記帳状況を後段に「。」区切りで連結する（設計書 §7 の3文言を
+    逐語で使う）。これらのキーを持たない旧形状の item（SL 結線前の単体テスト等）は
+    従来どおりの文だけを返す（後方互換・情報を落とさない）。
     """
     if bool(item.get("scope_count_is_zero")):
-        return "どの範囲で確かめたかが記録されていません。"
-    status = str(item.get("verification_status") or "unknown")
-    if status in ("untested", "unknown"):
-        return "検証の記録がない前提です。"
-    if status == "refuted":
-        return "反証の記録がある前提です。"
-    return "検証状況の記録がある前提です。"
+        base = "どの範囲で確かめたかが記録されていません。"
+    else:
+        status = str(item.get("verification_status") or "unknown")
+        if status in ("untested", "unknown"):
+            base = "検証の記録がない前提です。"
+        elif status == "refuted":
+            base = "反証の記録がある前提です。"
+        else:
+            base = "検証状況の記録がある前提です。"
+
+    if "has_falsification_condition" not in item and "falsification_not_formulable" not in item:
+        return base
+
+    if bool(item.get("has_falsification_condition")):
+        return _join_fact_sentences(base, "何が起これば覆るかが記帳されている前提です。")
+    if bool(item.get("falsification_not_formulable")):
+        return _join_fact_sentences(base, "反証条件を定式化できないと記帳されている前提です。")
+    return _join_fact_sentences(base, "覆る条件はまだ定式化されていません。")
 
 
 def project_fragile_points(

@@ -102,6 +102,32 @@ def collect_doubt_metrics() -> dict:
         row = session.execute(sa_text("SELECT COUNT(*) FROM verification_proposals")).fetchone()
         metrics["verification_proposals"] = {"total": int(row[0] or 0) if row else 0}
 
+        # SL-8: 検証提案のステータス遷移数（proposal PATCH の action 記帳）。
+        row = session.execute(sa_text("""
+            SELECT COUNT(*) FILTER (WHERE entity_type = 'verification_proposal'
+                                       AND (metadata->>'action') = 'status_transition')
+            FROM theory_review_events
+        """)).fetchone()
+        metrics["verification_proposals"]["status_transitions"] = int(row[0] or 0) if row else 0
+
+        # SL-1: 反証条件レジストリの人間の記帳行為数（falsification_* 4種の action 語彙）。
+        row = session.execute(sa_text("""
+            SELECT
+                COUNT(*) FILTER (WHERE entity_type = 'ledger' AND (metadata->>'action') = 'falsification_add'),
+                COUNT(*) FILTER (WHERE entity_type = 'ledger' AND (metadata->>'action') = 'falsification_patch'),
+                COUNT(*) FILTER (WHERE entity_type = 'ledger'
+                                   AND (metadata->>'action') = 'falsification_candidate_confirm'),
+                COUNT(*) FILTER (WHERE entity_type = 'ledger'
+                                   AND (metadata->>'action') = 'falsification_candidate_dismiss')
+            FROM theory_review_events
+        """)).fetchone()
+        metrics["falsification_actions"] = {
+            "recorded": int(row[0] or 0) if row else 0,
+            "patched": int(row[1] or 0) if row else 0,
+            "candidates_confirmed": int(row[2] or 0) if row else 0,
+            "candidates_dismissed": int(row[3] or 0) if row else 0,
+        }
+
         # 反実仮想セッション数と共有数
         row = session.execute(sa_text("""
             SELECT COUNT(*),
