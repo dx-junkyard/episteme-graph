@@ -1,7 +1,7 @@
 # docs/manual のAIアシスタント知識源化 — 最終設計書（3チーム代表討議 統合版）
 
 - 対象: episteme-graph（ura-dev）
-- ステータス: 討議確定 + ユーザー決定反映済み（2026-07-25）・Phase 0 実装待ち
+- ステータス: **Phase 0〜3 全実装済み**（migration 058/059、`backend/core/help_kb/`。討議確定 2026-07-25 → 同日実装。※旧表記「Phase 0 実装待ち」は 2026-08-13 の総点検で更新）
 - 関連正本: `docs/features/admin_assistant_design.md` / `guidance_layer_design.md` / `assistant_common_infra_design.md`
 - 討議の性格: チームA（最小コスト）・チームB（ガバナンス）・チームC（体験最大化）の3案を相互検証のうえ統合。単なる折衷ではなく、実機検証で生き残った設計だけを採用した。
 

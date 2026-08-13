@@ -1,6 +1,6 @@
 # 管理画面 統合AIアシスタント（Admin Copilot）設計
 
-> ステータス: Draft（設計提案）
+> ステータス: **実装済み**（migration 034、`backend/core/admin_assistant/` + `routes/admin_assistant.py`。本書は設計正本として凍結。※旧表記「Draft（設計提案）」は 2026-08-13 の総点検で更新）
 > 対象ブランチ想定: `learning-ux` の後続 / `feature/admin-assistant`
 > 関連層: 本機能は **横断ユーティリティ層**。A層（`src/episteme_graph/agents/`）・B層（学習）・C層（承認）・D層（Doubt）のコードは**変更しない**（既存 API を呼ぶ側として実装する）。
 

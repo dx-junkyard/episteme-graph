@@ -2,6 +2,12 @@
 
 [← ドキュメント目次](../README.md)
 
+> **鮮度注記（2026-08-13）:** 本書のステージ表は「26 ステージ」時点のもの。現行の
+> `_PIPELINE_STEPS` は **named 29 ステージ + フック2件**で、
+> `contextual_explanation`（二層説明）・`discuss_opening`（議論のきっかけ生成）・
+> `landscape_placement`（分野地図への配置）の3ステージが本書の表に未反映。
+> 一次情報は `backend/core/document_pipeline/orchestrator.py` の `PIPELINE_STAGES`。
+
 教材としてアップロードされた PDF を、再利用可能な理論コンポーネント／コース教材へ変換する
 **ドキュメントファースト・パイプライン**の全体像です。
 

@@ -2,6 +2,13 @@
 
 [← ドキュメント目次](../README.md) ｜ [← コアエンジン](core-engine.md)
 
+> **鮮度注記（2026-08-13）:** 本書は 2026-07-17 時点の記述で、以降に追加された
+> **discuss モード（`intent_mode` の4値目。論文と話す・開幕/着地・歩調合わせ）**・
+> 可視性フィルタ（`allowed_document_ids` fail-closed）・理解サイクル（cycle）等が未反映。
+> 現行の正本は CLAUDE.md の該当節と
+> [discussion_mode_design.md](../features/discussion_mode_design.md) /
+> [understanding_cycle_design.md](../features/understanding_cycle_design.md) を参照。
+
 学生の質問に答える RAG（Retrieval-Augmented Generation）の流れを解説します。
 実チャットの正本は `POST /api/learning/courses/{cid}/topics/{tid}/chat`（`api/routes/learning.py::learning_chat`）で、
 コンテキスト構築・出所判定（content_grounding）・casual モード分岐までここに実装されています。

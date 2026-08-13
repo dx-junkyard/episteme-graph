@@ -3,6 +3,12 @@
 対象仕様: `docs/features/element_deliberation_workspace_design.md`  
 レビュー対象: 作業ツリー上の W層 Phase 0 / W-β 実装（2026-07-15）
 
+> **解消済み注記（2026-08-13）:** 本レビューの P1/P2 の4指摘は、その後の実装で**すべて解消済み**
+> であることをコード実読で確認した（`048_element_identity_links.sql` の UNIQUE は
+> `instance_document_id` を含む4列 / document 権限ゲート ほか）。当時のレビュー記録として保存する。
+> なお本書のコード参照リンクは執筆環境のローカル絶対パスであり、他クローンでは機能しない
+> （記法の統一提案は `docs/architecture/feature_consolidation_proposals_2026-08-13.md` §1）。
+
 ## 指摘事項
 
 ### [P1] 数式の同一性リンクが document_id で区別されず、別論文のリンクを衝突・漏えいさせる

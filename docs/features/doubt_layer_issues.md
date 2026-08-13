@@ -1,6 +1,12 @@
 # D層（Doubt Layer）実装 issue 分割設計
 
+> **状態: 全 issue 実装済み**（migration 029〜033、`backend/core/doubt/` + `routes/doubt.py`。
+> 2026-08-13 追記。SL層 = migration 067 が本層の双対拡張として上に積まれている —
+> `stakes_ledger_design.md` 参照）
 > **正本**: `episteme-graph_D層構想準備資料.md`（前提の台帳と地図）
+> ※この構想準備資料は**リポジトリ未コミットのまま欠落**している（2026-08-13 総点検
+> `docs/architecture/doc_review_findings_2026-08-13.md` §1-2）。現行の要約は CLAUDE.md の
+> D層節と本書自身を正とする。
 > **位置づけ**: A層（構造化）・B層（学習）・C層（承認）に続く第四の層。
 > 本書は構想を **1 issue ≒ 1 PR** の粒度に分割し、実装順序・依存関係・UX 設計を確定させる。
 

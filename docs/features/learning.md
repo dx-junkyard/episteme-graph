@@ -2,6 +2,14 @@
 
 [← ドキュメント目次](../README.md)
 
+> **鮮度注記（2026-08-13）:** 本書は 2026-07-18 時点の記述で、以降に追加された学生向け主要機能 —
+> **discuss モード（サイドバー二枚看板「順番に学ぶ / この論文と議論する」・開幕/着地画面）**・
+> **理解サイクル**（精読モード・持ち越し問い・帰り道の景色）・**わたしの地図**の拡張・
+> SL層の台帳事実行 — が未反映。現行の正本は CLAUDE.md の該当節と各設計書
+> （[discussion_mode_design.md](discussion_mode_design.md) /
+> [understanding_cycle_design.md](understanding_cycle_design.md) /
+> [personal_knowledge_network_design.md](personal_knowledge_network_design.md)）を参照。
+
 学生向け学習 UI の機能を、画面と裏側の API の両面から解説します。
 実装: `frontend/public/index.html` + `frontend/public/js/app.js`（ES6+ SPA）。
 バックエンドは `/api/learning/*`（[API](../backend/api.md)）。

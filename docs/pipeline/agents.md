@@ -2,6 +2,14 @@
 
 [← ドキュメント目次](../README.md) ｜ [← パイプライン概要](overview.md)
 
+> **鮮度注記（2026-08-13）:** 以降に追加された **ContextualExplanationAgent**
+> （`contextual_explanation/`、二層説明）・**DiscussOpeningAgent**（`discuss_opening/`）・
+> **LandscapePlacementAgent**（`landscape_placement/`）の3 agent が本書に未収載。
+> それぞれ [hierarchical_context_explanation_design.md](../features/hierarchical_context_explanation_design.md) /
+> [discuss_opening_authoring_design.md](../features/discuss_opening_authoring_design.md) /
+> [knowledge_landscape_design.md](../features/knowledge_landscape_design.md) を参照。
+> また §3 の「graph_narrative/（空ディレクトリ）」は現在は存在しない。
+
 各 Agent の役割・入出力・LLM/決定論の区別をまとめます。実装は `src/episteme_graph/agents/<agent_name>/`。
 
 ---
