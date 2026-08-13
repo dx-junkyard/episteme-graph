@@ -23,6 +23,7 @@ from core.config import get_settings
 from core.llm_usage.context import bind_usage_context
 from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
+from core.reconstruction.derivation_source import collect_derivation_probes
 from core.reconstruction.input_builder import build_user_content
 from core.reconstruction.item_builder import preferred_elicit_mode, response_options_to_dicts
 from core.reconstruction.llm_client import ReconstructionLLMClient
@@ -34,6 +35,9 @@ from core.reconstruction.schema import (
     SOURCE_BACKED,
     ItemAuthoringResult,
 )
+
+# derivation_source が生成する非LLM モード（CostGate/LLM 日次上限の対象外。symbol と同じ扱い）。
+_DERIVATION_ELICIT_MODES = ("regime", "next_step")
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +63,10 @@ def _check_and_count_llm_call() -> bool:
 def _fetch_authorable_claims(session, document_id: str, limit: int) -> list[dict]:
     """source_backed + 承認済み、かつ非 retired の item を持たない claim を返す。
 
-    記号葉プローブ（elicit_mode='symbol'、descend 時に非LLMで生成）は
-    「その claim はオーサリング済み」とは数えない。
+    記号葉プローブ（elicit_mode='symbol'、descend 時に非LLMで生成）と derivation
+    プローブ（elicit_mode='regime'/'next_step'、非LLM・derivation_source.py 生成）は
+    「その claim はオーサリング済み」とは数えない（いずれも predict/restate の
+    LLM オーサリング対象とは独立した出題系のため）。
     """
     approved = list(APPROVED_REVIEW_STATUSES)
     rows = session.execute(
@@ -75,7 +81,7 @@ def _fetch_authorable_claims(session, document_id: str, limit: int) -> list[dict
               AND NOT EXISTS (
                   SELECT 1 FROM reconstruction_items i
                   WHERE i.claim_id = c.id AND i.status <> 'retired'
-                    AND i.elicit_mode <> 'symbol'
+                    AND i.elicit_mode NOT IN ('symbol', 'regime', 'next_step')
               )
             ORDER BY c.created_at ASC
             LIMIT :limit
@@ -144,12 +150,113 @@ def _persist_item(session, claim: dict, result: ItemAuthoringResult) -> str | No
     return str(row[0]) if row else None
 
 
+def _persist_derivation_item(session, probe: dict) -> str | None:
+    """derivation_source.py が組み立てた probe（regime/next_step）を永続化する。
+
+    `_persist_item`（LLM オーサリング専用・author を llm に固定）とは別の専用 INSERT。
+    author は常に 'system'（非LLM・決定論生成）。
+    """
+    row = session.execute(
+        sa_text("""
+            INSERT INTO reconstruction_items
+            (claim_id, document_id, elicit_mode, prompt, response_space, expected,
+             claim_fields_used, author, author_confidence, status)
+            VALUES (CAST(:claim_id AS uuid), :document_id, :elicit_mode, :prompt,
+                    CAST(:response_space AS jsonb), CAST(:expected AS jsonb),
+                    CAST(:claim_fields_used AS jsonb), 'system', :author_confidence, 'auto')
+            RETURNING id::text
+        """),
+        {
+            "claim_id": probe.get("claim_uuid") or "",
+            "document_id": probe.get("document_id") or "",
+            "elicit_mode": probe.get("elicit_mode") or "",
+            "prompt": probe.get("prompt") or "",
+            "response_space": json.dumps(probe.get("response_space") or [], ensure_ascii=False),
+            "expected": json.dumps(probe.get("expected") or {}, ensure_ascii=False),
+            "claim_fields_used": json.dumps(probe.get("claim_fields_used") or [], ensure_ascii=False),
+            "author_confidence": float(probe.get("author_confidence") or 0.0),
+        },
+    ).fetchone()
+    return str(row[0]) if row else None
+
+
+def run_derivation_item_authoring_for_document(document_id: str) -> int:
+    """derivation_chain artifact から regime / next_step item を非LLMで生成する。
+
+    CostGate（LLM 日次上限）は通さない（symbol プローブと同じ扱い。§Phase2 裁定）。
+    冪等性: (claim_id, elicit_mode) につき非 retired item を最大1件に保つ（既存があれば
+    スキップ。symbol の再利用パターンと同型）。
+    """
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return 0
+    try:
+        probes = collect_derivation_probes(doc_id)
+    except Exception as exc:
+        logger.warning("recon derivation probe collection failed for %s: %s", doc_id, exc)
+        return 0
+    if not probes:
+        return 0
+
+    created = 0
+    for probe in probes:
+        claim_id = str(probe.get("claim_uuid") or "")
+        mode = str(probe.get("elicit_mode") or "")
+        if not claim_id or mode not in _DERIVATION_ELICIT_MODES:
+            continue
+        session = _pg_session()
+        try:
+            existing = session.execute(
+                sa_text("""
+                    SELECT 1 FROM reconstruction_items
+                    WHERE claim_id = CAST(:cid AS uuid) AND elicit_mode = :mode
+                      AND status <> 'retired'
+                    LIMIT 1
+                """),
+                {"cid": claim_id, "mode": mode},
+            ).fetchone()
+            if existing:
+                continue
+            item_id = _persist_derivation_item(session, probe)
+            session.commit()
+        except Exception as exc:
+            session.rollback()
+            logger.warning("recon derivation item persist failed for claim %s: %s", claim_id, exc)
+            continue
+        finally:
+            session.close()
+        if item_id:
+            created += 1
+            _record_item_event(item_id, claim_id, "", "auto", None, {"author": "system", "mode": mode})
+    return created
+
+
 def run_item_authoring_for_document(document_id: str) -> int:
-    """1 ドキュメント分の未オーサリング claim に item を生成する。戻り値は生成数。
+    """1 ドキュメント分の未オーサリング claim に item を生成する（LLM + 非LLM derivation）。
+
+    LLM オーサリング（predict/restate）は `_run_llm_item_authoring_for_document` に
+    委譲し、その戻り値に非LLM derivation オーサリング（regime/next_step、
+    `run_derivation_item_authoring_for_document`）の生成数を合算する。derivation
+    オーサリングは LLM 側の累積上限（RECON_MAX_ITEMS_PER_DOCUMENT）や日次上限の
+    早期リターンに左右されず、claim 承認時トリガー / 手動バッチ API の両方から
+    毎回 best-effort で試みる（失敗しても LLM オーサリングの結果は損なわない）。
+    """
+    created = _run_llm_item_authoring_for_document(document_id)
+    derivation_created = 0
+    try:
+        derivation_created = run_derivation_item_authoring_for_document(document_id)
+    except Exception as exc:
+        logger.warning("recon derivation item authoring failed for %s: %s", document_id, exc)
+    return created + derivation_created
+
+
+def _run_llm_item_authoring_for_document(document_id: str) -> int:
+    """1 ドキュメント分の未オーサリング claim に LLM で item を生成する。戻り値は生成数。
 
     RECON_MAX_ITEMS_PER_DOCUMENT は**累積**上限（1回の実行あたりではない）。
     既存の非 retired item 数を差し引いた残余分だけ新規オーサリングする。
-    記号葉プローブ（非LLM・descend 由来）は LLM コスト制御の対象外なので数えない。
+    記号葉プローブ（非LLM・descend 由来）と derivation プローブ（非LLM・regime/next_step）は
+    LLM コスト制御の対象外なので数えない。
     """
     if not document_id:
         return 0
@@ -160,7 +267,8 @@ def run_item_authoring_for_document(document_id: str) -> int:
         existing = session.execute(
             sa_text("""
                 SELECT COUNT(*) FROM reconstruction_items
-                WHERE document_id = :doc AND status <> 'retired' AND elicit_mode <> 'symbol'
+                WHERE document_id = :doc AND status <> 'retired'
+                  AND elicit_mode NOT IN ('symbol', 'regime', 'next_step')
             """),
             {"doc": document_id},
         ).scalar() or 0

@@ -53,6 +53,71 @@ class TestDiffPredict:
         assert d.machine_verdict == "na"
 
 
+REGIME_ITEM = {
+    "elicit_mode": "regime",
+    "response_space": [
+        {"id": "sym_0", "label": "epsilon"},
+        {"id": "sym_1", "label": "x"},
+        {"id": "sym_2", "label": "y"},
+    ],
+    "expected": {"option_id": "sym_0", "symbol": "epsilon"},
+}
+
+NEXT_STEP_ITEM = {
+    "elicit_mode": "next_step",
+    "response_space": [
+        {"id": "op_linearize", "label": "線形化"},
+        {"id": "op_normalize", "label": "正規化"},
+    ],
+    "expected": {"option_id": "op_linearize", "operation": "linearize"},
+}
+
+
+class TestDiffChoiceModesRegimeAndNextStep:
+    """Phase 2（式スケール ELICIT）: regime / next_step は predict と同じ選択式 DIFF。"""
+
+    def test_regime_match(self):
+        d = recon_diff.run_diff(REGIME_ITEM, CLAIM, {"option_id": "sym_0"})
+        assert d.machine_verdict == "match"
+
+    def test_regime_mismatch_has_focus(self):
+        d = recon_diff.run_diff(REGIME_ITEM, CLAIM, {"option_id": "sym_1"})
+        assert d.machine_verdict == "mismatch"
+        assert d.focus
+
+    def test_regime_no_selection_is_na(self):
+        d = recon_diff.run_diff(REGIME_ITEM, CLAIM, {})
+        assert d.machine_verdict == "na"
+
+    def test_next_step_match(self):
+        d = recon_diff.run_diff(NEXT_STEP_ITEM, CLAIM, {"option_id": "op_linearize"})
+        assert d.machine_verdict == "match"
+
+    def test_next_step_mismatch(self):
+        d = recon_diff.run_diff(NEXT_STEP_ITEM, CLAIM, {"option_id": "op_normalize"})
+        assert d.machine_verdict == "mismatch"
+        assert d.focus
+
+    def test_reflection_mode_specific_wording_regime(self):
+        d = recon_diff.run_diff(REGIME_ITEM, CLAIM, {"option_id": "sym_1"})
+        refl = recon_diff.build_reflection(REGIME_ITEM, CLAIM, {"option_id": "sym_1"}, d)
+        joined = " ".join(refl["statements"])
+        assert "選びました" in joined
+        assert "記号" in joined or "可能性" in joined
+
+    def test_reflection_mode_specific_wording_next_step(self):
+        d = recon_diff.run_diff(NEXT_STEP_ITEM, CLAIM, {"option_id": "op_linearize"})
+        refl = recon_diff.build_reflection(NEXT_STEP_ITEM, CLAIM, {"option_id": "op_linearize"}, d)
+        joined = " ".join(refl["statements"])
+        assert "選びました" in joined
+        assert "操作" in joined
+
+    def test_reflection_hypothesis_framing_preserved_for_new_modes(self):
+        d = recon_diff.run_diff(NEXT_STEP_ITEM, CLAIM, {"option_id": "op_normalize"})
+        refl = recon_diff.build_reflection(NEXT_STEP_ITEM, CLAIM, {"option_id": "op_normalize"}, d)
+        assert "可能性" in " ".join(refl["statements"])  # 断定でなく仮説文体
+
+
 class TestDiffRestate:
     def test_restate_verdict_is_na(self):
         item = {"elicit_mode": "restate", "response_space": [], "expected": {}}

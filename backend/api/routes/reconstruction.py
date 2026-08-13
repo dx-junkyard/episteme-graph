@@ -214,6 +214,11 @@ def get_next_item(
 
     出題対象は status='auto'/'confirmed'、source_backed かつ承認済みの claim のみ。
     本人が未回答の item を優先する。無ければ item=None を返す。
+
+    連続回避（Phase 2, understanding_cycle_design.md §6）: 直近の回答が
+    elicit_mode='regime'/'next_step'（式スケール ELICIT）だった場合、今回は
+    それらの item を除外はせず後回しにする（機械的クリック化の防止。スコープに
+    導出系 item しか無い document では締め出さない — 除外ではなく並べ替えに留める）。
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
@@ -224,6 +229,24 @@ def get_next_item(
         scope = _course_scope(session, course_data, topic_id)
         if not scope["material_ids"] and not scope["doc_refs"]:
             return {"item": None, "exhausted": True}
+
+        deprioritize_derivation = False
+        try:
+            last_mode_row = session.execute(
+                sa_text("""
+                    SELECT i.elicit_mode
+                    FROM learner_reconstructions r
+                    JOIN reconstruction_items i ON i.id = r.item_id
+                    WHERE r.user_id = CAST(:uid AS uuid)
+                    ORDER BY r.created_at DESC
+                    LIMIT 1
+                """),
+                {"uid": current_user["id"]},
+            ).fetchone()
+            if last_mode_row and str(last_mode_row[0] or "") in ("regime", "next_step"):
+                deprioritize_derivation = True
+        except Exception:
+            logger.debug("recon last-mode lookup failed (non-fatal)", exc_info=True)
 
         # 記号葉プローブ（elicit_mode='symbol'）は descend 経由でのみ提示する（§3.4）。
         conditions = [
@@ -243,6 +266,13 @@ def get_next_item(
         params["mids"] = scope["material_ids"] or [""]
         params["doc_refs"] = scope["doc_refs"] or [""]
 
+        order_clause = "i.author_confidence DESC, i.created_at ASC"
+        if deprioritize_derivation:
+            order_clause = (
+                "CASE WHEN i.elicit_mode IN ('regime', 'next_step') THEN 1 ELSE 0 END ASC, "
+                + order_clause
+            )
+
         def _next_row(extra_clause: str):
             return session.execute(
                 sa_text(f"""
@@ -253,7 +283,7 @@ def get_next_item(
                     JOIN theory_claims c ON c.id = i.claim_id
                     LEFT JOIN chunks ch ON ch.id = c.chunk_id
                     WHERE {' AND '.join(conditions + [extra_clause])}
-                    ORDER BY i.author_confidence DESC, i.created_at ASC
+                    ORDER BY {order_clause}
                     LIMIT 1
                 """),
                 params,
