@@ -1,7 +1,7 @@
 # 賭け金の台帳（Stakes Ledger, SL層）設計書 — 理解サイクル Phase 3
 
 **作成日:** 2026-08-13
-**状態:** 設計書（実装なし）。本書が SL層の**正本**。
+**状態:** 設計書 + **SL-1〜SL-5 実装済み（2026-08-13, §15 実装記録参照）**。本書が SL層の**正本**。
 **位置づけ:** `understanding_cycle_design.md` §7 が要求する Phase 3 の専用設計書。
 D層（`doubt_layer_issues.md`）の上に積む第4の拡張であり、**D層の既存5テーブル・既存公理の
 意味論は変えない**。出典は `vision_expansion_proposals_2026-08.md` 提案3（哲学者の反証条件
@@ -449,6 +449,52 @@ SL-1 と SL-2/SL-3 は独立に実装・検証可能。SL-4 は SL-1（reachabil
 4. observation_targets の3段同定の実効カバレッジ（dsl 空 run の割合）
 5. falsification worker のパイプラインフック相乗りの是非（コスト実測後）
 6. 二重ラベル表（サーバ/フロント）の一本化リファクタ（別 issue）
+
+---
+
+## §15 実装記録（2026-08-13）
+
+Fable 5 指揮・Sonnet 3体（core / UI / routes の2波構成・ファイル所有権分離）。
+設計書の着手条件どおり**ガードレールテストを先行作成**してから実装。
+バックエンドフルスイート **9,235 pass**（着手前から +199・リグレッションなし）。
+migration **067** 適用（設計 §3.1 のまま）。
+
+- **core**（`backend/core/doubt/`）: `falsification_conditions/`（scope_candidates 完全同型の
+  9ファイル + examples）/ `observation_targets.py`（3段同定・A>B>C 優先・claim_id 昇順）/
+  `support_paths.py`（純 Python 単位容量 Edmonds–Karp。**仮想 super-sink は大容量** —
+  単一 sink ノードでも独立2経路が flow=2 になることをテストで証明。カットエッジが仮想
+  source に接する単一ルート事例は下流実ノードへ縮退）。語彙・ラベル・Pydantic モデルは
+  `core/doubt/schema.py` に追加（実 JSONB と完全一致 — §2-9 の乖離を踏襲していない）。
+- **routes**（`routes/doubt.py`）: §3.4/§4.2/§6.2 の全エンドポイント + 台帳 GET 拡張
+  （candidates は confidence 落とし射影・support_lines は fail-soft の optional キー）+
+  学習者投影（statement / kind_label / reachability_label / 「教員の記帳」・
+  support_fact_line のみ — cut_members / recorded_by 非漏洩）。counterfactual は
+  **assumption ids と観測 claim ids を結合して既存 fallback に渡すだけ**（伝播非改変）。
+  proposal 昇格は external_check 必須 422 + withdrawn チャレンジからの昇格 422 に是正 +
+  `PATCH /proposals/{id}`（前進遷移 + withdrawn）新設。
+- **投影**: `open_assumptions` item に `has_falsification_condition` /
+  `falsification_not_formulable` / `reachability_summary` / `support_line_level` を追加。
+  **support_paths はコンテキスト再利用にリファクタ**（`build_support_context` +
+  `compute_support_lines_from_context`。コース1回のグラフ構築を全 item で共有 —
+  公開シグネチャは薄いラッパとして不変）。opening の `_assumption_fact_line` は §7 の
+  3文言を逐語で分岐（新キー不在の旧入力には従来文を返す後方互換ガード付き）。
+- **UI**（doubt-atlas.js）: 覆る条件区画（一覧 / 候補カード confirm・dismiss +
+  reachability 選択 / 手動記帳 / AI 再生成）・観測を仮に倒す（aspect 2択・既存前提トグルと
+  併用可）・支持線事実行・未検証合意リスト3列 + 到達可能フィルタ（クライアント側・既定 off）・
+  proposal external_check 必須フォーム + status 遷移カード。アンカー5件の**3点セット**
+  （KNOWN_ADMIN_UI_ANCHOR_IDS + `docs/manual/teacher/18-admin-doubt-atlas.md` 節 +
+  網羅テスト件数 255→260）。
+- **テスト**: `test_stakes_ledger_{guardrails,core,api,ui_static}.py`（§12 の10項を充足）。
+- **実装裁定（設計書からの確定差分）**:
+  1. validator の混入処理: `reachability` は剥いで warning（候補は生存）、
+     `kind='not_formulable'` はその候補1件だけ drop（warning・repair は発火させない）。
+  2. proposal の status 遷移カードは POST 応答からのインプレース描画
+     （proposal 一覧 GET が存在しないため。台帳リフレッシュ後は再表示されない既知の制約 —
+     一覧 GET の新設は §14 に積む）。
+  3. 既記帳条件の PATCH 編集 UI は v1 未提供（API はあり。手動記帳・候補確定・
+     reachability 後付けで運用可能）。
+- **残作業**: docker 実機 E2E（反証条件の記帳→伝播→支持線の実データ確認）。
+  §13 非スコープ・§14 未決事項は不変。
 
 ---
 
