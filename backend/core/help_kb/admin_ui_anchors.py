@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。2026-07-31 時点では全236アンカーがマップ済み
+no_hit 経路で需要を計測する）。全260アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -110,10 +110,15 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "doubt-atlas.assumption-dismiss",
         "doubt-atlas.assumption-filter",
         "doubt-atlas.audit-run",
+        "doubt-atlas.counterfactual-observation-toggle",
         "doubt-atlas.course-select",
+        "doubt-atlas.falsification-candidate-decide",
+        "doubt-atlas.falsification-record",
+        "doubt-atlas.falsification-refresh",
         "doubt-atlas.load-recompute",
         "doubt-atlas.manage-challenge",
         "doubt-atlas.mining-run",
+        "doubt-atlas.open-assumptions-reachable-filter",
         "doubt-atlas.open-assumptions-row",
         "doubt-atlas.plot-detail",
         "doubt-atlas.record-challenge",
@@ -458,14 +463,24 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "doubt-atlas.assumption-filter": "teacher/18-admin-doubt-atlas.md#assumption-filter",
     # コーパス監査実行
     "doubt-atlas.audit-run": "teacher/18-admin-doubt-atlas.md#audit-run",
+    # 観測を仮に倒す
+    "doubt-atlas.counterfactual-observation-toggle": "teacher/18-admin-doubt-atlas.md#counterfactual-observation-toggle",
     # コースを選択...
     "doubt-atlas.course-select": "teacher/18-admin-doubt-atlas.md#course-select",
+    # 確認して記帳／見送る（覆る条件の候補）
+    "doubt-atlas.falsification-candidate-decide": "teacher/18-admin-doubt-atlas.md#falsification-candidate-decide",
+    # 覆る条件を記帳する
+    "doubt-atlas.falsification-record": "teacher/18-admin-doubt-atlas.md#falsification-record",
+    # AIに候補を出してもらう（覆る条件）
+    "doubt-atlas.falsification-refresh": "teacher/18-admin-doubt-atlas.md#falsification-refresh",
     # 負荷再計算
     "doubt-atlas.load-recompute": "teacher/18-admin-doubt-atlas.md#load-recompute",
     # 取り下げ／検証提案にする
     "doubt-atlas.manage-challenge": "teacher/18-admin-doubt-atlas.md#manage-challenge",
     # 前提マイニング実行
     "doubt-atlas.mining-run": "teacher/18-admin-doubt-atlas.md#mining-run",
+    # 到達可能な反証条件がある項目だけ表示
+    "doubt-atlas.open-assumptions-reachable-filter": "teacher/18-admin-doubt-atlas.md#open-assumptions-reachable-filter",
     # 未検証合意リストの行（クリックで台帳詳細）
     "doubt-atlas.open-assumptions-row": "teacher/18-admin-doubt-atlas.md#open-assumptions",
     # 散布図の点（クリックで台帳詳細）

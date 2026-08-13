@@ -92,7 +92,13 @@ class TestAdminUiAnchorsModule:
         #   atlas.gap-candidates（修正報告セクション内の第2グループ）/ atlas.gap-accept /
         #   atlas.gap-dismiss / atlas.gap-restore / atlas.gap-incorporate /
         #   atlas.gap-draft-from-frozen / atlas.gap-dismissed-filter。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 255
+        # + 賭け金の台帳（stakes_ledger_design.md §9、教員UI層のみ・SL-1〜SL-4）の5件:
+        #   doubt-atlas.falsification-record（覆る条件を記帳する）/
+        #   doubt-atlas.falsification-candidate-decide（候補の確認・見送り）/
+        #   doubt-atlas.falsification-refresh（AIに候補を出してもらう）/
+        #   doubt-atlas.counterfactual-observation-toggle（観測を仮に倒す）/
+        #   doubt-atlas.open-assumptions-reachable-filter（到達可能フィルタ）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 260
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""
