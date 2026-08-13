@@ -88,6 +88,10 @@ KNOWN_FEATURES = (
     # --- D層（Doubt Layer） ---
     "doubt:scope_candidates",
     "doubt:assumption_normalize",
+    # 賭け金の台帳（SL層, migration 067）— 反証条件候補抽出 worker
+    # （doubt:scope_candidates と同型・独立カウンタ。正本
+    # docs/features/stakes_ledger_design.md §3.3/§10）。
+    "doubt:falsification_conditions",
     # --- W層（Element Deliberation Workspace）。cross_corpus は §4.2 chunk-proxy レンズの
     # embedding 生成（Phase 1）。chat/vision は面③対話（Phase 2、設計書 §0 W9）の
     # 1ターン=1構造化出力コール（core.llm.generate_conversation_turn）。standardization は

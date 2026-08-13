@@ -315,6 +315,7 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "admin:reconstruction_authoring": ("recon_llm_model", "fast"),
     "doubt:scope_candidates": ("doubt_scope_llm_model", "fast"),
     "doubt:assumption_normalize": ("doubt_assumption_llm_model", "fast"),
+    "doubt:falsification_conditions": ("doubt_falsification_llm_model", "fast"),
     "admin:assistant": ("assistant_llm_model", "fast"),
     "admin:atlas_skeleton": ("atlas_assist_llm_model", "analysis"),
     "admin:atlas_assist": ("atlas_assist_llm_model", "analysis"),

@@ -326,3 +326,82 @@ def scope_coverage_level(scope_count: int) -> str:
     if scope_count <= 3:
         return "several"
     return "broad"
+
+
+# ---------------------------------------------------------------------------
+# SL層 — 賭け金の台帳（Stakes Ledger, migration 067）
+#
+# 正本ドキュメント: docs/features/stakes_ledger_design.md §1（SL1〜SL10）/ §3.2。
+#
+# SL-1 反証条件レジストリ: verification_scopes（どこで確かめられたか）の**双対の別列**
+# として falsification_conditions（何が起これば覆るか）を持つ。既存列の意味は変えない
+# （SL10）。reachability（到達可能性）は人間専用語彙（SL3） — builder / worker からの
+# 書き込みを構造的に禁止する（HUMAN_ONLY_VERIFICATION_STATUSES と同型の分離）。
+# ---------------------------------------------------------------------------
+
+# 反証条件の Duhem 区別 + 人間専用の「定式化できない」記帳。
+# not_formulable は LLM 候補には出力させない（人間専用, SL2）。
+FALSIFICATION_KINDS = ("observation_value", "auxiliary_hypothesis", "not_formulable")
+
+# 到達可能性区分（SL3: 人間専用語彙）。既定 unassessed。
+REACHABILITY_LEVELS = ("reachable", "next_generation", "unreachable", "unassessed")
+
+# 人間専用フィールド（LLM 候補に含めさせない・混入は validator が剥ぐ）。
+HUMAN_ONLY_FALSIFICATION_FIELDS = ("reachability",)
+
+FALSIFICATION_KIND_LABELS = {
+    "observation_value": "観測値そのもの",
+    "auxiliary_hypothesis": "較正・装置などの補助仮説",
+    "not_formulable": "反証条件を定式化できないという記帳",
+}
+
+REACHABILITY_LABELS = {
+    "reachable": "現在の観測で検証可能",
+    "next_generation": "次世代の装置・観測なら可能",
+    "unreachable": "現状では困難",
+    "unassessed": "未評価",
+}
+
+# 独立支持経路の段階（SL4: 数値非公開・3値の事実文のみ）。
+SUPPORT_LINE_LEVELS = ("none", "single", "several")
+
+
+class FalsificationCondition(BaseModel):
+    """反証条件 1 件 = 「何が観測・測定されたら覆るか」の記帳（SL-1）。
+
+    確定（記帳）は人間専用。LLM 候補（:class:`FalsificationCandidate`）から
+    このモデルへの変換は教員の確定操作でのみ発生する（候補行自体は昇格しない）。
+    実 JSONB と完全一致させる（§2-9 の乖離を踏襲しない）。
+    """
+
+    condition_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    statement: str = ""
+    kind: str = ""  # observation_value | auxiliary_hypothesis | not_formulable
+    reachability: str = "unassessed"  # 人間専用語彙（SL3）。既定 unassessed。
+    evidence_ids: list[str] = Field(default_factory=list)
+    evidence_quote: str = ""
+    recorded_by: str = ""  # user_id（帰属必須・空にしない — SL3）
+    reason: str = ""
+    recorded_at: str = ""
+    from_candidate_id: str = ""  # 候補確定由来のとき
+
+
+class FalsificationCandidate(BaseModel):
+    """LLM が提案する反証条件 **候補**（SL-1）。
+
+    status は候補管理の3値（candidate / confirmed / dismissed）。確定
+    （confirmed）は候補行自体を昇格させるのではなく、教員帰属で
+    :class:`FalsificationCondition` を新規発行し、候補行は confirmed のまま保持する
+    （scope_candidates の確定 API と同じ「行は保持・別行を発行」パターン）。
+    reachability を**持たない** — LLM 出力に含まれていたら validator が剥いで warning。
+    """
+
+    candidate_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    statement: str = ""
+    kind: str = ""  # observation_value | auxiliary_hypothesis（not_formulable は人間専用）
+    evidence_quote: str = ""   # 出典からの逐語引用（P5, validator で強制）
+    reason: str = ""
+    confidence: float = 0.0
+    status: str = "candidate"  # candidate | confirmed | dismissed（P4: 保持）
+    detector_version: str = SCHEMA_VERSION
+    created_at: str = ""

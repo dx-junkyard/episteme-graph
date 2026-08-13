@@ -180,6 +180,17 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DOUBT_ASSUMPTION_LLM_MODEL"),
     )
+    # 反証条件候補抽出（SL-1, 賭け金の台帳）の 1 日あたり LLM コール上限
+    # （doubt_scope / doubt_assumption とは独立のカウンタ）
+    doubt_falsification_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOUBT_FALSIFICATION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    doubt_falsification_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOUBT_FALSIFICATION_LLM_MODEL"),
+    )
 
     # --- 再構成ループ（Reconstruction Loop, R層） — item オーサリングのコスト制御 ---
     # （tension / anchor / doubt とは独立のカウンタ）
