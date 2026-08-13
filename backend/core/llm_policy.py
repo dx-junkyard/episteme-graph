@@ -104,6 +104,8 @@ def scene_for_feature(feature: str) -> str | None:
         "learning:chat",
         "learning:chat_casual",
         "learning:chat_discuss",
+        "learning:cycle_elicit",
+        "learning:cycle_diff",
         "learning:understanding_check",
         "learning:help_usage",
     ):
@@ -325,6 +327,10 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "learning:chat": ("learning_chat_llm_model", "analysis"),
     "learning:chat_casual": ("learning_chat_llm_model", "analysis"),
     "learning:chat_discuss": ("learning_chat_llm_model", "analysis"),
+    # 理解サイクル Phase 2（設計 §8）: 既存 learning_chat の1コール地点に相乗りするため
+    # モデル解決も同じ env キーを共有する。
+    "learning:cycle_elicit": ("learning_chat_llm_model", "analysis"),
+    "learning:cycle_diff": ("learning_chat_llm_model", "analysis"),
     "learning:understanding_check": ("learning_chat_llm_model", "analysis"),
     "learning:help_usage": ("learning_chat_llm_model", "analysis"),
     "admin:course_builder": ("course_builder_llm_model", "analysis"),

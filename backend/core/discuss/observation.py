@@ -333,6 +333,15 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         # 着地画面「今日の理解を自分の言葉で」の保存（候補の confirm とは別の導線なので
         # landing_confirmed には合算しない）。
         "landing_reflection_saved",
+        # 理解サイクル（UCサイクル, docs/features/understanding_cycle_design.md §10）:
+        # OPEN 動機・ELICIT予想・DIFF並置閲覧・LEAVE持ち越し・REVISIT再回答・ANCHOR軽量
+        # アンカーの内部計測（DO1〜DO6 継承。本文非含有・数値非表示・削除APIなし）。
+        "cycle_motive_saved",
+        "cycle_prediction_saved",
+        "cycle_diff_viewed",
+        "cycle_carryover_saved",
+        "cycle_revisit_answered",
+        "cycle_anchor_quick",
     }
 )
 

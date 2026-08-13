@@ -300,6 +300,11 @@ class LearningChatRequest(BaseModel):
     # "all_visible"(本人が閲覧可能な周辺資料まで)。該当チャンクが無くても他スコープへ
     # 無断フォールバックしない（DM1）。
     discuss_scope: str | None = None
+    # 理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）: AI モード。
+    # "elicit"（解を出さず予測を引き出す問いを返す）| "diff"（予想と骨格の差分観点の候補）。
+    # 不正値は 422。未指定は従来どおり。既存 learning_chat の1コール地点に相乗りする
+    # （新エンドポイントを作らない・UC10）。
+    cycle_mode: str | None = None
     # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
     # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
     #  related?, juxtapose?} — 自由文のみに依存しない

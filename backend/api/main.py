@@ -62,6 +62,7 @@ from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
 from routes import discuss_observation as discuss_observation_routes
+from routes import cycle as cycle_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
 from routes import llm_models as llm_models_routes
@@ -314,6 +315,7 @@ app.include_router(atlas_view_routes.router)
 app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
 app.include_router(discuss_observation_routes.learning_router)
+app.include_router(cycle_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
 app.include_router(llm_models_routes.router)

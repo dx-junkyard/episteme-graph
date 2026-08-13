@@ -53,6 +53,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 知識ランドスケープ（docs/features/knowledge_landscape_design.md §10.2）:
         # 出典タブの「分野の中の位置づけ」セクション。
         "sources.paper-placement",
+        # 理解サイクル Phase 1（docs/features/understanding_cycle_design.md §5.4）:
+        # 教材区画フッタの常設アンカー4ボタン。
+        "material.quick-anchor",
     }
 )
 
@@ -64,6 +67,8 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # 追記し、KNOWN_UI_ANCHOR_IDS の全17種がここにマップ済みになった。2026-08-04 に
 # 知識ランドスケープ（knowledge_landscape_design.md §10.2）の
 # sources.paper-placement を追加し、全18種がマップ済みの状態を保っている。
+# 2026-08-13 に理解サイクル Phase 1（understanding_cycle_design.md §5.4）の
+# material.quick-anchor を追加し、全19種がマップ済み。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
 # （composer.input / composer.send が同じ #ai-chat を指すのと同じパターン）。
@@ -105,6 +110,8 @@ UI_ANCHORS: dict[str, str] = {
     "discuss.end": "student/02-student.md#discuss-end",
     # 出典タブの「分野の中の位置づけ」（知識ランドスケープ・論文の位置づけ）。
     "sources.paper-placement": "student/02-student.md#paper-placement",
+    # 教材区画フッタの常設アンカー4ボタン（理解サイクル Phase 1・§5.4）。
+    "material.quick-anchor": "student/02-student.md#quick-anchor",
 }
 
 

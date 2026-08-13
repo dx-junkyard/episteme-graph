@@ -59,6 +59,11 @@ KNOWN_FEATURES = (
     "learning:chat",
     "learning:chat_casual",
     "learning:chat_discuss",
+    # 理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）: AI 4モードの
+    # うち Elicit/Diff は既存 learning_chat の1コール地点に相乗りするが、U層タグは
+    # discuss/casual と同様に分離計測する。
+    "learning:cycle_elicit",
+    "learning:cycle_diff",
     "learning:voice_stt",
     "learning:voice_tts",
     "learning:tension",

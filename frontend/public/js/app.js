@@ -914,6 +914,45 @@
     if (b) b.remove();
   }
 
+  // ── 理解サイクル Phase 1（ANCHOR, docs/features/understanding_cycle_design.md §5.4）──
+  // 4つの軽量アンカー。新機構にせず既存 structure_anchor 経路A（learner_selected・
+  // 同期・非LLM）への語彙マッピングで実装する（裁定 §1-4）。確認ダイアログは出さず
+  // 1タップで確定する（軽さが本体）。
+  var QUICK_ANCHOR_OPTIONS = [
+    { quick_label: "curious", label: "気になる" },
+    { quick_label: "not_yet", label: "まだ分からない" },
+    { quick_label: "return_later", label: "あとで戻る" },
+    { quick_label: "connects", label: "何かとつながりそう" },
+  ];
+
+  async function postCycleAnchor(payload) {
+    try {
+      var res = await apiFetch("/learning/courses/" + state.courseId + "/cycle/anchor", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      return !!(res && res.ok);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  // 印を残した直後の小さな確認表示（数値は出さない。しばらくすると自動で消える）。
+  function showQuickAnchorToast(rect) {
+    var toast = document.createElement("div");
+    toast.className = "quick-anchor-toast";
+    toast.textContent = "印を残しました";
+    toast.style.left = Math.round(rect.left) + "px";
+    toast.style.top = Math.round(rect.bottom + 6) + "px";
+    document.body.appendChild(toast);
+    setTimeout(function () { toast.remove(); }, 1500);
+  }
+
+  function hideQuickAnchorPopover() {
+    var p = document.getElementById("quick-anchor-popover");
+    if (p) p.remove();
+  }
+
   // 教材区画（#material-body）内のテキスト選択にフローティングボタンを出す。
   function initSelectionAnchor() {
     if (document._anchorSelectionWired) return;
@@ -922,6 +961,7 @@
       // click 直後に selection が確定するのを待つ
       setTimeout(function () {
         hideSelectionAskButton();
+        hideQuickAnchorPopover();
         var body = document.getElementById("material-body");
         var sel = window.getSelection();
         var text = sel ? String(sel.toString() || "").trim() : "";
@@ -944,17 +984,98 @@
           var seg = (Session.currentAnchor() || {}).segment_id || 0;
           state.pendingSelection = { text: text, segment_id: seg };
           hideSelectionAskButton();
+          hideQuickAnchorPopover();
           showPendingSelectionChip();
           var input = document.getElementById("chat-input");
           if (input) input.focus();
         });
         document.body.appendChild(btn);
+
+        // 理解サイクル ANCHOR: 選択直後に軽量アンカー4ボタンも併設する
+        // （既存の「ここについて質問」導線は不変・隣に並べるだけ）。
+        var popover = document.createElement("div");
+        popover.id = "quick-anchor-popover";
+        popover.style.left = Math.round(rect.left) + "px";
+        popover.style.top = Math.round(rect.bottom + 34) + "px";
+        QUICK_ANCHOR_OPTIONS.forEach(function (opt) {
+          var qbtn = document.createElement("button");
+          qbtn.type = "button";
+          qbtn.className = "quick-anchor-btn";
+          qbtn.textContent = opt.label;
+          qbtn.addEventListener("mousedown", function (e) { e.preventDefault(); });
+          qbtn.addEventListener("click", async function () {
+            var seg = (Session.currentAnchor() || {}).segment_id || 0;
+            var ok = await postCycleAnchor({
+              quick_label: opt.quick_label,
+              topic_id: state.currentTopicId,
+              selection_text: text,
+              selection_segment_id: seg,
+            });
+            sendDiscussMetric("cycle_anchor_quick", {});
+            hideSelectionAskButton();
+            hideQuickAnchorPopover();
+            var activeSel = window.getSelection();
+            if (activeSel && activeSel.removeAllRanges) activeSel.removeAllRanges();
+            if (ok) showQuickAnchorToast(rect);
+          });
+          popover.appendChild(qbtn);
+        });
+        document.body.appendChild(popover);
       }, 0);
     });
     document.addEventListener("mousedown", function (e) {
       if (e.target && e.target.id === "anchor-ask-btn") return;
+      if (e.target && e.target.closest && e.target.closest("#quick-anchor-popover")) return;
       hideSelectionAskButton();
+      hideQuickAnchorPopover();
     });
+  }
+
+  // 理解サイクル Phase 1（ANCHOR, §5.4）: 教材区画フッタの常設ストリップ。
+  // 選択ポップオーバーと同じ4ボタン・同じ API を使い、テキスト選択が無くても
+  // 押せる（縮退は selection_segment_id 省略＝サーバ側でチャンク単位に縮退）。
+  function initQuickAnchorStrip() {
+    var strip = document.getElementById("quick-anchor-strip");
+    if (!strip) return;
+    strip.querySelectorAll("[data-quick-anchor]").forEach(function (btn) {
+      btn.addEventListener("click", async function () {
+        var quickLabel = this.getAttribute("data-quick-anchor");
+        var anchor = Session.currentAnchor() || {};
+        var payload = { quick_label: quickLabel, topic_id: state.currentTopicId };
+        if (anchor.segment_id) payload.selection_segment_id = anchor.segment_id;
+        var ok = await postCycleAnchor(payload);
+        sendDiscussMetric("cycle_anchor_quick", {});
+        if (ok) showQuickAnchorToast(this.getBoundingClientRect());
+      });
+    });
+  }
+
+  // コース・トピック選択時のみ表示する（discuss モード中も表示。次へボタンと違い
+  // 順路の概念に依存しないため isDiscussMode() では隠さない）。
+  function updateQuickAnchorStrip() {
+    var strip = document.getElementById("quick-anchor-strip");
+    if (!strip) return;
+    strip.hidden = !(state.course && state.currentTopicId);
+  }
+
+  // 理解サイクル Phase 1（精読モード, §4.3/§5.3）: コース単位のクライアント設定。
+  // サーバ側に学習者設定テーブルを作らない（v1。オフにすれば痕跡だけが残る）。
+  function precisionReadingStorageKey(courseId) {
+    return "eg_precision_reading:" + (courseId || state.courseId || "");
+  }
+
+  function isPrecisionReadingOn(courseId) {
+    try {
+      return localStorage.getItem(precisionReadingStorageKey(courseId)) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setPrecisionReadingOn(on) {
+    try {
+      localStorage.setItem(precisionReadingStorageKey(), on ? "1" : "0");
+    } catch (_) { /* noop */ }
   }
 
   // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。ゲート済み応答にのみ付く。
@@ -1010,6 +1131,9 @@
     var body = document.getElementById("material-body");
     if (!body) return;
     updateMaterialHeader();
+    // 理解サイクル Phase 1（ANCHOR, §5.4）: 常設ストリップの表示・非表示はどの分岐
+    // （discuss/読込中/通常）でも同じ条件で決まるため、早期 return の前で一度だけ判定する。
+    updateQuickAnchorStrip();
     // discuss.js の stillInDiscussContext() が「非同期の開幕画面フェッチが戻った時点でも
     // まだ discuss モードのままか」を判定するための不可視の合図（旧 #material-here の
     // textContent="論文と議論中" を置き換え。表示テキストではなく data 属性にする）。
@@ -3099,6 +3223,12 @@
       bar.querySelectorAll("[data-discuss-scope]").forEach(function (b) {
         b.classList.toggle("active", b.getAttribute("data-discuss-scope") === scope);
       });
+      // 理解サイクル Phase 1（精読モード, §4.3）: コース切替でも現在コースの
+      // 保存値を反映し直す（別コースの状態を持ち越して見せない）。
+      var precisionToggle = document.getElementById("cycle-precision-toggle");
+      if (precisionToggle) {
+        precisionToggle.setAttribute("aria-pressed", isPrecisionReadingOn() ? "true" : "false");
+      }
     }
   }
 
@@ -3122,6 +3252,18 @@
     if (endBtn) {
       endBtn.addEventListener("click", function () {
         if (window.Discuss) window.Discuss.maybeShowLanding(state.courseId, "explicit");
+      });
+    }
+    // 理解サイクル Phase 1（精読モード, §4.3/§5.3）: トグルは表示専用の状態を
+    // 切り替えるだけ（DB非変更・非LLM）。効果は discuss 開幕の「予想してから開く」
+    // の既定表示だけ（UC1: 既定レンダリングは変えない）。
+    var precisionToggle = document.getElementById("cycle-precision-toggle");
+    if (precisionToggle) {
+      precisionToggle.setAttribute("aria-pressed", isPrecisionReadingOn() ? "true" : "false");
+      precisionToggle.addEventListener("click", function () {
+        var next = !isPrecisionReadingOn();
+        setPrecisionReadingOn(next);
+        this.setAttribute("aria-pressed", next ? "true" : "false");
       });
     }
   }
@@ -7354,7 +7496,12 @@
     // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める
     // ようにする DI（着地モーダルのコース一致ガードの防御の二重化に使う）。
     if (window.Discuss && window.Discuss.init) {
-      window.Discuss.init({ getActiveCourseId: function () { return state.courseId; } });
+      window.Discuss.init({
+        getActiveCourseId: function () { return state.courseId; },
+        // 理解サイクル Phase 1（精読モード, §5.3）: discuss.js は localStorage を
+        // 直接触らず、この DI 経由でだけ読む。
+        isPrecisionReading: function (courseId) { return isPrecisionReadingOn(courseId); },
+      });
     }
     // discuss 会話ファースト・レイアウト（学習UI再編）: 開幕カードの開閉トグルと、
     // 教材ヘッダのクリックでの開閉（ボタン以外への click のみ・二重トグル防止に
@@ -7378,6 +7525,7 @@
     }
     applyDiscussLayout();
     initSelectionAnchor();
+    initQuickAnchorStrip(); // 理解サイクル Phase 1（ANCHOR, §5.4）: 常設ストリップの配線
     initLogout();
     initGroups();
     initLectureMode();

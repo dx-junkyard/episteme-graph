@@ -9338,9 +9338,9 @@ body.admin-inspect-mode textarea:disabled {
 .app.discuss-on .split-handle {
   display: none;
 }
-.app.discuss-on .material-foot {
-  display: none;
-}
+/* 理解サイクル Phase 1（ANCHOR, §5.4）: material-foot は常設の軽量アンカー
+   ストリップを持つため discuss モードでも隠さない（「次へ」ボタンは discuss で
+   使わないため updateNextTopicBtn() が個別に非表示にする）。 */
 /* 会話が始まる前は開幕カードに広い場所を与える */
 .app.discuss-on:not(.discuss-chat-active) .material-region {
   flex: 1 1 auto;
@@ -9378,6 +9378,182 @@ body.admin-inspect-mode textarea:disabled {
 }
 .discuss-opening-toggle[hidden] {
   display: none;
+}
+
+/* ===========================================================================
+ * 理解サイクル Phase 1（Understanding Cycle, docs/features/understanding_cycle_design.md §5）
+ * OPEN（動機記録・持ち越し再訪）／ELICIT・DIFF（予想の並置）／ANCHOR（軽量4ボタン）／
+ * LEAVE（持ち越す問いの選択）。判定・採点は行わない（UC2）。数値は出さない（UC9）。
+ * atlas の霧表現とは色・テクスチャを分ける（§9）。
+ * =========================================================================== */
+
+.cycle-opening-block {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-tertiary);
+}
+.cycle-textarea {
+  width: 100%;
+  min-height: 44px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin: 6px 0;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.cycle-predict-link {
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 2px 0;
+  display: block;
+  margin-top: 4px;
+}
+.cycle-predict-link:hover { color: var(--color-text-primary); }
+.cycle-predict-doc-list {
+  margin: 4px 0 8px 18px;
+  padding: 0;
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+}
+.cycle-facts { margin-top: 8px; }
+.cycle-fact-item {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  margin: 4px 0;
+}
+/* 並置 DIFF（v1）: 判定・採点・一致度の視覚表現は一切持たせない（UC2）。 */
+.cycle-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.cycle-diff-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.cycle-diff-doc-title {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.cycle-diff-col {
+  flex: 1 1 0;
+  min-width: 160px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.cycle-diff-hd {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
+.cycle-diff-body {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+.cycle-leave-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  margin: 0 6px 6px 0;
+}
+.cycle-leave-option:hover { border-color: var(--color-border-primary); }
+.cycle-leave-chip {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  padding: 1px 5px;
+}
+.cycle-leave-free-link {
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 3px 0;
+  display: block;
+  margin-top: 4px;
+}
+.cycle-leave-free-link:hover { color: var(--color-text-primary); }
+.cycle-leave-input textarea {
+  width: 100%;
+  min-height: 44px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.cycle-precision-toggle { white-space: nowrap; }
+
+/* ── 軽量アンカー4ボタン（ANCHOR, §5.4）: 常設ストリップ + 選択ポップオーバー ── */
+.quick-anchor-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-right: auto;
+}
+.quick-anchor-strip[hidden] { display: none; }
+.quick-anchor-btn {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  border-radius: 14px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.quick-anchor-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-primary); }
+#quick-anchor-popover {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border, #ccc);
+  background: var(--color-bg, #fff);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .15);
+}
+.quick-anchor-toast {
+  position: fixed;
+  z-index: 1000;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
 }
 
 

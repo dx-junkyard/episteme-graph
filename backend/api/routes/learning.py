@@ -123,6 +123,8 @@ from core.element_context import (
     build_element_context,
 )
 from core.discuss.opening import build_opening as build_discussion_opening
+from core.cycle.derive import build_intention_dto
+from core.cycle.queries import fetch_active_carryover, fetch_intentions
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
@@ -1094,6 +1096,55 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
    「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
    のように、その部分がこの論文由来ではないことを一言明示してください。
 8. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
+
+
+def _get_cycle_elicit_system_prompt(domain: str, response_persona: str | None = None) -> str:
+    """理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）の Elicit モード。
+
+    答えを提示せず、学生自身の予測を引き出す短い問いを一つだけ返す。既存 discuss の
+    1コール地点に相乗りし（UC10・新エンドポイントを作らない）、システムプロンプトの
+    差し替えだけで実現する。UC2（採点しない）・UC8（LLM 失敗時は骨格のみで続行）継承。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    return f"""あなたは{domain_label}を専門とする研究者で、学生が「予測してから読む」ための問いを一つだけ差し出す案内役です。
+
+**厳守事項:**
+1. 【解を提示しないでください】この論文・教材の結論、答え、計算結果、正しい理解を
+   教えてはいけません。学生がまだ読んでいない・確かめていない内容を先回りして
+   明かさないでください。
+2. 【問いを一つだけ】学生が自分の予測を立てるための短い問いを一つだけ返してください。
+   複数の問いを並べたり、解説・ヒントの羅列を添えたりしないでください。
+3. 【学生の直前の発話を踏まえる】学生の直前の発話（言及した箇所・概念・言葉）を
+   踏まえた、その場に固有の問いにしてください。誰にでも使い回せる汎用の決まり文句は
+   避けてください。
+4. 【断定しない・数値を出さない】的中率・正誤・スコアには一切触れないでください。
+   予測そのものへの良し悪しの判定も与えないでください。{persona_block}"""
+
+
+def _get_cycle_diff_system_prompt(domain: str, response_persona: str | None = None) -> str:
+    """理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）の Diff モード。
+
+    学生のメッセージに含まれる本人の予想（逐語）と、出典・論文の骨格との差分の
+    観点候補を、仮説文体で最大3点まで提示する。正誤判定・採点はしない（UC2）。
+    R層 DIFF（選択肢型・非LLM・決定論）とは別系統であり混ぜない（設計 §1-2）。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    return f"""あなたは{domain_label}を専門とする研究者で、学生が立てた予想と論文・出典の内容を突き合わせる案内役です。
+
+**厳守事項:**
+1. 【断定しないでください】学生のメッセージに含まれる本人の予想と、提供された
+   出典・論文の骨格とを比べ、「食い違いの可能性」がある観点を仮説文体で挙げて
+   ください。これが正しい・間違っているという断定はしないでください。
+2. 【候補は最大3点】観点の候補は多くとも3点までとし、それぞれ短く述べてください。
+   すべてを網羅しようとしないでください。
+3. 【採点や点数評価をしないでください】正解/不正解の判定、点数、一致度、的中率などは
+   一切出力しないでください。学生の予想の良し悪しを評価しないでください。
+4. 【権威は出典】判断の根拠は必ず提供された出典・論文の記述に置き、出典に無い推測を
+   断定的に述べないでください。{persona_block}"""
 
 
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
@@ -2396,6 +2447,18 @@ def learning_chat(
                 ),
             )
 
+    # 理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）: cycle_mode の
+    # 値検証も discuss_scope precheck と同型で、truncate（機能3の書き直し）より前に行う。
+    _cycle_mode_precheck = (body.cycle_mode or "").strip()
+    if _cycle_mode_precheck and _cycle_mode_precheck not in ("elicit", "diff"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "cycle_mode には elicit か diff を指定してください"
+                f"（受信値: {_cycle_mode_precheck!r}）。"
+            ),
+        )
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -2518,6 +2581,15 @@ def learning_chat(
     # （意図分類・前提知識ゲート・detour化）を共有するが、応答スタイルは会話調ではなく
     # 学術ディスカッション調（_get_discuss_system_prompt）にする。
     _is_discuss = (body.intent_mode or "").strip() == "discuss"
+    # 理解サイクル Phase 2（設計 §8）: AI 4モードのうち Elicit/Diff は既存 discuss の
+    # 1コール地点に相乗りする。値検証（elicit/diff 以外は 422）は本処理より前で完了済み。
+    # フロントは cycle_mode を intent_mode=discuss と併せて送るため _is_discuss は
+    # 通常 true だが、_chat_feature の分岐は cycle_mode を独立に優先させる。
+    _cycle_mode = (body.cycle_mode or "").strip()
+    _cycle_chat_feature = {
+        "elicit": "learning:cycle_elicit",
+        "diff": "learning:cycle_diff",
+    }.get(_cycle_mode)
 
     # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
     # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
@@ -2713,7 +2785,11 @@ def learning_chat(
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
     # casual / discuss モードでも guard の注入（振る舞い）は維持する — 気軽さ・自由さ≠根拠の放棄。
     # discuss は casual と判定が競合しないが（intent_mode は単一値）、設計上 discuss を先に判定する。
-    if _is_discuss:
+    if _cycle_mode == "elicit":
+        _system_prompt = _get_cycle_elicit_system_prompt(domain, response_persona)
+    elif _cycle_mode == "diff":
+        _system_prompt = _get_cycle_diff_system_prompt(domain, response_persona)
+    elif _is_discuss:
         _system_prompt = _get_discuss_system_prompt(domain, response_persona)
     elif _is_casual:
         _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
@@ -2766,7 +2842,9 @@ def learning_chat(
 
     # discuss モード（設計 §6.2 Phase 1）: U層タグを "learning:chat_discuss" に分離し、
     # casual / 通常チャットと独立にコストを実測する（専用上限は Phase 3 で実測後に判断）。
-    if _is_discuss:
+    if _cycle_chat_feature:
+        _chat_feature = _cycle_chat_feature
+    elif _is_discuss:
         _chat_feature = "learning:chat_discuss"
     elif _is_casual:
         _chat_feature = "learning:chat_casual"
@@ -2995,9 +3073,19 @@ def get_discussion_opening(
     document_ids = list_course_source_document_ids(course_data)
     # Phase 0b: 教員の任意入力（AI 生成なし）。course_data への素の dict アクセスは
     # しない（Tier 3-18: 正本は core/course_data.py のアクセサ）。
-    return build_discussion_opening(
+    result = build_discussion_opening(
         course_id, document_ids, course_focus=course_focus(course_data)
     )
+    # 理解サイクル（UCサイクル §5.1/§5.2）: OPEN の一枠（初回動機 / 持ち越し問いの
+    # 再提示）を optional キーとして同梱する。DB 取得失敗は fail-open — intention
+    # キーを付けずに返し、opening 本体は壊さない（既存キー・ゲート・シグネチャは不変）。
+    try:
+        carryover = fetch_active_carryover(current_user["id"], course_id)
+        intentions = fetch_intentions(current_user["id"], course_id)
+        result["intention"] = build_intention_dto(carryover, bool(intentions))
+    except Exception:
+        logger.warning("Failed to build cycle intention for discuss opening", exc_info=True)
+    return result
 
 
 class DiscussReflectionRequest(BaseModel):

@@ -2504,7 +2504,14 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
 # 追加する kind。payload には質問逐語を積まない（help_anchor / documented / no_hit のみ,
 # P3）。tension/anchor worker・digest・個人知識ネットワーク導出・問いの軌跡ビューは
 # help_usage を対象にしない（意図的に除外。§6-6 ガードレール）。
-_INTEREST_KINDS = ("raw", "question", "detour", "misconception", "tension", "help_usage")
+# intention / anchor_mark は理解サイクル（UCサイクル, docs/features/understanding_cycle_design.md
+# §4）が追加する kind。本人専用メモであり、tension/anchor worker・digest・個人知識
+# ネットワーク導出・問いの軌跡ビュー・教員向け集約のいずれからも構造的に除外する
+# （UC3。help_usage と同型の除外パターン）。
+_INTEREST_KINDS = (
+    "raw", "question", "detour", "misconception", "tension", "help_usage",
+    "intention", "anchor_mark",
+)
 _TRACE_STATUSES = (
     "open", "revisited", "resolved",   # 既存
     "candidate",      # LLM提案・本人未確定（tension のみ）
@@ -2560,6 +2567,163 @@ def record_interest_trace(
         return None
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# 理解サイクル（Understanding Cycle, UCサイクル）Phase 1
+# 正本: docs/features/understanding_cycle_design.md（UC1〜UC10）。migration 0（既存
+# interest_traces の kind に 'intention' / 'anchor_mark' を追加するのみ、020確認済み）。
+# 本人専用メモであり、監査記帳（theory_review_events）は行わない（指揮官裁定）。
+# ---------------------------------------------------------------------------
+
+
+def _supersede_active_carryover(user_id: str, course_id: str) -> None:
+    """本人×コースの active な carryover（kind='intention', role='carryover_question',
+    status='open'）を 'superseded' に遷移させる（UC6: 削除せず状態遷移で保持）。
+
+    新しい carryover を書く直前に呼ぶ（carryover は常に最大1件/コース）。
+    """
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = 'superseded'
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'intention' AND payload->>'role' = 'carryover_question'
+                  AND status = 'open'
+            """),
+            {"uid": user_id, "cid": course_id},
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("Failed to supersede active carryover: %s", exc)
+    finally:
+        session.close()
+
+
+def record_cycle_intention(
+    user_id: str,
+    course_id: str,
+    role: str,
+    text: str,
+    source_trace_id: str | None = None,
+    prediction: dict | None = None,
+) -> dict | None:
+    """理解サイクル OPEN/LEAVE の intention 痕跡を記録する（非LLM・逐語保存・UC10）。
+
+    role は ``opening_motive`` / ``carryover_question`` / ``revisit_answer`` の3値
+    （語彙の正本は ``core.cycle.schema.INTENTION_ROLES``）。role/text の妥当性検証は
+    呼び出し側（ルート）が 422 を返す前提だが、ここでも安全側に倒す（不正値は None）。
+
+    - ``carryover_question``: 新しい持ち越しを書く前に、既存 active carryover を
+      superseded に遷移させる（置き換え。UC4: 未消化を催促しない）。
+    - ``opening_motive``: ``prediction``（並置 DIFF の予想、§5.3）を任意で同居させる。
+      confidence / load_score / score のキー名は含めない（UC9 の安全網）。
+    - ``revisit_answer``: ``source_trace_id``（active carryover の trace id）が
+      必須（無ければ None）。carryover 自体は消費しない（新しい carryover を書いた
+      ときのみ superseded になる。REVISIT は連鎖記録が目的）。
+
+    戻り値は ``{"trace_id": ...}``。失敗時は None。
+    """
+    from core.cycle.schema import INTENTION_ROLES, KIND_INTENTION
+
+    role = (role or "").strip()
+    if role not in INTENTION_ROLES:
+        return None
+    text = (text or "").strip()
+    prediction_text = ""
+    if isinstance(prediction, dict):
+        prediction_text = str(prediction.get("text", "") or "").strip()
+    # 「予想してから開く」（§5.3）は動機が空のまま予想だけを記録できる —
+    # opening_motive に限り、prediction.text があれば text 空を許容する。
+    if not text and not (role == "opening_motive" and prediction_text):
+        return None
+    if role == "revisit_answer" and not str(source_trace_id or "").strip():
+        return None
+
+    extra_payload: dict = {
+        "role": role,
+        "source_trace_id": source_trace_id or None,
+        "structure_anchor": None,
+        "session_ref": None,
+    }
+    if role == "opening_motive" and isinstance(prediction, dict) and prediction:
+        # UC9 の安全網: 数値キー(confidence/load_score/score)は同居させない。
+        safe_prediction = {
+            k: v for k, v in prediction.items() if k not in ("confidence", "load_score", "score")
+        }
+        if safe_prediction:
+            extra_payload["prediction"] = safe_prediction
+
+    if role == "carryover_question":
+        _supersede_active_carryover(user_id, course_id)
+
+    trace_id = record_interest_trace(
+        user_id, course_id, None, kind=KIND_INTENTION, text=text,
+        context_label="", extra_payload=extra_payload, status="open",
+    )
+    if trace_id is None:
+        return None
+    return {"trace_id": trace_id}
+
+
+def dismiss_cycle_intention(user_id: str, trace_id: str) -> bool:
+    """本人の intention 痕跡を dismiss する（削除ではなく status='dismissed' 遷移。UC6）。"""
+    from core.cycle.schema import KIND_INTENTION
+
+    session = _pg_session()
+    row = None
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                SET status = 'dismissed'
+                WHERE id = CAST(:tid AS uuid) AND user_id = CAST(:uid AS uuid) AND kind = :kind
+                RETURNING id
+            """),
+            {"tid": trace_id, "uid": user_id, "kind": KIND_INTENTION},
+        ).fetchone()
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        logger.warning("Failed to dismiss cycle intention: %s", exc)
+        return False
+    finally:
+        session.close()
+    return row is not None
+
+
+def record_cycle_anchor_mark(
+    user_id: str,
+    course_id: str,
+    topic_id: str | None,
+    quick_label_key: str,
+    anchor_payload: dict,
+    text: str,
+) -> str | None:
+    """軽量アンカー4ボタン（ANCHOR, 設計書 §4.2/§5.4）を1タップで確定記録する。
+
+    既存 structure_anchor 経路A（``attribution_source='learner_selected'``・同期・
+    非LLM）に相乗りする ``kind='anchor_mark'`` の新設行。``quick_label_key`` の妥当性は
+    呼び出し側で検証済みの前提だが、ここでも安全側に倒す（語彙外は None）。
+    """
+    from core.cycle.schema import KIND_ANCHOR_MARK, QUICK_LABELS
+
+    quick_label_key = (quick_label_key or "").strip()
+    if quick_label_key not in QUICK_LABELS:
+        return None
+    revisit = bool(QUICK_LABELS[quick_label_key].get("revisit", False))
+    extra_payload = {
+        "structure_anchor": anchor_payload,
+        "quick_label": quick_label_key,
+        "revisit": revisit,
+    }
+    return record_interest_trace(
+        user_id, course_id, topic_id, kind=KIND_ANCHOR_MARK, text=text,
+        context_label="", extra_payload=extra_payload, status="open",
+    )
 
 
 def recent_duplicate_ui_anchor_event(
@@ -2619,6 +2783,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   -- 学生 HELP ルート（設計 §1-3-8）: help_usage は使い方の質問の痕跡であり
                   -- 「問いの軌跡」（教材内容についての未解決の問い）には出さない
                   AND kind <> 'help_usage'
+                  -- 理解サイクル（UCサイクル §4/§11-1）: intention（OPEN/LEAVE の本人メモ）と
+                  -- anchor_mark（軽量アンカー）は本人専用メモであり「問いの軌跡」には出さない
+                  AND kind NOT IN ('intention', 'anchor_mark')
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -2645,21 +2812,28 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
     痕跡本文や user_id は一切出さない。集団集計を既定とする（仕様書 §6-5）。
     """
     title_map = topic_title_map or {}
+    # 理解サイクル（UCサイクル）の intention / 軽量アンカー(anchor_mark)、および
+    # 学生 HELP ルートの help_usage は本人専用メモ・使い方の質問であり、教員向け
+    # 集団集計（関与人数・トピック別件数）には数えない（UC3 / §1-3-8 と同型の除外）。
+    _dashboard_excluded_kinds = "('help_usage', 'intention', 'anchor_mark')"
     session = _pg_session()
     try:
         cohort = session.execute(
-            sa_text("SELECT COUNT(DISTINCT user_id) FROM interest_traces WHERE course_id = :cid"),
+            sa_text(f"""
+                SELECT COUNT(DISTINCT user_id) FROM interest_traces
+                WHERE course_id = :cid AND kind NOT IN {_dashboard_excluded_kinds}
+            """),
             {"cid": course_id},
         ).scalar() or 0
 
         rows = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT topic_id,
                        COUNT(*) AS cnt,
                        COUNT(*) FILTER (WHERE status IN ('open', 'revisited')) AS unfinished,
                        COUNT(DISTINCT user_id) AS learners
                 FROM interest_traces
-                WHERE course_id = :cid
+                WHERE course_id = :cid AND kind NOT IN {_dashboard_excluded_kinds}
                 GROUP BY topic_id
                 ORDER BY cnt DESC
                 LIMIT :lim

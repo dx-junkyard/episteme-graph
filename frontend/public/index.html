@@ -75,6 +75,15 @@
         </div>
         <div class="material-body" id="material-body"></div>
         <div class="material-foot">
+          <!-- 理解サイクル Phase 1（ANCHOR, docs/features/understanding_cycle_design.md
+               §5.4）: 常設の軽量アンカー4ボタン。テキスト選択時のポップオーバーとは別に、
+               選択なしでも押せる導線として置く。コース・トピック選択時のみ表示する。 -->
+          <div class="quick-anchor-strip" id="quick-anchor-strip" data-ui-anchor="material.quick-anchor" hidden>
+            <button type="button" class="quick-anchor-btn" data-quick-anchor="curious">気になる</button>
+            <button type="button" class="quick-anchor-btn" data-quick-anchor="not_yet">まだ分からない</button>
+            <button type="button" class="quick-anchor-btn" data-quick-anchor="return_later">あとで戻る</button>
+            <button type="button" class="quick-anchor-btn" data-quick-anchor="connects">何かとつながりそう</button>
+          </div>
           <button class="next-topic-btn" id="next-topic-btn" data-ui-anchor="material.next-topic" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
         <!-- 再構成ループ (R層): 「再構成に挑戦」導線。自動では開かない（本人が開く） -->
@@ -120,6 +129,10 @@
           <button type="button" class="discuss-scope-opt" data-discuss-scope="course_sources">このコースのソース論文</button>
           <button type="button" class="discuss-scope-opt" data-discuss-scope="all_visible">閲覧できる周辺資料まで</button>
         </div>
+        <!-- 理解サイクル Phase 1（精読モード, docs/features/understanding_cycle_design.md
+             §4.3/§5.3）: 既定 off。ON でも開幕は自動で変わらず、「予想してから開く」の
+             既定表示だけが変わる（OFF でも小さなリンクから入れる）。 -->
+        <button type="button" class="lx-filter cycle-precision-toggle" id="cycle-precision-toggle" aria-pressed="false" title="ONにすると、論文を開く前に予想を書く画面が既定で表示されます">精読モード</button>
         <!-- 音声会話の非対応を近傍に事実文で示す（設計 §6.4: 音声版はこのモードの
              非スコープ。app.js の updateVoiceAvailability が hidden を切り替える）。 -->
         <span class="discuss-voice-note" id="discuss-voice-note" hidden>音声会話は「順番に学ぶ」モードで利用できます。</span>
