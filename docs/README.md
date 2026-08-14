@@ -122,6 +122,7 @@ PDF アップロード
 - [デプロイ構成](architecture/deployment.md) — Docker Compose、環境変数、ネットワーク設計
 - [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧
 - [レイヤー索引表](architecture/layer_registry.md) — 全レイヤーの正本設計書/実装場所/migration 対応
+- [candidate → confirm 共通プリミティブ](features/candidate_flow_design.md) — 候補→確定ワークフローの共通制御フロー（`core/candidate_flow.py`）
 - [新機能 PR チェックリスト](development_checklist.md) — docs 3点セット・境界回帰テスト・アンカー整合
 
 ### バックエンド
