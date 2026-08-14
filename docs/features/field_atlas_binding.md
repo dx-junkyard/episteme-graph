@@ -2,6 +2,9 @@
 
 仕様書: `field_atlas_overlay_spec.md` / 関連: `field_atlas_skeleton.md`
 
+> 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
+> 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
+
 ## 背景
 
 issue F 完了後のレビューで、地図は描けているが「いまここ (現在地の実感)」が

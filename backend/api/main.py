@@ -69,8 +69,11 @@ from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
 from routes import landscape as landscape_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
-# 13個の子ルーターを、admin.py 経由の二段ネストではなく main.py から直接
+# 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
+# Tier 3-17c 導入当時は13本だったが、以降の機能追加でここに登録されるルーターは
+# 増え続けている——正確な本数は下記の `app.include_router(..., prefix="/api/admin")`
+# 呼び出しを数えること（数値をコメントに固定すると陳腐化する）。
 from routes.lecture_studio import router as _lecture_studio_router
 from routes.theory_components import router as _theory_components_router
 from routes.cartridges import router as _cartridges_router
@@ -326,8 +329,10 @@ app.include_router(personal_map_routes.me_router)
 app.include_router(landscape_routes.learning_router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
-# フラット化。以下13ルーターは admin.router と同じ "/api/admin" prefix で
-# 直接マウントする（URL・認可・レスポンスは従来と完全に不変）。
+# フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で
+# 直接マウントする（URL・認可・レスポンスは従来と完全に不変）。Tier 3-17c 導入
+# 当時は13本だったが、以降の機能追加でルーターは増え続けている——正確な本数は
+# 本ブロック内で `prefix="/api/admin"` を指定した呼び出しを数えること。
 app.include_router(_lecture_studio_router, prefix="/api/admin")
 app.include_router(_theory_components_router, prefix="/api/admin")
 app.include_router(_cartridges_router, prefix="/api/admin")

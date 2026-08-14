@@ -429,7 +429,9 @@ AdminAssistant.registerUiAnchors("materials", {
 - **fail-closed（P1）**: capability 未登録・ロール不足・scope 不一致は実行拒否。フロントの表示を信頼せずサーバで判定。
 - **確認ゲート（P2）**: `reversible=false` は必ず `confirm_required=true`。二重送信防止のため確認トークン（`action_plan` に nonce）を付与。
 - **PII / シークレット**: `screen_context` に生パスワードやトークンを載せない（フロントで除外）。LLM へ渡すのは表示用メタのみ。
-- **コスト上限**: `ASSISTANT_MAX_CALLS_PER_DAY`（既定10）等の env（D層 `DOUBT_SCOPE_MAX_CALLS_PER_DAY` に倣う）。モデルは fast tier 既定（`ASSISTANT_LLM_MODEL` で上書き）。LLM は `system` ロール/`temperature` 回避（開発ルール4、o1系互換）。
+- **コスト上限**: `ASSISTANT_MAX_CALLS_PER_DAY`（既定20。訂正注記: 実装時の既定値は
+  `backend/core/config.py` で 20 — 本書執筆時の想定値「10」から変更されている）等の env
+  （D層 `DOUBT_SCOPE_MAX_CALLS_PER_DAY` に倣う）。モデルは fast tier 既定（`ASSISTANT_LLM_MODEL` で上書き）。LLM は `system` ロール/`temperature` 回避（開発ルール4、o1系互換）。
 
 ---
 

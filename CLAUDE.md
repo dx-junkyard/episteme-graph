@@ -62,11 +62,11 @@ src/tests/                     → agents 用 pytest テスト
 | ファイル | 役割 |
 |---|---|
 | `backend/core/schema.py` | 全 Pydantic モデル定義（OntologyType, CorePredicate, PaperStructure など） |
-| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーター13本は `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）） |
+| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **19本（2026-08-14 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
 | `backend/api/routes/lecture_studio/` | 原稿スタジオルーター（Tier 3-17a で `_shared` / `scripts` / `pipeline` / `topics` に分割したパッケージ。`__init__.py` が router と互換シンボルを再エクスポートするため import 面は旧単一ファイルと同じ） |
 | `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）。orchestrator の下請け。旧 diff/merge は本番未使用のため削除済み（2026-07） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
-| `backend/core/chat.py` | tier 付き chunk 検索ユーティリティ（実 RAG チャットは `routes/learning.py`） |
+| `backend/core/chat.py` | tier 付き chunk 検索ユーティリティ。**レガシー・現行の呼び出し元なし**（`search_chunks` を参照するのは `tests/test_learner_experience_layer.py` のみ。実 RAG チャットは `routes/learning.py`、可視性ゲート付き検索は `services.search_chunks_with_metadata`）。削除候補 |
 | `backend/core/postgres.py` | PostgreSQL セッション管理 |
 | `backend/core/llm.py` | OpenAI クライアントファクトリ |
 | `backend/core/storage.py` | MinIO S3互換ストレージ |
@@ -468,8 +468,9 @@ LLM（B）は非同期バッチ。LLM 候補は本人確定まで確定扱いし
 ### 分野の地図（Field Atlas, Stage 2, issue A〜F 実装済み）
 
 学習中の箇所が分野全体のどこに該当するかを示す全画面オーバーレイ + 常設ミニマップ。
-仕様の正本は `field_atlas_overlay_spec.md`（3層モデル: S=骨格カートリッジ同梱 /
-C=`atlas_overlay_cache` / P=個人層 `interest_traces`）。設計原則: 宣言しない・煽らない・
+仕様の正本は **原本消失のため 2026-08-14 の再構成版 `docs/features/field_atlas_overlay_spec.md`**
+とする（3層モデル: S=骨格カートリッジ同梱 / C=`atlas_overlay_cache` /
+P=個人層 `interest_traces`）。設計原則: 宣言しない・煽らない・
 出所の正直さ・**踏破率を数値にしない**・リアルタイム LLM 生成をしない。
 
 - **バックエンド**: `core/atlas*.py`（骨格・状態導出・配置・報告）、
@@ -759,6 +760,69 @@ AIに疑わせない（LLM 出力は常に candidate、確定は人間。反実�
 - **KPI（DX-2）**: `GET /api/admin/doubt/metrics`（SYSTEM_ADMIN のみ）。
   `theory_review_events` の再集計のみで専用カウンタテーブルを持たない。ダッシュボード UI は作らない。
 
+### 賭け金の台帳（Stakes Ledger, SL層, migration 067）
+
+D層の上に積む第4の拡張。「この主張は、何が崩れたら危うくなるのか」を読めるようにする4部品
+— SL-1 反証条件レジストリ（何が起これば覆るか）/ SL-2 観測の反実仮想（覆れば何処まで届くか）/
+SL-3 独立支持経路（どこが一点吊りか）/ SL-4 晴れ間（どこで確かめられていないか）— を
+**D層の既存5テーブルの意味論を変えずに**載せ、出口は既存 `verification_proposals` に一本化する
+（新しい出口を作らない）。正本は `docs/features/stakes_ledger_design.md`（SL1〜SL10・§15 実装記録。
+理解サイクル設計書 §7 が要求する Phase 3 の専用設計書）。
+
+**不変条項（§1）**: SL1 閉世界語彙の固定（検証記録の不在について言えるのは
+**「このコーパスの中では検証記録がありません」だけ**。「この分野では未検証」「誰も検証して
+いない」「世界初」「未踏」は denylist で構造的に禁止 — 台帳はコーパスの射影であって分野の射影
+ではない。晴れ間は発見の候補地であって発見ではない）/ SL2 AI に疑わせない（LLM 出力は常に
+candidate・確定は教員。「反証不可能」の記帳も人間のみ）/ SL3 到達可能性（reachability）は人間
+専用語彙で worker が書かない・帰属必須 / SL4 数値を見せない（支持経路の本数・最小カットの
+サイズ・confidence を出さず段階事実文のみ）/ SL5 情報を落とさない（`core/doubt/` 配下に置いて
+既存 `DELETE FROM` 禁止ガードレールを継承）/ SL6 egocentric のみ / SL7 研究価値の判断は師弟の
+対話に残す（D層の煽り語彙禁止を継承）/ SL8 昇格にコーパス外文献確認の記帳を必須化 / SL9 同期
+パスに LLM を入れない / SL10 既存意味論の非改変（反証条件は `verification_scopes` の双対の別列）。
+
+- **DB（migration 067、新テーブルなし）**: `epistemic_ledger` に `falsification_conditions`
+  （人間の記帳）/ `falsification_candidates`（LLM 候補）/ `falsification_analyzed_at`（worker の
+  冪等マーカー・部分 index 付き）、`verification_proposals` に `course_id` / `reachability` /
+  `external_check` / `external_checked_by`、`counterfactual_sessions` に `toggled_observations`。
+- **core**（`backend/core/doubt/`）: `falsification_conditions/`（`scope_candidates/` 同型の非同期
+  worker 一式。validator は evidence_quote の verbatim・kind 2値を hard 検査し、reachability の
+  混入は剥いで warning・`not_formulable` 候補はその1件のみ drop）/ `observation_targets.py`
+  （観測系 claim の3段同定 A=DSL `MEASURES` → B=theory stage → C=`claim_type`。`identified_via`
+  を保持し `dsl` が空の旧 run でも fail-soft）/ `support_paths.py`（**純 Python の単位容量
+  Edmonds–Karp**。networkx/numpy を追加しない。容量1は `source_backing_status ∈ {source_backed,
+  partially_source_backed}` のエッジのみ。出力は `level ∈ {none, single, several}` / `fact_line` /
+  `cut_members` / `observation_roots` で経路数・容量を関数外に出さない）。語彙・ラベル・Pydantic
+  モデルは `core/doubt/schema.py` に追加（実 JSONB と完全一致させる）。
+- **API**（`routes/doubt.py`。admin は実パス `/api/admin/doubt/...`・全て `_require_teacher`）:
+  `POST|PATCH /ledger/{t}/{id}/falsification-conditions[/{condition_id}]`（手動記帳・訂正）/
+  `POST /ledger/{t}/{id}/falsification-candidates/{cid}/confirm|dismiss`（確定は候補行を昇格させず
+  status 遷移で保持し `recorded_by` に教員 user_id）/ `GET /courses/{id}/observation-targets` /
+  `POST /courses/{id}/falsification-candidates/refresh` / `PATCH /proposals/{id}`（新設）。
+  `POST /challenges/{cid}/proposals` は `external_check` 必須（空は 422）+ withdrawn な疑義からの
+  昇格を 422 に是正。台帳 GET は `falsification_conditions` と optional `support_lines`（導出失敗は
+  キーごと落とす fail-soft）を返す。**監査は新 entity_type を作らず `AUDIT_ENTITY_LEDGER` を流用**。
+- **反実仮想・投影・結線**: `CounterfactualComputeRequest` の optional `toggled_observations`
+  （`claim_id` + `aspect ∈ {value, systematics}`。aspect は Duhem 区別の記帳のみで伝播は同一）は既存
+  seed 解決の fallback に流すだけで **`counterfactual.py` の伝播は非改変**（両方空のときだけ 422）。
+  `compile_open_assumptions` の item に `has_falsification_condition` /
+  `falsification_not_formulable` / `reachability_summary` / `support_line_level` を追加（既存キー・
+  並び順は不変）。discuss 開幕「最も脆い一手」の `_assumption_fact_line` に3文言を分岐追加
+  （**第3の kind・第3の主語は作らない**）。学習者向け台帳 GET は事実文のみ（`cut_members`・
+  `recorded_by` は非漏洩、台帳未記帳なら従来どおり 404）。
+- **コスト・UI**: `DOUBT_FALSIFICATION_MAX_CALLS_PER_DAY`（既定10・D層の他カウンタと独立）/
+  `DOUBT_FALSIFICATION_LLM_MODEL`（空 = fast tier）。`doubt:falsification_conditions` は
+  `KNOWN_FEATURES` + `llm_policy.scene_for_feature` + `_FEATURE_ENV_SETTINGS` に3点同時登録する。
+  `doubt-atlas.js` に「覆る条件」区画・「観測を仮に倒す」・支持線の事実行・未検証合意リスト3列 +
+  到達可能フィルタ・external_check フォーム（空欄は警告色にしない＝空欄は発見）。段階ラベルは
+  サーバ / フロントの二重表の**両方に**追加し、アンカー5件の3点セットを揃える。
+- **ガードレール**: `test_stakes_ledger_{guardrails,core,api,ui_static}.py`（閉世界語彙 denylist と
+  固定文言の原文存在・worker の書き込み分離・reachability の人間専用性・数値非表示・`DELETE FROM`
+  不在・external_check の 422・`support_paths` / `observation_targets` が fastapi / LLM /
+  networkx を import しないこと・監査 action 語彙の固定）。
+- **非スコープ（v1, §13）**: LLM 事前知識への三角測量照会 / コーパス横断の認識的ストレステスト /
+  Assumption Atlas 散布図への支持線・反証条件の表示 / 学習者の反実仮想操作・晴れ間閲覧・条件への
+  異議 / 反証条件の自動再生成トリガー / 「前提×領域」二次元晴れ間マップ。
+
 ### 横断ユーティリティ層（Admin Copilot, migration 034）
 
 管理画面に点在する AI 機能（コース構築チャット・原稿スタジオ rewrite・コンポーネント候補生成）を、
@@ -875,7 +939,7 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 - **管理画面「？使い方」＝admin インスペクト・モード（2026-07-30、migration 不要）**:
   学習画面のインスペクト・モード（`core/help_kb/ui_anchors.py`）の管理画面版。
   ①アンカー表の正本は `core/help_kb/admin_ui_anchors.py`（`KNOWN_ADMIN_UI_ANCHOR_IDS` /
-  `ADMIN_UI_ANCHORS` 228件（正確な件数は `test_admin_help_ui_anchors.py` が正）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
+  `ADMIN_UI_ANCHORS` 260件（2026-08-14 時点。正確な件数は `test_admin_help_ui_anchors.py` が正）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
   構造的禁止**、`resolve_admin_ui_anchors(role)` は TEACHER=teacher/ のみ・SYSTEM_ADMIN=+
   system_admin/ のロール fail-closed）。②配信 `GET /api/admin/assistant/help/ui-anchors`、
   no_hit 記録 `POST /api/admin/assistant/help/ui-anchor-events`（`_require_teacher`・30分
@@ -946,14 +1010,17 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 （英語原文・OCR ノイズ）を流してしまい、表示が非レクチャー時と食い違った。現在は逆に
 **トピック教材を最優先**する。
 
-- **表示ソース判定の正本は `_lecture_uses_topic_material(topic)`**（`backend/api/routes/lecture.py`）:
+- **表示ソース判定の正本は `lecture_uses_topic_material(topic)`**（`backend/core/lecture.py`。
+  `routes/lecture.py` / `lecture_studio/scripts.py` は import して使うだけ。旧名
+  `_lecture_uses_topic_material` は撤去済み）:
   トピックが `student_material`/`content`/`summary` または `spoken_script` を持つなら
   トピック教材経路（`_build_topic_draft_segment`＝display=student_material /
   read=spoken_script をスライド分割）を使う。持たないトピックだけが PDF 由来
   チャンク経路へフォールバックする。`get_lecture_sequence` / `get_topic_audio_status` /
   studio のトピック音声生成の3者が**同じ述語**を使い、表示・ボタン活性・音声生成の
   食い違いを防ぐ（`_topic_has_linkable_material` は撤去済み）。
-- **スライド分割の正本は `_build_topic_slides(topic)`**（`routes/lecture.py`、決定論的・LLM 非使用）:
+- **スライド分割の正本は `build_topic_slides(topic)`**（`backend/core/lecture.py`、決定論的・
+  LLM 非使用。旧名 `_build_topic_slides` は撤去済み）:
   正規化＋`![[equation]]` 解決のうえ `core/lecture.py::auto_paginate_slides` で分割する。
   受講表示・音声生成・readiness の3者が**この関数を通る**ことで `slide_index` を完全一致させる。
   分割規約: `===` マーカーがあれば教員の明示分割を優先。無く display が長い（既定600字目安・
@@ -1424,7 +1491,8 @@ DO1〜DO6: 本文非含有/仮名化/学習者に数値非表示/削除APIなし
 - **フロント**（`app.js` + `discuss.js`（`window.Discuss`、reconstruction.js と同型の後付け
   パターン））: サイドバー最上部の**二枚看板**（「順番に学ぶ」/「この論文と議論する」を等重表示。
   現アプリにコース着地画面が無いため設計書 §3.2 の想定をサイドバー常設ブロックに軌道修正、
-  既存の先頭トピック自動選択は不変）・「もっと自由に話す」常設リンク・スコープトグル・
+  既存の先頭トピック自動選択は不変）・スコープトグル（※「もっと自由に話す」常設リンクは
+  二枚看板と重複のため削除済み — app.js §3.5 コメント参照）・
   モードバー「論文と議論中」（中立色）・応答後の分岐チップ（深掘り/横展開）。
   **discuss UI 文言に「寄り道」を使わない**（DM5。explore の内部語彙・既存 UI は不変）。
 - **ガードレール**: `test_discuss_guardrails.py` / `test_discuss_mode.py` /
@@ -1476,6 +1544,69 @@ discuss 開幕画面の情報を「主語で分けて全部出す」層。正本
 - **ガードレール**: `test_discuss_opening_projection.py` /
   `test_discuss_opening_authoring_guardrails.py` / `test_discuss_opening_stage.py` +
   `test_next_steps_guardrails.py`（全却下抑止）+ `test_element_explanation_review_ui_static.py`。
+
+### 理解サイクル（Understanding Cycle, UCサイクル, migration 不要, 2026-08-13）
+
+AI を「回答装置」として改善するのではなく、**学習者が予測し、差を見て、理解を更新し、問いを
+持ち越し、時間をおいて再訪する**閉ループ（OPEN → ELICIT → DIFF → REVEAL → UPDATE → ANCHOR →
+LEAVE → REVISIT）を一級の体験として設計し、AI をその補助レイヤーへ再配置する層。新しい大機構を
+作らず、各段は既存機構（discuss 開幕・着地 / R層 / structure_anchor / personal_graph）の薄い拡張で
+構成し、単独論文の読解は discuss の `_discussion` 疑似トピックに載せる（新しい会話コンテキストを
+発明しない）。正本は `docs/features/understanding_cycle_design.md`（UC1〜UC10・§14=Phase 1 /
+§15=Phase 2 の実装記録）。
+
+**不変条項（§2）**: UC1 ELICIT-first は opt-in（精読モードの明示トグルでのみ有効。既定の
+読書体験・既定レンダリングを変えず、通覧に摩擦税をかけない）/ UC2 DIFF は採点しない（正解・
+点数・一致度を出さず、事実の並置と「食い違いの可能性」の仮説文体。権威は常に出典リビール）/
+UC3 予測・想起・意図の痕跡は本人のみ可視・評価利用禁止 / UC4 セッション間は何もしない
+（督促・連続日数・未消化バッジ・忘却曲線を作らない — 「間」を埋めないこと自体が設計）/
+UC5 沈黙適応をしない（能力・理解度・スキーマ距離の推定で提示内容・提示順・対話方針を暗黙に
+変えない）/ UC6 情報を落とさない（status 遷移のみ・行削除 API なし）/ UC7 cold start で能力
+推定をしない / UC8 サイクルの骨格は非LLM・同期（AI 失敗時も骨格だけでサイクルが閉じる）/
+UC9 数値を見せない / UC10 既存層は非改変。
+
+- **DB**: `interest_traces` に kind `intention`（`payload.role ∈ {opening_motive,
+  carryover_question, revisit_answer}`）と `anchor_mark`（軽量アンカー4種）を足すだけ
+  （kind は CHECK なし TEXT）。status は既存語彙を流用し active の意味で `'open'` を使う。
+  carryover は本人×コースにつき active 最大1件で、新規記録時に旧行を `superseded` にする。
+- **core**（`backend/core/cycle/`、FastAPI 非 import）: `schema.py`（`INTENTION_ROLES` /
+  `QUICK_LABELS`＝軽量アンカー語彙の正本）/ `queries.py`（読み取り SQL）/ `derive.py`
+  （`build_intention_dto` / `build_revisit_facts` / `build_landing_candidates` の純関数）/
+  `map_diff.py`（Phase 2「帰り道の景色」= `build_network_as_of` + `build_map_diff_facts`。
+  personal_graph を非改変で再利用し、**否定形の断言をしない**＝肯定形の事実文のみ）。書き込みは
+  services.py の `record_cycle_intention` / `dismiss_cycle_intention` / `record_cycle_anchor_mark`
+  に置き、`record_interest_trace` 唯一入口を維持する。
+- **API**（`backend/api/routes/cycle.py` の `learning_router` を main.py 直接登録。すべて本人のみ・
+  受講ゲートは `get_accessible_course_data`）: `POST /api/learning/courses/{id}/cycle/intention`
+  （201）/ `POST /api/learning/cycle/intention/{trace_id}/dismiss` /
+  `POST /api/learning/courses/{id}/cycle/anchor`（201。1タップ確定の専用経路）/
+  `GET /api/learning/courses/{id}/cycle/landing-candidates`（LEAVE の選択リスト）。discuss 開幕
+  `GET .../discuss/opening` には optional キー `intention` を route 層で fail-open マージする
+  （`core/discuss` は非改変・LLM 0回のまま）。
+- **構造的除外**: `intention` / `anchor_mark` は「問いの軌跡」（`get_interest_traces`）と教員
+  向け集約（`aggregate_interest_dashboard`）から明示除外する。tension / structure_anchor の
+  worker・digest・personal_graph 導出は許可リスト方式のため非改変で構造的に除外される。
+- **Phase 2（式スケール ELICIT + AI モード）**: R層 `ELICIT_MODES` に `regime` / `next_step` を
+  追加し `CHOICE_MODES`（選択式 DIFF の集合）を新設。出題は
+  `core/reconstruction/derivation_source.py` が derivation_chain から3段ゲート（`REGIME_OPERATIONS`
+  の近似・削減系のみ / 出典 evidence 非空 / claim 解決可）で決定論生成する（非LLM）。AI モード
+  （Elicit / Diff）は**新エンドポイントを作らず**既存 learning_chat の1コール地点に相乗りする
+  （`LearningChatRequest.cycle_mode ∈ {elicit, diff}`、不正値 422）。Explain は既存 RAG のまま。
+- **コスト・計測・フロント**: LLM は既存 `LEARNING_CHAT_MAX_CALLS_PER_DAY` の CostGate に相乗り
+  （専用上限なし）。U層 feature は `learning:cycle_elicit` / `learning:cycle_diff`、内部計測は
+  discuss 観測基盤（`discuss_metric_events`）に `cycle_motive_saved` を含む cycle_* 6語彙を追加（DO1〜DO6
+  継承・payload は常に空・正答率や連続日数を KPI にしない）。UI は `discuss.js`（開幕の動機入力・
+  carryover 再回答と差分事実文・予想→並置 DIFF・着地の LEAVE 区画）+ `app.js`
+  （`#quick-anchor-popover` / `#quick-anchor-strip`、精読モードは localStorage
+  `eg_precision_reading:<courseId>` — **サーバに学習者設定テーブルを作らない**）。3点セットは
+  `material.quick-anchor` + `docs/manual/student/02-student.md`。
+- **ガードレール**: `test_understanding_cycle_{core,api,guardrails,ui_static,regime,phase2}.py`
+  （kind の構造的除外・行削除 API 不在・本人以外からの fail-closed・DIFF に正誤/点数語彙が出ない・
+  精読モード既定 off・数値非表示・督促語彙の不在・Elicit プロンプトの契約フレーズ・R層新
+  elicit_mode の伏せフィールド非漏洩・core 非 FastAPI）。
+- **非スコープ（v1, §12）**: 学習者モデル・習熟度推定による適応（UC5/UC7 で恒久排除）/ 白地図
+  スケッチ（地図スケール ELICIT）/ 時間レンズ / intention の「わたしの地図」時間層表示 /
+  音声・casual 経路への精読モード適用 / 教員向けのサイクル痕跡の可視化（既存 k-匿名集約のみ）。
 
 ### 教材図スタジオ（Teaching Figure Studio, migration 063, 2026-07-31）
 
@@ -1848,7 +1979,8 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   doubt/schema.py・services.py の集計はここに委譲済み（表示文言は各所に残る）。
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
-  `AUDIT_ENTITY_TYPES`（30語彙。2026-07-25 に `AUDIT_ENTITY_MANUAL="manual"` を追加）。
+  `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
+  `core/schema.py` を数える — 2026-08-14 時点で35語彙）。
   `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は

@@ -66,7 +66,12 @@ ComponentGraphAgent（`component_graph/normalizer.py`）が、DerivationChain �
 論文の「理論操作の構造」を表すグラフです。**特定分野・特定論文の用語をハードコードしない**のが鉄則。
 
 ### 語彙は operation から導出
-`schema.classify_operation()` が operation の prefix から edge_type を決定します。
+`component_graph/schema.py::classify_operation(operation)` が operation の prefix から edge_type を
+決定します（返り値は `(verb, edge_type, is_generic)`）。
+**同名の `agents/theory_operations.py::classify_operation(operation_text, cartridge=...)` とは別物**で、
+そちらは操作を「操作ファミリー（+ カートリッジ由来 subtype）」へ分類する共有モジュール
+（→ [PDF 解析 Agent 詳細 §3](agents.md#3-共有モジュールagents-直下)）。本節の記述は
+すべて component_graph 側を指します。
 ```
 define_*     → defines        linearize_* → linearizes     solve_*     → solves
 eliminate_*  → eliminates     derive_*    → derives        constrain_* → constrains
@@ -141,9 +146,22 @@ node の主たる backing は **atomic claim**（短く evidence_text 非空、p
 
 ## 4. 理論コンポーネント抽出（`theory_components.py`）
 
-`extract_theory_components_from_dsl()` がチャンクメタデータの DSL から候補コンポーネントを作ります。
-edge の述語に応じて component_type を決め（MEASURES→observation, DEFINES→concept, CAUSES/REQUIRES→mechanism）、
-inputs/outputs/preconditions/dependencies を関係から導出します。出力は `theory_components` テーブルへ。
+`extract_theory_components_from_dsl()` がチャンクメタデータの DSL（`chunks.smiles_dsl`）から候補
+コンポーネントを作ります。edge の述語に応じて component_type を決め（MEASURES→observation,
+DEFINES→concept, CAUSES/REQUIRES→mechanism）、inputs/outputs/preconditions/dependencies を関係から
+導出します。出力は `theory_components` テーブルへ。
+
+> **これは実質レガシー経路です（2026-08-14 追記）。** 現行 A層パイプラインが書くチャンクには
+> `smiles_dsl` が入りません — `document_pipeline/persistence.py` の `INSERT INTO chunks (...)` の
+> 列は `id / document_id / chunk_index / text / embedding / display_text / spoken_text / formulas /
+> latex_formulas / material_id / page_start / page_end / section_id / block_ids / source_metadata` で、
+> `smiles_dsl` を含みません（`smiles_dsl` を書くのは旧 `core/embedder.py::embed_and_store()` だけで、
+> こちらは本番呼び出し元がありません。`dsl_embedding` ステージが書くのはチャンクではなく
+> `document_embeddings` の `dsl_graph` 行です）。
+> したがって本関数は入力が空になり `[]` を返すのが通常で、現行の理論コンポーネント生成の本流は
+> **ComponentAssemblyAgent（`component_assembly` ステージ）** です。関数自体は
+> `POST /api/admin/chunks/{chunk_id}/theory-components/extract`（`routes/theory_components.py`）から
+> まだ到達可能なため残置されています。
 
 ---
 

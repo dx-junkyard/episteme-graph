@@ -2,13 +2,9 @@
 
 [← ドキュメント目次](../README.md)
 
-> **鮮度注記（2026-08-13）:** 本書は 2026-07-18 時点の記述で、以降に追加された学生向け主要機能 —
-> **discuss モード（サイドバー二枚看板「順番に学ぶ / この論文と議論する」・開幕/着地画面）**・
-> **理解サイクル**（精読モード・持ち越し問い・帰り道の景色）・**わたしの地図**の拡張・
-> SL層の台帳事実行 — が未反映。現行の正本は CLAUDE.md の該当節と各設計書
-> （[discussion_mode_design.md](discussion_mode_design.md) /
-> [understanding_cycle_design.md](understanding_cycle_design.md) /
-> [personal_knowledge_network_design.md](personal_knowledge_network_design.md)）を参照。
+> **更新注記（2026-08-14）:** discuss モード（§3.8）・理解サイクル（§3.9）・
+> 検証状態の事実併記（§3.10）を追補した。他の節は 2026-07-18 時点の記述で、
+> 残る差分は CLAUDE.md の該当節を参照。
 
 学生向け学習 UI の機能を、画面と裏側の API の両面から解説します。
 実装: `frontend/public/index.html` + `frontend/public/js/app.js`（ES6+ SPA）。
@@ -102,7 +98,7 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 1. MediaRecorder + WebAudio の無音検知（発話後 ~1.4 秒の沈黙）で発話を自動区切り
 2. `POST /api/learning/voice/transcribe` で Whisper 文字起こし
 3. `intent_mode='casual'` でチャット送信（雑談拒否・前提知識ゲート・誤解検出をバイパスし、
-   短い会話調で応答。RAG 検索・tier・OutOfSourceGuard はそのまま → [RAG チャットフロー](../backend/rag-chat.md#3-インテントモードon_path--explore--casual)）
+   短い会話調で応答。RAG 検索・tier・OutOfSourceGuard はそのまま → [RAG チャットフロー](../backend/rag-chat.md#3-インテントモードon_path--explore--casual--discuss)）
 4. 応答を `POST /api/learning/voice/speak`（TTS, MP3）で再生（再生中はマイク停止、終了で聞き取り再開）
 5. 応答の第 1 根拠チャンク（`sources[0].chunk_id`）を `GET .../source-chunk/{chunk_id}` で取得し、
    ボイスパネルに「いま話している題材」として教材表示
@@ -143,6 +139,151 @@ id を持つ user バブルにのみボタンを出し、送信中は出さな�
 - **派生痕跡の後始末（P4）**: 取り除いたメッセージ由来の `interest_traces` は削除せず
   `status='superseded'` へ遷移し、以降の tension / anchor worker・ダイジェスト・
   問いの軌跡ビューから除外される。
+
+---
+
+## 3.8 「論文と話す」（discuss モード）
+
+トピックを順にたどらず、コースのソース論文と最初から議論するモード
+（`intent_mode='discuss'`。正本: [discussion_mode_design.md](discussion_mode_design.md)
+DM1〜DM8 / 対話の進め方は
+[discuss_dialogue_alignment_design.md](discuss_dialogue_alignment_design.md) DA1〜DA6）。
+会話は予約疑似トピック `_discussion`（表示ラベル「論文との議論」）の上で行われ、
+新テーブル・新チャットエンドポイントは持たない。
+
+### 入口 — 二枚看板
+サイドバー最上部に「**順番に学ぶ**」（現行の逐次型・無変更）と「**論文と議論**」を
+同じ視覚的重みで並べたセグメントコントロール（`app.js` の `discuss-mode-switch`。
+UI アンカー `sidebar.mode-sequential` / `sidebar.mode-discuss`）。入口はここに一本化されており、
+チャット欄の常設リンク「もっと自由に話す」は重複のため廃止済み。discuss は
+**寄り道（explore）ではない** — 復帰バナー・「寄り道」語彙は出さない。
+
+### 検索スコープ 2 段（`discuss_scope`）
+入力欄上部の discuss バー（`#discuss-scope-toggle`、UI アンカー `discuss.scope-toggle`）で
+
+| 値 | 表示 | 検索対象 |
+|---|---|---|
+| `course_sources`（既定） | このコースのソース論文 | コースの `sources[]` が指す document のみ |
+| `all_visible` | 閲覧できる周辺資料まで | 本人が閲覧可能な document 全体 |
+
+を切り替える。**該当チャンクが 0 件でも他スコープへ無断で広げない**（DM1）。
+選択状態そのものが出所の正直さの UI になる。判定・fail-closed の詳細は
+[RAG チャットフロー](../backend/rag-chat.md#35-discuss-モードの分岐)。
+音声会話（§3.5）は discuss では無効で、その旨を近傍に事実文で示す。
+
+### 開幕画面 — 白紙のチャット欄で始めない
+`GET /api/learning/courses/{id}/discuss/opening`（**LLM 0 回・読み取り専用**。
+`core/discuss/opening.py`）を教材区画に描画する（`discuss.js`）。返るのは:
+
+- `course_focus` — 教員が任意入力した「このコースで議論したいこと」（AI 生成なし）
+- `documents[].thesis` — この論文が答えようとした問い / 中心命題 / 支持構造チップ /
+  「別の見方」（出所ラベル「AI が提示した別の定式化（出典との対応は未確認）」付き）
+- `documents[].backbone` — TheoryOperationGraph の main 層を theory stage 順に。
+  ノードから対話を始められる
+- `documents[].discussion_seeds` — 解析パイプラインが生成し**教員が承認した**
+  「議論のきっかけ」（承認 0 件の document ではキー自体が付かない）
+- `fragile_points` — 脆い箇所を**主語ごとに分けて**提示（「この論文が確かめていないこと」＝
+  D層の未検証合意 / 「まだ確認できていないところ」＝解析が裏づけを取れていない箇所）
+
+すべて事実文で、confidence・件数・網羅率などの数値は一切返らない（DM6）。
+会話が始まると開幕カードは畳まれ、`開く / たたむ` トグル（`#discuss-opening-toggle`）で
+開き直せる（対話ファースト）。開幕画面末尾には「最初の一手」の定型チップ（押すとその文が
+そのまま送信される）、AI 応答のたびに分岐チップ「🔎 深掘り / 🧭 横展開」が付く。
+
+### 対話 — 歩調合わせ（revoice / uptake）
+discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）が発話タイプ別に応じる:
+
+- **質問には即答**（出し惜しみせず、要約でなく完全な形で）
+- **解釈・立場の表明には言い直し（revoice）から** — 解説で応じず、学習者の読みを
+  言い直して確認 → 論文の主張との重なりとズレを事実として並べる → **どのズレから
+  検討するかを学習者が選ぶ**
+- **詰まりには一点だけの足場かけ**
+- 回答末尾には、学習者の直前の発話を引用・組み込んだ固有の誘い（言い換え・予測・
+  自己説明）か why / how / what-if の問い返しを**必ず 1 つ**添える（uptake。汎用の
+  決まり文句は不可）
+
+局面（係留 → ギャップの地図 → 共同検討）はプロンプトが自己管理し、**サーバに会話状態を
+持たない**（migration 0）。
+
+### 着地画面（consolidation）
+「議論を終える」ボタン（`discuss.end`）／通常トピックへの切替／無活動 15 分
+（ポーリングなし）で `discuss.js` が軽量パネルを出す。スキップ可・スキップしても痕跡は残る。
+
+1. **今日の理解を自分の言葉で** — `POST .../discuss/reflection`（非LLM）。本人の一文を
+   そのまま確定済み（`status='articulated'`）の tension として記録する。AI 候補を待たない
+2. **今日話した内容を地図に置く（帰属カード）** — その日の tension / structure_anchor
+   候補を confirm / dismiss。anchor カードは質問文の再掲ではなく「どこ（`anchor_label`）への
+   **どの様相**（`doubt_type_label`）の引っかかりか」を提示し、違う様相へ 1 タップで
+   訂正できるチップを添える。候補が 0 件でも「痕跡は残っており、後から『わたしの地図』で
+   確認できます」の事実文を出す（接続（connect）は「わたしの地図」の既存導線から）
+3. **持ち越し（LEAVE）** — §3.9
+4. **再構成プローブ、あれば 1 問**（§7。出題対象の制約上「必ず 1 問」にはしない）
+
+---
+
+## 3.9 理解サイクル（Understanding Cycle）
+
+「予測し → 差を見て → 理解を更新し → 問いを持ち越し → 時間をおいて再訪する」ループを
+**opt-in の層**として既存機構の上に載せたもの（正本:
+[understanding_cycle_design.md](understanding_cycle_design.md) UC1〜UC10。migration 0）。
+既定の読書体験は変えない（UC1）・採点しない（UC2）・数値を見せない（UC9）・
+セッション間に督促を作らない（UC4）。
+
+- **精読モード**: discuss バーの `精読モード` トグル（既定 off。localStorage
+  `eg_precision_reading:<courseId>`。サーバに学習者設定を持たない）。ON にすると
+  「予想してから開く」が既定表示になるだけで、OFF でも小さなリンクから入れる。
+- **OPEN**: 開幕画面の一枠（`discuss/opening` の optional キー `intention`）。
+  初回は「この論文を、なぜ今開きましたか？」の任意一文、再訪時は**他の何よりも先に**
+  前回の持ち越し問いを再提示して任意の再回答。記録は
+  `POST /api/learning/courses/{id}/cycle/intention`（`role` =
+  `opening_motive` / `carryover_question` / `revisit_answer`）。
+- **ELICIT / DIFF**: タイトルだけを見て予想を書く →「あなたの予想」と「論文の骨格」
+  （中心の問い ／ 中心命題）を**並置**し、任意の一行「予想と何が違いましたか？」を添える
+  （判定・採点・一致度は出さない）。任意で
+  「AI から問いをもらう」（`cycle_mode='elicit'`。解を提示せず問いを 1 つだけ返す）と
+  「AI に違いの観点を出してもらう」（`cycle_mode='diff'`。断定しない候補提示）を使える。
+  いずれも**既存チャットの 1 コールに相乗り**する内部値で、不正値は 422。
+- **式スケール ELICIT**: R層カード内の選択式出題に `regime`（支配項・消える記号当て）と
+  `next_step`（次の操作当て）を追加（§7）。出題は derivation_chain の近似・削減系
+  operation の地点だけで、判定は従来どおり非LLM・決定論。
+- **ANCHOR（軽量アンカー 4 ボタン）**: 教材区画下の常設ストリップ
+  （`#quick-anchor-strip`、UI アンカー `material.quick-anchor`）とテキスト選択時の
+  ポップオーバーに「気になる / まだ分からない / あとで戻る / 何かとつながりそう」。
+  1 タップで確定（確認ダイアログを出さない）し、`POST .../cycle/anchor` が
+  既存 structure_anchor の経路A（`learner_selected`・同期・非LLM）へ相乗りする。
+- **LEAVE**: 着地画面の「次に持ち越すなら、どの問いにしますか？」。新規入力欄ではなく
+  当日の本人の痕跡からの**選択リスト**（`GET .../cycle/landing-candidates`）＋自由入力 1 枠。
+  旧持ち越しは行削除せず `superseded` へ遷移（UC6）。選ばなければ何も起きない。
+- **REVISIT（帰り道の景色）**: 再回答の直後に、前回持ち越した時点の個人知識ネットワークと
+  現在の導出結果の**構造差分**を肯定形の事実文（最大 3 件・数値なし）で返す
+  （「あなたの地図に『…』が加わっています」など）。過去時点の不在は断言しない。
+
+痕跡（`kind='intention'` / `'anchor_mark'`）は**本人のみ可視**で、問いの軌跡ビュー・
+教員向け集約・tension / anchor の worker とダイジェストからは構造的に除外される（UC3）。
+
+---
+
+## 3.10 検証状態の事実併記（D層・SL層）
+
+学習者側の D層／SL層は**読み取り専用**で、煽らず数値も出さない一行の事実として現れる。
+
+- **出典タブの根拠カード**: そのチャンクに含まれる数式・claim について
+  `GET /api/learning/courses/{id}/ledger/{target_type}/{target_id}` を引き、
+  「この内容の検証スコープはまだ記帳されていません。」のような**一行の事実文**
+  （＋記帳スコープ）を併記する。台帳未記帳（404）・取得失敗ならセクション自体を出さない
+  （fail-closed。台帳を使っていないコースでは表示が一切変わらない）。記帳者 ID・
+  生スコアは返らない。教材内の component チップから開く説明ポップアップにも
+  同じ様式で併記する。
+- **未検証の前提リスト**: 出典タブ末尾の「この分野の未検証の前提を見る」はプル型
+  （開いた人だけが `GET .../open-assumptions` を読む）。疑義者の氏名は含まれない。
+- **SL層（賭け金の台帳）**: 上記の台帳 API は「覆る条件」（反証条件）の事実文
+  （種別・到達可能性の段階ラベル＋「教員の記帳」の出所ラベル）と支持線の一行も
+  DTO に含めて返す（出典タブが併記する一行は `fact_line`）。
+  discuss 開幕の「この論文が確かめていないこと」（§3.8）には、記帳状況が
+  「何が起これば覆るかが記帳されている前提です。」「覆る条件はまだ定式化されていません。」
+  のように一文で連結される。学習者からの反実仮想・晴れ間の閲覧・条件への異議は
+  非スコープ（正本: [stakes_ledger_design.md](stakes_ledger_design.md) §8、
+  D層の学習者導線は [doubt_layer_issues.md](doubt_layer_issues.md)）。
 
 ---
 

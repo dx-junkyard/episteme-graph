@@ -5,7 +5,8 @@
 - ステータス: **この文書が知識ランドスケープ機能の正本**
 - 入力仕様: `/Users/Shared/issues/episteme_graph_knowledge_landscape_astrophysics_spec.md`
   （知識ランドスケープ／宇宙物理基準地図 仕様書 v0.1。以下「入力仕様書」）
-- 関連文書: `field_atlas_overlay_spec.md`（分野の地図）/ `atlas_binding_lifecycle_design.md` /
+- 関連文書: `field_atlas_overlay_spec.md`（分野の地図。※原本消失につき現存するのは
+  2026-08-14 の再構成版 — 旧§番号との対応は保証されない）/ `atlas_binding_lifecycle_design.md` /
   `personal_knowledge_network_design.md` / `discussion_mode_design.md` /
   `element_deliberation_workspace_design.md`
 

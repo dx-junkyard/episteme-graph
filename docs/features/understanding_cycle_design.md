@@ -156,6 +156,8 @@ status:  'open'（active の意味） | 'superseded' | 'dismissed'   -- 行削�
   DB 列は CHECK なし（036 確認済み）— 語彙の正本は `core/reconstruction/schema.py` に追加し、
   validator・伏せフィールド規約は既存のまま継承する。答えキーは derivation_chain の
   近似 operation（linearize_*/approximate_*/eliminate_*）から非LLM 生成。
+  > 実装は §15 の記録を正とする（`linearize_*` 型ワイルドカードは実在せず、実際は
+  > 統制語彙 + `operation_subtype` による3段ゲート生成）。
 
 ---
 

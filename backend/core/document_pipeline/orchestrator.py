@@ -74,11 +74,18 @@ STAGE_MODELS_KEY = "_stage_models"
 # options.models による run override / 使用モデル記録(M7)の対象ステージ。
 # 「LLM-first」と明言されている、または vision/opt-in で実行が二値に決まる
 # ステージのみを対象にする。document_structure（構造優先・曖昧箇所のみ LLM 補助）・
-# figure_table_semantics（caption-first・LLM enricher 任意）・symbol_registry /
-# derivation_chain / course_mapping / component_graph（いずれも非LLM・決定論的）は、
-# 実行時に LLM 呼び出しが実際にあったかどうかを外側（ループ側）から正確に判定
-# できないため、記録対象から意図的に除外する（不正確な網羅より正直な部分記録を
-# 優先する、という Phase 2 依頼の指示どおり）。
+# figure_table_semantics（caption-first・LLM enricher 任意）は、実行時に LLM 呼び出しが
+# 実際にあったかどうかを外側（ループ側）から正確に判定できないため、記録対象から
+# 意図的に除外する（不正確な網羅より正直な部分記録を優先する、という Phase 2 依頼の
+# 指示どおり）。symbol_registry / derivation_chain / course_mapping は非LLM・決定論的
+# なので単純に対象外。component_graph は上記3ステージと異なり非LLMではない——
+# agents/component_graph/agent.py が自ら「hybrid deterministic/LLM edge-building
+# pipeline」と明記するとおり LLM クライアントを持ち、下記 `_stage_component_graph` も
+# `report_start(..., unit="llm_call")` で進捗報告している。それでもなお本セットから
+# 除外されている理由を裏付ける記録は見当たらず、歴史的な扱いの可能性がある（「LLM を
+# 呼ぶステージか」の判定が LLM_STAGE_NAMES / llm_usage の feature 語彙 / report_start
+# の unit 指定の3箇所で食い違っている既知の不整合。
+# docs/architecture/doc_review_findings_2026-08-13.md の 7-1 参照）。
 LLM_STAGE_NAMES = frozenset({
     "paper_skeleton",
     "rhetorical_role",

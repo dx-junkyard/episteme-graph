@@ -9,10 +9,10 @@
 > **着手前提の更新（2026-07-17、vision×UX ギャップ調査 N41）**: 本書起草後にリポジトリの
 > 前提が4点変わった。§10 の issue 分割は有効なまま、着手時に以下を織り込むこと。
 >
-> 1. **migration は 054 以降で採番する**。本書の「migration 034」は Admin Copilot
->    （`034_assistant_actions.sql`）と衝突済みで、044〜053 も他機能（object_group_permissions
->    〜 figure_reviewed_analysis）で使用済み。一次情報は `backend/db/0NN_*.sql` の実ファイル名
->    （`docs/architecture/layer_registry.md` §3 参照）。
+> 1. **migration は 068 以降で採番する**（2026-08-14 時点の空き番号。本書の「migration 034」は
+>    Admin Copilot（`034_assistant_actions.sql`）と衝突済みで、044〜067 も他機能
+>    （object_group_permissions 〜 賭け金の台帳）で使用済み）。一次情報は `backend/db/0NN_*.sql`
+>    の実ファイル名（`docs/architecture/layer_registry.md` §3 参照）。
 > 2. **生成 worker は独立モジュールの新設ではなく `backend/core/llm_worker/` への
 >    アダプタ接続で実装する**（現行の家風。tension / structure_anchor / reconstruction /
 >    doubt×2 / deliberation.standardization に続く7系統目として、`BaseJSONLLMClient` +
@@ -115,6 +115,8 @@ B〜D層で確立した積層規律を踏襲する。
 ---
 
 ## 5. データモデル（migration 034）
+
+> この番号は使用済み・着手時は 068 以降で再採番（`docs/architecture/layer_registry.md` 参照）。
 
 `backend/db/034_exposition_views.sql`。A層の `graph_json` に混ぜず独立テーブルにする理由:
 (1) A層非改変の維持、(2) ノード単位の review_status 遷移と監査、(3) 将来 C層の

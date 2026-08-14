@@ -2,7 +2,7 @@
 
 **正本**: 本ドキュメント（2026-08-05 起票・同日実装）。
 **親文書**: `knowledge_landscape_design.md`（配置層 LS1〜LS10）/
-`atlas_binding_lifecycle_design.md`（コース⇄地図バインド AB1〜AB3）/
+`atlas_binding_lifecycle_design.md`（コース⇄地図バインドの AB系条項、AB1〜AB8）/
 `guidance_layer_design.md`（G層 G1〜G8）。
 **関連 migration**: なし（既存 `landscape_placements` / `learning_courses.data` のみを使う）。
 

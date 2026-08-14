@@ -3,6 +3,8 @@
 - 状態: 設計確定（2026-07-20）
 - 対象: コース⇄地図バインディング（S2）の該当なしケース、骨格ドメインの共有単位・ライフサイクル
 - 親文書: `field_atlas_overlay_spec.md`（3層モデル）、`field_atlas_db_managed_skeleton.md`（migration 027）
+  - 注記（2026-08-14）: `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
+    2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
 - 関連層: G層（`guidance_layer_design.md`）、状態管理・通知基盤（migration 038/045）、L層（retire パターンの先例）
 
 ---

@@ -9,6 +9,11 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 > 画面操作の**手順の正本**は [docs/admin_operations/](../admin_operations/) 各ページ
 > （materials / course / lecture_studio / atlas / doubt / library / llm_usage / interest_dashboard /
 > users / system）に委ねる。手順の詳細をここに書かない。
+>
+> **網羅性（2026-08-14 時点）**: `backend/api/routes/` の全ルーターデコレータ + `/healthz` を
+> 突合し、本ページの一覧と過不足なく一致することを確認済み（346 経路。`GET
+> /api/admin/documents/{id}/figures` は admin.py と figure_presentation.py の2定義が
+> 1経路に収束するため1行）。ルーターやエンドポイントを追加したら本ページの該当節にも行を足すこと。
 
 ---
 
@@ -16,31 +21,54 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 
 | ファイル | 役割 |
 |---|---|
-| `backend/api/main.py` | FastAPI アプリ本体。lifespan で起動時マイグレーション・スキーマ seed・管理者初期化・各種 worker 起動（V層スイーパ / status watcher）、ルーター登録、CORS、エラーログ middleware |
+| `backend/api/main.py` | FastAPI アプリ本体。lifespan（下記）・ルーター登録・CORS・エラーログ middleware |
 | `backend/api/dependencies.py` | 認証・RBAC の依存関数（JWT 検証、ロール要求） |
 | `backend/api/schemas.py` | API 固有の Pydantic リクエスト/レスポンスモデル |
 | `backend/api/services.py` | 共通ビジネスロジック（バックグラウンドタスク CRUD、権限判定 `resolve_document_access` など） |
 | `backend/api/routes/*.py` | 機能別ルーター（下記マウント一覧参照。`export_artifacts.py` はルーターではなく export のヘルパー） |
 
+**lifespan（`main.py::_lifespan`）の起動時処理**: ①マイグレーション適用
+（`core/migrations.py::run_migrations`。PostgreSQL 起動待ちで最大10回リトライ）→
+②システム管理者アカウント `Administrator` の初期化 → ③カートリッジ／`backend/atlas_domains/` 同梱の
+凍結骨格シード取込（`core.atlas_store.import_bundled_skeletons`、migration 027）→
+④ビルトインスキーマ型・述語の seed（`core.schema_registry.seed_builtin_schema`）→
+⑤L層ナレッジライブラリの同梱シード取込（`core.library.seed`、migration 042）→
+⑥M層 LLM モデルポリシーの env → DB シード取込と `DbPolicyBackend` への差し替え（migration 061）→
+⑦V層の削除猶予スイーパ起動（`core.versioning.worker`、migration 037）→
+⑧状態管理・通知基盤の遷移検知 watcher 起動（`core.status.watcher`、migration 038）→
+⑨help_kb のバリデーション3種（`validate_manual` / `check_ui_anchor_mappings` /
+`check_admin_ui_anchor_mappings`）→ ⑩help_kb 配信スナップショットの content-hash 監査記帳
+（`core.help_kb.audit`）→ ⑪help_kb ベクトル補助層の同期（バックグラウンドスレッド、migration 058）。
+③〜⑪はすべて fail-open（失敗しても起動を止めず warning ログのみ）。
+
 **ルーターのマウント（main.py、Tier 3-17c でフラット化）**: 全ルーターは `main.py` から直接
 `app.include_router(...)` で登録される（admin.py 経由の二段ネストは廃止済み）。
 
-- **自前 prefix で直接登録**: `auth`（/api/auth）/ `learning`（/api/learning）/ `admin`（/api/admin）/
-  `figure_presentation`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`
-  （/api/learning/lecture）/ `groups`（/api/groups・/api/me）/ `export`（/api/courses・/api/documents）/
-  `atlas.learning_router`（/api/learning/atlas）/ `atlas.report_router`（/api/atlas）/ `atlas_view`
-  （/api/atlas）/ `doubt.learning_router`（/api/learning）/ `reconstruction.learning_router`
-  （/api/learning）/ `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/
-  `personal_map.router`（/api/learning）/ `personal_map.me_router`（/api/me）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（14本）**: `lecture_studio`
-  （パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/ `theory_components` /
-  `cartridges` / `revisions` / `atlas.router`（/cartridges 配下）/ `atlas.admin_atlas_router`（/atlas）/
-  `atlas.binding_router`（/courses）/ `doubt.admin_router`（/doubt）/ `admin_assistant`（/assistant）/
-  `reconstruction.admin_router` / `versioning` / `status`（/status）/ `notifications`（/notifications）/
-  `deliberation`（/deliberation）
+- **自前 prefix で直接登録（22本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
+  （/api/learning）/ `figure_presentation`（/api/admin）/ `element_explanations`（/api/admin）/
+  `admin`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`（/api/learning/lecture）/
+  `groups`（prefix なし。/api/groups・/api/me をパスに直書き）/ `export`（prefix なし。
+  /api/courses・/api/documents）/ `atlas.learning_router`（/api/learning/atlas）/
+  `atlas.report_router`（/api/atlas）/ `atlas_view`（/api/atlas）/ `doubt.learning_router`
+  （/api/learning）/ `reconstruction.learning_router`（/api/learning）/
+  `discuss_observation.learning_router`（/api/learning）/ `cycle.learning_router`（/api/learning）/
+  `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
+  （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
+  （/api/me）/ `landscape.learning_router`（/api/learning）
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（19本、`main.py` の登録順）**:
+  `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
+  `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
+  `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
+  （/cartridges 配下）/ `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
+  `reconstruction.admin_router` / `discuss_observation.admin_router` / `versioning` / `status`
+  （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
+  `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
 - **例外（#496）**: `GET /api/admin/documents/{id}/figures` は admin.py にも定義が残るが、main.py が
   admin.router から当該 GET ルートを除去して `figure_presentation.py` 側のハンドラだけを配信する
   （admin.py 側は後方互換テスト用の残置）。
+
+> `main.py` 側のコメントは 2026-08-14 に「本数はコードを数える」方式へ改訂済み
+> （`doc_review_findings_2026-08-13.md` 7-2 の対応）。本ページの一覧が登録実態。
 
 > `core/` には FastAPI を import しない方針（テスタビリティ確保）。API 固有モデルは `api/` 側に置きます。
 
@@ -116,6 +144,15 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | DELETE | `/api/learning/courses/{cid}/topics/{tid}/chat` | 所有者 or 受講者（本人の行のみ） | 本人のトピック別チャット履歴を全削除 |
 | DELETE | `/api/learning/courses/{cid}/topics/{tid}/chat/messages/{mid}` | 所有者 or 受講者（本人の履歴のみ） | 指定メッセージ以降の往復を truncate（派生 interest_traces は `superseded` 化。機能3） |
 | GET | `/api/learning/courses/{cid}/source-chunk/{chunk_id}` | 所有者 or 受講者 **かつ chunk の document が当該コースの source** | 出典ポップアップ用のチャンク本文・数式・出典名（音声会話の教材パネルにも使用）。スコープは `list_course_source_document_ids(course_data)` を `get_chunk_passage(..., allowed_document_ids=)` の SQL 内 `ANY(...)` で強制。コース非アクセス・コース source 外・不明 chunk はすべて同一 404 |
+| GET | `/api/learning/courses/{cid}/chunks/{chunk_id}/claim-refs` | 所有者 or 受講者 かつ chunk がコース教材に属する | 出典タブの台帳併記（D3-6）を claim へ拡張する読み取り。claim の id・claim_type・短い label のみ（confidence 等の数値なし）。属さない chunk は 404 |
+| GET | `/api/learning/courses/{cid}/figures/{fid}/image` | 受講ゲート + 図の出所条件（下記） | 学習者向け図画像配信。**抽出図**（`document_figures`）は「受講 ∧ 図の document がコース sources ∧ コース content から参照されている」の AND、**教材図**（`course_teaching_figures`）は「受講 ∧ 図の course_id 一致 ∧ 参照されている ∧ `status='adopted'`」の AND。いずれか欠ければ 404（draft/retired は学習者に出ない） |
+
+#### 「論文と話す」（discuss、B層）
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/learning/courses/{cid}/discuss/opening` | 所有者 or 受講者 | 開幕画面（非LLM・読み取り専用）。中心命題・支持構造・別の見方・理論のバックボーン・「最も脆い一手」（主語別）・`course_focus`・教員承認済みの「議論のきっかけ」（`documents[].discussion_seeds`）を投影 |
+| POST | `/api/learning/courses/{cid}/discuss/reflection` | 本人のみ | 着地画面「今日の理解を自分の言葉で」を `kind='tension'` / `status='articulated'` の痕跡として直接記録（LLM 0回・候補を経由しない。空文字は 422） |
 
 #### 問いの軌跡（interest_traces）・地図導線
 
@@ -145,13 +182,17 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | POST | `/api/learning/anchors/{trace_id}/confirm` | 本人の行のみ | 帰属の確定/訂正（未生成なら segment 縮退アンカーを新規作成） |
 | POST | `/api/learning/anchors/{trace_id}/dismiss` | 本人の llm_candidate 帰属のみ | `structure_anchor.status='dismissed'`（問い自体は保持） |
 
-#### ハンズフリー音声会話・C層学習者向け
+#### ハンズフリー音声会話・インスペクト・C層学習者向け
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | POST | `/api/learning/voice/transcribe` | 要ログイン | multipart 音声の文字起こし（Whisper 系。10MB 上限、openai プロバイダ以外 503） |
 | POST | `/api/learning/voice/speak` | 要ログイン | テキスト整形（LaTeX/markdown/出典マーカー除去）→ TTS で MP3(base64) |
+| GET | `/api/learning/help/ui-anchors` | 要ログイン | 学習画面インスペクト・モードの UI 論理アンカー配信（student audience のみ・読み取り専用。ログイン時1回フェッチ想定） |
+| POST | `/api/learning/help/ui-anchor-events` | 要ログイン（本人記録） | 未整備アンカーへのホバー滞留を `kind='help_usage'` 痕跡として記録（質問の逐語は積まない。30分デデュープ。G層 `manual.help_gaps_pending` に相乗り） |
 | GET | `/api/learning/courses/{cid}/components/{comp_id}/explanations` | コース閲覧権限 | 承認済み（teacher_approved）説明バージョン一覧（段階ラベルのみ・数値スコアなし） |
+| GET | `/api/learning/courses/{cid}/components/{comp_id}/context` | 受講ゲート + component の document がコースの document 集合に含まれる | コーススコープ component 文脈（instance / shared_part / graph）。DB UUID と agent 側 legacy ID の両方を受理。いずれか欠ければ 404 |
+| GET | `/api/learning/courses/{cid}/elements/{etype}/{eid}/context` | 同上（`etype` は `claim` / `equation` のみ） | 学習者向け claim / equation 文脈。`relation_status='candidate'` を除外し confidence 等を再帰除去。要素は解決できたが投影が空のときのみ `{"available": false}` を 200 で返す |
 
 ### レクチャーモード `/api/learning/lecture`（`routes/lecture.py`）
 
@@ -193,14 +234,27 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | POST | `/api/learning/reconstruction/{recon_id}/self-check` | 本人 | 自己確認（agreed / disagreed / verdict_wrong） |
 | POST | `/api/learning/reconstruction/{recon_id}/descend` | 本人 | 記号葉（SymbolRegistry）への降下プローブ |
 
+### 理解サイクル — 学習者向け（`routes/cycle.py` learning_router、UCサイクル）
+
+全エンドポイントが本人のみ（受講ゲートは `get_accessible_course_data`）。非LLM・同期（UC8）で、
+intention / 軽量アンカーは行削除せず状態遷移のみで保持する（UC6。削除 API は無い）。
+監査記帳は行わない（本人専用メモ）。詳細は `docs/features/understanding_cycle_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/learning/courses/{cid}/cycle/intention` | 本人のみ | OPEN（初回動機・予想・持ち越し問いへの再回答）と LEAVE（持ち越す問いの選択）を `role` で分岐して記録。`role='revisit_answer'` のときだけ「帰り道の景色」の差分事実文（数値なし・最大3件）を `facts` に同梱（導出失敗は fail-open） |
+| POST | `/api/learning/cycle/intention/{trace_id}/dismiss` | 本人の行のみ | intention 痕跡の dismiss（status 遷移のみ） |
+| POST | `/api/learning/courses/{cid}/cycle/anchor` | 本人のみ | 軽量アンカー4ボタンの1タップ確定。既存 structure_anchor 経路A（`attribution_source='learner_selected'`）へ相乗りし、element → selection → chunk → segment の順に縮退 |
+| GET | `/api/learning/courses/{cid}/cycle/landing-candidates` | 本人のみ | LEAVE の選択候補一覧（数値・件数を含めない。導出失敗時は空配列で縮退） |
+
 ### 個人知識ネットワーク（`routes/personal_map.py`、読み取り専用）
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/learning/courses/{cid}/personal-network` | 本人のみ | コースビュー（互換 API。`course_id` は provenance + フィルター） |
-| GET | `/api/learning/courses/{cid}/personal-network/journey?node_id=` | 本人のみ | コーススコープの旅（当該コース sources 内限定 + cross_course_hint） |
+| GET | `/api/learning/courses/{cid}/personal-network/journey` | 本人のみ | コーススコープの旅（クエリ `node_id` 必須。当該コース sources 内限定 + cross_course_hint） |
 | GET | `/api/me/personal-network` | 本人のみ | 正本 API（本人所有の全痕跡由来。`include_candidate_links=true` は 422 の fail-closed） |
-| GET | `/api/me/personal-network/journey?node_id=` | 本人のみ | コース横断の旅（hop ごとに can_view_document で fail-closed フィルタ） |
+| GET | `/api/me/personal-network/journey` | 本人のみ | コース横断の旅（クエリ `node_id` 必須。hop ごとに can_view_document で fail-closed フィルタ） |
 
 > このルーターは**読み取り専用**（書き込み API を作らないことをガードレールで固定）。
 > 訂正操作（map-exclude / map-restore）は `routes/learning.py` 側にある。
@@ -332,6 +386,23 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | PATCH | `/api/admin/documents/{id}/figures/{fid}/presentation-mode` | TEACHER + document 編集権 | 教員による表示モード上書き（`null` で解除し提案値に復帰。監査記録あり） |
 | POST | `/api/admin/documents/{id}/figures/{fid}/reanalyze` | TEACHER + document 編集権 | 教員指示付き図再解析（`hint_text` / `focus_bbox`。AI 候補生成のみで自動確定しない） |
 
+### 要素説明のレビュー `/api/admin`（`routes/element_explanations.py`、migration 056/062）
+
+パイプライン（ContextualExplanationAgent / DiscussOpeningAgent 等）が書く `candidate` を教員が
+確認・承認・却下・編集するためのルーター。全エンドポイント TEACHER + document の
+閲覧（GET）/ 編集（承認・却下・編集）権。**DELETE endpoint は作らない**（P4。本文編集は旧行を
+`superseded` に遷移させて新 revision 行を作る）。詳細は
+`docs/features/hierarchical_context_explanation_design.md` §5.2 /
+`docs/features/discuss_opening_authoring_design.md` §7.1。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/documents/{id}/element-explanations` | TEACHER + document 閲覧権 | document 内の説明一覧（レビューキューの供給元。`element_type` / `status` / `kind` / `role` で絞り込み可）。開幕素材（`element_type='document'` / `role='discussion_seed'`）には鮮度 `stale` / `stale_notice` を付ける（approved も対象。自動で非承認へは落とさない） |
+| POST | `/api/admin/element-explanations/{eid}/approve` | TEACHER + document 編集権 | `candidate → approved`（監査記録あり） |
+| POST | `/api/admin/element-explanations/{eid}/dismiss` | TEACHER + document 編集権 | `candidate → dismissed`（行は保持） |
+| POST | `/api/admin/documents/{id}/element-explanations/bulk-review` | TEACHER + document 編集権 | 一括承認 / 一括却下（`action` は `approve` / `dismiss`、それ以外は 422）。1回あたり最大200件、遷移できなかった行は `skipped` に理由付きで返す部分成功セマンティクス |
+| PATCH | `/api/admin/element-explanations/{eid}` | TEACHER + document 編集権 | 本文編集（旧行を `superseded` に遷移させ新 revision 行を作る。履歴保持） |
+
 ### エラーログ（`routes/error_logs.py`）
 
 | メソッド | パス | 権限 | 説明 |
@@ -379,6 +450,27 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | POST | `/api/admin/courses/{cid}/lecture-studio/course-topics/{tid}/draft/rewrite` | TEACHER + コース閲覧 | LLM によるドラフト案生成（保存は別 PUT。DB 非変更） |
 | GET | `/api/admin/courses/{cid}/lecture-studio/document-structure` | TEACHER + コース閲覧 | コース教材の文書構造（Agent 復元構造優先） |
 | GET | `/api/admin/courses/{cid}/lecture-studio/components` | TEACHER + コース閲覧 | 理論コンポーネント一覧・依存グラフ・解析ステータスの集約 |
+
+### 教材図スタジオ（`routes/teaching_figures.py`、migration 063）
+
+AI 対話で説明図（SVG）を作り、既存の `![[figure:id]]` 記法で教材へ埋め込む層。全エンドポイント
+TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`course_data_for_owner`。editor 共有教員は
+403）、**読み取り系は editor 共有教員にも開く**（`_course_data_for_studio_editable`）。保存の唯一の入口は
+`core/teaching_figures/sanitizer.py`（外部参照 / script / foreignObject / image / on* を拒否 = 422）。
+行削除 API は無い（`draft` / `adopted` / `retired` の状態遷移のみ）。詳細は
+`docs/features/teaching_figure_studio_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/courses/{cid}/figure-studio/turn` | TEACHER + コース所有者 | 図（SVG）を生成・修正する1ターン（DB 非変更）。LLM 失敗・サニタイズ失敗は 500 にせず `degraded=true` の 200 で返し、プレビューは前回版を保つ |
+| POST | `/api/admin/courses/{cid}/teaching-figures` | TEACHER + コース所有者 | SVG をサニタイズして保存（拒否は 422）。`adopt=true` なら §7.1b の採用まで実行（本文挿入 + `topic.linked_figure_ids` / `evidence_links` 登録）。MinIO 配信スナップショットの失敗は `image_snapshot_failed: true` で正直に返す |
+| PATCH | `/api/admin/courses/{cid}/teaching-figures/{fid}` | TEACHER + コース所有者 | 図の修正・状態遷移。`svg_source` 差し替えは再サニタイズ + 旧版を `revisions` に append、`draft → adopted` はトピック側登録も実行、`adopted → retired` はトピック側登録を**削除しない**（生 UUID 露出を防ぐ）。`register_topic_id` で別トピックへの参照登録のみも可（冪等） |
+| GET | `/api/admin/courses/{cid}/teaching-figures` | TEACHER + コース編集権（editor 共有可） | コースの生成図一覧（draft を含む。挿入タブ・ストック表示用） |
+| GET | `/api/admin/courses/{cid}/teaching-figures/{fid}/image` | TEACHER + コース編集権（editor 共有可） | 教員向け図画像配信（draft も見える）。正本は DB の `svg_source` で、MinIO 取得失敗時も DB の SVG で配信。SVG は `nosniff` + CSP sandbox 付き |
+| POST | `/api/admin/courses/{cid}/topics/{tid}/figure-suggestions/generate` | TEACHER + コース所有者 | 「図で補うとよい箇所」候補の生成（単発 LLM・candidate のみ）。学習者信号は k-匿名集約のレンジ・段階ラベルのみを LLM に渡す |
+| GET | `/api/admin/courses/{cid}/topics/{tid}/figure-suggestions` | TEACHER + コース編集権（editor 共有可） | candidate + accepted の提案一覧（段階ラベルのみ） |
+| POST | `/api/admin/courses/{cid}/figure-suggestions/{sid}/accept` | TEACHER + コース所有者 | 提案を採択済みにする（行削除しない） |
+| POST | `/api/admin/courses/{cid}/figure-suggestions/{sid}/dismiss` | TEACHER + コース所有者 | 提案を却下（`dismissed` 遷移で保持） |
 
 ### 理論コンポーネント + 承認・共有レイヤー（`routes/theory_components.py`、C層）
 
@@ -457,7 +549,12 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | GET | `/api/admin/cartridges/{cid}/atlas/skeleton` | TEACHER | 骨格のレビュー状態（draft / 凍結済み。DB が正本） |
 | POST | `/api/admin/cartridges/{cid}/atlas/skeleton/generate` | TEACHER | 骨格 draft の LLM バッチ生成（再実行は `force` 明示。カートリッジ無し新分野は `body.domain` で可） |
 | PUT | `/api/admin/cartridges/{cid}/atlas/skeleton/draft` | TEACHER | draft 保存（`revision` 楽観ロック、衝突 409） |
-| POST | `/api/admin/cartridges/{cid}/atlas/skeleton/freeze` | TEACHER | draft の凍結・版付与 |
+| POST | `/api/admin/cartridges/{cid}/atlas/skeleton/draft/from-frozen` | TEACHER | 現行凍結版を複製して次版 draft を作る（決定論・LLM 不使用。既存 draft あり / retired は 409、凍結版なしは 404）。node_id を振り直さないため既存の binding・配置・足跡が切れない |
+| DELETE | `/api/admin/cartridges/{cid}/atlas/skeleton/draft` | TEACHER | draft の破棄（作業コピーのため AB3 の対象外。**retired 中も許可**する唯一の書き込み経路。凍結版履歴・学習者表示に影響しない） |
+| GET | `/api/admin/cartridges/{cid}/atlas/freeze-impact` | TEACHER | 凍結前の影響プレビュー（draft ⇄ 現行凍結版の node_id 差分 + バインド中コースの topic 影響。draft なしは 404） |
+| POST | `/api/admin/cartridges/{cid}/atlas/skeleton/freeze` | TEACHER | draft の凍結・版付与（レスポンスに `impact` 同梱。関係教員へ `atlas_skeleton_frozen` 通知） |
+| POST | `/api/admin/cartridges/{cid}/atlas/retire` | TEACHER | domain を retired にする（削除ではなく状態遷移。propose 候補から除外・generate/draft 保存/freeze は 409。学習者表示は不変。関係教員へ best-effort 通知） |
+| POST | `/api/admin/cartridges/{cid}/atlas/restore` | TEACHER | retired → active へ戻す（監査のみ・通知なし。retired でなければ 409） |
 | POST | `/api/admin/cartridges/{cid}/atlas/skeleton/assist/interpret` | TEACHER | AI アシスト: 教員の発言を対象・要望に解釈（まだ編集しない） |
 | POST | `/api/admin/cartridges/{cid}/atlas/skeleton/assist/propose` | TEACHER | AI アシスト: 確定済み解釈から編集案（JSON Patch）生成（draft は書き換えない） |
 | GET | `/api/admin/cartridges/{cid}/atlas/reports` | TEACHER | 修正報告のレビューキュー |
@@ -465,13 +562,50 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | POST | `/api/admin/cartridges/{cid}/atlas/reports/{rid}/incorporate` | TEACHER | 報告内容の骨格 draft への取り込み |
 | POST | `/api/admin/cartridges/{cid}/atlas/overlay/refresh` | TEACHER | `atlas_overlay_cache` の状態導出バッチを明示実行 |
 | POST | `/api/admin/courses/{cid}/atlas-binding/propose` | TEACHER | コース→地図配置の決定論的提案（LLM 不使用。教員が保存するまで確定しない） |
-| PUT | `/api/admin/courses/{cid}/atlas-binding` | TEACHER | 承認済みバインディング保存（`cartridge_id` + `topics[].atlas_node_id`。監査記録あり） |
+| PUT | `/api/admin/courses/{cid}/atlas-binding` | TEACHER | 承認済みバインディング保存（`cartridge_id` + `topics[].atlas_node_id`。監査記録あり。保存で pending は自動クリア） |
+| PUT | `/api/admin/courses/{cid}/atlas-binding/pending` | TEACHER | 凍結待ちドメインの仮予約（`course_data.atlas_binding_pending`。コースの地図表示には影響しない。domain_key は英小文字・数字・アンダースコアのみ＝それ以外は 422） |
+| DELETE | `/api/admin/courses/{cid}/atlas-binding/pending` | TEACHER | 仮予約の取り消し（予約が無くても 200 の冪等） |
+
+### カテゴリギャップ候補（`routes/atlas_gaps.py`、migration 066）
+
+論文の解析で「置けなかった」主題のうち、2論文以上で反復したものだけをレビュー候補として
+**毎回読み時導出**する（候補行を蓄積しない）。骨格 draft を書くのは教員の既存
+`PUT .../atlas/skeleton/draft` だけで、本ルーターは骨格に書き込まない（KN-3 / AB4）。
+詳細は `docs/features/category_gap_candidates_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/cartridges/{cid}/atlas/gap-candidates` | TEACHER | 候補一覧（毎回導出。生 confidence・件数フィールドなし、支持論文はタイトル列挙）+ `skeleton_version` / `draft_exists` / `draft_revision`。`include_dismissed=true` で見送り済み・統合済みも返す |
+| POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/decide` | TEACHER | 候補を採用・見送りにする（見送りの取り消しも同 API。見送りは理由必須）。骨格 draft は変わらない |
+| POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/incorporate-preview` | TEACHER | 採用済み候補を次版 draft へ追加する JSON Patch（op は add のみ）と適用後 draft の**提示のみ**。DB 非変更。未採用 / draft なしは 409、満杯領域・親領域不在は 422 |
+| POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/mark-incorporated` | TEACHER | 教員の `PUT draft` **成功後**に取り込み先 node を刻印。`draft_node_id` が現 draft に無ければ 409（誤順序を弾く） |
+
+### 知識ランドスケープ（`routes/landscape.py`、migration 065）
+
+論文（document）を分野の地図（atlas 骨格の凍結版）のアンカーへ複数観点で配置する層。
+管理側は `/api/admin/landscape/...`、学習者向けは `/api/learning/courses/{cid}/landscape`。
+**DELETE ルートは無い**（却下は `status='rejected'`、再解析での置換は `superseded` で保持）。
+レスポンスは必ず `core.landscape.projection` の DTO を通し、`weight` / `confidence` はキーごと出さない
+（教員向けも同じ）。不在・権限なしは 404 に統一する（403 を使わない）。詳細は
+`docs/features/knowledge_landscape_design.md` §9 / `docs/features/release_review_flow_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/landscape/documents/{ref}/placements` | TEACHER + document 閲覧権 | 1論文の配置一覧（`document_ref` は UUID / source_path 両対応）。`unplaced_domains` / 骨格版 / `last_run_at` / `gap_signals_recorded`（真偽値のみ・件数なし）を同梱。`include_history=true` で `superseded` も返す |
+| PATCH | `/api/admin/landscape/placements/{pid}` | TEACHER + document 編集権 | 配置の status 遷移（確認 / 却下 / 再検討）。`superseded` を指す・履歴行を動かすは 422、行なし・document 不可視は 404。監査 `entity_type='landscape_placement'` |
+| POST | `/api/admin/landscape/documents/{ref}/placements/propose` | TEACHER + document 編集権 | 配置候補の作り直し（パイプラインと同一ビルダー・同一日次予算）。日次上限は 429、素材なし・骨格なしは 422。detail は数値を含まない事実文 |
+| GET | `/api/admin/landscape/courses/{cid}/placements` | TEACHER（edit 不能なソース論文は静かに除外） | コースのソース論文の live 配置（リリース前の確認 ステップ2）。document 別に `editable` / `unplaced_domains`、未確認件数 `pending_count` を返す |
+| POST | `/api/admin/landscape/courses/{cid}/placements/accept` | TEACHER + ソース論文の編集権 | 「次へ」= 一括確認。**edit 権限のある document の `inferred` のみ** `confirmed` へ。個別に却下・再検討された行は動かさない。権限外は除外件数として返す。監査は `action='accept_on_release'` |
+| GET | `/api/admin/landscape/overview` | TEACHER | 本人可視 document の live 配置をノード別に集約（`domain_key` 必須。凍結骨格なしは 404）。骨格に無いノードの配置は集約に載せない |
+| GET | `/api/learning/courses/{cid}/landscape` | 受講ゲート（`get_accessible_course_data`） | 学習者向け「論文の位置づけ」。対象はコース sources のみ・status は `confirmed` / `inferred` / `review_required` のみ。配置ゼロ・骨格なしでも 200 で空構造（非表示への縮退はフロント責務）。`unplaced_documents` / `skeleton_version` を同梱し、weight / confidence / claim_id は投影が構造的に落とす |
 
 ### D層 — 管理 `/api/admin/doubt`（`routes/doubt.py` admin_router）
 
-全27本が TEACHER（metrics のみ SYSTEM_ADMIN）。withdraw（疑義者本人）と反実仮想 PATCH（作成者本人）を除き、
+全34本が TEACHER（metrics のみ SYSTEM_ADMIN）。withdraw（疑義者本人）と反実仮想 PATCH（作成者本人）を除き、
 course_id / target_id への所有・共有チェックは行わない（ロールゲートのみ）。
 手順の正本: [admin_operations/doubt.md](../admin_operations/doubt.md)。
+賭け金の台帳（SL層, migration 067）で反証条件・観測反実仮想の7本が加わっている
+（下表の「反証条件（SL層）」節ほか）。
 
 #### 台帳（Epistemic Ledger）
 
@@ -485,6 +619,17 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 | POST | `/api/admin/doubt/ledger/{ttype}/{tid}/scope-candidates/{cid}/dismiss` | TEACHER | LLM スコープ候補の却下（`dismissed` で保持） |
 | GET | `/api/admin/doubt/courses/{cid}/ledger-summary` | TEACHER | コース単位の台帳サマリ（スコープあり/空欄の件数を事実として返す） |
 | POST | `/api/admin/doubt/courses/{cid}/scope-candidates/refresh` | TEACHER | スコープ候補生成の非同期スケジュール（同期パスに LLM を入れない） |
+
+#### 反証条件（SL層、migration 067）
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-conditions` | TEACHER | 反証条件の手動記帳（人間専用の記帳先。statement / kind / reason / 根拠 / reachability を必須検証） |
+| PATCH | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-conditions/{cond_id}` | TEACHER | 反証条件の訂正（訂正後も必須項目を再検証） |
+| POST | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-candidates/{cid}/confirm` | TEACHER | LLM 候補の確定（候補行は `confirmed` で保持し、教員の帰属で新規 FalsificationCondition を発行。候補が本体へ直接入らない） |
+| POST | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-candidates/{cid}/dismiss` | TEACHER | LLM 候補の却下（`dismissed` で保持） |
+| POST | `/api/admin/doubt/courses/{cid}/falsification-candidates/refresh` | TEACHER | 反証条件候補生成の非同期スケジュール（同期パスに LLM を入れない） |
+| GET | `/api/admin/doubt/courses/{cid}/observation-targets` | TEACHER | 「観測を仮に倒す」の選択肢となる観測系 claim 一覧（`identified_via` 併記・数値なし） |
 
 #### 素朴な問い・負荷度・暗黙前提
 
@@ -508,6 +653,7 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 | GET | `/api/admin/doubt/targets/{ttype}/{tid}/challenges` | TEACHER | 対象への疑義一覧（数値スコア化しない） |
 | POST | `/api/admin/doubt/challenges/{chid}/withdraw` | 疑義者本人のみ | 疑義の取り下げ（`withdrawn` 遷移で履歴保持） |
 | POST | `/api/admin/doubt/challenges/{chid}/proposals` | TEACHER | 疑義 → 検証提案への昇格（元 challenge を `led_to_verification` に遷移） |
+| PATCH | `/api/admin/doubt/proposals/{pid}` | TEACHER | 検証提案のステータス遷移（proposed→in_progress→completed の前進 + 任意時点から withdrawn）と reachability の更新 |
 | GET | `/api/admin/doubt/courses/{cid}/open-assumptions` | TEACHER | 未検証合意リスト（台帳の自動編纂・編集不可。教員版=疑義者名あり） |
 | POST | `/api/admin/doubt/counterfactual/compute` | TEACHER | 保存なしの反実仮想試算（collapsed/surviving/indeterminate の決定論的伝播） |
 | POST | `/api/admin/doubt/counterfactual/sessions` | TEACHER | 反実仮想セッションの保存（shared_scope 既定 private） |
@@ -517,17 +663,19 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 
-全15本が TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`（404 fail-closed）、
+全17本が TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`（404 fail-closed）、
 domain-scoped 共通部品（shared_part = L層 `library_entries`）は TEACHER + 由来 document 権限での
 route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_design.md`。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/admin/deliberation/elements/{etype}/{eid}/overview` | TEACHER + document 閲覧権（equation は `document_id` クエリ必須） | 面①内訳 + 面②位置づけ4レンズの集約（非LLM・DB 非変更） |
+| GET | `/api/admin/deliberation/elements/{etype}/{eid}/context` | TEACHER + document 閲覧権（equation / evidence / derivation は `document_id` クエリ必須） | 要素中心コンテキストレンズ（面③）のみを軽量に返す（`context_lens.build()` だけを実行。非LLM・DB 非変更）。ゲートは DB 行由来の `document_id` に対して行い、クエリの hint を信用しない |
 | POST | `/api/admin/deliberation/identity-links` | TEACHER + インスタンス側 document 編集権 | 同一性リンク候補の作成（常に `candidate`。監査記録） |
 | POST | `/api/admin/deliberation/identity-links/{lid}/confirm` | TEACHER + document 編集権（決定済みは 409） | 同一性リンクの人間確定 |
 | POST | `/api/admin/deliberation/identity-links/{lid}/reject` | TEACHER + document 編集権 | 同一性リンクの却下（status 遷移で保持） |
 | GET | `/api/admin/deliberation/elements/{etype}/{eid}/identity-links` | TEACHER + document 閲覧権 | インスタンス要素の同一性リンク一覧（shared_part 指定は 422） |
+| GET | `/api/admin/deliberation/elements/{etype}/{eid}/shared-part-candidates` | TEACHER + document 閲覧権（document-scoped インスタンスのみ） | 手動リンク作成用の類似 `library_entries` 候補（非LLM・DB 非変更）。`domain_key` はサーバ側で決定論解決し、解決不能は 0 件 + 事実文で縮退。距離等の数値は返さない |
 | GET | `/api/admin/deliberation/shared-parts/{spid}/identity-links` | TEACHER（閲覧不可 document 由来は除外し `hidden_count` で正直に返す） | 共通部品側の同一性リンク一覧 |
 | POST | `/api/admin/deliberation/sessions` | TEACHER + document 閲覧権 | 対話的検討セッションの開始 |
 | GET | `/api/admin/deliberation/sessions/{sid}` | 作成者本人のみ（他人は 404） | セッションのメッセージ履歴込み取得 |
@@ -543,13 +691,34 @@ route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
-| POST | `/api/admin/assistant/chat` | TEACHER | 統合 AI アシスタントチャット（guidance / locate / action / clarify を自動振り分け。1 LLM コール上限） |
+| POST | `/api/admin/assistant/chat` | TEACHER | 統合 AI アシスタントチャット（guidance / locate / action / clarify を自動振り分け。1 LLM コール上限。`support_action="usage_help"` は意図分類 LLM をバイパスして非LLM guidance 直行） |
+| GET | `/api/admin/assistant/capabilities` | TEACHER | 現在ロールで到達可能な capability 一覧（サーバ側でフィルタ）。`executable` で「代行できる」と「道案内のみ」を区別。読み取り専用・LLM 非呼び出し |
+| GET | `/api/admin/assistant/help/ui-anchors` | TEACHER | 管理画面インスペクト・モードの UI 論理アンカー配信（TEACHER=teacher/ のみ・SYSTEM_ADMIN=+system_admin/ のロール fail-closed。ログイン時1回フェッチ想定） |
+| POST | `/api/admin/assistant/help/ui-anchor-events` | TEACHER（本人記録） | 未整備アンカーへのホバー滞留を `kind='help_usage'` 痕跡として記録（逐語は積まない。course_id センチネル `"_ui"` で G層 `manual.help_gaps_pending` に相乗り） |
 | POST | `/api/admin/assistant/actions` | TEACHER | 操作代行の実行（capability registry + ロールで fail-closed。不可逆操作は確認ゲート） |
 | POST | `/api/admin/assistant/actions/{action_id}/revert` | TEACHER | 代行操作の取り消し（before スナップショットから復元。`reversible=false` は 409） |
 | GET | `/api/admin/assistant/actions` | TEACHER | 代行操作の履歴一覧 |
 | GET | `/api/admin/assistant/next-steps` | TEACHER | 状態導出型 To-Do（G層。`{steps, hidden, truncated, assistant_cue_pending}`） |
 | POST | `/api/admin/assistant/next-steps/{step_key}/dismiss` | TEACHER | 却下を upsert（行削除しない） |
 | POST | `/api/admin/assistant/next-steps/{step_key}/restore` | TEACHER | 却下の取り消し（`revoked` 遷移） |
+
+### 利用者マニュアル KB `/api/admin/help-kb`（`routes/admin_assistant.py` help_kb_router）
+
+`admin_router`（/assistant 配下）とは別ルーターとして `main.py` から直接登録される。
+全エンドポイント SYSTEM_ADMIN、書き込みは `theory_review_events`（`entity_type='manual'`）に監査記帳。
+**削除 API は無い**（版は append-only）。配信の既定はファイル（`docs/manual`）で、DB 配信へ切り替わるのは
+`freeze` 成功後のみ。詳細は `docs/features/manual_help_kb_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/help-kb/refresh` | SYSTEM_ADMIN | `docs/manual` / capability KB のキャッシュをクリアし再構築後の状態（audience 別節数・validator 違反数・除外節）を返す。volume-mount 開発・hotfix 用の非常口（定期実行は想定しない） |
+| GET | `/api/admin/help-kb/drafts` | SYSTEM_ADMIN | draft 一覧 + 配信状態（`serving_source` 等） |
+| GET | `/api/admin/help-kb/drafts/{audience}/{file}` | SYSTEM_ADMIN | 単一 draft の取得（未知 audience/file は 400、不在は 404） |
+| PUT | `/api/admin/help-kb/drafts/{audience}/{file}` | SYSTEM_ADMIN | draft 更新（`expected_revision` 楽観ロック。衝突は 409 + `current_revision`） |
+| POST | `/api/admin/help-kb/drafts/seed` | SYSTEM_ADMIN | 現配信ファイルのスナップショットから draft を冪等シード（既存 draft は上書きしない） |
+| POST | `/api/admin/help-kb/freeze` | SYSTEM_ADMIN | 全 draft を凍結検証ゲート（validator 全チェック + student denylist）に通し、通過時のみ新版発行 + db 配信へ切替。違反時は 422（`violations`）で版・配信状態を変更しない |
+| POST | `/api/admin/help-kb/serving-source` | SYSTEM_ADMIN | 配信ソースの明示切替（`db` への切替は freeze 済みの版が必須。無ければ 409）。files への退避経路 |
+| GET | `/api/admin/help-kb/versions` | SYSTEM_ADMIN | 版一覧（メタのみ・内容なし） |
 
 ### 再構成ループ — 管理（`routes/reconstruction.py` admin_router、R層）
 
@@ -617,6 +786,36 @@ route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_
 |---|---|---|---|
 | GET | `/api/admin/llm-usage/metrics` | SYSTEM_ADMIN | 使用量集計（reported / estimated 分離 + dropped_events + cost_usd） |
 | GET | `/api/admin/llm-usage/estimate/documents/{id}` | TEACHER + document 閲覧権 | 解析実行前のトークン見積り（レンジのみ・金額なし） |
+
+### 場面別 LLM モデル選択 `/api/admin/llm-models`（`routes/llm_models.py`、M層 / migration 061）
+
+モデル決定の正本は `core/llm_policy.py`。解決順序は 呼び出し引数 > 実行時 override > user 行 >
+system 行 > `*_LLM_MODEL` env > tier 既定で、**選択はユーザーごとに保存される**。検証は
+サーバ側 fail-closed（カタログ外・capability 不足・未知 scene は 422）。表示は実モデル名のみで
+tier 名・金額は出さない。監査 `entity_type='llm_model_policy'`。詳細は
+`docs/features/llm_model_selection_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/llm-models/catalog` | TEACHER | 選択肢 + 本人にとっての実効モデル（`scene` 未指定なら全 scene）。`catalog_available` でカタログ不在も正直に返す |
+| GET | `/api/admin/llm-models/pipeline-stages` | TEACHER | 解析パイプラインの LLM ステージ一覧（`PIPELINE_STAGES` の順序 × `LLM_STAGE_NAMES` の交差）。各行に `feature`（`pipeline:<stage>`）/ `label` / `vision` / `effective` |
+| GET | `/api/admin/llm-models/policies` | SYSTEM_ADMIN | システム既定一覧（各行に `is_feature_level`＝ステージ別上書き行かどうか、と `label`） |
+| PUT | `/api/admin/llm-models/policies/{scene_key}` | SYSTEM_ADMIN | システム既定の設定・変更 |
+| DELETE | `/api/admin/llm-models/policies/{scene_key}` | SYSTEM_ADMIN | システム既定の解除（行なしは 404） |
+| PUT | `/api/admin/llm-models/my-policies/{scene_key}` | TEACHER（user_id は認証ユーザー固定） | ユーザー別既定の設定・変更 |
+| DELETE | `/api/admin/llm-models/my-policies/{scene_key}` | TEACHER（本人の行のみ） | ユーザー別既定の解除（行なしは 404） |
+
+### discuss 観測基盤（`routes/discuss_observation.py`、migration 060）
+
+discuss モードの Phase 3 着手判断を実測ゲートで行うための観測層。本文非含有・仮名化で、
+学習者に数値を見せる API は作らない。削除 API は無い（append-only）。詳細は
+`docs/features/discuss_observation_design.md`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/learning/discuss/metric-events` | 要ログイン（本人記録） | discuss UI 操作イベントの取込（1リクエスト最大20件、語彙はサーバ側ホワイトリスト検証で未知は 422）。フロントは fire-and-forget 前提で、レスポンスは件数のみ |
+| GET | `/api/admin/discuss/observation-status` | SYSTEM_ADMIN | 蓄積状況 + 分析開始の参考目安（`criteria` / `ready_for_analysis` は表示専用。自動ゲートにしない） |
+| GET | `/api/admin/discuss/observation-dump` | SYSTEM_ADMIN | 分析用ダンプ（`format` は `tar.gz` / `zip`、それ以外は 422）。取得を `entity_type='discuss_observation'` で監査 |
 
 ### エクスポート（`routes/export.py`）
 
