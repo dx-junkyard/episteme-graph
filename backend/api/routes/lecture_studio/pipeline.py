@@ -61,35 +61,41 @@ DOCUMENT_PIPELINE_STAGES: tuple[str, ...] = tuple(
 # ステージ名の日本語表現は管理UI (`admin.js` の materialPipelineStageGroups) と
 # `docs/pipeline/overview.md` のステージ表に合わせる。ラベル未登録のステージは
 # ``.get(stage, "Agent Pipeline")`` でフォールバックするため受理には影響しない。
+#
+# ラベルは**教員が読む進捗表示**なので、内部の Agent クラス名
+# （DocumentStructureAgent 等）を値に入れない。かつて18件が英語クラス名のままで、
+# 追補された日本語ラベルと混在していた（「DocumentStructureAgentが進行中です...」）。
+# 内部ステージキー（dict のキー）は agent 実装と結び付いているため変更しない。
+# 再混入は test_lecture_studio.py::TestDocumentPipelineStageRegistry が検出する。
 DOCUMENT_PIPELINE_STAGE_LABELS: dict[str, str] = {
     "save_pdf": "入力ファイルの保存",
     "grobid_parse": "本文の抽出（GROBID）",
-    "document_structure": "DocumentStructureAgent",
+    "document_structure": "文書構造の復元",
     "figure_image_extraction": "図画像の抽出",
     "source_chunking": "チャンクの生成",
     "source_embedding": "チャンクの埋め込み保存",
-    "paper_skeleton": "PaperSkeletonAgent",
-    "rhetorical_role": "RhetoricalRoleAgent",
-    "claim_qualification": "ClaimQualificationAgent",
-    "equation_semantics": "EquationSemanticsAgent",
-    "evidence_registry": "EvidenceRegistryBuilder",
-    "claim_object_builder": "ClaimObjectBuilder",
-    "symbol_registry": "SymbolRegistryBuilder",
-    "derivation_chain": "DerivationChainAgent",
-    "figure_table_semantics": "FigureTableSemanticsAgent",
+    "paper_skeleton": "論文アウトラインの推定",
+    "rhetorical_role": "論述の役割分類",
+    "claim_qualification": "主張の抽出・分類",
+    "equation_semantics": "数式の意味付け",
+    "evidence_registry": "根拠の一元管理",
+    "claim_object_builder": "主張オブジェクトの組み立て",
+    "symbol_registry": "数式記号の整理",
+    "derivation_chain": "導出関係の構築",
+    "figure_table_semantics": "図表の意味復元",
     "apparatus_semantics": "図の装置・パーツ解析",
-    "thesis_reconstruction": "ThesisReconstructionAgent",
-    "dsl_linking": "DSLLinkingAgent",
+    "thesis_reconstruction": "中心命題の再構成",
+    "dsl_linking": "概念グラフへの接続",
     "dsl_embedding": "DSL の埋め込み保存",
-    "component_assembly": "ComponentAssemblyAgent",
-    "component_graph": "ComponentGraphAgent",
-    "narrative_annotator": "NarrativeAnnotator",
+    "component_assembly": "理論コンポーネントの組み立て",
+    "component_graph": "理論操作グラフの構築",
+    "narrative_annotator": "説明注釈の付与",
     "contextual_explanation": "要素の二層説明の生成",
     "discuss_opening": "議論のきっかけの生成",
     "landscape_placement": "分野マップ配置候補の生成",
-    "course_mapping": "CourseMappingAgent",
-    "blueprint": "BlueprintAgent",
-    "export_validation": "ExportValidationGate",
+    "course_mapping": "コース項目への対応付け",
+    "blueprint": "コース設計案の生成",
+    "export_validation": "整合性の最終チェック",
     "persist_claims_components_graph": "解析結果の保存",
 }
 

@@ -374,6 +374,85 @@ class TestDocumentPipelineStageRegistry:
         # ラベル表に実在しないステージ名（typo・撤去済みステージ）を残さない。
         assert set(mod.DOCUMENT_PIPELINE_STAGE_LABELS) == set(mod.DOCUMENT_PIPELINE_STAGES)
 
+    def test_every_display_label_is_japanese(self):
+        """進捗表示ラベルに英語 Agent クラス名を混ぜない。
+
+        ラベルは教員が読む進捗表示（「〜が進行中です...」）に埋め込まれる。かつては
+        18件が ``DocumentStructureAgent`` のような内部 Agent クラス名のままで、
+        追補された日本語ラベル（「図画像の抽出」等）と英日まだらになっていた。
+        内部ステージキー（dict のキー）は agent 実装と結び付いているため変更しない。
+        """
+        import re
+
+        mod = self._pipeline_module()
+        japanese = re.compile(r"[ぁ-んァ-ヶー一-龠]")
+        # 「FooAgent」「FooBuilder」「FooGate」形の ASCII クラス名を値に置かない。
+        class_name = re.compile(r"^[A-Za-z][A-Za-z0-9]*(Agent|Builder|Gate|Annotator)$")
+
+        not_japanese = sorted(
+            f"{stage}={label}"
+            for stage, label in mod.DOCUMENT_PIPELINE_STAGE_LABELS.items()
+            if not japanese.search(label)
+        )
+        assert not_japanese == [], f"日本語ラベルでないステージ: {not_japanese}"
+
+        class_names = sorted(
+            f"{stage}={label}"
+            for stage, label in mod.DOCUMENT_PIPELINE_STAGE_LABELS.items()
+            if class_name.match(label)
+        )
+        assert class_names == [], f"Agent クラス名がラベルに再混入: {class_names}"
+
+    def test_stage_labels_agree_with_the_model_selection_ui(self):
+        """同一ステージに2つの日本語名を持たない（進捗表示 ⇄ M層モデル選択UI）。
+
+        ラベル日本語化の際、M層 ``llm_policy.PIPELINE_STAGE_LABELS`` と 12 共有キー中
+        9 件で訳語が割れていることが表面化した（例: paper_skeleton =
+        「論文アウトラインの推定」vs「論文骨格の仮説化」）。語彙ガードレールの
+        重複表検出はキー集合の完全一致でグルーピングするため、この**部分重複の割れは
+        機械検出されない** — 共有キーの値一致をここで固定する。
+        """
+        from core.llm_policy import PIPELINE_STAGE_LABELS
+
+        mod = self._pipeline_module()
+        diverged = sorted(
+            f"{stage}: 進捗表示={mod.DOCUMENT_PIPELINE_STAGE_LABELS[stage]!r} "
+            f"M層UI={PIPELINE_STAGE_LABELS[stage]!r}"
+            for stage in set(mod.DOCUMENT_PIPELINE_STAGE_LABELS) & set(PIPELINE_STAGE_LABELS)
+            if mod.DOCUMENT_PIPELINE_STAGE_LABELS[stage] != PIPELINE_STAGE_LABELS[stage]
+        )
+        assert diverged == [], f"同一ステージの訳語が画面間で分裂: {diverged}"
+
+    def test_frontend_keeps_no_copy_of_the_stage_label_table(self):
+        """原稿スタジオ JS に訳語表のコピーを持たない（表を2箇所に増やさない）。
+
+        撤去した3つは同じ死クラスタ:
+        - ``lsAgentStageLabels`` … バックエンド旧ラベル表の第3コピー（英語のまま
+          取り残され、進捗復帰表示に「DocumentStructureAgentが進行中です...」と出ていた）
+        - ``lsRunDocumentPipeline`` … 呼び出し元ゼロ
+        - ``lsSetAgentStageItemState`` … 呼び出し元ゼロ。生成コードが存在しない
+          ``.ls-agent-stage-btn`` を走査していた
+
+        ステージ表示名の正本はバックエンドで、フロントは task の
+        ``result_data.label`` をそのまま表示する。
+        """
+        from pathlib import Path
+
+        js = (
+            Path(__file__).resolve().parents[2]
+            / "frontend" / "public" / "js" / "admin-lecture-studio.js"
+        ).read_text(encoding="utf-8")
+
+        assert "var lsAgentStageLabels" not in js
+        assert "function lsRunDocumentPipeline" not in js
+        assert "function lsSetAgentStageItemState" not in js
+        assert ".ls-agent-stage-btn" not in js
+        # 訳語表のコピーが復活していないこと（値としての Agent クラス名）。
+        for class_name in ('"DocumentStructureAgent"', '"ComponentGraphAgent"', '"ExportValidationGate"'):
+            assert class_name not in js, f"訳語表のコピーが復活: {class_name}"
+        # 復帰表示はバックエンドの label を使う（フロントで訳し直さない）。
+        assert 'var label = targetStage ? (rd.label || targetStage) : "パイプライン全実行";' in js
+
     def test_material_run_accepts_stage_absent_from_legacy_label_table(self, monkeypatch):
         """管理UIが送る start_stage=apparatus_semantics が 400 にならない。"""
         mod = self._pipeline_module()

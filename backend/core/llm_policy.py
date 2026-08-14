@@ -155,17 +155,22 @@ def scene_for_feature(feature: str) -> str | None:
 # orchestrator 側の集合とこの辞書の両方を同時に更新すること。
 # ---------------------------------------------------------------------------
 
+# 文言は進捗表示（routes/lecture_studio/pipeline.py::DOCUMENT_PIPELINE_STAGE_LABELS =
+# admin.js の再実行メニューと同語）に揃える — 同一ステージが画面によって別名になる
+# 訳語分裂を作らない（共有キーの一致は test_lecture_studio.py が固定）。
+# apparatus の vision 情報はラベルでなく pipeline-stages API の vision フラグと
+# 専用 UI 行（admin-llm-models.js「図の解析（vision）」）が担う。
 PIPELINE_STAGE_LABELS: dict[str, str] = {
-    "paper_skeleton": "論文骨格の仮説化",
-    "rhetorical_role": "論理役割の判定",
-    "claim_qualification": "主張の採否・原子化",
-    "equation_semantics": "数式の意味解析",
-    "apparatus_semantics": "図の装置同定（vision）",
+    "paper_skeleton": "論文アウトラインの推定",
+    "rhetorical_role": "論述の役割分類",
+    "claim_qualification": "主張の抽出・分類",
+    "equation_semantics": "数式の意味付け",
+    "apparatus_semantics": "図の装置・パーツ解析",
     "thesis_reconstruction": "中心命題の再構成",
-    "dsl_linking": "DSL グラフ接続",
-    "component_assembly": "コンポーネント生成",
-    "narrative_annotator": "ナラティブ注釈",
-    "contextual_explanation": "文脈的説明の生成",
+    "dsl_linking": "概念グラフへの接続",
+    "component_assembly": "理論コンポーネントの組み立て",
+    "narrative_annotator": "説明注釈の付与",
+    "contextual_explanation": "要素の二層説明の生成",
     "discuss_opening": "議論のきっかけの生成",
     "landscape_placement": "分野マップ配置候補の生成",
 }

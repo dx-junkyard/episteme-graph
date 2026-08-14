@@ -110,8 +110,22 @@ CLAUDE.md 横断基盤ルールへの追記が本体。既存8系統の巻き取
 > — 分裂源と名指しされていた discuss 開幕の独自表（他6キーは正典と完全一致）を
 > `element_vocab.THEORY_STAGE_LABELS`（オーナー承認済み統一語彙 §9 Q2）への委譲に置換。
 > 学習者に見える変化は「方程式系」→「式の体系」の1語のみ。
-> 繰り延べ（オーナー判断）: D2（standardization_status のフロント3種）/ D3（地図 verified 系
-> 4〜5種 — 凡例と pill での意図的短縮の可能性あり）— ガードレールの allowlist で可視化済み。
+> **追補（2026-08-14 第2弾・オーナー承認済み推奨案で実施）:**
+> **D2 是正済み** — 統一語彙（標準 / 分野標準 / 共通化しつつある / 新規 / 未評価）で
+> `core/library/schema.py` に `STANDARDIZATION_STATUS_LABELS` を新設し、フロント3表を統一 +
+> `test_library_vocab_mirror.py` で逐語固定（「教科書級」の語釈はバッジ title へ退避 = P4）。
+> **D3 是正済み** — 地図の verified の意味を「**原文に裏付け**」に確定（SL1 整合。
+> 「実験で確認」はコーパスの射影に対して強すぎるため全面撤去 + 負のアサーション常設）。
+> 正本は `atlas_state.PILL_LABELS`、`test_atlas_vocab_mirror.py` で固定。
+> **ステージ表示語彙も一本化** — 進捗表示ラベル18件の英語 Agent クラス名を日本語化
+> （admin.js の既存文言に統一）した際、M層 `PIPELINE_STAGE_LABELS` と共有12キー中9件の
+> 訳語割れが表面化 → M層側を追随（重複表検出はキー集合完全一致でグルーピングするため
+> **部分重複の割れは検出できない** — 共有キーの値一致テストを `test_lecture_studio.py` に常設）。
+> **事実訂正**: `lsAgentStageLabels` は当初「デッドコード」と報告したが実際は
+> `lsCheckActiveTask` に生きた参照があった（修正員の実測で判明）。参照をバックエンド正本
+> `rd.label` へ差し替えたうえで表を撤去し、死クラスタ3シンボル
+> （lsRunDocumentPipeline / lsSetAgentStageItemState / lsAgentStageLabels）を負のアサーションで固定。
+> 過去タスク行の result_data に label が無い場合は生ステージキー表示に縮退（許容劣化・エラーなし）。
 
 「数値を見せない」原則の実装として、生値→日本語段階ラベル（低/中/高、レンジ 3-5/6-10/11+ 等）の
 変換表が D層・SL層・G層・R層などで**サーバ側とフロント側に二重管理**されている

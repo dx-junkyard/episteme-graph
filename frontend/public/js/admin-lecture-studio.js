@@ -1265,7 +1265,14 @@
           _lsPollStructureTask(task.task_id, rd.total_materials || 0);
         } else if (task.task_type === "document_pipeline") {
           var targetStage = rd.start_stage || rd.target_stage || "";
-          var label = targetStage ? lsAgentStageLabels[targetStage] || targetStage : "パイプライン全実行";
+          // ステージ表示名の正本はバックエンド（lecture_studio/pipeline.py の
+          // DOCUMENT_PIPELINE_STAGE_LABELS）で、document_pipeline タスクの
+          // result_data には全 publish で `label` が入る。フロントに訳語表の
+          // コピーを持たない（かつての lsAgentStageLabels は英語 Agent クラス名
+          // のまま取り残され、「DocumentStructureAgentが進行中です...」と表示していた）。
+          // 全実行（targetStage 空）はバックエンド側ラベルが "Agent Pipeline" に
+          // なるため、従来どおりフロントの日本語文言を使う。
+          var label = targetStage ? (rd.label || targetStage) : "パイプライン全実行";
           lsState.pipelineTask = targetStage
             ? { step: "document_pipeline", stage: targetStage, status: "running" }
             : { step: "document_pipeline", status: "running" };
@@ -8011,20 +8018,6 @@
     });
   }
 
-  function lsSetAgentStageItemState(enabled) {
-    var task = lsState.pipelineTask || {};
-    document.querySelectorAll(".ls-agent-stage-btn").forEach(function (btn) {
-      var stage = btn.getAttribute("data-stage") || "";
-      var visual = "pending";
-      if (task.stage === stage && task.status === "running") visual = "running";
-      if (task.stage === stage && task.status === "failed") visual = "error";
-      btn.disabled = !enabled;
-      ["done", "next", "running", "error", "pending"].forEach(function (name) {
-        btn.classList.toggle("ls-menu-item-" + name, visual === name);
-      });
-    });
-  }
-
   function lsUpdateCourseControls() {
     var hasCourse = Boolean(lsState.courseId);
     var busy = Boolean(lsState.generating);
@@ -8052,61 +8045,6 @@
   function lsSetCourseTaskBusy(isBusy) {
     lsState.generating = isBusy;
     lsUpdateCourseControls();
-  }
-
-  var lsAgentStageLabels = {
-    document_structure: "DocumentStructureAgent",
-    paper_skeleton: "PaperSkeletonAgent",
-    rhetorical_role: "RhetoricalRoleAgent",
-    claim_qualification: "ClaimQualificationAgent",
-    equation_semantics: "EquationSemanticsAgent",
-    evidence_registry: "EvidenceRegistryBuilder",
-    claim_object_builder: "ClaimObjectBuilder",
-    symbol_registry: "SymbolRegistryBuilder",
-    derivation_chain: "DerivationChainAgent",
-    figure_table_semantics: "FigureTableSemanticsAgent",
-    thesis_reconstruction: "ThesisReconstructionAgent",
-    dsl_linking: "DSLLinkingAgent",
-    component_assembly: "ComponentAssemblyAgent",
-    component_graph: "ComponentGraphAgent",
-    narrative_annotator: "NarrativeAnnotator",
-    course_mapping: "CourseMappingAgent",
-    blueprint: "BlueprintAgent",
-    export_validation: "ExportValidationGate",
-  };
-
-  function lsRunDocumentPipeline(stage) {
-    var targetStage = stage || "";
-    var label = targetStage ? lsAgentStageLabels[targetStage] || targetStage : "パイプライン全実行";
-    lsState.pipelineTask = targetStage
-      ? { step: "document_pipeline", stage: targetStage, status: "running" }
-      : { step: "document_pipeline", status: "running" };
-    lsSetCourseTaskBusy(true);
-    lsShowProgress(label + "を開始しています...", "info");
-    apiFetch("/admin/courses/" + lsState.courseId + "/document-pipeline/run", {
-      method: "POST",
-      body: JSON.stringify({ start_stage: targetStage }),
-    })
-      .then(function (res) {
-        if (!res.ok) {
-          return res.json().then(function (errBody) {
-            throw new Error((errBody && errBody.detail) || label + "を開始できませんでした");
-          }, function () {
-            throw new Error(label + "を開始できませんでした");
-          });
-        }
-        return res.json();
-      })
-      .then(function (data) {
-        lsPollGenericCourseTask(data.task_id, label, "document_pipeline", targetStage);
-      })
-      .catch(function (err) {
-        lsState.pipelineTask = targetStage
-          ? { step: "document_pipeline", stage: targetStage, status: "failed" }
-          : { step: "document_pipeline", status: "failed" };
-        lsShowProgress(label + "に失敗しました: " + (err.message || "不明なエラー"), "error");
-        lsSetCourseTaskBusy(false);
-      });
   }
 
   function lsPollGenericCourseTask(taskId, label, step, targetStage) {
