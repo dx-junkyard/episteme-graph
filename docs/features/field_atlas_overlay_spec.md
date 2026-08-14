@@ -10,7 +10,7 @@
 
 - 対象: 分野の地図（Field Atlas）の全画面オーバーレイ・常設ミニマップ・骨格（skeleton）・
   状態導出・修正報告・コース⇄地図バインディング
-- 実装状態: 全機能実装済み（issue A〜F + S1〜S3 + ドメインライフサイクル）
+- 状態: 実装済み（正本・凍結）— 全機能実装済み（issue A〜F + S1〜S3 + ドメインライフサイクル）
 - 関連設計書: `field_atlas_skeleton.md`（骨格運用）/ `field_atlas_detail_panel.md`（詳細パネル）/
   `field_atlas_correction_reports.md`（修正報告）/ `field_atlas_binding.md`（個人層 binding）/
   `field_atlas_db_managed_skeleton.md`（骨格の DB 管理化）/

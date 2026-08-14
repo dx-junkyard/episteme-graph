@@ -2008,9 +2008,23 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   revision 照合更新と冪等シード取込の**制御フロー**だけを共有し、draft 粒度・freeze 方式・
   status 語彙・セッション規約はドメイン側（atlas_store / library/store）に残す。
   第3の draft/freeze 利用者はコピペせずこれに接続すること。
+- **`backend/core/candidate_flow.py`**（2026-08-14 新設、正本設計書
+  `docs/features/candidate_flow_design.md`） — 候補→確定ワークフローの共通制御フロー
+  （`CandidateVocabulary`（status 語彙の宣言）/ `CandidateFlow`（confirm / dismiss / supersede の
+  制御フローと監査記帳の呼び出し順）/ `select_supersedable`（再解析時に倒せる候補の選別。
+  確定済み・却下済みを AI が復活させないための選別規則））。**語彙・SQL・トリガはドメイン側に残す**
+  （テーブル名・粒度・却下理由の必須性・冪等マーカー・k-匿名集約は各層の責務）。
+  **新しい候補→確定系統はコピペせずこれに接続する**。既存8系統（tension / structure_anchor /
+  D層 scope_candidates / assumption_nodes / W層 element_annotations / C層 explanations /
+  ランドスケープ placements / カテゴリギャップ decisions）の巻き取りは非スコープ。
 - **`backend/core/document_pipeline/orchestrator.py` のステージ追加**（Tier 3-19） —
   新ステージは `_stage_<name>(ctx)` 関数 + `_PIPELINE_STEPS` リストへの登録で追加する
   （インライン展開に戻さない）。ステージ間の受け渡しは `PipelineContext` のフィールド。
+- **ドキュメント運用規約の正本は `docs/development_checklist.md` §5**（機能解説の同時更新 /
+  設計書の状態ヘッダ / レビュー文書への解消注記 / 想定 migration 番号を書かない /
+  リポジトリ外正本の禁止 / カウント記法）。**機械検証は
+  `backend/tests/test_docs_registry_guardrails.py`**（migration・ルーター・パイプラインステージ・
+  設計書索引の網羅とリンク実在）。
 
 
 ## 開発ルール

@@ -17,6 +17,12 @@
 
 ## §1 ドキュメント運用の整備（即効・低コスト）
 
+> **実施記録（2026-08-14）:** 1-1〜1-5（+ §3-6 のカウント記法）を
+> [開発運用チェックリスト](../development_checklist.md) §5
+> 「ドキュメント運用規約」として明文化した（機能解説の同時更新表 / 状態ヘッダ 5 語彙 /
+> レビュー文書への解消注記 / 想定 migration 番号の禁止 / リポジトリ外正本の禁止 / カウント記法）。
+> 機械検証は §3 の `backend/tests/test_docs_registry_guardrails.py` が担う。
+
 ### 1-1. 「機能解説ドキュメント」の同時更新を3点セットに組み込む
 
 設計書（`*_design.md`）は「実装後に §実装記録を追記」する運用が徹底されている一方、
@@ -68,6 +74,12 @@ G層/状態通知の相互矛盾する因果説明を生んだ（一次情報は
 ## §2 機能の大枠統合（アーキテクチャ提案）
 
 ### 2-1. candidate → confirm ワークフローの共通プリミティブ化 ★★★
+
+> **実施記録（2026-08-14）:** `backend/core/candidate_flow.py`（`CandidateVocabulary` /
+> `CandidateFlow` / `select_supersedable`）+ 正本設計書 `docs/features/candidate_flow_design.md`
+> + ガードレールテストを追加。語彙・SQL・トリガはドメイン側に残す方針も明文化した
+> （CLAUDE.md 横断基盤節 + layer_registry 横断基盤行）。
+> **既存8系統の巻き取りは提案どおり非実施**（次の新系統からアダプタ接続を義務化）。
 
 「非LLM prefilter → 非同期 LLM 候補 → 人間 confirm/dismiss → 状態遷移で保持・監査記帳」という
 同型パイプラインが、少なくとも **8系統**で個別に再実装されている:
@@ -203,11 +215,23 @@ U層 usage_context・G層 capability・help_kb）との接続点が未記載、�
 
 ## §3 機械ガードレール（docs ⇄ 実在物の網羅テスト）
 
+> **実施記録（2026-08-14）:** `backend/tests/test_docs_registry_guardrails.py` に **7系統・10テスト**を
+> 追加: ①migration ファイル名 ⇄ data-model 表 ②migration 番号 ⇄ layer_registry §3（「013〜015, 017」の
+> 範囲表記を展開）③空き番号案内 = max+1 の整合 ④ルーター ⇄ api.md（`<name>.py` 形の出現を要求）
+> ⑤パイプラインステージ ⇄ overview.md ⑥設計書 ⇄ 索引の孤児検出 ⑦相対リンク実在・バッククォート
+> `.md` 参照実在・状態ヘッダ（ラベル行 + レガシー凍結 allowlist）。実装が提案本文と異なる点2つ:
+> **§3-6 のカウント記法は機械検査せず** development_checklist.md §5-6 の規約に留めた（全文の数値
+> 表現の機械判定は誤検知が多い）/ **空き番号の手書き案内は廃止せず** max+1 整合テストで固定した（③）。
+> 併せて help_kb validator に `docs/manual` 内リンク実在検査を追加（6-1 の番号ズレの再発防止。
+> テキスト辞書ベースのため files 起動時検証と DB draft の freeze ゲートの両方で効く。なお
+> validate_manual 違反時は設計方針どおりベクトル補助層の再同期も fail-closed で停止する —
+> 検査を1つ増やした分、停止条件も広がる）。運用側の規約は §1 → development_checklist.md §5。
+
 今回の不具合30件の大半は「テストが固定していない集計値・一覧」で起きた
 （テスト固定済みのアンカー260件はズレていなかった）。既存ガードレールテスト様式の再利用で塞げる。
 
 1. **migration 網羅:** `backend/db/*.sql` の全番号が `data-model.md` の表と
-   `layer_registry.md` §3 に現れることをテストで固定（空き番号の手書き案内を廃止）。
+   `layer_registry.md` §3 に現れることをテストで固定（空き番号の手書き案内は max+1 整合テストで固定）。
 2. **ルーター網羅:** `backend/api/routes/*.py` の全ルーターが `api.md` に現れること。
 3. **ステージ網羅:** `orchestrator.PIPELINE_STAGES` の全ステージが `pipeline/overview.md` の
    表に現れること。
@@ -224,9 +248,14 @@ U層 usage_context・G層 capability・help_kb）との接続点が未記載、�
 
 ## §4 実施順の推奨
 
-1. **今すぐ（本整理で着手済み）:** §1 の運用規約を development_checklist.md に反映 /
-   索引の更新（vision.md・README・layer_registry — 済み）
-2. **次の1手:** §3 の網羅テスト4種（半日規模・効果最大）
-3. **次の新機能から適用:** §2-1 candidate_flow / §2-2 label_vocab（新系統のアダプタ接続を義務化）
-4. **設計検討を切る:** §2-3 振り返りハブ / §2-5 文脈API統合 / §2-9 LLMステージ正本化
-5. **将来の増設前に判断:** §2-4 入口凍結 / §2-11 domain_key 分離 / §2-12 CostGate / §2-13 E層
+1. ✅ **実施済み（2026-08-14）:** §1 の運用規約を
+   [development_checklist.md](../development_checklist.md) §5 に明文化 /
+   索引の更新（vision.md・README・layer_registry）
+2. ✅ **実施済み（2026-08-14）:** §3 の網羅テスト（`test_docs_registry_guardrails.py` +
+   help_kb validator のリンク検査）
+3. ✅ **基盤のみ実施済み（2026-08-14）:** §2-1 candidate_flow（`core/candidate_flow.py` +
+   設計書 + テスト。既存8系統の巻き取りは非スコープ、次の新系統からアダプタ接続を義務化）。
+   **§2-2 label_vocab は未着手** — 次の新機能から適用する
+4. **設計検討を切る（未着手）:** §2-3 振り返りハブ / §2-5 文脈API統合 / §2-9 LLMステージ正本化
+5. **将来の増設前に判断（未着手）:** §2-4 入口凍結 / §2-11 domain_key 分離 / §2-12 CostGate /
+   §2-13 E層
