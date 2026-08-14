@@ -71,45 +71,56 @@ ARTIFACTS_KEY = "_artifacts"
 
 STAGE_MODELS_KEY = "_stage_models"
 
-# options.models による run override / 使用モデル記録(M7)の対象ステージ。
-# 「LLM-first」と明言されている、または vision/opt-in で実行が二値に決まる
-# ステージのみを対象にする。document_structure（構造優先・曖昧箇所のみ LLM 補助）・
-# figure_table_semantics（caption-first・LLM enricher 任意）は、実行時に LLM 呼び出しが
-# 実際にあったかどうかを外側（ループ側）から正確に判定できないため、記録対象から
-# 意図的に除外する（不正確な網羅より正直な部分記録を優先する、という Phase 2 依頼の
-# 指示どおり）。symbol_registry / derivation_chain / course_mapping は非LLM・決定論的
-# なので単純に対象外。component_graph は上記3ステージと異なり非LLMではない——
-# agents/component_graph/agent.py が自ら「hybrid deterministic/LLM edge-building
-# pipeline」と明記するとおり LLM クライアントを持ち、下記 `_stage_component_graph` も
-# `report_start(..., unit="llm_call")` で進捗報告している。それでもなお本セットから
-# 除外されている理由を裏付ける記録は見当たらず、歴史的な扱いの可能性がある（「LLM を
-# 呼ぶステージか」の判定が LLM_STAGE_NAMES / llm_usage の feature 語彙 / report_start
-# の unit 指定の3箇所で食い違っている既知の不整合。
-# docs/architecture/doc_review_findings_2026-08-13.md の 7-1 参照）。
-LLM_STAGE_NAMES = frozenset({
-    "paper_skeleton",
-    "rhetorical_role",
-    "claim_qualification",
-    "equation_semantics",
-    "apparatus_semantics",
-    "thesis_reconstruction",
-    "dsl_linking",
-    "component_assembly",
-    "narrative_annotator",
-    "contextual_explanation",
-    "discuss_opening",
-    "landscape_placement",
+# ---------------------------------------------------------------------------
+# ステージ属性の語彙（`PipelineStageDef` の宣言フィールド）。
+#
+# 「このステージは LLM を呼ぶのか」の判定はかつて LLM_STAGE_NAMES /
+# report_start の unit 指定 / docs の種別列の3箇所に散っており、互いに食い違って
+# いた（docs/architecture/doc_review_findings_2026-08-13.md の 7-1）。現在は
+# `_PIPELINE_STEPS` の各 `PipelineStageDef` が事実を宣言し、判定用の集合
+# （`LLM_STAGE_NAMES` / `LLM_CALLING_STAGE_NAMES` / `VISION_STAGE_NAMES`）は
+# すべてそこから導出する（正本は1箇所 = `_PIPELINE_STEPS`）。
+# ---------------------------------------------------------------------------
+
+LLM_KIND_NONE = "none"
+LLM_KIND_TEXT = "text"
+LLM_KIND_VISION = "vision"
+LLM_KIND_EMBEDDING = "embedding"
+
+LLM_KINDS = frozenset({
+    LLM_KIND_NONE,
+    LLM_KIND_TEXT,
+    LLM_KIND_VISION,
+    LLM_KIND_EMBEDDING,
 })
 
-# 後方互換エイリアス（Phase 4 で `LLM_STAGE_NAMES` へ昇格・公開。旧名を参照する
-# 外部コードのための薄いエイリアスで、正本は `LLM_STAGE_NAMES`）。
-_LLM_STAGE_NAMES = LLM_STAGE_NAMES
+# `report_start(..., unit=...)` に渡される進捗単位の語彙。`PipelineStageDef.progress_unit`
+# は実呼び出しの**宣言**（静的照合専用）で、report_start 自体は各ステージ本体が
+# リテラルで呼ぶ（呼び出しを 1 文字も変えない）。unit は「入力の単位」の意味論であって
+# LLM-ness を表さないため、llm_kind から導出しない（例: rhetorical_role は LLM ステージ
+# だが unit="blocks"）。
+PROGRESS_UNITS = frozenset({
+    "blocks",
+    "builder",
+    "chunks",
+    "document",
+    "embedding",
+    "equations",
+    "gate",
+    "llm_call",
+    "spans",
+    "tables",
+})
+
+# 判定用の集合は `_PIPELINE_STEPS` の直後（モジュール後方）で導出する。
+# `LLM_STAGE_NAMES` / `_LLM_STAGE_NAMES`（後方互換エイリアス）/
+# `LLM_CALLING_STAGE_NAMES` / `VISION_STAGE_NAMES` の定義はそこを参照。
 
 
 def _resolve_stage_override_model(stage_name: str | None, effective_options: dict) -> str | None:
     """``effective_options["models"]`` から stage 単位の run override モデルを引く。
 
-    解決順: ``pipeline:{stage_name}`` → (``apparatus_semantics`` だけ
+    解決順: ``pipeline:{stage_name}`` → (``VISION_STAGE_NAMES`` のステージだけ
     ``pipeline.vision``、それ以外は ``pipeline``)。どちらにも一致しなければ
     None を返す（override なし = 従来どおり env/tier 既定へフォールバックする）。
     between-stage の決定論的後処理フック（``stage_name is None``）は対象外。
@@ -122,7 +133,7 @@ def _resolve_stage_override_model(stage_name: str | None, effective_options: dic
     candidate = models.get(f"pipeline:{stage_name}")
     if isinstance(candidate, str) and candidate.strip():
         return candidate.strip()
-    fallback_key = SCENE_PIPELINE_VISION if stage_name == "apparatus_semantics" else SCENE_PIPELINE
+    fallback_key = SCENE_PIPELINE_VISION if stage_name in VISION_STAGE_NAMES else SCENE_PIPELINE
     candidate = models.get(fallback_key)
     if isinstance(candidate, str) and candidate.strip():
         return candidate.strip()
@@ -331,10 +342,42 @@ class PipelineStageDef:
     ``name`` は PIPELINE_STAGES に対応するステージ名（between-stage の決定論的
     後処理フックには対応する PIPELINE_STAGES エントリが無いため None）。``execute``
     がステージ本体で、``ctx`` を受け取り「target_stage で停止すべきか」(bool) を返す。
+
+    残りのフィールドは「このステージは何を呼ぶのか」の**宣言**で、判定用の集合
+    （``LLM_STAGE_NAMES`` / ``LLM_CALLING_STAGE_NAMES`` / ``VISION_STAGE_NAMES``）は
+    すべてここから導出する（正本を1箇所にまとめる。提案 §2-9）。既存の呼び出し側が
+    位置引数 ``PipelineStageDef(name, execute)`` で生成しているため、すべて
+    キーワード既定値付きで後方互換に保つ。
+
+    Attributes:
+        llm_kind: このステージが実際に呼ぶものの事実（``LLM_KINDS``）。
+            ``text`` = テキスト LLM / ``vision`` = vision LLM / ``embedding`` =
+            埋め込みモデル / ``none`` = 決定論的（モデルを呼ばない）。
+        model_policy: M層のステージ別モデル選択（``options.models`` の
+            ``pipeline:<stage>`` による run override）と使用モデル記録（M7,
+            ``stage_outputs["_stage_models"]``）の対象か。**「LLM を呼ぶ事実」とは
+            別の意味論**で、``LLM_STAGE_NAMES`` の集合はこのフラグから導出する。
+            「LLM-first」と明言されている、または vision/opt-in で実行が二値に決まる
+            ステージのみ True にする。``document_structure``（構造優先・曖昧箇所のみ
+            LLM 補助）・``figure_table_semantics``（caption-first・LLM enricher 任意）は
+            実行時に LLM 呼び出しが実際にあったかどうかを外側（ループ側）から正確に
+            判定できないため、記録対象から意図的に除外する（不正確な網羅より正直な
+            部分記録を優先する）。``symbol_registry`` / ``derivation_chain`` /
+            ``course_mapping`` は非LLM・決定論的なので単純に対象外。
+        progress_unit: そのステージ本体が ``report_start(..., unit=...)`` に渡す単位の
+            宣言（``PROGRESS_UNITS``。``report_start`` を呼ばないステージは None）。
+            静的照合専用で、実行時にはこの値を使わない（呼び出しはリテラルのまま）。
+        vision_optional: 主たる呼び出しは ``llm_kind`` のとおりだが、条件付きで vision も
+            使うステージの宣言（``equation_semantics`` は再構成が必要な数式のみ切り出し
+            画像を添付する。M層では text 扱いのまま = 宣言だけする）。
     """
 
     name: str | None
     execute: Callable[["PipelineContext"], bool]
+    llm_kind: str = LLM_KIND_NONE
+    model_policy: bool = False
+    progress_unit: str | None = None
+    vision_optional: bool = False
 
 
 def run_document_pipeline(
@@ -2033,40 +2076,133 @@ def _stage_completed(ctx: PipelineContext) -> None:
 # ---------------------------------------------------------------------------
 # ステージ実行順序の正本。PIPELINE_STAGES と同じ順序（+ between-stage の決定論的
 # 後処理フック。name=None で PIPELINE_STAGES に対応エントリが無いことを示す）。
+#
+# 各行の `llm_kind` / `model_policy` / `progress_unit` / `vision_optional` が
+# 「このステージは何を呼ぶのか」の宣言で、判定用の集合はすべて下の導出定数に集約する
+# （提案 §2-9。フィールドの意味は `PipelineStageDef` の docstring 参照）。
 # ---------------------------------------------------------------------------
 _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef("save_pdf", _stage_save_pdf),
-    PipelineStageDef("grobid_parse", _stage_grobid_parse),
-    PipelineStageDef("document_structure", _stage_document_structure),
-    PipelineStageDef("figure_image_extraction", _stage_figure_image_extraction),
-    PipelineStageDef("source_chunking", _stage_source_chunking),
-    PipelineStageDef("source_embedding", _stage_source_embedding),
-    PipelineStageDef("paper_skeleton", _stage_paper_skeleton),
-    PipelineStageDef("rhetorical_role", _stage_rhetorical_role),
-    PipelineStageDef("claim_qualification", _stage_claim_qualification),
-    PipelineStageDef("equation_semantics", _stage_equation_semantics),
-    PipelineStageDef("evidence_registry", _stage_evidence_registry),
-    PipelineStageDef("claim_object_builder", _stage_claim_object_builder),
+    PipelineStageDef("grobid_parse", _stage_grobid_parse, progress_unit="document"),
+    # document_structure は structure-first（パーサ・レイアウト優先）。設計上は
+    # 「曖昧な block のみ LLM 補助」だがその補助は未実装で、実態は決定論的。
+    PipelineStageDef("document_structure", _stage_document_structure, progress_unit="document"),
+    PipelineStageDef("figure_image_extraction", _stage_figure_image_extraction, progress_unit="builder"),
+    PipelineStageDef("source_chunking", _stage_source_chunking, progress_unit="blocks"),
+    PipelineStageDef(
+        "source_embedding", _stage_source_embedding,
+        llm_kind=LLM_KIND_EMBEDDING, progress_unit="chunks",
+    ),
+    PipelineStageDef(
+        "paper_skeleton", _stage_paper_skeleton,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
+    ),
+    PipelineStageDef(
+        "rhetorical_role", _stage_rhetorical_role,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="blocks",
+    ),
+    PipelineStageDef(
+        "claim_qualification", _stage_claim_qualification,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="spans",
+    ),
+    # equation_semantics は基本テキスト LLM だが、再構成が必要な数式候補のみ切り出し
+    # 画像を添付する（agents/equation_semantics/agent.py）。M層では text 扱い。
+    PipelineStageDef(
+        "equation_semantics", _stage_equation_semantics,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="equations",
+        vision_optional=True,
+    ),
+    PipelineStageDef("evidence_registry", _stage_evidence_registry, progress_unit="builder"),
+    PipelineStageDef("claim_object_builder", _stage_claim_object_builder, progress_unit="builder"),
     PipelineStageDef(None, _hook_claim_equation_canonicalization),
-    PipelineStageDef("symbol_registry", _stage_symbol_registry),
-    PipelineStageDef("derivation_chain", _stage_derivation_chain),
+    PipelineStageDef("symbol_registry", _stage_symbol_registry, progress_unit="builder"),
+    PipelineStageDef("derivation_chain", _stage_derivation_chain, progress_unit="builder"),
     PipelineStageDef(None, _hook_equation_claim_synthesis),
-    PipelineStageDef("figure_table_semantics", _stage_figure_table_semantics),
-    PipelineStageDef("apparatus_semantics", _stage_apparatus_semantics),
-    PipelineStageDef("thesis_reconstruction", _stage_thesis_reconstruction),
-    PipelineStageDef("dsl_linking", _stage_dsl_linking),
-    PipelineStageDef("dsl_embedding", _stage_dsl_embedding),
-    PipelineStageDef("component_assembly", _stage_component_assembly),
-    PipelineStageDef("component_graph", _stage_component_graph),
-    PipelineStageDef("narrative_annotator", _stage_narrative_annotator),
-    PipelineStageDef("contextual_explanation", _stage_contextual_explanation),
-    PipelineStageDef("discuss_opening", _stage_discuss_opening),
-    PipelineStageDef("landscape_placement", _stage_landscape_placement),
-    PipelineStageDef("course_mapping", _stage_course_mapping),
-    PipelineStageDef("blueprint", _stage_blueprint),
-    PipelineStageDef("export_validation", _stage_export_validation),
-    PipelineStageDef("persist_claims_components_graph", _stage_persist_claims_components_graph),
+    # figure_table_semantics は caption-first の決定論処理。LLM enricher は任意で
+    # 現状未配線のため llm_kind=none（model_policy も対象外）。
+    PipelineStageDef("figure_table_semantics", _stage_figure_table_semantics, progress_unit="builder"),
+    PipelineStageDef(
+        "apparatus_semantics", _stage_apparatus_semantics,
+        llm_kind=LLM_KIND_VISION, model_policy=True, progress_unit="builder",
+    ),
+    PipelineStageDef(
+        "thesis_reconstruction", _stage_thesis_reconstruction,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
+    ),
+    PipelineStageDef(
+        "dsl_linking", _stage_dsl_linking,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
+    ),
+    PipelineStageDef(
+        "dsl_embedding", _stage_dsl_embedding,
+        llm_kind=LLM_KIND_EMBEDDING, progress_unit="embedding",
+    ),
+    PipelineStageDef(
+        "component_assembly", _stage_component_assembly,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
+    ),
+    # component_graph は LLM を呼ぶ（agents/component_graph/agent.py が自ら
+    # 「hybrid deterministic/LLM edge-building pipeline」と明記し LLM クライアントを
+    # 持つ）が、M層のステージ別選択・使用モデル記録の対象からは歴史的に外れている
+    # （model_policy=False）。集合に足すと `GET /pipeline-stages` の応答と
+    # `PIPELINE_STAGE_LABELS` が変わる = オーナー判断が必要な挙動変更なので、
+    # ここでは事実（llm_kind=text）と意図的除外（model_policy=False）を宣言するに留める。
+    PipelineStageDef(
+        "component_graph", _stage_component_graph,
+        llm_kind=LLM_KIND_TEXT, progress_unit="llm_call",
+    ),
+    PipelineStageDef(
+        "narrative_annotator", _stage_narrative_annotator,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
+    ),
+    PipelineStageDef(
+        "contextual_explanation", _stage_contextual_explanation,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="builder",
+    ),
+    PipelineStageDef(
+        "discuss_opening", _stage_discuss_opening,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="builder",
+    ),
+    PipelineStageDef(
+        "landscape_placement", _stage_landscape_placement,
+        llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="builder",
+    ),
+    PipelineStageDef("course_mapping", _stage_course_mapping, progress_unit="builder"),
+    PipelineStageDef("blueprint", _stage_blueprint, progress_unit="builder"),
+    PipelineStageDef("export_validation", _stage_export_validation, progress_unit="gate"),
+    PipelineStageDef(
+        "persist_claims_components_graph", _stage_persist_claims_components_graph,
+        progress_unit="tables",
+    ),
 ]
+
+
+# ---------------------------------------------------------------------------
+# ステージ判定用の導出集合（正本は上の `_PIPELINE_STEPS` の宣言。ここでリテラルの
+# ステージ名を書かない）。
+# ---------------------------------------------------------------------------
+
+# options.models による run override / 使用モデル記録(M7)の対象ステージ
+# （= `model_policy=True`。意味論は `PipelineStageDef.model_policy` の docstring 参照）。
+LLM_STAGE_NAMES = frozenset(step.name for step in _PIPELINE_STEPS if step.name and step.model_policy)
+
+# 後方互換エイリアス（Phase 4 で `LLM_STAGE_NAMES` へ昇格・公開。旧名を参照する
+# 外部コードのための薄いエイリアスで、正本は `LLM_STAGE_NAMES`）。
+_LLM_STAGE_NAMES = LLM_STAGE_NAMES
+
+# 実際に LLM（text / vision）を呼ぶステージ。`LLM_STAGE_NAMES` の上位集合で、差分は
+# M層の対象から意図的に外しているステージ（component_graph）。
+LLM_CALLING_STAGE_NAMES = frozenset(
+    step.name for step in _PIPELINE_STEPS
+    if step.name and step.llm_kind in (LLM_KIND_TEXT, LLM_KIND_VISION)
+)
+
+# vision LLM を主たる呼び出しとするステージ（`pipeline.vision` scene / vision
+# capability の必須判定に使う。条件付き vision の `vision_optional` は含めない）。
+VISION_STAGE_NAMES = frozenset(
+    step.name for step in _PIPELINE_STEPS
+    if step.name and step.llm_kind == LLM_KIND_VISION
+)
 
 
 def _instantiate(agent_class_or_instance):

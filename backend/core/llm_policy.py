@@ -144,8 +144,11 @@ def scene_for_feature(feature: str) -> str | None:
 # ステージ別（pipeline:<stage>）の表示名（設計書 §6.1「ステージ別に指定する（詳細）」・
 # §6.6「ステージ別の指定（N件）」・§10 Phase 4）。
 #
-# キー集合は `core.document_pipeline.orchestrator.LLM_STAGE_NAMES`（LLM を呼ぶ
-# ステージのみ）と完全一致でなければならない — 一致は
+# キー集合は `core.document_pipeline.orchestrator.LLM_STAGE_NAMES`（M層のステージ別
+# モデル選択の対象ステージ。集合の正本は `_PIPELINE_STEPS` の各 `PipelineStageDef` が
+# 宣言する `model_policy=True` で、そこからの導出。「LLM を呼ぶ事実」= `llm_kind` とは
+# 別の意味論で、LLM を呼ぶが対象外のステージ = component_graph はここにも入らない）と
+# 完全一致でなければならない — 一致は
 # `backend/tests/test_llm_model_phase4.py` が構造テストで固定する。
 # **本モジュールは orchestrator を import しない**（依存方向は
 # orchestrator → llm_policy のまま。M1 / 開発ルール2）。ステージが増減したら、

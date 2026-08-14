@@ -33,7 +33,8 @@
 `orchestrator.py` の `_PIPELINE_STEPS` は 31 要素 = **名前付き 29 ステージ**（`PIPELINE_STAGES`
 の 30 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
 `_hook_*` フック2件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`）。
-LLM=LLM-first、Det=決定論的（非 LLM）。
+LLM=LLM-first、Det=決定論的（非 LLM）、Det+LLM=LLM を呼ぶが M層のステージ別モデル選択の対象外
+（種別の正本は `_PIPELINE_STEPS` 各行の `llm_kind` / `model_policy` 宣言）。
 
 | # | ステージ | 担当 Agent / 処理 | 種別 | 出力（要旨） |
 |---|---|---|---|---|

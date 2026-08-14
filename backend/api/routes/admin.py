@@ -84,7 +84,7 @@ from core.course_data import (
     course_topics,
 )
 from core.document_pipeline.figure_images import load_document_figures
-from core.document_pipeline.orchestrator import PIPELINE_STAGES
+from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core import llm_policy
 from core.llm import generate_text
@@ -363,8 +363,9 @@ def _validate_models_option(models: dict) -> dict:
     ``"pipeline:<stage>"``（stage は ``orchestrator.PIPELINE_STAGES`` に実在する
     もの）のみ。値は ``llm_policy.load_catalog()`` に載っているモデルで、かつ
     現在の provider（``catalog_models()`` が既に絞り込み済み）と一致するものだけ
-    許可する。``"pipeline.vision"`` キー（および ``"pipeline:apparatus_semantics"``）
-    は capability に ``"vision"`` を含むモデルのみ許可する。
+    許可する。``"pipeline.vision"`` キー（および ``"pipeline:<stage>"`` のうち
+    ``orchestrator.VISION_STAGE_NAMES`` に属する vision ステージ = 現状
+    ``apparatus_semantics``）は capability に ``"vision"`` を含むモデルのみ許可する。
 
     カタログ自体が未設定/読めない環境で ``models`` 指定があれば、検証不能なため
     422 で拒否する（架空の候補を許可しない、M4）。``models`` が未指定/空の場合は
@@ -401,7 +402,7 @@ def _validate_models_option(models: dict) -> dict:
                     status_code=422,
                     detail=f"unknown pipeline stage in 'models' key: {key!r}",
                 )
-            allowed_ids = vision_model_ids if stage_name == "apparatus_semantics" else text_model_ids
+            allowed_ids = vision_model_ids if stage_name in VISION_STAGE_NAMES else text_model_ids
         else:
             raise HTTPException(status_code=422, detail=f"invalid 'models' key: {key!r}")
 

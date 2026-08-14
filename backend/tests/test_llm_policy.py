@@ -447,6 +447,12 @@ class TestRepresentativeFeature:
         monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m1")
         monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-m1")
         _real_get_settings.cache_clear()
+        # llm_policy_store の実時間 TTL キャッシュ（20秒）が、直前に走った別テストの
+        # 同一 scene_key 解決を保持していると env 由来の期待値と食い違い、フルスイートの
+        # 実行位相によって flake する。env を差し替えたら必ず無効化する。
+        from core import llm_policy_store
+
+        llm_policy_store.invalidate()
 
         feature = llm_policy.representative_feature_for_scene(llm_policy.SCENE_DELIBERATION)
         assert feature == "deliberation:chat"
