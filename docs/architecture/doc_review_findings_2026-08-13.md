@@ -119,7 +119,7 @@ rag-chat.md / admin.md / api.md）を同時更新する仕組みが無い**）�
 |---|---|---|---|
 | 7-1 | backend/core/document_pipeline/orchestrator.py:78 | コメント「derivation_chain / course_mapping / **component_graph（いずれも非LLM・決定論的）**」— component_graph agent は自ら『hybrid deterministic/LLM edge-building pipeline』と明記し LLM クライアントを持つ。**「LLMを呼ぶステージか」の判定が LLM_STAGE_NAMES / llm_usage 語彙 / report_start(unit="llm_call") の3箇所で食い違う**根になっている | ✅ 2026-08-14 コメントを実態（hybrid・意図的除外）へ是正（挙動非変更・py_compile 済み）。単一正本化は提案書 §2-9 |
 | 7-2 | backend/api/main.py:71-73, 328-330 | コメント「13個の子ルーター」（実19本）。ドキュメントと揃って陳腐化 | ✅ 2026-08-14 本数非依存の表現へ改訂 |
-| 7-3 | サーバ/フロントの段階ラベル辞書 | D層・SL層等で日本語段階ラベル表が doubt.py / core/doubt/schema.py と doubt-atlas.js に**二重管理**（SL層設計書自身が §14 で別 issue と明記） | ⏳ 正本化を提案（提案書 §2-2) |
+| 7-3 | サーバ/フロントの段階ラベル辞書 | D層・SL層等で日本語段階ラベル表が doubt.py / core/doubt/schema.py と doubt-atlas.js に**二重管理**（SL層設計書自身が §14 で別 issue と明記） | ✅ 2026-08-14 実装（`core/label_vocab.py` 正本化 + doubt 語彙の逐語ミラーテスト固定 — 提案書 §2-2 実施記録） |
 | 7-4 | guidance_layer_design.md:175 ⇄ status_notification_design.md | migration 038/039 の「なぜ入れ替わったか」の因果説明が**相互に矛盾**（最終番号自体は両方正しい） | ✅ 2026-08-14 両文書を中立の事実文（一次情報=実ファイル名）へ訂正。運用提案は提案書 §1-4 |
 
 ## 8. 未検証の軽微指摘（読解班の指摘・検証班のコード実読は未実施）

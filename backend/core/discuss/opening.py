@@ -41,6 +41,7 @@ from core.element_explanations import (
     STATUS_APPROVED,
     list_for_document,
 )
+from core import element_vocab
 from core.label_vocab import SUPPORT_SECTION_LABELS
 
 logger = logging.getLogger(__name__)
@@ -92,11 +93,10 @@ FRAGILE_SUBJECT_SYSTEM = "system"
 # 順序の正本: core/atlas_state.py::_STAGE_ORDER（L3 導出チェーンが同じ並びを使う）。
 # stage コードの正本: src/episteme_graph/agents/component_graph/schema.py::THEORY_STAGES。
 #
-# 表示名は**学習者向けの日本語**にする（A層の THEORY_STAGE_LABELS は英語で、教員向け
-# 管理UI（admin.js / W層）はそちらを使い続ける）。開幕画面は学習者が最初に見る画面で、
-# `Theory basis` `Equation system` のような内部語彙をそのまま出すと理論の骨格ではなく
-# 分類名の羅列に見えてしまうため、この API に限り日本語表示名を持つ。stage コード自体は
-# domain-neutral のまま変えない。
+# 表示名は**学習者向けの日本語**にする（A層 agents 側の THEORY_STAGE_LABELS は英語）。
+# 開幕画面は学習者が最初に見る画面で、`Theory basis` `Equation system` のような内部語彙を
+# そのまま出すと理論の骨格ではなく分類名の羅列に見えてしまうため日本語表示名を使う。
+# stage コード自体は domain-neutral のまま変えない。
 # ---------------------------------------------------------------------------
 
 _STAGE_ORDER = (
@@ -109,15 +109,11 @@ _STAGE_ORDER = (
     "diagnostic_application",
 )
 
-_STAGE_LABELS = {
-    "theory_basis": "理論の土台",
-    "observation_model": "観測モデル",
-    "observable_construction": "観測量の構成",
-    "equation_system": "方程式系",
-    "elimination": "消去",
-    "consistency_relation": "整合関係",
-    "diagnostic_application": "診断・応用",
-}
+# 日本語表示名の正本は core/element_vocab.py の THEORY_STAGE_LABELS（オーナー承認済みの
+# 統一語彙 §9 Q2）。かつて本モジュールが独自表を持ち `equation_system` だけ「方程式系」に
+# 分裂していた（他6キーは完全一致）ため、2026-08-14 に表ごと正本へ委譲した —
+# 学習者に見える変化は「方程式系」→「式の体系」の1語のみ。
+_STAGE_LABELS = element_vocab.THEORY_STAGE_LABELS
 
 
 def _stage_label(stage: str) -> str:

@@ -306,13 +306,6 @@ class TestNoLiteralRedefinition:
 _ALLOWED_VALUE_SPLITS = {
     # 状態ラベルと、その状態に添える台帳注記。用途が違う（同じ画面に併記される）。
     ("core/atlas_path.py::LEDGER_NOTES", "core/atlas_path.py::STATUS_LABELS"),
-    # theory stage の学習者向け表示名（discuss 開幕）と統制語彙の訳語（W層 / admin）。
-    # 「方程式系」/「式の体系」の差は既存の静的テストが原文で固定しており、
-    # 訳語統一はオーナー判断事項として別途繰り延べ（提案 §2-2 の裁定）。
-    (
-        "core/discuss/opening.py::_STAGE_LABELS",
-        "core/element_vocab.py::THEORY_STAGE_LABELS",
-    ),
     # 宛先別の文言差を**並べて可視化**している正本の2表（統合すると出力が変わる）。
     (
         "core/label_vocab.py::VERIFICATION_STATUS_LABELS_LEDGER",

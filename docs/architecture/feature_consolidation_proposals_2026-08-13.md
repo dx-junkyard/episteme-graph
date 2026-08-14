@@ -106,8 +106,12 @@ CLAUDE.md 横断基盤ルールへの追記が本体。既存8系統の巻き取
 > 方針修正**（select/SVG軸/fail-soft にキー集合が必要なため。`test_doubt_vocab_mirror.py` 新設・
 > doubt-atlas.js の死表1件は削除）。副産物: admin-lecture-studio.js の**リテラル NUL バイト**
 > （grep が同ファイル8,900行をバイナリ扱いで無言スキップしていた）を修正し NUL 検査を常設。
-> 繰り延べ（オーナー判断）: 訳語の食い違い統一 D1〜D3（equation_system「方程式系」vs「式の体系」/
-> standardization_status 3種 / 地図 verified 系 4〜5種 — ガードレールの allowlist で可視化済み）。
+> 訳語の食い違いのうち **D1（equation_system「方程式系」vs「式の体系」）は 2026-08-14 に是正済み**
+> — 分裂源と名指しされていた discuss 開幕の独自表（他6キーは正典と完全一致）を
+> `element_vocab.THEORY_STAGE_LABELS`（オーナー承認済み統一語彙 §9 Q2）への委譲に置換。
+> 学習者に見える変化は「方程式系」→「式の体系」の1語のみ。
+> 繰り延べ（オーナー判断）: D2（standardization_status のフロント3種）/ D3（地図 verified 系
+> 4〜5種 — 凡例と pill での意図的短縮の可能性あり）— ガードレールの allowlist で可視化済み。
 
 「数値を見せない」原則の実装として、生値→日本語段階ラベル（低/中/高、レンジ 3-5/6-10/11+ 等）の
 変換表が D層・SL層・G層・R層などで**サーバ側とフロント側に二重管理**されている
