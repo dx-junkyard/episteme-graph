@@ -328,6 +328,45 @@ def scope_coverage_level(scope_count: int) -> str:
     return "broad"
 
 
+COVERAGE_LEVELS = ("none", "single", "several", "broad")
+
+# ---------------------------------------------------------------------------
+# 教員画面（frontend/public/js/doubt-atlas.js）とミラーする語彙表
+#
+# doubt-atlas.js は D層 API が段階ラベルを返さない箇所（軸の目盛り・状態バッジ）を
+# 自前の表で描いている。サーバ側の**正本をここに置き**、
+# `backend/tests/test_doubt_vocab_mirror.py` が JS ⇄ Python の完全一致を固定する。
+# 文言は現行のフロント表示の**逐語**（この節の新設でサーバ挙動は変わらない）。
+# 注意: 以下のうちサーバコードから参照されない表は、フロント（doubt-atlas.js）
+# だけが消費する canon 宣言である。「未使用定数」として削除しないこと —
+# 削除すると test_doubt_vocab_mirror.py が落ちる。
+# ---------------------------------------------------------------------------
+
+#: :func:`scope_coverage_level` の段階（検証スコープの記帳の広さ）。
+COVERAGE_LABELS = {
+    "none": "記帳なし",
+    "single": "1件",
+    "several": "少数",
+    "broad": "広い",
+}
+
+#: :class:`ChallengeStatus`（疑義の状態）。P4: withdrawn は行削除でなく状態遷移。
+CHALLENGE_STATUS_LABELS = {
+    "open": "未対応",
+    "answered": "対応済み",
+    "withdrawn": "取り下げ済み",
+    "led_to_verification": "検証提案へ昇格済み",
+}
+
+#: :class:`ProposalStatus`（検証提案の状態）。
+PROPOSAL_STATUS_LABELS = {
+    "proposed": "検証に着手可能",
+    "in_progress": "検証に着手済み",
+    "completed": "完了",
+    "withdrawn": "取り下げ済み",
+}
+
+
 # ---------------------------------------------------------------------------
 # SL層 — 賭け金の台帳（Stakes Ledger, migration 067）
 #
@@ -364,6 +403,22 @@ REACHABILITY_LABELS = {
 
 # 独立支持経路の段階（SL4: 数値非公開・3値の事実文のみ）。
 SUPPORT_LINE_LEVELS = ("none", "single", "several")
+
+#: 支持線の段階バッジ（SL4: 経路数・最小カットのサイズは出さない）。
+#: 事実文（``core/doubt/support_paths.py`` の FACT_LINE_*）とは別の短いバッジ語彙。
+SUPPORT_LEVEL_BADGE_LABELS = {
+    "none": "支持記録なし",
+    "single": "単一の支持線",
+    "several": "複数の支持線",
+}
+
+#: 反実仮想「観測を仮に倒す」の Duhem 区別（aspect = value | systematics,
+#: ``api/routes/doubt.py::_OBSERVATION_ASPECTS``）。:data:`FALSIFICATION_KIND_LABELS`
+#: とキー語彙は違うが、教員に見せる日本語は**同じ区別**を指すため文言を揃える。
+FALSIFICATION_ASPECT_LABELS = {
+    "value": "観測値そのもの",
+    "systematics": "較正・装置などの補助仮説",
+}
 
 
 class FalsificationCondition(BaseModel):

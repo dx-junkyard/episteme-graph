@@ -12,6 +12,14 @@ from __future__ import annotations
 
 import uuid
 
+from core.label_vocab import (
+    CONFIDENCE_LABEL_HIGH,
+    CONFIDENCE_LABEL_LOW,
+    CONFIDENCE_LABEL_MEDIUM,
+    CONFIDENCE_LABELS_LOW_MED_HIGH,
+    CONFIDENCE_LOW_MED_HIGH,
+)
+
 # ── 図タイプ（domain-neutral。設計書 §5.2 の表がこの語彙の説明）───────────────
 FIGURE_KIND_CONCEPT_MAP = "concept_map"
 FIGURE_KIND_PROCESS_FLOW = "process_flow"
@@ -157,10 +165,8 @@ def is_valid_signal_basis(value: str) -> bool:
 # ── confidence の段階ラベル（FG8: 生値を出さない）─────────────────────────────
 # **生値を返す関数はこのモジュールに置かない**。API 応答へ confidence を載せる経路は
 # 段階ラベルのみを通す（store.list_suggestions が変換の責務を負う）。
-CONFIDENCE_LABEL_LOW = "低"
-CONFIDENCE_LABEL_MEDIUM = "中"
-CONFIDENCE_LABEL_HIGH = "高"
-CONFIDENCE_LABELS = (CONFIDENCE_LABEL_LOW, CONFIDENCE_LABEL_MEDIUM, CONFIDENCE_LABEL_HIGH)
+# 段階の境界・語彙・「未測定は最も慎重な段階へ倒す」規則の正本は core/label_vocab.py。
+CONFIDENCE_LABELS = CONFIDENCE_LABELS_LOW_MED_HIGH
 
 
 def confidence_label(value: float | None) -> str:
@@ -170,17 +176,7 @@ def confidence_label(value: float | None) -> str:
     （情報が無いことを高確度に見せない。``core/deliberation/identity_links.py::
     confidence_label`` と同じ思想）。
     """
-    try:
-        if value is None:
-            return CONFIDENCE_LABEL_LOW
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return CONFIDENCE_LABEL_LOW
-    if numeric >= 0.75:
-        return CONFIDENCE_LABEL_HIGH
-    if numeric >= 0.5:
-        return CONFIDENCE_LABEL_MEDIUM
-    return CONFIDENCE_LABEL_LOW
+    return CONFIDENCE_LOW_MED_HIGH.label_for(value)
 
 
 def normalize_confidence(value: object) -> float | None:

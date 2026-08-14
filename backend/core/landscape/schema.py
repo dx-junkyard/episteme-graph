@@ -16,6 +16,14 @@ LS5「数値を見せない」: weight / confidence の生値を返す関数は�
 
 from __future__ import annotations
 
+from core.label_vocab import (
+    WEIGHT_LABELS,
+    WEIGHT_LEVEL_SCALE,
+    WEIGHT_RELATION,
+    WEIGHT_THRESHOLD_MEDIUM,
+    WEIGHT_THRESHOLD_STRONG,
+)
+
 # ---------------------------------------------------------------------------
 # 観点（perspective）— 1論文が複数領域へ異なる観点で配置されるのが既定（LS1）
 # ---------------------------------------------------------------------------
@@ -174,20 +182,12 @@ def is_valid_node_kind(value: str) -> bool:
 # 関連の段階ラベル（LS5: weight の生値を出さない）
 # ---------------------------------------------------------------------------
 
+# 段階の境界（設計書 §8: >=0.7 strong / >=0.4 medium / else weak）・訳語・
+# 「未測定は最も慎重な段階へ倒す」規則の正本は core/label_vocab.py。
 WEIGHT_LEVEL_STRONG = "strong"
 WEIGHT_LEVEL_MEDIUM = "medium"
 WEIGHT_LEVEL_WEAK = "weak"
 WEIGHT_LEVELS = (WEIGHT_LEVEL_STRONG, WEIGHT_LEVEL_MEDIUM, WEIGHT_LEVEL_WEAK)
-
-WEIGHT_LABELS: dict[str, str] = {
-    WEIGHT_LEVEL_STRONG: "強い関連",
-    WEIGHT_LEVEL_MEDIUM: "関連",
-    WEIGHT_LEVEL_WEAK: "弱い関連",
-}
-
-#: 段階の境界（設計書 §8: >=0.7 strong / >=0.4 medium / else weak）。
-WEIGHT_THRESHOLD_STRONG = 0.7
-WEIGHT_THRESHOLD_MEDIUM = 0.4
 
 DEFAULT_WEIGHT = 0.5
 
@@ -198,22 +198,12 @@ def weight_level(value: object) -> str:
     数値化できない・未測定（``None``）は最も慎重な ``weak`` に倒す
     （情報が無いことを強い関連に見せない）。
     """
-    try:
-        if value is None:
-            return WEIGHT_LEVEL_WEAK
-        numeric = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return WEIGHT_LEVEL_WEAK
-    if numeric >= WEIGHT_THRESHOLD_STRONG:
-        return WEIGHT_LEVEL_STRONG
-    if numeric >= WEIGHT_THRESHOLD_MEDIUM:
-        return WEIGHT_LEVEL_MEDIUM
-    return WEIGHT_LEVEL_WEAK
+    return WEIGHT_LEVEL_SCALE.label_for(value)
 
 
 def weight_label(value: object) -> str:
     """weight の生値を段階ラベル（強い関連 / 関連 / 弱い関連）へ変換する（LS5）。"""
-    return WEIGHT_LABELS[weight_level(value)]
+    return WEIGHT_RELATION.label_for(value)
 
 
 def normalize_weight(value: object) -> float:

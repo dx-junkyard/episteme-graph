@@ -20,6 +20,16 @@ from __future__ import annotations
 
 import unicodedata
 
+from core.label_vocab import (
+    CONFIDENCE_LABEL_HIGH,
+    CONFIDENCE_LABEL_LOW,
+    CONFIDENCE_LABEL_MEDIUM,
+    CONFIDENCE_LABELS_LOW_MED_HIGH,
+    CONFIDENCE_LOW_MED_HIGH,
+    CONFIDENCE_THRESHOLD_HIGH,
+    CONFIDENCE_THRESHOLD_MEDIUM,
+)
+
 # ---------------------------------------------------------------------------
 # 層（layer）— 地図の上位=領域 / 下位=概念（設計書 §5.1）
 # ---------------------------------------------------------------------------
@@ -213,21 +223,12 @@ def cluster_key_domain_prefix(domain_key: str) -> str:
 # ---------------------------------------------------------------------------
 # confidence の段階ラベル（LS5: 生値を出さない）
 # ---------------------------------------------------------------------------
-# ``core/landscape/schema.py`` は weight の段階ラベルしか持たない（confidence の
-# 変換関数が無い）ため、``core/deliberation/identity_links.py`` /
-# ``core/teaching_figures/schema.py`` と**同型**の実装をここに置く。
+# 段階の境界・語彙・「未測定は最も慎重な段階へ倒す」規則の正本は core/label_vocab.py
+# （かつては ``core/deliberation/identity_links.py`` /
+# ``core/teaching_figures/schema.py`` と**同型**の実装をここに持っていた）。
+# 一方 :func:`normalize_confidence` は範囲外の扱いが層ごとに違うため委譲しない。
 
-CONFIDENCE_LABEL_LOW = "低"
-CONFIDENCE_LABEL_MEDIUM = "中"
-CONFIDENCE_LABEL_HIGH = "高"
-CONFIDENCE_LABELS = (
-    CONFIDENCE_LABEL_LOW,
-    CONFIDENCE_LABEL_MEDIUM,
-    CONFIDENCE_LABEL_HIGH,
-)
-
-CONFIDENCE_THRESHOLD_HIGH = 0.75
-CONFIDENCE_THRESHOLD_MEDIUM = 0.5
+CONFIDENCE_LABELS = CONFIDENCE_LABELS_LOW_MED_HIGH
 
 
 def confidence_label(value: object) -> str:
@@ -236,17 +237,7 @@ def confidence_label(value: object) -> str:
     未測定（``None``）・数値化できない値は最も慎重な「低」に倒す
     （情報が無いことを高確度に見せない）。
     """
-    try:
-        if value is None:
-            return CONFIDENCE_LABEL_LOW
-        numeric = float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return CONFIDENCE_LABEL_LOW
-    if numeric >= CONFIDENCE_THRESHOLD_HIGH:
-        return CONFIDENCE_LABEL_HIGH
-    if numeric >= CONFIDENCE_THRESHOLD_MEDIUM:
-        return CONFIDENCE_LABEL_MEDIUM
-    return CONFIDENCE_LABEL_LOW
+    return CONFIDENCE_LOW_MED_HIGH.label_for(value)
 
 
 def normalize_confidence(value: object) -> float | None:

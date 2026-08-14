@@ -34,6 +34,7 @@ from sqlalchemy import text as sa_text
 from core import atlas as atlas_module
 from core import embedder as embedder_module
 from core.deliberation import labels as labels_mod
+from core.label_vocab import SUPPORT_SECTION_LABELS, VERIFICATION_STATUS_LABELS_LENS
 from core.atlas_store import load_learner_skeleton
 from core.llm_usage import usage_context
 from core.postgres import get_session
@@ -57,13 +58,9 @@ _CROSS_CORPUS_LABEL = "関連する教材"
 
 # ── 語彙ラベル（生値を返さない・W8） ─────────────────────────────────────
 # epistemic_ledger.verification_status（migration 029 の CHECK 語彙をそのまま日本語化）。
-_VERIFICATION_STATUS_LABELS = {
-    "directly_verified": "直接検証済み",
-    "indirectly_supported": "間接的に支持",
-    "untested": "未検証",
-    "refuted": "反証あり",
-    "unknown": "不明",
-}
+# 訳語の正本は core/label_vocab.py。D層 API 側（api/routes/doubt.py）は同じキーで
+# 「記帳あり」を主語にした別文言を使う（意図された宛先差 — 2表を並べて可視化している）。
+_VERIFICATION_STATUS_LABELS = VERIFICATION_STATUS_LABELS_LENS
 
 # challenges.challenge_type（migration 031 の CHECK 語彙をそのまま日本語化）。
 _CHALLENGE_TYPE_LABELS = {
@@ -75,15 +72,8 @@ _CHALLENGE_TYPE_LABELS = {
 
 # ThesisReconstructionResult.support_structure のセクション名（agent schema.py の
 # SUPPORT_SECTIONS）を日本語ラベル化。未知のセクション名はそのまま表示する。
-_SUPPORT_SECTION_LABELS = {
-    "direct_supports": "直接支持",
-    "assumptions": "前提",
-    "derivation_core": "導出の核",
-    "correction_sources": "訂正の源",
-    "uncertainty_sources": "不確実性の源",
-    "diagnostic_consequences": "診断的帰結",
-    "future_requirements": "将来要件",
-}
+# 訳語の正本は core/label_vocab.py（同じ表を持っていた3箇所を委譲に統合）。
+_SUPPORT_SECTION_LABELS = SUPPORT_SECTION_LABELS
 
 # epistemic_ledger.target_type への element_type マップ（figure / shared_part は対象外）。
 _EPISTEMIC_TARGET_TYPE = {

@@ -449,6 +449,17 @@ SL-1 と SL-2/SL-3 は独立に実装・検証可能。SL-4 は SL-1（reachabil
 4. observation_targets の3段同定の実効カバレッジ（dsl 空 run の割合）
 5. falsification worker のパイプラインフック相乗りの是非（コスト実測後）
 6. 二重ラベル表（サーバ/フロント）の一本化リファクタ（別 issue）
+   → **解消（2026-08-14）**: [提案 §2-2](../architecture/feature_consolidation_proposals_2026-08-13.md) の
+   実装で決着。正本は [`label_vocab_design.md`](label_vocab_design.md)。実測の結論は
+   「生値→段階ラベルの変換はサーバに100%あり、フロントには無い（二重なのは語彙 enum の
+   日本語訳）」であり、**フロントの表は消さずミラーとして固定**した。SL層に関係する具体は
+   ①`doubt-atlas.js` の `FALSIFICATION_KIND_LABELS` / `REACHABILITY_LABELS` /
+   `FALSIFICATION_ASPECT_LABELS` / `SUPPORT_LEVEL_BADGE_LABELS` / `COVERAGE_LABELS` /
+   `CHALLENGE_STATUS_LABELS` / `PROPOSAL_STATUS_LABELS` / `STATUS_LABELS` / `LOAD_LABELS`
+   のサーバ正本を `core/doubt/schema.py`（+ `core/label_vocab.py`）に揃え、
+   `backend/tests/test_doubt_vocab_mirror.py` が逐語一致を固定（片側だけの変更は落ちる）
+   ②`FACT_LINE_*`（`core/doubt/support_paths.py`）は SL1 の閉世界語彙なので**統合対象外**
+   （原文固定のまま）③参照ゼロだった `DOUBT_TYPE_LABELS` を削除。文言・API 応答は不変。
 
 ---
 

@@ -3153,7 +3153,7 @@
         // 同内容の別名 ID（source:topic_summary / source:summary）はカードを2枚作らず、
         // 別名を alt_ids に畳む（参照解決は lsEvidenceItemByRef が alt_ids も引く）。
         if (sKind === "source" && sSummary) {
-          var sig = sTitle + " " + sSummary;
+          var sig = sTitle + "\x00" + sSummary;
           if (sourceBySignature[sig]) {
             var host = sourceBySignature[sig];
             host.alt_ids = (host.alt_ids || []).concat([sId]);

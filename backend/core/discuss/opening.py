@@ -41,6 +41,7 @@ from core.element_explanations import (
     STATUS_APPROVED,
     list_for_document,
 )
+from core.label_vocab import SUPPORT_SECTION_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -133,18 +134,10 @@ def _stage_label(stage: str) -> str:
 
 
 # ThesisReconstructionAgent.SUPPORT_SECTIONS の日本語ラベル。
-# 正本: core/deliberation/positioning.py::_SUPPORT_SECTION_LABELS（private 定数のため
-# import せず最小の再掲に留める。語彙自体は agents/thesis_reconstruction/schema.py の
-# SUPPORT_SECTIONS が正本）。
-_SUPPORT_SECTION_LABELS = {
-    "direct_supports": "直接支持",
-    "assumptions": "前提",
-    "derivation_core": "導出の核",
-    "correction_sources": "訂正の源",
-    "uncertainty_sources": "不確実性の源",
-    "diagnostic_consequences": "診断的帰結",
-    "future_requirements": "将来要件",
-}
+# 訳語の正本は core/label_vocab.py::SUPPORT_SECTION_LABELS（かつては
+# positioning.py の private 定数を再掲していた）。語彙自体は
+# agents/thesis_reconstruction/schema.py の SUPPORT_SECTIONS が正本。
+_SUPPORT_SECTION_LABELS = SUPPORT_SECTION_LABELS
 
 # TheoryOperationGraph の review_reasons 語彙（CLAUDE.md「TheoryOperationGraph」節が正本）
 # の事実文化。未知の reason コードはコードそのものを表示する（情報を落とさない）。

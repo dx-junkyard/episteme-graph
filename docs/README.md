@@ -123,6 +123,7 @@ PDF アップロード
 - [データモデル](architecture/data-model.md) — PostgreSQL テーブル設計、マイグレーション一覧
 - [レイヤー索引表](architecture/layer_registry.md) — 全レイヤーの正本設計書/実装場所/migration 対応
 - [candidate → confirm 共通プリミティブ](features/candidate_flow_design.md) — 候補→確定ワークフローの共通制御フロー（`core/candidate_flow.py`）
+- [段階ラベル辞書の正本](features/label_vocab_design.md) — 生値→段階ラベルの境界と共有語彙表（`core/label_vocab.py`）
 - [新機能 PR チェックリスト](development_checklist.md) — docs 3点セット・境界回帰テスト・アンカー整合
 
 ### バックエンド

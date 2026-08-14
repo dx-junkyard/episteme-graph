@@ -21,6 +21,12 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.label_vocab import (
+    CONFIDENCE_LABEL_REFERENCE,
+    CONFIDENCE_LABEL_TENTATIVE,
+    CONFIDENCE_LABEL_TENTATIVE_HIGH,
+    CONFIDENCE_TENTATIVE_REFERENCE_HIGH,
+)
 from core.postgres import get_session
 from core.deliberation.schema import (
     ElementRef,
@@ -32,9 +38,9 @@ from core.deliberation.schema import (
 )
 
 # ── 段階ラベル（W8: confidence の生値を UI に出さない）───────────────────────────
-CONFIDENCE_LABEL_TENTATIVE = "暫定"
-CONFIDENCE_LABEL_REFERENCE = "参考"
-CONFIDENCE_LABEL_HIGH = "確度高"
+# 段階の境界・語彙・「未測定は最も慎重な段階へ倒す」規則の正本は core/label_vocab.py。
+# ここの語彙は「低」と言い切らない別語彙（暫定 / 参考 / 確度高）である。
+CONFIDENCE_LABEL_HIGH = CONFIDENCE_LABEL_TENTATIVE_HIGH
 
 
 def confidence_label(value: Any) -> str:
@@ -42,17 +48,7 @@ def confidence_label(value: Any) -> str:
 
     未測定・変換不能は最も慎重な「暫定」に倒す（情報が無いことを高確度に見せない）。
     """
-    try:
-        if value is None:
-            return CONFIDENCE_LABEL_TENTATIVE
-        v = float(value)
-    except (TypeError, ValueError):
-        return CONFIDENCE_LABEL_TENTATIVE
-    if v >= 0.75:
-        return CONFIDENCE_LABEL_HIGH
-    if v >= 0.5:
-        return CONFIDENCE_LABEL_REFERENCE
-    return CONFIDENCE_LABEL_TENTATIVE
+    return CONFIDENCE_TENTATIVE_REFERENCE_HIGH.label_for(value)
 
 
 def _json(value: Any, default: Any) -> Any:

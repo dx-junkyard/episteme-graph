@@ -40,6 +40,10 @@
   }
 
   // ── 語彙ラベル（事実記述のみ。評価語を使わない）─────────────────────
+  //    正本はサーバ（core/doubt/schema.py の各 *_LABELS / STATUS_LABELS は
+  //    core/label_vocab.py::VERIFICATION_STATUS_LABELS_LEDGER）。この表は
+  //    backend/tests/test_doubt_vocab_mirror.py が逐語一致を固定するミラーで、
+  //    片側だけを直すとテストが落ちる。
   var STATUS_LABELS = {
     directly_verified: "直接検証の記帳あり",
     indirectly_supported: "間接的な支持あり",
@@ -61,11 +65,9 @@
     open: "未対応", answered: "対応済み", withdrawn: "取り下げ済み",
     led_to_verification: "検証提案へ昇格済み",
   };
-  var DOUBT_TYPE_LABELS = {
-    definition: "定義", justification_gap: "根拠の飛躍", premise: "前提",
-    prior_conflict: "既知との衝突", scope: "適用範囲", connection: "つながり",
-    unclassified: "未分類",
-  };
+  // 疑いの様相（doubt_type）の表はこのファイルに持たない。教員画面で使う場面が
+  // 無く（参照ゼロ）、学習者画面は API の doubt_type_label をそのまま描くため、
+  // 表を置くと分裂の種にしかならない（正本は core/structure_anchor/schema.py）。
 
   // ── SL層（賭け金の台帳）語彙ラベル。サーバ（core/doubt/schema.py）と同一の表を
   //    フロントに複製する（設計書 §2-10）。逐語で使う。─────────────────────

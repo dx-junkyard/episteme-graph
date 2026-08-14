@@ -88,6 +88,7 @@ from core.postgres import get_session
 from core.document_pipeline.figure_images import normalize_figure_join_key
 from core import element_explanations as element_explanations_store
 from core.element_vocab import link_status_fact, theory_stage_key
+from core.label_vocab import SUPPORT_SECTION_LABELS
 from core.figure_presentation import presentation_payload
 from core.library import schema as library_schema
 from core.library import store as library_store_mod
@@ -231,18 +232,10 @@ _SUBLABEL_LIMIT = 90
 _FOCUS_LABEL_LIMIT = 80
 
 # thesis_reconstruction artifact の support_structure セクション名 → 日本語ラベル
-# （agent schema.py の SUPPORT_SECTIONS を日本語化。positioning.py の
-# _SUPPORT_SECTION_LABELS と同内容だが、context_lens.py は positioning.py の私用
-# ヘルパーに依存しないよう自前で持つ）。
-_SUPPORT_SECTION_LABELS = {
-    "direct_supports": "直接支持",
-    "assumptions": "前提",
-    "derivation_core": "導出の核",
-    "correction_sources": "訂正の源",
-    "uncertainty_sources": "不確実性の源",
-    "diagnostic_consequences": "診断的帰結",
-    "future_requirements": "将来要件",
-}
+# （agent schema.py の SUPPORT_SECTIONS を日本語化）。訳語の正本は
+# core/label_vocab.py — かつては positioning.py の私用ヘルパーに依存しないよう
+# 自前で同内容の表を持っていたが、共有正本の新設で委譲に置き換えた。
+_SUPPORT_SECTION_LABELS = SUPPORT_SECTION_LABELS
 
 
 # ---------------------------------------------------------------------------

@@ -54,6 +54,7 @@ from core.doubt.schema import (
 )
 from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
 from core.doubt.support_paths import compute_support_lines
+from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
 from core.postgres import get_session as _pg_session
 from core.status import cross_layer_notify
 from core.schema import (
@@ -91,13 +92,9 @@ _PROPOSAL_ALLOWED_TRANSITIONS = {
 # SL-2: 観測の反実仮想の Duhem 区別（記帳のみ・伝播アルゴリズムには影響しない）。
 _OBSERVATION_ASPECTS = ("value", "systematics")
 
-_VERIFICATION_STATUS_LABELS = {
-    "directly_verified": "直接検証の記帳あり",
-    "indirectly_supported": "間接的な支持あり",
-    "untested": "未検証",
-    "refuted": "反証の記帳あり",
-    "unknown": "検証情報なし",
-}
+# 訳語の正本は core/label_vocab.py。W層 位置づけレンズ（core/deliberation/
+# positioning.py）は同じキーで短い状態名を使う（意図された宛先差 — 統合しない）。
+_VERIFICATION_STATUS_LABELS = VERIFICATION_STATUS_LABELS_LEDGER
 
 
 # ---------------------------------------------------------------------------
