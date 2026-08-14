@@ -5787,12 +5787,15 @@
   };
 
   // L層 LibraryEntry.standardization_status の日本語ラベル（Phase 2「共通部品として」面）。
+  // 正本は backend/core/library/schema.py::STANDARDIZATION_STATUS_LABELS。
+  // deliberation.js / admin.js の同語彙表とバイト一致させる
+  // （固定は backend/tests/test_library_vocab_mirror.py）。
   var MATERIAL_LIBRARY_STATUS_LABELS = {
     standard: "標準",
     field_standard: "分野標準",
-    emerging_common: "共通化進行中",
+    emerging_common: "共通化しつつある",
     novel: "新規",
-    unknown: "未判定",
+    unknown: "未評価",
   };
 
   // ── claim / equation の上位・下位文脈（learner element context, Phase 3）──────

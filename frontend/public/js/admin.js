@@ -2188,9 +2188,13 @@
   // N1（Phase S 標準化判定の UI 到達経路）: migration 050 の5語彙を日本語ラベル+色分けで表示する。
   // 値の変更経路は「深く検討」モーダルの標準化候補を教員が commit したときのみ
   // （LLM が library_entries に直接書く経路は無い。KN-3 / L層ガードレール）。数値スコアは出さない。
+  // 正本は backend/core/library/schema.py::STANDARDIZATION_STATUS_LABELS。
+  // deliberation.js / app.js の同語彙表とバイト一致させる
+  // （固定は backend/tests/test_library_vocab_mirror.py）。旧ラベルが括弧で補って
+  // いた語釈（標準＝教科書級 / 分野標準＝その分野内）はバッジの title に移した（P4）。
   var _libraryStandardizationLabels = {
-    standard: "標準（教科書級）",
-    field_standard: "分野内標準",
+    standard: "標準",
+    field_standard: "分野標準",
     emerging_common: "共通化しつつある",
     novel: "新規",
     unknown: "未評価",
@@ -2204,7 +2208,7 @@
   };
   function _libraryStandardizationBadgeHtml(status) {
     var key = _libraryStandardizationLabels.hasOwnProperty(status) ? status : "unknown";
-    return '<span class="admin-status" title="標準化度（三角測量による判定。確定は教員の commit のみ）" style="' +
+    return '<span class="admin-status" title="標準化度（三角測量による判定。確定は教員の commit のみ）。標準＝教科書級の定着 / 分野標準＝その分野内での定着 / 共通化しつつある＝コーパス内で反復するが外部の標準ではない" style="' +
       _libraryStandardizationStyles[key] + '">標準化度: ' + escHtml(_libraryStandardizationLabels[key]) + '</span>';
   }
 

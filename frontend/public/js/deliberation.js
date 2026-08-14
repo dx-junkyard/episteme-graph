@@ -129,10 +129,13 @@
 
   // Phase 3（設計書 §6）: L層エントリの標準化判定（standardization_status）。
   // 段階ラベルのみ（生スコアは持たない語彙のため、そのまま日本語ラベルに変換する）。
+  // 正本は backend/core/library/schema.py::STANDARDIZATION_STATUS_LABELS。
+  // app.js / admin.js の同語彙表とバイト一致させる
+  // （固定は backend/tests/test_library_vocab_mirror.py）。
   var STANDARDIZATION_STATUS_LABELS = {
     standard: "標準",
     field_standard: "分野標準",
-    emerging_common: "普及しつつある",
+    emerging_common: "共通化しつつある",
     novel: "新規",
     unknown: "未評価"
   };
