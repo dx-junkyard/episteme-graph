@@ -99,6 +99,16 @@ CLAUDE.md 横断基盤ルールへの追記が本体。既存8系統の巻き取
 
 ### 2-2. 段階ラベル辞書の正本化 ★★
 
+> **実施記録（2026-08-14）:** `backend/core/label_vocab.py` を新設（`GradedScale` + confidence
+> 2種・weight・支持構造・検証状態2表・状態投影訳語。出力文字列は不変）し、サーバ内の重複9箇所を
+> 委譲統合（公開名は再エクスポート維持）。偵察の実測で「数値→段階変換はサーバに100%あり
+> フロントに0件」と判明したため、**「フロント表の廃止」は「逐語ミラー + パリティテスト固定」へ
+> 方針修正**（select/SVG軸/fail-soft にキー集合が必要なため。`test_doubt_vocab_mirror.py` 新設・
+> doubt-atlas.js の死表1件は削除）。副産物: admin-lecture-studio.js の**リテラル NUL バイト**
+> （grep が同ファイル8,900行をバイナリ扱いで無言スキップしていた）を修正し NUL 検査を常設。
+> 繰り延べ（オーナー判断）: 訳語の食い違い統一 D1〜D3（equation_system「方程式系」vs「式の体系」/
+> standardization_status 3種 / 地図 verified 系 4〜5種 — ガードレールの allowlist で可視化済み）。
+
 「数値を見せない」原則の実装として、生値→日本語段階ラベル（低/中/高、レンジ 3-5/6-10/11+ 等）の
 変換表が D層・SL層・G層・R層などで**サーバ側とフロント側に二重管理**されている
 （SL層設計書 §14 自身が「二重ラベル表の一本化は別 issue」と明記）。
@@ -129,6 +139,15 @@ UI 面は未統合）。ヘッダー UI 要素（🔔📋🤖？+ cue pulse）�
 ルールを置く。
 
 ### 2-5. 要素文脈 API の2系統統合 ★★
+
+> **実施記録（2026-08-14）:** 偵察の実測で診断を修正 — 重複フィルタは約25行と小さく、真の負債は
+> **世代差**（提示再設計 #523 が element 側にだけ適用され、component 経路は学習者に生 TeX・
+> 内部 ID を出し得た）。`backend/core/learner_context_common.py` を新設し（案A: A-1〜A-3）、
+> DTO・ルート・フロント完全不変のまま遮断層・navigable fail-closed を component の graph レーンへ
+> 適用（agent ID トークン遮断は component レーンのみ。claim/equation への拡張は同一レーン内の
+> ラベル collapse 検討が要るためオーナー判断待ち）。既存の逆依存（element→component の
+> strip_confidence import）も解消。繰り延べ: A-4（曖昧 agent-ID の404化）/ B1（内部委譲・
+> 可視変更2件を伴う）/ B2（ルート統一 — 既存テスト3本が明示ブロック。専用設計書が前提）。
 
 学習者向け要素文脈が component 用（`/components/{id}/context`、instance/shared_part/graph 構造）と
 claim・equation 用（`/elements/{type}/{id}/context`、focus/upper/lower 構造）の **2系統の DTO・
@@ -169,6 +188,17 @@ figure_concept_linking + teaching_figure_studio）に分散し、`document_figur
 監査ラベルのレジストリ化）を検討する。§2-1 の確定プリミティブとセットで効く。
 
 ### 2-9. 「LLM を呼ぶステージか」の単一正本化 ★★
+
+> **実施記録（2026-08-14）:** `PipelineStageDef` に `llm_kind` / `model_policy` /
+> `progress_unit` / `vision_optional` を宣言フィールドとして追加し、`LLM_STAGE_NAMES` を
+> `_PIPELINE_STEPS` の `model_policy=True` からの導出に変更（集合12件・API 応答・report_start は
+> 完全不変）。`LLM_CALLING_STAGE_NAMES`（事実として LLM を呼ぶ13件）/ `VISION_STAGE_NAMES` を
+> 新設し、vision 判定リテラル2箇所を集合参照へ。整合は `test_pipeline_stage_registry.py`（8本）が
+> 固定（意図的除外 = component_graph の1件のみ、増えたら落ちる）。unit の導出化は却下
+> （進捗表示の意味論であり LLM-ness ではない）。繰り延べ（オーナー判断）: component_graph の
+> M層「昇格」（API 応答が12→13行に変わる + LLM 失敗フォールバック時の記録の正直さ対応が必要）。
+> 副産物の実バグ2件（start_stage allow-list 欠落で装置解析の単独再実行が 400 /
+> equation_semantics の vision 経路が U層計測を素通り）は別タスクチップとして起票済み。
 
 component_graph が LLM を併用するのに orchestrator コメント・`LLM_STAGE_NAMES`・
 `llm_usage` の pipeline:* 語彙・`report_start(unit="llm_call")` の**3〜4箇所で扱いが食い違う**
@@ -254,8 +284,11 @@ U層 usage_context・G層 capability・help_kb）との接続点が未記載、�
 2. ✅ **実施済み（2026-08-14）:** §3 の網羅テスト（`test_docs_registry_guardrails.py` +
    help_kb validator のリンク検査）
 3. ✅ **基盤のみ実施済み（2026-08-14）:** §2-1 candidate_flow（`core/candidate_flow.py` +
-   設計書 + テスト。既存8系統の巻き取りは非スコープ、次の新系統からアダプタ接続を義務化）。
-   **§2-2 label_vocab は未着手** — 次の新機能から適用する
-4. **設計検討を切る（未着手）:** §2-3 振り返りハブ / §2-5 文脈API統合 / §2-9 LLMステージ正本化
-5. **将来の増設前に判断（未着手）:** §2-4 入口凍結 / §2-11 domain_key 分離 / §2-12 CostGate /
+   設計書 + テスト。既存8系統の巻き取りは非スコープ、次の新系統からアダプタ接続を義務化）
+4. ✅ **実施済み（2026-08-14）:** §2-2 label_vocab（W1/W2/W3 — 各実施記録参照）/
+   §2-5 文脈API統合（案A。A-4/B1/B2 はオーナー判断・専用設計書待ち）/
+   §2-9 LLMステージ正本化（component_graph の M層昇格のみオーナー判断待ち）
+5. **設計検討を切る（未着手）:** §2-3 振り返りハブ / §2-6 深く検討の共通配線 /
+   §2-7 図の統合リファレンス / §2-8 レビューキュー一般化 / §2-10 モード語彙 enum
+6. **将来の増設前に判断（未着手）:** §2-4 入口凍結 / §2-11 domain_key 分離 / §2-12 CostGate /
    §2-13 E層

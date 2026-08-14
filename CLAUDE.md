@@ -1295,7 +1295,11 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   未知 scene は 422）。監査は `AUDIT_ENTITY_LLM_MODEL_POLICY`。
 - **Phase 4（ステージ別指定、実装済み）**:
   `GET /pipeline-stages`（TEACHER）— `orchestrator.PIPELINE_STAGES` の順序で
-  `orchestrator.LLM_STAGE_NAMES`（旧 `_LLM_STAGE_NAMES` を公開昇格）と交差した
+  `orchestrator.LLM_STAGE_NAMES`（旧 `_LLM_STAGE_NAMES` を公開昇格。2026-08-14 以降は
+  `_PIPELINE_STEPS` 各行の `model_policy=True` 宣言からの**導出値** — 意味論は
+  「M層のステージ別選択・`_stage_models` 記録の対象」であって「LLM を呼ぶ事実」ではない。
+  事実の集合は `LLM_CALLING_STAGE_NAMES`（13件。差集合は component_graph のみ＝意図的除外）、
+  vision は `VISION_STAGE_NAMES`。整合は `test_pipeline_stage_registry.py` が固定）と交差した
   LLM ステージのみ一覧し、各ステージの `feature`（`pipeline:<stage>`）/ `label`
   （`llm_policy.PIPELINE_STAGE_LABELS`、orchestrator 非 import で llm_policy 側に
   静的定義・キー集合の相互整合はテストで固定）/ `vision`（`apparatus_semantics` のみ
@@ -2017,6 +2021,21 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   **新しい候補→確定系統はコピペせずこれに接続する**。既存8系統（tension / structure_anchor /
   D層 scope_candidates / assumption_nodes / W層 element_annotations / C層 explanations /
   ランドスケープ placements / カテゴリギャップ decisions）の巻き取りは非スコープ。
+- **`backend/core/label_vocab.py`**（2026-08-14 新設、正本設計書
+  `docs/features/label_vocab_design.md`） — 段階ラベル・共有語彙表の正本
+  （`GradedScale`（閾値→段階ラベル。None/非数値は必ず最も慎重な末尾ラベルへ）/
+  confidence 2種・weight・支持構造セクション・検証状態2表（宛先別の意図差は統合せず並置）/
+  状態投影の日本語訳）。**数値→段階ラベルの変換表・enum→日本語の語彙表を新規に直書きしない**
+  （ガードレール `test_label_vocab_guardrails.py` が重複表・黙った分裂を ast 走査で検出。
+  フロントの表は削除ではなく `test_doubt_vocab_mirror.py` / `test_element_vocab_mirror.py`
+  型の逐語ミラーで固定する。k-匿名レンジは従来どおり `privacy.py` が正本）。
+- **`backend/core/learner_context_common.py`**（2026-08-14 新設） — 学習者向け要素文脈
+  API（component / claim / equation）の共通正本（ID解決スコープ強制・candidate 除外・
+  レーン上限・ITEM 射影・内部 ID / 生 TeX 遮断・`navigable` fail-closed・
+  `strip_confidence`）。`component_context.py` / `element_context.py` は再エクスポートで
+  これに委譲する。**学習者向け文脈の射影・遮断を再実装しない**（agent ID トークン遮断は
+  component レーンのみ＝claim/equation への拡張はオーナー判断待ち。DTO は component=旧6キー /
+  element=ITEM v2 の意図的世代差を維持）。
 - **`backend/core/document_pipeline/orchestrator.py` のステージ追加**（Tier 3-19） —
   新ステージは `_stage_<name>(ctx)` 関数 + `_PIPELINE_STEPS` リストへの登録で追加する
   （インライン展開に戻さない）。ステージ間の受け渡しは `PipelineContext` のフィールド。

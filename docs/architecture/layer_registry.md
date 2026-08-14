@@ -75,7 +75,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | カテゴリギャップ候補 | 分野マップを論文から育てる層 | `docs/features/category_gap_candidates_design.md`（§10 実装記録） | `backend/core/atlas_gaps/` + `routes/atlas_gaps.py` | 066 | 実装済み（v1-a〜v1-d） |
 | 教材図スタジオ | Teaching Figure Studio（AI対話 SVG 生成） | `docs/features/teaching_figure_studio_design.md`（FG1〜FG9・§13 実装記録） | `backend/core/teaching_figures/` + `routes/teaching_figures.py` + `admin-figure-studio.js` | 063 | 実装済み（v1） |
 | リリース前の確認 | Release Review Flow（3ステップウィザード） | `docs/features/release_review_flow_design.md`（RR1〜RR7） | `routes/landscape.py`（course-scoped）+ `admin-release-review.js` | 不要（既存 API の束ね） | 実装済み（v1） |
-| 横断基盤（共有ユーティリティ） | 同型実装のコピペ増殖を止める正本モジュール群 | `docs/features/assistant_common_infra_design.md` + `docs/features/candidate_flow_design.md` + `consolidation_survey_2026-07.md` | `backend/core/llm_worker/` / `privacy.py`（k=3 正本）/ `course_data.py` / `revision_store.py` / `candidate_flow.py`（候補→確定の共通制御フロー）/ `notification_recipients.py` / `schema.py` の `AUDIT_ENTITY_*` / `backend/tests/guardrail_helpers.py` | — | 実装済み（**新機能はコピペせずこれらに接続するのが規約**） |
+| 横断基盤（共有ユーティリティ） | 同型実装のコピペ増殖を止める正本モジュール群 | `docs/features/assistant_common_infra_design.md` + `docs/features/candidate_flow_design.md` + `docs/features/label_vocab_design.md` + `consolidation_survey_2026-07.md` | `backend/core/llm_worker/` / `privacy.py`（k=3 正本）/ `course_data.py` / `revision_store.py` / `candidate_flow.py`（候補→確定の共通制御フロー）/ `label_vocab.py`（段階ラベル・共有語彙表の正本）/ `learner_context_common.py`（学習者向け要素文脈の共通正本）/ `notification_recipients.py` / `schema.py` の `AUDIT_ENTITY_*` / `backend/tests/guardrail_helpers.py` | — | 実装済み（**新機能はコピペせずこれらに接続するのが規約**） |
 
 ## 2. 補足
 
