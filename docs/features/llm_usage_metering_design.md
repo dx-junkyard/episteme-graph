@@ -149,6 +149,7 @@ class UsageEvent:
 | 経路 | 実測 usage の在処 | 備考 |
 |---|---|---|
 | OpenAI chat / structured / vision | `response.usage`（`prompt_tokens` / `completion_tokens` / `prompt_tokens_details.cached_tokens` / `completion_tokens_details.reasoning_tokens`） | 非ストリーミングなので常に取得可能 |
+| messages + 単一画像の vision（`generate_json_with_image`。数式画像 OCR） | 上記と同じ（provider 別に `response.usage` / `response.usage_metadata`） | 2026-08 追加。agent が provider SDK を直接叩いていた経路の移設先（下記追補） |
 | OpenAI embeddings | `resp.usage.prompt_tokens` | 出力トークンなし |
 | Gemini / Vertex AI | `response.usage_metadata`（`prompt_token_count` / `candidates_token_count` / `total_token_count`） | 属性が無い SDK バージョンでは推計へフォールバック |
 | Vertex embeddings | `embeddings[].statistics.token_count`（取れなければ推計） | |
@@ -173,6 +174,31 @@ return response.choices[0].message.content or ""
 
 `_observe_*` は内部で `llm_usage.recorder.record()` を呼ぶだけの薄い関数。recorder 側が
 すべての例外を握りつぶす（U2）ため、`core/llm.py` 側に try/except の追加は不要。
+
+**追補（2026-08-14）— 数式画像 OCR の計測漏れを解消**: `equation_semantics` の vision 分岐
+（再構成が必要な数式だけ切り出し画像を添付する経路。orchestrator の `PipelineStageDef` では
+`vision_optional`）が agent 側（`src/episteme_graph/agents/equation_semantics/llm_client.py`）
+から provider SDK を直接叩いており、**このステージの vision トークンが `llm_usage_events` に
+1 行も載っていなかった**（U3 の穴。text 経路と `apparatus_semantics` の vision 経路は
+`core.llm` 経由なので計測済みだった）。既存 `generate_structured_with_images` は
+「フラットな 1 本の prompt + JSON Schema・OpenAI 限定」で、数式 OCR が必要とする
+①ロール構成の保持 ②`response_format={"type":"json_object"}` ③Gemini / Vertex AI 経路 を
+満たせないため、同じ呼び出しを `core/llm.py` に **`generate_json_with_image(messages,
+image_bytes, *, model, mime_type=None) -> str`** として移設し `observe_vision` を通した
+（`operation='vision'` / `image_count=1` / 寸法不明のため `metadata.image_estimate='flat'`。
+プロバイダが usage を返せば当然 `reported`）。パースは返さない（`str`）— agent 側の
+truncate 復旧付きパーサの意味論を変えないため。
+
+- **U4 の但し書き**: 「A層は共通クライアント経由なので触らずに計測対象になる」は
+  `ProviderJSONLLMClient`（text）と `generate_structured_with_images`（apparatus vision）
+  を使う限り成立する。**agent が provider SDK を直接呼んだ瞬間に成立しなくなる**ので、
+  新しい呼び方が必要になったら agent 側で SDK を叩かず `core/llm.py` に観測フック付きの
+  公開関数を追加する。
+- モデル解決は移設対象外（M層は非改変）。vision は具体的なモデル名が必要なため
+  `_resolve_vision_model`（`resolve_scene_model("pipeline:equation_semantics")`）が
+  agent 側に残り、`model=` で明示的に渡す。帰属 feature は orchestrator の
+  `report_start("equation_semantics")` が張る contextvar（§6）に乗るだけでよい
+  → `feature='pipeline:equation_semantics'`。
 
 ### 3.3 recorder（recorder.py）
 
@@ -449,6 +475,14 @@ GET /api/admin/documents/{document_id}/analysis-runs/{run_id}/llm-usage
 8. **学習者 API 非漏洩** — `routes/learning.py` のレスポンスモデルに
    token / usage 系フィールドが増えていない（U5）。
 9. **estimator の決定性** — 同一入力で常に同一値（乱数・時刻非依存）。
+10. **（追加）migration DDL の整合** — `db/043_llm_usage_events.sql`（正本）が期待する
+    テーブル / index / view / CHECK 語彙を定義し、`core/models.py` の ORM とカラム集合が一致。
+11. **（追加 2026-08）計測点の一元化（U3/U4）** — `src/episteme_graph/agents/` 配下に
+    provider SDK のエントリポイント（`chat.completions` / `GenerativeModel` / `vertexai` /
+    `import openai` 等）と `core/llm.py` の private プロバイダヘルパー
+    （`_get_openai_client` / `_get_gemini_module` / `_get_vertex_ai_client` …）が
+    **1 箇所も出現しない**こと。併せて `generate_json_with_image` が成功・失敗の両経路で
+    `observe_vision` を呼び、provider 分岐すべてがその try/except の内側にあること。
 
 ## 11. 段階導入
 

@@ -656,3 +656,87 @@ class TestOrmModelMatchesMigration:
         from core.models import LlmUsageEvent
 
         assert LlmUsageEvent.__tablename__ == "llm_usage_events"
+
+
+# ===========================================================================
+# 11.（追加）計測点の一元化（U3） — agent 群が provider SDK を直接叩かない
+# ===========================================================================
+
+
+class TestAgentsNeverCallProviderSdkDirectly:
+    """``src/episteme_graph/agents/`` の中から provider SDK を直接呼ばない（U3/U4）。
+
+    U3「計測点は core/llm.py に一元化」・U4「A層は共通クライアント経由で自動的に
+    計測対象になる」は、agent 側が provider SDK を直接叩いた瞬間に穴が空く。実際に
+    ``equation_semantics/llm_client.py`` の vision 分岐が
+    ``_get_openai_client().chat.completions.create(...)`` を直接呼んでおり、
+    数式画像 OCR のトークンが ``llm_usage_events`` に一切載っていなかった
+    （2026-08 修正: ``core.llm.generate_json_with_image`` へ移設）。同型の再発を
+    構造的に防ぐため、provider SDK・``core.llm`` の private プロバイダヘルパーの
+    語彙が agent ツリーに出現しないことを検査する。
+
+    許可される呼び口は ``core.llm`` の公開関数だけ（``generate_text`` /
+    ``generate_text_with_structured_output`` / ``generate_structured_with_images`` /
+    ``generate_json_with_image`` / ``generate_conversation_turn``）。新しい経路が
+    必要になったら **core/llm.py に観測フック付きで追加する**こと。
+    """
+
+    # SDK エントリポイント + core/llm.py 側の private プロバイダヘルパー
+    # （後者を agent から import すると観測フックを飛び越えられてしまう）。
+    _FORBIDDEN_PROVIDER_CALLS = (
+        "chat.completions",
+        "embeddings.create",
+        "GenerativeModel",
+        "vertexai",
+        "google.generativeai",
+        "import openai",
+        "from openai",
+        "_get_openai_client",
+        "_get_gemini_module",
+        "_get_gemini_vertex_module",
+        "_get_vertex_ai_client",
+    )
+
+    def test_no_direct_provider_sdk_usage_in_agent_tree(self):
+        agents_dir = SRC / "episteme_graph" / "agents"
+        assert agents_dir.is_dir(), f"agents dir not found: {agents_dir}"
+        from tests.guardrail_helpers import assert_module_tree_forbids
+
+        assert_module_tree_forbids(agents_dir, self._FORBIDDEN_PROVIDER_CALLS)
+
+    def test_equation_vision_goes_through_core_llm(self):
+        """数式画像 OCR の唯一の継ぎ目が core.llm の公開関数であること。"""
+        eq_client_src = (
+            SRC
+            / "episteme_graph"
+            / "agents"
+            / "equation_semantics"
+            / "llm_client.py"
+        ).read_text(encoding="utf-8")
+        assert "from core.llm import generate_json_with_image" in eq_client_src
+
+    def test_generate_json_with_image_is_instrumented(self):
+        """``generate_json_with_image`` が成功・失敗の両方で observe_vision を呼ぶこと。"""
+        from tests.guardrail_helpers import extract_function_source
+
+        fn_src = extract_function_source(_LLM_SRC, "generate_json_with_image")
+        assert fn_src.count("observe_vision(") == 2, (
+            "generate_json_with_image must observe both the success and the failure path"
+        )
+        assert "except Exception as exc:" in fn_src
+
+    def test_all_provider_branches_are_covered_by_the_instrumented_wrapper(self):
+        """provider 分岐（openai / vertex / gemini）が観測付き関数の内側にあること。
+
+        分岐ごとの下請け ``_openai_json_with_image`` 等は observe を持たないので、
+        呼び出しは必ず ``generate_json_with_image`` の try/except 内から行われる。
+        """
+        from tests.guardrail_helpers import extract_function_source
+
+        fn_src = extract_function_source(_LLM_SRC, "generate_json_with_image")
+        for helper in (
+            "_openai_json_with_image(",
+            "_vertex_json_with_image(",
+            "_gemini_json_with_image(",
+        ):
+            assert helper in fn_src, f"{helper} not dispatched from generate_json_with_image"

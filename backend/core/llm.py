@@ -1233,6 +1233,245 @@ def generate_structured_with_images(
 
 
 # ---------------------------------------------------------------------------
+# 公開 API: messages + 単一画像 → JSON テキスト（vision・プロバイダ横断）
+#
+# ``equation_semantics`` の数式画像 OCR 用。既存 ``generate_structured_with_images``
+# は「1本のフラットな prompt 文字列 + JSON Schema・OpenAI 限定」で、数式 OCR 側が
+# 必要とする ①system/user のロール構成の保持（reasoning モデルでは developer へ
+# 変換）②``response_format={"type": "json_object"}``（JSON Schema ではない）
+# ③Gemini / Vertex AI 経路 を満たせない。そのため agent 側が provider SDK を
+# 直接叩いており U層（llm_usage）の計測点を素通りしていた（U3 違反）。ここに
+# 同じ呼び出しを移設して ``observe_vision`` を通す。
+# ---------------------------------------------------------------------------
+
+# 本経路が vision 呼び出しを実装しているプロバイダ（他は NotImplementedError）。
+_JSON_VISION_PROVIDERS = ("openai", "google", "gemini-vertex", "gemini")
+
+
+def _messages_prompt_text(messages: list[dict[str, Any]]) -> str:
+    """観測フック用に messages のテキスト部分だけを連結する（推計の入力）。"""
+    parts: list[str] = []
+    for message in messages or []:
+        if not isinstance(message, dict):
+            continue
+        content = message.get("content", "")
+        if isinstance(content, str):
+            parts.append(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    parts.append(part["text"])
+        elif content is not None:
+            parts.append(str(content))
+    return "\n\n".join(parts)
+
+
+def _last_user_message_index(messages: list[dict[str, Any]]) -> int | None:
+    for i in range(len(messages) - 1, -1, -1):
+        if messages[i].get("role") in ("user", "developer"):
+            return i
+    return None
+
+
+def _with_gemini_image_part(
+    contents: list[dict[str, Any]], image_part: Any
+) -> list[dict[str, Any]]:
+    """Gemini/Vertex の contents 末尾（最後の user ターン）へ画像パーツを足す。"""
+    if not contents:
+        return [{"role": "user", "parts": [image_part]}]
+    updated = list(contents)
+    last = dict(updated[-1])
+    parts = list(last.get("parts") or [])
+    parts.append(image_part)
+    last["parts"] = parts
+    updated[-1] = last
+    return updated
+
+
+def _openai_json_with_image(
+    messages: list[dict[str, Any]],
+    image_bytes: bytes,
+    mime_type: str,
+    model_name: str,
+) -> Any:
+    adapted = list(_adapt_messages_for_model(messages, model_name))
+    user_idx = _last_user_message_index(adapted)
+    if user_idx is None:
+        adapted.append({"role": "user", "content": ""})
+        user_idx = len(adapted) - 1
+    # 呼び出し元の message dict を書き換えない（``_adapt_messages_for_model`` は
+    # 非 reasoning モデルでは入力リストをそのまま返し、reasoning モデルでも
+    # system 以外の dict を共有するため、in-place 変更は呼び出し元へ漏れる）。
+    original = adapted[user_idx]
+    data_b64 = base64.b64encode(image_bytes).decode("ascii")
+    adapted[user_idx] = {
+        **original,
+        "content": [
+            {"type": "text", "text": str(original.get("content", ""))},
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": f"data:{mime_type};base64,{data_b64}",
+                    "detail": "high",
+                },
+            },
+        ],
+    }
+    api_kwargs = _build_api_kwargs(
+        model_name,
+        temperature=0.0,
+        extra_kwargs={"response_format": {"type": "json_object"}},
+    )
+    return _get_openai_client().chat.completions.create(
+        model=model_name,
+        messages=adapted,
+        **api_kwargs,
+    )
+
+
+def _vertex_json_with_image(
+    messages: list[dict[str, Any]],
+    image_bytes: bytes,
+    mime_type: str,
+    model_name: str,
+) -> Any:
+    from vertexai.generative_models import (  # type: ignore[import]
+        GenerationConfig,
+        GenerativeModel,
+        Part,
+    )
+
+    _get_vertex_ai_client()  # ADC 初期化（キャッシュ済み）
+    system_instruction, contents = _messages_to_gemini(messages)
+    contents = _with_gemini_image_part(
+        contents, Part.from_data(data=image_bytes, mime_type=mime_type)
+    )
+    return GenerativeModel(
+        model_name=model_name, system_instruction=system_instruction
+    ).generate_content(
+        contents,
+        generation_config=GenerationConfig(
+            temperature=0.0,
+            response_mime_type="application/json",
+        ),
+    )
+
+
+def _gemini_json_with_image(
+    messages: list[dict[str, Any]],
+    image_bytes: bytes,
+    mime_type: str,
+    model_name: str,
+) -> Any:
+    genai = _get_gemini_module()
+    system_instruction, contents = _messages_to_gemini(messages)
+    contents = _with_gemini_image_part(
+        contents,
+        {
+            "inline_data": {
+                "mime_type": mime_type,
+                "data": base64.b64encode(image_bytes).decode("ascii"),
+            }
+        },
+    )
+    return genai.GenerativeModel(
+        model_name=model_name,
+        system_instruction=system_instruction,
+    ).generate_content(
+        contents,
+        generation_config={"temperature": 0.0, "response_mime_type": "application/json"},
+    )
+
+
+def _json_vision_response_text(provider: str, response: Any) -> str:
+    if provider == "openai":
+        return response.choices[0].message.content or ""
+    if provider in ("google", "gemini-vertex"):
+        return _extract_vertex_ai_text(response) or ""
+    return getattr(response, "text", "") or ""
+
+
+def generate_json_with_image(
+    messages: list[dict[str, Any]],
+    image_bytes: bytes,
+    *,
+    model: str,
+    mime_type: str | None = None,
+) -> str:
+    """messages + 単一画像で JSON モードの生成を行い、**生テキスト**を返す。
+
+    ``generate_structured_with_images`` との違い（両立せず別関数にした理由）:
+
+    * メッセージのロール構成をそのまま保つ（``system`` は reasoning モデルでのみ
+      ``developer`` へ変換。フラットな1本の prompt に畳まない）。
+    * ``response_format`` は ``{"type": "json_object"}``（JSON Schema を渡さない）。
+    * OpenAI / Vertex AI(``google``, ``gemini-vertex``) / Gemini の3経路に対応する。
+
+    パースはしない（``str`` を返す）。呼び出し側（agent の JSON クライアント）が
+    truncate 復旧付きの独自パーサを持つため、その意味論を変えないための設計。
+
+    Parameters
+    ----------
+    messages : list[dict]
+        ``[{"role": ..., "content": str}, ...]``。呼び出し元の dict は変更しない。
+    image_bytes : bytes
+        添付する画像1枚のバイト列。
+    model : str
+        使用するモデル名（必須。vision 経路は provider SDK を直接呼ぶため、
+        モデル解決は呼び出し側（M層の ``resolve_scene_model`` 等）の責務）。
+    mime_type : str | None
+        画像の MIME タイプ。None なら magic bytes から判別する。
+
+    Returns
+    -------
+    str
+        レスポンスの生テキスト（空文字列になりうる）。
+
+    Raises
+    ------
+    NotImplementedError
+        ``LLM_PROVIDER`` がこの経路を実装していない場合。
+    """
+    settings = get_settings()
+    provider = settings.llm_provider
+    if provider not in _JSON_VISION_PROVIDERS:
+        raise NotImplementedError(
+            f"JSON vision generation is not implemented for LLM_PROVIDER={provider!r}"
+        )
+
+    resolved_mime = mime_type or _detect_image_mime_type(image_bytes)
+    prompt_for_usage = _messages_prompt_text(messages)
+
+    started = time.monotonic()
+    try:
+        if provider == "openai":
+            response = _openai_json_with_image(messages, image_bytes, resolved_mime, model)
+        elif provider in ("google", "gemini-vertex"):
+            response = _vertex_json_with_image(messages, image_bytes, resolved_mime, model)
+        else:  # gemini
+            response = _gemini_json_with_image(messages, image_bytes, resolved_mime, model)
+    except Exception as exc:
+        observe_vision(
+            provider=provider,
+            model=model,
+            prompt=prompt_for_usage,
+            image_count=1,
+            error=exc,
+            started_monotonic=started,
+        )
+        raise
+    observe_vision(
+        provider=provider,
+        model=model,
+        prompt=prompt_for_usage,
+        image_count=1,
+        response=response,
+        started_monotonic=started,
+    )
+    return _json_vision_response_text(provider, response)
+
+
+# ---------------------------------------------------------------------------
 # 公開 API: マルチターン会話（構造化出力・W層 §5 対話的検討 向けに新設）
 # ---------------------------------------------------------------------------
 

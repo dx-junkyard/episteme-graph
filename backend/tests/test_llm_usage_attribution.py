@@ -424,3 +424,86 @@ class TestTensionWorkerFunctionalAttribution:
         assert captured.get("feature") == "learning:tension"
         assert captured.get("user_id") == "u-attr-1"
         assert captured.get("course_id") == "c-attr-1"
+
+
+# ===========================================================================
+# 5. 機能テスト（回帰）: equation_semantics の vision 分岐が
+#    pipeline:equation_semantics で記録される
+#
+#    かつて agent 側（src/episteme_graph/agents/equation_semantics/llm_client.py）が
+#    provider SDK を直接叩いており、数式画像 OCR のトークンが llm_usage_events に
+#    1 行も載っていなかった（U3 の穴）。実 agent クライアント × 実 core.llm ×
+#    フェイク OpenAI クライアントで、1 呼び出し = 1 イベントを固定する。
+# ===========================================================================
+
+
+class TestEquationVisionFunctionalAttribution:
+    def test_vision_call_is_recorded_with_pipeline_feature(self, monkeypatch):
+        import types
+        from unittest.mock import MagicMock
+
+        import core.config as core_config
+        import core.llm as llm
+        import core.llm_usage.observe as observe
+        from core.llm_usage.context import usage_context
+        from episteme_graph.agents.equation_semantics.llm_client import (
+            EquationSemanticsLLMClient,
+        )
+
+        events: list = []
+        monkeypatch.setattr(observe, "record", lambda event: events.append(event))
+
+        fake_settings = types.SimpleNamespace(
+            llm_provider="openai", llm_analysis_model="gpt-4o"
+        )
+        # agent 側は core.config.get_settings を関数内 import する。core.llm 側は
+        # import 時に束縛済みなので両方差し替える。
+        monkeypatch.setattr(core_config, "get_settings", lambda: fake_settings)
+        monkeypatch.setattr(llm, "get_settings", lambda: fake_settings)
+
+        usage = types.SimpleNamespace(
+            prompt_tokens=900,
+            completion_tokens=40,
+            total_tokens=940,
+            prompt_tokens_details=types.SimpleNamespace(cached_tokens=None),
+            completion_tokens_details=types.SimpleNamespace(reasoning_tokens=None),
+        )
+        fake_response = types.SimpleNamespace(
+            choices=[
+                types.SimpleNamespace(
+                    message=types.SimpleNamespace(content='{"latex": "E = mc^2"}')
+                )
+            ],
+            usage=usage,
+        )
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = fake_response
+        monkeypatch.setattr(llm, "_get_openai_client", lambda: fake_client)
+
+        image = {
+            "mime_type": "image/png",
+            "data_base64": "iVBORw0KGgo=",  # PNG magic bytes（内容は不問）
+        }
+        # 明示モデルで M層の解決（DB 参照を伴いうる）をこのテストから切り離す。
+        client = EquationSemanticsLLMClient(model="gpt-4o")
+
+        with usage_context(
+            "pipeline:equation_semantics", user_id="teacher-1", document_id="doc-1"
+        ):
+            out = client.generate([{"role": "user", "content": "read this"}], image=image)
+
+        # vision が実際に使われている（テキストフォールバックではない）。
+        assert out["_vision_ocr"]["used"] is True
+        assert out["latex"] == "E = mc^2"
+
+        assert len(events) == 1, "equation vision must record exactly one usage event"
+        event = events[0]
+        assert event.operation == "vision"
+        assert event.feature == "pipeline:equation_semantics"
+        assert event.provider == "openai"
+        assert event.model == "gpt-4o"
+        assert event.usage_source == "reported"
+        assert event.prompt_tokens == 900
+        assert event.image_count == 1
+        assert event.document_id == "doc-1"
+        assert event.user_id == "teacher-1"
