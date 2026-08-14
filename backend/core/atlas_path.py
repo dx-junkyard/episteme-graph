@@ -26,8 +26,15 @@ from typing import Any
 MAX_STEPS = 6
 
 # 台帳状態 → 表示ラベル (§5 の語彙。評価語ではなく状態名)
+#
+# 正本は `core/atlas_state.py::PILL_LABELS`（共通キーは逐語一致させる。固定は
+# `backend/tests/test_atlas_vocab_mirror.py`）。ここは "link" を持つぶんだけ広い。
+#
+# `verified` が意味するのは**コーパスの原文に裏付けの記帳がある**ことだけで、
+# 実験によって確かめられたという主張ではない（SL1 の閉世界: 台帳は分野の射影ではなく
+# コーパスの射影。検証の強さは D層台帳の verification_status が別軸で持つ）。
 STATUS_LABELS = {
-    "verified": "実験で確認 / 原文に裏付け",
+    "verified": "原文に裏付け",
     "contested": "解釈が分かれる",
     "assumed": "暗黙の前提",
     "gap": "行間 — AIが補完",

@@ -68,9 +68,10 @@ def _card(**overrides):
         level=2,
         skeleton_version="2026.1",
         node_status="verified",
-        node_pill="実験で確認",
+        # D3（訳語統一）: verified の表示語は「原文に裏付け」（旧「実験で確認」）。
+        node_pill="原文に裏付け",
         related=[
-            {"node_id": "disp", "label": "分散関係", "status": "verified", "pill": "実験で確認"},
+            {"node_id": "disp", "label": "分散関係", "status": "verified", "pill": "原文に裏付け"},
             {"node_id": "gy", "label": "高次項の抑制", "status": "gap", "pill": "行間 — AIが補完"},
             {"node_id": "dual", "label": "クォーク・ハドロン双対性", "status": "assumed", "pill": "暗黙の前提"},
         ],

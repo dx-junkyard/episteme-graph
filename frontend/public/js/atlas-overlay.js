@@ -170,17 +170,21 @@
     return item;
   }
 
+  // 凡例の語彙は backend/core/atlas_state.py::PILL_LABELS を正本とする
+  // （固定は backend/tests/test_atlas_vocab_mirror.py）。verified は「原文に裏付け」
+  // であり、実験による確認の主張ではない（SL1: 台帳はコーパスの射影）。assumed と gap は
+  // 同じ破線スタイルで描くため、正本の2語を1項に合成して示す。
   function buildLegend() {
     const legend = el("div", { class: "atlas-legend" });
     legend.appendChild(legendItem([
       svgEl("circle", { cx: 7, cy: 7, r: 5.5, fill: C.verifiedFill, stroke: C.verifiedStroke, "stroke-width": 1 }),
-    ], "実験で確認"));
+    ], "原文に裏付け"));
     legend.appendChild(legendItem([
       svgEl("circle", { cx: 7, cy: 7, r: 5.5, fill: C.contestedFill, stroke: C.contestedStroke, "stroke-width": 1 }),
     ], "解釈が分かれる"));
     legend.appendChild(legendItem([
       svgEl("circle", { cx: 7, cy: 7, r: 5.5, fill: "none", stroke: C.assumedStroke, "stroke-width": 1.5, "stroke-dasharray": "3 2" }),
-    ], "暗黙の前提・行間"));
+    ], "暗黙の前提・行間（AIが補完）"));
     legend.appendChild(legendItem([
       svgEl("rect", { x: 1, y: 1, width: 16, height: 11, rx: 2.5, fill: "none", stroke: C.fogStroke, "stroke-width": 0.75, "stroke-dasharray": "3 2" }),
       svgEl("line", { x1: 4, y1: 10, x2: 9, y2: 3, stroke: C.fogStroke, "stroke-width": 0.75, opacity: 0.6 }),

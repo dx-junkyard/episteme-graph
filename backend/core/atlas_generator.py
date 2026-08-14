@@ -114,8 +114,11 @@ def build_generation_prompt_from_meta(
         "- id は英小文字・数字・アンダースコアのスラッグ。改版を跨いで安定に使える普遍的な名前にする\n"
         "- layout は正規化座標 (0.0〜1.0)。領域同士は重ならないように配置する\n"
         "- 概念の x/y は領域内の相対位置 (0.0〜1.0)\n"
-        "- seed_status は確信がある場合のみ: verified (実験で確認) / contested (解釈が分かれる) / "
-        "assumed (暗黙の前提)。不明なら null\n"
+        # seed_status の語釈は表示ラベルの正本（core/atlas_state.py::PILL_LABELS）に揃える。
+        # verified は「原文に裏付けが取れる」であり、実験による確認の主張ではない
+        # （SL1: 台帳はコーパスの射影で、実験による検証の記帳は D層台帳が別軸で持つ）。
+        "- seed_status は確信がある場合のみ: verified (原文に裏付けが取れる確立した内容) / "
+        "contested (解釈が分かれる) / assumed (暗黙の前提)。不明なら null\n"
         "- edges は領域間の隣接・依存関係。from_id / to_id には領域IDを使う\n"
         "- 推薦文言・評価語は含めない。地図は事実の投影であり誘導ではない\n"
     )
