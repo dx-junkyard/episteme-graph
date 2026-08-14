@@ -21,7 +21,8 @@ component の文脈 DTO が instance / shared_part / graph の三層構造を持
   ``focus.contextual_role`` も source_backed / confirmed のときだけ残す
   （``component_context._build_graph`` の graph 射影と同じ原則）。
 - **数値を見せない（W8）**: 最終レスポンスを再帰走査して ``"confidence"`` キーを
-  除去する（``component_context.strip_confidence`` を共有）。
+  除去する（``core/learner_context_common.py::strip_confidence`` を component 文脈
+  API と共有）。
 - **裸の内部 ID を出さない**: ITEM の ``evidence_refs``（evidence_id / step_id 等の
   内部参照）と ``focus.provenance``（``theory_claims:<uuid>`` 等）は落とし、さらに
   **ラベルそのものが内部 ID 形の場合は一般ラベルへ置換する**（W層はラベル解決に
@@ -29,6 +30,11 @@ component の文脈 DTO が instance / shared_part / graph の三層構造を持
   ``synth_claim_0001`` 等）。
 - **書き込みを行わない**: A層（``src/episteme_graph/agents/``）・W層のコードは
   読むだけで変更しない。本モジュールに書き込み経路は無い。
+- **共通プリミティブは ``core/learner_context_common.py`` が正本**: 数値除去・
+  コース document スコープの SQL 強制（``scoped_id_match_sql``）・ITEM の射影と
+  遮断層（``project_item`` / ``visible_lane_items``）は component 文脈 API
+  （``core/component_context.py``）と共有する。本モジュールは旧名で再エクスポート
+  するだけなので、遮断が片方の API にしか実装されない状態には戻らない。
 - 本モジュールは FastAPI を import しない（開発ルール2 / core/ 共通ルール）。
 
 ITEM v2 / focus v2（``docs/features/element_context_presentation_redesign.md`` §4）:
@@ -55,18 +61,35 @@ W層 ``context_lens`` が ``sublabel`` / ``qualifier`` / ``group`` / ``unresolve
 from __future__ import annotations
 
 import logging
-import re
-import uuid
 from typing import Any
 
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
-from core.component_context import strip_confidence
+from core import learner_context_common
+from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
+    ITEM_GROUP_FALLBACK,
+    ITEM_GROUPS,
+    PROVENANCE_COURSE_FREEZE,
+    QUALIFIER_EQUATION_DETAIL,
+    contains_internal_id as _contains_internal_id,
+    equation_focus_label as _equation_focus_label,
+    generic_item_label as _generic_item_label,
+    is_internal_id_label as _is_internal_id_label,
+    is_uuid as _is_uuid,
+    json_list as _json_list,
+    learner_navigable as _learner_navigable,
+    normalized_document_ids as _normalized_document_ids,
+    normalized_group as _normalized_group,
+    project_item as _project_item,
+    safe_text as _safe_text,
+    scoped_id_match_sql,
+    strip_confidence,
+)
 from core.text_excerpt import excerpt, looks_like_tex_math
 from core.deliberation import context_lens as context_lens_mod
 from core.deliberation.refs import document_run_artifacts, equation_records
-from core.deliberation.schema import (
+from core.deliberation.schema import (  # noqa: F401  (ELEMENT_* は語彙表と再エクスポート)
     CONTEXT_ROLE_STATUS_UNIDENTIFIED,
     CONTEXT_STATUS_CANDIDATE,
     CONTEXT_STATUS_CONFIRMED,
@@ -98,164 +121,32 @@ _INTERNAL_ELEMENT_TYPES = {
 # 学習者に出してよい関係状態（candidate は教員確定前の AI 候補なので出さない）。
 _LEARNER_VISIBLE_STATUSES = (CONTEXT_STATUS_SOURCE_BACKED, CONTEXT_STATUS_CONFIRMED)
 
-# 各レーンの表示上限（``component_context._GRAPH_LANE_MAX`` と同じ値）。W層 ``_cap_lane``
-# が candidate 込みで既に 20 件へ切ったあとに本フィルタが走るため、実際の表示件数は
-# 20 件以下になり得る（W層を変更しない（LE6）ことを優先した既知の挙動。設計書 §4）。
-_LANE_MAX = 20
+# 各レーンの表示上限（正本は ``learner_context_common.LANE_MAX``。旧名を再エクスポート
+# して既存の参照面を維持する）。W層 ``_cap_lane`` が candidate 込みで既に 20 件へ切った
+# あとに本フィルタが走るため、実際の表示件数は 20 件以下になり得る（W層を変更しない
+# （LE6）ことを優先した既知の挙動。設計書 §4）。
+_LANE_MAX = learner_context_common.LANE_MAX
 
-# 学習者が「旅の続き」として実際に再フェッチできる element_type。
-# theory_claim / equation は本 API（``claim`` / ``equation``）、theory_component は
-# 学習者向け component 文脈 API（``/components/{id}/context``）で開ける。それ以外
-# （figure / section / thesis / derivation / symbol / evidence / stage / part）は
-# 学習者向けの文脈取得口が無いため ``navigable`` を立てない（W層の
-# ``_NAVIGABLE_ELEMENT_TYPES`` は教員向けの可否なのでそのままでは契約が成立しない）。
-_LEARNER_NAVIGABLE_ELEMENT_TYPES = (
-    ELEMENT_THEORY_CLAIM,
-    ELEMENT_EQUATION,
-    ELEMENT_THEORY_COMPONENT,
-)
-
-# W層設計書 §16 で evidence / derivation が教員向けには navigable になった
-# （``context_lens._NAVIGABLE_ELEMENT_TYPES`` に追加）。**学習者の旅の対象は
-# claim / equation / component のまま**なので、ホワイトリスト方式に加えて明示的な
-# 拒否リストとしても書いておく（W層が語彙を増やしたときに学習者側へ黙って波及しない
-# ための二重の fail-closed。学習者向けには対応する文脈取得 API が存在しないため、
-# navigable を立てると押しても何も起きない導線になる）。
+# 学習者が「旅の続き」として実際に再フェッチできる element_type / 明示的な拒否リスト
+# （正本は ``learner_context_common``。旧名の再エクスポート）。
+_LEARNER_NAVIGABLE_ELEMENT_TYPES = learner_context_common.LEARNER_NAVIGABLE_ELEMENT_TYPES
 _LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES = (
-    ELEMENT_EVIDENCE,
-    ELEMENT_DERIVATION,
+    learner_context_common.LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES
 )
 
 # W層 ITEM の表示専用 element_type（``deliberation/schema.py`` の解決対象語彙には無い）。
-_ITEM_TYPE_SYMBOL = "symbol"
-
-# ITEM v2 の ``qualifier``: 式単位の操作ノード（TheoryOperationGraph の
-# ``graph_layer='equation_detail'``）の目印。traceability のための層なので**学習者には
-# 項目ごと出さない**（CP3。教員向けは折りたたみ「式の詳細層」で残る）。
-QUALIFIER_EQUATION_DETAIL = "equation_detail"
-
-# ITEM v2 の ``group``（区画キー。設計書 §4.3）。未知値・空は「関連」区画へ寄せる
-# （P4: 項目自体は落とさない）。
-ITEM_GROUPS = (
-    "stage",
-    "thesis",
-    "claim",
-    "section",
-    "symbol_defined",
-    "symbol_used",
-    "equation_up",
-    "equation_down",
-    "derivation_in",
-    "derivation_out",
-    "claim_required",
-    "evidence",
-    "operation",
-    "figure",
-    "component",
-    "related",
-)
-ITEM_GROUP_FALLBACK = "related"
+_ITEM_TYPE_SYMBOL = learner_context_common.ITEM_TYPE_SYMBOL
 
 # context_lens が投影を返せない / 例外だった場合の事実文（available:false 時の note）。
 NOTE_NO_CONTEXT = "この要素の文脈情報は現在表示できません。"
 
-PROVENANCE_COURSE_FREEZE = "course_freeze"
-
-# ── 内部 ID ラベルの遮断（LE4）──────────────────────────────────────────────
-# W層 context_lens はラベル（caption / 本文 / 記号）を引けなかった項目に内部 ID を
-# そのまま label として入れる（``_build_claim`` の図 DB UUID・evidence_id・
-# subclaim の agent 側 ID、``_build_equation`` の ``synth_claim_0001``、
-# thesis の ``support:<section>:<idx>`` など）。W層は変更しない（LE6）ので、
-# 学習者向け射影の時点で「裸の内部 ID 形」を検出し一般ラベルへ置換する。
-_UUID_LABEL_RE = re.compile(
-    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
-)
-
-_INTERNAL_ID_LABEL_RES = (
-    re.compile(r"^ev(?:idence)?_[0-9]", re.IGNORECASE),   # evidence_registry: ev_0001
-    re.compile(r"^synth_", re.IGNORECASE),               # 合成 claim: synth_claim_0001
-    re.compile(r"^claim_", re.IGNORECASE),                # claim 生ID: claim_span_001 / claim_0004
-    re.compile(r"^span_[0-9]", re.IGNORECASE),           # rhetorical_role: span_001
-    re.compile(r"^support:"),                             # thesis support node: support:<section>:<idx>
-    re.compile(r"^node_", re.IGNORECASE),                 # graph node id
-)
-
-# ラベル**全体**ではなく「内部 ID を埋め込んだ事実文」も遮る（EC3。
-# equation_context_panel_display_design.md §1.5）。W層 ``_derivation_membership_facts``
-# は「導出「derivation_eq_tex_b16」のステップ「step_001」」のような文をラベルにするため、
-# 先頭一致の ``_INTERNAL_ID_LABEL_RES`` では検出できない。関係の意味（relation_label
-# 「の導出に属する」）は保持したまま、ラベルだけ一般ラベルへ置換する。
-_EMBEDDED_INTERNAL_ID_RE = re.compile(
-    r"derivation_[A-Za-z0-9_]+"
-    r"|system_derivation_[0-9]+"
-    r"|(?:^|[^A-Za-z0-9])sys_[0-9]+_step_[0-9]+"
-    r"|(?:^|[^A-Za-z0-9])step_[0-9]+",
-    re.IGNORECASE,
-)
-
-# ``eq_2_7`` 形は論文の式番号由来で学習者にも可読なため v1 では置換しない（設計書 §4 の裁定）。
-_EQUATION_NUMBER_LABEL_RE = re.compile(r"^eq[_\-.]?[0-9]", re.IGNORECASE)
-
-# element_type 別の一般ラベル（内部 ID を出す代わりの事実文。関係語
-# （``relation_label``）は保持するので「図 / を根拠とする」の形で意味は残る）。
-_GENERIC_ITEM_LABELS = {
-    ELEMENT_THEORY_CLAIM: "関連する主張",
-    ELEMENT_THEORY_COMPONENT: "関連する論理要素",
-    ELEMENT_EQUATION: "関連する数式",
-    "figure": "図",
-    "evidence": "本文の根拠箇所",
-    "section": "掲載セクション",
-    "thesis": "中心命題",
-    "derivation": "導出の流れ",
-    "symbol": "記号",
-    "stage": "理論の段階",
-    "part": "構成部品",
-}
-_GENERIC_ITEM_LABEL_FALLBACK = "関連する要素"
-
-# ``focus.contextual_role`` は上位項目のラベルから合成される（W層
-# ``_derive_contextual_role``）ため、内部 ID がそのまま役割文に混ざり得る
-# （「synth_claim_0001を定量化する」等）。含まれていたら role をキーごと落とす
-# （candidate / unidentified と同じ「推測で穴埋めしない」縮退）。
-_ROLE_INTERNAL_TOKEN_RE = re.compile(
-    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
-    r"|synth_[A-Za-z0-9_]*[0-9]"
-    r"|claim_span_[0-9]"
-    r"|claim_[0-9]{3,}"
-    r"|ev(?:idence)?_[0-9]{3,}"
-    r"|span_[0-9]{3,}"
-    r"|support:",
-    re.IGNORECASE,
-)
-
-# TheoryOperationGraph のノード ID（``theory_op_0001`` / ``eq_op_0007``）と
-# コンポーネントの agent 側 ID。ITEM v2 の ``sublabel`` / ``intrinsic`` の事実文は
-# ラベルと違い自由文なので、**文中のどこに現れても**遮断する。
-_EXTRA_INTERNAL_TOKEN_RE = re.compile(
-    r"(?:^|[^A-Za-z0-9])(?:theory_op|eq_op)_[0-9]"
-    r"|(?:^|[^A-Za-z0-9])comp_[0-9]",
-    re.IGNORECASE,
-)
+# ``focus.contextual_role`` の内部 ID 検出（``_project_focus`` が role をキーごと落とす
+# 判定に使う。正本は ``learner_context_common``）。
+_ROLE_INTERNAL_TOKEN_RE = learner_context_common.ROLE_INTERNAL_TOKEN_RE
 
 # W層 ``context_lens._degenerate_result`` の目印（要素の読み取りに失敗した fail-soft 形）。
 # この文言は context_lens.py 内で degenerate 専用に1箇所しか使われていない。
 _DEGENERATE_LENS_NOTE = "要素が見つからないか読み取りに失敗したため、文脈は表示できません"
-
-
-def _is_uuid(value: Any) -> bool:
-    try:
-        uuid.UUID(str(value))
-        return True
-    except (ValueError, AttributeError, TypeError):
-        return False
-
-
-def _normalized_document_ids(course_document_ids: set[str] | None) -> list[str]:
-    return sorted({str(d) for d in (course_document_ids or set()) if str(d or "").strip()})
-
-
-def _json_list(value: Any) -> list:
-    return value if isinstance(value, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -272,7 +163,10 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
 
     ``document_id = ANY(:doc_ids)`` を WHERE 句に直接含めることで（後付けの Python
     フィルタではなく）、agent 側 ID がコース外文書の同名 claim に誤って一致する余地を
-    断つ（``component_context._resolve_component_row`` と同型の fail-closed）。
+    断つ。WHERE 断片の組み立ては
+    ``learner_context_common.scoped_id_match_sql``（component 側の
+    ``_resolve_component_row`` と共有する正本）に委ね、本関数は claim 固有の
+    **曖昧一致の扱い**だけを持つ。
 
     **agent 側 ID の曖昧一致は解決しない**（fail-closed）。``claim_span_001`` のような
     agent 側 ID は span_id が block ごとに振り直されるため文書内でも文書間でも反復し
@@ -292,12 +186,7 @@ def _resolve_claim(element_id: str, course_document_ids: set[str]) -> tuple[str,
     if not document_ids:
         return None
 
-    conditions = ["source_scope->'legacy_ids' ? :raw_id"]
-    params: dict[str, Any] = {"raw_id": str(element_id), "doc_ids": document_ids}
-    if _is_uuid(element_id):
-        conditions.append("id = CAST(:uuid_id AS uuid)")
-        params["uuid_id"] = str(element_id)
-    where_clause = " OR ".join(conditions)
+    where_clause, params = scoped_id_match_sql(element_id, document_ids)
 
     session = get_session()
     try:
@@ -374,102 +263,14 @@ def _resolve_element(
 
 # ---------------------------------------------------------------------------
 # 学習者向けフィルタ（candidate 除外 / role 抑止 / 内部 ID 除去）
+#
+# 遮断層（``_is_internal_id_label`` / ``_generic_item_label`` /
+# ``_contains_internal_id`` / ``_safe_text`` / ``_normalized_group`` /
+# ``_equation_focus_label`` / ``_learner_navigable`` / ``_project_item``）の正本は
+# ``core/learner_context_common.py`` にあり、本モジュールは旧名で再エクスポート
+# している（import 節参照）。component 文脈 API も同じ関数を通るため、遮断が
+# 片方の API にだけ実装される状態には戻らない。
 # ---------------------------------------------------------------------------
-
-
-def _is_internal_id_label(label: str, element_type: str, element_id: Any) -> bool:
-    """label が「裸の内部 ID」かどうか（LE4 のラベル規則）。
-
-    ``eq_2_7`` のような equation の式番号は論文由来で学習者にも可読なため対象外
-    （設計書 §4 の裁定）。それ以外で UUID / evidence・claim・span の生ID形 /
-    ``support:`` 接頭 / label が ITEM の id 生値そのもの のいずれかなら内部 ID とみなす。
-    """
-    text = str(label or "").strip()
-    if not text:
-        return False
-    if element_type == ELEMENT_EQUATION and _EQUATION_NUMBER_LABEL_RE.match(text):
-        return False
-    if _UUID_LABEL_RE.match(text):
-        return True
-    if any(pattern.match(text) for pattern in _INTERNAL_ID_LABEL_RES):
-        return True
-    if _EMBEDDED_INTERNAL_ID_RE.search(text):  # EC3: 文中に埋め込まれた内部 ID
-        return True
-    raw_id = str(element_id or "").strip()
-    return bool(raw_id) and text == raw_id
-
-
-def _generic_item_label(element_type: str) -> str:
-    return _GENERIC_ITEM_LABELS.get(str(element_type or ""), _GENERIC_ITEM_LABEL_FALLBACK)
-
-
-def _contains_internal_id(value: Any) -> bool:
-    """自由文（sublabel / 事実文 / 役割文）**のどこか**に内部 ID が含まれるか。
-
-    ``_is_internal_id_label`` が「ラベル全体が内部 ID 形か」を見るのに対し、こちらは
-    説明文の途中に混ざった ID（「導出「derivation_x」のステップ「step_001」」/
-    「synth_claim_0001 を定量化する」）を遮るための判定。W層がラベルラダーで
-    生成時点から ID を排除しても（EC3′）、射影側は最後の砦として残す。
-    """
-    text = str(value or "").strip()
-    if not text:
-        return False
-    if any(pattern.match(text) for pattern in _INTERNAL_ID_LABEL_RES):
-        return True
-    if _UUID_LABEL_RE.match(text):
-        return True
-    if _EMBEDDED_INTERNAL_ID_RE.search(text):
-        return True
-    if _ROLE_INTERNAL_TOKEN_RE.search(text):  # UUID / synth_ / ev_ / span_ / support:
-        return True
-    return bool(_EXTRA_INTERNAL_TOKEN_RE.search(text))
-
-
-def _safe_text(value: Any, *, allow_tex: bool = False) -> str:
-    """学習者に出してよい表示文字列だけを通す（内部 ID / 生 TeX を空へ落とす）。
-
-    ``allow_tex=True`` は**記号**専用（``canonical_symbol`` は TeX 形のまま渡し、
-    レンダリング可否はフロントの ``looksLikeRenderableTex`` ゲートに委ねる。§5.4）。
-    """
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    if _contains_internal_id(text):
-        return ""
-    if not allow_tex and looks_like_tex_math(text):
-        return ""
-    return text
-
-
-def _normalized_group(value: Any) -> str:
-    """ITEM の区画キー。未知値・空は「関連」区画へ寄せる（§4.1 / P4）。"""
-    group = str(value or "").strip()
-    return group if group in ITEM_GROUPS else ITEM_GROUP_FALLBACK
-
-
-# ── TeX 文字列の遮断（EC1/EC2, equation_context_panel_display_design.md）──────
-# W層 ``context_lens._equation_label`` は plain_text（読み下し）が無い式で latex を
-# 採用し、さらに 80 字で機械的に切り詰める。結果は「コマンド途中で切れた TeX」で、
-# KaTeX に渡せば赤いエラー、素で出せば読めない文字列にしかならない。学習者向けには
-# 式そのものを再掲する意味も無い（式は教材本文に整形表示されている）ため、
-# TeX と判定できるラベル・本文はここで落とす。
-
-
-def _equation_focus_label(label: str, element_id: str) -> str:
-    """数式 focus の見出し（EC1: TeX を出さない）。
-
-    ラベルが TeX なら捨て、``eq_2_7`` のような論文の式番号だけを残す。
-    ``eq_tex_b14`` のような合成 ID は見出しにしない（空 = 種別チップのみ）。
-    """
-    text = str(label or "").strip()
-    if text and not looks_like_tex_math(text) and not _is_internal_id_label(
-        text, ELEMENT_EQUATION, element_id
-    ):
-        return text
-    raw_id = str(element_id or "").strip()
-    if raw_id and _EQUATION_NUMBER_LABEL_RE.match(raw_id):
-        return raw_id
-    return ""
 
 
 def _equation_explanatory_fields(record: Any) -> dict:
@@ -524,89 +325,13 @@ def _equation_record_in_course(element_id: str, document_id: str) -> dict | None
     return None
 
 
-def _learner_navigable(element_type: Any, element_id: Any) -> bool:
-    """学習者が実際に再フェッチできる型・ID か（W層の ``navigable`` は信用しない）。"""
-    kind = str(element_type or "")
-    return (
-        bool(str(element_id or "").strip())
-        and kind in _LEARNER_NAVIGABLE_ELEMENT_TYPES
-        and kind not in _LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES
-    )
-
-
-def _project_item(item: dict) -> dict | None:
-    """ITEM（v2）を学習者向けに射影する。``None`` は「学習者に出さない項目」。
-
-    ``evidence_refs``（evidence_id / step_id 等の内部参照）・``relation``（内部語彙
-    キー）・``label_source``（来歴 = 教員のみ）は落とし、読み手向けの
-    ``relation_label`` と v2 の区別材料（``sublabel`` / ``qualifier`` / ``group`` /
-    ``unresolved``）を残す。
-
-    - ``qualifier == "equation_detail"``（式単位の操作ノード）は**項目ごと除外**する
-      （CP3。traceability 層は学習者に見せない）。
-    - ``label`` が裸の内部 ID 形なら element_type 別の一般ラベルへ置換し
-      ``unresolved`` を立てる。このとき **``sublabel`` は保持する**（一般ラベルが
-      2件並んでも区別できるようにする = RC6 の再発防止）。
-    - ``sublabel`` に内部 ID / 生 TeX が混ざっていればその欄だけ空にする（項目は残す）。
-    - 生 TeX のラベルは一般ラベルへ落とす（式は再掲しない = EH1。equation は先に
-      論文の式番号を試す）。**記号（``symbol``）だけは TeX でも遮断しない** —
-      記号は式の再掲ではなく読解の部品で、レンダリング可否はフロントの
-      ``looksLikeRenderableTex`` ゲートが判断する（§5.4）。
-    - ``navigable`` は学習者が実際に再フェッチできる型かで作り直す（さらに
-      evidence / derivation は明示的に拒否する —
-      ``_LEARNER_FORCED_NON_NAVIGABLE_ELEMENT_TYPES``）。
-    """
-    element_type = str(item.get("element_type") or "")
-    element_id = item.get("element_id")
-    qualifier = str(item.get("qualifier") or "").strip()
-    if qualifier == QUALIFIER_EQUATION_DETAIL:
-        return None
-
-    label = str(item.get("label") or "")
-    unresolved = bool(item.get("unresolved"))
-    # EC1/EC2: レーンの相手ラベルにも生 TeX が混ざり得る（equation は式番号があれば
-    # それを、無ければ一般ラベルへ）。記号だけは TeX でも遮断しない（§5.4）。
-    is_symbol = element_type == _ITEM_TYPE_SYMBOL
-    if not is_symbol and looks_like_tex_math(label):
-        replacement = (
-            _equation_focus_label("", str(element_id or ""))
-            if element_type == ELEMENT_EQUATION
-            else ""
-        )
-        if replacement:
-            label = replacement
-        else:
-            label, unresolved = _generic_item_label(element_type), True
-    elif _is_internal_id_label(label, element_type, element_id):
-        label, unresolved = _generic_item_label(element_type), True
-
-    return {
-        "id": element_id,
-        "element_type": item.get("element_type"),
-        "label": label,
-        "sublabel": _safe_text(item.get("sublabel")),
-        "qualifier": qualifier,
-        "group": _normalized_group(item.get("group")),
-        "unresolved": unresolved,
-        "relation_label": item.get("relation_label"),
-        "relation_status": item.get("relation_status"),
-        "navigable": _learner_navigable(element_type, element_id),
-    }
-
-
 def _visible_items(items: Any) -> list[dict]:
-    """candidate（LE2）と式の詳細層（CP3）を除外して射影し、レーン上限で切る。"""
-    projected: list[dict] = []
-    for item in _json_list(items):
-        if not isinstance(item, dict) or item.get("relation_status") == CONTEXT_STATUS_CANDIDATE:
-            continue
-        entry = _project_item(item)
-        if entry is None:
-            continue
-        projected.append(entry)
-        if len(projected) >= _LANE_MAX:
-            break
-    return projected
+    """candidate（LE2）と式の詳細層（CP3）を除外して射影し、レーン上限で切る。
+
+    実体は component 文脈 API と共有する
+    ``learner_context_common.visible_lane_items``（ITEM v2 のキー集合で射影する）。
+    """
+    return learner_context_common.visible_lane_items(items)
 
 
 def _project_intrinsic(value: Any) -> dict:
