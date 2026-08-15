@@ -168,6 +168,9 @@ PDF アップロード
   ／[要素文脈の提示再設計](features/element_context_presentation_redesign.md)
 - [数式ホバー内容](features/equation_hover_content_design.md)
   ／[数式文脈パネル表示](features/equation_context_panel_display_design.md)
+- [痕跡kind登録簿と主権台帳v1「わたしの記録」](features/trace_registry_sovereignty_ledger_design.md) — パーソナライズ実装計画 Phase 1
+- [帰還の扉（帰還の三段 v1）](features/return_door_design.md) — 同 Phase 2
+- [構造の降下路（足場ダイヤル・楽屋 v1）](features/structure_descent_design.md) — 同 Phase 3
 
 ### 群4: 地図と位置づけ
 
@@ -197,6 +200,8 @@ PDF アップロード
 - [二層説明（generic/contextual）+ 図のコース流通](features/hierarchical_context_explanation_design.md)
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)
+- [宣言された弁と静かな計器（教員支援 v1）](features/teacher_triage_instruments_design.md) — パーソナライズ実装計画 Phase 4
+- [ゼミ前ブリーフと鏡面化](features/seminar_brief_mirroring_design.md) — 同 Phase 5
 
 ### 群7: 運営基盤
 

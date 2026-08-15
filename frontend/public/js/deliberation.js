@@ -2700,7 +2700,10 @@
   // 導線を持たず、代わりに本文のインライン編集（既存 PATCH: 旧行 superseded → 教員名義の
   // 新行 INSERT）を持つ。鮮度（§7.1）で元の解析結果が変わった承認済みの素材も同じ
   // グループに事実文付きで並べる（自動で非承認に落とさない）。
-  var explanationReviewState = { documentId: null, items: null, selected: {} };
+  // sortOrder は負荷順トリアージ（teacher_triage_instruments_design.md §2, TT1）:
+  // 既定は従来順（"default"）で、明示トグルでのみ "load" になる。localStorage 等へは
+  // 保存せず、インベントリを閉じる（_resetExplanationReviewState）と毎回既定に戻る。
+  var explanationReviewState = { documentId: null, items: null, selected: {}, sortOrder: "default" };
   var EXPLANATION_REVIEW_MAX_BULK = 200;
   var EXPLANATION_DOCUMENT_GROUP_LABEL = "この論文の議論のきっかけ";
   var EXPLANATION_STALE_NOTICE = "元の解析結果が変わっています";
@@ -2712,7 +2715,7 @@
   };
 
   function _resetExplanationReviewState() {
-    explanationReviewState = { documentId: null, items: null, selected: {} };
+    explanationReviewState = { documentId: null, items: null, selected: {}, sortOrder: "default" };
   }
 
   // GET/POST とも同じ document スコープのベースパスを共有する（許可リストの
@@ -2787,6 +2790,17 @@
     var selectable = _explanationReviewSelectable(exp);
     var editable = _isDocumentScopeExplanation(exp);
     var statusLabel = selectable ? "" : (EXPLANATION_REVIEW_STATUS_LABELS[exp.status] || exp.status || "");
+    // 負荷順トリアージ（§2, TT2）: サーバが返す段階ラベル（低/中/高/最高位）を
+    // そのまま表示する（JS 側に閾値・語彙表を持たない）。load 並び替え中にラベルが
+    // 空の候補は「影響度を導出できない候補」と正直にラベルする（縮退を隠さない。
+    // 末尾配置はサーバ側の責務）。
+    var loadChip = "";
+    if (exp.load_level_label) {
+      loadChip = ' <span class="deliberation-annotation-status">基盤への影響: ' +
+        escHtml(exp.load_level_label) + '</span>';
+    } else if (explanationReviewState.sortOrder === "load") {
+      loadChip = ' <span class="deliberation-annotation-status">影響度を導出できない候補</span>';
+    }
     return '<div class="deliberation-annotation-card deliberation-explanation-review-card" data-explanation-id="' +
         escHtml(exp.id) + '">' +
       '<label style="display:flex;align-items:flex-start;gap:6px;cursor:pointer">' +
@@ -2802,6 +2816,7 @@
           (statusLabel
             ? ' <span class="deliberation-annotation-status">' + escHtml(statusLabel) + '</span>'
             : '') +
+          loadChip +
           (exp.stale
             ? ' <span class="deliberation-annotation-status">' +
                 escHtml(exp.stale_notice || EXPLANATION_STALE_NOTICE) + '</span>'
@@ -2982,7 +2997,12 @@
     var buttons = card.querySelectorAll("[data-explanation-review-action]");
     Array.prototype.forEach.call(buttons, function (b) { b.disabled = true; });
     var path = "/admin/element-explanations/" + encodeURIComponent(explanationId) + "/" + action;
-    apiFetch(path, { method: "POST" })
+    // TT3（来歴を偽らない）: どの並び順の下で確定したかを監査 metadata に残すため
+    // 現在の sort_order を同梱する。
+    apiFetch(path, {
+      method: "POST",
+      body: JSON.stringify({ sort_order: explanationReviewState.sortOrder || "default" })
+    })
       .then(_parseJsonResponse)
       .then(function () {
         _removeExplanationsFromReviewQueue([explanationId]);
@@ -3061,7 +3081,12 @@
       var documentId = explanationReviewState.documentId;
       apiFetch(_explanationReviewBasePath(documentId) + "/bulk-review", {
         method: "POST",
-        body: JSON.stringify({ action: action, explanation_ids: ids })
+        // sort_order は TT3（来歴を偽らない）の監査 metadata 用。
+        body: JSON.stringify({
+          action: action,
+          explanation_ids: ids,
+          sort_order: explanationReviewState.sortOrder || "default"
+        })
       })
         .then(_parseJsonResponse)
         .then(function (data) {
@@ -3099,6 +3124,30 @@
     if (modal) modal.remove();
   }
 
+  // 負荷順トリアージ（TT1 沈黙の並べ替えを作らない）: 適用中の並び順を常に宣言する。
+  // 既定（従来順）のときは宣言行を出さない — 並べ替えを「していない」ときに宣言は不要。
+  function _updateExplanationReviewSortUi() {
+    var btn = document.getElementById("deliberation-explanation-review-sort-toggle");
+    if (btn) {
+      btn.textContent = explanationReviewState.sortOrder === "load"
+        ? "並び順: 従来の順に戻す"
+        : "並び順: 負荷の高い順";
+    }
+    var note = document.getElementById("deliberation-explanation-review-sort-note");
+    if (note) note.hidden = explanationReviewState.sortOrder !== "load";
+  }
+
+  // ソートトグル（明示ボタン）。並び替えはサーバの責務（段階ラベル降順・導出不能は
+  // 末尾）のため、切り替え時のみ再取得する。選択状態は再取得でクリアされる。
+  function _toggleExplanationReviewSort() {
+    explanationReviewState.sortOrder =
+      explanationReviewState.sortOrder === "load" ? "default" : "load";
+    _updateExplanationReviewSortUi();
+    _loadExplanationReviewQueue(explanationReviewState.documentId).then(function () {
+      _renderExplanationReviewList();
+    });
+  }
+
   function _openExplanationReviewModal() {
     if (!explanationReviewState.items || !explanationReviewState.items.length) return;
     _closeExplanationReviewModal();
@@ -3124,7 +3173,9 @@
           '<button type="button" id="deliberation-explanation-review-deselect-all" class="deliberation-annotation-btn">選択解除</button>' +
           '<button type="button" id="deliberation-explanation-review-approve-selected" class="deliberation-annotation-btn commit" data-ui-anchor="deliberation.inventory-bulk-review" disabled>選択した0件を承認</button>' +
           '<button type="button" id="deliberation-explanation-review-dismiss-selected" class="deliberation-annotation-btn dismiss" data-ui-anchor="deliberation.inventory-bulk-review" disabled>選択した0件を却下</button>' +
+          '<button type="button" id="deliberation-explanation-review-sort-toggle" class="deliberation-annotation-btn" data-ui-anchor="deliberation.review-sort-toggle">並び順: 負荷の高い順</button>' +
         '</div>' +
+        '<div id="deliberation-explanation-review-sort-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin:0 0 6px" hidden>基盤への影響が大きい順に並んでいます</div>' +
         '<div id="deliberation-explanation-review-message" style="font-size:11.5px;margin:0 0 8px"></div>' +
         '<div id="deliberation-explanation-review-list" style="overflow-y:auto;max-height:60vh;display:flex;flex-direction:column;gap:8px"></div>' +
       '</div>';
@@ -3149,8 +3200,11 @@
     document.getElementById("deliberation-explanation-review-dismiss-selected").addEventListener("click", function () {
       _bulkReviewExplanations("dismiss");
     });
+    document.getElementById("deliberation-explanation-review-sort-toggle")
+      .addEventListener("click", _toggleExplanationReviewSort);
 
     _renderExplanationReviewList();
+    _updateExplanationReviewSortUi();
   }
 
   // インベントリモーダルのツールバー付近に置く入口ボタン。件数はラベルにのみ
@@ -3190,9 +3244,12 @@
       });
   }
 
-  // GET のみ・DB非変更。openInventory 時に1回だけ呼ぶ（ポーリング禁止・§9 と同じ規約）。
+  // GET のみ・DB非変更。openInventory 時に1回だけ呼ぶ（ポーリング禁止・§9 と同じ規約。
+  // 例外はソートトグルの明示操作 — 並び替えはサーバの責務のため再取得が要る）。
+  // 並び順パラメータは load のときのみ付ける（既定は従来順でパラメータ自体を送らない, TT1）。
   function _loadExplanationReviewQueue(documentId) {
-    return apiFetch(_explanationReviewBasePath(documentId) + "?status=candidate")
+    var sortParam = explanationReviewState.sortOrder === "load" ? "&sort=load" : "";
+    return apiFetch(_explanationReviewBasePath(documentId) + "?status=candidate" + sortParam)
       .then(_parseJsonResponse)
       .then(function (data) {
         return _loadStaleApprovedDocumentExplanations(documentId, (data && data.explanations) || []);

@@ -2036,6 +2036,14 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   これに委譲する。**学習者向け文脈の射影・遮断を再実装しない**（agent ID トークン遮断は
   component レーンのみ＝claim/equation への拡張はオーナー判断待ち。DTO は component=旧6キー /
   element=ITEM v2 の意図的世代差を維持）。
+- **`backend/core/trace_registry.py`**（2026-08-15 新設、正本設計書
+  `docs/features/trace_registry_sovereignty_ledger_design.md`） — `interest_traces` の
+  **kind 登録簿の正本**（8 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、
+  + 主要消費者の方式宣言 `CONSUMERS`）。**新しい kind・消費者は登録簿に宣言する** —
+  `test_trace_registry_guardrails.py` が消費面ソースとの一致を固定し、`services._INTEREST_KINDS`
+  は登録簿からの導出。最初の読み手は主権台帳v1「わたしの記録」（`core/trace_ledger.py` +
+  `routes/my_records.py`、GET のみ・本人のみ・status ラベルは `label_vocab.TRACE_STATUS_LABELS`。
+  学習者本人の持ち出しは意図的に監査記帳しない — 本人行動の記録は観察面の拡大になるため）。
 - **`backend/core/document_pipeline/orchestrator.py` のステージ追加**（Tier 3-19） —
   新ステージは `_stage_<name>(ctx)` 関数 + `_PIPELINE_STEPS` リストへの登録で追加する
   （インライン展開に戻さない）。ステージ間の受け渡しは `PipelineContext` のフィールド。

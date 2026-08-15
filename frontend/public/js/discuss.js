@@ -246,7 +246,11 @@
     if (!area || !area.hidden) return;
     var docs = (openingCache.data && Array.isArray(openingCache.data.documents))
       ? openingCache.data.documents : [];
-    var html = '<div class="discuss-section-sub">この論文は何を示すと思いますか？</div>';
+    // 構造の降下路（SD6 宣言された留保, structure_descent_design.md §3）: 出し惜しみが
+    // 働く opt-in 枠には宣言一行を常設する（静的文字列のみ。既存の文言・プロンプト・
+    // ボタンは非改変）。
+    var html = '<div class="elicit-declaration">いまは答えを配らない対話です</div>';
+    html += '<div class="discuss-section-sub">この論文は何を示すと思いますか？</div>';
     if (docs.length) {
       html += '<ul class="cycle-predict-doc-list">';
       docs.forEach(function (doc) { html += '<li>' + esc(doc.title || "") + '</li>'; });
@@ -1151,6 +1155,112 @@
     return html;
   }
 
+  // 帰還の扉（docs/features/return_door_design.md §2.1/§2.2）: 着地画面末尾の
+  // 「未来の自分への書き置き」。任意入力で、書き置きを促す確認ダイアログ・リマインドは
+  // 出さない（RD3。保存成功時の控えめな事実文のみ）。脇の「今日のあなたの言葉」トレイは
+  // **既定畳み**（details）で、開いたときに1回だけ todays-words をフェッチし、本人発話の
+  // 逐語のみを列挙する（RD1: AI 応答を混ぜない。words[].text 以外は描画しない）。
+  function leaveNoteSectionHtml() {
+    var html = '<div class="discuss-landing-section" id="discuss-leave-note-section">';
+    html += '<div class="discuss-landing-section-hd">未来の自分への書き置き</div>';
+    html += '<p class="discuss-landing-section-body">次にこのコースを開いたときの自分に宛てて、' +
+      '一言だけ残せます。任意です。書かなければ何も表示されません。</p>';
+    html += '<div class="discuss-leave-note" id="discuss-leave-note">';
+    html += '<textarea id="discuss-leave-note-input" rows="2" ' +
+      'placeholder="任意・書かなくても進めます"></textarea>';
+    html += '<div class="discuss-landing-card-actions">';
+    html += '<button type="button" class="discuss-landing-card-btn" id="discuss-leave-note-save">残す</button>';
+    html += '</div></div>';
+    html += '<details class="discuss-todays-words" id="discuss-todays-words">';
+    html += '<summary>今日のあなたの言葉</summary>';
+    html += '<div class="discuss-todays-words-note">あなたの言葉（今日の発話の逐語）です。' +
+      '押すと書き置きに引用されます。</div>';
+    html += '<div class="discuss-todays-words-list" id="discuss-todays-words-list"></div>';
+    html += '</details>';
+    html += '</div>';
+    return html;
+  }
+
+  // 「今日のあなたの言葉」トレイの中身。details を開いたときに1回だけフェッチする
+  // （dataset.loaded ガード。着地画面は表示のたびに DOM を作り直すので自然にリセットされる）。
+  // 描画は createElement + textContent のみ（RD1）。words[].text 以外のフィールドは
+  // 描画しない（AI 応答・話者情報を混ぜる経路を作らない）。
+  async function loadTodaysWordsOnce() {
+    var list = document.getElementById("discuss-todays-words-list");
+    if (!list || list.dataset.loaded === "true") return;
+    list.dataset.loaded = "true";
+    list.textContent = "読み込み中…";
+    var data = null;
+    var failed = false;
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + encodeURIComponent(ctx.courseId) + "/cycle/todays-words"
+      );
+      if (res.ok) data = await res.json();
+      else failed = true;
+    } catch (e) {
+      failed = true;
+    }
+    list.textContent = "";
+    var words = (data && Array.isArray(data.words)) ? data.words : [];
+    if (failed || !words.length) {
+      var empty = document.createElement("div");
+      empty.className = "discuss-muted";
+      empty.textContent = failed ? "いまは表示できません。" : "今日の発話はまだありません。";
+      list.appendChild(empty);
+      return;
+    }
+    words.forEach(function (w) {
+      var text = (w && typeof w.text === "string") ? w.text : "";
+      if (!text) return;
+      var btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "discuss-todays-word";
+      btn.textContent = text; // 本人発話の逐語のみ（RD1）
+      btn.addEventListener("click", function () {
+        // タップでその一文を書き置き欄へ引用（追記）する。
+        var ta = document.getElementById("discuss-leave-note-input");
+        if (!ta) return;
+        ta.value = ta.value ? (ta.value + "\n" + text) : text;
+        ta.focus();
+      });
+      list.appendChild(btn);
+    });
+    if (data && data.truncated) {
+      var note = document.createElement("div");
+      note.className = "discuss-muted";
+      note.textContent = "最近の発話に絞って表示しています。";
+      list.appendChild(note);
+    }
+  }
+
+  // 書き置きの保存（既存 cycle/intention に role='leave_note' で相乗り）。saveReflection と
+  // 同型: 失敗時は本人が書いた文章を消さず事実文を出す。成功時は控えめな事実文のみ（RD3）。
+  async function saveLeaveNote() {
+    var box = document.getElementById("discuss-leave-note");
+    var input = document.getElementById("discuss-leave-note-input");
+    if (!box || !input) return;
+    var text = (input.value || "").trim();
+    if (!text) { input.focus(); return; }
+    var btn = document.getElementById("discuss-leave-note-save");
+    if (btn) btn.disabled = true;
+    var data = await postCycleIntention({ role: "leave_note", text: text });
+    if (!data) {
+      if (btn) btn.disabled = false;
+      var err = box.querySelector(".discuss-landing-reflect-error");
+      if (!err) {
+        err = document.createElement("div");
+        err.className = "discuss-landing-reflect-error";
+        box.appendChild(err);
+      }
+      err.textContent = "保存できませんでした。入力はそのまま残しています。";
+      return;
+    }
+    invalidateOpeningCache();
+    box.innerHTML = '<div class="discuss-landing-card-done">残しました。' +
+      '次にこのコースを開いたときに表示されます。</div>';
+  }
+
   function landingShellHtml(bodyHtml) {
     return '' +
       '<div class="discuss-landing-panel" role="dialog" aria-label="今日の議論を終える">' +
@@ -1222,6 +1332,16 @@
     var cycleLeaveFreeLink = document.getElementById("cycle-leave-free-link");
     if (cycleLeaveFreeLink) {
       cycleLeaveFreeLink.addEventListener("click", openCycleLeaveFreeInput);
+    }
+    // 帰還の扉（return_door_design.md §2.1/§2.2）: 書き置きの保存と、
+    // 「今日のあなたの言葉」トレイ（開いたときに1回だけフェッチ）。
+    var leaveNoteSaveBtn = document.getElementById("discuss-leave-note-save");
+    if (leaveNoteSaveBtn) leaveNoteSaveBtn.addEventListener("click", saveLeaveNote);
+    var todaysWords = document.getElementById("discuss-todays-words");
+    if (todaysWords) {
+      todaysWords.addEventListener("toggle", function () {
+        if (todaysWords.open) loadTodaysWordsOnce();
+      });
     }
     // スキップボタン（ヘッダ×・フッタ）はシェル描画直後（maybeShowLanding）で
     // 既に配線済み — 読み込み中でも即スキップできるようにするため。ここで
@@ -1371,6 +1491,9 @@
     html += '<button type="button" class="discuss-landing-btn" id="discuss-landing-continue-btn">' +
       'このトピックで続きを学ぶ</button>';
     html += '</div>';
+
+    // 帰還の扉（return_door_design.md §2.1/§2.2）: 着地画面の末尾に書き置き欄を置く。
+    html += leaveNoteSectionHtml();
 
     // Field Atlas 現在地チップ: 既にロード済みの状態からのみ安価に読む（新規APIは呼ばない）。
     // 現状 atlas-minimap.js は「いまここ」情報を外部から読める形で公開していないため、

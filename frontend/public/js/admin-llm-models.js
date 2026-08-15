@@ -192,6 +192,33 @@
     }
   }
 
+  // 静かな計器（teacher_triage_instruments_design.md §3.1）: コスト見通しの一行。
+  // サーバの forecast が show=true のときだけ事実文を表示する（収まる見込みのときは
+  // 行自体を出さない — 督促化の防止）。事実文の提示までで、ボタンの無効化・処理の
+  // 中止はしない（TT4）。数値・残回数は出さない（メッセージ本文はサーバの正本）。
+  function _setMaterialsCostNote(text) {
+    var noteEl = document.getElementById("llm-model-cost-note");
+    if (!noteEl) return;
+    if (text) {
+      noteEl.textContent = text;
+      noteEl.hidden = false;
+    } else {
+      noteEl.textContent = "";
+      noteEl.hidden = true;
+    }
+  }
+
+  // アップロードゾーン用のコスト見通し（document なし版）。教材管理パネルの初期化時に
+  // 1回だけ取得する（ポーリング禁止）。fail-open: 取得失敗・想定外の応答では何も
+  // 出さず、アップロード処理も止めない。
+  function _loadMaterialsCostForecast() {
+    _fetchJson("/admin/llm-usage/forecast").then(function (data) {
+      _setMaterialsCostNote(data && data.show === true && data.message ? data.message : "");
+    }).catch(function () {
+      _setMaterialsCostNote("");
+    });
+  }
+
   function renderMaterialsSummary() {
     var valueEl = document.getElementById("llm-model-summary-value");
     var btn = document.getElementById("llm-model-change-btn");
@@ -493,6 +520,7 @@
       });
     }
     loadMaterialsCatalog();
+    _loadMaterialsCostForecast();
   }
 
   // アップロード時に formData へ乗せる models dict を返す（カタログ外の値は含めない。422回避）。
@@ -537,7 +565,33 @@
     return count;
   }
 
-  function initReanalyzePanel(containerEl, lastOpts) {
+  // 静かな計器（teacher_triage_instruments_design.md §3.1）: 再解析モーダル用の
+  // コスト見通し（document 版）。show=true のときだけ事実文を表示する（収まる見込みの
+  // ときは行自体を出さない）。事実文の提示までで、「再開する」の無効化・処理の中止は
+  // しない（TT4）。fail-open: 取得失敗・想定外の応答では何も出さない。
+  function _loadReanalyzeCostForecast(documentId) {
+    var noteEl = document.getElementById("llm-model-reanalyze-cost-note");
+    if (!noteEl || !documentId) return;
+    var analyzeImagesEl = document.getElementById("reanalyze-analyze-images");
+    var analyzeImages = !!(analyzeImagesEl && analyzeImagesEl.checked);
+    _fetchJson(
+      "/admin/llm-usage/forecast/documents/" + encodeURIComponent(documentId) +
+        "?analyze_images=" + (analyzeImages ? "true" : "false")
+    ).then(function (data) {
+      if (data && data.show === true && data.message) {
+        noteEl.textContent = data.message;
+        noteEl.hidden = false;
+      } else {
+        noteEl.textContent = "";
+        noteEl.hidden = true;
+      }
+    }).catch(function () {
+      noteEl.textContent = "";
+      noteEl.hidden = true;
+    });
+  }
+
+  function initReanalyzePanel(containerEl, lastOpts, documentId) {
     if (!containerEl) return;
     rzPanelOpen = false;
     rzCatalog = { pipeline: null, vision: null };
@@ -558,6 +612,9 @@
         ? '<div id="llm-model-reanalyze-stage-note" style="font-size:11px;color:var(--color-text-tertiary);margin:0 0 8px">' +
             "ステージ別の指定があります（" + stageCount + "件・前回と同じ）。</div>"
         : "") +
+      // 静かな計器（§3.1）: コスト見通しの一行の器。既定は hidden（収まる見込みの
+      // ときは行ごと出さない）。
+      '<div id="llm-model-reanalyze-cost-note" data-ui-anchor="materials.cost-forecast-note" style="font-size:11px;color:var(--color-text-tertiary);margin:0 0 8px" hidden></div>' +
       '<div id="llm-model-reanalyze-panel" hidden></div>';
 
     var changeBtn = document.getElementById("llm-model-reanalyze-change-btn");
@@ -578,8 +635,12 @@
     if (analyzeImagesEl) {
       analyzeImagesEl.addEventListener("change", function () {
         if (rzPanelOpen) _renderReanalyzePanelBody();
+        // 図の解析の有無で見通しが変わるため、チェック変更時のみ取り直す
+        // （イベント駆動の1回ずつ・ポーリングではない）。
+        _loadReanalyzeCostForecast(documentId);
       });
     }
+    _loadReanalyzeCostForecast(documentId);
 
     _fetchCatalogPair().then(function (results) {
       var pipelineData = results[0];

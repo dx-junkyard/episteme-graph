@@ -60,6 +60,7 @@ __all__ = [
     "MATERIAL_STATE_LABELS",
     "SCRIPT_STATUS_LABELS",
     "SUPPORT_SECTION_LABELS",
+    "TRACE_STATUS_LABELS",
     "VERIFICATION_STATUS_LABELS_LEDGER",
     "VERIFICATION_STATUS_LABELS_LENS",
     "WEIGHT_LABELS",
@@ -67,6 +68,11 @@ __all__ = [
     "WEIGHT_RELATION",
     "WEIGHT_THRESHOLD_MEDIUM",
     "WEIGHT_THRESHOLD_STRONG",
+    "WM_INTERACTION_DENSITY",
+    "WM_INTERACTION_LABELS",
+    "WM_INTERACTION_LEVEL_SCALE",
+    "WM_INTERACTION_THRESHOLD_MANY",
+    "WM_INTERACTION_THRESHOLD_VERY_MANY",
 ]
 
 
@@ -173,6 +179,32 @@ WEIGHT_RELATION = GradedScale(
 WEIGHT_LABELS = MappingProxyType(dict(zip(WEIGHT_LEVEL_SCALE.labels, WEIGHT_RELATION.labels)))
 
 
+# ── 要素相互作用性（WMレンズ, 教員支援 Phase 4 §3.2）─────────────────────────────
+# スライド内で同時に現れる「相互依存する記号 + 数式」の密度（決定論スコア =
+# 突合できた distinct 記号数 + 数式件数, ``core/lecture_wm.py``）の段階化。
+# 固定閾値型なのでここが正本（パーセンタイル型の D層 load は ``core/doubt/schema.py``
+# 側 — §27 の住み分けどおり寄せない）。末尾（few = 少ない）が最も慎重な段階で、
+# 未測定はここへ倒れ、WMレンズは few のとき表示自体を省略する（「平常時は視界に無い」）。
+WM_INTERACTION_THRESHOLD_VERY_MANY = 9
+WM_INTERACTION_THRESHOLD_MANY = 5
+
+#: 段階キー側（``very_many / many / few``）。DTO のキーは日本語にしない。
+WM_INTERACTION_LEVEL_SCALE = GradedScale(
+    (WM_INTERACTION_THRESHOLD_VERY_MANY, WM_INTERACTION_THRESHOLD_MANY),
+    ("very_many", "many", "few"),
+)
+
+#: 表示側（「非常に多い / 多い / 少ない」）。
+WM_INTERACTION_DENSITY = GradedScale(
+    (WM_INTERACTION_THRESHOLD_VERY_MANY, WM_INTERACTION_THRESHOLD_MANY),
+    ("非常に多い", "多い", "少ない"),
+)
+
+WM_INTERACTION_LABELS = MappingProxyType(
+    dict(zip(WM_INTERACTION_LEVEL_SCALE.labels, WM_INTERACTION_DENSITY.labels))
+)
+
+
 # ---------------------------------------------------------------------------
 # 共有語彙表（複数レイヤーでバイト一致していたもの）
 # ---------------------------------------------------------------------------
@@ -189,6 +221,24 @@ SUPPORT_SECTION_LABELS = MappingProxyType({
     "uncertainty_sources": "不確実性の源",
     "diagnostic_consequences": "診断的帰結",
     "future_requirements": "将来要件",
+})
+
+#: ``interest_traces.status``（語彙の正本は ``api/services.py::_TRACE_STATUSES``、
+#: kind ごとの使用宣言は ``core/trace_registry.py``）の日本語ラベル。
+#: 台帳「わたしの記録」（``core/trace_ledger.py``）の status 表示が使う。
+#: ``dismissed`` / ``superseded`` は行削除ではなく保持を明示する文言（P4）、
+#: ``revisited`` / ``abstracted`` は書き込み経路が現存しない dead 語彙だが
+#: 既存行の表示のために保持する（TR3）。
+TRACE_STATUS_LABELS = MappingProxyType({
+    "open": "未解決",
+    "revisited": "再訪",
+    "resolved": "解決済み",
+    "candidate": "AIの候補",
+    "dismissed": "見送り（保持）",
+    "articulated": "言葉にした",
+    "connected": "つないだ",
+    "abstracted": "抽象化",
+    "superseded": "書き直しで差し替え",
 })
 
 #: ``epistemic_ledger.verification_status``（migration 029 の CHECK 語彙）の

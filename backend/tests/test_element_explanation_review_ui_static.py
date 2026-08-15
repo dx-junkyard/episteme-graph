@@ -454,7 +454,10 @@ class TestDiscussOpeningSeedFreshness:
     def test_select_all_skips_non_candidate_rows(self):
         src = _read(DELIBERATION_JS)
         start = src.index('id="deliberation-explanation-review-select-all"')
-        block = src[start:start + 1600]
+        # 窓幅はモーダル HTML（ツールバー〜宣言一行〜message）を挟んで全選択リスナーに
+        # 届く長さ。負荷順トリアージ（teacher_triage_instruments_design.md §2）の
+        # ソートトグル + 宣言一行の追加で 1600 では届かなくなったため拡大した。
+        block = src[start:start + 2600]
         assert "_explanationReviewSelectable(exp)" in block
 
     def test_status_label_shown_for_non_candidate_rows(self):

@@ -291,6 +291,8 @@ html.learn-page > body {
   max-height: 42%;
   display: flex;
   flex-direction: column;
+  /* 欄外の印（#margin-marks, return_door_design.md §2.3）の絶対配置の基準。 */
+  position: relative;
   border: 0.5px solid var(--color-border-tertiary);
   border-radius: 10px;
   background: var(--color-background-secondary, #fafbfd);
@@ -318,6 +320,124 @@ html.learn-page > body {
   gap: 10px;
   padding: 8px 12px;
   border-top: 0.5px solid var(--color-border-tertiary);
+}
+
+/* ── 帰還の扉（再入口インレイ, docs/features/return_door_design.md §2.1）──────
+   上段（.material-region）の圧縮規約を壊さない flex: 0 0 auto の薄い1区画。
+   本文は app.js が textContent でのみ描画する（RD1）。empty なら hidden のまま。 */
+.return-door {
+  flex: 0 0 auto;
+  position: relative;
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  background: var(--color-background-secondary, #fafbfd);
+  padding: 8px 30px 8px 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.return-door-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  overflow: hidden;
+}
+.return-door-row + .return-door-row {
+  margin-top: 4px;
+}
+.return-door-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+.return-door-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.return-door-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  background: none;
+  border: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  font-family: inherit;
+}
+.return-door-close:hover {
+  color: var(--color-text-primary);
+}
+
+/* ── 欄外の印（同 §2.3）: 教材区画右余白の淡い点レイヤ ───────────────────
+   絶対配置（基準は .material-region）なので flex 行に参加せず、
+   レイアウト規約（上段が縮む・下段を押し出さない）に影響しない。 */
+.margin-marks {
+  position: absolute;
+  top: 40px;
+  right: 2px;
+  bottom: 44px;
+  width: 14px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+.margin-mark-dot {
+  pointer-events: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  font-size: 8px;
+  line-height: 1;
+  color: var(--color-text-info);
+  opacity: 0.35;
+}
+.margin-mark-dot.tension {
+  color: var(--color-text-warning, #b8860b);
+}
+.margin-mark-dot:hover,
+.margin-mark-dot:focus {
+  opacity: 0.85;
+}
+.margin-marks-toggle {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.margin-marks-toggle[aria-pressed="true"] {
+  color: var(--color-text-info);
+  border-color: var(--color-text-info);
+}
+.margin-marks-tip {
+  position: fixed;
+  max-width: 320px;
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  z-index: 1200;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 教材区画ヘッダ（②提示形式, §3.2）: 左=「教材 · トピック名」/ 右=提示形式セグメント。 */
@@ -9066,6 +9186,37 @@ body.admin-inspect-mode textarea:disabled {
   margin-top: 6px;
 }
 
+/* ── 鏡面化（seminar_brief_mirroring_design.md §2, EX-3b⑤）──────────────────
+   AI が学習者の解釈表明・詰まりを言い直した部分。本人発話と区別が付くよう
+   左ボーダー + 淡背景の控えめな区別に留める（強調色・バッジは使わない）。 */
+.mirror-block {
+  border-left: 3px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  border-radius: 0 6px 6px 0;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.mirror-label {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
+.mirror-text {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.mirror-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.mirror-chip {
+  font-size: 12px;
+}
+
 /* ── 分岐チップ（チャット区画・discuss モード限定）───────────────────── */
 .discuss-branch-chips {
   display: flex;
@@ -9250,6 +9401,54 @@ body.admin-inspect-mode textarea:disabled {
   font-size: 11.5px;
   color: var(--color-text-secondary);
   margin-top: 6px;
+}
+/* 帰還の扉（return_door_design.md §2.1/§2.2）: 着地画面末尾の「未来の自分への書き置き」と
+   「今日のあなたの言葉」トレイ（既定畳み・本人発話の逐語のみ）。 */
+.discuss-leave-note textarea {
+  width: 100%;
+  min-height: 52px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.discuss-todays-words {
+  margin-top: 8px;
+}
+.discuss-todays-words > summary {
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.discuss-todays-words-note {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin: 6px 0;
+}
+.discuss-todays-words-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 12px;
+}
+.discuss-todays-word {
+  border: 1px solid var(--color-border-tertiary);
+  background: var(--color-background-secondary);
+  border-radius: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+}
+.discuss-todays-word:hover {
+  border-color: var(--color-border-primary);
 }
 .discuss-landing-empty {
   font-size: 12px;
@@ -10464,4 +10663,155 @@ button.element-card-item:focus-visible .element-card-item-label {
   margin-top: 8px;
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   構造の降下路（Phase 3 — 足場ダイヤル・楽屋,
+   docs/features/structure_descent_design.md §3/§4）。
+   すべて要素文脈ポップオーバー内のみの区画 — 学習画面レイアウトのフレックス規約
+   （.material-region / .ca / 下段固定）には一切触れない。
+   ══════════════════════════════════════════════════════════════════ */
+/* 宣言一行（SD6）— 降下路枠・Elicit（discuss.js / reconstruction.js）で共用。控えめに */
+.descent-declaration,
+.elicit-declaration {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-bottom: 6px;
+}
+.descent-frame {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--lx-line, #e6e9ef);
+  border-radius: 8px;
+  background: var(--color-background-secondary, #f5f5f7);
+  font-size: 12px;
+}
+.descent-rungs { margin: 2px 0; }
+.descent-rung {
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--color-border-tertiary, #e6e9ef);
+}
+.descent-rung:last-child { border-bottom: none; }
+.descent-rung-stage-label {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--color-background-tertiary, #ececf0);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 10px;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.descent-rung-text {
+  line-height: 1.6;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.descent-rung-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-symbol-row { margin: 4px 0; }
+.descent-symbol-head {
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.descent-symbol-line {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-reveal-row { margin: 4px 0; }
+.descent-reveal-op {
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.descent-reveal-io {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.descent-hint-btn,
+.descent-backstage-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.descent-hint-btn:disabled {
+  color: var(--color-text-tertiary, #aeaeb2);
+  cursor: default;
+}
+.descent-backstage-btn { color: var(--color-text-secondary, #6e6e73); }
+.descent-produce { margin-top: 8px; }
+.descent-produce > summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-produce-input,
+.backstage-ask-input {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 6px;
+  padding: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+/* 楽屋（SD4）: トーンを落ち着いた別色に変える（誘導・強調はしない） */
+.backstage-panel {
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--color-background-tertiary, #ececf0);
+  font-size: 12px;
+}
+.backstage-declaration {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.backstage-step { margin-bottom: 10px; }
+.backstage-step-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 4px;
+}
+.backstage-step-item {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-primary, #1d1d1f);
+  margin: 3px 0;
+}
+.backstage-ask { margin-top: 10px; }
+.backstage-ask-btn,
+.backstage-return-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.backstage-ask-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
 }

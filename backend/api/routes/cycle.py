@@ -29,12 +29,20 @@ from services import (
     record_cycle_anchor_mark,
     record_cycle_intention,
 )
-from core.cycle.derive import build_landing_candidates, build_revisit_facts
+from core.cycle.derive import (
+    build_landing_candidates,
+    build_return_door,
+    build_revisit_facts,
+    build_todays_words,
+)
 from core.cycle.map_diff import build_map_diff_facts, build_network_as_of
 from core.cycle.queries import (
     fetch_active_carryover,
+    fetch_active_leave_note,
     fetch_landing_candidates,
+    fetch_last_owned_tension,
     fetch_recent_traces_since,
+    fetch_todays_user_words,
 )
 from core.cycle.schema import INTENTION_ROLES, QUICK_LABELS
 from core.personal_graph.derive import derive_personal_network
@@ -228,6 +236,55 @@ def record_cycle_anchor_route(
     if trace_id is None:
         raise HTTPException(status_code=500, detail="Failed to record anchor")
     return {"ok": True, "trace_id": trace_id}
+
+
+@learning_router.get("/courses/{course_id}/cycle/return-door")
+def get_cycle_return_door_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """帰還の扉（return_door_design.md §2.1）— 読み取り専用・本人のみ・非LLM。
+
+    書き置き（leave_note）・持ち越しの問い（carryover）・最後に確定した tension の
+    3部品を本人の逐語のみで返す（RD1）。経過日数・件数は含めない（RD2/RD5）。
+    3部品とも無ければ ``{"empty": true}``（RD3）。導出失敗も同値へ縮退する
+    （fail-open — 扉が出ないだけで学習体験を止めない）。
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        leave_note_row = fetch_active_leave_note(current_user["id"], course_id)
+        carryover_row = fetch_active_carryover(current_user["id"], course_id)
+        tension_row = fetch_last_owned_tension(current_user["id"], course_id)
+        return build_return_door(leave_note_row, carryover_row, tension_row)
+    except Exception:
+        logger.warning("Failed to build return door", exc_info=True)
+        return {"empty": True}
+
+
+@learning_router.get("/courses/{course_id}/cycle/todays-words")
+def get_cycle_todays_words_route(
+    course_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """「今日のあなたの言葉」トレイ（return_door_design.md §2.2）— 読み取り専用・本人のみ。
+
+    当日にやり取りのあった学習チャットから **本人（user ロール）発話の逐語のみ**を返す
+    （assistant 行を返す経路は作らない, RD1）。上限超過は ``truncated: true`` で正直に
+    返す。導出失敗は空トレイへ縮退（fail-open）。
+    """
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    try:
+        rows = fetch_todays_user_words(current_user["id"], course_id)
+        return build_todays_words(rows)
+    except Exception:
+        logger.warning("Failed to build todays words", exc_info=True)
+        return {"words": [], "truncated": False}
 
 
 @learning_router.get("/courses/{course_id}/cycle/landing-candidates")

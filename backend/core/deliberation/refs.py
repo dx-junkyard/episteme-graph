@@ -128,6 +128,27 @@ def derivation_records(
     return [c for c in chains if isinstance(c, dict)] if isinstance(chains, list) else []
 
 
+def symbol_records(
+    document_id: str, *, artifacts: dict[str, Any] | None = None
+) -> list[dict[str, Any]]:
+    """document の symbol_registry artifact から記号レコード配列を返す（best-effort）。
+
+    実体は ``SymbolRegistryResult.records``（``src/episteme_graph/agents/symbol_registry/
+    schema.py`` の ``SymbolRecord``: ``symbol_id`` / ``canonical_symbol`` /
+    ``notation_variants`` / ``scope`` / ``defining_equation_ids`` /
+    ``used_in_equation_ids`` / ``definition_status`` / ``definition_evidence_texts`` /
+    ``review_reasons``）。``equation_records`` と同じ ``artifacts`` 省略規約
+    （``None`` なら自前取得）に従う。symbol_registry を持たない旧 run は空リスト。
+    """
+    if artifacts is None:
+        artifacts = document_run_artifacts(document_id)
+    stage = artifacts.get("symbol_registry") if isinstance(artifacts, dict) else None
+    if not isinstance(stage, dict):
+        return []
+    records = stage.get("records")
+    return [r for r in records if isinstance(r, dict)] if isinstance(records, list) else []
+
+
 def _resolve_theory_claim(element_id: str) -> ElementRef:
     if not _is_uuid(element_id):
         raise ElementResolutionError(f"invalid theory_claim id: {element_id!r}", kind="invalid")

@@ -432,6 +432,12 @@
       var landscapeBtn = m.document_id
         ? '<button class="ls-menu-item admin-landscape-doc-btn" type="button" data-ui-anchor="materials.row-landscape" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この論文が分野マップ（基準地図）のどこに位置づくかのAI候補を確認・却下・再検討します">位置づけ（分野マップ）…</button>'
         : "";
+      // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 輪講の前にこの論文の
+      // 「賭け金」（脆い前提・一点吊りの支持線・晴れ間）を10分で把握する read-only
+      // 合成ビュー（新テーブル・新LLMゼロ、SB1。document_id が必要）
+      var seminarBriefBtn = m.document_id
+        ? '<button class="ls-menu-item admin-seminar-brief-btn" type="button" data-ui-anchor="materials.row-seminar-brief" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="輪講の前に、この論文の脆い前提・一点吊りの支持線・晴れ間を確認します（読み取り専用）">ゼミ前ブリーフ…</button>'
+        : "";
       // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
       var figuresBtn = m.document_id
         ? '<button class="ls-menu-item admin-figures-btn" type="button" data-ui-anchor="materials.row-figures" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示">図・画像</button>'
@@ -459,6 +465,7 @@
             shareBtn +
             versionBtn +
             landscapeBtn +
+            seminarBriefBtn +
             estimateBtn +
             pdfBtn +
             resumeBtn +
@@ -521,6 +528,13 @@
     tbody.querySelectorAll(".admin-landscape-doc-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openLandscapeModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: read-only 合成ビューのモーダル
+    tbody.querySelectorAll(".admin-seminar-brief-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openSeminarBriefModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
       });
     });
 
@@ -1070,9 +1084,11 @@
     if (analyzeImagesCheckbox) analyzeImagesCheckbox.checked = !!(lastOpts && lastOpts.analyze_images);
 
     // M層（LLM モデル選択, migration 061）: 前回値を表示し「変更」で選び直せるようにする。
+    // docId は静かな計器（コスト見通しの一行, teacher_triage_instruments_design.md §3.1）
+    // の document 版 forecast 用。
     if (window.AdminLlmModels) {
       var llmModelRow = document.getElementById("reanalyze-llm-model-row");
-      if (llmModelRow) window.AdminLlmModels.initReanalyzePanel(llmModelRow, lastOpts);
+      if (llmModelRow) window.AdminLlmModels.initReanalyzePanel(llmModelRow, lastOpts, docId);
     }
 
     overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
@@ -2870,6 +2886,200 @@
         _landscapeResetProposeButton();
         _landscapeNotice((err && err.message) || LANDSCAPE_SKIP_TEXT.llm_call_failed, true);
       });
+  }
+
+  // ── ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1） ─────────────────
+  // 正本: docs/features/seminar_brief_mirroring_design.md
+  //   SB1 新テーブル・新LLMゼロ（既存投影の読み時合成 — このモーダルは読むだけ。書き込みAPIなし）
+  //   SB2 数値を見せない（件数・人数の生値なし。段階ラベル・事実文のみ描画する）
+  //   SB3 第4区画「学習者からの問い」は v1 空欄で予約（空欄は発見の流儀 — 警告色・催促文にしない）
+  //   SB4 学習者個人・学習者別件数への導線を作らない
+  // 描画は createElement / textContent 基調（本文変数を innerHTML に渡さない）。
+
+  // 第4区画の note がサーバから取れないときの固定文
+  // （正本: core/doubt/seminar_brief.py::LEARNER_HANDOFF_RESERVED_NOTE の逐語）。
+  var SEMINAR_BRIEF_RESERVED_NOTE = "（この区画は、学習者からの手渡しの仕組みの実装後に使われます）";
+  // 支持線の段階ラベル。正本は backend/core/doubt/schema.py::SUPPORT_LEVEL_BADGE_LABELS
+  // （test_seminar_brief_ui_static.py が逐語ミラーを固定。SL4: 経路数・カットのサイズは出さない）。
+  var SEMINAR_SUPPORT_LEVEL_LABELS = {
+    none: "支持記録なし",
+    single: "単一の支持線",
+    several: "複数の支持線"
+  };
+  // 検証状態のラベル。正本は backend/core/label_vocab.py::VERIFICATION_STATUS_LABELS_LEDGER
+  // （doubt-atlas.js::STATUS_LABELS と同じ台帳宛先の文言。逐語ミラーをテストで固定）。
+  var SEMINAR_VERIFICATION_STATUS_LABELS = {
+    directly_verified: "直接検証の記帳あり",
+    indirectly_supported: "間接的な支持あり",
+    untested: "未検証",
+    refuted: "反証の記帳あり",
+    unknown: "検証情報なし"
+  };
+  // つまづき4軸の見出し（原稿スタジオの lsStumbleAxis と同じ語彙。k-匿名の段階ラベルのみ）。
+  var SEMINAR_STUMBLE_AXIS_LABELS = [
+    ["error_rate", "誤り率"],
+    ["symbol_descent", "記号降下"],
+    ["verdict_self_check_divergence", "判定の乖離"],
+    ["faq", "質問・誤解"]
+  ];
+
+  function openSeminarBriefModal(documentId, title) {
+    var existing = document.getElementById("seminar-brief-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "seminar-brief-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.seminar-brief-modal");
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    // モーダルの骨組みは静的文字列のみ（教材タイトル・本文はあとから textContent で入れる）。
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:560px;max-width:720px;max-height:82vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 id="seminar-brief-modal-title" style="margin:0;font-size:16px;color:var(--color-text-primary)"></h3>' +
+          '<button id="seminar-brief-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 8px">' +
+          '輪講の前に、この論文の「何が崩れたら危ういか」を確認するための読み取り専用ビューです。' +
+        '</p>' +
+        '<div id="seminar-brief-modal-body" style="overflow-y:auto;flex:1">' +
+          '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById("seminar-brief-modal-title").textContent = "ゼミ前ブリーフ: " + (title || "");
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("seminar-brief-modal-close").addEventListener("click", function () { overlay.remove(); });
+
+    loadSeminarBrief(documentId);
+  }
+
+  function loadSeminarBrief(documentId) {
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/seminar-brief")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        renderSeminarBrief(data || {});
+      })
+      .catch(function () {
+        var body = document.getElementById("seminar-brief-modal-body");
+        if (!body) return;
+        body.textContent = "";
+        body.appendChild(_sbEl("div", "padding:16px;color:var(--color-text-danger);font-size:13px", "ブリーフの読み込みに失敗しました"));
+      });
+  }
+
+  // createElement + textContent の小さなヘルパー（本文変数を innerHTML に渡さない）。
+  function _sbEl(tag, cssText, text) {
+    var el = document.createElement(tag);
+    if (cssText) el.style.cssText = cssText;
+    if (text) el.textContent = text;
+    return el;
+  }
+
+  // 区画の枠。行が空なら null（＝区画ごと静かに省略する。空を告げる置き文を書かない）。
+  function _sbSection(heading, rowEls) {
+    if (!rowEls || !rowEls.length) return null;
+    var section = _sbEl("div", "margin-bottom:16px");
+    section.className = "seminar-brief-section";
+    section.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", heading));
+    rowEls.forEach(function (el) { section.appendChild(el); });
+    return section;
+  }
+
+  // 脆い前提1件の段階ラベル群（SB2: 描画するのはサーバの段階ラベル・レンジ文字列のみ。
+  // 文字列以外の値（数値等）は種類を問わず描画しない構造ガード）。
+  function _sbFragileMeta(item) {
+    var facts = [];
+    if (typeof item.load_level_label === "string" && item.load_level_label) {
+      facts.push("下流への影響: " + item.load_level_label);
+    }
+    if (typeof item.verification_status === "string" && SEMINAR_VERIFICATION_STATUS_LABELS[item.verification_status]) {
+      facts.push("検証: " + SEMINAR_VERIFICATION_STATUS_LABELS[item.verification_status]);
+    }
+    if (typeof item.challenge_count_label === "string" && item.challenge_count_label) {
+      facts.push("疑義: " + item.challenge_count_label);
+    }
+    if (typeof item.support_line_level === "string" && SEMINAR_SUPPORT_LEVEL_LABELS[item.support_line_level]) {
+      facts.push("支持: " + SEMINAR_SUPPORT_LEVEL_LABELS[item.support_line_level]);
+    }
+    return facts;
+  }
+
+  // 脆い前提（claim）に添える claim つまづきの段階ラベル行（k-匿名通過分のみ = has_data の
+  // ときだけ。少人数ゼミでは出ないのがふつうの状態 — 出ないことを警告にしない, SB4）。
+  function _sbStumbleFacts(stumble) {
+    if (!stumble || !stumble.has_data) return [];
+    var axes = stumble.axes || {};
+    var parts = [];
+    SEMINAR_STUMBLE_AXIS_LABELS.forEach(function (pair) {
+      var value = axes[pair[0]];
+      if (pair[0] === "faq") value = value && value.questions;
+      if (typeof value === "string" && value) parts.push(pair[1] + ": " + value);
+    });
+    if (!parts.length) return [];
+    return ["つまづき — " + parts.join(" ・ ")];
+  }
+
+  function _sbStatementRow(statement, facts) {
+    var row = _sbEl("div", "padding:6px 0;border-bottom:1px solid var(--color-border-tertiary)");
+    row.className = "seminar-brief-row";
+    row.appendChild(_sbEl("div", "font-size:13px;color:var(--color-text-primary)", statement || ""));
+    (facts || []).forEach(function (fact) {
+      row.appendChild(_sbEl("div", "font-size:11.5px;color:var(--color-text-secondary);margin-top:2px", fact));
+    });
+    return row;
+  }
+
+  function renderSeminarBrief(data) {
+    var body = document.getElementById("seminar-brief-modal-body");
+    if (!body) return;
+    body.textContent = "";
+
+    // 合成できない document は理由の事実文のみ（警告色にしない）。
+    if (!data.available) {
+      body.appendChild(_sbEl("div", "padding:16px;color:var(--color-text-secondary);font-size:13px",
+        data.reason || "この教材ではゼミ前ブリーフを合成できません。"));
+      return;
+    }
+
+    // 1. 脆い前提（未検証 × 下流影響の段階ラベル。並びはサーバが決める）
+    var fragileRows = [];
+    (data.fragile_assumptions || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      fragileRows.push(_sbStatementRow(item.statement, _sbFragileMeta(item).concat(_sbStumbleFacts(item.stumble))));
+    });
+    var fragileSection = _sbSection("脆い前提", fragileRows);
+    if (fragileSection) body.appendChild(fragileSection);
+
+    // 2. 一点吊りの支持線（SL層 support_paths level=single の事実文）
+    var singleRows = [];
+    (data.single_support_lines || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      singleRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+    });
+    var singleSection = _sbSection("一点吊りの支持線", singleRows);
+    if (singleSection) body.appendChild(singleSection);
+
+    // 3. 晴れ間（SL1 閉世界語彙の事実文。サーバの文をそのまま出す — 言い換えない）
+    var clearingRows = [];
+    (data.clear_skies || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      clearingRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+    });
+    var clearingSection = _sbSection("晴れ間", clearingRows);
+    if (clearingSection) body.appendChild(clearingSection);
+
+    // 4. 学習者からの問い — v1 は空欄予約（SB3）。空でもこの区画だけは常に出し、
+    //    淡色の note のみを添える（警告色・催促文にしない）。
+    var handed = data.learner_handoff || {};
+    var handedSection = _sbEl("div", "margin-bottom:16px");
+    handedSection.className = "seminar-brief-section seminar-brief-handed";
+    handedSection.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", "学習者からの問い"));
+    handedSection.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", handed.note || SEMINAR_BRIEF_RESERVED_NOTE));
+    body.appendChild(handedSection);
   }
 
   // ── File Upload ────────────────────────────────────────────────────
@@ -9240,6 +9450,10 @@
       // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
       material_inventory_button: function (id) {
         return _matRowActionAnchor(id, ".admin-inventory-btn");
+      },
+      // ゼミ前ブリーフ: 教材行の「ゼミ前ブリーフ…」ボタン（⋯メニュー内）。
+      seminar_brief_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-seminar-brief-btn");
       },
       // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
       // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、

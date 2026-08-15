@@ -61,12 +61,15 @@ from routes import atlas_gaps as atlas_gaps_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
+from routes import seminar_brief as seminar_brief_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
+from routes import descent as descent_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
 from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
+from routes import my_records as my_records_routes
 from routes import landscape as landscape_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
@@ -319,11 +322,15 @@ app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
 app.include_router(discuss_observation_routes.learning_router)
 app.include_router(cycle_routes.learning_router)
+app.include_router(descent_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
 app.include_router(llm_models_routes.router)
 app.include_router(personal_map_routes.router)
 app.include_router(personal_map_routes.me_router)
+# わたしの記録（主権台帳v1、trace_registry_sovereignty_ledger_design.md §3.3）。
+# 読み取り専用・本人のみ（/api/me 配下、personal_map.me_router と同型）。
+app.include_router(my_records_routes.me_router)
 # 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
 # ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
 app.include_router(landscape_routes.learning_router)
@@ -346,6 +353,9 @@ app.include_router(atlas_gaps_routes.router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
+# ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）。読み時合成の admin API 1本
+# （GET /api/admin/documents/{ref}/seminar-brief）。reconstruction.admin_router と同型。
+app.include_router(seminar_brief_routes.admin_router, prefix="/api/admin")
 app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")

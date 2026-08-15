@@ -100,6 +100,9 @@ def _fetch_pending_questions(session, user_id: str, course_id: str, topic_id: st
             WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
               AND (topic_id = :tid OR (:tid IS NULL AND topic_id IS NULL))
               AND kind = 'question'
+              -- 機能3: 書き直し/削除で往復ごと差し替えられた問いは帰属解析しない
+              -- （get_anchor_digest と同じ supersede 意味論。trace_registry 設計書 §2.4）
+              AND status <> 'superseded'
               AND payload->'structure_anchor' IS NULL
               AND payload->>'anchor_analyzed_at' IS NULL
             ORDER BY created_at ASC

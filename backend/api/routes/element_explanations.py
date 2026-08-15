@@ -20,6 +20,8 @@ from pydantic import BaseModel
 
 from dependencies import _require_teacher
 from core import element_explanations as store
+from core import teacher_triage
+from core.deliberation.context_lens import _claim_id_lookup, _component_id_lookup
 from core.deliberation.identity_links import confidence_label
 from core.deliberation.refs import document_run_artifacts
 from core.discuss.authoring import compute_source_fingerprint, has_fingerprint_source
@@ -47,6 +49,62 @@ _BULK_ACTION_TO_STATUS = {
     "approve": store.STATUS_APPROVED,
     "dismiss": store.STATUS_DISMISSED,
 }
+
+
+# ---------------------------------------------------------------------------
+# 負荷順トリアージ（宣言された弁, 教員支援 Phase 4 §2 — 実体は core/teacher_triage.py）
+# ---------------------------------------------------------------------------
+
+
+def _validate_sort(value: str | None, *, param: str) -> None:
+    """``sort`` / ``sort_order`` の語彙検証（``default`` | ``load``。不正値は 422）。"""
+    if value is not None and value not in teacher_triage.SORT_ORDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid {param}: {value!r} (must be one of {list(teacher_triage.SORT_ORDERS)})",
+        )
+
+
+def _apply_load_sort(document_id: str, rows: list[dict]) -> list[dict]:
+    """sort=load: 各行に ``load_level`` / ``load_level_label`` を付与し負荷降順で返す。
+
+    - element_id は claim / component が agent 側 ID のため、``context_lens`` の
+      一括変換器（§5 精査③）で DB UUID に解決してから台帳を引く。equation はそのまま、
+      figure / document スコープは導出不能（末尾 + 正直な縮退ラベル）。
+    - 台帳読みはバッチ1クエリ + ``load_percentiles`` をキューにつき1回（§5 精査②）。
+    - 索引・台帳の読み失敗は 500 にせず全件を導出不能として返す（並べ替えは計器であり
+      レビューキュー自体を止めない）。生値は付与しない（TT2）。
+    """
+    claim_lookup: dict[str, str] = {}
+    component_lookup: dict[str, str] = {}
+    try:
+        if any(r.get("element_type") == store.ELEMENT_TYPE_CLAIM for r in rows):
+            claim_lookup = _claim_id_lookup(document_id)
+        if any(r.get("element_type") == store.ELEMENT_TYPE_COMPONENT for r in rows):
+            component_lookup = _component_id_lookup(document_id)
+    except Exception:  # noqa: BLE001 — 索引失敗は導出不能扱いに縮退（キューを止めない）
+        logger.warning(
+            "load sort: agent-id lookup failed for document %s", document_id, exc_info=True
+        )
+
+    def _target(row: dict) -> tuple[str, str] | None:
+        return teacher_triage.explanation_target_for_row(row, claim_lookup, component_lookup)
+
+    levels: dict[tuple[str, str], str] = {}
+    try:
+        session = get_session()
+        try:
+            levels = teacher_triage.load_levels_for_targets(
+                session, [_target(r) for r in rows]
+            )
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 台帳読み失敗も導出不能扱いに縮退
+        logger.warning(
+            "load sort: ledger batch read failed for document %s", document_id, exc_info=True
+        )
+
+    return teacher_triage.annotate_and_sort_by_load(rows, levels, target_for_item=_target)
 
 
 def _canonical_document_id(chunks: list[dict], fallback: str) -> str:
@@ -164,6 +222,7 @@ def list_document_element_explanations(
     status: str | None = Query(default=None),
     kind: str | None = Query(default=None),
     role: str | None = Query(default=None),
+    sort: str = Query(default=teacher_triage.SORT_DEFAULT),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """document 内の説明一覧（レビューキューの供給元）。
@@ -172,7 +231,12 @@ def list_document_element_explanations(
     開幕素材には鮮度（``stale`` / ``stale_notice``、設計書 §7.1）を付ける — 対象は
     ``candidate`` だけでなく ``approved`` も含む（承認済みでも元の解析結果が変わった
     ことをレビューキューで見えるようにする。自動で非承認へは落とさない）。
+
+    ``sort=load``（負荷順トリアージ, 教員支援 Phase 4 §2）: D層台帳の負荷段階
+    （低/中/高/最高位）で降順に並べ替え、各行に段階ラベルを付ける。**既定
+    （``default``）は従来順・応答形も完全に不変**（TT1: 沈黙の並べ替えを作らない）。
     """
+    _validate_sort(sort, param="sort")
     chunks = _ensure_document_viewable(document_id, current_user)
     canonical_document_id = _canonical_document_id(chunks, document_id)
     session = get_session()
@@ -187,14 +251,24 @@ def list_document_element_explanations(
         )
     finally:
         session.close()
-    return {"explanations": _public_rows_with_freshness(canonical_document_id, rows)}
+    explanations = _public_rows_with_freshness(canonical_document_id, rows)
+    if sort == teacher_triage.SORT_LOAD:
+        return {
+            "explanations": _apply_load_sort(canonical_document_id, explanations),
+            "sort": teacher_triage.SORT_LOAD,
+        }
+    return {"explanations": explanations}
 
 
 @router.post("/element-explanations/{explanation_id}/approve")
 def approve_element_explanation(
     explanation_id: str,
+    sort_order: str | None = Query(default=None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
+    """承認。``sort_order``（``default`` | ``load``）は「どの並び順の下で確定したか」の
+    来歴を監査 metadata に残すための申告（TT3。未指定なら metadata に載せない — 偽装しない）。"""
+    _validate_sort(sort_order, param="sort_order")
     session = get_session()
     try:
         existing = store.get_by_id(session, explanation_id)
@@ -223,13 +297,16 @@ def approve_element_explanation(
         existing.get("status", ""),
         "approved",
         current_user.get("id"),
-        {
-            "action": "element_explanation.approve",
-            "document_id": existing.get("document_id"),
-            "element_type": existing.get("element_type"),
-            "element_id": existing.get("element_id"),
-            "kind": existing.get("kind"),
-        },
+        teacher_triage.sort_metadata(
+            {
+                "action": "element_explanation.approve",
+                "document_id": existing.get("document_id"),
+                "element_type": existing.get("element_type"),
+                "element_id": existing.get("element_id"),
+                "kind": existing.get("kind"),
+            },
+            sort_order,
+        ),
     )
     return {"explanation": _public_row(updated)}
 
@@ -237,8 +314,11 @@ def approve_element_explanation(
 @router.post("/element-explanations/{explanation_id}/dismiss")
 def dismiss_element_explanation(
     explanation_id: str,
+    sort_order: str | None = Query(default=None),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
+    """却下（保持）。``sort_order`` の意味は approve と同じ（TT3）。"""
+    _validate_sort(sort_order, param="sort_order")
     session = get_session()
     try:
         existing = store.get_by_id(session, explanation_id)
@@ -267,13 +347,16 @@ def dismiss_element_explanation(
         existing.get("status", ""),
         "dismissed",
         current_user.get("id"),
-        {
-            "action": "element_explanation.dismiss",
-            "document_id": existing.get("document_id"),
-            "element_type": existing.get("element_type"),
-            "element_id": existing.get("element_id"),
-            "kind": existing.get("kind"),
-        },
+        teacher_triage.sort_metadata(
+            {
+                "action": "element_explanation.dismiss",
+                "document_id": existing.get("document_id"),
+                "element_type": existing.get("element_type"),
+                "element_id": existing.get("element_id"),
+                "kind": existing.get("kind"),
+            },
+            sort_order,
+        ),
     )
     return {"explanation": _public_row(updated)}
 
@@ -281,6 +364,8 @@ def dismiss_element_explanation(
 class ElementExplanationBulkReview(BaseModel):
     action: str
     explanation_ids: list[str]
+    # どの並び順の下で一括確定したかの来歴申告（TT3。任意・未指定は監査に載せない）。
+    sort_order: str | None = None
 
 
 @router.post("/documents/{document_id}/element-explanations/bulk-review")
@@ -302,6 +387,7 @@ def bulk_review_element_explanations(
             status_code=422,
             detail=f"invalid action: {body.action!r} (must be 'approve' or 'dismiss')",
         )
+    _validate_sort(body.sort_order, param="sort_order")
 
     ids: list[str] = []
     seen: set[str] = set()
@@ -354,14 +440,17 @@ def bulk_review_element_explanations(
             "candidate",
             row.get("status", ""),
             current_user.get("id"),
-            {
-                "action": action_label,
-                "document_id": row.get("document_id"),
-                "element_type": row.get("element_type"),
-                "element_id": row.get("element_id"),
-                "kind": row.get("kind"),
-                "bulk": True,
-            },
+            teacher_triage.sort_metadata(
+                {
+                    "action": action_label,
+                    "document_id": row.get("document_id"),
+                    "element_type": row.get("element_type"),
+                    "element_id": row.get("element_id"),
+                    "kind": row.get("kind"),
+                    "bulk": True,
+                },
+                body.sort_order,
+            ),
         )
 
     return {

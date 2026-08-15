@@ -13,6 +13,10 @@ from __future__ import annotations
 
 import json
 
+# 本人が引き受けた tension status の正本（candidate / dismissed / superseded を含まない）。
+# リテラル再掲しない（return_door_design.md §2.1 / 発注仕様）。
+from core.tension.schema import TENSION_OWNED_STATUSES
+
 
 def _payload_dict(raw) -> dict:
     if isinstance(raw, dict):
@@ -62,6 +66,140 @@ def fetch_active_carryover(user_id: str, course_id: str) -> dict | None:
         "created_at": _to_iso(row[2]),
         "source_trace_id": payload.get("source_trace_id"),
     }
+
+
+def fetch_active_leave_note(user_id: str, course_id: str) -> dict | None:
+    """本人×コースの active（``status='open'``）な書き置き（leave_note）を最新1件返す。
+
+    帰還の扉（return_door_design.md §2.1）の読み。leave_note は carryover と同じ
+    「常に最大1件」規約（新規記録時の supersede は ``services.record_cycle_intention``
+    の責務。ここは読むだけ）。
+    """
+    from sqlalchemy import text as sa_text
+
+    from core.postgres import get_session as _pg_session
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT id, payload, created_at
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'intention'
+                  AND payload->>'role' = 'leave_note'
+                  AND status = 'open'
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            {"uid": user_id, "cid": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if row is None:
+        return None
+    payload = _payload_dict(row[1])
+    return {
+        "id": str(row[0]),
+        "text": payload.get("text", ""),
+        "created_at": _to_iso(row[2]),
+    }
+
+
+def fetch_last_owned_tension(user_id: str, course_id: str) -> dict | None:
+    """本人×コースで「最後に確定した tension」を最新1件返す（帰還の扉 §2.1）。
+
+    対象 status は ``core.tension.schema.TENSION_OWNED_STATUSES``（本人が引き受けた
+    確定分。candidate / dismissed / superseded を構造的に含まない）をそのまま使う
+    — リテラル再掲しない。
+    """
+    from sqlalchemy import text as sa_text
+
+    from core.postgres import get_session as _pg_session
+
+    placeholders = ", ".join(f":st_{i}" for i in range(len(TENSION_OWNED_STATUSES)))
+    params: dict = {"uid": user_id, "cid": course_id}
+    for i, status in enumerate(TENSION_OWNED_STATUSES):
+        params[f"st_{i}"] = status
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text(f"""
+                SELECT id, status, payload, created_at
+                FROM interest_traces
+                WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
+                  AND kind = 'tension'
+                  AND status IN ({placeholders})
+                ORDER BY created_at DESC
+                LIMIT 1
+            """),
+            params,
+        ).fetchone()
+    finally:
+        session.close()
+    if row is None:
+        return None
+    payload = _payload_dict(row[2])
+    return {
+        "id": str(row[0]),
+        "status": row[1] or "",
+        "text": payload.get("learner_text") or payload.get("text") or "",
+        "created_at": _to_iso(row[3]),
+    }
+
+
+def fetch_todays_user_words(user_id: str, course_id: str, limit: int = 30) -> list[dict]:
+    """当日（サーバ日付）のやり取りに含まれる本人発話（user ロールのみ）の逐語を返す
+    （「今日のあなたの言葉」トレイ, return_door_design.md §2.2）。
+
+    **当日フィルタは行 ``updated_at`` による近似**: ``learning_chat_history`` は
+    (user, course, topic) ごとに履歴全体を 1 行の JSONB で持ち、各メッセージに
+    タイムスタンプが無い。そのため「当日 = 行の ``updated_at`` が当日（＝当日に
+    やり取りのあったトピック）」で近似し、当該行の履歴に含まれる過去日のメッセージも
+    混ざりうる（各要素の ``created_at`` も行の ``updated_at`` の近似値）。
+
+    role フィルタは SQL 内で ``'user'`` に固定する — assistant ロール行を返す経路を
+    作らない（RD1。二重防御として ``derive.build_todays_words`` でも再検査する）。
+    並びは新しい順（行 ``updated_at`` 降順 → 行内の後方メッセージ優先）。truncated
+    判定のため ``limit + 1`` 件まで返す（切り詰めは derive 側の責務）。
+    """
+    from sqlalchemy import text as sa_text
+
+    from core.postgres import get_session as _pg_session
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT h.topic_id,
+                       m.msg->>'role' AS role,
+                       m.msg->>'content' AS content,
+                       h.updated_at
+                FROM learning_chat_history h
+                CROSS JOIN LATERAL jsonb_array_elements(h.history)
+                    WITH ORDINALITY AS m(msg, ord)
+                WHERE h.user_id = CAST(:uid AS uuid) AND h.course_id = :cid
+                  AND h.updated_at >= CURRENT_DATE
+                  AND m.msg->>'role' = 'user'
+                ORDER BY h.updated_at DESC, m.ord DESC
+                LIMIT :lim
+            """),
+            {"uid": user_id, "cid": course_id, "lim": int(limit) + 1},
+        ).fetchall()
+    except Exception:
+        rows = []
+    finally:
+        session.close()
+    return [
+        {
+            "topic_id": r[0] or "",
+            "role": r[1] or "",
+            "text": r[2] or "",
+            "created_at": _to_iso(r[3]),
+        }
+        for r in rows
+    ]
 
 
 def fetch_intentions(user_id: str, course_id: str) -> list[dict]:

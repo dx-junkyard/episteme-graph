@@ -284,6 +284,8 @@
     }
     if (overlay) return; // already showing
     removeVersionNoticeBanner();  // ログアウト時に削除予定バナーを残さない
+    hideReturnDoor();             // 帰還の扉も他ユーザーのログイン画面に残さない
+    hideMarginMarkTip();
 
     overlay = document.createElement("div");
     overlay.id = "auth-overlay";
@@ -766,7 +768,8 @@
         var seedHint = msg.discuss_prompt
           ? '<div class="discuss-prompt-hint">この問いに、あなたの考えを書いてください。</div>'
           : "";
-        html += '<div class="mg ai' + seedCls + '"' + idAttr + '>' + renderAiContent(msg.content, msg) +
+        html += '<div class="mg ai' + seedCls + '"' + idAttr + '>' + renderMirrorBlock(msg) +
+          renderAiContent(msg.content, msg) +
           seedHint + renderAnchorConfirmPrompt(msg) + "</div>";
       }
     });
@@ -803,6 +806,20 @@
       el.addEventListener("click", function () { openSourcePopup(this); });
       el.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openSourcePopup(this); }
+      });
+    });
+
+    // 鏡面化（EX-3b / §3 精査⑤）: 訂正チップは入力欄への文言プリフィルのみ。
+    // API は呼ばない — 送信は本人の通常発話として既存の tension/anchor の弁に流れる。
+    ca.querySelectorAll("[data-mirror-prefill]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var input = document.getElementById("chat-input");
+        if (!input) return;
+        input.value = this.getAttribute("data-mirror-prefill") || "";
+        input.focus();
+        if (typeof input.setSelectionRange === "function") {
+          input.setSelectionRange(input.value.length, input.value.length);
+        }
       });
     });
 
@@ -1076,6 +1093,238 @@
     try {
       localStorage.setItem(precisionReadingStorageKey(), on ? "1" : "0");
     } catch (_) { /* noop */ }
+  }
+
+  // ── 帰還の扉（再入口インレイ, docs/features/return_door_design.md §2.1）──────
+  // コース選択後のメインビュー最上部に、本人の書き置き（leave_note）・持ち越しの問い
+  // （carryover）・最後に確定した引っかかり（last_tension）の逐語のみを表示する。
+  //  - RD1: 本人の言葉のみ・AI要約ゼロ。描画は textContent だけで行う（HTML 注入経路なし）。
+  //  - RD2: 経過日数を出さない。トリガーは本人の再訪のみ。
+  //  - RD3: 書かなければ何も出ない。empty・取得失敗はインレイ自体を描画しない（fail-closed）。
+  //  - RD5: 件数・日数を出さない。
+  // 取得はコース読込（loadAndRenderCourse）につき1回のみ（ポーリング禁止・setInterval 禁止）。
+  // 閉じる（×）は当該セッション中のメモリ内フラグのみで、localStorage には永続化しない。
+  const returnDoorDismissed = new Set();
+
+  function hideReturnDoor() {
+    const inlay = document.getElementById("return-door");
+    if (!inlay) return;
+    inlay.hidden = true;
+    inlay.textContent = "";
+  }
+
+  function renderReturnDoor(data) {
+    const inlay = document.getElementById("return-door");
+    if (!inlay) return;
+    inlay.textContent = "";
+    // 提示順は固定: 書き置き → 持ち越しの問い → 最後に確定した引っかかり（各1行・逐語）。
+    const rows = [
+      ["あなたの書き置き", data.leave_note],
+      ["持ち越しの問い", data.carryover],
+      ["最後に確定した引っかかり", data.last_tension],
+    ];
+    let rendered = 0;
+    rows.forEach(function (pair) {
+      const item = pair[1];
+      const text = (item && typeof item.text === "string") ? item.text.trim() : "";
+      if (!text) return;
+      const row = document.createElement("div");
+      row.className = "return-door-row";
+      const label = document.createElement("span");
+      label.className = "return-door-label";
+      label.textContent = pair[0];
+      const body = document.createElement("span");
+      body.className = "return-door-text";
+      body.textContent = text; // 逐語のみ（RD1）。title も同じ逐語（全文確認用）。
+      body.title = text;
+      row.appendChild(label);
+      row.appendChild(body);
+      inlay.appendChild(row);
+      rendered += 1;
+    });
+    if (rendered === 0) {
+      hideReturnDoor(); // 空の枠を出さない（RD3）
+      return;
+    }
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "return-door-close";
+    closeBtn.title = "閉じる";
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", function () {
+      returnDoorDismissed.add(state.courseId); // メモリ内のみ（セッション中は再表示しない）
+      hideReturnDoor();
+    });
+    inlay.appendChild(closeBtn);
+    inlay.hidden = false;
+  }
+
+  async function loadReturnDoor() {
+    hideReturnDoor();
+    const cid = state.courseId;
+    if (!cid || returnDoorDismissed.has(cid)) return;
+    let data = null;
+    try {
+      const res = await apiFetch("/learning/courses/" + cid + "/cycle/return-door");
+      if (res.ok) data = await res.json();
+    } catch (_) {
+      data = null;
+    }
+    if (!data || data.empty) return; // fail-closed: 何も出さない
+    if (state.courseId !== cid) return; // コース切替後の遅延応答を破棄
+    renderReturnDoor(data);
+  }
+
+  // ── 欄外の印（return_door_design.md §2.3）─────────────────────────────
+  // 教材区画の右余白に、本人の確定痕跡（structure_anchor を持つ確定済み問い + 確定
+  // tension）を淡い点（●）で縦に並べる。新しい順に最大 MARGIN_MARKS_MAX 点・数は
+  // 表示しない（RD5）。map_excluded の行は表示しない（既存の訂正操作を尊重）。
+  // 素材位置への正確な対応付けは v1 では行わない（縦並び + ツールチップに帰属ラベルで近似）。
+  // 表示トグルの状態は localStorage `eg_margin_marks:<courseId>`（精読モードと同型の
+  // 許容例外）。既定は表示 ON。
+  const MARGIN_MARKS_MAX = 12;
+  // 確定 tension とみなす status（正本: backend/core/tension/schema.py::TENSION_OWNED_STATUSES）
+  const MARGIN_TENSION_STATUSES = ["open", "articulated", "connected", "abstracted"];
+  let marginMarksCache = { courseId: "", marks: null };
+
+  function marginMarksStorageKey(courseId) {
+    return "eg_margin_marks:" + (courseId || state.courseId || "");
+  }
+
+  function isMarginMarksOn(courseId) {
+    try {
+      // キー未設定（null）は表示 ON（既定 ON）。明示的に "0" のときだけ OFF。
+      return localStorage.getItem(marginMarksStorageKey(courseId)) !== "0";
+    } catch (_) {
+      return true;
+    }
+  }
+
+  function setMarginMarksOn(on) {
+    try {
+      localStorage.setItem(marginMarksStorageKey(), on ? "1" : "0");
+    } catch (_) { /* noop */ }
+  }
+
+  function extractMarginMarks(traces) {
+    const marks = [];
+    (traces || []).forEach(function (t) {
+      if (!t) return;
+      if (t.map_excluded) return; // 「地図には反映しない」にした行は出さない
+      // structure_anchor は API 側で確定済み（learner_selected/confirmed・active）のみ付く。
+      const isAnchored = !!t.structure_anchor;
+      const isOwnedTension = t.kind === "tension" && MARGIN_TENSION_STATUSES.indexOf(t.status) !== -1;
+      if (!isAnchored && !isOwnedTension) return;
+      marks.push(t);
+    });
+    // interest-traces の並び（status 優先 + 各群で新しい順）をそのまま使い、上限で切る
+    // （応答に created_at が無いため、厳密な新しい順は v1 では近似に留める）。
+    return marks.slice(0, MARGIN_MARKS_MAX);
+  }
+
+  function showMarginMarkTip(dot, text) {
+    const tipEl = document.getElementById("margin-marks-tip");
+    if (!tipEl) return;
+    tipEl.textContent = text; // 本人の言葉の逐語のみ（RD1。textContent 描画で HTML 注入経路なし）
+    const rect = dot.getBoundingClientRect();
+    tipEl.style.top = rect.top + "px";
+    tipEl.style.right = (window.innerWidth - rect.left + 6) + "px";
+    tipEl.hidden = false;
+  }
+
+  function hideMarginMarkTip() {
+    const tipEl = document.getElementById("margin-marks-tip");
+    if (tipEl) tipEl.hidden = true;
+  }
+
+  function renderMarginMarks() {
+    const layer = document.getElementById("margin-marks");
+    const toggle = document.getElementById("margin-marks-toggle");
+    if (!layer) return;
+    const hasCourse = !!(state.course && state.courseId);
+    if (toggle) {
+      toggle.hidden = !hasCourse;
+      toggle.setAttribute("aria-pressed", isMarginMarksOn() ? "true" : "false");
+    }
+    layer.textContent = "";
+    const marks = (marginMarksCache.courseId === state.courseId && marginMarksCache.marks) || [];
+    if (!hasCourse || !isMarginMarksOn() || marks.length === 0) {
+      layer.hidden = true;
+      return;
+    }
+    marks.forEach(function (t) {
+      const dot = document.createElement("button");
+      dot.type = "button";
+      dot.className = "margin-mark-dot" + (t.kind === "tension" ? " tension" : "");
+      dot.textContent = "●";
+      // ツールチップは本人の言葉の逐語 + 帰属ラベル（textContent のみ・数値なし）。
+      const anchorLabel = (t.structure_anchor && t.structure_anchor.anchor_label) || "";
+      const tip = (anchorLabel ? "〔" + anchorLabel + "〕 " : "") + (t.text || "");
+      dot.addEventListener("mouseenter", function () { showMarginMarkTip(dot, tip); });
+      dot.addEventListener("focus", function () { showMarginMarkTip(dot, tip); });
+      dot.addEventListener("mouseleave", hideMarginMarkTip);
+      dot.addEventListener("blur", hideMarginMarkTip);
+      dot.addEventListener("click", function () { showMarginMarkTip(dot, tip); }); // タップ端末向け
+      layer.appendChild(dot);
+    });
+    layer.hidden = false;
+  }
+
+  async function loadMarginMarks() {
+    const cid = state.courseId;
+    if (!cid) return;
+    if (marginMarksCache.courseId === cid && marginMarksCache.marks) {
+      renderMarginMarks();
+      return;
+    }
+    let data = null;
+    try {
+      const res = await apiFetch("/learning/courses/" + cid + "/interest-traces");
+      if (res.ok) data = await res.json();
+    } catch (_) {
+      data = null;
+    }
+    if (state.courseId !== cid) return; // コース切替後の遅延応答を破棄
+    if (!data || !Array.isArray(data.traces)) {
+      renderMarginMarks(); // fail-closed: 取れなければ何も出さない（キャッシュは残さない）
+      return;
+    }
+    marginMarksCache = { courseId: cid, marks: extractMarginMarks(data.traces) };
+    renderMarginMarks();
+  }
+
+  function initMarginMarks() {
+    const toggle = document.getElementById("margin-marks-toggle");
+    if (!toggle) return;
+    toggle.addEventListener("click", function () {
+      const next = !isMarginMarksOn();
+      setMarginMarksOn(next);
+      hideMarginMarkTip();
+      if (next && !(marginMarksCache.courseId === state.courseId && marginMarksCache.marks)) {
+        loadMarginMarks(); // ON にした時点で未取得ならここで1回だけ取得する
+      } else {
+        renderMarginMarks();
+      }
+    });
+  }
+
+  // 鏡面化（seminar_brief_mirroring_design.md §2, EX-3b 裁定）: 学習者の解釈表明・詰まりへの
+  // 「言い直し」部分。サーバが 〔鏡〕マーカーから決定論抽出した LearningChatResponse.mirror
+  // （optional）のみを描画する（フロント regex での再抽出はしない — §3 精査①）。
+  // EX-3b⑤: AI 由来であることを本人発話と視覚区別する（.mirror-block + ラベル）。
+  // 訂正チップ（[そのとおり] [少し違う]）は入力欄への文言プリフィルのみで API は呼ばない —
+  // 送信は本人の通常発話として既存の tension/anchor digest の弁に流れる（§3 精査⑤）。
+  // 鏡文を localStorage へ保存したり、鏡文そのものを再送信したりしない（窓の外へ持ち出さない）。
+  function renderMirrorBlock(msg) {
+    if (!msg || !msg.mirror || !msg.mirror.text) return "";
+    var html = '<div class="mirror-block">';
+    html += '<div class="mirror-label">AIによる言い直し</div>';
+    html += '<div class="mirror-text">' + escHtml(msg.mirror.text) + '</div>';
+    html += '<div class="mirror-chips">';
+    html += '<button class="lx-ghost mirror-chip" data-mirror-prefill="そのとおりです。">そのとおり</button>';
+    html += '<button class="lx-ghost mirror-chip" data-mirror-prefill="少し違います。">少し違う</button>';
+    html += '</div></div>';
+    return html;
   }
 
   // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。ゲート済み応答にのみ付く。
@@ -1354,6 +1603,10 @@
       .replace(/\[ACTION_BUTTON:\s*[^\]\n]{1,120}\]/g, "")
       .replace(/\[[^\]\n]{2,80}?について(?:詳しく)?(?:聞く|教えて|教えてください|知りたい)\]/g, "")
       .replace(/(?:^|\n)(?:\d+[.．]\s*)?【ネクストアクション】[\s\S]*$/m, "")
+      // 鏡面化（seminar_brief_mirroring_design.md §3 精査①）: 履歴に残ったレガシーの
+      // 〔鏡〕マーカーを剥がす（可視テキストとして漏らさない）。鏡ブロックの再構成は
+      // しない＝本文としてそのまま読める（許容劣化）。
+      .replace(/〔\/?鏡〕/g, "")
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
       .trim();
@@ -3635,6 +3888,9 @@
           atlas_path_card: registerAtlasPathCard(data.atlas_path_card),
           // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト（ゲート済みのときのみ）
           anchor_confirm: data.anchor_confirm || null,
+          // 鏡面化（EX-3b）: 言い直し部分（サーバ抽出済み）。メモリ内の表示にのみ使い、
+          // localStorage へは保存しない・鏡文そのものを再送信しない。
+          mirror: data.mirror || null,
           mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する
@@ -4783,6 +5039,13 @@
     state.anchorDigest = null;
     state.anchorDeferred = {};
 
+    // 帰還の扉・欄外の印: 前コースの表示・キャッシュを持ち越さない
+    // （return_door_design.md §2.1/§2.3。再取得は loadAndRenderCourse が行う）。
+    hideReturnDoor();
+    hideMarginMarkTip();
+    marginMarksCache = { courseId: "", marks: null };
+    renderMarginMarks();
+
     // Phase P-1: コース切替で「わたしの地図」のキャッシュ・表示状態を破棄させる。
     if (window.PersonalMap) window.PersonalMap.invalidate();
     // Phase P-3: 最上位「わたしの地図」も同様にキャッシュを破棄する（本人スコープの
@@ -4842,6 +5105,7 @@
 
   function showNoCourseState(hasEnrollable = false) {
     removeVersionNoticeBanner();
+    hideReturnDoor(); // コースなし状態に前コースの扉を残さない
     const select = document.getElementById("course-select");
     if (!hasEnrollable) {
       select.innerHTML = '<option value="">コースなし</option>';
@@ -4967,6 +5231,16 @@
     renderRightPanel();
     updateNextTopicBtn();
     refreshLectureAvailability();
+
+    // 帰還の扉（return_door_design.md §2.1）: コース読込につき1回だけ取得する
+    // （ポーリング禁止）。失敗・empty は何も出さない（fail-closed）。
+    loadReturnDoor();
+    // 欄外の印（同 §2.3）: 表示 ON のときだけ取得。OFF ならトグルの表示状態だけ更新する。
+    if (isMarginMarksOn()) {
+      loadMarginMarks();
+    } else {
+      renderMarginMarks();
+    }
   }
 
   // ── Utilities ──────────────────────────────────────────────────────
@@ -6554,6 +6828,12 @@
         });
       }
     }
+
+    // 構造の降下路（Phase 3）: マウント後に「降下路」枠を差し込む
+    // （renderElementContextPanel 側と同じパターン）。
+    var descentComponentId = (data && data.component_id) ||
+      ((graph && graph.focus && graph.focus.id) || "");
+    insertDescentFrame(pop, body, "component", descentComponentId);
   }
 
   // 「グラフで見る」内のノードクリック（旅）。theory_component かつ navigable な
@@ -6812,6 +7092,261 @@
     }
     body.innerHTML = html;
     bindLearnerElementCard(body, dto, opts);
+    // 構造の降下路（Phase 3）: マウント後に「降下路」枠を差し込む
+    // （augmentLearnerElementCardJumps と同じ「mount 後に行を差し込む」パターン。
+    // element-card.js の actionsHtml（readonly で非描画）は使わない）。
+    insertDescentFrame(pop, body, elementType, focus.element_id || "");
+  }
+
+  // ══════════════════════════════════════════════════════════════════
+  // 構造の降下路（Phase 3 — 足場ダイヤル・楽屋 v1,
+  // docs/features/structure_descent_design.md §3/§4）。
+  //
+  //  - SD1: 段を引くのは常に本人。開示状況はクライアント側のみで持ち、サーバへ
+  //    送らない・記録しない（自動開放・誘導をしない）。
+  //  - SD3: 産出欄（自分の語で書く欄）は無判定 — どこにも送信・保存しない。
+  //  - SD4: 楽屋での質問・閲覧は集計に入らない（learning_chat へ backstage: true）。
+  //  - SD6: 宣言された留保 — 宣言一行を枠の先頭に常設する。
+  //  - 段・step の本文はすべて createElement + textContent で描画する
+  //    （本文変数を innerHTML に渡さない）。新ボタンに data-evidence-ref は付けない
+  //    （ホバー係留 _latchState との干渉回避）。
+  // ══════════════════════════════════════════════════════════════════
+  const DESCENT_DECLARATION = "いまは答えを配らない対話です";
+  const BACKSTAGE_DECLARATION = "ここでの質問と閲覧は集計に入りません。記録はあなたにだけ残ります";
+  const BACKSTAGE_STEP_TITLES = {
+    notation_patterns: "この分野の記法の約束",
+    symbol_definitions: "記号の定義",
+    generic_explanations: "前提概念の一般説明",
+  };
+
+  // 産出欄（SD3: 無判定）。書かれた内容はどこにも送信・保存しない — この関数が返す
+  // 静的 HTML に入力を読み取る配線・送信ボタンは一切付けない（ガードレールが構造検査）。
+  function buildDescentProduceAreaHtml() {
+    return '<details class="descent-produce">' +
+      '<summary>自分の語で書いてみる（任意・判定されません）</summary>' +
+      '<textarea class="descent-produce-input" rows="3" ' +
+        'placeholder="ここに書いた内容は保存されません"></textarea>' +
+    '</details>';
+  }
+
+  // 要素文脈パネルのマウント直後に呼ばれ、「降下路」枠を body 末尾へ差し込む。
+  // elementType は ladder API の語彙（equation / component / claim）。
+  function insertDescentFrame(pop, body, elementType, elementId) {
+    if (!pop || !body || !elementType || !elementId || !state.courseId) return;
+    const holder = document.createElement("div");
+    // シェルは静的文字列のみ（変数を混ぜない）。data-ui-anchor はインスペクト・モード
+    // （？使い方）と網羅テストが拾う literal 形でルート要素に付ける。
+    holder.innerHTML =
+      '<div class="descent-frame" data-ui-anchor="material.descent-ladder">' +
+        '<div class="descent-declaration"></div>' +
+        '<div class="descent-rungs"></div>' +
+        '<div class="descent-actions">' +
+          '<button type="button" class="descent-hint-btn">ヒントを一段引く</button>' +
+          '<button type="button" class="descent-backstage-btn">楽屋へ降りる</button>' +
+        '</div>' +
+        buildDescentProduceAreaHtml() +
+      '</div>';
+    const frame = holder.firstElementChild;
+    frame.querySelector(".descent-declaration").textContent = DESCENT_DECLARATION;
+
+    const hintBtn = frame.querySelector(".descent-hint-btn");
+    const rungsBox = frame.querySelector(".descent-rungs");
+    // 梯子は初回クリックで1回だけ取得し、開示順の制御はクライアント側のみで持つ
+    // （SD1: サーバへ開示状況を送らない・記録しない）。
+    let ladder = null;
+    let opened = 0;
+    let loading = false;
+    hintBtn.addEventListener("click", async () => {
+      if (loading) return;
+      if (!ladder) {
+        loading = true;
+        try {
+          const res = await apiFetch("/learning/courses/" + state.courseId +
+            "/descent/ladder?element_type=" + encodeURIComponent(elementType) +
+            "&element_id=" + encodeURIComponent(elementId));
+          if (!res.ok) { frame.remove(); return; }
+          const data = await res.json();
+          if (!data || data.available !== true ||
+              !Array.isArray(data.rungs) || !data.rungs.length) {
+            // 梯子が組めない要素では枠ごと静かに消す（エラー文を出さない）。
+            frame.remove();
+            return;
+          }
+          ladder = data;
+        } catch (_) {
+          frame.remove();
+          return;
+        } finally {
+          loading = false;
+        }
+      }
+      if (opened < ladder.rungs.length) {
+        rungsBox.appendChild(buildDescentRungNode(ladder.rungs[opened]));
+        opened += 1;
+      }
+      if (opened >= ladder.rungs.length) {
+        hintBtn.disabled = true;
+        hintBtn.textContent = "すべて開きました";
+      }
+    });
+
+    frame.querySelector(".descent-backstage-btn").addEventListener("click", () => {
+      openBackstagePanel(pop, body, elementType, elementId);
+    });
+
+    body.appendChild(frame);
+  }
+
+  // 段の描画（すべて createElement + textContent。symbols は表ではなく行リスト）。
+  function buildDescentRungNode(rung) {
+    const node = document.createElement("div");
+    node.className = "descent-rung";
+    if (!rung || typeof rung !== "object") return node;
+    const addLine = (parent, cls, text) => {
+      if (!text) return;
+      const line = document.createElement("div");
+      line.className = cls;
+      line.textContent = String(text);
+      parent.appendChild(line);
+    };
+    if (rung.kind === "stage_fact") {
+      addLine(node, "descent-rung-stage-label", rung.stage_label);
+      addLine(node, "descent-rung-text", rung.text);
+    } else if (rung.kind === "symbols") {
+      (rung.items || []).forEach((item) => {
+        if (!item) return;
+        const row = document.createElement("div");
+        row.className = "descent-symbol-row";
+        addLine(row, "descent-symbol-head",
+          [item.symbol, item.definition_status_label].filter(Boolean).join(" — "));
+        addLine(row, "descent-symbol-line", item.meaning);
+        const scopeBits = [];
+        if (item.scope_label) scopeBits.push(item.scope_label);
+        const variants = Array.isArray(item.variants) ? item.variants.filter(Boolean) : [];
+        if (variants.length) scopeBits.push("表記ゆれ: " + variants.join("、"));
+        addLine(row, "descent-symbol-line", scopeBits.join(" ／ "));
+        // 定義が無い記号の事実文（「論文中に明示的な定義が見つかりません」等）を
+        // そのまま出す（正直に・言い換えない）。
+        addLine(row, "descent-symbol-line", item.missing_fact);
+        node.appendChild(row);
+      });
+    } else if (rung.kind === "reveal") {
+      (rung.items || []).forEach((item) => {
+        if (!item) return;
+        const row = document.createElement("div");
+        row.className = "descent-reveal-row";
+        addLine(row, "descent-reveal-op", item.operation_label);
+        addLine(row, "descent-rung-text", item.reason);
+        const inputs = Array.isArray(item.input_labels) ? item.input_labels.filter(Boolean) : [];
+        const outputs = Array.isArray(item.output_labels) ? item.output_labels.filter(Boolean) : [];
+        if (inputs.length) addLine(row, "descent-reveal-io", "入力: " + inputs.join("、"));
+        if (outputs.length) addLine(row, "descent-reveal-io", "出力: " + outputs.join("、"));
+        node.appendChild(row);
+      });
+      addLine(node, "descent-rung-note", rung.note);
+    } else {
+      // recall_prompt（1段目の想起プロンプト）と未知 kind は text をそのまま出す。
+      addLine(node, "descent-rung-text", rung.text);
+    }
+    return node;
+  }
+
+  // 楽屋（§4, SD4）。ポップオーバー本体を楽屋パネルへ置き換える。「本流に戻る」は
+  // 直前の DOM をそのまま復元する（再フェッチしない — 開いた段・入力中の産出欄も残る）。
+  async function openBackstagePanel(pop, body, elementType, elementId) {
+    if (!pop || !body || !state.courseId) return;
+    const stash = document.createDocumentFragment();
+    while (body.firstChild) stash.appendChild(body.firstChild);
+
+    const panel = document.createElement("div");
+    panel.className = "backstage-panel";
+    // シェルは静的文字列のみ（変数を混ぜない）。
+    panel.innerHTML =
+      '<div class="backstage-declaration"></div>' +
+      '<div class="backstage-steps"></div>' +
+      '<div class="backstage-ask">' +
+        '<textarea class="backstage-ask-input" rows="2" ' +
+          'placeholder="気になっていることをここで質問できます"></textarea>' +
+        '<button type="button" class="backstage-ask-btn">楽屋で質問する</button>' +
+        '<div class="backstage-ask-note" hidden></div>' +
+      '</div>' +
+      '<button type="button" class="backstage-return-btn">本流に戻る</button>';
+
+    const decl = panel.querySelector(".backstage-declaration");
+    // フェッチ前はローカル定数で同文を先出しし、取得後に API の宣言文へ差し替える。
+    decl.textContent = BACKSTAGE_DECLARATION;
+
+    const askInput = panel.querySelector(".backstage-ask-input");
+    const askNote = panel.querySelector(".backstage-ask-note");
+    panel.querySelector(".backstage-ask-btn").addEventListener("click", () => {
+      const text = askInput.value.trim();
+      if (!text || typeof window.sendPrompt !== "function") return;
+      // 楽屋フラグ付きで既存チャットへ送る（痕跡が楽屋扱いになる。SD4）。
+      window.sendPrompt(text, { backstage: true });
+      askInput.value = "";
+      askNote.textContent = "回答は会話欄に表示されます。この質問は集計に入りません";
+      askNote.hidden = false;
+    });
+
+    panel.querySelector(".backstage-return-btn").addEventListener("click", () => {
+      panel.remove();
+      body.appendChild(stash);
+    });
+
+    body.appendChild(panel);
+
+    try {
+      const res = await apiFetch("/learning/courses/" + state.courseId +
+        "/descent/backstage-path?element_type=" + encodeURIComponent(elementType) +
+        "&element_id=" + encodeURIComponent(elementId));
+      if (!res.ok) return; // 失敗しても楽屋は開いたまま（宣言・質問欄・戻るは生きる）
+      const data = await res.json();
+      if (data && typeof data.declaration === "string" && data.declaration) {
+        decl.textContent = data.declaration;
+      }
+      renderBackstageSteps(panel.querySelector(".backstage-steps"), data && data.steps);
+    } catch (_) { /* fail-soft: 楽屋の骨格（宣言・質問欄・戻る）は維持する */ }
+  }
+
+  // 楽屋の step 描画（見出しは固定語彙・本文は textContent のみ）。
+  function renderBackstageSteps(box, steps) {
+    if (!box || !Array.isArray(steps)) return;
+    steps.forEach((step) => {
+      if (!step || !step.kind) return;
+      const sec = document.createElement("div");
+      sec.className = "backstage-step";
+      const heading = BACKSTAGE_STEP_TITLES[step.kind] || "";
+      if (heading) {
+        const title = document.createElement("div");
+        title.className = "backstage-step-title";
+        title.textContent = heading;
+        sec.appendChild(title);
+      }
+      (step.items || []).forEach((item) => {
+        const text = backstageItemText(item);
+        if (!text) return;
+        const row = document.createElement("div");
+        row.className = "backstage-step-item";
+        row.textContent = text;
+        sec.appendChild(row);
+      });
+      if (sec.childNodes.length) box.appendChild(sec);
+    });
+  }
+
+  // step item → 1行テキスト（形はサーバ側の裁量に依存するため防御的に読む。
+  // generic_explanations は {body}、それ以外は主要フィールドの連結）。
+  function backstageItemText(item) {
+    if (item == null) return "";
+    if (typeof item === "string") return item;
+    if (typeof item !== "object") return String(item);
+    if (typeof item.body === "string" && item.body) return item.body;
+    const bits = [];
+    ["symbol", "pattern", "label", "text", "meaning", "definition",
+      "description", "scope_label", "missing_fact"].forEach((key) => {
+      if (typeof item[key] === "string" && item[key]) bits.push(item[key]);
+    });
+    return bits.join(" — ");
   }
 
   // ITEM が現在トピックの教材本文に担体（[data-evidence-ref]）を持つかを調べ、持つ
@@ -7529,6 +8064,7 @@
     applyDiscussLayout();
     initSelectionAnchor();
     initQuickAnchorStrip(); // 理解サイクル Phase 1（ANCHOR, §5.4）: 常設ストリップの配線
+    initMarginMarks(); // 帰還の扉 §2.3: 欄外の印トグルの配線（1度だけ）
     initLogout();
     initGroups();
     initLectureMode();
@@ -7545,6 +8081,14 @@
     if (myMapBtn) {
       myMapBtn.addEventListener("click", function () {
         if (window.PersonalMapHome) window.PersonalMapHome.open();
+      });
+    }
+    // 主権台帳 v1「わたしの記録」パネル（trace_registry_sovereignty_ledger_design.md §3.4）。
+    if (window.MyRecords) window.MyRecords.init({});
+    var myRecordsBtn = document.getElementById("my-records-btn");
+    if (myRecordsBtn) {
+      myRecordsBtn.addEventListener("click", function () {
+        if (window.MyRecords) window.MyRecords.open();
       });
     }
     await initCourseSelector();

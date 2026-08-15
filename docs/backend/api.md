@@ -44,7 +44,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 **ルーターのマウント（main.py、Tier 3-17c でフラット化）**: 全ルーターは `main.py` から直接
 `app.include_router(...)` で登録される（admin.py 経由の二段ネストは廃止済み）。
 
-- **自前 prefix で直接登録（22本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
+- **自前 prefix で直接登録（24本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
   （/api/learning）/ `figure_presentation`（/api/admin）/ `element_explanations`（/api/admin）/
   `admin`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`（/api/learning/lecture）/
   `groups`（prefix なし。/api/groups・/api/me をパスに直書き）/ `export`（prefix なし。
@@ -54,13 +54,14 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
   `discuss_observation.learning_router`（/api/learning）/ `cycle.learning_router`（/api/learning）/
   `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
   （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
-  （/api/me）/ `landscape.learning_router`（/api/learning）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（19本、`main.py` の登録順）**:
+  （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（20本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
   （/cartridges 配下）/ `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
-  `reconstruction.admin_router` / `discuss_observation.admin_router` / `versioning` / `status`
+  `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
+  `discuss_observation.admin_router` / `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
   `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
 - **例外（#496）**: `GET /api/admin/documents/{id}/figures` は admin.py にも定義が残るが、main.py が
@@ -246,6 +247,8 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | POST | `/api/learning/cycle/intention/{trace_id}/dismiss` | 本人の行のみ | intention 痕跡の dismiss（status 遷移のみ） |
 | POST | `/api/learning/courses/{cid}/cycle/anchor` | 本人のみ | 軽量アンカー4ボタンの1タップ確定。既存 structure_anchor 経路A（`attribution_source='learner_selected'`）へ相乗りし、element → selection → chunk → segment の順に縮退 |
 | GET | `/api/learning/courses/{cid}/cycle/landing-candidates` | 本人のみ | LEAVE の選択候補一覧（数値・件数を含めない。導出失敗時は空配列で縮退） |
+| GET | `/api/learning/courses/{cid}/cycle/return-door` | 本人のみ | 帰還の扉（`docs/features/return_door_design.md` §2.1）。書き置き（`leave_note`）・持ち越しの問い（carryover）・最後に確定した tension を**本人の逐語のみ**で返す（AI 要約ゼロ・経過日数/件数なし）。3部品とも無ければ `{empty: true}`（導出失敗も同値へ縮退） |
+| GET | `/api/learning/courses/{cid}/cycle/todays-words` | 本人のみ | 「今日のあなたの言葉」トレイ（同 §2.2）。当日にやり取りのあった学習チャットの **user ロール発話の逐語のみ**（assistant 行は返さない）。最新30件上限で超過は `truncated: true`（当日判定は行 `updated_at` の近似） |
 
 ### 個人知識ネットワーク（`routes/personal_map.py`、読み取り専用）
 
@@ -258,6 +261,37 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 
 > このルーターは**読み取り専用**（書き込み API を作らないことをガードレールで固定）。
 > 訂正操作（map-exclude / map-restore）は `routes/learning.py` 側にある。
+
+### わたしの記録（`routes/my_records.py`、読み取り専用）
+
+主権台帳v1（`docs/features/trace_registry_sovereignty_ledger_design.md` §3）。本人の
+`interest_traces` 全行（kind 条件・status 条件なし — dismissed / superseded / candidate も
+含む一望、P4）を系統（`core/trace_registry.py` の宣言順）でグルーピングし、各行に
+公表状態の事実文を添えて返す。実体は `core/trace_ledger.py`。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/me/records` | 本人のみ | 台帳 overview（系統グルーピング + status ラベル + 公表状態の事実文。新しい順・上限 500 行、超過は `truncated: true`。件数・スコアの数値フィールドなし — TR6） |
+| GET | `/api/me/records/export` | 本人のみ | 持ち出し JSON ダウンロード（`Content-Disposition: attachment`。payload 全文・無加工、`user_id` キーなし、`schema_version: 1`。本人の持ち出しは監査記帳しない — 意図的） |
+
+> このルーターは**読み取り専用**（書き込み・削除・封印メソッドを作らないことを
+> `test_trace_registry_guardrails.py` で固定。TR4）。封印は v2 の専用設計書を経る。
+> `{user_id}` パスパラメータは作らない — 対象は常に認証ユーザー本人。
+
+### 構造の降下路（`routes/descent.py`、読み取り専用）
+
+足場ダイヤル・楽屋の降下エンジン（`docs/features/structure_descent_design.md`。実体は
+`backend/core/descent/`、非LLM・決定論）。**閲覧をサーバに記録しない**（開示履歴・使用数の
+記録なし — SD1/SD5）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/learning/courses/{course_id}/descent/ladder` | 受講者本人 | 足場ダイヤルの梯子（想起プロンプト→stage 骨格事実文→記号の定義・スコープ・表記ゆれ→出典リビール。素材が無い段は返さず、全段不成立は `available: false`） |
+| GET | `/api/learning/courses/{course_id}/descent/backstage-path` | 受講者本人 | 楽屋の降下路（notation_patterns → 記号定義 → generic 説明。宣言文「ここでの質問と閲覧は集計に入りません…」同梱） |
+
+> `element_type` は `equation` / `component` / `claim` のみ（他は 422）。書き込みメソッドなし。
+> 楽屋からの質問は既存 learning_chat の `backstage: true` フラグで送られ、痕跡 kind
+> `backstage_question`（教員集約・digest・わたしの地図から除外）になる。
 
 ### グループ `/api/groups`・`/api/me`（`routes/groups.py`）
 
@@ -424,7 +458,7 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | PUT | `/api/admin/courses/{cid}/lecture-studio/settings` | TEACHER + コース編集 | 設定保存（変更時は原稿再生成フラグ。language 省略は変更しない） |
 | POST | `/api/admin/courses/{cid}/lecture-scripts/generate` | TEACHER + コース編集 | 全チャンクの display/spoken_text・数式を非同期一括生成（202。`auto_audio` で音声チェーン可。チャンク0件は 422） |
 | GET | `/api/admin/courses/{cid}/lecture-scripts` | TEACHER + コース閲覧 | チャンク原稿一覧（スライド数・音声準備状況付き） |
-| POST | `/api/admin/lecture-studio/preview-split` | TEACHER | スライド分割プレビュー（配信側と同一の `core/lecture.py::split_slides`。DB 非変更） |
+| POST | `/api/admin/lecture-studio/preview-split` | TEACHER | スライド分割プレビュー（配信側と同一の `core/lecture.py::split_slides`。DB 非変更）。応答の各 slide に WMレンズ（`core/lecture_wm.py`、教員支援 Phase 4 §3.2）の相互作用性段階 `wm: {level, level_label, fact, degraded?}` を相乗り — 最低段のスライドには wm キー自体を付けず、optional `document_id` 省略時は textual 照合へ縮退（degraded） |
 | PUT | `/api/admin/chunks/{chunk_id}/lecture-script` | TEACHER | 教員編集の原稿・数式を保存し当該チャンクの音声キャッシュを無効化 |
 | POST | `/api/admin/chunks/{chunk_id}/lecture-script/rewrite` | TEACHER | 教員指示に基づく LLM 原稿書き換え |
 | POST | `/api/admin/courses/{cid}/lecture-audio/generate` | TEACHER + コース編集 | スライド単位 TTS 音声の非同期一括生成（202。空 spoken_text ありは 422、言語切替チェーン時は免除） |
@@ -661,6 +695,18 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 | PATCH | `/api/admin/doubt/counterfactual/sessions/{sid}` | 作成者本人のみ | notes・共有範囲の変更（scope 変更時のみ監査記録） |
 | GET | `/api/admin/doubt/metrics` | SYSTEM_ADMIN | 運用判断用の内部 KPI（ダッシュボード UI は作らない前提） |
 
+### ゼミ前ブリーフ（`routes/seminar_brief.py` admin_router）
+
+輪講の前に教員が対象論文の「賭け金」を10分で把握するための read-only 合成ビュー
+（正本: [features/seminar_brief_mirroring_design.md](../features/seminar_brief_mirroring_design.md) §1、
+不変条項 SB1〜SB4）。新テーブル・新 LLM ゼロ（SB1）— D層 open-assumptions の document 絞り込み +
+SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利用のみ, SB4）の読み時合成。
+合成の実体は `core/doubt/seminar_brief.py::build_seminar_brief`（FastAPI 非 import）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/documents/{document_ref}/seminar-brief` | TEACHER + document 閲覧権（`_ensure_document_viewable`・404 fail-closed） | 4区画の合成ビュー: ①脆い前提（未検証×下流影響「高」。`dependent_count` 等の生数値は落とし、load 段階ラベル・challenge_count_label・SL 4キーの段階表示のみ・上位8件）②一点吊りの支持線（`level=single` の事実文・上限5）③晴れ間（「このコーパスの中では検証記録が見つかりません。」の閉世界固定文, SL1・上限8）④学習者からの問い（v1 は空欄予約, SB3）。document / course 対応が解決できないときは `{available: false, reason}` の正直縮退で 200 |
+
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 
 全17本が TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`（404 fail-closed）、
@@ -786,6 +832,8 @@ route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_
 |---|---|---|---|
 | GET | `/api/admin/llm-usage/metrics` | SYSTEM_ADMIN | 使用量集計（reported / estimated 分離 + dropped_events + cost_usd） |
 | GET | `/api/admin/llm-usage/estimate/documents/{id}` | TEACHER + document 閲覧権 | 解析実行前のトークン見積り（レンジのみ・金額なし） |
+| GET | `/api/admin/llm-usage/forecast` | TEACHER | コスト見通しの一行（document 不要版・アップロードゾーン用。末端4ステージの日次カウンタ残数のみによる保守判定。返却は `{show, message}` のみ・数値なし・fail-open。教員支援 Phase 4 §3.1） |
+| GET | `/api/admin/llm-usage/forecast/documents/{id}` | TEACHER + document 閲覧権 | コスト見通しの一行（document 版・再解析モーダル用。見積り上振れ × 日次カウンタ残数の合成による保守判定。返却は `{show, message}` のみ） |
 
 ### 場面別 LLM モデル選択 `/api/admin/llm-models`（`routes/llm_models.py`、M層 / migration 061）
 

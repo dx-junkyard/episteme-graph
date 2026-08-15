@@ -43,10 +43,15 @@ class TestMigration022:
 
 class TestVocabulary:
     def test_interest_kinds_and_statuses_extended(self):
-        # services.py の import は外部依存の初期化コストが大きいため静的検証（既存テストと同方式）
+        # services.py の import は外部依存の初期化コストが大きいため静的検証（既存テストと同方式）。
+        # kind 語彙の正本は core/trace_registry.py へ一本化された（TR1）ため、tension の
+        # 登録は登録簿（純宣言モジュール・import コストなし）で検証し、services 側は
+        # 登録簿からの導出であることを静的に確認する。
+        from core.trace_registry import ALL_TRACE_KINDS
+
+        assert "tension" in ALL_TRACE_KINDS
         source = _read(SERVICES)
-        kinds_block = source.split("_INTEREST_KINDS = (")[1].split(")")[0]
-        assert '"tension"' in kinds_block
+        assert "_INTEREST_KINDS = frozenset(ALL_TRACE_KINDS)" in source
         statuses_block = source.split("_TRACE_STATUSES = (")[1].split(")")[0]
         for status in ("candidate", "dismissed", "articulated", "connected", "abstracted",
                        "open", "revisited", "resolved"):

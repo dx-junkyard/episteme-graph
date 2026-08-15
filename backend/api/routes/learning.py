@@ -123,6 +123,7 @@ from core.element_context import (
     build_element_context,
 )
 from core.discuss.opening import build_opening as build_discussion_opening
+from core.discuss.mirroring import extract_mirror
 from core.cycle.derive import build_intention_dto
 from core.cycle.queries import fetch_active_carryover, fetch_intentions
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
@@ -1073,8 +1074,13 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
    まず学生の読みをあなたの言葉で短く言い直し、その理解で合っているかを確認してください。
    確認が取れてから、論文の主張との重なりとズレを事実として並べ、どのズレから埋めるかを
    学生に選ばせてください。
+   言い直しは、冒頭に 〔鏡〕あなたは「＜学生の直前の発話からの逐語引用＞」と捉えている、で合っていますか？〔/鏡〕
+   の形で書いてください。「」の中は学生の発話の言葉をそのまま（言い換えずに）引用してください。
+   〔鏡〕の中には論文の内容・一般知識・教科書的な正解を持ち込まず、学生の発話の言い直しだけを
+   書いてください。学生の能力・傾向・人物像について述べてはいけません。
 3. 【詰まりには一点だけの足場かけ】学生が混乱や詰まりを見せたときは、全体を解説し直すのではなく、
    詰まっている一点だけを短く補い、学生自身の言葉での言い直しで埋まったかを確かめてください。
+   詰まりの言い直し確認にも、ルール2と同じ 〔鏡〕…〔/鏡〕 の形式を使ってください。
 4. 【質問と解釈が同居するとき】1つの発話に質問と解釈の表明が混在する場合は、まず質問の部分に
    完全な形で即答し（ルール1を優先）、そのうえで解釈の部分の言い直しと確認に入ってください
    （ルール2）。質問を保留にして言い直しから始めることはしないでください。
@@ -2590,6 +2596,12 @@ def learning_chat(
         "elicit": "learning:cycle_elicit",
         "diff": "learning:cycle_diff",
     }.get(_cycle_mode)
+    # 楽屋モード（構造の降下路 docs/features/structure_descent_design.md §4）:
+    # 楽屋からの質問は既存 learning_chat に相乗りし、**記録面だけを私有化**する
+    # （痕跡 kind='backstage_question'・教員集約/tension mining の対象外）。
+    # v1 では system prompt を追加しない — 楽屋は記録の私有化であって
+    # 応答様式の変更ではない（通常 RAG 回答のまま）。
+    _is_backstage = bool(body.backstage)
 
     # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
     # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
@@ -2925,13 +2937,21 @@ def learning_chat(
     # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
     position_anchor = build_position_anchor(topic_id, _seg, _scroll)
     # L3 資産化: この往復を関心痕跡として安価に記録（LLM不使用）。
-    # kind は既存シグナルから決定: 誤解検出→misconception / それ以外→question。
-    _trace_kind = "misconception" if course_update else "question"
+    # kind は既存シグナルから決定: 楽屋→backstage_question（記録は本人のみ・集計対象外）/
+    # 誤解検出→misconception / それ以外→question。
+    _trace_kind = (
+        "backstage_question" if _is_backstage
+        else ("misconception" if course_update else "question")
+    )
     _ctx_label = " · ".join([s for s in [support_origin.chapter_title, topic_title] if s])
     # Stage 0 TensionPrefilter（同期・非LLM・数ms）: ヘッジ/逆接マーカーと直近3往復の
     # 同語再訪でヒントを立てるだけ。LLM 分類は非同期バッチ（P6: 応答を遅延させない）。
     _recent_user_texts = [t.get("content", "") for t in body.history if t.get("role") == "user"][-3:]
-    _tension_hint = judge_tension_hint(body.message, _recent_user_texts)
+    # 楽屋ガード（構造の降下路 §6 精査記録②）: tension worker（_fetch_pending_hints）は
+    # payload_flag 方式（kind 条件なし）のため kind では自動除外されない。送信側で
+    # tension_hint を立てない・tension mining をスケジュールしないことで、楽屋の質問を
+    # 解析対象から構造的に外す（SD4）。
+    _tension_hint = False if _is_backstage else judge_tension_hint(body.message, _recent_user_texts)
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
     _sel_anchor = _learner_selected_anchor(body)
@@ -2955,6 +2975,9 @@ def learning_chat(
         "content_grounding": content_grounding,
         # discuss のときのみスコープも焼き込む（discuss 以外は None のまま）。
         **({"discuss_scope": _discuss_scope} if _is_discuss else {}),
+        # 楽屋（構造の降下路 §4）: 本人の台帳表示・後方検証のために焼き込む
+        # （kind='backstage_question' と対。楽屋以外にはキー自体を足さない）。
+        **({"backstage": True} if _is_backstage else {}),
     }
     # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
     # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
@@ -2972,11 +2995,13 @@ def learning_chat(
         extra_payload=_trace_payload,
     )
     # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動
-    # （best-effort: 失敗してもチャット応答を止めない）。
-    if _tension_hint:
+    # （best-effort: 失敗してもチャット応答を止めない）。楽屋の質問は対象外
+    # （_tension_hint は backstage で常に False だが、ガードを明示して二重に守る）。
+    if _tension_hint and not _is_backstage:
         maybe_schedule_tension_mining(current_user["id"], course_id, topic_id)
     # 未帰属の問いが累積していればバックグラウンドで StructureAnchorAgent を起動
-    # （方法B・非同期。明示アンカー付きの問いは最初から対象外）。
+    # （方法B・非同期。明示アンカー付きの問いは最初から対象外。楽屋の質問は
+    # _trace_kind='backstage_question' のためこの条件で自動的に対象外になる）。
     if _trace_kind == "question" and not _sel_anchor:
         maybe_schedule_anchor_mining(current_user["id"], course_id, topic_id)
     # 方法C: 回答末尾の帰属確認プロンプト。tension_hint が立った往復か、明示アンカーは
@@ -2999,6 +3024,18 @@ def learning_chat(
         clean_answer, inline_actions = answer, []
     else:
         clean_answer, inline_actions = extract_inline_actions(answer)
+    # 鏡面化 move（seminar_brief_mirroring_design.md §2/§3 精査①③、EX-3b）: discuss の
+    # ときのみ、本文中の 〔鏡〕…〔/鏡〕 マーカーをサーバ側で決定論抽出して構造化フィールド
+    # （LearningChatResponse.mirror）へ正規化する（extract_inline_actions と同じ規律 —
+    # フロントに regex を書かせない）。verbatim 検査（鏡文中の「」引用が学習者の直前発話の
+    # 逐語部分文字列であること）に不合格ならマーカーだけ剥がして本文へ縮退（再生成なし・P6）。
+    # 鏡文は痕跡（record_interest_trace）・専用テーブル・assistant_meta には書かない
+    # （窓の外への持ち出しの禁止）。会話履歴 JSONB（persist_chat_history は上で実行済み）に
+    # 生 answer がマーカー込みで残るのは既存挙動のままで、これは window_history の窓内
+    # 再注入として設計が許容する範囲（§3 精査③）。
+    _mirror = None
+    if _is_discuss and not degraded:
+        clean_answer, _mirror = extract_mirror(clean_answer, body.message)
 
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
@@ -3031,6 +3068,7 @@ def learning_chat(
         position_anchor=position_anchor,
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
+        mirror=_mirror,
         mock=False,
         degraded=degraded,
     )
@@ -3401,6 +3439,9 @@ def get_anchor_digest_route(
                 SELECT DISTINCT topic_id FROM interest_traces
                 WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                   AND kind = 'question'
+                  -- 機能3: 差し替え済みの問いだけが残るトピックで帰属解析を起動しない
+                  -- （_fetch_pending_questions と同じ supersede 意味論。設計書 §2.4）
+                  AND status <> 'superseded'
                   AND payload->'structure_anchor' IS NULL
                   AND payload->>'anchor_analyzed_at' IS NULL
             """),

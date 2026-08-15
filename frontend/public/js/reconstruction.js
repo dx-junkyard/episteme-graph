@@ -102,7 +102,11 @@
 
   function renderElicit() {
     var item = current.item;
-    var html = '<p class="recon-prompt">' + esc(item.prompt) + '</p>';
+    // 構造の降下路（SD6 宣言された留保, structure_descent_design.md §3）: 出し惜しみが
+    // 働く opt-in 枠には宣言一行を常設する（静的文字列のみ。既存の文言・プロンプト・
+    // ボタンは非改変）。
+    var html = '<div class="elicit-declaration">いまは答えを配らない対話です</div>';
+    html += '<p class="recon-prompt">' + esc(item.prompt) + '</p>';
 
     var ctxFields = (item.claim_context && item.claim_context.concepts) || [];
     if (ctxFields.length) {

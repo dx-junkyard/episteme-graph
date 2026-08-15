@@ -305,6 +305,11 @@ class LearningChatRequest(BaseModel):
     # 不正値は 422。未指定は従来どおり。既存 learning_chat の1コール地点に相乗りする
     # （新エンドポイントを作らない・UC10）。
     cycle_mode: str | None = None
+    # 楽屋モード（構造の降下路 docs/features/structure_descent_design.md §4）: True のとき
+    # この質問の痕跡を kind='backstage_question' で記録する（教員向け集約・digest・
+    # わたしの地図の対象外 — 記録は本人にだけ残る。tension mining の対象にもしない）。
+    # v1 では応答様式（RAG 回答）を変えない — 楽屋は記録面の私有化。
+    backstage: bool = False
     # 分野の地図 (Issue C-2): ↗ アクション由来の構造化ペイロード
     # {node_id, level, skeleton_version, action, node_label, node_status, node_pill,
     #  related?, juxtapose?} — 自由文のみに依存しない
@@ -381,6 +386,12 @@ class LearningChatResponse(BaseModel):
     # 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。tension_hint 等でゲートされた
     # ときのみ設定される（毎回は出さない。P7）。{trace_id, question, options:[{doubt_type,label}]}
     anchor_confirm: dict | None = None
+    # 鏡面化 move（seminar_brief_mirroring_design.md §2/§3 精査①、EX-3b 裁定）: discuss の
+    # 言い直しターンで本文中マーカー 〔鏡〕…〔/鏡〕 からサーバが決定論抽出した鏡文
+    # （{text}）。verbatim 検査合格時のみ設定（不合格は None のまま本文へ縮退）。
+    # AI 由来であることを本人発話と視覚区別して描画するための構造化フィールドで、
+    # 痕跡・専用テーブルへは保存しない（窓外持ち出しの禁止）。
+    mirror: dict | None = None
     # 学生 HELP ルート（設計 docs/features/manual_help_kb_design.md §1-3）: docs/manual の
     # 出典（ヒット時のみ設定）。各要素は {file, anchor, title}。既存 sources/tier には
     # 相乗りしない（_TIER_STRENGTH が未知 tier を out_of_source=0 に落とすため）。

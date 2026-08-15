@@ -2508,10 +2508,11 @@ def log_unanswered_query(user_id: str, course_id: str, topic_id: str, question: 
 # §4）が追加する kind。本人専用メモであり、tension/anchor worker・digest・個人知識
 # ネットワーク導出・問いの軌跡ビュー・教員向け集約のいずれからも構造的に除外する
 # （UC3。help_usage と同型の除外パターン）。
-_INTEREST_KINDS = (
-    "raw", "question", "detour", "misconception", "tension", "help_usage",
-    "intention", "anchor_mark",
-)
+# kind 語彙の正本は core/trace_registry.py（TR1: 登録簿が単一の真実源。露出宣言
+# なしに新しい kind を追加できない）。ここは登録簿からの導出のみ。
+from core.trace_registry import ALL_TRACE_KINDS
+
+_INTEREST_KINDS = frozenset(ALL_TRACE_KINDS)
 _TRACE_STATUSES = (
     "open", "revisited", "resolved",   # 既存
     "candidate",      # LLM提案・本人未確定（tension のみ）
@@ -2577,11 +2578,16 @@ def record_interest_trace(
 # ---------------------------------------------------------------------------
 
 
-def _supersede_active_carryover(user_id: str, course_id: str) -> None:
-    """本人×コースの active な carryover（kind='intention', role='carryover_question',
-    status='open'）を 'superseded' に遷移させる（UC6: 削除せず状態遷移で保持）。
+def _supersede_active_carryover(
+    user_id: str, course_id: str, role: str = "carryover_question"
+) -> None:
+    """本人×コースの active な intention（指定 ``role``, status='open'）を
+    'superseded' に遷移させる（UC6: 削除せず状態遷移で保持）。
 
-    新しい carryover を書く直前に呼ぶ（carryover は常に最大1件/コース）。
+    新しい行を書く直前に呼ぶ（当該 role は常に最大1件/コース）。既定は従来どおり
+    carryover（``role='carryover_question'``）で、帰還の扉（return_door_design.md §2.1）の
+    書き置き ``role='leave_note'`` も同じ規約を共有する（role パラメータ化のみで
+    carryover の挙動は不変）。
     """
     session = _pg_session()
     try:
@@ -2590,10 +2596,10 @@ def _supersede_active_carryover(user_id: str, course_id: str) -> None:
                 UPDATE interest_traces
                 SET status = 'superseded'
                 WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
-                  AND kind = 'intention' AND payload->>'role' = 'carryover_question'
+                  AND kind = 'intention' AND payload->>'role' = :role
                   AND status = 'open'
             """),
-            {"uid": user_id, "cid": course_id},
+            {"uid": user_id, "cid": course_id, "role": role},
         )
         session.commit()
     except Exception as exc:
@@ -2624,6 +2630,9 @@ def record_cycle_intention(
     - ``revisit_answer``: ``source_trace_id``（active carryover の trace id）が
       必須（無ければ None）。carryover 自体は消費しない（新しい carryover を書いた
       ときのみ superseded になる。REVISIT は連鎖記録が目的）。
+    - ``leave_note``（帰還の扉 §2.1）: 「未来の自分への書き置き」。carryover と同じ
+      「本人×コースにつき active 最大1件・新規記録時に旧 leave_note 行を superseded」
+      規約を適用する（carryover の行には触れない — role 別に独立）。
 
     戻り値は ``{"trace_id": ...}``。失敗時は None。
     """
@@ -2659,6 +2668,10 @@ def record_cycle_intention(
 
     if role == "carryover_question":
         _supersede_active_carryover(user_id, course_id)
+    elif role == "leave_note":
+        # 帰還の扉（return_door_design.md §2.1）: 書き置きも carryover と同じ
+        # 「active 最大1件」規約（旧 leave_note 行のみ superseded。carryover は不変）。
+        _supersede_active_carryover(user_id, course_id, role="leave_note")
 
     trace_id = record_interest_trace(
         user_id, course_id, None, kind=KIND_INTENTION, text=text,
@@ -2812,10 +2825,13 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
     痕跡本文や user_id は一切出さない。集団集計を既定とする（仕様書 §6-5）。
     """
     title_map = topic_title_map or {}
-    # 理解サイクル（UCサイクル）の intention / 軽量アンカー(anchor_mark)、および
-    # 学生 HELP ルートの help_usage は本人専用メモ・使い方の質問であり、教員向け
-    # 集団集計（関与人数・トピック別件数）には数えない（UC3 / §1-3-8 と同型の除外）。
-    _dashboard_excluded_kinds = "('help_usage', 'intention', 'anchor_mark')"
+    # 理解サイクル（UCサイクル）の intention / 軽量アンカー(anchor_mark)、
+    # 学生 HELP ルートの help_usage、楽屋の質問 backstage_question は本人専用メモ・
+    # 使い方の質問・私的降下であり、教員向け集団集計（関与人数・トピック別件数）には
+    # 数えない（UC3 / §1-3-8 / 構造の降下路 SD4 と同型の除外。除外集合の正本は
+    # core/trace_registry.py の DASHBOARD_EXCLUDED_KINDS — 登録簿ガードレールが
+    # 全要素の出現を強制する）。
+    _dashboard_excluded_kinds = "('help_usage', 'intention', 'anchor_mark', 'backstage_question')"
     session = _pg_session()
     try:
         cohort = session.execute(

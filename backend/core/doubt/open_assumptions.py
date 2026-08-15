@@ -115,29 +115,43 @@ def compile_open_assumptions(
     session,
     course_id: str,
     include_challenger_names: bool = False,
+    document_id: str = "",
 ) -> list[dict]:
     """未検証合意リストを台帳から編纂する（読み取り専用の投影）。
 
     include_challenger_names=False（学習者向け）では疑義者名を一切含めない。
     True（教員向け）でも名前は challenge 詳細参照用で、リスト自体には
     型と段階ラベルのみを載せる。
+
+    document_id（optional, seminar_brief_mirroring_design.md §3 精査④）:
+    指定時は台帳行を当該 document に絞る（SQL に AND 1条件を足すだけ）。
+    percentile は従来どおり **course 全体**で計算する — 「高」の意味
+    （コースの中での相対負荷）を document 絞り込みで変えないため。
+    既定（空文字）は従来挙動完全不変。
     """
+    document_id = str(document_id or "").strip()
     p50, p90, p99 = load_percentiles(session, course_id)
 
     # SL-3: 独立支持経路の共有文脈を1度だけ構築し、対象ごとに再利用する
     # （compute_support_lines を項目数分呼ぶとグラフを N 回再構築してしまう — 性能改善）。
-    support_ctx = build_support_context(session, course_id=course_id)
+    support_ctx = build_support_context(session, course_id=course_id, document_id=document_id)
 
+    params: dict[str, Any] = {"course": course_id}
+    doc_filter = ""
+    if document_id:
+        doc_filter = "AND document_id = :doc"
+        params["doc"] = document_id
     rows = session.execute(
-        sa_text("""
+        sa_text(f"""
             SELECT target_id, target_type, verification_status,
                    verification_scopes, consensus_behavioral, load_score,
                    falsification_conditions
             FROM epistemic_ledger
             WHERE course_id = :course
               AND load_score IS NOT NULL
+              {doc_filter}
         """),
-        {"course": course_id},
+        params,
     ).fetchall()
 
     items: list[dict] = []

@@ -2371,10 +2371,12 @@
   // claim 別インライン確認パネル（lsToggleReviewQueueForClaim）とレビューキュー直行
   // モーダル（G4-R, lsOpenReconReviewModal）の双方から再利用する。
   // 非 2xx は resolve せず reject する（レビュー指摘5: PATCH 失敗が成功扱いになっていた）。
-  function lsPatchReconItemStatus(itemId, status) {
+  // sortOrder は負荷順トリアージ（teacher_triage_instruments_design.md §2, TT3）:
+  // どの並び順の下で確定したかを監査 metadata に残す（未指定＝従来順）。
+  function lsPatchReconItemStatus(itemId, status, sortOrder) {
     return apiFetch("/admin/reconstruction/items/" + encodeURIComponent(itemId), {
       method: "PATCH",
-      body: JSON.stringify({ status: status }),
+      body: JSON.stringify({ status: status, sort_order: sortOrder || "default" }),
     }).then(function (res) {
       if (res.ok) return res.json();
       return res.json()
@@ -2481,9 +2483,14 @@
       });
   }
 
+  // 負荷順トリアージ（teacher_triage_instruments_design.md §2, TT1）: 並び順は
+  // モーダルを開くたびに既定（従来順）へ戻す。localStorage 等へは保存しない。
+  var lsReconReviewSortOrder = "default";
+
   function lsOpenReconReviewModal() {
     var existing = document.getElementById("ls-recon-review-modal");
     if (existing) existing.remove();
+    lsReconReviewSortOrder = "default";
 
     var overlay = document.createElement("div");
     overlay.id = "ls-recon-review-modal";
@@ -2496,6 +2503,13 @@
         '</div>' +
         '<p class="ls-course-muted">疑わしさランク順の一覧です。教員は事後の監査役であり、' +
           'AI が自動生成した問いをその場で追認（confirm）・配信停止（retire）できます。</p>' +
+        // 負荷順トリアージ（§2）: 明示トグル + 適用中の並び順の宣言一行（TT1）。
+        // 宣言行は load 適用中のみ表示する（既定＝従来順のときは並べ替えをして
+        // いないので宣言しない）。
+        '<div class="ls-recon-review-sort">' +
+          '<button type="button" id="ls-recon-review-sort-toggle" class="ls-stumble-mini" data-ui-anchor="lecture-studio.recon-review-sort">並び順: 負荷の高い順</button>' +
+        '</div>' +
+        '<div id="ls-recon-review-sort-note" class="ls-course-muted" hidden>基盤への影響が大きい順に並んでいます</div>' +
         '<div id="ls-recon-review-list"><div class="ls-course-muted">読み込み中…</div></div>' +
       '</div>';
     document.body.appendChild(overlay);
@@ -2504,6 +2518,19 @@
     document.getElementById("ls-recon-review-close").addEventListener("click", close);
     overlay.addEventListener("click", function (e) { if (e.target === overlay) close(); });
 
+    var sortToggle = document.getElementById("ls-recon-review-sort-toggle");
+    if (sortToggle) {
+      sortToggle.addEventListener("click", function () {
+        lsReconReviewSortOrder = lsReconReviewSortOrder === "load" ? "default" : "load";
+        sortToggle.textContent = lsReconReviewSortOrder === "load"
+          ? "並び順: 従来の順に戻す"
+          : "並び順: 負荷の高い順";
+        var note = document.getElementById("ls-recon-review-sort-note");
+        if (note) note.hidden = lsReconReviewSortOrder !== "load";
+        lsLoadReconReviewModalList();
+      });
+    }
+
     lsLoadReconReviewModalList();
   }
 
@@ -2511,6 +2538,9 @@
     var list = document.getElementById("ls-recon-review-list");
     if (!list) return;
     var qs = lsReconReviewQueryString();
+    // 並び順パラメータは load のときのみ付ける（既定は従来順でパラメータ自体を
+    // 送らない, TT1。並び替え・導出不能候補の末尾配置はサーバの責務）。
+    if (lsReconReviewSortOrder === "load") qs = qs ? qs + "&sort=load" : "sort=load";
     apiFetch("/admin/reconstruction/items/review-queue" + (qs ? "?" + qs : ""))
       .then(function (res) { return res.ok ? res.json() : null; })
       .then(function (data) {
@@ -2537,6 +2567,16 @@
 
     function itemCardHtml(it, withActions) {
       var sig = it.signals || {};
+      // 負荷順トリアージ（§2, TT2）: サーバが返す段階ラベル（低/中/高/最高位）を
+      // そのまま小ラベルで出す（JS 側に閾値・語彙表を持たない）。load 並び替え中に
+      // ラベルが空の item は「影響度を導出できない候補」と正直にラベルする
+      // （末尾配置はサーバ側の責務）。
+      var loadLabel = "";
+      if (it.load_level_label) {
+        loadLabel = ' · 基盤への影響: ' + escHtml(it.load_level_label);
+      } else if (lsReconReviewSortOrder === "load") {
+        loadLabel = ' · 影響度を導出できない候補';
+      }
       var actions = withActions
         ? '<div class="ls-stumble-item-actions">' +
             '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
@@ -2545,7 +2585,7 @@
         : '';
       return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
         '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") +
-          (it.status ? ' · ' + escHtml(it.status) : '') + '</div>' +
+          (it.status ? ' · ' + escHtml(it.status) : '') + loadLabel + '</div>' +
         '<div class="ls-stumble-item-prompt">' + escHtml(it.prompt || "") + '</div>' +
         '<div class="ls-stumble-item-sig">回答 ' + escHtml(sig.responses || "-") +
           ' / 誤り ' + escHtml(sig.mismatch_level || "-") +
@@ -2580,7 +2620,7 @@
     var card = (triggerBtn && triggerBtn.closest) ? triggerBtn.closest("[data-recon-item]") : null;
     lsClearReconItemError(card);
     lsSetReconItemBusy(card, true);
-    lsPatchReconItemStatus(itemId, status)
+    lsPatchReconItemStatus(itemId, status, lsReconReviewSortOrder)
       .then(function () {
         // 成功時のみ一覧・バッジ・キャッシュを更新する（一覧再取得で DOM が置換される
         // ため、ボタンの再有効化は不要）
@@ -7406,15 +7446,19 @@
   // auto_paginate_slides）を通した結果を返す（教材図スタジオ設計書 §7.5: 図を入れると
   // ページ境界が動くため、コーストピックのスライド枚数インジケータは実際の配信と
   // 一致させる）。既定 false で従来の呼び出し（チャンク編集）は不変。
-  function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate) {
+  function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate, documentId) {
+    // WMレンズ（teacher_triage_instruments_design.md §3.2）: 現在編集中チャンクの
+    // 文書 ID が取れる場合のみ optional で渡す（サーバ側は既定 None・既存呼び出し不変）。
+    var payload = {
+      display_text: displayText || "",
+      spoken_text: spokenText || null,
+      formulas: formulas || [],
+      auto_paginate: !!autoPaginate,
+    };
+    if (documentId) payload.document_id = documentId;
     return apiFetch("/admin/lecture-studio/preview-split", {
       method: "POST",
-      body: JSON.stringify({
-        display_text: displayText || "",
-        spoken_text: spokenText || null,
-        formulas: formulas || [],
-        auto_paginate: !!autoPaginate,
-      }),
+      body: JSON.stringify(payload),
     })
       .then(function (res) {
         if (!res.ok) throw new Error("preview-split failed: " + res.status);
@@ -7422,7 +7466,9 @@
       })
       .then(function (data) {
         var slides = (data.slides || []).map(function (sd) {
-          return { slide_index: sd.slide_index, display: sd.display_text, spoken: sd.spoken_text };
+          // wm はWMレンズの段階ラベル + 事実文（高負荷スライドにのみ付く。最低段は
+          // キーなし）。数値・生スコアは含まれない（TT2）。
+          return { slide_index: sd.slide_index, display: sd.display_text, spoken: sd.spoken_text, wm: sd.wm || null };
         });
         return {
           slides: slides,
@@ -7581,6 +7627,19 @@
           ? '<div class="ls-slide-warn">⚠ 受講画面で縮小表示されます。=== で分割を検討してください</div>'
           : "";
         var badge = lsSlideAudioBadgeHtml(chunk, idx);
+        // WMレンズ（teacher_triage_instruments_design.md §3.2）: サーバが返す段階
+        // ラベルをそのまま表示する（JS 側に閾値・語彙表を持たない, TT2）。wm キーは
+        // 高負荷スライドにのみ付く。事実文の提示までで、分割マーカー === を挿すのは
+        // 常に教員の手（TT6 — 自動挿入・点線提示はしない）。
+        var wm = slide.wm || null;
+        var wmLabel = (wm && wm.level_label)
+          ? '<span class="ls-slide-badge ls-slide-wm-label" data-ui-anchor="lecture-studio.slide-wm-label">要素の相互作用: ' +
+              escHtml(wm.level_label) + '</span>'
+          : "";
+        var wmFact = (wm && wm.fact)
+          ? '<div class="ls-slide-warn ls-slide-wm-fact">' + escHtml(wm.fact) +
+              (wm.degraded ? ' 記号の照合は表記の一致による近似です。' : '') + '</div>'
+          : "";
         var notesHtml = slide.spoken
           ? lsRenderTextWithFormulas(slide.spoken, formulas)
           : '<span class="ls-course-muted">読み上げ原稿がありません</span>';
@@ -7589,9 +7648,11 @@
             '<div class="ls-slide-card-head">' +
               '<span class="ls-slide-card-index">スライド ' + (idx + 1) + ' / ' + split.slides.length + '</span>' +
               badge +
+              wmLabel +
             '</div>' +
             '<div class="ls-slide-card-body">' + lsRenderTextWithFormulas(slide.display, formulas) + '</div>' +
             lengthWarn +
+            wmFact +
             '<div class="ls-slide-card-notes">' + notesHtml + '</div>' +
             '<div class="ls-slide-card-actions">' +
               '<button type="button" class="ls-slide-play-btn admin-action-btn" data-slide-index="' + idx + '">▶ 試聴</button>' +
@@ -7620,7 +7681,9 @@
     var displayText = (displayEl && displayEl.value) || chunk.display_text || chunk.text || "";
     var spokenText = (spokenEl && spokenEl.value) || chunk.spoken_text || "";
     listEl.innerHTML = '<div class="ls-empty-state">読み込み中...</div>';
-    lsFetchSplitSlides(displayText, spokenText, chunk.formulas || []).then(renderWithSplit);
+    // WMレンズ（§3.2）: チャンク経路は文書 ID を渡す（取れない場合は送らない）。
+    lsFetchSplitSlides(displayText, spokenText, chunk.formulas || [], false,
+      chunk.document_id || chunk.material_id || null).then(renderWithSplit);
   }
 
   var lsSlideToolsLastFocus = "ls-display-text";
@@ -7637,7 +7700,9 @@
     var displayText = (displayEl && displayEl.value) || chunk.display_text || chunk.text || "";
     var spokenText = (spokenEl && spokenEl.value) || chunk.spoken_text || "";
     var seq = ++lsSlideIndicatorRequestSeq;
-    lsFetchSplitSlides(displayText, spokenText, chunk.formulas || []).then(function (split) {
+    // WMレンズ（§3.2）: チャンク経路は文書 ID を渡す（取れない場合は送らない）。
+    lsFetchSplitSlides(displayText, spokenText, chunk.formulas || [], false,
+      chunk.document_id || chunk.material_id || null).then(function (split) {
       if (seq !== lsSlideIndicatorRequestSeq) return; // 古いレスポンスは無視
       lsRenderSlideIndicatorEl(document.getElementById("ls-slide-tools-indicator"), split);
       if (lsState.displayView === "slides") lsRenderSlidesPanel(chunk, split);

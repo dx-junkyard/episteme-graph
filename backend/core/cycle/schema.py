@@ -21,15 +21,19 @@ from __future__ import annotations
 KIND_INTENTION = "intention"
 KIND_ANCHOR_MARK = "anchor_mark"
 
-# intention.payload.role（設計書 §4.1）。
+# intention.payload.role（設計書 §4.1 + 帰還の扉 §2.1）。
 ROLE_OPENING_MOTIVE = "opening_motive"
 ROLE_CARRYOVER_QUESTION = "carryover_question"
 ROLE_REVISIT_ANSWER = "revisit_answer"
+# 帰還の扉（return_door_design.md §2.1）: LEAVE の「未来の自分への書き置き」。
+# carryover と同じ「本人×コースにつき active 最大1件・新規記録時に旧行 superseded」規約。
+ROLE_LEAVE_NOTE = "leave_note"
 
 INTENTION_ROLES = (
     ROLE_OPENING_MOTIVE,
     ROLE_CARRYOVER_QUESTION,
     ROLE_REVISIT_ANSWER,
+    ROLE_LEAVE_NOTE,
 )
 
 # 軽量アンカー4ボタン（設計書 §4.2）。既存 structure_anchor の doubt_type 語彙への

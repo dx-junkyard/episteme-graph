@@ -314,6 +314,11 @@
           <!-- [変更] を押せないときに理由を必ず事実文で出す（無効化されたボタンだけを見せない） -->
           <span id="llm-model-summary-note" style="color:var(--color-text-tertiary);font-size:11.5px;margin-left:6px" hidden></span>
         </div>
+        <!-- 静かな計器（teacher_triage_instruments_design.md §3.1）: コスト見通しの一行。
+             日次枠に収まらない可能性があるときのみ表示（収まる見込みなら行ごと出さない）。
+             数値・残回数は出さない。事実文の提示までで、アップロードは止めない（TT4）。
+             中身は admin-llm-models.js（_loadMaterialsCostForecast）が1回だけ取得する。 -->
+        <div id="llm-model-cost-note" data-ui-anchor="materials.cost-forecast-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px" hidden></div>
         <div id="llm-model-panel" hidden></div>
         <div id="upload-status" class="upload-status"></div>
       </div>

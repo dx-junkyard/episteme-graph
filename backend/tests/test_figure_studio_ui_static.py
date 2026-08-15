@@ -502,8 +502,12 @@ class TestCourseSlideIndicatorAutoPaginate:
     """§7.5: コーストピックのスライド枚数は受講側と同じ自動ページ分割で数える。"""
 
     def test_fetch_helper_sends_the_auto_paginate_option(self):
+        # 第5引数 documentId は WMレンズ（teacher_triage_instruments_design.md §3.2）の
+        # optional 追加（未指定なら body に document_id を含めない＝従来挙動不変）。
         src = _read(ADMIN_LS_JS)
-        start = src.index("function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate) {")
+        start = src.index(
+            "function lsFetchSplitSlides(displayText, spokenText, formulas, autoPaginate, documentId) {"
+        )
         block = src[start : src.index("\n  }", start)]
         assert "auto_paginate: !!autoPaginate," in block
         assert "autoPaginated: !!data.auto_paginated," in block
@@ -514,9 +518,10 @@ class TestCourseSlideIndicatorAutoPaginate:
         assert "lsFetchSplitSlides(dText, sText, [], true)" in src
 
     def test_chunk_indicator_keeps_the_previous_behaviour(self):
-        """チャンク編集側の呼び出しは 3 引数のまま（auto_paginate=false 相当）。"""
+        """チャンク編集側の呼び出しは auto_paginate=false のまま（WMレンズの
+        documentId 追加後も自動ページ分割はコーストピック側だけ）。"""
         src = _read(ADMIN_LS_JS)
-        assert "lsFetchSplitSlides(displayText, spokenText, chunk.formulas || [])" in src
+        assert src.count("lsFetchSplitSlides(displayText, spokenText, chunk.formulas || [], false,") == 2
 
     def test_indicator_states_the_timer_advance_fact(self):
         src = _read(ADMIN_LS_JS)

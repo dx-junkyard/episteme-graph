@@ -34,6 +34,10 @@
         <span style="opacity:.3">|</span>
         <button id="my-map-btn" data-ui-anchor="topbar.my-map" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの地図を開く">わたしの地図</button>
         <span style="opacity:.3">|</span>
+        <!-- 主権台帳 v1（trace_registry_sovereignty_ledger_design.md §3.4）:
+             本人の全痕跡の一覧と持ち出し。パネル本体は my-records.js が遅延生成する。 -->
+        <button id="my-records-btn" data-ui-anchor="topbar.my-records" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="わたしの記録を開く">わたしの記録</button>
+        <span style="opacity:.3">|</span>
         <!-- 学習UI再編 Phase 1（§4）: composer から画面全体トグルの定位置＝トップバーへ移設。
              ID・typed action 配線（support_action="usage_help"）は不変。
              Phase 2: 押下は「使い方インスペクト・モード」の ON/OFF トグルになった
@@ -50,6 +54,9 @@
     <div class="inspect-banner" id="inspect-banner" hidden>使い方を確認中 — 知りたい部分にカーソルを合わせてください（Esc で終了）</div>
     <!-- インスペクト・ツールチップ容器（§5.2〜5.4）。JS が innerHTML と位置を都度書き換える。 -->
     <div class="inspect-tooltip" id="inspect-tooltip" hidden></div>
+    <!-- 欄外の印のツールチップ容器（return_door_design.md §2.3）。本人の言葉の逐語のみを
+         app.js が textContent で書き込む（RD1。innerHTML は使わない）。 -->
+    <div class="margin-marks-tip" id="margin-marks-tip" hidden></div>
 
     <!-- Sidebar -->
     <div class="sb" id="sidebar">
@@ -58,6 +65,12 @@
 
     <!-- Main Chat Area -->
     <div class="mn">
+      <!-- 帰還の扉（再入口インレイ, docs/features/return_door_design.md §2.1）:
+           本人の書き置き・持ち越しの問い・最後に確定した引っかかりの逐語のみを表示する
+           （RD1: AI要約ゼロ）。empty なら描画しない・経過日数は出さない（RD2/RD5）。
+           描画は app.js の renderReturnDoor が textContent でのみ行う。
+           flex: 0 0 auto の薄い1区画（上段 .material-region の圧縮規約を壊さない）。 -->
+      <div class="return-door" id="return-door" data-ui-anchor="material.return-door" hidden></div>
       <!-- 教材区画（本筋・順路）: 教材本文＋確認して次へ。会話で流れない独立スクロール -->
       <div class="material-region" id="material-region">
         <!-- 教材区画ヘッダ（②提示形式, §3.2）: 左=「教材 · トピック名」/ 右=提示形式
@@ -71,9 +84,16 @@
             <button type="button" class="material-format-opt" id="lecture-toggle" data-ui-anchor="material.lecture-toggle" title="レクチャーモード切替">🎙 講義</button>
             <span class="lecture-toggle-hint" id="lecture-toggle-hint" hidden></span>
           </div>
+          <!-- 欄外の印の表示トグル（return_door_design.md §2.3）: 状態は localStorage
+               eg_margin_marks:<courseId>（精読モードと同型の許容例外）。既定は表示 ON。 -->
+          <button type="button" class="margin-marks-toggle" id="margin-marks-toggle" aria-pressed="true" title="欄外の印（あなたが確定した引っかかり・問いの点）の表示/非表示" hidden>●印</button>
           <button type="button" class="lecture-fullscreen-btn" id="lecture-fullscreen-btn" title="スライドを全画面表示" hidden>⛶ 全画面</button>
         </div>
         <div class="material-body" id="material-body"></div>
+        <!-- 欄外の印（return_door_design.md §2.3）: 教材区画の右余白に本人の確定痕跡を
+             淡い点で縦に並べる薄いレイヤ。描画は app.js の renderMarginMarks が
+             textContent でのみ行う（数を表示しない・map_excluded は出さない）。 -->
+        <div class="margin-marks" id="margin-marks" hidden></div>
         <div class="material-foot">
           <!-- 理解サイクル Phase 1（ANCHOR, docs/features/understanding_cycle_design.md
                §5.4）: 常設の軽量アンカー4ボタン。テキスト選択時のポップオーバーとは別に、
@@ -195,6 +215,7 @@
   <script src="/js/atlas-cues.js"></script>
   <script src="/js/personal-map.js"></script>
   <script src="/js/personal-map-home.js"></script>
+  <script src="/js/my-records.js"></script>
   <!-- 知識ランドスケープ（docs/features/knowledge_landscape_design.md §10.1）:
        地図オーバーレイの「論文の位置」レイヤー + 出典タブへのデータ供給。
        atlas-overlay.js のフックから呼ばれるので personal-map.js の後に読み込む。 -->

@@ -54,6 +54,7 @@ from core.lecture import (
     lecture_uses_topic_material,
     split_slides,
 )
+from core import lecture_wm
 from core import llm_policy
 from core.llm import generate_text, get_llm_params
 from core.llm_usage.context import bind_usage_context, usage_context
@@ -566,9 +567,15 @@ class LecturePreviewSplitRequestWithPagination(LecturePreviewSplitRequest):
 
     ``schemas.py`` 側のモデルを拡張せずここで派生させているのは、この差分が
     「原稿スタジオのプレビュー専用の追加入力」であって配信 DTO ではないため。
+
+    ``document_id``（WMレンズ, 教員支援 Phase 4 §3.2 / §5 精査④）: 由来 document を
+    渡すと、スライドごとの要素相互作用性の記号照合が symbol_registry artifact との
+    突合になる。省略（``None``、既定）は従来どおり + textual 照合への縮退
+    （``wm.degraded``）。既存の呼び出しは完全に不変。
     """
 
     auto_paginate: bool = False
+    document_id: str | None = None
 
 
 class LecturePreviewSplitResponseWithPagination(LecturePreviewSplitResponse):
@@ -584,14 +591,11 @@ class LecturePreviewSplitResponseWithPagination(LecturePreviewSplitResponse):
     spoken_degraded: bool = False
 
 
-@router.post(
-    "/lecture-studio/preview-split",
-    response_model=LecturePreviewSplitResponseWithPagination,
-)
+@router.post("/lecture-studio/preview-split")
 def preview_split_slides(
     body: LecturePreviewSplitRequestWithPagination,
     current_user: dict = Depends(_require_teacher),
-) -> LecturePreviewSplitResponseWithPagination:
+) -> dict:
     """原稿スタジオのプレビュー用スライド分割を返す（DB は一切変更しない）。
 
     ``core.lecture`` の分割関数をそのまま呼ぶことで、プレビュー（本エンドポイント）と
@@ -603,6 +607,13 @@ def preview_split_slides(
     ``auto_paginate=True`` のときは ``auto_paginate_slides``（受講側
     ``routes/lecture.py::_build_topic_slides`` が使う正本）を通す。**分割ロジックを
     クライアントに再実装しないこと**（設計ルール）。
+
+    WMレンズ（教員支援 Phase 4 §3.2）: 応答の各 slide に相互作用性の段階
+    ``wm: {level, level_label, fact, degraded?}`` を相乗りさせる
+    （``core/lecture_wm.py``、非LLM・決定論）。**最低段のスライドには wm キー自体を
+    付けない**（平常時は視界に無い）ため、レスポンスは response_model を通さず
+    既存 DTO の ``model_dump()`` に条件付きで wm を注入して返す（既存キーは不変）。
+    導出失敗はプレビューを止めない（fail-open, TT4）。
     """
     display_count, spoken_count = count_slide_marker_segments(body.display_text, body.spoken_text)
     auto_paginated = False
@@ -624,7 +635,7 @@ def preview_split_slides(
     else:
         slides, mismatch = split_slides(body.display_text, body.spoken_text, body.formulas)
 
-    return LecturePreviewSplitResponseWithPagination(
+    response = LecturePreviewSplitResponseWithPagination(
         slides=[
             LectureSlide(
                 slide_index=sd["slide_index"],
@@ -640,6 +651,12 @@ def preview_split_slides(
         auto_paginated=auto_paginated,
         spoken_degraded=spoken_degraded,
     )
+    payload = response.model_dump()
+    try:
+        lecture_wm.annotate_slides(payload["slides"], document_id=body.document_id)
+    except Exception:  # noqa: BLE001 — 計器の失敗でプレビューを止めない（TT4）
+        logger.warning("WM lens annotation failed; returning plain preview", exc_info=True)
+    return payload
 
 
 def _load_chunk_slide_audio_map(chunk_ids: list[str]) -> dict[str, set[int]]:

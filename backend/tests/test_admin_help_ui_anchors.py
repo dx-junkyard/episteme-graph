@@ -98,7 +98,13 @@ class TestAdminUiAnchorsModule:
         #   doubt-atlas.falsification-refresh（AIに候補を出してもらう）/
         #   doubt-atlas.counterfactual-observation-toggle（観測を仮に倒す）/
         #   doubt-atlas.open-assumptions-reachable-filter（到達可能フィルタ）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 260
+        # + 宣言された弁と静かな計器（teacher_triage_instruments_design.md）の4件:
+        #   deliberation.review-sort-toggle / lecture-studio.recon-review-sort /
+        #   materials.cost-forecast-note / lecture-studio.slide-wm-label。
+        # + ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1.3）の2件:
+        #   materials.row-seminar-brief（⋯メニューの「ゼミ前ブリーフ…」）/
+        #   materials.seminar-brief-modal（4区画の read-only 合成ビューモーダル）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 266
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

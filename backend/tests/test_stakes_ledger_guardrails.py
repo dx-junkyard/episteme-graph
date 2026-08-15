@@ -84,6 +84,9 @@ class TestClosedWorldVocabulary:
         return [
             _DOUBT_DIR / "support_paths.py",
             _DOUBT_DIR / "observation_targets.py",
+            # ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 晴れ間の閉世界固定文を
+            # 新設したモジュール。SL1 denylist の検査対象に最初から含める。
+            _DOUBT_DIR / "seminar_brief.py",
             _ROUTES_DOUBT,
             _OPEN_ASSUMPTIONS,
             _DOUBT_ATLAS_JS,

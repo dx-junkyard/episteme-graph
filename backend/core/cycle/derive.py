@@ -137,6 +137,81 @@ def build_landing_candidates(rows: list[dict], limit: int = _MAX_LANDING_CANDIDA
     return ordered[:limit]
 
 
+_MAX_TODAYS_WORDS = 30
+
+
+def build_return_door(
+    leave_note_row: dict | None,
+    carryover_row: dict | None,
+    tension_row: dict | None,
+) -> dict[str, Any]:
+    """帰還の扉（コースビュー最上部の再入口インレイ）の DTO を組み立てる
+    （return_door_design.md §2.1）。
+
+    - **本人の言葉の逐語のみ**（RD1）: この関数は LLM・要約・言い換え・整形を一切行わず、
+      入力 rows の ``text`` をそのまま通す（切り詰めもしない）。
+    - **経過日数・「〜ぶり」・件数を含めない**（RD2/RD5）: 出力キーは固定で、日数・件数の
+      キーも文言も生成しない（``created_at`` は ISO タイムスタンプの事実のみ）。
+    - 提示順は固定（書き置き → 持ち越しの問い → 最後に確定した tension。§2.1 の仮決め）。
+    - 3部品とも無ければ ``{"empty": True}``（書かなければ何も出ない, RD3）。
+    """
+    leave_note = None
+    if leave_note_row and (leave_note_row.get("text") or "").strip():
+        leave_note = {
+            "text": leave_note_row.get("text", ""),
+            "created_at": leave_note_row.get("created_at", ""),
+        }
+    carryover = None
+    if carryover_row and (carryover_row.get("text") or "").strip():
+        carryover = {
+            "trace_id": carryover_row.get("id"),
+            "text": carryover_row.get("text", ""),
+            "created_at": carryover_row.get("created_at", ""),
+        }
+    last_tension = None
+    if tension_row and (tension_row.get("text") or "").strip():
+        last_tension = {
+            "text": tension_row.get("text", ""),
+            "created_at": tension_row.get("created_at", ""),
+        }
+    if leave_note is None and carryover is None and last_tension is None:
+        return {"empty": True}
+    return {
+        "empty": False,
+        "leave_note": leave_note,
+        "carryover": carryover,
+        "last_tension": last_tension,
+    }
+
+
+def build_todays_words(rows: list[dict], limit: int = _MAX_TODAYS_WORDS) -> dict[str, Any]:
+    """「今日のあなたの言葉」トレイの DTO を組み立てる（return_door_design.md §2.2）。
+
+    ``rows`` は ``core.cycle.queries.fetch_todays_user_words`` の生データ想定
+    （SQL 側で user ロールに絞り済み）だが、role をここでも再検査する二重防御
+    （assistant ロールの発話を返す経路を作らない, RD1）。本文は逐語のまま切らずに
+    全文を返す（切り詰めない — 逐語性優先）。上限（既定30件）を超えた分だけを
+    落とし ``truncated: True`` で正直に返す（件数の数値は出さない, RD5）。
+    """
+    words: list[dict] = []
+    truncated = False
+    for row in rows:
+        if row.get("role") != "user":
+            continue
+        text = row.get("text") or ""
+        if not text.strip():
+            continue
+        if len(words) >= limit:
+            truncated = True
+            break
+        words.append({
+            "text": text,
+            "topic_id": row.get("topic_id", ""),
+            "created_at": row.get("created_at", ""),
+        })
+    return {"words": words, "truncated": truncated}
+
+
 def build_intention_dto(carryover_row: dict | None, has_any_intention: bool) -> dict[str, Any]:
     """discuss opening へ同梱する ``intention`` フィールドを組み立てる（設計書 §5.1/§5.2）。
 
