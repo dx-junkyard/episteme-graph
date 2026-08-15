@@ -161,7 +161,15 @@ def build_position_anchor(
 # ---------------------------------------------------------------------------
 
 
-_TRACE_KIND_WORD = {"misconception": "誤答", "question": "問い", "detour": "寄り道"}
+_TRACE_KIND_WORD = {
+    "misconception": "誤答",
+    "question": "問い",
+    "detour": "寄り道",
+    # 構造の降下路（structure_descent_design.md §4）: 楽屋の質問は本人の「問いの軌跡」
+    # には見える（learner_trajectory=True）。表示語を用意しないと既定の「問い」に
+    # 縮退して楽屋であることが読めない（2026-08-15 レビュー是正）。
+    "backstage_question": "楽屋の質問",
+}
 
 
 def _days_ago(dt) -> int | None:

@@ -94,13 +94,19 @@ def _resolve_document_id(session, document_ref: str) -> str:
 
 
 def _derive_course_id(session, document_id: str) -> str:
-    """document の解析グラフから course_id を導出する（``ledger_builder`` と同じ経路）。"""
+    """document の解析グラフから course_id を導出する（``ledger_builder`` と同じ経路）。
+
+    複数コースに同一 document が紐づく場合に返す course_id が実行ごとに揺れないよう、
+    ``ORDER BY created_at DESC, course_id`` で決定論化する（最新の解析グラフを優先し、
+    同時刻は course_id の辞書順で安定させる）。
+    """
     try:
         rows = session.execute(
             sa_text("""
                 SELECT course_id
                 FROM theory_component_graphs
                 WHERE document_id = :doc
+                ORDER BY created_at DESC, course_id
             """),
             {"doc": document_id},
         ).fetchall()

@@ -162,10 +162,20 @@ class TestPublicity:
         assert "匿名集計" in PUBLICITY_DASHBOARD
 
     def test_private_kind_row_gets_private_fact(self):
-        for kind in ("help_usage", "intention", "anchor_mark"):
+        """教員向け消費（dashboard / teacher_aggregations）が一切ない kind のみ
+        「表示されません」を出す（TR5: help_usage は G層 To-Do の k-匿名集計対象
+        なので private 側に入れない）。"""
+        for kind in ("backstage_question", "intention", "anchor_mark"):
             items = _all_items(_overview([_row(kind=kind, status="open")]))
             assert items[0]["publicity"] == PUBLICITY_PRIVATE, kind
         assert PUBLICITY_PRIVATE == "あなた以外には表示されません。"
+
+    def test_help_usage_row_gets_aggregation_fact_not_private(self):
+        """TR5 回帰: help_usage は dashboard 非対象だが G層 To-Do
+        manual.help_gaps_pending（k-匿名レンジ）に含まれ得る —
+        「あなた以外には表示されません」と偽らない。"""
+        items = _all_items(_overview([_row(kind="help_usage", status="open")]))
+        assert items[0]["publicity"] == PUBLICITY_DASHBOARD
 
     def test_candidate_takes_priority_over_dashboard_kind(self):
         """tension は dashboard 対象 kind だが、candidate 行は候補の事実文が優先。"""
@@ -179,6 +189,8 @@ class TestPublicity:
         assert "匿名集計" in by_kind["question"]["publicity_note"]
         assert by_kind["intention"]["publicity_note"] == PUBLICITY_PRIVATE
         assert by_kind["anchor_mark"]["publicity_note"] == PUBLICITY_PRIVATE
+        # help_usage は trajectory / map に出ないが教員向け k-匿名集計の対象（TR5）。
+        assert by_kind["help_usage"]["publicity_note"] == PUBLICITY_DASHBOARD
 
 
 # ===========================================================================
@@ -259,3 +271,26 @@ class TestExport:
         ]
         export = build_ledger_export(rows, exported_at="2026-08-15T10:00:00+00:00")
         assert [r["id"] for r in export["records"]] == ["t-1", "t-2", "t-3"]
+
+    def test_truncated_export_says_so_honestly(self):
+        """読み出し上限に到達したときのみ truncated: true を含める（TR5:
+        上限到達を沈黙させない。数値は出さない TR6）。"""
+        export = build_ledger_export(
+            [_row()], exported_at="2026-08-15T10:00:00+00:00", truncated=True
+        )
+        assert export["truncated"] is True
+
+    def test_untruncated_export_has_no_truncated_key(self):
+        """非到達時はキー自体を出さない（既存キーは不変 — スキーマ安定性）。"""
+        export = build_ledger_export(
+            [_row()], exported_at="2026-08-15T10:00:00+00:00"
+        )
+        assert "truncated" not in export
+
+    def test_export_note_does_not_overclaim_completeness(self):
+        """EXPORT_NOTE は「完全」を無条件に断言しない（TR5）。数値も出さない（TR6）。"""
+        from core.trace_ledger import EXPORT_NOTE
+
+        assert "完全な持ち出し" not in EXPORT_NOTE
+        assert "上限まで" in EXPORT_NOTE
+        assert not any(ch.isdigit() for ch in EXPORT_NOTE)

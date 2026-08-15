@@ -34,9 +34,12 @@ migration: **不要**（新テーブルなし。既存 `interest_traces` の読�
 
 ### 2.1 背景（2026-08-15 時点の実態調査より）
 
-- kind は 8 種（`raw` / `question` / `detour` / `misconception` / `tension` / `help_usage` /
-  `intention` / `anchor_mark`）。語彙定数は `services._INTEREST_KINDS` にあるが、露出宣言は存在しない。
-- 消費者は 33 箇所（2026-08-15 時点。正確な検査対象は `backend/tests/test_trace_registry_guardrails.py` が正）
+- kind は 9 種（`raw` / `question` / `detour` / `misconception` / `tension` / `help_usage` /
+  `intention` / `anchor_mark`、+ 同日並行実装の構造の降下路
+  `docs/features/structure_descent_design.md` 由来の `backstage_question`）。
+  語彙定数は `services._INTEREST_KINDS` にあるが、露出宣言は存在しない。
+- 消費者は 33 箇所（2026-08-15 時点の調査。登録簿 `CONSUMERS` の宣言は主要 14 消費者 —
+  正確な検査対象は `backend/tests/test_trace_registry_guardrails.py` が正）
   で、除外方式が4種に分裂している:
   (A) SQL kind 許可リスト（新 kind を自動除外 — 安全）
   (B) SQL kind 除外リスト（`get_interest_traces` / `aggregate_interest_dashboard` の2箇所のみ。
@@ -60,9 +63,12 @@ class TraceKindSpec:
     learner_trajectory: bool         # 問いの軌跡（get_interest_traces）に出るか
     teacher_dashboard: bool          # aggregate_interest_dashboard（k-匿名集約）の対象になり得るか
     personal_map: bool               # わたしの地図（personal_graph 導出）の対象か
+    teacher_aggregations: tuple[str, ...] = ()  # dashboard 以外の教員向け k-匿名集約消費の記述
+                                     # （例: help_usage → G層 To-Do manual.help_gaps_pending。
+                                     # 台帳の publicity は dashboard OR これの非空で集約対象とみなす — TR5）
     dead: bool = False               # 書き込み経路が現存しない語彙（TR3）
 
-TRACE_KINDS: dict[str, TraceKindSpec]   # 8 kind すべて
+TRACE_KINDS: dict[str, TraceKindSpec]   # 9 kind すべて
 # 導出 frozenset（消費者・ガードレールが参照する正本）:
 ALL_TRACE_KINDS / TRAJECTORY_EXCLUDED_KINDS / DASHBOARD_EXCLUDED_KINDS / PERSONAL_MAP_KINDS
 ```
@@ -76,7 +82,8 @@ ALL_TRACE_KINDS / TRAJECTORY_EXCLUDED_KINDS / DASHBOARD_EXCLUDED_KINDS / PERSONA
 | tension | 引っかかり | ✓ | ✓ | ✓ |
 | raw | その他の記録 | ✓ | ✓ | — |
 | detour（dead） | 寄り道 | ✓ | ✓ | — |
-| help_usage | 使い方の質問 | — | — | — |
+| backstage_question | 楽屋の質問 | ✓ | — | — |
+| help_usage | 使い方の質問 | — | —（※ teacher_aggregations に G層 manual.help_gaps_pending を宣言） | — |
 | intention | 学習の意図 | — | — | — |
 | anchor_mark | 軽量アンカー | — | — | — |
 
@@ -93,9 +100,11 @@ ALL_TRACE_KINDS / TRAJECTORY_EXCLUDED_KINDS / DASHBOARD_EXCLUDED_KINDS / PERSONA
    `test_help_kb_guardrails.py` の方式を登録簿駆動に一般化）。
 4. A方式・D方式の主要消費者（personal_graph queries/derive・tension/anchor worker・digest 2種・
    `naive_signal` ・`stumble`・`next_steps` help_gaps・`bridges`・`cycle/queries`）のソースに現れる
-   kind リテラル集合が `CONSUMERS` の宣言と一致する。
+   kind リテラル集合が `CONSUMERS` の宣言と一致する（**双方向**: 宣言⊆ソースだけでなく、
+   ソース中の登録済み kind リテラル集合 == 宣言集合。docstring / コメント内の言及は ast で
+   剥がして誤検出を避ける — 2026-08-15 レビュー是正で片方向から強化）。
 5. すべての kind が露出3宣言を持つ（dataclass 必須フィールドなので構文的にも強制されるが、
-   dead 語彙も含めて登録簿に8件存在することを固定）。
+   dead 語彙も含めて登録簿に9件存在することを固定）。
 6. `trace_registry.py` は FastAPI / LLM / sqlalchemy を import しない（純宣言モジュール）。
 7. statuses は `services._TRACE_STATUSES` の部分集合。
 
@@ -124,16 +133,23 @@ dismiss したまま保持されている候補・書き直しで superseded に
 
 ### 3.2 core（`backend/core/trace_ledger.py`、FastAPI 非 import）
 
-- `fetch_ledger_rows(session, user_id, limit)` — 本人の全行（kind 条件なし・全 status。
-  dismissed / superseded / candidate も含む — P4 の一望）。新しい降順・上限 500 行
-  （超過は `truncated: true` で正直に返す。持ち出しは常に全件）。
-- `build_ledger_overview(rows, *, course_labels)` — 純関数。登録簿の `label` で系統グルーピングし、
-  各行を {id, kind, kind_label, status, status_label, text, created_at, course_label,
-  flags(map_excluded / superseded / candidate), publicity(事実文)} に射影する。
-  publicity は登録簿の露出宣言 + 行の状態から決定論導出（TR5: 実際の包含来歴は表示しない）。
-  confidence 等の生数値キーは payload から再帰除去（W8 同型）。
-- `build_ledger_export(rows)` — `{schema_version: 1, exported_at, records: [...]}`。
+- `fetch_ledger_rows(user_id, limit)` — 本人の全行（kind 条件なし・全 status。
+  dismissed / superseded / candidate も含む — P4 の一望）。DB セッションは関数内部で
+  生成・close する（`get_session` + try/finally — 引数に取らない）。新しい降順・
+  上限 500 行（超過は `(rows, truncated)` の bool で正直に返す）。
+- `build_ledger_overview(rows, *, course_labels, truncated)` — 純関数。登録簿の `label` で
+  系統グルーピングし、各行を {id, kind, kind_label, status, status_label, text, created_at,
+  course_label, flags(map_excluded / superseded / candidate), publicity(事実文)} に射影する。
+  publicity は登録簿の露出宣言 + 行の状態から決定論導出（TR5: 実際の包含来歴は表示しない。
+  教員向け集約対象の判定は `teacher_dashboard` OR `teacher_aggregations` 非空）。
+  payload は `text` / `context_label` のみの**ホワイトリスト射影**（数値キーを構造的に
+  持たない — 再帰除去ではなく、そもそもネスト payload を返さない）。
+- `build_ledger_export(rows, *, exported_at, truncated=False)` —
+  `{schema_version: 1, exported_at, note, records: [...]}`。
   records は id / kind / status / text / payload（全文）/ course_id / topic_id / created_at。
+  読み出し上限（`_EXPORT_ROW_LIMIT`）到達時のみ `truncated: true` を含める（非到達時は
+  キー自体を出さない — 既存キーは不変）。note は「完全」を無条件に断言しない事実文
+  （ごく大量の記録がある場合は上限まで、と正直に言う。数値は出さない — TR6）。
   スキーマ安定性: `schema_version` を持ち、将来の kind 追加は records に新 kind の行が
   増えるだけで既存キーは変えない。
 - 来歴欄: 系統ごとの露出事実文（登録簿由来・静的）+ 全体注記
@@ -177,7 +193,7 @@ dismiss したまま保持されている候補・書き直しで superseded に
 
 ## 4. 実装記録（2026-08-15）
 
-- 実装: `backend/core/trace_registry.py`（8 kind・消費者13宣言・導出 frozenset 4種）/
+- 実装: `backend/core/trace_registry.py`（9 kind・消費者14宣言・導出 frozenset 4種）/
   `backend/core/trace_ledger.py` / `backend/api/routes/my_records.py`（`me_router`、GET 2本のみ）/
   `frontend/public/js/my-records.js` / `core/label_vocab.py` に `TRACE_STATUS_LABELS`（9 status）/
   UIアンカー `topbar.my-records`（`docs/manual/student/02-student.md#my-records`）。
@@ -192,6 +208,28 @@ dismiss したまま保持されている候補・書き直しで superseded に
 - テスト: `test_trace_registry_guardrails.py`（superseded 是正の回帰含む）/
   `test_trace_ledger_core.py` / `test_my_records_api.py` / `test_my_records_ui_static.py`。
   バックエンド全スイート 9,531 passed / 0 failed（2026-08-15）。
+
+**レビュー是正（2026-08-15、同日）:**
+
+- **Fix 1（TR5・major）**: `help_usage` の公表事実文が虚偽だった —
+  `next_steps.py::_eval_manual_help_gaps_pending` が help_usage を教員向け G層 To-Do
+  （k-匿名レンジ）に集約しているのに、台帳は `teacher_dashboard=False` から
+  「あなた以外には表示されません。」を出していた。`TraceKindSpec` に
+  `teacher_aggregations: tuple[str, ...] = ()`（dashboard 以外の教員向け k-匿名集約消費の
+  記述）を追加して help_usage に宣言を持たせ、`trace_ledger` の `_row_publicity` /
+  `_system_publicity_note` は `teacher_dashboard OR teacher_aggregations 非空` で
+  k-匿名系の事実文（K は `core.privacy.K_ANONYMITY` から合成）を出す。
+  `backstage_question` / `intention` / `anchor_mark` は教員向け消費が無いので
+  「表示されません」のまま（正確）。過剰宣言の逆方向もガードレールで固定。
+- **Fix 2（TR2・major）**: `CONSUMERS` に `personal_graph_derive`（D方式 Python 定数分岐、
+  kinds={tension, question}）と `discuss_observation`（payload_flag 方式・flag=`entry_mode`・
+  kind 条件なしである事実を宣言に正直に明記）を追加（12→14宣言）。
+- **Fix 3（minor）**: export の読み出し上限（100,000 行）到達が沈黙的だった —
+  `fetch_ledger_rows` の truncated を `build_ledger_export` に渡し、到達時のみ
+  `truncated: true` を含める。`EXPORT_NOTE` と my-records.js の「すべて含まれます」断言を
+  上限の事実を含む正直な文に調整（数値は出さない — TR6）。
+- **Fix 5（minor）**: ガードレールの allowlist 検査を双方向化（ソース中の登録済み kind
+  リテラル集合 == 宣言集合。docstring / コメントは ast で剥がして誤検出を回避）。
 
 ## 5. 非スコープ（v2 以降・専用設計書を切る）
 

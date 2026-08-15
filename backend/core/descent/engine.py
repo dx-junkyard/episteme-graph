@@ -406,10 +406,18 @@ def build_ladder(
 
 
 def _notation_pattern_items(course_data: dict | None) -> list[dict[str, Any]]:
-    """cartridge の ``notation_patterns``（規約差の段）。cartridge 不在は空リストへ縮退。"""
+    """cartridge の ``notation_patterns``（規約差の段）。cartridge 不在は空リストへ縮退。
+
+    **明示 cartridge のみ**規約差の段を出す: ``course_data.cartridge_id`` が未設定の
+    コースで ``load_cartridge(None)`` を呼ぶと既定カートリッジ（particle_physics）へ
+    黙って縮退し、無関係な分野の規約差が楽屋に出てしまう（G層 Phase 0 の
+    DEFAULT_CARTRIDGE フォールバック撤去と同じ原則。2026-08-15 レビュー是正）。
+    """
     cartridge_id = course_cartridge_id(course_data if isinstance(course_data, dict) else None)
+    if not cartridge_id:
+        return []
     try:
-        cartridge = load_cartridge(cartridge_id or None)
+        cartridge = load_cartridge(cartridge_id)
     except Exception:  # noqa: BLE001
         logger.warning(
             "descent: cartridge load failed for %r (skipping notation patterns)",

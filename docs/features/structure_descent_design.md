@@ -104,6 +104,27 @@ v1 の中段は「定義・スコープ・表記ゆれ」で構成する。単�
 - 実装判断: 楽屋の応答様式は通常 RAG のまま（楽屋は記録面の私有化であって応答の変更ではない）。
   楽屋の宣言文はフェッチ前にローカル定数で先出し。ladder の開示順制御はクライアントのみで
   サーバは開示履歴を一切記録しない。
+- **レビュー是正（2026-08-15）**:
+  1. 楽屋の notation_patterns 段は**明示 cartridge のみ**出す — `engine._notation_pattern_items`
+     は `course_cartridge_id` が空のとき `load_cartridge` を呼ばず空リストを返す
+     （`load_cartridge(None)` は既定カートリッジ particle_physics へ黙って縮退するため。
+     G層 Phase 0 の DEFAULT_CARTRIDGE 撤去と同じ原則）。
+  2. discuss モード中の楽屋質問の痕跡に `entry_mode: 'discuss'` を焼き込まない
+     （`core/discuss/observation.py` は kind フィルタなしで `payload->>'entry_mode'='discuss'`
+     を数えるため、焼き込むと SD4 に反して discuss 観測基盤に混入する。observation.py は非改変）。
+  3. 送信側ガードの前倒し — `_is_backstage` の判定を learning_chat ハンドラ冒頭
+     （EXPLAIN_GRAPH_ELEMENT typed action・atlas mind/learn の early-return 記録経路より前）
+     へ移し、backstage のとき `body.action` / `body.atlas_context` を無効化して常に通常の
+     楽屋質問として処理する（現行フロントは送らない組合せのサーバ側防御。非 backstage の
+     挙動は不変）。
+  4. 楽屋では帰属確認カード（`anchor_confirm`）を出さない — 付与条件に
+     `not _is_backstage` を追加（「集計に入りません」と宣言した枠で帰属確定 UI を出さない）。
+  5. 問いの軌跡の表示語 — `learning_experience._TRACE_KIND_WORD` に
+     `"backstage_question": "楽屋の質問"` を追加（既定「問い」への縮退で楽屋であることが
+     読めなくなるのを防ぐ）。
+  - 回帰テスト: `test_descent_core.py`（cartridge_id 無しで load_cartridge 非呼び出し・
+    明示 id のみ段が出る）+ `test_descent_guardrails.py`（entry_mode ガード・前倒しガードの
+    位置検査・anchor_confirm ガードのソース構造固定）。
 
 ## 8. 非スコープ（v2）
 

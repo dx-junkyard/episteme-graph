@@ -2465,6 +2465,18 @@ def learning_chat(
             ),
         )
 
+    # 楽屋モード（構造の降下路 docs/features/structure_descent_design.md §4）の判定は
+    # ハンドラ冒頭で前倒しする（2026-08-15 レビュー是正）: 現行フロントは楽屋から
+    # typed action / 地図アクションを送らないが、サーバ側防御として backstage のときは
+    # EXPLAIN_GRAPH_ELEMENT（body.action）と地図 ↗（body.atlas_context）の early-return
+    # 記録経路（kind='question' + structure_anchor / atlas 帰属の焼き込み）に流さず、
+    # 常に通常の楽屋質問（kind='backstage_question'）として処理する（SD4）。
+    # 非 backstage のときは何も変更しない（既存挙動は完全不変）。
+    _is_backstage = bool(body.backstage)
+    if _is_backstage:
+        body.action = None
+        body.atlas_context = None
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -2601,7 +2613,8 @@ def learning_chat(
     # （痕跡 kind='backstage_question'・教員集約/tension mining の対象外）。
     # v1 では system prompt を追加しない — 楽屋は記録の私有化であって
     # 応答様式の変更ではない（通常 RAG 回答のまま）。
-    _is_backstage = bool(body.backstage)
+    # ※ _is_backstage 自体はハンドラ冒頭で判定済み（typed action / atlas の
+    #   early-return 経路より前 — 2026-08-15 レビュー是正）。
 
     # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
     # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
@@ -2967,8 +2980,11 @@ def learning_chat(
         # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
         **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
         # discuss モード（設計 §6.2 Phase 1）: 後から U層・k-匿名集計・personal_graph が
-        # discuss 由来の痕跡を区別できるように焼き込む。
-        **({"entry_mode": "discuss"} if _is_discuss else {}),
+        # discuss 由来の痕跡を区別できるように焼き込む。楽屋の質問には焼き込まない
+        # （discuss 観測基盤 core/discuss/observation.py は kind フィルタなしで
+        # payload->>'entry_mode'='discuss' を数えるため、焼き込むと SD4「楽屋は集計に
+        # 入らない」に反して混入する — 2026-08-15 レビュー是正）。
+        **({"entry_mode": "discuss"} if _is_discuss and not _is_backstage else {}),
         # discuss 観測基盤（docs/features/discuss_observation_design.md §2-1）: 全モード共通で
         # 回答の出所分類を焼き込む（記録開始日以前の痕跡には無いキーなので、集計側は
         # 「記録済み件数」を分母として明示する — U1 と同じ誠実さ）。
@@ -3006,10 +3022,14 @@ def learning_chat(
         maybe_schedule_anchor_mining(current_user["id"], course_id, topic_id)
     # 方法C: 回答末尾の帰属確認プロンプト。tension_hint が立った往復か、明示アンカーは
     # あるが疑いの様相が未分類の往復に限り、セッション内上限までゲートして提示する（P7）。
+    # 楽屋では出さない — 「集計に入りません」と宣言した枠で帰属確定 UI を出さない
+    # （SD4、2026-08-15 レビュー是正。_tension_hint は backstage で常に False だが、
+    # 明示アンカー経由でも出ないよう明示ガード）。
     _anchor_confirm = None
     if (
         _trace_id
         and not _is_casual
+        and not _is_backstage
         and (_tension_hint or _sel_anchor is not None)
         and check_and_count_confirm_prompt(current_user["id"], course_id, topic_id)
     ):

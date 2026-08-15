@@ -216,12 +216,26 @@ class TestTodaysWordsRoute:
         assert "AI回答" not in str(result)
         assert result["words"][0]["text"] == "本人発話"
 
-    def test_day_filter_is_row_updated_at_approximation(self):
-        """当日判定は行 updated_at の近似（メッセージ個別のタイムスタンプは無い）。
+    def test_day_filter_is_rolling_24h_window_tz_independent(self):
+        """「当日」判定は直近24時間窓 × 行 updated_at の近似（TZ 非依存）。
+        CURRENT_DATE（DB タイムゾーンの暦日）に戻すと JST 学習者の朝の発話が
+        同日昼に消える — fetch_landing_candidates と同型の相対窓を固定する。
         近似であることを docstring で正直に宣言していること。"""
         body = extract_function_source(_QUERIES_SRC, "fetch_todays_user_words")
-        assert "updated_at >= CURRENT_DATE" in body
+        assert "updated_at >= now() - interval '24 hours'" in body
+        # SQL 述語としての CURRENT_DATE 比較の再侵入を禁止する
+        # （docstring 内の「なぜ使わないか」説明での言及は許容）。
+        assert "updated_at >= CURRENT_DATE" not in body, (
+            "当日判定が DB タイムゾーン依存の CURRENT_DATE に戻っている"
+        )
         assert "近似" in body
+
+    def test_blank_words_are_excluded_in_sql_for_accurate_truncation(self):
+        """空白のみの発話は SQL 段階（btrim）で除外する — limit+1 方式の truncated
+        判定が空行に食われて不正確にならないため（derive 側のスキップは二重防御）。"""
+        body = extract_function_source(_QUERIES_SRC, "fetch_todays_user_words")
+        assert "btrim" in body
+        assert "<> ''" in body
 
 
 # ===========================================================================

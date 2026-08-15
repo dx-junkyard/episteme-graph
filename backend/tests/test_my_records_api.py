@@ -101,7 +101,7 @@ class TestGetMyRecords:
 
 
 class TestExportMyRecords:
-    def _export(self, monkeypatch):
+    def _export(self, monkeypatch, truncated=False):
         from routes import my_records
 
         rows = [{
@@ -113,7 +113,7 @@ class TestExportMyRecords:
         monkeypatch.setattr(
             my_records,
             "fetch_ledger_rows",
-            lambda user_id, limit=500: (rows, False),
+            lambda user_id, limit=500: (rows, truncated),
         )
         return my_records.export_my_records(current_user={"id": "u-1"})
 
@@ -132,3 +132,10 @@ class TestExportMyRecords:
         assert payload["schema_version"] == 1
         assert payload["records"][0]["payload"] == {"text": "本文", "confidence": 0.9}
         assert payload["records"][0]["status"] == "dismissed"  # 保持したまま持ち出す（P4）
+        assert "truncated" not in payload  # 非到達時はキー自体を出さない
+
+    def test_export_truncation_is_passed_through(self, monkeypatch):
+        """読み出し上限到達（fetch の truncated）が export DTO に正直に届く（TR5）。"""
+        response = self._export(monkeypatch, truncated=True)
+        payload = json.loads(response.body.decode("utf-8"))
+        assert payload["truncated"] is True

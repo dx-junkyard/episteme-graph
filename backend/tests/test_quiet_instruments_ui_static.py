@@ -14,9 +14,10 @@
    `sort_order` を同梱する。
 4. TT4 開始をブロックしない — コスト見通しの一行は hidden の器 + `show === true` 分岐のみで、
    ボタンの無効化（.disabled）を一切書かない。fail-open。
-5. WMレンズ — preview-split 応答の `wm` を射影し、`wm.fact` の事実文と degraded 時の
-   縮退文言「記号の照合は表記の一致による近似です」を表示する。分割マーカー === の
-   自動挿入コードを持たない（TT6）。
+5. WMレンズ — preview-split 応答の `wm` を射影し、`wm.fact` の事実文をサーバの正本の
+   まま素通し表示する。縮退（textual 照合）の事実文はサーバ fact の一文に含まれて届く
+   ため、JS 側で縮退文を作文しない（二重表示の防止 — レビュー是正）。分割マーカー ===
+   の自動挿入コードを持たない（TT6）。
 6. アンカー4件（deliberation.review-sort-toggle / lecture-studio.recon-review-sort /
    materials.cost-forecast-note / lecture-studio.slide-wm-label）の KNOWN 登録と
    マニュアル節の実在（frontend 担体との双方向網羅は既存
@@ -42,8 +43,9 @@ MANUAL_DIR = ROOT / "docs" / "manual"
 SORT_DECLARATION = "基盤への影響が大きい順に並んでいます"
 #: 導出不能候補の正直ラベル（設計書 §2 / §5-②）。
 UNDERIVABLE_LABEL = "影響度を導出できない候補"
-#: WMレンズの縮退の事実文（設計書 §3.2 / §5-④）。
-WM_DEGRADED_SENTENCE = "記号の照合は表記の一致による近似です"
+#: かつて JS 側で作文していた縮退文（レビュー是正で削除済み — サーバ fact に一本化）。
+#: 再発防止の禁止文字列として使う（JS の WM 表示コードにこれが再登場したら二重表示）。
+WM_DEGRADED_JS_SENTENCE = "記号の照合は表記の一致による近似です"
 
 NEW_ANCHOR_IDS = (
     "deliberation.review-sort-toggle",
@@ -217,6 +219,17 @@ class TestCostForecastNote:
         assert "data.message" in block
         # fail-open: 失敗時は何も出さない（エラー表示・処理停止をしない）。
         assert ".catch(" in block
+        # 「画像も解析する」を判定に反映する（vision カウンタの有無で見通しが変わる —
+        # レビュー是正）。
+        assert "analyze_images=" in block
+        assert "upload-analyze-images" in block
+
+    def test_upload_zone_forecast_refetches_on_analyze_images_change(self):
+        """チェック変更時のイベント駆動再取得（1回ずつ・ポーリング禁止）。"""
+        src = _read(LLM_MODELS_JS)
+        block = _function_block(src, "initMaterialsPanel")
+        change_idx = block.index('addEventListener("change"')
+        assert "_loadMaterialsCostForecast()" in block[change_idx:]
 
     def test_reanalyze_note_shown_only_when_show_is_true(self):
         src = _read(LLM_MODELS_JS)
@@ -267,12 +280,16 @@ class TestWmLens:
         # optional: 取れる場合のみ送る（既存呼び出しは不変 — §5-④）。
         assert "if (documentId) payload.document_id = documentId;" in block
 
-    def test_wm_fact_rendered_escaped_with_degraded_sentence(self):
+    def test_wm_fact_is_server_passthrough_without_js_composition(self):
+        """縮退の事実文はサーバ fact の一文に一本化（JS 側で縮退文を作文しない —
+        二重表示の防止。lecture_wm.py WM_DEGRADED_NOTICE がサーバの正本）。"""
         src = _read(LECTURE_STUDIO_JS)
         region = _region(src, "var wm = slide.wm || null;", "var notesHtml")
         assert "escHtml(wm.fact)" in region
-        assert WM_DEGRADED_SENTENCE in region
-        assert "wm.degraded" in region
+        # JS 作文の縮退文が再登場しないこと（再発防止）。
+        assert WM_DEGRADED_JS_SENTENCE not in region
+        # degraded フラグでの文言分岐を持たない（fact 素通しのみ）。
+        assert "wm.degraded ?" not in region
 
     def test_wm_label_rendered_from_server_label(self):
         src = _read(LECTURE_STUDIO_JS)
@@ -338,8 +355,10 @@ class TestAnchorsRegistration:
         assert "監査記録に残ります" in deliberation
         assert SORT_DECLARATION in lecture
         assert "監査記録に残ります" in lecture
-        # WMレンズ: === を挿すのは教員の手（TT6）。
-        assert WM_DEGRADED_SENTENCE in lecture
+        # WMレンズ: === を挿すのは教員の手（TT6）。縮退の事実文はサーバ fact に
+        # 一本化されたため、逐語ではなく「縮退の事実文が併記される」旨のみ固定する
+        # （文言の正本は lecture_wm.py WM_DEGRADED_NOTICE）。
+        assert "縮退の事実文" in lecture
         assert "常に教員の手" in lecture
         # コスト見通し: 収まる見込みのときは表示されない・処理は止まらない（TT4）。
         assert "この行自体が表示されません" in materials

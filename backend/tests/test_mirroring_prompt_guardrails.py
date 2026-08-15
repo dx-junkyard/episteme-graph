@@ -10,7 +10,8 @@
 - 既存の契約フレーズ（「ルール1を優先」・DA6 の11フレーズ・足場分岐の切り出しキー・
   ``window_history`` の字面・関数シグネチャ）が不変であること。
 - ``core/discuss/mirroring.py::extract_mirror`` の純関数挙動（verbatim 合格/不合格/
-  マーカーなし/複数マーカー/引用ゼロの純合成禁止）。
+  マーカーなし/複数マーカー/引用ゼロの純合成禁止/all-quotes 判定=捏造混在の不合格/
+  1文字引用の不合格/閉じマーカー欠落時のマーカー剥がし/ネスト時の鏡文非汚染）。
 - 窓の外への持ち出しの禁止（EX-3b ④・§3 精査③）: 鏡文が interest_traces / 専用テーブル /
   assistant_meta へ流れる経路が構造的に無いこと（痕跡記録・履歴保存は鏡抽出より**前**に
   完了している）。mirroring.py が FastAPI / LLM / DB を import しないこと。
@@ -158,6 +159,43 @@ class TestExtractMirror:
         assert mirror is None
         assert "〔鏡〕" not in clean
 
+    def test_mixed_verbatim_and_fabricated_quotes_are_rejected(self):
+        """all-quotes 判定: 逐語引用1つに捏造引用を混ぜた鏡は全体が不合格。"""
+        answer = (
+            "〔鏡〕あなたは「量子もつれ」を「隠れた変数の産物」と捉えている、"
+            "で合っていますか？〔/鏡〕本文。"
+        )
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is None
+        assert "〔鏡〕" not in clean and "〔/鏡〕" not in clean
+        assert "隠れた変数の産物" in clean  # 情報を落とさない
+
+    def test_all_verbatim_multiple_quotes_pass(self):
+        """すべての引用が逐語（2文字以上）なら複数引用でも合格。"""
+        answer = (
+            "〔鏡〕あなたは「量子もつれ」を「古典相関と同じ」と捉えている、"
+            "で合っていますか？〔/鏡〕本文。"
+        )
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is not None
+        assert clean == "本文。"
+
+    def test_single_char_quote_is_rejected(self):
+        """1文字だけの引用は逐語証拠として弱すぎるため不合格（最短2文字）。"""
+        answer = "〔鏡〕あなたは「量」と捉えている、で合っていますか？〔/鏡〕本文。"
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is None
+        assert "〔鏡〕" not in clean
+
+    def test_single_char_quote_mixed_with_verbatim_is_rejected(self):
+        """逐語の長い引用があっても、1文字引用が混ざれば all-quotes で不合格。"""
+        answer = (
+            "〔鏡〕あなたは「量子もつれは古典相関と同じ」の「量」に注目している、"
+            "で合っていますか？〔/鏡〕本文。"
+        )
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is None
+
     def test_no_marker_returns_answer_unchanged(self):
         answer = "マーカーの無い通常の応答です。"
         clean, mirror = extract_mirror(answer, self._MSG)
@@ -192,6 +230,32 @@ class TestExtractMirror:
         answer = "〔鏡〕あなたは「」と捉えている、で合っていますか？〔/鏡〕本文。"
         clean, mirror = extract_mirror(answer, "")
         assert mirror is None
+
+    def test_unclosed_marker_is_stripped_from_answer(self):
+        """閉じマーカー欠落（ペア不成立）でも生マーカーを学習者に見せない。"""
+        answer = "〔鏡〕あなたは「量子もつれ」と捉えている、で合っていますか？ 本文。"
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is None
+        assert "〔鏡〕" not in clean and "〔/鏡〕" not in clean
+        assert "あなたは「量子もつれ」と捉えている" in clean  # 情報を落とさない
+
+    def test_orphan_close_marker_is_stripped_from_answer(self):
+        """開きマーカー欠落（閉じだけ残存）でも生マーカーを学習者に見せない。"""
+        answer = "あなたは「量子もつれ」と捉えている、で合っていますか？〔/鏡〕本文。"
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is None
+        assert "〔/鏡〕" not in clean
+
+    def test_nested_marker_does_not_leak_into_mirror_text(self):
+        """ネスト等の残存マーカーは鏡文（mirror.text）にも混入させない。"""
+        answer = (
+            "〔鏡〕あなたは「量子もつれは古典相関と同じ」〔鏡〕と捉えている、"
+            "で合っていますか？〔/鏡〕本文。"
+        )
+        clean, mirror = extract_mirror(answer, self._MSG)
+        assert mirror is not None
+        assert "〔鏡〕" not in mirror["text"] and "〔/鏡〕" not in mirror["text"]
+        assert "〔鏡〕" not in clean and "〔/鏡〕" not in clean
 
 
 # ===========================================================================

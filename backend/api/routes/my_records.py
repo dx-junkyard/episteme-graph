@@ -66,9 +66,11 @@ def export_my_records(
     記帳すると観察面の拡大になる — 監査記帳ヘルパーをここから呼ばない。ガードレールが
     不使用を固定する）。
     """
-    rows, _truncated = fetch_ledger_rows(current_user["id"], limit=_EXPORT_ROW_LIMIT)
+    rows, truncated = fetch_ledger_rows(current_user["id"], limit=_EXPORT_ROW_LIMIT)
     now = datetime.datetime.now(datetime.timezone.utc)
-    payload = build_ledger_export(rows, exported_at=now.isoformat())
+    # 上限到達（ごく大量の記録）を沈黙させない — 到達時のみ truncated: true が
+    # export に含まれる（TR5。core/trace_ledger.py::build_ledger_export）。
+    payload = build_ledger_export(rows, exported_at=now.isoformat(), truncated=truncated)
     filename = f"my-records-{now.strftime('%Y%m%d')}.json"
     return Response(
         content=json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"),

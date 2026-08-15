@@ -51,6 +51,12 @@ class TraceKindSpec:
     learner_trajectory: bool         # 問いの軌跡（get_interest_traces）に出るか
     teacher_dashboard: bool          # aggregate_interest_dashboard（k-匿名集約）の対象になり得るか
     personal_map: bool               # わたしの地図（personal_graph 導出）の対象か
+    # dashboard **以外**の教員向け k-匿名集約消費の記述（例: G層 To-Do の
+    # manual.help_gaps_pending）。台帳「わたしの記録」の公表事実文は
+    # ``teacher_dashboard OR teacher_aggregations 非空`` で教員向け集約の対象と
+    # みなす（TR5: dashboard に出ないからといって「あなた以外には表示されません」と
+    # 偽らない）。
+    teacher_aggregations: tuple[str, ...] = ()
     dead: bool = False               # 書き込み経路が現存しない語彙（TR3: 削除せず保持）
 
 
@@ -157,6 +163,13 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
         learner_trajectory=False,
         teacher_dashboard=False,
         personal_map=False,
+        # dashboard には出ないが、G層 To-Do manual.help_gaps_pending が anchor 単位の
+        # k-匿名レンジで教員向けに集計する（TR5: 台帳はこれを見て「匿名集計に含まれる
+        # ことがあります」側の事実文を出す）。
+        teacher_aggregations=(
+            "backend/core/admin_assistant/next_steps.py::_eval_manual_help_gaps_pending"
+            "（G層 To-Do manual.help_gaps_pending の k-匿名レンジ集計）",
+        ),
     ),
     "intention": TraceKindSpec(
         kind="intention",
@@ -234,6 +247,14 @@ CONSUMERS: dict[str, dict] = {
         "mode": "allowlist",
         "kinds": frozenset({"tension", "question"}),
     },
+    # D方式（Python 定数分岐）— queries.py が読んだ行を kind リテラル分岐で導出する
+    # （設計書 §2.1 の (D)。わたしの地図のノード導出の実体）。
+    "personal_graph_derive": {
+        "module": "backend/core/personal_graph/derive.py",
+        "function": None,
+        "mode": "allowlist",
+        "kinds": frozenset({"tension", "question"}),
+    },
     "structure_anchor_worker": {
         "module": "backend/core/structure_anchor/worker.py",
         "function": "_fetch_pending_questions",
@@ -245,6 +266,17 @@ CONSUMERS: dict[str, dict] = {
         "function": None,
         "mode": "payload_flag",
         "flag": "tension_hint",
+        "kinds": frozenset(),
+    },
+    # discuss 観測基盤 — **kind 条件なし**で payload の entry_mode='discuss' フラグ
+    # だけを読む（どの kind の行でもフラグが立っていれば計測対象になる、という事実を
+    # 正直に宣言する。除外の実体は送信側 routes/learning.py がフラグを焼き込まない
+    # ことであり、kind による構造保証ではない — 設計書 §2.1 の (C)）。
+    "discuss_observation": {
+        "module": "backend/core/discuss/observation.py",
+        "function": None,
+        "mode": "payload_flag",
+        "flag": "entry_mode",
         "kinds": frozenset(),
     },
     "naive_signal": {

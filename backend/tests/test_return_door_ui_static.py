@@ -275,12 +275,20 @@ class TestMarginMarks:
         block = _extract_function_body(_read(APP_JS), "function isMarginMarksOn(courseId) {")
         assert '!== "0"' in block
 
-    def test_confirmed_tension_statuses_whitelist(self):
-        """確定 tension の status 語彙（正本: core/tension/schema.py）で絞り込む。"""
+    def test_confirmed_tension_statuses_mirror_owned_statuses(self):
+        """確定 tension の status 語彙は正本 core/tension/schema.py の
+        TENSION_OWNED_STATUSES と逐語一致させる（test_doubt_vocab_mirror.py 型。
+        リテラル再掲を許すのはフロントのみで、正本を変えたらこのテストが落ちる）。"""
+        from core.tension.schema import TENSION_OWNED_STATUSES
+
         js = _read(APP_JS)
-        for status in ("open", "articulated", "connected", "abstracted"):
-            assert f'"{status}"' in js
-        assert "MARGIN_TENSION_STATUSES" in js
+        m = re.search(r"const MARGIN_TENSION_STATUSES\s*=\s*\[([^\]]*)\]", js)
+        assert m, "app.js に MARGIN_TENSION_STATUSES 配列リテラルがありません"
+        js_statuses = set(re.findall(r'"([^"]+)"', m.group(1)))
+        assert js_statuses == set(TENSION_OWNED_STATUSES), (
+            "app.js の MARGIN_TENSION_STATUSES が正本 TENSION_OWNED_STATUSES と"
+            f" 不一致: js={sorted(js_statuses)} / 正本={sorted(TENSION_OWNED_STATUSES)}"
+        )
 
 
 class TestLearnerHelpAnchor:

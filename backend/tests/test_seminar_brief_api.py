@@ -273,6 +273,40 @@ class TestAvailabilityDegrade:
 
 
 # ===========================================================================
+# course_id 導出の決定論化（ORDER BY）
+# ===========================================================================
+
+
+class TestCourseDerivationIsDeterministic:
+    class _RecordingSession:
+        """_derive_course_id が発行する SQL を記録する fake。"""
+
+        def __init__(self, rows):
+            self.rows = rows
+            self.sql: list[str] = []
+
+        def execute(self, statement, params=None):
+            self.sql.append(str(statement))
+            return _FakeResult(list(self.rows))
+
+    def test_course_derivation_sql_orders_by_created_at_desc(self):
+        """複数コース対応時に返す course_id が実行ごとに揺れないこと（決定論化）。"""
+        session = self._RecordingSession([("course-newer",), ("course-older",)])
+        course_id = sb._derive_course_id(session, "doc-1")
+        assert course_id == "course-newer"  # 並び先頭（=最新）を採用
+        assert len(session.sql) == 1
+        sql = session.sql[0]
+        assert "FROM theory_component_graphs" in sql
+        assert "ORDER BY created_at DESC" in sql
+        # 同時刻タイブレークも安定させる
+        assert "ORDER BY created_at DESC, course_id" in sql
+
+    def test_course_derivation_skips_empty_rows(self):
+        session = self._RecordingSession([("",), (None,), ("course-1",)])
+        assert sb._derive_course_id(session, "doc-1") == "course-1"
+
+
+# ===========================================================================
 # 4区画の合成と SB2（数値非漏洩）
 # ===========================================================================
 

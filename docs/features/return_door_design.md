@@ -47,8 +47,11 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
 - 着地画面の書き置き欄の脇に**既定畳み**のトレイ。当日セッションの本人発話（chat 履歴の
   user ロール行）の逐語のみを非LLM で列挙し、タップで一文がそのまま書き置き欄へ引用される。
 - サーバ API `GET /api/learning/courses/{id}/cycle/todays-words` は
-  `learning_chat_history` から**当日・本人・user ロールのみ**を返す（assistant 行を返す
-  経路を作らない — ガードレールで role フィルタを固定）。
+  `learning_chat_history` から**本人・user ロールのみ**を返す（assistant 行を返す
+  経路を作らない — ガードレールで role フィルタを固定）。「当日」の実装は
+  **直近24時間窓（`updated_at >= now() - interval '24 hours'`、TZ 非依存）**の近似
+  （`CURRENT_DATE` だと DB タイムゾーン（UTC想定）の暦日で切れ、JST 学習者の朝の発話が
+  同日昼に消える）。
 - 表示には常に「あなたの言葉」ラベルを付す。
 - これは UC7 が唯一許す個人化「本人の産出物を本人に見せる」に該当する（migration 0・LLM 0）。
 
@@ -88,12 +91,30 @@ migration: **不要**（`interest_traces` の kind 追加なし。`intention` �
   ①欄外の印は素材位置への対応付けをせず**新しい順の縦並び** + ツールチップ冒頭に
   `anchor_label` を〔〕付きで表示する近似（位置対応は v2 候補）。並びも interest-traces
   応答の既存順（status 優先）先頭12点の近似 — 厳密な時系列には `created_at` 露出が必要。
-  ②todays-words の「当日」は履歴行の `updated_at >= CURRENT_DATE` 近似（JSONB 1行方式の
-  ため。docstring に明記）。③最後の確定 tension は `TENSION_OWNED_STATUSES` 正本を使用
+  ②todays-words の「当日」は履歴行の**直近24時間窓**
+  （`updated_at >= now() - interval '24 hours'`、TZ 非依存）近似（JSONB 1行方式で
+  メッセージ個別のタイムスタンプが無いため。docstring に明記。当初の `CURRENT_DATE` は
+  DB タイムゾーン依存のためレビュー是正で相対窓に変更 — `fetch_landing_candidates` と
+  同型）。空白のみの発話は SQL 段階（`btrim`）で除外し、`limit + 1` 方式の truncated
+  判定を正確にする（derive 側の空文字スキップは二重防御として残す）。
+  ③最後の確定 tension は `TENSION_OWNED_STATUSES` 正本を使用
   （リテラル再掲禁止を優先 — dead status `abstracted` も形式上対象）。
   ④扉 DTO は非空時 `empty: false` を同梱・carryover には `trace_id` を含む。
-- テスト: `test_return_door_{core,api,ui_static}.py`（計 91）。バックエンド全スイート
-  9,611 passed / 0 failed（2026-08-15）。
+- 設計判断の明文化（2026-08-15 レビュー是正時に追記）:
+  - **扉の last_tension は `payload.map_excluded` を意図的に尊重しない。**
+    `map_excluded` は「わたしの地図」スコープの訂正操作（地図に反映しない）であり、
+    扉は地図ではなく本人の言葉の再提示（RD1）— スコープが異なる。`map_excluded` を
+    尊重するのは欄外の印（§2.3。地図と同じ「素材上の可視化」であるため）のみ。
+  - **leave_note / carryover の supersede → insert は別セッション・2コミット**
+    （`_supersede_active_carryover` → `record_interest_trace` が各自のセッションで
+    commit する既存パターンを共有）。insert が失敗すると旧行は superseded 済みのため
+    扉から旧 leave_note が消える**既知の窓**がある（行自体は superseded で保持され
+    P4/UC6 非違反。carryover と共通の既存挙動）。同一トランザクション化は
+    `record_interest_trace` の契約変更（外部セッション注入）を要するため v1 では
+    見送り。
+- テスト: `test_return_door_{core,api,ui_static}.py`（計 81 — 2026-08-15 レビュー是正後の
+  実測。正確な件数は pytest 実行が正）。バックエンド全スイート
+  9,611 passed / 0 failed（2026-08-15、レビュー是正前の実測）。
 
 ## 6. 非スコープ（v2）
 

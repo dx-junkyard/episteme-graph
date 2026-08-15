@@ -41,7 +41,8 @@ from core.trace_registry import TRACE_KINDS
 
 #: status='candidate' の行（AI 候補。本人が確定するまで本人の痕跡ではない — P1）。
 PUBLICITY_CANDIDATE = "AIの候補です。あなたが確定するまで、あなたの痕跡になりません。"
-#: 教員向け k-匿名集約の対象になり得る kind の行。閾値の正本は core/privacy.py
+#: 教員向け k-匿名集約（dashboard または個別集約消費 — 登録簿の
+#: ``teacher_aggregations``）の対象になり得る kind の行。閾値の正本は core/privacy.py
 #: （k=3 をリテラルで再定義しない）。
 PUBLICITY_DASHBOARD = (
     f"教員向けには{K_ANONYMITY}人以上の匿名集計にのみ含まれることがあります。"
@@ -56,8 +57,12 @@ PROVENANCE_NOTE = (
     "どの集約に含まれたかを記録する仕組みを追加します。"
 )
 
-#: 持ち出し JSON の注記。
-EXPORT_NOTE = "このファイルはあなたの学習痕跡の完全な持ち出しです。"
+#: 持ち出し JSON の注記（TR5: 「完全」を無条件に断言しない — ごく大量の記録がある
+#: 場合は読み出し上限までになる。TR6: 上限の数値は出さない）。
+EXPORT_NOTE = (
+    "このファイルはあなたの学習痕跡の持ち出しです。"
+    "ごく大量の記録がある場合は、新しい順に上限までを含みます。"
+)
 
 #: 未知 status の表示ラベル（素通しにしない — 語彙の正本にない値をそのまま UI 語彙に
 #: 昇格させない。行自体は落とさず保持する。P4）。
@@ -149,6 +154,17 @@ def fetch_course_labels(rows: list[dict]) -> dict[str, str]:
 # ---------------------------------------------------------------------------
 
 
+def _teacher_aggregated(spec) -> bool:
+    """教員向け k-匿名集約の対象になり得るか（TR5）。
+
+    dashboard（``aggregate_interest_dashboard``）だけでなく、登録簿の
+    ``teacher_aggregations``（例: help_usage を集計する G層 To-Do
+    manual.help_gaps_pending）も教員向け集約の事実として扱う —
+    dashboard に出ない kind に「あなた以外には表示されません」と偽らない。
+    """
+    return bool(spec.teacher_dashboard or spec.teacher_aggregations)
+
+
 def _system_publicity_note(spec) -> str:
     """系統ごとの露出事実文（登録簿由来・静的。TR5）。"""
     surfaces: list[str] = []
@@ -159,7 +175,7 @@ def _system_publicity_note(spec) -> str:
     parts: list[str] = []
     if surfaces:
         parts.append("と".join(surfaces) + "に表示されます。")
-    if spec.teacher_dashboard:
+    if _teacher_aggregated(spec):
         parts.append(PUBLICITY_DASHBOARD)
     if not parts:
         return PUBLICITY_PRIVATE
@@ -174,7 +190,7 @@ def _row_publicity(status: str, spec) -> str:
     """
     if status == "candidate":
         return PUBLICITY_CANDIDATE
-    if spec is None or spec.teacher_dashboard:
+    if spec is None or _teacher_aggregated(spec):
         return PUBLICITY_DASHBOARD
     return PUBLICITY_PRIVATE
 
@@ -256,15 +272,19 @@ def build_ledger_overview(
 # ---------------------------------------------------------------------------
 
 
-def build_ledger_export(rows: list[dict], *, exported_at: str) -> dict:
+def build_ledger_export(
+    rows: list[dict], *, exported_at: str, truncated: bool = False
+) -> dict:
     """持ち出し JSON を組み立てる（純関数・DB 非接触）。
 
     records は payload **全文・無加工**（本人の手元に落とすデータなので数値キーも
-    削らない — 完全な持ち出し）。``user_id`` はキーとして含めない（ファイル単体が
-    識別子を持ち歩かないため）。スキーマ安定性: ``schema_version`` を持ち、将来の
-    kind 追加は records に新 kind の行が増えるだけで既存キーは変えない。
+    削らない）。``user_id`` はキーとして含めない（ファイル単体が識別子を持ち歩かない
+    ため）。スキーマ安定性: ``schema_version`` を持ち、将来の kind 追加は records に
+    新 kind の行が増えるだけで既存キーは変えない。読み出し上限に到達したときのみ
+    ``truncated: true`` を含める（TR5: 上限到達を沈黙させない。非到達時はキー自体を
+    出さない — 既存キーは不変）。
     """
-    return {
+    export = {
         "schema_version": 1,
         "exported_at": exported_at,
         "note": EXPORT_NOTE,
@@ -282,3 +302,6 @@ def build_ledger_export(rows: list[dict], *, exported_at: str) -> dict:
             for row in rows
         ],
     }
+    if truncated:
+        export["truncated"] = True
+    return export

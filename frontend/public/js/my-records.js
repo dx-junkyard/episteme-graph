@@ -151,8 +151,9 @@
       html += systemHtml(sys);
     });
     if (data && data.truncated) {
-      // 省略の事実だけを言う（TR5。件数は出さない TR6）。
-      html += '<p class="pm-home-node-ctx my-records-truncated">表示は最新分のみです。持ち出しにはすべて含まれます。</p>';
+      // 省略の事実だけを言う（TR5。件数は出さない TR6。「すべて」と断言しない —
+      // 持ち出しにも読み出し上限があり、ごく大量の記録では上限までになる）。
+      html += '<p class="pm-home-node-ctx my-records-truncated">表示は最新分のみです。持ち出しには記録が新しい順に含まれます（ごく大量の記録がある場合は上限まで）。</p>';
     }
     if (data && data.provenance_note) {
       html += '<div class="my-records-provenance">';

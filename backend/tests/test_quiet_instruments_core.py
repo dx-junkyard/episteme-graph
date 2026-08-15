@@ -65,10 +65,11 @@ class TestForecastConservativeJudgement:
         "remaining,limit,expected",
         [
             (20, 20, False),   # 余裕あり
-            (0, 20, True),     # 使い切り
+            (0, 20, True),     # 使い切り（枠はあるが枯渇）
             (4, 20, True),     # 残 20% < 25%
             (5, 20, False),    # 残 25% は閾値ちょうど（< でない）
-            (10, 0, True),     # 上限 0 は常に「収まらない可能性」
+            (10, 0, False),    # 上限 0 = 意図的に無効化（枯渇と別物・トリガにしない）
+            (0, 0, False),     # 上限 0 は remaining 0 でも判定材料にならない
         ],
     )
     def test_low_remaining_ratio_threshold(self, monkeypatch, remaining, limit, expected):
@@ -83,6 +84,34 @@ class TestForecastConservativeJudgement:
             forecast,
             "_gate_remainings",
             lambda analyze: [("a", 20, 20), ("b", 15, 20), ("c", 1, 20)],
+        )
+        assert forecast.forecast_run_capacity()["show"] is True
+
+    def test_disabled_stage_does_not_trigger_the_forecast(self, monkeypatch):
+        """limit=0 のステージが混ざっていても、他が健全なら show=False
+        （上限 0 の恒久表示バグの是正 — 2026-08-15 レビュー）。"""
+        monkeypatch.setattr(
+            forecast,
+            "_gate_remainings",
+            lambda analyze: [("disabled", 0, 0), ("healthy", 20, 20)],
+        )
+        assert forecast.forecast_run_capacity() == {"show": False, "message": ""}
+
+    def test_all_stages_disabled_is_hidden(self, monkeypatch):
+        """全カウンタが意図的に無効化されている場合は show=False。"""
+        monkeypatch.setattr(
+            forecast,
+            "_gate_remainings",
+            lambda analyze: [("a", 0, 0), ("b", 0, 0)],
+        )
+        assert forecast.forecast_run_capacity() == {"show": False, "message": ""}
+
+    def test_disabled_stage_does_not_mask_a_depleted_one(self, monkeypatch):
+        """無効化ステージの除外は、枯渇ステージの検出を妨げない。"""
+        monkeypatch.setattr(
+            forecast,
+            "_gate_remainings",
+            lambda analyze: [("disabled", 0, 0), ("depleted", 0, 20)],
         )
         assert forecast.forecast_run_capacity()["show"] is True
 

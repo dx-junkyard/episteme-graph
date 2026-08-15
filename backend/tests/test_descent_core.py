@@ -428,6 +428,51 @@ class TestBackstagePath:
             "notation_patterns", "symbol_definitions", "generic_explanations",
         ]
 
+    def test_notation_step_absent_without_explicit_cartridge(self, monkeypatch):
+        """cartridge_id 未設定コースでは load_cartridge を呼ばず規約差の段を出さない。
+
+        load_cartridge(None) は既定カートリッジ（particle_physics）へ黙って縮退するため、
+        明示 cartridge のみ規約差の段を出す（G層 Phase 0 の DEFAULT_CARTRIDGE 撤去と
+        同じ原則。2026-08-15 レビュー是正）。
+        """
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError(
+                "cartridge_id 無しの course_data で load_cartridge が呼ばれた"
+                "（既定カートリッジへの黙った縮退）"
+            )
+
+        monkeypatch.setattr(engine, "load_cartridge", _must_not_be_called)
+        monkeypatch.setattr(engine, "resolve_element", lambda et, eid, cd: None)
+        for course_data in ({}, {"title": "c"}, {"cartridge_id": "  "}, None):
+            path = build_backstage_path(course_data, "course-1", "equation", "eq_1")
+            assert path["declaration"] == BACKSTAGE_DECLARATION
+            assert path["steps"] == []
+
+    def test_notation_step_uses_explicit_cartridge_id_only(self, monkeypatch):
+        """明示 cartridge_id のときだけ、その id で load_cartridge が呼ばれ段が出る。"""
+        calls: list[str] = []
+
+        def _fake_load(cartridge_id):
+            calls.append(cartridge_id)
+            return SimpleNamespace(
+                ontology=SimpleNamespace(
+                    notation_patterns=[
+                        {"id": "np1", "pattern": "δ", "concept_type": "perturbation"},
+                    ]
+                )
+            )
+
+        monkeypatch.setattr(engine, "load_cartridge", _fake_load)
+        monkeypatch.setattr(engine, "resolve_element", lambda et, eid, cd: None)
+        path = build_backstage_path(
+            {"cartridge_id": "particle_physics"}, "course-1", "equation", "eq_1"
+        )
+        assert calls == ["particle_physics"]
+        assert [s["kind"] for s in path["steps"]] == ["notation_patterns"]
+        assert path["steps"][0]["items"] == [
+            {"id": "np1", "pattern": "δ", "concept_type": "perturbation"},
+        ]
+
     def test_declaration_returned_even_when_element_unresolved(self, monkeypatch):
         """規約差の段は cartridge 由来のため、要素が解決できなくても宣言 + 規約差は出る。"""
         monkeypatch.setattr(engine, "resolve_element", lambda et, eid, cd: None)

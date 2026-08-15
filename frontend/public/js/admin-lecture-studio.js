@@ -7636,9 +7636,11 @@
           ? '<span class="ls-slide-badge ls-slide-wm-label" data-ui-anchor="lecture-studio.slide-wm-label">要素の相互作用: ' +
               escHtml(wm.level_label) + '</span>'
           : "";
+        // 縮退（textual 照合）の事実文はサーバの fact 一文に含まれて届く
+        // （lecture_wm.py WM_DEGRADED_NOTICE）。JS 側で縮退文を作文しない
+        // （二重表示の防止 — レビュー是正。fact 素通しのみ）。
         var wmFact = (wm && wm.fact)
-          ? '<div class="ls-slide-warn ls-slide-wm-fact">' + escHtml(wm.fact) +
-              (wm.degraded ? ' 記号の照合は表記の一致による近似です。' : '') + '</div>'
+          ? '<div class="ls-slide-warn ls-slide-wm-fact">' + escHtml(wm.fact) + '</div>'
           : "";
         var notesHtml = slide.spoken
           ? lsRenderTextWithFormulas(slide.spoken, formulas)

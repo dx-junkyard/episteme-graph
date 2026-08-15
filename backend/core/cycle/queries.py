@@ -12,10 +12,13 @@ personal_graph 導出・問いの軌跡・教員向け集約のいずれから�
 from __future__ import annotations
 
 import json
+import logging
 
 # 本人が引き受けた tension status の正本（candidate / dismissed / superseded を含まない）。
 # リテラル再掲しない（return_door_design.md §2.1 / 発注仕様）。
 from core.tension.schema import TENSION_OWNED_STATUSES
+
+logger = logging.getLogger(__name__)
 
 
 def _payload_dict(raw) -> dict:
@@ -150,17 +153,22 @@ def fetch_last_owned_tension(user_id: str, course_id: str) -> dict | None:
 
 
 def fetch_todays_user_words(user_id: str, course_id: str, limit: int = 30) -> list[dict]:
-    """当日（サーバ日付）のやり取りに含まれる本人発話（user ロールのみ）の逐語を返す
+    """直近24時間のやり取りに含まれる本人発話（user ロールのみ）の逐語を返す
     （「今日のあなたの言葉」トレイ, return_door_design.md §2.2）。
 
-    **当日フィルタは行 ``updated_at`` による近似**: ``learning_chat_history`` は
-    (user, course, topic) ごとに履歴全体を 1 行の JSONB で持ち、各メッセージに
-    タイムスタンプが無い。そのため「当日 = 行の ``updated_at`` が当日（＝当日に
-    やり取りのあったトピック）」で近似し、当該行の履歴に含まれる過去日のメッセージも
-    混ざりうる（各要素の ``created_at`` も行の ``updated_at`` の近似値）。
+    **「当日」フィルタは直近24時間窓 × 行 ``updated_at`` による近似**:
+    ``learning_chat_history`` は (user, course, topic) ごとに履歴全体を 1 行の JSONB で
+    持ち、各メッセージにタイムスタンプが無い。そのため「当日 ≒ 行の ``updated_at`` が
+    直近24時間（＝直近にやり取りのあったトピック）」で近似し、当該行の履歴に含まれる
+    それ以前のメッセージも混ざりうる（各要素の ``created_at`` も行の ``updated_at`` の
+    近似値）。``CURRENT_DATE``（DB タイムゾーンの暦日）でなく ``now() - interval
+    '24 hours'`` の相対窓なのは、DB=UTC のとき JST 等の学習者の朝の発話が同日昼に
+    消えるのを避けるため（TZ 非依存。``fetch_landing_candidates`` と同型）。
 
     role フィルタは SQL 内で ``'user'`` に固定する — assistant ロール行を返す経路を
     作らない（RD1。二重防御として ``derive.build_todays_words`` でも再検査する）。
+    空白のみの発話は SQL 段階（``btrim``）で除外し、``limit + 1`` 方式の truncated
+    判定を正確にする（derive 側の空文字スキップは二重防御として残る）。
     並びは新しい順（行 ``updated_at`` 降順 → 行内の後方メッセージ優先）。truncated
     判定のため ``limit + 1`` 件まで返す（切り詰めは derive 側の責務）。
     """
@@ -180,14 +188,18 @@ def fetch_todays_user_words(user_id: str, course_id: str, limit: int = 30) -> li
                 CROSS JOIN LATERAL jsonb_array_elements(h.history)
                     WITH ORDINALITY AS m(msg, ord)
                 WHERE h.user_id = CAST(:uid AS uuid) AND h.course_id = :cid
-                  AND h.updated_at >= CURRENT_DATE
+                  AND h.updated_at >= now() - interval '24 hours'
                   AND m.msg->>'role' = 'user'
+                  AND btrim(coalesce(m.msg->>'content', '')) <> ''
                 ORDER BY h.updated_at DESC, m.ord DESC
                 LIMIT :lim
             """),
             {"uid": user_id, "cid": course_id, "lim": int(limit) + 1},
         ).fetchall()
     except Exception:
+        logger.warning(
+            "fetch_todays_user_words failed (fail-open to empty tray)", exc_info=True
+        )
         rows = []
     finally:
         session.close()

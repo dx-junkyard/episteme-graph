@@ -31,7 +31,14 @@ migration: **不要**（両者とも読み時合成とプロンプト move 追�
 1. **脆い前提** — 未検証 × 下流影響「高」の前提（D層 open-assumptions の投影を
    load 段階ラベル降順で上位のみ）
 2. **一点吊りの支持線** — SL層 `support_paths` の `level=single` の事実文
-3. **晴れ間** — 「このコーパスの中では検証記録がありません」の閉世界事実文（SL1 語彙）
+3. **晴れ間** — 「このコーパスの中では検証記録が**見つかり**ません」の閉世界事実文
+   （SL1 語彙。実装固定文は `FACT_LINE_NO_VERIFICATION_RECORD` =
+   「このコーパスの中では検証記録が見つかりません。」— SL1 ガードレール
+   `test_stakes_ledger_guardrails.py` 準拠の文言で、本節の記述は実装に揃える）。
+   なお晴れ間は `compile_open_assumptions` の投影（区画①と同一ソース）から
+   untested × スコープ空欄を選ぶため、**高負荷（load_level ∈ {high, highest}）の
+   前提に限定される**のは設計どおり（低負荷対象の晴れ間網羅はブリーフの責務外 —
+   全域の晴れ間は SL層の未検証合意リスト側の守備範囲）。
 4. **学習者からの問い** — v1 は空欄予約（「（この区画は手渡しの仕組みの実装後に使われます）」）
 
 ### 1.3 実装
@@ -122,6 +129,23 @@ UC7 が唯一許す個人化「本人の産出物を本人に見せる」の対�
   既存の弁へ）+ 履歴復元時のマーカー剥がし。
 - テスト: `test_seminar_brief_{api,ui_static}.py`（85）+ `test_mirroring_prompt_guardrails.py`（16）
   + `test_mirroring_ui_static.py`。全スイート 9,930 passed / 0 failed（2026-08-15）。
+
+### 4.1 レビュー是正（2026-08-15 同日）
+
+- **Fix 1（決定論化）**: `seminar_brief._derive_course_id` の theory_component_graphs
+  クエリに `ORDER BY created_at DESC, course_id` を追加（複数コースに同一 document が
+  紐づく場合に返す course_id が実行ごとに揺れないよう、最新の解析グラフを優先・
+  同時刻は辞書順タイブレーク）。
+- **Fix 2（verbatim 検査の all-quotes 化）**: `mirroring._has_verbatim_quote` を
+  「鏡文中の**すべて**の「」引用が学習者の直前発話の逐語部分文字列」判定に変更
+  （any-quote だと逐語引用1つを添えれば残りを自由に捏造できた）。あわせて1文字だけの
+  引用は逐語証拠として弱すぎるため最短2文字ガード（`_MIN_QUOTE_CHARS = 2`）を追加。
+  引用ゼロの不合格は従来どおり。
+- **Fix 3（マーカー断片の残存防止）**: `extract_mirror` で 〔鏡〕/〔/鏡〕 のペアが
+  成立しない場合（閉じ・開きマーカー欠落）も、マーカー断片だけ剥がした answer を返す
+  （mirror は None・中身のテキストは本文に残す）。
+- **Fix 4（ネスト時の鏡文非汚染）**: `mirror_text` は `_strip_markers(match.group(1))`
+  を通してから採用（ネストした残存マーカーが鏡文へ混入しない）。
 
 ## 5. 非スコープ（v2）
 

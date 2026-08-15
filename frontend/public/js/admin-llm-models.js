@@ -208,11 +208,17 @@
     }
   }
 
-  // アップロードゾーン用のコスト見通し（document なし版）。教材管理パネルの初期化時に
-  // 1回だけ取得する（ポーリング禁止）。fail-open: 取得失敗・想定外の応答では何も
-  // 出さず、アップロード処理も止めない。
+  // アップロードゾーン用のコスト見通し（document なし版）。教材管理パネルの初期化時と
+  // 「画像も解析する」チェック変更時にのみ取得する（イベント駆動1回ずつ・ポーリング禁止）。
+  // 図の解析（vision）カウンタは analyze_images のときだけ判定に加わるため、再解析
+  // モーダル側と同様に ?analyze_images= を付けて取り直す。fail-open: 取得失敗・
+  // 想定外の応答では何も出さず、アップロード処理も止めない。
   function _loadMaterialsCostForecast() {
-    _fetchJson("/admin/llm-usage/forecast").then(function (data) {
+    var analyzeImagesEl = document.getElementById("upload-analyze-images");
+    var analyzeImages = !!(analyzeImagesEl && analyzeImagesEl.checked);
+    _fetchJson(
+      "/admin/llm-usage/forecast?analyze_images=" + (analyzeImages ? "true" : "false")
+    ).then(function (data) {
       _setMaterialsCostNote(data && data.show === true && data.message ? data.message : "");
     }).catch(function () {
       _setMaterialsCostNote("");
@@ -517,6 +523,9 @@
     if (analyzeImagesEl) {
       analyzeImagesEl.addEventListener("change", function () {
         if (mtPanelOpen) renderMaterialsPanel();
+        // 図の解析の有無で見通しが変わるため、チェック変更時のみ取り直す
+        // （イベント駆動の1回ずつ・ポーリングではない）。
+        _loadMaterialsCostForecast();
       });
     }
     loadMaterialsCatalog();

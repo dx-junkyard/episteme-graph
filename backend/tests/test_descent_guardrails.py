@@ -176,6 +176,55 @@ class TestLearningBackstageGuard:
             "消えている（本人の台帳表示・後方検証用。§4）"
         )
 
+    def test_entry_mode_discuss_is_not_baked_into_backstage_traces(self):
+        """2026-08-15 レビュー是正 Fix 2: discuss 観測基盤（core/discuss/observation.py）は
+        kind フィルタなしで payload->>'entry_mode'='discuss' を数えるため、楽屋の痕跡に
+        entry_mode を焼き込むと SD4（楽屋は集計に入らない）に反して混入する。"""
+        snippet = (
+            '**({"entry_mode": "discuss"} if _is_discuss and not _is_backstage else {})'
+        )
+        assert snippet in _LEARNING_SRC, (
+            "learning.py の entry_mode 焼き込みから backstage ガードが消えている"
+            "（楽屋の質問が discuss 観測基盤に数えられてしまう。SD4）"
+        )
+
+    def test_backstage_is_front_loaded_and_clears_typed_action_and_atlas(self):
+        """2026-08-15 レビュー是正 Fix 3: _is_backstage の判定はハンドラ冒頭
+        （EXPLAIN_GRAPH_ELEMENT / atlas の early-return 記録経路より前）で行い、
+        backstage のとき typed action と atlas_context を無視する（サーバ側防御）。"""
+        snippet = (
+            "    _is_backstage = bool(body.backstage)\n"
+            "    if _is_backstage:\n"
+            "        body.action = None\n"
+            "        body.atlas_context = None\n"
+        )
+        assert snippet in _LEARNING_SRC, (
+            "learning.py の楽屋前倒しガード（body.action / body.atlas_context の無効化）"
+            "が消えている（楽屋の質問が kind='question' の early-return 記録経路に"
+            "流れ得る。SD4）"
+        )
+        # 前倒しの位置検査: 判定は EXPLAIN_GRAPH_ELEMENT 分岐・atlas 応答分岐より前。
+        guard_pos = _LEARNING_SRC.index(snippet)
+        assert guard_pos < _LEARNING_SRC.index('if body.action == "EXPLAIN_GRAPH_ELEMENT"'), (
+            "楽屋ガードが EXPLAIN_GRAPH_ELEMENT 分岐より後ろにある"
+        )
+        assert guard_pos < _LEARNING_SRC.index(
+            "_atlas_response = _atlas_action_response("
+        ), "楽屋ガードが atlas アクション応答より後ろにある"
+
+    def test_anchor_confirm_is_not_offered_in_backstage(self):
+        """2026-08-15 レビュー是正 Fix 4: 「集計に入りません」と宣言した枠で
+        帰属確定 UI（anchor_confirm）を出さない（SD4）。"""
+        snippet = (
+            "        _trace_id\n"
+            "        and not _is_casual\n"
+            "        and not _is_backstage\n"
+        )
+        assert snippet in _LEARNING_SRC, (
+            "learning.py の anchor_confirm 条件から backstage ガードが消えている"
+            "（楽屋で帰属確認カードが出てしまう。SD4）"
+        )
+
 
 # ===========================================================================
 # 6. 教員向け集約からの除外（SD4: 楽屋は集計に入らない）

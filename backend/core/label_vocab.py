@@ -185,6 +185,9 @@ WEIGHT_LABELS = MappingProxyType(dict(zip(WEIGHT_LEVEL_SCALE.labels, WEIGHT_RELA
 # 固定閾値型なのでここが正本（パーセンタイル型の D層 load は ``core/doubt/schema.py``
 # 側 — §27 の住み分けどおり寄せない）。末尾（few = 少ない）が最も慎重な段階で、
 # 未測定はここへ倒れ、WMレンズは few のとき表示自体を省略する（「平常時は視界に無い」）。
+# 閾値は発明値（実測データ非由来 — 設計書 §6②の宣言）: ワーキングメモリ容量の目安
+# ~4±1 チャンクを超え始める 5 を many、その約2倍（レビューで見直す上位段）の 9 を
+# very_many とした。実測での見直し前提。値を変えるときは設計書 §6 も更新する。
 WM_INTERACTION_THRESHOLD_VERY_MANY = 9
 WM_INTERACTION_THRESHOLD_MANY = 5
 

@@ -35,8 +35,10 @@ FORECAST_MESSAGE = (
     "分けて実行することもできます"
 )
 
-# 「収まらない可能性」の保守判定しきい値: いずれかのカウンタの残数が上限の
+# 「収まらない可能性」の保守判定しきい値: 有効なカウンタ（上限 > 0）の残数が上限の
 # この割合を下回った（または 0 になった）とき show=True。
+# 上限 0 のステージは「意図的に無効化されたステージ」（そもそも走らない）であり、
+# 枯渇とは別物なので判定材料から除外する（恒久表示の防止 — 2026-08-15 レビュー是正）。
 # **この閾値は近似である** — 4カウンタは互いに独立で、回数枠とトークン量の単位も
 # 揃わないため、厳密な「収まる/収まらない」は導出できない。発明した閾値の不確かさは
 # メッセージの仮説文体（「可能性があります」）に織り込む（§5 精査⑤）。
@@ -104,9 +106,16 @@ def _gate_remainings(analyze_images: bool) -> list[tuple[str, int, int]]:
 
 
 def _should_show(gates: list[tuple[str, int, int]]) -> bool:
-    """最小残数による保守判定（近似。上のコメント参照）。"""
+    """最小残数による保守判定（近似。上のコメント参照）。
+
+    - ``limit <= 0``: 意図的に無効化されたステージ — 判定材料から除外する
+      （見通しのトリガにしない。全カウンタが無効化なら show=False）。
+    - ``remaining <= 0``（枠はあるが枯渇）のみ show=True の材料にする。
+    """
     for _name, remaining, limit in gates:
-        if limit <= 0 or remaining <= 0:
+        if limit <= 0:
+            continue
+        if remaining <= 0:
             return True
         if remaining / limit < FORECAST_LOW_REMAINING_RATIO:
             return True

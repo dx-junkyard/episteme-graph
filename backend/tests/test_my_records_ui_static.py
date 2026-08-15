@@ -135,9 +135,14 @@ class TestMyRecordsModule:
         assert "いまは表示できません。" in src
 
     def test_truncated_fact_line(self):
-        """truncated は事実文で正直に言う（件数は出さない）。"""
+        """truncated は事実文で正直に言う（件数は出さない。「すべて」と断言しない —
+        持ち出しにも読み出し上限がある。TR5）。"""
         src = _read(MY_RECORDS_JS)
-        assert "表示は最新分のみです。持ち出しにはすべて含まれます。" in src
+        assert (
+            "表示は最新分のみです。持ち出しには記録が新しい順に含まれます"
+            "（ごく大量の記録がある場合は上限まで）。" in src
+        )
+        assert "持ち出しにはすべて含まれます" not in src
 
     def test_export_failure_fact_line(self):
         """持ち出し失敗時は事実文のみ（alert・エラーバナーにしない）。"""
