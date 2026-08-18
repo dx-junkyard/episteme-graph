@@ -84,15 +84,17 @@
             <button type="button" class="material-format-opt" id="lecture-toggle" data-ui-anchor="material.lecture-toggle" title="レクチャーモード切替">🎙 講義</button>
             <span class="lecture-toggle-hint" id="lecture-toggle-hint" hidden></span>
           </div>
-          <!-- 欄外の印の表示トグル（return_door_design.md §2.3）: 状態は localStorage
-               eg_margin_marks:<courseId>（精読モードと同型の許容例外）。既定は表示 ON。 -->
-          <button type="button" class="margin-marks-toggle" id="margin-marks-toggle" aria-pressed="true" title="欄外の印（あなたが確定した引っかかり・問いの点）の表示/非表示" hidden>●印</button>
+          <!-- 欄外の印（＝余白の引っかかり印）の表示トグル（return_door_design.md §2.3）:
+               状態は localStorage eg_margin_marks:<courseId>（精読モードと同型の許容例外）。
+               既定は表示 ON。アイコンは「段差でつまずく人」（app.js の createStumbleIcon と同図形）。 -->
+          <button type="button" class="margin-marks-toggle" id="margin-marks-toggle" aria-pressed="true" title="あなたが確定した引っかかり・問いの印を、教材の余白に表示します（もう一度押すと非表示）" hidden><svg class="stumble-icon" viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" focusable="false"><path d="M0.8 13.9H8.6v-2.4h6.6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><path d="M8.9 4.9 5.6 8.5M8.2 5.7 11.4 7.4M5.6 8.5 2.8 13.6M5.6 8.5 7.4 10.4 6.7 13.2" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/><circle cx="10.1" cy="3.2" r="1.9" fill="currentColor"/></svg>引っかかり</button>
           <button type="button" class="lecture-fullscreen-btn" id="lecture-fullscreen-btn" title="スライドを全画面表示" hidden>⛶ 全画面</button>
         </div>
         <div class="material-body" id="material-body"></div>
         <!-- 欄外の印（return_door_design.md §2.3）: 教材区画の右余白に本人の確定痕跡を
-             淡い点で縦に並べる薄いレイヤ。描画は app.js の renderMarginMarks が
-             textContent でのみ行う（数を表示しない・map_excluded は出さない）。 -->
+             「段差でつまずく人」の淡いアイコンで縦に並べる薄いレイヤ。描画は app.js の
+             renderMarginMarks（アイコンは createStumbleIcon の DOM 生成・本人の言葉は
+             textContent のみ）で行う（数を表示しない・map_excluded は出さない）。 -->
         <div class="margin-marks" id="margin-marks" hidden></div>
         <div class="material-foot">
           <!-- 理解サイクル Phase 1（ANCHOR, docs/features/understanding_cycle_design.md

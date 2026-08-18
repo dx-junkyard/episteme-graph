@@ -1177,7 +1177,8 @@
 
   // ── 欄外の印（return_door_design.md §2.3）─────────────────────────────
   // 教材区画の右余白に、本人の確定痕跡（structure_anchor を持つ確定済み問い + 確定
-  // tension）を淡い点（●）で縦に並べる。新しい順に最大 MARGIN_MARKS_MAX 点・数は
+  // tension）を「段差でつまずく人」の淡いアイコンで縦に並べる（旧: ● の点。何の印か
+  // 伝わらないという指摘を受けて図案化した）。新しい順に最大 MARGIN_MARKS_MAX 点・数は
   // 表示しない（RD5）。map_excluded の行は表示しない（既存の訂正操作を尊重）。
   // 素材位置への正確な対応付けは v1 では行わない（縦並び + ツールチップに帰属ラベルで近似）。
   // 表示トグルの状態は localStorage `eg_margin_marks:<courseId>`（精読モードと同型の
@@ -1222,6 +1223,40 @@
     return marks.slice(0, MARGIN_MARKS_MAX);
   }
 
+  // 印の図案（index.html のトグルボタン内 SVG と同じ形）: 段差でつまずく人。
+  // 装飾のみなので innerHTML を使わず DOM API で組む（RD1: この描画系に innerHTML を持ち込まない）。
+  const SVG_NS = "http://www.w3.org/2000/svg";
+  function createStumbleIcon(size) {
+    const svg = document.createElementNS(SVG_NS, "svg");
+    svg.setAttribute("viewBox", "0 0 16 16");
+    svg.setAttribute("width", String(size));
+    svg.setAttribute("height", String(size));
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    svg.setAttribute("class", "stumble-icon");
+    // 段差（手前の低い面 → 立ち上がり x=8.6 → 奥の高い面）と、進行方向（右）の
+    // 段差につまずいて前のめりになる人（胴 → 腕 → 後脚 → 膝で折れる前脚）。
+    // 前脚の足先（x≈6.7）は立ち上がりの手前に置き、線が重ならない隙間を残す
+    // — 段に乗った絵・足が段に埋もれた絵にしない。頭は下で circle として足す。
+    ["M0.8 13.9H8.6v-2.4h6.6", "M8.9 4.9 5.6 8.5M8.2 5.7 11.4 7.4M5.6 8.5 2.8 13.6M5.6 8.5 7.4 10.4 6.7 13.2"].forEach(function (d) {
+      const path = document.createElementNS(SVG_NS, "path");
+      path.setAttribute("d", d);
+      path.setAttribute("fill", "none");
+      path.setAttribute("stroke", "currentColor");
+      path.setAttribute("stroke-width", "1.6");
+      path.setAttribute("stroke-linecap", "round");
+      path.setAttribute("stroke-linejoin", "round");
+      svg.appendChild(path);
+    });
+    const head = document.createElementNS(SVG_NS, "circle");
+    head.setAttribute("cx", "10.1");
+    head.setAttribute("cy", "3.2");
+    head.setAttribute("r", "1.9");
+    head.setAttribute("fill", "currentColor");
+    svg.appendChild(head);
+    return svg;
+  }
+
   function showMarginMarkTip(dot, text) {
     const tipEl = document.getElementById("margin-marks-tip");
     if (!tipEl) return;
@@ -1256,7 +1291,7 @@
       const dot = document.createElement("button");
       dot.type = "button";
       dot.className = "margin-mark-dot" + (t.kind === "tension" ? " tension" : "");
-      dot.textContent = "●";
+      dot.appendChild(createStumbleIcon(13));
       // ツールチップは本人の言葉の逐語 + 帰属ラベル（textContent のみ・数値なし）。
       const anchorLabel = (t.structure_anchor && t.structure_anchor.anchor_label) || "";
       const tip = (anchorLabel ? "〔" + anchorLabel + "〕 " : "") + (t.text || "");

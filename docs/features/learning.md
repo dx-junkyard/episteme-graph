@@ -326,9 +326,11 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
   UI アンカーは `material.return-door`。
 - **欄外の印 `#margin-marks`**: 教材区画の右余白に、本人の確定痕跡（`structure_anchor` を
   持つ確定済み問い + 確定 tension。既存 `GET .../interest-traces` 応答からの抽出）を
-  淡い点（●）で新しい順に最大12点表示。数は出さない・`map_excluded` の行は出さない。
-  ホバー/タップで本人の text 逐語をツールチップ表示（帰属ラベルを添える近似 — 素材位置への
-  正確な対応付けは v1 非スコープ）。表示トグルは教材ヘッダの「●印」ボタンで、状態は
+  「段差でつまずく人」の淡いアイコン（`app.js::createStumbleIcon` の SVG 線画。旧 ● の点は
+  何の印か伝わらないため 2026-08-18 に図案化）で新しい順に最大12点表示。数は出さない・
+  `map_excluded` の行は出さない。ホバー/タップで本人の text 逐語をツールチップ表示
+  （帰属ラベルを添える近似 — 素材位置への正確な対応付けは v1 非スコープ）。表示トグルは
+  教材ヘッダの「引っかかり」ボタン（同じアイコン付き）で、状態は
   localStorage `eg_margin_marks:<courseId>`（精読モードと同型の許容例外・既定 ON）。
 
 ガードレールは `backend/tests/test_return_door_ui_static.py`（「あなたの言葉」ラベル・

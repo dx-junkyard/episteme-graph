@@ -382,11 +382,11 @@ html.learn-page > body {
   top: 40px;
   right: 2px;
   bottom: 44px;
-  width: 14px;
+  width: 18px;
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 4px;
+  gap: 5px;
   overflow: hidden;
   pointer-events: none;
   z-index: 3;
@@ -397,20 +397,23 @@ html.learn-page > body {
   border: none;
   padding: 0;
   cursor: pointer;
-  font-size: 8px;
-  line-height: 1;
+  display: flex;
+  line-height: 0;
   color: var(--color-text-info);
-  opacity: 0.35;
+  opacity: 0.45;
 }
 .margin-mark-dot.tension {
   color: var(--color-text-warning, #b8860b);
 }
 .margin-mark-dot:hover,
 .margin-mark-dot:focus {
-  opacity: 0.85;
+  opacity: 0.95;
 }
 .margin-marks-toggle {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
   padding: 2px 8px;
   border-radius: 8px;
   border: 1px solid var(--color-border-secondary);
@@ -424,6 +427,11 @@ html.learn-page > body {
 .margin-marks-toggle[aria-pressed="true"] {
   color: var(--color-text-info);
   border-color: var(--color-text-info);
+}
+/* 「段差でつまずく人」の印（トグル内・余白レイヤ共通）。線画なので currentColor で追従する。 */
+.stumble-icon {
+  display: block;
+  flex-shrink: 0;
 }
 .margin-marks-tip {
   position: fixed;
@@ -6847,14 +6855,19 @@ body.admin-inspect-mode textarea:disabled {
   border: none;
   background: var(--color-text-info, #06c);
   color: #fff;
-  font-size: 20px;
-  line-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
   padding: 0;
   cursor: pointer;
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
   z-index: 9999;
 }
 .admin-assistant-fab:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32); }
+/* 線画ロボットの顔（admin-assistant.js の ROBOT_ICON）。色は親の color を継ぐ。 */
+.admin-assistant-robot { display: block; flex-shrink: 0; }
+.admin-assistant-title .admin-assistant-robot { display: inline-block; vertical-align: -3px; margin-right: 5px; }
 /* G層の初回ログイン cue（.admin-next-steps-pulse）が丸ボタンでも円のまま光るように上書き */
 .admin-assistant-fab.admin-next-steps-pulse { border-radius: 50%; }
 
