@@ -163,6 +163,8 @@ PDF アップロード
 - [構造帰属型の問い記録（B層）](features/structure-anchored-questions.md)
 - [個人知識ネットワーク（わたしの地図・旅）](features/personal_knowledge_network_design.md)
   ／[外部レビュー](features/personal_knowledge_network_review.md)
+  ／[いまここの周り（近傍関係ビュー）](features/personal_map_nearby_design.md)
+  ／[広がり装置（名前のある霧ほか）](features/personal_map_curiosity_design.md)
 - [component 根拠カードのチップ化 + 文脈API](features/component_evidence_redesign.md)
 - [学習者向け要素文脈API](features/learner_element_context_design.md)
   ／[要素文脈の提示再設計](features/element_context_presentation_redesign.md)

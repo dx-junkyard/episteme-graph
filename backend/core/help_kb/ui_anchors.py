@@ -65,6 +65,10 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 構造の降下路（docs/features/structure_descent_design.md §3/§4）:
         # 要素文脈パネル内の「降下路」枠（足場ダイヤル・楽屋への入口）。
         "material.descent-ladder",
+        # 確認問題モーダルの選択肢（docs/features/learning.md の確認問題フロー）:
+        # 「AIと議論して理解を深める」「今回は確認せず次へ進む」の2ボタン。
+        "check.discuss",
+        "check.skip",
     }
 )
 
@@ -84,6 +88,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # 全21種がマップ済み。
 # 2026-08-15 に構造の降下路（structure_descent_design.md §3/§4）の
 # material.descent-ladder を追加し、全22種がマップ済み。
+# 2026-08-22 に確認問題モーダルの選択肢2ボタン（check.discuss / check.skip）を
+# 追加し、全24種がマップ済み。両者は「確認問題の3つの選択肢」を1つの節で
+# 並べて説明しているため、同じ参照先を指す。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
 # （composer.input / composer.send が同じ #ai-chat を指すのと同じパターン）。
@@ -133,6 +140,9 @@ UI_ANCHORS: dict[str, str] = {
     "material.return-door": "student/02-student.md#return-door",
     # 構造の降下路＝要素文脈パネル内の「降下路」枠（段階ヒント・楽屋）。
     "material.descent-ladder": "student/02-student.md#descent-ladder",
+    # 確認問題モーダルの「AIと議論して理解を深める」「今回は確認せず次へ進む」。
+    "check.discuss": "student/02-student.md#check-options",
+    "check.skip": "student/02-student.md#check-options",
 }
 
 

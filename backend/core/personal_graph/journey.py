@@ -43,6 +43,7 @@ from __future__ import annotations
 from core.personal_graph.schema import (
     ANCHOR_TYPE_COMPONENT,
     ANCHOR_TYPE_TOPIC,
+    NODE_KIND_LABELS,
     PersonalNetwork,
     PersonalNode,
 )
@@ -67,11 +68,8 @@ _DOCUMENT_LOCAL_ANCHOR_TYPES = (ANCHOR_TYPE_COMPONENT, _ANCHOR_CLAIM)
 
 _FRONTIER_NOTE = "ここから先はまだ道が無い（この要素の同一性リンクが未確定）"
 
-_NODE_KIND_JA = {
-    "tension": "引っかかり",
-    "question": "問い",
-    "reconstruction": "再構成",
-}
+# 訳語の正本は schema.NODE_KIND_LABELS（表を複製しない）。旧名は後方互換のため残す。
+_NODE_KIND_JA = NODE_KIND_LABELS
 
 
 def _node_kind_ja(node: PersonalNode) -> str:

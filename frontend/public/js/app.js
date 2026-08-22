@@ -24,6 +24,17 @@
     // data-advance（サーバー応答なしの前進）経路が完了カードを出す判断に使う。
     // トピック切替・コース切替でリセットする（古いコースの完了状態を持ち越さない）。
     lastCheckCourseCompleted: false,
+    // 確認問題の「AIと議論して理解を深める」用。直近の採点結果（合否・講評・必要な要素）を
+    // 保持し、議論メッセージの材料にする（モーダルを開き直したらクリアする）。
+    lastCheckGrading: null,
+    // 合格時の採点結果（提出した回答・講評・解答例・解説）。合格でも講評を捨てず、
+    // モーダルを開き直したとき（議論から「確認問題に戻る」）は白紙のフォームではなく
+    // 「確認済み」の状態で再提示する。トピック単位なので切替で破棄する。
+    lastCheckPass: null,
+    // 確認問題の壁打ちモードが継続中か。true の間は sendMessage が check_scaffold を
+    // 補い、AI は解答そのものを提示せず要素の説明と問いかけで支援する。
+    // 確認問題モーダルを開き直したとき・トピックを移ったときに false へ戻す。
+    checkScaffoldActive: false,
     topicHasAudio: false, // 現トピックに再生可能なキャッシュ済み音声があるか
     topicStaleLanguage: false, // audio-status.stale_language（表示のみ・判定には使わない）
     // ── 学習者体験レイヤー(B層) Stage M ──
@@ -3304,12 +3315,16 @@
     state.chatMessages = [];
     state.editingMessageId = null; // 機能3: トピック切替で書き直し状態を解除
     hideEditIndicator();
+    removeCheckReturnChip(); // 別トピックへ移ったら「確認問題に戻る」は事実でなくなる
+    state.checkScaffoldActive = false; // トピックを移ったら壁打ちは終わり、通常チャットに戻る
     state.topicMaterial = [];
     // claim / equation 文脈（learner element context）のメモリキャッシュはトピック単位。
     // 教材が入れ替わると担体（教材内ジャンプの対象）も変わるため持ち越さない。
     clearMaterialElementContextCache();
     // P1: トピック切替で「直前の check 応答の course_completed」を持ち越さない。
     state.lastCheckCourseCompleted = false;
+    // 合格時の講評もトピック単位。別トピックへ移ったら持ち越さない。
+    state.lastCheckPass = null;
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
     // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
     var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
@@ -3603,14 +3618,57 @@
     });
   }
 
+  // 合格時の「確認済み」表示。講評・解答例・解説をモーダル内に出し、主ボタンを前進
+  // （data-advance）へ切り替える。自動では次へ進まない — 講評を読む時間と、AI と
+  // 深掘りする選択肢を学習者に残すため（合格でも講評を捨てない）。
+  // 数値・スコア・祝祭演出は出さず、事実文と本文（講評・解答例・解説）だけを出す。
+  function applyCheckPassState(pass) {
+    if (!pass) return;
+    var answerEl = document.getElementById("check-answer");
+    if (answerEl) {
+      // 提出済みの回答を見ながら講評を読めるようにする（書き換えはできない）。
+      answerEl.value = pass.answer || "";
+      answerEl.readOnly = true;
+    }
+    var feedbackEl = document.getElementById("check-feedback");
+    if (feedbackEl) {
+      // 一等地は講評だけ。解答例・解説は本人が開くまで畳んでおく（合格した回答の
+      // 直後に長文を積み上げず、読み比べたい人だけが開ける）。
+      var reveal = "";
+      if (pass.model_answer || pass.explanation) {
+        reveal = '<details class="check-reveal"><summary>解答例と解説を読む</summary>' +
+          (pass.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(pass.model_answer) + '</div>' : "") +
+          (pass.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(pass.explanation) + '</div>' : "") +
+          '</details>';
+      }
+      feedbackEl.innerHTML = '<strong>この回答で次へ進めます。</strong><br>' +
+        escHtml(pass.feedback || "") + reveal;
+      feedbackEl.className = "check-feedback pass";
+    }
+    var submitBtn = document.getElementById("check-submit");
+    if (submitBtn) {
+      submitBtn.textContent = getNextTopic() ? "次へ進む" : "確認を終える";
+      submitBtn.disabled = false;
+      submitBtn.setAttribute("data-advance", "true");
+    }
+    // 確認したあとに「今回は確認せず進む」は事実でなくなるので出口ごと取り除く。
+    var skipBtn = document.getElementById("check-skip");
+    if (skipBtn) skipBtn.remove();
+  }
+
   function openCheckModal() {
     if (!state.currentTopicId || state.checkingUnderstanding) return;
     // G1-4: 最終トピック（次が無い）でも確認問題フローへ進み、合格後は完了カードへ繋ぐ。
     var existing = document.getElementById("check-overlay");
     if (existing) existing.remove();
+    // 開き直しは前回の採点結果を持ち越さない（古い指摘で議論メッセージを作らない）。
+    state.lastCheckGrading = null;
+    // 確認問題に戻ってきたら壁打ちは終わり、通常チャットに復帰する。
+    state.checkScaffoldActive = false;
 
     var topic = getCurrentTopic();
     var question = getCheckQuestionForCurrentTopic();
+    var hasNextTopic = !!getNextTopic();
     var overlay = document.createElement("div");
     overlay.id = "check-overlay";
     overlay.className = "check-overlay";
@@ -3623,16 +3681,98 @@
         '<div id="check-feedback" class="check-feedback"></div>' +
         '<div class="check-actions">' +
           '<button id="check-cancel" class="check-secondary">戻る</button>' +
+          '<button id="check-discuss" class="check-secondary" data-ui-anchor="check.discuss">AIと議論して理解を深める</button>' +
           '<button id="check-submit" class="check-primary">回答する</button>' +
         '</div>' +
+        // 確認せず進む出口。押し付けないための逃げ道なので、弱いリンク風・事実文のみ
+        // （督促・警告色は出さない）。サーバ API は呼ばず痕跡も残さない。
+        '<button id="check-skip" class="check-skip-link" data-ui-anchor="check.skip">' +
+          (hasNextTopic ? "今回は確認せず次へ進む" : "今回は確認せず終える") +
+        '</button>' +
       '</div>';
     document.body.appendChild(overlay);
     document.getElementById("check-cancel").addEventListener("click", function () {
       overlay.remove();
     });
     document.getElementById("check-submit").addEventListener("click", submitCheckAnswer);
+    document.getElementById("check-skip").addEventListener("click", async function () {
+      var skipCompleted = getCurrentTopic();
+      var skipNext = getNextTopic();
+      overlay.remove();
+      if (skipNext) {
+        // 確認していないので地図の cue（「〜を確認しました」）は出さない — 事実でなくなる。
+        await selectTopic(skipNext.id);
+      } else {
+        if (lectureState.active) deactivateLecture();
+        showCourseCompletionCard(skipCompleted, state.lastCheckCourseCompleted, { skipped: true });
+      }
+    });
+    document.getElementById("check-discuss").addEventListener("click", async function () {
+      var draftEl = document.getElementById("check-answer");
+      var draft = draftEl ? draftEl.value.trim() : "";
+      var grading = state.lastCheckGrading;
+      var passedCheck = !!(grading && grading.passed);
+      // P4: 書きかけの回答と採点の講評を捨てず、そのまま議論の材料として持ち出す。
+      var lines = [
+        "確認問題「" + (question.question || "") + "」について、理解を深めたいので議論させてください。",
+        "私の回答: " + (draft || "（まだ回答していません）"),
+      ];
+      if (grading && grading.feedback) {
+        lines.push((passedCheck ? "講評: " : "指摘された点: ") + grading.feedback);
+      }
+      if (grading && grading.answer_requirements && grading.answer_requirements.length) {
+        lines.push("回答に必要な要素: " + grading.answer_requirements.join(" / "));
+      }
+      overlay.remove();
+      if (passedCheck) {
+        // 合格後の深掘りは壁打ちにしない: 答えは既に本人が組み立てているので、解答を
+        // 伏せる拘束は目的を失う。通常のチャット（教材に基づく応答）で内容を深める。
+        state.checkScaffoldActive = false;
+        await sendMessage(lines.join("\n"));
+      } else {
+        // 壁打ちモードで送る: AI は解答そのものを示さず、回答に必要な構成要素を説明し、
+        // 組み立ては学習者に委ねる（以降の追撃も state.checkScaffoldActive で継続する）。
+        state.checkScaffoldActive = true;
+        await sendMessage(lines.join("\n"), { check_scaffold: true });
+      }
+      showCheckReturnChip();
+    });
+    // 合格済みトピックで開き直したとき（議論から「確認問題に戻る」）は、白紙の
+    // フォームに戻さず講評を再提示する（P4: 一度出した講評を消さない）。
+    if (state.lastCheckPass && state.lastCheckPass.topicId === state.currentTopicId) {
+      state.lastCheckGrading = {
+        passed: true,
+        feedback: state.lastCheckPass.feedback || "",
+        answer_requirements: state.lastCheckPass.answer_requirements || [],
+      };
+      applyCheckPassState(state.lastCheckPass);
+    }
     var answer = document.getElementById("check-answer");
     if (answer) answer.focus();
+  }
+
+  // 「確認問題に戻る」チップ。AtlasCues の導線カードと同じく #chat-area へ後付けする
+  // DOM なので、renderChat の再描画で消える（常に最新1枚・消えたら再掲しない）。
+  function removeCheckReturnChip() {
+    var chip = document.getElementById("check-return-chip");
+    if (chip) chip.remove();
+  }
+
+  function showCheckReturnChip() {
+    var ca = document.getElementById("chat-area");
+    if (!ca) return;
+    removeCheckReturnChip();
+    var chip = document.createElement("button");
+    chip.type = "button";
+    chip.id = "check-return-chip";
+    chip.className = "check-return-chip";
+    chip.textContent = "確認問題に戻る";
+    chip.addEventListener("click", function () {
+      removeCheckReturnChip();
+      openCheckModal();
+    });
+    ca.appendChild(chip);
+    if (typeof ca.scrollTop === "number") ca.scrollTop = ca.scrollHeight;
   }
 
   async function submitCheckAnswer() {
@@ -3687,22 +3827,53 @@
       // P1: サーバー正本の完了状態を保持する（data-advance 経路が後で参照する）。
       state.lastCheckCourseCompleted = !!data.course_completed;
       if (data.passed) {
-        var next = getNextTopic();
-        var completedTopic = getCurrentTopic();
-        var overlay = document.getElementById("check-overlay");
-        if (overlay) overlay.remove();
-        // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
-        if (next) {
-          await selectTopic(next.id);
-          // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
-          showAtlasCueAfterAdvance(completedTopic, next);
+        // 合格でも講評を捨てない: サーバーは合否に関わらず feedback / model_answer /
+        // explanation を返すので、その場に出して読ませ、次へ進むか AI と深掘りするかを
+        // 学習者に選ばせる（合格＝即遷移で講評が消える、をやめる）。
+        var passFeedback = String(data.feedback || "").trim();
+        var passModelAnswer = String(data.model_answer || "").trim();
+        var passExplanation = String(data.explanation || "").trim();
+        if (passFeedback || passModelAnswer || passExplanation) {
+          state.lastCheckGrading = {
+            passed: true,
+            feedback: data.feedback || "",
+            answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
+          };
+          // 議論から戻ってきたときに講評を復元するため、提出した回答ごと保持する。
+          state.lastCheckPass = {
+            topicId: state.currentTopicId,
+            answer: answer,
+            feedback: data.feedback || "",
+            answer_requirements: state.lastCheckGrading.answer_requirements,
+            model_answer: data.model_answer || "",
+            explanation: data.explanation || "",
+          };
+          applyCheckPassState(state.lastCheckPass);
         } else {
-          // G1-4: 最終トピック合格 → コース完走の完了カードへ繋ぐ（事実文のみ・数値なし）。
-          // P1: サーバーが course_completed===true を確認したときのみ断定文言を出す。
-          if (lectureState.active) deactivateLecture();
-          showCourseCompletionCard(completedTopic, data.course_completed === true);
+          // 見せる中身が無い（採点が講評を返さなかった・フォールバック採点）場合は、
+          // 空の枠を見せる意味が無いので従来どおり即座に次へ進む。
+          var next = getNextTopic();
+          var completedTopic = getCurrentTopic();
+          var overlay = document.getElementById("check-overlay");
+          if (overlay) overlay.remove();
+          // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
+          if (next) {
+            await selectTopic(next.id);
+            // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
+            showAtlasCueAfterAdvance(completedTopic, next);
+          } else {
+            // G1-4: 最終トピック合格 → コース完走の完了カードへ繋ぐ（事実文のみ・数値なし）。
+            // P1: サーバーが course_completed===true を確認したときのみ断定文言を出す。
+            if (lectureState.active) deactivateLecture();
+            showCourseCompletionCard(completedTopic, data.course_completed === true);
+          }
         }
       } else {
+        // 「AIと議論して理解を深める」が指摘・必要な要素を議論へ持ち出せるよう保持する。
+        state.lastCheckGrading = {
+          feedback: data.feedback || "",
+          answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
+        };
         if (feedbackEl) {
           feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
             escHtml(data.feedback || "") +
@@ -3736,11 +3907,16 @@
   // course_completed）。true のときだけ「全トピックを学習しました」と断定してよい。
   // falsy（未確認・不明を含む）なら fail-closed で縮退した事実文にする（途中を飛ばしても
   // 断定文言が出ないようにする）。
-  function showCourseCompletionCard(completedTopic, courseCompleted) {
+  // opts.skipped: 確認問題をスキップして最後まで来た場合。回答していないので
+  // 「確認を終えた」系の断定はせず、その事実だけを言う（body の縮退文は共通）。
+  function showCourseCompletionCard(completedTopic, courseCompleted, opts) {
+    opts = opts || {};
     var existing = document.getElementById("course-complete-overlay");
     if (existing) existing.remove();
     var courseTitle = state.course ? (state.course.title || "") : "";
-    var titleText = courseCompleted ? "学習を完了しました" : "最後のトピックの確認を終えました";
+    var titleText = opts.skipped
+      ? "最後のトピックまで進みました"
+      : (courseCompleted ? "学習を完了しました" : "最後のトピックの確認を終えました");
     var bodyText = courseCompleted
       ? ('「' + escHtml(courseTitle) + '」の全トピックを学習しました。')
       : "まだ確認を終えていないトピックがあります。";
@@ -3751,7 +3927,7 @@
       '<div class="check-box">' +
         '<div class="check-title">' + escHtml(titleText) + '</div>' +
         '<div class="check-section">' + bodyText + '</div>' +
-        (completedTopic
+        (completedTopic && !opts.skipped
           ? '<div class="check-question">最後のトピック「' + escHtml(completedTopic.title || "") +
             '」の確認問題に回答しました。</div>'
           : "") +
@@ -3829,6 +4005,11 @@
     // detour 中の自由質問でも origin（復帰先）が失われないよう、明示 payload が
     // support_context を持たない場合は現在のセッション文脈を補完する。
     const payload = Object.assign({}, Session.contextPayload(), actionPayload || {});
+    // 確認問題の壁打ちは開幕1通で終わらない。追撃の「答えを教えて」でも直答に戻らない
+    // よう、壁打ち継続中は明示指定が無ければ check_scaffold を補う。
+    if (state.checkScaffoldActive && payload.check_scaffold === undefined) {
+      payload.check_scaffold = true;
+    }
     // discuss モード（論文と話す）Phase 2: 開幕画面のチップ／分岐チップは sendWith を
     // 経由しないため、ここで最終フォールバックとして intent_mode を補う
     // （sendWith 等が明示指定済みなら上書きしない）。

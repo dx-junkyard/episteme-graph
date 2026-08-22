@@ -363,6 +363,92 @@ class TestQuestionAttributionNodes:
         assert net.nodes == []
 
 
+class TestTopicAnchorLabelIsTopicTitle:
+    """topic 縮退アンカー（N3 の問い・未接続 tension）の ``anchor_label`` にトピック題名が
+    入ること。「わたしの地図」の中心選択チップが学習者の発話原文にフォールバックせず、
+    トピック題名を出せるようにするための是正（設計書
+    ``docs/features/personal_map_nearby_design.md``）。"""
+
+    _LABELS = {"topic1": "干渉計の基礎", "topic2": "雑音の見積り"}
+
+    def test_question_topic_fallback_uses_topic_title(self):
+        trace = _trace(
+            id_="q-none", kind="question", status="open", topic_id="topic1",
+            payload={"text": "うん、塗ってみる。"},
+        )
+        net = build_network([trace], [], _ATLAS, topic_labels=self._LABELS)
+        anchor = net.nodes[0].anchor
+        assert anchor.anchor_type == "topic"
+        assert anchor.anchor_id == "topic1"
+        assert anchor.anchor_label == "干渉計の基礎"
+        # 発話原文は label 側に残るだけで anchor_label には入らない
+        assert net.nodes[0].label == "うん、塗ってみる。"
+
+    def test_llm_candidate_topic_fallback_uses_topic_title(self):
+        trace = _trace(
+            id_="q-llm", kind="question", status="open", topic_id="topic2",
+            payload={"structure_anchor": {
+                "attribution_source": "llm_candidate", "status": "active",
+                "anchor_type": "concept", "anchor_id": "concept_xyz",
+                "anchor_label": "LLM が推した概念",
+            }},
+        )
+        net = build_network([trace], [], _ATLAS, topic_labels=self._LABELS)
+        anchor = net.nodes[0].anchor
+        assert anchor.anchor_type == "topic"
+        assert anchor.anchor_label == "雑音の見積り"
+
+    def test_unconnected_tension_topic_fallback_uses_topic_title(self):
+        trace = _trace(id_="t-open", kind="tension", status="open", topic_id="topic1")
+        net = build_network([trace], [], _ATLAS, topic_labels=self._LABELS)
+        anchor = net.nodes[0].anchor
+        assert anchor.anchor_type == "topic"
+        assert anchor.anchor_label == "干渉計の基礎"
+
+    def test_omitted_topic_labels_keeps_backward_compatible_empty_label(self):
+        traces = [
+            _trace(id_="q1", kind="question", status="open", topic_id="topic1"),
+            _trace(id_="t1", kind="tension", status="open", topic_id="topic1"),
+        ]
+        net = build_network(traces, [], _ATLAS)
+        assert [n.anchor.anchor_label for n in net.nodes] == ["", ""]
+
+    def test_unknown_topic_keeps_empty_label_without_fabrication(self):
+        """題名が引けない topic（コース削除済み・title 未設定）は空のまま（P4）。"""
+        trace = _trace(
+            id_="q-unknown", kind="question", status="open", topic_id="topic_gone",
+            payload={"text": "発話原文"},
+        )
+        net = build_network([trace], [], _ATLAS, topic_labels=self._LABELS)
+        assert net.nodes[0].anchor.anchor_label == ""
+
+    def test_confirmed_structure_anchor_label_is_not_overwritten(self):
+        """N2（本人確定済み帰属）の anchor_label は structure_anchor 側の値のまま。"""
+        trace = _trace(
+            id_="q-confirmed", kind="question", status="open", topic_id="topic1",
+            payload={"structure_anchor": {
+                "attribution_source": "confirmed", "status": "active",
+                "anchor_type": "claim", "anchor_id": "claim_abc",
+                "anchor_label": "Some claim",
+            }},
+        )
+        net = build_network([trace], [], _ATLAS, topic_labels=self._LABELS)
+        anchor = net.nodes[0].anchor
+        assert anchor.anchor_type == "claim"
+        assert anchor.anchor_label == "Some claim"
+
+    def test_connected_tension_component_anchor_has_no_topic_label(self):
+        """component アンカーへ解決した tension はトピック題名を持ち込まない。"""
+        trace = _trace(
+            id_="t-connected", kind="tension", status="connected", topic_id="topic1",
+            payload={"connected_refs": {"component_ids": ["c1"]}},
+        )
+        net = build_network([trace], [], _ATLAS, topic_labels=self._LABELS)
+        anchor = net.nodes[0].anchor
+        assert anchor.anchor_type == "component"
+        assert anchor.anchor_label == ""
+
+
 # ---------------------------------------------------------------------------
 # N4: 再構成の成功（reconstruction）+ revision_of チェーン
 # ---------------------------------------------------------------------------
@@ -578,6 +664,83 @@ class TestClaimTopicMapFromCourseData:
         assert self._map(data) == {}
 
 
+class TestTopicLabelsFromCourseData:
+    """queries._topic_labels_from_data（純粋部・DB 非接続）: topics[].title の収集が
+    フラット/章ネスト両形を走査し、題名の無い topic をキーごと省くこと。"""
+
+    def _labels(self, data):
+        # 遅延 import（queries は sqlalchemy に依存するがここでは接続しない）
+        from core.personal_graph.queries import _topic_labels_from_data
+        return _topic_labels_from_data(data)
+
+    def test_flat_topics_titles(self):
+        data = {"topics": [
+            {"id": "t1", "title": "干渉計の基礎"},
+            {"id": "t2", "title": "雑音の見積り"},
+        ]}
+        assert self._labels(data) == {"t1": "干渉計の基礎", "t2": "雑音の見積り"}
+
+    def test_nested_chapter_topics_are_scanned(self):
+        data = {"chapters": [{"topics": [{"id": "t9", "title": "章の中のトピック"}]}]}
+        assert self._labels(data) == {"t9": "章の中のトピック"}
+
+    def test_topics_without_id_or_title_are_skipped(self):
+        data = {"topics": [
+            {"title": "id なし"},
+            {"id": "t2"},                 # title なし
+            {"id": "t3", "title": ""},    # 空
+            {"id": "t4", "title": "   "}, # 空白のみ
+        ]}
+        assert self._labels(data) == {}
+
+    def test_titles_are_stripped(self):
+        data = {"topics": [{"id": "t1", "title": "  題名  "}]}
+        assert self._labels(data) == {"t1": "題名"}
+
+
+class TestDeriveEntrypointsThreadTopicLabels:
+    """derive_personal_network / derive_person_network が queries のトピック題名解決を
+    build_network / build_person_network へ渡すこと（monkeypatch・DB 非接続）。"""
+
+    def test_course_scope_entrypoint_uses_fetch_topic_labels(self, monkeypatch):
+        import core.personal_graph.queries as queries_mod
+        from core.personal_graph.derive import derive_personal_network
+
+        monkeypatch.setattr(queries_mod, "fetch_traces", lambda uid, cid: [
+            _trace(id_="q1", kind="question", status="open", topic_id="topic1"),
+        ])
+        monkeypatch.setattr(queries_mod, "fetch_reconstructions", lambda uid, cid: [])
+        monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
+        monkeypatch.setattr(queries_mod, "fetch_claim_topic_map", lambda cid: {})
+        monkeypatch.setattr(queries_mod, "fetch_topic_labels", lambda cid: {"topic1": "干渉計の基礎"})
+
+        net = derive_personal_network("user1", "course1")
+        assert net.nodes[0].anchor.anchor_label == "干渉計の基礎"
+
+    def test_person_scope_entrypoint_uses_fetch_topic_labels_for_courses(self, monkeypatch):
+        import core.personal_graph.queries as queries_mod
+        from core.personal_graph.derive import derive_person_network
+
+        trace = _trace(id_="q1", kind="question", status="open", topic_id="topic1")
+        trace["course_id"] = "courseA"
+        monkeypatch.setattr(queries_mod, "fetch_traces_for_user", lambda uid: [trace])
+        monkeypatch.setattr(queries_mod, "fetch_reconstructions_for_user", lambda uid: [])
+        monkeypatch.setattr(
+            queries_mod, "fetch_topic_atlas_binding_for_courses", lambda cids: {},
+        )
+        monkeypatch.setattr(
+            queries_mod, "fetch_claim_topic_map_for_courses", lambda cids: {},
+        )
+        monkeypatch.setattr(
+            queries_mod, "fetch_topic_labels_for_courses",
+            lambda cids: {"courseA": {"topic1": "干渉計の基礎"}},
+        )
+
+        net = derive_person_network("user1")
+        assert net.nodes[0].course_id == "courseA"
+        assert net.nodes[0].anchor.anchor_label == "干渉計の基礎"
+
+
 class TestDeriveEntrypointsThreadClaimTopicMap:
     """derive_personal_network / derive_person_network が queries の claim→topic 解決を
     build_network / build_person_network へ渡すこと（monkeypatch・DB 非接続）。"""
@@ -592,6 +755,7 @@ class TestDeriveEntrypointsThreadClaimTopicMap:
         ])
         monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {"topic1": "atlas_n1"})
         monkeypatch.setattr(queries_mod, "fetch_claim_topic_map", lambda cid: {"claimX": "topic1"})
+        monkeypatch.setattr(queries_mod, "fetch_topic_labels", lambda cid: {})
 
         net = derive_personal_network("user1", "course1")
         assert len(net.nodes) == 1
@@ -614,6 +778,7 @@ class TestDeriveEntrypointsThreadClaimTopicMap:
             queries_mod, "fetch_claim_topic_map_for_courses",
             lambda cids: {"courseA": {"claimX": "topic1"}},
         )
+        monkeypatch.setattr(queries_mod, "fetch_topic_labels_for_courses", lambda cids: {})
 
         net = derive_person_network("user1")
         assert len(net.nodes) == 1

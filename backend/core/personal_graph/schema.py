@@ -21,6 +21,14 @@ NODE_KIND_RECONSTRUCTION = "reconstruction"    # N4: 再構成の成功（改訂
 
 NODE_KINDS = (NODE_KIND_TENSION, NODE_KIND_QUESTION, NODE_KIND_RECONSTRUCTION)
 
+#: node_kind の日本語表示名（正本）。事実文・DTO のラベル生成はここだけを引く
+#: （``journey.py`` / ``nearby.py`` が参照。同じ表を各所に複製しない）。
+NODE_KIND_LABELS = {
+    NODE_KIND_TENSION: "引っかかり",
+    NODE_KIND_QUESTION: "問い",
+    NODE_KIND_RECONSTRUCTION: "再構成",
+}
+
 # ---------------------------------------------------------------------------
 # edge_kind（§3。P-0 実装ノートにより実体化するのは bridge のみ。
 # revision / descend はノードの facts フィールドに事実文として保持する）

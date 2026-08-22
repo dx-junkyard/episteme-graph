@@ -330,6 +330,34 @@ class TestPerCourseAtlasBinding:
         assert net.nodes[0].anchor.atlas_node_id is None
 
 
+class TestPerCourseTopicLabels:
+    """topic 縮退アンカーの ``anchor_label`` が、そのノードの出所コースのトピック題名で
+    解決されること（同じ topic_id がコース間で衝突しても混ざらない）。"""
+
+    def test_topic_label_resolved_by_its_own_course(self):
+        traces = [
+            _trace(id_="t-a", kind="tension", status="open", topic_id="topic1", course_id="courseA"),
+            _trace(id_="t-b", kind="tension", status="open", topic_id="topic1", course_id="courseB"),
+        ]
+        labels_by_course = {
+            "courseA": {"topic1": "Aコースの題名"},
+            "courseB": {"topic1": "Bコースの題名"},
+        }
+        net = build_person_network(
+            traces, [], {}, topic_labels_by_course=labels_by_course,
+        )
+        by_id = {n.id: n for n in net.nodes}
+        assert by_id["t-a"].anchor.anchor_label == "Aコースの題名"
+        assert by_id["t-b"].anchor.anchor_label == "Bコースの題名"
+
+    def test_omitted_topic_labels_keeps_backward_compatible_empty_label(self):
+        traces = [
+            _trace(id_="t-a", kind="tension", status="open", topic_id="topic1", course_id="courseA"),
+        ]
+        net = build_person_network(traces, [], {})
+        assert net.nodes[0].anchor.anchor_label == ""
+
+
 # ---------------------------------------------------------------------------
 # ⑥ anchor_id 空のノードはグループに入らない
 # ---------------------------------------------------------------------------

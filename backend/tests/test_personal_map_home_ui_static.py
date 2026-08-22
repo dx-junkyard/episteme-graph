@@ -38,6 +38,16 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _strip_js_comment_lines(src: str) -> str:
+    """行頭がコメントの行を落とす（denylist 検査をコード行に限るための保守的な前処理）。"""
+    kept = [
+        line
+        for line in src.splitlines()
+        if not line.lstrip().startswith(("//", "*", "/*"))
+    ]
+    return "\n".join(kept)
+
+
 class TestPersonalMapHomeModule:
     """personal-map-home.js 単体の受け入れ条件 (PN-1 / PN-4 / PN-5 / §7.1)。"""
 
@@ -110,6 +120,156 @@ class TestPersonalMapHomeModule:
         match = re.search(r"function fetchJourney\(.*?\n  \}\n", src, re.S)
         assert match, "fetchJourney 関数が見つかりません"
         assert "method" not in match.group(0).lower()
+
+
+class TestNearbyTab:
+    """「いまここの周り」（近傍関係ビュー）の UI 契約。
+
+    正本: docs/features/personal_map_nearby_design.md §5。
+    """
+
+    def test_nearby_tab_is_first(self):
+        """既定タブが近傍関係ビューであること（3タブの順序・挙動は不変のまま先頭に足す）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"const TABS = \[(.*?)\];", src, re.S)
+        assert match, "TABS 定義が見つかりません"
+        keys = re.findall(r'key:\s*"([a-z]+)"', match.group(1))
+        assert keys[0] == "nearby", f"先頭タブが nearby ではありません: {keys}"
+        assert keys[1:] == ["now", "journeys", "reflect"], f"既存タブの順序が変わっています: {keys}"
+        assert re.search(r'activeTab:\s*"nearby"', src)
+
+    def test_uses_nearby_endpoint_with_mode(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "/me/personal-network/nearby" in src
+        assert "&mode=" in src
+
+    def test_nearby_fetch_is_get_only(self):
+        """読み取り専用（DB 非変更）。method 指定を持たない。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"function fetchNearby\(.*?\n  \}\n", src, re.S)
+        assert match, "fetchNearby 関数が見つかりません"
+        assert "method" not in match.group(0).lower()
+
+    def test_axis_meaning_is_stated(self):
+        """縦軸が依存の向きであることを画面に明記する（位置の意味を言葉で担保する）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "これが前提にしていること" in src
+        assert "これに依存していること" in src
+        assert "土台" in src
+
+    def test_verification_legend_is_closed_world(self):
+        """PMN-3: 検証の不在は「このコーパスの中では」に限定して書く。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "このコーパスの中では検証記録がない" in src
+        for banned in ("この分野では未検証", "誰も検証していない", "世界初", "未踏"):
+            assert banned not in src
+
+    def test_symbols_reuse_the_existing_vocabulary(self):
+        """記号はコースビューと同じ .personal-map-dot-* / スウォッチ定義を共有する。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "personal-map-dot-" in src
+        assert "personal-map-legend-swatch" in src
+
+    def test_nearby_styles_exist(self):
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        for cls in (
+            ".pm-home-nb-node",
+            ".pm-home-nb-node.unverified",
+            ".pm-home-nb-node.no-ledger",
+            ".pm-home-nb-node.is-center",
+            ".pm-home-nb-lane-label",
+            ".pm-home-nb-facts",
+            ".pm-home-nb-node.untouched",
+            ".pm-home-nb-range-head",
+            ".pm-home-nb-doc-head",
+        ):
+            assert cls in css, f"{cls} のスタイルがありません"
+
+    def test_no_numeric_or_progress_rendering(self):
+        """PMN-4: 件数・割合・進捗の描画語彙を持たない。
+
+        検査対象はコード行のみ（「件数・進捗率は出さない」と規約を説明するコメントまで
+        denylist に掛けると、規約の説明そのものが書けなくなる）。
+        """
+        src = _strip_js_comment_lines(_read(PERSONAL_MAP_HOME_JS))
+        for banned in ("confidence", "load_score", "件中", "％", "進捗率"):
+            assert banned not in src
+
+
+class TestNearbyRangeMode:
+    """範囲モード（topic アンカーの事実ベース粗表示）の UI 契約。
+
+    正本: docs/features/personal_map_nearby_design.md（本タブ実装時の追加分。
+    topic アンカーは中心1点ではなく range_documents を描く）。
+    """
+
+    def test_topic_anchor_type_included(self):
+        """topic アンカーの痕跡も中心の選択肢に出す（点ビューに解決できない代わりに
+        範囲モードのDTOが返る）。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"const NEARBY_ANCHOR_TYPES = \[(.*?)\];", src)
+        assert match, "NEARBY_ANCHOR_TYPES 定義が見つかりません"
+        assert '"topic"' in match.group(1)
+
+    def test_range_mode_branch_present(self):
+        """dto.mode === 'range' の分岐と range_documents の描画が存在する。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert re.search(r'dto\.mode\s*===\s*"range"', src)
+        assert "range_documents" in src
+
+    def test_range_head_and_self_records_heading_present(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "この話題が触れている範囲" in src
+        assert "このトピックでの自分の記録" in src
+
+    def test_untouched_class_assigned_from_touched_flag(self):
+        """サーバの `touched` フラグから `untouched` CSS クラスを付与するロジックがある。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert re.search(r"!n\.touched", src)
+        assert '" untouched"' in src
+
+    def test_mode_toggle_hidden_for_unresolved_topic_center(self):
+        """範囲モード（topic アンカー、中心未移動）では near/root モード切替を隠す
+        （anchorType 判定によるもので、中心移動後は通常どおり出す）。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert re.search(r'currentCenter\.anchorType\s*===\s*"topic"', src)
+        assert "hideModes" in src
+
+    def test_nearby_centers_expose_anchor_type(self):
+        """nearbyCenters() の返却物に anchorType / anchorId が含まれる
+        （範囲モード判定・自分の記録の絞り込みの両方に使うため）。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"function nearbyCenters\(.*?\n  \}\n", src, re.S)
+        assert match, "nearbyCenters 関数が見つかりません"
+        body = match.group(0)
+        assert "anchorType" in body
+        assert "anchorId" in body
+
+    def test_range_legend_uses_non_numeric_contrast_wording(self):
+        """凡例は「濃い枠/淡色」の事実対比のみで、件数・割合を言わない（PMN-4）。"""
+        src = _strip_js_comment_lines(_read(PERSONAL_MAP_HOME_JS))
+        assert "この話題が触れている場所" in src
+        assert "この論文のその他の理論構成" in src
+
+    def test_range_mode_reuses_existing_move_and_row_helpers(self):
+        """範囲モードのチップも既存の中心移動 (data-pm-home-nearby-move) を使い、
+        自分の記録一覧も既存の nodeRowHtml（旅・地図には反映しない導線つき）を再利用する。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"function renderNearbyRangeGraph\(.*?\n  \}\n", src, re.S)
+        assert match, "renderNearbyRangeGraph 関数が見つかりません"
+        assert "data-pm-home-nearby-move" in match.group(0)
+        mine_match = re.search(r"function renderNearbyRangeMine\(.*?\n  \}\n", src, re.S)
+        assert mine_match, "renderNearbyRangeMine 関数が見つかりません"
+        assert "nodeRowHtml(" in mine_match.group(0)
+
+    def test_no_forbidden_vocabulary_in_range_additions(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        hits = [w for w in FORBIDDEN_WORDS if w in src]
+        assert not hits, f"禁止語彙が見つかりました: {hits}"
 
 
 class TestIndexHtmlIntegration:
@@ -279,3 +439,138 @@ class TestHomePanelMapExclude:
         src = _read(PERSONAL_MAP_HOME_JS)
         assert "/dismiss" not in src
         assert 'method: "DELETE"' not in src
+
+
+class TestNamedFog:
+    """「名前のある霧」（いまの地図タブ・現在地の隣にある骨格概念を名前だけ淡く見せる
+    好奇心装置）の UI 契約。不変条項: 数値・件数・進捗を出さない / ポーリング禁止 /
+    明示操作起点の fetch のみ / fail-closed（取得失敗・対象なしは何も描かない。
+    エラー文言も出さない） / 推薦・助言文言禁止。
+    """
+
+    def test_fetches_atlas_neighbors_endpoint(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "/me/personal-network/atlas-neighbors" in src
+        assert "node_id=" in src
+
+    def test_atlas_neighbors_fetch_is_get_only(self):
+        """読み取り専用（DB 非変更）。method 指定を持たない。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"function fetchAtlasNeighbors\(.*?\n  \}\n", src, re.S)
+        assert match, "fetchAtlasNeighbors 関数が見つかりません"
+        assert "method" not in match.group(0).lower()
+
+    def test_fog_heading_present(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "この場所の隣にあるもの" in src
+
+    def test_fog_is_rendered_after_current_location_block(self):
+        """霧ブロックは「いまの地図」タブの現在地ブロック直後に描く。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderNow\(.*?\n  \}\n", src, re.S)
+        assert match, "renderNow 関数が見つかりません"
+        body = match.group(0)
+        current_idx = body.index("pm-home-current-heading")
+        fog_idx = body.index("renderFog(current)")
+        assert current_idx < fog_idx, "renderFog の呼び出しが現在地ブロックより前にあります"
+
+    def test_fog_fetch_is_explicit_tab_render_only(self):
+        """タブ描画時に1回だけ取りにいく（renderPanel からの呼び出し。ポーリングしない）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderPanel\(.*?\n  \}\n", src, re.S)
+        assert match, "renderPanel 関数が見つかりません"
+        assert "requestFog(" in match.group(0)
+
+    def test_no_new_polling(self):
+        """霧の追加によって新たなポーリング（setInterval）が増えていない。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "setInterval" not in src
+
+    def test_fog_dedupes_by_node_id(self):
+        """キー（nodeId）単位で重複抑制する（fogCache / fogLoadingId）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"function requestFog\(.*?\n  \}\n", src, re.S)
+        assert match, "requestFog 関数が見つかりません"
+        body = match.group(0)
+        assert "state.fogCache[nodeId]" in body
+        assert "state.fogLoadingId" in body
+
+    def test_fog_fail_closed_renders_nothing(self):
+        """available:false・neighbors 空・未取得は何も描かない。エラー文言・
+        「表示できません」を霧の描画経路で出さない。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderFog\(.*?\n  \}\n", src, re.S)
+        assert match, "renderFog 関数が見つかりません"
+        body = match.group(0)
+        assert 'dto.available !== true' in body or "dto.available === true" in body
+        assert "表示できません" not in body
+        assert "note" not in body  # dto.note は表示に使わない
+
+    def test_fog_chip_not_interactive(self):
+        """チップは非インタラクティブ（button にしない・click ハンドラを付けない）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderFog\(.*?\n  \}\n", src, re.S)
+        assert match, "renderFog 関数が見つかりません"
+        body = match.group(0)
+        assert "<button" not in body
+        assert "onclick" not in body
+        assert "tabindex" not in body
+        # onOverlayClick 側にも霧チップ専用のクリック分岐を作らない
+        click_src = _read(PERSONAL_MAP_HOME_JS)
+        assert "data-pm-home-fog" not in click_src
+
+    def test_fog_edge_group_before_sibling_group(self):
+        """relation==='edge' の群を relation==='sibling' の群より先に並べる。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderFog\(.*?\n  \}\n", src, re.S)
+        assert match, "renderFog 関数が見つかりません"
+        body = match.group(0)
+        edge_idx = body.index('n.relation === "edge"')
+        concat_idx = body.index("edges.concat(siblings)")
+        assert edge_idx < concat_idx
+
+    def test_no_forbidden_or_advisory_vocabulary_in_fog(self):
+        """PN-4 に加え、推薦・助言文言（「見てみよう」等）も霧の描画コードには書かない
+        （名前の提示だけに限る）。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderFog\(.*?\n  \}\n", src, re.S)
+        assert match, "renderFog 関数が見つかりません"
+        body = _strip_js_comment_lines(match.group(0))
+        for banned in FORBIDDEN_WORDS + (
+            "見てみよう",
+            "おすすめ",
+            "ぜひ",
+            "しましょう",
+            "件中",
+            "％",
+        ):
+            assert banned not in body, f"霧の描画コードに禁止語彙が見つかりました: {banned}"
+
+    def test_fog_styles_exist(self):
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        for cls in (
+            ".pm-home-fog-head",
+            ".pm-home-fog-here",
+            ".pm-home-fog-chips",
+            ".pm-home-fog-chip",
+            ".pm-home-fog-region",
+        ):
+            assert cls in css, f"{cls} のスタイルがありません"
+
+
+class TestInvalidateClearsDerivedCaches:
+    """invalidate() はログアウト・別ユーザーのログインを跨いで、コース横断の派生
+    キャッシュ（近傍関係ビュー・名前のある霧）を残さない（PN-1: 本人のみ可視）。
+    """
+
+    def test_invalidate_clears_nearby_cache(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function invalidate\(.*?\n  \}\n", src, re.S)
+        assert match, "invalidate 関数が見つかりません"
+        assert "state.nearbyCache = {}" in match.group(0)
+
+    def test_invalidate_clears_fog_cache(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function invalidate\(.*?\n  \}\n", src, re.S)
+        assert match, "invalidate 関数が見つかりません"
+        assert "state.fogCache = {}" in match.group(0)

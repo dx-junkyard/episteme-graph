@@ -1860,13 +1860,61 @@ confirmed のみ（PN-6）・fail-closed（PN-7）。migration 不要（既存�
 - **フロント**: `personal-map.js`（コースビュー: atlas トグル・kind 別ドット・
   「まだ地図にない」トレイ・旅カード + cross_course_hint 導線 + 「地図には反映しない」
   「地図に戻す」）と `personal-map-home.js`（P-3 最上位「わたしの地図」パネル。
-  ヘッダ `#my-map-btn` → いまの地図 / 問いからの旅 / 振り返り の3タブ +
+  ヘッダ `#my-map-btn` → いまここの周り / いまの地図 / 問いからの旅 / 振り返り の4タブ +
   `/api/me/...` の旅カード。常設注記「この地図はあなたにだけ表示されます。成績評価には
   使用されません。」・ポーリング禁止・数値/進捗/ゲーミフィケーション表示禁止）。
+- **「いまここの周り」＝近傍関係ビュー（2026-08-18, migration 不要）**: 正本は
+  `docs/features/personal_map_nearby_design.md`（PMN-1〜PMN-7）。**地図は周囲との関係で
+  あって分類の配置ではない**という原則から、位置に意味の無い配置を禁じ（PMN-1）、
+  2つの関係だけを描く — ①縦軸＝**依存の向き**（TheoryOperationGraph main 層の上流/下流。
+  採用する辺は `source_backing_status ∈ {source_backed, partially_source_backed}` のみで
+  `inferred` / `review_required` の**推測辺は描かない**＝PMN-2）②枠線＝**確かめられて
+  いるか**（`epistemic_ledger` の `target_type='component'` 行 + `support_paths` の事実文。
+  閉世界語彙 SL1 を継承し「このコーパスの中では検証記録がありません」しか言わない＝PMN-3）。
+  実装は `core/personal_graph/nearby.py`（FastAPI 非 import・非LLM・DB 非変更。訳語は
+  `element_vocab`（theory stage）/ `label_vocab`（検証状態）/ `personal_graph.schema`
+  （node_kind）からのみ引き**新しい訳語表を作らない**）+
+  `GET /api/me/personal-network/nearby`（`node_id` 必須 / `mode=near|root` /
+  `center_component_id` は同一 document の main 層のみ・他は 404）。中心解決は5種の
+  アンカー（component / claim / equation / derivation_step / stage）で、解決不能は
+  エラーにせず `available:false` + 事実文（P4）。台帳行ゼロは `ledger_available:false` で
+  検証の区別ごと出さず依存の向きだけを見せる（PMN-7）。数値（confidence / load_score /
+  支持経路の本数 / 件数）は返さない（PMN-4）。**範囲モード（2026-08-21 追加、設計書 §10）**:
+  topic 縮退痕跡（普通のチャット質問の N3 等）は `topics[].linked_claim_ids` → claim →
+  main ノードの**AI推定ゼロ**の決定論経路で `mode:"range"`（`range_documents[]` +
+  touched フラグ）を返す。1点の中心を偽装せず、topic 痕跡を特定ノードの mine に載せない
+  （`node_matches_anchor` が topic に False = 偽精度の構造的禁止）。`center_component_id`
+  指定で従来の点ビューへ移動（範囲→点の明示ナビゲーション）。**縮退是正（2026-08-22、
+  設計書 §11）**: `linked_claim_ids` が引けない場合は notice で終わらせず**コース範囲
+  フォールバック**（コース sources の解析済み論文の main バックボーンを `touched` なし +
+  `range_fallback:true` + 事実文 `FACT_RANGE_COURSE_FALLBACK` で範囲表示。UI は見出し・
+  凡例も切替）。claim 解決済みで main 交差ゼロの場合も表示する（旧 `has_touch` ゲート
+  撤廃・touched は交差ノードのみ）。`NOTICE_TOPIC_NO_MAPPING` はフォールバックでも
+  グラフのある閲覧可能 document がゼロの場合のみで、`unavailable(facts=)` が精密化の出口
+  （テキスト選択質問 / 帰属カード confirm）を必ず案内する。PMN-1 の解釈補足（設計書
+  §11.2）: **粗い対応は隠すのではなく粗いとラベルして見せる**。topic 縮退アンカーの
+  `anchor_label` にはトピック題名が入る（`derive._topic_anchor` +
+  `queries.fetch_topic_labels{,_for_courses}`。題名が引けなければ空のまま = 捏造しない。
+  中心選択チップが発話の生テキストではなく題名表示になる）。
+- **広がり装置（2026-08-22, migration 不要）**: 正本は
+  `docs/features/personal_map_curiosity_design.md`。好奇心の文法＝「存在だけを事実として
+  見せ、詳細は本人の明示操作まで伏せる」（cross_course_hint / 霧 / 晴れ間と同族。推薦・
+  督促・カウント・AI紹介文は禁止）。①名前のある霧 = `core/personal_graph/atlas_fog.py` +
+  `GET /api/me/personal-network/atlas-neighbors`（凍結骨格の隣接概念を名前だけ・
+  edge→sibling 順・最大8件・「いまの地図」タブに非インタラクティブな淡いチップ。失敗は
+  何も描かない）②共通部品の糸 = nearby 点ビュー中心ノードの facts に confirmed 同一性
+  リンク経由の「共通部品『◯』は、論文『△』にも現れます」（旅 [2][3] の鏡写し規則・
+  最大3行）③晴れ間の近接 = 表示集合外の `untested`/`unknown` ノードを閉世界語彙の
+  1行で提示（台帳行なしノードは対象外）④分野接続行 = 範囲ビュー facts 末尾に topic の
+  atlas binding 由来の対応行。全装置 fail-soft（その行だけ静かに消える）。
+  `invalidate()` は `nearbyCache`/`fogCache` も破棄する（PN-1: ログアウト後の
+  in-memory 残留防止）。
 - **ガードレール**: `test_personal_graph_guardrails.py`（core 非 FastAPI・読み取り専用・
   connected_refs・confirmed のみ・Phase B の k=3 は `core/privacy.py` 正本）+
   `test_personal_graph_{derive,person_scope,journey,journey_person,map_ops}.py` +
-  `test_personal_map_{ui_guardrails,home_ui_static}.py`。
+  `test_personal_map_{ui_guardrails,home_ui_static}.py` +
+  `test_personal_map_nearby.py`（近傍関係ビュー: 推測辺の非採用・数値非漏洩・閉世界語彙・
+  台帳ゼロでの縮退・訳語の非重複）。
 
 ### 要素検討ワークスペース（W層, migration 048〜050）
 

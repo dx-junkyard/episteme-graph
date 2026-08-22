@@ -1002,7 +1002,8 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
-- 教材を参照した場合は、コンテキストに付された番号付き出典マーカー `[出典1]` `[出典2]` … を本文に自然に挿入して言及すること。番号は提示された出典に対応させ、独自の番号や『書籍名』形式は使わないこと。{persona_block}"""
+- 教材を参照した場合は、コンテキストに付された番号付き出典マーカー `[出典1]` `[出典2]` … を本文に自然に挿入して言及すること。番号は提示された出典に対応させ、独自の番号や『書籍名』形式は使わないこと。
+- コンテキストに番号付き出典（`[出典1]` …）が1つも無い場合は、出典マーカーを一切書かないこと。{persona_block}"""
 
 
 def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None = None) -> str:
@@ -1151,6 +1152,52 @@ def _get_cycle_diff_system_prompt(domain: str, response_persona: str | None = No
    一切出力しないでください。学生の予想の良し悪しを評価しないでください。
 4. 【権威は出典】判断の根拠は必ず提供された出典・論文の記述に置き、出典に無い推測を
    断定的に述べないでください。{persona_block}"""
+
+
+# 確認問題の壁打ちモード（LearningChatRequest.check_scaffold）で system プロンプトへ
+# 追記する拘束。要素（定義・事実・関係）の伝授は行い、組み立て（要素をどう繋いで答えに
+# するか）は学習者に委ねる。既存の system プロンプトを置き換えるのではなく、選ばれた
+# プロンプトの末尾に追記して応答様式だけを変える（RAG 検索・痕跡記録・コスト計上は不変）。
+_CHECK_SCAFFOLD_INSTRUCTION = """**確認問題の壁打ちモード（厳守）:**
+1. 【解答そのものを出さない】確認問題への解答そのもの・模範解答・結論の言い切りを
+   提示しないでください。
+2. 【構成要素は説明してよい】回答に必要な知識の構成要素（定義・事実・関係）は、
+   求められれば個々に説明してかまいません。
+3. 【組み立ては学習者】要素をどのように組み合わせると答えに結びつくか（組み立て）は
+   学習者自身が行います。組み立ての手順や結論への道筋を先回りして示さないでください。
+4. 【壁打ち相手として応じる】学習者が組み立てを試みたら壁打ち相手として応じ、
+   合っている部分・まだ使われていない要素を事実として指摘してください。
+   正誤の断定や完成形の提示はしないでください。
+5. 【問いかけを1つ添える】応答の末尾に、学習者自身が次の一歩を組み立てられる
+   問いかけを1つだけ添えてください。
+6. 【答えを求められても】学習者が答えを直接求めても、構成要素の説明と問いかけで
+   自力の再回答を促してください。"""
+
+
+# 本文中の出典マーカー。フロント（app.js linkifyCitations）が扱えるのは半角 [出典N] のみ
+# だが、LLM は全角括弧・全角数字の表記ゆれを出すことがあるため広めに受ける。
+_CITATION_MARKER_RE = re.compile(r"[\[［【〔]\s*出典\s*([0-9０-９]+)\s*[\]］】〕]")
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def _reconcile_citation_markers(answer: str, valid_indices: set[int]) -> str:
+    """回答本文の出典マーカーを cited_sources と突き合わせて正規化する。
+
+    LLM は書式指示（「[出典N] を本文に挿入せよ」）に引きずられ、文脈に番号付き出典が
+    無い・番号が足りない場合でも [出典N] を捏造することがある。フロントの
+    linkifyCitations は対応する根拠の無い番号を素通しするため、「リンクにならない
+    出典番号」として学習者に見えてしまう（出典の内容を確認できない）。ここで
+    ①根拠のある番号は半角 [出典N] に正規化（表記ゆれをリンク可能な形に戻す）、
+    ②根拠の無い番号は本文から取り除く（確認できない出典番号を見せない）。
+    """
+
+    def _sub(m: re.Match) -> str:
+        n = int(m.group(1).translate(_FULLWIDTH_DIGITS))
+        return f"[出典{n}]" if n in valid_indices else ""
+
+    text = _CITATION_MARKER_RE.sub(_sub, answer or "")
+    # マーカー除去で句読点の直前に残った空白だけを軽く掃除する（本文には触れない）。
+    return re.sub(r"[ \t]+([。、．，])", r"\1", text)
 
 
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
@@ -1887,7 +1934,12 @@ def check_topic_understanding(
         f"解説（設定済みの場合はフィードバックに反映する）:\n{explanation or '(未設定)'}\n\n"
         f"受講者の回答: {body.answer}\n\n"
         "判定基準: 回答に必要な要素を概ね満たし、自分の言葉で説明できていれば passed=true。"
-        "核心が抜けている、逆に理解している、空欄に近い場合は false。"
+        "核心が抜けている、逆に理解している、空欄に近い場合は false。\n"
+        "feedback は合否に関わらず必ず書いてください（合格時もフロントで学習者に提示します）。"
+        "passed=true のときは、回答が押さえられている点を事実として述べ、さらに踏み込める"
+        "観点があれば1つだけ添えてください。passed=false のときは、何が抜けているかを述べて"
+        "ください。いずれの場合も点数・正解率・達成度のような数値や評価の言い切りは書かず、"
+        "褒め言葉の羅列にもしないでください。"
     )
 
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書きが設定されていれば
@@ -2820,6 +2872,10 @@ def learning_chat(
         _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
     else:
         _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
+    # 確認問題の壁打ちモード: どのモードの system プロンプトに対しても、解答の直接提示を
+    # 禁じ・要素の説明は許し・組み立ては学習者に委ねる拘束を末尾へ追記する。
+    if body.check_scaffold:
+        _system_prompt += "\n\n" + _CHECK_SCAFFOLD_INSTRUCTION
     if overall_tier == TIER_OUT_OF_SOURCE:
         _system_prompt += "\n\n" + out_of_source_guard_instruction()
     # アンカー優先ラダー（設計 §7、IH6）: typed action（EXPLAIN_GRAPH_ELEMENT）・
@@ -2836,7 +2892,18 @@ def learning_chat(
     # 文脈がこのフレームを再導入するため、学習者が立場を述べても完全解説が返る
     # （設計書 §0 の症状の再生産）。discuss のときだけ足場を中立化し、発話タイプ別の
     # 応答ルールへ橋渡しする。casual・通常モードの足場は変更しない。
-    if _is_discuss:
+    # 確認問題の壁打ちモードも同型の問題を抱える（system で「解答そのものを出さない」と
+    # 指示した直後に、足場の「以下の質問に答えてください」が直答を再誘導する）ため、
+    # discuss より優先して足場を中立化する。
+    if body.check_scaffold:
+        _scaffold_user_instruction = (
+            "上記のコンテキストを踏まえ（不足している場合は補完して）、"
+            "壁打ちモードの規則に従って学習者の発話に応じてください。"
+        )
+        _scaffold_assistant_ack = (
+            "はい。答えの組み立ては学習者に委ね、構成要素の説明と問いかけで支援します。"
+        )
+    elif _is_discuss:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、"
             "発話タイプ別の応答ルールに従って、以下の学生の発話に応じてください。"
@@ -2902,6 +2969,12 @@ def learning_chat(
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         answer = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
         degraded = True
+
+    # 出典マーカーの突き合わせ: 根拠の無い [出典N]（捏造・番号超過）を本文から取り除き、
+    # 根拠のある番号は表記ゆれを半角 [出典N] へ正規化する。ここで整えることで、
+    # レスポンス・履歴焼き込み・関心痕跡のすべてに同じ本文が流れる。
+    if not degraded:
+        answer = _reconcile_citation_markers(answer, {s["index"] for s in cited_sources})
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。

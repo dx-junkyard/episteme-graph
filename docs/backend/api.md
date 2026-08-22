@@ -258,6 +258,8 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | GET | `/api/learning/courses/{cid}/personal-network/journey` | 本人のみ | コーススコープの旅（クエリ `node_id` 必須。当該コース sources 内限定 + cross_course_hint） |
 | GET | `/api/me/personal-network` | 本人のみ | 正本 API（本人所有の全痕跡由来。`include_candidate_links=true` は 422 の fail-closed） |
 | GET | `/api/me/personal-network/journey` | 本人のみ | コース横断の旅（クエリ `node_id` 必須。hop ごとに can_view_document で fail-closed フィルタ） |
+| GET | `/api/me/personal-network/nearby` | 本人のみ | 近傍関係ビュー「いまここの周り」（クエリ `node_id` 必須 / `mode=near\|root` / `center_component_id` 任意。依存の向き + 検証状態のみ。数値なし・DB 非変更。topic 縮退痕跡は `mode:"range"` の範囲応答 — `topics[].linked_claim_ids` 経由の決定論解決で「トピックが触れる main 層ノード群」を返し、1点の中心を偽装しない。facts に広がり装置の事実文 — 共通部品の糸・晴れ間の近接・分野接続行 — が fail-soft で載る） |
+| GET | `/api/me/personal-network/atlas-neighbors` | 本人のみ | 名前のある霧（クエリ `node_id` 必須。現在地の凍結骨格上の隣接概念を名前だけ返す — edge→sibling 順・最大8件・非LLM・数値なし。atlas_node_id 未解決は `available:false` + 事実文） |
 
 > このルーターは**読み取り専用**（書き込み API を作らないことをガードレールで固定）。
 > 訂正操作（map-exclude / map-restore）は `routes/learning.py` 側にある。

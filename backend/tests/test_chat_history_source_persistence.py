@@ -276,6 +276,68 @@ class TestLearningChatPersistsSources:
 
 
 # ---------------------------------------------------------------------------
+# _reconcile_citation_markers — 根拠の無い出典マーカーの除去・表記ゆれ正規化
+# （バグ: LLM が書式指示に引きずられ、cited_sources が空でも [出典N] を書くことが
+#  あり、フロントの linkifyCitations は対応の無い番号を素通しするため「リンクの
+#  無い出典番号」として学習者に見えていた）
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileCitationMarkers:
+    def test_valid_marker_is_kept(self):
+        out = learning_mod._reconcile_citation_markers("説明です[出典1]。", {1})
+        assert out == "説明です[出典1]。"
+
+    def test_unbacked_marker_is_removed(self):
+        out = learning_mod._reconcile_citation_markers("説明です[出典1]。", set())
+        assert "[出典1]" not in out
+        assert "説明です。" == out
+
+    def test_over_index_marker_is_removed_but_valid_kept(self):
+        out = learning_mod._reconcile_citation_markers("A[出典1]とB[出典3]。", {1, 2})
+        assert "[出典1]" in out
+        assert "出典3" not in out
+
+    def test_fullwidth_variants_are_normalized(self):
+        # 全角括弧・全角数字・隅付き括弧を半角 [出典N] に戻す（linkify が拾える形）。
+        out = learning_mod._reconcile_citation_markers("A［出典１］とB【出典2】。", {1, 2})
+        assert "[出典1]" in out and "[出典2]" in out
+        assert "［" not in out and "【" not in out
+
+    def test_leftover_space_before_punctuation_is_cleaned(self):
+        out = learning_mod._reconcile_citation_markers("〜です [出典1] 。", set())
+        assert out == "〜です。"
+
+    def test_no_matching_chunks_strips_markers_from_response(self, chat_env):
+        """検索スコア足切りで cited_sources が空のとき、本文の捏造マーカーが消えること。"""
+        chat_env.monkeypatch.setattr(
+            learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(1, score=0.1)],
+        )
+        resp = learning_mod.learning_chat(
+            "course-1", "topic-1",
+            LearningChatRequest(message="質問です", support_action="ask_question"),
+            current_user=CURRENT_USER,
+        )
+        # 注意書き（out_of_source_notice）の「出典」という語は残ってよい。
+        # 消すのはリンクにならないマーカー形式 [出典N] だけ。
+        assert "[出典1]" not in resp.answer
+        assert "[出典2]" not in resp.answer
+
+    def test_matching_chunks_keep_markers_linked(self, chat_env):
+        """根拠がある番号はそのまま残る（リンク化は msg.sources との突き合わせで成立）。"""
+        chat_env.monkeypatch.setattr(
+            learning_mod, "search_chunks_with_metadata", lambda *a, **k: [_chunk(1), _chunk(2)],
+        )
+        resp = learning_mod.learning_chat(
+            "course-1", "topic-1",
+            LearningChatRequest(message="質問です", support_action="ask_question"),
+            current_user=CURRENT_USER,
+        )
+        assert "[出典1]" in resp.answer and "[出典2]" in resp.answer
+        assert [s.index for s in resp.sources] == [1, 2]
+
+
+# ---------------------------------------------------------------------------
 # _usage_help_response — マニュアル出典の焼き込み
 # ---------------------------------------------------------------------------
 

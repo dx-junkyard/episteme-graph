@@ -305,6 +305,11 @@ class LearningChatRequest(BaseModel):
     # 不正値は 422。未指定は従来どおり。既存 learning_chat の1コール地点に相乗りする
     # （新エンドポイントを作らない・UC10）。
     cycle_mode: str | None = None
+    # 確認問題の壁打ちモード: True のとき system プロンプトに「解答の直接提示禁止・
+    # 構成要素（定義・事実・関係）の説明は可・組み立ては学習者自身・学習者が組み立てを
+    # 試みたら壁打ち相手として応じる」の拘束を注入する。応答様式のみの変更で、
+    # RAG 検索・痕跡記録・コスト計上は不変。
+    check_scaffold: bool = False
     # 楽屋モード（構造の降下路 docs/features/structure_descent_design.md §4）: True のとき
     # この質問の痕跡を kind='backstage_question' で記録する（教員向け集約・digest・
     # わたしの地図の対象外 — 記録は本人にだけ残る。tension mining の対象にもしない）。

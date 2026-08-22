@@ -1595,6 +1595,27 @@ html.learn-page > body {
   color: var(--color-text-danger);
 }
 
+/* 合格時の講評。合否は既に判定済みなので fail と対称の色を使うが、祝祭的な演出
+   （バッジ・アイコン・拡大）は付けない（事実文と本文だけを出す）。 */
+.check-feedback.pass {
+  color: var(--color-text-success);
+}
+
+/* 合格時の解答例・解説は畳んで出す（一等地は講評だけ）。 */
+.check-reveal {
+  margin-top: 8px;
+}
+
+.check-reveal summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.check-reveal summary:hover {
+  color: var(--color-text-secondary);
+}
+
 .check-model-answer {
   margin-top: 10px;
   padding: 10px;
@@ -1645,6 +1666,44 @@ html.learn-page > body {
   border: 1px solid var(--color-text-info);
   background: var(--color-text-info);
   color: #fff;
+}
+
+/* 確認問題のスキップ導線。押し付けない出口なので、主要ボタンと競合しない
+   グレー系の弱いリンク風にする（警告色・強調は使わない）。 */
+.check-skip-link {
+  display: block;
+  margin: 10px 0 0 auto;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.check-skip-link:hover {
+  color: var(--color-text-secondary);
+}
+
+/* 議論から確認問題へ戻る一枚だけのチップ（チャット領域末尾に後付け）。 */
+.check-return-chip {
+  display: block;
+  margin: 8px 0 0;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.check-return-chip:hover {
+  border-color: var(--color-border-info);
+  color: var(--color-text-info);
 }
 
 .graph-suggestions {
@@ -7821,6 +7880,41 @@ body.admin-inspect-mode textarea:disabled {
 }
 .pm-home-journey-btn:hover { background: var(--color-background-info, #eef4fb); }
 
+/* 「名前のある霧」（いまの地図タブ・現在地の隣にある骨格概念を名前だけ淡く見せる好奇心
+   装置）。件数・矢印・推薦文言は描かない — 見た目自体を意図的に「薄い」ものにする。 */
+.pm-home-fog { margin-top: 14px; }
+.pm-home-fog-head {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-bottom: 4px;
+}
+.pm-home-fog-here {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.pm-home-fog-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pm-home-fog-chip {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  background: transparent;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.pm-home-fog-region {
+  font-size: 10px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  opacity: 0.75;
+}
+
 .pm-home-reflect-month { margin-bottom: 18px; }
 .pm-home-reflect-month-heading {
   font-size: 12px;
@@ -7837,6 +7931,139 @@ body.admin-inspect-mode textarea:disabled {
   font-size: 13px;
   color: var(--color-text-primary, #1d1d1f);
 }
+
+/* --- わたしの地図「いまここの周り」（近傍関係ビュー）------------------------
+   正本: docs/features/personal_map_nearby_design.md
+   縦 = 依存の向き / 枠線 = 検証の記帳の有無。座標・順位・距離は描かない（PMN-1）。
+   記号（問い/引っかかり/再構成）は atlas.css の .personal-map-dot-* を共有する。 */
+.pm-home-nb-centers-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 2px 0 6px;
+}
+.pm-home-nb-centers {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.pm-home-nb-center-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.pm-home-nb-center-chip:hover { border-color: var(--color-text-tertiary, #8e8e93); }
+.pm-home-nb-center-chip.active {
+  background: var(--color-background-info, #eef4fb);
+  border-color: #cfe0f3;
+  color: #185fa5;
+  font-weight: 600;
+}
+.pm-home-nb-modes {
+  display: inline-flex;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.pm-home-nb-mode {
+  border: 0;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.pm-home-nb-mode.active {
+  background: var(--color-background-info, #eef4fb);
+  color: #185fa5;
+  font-weight: 600;
+}
+.pm-home-nb-axis {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 0 0 6px;
+}
+.pm-home-nb-graph {
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 10px;
+  background: var(--color-background-secondary, #fcfcfd);
+  padding: 4px;
+}
+.pm-home-nb-graph svg { display: block; width: 100%; height: auto; }
+.pm-home-nb-lane-line { stroke: #f0f0f3; stroke-width: 1; }
+.pm-home-nb-lane-label { font-size: 9.5px; fill: #a1a1a6; }
+.pm-home-nb-link { fill: none; stroke: #cfcfd6; stroke-width: 1.3; }
+.pm-home-nb-chip { cursor: pointer; }
+.pm-home-nb-chip:focus { outline: none; }
+.pm-home-nb-chip:focus-visible .pm-home-nb-node { stroke: #185fa5; stroke-width: 2; }
+/* 既定（検証の記帳あり）= 実線。触っていないノードは淡く。 */
+.pm-home-nb-node { fill: #fafafa; stroke: #c7c7cc; stroke-width: 1; }
+.pm-home-nb-node.has-mine { fill: #fff; stroke: #a8a8ad; stroke-width: 1.1; }
+/* 記帳が無い（未検証・検証情報なし）= 破線。「検証済み」に見せない。 */
+.pm-home-nb-node.unverified { stroke-dasharray: 4 3; }
+/* 台帳行そのものが無いノードは中立（実線細）で、検証について何も主張しない。 */
+.pm-home-nb-node.no-ledger { stroke: #d6d6db; }
+.pm-home-nb-node.is-center { fill: #f4f8fd; stroke: #185fa5; stroke-width: 1.7; }
+.pm-home-nb-node-label { font-size: 11px; fill: var(--color-text-primary, #1d1d1f); }
+.pm-home-nb-node-verif { font-size: 8.5px; fill: #8e8e93; }
+.pm-home-nb-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.pm-home-nb-lg { display: inline-flex; align-items: center; gap: 5px; }
+.pm-home-nb-sw { width: 11px; height: 9px; display: inline-block; flex: none; border-radius: 2px; }
+.pm-home-nb-sw.solid { border: 1px solid #a8a8ad; background: #fff; }
+.pm-home-nb-sw.dash { border: 1px dashed #a8a8ad; background: #fff; }
+.pm-home-nb-facts {
+  margin-top: 12px;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.pm-home-nb-facts-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 6px;
+}
+.pm-home-nb-fact { font-size: 12.5px; margin: 0 0 6px; }
+.pm-home-nb-fact:last-child { margin-bottom: 0; }
+
+/* 範囲モード（topic アンカー。設計書 §5「範囲モード」追加分）:
+   1論文=1グラフを縦に並べる。「濃い＝この話題が触れている場所／淡色＝その他」の
+   対比のみを見せる（PMN-1: 位置に意味の無い配置をしない）。 */
+.pm-home-nb-range-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 4px 0 8px;
+}
+.pm-home-nb-doc-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+  margin: 14px 0 6px;
+}
+.pm-home-nb-doc-head:first-child { margin-top: 0; }
+.pm-home-nb-range-graph { margin-bottom: 4px; }
+/* 淡色 = まだこの話題では触れられていない（この論文の中のその他の理論構成）。 */
+.pm-home-nb-node.untouched { opacity: 0.45; }
+.pm-home-nb-sw.range-touched { border: 1.5px solid #185fa5; background: #f4f8fd; }
+.pm-home-nb-sw.range-untouched { border: 1px solid #d6d6db; background: #fafafa; opacity: 0.55; }
 
 .pm-home-journey-area {
   border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
