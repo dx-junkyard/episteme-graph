@@ -69,16 +69,25 @@ def fetch_traces(user_id: str, course_id: str) -> list[dict]:
 
 
 def fetch_reconstructions(user_id: str, course_id: str) -> list[dict]:
-    """learner_reconstructions から本人・コースの行を読む。"""
+    """learner_reconstructions から本人・コースの行を読む（元 claim 本文つき）。
+
+    ``claim_text`` は ``theory_claims.text``（元 claim 本文）を LEFT JOIN で併読した
+    もので、``derive._reconstruction_node`` がノードのラベルに使う。join は
+    ``learner_reconstructions.claim_id``（migration 036 が集計用に非正規化して持つ列）
+    から直接張る — ``reconstruction_items`` を経由しないので、R層の**伏せフィールド**
+    （``response_space`` / ``expected``）に触れる経路をそもそも作らない。claim 行が
+    無い（削除済み等）ときは ``None``（呼び出し側が従来の固定ラベルへフォールバック）。
+    """
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, item_id, claim_id, machine_verdict, self_check,
-                       descended_to_symbol, revision_of, created_at
-                FROM learner_reconstructions
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                ORDER BY created_at, id
+                SELECT r.id, r.item_id, r.claim_id, r.machine_verdict, r.self_check,
+                       r.descended_to_symbol, r.revision_of, r.created_at, c.text
+                FROM learner_reconstructions r
+                LEFT JOIN theory_claims c ON c.id = r.claim_id
+                WHERE r.user_id = CAST(:user_id AS uuid) AND r.course_id = :course_id
+                ORDER BY r.created_at, r.id
             """),
             {"user_id": user_id, "course_id": course_id},
         ).fetchall()
@@ -94,6 +103,7 @@ def fetch_reconstructions(user_id: str, course_id: str) -> list[dict]:
             "descended_to_symbol": bool(r[5]),
             "revision_of": str(r[6]) if r[6] else None,
             "created_at": _to_iso(r[7]),
+            "claim_text": str(r[8]) if r[8] else None,
         }
         for r in rows
     ]
@@ -330,20 +340,23 @@ def fetch_traces_for_user(user_id: str) -> list[dict]:
 
 
 def fetch_reconstructions_for_user(user_id: str) -> list[dict]:
-    """learner_reconstructions から本人の行を、コース条件なしで読む。
+    """learner_reconstructions から本人の行を、コース条件なしで読む（元 claim 本文つき）。
 
     ``fetch_reconstructions`` との差分は ``fetch_traces_for_user`` と同型
-    （course_id 条件を外し、返却 dict に ``course_id`` を追加するだけ）。
+    （course_id 条件を外し、返却 dict に ``course_id`` を追加するだけ）。``claim_text``
+    の由来と伏せフィールドを引かない理由は ``fetch_reconstructions`` の docstring 参照。
     """
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, item_id, claim_id, machine_verdict, self_check,
-                       descended_to_symbol, revision_of, created_at, course_id
-                FROM learner_reconstructions
-                WHERE user_id = CAST(:user_id AS uuid)
-                ORDER BY created_at, id
+                SELECT r.id, r.item_id, r.claim_id, r.machine_verdict, r.self_check,
+                       r.descended_to_symbol, r.revision_of, r.created_at, r.course_id,
+                       c.text
+                FROM learner_reconstructions r
+                LEFT JOIN theory_claims c ON c.id = r.claim_id
+                WHERE r.user_id = CAST(:user_id AS uuid)
+                ORDER BY r.created_at, r.id
             """),
             {"user_id": user_id},
         ).fetchall()
@@ -360,6 +373,7 @@ def fetch_reconstructions_for_user(user_id: str) -> list[dict]:
             "revision_of": str(r[6]) if r[6] else None,
             "created_at": _to_iso(r[7]),
             "course_id": str(r[8]) if r[8] is not None else "",
+            "claim_text": str(r[9]) if r[9] else None,
         }
         for r in rows
     ]

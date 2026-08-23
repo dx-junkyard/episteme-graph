@@ -129,13 +129,13 @@ class TestNearbyTab:
     """
 
     def test_nearby_tab_is_first(self):
-        """既定タブが近傍関係ビューであること（3タブの順序・挙動は不変のまま先頭に足す）。"""
+        """既定タブが近傍関係ビューであること（3タブ構成。順序・挙動は不変のまま先頭に足す）。"""
         src = _read(PERSONAL_MAP_HOME_JS)
         match = re.search(r"const TABS = \[(.*?)\];", src, re.S)
         assert match, "TABS 定義が見つかりません"
         keys = re.findall(r'key:\s*"([a-z]+)"', match.group(1))
         assert keys[0] == "nearby", f"先頭タブが nearby ではありません: {keys}"
-        assert keys[1:] == ["now", "journeys", "reflect"], f"既存タブの順序が変わっています: {keys}"
+        assert keys[1:] == ["now", "journeys"], f"既存タブの順序が変わっています: {keys}"
         assert re.search(r'activeTab:\s*"nearby"', src)
 
     def test_uses_nearby_endpoint_with_mode(self):
@@ -556,6 +556,180 @@ class TestNamedFog:
             ".pm-home-fog-region",
         ):
             assert cls in css, f"{cls} のスタイルがありません"
+
+
+class TestReflectTabRemoved:
+    """オーナー裁定: 「振り返り」タブは削除。タブ・ラベル・専用描画関数のいずれも
+    ソースに存在しないことを固定する。
+    """
+
+    def test_reflect_key_and_label_absent(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert '"reflect"' not in src
+        assert "振り返り" not in src
+        assert "renderReflect" not in src
+
+    def test_reflect_styles_removed(self):
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert ".pm-home-reflect-month" not in css
+        assert ".pm-home-reflect-item" not in css
+
+
+class TestInitialTabConsistency:
+    """T2: open() と invalidate() が同じ既定タブ（いまここの周り）に揃っていること。
+    以前は invalidate() だけ "now" に戻す不整合があった。
+    """
+
+    def test_invalidate_resets_to_nearby_tab(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function invalidate\(.*?\n  \}\n", src, re.S)
+        assert match, "invalidate 関数が見つかりません"
+        assert 'state.activeTab = "nearby"' in match.group(0)
+
+    def test_open_resets_to_first_tab(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function open\(.*?\n  \}\n", src, re.S)
+        assert match, "open 関数が見つかりません"
+        assert "state.activeTab = TABS[0].key" in match.group(0)
+
+
+class TestNearbyJumpBridge:
+    """T3: 「いまの地図」「問いからの旅」のノード行から「いまここの周り」への橋
+    (`この場所の周りを見る`)。中心になれるかどうかの判定は nearbyCenters() の
+    絞り込みと同じ述語を共有する（二重実装しない）。
+    """
+
+    def test_jump_button_present_in_node_row(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function nodeRowHtml\(.*?\n  \}\n", src, re.S)
+        assert match, "nodeRowHtml 関数が見つかりません"
+        body = match.group(0)
+        assert "data-pm-home-nearby-jump" in body
+        assert "この場所の周りを見る" in body
+
+    def test_predicate_is_shared_not_duplicated(self):
+        """canBeNearbyCenter 述語が定義され、nearbyCenters() とジャンプ判定の両方から
+        呼ばれている（NEARBY_ANCHOR_TYPES.indexOf のチェックを2箇所に書かない）。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert "function canBeNearbyCenter(" in src
+        # nearbyCenters() 自体が述語関数を使って絞り込んでいる
+        centers_match = re.search(r"\n  function nearbyCenters\(.*?\n  \}\n", src, re.S)
+        assert centers_match, "nearbyCenters 関数が見つかりません"
+        assert "canBeNearbyCenter" in centers_match.group(0)
+        # ジャンプ先の解決も同じ述語を経由する
+        jump_match = re.search(r"\n  function nearbyCenterIdForNode\(.*?\n  \}\n", src, re.S)
+        assert jump_match, "nearbyCenterIdForNode 関数が見つかりません"
+        assert "canBeNearbyCenter" in jump_match.group(0)
+        # NEARBY_ANCHOR_TYPES.indexOf の判定自体は canBeNearbyCenter の1箇所だけに書く
+        assert src.count("NEARBY_ANCHOR_TYPES.indexOf") == 1
+
+    def test_jump_click_handler_switches_to_nearby_tab(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\[data-pm-home-nearby-jump\]\"\);\s*\n\s*if \(nbJump\) \{(.*?)\n    \}", src, re.S)
+        assert match, "data-pm-home-nearby-jump のクリックハンドラが見つかりません"
+        body = match.group(1)
+        assert "state.nearbyCenterNodeId" in body
+        assert 'state.activeTab = "nearby"' in body
+        assert "renderPanel()" in body
+
+
+class TestJourneysTabReusesNodeRow:
+    """T4: 「問いからの旅」の起点リストは nodeRowHtml() を再利用し、自前の HTML 組み立てを
+    やめる（「地図には反映しない」「この場所の周りを見る」が旅タブでも一貫して出る）。
+    """
+
+    def test_render_journeys_calls_node_row_html(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderJourneys\(.*?\n  \}\n", src, re.S)
+        assert match, "renderJourneys 関数が見つかりません"
+        body = match.group(0)
+        assert "nodeRowHtml(" in body
+        # 旧来の自前組み立て（kind/label を直接連結する断片）が残っていないこと
+        assert 'pm-home-journey-card-item' not in body
+
+    def test_journeys_list_wrapper_and_limit_unchanged(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderJourneys\(.*?\n  \}\n", src, re.S)
+        assert match
+        body = match.group(0)
+        assert "pm-home-journeys-list" in body
+        assert "slice(0, 20)" in body
+
+
+class TestEmptyJourneyNotice:
+    """T5: 旅の steps が空でも無言にしない。サーバが notice/facts を添えた応答は、
+    nearby の「対象なし」分岐と同じ見出し・同じ描画部品 (renderNearbyFacts) で
+    「この記録について」を表示する。notice の無い旧型応答は従来どおり非表示
+    （後方互換）。
+    """
+
+    def test_render_journey_area_handles_empty_notice(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderJourneyArea\(.*?\n  \}\n", src, re.S)
+        assert match, "renderJourneyArea 関数が見つかりません"
+        body = match.group(0)
+        assert "data.notice" in body
+        assert "renderNearbyFacts(" in body
+        assert "この記録について" in body
+
+    def test_backward_compatible_when_no_notice(self):
+        """notice も steps も無い旧型応答では従来どおり area.hidden = true に丸める。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderJourneyArea\(.*?\n  \}\n", src, re.S)
+        assert match
+        body = match.group(0)
+        assert "if (!data.notice) {" in body
+
+    def test_fetch_error_and_404_paths_unchanged(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(r"\n  function renderJourneyArea\(.*?\n  \}\n", src, re.S)
+        assert match
+        body = match.group(0)
+        assert "data._fetch_error" in body
+        assert "旅の経路を読み込めませんでした" in body
+
+
+class TestJourneyRestartFocusesList:
+    """T6: 「別の問いから旅に出る」は旅タブ表示中に押されてもノーオペにならない。
+    switchTab() の同タブ早期 return を避け、closeJourneyArea() を先に呼んでから
+    起点リストへフォーカス移動する。別タブからは従来どおりタブ切替する。
+    """
+
+    def test_restart_calls_close_journey_area_first(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(
+            r"data-pm-home-journey-restart\]\"\);\s*\n\s*if \(journeyRestart\) \{(.*?)\n    \}",
+            src,
+            re.S,
+        )
+        assert match, "journeyRestart のクリックハンドラが見つかりません"
+        body = match.group(1)
+        assert "closeJourneyArea()" in body
+
+    def test_restart_scrolls_list_when_already_on_journeys_tab(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(
+            r"data-pm-home-journey-restart\]\"\);\s*\n\s*if \(journeyRestart\) \{(.*?)\n    \}",
+            src,
+            re.S,
+        )
+        assert match
+        body = match.group(1)
+        assert 'state.activeTab === "journeys"' in body
+        assert "pm-home-journeys-list" in body
+        assert "scrollIntoView" in body
+
+    def test_restart_switches_tab_from_other_tabs(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        match = re.search(
+            r"data-pm-home-journey-restart\]\"\);\s*\n\s*if \(journeyRestart\) \{(.*?)\n    \}",
+            src,
+            re.S,
+        )
+        assert match
+        body = match.group(1)
+        assert 'switchTab("journeys")' in body
 
 
 class TestInvalidateClearsDerivedCaches:

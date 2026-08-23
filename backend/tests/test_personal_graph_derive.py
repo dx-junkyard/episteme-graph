@@ -786,3 +786,64 @@ class TestDeriveEntrypointsThreadClaimTopicMap:
         assert node.course_id == "courseA"
         assert node.topic_id == "topic1"
         assert node.anchor.atlas_node_id == "atlas_n1"
+
+
+class TestReconstructionNodeLabel:
+    """N4 のラベルは元 claim 本文（``theory_claims.text`` = row["claim_text"]）を使う。
+
+    ``queries.fetch_reconstructions{,_for_user}`` が LEFT JOIN で併読する列で、引けない
+    行（claim 削除済み・claim_text キーの無い古い呼び出し）は従来の固定文字列へ
+    フォールバックする（後方互換）。R層 item の伏せフィールド（response_space /
+    expected）は引かない。
+    """
+
+    def test_claim_text_becomes_the_label(self):
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        row["claim_text"] = "ノイズ床は散射雑音で決まる"
+        net = build_network([], [row], _ATLAS)
+        assert net.nodes[0].label == "ノイズ床は散射雑音で決まる"
+
+    def test_missing_claim_text_key_keeps_the_legacy_label(self):
+        """fake rows に claim_text が無くても動く（getattr/None 既定の後方互換）。"""
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        assert "claim_text" not in row
+        net = build_network([], [row], _ATLAS)
+        assert net.nodes[0].label == "claim への再構成"
+
+    def test_none_claim_text_keeps_the_legacy_label(self):
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        row["claim_text"] = None
+        net = build_network([], [row], _ATLAS)
+        assert net.nodes[0].label == "claim への再構成"
+
+    def test_blank_claim_text_keeps_the_legacy_label(self):
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        row["claim_text"] = "   "
+        net = build_network([], [row], _ATLAS)
+        assert net.nodes[0].label == "claim への再構成"
+
+    def test_long_claim_text_is_truncated_with_the_shared_80_char_rule(self):
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        row["claim_text"] = "あ" * 200
+        net = build_network([], [row], _ATLAS)
+        assert net.nodes[0].label == "あ" * 80
+
+    def test_person_scope_carries_claim_text_through(self):
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        row["course_id"] = "courseA"
+        row["claim_text"] = "干渉計の応答は腕長差に比例する"
+        from core.personal_graph.derive import build_person_network
+
+        net = build_person_network([], [row], {"courseA": {}})
+        assert net.nodes[0].label == "干渉計の応答は腕長差に比例する"
+
+    def test_label_does_not_expose_hidden_item_fields(self):
+        """伏せフィールド（response_space / expected）は row に入っていても使わない。"""
+        row = _recon(id_="r1", machine_verdict="match", self_check=None)
+        row["claim_text"] = "主張本文"
+        row["response_space"] = ["伏せ選択肢A", "伏せ選択肢B"]
+        row["expected"] = {"choice_id": "伏せ想定解"}
+        net = build_network([], [row], _ATLAS)
+        node_json = json.dumps(net.nodes[0].to_dict(), ensure_ascii=False)
+        assert "伏せ" not in node_json
+        assert net.nodes[0].label == "主張本文"

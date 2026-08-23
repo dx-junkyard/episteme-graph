@@ -18,11 +18,11 @@
  * コース単位の `/api/learning/courses/{id}/personal-network` は使わない
  * （提案書 §5.3 — 正本APIは本人主体、course_id は所有境界ではなく provenance）。
  *
- * ビュー構成（提案書 §3.2 の A/C/D。B「このコースでの地図」は既存 personal-map.js が
- * 担うため本パネルには含めない）:
+ * ビュー構成（提案書 §3.2 の A/C。B「このコースでの地図」は既存 personal-map.js が
+ * 担うため本パネルには含めない。提案書 §3.2 D の月別グルーピングタブはオーナー裁定に
+ * より非搭載）:
  *   いまの地図   — 直近の本人確定痕跡を現在地にした局所ビュー（デフォルト）
  *   問いからの旅 — 問い/引っかかりの新しい順カード列（上限20件・「すべて見る」は作らない）
- *   振り返り     — 月別グルーピング（件数・進捗率は出さない。PN-4）
  *
  * 公開契約 window.PersonalMapHome（呼び出し側は app.js。名前・引数は固定）:
  *   init(deps)   — deps.openTrajectory(traceId) を登録（任意。ノード詳細から既存の
@@ -60,7 +60,6 @@
     { key: "nearby", label: "いまここの周り" },
     { key: "now", label: "いまの地図" },
     { key: "journeys", label: "問いからの旅" },
-    { key: "reflect", label: "振り返り" },
   ];
 
   // 近傍関係ビュー（案E。正本: docs/features/personal_map_nearby_design.md）。
@@ -131,13 +130,6 @@
       .replace(/&/g, "&amp;")
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;");
-  }
-
-  function fmtMonth(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    return d.getFullYear() + "年" + (d.getMonth() + 1) + "月";
   }
 
   // 本人スコープの個人ネットワーク（コース横断・正本API）。open() のたびに1回だけ fetch し
@@ -303,6 +295,15 @@
       '<button type="button" class="pm-home-journey-btn" data-pm-home-journey="' +
       esc(node.id) +
       '">ここから旅に出る</button>';
+    // T3: 「いまの地図」「問いからの旅」から「いまここの周り」への橋。サーバが中心として
+    // 解決できるアンカーを持つノードにのみ出す（canBeNearbyCenter / nearbyCenters と同じ述語）。
+    const nbCenterId = nearbyCenterIdForNode(node, data);
+    if (nbCenterId) {
+      html +=
+        '<button type="button" class="pm-home-journey-btn" data-pm-home-nearby-jump="' +
+        esc(nbCenterId) +
+        '">この場所の周りを見る</button>';
+    }
     // N17: 訂正操作「地図には反映しない」（提案書 §6）を最上位パネルからも使えるようにする。
     // 対象は tension/question のみ（reconstruction には出さない — コースビュー
     // personal-map.js の showPopup と同じ対象範囲）。node.id は interest_traces.id。
@@ -373,12 +374,22 @@
     });
   }
 
+  // サーバが中心として解決できるアンカーを持つか（T3: 「いまの地図」「問いからの旅」の
+  // ノード行に「この場所の周りを見る」を出すかどうかの判定と、中心の選択肢の絞り込みが
+  // 同じ述語を共有する — 二重実装しない）。
+  function canBeNearbyCenter(node) {
+    return !!(
+      node &&
+      node.anchor &&
+      node.anchor.anchor_id &&
+      NEARBY_ANCHOR_TYPES.indexOf(node.anchor.anchor_type) !== -1
+    );
+  }
+
   // 中心の選択肢: 本人の痕跡をアンカー単位に束ね、サーバが解決できる種別だけ残す。
   // 追加 fetch はしない（/api/me/personal-network の結果から導出するだけ）。
   function nearbyCenters(data) {
-    const nodes = nodesByRecency(data).filter(
-      (n) => n.anchor && n.anchor.anchor_id && NEARBY_ANCHOR_TYPES.indexOf(n.anchor.anchor_type) !== -1
-    );
+    const nodes = nodesByRecency(data).filter(canBeNearbyCenter);
     const seen = {};
     const out = [];
     nodes.forEach((n) => {
@@ -398,6 +409,24 @@
       });
     });
     return out;
+  }
+
+  // ノード自身の anchor が属する中心（nearbyCenters の代表 nodeId）を引く。中心の
+  // dedupe（同じアンカーを共有する複数ノードのうち先頭だけが centers に載る）と食い違うと
+  // renderNearby() 側の「未知の中心なら先頭に戻す」フォールバックに巻き取られてしまうため、
+  // ジャンプ先には必ず centers 側の代表 nodeId を使う。
+  function nearbyCenterIdForNode(node, data) {
+    if (!canBeNearbyCenter(node)) return null;
+    const centers = nearbyCenters(data);
+    for (let i = 0; i < centers.length; i++) {
+      if (
+        centers[i].anchorType === node.anchor.anchor_type &&
+        centers[i].anchorId === node.anchor.anchor_id
+      ) {
+        return centers[i].nodeId;
+      }
+    }
+    return null;
   }
 
   function renderNearbyCenters(centers) {
@@ -870,69 +899,11 @@
     }
     // 表示上限20件（「すべて見る」を基本導線にしない。§4.5）
     const shown = nodes.slice(0, 20);
+    // T4: nodeRowHtml() を再利用する（「地図には反映しない」「この場所の周りを見る」が
+    // 旅タブでも「いまの地図」タブと一貫して出るようにする。自前の HTML 組み立てはやめる）。
     let html = '<div class="pm-home-journeys-list">';
-    shown.forEach((n) => {
-      html += '<div class="pm-home-journey-card-item">';
-      html += '<div class="pm-home-node-top">';
-      html += '<span class="pm-home-node-kind">' + esc(kindLabel(n.node_kind)) + "</span>";
-      html += '<span class="pm-home-node-label">' + esc(n.label || "") + "</span>";
-      html += "</div>";
-      html +=
-        '<div class="pm-home-node-ctx">' +
-        esc(courseTitleOf(data, n.course_id)) +
-        " · " +
-        esc(fmtMonth(n.created_at)) +
-        "</div>";
-      html += '<div class="pm-home-node-actions">';
-      html +=
-        '<button type="button" class="pm-home-journey-btn" data-pm-home-journey="' +
-        esc(n.id) +
-        '">ここから旅に出る</button>';
-      html += "</div>";
-      html += "</div>";
-    });
+    shown.forEach((n) => { html += nodeRowHtml(n, data); });
     html += "</div>";
-    return html;
-  }
-
-  // -------------------------------------------------------------------
-  // ビュー D: 振り返り（月別グルーピング。件数・進捗率は出さない。PN-4）
-  // -------------------------------------------------------------------
-
-  function renderReflect(data) {
-    const nodes = nodesByRecency(data);
-    if (!nodes.length) {
-      return '<p class="pm-home-empty">まだ振り返れる記録がありません。</p>';
-    }
-    const order = [];
-    const byMonth = {};
-    nodes.forEach((n) => {
-      const label = fmtMonth(n.created_at) || "時期不明";
-      if (!byMonth[label]) {
-        byMonth[label] = [];
-        order.push(label);
-      }
-      byMonth[label].push(n);
-    });
-    let html = "";
-    order.forEach((label) => {
-      html += '<div class="pm-home-reflect-month">';
-      html += '<div class="pm-home-reflect-month-heading">' + esc(label) + "</div>";
-      byMonth[label].forEach((n) => {
-        html += '<div class="pm-home-reflect-item">';
-        html +=
-          '<div class="pm-home-reflect-item-title">' +
-          esc(kindLabel(n.node_kind)) +
-          "『" +
-          esc(n.label || "") +
-          "』（" +
-          esc(courseTitleOf(data, n.course_id)) +
-          "）</div>";
-        html += renderFacts(n.facts);
-        html += "</div>";
-      });
-      html += "</div>";
-    });
     return html;
   }
 
@@ -958,10 +929,29 @@
       area.hidden = false;
       return;
     }
-    if (!data || !Array.isArray(data.steps) || !data.steps.length) {
-      // steps が空/対象なし（404）なら何も出さない（fail-closed。エラーバナーは出さない）
+    if (!data) {
+      // 対象なし（404）なら何も出さない（fail-closed。エラーバナーは出さない）
       area.hidden = true;
       area.innerHTML = "";
+      return;
+    }
+    if (!Array.isArray(data.steps) || !data.steps.length) {
+      // T5: steps が空でも無言にしない。サーバが notice/facts を添えていれば、
+      // nearby の「対象なし」分岐と同じ見出し・同じ描画部品（renderNearbyFacts）で
+      // 「この記録について」を表示する。notice が無い旧型応答は従来どおり非表示
+      // （後方互換）。
+      if (!data.notice) {
+        area.hidden = true;
+        area.innerHTML = "";
+        return;
+      }
+      let emptyHtml = '<button type="button" class="pm-home-journey-close" aria-label="閉じる">×</button>';
+      emptyHtml += '<div class="pm-home-journey-heading">旅の経路</div>';
+      emptyHtml += '<p class="pm-home-empty">' + esc(data.notice) + "</p>";
+      emptyHtml += renderNearbyFacts({ facts: data.facts || [] }, "この記録について");
+      area.innerHTML = emptyHtml;
+      area.hidden = false;
+      if (typeof area.scrollIntoView === "function") area.scrollIntoView({ block: "nearest" });
       return;
     }
     let html = '<button type="button" class="pm-home-journey-close" aria-label="閉じる">×</button>';
@@ -1073,7 +1063,6 @@
     }
     if (state.activeTab === "nearby") return renderNearby(data);
     if (state.activeTab === "journeys") return renderJourneys(data);
-    if (state.activeTab === "reflect") return renderReflect(data);
     return renderNow(data);
   }
 
@@ -1126,10 +1115,17 @@
     }
 
     // G7-J: 旅の行き止まりから「問いからの旅」タブ（ノード一覧）へ戻り、別の問いを選び直せる。
+    // T6: switchTab() は同タブでは早期 return するため、旅タブを表示中に押されたときは
+    // タブ切替の代わりに起点リスト先頭へフォーカスを移す（何も起きないノーオペを解消する）。
     const journeyRestart = e.target.closest("[data-pm-home-journey-restart]");
     if (journeyRestart) {
       closeJourneyArea();
-      switchTab("journeys");
+      if (state.activeTab === "journeys") {
+        const list = state.contentEl && state.contentEl.querySelector(".pm-home-journeys-list");
+        if (list && typeof list.scrollIntoView === "function") list.scrollIntoView({ block: "nearest" });
+      } else {
+        switchTab("journeys");
+      }
       return;
     }
 
@@ -1151,6 +1147,18 @@
     if (nbMove) {
       const target = nbMove.getAttribute("data-pm-home-nearby-move");
       state.nearbyCenterComponentId = target || "";
+      renderPanel();
+      return;
+    }
+
+    // T3: 「いまの地図」「問いからの旅」のノード行から「いまここの周り」へ橋渡す。
+    // switchTab() は同タブでは早期 return するため使わず、常に中心を選び直して再描画する。
+    const nbJump = e.target.closest("[data-pm-home-nearby-jump]");
+    if (nbJump) {
+      closeJourneyArea();
+      state.nearbyCenterNodeId = nbJump.getAttribute("data-pm-home-nearby-jump");
+      state.nearbyCenterComponentId = "";
+      state.activeTab = "nearby";
       renderPanel();
       return;
     }
@@ -1279,7 +1287,7 @@
 
   function invalidate() {
     state.cache = null;
-    state.activeTab = "now";
+    state.activeTab = "nearby";
     state.courseFilter = "";
     // PN-1（本人のみ可視）: ログアウト・別ユーザーのログインを跨いで前ユーザーの
     // 取得結果が残らないよう、コース横断の派生キャッシュも合わせて破棄する。

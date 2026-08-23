@@ -380,8 +380,6 @@ class TestPersonalMapHomeCourseFilter:
         assert "filteredNodes(" in now_body
         journeys_body = _extract_function(src, "renderJourneys")
         assert "filteredNodes(" not in journeys_body
-        reflect_body = _extract_function(src, "renderReflect")
-        assert "filteredNodes(" not in reflect_body
 
     def test_course_filter_does_not_count_candidates(self):
         """PN-3/PN-4: フィルタ選択肢の導出は candidate を数えない・件数を出さない

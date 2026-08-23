@@ -41,6 +41,9 @@ _ATTRIBUTION_OWNED = (ATTRIBUTION_LEARNER_SELECTED, ATTRIBUTION_CONFIRMED)
 # N4 で「本人が異議を挟んだ」とみなす self_check（§2「採用しない痕跡」）
 _SELF_CHECK_DISAGREE = ("disagreed", "verdict_wrong")
 
+#: N4 のラベルが元 claim 本文から引けないときのフォールバック（従来の固定文字列）。
+_RECONSTRUCTION_FALLBACK_LABEL = "claim への再構成"
+
 _BRIDGE_FACT = "この引っかかりを自分でつないだ"
 _FACT_REVISED = "改訂を経てたどり着いた再構成"
 _FACT_DESCENDED = "原因を絞るため記号まで降りた"
@@ -281,15 +284,23 @@ def _reconstruction_node(
     ``course_content_builder.py`` が component 経由で書き込んだ既存マッピングを読むだけ）。
     解決できない claim（どのトピックにも組み込まれていない）は従来どおり ``None``
     のまま — 「まだ地図にない」トレイに残る（P4: 情報を落とさない）。
+
+    ``label`` は元 claim の本文（``row["claim_text"]`` = ``theory_claims.text``。
+    ``queries.fetch_reconstructions{,_for_user}`` が LEFT JOIN で併読する）を他ノードと
+    同じ80字規則で切ったもの。本人が REVEAL（出典開示）まで見た成功終端行だけがここに
+    来るため、claim 本文の提示は伏せフィールド（R層 item の ``response_space`` /
+    ``expected``）の漏洩には当たらない。claim 本文が引けない行（列が無い古い呼び出し・
+    claim 削除済み）は従来の固定ラベルへフォールバックする（後方互換）。
     """
     row_id = str(row["id"])
     claim_id = str(row.get("claim_id") or "")
     topic_id = (claim_topic_map or {}).get(claim_id)
     atlas_node_id = (topic_atlas or {}).get(str(topic_id)) if topic_id else None
+    label = _truncate(row.get("claim_text")) or _RECONSTRUCTION_FALLBACK_LABEL
     return PersonalNode(
         id=row_id,
         node_kind=NODE_KIND_RECONSTRUCTION,
-        label="claim への再構成",
+        label=label,
         anchor=PersonalAnchor(
             anchor_type="claim", anchor_id=claim_id, atlas_node_id=atlas_node_id,
         ),

@@ -7915,23 +7915,6 @@ body.admin-inspect-mode textarea:disabled {
   opacity: 0.75;
 }
 
-.pm-home-reflect-month { margin-bottom: 18px; }
-.pm-home-reflect-month-heading {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--color-text-secondary, #6e6e73);
-  margin-bottom: 8px;
-}
-.pm-home-reflect-item {
-  border-left: 2px solid var(--color-border-tertiary, #e5e5ea);
-  padding: 2px 0 10px 12px;
-  margin-bottom: 4px;
-}
-.pm-home-reflect-item-title {
-  font-size: 13px;
-  color: var(--color-text-primary, #1d1d1f);
-}
-
 /* --- わたしの地図「いまここの周り」（近傍関係ビュー）------------------------
    正本: docs/features/personal_map_nearby_design.md
    縦 = 依存の向き / 枠線 = 検証の記帳の有無。座標・順位・距離は描かない（PMN-1）。
