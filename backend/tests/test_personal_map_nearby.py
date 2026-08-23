@@ -192,7 +192,7 @@ class TestAnchorMatching:
 # ---------------------------------------------------------------------------
 
 
-def build(mode="near", *, ledger=None, personal=None, center="n_obs", support=""):
+def build(mode="near", *, ledger=None, personal=None, center="n_obs", support="", claims=None):
     graph = sample_graph()
     center_node = next(
         n for n in N.main_nodes(graph) if n["component_id"] == center
@@ -203,6 +203,7 @@ def build(mode="near", *, ledger=None, personal=None, center="n_obs", support=""
         personal_nodes=personal if personal is not None else [],
         ledger=ledger if ledger is not None else {},
         support_fact_line=support,
+        claim_summaries=claims,
         mode=mode,
     )
 
@@ -1332,6 +1333,381 @@ class TestNearbyForPersonNodeRangeModeAtlasConnection:
         dto = N.nearby_for_person_node("user1", "tnode", center_component_id="n_obs")
         assert dto["available"] is True
         assert dto["mode"] == "near"
+
+
+# ---------------------------------------------------------------------------
+# 代表 claim の逐語（claim_excerpt）
+# ---------------------------------------------------------------------------
+
+
+def claim_row(text, *, support="source_backed", review="teacher_approved"):
+    """``queries.fetch_claim_summaries`` の1行分（実フィールド名に合わせる）。"""
+    return {"text": text, "support_status": support, "review_status": review}
+
+
+class TestClaimExcerpt:
+    """``_claim_excerpt`` の選定規則（決定論・出典から確認できた claim のみ）。"""
+
+    def test_approved_source_backed_claim_is_used_verbatim(self):
+        dto = build(claims={"cl_obs": claim_row("観測量は視線速度から構成される。")})
+        assert dto["center"]["claim_excerpt"] == "観測量は視線速度から構成される。"
+
+    def test_approved_wins_over_unapproved_regardless_of_id_order(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a", "cl_b"])
+        claims = {
+            "cl_a": claim_row("未承認の本文", review="teacher_review_required"),
+            "cl_b": claim_row("承認済みの本文", review="teacher_approved"),
+        }
+        assert N._claim_excerpt(node, claims) == "承認済みの本文"
+
+    def test_unapproved_source_backed_claim_is_still_usable(self):
+        """承認済みが無ければ source_backed から採る（第2優先段）。"""
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a"])
+        claims = {"cl_a": claim_row("未承認だが出典由来", review="teacher_review_required")}
+        assert N._claim_excerpt(node, claims) == "未承認だが出典由来"
+
+    def test_non_source_backed_claim_is_never_shown(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a"])
+        claims = {"cl_a": claim_row("推測由来の本文", support="llm_inferred")}
+        assert N._claim_excerpt(node, claims) is None
+
+    def test_review_required_support_status_is_not_source_backed(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a"])
+        claims = {"cl_a": claim_row("未確定", support="review_required")}
+        assert N._claim_excerpt(node, claims) is None
+
+    def test_empty_text_is_not_an_excerpt(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a"])
+        assert N._claim_excerpt(node, {"cl_a": claim_row("   ")}) is None
+
+    def test_ties_are_broken_by_claim_id_ascending(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_b", "cl_a"])
+        claims = {"cl_a": claim_row("Aの本文"), "cl_b": claim_row("Bの本文")}
+        assert N._claim_excerpt(node, claims) == "Aの本文"
+
+    def test_unresolved_claim_ids_yield_null_not_a_guess(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_missing"])
+        assert N._claim_excerpt(node, {"cl_other": claim_row("別の本文")}) is None
+
+    def test_node_without_claim_links_is_null(self):
+        assert N._claim_excerpt(gnode("n", "Theory basis"), {"cl_a": claim_row("x")}) is None
+
+    def test_missing_summaries_argument_defaults_to_null(self):
+        """DTO のキーは常に在り、値は解決できなければ null（キーを消さない）。"""
+        dto = build()
+        assert dto["center"]["claim_excerpt"] is None
+        assert all("claim_excerpt" in n for n in dto["upstream"] + dto["downstream"])
+
+    def test_truncated_at_the_limit_with_an_ellipsis(self):
+        long_text = "あ" * 200
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a"])
+        got = N._claim_excerpt(node, {"cl_a": claim_row(long_text)})
+        assert got.startswith("あ" * N.CLAIM_EXCERPT_LIMIT)
+        assert got.endswith("…")
+        assert len(got) <= N.CLAIM_EXCERPT_LIMIT + 1
+
+    def test_short_text_is_not_decorated(self):
+        node = gnode("n", "Theory basis", linked_claim_ids=["cl_a"])
+        assert N._claim_excerpt(node, {"cl_a": claim_row("短い本文")}) == "短い本文"
+
+    def test_truncation_uses_the_single_canonical_implementation(self):
+        """CP5: 切り詰めは ``core/text_excerpt.excerpt`` の1実装のみを使う。"""
+        from core.text_excerpt import excerpt as canonical
+
+        assert N.excerpt is canonical
+        assert "from core.text_excerpt import excerpt" in _NEARBY_SRC
+
+    def test_approval_vocabulary_is_not_redefined_locally(self):
+        """承認語彙・support_status は既存正本（R層 schema）から引く。"""
+        from core.reconstruction.schema import APPROVED_REVIEW_STATUSES, SOURCE_BACKED
+
+        assert N.APPROVED_REVIEW_STATUSES is APPROVED_REVIEW_STATUSES
+        assert N.SOURCE_BACKED == SOURCE_BACKED
+        # 承認語彙をリテラルで書き写していない（``source_backed`` は辺の
+        # source_backing_status として既存の別語彙で使われているため対象外）。
+        literals = set(_emitted_literals(_NEARBY_SRC))
+        assert literals & set(APPROVED_REVIEW_STATUSES) == set()
+
+    def test_point_view_attaches_excerpts_to_every_lane(self):
+        claims = {
+            "cl_obs": claim_row("中心の本文"),
+            "cl_basis": claim_row("土台の本文"),
+        }
+        dto = build("root", claims=claims)
+        assert dto["center"]["claim_excerpt"] == "中心の本文"
+        by_id = {n["component_id"]: n for n in dto["root_path"]}
+        assert by_id["n_basis"]["claim_excerpt"] == "土台の本文"
+        assert by_id["n_eq"]["claim_excerpt"] is None
+
+    def test_range_view_attaches_excerpts_too(self):
+        dto = N.build_topic_range(
+            [{"title": "論文A", "graph": sample_graph(), "touched_claim_ids": {"cl_obs"}}],
+            personal_nodes=[],
+            ledger={},
+            topic_label="トピック1",
+            claim_summaries={"cl_obs": claim_row("観測量の本文")},
+        )
+        by_id = {n["component_id"]: n for n in dto["range_documents"][0]["nodes"]}
+        assert by_id["n_obs"]["claim_excerpt"] == "観測量の本文"
+        assert by_id["n_cons"]["claim_excerpt"] is None
+
+    def test_no_numeric_keys_leak_with_claim_summaries(self):
+        """PMN-4: support_status / review_status / confidence を DTO に出さない。"""
+        claims = {"cl_obs": claim_row("中心の本文")}
+        for mode in N.MODES:
+            dto = build(mode, ledger={"n_obs": "untested"}, claims=claims)
+            assert [path for path, key, _ in _walk(dto) if key in _NUMERIC_KEYS] == []
+            keys = set()
+            for _path, key, _item in _walk(dto):
+                keys.add(key)
+            assert "support_status" not in keys and "review_status" not in keys
+
+
+class TestClaimSummariesDbPath:
+    """``_claim_summaries_for_graphs``: 和集合を1回だけ引く（N+1 にしない）。"""
+
+    def test_union_is_resolved_in_a_single_call(self, monkeypatch):
+        calls = []
+
+        def _fake(claim_ids, *, document_ids=()):
+            calls.append((list(claim_ids), list(document_ids)))
+            return {"cl_obs": claim_row("本文")}
+
+        monkeypatch.setattr(queries_mod, "fetch_claim_summaries", _fake)
+        graph_b = {
+            "nodes": [gnode("b1", "Theory basis", linked_claim_ids=["cl_obs", "cl_x"])],
+            "edges": [],
+        }
+        got = N._claim_summaries_for_graphs([("docA", sample_graph()), ("docB", graph_b)])
+        assert got == {"cl_obs": claim_row("本文")}
+        assert len(calls) == 1
+        claim_ids, document_ids = calls[0]
+        assert claim_ids == ["cl_basis", "cl_obs", "cl_x"]
+        assert document_ids == ["docA", "docB"]
+
+    def test_no_claim_links_means_no_query(self, monkeypatch):
+        def _must_not_be_called(*args, **kwargs):
+            raise AssertionError("empty claim id set must not hit the DB")
+
+        monkeypatch.setattr(queries_mod, "fetch_claim_summaries", _must_not_be_called)
+        graph = {"nodes": [gnode("n1", "Theory basis")], "edges": []}
+        assert N._claim_summaries_for_graphs([("docA", graph)]) == {}
+
+    def test_exception_is_swallowed_fail_soft(self, monkeypatch):
+        def _boom(*args, **kwargs):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(queries_mod, "fetch_claim_summaries", _boom)
+        assert N._claim_summaries_for_graphs([("docA", sample_graph())]) == {}
+
+    def test_range_mode_end_to_end_carries_the_excerpt(self, monkeypatch):
+        start = _topic_pnode("tnode", "t1")
+        monkeypatch.setattr(
+            N, "derive_person_network", lambda user_id: PersonalNetwork(nodes=[start])
+        )
+        monkeypatch.setattr(
+            queries_mod,
+            "fetch_topic_claim_binding",
+            lambda course_id, topic_id: {"claim_ids": ["cl_obs"], "topic_label": "トピック1"},
+        )
+        monkeypatch.setattr(queries_mod, "fetch_claim_document_id", lambda cid: "docA")
+        monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
+        monkeypatch.setattr(queries_mod, "fetch_document_titles", lambda ids: {"docA": "論文A"})
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_topic_atlas_binding", lambda cid: {})
+        monkeypatch.setattr(
+            queries_mod,
+            "fetch_claim_summaries",
+            lambda claim_ids, document_ids=(): {"cl_obs": claim_row("観測量の本文")},
+        )
+
+        dto = N.nearby_for_person_node("user1", "tnode")
+        by_id = {n["component_id"]: n for n in dto["range_documents"][0]["nodes"]}
+        assert by_id["n_obs"]["claim_excerpt"] == "観測量の本文"
+
+    def test_point_view_end_to_end_carries_the_excerpt(self, monkeypatch):
+        start = pnode("cnode", NODE_KIND_QUESTION, "問い", "claim", "cl_obs")
+        monkeypatch.setattr(
+            N, "derive_person_network", lambda user_id: PersonalNetwork(nodes=[start])
+        )
+        monkeypatch.setattr(queries_mod, "fetch_claim_document_id", lambda cid: "docA")
+        monkeypatch.setattr(queries_mod, "fetch_component_graph", lambda doc_id: sample_graph())
+        monkeypatch.setattr(queries_mod, "fetch_component_ledger_statuses", lambda ids: {})
+        monkeypatch.setattr(queries_mod, "fetch_center_support_fact_line", lambda *a, **k: "")
+        monkeypatch.setattr(
+            queries_mod,
+            "fetch_claim_summaries",
+            lambda claim_ids, document_ids=(): {"cl_obs": claim_row("観測量の本文")},
+        )
+
+        dto = N.nearby_for_person_node("user1", "cnode")
+        assert dto["center"]["claim_excerpt"] == "観測量の本文"
+
+
+class TestFetchClaimSummariesPrimitive:
+    """``queries.fetch_claim_summaries`` の非DB部分（空入力・ID 判定）。"""
+
+    def test_empty_input_issues_no_sql(self):
+        assert queries_mod.fetch_claim_summaries([]) == {}
+        assert queries_mod.fetch_claim_summaries(["", None]) == {}
+
+    def test_non_uuid_ids_without_documents_issue_no_sql(self):
+        """CAST 事故を作らない: 引ける手掛かりが無ければクエリを組まない。"""
+        assert queries_mod.fetch_claim_summaries(["cl_obs"]) == {}
+
+    def test_uuid_detection(self):
+        assert queries_mod._is_uuid_text("3f2504e0-4f89-11d3-9a0c-0305e82c3301") is True
+        assert queries_mod._is_uuid_text("cl_obs") is False
+        assert queries_mod._is_uuid_text("") is False
+
+
+# ---------------------------------------------------------------------------
+# 検証状態の差分表示（区別が無いときは per-node ラベルを出さない）
+# ---------------------------------------------------------------------------
+
+
+class TestVerificationDiffDisplay:
+    """``_suppress_uniform_verification``: 「検証情報なし」で画面を埋めない。"""
+
+    def test_all_unknown_collapses_to_one_fact(self):
+        ledger = {"n_obs": "unknown", "n_eq": "unknown", "n_cons": "unknown"}
+        dto = build(ledger=ledger)
+        assert dto["center"]["verification"] is None
+        assert all(n["verification"] is None for n in dto["upstream"] + dto["downstream"])
+        assert dto["ledger_available"] is False
+        assert N.FACT_NO_VERIFICATION_RECORDS in dto["facts"]
+
+    def test_root_mode_collapses_too(self):
+        dto = build("root", ledger={"n_obs": "unknown", "n_basis": "unknown"})
+        assert all(n["verification"] is None for n in dto["root_path"])
+        assert N.FACT_NO_VERIFICATION_RECORDS in dto["facts"]
+
+    @pytest.mark.parametrize(
+        "status", ["untested", "indirectly_supported", "directly_verified", "refuted"]
+    )
+    def test_a_single_distinguishing_status_keeps_per_node_labels(self, status):
+        from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
+
+        dto = build(ledger={"n_obs": "unknown", "n_eq": status})
+        assert dto["ledger_available"] is True
+        assert N.FACT_NO_VERIFICATION_RECORDS not in dto["facts"]
+        assert dto["center"]["verification"] == {
+            "status": "unknown",
+            "label": VERIFICATION_STATUS_LABELS_LEDGER["unknown"],
+        }
+        assert dto["upstream"][0]["verification"]["status"] == status
+
+    def test_distinguishing_status_on_the_center_alone_is_enough(self):
+        dto = build(ledger={"n_obs": "untested", "n_eq": "unknown"})
+        assert dto["ledger_available"] is True
+        assert dto["center"]["verification"]["status"] == "untested"
+        assert N.FACT_NO_VERIFICATION_RECORDS not in dto["facts"]
+
+    def test_zero_ledger_rows_keeps_the_existing_behaviour(self):
+        """台帳の不在は「検証記録がない」という主張ではない（既存挙動を変えない）。"""
+        dto = build(ledger={})
+        assert dto["ledger_available"] is False
+        assert N.FACT_NO_VERIFICATION_RECORDS not in dto["facts"]
+        assert dto["center"]["verification"] is None
+
+    def test_rows_only_outside_the_shown_set_also_collapse(self):
+        """表示ノードに1件も区別が無ければ、行の在処ではなく見え方で決める。"""
+        dto = build(ledger={"n_detail": "untested"})
+        assert dto["ledger_available"] is False
+        assert N.FACT_NO_VERIFICATION_RECORDS in dto["facts"]
+
+    def test_unmapped_status_is_treated_as_no_distinction(self):
+        dto = build(ledger={"n_obs": "bogus"})
+        assert dto["ledger_available"] is False
+        assert N.FACT_NO_VERIFICATION_RECORDS in dto["facts"]
+
+    def test_fog_facts_stay_independent_of_the_collapse(self):
+        """装置3（晴れ間）の主語は表示集合の**外**なので畳み込みと独立に出る。"""
+        # n_basis は main 層だが near モードの表示集合（n_obs / n_eq / n_cons / n_diag）の外。
+        ledger = {"n_obs": "unknown", "n_eq": "unknown", "n_basis": "untested"}
+        dto = build(ledger=ledger)
+        assert dto["ledger_available"] is False
+        assert N.FACT_NO_VERIFICATION_RECORDS in dto["facts"]
+        assert any(f.startswith(N.FACT_FOG_NEARBY_PREFIX) for f in dto["facts"])
+
+    def test_fact_position_is_after_the_dependency_lines(self):
+        dto = build(ledger={"n_obs": "unknown"})
+        idx = dto["facts"].index(N.FACT_NO_VERIFICATION_RECORDS)
+        assert dto["facts"][idx - 1].startswith("これが前提にしていること：")
+
+    def test_range_view_collapses_and_states_the_fact_before_sharpen(self):
+        dto = N.build_topic_range(
+            [{"title": "論文A", "graph": sample_graph(), "touched_claim_ids": {"cl_obs"}}],
+            personal_nodes=[],
+            ledger={"n_obs": "unknown", "n_basis": "unknown"},
+            topic_label="トピック1",
+        )
+        assert dto["ledger_available"] is False
+        assert all(
+            n["verification"] is None for n in dto["range_documents"][0]["nodes"]
+        )
+        assert dto["facts"][-2] == N.FACT_NO_VERIFICATION_RECORDS
+        assert dto["facts"][-1] == N.FACT_RANGE_SHARPEN
+
+    def test_range_view_keeps_labels_when_a_distinction_exists(self):
+        dto = N.build_topic_range(
+            [{"title": "論文A", "graph": sample_graph(), "touched_claim_ids": set()}],
+            personal_nodes=[],
+            ledger={"n_obs": "unknown", "n_basis": "untested"},
+            topic_label="",
+        )
+        assert dto["ledger_available"] is True
+        assert N.FACT_NO_VERIFICATION_RECORDS not in dto["facts"]
+        by_id = {n["component_id"]: n for n in dto["range_documents"][0]["nodes"]}
+        assert by_id["n_basis"]["verification"]["status"] == "untested"
+
+    def test_range_view_zero_ledger_is_unchanged(self):
+        dto = N.build_topic_range(
+            [{"title": "論文A", "graph": sample_graph(), "touched_claim_ids": set()}],
+            personal_nodes=[],
+            ledger={},
+            topic_label="トピック1",
+        )
+        assert dto["facts"] == [
+            "この記録は、トピック『トピック1』での記録です。",
+            N.FACT_RANGE_UNKNOWN_POINT,
+            N.FACT_RANGE_SHARPEN,
+        ]
+
+    def test_range_fallback_still_states_the_verification_fact(self):
+        dto = N.build_topic_range(
+            [{"title": "論文A", "graph": sample_graph(), "touched_claim_ids": set()}],
+            personal_nodes=[],
+            ledger={"n_obs": "unknown"},
+            topic_label="トピック1",
+            fallback_fact=N.FACT_RANGE_COURSE_FALLBACK,
+        )
+        assert dto["facts"] == [
+            "この記録は、トピック『トピック1』での記録です。",
+            N.FACT_RANGE_COURSE_FALLBACK,
+            N.FACT_NO_VERIFICATION_RECORDS,
+            N.FACT_RANGE_SHARPEN,
+        ]
+
+    def test_distinguishing_vocabulary_is_derived_from_label_vocab(self):
+        """§7-8: 語彙表を新設せず、台帳表のキーから ``unknown`` を除いて導出する。"""
+        from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
+
+        assert set(N.DISTINGUISHING_VERIFICATION_STATUSES) == (
+            set(VERIFICATION_STATUS_LABELS_LEDGER) - {"unknown"}
+        )
+
+    def test_fact_is_a_closed_world_server_side_constant(self):
+        """SL1: 主語は「このコーパス」に限る。件数・数値を含まない。"""
+        assert N.FACT_NO_VERIFICATION_RECORDS in _emitted_literals(_NEARBY_SRC)
+        assert "このコーパスの中では" in N.FACT_NO_VERIFICATION_RECORDS
+        assert not any(ch.isdigit() for ch in N.FACT_NO_VERIFICATION_RECORDS)
+        assert [w for w in _BANNED_VOCAB if w in N.FACT_NO_VERIFICATION_RECORDS] == []
+
+    def test_fact_literal_is_fixed(self):
+        assert N.FACT_NO_VERIFICATION_RECORDS == (
+            "これらの理論構成には、このコーパスの中では検証記録がありません。"
+        )
 
 
 # ---------------------------------------------------------------------------

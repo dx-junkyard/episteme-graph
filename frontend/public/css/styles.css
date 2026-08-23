@@ -7997,6 +7997,8 @@ body.admin-inspect-mode textarea:disabled {
 .pm-home-nb-node.no-ledger { stroke: #d6d6db; }
 .pm-home-nb-node.is-center { fill: #f4f8fd; stroke: #185fa5; stroke-width: 1.7; }
 .pm-home-nb-node-label { font-size: 11px; fill: var(--color-text-primary, #1d1d1f); }
+/* claim_excerpt（範囲ビューのチップのみ。点ビューの横レーンチップには出さない）。 */
+.pm-home-nb-node-excerpt { font-size: 9.5px; fill: #6e6e73; }
 .pm-home-nb-node-verif { font-size: 8.5px; fill: #8e8e93; }
 .pm-home-nb-legend {
   display: flex;

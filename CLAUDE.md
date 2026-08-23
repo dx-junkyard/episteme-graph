@@ -1907,7 +1907,15 @@ confirmed のみ（PN-6）・fail-closed（PN-7）。migration 不要（既存�
   §11.2）: **粗い対応は隠すのではなく粗いとラベルして見せる**。topic 縮退アンカーの
   `anchor_label` にはトピック題名が入る（`derive._topic_anchor` +
   `queries.fetch_topic_labels{,_for_courses}`。題名が引けなければ空のまま = 捏造しない。
-  中心選択チップが発話の生テキストではなく題名表示になる）。
+  中心選択チップが発話の生テキストではなくトピック題名表示になる）。**ノード情報の拡充
+  （2026-08-23、設計書 §12）**: ①ノード DTO に `claim_excerpt`（source_backed・承認済み
+  優先の代表 claim 本文80字。claim_id 昇順の決定論・無ければ null。範囲ビューのチップ
+  2行目にのみ描画）②検証ラベルの差分表示化 — 表示ノードに差分となる status
+  （directly_verified / indirectly_supported / refuted / untested）が無ければ全ノード
+  `verification:null` + `ledger_available:false` + facts に
+  `FACT_NO_VERIFICATION_RECORDS`（一様な「検証情報なし」の氾濫＝ノイズを1事実文に集約。
+  D層 ledger_builder の unknown バックフィルで「台帳行ゼロ」縮退が空振りしていた
+  ミスマッチの是正。差分があるときは従来どおり per-node 表示）。
 - **広がり装置（2026-08-22, migration 不要）**: 正本は
   `docs/features/personal_map_curiosity_design.md`。好奇心の文法＝「存在だけを事実として
   見せ、詳細は本人の明示操作まで伏せる」（cross_course_hint / 霧 / 晴れ間と同族。推薦・

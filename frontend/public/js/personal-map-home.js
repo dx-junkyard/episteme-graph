@@ -480,8 +480,24 @@
 
   const NB = { w: 700, chipH: 38, rowH: 76, laneX: 84, pad: 12 };
 
-  function nearbyChipWidth(label) {
-    return Math.max(150, Math.min(300, 30 + String(label || "").length * 13));
+  // extra は範囲ビューでのみ渡す claim_excerpt（切り詰め済み）。渡された場合はラベル単体より
+  // 広い幅を許容する。点ビュー（renderNearbyGraph）は第2引数を渡さないため挙動は不変。
+  function nearbyChipWidth(label, extra) {
+    const base = Math.max(150, Math.min(300, 30 + String(label || "").length * 13));
+    if (!extra) return base;
+    return Math.max(base, Math.min(420, 40 + String(extra).length * 9));
+  }
+
+  // SVG <text> は CSS の text-overflow が効かず自動省略されないため、表示幅に収まる
+  // 文字数へフロント側で切り詰める（全角文字主体の表示を想定した目安 45〜50 字程度）。
+  // 範囲ビューのチップでのみ使う（点ビューは claim_excerpt を描画しない。理由は
+  // renderNearbyGraph 側のコメント参照）。
+  const NBR_EXCERPT_MAX_CHARS = 48;
+  function nearbyTruncateExcerpt(text, maxChars) {
+    const s = String(text || "").trim();
+    const limit = maxChars || NBR_EXCERPT_MAX_CHARS;
+    if (!s || s.length <= limit) return s;
+    return s.slice(0, Math.max(1, limit - 1)) + "…";
   }
 
   function nearbyRows(dto) {
@@ -524,6 +540,9 @@
         const w = widths[i];
         const cx = x + w / 2;
         pos[n.component_id] = { x: cx, top: y - NB.chipH / 2, bottom: y + NB.chipH / 2 };
+        // 点ビューの横レーンチップは横に並ぶため個々の幅が狭い（laneX 起点で複数チップを
+        // 同じ行に詰める）。claim_excerpt を足すと折り返し・重なりが起きるため、DTO に
+        // 値が来ていても描画しない（excerpt は範囲ビュー = renderNearbyRangeGraph のみ）。
         chips +=
           '<g class="pm-home-nb-chip" tabindex="0" role="button" ' +
           'data-pm-home-nearby-move="' + esc(n.component_id) + '">' +
@@ -641,38 +660,72 @@
   // 「いまここ」ラベルは無い — 中心の概念が無いため）。並び順は DTO の nodes 順そのまま
   // （サーバが土台から積み上がる順で並べている前提。位置に意味を持たせるのはサーバ側の
   // 決定論導出のみで、フロントは並び替えない = PMN-1）。
-  const NBR = { w: 700, chipH: 34, rowH: 54, pad: 10 };
+  // chipH は行内に描く文字行数（label / claim_excerpt / verification のうち存在するもの）
+  // に応じて可変（1行=24 / 2行=34（従来値） / 3行=46）。行間の余白 gap は固定 20px。
+  const NBR = { w: 700, chipH: 34, pad: 10, gap: 20 };
+
+  function nearbyRangeChipHeight(lineCount) {
+    if (lineCount <= 1) return 24;
+    if (lineCount === 2) return 34;
+    return 46;
+  }
+
+  // 各行の baseline y 座標（チップ中心 cy・高さ chipH から算出）。行の積み順は常に
+  // label → claim_excerpt → verification（存在する行だけを詰めて描く）。
+  function nearbyRangeLineYs(cy, lineCount) {
+    if (lineCount <= 1) return [cy + 4];
+    if (lineCount === 2) return [cy - 1, cy + 11];
+    return [cy - 11, cy + 2, cy + 15];
+  }
 
   function renderNearbyRangeGraph(doc) {
     const nodes = (doc && doc.nodes) || [];
     if (!nodes.length) return "";
     const pos = {};
     let chips = "";
-    nodes.forEach((n, i) => {
-      const y = NBR.pad + NBR.chipH / 2 + i * NBR.rowH;
-      const w = nearbyChipWidth(n.label);
+    let top = NBR.pad; // 次に描くチップの上端
+    nodes.forEach((n) => {
+      // claim_excerpt: その論文がその理論構成で言っていることの逐語（最大80字、サーバ側で
+      // 切り詰め済み）。SVG text は自動省略されないため、表示幅に収まる文字数へさらに
+      // 切り詰める（範囲ビューのチップのみ — 点ビューは横に狭いため描画しない）。
+      const excerpt = n.claim_excerpt ? nearbyTruncateExcerpt(n.claim_excerpt) : "";
+      const lineCount = 1 + (excerpt ? 1 : 0) + (n.verification ? 1 : 0);
+      const chipH = nearbyRangeChipHeight(lineCount);
+      const w = nearbyChipWidth(n.label, excerpt);
       const x = (NBR.w - w) / 2;
-      pos[n.component_id] = { x: x + w / 2, top: y - NBR.chipH / 2, bottom: y + NBR.chipH / 2 };
+      const cy = top + chipH / 2;
+      pos[n.component_id] = { x: x + w / 2, top: cy - chipH / 2, bottom: cy + chipH / 2 };
       let cls = nearbyNodeClass(n);
       if (!n.touched) cls += " untouched";
+      // title はホバーで全文を読めるよう label + excerpt 全文（切り詰め前）を併記する。
+      const titleText = n.claim_excerpt ? n.label + "：" + n.claim_excerpt : n.label;
       chips +=
         '<g class="pm-home-nb-chip" tabindex="0" role="button" ' +
         'data-pm-home-nearby-move="' + esc(n.component_id) + '">' +
-        "<title>" + esc(n.label) + "</title>" +
-        '<rect x="' + x + '" y="' + (y - NBR.chipH / 2) + '" width="' + w + '" height="' + NBR.chipH +
-        '" rx="8" class="' + cls + '"/>' +
-        '<text x="' + (x + 10) + '" y="' + (y + (n.verification ? -1 : 4)) +
+        "<title>" + esc(titleText) + "</title>" +
+        '<rect x="' + x + '" y="' + (cy - chipH / 2) + '" width="' + w + '" height="' + chipH +
+        '" rx="8" class="' + cls + '"/>';
+      const lineYs = nearbyRangeLineYs(cy, lineCount);
+      let li = 0;
+      chips +=
+        '<text x="' + (x + 10) + '" y="' + lineYs[li++] +
         '" class="pm-home-nb-node-label">' + esc(n.label) + "</text>";
+      if (excerpt) {
+        chips +=
+          '<text x="' + (x + 10) + '" y="' + lineYs[li++] +
+          '" class="pm-home-nb-node-excerpt">' + esc(excerpt) + "</text>";
+      }
       if (n.verification) {
         chips +=
-          '<text x="' + (x + 10) + '" y="' + (y + 11) +
+          '<text x="' + (x + 10) + '" y="' + lineYs[li++] +
           '" class="pm-home-nb-node-verif">' + esc(n.verification.label) + "</text>";
       }
       (n.mine || []).forEach((m, k) => {
         const mx = x + w - 12 - k * 13;
-        chips += nearbyMarker(m.kind, mx, y - NBR.chipH / 2 + 11);
+        chips += nearbyMarker(m.kind, mx, cy - chipH / 2 + 11);
       });
       chips += "</g>";
+      top = cy + chipH / 2 + NBR.gap;
     });
 
     let links = "";
@@ -686,7 +739,7 @@
         ", " + b.x + " " + b.top + '"/>';
     });
 
-    const h = NBR.pad * 2 + nodes.length * NBR.rowH - (NBR.rowH - NBR.chipH);
+    const h = top - NBR.gap + NBR.pad;
     return (
       '<div class="pm-home-nb-graph pm-home-nb-range-graph"><svg viewBox="0 0 ' + NBR.w + " " + h +
       '" role="img" aria-label="この話題が触れている理論構成">' + links + chips + "</svg></div>"

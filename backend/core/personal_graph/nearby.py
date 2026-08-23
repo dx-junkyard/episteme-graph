@@ -10,6 +10,19 @@
 - **R2 確かめられているか**: ``epistemic_ledger`` の検証状態（記帳の有無を主語にした
   段階ラベル）と、``core/doubt/support_paths.py`` の支持線の事実文。
 
+各ノードには、その理論構成を裏づける**代表 claim の逐語**（``claim_excerpt``）を添える
+（:func:`_claim_excerpt`）。main ノードの ``label`` は theory stage 名に固定されており
+（CLAUDE.md #308）、``description`` は内部 ID を含むため学習者 DTO には載せられないので、
+stage 名だけでは「どの話なのか」が判らない。逐語は**出典から確認できた claim**
+（``support_status='source_backed'``）に限り、承認済み review_status を優先する
+（未承認・非 source_backed の本文は学習者に出さない = ``claim_excerpt: null``）。
+
+検証状態は**差分になるときだけ**出す（:func:`_suppress_uniform_verification`）。D層の
+``ledger_builder`` は main ノードへ ``unknown`` 行をバックフィルするため、素朴に出すと
+全ノードに「検証情報なし」が並び、区別を伝えない語が画面を埋める。表示ノードのどれにも
+区別を生む status が無ければ、台帳の区別ごと出さず（``ledger_available=False``）事実文
+:data:`FACT_NO_VERIFICATION_RECORDS` 1行に畳む。
+
 加えて「広がりの装置」（好奇心の情報設計）のうち2件を点ビュー・範囲ビューに追加する
 （正本は同設計書。存在だけを事実として見せ、詳細は本人の明示操作まで伏せる —
 ``journey.py`` の ``cross_course_hint`` と同じ文法）:
@@ -57,6 +70,8 @@ from core.personal_graph.schema import (
     NODE_KIND_LABELS,
     PersonalNode,
 )
+from core.reconstruction.schema import APPROVED_REVIEW_STATUSES, SOURCE_BACKED
+from core.text_excerpt import excerpt
 
 # ---------------------------------------------------------------------------
 # 境界（PN-5: 有界な探索。無制限に広げない）
@@ -91,12 +106,34 @@ MAX_FOG_LABELS = 3
 #: 装置3が対象とする台帳 status（閉世界語彙 SL1。台帳行が無いノードは対象外）。
 _FOG_VERIFICATION_STATUSES = ("untested", "unknown")
 
+#: 「状態が定まっていない」ことしか言わない台帳 status（表示上の区別を生まない）。
+_UNINFORMATIVE_VERIFICATION_STATUS = "unknown"
+
+#: 表示ノード間で**区別を生む**台帳 status。語彙の正本は
+#: ``core/label_vocab.VERIFICATION_STATUS_LABELS_LEDGER`` のキーで、そこから
+#: :data:`_UNINFORMATIVE_VERIFICATION_STATUS` を除いて導出する（新しい語彙表を作らない）。
+DISTINGUISHING_VERIFICATION_STATUSES = tuple(
+    status
+    for status in VERIFICATION_STATUS_LABELS_LEDGER
+    if status != _UNINFORMATIVE_VERIFICATION_STATUS
+)
+
+#: ノードの代表 claim 逐語（``claim_excerpt``）の最大文字数。切り詰めの実装は
+#: ``core/text_excerpt.excerpt``（CP5: 切り詰めは1実装。素スライスを新規に書かない）。
+CLAIM_EXCERPT_LIMIT = 80
+
 # ---------------------------------------------------------------------------
 # 事実文（PMN-3 閉世界語彙 / PMN-5 助言しない）。
 # 「この分野では未検証」「誰も検証していない」のような分野全体への言及はしない。
 # ---------------------------------------------------------------------------
 
 FACT_NO_QUALIFIED_EDGES = "この場所の前後のつながりは、まだ出典から確認できていません。"
+
+#: 表示ノードの検証状態に区別が無いとき、ノードごとのラベルの代わりに1行だけ言う事実文
+#: （閉世界語彙 SL1: 主語は「このコーパス」に限る。分野全体には言及しない）。
+FACT_NO_VERIFICATION_RECORDS = (
+    "これらの理論構成には、このコーパスの中では検証記録がありません。"
+)
 FACT_NO_UPSTREAM = "この場所より手前の前提は、この論文の中には見つかりません。"
 FACT_NO_DOWNSTREAM = "これに依存しているものは、この論文の中には見つかりません。"
 NOTICE_UNRESOLVED = "この記録は、まだ論文の理論構成に結びついていません。"
@@ -324,12 +361,82 @@ def _verification(component_id: str, ledger: dict[str, str]) -> dict | None:
     return {"status": status, "label": label}
 
 
+def _claim_excerpt(node: dict, claim_summaries: dict[str, dict] | None) -> str | None:
+    """ノードの代表 claim の逐語（80字切り詰め）。出せない場合は ``None``。
+
+    選定規則（決定論。AI 推定・要約を挟まない = PMN-6）:
+
+    1. 候補は ``linked_claim_ids`` のうち本文が非空で
+       ``support_status == 'source_backed'`` のもの（出典から確認できた claim のみ）。
+    2. そのうち承認済み ``review_status``（``core/reconstruction/schema.py`` の
+       ``APPROVED_REVIEW_STATUSES``。claim の承認語彙の既存正本）を優先する。
+    3. 承認済みが無ければ ``source_backed`` の中から採る。
+    4. ``source_backed`` が1件も無ければ ``None`` — 未承認・非 source_backed の本文を
+       学習者に出さない（R層が「未検証の構造で学習者を試さない」のと同じ線）。
+
+    同順位内は ``claim_id`` の昇順で先頭を採る（表示の揺れを作らない）。切り詰めは
+    ``core/text_excerpt.excerpt``（CP5 の唯一の実装。TeX トークンの途中で切らない。
+    安全に切れる位置が無ければ空文字を返すので、その場合も ``None`` に倒す）。
+    """
+    if not claim_summaries:
+        return None
+    approved: list[str] = []
+    backed: list[str] = []
+    for claim_id in sorted(set(_ids(node, "linked_claim_ids"))):
+        summary = claim_summaries.get(claim_id)
+        if not isinstance(summary, dict):
+            continue
+        text = str(summary.get("text") or "").strip()
+        if not text:
+            continue
+        if str(summary.get("support_status") or "") != SOURCE_BACKED:
+            continue
+        if str(summary.get("review_status") or "") in APPROVED_REVIEW_STATUSES:
+            approved.append(text)
+        else:
+            backed.append(text)
+    for bucket in (approved, backed):
+        if bucket:
+            return excerpt(bucket[0], CLAIM_EXCERPT_LIMIT) or None
+    return None
+
+
+def _suppress_uniform_verification(
+    node_dtos: list[dict], ledger: dict[str, str]
+) -> bool:
+    """表示ノードの検証状態に**区別**が無いなら、区別ごと出さないと決める。
+
+    ``ledger`` が1行も無いとき（D層未導入・未バックフィル）は従来どおり ``False`` —
+    台帳の不在は「検証記録がない」という主張ではないので、既存の「台帳ゼロ」表示
+    （何も言わない）をそのまま維持する。台帳行はあるが表示ノードのどれも
+    :data:`DISTINGUISHING_VERIFICATION_STATUSES` を持たない場合に ``True`` を返し、
+    呼び出し側が per-node ラベルを畳んで事実文1行
+    （:data:`FACT_NO_VERIFICATION_RECORDS`）に置き換える。
+    """
+    if not ledger:
+        return False
+    for dto in node_dtos:
+        verification = dto.get("verification")
+        if not isinstance(verification, dict):
+            continue
+        if str(verification.get("status") or "") in DISTINGUISHING_VERIFICATION_STATUSES:
+            return False
+    return True
+
+
+def _blank_verification(node_dtos: list[dict]) -> None:
+    """per-node の検証ラベルを落とす（台帳ゼロと同じ見え方へ畳む）。"""
+    for dto in node_dtos:
+        dto["verification"] = None
+
+
 def _node_dto(
     node: dict,
     *,
     ledger: dict[str, str],
     personal_nodes: list[PersonalNode],
     is_center: bool,
+    claim_summaries: dict[str, dict] | None = None,
 ) -> dict:
     component_id = str(node.get("component_id") or "")
     return {
@@ -337,6 +444,9 @@ def _node_dto(
         "label": node_display_label(node),
         "stage": node_stage(node),
         "verification": _verification(component_id, ledger),
+        # 点ビュー・範囲ビュー共通のノード形（フロントが描くかは別問題として、
+        # DTO のキー集合は揃える）。解決できなければ null（捏造しない）。
+        "claim_excerpt": _claim_excerpt(node, claim_summaries),
         "mine": _mine_for_node(node, personal_nodes),
         "is_center": is_center,
     }
@@ -491,6 +601,7 @@ def build_nearby(
     ledger: dict[str, str],
     support_fact_line: str = "",
     shared_part_fact_lines: list[str] | tuple[str, ...] = (),
+    claim_summaries: dict[str, dict] | None = None,
     mode: str = MODE_NEAR,
 ) -> dict:
     """近傍関係ビューの DTO を組み立てる（純関数・DB 非依存）。
@@ -503,6 +614,16 @@ def build_nearby(
     :func:`_shared_part_thread_facts` で事前に解決した事実文（最大 ``MAX_SHARED_PART_THREADS``
     行）をそのまま素通しする。装置3（検証の晴れ間の近接提示）は :func:`_fog_candidate_labels`
     を使って本関数内で導出する（表示集合 ``shown_ids`` を必要とするため純関数の中で組み立てる）。
+
+    ``claim_summaries``（``{claim_id: {text, support_status, review_status}}``）は
+    呼び出し側（DB 経路）が ``queries.fetch_claim_summaries`` で1回だけ解決して渡す
+    （:func:`_claim_excerpt` の材料。省略時は全ノードの ``claim_excerpt`` が ``None``）。
+
+    ``ledger_available`` は「台帳行があり、かつ表示ノードの検証状態に区別がある」ことを
+    意味する（:func:`_suppress_uniform_verification`）。区別が無いときは per-node ラベルを
+    落として :data:`FACT_NO_VERIFICATION_RECORDS` 1行に畳む。装置3（晴れ間）は生の
+    ``ledger`` を直接読むため、この畳み込みとは独立に動く（表示集合の**外**が主語なので、
+    畳み込みで消してはならない）。
     """
     nodes_by_id = {str(n.get("component_id") or ""): n for n in main_nodes(graph)}
     edges = qualified_edges(graph)
@@ -516,7 +637,11 @@ def build_nearby(
                 continue
             out.append(
                 _node_dto(
-                    node, ledger=ledger, personal_nodes=personal_nodes, is_center=False
+                    node,
+                    ledger=ledger,
+                    personal_nodes=personal_nodes,
+                    is_center=False,
+                    claim_summaries=claim_summaries,
                 )
             )
         return out
@@ -531,8 +656,19 @@ def build_nearby(
         upstream = _dto_list(_upstream_ids(edges, center_id)[:MAX_FANOUT])
 
     center = _node_dto(
-        center_node, ledger=ledger, personal_nodes=personal_nodes, is_center=True
+        center_node,
+        ledger=ledger,
+        personal_nodes=personal_nodes,
+        is_center=True,
+        claim_summaries=claim_summaries,
     )
+
+    # 検証状態の差分表示: 表示ノードに区別が無ければ per-node ラベルを畳む。
+    verification_suppressed = _suppress_uniform_verification(
+        [center] + upstream + downstream + root_path, ledger
+    )
+    if verification_suppressed:
+        _blank_verification([center] + upstream + downstream + root_path)
 
     shown_ids = {center_id}
     for group in (upstream, downstream, root_path):
@@ -560,6 +696,9 @@ def build_nearby(
     else:
         facts.append(FACT_NO_UPSTREAM)
 
+    if verification_suppressed:
+        facts.append(FACT_NO_VERIFICATION_RECORDS)
+
     # 装置2（共通部品の糸）: 中心ノード限定・DB 経路が事前解決した事実文をそのまま素通し。
     for line in shared_part_fact_lines:
         if line:
@@ -579,7 +718,7 @@ def build_nearby(
     return {
         "available": True,
         "mode": mode,
-        "ledger_available": bool(ledger),
+        "ledger_available": bool(ledger) and not verification_suppressed,
         "center": center,
         "upstream": upstream,
         "downstream": downstream,
@@ -598,6 +737,7 @@ def build_topic_range(
     topic_label: str,
     atlas_concept_context: dict | None = None,
     fallback_fact: str = "",
+    claim_summaries: dict[str, dict] | None = None,
 ) -> dict:
     """範囲モード（topic アンカーの事実ベース粗表示）の DTO を組み立てる（純関数）。
 
@@ -621,10 +761,16 @@ def build_topic_range(
     ``concept_label`` の両方が非空のときだけ、facts の**末尾**（``FACT_RANGE_SHARPEN`` の
     後）に分野の地図への接続行を1件追加する。binding が無い・骨格突合不能などは
     呼び出し側が ``None`` を渡すだけで、この関数は事実文を1行減らすだけで済む（fail-soft）。
+
+    ``claim_summaries`` と ``ledger_available`` の意味論は :func:`build_nearby` と同じ
+    （代表 claim の逐語は :func:`_claim_excerpt`、検証状態の差分表示は
+    :func:`_suppress_uniform_verification`。stage 名しか出せない範囲ビューでは、この2つが
+    「どの話で・何が確かめられているか」を運ぶ唯一の情報になる）。
     """
     range_documents: list[dict] = []
     seen_labels: set[str] = set()
     ordered_labels: list[str] = []
+    all_node_dtos: list[dict] = []
 
     for doc in documents:
         graph = doc.get("graph") or {}
@@ -632,11 +778,16 @@ def build_topic_range(
         nodes_out: list[dict] = []
         for node in main_nodes(graph):
             dto = _node_dto(
-                node, ledger=ledger, personal_nodes=personal_nodes, is_center=False
+                node,
+                ledger=ledger,
+                personal_nodes=personal_nodes,
+                is_center=False,
+                claim_summaries=claim_summaries,
             )
             touched = bool(touched_claim_ids & set(_ids(node, "linked_claim_ids")))
             dto["touched"] = touched
             nodes_out.append(dto)
+            all_node_dtos.append(dto)
             if touched and dto["label"] not in seen_labels:
                 seen_labels.add(dto["label"])
                 ordered_labels.append(dto["label"])
@@ -650,6 +801,10 @@ def build_topic_range(
             {"title": str(doc.get("title") or ""), "nodes": nodes_out, "edges": edges_out}
         )
 
+    verification_suppressed = _suppress_uniform_verification(all_node_dtos, ledger)
+    if verification_suppressed:
+        _blank_verification(all_node_dtos)
+
     facts: list[str] = []
     if topic_label:
         facts.append(f"この記録は、トピック『{topic_label}』での記録です。")
@@ -660,6 +815,8 @@ def build_topic_range(
         facts.append("このトピックの教材が触れている理論構成：" + _enumerate(ordered_labels))
     if not fallback_fact:
         facts.append(FACT_RANGE_UNKNOWN_POINT)
+    if verification_suppressed:
+        facts.append(FACT_NO_VERIFICATION_RECORDS)
     facts.append(FACT_RANGE_SHARPEN)
 
     if atlas_concept_context:
@@ -675,7 +832,7 @@ def build_topic_range(
     return {
         "available": True,
         "mode": MODE_RANGE,
-        "ledger_available": bool(ledger),
+        "ledger_available": bool(ledger) and not verification_suppressed,
         "center": None,
         "upstream": [],
         "downstream": [],
@@ -748,6 +905,33 @@ def _documents_for_anchor(
     if can_view_document is None:
         return candidates
     return [d for d in candidates if can_view_document(user_id, d)]
+
+
+def _claim_summaries_for_graphs(entries: list[tuple[str, dict]]) -> dict[str, dict]:
+    """表示対象グラフの main ノード ``linked_claim_ids`` の**和集合を1回**で解決する。
+
+    ``entries`` は ``[(document_id, graph), ...]``。claim 参照が無ければクエリを発行
+    しない（``{}``）。例外はすべて握って ``{}`` に倒す（fail-soft: 逐語が出ないだけで
+    依存の向きの表示は成立させる）。
+    """
+    document_ids: list[str] = []
+    claim_ids: list[str] = []
+    seen: set[str] = set()
+    for document_id, graph in entries:
+        doc_id = str(document_id or "")
+        if doc_id and doc_id not in document_ids:
+            document_ids.append(doc_id)
+        for node in main_nodes(graph or {}):
+            for claim_id in _ids(node, "linked_claim_ids"):
+                if claim_id not in seen:
+                    seen.add(claim_id)
+                    claim_ids.append(claim_id)
+    if not claim_ids:
+        return {}
+    try:
+        return queries.fetch_claim_summaries(claim_ids, document_ids=document_ids)
+    except Exception:
+        return {}
 
 
 def _resolve_range_atlas_context(course_id: str, topic_id: str) -> dict | None:
@@ -841,6 +1025,7 @@ def _nearby_for_topic_anchor(
                 ledger=ledger,
                 support_fact_line=support_fact_line,
                 shared_part_fact_lines=shared_part_fact_lines,
+                claim_summaries=_claim_summaries_for_graphs([(document_id, graph)]),
                 mode=mode,
             )
         return None
@@ -913,6 +1098,9 @@ def _nearby_for_topic_anchor(
     atlas_concept_context = _resolve_range_atlas_context(
         str(start.course_id or ""), str(start.anchor.anchor_id or "")
     )
+    claim_summaries = _claim_summaries_for_graphs(
+        [(doc["document_id"], doc["graph"]) for doc in documents]
+    )
     return build_topic_range(
         documents,
         personal_nodes=network.nodes,
@@ -920,6 +1108,7 @@ def _nearby_for_topic_anchor(
         topic_label=topic_label,
         atlas_concept_context=atlas_concept_context,
         fallback_fact=fallback_fact,
+        claim_summaries=claim_summaries,
     )
 
 
@@ -1006,6 +1195,7 @@ def nearby_for_person_node(
             ledger=ledger,
             support_fact_line=support_fact_line,
             shared_part_fact_lines=shared_part_fact_lines,
+            claim_summaries=_claim_summaries_for_graphs([(document_id, graph)]),
             mode=mode,
         )
 

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 from sqlalchemy import text as sa_text
 
@@ -512,6 +513,97 @@ def fetch_claim_document_id(claim_id: str) -> str | None:
     finally:
         session.close()
     return str(row[0]) if row and row[0] else None
+
+
+def _is_uuid_text(value: str) -> bool:
+    """``value`` が UUID として解釈できるかを返す（``CAST(... AS uuid)`` 事故の予防）。
+
+    グラフ ``linked_claim_ids`` には DB UUID と agent 側 claim ID が混在しうる
+    （``core/document_pipeline/persistence.py`` は main ノードの claim 参照を
+    remap しない）。1件でも非 UUID が混ざったまま ``CAST`` すると SQL 全体が
+    落ちるため、UUID 相当のものだけを ``id IN (...)`` 側へ回す。
+    """
+    try:
+        UUID(str(value))
+    except Exception:
+        return False
+    return True
+
+
+def fetch_claim_summaries(
+    claim_ids: list[str], *, document_ids: list[str] | tuple[str, ...] = ()
+) -> dict[str, dict]:
+    """``theory_claims`` を ``{要求された claim_id: {text, support_status, review_status}}`` で返す。
+
+    近傍関係ビュー（``nearby.py``）がノードの代表 claim の**逐語**を出すための読み。
+    キーは**呼び出し側が渡した ID そのもの**で、DB UUID・``source_scope.span_id``・
+    ``source_scope.legacy_ids``（agent 側 atomic claim ID）のいずれかで突合する
+    （``api/routes/theory_components.py::_resolve_claim_reference_index`` と同じ
+    突合規則の鏡写し。グラフの ``linked_claim_ids`` は remap されないまま agent 側 ID を
+    保持しうるため、UUID だけで引くと逐語が一切出せない）。
+
+    ``document_ids`` を渡した場合は ``document_id IN (...)``（索引あり）で1回引き、
+    その中から突合する。``claim_ids`` の UUID 相当分は ``id IN (...)`` でも併せて拾う
+    （document が不明な経路のため）。**呼び出しは1回のクエリで完結する**（N+1 にしない）。
+
+    ``load_score`` 等の数値は読まない（PMN-4）。突合できない ID はキーごと欠落させる
+    （呼び出し側が ``claim_excerpt: null`` に倒す）。行が無い・テーブルが無い・
+    ID が不正などは空 dict へ倒す（PN-7 fail-closed）。
+    """
+    wanted = {str(c) for c in claim_ids if c}
+    if not wanted:
+        return {}
+    docs = [str(d) for d in document_ids if d]
+    uuid_ids = [c for c in sorted(wanted) if _is_uuid_text(c)]
+
+    clauses: list[str] = []
+    params: dict[str, str] = {}
+    if docs:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(docs)))
+        clauses.append(f"document_id IN ({placeholders})")
+        params.update({f"doc_{i}": doc_id for i, doc_id in enumerate(docs)})
+    if uuid_ids:
+        placeholders = ", ".join(f"CAST(:cid_{i} AS uuid)" for i in range(len(uuid_ids)))
+        clauses.append(f"id IN ({placeholders})")
+        params.update({f"cid_{i}": claim_id for i, claim_id in enumerate(uuid_ids)})
+    if not clauses:
+        return {}
+
+    session = _pg_session()
+    try:
+        try:
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT id::text, text, support_status, review_status, source_scope
+                    FROM theory_claims
+                    WHERE {" OR ".join(clauses)}
+                """),
+                params,
+            ).fetchall()
+        except Exception:
+            return {}
+    finally:
+        session.close()
+
+    summaries: dict[str, dict] = {}
+    for row in rows:
+        claim_uuid = str(row[0])
+        summary = {
+            "text": str(row[1] or ""),
+            "support_status": str(row[2] or ""),
+            "review_status": str(row[3] or ""),
+        }
+        keys = {claim_uuid}
+        scope = _payload_dict(row[4])
+        span_id = scope.get("span_id")
+        if span_id:
+            keys.add(str(span_id))
+        legacy_ids = scope.get("legacy_ids")
+        if isinstance(legacy_ids, list):
+            keys.update(str(v) for v in legacy_ids if v)
+        for key in keys & wanted:
+            summaries[key] = summary
+    return summaries
 
 
 def fetch_component_graph(document_id: str) -> dict:

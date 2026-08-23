@@ -272,6 +272,71 @@ class TestNearbyRangeMode:
         assert not hits, f"禁止語彙が見つかりました: {hits}"
 
 
+class TestNearbyClaimExcerpt:
+    """範囲ビューのチップに claim_excerpt（その論文の逐語, 最大80字・サーバ側切り詰め済み）
+    を追加描画する契約。点ビュー（横レーンのチップ）には出さない。
+    """
+
+    def _range_graph_body(self, src: str) -> str:
+        match = re.search(r"function renderNearbyRangeGraph\(.*?\n  \}\n", src, re.S)
+        assert match, "renderNearbyRangeGraph 関数が見つかりません"
+        return match.group(0)
+
+    def _point_graph_body(self, src: str) -> str:
+        match = re.search(r"function renderNearbyGraph\(.*?\n  \}\n", src, re.S)
+        assert match, "renderNearbyGraph 関数が見つかりません"
+        return match.group(0)
+
+    def test_range_graph_renders_excerpt_with_dedicated_class(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        body = self._range_graph_body(src)
+        assert "claim_excerpt" in body
+        assert "pm-home-nb-node-excerpt" in body
+
+    def test_point_graph_does_not_render_excerpt(self):
+        """点ビュー（横レーンのチップ）は幅が無いため claim_excerpt を描画しない。
+
+        コード行のみを検査する（理由を説明するコメント中の語彙まで denylist に
+        掛けると、その理由説明自体が書けなくなる）。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        body = self._point_graph_body(_strip_js_comment_lines(src))
+        assert "claim_excerpt" not in body
+        assert "pm-home-nb-node-excerpt" not in body
+
+    def test_truncate_helper_exists(self):
+        """SVG <text> は自動省略されないため、表示幅に収まる文字数への切り詰め関数を持つ。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert re.search(r"function nearbyTruncateExcerpt\(", src)
+
+    def test_range_graph_uses_truncate_helper(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        body = self._range_graph_body(src)
+        assert "nearbyTruncateExcerpt(" in body
+
+    def test_title_includes_excerpt_text(self):
+        """ホバー (<title>) では切り詰め前の全文が読める。"""
+        src = _read(PERSONAL_MAP_HOME_JS)
+        body = self._range_graph_body(src)
+        assert re.search(r"<title>.*claim_excerpt", body, re.S) or "titleText" in body
+
+    def test_chip_height_and_line_layout_adapt_to_line_count(self):
+        """label / claim_excerpt / verification の存在行数に応じてチップの高さ・行の
+        y 座標が追随すること（固定 rowH の単純乗算に戻っていないこと）。
+        """
+        src = _read(PERSONAL_MAP_HOME_JS)
+        assert re.search(r"function nearbyRangeChipHeight\(", src)
+        assert re.search(r"function nearbyRangeLineYs\(", src)
+        body = self._range_graph_body(src)
+        assert "nearbyRangeChipHeight(" in body
+        assert "nearbyRangeLineYs(" in body
+
+    def test_no_forbidden_vocabulary(self):
+        src = _read(PERSONAL_MAP_HOME_JS)
+        hits = [w for w in FORBIDDEN_WORDS if w in src]
+        assert not hits, f"禁止語彙が見つかりました: {hits}"
+
+
 class TestIndexHtmlIntegration:
     def test_personal_map_home_script_tag_present(self):
         html = _read(INDEX_HTML)
