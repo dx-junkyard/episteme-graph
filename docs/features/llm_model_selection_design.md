@@ -700,3 +700,40 @@ id を渡す配線が無い**（`AdminLlmModels.initReanalyzePanel(containerEl, 
 `routes/lecture_studio/topics.py::rewrite_lecture_studio_course_topic` も
 `requested_model or params["model"]` の形で J3 と同型のバイパスをしている
 （既存テストがその挙動を固定しているため、本修正では触っていない）。
+
+## 14. 追補 — `LLM_STAGE_NAMES` の意味論と導出化（2026-08-14, 提案 §2-9）
+
+本節は凍結済みの §1〜§13 を書き換えずに、ステージ判定の正本の所在だけを追補する
+（挙動・API 応答・集合の要素は一切変えていない）。
+
+- **`LLM_STAGE_NAMES` はリテラル定義をやめ、`_PIPELINE_STEPS` からの導出になった。**
+  `core/document_pipeline/orchestrator.py` の `PipelineStageDef` が
+  `llm_kind`（`none` / `text` / `vision` / `embedding`）・`model_policy`（bool）・
+  `progress_unit`（`report_start(..., unit=)` の宣言）・`vision_optional`（bool）を
+  宣言し、判定用の集合はすべてそこから導出する:
+  - `LLM_STAGE_NAMES = {s.name for s in _PIPELINE_STEPS if s.model_policy}`（12件・不変）
+  - `LLM_CALLING_STAGE_NAMES`（`llm_kind ∈ {text, vision}` = 実際に LLM を呼ぶ13件）
+  - `VISION_STAGE_NAMES`（`llm_kind == vision` = `{"apparatus_semantics"}`）
+- **`LLM_STAGE_NAMES` の意味論は「M層のステージ別モデル選択・使用モデル記録（M7）の
+  対象」であって「LLM を呼ぶ事実」ではない。** 両者は `component_graph` の1件で食い違う
+  （LLM を呼ぶが M層の対象外）。この差は `LLM_CALLING_STAGE_NAMES - LLM_STAGE_NAMES ==
+  {"component_graph"}` として `backend/tests/test_pipeline_stage_registry.py` が固定して
+  いるので、意図せず増えれば落ちる。`component_graph` を M層の対象へ昇格させるかは
+  `GET /api/admin/llm-models/pipeline-stages` の応答と `PIPELINE_STAGE_LABELS` が変わる
+  挙動変更なので、オーナー判断として保留にしてある。
+- **vision 判定のリテラル `stage_name == "apparatus_semantics"` は集合参照に置換した。**
+  `orchestrator._resolve_stage_override_model`（`pipeline.vision` へのフォールバック）と
+  `routes/admin.py::_validate_models_option`（vision capability の必須化）の2箇所が
+  `VISION_STAGE_NAMES` を参照する。`llm_policy.scene_for_feature` の
+  `"pipeline:apparatus_semantics"` リテラルは**そのまま**（`llm_policy` は orchestrator を
+  import しない依存方向を維持する。M1 / ガードレール
+  `test_llm_model_policy_guardrails.py`）。
+- **`progress_unit` は宣言のみで実行時には使わない。** `report_start` の呼び出しは各
+  ステージ本体がリテラル引数で行う形を変えていない（U層の feature 語彙網羅テストが
+  ソースからの正規表現抽出に依存している）。宣言と実呼び出しのズレは
+  `test_pipeline_stage_registry.py` が静的に照合する。`unit` は入力の単位の意味論であって
+  LLM-ness を表さない（`rhetorical_role` は LLM ステージだが `unit="blocks"`）ため、
+  `llm_kind` から導出しない。
+- `equation_semantics` は再構成が必要な数式候補にのみ切り出し画像を添付する条件付き
+  vision で、`vision_optional=True` として宣言だけする（M層では従来どおり text 扱い =
+  `pipeline.vision` ではなく `pipeline` にフォールバックする）。

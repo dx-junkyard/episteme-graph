@@ -104,17 +104,45 @@ def _fig(figure_id="fig_1", caption="Setup diagram", linked_claim_ids=None, capt
     }
 
 
-def _no_db_lookups(monkeypatch, *, figure_maps=None, identity_links=None):
-    """Ensure figure/identity-link lookups never attempt a real DB connection."""
+def _derivation_step(step_id="step_1", output_equation_ids=None, **kw):
+    defaults = dict(
+        step_id=step_id, input_equation_ids=[],
+        output_equation_ids=list(output_equation_ids or []),
+    )
+    defaults.update(kw)
+    return types.SimpleNamespace(**defaults)
+
+
+def _derivation_chain(derivation_id="der_1", steps=None, output_equation_ids=None, **kw):
+    defaults = dict(
+        derivation_id=derivation_id, steps=list(steps or []),
+        input_equation_ids=[], intermediate_equation_ids=[],
+        output_equation_ids=list(output_equation_ids or []),
+    )
+    defaults.update(kw)
+    return types.SimpleNamespace(**defaults)
+
+
+def _no_db_lookups(monkeypatch, *, figure_maps=None, identity_links=None,
+                   course_equation_ids=None):
+    """Ensure figure/identity-link/course lookups never attempt a real DB connection."""
     by_key, by_caption_block = figure_maps or ({}, {})
     monkeypatch.setattr(cei, "build_figure_db_maps", lambda document_id: (by_key, by_caption_block))
     monkeypatch.setattr(cei, "build_identity_link_map", lambda document_id: (identity_links or {}))
+    monkeypatch.setattr(
+        cei, "build_course_snapshot_equation_ids",
+        lambda material_id: list(course_equation_ids or []),
+    )
 
 
 def _build(monkeypatch, *, components=None, claims=None, equations=None, figures=None,
            apparatus_records=None, thesis=None, max_elements=40, figure_maps=None,
-           identity_links=None):
-    _no_db_lookups(monkeypatch, figure_maps=figure_maps, identity_links=identity_links)
+           identity_links=None, derivations=None, material_id=None,
+           course_equation_ids=None):
+    _no_db_lookups(
+        monkeypatch, figure_maps=figure_maps, identity_links=identity_links,
+        course_equation_ids=course_equation_ids,
+    )
     return cei.build_contextual_explanation_inputs(
         document_id="doc-1",
         cartridge_id=None,
@@ -125,6 +153,8 @@ def _build(monkeypatch, *, components=None, claims=None, equations=None, figures
         apparatus_result=_result(apparatus_records or [], "apparatus_records"),
         thesis=thesis,
         max_elements=max_elements,
+        material_id=material_id,
+        derivations=_result(derivations, "chains") if derivations is not None else None,
     )
 
 
@@ -375,6 +405,225 @@ class TestPriorityAndTruncation:
         assert elements == []
         assert meta["truncated"] is True
         assert meta["truncated_count"] == 1
+
+
+# ---------------------------------------------------------------------------
+# required equations (指示書 §5.2 / element_context_presentation_redesign.md
+# §8 Phase 3): equations the teaching material presents are reserved outside
+# ``max_elements`` instead of falling off the end of a flat concatenation.
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredEquations:
+    def test_required_equation_survives_a_cap_filled_by_other_kinds(self, monkeypatch):
+        """component / figure / claim だけで上限が埋まっても required は選ばれる。"""
+        comps = [_component(f"comp_{i}") for i in range(3)]
+        # comp_0 references eq_req -> the course builder's material rule shows it.
+        comps[0].linked_equation_ids = ["eq_req"]
+        eq_required = _equation("eq_req", semantics=_equation_semantics(summary="required eq"))
+        eq_optional = _equation("eq_opt", semantics=_equation_semantics(summary="optional eq"))
+        elements, meta = _build(
+            monkeypatch, components=comps, equations=[eq_required, eq_optional], max_elements=3,
+        )
+        ids = [e.element_id for e in elements]
+        # The cap still admits exactly 3 non-required elements (the components),
+        # and the required equation rides on top of it.
+        assert "eq_req" in ids
+        assert "eq_opt" not in ids
+        assert len(elements) == 4
+        assert elements[0].element_id == "eq_req"  # required first
+        assert meta["required_equations_considered"] == 1
+        assert meta["required_equations_selected"] == 1
+        assert meta["required_equations_unresolved"] == 0
+        assert meta["truncated"] is True
+        assert meta["truncated_count"] == 1  # the optional equation
+
+    def test_required_equation_is_not_duplicated(self, monkeypatch):
+        """複数ソースが同じ式を指しても入力は1回だけ（optional 枠にも残らない）。"""
+        comp = _component("comp_1", linked_equation_ids=["eq_1"])
+        comp.evidence_refs = {"equation_ids": ["eq_1"]}
+        claim = _claim("claim_1", equation_ids=["eq_1"])
+        thesis = types.SimpleNamespace(
+            central_thesis={"text": "T", "claim_ids": [], "equation_ids": ["eq_1"]},
+            support_structure={"evidence": [{"text": "S", "claim_ids": [], "equation_ids": ["eq_1"]}]},
+        )
+        eq = _equation("eq_1")
+        elements, meta = _build(
+            monkeypatch, components=[comp], claims=[claim], equations=[eq], thesis=thesis,
+            derivations=[_derivation_chain(output_equation_ids=["eq_1"])],
+            course_equation_ids=["eq_1"], material_id="mat-1",
+        )
+        eq_ids = [e.element_id for e in elements if e.element_type == "equation"]
+        assert eq_ids == ["eq_1"]
+        assert meta["required_equations_considered"] == 1
+        assert meta["required_equations_selected"] == 1
+        assert meta["counts_by_kind"]["equation"] == 1
+
+    def test_unresolved_required_id_is_skipped_not_fabricated(self, monkeypatch):
+        """artifact に実体の無い required ID は入力化せず、明示 skip として記録する。"""
+        comp = _component("comp_1", linked_equation_ids=["eq_ghost", "eq_real"])
+        eq = _equation("eq_real")
+        elements, meta = _build(monkeypatch, components=[comp], equations=[eq])
+        eq_ids = [e.element_id for e in elements if e.element_type == "equation"]
+        assert eq_ids == ["eq_real"]
+        assert {
+            "element_type": "equation", "element_id": "eq_ghost",
+            "reason": "equation_not_resolved",
+        } in meta["skipped"]
+        assert meta["required_equations_considered"] == 2
+        assert meta["required_equations_selected"] == 1
+        assert meta["required_equations_unresolved"] == 1
+
+    def test_optional_equations_still_obey_max_elements(self, monkeypatch):
+        """required でない式は従来どおり上限の中で競合する。"""
+        eqs = [_equation(f"eq_{i}") for i in range(5)]
+        elements, meta = _build(monkeypatch, equations=eqs, max_elements=2)
+        assert [e.element_id for e in elements] == ["eq_0", "eq_1"]
+        assert meta["required_equations_considered"] == 0
+        assert meta["required_equations_selected"] == 0
+        assert meta["truncated"] is True
+        assert meta["truncated_count"] == 3
+
+    def test_zero_max_elements_disables_the_reservation_too(self, monkeypatch):
+        """``max_elements=0`` は運用の停止スイッチ。required も含めて何も選ばない。"""
+        comp = _component("comp_1", linked_equation_ids=["eq_1"])
+        elements, meta = _build(
+            monkeypatch, components=[comp], equations=[_equation("eq_1")], max_elements=0,
+        )
+        assert elements == []
+        assert meta["selected"] == 0
+        assert meta["required_equations_considered"] == 1
+        assert meta["required_equations_selected"] == 0
+        assert meta["truncated"] is True
+
+    def test_claim_and_thesis_and_derivation_result_equations_are_required(self, monkeypatch):
+        claim = _claim("claim_1", equation_ids=["eq_claim"])
+        thesis = types.SimpleNamespace(
+            central_thesis={"text": "T", "claim_ids": [], "equation_ids": ["eq_thesis"]},
+            support_structure={},
+        )
+        chain = _derivation_chain(
+            steps=[
+                _derivation_step("step_1", output_equation_ids=["eq_mid"]),
+                _derivation_step("step_2", output_equation_ids=["eq_result"]),
+            ],
+        )
+        eqs = [_equation(e) for e in ("eq_claim", "eq_thesis", "eq_mid", "eq_result", "eq_other")]
+        elements, meta = _build(
+            monkeypatch, claims=[claim], thesis=thesis, equations=eqs, derivations=[chain],
+            max_elements=1,
+        )
+        selected_eq_ids = [e.element_id for e in elements if e.element_type == "equation"]
+        # Terminal derivation output only: eq_mid stays optional (and is cut by
+        # the cap of 1, which the claim element consumes).
+        assert set(selected_eq_ids) == {"eq_claim", "eq_thesis", "eq_result"}
+        assert meta["required_equations_considered"] == 3
+        assert meta["required_equations_selected"] == 3
+
+    def test_course_snapshot_embed_makes_an_otherwise_unlinked_equation_required(self, monkeypatch):
+        """教員が本文に手書きした ``![[equation:id]]`` は他の紐づきが無くても対象。"""
+        comps = [_component(f"comp_{i}") for i in range(3)]
+        eq = _equation("eq_F2")
+        elements, meta = _build(
+            monkeypatch, components=comps, equations=[eq], max_elements=3,
+            material_id="mat-1",
+            # A snapshot embed written as ``eq_eq_F2`` normalizes onto ``eq_F2``;
+            # ``eq_from_other_doc`` belongs to a sibling document in the same
+            # course and is silently ignored (not reported as unresolved).
+            course_equation_ids=["eq_eq_F2", "eq_from_other_doc"],
+        )
+        assert "eq_F2" in [e.element_id for e in elements]
+        assert meta["required_equations_considered"] == 1
+        assert meta["required_equations_selected"] == 1
+        assert meta["required_equations_unresolved"] == 0
+        assert meta["skipped"] == []
+
+    def test_course_snapshot_source_is_not_consulted_without_material_id(self, monkeypatch):
+        """material_id が無い呼び出しはコース逆引きを行わない（DB を触らない）。"""
+        called: list[str] = []
+
+        def _spy(material_id):
+            called.append(material_id)
+            return []
+
+        monkeypatch.setattr(cei, "build_figure_db_maps", lambda document_id: ({}, {}))
+        monkeypatch.setattr(cei, "build_identity_link_map", lambda document_id: {})
+        monkeypatch.setattr(cei, "build_course_snapshot_equation_ids", _spy)
+        cei.build_contextual_explanation_inputs(
+            document_id="doc-1", cartridge_id=None,
+            component_result=_result([], "components"),
+            claim_objects=_result([], "claims"),
+            equations=_result([], "equations"),
+            fig_tbl={"figures": []}, apparatus_result=None, thesis=None,
+            max_elements=40,
+        )
+        assert called == [""]
+
+
+class TestCourseSnapshotEquationIds:
+    """``build_course_snapshot_equation_ids``: bounded, read-only, fail-soft."""
+
+    def _patch_session(self, monkeypatch, rows=None, raises=None):
+        captured = {}
+
+        class _FakeResult:
+            def fetchall(self):
+                return rows or []
+
+        class _FakeSession:
+            def execute(self, statement, params=None):
+                captured["sql"] = str(statement)
+                captured["params"] = params
+                if raises:
+                    raise raises
+                return _FakeResult()
+
+            def close(self):
+                captured["closed"] = True
+
+        monkeypatch.setattr("core.postgres.get_session", lambda: _FakeSession())
+        return captured
+
+    def _course(self, material_id="mat-1", text="See ![[equation:eq_7]] here."):
+        return ({
+            "sources": [{"material_id": material_id}],
+            "topics": [{"id": "t1", "student_material": {"source_text": text}}],
+        },)
+
+    def test_extracts_embedded_equation_ids(self, monkeypatch):
+        captured = self._patch_session(monkeypatch, rows=[self._course()])
+        assert cei.build_course_snapshot_equation_ids("mat-1") == ["eq_7"]
+        assert captured["params"]["material_id"] == "mat-1"
+        assert captured["params"]["limit"] == cei.MAX_COURSE_SNAPSHOTS
+        assert captured["closed"] is True
+        # Read-only: no writes to course state from the analysis pipeline.
+        sql = captured["sql"].upper()
+        assert "SELECT" in sql
+        for verb in ("INSERT", "UPDATE", "DELETE"):
+            assert verb not in sql
+
+    def test_legacy_double_eq_prefix_is_normalized_by_the_course_builder_rule(self, monkeypatch):
+        self._patch_session(monkeypatch, rows=[self._course(text="![[equation:eq_eq_F2]]")])
+        assert cei.build_course_snapshot_equation_ids("mat-1") == ["eq_F2"]
+
+    def test_scans_nested_chapter_topics_and_spoken_script(self, monkeypatch):
+        self._patch_session(monkeypatch, rows=[({
+            "sources": [{"material_id": "mat-1"}],
+            "chapters": [{"topics": [{"id": "c1", "content": "![[equation:eq_a]]"}]}],
+            "topics": [{"id": "t1", "spoken_script": "[[equation:eq_b]]"}],
+        },)])
+        assert sorted(cei.build_course_snapshot_equation_ids("mat-1")) == ["eq_a", "eq_b"]
+
+    def test_blank_material_id_never_queries(self, monkeypatch):
+        def _boom():
+            raise AssertionError("must not open a session")
+
+        monkeypatch.setattr("core.postgres.get_session", _boom)
+        assert cei.build_course_snapshot_equation_ids("") == []
+
+    def test_db_failure_is_fail_soft(self, monkeypatch):
+        self._patch_session(monkeypatch, raises=RuntimeError("no db in this test"))
+        assert cei.build_course_snapshot_equation_ids("mat-1") == []
 
 
 # ---------------------------------------------------------------------------
@@ -654,6 +903,101 @@ class TestBuildContextualExplanation:
         run_spy.assert_not_called()
         insert_spy.assert_not_called()
 
+    def test_required_equation_counts_survive_the_daily_limit_skip(self, monkeypatch):
+        """CostGate 到達時は LLM を呼ばず、required 対象数を artifact に残す（§5.6）。"""
+        elements = [types.SimpleNamespace(element_id="eq_1", element_type="equation")]
+        meta = {
+            "considered": 1, "selected": 1, "truncated": False, "truncated_count": 0,
+            "counts_by_kind": {"equation": 1},
+            "skipped": [{"element_type": "equation", "element_id": "eq_x",
+                         "reason": "equation_not_resolved"}],
+            "required_equations_considered": 2,
+            "required_equations_selected": 1,
+            "required_equations_unresolved": 1,
+        }
+        run_spy = MagicMock()
+
+        class _FakeAgent:
+            def __init__(self, llm_model=None, **kw):
+                pass
+
+            def run(self, elements, cartridge_id=None):
+                run_spy()
+                return _fake_agent_result([])
+
+        monkeypatch.setattr(
+            "core.document_pipeline.contextual_explanation_inputs.build_contextual_explanation_inputs",
+            lambda **kwargs: (elements, meta),
+        )
+        monkeypatch.setattr(
+            "episteme_graph.agents.contextual_explanation.agent.ContextualExplanationAgent",
+            _FakeAgent,
+        )
+        monkeypatch.setattr("core.element_explanations.insert_candidates", MagicMock())
+        monkeypatch.setenv("CTXEXPL_MAX_CALLS_PER_DAY", "1")
+        gate = orch.CostGate()
+        monkeypatch.setattr(orch, "_ctxexpl_cost_gate", gate)
+        assert gate.check_and_count(daily_limit=1, daily_key=orch.today_str())
+
+        payload = orch._build_contextual_explanation(
+            document_id="doc-1", cartridge_id=None, component_result=None,
+            claim_objects=None, equations=None, fig_tbl=None,
+            apparatus_result=None, thesis=None,
+        )
+        assert payload.get("skipped_by_limit") is True
+        run_spy.assert_not_called()
+        assert payload["required_equations_considered"] == 2
+        assert payload["required_equations_selected"] == 1
+        assert payload["required_equations_unresolved"] == 1
+        assert payload["skipped"] == meta["skipped"]
+
+    def test_required_equation_counts_are_reported_in_the_payload(self, monkeypatch):
+        elements = [types.SimpleNamespace(element_id="eq_1", element_type="equation")]
+        meta = {
+            "considered": 1, "selected": 1, "truncated": False, "truncated_count": 0,
+            "counts_by_kind": {"equation": 1}, "skipped": [],
+            "required_equations_considered": 3,
+            "required_equations_selected": 3,
+            "required_equations_unresolved": 0,
+        }
+        self._patch_common(
+            monkeypatch, elements=elements, meta=meta,
+            agent_result=_fake_agent_result([], llm_call_count=1),
+            insert_spy=MagicMock(return_value=[]),
+        )
+        payload = orch._build_contextual_explanation(
+            document_id="doc-1", cartridge_id=None, component_result=None,
+            claim_objects=None, equations=None, fig_tbl=None,
+            apparatus_result=None, thesis=None,
+        )
+        assert payload["required_equations_considered"] == 3
+        assert payload["required_equations_selected"] == 3
+        assert payload["required_equations_unresolved"] == 0
+
+    def test_material_id_and_derivations_reach_the_input_builder(self, monkeypatch):
+        captured = {}
+
+        def _capture(**kwargs):
+            captured.update(kwargs)
+            return [], {
+                "considered": 0, "selected": 0, "truncated": False, "truncated_count": 0,
+                "counts_by_kind": {}, "skipped": [],
+            }
+
+        monkeypatch.setattr(
+            "core.document_pipeline.contextual_explanation_inputs.build_contextual_explanation_inputs",
+            _capture,
+        )
+        monkeypatch.setattr(orch, "_ctxexpl_cost_gate", orch.CostGate())
+        orch._build_contextual_explanation(
+            document_id="doc-1", cartridge_id=None, component_result=None,
+            claim_objects=None, equations=None, fig_tbl=None,
+            apparatus_result=None, thesis=None,
+            material_id="mat-1", derivations="derivations-sentinel",
+        )
+        assert captured["material_id"] == "mat-1"
+        assert captured["derivations"] == "derivations-sentinel"
+
     def test_model_env_var_is_forwarded_to_agent(self, monkeypatch):
         elements = [types.SimpleNamespace(element_id="comp_1", element_type="theory_component")]
         meta = {
@@ -729,6 +1073,19 @@ class TestStageWiring:
         assert "contextual_explanation" in ctx._saved
         assert ctx._saved["contextual_explanation"]["error"] == "boom"
         assert ctx._saved["contextual_explanation"]["status"] == "completed"
+
+    def test_stage_forwards_material_id_and_derivations(self, monkeypatch):
+        """required equation の導出ソース2つ（コース snapshot 逆引きキー / 導出結果）
+        がステージから渡ること。"""
+        build_spy = MagicMock(return_value={"status": "completed"})
+        monkeypatch.setattr(orch, "_build_contextual_explanation", build_spy)
+        ctx = _make_ctx(derivations="derivations-sentinel")
+
+        orch._stage_contextual_explanation(ctx)
+
+        kwargs = build_spy.call_args.kwargs
+        assert kwargs["material_id"] == "mat-1"
+        assert kwargs["derivations"] == "derivations-sentinel"
 
     def test_stage_resumes_from_existing_artifact_without_rebuilding(self, monkeypatch):
         build_spy = MagicMock()

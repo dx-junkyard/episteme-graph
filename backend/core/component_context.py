@@ -24,23 +24,39 @@ equation に裏付けられ、共通部品（L層）や周辺構造（W層 conte
 - **数値 confidence を一切含めない**: 最終レスポンスを再帰走査して
   ``"confidence"`` キーを除去する（W8 相当。同一性リンクの ``evidence`` に
   confidence が混入していても落とす）。
+- **共通プリミティブは ``core/learner_context_common.py`` が正本**: 数値除去
+  （``strip_confidence``）・コース document スコープを SQL で強制する要素解決
+  （``scoped_id_match_sql``）・W層 ITEM の学習者向け射影と遮断層
+  （``project_item`` / ``visible_lane_items``）は claim / equation 文脈 API
+  （``core/element_context.py``）と共有する。``graph.upper`` / ``graph.lower`` の
+  キー集合は従来の6キーのまま（``legacy_keys_only=True``）で、内部 ID・生 TeX の
+  ラベル遮断と ``navigable`` の fail-closed 再計算だけが共有によって効く。
 - 本モジュールは FastAPI を import しない（開発ルール2 / core/ 共通ルール）。
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from typing import Any
 
 from sqlalchemy import text as sa_text
 
 from core.postgres import get_session
+from core import learner_context_common
+from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
+    PROVENANCE_COURSE_FREEZE,
+    is_uuid as _is_uuid,
+    json_dict as _json_dict,
+    json_list as _json_list,
+    normalized_document_ids as _normalized_document_ids,
+    project_item,
+    scoped_id_match_sql,
+    strip_confidence,
+)
 from core.deliberation import context_lens as context_lens_mod
 from core.deliberation import identity_links as identity_links_mod
 from core.deliberation.refs import document_run_artifacts, equation_records
 from core.deliberation.schema import (
-    CONTEXT_STATUS_CANDIDATE,
     ELEMENT_THEORY_COMPONENT,
     IDENTITY_LINK_STATUS_CONFIRMED,
     SCOPE_DOCUMENT,
@@ -55,9 +71,10 @@ logger = logging.getLogger(__name__)
 # （設計書: text 空は除外、最大8）。
 _MAX_FIELD_REF_ITEMS = 8
 
-# W層 context lens レーンの表示上限（context_lens.py の _CONTEXT_LANE_MAX と同じ値。
-# ここでは candidate 除外後の件数に対して適用する）。
-_GRAPH_LANE_MAX = 20
+# W層 context lens レーンの表示上限（正本は ``learner_context_common.LANE_MAX``。
+# context_lens.py の _CONTEXT_LANE_MAX と同じ値で、ここでは candidate 除外後の件数に
+# 対して適用する。旧名を再エクスポートして既存の参照面を維持する）。
+_GRAPH_LANE_MAX = learner_context_common.LANE_MAX
 
 # equation の役割語彙（*_equation_ids フィールド名 → role）。優先順はこの順序
 # （同じ equation_id が複数フィールドに現れた場合は最初に一致した role を採用する）。
@@ -70,37 +87,9 @@ _EQUATION_ROLE_FIELDS = (
 )
 
 
-def _is_uuid(value: Any) -> bool:
-    try:
-        uuid.UUID(str(value))
-        return True
-    except (ValueError, AttributeError, TypeError):
-        return False
-
-
-def strip_confidence(value: Any) -> Any:
-    """レスポンスを再帰走査して ``"confidence"`` キーを除去する（数値非公開・W8 相当）。
-
-    学習者向け文脈 API 共通のヘルパー。``core/element_context.py``（claim / equation の
-    文脈 API）も同じ規則を使うため、正本はここ1箇所に置く（W8 の実装をコピペしない）。
-    """
-    if isinstance(value, dict):
-        return {k: strip_confidence(v) for k, v in value.items() if k != "confidence"}
-    if isinstance(value, list):
-        return [strip_confidence(v) for v in value]
-    return value
-
-
-# 旧名（本モジュール内および既存テストからの参照）。公開名 ``strip_confidence`` の別名。
+# 旧名（本モジュール内および既存テストからの参照）。公開名 ``strip_confidence``
+# （正本は ``learner_context_common``）の別名。
 _strip_confidence = strip_confidence
-
-
-def _json_dict(value: Any) -> dict:
-    return value if isinstance(value, dict) else {}
-
-
-def _json_list(value: Any) -> list:
-    return value if isinstance(value, list) else []
 
 
 # ---------------------------------------------------------------------------
@@ -114,18 +103,19 @@ def _resolve_component_row(component_id: str, course_document_ids: set[str]) -> 
     ``document_id = ANY(course_document_ids)`` を SQL の WHERE 句に直接含めることで
     （後付けの Python フィルタではなく）、agent 側 ID（``comp_001`` 等、論文ごとに
     独立採番されるため文書間で衝突しうる）がコース外文書の同名 component に
-    誤って一致する余地を断つ（fail-closed）。
+    誤って一致する余地を断つ（fail-closed）。WHERE 断片の組み立ては
+    ``learner_context_common.scoped_id_match_sql``（claim 側の
+    ``element_context._resolve_claim`` と共有する正本）に委ねる。
+
+    複数行に一致した場合は ``ORDER BY (id::text = :raw_id) DESC`` + ``LIMIT 1`` で
+    先頭 1 行を採る（agent 側 ID の曖昧一致を 404 にする claim 側とは意図的に挙動が
+    違う。現行挙動の維持であり、変更はオーナー判断の別課題）。
     """
-    document_ids = sorted({str(d) for d in (course_document_ids or set()) if str(d or "").strip()})
+    document_ids = _normalized_document_ids(course_document_ids)
     if not document_ids:
         return None
 
-    conditions = ["source_scope->'legacy_ids' ? :raw_id"]
-    params: dict[str, Any] = {"raw_id": str(component_id), "doc_ids": document_ids}
-    if _is_uuid(component_id):
-        conditions.append("id = CAST(:uuid_id AS uuid)")
-        params["uuid_id"] = str(component_id)
-    where_clause = " OR ".join(conditions)
+    where_clause, params = scoped_id_match_sql(component_id, document_ids)
 
     session = get_session()
     try:
@@ -460,15 +450,43 @@ def _build_shared_part(component_db_id: str, document_id: str, agent_ids: set[st
 # ---------------------------------------------------------------------------
 
 
-def _project_context_item(item: dict) -> dict:
-    return {
-        "id": item.get("element_id"),
-        "element_type": item.get("element_type"),
-        "label": item.get("label"),
-        "relation_label": item.get("relation_label"),
-        "relation_status": item.get("relation_status"),
-        "navigable": bool(item.get("navigable")),
-    }
+def _project_context_item(item: dict) -> dict | None:
+    """W層 ITEM を graph レーン用に射影する（キー集合は従来の6キーのまま）。
+
+    射影の本体は claim / equation 文脈 API と共有する
+    ``learner_context_common.project_item`` で、``legacy_keys_only=True`` により
+    ITEM v2 の追加キー（``sublabel`` / ``qualifier`` / ``group`` / ``unresolved``）は
+    足さない — component の DTO に ``group`` を混ぜると統一パーツカード
+    （``element-card.js`` の ``hasGroupedItems``）が4区画描画へ切り替わり、可視の
+    UX 変更になってしまうため（キー集合の世代差は意図的に維持する）。
+
+    共有によって従来この経路に無かった2つの遮断が効く:
+
+    - 内部 ID / 生 TeX の label を element_type 別の一般ラベルへ置換する
+      （W層は ``comp_003`` のような生 ID をラベルに入れ得る）。
+    - ``navigable`` を学習者が実際に開ける型（claim / equation / component）だけに
+      絞り直す（W層の ``navigable`` は教員向けの可否で、figure / evidence /
+      derivation でも真になり得た）。
+
+    加えて component レーンでは ``include_agent_id_tokens=True`` により
+    ``comp_003`` / ``theory_op_0001`` 型の agent 側 ID ラベルも遮断する
+    （claim / equation 経路は従来判定のまま — 拡張はオーナー判断待ち）。
+
+    レーン単位の組み立て（candidate 除外・上限）は ``_visible_lane`` が行い、
+    ``visible_lane_items(project=...)`` 経由で**本番経路がこの関数を通る**
+    （seam をテスト専用にしない）。
+    """
+    return project_item(item, legacy_keys_only=True, include_agent_id_tokens=True)
+
+
+def _visible_lane(items: Any) -> list[dict]:
+    """1レーン分の ITEM を candidate 除外（LE2）+ 射影 + 上限（``_GRAPH_LANE_MAX``）で組む。
+
+    実体は claim / equation 文脈 API と共有する
+    ``learner_context_common.visible_lane_items``。1件の射影は
+    ``_project_context_item`` を注入して行う（旧6キー + agent ID 遮断）。
+    """
+    return learner_context_common.visible_lane_items(items, project=_project_context_item)
 
 
 def _build_graph(component_db_id: str, document_id: str) -> dict | None:
@@ -488,20 +506,10 @@ def _build_graph(component_db_id: str, document_id: str) -> dict | None:
     if not result:
         return None
     focus = _json_dict(result.get("focus"))
-    upper = [
-        _project_context_item(item)
-        for item in _json_list(result.get("upper"))
-        if isinstance(item, dict) and item.get("relation_status") != CONTEXT_STATUS_CANDIDATE
-    ]
-    lower = [
-        _project_context_item(item)
-        for item in _json_list(result.get("lower"))
-        if isinstance(item, dict) and item.get("relation_status") != CONTEXT_STATUS_CANDIDATE
-    ]
     return {
         "focus": {"id": component_db_id, "label": str(focus.get("label") or "")},
-        "upper": upper[:_GRAPH_LANE_MAX],
-        "lower": lower[:_GRAPH_LANE_MAX],
+        "upper": _visible_lane(result.get("upper")),
+        "lower": _visible_lane(result.get("lower")),
     }
 
 
@@ -585,7 +593,9 @@ def build_component_context(
             "graph_summary_excerpt": graph_summary_excerpt,
         },
         "supports": _build_supports(assembly_record, claims_by_id, equations_by_id, components_by_agent_id),
-        "provenance": "course_freeze",
+        # 出所ラベルの位置は DTO 契約（component は instance の中、claim / equation は
+        # トップレベル）。値だけを共有定数に寄せ、位置は動かさない。
+        "provenance": PROVENANCE_COURSE_FREEZE,
     }
 
     result = {

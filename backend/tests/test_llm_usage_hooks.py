@@ -308,6 +308,181 @@ class TestGenerateStructuredWithImages:
 
 
 # ---------------------------------------------------------------------------
+# generate_json_with_image — messages + 単一画像の vision（equation_semantics 用）
+# ---------------------------------------------------------------------------
+
+
+_EQ_IMAGE = b"\x89PNG\r\n\x1a\n" + b"0" * 10
+
+
+class TestGenerateJsonWithImage:
+    """数式画像 OCR の vision 経路が計測される（U3。旧実装は agent 側で provider SDK を
+    直接叩いており `llm_usage_events` に一切載っていなかった）。"""
+
+    def test_openai_path_records_reported_usage_and_returns_raw_text(
+        self, monkeypatch, captured_events
+    ):
+        import core.llm as llm
+
+        fake_response = _fake_openai_chat_response(
+            content='{"latex": "x=1"}',
+            prompt_tokens=800,
+            completion_tokens=30,
+            total_tokens=830,
+        )
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = fake_response
+
+        monkeypatch.setattr(llm, "get_settings", lambda: _make_settings("openai"))
+        monkeypatch.setattr(llm, "_get_openai_client", lambda: fake_client)
+
+        messages = [
+            {"role": "system", "content": "you are an OCR"},
+            {"role": "user", "content": "read this"},
+        ]
+        result = llm.generate_json_with_image(
+            messages, _EQ_IMAGE, model="gpt-4o", mime_type="image/png"
+        )
+
+        # パースはしない（生テキストを返す。パーサは agent 側が持つ）。
+        assert result == '{"latex": "x=1"}'
+
+        assert len(captured_events) == 1
+        event = captured_events[0]
+        assert event.operation == "vision"
+        assert event.provider == "openai"
+        assert event.usage_source == "reported"
+        assert event.image_count == 1
+        assert event.prompt_tokens == 800
+
+    def test_openai_request_keeps_json_object_mode_and_attaches_image(
+        self, monkeypatch, captured_events
+    ):
+        import core.llm as llm
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _fake_openai_chat_response(
+            content="{}"
+        )
+
+        monkeypatch.setattr(llm, "get_settings", lambda: _make_settings("openai"))
+        monkeypatch.setattr(llm, "_get_openai_client", lambda: fake_client)
+
+        messages = [{"role": "user", "content": "read this"}]
+        llm.generate_json_with_image(messages, _EQ_IMAGE, model="gpt-4o")
+
+        kwargs = fake_client.chat.completions.create.call_args.kwargs
+        assert kwargs["response_format"] == {"type": "json_object"}
+        assert kwargs["temperature"] == 0.0
+        content = kwargs["messages"][-1]["content"]
+        assert content[0] == {"type": "text", "text": "read this"}
+        assert content[1]["type"] == "image_url"
+        assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+        assert content[1]["image_url"]["detail"] == "high"
+
+        # 呼び出し元の messages は書き換えない（vision 失敗時のテキストフォールバックが
+        # 画像パーツ入りの content をテキスト経路へ流さないため）。
+        assert messages == [{"role": "user", "content": "read this"}]
+
+    def test_sdk_exception_records_failure_and_propagates(self, monkeypatch, captured_events):
+        import core.llm as llm
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.side_effect = TimeoutError("slow")
+
+        monkeypatch.setattr(llm, "get_settings", lambda: _make_settings("openai"))
+        monkeypatch.setattr(llm, "_get_openai_client", lambda: fake_client)
+
+        with pytest.raises(TimeoutError):
+            llm.generate_json_with_image(
+                [{"role": "user", "content": "read this"}], _EQ_IMAGE, model="gpt-4o"
+            )
+
+        assert len(captured_events) == 1
+        event = captured_events[0]
+        assert event.operation == "vision"
+        assert event.success is False
+        assert event.image_count == 1
+
+    def test_gemini_path_records_reported_usage(self, monkeypatch, captured_events):
+        import core.llm as llm
+
+        fake_response = types.SimpleNamespace(
+            text='{"latex": "y=2"}',
+            usage_metadata=types.SimpleNamespace(
+                prompt_token_count=500, candidates_token_count=40, total_token_count=540
+            ),
+        )
+        fake_model = MagicMock()
+        fake_model.generate_content.return_value = fake_response
+        fake_genai = MagicMock()
+        fake_genai.GenerativeModel.return_value = fake_model
+
+        monkeypatch.setattr(llm, "get_settings", lambda: _make_settings("gemini"))
+        monkeypatch.setattr(llm, "_get_gemini_module", lambda: fake_genai)
+
+        result = llm.generate_json_with_image(
+            [{"role": "user", "content": "read this"}], _EQ_IMAGE, model="gemini-1.5-pro"
+        )
+
+        assert result == '{"latex": "y=2"}'
+        assert len(captured_events) == 1
+        event = captured_events[0]
+        assert event.operation == "vision"
+        assert event.provider == "gemini"
+        assert event.usage_source == "reported"
+        assert event.prompt_tokens == 500
+
+    def test_unsupported_provider_raises_not_implemented_without_recording(
+        self, monkeypatch, captured_events
+    ):
+        """未対応プロバイダは NotImplementedError（防御的ガード）。
+
+        現行 ``Settings.llm_provider`` の Literal は4値すべてこの経路を実装済みなので
+        実運用では到達しないが、agent 側はこの例外を
+        ``reason="provider_has_no_equation_vision_path"`` のテキストフォールバックへ
+        マップする（旧実装の「どの分岐にも入らなかった」に対応）。
+        """
+        import core.llm as llm
+
+        monkeypatch.setattr(
+            llm, "get_settings", lambda: types.SimpleNamespace(llm_provider="anthropic")
+        )
+
+        with pytest.raises(NotImplementedError):
+            llm.generate_json_with_image(
+                [{"role": "user", "content": "read this"}], _EQ_IMAGE, model="whatever"
+            )
+
+        # プロバイダ呼び出し自体が起きていないので消費もない（捏造しない）。
+        assert captured_events == []
+
+    def test_feature_attribution_follows_usage_context(self, monkeypatch, captured_events):
+        import core.llm as llm
+        from core.llm_usage.context import usage_context
+
+        fake_client = MagicMock()
+        fake_client.chat.completions.create.return_value = _fake_openai_chat_response(
+            content="{}"
+        )
+        monkeypatch.setattr(llm, "get_settings", lambda: _make_settings("openai"))
+        monkeypatch.setattr(llm, "_get_openai_client", lambda: fake_client)
+
+        with usage_context(
+            "pipeline:equation_semantics", user_id="teacher-1", document_id="doc-1"
+        ):
+            llm.generate_json_with_image(
+                [{"role": "user", "content": "read this"}], _EQ_IMAGE, model="gpt-4o"
+            )
+
+        assert len(captured_events) == 1
+        event = captured_events[0]
+        assert event.feature == "pipeline:equation_semantics"
+        assert event.user_id == "teacher-1"
+        assert event.document_id == "doc-1"
+
+
+# ---------------------------------------------------------------------------
 # transcribe_audio
 # ---------------------------------------------------------------------------
 

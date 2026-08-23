@@ -26,6 +26,7 @@ from services import (
     update_background_task,
 )
 from core.course_data import course_source_material_ids
+from core.document_pipeline.orchestrator import PIPELINE_STAGES
 from core.postgres import get_session as _pg_session
 from core.storage import get_storage_client
 
@@ -36,26 +37,81 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["Lecture Script Studio"])
 
 
+# ---------------------------------------------------------------------------
+# 単独再実行 (start_stage / target_stage) が受け付けるステージ集合。
+#
+# 正本は ``core.document_pipeline.orchestrator.PIPELINE_STAGES``（ステージ列そのもの）
+# から導出する。かつては下の表示ラベル表のキーを allow-list に兼用していたため、
+# ラベル追補を忘れたステージ（apparatus_semantics / contextual_explanation /
+# discuss_opening / landscape_placement / figure_image_extraction / dsl_embedding /
+# persist_claims_components_graph 等）が管理UIの再実行メニューに出るのに 400
+# "Unknown pipeline start stage" になっていた。ステージ表を2箇所に持たないこと。
+#
+# ``completed`` はラン完了マーカーで実行対象のステージではないため除く
+# （orchestrator 側は PIPELINE_STAGES 全体を受けるが、"completed" を渡しても
+# 実行できるステージが無く意味を持たない）。
+# ---------------------------------------------------------------------------
+
+DOCUMENT_PIPELINE_STAGES: tuple[str, ...] = tuple(
+    stage for stage in PIPELINE_STAGES if stage != "completed"
+)
+
+
+# 進捗表示用のラベル表（表示専用 — 受理判定には使わない）。
+# ステージ名の日本語表現は管理UI (`admin.js` の materialPipelineStageGroups) と
+# `docs/pipeline/overview.md` のステージ表に合わせる。ラベル未登録のステージは
+# ``.get(stage, "Agent Pipeline")`` でフォールバックするため受理には影響しない。
+#
+# ラベルは**教員が読む進捗表示**なので、内部の Agent クラス名
+# （DocumentStructureAgent 等）を値に入れない。かつて18件が英語クラス名のままで、
+# 追補された日本語ラベルと混在していた（「DocumentStructureAgentが進行中です...」）。
+# 内部ステージキー（dict のキー）は agent 実装と結び付いているため変更しない。
+# 再混入は test_lecture_studio.py::TestDocumentPipelineStageRegistry が検出する。
 DOCUMENT_PIPELINE_STAGE_LABELS: dict[str, str] = {
-    "document_structure": "DocumentStructureAgent",
-    "paper_skeleton": "PaperSkeletonAgent",
-    "rhetorical_role": "RhetoricalRoleAgent",
-    "claim_qualification": "ClaimQualificationAgent",
-    "equation_semantics": "EquationSemanticsAgent",
-    "evidence_registry": "EvidenceRegistryBuilder",
-    "claim_object_builder": "ClaimObjectBuilder",
-    "symbol_registry": "SymbolRegistryBuilder",
-    "derivation_chain": "DerivationChainAgent",
-    "figure_table_semantics": "FigureTableSemanticsAgent",
-    "thesis_reconstruction": "ThesisReconstructionAgent",
-    "dsl_linking": "DSLLinkingAgent",
-    "component_assembly": "ComponentAssemblyAgent",
-    "component_graph": "ComponentGraphAgent",
-    "narrative_annotator": "NarrativeAnnotator",
-    "course_mapping": "CourseMappingAgent",
-    "blueprint": "BlueprintAgent",
-    "export_validation": "ExportValidationGate",
+    "save_pdf": "入力ファイルの保存",
+    "grobid_parse": "本文の抽出（GROBID）",
+    "document_structure": "文書構造の復元",
+    "figure_image_extraction": "図画像の抽出",
+    "source_chunking": "チャンクの生成",
+    "source_embedding": "チャンクの埋め込み保存",
+    "paper_skeleton": "論文アウトラインの推定",
+    "rhetorical_role": "論述の役割分類",
+    "claim_qualification": "主張の抽出・分類",
+    "equation_semantics": "数式の意味付け",
+    "evidence_registry": "根拠の一元管理",
+    "claim_object_builder": "主張オブジェクトの組み立て",
+    "symbol_registry": "数式記号の整理",
+    "derivation_chain": "導出関係の構築",
+    "figure_table_semantics": "図表の意味復元",
+    "apparatus_semantics": "図の装置・パーツ解析",
+    "thesis_reconstruction": "中心命題の再構成",
+    "dsl_linking": "概念グラフへの接続",
+    "dsl_embedding": "DSL の埋め込み保存",
+    "component_assembly": "理論コンポーネントの組み立て",
+    "component_graph": "理論操作グラフの構築",
+    "narrative_annotator": "説明注釈の付与",
+    "contextual_explanation": "要素の二層説明の生成",
+    "discuss_opening": "議論のきっかけの生成",
+    "landscape_placement": "分野マップ配置候補の生成",
+    "course_mapping": "コース項目への対応付け",
+    "blueprint": "コース設計案の生成",
+    "export_validation": "整合性の最終チェック",
+    "persist_claims_components_graph": "解析結果の保存",
 }
+
+
+def _validate_pipeline_stage_request(
+    target_stage: str | None, start_stage: str | None
+) -> None:
+    """``start_stage`` / ``target_stage`` が実在するステージか検証する。
+
+    受理集合の正本は ``DOCUMENT_PIPELINE_STAGES``（= orchestrator の PIPELINE_STAGES）。
+    エラー文言は従来と同一に保つ（フロントは detail をそのまま表示する）。
+    """
+    if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Unknown pipeline stage")
+    if start_stage and start_stage not in DOCUMENT_PIPELINE_STAGES:
+        raise HTTPException(status_code=400, detail="Unknown pipeline start stage")
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +353,7 @@ def _get_active_task_for_material(material_id: str) -> dict | None:
 
 
 def _material_pipeline_status(material_id: str, document_id: str) -> dict:
-    stages = {stage: "not_started" for stage in DOCUMENT_PIPELINE_STAGE_LABELS}
+    stages = {stage: "not_started" for stage in DOCUMENT_PIPELINE_STAGES}
     status = "not_started"
     current_stage = ""
     error_message = ""
@@ -597,10 +653,7 @@ def run_course_document_pipeline(
 
     target_stage = str((body or {}).get("target_stage") or "").strip() or None
     start_stage = str((body or {}).get("start_stage") or "").strip() or None
-    if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
-        raise HTTPException(status_code=400, detail="Unknown pipeline stage")
-    if start_stage and start_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
-        raise HTTPException(status_code=400, detail="Unknown pipeline start stage")
+    _validate_pipeline_stage_request(target_stage, start_stage)
 
     documents = _course_pipeline_documents(course_data)
     if not documents:
@@ -673,10 +726,7 @@ def run_material_document_pipeline(
     """教材単位の document-first Agent Pipeline を起動する。"""
     target_stage = str((body or {}).get("target_stage") or "").strip() or None
     start_stage = str((body or {}).get("start_stage") or "").strip() or None
-    if target_stage and target_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
-        raise HTTPException(status_code=400, detail="Unknown pipeline stage")
-    if start_stage and start_stage not in DOCUMENT_PIPELINE_STAGE_LABELS:
-        raise HTTPException(status_code=400, detail="Unknown pipeline start stage")
+    _validate_pipeline_stage_request(target_stage, start_stage)
 
     document = _get_editable_material_document(material_id, current_user)
     active = _get_active_task_for_material(document["material_id"])

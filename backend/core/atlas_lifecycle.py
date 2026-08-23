@@ -109,6 +109,31 @@ def _affected_courses_for_domain(session, domain_key: str, removed_ids: set[str]
     return affected
 
 
+#: 版から消える項目があるときに必ず添える事実文（件数・煽り表現を書かない）。
+#: 正本: docs/features/category_gap_candidates_design.md §5.5（gap 経路に限らず
+#: removed node のある freeze 全般の改善として入れる）。
+FACT_REMOVED_NODES_HIDE_LEARNER_TRACES = (
+    "この版に存在しない項目を参照する学習者の記録は、"
+    "その版からは表示されなくなります（記録自体は残ります）。"
+)
+
+#: 新しい項目を足しても、既存の論文の配置は再解析するまで変わらないという事実
+#: （「カテゴリを足したのに論文が載らない」という空振りの期待を作らないため。§5.5）。
+FACT_ADDED_NODES_NEED_REANALYSIS = (
+    "追加した項目に既存の論文が並ぶのは、その論文をもう一度解析したときです。"
+)
+
+
+def _freeze_impact_facts(removed_ids: set[str], added_ids: set[str]) -> list[str]:
+    """影響プレビューに添える事実文（該当するものだけ・順序は決定論）。"""
+    facts: list[str] = []
+    if removed_ids:
+        facts.append(FACT_REMOVED_NODES_HIDE_LEARNER_TRACES)
+    if added_ids:
+        facts.append(FACT_ADDED_NODES_NEED_REANALYSIS)
+    return facts
+
+
 def compute_freeze_impact(
     session,
     domain_key: str,
@@ -132,6 +157,7 @@ def compute_freeze_impact(
             "removed_node_ids": [],
             "added_node_ids": [],
             "affected_courses": [],
+            "facts": [],
         }
 
     draft_ids = set(draft_skeleton.concept_ids()) | set(draft_skeleton.region_ids())
@@ -156,4 +182,6 @@ def compute_freeze_impact(
         "removed_node_ids": sorted(removed_ids),
         "added_node_ids": sorted(added_ids),
         "affected_courses": affected_courses,
+        # 差分の意味を教員向けの事実文で添える（数値・督促は書かない。§5.5）。
+        "facts": _freeze_impact_facts(removed_ids, added_ids),
     }

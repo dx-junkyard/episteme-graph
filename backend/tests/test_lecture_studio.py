@@ -307,6 +307,271 @@ class TestMaterialPipelineSourceLoading:
         assert source_kind == "pdf"
 
 
+class TestDocumentPipelineStageRegistry:
+    """単独再実行 API の受理ステージ集合は orchestrator の PIPELINE_STAGES が正本。
+
+    かつては表示ラベル表 (``DOCUMENT_PIPELINE_STAGE_LABELS``、18件) のキーを
+    start_stage / target_stage の allow-list に兼用していたため、ラベル追補漏れの
+    ステージ（apparatus_semantics / contextual_explanation / discuss_opening /
+    landscape_placement / figure_image_extraction / dsl_embedding /
+    persist_claims_components_graph 等）は管理UIの再実行メニューに出るのに
+    400 "Unknown pipeline start stage" になっていた。ステージ表を2箇所に持たない。
+    """
+
+    @staticmethod
+    def _pipeline_module():
+        from routes.lecture_studio import pipeline as lecture_studio_pipeline
+
+        return lecture_studio_pipeline
+
+    @staticmethod
+    def _stub_material_run(monkeypatch, mod):
+        """DB・ストレージ・スレッドに触れずに run API のバリデーションだけ通す。"""
+        from types import SimpleNamespace
+
+        started: list = []
+
+        class _FakeThread:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+
+            def start(self):
+                started.append(self.kwargs)
+
+        monkeypatch.setattr(mod, "threading", SimpleNamespace(Thread=_FakeThread))
+        monkeypatch.setattr(mod, "create_background_task", lambda *a, **k: None)
+        monkeypatch.setattr(mod, "update_background_task", lambda *a, **k: None)
+        monkeypatch.setattr(mod, "_get_active_task_for_material", lambda *a, **k: None)
+        monkeypatch.setattr(
+            mod,
+            "_get_editable_material_document",
+            lambda material_id, current_user: {
+                "document_id": "doc-1",
+                "material_id": material_id,
+                "filename": "paper.pdf",
+            },
+        )
+        return started
+
+    def test_accepted_stages_are_derived_from_orchestrator(self):
+        from core.document_pipeline.orchestrator import PIPELINE_STAGES
+
+        mod = self._pipeline_module()
+        expected = tuple(stage for stage in PIPELINE_STAGES if stage != "completed")
+        assert mod.DOCUMENT_PIPELINE_STAGES == expected
+        # 終端マーカーは実行可能なステージではないので受け付けない。
+        assert "completed" not in mod.DOCUMENT_PIPELINE_STAGES
+
+    def test_every_pipeline_stage_has_a_display_label(self):
+        """PIPELINE_STAGES（completed 除く）の全ステージに表示ラベルがある。"""
+        mod = self._pipeline_module()
+        missing = [
+            stage
+            for stage in mod.DOCUMENT_PIPELINE_STAGES
+            if not mod.DOCUMENT_PIPELINE_STAGE_LABELS.get(stage)
+        ]
+        assert missing == [], f"表示ラベル未登録のステージ: {missing}"
+        # ラベル表に実在しないステージ名（typo・撤去済みステージ）を残さない。
+        assert set(mod.DOCUMENT_PIPELINE_STAGE_LABELS) == set(mod.DOCUMENT_PIPELINE_STAGES)
+
+    def test_every_display_label_is_japanese(self):
+        """進捗表示ラベルに英語 Agent クラス名を混ぜない。
+
+        ラベルは教員が読む進捗表示（「〜が進行中です...」）に埋め込まれる。かつては
+        18件が ``DocumentStructureAgent`` のような内部 Agent クラス名のままで、
+        追補された日本語ラベル（「図画像の抽出」等）と英日まだらになっていた。
+        内部ステージキー（dict のキー）は agent 実装と結び付いているため変更しない。
+        """
+        import re
+
+        mod = self._pipeline_module()
+        japanese = re.compile(r"[ぁ-んァ-ヶー一-龠]")
+        # 「FooAgent」「FooBuilder」「FooGate」形の ASCII クラス名を値に置かない。
+        class_name = re.compile(r"^[A-Za-z][A-Za-z0-9]*(Agent|Builder|Gate|Annotator)$")
+
+        not_japanese = sorted(
+            f"{stage}={label}"
+            for stage, label in mod.DOCUMENT_PIPELINE_STAGE_LABELS.items()
+            if not japanese.search(label)
+        )
+        assert not_japanese == [], f"日本語ラベルでないステージ: {not_japanese}"
+
+        class_names = sorted(
+            f"{stage}={label}"
+            for stage, label in mod.DOCUMENT_PIPELINE_STAGE_LABELS.items()
+            if class_name.match(label)
+        )
+        assert class_names == [], f"Agent クラス名がラベルに再混入: {class_names}"
+
+    def test_stage_labels_agree_with_the_model_selection_ui(self):
+        """同一ステージに2つの日本語名を持たない（進捗表示 ⇄ M層モデル選択UI）。
+
+        ラベル日本語化の際、M層 ``llm_policy.PIPELINE_STAGE_LABELS`` と 12 共有キー中
+        9 件で訳語が割れていることが表面化した（例: paper_skeleton =
+        「論文アウトラインの推定」vs「論文骨格の仮説化」）。語彙ガードレールの
+        重複表検出はキー集合の完全一致でグルーピングするため、この**部分重複の割れは
+        機械検出されない** — 共有キーの値一致をここで固定する。
+        """
+        from core.llm_policy import PIPELINE_STAGE_LABELS
+
+        mod = self._pipeline_module()
+        diverged = sorted(
+            f"{stage}: 進捗表示={mod.DOCUMENT_PIPELINE_STAGE_LABELS[stage]!r} "
+            f"M層UI={PIPELINE_STAGE_LABELS[stage]!r}"
+            for stage in set(mod.DOCUMENT_PIPELINE_STAGE_LABELS) & set(PIPELINE_STAGE_LABELS)
+            if mod.DOCUMENT_PIPELINE_STAGE_LABELS[stage] != PIPELINE_STAGE_LABELS[stage]
+        )
+        assert diverged == [], f"同一ステージの訳語が画面間で分裂: {diverged}"
+
+    def test_frontend_keeps_no_copy_of_the_stage_label_table(self):
+        """原稿スタジオ JS に訳語表のコピーを持たない（表を2箇所に増やさない）。
+
+        撤去した3つは同じ死クラスタ:
+        - ``lsAgentStageLabels`` … バックエンド旧ラベル表の第3コピー（英語のまま
+          取り残され、進捗復帰表示に「DocumentStructureAgentが進行中です...」と出ていた）
+        - ``lsRunDocumentPipeline`` … 呼び出し元ゼロ
+        - ``lsSetAgentStageItemState`` … 呼び出し元ゼロ。生成コードが存在しない
+          ``.ls-agent-stage-btn`` を走査していた
+
+        ステージ表示名の正本はバックエンドで、フロントは task の
+        ``result_data.label`` をそのまま表示する。
+        """
+        from pathlib import Path
+
+        js = (
+            Path(__file__).resolve().parents[2]
+            / "frontend" / "public" / "js" / "admin-lecture-studio.js"
+        ).read_text(encoding="utf-8")
+
+        assert "var lsAgentStageLabels" not in js
+        assert "function lsRunDocumentPipeline" not in js
+        assert "function lsSetAgentStageItemState" not in js
+        assert ".ls-agent-stage-btn" not in js
+        # 訳語表のコピーが復活していないこと（値としての Agent クラス名）。
+        for class_name in ('"DocumentStructureAgent"', '"ComponentGraphAgent"', '"ExportValidationGate"'):
+            assert class_name not in js, f"訳語表のコピーが復活: {class_name}"
+        # 復帰表示はバックエンドの label を使う（フロントで訳し直さない）。
+        assert 'var label = targetStage ? (rd.label || targetStage) : "パイプライン全実行";' in js
+
+    def test_material_run_accepts_stage_absent_from_legacy_label_table(self, monkeypatch):
+        """管理UIが送る start_stage=apparatus_semantics が 400 にならない。"""
+        mod = self._pipeline_module()
+        started = self._stub_material_run(monkeypatch, mod)
+
+        result = mod.run_material_document_pipeline(
+            material_id="mat-1",
+            body={"start_stage": "apparatus_semantics"},
+            current_user={"id": "u-1", "role": "TEACHER"},
+        )
+
+        assert result["start_stage"] == "apparatus_semantics"
+        assert result["status"] == "pending"
+        # worker スレッドへも同じ start_stage が渡る（Thread は fake なので実行しない）。
+        assert started
+        assert started[0]["kwargs"]["start_stage"] == "apparatus_semantics"
+
+    def test_material_run_accepts_every_pipeline_stage(self, monkeypatch):
+        """従来受理していた18件を含め、全ステージが start_stage として通る。"""
+        mod = self._pipeline_module()
+        self._stub_material_run(monkeypatch, mod)
+
+        for stage in mod.DOCUMENT_PIPELINE_STAGES:
+            result = mod.run_material_document_pipeline(
+                material_id="mat-1",
+                body={"start_stage": stage},
+                current_user={"id": "u-1", "role": "TEACHER"},
+            )
+            assert result["start_stage"] == stage, stage
+
+    def test_material_run_rejects_unknown_stage(self, monkeypatch):
+        """存在しないステージ名は従来どおり 400 + 同一 detail 文言。"""
+        from fastapi import HTTPException
+        import pytest as _pytest
+
+        mod = self._pipeline_module()
+        self._stub_material_run(monkeypatch, mod)
+
+        with _pytest.raises(HTTPException) as exc:
+            mod.run_material_document_pipeline(
+                material_id="mat-1",
+                body={"start_stage": "no_such_stage"},
+                current_user={"id": "u-1", "role": "TEACHER"},
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Unknown pipeline start stage"
+
+        with _pytest.raises(HTTPException) as exc:
+            mod.run_material_document_pipeline(
+                material_id="mat-1",
+                body={"target_stage": "completed"},
+                current_user={"id": "u-1", "role": "TEACHER"},
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Unknown pipeline stage"
+
+    def test_course_run_accepts_and_rejects_the_same_stage_set(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from fastapi import HTTPException
+        import pytest as _pytest
+
+        mod = self._pipeline_module()
+
+        class _FakeThread:
+            def __init__(self, *args, **kwargs):
+                self.kwargs = kwargs
+
+            def start(self):
+                pass
+
+        monkeypatch.setattr(mod, "threading", SimpleNamespace(Thread=_FakeThread))
+        monkeypatch.setattr(mod, "create_background_task", lambda *a, **k: None)
+        monkeypatch.setattr(mod, "update_background_task", lambda *a, **k: None)
+        monkeypatch.setattr(mod, "get_editable_course_data", lambda *a, **k: {"topics": []})
+        monkeypatch.setattr(mod, "get_active_task_for_course", lambda *a, **k: None)
+        monkeypatch.setattr(
+            mod,
+            "_course_pipeline_documents",
+            lambda course_data: [
+                {"document_id": "doc-1", "material_id": "mat-1", "filename": "paper.pdf"}
+            ],
+        )
+
+        result = mod.run_course_document_pipeline(
+            course_id="course-1",
+            body={"start_stage": "landscape_placement"},
+            current_user={"id": "u-1", "role": "TEACHER"},
+        )
+        assert result["start_stage"] == "landscape_placement"
+
+        with _pytest.raises(HTTPException) as exc:
+            mod.run_course_document_pipeline(
+                course_id="course-1",
+                body={"start_stage": "no_such_stage"},
+                current_user={"id": "u-1", "role": "TEACHER"},
+            )
+        assert exc.value.status_code == 400
+        assert exc.value.detail == "Unknown pipeline start stage"
+
+    def test_admin_ui_pipeline_menu_stages_are_all_accepted(self):
+        """`admin.js` の再実行メニューが送り得る全ステージがバックエンドで受理される。"""
+        import re
+        from pathlib import Path
+
+        js = (
+            Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js"
+        ).read_text(encoding="utf-8")
+        start = js.index("var materialPipelineStageGroups = [")
+        end = js.index("var materialPipelineStages =", start)
+        ui_stages = re.findall(r'\["([a-z_]+)",\s*"', js[start:end])
+        # 抽出が空振りして緑にならないようにする（現行メニューは19ステージ）。
+        assert len(ui_stages) >= 19
+
+        mod = self._pipeline_module()
+        unknown = [stage for stage in ui_stages if stage not in mod.DOCUMENT_PIPELINE_STAGES]
+        assert unknown == [], f"バックエンドが受理しないステージが管理UIにある: {unknown}"
+
+
 class TestCourseTopicCheckQuestions:
     def test_normalize_check_questions_accepts_detailed_objects(self):
         from routes.lecture_studio import _normalize_check_questions

@@ -180,6 +180,17 @@ class Settings(BaseSettings):
         default="",
         validation_alias=AliasChoices("DOUBT_ASSUMPTION_LLM_MODEL"),
     )
+    # 反証条件候補抽出（SL-1, 賭け金の台帳）の 1 日あたり LLM コール上限
+    # （doubt_scope / doubt_assumption とは独立のカウンタ）
+    doubt_falsification_max_calls_per_day: int = Field(
+        default=10,
+        validation_alias=AliasChoices("DOUBT_FALSIFICATION_MAX_CALLS_PER_DAY"),
+    )
+    # 空文字なら fast tier（llm_fast_model）に委譲
+    doubt_falsification_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DOUBT_FALSIFICATION_LLM_MODEL"),
+    )
 
     # --- 再構成ループ（Reconstruction Loop, R層） — item オーサリングのコスト制御 ---
     # （tension / anchor / doubt とは独立のカウンタ）
@@ -326,6 +337,15 @@ class Settings(BaseSettings):
     teaching_figure_max_suggestions: int = Field(
         default=4,
         validation_alias=AliasChoices("TEACHING_FIGURE_MAX_SUGGESTIONS"),
+    )
+
+    # --- カテゴリギャップ候補（migration 066） ---
+    # 正本: docs/features/category_gap_candidates_design.md §5.1
+    # 1 document あたりに保存するギャップ信号の上限（追加 LLM コールは無く、
+    # landscape_placement の同一コールに相乗りする。0 で申告させない）
+    landscape_gap_max_per_document: int = Field(
+        default=3,
+        validation_alias=AliasChoices("LANDSCAPE_GAP_MAX_PER_DOCUMENT"),
     )
 
     # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---

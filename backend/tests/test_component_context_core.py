@@ -438,6 +438,99 @@ class TestBuildGraph:
         graph = component_context._build_graph(_COMP_UUID, _DOC_A)
         assert len(graph["upper"]) == component_context._GRAPH_LANE_MAX
 
+    def test_item_keys_stay_the_legacy_six(self, monkeypatch):
+        """graph レーンの ITEM は旧6キーのまま（``group`` を足さない）。
+
+        ``group`` が1件でも入ると統一パーツカード（``element-card.js`` の
+        ``hasGroupedItems``）が4区画描画へ切り替わり、可視の UX 変更になる。
+        """
+        monkeypatch.setattr(
+            component_context.context_lens_mod,
+            "build",
+            lambda ref: {
+                "focus": {"label": "焦点"},
+                "upper": [
+                    {"element_id": "up-1", "element_type": "theory_claim", "label": "上位A",
+                     "relation_label": "を支持する", "relation_status": "source_backed",
+                     "navigable": True, "group": "claim", "sublabel": "区別材料",
+                     "qualifier": "", "unresolved": False, "label_source": "text",
+                     "evidence_refs": ["ev_0001"], "relation": "backed_by_claim"},
+                ],
+                "lower": [],
+            },
+        )
+        item = component_context._build_graph(_COMP_UUID, _DOC_A)["upper"][0]
+        assert set(item) == {
+            "id", "element_type", "label", "relation_label", "relation_status", "navigable"
+        }
+
+    def test_internal_id_labels_are_replaced_with_generic_labels(self, monkeypatch):
+        """A-3（望ましい挙動変更）: 遮断層が component の graph レーンにも効く。
+
+        W層 ``_build_component`` はノードラベルを引けなかったとき ``comp_003`` のような
+        agent 側 ref を、``_build_claim`` は図の DB UUID をそのまま label に入れる。
+        従来この経路は W層の値を素通しにしていたため、学習者に内部 ID が見えていた。
+        """
+        monkeypatch.setattr(
+            component_context.context_lens_mod,
+            "build",
+            lambda ref: {
+                "focus": {"label": "焦点"},
+                "upper": [
+                    {"element_id": None, "element_type": "theory_component", "label": "comp_003",
+                     "relation_label": "に含まれる", "relation_status": "source_backed",
+                     "navigable": False},
+                    {"element_id": "fig-1", "element_type": "figure",
+                     "label": _DOC_B,  # 図の DB UUID がそのまま label に入るケース
+                     "relation_label": "を根拠とする", "relation_status": "source_backed",
+                     "navigable": True},
+                ],
+                "lower": [
+                    {"element_id": "eq_tex_b14", "element_type": "equation",
+                     "label": r"\frac{\rho}{\bar{\rho}} - 1",  # 切り詰められた生 TeX
+                     "relation_label": "を用いる", "relation_status": "source_backed",
+                     "navigable": True},
+                ],
+            },
+        )
+        graph = component_context._build_graph(_COMP_UUID, _DOC_A)
+        assert [i["label"] for i in graph["upper"]] == ["関連する論理要素", "図"]
+        assert graph["lower"][0]["label"] == "関連する数式"
+
+    def test_navigable_is_recomputed_fail_closed(self, monkeypatch):
+        """A-3（望ましい挙動変更）: ``navigable`` を学習者が実際に開ける型だけに絞る。
+
+        W層の ``navigable`` は**教員向け**の可否なので、学習者向けの文脈取得 API が
+        無い型（figure / evidence / derivation / stage …）でも真になり得た。押しても
+        何も起きない導線を DTO に残さない（フロントの再ゲートに頼らない）。
+        """
+        monkeypatch.setattr(
+            component_context.context_lens_mod,
+            "build",
+            lambda ref: {
+                "focus": {"label": "焦点"},
+                "upper": [
+                    {"element_id": "cl-1", "element_type": "theory_claim", "label": "主張",
+                     "relation_label": "を支持する", "relation_status": "source_backed",
+                     "navigable": True},
+                    {"element_id": "ev-1", "element_type": "evidence", "label": "本文の一節",
+                     "relation_label": "を根拠とする", "relation_status": "source_backed",
+                     "navigable": True},
+                ],
+                "lower": [
+                    {"element_id": "dv-1", "element_type": "derivation", "label": "導出の名前",
+                     "relation_label": "の導出に属する", "relation_status": "source_backed",
+                     "navigable": True},
+                    {"element_id": "fg-1", "element_type": "figure", "label": "装置図",
+                     "relation_label": "を根拠とする", "relation_status": "source_backed",
+                     "navigable": True},
+                ],
+            },
+        )
+        graph = component_context._build_graph(_COMP_UUID, _DOC_A)
+        assert [i["navigable"] for i in graph["upper"]] == [True, False]
+        assert [i["navigable"] for i in graph["lower"]] == [False, False]
+
 
 # ---------------------------------------------------------------------------
 # build_component_context: end-to-end DTO 組み立て + confidence 非漏洩

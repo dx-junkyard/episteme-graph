@@ -91,6 +91,23 @@
   // パネル DOM
   // -------------------------------------------------------------------------
 
+  // アシスタントの顔（丸い頭・目・口・アンテナだけの線画ロボット）。絵文字 🤖 は端末ごとに
+  // 描き分けが変わり細かすぎたため、単色の SVG に置き換えた（色は currentColor で追従）。
+  // ROBOT_ICON(size) は FAB（大）とパネル見出し（小）で共用する。
+  function ROBOT_ICON(size) {
+    return (
+      '<svg class="admin-assistant-robot" viewBox="0 0 24 24" width="' + size + '" height="' + size + '"' +
+      ' aria-hidden="true" focusable="false">' +
+      '<circle cx="12" cy="3.1" r="1.3" fill="currentColor"/>' +
+      '<path d="M12 4.4v2.3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>' +
+      '<rect x="4.2" y="6.7" width="15.6" height="12.6" rx="4.6" fill="none" stroke="currentColor" stroke-width="1.7"/>' +
+      '<circle cx="9.2" cy="12" r="1.45" fill="currentColor"/>' +
+      '<circle cx="14.8" cy="12" r="1.45" fill="currentColor"/>' +
+      '<path d="M9.7 15.5q2.3 1.9 4.6 0" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>' +
+      "</svg>"
+    );
+  }
+
   // 常設フローティング起動ボタン（右下）。以前この位置は通知ベル（🔔）が占めていたが、
   // 「AI アシスタントへのアクセスを良くする」ため位置を入れ替え、通知はトップバーへ移した。
   function buildToggleButton() {
@@ -100,7 +117,7 @@
     toggleBtn.className = "admin-assistant-fab";
     toggleBtn.setAttribute("data-ui-anchor", "header.copilot");
     toggleBtn.title = "管理画面の操作を手伝う AI アシスタント";
-    toggleBtn.innerHTML = "🤖";
+    toggleBtn.innerHTML = ROBOT_ICON(26);
     toggleBtn.addEventListener("click", togglePanel);
     document.body.appendChild(toggleBtn);
   }
@@ -111,7 +128,7 @@
     panelEl.setAttribute("hidden", "hidden");
     panelEl.innerHTML =
       '<div class="admin-assistant-head">' +
-        '<span class="admin-assistant-title">🤖 操作アシスタント</span>' +
+        '<span class="admin-assistant-title">' + ROBOT_ICON(16) + "操作アシスタント</span>" +
         '<button type="button" class="admin-assistant-close" title="閉じる">×</button>' +
       "</div>" +
       '<div class="admin-assistant-body"></div>' +

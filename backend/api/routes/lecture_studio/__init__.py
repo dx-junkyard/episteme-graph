@@ -74,6 +74,7 @@ from .scripts import (  # noqa: E402,F401
 # pipeline.py 由来
 from .pipeline import (  # noqa: E402,F401
     DOCUMENT_PIPELINE_STAGE_LABELS,
+    DOCUMENT_PIPELINE_STAGES,
     _load_pipeline_source,
     get_storage_client,
 )

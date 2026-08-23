@@ -2,6 +2,9 @@
 
 > **ステータス: S1〜S3 実装済み（2026-07-05, migration 027）**
 > 関連: `field_atlas_binding.md` / `field_atlas_skeleton.md` / `field_atlas_overlay_spec.md`
+>
+> 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
+> 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
 
 ## 実装サマリ
 

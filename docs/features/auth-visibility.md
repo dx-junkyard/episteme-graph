@@ -73,6 +73,54 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 
 ---
 
+## 4.5 オブジェクトスコープの権限（ID 直指定エンドポイント）
+
+`_require_teacher()` が保証するのは「TEACHER 以上であること」だけで、URL の
+`{course_id}` / `{document_id}` / `{material_id}` が**誰のものか**は何も見ていません。
+ID を直指定するエンドポイントは、対象オブジェクトへの権限をサーバ側で確認します
+（UI のボタン非表示・disabled は認可根拠にしません）。
+
+共通ゲート（`backend/api/routes/admin.py`）:
+
+| ヘルパー | 許可 | 委譲先（権限の正本） |
+|---|---|---|
+| `_require_editable_document_or_404(document_ref, current_user)` | document 所有者 / `object_group_permissions('document', …, 'editor')` / SYSTEM_ADMIN | `services.resolve_document_access()`（UUID・`source_path` 両対応） |
+| `_require_editable_course_or_404(course_id, current_user)` | コース所有者 / `object_group_permissions('course', …, 'editor')` / SYSTEM_ADMIN | `services.get_editable_course_data()` |
+
+ルール:
+
+- **不在と権限なしを同じ 404・同じ detail に畳む**（"Document not found" /
+  "Course not found"）。レスポンス本文から対象の存在を判別させません。
+  ロール不足（STUDENT が管理 API を叩く等）は従来どおり `_require_teacher` の 403 です。
+- **副作用より先に認可する**。DB 集計・学生名取得・MinIO 読み書き・background task 起動・
+  LLM 呼び出しはすべてゲート通過後に行います。
+- **閲覧ゲートを変更系の認可に使わない**。`get_material()` や
+  `routes/theory_components.py::_ensure_document_viewable` は public / viewer /
+  コース経由の閲覧者も通すため、再解析・PDF 差し替え・学習痕跡の開示には使えません。
+- SYSTEM_ADMIN の bypass はロール定数を明示比較して行い、TEACHER 全体へ広げません。
+  document 側は SYSTEM_ADMIN でも `resolve_document_access()` を呼び、
+  canonical な `document_id` / `source_path` を得ます（解決できなければ 404）。
+
+適用済みエンドポイント:
+
+| エンドポイント | 境界 |
+|---|---|
+| `GET /api/admin/courses/{cid}/unanswered-queries` | コース owner / editor（学生表示名・質問本文を返すため） |
+| `GET /api/admin/courses/{cid}/bridge-insights` | コース owner / editor（k-匿名集約でも権限外へは存在ごと隠す） |
+| `POST /api/admin/documents/{id}/reanalyze` | document owner / editor |
+| `PUT /api/admin/materials/{id}/pdf` | document owner / editor |
+| `GET /api/learning/courses/{cid}/source-chunk/{chunk_id}` | コースにアクセス可能、**かつ** chunk の document がそのコースの source |
+
+`source-chunk` のスコープは `services.get_accessible_course_data()` →
+`services.list_course_source_document_ids()` →
+`services.get_chunk_passage(..., allowed_document_ids=…)` の SQL 内 `ANY(...)` で強制します
+（取得後の Python 判定にしない。sources が空なら SQL を発行せず 404）。
+本人の全域可視集合（`list_visible_document_ids`）は使いません — 使うと URL のコースに
+紐づかない別コース・public 文書のチャンクまで読めてしまいます。逆に積集合も取りません
+（コースへの正規アクセスが source 文書の開示根拠、という現行設計を保つため）。
+
+---
+
 ## 5. アクセス制御の組み合わせ
 
 実際のアクセス可否は **ロール（RBAC）× 開示範囲（Visibility）× グループ権限**の組み合わせで決まります。

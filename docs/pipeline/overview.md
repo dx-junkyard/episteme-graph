@@ -2,6 +2,11 @@
 
 [← ドキュメント目次](../README.md)
 
+> **更新注記（2026-08-14）:** §2 のステージ表を現行の `_PIPELINE_STEPS` に合わせて更新済み
+> （`contextual_explanation` / `discuss_opening` / `landscape_placement` を追補）。
+> ステージ構成の一次情報は常に `backend/core/document_pipeline/orchestrator.py` の
+> `PIPELINE_STAGES` / `_PIPELINE_STEPS`。
+
 教材としてアップロードされた PDF を、再利用可能な理論コンポーネント／コース教材へ変換する
 **ドキュメントファースト・パイプライン**の全体像です。
 
@@ -23,10 +28,13 @@
 
 ---
 
-## 2. パイプライン 26 ステージ
+## 2. パイプライン 29 ステージ
 
-`orchestrator.py` の `_PIPELINE_STEPS`（名前付き26ステージ + between-stage 決定論的後処理の
-`_hook_*` フック2件）。LLM=LLM-first、Det=決定論的（非 LLM）。
+`orchestrator.py` の `_PIPELINE_STEPS` は 31 要素 = **名前付き 29 ステージ**（`PIPELINE_STAGES`
+の 30 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
+`_hook_*` フック2件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`）。
+LLM=LLM-first、Det=決定論的（非 LLM）、Det+LLM=LLM を呼ぶが M層のステージ別モデル選択の対象外
+（種別の正本は `_PIPELINE_STEPS` 各行の `llm_kind` / `model_policy` 宣言）。
 
 | # | ステージ | 担当 Agent / 処理 | 種別 | 出力（要旨） |
 |---|---|---|---|---|
@@ -54,10 +62,13 @@
 | 20 | `component_assembly` | **ComponentAssemblyAgent** 再利用可能コンポーネント生成 | LLM | ComponentAssemblyResult |
 | 21 | `component_graph` | **ComponentGraphAgent** 理論操作グラフ構築 | Det+LLM | ComponentGraphResult |
 | 22 | `narrative_annotator` | **NarrativeAnnotator** main graph への narrative 注釈（構造非変更） | LLM | NarrativeAnnotationResult |
-| 23 | `course_mapping` | **CourseMappingAgent** Component → Course topic 接続 | Det | CourseMappingResult |
-| 24 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
-| 25 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
-| 26 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
+| 23 | `contextual_explanation` | **ContextualExplanationAgent** 要素の二層説明（contextual / generic）生成 | LLM | `element_explanations` の candidate（stage_outputs に件数・上限情報） |
+| 24 | `discuss_opening` | **DiscussOpeningAgent** discuss 開幕の「議論のきっかけ」生成（1 document = 1 コール） | LLM | `element_explanations`（`role='discussion_seed'`）の candidate |
+| 25 | `landscape_placement` | **LandscapePlacementAgent** 論文を凍結済み基準地図へ配置（+ カテゴリギャップ候補） | LLM | `landscape_placements`（`status='inferred'`）/ `landscape_gap_signals` |
+| 26 | `course_mapping` | **CourseMappingAgent** Component → Course topic 接続 | Det | CourseMappingResult |
+| 27 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
+| 28 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
+| 29 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
 | — | `completed` | ラン完了マーク | — | — |
 
 ---
@@ -91,6 +102,7 @@ PDF
 - **Claim の atomic 化は ClaimQualificationAgent（LLM）が担当**。ClaimObjectBuilder は候補を変換・リンク・検証するだけ（atomic rewrite はしない）。非 atomic / split_pending は `review_required` で保持。
 - **Evidence は PDF 原文由来のみ**を EvidenceRegistry が一元管理。各 claim/equation は `source_evidence_ids` で参照する。
 - **理論操作グラフ（ComponentGraph）**は導出チェーンから決定論的に構築し、ソースバッキング状態とレビュー理由を必ず付与する。詳細 → [DSL と理論操作グラフ](theory-graph.md)。
+- **`contextual_explanation` / `discuss_opening` / `landscape_placement`（23〜25）は非致命**。グラフ・narrative が揃った位置に置かれ、既存成果物の解決済みテキストだけを読んで**候補**（`candidate` / `inferred`）を書く。ここで失敗しても `course_mapping` 以降（永続化）を止めない。確定は必ず教員が行う。
 
 > 上表の各出力を「論文の抽出単位（ブロック → チャンク / エビデンス → span → atomic claim → 理論部品）」という縦串で読み直すなら → [論文の抽出単位](extraction-units.md)。
 

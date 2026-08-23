@@ -1687,6 +1687,288 @@ class TestEquationByIdAndLabel:
 
 
 # ---------------------------------------------------------------------------
+# Phase 3: 承認済み contextual 説明のラベル結線
+# （element_context_presentation_redesign.md §8 Phase 3 /
+#  security_and_context_phase3_implementation_directive.md §5.3・§5.5）
+# ---------------------------------------------------------------------------
+
+
+_APPROVED_BODY = (
+    "この式は物質密度のゆらぎを平均密度に対する比として定義する。以降の摂動論は"
+    "この量を出発点にする。"
+)
+_APPROVED_FIRST_SENTENCE = "この式は物質密度のゆらぎを平均密度に対する比として定義する。"
+
+
+class _FakeExplanationSession:
+    """``element_explanations`` の SELECT だけを解釈する fake セッション。
+
+    実 SQL のバインド変数（document_ids / element_type / kind / status）を素直に
+    適用するので、「approved かつ contextual かつ role IS NULL の行だけが読まれる」
+    ことを行データ側から検証できる。
+    """
+
+    def __init__(self, rows):
+        self.rows = list(rows)
+        self.closed = False
+        self.queries: list[str] = []
+
+    def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        self.queries.append(sql)
+        params = dict(params or {})
+        assert "FROM element_explanations" in sql
+        matched = [
+            r for r in self.rows
+            if r["document_id"] in params["document_ids"]
+            and r["element_type"] == params["element_type"]
+            and r["kind"] == params["kind"]
+            and r["status"] == params["status"]
+            and r.get("role") is None
+        ]
+        matched.sort(key=lambda r: r.get("created_at", 0), reverse=True)
+
+        class _Result:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def fetchall(self):
+                return [(r["document_id"], r["element_id"], r["body"]) for r in self._rows]
+
+        return _Result(matched)
+
+    def close(self):
+        self.closed = True
+
+
+def _explanation_row(**overrides):
+    row = {
+        "document_id": "doc-1",
+        "element_type": "equation",
+        "element_id": "eq_tex_b14",
+        "kind": "contextual",
+        "status": "approved",
+        "role": None,
+        "body": _APPROVED_BODY,
+        "created_at": 1,
+    }
+    row.update(overrides)
+    return row
+
+
+class TestApprovedEquationExplanationLookup:
+    def test_blank_document_id_does_not_touch_the_database(self, monkeypatch):
+        def boom():  # pragma: no cover - 呼ばれたら失敗
+            raise AssertionError("get_session must not be called for a blank document_id")
+
+        monkeypatch.setattr(context_lens, "get_session", boom)
+        assert context_lens._approved_equation_explanations("") == {}
+
+    def test_returns_body_indexed_by_equation_id_and_closes_the_session(self, monkeypatch):
+        session = _FakeExplanationSession([_explanation_row()])
+        monkeypatch.setattr(context_lens, "get_session", lambda: session)
+        assert context_lens._approved_equation_explanations("doc-1") == {
+            "eq_tex_b14": _APPROVED_BODY
+        }
+        assert session.closed is True
+
+    def test_only_approved_contextual_rows_are_read(self, monkeypatch):
+        session = _FakeExplanationSession(
+            [
+                _explanation_row(element_id="eq_candidate", status="candidate"),
+                _explanation_row(element_id="eq_dismissed", status="dismissed"),
+                _explanation_row(element_id="eq_superseded", status="superseded"),
+                _explanation_row(element_id="eq_generic", kind="generic"),
+                _explanation_row(element_id="eq_seed", role="discussion_seed"),
+                _explanation_row(element_id="eq_ok"),
+            ]
+        )
+        monkeypatch.setattr(context_lens, "get_session", lambda: session)
+        assert context_lens._approved_equation_explanations("doc-1") == {
+            "eq_ok": _APPROVED_BODY
+        }
+
+    def test_other_documents_do_not_leak_into_the_index(self, monkeypatch):
+        session = _FakeExplanationSession(
+            [
+                _explanation_row(document_id="doc-2", element_id="eq_tex_b14", body="別論文の説明。"),
+                _explanation_row(document_id="doc-1", element_id="eq_tex_b14"),
+            ]
+        )
+        monkeypatch.setattr(context_lens, "get_session", lambda: session)
+        assert context_lens._approved_equation_explanations("doc-1") == {
+            "eq_tex_b14": _APPROVED_BODY
+        }
+
+    def test_a_single_query_serves_every_equation_of_the_document(self, monkeypatch):
+        session = _FakeExplanationSession(
+            [_explanation_row(element_id="eq_a"), _explanation_row(element_id="eq_b")]
+        )
+        monkeypatch.setattr(context_lens, "get_session", lambda: session)
+        index = context_lens._approved_equation_explanations("doc-1")
+        assert set(index) == {"eq_a", "eq_b"}
+        assert len(session.queries) == 1
+
+
+class TestEquationLabelExplanationLadder:
+    def _record(self):
+        return {
+            "equation_id": "eq_tex_b14",
+            "source_extraction": {"latex": "\\delta = (\\rho - \\bar\\rho)/\\bar\\rho"},
+            "semantics": {
+                "summary": "Definition of the matter density contrast.",
+                "role_in_argument": "definition",
+            },
+        }
+
+    def test_approved_explanation_first_sentence_becomes_the_label(self):
+        label = context_lens._equation_label(
+            self._record(), explanations={"eq_tex_b14": _APPROVED_BODY}
+        )
+        assert label.text == _APPROVED_FIRST_SENTENCE
+        assert label.label_source == "explanation"
+        assert label.unresolved is False
+
+    def test_second_sentence_is_not_part_of_the_label(self):
+        label = context_lens._equation_label(
+            self._record(), explanations={"eq_tex_b14": _APPROVED_BODY}
+        )
+        assert "以降の摂動論" not in label.text
+
+    def test_no_explanation_keeps_the_existing_ladder(self):
+        label = context_lens._equation_label(self._record(), explanations={})
+        assert label.text == "Definition of the matter density contrast."
+        assert label.label_source == "semantic_summary"
+
+    def test_explanation_for_another_equation_is_not_borrowed(self):
+        label = context_lens._equation_label(
+            self._record(), explanations={"eq_other": _APPROVED_BODY}
+        )
+        assert label.label_source == "semantic_summary"
+
+    def test_paper_equation_number_is_outranked_by_the_approved_explanation(self):
+        record = {"equation_id": "eq_2_7", "semantics": {}}
+        assert context_lens._equation_label(record).text == "式 (2.7)"
+        label = context_lens._equation_label(
+            record, explanations={"eq_2_7": _APPROVED_BODY}
+        )
+        assert label.text == _APPROVED_FIRST_SENTENCE
+
+    def test_tex_only_explanation_is_rejected_and_falls_back(self):
+        label = context_lens._equation_label(
+            self._record(),
+            explanations={"eq_tex_b14": "\\delta(t,x) \\equiv \\frac{\\rho - \\bar{\\rho}}{\\bar{\\rho}}"},
+        )
+        assert label.text == "Definition of the matter density contrast."
+        assert label.label_source == "semantic_summary"
+
+    def test_internal_id_only_explanation_is_rejected_and_falls_back(self):
+        label = context_lens._equation_label(
+            self._record(), explanations={"eq_tex_b14": "Derive result eq_tex_b16"}
+        )
+        assert label.label_source == "semantic_summary"
+
+    def test_blank_explanation_is_ignored(self):
+        label = context_lens._equation_label(
+            self._record(), explanations={"eq_tex_b14": "   "}
+        )
+        assert label.label_source == "semantic_summary"
+
+
+class TestBuildEquationExplanationWiring:
+    _DOC = "doc-eq-1"
+    _EQ = "eq_tex_b14"
+
+    def _patch(self, monkeypatch, *, explanations=None, explanations_fail=False):
+        records = [
+            {
+                "equation_id": self._EQ,
+                "document_id": self._DOC,
+                "source_extraction": {
+                    "latex": "\\delta = (\\rho-\\bar\\rho)/\\bar\\rho",
+                    "source_location": {"section_id": "sec_1"},
+                },
+                "semantics": {
+                    "summary": "Definition of the matter density contrast.",
+                    "role_in_argument": "definition",
+                    "output_equation_ids": ["eq_out"],
+                },
+            },
+            {
+                "equation_id": "eq_out",
+                "document_id": self._DOC,
+                "semantics": {"summary": "Fourier space version."},
+            },
+        ]
+        monkeypatch.setattr(
+            context_lens.refs_mod, "equation_records", lambda *_a, **_k: records
+        )
+        monkeypatch.setattr(context_lens.refs_mod, "document_run_artifacts", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_claim_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(context_lens, "_component_id_lookup", lambda _doc: {})
+        monkeypatch.setattr(
+            context_lens, "_load_component_graph", lambda _doc: {"nodes": [], "edges": []}
+        )
+        monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
+        monkeypatch.setattr(context_lens, "_generic_block_for_focus", lambda _ref: None)
+
+        def _explanations(_doc):
+            if explanations_fail:
+                raise RuntimeError("db down")
+            return dict(explanations or {})
+
+        monkeypatch.setattr(context_lens, "_approved_equation_explanations", _explanations)
+
+    def _build(self):
+        return context_lens.build(
+            ElementRef(
+                scope="document",
+                element_type=ELEMENT_EQUATION,
+                element_id=self._EQ,
+                document_id=self._DOC,
+            )
+        )
+
+    def test_focus_headline_uses_the_approved_explanation(self, monkeypatch):
+        self._patch(monkeypatch, explanations={self._EQ: _APPROVED_BODY})
+        result = self._build()
+        assert result["focus"]["headline"] == _APPROVED_FIRST_SENTENCE
+        assert result["focus"]["label"] == _APPROVED_FIRST_SENTENCE
+
+    def test_headline_and_intrinsic_summary_are_not_the_same_string(self, monkeypatch):
+        """CP1: 見出しと意味の一行を同一化しない（説明本文を summary へ複製しない）。"""
+        self._patch(monkeypatch, explanations={self._EQ: _APPROVED_BODY})
+        focus = self._build()["focus"]
+        assert focus["intrinsic_summary"] != focus["headline"]
+        assert _APPROVED_BODY not in focus["intrinsic_summary"]
+
+    def test_related_equation_items_use_their_own_approved_explanation(self, monkeypatch):
+        self._patch(monkeypatch, explanations={"eq_out": _APPROVED_BODY})
+        result = self._build()
+        related = [i for i in result["upper"] if i["element_type"] == "equation"]
+        assert related and related[0]["label"] == _APPROVED_FIRST_SENTENCE
+        # 中心の式には説明が無いので既存ラダーのまま。
+        assert result["focus"]["headline"] == "Definition of the matter density contrast."
+
+    def test_no_explanation_keeps_the_existing_headline(self, monkeypatch):
+        self._patch(monkeypatch, explanations={})
+        assert self._build()["focus"]["headline"] == "Definition of the matter density contrast."
+
+    def test_lookup_failure_degrades_to_the_existing_ladder_with_a_full_dto(self, monkeypatch):
+        self._patch(monkeypatch, explanations_fail=True)
+        result = self._build()
+        assert set(result) >= {"focus", "upper", "lower", "notes"}
+        assert result["focus"]["headline"] == "Definition of the matter density contrast."
+        assert result["focus"]["element_id"] == self._EQ
+
+    def test_headline_never_shows_tex_or_internal_ids(self, monkeypatch):
+        self._patch(monkeypatch, explanations={self._EQ: _APPROVED_BODY})
+        headline = self._build()["focus"]["headline"]
+        assert "\\" not in headline
+        assert "eq_tex" not in headline
+
+
+# ---------------------------------------------------------------------------
 # evidence quote / structure index ヘルパ
 # ---------------------------------------------------------------------------
 

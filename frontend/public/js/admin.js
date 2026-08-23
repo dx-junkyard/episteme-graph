@@ -432,6 +432,12 @@
       var landscapeBtn = m.document_id
         ? '<button class="ls-menu-item admin-landscape-doc-btn" type="button" data-ui-anchor="materials.row-landscape" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この論文が分野マップ（基準地図）のどこに位置づくかのAI候補を確認・却下・再検討します">位置づけ（分野マップ）…</button>'
         : "";
+      // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 輪講の前にこの論文の
+      // 「賭け金」（脆い前提・一点吊りの支持線・晴れ間）を10分で把握する read-only
+      // 合成ビュー（新テーブル・新LLMゼロ、SB1。document_id が必要）
+      var seminarBriefBtn = m.document_id
+        ? '<button class="ls-menu-item admin-seminar-brief-btn" type="button" data-ui-anchor="materials.row-seminar-brief" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="輪講の前に、この論文の脆い前提・一点吊りの支持線・晴れ間を確認します（読み取り専用）">ゼミ前ブリーフ…</button>'
+        : "";
       // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
       var figuresBtn = m.document_id
         ? '<button class="ls-menu-item admin-figures-btn" type="button" data-ui-anchor="materials.row-figures" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="抽出された図・画像を表示">図・画像</button>'
@@ -459,6 +465,7 @@
             shareBtn +
             versionBtn +
             landscapeBtn +
+            seminarBriefBtn +
             estimateBtn +
             pdfBtn +
             resumeBtn +
@@ -521,6 +528,13 @@
     tbody.querySelectorAll(".admin-landscape-doc-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openLandscapeModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: read-only 合成ビューのモーダル
+    tbody.querySelectorAll(".admin-seminar-brief-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openSeminarBriefModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
       });
     });
 
@@ -1070,9 +1084,11 @@
     if (analyzeImagesCheckbox) analyzeImagesCheckbox.checked = !!(lastOpts && lastOpts.analyze_images);
 
     // M層（LLM モデル選択, migration 061）: 前回値を表示し「変更」で選び直せるようにする。
+    // docId は静かな計器（コスト見通しの一行, teacher_triage_instruments_design.md §3.1）
+    // の document 版 forecast 用。
     if (window.AdminLlmModels) {
       var llmModelRow = document.getElementById("reanalyze-llm-model-row");
-      if (llmModelRow) window.AdminLlmModels.initReanalyzePanel(llmModelRow, lastOpts);
+      if (llmModelRow) window.AdminLlmModels.initReanalyzePanel(llmModelRow, lastOpts, docId);
     }
 
     overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
@@ -2188,9 +2204,13 @@
   // N1（Phase S 標準化判定の UI 到達経路）: migration 050 の5語彙を日本語ラベル+色分けで表示する。
   // 値の変更経路は「深く検討」モーダルの標準化候補を教員が commit したときのみ
   // （LLM が library_entries に直接書く経路は無い。KN-3 / L層ガードレール）。数値スコアは出さない。
+  // 正本は backend/core/library/schema.py::STANDARDIZATION_STATUS_LABELS。
+  // deliberation.js / app.js の同語彙表とバイト一致させる
+  // （固定は backend/tests/test_library_vocab_mirror.py）。旧ラベルが括弧で補って
+  // いた語釈（標準＝教科書級 / 分野標準＝その分野内）はバッジの title に移した（P4）。
   var _libraryStandardizationLabels = {
-    standard: "標準（教科書級）",
-    field_standard: "分野内標準",
+    standard: "標準",
+    field_standard: "分野標準",
     emerging_common: "共通化しつつある",
     novel: "新規",
     unknown: "未評価",
@@ -2204,7 +2224,7 @@
   };
   function _libraryStandardizationBadgeHtml(status) {
     var key = _libraryStandardizationLabels.hasOwnProperty(status) ? status : "unknown";
-    return '<span class="admin-status" title="標準化度（三角測量による判定。確定は教員の commit のみ）" style="' +
+    return '<span class="admin-status" title="標準化度（三角測量による判定。確定は教員の commit のみ）。標準＝教科書級の定着 / 分野標準＝その分野内での定着 / 共通化しつつある＝コーパス内で反復するが外部の標準ではない" style="' +
       _libraryStandardizationStyles[key] + '">標準化度: ' + escHtml(_libraryStandardizationLabels[key]) + '</span>';
   }
 
@@ -2714,6 +2734,10 @@
     '</div>';
   }
 
+  // カテゴリギャップ候補（migration 066, §4.1 裁定）: 記録された事実の一行だけを添える。
+  // このモーダルではレビューさせない（「地図を直す」ボタンを1論文の画面に置かない）。
+  var LANDSCAPE_GAP_SIGNAL_NOTICE = "この分野の地図への候補として記録されています（分野の地図タブで確認できます）";
+
   // LS10: どの領域にも置けなかったドメインは失敗ではなく信号。事実文で並べる。
   function _landscapeUnplacedHtml(unplaced) {
     if (!unplaced.length) return "";
@@ -2724,6 +2748,11 @@
       var reason = (item && item.reason) || "";
       html += '<div class="landscape-unplaced-row" style="font-size:12px;color:var(--color-text-secondary);padding:3px 0">' +
         escHtml("この論文は「" + name + "」の地図に配置できませんでした: " + reason) +
+        (item && item.gap_signals_recorded
+          ? '<div class="landscape-gap-signal-row" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+              escHtml(LANDSCAPE_GAP_SIGNAL_NOTICE) +
+            '</div>'
+          : "") +
       '</div>';
     });
     html += '</div>';
@@ -2857,6 +2886,200 @@
         _landscapeResetProposeButton();
         _landscapeNotice((err && err.message) || LANDSCAPE_SKIP_TEXT.llm_call_failed, true);
       });
+  }
+
+  // ── ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1） ─────────────────
+  // 正本: docs/features/seminar_brief_mirroring_design.md
+  //   SB1 新テーブル・新LLMゼロ（既存投影の読み時合成 — このモーダルは読むだけ。書き込みAPIなし）
+  //   SB2 数値を見せない（件数・人数の生値なし。段階ラベル・事実文のみ描画する）
+  //   SB3 第4区画「学習者からの問い」は v1 空欄で予約（空欄は発見の流儀 — 警告色・催促文にしない）
+  //   SB4 学習者個人・学習者別件数への導線を作らない
+  // 描画は createElement / textContent 基調（本文変数を innerHTML に渡さない）。
+
+  // 第4区画の note がサーバから取れないときの固定文
+  // （正本: core/doubt/seminar_brief.py::LEARNER_HANDOFF_RESERVED_NOTE の逐語）。
+  var SEMINAR_BRIEF_RESERVED_NOTE = "（この区画は、学習者からの手渡しの仕組みの実装後に使われます）";
+  // 支持線の段階ラベル。正本は backend/core/doubt/schema.py::SUPPORT_LEVEL_BADGE_LABELS
+  // （test_seminar_brief_ui_static.py が逐語ミラーを固定。SL4: 経路数・カットのサイズは出さない）。
+  var SEMINAR_SUPPORT_LEVEL_LABELS = {
+    none: "支持記録なし",
+    single: "単一の支持線",
+    several: "複数の支持線"
+  };
+  // 検証状態のラベル。正本は backend/core/label_vocab.py::VERIFICATION_STATUS_LABELS_LEDGER
+  // （doubt-atlas.js::STATUS_LABELS と同じ台帳宛先の文言。逐語ミラーをテストで固定）。
+  var SEMINAR_VERIFICATION_STATUS_LABELS = {
+    directly_verified: "直接検証の記帳あり",
+    indirectly_supported: "間接的な支持あり",
+    untested: "未検証",
+    refuted: "反証の記帳あり",
+    unknown: "検証情報なし"
+  };
+  // つまづき4軸の見出し（原稿スタジオの lsStumbleAxis と同じ語彙。k-匿名の段階ラベルのみ）。
+  var SEMINAR_STUMBLE_AXIS_LABELS = [
+    ["error_rate", "誤り率"],
+    ["symbol_descent", "記号降下"],
+    ["verdict_self_check_divergence", "判定の乖離"],
+    ["faq", "質問・誤解"]
+  ];
+
+  function openSeminarBriefModal(documentId, title) {
+    var existing = document.getElementById("seminar-brief-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "seminar-brief-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.seminar-brief-modal");
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    // モーダルの骨組みは静的文字列のみ（教材タイトル・本文はあとから textContent で入れる）。
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:560px;max-width:720px;max-height:82vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 id="seminar-brief-modal-title" style="margin:0;font-size:16px;color:var(--color-text-primary)"></h3>' +
+          '<button id="seminar-brief-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 8px">' +
+          '輪講の前に、この論文の「何が崩れたら危ういか」を確認するための読み取り専用ビューです。' +
+        '</p>' +
+        '<div id="seminar-brief-modal-body" style="overflow-y:auto;flex:1">' +
+          '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById("seminar-brief-modal-title").textContent = "ゼミ前ブリーフ: " + (title || "");
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("seminar-brief-modal-close").addEventListener("click", function () { overlay.remove(); });
+
+    loadSeminarBrief(documentId);
+  }
+
+  function loadSeminarBrief(documentId) {
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/seminar-brief")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        renderSeminarBrief(data || {});
+      })
+      .catch(function () {
+        var body = document.getElementById("seminar-brief-modal-body");
+        if (!body) return;
+        body.textContent = "";
+        body.appendChild(_sbEl("div", "padding:16px;color:var(--color-text-danger);font-size:13px", "ブリーフの読み込みに失敗しました"));
+      });
+  }
+
+  // createElement + textContent の小さなヘルパー（本文変数を innerHTML に渡さない）。
+  function _sbEl(tag, cssText, text) {
+    var el = document.createElement(tag);
+    if (cssText) el.style.cssText = cssText;
+    if (text) el.textContent = text;
+    return el;
+  }
+
+  // 区画の枠。行が空なら null（＝区画ごと静かに省略する。空を告げる置き文を書かない）。
+  function _sbSection(heading, rowEls) {
+    if (!rowEls || !rowEls.length) return null;
+    var section = _sbEl("div", "margin-bottom:16px");
+    section.className = "seminar-brief-section";
+    section.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", heading));
+    rowEls.forEach(function (el) { section.appendChild(el); });
+    return section;
+  }
+
+  // 脆い前提1件の段階ラベル群（SB2: 描画するのはサーバの段階ラベル・レンジ文字列のみ。
+  // 文字列以外の値（数値等）は種類を問わず描画しない構造ガード）。
+  function _sbFragileMeta(item) {
+    var facts = [];
+    if (typeof item.load_level_label === "string" && item.load_level_label) {
+      facts.push("下流への影響: " + item.load_level_label);
+    }
+    if (typeof item.verification_status === "string" && SEMINAR_VERIFICATION_STATUS_LABELS[item.verification_status]) {
+      facts.push("検証: " + SEMINAR_VERIFICATION_STATUS_LABELS[item.verification_status]);
+    }
+    if (typeof item.challenge_count_label === "string" && item.challenge_count_label) {
+      facts.push("疑義: " + item.challenge_count_label);
+    }
+    if (typeof item.support_line_level === "string" && SEMINAR_SUPPORT_LEVEL_LABELS[item.support_line_level]) {
+      facts.push("支持: " + SEMINAR_SUPPORT_LEVEL_LABELS[item.support_line_level]);
+    }
+    return facts;
+  }
+
+  // 脆い前提（claim）に添える claim つまづきの段階ラベル行（k-匿名通過分のみ = has_data の
+  // ときだけ。少人数ゼミでは出ないのがふつうの状態 — 出ないことを警告にしない, SB4）。
+  function _sbStumbleFacts(stumble) {
+    if (!stumble || !stumble.has_data) return [];
+    var axes = stumble.axes || {};
+    var parts = [];
+    SEMINAR_STUMBLE_AXIS_LABELS.forEach(function (pair) {
+      var value = axes[pair[0]];
+      if (pair[0] === "faq") value = value && value.questions;
+      if (typeof value === "string" && value) parts.push(pair[1] + ": " + value);
+    });
+    if (!parts.length) return [];
+    return ["つまづき — " + parts.join(" ・ ")];
+  }
+
+  function _sbStatementRow(statement, facts) {
+    var row = _sbEl("div", "padding:6px 0;border-bottom:1px solid var(--color-border-tertiary)");
+    row.className = "seminar-brief-row";
+    row.appendChild(_sbEl("div", "font-size:13px;color:var(--color-text-primary)", statement || ""));
+    (facts || []).forEach(function (fact) {
+      row.appendChild(_sbEl("div", "font-size:11.5px;color:var(--color-text-secondary);margin-top:2px", fact));
+    });
+    return row;
+  }
+
+  function renderSeminarBrief(data) {
+    var body = document.getElementById("seminar-brief-modal-body");
+    if (!body) return;
+    body.textContent = "";
+
+    // 合成できない document は理由の事実文のみ（警告色にしない）。
+    if (!data.available) {
+      body.appendChild(_sbEl("div", "padding:16px;color:var(--color-text-secondary);font-size:13px",
+        data.reason || "この教材ではゼミ前ブリーフを合成できません。"));
+      return;
+    }
+
+    // 1. 脆い前提（未検証 × 下流影響の段階ラベル。並びはサーバが決める）
+    var fragileRows = [];
+    (data.fragile_assumptions || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      fragileRows.push(_sbStatementRow(item.statement, _sbFragileMeta(item).concat(_sbStumbleFacts(item.stumble))));
+    });
+    var fragileSection = _sbSection("脆い前提", fragileRows);
+    if (fragileSection) body.appendChild(fragileSection);
+
+    // 2. 一点吊りの支持線（SL層 support_paths level=single の事実文）
+    var singleRows = [];
+    (data.single_support_lines || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      singleRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+    });
+    var singleSection = _sbSection("一点吊りの支持線", singleRows);
+    if (singleSection) body.appendChild(singleSection);
+
+    // 3. 晴れ間（SL1 閉世界語彙の事実文。サーバの文をそのまま出す — 言い換えない）
+    var clearingRows = [];
+    (data.clear_skies || []).forEach(function (item) {
+      if (!item || !item.statement) return;
+      clearingRows.push(_sbStatementRow(item.statement, item.fact_line ? [item.fact_line] : []));
+    });
+    var clearingSection = _sbSection("晴れ間", clearingRows);
+    if (clearingSection) body.appendChild(clearingSection);
+
+    // 4. 学習者からの問い — v1 は空欄予約（SB3）。空でもこの区画だけは常に出し、
+    //    淡色の note のみを添える（警告色・催促文にしない）。
+    var handed = data.learner_handoff || {};
+    var handedSection = _sbEl("div", "margin-bottom:16px");
+    handedSection.className = "seminar-brief-section seminar-brief-handed";
+    handedSection.appendChild(_sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px", "学習者からの問い"));
+    handedSection.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary)", handed.note || SEMINAR_BRIEF_RESERVED_NOTE));
+    body.appendChild(handedSection);
   }
 
   // ── File Upload ────────────────────────────────────────────────────
@@ -4644,6 +4867,7 @@
         setStatus("カートリッジを選択してください");
         renderAtlasOverview();
         updateLifecycleUI();
+        loadGapCandidates();
         return;
       }
       setStatus("読み込み中...");
@@ -4655,6 +4879,9 @@
         .then(function (data) { renderState(data); setStatus(""); })
         .catch(function (err) { setStatus("読み込みに失敗しました: " + err.message, true); });
       loadReports();
+      // カテゴリギャップ候補（migration 066）。ポーリングはせず、この読み込みと
+      // 各操作の成功後だけ取り直す。
+      loadGapCandidates();
     }
 
     // ── 修正報告のレビューキュー (Issue D-2 / D-3) ────────────────────
@@ -4841,6 +5068,415 @@
         else loadReports();
       });
     }
+
+    // ── 論文の解析から見つかった候補（カテゴリギャップ候補, migration 066） ─────
+    // 正本: docs/features/category_gap_candidates_design.md
+    //   §5.4 レビュー UI（修正報告セクション内の第2グループ。専用タブを作らない）
+    //   §5.5 骨格への反映は additive-only。**骨格を書くのは常に教員の PUT draft**
+    //        （preview → 既存の draft 保存経路 → mark-incorporated の3手）
+    //   LS1 / AB1 「この地図では言い表せなかった主題」の事実文。エラー色・警告
+    //        アイコン・欠陥語彙・督促を使わない（候補は不備ではなく発見）
+    //   LS5  件数バッジ・カバー率を出さない（支持論文はタイトルの列挙で示す）
+    //   G1 / PN-2 キューはサーバの読み時導出。完了フラグをクライアントに持たない
+    //   LS9  読み取り・patch 生成とも非LLM。ポーリングしない（タブ表示時と操作成功後のみ）
+    var GAP_GROUP_TITLE = "論文の解析から見つかった候補";
+    var GAP_GROUP_INTRO = "複数の論文が、この地図にまだ無い項目に触れています。";
+    var GAP_ORIGIN_LABEL = "AIによる検出（未確認）";
+    var GAP_ACCEPT_NOTE = "[採用] は「カテゴリとして妥当」という判断だけを記録します。次版の下書きはこの操作では変わりません。";
+    var GAP_DISMISS_NOTE = "この分野で同じ名前の候補は今後表示されません。「見送り済み」フィルタから戻せます。";
+    var GAP_AT_CAPACITY_TEXT = "この領域の概念は上限（6件）に達しています。追加するには次版で既存概念の整理が必要です。";
+    var GAP_NO_DRAFT_TEXT = "次版の下書きがまだありません。「現在の版から次版の下書きを作る」を実行すると取り込めます。";
+    var GAP_NOT_ACCEPTED_TEXT = "[採用] を押すと、次版の下書きに取り込めます。";
+    var GAP_RETIRED_TEXT = "この分野は廃止済みです。「復帰する」で戻すと操作できます。";
+    var GAP_EMPTY_TEXT = "いまレビューする候補はありません。";
+    var GAP_DISMISS_REASON_REQUIRED = "却下には理由が必要です";
+    var GAP_FREEZE_PENDING_TEXT = "採用済みでまだ次版に反映されていない候補が残っています";
+    var GAP_FREEZE_REANALYSIS_TEXT = "既存論文の配置は再解析するまで変わりません";
+
+    var gapIncludeDismissed = false;
+    var gapBusy = false;
+    var latestGapData = null;
+    // 教員がその場で書き換えた提案ラベル（cluster_key → 表記）。判断のたびに一覧を
+    // 読み直すため、編集途中の名前が消えないようクライアント側で保持する。
+    var gapLabelEdits = {};
+    var gapsGroupEl = null;
+    var gapsListEl = null;
+    var gapsStatusEl = null;
+
+    function gapsPath() {
+      return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/gap-candidates";
+    }
+
+    function setGapsStatus(text, isError) {
+      if (!gapsStatusEl) return;
+      gapsStatusEl.textContent = text || "";
+      gapsStatusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+
+    // 修正報告セクション内の第2グループとして生成する（admin.html は変更しない。
+    // 「下書きを破棄」ボタンと同じ後付けパターン）。
+    function buildGapsGroup() {
+      var section = document.getElementById("atlas-reports-section");
+      if (!section || document.getElementById("atlas-gaps-group")) return;
+      var group = document.createElement("div");
+      group.id = "atlas-gaps-group";
+      group.setAttribute("data-ui-anchor", "atlas.gap-candidates");
+      group.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border)";
+      group.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px">' +
+          '<h4 style="font-size:13px;margin:0">' + escHtml(GAP_GROUP_TITLE) + '</h4>' +
+          '<label data-ui-anchor="atlas.gap-dismissed-filter" style="font-size:12px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">' +
+            '<input type="checkbox" id="atlas-gaps-show-dismissed"> 見送り済みも表示' +
+          '</label>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 8px">' + escHtml(GAP_GROUP_INTRO) + '</p>' +
+        '<div id="atlas-gaps-list" style="font-size:12.5px"></div>' +
+        '<div id="atlas-gaps-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px"></div>';
+      section.appendChild(group);
+      gapsGroupEl = group;
+      gapsListEl = document.getElementById("atlas-gaps-list");
+      gapsStatusEl = document.getElementById("atlas-gaps-status");
+      group.style.display = "none";
+
+      document.getElementById("atlas-gaps-show-dismissed").addEventListener("change", function () {
+        gapIncludeDismissed = !!this.checked;
+        loadGapCandidates();
+      });
+      gapsListEl.addEventListener("input", function (e) {
+        var input = e.target;
+        if (!input || !input.classList || !input.classList.contains("atlas-gap-label-input")) return;
+        var owner = input.closest ? input.closest("[data-cluster-key]") : null;
+        if (owner) gapLabelEdits[owner.getAttribute("data-cluster-key")] = input.value;
+      });
+      gapsListEl.addEventListener("click", function (e) {
+        var btn = e.target.closest ? e.target.closest("[data-gap-action]") : null;
+        if (!btn || btn.disabled) return;
+        var action = btn.getAttribute("data-gap-action");
+        if (action === "draft-from-frozen") { gapCreateDraftFromFrozen(); return; }
+        var card = btn.closest("[data-cluster-key]");
+        if (!card) return;
+        handleGapAction(card.getAttribute("data-cluster-key"), action, card);
+      });
+    }
+
+    // 骨格が無い分野（404）はグループごと非表示にする（fail-closed。空の枠を出さない）。
+    function loadGapCandidates() {
+      if (!gapsGroupEl) return;
+      if (!select.value) {
+        latestGapData = null;
+        gapsGroupEl.style.display = "none";
+        return;
+      }
+      apiFetch(gapsPath() + (gapIncludeDismissed ? "?include_dismissed=true" : ""))
+        .then(function (res) {
+          if (res.status === 404) return null;
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          if (!data) {
+            latestGapData = null;
+            gapsGroupEl.style.display = "none";
+            return;
+          }
+          gapsGroupEl.style.display = "";
+          renderGapCandidates(data);
+          setGapsStatus("");
+        })
+        .catch(function (err) {
+          latestGapData = null;
+          gapsGroupEl.style.display = "";
+          if (gapsListEl) gapsListEl.innerHTML = "";
+          setGapsStatus("候補の読み込みに失敗しました: " + err.message, true);
+        });
+    }
+
+    function _gapLayerBadgeText(candidate) {
+      var layer = (candidate && candidate.layer) || "";
+      if (layer === "concept") {
+        var parent = (candidate && (candidate.parent_region_label || candidate.parent_region_id)) || "";
+        return "概念（親: " + parent + "）";
+      }
+      return (candidate && candidate.layer_label) || "領域";
+    }
+
+    // 旧版の地図に対する信号を含む候補の事実チップ（件数・エラー色を付けない）。
+    function _gapVersionChipHtml(candidate) {
+      if (!candidate || !candidate.version_mismatch) return "";
+      var docs = candidate.documents || [];
+      var version = "";
+      for (var i = 0; i < docs.length; i++) {
+        if (docs[i] && docs[i].version_mismatch && docs[i].skeleton_version) {
+          version = docs[i].skeleton_version;
+          break;
+        }
+      }
+      if (!version) return "";
+      return '<span class="atlas-gap-version-chip" style="border:1px solid var(--color-border);border-radius:4px;padding:0 6px;font-size:11px;color:var(--color-text-secondary)">' +
+        escHtml("この候補は版 " + version + " の地図に対するものです") + '</span>';
+    }
+
+    // LS5: 支持論文は件数バッジではなくタイトルの列挙。行を開くと理由と原文の逐語が出る。
+    function _gapDocumentsHtml(candidate) {
+      var docs = (candidate && candidate.documents) || [];
+      if (!docs.length) return "";
+      var html = '<div class="atlas-gap-documents" style="margin-top:6px">' +
+        '<div style="font-size:11.5px;color:var(--color-text-tertiary)">この項目に触れている論文</div>';
+      docs.forEach(function (d) {
+        html += '<details class="atlas-gap-document" style="margin:2px 0">' +
+          '<summary style="font-size:12px;color:var(--color-text-secondary);cursor:pointer">' +
+            escHtml((d && d.title) || "無題の論文") +
+          '</summary>';
+        if (d && d.reason) {
+          html += '<div style="font-size:12px;color:var(--color-text-secondary);padding:2px 0 0 12px">' + escHtml(d.reason) + '</div>';
+        }
+        if (d && d.evidence_quote) {
+          html += '<div style="font-size:12px;color:var(--color-text-secondary);border-left:2px solid var(--color-border-tertiary);padding:2px 0 2px 8px;margin:4px 0 4px 12px">' +
+            escHtml(d.evidence_quote) + '</div>';
+        }
+        html += '</details>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    // 取り込みボタンが押せない理由の事実文（ゲージ・空きスロット・督促は出さない）。
+    function _gapBlockedText(candidate, accepted, draftExists, retired) {
+      if (retired) return GAP_RETIRED_TEXT;
+      if (candidate && candidate.parent_region_at_capacity) return GAP_AT_CAPACITY_TEXT;
+      if (!accepted) return GAP_NOT_ACCEPTED_TEXT;
+      if (!draftExists) return GAP_NO_DRAFT_TEXT;
+      return "";
+    }
+
+    function _gapCandidateCardHtml(candidate, draftExists, retired) {
+      var clusterKey = (candidate && candidate.cluster_key) || "";
+      var decision = (candidate && candidate.decision) || null;
+      var status = (decision && decision.status) || "candidate";
+      var accepted = status === "accepted";
+      var suppressed = status === "dismissed" || status === "merged";
+      var atCapacity = !!(candidate && candidate.parent_region_at_capacity);
+      var html = '<div class="atlas-gap-card" data-cluster-key="' + escHtml(clusterKey) +
+        '" style="border:1px solid var(--color-border);border-radius:6px;padding:8px 10px;margin-bottom:8px">';
+      var labelValue = gapLabelEdits.hasOwnProperty(clusterKey)
+        ? gapLabelEdits[clusterKey]
+        : ((candidate && candidate.proposed_label) || "");
+      html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+        '<input type="text" class="atlas-gap-label-input" value="' + escHtml(labelValue) +
+          '" style="font-size:13px;padding:3px 6px;border:1px solid var(--color-border);border-radius:4px;min-width:220px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+        '<span class="atlas-gap-layer" style="font-size:11.5px;color:var(--color-text-secondary)">' + escHtml(_gapLayerBadgeText(candidate)) + '</span>' +
+        '<span class="atlas-gap-origin" style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(GAP_ORIGIN_LABEL) + '</span>' +
+        (decision && decision.status_label
+          ? '<span class="atlas-gap-decision" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' + escHtml(decision.status_label) + '</span>'
+          : "") +
+        _gapVersionChipHtml(candidate) +
+      '</div>';
+      html += _gapDocumentsHtml(candidate);
+      if (decision && decision.review_note) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">判断のメモ: ' + escHtml(decision.review_note) + '</div>';
+      }
+
+      html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">';
+      if (suppressed) {
+        html += '<button type="button" class="admin-action-btn" data-gap-action="restore" data-ui-anchor="atlas.gap-restore">見送りから戻す</button>';
+      } else {
+        html += '<button type="button" class="admin-action-btn" data-gap-action="accept" data-ui-anchor="atlas.gap-accept"' +
+          (accepted || retired ? " disabled" : "") + '>採用</button>';
+        html += '<button type="button" class="admin-action-btn" data-gap-action="dismiss" data-ui-anchor="atlas.gap-dismiss"' +
+          (retired ? " disabled" : "") + '>却下…</button>';
+        if (accepted && !draftExists) {
+          html += '<button type="button" class="admin-action-btn" data-gap-action="draft-from-frozen" data-ui-anchor="atlas.gap-draft-from-frozen"' +
+            (retired ? " disabled" : "") + '>現在の版から次版の下書きを作る</button>';
+        } else {
+          html += '<button type="button" class="admin-action-btn" data-gap-action="incorporate" data-ui-anchor="atlas.gap-incorporate"' +
+            (!accepted || !draftExists || atCapacity || retired ? " disabled" : "") + '>次版の下書きに取り込む…</button>';
+        }
+      }
+      html += '</div>';
+
+      if (!suppressed) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + escHtml(GAP_ACCEPT_NOTE) + '</div>';
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(GAP_DISMISS_NOTE) + '</div>';
+        var blocked = _gapBlockedText(candidate, accepted, draftExists, retired);
+        if (blocked) {
+          html += '<div class="atlas-gap-blocked" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' + escHtml(blocked) + '</div>';
+        }
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function renderGapCandidates(data) {
+      latestGapData = data || null;
+      if (!gapsListEl) return;
+      var candidates = (data && data.candidates) || [];
+      var draftExists = !!(data && data.draft_exists);
+      var retired = !!select.value && domainLifecycles[select.value] === "retired";
+      if (!candidates.length) {
+        gapsListEl.innerHTML = '<div style="color:var(--color-text-tertiary)">' + escHtml(GAP_EMPTY_TEXT) + '</div>';
+        return;
+      }
+      var html = "";
+      candidates.forEach(function (candidate) {
+        html += _gapCandidateCardHtml(candidate, draftExists, retired);
+      });
+      gapsListEl.innerHTML = html;
+    }
+
+    // インライン編集した提案ラベル（空欄なら候補の表記をサーバ側で使う）。
+    function _gapLabelFromCard(card) {
+      var input = card ? card.querySelector(".atlas-gap-label-input") : null;
+      return input ? input.value.trim() : "";
+    }
+
+    function handleGapAction(clusterKey, action, card) {
+      if (!clusterKey || gapBusy) return;
+      if (action === "accept" || action === "restore") {
+        gapDecide(clusterKey, action, "");
+        return;
+      }
+      if (action === "dismiss") {
+        // 見送りは理由必須（空は送信しない。サーバ側も 422 で拒否する）。
+        var note = prompt("却下の理由（必須）") || "";
+        if (!note.trim()) { setGapsStatus(GAP_DISMISS_REASON_REQUIRED, true); return; }
+        gapDecide(clusterKey, "dismiss", note);
+        return;
+      }
+      if (action === "incorporate") gapIncorporate(clusterKey, _gapLabelFromCard(card));
+    }
+
+    // サーバの detail（事実文）をそのまま使う。取れないときだけ HTTP 状態へ縮退する。
+    function _gapResponse(res) {
+      return res.json().then(function (body) {
+        if (!res.ok) {
+          var detail = body && body.detail;
+          throw new Error(
+            typeof detail === "string" ? detail : ((detail && detail.message) || ("HTTP " + res.status))
+          );
+        }
+        return body;
+      });
+    }
+
+    function gapDecide(clusterKey, action, note) {
+      gapBusy = true;
+      setGapsStatus("処理中...");
+      apiFetch(gapsPath() + "/decide", {
+        method: "POST",
+        body: JSON.stringify({ cluster_key: clusterKey, action: action, review_note: note || "" }),
+      })
+        .then(_gapResponse)
+        .then(function () { gapBusy = false; setGapsStatus(""); loadGapCandidates(); })
+        .catch(function (err) { gapBusy = false; setGapsStatus("処理に失敗しました: " + err.message, true); });
+    }
+
+    // 次版の下書きを現行凍結版から複製する（決定論・LLM 不使用）。
+    function gapCreateDraftFromFrozen() {
+      if (!select.value || gapBusy) return;
+      var version = (latestGapData && latestGapData.skeleton_version) || "";
+      if (!confirm("現行版 " + version + " を複製して下書きを作ります。下書きは学習者には表示されません")) return;
+      gapBusy = true;
+      setGapsStatus("次版の下書きを作成中...");
+      apiFetch("/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/skeleton/draft/from-frozen", {
+        method: "POST",
+      })
+        .then(_gapResponse)
+        .then(function () {
+          gapBusy = false;
+          setGapsStatus("次版の下書きを作りました");
+          loadState();
+        })
+        .catch(function (err) {
+          gapBusy = false;
+          setGapsStatus("下書きを作れませんでした: " + err.message, true);
+        });
+    }
+
+    // 取り込みの3手 (1) 読み取り専用の patch プレビュー
+    function gapIncorporate(clusterKey, label) {
+      if (gapBusy) return;
+      gapBusy = true;
+      setGapsStatus("取り込む内容を確認中...");
+      apiFetch(gapsPath() + "/incorporate-preview", {
+        method: "POST",
+        body: JSON.stringify({ cluster_key: clusterKey, proposed_label: label || "" }),
+      })
+        .then(_gapResponse)
+        .then(function (preview) {
+          gapBusy = false;
+          setGapsStatus("");
+          openGapIncorporateConfirm(clusterKey, preview || {});
+        })
+        .catch(function (err) {
+          gapBusy = false;
+          setGapsStatus("取り込みを準備できませんでした: " + err.message, true);
+        });
+    }
+
+    function _gapIssueText(issue) {
+      if (!issue) return "";
+      if (typeof issue === "string") return issue;
+      return issue.message || "";
+    }
+
+    // 取り込みの3手 (2) 事実文の確認（追加される node の id・名前・親領域 + 検証結果）
+    function openGapIncorporateConfirm(clusterKey, preview) {
+      var validation = preview.validation || {};
+      var lines = [];
+      if (preview.summary) lines.push(preview.summary);
+      if (preview.node_id) lines.push("追加する項目のid: " + preview.node_id);
+      if (preview.proposed_label) lines.push("名前: " + preview.proposed_label);
+      if (preview.layer === "concept" && preview.parent_region_id) {
+        lines.push("親領域: " + preview.parent_region_id);
+      }
+      (validation.errors || []).forEach(function (issue) {
+        var text = _gapIssueText(issue);
+        if (text) lines.push("検証: " + text);
+      });
+      (validation.warnings || []).forEach(function (issue) {
+        var text = _gapIssueText(issue);
+        if (text) lines.push("検証: " + text);
+      });
+      if (!preview.patched_draft) {
+        setGapsStatus("この項目は下書きに追加できませんでした: " + (lines.join(" / ") || "内容を確認してください"), true);
+        return;
+      }
+      lines.push("この内容を次版の下書きに保存します。学習者には表示されません。");
+      openDangerConfirmModal({
+        title: "次版の下書きに取り込む",
+        message: lines,
+        confirmLabel: "下書きに追加する",
+      }, function () { gapApplyIncorporation(clusterKey, preview); });
+    }
+
+    // 取り込みの3手 (3) 教員の既存 PUT draft（applyAssistProposal → saveDraft。楽観ロック
+    // 409 は saveDraft 側の事実文 + 再読込に委ねる）→ 成功後に mark-incorporated で刻印。
+    // **骨格を書くのは常にこの PUT** — gap 側の API は下書きを書かない（LS7）。
+    function gapApplyIncorporation(clusterKey, preview) {
+      gapBusy = true;
+      setGapsStatus("次版の下書きに保存中...");
+      applyAssistProposal(preview.patched_draft)
+        .then(function () {
+          return apiFetch(gapsPath() + "/mark-incorporated", {
+            method: "POST",
+            body: JSON.stringify({ cluster_key: clusterKey, draft_node_id: preview.node_id || "" }),
+          }).then(_gapResponse);
+        })
+        .then(function () {
+          gapBusy = false;
+          // 取り込み済みの候補は次の導出で消えるので、編集中の名前も持ち越さない。
+          if (gapLabelEdits.hasOwnProperty(clusterKey)) delete gapLabelEdits[clusterKey];
+          setGapsStatus("次版の下書きに追加しました");
+          loadGapCandidates();
+        })
+        .catch(function (err) {
+          gapBusy = false;
+          setGapsStatus("取り込みに失敗しました: " + err.message, true);
+          loadGapCandidates();
+        });
+    }
+
+    buildGapsGroup();
 
     function addDomainOption(key, label) {
       for (var i = 0; i < select.options.length; i++) {
@@ -5223,12 +5859,26 @@
               return res.json().then(function (body) {
                 if (!res.ok) {
                   var detail = body.detail;
+                  // カテゴリギャップ候補の公開前ゲート（migration 066）: 採用済みで
+                  // まだ次版に反映されていない候補はラベルの列挙で示す（件数は出さない）。
+                  if (detail && detail.pending_labels) {
+                    scrollToAtlasSection("atlas-reports-section");
+                    var labels = (detail.pending_labels || []).join("、");
+                    throw new Error(
+                      (detail.message || GAP_FREEZE_PENDING_TEXT) + (labels ? ": " + labels : "")
+                    );
+                  }
                   throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
                 }
                 return body;
               });
             })
-            .then(function () { setStatus("版 " + version + " を学習者向けに公開しました"); loadState(); loadReports(); })
+            .then(function () {
+              // 追加した項目に既存の論文が並ぶのは再解析のときであることを事実で添える。
+              setStatus("版 " + version + " を学習者向けに公開しました。" + GAP_FREEZE_REANALYSIS_TEXT);
+              loadState();
+              loadReports();
+            })
             .catch(function (err) { setStatus("公開に失敗しました: " + err.message, true); });
         });
       }
@@ -5240,12 +5890,21 @@
         .then(function (impact) {
           var removedCount = impact ? (impact.removed_node_ids || []).length : 0;
           var affectedCourses = impact ? (impact.affected_courses || []) : [];
+          // サーバが添える事実文（facts[]）はそのまま公開前チェックへ差し込む。
+          // 件数を足したり言い換えたりしない（category_gap_candidates_design.md §5.5）。
+          var facts = impact ? (impact.facts || []) : [];
+          if (facts.length) {
+            var question = checkLines.pop();
+            facts.forEach(function (fact) { if (fact) checkLines.push(fact); });
+            checkLines.push(question);
+          }
           if (removedCount > 0 || affectedCourses.length > 0) {
             var titles = affectedCourses.map(function (c) { return c.title; });
             var shown = titles.slice(0, 5).join("、") + (titles.length > 5 ? " …" : "");
             var proceed = confirm(
               "この凍結で " + removedCount + " 概念が削除され、" + affectedCourses.length +
-              " コースの対応が外れます" + (shown ? ": " + shown : "") + "。凍結しますか？"
+              " コースの対応が外れます" + (shown ? ": " + shown : "") + "。" +
+              (facts.length ? facts.join("\n") + "\n" : "") + "凍結しますか？"
             );
             if (!proceed) return;
           }
@@ -8791,6 +9450,10 @@
       // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
       material_inventory_button: function (id) {
         return _matRowActionAnchor(id, ".admin-inventory-btn");
+      },
+      // ゼミ前ブリーフ: 教材行の「ゼミ前ブリーフ…」ボタン（⋯メニュー内）。
+      seminar_brief_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-seminar-brief-btn");
       },
       // 開幕素材レビュー（discuss の「議論のきっかけ」）: 要素インベントリ内の
       // 「説明レビュー」ボタン。インベントリを開くまでは DOM に存在しないので、

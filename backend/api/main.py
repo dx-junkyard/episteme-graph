@@ -57,18 +57,26 @@ from routes import auth, learning, admin, lecture, groups, error_logs, export as
 from routes import figure_presentation as figure_presentation_routes
 from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
+from routes import atlas_gaps as atlas_gaps_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
+from routes import seminar_brief as seminar_brief_routes
 from routes import discuss_observation as discuss_observation_routes
+from routes import cycle as cycle_routes
+from routes import descent as descent_routes
 from routes import library as library_routes
 from routes import llm_usage as llm_usage_routes
 from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
+from routes import my_records as my_records_routes
 from routes import landscape as landscape_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
-# 13個の子ルーターを、admin.py 経由の二段ネストではなく main.py から直接
+# 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
+# Tier 3-17c 導入当時は13本だったが、以降の機能追加でここに登録されるルーターは
+# 増え続けている——正確な本数は下記の `app.include_router(..., prefix="/api/admin")`
+# 呼び出しを数えること（数値をコメントに固定すると陳腐化する）。
 from routes.lecture_studio import router as _lecture_studio_router
 from routes.theory_components import router as _theory_components_router
 from routes.cartridges import router as _cartridges_router
@@ -313,18 +321,25 @@ app.include_router(atlas_view_routes.router)
 app.include_router(doubt_routes.learning_router)
 app.include_router(reconstruction_routes.learning_router)
 app.include_router(discuss_observation_routes.learning_router)
+app.include_router(cycle_routes.learning_router)
+app.include_router(descent_routes.learning_router)
 app.include_router(library_routes.router)
 app.include_router(llm_usage_routes.router)
 app.include_router(llm_models_routes.router)
 app.include_router(personal_map_routes.router)
 app.include_router(personal_map_routes.me_router)
+# わたしの記録（主権台帳v1、trace_registry_sovereignty_ledger_design.md §3.3）。
+# 読み取り専用・本人のみ（/api/me 配下、personal_map.me_router と同型）。
+app.include_router(my_records_routes.me_router)
 # 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
 # ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
 app.include_router(landscape_routes.learning_router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
-# フラット化。以下13ルーターは admin.router と同じ "/api/admin" prefix で
-# 直接マウントする（URL・認可・レスポンスは従来と完全に不変）。
+# フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で
+# 直接マウントする（URL・認可・レスポンスは従来と完全に不変）。Tier 3-17c 導入
+# 当時は13本だったが、以降の機能追加でルーターは増え続けている——正確な本数は
+# 本ブロック内で `prefix="/api/admin"` を指定した呼び出しを数えること。
 app.include_router(_lecture_studio_router, prefix="/api/admin")
 app.include_router(_theory_components_router, prefix="/api/admin")
 app.include_router(_cartridges_router, prefix="/api/admin")
@@ -332,9 +347,15 @@ app.include_router(_revisions_router, prefix="/api/admin")
 app.include_router(atlas_routes.router, prefix="/api/admin")
 app.include_router(atlas_routes.admin_atlas_router, prefix="/api/admin")
 app.include_router(atlas_routes.binding_router, prefix="/api/admin")
+# カテゴリギャップ候補のレビュー（category_gap_candidates_design.md §5.4）。
+# atlas_routes.router と同じ "/cartridges" 配下だがパスが衝突しないためフラット登録で足りる。
+app.include_router(atlas_gaps_routes.router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
+# ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）。読み時合成の admin API 1本
+# （GET /api/admin/documents/{ref}/seminar-brief）。reconstruction.admin_router と同型。
+app.include_router(seminar_brief_routes.admin_router, prefix="/api/admin")
 app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")

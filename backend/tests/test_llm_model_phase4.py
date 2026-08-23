@@ -119,7 +119,8 @@ class TestPipelineStageLabelsCoverage:
 
     def test_pipeline_stage_label_helper_falls_back_to_stage_name(self):
         assert llm_policy.pipeline_stage_label("not_a_real_stage") == "not_a_real_stage"
-        assert llm_policy.pipeline_stage_label("paper_skeleton") == "論文骨格の仮説化"
+        # 2026-08-14 訳語統一: 進捗表示（DOCUMENT_PIPELINE_STAGE_LABELS = admin.js）と同語へ。
+        assert llm_policy.pipeline_stage_label("paper_skeleton") == "論文アウトラインの推定"
 
 
 # ===========================================================================
@@ -272,7 +273,8 @@ class TestPoliciesListFeatureLevelRows:
         row = result["policies"][0]
         assert row["is_feature_level"] is True
         assert row["label"] == llm_policy.pipeline_stage_label("claim_qualification")
-        assert row["label"] == "主張の採否・原子化"
+        # 2026-08-14 訳語統一: 進捗表示（DOCUMENT_PIPELINE_STAGE_LABELS = admin.js）と同語へ。
+        assert row["label"] == "主張の抽出・分類"
 
     def test_unrecognized_feature_key_falls_back_to_key_itself(self, monkeypatch):
         import routes.llm_models as llm_models_routes

@@ -41,6 +41,8 @@ from core.element_explanations import (
     STATUS_APPROVED,
     list_for_document,
 )
+from core import element_vocab
+from core.label_vocab import SUPPORT_SECTION_LABELS
 
 logger = logging.getLogger(__name__)
 
@@ -91,11 +93,10 @@ FRAGILE_SUBJECT_SYSTEM = "system"
 # 順序の正本: core/atlas_state.py::_STAGE_ORDER（L3 導出チェーンが同じ並びを使う）。
 # stage コードの正本: src/episteme_graph/agents/component_graph/schema.py::THEORY_STAGES。
 #
-# 表示名は**学習者向けの日本語**にする（A層の THEORY_STAGE_LABELS は英語で、教員向け
-# 管理UI（admin.js / W層）はそちらを使い続ける）。開幕画面は学習者が最初に見る画面で、
-# `Theory basis` `Equation system` のような内部語彙をそのまま出すと理論の骨格ではなく
-# 分類名の羅列に見えてしまうため、この API に限り日本語表示名を持つ。stage コード自体は
-# domain-neutral のまま変えない。
+# 表示名は**学習者向けの日本語**にする（A層 agents 側の THEORY_STAGE_LABELS は英語）。
+# 開幕画面は学習者が最初に見る画面で、`Theory basis` `Equation system` のような内部語彙を
+# そのまま出すと理論の骨格ではなく分類名の羅列に見えてしまうため日本語表示名を使う。
+# stage コード自体は domain-neutral のまま変えない。
 # ---------------------------------------------------------------------------
 
 _STAGE_ORDER = (
@@ -108,15 +109,11 @@ _STAGE_ORDER = (
     "diagnostic_application",
 )
 
-_STAGE_LABELS = {
-    "theory_basis": "理論の土台",
-    "observation_model": "観測モデル",
-    "observable_construction": "観測量の構成",
-    "equation_system": "方程式系",
-    "elimination": "消去",
-    "consistency_relation": "整合関係",
-    "diagnostic_application": "診断・応用",
-}
+# 日本語表示名の正本は core/element_vocab.py の THEORY_STAGE_LABELS（オーナー承認済みの
+# 統一語彙 §9 Q2）。かつて本モジュールが独自表を持ち `equation_system` だけ「方程式系」に
+# 分裂していた（他6キーは完全一致）ため、2026-08-14 に表ごと正本へ委譲した —
+# 学習者に見える変化は「方程式系」→「式の体系」の1語のみ。
+_STAGE_LABELS = element_vocab.THEORY_STAGE_LABELS
 
 
 def _stage_label(stage: str) -> str:
@@ -133,18 +130,10 @@ def _stage_label(stage: str) -> str:
 
 
 # ThesisReconstructionAgent.SUPPORT_SECTIONS の日本語ラベル。
-# 正本: core/deliberation/positioning.py::_SUPPORT_SECTION_LABELS（private 定数のため
-# import せず最小の再掲に留める。語彙自体は agents/thesis_reconstruction/schema.py の
-# SUPPORT_SECTIONS が正本）。
-_SUPPORT_SECTION_LABELS = {
-    "direct_supports": "直接支持",
-    "assumptions": "前提",
-    "derivation_core": "導出の核",
-    "correction_sources": "訂正の源",
-    "uncertainty_sources": "不確実性の源",
-    "diagnostic_consequences": "診断的帰結",
-    "future_requirements": "将来要件",
-}
+# 訳語の正本は core/label_vocab.py::SUPPORT_SECTION_LABELS（かつては
+# positioning.py の private 定数を再掲していた）。語彙自体は
+# agents/thesis_reconstruction/schema.py の SUPPORT_SECTIONS が正本。
+_SUPPORT_SECTION_LABELS = SUPPORT_SECTION_LABELS
 
 # TheoryOperationGraph の review_reasons 語彙（CLAUDE.md「TheoryOperationGraph」節が正本）
 # の事実文化。未知の reason コードはコードそのものを表示する（情報を落とさない）。
@@ -520,21 +509,48 @@ def _backbone_fact_line(node: dict[str, Any]) -> str:
     return _SYSTEM_UNCONFIRMED_PREFIX + "。"
 
 
+def _join_fact_sentences(base: str, addition: str) -> str:
+    """事実文を「。」区切りで連結する（末尾の句点を重複させない）。"""
+    base = (base or "").rstrip()
+    if not base:
+        return addition
+    if not base.endswith("。"):
+        base += "。"
+    return base + addition
+
+
 def _assumption_fact_line(item: dict[str, Any]) -> str:
     """未検証合意リスト項目（``compile_open_assumptions`` の1件）の事実文。
 
     **主語は論文**（この論文が確かめていないこと）。``routes/doubt.py::_learner_fact_line``
     と同じ「検証済みも未記帳も同じ精度で併記する」思想（§8-1/8-2）を、開幕画面向けの
     短い一文に凝縮したもの。内部語彙（記帳・スコープ）は学習者向けに平易化する。
+
+    SL-1（賭け金の台帳, §7）: ``compile_open_assumptions`` が付与する
+    ``has_falsification_condition`` / ``falsification_not_formulable`` キーが**存在する**
+    ときだけ、覆る条件の記帳状況を後段に「。」区切りで連結する（設計書 §7 の3文言を
+    逐語で使う）。これらのキーを持たない旧形状の item（SL 結線前の単体テスト等）は
+    従来どおりの文だけを返す（後方互換・情報を落とさない）。
     """
     if bool(item.get("scope_count_is_zero")):
-        return "どの範囲で確かめたかが記録されていません。"
-    status = str(item.get("verification_status") or "unknown")
-    if status in ("untested", "unknown"):
-        return "検証の記録がない前提です。"
-    if status == "refuted":
-        return "反証の記録がある前提です。"
-    return "検証状況の記録がある前提です。"
+        base = "どの範囲で確かめたかが記録されていません。"
+    else:
+        status = str(item.get("verification_status") or "unknown")
+        if status in ("untested", "unknown"):
+            base = "検証の記録がない前提です。"
+        elif status == "refuted":
+            base = "反証の記録がある前提です。"
+        else:
+            base = "検証状況の記録がある前提です。"
+
+    if "has_falsification_condition" not in item and "falsification_not_formulable" not in item:
+        return base
+
+    if bool(item.get("has_falsification_condition")):
+        return _join_fact_sentences(base, "何が起これば覆るかが記帳されている前提です。")
+    if bool(item.get("falsification_not_formulable")):
+        return _join_fact_sentences(base, "反証条件を定式化できないと記帳されている前提です。")
+    return _join_fact_sentences(base, "覆る条件はまだ定式化されていません。")
 
 
 def project_fragile_points(

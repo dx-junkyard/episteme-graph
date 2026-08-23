@@ -48,6 +48,27 @@ STANDARDIZATION_STATUSES = (
 )
 
 
+#: standardization_status の日本語ラベル（フロント3表のミラー正本）。
+#:
+#: `frontend/public/js/deliberation.js::STANDARDIZATION_STATUS_LABELS` /
+#: `app.js::MATERIAL_LIBRARY_STATUS_LABELS` /
+#: `admin.js::_libraryStandardizationLabels` の3表と逐語一致させる
+#: （固定は `backend/tests/test_library_vocab_mirror.py`。**この表を削除すると
+#: ミラーテストが落ちる** — 表を消すのではなく、3表ごと同時に直すこと）。
+#:
+#: `emerging_common` は「コーパス内で反復して現れるのに、外部の標準としては
+#: 確立していない」状態を指す。これは判定不能の中間段階ではなく、本システムが
+#: 見つけ出す発見的価値の在り処（knowledge_network_vision §3 修正③）なので、
+#: 「普及しつつある」のように外部での定着を示唆する語には**しない**。
+STANDARDIZATION_STATUS_LABELS = {
+    STANDARDIZATION_STATUS_STANDARD: "標準",
+    STANDARDIZATION_STATUS_FIELD_STANDARD: "分野標準",
+    STANDARDIZATION_STATUS_EMERGING_COMMON: "共通化しつつある",
+    STANDARDIZATION_STATUS_NOVEL: "新規",
+    STANDARDIZATION_STATUS_UNKNOWN: "未評価",
+}
+
+
 def is_valid_standardization_status(value: str) -> bool:
     return value in STANDARDIZATION_STATUSES
 

@@ -49,12 +49,16 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from dependencies import _get_current_user
 from services import get_accessible_course_data, user_can_view_document
+from core.personal_graph.atlas_fog import atlas_neighbors_for_person_node
 from core.personal_graph.derive import (
     derive_person_network,
     derive_personal_network,
     group_nodes_by_anchor,
 )
 from core.personal_graph.journey import journey_for_node
+from core.personal_graph.nearby import MODES as NEARBY_MODES
+from core.personal_graph.nearby import nearby_for_person_node
+from core.personal_graph.provisional import derive_provisional_nodes
 from core.personal_graph.queries import fetch_course_titles
 from core.personal_graph.schema import PersonalNetwork
 
@@ -80,13 +84,24 @@ def get_personal_network(
     (user_id, course_id) スコープで読み、本人確定済みの痕跡のみをノード化する（設計書 §2）。
     candidate / dismissed / superseded / llm_candidate 帰属のノードは含まれない（PN-3）。
     集計数値（件数・網羅率等）は含めない（PN-4）。
+
+    ``provisional_nodes``（カテゴリギャップ候補 v1-b。正本は
+    ``docs/features/category_gap_candidates_design.md`` §4.4 裁定 / §5.6）: このコースの
+    sources 由来 document について、共有骨格に置けなかった主題を**本人にだけ**見せる
+    暫定ノード。``core.personal_graph.provisional`` が ``landscape_gap_signals`` の
+    ``active`` 行から読み時に導出するだけで、共有骨格・共有候補（``atlas_gap_decisions``）
+    には一切書き込まない・読まない。骨格の無いコース・取得失敗は空リスト（fail-closed）で、
+    ``confidence`` / ``weight`` / 件数などの数値は載せない（PN-4 / LS5）。
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
         raise HTTPException(status_code=404, detail="Course not found")
 
     network = derive_personal_network(current_user["id"], course_id)
-    return network.to_dict()
+    payload = network.to_dict()
+    # 読み取り専用の追加フィールド（DB 非変更・PN-2）。導出失敗は [] へ縮退する。
+    payload["provisional_nodes"] = derive_provisional_nodes(course_id)
+    return payload
 
 
 @router.get("/courses/{course_id}/personal-network/journey")
@@ -225,6 +240,85 @@ def get_me_personal_network_journey(
         current_user["id"], node_id,
         can_view_document=user_can_view_document,
     )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return result
+
+
+@me_router.get("/personal-network/nearby")
+def get_me_personal_network_nearby(
+    node_id: str,
+    mode: str = "near",
+    center_component_id: str | None = None,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """わたしの地図「いまここの周り」＝近傍関係ビュー（読み取り専用・非LLM・DB 非変更）。
+
+    設計の正本は ``docs/features/personal_map_nearby_design.md``（PMN-1〜PMN-7）。実体は
+    ``core.personal_graph.nearby.nearby_for_person_node``。見せるのは**2つの関係**だけで、
+    座標・順位・距離を返さない（PMN-1）:
+
+    - **依存の向き**: TheoryOperationGraph の main 層における中心ノードの上流
+      （これが前提にしていること）と下流（これに依存していること）。採用する辺は
+      ``source_backing_status ∈ {source_backed, partially_source_backed}`` のみで、
+      ``inferred`` / ``review_required`` の推測辺は描かない（PMN-2）。
+    - **確かめられているか**: ``epistemic_ledger`` の検証状態（段階ラベル）と
+      支持線の事実文。台帳行が1件も無ければ ``ledger_available=False`` を返し、UI は
+      その区別ごと出さない（PMN-7 fail-closed）。
+
+    クエリ:
+    - ``node_id``: 本人の痕跡ノード ID（``/api/me/personal-network`` の ``nodes[].id``）。
+      本人の個人ネットワークに無ければ 404（他人の痕跡を中心にできない・PN-1）。
+    - ``mode``: ``near``（既定・前後1階層）/ ``root``（土台までの道筋 + 下流1階層）。
+      それ以外は 422（黙って既定に倒さない）。
+    - ``center_component_id``: 中心の移動先。``node_id`` から解決した document の main 層に
+      存在する ID のみ受け付け、無ければ 404（別 document へ回遊させない）。
+
+    レスポンスに数値（confidence / load_score / 支持経路の本数 / 件数）は含まれない
+    （PMN-4）。中心が理論構成に解決できない場合はエラーにせず ``available=False`` +
+    ``notice`` の事実文を 200 で返す（欠落を異常として演出しない・P4）。
+    """
+    if mode not in NEARBY_MODES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"mode は {' / '.join(NEARBY_MODES)} のいずれか",
+        )
+    result = nearby_for_person_node(
+        current_user["id"],
+        node_id,
+        mode=mode,
+        center_component_id=center_component_id,
+        can_view_document=user_can_view_document,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Node not found")
+    return result
+
+
+@me_router.get("/personal-network/atlas-neighbors")
+def get_me_personal_network_atlas_neighbors(
+    node_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """わたしの地図「名前のある霧」（装置1、広がりの装置の1件）。
+
+    設計の正本は ``docs/features/personal_map_nearby_design.md``。実体は
+    ``core.personal_graph.atlas_fog.atlas_neighbors_for_person_node``（読み取り専用・
+    非LLM・DB 非変更）。本人ノードが分野の地図の1概念に結びついているとき、その概念が
+    属する領域と、骨格エッジで直接つながる概念・同じ領域の他概念だけを「近くにある」
+    という事実で示す（存在だけを事実として見せ、詳細は本人の明示操作まで伏せる —
+    ``journey.py`` の ``cross_course_hint`` と同じ文法）。座標・件数・confidence 等の
+    数値は返さない。
+
+    クエリ:
+    - ``node_id``: 本人の痕跡ノード ID（``/api/me/personal-network`` の ``nodes[].id``）。
+      本人の個人ネットワークに無ければ 404（他人の痕跡を中心にできない・PN-1）。
+
+    中心が地図に結びついていない・骨格が無い・概念が突合できない場合はエラーにせず
+    ``available=False`` + ``note`` の事実文を 200 で返す（欠落を異常として演出しない）。
+    ``user_id`` を受け取るパラメータは無く、書き込みメソッドもここには追加しない。
+    """
+    result = atlas_neighbors_for_person_node(current_user["id"], node_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Node not found")
     return result

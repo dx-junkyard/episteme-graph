@@ -13,8 +13,12 @@
 LLM-first な主要ステージ（paper_skeleton / rhetorical_role / claim_qualification /
 equation_semantics / thesis_reconstruction / dsl_linking / component_assembly）。
 非LLM ステージ（evidence_registry / claim_object_builder / symbol_registry /
-derivation_chain / component_graph / course_mapping 等、CLAUDE.md 記載の「非LLM」ステージ）
-はここでは見積らない。``analyze_images=True`` のときのみ vision ステージ
+derivation_chain / course_mapping 等、``_PIPELINE_STEPS`` で ``llm_kind="none"`` を
+宣言しているステージ）はここでは見積らない。``component_graph`` は LLM を呼ぶ
+（``llm_kind="text"``）が入力量の係数が定まっていないため v1 の見積り対象外で、
+``narrative_annotator`` / ``contextual_explanation`` / ``discuss_opening`` /
+``landscape_placement`` も同様に未収録（見積りは主要ステージのみの下限であって
+全 LLM ステージの網羅ではない）。``analyze_images=True`` のときのみ vision ステージ
 （apparatus_semantics）を別途加算する。
 
 FastAPI には依存しない・LLM を呼ばない（core/llm_usage の他モジュールと同じ規律）。

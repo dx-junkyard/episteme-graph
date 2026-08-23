@@ -91,7 +91,8 @@ class TestPromptBounds:
         )
         prepared = BUILDER.prepare_for_prompt(item)
         assert len(prepared["domains"]) == MAX_DOMAINS
-        assert len(prepared["domains"][0]["nodes"]) == MAX_NODES_PER_DOMAIN
+        # 既定 kind は region なので、上限で切られたノードが regions に並ぶ
+        assert len(prepared["domains"][0]["regions"]) == MAX_NODES_PER_DOMAIN
 
     def test_long_texts_are_truncated_for_the_prompt(self):
         item = _input(central_thesis="x" * (MAX_THESIS_CHARS + 100))

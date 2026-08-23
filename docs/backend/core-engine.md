@@ -38,13 +38,14 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 
 ## 3. 抽出・埋め込み・検索
 
-### `extractor.py` — PDF → GROBID ユーティリティ + 構造 diff/merge
-- `extract_tei_xml_from_pdf_bytes()` — GROBID `/api/processFulltextDocument` に投げて TEI-XML を得る（`document_pipeline/orchestrator.py` が使用）
-- `compute_structure_diff()` / `evaluate_and_merge_proposals()` — `PaperStructure` の構造差分とマージ評価（Gateway 層向け。`backend/tests/core/test_diff_merge.py` が参照）
+### `extractor.py` — PDF → GROBID 変換
+- `extract_tei_xml_from_pdf_bytes()` — GROBID `/api/processFulltextDocument` に投げて TEI-XML を得る（`document_pipeline/orchestrator.py` が使用）。**現在このモジュールの公開関数はこれ 1 本だけ**です
 
-> 旧仮説駆動型の逐次 LLM 構造抽出（`extract_paper_structure()` とその内部ステップ）は本番呼び出し元が
-> 存在しなかったため 2026-07 に削除済み。教材アップロード後の本格的な構造化は、
-> **Agent パイプライン**（`document_pipeline/`）が担います。[パイプライン概要](../pipeline/overview.md) を参照。
+> 旧仮説駆動型の逐次 LLM 構造抽出（`extract_paper_structure()` とその内部ステップ）と、
+> 旧構造 diff/merge（`compute_structure_diff()` / `evaluate_and_merge_proposals()`。参照していた
+> `backend/tests/core/test_diff_merge.py` も同時に削除）は、本番呼び出し元が存在しなかったため
+> 2026-07 に削除済み。教材アップロード後の本格的な構造化は、**Agent パイプライン**
+> （`document_pipeline/`）が担います。[パイプライン概要](../pipeline/overview.md) を参照。
 
 ### `embedder.py` — pgvector への保存
 - `embed_and_store(chunks, material_id, extracted_structure)` — チャンクを 100 件単位で埋め込み、`documents` を upsert、`chunks` に `embedding(halfvec 3072)` + `smiles_dsl` / `variables` / `ancestors` を保存
@@ -122,10 +123,13 @@ LLM 出力は常に `status='candidate'` で、本人の confirm を経てのみ
 
 | ファイル | 役割 |
 |---|---|
-| `orchestrator.py` | `run_document_pipeline()`。23 ステージを順次実行。ステージ単位で再開可能、進捗コールバック、`PipelineStageError` でステージ名付きエラー |
+| `orchestrator.py` | `run_document_pipeline()`。名前付き 29 ステージ（+ between-stage フック2件）を順次実行。ステージ単位で再開可能、進捗コールバック、`PipelineStageError` でステージ名付きエラー。ステージ構成の正本は `PIPELINE_STAGES` / `_PIPELINE_STEPS` |
 | `chunker.py` | ブロックからチャンク生成（決定論的） |
 | `persistence.py` | 成果物の PostgreSQL 永続化 |
 | `export_validation_gate.py` | 最終検証ゲート（成果物完全性・ソースバッキング整合性） |
+| `figure_images.py` | **L層**: `figure_image_extraction` ステージ本体（非LLM）。PyMuPDF の埋め込み画像抽出 + caption 近傍の領域レンダリング fallback、図中ラベル（`inner_labels`）抽出。保存先は MinIO `figure-images` + `document_figures` |
+| `figure_context.py` | **L層**: 図ごとの周辺本文（caption 直近 / `Fig. N` 参照メンション / 同一セクション本文）と略語辞書を決定論的に収集し、`apparatus_semantics` の LLM 入力にする |
+| `contextual_explanation_inputs.py` | `contextual_explanation` ステージの入力構築。components / claims / equations / figures / thesis から**不透明 ID を解決済みテキストに展開**した `ElementExplanationInput` を組む（設計原則 E4） |
 | `completeness.py` / `dsl_text.py` / `tex_archive.py` / `revision/` | 完全性チェック、DSL テキスト化、TeX アーカイブ処理、リビジョン |
 
 詳細は [パイプライン概要](../pipeline/overview.md) と [PDF 解析 Agent 詳細](../pipeline/agents.md)。

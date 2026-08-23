@@ -1,0 +1,41 @@
+"""反証条件候補 — validation 失敗時の修復再試行（SL-1, scope_candidates と同方式）。
+
+2回失敗しても対象行は破棄せず、repair_failed=True の空結果を返す。
+worker は falsification_analyzed_at を打った上で候補 0 件のまま保持する（P4）。
+
+ループの骨格は core/llm_worker/repair.py に共通化済み。ここでは
+falsification_conditions 固有の validate_output 呼び出しと repair_failed 時の
+FalsificationCandidateResult 組み立てのみを持つ。
+"""
+
+from __future__ import annotations
+
+from core.doubt.falsification_conditions.prompt import build_repair_prompt
+from core.doubt.falsification_conditions.schema import (
+    FalsificationCandidateResult,
+    FalsificationTargetContext,
+)
+from core.doubt.falsification_conditions.validator import validate_output
+from core.llm_worker.repair import MAX_REPAIR_ATTEMPTS, run_with_repair as _run_with_repair
+
+__all__ = ["MAX_REPAIR_ATTEMPTS", "run_with_repair"]
+
+
+def run_with_repair(
+    llm_client,
+    base_content: str,
+    context: FalsificationTargetContext,
+) -> FalsificationCandidateResult:
+    return _run_with_repair(
+        llm_client,
+        base_content,
+        validate=lambda data: validate_output(data, context),
+        build_repair_prompt=build_repair_prompt,
+        on_repair_failed=lambda errors: FalsificationCandidateResult(
+            target_id=context.target_id,
+            target_type=context.target_type,
+            repair_failed=True,
+            warnings=[f"repair_failed: {e}" for e in errors],
+        ),
+        log_label="falsification condition",
+    )

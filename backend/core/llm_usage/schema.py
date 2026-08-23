@@ -59,6 +59,11 @@ KNOWN_FEATURES = (
     "learning:chat",
     "learning:chat_casual",
     "learning:chat_discuss",
+    # 理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）: AI 4モードの
+    # うち Elicit/Diff は既存 learning_chat の1コール地点に相乗りするが、U層タグは
+    # discuss/casual と同様に分離計測する。
+    "learning:cycle_elicit",
+    "learning:cycle_diff",
     "learning:voice_stt",
     "learning:voice_tts",
     "learning:tension",
@@ -83,6 +88,10 @@ KNOWN_FEATURES = (
     # --- D層（Doubt Layer） ---
     "doubt:scope_candidates",
     "doubt:assumption_normalize",
+    # 賭け金の台帳（SL層, migration 067）— 反証条件候補抽出 worker
+    # （doubt:scope_candidates と同型・独立カウンタ。正本
+    # docs/features/stakes_ledger_design.md §3.3/§10）。
+    "doubt:falsification_conditions",
     # --- W層（Element Deliberation Workspace）。cross_corpus は §4.2 chunk-proxy レンズの
     # embedding 生成（Phase 1）。chat/vision は面③対話（Phase 2、設計書 §0 W9）の
     # 1ターン=1構造化出力コール（core.llm.generate_conversation_turn）。standardization は

@@ -59,8 +59,10 @@
   };
 
   // seed_status → 表示ラベル (学習者向け凡例と揃える)
+  // 正本は backend/core/atlas_state.py::PILL_LABELS
+  // （固定は backend/tests/test_atlas_vocab_mirror.py）。
   var SEED_LABEL = {
-    verified: "実験で確認", contested: "解釈が分かれる", assumed: "暗黙の前提",
+    verified: "原文に裏付け", contested: "解釈が分かれる", assumed: "暗黙の前提",
   };
   // エッジ種別 → 強さ重み / ラベル
   var KIND_WEIGHT = { depends: 3, related: 2, adjacent: 1 };
@@ -812,7 +814,7 @@
       span.appendChild(document.createTextNode(label));
       return span;
     }
-    row.appendChild(item(C.verifiedFill, C.verifiedStroke, null, "実験で確認"));
+    row.appendChild(item(C.verifiedFill, C.verifiedStroke, null, "原文に裏付け"));
     row.appendChild(item(C.contestedFill, C.contestedStroke, null, "解釈が分かれる"));
     row.appendChild(item("none", C.assumedStroke, "3 2", "暗黙の前提"));
     row.appendChild(item(C.neutralFill, C.neutralStroke, null, "未設定"));

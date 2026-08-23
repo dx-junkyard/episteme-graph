@@ -25,6 +25,7 @@ from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
 from core import llm_policy
+from core.atlas_gaps import store as gap_store
 from core.course_data import course_atlas_binding_pending, course_cartridge_id, course_topics
 from core.schema import (
     AUDIT_ENTITY_ATLAS_ASSIST,
@@ -125,6 +126,33 @@ def _ensure_domain_exists(cartridge_id: str) -> None:
     finally:
         session.close()
     raise HTTPException(status_code=404, detail=f"domain '{cartridge_id}' not found")
+
+
+def _pending_gap_candidates(
+    session, cartridge_id: str, draft: atlas.AtlasSkeleton
+) -> list[dict]:
+    """凍結前チェック: 採用済みでまだ次版に反映されていないカテゴリギャップ候補。
+
+    正本: docs/features/category_gap_candidates_design.md §5.4。判定材料は
+    「教員が採用した」判断行と「いまの下書きに入っている node id」だけで、
+    骨格へは一切書き込まない (LS7)。
+
+    DB 不通・照会失敗は空リスト (fail-open) — 候補機構の不調で凍結という主要操作を
+    止めない。ガードレールは「採用済み未反映があるときに止まること」を検査する。
+    """
+    try:
+        return gap_store.list_pending_for_freeze(
+            session,
+            domain_key=cartridge_id,
+            draft_node_ids=list(draft.concept_ids()) + list(draft.region_ids()),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas freeze: category gap pending check skipped for %s",
+            cartridge_id,
+            exc_info=True,
+        )
+        return []
 
 
 def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | None:
@@ -439,6 +467,105 @@ def save_atlas_skeleton_draft(
     return {"cartridge_id": cartridge_id, "draft": payload}
 
 
+@router.post("/{cartridge_id}/atlas/skeleton/draft/from-frozen")
+def create_atlas_skeleton_draft_from_frozen(
+    cartridge_id: str, current_user: dict = Depends(_require_teacher)
+) -> dict:
+    """現行の凍結版を複製して次版 draft を作る (決定論・LLM 不使用)。
+
+    正本: docs/features/category_gap_candidates_design.md §5.5。
+
+    骨格に「1項目だけ足す」ための前提となる経路である。既存の draft 生成は LLM の
+    全体再生成で node id が振り直され、`landscape_placements.node_id` /
+    `topics[].atlas_node_id` / 学習者の足跡が静かに参照切れするため、次版の編集は
+    **現行版の複製から始められなければならない**。
+
+    - 既存 draft あり: 409 (作業中の下書きを黙って捨てない)
+    - retired: 409 (読み取り専用)
+    - 凍結版なし: 404 (複製元が無い)
+
+    `lock_domain_for_write` + トランザクション内 lifecycle 再確認で retire/restore と
+    直列化する (generate / freeze と同じ check-then-write 競合の防止)。
+    """
+    _ensure_domain_exists(cartridge_id)
+    session = _skeleton_session()
+    try:
+        atlas_store.lock_domain_for_write(session, cartridge_id)
+        if atlas_store.domain_lifecycle(session, cartridge_id) == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は廃止済みです。復帰してから編集してください",
+            )
+        if atlas_store.load_draft(session, cartridge_id) is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="draft が既に存在します。現在の下書きを編集するか、破棄してからやり直してください",
+            )
+        # 同梱のみの骨格専用ドメイン (atlas_domains/<key>/skeleton.yaml) でも複製できる
+        # よう、DB 凍結版 → 同梱ファイルの順で解決する learner_skeleton を使う。
+        frozen = atlas_store.load_learner_skeleton(cartridge_id, session)
+        if frozen is None:
+            raise HTTPException(status_code=404, detail="複製できる凍結済みの骨格がありません")
+        draft = atlas.AtlasSkeleton(
+            cartridge=cartridge_id,
+            status=atlas.STATUS_DRAFT,
+            version="",
+            generated_by=frozen.generated_by,
+            reviewed_by=(),
+            # 版の履歴は引き継ぐ (凍結時に新しい版のエントリが積まれる)。
+            changelog=frozen.changelog,
+            regions=frozen.regions,
+            edges=frozen.edges,
+            concept_bindings=frozen.concept_bindings,
+            # id_migrations は「その凍結で行った付け替え」の記録なので複製しない
+            # (次版で再適用すると修正報告の node_id を二重に付け替えてしまう)。
+            id_migrations=(),
+        )
+        revision = atlas_store.save_draft(
+            session,
+            cartridge_id,
+            draft,
+            expected_revision=None,
+            user_id=str(current_user.get("id") or "") or None,
+            generated_by=frozen.generated_by,
+        )
+        session.commit()
+    except atlas_store.DraftRevisionConflict as exc:
+        session.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail={"message": str(exc), "current_revision": exc.current_revision},
+        ) from exc
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_review_event(
+        cartridge_id,
+        atlas.STATUS_FROZEN,
+        atlas.STATUS_DRAFT,
+        current_user.get("id"),
+        {
+            "action": "draft_from_frozen",
+            "source_version": frozen.version,
+            "revision": revision,
+        },
+    )
+    payload = _skeleton_payload(draft)
+    if payload is not None:
+        payload["revision"] = revision
+    return {
+        "cartridge_id": cartridge_id,
+        "draft": payload,
+        "source_version": frozen.version,
+    }
+
+
 @router.delete("/{cartridge_id}/atlas/skeleton/draft")
 def discard_atlas_skeleton_draft(
     cartridge_id: str, current_user: dict = Depends(_require_teacher)
@@ -493,6 +620,8 @@ def freeze_atlas_skeleton(
       新版へ引き継ぎ、id_migrations に従って対象 node_id を付け替える
     - 凍結処理の前に凍結前の現行版 (DB) との影響プレビュー (§3.2/§4.4) を計算し、
       レスポンスに含める。凍結成功後は関係教員へ通知する (§3.4, best-effort)
+    - 公開前チェック: 採用済みでまだ次版に反映されていないカテゴリギャップ候補が
+      残っていれば中止する (409。category_gap_candidates_design.md §5.4)
     """
     session = _skeleton_session()
     try:
@@ -508,8 +637,20 @@ def freeze_atlas_skeleton(
         freeze_impact = atlas_lifecycle.compute_freeze_impact(
             session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
         )
+        pending_gaps = _pending_gap_candidates(session, cartridge_id, draft_row["skeleton"])
     finally:
         session.close()
+    if pending_gaps:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "採用済みでまだ次版に反映されていない候補が残っています",
+                # 件数ではなくラベルの列挙で示す (LS5: 数値を見せない)。
+                "pending_labels": [
+                    str(item.get("proposed_label") or "") for item in pending_gaps
+                ],
+            },
+        )
     draft = draft_row["skeleton"]
 
     # 採用済み報告の帰属を credits に合流する (受け入れ条件3)。
@@ -562,6 +703,14 @@ def freeze_atlas_skeleton(
             user_id=str(current_user.get("id") or "") or None,
         )
         atlas_store.delete_draft(session, cartridge_id)
+        # 採用と反映の分離: 実際に版へ入った候補にだけ applied_version を刻印する
+        # (凍結と同一トランザクション。刻印だけが残る・落ちる状態を作らない)。
+        stamped_gaps = gap_store.stamp_applied_versions(
+            session,
+            domain_key=cartridge_id,
+            frozen_version=body.version,
+            frozen_node_ids=list(frozen.concept_ids()) + list(frozen.region_ids()),
+        )
         session.commit()
     except HTTPException:
         session.rollback()
@@ -615,6 +764,8 @@ def freeze_atlas_skeleton(
             "report_credits": atlas_reports.credits_from_reports(accepted_reports),
             "reports_applied": report_summary.get("applied", 0),
             "reports_migrated": report_summary.get("migrated", 0),
+            # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
+            "category_gaps_applied": list(stamped_gaps),
         },
     )
 

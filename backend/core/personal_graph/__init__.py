@@ -17,6 +17,9 @@ Phase P-0 スコープ（本パッケージ現状）:
 - ``graph_data.py``: ``learning_states.personal_graph`` JSONB の正本アクセサ
 - ``bridges.py``   : ビジョン Phase B — 橋候補の k-匿名集約（教員向け・コーススコープ。
   本人スコープの個人ネットワーク導出とは別系統で、集約読みを自前に持つ）
+- ``provisional.py``: カテゴリギャップ候補 v1-b — 共有骨格に置けなかった論文の主題を
+  本人にだけ見せる「暫定ノード」の読み時導出（``docs/features/category_gap_candidates_design.md``
+  §4.4 裁定 / §5.6。共有骨格・共有候補には一切書き込まない）
 
 **開発ルール2**: 本パッケージは FastAPI / routes / services / ``core.llm`` を import しない
 （非LLM・決定論であることを import レベルで保証する。PN-5）。受講ゲート等の権限判定は

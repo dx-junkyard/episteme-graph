@@ -25,6 +25,7 @@ from dependencies import _require_system_admin, _require_teacher
 from routes.theory_components import _ensure_document_viewable
 
 from core.llm_usage.document_estimate import estimate_document_run
+from core.llm_usage.forecast import forecast_document_run, forecast_run_capacity
 from core.llm_usage.metrics import collect_metrics
 from core.postgres import get_session
 
@@ -106,3 +107,42 @@ def get_document_usage_estimate(
     if result is None:
         raise HTTPException(status_code=404, detail="Document not found")
     return result
+
+
+@router.get("/forecast")
+def get_run_capacity_forecast(
+    analyze_images: bool = Query(default=False),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コスト見通しの一行（document 不要版・アップロードゾーン用, 教員支援 Phase 4 §3.1）。
+
+    末端4ステージの日次カウンタ残数のみによる保守判定。返却は
+    ``{show: bool, message: str}`` のみ — 数値・残回数・トークン数は返さない（TT2）。
+    導出失敗は ``{show: false}`` の fail-open（TT4: 開始をブロックしない）。
+    """
+    return forecast_run_capacity(analyze_images=analyze_images)
+
+
+@router.get("/forecast/documents/{document_id}")
+def get_document_run_forecast(
+    document_id: str,
+    analyze_images: bool = Query(default=False),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コスト見通しの一行（document 版・再解析モーダル用, 教員支援 Phase 4 §3.1）。
+
+    ``estimate_document_run`` の上振れ × カウンタ残数の合成による保守判定
+    （``core/llm_usage/forecast.py``）。権限ゲートは estimate と同じ
+    ``_ensure_document_viewable``（fail-closed のまま — fail-open は導出のみ）。
+    返却は ``{show: bool, message: str}`` のみ（TT2 / TT4）。
+    """
+    chunks = _ensure_document_viewable(document_id, current_user)
+    canonical_document_id = _canonical_document_id(chunks, document_id)
+
+    session = get_session()
+    try:
+        return forecast_document_run(
+            session, canonical_document_id, analyze_images=analyze_images
+        )
+    finally:
+        session.close()

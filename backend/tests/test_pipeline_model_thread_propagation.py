@@ -538,12 +538,15 @@ class TestEquationSemanticsVisionModelResolution:
         client = EquationSemanticsLLMClient(model="explicit-vision-model")
         captured: dict = {}
 
-        def fake_openai_vision(messages, image, model):
+        # vision 経路の唯一の継ぎ目は ``_generate_vision_json``（内部で
+        # ``core.llm.generate_json_with_image`` を呼び、U層の観測フックを通る）。
+        # 戻り値はパース前の生テキスト。
+        def fake_vision_json(messages, image, model):
             captured["model"] = model
-            return {"equations": []}
+            return '{"equations": []}'
 
         monkeypatch.setattr(
-            client, "_generate_openai_vision", fake_openai_vision, raising=True
+            client, "_generate_vision_json", fake_vision_json, raising=True
         )
         monkeypatch.setenv("LLM_PROVIDER", "openai")
         _real_get_settings.cache_clear()

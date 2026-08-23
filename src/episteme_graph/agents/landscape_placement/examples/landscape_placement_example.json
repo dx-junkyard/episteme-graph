@@ -1,5 +1,5 @@
 {
-  "_comment": "Sample input/output pair for LandscapePlacementAgent (knowledge_landscape_design.md §7.3). Not consumed by production code; human reference + fixture source for tests. All ids are already resolved into text by core/landscape/builder.py before the agent sees them, and every node_id below exists in the supplied domains (the validator rejects invented anchors).",
+  "_comment": "Sample input/output pair for LandscapePlacementAgent (knowledge_landscape_design.md §7.3 + category_gap_candidates_design.md §5.1). Not consumed by production code; human reference + fixture source for tests. All ids are already resolved into text by core/landscape/builder.py before the agent sees them, and every node_id below exists in the supplied domains (the validator rejects invented anchors). The optional category_gaps section carries *candidate* categories only: it never moves the map, and a malformed candidate drops itself without costing a placement (warning-only soft collector).",
   "input": {
     "document_id": "11111111-2222-3333-4444-555555555555",
     "cartridge_id": "astrophysics",
@@ -43,7 +43,8 @@
         ]
       }
     ],
-    "max_placements": 8
+    "max_placements": 8,
+    "max_gaps_per_document": 3
   },
   "output": {
     "placements": [
@@ -92,6 +93,17 @@
       {
         "domain_key": "particle_physics",
         "reason": "この論文は加速器実験の検出器を扱っていないため、提示された領域に対応するノードがない。"
+      }
+    ],
+    "category_gaps": [
+      {
+        "layer": "concept",
+        "domain_key": "astrophysics",
+        "parent_region_id": "cosmology",
+        "proposed_label": "重力レンズ再構成",
+        "reason": "論文はレンズ効果のパワースペクトルの再構成を扱っているが、宇宙論・大規模構造の領域に並んでいる概念は宇宙背景放射のみである。",
+        "evidence_quote": "The reconstructed lensing power spectrum is measured over the multipole range 100 < L < 2000.",
+        "confidence": 0.55
       }
     ]
   }

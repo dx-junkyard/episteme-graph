@@ -2,8 +2,16 @@
 
 G層（`guidance_layer_design.md`）の土台となる基盤層。通知とエージェント（Admin Copilot）で
 ユーザーサポートを行うために必要な「状態の読み取りモデル」「遷移の検知」「通知の届け先」を
-整備する。migration 038 で実装（設計時点では 039 を想定していたが、039 は先行して
-G層 `guidance_layer_design.md` が使用したため、実装では **038** が割り当てられた）。
+整備する。migration 038 で実装（設計時点では 039 を想定していた）。
+
+> **訂正注記（2026-08-13）:** 上記の「039 を想定していた」の**理由説明**（先に G層が 039 を
+> 使ったため入れ替わった、という趣旨の記述）は、G層 `guidance_layer_design.md` §5 の
+> 同種の記述と因果が逆向きで相互に矛盾していた。事実として確認できるのは
+> **設計時の想定番号と実装番号が入れ替わった**ことのみで、どちらが先に採番したかは
+> 追跡できない。**一次情報は `backend/db/` の実ファイル名**
+> （`038_status_events_notifications.sql` = 本層 / `039_assistant_step_dismissals.sql` = G層）で、
+> 最終番号自体は両設計書とも正しい。設計書には想定番号を書かない運用が望ましい
+> （`docs/architecture/doc_review_findings_2026-08-13.md` 7-4）。
 
 > **2026-07 更新（アーキテクチャ整理 Tier 3）**: 本設計書が新設した `user_notifications` は
 > migration 045 で V層（`shared_versioning_design.md`）の `share_notifications`（migration 037）を

@@ -914,3 +914,322 @@ class TestEquationDisplayTitle:
         item = next(i for i in items if i["kind"] == "equation")
         assert item["summary"] == ""
         assert item["latex"] == "\\frac{a}{b}"  # 本文カード用には保持する
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: 承認済み contextual 説明の見出し結線（snapshot 側）
+#
+# 設計正本: docs/features/element_context_presentation_redesign.md §8 Phase 3 /
+# docs/features/security_and_context_phase3_implementation_directive.md §5.4・§5.5。
+# ---------------------------------------------------------------------------
+
+
+_APPROVED_BODY = (
+    "この式は物質密度のゆらぎを空間平均に対する比として定義する。"
+    "以降の摂動論はこの量を出発点にする。"
+)
+_APPROVED_FIRST_SENTENCE = "この式は物質密度のゆらぎを空間平均に対する比として定義する。"
+
+_PHASE3_EQUATION = {
+    "equation_id": "eq_tex_b14",
+    "latex": "\\delta = 1",
+    "semantics": {
+        "equation_type": "definition",
+        "role_in_argument": "definition",
+        "summary": "密度揺らぎの定義",
+    },
+}
+
+
+def _phase3_bundle(explanations=None, *, document_id="doc-1", equation=None):
+    from core.course_content_builder import _collect_structured_content
+
+    return _collect_structured_content(
+        {document_id: {"equation_semantics": {"equations": [equation or _PHASE3_EQUATION]}}},
+        explanations,
+    )
+
+
+class TestApprovedExplanationCollection:
+    def test_body_is_attached_for_the_matching_document_and_equation(self):
+        from core.course_content_builder import _APPROVED_EXPLANATION_KEY
+
+        bundle = _phase3_bundle({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        assert bundle["equations"]["eq_tex_b14"][_APPROVED_EXPLANATION_KEY] == _APPROVED_BODY
+
+    def test_explanation_of_another_document_is_not_borrowed(self):
+        """同じ equation ID が別論文にもあり得るため、索引キーは (document_id, equation_id)。"""
+        from core.course_content_builder import (
+            _APPROVED_EXPLANATION_KEY,
+            _equation_semantic_projection,
+        )
+
+        bundle = _phase3_bundle({("doc-OTHER", "eq_tex_b14"): _APPROVED_BODY})
+        equation = bundle["equations"]["eq_tex_b14"]
+        assert _APPROVED_EXPLANATION_KEY not in equation
+        assert "headline" not in _equation_semantic_projection(equation)
+
+    def test_no_explanations_argument_keeps_the_previous_behaviour(self):
+        from core.course_content_builder import _APPROVED_EXPLANATION_KEY
+
+        bundle = _phase3_bundle(None)
+        assert _APPROVED_EXPLANATION_KEY not in bundle["equations"]["eq_tex_b14"]
+
+
+class TestApprovedExplanationHeadlineProjection:
+    def _projection(self, explanations=None, equation=None):
+        from core.course_content_builder import _equation_semantic_projection
+
+        bundle = _phase3_bundle(explanations, equation=equation)
+        return _equation_semantic_projection(bundle["equations"]["eq_tex_b14"])
+
+    def test_headline_is_the_first_sentence_only(self):
+        projected = self._projection({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        assert projected["headline"] == _APPROVED_FIRST_SENTENCE
+        assert "以降の摂動論" not in projected["headline"]
+
+    def test_headline_key_is_absent_without_an_approved_explanation(self):
+        assert "headline" not in self._projection(None)
+
+    def test_tex_only_explanation_is_rejected(self):
+        projected = self._projection(
+            {("doc-1", "eq_tex_b14"): "\\delta \\equiv \\frac{\\rho-\\bar{\\rho}}{\\bar{\\rho}}"}
+        )
+        assert "headline" not in projected
+
+    def test_internal_id_only_explanation_is_rejected(self):
+        projected = self._projection({("doc-1", "eq_tex_b14"): "Derive result eq_tex_b16"})
+        assert "headline" not in projected
+
+    def test_semantic_kind_is_not_replaced_by_the_headline(self):
+        """CP1: 見出しと意味の一行を同じ文字列にしない。"""
+        projected = self._projection({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        assert projected["semantic_kind"] == "密度揺らぎの定義"
+        assert projected["semantic_kind"] != projected["headline"]
+
+    def test_snapshot_carries_no_review_metadata(self):
+        """§5.4-5: reviewer / status / 説明本文そのものはスナップショットへ焼かない。"""
+        from core.course_content_builder import _content_blocks, _topic_evidence_links
+
+        bundle = _phase3_bundle({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        equation = bundle["equations"]["eq_tex_b14"]
+        item = next(
+            b for b in _content_blocks("", [], [], [equation], []) if b["type"] == "equations"
+        )["items"][0]
+        link = next(
+            link for link in _topic_evidence_links([], [equation], {}, {}, "high")
+            if link["kind"] == "equation"
+        )
+        for payload in (item, link):
+            assert payload["headline"] == _APPROVED_FIRST_SENTENCE
+            assert "reviewed_by" not in payload
+            assert "review_status" not in payload
+            assert "label_source" not in payload
+            assert "_approved_contextual_explanation" not in payload
+            # 説明**全文**は保存しない（第1文の見出しだけ）。
+            assert _APPROVED_BODY not in repr(payload)
+
+
+class TestApprovedExplanationEvidenceItemTitle:
+    def _topic(self, explanations):
+        from core.course_content_builder import _content_blocks, _topic_evidence_links
+
+        bundle = _phase3_bundle(explanations)
+        equations = [bundle["equations"]["eq_tex_b14"]]
+        return {
+            "content_blocks": _content_blocks("", [], [], equations, []),
+            "evidence_links": _topic_evidence_links([], equations, {}, {}, "high"),
+            "content_confidence": "high",
+        }
+
+    def _equation_item(self, explanations):
+        from core.course_content_builder import build_topic_evidence_items
+
+        items = build_topic_evidence_items(self._topic(explanations))
+        return next(i for i in items if i["kind"] == "equation")
+
+    def test_title_uses_the_approved_headline(self):
+        item = self._equation_item({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        assert item["title"] == _APPROVED_FIRST_SENTENCE
+
+    def test_title_falls_back_to_the_existing_ladder_without_an_explanation(self):
+        assert self._equation_item(None)["title"] == "密度揺らぎの定義"
+
+    def test_content_block_route_also_uses_the_headline(self):
+        """evidence_links を持たない（content_blocks だけの）トピックでも同じ見出し。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = self._topic({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        topic.pop("evidence_links")
+        item = next(
+            i for i in build_topic_evidence_items(topic) if i["kind"] == "equation"
+        )
+        assert item["title"] == _APPROVED_FIRST_SENTENCE
+
+    def test_title_never_shows_tex_or_internal_ids(self):
+        item = self._equation_item({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        assert "\\" not in item["title"]
+        assert "eq_tex" not in item["title"]
+
+    def test_learner_item_does_not_leak_provenance(self):
+        item = self._equation_item({("doc-1", "eq_tex_b14"): _APPROVED_BODY})
+        for forbidden in ("label_source", "reviewed_by", "review_status", "explanation_status"):
+            assert forbidden not in item
+        assert _APPROVED_BODY not in repr(item)
+
+    def test_a_stored_headline_that_is_tex_or_an_internal_id_is_ignored(self):
+        """旧データ・手編集への読み取り時の防衛（保存値をそのまま信じない）。"""
+        from core.course_content_builder import build_topic_evidence_items
+
+        items = build_topic_evidence_items({
+            "evidence_links": [{
+                "kind": "equation",
+                "target_id": "eq_tex_b14",
+                "headline": "\\begin{aligned} x &= y \\end{aligned}",
+                "semantic_kind": "密度揺らぎの定義",
+            }],
+        })
+        assert next(i for i in items if i["kind"] == "equation")["title"] == "密度揺らぎの定義"
+
+
+class TestApprovedExplanationBulkLoad:
+    def test_document_ids_are_passed_to_the_store_helper_in_one_call(self):
+        from unittest.mock import MagicMock
+
+        from core.course_content_builder import _load_approved_equation_explanations
+
+        session = MagicMock()
+        with patch(
+            "core.element_explanations.approved_contextual_bodies",
+            return_value={("doc-1", "eq_tex_b14"): _APPROVED_BODY},
+        ) as bulk:
+            result = _load_approved_equation_explanations(session, ["doc-1", "doc-2"])
+        assert result == {("doc-1", "eq_tex_b14"): _APPROVED_BODY}
+        bulk.assert_called_once()
+        assert bulk.call_args.args[1] == ["doc-1", "doc-2"]
+        assert bulk.call_args.kwargs["element_type"] == "equation"
+
+    def test_lookup_failure_degrades_to_empty_and_rolls_back(self):
+        from unittest.mock import MagicMock
+
+        from core.course_content_builder import _load_approved_equation_explanations
+
+        session = MagicMock()
+        with patch(
+            "core.element_explanations.approved_contextual_bodies",
+            side_effect=RuntimeError("db down"),
+        ):
+            assert _load_approved_equation_explanations(session, ["doc-1"]) == {}
+        session.rollback.assert_called_once()
+
+    def test_snapshot_still_builds_when_the_lookup_failed(self):
+        from core.course_content_builder import _content_blocks
+
+        equations = [_phase3_bundle({})["equations"]["eq_tex_b14"]]
+        block = next(
+            b for b in _content_blocks("", [], [], equations, []) if b["type"] == "equations"
+        )
+        assert block["items"][0]["equation_id"] == "eq_tex_b14"
+        assert "headline" not in block["items"][0]
+
+
+class TestApprovedExplanationEndToEndCourseBuild:
+    """``build_course_content`` が (document_id, equation_id) で説明を解決し、
+    保存されるスナップショットの見出しに反映すること（§5.4）。"""
+
+    def _run(self, explanation_rows):
+        from unittest.mock import MagicMock
+
+        from core.course_content_builder import build_course_content
+
+        course_data = {
+            "sources": [{"material_id": "m1"}],
+            "topics": [{"id": "t1", "title": "Topic 1"}],
+        }
+        saved: dict = {}
+
+        def _execute(query, params=None):
+            sql = " ".join(str(query).split())
+            result = MagicMock()
+            if "SELECT data, user_id" in sql:
+                result.fetchone.return_value = (course_data, "user-1")
+            elif "FROM element_explanations" in sql:
+                result.fetchall.return_value = list(explanation_rows)
+            elif "FROM chunks" in sql and "DISTINCT" in sql:
+                result.fetchall.return_value = [("doc-1",)]
+            elif "chunk_index ASC" in sql:
+                result.fetchall.return_value = []
+            elif "FROM document_figures" in sql:
+                result.fetchall.return_value = []
+            elif "title = :title" in sql:
+                saved["data"] = params.get("data")
+            return result
+
+        session = MagicMock()
+        session.execute.side_effect = _execute
+
+        artifacts = {
+            "doc-1": {
+                "stage_outputs": {
+                    "_artifacts": {
+                        "course_mapping": {
+                            "topics": [
+                                {
+                                    "title": "Topic 1",
+                                    "description": "desc",
+                                    "linked_component_ids": ["comp_1"],
+                                }
+                            ]
+                        },
+                        "component_assembly": {
+                            "components": [
+                                {
+                                    "component_id": "comp_1",
+                                    "label": "密度コントラスト",
+                                    "linked_equation_ids": ["eq_tex_b14"],
+                                }
+                            ]
+                        },
+                        "equation_semantics": {"equations": [_PHASE3_EQUATION]},
+                    },
+                },
+            },
+        }
+
+        with patch("core.course_content_builder._pg_session", return_value=session), \
+             patch(
+                 "core.document_pipeline.persistence.resolve_artifact_runs",
+                 return_value=artifacts,
+             ), \
+             patch("core.course_content_builder.generate_text_with_structured_output") as gen:
+            gen.return_value = {
+                "key_concepts": ["k"],
+                "student_material": {"source_format": "eg-markdown-v1", "source_text": "本文"},
+                "spoken_script": "script",
+                "cautions": [],
+                "check_questions": [],
+            }
+            result = build_course_content("user-1", "course-1")
+
+        assert result["status"] == "completed"
+        return course_data
+
+    def _equation_item(self, course):
+        from core.course_content_builder import build_topic_evidence_items
+
+        topic = course["topics"][0]
+        return next(
+            i for i in build_topic_evidence_items(topic) if i["kind"] == "equation"
+        )
+
+    def test_snapshot_title_reflects_the_approved_explanation(self):
+        course = self._run([("doc-1", "eq_tex_b14", _APPROVED_BODY)])
+        assert self._equation_item(course)["title"] == _APPROVED_FIRST_SENTENCE
+
+    def test_explanation_of_another_document_does_not_reach_this_snapshot(self):
+        course = self._run([("doc-OTHER", "eq_tex_b14", _APPROVED_BODY)])
+        assert self._equation_item(course)["title"] == "密度揺らぎの定義"
+
+    def test_build_succeeds_with_no_approved_explanations(self):
+        course = self._run([])
+        assert self._equation_item(course)["title"] == "密度揺らぎの定義"

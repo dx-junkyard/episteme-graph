@@ -2,6 +2,9 @@
 
 仕様書: `field_atlas_overlay_spec.md` §1.2 / §9 / §10 / §16
 
+> 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
+> 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
+
 ## 概要
 
 骨格は、モデル知識からカートリッジ単位で一度だけバッチ生成し、教員レビューを経て
@@ -50,6 +53,16 @@ LLMバッチ生成 (draft)             → backend/cartridges/<id>/atlas/skeleto
    **10件**、または**3つ以上の異なる node/region** に修正が必要になった時点
    (D-1 issue と共有の暫定値。運用開始後に調整)
 3. **分野の大きな動き** — 手動判断
+
+> **訂正注記 (2026-08-14):** 上記 2. の「**10件**、または3つ以上の異なる node/region」は
+> **実装されていない当初案**である。実装値は
+> `backend/core/atlas_reports.py` の `REVISION_TRIGGER_THRESHOLD = 5` で、判定対象は
+> 「**同一対象 (node/region) への未クローズ報告 (pending + 未反映 accepted) が 5件**」。
+> 到達でレビュー画面に改版検討ヒント (`revision_hint_targets`) を出すだけで、
+> **自動改版はしない**。D-1 の正本 `field_atlas_correction_reports.md` の
+> 「未決事項の決定」表も 5件で確定している。一次情報はコード
+> (`REVISION_TRIGGER_THRESHOLD`) 側。
+> （不具合報告 `docs/architecture/doc_review_findings_2026-08-13.md` §2-10）
 
 改版手順: 現行の凍結版を draft としてコピー (`PUT .../skeleton/draft` に凍結版の内容を
 渡す) → 修正 → `POST .../skeleton/freeze` で次版 (例 `2027.1`) を付与。

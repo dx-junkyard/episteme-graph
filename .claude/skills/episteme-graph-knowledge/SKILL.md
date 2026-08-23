@@ -153,6 +153,7 @@ AbstractionPattern によるパターンマッチングシステム（旧 `backe
 | `LLM_USAGE_FLUSH_INTERVAL_SECONDS` | U層: flusher スレッドの書込周期（秒） | `10` |
 | `LLM_USAGE_FLUSH_BATCH` | U層: この件数到達で即時 flush | `100` |
 | `LLM_PRICE_TABLE_PATH` | U層: モデル単価 JSON のパス（1Mトークンあたり USD・前方一致）。空なら cost_usd=null | （空） |
+| `LANDSCAPE_GAP_MAX_PER_DOCUMENT` | カテゴリギャップ候補: landscape_placement 相乗りの gap 申告を 1 document あたり何件まで保存するか（migration 066 `landscape_gap_signals`。追加 LLM コールなし） | `3` |
 
 > **禁止**: `google-cloud-aiplatform` (Vertex AI) を新規パイプラインコードで使用すること。
 > Google の LLM を使う場合は必ず `LLM_PROVIDER=gemini` (`google-generativeai`) を指定すること。

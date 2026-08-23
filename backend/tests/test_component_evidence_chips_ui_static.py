@@ -180,7 +180,9 @@ class TestPopoverAndContextPanel:
         start = src.index("var MATERIAL_LIBRARY_STATUS_LABELS = {")
         end = src.index("};", start)
         block = src[start:end]
-        for label in ("標準", "分野標準", "共通化進行中", "新規", "未判定"):
+        # D2（訳語統一）: 3画面で分裂していた語彙をサーバ正本
+        # （core/library/schema.py::STANDARDIZATION_STATUS_LABELS）へ統一した。
+        for label in ("標準", "分野標準", "共通化しつつある", "新規", "未評価"):
             assert label in block
 
 

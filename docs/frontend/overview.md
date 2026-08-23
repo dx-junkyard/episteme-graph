@@ -20,9 +20,19 @@
 
 > コーディング規約: `admin.js` と管理側モジュールは既存コードに合わせ ES5 互換、`app.js` は ES6+。フレームワークは使わない。
 
-### JS モジュール一覧（`public/js/`、2026-07 時点で 22 本）
+### JS モジュール一覧（`public/js/`、実ファイル突合で 31 本）
 
-**学習 UI 側（`index.html` が読み込む 11 本）**
+`element-vocab.js` / `element-card.js` の 2 本は学習 UI・管理 UI の**両方**が読み込む共用モジュール。
+残り 29 本は片側専用（学習 UI 専用 13 本、管理 UI 専用 16 本）。
+
+**共用（`index.html` と `admin.html` の両方が読み込む 2 本）**
+
+| モジュール | グローバル | 役割 |
+|---|---|---|
+| `element-vocab.js` | `ElementVocab` | 要素種別・状態などの表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。DOM 非操作・依存なしの純関数群 |
+| `element-card.js` | `ElementCard` | 統一パーツカードの描画・イベントバインド（同 §3.2）。編集可能（`VARIANT_EDITABLE`）/ 読み取り専用（`VARIANT_READONLY`）の2バリアント |
+
+**学習 UI 側（`index.html` が読み込む、共用込みで 15 本 / 専用 13 本）**
 
 | モジュール | グローバル | 役割 |
 |---|---|---|
@@ -36,9 +46,11 @@
 | `atlas-cues.js` | `AtlasCues` | 見晴らしの導線カード + 初回ログイン一度きり自動表示（F-2） |
 | `personal-map.js` | `PersonalMap` | 個人知識ネットワークのコースビュー（旅カード・「地図には反映しない」訂正操作込み） |
 | `personal-map-home.js` | `PersonalMapHome` | 最上位「わたしの地図」パネル（P-3、ヘッダ `#my-map-btn`） |
+| `landscape-layer.js` | `LandscapeLayer` | 知識ランドスケープ（migration 065）の「論文の位置」レイヤー。地図オーバーレイ + 出典タブへ配置データを供給 |
 | `reconstruction.js` | `Reconstruction` | 再構成ループ（R層）の学習画面導線「再構成に挑戦」 |
+| `discuss.js` | `Discuss` | 「論文と話す」discuss モードのフロント（二枚看板・スコープトグル・モードバー・開幕/着地画面） |
 
-**管理 UI 側（`admin.html` が読み込む 10 本 + 共用 vis-network / KaTeX CDN）**
+**管理 UI 側（`admin.html` が読み込む、共用込みで 18 本 / 専用 16 本 + 共用 vis-network / KaTeX CDN）**
 
 | モジュール | グローバル | 役割 |
 |---|---|---|
@@ -52,25 +64,49 @@
 | `admin-llm-usage.js` | `AdminLlmUsage` | U層 LLM 使用量タブ（SYSTEM_ADMIN）+ 教材見積りポップオーバー（TEACHER） |
 | `atlas-draft-preview.js` | `AtlasDraftPreview` | 分野の地図・骨格エディタのビジュアルプレビュー |
 | `atlas-assist-panel.js` | `AtlasAssistPanel` | 骨格エディタの AI アシスト編集パネル |
+| `admin-llm-models.js` | `AdminLlmModels` | M層 場面別 LLM モデル選択（教材管理の解析モデル1行サマリ + 運用タブ「AIモデル」+ 共通モデルチップ `createModelChip`） |
+| `admin-figure-studio.js` | `FigureStudio` | 教材図スタジオ（AI 対話で SVG 説明図を生成し `![[figure:id]]` として教材へ採用） |
+| `admin-release-review.js` | `AdminReleaseReview` | リリース前の確認ウィザード（学習マップ割当 → 論文の位置づけ → 公開の3ステップ） |
+| `admin-manual-editor.js` | `ManualKbEditor` | 利用者マニュアル KB（help_kb, migration 058/059）の draft 編集 + 凍結配信 UI（SYSTEM_ADMIN のみ） |
+| `admin-discuss-observation.js` | `AdminDiscussObservation` | discuss 観測基盤（Observation Layer）の状況ダッシュボード + ダンプ取得（SYSTEM_ADMIN のみ） |
+| `admin-help-inspect.js` | `AdminHelpInspect` | 管理画面「❓ 使い方」インスペクト・モード（`[data-ui-anchor]` ホバーでマニュアル節ツールチップ） |
 
 ### 読み込み順と DI 注入の関係
 
-`index.html` の読み込み順: `app.js` → `atlas-fixture.js` → `atlas-data.js` → `atlas-overlay.js` →
-`atlas-panel.js` → `atlas-report.js` → `atlas-minimap.js` → `atlas-cues.js` → `personal-map.js` →
-`personal-map-home.js` → `reconstruction.js`。`app.js` が各グローバルの存在チェック付きで呼び出し、
+`index.html` の読み込み順: `element-vocab.js` → `element-card.js` → `app.js` → `atlas-fixture.js` →
+`atlas-data.js` → `atlas-overlay.js` → `atlas-panel.js` → `atlas-report.js` → `atlas-minimap.js` →
+`atlas-cues.js` → `personal-map.js` → `personal-map-home.js` → `landscape-layer.js`（`atlas-overlay.js`
+のフックから呼ばれるため `personal-map.js` の後）→ `reconstruction.js` → `discuss.js`。
+`element-vocab.js` / `element-card.js` はこれらを参照する全スクリプトより前に読み込む必要があるため
+先頭固定。`app.js` が各グローバルの存在チェック付きで呼び出し、
 `PersonalMap.init({openTrajectory})` / `PersonalMapHome.init({openTrajectory})` のように依存を渡す。
 
-`admin.html` の読み込み順: `doubt-atlas.js` → `atlas-draft-preview.js` → `atlas-assist-panel.js` →
-`admin-assistant.js` → `admin-next-steps.js` → `versioning.js` → `admin-lecture-studio.js` →
-`deliberation.js` → `admin-llm-usage.js` → **最後に `admin.js`**。各分離モジュールは
-`window.*` グローバルを公開するだけで、初期化は `admin.js` の起動処理が DI 注入で行う:
+`admin.html` の読み込み順: `element-vocab.js` → `element-card.js` → `doubt-atlas.js` →
+`atlas-draft-preview.js` → `atlas-assist-panel.js` → `admin-help-inspect.js` → `admin-assistant.js` →
+`admin-next-steps.js` → `versioning.js` → `admin-figure-studio.js` → `admin-lecture-studio.js` →
+`deliberation.js` → `admin-llm-usage.js` → `admin-manual-editor.js` → `admin-discuss-observation.js` →
+`admin-llm-models.js` → `admin-release-review.js` → **最後に `admin.js`**。`element-vocab.js` /
+`element-card.js` はここでも先頭固定（`admin-lecture-studio.js` / `deliberation.js` / `admin.js` が
+参照するため）。各分離モジュールは `window.*` グローバルを公開するだけで、初期化は `admin.js` の
+起動処理が DI 注入で行う:
 
+- `AdminLlmModels.init({apiFetch, escHtml, onTabActivate, state, activateTabView})` — `initUpload()` /
+  `initMaterialsPanel()` より**前**に注入する（教材管理の初期化がこの DI に依存するため）。直後に
+  `AdminLlmModels.initMaterialsPanel()` を呼ぶ
+- `AdminReleaseReview.init({apiFetch, escHtml, atlasBindingPropose, refreshNextSteps, onPublished})` —
+  コース管理初期化と同じブロックで起動（SYSTEM_ADMIN では初期化しない）
 - `LectureStudio.init({apiFetch, apiFetchRaw, escHtml, onTabActivate, state})` — 公開 API は
-  `init` / `openExportModal` / `getScreenContext`
+  `init` / `openExportModal` / `getScreenContext`。**`FigureStudio.init({apiFetch, apiFetchRaw,
+  escHtml})` はこの内部から呼ばれる**（admin.js から見た起動点を増やさないため。admin.js は
+  `FigureStudio` を直接 init しない）
 - `Deliberation.init({apiFetch, apiFetchRaw, escHtml})`（SYSTEM_ADMIN では LectureStudio とともに初期化しない）
 - `AdminLlmUsage.init({apiFetch, escHtml, onTabActivate, state})`
+- `ManualKbEditor.init({apiFetch, escHtml, onTabActivate, state})` — `admin-llm-usage.js` と同型の DI
+- `AdminDiscussObservation.init({apiFetch, escHtml, onTabActivate, state})` — `admin-manual-editor.js`
+  と同型の DI
 - `AdminAssistant.init({apiFetch, state, activateTabView})` → 直後に `registerAssistantHooks()` で
   各画面の screen context / UI アンカー（道案内の点灯先）を登録
+- `AdminHelpInspect.init({apiFetch})` — `AdminAssistant` の usage_help 連携より前に読み込む
 - `AdminNextSteps.init({apiFetch, state})` — AdminAssistant の**後**に起動する
   （パネルの `[案内する]` が `AdminAssistant.runLocatePlan` を呼ぶため）
 - `Versioning.init({apiFetch, state})` + `Versioning.initInbox()`（ヘッダの 🔔 通知）
@@ -147,3 +183,7 @@
 ---
 
 [← 認証・権限・開示範囲](../features/auth-visibility.md) ｜ [ドキュメント目次に戻る →](../README.md)
+
+---
+
+最終更新 2026-08-14（実ファイル突合）

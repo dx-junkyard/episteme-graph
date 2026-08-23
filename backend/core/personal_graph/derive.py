@@ -41,6 +41,9 @@ _ATTRIBUTION_OWNED = (ATTRIBUTION_LEARNER_SELECTED, ATTRIBUTION_CONFIRMED)
 # N4 で「本人が異議を挟んだ」とみなす self_check（§2「採用しない痕跡」）
 _SELF_CHECK_DISAGREE = ("disagreed", "verdict_wrong")
 
+#: N4 のラベルが元 claim 本文から引けないときのフォールバック（従来の固定文字列）。
+_RECONSTRUCTION_FALLBACK_LABEL = "claim への再構成"
+
 _BRIDGE_FACT = "この引っかかりを自分でつないだ"
 _FACT_REVISED = "改訂を経てたどり着いた再構成"
 _FACT_DESCENDED = "原因を絞るため記号まで降りた"
@@ -63,7 +66,32 @@ def _tension_label(payload: dict) -> str:
     return _truncate(payload.get("text"))
 
 
-def _tension_anchor(trace: dict, topic_atlas: dict[str, str]) -> PersonalAnchor:
+def _topic_anchor(
+    topic_id: str,
+    topic_atlas: dict[str, str],
+    topic_labels: dict[str, str] | None,
+) -> PersonalAnchor:
+    """topic 粒度への縮退アンカーを組み立てる（``_tension_anchor`` / ``_question_anchor`` 共用）。
+
+    ``anchor_label`` には**トピック題名のみ**を入れる（``topic_labels`` は
+    ``queries.fetch_topic_labels`` が ``topics[].title`` から決定論的に組み立てた
+    {topic_id: title}）。題名が引けない topic（コース削除済み・title 未設定）は
+    従来どおり空文字のまま — 発話原文などの別テキストで埋めない（捏造しない・P4）。
+    """
+    return PersonalAnchor(
+        anchor_type=ANCHOR_TYPE_TOPIC,
+        anchor_id=topic_id,
+        anchor_label=(topic_labels or {}).get(topic_id, ""),
+        atlas_node_id=topic_atlas.get(topic_id),
+    )
+
+
+def _tension_anchor(
+    trace: dict,
+    topic_atlas: dict[str, str],
+    *,
+    topic_labels: dict[str, str] | None = None,
+) -> PersonalAnchor:
     """§2: 本人が connect 操作を経た tension（``status='connected'``）のみ、
     ``payload.connected_refs.component_ids / edge_ids`` をアンカーに使う。
 
@@ -79,6 +107,9 @@ def _tension_anchor(trace: dict, topic_atlas: dict[str, str]) -> PersonalAnchor:
     LLM 由来の ``target_refs`` とは区別される。``connected_refs`` を持たない
     connect 済み行（本機能未コミット時点のデータには存在しないが、将来の後方互換のため）は
     topic 粒度へ fail-closed に縮退する。
+
+    topic 粒度へ縮退した場合の ``anchor_label`` はトピック題名（``topic_labels``、既定
+    ``None``＝従来どおり空文字）。``_topic_anchor`` 参照。
     """
     payload = trace.get("payload") or {}
     if trace.get("status") == "connected":
@@ -89,21 +120,21 @@ def _tension_anchor(trace: dict, topic_atlas: dict[str, str]) -> PersonalAnchor:
             return PersonalAnchor(anchor_type=ANCHOR_TYPE_COMPONENT, anchor_id=component_ids[0])
         if edge_ids:
             return PersonalAnchor(anchor_type=ANCHOR_TYPE_GRAPH_EDGE, anchor_id=edge_ids[0])
-    topic_id = str(trace.get("topic_id") or "")
-    return PersonalAnchor(
-        anchor_type=ANCHOR_TYPE_TOPIC,
-        anchor_id=topic_id,
-        atlas_node_id=topic_atlas.get(topic_id),
-    )
+    return _topic_anchor(str(trace.get("topic_id") or ""), topic_atlas, topic_labels)
 
 
-def _tension_node(trace: dict, topic_atlas: dict[str, str]) -> PersonalNode:
+def _tension_node(
+    trace: dict,
+    topic_atlas: dict[str, str],
+    *,
+    topic_labels: dict[str, str] | None = None,
+) -> PersonalNode:
     payload = trace.get("payload") or {}
     return PersonalNode(
         id=str(trace["id"]),
         node_kind=NODE_KIND_TENSION,
         label=_tension_label(payload),
-        anchor=_tension_anchor(trace, topic_atlas),
+        anchor=_tension_anchor(trace, topic_atlas, topic_labels=topic_labels),
         topic_id=trace.get("topic_id"),
         created_at=str(trace.get("created_at") or ""),
         facts=[],
@@ -141,10 +172,19 @@ def _tension_bridge_edges(trace: dict) -> list[PersonalEdge]:
     return edges
 
 
-def _question_anchor(trace: dict, topic_atlas: dict[str, str]) -> tuple[PersonalAnchor, str]:
+def _question_anchor(
+    trace: dict,
+    topic_atlas: dict[str, str],
+    *,
+    topic_labels: dict[str, str] | None = None,
+) -> tuple[PersonalAnchor, str]:
     """§2 N2/N3: structure_anchor が本人確定済み（learner_selected/confirmed・active）なら
     そのアンカーを使う（N2）。それ以外（無し・llm_candidate・dismissed）は topic 粒度へ
     縮退する（N3）。**llm_candidate の anchor_id は絶対に使わない**（PN-3）。
+
+    N2 の ``anchor_label`` は structure_anchor 側の値をそのまま使う（トピック題名で
+    上書きしない）。N3（topic 縮退）のときだけ ``topic_labels`` からトピック題名を入れる
+    （``_topic_anchor`` 参照。既定 ``None`` は従来どおり空文字）。
 
     戻り値は (anchor, attribution_source_for_source_meta)。
     """
@@ -162,21 +202,21 @@ def _question_anchor(trace: dict, topic_atlas: dict[str, str]) -> tuple[Personal
         )
         return anchor, str(structure_anchor.get("attribution_source") or "")
 
-    topic_id = str(trace.get("topic_id") or "")
-    anchor = PersonalAnchor(
-        anchor_type=ANCHOR_TYPE_TOPIC,
-        anchor_id=topic_id,
-        atlas_node_id=topic_atlas.get(topic_id),
-    )
+    anchor = _topic_anchor(str(trace.get("topic_id") or ""), topic_atlas, topic_labels)
     attribution = ""
     if isinstance(structure_anchor, dict):
         attribution = str(structure_anchor.get("attribution_source") or "")
     return anchor, attribution
 
 
-def _question_node(trace: dict, topic_atlas: dict[str, str]) -> PersonalNode:
+def _question_node(
+    trace: dict,
+    topic_atlas: dict[str, str],
+    *,
+    topic_labels: dict[str, str] | None = None,
+) -> PersonalNode:
     payload = trace.get("payload") or {}
-    anchor, attribution_source = _question_anchor(trace, topic_atlas)
+    anchor, attribution_source = _question_anchor(trace, topic_atlas, topic_labels=topic_labels)
     return PersonalNode(
         id=str(trace["id"]),
         node_kind=NODE_KIND_QUESTION,
@@ -244,15 +284,23 @@ def _reconstruction_node(
     ``course_content_builder.py`` が component 経由で書き込んだ既存マッピングを読むだけ）。
     解決できない claim（どのトピックにも組み込まれていない）は従来どおり ``None``
     のまま — 「まだ地図にない」トレイに残る（P4: 情報を落とさない）。
+
+    ``label`` は元 claim の本文（``row["claim_text"]`` = ``theory_claims.text``。
+    ``queries.fetch_reconstructions{,_for_user}`` が LEFT JOIN で併読する）を他ノードと
+    同じ80字規則で切ったもの。本人が REVEAL（出典開示）まで見た成功終端行だけがここに
+    来るため、claim 本文の提示は伏せフィールド（R層 item の ``response_space`` /
+    ``expected``）の漏洩には当たらない。claim 本文が引けない行（列が無い古い呼び出し・
+    claim 削除済み）は従来の固定ラベルへフォールバックする（後方互換）。
     """
     row_id = str(row["id"])
     claim_id = str(row.get("claim_id") or "")
     topic_id = (claim_topic_map or {}).get(claim_id)
     atlas_node_id = (topic_atlas or {}).get(str(topic_id)) if topic_id else None
+    label = _truncate(row.get("claim_text")) or _RECONSTRUCTION_FALLBACK_LABEL
     return PersonalNode(
         id=row_id,
         node_kind=NODE_KIND_RECONSTRUCTION,
-        label="claim への再構成",
+        label=label,
         anchor=PersonalAnchor(
             anchor_type="claim", anchor_id=claim_id, atlas_node_id=atlas_node_id,
         ),
@@ -273,12 +321,19 @@ def build_network(
     reconstructions: list[dict],
     topic_atlas: dict[str, str],
     claim_topic_map: dict[str, str] | None = None,
+    *,
+    topic_labels: dict[str, str] | None = None,
 ) -> PersonalNetwork:
     """§4 の導出アルゴリズム本体（純粋関数・非LLM・決定論）。
 
     ``claim_topic_map``（N16 是正, 既定 None＝後方互換）は {claim_id: topic_id} で、
     reconstruction ノードの ``topic_id`` 解決に使う（``_reconstruction_node`` 参照）。
     省略時は従来どおり全 reconstruction ノードの ``topic_id`` が ``None`` になる。
+
+    ``topic_labels``（既定 None＝後方互換）は {topic_id: トピック題名}
+    （``queries.fetch_topic_labels``）。topic 粒度へ縮退したアンカー（N3 と未接続 tension）の
+    ``anchor_label`` にトピック題名を入れるためだけに使う。省略時は従来どおり空文字
+    （題名の無い topic も空のまま。発話原文で埋めない・P4）。
 
     - N1 tension: ``kind='tension'`` かつ ``status in TENSION_OWNED_STATUSES`` のみ採用。
       ``status='connected'`` の行だけ bridge 辺を張る。
@@ -309,13 +364,13 @@ def build_network(
         if kind == "tension":
             if status not in TENSION_OWNED_STATUSES:
                 continue
-            nodes.append(_tension_node(trace, topic_atlas))
+            nodes.append(_tension_node(trace, topic_atlas, topic_labels=topic_labels))
             if status == "connected":
                 edges.extend(_tension_bridge_edges(trace))
         elif kind == "question":
             if status == "superseded":
                 continue
-            nodes.append(_question_node(trace, topic_atlas))
+            nodes.append(_question_node(trace, topic_atlas, topic_labels=topic_labels))
 
     recon_sorted = sorted(reconstructions, key=_sort_key)
     by_id = {str(r["id"]): r for r in recon_sorted}
@@ -346,7 +401,10 @@ def derive_personal_network(user_id: str, course_id: str) -> PersonalNetwork:
     reconstructions = queries.fetch_reconstructions(user_id, course_id)
     topic_atlas = queries.fetch_topic_atlas_binding(course_id)
     claim_topic_map = queries.fetch_claim_topic_map(course_id)
-    return build_network(traces, reconstructions, topic_atlas, claim_topic_map)
+    topic_labels = queries.fetch_topic_labels(course_id)
+    return build_network(
+        traces, reconstructions, topic_atlas, claim_topic_map, topic_labels=topic_labels,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -364,6 +422,8 @@ def build_person_network(
     reconstructions: list[dict],
     atlas_by_course: dict[str, dict[str, str]],
     claim_topic_by_course: dict[str, dict[str, str]] | None = None,
+    *,
+    topic_labels_by_course: dict[str, dict[str, str]] | None = None,
 ) -> PersonalNetwork:
     """本人スコープの導出（純粋関数・非LLM・決定論）。設計書 §5.1/§5.2。
 
@@ -373,7 +433,10 @@ def build_person_network(
 
     ``claim_topic_by_course``（N16 是正, 既定 None＝後方互換）は
     ``{course_id: {claim_id: topic_id}}``。各コースの ``build_network`` 呼び出しへ
-    そのコース分の claim_topic_map を渡し、reconstruction ノードの topic 解決に使う。最後に nodes を (created_at, id) で
+    そのコース分の claim_topic_map を渡し、reconstruction ノードの topic 解決に使う。
+    ``topic_labels_by_course``（既定 None＝後方互換）は ``{course_id: {topic_id: title}}``
+    で、同様にそのコース分だけを ``build_network`` へ渡す（topic 縮退アンカーの
+    ``anchor_label``。コース題名ではなくトピック題名であることに注意）。最後に nodes を (created_at, id) で
     再ソートする。edges はコースIDの辞書順に連結する（決定論。edges 自体は再ソートしない
     — ``build_network`` が既にコース内で決定論順に組み立てている）。
 
@@ -408,6 +471,7 @@ def build_person_network(
             recon_by_course.get(course_id, []),
             topic_atlas,
             claim_topic_map,
+            topic_labels=(topic_labels_by_course or {}).get(course_id),
         )
         for node in sub_network.nodes:
             node.course_id = course_id
@@ -469,4 +533,11 @@ def derive_person_network(user_id: str) -> PersonalNetwork:
     })
     atlas_by_course = queries.fetch_topic_atlas_binding_for_courses(course_ids)
     claim_topic_by_course = queries.fetch_claim_topic_map_for_courses(course_ids)
-    return build_person_network(traces, reconstructions, atlas_by_course, claim_topic_by_course)
+    topic_labels_by_course = queries.fetch_topic_labels_for_courses(course_ids)
+    return build_person_network(
+        traces,
+        reconstructions,
+        atlas_by_course,
+        claim_topic_by_course,
+        topic_labels_by_course=topic_labels_by_course,
+    )

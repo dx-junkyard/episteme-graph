@@ -27,7 +27,7 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 ### コース・学習
 | テーブル | 役割 | 主なカラム |
 |---|---|---|
-| `learning_courses` | コース定義（マスター） | `id(TEXT)`, `user_id`, `title`, `data(JSONB)`, `visibility`, `group_id`, `is_template`, `is_published`, `cloned_from`, `description` |
+| `learning_courses` | コース定義（マスター） | `id(TEXT)`, `user_id`, `title`, `data(JSONB)`, `visibility`, `group_id`, `is_template`, `is_published`, `description`, `llm_models(JSONB)`（※`cloned_from` は 011 で DROP 済み） |
 | `learning_states` | ユーザーごとの受講状態（可変層） | `user_id`, `course_id`, `progress_data` …（マスターと進捗の分離: マイグレーション 011） |
 | `course_builder_sessions` | コースビルダーの対話履歴 | `id`, `user_id`, `history(JSONB)`, `course_draft(JSONB)`, `status` |
 | `learner_profiles` | 学習者状態 | `user_id(UNIQUE)`, `current_level` |
@@ -54,7 +54,7 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 ### 講義モード
 | テーブル | 役割 |
 |---|---|
-| `lecture_audio_cache` | TTS 音声キャッシュ（`chunk_id` + `voice` UNIQUE, `audio_data`, `duration_ms`, `word_timestamps`） |
+| `lecture_audio_cache` | TTS 音声キャッシュ（040 で `UNIQUE(chunk_id, slide_index, voice)` に張替え・`language` 列追加。`audio_data`, `duration_ms`, `word_timestamps`） |
 | `lecture_sessions` / 関連状態 | レクチャーの再生状態（マイグレーション 006） |
 
 ### グループ・開示範囲
@@ -98,7 +98,7 @@ A層（生成パイプライン）を書き換えず、その上に「教員に�
 | `document_analysis_runs` | Agent パイプライン実行履歴（`status`, `current_stage`, `stage_outputs(JSONB)`, `run_type`, `base_run_id`, `revision_status`, `created_by`, マイグレーション041で `options(JSONB)` 追加 — アップロード時オプションのスナップショット） |
 | `background_tasks` | 非同期ジョブ追跡（`task_type`, `status`, `result_data`, `error_message`） |
 
-### 分野の地図（Field Atlas, マイグレーション 023・024・026・027・028・046）
+### 分野の地図（Field Atlas, マイグレーション 023・024・026・027・028・046・057）
 3層モデル（S=骨格 / C=状態導出キャッシュ / P=個人層 `interest_traces`）で「いま学習中の箇所が
 分野全体のどこか」を示す。詳細は `docs/features/field_atlas_*.md` 系設計書群、CLAUDE.md
 「分野の地図（Field Atlas）」参照。
@@ -219,7 +219,7 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 |---|---|
 | `topic_lecture_audio_cache`（047） | トピック単位の TTS 音声キャッシュ。キーは `(course_id, topic_id, slide_index, voice)`（`course_id`/`topic_id` は FK なしのテキストキー）。トピックの授業用教材/読み上げ原稿を編集すると当該トピックの音声行が DELETE される |
 
-### 画像読み取りパイプライン（マイグレーション 041・051・052・053）
+### 画像読み取りパイプライン（マイグレーション 041・051・052・053・054）
 正本は `docs/features/image_pipeline_knowledge_library_design.md`。既存 agent は非改変。
 
 | テーブル/変更 | 役割 |
@@ -250,7 +250,7 @@ purge 誤削除を防止する。`kind` に DB CHECK は付けず、V層側の4�
 | `llm_usage_events`（043） | LLM 呼び出しのトークン使用量台帳（append-only、削除 API を作らない）。`usage_source`(reported/estimated_tokenizer/estimated_heuristic) を分離集計。`feature`（帰属、既定 `unattributed`）。FK なし・金額列なし（価格は集計時に価格表で都度換算） |
 | `llm_usage_daily`（043, VIEW） | day × feature × model × usage_source の SUM 集計ビュー。専用カウンタテーブルは持たない |
 
-### W層（要素検討ワークスペース, マイグレーション 048・049）
+### W層（要素検討ワークスペース, マイグレーション 048・049・064）
 教員が図・理論コンポーネント・claim・数式などパイプライン成果を「深く検討」するための対話・注釈層。
 A層は非改変。正本は `docs/features/element_deliberation_workspace_design.md`（親文書
 `docs/features/knowledge_network_vision.md`）。設計書は当初 migration 046 への同乗を想定していたが、
@@ -349,6 +349,20 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `051_figure_inner_labels.sql` | 画像読み取りパイプライン — 図中ラベル抽出（`document_figures.inner_labels`、決定論的・非LLM） |
 | `052_figure_presentation_modes.sql` | 図の提示モード分類・教員レビュー（#496） — `document_figures` に `suggested_mode`/`reviewed_mode` 等を追加 |
 | `053_figure_reviewed_analysis.sql` | 教員レビュー済み図解析プロファイルの分離保存 — `document_figures` に `reviewed_analysis_mode`/`reviewed_analysis_profile` 等を追加（再解析時も教員レビュー済み内容を上書きしない） |
+| `054_figure_iterative_analysis.sql` | 図解析の反証型反復パイプライン(L層 #499) — `document_figures.iterative_analysis JSONB`（AI提案層のみ・教員確定列なし） |
+| `055_thesis_context_persistence.sql` | 二層説明 Phase 1 — thesis 構造メタの DB 永続化（`theory_components.thesis_context` / `theory_claims.thesis_refs`） |
+| `056_element_explanations.sql` | 二層説明 Phase 2 — 全要素型ポリモーフィックな generic/contextual 説明台帳（`element_explanations`） |
+| `057_atlas_domain_lifecycle.sql` | 分野の地図 — ドメインのライフサイクル（`atlas_domain_meta.lifecycle` active/retired、`retired_at/by/note`） |
+| `058_manual_sections.sql` | help_kb Phase 3① — マニュアルのベクトル補助層（`manual_sections`。chunks 非汚染の専用テーブル） |
+| `059_manual_kb_store.sql` | help_kb Phase 3② — DB draft/freeze ストア（`manual_kb_drafts` / `manual_kb_versions` / `manual_kb_state`） |
+| `060_discuss_metric_events.sql` | discuss 観測基盤 — `discuss_metric_events`（本文非含有・append-only・FK なし） |
+| `061_llm_model_policies.sql` | M層（場面別 LLM モデル選択） — `llm_model_policies`（scope=system\|user） |
+| `062_discuss_opening_explanations.sql` | discuss 開幕素材オーサリング — `element_explanations` に element_type `'document'` と `role` 列を追加（056 台帳へ相乗り） |
+| `063_teaching_figures.sql` | 教材図スタジオ — `course_teaching_figures` / `teaching_figure_suggestions`（SVG 正本 + ギャップ候補） |
+| `064_deliberation_evidence_derivation.sql` | W層 Phase 5 — `deliberation_sessions` / `element_annotations` の element_type CHECK に `evidence` / `derivation` を追加 |
+| `065_landscape_placements.sql` | 知識ランドスケープ（配置層） — `landscape_placements`（documents FK CASCADE・supersede 用部分 UNIQUE） |
+| `066_category_gap_signals.sql` | カテゴリギャップ候補 — `landscape_gap_signals`（論文単位の信号）+ `atlas_gap_decisions`（cluster 単位の教員判断。`cluster_key` は版非依存） |
+| `067_stakes_ledger.sql` | SL層（賭け金の台帳） — `epistemic_ledger.falsification_conditions/candidates/analyzed_at` / `verification_proposals.course_id・reachability・external_check*` / `counterfactual_sessions.toggled_observations` |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

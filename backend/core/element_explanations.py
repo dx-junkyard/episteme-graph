@@ -379,6 +379,67 @@ def approved_for_elements(
     return result
 
 
+def approved_contextual_bodies(
+    session: Any,
+    document_ids: Iterable[str],
+    *,
+    element_type: str,
+) -> dict[tuple[str, str], str]:
+    """``(document_id, element_id) -> approved contextual 説明の本文`` を**1クエリで**返す。
+
+    ラベルラダー結線（``element_context_presentation_redesign.md`` §8 Phase 3）の
+    読み出し正本。``approved_for_elements`` が「1 document + 要素 ID の明示集合」を
+    引くのに対し、こちらは「**複数 document** の当該要素型を全部」引く
+    （course build は 1〜数件の source document をまとめて投影するため、
+    document ごとに1回ずつ SQL を出さない）。
+
+    条件は ``status='approved'`` / ``kind='contextual'`` / ``role IS NULL``
+    （= 二層説明の説明本文。``role='discussion_seed'`` のような別用途の行を
+    見出しに使わない）/ 本文非空。candidate・dismissed・superseded・generic は
+    返さない（不変条項: 候補を確定表示に混ぜない）。
+
+    同じキーに複数の approved 行があるときは **created_at が新しい行**を採る
+    （P4: 古い行は DB に残る。ここは表示用の1本だけを選ぶ読み取りである）。
+    ``document_ids`` が空なら SQL を発行せず空 dict。
+    """
+    doc_ids = [str(d or "").strip() for d in (document_ids or []) if str(d or "").strip()]
+    doc_ids = list(dict.fromkeys(doc_ids))
+    element_type = str(element_type or "").strip()
+    if not doc_ids or not element_type:
+        return {}
+
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT document_id::text, element_id, body
+            FROM element_explanations
+            WHERE document_id::text = ANY(:document_ids)
+              AND element_type = :element_type
+              AND kind = :kind
+              AND status = :status
+              AND role IS NULL
+            ORDER BY document_id, element_id, created_at DESC
+            """
+        ),
+        {
+            "document_ids": doc_ids,
+            "element_type": element_type,
+            "kind": KIND_CONTEXTUAL,
+            "status": STATUS_APPROVED,
+        },
+    ).fetchall()
+
+    result: dict[tuple[str, str], str] = {}
+    for row in rows:
+        key = (str(row[0] or ""), str(row[1] or ""))
+        body = str(row[2] or "").strip()
+        if not key[0] or not key[1] or not body:
+            continue
+        # ORDER BY … created_at DESC なので先勝ち = 最新。
+        result.setdefault(key, body)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # 承認・却下（状態遷移のみ・行削除なし）
 # ---------------------------------------------------------------------------

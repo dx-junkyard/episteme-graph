@@ -13,7 +13,28 @@ from __future__ import annotations
 
 from typing import Any
 
-from core.reconstruction.schema import DiffResult, subject_driver_concepts
+from core.reconstruction.schema import CHOICE_MODES, DiffResult, subject_driver_concepts
+
+# mode 別の focus 文言（mismatch 時に「食い違いの可能性があるのは…の一点です」に差し込む）。
+_CHOICE_FOCUS_LABELS = {
+    "predict": "選択した関係の型",
+    "regime": "取り除かれる記号の見立て",
+    "next_step": "操作の選択",
+}
+
+# mode 別「あなたは…しました」のテンプレ（自然な日本語の助詞・動詞をモードごとに変える）。
+_CHOICE_SELECTION_TEMPLATES = {
+    "predict": "あなたは「{label}」と予測しました。",
+    "regime": "あなたは「{label}」を選びました。",
+    "next_step": "あなたは「{label}」を選びました。",
+}
+
+# mode 別「一致しているようです」の文言（型 / 記号 / 操作で対象語を変える）。
+_CHOICE_MATCH_STATEMENTS = {
+    "predict": "あなたの予測と出典の関係の型は一致しているようです。最終的な確認はご自身の判断でどうぞ。",
+    "regime": "あなたの見立てと出典の記号は一致しているようです。最終的な確認はご自身の判断でどうぞ。",
+    "next_step": "あなたの選択と出典の操作は一致しているようです。最終的な確認はご自身の判断でどうぞ。",
+}
 
 
 def _learner_text(response: dict[str, Any]) -> str:
@@ -56,8 +77,9 @@ def _option_label(item: dict[str, Any], option_id: str) -> str:
 def run_diff(item: dict[str, Any], claim: dict[str, Any], response: dict[str, Any]) -> DiffResult:
     """item / claim / response から DiffResult を決定論的に構築する。
 
-    predict: 選択肢 ID と expected.option_id の照合 → match / mismatch。
-    restate: 構造照合は concept 被覆のみ（verdict は na が既定。最終判断は自己確認）。
+    predict/regime/next_step（CHOICE_MODES）: 選択肢 ID と expected.option_id の照合 →
+    match / mismatch。restate: 構造照合は concept 被覆のみ（verdict は na が既定。
+    最終判断は自己確認）。
     """
     mode = str(item.get("elicit_mode") or "restate")
     expected = item.get("expected") if isinstance(item.get("expected"), dict) else {}
@@ -65,7 +87,7 @@ def run_diff(item: dict[str, Any], claim: dict[str, Any], response: dict[str, An
 
     result = DiffResult(expected_concepts=list(expected_concepts))
 
-    if mode == "predict":
+    if mode in CHOICE_MODES:
         selected = _selected_option_id(response)
         gold = str(expected.get("option_id") or "").strip()
         # concept 被覆は選択ラベルへの言及で近似（情報提示用。verdict の主軸ではない）
@@ -78,7 +100,7 @@ def run_diff(item: dict[str, Any], claim: dict[str, Any], response: dict[str, An
             result.machine_verdict = "match"
         else:
             result.machine_verdict = "mismatch"
-            result.focus = "選択した関係の型"
+            result.focus = _CHOICE_FOCUS_LABELS.get(mode, "選択した関係の型")
         return result
 
     # restate（言い直し）: concept 被覆のみ。verdict は na（鏡=自己確認に委ねる）。
@@ -133,15 +155,16 @@ def build_reflection(
     if source_line:
         statements.append("出典はこう述べています: " + source_line)
 
-    if mode == "predict":
+    if mode in CHOICE_MODES:
         selected_label = _option_label(item, _selected_option_id(response))
         if selected_label:
-            statements.append("あなたは「" + selected_label + "」と予測しました。")
+            template = _CHOICE_SELECTION_TEMPLATES.get(mode, _CHOICE_SELECTION_TEMPLATES["predict"])
+            statements.append(template.format(label=selected_label))
         if diff.machine_verdict == "mismatch":
-            focus = diff.focus or "関係の型"
+            focus = diff.focus or _CHOICE_FOCUS_LABELS.get(mode, "関係の型")
             statements.append("食い違いの可能性があるのは" + focus + "の一点です。")
         elif diff.machine_verdict == "match":
-            statements.append("あなたの予測と出典の関係の型は一致しているようです。最終的な確認はご自身の判断でどうぞ。")
+            statements.append(_CHOICE_MATCH_STATEMENTS.get(mode, _CHOICE_MATCH_STATEMENTS["predict"]))
         else:
             statements.append("選択と出典を並べて見比べてみてください。")
     else:

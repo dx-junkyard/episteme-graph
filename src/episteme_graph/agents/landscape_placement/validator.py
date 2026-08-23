@@ -28,17 +28,30 @@ Warnings (kept, never block):
 - duplicate ``(domain_key, node_id, perspective)`` → first-wins dedupe.
 - fewer placements than the design's 2〜6 target, or an ``unplaced_domains``
   entry naming a domain that was not offered.
+- **everything about ``category_gaps``**
+  (``docs/features/category_gap_candidates_design.md`` §5.1): the gap section is
+  optional and secondary, so :meth:`_collect_category_gaps` is a *soft
+  collector* — it never appends to ``errors``. A malformed gap drops that gap
+  alone and leaves the placements (and the other gaps) untouched. Making gaps a
+  hard error would send the whole output into the repair loop and, after two
+  failures, wipe out every placement (design §1-6).
 """
 from __future__ import annotations
 
 from .input_builder import LandscapePlacementInputBuilder, normalize_for_quote_match
 from .schema import (
+    CategoryGapRecord,
+    GAP_LAYER_CONCEPT,
+    GAP_LAYER_REGION,
+    GAP_LAYERS,
     LANDSCAPE_PLACEMENT_VERSION,
     LandscapePlacementInput,
     LandscapePlacementResult,
     MAX_EVIDENCE_QUOTE_CHARS,
+    MAX_PROPOSED_LABEL_CHARS,
     MAX_REASON_CHARS,
     MIN_EVIDENCE_QUOTE_CHARS,
+    normalize_gap_label,
     PERSPECTIVES,
     PlacementCandidate,
     TARGET_MIN_PLACEMENTS,
@@ -86,6 +99,11 @@ class LandscapePlacementValidator:
         known_domains = set(item.domain_keys())
         known_claim_ids = item.claim_ids()
         haystack = self._input_builder.quote_haystack(item)
+
+        # 候補は placements と独立に収集する（warning のみ・失敗は当該候補のみ drop）。
+        category_gaps = self._collect_category_gaps(
+            raw.get("category_gaps"), item, haystack, warn
+        )
 
         accepted: list[PlacementCandidate] = []
         seen_keys: set[tuple[str, str, str]] = set()
@@ -204,6 +222,7 @@ class LandscapePlacementValidator:
                 document_id=item.document_id,
                 placements=placements,
                 unplaced_domains=unplaced,
+                category_gaps=category_gaps,
                 cartridge_id=cartridge_id or item.cartridge_id,
                 placement_version=LANDSCAPE_PLACEMENT_VERSION,
                 truncated=truncated,
@@ -291,6 +310,202 @@ class LandscapePlacementValidator:
                 )
             seen.add(declared.domain_key)
             out.append(declared)
+        return out
+
+    @staticmethod
+    def _collect_category_gaps(
+        raw_gaps,
+        item: LandscapePlacementInput,
+        haystack: str,
+        warn,
+    ) -> list[CategoryGapRecord]:
+        """``category_gaps`` の収集（**warning-only の soft collector**）。
+
+        設計書 ``category_gap_candidates_design.md`` §5.1 / §1-6: 候補は任意・
+        副次的な出力なので、ここで hard error を積んではならない
+        （積むと ``if errors: return None`` → repair 2回失敗 → **placements が全滅**
+        する）。この関数は ``errors`` に触らず、``warn`` だけを使う。違反は
+        **その候補のみ** drop し、他の候補と placements は無傷で残す。
+
+        drop する条件（いずれも warning）:
+
+        - ``layer`` が語彙外 / ``domain_key`` が未提示 / ``proposed_label`` が空・長すぎ
+        - ``layer='concept'`` で ``parent_region_id`` が空（親のない概念は置き場所が無い）
+        - ``reason`` が空、``evidence_quote`` が空・短すぎ・長すぎ・**逐語でない**（LS4）
+        - 既存の領域・概念と正規化ラベルが一致する（＝言い換えの申告）
+        - ``max_gaps_per_document`` の超過分（入力順で先勝ち）
+
+        保持する条件（warning のみ・情報を落とさない）:
+
+        - ``parent_region_id`` が実在しない（設計書 §5.1「実在検査は warning」）
+        - ``layer='region'`` に ``parent_region_id`` が付いていた場合は空文字へ正規化
+        - ``reason`` が長すぎる
+        """
+        if raw_gaps is None:
+            return []
+        if not isinstance(raw_gaps, list):
+            warn(
+                "category_gaps_not_list",
+                "'category_gaps' is not an array; ignored (placements are unaffected)",
+            )
+            return []
+
+        try:
+            cap = max(0, int(item.max_gaps_per_document))
+        except (TypeError, ValueError):
+            cap = 0
+
+        known_domains = set(item.domain_keys())
+        region_index = item.region_index()
+        existing_labels = item.existing_labels()
+
+        out: list[CategoryGapRecord] = []
+        seen: set[tuple[str, str, str]] = set()
+
+        for index, entry in enumerate(raw_gaps):
+            field = f"category_gaps[{index}]"
+            if not isinstance(entry, dict):
+                warn("category_gap_not_object", f"{field} is not an object; dropped")
+                continue
+            gap = CategoryGapRecord.from_dict(entry)
+
+            if gap.layer not in GAP_LAYERS:
+                warn(
+                    "category_gap_unknown_layer",
+                    f"{field} layer {gap.layer!r} is outside the vocabulary "
+                    f"({', '.join(GAP_LAYERS)}); dropped",
+                    field,
+                )
+                continue
+            if not gap.domain_key or gap.domain_key not in known_domains:
+                warn(
+                    "category_gap_unknown_domain",
+                    f"{field} domain_key {gap.domain_key!r} was not offered; dropped",
+                    field,
+                )
+                continue
+            if not gap.proposed_label:
+                warn(
+                    "category_gap_label_missing",
+                    f"{field} has no proposed_label; dropped",
+                    field,
+                )
+                continue
+            if len(gap.proposed_label) > MAX_PROPOSED_LABEL_CHARS:
+                warn(
+                    "category_gap_label_too_long",
+                    f"{field} proposed_label is {len(gap.proposed_label)} chars "
+                    f"(max {MAX_PROPOSED_LABEL_CHARS}); dropped",
+                    field,
+                )
+                continue
+
+            if gap.layer == GAP_LAYER_CONCEPT:
+                if not gap.parent_region_id:
+                    warn(
+                        "category_gap_parent_missing",
+                        f"{field} is a concept candidate without parent_region_id; "
+                        "dropped",
+                        field,
+                    )
+                    continue
+                if (gap.domain_key, gap.parent_region_id) not in region_index:
+                    # 実在検査は warning にとどめる（設計書 §5.1）。教員のレビューで
+                    # 親を選び直せるので、候補ごと捨てない。
+                    warn(
+                        "category_gap_unknown_parent",
+                        f"{field} parent_region_id {gap.parent_region_id!r} does not "
+                        f"exist in domain {gap.domain_key!r}; kept for review",
+                        field,
+                    )
+            elif gap.layer == GAP_LAYER_REGION and gap.parent_region_id:
+                warn(
+                    "category_gap_parent_ignored",
+                    f"{field} is a region candidate but carries parent_region_id "
+                    f"{gap.parent_region_id!r}; normalized to an empty string",
+                    field,
+                )
+                gap.parent_region_id = ""
+
+            if not gap.reason:
+                warn(
+                    "category_gap_reason_missing",
+                    f"{field} has no reason; dropped",
+                    field,
+                )
+                continue
+            if len(gap.reason) > MAX_REASON_CHARS:
+                warn(
+                    "category_gap_reason_too_long",
+                    f"{field} reason is {len(gap.reason)} chars "
+                    f"(max {MAX_REASON_CHARS}); kept",
+                    field,
+                )
+
+            if not gap.evidence_quote:
+                warn(
+                    "category_gap_evidence_quote_missing",
+                    f"{field} has no evidence_quote; dropped",
+                    field,
+                )
+                continue
+            if len(gap.evidence_quote) < MIN_EVIDENCE_QUOTE_CHARS:
+                warn(
+                    "category_gap_evidence_quote_too_short",
+                    f"{field} evidence_quote is too short to ground anything "
+                    f"(min {MIN_EVIDENCE_QUOTE_CHARS} chars); dropped",
+                    field,
+                )
+                continue
+            if len(gap.evidence_quote) > MAX_EVIDENCE_QUOTE_CHARS:
+                warn(
+                    "category_gap_evidence_quote_too_long",
+                    f"{field} evidence_quote is {len(gap.evidence_quote)} chars "
+                    f"(max {MAX_EVIDENCE_QUOTE_CHARS}); dropped",
+                    field,
+                )
+                continue
+            if normalize_for_quote_match(gap.evidence_quote) not in haystack:
+                warn(
+                    "category_gap_evidence_quote_not_verbatim",
+                    f"{field} evidence_quote does not appear verbatim in the supplied "
+                    "material; dropped",
+                    field,
+                )
+                continue
+
+            normalized_label = normalize_gap_label(gap.proposed_label)
+            if normalized_label in existing_labels.get(gap.domain_key, set()):
+                warn(
+                    "category_gap_duplicates_existing_label",
+                    f"{field} proposed_label {gap.proposed_label!r} already exists in "
+                    f"domain {gap.domain_key!r} (a rewording of an existing node is "
+                    "not a new category); dropped",
+                    field,
+                )
+                continue
+
+            key = gap.key()
+            if key in seen:
+                warn(
+                    "category_gap_duplicate",
+                    f"{field} duplicates (domain_key, parent_region_id, label)={key}; "
+                    "the first occurrence is kept",
+                    field,
+                )
+                continue
+
+            if len(out) >= cap:
+                warn(
+                    "category_gaps_over_cap",
+                    f"{field} is beyond the per-document candidate cap ({cap}); "
+                    "dropped",
+                    field,
+                )
+                continue
+
+            seen.add(key)
+            out.append(gap)
         return out
 
     @staticmethod

@@ -2,6 +2,10 @@
 
 [← ドキュメント目次](../README.md) ｜ [← パイプライン概要](overview.md)
 
+> **更新注記（2026-08-14）:** **ContextualExplanationAgent** / **DiscussOpeningAgent** /
+> **LandscapePlacementAgent** の3 agent を §2 に追補し、実在しない `graph_narrative/` の記述を
+> 削除、§3 の共有モジュール表に `figure_modes.py` を追加した。
+
 各 Agent の役割・入出力・LLM/決定論の区別をまとめます。実装は `src/episteme_graph/agents/<agent_name>/`。
 
 ---
@@ -126,6 +130,64 @@
 ### NarrativeAnnotator（#360）— LLM-first（構造非変更）
 `narrative_annotator/agent.py`。main graph に reader 向けの narrative（`narrative_role`, `transition_text`, `graph_summary`）を**注釈として**付与。グラフ構造は一切変更しない（スナップショット比較で検証、違反は hard error）。出力はすべて `llm_proposed`。
 
+### ContextualExplanationAgent（二層説明）— LLM-first
+`contextual_explanation/agent.py`。パイプライン要素（figure / theory_component / theory_claim /
+equation）に **2 層の説明**を生成する（正本:
+[二層説明 設計書](../features/hierarchical_context_explanation_design.md) §5.1）。
+- 入力: `ElementExplanationInput` のリスト。上位（何を支えるか）/ 下位（何から組み立てられているか）の
+  文脈は**呼び出し側が解決済みテキストにして渡す**（構築は
+  `backend/core/document_pipeline/contextual_explanation_inputs.py`）。agent 自身は不透明 ID を
+  解決しない（設計原則 E4）
+- 出力: `ContextualExplanationResult`。要素ごとに `contextual_explanation`（**この論文の中での役割**）と
+  `generic_explanation`（**一般に何であるか**）
+- **E3 幻覚ガード**: `generic_explanation` は L層ライブラリの確定リンク（`library_excerpt`）が
+  供給された要素にだけ生成する。リンクが無ければ、モデルが「知っていても」生成しない（validator の hard error）
+- バッチ: 既定 8 要素 = 1 コール（`DEFAULT_MAX_ELEMENTS_PER_CALL`）。repair は検証に落ちた要素だけを
+  対象にし、同じバッチの正しい兄弟説明を巻き添えにしない。修復後も説明できない要素は
+  `skipped_reason` 付きで結果に残す（P4）
+- 上限: `CTXEXPL_MAX_ELEMENTS_PER_DOCUMENT`（既定 40）/ `CTXEXPL_MAX_CALLS_PER_DAY`（既定 20）。
+  日次上限に達した run は LLM を呼ばず `skipped_by_limit` を `stage_outputs` に記録
+- 保存: orchestrator が `element_explanations` へ `status='candidate'` で書く（確定は教員）
+
+### DiscussOpeningAgent — LLM-first
+`discuss_opening/agent.py`。discuss（論文と議論する）開幕画面のうち、既存成果物の投影では
+作れない唯一の生成物「**議論のきっかけ**」（立場を求める問い）を **1 document = 1 LLM コール**で
+生成する（正本:
+[discuss 開幕素材のオーサリング 設計書](../features/discuss_opening_authoring_design.md) §4.1）。
+- 入力: `DiscussOpeningInput`。`backend/core/discuss/authoring.py` が解決済みテキストへ展開した
+  D層の未検証前提（`epistemic_ledger` の `untested` / `unknown`。初回解析で台帳が空のときは
+  in-run artifact から同じ保守的マッピングで導出）+ derivation の `operation` 列（＝著者が
+  別様にもできた選択）+ thesis の合成文
+- 出力: `DiscussOpeningResult`（`DiscussionSeed` のリスト。狙いは 2〜3 件、上限は
+  `DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT`（既定 4）。溢れは `truncated` / `truncated_count` で申告）
+- **素材が無い document は LLM を呼ばない** — `skipped_reason='no_source_material'` を記録する
+  （根拠の無い火種を創作しない）
+- validator: `evidence_quote` の verbatim 包含と、煽り語の denylist（`FORBIDDEN_PHRASES`＝
+  「疑え」「ノーベル賞」等、D層と同じ禁止語彙）を hard error
+- 上限・設定: `DISCUSS_OPENING_MAX_CALLS_PER_DAY`（既定 20）/ `DISCUSS_OPENING_LANGUAGE`（既定 `ja`）
+- 保存: orchestrator が `element_explanations` へ `element_type='document'` / `role='discussion_seed'` の
+  candidate として書く（再解析で candidate は superseded、approved は不変）
+
+### LandscapePlacementAgent — LLM-first
+`landscape_placement/agent.py`。論文を**凍結済みの基準地図（atlas 骨格）のアンカー**へ、複数観点
+（`perspective`: subject / question / method / theory / observation / application）で配置する候補を
+生成する。**全ドメインを 1 コール**で扱い、ドメイン同士を相対評価させる（正本:
+[知識ランドスケープ 設計書](../features/knowledge_landscape_design.md) §7.3）。
+- 入力: `LandscapePlacementInput`。`backend/core/landscape/builder.py` が渡す解決済みテキスト
+  （論文タイトル / thesis / goal / claim テキスト）+ 各ドメインの骨格ノード一覧
+- 出力: `LandscapePlacementResult`（`PlacementCandidate`: `node_id` / `perspective` / `reason` /
+  `evidence_quote` ほか。配置できなかったドメインは理由付きで `unplaced_domains` に申告）
+- validator の hard error: `node_id` が供給された骨格に実在すること・`evidence_quote` の verbatim・
+  perspective 語彙。**地図を勝手に増やさない**（LS7）
+- **「置けない」は失敗ではなく信号**（LS10）。無理に当てはめず `unplaced_domains` に残す
+- agent は status を出さない。`builder.py` が `status='inferred'` で書き、確定は教員のみ（LS3）
+- **カテゴリギャップ候補**（`category_gaps`）は**同一コール**に相乗りする追加出力
+  （正本: [カテゴリギャップ候補 設計書](../features/category_gap_candidates_design.md) §5.1）。
+  検証は **warning-only の soft collector** で、不正な候補が配置を巻き添えにしない。骨格への反映は
+  教員の明示操作のみ
+- 上限: `LANDSCAPE_MAX_PLACEMENTS_PER_DOCUMENT`（既定 8）/ `LANDSCAPE_MAX_CALLS_PER_DAY`（既定 20）/
+  `LANDSCAPE_GAP_MAX_PER_DOCUMENT`（既定 3）
+
 ### CourseMappingAgent（#237）— 決定論
 `course_mapping/agent.py`。Component → Course topic へマッピング（既定は 1 component = 1 topic）。
 - 出力: `CourseMappingResult`（topics with linked_component_ids, learning_objectives, prerequisites）→ `course_info.json`
@@ -136,11 +198,10 @@
 ### ExportValidationGate — 決定論
 `backend/core/document_pipeline/export_validation_gate.py`。最終検証。成果物の完全性・ソースバッキング整合性・スキーマ妥当性をチェック。非 atomic / split_pending な claim が main graph に強い backing として使われていないか等を明示 report（一部は hard error）。
 
-### 未統合・レガシーのディレクトリ
+### 未統合のディレクトリ
 - `document_unit_boundary/` — 文書のユニット境界検出 Agent。実装（agent / detector / validator / schema）は
   存在するが、`orchestrator.py` の `PIPELINE_STAGES` にはまだ組み込まれていない（設計案は
   DocumentStructureAgent → 本 Agent → SourceChunking）。
-- `graph_narrative/` — 空ディレクトリ（レガシー）。narrative 注釈の現行実装は `narrative_annotator/`。
 
 ---
 
@@ -150,7 +211,8 @@
 
 | モジュール | 役割 |
 |---|---|
-| `theory_operations.py` | ドメイン中立な操作ファミリー分類（introduce_entity / define_relation / impose_assumption / construct_model / transform_representation / derive_consequence / evaluate_condition / compare_cases / validate_or_test / apply_to_context / state_limitation）。`classify_operation()` がキーワードからファミリーへ |
+| `theory_operations.py` | ドメイン中立な操作ファミリー分類（introduce_entity / define_relation / impose_assumption / construct_model / transform_representation / derive_consequence / evaluate_condition / compare_cases / validate_or_test / apply_to_context / state_limitation）。`theory_operations.classify_operation(operation_text, cartridge=...)` がキーワード（+ カートリッジの subtype ヒント）からファミリーへ。**同名の `component_graph/schema.py::classify_operation(operation)` は別物**（operation → (verb, edge_type, is_generic)。→ [理論操作グラフ](theory-graph.md)） |
+| `figure_modes.py` | 図の提示モード語彙の正本（`FIGURE_MODES` = functional_diagram / data_plot / descriptive_image / mixed / unknown）。`effective_mode(suggested, reviewed)`（教員の `reviewed_mode` 優先）と、vision 不在時の caption ヒューリスティック `infer_mode_from_text()`（判別不能は `unknown`）。分類は常に候補で、確定は `document_figures.reviewed_mode`（教員）のみ |
 | `claim_selection.py` | LLM ステージへ渡す claim の選択ポリシー。tier（paper_core→…）+ 関連度（headline 重なり）+ confidence で並べ、上限を超えた分は理由つきで除外 |
 | `content_normalization.py` | 横断再利用のための claim/equation ハッシュ。散文は casefold、数式トークンは大文字小文字保持。`CONTENT_HASH_VERSION` でルール変更を検知 |
 | `id_canonicalization.py` | 横断参照を canonical claim_id に揃える。`canonical_claim_id_for_span()` / `canonicalize_claim_refs()`。解決不能な参照は drop + warning |

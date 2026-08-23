@@ -291,6 +291,8 @@ html.learn-page > body {
   max-height: 42%;
   display: flex;
   flex-direction: column;
+  /* 欄外の印（#margin-marks, return_door_design.md §2.3）の絶対配置の基準。 */
+  position: relative;
   border: 0.5px solid var(--color-border-tertiary);
   border-radius: 10px;
   background: var(--color-background-secondary, #fafbfd);
@@ -318,6 +320,132 @@ html.learn-page > body {
   gap: 10px;
   padding: 8px 12px;
   border-top: 0.5px solid var(--color-border-tertiary);
+}
+
+/* ── 帰還の扉（再入口インレイ, docs/features/return_door_design.md §2.1）──────
+   上段（.material-region）の圧縮規約を壊さない flex: 0 0 auto の薄い1区画。
+   本文は app.js が textContent でのみ描画する（RD1）。empty なら hidden のまま。 */
+.return-door {
+  flex: 0 0 auto;
+  position: relative;
+  border: 0.5px solid var(--color-border-tertiary);
+  border-radius: 10px;
+  background: var(--color-background-secondary, #fafbfd);
+  padding: 8px 30px 8px 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.return-door-row {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  overflow: hidden;
+}
+.return-door-row + .return-door-row {
+  margin-top: 4px;
+}
+.return-door-label {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+}
+.return-door-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.return-door-close {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  background: none;
+  border: none;
+  color: var(--color-text-tertiary);
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  font-family: inherit;
+}
+.return-door-close:hover {
+  color: var(--color-text-primary);
+}
+
+/* ── 欄外の印（同 §2.3）: 教材区画右余白の淡い点レイヤ ───────────────────
+   絶対配置（基準は .material-region）なので flex 行に参加せず、
+   レイアウト規約（上段が縮む・下段を押し出さない）に影響しない。 */
+.margin-marks {
+  position: absolute;
+  top: 40px;
+  right: 2px;
+  bottom: 44px;
+  width: 18px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 3;
+}
+.margin-mark-dot {
+  pointer-events: auto;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: flex;
+  line-height: 0;
+  color: var(--color-text-info);
+  opacity: 0.45;
+}
+.margin-mark-dot.tension {
+  color: var(--color-text-warning, #b8860b);
+}
+.margin-mark-dot:hover,
+.margin-mark-dot:focus {
+  opacity: 0.95;
+}
+.margin-marks-toggle {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+  white-space: nowrap;
+}
+.margin-marks-toggle[aria-pressed="true"] {
+  color: var(--color-text-info);
+  border-color: var(--color-text-info);
+}
+/* 「段差でつまずく人」の印（トグル内・余白レイヤ共通）。線画なので currentColor で追従する。 */
+.stumble-icon {
+  display: block;
+  flex-shrink: 0;
+}
+.margin-marks-tip {
+  position: fixed;
+  max-width: 320px;
+  background: var(--color-background-primary, #fff);
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--color-text-primary);
+  z-index: 1200;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 /* 教材区画ヘッダ（②提示形式, §3.2）: 左=「教材 · トピック名」/ 右=提示形式セグメント。 */
@@ -1467,6 +1595,27 @@ html.learn-page > body {
   color: var(--color-text-danger);
 }
 
+/* 合格時の講評。合否は既に判定済みなので fail と対称の色を使うが、祝祭的な演出
+   （バッジ・アイコン・拡大）は付けない（事実文と本文だけを出す）。 */
+.check-feedback.pass {
+  color: var(--color-text-success);
+}
+
+/* 合格時の解答例・解説は畳んで出す（一等地は講評だけ）。 */
+.check-reveal {
+  margin-top: 8px;
+}
+
+.check-reveal summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+.check-reveal summary:hover {
+  color: var(--color-text-secondary);
+}
+
 .check-model-answer {
   margin-top: 10px;
   padding: 10px;
@@ -1517,6 +1666,44 @@ html.learn-page > body {
   border: 1px solid var(--color-text-info);
   background: var(--color-text-info);
   color: #fff;
+}
+
+/* 確認問題のスキップ導線。押し付けない出口なので、主要ボタンと競合しない
+   グレー系の弱いリンク風にする（警告色・強調は使わない）。 */
+.check-skip-link {
+  display: block;
+  margin: 10px 0 0 auto;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.check-skip-link:hover {
+  color: var(--color-text-secondary);
+}
+
+/* 議論から確認問題へ戻る一枚だけのチップ（チャット領域末尾に後付け）。 */
+.check-return-chip {
+  display: block;
+  margin: 8px 0 0;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.check-return-chip:hover {
+  border-color: var(--color-border-info);
+  color: var(--color-text-info);
 }
 
 .graph-suggestions {
@@ -6727,14 +6914,19 @@ body.admin-inspect-mode textarea:disabled {
   border: none;
   background: var(--color-text-info, #06c);
   color: #fff;
-  font-size: 20px;
-  line-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 0;
   padding: 0;
   cursor: pointer;
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.25);
   z-index: 9999;
 }
 .admin-assistant-fab:hover { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.32); }
+/* 線画ロボットの顔（admin-assistant.js の ROBOT_ICON）。色は親の color を継ぐ。 */
+.admin-assistant-robot { display: block; flex-shrink: 0; }
+.admin-assistant-title .admin-assistant-robot { display: inline-block; vertical-align: -3px; margin-right: 5px; }
 /* G層の初回ログイン cue（.admin-next-steps-pulse）が丸ボタンでも円のまま光るように上書き */
 .admin-assistant-fab.admin-next-steps-pulse { border-radius: 50%; }
 
@@ -7688,22 +7880,175 @@ body.admin-inspect-mode textarea:disabled {
 }
 .pm-home-journey-btn:hover { background: var(--color-background-info, #eef4fb); }
 
-.pm-home-reflect-month { margin-bottom: 18px; }
-.pm-home-reflect-month-heading {
-  font-size: 12px;
+/* 「名前のある霧」（いまの地図タブ・現在地の隣にある骨格概念を名前だけ淡く見せる好奇心
+   装置）。件数・矢印・推薦文言は描かない — 見た目自体を意図的に「薄い」ものにする。 */
+.pm-home-fog { margin-top: 14px; }
+.pm-home-fog-head {
+  font-size: 11px;
   font-weight: 600;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-bottom: 4px;
+}
+.pm-home-fog-here {
+  font-size: 12px;
   color: var(--color-text-secondary, #6e6e73);
   margin-bottom: 8px;
 }
-.pm-home-reflect-item {
-  border-left: 2px solid var(--color-border-tertiary, #e5e5ea);
-  padding: 2px 0 10px 12px;
-  margin-bottom: 4px;
+.pm-home-fog-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
-.pm-home-reflect-item-title {
-  font-size: 13px;
+.pm-home-fog-chip {
+  display: inline-flex;
+  align-items: baseline;
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  background: transparent;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 999px;
+  padding: 3px 10px;
+}
+.pm-home-fog-region {
+  font-size: 10px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  opacity: 0.75;
+}
+
+/* --- わたしの地図「いまここの周り」（近傍関係ビュー）------------------------
+   正本: docs/features/personal_map_nearby_design.md
+   縦 = 依存の向き / 枠線 = 検証の記帳の有無。座標・順位・距離は描かない（PMN-1）。
+   記号（問い/引っかかり/再構成）は atlas.css の .personal-map-dot-* を共有する。 */
+.pm-home-nb-centers-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 2px 0 6px;
+}
+.pm-home-nb-centers {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.pm-home-nb-center-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  cursor: pointer;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-primary, #fff);
   color: var(--color-text-primary, #1d1d1f);
+  border-radius: 999px;
+  padding: 3px 10px;
 }
+.pm-home-nb-center-chip:hover { border-color: var(--color-text-tertiary, #8e8e93); }
+.pm-home-nb-center-chip.active {
+  background: var(--color-background-info, #eef4fb);
+  border-color: #cfe0f3;
+  color: #185fa5;
+  font-weight: 600;
+}
+.pm-home-nb-modes {
+  display: inline-flex;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.pm-home-nb-mode {
+  border: 0;
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  padding: 4px 12px;
+  cursor: pointer;
+}
+.pm-home-nb-mode.active {
+  background: var(--color-background-info, #eef4fb);
+  color: #185fa5;
+  font-weight: 600;
+}
+.pm-home-nb-axis {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 0 0 6px;
+}
+.pm-home-nb-graph {
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 10px;
+  background: var(--color-background-secondary, #fcfcfd);
+  padding: 4px;
+}
+.pm-home-nb-graph svg { display: block; width: 100%; height: auto; }
+.pm-home-nb-lane-line { stroke: #f0f0f3; stroke-width: 1; }
+.pm-home-nb-lane-label { font-size: 9.5px; fill: #a1a1a6; }
+.pm-home-nb-link { fill: none; stroke: #cfcfd6; stroke-width: 1.3; }
+.pm-home-nb-chip { cursor: pointer; }
+.pm-home-nb-chip:focus { outline: none; }
+.pm-home-nb-chip:focus-visible .pm-home-nb-node { stroke: #185fa5; stroke-width: 2; }
+/* 既定（検証の記帳あり）= 実線。触っていないノードは淡く。 */
+.pm-home-nb-node { fill: #fafafa; stroke: #c7c7cc; stroke-width: 1; }
+.pm-home-nb-node.has-mine { fill: #fff; stroke: #a8a8ad; stroke-width: 1.1; }
+/* 記帳が無い（未検証・検証情報なし）= 破線。「検証済み」に見せない。 */
+.pm-home-nb-node.unverified { stroke-dasharray: 4 3; }
+/* 台帳行そのものが無いノードは中立（実線細）で、検証について何も主張しない。 */
+.pm-home-nb-node.no-ledger { stroke: #d6d6db; }
+.pm-home-nb-node.is-center { fill: #f4f8fd; stroke: #185fa5; stroke-width: 1.7; }
+.pm-home-nb-node-label { font-size: 11px; fill: var(--color-text-primary, #1d1d1f); }
+/* claim_excerpt（範囲ビューのチップのみ。点ビューの横レーンチップには出さない）。 */
+.pm-home-nb-node-excerpt { font-size: 9.5px; fill: #6e6e73; }
+.pm-home-nb-node-verif { font-size: 8.5px; fill: #8e8e93; }
+.pm-home-nb-legend {
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: 8px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.pm-home-nb-lg { display: inline-flex; align-items: center; gap: 5px; }
+.pm-home-nb-sw { width: 11px; height: 9px; display: inline-block; flex: none; border-radius: 2px; }
+.pm-home-nb-sw.solid { border: 1px solid #a8a8ad; background: #fff; }
+.pm-home-nb-sw.dash { border: 1px dashed #a8a8ad; background: #fff; }
+.pm-home-nb-facts {
+  margin-top: 12px;
+  border: 0.5px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 10px;
+  padding: 10px 12px;
+}
+.pm-home-nb-facts-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 6px;
+}
+.pm-home-nb-fact { font-size: 12.5px; margin: 0 0 6px; }
+.pm-home-nb-fact:last-child { margin-bottom: 0; }
+
+/* 範囲モード（topic アンカー。設計書 §5「範囲モード」追加分）:
+   1論文=1グラフを縦に並べる。「濃い＝この話題が触れている場所／淡色＝その他」の
+   対比のみを見せる（PMN-1: 位置に意味の無い配置をしない）。 */
+.pm-home-nb-range-head {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 4px 0 8px;
+}
+.pm-home-nb-doc-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+  margin: 14px 0 6px;
+}
+.pm-home-nb-doc-head:first-child { margin-top: 0; }
+.pm-home-nb-range-graph { margin-bottom: 4px; }
+/* 淡色 = まだこの話題では触れられていない（この論文の中のその他の理論構成）。 */
+.pm-home-nb-node.untouched { opacity: 0.45; }
+.pm-home-nb-sw.range-touched { border: 1.5px solid #185fa5; background: #f4f8fd; }
+.pm-home-nb-sw.range-untouched { border: 1px solid #d6d6db; background: #fafafa; opacity: 0.55; }
 
 .pm-home-journey-area {
   border-top: 0.5px solid var(--color-border-tertiary, #e5e5ea);
@@ -9066,6 +9411,37 @@ body.admin-inspect-mode textarea:disabled {
   margin-top: 6px;
 }
 
+/* ── 鏡面化（seminar_brief_mirroring_design.md §2, EX-3b⑤）──────────────────
+   AI が学習者の解釈表明・詰まりを言い直した部分。本人発話と区別が付くよう
+   左ボーダー + 淡背景の控えめな区別に留める（強調色・バッジは使わない）。 */
+.mirror-block {
+  border-left: 3px solid var(--color-border-secondary);
+  background: var(--color-background-secondary);
+  border-radius: 0 6px 6px 0;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.mirror-label {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
+.mirror-text {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.mirror-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+.mirror-chip {
+  font-size: 12px;
+}
+
 /* ── 分岐チップ（チャット区画・discuss モード限定）───────────────────── */
 .discuss-branch-chips {
   display: flex;
@@ -9251,6 +9627,54 @@ body.admin-inspect-mode textarea:disabled {
   color: var(--color-text-secondary);
   margin-top: 6px;
 }
+/* 帰還の扉（return_door_design.md §2.1/§2.2）: 着地画面末尾の「未来の自分への書き置き」と
+   「今日のあなたの言葉」トレイ（既定畳み・本人発話の逐語のみ）。 */
+.discuss-leave-note textarea {
+  width: 100%;
+  min-height: 52px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.discuss-todays-words {
+  margin-top: 8px;
+}
+.discuss-todays-words > summary {
+  font-size: 11.5px;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+.discuss-todays-words-note {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin: 6px 0;
+}
+.discuss-todays-words-list {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  font-size: 12px;
+}
+.discuss-todays-word {
+  border: 1px solid var(--color-border-tertiary);
+  background: var(--color-background-secondary);
+  border-radius: 10px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+  max-width: 100%;
+}
+.discuss-todays-word:hover {
+  border-color: var(--color-border-primary);
+}
 .discuss-landing-empty {
   font-size: 12px;
   color: var(--color-text-tertiary);
@@ -9338,9 +9762,9 @@ body.admin-inspect-mode textarea:disabled {
 .app.discuss-on .split-handle {
   display: none;
 }
-.app.discuss-on .material-foot {
-  display: none;
-}
+/* 理解サイクル Phase 1（ANCHOR, §5.4）: material-foot は常設の軽量アンカー
+   ストリップを持つため discuss モードでも隠さない（「次へ」ボタンは discuss で
+   使わないため updateNextTopicBtn() が個別に非表示にする）。 */
 /* 会話が始まる前は開幕カードに広い場所を与える */
 .app.discuss-on:not(.discuss-chat-active) .material-region {
   flex: 1 1 auto;
@@ -9378,6 +9802,182 @@ body.admin-inspect-mode textarea:disabled {
 }
 .discuss-opening-toggle[hidden] {
   display: none;
+}
+
+/* ===========================================================================
+ * 理解サイクル Phase 1（Understanding Cycle, docs/features/understanding_cycle_design.md §5）
+ * OPEN（動機記録・持ち越し再訪）／ELICIT・DIFF（予想の並置）／ANCHOR（軽量4ボタン）／
+ * LEAVE（持ち越す問いの選択）。判定・採点は行わない（UC2）。数値は出さない（UC9）。
+ * atlas の霧表現とは色・テクスチャを分ける（§9）。
+ * =========================================================================== */
+
+.cycle-opening-block {
+  padding: 12px;
+  border-radius: 8px;
+  background: var(--color-background-secondary);
+  border: 0.5px solid var(--color-border-tertiary);
+}
+.cycle-textarea {
+  width: 100%;
+  min-height: 44px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin: 6px 0;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.cycle-predict-link {
+  border: none;
+  background: none;
+  color: var(--color-text-tertiary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 2px 0;
+  display: block;
+  margin-top: 4px;
+}
+.cycle-predict-link:hover { color: var(--color-text-primary); }
+.cycle-predict-doc-list {
+  margin: 4px 0 8px 18px;
+  padding: 0;
+  font-size: 12.5px;
+  color: var(--color-text-primary);
+}
+.cycle-facts { margin-top: 8px; }
+.cycle-fact-item {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-secondary);
+  margin: 4px 0;
+}
+/* 並置 DIFF（v1）: 判定・採点・一致度の視覚表現は一切持たせない（UC2）。 */
+.cycle-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+}
+.cycle-diff-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.cycle-diff-doc-title {
+  flex-basis: 100%;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+.cycle-diff-col {
+  flex: 1 1 0;
+  min-width: 160px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.cycle-diff-hd {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-bottom: 4px;
+}
+.cycle-diff-body {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+.cycle-leave-option {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  border-radius: 14px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  margin: 0 6px 6px 0;
+}
+.cycle-leave-option:hover { border-color: var(--color-border-primary); }
+.cycle-leave-chip {
+  font-size: 10px;
+  color: var(--color-text-tertiary);
+  border: 1px solid var(--color-border-tertiary);
+  border-radius: 8px;
+  padding: 1px 5px;
+}
+.cycle-leave-free-link {
+  border: none;
+  background: none;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  text-decoration: underline;
+  padding: 3px 0;
+  display: block;
+  margin-top: 4px;
+}
+.cycle-leave-free-link:hover { color: var(--color-text-primary); }
+.cycle-leave-input textarea {
+  width: 100%;
+  min-height: 44px;
+  font-family: inherit;
+  font-size: 12.5px;
+  padding: 6px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  margin-bottom: 8px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+.cycle-precision-toggle { white-space: nowrap; }
+
+/* ── 軽量アンカー4ボタン（ANCHOR, §5.4）: 常設ストリップ + 選択ポップオーバー ── */
+.quick-anchor-strip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-right: auto;
+}
+.quick-anchor-strip[hidden] { display: none; }
+.quick-anchor-btn {
+  border: 1px solid var(--color-border-secondary);
+  background: var(--color-background-primary);
+  color: var(--color-text-secondary);
+  border-radius: 14px;
+  padding: 3px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.quick-anchor-btn:hover { color: var(--color-text-primary); border-color: var(--color-border-primary); }
+#quick-anchor-popover {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  gap: 4px;
+  padding: 4px 6px;
+  border-radius: 10px;
+  border: 1px solid var(--color-border, #ccc);
+  background: var(--color-bg, #fff);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .15);
+}
+.quick-anchor-toast {
+  position: fixed;
+  z-index: 1000;
+  font-size: 11px;
+  padding: 4px 10px;
+  border-radius: 12px;
+  background: var(--color-background-secondary);
+  color: var(--color-text-secondary);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, .12);
 }
 
 
@@ -10288,4 +10888,155 @@ button.element-card-item:focus-visible .element-card-item-label {
   margin-top: 8px;
   font-size: 11px;
   color: var(--color-text-tertiary);
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   構造の降下路（Phase 3 — 足場ダイヤル・楽屋,
+   docs/features/structure_descent_design.md §3/§4）。
+   すべて要素文脈ポップオーバー内のみの区画 — 学習画面レイアウトのフレックス規約
+   （.material-region / .ca / 下段固定）には一切触れない。
+   ══════════════════════════════════════════════════════════════════ */
+/* 宣言一行（SD6）— 降下路枠・Elicit（discuss.js / reconstruction.js）で共用。控えめに */
+.descent-declaration,
+.elicit-declaration {
+  font-size: 11px;
+  color: var(--color-text-tertiary, #aeaeb2);
+  margin-bottom: 6px;
+}
+.descent-frame {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--lx-line, #e6e9ef);
+  border-radius: 8px;
+  background: var(--color-background-secondary, #f5f5f7);
+  font-size: 12px;
+}
+.descent-rungs { margin: 2px 0; }
+.descent-rung {
+  padding: 6px 0;
+  border-bottom: 1px dashed var(--color-border-tertiary, #e6e9ef);
+}
+.descent-rung:last-child { border-bottom: none; }
+.descent-rung-stage-label {
+  display: inline-block;
+  border-radius: 999px;
+  padding: 1px 7px;
+  background: var(--color-background-tertiary, #ececf0);
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 10px;
+  font-weight: 700;
+  margin-bottom: 3px;
+}
+.descent-rung-text {
+  line-height: 1.6;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.descent-rung-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-symbol-row { margin: 4px 0; }
+.descent-symbol-head {
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.descent-symbol-line {
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-reveal-row { margin: 4px 0; }
+.descent-reveal-op {
+  font-weight: 600;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.descent-reveal-io {
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 6px;
+}
+.descent-hint-btn,
+.descent-backstage-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.descent-hint-btn:disabled {
+  color: var(--color-text-tertiary, #aeaeb2);
+  cursor: default;
+}
+.descent-backstage-btn { color: var(--color-text-secondary, #6e6e73); }
+.descent-produce { margin-top: 8px; }
+.descent-produce > summary {
+  cursor: pointer;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.descent-produce-input,
+.backstage-ask-input {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 6px;
+  padding: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 6px;
+  resize: vertical;
+  box-sizing: border-box;
+}
+/* 楽屋（SD4）: トーンを落ち着いた別色に変える（誘導・強調はしない） */
+.backstage-panel {
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--color-background-tertiary, #ececf0);
+  font-size: 12px;
+}
+.backstage-declaration {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 8px;
+}
+.backstage-step { margin-bottom: 10px; }
+.backstage-step-title {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-bottom: 4px;
+}
+.backstage-step-item {
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--color-text-primary, #1d1d1f);
+  margin: 3px 0;
+}
+.backstage-ask { margin-top: 10px; }
+.backstage-ask-btn,
+.backstage-return-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  margin-top: 6px;
+}
+.backstage-ask-note {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
 }

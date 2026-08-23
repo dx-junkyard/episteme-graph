@@ -43,6 +43,7 @@ from __future__ import annotations
 from core.personal_graph.schema import (
     ANCHOR_TYPE_COMPONENT,
     ANCHOR_TYPE_TOPIC,
+    NODE_KIND_LABELS,
     PersonalNetwork,
     PersonalNode,
 )
@@ -67,11 +68,31 @@ _DOCUMENT_LOCAL_ANCHOR_TYPES = (ANCHOR_TYPE_COMPONENT, _ANCHOR_CLAIM)
 
 _FRONTIER_NOTE = "ここから先はまだ道が無い（この要素の同一性リンクが未確定）"
 
-_NODE_KIND_JA = {
-    "tension": "引っかかり",
-    "question": "問い",
-    "reconstruction": "再構成",
-}
+# ---------------------------------------------------------------------------
+# 事実文・notice（「いまここの周り」§11 の原理を旅へ水平展開したもの:
+# 縮退は主経路・粗い対応は隠さず粗いとラベルして見せる・欠落は事実文 + 出口で
+# 行き止まりにしない）。助言・評価・数値は書かない（PN-4/PMN-5）。
+# ---------------------------------------------------------------------------
+
+#: 旅の steps が1件も組めなかったときの事実文（``journey_for_person_node`` のみで付く）。
+NOTICE_JOURNEY_EMPTY = "この記録からたどれる道は、まだ記録されていません。"
+
+#: [1'] topic 粒度に縮退したアンカーの範囲エントリ（前置き）。1点の帰属を主張しない。
+FACT_TOPIC_RANGE_PREAMBLE = (
+    "このトピック『{topic_label}』の教材が触れている理論構成をたどります（トピック単位の対応）。"
+)
+FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL = (
+    "このトピックの教材が触れている理論構成をたどります（トピック単位の対応）。"
+)
+
+#: [1'] 範囲エントリの各行。
+FACT_TOPIC_RANGE_NODE = "論文『{title}』の理論構成『{label}』に触れています。"
+
+#: タイトルが引けない document のラベル（捏造しない・件数に言及しない）。
+_UNTITLED_DOCUMENT_LABEL = "この教材"
+
+# 訳語の正本は schema.NODE_KIND_LABELS（表を複製しない）。旧名は後方互換のため残す。
+_NODE_KIND_JA = NODE_KIND_LABELS
 
 
 def _node_kind_ja(node: PersonalNode) -> str:
@@ -368,6 +389,8 @@ def build_person_journey(
     atlas_by_course: dict[str, dict[str, str]],
     course_titles: dict[str, str],
     viewable_document_ids: set,
+    *,
+    topic_range: dict | None = None,
 ) -> dict:
     """§6 の旅の traversal（コース横断版・Phase P-2「コース横断の橋」）。
 
@@ -391,6 +414,12 @@ def build_person_journey(
       別コースのノードは元のコース文脈と表現を失わないよう、事実文に ``course_titles``
       から引いたコース名を含める（引けなければ「以前の学習」と表記する）。
 
+    ``topic_range``（kw-only・既定 ``None``＝従来どおり）は topic 粒度に縮退した起点
+    アンカー専用の [1'] 区間の材料で、``{"topic_label": str, "entries":
+    [{"component_id", "label", "document_title"}, ...]}``。呼び出し側
+    （:func:`_topic_range_for_node`）が ``topics[].linked_claim_ids`` →
+    claim → main 層ノードという**AI 推定ゼロ**の決定論経路で解決したものだけを渡す。
+
     純粋関数・非LLM・決定論（PN-5）。fake データのみでユニットテストできる。
     """
     steps: list[dict] = []
@@ -400,6 +429,42 @@ def build_person_journey(
     anchor_type = anchor.anchor_type
     anchor_id = anchor.anchor_id
     kind_ja = _node_kind_ja(start_node)
+
+    # ---- [1'] topic 粒度に縮退したアンカーの範囲エントリ --------------------------
+    # topic アンカーは1点の帰属を主張できないため、[1] の「この要素は理論構成『X』の
+    # 一部です」ではなく「このトピックの教材が触れている理論構成」を**範囲**として
+    # 列挙する（粗い対応を隠さず、粗いとラベルして見せる）。
+    # topic では [2][3]（confirmed 同一性リンク → 共通部品ハブ）を実行しない — 粗い
+    # トピック単位の対応から確定リンクへ飛ぶと、本人が確定していない帰属を確定の顔で
+    # 見せることになる（帰属の偽装）。
+    if anchor_type == ANCHOR_TYPE_TOPIC and isinstance(topic_range, dict):
+        range_entries = [e for e in (topic_range.get("entries") or []) if isinstance(e, dict)]
+        if range_entries:
+            topic_label = str(topic_range.get("topic_label") or "")
+            steps.append({
+                "fact": (
+                    FACT_TOPIC_RANGE_PREAMBLE.format(topic_label=topic_label)
+                    if topic_label
+                    else FACT_TOPIC_RANGE_PREAMBLE_NO_LABEL
+                ),
+                "ref": {
+                    "kind": "personal_node",
+                    "id": start_node.id,
+                    "label": start_node.label,
+                    "course_id": start_node.course_id,
+                },
+            })
+            for entry in range_entries[:MAX_FANOUT_PER_SEGMENT]:
+                entry_label = str(entry.get("label") or "")
+                entry_title = str(entry.get("document_title") or "") or _UNTITLED_DOCUMENT_LABEL
+                steps.append({
+                    "fact": FACT_TOPIC_RANGE_NODE.format(title=entry_title, label=entry_label),
+                    "ref": {
+                        "kind": "graph_node",
+                        "id": str(entry.get("component_id") or ""),
+                        "label": entry_label,
+                    },
+                })
 
     # ---- [1] 論文ローカルグラフ -------------------------------------------------
     if anchor_type in _DOCUMENT_LOCAL_ANCHOR_TYPES and isinstance(local_graph, dict):
@@ -676,6 +741,110 @@ def _cross_course_hint(user_id: str, start_node: PersonalNode) -> dict | None:
     return None
 
 
+def _empty_journey_facts() -> list[str]:
+    """空の旅に添える出口案内の事実文（文言の正本は ``nearby.FACT_RANGE_SHARPEN``）。
+
+    「いまここの周り」の unavailable 分岐と**同じ1行**を使う（同義の別文言を増やさない）。
+    ``nearby`` は ``queries``（sqlalchemy）を module top で import するため、
+    ``build_journey`` / :func:`build_person_journey` の純粋部を sqlalchemy 無しで
+    検証できる本モジュールの規約を守るために遅延 import する。解決できないときは
+    行を1つ減らすだけに留める（fail-soft。同じ文字列を複製しない）。
+    """
+    try:
+        from core.personal_graph.nearby import FACT_RANGE_SHARPEN
+    except Exception:
+        return []
+    return [FACT_RANGE_SHARPEN]
+
+
+def _with_empty_journey_notice(result: dict) -> dict:
+    """steps が空のときだけ ``notice`` / ``facts`` を足す（非空なら DTO 完全不変）。
+
+    欠落を無言の空リストで返さず、事実文（何が記録されていないか）と出口案内を添える。
+    キーの追加は空のときのみ — 従来の DTO（steps / frontier_note / truncated）に
+    キーを増やさない後方互換のため。
+    """
+    if result.get("steps"):
+        return result
+    result["notice"] = NOTICE_JOURNEY_EMPTY
+    result["facts"] = _empty_journey_facts()
+    return result
+
+
+def _topic_range_for_node(
+    user_id: str,
+    start_node: PersonalNode,
+    can_view_document=None,
+) -> dict | None:
+    """[1'] 範囲エントリを解決する（DB 経路・決定論・非LLM）。
+
+    ``topics[].linked_claim_ids``（``course_content_builder`` がトピック教材生成時に
+    component 経由で書き込む既存フィールド）→ claim → main 層ノードという
+    **AI 推定ゼロ**の経路のみを使う（「いまここの周り」範囲モードと同じデータ経路）。
+    グラフの読み・main 層の抽出・theory stage の日本語訳は
+    ``core.personal_graph.nearby`` の読み取り関数（``main_nodes`` /
+    ``node_display_label``）と ``MAX_DOCUMENTS_SCANNED`` をそのまま再利用する
+    （同じ解決規則を書き写さない）。
+
+    ``can_view_document`` が callable でなければ何も返さない（``journey_for_person_node``
+    の [3] と同じ fail-closed。新しい区間なので後方互換のスキップを持たせない）。
+    解決できない・例外はすべて ``None``（旅は [4][5] だけで続き、それも空なら
+    :func:`_with_empty_journey_notice` が事実文を添える）。
+    """
+    if not callable(can_view_document):
+        return None
+    course_id = str(start_node.course_id or "")
+    topic_id = str(start_node.anchor.anchor_id or "")
+    if not course_id or not topic_id:
+        return None
+    try:
+        # 遅延 import（`_empty_journey_facts` と同じ理由 + derive.py の流儀）。
+        from core.personal_graph import nearby, queries
+
+        binding = queries.fetch_topic_claim_binding(course_id, topic_id=topic_id)
+        claim_ids = [str(c) for c in (binding.get("claim_ids") or []) if c]
+        topic_label = str(binding.get("topic_label") or "")
+
+        doc_to_claims: dict[str, set[str]] = {}
+        for claim_id in claim_ids:
+            document_id = queries.fetch_claim_document_id(claim_id)
+            if document_id:
+                doc_to_claims.setdefault(str(document_id), set()).add(claim_id)
+
+        document_ids = [
+            d
+            for d in sorted(doc_to_claims)[: nearby.MAX_DOCUMENTS_SCANNED]
+            if can_view_document(user_id, d)
+        ]
+        if not document_ids:
+            return None
+
+        titles = queries.fetch_document_titles(document_ids)
+        entries: list[dict] = []
+        for document_id in document_ids:
+            graph = queries.fetch_component_graph(document_id)
+            if not graph:
+                continue
+            touched = doc_to_claims[document_id]
+            for node in nearby.main_nodes(graph):
+                linked = {str(c) for c in (node.get("linked_claim_ids") or []) if c}
+                if not touched & linked:
+                    continue
+                entries.append({
+                    "component_id": str(node.get("component_id") or ""),
+                    "label": nearby.node_display_label(node),
+                    "document_title": titles.get(document_id, ""),
+                })
+        if not entries:
+            return None
+        return {
+            "topic_label": topic_label,
+            "entries": entries[:MAX_FANOUT_PER_SEGMENT],
+        }
+    except Exception:
+        return None
+
+
 def journey_for_person_node(
     user_id: str,
     node_id: str,
@@ -701,6 +870,11 @@ def journey_for_person_node(
     より**厳しい** fail-closed 挙動である点に注意（コース横断は新しい導線であり、
     後方互換を優先する理由が無いため）。呼び出し側（``routes/personal_map.py``）は
     必ず ``can_view_document`` を渡すこと。
+
+    topic 粒度に縮退した起点アンカーは、[1]〜[3] のかわりに [1'] 範囲エントリを
+    :func:`_topic_range_for_node` で解決して先頭に置く。steps が1件も組めなかった
+    場合は :func:`_with_empty_journey_notice` が ``notice`` / ``facts`` を添える
+    （steps が非空なら DTO は従来と完全に同じ）。
     """
     from core.personal_graph import queries  # 遅延 import（derive.py と同じ理由）
     from core.personal_graph.derive import derive_person_network
@@ -796,7 +970,13 @@ def journey_for_person_node(
     )
     course_titles = queries.fetch_course_titles(course_ids) if course_ids else {}
 
-    return build_person_journey(
+    topic_range = None
+    if anchor.anchor_type == ANCHOR_TYPE_TOPIC:
+        topic_range = _topic_range_for_node(
+            user_id, start_node, can_view_document=can_view_document,
+        )
+
+    result = build_person_journey(
         start_node,
         network,
         local_graph,
@@ -805,4 +985,6 @@ def journey_for_person_node(
         atlas_by_course,
         course_titles,
         viewable_document_ids,
+        topic_range=topic_range,
     )
+    return _with_empty_journey_notice(result)

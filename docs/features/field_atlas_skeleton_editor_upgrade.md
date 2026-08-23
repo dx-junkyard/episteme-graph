@@ -3,6 +3,9 @@
 > **ステータス: 実装済み（P1〜P5、learning-ux ブランチ）**
 > 関連: `field_atlas_skeleton.md` / `field_atlas_db_managed_skeleton.md` / `field_atlas_overlay_spec.md`
 >
+> 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
+> 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
+>
 > 実装場所: `backend/core/atlas.py`（`ValidationIssue`）/
 > `backend/core/atlas_generator.py`（`interpret_skeleton_instruction` /
 > `propose_skeleton_edit` / `apply_json_patch`）/ `backend/api/routes/atlas.py`

@@ -104,6 +104,8 @@ def scene_for_feature(feature: str) -> str | None:
         "learning:chat",
         "learning:chat_casual",
         "learning:chat_discuss",
+        "learning:cycle_elicit",
+        "learning:cycle_diff",
         "learning:understanding_check",
         "learning:help_usage",
     ):
@@ -142,25 +144,33 @@ def scene_for_feature(feature: str) -> str | None:
 # ステージ別（pipeline:<stage>）の表示名（設計書 §6.1「ステージ別に指定する（詳細）」・
 # §6.6「ステージ別の指定（N件）」・§10 Phase 4）。
 #
-# キー集合は `core.document_pipeline.orchestrator.LLM_STAGE_NAMES`（LLM を呼ぶ
-# ステージのみ）と完全一致でなければならない — 一致は
+# キー集合は `core.document_pipeline.orchestrator.LLM_STAGE_NAMES`（M層のステージ別
+# モデル選択の対象ステージ。集合の正本は `_PIPELINE_STEPS` の各 `PipelineStageDef` が
+# 宣言する `model_policy=True` で、そこからの導出。「LLM を呼ぶ事実」= `llm_kind` とは
+# 別の意味論で、LLM を呼ぶが対象外のステージ = component_graph はここにも入らない）と
+# 完全一致でなければならない — 一致は
 # `backend/tests/test_llm_model_phase4.py` が構造テストで固定する。
 # **本モジュールは orchestrator を import しない**（依存方向は
 # orchestrator → llm_policy のまま。M1 / 開発ルール2）。ステージが増減したら、
 # orchestrator 側の集合とこの辞書の両方を同時に更新すること。
 # ---------------------------------------------------------------------------
 
+# 文言は進捗表示（routes/lecture_studio/pipeline.py::DOCUMENT_PIPELINE_STAGE_LABELS =
+# admin.js の再実行メニューと同語）に揃える — 同一ステージが画面によって別名になる
+# 訳語分裂を作らない（共有キーの一致は test_lecture_studio.py が固定）。
+# apparatus の vision 情報はラベルでなく pipeline-stages API の vision フラグと
+# 専用 UI 行（admin-llm-models.js「図の解析（vision）」）が担う。
 PIPELINE_STAGE_LABELS: dict[str, str] = {
-    "paper_skeleton": "論文骨格の仮説化",
-    "rhetorical_role": "論理役割の判定",
-    "claim_qualification": "主張の採否・原子化",
-    "equation_semantics": "数式の意味解析",
-    "apparatus_semantics": "図の装置同定（vision）",
+    "paper_skeleton": "論文アウトラインの推定",
+    "rhetorical_role": "論述の役割分類",
+    "claim_qualification": "主張の抽出・分類",
+    "equation_semantics": "数式の意味付け",
+    "apparatus_semantics": "図の装置・パーツ解析",
     "thesis_reconstruction": "中心命題の再構成",
-    "dsl_linking": "DSL グラフ接続",
-    "component_assembly": "コンポーネント生成",
-    "narrative_annotator": "ナラティブ注釈",
-    "contextual_explanation": "文脈的説明の生成",
+    "dsl_linking": "概念グラフへの接続",
+    "component_assembly": "理論コンポーネントの組み立て",
+    "narrative_annotator": "説明注釈の付与",
+    "contextual_explanation": "要素の二層説明の生成",
     "discuss_opening": "議論のきっかけの生成",
     "landscape_placement": "分野マップ配置候補の生成",
 }
@@ -313,6 +323,7 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "admin:reconstruction_authoring": ("recon_llm_model", "fast"),
     "doubt:scope_candidates": ("doubt_scope_llm_model", "fast"),
     "doubt:assumption_normalize": ("doubt_assumption_llm_model", "fast"),
+    "doubt:falsification_conditions": ("doubt_falsification_llm_model", "fast"),
     "admin:assistant": ("assistant_llm_model", "fast"),
     "admin:atlas_skeleton": ("atlas_assist_llm_model", "analysis"),
     "admin:atlas_assist": ("atlas_assist_llm_model", "analysis"),
@@ -325,6 +336,10 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "learning:chat": ("learning_chat_llm_model", "analysis"),
     "learning:chat_casual": ("learning_chat_llm_model", "analysis"),
     "learning:chat_discuss": ("learning_chat_llm_model", "analysis"),
+    # 理解サイクル Phase 2（設計 §8）: 既存 learning_chat の1コール地点に相乗りするため
+    # モデル解決も同じ env キーを共有する。
+    "learning:cycle_elicit": ("learning_chat_llm_model", "analysis"),
+    "learning:cycle_diff": ("learning_chat_llm_model", "analysis"),
     "learning:understanding_check": ("learning_chat_llm_model", "analysis"),
     "learning:help_usage": ("learning_chat_llm_model", "analysis"),
     "admin:course_builder": ("course_builder_llm_model", "analysis"),

@@ -14,7 +14,11 @@ from core import schema as core_schema
 
 # --- 語彙（DB CHECK 制約と対応） -------------------------------------------
 
-ELICIT_MODES = ("predict", "restate", "symbol")
+ELICIT_MODES = ("predict", "restate", "symbol", "regime", "next_step")
+# 選択式（response_space から option_id を選ぶ）モード。DIFF は非LLM・決定論の
+# option_id 照合で判定できる（自由記述の restate とは判定方式が異なる。
+# 設計書 §4.4 / Phase 2 §6）。
+CHOICE_MODES = ("predict", "regime", "next_step")
 ITEM_STATUSES = ("auto", "flagged", "retired", "confirmed")
 # 学習者に配信してよい item の status（P1: auto=candidate 相当も配信可、retire で回収）
 DELIVERABLE_STATUSES = ("auto", "confirmed")

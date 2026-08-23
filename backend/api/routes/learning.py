@@ -123,6 +123,9 @@ from core.element_context import (
     build_element_context,
 )
 from core.discuss.opening import build_opening as build_discussion_opening
+from core.discuss.mirroring import extract_mirror
+from core.cycle.derive import build_intention_dto
+from core.cycle.queries import fetch_active_carryover, fetch_intentions
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
@@ -999,7 +1002,8 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 
 **フォーマット要件:**
 - 数式は必ず LaTeX 記法で記述（インラインは $...$、ディスプレイは $$...$$）
-- 教材を参照した場合は、コンテキストに付された番号付き出典マーカー `[出典1]` `[出典2]` … を本文に自然に挿入して言及すること。番号は提示された出典に対応させ、独自の番号や『書籍名』形式は使わないこと。{persona_block}"""
+- 教材を参照した場合は、コンテキストに付された番号付き出典マーカー `[出典1]` `[出典2]` … を本文に自然に挿入して言及すること。番号は提示された出典に対応させ、独自の番号や『書籍名』形式は使わないこと。
+- コンテキストに番号付き出典（`[出典1]` …）が1つも無い場合は、出典マーカーを一切書かないこと。{persona_block}"""
 
 
 def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None = None) -> str:
@@ -1071,8 +1075,13 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
    まず学生の読みをあなたの言葉で短く言い直し、その理解で合っているかを確認してください。
    確認が取れてから、論文の主張との重なりとズレを事実として並べ、どのズレから埋めるかを
    学生に選ばせてください。
+   言い直しは、冒頭に 〔鏡〕あなたは「＜学生の直前の発話からの逐語引用＞」と捉えている、で合っていますか？〔/鏡〕
+   の形で書いてください。「」の中は学生の発話の言葉をそのまま（言い換えずに）引用してください。
+   〔鏡〕の中には論文の内容・一般知識・教科書的な正解を持ち込まず、学生の発話の言い直しだけを
+   書いてください。学生の能力・傾向・人物像について述べてはいけません。
 3. 【詰まりには一点だけの足場かけ】学生が混乱や詰まりを見せたときは、全体を解説し直すのではなく、
    詰まっている一点だけを短く補い、学生自身の言葉での言い直しで埋まったかを確かめてください。
+   詰まりの言い直し確認にも、ルール2と同じ 〔鏡〕…〔/鏡〕 の形式を使ってください。
 4. 【質問と解釈が同居するとき】1つの発話に質問と解釈の表明が混在する場合は、まず質問の部分に
    完全な形で即答し（ルール1を優先）、そのうえで解釈の部分の言い直しと確認に入ってください
    （ルール2）。質問を保留にして言い直しから始めることはしないでください。
@@ -1094,6 +1103,101 @@ def _get_discuss_system_prompt(domain: str, response_persona: str | None = None)
    「これはこの論文に書かれている内容ではなく、一般的な学術知識からの補足ですが」
    のように、その部分がこの論文由来ではないことを一言明示してください。
 8. 【数値を見せない】検索件数・一致度・網羅率のような数値スコアは出さないでください。{persona_block}"""
+
+
+def _get_cycle_elicit_system_prompt(domain: str, response_persona: str | None = None) -> str:
+    """理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）の Elicit モード。
+
+    答えを提示せず、学生自身の予測を引き出す短い問いを一つだけ返す。既存 discuss の
+    1コール地点に相乗りし（UC10・新エンドポイントを作らない）、システムプロンプトの
+    差し替えだけで実現する。UC2（採点しない）・UC8（LLM 失敗時は骨格のみで続行）継承。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    return f"""あなたは{domain_label}を専門とする研究者で、学生が「予測してから読む」ための問いを一つだけ差し出す案内役です。
+
+**厳守事項:**
+1. 【解を提示しないでください】この論文・教材の結論、答え、計算結果、正しい理解を
+   教えてはいけません。学生がまだ読んでいない・確かめていない内容を先回りして
+   明かさないでください。
+2. 【問いを一つだけ】学生が自分の予測を立てるための短い問いを一つだけ返してください。
+   複数の問いを並べたり、解説・ヒントの羅列を添えたりしないでください。
+3. 【学生の直前の発話を踏まえる】学生の直前の発話（言及した箇所・概念・言葉）を
+   踏まえた、その場に固有の問いにしてください。誰にでも使い回せる汎用の決まり文句は
+   避けてください。
+4. 【断定しない・数値を出さない】的中率・正誤・スコアには一切触れないでください。
+   予測そのものへの良し悪しの判定も与えないでください。{persona_block}"""
+
+
+def _get_cycle_diff_system_prompt(domain: str, response_persona: str | None = None) -> str:
+    """理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）の Diff モード。
+
+    学生のメッセージに含まれる本人の予想（逐語）と、出典・論文の骨格との差分の
+    観点候補を、仮説文体で最大3点まで提示する。正誤判定・採点はしない（UC2）。
+    R層 DIFF（選択肢型・非LLM・決定論）とは別系統であり混ぜない（設計 §1-2）。
+    """
+    domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
+    persona_instruction = persona_prompt(response_persona, target="response")
+    persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    return f"""あなたは{domain_label}を専門とする研究者で、学生が立てた予想と論文・出典の内容を突き合わせる案内役です。
+
+**厳守事項:**
+1. 【断定しないでください】学生のメッセージに含まれる本人の予想と、提供された
+   出典・論文の骨格とを比べ、「食い違いの可能性」がある観点を仮説文体で挙げて
+   ください。これが正しい・間違っているという断定はしないでください。
+2. 【候補は最大3点】観点の候補は多くとも3点までとし、それぞれ短く述べてください。
+   すべてを網羅しようとしないでください。
+3. 【採点や点数評価をしないでください】正解/不正解の判定、点数、一致度、的中率などは
+   一切出力しないでください。学生の予想の良し悪しを評価しないでください。
+4. 【権威は出典】判断の根拠は必ず提供された出典・論文の記述に置き、出典に無い推測を
+   断定的に述べないでください。{persona_block}"""
+
+
+# 確認問題の壁打ちモード（LearningChatRequest.check_scaffold）で system プロンプトへ
+# 追記する拘束。要素（定義・事実・関係）の伝授は行い、組み立て（要素をどう繋いで答えに
+# するか）は学習者に委ねる。既存の system プロンプトを置き換えるのではなく、選ばれた
+# プロンプトの末尾に追記して応答様式だけを変える（RAG 検索・痕跡記録・コスト計上は不変）。
+_CHECK_SCAFFOLD_INSTRUCTION = """**確認問題の壁打ちモード（厳守）:**
+1. 【解答そのものを出さない】確認問題への解答そのもの・模範解答・結論の言い切りを
+   提示しないでください。
+2. 【構成要素は説明してよい】回答に必要な知識の構成要素（定義・事実・関係）は、
+   求められれば個々に説明してかまいません。
+3. 【組み立ては学習者】要素をどのように組み合わせると答えに結びつくか（組み立て）は
+   学習者自身が行います。組み立ての手順や結論への道筋を先回りして示さないでください。
+4. 【壁打ち相手として応じる】学習者が組み立てを試みたら壁打ち相手として応じ、
+   合っている部分・まだ使われていない要素を事実として指摘してください。
+   正誤の断定や完成形の提示はしないでください。
+5. 【問いかけを1つ添える】応答の末尾に、学習者自身が次の一歩を組み立てられる
+   問いかけを1つだけ添えてください。
+6. 【答えを求められても】学習者が答えを直接求めても、構成要素の説明と問いかけで
+   自力の再回答を促してください。"""
+
+
+# 本文中の出典マーカー。フロント（app.js linkifyCitations）が扱えるのは半角 [出典N] のみ
+# だが、LLM は全角括弧・全角数字の表記ゆれを出すことがあるため広めに受ける。
+_CITATION_MARKER_RE = re.compile(r"[\[［【〔]\s*出典\s*([0-9０-９]+)\s*[\]］】〕]")
+_FULLWIDTH_DIGITS = str.maketrans("０１２３４５６７８９", "0123456789")
+
+
+def _reconcile_citation_markers(answer: str, valid_indices: set[int]) -> str:
+    """回答本文の出典マーカーを cited_sources と突き合わせて正規化する。
+
+    LLM は書式指示（「[出典N] を本文に挿入せよ」）に引きずられ、文脈に番号付き出典が
+    無い・番号が足りない場合でも [出典N] を捏造することがある。フロントの
+    linkifyCitations は対応する根拠の無い番号を素通しするため、「リンクにならない
+    出典番号」として学習者に見えてしまう（出典の内容を確認できない）。ここで
+    ①根拠のある番号は半角 [出典N] に正規化（表記ゆれをリンク可能な形に戻す）、
+    ②根拠の無い番号は本文から取り除く（確認できない出典番号を見せない）。
+    """
+
+    def _sub(m: re.Match) -> str:
+        n = int(m.group(1).translate(_FULLWIDTH_DIGITS))
+        return f"[出典{n}]" if n in valid_indices else ""
+
+    text = _CITATION_MARKER_RE.sub(_sub, answer or "")
+    # マーカー除去で句読点の直前に残った空白だけを軽く掃除する（本文には触れない）。
+    return re.sub(r"[ \t]+([。、．，])", r"\1", text)
 
 
 def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
@@ -1830,7 +1934,12 @@ def check_topic_understanding(
         f"解説（設定済みの場合はフィードバックに反映する）:\n{explanation or '(未設定)'}\n\n"
         f"受講者の回答: {body.answer}\n\n"
         "判定基準: 回答に必要な要素を概ね満たし、自分の言葉で説明できていれば passed=true。"
-        "核心が抜けている、逆に理解している、空欄に近い場合は false。"
+        "核心が抜けている、逆に理解している、空欄に近い場合は false。\n"
+        "feedback は合否に関わらず必ず書いてください（合格時もフロントで学習者に提示します）。"
+        "passed=true のときは、回答が押さえられている点を事実として述べ、さらに踏み込める"
+        "観点があれば1つだけ添えてください。passed=false のときは、何が抜けているかを述べて"
+        "ください。いずれの場合も点数・正解率・達成度のような数値や評価の言い切りは書かず、"
+        "褒め言葉の羅列にもしないでください。"
     )
 
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書きが設定されていれば
@@ -2396,6 +2505,30 @@ def learning_chat(
                 ),
             )
 
+    # 理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）: cycle_mode の
+    # 値検証も discuss_scope precheck と同型で、truncate（機能3の書き直し）より前に行う。
+    _cycle_mode_precheck = (body.cycle_mode or "").strip()
+    if _cycle_mode_precheck and _cycle_mode_precheck not in ("elicit", "diff"):
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "cycle_mode には elicit か diff を指定してください"
+                f"（受信値: {_cycle_mode_precheck!r}）。"
+            ),
+        )
+
+    # 楽屋モード（構造の降下路 docs/features/structure_descent_design.md §4）の判定は
+    # ハンドラ冒頭で前倒しする（2026-08-15 レビュー是正）: 現行フロントは楽屋から
+    # typed action / 地図アクションを送らないが、サーバ側防御として backstage のときは
+    # EXPLAIN_GRAPH_ELEMENT（body.action）と地図 ↗（body.atlas_context）の early-return
+    # 記録経路（kind='question' + structure_anchor / atlas 帰属の焼き込み）に流さず、
+    # 常に通常の楽屋質問（kind='backstage_question'）として処理する（SD4）。
+    # 非 backstage のときは何も変更しない（既存挙動は完全不変）。
+    _is_backstage = bool(body.backstage)
+    if _is_backstage:
+        body.action = None
+        body.atlas_context = None
+
     # 1. コースデータを取得
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
@@ -2518,6 +2651,22 @@ def learning_chat(
     # （意図分類・前提知識ゲート・detour化）を共有するが、応答スタイルは会話調ではなく
     # 学術ディスカッション調（_get_discuss_system_prompt）にする。
     _is_discuss = (body.intent_mode or "").strip() == "discuss"
+    # 理解サイクル Phase 2（設計 §8）: AI 4モードのうち Elicit/Diff は既存 discuss の
+    # 1コール地点に相乗りする。値検証（elicit/diff 以外は 422）は本処理より前で完了済み。
+    # フロントは cycle_mode を intent_mode=discuss と併せて送るため _is_discuss は
+    # 通常 true だが、_chat_feature の分岐は cycle_mode を独立に優先させる。
+    _cycle_mode = (body.cycle_mode or "").strip()
+    _cycle_chat_feature = {
+        "elicit": "learning:cycle_elicit",
+        "diff": "learning:cycle_diff",
+    }.get(_cycle_mode)
+    # 楽屋モード（構造の降下路 docs/features/structure_descent_design.md §4）:
+    # 楽屋からの質問は既存 learning_chat に相乗りし、**記録面だけを私有化**する
+    # （痕跡 kind='backstage_question'・教員集約/tension mining の対象外）。
+    # v1 では system prompt を追加しない — 楽屋は記録の私有化であって
+    # 応答様式の変更ではない（通常 RAG 回答のまま）。
+    # ※ _is_backstage 自体はハンドラ冒頭で判定済み（typed action / atlas の
+    #   early-return 経路より前 — 2026-08-15 レビュー是正）。
 
     # 分野の地図 (Issue C-2/C-3): ↗ アクションは型付きなので意図分類を経由しない。
     # mind / learn は決定論的に応答し、evid ほかは通常の RAG フローへ流す。
@@ -2713,12 +2862,20 @@ def learning_chat(
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
     # casual / discuss モードでも guard の注入（振る舞い）は維持する — 気軽さ・自由さ≠根拠の放棄。
     # discuss は casual と判定が競合しないが（intent_mode は単一値）、設計上 discuss を先に判定する。
-    if _is_discuss:
+    if _cycle_mode == "elicit":
+        _system_prompt = _get_cycle_elicit_system_prompt(domain, response_persona)
+    elif _cycle_mode == "diff":
+        _system_prompt = _get_cycle_diff_system_prompt(domain, response_persona)
+    elif _is_discuss:
         _system_prompt = _get_discuss_system_prompt(domain, response_persona)
     elif _is_casual:
         _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
     else:
         _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
+    # 確認問題の壁打ちモード: どのモードの system プロンプトに対しても、解答の直接提示を
+    # 禁じ・要素の説明は許し・組み立ては学習者に委ねる拘束を末尾へ追記する。
+    if body.check_scaffold:
+        _system_prompt += "\n\n" + _CHECK_SCAFFOLD_INSTRUCTION
     if overall_tier == TIER_OUT_OF_SOURCE:
         _system_prompt += "\n\n" + out_of_source_guard_instruction()
     # アンカー優先ラダー（設計 §7、IH6）: typed action（EXPLAIN_GRAPH_ELEMENT）・
@@ -2735,7 +2892,18 @@ def learning_chat(
     # 文脈がこのフレームを再導入するため、学習者が立場を述べても完全解説が返る
     # （設計書 §0 の症状の再生産）。discuss のときだけ足場を中立化し、発話タイプ別の
     # 応答ルールへ橋渡しする。casual・通常モードの足場は変更しない。
-    if _is_discuss:
+    # 確認問題の壁打ちモードも同型の問題を抱える（system で「解答そのものを出さない」と
+    # 指示した直後に、足場の「以下の質問に答えてください」が直答を再誘導する）ため、
+    # discuss より優先して足場を中立化する。
+    if body.check_scaffold:
+        _scaffold_user_instruction = (
+            "上記のコンテキストを踏まえ（不足している場合は補完して）、"
+            "壁打ちモードの規則に従って学習者の発話に応じてください。"
+        )
+        _scaffold_assistant_ack = (
+            "はい。答えの組み立ては学習者に委ね、構成要素の説明と問いかけで支援します。"
+        )
+    elif _is_discuss:
         _scaffold_user_instruction = (
             "上記のコンテキストを踏まえ（不足している場合は補完して）、"
             "発話タイプ別の応答ルールに従って、以下の学生の発話に応じてください。"
@@ -2766,7 +2934,9 @@ def learning_chat(
 
     # discuss モード（設計 §6.2 Phase 1）: U層タグを "learning:chat_discuss" に分離し、
     # casual / 通常チャットと独立にコストを実測する（専用上限は Phase 3 で実測後に判断）。
-    if _is_discuss:
+    if _cycle_chat_feature:
+        _chat_feature = _cycle_chat_feature
+    elif _is_discuss:
         _chat_feature = "learning:chat_discuss"
     elif _is_casual:
         _chat_feature = "learning:chat_casual"
@@ -2799,6 +2969,12 @@ def learning_chat(
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
         answer = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
         degraded = True
+
+    # 出典マーカーの突き合わせ: 根拠の無い [出典N]（捏造・番号超過）を本文から取り除き、
+    # 根拠のある番号は表記ゆれを半角 [出典N] へ正規化する。ここで整えることで、
+    # レスポンス・履歴焼き込み・関心痕跡のすべてに同じ本文が流れる。
+    if not degraded:
+        answer = _reconcile_citation_markers(answer, {s["index"] for s in cited_sources})
 
     # L1 OutOfSourceGuard: 未踏なら断定せず、根拠が弱い旨を先頭に明示する。
     # casual では可視プレフィックスのみ省略（音声で毎回読み上げると会話が壊れるため）。
@@ -2847,13 +3023,21 @@ def learning_chat(
     # L2: クライアント報告の実位置で position_anchor を構築（mock ではない）。
     position_anchor = build_position_anchor(topic_id, _seg, _scroll)
     # L3 資産化: この往復を関心痕跡として安価に記録（LLM不使用）。
-    # kind は既存シグナルから決定: 誤解検出→misconception / それ以外→question。
-    _trace_kind = "misconception" if course_update else "question"
+    # kind は既存シグナルから決定: 楽屋→backstage_question（記録は本人のみ・集計対象外）/
+    # 誤解検出→misconception / それ以外→question。
+    _trace_kind = (
+        "backstage_question" if _is_backstage
+        else ("misconception" if course_update else "question")
+    )
     _ctx_label = " · ".join([s for s in [support_origin.chapter_title, topic_title] if s])
     # Stage 0 TensionPrefilter（同期・非LLM・数ms）: ヘッジ/逆接マーカーと直近3往復の
     # 同語再訪でヒントを立てるだけ。LLM 分類は非同期バッチ（P6: 応答を遅延させない）。
     _recent_user_texts = [t.get("content", "") for t in body.history if t.get("role") == "user"][-3:]
-    _tension_hint = judge_tension_hint(body.message, _recent_user_texts)
+    # 楽屋ガード（構造の降下路 §6 精査記録②）: tension worker（_fetch_pending_hints）は
+    # payload_flag 方式（kind 条件なし）のため kind では自動除外されない。送信側で
+    # tension_hint を立てない・tension mining をスケジュールしないことで、楽屋の質問を
+    # 解析対象から構造的に外す（SD4）。
+    _tension_hint = False if _is_backstage else judge_tension_hint(body.message, _recent_user_texts)
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
     _sel_anchor = _learner_selected_anchor(body)
@@ -2869,14 +3053,20 @@ def learning_chat(
         # 分野の地図由来の質問 (根拠を見る ↗ など) は帰属を構造化して焼き込む (Issue C-2)
         **({"atlas": _atlas_attribution(_atlas_ctx)} if _atlas_ctx else {}),
         # discuss モード（設計 §6.2 Phase 1）: 後から U層・k-匿名集計・personal_graph が
-        # discuss 由来の痕跡を区別できるように焼き込む。
-        **({"entry_mode": "discuss"} if _is_discuss else {}),
+        # discuss 由来の痕跡を区別できるように焼き込む。楽屋の質問には焼き込まない
+        # （discuss 観測基盤 core/discuss/observation.py は kind フィルタなしで
+        # payload->>'entry_mode'='discuss' を数えるため、焼き込むと SD4「楽屋は集計に
+        # 入らない」に反して混入する — 2026-08-15 レビュー是正）。
+        **({"entry_mode": "discuss"} if _is_discuss and not _is_backstage else {}),
         # discuss 観測基盤（docs/features/discuss_observation_design.md §2-1）: 全モード共通で
         # 回答の出所分類を焼き込む（記録開始日以前の痕跡には無いキーなので、集計側は
         # 「記録済み件数」を分母として明示する — U1 と同じ誠実さ）。
         "content_grounding": content_grounding,
         # discuss のときのみスコープも焼き込む（discuss 以外は None のまま）。
         **({"discuss_scope": _discuss_scope} if _is_discuss else {}),
+        # 楽屋（構造の降下路 §4）: 本人の台帳表示・後方検証のために焼き込む
+        # （kind='backstage_question' と対。楽屋以外にはキー自体を足さない）。
+        **({"backstage": True} if _is_backstage else {}),
     }
     # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
     # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
@@ -2894,19 +3084,25 @@ def learning_chat(
         extra_payload=_trace_payload,
     )
     # ヒント累積が閾値に達していればバックグラウンドで TensionMiningAgent を起動
-    # （best-effort: 失敗してもチャット応答を止めない）。
-    if _tension_hint:
+    # （best-effort: 失敗してもチャット応答を止めない）。楽屋の質問は対象外
+    # （_tension_hint は backstage で常に False だが、ガードを明示して二重に守る）。
+    if _tension_hint and not _is_backstage:
         maybe_schedule_tension_mining(current_user["id"], course_id, topic_id)
     # 未帰属の問いが累積していればバックグラウンドで StructureAnchorAgent を起動
-    # （方法B・非同期。明示アンカー付きの問いは最初から対象外）。
+    # （方法B・非同期。明示アンカー付きの問いは最初から対象外。楽屋の質問は
+    # _trace_kind='backstage_question' のためこの条件で自動的に対象外になる）。
     if _trace_kind == "question" and not _sel_anchor:
         maybe_schedule_anchor_mining(current_user["id"], course_id, topic_id)
     # 方法C: 回答末尾の帰属確認プロンプト。tension_hint が立った往復か、明示アンカーは
     # あるが疑いの様相が未分類の往復に限り、セッション内上限までゲートして提示する（P7）。
+    # 楽屋では出さない — 「集計に入りません」と宣言した枠で帰属確定 UI を出さない
+    # （SD4、2026-08-15 レビュー是正。_tension_hint は backstage で常に False だが、
+    # 明示アンカー経由でも出ないよう明示ガード）。
     _anchor_confirm = None
     if (
         _trace_id
         and not _is_casual
+        and not _is_backstage
         and (_tension_hint or _sel_anchor is not None)
         and check_and_count_confirm_prompt(current_user["id"], course_id, topic_id)
     ):
@@ -2921,6 +3117,18 @@ def learning_chat(
         clean_answer, inline_actions = answer, []
     else:
         clean_answer, inline_actions = extract_inline_actions(answer)
+    # 鏡面化 move（seminar_brief_mirroring_design.md §2/§3 精査①③、EX-3b）: discuss の
+    # ときのみ、本文中の 〔鏡〕…〔/鏡〕 マーカーをサーバ側で決定論抽出して構造化フィールド
+    # （LearningChatResponse.mirror）へ正規化する（extract_inline_actions と同じ規律 —
+    # フロントに regex を書かせない）。verbatim 検査（鏡文中の「」引用が学習者の直前発話の
+    # 逐語部分文字列であること）に不合格ならマーカーだけ剥がして本文へ縮退（再生成なし・P6）。
+    # 鏡文は痕跡（record_interest_trace）・専用テーブル・assistant_meta には書かない
+    # （窓の外への持ち出しの禁止）。会話履歴 JSONB（persist_chat_history は上で実行済み）に
+    # 生 answer がマーカー込みで残るのは既存挙動のままで、これは window_history の窓内
+    # 再注入として設計が許容する範囲（§3 精査③）。
+    _mirror = None
+    if _is_discuss and not degraded:
+        clean_answer, _mirror = extract_mirror(clean_answer, body.message)
 
     # 送信意図で分岐（教材/チャット2区画 UX）:
     #  - on_path : 本筋維持。detour にせず origin/status_label を返さない（フロントは寄り道化しない）
@@ -2953,6 +3161,7 @@ def learning_chat(
         position_anchor=position_anchor,
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
+        mirror=_mirror,
         mock=False,
         degraded=degraded,
     )
@@ -2995,9 +3204,19 @@ def get_discussion_opening(
     document_ids = list_course_source_document_ids(course_data)
     # Phase 0b: 教員の任意入力（AI 生成なし）。course_data への素の dict アクセスは
     # しない（Tier 3-18: 正本は core/course_data.py のアクセサ）。
-    return build_discussion_opening(
+    result = build_discussion_opening(
         course_id, document_ids, course_focus=course_focus(course_data)
     )
+    # 理解サイクル（UCサイクル §5.1/§5.2）: OPEN の一枠（初回動機 / 持ち越し問いの
+    # 再提示）を optional キーとして同梱する。DB 取得失敗は fail-open — intention
+    # キーを付けずに返し、opening 本体は壊さない（既存キー・ゲート・シグネチャは不変）。
+    try:
+        carryover = fetch_active_carryover(current_user["id"], course_id)
+        intentions = fetch_intentions(current_user["id"], course_id)
+        result["intention"] = build_intention_dto(carryover, bool(intentions))
+    except Exception:
+        logger.warning("Failed to build cycle intention for discuss opening", exc_info=True)
+    return result
 
 
 class DiscussReflectionRequest(BaseModel):
@@ -3044,12 +3263,24 @@ def get_source_chunk_route(
 ) -> dict:
     """出典ポップアップ用: チャンク本文（数式プレースホルダ正規化済み）と数式を返す（L1）。
 
-    レビュー確定の修正1（セキュリティ）: 従来は chunk_id のみで本人の可視性を検証せず
-    任意の Private 文書本文が読めてしまっていた。`list_visible_document_ids` の正本
-    （所有/public/group/object_group_permissions ∪ アクセス可能コースの sources 経由）で
-    fail-closed に絞る。
+    スコープは **URL の course の sources に限定**する（P0 オブジェクトスコープ是正）。
+
+    1. `get_accessible_course_data` — 本人がその course にアクセスできること（不可なら 404）。
+    2. `list_course_source_document_ids(course_data)` — その course の source document 集合。
+    3. `get_chunk_passage(..., allowed_document_ids=...)` の SQL 内
+       `document_id = ANY(...)` でスコープを強制する（取得後の Python 判定にしない）。
+       sources が空なら SQL を発行せず None → 404（fail-closed）。
+
+    かつては `list_visible_document_ids`（本人の全域可視集合）で絞っていたため、
+    course に紐づかない別コース・public 文書のチャンクも URL の course 経由で読めていた。
+    course への正規アクセスが source 文書の開示根拠であるという設計はそのまま
+    （`list_visible_document_ids` との積集合は取らない — 取ると教員 private のコース教材が
+    受講者から読めなくなり、コース経由開示が壊れる）。
     """
-    allowed_document_ids = list_visible_document_ids(current_user["id"])
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="Source chunk not found")
+    allowed_document_ids = list_course_source_document_ids(course_data)
     passage = get_chunk_passage(chunk_id, allowed_document_ids=allowed_document_ids)
     if not passage:
         raise HTTPException(status_code=404, detail="Source chunk not found")
@@ -3301,6 +3532,9 @@ def get_anchor_digest_route(
                 SELECT DISTINCT topic_id FROM interest_traces
                 WHERE user_id = CAST(:uid AS uuid) AND course_id = :cid
                   AND kind = 'question'
+                  -- 機能3: 差し替え済みの問いだけが残るトピックで帰属解析を起動しない
+                  -- （_fetch_pending_questions と同じ supersede 意味論。設計書 §2.4）
+                  AND status <> 'superseded'
                   AND payload->'structure_anchor' IS NULL
                   AND payload->>'anchor_analyzed_at' IS NULL
             """),

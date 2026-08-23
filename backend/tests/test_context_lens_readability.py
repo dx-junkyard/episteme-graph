@@ -483,6 +483,9 @@ def lens(monkeypatch):
     monkeypatch.setattr(context_lens, "_chunk_section_ids", lambda _ids: [])
     monkeypatch.setattr(context_lens, "_annotations_for", lambda *_a, **_k: [])
     monkeypatch.setattr(context_lens, "_generic_block_for_focus", lambda _ref: None)
+    # Phase 3 のラベル結線（承認済み contextual 説明）。既定は「承認ゼロ」＝
+    # 従来ラダー。説明ありの検証は TestApprovedExplanationHeadline が個別に差し替える。
+    monkeypatch.setattr(context_lens, "_approved_equation_explanations", lambda _doc: {})
     return artifacts
 
 
@@ -1114,3 +1117,138 @@ class TestClaimAndComponentReadability:
         assert stages
         assert stages[0]["label"] == "理論の土台"
         assert stages[0]["group"] == "stage"
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: 承認済み contextual 説明のラベル結線（§8 Phase 3 / EH1・CP1・CP6）
+# ---------------------------------------------------------------------------
+
+
+_APPROVED_BODY = (
+    "この式は物質密度のゆらぎを、その空間平均に対する比として定義する。"
+    "以降の摂動論はすべてこの量を出発点にする。"
+)
+_APPROVED_FIRST_SENTENCE = "この式は物質密度のゆらぎを、その空間平均に対する比として定義する。"
+
+
+@pytest.fixture
+def approved_explanation(lens, monkeypatch):
+    """中心の式に「承認済み contextual 説明」が1件だけある状態。"""
+    monkeypatch.setattr(
+        context_lens,
+        "_approved_equation_explanations",
+        lambda _doc: {_EQ_FOCUS: _APPROVED_BODY},
+    )
+    return _APPROVED_BODY
+
+
+class TestApprovedExplanationHeadline:
+    def test_headline_is_the_first_sentence_of_the_approved_explanation(
+        self, approved_explanation
+    ):
+        focus = _build(ELEMENT_EQUATION, _EQ_FOCUS)["focus"]
+        assert focus["headline"] == _APPROVED_FIRST_SENTENCE
+        assert focus["label"] == _APPROVED_FIRST_SENTENCE
+        assert "以降の摂動論" not in focus["headline"]
+
+    def test_label_source_is_explanation(self, approved_explanation):
+        label = context_lens._equation_label(
+            _equations()[0], explanations={_EQ_FOCUS: _APPROVED_BODY}
+        )
+        assert label.label_source == labels_mod.LABEL_SOURCE_EXPLANATION
+
+    def test_cp1_headline_is_not_duplicated_into_intrinsic_summary(self, approved_explanation):
+        """CP1: 見出しと意味の一行を同一化しない・説明全文を summary へ複製しない。"""
+        focus = _build(ELEMENT_EQUATION, _EQ_FOCUS)["focus"]
+        assert focus["intrinsic_summary"] == _SUMMARY_FOCUS
+        assert focus["intrinsic_summary"] != focus["headline"]
+        assert _APPROVED_BODY not in focus["intrinsic_summary"]
+
+    def test_headline_carries_no_tex_and_no_internal_id(self, approved_explanation):
+        focus = _build(ELEMENT_EQUATION, _EQ_FOCUS)["focus"]
+        assert not looks_like_tex_math(focus["headline"])
+        assert not labels_mod.is_internal_id_like(focus["headline"])
+        assert _EQ_FOCUS not in focus["headline"]
+
+    def test_other_lenses_reuse_the_same_headline_for_that_equation(self, approved_explanation):
+        """claim / derivation / component から見た式 ITEM も同じ見出しになる。"""
+        for element_type, focus_id in (
+            (ELEMENT_THEORY_CLAIM, _CLAIM_DB),
+            (ELEMENT_DERIVATION, _DERIV_TRANSFORM),
+        ):
+            items = [
+                i for i in _items(_build(element_type, focus_id))
+                if i["element_type"] == "equation" and i["element_id"] == _EQ_FOCUS
+            ]
+            assert items, element_type
+            assert all(i["label"] == _APPROVED_FIRST_SENTENCE for i in items), element_type
+
+    @pytest.mark.parametrize("element_type", sorted(_BEFORE))
+    def test_cp6_relation_set_is_unchanged_by_the_explanation(
+        self, approved_explanation, element_type
+    ):
+        """CP6: 説明材料を足しても ``(type, id, relation_status)`` 集合は不変。"""
+        result = _build(element_type, _FOCUS_IDS[element_type])
+        assert _relation_set(result) == _expected_after(element_type)
+
+    def test_relations_are_identical_with_and_without_the_explanation(
+        self, lens, monkeypatch
+    ):
+        without = _relation_set(_build(ELEMENT_EQUATION, _EQ_FOCUS))
+        relations_without = [
+            (i["element_type"], i["element_id"], i["relation"], i["relation_status"])
+            for i in _items(_build(ELEMENT_EQUATION, _EQ_FOCUS))
+        ]
+        monkeypatch.setattr(
+            context_lens,
+            "_approved_equation_explanations",
+            lambda _doc: {_EQ_FOCUS: _APPROVED_BODY},
+        )
+        result = _build(ELEMENT_EQUATION, _EQ_FOCUS)
+        assert _relation_set(result) == without
+        assert [
+            (i["element_type"], i["element_id"], i["relation"], i["relation_status"])
+            for i in _items(result)
+        ] == relations_without
+
+    def test_lookup_failure_degrades_to_the_existing_ladder(self, lens, monkeypatch):
+        def boom(_doc):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(context_lens, "_approved_equation_explanations", boom)
+        result = _build(ELEMENT_EQUATION, _EQ_FOCUS)
+        assert set(result) >= {"focus", "upper", "lower", "notes"}
+        assert result["focus"]["headline"] == _build_without_explanation_headline()
+
+
+def _build_without_explanation_headline() -> str:
+    """説明が1件も無いときの見出し（既存ラダー④ = semantics.summary の第1文）。"""
+    return context_lens._equation_label(_equations()[0]).text
+
+
+class TestApprovedExplanationLearnerProjection:
+    """学習者射影に来歴（label_source）・レビュー情報が漏れないこと（§5.5）。"""
+
+    def test_learner_items_do_not_expose_label_source(self, approved_explanation):
+        from core import element_context
+
+        result = _build(ELEMENT_EQUATION, _EQ_FOCUS)
+        for item in _items(result):
+            assert "label_source" in item  # 教員向け DTO には来歴がある
+            projected = element_context._project_item(item)
+            if projected is None:
+                continue
+            assert "label_source" not in projected
+            assert "reviewed_by" not in projected
+            assert "status" not in projected
+
+    def test_learner_focus_keeps_the_readable_headline_without_provenance(
+        self, approved_explanation
+    ):
+        from core import element_context
+
+        focus = _build(ELEMENT_EQUATION, _EQ_FOCUS)["focus"]
+        projected = element_context._project_focus(focus, ELEMENT_EQUATION, _EQ_FOCUS)
+        assert projected["headline"] == _APPROVED_FIRST_SENTENCE
+        for forbidden in ("label_source", "review_notes", "provenance", "reviewed_by"):
+            assert forbidden not in projected

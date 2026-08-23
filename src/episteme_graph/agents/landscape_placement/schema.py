@@ -23,6 +23,14 @@ Invariants carried by this module (design §0):
 - LS10 "cannot place" is a signal, not a failure — a domain that does not fit
   is declared in ``unplaced_domains`` with a reason instead of being forced.
 
+Category gap candidates (``docs/features/category_gap_candidates_design.md`` §5.1)
+ride on the very same LLM call: when the paper *does* touch a domain whose
+skeleton has no anchor for it, the agent may declare a **candidate** category
+(:class:`CategoryGapRecord`). Those candidates are supply-side signals only —
+they never touch the skeleton (LS7), they are validated by a warning-only soft
+collector so a bad gap can never wipe out the placements (design §1-6), and the
+teacher-side decision lives entirely in ``backend/core/atlas_gaps``.
+
 The agent never resolves opaque ids: the caller hands over already-resolved
 *text* (paper title / thesis / goal / claim texts) plus the skeleton node
 inventory. ``backend/core`` is never imported from here except lazily inside
@@ -51,6 +59,13 @@ __all__ = [
     "MAX_REASON_CHARS",
     "MAX_EVIDENCE_QUOTE_CHARS",
     "MIN_EVIDENCE_QUOTE_CHARS",
+    "GAP_LAYER_REGION",
+    "GAP_LAYER_CONCEPT",
+    "GAP_LAYERS",
+    "DEFAULT_MAX_GAPS_PER_DOCUMENT",
+    "MAX_PROPOSED_LABEL_CHARS",
+    "MAX_CONCEPTS_PER_REGION",
+    "normalize_gap_label",
     "SKIPPED_REASON_NO_MATERIAL",
     "SKIPPED_REASON_NO_DOMAINS",
     "SKIPPED_REASON_LLM_CALL_FAILED",
@@ -61,6 +76,7 @@ __all__ = [
     "LandscapePlacementInput",
     "PlacementCandidate",
     "UnplacedDomain",
+    "CategoryGapRecord",
     "ValidationIssue",
     "LandscapePlacementResult",
 ]
@@ -107,6 +123,52 @@ MAX_REASON_CHARS = 400
 MAX_EVIDENCE_QUOTE_CHARS = 400
 # あまりに短い「引用」は grounding の証明にならない（"the" 等）。
 MIN_EVIDENCE_QUOTE_CHARS = 6
+
+# ---------------------------------------------------------------------------
+# カテゴリギャップ候補（``docs/features/category_gap_candidates_design.md`` §5.1）
+# ---------------------------------------------------------------------------
+
+# 候補の層。語彙の正本は backend 側 ``core/atlas_gaps/schema.py`` /
+# migration の CHECK 制約で、一致は backend のガードレールが構造テストで固定する
+# （agent は backend/core を import しないため同じリテラルをここにも置く。
+# PERSPECTIVES と同じ流儀）。
+GAP_LAYER_REGION = "region"
+GAP_LAYER_CONCEPT = "concept"
+GAP_LAYERS = (GAP_LAYER_REGION, GAP_LAYER_CONCEPT)
+
+# 1 document あたりの候補上限（設計書 §3-2 の ``LANDSCAPE_GAP_MAX_PER_DOCUMENT=3``。
+# builder が env から解決して ``max_gaps_per_document`` として渡す）。
+DEFAULT_MAX_GAPS_PER_DOCUMENT = 3
+
+# 「ラベル」であって説明文でないことの防波堤（超過はその候補のみ drop・warning）。
+MAX_PROPOSED_LABEL_CHARS = 60
+
+# 領域あたりの概念上限。``backend/core/atlas.py::MAX_CONCEPTS_PER_REGION`` と**同値**
+# （骨格 draft 保存時の hard error 側の正本はあちら。ここはプロンプトに
+# ``concept_slots_remaining`` を決定論で添えるためだけに使う）。
+MAX_CONCEPTS_PER_REGION = 6
+
+
+def normalize_gap_label(text: Any) -> str:
+    """ラベル比較用の正規化（``backend/core/atlas.py::normalize_label`` と同規則）。
+
+    用途は agent 側の2つだけ:
+
+    - 「既存概念の言い換えを新概念として申告させない」捏造ガードの照合
+      （提示した骨格ノードのラベル・id との突合）
+    - 同一候補の重複排除
+
+    **backend の cluster_key（``core/atlas_gaps/schema.py::normalize_label``）とは
+    別実装**である点に注意する: あちらは NFKC + casefold + 空白畳み込みで「・」を
+    保つ（論文横断の束ね方の正本）。こちらは空白と「・」まで落とす分だけ**より
+    強く**同一視するが、agent 側の判定は soft（一致したらその候補を1件 drop する
+    だけ）なので、保守側に倒しても配置にも保存にも影響しない。純粋関数。
+    """
+    return (
+        "".join(str(text or "").lower().split())
+        .replace("・", "")
+        .replace("　", "")
+    )
 
 # skipped_reason 語彙（P4: 生成しなかったことを必ず理由付きで残す）。
 # ``no_frozen_skeleton`` / ``no_source_material`` は設計書 §7.2 のステージ skip 語彙と
@@ -225,6 +287,8 @@ class LandscapePlacementInput:
     claim_summaries: list[ClaimSummary] = field(default_factory=list)
     domains: list[DomainOption] = field(default_factory=list)
     max_placements: int = DEFAULT_MAX_PLACEMENTS
+    # 設計書 §5.1: カテゴリギャップ候補の1 document 上限（0 で申告させない）。
+    max_gaps_per_document: int = DEFAULT_MAX_GAPS_PER_DOCUMENT
 
     # -- degradation --------------------------------------------------------
 
@@ -277,6 +341,51 @@ class LandscapePlacementInput:
     def domain_keys(self) -> list[str]:
         return [d.domain_key for d in self.domains if d.domain_key]
 
+    # -- category gap helpers (設計書 §5.1) --------------------------------
+
+    def region_index(self) -> dict[tuple[str, str], SkeletonNodeOption]:
+        """``(domain_key, region_id) -> region node``（親領域の実在検査用）。"""
+        index: dict[tuple[str, str], SkeletonNodeOption] = {}
+        for domain in self.domains:
+            for node in domain.nodes:
+                if (
+                    domain.domain_key
+                    and node.node_id
+                    and node.kind != NODE_KIND_CONCEPT
+                ):
+                    index.setdefault((domain.domain_key, node.node_id), node)
+        return index
+
+    def concepts_by_region(self) -> dict[tuple[str, str], list[SkeletonNodeOption]]:
+        """``(domain_key, region_id) -> concepts``（``concept_slots_remaining`` の素）。"""
+        grouped: dict[tuple[str, str], list[SkeletonNodeOption]] = {}
+        for domain in self.domains:
+            for node in domain.nodes:
+                if not (domain.domain_key and node.node_id):
+                    continue
+                if node.kind != NODE_KIND_CONCEPT:
+                    continue
+                grouped.setdefault((domain.domain_key, node.region_id), []).append(node)
+        return grouped
+
+    def existing_labels(self) -> dict[str, set[str]]:
+        """``domain_key -> 既存ノードの正規化ラベル/id 集合``（言い換え申告の検出用）。
+
+        領域・概念を区別せず domain 単位で集める: 既にその分野の地図に同じ名前の
+        ノードがあるなら、それは「新しいカテゴリ」ではない（設計書 §5.1 の捏造ガード）。
+        """
+        index: dict[str, set[str]] = {}
+        for domain in self.domains:
+            if not domain.domain_key:
+                continue
+            bucket = index.setdefault(domain.domain_key, set())
+            for node in domain.nodes:
+                for value in (node.label, node.node_id):
+                    normalized = normalize_gap_label(value)
+                    if normalized:
+                        bucket.add(normalized)
+        return index
+
     # -- serialization ------------------------------------------------------
 
     def to_dict(self) -> dict:
@@ -291,6 +400,7 @@ class LandscapePlacementInput:
             "claim_summaries": [c.to_dict() for c in self.claim_summaries],
             "domains": [d.to_dict() for d in self.domains],
             "max_placements": self.max_placements,
+            "max_gaps_per_document": self.max_gaps_per_document,
         }
 
     @classmethod
@@ -300,6 +410,15 @@ class LandscapePlacementInput:
             max_placements = int(d.get("max_placements") or DEFAULT_MAX_PLACEMENTS)
         except (TypeError, ValueError):
             max_placements = DEFAULT_MAX_PLACEMENTS
+        raw_max_gaps = d.get("max_gaps_per_document")
+        try:
+            max_gaps = (
+                int(raw_max_gaps)
+                if raw_max_gaps is not None
+                else DEFAULT_MAX_GAPS_PER_DOCUMENT
+            )
+        except (TypeError, ValueError):
+            max_gaps = DEFAULT_MAX_GAPS_PER_DOCUMENT
         return cls(
             document_id=_clean(d.get("document_id")),
             cartridge_id=d.get("cartridge_id") or None,
@@ -321,6 +440,9 @@ class LandscapePlacementInput:
             max_placements=(
                 max_placements if max_placements > 0 else DEFAULT_MAX_PLACEMENTS
             ),
+            # 0 は「候補を申告させない」という有効な設定なので既定値へ戻さない
+            # （負値だけ 0 に丸める）。
+            max_gaps_per_document=max(0, max_gaps),
         )
 
 
@@ -380,6 +502,57 @@ class UnplacedDomain:
 
 
 @dataclass
+class CategoryGapRecord:
+    """地図カテゴリの候補1件（設計書 §5.1。常に candidate・確定は教員のみ）。
+
+    フィールド名は backend 側（``core/atlas_gaps/store.py`` の
+    ``landscape_gap_signals`` 行）との**契約**なので変えない。``parent_region_id``
+    は ``layer='region'`` のとき空文字 ""、``layer='concept'`` のとき必須
+    （実在検査は warning にとどめる — 設計書 §5.1）。
+
+    ``layer`` / ``domain_key`` に既定値を置かない（``PlacementCandidate`` と同じ流儀）:
+    「層とドメインの分からない候補」は黙って作られてはならない。
+    """
+
+    layer: str
+    domain_key: str
+    parent_region_id: str = ""
+    proposed_label: str = ""
+    reason: str = ""
+    evidence_quote: str = ""
+    confidence: float = 0.0
+
+    def key(self) -> tuple[str, str, str]:
+        """agent 内の重複判定キー（フィールドの組は backend の cluster_key と同じ）。
+
+        版非依存（§4.2 の裁定）。正規化は :func:`normalize_gap_label`（agent 側の
+        保守的な突合用）で、cluster_key の正本は backend
+        ``core/atlas_gaps/schema.py::build_cluster_key`` にある。
+        """
+        return (
+            self.domain_key,
+            self.parent_region_id or "",
+            normalize_gap_label(self.proposed_label),
+        )
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict | None) -> "CategoryGapRecord":
+        d = d or {}
+        return cls(
+            layer=_clean(d.get("layer")),
+            domain_key=_clean(d.get("domain_key")),
+            parent_region_id=_clean(d.get("parent_region_id")),
+            proposed_label=_clean(d.get("proposed_label")),
+            reason=_clean(d.get("reason")),
+            evidence_quote=_clean(d.get("evidence_quote")),
+            confidence=_clamp(d.get("confidence")),
+        )
+
+
+@dataclass
 class ValidationIssue:
     rule_id: str
     severity: str  # "error" | "warning"
@@ -395,6 +568,9 @@ class LandscapePlacementResult:
     document_id: str
     placements: list[PlacementCandidate] = field(default_factory=list)
     unplaced_domains: list[UnplacedDomain] = field(default_factory=list)
+    # 設計書 §5.1: 供給側の信号。backend は ``getattr(result, "category_gaps", [])``
+    # で読む（配置と独立・空でも配置には影響しない）。
+    category_gaps: list[CategoryGapRecord] = field(default_factory=list)
     cartridge_id: str | None = None
     placement_version: str = LANDSCAPE_PLACEMENT_VERSION
     llm_call_count: int = 0
@@ -409,6 +585,7 @@ class LandscapePlacementResult:
             "document_id": self.document_id,
             "placements": [p.to_dict() for p in self.placements],
             "unplaced_domains": [u.to_dict() for u in self.unplaced_domains],
+            "category_gaps": [g.to_dict() for g in self.category_gaps],
             "cartridge_id": self.cartridge_id,
             "placement_version": self.placement_version,
             "llm_call_count": self.llm_call_count,
@@ -432,6 +609,9 @@ class LandscapePlacementResult:
             ],
             unplaced_domains=[
                 UnplacedDomain.from_dict(u) for u in (d.get("unplaced_domains") or [])
+            ],
+            category_gaps=[
+                CategoryGapRecord.from_dict(g) for g in (d.get("category_gaps") or [])
             ],
             cartridge_id=d.get("cartridge_id") or None,
             placement_version=(

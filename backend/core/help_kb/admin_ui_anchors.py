@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。2026-07-31 時点では全236アンカーがマップ済み
+no_hit 経路で需要を計測する）。全266アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -51,6 +51,13 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.domain-restore",
         "atlas.domain-retire",
         "atlas.freeze",
+        "atlas.gap-accept",
+        "atlas.gap-candidates",
+        "atlas.gap-dismiss",
+        "atlas.gap-dismissed-filter",
+        "atlas.gap-draft-from-frozen",
+        "atlas.gap-incorporate",
+        "atlas.gap-restore",
         "atlas.generate",
         "atlas.refresh",
         "atlas.report-incorporate",
@@ -95,6 +102,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "deliberation.inventory-filter",
         "deliberation.mode-save",
         "deliberation.positioning-lenses",
+        "deliberation.review-sort-toggle",
         "deliberation.standardization-assess",
         "discuss-observation.dump-targz",
         "discuss-observation.dump-zip",
@@ -103,10 +111,15 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "doubt-atlas.assumption-dismiss",
         "doubt-atlas.assumption-filter",
         "doubt-atlas.audit-run",
+        "doubt-atlas.counterfactual-observation-toggle",
         "doubt-atlas.course-select",
+        "doubt-atlas.falsification-candidate-decide",
+        "doubt-atlas.falsification-record",
+        "doubt-atlas.falsification-refresh",
         "doubt-atlas.load-recompute",
         "doubt-atlas.manage-challenge",
         "doubt-atlas.mining-run",
+        "doubt-atlas.open-assumptions-reachable-filter",
         "doubt-atlas.open-assumptions-row",
         "doubt-atlas.plot-detail",
         "doubt-atlas.record-challenge",
@@ -195,10 +208,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.nav-course",
         "lecture-studio.nav-document",
         "lecture-studio.recon-review-btn",
+        "lecture-studio.recon-review-sort",
         "lecture-studio.refresh-graph-btn",
         "lecture-studio.right-pane-toggle",
         "lecture-studio.save-btn",
         "lecture-studio.settings-btn",
+        "lecture-studio.slide-wm-label",
         "lecture-studio.stumble-tab-evidence",
         "lecture-studio.stumble-tab-figures",
         "lecture-studio.stumble-tab-stumble",
@@ -224,6 +239,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "manual-editor.switch-to-db",
         "manual-editor.switch-to-files",
         "materials.analyze-images",
+        "materials.cost-forecast-note",
         "materials.export-modal",
         "materials.figure-deliberate",
         "materials.figure-overlay",
@@ -249,8 +265,10 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-pipeline-run",
         "materials.row-resume-analysis",
         "materials.row-retry-stage",
+        "materials.row-seminar-brief",
         "materials.row-share",
         "materials.row-version",
+        "materials.seminar-brief-modal",
         "materials.upload-zone",
         "release-review.modal",
         "release-review.next",
@@ -323,6 +341,20 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.domain-retire": "teacher/17-admin-atlas.md#domain-retire",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
+    # 論文の解析から見つかった候補 — 採用
+    "atlas.gap-accept": "teacher/17-admin-atlas.md#gap-accept",
+    # 論文の解析から見つかった候補（グループ全体）
+    "atlas.gap-candidates": "teacher/17-admin-atlas.md#gap-candidates",
+    # 却下…（理由必須）
+    "atlas.gap-dismiss": "teacher/17-admin-atlas.md#gap-dismiss",
+    # 見送り済みも表示
+    "atlas.gap-dismissed-filter": "teacher/17-admin-atlas.md#gap-dismissed-filter",
+    # 現在の版から次版の下書きを作る
+    "atlas.gap-draft-from-frozen": "teacher/17-admin-atlas.md#gap-draft-from-frozen",
+    # 次版の下書きに取り込む…
+    "atlas.gap-incorporate": "teacher/17-admin-atlas.md#gap-incorporate",
+    # 見送りから戻す
+    "atlas.gap-restore": "teacher/17-admin-atlas.md#gap-restore",
     # 次版の編集を始める
     "atlas.generate": "teacher/17-admin-atlas.md#generate",
     # 更新
@@ -417,6 +449,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "deliberation.mode-save": "teacher/24-admin-deliberation.md#mode-save",
     # 文脈的位置づけ（4つのレンズ）
     "deliberation.positioning-lenses": "teacher/24-admin-deliberation.md#positioning-lenses",
+    # 説明レビューキュー：並び順（負荷の高い順）トグル
+    "deliberation.review-sort-toggle": "teacher/24-admin-deliberation.md#review-sort-toggle",
     # 標準化度を評価
     "deliberation.standardization-assess": "teacher/24-admin-deliberation.md#standardization-assess",
 
@@ -437,14 +471,24 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "doubt-atlas.assumption-filter": "teacher/18-admin-doubt-atlas.md#assumption-filter",
     # コーパス監査実行
     "doubt-atlas.audit-run": "teacher/18-admin-doubt-atlas.md#audit-run",
+    # 観測を仮に倒す
+    "doubt-atlas.counterfactual-observation-toggle": "teacher/18-admin-doubt-atlas.md#counterfactual-observation-toggle",
     # コースを選択...
     "doubt-atlas.course-select": "teacher/18-admin-doubt-atlas.md#course-select",
+    # 確認して記帳／見送る（覆る条件の候補）
+    "doubt-atlas.falsification-candidate-decide": "teacher/18-admin-doubt-atlas.md#falsification-candidate-decide",
+    # 覆る条件を記帳する
+    "doubt-atlas.falsification-record": "teacher/18-admin-doubt-atlas.md#falsification-record",
+    # AIに候補を出してもらう（覆る条件）
+    "doubt-atlas.falsification-refresh": "teacher/18-admin-doubt-atlas.md#falsification-refresh",
     # 負荷再計算
     "doubt-atlas.load-recompute": "teacher/18-admin-doubt-atlas.md#load-recompute",
     # 取り下げ／検証提案にする
     "doubt-atlas.manage-challenge": "teacher/18-admin-doubt-atlas.md#manage-challenge",
     # 前提マイニング実行
     "doubt-atlas.mining-run": "teacher/18-admin-doubt-atlas.md#mining-run",
+    # 到達可能な反証条件がある項目だけ表示
+    "doubt-atlas.open-assumptions-reachable-filter": "teacher/18-admin-doubt-atlas.md#open-assumptions-reachable-filter",
     # 未検証合意リストの行（クリックで台帳詳細）
     "doubt-atlas.open-assumptions-row": "teacher/18-admin-doubt-atlas.md#open-assumptions",
     # 散布図の点（クリックで台帳詳細）
@@ -633,6 +677,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.nav-document": "teacher/14-admin-lecture-studio.md#nav-tabs",
     # 再構成の確認
     "lecture-studio.recon-review-btn": "teacher/14-admin-lecture-studio.md#recon-review-btn",
+    # 再構成の確認：並び順（負荷の高い順）トグル
+    "lecture-studio.recon-review-sort": "teacher/14-admin-lecture-studio.md#recon-review-sort",
     # グラフを更新
     "lecture-studio.refresh-graph-btn": "teacher/14-admin-lecture-studio.md#refresh-graph-btn",
     # 右ペインを隠す
@@ -641,6 +687,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.save-btn": "teacher/14-admin-lecture-studio.md#save-btn",
     # 設定
     "lecture-studio.settings-btn": "teacher/14-admin-lecture-studio.md#settings-btn",
+    # スライドの負荷ラベル（WMレンズ）
+    "lecture-studio.slide-wm-label": "teacher/14-admin-lecture-studio.md#slide-wm-label",
     # 根拠リンク
     "lecture-studio.stumble-tab-evidence": "teacher/14-admin-lecture-studio.md#stumble-tabs",
     # 図の提案（右ペイン第3トグル）
@@ -699,6 +747,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- materials.* — 教材管理タブ -----------------------------------------------------
     # 図面・画像を解析する
     "materials.analyze-images": "teacher/11-admin-materials.md#analyze-images",
+    # AI利用枠の見通し（コスト見通しの一行。アップロードゾーン + 再解析モーダル）
+    "materials.cost-forecast-note": "teacher/11-admin-materials.md#cost-forecast-note",
     # 外部レビュー用に書き出しモーダル
     "materials.export-modal": "teacher/11-admin-materials.md#export-modal",
     # 深く検討（図）
@@ -749,10 +799,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-resume-analysis": "teacher/11-admin-materials.md#resume-analysis",
     # ステージ再実行（縮退時のみ表示されるリンク）
     "materials.row-retry-stage": "teacher/11-admin-materials.md#row-retry-stage",
+    # ゼミ前ブリーフ…（seminar_brief_mirroring_design.md §1: 輪講前の read-only 合成ビュー）
+    "materials.row-seminar-brief": "teacher/11-admin-materials.md#seminar-brief-open",
     # 共有設定
     "materials.row-share": "teacher/11-admin-materials.md#row-share",
     # 版の管理
     "materials.row-version": "teacher/11-admin-materials.md#row-version",
+    # ゼミ前ブリーフモーダル（4区画: 脆い前提 / 一点吊りの支持線 / 晴れ間 / 学習者からの問い）
+    "materials.seminar-brief-modal": "teacher/11-admin-materials.md#seminar-brief-modal",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
 

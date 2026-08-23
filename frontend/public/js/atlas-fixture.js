@@ -7,6 +7,8 @@
  * 注意 (設計原則 §1.2):
  * - 踏破率の %・スコア・推薦文言をこのデータに含めない
  * - 霧 (fog) 領域に概念ラベル・誘導文言を持たせない (匿名ドット座標のみ)
+ * - pill の文言は backend/core/atlas_state.py::PILL_LABELS を正本とする
+ *   (固定は backend/tests/test_atlas_vocab_mirror.py)
  */
 window.ATLAS_FIXTURE = {
   "skeleton_version": "2026.1",
@@ -20,9 +22,9 @@ window.ATLAS_FIXTURE = {
   "initial_selection": { "1": "now", "2": "now", "3": "gy" },
   "nodes": {
     "now":   { "label": "B→c 和則", "pill": "いまここ", "status": "now", "verify": "検証: 原文3本に裏付け（式(12)・§3.2 ほか）。あなたの学習の現在地。", "endorse": "承認: 強い支持 — 3名の教員が承認（専門2分野）", "learn": true, "evid": true },
-    "ope":   { "label": "演算子積展開", "pill": "実験で確認", "status": "verified", "verify": "検証: 短距離展開として複数過程で確認。スコープ: 高エネルギー・摂動領域。", "endorse": "承認: 標準の説明＋A先生の説明が並存", "learn": true, "evid": true },
-    "disp":  { "label": "分散関係", "pill": "実験で確認", "status": "verified", "verify": "検証: 解析性に基づく厳密な関係。原文2本に導出の記帳あり。", "endorse": "承認: 2名の教員が承認", "learn": true, "evid": true },
-    "qft":   { "label": "場の量子論の基礎", "pill": "実験で確認・習得済み", "status": "verified", "verify": "検証: 前提知識チェックを通過済み。", "endorse": "承認: 標準の説明", "learn": true, "evid": true },
+    "ope":   { "label": "演算子積展開", "pill": "原文に裏付け", "status": "verified", "verify": "検証: 短距離展開として複数過程で確認。スコープ: 高エネルギー・摂動領域。", "endorse": "承認: 標準の説明＋A先生の説明が並存", "learn": true, "evid": true },
+    "disp":  { "label": "分散関係", "pill": "原文に裏付け", "status": "verified", "verify": "検証: 解析性に基づく厳密な関係。原文2本に導出の記帳あり。", "endorse": "承認: 2名の教員が承認", "learn": true, "evid": true },
+    "qft":   { "label": "場の量子論の基礎", "pill": "原文に裏付け・習得済み", "status": "verified", "verify": "検証: 前提知識チェックを通過済み。", "endorse": "承認: 標準の説明", "learn": true, "evid": true },
     "dual":  { "label": "クォーク・ハドロン双対性", "pill": "暗黙の前提", "status": "assumed", "verify": "検証: 記帳された直接検証なし。多数の導出が依存（行動上の合意は強い）。", "endorse": "承認: 承認記録なし — 台帳のスコープ欄は空欄", "learn": true, "evid": true },
     "vcb":   { "label": "Vcb の測定間の不一致", "pill": "解釈が分かれる", "status": "contested", "verify": "検証: 包括的・排他的の2系統の測定が併存し、値が一致しない。", "endorse": "承認: 2つの解釈が帰属つきで並存", "learn": true, "evid": true },
     "spec":  { "label": "スペクトル密度", "pill": "未訪問", "status": "unvisited", "verify": "検証: 原文に記帳あり。まだ訪れていない概念。", "endorse": "承認: 標準の説明", "learn": true, "evid": true },

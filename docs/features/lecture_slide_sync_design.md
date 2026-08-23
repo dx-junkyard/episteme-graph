@@ -7,6 +7,9 @@
 > 旧「実チャンク教材を持つトピックはチャンク経路を優先」（`_topic_has_linkable_material`）は
 > **撤去**し、表示ソース判定は `_lecture_uses_topic_material(topic)` に一本化した。以下本文中の
 > チャンク優先の記述（§1-6・§2-4・受け入れ条件の一部）はこの更新で置き換わっている。
+> （さらに正本は `backend/api/routes/lecture.py` の `_lecture_uses_topic_material` から
+> `backend/core/lecture.py::lecture_uses_topic_material`（アンダースコアなし）へ移設済み。
+> 呼び出し元は `get_lecture_sequence` / `get_topic_audio_status` / studio のトピック音声生成。）
 > スライド分割は `_build_topic_slides(topic)`（受講表示・音声生成・readiness で共有・決定論的）
 > が `core/lecture.py::auto_paginate_slides` を用いて行う: `===` があれば明示分割を優先、無く
 > 長い教材は**段落境界で自動ページ分割**（既定600字目安）し表示と読み上げを同数ページ・同順で
@@ -77,6 +80,7 @@
 6. **`_topic_has_linkable_material` 経由の判定を維持**: ドラフト専用トピック判定は
    従来どおり同関数を必ず経由する（CLAUDE.md 既存ルール）。スライド化はチャンク教材
    トピック・ドラフトトピックの両方で同じマーカー規約を使う。
+   （この関数は migration 047 の転換で撤去済み — 冒頭注記参照）
 
 ---
 

@@ -21,12 +21,13 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_teacher
 from services import _resolve_document, get_accessible_course_data, record_review_event, user_can_view_course
+from core import teacher_triage
 from core.course_data import course_source_material_ids, course_topics
 from core.postgres import get_session as _pg_session
 from core.reconstruction import diff as recon_diff
@@ -214,6 +215,11 @@ def get_next_item(
 
     出題対象は status='auto'/'confirmed'、source_backed かつ承認済みの claim のみ。
     本人が未回答の item を優先する。無ければ item=None を返す。
+
+    連続回避（Phase 2, understanding_cycle_design.md §6）: 直近の回答が
+    elicit_mode='regime'/'next_step'（式スケール ELICIT）だった場合、今回は
+    それらの item を除外はせず後回しにする（機械的クリック化の防止。スコープに
+    導出系 item しか無い document では締め出さない — 除外ではなく並べ替えに留める）。
     """
     course_data = get_accessible_course_data(current_user["id"], course_id)
     if course_data is None:
@@ -224,6 +230,24 @@ def get_next_item(
         scope = _course_scope(session, course_data, topic_id)
         if not scope["material_ids"] and not scope["doc_refs"]:
             return {"item": None, "exhausted": True}
+
+        deprioritize_derivation = False
+        try:
+            last_mode_row = session.execute(
+                sa_text("""
+                    SELECT i.elicit_mode
+                    FROM learner_reconstructions r
+                    JOIN reconstruction_items i ON i.id = r.item_id
+                    WHERE r.user_id = CAST(:uid AS uuid)
+                    ORDER BY r.created_at DESC
+                    LIMIT 1
+                """),
+                {"uid": current_user["id"]},
+            ).fetchone()
+            if last_mode_row and str(last_mode_row[0] or "") in ("regime", "next_step"):
+                deprioritize_derivation = True
+        except Exception:
+            logger.debug("recon last-mode lookup failed (non-fatal)", exc_info=True)
 
         # 記号葉プローブ（elicit_mode='symbol'）は descend 経由でのみ提示する（§3.4）。
         conditions = [
@@ -243,6 +267,13 @@ def get_next_item(
         params["mids"] = scope["material_ids"] or [""]
         params["doc_refs"] = scope["doc_refs"] or [""]
 
+        order_clause = "i.author_confidence DESC, i.created_at ASC"
+        if deprioritize_derivation:
+            order_clause = (
+                "CASE WHEN i.elicit_mode IN ('regime', 'next_step') THEN 1 ELSE 0 END ASC, "
+                + order_clause
+            )
+
         def _next_row(extra_clause: str):
             return session.execute(
                 sa_text(f"""
@@ -253,7 +284,7 @@ def get_next_item(
                     JOIN theory_claims c ON c.id = i.claim_id
                     LEFT JOIN chunks ch ON ch.id = c.chunk_id
                     WHERE {' AND '.join(conditions + [extra_clause])}
-                    ORDER BY i.author_confidence DESC, i.created_at ASC
+                    ORDER BY {order_clause}
                     LIMIT 1
                 """),
                 params,
@@ -529,12 +560,59 @@ class ItemPatchRequest(BaseModel):
     status: str | None = None            # confirmed | retired | auto | flagged
     prompt: str | None = None
     expected: dict | None = None
+    # どの並び順の下で確定したかの来歴申告（負荷順トリアージ TT3。任意・未指定は
+    # 監査 metadata に載せない — 偽装しない）。
+    sort_order: str | None = None
+
+
+def _validate_sort(value: str | None, *, param: str) -> None:
+    """負荷順トリアージの ``sort`` / ``sort_order`` 語彙検証（不正値は 422）。"""
+    if value is not None and value not in teacher_triage.SORT_ORDERS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"invalid {param}: {value!r} (must be one of {list(teacher_triage.SORT_ORDERS)})",
+        )
+
+
+def _apply_load_sort_to_queue(payload: dict) -> dict:
+    """sort=load（負荷順トリアージ, 教員支援 Phase 4 §2）: R層 review キューを
+    D層台帳の負荷段階（低/中/高/最高位）で降順に並べ替える。
+
+    R層の ``claim_id`` は DB UUID なので台帳（``target_type='claim'``）に直結する
+    （§5 精査③ — 説明キューと違い agent ID 解決は不要）。台帳読みはバッチ1クエリ +
+    ``load_percentiles`` をキューにつき1回（§5 精査②）。読み失敗は 500 にせず
+    全件を導出不能（末尾・正直な縮退ラベル）として返す。生値は付与しない（TT2）。
+    """
+    items = payload.get("items") or []
+
+    def _target(item: dict) -> tuple[str, str] | None:
+        claim_id = str(item.get("claim_id") or "").strip()
+        return (teacher_triage.TARGET_CLAIM, claim_id) if claim_id else None
+
+    levels: dict[tuple[str, str], str] = {}
+    try:
+        session = _pg_session()
+        try:
+            levels = teacher_triage.load_levels_for_targets(
+                session, [_target(it) for it in items]
+            )
+        finally:
+            session.close()
+    except Exception:  # noqa: BLE001 — 台帳読み失敗は導出不能扱いに縮退（キューを止めない）
+        logger.warning("load sort: ledger batch read failed for review queue", exc_info=True)
+
+    payload["items"] = teacher_triage.annotate_and_sort_by_load(
+        items, levels, target_for_item=_target
+    )
+    payload["sort"] = teacher_triage.SORT_LOAD
+    return payload
 
 
 @admin_router.get("/reconstruction/items/review-queue")
 def review_queue(
     document_id: str | None = None,
     course_id: str | None = None,
+    sort: str = Query(default=teacher_triage.SORT_DEFAULT),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """疑わしさランク順の item 一覧（health 集計を段階ラベル / レンジで付与）。
@@ -545,7 +623,12 @@ def review_queue(
     fail-closed（``admin.py`` の既存コース閲覧ガード, admin.py の
     ``list_course_group_permissions`` と同じ規約 — 403 ではなく 404）。
     ``course_id`` 未指定時は従来どおり ``document_id`` 指定 / 無指定の挙動を維持する。
+
+    ``sort=load``（負荷順トリアージ, 教員支援 Phase 4 §2）: D層台帳の負荷段階で
+    降順に並べ替え、各 item に段階ラベルを付ける。**既定（``default``）は従来の
+    疑わしさランク順・応答形も完全に不変**（TT1: 沈黙の並べ替えを作らない）。
     """
+    _validate_sort(sort, param="sort")
     if course_id:
         if not user_can_view_course(current_user["id"], course_id):
             raise HTTPException(status_code=404, detail="Course not found")
@@ -562,8 +645,12 @@ def review_queue(
             session.close()
         # sources が空のコースは doc_refs も空になり、get_review_queue が
         # fail-closed で {"items": [], ...} を返す（全件フォールバックしない）。
-        return get_review_queue(document_ids=scope["doc_refs"])
-    return get_review_queue(document_id)
+        payload = get_review_queue(document_ids=scope["doc_refs"])
+    else:
+        payload = get_review_queue(document_id)
+    if sort == teacher_triage.SORT_LOAD:
+        return _apply_load_sort_to_queue(payload)
+    return payload
 
 
 @admin_router.patch("/reconstruction/items/{item_id}")
@@ -574,8 +661,11 @@ def patch_item(
 ) -> dict:
     """status 遷移（confirmed / retired / auto / flagged）+ prompt / expected 修正。
 
-    削除 API は無い（retire のみ。P4）。
+    削除 API は無い（retire のみ。P4）。``body.sort_order`` は「どの並び順の下で
+    確定したか」の来歴申告で、status 遷移の監査 metadata にのみ載る（TT3。
+    status 変化が無ければ従来どおり記帳しない — 既存分岐は変えない）。
     """
+    _validate_sort(body.sort_order, param="sort_order")
     session = _pg_session()
     try:
         existing = session.execute(
@@ -625,7 +715,9 @@ def patch_item(
     if new_status != old_status:
         _record_recon_event(
             ENTITY_ITEM, item_id, old_status, new_status, current_user.get("id"),
-            {"claim_id": claim_id, "by": "teacher"},
+            teacher_triage.sort_metadata(
+                {"claim_id": claim_id, "by": "teacher"}, body.sort_order
+            ),
         )
         if new_status == "flagged":
             # 横断インボックス fan-out（N14, best-effort）: item のオーサーへ「flagged に

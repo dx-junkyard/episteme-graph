@@ -518,10 +518,21 @@ def _reanalyze_capture(monkeypatch, *, body, previous_options):
         def start(self):
             pass
 
-    select_session = MagicMock()
-    select_session.execute.return_value.fetchone.return_value = (
-        "dddddddd-dddd-dddd-dddd-dddddddddddd", "Title", "file.pdf", "mat-1",
+    # P0（オブジェクトスコープ権限）: document owner/editor ゲートを通す。
+    from services import DocumentAccess
+
+    monkeypatch.setattr(
+        admin_mod, "resolve_document_access",
+        lambda uid, ref: DocumentAccess(
+            document_id="dddddddd-dddd-dddd-dddd-dddddddddddd",
+            source_path="mat-1", uploaded_by=uid, is_owner=True,
+            can_view=True, can_edit=True,
+        ),
     )
+
+    # ゲート通過後の最小 SELECT（title, filename）。
+    select_session = MagicMock()
+    select_session.execute.return_value.fetchone.return_value = ("Title", "file.pdf")
     update_session = MagicMock()
     monkeypatch.setattr(admin_mod, "_pg_session", MagicMock(side_effect=[select_session, update_session]))
 

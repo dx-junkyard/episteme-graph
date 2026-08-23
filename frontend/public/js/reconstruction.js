@@ -13,6 +13,11 @@
   var el = null; // #reconstruction-region
   var current = { item: null, reconId: "", isRevision: false };
 
+  // 選択式モード（predict = 型の予測 / regime・next_step = 式スケール ELICIT）。
+  // restate だけが自由記述。判定方式（option_id 照合）が同じ3モードをまとめて扱う。
+  var CHOICE_MODES = { predict: 1, regime: 1, next_step: 1 };
+  function isChoiceMode(mode) { return !!CHOICE_MODES[mode]; }
+
   function token() {
     return localStorage.getItem("eg_token") || null;
   }
@@ -97,7 +102,11 @@
 
   function renderElicit() {
     var item = current.item;
-    var html = '<p class="recon-prompt">' + esc(item.prompt) + '</p>';
+    // 構造の降下路（SD6 宣言された留保, structure_descent_design.md §3）: 出し惜しみが
+    // 働く opt-in 枠には宣言一行を常設する（静的文字列のみ。既存の文言・プロンプト・
+    // ボタンは非改変）。
+    var html = '<div class="elicit-declaration">いまは答えを配らない対話です</div>';
+    html += '<p class="recon-prompt">' + esc(item.prompt) + '</p>';
 
     var ctxFields = (item.claim_context && item.claim_context.concepts) || [];
     if (ctxFields.length) {
@@ -108,7 +117,7 @@
       html += '</div>';
     }
 
-    if (item.elicit_mode === "predict" && (item.response_space || []).length) {
+    if (isChoiceMode(item.elicit_mode) && (item.response_space || []).length) {
       html += '<div class="recon-options">';
       item.response_space.forEach(function (opt, i) {
         html += '<label class="recon-option">' +
@@ -130,7 +139,7 @@
 
   function collectResponse() {
     var item = current.item;
-    if (item.elicit_mode === "predict") {
+    if (isChoiceMode(item.elicit_mode)) {
       var checked = el.querySelector('input[name="recon-choice"]:checked');
       return checked ? { option_id: checked.value } : null;
     }
@@ -148,7 +157,7 @@
         warn = document.createElement("div");
         warn.className = "recon-muted recon-warn";
         warn.id = "recon-warn";
-        warn.textContent = item.elicit_mode === "predict"
+        warn.textContent = isChoiceMode(item.elicit_mode)
           ? "選択肢を一つ選んでください。" : "一文を入力してください。";
         var actions = el.querySelector(".recon-actions");
         if (actions) actions.parentNode.insertBefore(warn, actions);

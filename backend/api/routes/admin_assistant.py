@@ -32,6 +32,7 @@ from core.course_data import course_title as _course_title
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate, today_str
+from core.label_vocab import AUDIO_STATUS_LABELS, MATERIAL_STATE_LABELS, SCRIPT_STATUS_LABELS
 from core.postgres import get_session as _pg_session
 from core.schema import AUDIT_ENTITY_ASSISTANT_ACTION, AUDIT_ENTITY_NEXT_STEP, AUDIT_ENTITY_MANUAL
 from core.admin_assistant import capabilities as caps
@@ -463,24 +464,11 @@ def _action_response(message: str, role: str, cap, screen_context: dict) -> Assi
     return AssistantChatResponse(answer=answer, intent=INTENT_ACTION, action_plan=plan)
 
 
-_MATERIAL_STATE_LABELS = {
-    status_schema.MATERIAL_STATE_UPLOADED: "アップロード済み（未解析）",
-    status_schema.MATERIAL_STATE_CHUNKING: "解析待ち",
-    status_schema.MATERIAL_STATE_ANALYZING: "解析実行中",
-    status_schema.MATERIAL_STATE_ANALYZED: "解析完了",
-    status_schema.MATERIAL_STATE_ANALYSIS_FAILED: "解析失敗",
-    status_schema.MATERIAL_STATE_UNKNOWN: "状態不明",
-}
-_SCRIPT_STATUS_LABELS = {
-    status_schema.SCRIPT_STATUS_DRAFT: "未生成",
-    status_schema.SCRIPT_STATUS_PARTIAL: "一部生成",
-    status_schema.SCRIPT_STATUS_GENERATED: "生成済み",
-}
-_AUDIO_STATUS_LABELS = {
-    status_schema.AUDIO_STATUS_NONE: "未生成",
-    status_schema.AUDIO_STATUS_PARTIAL: "一部生成",
-    status_schema.AUDIO_STATUS_GENERATED: "生成済み",
-}
+# 状態語彙の正本は core/status/schema.py、訳語の正本は core/label_vocab.py
+# （routes 層にしか訳が無い状態を解消。文言は移設前と同一）。
+_MATERIAL_STATE_LABELS = MATERIAL_STATE_LABELS
+_SCRIPT_STATUS_LABELS = SCRIPT_STATUS_LABELS
+_AUDIO_STATUS_LABELS = AUDIO_STATUS_LABELS
 
 # 「対応が必要」とみなす教材状態（詳細列挙の対象。解析完了は詳細列挙しない）。
 _MATERIAL_NEEDS_ATTENTION = {

@@ -58,6 +58,22 @@
 アップロード後は **PDF 解析パイプライン**が非同期で走ります（[パイプライン概要](../pipeline/overview.md)）。
 進捗は `GET /api/admin/tasks/{task_id}` でポーリング。ステージ: `uploaded → document-analysis → script-generation → audio-generation`。
 
+### ゼミ前ブリーフ
+
+輪講の前に対象論文の「賭け金」を10分で把握する read-only 合成ビュー（正本:
+[seminar_brief_mirroring_design.md](seminar_brief_mirroring_design.md) §1、SB1〜SB4）。
+`GET /api/admin/documents/{ref}/seminar-brief`（`_require_teacher` +
+`_ensure_document_viewable`。実体は `core/doubt/seminar_brief.py::build_seminar_brief` —
+新テーブル・新 LLM ゼロの読み時合成, SB1）。教材管理の行 ⋯メニュー「ゼミ前ブリーフ…」→
+モーダル（admin.js `openSeminarBriefModal`）が4区画を順に描画する:
+**脆い前提**（D層 open-assumptions の document 絞り込み投影・段階ラベルのみ + claim には
+k-匿名通過分のつまづき段階ラベル）/ **一点吊りの支持線**（SL層 support_paths
+`level=single` の事実文）/ **晴れ間**（「このコーパスの中では検証記録が見つかりません。」の
+閉世界固定文, SL1）/ **学習者からの問い**（v1 は空欄で予約, SB3 — 警告色・催促文にしない）。
+件数・人数の生値は教員にも出さない（SB2）。空の区画は静かに省略し、第4区画のみ常設。
+アンカー2件（`materials.row-seminar-brief` / `materials.seminar-brief-modal`）+
+teacher マニュアル節（`11-admin-materials.md#seminar-brief`）の3点セット登録済み。
+
 ---
 
 ## 2. AI 支援コースビルダー
@@ -145,6 +161,27 @@ LLM との対話形式でコース構造（章・トピック・前提知識・�
 - つまずきデータ: `GET /api/admin/courses/{id}/unanswered-queries`（`student_stumble_events` / `unanswered_query_logs`）。
 - エラー分析: キーワード/重大度/期間でログを絞り込み、複数形式で一括コピー。
 - システム統計: `GET /api/admin/system/materials-stats`（SYSTEM_ADMIN）。
+
+---
+
+## 8. 宣言された弁と静かな計器（教員支援 v1）
+
+正本は [宣言された弁と静かな計器 設計書](teacher_triage_instruments_design.md)（TT1〜TT6。migration 不要）。
+
+- **負荷順トリアージ**: 説明レビューキュー（`deliberation.js`）と R層「再構成の確認」
+  （`admin-lecture-studio.js`）に「並び順: 負荷の高い順」トグル。既定は従来順・明示トグル・
+  適用中は「基盤への影響が大きい順に並んでいます」の宣言一行を常に表示（TT1。localStorage
+  等へ保存せず毎回既定に戻る）。段階ラベル（低/中/高/最高位）はサーバの `load_level_label`
+  をそのまま表示し、JS 側に語彙表を持たない（TT2）。導出不能候補は末尾 +
+  「影響度を導出できない候補」の正直ラベル。確定操作（approve/dismiss/bulk・R層 PATCH）は
+  `sort_order` を body で送り、どの並び順の下で確定したかを監査に残す（TT3）。
+- **コスト見通しの一行**: 教材アップロードゾーンのモデルサマリ直下（`#llm-model-cost-note`）と
+  再解析モーダルに、`GET /api/admin/llm-usage/forecast[/documents/{id}]` の `show=true` の
+  ときのみ事実文を表示。収まる見込みなら行ごと出さず、ボタンの無効化・処理の中止はしない
+  （TT4・fail-open）。
+- **WMレンズ**: 原稿スタジオのスライドプレビュー（`preview-split` 応答の optional `wm`）で、
+  高負荷スライドにのみ段階ラベル + 事実文（degraded 時は「記号の照合は表記の一致による
+  近似です」を併記）。`===` を挿すのは教員の手のみ（TT6 — 自動挿入・分割候補の提示はしない）。
 
 ---
 

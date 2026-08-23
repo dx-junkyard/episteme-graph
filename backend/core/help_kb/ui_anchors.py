@@ -53,6 +53,22 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 知識ランドスケープ（docs/features/knowledge_landscape_design.md §10.2）:
         # 出典タブの「分野の中の位置づけ」セクション。
         "sources.paper-placement",
+        # 理解サイクル Phase 1（docs/features/understanding_cycle_design.md §5.4）:
+        # 教材区画フッタの常設アンカー4ボタン。
+        "material.quick-anchor",
+        # 主権台帳 v1（docs/features/trace_registry_sovereignty_ledger_design.md §3.4）:
+        # トップバーの「わたしの記録」ボタン。
+        "topbar.my-records",
+        # 帰還の扉（docs/features/return_door_design.md §2.1）:
+        # コースビュー最上部の再入口インレイ（書き置き・持ち越しの問い・確定した引っかかり）。
+        "material.return-door",
+        # 構造の降下路（docs/features/structure_descent_design.md §3/§4）:
+        # 要素文脈パネル内の「降下路」枠（足場ダイヤル・楽屋への入口）。
+        "material.descent-ladder",
+        # 確認問題モーダルの選択肢（docs/features/learning.md の確認問題フロー）:
+        # 「AIと議論して理解を深める」「今回は確認せず次へ進む」の2ボタン。
+        "check.discuss",
+        "check.skip",
     }
 )
 
@@ -64,6 +80,17 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # 追記し、KNOWN_UI_ANCHOR_IDS の全17種がここにマップ済みになった。2026-08-04 に
 # 知識ランドスケープ（knowledge_landscape_design.md §10.2）の
 # sources.paper-placement を追加し、全18種がマップ済みの状態を保っている。
+# 2026-08-13 に理解サイクル Phase 1（understanding_cycle_design.md §5.4）の
+# material.quick-anchor を追加し、全19種がマップ済み。
+# 2026-08-15 に主権台帳 v1（trace_registry_sovereignty_ledger_design.md §3.4）の
+# topbar.my-records を追加し、全20種がマップ済み。
+# 2026-08-15 に帰還の扉（return_door_design.md §2.1）の material.return-door を追加し、
+# 全21種がマップ済み。
+# 2026-08-15 に構造の降下路（structure_descent_design.md §3/§4）の
+# material.descent-ladder を追加し、全22種がマップ済み。
+# 2026-08-22 に確認問題モーダルの選択肢2ボタン（check.discuss / check.skip）を
+# 追加し、全24種がマップ済み。両者は「確認問題の3つの選択肢」を1つの節で
+# 並べて説明しているため、同じ参照先を指す。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
 # （composer.input / composer.send が同じ #ai-chat を指すのと同じパターン）。
@@ -105,6 +132,17 @@ UI_ANCHORS: dict[str, str] = {
     "discuss.end": "student/02-student.md#discuss-end",
     # 出典タブの「分野の中の位置づけ」（知識ランドスケープ・論文の位置づけ）。
     "sources.paper-placement": "student/02-student.md#paper-placement",
+    # 教材区画フッタの常設アンカー4ボタン（理解サイクル Phase 1・§5.4）。
+    "material.quick-anchor": "student/02-student.md#quick-anchor",
+    # 「わたしの記録」ボタン＝主権台帳 v1（本人の全痕跡の一覧と持ち出し）。
+    "topbar.my-records": "student/02-student.md#my-records",
+    # 帰還の扉＝コースビュー最上部の再入口インレイ（書き置き・欄外の印の説明節）。
+    "material.return-door": "student/02-student.md#return-door",
+    # 構造の降下路＝要素文脈パネル内の「降下路」枠（段階ヒント・楽屋）。
+    "material.descent-ladder": "student/02-student.md#descent-ladder",
+    # 確認問題モーダルの「AIと議論して理解を深める」「今回は確認せず次へ進む」。
+    "check.discuss": "student/02-student.md#check-options",
+    "check.skip": "student/02-student.md#check-options",
 }
 
 

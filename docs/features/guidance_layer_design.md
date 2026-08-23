@@ -172,8 +172,16 @@ spotlight が粗い。`data-material-id` / `data-course-id` 属性で行を特�
 
 判定はすべてサーバ側。フロントは表示するだけ（P1 と同型）。
 
-## 5. DB（migration 039。設計時点では 038 を想定していたが、038 は状態管理・通知基盤
-`status_notification_design.md` が先に使用したため、実装では **039** が割り当てられた）
+## 5. DB（migration 039。設計時点では 038 を想定していた）
+
+> **訂正注記（2026-08-13）:** 上記の「038 を想定していた」の**理由説明**（先に状態管理・
+> 通知基盤が 038 を使ったため入れ替わった、という趣旨の記述）は、
+> `status_notification_design.md` 冒頭の同種の記述と因果が逆向きで相互に矛盾していた。
+> 事実として確認できるのは**設計時の想定番号と実装番号が入れ替わった**ことのみで、
+> どちらが先に採番したかは追跡できない。**一次情報は `backend/db/` の実ファイル名**
+> （`039_assistant_step_dismissals.sql` = 本層 / `038_status_events_notifications.sql` =
+> 状態管理・通知基盤）で、最終番号自体は両設計書とも正しい。設計書には想定番号を
+> 書かない運用が望ましい（`docs/architecture/doc_review_findings_2026-08-13.md` 7-4）。
 
 ```sql
 CREATE TABLE IF NOT EXISTS assistant_step_dismissals (

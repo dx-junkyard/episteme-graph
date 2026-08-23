@@ -19,10 +19,23 @@ from sqlalchemy import text as sa_text
 from core.doubt.load_calculator import load_percentiles
 from core.doubt.naive_signal import has_naive_signal
 from core.doubt.schema import load_level_for_score, scope_coverage_level
+from core.doubt.support_paths import build_support_context, compute_support_lines_from_context
 
 logger = logging.getLogger(__name__)
 
 _LOW_VERIFICATION_STATUSES = ("untested", "unknown")
+
+# SL-4: 反証条件群からの到達可能性の要約（最良値。reachable > next_generation >
+# unreachable > unassessed。条件なしは呼び出し側で "" のまま返す）。
+_REACHABILITY_PRIORITY = {"reachable": 0, "next_generation": 1, "unreachable": 2, "unassessed": 3}
+
+
+def _falsification_reachability_summary(conditions: list[dict]) -> str:
+    """not_formulable を除いた条件群の最良到達可能性（SL-4, §6.1）。"""
+    candidates = [str(c.get("reachability") or "unassessed") for c in conditions if isinstance(c, dict)]
+    if not candidates:
+        return ""
+    return min(candidates, key=lambda r: _REACHABILITY_PRIORITY.get(r, 99))
 
 
 def _challenge_count_label(count: int) -> str:
@@ -102,24 +115,43 @@ def compile_open_assumptions(
     session,
     course_id: str,
     include_challenger_names: bool = False,
+    document_id: str = "",
 ) -> list[dict]:
     """未検証合意リストを台帳から編纂する（読み取り専用の投影）。
 
     include_challenger_names=False（学習者向け）では疑義者名を一切含めない。
     True（教員向け）でも名前は challenge 詳細参照用で、リスト自体には
     型と段階ラベルのみを載せる。
+
+    document_id（optional, seminar_brief_mirroring_design.md §3 精査④）:
+    指定時は台帳行を当該 document に絞る（SQL に AND 1条件を足すだけ）。
+    percentile は従来どおり **course 全体**で計算する — 「高」の意味
+    （コースの中での相対負荷）を document 絞り込みで変えないため。
+    既定（空文字）は従来挙動完全不変。
     """
+    document_id = str(document_id or "").strip()
     p50, p90, p99 = load_percentiles(session, course_id)
 
+    # SL-3: 独立支持経路の共有文脈を1度だけ構築し、対象ごとに再利用する
+    # （compute_support_lines を項目数分呼ぶとグラフを N 回再構築してしまう — 性能改善）。
+    support_ctx = build_support_context(session, course_id=course_id, document_id=document_id)
+
+    params: dict[str, Any] = {"course": course_id}
+    doc_filter = ""
+    if document_id:
+        doc_filter = "AND document_id = :doc"
+        params["doc"] = document_id
     rows = session.execute(
-        sa_text("""
+        sa_text(f"""
             SELECT target_id, target_type, verification_status,
-                   verification_scopes, consensus_behavioral, load_score
+                   verification_scopes, consensus_behavioral, load_score,
+                   falsification_conditions
             FROM epistemic_ledger
             WHERE course_id = :course
               AND load_score IS NOT NULL
+              {doc_filter}
         """),
-        {"course": course_id},
+        params,
     ).fetchall()
 
     items: list[dict] = []
@@ -137,6 +169,32 @@ def compile_open_assumptions(
         low_verification = status in _LOW_VERIFICATION_STATUSES or len(scopes) == 0
         if not low_verification:
             continue
+
+        # SL-1/SL-4: 反証条件の記帳状況（§6.1）。not_formulable は「定式化できない」という
+        # 人間の明示記帳であり、それ以外の記帳とは別に扱う（反証不可能の記帳 vs 未検討）。
+        falsification_conditions = row[6] if isinstance(row[6], list) else []
+        non_not_formulable = [
+            c for c in falsification_conditions
+            if isinstance(c, dict) and str(c.get("kind") or "") != "not_formulable"
+        ]
+        has_falsification_condition = bool(non_not_formulable)
+        falsification_not_formulable = (not has_falsification_condition) and any(
+            isinstance(c, dict) and str(c.get("kind") or "") == "not_formulable"
+            for c in falsification_conditions
+        )
+        reachability_summary = _falsification_reachability_summary(non_not_formulable)
+
+        # SL-3: 独立支持経路の段階（導出失敗は "" のまま — キーは常に返す）。
+        support_line_level = ""
+        try:
+            support_lines = compute_support_lines_from_context(support_ctx, target_type, target_id)
+            if support_lines:
+                support_line_level = str(support_lines.get("level") or "")
+        except Exception:  # noqa: BLE001
+            logger.debug(
+                "support line computation failed for %s/%s", target_type, target_id, exc_info=True
+            )
+            support_line_level = ""
 
         challenge_rows = session.execute(
             sa_text("""
@@ -178,6 +236,11 @@ def compile_open_assumptions(
                 if target_type in ("claim", "equation", "component")
                 else False
             ),
+            # SL-1/SL-3/SL-4: 覆る条件・到達可能性・支持線（すべて事実。数値は出さない）。
+            "has_falsification_condition": has_falsification_condition,
+            "falsification_not_formulable": falsification_not_formulable,
+            "reachability_summary": reachability_summary,
+            "support_line_level": support_line_level,
         }
         if include_challenger_names:
             item["challengers"] = sorted({str(r[3] or "") for r in challenge_rows if r[3]})

@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+from uuid import UUID
 
 from sqlalchemy import text as sa_text
 
@@ -69,16 +70,25 @@ def fetch_traces(user_id: str, course_id: str) -> list[dict]:
 
 
 def fetch_reconstructions(user_id: str, course_id: str) -> list[dict]:
-    """learner_reconstructions から本人・コースの行を読む。"""
+    """learner_reconstructions から本人・コースの行を読む（元 claim 本文つき）。
+
+    ``claim_text`` は ``theory_claims.text``（元 claim 本文）を LEFT JOIN で併読した
+    もので、``derive._reconstruction_node`` がノードのラベルに使う。join は
+    ``learner_reconstructions.claim_id``（migration 036 が集計用に非正規化して持つ列）
+    から直接張る — ``reconstruction_items`` を経由しないので、R層の**伏せフィールド**
+    （``response_space`` / ``expected``）に触れる経路をそもそも作らない。claim 行が
+    無い（削除済み等）ときは ``None``（呼び出し側が従来の固定ラベルへフォールバック）。
+    """
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, item_id, claim_id, machine_verdict, self_check,
-                       descended_to_symbol, revision_of, created_at
-                FROM learner_reconstructions
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                ORDER BY created_at, id
+                SELECT r.id, r.item_id, r.claim_id, r.machine_verdict, r.self_check,
+                       r.descended_to_symbol, r.revision_of, r.created_at, c.text
+                FROM learner_reconstructions r
+                LEFT JOIN theory_claims c ON c.id = r.claim_id
+                WHERE r.user_id = CAST(:user_id AS uuid) AND r.course_id = :course_id
+                ORDER BY r.created_at, r.id
             """),
             {"user_id": user_id, "course_id": course_id},
         ).fetchall()
@@ -94,6 +104,7 @@ def fetch_reconstructions(user_id: str, course_id: str) -> list[dict]:
             "descended_to_symbol": bool(r[5]),
             "revision_of": str(r[6]) if r[6] else None,
             "created_at": _to_iso(r[7]),
+            "claim_text": str(r[8]) if r[8] else None,
         }
         for r in rows
     ]
@@ -144,6 +155,121 @@ def _claim_topic_map_from_data(data: dict) -> dict[str, str]:
             if claim_id and claim_id not in mapping:
                 mapping[claim_id] = str(topic_id)
     return mapping
+
+
+def _topic_labels_from_data(data: dict) -> dict[str, str]:
+    """``topics[].title`` から {topic_id: トピック題名} を組み立てる。
+
+    「わたしの地図」の topic 縮退アンカー（``derive.py`` の ``_question_anchor`` /
+    ``_tension_anchor`` のフォールバック分岐）に付ける ``anchor_label`` の材料。読み方は
+    ``_claim_topic_map_from_data`` と同じ ``iter_all_topics`` 経由（フラット ``topics[]`` +
+    章ネスト ``chapters[].topics[]`` の両方を走査。``course_data.py`` への素の dict
+    アクセス禁止ルールに従い、正本アクセサのみを使う）。
+
+    ``id`` が無い topic と ``title`` が空（未設定・空白のみ）の topic はキーごと省く
+    （P4: 題名が引けないときは捏造せず、``anchor_label`` を空のままにする）。
+    """
+    labels: dict[str, str] = {}
+    for topic in iter_all_topics(data):
+        topic_id = topic.get("id")
+        if not topic_id:
+            continue
+        title = str(topic.get("title") or "").strip()
+        if title:
+            labels[str(topic_id)] = title
+    return labels
+
+
+def fetch_topic_labels(course_id: str) -> dict[str, str]:
+    """コースの {topic_id: トピック題名} を返す（題名未設定の topic はキーごと省く）。
+
+    ``derive.derive_personal_network`` が topic 縮退アンカーの ``anchor_label`` 解決に
+    使う（``fetch_topic_atlas_binding`` と同型の1 SELECT）。コースが無い場合は空 dict
+    （PN-7 fail-closed。題名が引けなければ ``anchor_label`` は空のまま）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {}
+    return _topic_labels_from_data(_payload_dict(row[0]))
+
+
+def fetch_topic_labels_for_courses(course_ids: list[str]) -> dict[str, dict[str, str]]:
+    """複数コースのトピック題名を1クエリで ``{course_id: {topic_id: title}}`` として返す。
+
+    ``fetch_topic_atlas_binding_for_courses`` / ``fetch_claim_topic_map_for_courses`` と
+    同型（本人スコープの導出はコースをまたいで束ねられるため、``fetch_topic_labels`` を
+    コース数だけ N 回呼ばない）。空リストは ``{}``、存在しないコースはキーごと欠落
+    （PN-7 fail-closed）。
+    """
+    ids = [str(c) for c in course_ids if c]
+    if not ids:
+        return {}
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":cid_{i}" for i in range(len(ids)))
+        rows = session.execute(
+            sa_text(f"SELECT id, data FROM learning_courses WHERE id IN ({placeholders})"),
+            {f"cid_{i}": course_id for i, course_id in enumerate(ids)},
+        ).fetchall()
+    finally:
+        session.close()
+    result: dict[str, dict[str, str]] = {}
+    for row in rows:
+        result[str(row[0])] = _topic_labels_from_data(_payload_dict(row[1]))
+    return result
+
+
+def _topic_claim_binding_from_data(data: dict, topic_id: str) -> dict:
+    """``data`` から1トピックの ``{claim_ids, topic_label}`` を組み立てる（範囲モード用）。
+
+    ``_claim_topic_map_from_data`` と同じ ``iter_all_topics`` 経由の読み方（フラット
+    ``topics[]`` + 章ネスト ``chapters[].topics[]`` の両方を走査。素の dict アクセス
+    禁止ルールに合わせ ``course_data.py`` の正本関数のみを使う）。``claim_ids`` は
+    ``linked_claim_ids`` の出現順・重複除去（最初の出現を残す）。見つからなければ
+    ``{"claim_ids": [], "topic_label": ""}``（P4: 欠落をエラーにしない）。
+    """
+    for topic in iter_all_topics(data):
+        if str(topic.get("id") or "") != str(topic_id):
+            continue
+        claim_ids: list[str] = []
+        seen: set[str] = set()
+        for claim_id in topic.get("linked_claim_ids") or []:
+            claim_id = str(claim_id)
+            if claim_id and claim_id not in seen:
+                seen.add(claim_id)
+                claim_ids.append(claim_id)
+        topic_label = str(topic.get("title") or "").strip()
+        return {"claim_ids": claim_ids, "topic_label": topic_label}
+    return {"claim_ids": [], "topic_label": ""}
+
+
+def fetch_topic_claim_binding(course_id: str, topic_id: str) -> dict:
+    """コースの1トピックについて ``{claim_ids: [...], topic_label: str}`` を返す。
+
+    近傍関係ビューの範囲モード（``nearby.py``、設計正本
+    ``docs/features/personal_map_nearby_design.md``）専用の読み。``topics[].
+    linked_claim_ids``（``course_content_builder.py`` が component 経由で決定論的に
+    書き込む既存フィールド）をそのまま読むだけで、AI 推定を一切行わない。コースが無い・
+    トピックが見つからない場合は ``{"claim_ids": [], "topic_label": ""}``（PN-7 fail-closed）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return {"claim_ids": [], "topic_label": ""}
+    return _topic_claim_binding_from_data(_payload_dict(row[0]), topic_id)
 
 
 def fetch_claim_topic_map(course_id: str) -> dict[str, str]:
@@ -215,20 +341,23 @@ def fetch_traces_for_user(user_id: str) -> list[dict]:
 
 
 def fetch_reconstructions_for_user(user_id: str) -> list[dict]:
-    """learner_reconstructions から本人の行を、コース条件なしで読む。
+    """learner_reconstructions から本人の行を、コース条件なしで読む（元 claim 本文つき）。
 
     ``fetch_reconstructions`` との差分は ``fetch_traces_for_user`` と同型
-    （course_id 条件を外し、返却 dict に ``course_id`` を追加するだけ）。
+    （course_id 条件を外し、返却 dict に ``course_id`` を追加するだけ）。``claim_text``
+    の由来と伏せフィールドを引かない理由は ``fetch_reconstructions`` の docstring 参照。
     """
     session = _pg_session()
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, item_id, claim_id, machine_verdict, self_check,
-                       descended_to_symbol, revision_of, created_at, course_id
-                FROM learner_reconstructions
-                WHERE user_id = CAST(:user_id AS uuid)
-                ORDER BY created_at, id
+                SELECT r.id, r.item_id, r.claim_id, r.machine_verdict, r.self_check,
+                       r.descended_to_symbol, r.revision_of, r.created_at, r.course_id,
+                       c.text
+                FROM learner_reconstructions r
+                LEFT JOIN theory_claims c ON c.id = r.claim_id
+                WHERE r.user_id = CAST(:user_id AS uuid)
+                ORDER BY r.created_at, r.id
             """),
             {"user_id": user_id},
         ).fetchall()
@@ -245,6 +374,7 @@ def fetch_reconstructions_for_user(user_id: str) -> list[dict]:
             "revision_of": str(r[6]) if r[6] else None,
             "created_at": _to_iso(r[7]),
             "course_id": str(r[8]) if r[8] is not None else "",
+            "claim_text": str(r[9]) if r[9] else None,
         }
         for r in rows
     ]
@@ -383,6 +513,97 @@ def fetch_claim_document_id(claim_id: str) -> str | None:
     finally:
         session.close()
     return str(row[0]) if row and row[0] else None
+
+
+def _is_uuid_text(value: str) -> bool:
+    """``value`` が UUID として解釈できるかを返す（``CAST(... AS uuid)`` 事故の予防）。
+
+    グラフ ``linked_claim_ids`` には DB UUID と agent 側 claim ID が混在しうる
+    （``core/document_pipeline/persistence.py`` は main ノードの claim 参照を
+    remap しない）。1件でも非 UUID が混ざったまま ``CAST`` すると SQL 全体が
+    落ちるため、UUID 相当のものだけを ``id IN (...)`` 側へ回す。
+    """
+    try:
+        UUID(str(value))
+    except Exception:
+        return False
+    return True
+
+
+def fetch_claim_summaries(
+    claim_ids: list[str], *, document_ids: list[str] | tuple[str, ...] = ()
+) -> dict[str, dict]:
+    """``theory_claims`` を ``{要求された claim_id: {text, support_status, review_status}}`` で返す。
+
+    近傍関係ビュー（``nearby.py``）がノードの代表 claim の**逐語**を出すための読み。
+    キーは**呼び出し側が渡した ID そのもの**で、DB UUID・``source_scope.span_id``・
+    ``source_scope.legacy_ids``（agent 側 atomic claim ID）のいずれかで突合する
+    （``api/routes/theory_components.py::_resolve_claim_reference_index`` と同じ
+    突合規則の鏡写し。グラフの ``linked_claim_ids`` は remap されないまま agent 側 ID を
+    保持しうるため、UUID だけで引くと逐語が一切出せない）。
+
+    ``document_ids`` を渡した場合は ``document_id IN (...)``（索引あり）で1回引き、
+    その中から突合する。``claim_ids`` の UUID 相当分は ``id IN (...)`` でも併せて拾う
+    （document が不明な経路のため）。**呼び出しは1回のクエリで完結する**（N+1 にしない）。
+
+    ``load_score`` 等の数値は読まない（PMN-4）。突合できない ID はキーごと欠落させる
+    （呼び出し側が ``claim_excerpt: null`` に倒す）。行が無い・テーブルが無い・
+    ID が不正などは空 dict へ倒す（PN-7 fail-closed）。
+    """
+    wanted = {str(c) for c in claim_ids if c}
+    if not wanted:
+        return {}
+    docs = [str(d) for d in document_ids if d]
+    uuid_ids = [c for c in sorted(wanted) if _is_uuid_text(c)]
+
+    clauses: list[str] = []
+    params: dict[str, str] = {}
+    if docs:
+        placeholders = ", ".join(f":doc_{i}" for i in range(len(docs)))
+        clauses.append(f"document_id IN ({placeholders})")
+        params.update({f"doc_{i}": doc_id for i, doc_id in enumerate(docs)})
+    if uuid_ids:
+        placeholders = ", ".join(f"CAST(:cid_{i} AS uuid)" for i in range(len(uuid_ids)))
+        clauses.append(f"id IN ({placeholders})")
+        params.update({f"cid_{i}": claim_id for i, claim_id in enumerate(uuid_ids)})
+    if not clauses:
+        return {}
+
+    session = _pg_session()
+    try:
+        try:
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT id::text, text, support_status, review_status, source_scope
+                    FROM theory_claims
+                    WHERE {" OR ".join(clauses)}
+                """),
+                params,
+            ).fetchall()
+        except Exception:
+            return {}
+    finally:
+        session.close()
+
+    summaries: dict[str, dict] = {}
+    for row in rows:
+        claim_uuid = str(row[0])
+        summary = {
+            "text": str(row[1] or ""),
+            "support_status": str(row[2] or ""),
+            "review_status": str(row[3] or ""),
+        }
+        keys = {claim_uuid}
+        scope = _payload_dict(row[4])
+        span_id = scope.get("span_id")
+        if span_id:
+            keys.add(str(span_id))
+        legacy_ids = scope.get("legacy_ids")
+        if isinstance(legacy_ids, list):
+            keys.update(str(v) for v in legacy_ids if v)
+        for key in keys & wanted:
+            summaries[key] = summary
+    return summaries
 
 
 def fetch_component_graph(document_id: str) -> dict:
@@ -566,3 +787,203 @@ def fetch_confirmed_links_for_shared_part(shared_part_id: str) -> list[dict]:
     except Exception:
         return []
     return [row for row in rows if row.get("status") == "confirmed"]
+
+
+def fetch_component_ledger_statuses(component_ids: list[str]) -> dict[str, str]:
+    """``epistemic_ledger`` の検証状態を ``component_id -> verification_status`` で返す。
+
+    近傍関係ビュー（``nearby.py``、設計書
+    ``docs/features/personal_map_nearby_design.md`` §3.3）専用の読み。キーは
+    ``target_type='component'`` / ``target_id = component_id`` で、
+    ``core/doubt/ledger_builder.py`` が TheoryOperationGraph の main 層ノードについて
+    作る行と同一（同じキーを別解釈しない）。
+
+    **``load_score`` は読まない**（PMN-4: 数値を返さない）。台帳行が無い component は
+    キーごと欠落させる（呼び出し側が ``verification: null`` に倒す）。行が無い・
+    テーブルが無い等は空 dict へ倒す（PN-7 fail-closed）。
+    """
+    ids = [str(c) for c in component_ids if c]
+    if not ids:
+        return {}
+    session = _pg_session()
+    try:
+        placeholders = ", ".join(f":cid_{i}" for i in range(len(ids)))
+        try:
+            rows = session.execute(
+                sa_text(f"""
+                    SELECT target_id, verification_status
+                    FROM epistemic_ledger
+                    WHERE target_type = 'component' AND target_id IN ({placeholders})
+                """),
+                {f"cid_{i}": cid for i, cid in enumerate(ids)},
+            ).fetchall()
+        except Exception:
+            return {}
+    finally:
+        session.close()
+    return {str(r[0]): str(r[1] or "") for r in rows if r and r[0]}
+
+
+def fetch_center_support_fact_line(
+    component_id: str, *, document_id: str = "", course_id: str = ""
+) -> str:
+    """中心ノード1件の独立支持経路の**事実文だけ**を返す（無ければ空文字）。
+
+    実体は ``core/doubt/support_paths.py``（SL-3）。``level`` / ``cut_members`` /
+    ``observation_roots`` は返さない（PMN-4。``fact_line`` は既存の学習者向け台帳 API
+    が既に学習者へ出している文言と同一なので、そのまま出せる）。
+
+    最大流の計算は中心1件のみに使う（上流・下流の全ノードには回さない — 設計書 §3.4）。
+    計算不能・グラフ不在・例外はすべて空文字へ倒す（PN-7 fail-closed）。
+    """
+    if not component_id:
+        return ""
+    # 遅延 import: core.doubt は core.personal_graph の必須依存にしない（台帳未導入でも動く）
+    from core.doubt.support_paths import (
+        build_support_context,
+        compute_support_lines_from_context,
+    )
+
+    session = _pg_session()
+    try:
+        try:
+            ctx = build_support_context(
+                session, course_id=str(course_id or ""), document_id=str(document_id or "")
+            )
+            result = compute_support_lines_from_context(ctx, "component", str(component_id))
+        except Exception:
+            return ""
+    finally:
+        session.close()
+    if not isinstance(result, dict):
+        return ""
+    return str(result.get("fact_line") or "")
+
+
+# ---------------------------------------------------------------------------
+# 「広がりの装置」（好奇心の情報設計）向けの読み取りプリミティブ。
+# 設計正本は ``docs/features/personal_map_nearby_design.md``。
+# ---------------------------------------------------------------------------
+
+
+def fetch_course_cartridge_id(course_id: str) -> str:
+    """コースの**明示** cartridge_id を返す（無ければ ``""``）。
+
+    ``core.course_data.course_cartridge_id`` を経由するだけで、解析 run 由来の
+    **導出**（``core.atlas_state.resolve_course_cartridge``）にはフォールバックしない。
+    範囲ビューの分野接続行（装置4）・「名前のある霧」（装置1, ``atlas_fog.py``）が、
+    無関係な既定カートリッジの骨格へ誤接続しないための意図的な制約
+    （``core/course_data.py`` の素の dict アクセス禁止ルールに従い、読みは
+    ``course_cartridge_id`` アクセサ経由のみ）。
+    """
+    # 遅延 import: 本ファイル冒頭の import 群を軽く保つ（他アクセサと同じ流儀を踏襲しつつ、
+    # 新規ヘルパー限定の依存として分離する）。
+    from core.course_data import course_cartridge_id
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT data FROM learning_courses WHERE id = :course_id"),
+            {"course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not row:
+        return ""
+    return course_cartridge_id(_payload_dict(row[0]))
+
+
+def fetch_atlas_concept_context(cartridge_id: str, atlas_node_id: str) -> dict | None:
+    """凍結骨格から1概念の文脈（所属領域・骨格エッジの隣接概念・同領域の他概念）を読む。
+
+    「名前のある霧」（``atlas_fog.py``、装置1）と範囲ビューの分野接続行
+    （``nearby.build_topic_range``、装置4）が共用する骨格読みの単一集約点。
+
+    読むのは ``atlas_store.load_learner_skeleton``（**凍結版のみ**を返す既存正本）
+    経由のみ — draft を読む経路は作らない。概念が骨格中に見つからない・骨格が無い・
+    import/実行時の例外はすべて ``None`` へ倒す（fail-soft。呼び出し側は事実文を
+    出さないだけに留め、異常として演出しない）。
+
+    戻り値（見つかった場合）::
+
+        {
+            "concept_id": str, "concept_label": str,
+            "region_id": str, "region_label": str,
+            "edge_neighbor_ids": [str, ...],
+            "sibling_concepts": [{"id": str, "label": str}, ...],
+            "edge_neighbors": [{"id": str, "label": str, "region_label": str}, ...],
+        }
+
+    ``edge_neighbor_ids`` は骨格エッジで直接つながる概念 ID の全量（順序は骨格の
+    エッジ出現順・重複除去）。``edge_neighbors`` はそのうち骨格中に実在が確認できた
+    ものだけを label/region_label 付きで列挙する（存在しない ID への言及はしない）。
+    座標・件数・seed_status 等の数値は一切含めない。
+    """
+    cartridge_id = str(cartridge_id or "").strip()
+    atlas_node_id = str(atlas_node_id or "").strip()
+    if not cartridge_id or not atlas_node_id:
+        return None
+    try:
+        # 遅延 import（core.doubt と同じ流儀）: atlas_store は core.personal_graph の
+        # 必須依存にしない。
+        from core.atlas_store import load_learner_skeleton
+    except Exception:
+        return None
+    try:
+        skeleton = load_learner_skeleton(cartridge_id)
+    except Exception:
+        return None
+    if skeleton is None:
+        return None
+
+    concept_index: dict[str, tuple] = {}
+    for region in skeleton.regions:
+        for concept in region.concepts:
+            concept_index[str(concept.id)] = (region, concept)
+
+    hit = concept_index.get(atlas_node_id)
+    if hit is None:
+        return None
+    region, concept = hit
+
+    neighbor_ids: list[str] = []
+    for edge in skeleton.edges:
+        from_id = str(edge.from_id)
+        to_id = str(edge.to_id)
+        other = None
+        if from_id == atlas_node_id and to_id != atlas_node_id:
+            other = to_id
+        elif to_id == atlas_node_id and from_id != atlas_node_id:
+            other = from_id
+        if other and other not in neighbor_ids:
+            neighbor_ids.append(other)
+
+    edge_neighbors: list[dict] = []
+    for neighbor_id in neighbor_ids:
+        neighbor_hit = concept_index.get(neighbor_id)
+        if neighbor_hit is None:
+            continue
+        neighbor_region, neighbor_concept = neighbor_hit
+        edge_neighbors.append(
+            {
+                "id": neighbor_id,
+                "label": str(neighbor_concept.label or ""),
+                "region_label": str(neighbor_region.label or ""),
+            }
+        )
+
+    sibling_concepts = [
+        {"id": str(c.id), "label": str(c.label or "")}
+        for c in region.concepts
+        if str(c.id) != atlas_node_id
+    ]
+
+    return {
+        "concept_id": str(concept.id),
+        "concept_label": str(concept.label or ""),
+        "region_id": str(region.id),
+        "region_label": str(region.label or ""),
+        "edge_neighbor_ids": neighbor_ids,
+        "sibling_concepts": sibling_concepts,
+        "edge_neighbors": edge_neighbors,
+    }

@@ -33,19 +33,28 @@ from dependencies import _get_current_user, _require_system_admin, _require_teac
 from core.doubt.assumption_mining.corpus_audit import run_corpus_audit
 from core.doubt.assumption_mining.worker import maybe_schedule_assumption_mining
 from core.doubt.counterfactual import compute_counterfactual, snapshot_subgraphs
+from core.doubt.falsification_conditions.worker import maybe_schedule_falsification_candidates
 from core.doubt.load_calculator import load_percentiles, recompute_load_scores
 from core.doubt.metrics import collect_doubt_metrics
 from core.doubt.naive_signal import aggregate_naive_signals, has_naive_signal
+from core.doubt.observation_targets import observation_claim_targets
 from core.doubt.open_assumptions import compile_open_assumptions, target_label
 from core.doubt.schema import (
     ChallengeStatus,
     ChallengeType,
+    FALSIFICATION_KIND_LABELS,
+    FALSIFICATION_KINDS,
+    ProposalStatus,
+    REACHABILITY_LABELS,
+    REACHABILITY_LEVELS,
     TargetType,
     VerificationStatus,
     load_level_for_score,
     scope_coverage_level,
 )
 from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
+from core.doubt.support_paths import compute_support_lines
+from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
 from core.postgres import get_session as _pg_session
 from core.status import cross_layer_notify
 from core.schema import (
@@ -70,13 +79,22 @@ _CHALLENGE_TARGET_TYPES = ("assumption", "claim")
 _CHALLENGE_TYPES = tuple(t.value for t in ChallengeType)
 _SHARED_SCOPES = ("private", "group", "public")
 
-_VERIFICATION_STATUS_LABELS = {
-    "directly_verified": "直接検証の記帳あり",
-    "indirectly_supported": "間接的な支持あり",
-    "untested": "未検証",
-    "refuted": "反証の記帳あり",
-    "unknown": "検証情報なし",
+# SL層（賭け金の台帳）— proposal ステータス遷移の許可集合（前進 + 任意時点から withdrawn）。
+_PROPOSAL_STATUSES = tuple(s.value for s in ProposalStatus)
+_PROPOSAL_ALLOWED_TRANSITIONS = {
+    ("proposed", "in_progress"),
+    ("in_progress", "completed"),
+    ("proposed", "withdrawn"),
+    ("in_progress", "withdrawn"),
+    ("completed", "withdrawn"),
 }
+
+# SL-2: 観測の反実仮想の Duhem 区別（記帳のみ・伝播アルゴリズムには影響しない）。
+_OBSERVATION_ASPECTS = ("value", "systematics")
+
+# 訳語の正本は core/label_vocab.py。W層 位置づけレンズ（core/deliberation/
+# positioning.py）は同じキーで短い状態名を使う（意図された宛先差 — 統合しない）。
+_VERIFICATION_STATUS_LABELS = VERIFICATION_STATUS_LABELS_LEDGER
 
 
 # ---------------------------------------------------------------------------
@@ -131,12 +149,14 @@ def _jsonb_dict(value: Any) -> dict:
 
 
 def _fetch_ledger_row(session, target_type: str, target_id: str):
+    # falsification_conditions（row[13]）/ falsification_candidates（row[14]）は
+    # SL-1（賭け金の台帳）用に末尾へ追加（既存インデックス 0-12 は不変）。
     return session.execute(
         sa_text("""
             SELECT id::text, target_id, target_type, document_id, course_id,
                    verification_status, verification_scopes, scope_candidates,
                    consensus_explicit, consensus_behavioral, load_score,
-                   created_at, updated_at
+                   created_at, updated_at, falsification_conditions, falsification_candidates
             FROM epistemic_ledger
             WHERE target_id = :tid AND target_type = :ttype
         """),
@@ -188,6 +208,63 @@ def _candidate_out(candidate: dict) -> dict:
         "reason": str(candidate.get("reason") or ""),
         "status": str(candidate.get("status") or "candidate"),
     }
+
+
+def _falsification_condition_out(condition: dict) -> dict:
+    """反証条件（確定・SL-1）の API 表現。実 JSONB と同じ形（confidence を元々持たない）。"""
+    return {
+        "condition_id": str(condition.get("condition_id") or ""),
+        "statement": str(condition.get("statement") or ""),
+        "kind": str(condition.get("kind") or ""),
+        "reachability": str(condition.get("reachability") or "unassessed"),
+        "evidence_ids": [str(e) for e in condition.get("evidence_ids") or []],
+        "evidence_quote": str(condition.get("evidence_quote") or ""),
+        "recorded_by": str(condition.get("recorded_by") or ""),
+        "reason": str(condition.get("reason") or ""),
+        "recorded_at": str(condition.get("recorded_at") or ""),
+        "from_candidate_id": str(condition.get("from_candidate_id") or ""),
+    }
+
+
+def _falsification_candidate_out(candidate: dict) -> dict:
+    """LLM 反証条件候補の API 表現。生の確度スコアは返さない（SL4）。"""
+    return {
+        "candidate_id": str(candidate.get("candidate_id") or ""),
+        "statement": str(candidate.get("statement") or ""),
+        "kind": str(candidate.get("kind") or ""),
+        "evidence_quote": str(candidate.get("evidence_quote") or ""),
+        "reason": str(candidate.get("reason") or ""),
+        "status": str(candidate.get("status") or "candidate"),
+    }
+
+
+def _validate_falsification_condition_fields(
+    statement: str,
+    kind: str,
+    reason: str,
+    evidence_ids: list[str],
+    evidence_quote: str,
+    reachability: str,
+) -> None:
+    """反証条件（手動記帳 / 候補確定 / 訂正）に共通する必須項目の検証（SL-1）。
+
+    kind='not_formulable'（人間専用の「定式化できない」記帳）は根拠を要求しない
+    （§3.2: これにより反証不可能（記帳あり）と未検討（空配列）が区別できる）。
+    """
+    if not statement.strip():
+        raise HTTPException(status_code=422, detail="statement が必要です")
+    if kind not in FALSIFICATION_KINDS:
+        raise HTTPException(status_code=422, detail=f"invalid kind: {kind}")
+    if not reason.strip():
+        raise HTTPException(status_code=422, detail="reason が必要です")
+    if kind != "not_formulable" and not evidence_ids and not evidence_quote.strip():
+        raise HTTPException(
+            status_code=422,
+            detail="根拠（evidence_ids または evidence_quote）が必要です"
+                   "（kind=not_formulable の記帳を除く）",
+        )
+    if reachability not in REACHABILITY_LEVELS:
+        raise HTTPException(status_code=422, detail=f"invalid reachability: {reachability}")
 
 
 def _endorsement_label(consensus_explicit: dict) -> str:
@@ -301,6 +378,26 @@ def get_ledger_entry(
         ]
         consensus_explicit = _jsonb_dict(row[8])
         course_id = str(row[4] or "")
+        document_id = str(row[3] or "")
+
+        falsification_conditions = [
+            _falsification_condition_out(c) for c in _jsonb_list(row[13]) if isinstance(c, dict)
+        ]
+        falsification_candidates = [
+            _falsification_candidate_out(c) for c in _jsonb_list(row[14])
+            if isinstance(c, dict) and str(c.get("status") or "candidate") == "candidate"
+        ]
+        # SL-3: 独立支持経路（数値非公開・導出失敗はキー自体を付けない fail-soft）。
+        support_lines = None
+        try:
+            support_lines = compute_support_lines(
+                session, target_type, target_id, course_id=course_id, document_id=document_id,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "support lines computation failed for %s/%s", target_type, target_id, exc_info=True
+            )
+            support_lines = None
 
         challenge_rows = session.execute(
             sa_text("""
@@ -345,6 +442,9 @@ def get_ledger_entry(
                 }
                 for c in challenge_rows
             ],
+            "falsification_conditions": falsification_conditions,
+            "falsification_candidates": falsification_candidates,
+            **({"support_lines": support_lines} if support_lines is not None else {}),
             "updated_at": str(row[12] or ""),
         }
     finally:
@@ -731,6 +831,343 @@ def refresh_scope_candidates(
     """スコープ候補の非同期リフレッシュ（P6: 同期パスに LLM を入れない）。"""
     maybe_schedule_scope_candidates(course_id=course_id)
     return {"ok": True, "scheduled": True}
+
+
+# ---------------------------------------------------------------------------
+# SL-1: 反証条件レジストリ（賭け金の台帳。verification_scopes の双対の別列, SL10）
+# ---------------------------------------------------------------------------
+
+
+class FalsificationConditionCreateRequest(BaseModel):
+    statement: str = ""
+    kind: str = ""
+    reason: str = ""
+    evidence_ids: list[str] = Field(default_factory=list)
+    evidence_quote: str = ""
+    reachability: str = "unassessed"
+
+
+class FalsificationConditionPatchRequest(BaseModel):
+    statement: str | None = None
+    kind: str | None = None
+    reason: str | None = None
+    evidence_ids: list[str] | None = None
+    evidence_quote: str | None = None
+    reachability: str | None = None
+
+
+class FalsificationCandidateConfirmRequest(BaseModel):
+    statement: str | None = None
+    kind: str | None = None
+    reason: str | None = None
+    evidence_quote: str | None = None
+    reachability: str | None = None
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/falsification-conditions")
+def add_falsification_condition(
+    target_type: str,
+    target_id: str,
+    body: FalsificationConditionCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """反証条件の手動記帳（人間専用の記帳先, SL-1/SL-3）。"""
+    _require_ledger_target_type(target_type)
+    _validate_falsification_condition_fields(
+        body.statement, body.kind, body.reason, body.evidence_ids, body.evidence_quote,
+        body.reachability,
+    )
+    condition = {
+        "condition_id": str(uuid.uuid4()),
+        "statement": body.statement.strip(),
+        "kind": body.kind,
+        "reachability": body.reachability,
+        "evidence_ids": [str(e) for e in body.evidence_ids],
+        "evidence_quote": body.evidence_quote.strip(),
+        "recorded_by": str(current_user.get("id") or ""),
+        "reason": body.reason.strip(),
+        "recorded_at": _now_iso(),
+        "from_candidate_id": "",
+    }
+    session = _pg_session()
+    try:
+        row = _get_or_create_ledger_row(session, target_type, target_id)
+        if row is None:
+            raise HTTPException(status_code=500, detail="Failed to create ledger entry")
+        session.execute(
+            sa_text("""
+                UPDATE epistemic_ledger
+                SET falsification_conditions = falsification_conditions || CAST(:cond AS jsonb),
+                    updated_at = now()
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {"cond": json.dumps([condition], ensure_ascii=False), "tid": target_id, "ttype": target_type},
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to add falsification condition for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="Failed to add falsification condition")
+    finally:
+        session.close()
+
+    _record_doubt_event(
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "", "falsification_added",
+        current_user.get("id"),
+        {"action": "falsification_add", "condition_id": condition["condition_id"], "reason": condition["reason"]},
+    )
+    return {"ok": True, "condition": _falsification_condition_out(condition)}
+
+
+@admin_router.patch("/ledger/{target_type}/{target_id}/falsification-conditions/{condition_id}")
+def patch_falsification_condition(
+    target_type: str,
+    target_id: str,
+    condition_id: str,
+    body: FalsificationConditionPatchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """反証条件の訂正（訂正後も必須項目を再検証する）。"""
+    _require_ledger_target_type(target_type)
+    session = _pg_session()
+    try:
+        row = _fetch_ledger_row(session, target_type, target_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        conditions = [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
+        target_condition = None
+        for condition in conditions:
+            if str(condition.get("condition_id") or "") == condition_id:
+                target_condition = condition
+                break
+        if target_condition is None:
+            raise HTTPException(status_code=404, detail="Falsification condition not found")
+
+        old_condition = dict(target_condition)
+        for field_name in ("statement", "kind", "reason", "evidence_quote", "reachability"):
+            value = getattr(body, field_name)
+            if value is not None:
+                target_condition[field_name] = str(value).strip()
+        if body.evidence_ids is not None:
+            target_condition["evidence_ids"] = [str(e) for e in body.evidence_ids]
+
+        _validate_falsification_condition_fields(
+            str(target_condition.get("statement") or ""),
+            str(target_condition.get("kind") or ""),
+            str(target_condition.get("reason") or ""),
+            list(target_condition.get("evidence_ids") or []),
+            str(target_condition.get("evidence_quote") or ""),
+            str(target_condition.get("reachability") or "unassessed"),
+        )
+
+        session.execute(
+            sa_text("""
+                UPDATE epistemic_ledger
+                SET falsification_conditions = CAST(:conditions AS jsonb), updated_at = now()
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {
+                "conditions": json.dumps(conditions, ensure_ascii=False),
+                "tid": target_id,
+                "ttype": target_type,
+            },
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to patch falsification condition for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="Failed to patch falsification condition")
+    finally:
+        session.close()
+
+    _record_doubt_event(
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "falsification_updated", "falsification_updated",
+        current_user.get("id"),
+        {"action": "falsification_patch", "condition_id": condition_id, "old": old_condition},
+    )
+    return {"ok": True, "condition": _falsification_condition_out(target_condition)}
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/falsification-candidates/{candidate_id}/confirm")
+def confirm_falsification_candidate(
+    target_type: str,
+    target_id: str,
+    candidate_id: str,
+    body: FalsificationCandidateConfirmRequest = Body(default=None),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """反証条件候補の確定。scope-candidates confirm（543行目）の完全な写し:
+    候補行自体は昇格せず status='confirmed' で保持し、教員の帰属で新規
+    :class:`FalsificationCondition` を発行する（確定なしに本体へ入らない構造, SL2/SL3）。
+    """
+    _require_ledger_target_type(target_type)
+    session = _pg_session()
+    try:
+        row = _fetch_ledger_row(session, target_type, target_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        candidates = [c for c in _jsonb_list(row[14]) if isinstance(c, dict)]
+        candidate = None
+        for item in candidates:
+            if str(item.get("candidate_id") or "") == candidate_id:
+                candidate = item
+                break
+        if candidate is None:
+            raise HTTPException(status_code=404, detail="Falsification candidate not found")
+        if str(candidate.get("status") or "candidate") != "candidate":
+            raise HTTPException(status_code=422, detail="この候補は既に処理済みです")
+
+        overrides = body or FalsificationCandidateConfirmRequest()
+        statement = (overrides.statement if overrides.statement is not None
+                     else str(candidate.get("statement") or "")).strip()
+        kind = (overrides.kind if overrides.kind is not None
+                else str(candidate.get("kind") or "")).strip()
+        reason = (overrides.reason if overrides.reason is not None
+                  else str(candidate.get("reason") or "")).strip()
+        evidence_quote = (overrides.evidence_quote if overrides.evidence_quote is not None
+                          else str(candidate.get("evidence_quote") or "")).strip()
+        # reachability は人間専用語彙（SL3）— 候補は持たないため、確定時に必ず人間が
+        # 選択する（未選択時は既定 unassessed）。
+        reachability = (overrides.reachability if overrides.reachability is not None
+                         else "unassessed").strip()
+
+        _validate_falsification_condition_fields(statement, kind, reason, [], evidence_quote, reachability)
+
+        condition = {
+            "condition_id": str(uuid.uuid4()),
+            "statement": statement,
+            "kind": kind,
+            "reachability": reachability,
+            "evidence_ids": [],
+            "evidence_quote": evidence_quote,
+            # 確定時に帰属は教員に付く（LLM ではなく人間の記帳になる, SL3）
+            "recorded_by": str(current_user.get("id") or ""),
+            "reason": reason,
+            "recorded_at": _now_iso(),
+            "from_candidate_id": candidate_id,
+        }
+        candidate["status"] = "confirmed"
+        candidate["confirmed_by"] = str(current_user.get("id") or "")
+        candidate["confirmed_at"] = _now_iso()
+        session.execute(
+            sa_text("""
+                UPDATE epistemic_ledger
+                SET falsification_conditions = falsification_conditions || CAST(:cond AS jsonb),
+                    falsification_candidates = CAST(:candidates AS jsonb),
+                    updated_at = now()
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {
+                "cond": json.dumps([condition], ensure_ascii=False),
+                "candidates": json.dumps(candidates, ensure_ascii=False),
+                "tid": target_id,
+                "ttype": target_type,
+            },
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to confirm falsification candidate for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="Failed to confirm falsification candidate")
+    finally:
+        session.close()
+
+    _record_doubt_event(
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "falsification_added",
+        current_user.get("id"),
+        {
+            "action": "falsification_candidate_confirm",
+            "candidate_id": candidate_id,
+            "condition_id": condition["condition_id"],
+        },
+    )
+    return {"ok": True, "condition": _falsification_condition_out(condition)}
+
+
+@admin_router.post("/ledger/{target_type}/{target_id}/falsification-candidates/{candidate_id}/dismiss")
+def dismiss_falsification_candidate(
+    target_type: str,
+    target_id: str,
+    candidate_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """反証条件候補の却下（P4: 行は dismissed で保持する）。"""
+    _require_ledger_target_type(target_type)
+    session = _pg_session()
+    try:
+        row = _fetch_ledger_row(session, target_type, target_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="Ledger entry not found")
+        candidates = [c for c in _jsonb_list(row[14]) if isinstance(c, dict)]
+        found = False
+        for candidate in candidates:
+            if str(candidate.get("candidate_id") or "") == candidate_id:
+                candidate["status"] = "dismissed"
+                candidate["dismissed_by"] = str(current_user.get("id") or "")
+                candidate["dismissed_at"] = _now_iso()
+                found = True
+                break
+        if not found:
+            raise HTTPException(status_code=404, detail="Falsification candidate not found")
+        session.execute(
+            sa_text("""
+                UPDATE epistemic_ledger
+                SET falsification_candidates = CAST(:candidates AS jsonb), updated_at = now()
+                WHERE target_id = :tid AND target_type = :ttype
+            """),
+            {"candidates": json.dumps(candidates, ensure_ascii=False), "tid": target_id, "ttype": target_type},
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to dismiss falsification candidate for %s/%s", target_type, target_id)
+        raise HTTPException(status_code=500, detail="Failed to dismiss falsification candidate")
+    finally:
+        session.close()
+
+    _record_doubt_event(
+        AUDIT_ENTITY_LEDGER, f"{target_type}:{target_id}", "candidate", "dismissed",
+        current_user.get("id"),
+        {"action": "falsification_candidate_dismiss", "candidate_id": candidate_id},
+    )
+    return {"ok": True, "candidate_id": candidate_id, "status": "dismissed"}
+
+
+@admin_router.post("/courses/{course_id}/falsification-candidates/refresh")
+def refresh_falsification_candidates(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """反証条件候補の非同期リフレッシュ（P6: 同期パスに LLM を入れない）。"""
+    maybe_schedule_falsification_candidates(course_id=course_id)
+    return {"ok": True, "scheduled": True}
+
+
+# ---------------------------------------------------------------------------
+# SL-2: 観測の反実仮想 — 観測系 claim の一覧（多段同定, 非LLM）
+# ---------------------------------------------------------------------------
+
+
+@admin_router.get("/courses/{course_id}/observation-targets")
+def get_observation_targets(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """観測系 claim の一覧（「観測を仮に倒す」の選択肢。identified_via 併記・数値なし）。"""
+    session = _pg_session()
+    try:
+        targets = observation_claim_targets(session, course_id=course_id)
+        return {"targets": targets}
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1706,15 @@ def withdraw_challenge(
 
 class ProposalCreateRequest(BaseModel):
     proposal: str
+    # SL-8: 「コーパス外の文献を確認した」旨の人間の記帳（自由記述・非空）。晴れ間は
+    # まずコーパスの穴であり、それが空の穴であることを人間が確かめたあとにだけ立つ。
+    external_check: str = ""
+    reachability: str = "unassessed"
+
+
+class ProposalPatchRequest(BaseModel):
+    status: str | None = None
+    reachability: str | None = None
 
 
 @admin_router.post("/challenges/{challenge_id}/proposals")
@@ -1277,25 +1723,52 @@ def create_verification_proposal(
     body: ProposalCreateRequest,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """疑義 → 「この実験・この計算で検証可能」への昇格。"""
+    """疑義 → 「この実験・この計算で検証可能」への昇格。
+
+    SL-8: コーパス外の文献確認の記帳（external_check）を必須化。取り下げ済み
+    （withdrawn）の疑義からの昇格は記帳整合性バグとして 422 に是正する（§6.2）。
+    """
     if not body.proposal.strip():
         raise HTTPException(status_code=422, detail="proposal が必要です")
+    if not body.external_check.strip():
+        raise HTTPException(status_code=422, detail="コーパス外の文献確認の記録が必要です")
+    reachability = str(body.reachability or "unassessed").strip()
+    if reachability not in REACHABILITY_LEVELS:
+        raise HTTPException(status_code=422, detail=f"invalid reachability: {reachability}")
+
     session = _pg_session()
     try:
         row = session.execute(
-            sa_text("SELECT status FROM challenges WHERE id::text = :cid"),
+            sa_text("SELECT status, course_id FROM challenges WHERE id::text = :cid"),
             {"cid": challenge_id},
         ).fetchone()
         if row is None:
             raise HTTPException(status_code=404, detail="Challenge not found")
         old_status = str(row[0] or "open")
+        if old_status == ChallengeStatus.WITHDRAWN.value:
+            raise HTTPException(
+                status_code=422,
+                detail="取り下げ済みの疑義から検証提案へ昇格することはできません",
+            )
+        course_id = str(row[1] or "")
         proposal_row = session.execute(
             sa_text("""
-                INSERT INTO verification_proposals (challenge_id, proposal, proposer_id)
-                VALUES (CAST(:cid AS uuid), :proposal, CAST(:uid AS uuid))
+                INSERT INTO verification_proposals
+                    (challenge_id, proposal, proposer_id, course_id, reachability,
+                     external_check, external_checked_by)
+                VALUES
+                    (CAST(:cid AS uuid), :proposal, CAST(:uid AS uuid), :course, :reachability,
+                     :external_check, CAST(:uid AS uuid))
                 RETURNING id
             """),
-            {"cid": challenge_id, "proposal": body.proposal.strip(), "uid": current_user.get("id")},
+            {
+                "cid": challenge_id,
+                "proposal": body.proposal.strip(),
+                "uid": current_user.get("id"),
+                "course": course_id,
+                "reachability": reachability,
+                "external_check": body.external_check.strip(),
+            },
         ).fetchone()
         # 元 challenge を led_to_verification に遷移（双方向参照）
         session.execute(
@@ -1327,6 +1800,74 @@ def create_verification_proposal(
     return {"ok": True, "proposal_id": proposal_id, "challenge_status": "led_to_verification"}
 
 
+@admin_router.patch("/proposals/{proposal_id}")
+def patch_verification_proposal(
+    proposal_id: str,
+    body: ProposalPatchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """検証提案のステータス遷移（proposed→in_progress→completed の前進 +
+    任意時点から withdrawn）+ reachability の更新（§6.2、§2-8 の既存欠落を埋める）。
+    """
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT status FROM verification_proposals WHERE id::text = :pid"),
+            {"pid": proposal_id},
+        ).fetchone()
+        if row is None:
+            raise HTTPException(status_code=404, detail="Verification proposal not found")
+        old_status = str(row[0] or ProposalStatus.PROPOSED.value)
+        new_status = old_status
+
+        updates = []
+        params: dict[str, Any] = {"pid": proposal_id}
+        if body.status is not None:
+            new_status = str(body.status).strip()
+            if new_status not in _PROPOSAL_STATUSES:
+                raise HTTPException(status_code=422, detail=f"invalid status: {new_status}")
+            if (old_status, new_status) not in _PROPOSAL_ALLOWED_TRANSITIONS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"invalid status transition: {old_status} -> {new_status}",
+                )
+            updates.append("status = :status")
+            params["status"] = new_status
+        if body.reachability is not None:
+            reachability = str(body.reachability).strip()
+            if reachability not in REACHABILITY_LEVELS:
+                raise HTTPException(status_code=422, detail=f"invalid reachability: {reachability}")
+            updates.append("reachability = :reachability")
+            params["reachability"] = reachability
+
+        if not updates:
+            return {"ok": True, "proposal_id": proposal_id, "status": old_status}
+
+        session.execute(
+            sa_text(
+                f"UPDATE verification_proposals SET {', '.join(updates)}, updated_at = now() "
+                f"WHERE id::text = :pid"
+            ),
+            params,
+        )
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to patch verification proposal %s", proposal_id)
+        raise HTTPException(status_code=500, detail="Failed to patch verification proposal")
+    finally:
+        session.close()
+
+    if body.status is not None:
+        _record_doubt_event(
+            AUDIT_ENTITY_VERIFICATION_PROPOSAL, proposal_id, old_status, new_status,
+            current_user.get("id"), {"action": "status_transition"},
+        )
+    return {"ok": True, "proposal_id": proposal_id, "status": new_status}
+
+
 @admin_router.get("/courses/{course_id}/open-assumptions")
 def get_open_assumptions(
     course_id: str,
@@ -1346,8 +1887,17 @@ def get_open_assumptions(
 # ---------------------------------------------------------------------------
 
 
+class ToggledObservation(BaseModel):
+    """SL-2: 「観測を仮に倒す」の1件。aspect は Duhem 区別（記帳のみ・伝播に影響しない）。"""
+
+    claim_id: str
+    aspect: str = "value"
+
+
 class CounterfactualComputeRequest(BaseModel):
     toggled_assumption_ids: list[str] = Field(default_factory=list)
+    # SL-2: 観測系 claim を仮に倒す（observation_targets から選択）。前提トグルと併用可。
+    toggled_observations: list[ToggledObservation] = Field(default_factory=list)
     course_id: str = ""
     document_id: str = ""
 
@@ -1364,19 +1914,50 @@ class CounterfactualSessionPatchRequest(BaseModel):
     group_id: str | None = None
 
 
+def _observation_claim_ids(observations: list) -> list[str]:
+    """SL-2: toggled_observations の aspect 語彙を検証し claim_id 列を返す（伝播非改変）。
+
+    aspect（value/systematics）は Duhem 区別の記帳のみで、伝播計算には影響しない
+    （観測値を疑うのも較正モデルを疑うのも、依存範囲の計算上は同じ seed, §4.2）。
+    """
+    ids: list[str] = []
+    for obs in observations:
+        aspect = str(obs.aspect or "").strip()
+        if aspect not in _OBSERVATION_ASPECTS:
+            raise HTTPException(status_code=422, detail=f"invalid aspect: {aspect}")
+        claim_id = str(obs.claim_id or "").strip()
+        if claim_id:
+            ids.append(claim_id)
+    return ids
+
+
+def _require_at_least_one_toggle(assumption_ids: list[str], observations: list) -> None:
+    """既存の「toggled_assumption_ids 空 → 422」を「両方空 → 422」に緩和（§4.2）。"""
+    if not assumption_ids and not observations:
+        raise HTTPException(
+            status_code=422,
+            detail="toggled_assumption_ids または toggled_observations のいずれかが必要です",
+        )
+
+
 @admin_router.post("/counterfactual/compute")
 def compute_counterfactual_route(
     body: CounterfactualComputeRequest,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """保存なしの試算。決定論的（同入力同出力）。再構築は計算しない。"""
-    if not body.toggled_assumption_ids:
-        raise HTTPException(status_code=422, detail="toggled_assumption_ids が必要です")
+    """保存なしの試算。決定論的（同入力同出力）。再構築は計算しない。
+
+    SL-2: toggled_observations（観測系 claim）は toggled_assumption_ids と結合して
+    そのまま compute_counterfactual に渡す（seed 解決の既存 fallback が claim id を
+    受けられるため、伝播アルゴリズムに変更なし, §4.2）。
+    """
+    _require_at_least_one_toggle(body.toggled_assumption_ids, body.toggled_observations)
+    observation_claim_ids = _observation_claim_ids(body.toggled_observations)
     session = _pg_session()
     try:
         return compute_counterfactual(
             session,
-            toggled_assumption_ids=[str(a) for a in body.toggled_assumption_ids],
+            toggled_assumption_ids=[str(a) for a in body.toggled_assumption_ids] + observation_claim_ids,
             course_id=body.course_id or "",
             document_id=body.document_id or "",
         )
@@ -1390,8 +1971,8 @@ def save_counterfactual_session(
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """反実仮想セッションの保存（スナップショット）。既定は private。"""
-    if not body.toggled_assumption_ids:
-        raise HTTPException(status_code=422, detail="toggled_assumption_ids が必要です")
+    _require_at_least_one_toggle(body.toggled_assumption_ids, body.toggled_observations)
+    observation_claim_ids = _observation_claim_ids(body.toggled_observations)
     if body.shared_scope not in _SHARED_SCOPES:
         raise HTTPException(status_code=422, detail=f"invalid shared_scope: {body.shared_scope}")
     if body.shared_scope == "group" and not body.group_id:
@@ -1401,19 +1982,26 @@ def save_counterfactual_session(
     try:
         payload = compute_counterfactual(
             session,
-            toggled_assumption_ids=[str(a) for a in body.toggled_assumption_ids],
+            toggled_assumption_ids=[str(a) for a in body.toggled_assumption_ids] + observation_claim_ids,
             course_id=body.course_id or "",
             document_id=body.document_id or "",
         )
         collapsed, surviving, indeterminate = snapshot_subgraphs(payload)
+        toggled_observations_json = json.dumps(
+            [{"claim_id": str(o.claim_id or ""), "aspect": str(o.aspect or "value")}
+             for o in body.toggled_observations],
+            ensure_ascii=False,
+        )
         row = session.execute(
             sa_text("""
                 INSERT INTO counterfactual_sessions
                     (owner_id, course_id, document_id, toggled_assumption_ids,
+                     toggled_observations,
                      collapsed_subgraph, surviving_subgraph, indeterminate_subgraph,
                      notes, shared_scope, group_id)
                 VALUES
                     (CAST(:uid AS uuid), :course, :doc, CAST(:toggled AS jsonb),
+                     CAST(:toggled_obs AS jsonb),
                      CAST(:collapsed AS jsonb), CAST(:surviving AS jsonb),
                      CAST(:indeterminate AS jsonb),
                      :notes, :scope, CAST(NULLIF(:gid, '') AS uuid))
@@ -1424,6 +2012,7 @@ def save_counterfactual_session(
                 "course": body.course_id or "",
                 "doc": body.document_id or "",
                 "toggled": json.dumps([str(a) for a in body.toggled_assumption_ids], ensure_ascii=False),
+                "toggled_obs": toggled_observations_json,
                 "collapsed": collapsed,
                 "surviving": surviving,
                 "indeterminate": indeterminate,
@@ -1446,7 +2035,11 @@ def save_counterfactual_session(
     _record_doubt_event(
         AUDIT_ENTITY_COUNTERFACTUAL_SESSION, session_id, "", body.shared_scope,
         current_user.get("id"),
-        {"action": "create", "toggled_count": len(body.toggled_assumption_ids)},
+        {
+            "action": "create",
+            "toggled_count": len(body.toggled_assumption_ids),
+            "toggled_observation_count": len(body.toggled_observations),
+        },
     )
     return {"ok": True, "session_id": session_id, "result": payload}
 
@@ -1466,6 +2059,9 @@ def _counterfactual_session_out(row) -> dict:
         "shared_scope": str(row[10] or "private"),
         "group_id": str(row[11] or ""),
         "created_at": str(row[12] or ""),
+        # SL-2: 観測トグルの記録（P4: 情報を落とさない。row[13] は末尾追加のため既存
+        # インデックス 0-12 は不変）。
+        "toggled_observations": _jsonb_list(row[13]),
     }
 
 
@@ -1473,7 +2069,8 @@ _CF_SELECT = """
     SELECT s.id::text, s.owner_id::text, COALESCE(u.display_name, ''),
            s.course_id, s.document_id, s.toggled_assumption_ids,
            s.collapsed_subgraph, s.surviving_subgraph, s.indeterminate_subgraph,
-           s.notes, s.shared_scope, COALESCE(s.group_id::text, ''), s.created_at::text
+           s.notes, s.shared_scope, COALESCE(s.group_id::text, ''), s.created_at::text,
+           s.toggled_observations
     FROM counterfactual_sessions s
     LEFT JOIN users u ON u.id = s.owner_id
 """
@@ -1608,6 +2205,23 @@ def _learner_fact_line(target_type: str, status: str, scopes: list[dict]) -> str
     return "この内容の検証スコープはまだ記帳されていません。"
 
 
+def _learner_falsification_conditions(conditions: list[dict]) -> list[dict]:
+    """SL-1 の学習者向け投影。事実文のみ（記帳者情報・根拠の生データ等は落とす, §8）。"""
+    result = []
+    for condition in conditions:
+        if not isinstance(condition, dict):
+            continue
+        kind = str(condition.get("kind") or "")
+        reachability = str(condition.get("reachability") or "unassessed")
+        result.append({
+            "statement": str(condition.get("statement") or ""),
+            "kind_label": FALSIFICATION_KIND_LABELS.get(kind, kind),
+            "reachability_label": REACHABILITY_LABELS.get(reachability, reachability),
+            "source_label": "教員の記帳",
+        })
+    return result
+
+
 @learning_router.get("/courses/{course_id}/ledger/{target_type}/{target_id}")
 def get_learner_ledger_line(
     course_id: str,
@@ -1636,6 +2250,24 @@ def get_learner_ledger_line(
             {k: v for k, v in scope.items() if k in ("condition", "domain", "precision", "system")}
             for scope in scopes
         ]
+        falsification_conditions = _learner_falsification_conditions(
+            [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
+        )
+        # SL-3: 支持線は事実文のみ（内部の構成要素の列挙・記帳者情報は出さない）。
+        support_fact_line = ""
+        try:
+            support_lines = compute_support_lines(
+                session, target_type, target_id,
+                course_id=str(row[4] or ""), document_id=str(row[3] or ""),
+            )
+            if support_lines:
+                support_fact_line = str(support_lines.get("fact_line") or "")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "learner support lines computation failed for %s/%s", target_type, target_id,
+                exc_info=True,
+            )
+            support_fact_line = ""
         return {
             "target_id": target_id,
             "target_type": target_type,
@@ -1644,6 +2276,8 @@ def get_learner_ledger_line(
             "scopes": learner_scopes,
             "scope_coverage": scope_coverage_level(len(scopes)),
             "fact_line": _learner_fact_line(target_type, status, scopes),
+            "falsification_conditions": falsification_conditions,
+            **({"support_fact_line": support_fact_line} if support_fact_line else {}),
         }
     finally:
         session.close()

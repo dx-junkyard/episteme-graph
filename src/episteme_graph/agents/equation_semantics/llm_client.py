@@ -1,6 +1,15 @@
-"""LLM client for EquationSemanticsAgent."""
+"""LLM client for EquationSemanticsAgent.
+
+The vision branch (a cropped equation image attached to the prompt) goes through
+``core.llm.generate_json_with_image`` — **not** the provider SDK directly. The
+provider SDK was called here until 2026-08 and therefore skipped the U層 usage
+metering hooks in ``core/llm.py`` (design doc `llm_usage_metering_design.md` U3:
+計測点は core/llm.py に一元化). Model resolution stays on this side
+(``_resolve_vision_model``) because the vision call needs a concrete model name.
+"""
 from __future__ import annotations
 
+import base64
 import logging
 from typing import Any
 
@@ -61,30 +70,20 @@ class EquationSemanticsLLMClient(ProviderJSONLLMClient):
             )
 
         try:
-            if provider == "openai":
-                return self._with_vision_meta(
-                    self._generate_openai_vision(messages, image, model),
-                    provider=provider,
-                    model=model,
-                    used=True,
-                    reason=None,
-                )
-            if provider in ("google", "gemini-vertex"):
-                return self._with_vision_meta(
-                    self._generate_vertex_vision(messages, image, model),
-                    provider=provider,
-                    model=model,
-                    used=True,
-                    reason=None,
-                )
-            if provider == "gemini":
-                return self._with_vision_meta(
-                    self._generate_gemini_vision(messages, image, model),
-                    provider=provider,
-                    model=model,
-                    used=True,
-                    reason=None,
-                )
+            raw_text = self._generate_vision_json(messages, image, model)
+        except NotImplementedError:
+            # このプロバイダには vision 経路が無い（従来と同じ理由ラベルを維持）。
+            logger.info(
+                "Equation vision unavailable for provider=%s; falling back to text context",
+                provider,
+            )
+            return self._text_fallback_with_vision_meta(
+                messages,
+                response_schema,
+                provider=provider,
+                model=model,
+                reason="provider_has_no_equation_vision_path",
+            )
         except Exception:
             logger.warning(
                 "Equation vision generation failed provider=%s model=%s; falling back to text context",
@@ -99,104 +98,33 @@ class EquationSemanticsLLMClient(ProviderJSONLLMClient):
                 model=model,
                 reason="vision_generation_failed",
             )
-        return self._text_fallback_with_vision_meta(
-            messages,
-            response_schema,
+        return self._with_vision_meta(
+            self._parse_json(raw_text or "{}"),
             provider=provider,
             model=model,
-            reason="provider_has_no_equation_vision_path",
+            used=True,
+            reason=None,
         )
 
-    def _generate_openai_vision(self, messages: list[dict], image: dict, model: str) -> dict:
-        from core.llm import _adapt_messages_for_model, _build_api_kwargs, _get_openai_client
+    @staticmethod
+    def _generate_vision_json(messages: list[dict], image: dict, model: str) -> str:
+        """Run the single-image JSON vision call through ``core.llm``.
 
-        adapted = _adapt_messages_for_model(messages, model)
-        user_idx = self._last_user_index(adapted)
-        if user_idx is None:
-            adapted.append({"role": "user", "content": []})
-            user_idx = len(adapted) - 1
-        text = adapted[user_idx].get("content", "")
-        adapted[user_idx]["content"] = [
-            {"type": "text", "text": str(text)},
-            {
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{image['mime_type']};base64,{image['data_base64']}",
-                    "detail": "high",
-                },
-            },
-        ]
-        kwargs = _build_api_kwargs(model, temperature=0.0, extra_kwargs={"response_format": {"type": "json_object"}})
-        response = _get_openai_client().chat.completions.create(
+        This is the only seam between the agent and the provider SDK; keeping it
+        in ``core.llm`` is what makes the call visible to the U層 usage metering
+        hooks (``observe_vision``). Returns the raw response text — parsing stays
+        on this side so ``ProviderJSONLLMClient._parse_json`` (truncated-JSON
+        recovery) keeps owning it.
+        """
+        from core.llm import generate_json_with_image
+
+        image_bytes = base64.b64decode(str(image.get("data_base64", "")).encode("ascii"))
+        return generate_json_with_image(
+            messages,
+            image_bytes,
             model=model,
-            messages=adapted,
-            **kwargs,
+            mime_type=image.get("mime_type"),
         )
-        return self._parse_json(response.choices[0].message.content or "{}")
-
-    def _generate_vertex_vision(self, messages: list[dict], image: dict, model: str) -> dict:
-        from core.llm import _extract_vertex_ai_text, _messages_to_gemini, _get_vertex_ai_client
-        from vertexai.generative_models import GenerativeModel, GenerationConfig, Part
-
-        _get_vertex_ai_client()
-        system_instruction, contents = _messages_to_gemini(messages)
-        contents = self._with_gemini_image_part(contents, Part.from_data(
-            data=self._b64decode(image["data_base64"]),
-            mime_type=image["mime_type"],
-        ))
-        response = GenerativeModel(model_name=model, system_instruction=system_instruction).generate_content(
-            contents,
-            generation_config=GenerationConfig(
-                temperature=0.0,
-                response_mime_type="application/json",
-            ),
-        )
-        return self._parse_json(_extract_vertex_ai_text(response) or "{}")
-
-    def _generate_gemini_vision(self, messages: list[dict], image: dict, model: str) -> dict:
-        from core.llm import _get_gemini_module, _messages_to_gemini
-
-        genai = _get_gemini_module()
-        system_instruction, contents = _messages_to_gemini(messages)
-        contents = self._with_gemini_image_part(contents, {
-            "inline_data": {
-                "mime_type": image["mime_type"],
-                "data": image["data_base64"],
-            }
-        })
-        response = genai.GenerativeModel(
-            model_name=model,
-            system_instruction=system_instruction,
-        ).generate_content(
-            contents,
-            generation_config={"temperature": 0.0, "response_mime_type": "application/json"},
-        )
-        return self._parse_json(getattr(response, "text", "") or "{}")
-
-    @staticmethod
-    def _last_user_index(messages: list[dict]) -> int | None:
-        for i in range(len(messages) - 1, -1, -1):
-            if messages[i].get("role") in ("user", "developer"):
-                return i
-        return None
-
-    @staticmethod
-    def _with_gemini_image_part(contents: list[dict[str, Any]], image_part: Any) -> list[dict[str, Any]]:
-        if not contents:
-            return [{"role": "user", "parts": [image_part]}]
-        updated = list(contents)
-        last = dict(updated[-1])
-        parts = list(last.get("parts") or [])
-        parts.append(image_part)
-        last["parts"] = parts
-        updated[-1] = last
-        return updated
-
-    @staticmethod
-    def _b64decode(value: str) -> bytes:
-        import base64
-
-        return base64.b64decode(value.encode("ascii"))
 
     def _text_fallback_with_vision_meta(
         self,

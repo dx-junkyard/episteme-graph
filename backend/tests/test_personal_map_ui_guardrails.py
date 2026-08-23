@@ -291,6 +291,88 @@ class TestCourseSwitchRaceGuard:
             )
 
 
+class TestProvisionalNodeStrip:
+    """暫定ノードの帯（カテゴリギャップ候補 v1-b）の静的ガードレール。
+
+    正本: docs/features/category_gap_candidates_design.md §4.4 裁定 / §5.6。
+    - サーバの ``provisional_nodes``（読み時導出）だけを描く。専用 fetch もポーリングも
+      しない（既存 personal-network 応答に相乗り・PN-5 / LS9）
+    - 骨格ノードとは別の「地図の外の帯」に描く（既存ノードと視覚的に混ざらない）
+    - キーが無い・空・トグル OFF・L1 以外では何も描かない（fail-closed / 後方互換）
+    - 事実文のみ。欠陥・督励語彙（穴 / 不足 / 未整備 / 埋める）と数値・進捗表現を出さない
+      （AB1 / PN-4 / LS5）
+    - 共有候補の内部語彙（cluster_key / decision / confidence / weight）を触らない
+    """
+
+    #: 欠陥・督励を思わせる語彙（AB1「一致ゼロは発見」— 置けないことを欠陥として見せない）。
+    BANNED_WORDS = ("穴", "不足", "未整備", "埋め", "督促", "急いで")
+
+    def test_reads_provisional_nodes_from_personal_network_payload(self):
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "provisionalNodes")
+        assert "provisional_nodes" in fn_src
+        assert "Array.isArray" in fn_src  # 型が違えば空扱い（fail-closed）
+
+    def test_strip_is_gated_on_toggle_level_and_data(self):
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "renderProvisionalStrip")
+        assert "state.enabled" in fn_src          # トグル OFF では帯ごと出さない
+        assert "state.lastLevel !== 1" in fn_src  # 骨格表示（L1）のときだけ
+        assert "if (!nodes.length) return;" in fn_src  # 無ければ何も描かない
+
+    def test_strip_uses_its_own_layer_outside_the_skeleton_nodes(self):
+        """帯は骨格ノード（SVG）に重ねず、専用ストリップとして差し込む。"""
+        src = _read(PERSONAL_MAP_JS)
+        assert "personal-map-provisional-strip" in src
+        fn_src = _extract_function(src, "renderProvisionalStrip")
+        assert "removeProvisionalStrip" in fn_src  # 再描画のたびに古い帯を捨てる
+        assert "dashed" in fn_src or "dashed" in _extract_function(
+            src, "buildProvisionalChip"
+        )  # 点線輪郭（既存ノードと視覚的に混ざらない）
+
+    def test_dots_layer_renders_the_strip_at_every_call_site(self):
+        """描画の入口を1つに絞る（トグル ON/OFF・レベル描画・コース切替の全経路で追随）。"""
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "renderDotsLayer")
+        assert "renderProvisionalStrip(canvasEl);" in fn_src
+
+    def test_no_extra_fetch_or_polling_for_provisional_nodes(self):
+        src = _read(PERSONAL_MAP_JS)
+        for name in ("renderProvisionalStrip", "showProvisionalCard", "buildProvisionalChip",
+                     "provisionalNodes"):
+            fn_src = _extract_function(src, name)
+            assert "fetch(" not in fn_src, f"{name}: 暫定ノードのための追加 fetch は作らない"
+            assert "setInterval" not in fn_src
+
+    def test_fact_card_shows_documents_quote_and_source_label(self):
+        src = _read(PERSONAL_MAP_JS)
+        fn_src = _extract_function(src, "showProvisionalCard")
+        assert "node.label" in fn_src
+        assert "node.source_label" in fn_src      # 出所ラベル（サーバ側定数）
+        assert "node.evidence_quote" in fn_src    # 逐語引用
+        assert "doc.title" in fn_src              # 出所論文はタイトル列挙（件数を出さない）
+
+    def test_headings_are_factual_without_banned_vocabulary(self):
+        src = _read(PERSONAL_MAP_JS)
+        headings = re.findall(r'const PROVISIONAL_[A-Z_]+ = "([^"]*)"', src)
+        assert len(headings) >= 2, "帯・カードの見出し定数が見つかりません"
+        for heading in headings:
+            for word in self.BANNED_WORDS:
+                assert word not in heading, f"見出しに欠陥・督励語彙: {heading!r}"
+
+    def test_no_banned_vocabulary_anywhere_in_the_module(self):
+        """コメントを含めファイル全体で欠陥・督励語彙を持たない（文言の逆流防止）。"""
+        src = _read(PERSONAL_MAP_JS)
+        hits = [w for w in self.BANNED_WORDS if w in src]
+        assert not hits, f"personal-map.js に欠陥・督励語彙があります: {hits}"
+
+    def test_shared_candidate_vocabulary_is_not_referenced(self):
+        """共有候補・教員判断の内部語彙は学習者側に出さない（§5.6）。"""
+        src = _read(PERSONAL_MAP_JS)
+        for term in ("cluster_key", "decision", "confidence", "weight", "skeleton_version"):
+            assert term not in src, f"共有候補側の語彙が学習者 UI に漏れています: {term!r}"
+
+
 class TestAtlasOverlayIntegration:
     """atlas-overlay.js からの PersonalMap 参照はすべてガード形で行われている。"""
 

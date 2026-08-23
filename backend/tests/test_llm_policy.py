@@ -13,6 +13,17 @@
 ただし ``cache_clear()`` は同一の関数オブジェクトに対して働くため、
 ``monkeypatch.setenv`` → ``_real_get_settings.cache_clear()`` の順で呼べば
 llm_policy 側の解決も実環境の値を正しく反映する）。
+
+**フルスイート限定の実行位相 flake の遮断（2026-08-16）**: この共有 lru_cache
+（``maxsize=1``）は core/postgres.py など worker デーモンスレッド側とも同一実体で、
+先行テストが起動した worker スレッドが **env パッチ前の環境**で ``Settings()`` を
+構築中に本モジュールのテストが ``setenv → cache_clear()`` を済ませると、スレッド側の
+計算結果（旧 env 由来）が**クリア後のキャッシュへ格納**され、テストが stale な
+``llm_fast_model`` 等を読んで落ちる（単独実行では再現しない）。そのため本モジュールは
+autouse フィクスチャ ``_uncached_settings`` で llm_policy に非キャッシュの
+``get_settings.__wrapped__`` を注入し、共有キャッシュへの依存自体を断つ
+（llm_policy の解決は常に「現在の os.environ」を読む）。期待値側の直接参照も
+:func:`_fresh_settings` を使い、同じ理由で共有キャッシュを経由しない。
 """
 
 from __future__ import annotations
@@ -31,6 +42,26 @@ from core.config import get_settings as _real_get_settings  # noqa: E402
 import core.llm_policy as llm_policy  # noqa: E402
 from core.llm_usage.context import usage_context  # noqa: E402
 from core.llm_usage.schema import KNOWN_FEATURES, UNATTRIBUTED  # noqa: E402
+
+
+def _fresh_settings():
+    """共有 lru_cache を経由せず、現在の os.environ から Settings を構築する。
+
+    期待値の算出にキャッシュ済み ``_real_get_settings()`` を使うと、worker デーモン
+    スレッドとの in-flight 競合（モジュール docstring 参照）で stale な値を掴み得る。
+    """
+    return _real_get_settings.__wrapped__()
+
+
+@pytest.fixture(autouse=True)
+def _uncached_settings(monkeypatch):
+    """llm_policy のモデル解決を共有 settings キャッシュから切り離す（flake 遮断）。
+
+    llm_policy は ``from core.config import get_settings`` の by-name 参照を保持する
+    ため、モジュール属性の差し替えで本モジュール内のテストだけが非キャッシュ読みに
+    なる（worker スレッド側・他モジュールのキャッシュ利用には影響しない）。
+    """
+    monkeypatch.setattr(llm_policy, "get_settings", _real_get_settings.__wrapped__)
 
 
 @pytest.fixture(autouse=True)
@@ -207,7 +238,7 @@ class TestPhase0BehaviorParity:
         assert resolved.model == "tension-custom"
         assert resolved.source == llm_policy.SOURCE_ENV
 
-        settings = _real_get_settings()
+        settings = _fresh_settings()
         assert resolved.model == (settings.tension_llm_model or settings.llm_fast_model)
 
     def test_learning_chat_unset_falls_back_to_analysis(self, monkeypatch):
@@ -231,7 +262,7 @@ class TestPhase0BehaviorParity:
         # ``getattr(settings, "apparatus_llm_model", "gpt-4o")`` fallback exactly).
         monkeypatch.delenv("APPARATUS_LLM_MODEL", raising=False)
         _real_get_settings.cache_clear()
-        settings = _real_get_settings()
+        settings = _fresh_settings()
         resolved = llm_policy.resolve_scene_model("pipeline:apparatus_semantics")
         assert resolved.model == settings.apparatus_llm_model
         assert resolved.source == llm_policy.SOURCE_ENV
@@ -447,6 +478,12 @@ class TestRepresentativeFeature:
         monkeypatch.setenv("LLM_FAST_MODEL", "fast-model-m1")
         monkeypatch.setenv("LLM_ANALYSIS_MODEL", "analysis-model-m1")
         _real_get_settings.cache_clear()
+        # llm_policy_store の実時間 TTL キャッシュ（20秒）が、直前に走った別テストの
+        # 同一 scene_key 解決を保持していると env 由来の期待値と食い違い、フルスイートの
+        # 実行位相によって flake する。env を差し替えたら必ず無効化する。
+        from core import llm_policy_store
+
+        llm_policy_store.invalidate()
 
         feature = llm_policy.representative_feature_for_scene(llm_policy.SCENE_DELIBERATION)
         assert feature == "deliberation:chat"
@@ -687,3 +724,33 @@ class TestIterEnvSeeds:
         for seed in llm_policy.iter_env_seeds():
             assert llm_policy.is_known_scene_key(seed.scene_key), seed.scene_key
             assert not llm_policy.is_read_only_scene(seed.scene_key)
+
+
+# ===========================================================================
+# 12. 共有 settings キャッシュ競合への免疫（フルスイート flake の回帰固定）
+# ===========================================================================
+
+
+class TestSettingsCacheRaceImmunity:
+    def test_resolution_ignores_stale_shared_settings_cache(self, monkeypatch):
+        """worker デーモンスレッドの in-flight ``Settings()`` 構築が ``cache_clear()``
+        後に stale な結果を共有キャッシュへ格納しても、本モジュールのモデル解決が
+        影響を受けないこと（モジュール docstring の flake の決定論的再現）。
+
+        手順: ①stale な env でキャッシュを温める ②env を差し替えるが cache_clear
+        **しない**（= スレッドがクリア後に旧 env の結果を格納した状態の再現）
+        ③解決結果は現在の env（fresh 値）を読むこと。``_uncached_settings``
+        フィクスチャを外すとこのテストは stale 値を返して落ちる。
+        """
+        monkeypatch.delenv("DELIBERATION_LLM_MODEL", raising=False)
+        # ① 共有キャッシュに stale な Settings を格納
+        monkeypatch.setenv("LLM_FAST_MODEL", "stale-fast-model")
+        _real_get_settings.cache_clear()
+        assert _real_get_settings().llm_fast_model == "stale-fast-model"
+        # ② env は更新するが共有キャッシュはあえて温存（レース後の状態を再現）
+        monkeypatch.setenv("LLM_FAST_MODEL", "fresh-fast-model")
+        assert _real_get_settings().llm_fast_model == "stale-fast-model"  # 前提の確認
+        # ③ llm_policy の解決は共有キャッシュを経由せず現在の env を読む
+        resolved = llm_policy.resolve_scene_model("deliberation:chat")
+        assert resolved.model == "fresh-fast-model"
+        assert resolved.source == llm_policy.SOURCE_TIER_DEFAULT

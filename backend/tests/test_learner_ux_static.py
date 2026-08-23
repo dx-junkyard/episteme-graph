@@ -145,8 +145,10 @@ class TestCourseCompletionCard:
 class TestCourseCompletionCardServerGating:
     def test_show_course_completion_card_takes_course_completed_param(self):
         src = _read(APP_JS)
+        # 第3引数以降（opts: 確認スキップ経路のフラグ等）の追加は許容する。
+        # ここで固定したいのは「第2引数が courseCompleted であること」だけ。
         assert re.search(
-            r"function showCourseCompletionCard\(\s*completedTopic,\s*courseCompleted\s*\)",
+            r"function showCourseCompletionCard\(\s*completedTopic,\s*courseCompleted\s*[,)]",
             src,
         ), "showCourseCompletionCard は第2引数 courseCompleted を取ること"
 
@@ -380,8 +382,6 @@ class TestPersonalMapHomeCourseFilter:
         assert "filteredNodes(" in now_body
         journeys_body = _extract_function(src, "renderJourneys")
         assert "filteredNodes(" not in journeys_body
-        reflect_body = _extract_function(src, "renderReflect")
-        assert "filteredNodes(" not in reflect_body
 
     def test_course_filter_does_not_count_candidates(self):
         """PN-3/PN-4: フィルタ選択肢の導出は candidate を数えない・件数を出さない

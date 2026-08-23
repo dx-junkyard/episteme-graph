@@ -14,6 +14,10 @@ PDF文献から概念・主張・数式・関係性を自動抽出してナレ�
 2. **適応的学習（B層）** — 習得状態・関心痕跡・違和感（tension）を追跡し、前提知識に応じた問いかけで理解を深める
 3. **没入型講義** — TTS音声＋カラオケ式ハイライトで、論文をセミナー形式に変換する
 4. **承認・共有（C層）** — 教員が説明バージョン単位で査読承認し、教員間で解釈を共有する
+5. **検証・位置づけ・運用の層群** — 疑義と検証の台帳（D層/SL層）、分野の地図と論文の位置づけ（Field Atlas / ランドスケープ）、要素検討（W層）、版管理（V層）、ガイダンス・AI運用基盤（G/U/M層・Copilot・help_kb）
+
+設計思想の全体像（知識観・学習観・AIの役割・横断14原則）は
+[docs/vision.md](docs/vision.md) を参照。
 
 ## 技術スタック
 
@@ -138,7 +142,7 @@ docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 ```
 PDF アップロード → MinIO 保存
   → GROBID TEI-XML 解析（利用不可時は PyMuPDF フォールバック）
-  → PDF解析エージェントパイプライン（src/episteme_graph/agents/, 20超のステージ）
+  → PDF解析エージェントパイプライン（src/episteme_graph/agents/, named 29 ステージ）
      文書構造復元 → 主張（claim）の採否・atomic 化 → 数式の意味・導出チェーン
      → 中心命題の再構成 → DSL 接続 → 再利用可能コンポーネント → 理論操作グラフ
   → テキストチャンク → PostgreSQL pgvector（次元数は `LLM_EMBEDDING_DIM` 準拠）
@@ -222,7 +226,8 @@ PDF アップロード → MinIO 保存
 
 ## 機能ドキュメント索引（docs/features/）
 
-機能・レイヤーごとの解説/設計書の全一覧。レイヤー ↔ migration の対応は
+機能・レイヤーごとの解説/設計書の索引（ビジョン起点の機能群別・完全版は
+[docs/README.md](docs/README.md) §4）。レイヤー ↔ migration の対応は
 [docs/architecture/layer_registry.md](docs/architecture/layer_registry.md) を参照。
 
 ### 機能解説（実装ベース）
@@ -249,6 +254,33 @@ PDF アップロード → MinIO 保存
 - [個人知識ネットワーク（Phase P）](docs/features/personal_knowledge_network_design.md)
   ／[外部レビュー](docs/features/personal_knowledge_network_review.md)
 - [知識ネットワークビジョン（W層・個人知識ネットワークの親文書）](docs/features/knowledge_network_vision.md)
+- [場面別 LLM モデル選択（M層）](docs/features/llm_model_selection_design.md)
+- [賭け金の台帳（SL層）](docs/features/stakes_ledger_design.md)
+- [理解サイクル（UCサイクル）](docs/features/understanding_cycle_design.md)
+- [知識ランドスケープ（配置層）](docs/features/knowledge_landscape_design.md)
+- [カテゴリギャップ候補](docs/features/category_gap_candidates_design.md)
+- [教材図スタジオ](docs/features/teaching_figure_studio_design.md)
+- [利用者マニュアル KB（help_kb）](docs/features/manual_help_kb_design.md)
+- [リリース前の確認フロー](docs/features/release_review_flow_design.md)
+- [二層説明（generic/contextual）](docs/features/hierarchical_context_explanation_design.md)
+- [Atlas バインディング該当なしUX + ドメインライフサイクル](docs/features/atlas_binding_lifecycle_design.md)
+- [チャット型AI支援の共通基盤](docs/features/assistant_common_infra_design.md)
+
+### discuss（論文と話す）
+
+- [ディスカッションモード本体](docs/features/discussion_mode_design.md) /
+  [対話の歩調合わせ](docs/features/discuss_dialogue_alignment_design.md) /
+  [開幕素材のオーサリング](docs/features/discuss_opening_authoring_design.md) /
+  [観測基盤](docs/features/discuss_observation_design.md)
+
+### 学習UI・要素文脈
+
+- [component 根拠カードのチップ化 + 文脈API](docs/features/component_evidence_redesign.md)
+- [要素文脈の提示再設計](docs/features/element_context_presentation_redesign.md) /
+  [学習者向け要素文脈API](docs/features/learner_element_context_design.md)
+- [数式ホバー内容](docs/features/equation_hover_content_design.md) /
+  [数式文脈パネル](docs/features/equation_context_panel_display_design.md)
+- [学習画面UI再編 + インスペクト/ホバー係留](docs/features/learning_ui_inspect_hover_design.md)
 
 ### 分野の地図（Field Atlas）
 
@@ -264,7 +296,10 @@ PDF アップロード → MinIO 保存
 - [レクチャースライド同期 + 音声言語切替](docs/features/lecture_slide_sync_design.md)
 - [音声生成の準備確認フロー（#491）](docs/features/lecture_audio_generation_readiness.md)
 - [教員指示付き図再解析](docs/features/guided_figure_reanalysis_design.md)
+- [図解析の反証型反復検証（#499）](docs/features/contextual_figure_analysis_iterative_verification.md)
+- [図⇄概念構造の接続](docs/features/figure_concept_linking_design.md)
 - [要素インベントリ](docs/features/element_inventory_design.md)
+- [要素中心コンテキストレンズ（#498）](docs/features/element_context_lens_design.md)
 
 ---
 
@@ -333,7 +368,7 @@ episteme-graph/
 │   │   ├── graphs/            # 学生向け/教員向けグラフ組み立て
 │   │   └── tension/           # TensionMiningAgent（B層: prefilter/agent/worker …）
 │   ├── cartridges/            # ドメインカートリッジ（particle_physics）
-│   ├── db/                    # SQLマイグレーション（init.sql, 002〜053）
+│   ├── db/                    # SQLマイグレーション（init.sql, 002〜067）
 │   └── tests/                 # pytest テスト（FastAPI / core）
 ├── src/
 │   ├── episteme_graph/agents/ # PDF解析エージェント群（document_structure, paper_skeleton,
@@ -348,7 +383,7 @@ episteme-graph/
 └── .env.example
 ```
 
-マイグレーションは `backend/db/`（init.sql 〜 053）。一覧と各テーブルの説明は
+マイグレーションは `backend/db/`（init.sql 〜 067）。一覧と各テーブルの説明は
 [docs/architecture/data-model.md](docs/architecture/data-model.md) を参照してください。
 
 ## API エンドポイント概要

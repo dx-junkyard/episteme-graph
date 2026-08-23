@@ -345,7 +345,12 @@ class TestEntryModeTrace:
     def test_trace_payload_has_discuss_entry_mode(self):
         source = _read(LEARNING)
         block = source.split("_trace_payload = {")[1].split("\n    }")[0]
-        assert '**({"entry_mode": "discuss"} if _is_discuss else {}),' in block
+        # 楽屋（構造の降下路 SD4、2026-08-15 レビュー是正）: 楽屋の質問には entry_mode を
+        # 焼き込まない（discuss 観測基盤への混入防止）。discuss 本体の焼き込みは維持。
+        assert (
+            '**({"entry_mode": "discuss"} if _is_discuss and not _is_backstage else {}),'
+            in block
+        )
 
 
 class TestLectureHelperDelegation:

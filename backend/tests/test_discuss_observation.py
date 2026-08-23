@@ -372,11 +372,18 @@ class TestMetricEventVocabAndPayloadWhitelist:
         "landing_continue_clicked",
         # 着地画面の「今日の理解を自分の言葉で」保存（候補 confirm とは別導線）
         "landing_reflection_saved",
+        # 理解サイクル（UCサイクル, understanding_cycle_design.md §10）の内部計測6語彙。
+        "cycle_motive_saved",
+        "cycle_prediction_saved",
+        "cycle_diff_viewed",
+        "cycle_carryover_saved",
+        "cycle_revisit_answered",
+        "cycle_anchor_quick",
     }
 
-    def test_vocab_matches_design_doc_14_events(self):
+    def test_vocab_matches_design_doc_20_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 14
+        assert len(observation.METRIC_EVENT_VOCAB) == 20
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(

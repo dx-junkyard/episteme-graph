@@ -22,6 +22,7 @@ from dependencies import (
     _require_system_admin,
     _require_teacher,
     ROLE_STUDENT,
+    ROLE_SYSTEM_ADMIN,
     ROLE_TEACHER,
 )
 from schemas import (
@@ -48,18 +49,22 @@ from schemas import (
     VisibilityUpdateRequest,
 )
 from services import (
+    DocumentAccess,
+    _fetch_course_data_row,
     _material_lock,
     _material_status,
     _resolve_document,
     create_background_task,
     extract_pdf_pages,
     get_background_task,
+    get_editable_course_data,
     remove_teaching_figure_objects as _remove_teaching_figure_objects,
     get_course_group_permissions,
     get_document_group_permissions,
     get_user_group_ids,
     process_material_background,
     record_review_event,
+    resolve_document_access,
     save_cb_session,
     user_can_access_group,
     user_can_edit_course,
@@ -79,7 +84,7 @@ from core.course_data import (
     course_topics,
 )
 from core.document_pipeline.figure_images import load_document_figures
-from core.document_pipeline.orchestrator import PIPELINE_STAGES
+from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core import llm_policy
 from core.llm import generate_text
@@ -115,6 +120,62 @@ from routes.theory_components import _ensure_document_viewable
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/admin", tags=["Admin"])
+
+
+# ---------------------------------------------------------------------------
+# オブジェクトスコープの権限ゲート（P0 セキュリティ）
+#
+# `_require_teacher` が保証するのは「TEACHER 以上であること」だけで、対象オブジェクト
+# （document / course）への権限は何も見ていない。ID を直指定するエンドポイントは、
+# 副作用（DB 集計・学生名取得・MinIO 読み書き・background task 起動）より **先に**
+# ここを通す。不在と権限なしは同一の 404・同一 detail に畳み、外部からオブジェクトの
+# 存在を判別させない（fail-closed）。
+#
+# 判定そのものは再実装しない。権限の正本
+#   - document: `services.resolve_document_access()`（UUID / source_path 両対応）
+#   - course:   `services.get_editable_course_data()`（owner or editor グループ）
+# へ委譲する（ルートごとの独自 SQL で visibility / group / editor 判定を作らない）。
+# 流儀は `routes/lecture_studio/_shared.py::_ensure_chunk_editable` /
+# `_course_data_for_studio_editable` と同型（SYSTEM_ADMIN のみ明示 bypass）。
+#
+# 閲覧ゲート（`get_material()` / `routes/theory_components.py::_ensure_document_viewable`）は
+# public / viewer / コース経由の閲覧者も通すため、**変更系の認可には使わない**。
+# ---------------------------------------------------------------------------
+
+_DOCUMENT_NOT_FOUND_DETAIL = "Document not found"
+_COURSE_NOT_FOUND_DETAIL = "Course not found"
+
+
+def _require_editable_document_or_404(document_ref: str, current_user: dict) -> DocumentAccess:
+    """document への編集権限を要求し、解決済みの `DocumentAccess` を返す。
+
+    許可: 所有者 / `object_group_permissions('document', …, 'editor')` のグループ員 /
+    SYSTEM_ADMIN。不在・権限なしはどちらも 404（detail も同一）。
+
+    SYSTEM_ADMIN でも `resolve_document_access()` は必ず呼ぶ（canonical な
+    `document_id` / `source_path` を得るため。存在しなければ 404）。
+    """
+    access = resolve_document_access(current_user["id"], document_ref)
+    if not access.found:
+        raise HTTPException(status_code=404, detail=_DOCUMENT_NOT_FOUND_DETAIL)
+    if access.can_edit or current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        return access
+    raise HTTPException(status_code=404, detail=_DOCUMENT_NOT_FOUND_DETAIL)
+
+
+def _require_editable_course_or_404(course_id: str, current_user: dict) -> dict:
+    """course への編集権限を要求し、HEAD（live working copy）のコースデータを返す。
+
+    許可: 所有者 / `object_group_permissions('course', …, 'editor')` のグループ員 /
+    SYSTEM_ADMIN。不在・権限なしはどちらも 404（detail も同一）。
+    """
+    course_data = get_editable_course_data(current_user["id"], course_id)
+    if course_data is None and current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        course_data = _fetch_course_data_row(course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail=_COURSE_NOT_FOUND_DETAIL)
+    return course_data
+
 
 _TEX_ARCHIVE_SUFFIXES = (".tar.gz", ".tgz")
 
@@ -302,8 +363,9 @@ def _validate_models_option(models: dict) -> dict:
     ``"pipeline:<stage>"``（stage は ``orchestrator.PIPELINE_STAGES`` に実在する
     もの）のみ。値は ``llm_policy.load_catalog()`` に載っているモデルで、かつ
     現在の provider（``catalog_models()`` が既に絞り込み済み）と一致するものだけ
-    許可する。``"pipeline.vision"`` キー（および ``"pipeline:apparatus_semantics"``）
-    は capability に ``"vision"`` を含むモデルのみ許可する。
+    許可する。``"pipeline.vision"`` キー（および ``"pipeline:<stage>"`` のうち
+    ``orchestrator.VISION_STAGE_NAMES`` に属する vision ステージ = 現状
+    ``apparatus_semantics``）は capability に ``"vision"`` を含むモデルのみ許可する。
 
     カタログ自体が未設定/読めない環境で ``models`` 指定があれば、検証不能なため
     422 で拒否する（架空の候補を許可しない、M4）。``models`` が未指定/空の場合は
@@ -340,7 +402,7 @@ def _validate_models_option(models: dict) -> dict:
                     status_code=422,
                     detail=f"unknown pipeline stage in 'models' key: {key!r}",
                 )
-            allowed_ids = vision_model_ids if stage_name == "apparatus_semantics" else text_model_ids
+            allowed_ids = vision_model_ids if stage_name in VISION_STAGE_NAMES else text_model_ids
         else:
             raise HTTPException(status_code=422, detail=f"invalid 'models' key: {key!r}")
 
@@ -528,12 +590,22 @@ def reanalyze_document(
     options を引き継ぐ（初回解析で ON にした選択が再解析で黙って落ちない）。
     前回 run が無い場合の実効値は orchestrator 側の既定で False
     （明示オプトインのみ有効、原則6）。
+
+    権限（P0）: 再解析は成果物を作り直す**変更系**の操作なので、閲覧できるだけ
+    （public / viewer / コース経由）では実行させない。document owner / editor
+    （SYSTEM_ADMIN は可）を要求し、不在・権限なしはどちらも 404 に畳む。
+    MinIO 取得・前回 options 読み出し・background task 起動より先に判定する。
     """
+    access = _require_editable_document_or_404(document_id, current_user)
+    # 以降はゲートが解決した canonical ID を使う（アクセス判定を二重に解決しない）。
+    document_id = access.document_id or document_id
+    material_id = access.source_path
+
     session = _pg_session()
     try:
         row = session.execute(
             sa_text(
-                "SELECT id, title, filename, source_path FROM documents "
+                "SELECT title, filename FROM documents "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": document_id},
@@ -541,11 +613,7 @@ def reanalyze_document(
     finally:
         session.close()
 
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    material_id = row[3]
-    filename = row[2] or row[1] or "document.pdf"
+    filename = (row[1] if row else None) or (row[0] if row else None) or "document.pdf"
 
     if not material_id:
         raise HTTPException(
@@ -1084,8 +1152,13 @@ def reupload_material_pdf(
     """既存教材のPDFをMinIOへ再登録し、欠落したチャンクページ情報を補完する。
 
     MinIOへのPDF保存が欠落している旧教材の復元に使用する。
+
+    権限（P0）: 教材原本の差し替えは**変更系**なので、閲覧ゲート
+    （`get_material()` は public / viewer / コース経由の閲覧者も通す）では足りない。
+    document owner / editor（SYSTEM_ADMIN は可）を要求し、ファイル読取・PDF パース・
+    類似度計算・MinIO upload のいずれよりも先に 404 で弾く。
     """
-    get_material(material_id, current_user)  # アクセス権確認
+    _require_editable_document_or_404(material_id, current_user)
 
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="Only PDF files are accepted")
@@ -3003,7 +3076,14 @@ def list_unanswered_queries(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> list[dict]:
-    """コースに紐づくつまづきデータ（RAG未回答クエリ）を返す。"""
+    """コースに紐づくつまづきデータ（RAG未回答クエリ）を返す。
+
+    学生の表示名と質問本文を返すため、`_require_teacher`（ロール）だけでは足りない。
+    course owner / editor（SYSTEM_ADMIN は可）を SQL 実行より先に要求し、権限が
+    無ければ空配列ではなく 404 にする（件数・学生名・質問・日時のいずれも返さない）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
+
     session = _pg_session()
     try:
         rows = session.execute(
@@ -3507,7 +3587,12 @@ def get_bridge_insights(
     - 個別の学習者・個別の痕跡行は一切返さない（PN-1/P3・評価利用禁止）
     - 教員への候補提示のみで、ドメイン知識候補への自動昇格経路は作らない（KN-4）
     - 「繋がりを見失う」側（迷いの集約）は v1 見送り（橋のみ）
+
+    k-匿名集約であっても、権限のない教員へ集約の存在・空非空・対象 course ID を
+    開示しない。集約処理より **先に** course owner / editor ゲートを通す。
     """
+    _require_editable_course_or_404(course_id, current_user)
+
     from core.personal_graph.bridges import aggregate_bridge_candidates
 
     bridges = aggregate_bridge_candidates(course_id)
