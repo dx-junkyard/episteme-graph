@@ -376,7 +376,7 @@ class TestFrontendContract:
     def test_linkify_reads_msg_sources(self):
         """バックエンドが焼き込む先は msg.sources（この参照が消えたら復元チップも消える）。"""
         src = _APP_JS.read_text(encoding="utf-8")
-        body = re.search(r"function linkifyCitations\(html, msg\) \{(.+?)\n  \}", src, re.DOTALL)
+        body = re.search(r"function linkifyCitations\([^)]*\) \{(.+?)\n  \}", src, re.DOTALL)
         assert body, "linkifyCitations が見つからない"
         assert "msg.sources" in body.group(1)
         assert "出典" in body.group(1)

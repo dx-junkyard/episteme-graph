@@ -145,8 +145,10 @@ class TestCourseCompletionCard:
 class TestCourseCompletionCardServerGating:
     def test_show_course_completion_card_takes_course_completed_param(self):
         src = _read(APP_JS)
+        # 第3引数以降（opts: 確認スキップ経路のフラグ等）の追加は許容する。
+        # ここで固定したいのは「第2引数が courseCompleted であること」だけ。
         assert re.search(
-            r"function showCourseCompletionCard\(\s*completedTopic,\s*courseCompleted\s*\)",
+            r"function showCourseCompletionCard\(\s*completedTopic,\s*courseCompleted\s*[,)]",
             src,
         ), "showCourseCompletionCard は第2引数 courseCompleted を取ること"
 

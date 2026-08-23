@@ -1845,7 +1845,7 @@ _COURSE_CONTENT_DRAFT_PROMPT = """あなたは大学教員の授業用ドラフ�
 - Markdown風の軽量表記を使う
 - インライン数式は `$...$`
 - ブロック数式は `$$...$$`
-- `\(...\)` や `\[...\]` は使わず、必ず `$...$` / `$$...$$` を使う
+- `\\(...\\)` や `\\[...\\]` は使わず、必ず `$...$` / `$$...$$` を使う
 - 埋め込みは `![[equation:id]]`, `![[component:id]]`, `![[claim:id]]`, `![[source:id]]`, `![[figure:id]]` の形式を使う
 - 埋め込みに使ってよい kind と id の組み合わせは、根拠候補の `available_references` に列挙されたものだけ
 - `available_references` に無い id を発明してはならない。また id 本来の kind を変えて埋め込んではならない（例: component の id を `claim:` や `equation:` で埋め込まない）
