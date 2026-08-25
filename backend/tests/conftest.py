@@ -54,6 +54,42 @@ def _override_settings(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _default_account_status(monkeypatch):
+    """AL層（アカウントライフサイクル管理）のアカウント状態照合をテスト既定へ固定する。
+
+    ``api/dependencies.py::_get_current_user`` は JWT のデコード後に
+    ``users.status`` / ``users.token_generation`` を照合する
+    （``docs/features/account_lifecycle_management_design.md`` §4.2）。既存の API テストは
+    ``core.postgres.get_session`` をドメイン固有の fake に差し替えているため、この照合が
+    「users 行なし」に見えて 401 になってしまう。**認証状態を主題にしないテストの既定は
+    「active・世代 0 のアカウントが存在する」** とし、照合そのものを検証したいテスト
+    （``test_account_lifecycle_auth.py``）が各自で上書きする。
+
+    プロセス内 TTL キャッシュ（既定 30 秒）はテスト間で漏れるため、前後で必ず全消去する。
+    """
+    try:
+        from core import account_status
+    except Exception:  # pragma: no cover — core が利用不可な環境
+        yield
+        return
+
+    account_status.invalidate_all()
+
+    def _active(user_id):
+        return account_status.AccountState(
+            user_id=str(user_id),
+            status=account_status.ACCOUNT_STATUS_ACTIVE,
+            token_generation=0,
+        )
+
+    monkeypatch.setattr(account_status, "get_account_state", _active)
+    # last_seen_at のスロットル更新は fake session の呼び出し記録を汚すので no-op にする。
+    monkeypatch.setattr(account_status, "touch_last_seen", lambda user_id: False)
+    yield
+    account_status.invalidate_all()
+
+
+@pytest.fixture(autouse=True)
 def _reset_llm_usage_context():
     """bind_usage_context を使う worker 関数をテストがメインスレッドで直接呼ぶと
     contextvar が後続テストへ漏れるため、テストごとに既定値へ戻す。"""

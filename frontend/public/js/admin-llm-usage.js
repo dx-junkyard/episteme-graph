@@ -10,12 +10,16 @@
  *      feature/model 別に reported（実測）/ estimated（推計）を分離表示する（U1）。
  *      dropped_events は 0 件でも必ず表示する（U8: 隠さない）。cost_usd は
  *      price_table_loaded=true のときのみ表示する（U7: 価格のハードコード禁止・
- *      価格表が無ければ費用を捏造しない）。
+ *      価格表が無ければ費用を捏造しない）。集計軸に「ユーザー別」（group_by=user_id 系）
+ *      を選べる（アカウントライフサイクル管理設計書 §7-2）— キー内の user_id は
+ *      サーバが解決した user_display_name（未帰属 / 不明ユーザー / 表示名）で表示する。
  *   2. TEACHER 向け「解析コスト見積り」ポップオーバー（教材行のボタンから起動）—
  *      GET /api/admin/llm-usage/estimate/documents/{id}。レンジのみ表示し、
  *      点推定・金額は一切出さない（U5）。
  *
  * 識別子/CSS は llm-usage- プレフィックス（Field Atlas / Doubt Atlas と非衝突）。
+ * 新しい data-ui-anchor は追加しない（group_by セレクタは既存 llm-usage.groupby が
+ * 担体のまま。1属性1ID 規約 — アカウントライフサイクル管理設計書 §9.4）。
  */
 (function () {
   "use strict";
@@ -56,6 +60,8 @@
               '<option value="provider">provider</option>' +
               '<option value="operation">operation</option>' +
               '<option value="day">day</option>' +
+              '<option value="user_id">ユーザー別</option>' +
+              '<option value="user_id,feature">ユーザー別 &times; feature</option>' +
             '</select>' +
             '<button id="llm-usage-refresh" class="admin-action-btn" data-ui-anchor="llm-usage.refresh">更新</button>' +
           '</div>' +
@@ -67,6 +73,7 @@
         '<div id="llm-usage-range-note" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"></div>' +
         '<div id="llm-usage-price-note" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px"></div>' +
         '<div id="llm-usage-dropped-note" style="font-size:12px;margin-bottom:10px"></div>' +
+        '<div id="llm-usage-user-note" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:10px;display:none"></div>' +
         '<div id="llm-usage-metrics-body">' +
           '<div style="color:var(--color-text-tertiary)">読み込み中...</div>' +
         '</div>' +
@@ -121,6 +128,19 @@
       droppedNote.textContent = "記録バッファから溢れて記録できなかったイベント: " + dropped + "件";
       droppedNote.style.color = dropped > 0 ? "var(--color-text-danger)" : "var(--color-text-tertiary)";
     }
+    var userNote = document.getElementById("llm-usage-user-note");
+    if (userNote) {
+      // ユーザー別集計を選んでいるときだけ、バッチ処理由来の「未帰属」が何を意味するかを
+      // 事実文で注記する（アカウントライフサイクル管理設計書 §7-2）。
+      var isUserGrouping = (currentGroupBy || "").indexOf("user_id") !== -1;
+      if (isUserGrouping) {
+        userNote.style.display = "";
+        userNote.textContent = "バッチ処理・自動解析による消費は「未帰属」に計上されます。";
+      } else {
+        userNote.style.display = "none";
+        userNote.textContent = "";
+      }
+    }
 
     var body = document.getElementById("llm-usage-metrics-body");
     if (!body) return;
@@ -147,7 +167,13 @@
       var key = row.key || {};
       var keyParts = [];
       Object.keys(key).forEach(function (k) {
-        keyParts.push(k + ": " + (key[k] === null || key[k] === undefined || key[k] === "" ? "(未帰属)" : key[k]));
+        // user_display_name はサーバが user_id に紐づけて付与した表示名。
+        // user_id 自体の生 UUID の代わりにこちらを表示し、別列としては出さない
+        // （アカウントライフサイクル管理設計書 §7-2）。
+        if (k === "user_display_name") return;
+        var label = (k === "user_id") ? "ユーザー" : k;
+        var value = (k === "user_id" && key.user_display_name) ? key.user_display_name : key[k];
+        keyParts.push(label + ": " + (value === null || value === undefined || value === "" ? "(未帰属)" : value));
       });
       var keyLabel = keyParts.length ? keyParts.join(" / ") : "(全体)";
       var rep = row.reported || {};

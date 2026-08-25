@@ -198,9 +198,18 @@ class AtlasSkeletonTableFake:
                 out.append((r["domain_key"], r["status"], r["version"], r["revision"], rn))
             return FakeResult(out)
 
-        if sql.startswith("SELECT created_by::text AS uid FROM atlas_skeletons"):
+        if "AS uid FROM atlas_skeletons" in sql:
             # notification_recipients.atlas_skeleton_editor_ids (§3.4) の模倣
             # (UNION の created_by / updated_by を合成して返す)。
+            #
+            # 実 SQL は `SELECT s.created_by::text AS uid FROM atlas_skeletons s
+            # JOIN users u ON ... AND u.status <> 'deleted' ...`（アカウント
+            # ライフサイクル管理 §8.4 で墓標ユーザー・孤児 UUID を除外する JOIN が
+            # 付いた）。このフェイクは users を持たないため JOIN 条件は再現せず、
+            # 編集者を全員返す。**墓標除外そのものの検証は
+            # tests/core/test_notification_recipients.py（SQL 検査）で行う。**
+            # 前方一致ではなく別名句の部分一致で照合するのは、SELECT 句の
+            # テーブル別名（`s.`）の有無に追随するため。
             uids = {
                 str(r.get("created_by"))
                 for r in self.skeleton_rows

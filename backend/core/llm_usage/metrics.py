@@ -1,8 +1,14 @@
-"""集計クエリ（設計書 §7-1）。
+"""集計クエリ（設計書 §7-1・アカウントライフサイクル管理設計書 §7-2）。
 
 U1: reported / estimated は常に分離して返す（合算した単一数値を作らない）。
 group_by はホワイトリスト（``_GROUP_BY_SQL``）経由でのみ SQL に反映し、文字列連結による
 SQL インジェクションを構造的に防ぐ。
+
+``user_id`` は group_by の1軸として使えるほか、``collect_metrics(..., user_id=...)`` で
+個票フィルタとしても使える（アカウント個票の LLM 利用サマリ§7-3 用）。表示名解決
+（``user_id`` → ``display_name``・「未帰属」「不明ユーザー」）は呼び出し側
+（``routes/llm_usage.py``）の責務— この関数は集計値のみを返し、users テーブルを
+JOIN しない（U5 の権限判定を呼び出し側に閉じ込めるため）。
 """
 
 from __future__ import annotations
@@ -20,6 +26,7 @@ _GROUP_BY_SQL: dict[str, str] = {
     "model": "model",
     "provider": "provider",
     "operation": "operation",
+    "user_id": "user_id",
 }
 
 _EMPTY_BUCKET = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
@@ -36,6 +43,11 @@ def _format_group_value(field: str, value):
         if hasattr(value, "isoformat"):
             return value.isoformat()
         return str(value)
+    if field == "user_id" and value is not None:
+        # UUID オブジェクトのままだと JSON 化できないため文字列化する。
+        # None（未帰属）はそのまま None を返し、表示側（routes/llm_usage.py）が
+        # 「未帰属」ラベルへ変換する（U1: 生の欠測を隠さない）。
+        return str(value)
     return value
 
 
@@ -45,11 +57,17 @@ def _format_date_value(value) -> str:
     return str(value)
 
 
-def collect_metrics(session, *, date_from, date_to, group_by: list[str]) -> dict:
+def collect_metrics(
+    session, *, date_from, date_to, group_by: list[str], user_id: str | None = None
+) -> dict:
     """usage_source 別に分離した集計を返す（設計書 §7-1 のレスポンス形）。
 
-    ``group_by`` は ``{"day","feature","model","provider","operation"}`` の部分集合のみ
-    許可する。不正な値は ``ValueError``（SQL には決して混入しない）。
+    ``group_by`` は ``{"day","feature","model","provider","operation","user_id"}`` の
+    部分集合のみ許可する。不正な値は ``ValueError``（SQL には決して混入しない）。
+
+    ``user_id``（任意キーワード引数）を指定すると、集計対象を当該ユーザーの行のみに
+    絞り込む（アカウント個票の LLM 利用サマリ §7-3 用）。既存呼び出し（省略時は
+    フィルタなし）との後方互換を維持する。
     """
     if not group_by:
         raise ValueError("group_by must not be empty")
@@ -69,6 +87,12 @@ def collect_metrics(session, *, date_from, date_to, group_by: list[str]) -> dict
     )
     group_clause_sql = ", ".join(_GROUP_BY_SQL[col] for col in internal_group_cols)
 
+    where_sql = "occurred_at >= :date_from AND occurred_at < :date_to"
+    params: dict = {"date_from": date_from, "date_to": date_to}
+    if user_id is not None:
+        where_sql += " AND user_id = :user_id"
+        params["user_id"] = user_id
+
     query = sa_text(
         f"""
         SELECT {select_cols_sql}, usage_source,
@@ -78,11 +102,11 @@ def collect_metrics(session, *, date_from, date_to, group_by: list[str]) -> dict
                COALESCE(SUM(cached_tokens), 0) AS sum_cached,
                COUNT(*) AS calls
         FROM llm_usage_events
-        WHERE occurred_at >= :date_from AND occurred_at < :date_to
+        WHERE {where_sql}
         GROUP BY {group_clause_sql}, usage_source
         """
     )
-    result = session.execute(query, {"date_from": date_from, "date_to": date_to})
+    result = session.execute(query, params)
     raw_rows = result.fetchall()
 
     price_table = pricing.load_price_table()

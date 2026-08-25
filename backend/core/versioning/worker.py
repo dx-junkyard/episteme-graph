@@ -4,6 +4,15 @@
 共有先へ 'deleted' 通知を配信する。冪等（purge 済みは no-op）・1件失敗は skip。
 
 同期パスには入れない。起動時に daemon スレッドで回す（VERSION_SWEEPER_ENABLED で制御）。
+
+【アカウントライフサイクル管理（AL層）の相乗り】
+``sweep_once`` は V層オブジェクト（course / document）と**並列に**、期限到来済みの
+``pending_deletion`` **ユーザー**も purge する（設計書
+``docs/features/account_lifecycle_management_design.md`` §8.1-2）。独立 worker を
+増やさず、「1件の失敗が全体を止めない」「冪等」というこのモジュールの構造を共有する。
+``shared_version_state.object_type`` に 'user' は**追加しない** — ユーザーの削除予約状態は
+``users.status`` / ``users.purge_after``（migration 068）だけで管理する（V層の意味論を
+汚さない）。
 """
 from __future__ import annotations
 
@@ -14,6 +23,7 @@ import time
 
 from sqlalchemy import text as sa_text
 
+from core import account_lifecycle
 from core.postgres import get_session
 
 from . import audit, deletion, notifications, schema, subscriptions
@@ -66,8 +76,39 @@ def _purge_one(object_type: str, object_id: str, scheduled_by: str | None) -> bo
     return True
 
 
+def _due_users() -> list[account_lifecycle.DueUser]:
+    """期限到来済みの pending_deletion ユーザーを返す（AL層の相乗り）。
+
+    取得失敗は空リストに縮退する（V層オブジェクトの sweep を止めない）。
+    """
+    session = get_session()
+    try:
+        return account_lifecycle.due_users(session)
+    except Exception:  # noqa: BLE001 — AL層の取得失敗で V層 sweep を止めない
+        logger.exception("sweep: failed to list due users")
+        return []
+    finally:
+        session.close()
+
+
+def _sweep_users() -> int:
+    """期限到来済みユーザーを一巡 purge する。戻り値は墓標化した件数。
+
+    ``purge_user`` は所有物が残っていれば users 行を変更せず False を返す（AL9）。
+    その場合は次周期に再試行される（完了フラグを持たない）。
+    """
+    purged = 0
+    for due in _due_users():
+        try:
+            if account_lifecycle.purge_user(due.user_id, scheduled_by=due.scheduled_by):
+                purged += 1
+        except Exception:  # noqa: BLE001 — 1件の失敗が全体を止めないように
+            logger.exception("sweep: purge failed for user %s", due.user_id)
+    return purged
+
+
 def sweep_once() -> int:
-    """期限到来済みを一巡 purge する。戻り値は purge した件数。"""
+    """期限到来済みを一巡 purge する。戻り値は purge した件数（オブジェクト + ユーザー）。"""
     purged = 0
     for object_type, object_id, scheduled_by in _due_objects():
         try:
@@ -75,6 +116,10 @@ def sweep_once() -> int:
                 purged += 1
         except Exception:  # noqa: BLE001 — 1件の失敗が全体を止めないように
             logger.exception("sweep: purge failed for %s %s", object_type, object_id)
+    try:
+        purged += _sweep_users()
+    except Exception:  # noqa: BLE001 — AL層の失敗で V層 sweep の結果を捨てない
+        logger.exception("sweep: user purge pass failed")
     return purged
 
 

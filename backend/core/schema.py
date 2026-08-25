@@ -485,6 +485,11 @@ AUDIT_ENTITY_LANDSCAPE_PLACEMENT = "landscape_placement"
 # 統合 merge / 下書き取り込み incorporate。metadata.action で区別, migration 066）
 AUDIT_ENTITY_CATEGORY_GAP = "category_gap"
 
+# アカウントライフサイクル管理（停止 suspend / 再開 restore / パスワードリセット
+# password_reset / 削除予約 schedule_deletion・取消 cancel_deletion / purge / 所有物移管
+# transfer_ownership。metadata.action で区別, migration 068）
+AUDIT_ENTITY_USER_ACCOUNT = "user_account"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -522,4 +527,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_TEACHING_FIGURE,
     AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
     AUDIT_ENTITY_CATEGORY_GAP,
+    AUDIT_ENTITY_USER_ACCOUNT,
 )

@@ -104,7 +104,14 @@ class TestAdminUiAnchorsModule:
         # + ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1.3）の2件:
         #   materials.row-seminar-brief（⋯メニューの「ゼミ前ブリーフ…」）/
         #   materials.seminar-brief-modal（4区画の read-only 合成ビューモーダル）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 266
+        # + アカウントライフサイクル管理（account_lifecycle_management_design.md §9.4）の11件:
+        #   teachers.user-list / .user-suspend / .user-reset / .user-activity /
+        #   .user-delete / .user-transfer（教員管理タブ、SYSTEM_ADMIN 限定）+
+        #   students.user-list / .user-suspend（teacher/ 節）+
+        #   students.user-reset / .user-activity / .user-delete
+        #   （SYSTEM_ADMIN 限定ボタン → system_admin/ 節を指し、AL7 を
+        #    resolve_admin_ui_anchors の fail-closed がそのまま担保する）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 277
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

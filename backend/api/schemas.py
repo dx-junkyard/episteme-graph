@@ -1475,3 +1475,119 @@ class HelpKbVersionOut(BaseModel):
 
 class HelpKbVersionsResponse(BaseModel):
     versions: list[HelpKbVersionOut] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Account Lifecycle（アカウントライフサイクル管理 — 一覧 / 停止 / リセット /
+# 利用実績 / 削除 / 移管）
+#
+# 正本: docs/features/account_lifecycle_management_design.md §5（API 設計）。
+# AL4: リクエスト・レスポンスに平文パスワード・ハッシュを**戻さない**
+# （PasswordResetRequest だけが平文を受け取り、レスポンスには含めない）。
+# AL6/AL7: 個票（activity）は SYSTEM_ADMIN のみ。学生の行動監視に使わない。
+# ---------------------------------------------------------------------------
+
+
+class UserListItem(BaseModel):
+    """一覧 1 行（`GET /api/admin/users`）。
+
+    ``username`` は ``users.display_name``、``role`` はアプリ語彙
+    （STUDENT / TEACHER / SYSTEM_ADMIN）。DB 語彙（learner / instructor / admin）は
+    API 境界の外に出さない。
+    """
+    id: str
+    username: str
+    email: str = ""
+    role: str = "STUDENT"
+    status: str = "active"
+    created_at: Optional[str] = None
+    last_login_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+
+
+class UserListResponse(BaseModel):
+    users: list[UserListItem] = Field(default_factory=list)
+    total: int = 0
+
+
+class UserStatusResponse(BaseModel):
+    """状態遷移系（suspend / restore / 削除予約 / 取消）の共通レスポンス。"""
+    id: str
+    username: str = ""
+    role: str = "STUDENT"
+    status: str = "active"
+    status_reason: str = ""
+    purge_after: Optional[str] = None
+
+
+class SuspendUserRequest(BaseModel):
+    """停止リクエスト。``reason`` は必須（監査に残す。空文字は 422）。"""
+    reason: str
+
+
+class PasswordResetRequest(BaseModel):
+    """パスワード再設定リクエスト（SYSTEM_ADMIN のみ）。最低 8 文字はサーバ検証。"""
+    new_password: str
+
+
+class PasswordResetResponse(BaseModel):
+    """再設定結果。**パスワード・ハッシュは返さない**（AL4）。
+
+    ``self_reset`` が true のとき、実行者自身のトークンも失効している
+    （``token_generation++`` は無条件のため）。UI は再ログインへ誘導する。
+    """
+    id: str
+    username: str = ""
+    password_updated_at: Optional[str] = None
+    self_reset: bool = False
+
+
+class AuthEventOut(BaseModel):
+    """認証イベント 1 行（新しい順）。``username_attempted`` は返さない
+    （本人行に user_id が立った行のみを対象にするため冗長。列挙情報も増やさない）。"""
+    event: str
+    created_at: Optional[str] = None
+    ip_address: Optional[str] = None
+    user_agent: Optional[str] = None
+
+
+class UserActivityUser(BaseModel):
+    """個票ヘッダ（一覧と同型 + 運用に必要な 2 列）。"""
+    id: str
+    username: str
+    email: str = ""
+    role: str = "STUDENT"
+    status: str = "active"
+    created_at: Optional[str] = None
+    last_login_at: Optional[str] = None
+    last_seen_at: Optional[str] = None
+    status_reason: str = ""
+    purge_after: Optional[str] = None
+
+
+class UserActivityResponse(BaseModel):
+    """個票照会（`GET /api/admin/users/{id}/activity`、SYSTEM_ADMIN のみ）。
+
+    ``llm_usage`` は U層 ``collect_metrics`` の再利用（reported / estimated 分離, U1）。
+    集計不能時は ``{"available": false}`` に縮退する（fail-soft。個票表示を止めない）。
+    """
+    user: UserActivityUser
+    auth_events: list[AuthEventOut] = Field(default_factory=list)
+    llm_usage: dict = Field(default_factory=dict)
+
+
+class ScheduleDeletionRequest(BaseModel):
+    """削除予約リクエスト。``grace_days`` 省略時は V層 ``DEFAULT_GRACE_DAYS``（14 日）。"""
+    grace_days: Optional[int] = None
+
+
+class TransferOwnershipRequest(BaseModel):
+    """所有物の移管リクエスト。移管先は active な教員・管理者のみ（422）。"""
+    to_user_id: str
+
+
+class TransferOwnershipResponse(BaseModel):
+    """移管結果。``transferred`` は {"documents": N, "courses": N, "groups": N}。"""
+    id: str
+    to_user_id: str
+    transferred: dict = Field(default_factory=dict)

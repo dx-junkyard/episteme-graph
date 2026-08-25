@@ -209,6 +209,7 @@ PDF アップロード
 ### 群7: 運営基盤
 
 - [認証・権限・開示範囲](features/auth-visibility.md)
+  ／[アカウントライフサイクル管理（一覧・停止・削除・リセット・利用実績照会）](features/account_lifecycle_management_design.md)
   ／[オブジェクトスコープ権限是正（Security Phase 3）指示書](features/security_and_context_phase3_implementation_directive.md)
   ・[完了報告](features/security_and_context_phase3_completion_report.md)
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)

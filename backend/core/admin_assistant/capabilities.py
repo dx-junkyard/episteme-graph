@@ -298,6 +298,157 @@ _REGISTRY: list[Capability] = [
             _step("teachers", "create_teacher_form", "教員アカウント作成フォームに入力します"),
         ),
     ),
+    # --- アカウントライフサイクル管理 ---
+    # 正本: docs/features/account_lifecycle_management_design.md §9.4。
+    # `required_role` は 1 値なので **対象ロール別に capability を分割する**。
+    # `users.suspend` 1 本に required_role=TEACHER を付けると Copilot が TEACHER に
+    # 教員停止の手順まで案内してしまい P1 違反になる。
+    # v1 は action tool（actions/ の capture_before/apply/revert）を作らず、
+    # guidance / locate 用の宣言に留める（users.create_teacher と同じ構え）。
+    Capability(
+        id="users.list",
+        screen="students",
+        title="アカウントを一覧する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/users.md#list-users",
+        description="学生アカウントの一覧・状態・最終ログインを確認する（教員は学生のみ）。",
+        api={"method": "GET", "path": "/api/admin/users"},
+        locate_steps=(
+            _step("students", "user_list", "アカウント一覧です。状態と最終ログインを確認できます"),
+        ),
+    ),
+    Capability(
+        id="users.suspend_student",
+        screen="students",
+        title="学生アカウントを停止する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_ACTION,
+        reversible=True,   # 「再開」で元に戻せる（L2 永続可逆）
+        confirm=True,      # 本人がログインできなくなるため理由入力 + 確認を要求する
+        target_type="user",
+        howto_doc="admin_operations/users.md#suspend-student",
+        description="学生アカウントのログインを停止する（理由必須・再開可能）。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/suspend"},
+        revert={"strategy": "restore_user"},
+        locate_steps=(
+            _step("students", "user_list", "対象の学生を一覧から選びます"),
+            _step("students", "user_suspend_button", "「停止…」を押して理由を入力します",
+                  precondition="user_selected"),
+        ),
+    ),
+    Capability(
+        id="users.restore_student",
+        screen="students",
+        title="学生アカウントの停止を解除する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_ACTION,
+        reversible=True,
+        confirm=True,
+        target_type="user",
+        howto_doc="admin_operations/users.md#restore-student",
+        description="停止中の学生アカウントを再開する。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/restore"},
+        revert={"strategy": "suspend_user"},
+        locate_steps=(
+            _step("students", "user_list", "停止中の学生を一覧から選びます"),
+            _step("students", "user_restore_button", "「再開」を押します",
+                  precondition="user_selected"),
+        ),
+    ),
+    Capability(
+        id="users.suspend_teacher",
+        screen="teachers",
+        title="教員アカウントを停止する",
+        required_role=ROLE_SYSTEM_ADMIN,  # 教員・管理者への操作は SYSTEM_ADMIN のみ
+        kind=KIND_ACTION,
+        reversible=True,
+        confirm=True,
+        target_type="user",
+        howto_doc="admin_operations/users.md#suspend-teacher",
+        description="教員アカウントのログインを停止する（所有教材・コースの共有と受講は継続する）。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/suspend"},
+        revert={"strategy": "restore_user"},
+        locate_steps=(
+            _step("teachers", "user_list", "対象の教員を一覧から選びます"),
+            _step("teachers", "user_suspend_button", "「停止…」を押して理由を入力します",
+                  precondition="user_selected"),
+        ),
+    ),
+    Capability(
+        id="users.restore_teacher",
+        screen="teachers",
+        title="教員アカウントの停止を解除する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_ACTION,
+        reversible=True,
+        confirm=True,
+        target_type="user",
+        howto_doc="admin_operations/users.md#restore-teacher",
+        description="停止中の教員アカウントを再開する。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/restore"},
+        revert={"strategy": "suspend_user"},
+        locate_steps=(
+            _step("teachers", "user_list", "停止中の教員を一覧から選びます"),
+            _step("teachers", "user_restore_button", "「再開」を押します",
+                  precondition="user_selected"),
+        ),
+    ),
+    Capability(
+        id="users.password_reset",
+        screen="teachers",
+        title="パスワードを再設定する",
+        required_role=ROLE_SYSTEM_ADMIN,  # 対象が学生でも SYSTEM_ADMIN のみ（§14-1 裁定）
+        kind=KIND_ACTION,
+        reversible=False,  # 旧パスワードは復元できない（発行済みトークンも即時失効する）
+        confirm=True,
+        target_type="user",
+        howto_doc="admin_operations/users.md#password-reset",
+        description="アカウントのパスワードを管理者が再設定する（取り消し不可・既存ログインは失効）。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/password-reset"},
+        locate_steps=(
+            _step("teachers", "user_list", "対象のアカウントを一覧から選びます"),
+            _step("teachers", "user_reset_button", "「パスワード再設定…」を押します",
+                  precondition="user_selected"),
+        ),
+    ),
+    Capability(
+        id="users.schedule_deletion",
+        screen="teachers",
+        title="アカウントの削除を予約する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_ACTION,
+        # 予約自体は取消可能だが、猶予経過後の outcome が破壊的なため reversible=False 扱い
+        reversible=False,
+        confirm=True,
+        target_type="user",
+        howto_doc="admin_operations/users.md#schedule-deletion",
+        description="停止中のアカウントに削除猶予を設定する（猶予中は取消可能）。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/deletion"},
+        locate_steps=(
+            _step("teachers", "user_list", "停止中のアカウントを一覧から選びます"),
+            _step("teachers", "user_delete_button", "「削除予約…」を押します",
+                  precondition="user_selected"),
+        ),
+    ),
+    Capability(
+        id="users.transfer_ownership",
+        screen="teachers",
+        title="所有物を別の教員へ移管する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_ACTION,
+        reversible=False,  # 逆方向の移管は可能だが、同一操作の revert としては扱わない
+        confirm=True,
+        target_type="user",
+        howto_doc="admin_operations/users.md#transfer-ownership",
+        description="教材・コース・グループの所有者を後任の教員へ付け替える（取り消し不可）。",
+        api={"method": "POST", "path": "/api/admin/users/{user_id}/transfer-ownership"},
+        locate_steps=(
+            _step("teachers", "user_list", "移管元の教員を一覧から選びます"),
+            _step("teachers", "user_transfer_button", "「移管…」を押して移管先を選びます",
+                  precondition="user_selected"),
+        ),
+    ),
     # --- グループ管理 (groups) ---
     Capability(
         id="groups.manage",

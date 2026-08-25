@@ -740,3 +740,170 @@ class TestAgentsNeverCallProviderSdkDirectly:
             "_gemini_json_with_image(",
         ):
             assert helper in fn_src, f"{helper} not dispatched from generate_json_with_image"
+
+
+# ===========================================================================
+# 12.（追加）ユーザー別 LLM 利用実績照会（アカウントライフサイクル管理設計書 §7-2）
+#
+# AL6 継承: ユーザー別数値は既存の /metrics（_require_system_admin）から露出する
+# だけで、新しいロールゲート・新しい公開ルートは作らない。reported/estimated の
+# 分離（U1）は user_id 軸でも維持される。
+# ===========================================================================
+
+
+class TestUserIdUsageInquiryPhase2:
+    def test_user_id_is_a_whitelisted_group_by_field(self):
+        from core.llm_usage.metrics import _GROUP_BY_SQL
+
+        assert "user_id" in _GROUP_BY_SQL
+        # 値そのものが SQL に直結する固定文字列であり、リクエスト値が混入しないことの確認
+        assert _GROUP_BY_SQL["user_id"] == "user_id"
+
+    def test_collect_metrics_accepts_optional_user_id_filter_without_breaking_signature(self):
+        """既存呼び出し（user_id 省略）との後方互換 + 指定時は WHERE 句に反映される。"""
+        from core.llm_usage import metrics as metrics_module
+
+        session = _FakeMetricsSession([])
+        # 省略時: 例外を出さず、SQL に user_id 条件が入らない
+        metrics_module.collect_metrics(
+            session, date_from="2026-08-01", date_to="2026-08-02", group_by=["feature"]
+        )
+
+        session2 = _FakeMetricsSession([])
+        captured = {}
+
+        def _capturing_execute(stmt, params=None):
+            captured["sql"] = str(stmt)
+            captured["params"] = params
+            return _FakeMetricsQueryResult([])
+
+        session2.execute = _capturing_execute
+        metrics_module.collect_metrics(
+            session2,
+            date_from="2026-08-01",
+            date_to="2026-08-02",
+            group_by=["feature"],
+            user_id="11111111-1111-1111-1111-111111111111",
+        )
+        assert "user_id = :user_id" in captured["sql"]
+        assert captured["params"]["user_id"] == "11111111-1111-1111-1111-111111111111"
+
+    def test_collect_metrics_group_by_user_id_row_shape_keeps_reported_estimated_separated(self):
+        """user_id 軸でグルーピングしても reported/estimated 分離（U1）は不変。"""
+        from core.llm_usage import metrics as metrics_module
+
+        rows = [
+            ("u-1", "gpt-4o", "reported", 100, 20, 120, 0, 3),
+            ("u-1", "gpt-4o", "estimated_heuristic", 10, 2, 12, 0, 1),
+            (None, "gpt-4o-mini", "reported", 5, 1, 6, 0, 1),
+        ]
+        session = _FakeMetricsSession(rows)
+        result = metrics_module.collect_metrics(
+            session, date_from="2026-08-01", date_to="2026-08-02", group_by=["user_id"]
+        )
+        rows_by_key = {row["key"]["user_id"]: row for row in result["rows"]}
+        assert rows_by_key["u-1"]["reported"]["calls"] == 3
+        assert rows_by_key["u-1"]["estimated"]["calls"] == 1
+        assert rows_by_key[None]["reported"]["calls"] == 1
+        # 合算した単一フィールドが無いこと（U1 の row 形は user_id 軸でも同一）
+        for row in result["rows"]:
+            assert set(row.keys()) == {"key", "reported", "estimated", "cost_usd"}
+
+    def test_attach_user_display_names_distinguishes_unattributed_and_unknown(self):
+        """設計書 §7-2: user_id=None は『未帰属』、users に存在しない UUID は
+        『不明ユーザー』として区別する（U1 精神 — 欠測を隠さず正直に出す）。
+        解決できた UUID は display_name で表示する。
+        """
+        import routes.llm_usage as llm_usage_routes
+
+        rows = [
+            {"key": {"user_id": None}, "reported": {}, "estimated": {}, "cost_usd": None},
+            {"key": {"user_id": "known-1"}, "reported": {}, "estimated": {}, "cost_usd": None},
+            {"key": {"user_id": "orphan-1"}, "reported": {}, "estimated": {}, "cost_usd": None},
+        ]
+
+        class _FakeUsersQueryResult:
+            def fetchall(self_inner):
+                return [("known-1", "山田太郎")]
+
+        class _FakeUsersSession:
+            def execute(self_inner, stmt, params=None):
+                assert set(params["ids"]) == {"known-1", "orphan-1"}
+                return _FakeUsersQueryResult()
+
+        llm_usage_routes._attach_user_display_names(_FakeUsersSession(), rows)
+
+        by_id = {row["key"]["user_id"]: row["key"]["user_display_name"] for row in rows}
+        assert by_id[None] == "未帰属"
+        assert by_id["known-1"] == "山田太郎"
+        assert by_id["orphan-1"] == "不明ユーザー"
+
+    def test_attach_user_display_names_skips_users_query_when_no_ids_present(self):
+        """全行が未帰属（user_id=None）のときは users への問い合わせ自体を発行しない。"""
+        import routes.llm_usage as llm_usage_routes
+
+        rows = [{"key": {"user_id": None}, "reported": {}, "estimated": {}, "cost_usd": None}]
+
+        class _ExplodingSession:
+            def execute(self_inner, stmt, params=None):
+                raise AssertionError("users query must not run when there are no ids")
+
+        llm_usage_routes._attach_user_display_names(_ExplodingSession(), rows)
+        assert rows[0]["key"]["user_display_name"] == "未帰属"
+
+    def test_metrics_route_attaches_display_names_only_when_grouping_by_user_id(self, monkeypatch):
+        """group_by に user_id が無ければ users への問い合わせを発行しない
+        （既存の feature/model 集計の挙動を変えない）。"""
+        import routes.llm_usage as llm_usage_routes
+
+        called = {"attach": False}
+
+        def _fake_attach(session, rows):
+            called["attach"] = True
+
+        def fake_collect_metrics(session, *, date_from, date_to, group_by, user_id=None):
+            return {"from": date_from, "to": date_to, "rows": [], "dropped_events": 0,
+                     "price_table_loaded": False}
+
+        class _FakeSession:
+            def close(self_inner):
+                pass
+
+        monkeypatch.setattr(llm_usage_routes, "get_session", lambda: _FakeSession())
+        monkeypatch.setattr(llm_usage_routes, "collect_metrics", fake_collect_metrics)
+        monkeypatch.setattr(llm_usage_routes, "_attach_user_display_names", _fake_attach)
+
+        llm_usage_routes.get_llm_usage_metrics(
+            date_from="2026-08-01", date_to="2026-08-02", group_by="feature",
+            user_id=None, current_user={"id": "admin-1", "role": "SYSTEM_ADMIN"},
+        )
+        assert called["attach"] is False
+
+        llm_usage_routes.get_llm_usage_metrics(
+            date_from="2026-08-01", date_to="2026-08-02", group_by="user_id",
+            user_id=None, current_user={"id": "admin-1", "role": "SYSTEM_ADMIN"},
+        )
+        assert called["attach"] is True
+
+    def test_no_second_route_or_role_gate_introduced_for_user_id_grouping(self):
+        """user_id 軸はロールゲートを変えず、既存の /metrics 1本から露出する
+        （AL6: 新しい公開エンドポイント・緩いロールを作らない）。"""
+        import routes.llm_usage as llm_usage_routes
+
+        metrics_routes = [r for r in llm_usage_routes.router.routes if r.path.endswith("/metrics")]
+        assert len(metrics_routes) == 1
+        dependant = metrics_routes[0].dependant
+        dep_names = {dep.call.__name__ for dep in dependant.dependencies if dep.call}
+        assert dep_names == {"_require_system_admin"}
+
+    def test_migration_069_adds_index_without_editing_043(self):
+        """043_llm_usage_events.sql（正本）を編集せず、新番号ファイルでインデックスを
+        追加していること（マイグレーション正本一本化ルール）。"""
+        migration_069 = (BACKEND / "db" / "069_llm_usage_user_index.sql").read_text(
+            encoding="utf-8"
+        )
+        assert "CREATE INDEX IF NOT EXISTS idx_llm_usage_events_user" in migration_069
+        assert "llm_usage_events(user_id, occurred_at)" in migration_069
+        assert "WHERE user_id IS NOT NULL" in migration_069
+        # 043.sql 自体は本 Phase で変更しない
+        assert "idx_llm_usage_events_user" not in _MIGRATION_SQL_SRC

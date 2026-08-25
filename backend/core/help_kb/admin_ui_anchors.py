@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。全266アンカーがマップ済み
+no_hit 経路で需要を計測する）。全277アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -289,6 +289,11 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "schema.reject-btn",
         "schema.types-list",
         "students.student-form",
+        "students.user-activity",
+        "students.user-delete",
+        "students.user-list",
+        "students.user-reset",
+        "students.user-suspend",
         "stumbles.course-select",
         "stumbles.refresh-btn",
         "stumbles.table",
@@ -299,6 +304,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "system-stats.sort-columns",
         "system-stats.teacher-filter",
         "teachers.teacher-form",
+        "teachers.user-activity",
+        "teachers.user-delete",
+        "teachers.user-list",
+        "teachers.user-reset",
+        "teachers.user-suspend",
+        "teachers.user-transfer",
         "versioning.cancel-deletion",
         "versioning.inbox",
         "versioning.inbox-adopt",
@@ -855,6 +866,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- students.* — 学生管理タブ ------------------------------------------------------
     # 学生を作成
     "students.student-form": "teacher/16-admin-students.md#student-form",
+    # 学生アカウント一覧
+    "students.user-list": "teacher/16-admin-students.md#user-list",
+    # 停止… / 再開（教員以上）
+    "students.user-suspend": "teacher/16-admin-students.md#user-suspend",
+    # 以下3件は SYSTEM_ADMIN 限定のボタン（AL7）。TEACHER には
+    # resolve_admin_ui_anchors の fail-closed により配信されない値（system_admin/）を指す。
+    # パスワード再設定…（学生）
+    "students.user-reset": "system_admin/10-admin-teachers.md#student-user-reset",
+    # 利用状況…（学生）
+    "students.user-activity": "system_admin/10-admin-teachers.md#student-user-activity",
+    # 削除予約… / 削除予約を取消（学生）
+    "students.user-delete": "system_admin/10-admin-teachers.md#student-user-delete",
 
     # --- stumbles.* — つまづきデータタブ ---------------------------------------------------
     # コース選択
@@ -881,6 +904,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- teachers.* — 教員管理タブ（SYSTEM_ADMIN 限定） -------------------------------------
     # 教員を作成
     "teachers.teacher-form": "system_admin/10-admin-teachers.md#teacher-form",
+    # 教員アカウント一覧
+    "teachers.user-list": "system_admin/10-admin-teachers.md#user-list",
+    # 停止… / 再開
+    "teachers.user-suspend": "system_admin/10-admin-teachers.md#user-suspend",
+    # パスワード再設定…
+    "teachers.user-reset": "system_admin/10-admin-teachers.md#user-reset",
+    # 利用状況…
+    "teachers.user-activity": "system_admin/10-admin-teachers.md#user-activity",
+    # 削除予約… / 削除予約を取消
+    "teachers.user-delete": "system_admin/10-admin-teachers.md#user-delete",
+    # 移管…
+    "teachers.user-transfer": "system_admin/10-admin-teachers.md#user-transfer",
 
     # --- versioning.* — 共有版管理（V層。コース管理/教材管理の「版の管理」ボタン、通知ベルから開く横断UI） ---------------
     # 削除予約を取り消す
