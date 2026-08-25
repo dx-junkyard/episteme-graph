@@ -212,6 +212,7 @@ PDF アップロード
   ／[アカウントライフサイクル管理（一覧・停止・削除・リセット・利用実績照会）](features/account_lifecycle_management_design.md)
   ／[オブジェクトスコープ権限是正（Security Phase 3）指示書](features/security_and_context_phase3_implementation_directive.md)
   ・[完了報告](features/security_and_context_phase3_completion_report.md)
+- [URL指定による教材取得（取得先ドメイン許可リスト + SSRF ガード）](features/url_material_upload_design.md)
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)
 - [状態管理・通知基盤](features/status_notification_design.md)
 - [ガイダンス層（G層）](features/guidance_layer_design.md)

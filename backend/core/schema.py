@@ -490,6 +490,10 @@ AUDIT_ENTITY_CATEGORY_GAP = "category_gap"
 # transfer_ownership。metadata.action で区別, migration 068）
 AUDIT_ENTITY_USER_ACCOUNT = "user_account"
 
+# URL指定による教材取得の取得先ドメイン許可リスト（登録 create / 解除 delete。
+# metadata.action で区別, migration 070）
+AUDIT_ENTITY_URL_FETCH_DOMAIN = "url_fetch_domain"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -528,4 +532,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
     AUDIT_ENTITY_CATEGORY_GAP,
     AUDIT_ENTITY_USER_ACCOUNT,
+    AUDIT_ENTITY_URL_FETCH_DOMAIN,
 )

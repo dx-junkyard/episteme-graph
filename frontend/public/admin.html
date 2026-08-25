@@ -300,6 +300,11 @@
             ファイルを選択
             <input type="file" id="file-input" accept=".pdf,.tar.gz,.tgz,application/pdf,application/gzip" hidden>
           </label>
+          <!-- URL指定による教材取得: 押すとダイアログ（#url-upload-modal）が開き、即取得ではない -->
+          <p style="margin-top:8px">
+            <button type="button" id="url-upload-link" data-ui-anchor="materials.url-upload"
+                    style="background:none;border:none;padding:0;font-size:12px;color:var(--color-accent, #2563eb);text-decoration:underline;cursor:pointer">URLから取得（arXiv など）</button>
+          </p>
         </div>
         <!-- 画像読み取りパイプライン（migration 041）: 既定 off。vision LLM は明示オプトインのみで呼ぶ -->
         <label data-ui-anchor="materials.analyze-images" style="display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">

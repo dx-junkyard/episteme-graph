@@ -3144,25 +3144,31 @@
         return res.json();
       })
       .then(function (data) {
-        showUploadStatus(
-          escHtml(file.name) + " のアップロードが完了しました。グラフ構築中..." +
-          '<span class="typing" style="display:inline-flex;margin-left:8px"><span></span><span></span><span></span></span>',
-          "info"
-        );
-        showMaterialNextStepCard();
-        loadMaterials();
-        loadMaterialsForSelection();
-        if (window.AdminNextSteps) window.AdminNextSteps.refresh();
-        if (data.task_id) {
-          startTaskPolling(data.task_id, file.name);
-        } else {
-          disableUploadUI(false);
-        }
+        handleUploadAccepted(data, file.name);
       })
       .catch(function (err) {
         showUploadStatus("アップロードに失敗しました: " + (err.detail || "不明なエラー"), "error");
         disableUploadUI(false);
       });
+  }
+
+  // 受理（202）後の共通経路。ファイル選択とURL指定の両方がここへ合流する
+  // （状態表示・タスクポーリング・一覧更新を二重に実装しない）。
+  function handleUploadAccepted(data, displayName) {
+    showUploadStatus(
+      escHtml(displayName) + " のアップロードが完了しました。グラフ構築中..." +
+      '<span class="typing" style="display:inline-flex;margin-left:8px"><span></span><span></span><span></span></span>',
+      "info"
+    );
+    showMaterialNextStepCard();
+    loadMaterials();
+    loadMaterialsForSelection();
+    if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+    if (data && data.task_id) {
+      startTaskPolling(data.task_id, displayName);
+    } else {
+      disableUploadUI(false);
+    }
   }
 
   function disableUploadUI(disabled) {
@@ -3269,6 +3275,345 @@
       });
     }
     statusEl.parentNode.insertBefore(card, statusEl.nextSibling);
+  }
+
+  // ── URL指定による教材取得 ──────────────────────────────────────────
+  //
+  // 取得できるのは管理者が許可したドメインのみ（サーバ側で強制する）。この画面は
+  // 許可リストを取得して事実文で提示し、空なら取得ボタンを理由付きで無効化する。
+  // 受理後は既存のファイルアップロードと同じ経路（handleUploadAccepted）へ合流する。
+  var _urlUploadSubmitting = false;
+
+  function initUrlUpload() {
+    var link = document.getElementById("url-upload-link");
+    if (!link) return;
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      openUrlUploadModal();
+    });
+  }
+
+  // サーバの detail（事実文）をそのまま見せる。取れないときだけ既定文へ縮退する。
+  function _urlFetchDetailText(err) {
+    if (!err) return "不明なエラー";
+    var detail = err.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (detail && detail.length && typeof detail[0] === "object" && detail[0].msg) return String(detail[0].msg);
+    if (err.message && err.message !== "Unauthorized") return String(err.message);
+    return "不明なエラー";
+  }
+
+  function closeUrlUploadModal() {
+    var overlay = document.getElementById("url-upload-modal");
+    if (overlay) overlay.remove();
+  }
+
+  function openUrlUploadModal() {
+    closeUrlUploadModal();
+    _urlUploadSubmitting = false;
+
+    var overlay = document.createElement("div");
+    overlay.id = "url-upload-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.url-upload-modal");
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:460px;max-width:560px;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">URLから教材を取得</h3>' +
+          '<button type="button" id="url-upload-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<label for="url-upload-input" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px">教材のURL</label>' +
+        '<input type="text" id="url-upload-input" placeholder="https://arxiv.org/pdf/2401.00001" ' +
+          'style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+        '<div id="url-upload-domains-note" style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px">許可ドメインを確認しています。</div>' +
+        '<div id="url-upload-status" class="upload-status" style="display:none;margin-top:10px"></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
+          '<button type="button" id="url-upload-cancel" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">キャンセル</button>' +
+          '<button type="button" id="url-upload-submit" data-ui-anchor="materials.url-upload-submit" class="admin-action-btn" disabled>アップロード</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) closeUrlUploadModal(); });
+    document.getElementById("url-upload-close").addEventListener("click", closeUrlUploadModal);
+    document.getElementById("url-upload-cancel").addEventListener("click", closeUrlUploadModal);
+    document.getElementById("url-upload-submit").addEventListener("click", submitUrlUpload);
+    var input = document.getElementById("url-upload-input");
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitUrlUpload();
+      }
+    });
+    input.focus();
+
+    loadUrlUploadDomains();
+  }
+
+  // 無効化したボタンには理由の事実文を必ず添える。
+  function _urlUploadSetSubmitEnabled(enabled, reason) {
+    var btn = document.getElementById("url-upload-submit");
+    if (btn) btn.disabled = !enabled;
+    var note = document.getElementById("url-upload-domains-note");
+    if (note && reason) note.textContent = reason;
+  }
+
+  function _urlUploadStatus(message, kind) {
+    var el = document.getElementById("url-upload-status");
+    if (!el) return;
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "";
+    el.className = "upload-status upload-status-" + (kind || "info");
+    el.textContent = message;
+  }
+
+  function loadUrlUploadDomains() {
+    apiFetch("/admin/url-fetch-domains")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var domains = (data && data.domains) || [];
+        var names = [];
+        for (var i = 0; i < domains.length; i++) {
+          if (domains[i] && domains[i].domain) names.push(domains[i].domain);
+        }
+        if (!names.length) {
+          _urlUploadSetSubmitEnabled(false, "URLからの取得は、管理者が取得先ドメインを許可すると利用できます。");
+          return;
+        }
+        _urlUploadSetSubmitEnabled(true, "取得できるのは管理者が許可したドメインのみです: " + names.join(", "));
+      })
+      .catch(function () {
+        _urlUploadSetSubmitEnabled(false, "許可ドメインを取得できませんでした。時間をおいて開き直してください。");
+      });
+  }
+
+  function submitUrlUpload() {
+    if (_urlUploadSubmitting) return;
+    var btn = document.getElementById("url-upload-submit");
+    if (btn && btn.disabled) return;
+    var input = document.getElementById("url-upload-input");
+    var url = input ? input.value.trim() : "";
+    if (!url) {
+      _urlUploadStatus("URLを入力してください。", "error");
+      return;
+    }
+
+    var payload = { url: url };
+    // 画像読み取りパイプライン（migration 041）: ファイル選択時と同じチェックボックスを引き継ぐ。
+    var analyzeImagesEl = document.getElementById("upload-analyze-images");
+    var analyzeImagesChecked = !!(analyzeImagesEl && analyzeImagesEl.checked);
+    payload.analyze_images = analyzeImagesChecked;
+    // M層（LLM モデル選択, migration 061）: ファイル選択時と同じ選択を run options へ渡す。
+    if (window.AdminLlmModels) {
+      var uploadModels = window.AdminLlmModels.getUploadModels(analyzeImagesChecked);
+      if (uploadModels) payload.models = uploadModels;
+    }
+
+    _urlUploadSubmitting = true;
+    if (btn) btn.disabled = true;
+    _urlUploadStatus("取得しています...", "info");
+    disableUploadUI(true);
+
+    apiFetch("/admin/materials/upload-from-url", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        _urlUploadSubmitting = false;
+        closeUrlUploadModal();
+        handleUploadAccepted(data, (data && (data.filename || data.title)) || url);
+      })
+      .catch(function (err) {
+        _urlUploadSubmitting = false;
+        if (btn) btn.disabled = false;
+        disableUploadUI(false);
+        _urlUploadStatus("取得に失敗しました: " + _urlFetchDetailText(err), "error");
+      });
+  }
+
+  // ── URL取得の許可ドメイン（運用「AIモデル」タブ = SYSTEM_ADMIN 限定）──────
+  //
+  // 教材管理タブは SYSTEM_ADMIN では非表示（setupRoleBasedUI）なので、この区画は
+  // 運用グループの `#tab-llm-models` パネル末尾に動的生成する。admin-llm-models.js の
+  // buildOpsTab() は data-llm-models-built ガードで初回1回だけ innerHTML を書くため、
+  // initOpsTab の後に append すれば消えない。冪等（既に居れば作り直さない）。
+  var _urlFetchDomainsBusy = false;
+
+  function ensureUrlFetchDomainsSection() {
+    var panel = document.getElementById("tab-llm-models");
+    if (!panel) return;
+    var section = document.getElementById("url-fetch-domains-section");
+    if (section && section.parentNode === panel) {
+      loadUrlFetchDomains();
+      return;
+    }
+    if (section && section.parentNode) section.parentNode.removeChild(section);
+
+    section = document.createElement("div");
+    section.className = "admin-section";
+    section.id = "url-fetch-domains-section";
+    section.setAttribute("data-ui-anchor", "llm-models.url-fetch-domains");
+    section.innerHTML =
+      '<h3 class="admin-section-title">URL取得の許可ドメイン</h3>' +
+      '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+        "ここに登録したドメインからのみ、教員は URL を指定して教材を取得できます。" +
+      "</p>" +
+      '<div id="url-fetch-domains-status" class="upload-status" style="display:none;margin-bottom:10px"></div>' +
+      '<div id="url-fetch-domains-list" style="margin-bottom:12px">' +
+        '<p style="color:var(--color-text-tertiary);font-size:13px;margin:0">読み込み中...</p>' +
+      "</div>" +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<input type="text" id="url-fetch-domain-input" placeholder="arxiv.org" ' +
+          'style="flex:0 1 260px;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+        '<button type="button" id="url-fetch-domain-add" data-ui-anchor="llm-models.url-fetch-domain-add" class="admin-action-btn">追加</button>' +
+      "</div>";
+    panel.appendChild(section);
+
+    var addBtn = document.getElementById("url-fetch-domain-add");
+    if (addBtn) addBtn.addEventListener("click", urlFetchDomainAdd);
+    var input = document.getElementById("url-fetch-domain-input");
+    if (input) {
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          urlFetchDomainAdd();
+        }
+      });
+    }
+    var list = document.getElementById("url-fetch-domains-list");
+    if (list) {
+      list.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-url-domain-remove]") : null;
+        if (!btn || btn.disabled) return;
+        urlFetchDomainRemove(btn.getAttribute("data-url-domain-remove"));
+      });
+    }
+    loadUrlFetchDomains();
+  }
+
+  function _urlFetchDomainsStatus(message, kind) {
+    var el = document.getElementById("url-fetch-domains-status");
+    if (!el) return;
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "";
+    el.className = "upload-status upload-status-" + (kind || "info");
+    el.textContent = message;
+  }
+
+  function loadUrlFetchDomains() {
+    var list = document.getElementById("url-fetch-domains-list");
+    if (!list) return;
+    apiFetch("/admin/url-fetch-domains")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        renderUrlFetchDomains((data && data.domains) || []);
+      })
+      .catch(function () {
+        list.innerHTML = '<p style="color:var(--color-text-danger);font-size:13px;margin:0">許可ドメインの読み込みに失敗しました。</p>';
+      });
+  }
+
+  function renderUrlFetchDomains(domains) {
+    var list = document.getElementById("url-fetch-domains-list");
+    if (!list) return;
+    if (!domains.length) {
+      list.innerHTML =
+        '<p style="color:var(--color-text-tertiary);font-size:13px;margin:0">' +
+        "許可ドメインは登録されていません。登録するまで教員はURLからの取得を利用できません。" +
+        "</p>";
+      return;
+    }
+    var rows = "";
+    for (var i = 0; i < domains.length; i++) {
+      var d = domains[i] || {};
+      rows +=
+        "<tr>" +
+          "<td>" + escHtml(d.domain) + "</td>" +
+          "<td>" + escHtml(formatDateTime(d.created_at)) + "</td>" +
+          '<td><button type="button" class="admin-action-btn" data-ui-anchor="llm-models.url-fetch-domain-remove" ' +
+            'data-url-domain-remove="' + escHtml(d.domain) + '">削除</button></td>' +
+        "</tr>";
+    }
+    list.innerHTML =
+      '<table class="admin-table">' +
+        "<thead><tr><th>ドメイン</th><th>登録日</th><th>操作</th></tr></thead>" +
+        "<tbody>" + rows + "</tbody>" +
+      "</table>";
+  }
+
+  function urlFetchDomainAdd() {
+    if (_urlFetchDomainsBusy) return;
+    var input = document.getElementById("url-fetch-domain-input");
+    var domain = input ? input.value.trim() : "";
+    if (!domain) {
+      _urlFetchDomainsStatus("追加するドメインを入力してください。", "error");
+      return;
+    }
+    _urlFetchDomainsBusy = true;
+    _urlFetchDomainsStatus("追加しています...", "info");
+    apiFetch("/admin/url-fetch-domains", {
+      method: "POST",
+      body: JSON.stringify({ domain: domain }),
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        }
+        return res.json().catch(function () { return {}; });
+      })
+      .then(function () {
+        _urlFetchDomainsBusy = false;
+        if (input) input.value = "";
+        _urlFetchDomainsStatus("ドメイン " + domain + " を許可リストに追加しました。", "success");
+        loadUrlFetchDomains();
+      })
+      .catch(function (err) {
+        _urlFetchDomainsBusy = false;
+        _urlFetchDomainsStatus("追加に失敗しました: " + _urlFetchDetailText(err), "error");
+      });
+  }
+
+  function urlFetchDomainRemove(domain) {
+    if (_urlFetchDomainsBusy || !domain) return;
+    if (!confirm("ドメイン " + domain + " を許可リストから削除します。以後このドメインからのURL取得はできなくなります。")) return;
+    _urlFetchDomainsBusy = true;
+    _urlFetchDomainsStatus("削除しています...", "info");
+    apiFetch("/admin/url-fetch-domains/" + encodeURIComponent(domain), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        }
+        return res.json().catch(function () { return {}; });
+      })
+      .then(function () {
+        _urlFetchDomainsBusy = false;
+        _urlFetchDomainsStatus("ドメイン " + domain + " を許可リストから削除しました。", "success");
+        loadUrlFetchDomains();
+      })
+      .catch(function (err) {
+        _urlFetchDomainsBusy = false;
+        _urlFetchDomainsStatus("削除に失敗しました: " + _urlFetchDetailText(err), "error");
+      });
   }
 
   // ── Course Builder Chat ────────────────────────────────────────────
@@ -10044,10 +10389,15 @@
         state: state,
         activateTabView: activateTabView,
       });
+      // URL取得の許可ドメイン（SYSTEM_ADMIN 限定の運用タブに相乗り）。AdminLlmModels.init が
+      // 登録した initOpsTab の直後に走らせる（コールバックは登録順に実行される）ため、
+      // buildOpsTab() の innerHTML 書き込みに消されない。
+      onTabActivate("llm-models", ensureUrlFetchDomainsSection);
     }
 
     if (state.role !== "SYSTEM_ADMIN") {
       initUpload();
+      initUrlUpload();
       // M層 — 教材アップロード区画の解析モデル1行サマリ（init 済みが前提）。
       if (window.AdminLlmModels) window.AdminLlmModels.initMaterialsPanel();
       initCourseBuilder();

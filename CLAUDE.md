@@ -345,6 +345,29 @@ class CartridgeContext:
   PURGE ∪ RETAIN に現れる・判定順序・fail-closed・数値開示）。
   UI アンカーは実装時点で 277 件（件数の正は `test_admin_help_ui_anchors.py`）。
 
+### URL指定による教材取得（migration 070, 2026-08-25）
+
+教員が教材管理タブの「URLから取得」から論文 URL（PDF / TeX `.tar.gz`）を指定すると、
+サーバが取得して**既存のアップロードパイプラインへそのまま流す**層。正本は
+`docs/features/url_material_upload_design.md`（UF1〜UF6）。
+
+- **取得先は許可リストのみ**（migration 070 `url_fetch_domains`）。参照は TEACHER 以上、
+  変更は SYSTEM_ADMIN（「AIモデル」タブ末尾の区画）。**初期状態は空 = 機能無効**で、
+  照合はサーバ側で強制する（UI の無効化は補助）。
+- **migration でシードしない**。毎起動・番号順の全再実行方式のため、初期ドメインを
+  INSERT すると管理者が削除した行が再起動で復活し、削除が効かなくなる。
+- **SSRF ガードの正本は `backend/core/url_fetch.py`**（FastAPI 非 import）: ドット境界の
+  ドメイン照合・`getaddrinfo` の全アドレス検査（private/loopback/link-local/reserved 拒否）・
+  リダイレクト手動追跡（最大5ホップ・**各ホップで再検証**）・実バイトのマジックによる
+  形式判定（拡張子と `Content-Type` を信用しない）・100MB / 60秒の上限。
+  `fetch_source_from_url` は `allowed_domains` 必須引数で、空は専用エラー（迂回口を作らない）。
+- 取得後は `_accept_material_source` へ合流し、フロントも `handleUploadAccepted` で
+  既存アップロードと同一経路（新しい教材種別・新しいポーリングを作らない）。
+- 監査は `AUDIT_ENTITY_URL_FETCH_DOMAIN`。エラーは日本語事実文で、解決した IP 等の内部情報を
+  `detail` に載せない。UI アンカーは `materials.url-upload{,-modal,-submit}` +
+  `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
+- ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
+
 ### 資料の開示範囲 (Visibility)
 教材 (Document) や コース (LearningCourse) は、以下のいずれかの開示範囲を持つ。
 - **Public**: システム全体（全ユーザー）に公開
@@ -2089,7 +2112,7 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
   `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
-  `core/schema.py` を数える — 2026-08-23 時点で36語彙）。
+  `core/schema.py` を数える — 2026-08-25 時点で37語彙）。
   `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は

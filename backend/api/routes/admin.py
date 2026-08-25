@@ -119,6 +119,7 @@ from core.postgres import get_session as _pg_session
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
 from core.schema import (
     AUDIT_ENTITY_DOCUMENT_SHARE,
+    AUDIT_ENTITY_URL_FETCH_DOMAIN,
     AUDIT_ENTITY_USER_ACCOUNT,
 )
 from core.schema_registry import (
@@ -128,6 +129,9 @@ from core.schema_registry import (
     get_predicates,
 )
 from core.status import projector as status_projector
+# URL指定による教材取得（migration 070）: 許可リスト CRUD と SSRF ガード付き
+# ダウンローダの正本。API 層は例外型を HTTP ステータスへ写像するだけ。
+from core import url_fetch
 from core.status import schema as status_schema
 from core.storage import get_storage_client
 # 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
@@ -443,51 +447,28 @@ def _validate_models_option(models: dict) -> dict:
     return validated
 
 
-@router.post("/materials/upload", status_code=202)
-def upload_material(
-    file: UploadFile = File(...),
-    analyze_images: bool = Form(False),
-    models: str | None = Form(None),
-    current_user: dict = Depends(_require_teacher),
+def _accept_material_source(
+    *,
+    source_bytes: bytes,
+    filename: str | None,
+    source_kind: str,
+    analyze_images: bool,
+    models_option: dict | None,
+    current_user: dict,
 ) -> dict:
-    """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+    """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
-    即座に task_id を返却し、処理完了はポーリングで確認する。
+    ``upload_material``（multipart アップロード）と ``upload_material_from_url``
+    （URL 指定取得）の**後半**を共有する。両者の違いは「バイト列をどこから得るか」
+    だけなので、MinIO 保存 → ``documents`` INSERT → background task 登録 →
+    処理スレッド起動 → レスポンス組立を1箇所に集約する。
 
-    ``analyze_images``（画像パイプライン §3）: True のとき ``apparatus_semantics``
-    ステージ（vision LLM による装置図同定）が有効になる。既定 off（原則6:
-    コスト fail-closed）。``figure_image_extraction``（非LLM の図画像抽出）は
-    このフラグに関係なく常時実行される（決定 0-4-2）。
-
-    ``models``（M層設計書 §7・Phase 2）: JSON 文字列でエンコードされた
-    ``{"pipeline": "gpt-5.4-mini", "pipeline.vision": "gpt-4o", ...}`` 形式の
-    run 単位モデル上書き。未指定/空文字は従来どおり素通り（options に
-    ``models`` キーを含めない）。指定時は ``_validate_models_option`` で
-    fail-closed 検証し、``document_analysis_runs.options.models`` に保存する。
+    レスポンス形は既存のアップロード API と**完全に同一**（フロントの分岐を増やさない）。
     """
     import datetime
 
-    source_kind = _uploaded_source_kind(file.filename)
-    if source_kind is None:
-        raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
-
-    models_option: dict | None = None
-    if models:
-        try:
-            parsed_models = json.loads(models)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="'models' must be a JSON object") from exc
-        if not isinstance(parsed_models, dict):
-            raise HTTPException(status_code=422, detail="'models' must be a JSON object")
-        if parsed_models:
-            models_option = _validate_models_option(parsed_models)
-
-    source_bytes = file.file.read()
-    if len(source_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
-
     material_id = str(uuid.uuid4())[:12]
-    object_suffix = _source_object_suffix(file.filename, source_kind)
+    object_suffix = _source_object_suffix(filename, source_kind)
     source_object_name = f"uploads/{material_id}{object_suffix}"
     doc_id = uuid.uuid4()
     task_id = str(uuid.uuid4())[:12]
@@ -513,8 +494,8 @@ def upload_material(
             """),
             {
                 "id": doc_id,
-                "title": _source_title(file.filename),
-                "filename": file.filename,
+                "title": _source_title(filename),
+                "filename": filename,
                 "uploaded_by": current_user["id"],
                 "material_id": material_id,
             },
@@ -534,7 +515,7 @@ def upload_material(
 
     thread = threading.Thread(
         target=process_material_background,
-        args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
+        args=(material_id, str(doc_id), filename, source_bytes, task_id, None, source_kind),
         kwargs={"options": upload_options, "user_id": str(current_user["id"])},
         daemon=True,
     )
@@ -542,19 +523,227 @@ def upload_material(
 
     logger.info(
         "Material upload accepted: %s (%s) task=%s by user=%s analyze_images=%s models=%s",
-        material_id, file.filename, task_id, current_user["id"], analyze_images, bool(models_option),
+        material_id, filename, task_id, current_user["id"], analyze_images, bool(models_option),
     )
 
     return {
         "task_id": task_id,
         "material_id": material_id,
-        "filename": file.filename,
-        "title": _source_title(file.filename),
+        "filename": filename,
+        "title": _source_title(filename),
         "source_kind": source_kind,
         "status": "pending",
         "uploaded_at": now,
         "analyze_images": bool(analyze_images),
     }
+
+
+@router.post("/materials/upload", status_code=202)
+def upload_material(
+    file: UploadFile = File(...),
+    analyze_images: bool = Form(False),
+    models: str | None = Form(None),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+
+    即座に task_id を返却し、処理完了はポーリングで確認する。
+
+    ``analyze_images``（画像パイプライン §3）: True のとき ``apparatus_semantics``
+    ステージ（vision LLM による装置図同定）が有効になる。既定 off（原則6:
+    コスト fail-closed）。``figure_image_extraction``（非LLM の図画像抽出）は
+    このフラグに関係なく常時実行される（決定 0-4-2）。
+
+    ``models``（M層設計書 §7・Phase 2）: JSON 文字列でエンコードされた
+    ``{"pipeline": "gpt-5.4-mini", "pipeline.vision": "gpt-4o", ...}`` 形式の
+    run 単位モデル上書き。未指定/空文字は従来どおり素通り（options に
+    ``models`` キーを含めない）。指定時は ``_validate_models_option`` で
+    fail-closed 検証し、``document_analysis_runs.options.models`` に保存する。
+    """
+    source_kind = _uploaded_source_kind(file.filename)
+    if source_kind is None:
+        raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
+
+    models_option: dict | None = None
+    if models:
+        try:
+            parsed_models = json.loads(models)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="'models' must be a JSON object") from exc
+        if not isinstance(parsed_models, dict):
+            raise HTTPException(status_code=422, detail="'models' must be a JSON object")
+        if parsed_models:
+            models_option = _validate_models_option(parsed_models)
+
+    source_bytes = file.file.read()
+    if len(source_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    return _accept_material_source(
+        source_bytes=source_bytes,
+        filename=file.filename,
+        source_kind=source_kind,
+        analyze_images=analyze_images,
+        models_option=models_option,
+        current_user=current_user,
+    )
+
+
+# ---------------------------------------------------------------------------
+# URL指定による教材取得（migration 070）
+#
+# サーバ側から任意の URL を取得する経路は SSRF の入口になるため、取得先ドメインを
+# SYSTEM_ADMIN が管理する許可リスト（`url_fetch_domains`）で制限する。**初期状態は
+# 空 = 機能無効**（fail-closed）。取得そのもの（scheme 検査・許可リスト照合・
+# 名前解決結果の IP 検査・手動リダイレクト追跡・サイズ上限・マジックバイトによる
+# 形式判定）は `core/url_fetch.py` が正本で、ここは権限・監査・HTTP 写像だけを担う。
+# ---------------------------------------------------------------------------
+
+
+class UrlFetchDomainCreateRequest(BaseModel):
+    """許可ドメインの登録リクエスト。値は `normalize_domain` で正規化して保存する。"""
+
+    domain: str
+
+
+class UploadFromUrlRequest(BaseModel):
+    """URL指定による教材取得のリクエスト。
+
+    ``analyze_images`` / ``models`` の意味は ``upload_material`` と同一
+    （画像パイプライン §3 / M層設計書 §7）。
+    """
+
+    url: str
+    analyze_images: bool = False
+    models: dict[str, str] | None = None
+
+
+@router.get("/url-fetch-domains")
+def list_url_fetch_domains(current_user: dict = Depends(_require_teacher)) -> dict:
+    """取得先ドメインの許可リストを返す（TEACHER 以上）。
+
+    教員は「どのドメインなら URL 取得が使えるか」を知る必要があるため参照は
+    TEACHER 以上。**変更は SYSTEM_ADMIN のみ**（下の2エンドポイント）。
+    """
+    session = _pg_session()
+    try:
+        domains = url_fetch.list_url_fetch_domains(session)
+    finally:
+        session.close()
+    return {"domains": domains}
+
+
+@router.post("/url-fetch-domains", status_code=201)
+def add_url_fetch_domain(
+    body: UrlFetchDomainCreateRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> dict:
+    """取得先ドメインを許可リストへ登録する（**SYSTEM_ADMIN のみ**）。冪等。"""
+    session = _pg_session()
+    try:
+        try:
+            normalized = url_fetch.add_url_fetch_domain(session, body.domain, current_user["id"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"ドメインの形式が正しくありません: {exc}") from exc
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    record_review_event(
+        AUDIT_ENTITY_URL_FETCH_DOMAIN, normalized, "", "allowed", current_user["id"],
+        {"action": "create", "domain": normalized},
+    )
+    logger.info(
+        "URL fetch domain allowed: %s by user=%s", normalized, current_user["id"],
+    )
+    return {"domain": normalized}
+
+
+@router.delete("/url-fetch-domains/{domain}")
+def delete_url_fetch_domain(
+    domain: str,
+    current_user: dict = Depends(_require_system_admin),
+) -> dict:
+    """取得先ドメインを許可リストから解除する（**SYSTEM_ADMIN のみ**）。"""
+    session = _pg_session()
+    try:
+        removed = url_fetch.remove_url_fetch_domain(session, domain)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    record_review_event(
+        AUDIT_ENTITY_URL_FETCH_DOMAIN, domain, "allowed", "removed", current_user["id"],
+        {"action": "delete", "domain": domain},
+    )
+    logger.info(
+        "URL fetch domain removed: %s by user=%s", domain, current_user["id"],
+    )
+    return {"domain": domain, "deleted": True}
+
+
+#: `core/url_fetch.py` の例外型 → HTTP ステータス / 事実文の写像。
+#: detail に内部情報（解決した IP・スタックトレース）を載せない。
+_URL_FETCH_ERROR_STATUS: dict[type, int] = {
+    url_fetch.NoDomainsConfiguredError: 422,
+    url_fetch.DomainNotAllowedError: 422,
+    url_fetch.PrivateAddressError: 422,
+    url_fetch.UnsupportedContentError: 422,
+    url_fetch.TooLargeError: 413,
+    url_fetch.FetchFailedError: 502,
+}
+
+
+@router.post("/materials/upload-from-url", status_code=202)
+def upload_material_from_url(
+    body: UploadFromUrlRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """URL を指定して教材を取得し、既存のアップロードパイプラインへ流す。
+
+    取得は**リクエスト内同期**（v1）。成功時のレスポンスは
+    ``POST /api/admin/materials/upload`` と同形（202）。
+    """
+    models_option: dict | None = None
+    if body.models:
+        models_option = _validate_models_option(body.models)
+
+    session = _pg_session()
+    try:
+        allowed = [row["domain"] for row in url_fetch.list_url_fetch_domains(session)]
+    finally:
+        session.close()
+
+    try:
+        fetched = url_fetch.fetch_source_from_url(body.url, allowed)
+    except url_fetch.UrlFetchError as exc:
+        status = _URL_FETCH_ERROR_STATUS.get(type(exc), 502)
+        logger.info(
+            "URL fetch rejected (%s) for user=%s: %s",
+            type(exc).__name__, current_user["id"], exc,
+        )
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    return _accept_material_source(
+        source_bytes=fetched.content,
+        filename=fetched.filename,
+        source_kind=fetched.source_kind,
+        analyze_images=body.analyze_images,
+        models_option=models_option,
+        current_user=current_user,
+    )
 
 
 class ReanalyzeRequest(BaseModel):
@@ -3499,7 +3688,7 @@ def create_student(
         ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
-        # email も UNIQUE 制約を持つ（§2.6-① の 500 是正）。
+        # email も UNIQUE 制約を持つ。事前チェックしないと DB 例外 → 500 になる（§2.6-①）。
         if session.execute(
             sa_text("SELECT id FROM users WHERE email = :email LIMIT 1"),
             {"email": body.email},
@@ -3537,7 +3726,7 @@ def create_teacher(
         ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
-        # email も UNIQUE 制約を持つ。事前チェックしないと DB 例外 → 500 になる（§2.6-①）。
+        # email も UNIQUE 制約を持つ（§2.6-① の 500 是正）。
         if session.execute(
             sa_text("SELECT id FROM users WHERE email = :email LIMIT 1"),
             {"email": body.email},

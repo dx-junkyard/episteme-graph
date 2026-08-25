@@ -19,7 +19,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（**070 以降**。044〜069 は使用済み — §3 参照）へ採番し直すこと。
+  着手時は次の空き番号（**071 以降**。044〜070 は使用済み — §3 参照）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
   （設計書表記 039 → 実装 038）/ G層（038 → 039）/ W層 W-β（046 → 048）/
@@ -54,7 +54,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **B層** | 学習者体験レイヤー（関心痕跡・tension・構造帰属・casual/voice 等） | 機能ごとに分散: `docs/features/learning.md` / `structure-anchored-questions.md` | `backend/core/tension/`、`backend/core/structure_anchor/`、`backend/api/routes/learning.py` | 020, 022, 025 | 実装済み |
 | **C層** | 承認・共有レイヤー | `docs/features/endorsement-sharing.md` | `backend/api/routes/theory_components.py` | 021 | 実装済み |
 | **D層** | 疑義・認識的地位台帳（Doubt Layer） | `docs/features/doubt_layer_issues.md` | `backend/core/doubt/` + `backend/api/routes/doubt.py` | 029〜033 | 実装済み |
-| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は 070 以降へ採番し直し** + 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
+| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は 071 以降へ採番し直し** + 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
 | **G層** | ガイダンス層（次にやることバッジ + 状態導出型To-Do） | `docs/features/guidance_layer_design.md`（表記 038 → 実装 039） | `backend/core/admin_assistant/next_steps.py` + `admin-next-steps.js` | 039 | 実装済み |
 | **L層** | 画像読み取りパイプライン + 分野別ナレッジライブラリ | `docs/features/image_pipeline_knowledge_library_design.md`（§14〜16 追補含む）+ `contextual_figure_analysis_iterative_verification.md`（#499）+ `guided_figure_reanalysis_design.md` | `backend/core/document_pipeline/figure_images.py`、`src/episteme_graph/agents/apparatus_semantics/`、`backend/core/library/` + `routes/library.py`、`backend/core/figure_presentation.py` + `routes/figure_presentation.py` | 041, 042, 051, 052/053, **054（反証型反復照合 #499）** | 実装済み |
 | **M層** | 場面別 LLM モデル選択（LLM Model Selection） | `docs/features/llm_model_selection_design.md`（M1〜M10） | `backend/core/llm_policy.py` / `llm_policy_store.py` + `routes/llm_models.py` + `admin-llm-models.js` | 061 | 実装済み（Phase 0〜4。ユーザー別保存が正・tier名/金額は UI 非表示） |
@@ -63,6 +63,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **SL層** | 賭け金の台帳（Stakes Ledger）＝理解サイクル Phase 3 | `docs/features/stakes_ledger_design.md`（SL1〜SL10・§15 実装記録） | `backend/core/doubt/` 配下の SL 系モジュール + `routes/doubt.py` 拡張（D層の双対拡張・既存意味論は非改変） | 067 | 実装済み（SL-1〜SL-5） |
 | **U層** | LLM トークン使用量推計（Usage Metering） | `docs/features/llm_usage_metering_design.md` | `backend/core/llm_usage/` + `routes/llm_usage.py` | 043, **069（ユーザー別集計軸）** | 実装済み |
 | **（運営基盤）** | アカウントライフサイクル管理（一覧・停止・削除・リセット・最終ログイン・利用実績照会） | `docs/features/account_lifecycle_management_design.md`（AL1〜AL10） | `backend/core/account_status.py` / `auth_events.py` / `account_lifecycle.py` + `routes/admin.py` User Management 節 + `routes/auth.py` | 068, 069 | 実装済み（Phase 0〜3） |
+| **（運営基盤）** | URL指定による教材取得（取得先ドメイン許可リスト + SSRF ガード付きダウンローダ） | `docs/features/url_material_upload_design.md`（UF1〜UF6） | `backend/core/url_fetch.py` + `routes/admin.py` URL Fetch 節 + `admin.js`（URLモーダル / 許可ドメイン区画） | 070 | 実装済み（v1） |
 | **V層** | 共有物のバージョン管理 + 更新通知 + 削除猶予 | `docs/features/shared_versioning_design.md` | `backend/core/versioning/` + `routes/versioning.py` + `versioning.js` | 037（通知は 045 で `user_notifications` に統合） | 実装済み |
 | **W層** | 要素検討ワークスペース（Element Deliberation Workspace） | `docs/features/element_deliberation_workspace_design.md`（親: `knowledge_network_vision.md`）+ `element_context_lens_design.md`（#498） | `backend/core/deliberation/`（context_lens.py 含む）+ `routes/deliberation.py` + `deliberation.js` | 048, 049, 050, **064（Phase 5: evidence / derivation の要素化）** | 実装済み（Phase 0/1/W-β/2/S/5） |
 | 横断ユーティリティ層 | Admin Copilot（統合AIアシスタント） | `docs/features/admin_assistant_design.md` | `backend/core/admin_assistant/` + `routes/admin_assistant.py` | 034 | 実装済み |
@@ -149,7 +150,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 067 | `067_stakes_ledger` | **SL層**（反証条件・到達可能性・観測反実仮想・晴れ間昇格ゲート） |
 | 068 | `068_account_lifecycle` | **アカウントライフサイクル管理**（users 状態列 + auth_events 台帳） |
 | 069 | `069_llm_usage_user_index` | **U層拡張**（llm_usage_events のユーザー別集計インデックス） |
+| 070 | `070_url_fetch_domains` | URL指定による教材取得（取得先ドメイン許可リスト） |
 
-次の空き番号は **070**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **071**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

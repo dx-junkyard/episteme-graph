@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。全277アンカーがマップ済み
+no_hit 経路で需要を計測する）。全283アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -227,6 +227,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "llm-models.change-scene-model",
         "llm-models.reset-scene-model",
         "llm-models.stage-overrides",
+        "llm-models.url-fetch-domain-add",
+        "llm-models.url-fetch-domain-remove",
+        "llm-models.url-fetch-domains",
         "llm-models.usage-link",
         "llm-usage.groupby",
         "llm-usage.refresh",
@@ -270,6 +273,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-version",
         "materials.seminar-brief-modal",
         "materials.upload-zone",
+        "materials.url-upload",
+        "materials.url-upload-modal",
+        "materials.url-upload-submit",
         "release-review.modal",
         "release-review.next",
         "release-review.publish",
@@ -728,6 +734,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "llm-models.reset-scene-model": "system_admin/16-admin-llm-models.md#reset-scene-model",
     # ステージ別の指定（N件）
     "llm-models.stage-overrides": "system_admin/16-admin-llm-models.md#stage-overrides",
+    # URL取得の許可ドメイン: 追加（migration 070 / url_material_upload_design.md）
+    "llm-models.url-fetch-domain-add": "system_admin/17-admin-url-fetch-domains.md#url-fetch-domain-add",
+    # URL取得の許可ドメイン: 行の削除
+    "llm-models.url-fetch-domain-remove": "system_admin/17-admin-url-fetch-domains.md#url-fetch-domain-remove",
+    # URL取得の許可ドメイン: 区画本体（一覧）
+    "llm-models.url-fetch-domains": "system_admin/17-admin-url-fetch-domains.md#url-fetch-domains",
     # 「LLM使用量」タブへのリンク
     "llm-models.usage-link": "system_admin/16-admin-llm-models.md#usage-link",
 
@@ -820,6 +832,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.seminar-brief-modal": "teacher/11-admin-materials.md#seminar-brief-modal",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
+    # URLから取得（arXiv など）— アップロードゾーン内のリンク（migration 070）
+    "materials.url-upload": "teacher/11-admin-materials.md#url-upload",
+    # URLから教材を取得モーダル
+    "materials.url-upload-modal": "teacher/11-admin-materials.md#url-upload-modal",
+    # モーダルの「アップロード」（許可リストが空のときは無効）
+    "materials.url-upload-submit": "teacher/11-admin-materials.md#url-upload-submit",
 
     # --- release-review.* — リリース前の確認ウィザード（release_review_flow_design.md。コース管理/コースビルダーから開く横断UI） -
     # ウィザード本体（3ステップ: 学習マップ → 論文の位置づけ → 公開）
