@@ -43,8 +43,11 @@ def _api_prefixes() -> set[str]:
             sys.path.insert(0, p)
     from api.main import app
 
+    from tests.guardrail_helpers import iter_app_routes
+
     prefixes: set[str] = set()
-    for route in app.routes:
+    # FastAPI 0.139 以降の遅延 include ラッパーを開いてから走査する。
+    for route in iter_app_routes(app):
         path = getattr(route, "path", "")
         m = re.match(r"^/api/([^/{]+)", path)
         if m:
