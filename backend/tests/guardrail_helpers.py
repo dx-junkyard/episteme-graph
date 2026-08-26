@@ -135,3 +135,41 @@ def extract_function_source(src: str, fn_name: str) -> str:
     rel_end = tail.find("\ndef ")
     end = start + 1 + rel_end if rel_end != -1 else len(src)
     return src[start:end]
+
+
+def iter_app_routes(app) -> list:
+    """FastAPI アプリに登録済みのルートオブジェクトを平坦化して返す。
+
+    FastAPI 0.139 以降、``app.include_router(...)`` は子ルーターの route を
+    ``app.routes`` へ展開せず遅延ラッパー（``_IncludedRouter``）のまま保持する。
+    そのため ``for route in app.routes`` を素朴に走査する検査は、登録済みの
+    エンドポイントを1件も見つけられずに**空振り**する（実際に
+    ``test_account_lifecycle_guardrails.py`` の経路契約が落ち、他の同型検査は
+    無言で無効化されていた）。ここでラッパーを再帰的に開いて、版に依存しない
+    平坦なルート一覧を単一の正本として提供する。
+    """
+    collected: list = []
+
+    def _walk(routes) -> None:
+        for route in routes:
+            inner = getattr(route, "original_router", None)
+            if inner is not None:
+                _walk(inner.routes)
+            else:
+                collected.append(route)
+
+    _walk(app.routes)
+    return collected
+
+
+def collect_route_pairs(app, *, include_head: bool = False) -> set[tuple[str, str]]:
+    """登録済みの ``(path, method)`` 集合を返す（``iter_app_routes`` の投影）。
+
+    ``HEAD`` は GET へ自動付与されるため既定で除外する。
+    """
+    return {
+        (getattr(route, "path", ""), method)
+        for route in iter_app_routes(app)
+        for method in (getattr(route, "methods", None) or set())
+        if include_head or method != "HEAD"
+    }

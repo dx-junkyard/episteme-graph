@@ -38,6 +38,7 @@ for _path in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
 from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
     assert_source_forbids,
+    collect_route_pairs,
     extract_function_source,
 )
 
@@ -656,11 +657,7 @@ class TestRouteContract:
     def test_all_eight_endpoints_are_registered(self):
         from api.main import app
 
-        paths = {
-            (route.path, method)
-            for route in app.routes
-            for method in getattr(route, "methods", ())
-        }
+        paths = collect_route_pairs(app)
         expected = {
             ("/api/admin/users", "GET"),
             ("/api/admin/users/{user_id}/suspend", "POST"),
@@ -677,11 +674,9 @@ class TestRouteContract:
         """AL1: users 行を消す HTTP 経路を作らない（削除は予約 → purge のみ）。"""
         from api.main import app
 
-        for route in app.routes:
-            path = getattr(route, "path", "")
-            methods = getattr(route, "methods", set())
-            if path == "/api/admin/users/{user_id}" and "DELETE" in methods:
-                raise AssertionError("users 行を直接削除するルートが存在する")
+        assert ("/api/admin/users/{user_id}", "DELETE") not in collect_route_pairs(app), (
+            "users 行を直接削除するルートが存在する"
+        )
 
     def test_every_lifecycle_route_exists_in_source(self):
         for fn in _LIFECYCLE_ROUTES:

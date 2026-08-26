@@ -18,6 +18,8 @@ for _p in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from tests.guardrail_helpers import iter_app_routes  # noqa: E402
+
 try:
     import fastapi  # noqa: F401
     _HAS_FASTAPI = True
@@ -30,8 +32,10 @@ pytestmark = pytest.mark.skipif(not _HAS_FASTAPI, reason="FastAPI 未導入")
 def _collect_path_methods():
     from api.main import app
 
+    # FastAPI 0.139 以降 app.routes は子ルーターを遅延ラッパーのまま保持するため、
+    # 素朴な走査では登録済みルートが1件も取れない（検査が空振りする）。
     pairs = []
-    for route in app.routes:
+    for route in iter_app_routes(app):
         path = getattr(route, "path", None)
         methods = getattr(route, "methods", None) or set()
         for method in methods:
