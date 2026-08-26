@@ -3144,25 +3144,31 @@
         return res.json();
       })
       .then(function (data) {
-        showUploadStatus(
-          escHtml(file.name) + " のアップロードが完了しました。グラフ構築中..." +
-          '<span class="typing" style="display:inline-flex;margin-left:8px"><span></span><span></span><span></span></span>',
-          "info"
-        );
-        showMaterialNextStepCard();
-        loadMaterials();
-        loadMaterialsForSelection();
-        if (window.AdminNextSteps) window.AdminNextSteps.refresh();
-        if (data.task_id) {
-          startTaskPolling(data.task_id, file.name);
-        } else {
-          disableUploadUI(false);
-        }
+        handleUploadAccepted(data, file.name);
       })
       .catch(function (err) {
         showUploadStatus("アップロードに失敗しました: " + (err.detail || "不明なエラー"), "error");
         disableUploadUI(false);
       });
+  }
+
+  // 受理（202）後の共通経路。ファイル選択とURL指定の両方がここへ合流する
+  // （状態表示・タスクポーリング・一覧更新を二重に実装しない）。
+  function handleUploadAccepted(data, displayName) {
+    showUploadStatus(
+      escHtml(displayName) + " のアップロードが完了しました。グラフ構築中..." +
+      '<span class="typing" style="display:inline-flex;margin-left:8px"><span></span><span></span><span></span></span>',
+      "info"
+    );
+    showMaterialNextStepCard();
+    loadMaterials();
+    loadMaterialsForSelection();
+    if (window.AdminNextSteps) window.AdminNextSteps.refresh();
+    if (data && data.task_id) {
+      startTaskPolling(data.task_id, displayName);
+    } else {
+      disableUploadUI(false);
+    }
   }
 
   function disableUploadUI(disabled) {
@@ -3269,6 +3275,345 @@
       });
     }
     statusEl.parentNode.insertBefore(card, statusEl.nextSibling);
+  }
+
+  // ── URL指定による教材取得 ──────────────────────────────────────────
+  //
+  // 取得できるのは管理者が許可したドメインのみ（サーバ側で強制する）。この画面は
+  // 許可リストを取得して事実文で提示し、空なら取得ボタンを理由付きで無効化する。
+  // 受理後は既存のファイルアップロードと同じ経路（handleUploadAccepted）へ合流する。
+  var _urlUploadSubmitting = false;
+
+  function initUrlUpload() {
+    var link = document.getElementById("url-upload-link");
+    if (!link) return;
+    link.addEventListener("click", function (e) {
+      e.preventDefault();
+      openUrlUploadModal();
+    });
+  }
+
+  // サーバの detail（事実文）をそのまま見せる。取れないときだけ既定文へ縮退する。
+  function _urlFetchDetailText(err) {
+    if (!err) return "不明なエラー";
+    var detail = err.detail;
+    if (typeof detail === "string" && detail) return detail;
+    if (detail && detail.length && typeof detail[0] === "object" && detail[0].msg) return String(detail[0].msg);
+    if (err.message && err.message !== "Unauthorized") return String(err.message);
+    return "不明なエラー";
+  }
+
+  function closeUrlUploadModal() {
+    var overlay = document.getElementById("url-upload-modal");
+    if (overlay) overlay.remove();
+  }
+
+  function openUrlUploadModal() {
+    closeUrlUploadModal();
+    _urlUploadSubmitting = false;
+
+    var overlay = document.createElement("div");
+    overlay.id = "url-upload-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.url-upload-modal");
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:460px;max-width:560px;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">URLから教材を取得</h3>' +
+          '<button type="button" id="url-upload-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<label for="url-upload-input" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px">教材のURL</label>' +
+        '<input type="text" id="url-upload-input" placeholder="https://arxiv.org/pdf/2401.00001" ' +
+          'style="padding:6px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+        '<div id="url-upload-domains-note" style="font-size:12px;color:var(--color-text-tertiary);margin-top:8px">許可ドメインを確認しています。</div>' +
+        '<div id="url-upload-status" class="upload-status" style="display:none;margin-top:10px"></div>' +
+        '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px">' +
+          '<button type="button" id="url-upload-cancel" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">キャンセル</button>' +
+          '<button type="button" id="url-upload-submit" data-ui-anchor="materials.url-upload-submit" class="admin-action-btn" disabled>アップロード</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) closeUrlUploadModal(); });
+    document.getElementById("url-upload-close").addEventListener("click", closeUrlUploadModal);
+    document.getElementById("url-upload-cancel").addEventListener("click", closeUrlUploadModal);
+    document.getElementById("url-upload-submit").addEventListener("click", submitUrlUpload);
+    var input = document.getElementById("url-upload-input");
+    input.addEventListener("keydown", function (e) {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        submitUrlUpload();
+      }
+    });
+    input.focus();
+
+    loadUrlUploadDomains();
+  }
+
+  // 無効化したボタンには理由の事実文を必ず添える。
+  function _urlUploadSetSubmitEnabled(enabled, reason) {
+    var btn = document.getElementById("url-upload-submit");
+    if (btn) btn.disabled = !enabled;
+    var note = document.getElementById("url-upload-domains-note");
+    if (note && reason) note.textContent = reason;
+  }
+
+  function _urlUploadStatus(message, kind) {
+    var el = document.getElementById("url-upload-status");
+    if (!el) return;
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "";
+    el.className = "upload-status upload-status-" + (kind || "info");
+    el.textContent = message;
+  }
+
+  function loadUrlUploadDomains() {
+    apiFetch("/admin/url-fetch-domains")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var domains = (data && data.domains) || [];
+        var names = [];
+        for (var i = 0; i < domains.length; i++) {
+          if (domains[i] && domains[i].domain) names.push(domains[i].domain);
+        }
+        if (!names.length) {
+          _urlUploadSetSubmitEnabled(false, "URLからの取得は、管理者が取得先ドメインを許可すると利用できます。");
+          return;
+        }
+        _urlUploadSetSubmitEnabled(true, "取得できるのは管理者が許可したドメインのみです: " + names.join(", "));
+      })
+      .catch(function () {
+        _urlUploadSetSubmitEnabled(false, "許可ドメインを取得できませんでした。時間をおいて開き直してください。");
+      });
+  }
+
+  function submitUrlUpload() {
+    if (_urlUploadSubmitting) return;
+    var btn = document.getElementById("url-upload-submit");
+    if (btn && btn.disabled) return;
+    var input = document.getElementById("url-upload-input");
+    var url = input ? input.value.trim() : "";
+    if (!url) {
+      _urlUploadStatus("URLを入力してください。", "error");
+      return;
+    }
+
+    var payload = { url: url };
+    // 画像読み取りパイプライン（migration 041）: ファイル選択時と同じチェックボックスを引き継ぐ。
+    var analyzeImagesEl = document.getElementById("upload-analyze-images");
+    var analyzeImagesChecked = !!(analyzeImagesEl && analyzeImagesEl.checked);
+    payload.analyze_images = analyzeImagesChecked;
+    // M層（LLM モデル選択, migration 061）: ファイル選択時と同じ選択を run options へ渡す。
+    if (window.AdminLlmModels) {
+      var uploadModels = window.AdminLlmModels.getUploadModels(analyzeImagesChecked);
+      if (uploadModels) payload.models = uploadModels;
+    }
+
+    _urlUploadSubmitting = true;
+    if (btn) btn.disabled = true;
+    _urlUploadStatus("取得しています...", "info");
+    disableUploadUI(true);
+
+    apiFetch("/admin/materials/upload-from-url", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        }
+        return res.json();
+      })
+      .then(function (data) {
+        _urlUploadSubmitting = false;
+        closeUrlUploadModal();
+        handleUploadAccepted(data, (data && (data.filename || data.title)) || url);
+      })
+      .catch(function (err) {
+        _urlUploadSubmitting = false;
+        if (btn) btn.disabled = false;
+        disableUploadUI(false);
+        _urlUploadStatus("取得に失敗しました: " + _urlFetchDetailText(err), "error");
+      });
+  }
+
+  // ── URL取得の許可ドメイン（運用「AIモデル」タブ = SYSTEM_ADMIN 限定）──────
+  //
+  // 教材管理タブは SYSTEM_ADMIN では非表示（setupRoleBasedUI）なので、この区画は
+  // 運用グループの `#tab-llm-models` パネル末尾に動的生成する。admin-llm-models.js の
+  // buildOpsTab() は data-llm-models-built ガードで初回1回だけ innerHTML を書くため、
+  // initOpsTab の後に append すれば消えない。冪等（既に居れば作り直さない）。
+  var _urlFetchDomainsBusy = false;
+
+  function ensureUrlFetchDomainsSection() {
+    var panel = document.getElementById("tab-llm-models");
+    if (!panel) return;
+    var section = document.getElementById("url-fetch-domains-section");
+    if (section && section.parentNode === panel) {
+      loadUrlFetchDomains();
+      return;
+    }
+    if (section && section.parentNode) section.parentNode.removeChild(section);
+
+    section = document.createElement("div");
+    section.className = "admin-section";
+    section.id = "url-fetch-domains-section";
+    section.setAttribute("data-ui-anchor", "llm-models.url-fetch-domains");
+    section.innerHTML =
+      '<h3 class="admin-section-title">URL取得の許可ドメイン</h3>' +
+      '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 10px">' +
+        "ここに登録したドメインからのみ、教員は URL を指定して教材を取得できます。" +
+      "</p>" +
+      '<div id="url-fetch-domains-status" class="upload-status" style="display:none;margin-bottom:10px"></div>' +
+      '<div id="url-fetch-domains-list" style="margin-bottom:12px">' +
+        '<p style="color:var(--color-text-tertiary);font-size:13px;margin:0">読み込み中...</p>' +
+      "</div>" +
+      '<div style="display:flex;gap:8px;align-items:center">' +
+        '<input type="text" id="url-fetch-domain-input" placeholder="arxiv.org" ' +
+          'style="flex:0 1 260px;padding:5px 8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+        '<button type="button" id="url-fetch-domain-add" data-ui-anchor="llm-models.url-fetch-domain-add" class="admin-action-btn">追加</button>' +
+      "</div>";
+    panel.appendChild(section);
+
+    var addBtn = document.getElementById("url-fetch-domain-add");
+    if (addBtn) addBtn.addEventListener("click", urlFetchDomainAdd);
+    var input = document.getElementById("url-fetch-domain-input");
+    if (input) {
+      input.addEventListener("keydown", function (e) {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          urlFetchDomainAdd();
+        }
+      });
+    }
+    var list = document.getElementById("url-fetch-domains-list");
+    if (list) {
+      list.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-url-domain-remove]") : null;
+        if (!btn || btn.disabled) return;
+        urlFetchDomainRemove(btn.getAttribute("data-url-domain-remove"));
+      });
+    }
+    loadUrlFetchDomains();
+  }
+
+  function _urlFetchDomainsStatus(message, kind) {
+    var el = document.getElementById("url-fetch-domains-status");
+    if (!el) return;
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "";
+    el.className = "upload-status upload-status-" + (kind || "info");
+    el.textContent = message;
+  }
+
+  function loadUrlFetchDomains() {
+    var list = document.getElementById("url-fetch-domains-list");
+    if (!list) return;
+    apiFetch("/admin/url-fetch-domains")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        renderUrlFetchDomains((data && data.domains) || []);
+      })
+      .catch(function () {
+        list.innerHTML = '<p style="color:var(--color-text-danger);font-size:13px;margin:0">許可ドメインの読み込みに失敗しました。</p>';
+      });
+  }
+
+  function renderUrlFetchDomains(domains) {
+    var list = document.getElementById("url-fetch-domains-list");
+    if (!list) return;
+    if (!domains.length) {
+      list.innerHTML =
+        '<p style="color:var(--color-text-tertiary);font-size:13px;margin:0">' +
+        "許可ドメインは登録されていません。登録するまで教員はURLからの取得を利用できません。" +
+        "</p>";
+      return;
+    }
+    var rows = "";
+    for (var i = 0; i < domains.length; i++) {
+      var d = domains[i] || {};
+      rows +=
+        "<tr>" +
+          "<td>" + escHtml(d.domain) + "</td>" +
+          "<td>" + escHtml(formatDateTime(d.created_at)) + "</td>" +
+          '<td><button type="button" class="admin-action-btn" data-ui-anchor="llm-models.url-fetch-domain-remove" ' +
+            'data-url-domain-remove="' + escHtml(d.domain) + '">削除</button></td>' +
+        "</tr>";
+    }
+    list.innerHTML =
+      '<table class="admin-table">' +
+        "<thead><tr><th>ドメイン</th><th>登録日</th><th>操作</th></tr></thead>" +
+        "<tbody>" + rows + "</tbody>" +
+      "</table>";
+  }
+
+  function urlFetchDomainAdd() {
+    if (_urlFetchDomainsBusy) return;
+    var input = document.getElementById("url-fetch-domain-input");
+    var domain = input ? input.value.trim() : "";
+    if (!domain) {
+      _urlFetchDomainsStatus("追加するドメインを入力してください。", "error");
+      return;
+    }
+    _urlFetchDomainsBusy = true;
+    _urlFetchDomainsStatus("追加しています...", "info");
+    apiFetch("/admin/url-fetch-domains", {
+      method: "POST",
+      body: JSON.stringify({ domain: domain }),
+    })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        }
+        return res.json().catch(function () { return {}; });
+      })
+      .then(function () {
+        _urlFetchDomainsBusy = false;
+        if (input) input.value = "";
+        _urlFetchDomainsStatus("ドメイン " + domain + " を許可リストに追加しました。", "success");
+        loadUrlFetchDomains();
+      })
+      .catch(function (err) {
+        _urlFetchDomainsBusy = false;
+        _urlFetchDomainsStatus("追加に失敗しました: " + _urlFetchDetailText(err), "error");
+      });
+  }
+
+  function urlFetchDomainRemove(domain) {
+    if (_urlFetchDomainsBusy || !domain) return;
+    if (!confirm("ドメイン " + domain + " を許可リストから削除します。以後このドメインからのURL取得はできなくなります。")) return;
+    _urlFetchDomainsBusy = true;
+    _urlFetchDomainsStatus("削除しています...", "info");
+    apiFetch("/admin/url-fetch-domains/" + encodeURIComponent(domain), { method: "DELETE" })
+      .then(function (res) {
+        if (!res.ok) {
+          return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+        }
+        return res.json().catch(function () { return {}; });
+      })
+      .then(function () {
+        _urlFetchDomainsBusy = false;
+        _urlFetchDomainsStatus("ドメイン " + domain + " を許可リストから削除しました。", "success");
+        loadUrlFetchDomains();
+      })
+      .catch(function (err) {
+        _urlFetchDomainsBusy = false;
+        _urlFetchDomainsStatus("削除に失敗しました: " + _urlFetchDetailText(err), "error");
+      });
   }
 
   // ── Course Builder Chat ────────────────────────────────────────────
@@ -6767,13 +7112,19 @@
   }
 
   // ── Logout ─────────────────────────────────────────────────────────
+  // トークンを捨ててログイン画面に戻す共通処理。ヘッダーのログアウトボタンと、
+  // 自分のパスワードを再設定した直後（トークンが即失効する）の両方から呼ぶ。
+  function performLogout() {
+    state.token = null;
+    state.username = null;
+    localStorage.removeItem("eg_token");
+    localStorage.removeItem("eg_username");
+    renderAuth();
+  }
+
   function initLogout() {
     document.getElementById("logout-btn").addEventListener("click", function () {
-      state.token = null;
-      state.username = null;
-      localStorage.removeItem("eg_token");
-      localStorage.removeItem("eg_username");
-      renderAuth();
+      performLogout();
     });
   }
 
@@ -6844,6 +7195,759 @@
           });
       });
     }
+
+    // アカウントライフサイクル（一覧・停止・再開・パスワード再設定・利用状況・削除予約・移管）
+    alInitAccountLifecycle();
+  }
+
+  // ── アカウントライフサイクル管理（一覧・停止・再開・パスワード再設定・利用状況・削除予約・移管） ──
+  // 正本: docs/features/account_lifecycle_management_design.md §9。
+  //   AL2 停止は認証の拒否のみ（所有権・共有・受講状態には触らない。文言でもそう書く）
+  //   AL7 学生の個票（パスワード再設定・利用状況・削除予約）は SYSTEM_ADMIN のみ描画する
+  //   AL10 自分自身と Administrator は停止・削除できない（サーバ側 422。UI では理由付きで無効化）
+  // 一覧の再取得はタブを開いたとき・操作が成功したとき・「一覧を更新」を押したときだけ
+  // （ポーリングしない）。段階の付いた評価値・煽り文言は出さない。
+  var AL_SCOPES = {
+    students: {
+      role: "learner",
+      label: "学生",
+      listId: "al-students-list",
+      msgId: "al-students-msg",
+      searchId: "al-students-search",
+      refreshId: "al-students-refresh"
+    },
+    teachers: {
+      role: "instructor",
+      label: "教員",
+      listId: "al-teachers-list",
+      msgId: "al-teachers-msg",
+      searchId: "al-teachers-search",
+      refreshId: "al-teachers-refresh"
+    }
+  };
+
+  // data-ui-anchor（マニュアル節参照）は論理IDを素の文字列で持つ。
+  // students の reset / activity / delete は SYSTEM_ADMIN 限定のため system_admin/ 節を指す。
+  var AL_ANCHORS = {
+    students: {
+      list: "students.user-list",
+      suspend: "students.user-suspend",
+      reset: "students.user-reset",
+      activity: "students.user-activity",
+      remove: "students.user-delete",
+      transfer: ""
+    },
+    teachers: {
+      list: "teachers.user-list",
+      suspend: "teachers.user-suspend",
+      reset: "teachers.user-reset",
+      activity: "teachers.user-activity",
+      remove: "teachers.user-delete",
+      transfer: "teachers.user-transfer"
+    }
+  };
+
+  var AL_STATUS_LABELS = {
+    active: "有効",
+    suspended: "停止中",
+    pending_deletion: "削除予定",
+    deleted: "削除済み"
+  };
+
+  var AL_AUTH_EVENT_LABELS = {
+    login_success: "ログイン成功",
+    login_failed: "ログイン失敗",
+    login_rejected_suspended: "停止中のログイン試行",
+    token_rejected_suspended: "停止中のアクセス",
+    token_rejected_stale: "失効トークンのアクセス",
+    password_reset: "パスワード再設定"
+  };
+
+  // U1: 実測と推計を混ぜた単一数値を出さない（種別を分けて並べる）。
+  // activity API は reported / estimated の2バケットで返す（推計の内訳は合算済み）。
+  var AL_USAGE_SOURCE_LABELS = {
+    reported: "実測（プロバイダの報告値）",
+    estimated: "推計（トークン数の換算値）"
+  };
+  var AL_USAGE_BUCKETS = ["reported", "estimated"];
+
+  var AL_MIN_PASSWORD_LENGTH = 8;
+
+  function alAccountSectionHtml(scope) {
+    var cfg = AL_SCOPES[scope];
+    return '<div class="admin-section" style="margin-top:24px">' +
+      '<h3 class="admin-section-title">' + cfg.label + 'アカウント一覧</h3>' +
+      '<p style="color:var(--color-text-secondary);font-size:12.5px;margin:0 0 10px">' +
+        '停止すると、そのアカウントはログインできなくなります。教材・コース・グループの所有と共有、' +
+        '受講状態は停止しても変わりません。' +
+      '</p>' +
+      '<div style="display:flex;gap:8px;align-items:center;margin-bottom:10px">' +
+        '<input id="' + cfg.searchId + '" type="text" placeholder="ユーザー名・メールで絞り込む" ' +
+          'style="flex:1;max-width:280px;padding:6px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+        '<button id="' + cfg.refreshId + '" class="admin-action-btn" type="button">一覧を更新</button>' +
+      '</div>' +
+      '<div id="' + cfg.listId + '" data-ui-anchor="' + AL_ANCHORS[scope].list + '">' +
+        '<p style="color:var(--color-text-tertiary)">読み込み中...</p>' +
+      '</div>' +
+      '<div id="' + cfg.msgId + '" class="upload-status"></div>' +
+    '</div>';
+  }
+
+  function alSetMessage(scope, text, kind) {
+    var el = document.getElementById(AL_SCOPES[scope].msgId);
+    if (!el) return;
+    el.textContent = text || "";
+    el.className = "upload-status" + (kind ? " upload-status-" + kind : "");
+  }
+
+  function alErrorDetail(err) {
+    if (!err) return "不明なエラー";
+    return err.detail || err.message || "不明なエラー";
+  }
+
+  function alExpectOk(res) {
+    if (!res.ok) {
+      return res.json().catch(function () { return {}; }).then(function (d) { throw d; });
+    }
+    return res.json().catch(function () { return {}; });
+  }
+
+  function alStatusChip(status) {
+    var label = AL_STATUS_LABELS[status] || status || "";
+    var color = "var(--color-text-secondary)";
+    if (status === "suspended") color = "var(--color-text-warning)";
+    if (status === "pending_deletion" || status === "deleted") color = "var(--color-text-danger)";
+    return '<span class="al-status-chip" data-al-status="' + escHtml(status || "") + '" ' +
+      'style="font-size:11.5px;padding:1px 6px;border:1px solid ' + color + ';border-radius:10px;color:' + color + '">' +
+      escHtml(label) + '</span>';
+  }
+
+  function alActionBtn(action, anchor, label, uid, uname) {
+    return '<button type="button" class="admin-action-btn al-action-btn"' +
+      ' data-ui-anchor="' + anchor + '"' +
+      ' data-al-action="' + escHtml(action) + '"' +
+      ' data-al-user-id="' + escHtml(uid) + '"' +
+      ' data-al-username="' + escHtml(uname) + '"' +
+      ' style="padding:3px 8px;font-size:11.5px">' + escHtml(label) + '</button>';
+  }
+
+  function alDisabledBtn(anchor, label, reason) {
+    return '<button type="button" class="admin-action-btn al-action-btn" disabled' +
+      ' data-ui-anchor="' + anchor + '" title="' + escHtml(reason) + '"' +
+      ' style="padding:3px 8px;font-size:11.5px;opacity:.5;cursor:not-allowed">' + escHtml(label) + '</button>';
+  }
+
+  function alUserRowHtml(scope, u) {
+    var a = AL_ANCHORS[scope];
+    var isSystemAdmin = state.role === "SYSTEM_ADMIN";
+    var status = u.status || "active";
+    var uid = u.id || "";
+    var uname = u.username || "";
+    // AL10: 自分自身と bootstrap Administrator は停止・削除できない。
+    var locked = (uid && uid === _meUserId()) || uname === "Administrator";
+    var btns = [];
+
+    if (status !== "deleted") {
+      if (status === "active") {
+        if (locked) {
+          btns.push(alDisabledBtn(a.suspend, "停止…",
+            "自分自身のアカウントと Administrator は停止できません。別のシステム管理者に依頼してください。"));
+        } else {
+          btns.push(alActionBtn("suspend", a.suspend, "停止…", uid, uname));
+        }
+      } else if (status === "suspended") {
+        btns.push(alActionBtn("restore", a.suspend, "再開", uid, uname));
+      }
+
+      // AL7: 個票・パスワード再設定・削除予約は SYSTEM_ADMIN のみ。
+      if (isSystemAdmin) {
+        btns.push(alActionBtn("reset", a.reset, "パスワード再設定…", uid, uname));
+        btns.push(alActionBtn("activity", a.activity, "利用状況…", uid, uname));
+        if (status === "pending_deletion") {
+          btns.push(alActionBtn("cancel-deletion", a.remove, "削除予約を取消", uid, uname));
+        } else if (status === "suspended" && !locked) {
+          btns.push(alActionBtn("deletion", a.remove, "削除予約…", uid, uname));
+        } else {
+          btns.push(alDisabledBtn(a.remove, "削除予約…", locked
+            ? "自分自身のアカウントと Administrator は削除できません。"
+            : "削除予約は、先に停止したアカウントにだけできます。「停止…」を実行してください。"));
+        }
+        if (a.transfer) {
+          btns.push(alActionBtn("transfer", a.transfer, "移管…", uid, uname));
+        }
+      }
+    }
+
+    return '<tr data-al-user-row="' + escHtml(uid) + '">' +
+      '<td>' + escHtml(uname) + '</td>' +
+      '<td style="font-size:12px;color:var(--color-text-secondary)">' + escHtml(u.email || "") + '</td>' +
+      '<td>' + alStatusChip(status) + '</td>' +
+      '<td style="font-size:12px">' + escHtml(u.last_login_at ? formatDateTime(u.last_login_at) : "—") + '</td>' +
+      '<td style="font-size:12px">' + escHtml(u.last_seen_at ? formatDateTime(u.last_seen_at) : "—") + '</td>' +
+      '<td><div style="display:flex;gap:4px;flex-wrap:wrap">' + btns.join("") + '</div></td>' +
+    '</tr>';
+  }
+
+  function alRenderUsers(scope, users) {
+    var el = document.getElementById(AL_SCOPES[scope].listId);
+    if (!el) return;
+    if (!users || users.length === 0) {
+      el.innerHTML = '<p style="color:var(--color-text-tertiary)">該当するアカウントはありません。</p>';
+      return;
+    }
+    var rows = "";
+    for (var i = 0; i < users.length; i++) rows += alUserRowHtml(scope, users[i]);
+    el.innerHTML =
+      '<table class="admin-table"><thead><tr>' +
+        '<th>ユーザー名</th><th>メール</th><th>状態</th><th>最終ログイン</th><th>最終アクセス</th><th>操作</th>' +
+      '</tr></thead><tbody>' + rows + '</tbody></table>' +
+      '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:6px 0 0">' +
+        '「最終アクセス」は書き込みを抑えるため数分間隔で更新される目安の値です。' +
+      '</p>';
+  }
+
+  function alLoadUsers(scope) {
+    var cfg = AL_SCOPES[scope];
+    var listEl = document.getElementById(cfg.listId);
+    if (!listEl) return;
+    var searchEl = document.getElementById(cfg.searchId);
+    var q = searchEl ? searchEl.value.trim() : "";
+    var path = "/admin/users?role=" + encodeURIComponent(cfg.role) + "&limit=200";
+    if (q) path += "&q=" + encodeURIComponent(q);
+    listEl.innerHTML = '<p style="color:var(--color-text-tertiary)">読み込み中...</p>';
+    apiFetch(path)
+      .then(alExpectOk)
+      .then(function (data) {
+        alRenderUsers(scope, (data && data.users) || []);
+      })
+      .catch(function (err) {
+        listEl.innerHTML = '<p style="color:var(--color-text-danger);font-size:12.5px">' +
+          '一覧を取得できませんでした: ' + escHtml(alErrorDetail(err)) + '</p>';
+      });
+  }
+
+  function alSuspendUser(scope, uid, uname) {
+    var reason = prompt("停止の理由（必須・監査記録に残ります）");
+    if (reason === null) return;
+    reason = reason.trim();
+    if (!reason) {
+      alSetMessage(scope, "停止の理由を入力してください。理由なしでは停止できません。", "error");
+      return;
+    }
+    alSetMessage(scope, "「" + uname + "」を停止しています...", "info");
+    apiFetch("/admin/users/" + encodeURIComponent(uid) + "/suspend", {
+      method: "POST",
+      body: JSON.stringify({ reason: reason })
+    })
+      .then(alExpectOk)
+      .then(function () {
+        alSetMessage(scope, "「" + uname + "」を停止しました。ログインできなくなります。" +
+          "教材・コース・グループの所有と共有、受講状態は変わりません。", "success");
+        alLoadUsers(scope);
+      })
+      .catch(function (err) {
+        alSetMessage(scope, "停止できませんでした: " + alErrorDetail(err), "error");
+      });
+  }
+
+  function alRestoreUser(scope, uid, uname) {
+    alSetMessage(scope, "「" + uname + "」を再開しています...", "info");
+    apiFetch("/admin/users/" + encodeURIComponent(uid) + "/restore", { method: "POST" })
+      .then(alExpectOk)
+      .then(function () {
+        alSetMessage(scope, "「" + uname + "」を再開しました。ログインできる状態に戻りました。", "success");
+        alLoadUsers(scope);
+      })
+      .catch(function (err) {
+        alSetMessage(scope, "再開できませんでした: " + alErrorDetail(err), "error");
+      });
+  }
+
+  function alOpenPasswordResetModal(scope, uid, uname) {
+    var existing = document.getElementById("al-reset-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "al-reset-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:380px;max-width:460px">' +
+        '<h3 style="margin:0 0 12px;font-size:15px;color:var(--color-text-primary)">パスワードの再設定</h3>' +
+        '<p style="font-size:12.5px;color:var(--color-text-primary);margin:0 0 8px">「' + escHtml(uname) + '」の新しいパスワードを設定します。</p>' +
+        '<p style="font-size:12px;color:var(--color-text-secondary);margin:0 0 12px">' +
+          '再設定すると、このアカウントで発行済みのログイン状態はすべて無効になり、次回から新しいパスワードが必要になります。' +
+          '新しいパスワードは本人に個別に伝えてください（画面には再表示されません）。' +
+        '</p>' +
+        '<input type="password" id="al-reset-pw" autocomplete="new-password" placeholder="新しいパスワード（' + AL_MIN_PASSWORD_LENGTH + '文字以上）" ' +
+          'style="width:100%;padding:8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);box-sizing:border-box;margin-bottom:8px">' +
+        '<input type="password" id="al-reset-pw2" autocomplete="new-password" placeholder="確認のためもう一度入力" ' +
+          'style="width:100%;padding:8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);box-sizing:border-box;margin-bottom:10px">' +
+        '<div id="al-reset-error" style="display:none;color:var(--color-text-danger);font-size:12px;margin-bottom:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button type="button" id="al-reset-cancel" class="admin-action-btn">キャンセル</button>' +
+          '<button type="button" id="al-reset-exec" class="admin-action-btn" data-ui-anchor="' + AL_ANCHORS[scope].reset + '" ' +
+            'style="background:var(--color-text-danger);color:#fff" disabled>再設定する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    var pw = document.getElementById("al-reset-pw");
+    var pw2 = document.getElementById("al-reset-pw2");
+    var execBtn = document.getElementById("al-reset-exec");
+    var errEl = document.getElementById("al-reset-error");
+
+    function validate() {
+      var v1 = pw.value;
+      var v2 = pw2.value;
+      var msg = "";
+      if (v1.length > 0 && v1.length < AL_MIN_PASSWORD_LENGTH) {
+        msg = "パスワードは" + AL_MIN_PASSWORD_LENGTH + "文字以上で入力してください。";
+      } else if (v2.length > 0 && v1 !== v2) {
+        msg = "確認用のパスワードが一致しません。";
+      }
+      errEl.textContent = msg;
+      errEl.style.display = msg ? "block" : "none";
+      execBtn.disabled = !(v1.length >= AL_MIN_PASSWORD_LENGTH && v1 === v2);
+    }
+    pw.addEventListener("input", validate);
+    pw2.addEventListener("input", validate);
+
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("al-reset-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    execBtn.addEventListener("click", function () {
+      execBtn.disabled = true;
+      execBtn.textContent = "再設定中...";
+      apiFetch("/admin/users/" + encodeURIComponent(uid) + "/password-reset", {
+        method: "POST",
+        body: JSON.stringify({ new_password: pw.value })
+      })
+        .then(alExpectOk)
+        .then(function (data) {
+          overlay.remove();
+          if (data && data.self_reset) {
+            // 自分自身のパスワードを再設定した場合は、いま使っているログイン状態も無効になる。
+            alert("パスワードを再設定しました。いま使っているログイン状態は無効になりました。新しいパスワードで再ログインしてください。");
+            performLogout();
+            return;
+          }
+          alSetMessage(scope, "「" + uname + "」のパスワードを再設定しました。" +
+            "このアカウントの発行済みログイン状態は無効になりました。", "success");
+          alLoadUsers(scope);
+        })
+        .catch(function (err) {
+          execBtn.disabled = false;
+          execBtn.textContent = "再設定する";
+          errEl.textContent = "再設定できませんでした: " + alErrorDetail(err);
+          errEl.style.display = "block";
+        });
+    });
+
+    pw.focus();
+  }
+
+  function alTokenText(value) {
+    if (value === null || value === undefined || value === "") return "—";
+    return String(value);
+  }
+
+  // activity API の llm_usage は reported / estimated を別オブジェクトで返す
+  // （U1: 合算した単一数値を作らない）。表示もバケットごとの行に分けたまま並べる。
+  function alUsageBucketRows(usage) {
+    var rows = [];
+    for (var i = 0; i < AL_USAGE_BUCKETS.length; i++) {
+      var name = AL_USAGE_BUCKETS[i];
+      var bucket = (usage && usage[name]) || null;
+      if (!bucket) continue;
+      rows.push({
+        usage_source: name,
+        prompt_tokens: bucket.prompt_tokens,
+        completion_tokens: bucket.completion_tokens,
+        total_tokens: bucket.total_tokens,
+        calls: bucket.calls
+      });
+    }
+    return rows;
+  }
+
+  function alUsageHasRecords(rows) {
+    for (var i = 0; i < rows.length; i++) {
+      if (Number(rows[i].calls || 0) > 0 || Number(rows[i].total_tokens || 0) > 0) return true;
+    }
+    return false;
+  }
+
+  function alUsageSummaryHtml(usage) {
+    var html = '<h4 style="font-size:13px;margin:16px 0 6px">AI（LLM）の利用実績</h4>';
+    if (!usage || !usage.available) {
+      html += '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0">' +
+        '利用実績を取得できませんでした。（記録がないという意味ではありません）</p>';
+      return html;
+    }
+    var days = usage.window_days || 30;
+    html += '<p style="font-size:12px;color:var(--color-text-secondary);margin:0 0 8px">' +
+      '直近' + days + '日間の記録です。実測と推計は別の行として表示します（足し合わせた数値は出しません）。' +
+      'バックグラウンドのバッチ処理は利用者に結び付かない「未帰属」として記録されるため、ここには出ません。' +
+      '</p>';
+    var rows = alUsageBucketRows(usage);
+    if (!alUsageHasRecords(rows)) {
+      html += '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0">この期間の記録はありません。</p>';
+    } else {
+      html += '<table class="admin-table"><thead><tr>' +
+        '<th>種別</th><th>入力トークン</th><th>出力トークン</th><th>合計トークン</th><th>呼び出し回数</th>' +
+        '</tr></thead><tbody>';
+      for (var i = 0; i < rows.length; i++) {
+        var r = rows[i];
+        html += '<tr><td>' + escHtml(AL_USAGE_SOURCE_LABELS[r.usage_source] || r.usage_source) + '</td>' +
+          '<td style="font-size:12px">' + escHtml(alTokenText(r.prompt_tokens)) + '</td>' +
+          '<td style="font-size:12px">' + escHtml(alTokenText(r.completion_tokens)) + '</td>' +
+          '<td style="font-size:12px">' + escHtml(alTokenText(r.total_tokens)) + '</td>' +
+          '<td style="font-size:12px">' + escHtml(alTokenText(r.calls)) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+    var features = usage.top_features || [];
+    if (features.length) {
+      html += '<h5 style="font-size:12.5px;margin:12px 0 4px">よく使われた機能</h5>' +
+        '<table class="admin-table"><thead><tr><th>機能</th><th>実測（合計トークン）</th><th>推計（合計トークン）</th></tr></thead><tbody>';
+      for (var j = 0; j < features.length; j++) {
+        var f = features[j] || {};
+        var rep = f.reported || {};
+        var est = f.estimated || {};
+        html += '<tr><td style="font-size:12px">' + escHtml(f.feature || "（未帰属）") + '</td>' +
+          '<td style="font-size:12px">' + escHtml(alTokenText(rep.total_tokens)) + '</td>' +
+          '<td style="font-size:12px">' + escHtml(alTokenText(est.total_tokens)) + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+    return html;
+  }
+
+  function alActivityHtml(data) {
+    var user = (data && data.user) || {};
+    var events = (data && data.auth_events) || [];
+    var html = '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0 0 6px">' +
+      '状態: ' + alStatusChip(user.status || "active") +
+      ' ／ 最終ログイン: ' + escHtml(user.last_login_at ? formatDateTime(user.last_login_at) : "記録がありません") +
+      ' ／ 最終アクセス: ' + escHtml(user.last_seen_at ? formatDateTime(user.last_seen_at) : "記録がありません") +
+      '</p>';
+    // 個票だけが持つ情報（一覧には含まれない）: 停止の理由と削除予定日。
+    if (user.status_reason) {
+      html += '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0 0 6px">' +
+        '停止・削除予約の理由: ' + escHtml(user.status_reason) + '</p>';
+    }
+    if (user.purge_after) {
+      html += '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0 0 6px">' +
+        '削除予定: ' + escHtml(formatDateTime(user.purge_after)) +
+        '（それまでは「削除予約を取消」で元に戻せます）</p>';
+    }
+    html += '<h4 style="font-size:13px;margin:0 0 6px">ログインの記録</h4>';
+    if (!events.length) {
+      html += '<p style="font-size:12.5px;color:var(--color-text-secondary);margin:0">記録はまだありません。</p>';
+    } else {
+      html += '<table class="admin-table"><thead><tr><th>日時</th><th>できごと</th><th>IPアドレス</th><th>ブラウザ</th></tr></thead><tbody>';
+      for (var i = 0; i < events.length; i++) {
+        var e = events[i] || {};
+        html += '<tr><td style="font-size:12px;white-space:nowrap">' + escHtml(formatDateTime(e.created_at)) + '</td>' +
+          '<td style="font-size:12px">' + escHtml(AL_AUTH_EVENT_LABELS[e.event] || e.event || "") + '</td>' +
+          '<td style="font-size:12px">' + escHtml(e.ip_address || "—") + '</td>' +
+          '<td style="font-size:11.5px;max-width:260px;word-break:break-all">' + escHtml(e.user_agent || "—") + '</td></tr>';
+      }
+      html += '</tbody></table>';
+    }
+    html += alUsageSummaryHtml(data && data.llm_usage);
+    html += '<p style="font-size:11.5px;color:var(--color-text-tertiary);margin:12px 0 0">' +
+      'この記録はアカウントの運用（不正利用・休眠アカウントの確認）のために表示しています。学習の評価には使いません。' +
+      '</p>';
+    return html;
+  }
+
+  function alOpenActivityModal(scope, uid, uname) {
+    var existing = document.getElementById("al-activity-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "al-activity-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:520px;max-width:760px;max-height:80vh;overflow:auto">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 style="margin:0;font-size:15px;color:var(--color-text-primary)">「' + escHtml(uname) + '」の利用状況</h3>' +
+          '<button type="button" id="al-activity-close" class="admin-action-btn" data-ui-anchor="' + AL_ANCHORS[scope].activity + '">閉じる</button>' +
+        '</div>' +
+        '<div id="al-activity-body"><p style="color:var(--color-text-tertiary)">読み込み中...</p></div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("al-activity-close").addEventListener("click", function () { overlay.remove(); });
+
+    apiFetch("/admin/users/" + encodeURIComponent(uid) + "/activity")
+      .then(alExpectOk)
+      .then(function (data) {
+        var body = document.getElementById("al-activity-body");
+        if (body) body.innerHTML = alActivityHtml(data);
+      })
+      .catch(function (err) {
+        var body = document.getElementById("al-activity-body");
+        if (body) {
+          body.innerHTML = '<p style="color:var(--color-text-danger);font-size:12.5px">' +
+            '利用状況を取得できませんでした: ' + escHtml(alErrorDetail(err)) + '</p>';
+        }
+      });
+  }
+
+  // 削除予約は取消可能だが行き先が破壊的なので、コース削除と同型の「対象名入力」確認にする。
+  function alOpenDeletionModal(scope, uid, uname) {
+    var existing = document.getElementById("al-deletion-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "al-deletion-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:420px;max-width:520px">' +
+        '<h3 style="margin:0 0 12px;font-size:16px;color:var(--color-text-danger)">アカウントの削除予約</h3>' +
+        '<p style="font-size:13px;color:var(--color-text-primary);margin:0 0 8px">以下のアカウントの削除を予約します:</p>' +
+        '<p style="font-size:14px;font-weight:600;color:var(--color-text-primary);margin:0 0 12px;padding:8px;background:var(--color-bg-secondary);border-radius:4px">' +
+          escHtml(uname) +
+        '</p>' +
+        '<p style="font-size:12px;color:var(--color-text-secondary);margin:0 0 6px">' +
+          '予約してもすぐには消えません。既定では14日の猶予期間があり、その間は「削除予約を取消」で元に戻せます。' +
+        '</p>' +
+        '<p style="font-size:12px;color:var(--color-text-secondary);margin:0 0 10px">' +
+          '教材・コース・グループを所有しているアカウントは、猶予期間が過ぎても削除されません。先に「移管…」で引き継ぎ先を決めてください。' +
+        '</p>' +
+        '<label style="display:block;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:10px">猶予日数（空欄のままだと既定の14日）' +
+          '<input type="number" id="al-deletion-grace" min="1" max="365" placeholder="14" ' +
+            'style="width:100px;margin-left:8px;padding:6px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+        '</label>' +
+        '<p style="font-size:13px;color:var(--color-text-secondary);margin:0 0 8px">確認のため、ユーザー名を正確に入力してください:</p>' +
+        '<input type="text" id="al-deletion-confirm-input" placeholder="' + escHtml(uname) + '" ' +
+          'style="width:100%;padding:8px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary);box-sizing:border-box;margin-bottom:12px">' +
+        '<div id="al-deletion-error" style="display:none;color:var(--color-text-danger);font-size:12px;margin-bottom:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button type="button" id="al-deletion-cancel" class="admin-action-btn">キャンセル</button>' +
+          '<button type="button" id="al-deletion-exec" class="admin-action-btn" data-ui-anchor="' + AL_ANCHORS[scope].remove + '" ' +
+            'style="background:var(--color-text-danger);color:#fff" disabled>削除を予約する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    var input = document.getElementById("al-deletion-confirm-input");
+    var execBtn = document.getElementById("al-deletion-exec");
+    var errEl = document.getElementById("al-deletion-error");
+
+    input.addEventListener("input", function () {
+      execBtn.disabled = (input.value !== uname);
+    });
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("al-deletion-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    execBtn.addEventListener("click", function () {
+      execBtn.disabled = true;
+      execBtn.textContent = "予約中...";
+      var graceEl = document.getElementById("al-deletion-grace");
+      var body = {};
+      var graceRaw = graceEl ? graceEl.value.trim() : "";
+      if (graceRaw) body.grace_days = parseInt(graceRaw, 10);
+      apiFetch("/admin/users/" + encodeURIComponent(uid) + "/deletion", {
+        method: "POST",
+        body: JSON.stringify(body)
+      })
+        .then(alExpectOk)
+        .then(function (data) {
+          overlay.remove();
+          var when = (data && data.purge_after) ? formatDateTime(data.purge_after) : "";
+          alSetMessage(scope, "「" + uname + "」の削除を予約しました。" +
+            (when ? "削除予定は " + when + " です。" : "") +
+            "それまでは「削除予約を取消」で元に戻せます。", "success");
+          alLoadUsers(scope);
+        })
+        .catch(function (err) {
+          execBtn.disabled = false;
+          execBtn.textContent = "削除を予約する";
+          errEl.textContent = "削除を予約できませんでした: " + alErrorDetail(err);
+          errEl.style.display = "block";
+        });
+    });
+
+    input.focus();
+  }
+
+  function alCancelDeletion(scope, uid, uname) {
+    alSetMessage(scope, "「" + uname + "」の削除予約を取り消しています...", "info");
+    apiFetch("/admin/users/" + encodeURIComponent(uid) + "/deletion", { method: "DELETE" })
+      .then(alExpectOk)
+      .then(function () {
+        alSetMessage(scope, "「" + uname + "」の削除予約を取り消しました。停止中の状態に戻りました。", "success");
+        alLoadUsers(scope);
+      })
+      .catch(function (err) {
+        alSetMessage(scope, "削除予約を取り消せませんでした: " + alErrorDetail(err), "error");
+      });
+  }
+
+  function alOpenTransferModal(scope, uid, uname) {
+    var existing = document.getElementById("al-transfer-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "al-transfer-modal";
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:420px;max-width:520px">' +
+        '<h3 style="margin:0 0 12px;font-size:15px;color:var(--color-text-primary)">所有物の移管</h3>' +
+        '<p style="font-size:12.5px;color:var(--color-text-primary);margin:0 0 8px">' +
+          '「' + escHtml(uname) + '」が所有している教材・コース・グループを、別の教員または管理者に引き継ぎます。' +
+        '</p>' +
+        '<p style="font-size:12px;color:var(--color-text-secondary);margin:0 0 10px">' +
+          '受講者の学習状態・共有設定・発行済みの版はそのまま残ります。発行済みの版に記録された発行者名は、発行時点の事実として変わりません。' +
+        '</p>' +
+        '<label style="display:block;font-size:12.5px;color:var(--color-text-secondary);margin-bottom:12px">引き継ぎ先' +
+          '<select id="al-transfer-target" style="width:100%;margin-top:4px;padding:7px;font-size:13px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)">' +
+            '<option value="">読み込み中...</option>' +
+          '</select>' +
+        '</label>' +
+        '<div id="al-transfer-error" style="display:none;color:var(--color-text-danger);font-size:12px;margin-bottom:8px"></div>' +
+        '<div style="display:flex;gap:8px;justify-content:flex-end">' +
+          '<button type="button" id="al-transfer-cancel" class="admin-action-btn">キャンセル</button>' +
+          '<button type="button" id="al-transfer-exec" class="admin-action-btn" data-ui-anchor="' + AL_ANCHORS[scope].transfer + '" ' +
+            'style="background:var(--color-text-danger);color:#fff" disabled>移管する</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+
+    var select = document.getElementById("al-transfer-target");
+    var execBtn = document.getElementById("al-transfer-exec");
+    var errEl = document.getElementById("al-transfer-error");
+
+    overlay.addEventListener("click", function (e) {
+      if (e.target === overlay) overlay.remove();
+    });
+    document.getElementById("al-transfer-cancel").addEventListener("click", function () { overlay.remove(); });
+
+    // 移管先は「有効な TEACHER 以上」= instructor + admin（設計 §5）。教員が1人だけの
+    // 環境では管理者が唯一の正当な引き取り先になるため、admin を候補から外さない
+    // （外すと AL9 により削除予約が永久に完了せず、通知が出続ける）。
+    // 学生で limit を食い潰さないよう、ロールごとに取得してマージする。
+    Promise.all([
+      apiFetch("/admin/users?role=instructor&status=active&limit=200").then(alExpectOk),
+      apiFetch("/admin/users?role=admin&status=active&limit=200").then(alExpectOk)
+    ])
+      .then(function (results) {
+        var users = [];
+        for (var r = 0; r < results.length; r++) {
+          var chunk = (results[r] && results[r].users) || [];
+          for (var k = 0; k < chunk.length; k++) users.push(chunk[k]);
+        }
+        var opts = '<option value="">選択してください</option>';
+        var seen = {};
+        for (var i = 0; i < users.length; i++) {
+          if (!users[i] || !users[i].id || users[i].id === uid) continue;
+          if (seen[users[i].id]) continue;
+          seen[users[i].id] = true;
+          // レスポンスの role はアプリ語彙（TEACHER / SYSTEM_ADMIN）。
+          var suffix = users[i].role === "SYSTEM_ADMIN" ? "（管理者）" : "";
+          opts += '<option value="' + escHtml(users[i].id) + '">' +
+            escHtml(users[i].username || "") + suffix + '</option>';
+        }
+        select.innerHTML = opts;
+      })
+      .catch(function (err) {
+        select.innerHTML = '<option value="">取得できませんでした</option>';
+        errEl.textContent = "引き継ぎ先の候補を取得できませんでした: " + alErrorDetail(err);
+        errEl.style.display = "block";
+      });
+
+    select.addEventListener("change", function () {
+      execBtn.disabled = !select.value;
+    });
+
+    execBtn.addEventListener("click", function () {
+      var targetId = select.value;
+      if (!targetId) return;
+      var targetName = select.options[select.selectedIndex] ? select.options[select.selectedIndex].text : "";
+      openDangerConfirmModal({
+        title: "所有物の移管",
+        message: [
+          "「" + uname + "」が所有する教材・コース・グループの所有者が「" + targetName + "」に変わります。",
+          "移管後、元の所有者はこれらを自分の教材・コースとして操作できなくなります。"
+        ],
+        confirmLabel: "移管する"
+      }, function () {
+        overlay.remove();
+        alSetMessage(scope, "「" + uname + "」の所有物を移管しています...", "info");
+        apiFetch("/admin/users/" + encodeURIComponent(uid) + "/transfer-ownership", {
+          method: "POST",
+          body: JSON.stringify({ to_user_id: targetId })
+        })
+          .then(alExpectOk)
+          .then(function (data) {
+            var t = (data && data.transferred) || {};
+            alSetMessage(scope, "「" + targetName + "」に移管しました（教材 " + (t.documents || 0) +
+              " 件・コース " + (t.courses || 0) + " 件・グループ " + (t.groups || 0) + " 件）。", "success");
+            alLoadUsers(scope);
+          })
+          .catch(function (err) {
+            alSetMessage(scope, "移管できませんでした: " + alErrorDetail(err), "error");
+          });
+      });
+    });
+  }
+
+  function alHandleAction(scope, action, uid, uname) {
+    if (!uid) return;
+    if (action === "suspend") { alSuspendUser(scope, uid, uname); return; }
+    if (action === "restore") { alRestoreUser(scope, uid, uname); return; }
+    if (action === "reset") { alOpenPasswordResetModal(scope, uid, uname); return; }
+    if (action === "activity") { alOpenActivityModal(scope, uid, uname); return; }
+    if (action === "deletion") { alOpenDeletionModal(scope, uid, uname); return; }
+    if (action === "cancel-deletion") { alCancelDeletion(scope, uid, uname); return; }
+    if (action === "transfer") { alOpenTransferModal(scope, uid, uname); return; }
+  }
+
+  // Copilot 道案内（G8）: 一覧の行に描かれた操作ボタンの代表1件を返す。
+  // 一覧が未読込・その操作が非活性のときは null（案内はそこで止まる = P8 fail-closed）。
+  function _alRowActionAnchor(scope, action) {
+    var listEl = document.getElementById(AL_SCOPES[scope].listId);
+    if (!listEl) return null;
+    return listEl.querySelector('[data-al-action="' + action + '"]');
+  }
+
+  function alInitAccountLifecycle() {
+    Object.keys(AL_SCOPES).forEach(function (scope) {
+      var cfg = AL_SCOPES[scope];
+      var listEl = document.getElementById(cfg.listId);
+      // 教員管理パネルは SYSTEM_ADMIN 以外では生成されない（存在しなければ何もしない）。
+      if (!listEl) return;
+      listEl.addEventListener("click", function (e) {
+        var btn = e.target && e.target.closest ? e.target.closest("[data-al-action]") : null;
+        if (!btn || btn.disabled) return;
+        alHandleAction(
+          scope,
+          btn.getAttribute("data-al-action"),
+          btn.getAttribute("data-al-user-id"),
+          btn.getAttribute("data-al-username")
+        );
+      });
+      var refreshBtn = document.getElementById(cfg.refreshId);
+      if (refreshBtn) refreshBtn.addEventListener("click", function () { alLoadUsers(scope); });
+      var searchEl = document.getElementById(cfg.searchId);
+      if (searchEl) {
+        searchEl.addEventListener("keydown", function (e) {
+          if (e.key === "Enter") { e.preventDefault(); alLoadUsers(scope); }
+        });
+      }
+      // 取得はタブを開いたときだけ（ポーリングしない）。
+      onTabActivate(scope, function () { alLoadUsers(scope); });
+    });
   }
 
   // ── Role-based UI setup ───────────────────────────────────────────
@@ -6980,7 +8084,8 @@
           '<button type="submit" class="admin-action-btn">学生を作成</button>' +
         '</form>' +
         '<div id="student-msg" class="upload-status"></div>' +
-      '</div>';
+      '</div>' +
+      alAccountSectionHtml("students");
     tabsEl.parentElement.appendChild(studentPanel);
 
     // Create teacher management panel (SYSTEM_ADMIN only)
@@ -7004,7 +8109,8 @@
             '<button type="submit" class="admin-action-btn">教員を作成</button>' +
           '</form>' +
           '<div id="teacher-msg" class="upload-status"></div>' +
-        '</div>';
+        '</div>' +
+        alAccountSectionHtml("teachers");
       tabsEl.parentElement.appendChild(teacherPanel);
     }
 
@@ -9283,10 +10389,15 @@
         state: state,
         activateTabView: activateTabView,
       });
+      // URL取得の許可ドメイン（SYSTEM_ADMIN 限定の運用タブに相乗り）。AdminLlmModels.init が
+      // 登録した initOpsTab の直後に走らせる（コールバックは登録順に実行される）ため、
+      // buildOpsTab() の innerHTML 書き込みに消されない。
+      onTabActivate("llm-models", ensureUrlFetchDomainsSection);
     }
 
     if (state.role !== "SYSTEM_ADMIN") {
       initUpload();
+      initUrlUpload();
       // M層 — 教材アップロード区画の解析モデル1行サマリ（init 済みが前提）。
       if (window.AdminLlmModels) window.AdminLlmModels.initMaterialsPanel();
       initCourseBuilder();
@@ -9532,11 +10643,27 @@
     AA.registerUiAnchors("groups", {
       groups_create_form: function () { return document.getElementById("groups-create-form"); }
     });
+    // アカウントライフサイクル（account_lifecycle_management_design.md §9）: 一覧と行操作。
+    // 行ボタンは一覧を描画するまで DOM に無いので、未解決なら道案内はそこで止まる
+    // （P8 fail-closed。学生タブの reset/activity/delete は SYSTEM_ADMIN のときだけ描画される）。
     AA.registerUiAnchors("students", {
-      create_student_form: function () { return document.getElementById("student-form"); }
+      create_student_form: function () { return document.getElementById("student-form"); },
+      user_list: function () { return document.getElementById("al-students-list"); },
+      user_suspend_button: function () { return _alRowActionAnchor("students", "suspend"); },
+      user_restore_button: function () { return _alRowActionAnchor("students", "restore"); },
+      user_reset_button: function () { return _alRowActionAnchor("students", "reset"); },
+      user_activity_button: function () { return _alRowActionAnchor("students", "activity"); },
+      user_delete_button: function () { return _alRowActionAnchor("students", "deletion"); }
     });
     AA.registerUiAnchors("teachers", {
-      create_teacher_form: function () { return document.getElementById("teacher-form"); }
+      create_teacher_form: function () { return document.getElementById("teacher-form"); },
+      user_list: function () { return document.getElementById("al-teachers-list"); },
+      user_suspend_button: function () { return _alRowActionAnchor("teachers", "suspend"); },
+      user_restore_button: function () { return _alRowActionAnchor("teachers", "restore"); },
+      user_reset_button: function () { return _alRowActionAnchor("teachers", "reset"); },
+      user_activity_button: function () { return _alRowActionAnchor("teachers", "activity"); },
+      user_delete_button: function () { return _alRowActionAnchor("teachers", "deletion"); },
+      user_transfer_button: function () { return _alRowActionAnchor("teachers", "transfer"); }
     });
     // 知識ネットワークビジョン Phase B（G2-B）: 橋の候補セクション。
     AA.registerUiAnchors("interest-dashboard", {

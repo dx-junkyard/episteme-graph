@@ -16,7 +16,7 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。全266アンカーがマップ済み
+no_hit 経路で需要を計測する）。全283アンカーがマップ済み
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -227,6 +227,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "llm-models.change-scene-model",
         "llm-models.reset-scene-model",
         "llm-models.stage-overrides",
+        "llm-models.url-fetch-domain-add",
+        "llm-models.url-fetch-domain-remove",
+        "llm-models.url-fetch-domains",
         "llm-models.usage-link",
         "llm-usage.groupby",
         "llm-usage.refresh",
@@ -270,6 +273,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-version",
         "materials.seminar-brief-modal",
         "materials.upload-zone",
+        "materials.url-upload",
+        "materials.url-upload-modal",
+        "materials.url-upload-submit",
         "release-review.modal",
         "release-review.next",
         "release-review.publish",
@@ -289,6 +295,11 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "schema.reject-btn",
         "schema.types-list",
         "students.student-form",
+        "students.user-activity",
+        "students.user-delete",
+        "students.user-list",
+        "students.user-reset",
+        "students.user-suspend",
         "stumbles.course-select",
         "stumbles.refresh-btn",
         "stumbles.table",
@@ -299,6 +310,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "system-stats.sort-columns",
         "system-stats.teacher-filter",
         "teachers.teacher-form",
+        "teachers.user-activity",
+        "teachers.user-delete",
+        "teachers.user-list",
+        "teachers.user-reset",
+        "teachers.user-suspend",
+        "teachers.user-transfer",
         "versioning.cancel-deletion",
         "versioning.inbox",
         "versioning.inbox-adopt",
@@ -717,6 +734,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "llm-models.reset-scene-model": "system_admin/16-admin-llm-models.md#reset-scene-model",
     # ステージ別の指定（N件）
     "llm-models.stage-overrides": "system_admin/16-admin-llm-models.md#stage-overrides",
+    # URL取得の許可ドメイン: 追加（migration 070 / url_material_upload_design.md）
+    "llm-models.url-fetch-domain-add": "system_admin/17-admin-url-fetch-domains.md#url-fetch-domain-add",
+    # URL取得の許可ドメイン: 行の削除
+    "llm-models.url-fetch-domain-remove": "system_admin/17-admin-url-fetch-domains.md#url-fetch-domain-remove",
+    # URL取得の許可ドメイン: 区画本体（一覧）
+    "llm-models.url-fetch-domains": "system_admin/17-admin-url-fetch-domains.md#url-fetch-domains",
     # 「LLM使用量」タブへのリンク
     "llm-models.usage-link": "system_admin/16-admin-llm-models.md#usage-link",
 
@@ -809,6 +832,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.seminar-brief-modal": "teacher/11-admin-materials.md#seminar-brief-modal",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
+    # URLから取得（arXiv など）— アップロードゾーン内のリンク（migration 070）
+    "materials.url-upload": "teacher/11-admin-materials.md#url-upload",
+    # URLから教材を取得モーダル
+    "materials.url-upload-modal": "teacher/11-admin-materials.md#url-upload-modal",
+    # モーダルの「アップロード」（許可リストが空のときは無効）
+    "materials.url-upload-submit": "teacher/11-admin-materials.md#url-upload-submit",
 
     # --- release-review.* — リリース前の確認ウィザード（release_review_flow_design.md。コース管理/コースビルダーから開く横断UI） -
     # ウィザード本体（3ステップ: 学習マップ → 論文の位置づけ → 公開）
@@ -855,6 +884,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- students.* — 学生管理タブ ------------------------------------------------------
     # 学生を作成
     "students.student-form": "teacher/16-admin-students.md#student-form",
+    # 学生アカウント一覧
+    "students.user-list": "teacher/16-admin-students.md#user-list",
+    # 停止… / 再開（教員以上）
+    "students.user-suspend": "teacher/16-admin-students.md#user-suspend",
+    # 以下3件は SYSTEM_ADMIN 限定のボタン（AL7）。TEACHER には
+    # resolve_admin_ui_anchors の fail-closed により配信されない値（system_admin/）を指す。
+    # パスワード再設定…（学生）
+    "students.user-reset": "system_admin/10-admin-teachers.md#student-user-reset",
+    # 利用状況…（学生）
+    "students.user-activity": "system_admin/10-admin-teachers.md#student-user-activity",
+    # 削除予約… / 削除予約を取消（学生）
+    "students.user-delete": "system_admin/10-admin-teachers.md#student-user-delete",
 
     # --- stumbles.* — つまづきデータタブ ---------------------------------------------------
     # コース選択
@@ -881,6 +922,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- teachers.* — 教員管理タブ（SYSTEM_ADMIN 限定） -------------------------------------
     # 教員を作成
     "teachers.teacher-form": "system_admin/10-admin-teachers.md#teacher-form",
+    # 教員アカウント一覧
+    "teachers.user-list": "system_admin/10-admin-teachers.md#user-list",
+    # 停止… / 再開
+    "teachers.user-suspend": "system_admin/10-admin-teachers.md#user-suspend",
+    # パスワード再設定…
+    "teachers.user-reset": "system_admin/10-admin-teachers.md#user-reset",
+    # 利用状況…
+    "teachers.user-activity": "system_admin/10-admin-teachers.md#user-activity",
+    # 削除予約… / 削除予約を取消
+    "teachers.user-delete": "system_admin/10-admin-teachers.md#user-delete",
+    # 移管…
+    "teachers.user-transfer": "system_admin/10-admin-teachers.md#user-transfer",
 
     # --- versioning.* — 共有版管理（V層。コース管理/教材管理の「版の管理」ボタン、通知ベルから開く横断UI） ---------------
     # 削除予約を取り消す

@@ -308,6 +308,66 @@ class CartridgeContext:
 - **TEACHER**: 教材アップロード、学生アカウント作成
 - **SYSTEM_ADMIN**: 全権限（教師アカウント作成を含む）
 
+### アカウントライフサイクル管理（migration 068/069, 2026-08-23）
+
+アカウントの一覧・停止/再開・パスワードリセット・削除（移管→墓標化→選択的purge）・
+最終ログイン・認証/LLM 利用実績照会の層。正本は
+`docs/features/account_lifecycle_management_design.md`（AL1〜AL10・§15 実装記録）。
+
+- **AL1 users 行を物理 DELETE しない**（削除 = `status` 遷移 + 匿名化墓標 +
+  `core/account_lifecycle.py` の `PURGE_TABLES` / `RETAIN_TABLES` による明示 purge。
+  users への FK は NO ACTION 17列 + 破壊的 CASCADE 連鎖があるため、行を消す設計に戻さない）。
+- **失効はトークン世代**: JWT の `gen` クレームを `_get_current_user` が
+  `core/account_status.py`（30秒 TTL キャッシュ・DB 例外のみ fail-open・行不在は 401）で
+  照合。停止・リセット API は `account_status.invalidate()` を必ず呼ぶ。
+- **ログインの判定順序は資格情報→status**（先に status を見ると停止中アカウントの列挙
+  リークになる。`password_hash IS NULL` は `_verify_password` を呼ばず 401）。
+- **`auth_events`**（migration 068、FK なし・append-only・削除 API なし）: 語彙の正本は
+  `core/auth_events.py`（login_success / login_failed / login_rejected_suspended /
+  token_rejected_suspended / token_rejected_stale / password_reset）。IP は X-Real-IP →
+  XFF 末尾。`last_seen_at` は5分スロットルの列更新のみ（イベント化しない）。
+- **権限**: 一覧は TEACHER 以上（TEACHER は learner 固定に fail-closed）、学生の停止/再開は
+  TEACHER 以上、教員への操作・パスワードリセット（対象問わず）・個票 activity・削除予約・
+  移管は SYSTEM_ADMIN のみ。自分自身と bootstrap `Administrator`（固定名一致）は
+  停止・削除不可（422）。停止は認証拒否のみで所有権・共有・受講は不変（AL2）。
+- **削除**: suspended 前提で予約（既定14日 `DEFAULT_GRACE_DAYS`）→ V層スイーパに
+  `_due_users` として相乗り（`shared_version_state.object_type` に 'user' は足さない）→
+  所有物（documents / courses / groups）残存なら purge 中止 + 通知（24時間デデュープ）。
+  移管 API は `uploaded_by` / `learning_courses.user_id`+`owner_id` / `groups.created_by` を
+  付け替え、移管先を group_members の admin として保証。
+- **利用実績**: `GET /api/admin/users/{id}/activity`（SYSTEM_ADMIN）+ U層 `collect_metrics`
+  の `user_id` 集計軸/フィルタ（migration 069 のインデックス。表示名解決は route 層・
+  未帰属/不明ユーザーを正直表示、reported/estimated 非合算 = U1/AL6）。
+- **監査**: `AUDIT_ENTITY_USER_ACCOUNT`。平文パスワード・ハッシュを監査/ログ/イベントに
+  入れない（`sanitize_payload` + ガードレール）。
+- **ガードレール**: `test_account_lifecycle_{auth,api,guardrails,purge,ui_static}.py`
+  （AL1 の ORM 削除語彙込み検査・purge 網羅性 = `REFERENCES users(id)` 全表が
+  PURGE ∪ RETAIN に現れる・判定順序・fail-closed・数値開示）。
+  UI アンカーは実装時点で 277 件（件数の正は `test_admin_help_ui_anchors.py`）。
+
+### URL指定による教材取得（migration 070, 2026-08-25）
+
+教員が教材管理タブの「URLから取得」から論文 URL（PDF / TeX `.tar.gz`）を指定すると、
+サーバが取得して**既存のアップロードパイプラインへそのまま流す**層。正本は
+`docs/features/url_material_upload_design.md`（UF1〜UF6）。
+
+- **取得先は許可リストのみ**（migration 070 `url_fetch_domains`）。参照は TEACHER 以上、
+  変更は SYSTEM_ADMIN（「AIモデル」タブ末尾の区画）。**初期状態は空 = 機能無効**で、
+  照合はサーバ側で強制する（UI の無効化は補助）。
+- **migration でシードしない**。毎起動・番号順の全再実行方式のため、初期ドメインを
+  INSERT すると管理者が削除した行が再起動で復活し、削除が効かなくなる。
+- **SSRF ガードの正本は `backend/core/url_fetch.py`**（FastAPI 非 import）: ドット境界の
+  ドメイン照合・`getaddrinfo` の全アドレス検査（private/loopback/link-local/reserved 拒否）・
+  リダイレクト手動追跡（最大5ホップ・**各ホップで再検証**）・実バイトのマジックによる
+  形式判定（拡張子と `Content-Type` を信用しない）・100MB / 60秒の上限。
+  `fetch_source_from_url` は `allowed_domains` 必須引数で、空は専用エラー（迂回口を作らない）。
+- 取得後は `_accept_material_source` へ合流し、フロントも `handleUploadAccepted` で
+  既存アップロードと同一経路（新しい教材種別・新しいポーリングを作らない）。
+- 監査は `AUDIT_ENTITY_URL_FETCH_DOMAIN`。エラーは日本語事実文で、解決した IP 等の内部情報を
+  `detail` に載せない。UI アンカーは `materials.url-upload{,-modal,-submit}` +
+  `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
+- ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
+
 ### 資料の開示範囲 (Visibility)
 教材 (Document) や コース (LearningCourse) は、以下のいずれかの開示範囲を持つ。
 - **Public**: システム全体（全ユーザー）に公開
@@ -2052,7 +2112,7 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
   `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
-  `core/schema.py` を数える — 2026-08-14 時点で35語彙）。
+  `core/schema.py` を数える — 2026-08-25 時点で37語彙）。
   `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は

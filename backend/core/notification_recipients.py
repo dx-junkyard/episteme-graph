@@ -14,6 +14,21 @@ permission を対象にするか」「レガシー単一グループ共有を含
 
 FastAPI 非 import（core 配下のガードレール）。backend/api を import する方向の
 依存は作らない。
+
+【墓標ユーザーの除外（アカウントライフサイクル管理 §8.4）】
+本モジュールの全宛先解決関数は ``users`` を JOIN し ``status <> 'deleted'`` で絞る。
+理由は2つある:
+
+1. 墓標化された（``status='deleted'``）ユーザーへ通知を積まない。読む人が居ない
+   インボックス行を増やさない。
+2. FK なしの帰属列（``atlas_skeletons.created_by`` / ``updated_by`` 等）が返す
+   「users に存在しない孤児 UUID」を構造的に落とす。宛先は
+   ``user_notifications.recipient_id``（NOT NULL + FK）へ INSERT されるため、孤児 UUID が
+   混ざると通知全体が FK 違反で静かに落ちていた（設計書 §2.2）。JOIN が結合できない
+   UUID をここで捨てることで、その事故が起きなくなる。
+
+``'deleted'`` は SQL リテラルで書く（バインドパラメータを増やさない — 呼び出し側と
+既存テストが params dict の形に依存している）。
 """
 
 from __future__ import annotations
@@ -22,18 +37,28 @@ from sqlalchemy import text as sa_text
 
 
 def document_owner_id(session, document_id: str) -> str | None:
-    """documents.uploaded_by（所有者 id）を返す。無ければ None。"""
+    """documents.uploaded_by（所有者 id）を返す。無ければ（または墓標なら）None。"""
     row = session.execute(
-        sa_text("SELECT uploaded_by::text FROM documents WHERE id = CAST(:did AS uuid)"),
+        sa_text("""
+            SELECT d.uploaded_by::text
+            FROM documents d
+            JOIN users u ON u.id = d.uploaded_by AND u.status <> 'deleted'
+            WHERE d.id = CAST(:did AS uuid)
+        """),
         {"did": document_id},
     ).fetchone()
     return str(row[0]) if row and row[0] else None
 
 
 def course_owner_id(session, course_id: str) -> str | None:
-    """learning_courses.user_id（所有者 id）を返す。無ければ None。"""
+    """learning_courses.user_id（所有者 id）を返す。無ければ（または墓標なら）None。"""
     row = session.execute(
-        sa_text("SELECT user_id::text FROM learning_courses WHERE id = :cid"),
+        sa_text("""
+            SELECT c.user_id::text
+            FROM learning_courses c
+            JOIN users u ON u.id = c.user_id AND u.status <> 'deleted'
+            WHERE c.id = :cid
+        """),
         {"cid": course_id},
     ).fetchone()
     return str(row[0]) if row and row[0] else None
@@ -58,6 +83,7 @@ def document_group_member_ids(session, document_id: str, permissions: tuple[str,
             SELECT DISTINCT gm.user_id::text
             FROM object_group_permissions p
             JOIN group_members gm ON gm.group_id = p.group_id
+            JOIN users u ON u.id = gm.user_id AND u.status <> 'deleted'
             WHERE p.object_type = 'document'
               AND p.object_id = CAST(:did AS uuid)::text
               AND p.permission IN ({placeholders})
@@ -81,6 +107,7 @@ def course_group_member_ids(session, course_id: str, permissions: tuple[str, ...
             SELECT DISTINCT gm.user_id::text
             FROM object_group_permissions p
             JOIN group_members gm ON gm.group_id = p.group_id
+            JOIN users u ON u.id = gm.user_id AND u.status <> 'deleted'
             WHERE p.object_type = 'course'
               AND p.object_id = :cid
               AND p.permission IN ({placeholders})
@@ -101,9 +128,10 @@ def atlas_bound_course_owner_ids(session, domain_key: str) -> list[str]:
         return []
     rows = session.execute(
         sa_text("""
-            SELECT DISTINCT user_id::text
-            FROM learning_courses
-            WHERE data->>'cartridge_id' = :domain_key AND user_id IS NOT NULL
+            SELECT DISTINCT c.user_id::text
+            FROM learning_courses c
+            JOIN users u ON u.id = c.user_id AND u.status <> 'deleted'
+            WHERE c.data->>'cartridge_id' = :domain_key AND c.user_id IS NOT NULL
         """),
         {"domain_key": domain_key},
     ).fetchall()
@@ -115,16 +143,21 @@ def atlas_skeleton_editor_ids(session, domain_key: str) -> list[str]:
 
     `created_by` / `updated_by` の和（重複除去）。「誰でも凍結できる共同財」の
     透明性担保のため、生成者・更新者のどちらも当事者として扱う。
+
+    この2列は FK を持たないため、users に存在しない孤児 UUID を返しうる（設計書 §2.2）。
+    JOIN users で結合できない UUID と墓標ユーザーを落とす。
     """
     if not domain_key:
         return []
     rows = session.execute(
         sa_text("""
-            SELECT created_by::text AS uid FROM atlas_skeletons
-             WHERE domain_key = :domain_key AND created_by IS NOT NULL
+            SELECT s.created_by::text AS uid FROM atlas_skeletons s
+             JOIN users u ON u.id = s.created_by AND u.status <> 'deleted'
+             WHERE s.domain_key = :domain_key AND s.created_by IS NOT NULL
             UNION
-            SELECT updated_by::text AS uid FROM atlas_skeletons
-             WHERE domain_key = :domain_key AND updated_by IS NOT NULL
+            SELECT s.updated_by::text AS uid FROM atlas_skeletons s
+             JOIN users u ON u.id = s.updated_by AND u.status <> 'deleted'
+             WHERE s.domain_key = :domain_key AND s.updated_by IS NOT NULL
         """),
         {"domain_key": domain_key},
     ).fetchall()
@@ -143,6 +176,7 @@ def document_legacy_group_visibility_member_ids(session, document_id: str) -> li
             SELECT gm.user_id::text
             FROM documents d
             JOIN group_members gm ON gm.group_id = d.group_id
+            JOIN users u ON u.id = gm.user_id AND u.status <> 'deleted'
             WHERE d.id = CAST(:did AS uuid) AND d.visibility = 'group' AND d.group_id IS NOT NULL
         """),
         {"did": document_id},

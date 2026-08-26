@@ -120,7 +120,7 @@ class TestMetricsHandler:
         def fake_get_session():
             return fake_session
 
-        def fake_collect_metrics(session, *, date_from, date_to, group_by):
+        def fake_collect_metrics(session, *, date_from, date_to, group_by, user_id=None):
             captured["session"] = session
             captured["date_from"] = date_from
             captured["date_to"] = date_to
@@ -156,7 +156,7 @@ class TestMetricsHandler:
         def fake_get_session():
             return _FakeSession()
 
-        def fake_collect_metrics(session, *, date_from, date_to, group_by):
+        def fake_collect_metrics(session, *, date_from, date_to, group_by, user_id=None):
             captured["group_by"] = group_by
             return {"from": date_from, "to": date_to, "rows": [], "dropped_events": 0,
                      "price_table_loaded": False}
@@ -178,7 +178,7 @@ class TestMetricsHandler:
         def fake_get_session():
             return _FakeSession()
 
-        def fake_collect_metrics(session, *, date_from, date_to, group_by):
+        def fake_collect_metrics(session, *, date_from, date_to, group_by, user_id=None):
             captured["date_from"] = date_from
             captured["date_to"] = date_to
             return {"from": date_from, "to": date_to, "rows": [], "dropped_events": 0,
@@ -202,7 +202,7 @@ class TestMetricsHandler:
         def fake_get_session():
             return _FakeSession()
 
-        def fake_collect_metrics(session, *, date_from, date_to, group_by):
+        def fake_collect_metrics(session, *, date_from, date_to, group_by, user_id=None):
             raise ValueError(f"invalid group_by fields: {group_by!r}")
 
         monkeypatch.setattr(llm_usage_routes, "get_session", fake_get_session)
@@ -224,7 +224,7 @@ class TestMetricsHandler:
         def fake_get_session():
             return fake_session
 
-        def fake_collect_metrics(session, *, date_from, date_to, group_by):
+        def fake_collect_metrics(session, *, date_from, date_to, group_by, user_id=None):
             raise ValueError("bad group_by")
 
         monkeypatch.setattr(llm_usage_routes, "get_session", fake_get_session)

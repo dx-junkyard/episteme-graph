@@ -9,9 +9,9 @@ import re
 import threading
 import uuid
 from contextlib import nullcontext
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
@@ -19,6 +19,7 @@ from sqlalchemy import text as sa_text
 from dependencies import (
     _get_current_user,
     _hash_password,
+    _pg_role_to_app_role,
     _require_system_admin,
     _require_teacher,
     ROLE_STUDENT,
@@ -27,6 +28,7 @@ from dependencies import (
 )
 from schemas import (
     ApproveWithScopeRequest,
+    AuthEventOut,
     BackgroundTaskOut,
     CourseBuilderChatRequest,
     CourseBuilderChatResponse,
@@ -40,12 +42,23 @@ from schemas import (
     DocumentGroupPermissionOut,
     DocumentGroupPermissionUpsertRequest,
     MaterialOut,
+    PasswordResetRequest,
+    PasswordResetResponse,
     ReextractionJobOut,
+    ScheduleDeletionRequest,
     SimulationResponse,
     SchemaProposalOut,
     SchemaTypeCreateRequest,
     SchemaTypeOut,
+    SuspendUserRequest,
+    TransferOwnershipRequest,
+    TransferOwnershipResponse,
+    UserActivityResponse,
+    UserActivityUser,
+    UserListItem,
+    UserListResponse,
     UserOut,
+    UserStatusResponse,
     VisibilityUpdateRequest,
 )
 from services import (
@@ -73,6 +86,9 @@ from services import (
     user_owns_course,
     user_owns_document,
 )
+from core import account_lifecycle
+from core import account_status
+from core import auth_events as auth_events_module
 from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
@@ -88,6 +104,7 @@ from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NA
 from core.document_pipeline.persistence import get_latest_analysis_run
 from core import llm_policy
 from core.llm import generate_text
+from core.llm_usage import metrics as llm_usage_metrics
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate, today_str
@@ -100,7 +117,11 @@ from core.meta_analyzer import (
 )
 from core.postgres import get_session as _pg_session
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
-from core.schema import AUDIT_ENTITY_DOCUMENT_SHARE
+from core.schema import (
+    AUDIT_ENTITY_DOCUMENT_SHARE,
+    AUDIT_ENTITY_URL_FETCH_DOMAIN,
+    AUDIT_ENTITY_USER_ACCOUNT,
+)
 from core.schema_registry import (
     add_ontology_type,
     add_predicate,
@@ -108,11 +129,15 @@ from core.schema_registry import (
     get_predicates,
 )
 from core.status import projector as status_projector
+# URL指定による教材取得（migration 070）: 許可リスト CRUD と SSRF ガード付き
+# ダウンローダの正本。API 層は例外型を HTTP ステータスへ写像するだけ。
+from core import url_fetch
 from core.status import schema as status_schema
 from core.storage import get_storage_client
 # 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
 # コース物理削除の全経路で明示削除する（delete_material の巻き添え削除・delete_course）。
 from core.teaching_figures import store as _teaching_figures_store
+from core.versioning.schema import DEFAULT_GRACE_DAYS
 # 画像パイプライン §7: 図画像 API は theory_components.py の
 # _ensure_document_viewable（document_id は UUID / material_id 両対応）を必ず通す。
 from routes.theory_components import _ensure_document_viewable
@@ -422,51 +447,28 @@ def _validate_models_option(models: dict) -> dict:
     return validated
 
 
-@router.post("/materials/upload", status_code=202)
-def upload_material(
-    file: UploadFile = File(...),
-    analyze_images: bool = Form(False),
-    models: str | None = Form(None),
-    current_user: dict = Depends(_require_teacher),
+def _accept_material_source(
+    *,
+    source_bytes: bytes,
+    filename: str | None,
+    source_kind: str,
+    analyze_images: bool,
+    models_option: dict | None,
+    current_user: dict,
 ) -> dict:
-    """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+    """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
-    即座に task_id を返却し、処理完了はポーリングで確認する。
+    ``upload_material``（multipart アップロード）と ``upload_material_from_url``
+    （URL 指定取得）の**後半**を共有する。両者の違いは「バイト列をどこから得るか」
+    だけなので、MinIO 保存 → ``documents`` INSERT → background task 登録 →
+    処理スレッド起動 → レスポンス組立を1箇所に集約する。
 
-    ``analyze_images``（画像パイプライン §3）: True のとき ``apparatus_semantics``
-    ステージ（vision LLM による装置図同定）が有効になる。既定 off（原則6:
-    コスト fail-closed）。``figure_image_extraction``（非LLM の図画像抽出）は
-    このフラグに関係なく常時実行される（決定 0-4-2）。
-
-    ``models``（M層設計書 §7・Phase 2）: JSON 文字列でエンコードされた
-    ``{"pipeline": "gpt-5.4-mini", "pipeline.vision": "gpt-4o", ...}`` 形式の
-    run 単位モデル上書き。未指定/空文字は従来どおり素通り（options に
-    ``models`` キーを含めない）。指定時は ``_validate_models_option`` で
-    fail-closed 検証し、``document_analysis_runs.options.models`` に保存する。
+    レスポンス形は既存のアップロード API と**完全に同一**（フロントの分岐を増やさない）。
     """
     import datetime
 
-    source_kind = _uploaded_source_kind(file.filename)
-    if source_kind is None:
-        raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
-
-    models_option: dict | None = None
-    if models:
-        try:
-            parsed_models = json.loads(models)
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=422, detail="'models' must be a JSON object") from exc
-        if not isinstance(parsed_models, dict):
-            raise HTTPException(status_code=422, detail="'models' must be a JSON object")
-        if parsed_models:
-            models_option = _validate_models_option(parsed_models)
-
-    source_bytes = file.file.read()
-    if len(source_bytes) == 0:
-        raise HTTPException(status_code=400, detail="Empty file")
-
     material_id = str(uuid.uuid4())[:12]
-    object_suffix = _source_object_suffix(file.filename, source_kind)
+    object_suffix = _source_object_suffix(filename, source_kind)
     source_object_name = f"uploads/{material_id}{object_suffix}"
     doc_id = uuid.uuid4()
     task_id = str(uuid.uuid4())[:12]
@@ -492,8 +494,8 @@ def upload_material(
             """),
             {
                 "id": doc_id,
-                "title": _source_title(file.filename),
-                "filename": file.filename,
+                "title": _source_title(filename),
+                "filename": filename,
                 "uploaded_by": current_user["id"],
                 "material_id": material_id,
             },
@@ -513,7 +515,7 @@ def upload_material(
 
     thread = threading.Thread(
         target=process_material_background,
-        args=(material_id, str(doc_id), file.filename, source_bytes, task_id, None, source_kind),
+        args=(material_id, str(doc_id), filename, source_bytes, task_id, None, source_kind),
         kwargs={"options": upload_options, "user_id": str(current_user["id"])},
         daemon=True,
     )
@@ -521,19 +523,227 @@ def upload_material(
 
     logger.info(
         "Material upload accepted: %s (%s) task=%s by user=%s analyze_images=%s models=%s",
-        material_id, file.filename, task_id, current_user["id"], analyze_images, bool(models_option),
+        material_id, filename, task_id, current_user["id"], analyze_images, bool(models_option),
     )
 
     return {
         "task_id": task_id,
         "material_id": material_id,
-        "filename": file.filename,
-        "title": _source_title(file.filename),
+        "filename": filename,
+        "title": _source_title(filename),
         "source_kind": source_kind,
         "status": "pending",
         "uploaded_at": now,
         "analyze_images": bool(analyze_images),
     }
+
+
+@router.post("/materials/upload", status_code=202)
+def upload_material(
+    file: UploadFile = File(...),
+    analyze_images: bool = Form(False),
+    models: str | None = Form(None),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
+
+    即座に task_id を返却し、処理完了はポーリングで確認する。
+
+    ``analyze_images``（画像パイプライン §3）: True のとき ``apparatus_semantics``
+    ステージ（vision LLM による装置図同定）が有効になる。既定 off（原則6:
+    コスト fail-closed）。``figure_image_extraction``（非LLM の図画像抽出）は
+    このフラグに関係なく常時実行される（決定 0-4-2）。
+
+    ``models``（M層設計書 §7・Phase 2）: JSON 文字列でエンコードされた
+    ``{"pipeline": "gpt-5.4-mini", "pipeline.vision": "gpt-4o", ...}`` 形式の
+    run 単位モデル上書き。未指定/空文字は従来どおり素通り（options に
+    ``models`` キーを含めない）。指定時は ``_validate_models_option`` で
+    fail-closed 検証し、``document_analysis_runs.options.models`` に保存する。
+    """
+    source_kind = _uploaded_source_kind(file.filename)
+    if source_kind is None:
+        raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
+
+    models_option: dict | None = None
+    if models:
+        try:
+            parsed_models = json.loads(models)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(status_code=422, detail="'models' must be a JSON object") from exc
+        if not isinstance(parsed_models, dict):
+            raise HTTPException(status_code=422, detail="'models' must be a JSON object")
+        if parsed_models:
+            models_option = _validate_models_option(parsed_models)
+
+    source_bytes = file.file.read()
+    if len(source_bytes) == 0:
+        raise HTTPException(status_code=400, detail="Empty file")
+
+    return _accept_material_source(
+        source_bytes=source_bytes,
+        filename=file.filename,
+        source_kind=source_kind,
+        analyze_images=analyze_images,
+        models_option=models_option,
+        current_user=current_user,
+    )
+
+
+# ---------------------------------------------------------------------------
+# URL指定による教材取得（migration 070）
+#
+# サーバ側から任意の URL を取得する経路は SSRF の入口になるため、取得先ドメインを
+# SYSTEM_ADMIN が管理する許可リスト（`url_fetch_domains`）で制限する。**初期状態は
+# 空 = 機能無効**（fail-closed）。取得そのもの（scheme 検査・許可リスト照合・
+# 名前解決結果の IP 検査・手動リダイレクト追跡・サイズ上限・マジックバイトによる
+# 形式判定）は `core/url_fetch.py` が正本で、ここは権限・監査・HTTP 写像だけを担う。
+# ---------------------------------------------------------------------------
+
+
+class UrlFetchDomainCreateRequest(BaseModel):
+    """許可ドメインの登録リクエスト。値は `normalize_domain` で正規化して保存する。"""
+
+    domain: str
+
+
+class UploadFromUrlRequest(BaseModel):
+    """URL指定による教材取得のリクエスト。
+
+    ``analyze_images`` / ``models`` の意味は ``upload_material`` と同一
+    （画像パイプライン §3 / M層設計書 §7）。
+    """
+
+    url: str
+    analyze_images: bool = False
+    models: dict[str, str] | None = None
+
+
+@router.get("/url-fetch-domains")
+def list_url_fetch_domains(current_user: dict = Depends(_require_teacher)) -> dict:
+    """取得先ドメインの許可リストを返す（TEACHER 以上）。
+
+    教員は「どのドメインなら URL 取得が使えるか」を知る必要があるため参照は
+    TEACHER 以上。**変更は SYSTEM_ADMIN のみ**（下の2エンドポイント）。
+    """
+    session = _pg_session()
+    try:
+        domains = url_fetch.list_url_fetch_domains(session)
+    finally:
+        session.close()
+    return {"domains": domains}
+
+
+@router.post("/url-fetch-domains", status_code=201)
+def add_url_fetch_domain(
+    body: UrlFetchDomainCreateRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> dict:
+    """取得先ドメインを許可リストへ登録する（**SYSTEM_ADMIN のみ**）。冪等。"""
+    session = _pg_session()
+    try:
+        try:
+            normalized = url_fetch.add_url_fetch_domain(session, body.domain, current_user["id"])
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"ドメインの形式が正しくありません: {exc}") from exc
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    record_review_event(
+        AUDIT_ENTITY_URL_FETCH_DOMAIN, normalized, "", "allowed", current_user["id"],
+        {"action": "create", "domain": normalized},
+    )
+    logger.info(
+        "URL fetch domain allowed: %s by user=%s", normalized, current_user["id"],
+    )
+    return {"domain": normalized}
+
+
+@router.delete("/url-fetch-domains/{domain}")
+def delete_url_fetch_domain(
+    domain: str,
+    current_user: dict = Depends(_require_system_admin),
+) -> dict:
+    """取得先ドメインを許可リストから解除する（**SYSTEM_ADMIN のみ**）。"""
+    session = _pg_session()
+    try:
+        removed = url_fetch.remove_url_fetch_domain(session, domain)
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    if not removed:
+        raise HTTPException(status_code=404, detail="Domain not found")
+
+    record_review_event(
+        AUDIT_ENTITY_URL_FETCH_DOMAIN, domain, "allowed", "removed", current_user["id"],
+        {"action": "delete", "domain": domain},
+    )
+    logger.info(
+        "URL fetch domain removed: %s by user=%s", domain, current_user["id"],
+    )
+    return {"domain": domain, "deleted": True}
+
+
+#: `core/url_fetch.py` の例外型 → HTTP ステータス / 事実文の写像。
+#: detail に内部情報（解決した IP・スタックトレース）を載せない。
+_URL_FETCH_ERROR_STATUS: dict[type, int] = {
+    url_fetch.NoDomainsConfiguredError: 422,
+    url_fetch.DomainNotAllowedError: 422,
+    url_fetch.PrivateAddressError: 422,
+    url_fetch.UnsupportedContentError: 422,
+    url_fetch.TooLargeError: 413,
+    url_fetch.FetchFailedError: 502,
+}
+
+
+@router.post("/materials/upload-from-url", status_code=202)
+def upload_material_from_url(
+    body: UploadFromUrlRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """URL を指定して教材を取得し、既存のアップロードパイプラインへ流す。
+
+    取得は**リクエスト内同期**（v1）。成功時のレスポンスは
+    ``POST /api/admin/materials/upload`` と同形（202）。
+    """
+    models_option: dict | None = None
+    if body.models:
+        models_option = _validate_models_option(body.models)
+
+    session = _pg_session()
+    try:
+        allowed = [row["domain"] for row in url_fetch.list_url_fetch_domains(session)]
+    finally:
+        session.close()
+
+    try:
+        fetched = url_fetch.fetch_source_from_url(body.url, allowed)
+    except url_fetch.UrlFetchError as exc:
+        status = _URL_FETCH_ERROR_STATUS.get(type(exc), 502)
+        logger.info(
+            "URL fetch rejected (%s) for user=%s: %s",
+            type(exc).__name__, current_user["id"], exc,
+        )
+        raise HTTPException(status_code=status, detail=str(exc)) from exc
+
+    return _accept_material_source(
+        source_bytes=fetched.content,
+        filename=fetched.filename,
+        source_kind=fetched.source_kind,
+        analyze_images=body.analyze_images,
+        models_option=models_option,
+        current_user=current_user,
+    )
 
 
 class ReanalyzeRequest(BaseModel):
@@ -3304,6 +3514,166 @@ def get_materials_stats(
 # ---------------------------------------------------------------------------
 
 
+# --- アカウントライフサイクル管理の共通部品 -------------------------------------
+# 正本: docs/features/account_lifecycle_management_design.md §5（API 設計）。
+#
+# 権限の原則: 学生アカウントへの操作（一覧・停止・再開）は TEACHER 以上、
+# 教員・管理者アカウントへの操作は SYSTEM_ADMIN のみ。パスワードリセット・個票照会・
+# 削除・移管は対象ロールを問わず SYSTEM_ADMIN のみ（§14-1 裁定 / AL7）。
+# **対象ユーザーのロールはリクエストではなく必ず DB から読んで判定する**（fail-closed）。
+
+_DB_ROLE_LEARNER = "learner"
+_DB_ROLE_INSTRUCTOR = "instructor"
+_DB_ROLE_ADMIN = "admin"
+#: users.role の全語彙（DB 語彙。API の role パラメータもこの語彙で受ける）。
+_DB_ROLES = (_DB_ROLE_LEARNER, _DB_ROLE_INSTRUCTOR, _DB_ROLE_ADMIN)
+#: SYSTEM_ADMIN のみが操作できる対象ロール（教員・管理者アカウント）。
+_ELEVATED_DB_ROLES = (_DB_ROLE_INSTRUCTOR, _DB_ROLE_ADMIN)
+
+#: bootstrap Administrator の同定（§14-5 裁定: 固定名一致。is_bootstrap 列は追加しない）。
+BOOTSTRAP_ADMIN_DISPLAY_NAME = "Administrator"
+
+_USER_LIST_LIMIT_DEFAULT = 50
+_USER_LIST_LIMIT_MAX = 200
+_ACTIVITY_LIMIT_DEFAULT = 50
+_ACTIVITY_LIMIT_MAX = 100
+_MIN_PASSWORD_LENGTH = 8
+#: 個票の LLM 利用サマリの集計窓（日）。設計書 §7.3。
+_ACTIVITY_USAGE_WINDOW_DAYS = 30
+#: 個票の LLM 利用サマリで返す feature の件数（設計書 §7.3「上位 5 件」）。
+_ACTIVITY_TOP_FEATURES = 5
+_MAX_GRACE_DAYS = 365
+
+_USER_COLUMNS_SQL = """
+    id::text, display_name, email, role, status,
+    created_at, last_login_at, last_seen_at, status_reason, purge_after
+"""
+
+
+def _iso(value) -> str | None:
+    """timestamptz を ISO 文字列にする（None は None のまま）。"""
+    if value is None:
+        return None
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
+def _user_row_to_dict(row) -> dict:
+    """`_USER_COLUMNS_SQL` の 1 行を dict にする（role はアプリ語彙へ変換）。"""
+    return {
+        "id": str(row[0]),
+        "username": row[1] or "",
+        "email": row[2] or "",
+        "db_role": row[3] or _DB_ROLE_LEARNER,
+        "role": _pg_role_to_app_role(row[3] or _DB_ROLE_LEARNER),
+        "status": row[4] or account_status.ACCOUNT_STATUS_ACTIVE,
+        "created_at": _iso(row[5]),
+        "last_login_at": _iso(row[6]),
+        "last_seen_at": _iso(row[7]),
+        "status_reason": row[8] or "",
+        "purge_after": _iso(row[9]),
+    }
+
+
+def _load_user_or_404(session, user_id: str) -> dict:
+    """対象ユーザーを DB から読む。不在・不正な id は 404 統一（存在を教えない）。"""
+    try:
+        uuid.UUID(str(user_id))
+    except (ValueError, AttributeError, TypeError):
+        raise HTTPException(status_code=404, detail="対象のユーザーが見つかりません。")
+    row = session.execute(
+        sa_text(f"SELECT {_USER_COLUMNS_SQL} FROM users WHERE id = CAST(:uid AS uuid)"),
+        {"uid": str(user_id)},
+    ).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="対象のユーザーが見つかりません。")
+    return _user_row_to_dict(row)
+
+
+def _require_role_for_target(current_user: dict, target: dict) -> None:
+    """対象が教員・管理者なら SYSTEM_ADMIN を要求する（DB の role で判定・fail-closed）。"""
+    if target["db_role"] in _ELEVATED_DB_ROLES and current_user.get("role") != ROLE_SYSTEM_ADMIN:
+        raise HTTPException(status_code=403, detail="System admin role required")
+
+
+def _guard_lockout(current_user: dict, target: dict) -> None:
+    """自分自身と bootstrap Administrator への停止・削除を拒否する（AL10）。"""
+    if str(target["id"]) == str(current_user.get("id")):
+        raise HTTPException(
+            status_code=422,
+            detail="自分自身のアカウントは停止・削除できません。別の管理者に依頼してください。",
+        )
+    if target["username"] == BOOTSTRAP_ADMIN_DISPLAY_NAME:
+        raise HTTPException(
+            status_code=422,
+            detail="初期管理者アカウント（Administrator）は停止・削除できません。",
+        )
+
+
+def _status_response(target: dict, **overrides) -> UserStatusResponse:
+    payload = {
+        "id": target["id"],
+        "username": target["username"],
+        "role": target["role"],
+        "status": target["status"],
+        "status_reason": target["status_reason"],
+        "purge_after": target["purge_after"],
+    }
+    payload.update(overrides)
+    return UserStatusResponse(**payload)
+
+
+def _apply_status_change(
+    session,
+    target: dict,
+    *,
+    new_status: str,
+    actor_id: str,
+    reason: str | None = None,
+    purge_after=None,
+) -> None:
+    """users の状態列だけを更新する。
+
+    **所有権（documents.uploaded_by / learning_courses.user_id）・可視性・グループ・
+    共有・受講状態には一切触らない**（AL2。所有列を触ると共有先教員の閲覧と学習者の
+    受講が全滅する）。
+    """
+    session.execute(
+        sa_text("""
+            UPDATE users
+            SET status = :status,
+                status_changed_at = now(),
+                status_changed_by = CAST(:by AS uuid),
+                status_reason = COALESCE(:reason, status_reason),
+                purge_after = :purge_after,
+                updated_at = now()
+            WHERE id = CAST(:uid AS uuid)
+        """),
+        {
+            "status": new_status,
+            "by": actor_id or None,
+            "reason": reason,
+            "purge_after": purge_after,
+            "uid": target["id"],
+        },
+    )
+
+
+def _audit_account(target: dict, old_status: str, new_status: str, actor_id: str,
+                   action: str, extra: dict | None = None) -> None:
+    """アカウント状態変更を監査記帳する。
+
+    **資格情報（平文パスワード・ハッシュ）を metadata に入れない**（AL4）。
+    """
+    metadata = {"action": action, "target_role": target["db_role"]}
+    if extra:
+        metadata.update(extra)
+    record_review_event(
+        AUDIT_ENTITY_USER_ACCOUNT, target["id"], old_status, new_status, actor_id, metadata,
+    )
+
+
 @router.post("/users/student", response_model=UserOut, status_code=201)
 def create_student(
     body: CreateUserRequest,
@@ -3318,6 +3688,12 @@ def create_student(
         ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
+        # email も UNIQUE 制約を持つ。事前チェックしないと DB 例外 → 500 になる（§2.6-①）。
+        if session.execute(
+            sa_text("SELECT id FROM users WHERE email = :email LIMIT 1"),
+            {"email": body.email},
+        ).fetchone():
+            raise HTTPException(status_code=409, detail="Email already registered")
 
         user_id = uuid.uuid4()
         hashed_pw = _hash_password(body.password)
@@ -3350,6 +3726,12 @@ def create_teacher(
         ).fetchone()
         if existing:
             raise HTTPException(status_code=409, detail="Username already taken")
+        # email も UNIQUE 制約を持つ（§2.6-① の 500 是正）。
+        if session.execute(
+            sa_text("SELECT id FROM users WHERE email = :email LIMIT 1"),
+            {"email": body.email},
+        ).fetchone():
+            raise HTTPException(status_code=409, detail="Email already registered")
 
         user_id = uuid.uuid4()
         hashed_pw = _hash_password(body.password)
@@ -3366,6 +3748,507 @@ def create_teacher(
 
     logger.info("Admin '%s' created teacher '%s' (id=%s)", current_user["username"], body.username, user_id)
     return UserOut(id=str(user_id), username=body.username, email=body.email, role=ROLE_TEACHER)
+
+
+@router.get("/users", response_model=UserListResponse)
+def list_users(
+    role: str | None = None,
+    status: str | None = None,
+    q: str | None = None,
+    limit: int = _USER_LIST_LIMIT_DEFAULT,
+    offset: int = 0,
+    current_user: dict = Depends(_require_teacher),
+) -> UserListResponse:
+    """アカウント一覧（設計書 §5）。
+
+    **TEACHER は role='learner' に強制固定する**（パラメータを無視する fail-closed。
+    TEACHER に教員・管理者アカウントの存在を見せない = AL7）。SYSTEM_ADMIN は全ロール。
+    """
+    is_admin = current_user.get("role") == ROLE_SYSTEM_ADMIN
+    if is_admin:
+        role_filter = (role or "").strip() or None
+        if role_filter is not None and role_filter not in _DB_ROLES:
+            raise HTTPException(
+                status_code=422,
+                detail="role は learner / instructor / admin のいずれかを指定してください。",
+            )
+    else:
+        # fail-closed: TEACHER は学生のみ（リクエストの role を採用しない）
+        role_filter = _DB_ROLE_LEARNER
+
+    status_filter = (status or "").strip() or None
+    if status_filter is not None and status_filter not in account_status.ACCOUNT_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail="status は active / suspended / pending_deletion / deleted のいずれかを指定してください。",
+        )
+
+    limit = max(1, min(int(limit or _USER_LIST_LIMIT_DEFAULT), _USER_LIST_LIMIT_MAX))
+    offset = max(0, int(offset or 0))
+
+    clauses: list[str] = []
+    params: dict = {}
+    if role_filter is not None:
+        clauses.append("role = :role")
+        params["role"] = role_filter
+    if status_filter is not None:
+        clauses.append("status = :status")
+        params["status"] = status_filter
+    keyword = (q or "").strip()
+    if keyword:
+        clauses.append("(display_name ILIKE :kw OR email ILIKE :kw)")
+        params["kw"] = f"%{keyword}%"
+    where_sql = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+
+    session = _pg_session()
+    try:
+        total_row = session.execute(
+            sa_text(f"SELECT COUNT(*) FROM users{where_sql}"), params,  # noqa: S608 — 定数句のみ
+        ).fetchone()
+        rows = session.execute(
+            sa_text(
+                f"SELECT {_USER_COLUMNS_SQL} FROM users{where_sql} "  # noqa: S608
+                "ORDER BY created_at DESC NULLS LAST, display_name LIMIT :limit OFFSET :offset"
+            ),
+            {**params, "limit": limit, "offset": offset},
+        ).fetchall()
+    finally:
+        session.close()
+
+    users = []
+    for row in rows:
+        item = _user_row_to_dict(row)
+        users.append(UserListItem(
+            id=item["id"], username=item["username"], email=item["email"], role=item["role"],
+            status=item["status"], created_at=item["created_at"],
+            last_login_at=item["last_login_at"], last_seen_at=item["last_seen_at"],
+        ))
+    return UserListResponse(users=users, total=int(total_row[0]) if total_row else 0)
+
+
+@router.post("/users/{user_id}/suspend", response_model=UserStatusResponse)
+def suspend_user(
+    user_id: str,
+    body: SuspendUserRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> UserStatusResponse:
+    """アカウントを停止する（active → suspended）。
+
+    効果は**認証の拒否のみ**（AL2）。所有権・可視性・共有・受講状態は一切触らない。
+    停止中も共有先教員は教材を閲覧でき、学習者は受講を継続できる。
+    """
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(status_code=422, detail="停止の理由を入力してください（監査記録に残します）。")
+
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        _require_role_for_target(current_user, target)
+        _guard_lockout(current_user, target)
+        if target["status"] != account_status.ACCOUNT_STATUS_ACTIVE:
+            raise HTTPException(
+                status_code=422,
+                detail="このアカウントは利用中ではありません。停止できるのは利用中のアカウントだけです。",
+            )
+        _apply_status_change(
+            session, target,
+            new_status=account_status.ACCOUNT_STATUS_SUSPENDED,
+            actor_id=current_user.get("id"), reason=reason, purge_after=None,
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    # commit の後に落とす（AL3。同一プロセスは即時・多プロセスでも最大 TTL 秒で反映）
+    account_status.invalidate(target["id"])
+    _audit_account(
+        target, target["status"], account_status.ACCOUNT_STATUS_SUSPENDED,
+        current_user.get("id"), "suspend", {"reason": reason},
+    )
+    logger.info("account suspended: %s by %s", target["id"], current_user.get("id"))
+    return _status_response(
+        target, status=account_status.ACCOUNT_STATUS_SUSPENDED, status_reason=reason,
+        purge_after=None,
+    )
+
+
+@router.post("/users/{user_id}/restore", response_model=UserStatusResponse)
+def restore_user(
+    user_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> UserStatusResponse:
+    """停止を解除する（suspended → active）。
+
+    ``pending_deletion`` の解除は削除予約の取消 API（`DELETE .../deletion`）でのみ行う
+    （削除予約を「再開」で黙って解除しない）。
+    """
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        _require_role_for_target(current_user, target)
+        if target["status"] != account_status.ACCOUNT_STATUS_SUSPENDED:
+            raise HTTPException(
+                status_code=422,
+                detail="このアカウントは停止中ではありません。削除予約中の場合は「削除予約の取消」を使ってください。",
+            )
+        _apply_status_change(
+            session, target,
+            new_status=account_status.ACCOUNT_STATUS_ACTIVE,
+            actor_id=current_user.get("id"), reason="", purge_after=None,
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    account_status.invalidate(target["id"])
+    # 停止理由は列から消えるが、監査台帳に previous_reason として残す（AL8）
+    _audit_account(
+        target, account_status.ACCOUNT_STATUS_SUSPENDED, account_status.ACCOUNT_STATUS_ACTIVE,
+        current_user.get("id"), "restore", {"previous_reason": target["status_reason"]},
+    )
+    logger.info("account restored: %s by %s", target["id"], current_user.get("id"))
+    return _status_response(
+        target, status=account_status.ACCOUNT_STATUS_ACTIVE, status_reason="", purge_after=None,
+    )
+
+
+@router.post("/users/{user_id}/password-reset", response_model=PasswordResetResponse)
+def reset_user_password(
+    user_id: str,
+    body: PasswordResetRequest,
+    request: Request,
+    current_user: dict = Depends(_require_system_admin),
+) -> PasswordResetResponse:
+    """パスワードを再設定する（**SYSTEM_ADMIN のみ・対象ロールを問わない**。§14-1 裁定）。
+
+    ``token_generation++`` により対象の発行済みトークンは即時失効する（AL3）。
+    自分自身に対して実行した場合も無条件で ++ するため、実行者のトークンも失効する
+    （レスポンスの ``self_reset`` で UI にログイン画面へ誘導させる）。
+
+    **平文・ハッシュを監査 metadata / auth_events payload / ログに入れない**（AL4）。
+    """
+    new_password = body.new_password or ""
+    if len(new_password) < _MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=422,
+            detail=f"パスワードは{_MIN_PASSWORD_LENGTH}文字以上で設定してください。",
+        )
+
+    hashed = _hash_password(new_password)
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        row = session.execute(
+            sa_text("""
+                UPDATE users
+                SET password_hash = :pw,
+                    token_generation = token_generation + 1,
+                    password_updated_at = now(),
+                    updated_at = now()
+                WHERE id = CAST(:uid AS uuid)
+                RETURNING password_updated_at
+            """),
+            {"pw": hashed, "uid": target["id"]},
+        ).fetchone()
+        auth_events_module.record_auth_event(
+            session,
+            event=auth_events_module.AUTH_EVENT_PASSWORD_RESET,
+            user_id=target["id"],
+            ip_address=auth_events_module.client_ip_from_headers(request.headers),
+            user_agent=auth_events_module.user_agent_from_headers(request.headers),
+            payload={"actor_id": str(current_user.get("id") or "")},
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    account_status.invalidate(target["id"])
+    _audit_account(
+        target, target["status"], target["status"], current_user.get("id"), "password_reset",
+    )
+    self_reset = str(target["id"]) == str(current_user.get("id"))
+    logger.info("password reset for %s by %s (self=%s)",
+                target["id"], current_user.get("id"), self_reset)
+    return PasswordResetResponse(
+        id=target["id"], username=target["username"],
+        password_updated_at=_iso(row[0]) if row else None,
+        self_reset=self_reset,
+    )
+
+
+def _activity_llm_usage(session, user_id: str) -> dict:
+    """個票の LLM 利用サマリ（設計書 §7.3）。
+
+    既存の U層 ``collect_metrics`` の再利用のみで新集計 SQL を書かない。reported /
+    estimated は分離したまま返す（U1: 合算した単一数値を作らない）。集計に失敗したら
+    ``{"available": False}`` に縮退して個票表示を止めない（fail-soft）。
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        metrics = llm_usage_metrics.collect_metrics(
+            session,
+            date_from=now - timedelta(days=_ACTIVITY_USAGE_WINDOW_DAYS),
+            date_to=now + timedelta(days=1),
+            group_by=["feature"],
+            user_id=str(user_id),
+        )
+    except Exception:  # noqa: BLE001 — 集計の失敗で個票を落とさない
+        logger.warning("activity: llm usage aggregation failed for %s", user_id, exc_info=True)
+        return {"available": False}
+
+    empty = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "calls": 0}
+    totals = {"reported": dict(empty), "estimated": dict(empty)}
+    features = []
+    for row in metrics.get("rows", []) or []:
+        reported = row.get("reported") or dict(empty)
+        estimated = row.get("estimated") or dict(empty)
+        for bucket_name, bucket in (("reported", reported), ("estimated", estimated)):
+            for key in empty:
+                totals[bucket_name][key] += int(bucket.get(key) or 0)
+        features.append({
+            "feature": (row.get("key") or {}).get("feature"),
+            "reported": reported,
+            "estimated": estimated,
+        })
+    # 並べ替えのキーだけ内部で合算する（表示値は reported / estimated を分離したまま）
+    features.sort(
+        key=lambda f: int(f["reported"].get("total_tokens") or 0)
+        + int(f["estimated"].get("total_tokens") or 0),
+        reverse=True,
+    )
+    return {
+        "available": True,
+        "window_days": _ACTIVITY_USAGE_WINDOW_DAYS,
+        "reported": totals["reported"],
+        "estimated": totals["estimated"],
+        "top_features": features[:_ACTIVITY_TOP_FEATURES],
+    }
+
+
+@router.get("/users/{user_id}/activity", response_model=UserActivityResponse)
+def get_user_activity(
+    user_id: str,
+    limit: int = _ACTIVITY_LIMIT_DEFAULT,
+    before: str | None = None,
+    current_user: dict = Depends(_require_system_admin),
+) -> UserActivityResponse:
+    """アカウント個票（認証イベント時系列 + LLM 利用サマリ）。**SYSTEM_ADMIN のみ**。
+
+    AL7: 学生の個票も TEACHER には開示しない。用途はアカウント運用（不正利用・休眠検知）に
+    限定し、学習評価に使わない。
+    """
+    limit = max(1, min(int(limit or _ACTIVITY_LIMIT_DEFAULT), _ACTIVITY_LIMIT_MAX))
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        clause = ""
+        params: dict = {"uid": target["id"], "limit": limit}
+        cursor = (before or "").strip()
+        if cursor:
+            clause = " AND created_at < CAST(:before AS timestamptz)"
+            params["before"] = cursor
+        try:
+            rows = session.execute(
+                sa_text(
+                    "SELECT event, created_at, ip_address, user_agent FROM auth_events "
+                    f"WHERE user_id = CAST(:uid AS uuid){clause} "  # noqa: S608 — 定数句のみ
+                    "ORDER BY created_at DESC LIMIT :limit"
+                ),
+                params,
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — 不正な before 等で個票全体を落とさない
+            session.rollback()
+            logger.warning("activity: auth_events query failed for %s", target["id"], exc_info=True)
+            rows = []
+        usage = _activity_llm_usage(session, target["id"])
+    finally:
+        session.close()
+
+    return UserActivityResponse(
+        user=UserActivityUser(
+            id=target["id"], username=target["username"], email=target["email"],
+            role=target["role"], status=target["status"], created_at=target["created_at"],
+            last_login_at=target["last_login_at"], last_seen_at=target["last_seen_at"],
+            status_reason=target["status_reason"], purge_after=target["purge_after"],
+        ),
+        auth_events=[
+            AuthEventOut(
+                event=str(r[0] or ""), created_at=_iso(r[1]),
+                ip_address=r[2] or None, user_agent=r[3] or None,
+            )
+            for r in rows
+        ],
+        llm_usage=usage,
+    )
+
+
+@router.post("/users/{user_id}/deletion", response_model=UserStatusResponse)
+def schedule_user_deletion(
+    user_id: str,
+    body: ScheduleDeletionRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> UserStatusResponse:
+    """アカウント削除を予約する（suspended → pending_deletion + purge_after）。
+
+    前提は **停止済み**（いきなり削除予約できない）。期限到来後に
+    ``core/versioning/worker.py`` のスイーパが purge するが、所有物（教材・コース・
+    グループ）が残っている限り users 行は消えず、SYSTEM_ADMIN へ事実文が届く（AL9）。
+    """
+    days = body.grace_days if body.grace_days is not None else DEFAULT_GRACE_DAYS
+    try:
+        days = int(days)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=422, detail="猶予日数は整数で指定してください。")
+    if days < 1 or days > _MAX_GRACE_DAYS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"猶予日数は 1〜{_MAX_GRACE_DAYS} 日の範囲で指定してください。",
+        )
+    purge_after = account_lifecycle.default_purge_after(days)
+
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        _guard_lockout(current_user, target)
+        if target["status"] != account_status.ACCOUNT_STATUS_SUSPENDED:
+            raise HTTPException(
+                status_code=422,
+                detail="削除を予約できるのは停止中のアカウントだけです。先に停止してください。",
+            )
+        _apply_status_change(
+            session, target,
+            new_status=account_status.ACCOUNT_STATUS_PENDING_DELETION,
+            actor_id=current_user.get("id"), reason=None, purge_after=purge_after,
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    account_status.invalidate(target["id"])
+    _audit_account(
+        target, account_status.ACCOUNT_STATUS_SUSPENDED,
+        account_status.ACCOUNT_STATUS_PENDING_DELETION, current_user.get("id"),
+        "schedule_deletion", {"grace_days": days, "purge_after": purge_after.isoformat()},
+    )
+    logger.info("account deletion scheduled: %s purge_after=%s", target["id"], purge_after)
+    return _status_response(
+        target, status=account_status.ACCOUNT_STATUS_PENDING_DELETION,
+        purge_after=purge_after.isoformat(),
+    )
+
+
+@router.delete("/users/{user_id}/deletion", response_model=UserStatusResponse)
+def cancel_user_deletion(
+    user_id: str,
+    current_user: dict = Depends(_require_system_admin),
+) -> UserStatusResponse:
+    """削除予約を取消す（pending_deletion → suspended）。AL8: 取消可能な状態遷移。"""
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        if target["status"] != account_status.ACCOUNT_STATUS_PENDING_DELETION:
+            raise HTTPException(
+                status_code=422, detail="このアカウントは削除予約中ではありません。",
+            )
+        _apply_status_change(
+            session, target,
+            new_status=account_status.ACCOUNT_STATUS_SUSPENDED,
+            actor_id=current_user.get("id"), reason=None, purge_after=None,
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    account_status.invalidate(target["id"])
+    _audit_account(
+        target, account_status.ACCOUNT_STATUS_PENDING_DELETION,
+        account_status.ACCOUNT_STATUS_SUSPENDED, current_user.get("id"), "cancel_deletion",
+    )
+    logger.info("account deletion cancelled: %s", target["id"])
+    return _status_response(
+        target, status=account_status.ACCOUNT_STATUS_SUSPENDED, purge_after=None,
+    )
+
+
+@router.post("/users/{user_id}/transfer-ownership", response_model=TransferOwnershipResponse)
+def transfer_user_ownership(
+    user_id: str,
+    body: TransferOwnershipRequest,
+    current_user: dict = Depends(_require_system_admin),
+) -> TransferOwnershipResponse:
+    """所有物（教材 / コース / グループ）を後任へ移管する（設計書 §8.2）。
+
+    受講者の ``learning_states``・共有・V層の版はそのまま生きる（所有者 UUID の
+    付け替えだけで権限判定と通知宛先が新所有者へ切り替わる）。
+    ``shared_versions.published_by`` は発行時点の事実なので付け替えない。
+    """
+    session = _pg_session()
+    try:
+        target = _load_user_or_404(session, user_id)
+        destination = _load_user_or_404(session, body.to_user_id)
+        if str(destination["id"]) == str(target["id"]):
+            raise HTTPException(status_code=422, detail="移管先には別のユーザーを指定してください。")
+        if destination["db_role"] not in _ELEVATED_DB_ROLES:
+            raise HTTPException(
+                status_code=422, detail="移管先には教員または管理者のアカウントを指定してください。",
+            )
+        if destination["status"] != account_status.ACCOUNT_STATUS_ACTIVE:
+            raise HTTPException(
+                status_code=422, detail="移管先には利用中のアカウントを指定してください。",
+            )
+        transferred = account_lifecycle.transfer_ownership(session, target["id"], destination["id"])
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _audit_account(
+        target, target["status"], target["status"], current_user.get("id"),
+        account_lifecycle.AUDIT_ACTION_TRANSFER_OWNERSHIP,
+        {"to_user_id": destination["id"], "to_username": destination["username"],
+         "transferred": transferred},
+    )
+    logger.info("ownership transferred %s -> %s: %s",
+                target["id"], destination["id"], transferred)
+    return TransferOwnershipResponse(
+        id=target["id"], to_user_id=destination["id"], transferred=transferred,
+    )
 
 
 # ---------------------------------------------------------------------------

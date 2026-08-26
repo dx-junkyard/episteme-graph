@@ -182,3 +182,35 @@ class TestLlmUsageModule:
         body = _extract_function(self.js, "renderEstimatePopover")
         assert "tokens_range" in body
         assert "total_tokens_range" in body
+
+
+# ---------------------------------------------------------------------------
+# admin-llm-usage.js: ユーザー別集計（アカウントライフサイクル管理設計書 §7-2）
+# ---------------------------------------------------------------------------
+
+
+class TestLlmUsageUserGrouping:
+    def setup_method(self):
+        assert LLM_USAGE_JS.exists(), "admin-llm-usage.js が存在しません"
+        self.js = _read(LLM_USAGE_JS)
+
+    def test_groupby_selector_has_user_id_option(self):
+        assert '<option value="user_id">' in self.js
+        assert 'value="user_id,feature"' in self.js
+
+    def test_no_new_data_ui_anchor_added(self):
+        """1属性1ID 規約: group_by セレクタの担体は既存 llm-usage.groupby のまま
+        （新しい data-ui-anchor="llm-usage.group-by-user" 等は作らない）。"""
+        anchors = re.findall(r'data-ui-anchor="([^"]+)"', self.js)
+        assert anchors.count("llm-usage.groupby") == 1
+        assert not any(a.startswith("llm-usage.group-by-user") for a in anchors)
+
+    def test_unattributed_batch_notice_shown_only_for_user_grouping(self):
+        body = _extract_function(self.js, "renderMetrics")
+        assert "llm-usage-user-note" in body
+        assert "バッチ処理・自動解析による消費は「未帰属」に計上されます。" in body
+        assert 'indexOf("user_id")' in body
+
+    def test_key_rendering_prefers_user_display_name_over_raw_user_id(self):
+        body = _extract_function(self.js, "renderMetrics")
+        assert "user_display_name" in body
