@@ -2,8 +2,8 @@
 
 > **状態: 実装済み（正本・凍結）**（2026-08-27 起票・同日 Phase 1 / Phase 2 / Phase 3 実装。
 > migration は **071** `paper_discovery` / **072** `paper_discovery_ingest_queue` で採番済み
-> （Phase 3 は migration なし）。§7 のコーパス回遊は提案（実装対象外）— 着手時は専用
-> 設計書を切る。以後は §10 実装記録のみ追記する）
+> （Phase 3 は migration なし）。§7 のコーパス回遊は専用設計書
+> `corpus_roaming_design.md` で**実装済み**（migration 073）。以後は §10 実装記録のみ追記する）
 
 **正本**: 本ドキュメント。
 **関連**: [URL指定による教材取得](url_material_upload_design.md)（UF1〜UF6 — 本層の
@@ -93,7 +93,7 @@ confirmed リンクと骨格が育っている — 事前構築の実体は自�
 | **Phase 1** | 分野購読 + arXiv 検索 + 候補一覧 UI + 承認取り込み（§4） | 実装済み（2026-08-27・§10） |
 | **Phase 2** | バッチ取り込みの非同期化 + トークン使用量の事前見積り提示（§5） | 実装済み（2026-08-27・§10） |
 | **Phase 3** | embedding 類似度ランキング + 引用グラフ拡張口（§6） | 実装済み（2026-08-27・§10。migration なし） |
-| **Phase 4 / v2** | コーパス回遊 — コース無し議論・コーパス地図・地図の端（§7） | 提案（実装対象外・着手時に専用設計書） |
+| **Phase 4 / v2** | コーパス回遊 — コース無し議論・コーパス地図・地図の端（§7） | 実装済み（2026-08-27・正本は [corpus_roaming_design.md](corpus_roaming_design.md)） |
 
 ---
 
