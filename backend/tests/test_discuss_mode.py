@@ -58,9 +58,15 @@ class TestDiscussionTopicLabel:
 
     def test_topic_title_label_conversion_wired(self):
         source = _read(LEARNING)
-        block = source.split("topic_info = find_course_topic(course_data, topic_id)")[1][:500]
+        block = source.split("topic_info = find_course_topic(course_data, topic_id)")[1][:900]
         assert "if topic_id == DISCUSSION_TOPIC_ID:" in block
-        assert "topic_title = DISCUSSION_TOPIC_LABEL" in block
+        assert "DISCUSSION_TOPIC_LABEL" in block
+        # コーパス回遊 Phase B（corpus_roaming_design.md §5.4）: コース外（document
+        # 直付け）の議論はここで別ラベルへ分岐する。ラベル変換は依然この1箇所のみ。
+        assert (
+            "DOCUMENT_DISCUSSION_TOPIC_LABEL if _document_context_id else DISCUSSION_TOPIC_LABEL"
+            in block
+        )
         # 既存トピックの通常フォールバックも維持されていること
         assert 'topic_title = topic_info["title"] if topic_info else topic_id' in block
 
@@ -288,7 +294,7 @@ class TestScopeResolution:
 
     def test_scope_block_wires_course_sources_default_and_all_visible(self):
         source = _read(LEARNING)
-        block = source.split("_discuss_scope = (body.discuss_scope or \"course_sources\").strip()")[1][:700]
+        block = source.split("_discuss_scope = (body.discuss_scope or \"course_sources\").strip()")[1][:1400]
         assert 'if _is_discuss and _discuss_scope == "all_visible":' in block
         assert "allowed_document_ids = list_visible_document_ids(current_user[\"id\"])" in block
         assert "elif _is_discuss:" in block
@@ -304,7 +310,7 @@ class TestScopeResolution:
     def test_non_discuss_path_keeps_phase0_visible_document_ids(self):
         """非 discuss は Phase 0 のまま list_visible_document_ids のみを使う（挙動不変）。"""
         source = _read(LEARNING)
-        block = source.split('_discuss_scope = (body.discuss_scope or "course_sources").strip()')[1][:900]
+        block = source.split('_discuss_scope = (body.discuss_scope or "course_sources").strip()')[1][:1600]
         assert "else:" in block
         tail = block.split("else:")[-1]
         assert 'allowed_document_ids = list_visible_document_ids(current_user["id"])' in tail
@@ -384,7 +390,7 @@ class TestDiscussScopeValidatedBeforeTruncate:
     def test_precheck_appears_before_truncate_call(self):
         from tests.guardrail_helpers import extract_function_source
 
-        body = extract_function_source(_read(LEARNING), "learning_chat")
+        body = extract_function_source(_read(LEARNING), "_learning_chat_core")
         precheck_idx = body.index('if (body.intent_mode or "").strip() == "discuss":')
         truncate_idx = body.index("truncate_chat_and_supersede(")
         assert precheck_idx < truncate_idx
@@ -392,7 +398,7 @@ class TestDiscussScopeValidatedBeforeTruncate:
     def test_precheck_appears_before_replace_message_id_check(self):
         from tests.guardrail_helpers import extract_function_source
 
-        body = extract_function_source(_read(LEARNING), "learning_chat")
+        body = extract_function_source(_read(LEARNING), "_learning_chat_core")
         precheck_idx = body.index('if (body.intent_mode or "").strip() == "discuss":')
         replace_idx = body.index("if body.replace_message_id:")
         assert precheck_idx < replace_idx
@@ -400,7 +406,7 @@ class TestDiscussScopeValidatedBeforeTruncate:
     def test_precheck_raises_422_with_expected_detail_text(self):
         from tests.guardrail_helpers import extract_function_source
 
-        body = extract_function_source(_read(LEARNING), "learning_chat")
+        body = extract_function_source(_read(LEARNING), "_learning_chat_core")
         precheck = body.split(
             'if (body.intent_mode or "").strip() == "discuss":'
         )[1].split("\n\n    # 1. コースデータを取得")[0]
@@ -424,9 +430,11 @@ class TestDiscussionOriginTopicTitle:
 
     def test_origin_topic_info_uses_synthetic_dict_for_discussion(self):
         source = _read(LEARNING)
-        block = source.split("if topic_id == DISCUSSION_TOPIC_ID:")[1][:400]
+        block = source.split("if topic_id == DISCUSSION_TOPIC_ID:")[1][:700]
+        # topic_title（= DISCUSSION_TOPIC_LABEL / コース外は DOCUMENT_DISCUSSION_TOPIC_LABEL）
+        # を使った合成 dict であること。生の予約 topic_id を渡す旧コードに戻っていないこと。
         assert (
-            '_origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": DISCUSSION_TOPIC_LABEL}'
+            '_origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": topic_title}'
             in block
         )
         assert "else:" in block

@@ -375,14 +375,14 @@ class TestCheckScaffoldBackend:
         assert not missing, f"契約フレーズが欠けています: {missing}"
 
     def test_learning_chat_injects_instruction(self):
-        body = _python_def_source(_read(LEARNING_PY), "def learning_chat(")
+        body = _python_def_source(_read(LEARNING_PY), "def _learning_chat_core(")
         assert "if body.check_scaffold:" in body
         assert '_system_prompt += "\\n\\n" + _CHECK_SCAFFOLD_INSTRUCTION' in body
 
     def test_learning_chat_neutralizes_qa_scaffold_frame(self):
         """「以下の質問に答えてください」の足場が直答を再誘導しないよう中立化する
         （DA1/DA2 と同型の問題）。"""
-        body = _python_def_source(_read(LEARNING_PY), "def learning_chat(")
+        body = _python_def_source(_read(LEARNING_PY), "def _learning_chat_core(")
         idx = body.index("_scaffold_user_instruction")
         frame = body[idx - 400:]
         assert "壁打ちモードの規則に従って" in frame

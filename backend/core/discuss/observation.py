@@ -342,6 +342,14 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         "cycle_carryover_saved",
         "cycle_revisit_answered",
         "cycle_anchor_quick",
+        # コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.5）:
+        # コース無し論文議論（document 直付け discuss）をコース discuss と分離集計する
+        # ための2語彙（DO1〜DO6 継承 — 本文非含有・payload 最小・学習者に数値非表示・
+        # 削除 API なし）。course_id 欄にはセンチネル ``_doc:{document_id}`` が入る。
+        # **記録はサーバ側**（opening / chat の各ルート）が best-effort で行うため、
+        # フロントからは送らない（二重計上の防止）。
+        "document_discuss_opened",
+        "document_discuss_turn",
     }
 )
 
