@@ -368,6 +368,44 @@ class CartridgeContext:
   `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
 - ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
 
+### 論文ディスカバリー層（arXiv 分野購読, migration 071, 2026-08-27）
+
+分野（atlas ドメイン / cartridge_id 名前空間）ごとの購読条件（arXiv カテゴリ + キーフレーズ）で
+arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得（migration 070）→ 解析パイプラインへ
+流す層。正本は `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録。§7 の
+コーパス回遊は v2 提案 — 着手時は専用設計書）。
+
+- **PD1 発見は自動・取り込みは教員の明示承認のみ**（全自動クロール・worker/cron からの
+  ingest 経路なし。ガードレールが構造的に固定）。**PD2 取得は `url_fetch` 経由のみ**
+  （UF1〜UF6 継承。`arxiv.org` が許可リストに無ければ候補は見えても取り込めない —
+  UI 無効化は補助・強制はサーバ側）。
+- **DB（migration 071・シードしない）**: `paper_discovery_subscriptions`（domain_key PK・
+  分野単位の教員共同財・last-write-wins）+ `paper_discovery_dismissals`（見送り。行削除せず
+  `revoked` 遷移で復帰）+ `documents.source_url`（URL 経由取り込みの出所。**取り込み済み
+  判定の正本** — 手動アップロード分は判定不能と正直に表示）。候補は保存せず毎回 API から
+  読み時導出（PD5）。
+- **core（`backend/core/paper_discovery/`、FastAPI・LLM 非 import）**: `schema.py`
+  （`normalize_arxiv_id` = version 抜き正規化・URL 両形式吸収）/ `arxiv_client.py`
+  （宛先 `export.arxiv.org` 固定・**3秒スロットル**・Atom パース。PD7）/ `vocab.py`
+  （キーフレーズ供給: 骨格概念 + カートリッジ aliases + 承認済み theory_components。
+  出所4語彙 `skeleton|cartridge|component|manual` — PD3）/ `store.py`（`DELETE FROM` なし）/
+  `search.py`（条件ゼロなら arXiv を呼ばない・`closed_world_note` 必須 — PD6。数値スコア
+  なし — PD4）。発見層は LLM 0回・embedding 0回。
+- **API（`routes/paper_discovery.py`、main.py 直接登録、`/api/admin/discovery/...`、全て
+  `_require_teacher`）**: subscriptions GET/PUT・keyphrase-candidates・search・
+  ingest（**上限5件/回**・部分失敗は `failed[]`・202）・dismiss/restore。ingest は
+  `_accept_material_source(source_url=...)` へ合流（レスポンス形は既存 upload と同一）。
+  監査は `AUDIT_ENTITY_PAPER_DISCOVERY`。
+- **UI**: 教材管理タブ「arXivから探す」→ 3区画モーダル（`admin-paper-discovery.js`、ES5・
+  `window.PaperDiscovery`・DI 注入）。検索条件と閉世界注記を常時表示、供給チップは外しても
+  打ち消し表示で保持、既存購読への新規供給候補は enabled=false で追加（AI が教員の操作なしに
+  条件を広げない）。ポーリング・バッジ・G層ルールなし（PD8）。アンカーは
+  `materials.arxiv-discovery{,-modal,-search,-ingest,-subscribe}` の5件 + Copilot capability
+  `materials.arxiv_discovery`（guidance_only）。
+- **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static}.py`。
+- **非スコープ（v1）**: バッチ取り込み worker / embedding ランキング / 引用グラフ（Phase 2〜3）、
+  学習者向け表示・コーパス回遊（§7、専用設計書マター）。
+
 ### 資料の開示範囲 (Visibility)
 教材 (Document) や コース (LearningCourse) は、以下のいずれかの開示範囲を持つ。
 - **Public**: システム全体（全ユーザー）に公開
@@ -2112,7 +2150,7 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
   `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
-  `core/schema.py` を数える — 2026-08-25 時点で37語彙）。
+  `core/schema.py` を数える — 2026-08-27 時点で38語彙）。
   `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は

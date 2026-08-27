@@ -115,7 +115,11 @@ class TestAdminUiAnchorsModule:
         #   materials.url-upload / .url-upload-modal / .url-upload-submit（teacher/ 節）+
         #   llm-models.url-fetch-domains / .url-fetch-domain-add / .url-fetch-domain-remove
         #   （AIモデルタブ末尾の SYSTEM_ADMIN 限定区画 → system_admin/ 節）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 283
+        # + 論文ディスカバリー（paper_discovery_design.md §4.4、Phase 1）の5件:
+        #   materials.arxiv-discovery（アップロードゾーン内の入口リンク）/
+        #   .arxiv-discovery-modal / .arxiv-discovery-search / .arxiv-discovery-subscribe /
+        #   .arxiv-discovery-ingest（許可ドメイン未設定・未選択のとき無効化される）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 288
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

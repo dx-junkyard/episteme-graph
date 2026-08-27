@@ -107,6 +107,25 @@ _REGISTRY: list[Capability] = [
             _step("materials", "material_row:{material_id}", "削除したい教材を選びます"),
         ),
     ),
+    # 論文ディスカバリー（paper_discovery_design.md §4.4）: 「arXivから探す」の道案内。
+    # 取り込み実行（POST /api/admin/discovery/ingest）の代行 capability は登録しない —
+    # LLM コストを伴う操作を Copilot の代行に載せない判断（PD1: 承認は教員の明示操作）。
+    Capability(
+        id="materials.arxiv_discovery",
+        screen="materials",
+        title="arXiv から論文を探して取り込む",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#arxiv-discovery",
+        description="分野の条件（arXiv カテゴリ・キーフレーズ）で arXiv を検索し、"
+                    "候補の一覧から選んだ論文だけを教材として取り込む。"
+                    "候補を並べるところまでが自動で、取り込みは教員の明示操作のみ。",
+        api={"method": "POST", "path": "/api/admin/discovery/search"},
+        locate_steps=(
+            _step("materials", "paper_discovery_button",
+                  "アップロード領域の中にある「arXivから探す」を押します"),
+        ),
+    ),
     # --- コース構築 (course-builder) ---
     # 多ターンチャットのため apply/revert を持たせず、道案内・説明に留める（P1 の段階登録）。
     Capability(

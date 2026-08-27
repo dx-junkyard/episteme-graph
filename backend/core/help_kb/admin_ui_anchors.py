@@ -16,7 +16,8 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。全283アンカーがマップ済み
+no_hit 経路で需要を計測する）。現状は全アンカーがマップ済み
+（正確な件数は ``backend/tests/test_admin_help_ui_anchors.py`` が正）
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -242,6 +243,11 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "manual-editor.switch-to-db",
         "manual-editor.switch-to-files",
         "materials.analyze-images",
+        "materials.arxiv-discovery",
+        "materials.arxiv-discovery-ingest",
+        "materials.arxiv-discovery-modal",
+        "materials.arxiv-discovery-search",
+        "materials.arxiv-discovery-subscribe",
         "materials.cost-forecast-note",
         "materials.export-modal",
         "materials.figure-deliberate",
@@ -770,6 +776,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- materials.* — 教材管理タブ -----------------------------------------------------
     # 図面・画像を解析する
     "materials.analyze-images": "teacher/11-admin-materials.md#analyze-images",
+    # arXivから探す（論文ディスカバリー, paper_discovery_design.md）— アップロードゾーン内のリンク
+    "materials.arxiv-discovery": "teacher/11-admin-materials.md#arxiv-discovery",
+    # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
+    "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
+    # arXivから探すモーダル（検索・購読パネル / 候補一覧 / 取り込みの3区画）
+    "materials.arxiv-discovery-modal": "teacher/11-admin-materials.md#arxiv-discovery-modal",
+    # この条件で検索（arXiv のメタデータのみ・LLM 不使用）
+    "materials.arxiv-discovery-search": "teacher/11-admin-materials.md#arxiv-discovery-search",
+    # この条件を保存（分野単位の購読条件。外したキーフレーズも保持される）
+    "materials.arxiv-discovery-subscribe": "teacher/11-admin-materials.md#arxiv-discovery-subscribe",
     # AI利用枠の見通し（コスト見通しの一行。アップロードゾーン + 再解析モーダル）
     "materials.cost-forecast-note": "teacher/11-admin-materials.md#cost-forecast-note",
     # 外部レビュー用に書き出しモーダル
