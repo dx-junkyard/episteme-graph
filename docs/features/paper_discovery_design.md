@@ -1,8 +1,9 @@
 # 論文ディスカバリー層（arXiv 分野購読とコーパス成長ループ）
 
-> **状態: 実装済み（正本・凍結）**（2026-08-27 起票・同日 Phase 1 実装。migration は
-> **071** `paper_discovery` で採番済み。Phase 2〜3 は未着手、§7 のコーパス回遊は
-> 提案（実装対象外）— 着手時は専用設計書を切る。以後は §10 実装記録のみ追記する）
+> **状態: 実装済み（正本・凍結）**（2026-08-27 起票・同日 Phase 1 実装、同日 Phase 2 実装。
+> migration は **071** `paper_discovery` / **072** `paper_discovery_ingest_queue` で採番済み。
+> Phase 3 は未着手、§7 のコーパス回遊は提案（実装対象外）— 着手時は専用設計書を切る。
+> 以後は §10 実装記録のみ追記する）
 
 **正本**: 本ドキュメント。
 **関連**: [URL指定による教材取得](url_material_upload_design.md)（UF1〜UF6 — 本層の
@@ -89,8 +90,8 @@ confirmed リンクと骨格が育っている — 事前構築の実体は自�
 
 | Phase | 内容 | 状態 |
 |---|---|---|
-| **Phase 1** | 分野購読 + arXiv 検索 + 候補一覧 UI + 承認取り込み（§4） | 実装対象 |
-| **Phase 2** | バッチ取り込みの非同期化 + トークン使用量の事前見積り提示（§5） | 設計済み・着手待ち |
+| **Phase 1** | 分野購読 + arXiv 検索 + 候補一覧 UI + 承認取り込み（§4） | 実装済み（2026-08-27・§10） |
+| **Phase 2** | バッチ取り込みの非同期化 + トークン使用量の事前見積り提示（§5） | 実装済み（2026-08-27・§10） |
 | **Phase 3** | embedding 類似度ランキング + 引用グラフ拡張口（§6） | 設計済み・着手待ち |
 | **Phase 4 / v2** | コーパス回遊 — コース無し議論・コーパス地図・地図の端（§7） | 提案（実装対象外・着手時に専用設計書） |
 
@@ -398,3 +399,42 @@ API ルーター / 管理UI 3点セット）で実装。backend フルスイー�
 9. 承認済み部品語彙（vocab ③）の承認 status は R層と同じ
    `("teacher_approved","teacher_reviewed","endorsed")` を vocab.py にローカル定義
    （R層への import 依存を作らない。コメントで相互参照）。
+
+### Phase 2 実装記録（2026-08-27）
+
+同日、同体制（Fable 5 指揮・Opus 5 並列3体 = backend / frontend / 3点セット）で実装。
+backend フルスイート 11,188 pass。
+
+- **migration 072** `paper_discovery_ingest_queue.sql`: `paper_discovery_ingest_items`
+  （status CHECK = queued/fetching/accepted/failed・INSERT シードなし・FK なし・部分
+  インデックス2本）
+- **キュー store は core・worker ループは api 層**という配置を確定（指揮判断）:
+  `core/paper_discovery/ingest_queue.py` は FastAPI / threading / HTTP 非 import の規約を
+  維持し（Phase 1 ガードレール非改変のまま）、取得（url_fetch）と受理
+  （`_accept_material_source`）を呼ぶ worker 本体は `backend/api/ingest_worker.py`
+  （threading.Thread daemon・V層スイーパと同じ lifespan 起動）に置いた。worker は
+  `arxiv_client` を import しない（発見をしない = PD1 の構造化）
+- `claim_next` は `FOR UPDATE SKIP LOCKED` のアトミック遷移（多重起動安全）。取得のたびに
+  許可リストを読み直す（許可の追加・削除が即反映）。アイテム間 3 秒 sleep（PD7 の同族）。
+  worker 起動時に `requeue_stale_fetching` で置き去り fetching を回収。env:
+  `PAPER_DISCOVERY_WORKER_ENABLED`（既定 on）/ `PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS`
+  （既定 30）
+- **API 追加4本**: `POST /ingest-batch`（上限 `MAX_INGEST_BATCH=50`・202・queued/skipped/
+  notice。models はここで fail-closed 検証）/ `GET /ingest-queue` / `POST
+  /ingest-queue/{id}/retry`（failed のみ・監査 `ingest_retry`）/ `GET /ingest-estimate`
+- **事前見積り**: `core/llm_usage/metrics.py::recent_document_run_estimate` —
+  `llm_usage_events` の `pipeline:%` を document 単位に合算した直近実績（各バケット最大20
+  document）の中央値 ±25%（`ESTIMATE_SPREAD`）。reported / estimated を**合算しない**（U1）、
+  レンジのみ・金額キーなし（U5）、実績ゼロは `available:false` の正直文
+- **フロント**: 選択5件以下 = 従来の同期 `/ingest`、6件以上 = `/ingest-batch`（境界述語
+  `usesBatchIngest` の1箇所）。キュー投入時に候補行を `ingested` に偽装しない（PD6）。
+  取り込みキュー欄（既定で閉じた details・手動[更新]のみ・ポーリングなし = PD8・失敗行に
+  detail + [再試行]）。見積り行は「1論文あたりの目安レンジ × 選択件数」の並置表示で
+  クライアント側の掛け算をしない
+- **3点セット追随**: アンカー2件追加（`materials.arxiv-discovery-queue{,-refresh}`、総数
+  288→290）+ teacher マニュアル2節 + `{#arxiv-discovery-ingest}` 節の2経路化追記 +
+  admin_operations 手順更新
+- **設計からの逸脱**: 「失敗 item は status='failed' で保持・リトライは教員の明示操作のみ」は
+  `retry_item`（failed 限定・それ以外 422）で構造化。ingest-batch は許可ドメイン未設定でも
+  **受理**し notice で正直に告げる（worker が取得時点の許可リストで判定 — 後から許可が
+  入れば流れる）

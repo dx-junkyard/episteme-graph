@@ -246,6 +246,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery",
         "materials.arxiv-discovery-ingest",
         "materials.arxiv-discovery-modal",
+        "materials.arxiv-discovery-queue",
+        "materials.arxiv-discovery-queue-refresh",
         "materials.arxiv-discovery-search",
         "materials.arxiv-discovery-subscribe",
         "materials.cost-forecast-note",
@@ -782,6 +784,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # arXivから探すモーダル（検索・購読パネル / 候補一覧 / 取り込みの3区画）
     "materials.arxiv-discovery-modal": "teacher/11-admin-materials.md#arxiv-discovery-modal",
+    # 取り込みキュー（6件以上のバッチ登録の進捗。既定で閉じた欄・自動更新なし）
+    "materials.arxiv-discovery-queue": "teacher/11-admin-materials.md#arxiv-discovery-queue",
+    # キューの更新（開いたとき・登録直後・このボタンのときだけ読む）
+    "materials.arxiv-discovery-queue-refresh": "teacher/11-admin-materials.md#arxiv-discovery-queue-refresh",
     # この条件で検索（arXiv のメタデータのみ・LLM 不使用）
     "materials.arxiv-discovery-search": "teacher/11-admin-materials.md#arxiv-discovery-search",
     # この条件を保存（分野単位の購読条件。外したキーフレーズも保持される）

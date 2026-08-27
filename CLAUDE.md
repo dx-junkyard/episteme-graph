@@ -368,7 +368,7 @@ class CartridgeContext:
   `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
 - ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
 
-### 論文ディスカバリー層（arXiv 分野購読, migration 071, 2026-08-27）
+### 論文ディスカバリー層（arXiv 分野購読, migration 071/072, 2026-08-27）
 
 分野（atlas ドメイン / cartridge_id 名前空間）ごとの購読条件（arXiv カテゴリ + キーフレーズ）で
 arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得（migration 070）→ 解析パイプラインへ
@@ -402,8 +402,20 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   条件を広げない）。ポーリング・バッジ・G層ルールなし（PD8）。アンカーは
   `materials.arxiv-discovery{,-modal,-search,-ingest,-subscribe}` の5件 + Copilot capability
   `materials.arxiv_discovery`（guidance_only）。
-- **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static}.py`。
-- **非スコープ（v1）**: バッチ取り込み worker / embedding ランキング / 引用グラフ（Phase 2〜3）、
+- **Phase 2（同日実装）**: バッチ取り込みキュー `paper_discovery_ingest_items`（migration 072・
+  status = queued/fetching/accepted/failed・FK なし）。**キュー store は core
+  （`ingest_queue.py`、threading 非使用のまま）・worker ループは api 層
+  （`backend/api/ingest_worker.py`、lifespan 起動・`PAPER_DISCOVERY_WORKER_ENABLED` 既定 on /
+  `PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS` 既定 30）**。worker は arxiv_client 非 import
+  （発見しない = PD1）・claim は `FOR UPDATE SKIP LOCKED`・アイテム間3秒・許可リストは取得の
+  たびに再読込。API は ingest-batch（上限50・202・queued/skipped/notice）/ ingest-queue /
+  retry（failed のみ）/ ingest-estimate（`core/llm_usage/metrics.py::
+  recent_document_run_estimate` — 実績中央値±25%・reported/estimated 非合算 = U1・レンジのみ =
+  U5・実績ゼロは available:false）。フロントは選択5件以下 = 同期 / 6件以上 = キュー登録
+  （候補行を ingested に偽装しない）・キュー欄は手動[更新]のみ。アンカー +2（`materials.
+  arxiv-discovery-queue{,-refresh}`）。
+- **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker}.py`。
+- **非スコープ（v1）**: embedding ランキング / 引用グラフ（Phase 3）、
   学習者向け表示・コーパス回遊（§7、専用設計書マター）。
 
 ### 資料の開示範囲 (Visibility)
