@@ -231,7 +231,14 @@ def run_search(
         candidates.append(payload)
 
     if key:
-        store.touch_last_checked(session, key)
+        # コーパス回遊層「地図の端 — 外の輪」（corpus_roaming_design.md §6.2）が読む
+        # 集約1ビットを同時に上書きする。保存するのは「新規候補が1件以上あったか」
+        # だけで、候補そのものは保存しない（PD5）。
+        store.touch_last_checked(
+            session,
+            key,
+            found_new=any(c.get("status") == "new" for c in candidates),
+        )
 
     result["total"] = int(total or 0)
     result["candidates"] = candidates

@@ -19,7 +19,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（**073 以降**。044〜072 は使用済み — §3 参照）へ採番し直すこと。
+  着手時は次の空き番号（**074 以降**。044〜073 は使用済み — §3 参照）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
   （設計書表記 039 → 実装 038）/ G層（038 → 039）/ W層 W-β（046 → 048）/
@@ -153,7 +153,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 070 | `070_url_fetch_domains` | URL指定による教材取得（取得先ドメイン許可リスト） |
 | 071 | `071_paper_discovery` | **論文ディスカバリー層**（arXiv 分野購読 + 見送り記録 + `documents.source_url`） |
 | 072 | `072_paper_discovery_ingest_queue` | 論文ディスカバリー層 Phase 2（取り込みキュー `paper_discovery_ingest_items`。失敗は行を消さず `failed` 保持） |
+| 073 | `073_corpus_roaming_search_state` | **コーパス回遊層** Phase C（地図の端 — 外の輪。`paper_discovery_subscriptions.last_search_found_new` の集約1ビットのみ） |
 
-次の空き番号は **073**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **074**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

@@ -187,24 +187,37 @@ def upsert_subscription(
     }
 
 
-def touch_last_checked(session, domain_key: str) -> None:
+def touch_last_checked(
+    session, domain_key: str, *, found_new: bool | None = None
+) -> None:
     """検索を実行した事実（``last_checked_at``）だけを更新する。
 
     購読行が無い分野（条件を保存せず検索だけした場合）は 0 行更新で何もしない
     — 購読行を勝手に作らない（購読は教員の意思の正本、PD3）。
+
+    ``found_new`` を渡したときだけ ``last_search_found_new``（migration 073）も
+    同時に上書きする。これはコーパス回遊層「地図の端 — 外の輪」
+    （``docs/features/corpus_roaming_design.md`` §6.2）が読む**集約1ビット**で、
+    「``status='new'`` の候補が1件以上あったか」だけを持つ。候補のスナップショットは
+    保存しない（PD5 と両立させる）。``None`` のときは列に触れない（過去の値を保つ）。
     """
     key = str(domain_key or "").strip()
     if not key:
         return
+    params = {"domain_key": key}
+    assignments = ["last_checked_at = now()"]
+    if found_new is not None:
+        assignments.append("last_search_found_new = :found_new")
+        params["found_new"] = bool(found_new)
     session.execute(
         sa_text(
-            """
+            f"""
             UPDATE paper_discovery_subscriptions
-               SET last_checked_at = now()
+               SET {", ".join(assignments)}
              WHERE domain_key = :domain_key
             """
         ),
-        {"domain_key": key},
+        params,
     )
 
 

@@ -72,6 +72,7 @@ from routes import personal_map as personal_map_routes
 from routes import my_records as my_records_routes
 from routes import landscape as landscape_routes
 from routes import paper_discovery as paper_discovery_routes
+from routes import corpus as corpus_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -348,6 +349,10 @@ app.include_router(landscape_routes.learning_router)
 # ルーター自身が /api/admin/discovery プレフィックスを持つため追加 prefix は付けない
 # （landscape と同じ「直接登録」の扱い。admin.router には include しない）。
 app.include_router(paper_discovery_routes.router)
+# コーパス回遊層の学習者向け読み取り（corpus_roaming_design.md §4 / §6 / §7、
+# migration 073）。ルーター自身が /api/learning プレフィックスを持つため追加
+# prefix は付けない（コース非依存 — 可視性ゲートは CR1 の document 可視集合）。
+app.include_router(corpus_routes.learning_router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で

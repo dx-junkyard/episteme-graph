@@ -155,6 +155,28 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | GET | `/api/learning/courses/{cid}/discuss/opening` | 所有者 or 受講者 | 開幕画面（非LLM・読み取り専用）。中心命題・支持構造・別の見方・理論のバックボーン・「最も脆い一手」（主語別）・`course_focus`・教員承認済みの「議論のきっかけ」（`documents[].discussion_seeds`）を投影 |
 | POST | `/api/learning/courses/{cid}/discuss/reflection` | 本人のみ | 着地画面「今日の理解を自分の言葉で」を `kind='tension'` / `status='articulated'` の痕跡として直接記録（LLM 0回・候補を経由しない。空文字は 422） |
 
+#### コース無し論文議論（document 直付け discuss、コーパス回遊 Phase B）
+
+正本: `docs/features/corpus_roaming_design.md` §5（CR1/CR2/CR8/CR9）。**受講ゲートを一切
+経由せず、ゲートは document 可視性のみ**（`resolve_document_access(...).can_view` =
+`user_can_view_document` と同一判定。閲覧不可も不在も同じ 404）。会話は既存の
+`learning_chat_history` / `interest_traces` に予約センチネル
+`course_id = "_doc:{document_id}"`（正本 `core/discuss/context.py`）+ `topic_id = "_discussion"`
+で載せる（migration 0・新テーブルなし）。`{ref}` は `documents.id`(UUID) と
+`source_path`(material_id) の両対応。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/learning/documents/{ref}/discuss/opening` | document 閲覧権のみ | コース版と同じ `build_opening` をセンチネル + 単一 document で呼ぶ（LLM 0回）。レスポンスはコース版の DTO + `document_context: {document_id, title, context_id, topic_id, label}`。既知の縮退: `fragile_points` は `epistemic_ledger.course_id` 基準のため空／UCサイクルの `intention` は同梱しない |
+| POST | `/api/learning/documents/{ref}/discuss/chat` | document 閲覧権のみ | 既存 `learning_chat` の discuss 経路のファサード（本体は共通コア `_learning_chat_core`）。body は `LearningChatRequest`（`message` 必須 / `history` / `discuss_scope` / `replace_message_id` / `message_id` / `selection_text` 等）。`intent_mode` はサーバが `discuss` に固定し、`action` / `atlas_context` / `cycle_mode` は落とす（§5.4 の縮退）。RAG は既定で当該 document のみ、`discuss_scope="all_visible"` のときだけ `list_visible_document_ids` まで。不正な `discuss_scope` は 422。レスポンスは `LearningChatResponse`（コース版と同型・`origin` は常に null） |
+| GET | `/api/learning/documents/{ref}/discuss/history` | document 閲覧権のみ | センチネルキーの履歴（`LearningChatHistoryResponse`。形はコース版 `GET .../topics/{tid}/chat` と同一） |
+| DELETE | `/api/learning/documents/{ref}/discuss/messages/{mid}` | document 閲覧権のみ | 指定メッセージ以降の往復を truncate（`truncate_chat_and_supersede`。派生 interest_traces は削除せず `superseded` 化 = CR8）。不明 mid は 404 |
+
+コストは既存 `LEARNING_CHAT_MAX_CALLS_PER_DAY` に相乗り（専用上限なし）。U層 feature は
+`learning:chat_discuss` を流用し、内部計測は `discuss_metric_events` の
+`document_discuss_opened` / `document_discuss_turn`（サーバ側 best-effort 記録・payload 空・
+学習者に数値を返さない）で分離する。痕跡の `context_label` は「論文との議論（コース外）」。
+
 #### 問いの軌跡（interest_traces）・地図導線
 
 | メソッド | パス | 権限 | 説明 |
@@ -637,7 +659,7 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 
 ### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071 / 072）
 
-arXiv を供給源とする分野購読と候補一覧。全11本が TEACHER 以上（`_require_teacher`）。
+arXiv を供給源とする分野購読と候補一覧。全12本が TEACHER 以上（`_require_teacher`）。
 **候補を保存するテーブルは無い**（PD5 — 取り込み済み判定は `documents.source_url`、
 見送りは `paper_discovery_dismissals` から毎回読み時導出）。**DELETE ルートは無い**
 （見送りの取り消しは `revoked` 遷移）。取り込みは教員の明示操作だけが入口で、
@@ -674,6 +696,28 @@ Semantic Scholar recommendations API を引く（LLM 0回）。
 | GET | `/api/admin/discovery/ingest-queue` | TEACHER | 取り込みキューを新しい順に返す。`?domain_key=` / `?limit=`（1〜500、既定50）。`{"items": [{item_id, domain_key, arxiv_id, title, status, detail, material_id, task_id, attempts, requested_at, ...}]}`。`status ∈ {queued, fetching, accepted, failed}` |
 | POST | `/api/admin/discovery/ingest-queue/{item_id}/retry` | TEACHER | 失敗した項目を `queued` へ戻す（前回の `detail` は消さない）。`failed` 以外・不在は 422。`{"item": {...}}`。監査 `action='ingest_retry'` |
 | GET | `/api/admin/discovery/ingest-estimate` | TEACHER | 取り込み前のトークン目安（`?count=` 既定1・上限200）。`llm_usage_events` の `feature LIKE 'pipeline:%'` を document 単位に合算した直近実績から導出し、**実測（reported）と推計（estimated）を分離**して `per_document` / `batch` の `total_tokens_range: [low, high]` を返す（U1）。**点推定・金額は返さない**（U5）。実績ゼロは `{"available": false, "note": ...}`（捏造しない） |
+| GET | `/api/admin/discovery/frontier-interest` | TEACHER | 地図の端への学習者の関心（コーパス回遊層 Phase D、migration 073）。`?domain_key=` 任意。集計単位は **分野 × 領域 × 輪**（`ring ∈ {fringe, outer}`）で、返すのは `{"rows": [{domain_key, region_id, ring, range_label}]}` の **k-匿名レンジのみ**（k=3・`3-5` / `6-10` / `11+`。`core/privacy.py` 委譲・n<3 の行は返さない）。**個人・時系列・順位・生の件数を返さない**（CR6）。取り消し済み（`dismissed`）は数えない。この行は需要の提示であって、購読条件・取り込み・骨格を自動変更する入力にしない（CR10） |
+
+### コーパス回遊 `/api/learning/corpus`（`routes/corpus.py`、migration 073）
+
+コース非依存の「論文の海」。**受講ゲートを一切経由せず、`services.list_visible_document_ids`
+（所有 / public / group / object_group_permissions / アクセス可能コースの sources）だけを
+ゲートにする**（CR1。可視性交差は `core/corpus_view.py` の SQL 内 `= ANY(:doc_ids)` で強制し、
+空集合は SQL を発行せず空を返す）。読み取りは非LLM・読み時導出・保存物なしで、
+weight / confidence / 件数を返さない（CR3。配置には出所ラベルを必ず付ける）。
+**DELETE ルートは無い**（関心の取り消しは `status='dismissed'` 遷移 — CR8）。
+学習者本人の回遊・関心タップは監査記帳しない（本人行動の記帳は観察面の拡大 — 主権台帳 v1 と
+同じ判断）。骨格そのもの（領域配置・座標）は既存の `GET /api/atlas?cartridge={domain_key}` が
+返すため本ルーターは返さない（描画資産を二重管理しない）。
+詳細は `docs/features/corpus_roaming_design.md` §4 / §6 / §7。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/learning/corpus/domains` | 認証済み本人 | 凍結骨格を持つ **active** ドメインの一覧。`{"domains": [{domain_key, domain_name, frozen_version, has_visible_papers}]}`。`has_visible_papers` は bool のみで**件数を返さない**。retired ドメインは並べない |
+| GET | `/api/learning/corpus/landscape?domain_key=` | 認証済み本人 | 1分野のコーパス地図。`{domain_key, skeleton_version, placements, fringe, outer}`。`placements` は本人可視 document × `confirmed`/`inferred`/`review_required` の配置で `source_label`（「AIによる推定（未確認）」/「教員確認済み」）必須・現行骨格に無いノードは落とす。`fringe`（縁）は `landscape_gap_signals` の active を領域単位に集約した `{region_id, region_label, fact_line, paper_titles}`（支持論文は**可視 document のタイトルのみ**・件数なし。教員の判断 = `atlas_gap_decisions` は一切読まない）。`outer`（外）は購読の `last_search_found_new` が TRUE かつ時点があるときだけ `{fact_line}`、他は `null`。`domain_key` 空は 422、凍結骨格なしは **404**（地図領域ごと非表示） |
+| GET | `/api/learning/corpus/documents?domain_key=` | 認証済み本人 | この分野に関係づけられた可視論文（配置あり ∪ 置けなかった信号あり）を**新しい順**で返す。`{"documents": [{document_id, title, authors, year, placed, can_discuss}]}`。`placed=false` は「取り込まれているが現行の地図には置かれていない」という事実。数値スコア・並べ替え指定は無い。`domain_key` 空は 422 |
+| POST | `/api/learning/corpus/frontier-interest` | 認証済み本人 | 「この先を知りたい」の1タップ（Phase D）。body `{domain_key, ring, region_id?}`（`ring ∈ {fringe, outer}`、語彙外・分野空は 422）。`interest_traces` に kind `frontier_interest` で1行（**本文・質問文を持たない**。payload は `domain_key` / `region_id` / `ring` のみ）。201 + `{"ok": true, "trace_id"}` |
+| POST | `/api/learning/corpus/frontier-interest/{trace_id}/withdraw` | 認証済み本人 | 関心の取り消し（`status='dismissed'` 遷移のみ・行削除しない）。他人の行・不在はどちらも 404 |
 
 ### D層 — 管理 `/api/admin/doubt`（`routes/doubt.py` admin_router）
 

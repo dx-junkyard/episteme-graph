@@ -41,7 +41,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from dependencies import _require_teacher
-from services import record_review_event
+from services import aggregate_frontier_interest, record_review_event
 
 from core import url_fetch
 from core.llm_usage import metrics as usage_metrics
@@ -763,3 +763,27 @@ def restore_candidate(
 ) -> dict:
     """見送りを取り消す（``revoked=TRUE`` 遷移）。記録が無ければ 404。"""
     return _dismissal_op(body, current_user, restore=True)
+
+
+# ---------------------------------------------------------------------------
+# 学習者の関心（コーパス回遊層 Phase D）
+# 正本: docs/features/corpus_roaming_design.md §7（CR6 / CR10）。
+# ---------------------------------------------------------------------------
+
+
+@router.get("/frontier-interest")
+def list_frontier_interest(
+    domain_key: str = Query(""),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """地図の端への学習者の関心（分野×領域×輪の **k-匿名レンジ**のみ）。
+
+    - 集計・閾値は ``services.aggregate_frontier_interest``（``core/privacy.py`` の
+      k=3 / レンジ 3-5・6-10・11+ に委譲）。``n < k`` の行は返さない。
+    - **個人・時系列・順位・生の件数を返さない**（CR6 / CR3）。ここに出るのは需要の
+      提示であって、購読条件・取り込み・骨格を自動変更する入力ではない（CR10）。
+    - 新しいダッシュボードを作らず、既存のディスカバリーモーダルの中で1行として
+      読む前提の最小 DTO（``{domain_key, region_id, ring, range_label}``）。
+    """
+    rows = aggregate_frontier_interest((domain_key or "").strip() or None)
+    return {"rows": rows}
