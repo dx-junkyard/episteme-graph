@@ -302,6 +302,10 @@ casual 音声パイプライン・個人知識ネットワーク導出。
 
 ### 6.4 Phase 3（v2）— コース非依存の正面突破
 
+> → 2026-08-27 専用設計書 [corpus_roaming_design.md](corpus_roaming_design.md)（Phase B =
+> document 直付け discuss）を起票（設計中）。会話キーは migration ではなくセンチネル
+> `_doc:{document_id}` 方式を採用予定（`learning_chat_history.course_id` が TEXT・FK なしのため）。
+
 Phase 1/2 の U層実測でモードの価値を確認してから、専用の設計文書を切って着手する
 （interest_traces の読み手全域 — worker・digest・k-匿名集計・personal_graph derive — に及ぶ
 準破壊的変更のため）。
