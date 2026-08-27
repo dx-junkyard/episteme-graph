@@ -151,7 +151,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 068 | `068_account_lifecycle` | **アカウントライフサイクル管理**（users 状態列 + auth_events 台帳） |
 | 069 | `069_llm_usage_user_index` | **U層拡張**（llm_usage_events のユーザー別集計インデックス） |
 | 070 | `070_url_fetch_domains` | URL指定による教材取得（取得先ドメイン許可リスト） |
+| 071 | `071_paper_discovery` | **論文ディスカバリー層**（arXiv 分野購読 + 見送り記録 + `documents.source_url`） |
 
-次の空き番号は **071**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **072**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

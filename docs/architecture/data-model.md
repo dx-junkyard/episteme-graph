@@ -366,6 +366,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `068_account_lifecycle.sql` | アカウントライフサイクル管理 — `users` に状態列9本（`status`/`status_changed_at/by`/`status_reason`/`token_generation`/`password_updated_at`/`last_login_at`/`last_seen_at`/`purge_after`）+ `auth_events`（FK なし・append-only の認証イベント台帳） |
 | `069_llm_usage_user_index.sql` | U層拡張 — `llm_usage_events(user_id, occurred_at)` の部分インデックス（ユーザー別集計軸。043 は非編集） |
 | `070_url_fetch_domains.sql` | URL指定による教材取得 — 取得先ドメインの許可リスト `url_fetch_domains`（`domain` 主キー・`added_by` は FK なし。**シード行を入れない** = 初期状態は空で機能無効） |
+| `071_paper_discovery.sql` | 論文ディスカバリー層（arXiv 分野購読）— `paper_discovery_subscriptions`（分野単位1行の購読条件）+ `paper_discovery_dismissals`（見送りは `revoked` 遷移で保持）+ `documents.source_url`（取り込み済み判定の正本）。**シード行を入れない**・候補一覧のテーブルを持たない（読み時導出） |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の
