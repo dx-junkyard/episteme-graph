@@ -455,6 +455,7 @@ def _accept_material_source(
     analyze_images: bool,
     models_option: dict | None,
     current_user: dict,
+    source_url: str | None = None,
 ) -> dict:
     """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
@@ -464,6 +465,12 @@ def _accept_material_source(
     処理スレッド起動 → レスポンス組立を1箇所に集約する。
 
     レスポンス形は既存のアップロード API と**完全に同一**（フロントの分岐を増やさない）。
+
+    ``source_url``（migration 071 / 論文ディスカバリー層 PD5）: URL 経由で取得した
+    場合の出所 URL。``documents.source_url`` に保存し、arXiv 候補一覧の「取り込み済み」
+    判定（``core.paper_discovery.search.ingested_arxiv_ids``）の**読み時導出**の材料に
+    する。multipart アップロードは ``None`` のまま（出所 URL が存在しないため、
+    重複判定できないことを偽装しない — 設計書 §8）。
     """
     import datetime
 
@@ -489,8 +496,8 @@ def _accept_material_source(
     try:
         session.execute(
             sa_text("""
-                INSERT INTO documents (id, title, filename, status, uploaded_by, doc_type, source_path)
-                VALUES (:id, :title, :filename, 'uploaded', CAST(:uploaded_by AS uuid), 'textbook', :material_id)
+                INSERT INTO documents (id, title, filename, status, uploaded_by, doc_type, source_path, source_url)
+                VALUES (:id, :title, :filename, 'uploaded', CAST(:uploaded_by AS uuid), 'textbook', :material_id, :source_url)
             """),
             {
                 "id": doc_id,
@@ -498,6 +505,7 @@ def _accept_material_source(
                 "filename": filename,
                 "uploaded_by": current_user["id"],
                 "material_id": material_id,
+                "source_url": (source_url or None),
             },
         )
         session.commit()
@@ -743,6 +751,7 @@ def upload_material_from_url(
         analyze_images=body.analyze_images,
         models_option=models_option,
         current_user=current_user,
+        source_url=body.url,
     )
 
 

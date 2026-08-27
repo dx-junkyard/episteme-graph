@@ -44,7 +44,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 **ルーターのマウント（main.py、Tier 3-17c でフラット化）**: 全ルーターは `main.py` から直接
 `app.include_router(...)` で登録される（admin.py 経由の二段ネストは廃止済み）。
 
-- **自前 prefix で直接登録（24本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
+- **自前 prefix で直接登録（25本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
   （/api/learning）/ `figure_presentation`（/api/admin）/ `element_explanations`（/api/admin）/
   `admin`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`（/api/learning/lecture）/
   `groups`（prefix なし。/api/groups・/api/me をパスに直書き）/ `export`（prefix なし。
@@ -54,7 +54,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
   `discuss_observation.learning_router`（/api/learning）/ `cycle.learning_router`（/api/learning）/
   `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
   （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
-  （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）
+  （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）
 - **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（20本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
@@ -634,6 +634,26 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | POST | `/api/admin/landscape/courses/{cid}/placements/accept` | TEACHER + ソース論文の編集権 | 「次へ」= 一括確認。**edit 権限のある document の `inferred` のみ** `confirmed` へ。個別に却下・再検討された行は動かさない。権限外は除外件数として返す。監査は `action='accept_on_release'` |
 | GET | `/api/admin/landscape/overview` | TEACHER | 本人可視 document の live 配置をノード別に集約（`domain_key` 必須。凍結骨格なしは 404）。骨格に無いノードの配置は集約に載せない |
 | GET | `/api/learning/courses/{cid}/landscape` | 受講ゲート（`get_accessible_course_data`） | 学習者向け「論文の位置づけ」。対象はコース sources のみ・status は `confirmed` / `inferred` / `review_required` のみ。配置ゼロ・骨格なしでも 200 で空構造（非表示への縮退はフロント責務）。`unplaced_documents` / `skeleton_version` を同梱し、weight / confidence / claim_id は投影が構造的に落とす |
+
+### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071）
+
+arXiv を供給源とする分野購読と候補一覧。全6本が TEACHER 以上（`_require_teacher`）。
+**候補を保存するテーブルは無い**（PD5 — 取り込み済み判定は `documents.source_url`、
+見送りは `paper_discovery_dismissals` から毎回読み時導出）。**DELETE ルートは無い**
+（見送りの取り消しは `revoked` 遷移）。取り込みは教員の明示操作だけが入口で、
+取得は既存の `core/url_fetch.py`（許可ドメイン照合・SSRF ガード）へ完全合流する
+（PD1 / PD2）。類似度・一致度の生数値は返さない（PD4）。監査は
+`entity_type='paper_discovery'`（`metadata.action` = subscribe / ingest / dismiss / restore）。
+詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/discovery/subscriptions` | TEACHER | 分野購読の一覧（分野単位の共同財）。`{"subscriptions": [...]}` |
+| PUT | `/api/admin/discovery/subscriptions/{domain_key}` | TEACHER | 購読の作成・更新（カテゴリ / キーフレーズ / 著者）。`enabled=false` のフレーズも保存する。分野キー空は 422。監査 `action='subscribe'` |
+| GET | `/api/admin/discovery/subscriptions/{domain_key}/keyphrase-candidates` | TEACHER | 分野語彙（骨格概念 / カートリッジ ontology / 承認済み理論部品）からのキーフレーズ候補を出所付きで返す（PD3）。購読行には書かない |
+| POST | `/api/admin/discovery/search` | TEACHER | 購読条件（body で上書き可）で arXiv を検索。副作用は `last_checked_at` の更新のみ。`query` / `closed_world_note` を必ず同梱し、条件ゼロなら arXiv を呼ばず空（PD6）。`max_results` はサーバ側で 1〜100 に丸める。arXiv 到達失敗は 502 + 事実文（空一覧に化けさせない） |
+| POST | `/api/admin/discovery/ingest` | TEACHER | 選択した候補を取得し既存アップロード経路へ流す（`_accept_material_source`、`documents.source_url` に PDF URL を保存）。**1リクエスト5件まで**（超過・空は 422）。1件ごとの取得失敗は `failed[{arxiv_id, detail}]` に積み残りを続行、許可ドメイン未設定のみ全体を 422。レスポンスは `{"accepted": [upload と同形 + arxiv_id], "failed": [...]}`。監査 `action='ingest'` |
+| POST | `/api/admin/discovery/dismiss` / `/restore` | TEACHER | 候補の見送り / 復帰（`revoked` 遷移。行削除しない）。復帰対象の記録が無ければ 404。監査 `action='dismiss'` / `'restore'` |
 
 ### D層 — 管理 `/api/admin/doubt`（`routes/doubt.py` admin_router）
 

@@ -494,6 +494,10 @@ AUDIT_ENTITY_USER_ACCOUNT = "user_account"
 # metadata.action で区別, migration 070）
 AUDIT_ENTITY_URL_FETCH_DOMAIN = "url_fetch_domain"
 
+# 論文ディスカバリー層（arXiv 分野購読。購読の作成・更新 subscribe / 取り込み実行 ingest /
+# 見送り dismiss / 復帰 restore。metadata.action で区別, migration 071）
+AUDIT_ENTITY_PAPER_DISCOVERY = "paper_discovery"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -533,4 +537,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_CATEGORY_GAP,
     AUDIT_ENTITY_USER_ACCOUNT,
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
+    AUDIT_ENTITY_PAPER_DISCOVERY,
 )
