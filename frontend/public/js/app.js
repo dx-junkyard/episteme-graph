@@ -249,6 +249,8 @@
       localStorage.removeItem("eg_token");
       // discuss モード（論文と話す）: トークン失効時も discuss 内部状態を残さない。
       if (window.Discuss) window.Discuss.reset();
+      // コーパス回遊層: 失効時に前ユーザーの取得結果を残さない（CR1 と同族）。
+      if (window.CorpusSea) window.CorpusSea.invalidate();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -267,6 +269,8 @@
       localStorage.removeItem("eg_token");
       // discuss モード（論文と話す）: トークン失効時も discuss 内部状態を残さない。
       if (window.Discuss) window.Discuss.reset();
+      // コーパス回遊層: 失効時に前ユーザーの取得結果を残さない（CR1 と同族）。
+      if (window.CorpusSea) window.CorpusSea.invalidate();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -543,11 +547,32 @@
     chip.click();
   }
 
+  // コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）: コース非依存の
+  // 常設入口「論文の海」。コース未選択でも押せる。既存の入口を置き換えず並置し、
+  // 自動では開かない・バッジも出さない（CR2 / CR5）。
+  function corpusSeaEntryHtml() {
+    return '<div class="corpus-sea-entry">' +
+      '<button type="button" class="corpus-sea-entry-btn" id="corpus-sea-btn"' +
+      ' data-ui-anchor="sidebar.corpus-sea"' +
+      ' title="コースに関係なく、閲覧できる論文を分野の地図の上で見わたします">🌊 論文の海</button>' +
+      "</div>";
+  }
+
+  function bindCorpusSeaEntry() {
+    var btn = document.getElementById("corpus-sea-btn");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        if (window.CorpusSea) window.CorpusSea.open();
+      });
+    }
+  }
+
   // ── Render: Sidebar ────────────────────────────────────────────────
   function renderSidebar() {
     const sb = document.getElementById("sidebar");
     if (!state.course) {
-      sb.innerHTML = '<div class="sb-hd">コースを選択してください</div>';
+      sb.innerHTML = corpusSeaEntryHtml() + '<div class="sb-hd">コースを選択してください</div>';
+      bindCorpusSeaEntry();
       return;
     }
     const course = state.course;
@@ -563,7 +588,10 @@
     // 2行折り返しをやめて高さを詰める）。ラベルは短縮するが、アイコンのみにはしない
     // （初見で意味が取れなくなるため）。
     const discussActive = isDiscussMode();
-    let html = '<div class="discuss-mode-switch" role="group" aria-label="学び方の切替">' +
+    // コーパス回遊層の入口はコースの学び方の切替とは別レイヤーなので、二枚看板の
+    // 外（上）に置く。等重の二枚看板の並びには手を入れない。
+    let html = corpusSeaEntryHtml();
+    html += '<div class="discuss-mode-switch" role="group" aria-label="学び方の切替">' +
       '<button type="button" class="discuss-mode-btn' + (!discussActive ? " active" : "") +
       '" id="discuss-mode-sequential-btn" data-ui-anchor="sidebar.mode-sequential"' +
       ' aria-pressed="' + (!discussActive ? "true" : "false") + '"' +
@@ -644,6 +672,9 @@
     html += "</div>";
 
     sb.innerHTML = html;
+
+    // コーパス回遊層（論文の海）の常設入口の配線
+    bindCorpusSeaEntry();
 
     // discuss モード二枚看板の配線
     var seqModeBtn = document.getElementById("discuss-mode-sequential-btn");
@@ -5496,6 +5527,9 @@
         // discuss モード（論文と話す）: ログアウトでも discuss 内部状態
         // （無活動タイマー・ctx.courseId 等）を残さない。
         if (window.Discuss) window.Discuss.reset();
+        // コーパス回遊層: 前ユーザーの取得結果・議論の下書きを残さない（CR1 と同族の
+        // fail-closed。可視集合はユーザーごとに違う）。
+        if (window.CorpusSea) window.CorpusSea.invalidate();
         renderAuth();
       });
     }
@@ -8299,6 +8333,9 @@
         if (window.PersonalMapHome) window.PersonalMapHome.open();
       });
     }
+    // コーパス回遊層（corpus_roaming_design.md §4.2）: 「論文の海」オーバーレイ。
+    // 入口はサイドバーの常設ボタンだけで、ここでは自動で開かない（CR5）。
+    if (window.CorpusSea) window.CorpusSea.init({});
     // 主権台帳 v1「わたしの記録」パネル（trace_registry_sovereignty_ledger_design.md §3.4）。
     if (window.MyRecords) window.MyRecords.init({});
     var myRecordsBtn = document.getElementById("my-records-btn");

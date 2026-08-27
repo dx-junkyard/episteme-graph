@@ -11040,3 +11040,353 @@ button.element-card-item:focus-visible .element-card-item-label {
   font-size: 11px;
   color: var(--color-text-secondary, #6e6e73);
 }
+
+/* ── コーパス回遊層「論文の海」（docs/features/corpus_roaming_design.md §4.2）──────
+   コース非依存の全画面ビュー。既存のコース学習の DOM・スタイルには触らず、
+   corpus-sea- 接頭辞で完全に分離する（CR2）。数値・バッジ・督促の表現を持たない
+   （CR3 / CR5）。 */
+.corpus-sea-entry {
+  padding: 10px 12px 4px;
+}
+.corpus-sea-entry-btn {
+  width: 100%;
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-entry-btn:hover { background: var(--color-background-secondary, #f5f5f7); }
+
+.corpus-sea-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: rgba(0, 0, 0, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.corpus-sea-overlay[hidden] { display: none; }
+.corpus-sea-sheet {
+  width: min(1180px, 100%);
+  height: min(88vh, 900px);
+  background: var(--color-background-primary, #fff);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.corpus-sea-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border-tertiary, #e5e5ea);
+  flex: 0 0 auto;
+}
+.corpus-sea-title { font-size: 14px; font-weight: 700; }
+.corpus-sea-domain-picker { display: flex; gap: 6px; flex-wrap: wrap; flex: 1 1 auto; }
+.corpus-sea-domain-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-domain-btn.active {
+  background: var(--color-background-secondary, #f5f5f7);
+  border-color: var(--color-border-primary, #c6c6cc);
+}
+.corpus-sea-domain-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--color-text-info, #378add);
+}
+.corpus-sea-close {
+  appearance: none;
+  border: none;
+  background: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--color-text-secondary, #6e6e73);
+  cursor: pointer;
+}
+.corpus-sea-note {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-note[hidden] { display: none; }
+
+.corpus-sea-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+  padding: 12px 16px 16px;
+}
+.corpus-sea-body[hidden] { display: none; }
+.corpus-sea-mapcol { flex: 1 1 60%; min-width: 0; overflow-y: auto; }
+.corpus-sea-side { flex: 1 1 40%; min-width: 260px; overflow-y: auto; }
+.corpus-sea-svg { width: 100%; height: auto; }
+.corpus-sea-region rect {
+  fill: var(--color-background-secondary, #f5f5f7);
+  stroke: var(--color-border-tertiary, #e5e5ea);
+}
+.corpus-sea-region.fog rect {
+  fill: var(--color-background-tertiary, #eeeef0);
+  stroke-dasharray: 4 4;
+}
+.corpus-sea-region text {
+  font-size: 11px;
+  fill: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-node circle { fill: var(--color-border-primary, #c6c6cc); }
+.corpus-sea-node text {
+  font-size: 10px;
+  fill: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-marker { cursor: pointer; }
+.corpus-sea-marker circle {
+  fill: var(--color-background-primary, #fff);
+  stroke: var(--color-border-primary, #c6c6cc);
+}
+.corpus-sea-marker text { font-size: 10px; }
+.corpus-sea-marker-more {
+  font-size: 12px;
+  fill: var(--color-text-tertiary, #aeaeb2);
+}
+
+.corpus-sea-sec-hd {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 10px 0 6px;
+}
+.corpus-sea-loading,
+.corpus-sea-empty {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 8px 0;
+}
+.corpus-sea-paper {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-primary, #fff);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-paper.active { border-color: var(--color-border-info, #378add); }
+.corpus-sea-paper-title { display: block; font-size: 13px; color: var(--color-text-primary, #1d1d1f); }
+.corpus-sea-paper-meta,
+.corpus-sea-paper-note {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-top: 2px;
+}
+.corpus-sea-detail-card {
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.corpus-sea-detail-title { font-size: 13px; font-weight: 700; }
+.corpus-sea-detail-meta,
+.corpus-sea-detail-fact {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-top: 4px;
+}
+.corpus-sea-placement {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.corpus-sea-placement-node { color: var(--color-text-primary, #1d1d1f); }
+.corpus-sea-placement-persp,
+.corpus-sea-placement-source {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.corpus-sea-discuss-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 5px 12px;
+  margin-top: 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.corpus-sea-edges { margin-top: 12px; }
+.corpus-sea-edge {
+  border: 1px dashed var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.corpus-sea-edge-region {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-edge-fact {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.corpus-sea-edge-papers {
+  margin: 6px 0 0 18px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-frontier-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 999px;
+  padding: 3px 10px;
+  margin-top: 8px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-frontier-btn.on { border-color: var(--color-border-primary, #c6c6cc); }
+
+.corpus-sea-discuss {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+}
+.corpus-sea-discuss[hidden] { display: none; }
+.corpus-sea-discuss-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+.corpus-sea-back {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-mode {
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+.corpus-sea-scope-label { font-size: 11px; }
+.corpus-sea-doc-title { color: var(--color-text-primary, #1d1d1f); }
+.corpus-sea-scope-toggle { display: flex; gap: 4px; }
+.corpus-sea-scope-opt {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-scope-opt.active {
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+}
+.corpus-sea-opening {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+.corpus-sea-chat {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0;
+}
+.corpus-sea-chat-hint {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-msg-ops { margin-left: 8px; }
+.corpus-sea-msg-op {
+  appearance: none;
+  border: none;
+  background: none;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.corpus-sea-composer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+.corpus-sea-composer input {
+  flex: 1 1 auto;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.corpus-sea-send-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-info, #378add);
+  background: var(--color-text-info, #378add);
+  /* 送信ボタンの文字色は「情報色の上に置く地の色」= 背景プライマリ。生の #fff を
+     書かない（テーマ変数だけで色を決める規約。test_element_card_ui_static.py）。 */
+  color: var(--color-background-primary, #fff);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
