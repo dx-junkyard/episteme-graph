@@ -40,6 +40,8 @@ from tests.guardrail_helpers import (  # noqa: E402
 
 CORE_DIR = BACKEND / "core" / "paper_discovery"
 MIGRATION_NUMBER = 71
+#: Phase 2（取り込みキュー）の DDL。振る舞いの検査は ``test_paper_discovery_worker.py``。
+QUEUE_MIGRATION_NUMBER = 72
 
 
 _SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
@@ -56,6 +58,11 @@ def _migration_statements() -> str:
     ``INSERT`` の語が出てくるのは正常）。
     """
     return _SQL_LINE_COMMENT_RE.sub("", read_migration_sql(BACKEND, MIGRATION_NUMBER))
+
+
+def _queue_migration_statements() -> str:
+    """migration 072（Phase 2 の取り込みキュー）の SQL 文だけ。"""
+    return _SQL_LINE_COMMENT_RE.sub("", read_migration_sql(BACKEND, QUEUE_MIGRATION_NUMBER))
 
 
 class TestCoreIsolation:
@@ -273,3 +280,74 @@ class TestMigration:
         """操作者は後に墓標化されうる（AL1 / migration 068 §3.1・070 と同じ理由）。"""
         sql = _migration_statements()
         assert "REFERENCES users" not in sql
+
+
+class TestQueueMigration:
+    """migration 072（Phase 2 の取り込みキュー）— 071 と同じ規律を継ぐ。"""
+
+    def test_no_insert(self):
+        sql = _queue_migration_statements()
+        assert not re.search(r"\bINSERT\b", sql, re.IGNORECASE), (
+            "キューにシード行を入れると、処理し終えた項目が再起動で復活する（UF2 / 071 継承）"
+        )
+
+    def test_idempotent_guards(self):
+        sql = _queue_migration_statements()
+        creates = re.findall(r"CREATE TABLE(\s+IF NOT EXISTS)?", sql, re.IGNORECASE)
+        assert creates and all(c.strip() for c in creates), (
+            "CREATE TABLE には IF NOT EXISTS が必要（毎起動再実行のため）"
+        )
+        indexes = re.findall(r"CREATE INDEX(\s+IF NOT EXISTS)?", sql, re.IGNORECASE)
+        assert indexes and all(i.strip() for i in indexes), (
+            "CREATE INDEX には IF NOT EXISTS が必要"
+        )
+
+    def test_only_the_queue_table(self):
+        sql = _queue_migration_statements()
+        tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", sql, re.IGNORECASE))
+        assert tables == {"paper_discovery_ingest_items"}, (
+            f"unexpected tables in migration {QUEUE_MIGRATION_NUMBER}: {sorted(tables)}"
+        )
+
+    def test_status_check_vocabulary(self):
+        """CHECK 制約と ``ingest_queue.INGEST_STATUSES`` を一致させる（語彙の二重管理を防ぐ）。"""
+        from core.paper_discovery import ingest_queue
+
+        sql = _queue_migration_statements()
+        match = re.search(r"status\s+IN\s*\(([^)]*)\)", sql, re.IGNORECASE)
+        assert match, "status には CHECK 制約が必要"
+        assert set(re.findall(r"'([a-z_]+)'", match.group(1))) == set(
+            ingest_queue.INGEST_STATUSES
+        )
+
+    def test_no_foreign_keys_on_actor_columns(self):
+        assert "REFERENCES users" not in _queue_migration_statements()
+
+
+class TestQueueStoreKeepsHistory:
+    """P4: 失敗行を消さない（再試行は教員の明示操作のみ — PD1）。"""
+
+    def test_no_delete_from(self):
+        assert_source_forbids(
+            _read("ingest_queue.py"),
+            ["DELETE FROM", "DELETE  FROM", "delete from"],
+            context="core/paper_discovery/ingest_queue.py",
+        )
+
+    def test_retry_is_an_update_limited_to_failed(self):
+        src = extract_function_source(_read("ingest_queue.py"), "retry_item")
+        assert "UPDATE paper_discovery_ingest_items" in src
+        assert "AND status = 'failed'" in src
+
+    def test_queue_writes_only_the_queue_table(self):
+        src = _read("ingest_queue.py")
+        written = set(re.findall(r"INSERT INTO\s+(\w+)", src)) | {
+            # ``SET`` は UPDATE ... SET の、``SKIP`` は FOR UPDATE SKIP LOCKED の
+            # イディオムなので除く（どちらもテーブル名ではない）
+            name
+            for name in re.findall(r"\bUPDATE\s+(\w+)", src)
+            if name not in ("SET", "SKIP")
+        }
+        assert written <= {"paper_discovery_ingest_items"}, (
+            f"unexpected write target(s): {sorted(written)}"
+        )

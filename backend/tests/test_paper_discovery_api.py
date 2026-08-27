@@ -7,6 +7,10 @@
   - ``POST /api/admin/discovery/search``
   - ``POST /api/admin/discovery/ingest``
   - ``POST /api/admin/discovery/dismiss`` / ``/restore``
+  - ``POST /api/admin/discovery/ingest-batch``（Phase 2 — キューへ積むだけ）
+  - ``GET  /api/admin/discovery/ingest-queue``
+  - ``POST /api/admin/discovery/ingest-queue/{item_id}/retry``
+  - ``GET  /api/admin/discovery/ingest-estimate``
 
 ``tests/test_url_fetch_api.py`` の流儀（実 app + ``TestClient`` + ``_pg_session`` の
 フェイク差し替え）を踏襲する。DB・MinIO・arXiv・ネットワークには接続しない。
@@ -19,6 +23,8 @@
   5. ``documents.source_url`` の永続化（PD5 の読み時導出の材料）
   6. 見送り / 復帰の遷移・404・監査
   7. 構造的な検査: ルーターの登録 / ingest が url_fetch を経由し独自 HTTP を持たない
+  8. Phase 2: バッチの件数上限・skip 事実文・許可リスト未設定の ``notice``・
+     retry が ``failed`` 限定・事前見積りの分離（U1）とレンジのみ（U5）
 """
 
 from __future__ import annotations
@@ -78,8 +84,9 @@ class _Stamp:
 class FakeSession:
     """``url_fetch`` の許可リスト SELECT だけ実データを返す最小セッション。"""
 
-    def __init__(self, domains=()):
+    def __init__(self, domains=(), usage_rows=()):
         self.domains = list(domains)
+        self.usage_rows = list(usage_rows)
         self.calls: list[tuple[str, dict]] = []
         self.commits = 0
         self.rollbacks = 0
@@ -90,6 +97,8 @@ class FakeSession:
         self.calls.append((sql, dict(params or {})))
         if sql.startswith("SELECT domain, created_at FROM url_fetch_domains"):
             return _Result([(d, _Stamp()) for d in sorted(self.domains)])
+        if "FROM llm_usage_events" in sql:
+            return _Result(self.usage_rows)
         return _Result()
 
     def commit(self):
@@ -131,6 +140,19 @@ def env(monkeypatch):
         "dismiss_calls": [],
         "restore_calls": [],
         "restore_result": {"domain_key": "astrophysics", "arxiv_id": "2608.20293", "revoked": True},
+        # ── Phase 2（取り込みキュー） ───────────────────────────────────
+        "enqueue_calls": [],
+        "enqueue_result": None,
+        "queue_items": [],
+        "queue_list_calls": [],
+        "retry_calls": [],
+        "retry_result": {
+            "item_id": "11111111-1111-1111-1111-111111111111",
+            "domain_key": "astrophysics",
+            "arxiv_id": "2608.20293",
+            "status": "queued",
+            "detail": "取得できませんでした。",
+        },
     }
 
     monkeypatch.setattr(routes, "_pg_session", lambda: state["session"])
@@ -202,6 +224,45 @@ def env(monkeypatch):
 
     monkeypatch.setattr(routes.pd_search, "run_search", _run_search)
 
+    # ── 取り込みキュー（Phase 2 / migration 072） ─────────────────────────
+    def _enqueue(session, items, **kwargs):
+        entries = [dict(item) for item in items]
+        state["enqueue_calls"].append((entries, kwargs))
+        if state["enqueue_result"] is not None:
+            return state["enqueue_result"]
+        queued = []
+        skipped = []
+        for index, entry in enumerate(entries):
+            normalized = routes.pd_schema.normalize_arxiv_id(entry.get("arxiv_id"))
+            if not normalized:
+                skipped.append(
+                    {
+                        "arxiv_id": str(entry.get("arxiv_id") or ""),
+                        "detail": routes.pd_queue.SKIP_INVALID_ID,
+                    }
+                )
+                continue
+            queued.append(
+                {
+                    "item_id": f"item-{index}",
+                    "arxiv_id": normalized,
+                    "title": str(entry.get("title") or ""),
+                }
+            )
+        return {"queued": queued, "skipped": skipped}
+
+    def _list_items(session, **kwargs):
+        state["queue_list_calls"].append(kwargs)
+        return list(state["queue_items"])
+
+    def _retry(session, item_id):
+        state["retry_calls"].append(item_id)
+        return state["retry_result"]
+
+    monkeypatch.setattr(routes.pd_queue, "enqueue_items", _enqueue)
+    monkeypatch.setattr(routes.pd_queue, "list_items", _list_items)
+    monkeypatch.setattr(routes.pd_queue, "retry_item", _retry)
+
     # ── 取得（PD2: 既存 url_fetch へ委譲） ────────────────────────────────
     def _fetch(url, allowed_domains):
         state["fetches"].append((url, list(allowed_domains)))
@@ -260,6 +321,14 @@ _ALL_ENDPOINTS = [
     ("get", "/api/admin/discovery/subscriptions/astrophysics/keyphrase-candidates", None),
     ("post", "/api/admin/discovery/search", {"domain_key": "astrophysics"}),
     ("post", "/api/admin/discovery/ingest", {"items": [{"arxiv_id": "2608.20293"}]}),
+    ("post", "/api/admin/discovery/ingest-batch", {"items": [{"arxiv_id": "2608.20293"}]}),
+    ("get", "/api/admin/discovery/ingest-queue", None),
+    (
+        "post",
+        "/api/admin/discovery/ingest-queue/11111111-1111-1111-1111-111111111111/retry",
+        {},
+    ),
+    ("get", "/api/admin/discovery/ingest-estimate", None),
     ("post", "/api/admin/discovery/dismiss", {"domain_key": "a", "arxiv_id": "2608.20293"}),
     ("post", "/api/admin/discovery/restore", {"domain_key": "a", "arxiv_id": "2608.20293"}),
 ]
@@ -850,3 +919,331 @@ class TestSourceUrlPersistence:
 
         body = inspect.getsource(admin_routes.upload_material)
         assert "source_url" not in body
+
+
+# ---------------------------------------------------------------------------
+# 8. バッチ取り込み（Phase 2 / migration 072）
+# ---------------------------------------------------------------------------
+
+
+class TestIngestBatch:
+    """``POST /ingest-batch`` — 積むのは教員の明示操作だけ（PD1）。"""
+
+    def _post(self, env, body):
+        return env["client"].post(
+            "/api/admin/discovery/ingest-batch", json=body, headers=_auth(env, "teacher")
+        )
+
+    def test_empty_items_is_422(self, env):
+        res = self._post(env, {"items": []})
+        assert res.status_code == 422
+        assert env["enqueue_calls"] == []
+        assert env["audits"] == []
+
+    def test_over_the_batch_limit_is_422(self, env):
+        from routes.paper_discovery import MAX_INGEST_BATCH
+
+        assert MAX_INGEST_BATCH == 50
+        body = {"items": [{"arxiv_id": f"2608.{20000 + i}"} for i in range(MAX_INGEST_BATCH + 1)]}
+        res = self._post(env, body)
+        assert res.status_code == 422
+        assert "50" in res.json()["detail"]
+        assert env["enqueue_calls"] == []
+
+    def test_at_the_batch_limit_is_accepted(self, env):
+        env["session"].domains = ["arxiv.org"]
+        from routes.paper_discovery import MAX_INGEST_BATCH
+
+        body = {"items": [{"arxiv_id": f"2608.{20000 + i}"} for i in range(MAX_INGEST_BATCH)]}
+        res = self._post(env, body)
+        assert res.status_code == 202
+        assert len(res.json()["queued"]) == MAX_INGEST_BATCH
+
+    def test_returns_queued_and_skipped(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = self._post(
+            env,
+            {
+                "items": [
+                    {"arxiv_id": "2608.20293", "title": "Dark energy"},
+                    {"arxiv_id": "not-an-id"},
+                ],
+                "domain_key": "astrophysics",
+            },
+        )
+        assert res.status_code == 202
+        payload = res.json()
+        assert payload["queued"] == [
+            {"item_id": "item-0", "arxiv_id": "2608.20293", "title": "Dark energy"}
+        ]
+        assert payload["skipped"][0]["arxiv_id"] == "not-an-id"
+        assert payload["skipped"][0]["detail"]
+        # 許可リストに arxiv.org がある間は注記を付けない
+        assert "notice" not in payload
+
+    def test_notice_when_domain_not_allowed(self, env):
+        env["session"].domains = []
+        res = self._post(env, {"items": [{"arxiv_id": "2608.20293"}]})
+        assert res.status_code == 202
+        payload = res.json()
+        # 受理はする（許可が後から入れば流れる）が、黙らない（PD6）
+        assert payload["queued"]
+        assert payload["notice"]
+        assert "許可" in payload["notice"]
+
+    def test_no_notice_when_nothing_was_queued(self, env):
+        env["session"].domains = []
+        res = self._post(env, {"items": [{"arxiv_id": "not-an-id"}]})
+        assert res.status_code == 202
+        assert res.json()["queued"] == []
+        assert "notice" not in res.json()
+
+    def test_models_are_validated_at_enqueue_time(self, env, monkeypatch):
+        """worker は再検証しない — 検証の正本は投入時（M4/M5 の fail-closed）。"""
+        import routes.paper_discovery as routes
+
+        calls = []
+
+        def _validate(models):
+            calls.append(models)
+            return {"pipeline": "gpt-x"}
+
+        monkeypatch.setattr(routes, "_validate_models_option", _validate)
+        res = self._post(
+            env, {"items": [{"arxiv_id": "2608.20293"}], "models": {"pipeline": "gpt-x"}}
+        )
+        assert res.status_code == 202
+        assert calls == [{"pipeline": "gpt-x"}]
+        assert env["enqueue_calls"][0][1]["models"] == {"pipeline": "gpt-x"}
+
+    def test_invalid_models_reject_the_whole_request(self, env, monkeypatch):
+        import fastapi
+
+        import routes.paper_discovery as routes
+
+        def _validate(models):
+            raise fastapi.HTTPException(status_code=422, detail="bad model")
+
+        monkeypatch.setattr(routes, "_validate_models_option", _validate)
+        res = self._post(
+            env, {"items": [{"arxiv_id": "2608.20293"}], "models": {"pipeline": "nope"}}
+        )
+        assert res.status_code == 422
+        assert env["enqueue_calls"] == []
+
+    def test_enqueue_receives_requester_and_options(self, env):
+        self._post(
+            env,
+            {
+                "items": [{"arxiv_id": "2608.20293"}],
+                "domain_key": "astrophysics",
+                "analyze_images": True,
+            },
+        )
+        _entries, kwargs = env["enqueue_calls"][0]
+        assert kwargs["domain_key"] == "astrophysics"
+        assert kwargs["requested_by"] == _TEACHER
+        assert kwargs["analyze_images"] is True
+
+    def test_does_not_fetch_or_accept_synchronously(self, env):
+        """バッチは積むだけ — リクエスト内で arXiv を取りに行かない。"""
+        self._post(env, {"items": [{"arxiv_id": "2608.20293"}]})
+        assert env["fetches"] == []
+        assert env["accepted"] == []
+
+    def test_audit_uses_ingest_batch_action(self, env):
+        self._post(env, {"items": [{"arxiv_id": "2608.20293"}], "domain_key": "astrophysics"})
+        entity_type, entity_id, _before, after, actor, metadata = env["audits"][0]
+        assert entity_type == "paper_discovery"
+        assert entity_id == "astrophysics"
+        assert after == "queued"
+        assert actor == _TEACHER
+        assert metadata["action"] == "ingest_batch"
+        assert metadata["arxiv_ids"] == ["2608.20293"]
+        assert metadata["queued"] == 1
+
+    def test_session_is_committed_and_closed(self, env):
+        self._post(env, {"items": [{"arxiv_id": "2608.20293"}]})
+        assert env["session"].commits >= 1
+        assert env["session"].closed >= 1
+
+
+class TestIngestQueueListing:
+    def test_returns_items(self, env):
+        env["queue_items"] = [
+            {
+                "item_id": "i-1",
+                "arxiv_id": "2608.20293",
+                "status": "failed",
+                "detail": "取得できませんでした。",
+            }
+        ]
+        res = env["client"].get(
+            "/api/admin/discovery/ingest-queue", headers=_auth(env, "teacher")
+        )
+        assert res.status_code == 200
+        assert res.json() == {"items": env["queue_items"]}
+
+    def test_passes_filters_through(self, env):
+        env["client"].get(
+            "/api/admin/discovery/ingest-queue?domain_key=astrophysics&limit=5",
+            headers=_auth(env, "teacher"),
+        )
+        assert env["queue_list_calls"][0] == {"domain_key": "astrophysics", "limit": 5}
+
+    def test_works_without_domain_key(self, env):
+        res = env["client"].get(
+            "/api/admin/discovery/ingest-queue", headers=_auth(env, "teacher")
+        )
+        assert res.status_code == 200
+        assert env["queue_list_calls"][0]["domain_key"] == ""
+
+    def test_listing_does_not_write_audit(self, env):
+        env["client"].get("/api/admin/discovery/ingest-queue", headers=_auth(env, "teacher"))
+        assert env["audits"] == []
+
+
+class TestIngestQueueRetry:
+    _PATH = "/api/admin/discovery/ingest-queue/11111111-1111-1111-1111-111111111111/retry"
+
+    def test_failed_item_is_requeued(self, env):
+        res = env["client"].post(self._PATH, headers=_auth(env, "teacher"))
+        assert res.status_code == 200
+        assert res.json()["item"]["status"] == "queued"
+        assert env["retry_calls"] == ["11111111-1111-1111-1111-111111111111"]
+
+    def test_non_failed_item_is_422(self, env):
+        """``retry_item`` が None を返す = 失敗行ではない（処理中 / 受理済み / 不在）。"""
+        env["retry_result"] = None
+        res = env["client"].post(self._PATH, headers=_auth(env, "teacher"))
+        assert res.status_code == 422
+        assert res.json()["detail"] == "再試行できるのは失敗した項目だけです。"
+        assert env["audits"] == []
+        assert env["session"].rollbacks >= 1
+
+    def test_audit_uses_ingest_retry_action(self, env):
+        env["client"].post(self._PATH, headers=_auth(env, "teacher"))
+        entity_type, _entity_id, before, after, _actor, metadata = env["audits"][0]
+        assert entity_type == "paper_discovery"
+        assert (before, after) == ("failed", "queued")
+        assert metadata["action"] == "ingest_retry"
+        assert metadata["arxiv_id"] == "2608.20293"
+
+    def test_retry_does_not_fetch_synchronously(self, env):
+        env["client"].post(self._PATH, headers=_auth(env, "teacher"))
+        assert env["fetches"] == []
+        assert env["accepted"] == []
+
+
+class TestIngestEstimate:
+    """事前見積り（U1 分離 / U5 レンジのみ・金額なし / 実績ゼロは正直に）。"""
+
+    _PATH = "/api/admin/discovery/ingest-estimate"
+
+    def test_no_history_reports_unavailable(self, env):
+        env["session"].usage_rows = []
+        res = env["client"].get(self._PATH, headers=_auth(env, "teacher"))
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["available"] is False
+        assert payload["note"] == "解析の実績がまだないため、目安を示せません。"
+        assert "per_document" not in payload
+
+    def test_history_yields_separated_ranges(self, env):
+        env["session"].usage_rows = [
+            ("reported", "doc-1", 12000),
+            ("reported", "doc-2", 16000),
+            ("estimated_heuristic", "doc-3", 900),
+        ]
+        res = env["client"].get(self._PATH + "?count=3", headers=_auth(env, "teacher"))
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["available"] is True
+        assert payload["item_count"] == 3
+
+        reported = payload["per_document"]["reported"]
+        estimated = payload["per_document"]["estimated"]
+        # U1: 実測と推計を合算しない（別バケットで返す）
+        assert reported["documents"] == 2
+        assert estimated["documents"] == 1
+        for bucket in (reported, estimated):
+            low, high = bucket["total_tokens_range"]
+            assert isinstance(low, int) and isinstance(high, int)
+            assert 0 <= low <= high
+        assert payload["batch"]["reported"]["total_tokens_range"][1] > \
+            reported["total_tokens_range"][1]
+        assert payload["basis_note"]
+
+    def test_missing_bucket_is_none_not_zero(self, env):
+        env["session"].usage_rows = [("reported", "doc-1", 12000)]
+        payload = env["client"].get(self._PATH, headers=_auth(env, "teacher")).json()
+        assert payload["per_document"]["estimated"] is None
+        assert payload["batch"]["estimated"] is None
+
+    def test_no_cost_or_point_estimate_keys(self, env):
+        env["session"].usage_rows = [
+            ("reported", "doc-1", 12000),
+            ("estimated_heuristic", "doc-2", 900),
+        ]
+        payload = env["client"].get(self._PATH + "?count=2", headers=_auth(env, "teacher")).json()
+
+        def _walk(obj, path=""):
+            found = []
+            if isinstance(obj, dict):
+                for key, value in obj.items():
+                    lowered = str(key).lower()
+                    cur = f"{path}.{key}" if path else str(key)
+                    if "cost" in lowered or "usd" in lowered or "price" in lowered:
+                        found.append(cur)
+                    if lowered.endswith("tokens") and not lowered.endswith("_range"):
+                        found.append(cur)
+                    found.extend(_walk(value, cur))
+            elif isinstance(obj, list):
+                for i, item in enumerate(obj):
+                    found.extend(_walk(item, f"{path}[{i}]"))
+            return found
+
+        assert _walk(payload) == []
+
+    def test_estimate_does_not_call_arxiv_or_llm(self, env):
+        env["session"].usage_rows = [("reported", "doc-1", 12000)]
+        env["client"].get(self._PATH, headers=_auth(env, "teacher"))
+        assert env["search_calls"] == []
+        assert env["fetches"] == []
+        assert env["accepted"] == []
+
+    def test_only_pipeline_features_are_summed(self, env):
+        env["session"].usage_rows = [("reported", "doc-1", 12000)]
+        env["client"].get(self._PATH, headers=_auth(env, "teacher"))
+        usage_sqls = [sql for sql in env["session"].sqls() if "llm_usage_events" in sql]
+        assert usage_sqls
+        assert "feature LIKE" in usage_sqls[0]
+        assert "DELETE" not in usage_sqls[0].upper()
+
+
+class TestPhase2RouteRegistration:
+    def test_all_new_routes_require_teacher(self):
+        import routes.paper_discovery as routes
+
+        wanted = {
+            "/api/admin/discovery/ingest-batch",
+            "/api/admin/discovery/ingest-queue",
+            "/api/admin/discovery/ingest-queue/{item_id}/retry",
+            "/api/admin/discovery/ingest-estimate",
+        }
+        seen = set()
+        for route in routes.router.routes:
+            if route.path not in wanted:
+                continue
+            seen.add(route.path)
+            names = {dep.call.__name__ for dep in route.dependant.dependencies if dep.call}
+            assert "_require_teacher" in names, f"{route.path}: {names}"
+        assert seen == wanted
+
+    def test_no_delete_routes(self):
+        src = ROUTE_SOURCE.read_text(encoding="utf-8")
+        assert "@router.delete" not in src
+
+    def test_ingest_batch_returns_202(self):
+        src = ROUTE_SOURCE.read_text(encoding="utf-8")
+        assert re.search(r'@router\.post\("/ingest-batch", status_code=202\)', src)

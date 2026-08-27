@@ -1,12 +1,16 @@
 """論文ディスカバリー層 — 管理 API（実パス ``/api/admin/discovery/...``）。
 
-正本: ``docs/features/paper_discovery_design.md`` §4.3（API 契約）/ §4.5（監査）。
+正本: ``docs/features/paper_discovery_design.md`` §4.3（API 契約）/ §4.5（監査）/
+§5（Phase 2 = バッチ取り込みと事前見積り）。
 不変条項 PD1〜PD8 のうち、本ルータが構造として守るもの:
 
-- **PD1 発見は自動、取り込みは教員の明示承認のみ**: 取り込みは ``POST /ingest``
-  （教員のリクエスト）だけが入口で、worker・スケジューラ・検索の副作用から
-  取り込みを起動する経路を作らない。1リクエストの件数上限
-  :data:`MAX_INGEST_PER_REQUEST` を超えたら 422（Phase 2 のバッチを待つ）。
+- **PD1 発見は自動、取り込みは教員の明示承認のみ**: 取り込みの入口は教員のリクエスト
+  だけで、検索の副作用やスケジューラから取り込みが起動する経路を作らない。
+  同期の ``POST /ingest`` は1リクエスト :data:`MAX_INGEST_PER_REQUEST` 件まで、
+  Phase 2 の ``POST /ingest-batch``（キューへ積むだけ）は
+  :data:`MAX_INGEST_BATCH` 件まで。キュー行を作れるのは ``/ingest-batch`` と
+  ``/ingest-queue/{id}/retry`` の2本だけで、``api/ingest_worker.py`` の worker は
+  積まれた行を処理するだけ（自分で候補を作らない・arXiv を検索しない）。
 - **PD2 取得・解析は既存経路へ完全合流**: 論文の取得は
   ``core.url_fetch.fetch_source_from_url``（許可リスト照合・SSRF ガード・形式判定）に
   一任し、受理後は ``routes.admin._accept_material_source`` へ合流する。
@@ -30,14 +34,16 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from dependencies import _require_teacher
 from services import record_review_event
 
 from core import url_fetch
+from core.llm_usage import metrics as usage_metrics
 from core.paper_discovery import arxiv_client
+from core.paper_discovery import ingest_queue as pd_queue
 from core.paper_discovery import schema as pd_schema
 from core.paper_discovery import search as pd_search
 from core.paper_discovery import store as pd_store
@@ -67,6 +73,15 @@ router = APIRouter(prefix="/api/admin/discovery", tags=["Paper Discovery"])
 #: 1リクエストで取り込める論文の上限（PD1 — v1 は同期・少数件）。
 MAX_INGEST_PER_REQUEST = 5
 
+#: 1リクエストでキューへ登録できる論文の上限（Phase 2 のバッチ投入）。
+MAX_INGEST_BATCH = 50
+
+#: 取り込みキュー一覧の既定件数。
+DEFAULT_QUEUE_LIMIT = 50
+
+#: 事前見積りで一度に見積れる件数の上限（画面の「N件ぶん」の N）。
+MAX_ESTIMATE_ITEMS = 200
+
 #: ``POST /search`` の 1 リクエスト取得件数の上限（arXiv への行儀 — PD7）。
 MAX_SEARCH_RESULTS = 100
 
@@ -83,6 +98,16 @@ _DETAIL_ARXIV_UNAVAILABLE = (
     "arXiv に接続できませんでした。時間をおいて再度お試しください。"
 )
 _DETAIL_DISMISSAL_NOT_FOUND = "この見送り記録は見つかりません。"
+_DETAIL_BATCH_TOO_MANY = (
+    f"一度にキューへ登録できるのは{MAX_INGEST_BATCH}件までです。"
+    "件数を減らして実行してください。"
+)
+_DETAIL_RETRY_NOT_FAILED = "再試行できるのは失敗した項目だけです。"
+
+#: 許可リストに arXiv の取得先が無いまま投入されたときの注記（黙って受理しない — PD6）。
+_NOTICE_DOMAIN_NOT_ALLOWED = (
+    "現在、取得先ドメインが許可されていないため、許可されるまで取り込みは失敗します。"
+)
 
 # 監査の status 語彙（``metadata.action`` で操作を区別する — 既存層と同じ流儀）。
 _STATUS_NONE = ""
@@ -90,6 +115,8 @@ _STATUS_SUBSCRIBED = "subscribed"
 _STATUS_CANDIDATE = "candidate"
 _STATUS_DISMISSED = "dismissed"
 _STATUS_INGEST_REQUESTED = "ingest_requested"
+_STATUS_QUEUED = "queued"
+_STATUS_FAILED = "failed"
 
 #: 分野が特定できない操作（取り込みは複数分野にまたがり得る）の監査 entity_id。
 _ENTITY_ID_FALLBACK = "arxiv"
@@ -141,6 +168,22 @@ class IngestRequest(BaseModel):
     analyze_images: bool = False
     models: Optional[dict] = None
     domain_key: str = ""
+
+
+class IngestBatchItem(BaseModel):
+    """キューへ積む1件。``title`` は候補カードから引き継ぐ表示用（任意）。"""
+
+    arxiv_id: str
+    title: str = ""
+
+
+class IngestBatchRequest(BaseModel):
+    """バッチ取り込み（Phase 2）。積むのは教員の明示操作だけ（PD1）。"""
+
+    items: list[IngestBatchItem] = []
+    domain_key: str = ""
+    analyze_images: bool = False
+    models: Optional[dict] = None
 
 
 class DismissRequest(BaseModel):
@@ -393,6 +436,169 @@ def ingest_candidates(
         current_user["id"], len(accepted), len(failed),
     )
     return {"accepted": accepted, "failed": failed}
+
+
+# ---------------------------------------------------------------------------
+# バッチ取り込み（Phase 2 — キューに積むのは教員の明示操作だけ、PD1）
+# ---------------------------------------------------------------------------
+
+
+def _arxiv_fetch_allowed(session) -> bool:
+    """arXiv の配信ホストが現在の許可リストで取得可能か（UI の無効化は補助 — UF1）。"""
+    try:
+        domains = [row["domain"] for row in url_fetch.list_url_fetch_domains(session)]
+    except Exception:  # noqa: BLE001 — 判定不能を「許可済み」に化けさせない
+        logger.warning("failed to read url fetch domains for ingest batch notice", exc_info=True)
+        return False
+    return url_fetch.domain_allowed(pd_schema.ARXIV_SITE_HOST, domains)
+
+
+@router.post("/ingest-batch", status_code=202)
+def ingest_batch(
+    body: IngestBatchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """選択された候補を取り込みキューへ積む（実際の取得は非同期 worker が行う）。
+
+    ここで積まれた行は「教員が承認した」という事実そのもの（PD1）。検索や worker が
+    行を作る経路は無い。積まなかった候補は ``skipped`` に事実文つきで返す
+    （黙って落とさない）。
+
+    ``models`` は**この時点で** ``_validate_models_option`` により fail-closed 検証する
+    （worker は再検証しない — 検証の正本を1箇所に保つ）。
+
+    許可リストに arXiv の取得先が無くても**受理はする**（許可が後から入れば流れる）。
+    ただし現状では失敗することを ``notice`` に事実文で添える（PD6 — 黙らない）。
+    """
+    items = list(body.items or [])
+    if not items:
+        raise HTTPException(status_code=422, detail=_DETAIL_INGEST_EMPTY)
+    if len(items) > MAX_INGEST_BATCH:
+        raise HTTPException(status_code=422, detail=_DETAIL_BATCH_TOO_MANY)
+
+    models_option: dict | None = None
+    if body.models:
+        models_option = _validate_models_option(body.models)
+
+    session = _pg_session()
+    try:
+        try:
+            result = pd_queue.enqueue_items(
+                session,
+                [{"arxiv_id": item.arxiv_id, "title": item.title} for item in items],
+                domain_key=body.domain_key,
+                requested_by=current_user["id"],
+                analyze_images=body.analyze_images,
+                models=models_option,
+            )
+        except ValueError as exc:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=f"指定が正しくありません: {exc}") from exc
+        session.commit()
+        fetch_allowed = _arxiv_fetch_allowed(session)
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    payload: dict = {"queued": result["queued"], "skipped": result["skipped"]}
+    if result["queued"] and not fetch_allowed:
+        payload["notice"] = _NOTICE_DOMAIN_NOT_ALLOWED
+
+    record_review_event(
+        AUDIT_ENTITY_PAPER_DISCOVERY,
+        str(body.domain_key or "").strip() or _ENTITY_ID_FALLBACK,
+        _STATUS_CANDIDATE,
+        _STATUS_QUEUED,
+        current_user["id"],
+        {
+            "action": "ingest_batch",
+            "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
+            "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
+            "queued": len(result["queued"]),
+            "skipped": len(result["skipped"]),
+        },
+    )
+    logger.info(
+        "arXiv ingest batch queued by user=%s queued=%s skipped=%s",
+        current_user["id"], len(result["queued"]), len(result["skipped"]),
+    )
+    return payload
+
+
+@router.get("/ingest-queue")
+def list_ingest_queue(
+    domain_key: str = Query(default=""),
+    limit: int = Query(default=DEFAULT_QUEUE_LIMIT),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """取り込みキューを新しい順に返す（失敗行も ``detail`` つきで残る — P4）。"""
+    session = _pg_session()
+    try:
+        items = pd_queue.list_items(session, domain_key=domain_key, limit=limit)
+    finally:
+        session.close()
+    return {"items": items}
+
+
+@router.post("/ingest-queue/{item_id}/retry")
+def retry_ingest_item(
+    item_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """失敗した項目を ``queued`` へ戻す（教員の明示操作のみ — P4 / PD1）。
+
+    ``failed`` 以外（処理中・受理済み・存在しない）は 422。前回の ``detail`` は
+    消さずに残す。
+    """
+    session = _pg_session()
+    try:
+        changed = pd_queue.retry_item(session, item_id)
+        if changed is None:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=_DETAIL_RETRY_NOT_FAILED)
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    record_review_event(
+        AUDIT_ENTITY_PAPER_DISCOVERY,
+        changed["domain_key"] or _ENTITY_ID_FALLBACK,
+        _STATUS_FAILED,
+        _STATUS_QUEUED,
+        current_user["id"],
+        {"action": "ingest_retry", "arxiv_id": changed["arxiv_id"], "item_id": changed["item_id"]},
+    )
+    return {"item": changed}
+
+
+@router.get("/ingest-estimate")
+def get_ingest_estimate(
+    count: int = Query(default=1),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """取り込み確認画面に出す事前見積り（設計書 §5）。
+
+    U層の流儀をそのまま踏襲する: 実測（reported）と推計（estimated）は**分離**して
+    返し（U1）、**レンジのみ・金額なし**（U5）。実績が1件も無ければ捏造せず
+    ``available: false`` + 事実文を返す。
+
+    導出は読み取りのみ（``llm_usage_events`` は append-only 台帳 — U6）。
+    """
+    item_count = max(0, min(MAX_ESTIMATE_ITEMS, int(count or 0)))
+    session = _pg_session()
+    try:
+        return usage_metrics.recent_document_run_estimate(session, item_count=item_count)
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------

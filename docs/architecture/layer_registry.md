@@ -19,7 +19,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（**071 以降**。044〜070 は使用済み — §3 参照）へ採番し直すこと。
+  着手時は次の空き番号（**073 以降**。044〜072 は使用済み — §3 参照）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
   （設計書表記 039 → 実装 038）/ G層（038 → 039）/ W層 W-β（046 → 048）/
@@ -54,7 +54,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **B層** | 学習者体験レイヤー（関心痕跡・tension・構造帰属・casual/voice 等） | 機能ごとに分散: `docs/features/learning.md` / `structure-anchored-questions.md` | `backend/core/tension/`、`backend/core/structure_anchor/`、`backend/api/routes/learning.py` | 020, 022, 025 | 実装済み |
 | **C層** | 承認・共有レイヤー | `docs/features/endorsement-sharing.md` | `backend/api/routes/theory_components.py` | 021 | 実装済み |
 | **D層** | 疑義・認識的地位台帳（Doubt Layer） | `docs/features/doubt_layer_issues.md` | `backend/core/doubt/` + `backend/api/routes/doubt.py` | 029〜033 | 実装済み |
-| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は 071 以降へ採番し直し** + 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
+| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は 073 以降へ採番し直し** + 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
 | **G層** | ガイダンス層（次にやることバッジ + 状態導出型To-Do） | `docs/features/guidance_layer_design.md`（表記 038 → 実装 039） | `backend/core/admin_assistant/next_steps.py` + `admin-next-steps.js` | 039 | 実装済み |
 | **L層** | 画像読み取りパイプライン + 分野別ナレッジライブラリ | `docs/features/image_pipeline_knowledge_library_design.md`（§14〜16 追補含む）+ `contextual_figure_analysis_iterative_verification.md`（#499）+ `guided_figure_reanalysis_design.md` | `backend/core/document_pipeline/figure_images.py`、`src/episteme_graph/agents/apparatus_semantics/`、`backend/core/library/` + `routes/library.py`、`backend/core/figure_presentation.py` + `routes/figure_presentation.py` | 041, 042, 051, 052/053, **054（反証型反復照合 #499）** | 実装済み |
 | **M層** | 場面別 LLM モデル選択（LLM Model Selection） | `docs/features/llm_model_selection_design.md`（M1〜M10） | `backend/core/llm_policy.py` / `llm_policy_store.py` + `routes/llm_models.py` + `admin-llm-models.js` | 061 | 実装済み（Phase 0〜4。ユーザー別保存が正・tier名/金額は UI 非表示） |
@@ -152,7 +152,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 069 | `069_llm_usage_user_index` | **U層拡張**（llm_usage_events のユーザー別集計インデックス） |
 | 070 | `070_url_fetch_domains` | URL指定による教材取得（取得先ドメイン許可リスト） |
 | 071 | `071_paper_discovery` | **論文ディスカバリー層**（arXiv 分野購読 + 見送り記録 + `documents.source_url`） |
+| 072 | `072_paper_discovery_ingest_queue` | 論文ディスカバリー層 Phase 2（取り込みキュー `paper_discovery_ingest_items`。失敗は行を消さず `failed` 保持） |
 
-次の空き番号は **072**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **073**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

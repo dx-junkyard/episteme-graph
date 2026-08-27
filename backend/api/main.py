@@ -212,6 +212,15 @@ async def _lifespan(application: FastAPI):
     except Exception:  # noqa: BLE001
         logger.warning("versioning sweeper startup skipped", exc_info=True)
 
+    # 論文ディスカバリー層 Phase 2（migration 072）: 取り込みキューの worker を起動
+    # （best-effort。教員がキューに積んだ行だけを処理する — PD1）
+    try:
+        import ingest_worker as _ingest_worker
+
+        _ingest_worker.start_background_worker()
+    except Exception:  # noqa: BLE001
+        logger.warning("paper discovery ingest worker startup skipped", exc_info=True)
+
     # 状態管理・通知基盤（migration 038）: 遷移検知 watcher を起動（best-effort）
     try:
         from core.status import watcher as _status_watcher

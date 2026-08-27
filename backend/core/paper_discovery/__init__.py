@@ -11,6 +11,8 @@ DDL は ``backend/db/071_paper_discovery.sql``、API 層は
   3秒スロットル）
 - :mod:`~core.paper_discovery.vocab` — キーフレーズ候補の供給（分野語彙から）
 - :mod:`~core.paper_discovery.store` — 購読・見送りの読み書き（行削除の SQL を持たない）
+- :mod:`~core.paper_discovery.ingest_queue` — 取り込みキューの状態遷移（migration 072 /
+  Phase 2。取得・受理そのものは API 層の責務で、ここからは呼ばない）
 - :mod:`~core.paper_discovery.search` — クエリ組み立てと候補への読み時注釈
 
 FastAPI / ``core.llm`` を import しない（発見層は Phase 1〜2 を通じて LLM 0回）。
@@ -20,7 +22,7 @@ FastAPI / ``core.llm`` を import しない（発見層は Phase 1〜2 を通じ
 
 from __future__ import annotations
 
-from core.paper_discovery import arxiv_client, schema, search, store, vocab
+from core.paper_discovery import arxiv_client, ingest_queue, schema, search, store, vocab
 from core.paper_discovery.arxiv_client import ArxivApiError, parse_atom
 
 # NOTE: ``arxiv_client.search`` はパッケージ属性として再エクスポートしない
@@ -70,6 +72,7 @@ __all__ = [
     "dismiss",
     "dismissed_ids",
     "get_subscription",
+    "ingest_queue",
     "ingested_arxiv_ids",
     "keyphrase_candidates",
     "list_dismissals",
