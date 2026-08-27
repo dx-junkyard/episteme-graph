@@ -122,7 +122,11 @@ class TestAdminUiAnchorsModule:
         # + 論文ディスカバリー Phase 2（バッチ取り込み + 取り込みキュー）の2件:
         #   materials.arxiv-discovery-queue（既定で閉じた取り込みキュー欄）/
         #   .arxiv-discovery-queue-refresh（[更新] ボタン。自動更新はしない — PD8）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 290
+        # + 論文ディスカバリー Phase 3（並べ替えの強化 + 引用グラフ供給）の2件:
+        #   materials.arxiv-discovery-order（新着順 / 関連度順。関連度は段階ラベルのみ — PD4）/
+        #   .arxiv-discovery-citation-search（[引用グラフから探す]。
+        #    DISCOVERY_CITATION_SOURCE_ENABLED のオプトインで既定は無効化される）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 292
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

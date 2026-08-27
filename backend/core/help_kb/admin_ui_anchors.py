@@ -244,8 +244,10 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "manual-editor.switch-to-files",
         "materials.analyze-images",
         "materials.arxiv-discovery",
+        "materials.arxiv-discovery-citation-search",
         "materials.arxiv-discovery-ingest",
         "materials.arxiv-discovery-modal",
+        "materials.arxiv-discovery-order",
         "materials.arxiv-discovery-queue",
         "materials.arxiv-discovery-queue-refresh",
         "materials.arxiv-discovery-search",
@@ -780,10 +782,14 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.analyze-images": "teacher/11-admin-materials.md#analyze-images",
     # arXivから探す（論文ディスカバリー, paper_discovery_design.md）— アップロードゾーン内のリンク
     "materials.arxiv-discovery": "teacher/11-admin-materials.md#arxiv-discovery",
+    # 引用グラフから探す（取り込み済み論文をシードにした第2の候補供給。env オプトインで既定は無効）
+    "materials.arxiv-discovery-citation-search": "teacher/11-admin-materials.md#arxiv-discovery-citation-search",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # arXivから探すモーダル（検索・購読パネル / 候補一覧 / 取り込みの3区画）
     "materials.arxiv-discovery-modal": "teacher/11-admin-materials.md#arxiv-discovery-modal",
+    # 並び順（新着順 / 関連度順。次の検索から適用・関連度は段階ラベルのみで数値を出さない）
+    "materials.arxiv-discovery-order": "teacher/11-admin-materials.md#arxiv-discovery-order",
     # 取り込みキュー（6件以上のバッチ登録の進捗。既定で閉じた欄・自動更新なし）
     "materials.arxiv-discovery-queue": "teacher/11-admin-materials.md#arxiv-discovery-queue",
     # キューの更新（開いたとき・登録直後・このボタンのときだけ読む）

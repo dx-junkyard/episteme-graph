@@ -414,8 +414,22 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   U5・実績ゼロは available:false）。フロントは選択5件以下 = 同期 / 6件以上 = キュー登録
   （候補行を ingested に偽装しない）・キュー欄は手動[更新]のみ。アンカー +2（`materials.
   arxiv-discovery-queue{,-refresh}`）。
-- **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker}.py`。
-- **非スコープ（v1）**: embedding ランキング / 引用グラフ（Phase 3）、
+- **Phase 3（同日実装・migration なし）**: ①関連度ランキング — `POST /search` の
+  `order: "relevance"`（既定 date は完全後方互換）。`core/paper_discovery/ranking.py` が
+  分野コーパス（`corpus.py` = 分野→document 解決の正本）のチャンク重心と候補アブストの
+  cosine で並べ替え。**発見層で唯一 `core.llm` に触れるファイル**（`generate_embeddings`
+  1バッチ・feature `discovery:ranking`・scene は None = M5 embedding 扱い・
+  `DISCOVERY_RANKING_MAX_CALLS_PER_DAY` 既定100）。生スコア非漏洩、段階ラベルの正本は
+  `label_vocab.DISCOVERY_RELEVANCE_SCALE`（関連: 高/中/低）。不能時は新着順のまま
+  `ranking.available:false` + 事実文（fail-soft）。②引用グラフ拡張口 —
+  `POST /citation-search`（`citation_client.py` = `api.semanticscholar.org` 固定・独立3秒
+  スロットル・`externalIds.ArXiv` 持ちのみ・LLM 0回）。シード = 取り込み済み arXiv 論文
+  最大5件・`derived_from` で出所明示・候補提示のみ（取り込みは既存経路 = PD1）。
+  オプトインは env `DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off・ゲートは core 側）。
+  アンカー +2（`materials.arxiv-discovery-{order,citation-search}`、正確な総数は
+  `test_admin_help_ui_anchors.py` が正）。
+- **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
+- **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源 /
   学習者向け表示・コーパス回遊（§7、専用設計書マター）。
 
 ### 資料の開示範囲 (Visibility)
