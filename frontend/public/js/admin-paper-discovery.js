@@ -70,6 +70,28 @@
     "件をキューに登録しました。進捗は下の「取り込みキュー」で確認できます。";
   var ESTIMATE_LINE_HEAD = "1論文あたりの解析トークンの目安: ";
 
+  // ── Phase 3（関連度順の並べ替え + 引用グラフからの候補）─────────────────
+  // 並び順は検索リクエストのパラメータであって表示の後処理ではない。
+  // クライアントで候補を並べ替えない（サーバが返した順をそのまま描く）。
+  var ORDER_LABELS = { date: "新着順", relevance: "関連度順" };
+  // PD6: 関連度順を頼んだのに使えなかったときは黙って新着順に落とさず事実を書く。
+  // サーバが note を返せばそれをそのまま出し、この文は取れなかったときの縮退。
+  var RANKING_UNAVAILABLE_NOTICE =
+    "関連度順の並べ替えは利用できませんでした。新着順のまま表示しています。";
+  // 引用グラフ供給はサーバ設定のオプトイン。UI の無効化は補助（強制はサーバ側）。
+  var CITATION_DISABLED_NOTICE =
+    "引用グラフによる候補供給は有効化されていません（サーバ設定）。";
+  var CITATION_UNKNOWN_NOTICE =
+    "引用グラフによる候補供給の利用可否を確認できませんでした。";
+  var CITATION_UNAVAILABLE_FALLBACK =
+    "引用グラフからの候補を取得できませんでした。";
+  // PD6: どこから導出した一覧なのかを常時明示する（通常検索と混ぜない）。
+  var CITATION_MODE_LABEL = "候補の出所: 引用グラフ";
+  var CITATION_SEEDS_HEAD = "シード: ";
+  var CITATION_DERIVED_HEAD = "引用元: ";
+  var CITATION_EMPTY_NOTICE =
+    "引用グラフからは候補が見つかりませんでした。取り込み済みの論文が増えると候補が変わることがあります。";
+
   var state = {
     open: false,
     domainKey: "",
@@ -94,7 +116,18 @@
     queueError: "",
     // 事前見積りはモーダルを開いている間 1 回だけ取得してキャッシュする。
     estimate: null,
-    estimateRequested: false
+    estimateRequested: false,
+    // Phase 3: 並び順は検索リクエスト時のみ効く（order = 教員の選択、
+    // appliedOrder = サーバが実際に適用した並び順）。
+    order: "date",
+    appliedOrder: "date",
+    ranking: null,
+    // 一覧の出所（"search" = 通常検索 / "citation" = 引用グラフ）。混ぜない。
+    mode: "search",
+    citationEnabled: null,
+    citationNote: "",
+    citationSeeds: [],
+    citationSearching: false
   };
 
   // ── 小道具 ────────────────────────────────────────────────────────────
@@ -236,15 +269,28 @@
             "</div>" +
           "</div>" +
 
+          '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+            '<label for="pd-order" style="font-size:12px;color:var(--color-text-secondary)">並び順</label>' +
+            '<select id="pd-order" data-ui-anchor="materials.arxiv-discovery-order" ' +
+              'style="padding:3px 6px;font-size:12px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-primary);color:var(--color-text-primary)">' +
+              '<option value="date">' + esc(ORDER_LABELS.date) + "</option>" +
+              '<option value="relevance">' + esc(ORDER_LABELS.relevance) + "</option>" +
+            "</select>" +
+            '<span style="font-size:11.5px;color:var(--color-text-tertiary)">並び順は次の検索から適用されます。</span>' +
+          "</div>" +
+
           '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
             '<button type="button" id="pd-search-btn" data-ui-anchor="materials.arxiv-discovery-search" class="admin-action-btn">この条件で検索</button>' +
+            '<button type="button" id="pd-citation-btn" data-ui-anchor="materials.arxiv-discovery-citation-search" class="admin-action-btn" disabled>引用グラフから探す</button>' +
             '<button type="button" id="pd-subscribe-btn" data-ui-anchor="materials.arxiv-discovery-subscribe" class="admin-action-btn">この条件を保存</button>' +
             '<span id="pd-subscribe-note" style="font-size:11.5px;color:var(--color-text-tertiary)"></span>' +
           "</div>" +
+          '<div id="pd-citation-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px"></div>' +
         "</div>" +
 
         // ② 候補一覧（PD6: 検索条件を常に上に出す）
-        '<div id="pd-query-note" style="font-size:11.5px;color:var(--color-text-tertiary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px"></div>' +
+        '<div id="pd-query-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:4px"></div>' +
+        '<div id="pd-ranking-note" style="font-size:11.5px;color:var(--color-text-secondary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px"></div>' +
         '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
           '<label style="font-size:11.5px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">' +
             '<input type="checkbox" id="pd-show-dismissed">見送り済みを表示' +
@@ -298,6 +344,15 @@
     state.queueError = "";
     state.estimate = null;
     state.estimateRequested = false;
+    // 再オープン時は描き直したセレクト（既定＝新着順）と状態を一致させる。
+    state.order = "date";
+    state.appliedOrder = "date";
+    state.ranking = null;
+    state.mode = "search";
+    state.citationEnabled = null;
+    state.citationNote = "";
+    state.citationSeeds = [];
+    state.citationSearching = false;
 
     var overlay = document.createElement("div");
     overlay.id = "paper-discovery-modal";
@@ -313,7 +368,12 @@
     el("pd-close").addEventListener("click", close);
     el("pd-cancel").addEventListener("click", close);
     el("pd-search-btn").addEventListener("click", runSearch);
+    el("pd-citation-btn").addEventListener("click", runCitationSearch);
     el("pd-subscribe-btn").addEventListener("click", saveSubscription);
+    // 並び順の変更だけでは検索しない（PD8: 押し付けない・自動 fetch しない）。
+    el("pd-order").addEventListener("change", function () {
+      state.order = this.value === "relevance" ? "relevance" : "date";
+    });
     el("pd-ingest-btn").addEventListener("click", runIngest);
     el("pd-category-add").addEventListener("click", addCategoryFromInput);
     el("pd-keyphrase-add").addEventListener("click", addKeyphraseFromInput);
@@ -334,6 +394,8 @@
 
     renderChips();
     renderQueryNote();
+    renderRankingNote();
+    renderCitationControl();
     renderCandidates();
     renderIngestSummary();
     renderQueue();
@@ -364,6 +426,9 @@
       })
       .then(function (data) {
         state.subscriptions = (data && data.subscriptions) || [];
+        // Phase 3: 引用グラフ供給の可否はサーバが宣言する（キー欠落は無効扱い）。
+        state.citationEnabled = !!(data && data.citation_source_enabled);
+        renderCitationControl();
         fillDomainDatalist();
         if (!state.domainKey && state.subscriptions.length) {
           var input = el("pd-domain");
@@ -372,6 +437,9 @@
         }
       })
       .catch(function () {
+        // 可否を確認できないままボタンを開けない（fail-closed の補助表示）。
+        state.citationEnabled = null;
+        renderCitationControl();
         setNotice("購読条件を読み込めませんでした。分野を入力して検索できます。");
       });
   }
@@ -440,6 +508,11 @@
     state.closedWorldNote = "";
     state.total = null;
     state.searched = false;
+    state.mode = "search";
+    state.ranking = null;
+    state.appliedOrder = "date";
+    state.citationNote = "";
+    state.citationSeeds = [];
     setNotice("");
 
     var subscription = findSubscription(state.domainKey);
@@ -469,6 +542,8 @@
 
     renderChips();
     renderQueryNote();
+    renderRankingNote();
+    renderCitationControl();
     renderCandidates();
     renderIngestSummary();
     if (state.domainKey) loadKeyphraseCandidates(!subscription);
@@ -714,7 +789,9 @@
       body: JSON.stringify({
         domain_key: state.domainKey,
         categories: state.categories,
-        keyphrases: enabledKeyphrases()
+        keyphrases: enabledKeyphrases(),
+        // 並び順はサーバ側の並べ替えパラメータ（クライアントで再ソートしない）。
+        order: state.order
       })
     })
       .then(function (res) {
@@ -724,14 +801,23 @@
       .then(function (data) {
         state.searching = false;
         if (button) button.disabled = false;
+        // 通常検索の結果は引用グラフ一覧と混ぜない（出所を上書きする）。
+        state.mode = "search";
+        state.citationNote = "";
+        state.citationSeeds = [];
         state.candidates = (data && data.candidates) || [];
         state.query = (data && data.query) || "";
         state.closedWorldNote = (data && data.closed_world_note) || "";
         state.total = data && typeof data.total === "number" ? data.total : null;
+        // サーバが実際に適用した並び順を記録する（要求と食い違ってもそのまま出す）。
+        state.appliedOrder =
+          data && data.order === "relevance" ? "relevance" : "date";
+        state.ranking = (data && data.ranking) || null;
         state.searched = true;
         state.selected = {};
         setNotice("");
         renderQueryNote();
+        renderRankingNote();
         renderCandidates();
         renderIngestSummary();
       })
@@ -742,11 +828,34 @@
       });
   }
 
+  // 引用グラフのシード表示（どの論文から導出したかを名前で言う）。
+  function citationSeedTitles() {
+    var out = [];
+    for (var i = 0; i < state.citationSeeds.length; i++) {
+      var seed = state.citationSeeds[i] || {};
+      var text = seed.title || seed.arxiv_id || "";
+      if (text) out.push(String(text));
+    }
+    return out;
+  }
+
   // PD6: 何をどう検索した結果なのかを一覧の上に常時出す。
   function renderQueryNote() {
     var node = el("pd-query-note");
     if (!node) return;
     var parts = [];
+
+    // 引用グラフ一覧は通常検索と別の出所。条件行ごと切り替えて混同を防ぐ。
+    if (state.mode === "citation") {
+      parts.push(CITATION_MODE_LABEL);
+      var seeds = citationSeedTitles();
+      if (seeds.length) parts.push(CITATION_SEEDS_HEAD + seeds.join(" ・ "));
+      if (state.closedWorldNote) parts.push(state.closedWorldNote);
+      if (state.citationNote) parts.push(state.citationNote);
+      node.textContent = parts.join(" ／ ");
+      return;
+    }
+
     if (state.query) {
       parts.push("検索条件: " + state.query);
     } else if (state.searched) {
@@ -755,9 +864,122 @@
     } else {
       parts.push("検索条件: まだ検索していません。");
     }
+    if (state.searched) {
+      // 実際に適用された並び順を書く（要求した並び順ではなく）。
+      parts.push(
+        "並び順: " + (ORDER_LABELS[state.appliedOrder] || ORDER_LABELS.date)
+      );
+    }
     if (state.total !== null) parts.push("該当件数: " + String(state.total));
     if (state.closedWorldNote) parts.push(state.closedWorldNote);
     node.textContent = parts.join(" ／ ");
+  }
+
+  // PD6: 関連度順が使えなかったことを黙らない（サーバの note をそのまま出す）。
+  function renderRankingNote() {
+    var node = el("pd-ranking-note");
+    if (!node) return;
+    var ranking = state.ranking;
+    if (!ranking) {
+      node.textContent = "";
+      return;
+    }
+    if (ranking.available === false) {
+      node.textContent = ranking.note
+        ? String(ranking.note)
+        : RANKING_UNAVAILABLE_NOTICE;
+      return;
+    }
+    node.textContent = ranking.note ? String(ranking.note) : "";
+  }
+
+  // ── 引用グラフからの候補（PD8: ボタンを押したときだけ実行する）──────────
+  function renderCitationControl() {
+    var button = el("pd-citation-btn");
+    var note = el("pd-citation-note");
+    if (note) {
+      if (state.citationEnabled === false) {
+        note.textContent = CITATION_DISABLED_NOTICE;
+      } else if (state.citationEnabled === null) {
+        note.textContent = CITATION_UNKNOWN_NOTICE;
+      } else {
+        note.textContent = "";
+      }
+    }
+    if (!button) return;
+    // 分野未入力の案内は runCitationSearch 側の事実文で出す（検索ボタンと同じ流儀）。
+    button.disabled = state.citationEnabled !== true || state.citationSearching;
+  }
+
+  function runCitationSearch() {
+    if (state.citationSearching) return;
+    var button = el("pd-citation-btn");
+    if (button && button.disabled) return;
+    var input = el("pd-domain");
+    var domainKey = input ? input.value.trim() : state.domainKey;
+    if (!domainKey) {
+      setNotice("分野を入力してください。", true);
+      return;
+    }
+    if (domainKey !== state.domainKey) selectDomain(domainKey);
+
+    state.citationSearching = true;
+    renderCitationControl();
+    setNotice("引用グラフから候補を探しています...");
+
+    api("/admin/discovery/citation-search", {
+      method: "POST",
+      body: JSON.stringify({ domain_key: state.domainKey })
+    })
+      .then(function (res) {
+        if (!res.ok) return rejectWithBody(res);
+        return res.json();
+      })
+      .then(function (data) {
+        state.citationSearching = false;
+        applyCitationResult(data || {});
+      })
+      .catch(function (err) {
+        state.citationSearching = false;
+        renderCitationControl();
+        // 502（外部 API 不達）等はサーバの事実文をそのまま見せる。
+        setNotice(detailText(err, "引用グラフからの候補を取得できませんでした。"), true);
+      });
+  }
+
+  function applyCitationResult(data) {
+    state.mode = "citation";
+    state.searched = true;
+    state.selected = {};
+    // 引用グラフ一覧は並べ替えの対象外。前回検索のランキング表示を持ち越さない。
+    state.ranking = null;
+    state.appliedOrder = "date";
+    state.query = "";
+    state.total = null;
+    state.citationSeeds = (data && data.seeds) || [];
+    state.closedWorldNote = (data && data.closed_world_note) || "";
+    state.citationNote = data && data.note ? String(data.note) : "";
+
+    if (data.enabled === false || data.available === false) {
+      // 供給されていない・使えないときは候補を作らず、サーバの事実文だけを出す。
+      state.candidates = [];
+      if (!state.citationNote) {
+        state.citationNote =
+          data.enabled === false
+            ? CITATION_DISABLED_NOTICE
+            : CITATION_UNAVAILABLE_FALLBACK;
+      }
+      if (data.enabled === false) state.citationEnabled = false;
+    } else {
+      state.candidates = (data && data.candidates) || [];
+    }
+
+    setNotice("");
+    renderQueryNote();
+    renderRankingNote();
+    renderCitationControl();
+    renderCandidates();
+    renderIngestSummary();
   }
 
   // ── 候補一覧 ──────────────────────────────────────────────────────────
@@ -793,10 +1015,37 @@
       '<div style="flex:1;min-width:0">' +
       '<div style="font-size:13px;color:var(--color-text-primary)">' +
       esc((candidate && candidate.title) || arxivId) +
-      "</div>" +
+      "</div>";
+
+    // PD4: サーバが確定した段階ラベルをそのまま出す（閾値判定・数値描画をしない）。
+    if (candidate && candidate.relevance_label) {
+      html +=
+        '<span class="pd-relevance-label" style="display:inline-block;margin-top:3px;border:1px solid var(--color-border);border-radius:10px;padding:0 7px;font-size:11px;color:var(--color-text-secondary)">' +
+        esc(candidate.relevance_label) +
+        "</span>";
+    }
+
+    html +=
       '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
       esc(meta.join(" ・ ")) +
       "</div>";
+
+    // 引用グラフ由来の候補は「どの論文から辿ったか」を必ず添える（PD6）。
+    var derivedFrom = (candidate && candidate.derived_from) || [];
+    if (derivedFrom.length) {
+      var origins = [];
+      for (var d = 0; d < derivedFrom.length; d++) {
+        var origin = derivedFrom[d] || {};
+        var originText = origin.title || origin.arxiv_id || "";
+        if (originText) origins.push(String(originText));
+      }
+      if (origins.length) {
+        html +=
+          '<div class="pd-derived-from" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' +
+          esc(CITATION_DERIVED_HEAD + origins.join(" ・ ")) +
+          "</div>";
+      }
+    }
 
     if (matched.length) {
       // なぜ候補なのかを1行で言う（ブラックボックスのおすすめにしない・数値は出さない）。
@@ -858,9 +1107,18 @@
     if (!node) return;
     var visible = visibleCandidates();
     if (!visible.length) {
+      var emptyText;
+      if (state.mode === "citation") {
+        // 引用グラフ経路で「見つからない」と「使えない」を取り違えない（PD6）。
+        emptyText = state.citationNote || CITATION_EMPTY_NOTICE;
+      } else if (state.searched) {
+        emptyText = EMPTY_RESULT_NOTICE;
+      } else {
+        emptyText = "分野と条件を指定して「この条件で検索」を押してください。";
+      }
       node.innerHTML =
         '<div id="pd-empty-note" style="font-size:12.5px;color:var(--color-text-tertiary);padding:8px 0">' +
-        esc(state.searched ? EMPTY_RESULT_NOTICE : "分野と条件を指定して「この条件で検索」を押してください。") +
+        esc(emptyText) +
         "</div>";
       return;
     }

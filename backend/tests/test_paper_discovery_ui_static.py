@@ -29,6 +29,17 @@ Phase 2（バッチ取り込み + 事前見積り、§5）で追加した固定:
 - 取り込みキュー欄が手動更新のみ（ポーリング禁止 — PD8）で、失敗行を保持して
   明示操作でのみ再試行できること（P4 / PD1）。
 
+Phase 3（関連度順の並べ替え + 引用グラフからの候補、§6）で追加した固定:
+
+- 並び順は検索リクエストのパラメータであり、クライアント側で候補を並べ替えないこと。
+- `relevance_label` は**サーバが確定した文字列をそのまま描く**こと（クライアント側の
+  閾値表・数値→ラベル変換を持たない — PD4）。
+- `ranking.available:false` を黙って新着順に落とさず note を出すこと（PD6）。
+- 引用グラフ供給は明示操作（ボタン）でのみ実行し、`citation_source_enabled:false` の
+  ときは無効化 + 事実文を出すこと（強制はサーバ側 — UI は補助）。
+- 引用グラフ一覧は出所（`derived_from` / `seeds` / `closed_world_note`）を常時明示し、
+  通常検索の一覧と混ざらないこと（PD6）。
+
 すべて静的解析（部分文字列・正規表現）。外部 API / 実 DOM は使わない。
 """
 
@@ -52,6 +63,9 @@ ANCHORS = (
     # Phase 2（取り込みキュー欄）
     "materials.arxiv-discovery-queue",
     "materials.arxiv-discovery-queue-refresh",
+    # Phase 3（並び順トグル / 引用グラフからの候補）
+    "materials.arxiv-discovery-order",
+    "materials.arxiv-discovery-citation-search",
 )
 
 # 属性直書き（`data-ui-anchor="X"`）と setAttribute（`"data-ui-anchor", "X"`）の両形。
@@ -671,3 +685,259 @@ class TestIngestQueuePane:
         body = _extract_function(self.src, "renderQueue")
         assert "state.queueError" in body
         assert "取り込みキューを読み込めませんでした。" in self.src
+
+
+# ---------------------------------------------------------------------------
+# ⑯ Phase 3: 並び順トグル（サーバ側の並べ替えパラメータ）
+# ---------------------------------------------------------------------------
+
+
+class TestOrderToggle:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+
+    def test_order_control_exists_with_anchor(self):
+        assert 'id="pd-order"' in self.src
+        assert 'data-ui-anchor="materials.arxiv-discovery-order"' in self.src
+
+    def test_both_orders_are_offered_with_date_as_default(self):
+        assert 'var ORDER_LABELS = { date: "新着順", relevance: "関連度順" };' in self.src
+        assert '<option value="date">' in self.src
+        assert '<option value="relevance">' in self.src
+        # 既定は新着順（先に描く option / 初期 state の両方）。
+        assert self.src.index('<option value="date">') < self.src.index(
+            '<option value="relevance">'
+        )
+        assert 'order: "date",' in self.src
+
+    def test_search_request_carries_the_order(self):
+        body = _extract_function(self.src, "runSearch")
+        assert "order: state.order" in body
+
+    def test_changing_the_order_does_not_search_automatically(self):
+        """PD8: 並び順を変えただけで勝手に fetch しない（次の検索から効く）。"""
+        body = _extract_function(self.src, "openModal")
+        handler = body.split('el("pd-order").addEventListener("change"', 1)
+        assert len(handler) == 2, "並び順の change ハンドラが無い"
+        assert "runSearch" not in handler[1].split("});", 1)[0]
+        assert "並び順は次の検索から適用されます。" in self.src
+
+    def test_client_never_reorders_the_candidate_list(self):
+        """並べ替えはサーバの責務。返却順をそのまま描く。"""
+        assert ".sort(" not in self.src, "クライアント側で候補を並べ替えている"
+        render = _extract_function(self.src, "renderCandidates")
+        assert "sort" not in render
+        visible = _extract_function(self.src, "visibleCandidates")
+        assert "sort" not in visible
+
+    def test_applied_order_comes_from_the_response(self):
+        """要求した並び順ではなく、サーバが実際に適用した並び順を表示に使う。"""
+        body = _extract_function(self.src, "runSearch")
+        assert "state.appliedOrder" in body
+        assert 'data.order === "relevance"' in body
+        note = _extract_function(self.src, "renderQueryNote")
+        assert "state.appliedOrder" in note
+        assert "並び順: " in note
+
+
+# ---------------------------------------------------------------------------
+# ⑰ Phase 3: relevance_label はサーバ文字列の素通し（PD4）
+# ---------------------------------------------------------------------------
+
+
+class TestRelevanceLabel:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+        self.stripped = _strip_comments(self.src)
+
+    def test_label_is_rendered_verbatim_from_the_candidate(self):
+        body = _extract_function(self.src, "candidateCardHtml")
+        assert "candidate.relevance_label" in body
+        assert "esc(candidate.relevance_label)" in body
+
+    def test_label_is_only_rendered_when_present(self):
+        body = _extract_function(self.src, "candidateCardHtml")
+        assert "if (candidate && candidate.relevance_label)" in body
+
+    def test_no_client_side_threshold_table_or_conversion(self):
+        """クライアントに数値→ラベルの変換表を持たない（サーバが確定した表示）。"""
+        for banned in (
+            "RELEVANCE_LABELS",
+            "relevance_score",
+            "relevanceScore",
+            "state.relevance >",
+            "toFixed",
+            "Math.round",
+            "parseFloat",
+        ):
+            assert banned not in self.stripped, f"クライアント側の数値処理: {banned}"
+
+    def test_label_text_is_not_hardcoded_in_the_module(self):
+        """「関連: 高」のような表示文字列を実装側で作らない（サーバの文字列を出す）。"""
+        for banned in ("関連: 高", "関連: 中", "関連: 低"):
+            assert banned not in self.stripped, f"ラベル文字列の実装側での生成: {banned}"
+
+    def test_still_no_numeric_scores_anywhere(self):
+        for banned in (".confidence", ".score", ".similarity", "類似度", "一致度"):
+            assert banned not in self.stripped, f"数値スコアの痕跡: {banned}"
+
+
+# ---------------------------------------------------------------------------
+# ⑱ Phase 3: ranking.available:false を黙らない（PD6）
+# ---------------------------------------------------------------------------
+
+
+class TestRankingNote:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+
+    def test_ranking_note_container_sits_next_to_the_query_note(self):
+        assert 'id="pd-ranking-note"' in self.src
+        assert self.src.index('id="pd-query-note"') < self.src.index(
+            'id="pd-ranking-note"'
+        )
+
+    def test_search_stores_ranking_from_the_response(self):
+        body = _extract_function(self.src, "runSearch")
+        assert "state.ranking = (data && data.ranking) || null;" in body
+
+    def test_unavailable_ranking_shows_the_server_note(self):
+        body = _extract_function(self.src, "renderRankingNote")
+        assert "ranking.available === false" in body
+        assert "ranking.note" in body
+
+    def test_fallback_notice_states_the_list_is_still_date_ordered(self):
+        """note が取れなくても「関連度順で並んでいる」と誤認させない。"""
+        assert (
+            "関連度順の並べ替えは利用できませんでした。新着順のまま表示しています。"
+            in self.src
+        )
+        body = _extract_function(self.src, "renderRankingNote")
+        assert "RANKING_UNAVAILABLE_NOTICE" in body
+
+    def test_ranking_note_is_rendered_on_open_and_after_search(self):
+        assert "renderRankingNote();" in _extract_function(self.src, "openModal")
+        assert "renderRankingNote();" in _extract_function(self.src, "runSearch")
+
+
+# ---------------------------------------------------------------------------
+# ⑲ Phase 3: 引用グラフからの候補（明示操作・出所の明示）
+# ---------------------------------------------------------------------------
+
+
+class TestCitationSearch:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+
+    def test_button_exists_with_anchor_and_starts_disabled(self):
+        assert 'id="pd-citation-btn"' in self.src
+        assert 'data-ui-anchor="materials.arxiv-discovery-citation-search"' in self.src
+        assert "引用グラフから探す" in self.src
+        # 初期描画は無効（サーバの宣言を読むまで開けない — fail-closed の補助）。
+        marker = self.src.index('id="pd-citation-btn"')
+        assert "disabled" in self.src[marker : marker + 260]
+
+    def test_enabled_only_when_server_declares_it(self):
+        body = _extract_function(self.src, "renderCitationControl")
+        assert "state.citationEnabled !== true" in body
+        load = _extract_function(self.src, "loadSubscriptions")
+        assert "data.citation_source_enabled" in load
+
+    def test_disabled_state_states_the_fact(self):
+        assert "引用グラフによる候補供給は有効化されていません（サーバ設定）。" in self.src
+        body = _extract_function(self.src, "renderCitationControl")
+        assert "CITATION_DISABLED_NOTICE" in body
+        # 可否を確認できないときも黙って開けない。
+        assert "CITATION_UNKNOWN_NOTICE" in body
+        assert "引用グラフによる候補供給の利用可否を確認できませんでした。" in self.src
+
+    def test_posts_to_the_dedicated_endpoint_with_domain_key(self):
+        body = _extract_function(self.src, "runCitationSearch")
+        assert '"/admin/discovery/citation-search"' in body
+        assert '"POST"' in body
+        assert "domain_key: state.domainKey" in body
+
+    def test_runs_only_on_explicit_click(self):
+        """PD8: 自動実行しない（openModal / 検索完了から呼ばない）。"""
+        code = _strip_comments(self.src)
+        assert code.count("runCitationSearch") == 2, (
+            "runCitationSearch の出現は 関数定義 と クリックバインド の2箇所だけであるべき"
+        )
+        assert (
+            'el("pd-citation-btn").addEventListener("click", runCitationSearch);'
+            in self.src
+        )
+        # 起動時に呼ぶ経路が無い（`runCitationSearch()` は関数定義の1箇所だけ）。
+        assert self.src.count("runCitationSearch()") == 1
+        assert "function runCitationSearch() {" in self.src
+        assert "runCitationSearch" not in _extract_function(self.src, "runSearch")
+        assert (
+            _extract_function(self.src, "openModal").count("runCitationSearch") == 1
+        ), "openModal からの runCitationSearch はクリックバインドの1回だけ"
+        assert "setInterval" not in self.src
+
+    def test_refuses_while_button_disabled(self):
+        body = _extract_function(self.src, "runCitationSearch")
+        assert "button.disabled" in body
+
+    def test_failure_surfaces_server_detail(self):
+        """502（外部 API 不達）等はサーバの事実文をそのまま見せる。"""
+        body = _extract_function(self.src, "runCitationSearch")
+        assert "detailText(err," in body
+        assert "rejectWithBody(res)" in body
+
+    def test_disabled_or_unavailable_response_shows_the_note_and_no_candidates(self):
+        body = _extract_function(self.src, "applyCitationResult")
+        assert "data.enabled === false || data.available === false" in body
+        assert "state.candidates = [];" in body
+        assert "data.note" in body
+
+    def test_results_reuse_the_shared_candidate_rendering(self):
+        """取り込み経路を分岐させない（同じカード・同じチェックボックス）。"""
+        body = _extract_function(self.src, "applyCitationResult")
+        assert "state.candidates =" in body
+        assert "renderCandidates();" in body
+        assert "renderIngestSummary();" in body
+        # 専用の取り込み経路を作らない。
+        assert "/admin/discovery/ingest" not in body
+
+    def test_derived_from_is_rendered_per_candidate(self):
+        body = _extract_function(self.src, "candidateCardHtml")
+        assert "candidate.derived_from" in body
+        assert "CITATION_DERIVED_HEAD" in body
+        assert "origin.title || origin.arxiv_id" in body
+        assert 'var CITATION_DERIVED_HEAD = "引用元: ";' in self.src
+
+    def test_condition_row_switches_to_seeds_and_closed_world_note(self):
+        body = _extract_function(self.src, "renderQueryNote")
+        assert 'state.mode === "citation"' in body
+        assert "CITATION_MODE_LABEL" in body
+        assert "CITATION_SEEDS_HEAD" in body
+        assert "state.closedWorldNote" in body
+        assert "citationSeedTitles()" in body
+        assert 'var CITATION_SEEDS_HEAD = "シード: ";' in self.src
+        assert 'var CITATION_MODE_LABEL = "候補の出所: 引用グラフ";' in self.src
+
+    def test_seed_titles_fall_back_to_ids_without_inventing_text(self):
+        body = _extract_function(self.src, "citationSeedTitles")
+        assert "seed.title || seed.arxiv_id" in body
+
+    def test_citation_and_search_results_do_not_mix(self):
+        """通常検索は出所を search に戻し、引用グラフのシード・注記を持ち越さない。"""
+        search = _extract_function(self.src, "runSearch")
+        assert 'state.mode = "search";' in search
+        assert "state.citationSeeds = [];" in search
+        citation = _extract_function(self.src, "applyCitationResult")
+        assert 'state.mode = "citation";' in citation
+        # 引用グラフ一覧は並べ替えの対象外（前回の ranking を持ち越さない）。
+        assert "state.ranking = null;" in citation
+
+    def test_empty_citation_list_is_not_called_absence_of_papers(self):
+        body = _extract_function(self.src, "renderCandidates")
+        assert 'state.mode === "citation"' in body
+        assert "CITATION_EMPTY_NOTICE" in body
+        assert "state.citationNote" in body
+        assert (
+            "引用グラフからは候補が見つかりませんでした。"
+            "取り込み済みの論文が増えると候補が変わることがあります。" in self.src
+        )
