@@ -18,6 +18,17 @@
 - PD8: ポーリング（setInterval）・自動表示をしないこと。
 - 許可ドメイン未設定時の事実文と取り込みボタンの無効化（UF1 継承の補助表示）。
 
+Phase 2（バッチ取り込み + 事前見積り、§5）で追加した固定:
+
+- 取り込みの2経路（5件以下＝同期 `/ingest` / 6件以上＝キュー `/ingest-batch`）と、
+  経路ごとに切り替わる確認事実文。クライアント側の上限先回り検査（上限の強制はサーバ）。
+- キュー投入を「取り込み完了」と偽らないこと（候補行の status をローカルで
+  `ingested` に書き換えない — PD6）。
+- 事前見積り行が fail-soft（取得失敗で行ごと出さない・取り込みを止めない）であり、
+  U1 のとおり reported / estimated を合算せず、金額を出さないこと。
+- 取り込みキュー欄が手動更新のみ（ポーリング禁止 — PD8）で、失敗行を保持して
+  明示操作でのみ再試行できること（P4 / PD1）。
+
 すべて静的解析（部分文字列・正規表現）。外部 API / 実 DOM は使わない。
 """
 
@@ -38,6 +49,9 @@ ANCHORS = (
     "materials.arxiv-discovery-search",
     "materials.arxiv-discovery-ingest",
     "materials.arxiv-discovery-subscribe",
+    # Phase 2（取り込みキュー欄）
+    "materials.arxiv-discovery-queue",
+    "materials.arxiv-discovery-queue-refresh",
 )
 
 # 属性直書き（`data-ui-anchor="X"`）と setAttribute（`"data-ui-anchor", "X"`）の両形。
@@ -448,3 +462,212 @@ class TestCandidateStates:
         body = _extract_function(self.src, "candidateCardHtml")
         assert "<details" in body
         assert "要旨" in body
+
+
+# ---------------------------------------------------------------------------
+# ⑫ Phase 2: 取り込みの2経路（同期 / キュー）
+# ---------------------------------------------------------------------------
+
+
+class TestBatchIngestRouting:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+
+    def test_boundary_constants_are_declared_once(self):
+        """境界（5件）と上限（50件）はリテラルを散らさず定数で持つ。"""
+        assert re.search(r"var SYNC_INGEST_MAX = 5;", self.src)
+        assert re.search(r"var BATCH_INGEST_MAX = 50;", self.src)
+
+    def test_boundary_predicate_is_strictly_greater_than_five(self):
+        """5件以下は同期、6件以上がキュー（境界の判定を1箇所に閉じる）。"""
+        body = _extract_function(self.src, "usesBatchIngest")
+        assert "count > SYNC_INGEST_MAX" in body
+
+    def test_run_ingest_selects_endpoint_by_batch_flag(self):
+        body = _extract_function(self.src, "runIngest")
+        assert "usesBatchIngest(ids.length)" in body
+        assert '"/admin/discovery/ingest-batch"' in body
+        assert '"/admin/discovery/ingest"' in body
+
+    def test_batch_notice_states_queueing_not_completion(self):
+        """キュー経路の事実文（何が起きるか）を省略しない（PD1）。"""
+        assert "件をキューに登録します。" in self.src
+        assert "サーバが順に取得・解析します（1件ずつ・間隔をあけて実行）。" in self.src
+        assert "進捗はこのモーダルの取り込みキュー欄と教材一覧で確認できます。" in self.src
+        # 同期経路と同じ「LLM を使う」「候補として保存」の告知も落とさない。
+        assert "解析には LLM を使用します" in self.src
+        assert "公開するまで学習者には表示されません" in self.src
+
+    def test_summary_switches_notice_by_route(self):
+        body = _extract_function(self.src, "renderIngestSummary")
+        assert "usesBatchIngest(ids.length)" in body
+        assert "BATCH_NOTICE_TAIL" in body
+        assert "INGEST_NOTICE_TAIL" in body
+
+    def test_client_side_limit_check_precedes_the_request(self):
+        """上限の強制はサーバ（422）。クライアントは先回りの案内のみ。"""
+        summary = _extract_function(self.src, "renderIngestSummary")
+        assert "ids.length > BATCH_INGEST_MAX" in summary
+        assert "overLimit" in summary
+        run = _extract_function(self.src, "runIngest")
+        assert "ids.length > BATCH_INGEST_MAX" in run
+        assert "BATCH_LIMIT_NOTICE_HEAD" in run
+
+    def test_batch_payload_carries_domain_and_titles(self):
+        body = _extract_function(self.src, "runIngest")
+        assert "payload.domain_key" in body
+        assert "entry.title" in body
+
+    def test_batch_reuses_existing_upload_options(self):
+        """analyze_images / models はバッチでも既存アップロード欄から引き継ぐ。"""
+        body = _extract_function(self.src, "runIngest")
+        assert "uploadOptions()" in body
+
+
+# ---------------------------------------------------------------------------
+# ⑬ Phase 2: キュー投入を「完了」と偽らない（PD6）
+# ---------------------------------------------------------------------------
+
+
+class TestBatchResultHonesty:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+        self.body = _extract_function(self.src, "handleBatchResult")
+
+    def test_does_not_fake_ingested_status_locally(self):
+        """キュー登録は取り込み完了ではない。候補行の status を書き換えない。"""
+        assert "ingested" not in self.body, "キュー投入で取り込み済みに見せている"
+        assert "candidate.status" not in self.body
+
+    def test_does_not_push_queued_items_into_the_upload_pipeline(self):
+        """受理は非同期。ここで handleUploadAccepted を呼ばない（教材一覧の偽装防止）。"""
+        assert "onUploadAccepted" not in self.body
+
+    def test_reports_queued_count_and_skipped_details(self):
+        assert "data.queued" in self.body
+        assert "data.skipped" in self.body
+        assert "skip.detail" in self.body, "skipped の detail をサーバ文のまま出す"
+
+    def test_notice_is_always_surfaced_when_present(self):
+        assert "data.notice" in self.body
+
+    def test_refreshes_the_queue_once_after_registering(self):
+        assert "loadQueue();" in self.body
+        assert "setInterval" not in self.body
+
+
+# ---------------------------------------------------------------------------
+# ⑭ Phase 2: 事前見積り（U層のレンジ表示の流儀）
+# ---------------------------------------------------------------------------
+
+
+class TestIngestEstimate:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+
+    def test_uses_the_dedicated_endpoint_once(self):
+        body = _extract_function(self.src, "ensureEstimate")
+        assert '"/admin/discovery/ingest-estimate"' in body
+        # 1 回だけ取得してキャッシュする（開くたびにリセット）。
+        assert "state.estimateRequested" in body
+
+    def test_fetch_failure_is_fail_soft(self):
+        """見積りが取れなくても取り込みを止めない（行ごと出さないだけ）。"""
+        body = _extract_function(self.src, "ensureEstimate")
+        assert ".catch(" in body
+        assert "state.estimate = null;" in body
+        render = _extract_function(self.src, "renderEstimateLine")
+        assert 'node.textContent = "";' in render
+
+    def test_unavailable_is_stated_with_server_note(self):
+        body = _extract_function(self.src, "renderEstimateLine")
+        assert "data.available === false" in body
+        assert "data.note" in body
+
+    def test_reported_and_estimated_are_not_summed(self):
+        """U1: 実測と推計を合算した単一数値を作らない。"""
+        body = _extract_function(self.src, "estimateBucketTexts")
+        assert '"reported"' in body
+        assert '"estimated"' in body
+        assert "total_tokens_range" in body
+        for banned in ("+ range[1]", "range[0] + range", "合計"):
+            assert banned not in body, f"レンジを合成している痕跡: {banned}"
+
+    def test_line_is_per_document_times_selection(self):
+        body = _extract_function(self.src, "renderEstimateLine")
+        assert "ESTIMATE_LINE_HEAD" in body
+        assert "data.per_document" in body
+        assert '" × "' in body
+        assert "basis_note" in body
+        assert "1論文あたりの解析トークンの目安: " in self.src
+
+    def test_no_currency_is_displayed(self):
+        src = _strip_comments(self.src)
+        for banned in ("cost_usd", "cost", "USD", "$", "円"):
+            assert banned not in src, f"金額表示の痕跡: {banned}"
+
+    def test_estimate_is_requested_only_when_something_is_selected(self):
+        body = _extract_function(self.src, "renderIngestSummary")
+        assert "if (ids.length) ensureEstimate();" in body
+
+
+# ---------------------------------------------------------------------------
+# ⑮ Phase 2: 取り込みキュー欄（手動更新のみ・失敗は保持）
+# ---------------------------------------------------------------------------
+
+
+class TestIngestQueuePane:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+
+    def test_queue_pane_is_a_collapsible_with_an_anchor(self):
+        assert 'id="pd-queue"' in self.src
+        assert '<details id="pd-queue" data-ui-anchor="materials.arxiv-discovery-queue"' in self.src
+        assert 'id="pd-queue-list"' in self.src
+
+    def test_manual_refresh_button_exists(self):
+        assert 'id="pd-queue-refresh"' in self.src
+        assert 'data-ui-anchor="materials.arxiv-discovery-queue-refresh"' in self.src
+        assert "自動では更新されません。" in self.src
+
+    def test_queue_is_fetched_only_on_open_refresh_and_after_batch(self):
+        """PD8: ポーリングしない。読むのは3つの明示契機だけ。"""
+        assert self.src.count("loadQueue();") == 3
+        assert "loadQueue();" in _extract_function(self.src, "openModal")
+        assert "loadQueue();" in _extract_function(self.src, "handleBatchResult")
+        body = _extract_function(self.src, "loadQueue")
+        assert '"/admin/discovery/ingest-queue"' in body
+        assert "setInterval" not in body
+
+    def test_all_four_status_labels_exist(self):
+        for status, label in (
+            ("queued", "待機中"),
+            ("fetching", "取得中"),
+            ("accepted", "受理済み"),
+            ("failed", "失敗"),
+        ):
+            assert status + ": \"" + label + '"' in self.src, f"status ラベルが無い: {status}"
+
+    def test_empty_queue_is_stated(self):
+        assert "キューに項目はありません。" in self.src
+
+    def test_failed_rows_keep_detail_and_offer_retry(self):
+        body = _extract_function(self.src, "queueRowHtml")
+        assert 'status === "failed"' in body
+        assert "item.detail" in body
+        assert "pd-queue-retry" in body
+        assert "再試行" in body
+
+    def test_retry_is_an_explicit_post_and_surfaces_422_detail(self):
+        body = _extract_function(self.src, "retryQueueItem")
+        assert '"/retry"' in body
+        assert '"POST"' in body
+        assert "detailText(err," in body
+        # 行削除しない（P4）。
+        assert "splice" not in body
+        assert '"DELETE"' not in body
+
+    def test_queue_load_failure_is_stated_not_silently_empty(self):
+        body = _extract_function(self.src, "renderQueue")
+        assert "state.queueError" in body
+        assert "取り込みキューを読み込めませんでした。" in self.src

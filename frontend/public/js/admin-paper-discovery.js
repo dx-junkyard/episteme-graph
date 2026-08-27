@@ -45,6 +45,31 @@
   var KEYPHRASE_NEW_NOTICE_TAIL =
     "件の新しいキーフレーズ候補が分野語彙から供給されました（外れた状態です。使うにはクリックしてください）。";
 
+  // ── Phase 2（バッチ取り込み + 事前見積り）─────────────────────────────
+  // 少数（5件以下）は従来どおり同期取り込み、6件以上はサーバのキューへ登録する。
+  // 経路が違えば起きることも違うので、確認画面の事実文も切り替える（PD1）。
+  var SYNC_INGEST_MAX = 5;
+  var BATCH_INGEST_MAX = 50;
+  var BATCH_NOTICE_TAIL =
+    "件をキューに登録します。サーバが順に取得・解析します（1件ずつ・間隔をあけて実行）。" +
+    "進捗はこのモーダルの取り込みキュー欄と教材一覧で確認できます。解析には LLM を使用します。" +
+    "解析結果は候補として保存され、公開するまで学習者には表示されません。";
+  // 上限はサーバ側でも 422 で強制される。ここでの検査は先回りの案内にすぎない。
+  var BATCH_LIMIT_NOTICE_HEAD = "一度にキューへ登録できるのは ";
+  var BATCH_LIMIT_NOTICE_TAIL = " 件までです。選択を減らしてください。";
+  // 取り込みキューの状態語彙（サーバの status をそのまま日本語ラベルにするだけ）。
+  var QUEUE_STATUS_LABELS = {
+    queued: "待機中",
+    fetching: "取得中",
+    accepted: "受理済み",
+    failed: "失敗"
+  };
+  var QUEUE_EMPTY_NOTICE = "キューに項目はありません。";
+  var QUEUE_LOAD_ERROR = "取り込みキューを読み込めませんでした。";
+  var BATCH_QUEUED_NOTICE_TAIL =
+    "件をキューに登録しました。進捗は下の「取り込みキュー」で確認できます。";
+  var ESTIMATE_LINE_HEAD = "1論文あたりの解析トークンの目安: ";
+
   var state = {
     open: false,
     domainKey: "",
@@ -62,7 +87,14 @@
     searching: false,
     saving: false,
     ingesting: false,
-    domainAllowed: null
+    domainAllowed: null,
+    // Phase 2: 取り込みキューは手動更新のみ（PD8。ポーリングしない）。
+    queue: [],
+    queueLoading: false,
+    queueError: "",
+    // 事前見積りはモーダルを開いている間 1 回だけ取得してキャッシュする。
+    estimate: null,
+    estimateRequested: false
   };
 
   // ── 小道具 ────────────────────────────────────────────────────────────
@@ -221,9 +253,20 @@
         "</div>" +
         '<div id="pd-results" style="overflow-y:auto;flex:1;min-height:160px"></div>' +
 
+        // ④ 取り込みキュー（Phase 2。開いたとき・登録直後・[更新] のときだけ読む）
+        '<details id="pd-queue" data-ui-anchor="materials.arxiv-discovery-queue" style="margin-top:8px;border-top:1px solid var(--color-border-tertiary);padding-top:8px">' +
+          '<summary style="font-size:12px;color:var(--color-text-secondary);cursor:pointer">取り込みキュー</summary>' +
+          '<div style="display:flex;align-items:center;gap:8px;margin:6px 0">' +
+            '<button type="button" id="pd-queue-refresh" data-ui-anchor="materials.arxiv-discovery-queue-refresh" class="admin-action-btn" style="font-size:11.5px;padding:1px 8px">更新</button>' +
+            '<span style="font-size:11.5px;color:var(--color-text-tertiary)">自動では更新されません。</span>' +
+          "</div>" +
+          '<div id="pd-queue-list" style="max-height:180px;overflow-y:auto"></div>' +
+        "</details>" +
+
         // ③ 取り込み確認
         '<div style="border-top:1px solid var(--color-border-tertiary);margin-top:10px;padding-top:10px">' +
           '<div id="pd-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
+          '<div id="pd-ingest-estimate" style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:6px"></div>' +
           '<div id="pd-ingest-result" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div style="display:flex;justify-content:flex-end;gap:8px">' +
             '<button type="button" id="pd-cancel" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">閉じる</button>' +
@@ -250,6 +293,11 @@
     state.saving = false;
     state.ingesting = false;
     state.domainAllowed = null;
+    state.queue = [];
+    state.queueLoading = false;
+    state.queueError = "";
+    state.estimate = null;
+    state.estimateRequested = false;
 
     var overlay = document.createElement("div");
     overlay.id = "paper-discovery-modal";
@@ -280,16 +328,21 @@
       state.showDismissed = !!this.checked;
       renderCandidates();
     });
+    el("pd-queue-refresh").addEventListener("click", function () {
+      loadQueue();
+    });
 
     renderChips();
     renderQueryNote();
     renderCandidates();
     renderIngestSummary();
+    renderQueue();
 
     // PD8: 開いたときだけ取得する（ポーリング・自動更新をしない）。
     loadSubscriptions();
     loadDomainOptions();
     checkAllowedDomains();
+    loadQueue();
   }
 
   function bindEnter(inputId, handler) {
@@ -936,14 +989,31 @@
     return out;
   }
 
+  // 5件以下は同期取り込み、6件以上はキュー登録（Phase 2）。境界を1箇所に閉じる。
+  function usesBatchIngest(count) {
+    return count > SYNC_INGEST_MAX;
+  }
+
   // PD1: 選択件数と「何が起きるか」を必ず出してから実行させる。
+  // 経路（同期 / キュー）で起きることが違うので事実文も切り替える。
   function renderIngestSummary() {
     var summary = el("pd-ingest-summary");
     var button = el("pd-ingest-btn");
     if (!summary || !button) return;
     var ids = selectedIds();
+    var overLimit = ids.length > BATCH_INGEST_MAX;
     var lines = [];
-    if (ids.length) {
+    if (overLimit) {
+      lines.push(
+        String(ids.length) +
+          "件が選択されています。" +
+          BATCH_LIMIT_NOTICE_HEAD +
+          String(BATCH_INGEST_MAX) +
+          BATCH_LIMIT_NOTICE_TAIL
+      );
+    } else if (usesBatchIngest(ids.length)) {
+      lines.push(String(ids.length) + BATCH_NOTICE_TAIL);
+    } else if (ids.length) {
       lines.push(String(ids.length) + INGEST_NOTICE_TAIL);
     } else {
       lines.push("取り込む論文を選択してください。");
@@ -954,7 +1024,74 @@
       lines.push(DOMAIN_UNKNOWN_NOTICE);
     }
     summary.textContent = lines.join(" ");
-    button.disabled = state.ingesting || !ids.length || state.domainAllowed === false;
+    button.disabled =
+      state.ingesting || !ids.length || overLimit || state.domainAllowed === false;
+
+    // 見積りは「取り込むつもりがある」ときだけ取りに行く（1回だけ・キャッシュ）。
+    if (ids.length) ensureEstimate();
+    renderEstimateLine();
+  }
+
+  // ── 事前見積り（U層のレンジ表示の流儀。金額なし・reported/estimated 非合算）──
+  function ensureEstimate() {
+    if (state.estimateRequested) return;
+    state.estimateRequested = true;
+    api("/admin/discovery/ingest-estimate")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        state.estimate = data || null;
+        renderEstimateLine();
+      })
+      .catch(function () {
+        // fail-soft: 見積りが取れないときは行ごと出さない（取り込みは止めない）。
+        state.estimate = null;
+        renderEstimateLine();
+      });
+  }
+
+  // U1: reported（実測）と estimated（推計）を合算せず、あるものだけ並べる。
+  function estimateBucketTexts(perDocument) {
+    var buckets = [
+      { key: "reported", label: "実測(reported) " },
+      { key: "estimated", label: "推計(estimated) " }
+    ];
+    var out = [];
+    for (var i = 0; i < buckets.length; i++) {
+      var bucket = perDocument ? perDocument[buckets[i].key] : null;
+      var range = bucket && bucket.total_tokens_range;
+      if (!range || range.length !== 2 || range[0] == null || range[1] == null) continue;
+      out.push(
+        buckets[i].label + String(range[0]) + " 〜 " + String(range[1]) + " トークン"
+      );
+    }
+    return out;
+  }
+
+  function renderEstimateLine() {
+    var node = el("pd-ingest-estimate");
+    if (!node) return;
+    var count = selectedIds().length;
+    var data = state.estimate;
+    if (!count || !data) {
+      node.textContent = "";
+      return;
+    }
+    if (data.available === false) {
+      // 実績がまだ無いことをサーバの事実文のまま出す（推測で埋めない）。
+      node.textContent = data.note ? String(data.note) : "";
+      return;
+    }
+    var texts = estimateBucketTexts(data.per_document);
+    if (!texts.length) {
+      node.textContent = "";
+      return;
+    }
+    var line = ESTIMATE_LINE_HEAD + texts.join(" ／ ") + " × " + String(count) + "件";
+    if (data.basis_note) line += "（" + String(data.basis_note) + "）";
+    node.textContent = line;
   }
 
   function runIngest() {
@@ -963,21 +1100,35 @@
     if (button && button.disabled) return;
     var ids = selectedIds();
     if (!ids.length) return;
+    if (ids.length > BATCH_INGEST_MAX) {
+      // サーバも 422 で拒否する。ここでは先回りして事実文を出すだけ。
+      setNotice(
+        BATCH_LIMIT_NOTICE_HEAD + String(BATCH_INGEST_MAX) + BATCH_LIMIT_NOTICE_TAIL,
+        true
+      );
+      return;
+    }
+    var batch = usesBatchIngest(ids.length);
 
     var items = [];
     for (var i = 0; i < ids.length; i++) {
-      items.push({ arxiv_id: ids[i] });
+      var candidate = findCandidate(ids[i]);
+      var entry = { arxiv_id: ids[i] };
+      // キュー行の表示に使うタイトルだけ添える（候補は保存しない — PD5）。
+      if (batch && candidate && candidate.title) entry.title = candidate.title;
+      items.push(entry);
     }
     var payload = uploadOptions();
     payload.items = items;
+    if (batch && state.domainKey) payload.domain_key = state.domainKey;
 
     state.ingesting = true;
     if (button) button.disabled = true;
     var result = el("pd-ingest-result");
-    if (result) result.textContent = "取得しています...";
+    if (result) result.textContent = batch ? "キューに登録しています..." : "取得しています...";
     setNotice("");
 
-    api("/admin/discovery/ingest", {
+    api(batch ? "/admin/discovery/ingest-batch" : "/admin/discovery/ingest", {
       method: "POST",
       body: JSON.stringify(payload)
     })
@@ -987,7 +1138,8 @@
       })
       .then(function (data) {
         state.ingesting = false;
-        handleIngestResult(data || {});
+        if (batch) handleBatchResult(data || {});
+        else handleIngestResult(data || {});
         renderIngestSummary();
       })
       .catch(function (err) {
@@ -1035,6 +1187,167 @@
     var result = el("pd-ingest-result");
     if (result) result.textContent = lines.join(" ／ ");
     renderCandidates();
+  }
+
+  // キュー投入は「取り込み完了」ではない。候補行の status をローカルで
+  // "ingested" に書き換えない（PD6: 起きていないことを起きたように見せない）。
+  // 二重登録を防ぐためにチェックだけ外す。
+  function handleBatchResult(data) {
+    var queued = data.queued || [];
+    var skipped = data.skipped || [];
+    var lines = [];
+
+    for (var i = 0; i < queued.length; i++) {
+      var item = queued[i] || {};
+      if (item.arxiv_id) delete state.selected[item.arxiv_id];
+    }
+
+    if (queued.length) {
+      lines.push(String(queued.length) + BATCH_QUEUED_NOTICE_TAIL);
+    }
+    for (var j = 0; j < skipped.length; j++) {
+      var skip = skipped[j] || {};
+      // サーバの detail を独自文で上書きしない。
+      lines.push(
+        (skip.arxiv_id || "") + ": " + (skip.detail || "キューに登録できませんでした。")
+      );
+    }
+    // notice（許可ドメイン未設定など）は存在すれば必ず出す。
+    if (data.notice) lines.push(String(data.notice));
+    if (!lines.length) lines.push("キューに登録された論文はありませんでした。");
+
+    var result = el("pd-ingest-result");
+    if (result) result.textContent = lines.join(" ／ ");
+    renderCandidates();
+
+    var details = el("pd-queue");
+    if (details) details.open = true;
+    loadQueue();
+  }
+
+  // ── 取り込みキュー（PD8: 開いたとき・登録直後・[更新] のときだけ読む）─────
+  function loadQueue() {
+    if (state.queueLoading) return;
+    state.queueLoading = true;
+    state.queueError = "";
+    renderQueue();
+
+    // 分野で絞らない（開いたときと [更新] で中身が変わらないようにする。
+    // 行ごとに domain_key を出すので、どの分野の項目かは行で分かる）。
+    api("/admin/discovery/ingest-queue")
+      .then(function (res) {
+        if (!res.ok) return rejectWithBody(res);
+        return res.json();
+      })
+      .then(function (data) {
+        state.queueLoading = false;
+        state.queue = (data && data.items) || [];
+        renderQueue();
+      })
+      .catch(function (err) {
+        state.queueLoading = false;
+        state.queueError = detailText(err, QUEUE_LOAD_ERROR);
+        renderQueue();
+      });
+  }
+
+  function queueRowHtml(item) {
+    var status = (item && item.status) || "";
+    var label = QUEUE_STATUS_LABELS[status] || status;
+    var title = (item && item.title) || (item && item.arxiv_id) || "";
+    var meta = [];
+    if (item && item.arxiv_id) meta.push(item.arxiv_id);
+    if (item && item.domain_key) meta.push(item.domain_key);
+    var html =
+      '<div class="pd-queue-row" style="border-bottom:1px solid var(--color-border-tertiary);padding:6px 0">' +
+      '<div style="font-size:12.5px;color:var(--color-text-primary)">' +
+      esc(title) +
+      "</div>" +
+      '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+      esc(label) +
+      (meta.length ? " ・ " + esc(meta.join(" ・ ")) : "") +
+      "</div>";
+
+    if (status === "failed") {
+      html +=
+        '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc((item && item.detail) || "取り込みに失敗しました。") +
+        "</div>" +
+        '<div style="margin-top:4px">' +
+        '<button type="button" class="pd-queue-retry admin-action-btn" data-item-id="' +
+        esc((item && item.item_id) || "") +
+        '" style="font-size:11px;padding:1px 7px">再試行</button>' +
+        "</div>";
+    } else if (item && item.detail) {
+      html +=
+        '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc(item.detail) +
+        "</div>";
+    }
+
+    return html + "</div>";
+  }
+
+  function renderQueue() {
+    var node = el("pd-queue-list");
+    if (!node) return;
+    if (state.queueLoading) {
+      node.innerHTML =
+        '<div style="font-size:11.5px;color:var(--color-text-tertiary)">読み込んでいます...</div>';
+      return;
+    }
+    if (state.queueError) {
+      node.innerHTML =
+        '<div style="font-size:11.5px;color:var(--color-text-danger, #e53935)">' +
+        esc(state.queueError) +
+        "</div>";
+      return;
+    }
+    if (!state.queue.length) {
+      node.innerHTML =
+        '<div id="pd-queue-empty" style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+        esc(QUEUE_EMPTY_NOTICE) +
+        "</div>";
+      return;
+    }
+    var html = "";
+    for (var i = 0; i < state.queue.length; i++) {
+      html += queueRowHtml(state.queue[i] || {});
+    }
+    node.innerHTML = html;
+    bindAll(node, ".pd-queue-retry", function (button) {
+      retryQueueItem(button.getAttribute("data-item-id"), button);
+    });
+  }
+
+  // P4/PD1: 失敗行は消さず保持し、リトライは教員の明示操作のみ。
+  function retryQueueItem(itemId, button) {
+    if (!itemId) return;
+    if (button) button.disabled = true;
+    api("/admin/discovery/ingest-queue/" + encodeURIComponent(itemId) + "/retry", {
+      method: "POST"
+    })
+      .then(function (res) {
+        if (!res.ok) return rejectWithBody(res);
+        return res.json();
+      })
+      .then(function (data) {
+        var updated = data && data.item;
+        if (updated) {
+          for (var i = 0; i < state.queue.length; i++) {
+            if (state.queue[i] && state.queue[i].item_id === updated.item_id) {
+              state.queue[i] = updated;
+            }
+          }
+        }
+        setNotice("");
+        renderQueue();
+      })
+      .catch(function (err) {
+        if (button) button.disabled = false;
+        // 422（failed 以外）はサーバの事実文をそのまま見せる。
+        setNotice(detailText(err, "再試行できませんでした。"), true);
+      });
   }
 
   window.PaperDiscovery = {
