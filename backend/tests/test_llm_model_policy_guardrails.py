@@ -172,6 +172,9 @@ class TestFeatureCoverage:
             "embedding:chunks",
             "embedding:library_search",
             "admin:help_kb_embed",
+            # 論文ディスカバリーの関連度ランキング（Phase 3）。実体は embedding 呼び出し
+            # なので、他の embedding 系と同じくモデル選択の対象外（M5）。
+            "discovery:ranking",
         }
         for feature in KNOWN_FEATURES:
             scene = llm_policy.scene_for_feature(feature)

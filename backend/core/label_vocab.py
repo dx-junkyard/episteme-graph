@@ -56,6 +56,12 @@ __all__ = [
     "CONFIDENCE_TENTATIVE_REFERENCE_HIGH",
     "CONFIDENCE_THRESHOLD_HIGH",
     "CONFIDENCE_THRESHOLD_MEDIUM",
+    "DISCOVERY_RELEVANCE_LABEL_HIGH",
+    "DISCOVERY_RELEVANCE_LABEL_LOW",
+    "DISCOVERY_RELEVANCE_LABEL_MEDIUM",
+    "DISCOVERY_RELEVANCE_SCALE",
+    "DISCOVERY_RELEVANCE_THRESHOLD_HIGH",
+    "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
     "GradedScale",
     "MATERIAL_STATE_LABELS",
     "SCRIPT_STATUS_LABELS",
@@ -155,6 +161,36 @@ CONFIDENCE_TENTATIVE_REFERENCE_HIGH = GradedScale(
         CONFIDENCE_LABEL_TENTATIVE_HIGH,
         CONFIDENCE_LABEL_REFERENCE,
         CONFIDENCE_LABEL_TENTATIVE,
+    ),
+)
+
+
+# ── 論文ディスカバリーの関連度（PD4: 数値スコアを教員にも見せない）──────────────
+# 候補論文のアブストラクト埋め込みと、分野の取り込み済みコーパス重心との
+# **cosine 類似度**（-1〜1）の段階化。生値は API / UI へ出さず、並び順とこのラベル
+# だけを見せる（``core/paper_discovery/ranking.py``、設計書 §6）。
+#
+# 閾値は発明値（実測データ非由来）。参考にしたのは help_kb ベクトル補助層の
+# ``_MAX_COSINE_DISTANCE = 0.55``（= cosine 類似度 0.45 未満は「なんとなく関連」で
+# 捏造に見えるため足切りする、という同一モデル族での保守的な判断）。ここでは
+# 足切りはせず（PD6 — 候補を黙って消さない）、
+#   * 0.45 以上 = help_kb が「提示してよい」とした水準       → 「関連: 高」
+#   * 0.30 以上 = 同語彙圏だが主題が離れうる水準             → 「関連: 中」
+#   * それ未満・未測定                                       → 「関連: 低」
+# とする。実測での見直し前提（変えるときは設計書 §6 も更新する）。
+DISCOVERY_RELEVANCE_THRESHOLD_HIGH = 0.45
+DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM = 0.30
+
+DISCOVERY_RELEVANCE_LABEL_HIGH = "関連: 高"
+DISCOVERY_RELEVANCE_LABEL_MEDIUM = "関連: 中"
+DISCOVERY_RELEVANCE_LABEL_LOW = "関連: 低"
+
+DISCOVERY_RELEVANCE_SCALE = GradedScale(
+    (DISCOVERY_RELEVANCE_THRESHOLD_HIGH, DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM),
+    (
+        DISCOVERY_RELEVANCE_LABEL_HIGH,
+        DISCOVERY_RELEVANCE_LABEL_MEDIUM,
+        DISCOVERY_RELEVANCE_LABEL_LOW,
     ),
 )
 

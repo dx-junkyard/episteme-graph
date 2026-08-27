@@ -26,6 +26,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.paper_discovery import corpus
 from core.paper_discovery.schema import KEYPHRASE_SOURCES
 
 logger = logging.getLogger(__name__)
@@ -110,50 +111,11 @@ def _cartridge_phrases(domain_key: str) -> list[str]:
 def _domain_document_refs(session, domain_key: str) -> list[str]:
     """当該分野のコースが参照する document の参照値（id と source_path の両方）。
 
-    ``theory_components.document_id`` は documents.id（UUID 文字列）と
-    material_id（``source_path``）のどちらも取りうるため、両方を候補に入れる
-    （``services._resolve_document`` と同じ二面性）。
+    実装の正本は :func:`core.paper_discovery.corpus.domain_document_refs`
+    （Phase 3 の ``ranking`` / ``citation_search`` と共有する。同じ解決を3箇所へ
+    コピペしない）。ここは import 面を保つための薄い委譲。
     """
-    from core.course_data import course_source_material_ids  # 遅延 import
-
-    rows = session.execute(
-        sa_text(
-            """
-            SELECT data
-              FROM learning_courses
-             WHERE data->>'cartridge_id' = :domain_key
-            """
-        ),
-        {"domain_key": domain_key},
-    ).fetchall()
-
-    material_ids: list[str] = []
-    for row in rows:
-        material_ids.extend(course_source_material_ids(row[0]))
-    material_ids = [m for m in dict.fromkeys(material_ids) if m]
-    if not material_ids:
-        # 対応 document ゼロは正常な状態（分野に紐づくコースがまだ無い）。
-        # 空配列で SQL を撃たない。
-        return []
-
-    doc_rows = session.execute(
-        sa_text(
-            """
-            SELECT id::text, COALESCE(source_path, '')
-              FROM documents
-             WHERE source_path = ANY(CAST(:material_ids AS text[]))
-            """
-        ),
-        {"material_ids": material_ids},
-    ).fetchall()
-
-    refs: list[str] = []
-    for row in doc_rows:
-        for value in (row[0], row[1]):
-            value = str(value or "").strip()
-            if value:
-                refs.append(value)
-    return list(dict.fromkeys(refs))
+    return corpus.domain_document_refs(session, domain_key)
 
 
 def _component_phrases(session, domain_key: str) -> list[str]:

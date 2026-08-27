@@ -513,6 +513,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LLM_PRICE_TABLE_PATH"),
     )
 
+    # --- 論文ディスカバリー層 Phase 3（正本: docs/features/paper_discovery_design.md §6） ---
+    # 候補の関連度ランキング（embedding 1バッチ = 1コール）の1日あたり上限。
+    # 上限到達は失敗ではなく「新着順で表示する」への fail-soft（検索自体は成立させる）。
+    discovery_ranking_max_calls_per_day: int = Field(
+        default=100,
+        validation_alias=AliasChoices("DISCOVERY_RANKING_MAX_CALLS_PER_DAY"),
+    )
+    # 引用グラフによる第2の候補供給源（Semantic Scholar）のオプトイン。
+    # 既定 off — 外部 API の追加は SYSTEM_ADMIN の明示設定で有効化する（設計書 §6）。
+    discovery_citation_source_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DISCOVERY_CITATION_SOURCE_ENABLED"),
+    )
+
     # --- M層（LLM モデル選択, core/llm_policy.py） ---
     # モデルカタログ (JSON) のパス。空/不在/パース不能なら catalog_models() は空リスト
     # を返す（M4: 選択肢を捏造しない）。正本: docs/features/llm_model_selection_design.md §5

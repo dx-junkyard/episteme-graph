@@ -20,6 +20,9 @@
   ``/keyphrase-candidates`` は候補を返すだけで購読行に書かない。
 - **PD4 数値スコアを見せない**: core の DTO をそのまま返し、類似度・一致度の
   生数値を足さない（``core.paper_discovery.search`` が構造として持たない）。
+  Phase 3 の関連度ランキングも、この層が受け取るのは並び順と段階ラベル
+  （``relevance_label``）だけで、cosine の生値は ``core.paper_discovery.ranking``
+  の内側から出てこない。
 - **PD5 候補は保存せず読み時導出**: 保存するのは購読条件・見送り記録・取り込み出所
   （``documents.source_url``）だけ。候補一覧のスナップショットを作らない。
 - **PD6 閉世界の正直さ**: 検索は core の DTO（``query`` / ``closed_world_note``
@@ -43,7 +46,10 @@ from services import record_review_event
 from core import url_fetch
 from core.llm_usage import metrics as usage_metrics
 from core.paper_discovery import arxiv_client
+from core.paper_discovery import citation_client as pd_citation_client
+from core.paper_discovery import citation_search as pd_citation_search
 from core.paper_discovery import ingest_queue as pd_queue
+from core.paper_discovery import ranking as pd_ranking
 from core.paper_discovery import schema as pd_schema
 from core.paper_discovery import search as pd_search
 from core.paper_discovery import store as pd_store
@@ -88,6 +94,11 @@ MAX_SEARCH_RESULTS = 100
 #: 検索結果の既定件数。
 DEFAULT_SEARCH_RESULTS = 50
 
+#: ``POST /search`` の並び順（Phase 3）。既定は従来どおり新着順で、関連度は明示指定のみ。
+ORDER_DATE = "date"
+ORDER_RELEVANCE = "relevance"
+SEARCH_ORDERS = (ORDER_DATE, ORDER_RELEVANCE)
+
 _DETAIL_INGEST_EMPTY = "取り込む論文が選択されていません。"
 _DETAIL_INGEST_TOO_MANY = (
     f"一度に取り込めるのは{MAX_INGEST_PER_REQUEST}件までです。"
@@ -103,6 +114,10 @@ _DETAIL_BATCH_TOO_MANY = (
     "件数を減らして実行してください。"
 )
 _DETAIL_RETRY_NOT_FAILED = "再試行できるのは失敗した項目だけです。"
+_DETAIL_INVALID_ORDER = "並び順の指定が正しくありません。"
+_DETAIL_CITATION_UNAVAILABLE = (
+    "引用グラフの照会に接続できませんでした。時間をおいて再度お試しください。"
+)
 
 #: 許可リストに arXiv の取得先が無いまま投入されたときの注記（黙って受理しない — PD6）。
 _NOTICE_DOMAIN_NOT_ALLOWED = (
@@ -141,7 +156,11 @@ class SubscriptionUpdateRequest(BaseModel):
 
 
 class SearchRequest(BaseModel):
-    """候補検索。条件を渡すと保存済み購読より優先する（保存せず試せる — PD3）。"""
+    """候補検索。条件を渡すと保存済み購読より優先する（保存せず試せる — PD3）。
+
+    ``order`` は Phase 3 の並べ替え指定（``date`` 既定 / ``relevance``）。既定のまま
+    なら Phase 1〜2 と**完全に同一**のレスポンスを返す（後方互換）。
+    """
 
     domain_key: str = ""
     categories: Optional[list] = None
@@ -149,6 +168,7 @@ class SearchRequest(BaseModel):
     followed_authors: Optional[list] = None
     start: int = 0
     max_results: int = DEFAULT_SEARCH_RESULTS
+    order: str = ORDER_DATE
 
 
 class IngestItem(BaseModel):
@@ -186,6 +206,12 @@ class IngestBatchRequest(BaseModel):
     models: Optional[dict] = None
 
 
+class CitationSearchRequest(BaseModel):
+    """引用グラフからの候補供給（Phase 3）。取り込みはしない — 候補提示のみ（PD1）。"""
+
+    domain_key: str = ""
+
+
 class DismissRequest(BaseModel):
     """見送り / 復帰（``revoked`` 遷移。行は削除しない — P4 / PD5）。"""
 
@@ -200,13 +226,21 @@ class DismissRequest(BaseModel):
 
 @router.get("/subscriptions")
 def list_subscriptions(current_user: dict = Depends(_require_teacher)) -> dict:
-    """分野購読の一覧を返す（TEACHER 以上）。購読は分野単位の共同財。"""
+    """分野購読の一覧を返す（TEACHER 以上）。購読は分野単位の共同財。
+
+    ``citation_source_enabled`` は引用グラフ供給（Phase 3）のオプトイン状態。
+    フロントのボタン活性判定に使う**補助**で、強制はサーバ側
+    （``citation_search.run_citation_search`` が無効時に外部 API を呼ばない）。
+    """
     session = _pg_session()
     try:
         subscriptions = pd_store.list_subscriptions(session)
     finally:
         session.close()
-    return {"subscriptions": subscriptions}
+    return {
+        "subscriptions": subscriptions,
+        "citation_source_enabled": pd_citation_search.citation_source_enabled(),
+    }
 
 
 @router.put("/subscriptions/{domain_key}")
@@ -281,6 +315,31 @@ def list_keyphrase_candidates(
 # ---------------------------------------------------------------------------
 
 
+def _apply_relevance_order(session, domain_key: str, result: dict) -> dict:
+    """検索結果を関連度で並べ替える（Phase 3）。**失敗しても検索を落とさない**。
+
+    生の類似度は ``ranking`` 側で閉じており、ここが受け取るのは並び順と段階ラベル
+    だけ（PD4）。並べ替え不能は ``ranking.available=false`` + 事実文で正直に返し、
+    候補は新着順のまま残す（PD6 — 黙って空にしない・黙って順序を変えない）。
+    """
+    candidates = list(result.get("candidates") or [])
+    try:
+        ranked = pd_ranking.rank_candidates(session, domain_key, candidates)
+    except Exception:  # noqa: BLE001 — 並べ替えの失敗で検索結果を捨てない
+        logger.warning("relevance ordering failed for domain %s", domain_key, exc_info=True)
+        ranked = {"available": False, "note": pd_ranking.NOTE_UNAVAILABLE, "ordered": candidates}
+
+    payload = dict(result)
+    payload["order"] = ORDER_RELEVANCE
+    payload["candidates"] = list(ranked.get("ordered") or candidates)
+    ranking_info: dict[str, Any] = {"available": bool(ranked.get("available"))}
+    note = ranked.get("note")
+    if note:
+        ranking_info["note"] = note
+    payload["ranking"] = ranking_info
+    return payload
+
+
 @router.post("/search")
 def search_candidates(
     body: SearchRequest,
@@ -290,10 +349,19 @@ def search_candidates(
 
     副作用は ``last_checked_at`` の更新のみ。arXiv API の失敗は **502 + 事実文**で、
     空一覧を「該当なし」と偽らない（PD6）。
+
+    ``order="relevance"``（Phase 3）のときだけ、分野コーパスの重心との関連度で
+    並べ替え、各候補に段階ラベル ``relevance_label`` を付ける（生スコアは返さない
+    — PD4）。並べ替えができないとき（コーパス無し・埋め込み失敗・日次上限）は
+    ``ranking.available=false`` + 事実文で**新着順のまま**返す（検索は必ず成立させる）。
+    既定の ``order="date"`` では ``ranking`` キー自体を付けない（後方互換）。
     """
     requested = body.max_results if body.max_results is not None else DEFAULT_SEARCH_RESULTS
     max_results = max(1, min(MAX_SEARCH_RESULTS, int(requested)))
     start = max(0, int(body.start if body.start is not None else 0))
+    order = str(body.order or ORDER_DATE).strip()
+    if order not in SEARCH_ORDERS:
+        raise HTTPException(status_code=422, detail=_DETAIL_INVALID_ORDER)
 
     session = _pg_session()
     try:
@@ -315,6 +383,8 @@ def search_candidates(
             logger.info("arXiv search failed for user=%s: %s", current_user["id"], exc)
             raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
         session.commit()
+        if order == ORDER_RELEVANCE:
+            result = _apply_relevance_order(session, body.domain_key, result)
     except HTTPException:
         raise
     except Exception:
@@ -324,6 +394,36 @@ def search_candidates(
         session.close()
 
     return result
+
+
+@router.post("/citation-search")
+def citation_search_candidates(
+    body: CitationSearchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """取り込み済み論文の引用・推薦関係から候補を導出する（Phase 3 / 設計書 §6）。
+
+    **候補提示のみ**で取り込みはしない（PD1 — 取り込みは既存の ``/ingest`` /
+    ``/ingest-batch`` を教員が明示的に叩く）。候補は保存しない（PD5）ため副作用ゼロで、
+    監査も記帳しない（``/search`` と同じ扱い）。
+
+    オプトイン（``DISCOVERY_CITATION_SOURCE_ENABLED``）が無効なときは 403 / 404 に
+    せず ``{"enabled": false, "note": ...}`` を返す（機能の存在は隠さない）。
+    外部 API の失敗は **502 + 事実文**で、空一覧を「該当なし」と偽らない（PD6）。
+    """
+    session = _pg_session()
+    try:
+        try:
+            return pd_citation_search.run_citation_search(session, body.domain_key)
+        except pd_citation_client.CitationApiError as exc:
+            logger.info(
+                "citation search failed for user=%s: %s", current_user["id"], exc
+            )
+            raise HTTPException(
+                status_code=502, detail=_DETAIL_CITATION_UNAVAILABLE
+            ) from exc
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------

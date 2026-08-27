@@ -637,7 +637,7 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 
 ### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071 / 072）
 
-arXiv を供給源とする分野購読と候補一覧。全10本が TEACHER 以上（`_require_teacher`）。
+arXiv を供給源とする分野購読と候補一覧。全11本が TEACHER 以上（`_require_teacher`）。
 **候補を保存するテーブルは無い**（PD5 — 取り込み済み判定は `documents.source_url`、
 見送りは `paper_discovery_dismissals` から毎回読み時導出）。**DELETE ルートは無い**
 （見送りの取り消しは `revoked` 遷移）。取り込みは教員の明示操作だけが入口で、
@@ -650,14 +650,24 @@ Phase 2（migration 072）はまとまった件数を**キューへ積むだけ*
 アイテム間に3秒の間隔を置く。進捗は教材一覧の既存 status が正本で、専用の進捗
 ポーリングは作らない）。失敗した項目は行を消さず `status='failed'` + 事実文で残り、
 再試行は教員の明示操作だけが `queued` へ戻す（P4 / PD1）。
-詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5 / §5。
+Phase 3 は**並べ替えの強化**（`POST /search` の `order`）と**引用グラフ拡張口**
+（`POST /citation-search`）を足す。関連度は分野コーパス（取り込み済み document の
+チャンク重心）と候補アブストラクトの cosine で並べ替えるだけで候補を捨てず、生スコアは
+返さない（段階ラベル `relevance_label` のみ — PD4）。embedding は `core.llm` 経由で
+U層 feature `discovery:ranking` に帰属し、`DISCOVERY_RANKING_MAX_CALLS_PER_DAY`
+（既定100）の日次上限に達しても検索は新着順で成立する（fail-soft）。引用グラフは
+`DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off）の明示オプトインで、宛先固定・3秒
+スロットルの client（`core/paper_discovery/citation_client.py`）から
+Semantic Scholar recommendations API を引く（LLM 0回）。
+詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5 / §5 / §6。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
-| GET | `/api/admin/discovery/subscriptions` | TEACHER | 分野購読の一覧（分野単位の共同財）。`{"subscriptions": [...]}` |
+| GET | `/api/admin/discovery/subscriptions` | TEACHER | 分野購読の一覧（分野単位の共同財）。`{"subscriptions": [...], "citation_source_enabled": bool}`（後者は引用グラフ供給のオプトイン状態。フロントの活性判定用の補助で、強制はサーバ側） |
 | PUT | `/api/admin/discovery/subscriptions/{domain_key}` | TEACHER | 購読の作成・更新（カテゴリ / キーフレーズ / 著者）。`enabled=false` のフレーズも保存する。分野キー空は 422。監査 `action='subscribe'` |
 | GET | `/api/admin/discovery/subscriptions/{domain_key}/keyphrase-candidates` | TEACHER | 分野語彙（骨格概念 / カートリッジ ontology / 承認済み理論部品）からのキーフレーズ候補を出所付きで返す（PD3）。購読行には書かない |
-| POST | `/api/admin/discovery/search` | TEACHER | 購読条件（body で上書き可）で arXiv を検索。副作用は `last_checked_at` の更新のみ。`query` / `closed_world_note` を必ず同梱し、条件ゼロなら arXiv を呼ばず空（PD6）。`max_results` はサーバ側で 1〜100 に丸める。arXiv 到達失敗は 502 + 事実文（空一覧に化けさせない） |
+| POST | `/api/admin/discovery/search` | TEACHER | 購読条件（body で上書き可）で arXiv を検索。副作用は `last_checked_at` の更新のみ。`query` / `closed_world_note` を必ず同梱し、条件ゼロなら arXiv を呼ばず空（PD6）。`max_results` はサーバ側で 1〜100 に丸める。arXiv 到達失敗は 502 + 事実文（空一覧に化けさせない）。`order`（`date` 既定 / `relevance`、語彙外は 422・空文字は既定）で並べ替えを指定でき、`relevance` のときだけ `order` と `ranking: {available, note?}` を足して候補を並べ替え、各候補に `relevance_label`（「関連: 高 / 中 / 低」）を付ける。並べ替え不能（コーパス無し / embedding 失敗 / 日次上限）は `ranking.available=false` + 事実文で**新着順のまま**返す。既定の `date` では `order` / `ranking` キー自体を付けない（Phase 1〜2 と完全に同一） |
+| POST | `/api/admin/discovery/citation-search` | TEACHER | 取り込み済み論文（`documents.source_url` から arXiv ID が取れるもの・新しい順に最大5件）をシードに、引用グラフ API の推薦から候補を導出する（Phase 3）。**候補提示のみで取り込みはしない**（PD1）ため副作用ゼロ・監査記帳なし。`{"enabled", "available", "candidates": [{...arXiv メタデータ, status, derived_from: [{arxiv_id, title}]}], "seeds": [...], "closed_world_note"}`。`externalIds.ArXiv` を持つ推薦のみ返す（既存の取得経路に乗るもの — PD2）。オプトイン未設定は 403/404 ではなく `{"enabled": false, "note": ...}`、シードゼロは `available:false` + 事実文、外部 API 到達不能は 502 + 固定事実文（内部情報を載せない） |
 | POST | `/api/admin/discovery/ingest` | TEACHER | 選択した候補を取得し既存アップロード経路へ流す（`_accept_material_source`、`documents.source_url` に PDF URL を保存）。**1リクエスト5件まで**（超過・空は 422）。1件ごとの取得失敗は `failed[{arxiv_id, detail}]` に積み残りを続行、許可ドメイン未設定のみ全体を 422。レスポンスは `{"accepted": [upload と同形 + arxiv_id], "failed": [...]}`。監査 `action='ingest'` |
 | POST | `/api/admin/discovery/dismiss` / `/restore` | TEACHER | 候補の見送り / 復帰（`revoked` 遷移。行削除しない）。復帰対象の記録が無ければ 404。監査 `action='dismiss'` / `'restore'` |
 | POST | `/api/admin/discovery/ingest-batch` | TEACHER | 選択した候補を取り込みキューへ積む（Phase 2）。**1リクエスト50件まで**（超過・空は 422）。`models` はここで fail-closed 検証し、worker は再検証しない。202 + `{"queued": [{item_id, arxiv_id, title}], "skipped": [{arxiv_id, detail}]}`。積まない条件は「ID 不正 / 取り込み済み / 既にキュー内」の3つで、いずれも事実文つきで返す。arXiv が許可リストに無くても**受理はする**が `notice` に事実文を添える（PD6）。監査 `action='ingest_batch'` |

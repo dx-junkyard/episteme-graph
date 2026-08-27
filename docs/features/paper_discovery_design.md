@@ -1,9 +1,9 @@
 # 論文ディスカバリー層（arXiv 分野購読とコーパス成長ループ）
 
-> **状態: 実装済み（正本・凍結）**（2026-08-27 起票・同日 Phase 1 実装、同日 Phase 2 実装。
-> migration は **071** `paper_discovery` / **072** `paper_discovery_ingest_queue` で採番済み。
-> Phase 3 は未着手、§7 のコーパス回遊は提案（実装対象外）— 着手時は専用設計書を切る。
-> 以後は §10 実装記録のみ追記する）
+> **状態: 実装済み（正本・凍結）**（2026-08-27 起票・同日 Phase 1 / Phase 2 / Phase 3 実装。
+> migration は **071** `paper_discovery` / **072** `paper_discovery_ingest_queue` で採番済み
+> （Phase 3 は migration なし）。§7 のコーパス回遊は提案（実装対象外）— 着手時は専用
+> 設計書を切る。以後は §10 実装記録のみ追記する）
 
 **正本**: 本ドキュメント。
 **関連**: [URL指定による教材取得](url_material_upload_design.md)（UF1〜UF6 — 本層の
@@ -92,7 +92,7 @@ confirmed リンクと骨格が育っている — 事前構築の実体は自�
 |---|---|---|
 | **Phase 1** | 分野購読 + arXiv 検索 + 候補一覧 UI + 承認取り込み（§4） | 実装済み（2026-08-27・§10） |
 | **Phase 2** | バッチ取り込みの非同期化 + トークン使用量の事前見積り提示（§5） | 実装済み（2026-08-27・§10） |
-| **Phase 3** | embedding 類似度ランキング + 引用グラフ拡張口（§6） | 設計済み・着手待ち |
+| **Phase 3** | embedding 類似度ランキング + 引用グラフ拡張口（§6） | 実装済み（2026-08-27・§10。migration なし） |
 | **Phase 4 / v2** | コーパス回遊 — コース無し議論・コーパス地図・地図の端（§7） | 提案（実装対象外・着手時に専用設計書） |
 
 ---
@@ -319,7 +319,7 @@ Phase 1 の `POST /ingest` は同期・少数件。まとまった数を流せ�
   行わない — 検索はモーダルを開いたときだけ）
 - G層 next_steps ルール・通知・バッジ（PD8。運用実測後に再判断）
 - 学習者向け表示のすべて（§7 は専用設計書マター）
-- 引用グラフ API 接続・embedding ランキング（Phase 3）
+- ~~引用グラフ API 接続・embedding ランキング（Phase 3）~~ → 2026-08-27 に実装（§10）
 - arXiv 以外の供給源（bioRxiv / HAL 等。client インターフェースの一般化で拡張可能な形には
   しておくが実装しない）
 - 購読の個人化（購読は分野単位の共同財。教員個人ごとの購読は需要が観測されてから）
@@ -438,3 +438,62 @@ backend フルスイート 11,188 pass。
   `retry_item`（failed 限定・それ以外 422）で構造化。ingest-batch は許可ドメイン未設定でも
   **受理**し notice で正直に告げる（worker が取得時点の許可リストで判定 — 後から許可が
   入れば流れる）
+
+### Phase 3 実装記録（2026-08-27、バックエンド）
+
+同日、embedding 類似度ランキングと引用グラフ拡張口（§6）を実装。**migration なし**
+（新テーブルゼロ — ランキングは読み時導出 = PD5、引用グラフは env オプトイン）。
+
+- **core 追加4ファイル**（`backend/core/paper_discovery/`）:
+  - `corpus.py` — 「分野 → コース(cartridge_id) → sources → documents」解決の**正本**。
+    Phase 1 で `vocab._domain_document_refs` に閉じていたロジックを抽出し、vocab は
+    薄い委譲になった（同じ解決を3実装に増やさない）。`domain_ingested_papers()` が
+    `documents.source_url` から正規化 arXiv ID の取れる論文を新しい順に返す。
+  - `ranking.py` — `field_centroid()`（document ごとに先頭20チャンクを平均 → document
+    ベクトル群を平均。チャンク数の多い論文が重心を独占しない2段平均。pgvector の
+    text 表現も解釈）/ `rank_candidates()`（候補の `title + summary` を**1バッチ**で
+    埋め込み → cosine 降順・同点は入力順を保つ安定ソート・未測定は最後尾）。
+    **このパッケージで唯一 `core.llm` に触れるファイル**で、その import も関数内に
+    閉じる（Phase 1〜2 の経路は LLM 0回のまま）。
+  - `citation_client.py` — Semantic Scholar recommendations API の唯一の入口。
+    `arxiv_client.py` と同じ規律（宛先定数・**独立した**3秒スロットル・タイムアウト・
+    `CitationApiError`）を独立に実装する（スロットルはホストごとの行儀なので共有しない）。
+    `externalIds.ArXiv` を持つ推薦だけを DTO 化する（既存の取得経路に乗らない論文を
+    候補に出さない — PD2）。
+  - `citation_search.py` — `run_citation_search()`。シードは当該分野の取り込み済み
+    arXiv 論文（既定5件）、各シードの推薦（既定10件）を重複除去し `derived_from`
+    （どのシードから辿ったか）と Phase 1 と同じ注釈（ingested / dismissed / new）を付ける。
+    LLM 0回・embedding 0回。
+- **API 追加1本 + 拡張2点**: `POST /citation-search`（読み取りのみ = `/search` と同じく
+  **監査記帳しない**。502 は固定事実文）/ `POST /search` の optional `order`
+  （`date` 既定 / `relevance`、語彙外 422）/ `GET /subscriptions` に
+  `citation_source_enabled`。
+- **段階ラベルは `core/label_vocab.py` の新スケール `DISCOVERY_RELEVANCE_SCALE`**
+  （「関連: 高 / 中 / 低」、閾値 0.45 / 0.30 は発明値。help_kb の
+  `_MAX_COSINE_DISTANCE=0.55`（= 類似度 0.45）を「提示してよい水準」の参考にしたが、
+  **足切りはしない**（候補を黙って消さない = PD6）。実測での見直し前提）。
+  ランキング側に閾値・ラベル文字列を直書きしない（重複表検出のガードレールが固定）。
+- **env 2件**: `DISCOVERY_RANKING_MAX_CALLS_PER_DAY`（既定100。`core/llm_worker/
+  cost_gate.py` の day-only ゲート）/ `DISCOVERY_CITATION_SOURCE_ENABLED`（既定 **off**。
+  §6 の「SYSTEM_ADMIN の明示設定でオプトイン」の v1 実装形。**ゲートは core 側**に
+  置き、無効時は外部 API を呼ばない）。
+- **U層**: feature `discovery:ranking` を `KNOWN_FEATURES` に追加。実体は embedding
+  なので `llm_policy.scene_for_feature` は None（モデル選択の対象外 = M5。`embedding:*` /
+  `admin:help_kb_embed` と同じ扱い）。
+- **fail-soft の徹底**: 重心なし / embedding 失敗 / 件数不一致 / 日次上限 / 想定外例外の
+  いずれでも検索は 200 で成立し、候補は**新着順のまま**返る（`ranking.available=false` +
+  事実文。数値を含めない）。並べ替えできなかった候補にラベルを付けない（測れていない
+  ものを測れたように見せない）。
+- **設計からの確定事項**: ①引用グラフは**候補提示のみ**で、取り込みは既存の
+  `/ingest` `/ingest-batch` を教員が叩く（PD1。ガードレールが取得・受理の不在を固定）
+  ②全シードの照会が失敗した場合だけ例外 → 502（部分失敗は取れた分 + `partial: true`。
+  空一覧を「該当なし」と偽らない = PD6）③宛先ホスト定数は `schema.py` に置き
+  citation_client が import（`ARXIV_API_HOST` と同じ「語彙の正本は schema」規約）
+  ④`order` の空文字は未指定と同義（既定へ縮退。語彙外のみ 422）。
+- **テスト**: `test_paper_discovery_ranking.py`（29件）/ `test_paper_discovery_citation.py`
+  （27件）新設 + `test_paper_discovery_guardrails.py` に Phase 3 検査追加
+  （ranking.py 以外は `generate_embeddings` に触れない / 引用 client の宛先固定・
+  独立スロットル / オプトインのゲート位置 / 段階ラベルの正本委譲）。
+- **非スコープ（Phase 3 backend v1）**: 引用グラフ候補の関連度ランキング（`/search` の
+  order のみ）/ OpenAlex 等の第3の供給源 / 引用グラフの許可ドメイン管理 UI
+  （env オプトインのまま）/ 重心のキャッシュ（毎回導出 — PD5 の同族）。

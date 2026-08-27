@@ -33,12 +33,17 @@ for _path in (str(BACKEND), str(BACKEND / "api")):
 from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
     assert_module_tree_forbids,
+    assert_paths_forbid,
     assert_source_forbids,
     extract_function_source,
     read_migration_sql,
 )
 
 CORE_DIR = BACKEND / "core" / "paper_discovery"
+
+#: Phase 3 の関連度ランキングだけが ``core.llm``（embedding）に触れてよい
+#: （設計書 §6。他ファイルは Phase 1〜2 と同じく LLM 0回のまま）。
+LLM_EXEMPT_FILES = ("ranking.py",)
 MIGRATION_NUMBER = 71
 #: Phase 2（取り込みキュー）の DDL。振る舞いの検査は ``test_paper_discovery_worker.py``。
 QUEUE_MIGRATION_NUMBER = 72
@@ -49,6 +54,10 @@ _SQL_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
 
 def _read(name: str) -> str:
     return (CORE_DIR / name).read_text(encoding="utf-8")
+
+
+def _core_paths(*, exclude: tuple[str, ...] = ()) -> list:
+    return [p for p in sorted(CORE_DIR.rglob("*.py")) if p.name not in exclude]
 
 
 def _migration_statements() -> str:
@@ -71,16 +80,52 @@ class TestCoreIsolation:
     def test_package_exists(self):
         assert CORE_DIR.is_dir(), f"expected core package at {CORE_DIR}"
         assert (CORE_DIR / "__init__.py").is_file()
-        for name in ("schema.py", "arxiv_client.py", "vocab.py", "store.py", "search.py"):
+        for name in (
+            "schema.py",
+            "arxiv_client.py",
+            "vocab.py",
+            "store.py",
+            "search.py",
+            # Phase 3（設計書 §6）
+            "corpus.py",
+            "ranking.py",
+            "citation_client.py",
+            "citation_search.py",
+        ):
             assert (CORE_DIR / name).is_file(), f"missing {name}"
 
     def test_does_not_import_fastapi(self):
         assert_module_tree_does_not_import(CORE_DIR, ["fastapi"])
 
-    def test_does_not_import_llm(self):
-        """発見層は Phase 1〜2 を通じて LLM 0回（embedding は Phase 3 で U層計測下に入る）。"""
-        assert_module_tree_does_not_import(CORE_DIR, ["core.llm", "openai"])
-        assert_module_tree_forbids(CORE_DIR, ["core import llm", "generate_text"])
+    def test_only_ranking_touches_the_llm_layer(self):
+        """発見層で embedding を使うのは Phase 3 の ``ranking.py`` **だけ**。
+
+        Phase 1〜2 の経路（検索・購読・見送り・キュー・引用グラフ供給）は LLM 0回・
+        embedding 0回のままであることを構造として固定する。
+        """
+        paths = _core_paths(exclude=LLM_EXEMPT_FILES)
+        assert_paths_forbid(
+            paths,
+            [
+                "import core.llm",
+                "from core.llm",
+                "import openai",
+                "from openai",
+                "core import llm",
+                "generate_text",
+                "generate_embeddings",
+            ],
+        )
+
+    def test_ranking_calls_embeddings_through_core_llm_with_usage_context(self):
+        """embedding は ``core.llm`` 経由 + U層計測（設計書 §6 / U3）。"""
+        src = _read("ranking.py")
+        assert "from core.llm import generate_embeddings" in src
+        assert 'usage_context("discovery:ranking")' in src
+
+        from core.llm_usage.schema import KNOWN_FEATURES
+
+        assert "discovery:ranking" in KNOWN_FEATURES
 
 
 class TestNoAutomaticIngestPath:
@@ -201,6 +246,87 @@ class TestArxivClientManners:
         )
 
 
+class TestCitationClientManners:
+    """Phase 3（設計書 §6）: 引用グラフ client も arXiv と同じ規律を独立に持つ。"""
+
+    def test_destination_is_a_fixed_constant(self):
+        from core.paper_discovery import citation_client, schema
+
+        assert schema.SEMANTIC_SCHOLAR_API_HOST == "api.semanticscholar.org"
+        assert citation_client.SEMANTIC_SCHOLAR_API_HOST == "api.semanticscholar.org"
+        api_url = extract_function_source(_read("citation_client.py"), "_api_url")
+        assert "SEMANTIC_SCHOLAR_API_HOST" in api_url
+        assert "semanticscholar.org" not in api_url.replace(
+            "SEMANTIC_SCHOLAR_API_HOST", ""
+        )
+
+    def test_all_http_calls_use_the_fixed_endpoint(self):
+        src = _read("citation_client.py")
+        calls = re.findall(r"requests\.(?:get|post|put|request)\(\s*([^,\n]+?)\s*,", src)
+        assert calls, "expected at least one requests call"
+        assert all(call.strip().startswith("_api_url(") for call in calls), (
+            f"citation client must only call the fixed endpoint, found: {calls}"
+        )
+
+    def test_throttle_is_three_seconds_and_independent_from_arxiv(self):
+        src = _read("citation_client.py")
+        assert re.search(r"_MIN_INTERVAL_SECONDS\s*=\s*3(\.0)?\b", src), (
+            "引用グラフ API の最小リクエスト間隔は 3 秒（PD7 の同族）"
+        )
+        throttle = extract_function_source(src, "_throttle")
+        assert "time.sleep" in throttle
+        assert "_last_request_at" in throttle
+        # スロットル状態は arXiv 側と共有しない（ホストごとに独立の行儀）。
+        assert "from core.paper_discovery.arxiv_client" not in src
+        assert "from core.paper_discovery import arxiv_client" not in src
+
+        from core.paper_discovery import arxiv_client, citation_client
+
+        assert citation_client._throttle_lock is not arxiv_client._throttle_lock
+
+    def test_signature_has_no_destination_argument(self):
+        import inspect
+
+        from core.paper_discovery import citation_client
+
+        params = set(inspect.signature(citation_client.recommendations_for_arxiv).parameters)
+        assert not (params & {"url", "host", "endpoint", "base_url"}), sorted(params)
+
+    def test_only_arxiv_backed_recommendations_are_returned(self):
+        """既存の取り込み経路（arXiv の PDF URL）に乗らない論文は候補にしない（PD2）。"""
+        from core.paper_discovery import citation_client
+
+        payload = {
+            "recommendedPapers": [
+                {"title": "with arxiv", "externalIds": {"ArXiv": "2608.20293v2"}},
+                {"title": "doi only", "externalIds": {"DOI": "10.1/x"}},
+                {"title": "no ids"},
+            ]
+        }
+        entries = citation_client.parse_recommendations(payload, "2601.00001")
+        assert [e.arxiv_id for e in entries] == ["2608.20293"]
+        assert entries[0].seed_arxiv_id == "2601.00001"
+
+    def test_citation_source_is_opt_in_and_gated_in_core(self):
+        """オプトインのゲートは core 側にある（route の分岐忘れで外へ出ない）。"""
+        src = _read("citation_search.py")
+        assert "DISCOVERY_CITATION_SOURCE_ENABLED" in src
+        run = extract_function_source(src, "run_citation_search")
+        assert "if not citation_source_enabled():" in run
+
+        from core.config import Settings
+
+        assert Settings().discovery_citation_source_enabled is False, "既定は off"
+
+    def test_citation_search_has_no_ingest_path(self):
+        """PD1: 引用グラフ供給は候補提示のみ（取得・受理の呼び出しを持たない）。"""
+        assert_source_forbids(
+            _read("citation_search.py"),
+            ["fetch_source_from_url", "_accept_material_source", "requests."],
+            context="core/paper_discovery/citation_search.py",
+        )
+
+
 class TestNoNumericScores:
     """PD4: 数値スコア・類似度を（教員にも）見せない。"""
 
@@ -212,6 +338,26 @@ class TestNoNumericScores:
         '"rank"',
         '"match_score"',
     )
+
+    def test_relevance_is_exposed_as_a_label_only(self):
+        """Phase 3: DTO に載るのは段階ラベル（文字列）だけで、cosine の生値ではない。
+
+        ``relevance_label`` は禁止キー ``"relevance"`` とは別の文字列で、値も
+        ``core.label_vocab`` の段階ラベル。ここでは「ラベルは可・生値は不可」を
+        両側から固定する。
+        """
+        from core.label_vocab import DISCOVERY_RELEVANCE_SCALE
+
+        src = _read("ranking.py")
+        assert '"relevance_label"' in src
+        assert_source_forbids(
+            src, list(self._FORBIDDEN_KEYS), context="core/paper_discovery/ranking.py"
+        )
+        # 段階ラベル表を再定義していない（正本は core/label_vocab.py）。
+        assert "DISCOVERY_RELEVANCE_SCALE" in src
+        for literal in DISCOVERY_RELEVANCE_SCALE.labels:
+            assert f'"{literal}"' not in src, literal
+        assert ">= 0.45" not in src and ">= 0.3" not in src
 
     def test_run_search_dto_has_no_score_keys(self):
         src = extract_function_source(_read("search.py"), "run_search")

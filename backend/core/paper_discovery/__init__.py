@@ -14,25 +14,49 @@ DDL は ``backend/db/071_paper_discovery.sql``、API 層は
 - :mod:`~core.paper_discovery.ingest_queue` — 取り込みキューの状態遷移（migration 072 /
   Phase 2。取得・受理そのものは API 層の責務で、ここからは呼ばない）
 - :mod:`~core.paper_discovery.search` — クエリ組み立てと候補への読み時注釈
+- :mod:`~core.paper_discovery.corpus` — 分野 → 取り込み済み document の解決（正本）
+- :mod:`~core.paper_discovery.ranking` — 関連度ランキング（Phase 3。**このパッケージで
+  唯一 embedding を使う**。並べ替えだけで候補を捨てない）
+- :mod:`~core.paper_discovery.citation_client` — 引用グラフ API の唯一の入口
+  （Phase 3。宛先固定・3秒スロットル）
+- :mod:`~core.paper_discovery.citation_search` — 引用グラフによる候補供給（Phase 3。
+  ``DISCOVERY_CITATION_SOURCE_ENABLED`` のオプトイン）
 
-FastAPI / ``core.llm`` を import しない（発見層は Phase 1〜2 を通じて LLM 0回）。
+FastAPI を import しない。``core.llm`` に触れるのは :mod:`ranking` だけで、
+そこでも関数内の遅延 import に閉じる（Phase 1〜2 の経路は LLM 0回のまま）。
 論文本体の取得は API 層が既存の URL 取得層（migration 070 / UF1〜UF6）を呼ぶ
 （PD2 — このパッケージは HTTP で論文を取りに行かない）。
 """
 
 from __future__ import annotations
 
-from core.paper_discovery import arxiv_client, ingest_queue, schema, search, store, vocab
+from core.paper_discovery import (
+    arxiv_client,
+    citation_client,
+    citation_search,
+    corpus,
+    ingest_queue,
+    ranking,
+    schema,
+    search,
+    store,
+    vocab,
+)
 from core.paper_discovery.arxiv_client import ArxivApiError, parse_atom
+from core.paper_discovery.citation_client import CitationApiError
+from core.paper_discovery.citation_search import run_citation_search
 
 # NOTE: ``arxiv_client.search`` はパッケージ属性として再エクスポートしない
 # （サブモジュール ``core.paper_discovery.search`` と名前が衝突するため）。
 # arXiv API を直接叩く場合は ``arxiv_client.search(...)`` を使う。
+from core.paper_discovery.ranking import field_centroid, rank_candidates
 from core.paper_discovery.schema import (
     ARXIV_API_HOST,
     CANDIDATE_STATUSES,
     KEYPHRASE_SOURCES,
+    SEMANTIC_SCHOLAR_API_HOST,
     ArxivEntry,
+    CitationEntry,
     abs_url_for,
     normalize_arxiv_id,
     normalize_authors,
@@ -64,12 +88,22 @@ __all__ = [
     "CANDIDATE_STATUSES",
     "CLOSED_WORLD_NOTE",
     "KEYPHRASE_SOURCES",
+    "SEMANTIC_SCHOLAR_API_HOST",
     "ArxivApiError",
     "ArxivEntry",
+    "CitationApiError",
+    "CitationEntry",
     "abs_url_for",
     "arxiv_client",
     "build_search_query",
+    "citation_client",
+    "citation_search",
+    "corpus",
     "dismiss",
+    "field_centroid",
+    "rank_candidates",
+    "ranking",
+    "run_citation_search",
     "dismissed_ids",
     "get_subscription",
     "ingest_queue",

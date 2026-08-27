@@ -357,7 +357,12 @@ class TestPermissions:
             "/api/admin/discovery/subscriptions", headers=_auth(env, "teacher")
         )
         assert res.status_code == 200
-        assert res.json() == {"subscriptions": env["subscriptions"]}
+        # Phase 3: ``citation_source_enabled`` はフロントの活性判定用の補助キー
+        # （既定 off。強制はサーバ側 — 設計書 §6）。他のキーは Phase 1 のまま。
+        assert res.json() == {
+            "subscriptions": env["subscriptions"],
+            "citation_source_enabled": False,
+        }
 
     def test_system_admin_can_read_subscriptions(self, env):
         res = env["client"].get(

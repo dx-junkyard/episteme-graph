@@ -45,6 +45,10 @@ ARXIV_API_HOST = "export.arxiv.org"
 #: 論文ページ / PDF の配信ホスト（``documents.source_url`` に保存する URL の組み立て）。
 ARXIV_SITE_HOST = "arxiv.org"
 
+#: 引用グラフ API の宛先ホスト（Phase 3 / 設計書 §6。PD7 — arXiv と同じ規律で固定値。
+#: スロットルは**ホストごとに独立**なので arxiv_client とは共有しない）。
+SEMANTIC_SCHOLAR_API_HOST = "api.semanticscholar.org"
+
 
 # ---------------------------------------------------------------------------
 # arXiv ID の正規化
@@ -203,6 +207,38 @@ class ArxivEntry:
             "updated": self.updated,
             "pdf_url": self.pdf_url or pdf_url_for(self.arxiv_id),
             "abs_url": self.abs_url or abs_url_for(self.arxiv_id),
+        }
+
+
+@dataclass
+class CitationEntry:
+    """引用グラフ API が返した推薦論文1件（Phase 3 / 設計書 §6）。
+
+    ``arxiv_id`` は :func:`normalize_arxiv_id` 済み（version 抜き）。**arXiv ID を
+    持つ論文だけ**を DTO 化する（既存の取り込み経路＝arXiv の PDF URL に乗せられる
+    ものに限る、PD2）。:class:`ArxivEntry` と同じく数値スコアを持たない（PD4）。
+
+    ``seed_arxiv_id`` は「どの取り込み済み論文から辿ったか」の出所で、候補カードに
+    「〇〇から辿りました」と事実を書くために持つ（ブラックボックスのおすすめに
+    しない — §4.4 の候補カードと同じ規律）。
+    """
+
+    arxiv_id: str
+    title: str = ""
+    summary: str = ""
+    authors: list[str] = field(default_factory=list)
+    year: Optional[int] = None
+    seed_arxiv_id: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "arxiv_id": self.arxiv_id,
+            "title": self.title,
+            "summary": self.summary,
+            "authors": list(self.authors),
+            "year": self.year,
+            "pdf_url": pdf_url_for(self.arxiv_id),
+            "abs_url": abs_url_for(self.arxiv_id),
         }
 
 

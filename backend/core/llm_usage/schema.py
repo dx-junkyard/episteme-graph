@@ -101,6 +101,10 @@ KNOWN_FEATURES = (
     "deliberation:vision",
     "deliberation:figure_reanalysis",
     "deliberation:standardization",
+    # --- 論文ディスカバリー層 Phase 3（正本 docs/features/paper_discovery_design.md §6）---
+    # 候補アブストラクトの埋め込み（1検索 = 1バッチコール）。発見層で LLM/embedding を
+    # 使う唯一の地点で、モデル選択の対象外（embedding は M5 で scene を持たない）。
+    "discovery:ranking",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",

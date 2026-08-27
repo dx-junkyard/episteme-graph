@@ -77,7 +77,8 @@ def scene_for_feature(feature: str) -> str | None:
 
     None を返すのは次の場合のみ:
       - ``unattributed`` / 未知の feature（policy 非適用 = 従来挙動）
-      - ``embedding:*`` / ``admin:help_kb_embed``（embedding は選択対象外、M5）
+      - ``embedding:*`` / ``admin:help_kb_embed`` / ``discovery:ranking``
+        （いずれも実体は embedding 呼び出し。embedding は選択対象外、M5）
 
     ``admin:component_candidates``（C層の質問→候補生成、正本
     ``core/component_candidates.py``）は設計書 §2 の場面表に明示の行を持たないが、
@@ -88,7 +89,13 @@ def scene_for_feature(feature: str) -> str | None:
     """
     if not feature or feature == UNATTRIBUTED:
         return None
-    if feature.startswith("embedding:") or feature == "admin:help_kb_embed":
+    if (
+        feature.startswith("embedding:")
+        or feature == "admin:help_kb_embed"
+        # 論文ディスカバリーの関連度ランキング（設計書 paper_discovery §6）も実体は
+        # embedding 呼び出しなので、embedding と同じくモデル選択の対象外（M5）。
+        or feature == "discovery:ranking"
+    ):
         return None
     if feature in ("pipeline:apparatus_semantics", "deliberation:figure_reanalysis"):
         # 教員指示付き図再解析（deliberation:figure_reanalysis）は W層の導線から
