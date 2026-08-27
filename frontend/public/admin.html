@@ -304,6 +304,10 @@
           <p style="margin-top:8px">
             <button type="button" id="url-upload-link" data-ui-anchor="materials.url-upload"
                     style="background:none;border:none;padding:0;font-size:12px;color:var(--color-accent, #2563eb);text-decoration:underline;cursor:pointer">URLから取得（arXiv など）</button>
+            <!-- 論文ディスカバリー: 押すとモーダル（#paper-discovery-modal）が開く。
+                 候補の一覧までが機械の仕事で、取り込みは教員の明示承認のみ（PD1）。 -->
+            <button type="button" id="paper-discovery-link" data-ui-anchor="materials.arxiv-discovery"
+                    style="background:none;border:none;padding:0 0 0 12px;font-size:12px;color:var(--color-accent, #2563eb);text-decoration:underline;cursor:pointer">arXivから探す</button>
           </p>
         </div>
         <!-- 画像読み取りパイプライン（migration 041）: 既定 off。vision LLM は明示オプトインのみで呼ぶ -->
@@ -987,6 +991,9 @@
   <!-- リリース前の確認（release_review_flow_design.md）— AI が作った地図を提示し
        「次へ」で承認、そのまま公開まで進めるウィザード。admin.js から init/open される。 -->
   <script src="/js/admin-release-review.js?v=release-review-20260805-1"></script>
+  <!-- 論文ディスカバリー層（paper_discovery_design.md PD1〜PD8）— arXiv 分野購読と
+       候補一覧。取り込みは教員の明示承認のみで、受理後は既存アップロード経路へ合流する。 -->
+  <script src="/js/admin-paper-discovery.js?v=paper-discovery-20260827-1"></script>
   <script src="/js/admin.js?v=llm-model-select-20260728-1"></script>
 </body>
 </html>

@@ -10417,6 +10417,22 @@
           },
         });
       }
+      // 論文ディスカバリー層（paper_discovery_design.md PD1〜PD8）— arXiv 分野購読モーダル。
+      // 受理後の合流点（handleUploadAccepted）を注入し、URL取得と同じ経路に乗せる（PD2）。
+      if (window.PaperDiscovery) {
+        window.PaperDiscovery.init({
+          apiFetch: apiFetch,
+          escHtml: escHtml,
+          onUploadAccepted: handleUploadAccepted,
+        });
+        var discoveryLink = document.getElementById("paper-discovery-link");
+        if (discoveryLink) {
+          discoveryLink.addEventListener("click", function (e) {
+            e.preventDefault();
+            window.PaperDiscovery.openModal();
+          });
+        }
+      }
       if (window.LectureStudio) {
         window.LectureStudio.init({
           apiFetch: apiFetch,
@@ -10539,6 +10555,8 @@
     // 「この先はこの画面での操作のあとに案内します」に自然に縮退する）。
     AA.registerUiAnchors("materials", {
       upload_dropzone: function () { return document.getElementById("upload-zone"); },
+      // 論文ディスカバリー（paper_discovery_design.md §4.4）: 「arXivから探す」入口ボタン。
+      paper_discovery_button: function () { return document.getElementById("paper-discovery-link"); },
       material_row: function (id) {
         if (id) _matLastAnchoredMaterialId = id;
         return id
