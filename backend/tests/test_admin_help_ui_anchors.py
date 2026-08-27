@@ -126,7 +126,10 @@ class TestAdminUiAnchorsModule:
         #   materials.arxiv-discovery-order（新着順 / 関連度順。関連度は段階ラベルのみ — PD4）/
         #   .arxiv-discovery-citation-search（[引用グラフから探す]。
         #    DISCOVERY_CITATION_SOURCE_ENABLED のオプトインで既定は無効化される）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 292
+        # + コーパス回遊層 Phase D（corpus_roaming_design.md §7）の1件:
+        #   materials.arxiv-discovery-interest（学習者の関心。k-匿名レンジの事実行だけを
+        #   出し、行が無ければ区画ごと非表示 — CR6 / CR10）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 293
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

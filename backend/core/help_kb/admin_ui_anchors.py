@@ -246,6 +246,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery",
         "materials.arxiv-discovery-citation-search",
         "materials.arxiv-discovery-ingest",
+        "materials.arxiv-discovery-interest",
         "materials.arxiv-discovery-modal",
         "materials.arxiv-discovery-order",
         "materials.arxiv-discovery-queue",
@@ -786,6 +787,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.arxiv-discovery-citation-search": "teacher/11-admin-materials.md#arxiv-discovery-citation-search",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
+    # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）
+    "materials.arxiv-discovery-interest": "teacher/11-admin-materials.md#arxiv-discovery-interest",
     # arXivから探すモーダル（検索・購読パネル / 候補一覧 / 取り込みの3区画）
     "materials.arxiv-discovery-modal": "teacher/11-admin-materials.md#arxiv-discovery-modal",
     # 並び順（新着順 / 関連度順。次の検索から適用・関連度は段階ラベルのみで数値を出さない）

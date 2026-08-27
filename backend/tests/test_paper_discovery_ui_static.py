@@ -941,3 +941,76 @@ class TestCitationSearch:
             "引用グラフからは候補が見つかりませんでした。"
             "取り込み済みの論文が増えると候補が変わることがあります。" in self.src
         )
+
+
+# ---------------------------------------------------------------------------
+# ⑳ コーパス回遊 Phase D: 学習者の関心（k-匿名レンジの事実行）
+#    正本: docs/features/corpus_roaming_design.md §7（CR6 / CR10）。
+# ---------------------------------------------------------------------------
+
+
+class TestFrontierInterestPane:
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+        self.code = _strip_comments(self.src)
+
+    def test_pane_has_the_ui_anchor_carrier(self):
+        assert 'data-ui-anchor="materials.arxiv-discovery-interest"' in self.src
+        assert 'id="pd-frontier-interest"' in self.src
+
+    def test_pane_is_hidden_until_rows_arrive(self):
+        """既定は非表示。行が無ければ区画ごと出さない（「関心なし」と読ませない）。"""
+        assert 'id="pd-frontier-interest"' in self.src
+        head = self.src.split('id="pd-frontier-interest"', 1)[1][:400]
+        assert "display:none" in head
+        body = _extract_function(self.code, "renderFrontierInterest")
+        assert 'box.style.display = "none";' in body
+        assert "if (!html)" in body
+
+    def test_reads_the_admin_endpoint_with_the_domain_filter(self):
+        body = _extract_function(self.code, "loadFrontierInterest")
+        assert '"/admin/discovery/frontier-interest?domain_key="' in body
+        assert "encodeURIComponent(key)" in body
+
+    def test_fetch_is_bound_to_open_and_domain_selection_only(self):
+        """CR5 / PD8: モーダルを開いたときと分野を選んだときだけ読む。更新ボタン無し。"""
+        assert "loadFrontierInterest();" in _extract_function(self.code, "openModal")
+        assert "loadFrontierInterest();" in _extract_function(self.code, "selectDomain")
+        # 呼び出しはこの2箇所のみ（定期取得・[更新] ボタンを足さない）。
+        assert self.code.count("loadFrontierInterest();") == 2
+        assert "pd-frontier-interest-refresh" not in self.src
+
+    def test_failure_and_empty_rows_are_indistinguishable_and_silent(self):
+        """取得失敗でも区画ごと出さない（空を「関心なし」と書かない・作り話をしない）。"""
+        body = _extract_function(self.code, "loadFrontierInterest")
+        assert ".catch(function () {" in body
+        assert "state.interest = [];" in body
+        assert "関心なし" not in self.code
+        assert "関心はありません" not in self.code
+
+    def test_domain_switch_drops_the_previous_domain_rows(self):
+        body = _extract_function(self.code, "selectDomain")
+        assert "state.interest = [];" in body
+        # 遅延応答ガード（別分野の行を混ぜない）。
+        assert '(state.domainKey || "") !== key' in _extract_function(self.code, "loadFrontierInterest")
+
+    def test_line_is_a_fact_sentence_with_range_only(self):
+        """CR3 / CR6: 表示は分野・領域・輪・人数レンジのみ（生の件数・順位・時刻なし）。"""
+        body = _extract_function(self.code, "frontierInterestLine")
+        assert "INTEREST_HEAD" in body
+        assert "row.region_id || row.domain_key" in body
+        assert "INTEREST_RING_LABELS[row.ring]" in body
+        assert 'row.range_label + "人"' in body
+        assert 'var INTEREST_HEAD = "学習者の関心: ";' in self.src
+        # レンジ文字列はサーバの range_label をそのまま使う（閾値表を持たない）。
+        for banned in ("3-5", "6-10", "11+", "K_ANONYMITY"):
+            assert banned not in self.code, f"クライアント側の閾値表: {banned}"
+
+    def test_ring_vocabulary_matches_the_backend(self):
+        assert 'var INTEREST_RING_LABELS = { fringe: "地図の縁", outer: "地図の外" };' in self.src
+
+    def test_note_states_that_nothing_is_changed_automatically(self):
+        """CR10: 需要の提示であって、購読条件・取り込み・地図の自動変更ではない。"""
+        assert "個人・時期・順位は表示しません。" in self.src
+        assert "購読条件・取り込み・分野の地図を自動で変えません。" in self.src
+        assert "INTEREST_NOTE" in _extract_function(self.code, "renderFrontierInterest")

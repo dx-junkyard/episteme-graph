@@ -429,8 +429,51 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   アンカー +2（`materials.arxiv-discovery-{order,citation-search}`、正確な総数は
   `test_admin_help_ui_anchors.py` が正）。
 - **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
-- **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源 /
-  学習者向け表示・コーパス回遊（§7、専用設計書マター）。
+- **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源。
+  学習者向け表示・コーパス回遊は §7 → 専用設計書で**実装済み**（下記コーパス回遊層）。
+
+### コーパス回遊層（コース無し論文議論・コーパス地図・地図の端, migration 073, 2026-08-27）
+
+育てたコーパスを学習者がコースの外から歩ける層。正本は
+`docs/features/corpus_roaming_design.md`（CR1〜CR10・§12 実装記録。ディスカバリー §7 と
+discuss Phase 3 予約を引き受けた専用設計書）。
+
+- **不変条項の要点**: CR1 document 可視性が唯一のゲート（fail-closed・SQL 内 `ANY(:doc_ids)`
+  強制）/ CR2 コース学習の非改変 / CR3 数値非表示 / CR4 閉世界の正直さ / CR5 好奇心の文法
+  （バッジ・督促・自動表示なし）/ CR6 監視しない（明示タップのみ・k=3）/ **CR7 学習者起点で
+  外部 API を呼ばない** / CR8 行削除なし / CR9 同期パス非LLM / CR10 取り込みの弁は教員のまま。
+- **Phase A コーパス地図**: `core/corpus_view.py`（FastAPI/LLM 非 import・読み時導出）+
+  `routes/corpus.py`（`/api/learning/corpus/{domains,landscape,documents}`）。**骨格は返さず**
+  配置・縁・外のみ（骨格は既存 `GET /api/atlas?cartridge=` — 二重管理回避）。documents の
+  母集合は「配置あり ∪ gap 信号あり」（分野帰属の捏造防止）。UI は `corpus-sea.js`
+  （ES6・`window.CorpusSea`・サイドバー常設「🌊 論文の海」・簡易 SVG 地図・atlas-overlay
+  非流用）。アンカーは学習側 `sidebar.corpus-sea`。
+- **Phase B コース無し議論（discuss document 直付け）**: センチネル
+  `course_id = "_doc:{document_id}"` の正本は `core/discuss/context.py`（組み立ては AST
+  ガードレールで1ファイルに固定・migration 0）。`learning_chat` は本体を
+  `_learning_chat_core` に分離（route は1行委譲・コース経路は不変・分岐4点のみ）。
+  API 4本 `/api/learning/documents/{ref}/discuss/{opening,chat,history,messages}` — ゲートは
+  `resolve_document_access.can_view` のみ・不可視と不在は同一 404。opening の
+  `fragile_points` は空・`action`/`atlas_context`/`cycle_mode` はサーバ側 null 化（縮退の
+  明示）。観測は `document_discuss_{opened,turn}`（サーバ側記録）。コストは既存
+  `LEARNING_CHAT_MAX_CALLS_PER_DAY` 相乗り。
+- **Phase C 地図の端**: 縁 = `landscape_gap_signals` の学習者向け事実文（現行凍結版に実在
+  する region のみ・可視論文タイトルのみ・教員判断は非開示）。外 = migration 073
+  `paper_discovery_subscriptions.last_search_found_new BOOLEAN`（教員の `POST /search` 実行時
+  のみ更新・候補スナップショットなし = PD5 両立の集約1ビット。DEFAULT なし = NULL は
+  「まだ検索していない」）。
+- **Phase D 関心信号**: kind `frontier_interest`（trace_registry 宣言済み: 問いの軌跡×・
+  教員=専用 k-匿名集約のみ・わたしの地図×・わたしの記録○）。痕跡 course_id はセンチネル
+  `services.CORPUS_TRACE_COURSE_ID="_corpus"`。学習者は「この先を知りたい」明示タップ +
+  withdraw（`status='dismissed'` 遷移）。教員向け `GET /api/admin/discovery/
+  frontier-interest`（k=3・レンジのみ・dismissed 非計上）をディスカバリーモーダルに表示
+  （行ゼロ・取得失敗は区画ごと非表示 = 「関心なし」と言わない）。アンカー
+  `materials.arxiv-discovery-interest`。
+- **ガードレール**: `test_corpus_roaming_{core,api,guardrails,ui_static}.py` +
+  `test_document_discuss_{api,guardrails}.py`。
+- **非スコープ（v1）**: document 直付けの出典タブ・数式レンダリング・着地画面・
+  tension/anchor digest・fragile_points / EmergentRegion 系 / G層ルール /
+  関心信号による自動化（CR10 で恒久禁止）。
 
 ### 資料の開示範囲 (Visibility)
 教材 (Document) や コース (LearningCourse) は、以下のいずれかの開示範囲を持つ。

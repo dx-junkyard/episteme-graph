@@ -153,7 +153,7 @@ PDF アップロード
   ／[対話の歩調合わせ](features/discuss_dialogue_alignment_design.md)
   ／[開幕素材のオーサリング](features/discuss_opening_authoring_design.md)
   ／[観測基盤](features/discuss_observation_design.md)
-  ／[コーパス回遊層（コース無し議論・コーパス地図・地図の端）](features/corpus_roaming_design.md) — 設計中
+  ／[コーパス回遊層（コース無し議論・コーパス地図・地図の端）](features/corpus_roaming_design.md)
 - [レクチャースライド同期 + 音声言語切替](features/lecture_slide_sync_design.md)
   ／[音声生成の準備確認フロー（#491）](features/lecture_audio_generation_readiness.md)
 - [学習画面UI再編 + インスペクト/ホバー係留](features/learning_ui_inspect_hover_design.md)

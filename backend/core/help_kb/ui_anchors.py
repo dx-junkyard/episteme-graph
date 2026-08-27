@@ -69,6 +69,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 「AIと議論して理解を深める」「今回は確認せず次へ進む」の2ボタン。
         "check.discuss",
         "check.skip",
+        # コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
+        # サイドバー最上部の常設入口「🌊 論文の海」（コース未選択でも押せる）。
+        "sidebar.corpus-sea",
     }
 )
 
@@ -89,7 +92,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # 2026-08-15 に構造の降下路（structure_descent_design.md §3/§4）の
 # material.descent-ladder を追加し、全22種がマップ済み。
 # 2026-08-22 に確認問題モーダルの選択肢2ボタン（check.discuss / check.skip）を
-# 追加し、全24種がマップ済み。両者は「確認問題の3つの選択肢」を1つの節で
+# 追加し、全24種がマップ済み。
+# 2026-08-27 にコーパス回遊層（corpus_roaming_design.md §4.2）の sidebar.corpus-sea
+# （サイドバー最上部の「🌊 論文の海」）を追加し、全25種がマップ済み。両者は「確認問題の3つの選択肢」を1つの節で
 # 並べて説明しているため、同じ参照先を指す。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
@@ -143,6 +148,8 @@ UI_ANCHORS: dict[str, str] = {
     # 確認問題モーダルの「AIと議論して理解を深める」「今回は確認せず次へ進む」。
     "check.discuss": "student/02-student.md#check-options",
     "check.skip": "student/02-student.md#check-options",
+    # サイドバー最上部の「🌊 論文の海」＝コースの外から論文を見わたす入口。
+    "sidebar.corpus-sea": "student/02-student.md#corpus-sea",
 }
 
 

@@ -85,6 +85,18 @@
     "引用グラフによる候補供給の利用可否を確認できませんでした。";
   var CITATION_UNAVAILABLE_FALLBACK =
     "引用グラフからの候補を取得できませんでした。";
+  // コーパス回遊層 Phase D（docs/features/corpus_roaming_design.md §7）:
+  // 地図の端で学習者が「この先を知りたい」を押した記録の k-匿名集約。
+  // CR6: 表示は分野・領域・輪ごとの人数レンジだけ（個人・時系列・順位を出さない。
+  // 閾値とレンジはサーバの core/privacy.py が正本で、ここでは受け取った
+  // range_label をそのまま描く）。CR10: この表示は購読条件・取り込み・地図を
+  // 何も自動変更しない（教員が読んで判断するための需要の提示）。
+  var INTEREST_HEAD = "学習者の関心: ";
+  var INTEREST_RING_LABELS = { fringe: "地図の縁", outer: "地図の外" };
+  var INTEREST_NOTE =
+    "学習者が地図の端で「この先を知りたい」を押した記録の集計です。人数の範囲だけを表示し、" +
+    "個人・時期・順位は表示しません。この表示は購読条件・取り込み・分野の地図を自動で変えません。";
+
   // PD6: どこから導出した一覧なのかを常時明示する（通常検索と混ぜない）。
   var CITATION_MODE_LABEL = "候補の出所: 引用グラフ";
   var CITATION_SEEDS_HEAD = "シード: ";
@@ -127,7 +139,10 @@
     citationEnabled: null,
     citationNote: "",
     citationSeeds: [],
-    citationSearching: false
+    citationSearching: false,
+    // Phase D（コーパス回遊）: 学習者の関心（k-匿名レンジの行のみ）。
+    // 取得はモーダルを開いたときと分野を選んだときの各1回だけ（ポーリングしない）。
+    interest: []
   };
 
   // ── 小道具 ────────────────────────────────────────────────────────────
@@ -288,6 +303,12 @@
           '<div id="pd-citation-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px"></div>' +
         "</div>" +
 
+        // ①-b 学習者の関心（コーパス回遊 Phase D）。行が無ければ区画ごと出さない
+        // （k-匿名で表示できない状態を「関心なし」と読める形にしない — CR6）。
+        '<div id="pd-frontier-interest" data-ui-anchor="materials.arxiv-discovery-interest" ' +
+          'style="display:none;border:1px solid var(--color-border-tertiary);border-radius:6px;' +
+          'padding:8px 10px;margin-bottom:10px"></div>' +
+
         // ② 候補一覧（PD6: 検索条件を常に上に出す）
         '<div id="pd-query-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:4px"></div>' +
         '<div id="pd-ranking-note" style="font-size:11.5px;color:var(--color-text-secondary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px"></div>' +
@@ -353,6 +374,7 @@
     state.citationNote = "";
     state.citationSeeds = [];
     state.citationSearching = false;
+    state.interest = [];
 
     var overlay = document.createElement("div");
     overlay.id = "paper-discovery-modal";
@@ -399,12 +421,14 @@
     renderCandidates();
     renderIngestSummary();
     renderQueue();
+    renderFrontierInterest();
 
     // PD8: 開いたときだけ取得する（ポーリング・自動更新をしない）。
     loadSubscriptions();
     loadDomainOptions();
     checkAllowedDomains();
     loadQueue();
+    loadFrontierInterest();
   }
 
   function bindEnter(inputId, handler) {
@@ -546,7 +570,70 @@
     renderCitationControl();
     renderCandidates();
     renderIngestSummary();
+    // 分野を変えたら前の分野の関心行は残さない（別分野の需要と混ぜない）。
+    state.interest = [];
+    renderFrontierInterest();
+    loadFrontierInterest();
     if (state.domainKey) loadKeyphraseCandidates(!subscription);
+  }
+
+  // ── 学習者の関心（コーパス回遊 Phase D, §7）────────────────────────────
+  // 取得はモーダルを開いたときと分野を選んだときだけ（自動更新・[更新] ボタンなし）。
+  // 分野未選択のときは分野を絞らずに読む（全分野の行が並ぶ）。
+  function loadFrontierInterest() {
+    var key = state.domainKey || "";
+    api("/admin/discovery/frontier-interest?domain_key=" + encodeURIComponent(key))
+      .then(function (res) {
+        return res.ok ? res.json() : { rows: [] };
+      })
+      .then(function (data) {
+        // 遅延応答ガード: 待っている間に分野が変わっていたら捨てる。
+        if ((state.domainKey || "") !== key) return;
+        state.interest = (data && data.rows) || [];
+        renderFrontierInterest();
+      })
+      .catch(function () {
+        // 取れないときは区画ごと出さない（「関心なし」と読める表示を作らない）。
+        if ((state.domainKey || "") !== key) return;
+        state.interest = [];
+        renderFrontierInterest();
+      });
+  }
+
+  // 1行 = 「学習者の関心: {領域 or 分野} — {地図の縁 / 地図の外} — {レンジ}人」。
+  // 数値・順位・時系列は描かない（レンジ文字列はサーバの range_label をそのまま使う）。
+  function frontierInterestLine(row) {
+    var parts = [];
+    var where = (row && (row.region_id || row.domain_key)) || "";
+    if (where) parts.push(where);
+    var ring = (row && INTEREST_RING_LABELS[row.ring]) || "";
+    if (ring) parts.push(ring);
+    if (row && row.range_label) parts.push(row.range_label + "人");
+    if (!parts.length) return "";
+    return INTEREST_HEAD + parts.join(" — ");
+  }
+
+  function renderFrontierInterest() {
+    var box = el("pd-frontier-interest");
+    if (!box) return;
+    var rows = state.interest || [];
+    var html = "";
+    for (var i = 0; i < rows.length; i++) {
+      var line = frontierInterestLine(rows[i]);
+      if (!line) continue;
+      html += '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">' +
+        esc(line) + "</div>";
+    }
+    if (!html) {
+      // 行が無い（＝k-匿名で表示できる集計が無い）ときは区画ごと非表示。
+      box.innerHTML = "";
+      box.style.display = "none";
+      return;
+    }
+    box.innerHTML = html +
+      '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' +
+      esc(INTEREST_NOTE) + "</div>";
+    box.style.display = "";
   }
 
   // PD3: 分野語彙からの供給。既存の購読条件は書き換えず、新しい候補は

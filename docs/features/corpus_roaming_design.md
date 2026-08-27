@@ -1,9 +1,9 @@
 # コーパス回遊層（コース無し論文議論・コーパス地図・地図の端）
 
-> **状態: 設計中**（2026-08-27 起票。論文ディスカバリー層の Phase 4 / v2 構想
-> （`paper_discovery_design.md` §7）と discuss モードの Phase 3 予約
-> （`discussion_mode_design.md`）を引き受ける専用設計書。migration は実装時に採番
-> — `ls backend/db/` で空き番号を確認すること）
+> **状態: 実装済み（正本・凍結）**（2026-08-27 起票・同日 Phase A〜D 実装。migration は
+> **073** `corpus_roaming_search_state`（外の輪の1列のみ）で採番済み。論文ディスカバリー層の
+> Phase 4 / v2 構想（`paper_discovery_design.md` §7）と discuss モードの Phase 3 予約
+> （`discussion_mode_design.md`）を引き受けた専用設計書。以後は §12 実装記録のみ追記する）
 
 **正本**: 本ドキュメント。
 **親文書**: [論文ディスカバリー層](paper_discovery_design.md)（§7 が本書の起点。PD1〜PD8 を
@@ -282,3 +282,77 @@ course 前提の派生機能は document 直付けセッションでは動かな
   §実装記録に残す）。
 - 学習者マニュアル（`docs/manual/student/`）への節追加と、学習UI インスペクト・モードの
   アンカー（`core/help_kb/ui_anchors.py` — 管理側とは別表）の追随。
+
+---
+
+## 12. 実装記録（Phase A〜D, 2026-08-27）
+
+同日、同体制（Fable 5 指揮・Opus 5 並列4体 = corpus-backend / discuss-backend / fe-learner /
+followup）で全 Phase を実装。backend フルスイート 11,483 pass・src 1,811 pass。
+
+**着手ゲートの裁定（§3）**: discuss 観測実測の確認はオーナーの明示指示
+（2026-08-27「これまでと同じ体制で実装に着手せよ」）を裁定として免除した。docker 環境
+未稼働のため observation-status の実測は取得していない — 運用開始後に
+`document_discuss_opened` / `document_discuss_turn` を含めて観測する。
+
+### Phase A/C/D バックエンド
+- migration **073**: `paper_discovery_subscriptions.last_search_found_new BOOLEAN` のみ
+  （DEFAULT なし — NULL = 「まだ検索していない」を保つ）。ビット更新は
+  `store.touch_last_checked(..., found_new=)` 経由で `POST /search` 実行時のみ
+- `core/corpus_view.py`（FastAPI/LLM 非 import・読み時導出・保存物なし）+
+  `routes/corpus.py`（learning_router・main.py 直接登録）。**骨格そのものは返さない**
+  （既存 `GET /api/atlas?cartridge=` がコース無しで骨格を返すため、配置・縁・外だけを
+  返す — 描画資産の二重管理回避）
+- `corpus/documents` の母集合 = 「配置がある論文 ∪ gap 信号がある論文」（可視論文全件を
+  分野に並べると分野帰属の捏造になるため。`placed:false` が縁の事実）
+- fringe は現行凍結版に実在する region のみ・outer は bit=TRUE かつ日付解釈可のときのみ
+- Phase D: kind `frontier_interest` を `trace_registry` に宣言（問いの軌跡=非表示 /
+  教員=専用 k-匿名集約のみ / わたしの地図=非表示 / わたしの記録=表示）。痕跡の course_id
+  はセンチネル `services.CORPUS_TRACE_COURSE_ID = "_corpus"`（help_usage の `"_ui"` と同型）。
+  教員向け `GET /api/admin/discovery/frontier-interest`（k=3・レンジのみ・dismissed 非計上）
+
+### Phase B（document 直付け discuss）
+- センチネルの正本は `core/discuss/context.py`（`_doc:` の組み立ては AST ガードレールで
+  この1ファイルに固定）。migration 0
+- `learning_chat` は**本体を `_learning_chat_core` に分離**（route は1行委譲・コース経路の
+  挙動はバイト単位で不変が原則、分岐は4点のみ: course_data 注入 / センチネル判定 /
+  topic_title / RAG スコープ注入）。document 経路は DA1〜DA6・truncate・tension プレ
+  フィルタ・CostGate・U層タグを共通コアからそのまま得る
+- API 4本: opening（`build_opening` 再利用 + `document_context` キー・LLM 0回）/ chat /
+  history / messages DELETE（truncate）。ゲートは `resolve_document_access.can_view` のみ・
+  不可視と不在は同一 404（存在リーク防止）
+- **確定した縮退**: document 直付け opening の `fragile_points` は空（`compile_open_
+  assumptions` が course_id キーのため。v2 で document_id 引数に切替可）。`action` /
+  `atlas_context` / `cycle_mode` はサーバ側で null 化（§5.4 の明示化）。content_grounding
+  は当該論文 = course_material 扱い
+- 観測2語彙 `document_discuss_opened` / `document_discuss_turn`（サーバ側記録 —
+  フロントから二重送信しない）
+
+### 学習UI
+- `corpus-sea.js`（ES6・`window.CorpusSea`）: サイドバー常設「🌊 論文の海」→ 全画面
+  オーバーレイ（ドメインチップ / 簡易 SVG 地図 = 領域ボックス + 概念ノード + 📄 マーカー /
+  端カード / 論文リスト + 詳細 / 議論ビュー）。atlas-overlay は AtlasContext のコース
+  結合が強く流用せず、骨格は `/api/atlas?cartridge=` 直接取得（座標規則は
+  landscape-layer と同一）。マーカー溢れは「+N」でなく「…」（件数非表示の徹底）
+- discuss.js の `renderOpening` を第2引数の多相化で document 文脈対応（コース文脈は
+  完全従来どおり・`sendDiscussMetric` は document 文脈で送らない）。議論ビューの離脱は
+  閉じるだけ（着地なし）
+- 「この先を知りたい」はトグルのみで表示内容を変えない（CR5）。invalidate はログアウト /
+  401 の2経路（コース切替では呼ばない — コーパスはコース非依存）
+
+### 3点セット・教員側
+- 教員: ディスカバリーモーダルに「学習者の関心」区画（open / 分野選択の2トリガのみ・
+  行ゼロと取得失敗は区画ごと非表示 = 「関心なし」と言わない）。アンカー
+  `materials.arxiv-discovery-interest`（管理側総数 293 — 正は `test_admin_help_ui_anchors.py`）
+- 学習者: アンカー `sidebar.corpus-sea`（学習側 ui_anchors 表・sidebar.* の既存命名に
+  合わせた）+ `docs/manual/student/02-student.md` §16（4節）
+- teacher マニュアル節・admin_operations 追記
+
+### テスト
+`test_corpus_roaming_{core,api,guardrails,ui_static}.py` +
+`test_document_discuss_{api,guardrails}.py`（計 81+63+44+α）。既存 discuss テストは
+`learning_chat` → `_learning_chat_core` への機械的な参照付替えのみ（アサーション非弱体化）。
+
+### v1 で提供しないもの（§5.4 / §9 の確定）
+document 直付けの出典タブ・教材埋め込み記法解決・数式レンダリング（本文素通し）、
+着地画面・tension/anchor digest、fragile_points、EmergentRegion 系、G層ルール。
