@@ -75,6 +75,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 利用者マニュアル KB | help_kb（非ベクトル索引 + ベクトル補助 + DB draft/freeze）+ インスペクトモード | `docs/features/manual_help_kb_design.md` | `backend/core/help_kb/` + `admin-manual-editor.js` / `admin-help-inspect.js` | 058, 059 | 実装済み（Phase 1〜3。配信既定は files） |
 | 知識ランドスケープ | Knowledge Landscape（論文→地図の多観点配置） | `docs/features/knowledge_landscape_design.md`（LS1〜LS10） | `backend/core/landscape/` + `routes/landscape.py` + `landscape-layer.js` + `backend/atlas_domains/` | 065 | 実装済み（v1） |
 | カテゴリギャップ候補 | 分野マップを論文から育てる層 | `docs/features/category_gap_candidates_design.md`（§10 実装記録） | `backend/core/atlas_gaps/` + `routes/atlas_gaps.py` | 066 | 実装済み（v1-a〜v1-d） |
+| VA層 | ベクトル係留（アンカー埋め込み・別名レジストリ・配置プレフィルタ・着地予測） | `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録） | `backend/core/atlas_vectors/` + `routes/atlas_vectors.py` | 074 | 実装済み（v1） |
 | 教材図スタジオ | Teaching Figure Studio（AI対話 SVG 生成） | `docs/features/teaching_figure_studio_design.md`（FG1〜FG9・§13 実装記録） | `backend/core/teaching_figures/` + `routes/teaching_figures.py` + `admin-figure-studio.js` | 063 | 実装済み（v1） |
 | リリース前の確認 | Release Review Flow（3ステップウィザード） | `docs/features/release_review_flow_design.md`（RR1〜RR7） | `routes/landscape.py`（course-scoped）+ `admin-release-review.js` | 不要（既存 API の束ね） | 実装済み（v1） |
 | 教員の弁と計器 | 負荷順トリアージ + 静かな計器（コスト見通し・WMレンズ） | `docs/features/teacher_triage_instruments_design.md`（TT1〜TT6・§6 実装記録） | `backend/core/teacher_triage.py` + `core/llm_usage/forecast.py` + `core/lecture_wm.py` + 既存キュー2ルートの sort 拡張 | 不要（読み時導出とソートのみ） | 実装済み（Phase 4 v1） |
@@ -154,7 +155,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 071 | `071_paper_discovery` | **論文ディスカバリー層**（arXiv 分野購読 + 見送り記録 + `documents.source_url`） |
 | 072 | `072_paper_discovery_ingest_queue` | 論文ディスカバリー層 Phase 2（取り込みキュー `paper_discovery_ingest_items`。失敗は行を消さず `failed` 保持） |
 | 073 | `073_corpus_roaming_search_state` | **コーパス回遊層** Phase C（地図の端 — 外の輪。`paper_discovery_subscriptions.last_search_found_new` の集約1ビットのみ） |
+| 074 | `074_atlas_vector_anchoring` | **VA層（ベクトル係留）**（アンカー埋め込み + 別名レジストリの2表） |
 
-次の空き番号は **074**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **075**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

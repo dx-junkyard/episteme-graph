@@ -187,6 +187,7 @@ PDF アップロード
   [バインディング該当なしUX + ドメインライフサイクル](features/atlas_binding_lifecycle_design.md)
 - [知識ランドスケープ（配置層）](features/knowledge_landscape_design.md)
 - [カテゴリギャップ候補（地図を論文から育てる）](features/category_gap_candidates_design.md)
+- [分野マップのベクトル係留層（VA層 — アンカー埋め込み・別名レジストリ・着地予測）](features/atlas_vector_anchoring_design.md)
 - [リリース前の確認フロー](features/release_review_flow_design.md)
 
 ### 群5: 疑いと検証

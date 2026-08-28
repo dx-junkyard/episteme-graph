@@ -388,7 +388,8 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   （`normalize_arxiv_id` = version 抜き正規化・URL 両形式吸収）/ `arxiv_client.py`
   （宛先 `export.arxiv.org` 固定・**3秒スロットル**・Atom パース。PD7）/ `vocab.py`
   （キーフレーズ供給: 骨格概念 + カートリッジ aliases + 承認済み theory_components。
-  出所4語彙 `skeleton|cartridge|component|manual` — PD3）/ `store.py`（`DELETE FROM` なし）/
+  出所5語彙 `skeleton|cartridge|component|alias|manual` — PD3。`alias` は VA層の教員確定別名）/
+  `store.py`（`DELETE FROM` なし）/
   `search.py`（条件ゼロなら arXiv を呼ばない・`closed_world_note` 必須 — PD6。数値スコア
   なし — PD4）。発見層は LLM 0回・embedding 0回。
 - **API（`routes/paper_discovery.py`、main.py 直接登録、`/api/admin/discovery/...`、全て
@@ -858,6 +859,58 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
 - **非スコープ（v1, §7）**: 削除/改名/統合の候補化（additive-only）/ 学習者信号の入力混合
   （KN-4）/ 件数バッジ・カバー率・横断ダッシュボード / 過去論文の自動再配置 / 浮遊アンカー・
   EmergentRegion（Phase 2/3）/ G層 To-Do（運用実測後に判断 — §4.6 裁定）。
+
+### 分野マップのベクトル係留層（VA層, migration 074, 2026-08-29）
+
+骨格ノード（region / concept）に**プロトタイプベクトル**（label + 教員確定別名 +
+confirmed 配置の evidence 引用の合成テキストを chunks と同一 embedding で埋め込み）を
+与え、①配置プレフィルタ ②別名レジストリ（語彙標準化） ③着地予測を実現する層。
+正本は `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録）。
+
+- **不変条項の要点**: VA1 ベクトルは候補生成器・確定は常に人間 / VA2 cosine 生値
+  非表示（段階ラベルの正本は `label_vocab.ANCHOR_NEARNESS_SCALE`「かなり近い/
+  近い可能性/遠い」、閾値 0.55/0.40）/ VA3 埋め込みは凍結時・教員起点・パイプライン
+  のみ（学習者起点ゼロ = CR7）/ VA4 fail-soft 全縮退（freeze を止めない・不在時は
+  従来動作）/ VA5 モデルは chunks と同一（feature `embedding:atlas_anchors`・scene
+  なし = M5）/ VA6 別名は status 遷移のみ（(domain, version) 単位の全置換再構築だけ
+  設計明示例外）/ VA7 プレフィルタの間引きは `stage_outputs.vector_prefilter` に記録 /
+  VA8 骨格版を明示した閉世界言明のみ / VA9 `atlas_skeletons` への書き込み経路なし
+  （KN-3/AB4 継承・ガードレールで固定）。
+- **DB（migration 074・シードなし）**: `atlas_anchor_embeddings`（`UNIQUE(domain_key,
+  skeleton_version, node_id)`・vector(3072)・FK/index なし・`source_hash` で不変
+  ノードの再埋め込みスキップ）+ `atlas_anchor_aliases`（版非依存・
+  `UNIQUE(domain_key, node_id, normalized_alias)`・normalize は atlas_gaps の
+  `normalize_label` 正本を流用・status = confirmed/dismissed・削除 API なし）。
+- **core（`backend/core/atlas_vectors/`、FastAPI 非 import）**: schema（合成テキスト
+  `build_anchor_source_text` / 語彙）/ store（全置換保存・AnchorVector・alias CRUD =
+  状態遷移のみ）/ builder（`build_anchor_embeddings` = 1バッチ embed + CostGate 日次
+  ゲート `ATLAS_VECTOR_MAX_CALLS_PER_DAY` 既定50、`anchors_with_labels`）/ query
+  （純計算: cosine・`prefilter_domains`・`landing_for_vector`）/ annotate（gap
+  クラスタ label の近傍注記・in-process キャッシュ・fail-soft）。
+- **構築トリガー**: freeze 後の best-effort daemon thread（`routes/atlas.py`）+ 手動
+  `POST /api/admin/cartridges/{id}/atlas/vectors/refresh`（TEACHER・retired 409）。
+  起動時の自動バックフィルはしない。status は `GET .../atlas/vectors/status`。
+- **別名レジストリ（語彙標準化の回路）**: gap レビューキューに読み時 `near_anchor`
+  注記（最上位帯のみ・保存しない）→ 教員の「別名として登録」（`POST .../atlas/
+  aliases`、現行凍結版に node 実在必須 422）→ ①プロトタイプへ還流（単ノード
+  best-effort 再埋め込み）②keyphrase 供給へ還流（`vocab.py` の alias サプライヤ。
+  KEYPHRASE_SOURCES は5語彙に拡張済み）。登録時は既存 gap 却下 API を理由自動填入で
+  併用（2段動作・フロント）。監査は `AUDIT_ENTITY_ATLAS_VECTOR`
+  （vectors_refresh / alias_register / alias_dismiss）。
+- **配置プレフィルタ**: `landscape/builder.py` が論文重心（`ranking.document_centroid`
+  再利用・追加 embedding ゼロ）× アンカー cosine で concept を上位
+  `LANDSCAPE_VECTOR_PREFILTER_TOPK`（既定32・0=off）に絞って LLM へ閉世界提示
+  （region は常に全提示・ベクトルなし concept は保持・プロンプトに絞り込み注記）。
+- **着地予測**: discovery 検索の `order:"relevance"` 経路のみ、既存バッチの候補
+  ベクトルを流用（追加呼び出しゼロ）して候補に `landing`（node_label / region_label /
+  nearness_label / skeleton_version）を付与。下位帯・アンカー不在はキー自体なし。
+  radar / date 順は v1 非対象。
+- **UI**: 分野の地図タブ「ベクトル索引」+「登録済みの別名」区画、gap カードの注記 +
+  登録ボタン、discovery 候補行の着地1行。アンカー +3
+  （`atlas.vector-refresh` / `atlas.aliases` / `atlas.gap-alias-register`）。
+- **ガードレール**: `test_atlas_vectors_{core,api,guardrails,ui_static}.py`。
+- **非スコープ（v1）**: radar への着地予測 / alias candidate 行の自動生成 /
+  配置共起のグラフ埋め込み（node2vec）/ 学習者向け表示 / skip-gram 自前学習。
 
 ### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
 
@@ -2251,7 +2304,7 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
   `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
-  `core/schema.py` を数える — 2026-08-27 時点で38語彙）。
+  `core/schema.py` を数える — 2026-08-29 時点で39語彙）。
   `theory_review_events` への記帳は原則
   `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
   同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は
