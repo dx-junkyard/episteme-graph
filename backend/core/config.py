@@ -348,6 +348,22 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LANDSCAPE_GAP_MAX_PER_DOCUMENT"),
     )
 
+    # --- 分野マップのベクトル係留層（VA層, migration 074） ---
+    # 正本: docs/features/atlas_vector_anchoring_design.md §5
+    # アンカーベクトル構築・ギャップ近傍注記の embedding バッチ回数の日次上限
+    # （CostGate は in-memory。超過は fail-soft で従来動作へ縮退する — VA4）
+    atlas_vector_max_calls_per_day: int = Field(
+        default=50,
+        validation_alias=AliasChoices("ATLAS_VECTOR_MAX_CALLS_PER_DAY"),
+    )
+    # 正本: 同 §6（配置の前段絞り込み）
+    # ドメインごとに LLM へ閉世界提示する concept ノードの上限（0 で絞り込み無効。
+    # region は常に全提示 — gap 検出の親 region 選択肢を狭めないため）
+    landscape_vector_prefilter_topk: int = Field(
+        default=32,
+        validation_alias=AliasChoices("LANDSCAPE_VECTOR_PREFILTER_TOPK"),
+    )
+
     # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
     # 三角測量の証拠①（LLM 事前知識）の 1 日あたり LLM コール上限
     stdpart_max_calls_per_day: int = Field(

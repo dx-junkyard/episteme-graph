@@ -88,6 +88,9 @@ class TestSceneForFeature:
             # 論文ディスカバリーの関連度ランキング（Phase 3）も実体は embedding
             # 呼び出しで、モデル選択の対象外（M5）。
             "discovery:ranking",
+            # VA層のアンカー埋め込み（atlas_vector_anchoring_design.md VA5）。
+            # embedding: プレフィックスで scene なし（M5）。
+            "embedding:atlas_anchors",
         }
         assert unmapped == allowed_none
 

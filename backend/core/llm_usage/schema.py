@@ -115,6 +115,10 @@ KNOWN_FEATURES = (
     # help_kb ベクトル補助層（Phase 3 ①、正本 docs/features/manual_help_kb_design.md
     # §5）。core/help_kb/vector.py::sync_manual_vectors が凍結節を埋め込む際に使う。
     "admin:help_kb_embed",
+    # 分野マップのベクトル係留層（正本 docs/features/atlas_vector_anchoring_design.md
+    # §4/§5）。骨格ノードのプロトタイプ埋め込みとギャップ候補ラベルの埋め込みが使う。
+    # VA5 でモデル切替は非対応（`embedding:` プレフィックスにより scene 対象外）。
+    "embedding:atlas_anchors",
 )
 
 

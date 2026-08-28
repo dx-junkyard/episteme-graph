@@ -498,6 +498,10 @@ AUDIT_ENTITY_URL_FETCH_DOMAIN = "url_fetch_domain"
 # 見送り dismiss / 復帰 restore。metadata.action で区別, migration 071）
 AUDIT_ENTITY_PAPER_DISCOVERY = "paper_discovery"
 
+# 分野マップのベクトル係留層（アンカーベクトルの再構築 vectors_refresh / 別名の登録
+# alias_register・見送り alias_dismiss。metadata.action で区別, migration 074）
+AUDIT_ENTITY_ATLAS_VECTOR = "atlas_vector"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -538,4 +542,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_USER_ACCOUNT,
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
     AUDIT_ENTITY_PAPER_DISCOVERY,
+    AUDIT_ENTITY_ATLAS_VECTOR,
 )

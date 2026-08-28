@@ -44,6 +44,9 @@ from types import MappingProxyType
 from core.status import schema as status_schema
 
 __all__ = [
+    "ANCHOR_NEARNESS_SCALE",
+    "ANCHOR_NEARNESS_THRESHOLD_MID",
+    "ANCHOR_NEARNESS_THRESHOLD_NEAR",
     "AUDIO_STATUS_LABELS",
     "CONFIDENCE_LABELS_LOW_MED_HIGH",
     "CONFIDENCE_LABEL_HIGH",
@@ -227,6 +230,31 @@ RADAR_DISTANCE_SCALE = GradedScale(
         RADAR_DISTANCE_LABEL_MID,
         RADAR_DISTANCE_LABEL_FAR,
     ),
+)
+
+
+# ── 骨格アンカーへの近さ（分野マップのベクトル係留層 VA2）──────────────────────
+# 骨格ノード（region / concept）の**プロトタイプベクトル**と、論文重心 / 候補
+# アブストラクト / ギャップ候補ラベルとの **cosine 類似度**の段階化（正本
+# ``docs/features/atlas_vector_anchoring_design.md`` §9、算出は
+# ``core/atlas_vectors/query.py``）。cosine の生値は DB / 内部計算に留め、外へ出るのは
+# このスケールのラベルだけ（VA2 数値非表示）。
+#
+# 閾値は :data:`DISCOVERY_RELEVANCE_SCALE` より**高く**取る（0.55 / 0.40）。あちらは
+# 「候補を捨てずに並べ替える」ための相対順位づけだが、こちらは「地図のこのノードの
+# 近くに落ちる」という**係留の言明**であり、外すと閉世界の正直さ（VA8）を損なうため。
+# 0.55 は help_kb ベクトル補助層の保守的足切り（``_MAX_COSINE_DISTANCE = 0.55``）と
+# 同じ「提示してよい」水準に合わせた発明値で、実測での見直し前提
+# （変えるときは設計書 §9 も更新する）。
+#
+# 使い分け（設計書 §9）: ギャップ近傍注記は最上位帯（NEAR 以上）のみ表示、着地予測は
+# 上位2帯（MID 以上）を表示し、最下帯は表示しない（「なんとなく関連」を出さない）。
+ANCHOR_NEARNESS_THRESHOLD_NEAR = 0.55
+ANCHOR_NEARNESS_THRESHOLD_MID = 0.40
+
+ANCHOR_NEARNESS_SCALE = GradedScale(
+    (ANCHOR_NEARNESS_THRESHOLD_NEAR, ANCHOR_NEARNESS_THRESHOLD_MID),
+    ("かなり近い", "近い可能性", "遠い"),
 )
 
 
