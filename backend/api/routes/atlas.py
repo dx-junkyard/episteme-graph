@@ -736,6 +736,28 @@ def freeze_atlas_skeleton(
     except Exception:  # noqa: BLE001
         logger.warning("atlas overlay refresh scheduling failed", exc_info=True)
 
+    # 新版のアンカーベクトル索引を作り直す (VA3 の呼び出し地点①: 凍結時の
+    # best-effort 再構築。atlas_vector_anchoring_design.md §5)。埋め込みは外部 API を
+    # 呼ぶため daemon thread に逃がし、どんな失敗も警告ログだけにする —
+    # **凍結は止めない**し、レスポンスの形も変えない (VA4)。
+    try:
+        import threading
+
+        def _atlas_anchor_embed() -> None:
+            try:
+                from core.atlas_vectors.builder import build_anchor_embeddings
+
+                result = build_anchor_embeddings(cartridge_id)
+                logger.info("atlas anchor embeddings after freeze: %s", result)
+            except Exception:  # noqa: BLE001
+                logger.warning("atlas anchor embedding after freeze failed", exc_info=True)
+
+        threading.Thread(
+            target=_atlas_anchor_embed, name="atlas-anchor-embed", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas anchor embedding scheduling skipped", exc_info=True)
+
     report_summary = {"applied": 0, "migrated": 0}
     if report_session is not None:
         try:

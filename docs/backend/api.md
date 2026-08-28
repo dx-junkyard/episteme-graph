@@ -55,11 +55,11 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
   `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
   （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
   （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（20本、`main.py` の登録順）**:
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（21本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
-  （/cartridges 配下）/ `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
+  （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
   `discuss_observation.admin_router` / `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
@@ -637,6 +637,23 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/decide` | TEACHER | 候補を採用・見送りにする（見送りの取り消しも同 API。見送りは理由必須）。骨格 draft は変わらない |
 | POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/incorporate-preview` | TEACHER | 採用済み候補を次版 draft へ追加する JSON Patch（op は add のみ）と適用後 draft の**提示のみ**。DB 非変更。未採用 / draft なしは 409、満杯領域・親領域不在は 422 |
 | POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/mark-incorporated` | TEACHER | 教員の `PUT draft` **成功後**に取り込み先 node を刻印。`draft_node_id` が現 draft に無ければ 409（誤順序を弾く） |
+
+### 分野マップのベクトル係留（`routes/atlas_vectors.py`、migration 074）
+
+凍結骨格の各ノードに**プロトタイプベクトル**（label + 確定別名 + 確定配置の evidence 引用の
+埋め込み）を与える層の管理 API。索引の構築は凍結後の best-effort 再構築（`routes/atlas.py` の
+freeze フック）が主経路で、本ルーターの refresh はそれ以前に凍結された骨格のバックフィル手段。
+**DELETE ルートは無い**（別名の見送りは `status='dismissed'` への遷移で、同じ表記の再登録が復帰）。
+返す数値は索引カバレッジだけで、cosine / 類似度は返さない（VA2）。詳細は
+`docs/features/atlas_vector_anchoring_design.md` §5 / §7。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/cartridges/{cid}/atlas/vectors/status` | TEACHER | 索引の状態（`total_nodes` / `embedded_nodes` / `built_at` / `stale`）。凍結骨格が無い分野は 404 ではなく `{available: false}` |
+| POST | `/api/admin/cartridges/{cid}/atlas/vectors/refresh` | TEACHER | 現行凍結版のアンカー索引を作り直す。builder の要約（`completed` / `skipped` + 理由）をそのまま返す。retired ドメインは 409、構築失敗は 422（detail は数値・内部情報を含まない事実文） |
+| GET | `/api/admin/cartridges/{cid}/atlas/aliases` | TEACHER | 登録済み別名の一覧（既定は confirmed のみ。`include_dismissed=true` で見送り済みも）。`node_label` は現行凍結骨格から補い、骨格に無いノードは空文字 |
+| POST | `/api/admin/cartridges/{cid}/atlas/aliases` | TEACHER | 別名の登録（教員の確定操作 — VA1）。`node_id` が現行凍結骨格に無い / 表記が空 / `source` が語彙外は 422。登録後に当該ノードのプロトタイプを best-effort で再構築（失敗しても登録は成功） |
+| POST | `/api/admin/cartridges/{cid}/atlas/aliases/{alias_id}/dismiss` | TEACHER | 別名を見送りにする（行は消さない）。別分野の id・不在はいずれも 404 |
 
 ### 知識ランドスケープ（`routes/landscape.py`、migration 065）
 

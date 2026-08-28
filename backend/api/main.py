@@ -58,6 +58,7 @@ from routes import figure_presentation as figure_presentation_routes
 from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
 from routes import atlas_gaps as atlas_gaps_routes
+from routes import atlas_vectors as atlas_vectors_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
@@ -369,6 +370,9 @@ app.include_router(atlas_routes.binding_router, prefix="/api/admin")
 # カテゴリギャップ候補のレビュー（category_gap_candidates_design.md §5.4）。
 # atlas_routes.router と同じ "/cartridges" 配下だがパスが衝突しないためフラット登録で足りる。
 app.include_router(atlas_gaps_routes.router, prefix="/api/admin")
+# 分野マップのベクトル係留（atlas_vector_anchoring_design.md §5 索引の状態・再構築 /
+# §7 別名レジストリ。migration 074）。atlas_routes.router と同じ "/cartridges" 配下。
+app.include_router(atlas_vectors_routes.router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
