@@ -5231,6 +5231,7 @@
         renderAtlasOverview();
         updateLifecycleUI();
         loadGapCandidates();
+        loadVectorPanel();
         return;
       }
       setStatus("読み込み中...");
@@ -5245,6 +5246,8 @@
       // カテゴリギャップ候補（migration 066）。ポーリングはせず、この読み込みと
       // 各操作の成功後だけ取り直す。
       loadGapCandidates();
+      // ベクトル索引・別名レジストリ（VA層）も同じ規律で読み直す。
+      loadVectorPanel();
     }
 
     // ── 修正報告のレビューキュー (Issue D-2 / D-3) ────────────────────
@@ -5432,6 +5435,321 @@
       });
     }
 
+    // ── ベクトル索引と別名レジストリ（VA層, migration 074） ──────────────
+    // 正本: docs/features/atlas_vector_anchoring_design.md
+    //   §5   状態 (status) と手動 refresh。起動時の自動構築はしない
+    //   §7   別名レジストリ（ギャップ候補からの登録 / 手動登録 / 見送り）
+    //   VA1  ベクトルは候補生成器 — 確定は常に人間（登録は教員の明示操作）
+    //   VA2  数値非表示。類似度・スコアを描かない（索引の件数は運用状態の事実）
+    //   VA4  fail-soft。骨格・索引が無くても事実文へ縮退し、既存の操作を止めない
+    //   VA6  見送りは行削除ではなく状態の遷移（同じ表記を登録し直すと戻る）
+    //   VA8  閉世界の正直さ。近さの言明には必ず骨格の版を添える
+    var VECTOR_GROUP_TITLE = "ベクトル索引";
+    var VECTOR_GROUP_INTRO = "公開中の骨格の各項目に、論文と同じ空間での索引を作ります。論文を配置するときの候補の絞り込みと、別の表記の検出に使われます。";
+    var VECTOR_NO_SKELETON_TEXT = "凍結済みの骨格がありません";
+    var VECTOR_STALE_TEXT = "骨格が更新されています。再構築してください。";
+    var VECTOR_LIMIT_TEXT = "本日の再構築回数の上限に達しました";
+    var VECTOR_DONE_TEXT = "索引を作り直しました";
+    var ALIAS_GROUP_TITLE = "登録済みの別名";
+    var ALIAS_GROUP_INTRO = "地図の項目と同じものを指す表記を登録できます。登録した表記は索引と、論文を探すときの手がかりに使われます。";
+    var ALIAS_EMPTY_TEXT = "登録された別名はまだありません。";
+    var ALIAS_DISMISS_NOTE = "「見送り」は行を消す操作ではありません。同じ表記をもう一度登録すると戻ります。";
+    var ALIAS_INPUT_REQUIRED_TEXT = "地図の項目のidと表記の両方を入力してください";
+    var GAP_ALIAS_NOTE_HEAD = "既存概念『";
+    var GAP_ALIAS_NOTE_TAIL = "』の別名として登録";
+
+    var vectorBusy = false;
+    var aliasIncludeDismissed = false;
+    var vectorsGroupEl = null;
+    var vectorsFactEl = null;
+    var vectorsStatusEl = null;
+    var vectorsRefreshBtn = null;
+    var aliasesListEl = null;
+    var aliasesStatusEl = null;
+
+    function vectorsPath() {
+      return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/vectors";
+    }
+
+    function aliasesPath() {
+      return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/aliases";
+    }
+
+    function setVectorsStatus(text, isError) {
+      if (!vectorsStatusEl) return;
+      vectorsStatusEl.textContent = text || "";
+      vectorsStatusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+
+    function setAliasesStatus(text, isError) {
+      if (!aliasesStatusEl) return;
+      aliasesStatusEl.textContent = text || "";
+      aliasesStatusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+
+    // マップ本体の区画に後付けで足す（admin.html は変更しない。gap グループと同じ流儀）。
+    function buildVectorGroup() {
+      var section = document.getElementById("atlas-map-section");
+      if (!section || document.getElementById("atlas-vectors-group")) return;
+      var inputStyle = "font-size:12.5px;padding:3px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)";
+      var group = document.createElement("div");
+      group.id = "atlas-vectors-group";
+      group.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border)";
+      group.innerHTML =
+        '<h4 style="font-size:13px;margin:0 0 4px">' + escHtml(VECTOR_GROUP_TITLE) + '</h4>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 6px">' + escHtml(VECTOR_GROUP_INTRO) + '</p>' +
+        '<div id="atlas-vectors-fact" style="font-size:12.5px;color:var(--color-text-secondary)"></div>' +
+        '<div style="margin-top:6px">' +
+          '<button type="button" id="atlas-vectors-refresh" data-ui-anchor="atlas.vector-refresh" class="admin-action-btn">索引を再構築</button>' +
+        '</div>' +
+        '<div id="atlas-vectors-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px"></div>' +
+        '<div id="atlas-aliases-group" data-ui-anchor="atlas.aliases" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--color-border-tertiary)">' +
+          '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:4px">' +
+            '<h4 style="font-size:13px;margin:0">' + escHtml(ALIAS_GROUP_TITLE) + '</h4>' +
+            '<label style="font-size:12px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">' +
+              '<input type="checkbox" id="atlas-aliases-show-dismissed"> 見送り済みも表示' +
+            '</label>' +
+          '</div>' +
+          '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 6px">' + escHtml(ALIAS_GROUP_INTRO) + '</p>' +
+          '<div id="atlas-aliases-list"></div>' +
+          '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">' +
+            '<input type="text" id="atlas-alias-node-id" placeholder="地図の項目のid" style="' + inputStyle + ';min-width:180px">' +
+            '<input type="text" id="atlas-alias-text" placeholder="別の表記" style="' + inputStyle + ';min-width:180px">' +
+            '<button type="button" id="atlas-alias-add" class="admin-action-btn">登録</button>' +
+          '</div>' +
+          '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + escHtml(ALIAS_DISMISS_NOTE) + '</div>' +
+          '<div id="atlas-aliases-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:6px"></div>' +
+        '</div>';
+      section.appendChild(group);
+      vectorsGroupEl = group;
+      vectorsFactEl = document.getElementById("atlas-vectors-fact");
+      vectorsStatusEl = document.getElementById("atlas-vectors-status");
+      vectorsRefreshBtn = document.getElementById("atlas-vectors-refresh");
+      aliasesListEl = document.getElementById("atlas-aliases-list");
+      aliasesStatusEl = document.getElementById("atlas-aliases-status");
+      group.style.display = "none";
+
+      vectorsRefreshBtn.addEventListener("click", refreshVectors);
+      document.getElementById("atlas-alias-add").addEventListener("click", function () {
+        var nodeInput = document.getElementById("atlas-alias-node-id");
+        var aliasInput = document.getElementById("atlas-alias-text");
+        var nodeId = nodeInput ? nodeInput.value.trim() : "";
+        var alias = aliasInput ? aliasInput.value.trim() : "";
+        if (!nodeId || !alias) { setAliasesStatus(ALIAS_INPUT_REQUIRED_TEXT, true); return; }
+        registerAlias(nodeId, alias, "manual", null, function () {
+          if (nodeInput) nodeInput.value = "";
+          if (aliasInput) aliasInput.value = "";
+          setAliasesStatus("別名を登録しました");
+        });
+      });
+      document.getElementById("atlas-aliases-show-dismissed").addEventListener("change", function () {
+        aliasIncludeDismissed = !!this.checked;
+        loadAliases();
+      });
+      aliasesListEl.addEventListener("click", function (e) {
+        var btn = e.target.closest ? e.target.closest("[data-alias-action]") : null;
+        if (!btn || btn.disabled) return;
+        var row = btn.closest("[data-alias-id]");
+        if (!row) return;
+        dismissAlias(row.getAttribute("data-alias-id"));
+      });
+    }
+
+    // 索引の状態（骨格なしは available:false）。数値は索引済みの件数だけで、
+    // 類似度・スコアは受け取っても描かない（VA2）。
+    function loadVectorStatus() {
+      if (!vectorsGroupEl) return;
+      if (!select.value) {
+        vectorsGroupEl.style.display = "none";
+        return;
+      }
+      vectorsGroupEl.style.display = "";
+      apiFetch(vectorsPath() + "/status")
+        .then(function (res) {
+          if (res.status === 404) return { available: false };
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (data) { renderVectorStatus(data || {}); })
+        .catch(function (err) {
+          if (vectorsFactEl) vectorsFactEl.textContent = "";
+          // 状態が読めなくても再構築の入口は塞がない（VA4）。
+          if (vectorsRefreshBtn) vectorsRefreshBtn.disabled = false;
+          setVectorsStatus("索引の状態を読み込めませんでした: " + err.message, true);
+        });
+    }
+
+    function renderVectorStatus(data) {
+      if (!vectorsFactEl) return;
+      var lines = [];
+      if (!data || data.available === false) {
+        lines.push(VECTOR_NO_SKELETON_TEXT);
+        if (vectorsRefreshBtn) vectorsRefreshBtn.disabled = true;
+      } else {
+        var embedded = data.embedded_nodes;
+        var total = data.total_nodes;
+        if (typeof embedded === "number" && typeof total === "number") {
+          lines.push("索引済み: " + embedded + "/" + total + " ノード（骨格 版" + (data.skeleton_version || "") + "）");
+        } else if (data.skeleton_version) {
+          lines.push("骨格 版" + data.skeleton_version);
+        }
+        if (data.built_at) lines.push("最後に作成: " + data.built_at);
+        if (data.stale) lines.push(VECTOR_STALE_TEXT);
+        if (vectorsRefreshBtn) {
+          vectorsRefreshBtn.disabled = !!select.value && domainLifecycles[select.value] === "retired";
+        }
+      }
+      var html = "";
+      for (var i = 0; i < lines.length; i++) {
+        html += '<div>' + escHtml(lines[i]) + '</div>';
+      }
+      vectorsFactEl.innerHTML = html;
+    }
+
+    // 手動の再構築（既存の凍結骨格のバックフィル）。結果は事実文で出す。
+    function refreshVectors() {
+      if (!select.value || vectorBusy) return;
+      vectorBusy = true;
+      if (vectorsRefreshBtn) vectorsRefreshBtn.disabled = true;
+      setVectorsStatus("索引を作り直しています...");
+      apiFetch(vectorsPath() + "/refresh", { method: "POST" })
+        .then(_gapResponse)
+        .then(function (summary) {
+          vectorBusy = false;
+          setVectorsStatus(vectorRefreshFactText(summary || {}));
+          loadVectorStatus();
+        })
+        .catch(function (err) {
+          vectorBusy = false;
+          setVectorsStatus("索引を作り直せませんでした: " + err.message, true);
+          loadVectorStatus();
+        });
+    }
+
+    // サーバの要約を日本語の事実文にする（スキップの理由も隠さない）。
+    function vectorRefreshFactText(summary) {
+      if (summary.status === "skipped") {
+        if (summary.skipped_reason === "daily_call_limit_reached") return VECTOR_LIMIT_TEXT;
+        if (summary.skipped_reason === "no_frozen_skeleton") return VECTOR_NO_SKELETON_TEXT;
+        return "索引は作り直されませんでした" + (summary.skipped_reason ? "（" + summary.skipped_reason + "）" : "");
+      }
+      var parts = [VECTOR_DONE_TEXT];
+      if (typeof summary.embedded === "number") parts.push("新しく索引した項目: " + summary.embedded);
+      if (typeof summary.reused === "number") parts.push("そのまま使った項目: " + summary.reused);
+      if (summary.skeleton_version) parts.push("骨格 版" + summary.skeleton_version);
+      return parts.join(" / ");
+    }
+
+    // 別名の一覧（node_id ごとにまとめる）。見送り済みは打ち消しではなく淡色で残す。
+    function loadAliases() {
+      if (!aliasesListEl) return;
+      if (!select.value) {
+        aliasesListEl.innerHTML = "";
+        return;
+      }
+      apiFetch(aliasesPath() + (aliasIncludeDismissed ? "?include_dismissed=true" : "?include_dismissed=false"))
+        .then(function (res) {
+          if (res.status === 404) return null;
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (data) { renderAliases(data); })
+        .catch(function (err) {
+          aliasesListEl.innerHTML = "";
+          setAliasesStatus("別名を読み込めませんでした: " + err.message, true);
+        });
+    }
+
+    function renderAliases(data) {
+      if (!aliasesListEl) return;
+      var aliases = (data && data.aliases) || [];
+      if (!aliases.length) {
+        aliasesListEl.innerHTML = '<div style="color:var(--color-text-tertiary)">' + escHtml(ALIAS_EMPTY_TEXT) + '</div>';
+        return;
+      }
+      var order = [];
+      var grouped = {};
+      aliases.forEach(function (row) {
+        var nodeId = (row && row.node_id) || "";
+        if (!grouped.hasOwnProperty(nodeId)) { grouped[nodeId] = []; order.push(nodeId); }
+        grouped[nodeId].push(row);
+      });
+      var html = "";
+      order.forEach(function (nodeId) {
+        var rows = grouped[nodeId];
+        var head = (rows[0] && rows[0].node_label) ? (rows[0].node_label + "（" + nodeId + "）") : nodeId;
+        html += '<div class="atlas-alias-node" style="margin-bottom:6px">' +
+          '<div style="font-size:12px;color:var(--color-text-secondary)">' + escHtml(head) + '</div>';
+        rows.forEach(function (row) {
+          var dismissed = (row && row.status) === "dismissed";
+          html += '<div class="atlas-alias-row" data-alias-id="' + escHtml((row && row.id) || "") +
+            '" style="display:flex;gap:6px;align-items:center;padding:1px 0 1px 12px">' +
+            '<span style="font-size:12.5px;color:' + (dismissed ? "var(--color-text-tertiary)" : "var(--color-text-primary)") + '">' +
+              escHtml((row && row.alias) || "") + '</span>';
+          if (dismissed) {
+            html += '<span style="font-size:11px;color:var(--color-text-tertiary)">見送り済み</span>';
+          } else {
+            html += '<button type="button" class="admin-action-btn" data-alias-action="dismiss" style="font-size:11px;padding:1px 7px">見送り</button>';
+          }
+          html += '</div>';
+        });
+        html += '</div>';
+      });
+      aliasesListEl.innerHTML = html;
+    }
+
+    // 登録は教員の明示操作だけ（VA1）。成功したら索引の状態も取り直す
+    // （プロトタイプが作り直されるため）。
+    function registerAlias(nodeId, alias, source, evidence, onDone) {
+      if (!select.value || vectorBusy) return;
+      var body = { node_id: nodeId, alias: alias, source: source || "manual" };
+      if (evidence) body.evidence = evidence;
+      setAliasesStatus("登録しています...");
+      return apiFetch(aliasesPath(), { method: "POST", body: JSON.stringify(body) })
+        .then(_gapResponse)
+        .then(function (row) {
+          loadAliases();
+          loadVectorStatus();
+          if (onDone) onDone(row);
+          return row;
+        })
+        .catch(function (err) {
+          setAliasesStatus("登録できませんでした: " + err.message, true);
+          throw err;
+        });
+    }
+
+    function dismissAlias(aliasId) {
+      if (!aliasId || !select.value) return;
+      setAliasesStatus("処理中...");
+      apiFetch(aliasesPath() + "/" + encodeURIComponent(aliasId) + "/dismiss", { method: "POST" })
+        .then(_gapResponse)
+        .then(function () { setAliasesStatus("見送りにしました"); loadAliases(); })
+        .catch(function (err) { setAliasesStatus("処理に失敗しました: " + err.message, true); });
+    }
+
+    // ギャップ候補の近傍注記からの2段動作（§7）。別名の登録が成功したときだけ、
+    // 既存の却下経路（理由必須）へ理由を自動で填めて渡す。骨格には書かない（VA9）。
+    function gapRegisterAlias(clusterKey, card) {
+      var candidate = _gapCandidateByKey(clusterKey);
+      var near = candidate && candidate.near_anchor;
+      if (!near || !near.node_id || gapBusy) return;
+      var alias = (card ? _gapLabelFromCard(card) : "") || (candidate && candidate.proposed_label) || "";
+      if (!alias) return;
+      var nodeLabel = near.node_label || near.node_id;
+      registerAlias(near.node_id, alias, "gap_signal", { cluster_key: clusterKey }, function () {
+        setAliasesStatus("別名として登録しました");
+        gapDecide(clusterKey, "dismiss", GAP_ALIAS_NOTE_HEAD + nodeLabel + GAP_ALIAS_NOTE_TAIL);
+      }).catch(function () { /* 事実文は setAliasesStatus 側で出す（却下はしない） */ });
+    }
+
+    function loadVectorPanel() {
+      loadVectorStatus();
+      loadAliases();
+    }
+
+    buildVectorGroup();
+
     // ── 論文の解析から見つかった候補（カテゴリギャップ候補, migration 066） ─────
     // 正本: docs/features/category_gap_candidates_design.md
     //   §5.4 レビュー UI（修正報告セクション内の第2グループ。専用タブを作らない）
@@ -5603,6 +5921,29 @@
       return html;
     }
 
+    // VA層（§7）: ベクトルで近いと分かった既存項目の注記。可能性の提示であって
+    // 確定ではない（登録するかどうかは教員の判断）。骨格の版を必ず添える（VA8）。
+    // 生の類似度は受け取らず、サーバが確定した段階ラベルをそのまま描く（VA2）。
+    function _gapNearAnchorHtml(candidate) {
+      var near = candidate && candidate.near_anchor;
+      if (!near || !near.node_label) return "";
+      var parts = [];
+      if (near.nearness_label) parts.push(near.nearness_label);
+      if (near.skeleton_version) parts.push("骨格 版" + near.skeleton_version);
+      var text = "既存の『" + near.node_label + "』の別表記の可能性があります" +
+        (parts.length ? "（" + parts.join("・") + "）" : "");
+      return '<div class="atlas-gap-near-anchor" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:4px">' +
+        escHtml(text) + '</div>';
+    }
+
+    function _gapCandidateByKey(clusterKey) {
+      var candidates = (latestGapData && latestGapData.candidates) || [];
+      for (var i = 0; i < candidates.length; i++) {
+        if (candidates[i] && candidates[i].cluster_key === clusterKey) return candidates[i];
+      }
+      return null;
+    }
+
     // 取り込みボタンが押せない理由の事実文（ゲージ・空きスロット・督促は出さない）。
     function _gapBlockedText(candidate, accepted, draftExists, retired) {
       if (retired) return GAP_RETIRED_TEXT;
@@ -5635,6 +5976,7 @@
         _gapVersionChipHtml(candidate) +
       '</div>';
       html += _gapDocumentsHtml(candidate);
+      html += _gapNearAnchorHtml(candidate);
       if (decision && decision.review_note) {
         html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">判断のメモ: ' + escHtml(decision.review_note) + '</div>';
       }
@@ -5647,6 +5989,10 @@
           (accepted || retired ? " disabled" : "") + '>採用</button>';
         html += '<button type="button" class="admin-action-btn" data-gap-action="dismiss" data-ui-anchor="atlas.gap-dismiss"' +
           (retired ? " disabled" : "") + '>却下…</button>';
+        if (candidate && candidate.near_anchor && candidate.near_anchor.node_id) {
+          html += '<button type="button" class="admin-action-btn" data-gap-action="alias-register" data-ui-anchor="atlas.gap-alias-register"' +
+            (retired ? " disabled" : "") + '>別名として登録</button>';
+        }
         if (accepted && !draftExists) {
           html += '<button type="button" class="admin-action-btn" data-gap-action="draft-from-frozen" data-ui-anchor="atlas.gap-draft-from-frozen"' +
             (retired ? " disabled" : "") + '>現在の版から次版の下書きを作る</button>';
@@ -5705,6 +6051,9 @@
         gapDecide(clusterKey, "dismiss", note);
         return;
       }
+      // VA層（§7）: 別名として登録 → 成功したときだけ理由を自動で填めて却下へ渡す
+      // （理由必須の既存経路を再利用する。教員に理由を打ち直させない）。
+      if (action === "alias-register") { gapRegisterAlias(clusterKey, card); return; }
       if (action === "incorporate") gapIncorporate(clusterKey, _gapLabelFromCard(card));
     }
 

@@ -101,6 +101,8 @@
   var CITATION_MODE_LABEL = "候補の出所: 引用グラフ";
   var CITATION_SEEDS_HEAD = "シード: ";
   var CITATION_DERIVED_HEAD = "引用元: ";
+  // VA層（着地予測）: 取り込む前の目安であって、確定した配置ではない。
+  var LANDING_HEAD = "地図上の近い領域: ";
   var CITATION_EMPTY_NOTICE =
     "引用グラフからは候補が見つかりませんでした。取り込み済みの論文が増えると候補が変わることがあります。";
 
@@ -1134,6 +1136,25 @@
           esc(CITATION_DERIVED_HEAD + origins.join(" ・ ")) +
           "</div>";
       }
+    }
+
+    // VA層（着地予測, atlas_vector_anchoring_design.md §8）: 取り込むと地図の
+    // どのあたりに落ちそうかの目安。サーバが確定した段階ラベルと骨格の版を
+    // そのまま出す（閾値判定・数値描画をしない — VA2 / VA8）。表示だけで操作はない。
+    var landing = candidate && candidate.landing;
+    if (landing && landing.node_label) {
+      var landingParts = [];
+      if (landing.nearness_label) landingParts.push(String(landing.nearness_label));
+      if (landing.skeleton_version) landingParts.push("骨格 版" + landing.skeleton_version);
+      html +=
+        '<div class="pd-landing" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' +
+        esc(
+          LANDING_HEAD +
+            (landing.region_label ? landing.region_label + " / " : "") +
+            landing.node_label +
+            (landingParts.length ? "（" + landingParts.join("・") + "）" : "")
+        ) +
+        "</div>";
     }
 
     if (matched.length) {

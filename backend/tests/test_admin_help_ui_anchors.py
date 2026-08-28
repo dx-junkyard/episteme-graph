@@ -140,7 +140,13 @@ class TestAdminUiAnchorsModule:
         #   materials.radar-provenance（[この論文として登録する]。ファイル名からの推定は
         #    書き込まず、自動記帳はタイトル完全一致時のみ。既存出所あり・編集権限なし・
         #    arXiv 未到達では出ない/押せない）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 300
+        # + 分野マップのベクトル係留層（atlas_vector_anchoring_design.md §5 / §7）の3件:
+        #   atlas.vector-refresh（[索引を再構築]。凍結骨格なし・日次上限では
+        #    作り直されず、その事実が出る — VA4）/
+        #   atlas.aliases（登録済みの別名の区画。見送りは行削除ではなく状態遷移 — VA6）/
+        #   atlas.gap-alias-register（ギャップ候補カードの [別名として登録]。近傍注記の
+        #    ある候補にだけ出る。注記は可能性の提示で、確定は教員 — VA1 / VA8）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 303
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

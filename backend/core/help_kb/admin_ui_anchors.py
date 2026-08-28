@@ -42,6 +42,7 @@ from . import manual as _manual
 KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
     {
         "atlas.add-domain-toggle",
+        "atlas.aliases",
         "atlas.assist-toggle",
         "atlas.binding-course-select",
         "atlas.binding-new-domain",
@@ -53,6 +54,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.domain-retire",
         "atlas.freeze",
         "atlas.gap-accept",
+        "atlas.gap-alias-register",
         "atlas.gap-candidates",
         "atlas.gap-dismiss",
         "atlas.gap-dismissed-filter",
@@ -65,6 +67,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.report-resolve",
         "atlas.reports-filter",
         "atlas.save-draft",
+        "atlas.vector-refresh",
         "course-builder.approve-btn",
         "course-builder.atlas-binding-area",
         "course-builder.import-course-btn",
@@ -356,6 +359,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- atlas.* — 分野の地図タブ --------------------------------------------------------
     # 新しい分野マップを作る
     "atlas.add-domain-toggle": "teacher/17-admin-atlas.md#add-domain",
+    # 登録済みの別名（別名レジストリの区画全体）
+    "atlas.aliases": "teacher/17-admin-atlas.md#aliases",
     # AIと部分修正
     "atlas.assist-toggle": "teacher/17-admin-atlas.md#assist",
     # コース配置のコース選択
@@ -378,6 +383,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
     # 論文の解析から見つかった候補 — 採用
     "atlas.gap-accept": "teacher/17-admin-atlas.md#gap-accept",
+    # 別名として登録（近傍注記のある候補にだけ出る）
+    "atlas.gap-alias-register": "teacher/17-admin-atlas.md#gap-alias-register",
     # 論文の解析から見つかった候補（グループ全体）
     "atlas.gap-candidates": "teacher/17-admin-atlas.md#gap-candidates",
     # 却下…（理由必須）
@@ -402,6 +409,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.reports-filter": "teacher/17-admin-atlas.md#reports-filter",
     # 次版を保存
     "atlas.save-draft": "teacher/17-admin-atlas.md#save-draft",
+    # 索引を再構築
+    "atlas.vector-refresh": "teacher/17-admin-atlas.md#vector-refresh",
 
     # --- course-builder.* — コースビルダータブ ---------------------------------------------
     # 承認してコースを登録
