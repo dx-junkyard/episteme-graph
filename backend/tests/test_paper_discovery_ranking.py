@@ -354,6 +354,129 @@ class TestFailSoft:
 
 
 # ---------------------------------------------------------------------------
+# 3.5 着地予測（``docs/features/atlas_vector_anchoring_design.md`` §8）
+# ---------------------------------------------------------------------------
+
+
+class _FakeAnchor:
+    """``core.atlas_vectors.store.AnchorVector`` の最小形（属性しか見られない）。"""
+
+    def __init__(self, node_id, vector, *, label="", region_label="", kind="concept"):
+        self.node_id = node_id
+        self.node_kind = kind
+        self.label = label or node_id
+        self.region_label = region_label
+        self.vector = list(vector)
+
+
+class TestLandingPreview:
+    """候補に「取り込むと地図のどこに落ちそうか」を足す（追加 embedding ゼロ）。"""
+
+    _CANDIDATES = [{"arxiv_id": "2608.00001", "title": "a", "summary": "x"}]
+
+    def _session(self):
+        return _session_with(
+            [{"document_id": "doc-1", "chunk_index": 0, "embedding": [1.0, 0.0]}]
+        )
+
+    def _context(self, anchors, version="2026.1"):
+        return {"anchors": anchors, "skeleton_version": version}
+
+    def test_absent_without_anchor_context(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+        result = ranking.rank_candidates(self._session(), "astrophysics", self._CANDIDATES)
+        assert result["available"] is True
+        assert "landing" not in result["ordered"][0]
+
+    def test_attached_with_exact_keys_and_the_skeleton_version(self, monkeypatch):
+        calls: list[dict] = []
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]], recorder=calls)
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0], label="CMB", region_label="宇宙論")]
+
+        result = ranking.rank_candidates(
+            self._session(),
+            "astrophysics",
+            self._CANDIDATES,
+            anchor_context=self._context(anchors),
+        )
+
+        landing = result["ordered"][0]["landing"]
+        assert set(landing) == {
+            "node_label",
+            "region_label",
+            "nearness_label",
+            "skeleton_version",
+        }
+        assert landing["node_label"] == "CMB"
+        assert landing["region_label"] == "宇宙論"
+        assert landing["skeleton_version"] == "2026.1"
+        # 段階ラベルの正本（内部 ID・生スコアは載せない — VA2）。
+        from core.label_vocab import ANCHOR_NEARNESS_SCALE
+
+        assert landing["nearness_label"] in ANCHOR_NEARNESS_SCALE.labels
+        assert "node_id" not in landing and "node_kind" not in landing
+        assert not [v for v in landing.values() if isinstance(v, (int, float))]
+        # 埋め込みは並べ替えの1バッチのまま（着地予測でコールを増やさない）。
+        assert len(calls) == 1
+
+    def test_below_the_mid_threshold_has_no_landing(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+        # 候補ベクトル [1,0] と直交するアンカー（cosine 0 < MID）。
+        anchors = [_FakeAnchor("bao", [0.0, 1.0], label="BAO")]
+        result = ranking.rank_candidates(
+            self._session(),
+            "astrophysics",
+            self._CANDIDATES,
+            anchor_context=self._context(anchors),
+        )
+        assert "landing" not in result["ordered"][0]
+
+    def test_empty_anchors_or_version_are_ignored(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0], [1.0, 0.0]])
+        session = self._session()
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0])]
+        assert "landing" not in ranking.rank_candidates(
+            session, "astrophysics", self._CANDIDATES,
+            anchor_context=self._context([]),
+        )["ordered"][0]
+        assert "landing" not in ranking.rank_candidates(
+            session, "astrophysics", self._CANDIDATES,
+            anchor_context=self._context(anchors, version=""),
+        )["ordered"][0]
+
+    def test_landing_failure_does_not_break_the_ordering(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("vector layer down")
+
+        monkeypatch.setattr("core.atlas_vectors.query.landing_for_vector", _boom)
+        result = ranking.rank_candidates(
+            self._session(),
+            "astrophysics",
+            self._CANDIDATES,
+            anchor_context=self._context([_FakeAnchor("cmb", [1.0, 0.0])]),
+        )
+        assert result["available"] is True
+        assert result["ordered"][0]["relevance_label"]
+        assert "landing" not in result["ordered"][0]
+
+    def test_unavailable_ranking_never_reaches_the_landing_step(self, monkeypatch):
+        """重心が無いときは並べ替えも着地予測も起きない（新着順のまま）。"""
+        calls: list[dict] = []
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]], recorder=calls)
+        result = ranking.rank_candidates(
+            FakeSession(),
+            "astrophysics",
+            self._CANDIDATES,
+            anchor_context=self._context([_FakeAnchor("cmb", [1.0, 0.0])]),
+        )
+        assert result["available"] is False
+        assert "landing" not in result["ordered"][0]
+        assert calls == []
+
+
+# ---------------------------------------------------------------------------
 # 4. API（``POST /search`` の ``order``）
 # ---------------------------------------------------------------------------
 
@@ -385,6 +508,7 @@ def api(monkeypatch):
             "closed_world_note": routes.pd_search.CLOSED_WORLD_NOTE,
         },
         "rank_calls": [],
+        "rank_kwargs": [],
         "rank_result": None,
     }
 
@@ -410,6 +534,7 @@ def api(monkeypatch):
 
     def _rank(session, domain_key, candidates, **kwargs):
         state["rank_calls"].append((domain_key, list(candidates)))
+        state["rank_kwargs"].append(dict(kwargs))
         if state["rank_result"] is not None:
             return state["rank_result"]
         ordered = [
@@ -515,3 +640,49 @@ class TestSearchOrderApi:
         )
         assert res.status_code == 200
         assert "ranking" not in res.json()
+
+
+@pytest.mark.skipif(not _HAS_FASTAPI, reason="FastAPI not installed")
+class TestLandingAnchorContextApi:
+    """VA層 §8: 着地予測の材料はルート層が fail-soft に組む。"""
+
+    _PATH = "/api/admin/discovery/search"
+
+    def _relevance(self, api):
+        return api["client"].post(
+            self._PATH, json={"domain_key": "astrophysics", "order": "relevance"},
+            headers=api["headers"],
+        )
+
+    def test_anchor_context_is_passed_when_anchors_exist(self, api, monkeypatch):
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0], label="CMB")]
+        monkeypatch.setattr(
+            "core.atlas_vectors.builder.anchors_with_labels",
+            lambda _session, _domain: (anchors, "2026.1"),
+        )
+        assert self._relevance(api).status_code == 200
+        assert api["rank_kwargs"] == [
+            {"anchor_context": {"anchors": anchors, "skeleton_version": "2026.1"}}
+        ]
+
+    def test_no_anchors_means_no_context(self, api, monkeypatch):
+        monkeypatch.setattr(
+            "core.atlas_vectors.builder.anchors_with_labels",
+            lambda _session, _domain: ([], ""),
+        )
+        assert self._relevance(api).status_code == 200
+        assert api["rank_kwargs"] == [{"anchor_context": None}]
+
+    def test_anchor_lookup_failure_keeps_the_search(self, api, monkeypatch):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("vector layer down")
+
+        monkeypatch.setattr("core.atlas_vectors.builder.anchors_with_labels", _boom)
+        response = self._relevance(api)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["ranking"] == {"available": True}
+        assert len(body["candidates"]) == 2
+        assert all("landing" not in c for c in body["candidates"])
+        assert api["rank_kwargs"] == [{"anchor_context": None}]

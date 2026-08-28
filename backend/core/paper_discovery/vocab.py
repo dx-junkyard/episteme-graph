@@ -2,11 +2,14 @@
 
 設計正本: ``docs/features/paper_discovery_design.md`` §4.2 / §1 の成長ループ。
 
-供給元は3系統で、いずれも**システムが既に持っている分野語彙**である:
+供給元は4系統で、いずれも**システムが既に持っている分野語彙**である:
 
 1. ``skeleton``  — atlas 骨格（凍結版）の概念ラベル
 2. ``cartridge`` — カートリッジ ``ontology.json`` の aliases / concept_types
-3. ``component``— 当該分野のコースが参照する document 群の、承認済み理論部品のラベル
+3. ``alias``     — 教員が確定した骨格ノードの別名（VA層の還流2。正本は
+   ``docs/features/atlas_vector_anchoring_design.md`` §7 — 教員の裁定した語彙なので
+   ``component`` 由来より信頼が高く、その手前に置く）
+4. ``component``— 当該分野のコースが参照する document 群の、承認済み理論部品のラベル
 
 **AI・サーバが購読条件を書き換えることはない**（PD3）。ここが返すのはあくまで
 「購読編集 UI の初期チップ候補」であり、採否は教員の操作で決まる。
@@ -108,6 +111,26 @@ def _cartridge_phrases(domain_key: str) -> list[str]:
     return phrases
 
 
+def _alias_phrases(session, domain_key: str) -> list[str]:
+    """教員が確定した骨格ノードの別名（VA層 §7 の還流2）。
+
+    ``atlas_anchor_aliases`` の confirmed 行だけを読む（dismissed は出さない）。
+    並びは ``node_id`` → ``alias`` の決定論順（``confirmed_aliases_by_node`` が
+    ``node_id`` ごとに normalized 昇順で返す dict を、キー順に平坦化する）。
+    別名レジストリが無い分野・未登録の分野は空リスト（正常な状態）。
+    """
+    from core.atlas_vectors.store import confirmed_aliases_by_node  # 遅延 import
+
+    by_node = confirmed_aliases_by_node(session, domain_key) or {}
+    phrases: list[str] = []
+    for node_id in sorted(by_node):
+        for alias in by_node.get(node_id) or ():
+            value = _clean(alias)
+            if value:
+                phrases.append(value)
+    return phrases
+
+
 def _domain_document_refs(session, domain_key: str) -> list[str]:
     """当該分野のコースが参照する document の参照値（id と source_path の両方）。
 
@@ -148,6 +171,8 @@ def _component_phrases(session, domain_key: str) -> list[str]:
 _SUPPLIERS = (
     ("skeleton", lambda session, domain_key: _skeleton_phrases(session, domain_key)),
     ("cartridge", lambda session, domain_key: _cartridge_phrases(domain_key)),
+    # 教員の確定語彙は、解析由来の部品ラベルより先に置く（VA層 §7 の還流2）。
+    ("alias", lambda session, domain_key: _alias_phrases(session, domain_key)),
     ("component", lambda session, domain_key: _component_phrases(session, domain_key)),
 )
 
@@ -155,7 +180,7 @@ _SUPPLIERS = (
 def keyphrase_candidates(session, domain_key: str, *, limit: int = 40) -> list[dict]:
     """分野語彙から供給されるキーフレーズ候補を ``[{"text", "source"}]`` で返す。
 
-    同一テキストは**最初の供給元が優先**される（骨格 → カートリッジ → 部品の順。
+    同一テキストは**最初の供給元が優先**される（骨格 → カートリッジ → 別名 → 部品の順。
     出所は表示に使うため、後から来た同じ語で上書きしない）。
     どの供給元も fail-soft で、落ちた系統は結果から抜けるだけ。
 

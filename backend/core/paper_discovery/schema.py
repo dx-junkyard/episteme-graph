@@ -31,8 +31,10 @@ from typing import Any, Optional
 
 #: キーフレーズの供給元語彙（PD3 — 各フレーズがどこから来たかを必ず明示する）。
 #: ``skeleton`` = atlas 骨格の概念ラベル / ``cartridge`` = カートリッジ ontology /
+#: ``alias`` = 教員が確定した骨格ノードの別名
+#: （``docs/features/atlas_vector_anchoring_design.md`` §7 の還流2）/
 #: ``component`` = 承認済み理論部品のラベル / ``manual`` = 教員が自分で足したもの。
-KEYPHRASE_SOURCES = ("skeleton", "cartridge", "component", "manual")
+KEYPHRASE_SOURCES = ("skeleton", "cartridge", "component", "alias", "manual")
 
 #: 供給元が不明・不正だったキーフレーズの落とし所（教員が足したものと同じ扱い）。
 DEFAULT_KEYPHRASE_SOURCE = "manual"

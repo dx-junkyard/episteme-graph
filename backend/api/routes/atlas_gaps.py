@@ -222,6 +222,19 @@ def list_atlas_gap_candidates(
             current_version=version,
             include_dismissed=include_dismissed,
         )
+        # 近傍注記（VA層 §7。読み時導出・保存しない）。ベクトル層が使えなければ
+        # ``near_anchor`` キーが付かないだけで、候補一覧は従来と完全に同じ形で返る。
+        try:
+            from core.atlas_vectors.annotate import annotate_gap_clusters
+
+            candidates = annotate_gap_clusters(
+                session, cartridge_id, version, candidates
+            )
+        except Exception:  # noqa: BLE001 — 注記の失敗でレビューキューを壊さない
+            logger.warning(
+                "atlas gap candidates: anchor annotation unavailable for %s (non-fatal)",
+                cartridge_id, exc_info=True,
+            )
         draft_row = atlas_store.load_draft(session, cartridge_id)
     finally:
         session.close()

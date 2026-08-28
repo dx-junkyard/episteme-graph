@@ -274,14 +274,54 @@ def _embed(texts: list[str]) -> list[list[float]]:
         return generate_embeddings(texts)
 
 
+def _attach_landing(payload: dict, vector: Optional[Sequence[float]], anchor_context: Any) -> None:
+    """候補に「取り込むと地図のどこに落ちそうか」の事実を足す（VA層 §8）。
+
+    ``anchor_context`` は ``{"anchors": [AnchorVector, ...], "skeleton_version": str}``。
+    **追加の embedding 呼び出しはゼロ**（並べ替えで既に作った候補ベクトルを流用する）。
+    骨格版は呼び出し側が知っている値をそのまま刻む（VA8 閉世界の正直さ）。
+    下位帯・アンカー不在・未測定では ``landing`` キー自体を付けない（VA4）。
+    """
+    if not anchor_context or not vector:
+        return
+    anchors = list((anchor_context or {}).get("anchors") or [])
+    version = str((anchor_context or {}).get("skeleton_version") or "").strip()
+    if not anchors or not version:
+        return
+    try:
+        from core.atlas_vectors.query import landing_for_vector  # 遅延 import
+
+        landing = landing_for_vector(vector, anchors)
+    except Exception:  # noqa: BLE001 — 着地予測が出ないだけ（検索は成立させる）
+        logger.warning("landing prediction failed (non-fatal)", exc_info=True)
+        return
+    if not landing:
+        return
+    payload["landing"] = {
+        "node_label": landing.get("node_label") or "",
+        "region_label": landing.get("region_label") or "",
+        "nearness_label": landing.get("nearness_label") or "",
+        "skeleton_version": version,
+    }
+
+
 def rank_candidates(
     session,
     domain_key: str,
     candidates: Sequence[dict],
     *,
     daily_limit: Optional[int] = None,
+    anchor_context: Optional[dict] = None,
 ) -> dict:
     """候補を分野の重心との関連度で並べ替える（PD4 — 生スコアは返さない）。
+
+    Args:
+        anchor_context: 着地予測（VA層 §8）の材料
+            ``{"anchors": [AnchorVector, ...], "skeleton_version": str}``。
+            省略時は従来どおり ``landing`` キーを付けない（完全後方互換）。
+            アンカーとの照合は DB・LLM に触れない純計算
+            （``core.atlas_vectors.query.landing_for_vector``）で、**候補の埋め込みは
+            並べ替えの1バッチを流用する**（発見層の embedding 予算は増えない）。
 
     Returns:
         ``{"available": bool, "ordered": [candidate, ...], "note"?: str}``。
@@ -334,10 +374,13 @@ def rank_candidates(
 
     scored: list[tuple[int, Optional[float], dict]] = []
     for index, (item, vector) in enumerate(zip(items, vectors)):
-        similarity = cosine_similarity(centroid, _parse_vector(vector) or [])
+        parsed = _parse_vector(vector)
+        similarity = cosine_similarity(centroid, parsed or [])
         payload = dict(item)
         # 段階ラベルは正本のスケールからのみ引く（未測定は最も慎重な段階へ倒れる）。
         payload["relevance_label"] = DISCOVERY_RELEVANCE_SCALE.label_for(similarity)
+        # 着地予測（VA層 §8）。同じベクトルの使い回しなので追加コールは無い。
+        _attach_landing(payload, parsed, anchor_context)
         scored.append((index, similarity, payload))
 
     # 未測定（None）は最後尾へ。同点は入力順（= 新着順）を保つ安定ソート。

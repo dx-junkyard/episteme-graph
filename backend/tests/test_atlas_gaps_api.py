@@ -275,6 +275,81 @@ class TestGapCandidateQueue:
         assert client.get(_QUEUE_PATH, headers=_auth(student)).status_code == 403
 
 
+class TestNearAnchorAnnotation:
+    """VA層 §7: 近傍注記は読み時導出で、出ないときは既存レスポンスと完全に同じ形。"""
+
+    def _annotate(self, env, fake):
+        env["monkeypatch"].setattr(
+            "core.atlas_vectors.annotate.annotate_gap_clusters", fake
+        )
+
+    def test_near_anchor_is_attached_with_the_skeleton_version(
+        self, client_and_tokens, env
+    ):
+        client, _student, teacher = client_and_tokens
+        _seed_repeated_signals(env["session"])
+        calls: list[tuple] = []
+
+        def _fake(session, domain_key, skeleton_version, clusters, **kwargs):
+            calls.append((domain_key, skeleton_version, len(clusters)))
+            return [
+                dict(
+                    c,
+                    near_anchor={
+                        "node_id": "cmb",
+                        "node_label": "CMB",
+                        "region_label": "宇宙論・大規模構造",
+                        "nearness_label": "かなり近い",
+                        "skeleton_version": skeleton_version,
+                    },
+                )
+                for c in clusters
+            ]
+
+        self._annotate(env, _fake)
+        body = client.get(_QUEUE_PATH, headers=_auth(teacher)).json()
+
+        assert calls == [(_DOMAIN, "2026.1", 1)]
+        annotation = body["candidates"][0]["near_anchor"]
+        assert annotation["node_label"] == "CMB"
+        assert annotation["skeleton_version"] == "2026.1"
+        # 生スコアは載らない（VA2）。
+        assert "similarity" not in _keys_recursive(body)
+        assert "score" not in _keys_recursive(body)
+
+    def test_annotation_failure_keeps_the_queue(self, client_and_tokens, env):
+        client, _student, teacher = client_and_tokens
+        _seed_repeated_signals(env["session"])
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("vector layer down")
+
+        self._annotate(env, _boom)
+        response = client.get(_QUEUE_PATH, headers=_auth(teacher))
+
+        assert response.status_code == 200
+        body = response.json()
+        assert len(body["candidates"]) == 1
+        assert "near_anchor" not in body["candidates"][0]
+
+    def test_no_annotation_keeps_the_response_backward_compatible(
+        self, client_and_tokens, env
+    ):
+        client, _student, teacher = client_and_tokens
+        _seed_repeated_signals(env["session"])
+        self._annotate(env, lambda _s, _d, _v, clusters, **_k: [dict(c) for c in clusters])
+
+        body = client.get(_QUEUE_PATH, headers=_auth(teacher)).json()
+        assert set(body) == {
+            "cartridge_id",
+            "candidates",
+            "skeleton_version",
+            "draft_exists",
+            "draft_revision",
+        }
+        assert "near_anchor" not in body["candidates"][0]
+
+
 # ---------------------------------------------------------------------------
 # 2. 判断（採用 / 見送り / 復帰）
 # ---------------------------------------------------------------------------

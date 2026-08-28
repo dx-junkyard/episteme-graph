@@ -62,7 +62,7 @@ confirmed リンクと骨格が育っている — 事前構築の実体は自�
 |---|---|---|
 | **PD1** | **発見は自動、取り込みは教員の明示承認のみ** | 候補のリストアップまでが機械の仕事。解析パイプラインに入るのは教員が選択・確認した論文だけ。全自動クロール取り込みの経路を作らない（LLM コストの弁であると同時に、レビューされない inferred 成果物の無限堆積を防ぐ。candidate-only 原則の取り込み版）。 |
 | **PD2** | **取得・解析は既存経路へ完全合流** | 承認された論文の取得は `core/url_fetch.py`（UF1〜UF6）を呼ぶだけ。許可ドメイン照合・SSRF ガード・形式判定・`_accept_material_source` への合流をそのまま継承し、ディスカバリー専用の取得経路・専用の教材種別を作らない。A層は非改変。 |
-| **PD3** | **検索語彙は分野語彙から供給し、出所を明示する** | キーフレーズ候補は骨格概念・カートリッジ ontology（aliases 含む）・confirmed 理論部品から自動供給し、各フレーズに供給元を表示する。教員は自由に外せる・足せる。**AI・サーバが購読条件を教員の操作なしに書き換えることはない**（購読は教員の意思の正本）。 |
+| **PD3** | **検索語彙は分野語彙から供給し、出所を明示する** | キーフレーズ候補は骨格概念・カートリッジ ontology（aliases 含む）・教員が確定した骨格ノードの別名（`alias`。[VA層設計書](atlas_vector_anchoring_design.md) §7 の還流2）・confirmed 理論部品から自動供給し、各フレーズに供給元を表示する（出所5語彙 `skeleton|cartridge|component|alias|manual`）。教員は自由に外せる・足せる。**AI・サーバが購読条件を教員の操作なしに書き換えることはない**（購読は教員の意思の正本）。 |
 | **PD4** | **数値スコアを見せない（教員含む）** | 類似度・一致度の生数値は UI・API レスポンスに出さない。提示は並び順と段階ラベルまで（LS/W8 と同じ規律）。 |
 | **PD5** | **候補は保存せず読み時導出** | サーバに保存するのは購読条件・見送り記録・取り込み対応（出所 URL）だけ。候補一覧は毎回 arXiv API から導出し、「取り込み済み」「見送り済み」の判定も既存行との突合で導出する（G1 と同じ思想 — 完了フラグ・候補スナップショットのテーブルを持たない）。見送りは行削除せず状態遷移で保持し、復帰できる（P4）。 |
 | **PD6** | **閉世界の正直さ** | 候補一覧は「この購読条件で arXiv を検索した結果」であって分野の全体ではない。UI は検索条件を常に併記し、「この分野の論文は他にない」と読める表示をしない（SL1 の同族）。API 失敗時は事実文で degrade し、空一覧を「該当なし」と偽らない。 |
@@ -107,7 +107,8 @@ CREATE TABLE IF NOT EXISTS paper_discovery_subscriptions (
     domain_key        TEXT PRIMARY KEY,          -- atlas ドメイン / cartridge_id 名前空間
     arxiv_categories  TEXT[] NOT NULL DEFAULT '{}',
     keyphrases        JSONB  NOT NULL DEFAULT '[]',
-    -- keyphrases 要素: {"text": "...", "source": "skeleton"|"cartridge"|"component"|"manual",
+    -- keyphrases 要素: {"text": "...",
+    --                   "source": "skeleton"|"cartridge"|"component"|"alias"|"manual",
     --                   "enabled": true}  — 供給元の明示（PD3）。外した状態も保持する（P4）
     followed_authors  JSONB  NOT NULL DEFAULT '[]',
     updated_by        UUID,
@@ -145,7 +146,7 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT;
 
 | ファイル | 責務 |
 |---|---|
-| `schema.py` | dataclass / 語彙の正本。`normalize_arxiv_id()`（URL・version 吸収）、キーフレーズ供給元語彙（`skeleton` / `cartridge` / `component` / `manual`） |
+| `schema.py` | dataclass / 語彙の正本。`normalize_arxiv_id()`（URL・version 吸収）、キーフレーズ供給元語彙（`skeleton` / `cartridge` / `component` / `alias` / `manual`。`alias` = 教員が確定した骨格ノードの別名 — [VA層設計書](atlas_vector_anchoring_design.md) §7 の還流2） |
 | `arxiv_client.py` | arXiv API 呼び出しの唯一の入口。`export.arxiv.org` への HTTPS 固定・**モジュールレベルの 3 秒スロットル**（前回呼び出し時刻を保持し不足分 sleep）・タイムアウト・`xml.etree` による Atom パース。返すのは正規化済み `ArxivEntry`（id / title / authors / summary / categories / published / updated / pdf_url） |
 | `vocab.py` | キーフレーズ候補の供給。①`atlas_store.load_learner_skeleton()` の概念ラベル ②カートリッジ `ontology.json` の aliases / notation_patterns ③当該分野の document 群から confirmed / teacher_approved な `theory_components` のラベル。各候補に `source` を付けて返す（PD3） |
 | `search.py` | 購読条件 → `search_query` 文字列の組み立て（カテゴリ OR 結合 + フレーズ AND/OR）、結果への注釈付け（取り込み済み / 見送り済みの読み時導出）、新着判定（`last_checked_at` 比較） |

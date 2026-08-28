@@ -407,16 +407,45 @@ def list_keyphrase_candidates(
 # ---------------------------------------------------------------------------
 
 
+def _anchor_context(session, domain_key: str) -> Optional[dict]:
+    """着地予測（VA層 §8）の材料。使えないときは ``None``（キーごと付かない）。
+
+    骨格なし・アンカー未構築・DB 不達のいずれも**正常な状態**として静かに縮退する
+    （VA4）。返すのは現行凍結版のアンカーとその版だけで、生スコアには触れない。
+    """
+    try:
+        from core.atlas_vectors.builder import anchors_with_labels
+
+        anchors, version = anchors_with_labels(session, domain_key)
+    except Exception:  # noqa: BLE001 — 着地予測が出ないだけ（検索は成立させる）
+        logger.warning(
+            "landing prediction unavailable for domain %s (non-fatal)",
+            domain_key, exc_info=True,
+        )
+        return None
+    if not anchors or not version:
+        return None
+    return {"anchors": anchors, "skeleton_version": version}
+
+
 def _apply_relevance_order(session, domain_key: str, result: dict) -> dict:
     """検索結果を関連度で並べ替える（Phase 3）。**失敗しても検索を落とさない**。
 
     生の類似度は ``ranking`` 側で閉じており、ここが受け取るのは並び順と段階ラベル
     だけ（PD4）。並べ替え不能は ``ranking.available=false`` + 事実文で正直に返し、
     候補は新着順のまま残す（PD6 — 黙って空にしない・黙って順序を変えない）。
+
+    現行凍結版のアンカーが読めるときは、同じ経路で着地予測（VA層 §8 の ``landing``）も
+    付く。アンカーが無ければキー自体が付かない（既存レスポンスと後方互換）。
     """
     candidates = list(result.get("candidates") or [])
     try:
-        ranked = pd_ranking.rank_candidates(session, domain_key, candidates)
+        ranked = pd_ranking.rank_candidates(
+            session,
+            domain_key,
+            candidates,
+            anchor_context=_anchor_context(session, domain_key),
+        )
     except Exception:  # noqa: BLE001 — 並べ替えの失敗で検索結果を捨てない
         logger.warning("relevance ordering failed for domain %s", domain_key, exc_info=True)
         ranked = {"available": False, "note": pd_ranking.NOTE_UNAVAILABLE, "ordered": candidates}

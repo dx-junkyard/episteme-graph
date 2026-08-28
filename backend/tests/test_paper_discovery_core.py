@@ -774,19 +774,22 @@ class TestRunSearch:
 
 
 class TestKeyphraseCandidates:
-    def test_collects_from_all_three_suppliers_with_source(self, monkeypatch):
+    def test_collects_from_all_suppliers_with_source(self, monkeypatch):
         session = DiscoveryFake()
         monkeypatch.setattr(
             vocab, "_skeleton_phrases", lambda s, d: ["dark energy", "structure growth"]
         )
         monkeypatch.setattr(vocab, "_cartridge_phrases", lambda d: ["HQET"])
+        monkeypatch.setattr(vocab, "_alias_phrases", lambda s, d: ["CMB lensing"])
         monkeypatch.setattr(vocab, "_component_phrases", lambda s, d: ["form factor"])
 
         out = vocab.keyphrase_candidates(session, "astrophysics")
+        # 供給順は 骨格 → カートリッジ → 別名（教員の確定語彙）→ 部品（VA層 §7 の還流2）。
         assert out == [
             {"text": "dark energy", "source": "skeleton"},
             {"text": "structure growth", "source": "skeleton"},
             {"text": "HQET", "source": "cartridge"},
+            {"text": "CMB lensing", "source": "alias"},
             {"text": "form factor", "source": "component"},
         ]
         assert {c["source"] for c in out} <= set(schema.KEYPHRASE_SOURCES)
@@ -845,3 +848,54 @@ class TestKeyphraseCandidates:
         session = DiscoveryFake()
         assert vocab._component_phrases(session, "astrophysics") == []
         assert "theory_components" not in session.sql_log
+
+
+class TestAliasSupplier:
+    """VA層 §7 の還流2 — 教員が確定した別名がキーフレーズ供給に入る。"""
+
+    def test_flattens_confirmed_aliases_in_a_deterministic_order(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.atlas_vectors.store.confirmed_aliases_by_node",
+            lambda _session, _domain: {
+                "cmb": ["CMB", "宇宙マイクロ波背景"],
+                "bao": ["BAO"],
+            },
+        )
+        # node_id 昇順 → その中は store が返す順（normalized 昇順）。
+        assert vocab._alias_phrases(DiscoveryFake(), "astrophysics") == [
+            "BAO",
+            "CMB",
+            "宇宙マイクロ波背景",
+        ]
+
+    def test_no_aliases_is_a_normal_state(self, monkeypatch):
+        monkeypatch.setattr(
+            "core.atlas_vectors.store.confirmed_aliases_by_node",
+            lambda _session, _domain: {},
+        )
+        assert vocab._alias_phrases(DiscoveryFake(), "astrophysics") == []
+
+    def test_failure_does_not_break_the_other_suppliers(self, monkeypatch):
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("alias table unavailable")
+
+        monkeypatch.setattr(
+            "core.atlas_vectors.store.confirmed_aliases_by_node", _boom
+        )
+        monkeypatch.setattr(vocab, "_skeleton_phrases", lambda s, d: ["dark energy"])
+        monkeypatch.setattr(vocab, "_cartridge_phrases", lambda d: [])
+        monkeypatch.setattr(vocab, "_component_phrases", lambda s, d: ["form factor"])
+
+        out = vocab.keyphrase_candidates(DiscoveryFake(), "astrophysics")
+        assert out == [
+            {"text": "dark energy", "source": "skeleton"},
+            {"text": "form factor", "source": "component"},
+        ]
+
+    def test_supplier_is_registered_between_cartridge_and_component(self):
+        order = [name for name, _fn in vocab._SUPPLIERS]
+        assert order == ["skeleton", "cartridge", "alias", "component"]
+        assert set(order) <= set(schema.KEYPHRASE_SOURCES)
+        # "manual"（教員が自分で足したもの）は供給元ではなく、語彙の末尾に残る。
+        assert schema.KEYPHRASE_SOURCES[-1] == "manual"
+        assert "manual" not in order
