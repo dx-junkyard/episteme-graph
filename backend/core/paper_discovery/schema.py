@@ -39,6 +39,13 @@ DEFAULT_KEYPHRASE_SOURCE = "manual"
 #: 候補1件の状態（読み時導出。テーブルには保存しない — PD5）。
 CANDIDATE_STATUSES = ("new", "ingested", "dismissed")
 
+#: 論文レーダーの距離語彙（正本: ``docs/features/paper_radar_design.md`` §5.1）。
+#: ``near`` = カテゴリ + キーフレーズで絞る / ``mid`` / ``far`` = カテゴリのみで網を張り、
+#: seed 教材からの意味的な遠さは第2層の帯分け（``ranking.band_candidates``）が担う。
+#: 距離帯の**表示ラベル**は語彙ではなく段階ラベルなので、正本は
+#: ``core.label_vocab.RADAR_DISTANCE_SCALE`` 側にある（PR2 — 閾値・文字列をここに置かない）。
+RADAR_DISTANCES = ("near", "mid", "far")
+
 #: arXiv API の宛先ホスト（PD7 — 呼び出し側から URL を渡せない固定値）。
 ARXIV_API_HOST = "export.arxiv.org"
 

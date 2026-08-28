@@ -126,6 +126,26 @@ _REGISTRY: list[Capability] = [
                   "アップロード領域の中にある「arXivから探す」を押します"),
         ),
     ),
+    # 論文レーダー（paper_radar_design.md §4.2）: 教材1件を起点にした類似論文探索の道案内。
+    # 比較分析（POST /api/admin/discovery/radar/compare）・取り込みの代行 capability は
+    # 登録しない — arxiv_discovery と同じ判断（LLM コストを伴う操作を Copilot 代行に
+    # 載せない / 取り込みの弁は教員の明示操作のまま。PR3/PR5）。
+    Capability(
+        id="materials.paper_radar",
+        screen="materials",
+        title="この論文に近い論文を探す（論文レーダー）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#paper-radar",
+        description="教材（論文）を起点に、距離（近い / 中間 / 同じ分野の別テーマ）を選んで "
+                    "arXiv から類似論文の候補を並べる。必要なら候補との違いを AI に分析させ、"
+                    "取り込みは既存の取り込み操作（教員の明示操作）で行う。",
+        api={"method": "POST", "path": "/api/admin/discovery/radar/search"},
+        locate_steps=(
+            _step("materials", "paper_radar_row_menu",
+                  "起点にしたい教材の行の「⋯」メニューから「近い論文を探す…」を開けます"),
+        ),
+    ),
     # --- コース構築 (course-builder) ---
     # 多ターンチャットのため apply/revert を持たせず、道案内・説明に留める（P1 の段階登録）。
     Capability(

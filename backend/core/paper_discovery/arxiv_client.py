@@ -34,6 +34,7 @@ from core.paper_discovery.schema import (
     ARXIV_API_HOST,
     ArxivEntry,
     abs_url_for,
+    normalize_arxiv_id,
     pdf_url_for,
     split_arxiv_ref,
 )
@@ -48,6 +49,11 @@ DEFAULT_TIMEOUT_SECONDS = 30.0
 
 #: 1リクエストで要求できる件数の上限（UI 表示は数十件 + 「さらに読み込む」で足りる）。
 MAX_RESULTS_LIMIT = 200
+
+#: ``id_list`` で一度に指定できる ID の上限（論文レーダー §5.4。seed のメタデータ取得は
+#: 1件、比較分析の候補取り直しは :data:`~core.paper_discovery.compare.
+#: RADAR_COMPARE_MAX_CANDIDATES` 件なので、控えめな定数で足りる）。
+MAX_ID_LIST = 20
 
 #: 並び順の語彙（arXiv API の ``sortBy`` / ``sortOrder``）。
 #: v1 は日付順のみ（並び順は新着順 = 機械の点数を持ち込まない、PD4）。
@@ -261,3 +267,50 @@ def search(
 
     payload = _http_get(params, timeout)
     return parse_atom(payload)
+
+
+def fetch_by_ids(
+    ids,
+    *,
+    timeout: float = DEFAULT_TIMEOUT_SECONDS,
+) -> list[ArxivEntry]:
+    """arXiv ID を指定してメタデータを1コールで取得する（論文レーダー §5.4）。
+
+    ``search()`` と同じ :func:`_throttle` / タイムアウト / :func:`parse_atom` を通り、
+    宛先は定数ホストのまま（PR6 / PD7）。ID は
+    :func:`~core.paper_discovery.schema.normalize_arxiv_id` で正規化してから
+    ``id_list`` に載せる（版違い・URL 表記のゆれを吸収する）。
+
+    Args:
+        ids: arXiv ID / URL の列。先頭 :data:`MAX_ID_LIST` 件だけを使う
+            （超過分は黙って捨てるのではなく、呼び出し側が上限を持って渡す前提。
+            防波堤としてここでも切り詰める）。
+        timeout: HTTP タイムアウト（秒）。
+
+    Returns:
+        取得できた :class:`ArxivEntry` の列。引けなかった ID は結果に現れない
+        （呼び出し側が「引けなかった事実」を正直に返す — 黙って埋めない）。
+        正規化できる ID が1件も無ければ **API を呼ばず** 空リスト。
+
+    Raises:
+        ArxivApiError: 接続失敗・非200・パース不能。
+    """
+    normalized: list[str] = []
+    for ref in ids or ():
+        arxiv_id = normalize_arxiv_id(ref)
+        if arxiv_id and arxiv_id not in normalized:
+            normalized.append(arxiv_id)
+        if len(normalized) >= MAX_ID_LIST:
+            break
+
+    if not normalized:
+        # 指定ゼロで API を叩くと全件が返る（search() の空クエリと同じ理由 — PD6）。
+        return []
+
+    params = {
+        "id_list": ",".join(normalized),
+        "start": 0,
+        "max_results": len(normalized),
+    }
+    payload = _http_get(params, timeout)
+    return parse_atom(payload)[1]

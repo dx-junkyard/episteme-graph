@@ -432,6 +432,11 @@
       var landscapeBtn = m.document_id
         ? '<button class="ls-menu-item admin-landscape-doc-btn" type="button" data-ui-anchor="materials.row-landscape" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この論文が分野マップ（基準地図）のどこに位置づくかのAI候補を確認・却下・再検討します">位置づけ（分野マップ）…</button>'
         : "";
+      // 論文レーダー（paper_radar_design.md §4.1）: この論文を起点に arXiv から
+      // 近い / 中間 / 同じ分野の別テーマ の候補を探す（取り込みは既存の弁のみ。document_id が必要）
+      var radarBtn = m.document_id
+        ? '<button class="ls-menu-item admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この論文を起点に、距離（近い/中間/同じ分野の別テーマ）を選んで arXiv から候補を探します">📡 近い論文を探す…</button>'
+        : "";
       // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 輪講の前にこの論文の
       // 「賭け金」（脆い前提・一点吊りの支持線・晴れ間）を10分で把握する read-only
       // 合成ビュー（新テーブル・新LLMゼロ、SB1。document_id が必要）
@@ -465,6 +470,7 @@
             shareBtn +
             versionBtn +
             landscapeBtn +
+            radarBtn +
             seminarBriefBtn +
             estimateBtn +
             pdfBtn +
@@ -528,6 +534,18 @@
     tbody.querySelectorAll(".admin-landscape-doc-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openLandscapeModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 論文レーダー（paper_radar_design.md §4.1）: 教材起点の類似論文探索モーダル
+    tbody.querySelectorAll(".admin-radar-doc-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.PaperRadar) {
+          window.PaperRadar.openModal(
+            this.getAttribute("data-document-id"),
+            this.getAttribute("data-title")
+          );
+        }
       });
     });
 
@@ -10433,6 +10451,15 @@
           });
         }
       }
+      // 論文レーダー層（paper_radar_design.md PR1〜PR8）— 教材行の「近い論文を探す」モーダル。
+      // ディスカバリーと同じ合流点（handleUploadAccepted）を注入し、取り込みは既存の弁のみ（PR3）。
+      if (window.PaperRadar) {
+        window.PaperRadar.init({
+          apiFetch: apiFetch,
+          escHtml: escHtml,
+          onUploadAccepted: handleUploadAccepted,
+        });
+      }
       if (window.LectureStudio) {
         window.LectureStudio.init({
           apiFetch: apiFetch,
@@ -10557,6 +10584,12 @@
       upload_dropzone: function () { return document.getElementById("upload-zone"); },
       // 論文ディスカバリー（paper_discovery_design.md §4.4）: 「arXivから探す」入口ボタン。
       paper_discovery_button: function () { return document.getElementById("paper-discovery-link"); },
+      // 論文レーダー（paper_radar_design.md §4.1）: 入口は教材行の「⋯」メニュー内なので、
+      // 道案内はまずメニューのトリガーを点灯する（P8: 誘導まで。開くのは本人）。
+      paper_radar_row_menu: function () {
+        return document.querySelector("#materials-tbody .material-more-trigger")
+          || document.getElementById("materials-table");
+      },
       material_row: function (id) {
         if (id) _matLastAnchoredMaterialId = id;
         return id

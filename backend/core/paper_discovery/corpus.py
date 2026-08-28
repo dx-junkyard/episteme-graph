@@ -59,6 +59,68 @@ def domain_material_ids(session, domain_key: str) -> list[str]:
     return [m for m in dict.fromkeys(material_ids) if m]
 
 
+def document_domain_keys(session, document_ref: str) -> list[str]:
+    """document → 所属分野（``cartridge_id``）の**逆引き**（論文レーダー §5.1）。
+
+    :func:`domain_material_ids` の逆方向で、この document の ``source_path`` を
+    sources に含むコースの ``cartridge_id`` を**コース作成の新しい順**に返す。
+    レーダーのカテゴリ供給②（seed の分野購読）と、取り込み時に既存 API へ渡す
+    ``domain_key``（監査の帰属）に使う。
+
+    Args:
+        session: SQLAlchemy セッション（読み取りのみ。commit しない）。
+        document_ref: ``documents.id``（UUID 文字列）または ``source_path``
+            （material_id）。どちらでも解決する（``services._resolve_document``
+            と同じ二面性）。
+
+    Returns:
+        分野キーの列（重複除去・順序保持）。**ゼロは正常な状態**（この論文を参照する
+        コースがまだ無い / コースに分野が設定されていない）。
+    """
+    from core.course_data import course_source_material_ids  # 遅延 import
+
+    ref = str(document_ref or "").strip()
+    if not ref:
+        return []
+
+    row = session.execute(
+        sa_text(
+            """
+            SELECT COALESCE(source_path, '')
+              FROM documents
+             WHERE id::text = :ref OR source_path = :ref
+             LIMIT 1
+            """
+        ),
+        {"ref": ref},
+    ).fetchone()
+    source_path = str((row or [""])[0] or "").strip()
+    if not source_path:
+        # material_id が無い document はコース sources から辿れない（判定不能を
+        # 「分野なし」と偽らず、空を返して呼び出し側の縮退に任せる — PD6）。
+        return []
+
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT COALESCE(data->>'cartridge_id', ''), data
+              FROM learning_courses
+             WHERE COALESCE(data->>'cartridge_id', '') <> ''
+             ORDER BY created_at DESC NULLS LAST, id
+            """
+        )
+    ).fetchall()
+
+    keys: list[str] = []
+    for row in rows:
+        domain_key = str(row[0] or "").strip()
+        if not domain_key or domain_key in keys:
+            continue
+        if source_path in course_source_material_ids(row[1]):
+            keys.append(domain_key)
+    return keys
+
+
 def domain_document_refs(session, domain_key: str) -> list[str]:
     """当該分野の document の参照値（``documents.id`` と ``source_path`` の両方）。
 

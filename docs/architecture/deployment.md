@@ -145,6 +145,8 @@ STDPART_MAX_CALLS_PER_DAY=10            # W層 Phase S 標準化判定
 FIGURE_STUDIO_MAX_CALLS_PER_DAY=60      # 教材図スタジオ 対話生成
 FIGURE_SUGGEST_MAX_CALLS_PER_DAY=20     # 同・ギャップ提案（対話とは独立）
 ATLAS_ASSIST_MAX_CALLS_PER_DAY=60       # 分野の地図 骨格エディタの AI アシスト
+DISCOVERY_COMPARE_MAX_CALLS_PER_DAY=20  # 論文レーダー 比較分析（教員ごと・日次）
+DISCOVERY_COMPARE_LLM_MODEL=            # 同・モデル（空 = fast tier）
 
 # パイプラインのステージ（1 document = 1 コール系）
 DISCUSS_OPENING_MAX_CALLS_PER_DAY=20       # discuss 開幕素材の生成

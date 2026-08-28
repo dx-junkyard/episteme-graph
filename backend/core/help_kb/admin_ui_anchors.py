@@ -261,6 +261,11 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.figures-modal",
         "materials.landscape-modal",
         "materials.landscape-propose",
+        "materials.radar-compare",
+        "materials.radar-distance",
+        "materials.radar-ingest",
+        "materials.radar-modal",
+        "materials.radar-search",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
@@ -277,6 +282,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-more-menu",
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
+        "materials.row-radar",
         "materials.row-resume-analysis",
         "materials.row-retry-stage",
         "materials.row-seminar-brief",
@@ -817,6 +823,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.landscape-modal": "teacher/11-admin-materials.md#landscape-modal",
     # AIで再提案（配置候補の再生成）
     "materials.landscape-propose": "teacher/11-admin-materials.md#landscape-propose",
+    # 違いを分析（論文レーダー, paper_radar_design.md §4.2）— 要旨比較の AI 推定・非保存
+    "materials.radar-compare": "teacher/11-admin-materials.md#radar-compare",
+    # 距離（近い / 中間 / 同じ分野の別テーマ。段階ラベルのみ・数値は出さない）
+    "materials.radar-distance": "teacher/11-admin-materials.md#radar-distance",
+    # 選択した論文を取り込む（レーダー）— 取り込みの弁は既存 ingest と同一
+    "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
+    # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）
+    "materials.radar-modal": "teacher/11-admin-materials.md#radar-modal",
+    # この条件で検索（レーダー）— arXiv のメタデータのみ・テキスト LLM 不使用
+    "materials.radar-search": "teacher/11-admin-materials.md#radar-search",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス
     "materials.library-entry-merge-target": "teacher/11-admin-materials.md#library-entry-merge-target",
     # ライブラリへ昇格モーダル
@@ -849,6 +865,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-pdf-reupload": "teacher/11-admin-materials.md#pdf-reupload",
     # パイプラインを実行 ▼
     "materials.row-pipeline-run": "teacher/11-admin-materials.md#pipeline-run",
+    # 📡 近い論文を探す…（paper_radar_design.md §4.1: 教材起点の類似論文探索の入口）
+    "materials.row-radar": "teacher/11-admin-materials.md#radar-open",
     # 解析再開
     "materials.row-resume-analysis": "teacher/11-admin-materials.md#resume-analysis",
     # ステージ再実行（縮退時のみ表示されるリンク）

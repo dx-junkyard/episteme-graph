@@ -129,7 +129,14 @@ class TestAdminUiAnchorsModule:
         # + コーパス回遊層 Phase D（corpus_roaming_design.md §7）の1件:
         #   materials.arxiv-discovery-interest（学習者の関心。k-匿名レンジの事実行だけを
         #   出し、行が無ければ区画ごと非表示 — CR6 / CR10）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 293
+        # + 論文レーダー（paper_radar_design.md §4.2）の6件:
+        #   materials.row-radar（⋯メニューの「📡 近い論文を探す…」）/
+        #   .radar-modal（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）/
+        #   .radar-distance（近い / 中間 / 同じ分野の別テーマ。段階ラベルのみ — PR2）/
+        #   .radar-search（arXiv のメタデータのみ・テキスト LLM 不使用）/
+        #   .radar-compare（違いを分析。AI 推定・非保存・日次上限で無効化される — PR4）/
+        #   .radar-ingest（取り込みの弁は既存 ingest と同一 — PR3）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 299
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

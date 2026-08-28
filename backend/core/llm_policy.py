@@ -55,6 +55,7 @@ SCENE_DOUBT = "doubt"
 SCENE_DELIBERATION = "deliberation"
 SCENE_ASSISTANT = "assistant"
 SCENE_FIGURE_STUDIO = "figure_studio"
+SCENE_DISCOVERY_COMPARE = "discovery_compare"
 
 _SCENE_LABELS: dict[str, str] = {
     SCENE_PIPELINE: "教材の解析",
@@ -69,6 +70,7 @@ _SCENE_LABELS: dict[str, str] = {
     SCENE_DELIBERATION: "要素検討ワークスペース",
     SCENE_ASSISTANT: "管理アシスタント",
     SCENE_FIGURE_STUDIO: "教材図スタジオ",
+    SCENE_DISCOVERY_COMPARE: "類似論文の比較分析",
 }
 
 
@@ -140,6 +142,11 @@ def scene_for_feature(feature: str) -> str | None:
         # ギャップ提案は教員から見て同じ場面なので、1つの scene に束ねる（vision 不要 —
         # SVG はテキスト生成なので _VISION_REQUIRED_SCENE_KEYS には入れない）。
         return SCENE_FIGURE_STUDIO
+    if feature == "discovery:compare":
+        # 論文レーダーの比較分析（設計書 paper_radar_design.md §5.3）。同じ発見層でも
+        # ``discovery:ranking`` は embedding なので scene を持たない（上の分岐で None）—
+        # モデルを選べるのはテキスト生成のこの1本だけ。
+        return SCENE_DISCOVERY_COMPARE
     if feature == "admin:assistant":
         return SCENE_ASSISTANT
     if feature == "admin:component_candidates":
@@ -232,6 +239,7 @@ _SCENE_REPRESENTATIVE_FEATURE: dict[str, str] = {
     SCENE_DELIBERATION: "deliberation:chat",
     SCENE_ASSISTANT: "admin:assistant",
     SCENE_FIGURE_STUDIO: "admin:figure_studio",
+    SCENE_DISCOVERY_COMPARE: "discovery:compare",
 }
 
 
@@ -355,6 +363,8 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     # （deliberation の chat/vision と同じパターン）。
     "admin:figure_studio": ("figure_studio_llm_model", "fast"),
     "admin:figure_suggest": ("figure_studio_llm_model", "fast"),
+    # 論文レーダーの比較分析（paper_radar_design.md §5.6）。
+    "discovery:compare": ("discovery_compare_llm_model", "fast"),
 }
 
 # 特例: Settings に専用フィールドが無く、呼び出し元が os.getenv で直接読んでいる feature

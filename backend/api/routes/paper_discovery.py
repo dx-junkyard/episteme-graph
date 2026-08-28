@@ -28,6 +28,19 @@
 - **PD6 閉世界の正直さ**: 検索は core の DTO（``query`` / ``closed_world_note``
   同梱）を素通しし、arXiv API 失敗を空一覧に化けさせない（502 + 事実文）。
 
+論文レーダー（``docs/features/paper_radar_design.md`` / PR1〜PR8）の3本
+（``/radar/seed`` / ``/radar/search`` / ``/radar/compare``）も同じルータに足す。
+本ルータが構造として守るのは:
+
+- **PR3 取り込みは既存の弁のみ**: レーダーは候補提示までで、専用の取得・取り込み
+  エンドポイントを持たない（教員は既存の ``/ingest`` / ``/ingest-batch`` を叩く）。
+- **PR5 教員の明示操作のみ**: 3本とも読み取り専用で、購読・見送りへ書き込まない
+  （``last_checked_at`` も更新しない）。監査も記帳しない（``/search`` と同じ扱い）。
+- **PR8 教員専用 + document 可視性ゲート**: ``_radar_document_or_404`` が
+  ``services.resolve_document_access`` で view を確認し、不可視と不在を同一 404 に
+  する（``routes/landscape.py`` と同じ fail-closed の作法）。学習者向けの
+  レーダー系ルートは作らない。
+
 エラーは日本語の事実文で、内部情報（解決 IP・スタックトレース）を ``detail`` に
 載せない（UF6 継承）。
 """
@@ -40,15 +53,20 @@ from typing import Any, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
-from dependencies import _require_teacher
+import services
+from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from services import aggregate_frontier_interest, record_review_event
 
 from core import url_fetch
+from core.config import get_settings
 from core.llm_usage import metrics as usage_metrics
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.paper_discovery import arxiv_client
 from core.paper_discovery import citation_client as pd_citation_client
 from core.paper_discovery import citation_search as pd_citation_search
+from core.paper_discovery import compare as pd_compare
 from core.paper_discovery import ingest_queue as pd_queue
+from core.paper_discovery import radar as pd_radar
 from core.paper_discovery import ranking as pd_ranking
 from core.paper_discovery import schema as pd_schema
 from core.paper_discovery import search as pd_search
@@ -117,6 +135,22 @@ _DETAIL_RETRY_NOT_FAILED = "再試行できるのは失敗した項目だけで�
 _DETAIL_INVALID_ORDER = "並び順の指定が正しくありません。"
 _DETAIL_CITATION_UNAVAILABLE = (
     "引用グラフの照会に接続できませんでした。時間をおいて再度お試しください。"
+)
+
+# ── 論文レーダー（正本 docs/features/paper_radar_design.md §5.5）─────────────
+#: 不可視と不在を区別しない（存在を知れる 403 を使わない — PR8 / landscape.py と同文）。
+_DETAIL_DOCUMENT_NOT_FOUND = "Document not found"
+_DETAIL_INVALID_DISTANCE = "距離の指定が正しくありません。"
+_DETAIL_COMPARE_EMPTY = "比較する候補が選択されていません。"
+_DETAIL_COMPARE_TOO_MANY = (
+    f"一度に比較できるのは{pd_compare.RADAR_COMPARE_MAX_CANDIDATES}件までです。"
+    "件数を減らして実行してください。"
+)
+_DETAIL_COMPARE_LIMIT = (
+    "本日の比較分析の上限に達しました。明日以降に再度お試しください。"
+)
+_DETAIL_COMPARE_UNAVAILABLE = (
+    "比較分析を実行できませんでした。時間をおいて再度お試しください。"
 )
 
 #: 許可リストに arXiv の取得先が無いまま投入されたときの注記（黙って受理しない — PD6）。
@@ -217,6 +251,28 @@ class DismissRequest(BaseModel):
 
     domain_key: str
     arxiv_id: str
+
+
+class RadarSearchRequest(BaseModel):
+    """レーダー検索（教材起点）。条件を渡すと seed 由来の供給より優先する（PR1）。
+
+    ``distance`` は ``near`` / ``mid`` / ``far``（語彙の正本は
+    ``core.paper_discovery.schema.RADAR_DISTANCES``。語彙外は 422）。
+    """
+
+    document_ref: str = ""
+    distance: str = "near"
+    categories: Optional[list] = None
+    keyphrases: Optional[list] = None
+    start: int = 0
+    max_results: int = DEFAULT_SEARCH_RESULTS
+
+
+class RadarCompareRequest(BaseModel):
+    """比較分析（PR4 — 結果は保存しない一時的な注釈）。"""
+
+    document_ref: str = ""
+    arxiv_ids: list[str] = []
 
 
 # ---------------------------------------------------------------------------
@@ -787,3 +843,159 @@ def list_frontier_interest(
     """
     rows = aggregate_frontier_interest((domain_key or "").strip() or None)
     return {"rows": rows}
+
+
+# ---------------------------------------------------------------------------
+# 論文レーダー（教材起点の探索・比較分析）
+# 正本: docs/features/paper_radar_design.md §5.5（PR1〜PR8）。
+# すべて読み取り専用 — 購読・見送り・キューへ書かず、監査も記帳しない。
+# ---------------------------------------------------------------------------
+
+#: 比較分析の日次上限（PR: 教員ごと・day-only。``figure_suggest`` と同型の in-memory
+#: ゲートで、プロセスローカルである制約は既存踏襲）。
+_radar_compare_gate = CostGate()
+
+
+def _radar_document_or_404(document_ref: str, current_user: dict):
+    """``document_ref``（UUID / material_id）を解決し **view** をゲートする（PR8）。
+
+    不在・権限なしはどちらも **404**（``routes/landscape.py::_document_access_or_404``
+    と同じ fail-closed の作法。403 は「存在は知れる」ため使わない）。レーダーは
+    読み取りのみなので edit は要求しない。
+    """
+    access = services.resolve_document_access(current_user.get("id"), document_ref)
+    if not access.found:
+        raise HTTPException(status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND)
+    if str(current_user.get("role") or "") == ROLE_SYSTEM_ADMIN:
+        return access
+    if not access.can_view:
+        raise HTTPException(status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND)
+    return access
+
+
+def _consume_radar_compare_quota(user_id: str) -> None:
+    """比較分析の日次上限を1消費する。超過は 429 + 事実文（数値を返さない）。"""
+    cap = int(getattr(get_settings(), "discovery_compare_max_calls_per_day", 20) or 0)
+    if not _radar_compare_gate.check_and_count(
+        daily_limit=cap, daily_key=(today_str(), user_id)
+    ):
+        raise HTTPException(status_code=429, detail=_DETAIL_COMPARE_LIMIT)
+
+
+@router.get("/radar/seed")
+def get_radar_seed(
+    document_ref: str = Query(default=""),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """レーダーの起点（seed）— 検索条件の供給元とメタデータを返す（PR1）。
+
+    保存はしない（毎回導出）。arXiv 由来として登録されていない教材では
+    ``arxiv_id`` / ``abs_url`` が ``null`` で ``categories_source="manual"``
+    （判定不能を偽装しない — PD6）。
+    """
+    access = _radar_document_or_404(document_ref, current_user)
+    session = _pg_session()
+    try:
+        try:
+            seed = pd_radar.resolve_seed(session, str(access.document_id or ""))
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND
+            ) from exc
+    finally:
+        session.close()
+    return {"seed": seed}
+
+
+@router.post("/radar/search")
+def radar_search(
+    body: RadarSearchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """seed 教材の周辺を距離を選んで探す（候補提示のみ — 取り込みは既存経路、PR3）。
+
+    副作用ゼロ（購読の ``last_checked_at`` も更新しない — PR5）。arXiv API の失敗は
+    **502 + 事実文**で、空一覧を「該当なし」と偽らない（PD6 / PR7）。
+    """
+    distance = str(body.distance or "").strip()
+    if distance not in pd_schema.RADAR_DISTANCES:
+        raise HTTPException(status_code=422, detail=_DETAIL_INVALID_DISTANCE)
+
+    requested = body.max_results if body.max_results is not None else DEFAULT_SEARCH_RESULTS
+    max_results = max(1, min(MAX_SEARCH_RESULTS, int(requested)))
+    start = max(0, int(body.start if body.start is not None else 0))
+
+    access = _radar_document_or_404(body.document_ref, current_user)
+
+    session = _pg_session()
+    try:
+        try:
+            return pd_radar.run_radar_search(
+                session,
+                str(access.document_id or ""),
+                distance=distance,
+                categories=body.categories,
+                keyphrases=body.keyphrases,
+                start=start,
+                max_results=max_results,
+            )
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND
+            ) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=_DETAIL_INVALID_DISTANCE) from exc
+        except arxiv_client.ArxivApiError as exc:
+            logger.info("radar search failed for user=%s: %s", current_user["id"], exc)
+            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+    finally:
+        session.close()
+
+
+@router.post("/radar/compare")
+def radar_compare(
+    body: RadarCompareRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """起点論文と選択候補のアブストラクトを1コールで比較する（PR4）。
+
+    結果は保存しない（レスポンス限りの注釈）。各項目には**サーバ側固定文**の
+    ``caveat`` が付く（LLM 出力に依存しない）。素材なしは 422・日次上限は 429・
+    候補メタデータ全滅と LLM 失敗は 502（いずれも数値を含まない事実文）。
+    """
+    arxiv_ids = [str(value or "").strip() for value in (body.arxiv_ids or [])]
+    arxiv_ids = [value for value in arxiv_ids if value]
+    if not arxiv_ids:
+        raise HTTPException(status_code=422, detail=_DETAIL_COMPARE_EMPTY)
+    if len(arxiv_ids) > pd_compare.RADAR_COMPARE_MAX_CANDIDATES:
+        raise HTTPException(status_code=422, detail=_DETAIL_COMPARE_TOO_MANY)
+
+    access = _radar_document_or_404(body.document_ref, current_user)
+    _consume_radar_compare_quota(current_user["id"])
+
+    session = _pg_session()
+    try:
+        try:
+            return pd_compare.run_compare(
+                session,
+                str(access.document_id or ""),
+                arxiv_ids,
+                user_id=current_user["id"],
+            )
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND
+            ) from exc
+        except pd_compare.NoSeedMaterialError as exc:
+            # 素材なしで比較文を創作しない（core の事実文をそのまま渡す）。
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except pd_compare.CompareUnavailableError as exc:
+            logger.info("radar compare unavailable for user=%s: %s", current_user["id"], exc)
+            raise HTTPException(
+                status_code=502, detail=_DETAIL_COMPARE_UNAVAILABLE
+            ) from exc
+        except arxiv_client.ArxivApiError as exc:
+            logger.info("radar compare arXiv failed for user=%s: %s", current_user["id"], exc)
+            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+    finally:
+        session.close()

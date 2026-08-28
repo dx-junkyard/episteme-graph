@@ -64,6 +64,12 @@ __all__ = [
     "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
     "GradedScale",
     "MATERIAL_STATE_LABELS",
+    "RADAR_DISTANCE_LABEL_FAR",
+    "RADAR_DISTANCE_LABEL_MID",
+    "RADAR_DISTANCE_LABEL_NEAR",
+    "RADAR_DISTANCE_SCALE",
+    "RADAR_DISTANCE_THRESHOLD_MID",
+    "RADAR_DISTANCE_THRESHOLD_NEAR",
     "SCRIPT_STATUS_LABELS",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
@@ -191,6 +197,35 @@ DISCOVERY_RELEVANCE_SCALE = GradedScale(
         DISCOVERY_RELEVANCE_LABEL_HIGH,
         DISCOVERY_RELEVANCE_LABEL_MEDIUM,
         DISCOVERY_RELEVANCE_LABEL_LOW,
+    ),
+)
+
+
+# ── 論文レーダーの距離帯（PR2: 段階ラベルのみ・測れないものにラベルを付けない）────
+# seed 教材のチャンク重心（または seed 論文要旨）と候補アブストラクトの **cosine
+# 類似度**の段階化（``core/paper_discovery/ranking.py::band_candidates``、正本
+# ``docs/features/paper_radar_design.md`` §5.2）。分野重心の代わりに教材1件の重心を
+# 使うだけで、写す数値の意味は :data:`DISCOVERY_RELEVANCE_SCALE` と同じなので、
+# **閾値も同じ 0.45 / 0.30 を初期値に採用する**（発明値・実測見直し前提。ヒストグラムを
+# 見て変えるときは設計書 §9 も更新する）。
+#
+# **未測定（``None``）はこのスケールに通さない**（PR2）。:class:`GradedScale` の慎重側
+# フォールバックはここでは偽装になる — 「測れなかった」と「遠い」は別の事実であり、
+# 未測定候補には ``distance_label`` キー自体を付けない（呼び出し側
+# ``ranking.band_candidates`` が ``None`` を弾いてからラベルを引く）。
+RADAR_DISTANCE_THRESHOLD_NEAR = 0.45
+RADAR_DISTANCE_THRESHOLD_MID = 0.30
+
+RADAR_DISTANCE_LABEL_NEAR = "近い"
+RADAR_DISTANCE_LABEL_MID = "中間"
+RADAR_DISTANCE_LABEL_FAR = "遠い"
+
+RADAR_DISTANCE_SCALE = GradedScale(
+    (RADAR_DISTANCE_THRESHOLD_NEAR, RADAR_DISTANCE_THRESHOLD_MID),
+    (
+        RADAR_DISTANCE_LABEL_NEAR,
+        RADAR_DISTANCE_LABEL_MID,
+        RADAR_DISTANCE_LABEL_FAR,
     ),
 )
 

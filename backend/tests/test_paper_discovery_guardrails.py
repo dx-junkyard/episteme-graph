@@ -41,9 +41,13 @@ from tests.guardrail_helpers import (  # noqa: E402
 
 CORE_DIR = BACKEND / "core" / "paper_discovery"
 
-#: Phase 3 の関連度ランキングだけが ``core.llm``（embedding）に触れてよい
-#: （設計書 §6。他ファイルは Phase 1〜2 と同じく LLM 0回のまま）。
-LLM_EXEMPT_FILES = ("ranking.py",)
+#: ``core.llm`` に触れてよいファイルの allowlist。
+#: ``ranking.py`` = Phase 3 の関連度ランキングと論文レーダーの距離帯（embedding。
+#: 設計書 §6 / paper_radar_design.md §5.2）、``compare.py`` = 論文レーダーの比較分析
+#: （テキスト生成。paper_radar_design.md §5.3）。
+#: **この2本以外は LLM 0回のまま**（Phase 1〜2 の検索・購読・見送り・キュー・引用グラフ
+#: 供給に LLM を持ち込まない）。
+LLM_EXEMPT_FILES = ("ranking.py", "compare.py")
 MIGRATION_NUMBER = 71
 #: Phase 2（取り込みキュー）の DDL。振る舞いの検査は ``test_paper_discovery_worker.py``。
 QUEUE_MIGRATION_NUMBER = 72
@@ -98,10 +102,11 @@ class TestCoreIsolation:
         assert_module_tree_does_not_import(CORE_DIR, ["fastapi"])
 
     def test_only_ranking_touches_the_llm_layer(self):
-        """発見層で embedding を使うのは Phase 3 の ``ranking.py`` **だけ**。
+        """発見層で LLM に触れるのは :data:`LLM_EXEMPT_FILES` の2本**だけ**。
 
-        Phase 1〜2 の経路（検索・購読・見送り・キュー・引用グラフ供給）は LLM 0回・
-        embedding 0回のままであることを構造として固定する。
+        Phase 1〜2 の経路（検索・購読・見送り・キュー・引用グラフ供給）と、論文
+        レーダーの seed 解決（``radar.py``）は LLM 0回・embedding 0回のままである
+        ことを構造として固定する。
         """
         paths = _core_paths(exclude=LLM_EXEMPT_FILES)
         assert_paths_forbid(

@@ -681,7 +681,9 @@ U層 feature `discovery:ranking` に帰属し、`DISCOVERY_RANKING_MAX_CALLS_PER
 `DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off）の明示オプトインで、宛先固定・3秒
 スロットルの client（`core/paper_discovery/citation_client.py`）から
 Semantic Scholar recommendations API を引く（LLM 0回）。
-詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5 / §5 / §6。
+詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5 / §5 / §6。教材起点の
+`/radar/*` 3ルート（論文レーダー — seed 解決・距離帯つき探索・AI 比較分析）の正本は
+`docs/features/paper_radar_design.md`（PR1〜PR8。migration なし・読み時導出のみ）。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
@@ -697,6 +699,9 @@ Semantic Scholar recommendations API を引く（LLM 0回）。
 | POST | `/api/admin/discovery/ingest-queue/{item_id}/retry` | TEACHER | 失敗した項目を `queued` へ戻す（前回の `detail` は消さない）。`failed` 以外・不在は 422。`{"item": {...}}`。監査 `action='ingest_retry'` |
 | GET | `/api/admin/discovery/ingest-estimate` | TEACHER | 取り込み前のトークン目安（`?count=` 既定1・上限200）。`llm_usage_events` の `feature LIKE 'pipeline:%'` を document 単位に合算した直近実績から導出し、**実測（reported）と推計（estimated）を分離**して `per_document` / `batch` の `total_tokens_range: [low, high]` を返す（U1）。**点推定・金額は返さない**（U5）。実績ゼロは `{"available": false, "note": ...}`（捏造しない） |
 | GET | `/api/admin/discovery/frontier-interest` | TEACHER | 地図の端への学習者の関心（コーパス回遊層 Phase D、migration 073）。`?domain_key=` 任意。集計単位は **分野 × 領域 × 輪**（`ring ∈ {fringe, outer}`）で、返すのは `{"rows": [{domain_key, region_id, ring, range_label}]}` の **k-匿名レンジのみ**（k=3・`3-5` / `6-10` / `11+`。`core/privacy.py` 委譲・n<3 の行は返さない）。**個人・時系列・順位・生の件数を返さない**（CR6）。取り消し済み（`dismissed`）は数えない。この行は需要の提示であって、購読条件・取り込み・骨格を自動変更する入力にしない（CR10） |
+| GET | `/api/admin/discovery/radar/seed` | TEACHER | 論文レーダー（`docs/features/paper_radar_design.md`、migration なし）の seed 解決。`?document_ref=`（documents.id / source_path 両対応・**document 可視性ゲート**・不可視と不在は同一 404）。`{"seed": {document_id, title, arxiv_id?, abs_url?, summary, categories, categories_source ∈ {arxiv, subscription, manual}, keyphrase_candidates, domain_key}}`。arXiv 由来教材はメタデータを `id_list` で1コール取得（fail-soft — 失敗は購読条件へ縮退） |
+| POST | `/api/admin/discovery/radar/search` | TEACHER | 教材起点の候補探索。body `{document_ref, distance ∈ {near, mid, far}（語彙外 422）, categories?, keyphrases?, start?, max_results?}`。seed 自身を除外し `status`（new / ingested のみ — dismissal は読まない）+ near のみ `matched_keyphrases` + 測定できた候補のみ `distance_label`（「近い / 中間 / 遠い」、正本は `label_vocab.RADAR_DISTANCE_SCALE`）を注釈。`banding: {available, primary_label?, note?}`（帯分け不能は新着順のまま + 事実文の fail-soft）。**購読の `last_checked_at` を更新しない・監査記帳なし**（読み取り専用）。条件ゼロは arXiv 非呼び出し（PD6）。cosine 生値は返さない（PR2） |
+| POST | `/api/admin/discovery/radar/compare` | TEACHER | 選択候補と seed の比較分析（1 LLM コール・feature `discovery:compare`）。body `{document_ref, arxiv_ids}`（空 / 10件超は 422）。候補の要旨は**サーバが `id_list` で取り直し**、各 difference の `evidence_quote` を要旨に対して verbatim 検査（不一致はその項目のみ drop）。`{"items": [{arxiv_id, title, common_ground, differences: [{aspect, statement, evidence_quote}], caveat}], skipped, notes}`（`caveat` はサーバ固定文「アブストラクト（要旨）の比較に基づく AI の推定です。…」）。日次上限（`DISCOVERY_COMPARE_MAX_CALLS_PER_DAY`・ユーザー別）超過は 429、LLM / arXiv 全滅は 502。**結果は保存しない・監査記帳なし** |
 
 ### コーパス回遊 `/api/learning/corpus`（`routes/corpus.py`、migration 073）
 

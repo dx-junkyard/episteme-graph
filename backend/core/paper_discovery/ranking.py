@@ -4,12 +4,21 @@
 候補を並べ替える。第1層（arXiv カテゴリ）と第2層（キーフレーズ）の絞り込みは
 変えない — ここがやるのは**並べ替えだけ**で、候補を捨てない（PD6）。
 
+論文レーダー（``docs/features/paper_radar_design.md`` §5.2）の**距離帯**も同じ機構の
+別投影としてここに置く（:func:`document_centroid` + :func:`band_candidates`）。分野重心の
+代わりに seed 教材の重心を使い、順位の代わりに帯ラベルを付けるだけで、embedding の
+接触点・日次予算・fail-soft の規律は共有する。
+
 不変条項:
 
 - **PD4 数値スコアを見せない**: cosine の生値は関数の外へ出さない。DTO に載るのは
-  並び順と段階ラベル ``relevance_label`` だけで、そのラベルも
-  ``core.label_vocab.DISCOVERY_RELEVANCE_SCALE``（正本）からのみ引く
+  並び順と段階ラベル（``relevance_label`` / ``distance_label``）だけで、そのラベルも
+  ``core.label_vocab``（正本）からのみ引く
   （このモジュールに閾値・ラベル文字列を直書きしない）。
+- **PR2 測れないものにラベルを付けない**: 距離帯は未測定（cosine が ``None``）の候補に
+  ``distance_label`` を付けない（``GradedScale`` の慎重側フォールバックを通さない —
+  「測れなかった」を「遠い」に化けさせないため。関連度ランキング側は従来どおり
+  慎重側へ倒す既存挙動のまま）。
 - **fail-soft**: 重心が作れない / 埋め込みに失敗した / 日次上限に達した — いずれも
   例外にせず ``available: False`` + 事実文で返し、**元の並び順（新着順）のまま**の
   候補を返す。検索そのものは必ず成立させる。
@@ -28,7 +37,7 @@ from typing import Any, Iterable, Optional, Sequence
 
 from sqlalchemy import text as sa_text
 
-from core.label_vocab import DISCOVERY_RELEVANCE_SCALE
+from core.label_vocab import DISCOVERY_RELEVANCE_SCALE, RADAR_DISTANCE_SCALE
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.paper_discovery import corpus
 
@@ -56,6 +65,9 @@ NOTE_NO_CORPUS = (
 )
 NOTE_LIMIT_REACHED = "本日の関連度計算の上限に達しました。新着順で表示します。"
 NOTE_UNAVAILABLE = "関連度を計算できませんでした。新着順で表示します。"
+
+#: 論文レーダー（§5.2）の帯分けで、seed の基準ベクトルが作れなかったときの事実文。
+NOTE_NO_SEED = "この教材から距離の基準を作れませんでした。新着順で表示します。"
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +146,58 @@ def cosine_similarity(left: Sequence[float], right: Sequence[float]) -> Optional
 # ---------------------------------------------------------------------------
 
 
+def _document_means(
+    session,
+    document_ids: Sequence[str],
+    per_document: int,
+) -> dict[str, list[float]]:
+    """document ごとの「先頭 N チャンクの平均ベクトル」を決定論的に作る。
+
+    :func:`field_centroid`（分野の2段平均）と :func:`document_centroid`（1 document）が
+    共有する下請け（同じ SQL 形をコピペで2実装にしない）。embedding が引けない
+    document はキーごと現れない。
+    """
+    ids = [str(d).strip() for d in (document_ids or ()) if str(d or "").strip()]
+    if not ids:
+        return {}
+
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT document_id::text, embedding
+              FROM chunks
+             WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
+               AND embedding IS NOT NULL
+               AND chunk_index < :per_document
+             ORDER BY document_id, chunk_index
+            """
+        ),
+        {"document_ids": sorted(ids), "per_document": per_document},
+    ).fetchall()
+
+    by_document: dict[str, list[list[float]]] = {}
+    for row in rows:
+        document_id = str(row[0] or "").strip()
+        vector = _parse_vector(row[1])
+        if not document_id or vector is None:
+            continue
+        by_document.setdefault(document_id, []).append(vector)
+
+    means: dict[str, list[float]] = {}
+    for document_id in sorted(by_document):
+        mean = _mean(by_document[document_id])
+        if mean is not None:
+            means[document_id] = mean
+    return means
+
+
+def _per_document_limit(chunks_per_document: Any) -> int:
+    try:
+        return max(1, int(chunks_per_document))
+    except (TypeError, ValueError):
+        return DEFAULT_CHUNKS_PER_DOCUMENT
+
+
 def field_centroid(
     session,
     domain_key: str,
@@ -154,39 +218,31 @@ def field_centroid(
     document_ids = corpus.domain_document_ids(session, domain_key, limit=max_documents)
     if not document_ids:
         return None
-    try:
-        per_document = max(1, int(chunks_per_document))
-    except (TypeError, ValueError):
-        per_document = DEFAULT_CHUNKS_PER_DOCUMENT
+    means = _document_means(session, document_ids, _per_document_limit(chunks_per_document))
+    return _mean([means[key] for key in sorted(means)])
 
-    rows = session.execute(
-        sa_text(
-            """
-            SELECT document_id::text, embedding
-              FROM chunks
-             WHERE document_id = ANY(CAST(:document_ids AS uuid[]))
-               AND embedding IS NOT NULL
-               AND chunk_index < :per_document
-             ORDER BY document_id, chunk_index
-            """
-        ),
-        {"document_ids": sorted(document_ids), "per_document": per_document},
-    ).fetchall()
 
-    by_document: dict[str, list[list[float]]] = {}
-    for row in rows:
-        document_id = str(row[0] or "").strip()
-        vector = _parse_vector(row[1])
-        if not document_id or vector is None:
-            continue
-        by_document.setdefault(document_id, []).append(vector)
+def document_centroid(
+    session,
+    document_id: str,
+    *,
+    chunks_per_document: int = DEFAULT_CHUNKS_PER_DOCUMENT,
+) -> Optional[list[float]]:
+    """1 document のチャンク埋め込みから重心を作る（論文レーダーの seed ベクトル）。
 
-    document_vectors: list[list[float]] = []
-    for document_id in sorted(by_document):
-        mean = _mean(by_document[document_id])
-        if mean is not None:
-            document_vectors.append(mean)
-    return _mean(document_vectors)
+    :func:`field_centroid` の2段平均を1 document に縮めたもの（先頭
+    ``chunks_per_document`` チャンクの平均）。チャンク上限も分野重心と共有する
+    ので、seed と候補の測り方が画面によって変わらない。
+
+    Returns:
+        重心ベクトル。チャンクなし・embedding なしは ``None``（**正常な状態**。
+        呼び出し側は要旨からの疑似 seed へ、それも無ければ新着順へ縮退する — PR2）。
+    """
+    key = str(document_id or "").strip()
+    if not key:
+        return None
+    means = _document_means(session, [key], _per_document_limit(chunks_per_document))
+    return means.get(key)
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +338,110 @@ def rank_candidates(
         payload = dict(item)
         # 段階ラベルは正本のスケールからのみ引く（未測定は最も慎重な段階へ倒れる）。
         payload["relevance_label"] = DISCOVERY_RELEVANCE_SCALE.label_for(similarity)
+        scored.append((index, similarity, payload))
+
+    # 未測定（None）は最後尾へ。同点は入力順（= 新着順）を保つ安定ソート。
+    scored.sort(key=lambda row: (-(row[1] if row[1] is not None else -math.inf), row[0]))
+    return {"available": True, "ordered": [row[2] for row in scored]}
+
+
+# ---------------------------------------------------------------------------
+# 距離帯（論文レーダー §5.2 — 並べ替えと同じ機構の別投影）
+# ---------------------------------------------------------------------------
+
+
+def band_candidates(
+    session,
+    candidates: Sequence[dict],
+    *,
+    seed_vector: Optional[Sequence[float]] = None,
+    seed_text: str = "",
+    daily_limit: Optional[int] = None,
+) -> dict:
+    """候補を seed 教材からの距離帯に分ける（PR2 — 生スコアは返さない）。
+
+    :func:`rank_candidates` と同型（候補テキストを**1バッチ**で埋め込み → cosine →
+    段階ラベル）で、相違点は3つ:
+
+    1. 基準が分野重心ではなく **seed 教材**（``seed_vector`` = 呼び出し側が
+       :func:`document_centroid` で解決した重心）。作れない場合は ``seed_text``
+       （seed 論文の要旨）を候補と**同じバッチの先頭**に入れて埋め込み、疑似 seed
+       ベクトルにする（追加コールを増やさない）。
+    2. 出力が順位ではなく ``distance_label``（正本は
+       ``core.label_vocab.RADAR_DISTANCE_SCALE``）。
+    3. **未測定（cosine が ``None``）の候補にはラベルを付けない** — ``distance_label``
+       キー自体を省略する（PR2。「測れなかった」を「遠い」に化けさせない）。
+
+    日次ゲート・U層 feature（``discovery:ranking``）は :func:`rank_candidates` と
+    共有する（発見層の embedding 予算は1本 — 用途別に env を増やさない）。
+    fail-soft の規律も同じで、基準が作れない・埋め込みに失敗した・上限に達したは
+    いずれも ``available: False`` + 事実文で**元の並び順のまま**返す。
+
+    Args:
+        session: :func:`rank_candidates` と呼び出し形を揃えるために受け取る
+            （本関数自体は DB を読まない — seed ベクトルの解決は呼び出し側の責務）。
+        candidates: 注釈済み候補（``title`` / ``summary`` を持つ dict）。
+        seed_vector: seed 教材の重心。``None`` なら ``seed_text`` を使う。
+        seed_text: seed 論文の要旨（重心が作れないときのフォールバック素材）。
+        daily_limit: 日次上限（省略時は ``DISCOVERY_RANKING_MAX_CALLS_PER_DAY``）。
+
+    Returns:
+        ``{"available": bool, "ordered": [candidate, ...], "note"?: str}``。
+        ``available=True`` のとき ``ordered`` は類似度降順（未測定は最後尾・同点は
+        入力順の安定ソート）で、測れた候補にだけ ``distance_label`` が付く。
+    """
+    items = list(candidates or [])
+    if not items:
+        return _unavailable(NOTE_NO_CANDIDATES, items)
+
+    if daily_limit is None:
+        from core.config import get_settings  # 遅延 import（core の純粋性を保つ）
+
+        daily_limit = get_settings().discovery_ranking_max_calls_per_day
+
+    texts = [candidate_text(item) for item in items]
+    if not any(texts):
+        return _unavailable(NOTE_UNAVAILABLE, items)
+
+    seed = _parse_vector(list(seed_vector)) if seed_vector else None
+    fallback_text = " ".join(str(seed_text or "").split())[:MAX_CANDIDATE_TEXT_CHARS]
+    if seed is None and not fallback_text:
+        # 基準が無い状態で帯を付けると、根拠のない「遠い」を作ってしまう（PR2）。
+        return _unavailable(NOTE_NO_SEED, items)
+
+    batch = texts if seed is not None else [fallback_text] + texts
+    if not _gate.check_and_count(
+        daily_limit=int(daily_limit),
+        daily_key=(_DAILY_KEY_PREFIX, today_str()),
+        prune_stale_daily=True,
+    ):
+        return _unavailable(NOTE_LIMIT_REACHED, items)
+
+    try:
+        vectors = _embed(batch)
+    except Exception:  # noqa: BLE001 — embedding の失敗で検索を落とさない
+        logger.warning("radar band embedding failed", exc_info=True)
+        return _unavailable(NOTE_UNAVAILABLE, items)
+
+    if len(vectors) != len(batch):
+        logger.warning(
+            "radar band embedding count mismatch (%s vs %s)", len(vectors), len(batch)
+        )
+        return _unavailable(NOTE_UNAVAILABLE, items)
+
+    if seed is None:
+        seed = _parse_vector(vectors[0])
+        vectors = list(vectors[1:])
+        if seed is None:
+            return _unavailable(NOTE_NO_SEED, items)
+
+    scored: list[tuple[int, Optional[float], dict]] = []
+    for index, (item, vector) in enumerate(zip(items, vectors)):
+        similarity = cosine_similarity(seed, _parse_vector(vector) or [])
+        payload = dict(item)
+        if similarity is not None:
+            # 測れたものにだけラベルを付ける（未測定はキーごと省略 — PR2）。
+            payload["distance_label"] = RADAR_DISTANCE_SCALE.label_for(similarity)
         scored.append((index, similarity, payload))
 
     # 未測定（None）は最後尾へ。同点は入力順（= 新着順）を保つ安定ソート。

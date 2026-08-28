@@ -428,6 +428,23 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   オプトインは env `DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off・ゲートは core 側）。
   アンカー +2（`materials.arxiv-discovery-{order,citation-search}`、正確な総数は
   `test_admin_help_ui_anchors.py` が正）。
+- **論文レーダー（教材起点の類似論文探索, 2026-08-28・migration なし）**: 正本は
+  `docs/features/paper_radar_design.md`（PR1〜PR8・§10 実装記録。PD1〜PD8 を全継承）。
+  教材行 `⋯` メニュー「📡 近い論文を探す…」→ 距離3択（near=カテゴリ+キーフレーズ /
+  mid・far=カテゴリのみ）で arXiv 検索し、seed 教材のチャンク重心（`ranking.
+  document_centroid`・不能時は seed 要旨を同一バッチ埋め込み）との cosine を3帯の
+  段階ラベル（`label_vocab.RADAR_DISTANCE_SCALE`「近い/中間/遠い」・未測定はラベルなし =
+  慎重側フォールバック不使用）に変換。API 3本 `/api/admin/discovery/radar/{seed,search,
+  compare}`（全て可視性ゲート・監査記帳なし・購読 `last_checked_at` 非更新・dismissal
+  非関与）。compare = 1 LLM コール（feature `discovery:compare`・scene
+  `discovery_compare`・`DISCOVERY_COMPARE_MAX_CALLS_PER_DAY` 既定20・ユーザー別日次
+  キー）で候補要旨をサーバが `id_list` 取り直し → evidence_quote verbatim 検査 →
+  仮説文体 + サーバ固定 caveat・**非保存**。`compare.py` は ranking.py と並ぶ発見層
+  LLM 接触 allowlist の2本目。UI は `admin-paper-radar.js`（ES5・`window.PaperRadar`）、
+  アンカー +6（`materials.row-radar` / `materials.radar-{modal,distance,search,compare,
+  ingest}`）+ capability `materials.paper_radar`（guidance_only）。取り込みは既存
+  `/ingest`・`/ingest-batch` 再利用。ガードレールは `test_paper_radar_{core,api,
+  guardrails,ui_static}.py`。
 - **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
 - **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源。
   学習者向け表示・コーパス回遊は §7 → 専用設計書で**実装済み**（下記コーパス回遊層）。

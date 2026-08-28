@@ -527,6 +527,20 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DISCOVERY_CITATION_SOURCE_ENABLED"),
     )
 
+    # --- 論文レーダー（正本: docs/features/paper_radar_design.md §5.6） ---
+    # 起点論文と候補の比較分析（1リクエスト = 1コール）の1日あたり上限（教員ごと）。
+    # 上限到達は 429 + 事実文（数値を返さない）。検索・帯分けとは独立のカウンタで、
+    # 帯分けの embedding は既存 DISCOVERY_RANKING_MAX_CALLS_PER_DAY を共有する。
+    discovery_compare_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("DISCOVERY_COMPARE_MAX_CALLS_PER_DAY"),
+    )
+    # 比較分析のモデル。空文字なら fast tier（llm_fast_model）に委譲。
+    discovery_compare_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DISCOVERY_COMPARE_LLM_MODEL"),
+    )
+
     # --- M層（LLM モデル選択, core/llm_policy.py） ---
     # モデルカタログ (JSON) のパス。空/不在/パース不能なら catalog_models() は空リスト
     # を返す（M4: 選択肢を捏造しない）。正本: docs/features/llm_model_selection_design.md §5

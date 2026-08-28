@@ -105,6 +105,10 @@ KNOWN_FEATURES = (
     # 候補アブストラクトの埋め込み（1検索 = 1バッチコール）。発見層で LLM/embedding を
     # 使う唯一の地点で、モデル選択の対象外（embedding は M5 で scene を持たない）。
     "discovery:ranking",
+    # 論文レーダー（正本 docs/features/paper_radar_design.md §5.3）— 起点論文と候補
+    # アブストラクトの比較分析（1リクエスト = 1コール）。発見層で**テキスト**生成を
+    # 使う唯一の地点で、教員の明示ボタンでのみ発火する（PR5）。
+    "discovery:compare",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",

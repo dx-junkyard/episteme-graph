@@ -1,0 +1,308 @@
+"""論文レーダーのガードレール（設計書 ``paper_radar_design.md`` §7）。
+
+ここで固定するのは**構造**であり、振る舞いの検査は ``test_paper_radar_core.py`` /
+``test_paper_radar_api.py`` 側。
+
+検査項目（不変条項 PR1〜PR8 のうち構造で守れるもの）:
+
+- ``radar.py`` / ``compare.py`` が FastAPI を import しない。``radar.py`` は
+  ``core.llm`` にも触れない（LLM 接触点は ranking.py（embedding）と compare.py
+  （比較文）の2本だけ — 既存 allowlist の改訂と対）
+- 比較分析のプロンプト制約3文が原文で存在し、``caveat`` がサーバ側定数である（PR4）
+- ``fetch_by_ids`` がスロットルを通り、宛先が定数ホストである（PR6）
+- レーダー経路が購読・見送りへ書き込まない（``touch_last_checked`` を呼ばない — PR5）
+- レーダー専用の取得・取り込みエンドポイントが無い（PR3）
+- ``/api/learning`` 配下にレーダー系ルートが無い（PR8）
+- migration ディレクトリにレーダーの採番が無い（PR1 — 新テーブル・新列ゼロ）
+- 取り込み worker がレーダーを import しない（PR5 — 自動探索の経路を作らない）
+- 距離帯のラベル文字列・閾値が ``core/label_vocab.py`` 以外に直書きされていない（PR2）
+- ``band_candidates`` が未測定（``None``）を段階ラベルへ通さない（PR2）
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+BACKEND = Path(__file__).resolve().parents[1]
+ROOT = BACKEND.parent
+for _path in (str(BACKEND), str(BACKEND / "api")):
+    if _path not in sys.path:
+        sys.path.insert(0, str(_path))
+
+from tests.guardrail_helpers import (  # noqa: E402
+    assert_source_does_not_import,
+    assert_source_forbids,
+    extract_function_source,
+)
+
+CORE_DIR = BACKEND / "core" / "paper_discovery"
+ROUTE_SOURCE = BACKEND / "api" / "routes" / "paper_discovery.py"
+WORKER_SOURCE = BACKEND / "api" / "ingest_worker.py"
+LABEL_VOCAB_SOURCE = BACKEND / "core" / "label_vocab.py"
+
+_RADAR_SRC = (CORE_DIR / "radar.py").read_text(encoding="utf-8")
+_COMPARE_SRC = (CORE_DIR / "compare.py").read_text(encoding="utf-8")
+_RANKING_SRC = (CORE_DIR / "ranking.py").read_text(encoding="utf-8")
+_ROUTE_SRC = ROUTE_SOURCE.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# 1. core の独立性（開発ルール2 / LLM 接触点）
+# ---------------------------------------------------------------------------
+
+
+class TestCoreIsolation:
+    def test_files_exist(self):
+        assert (CORE_DIR / "radar.py").is_file()
+        assert (CORE_DIR / "compare.py").is_file()
+
+    def test_radar_does_not_import_fastapi(self):
+        assert_source_does_not_import(
+            _RADAR_SRC, ["fastapi"], context="core/paper_discovery/radar.py"
+        )
+
+    def test_compare_does_not_import_fastapi(self):
+        assert_source_does_not_import(
+            _COMPARE_SRC, ["fastapi"], context="core/paper_discovery/compare.py"
+        )
+
+    def test_radar_does_not_touch_the_llm_layer(self):
+        """PR: seed 解決・クエリ組み立ては LLM 0回（embedding は ranking 経由）。"""
+        assert_source_forbids(
+            _RADAR_SRC,
+            [
+                "import core.llm",
+                "from core.llm",
+                "import openai",
+                "from openai",
+                "generate_text",
+                "generate_embeddings",
+            ],
+            context="core/paper_discovery/radar.py",
+        )
+
+    def test_compare_is_the_only_text_llm_and_is_metered(self):
+        """比較文の生成は compare.py だけ。U層計測（U3）も同時に固定する。"""
+        assert "generate_text_with_structured_output" in _COMPARE_SRC
+        assert 'FEATURE_RADAR_COMPARE = "discovery:compare"' in _COMPARE_SRC
+        assert "usage_context(" in _COMPARE_SRC
+
+        from core.llm_usage.schema import KNOWN_FEATURES
+
+        assert "discovery:compare" in KNOWN_FEATURES
+
+    def test_compare_feature_is_registered_in_the_model_policy(self):
+        """M層3点同時登録（KNOWN_FEATURES / scene / env マッピング）。"""
+        from core import llm_policy
+
+        scene = llm_policy.scene_for_feature("discovery:compare")
+        assert scene is not None and scene in llm_policy.SCENES
+        assert llm_policy._FEATURE_ENV_SETTINGS["discovery:compare"] == (  # noqa: SLF001
+            "discovery_compare_llm_model",
+            "fast",
+        )
+
+    def test_compare_does_not_hold_the_daily_gate(self):
+        """コスト上限は route 層（figure_suggest と同じ配置）。"""
+        assert_source_forbids(
+            _COMPARE_SRC,
+            ["CostGate()", "check_and_count", "max_calls_per_day"],
+            context="core/paper_discovery/compare.py",
+        )
+        assert "_radar_compare_gate = CostGate()" in _ROUTE_SRC
+
+
+# ---------------------------------------------------------------------------
+# 2. 比較文の捏造ガードと出所（PR4）
+# ---------------------------------------------------------------------------
+
+
+class TestCompareGuards:
+    _REQUIRED_PROMPT_CONSTRAINTS = (
+        "アブストラクトに書かれていることだけを比較する",
+        "断定せず推量形で書く",
+        "数値スコア・優劣の評価を書かない",
+    )
+
+    def test_prompt_constraints_exist_verbatim(self):
+        for phrase in self._REQUIRED_PROMPT_CONSTRAINTS:
+            assert phrase in _COMPARE_SRC, phrase
+
+    def test_caveat_is_a_server_side_constant(self):
+        from core.paper_discovery.compare import CAVEAT
+
+        assert CAVEAT == (
+            "アブストラクト（要旨）の比較に基づく AI の推定です。本文は確認されていません。"
+        )
+        # 各項目に付けるのは validator（LLM 出力に依存しない）。
+        validator = extract_function_source(_COMPARE_SRC, "validate_items")
+        assert '"caveat": CAVEAT' in validator
+
+    def test_evidence_quote_is_checked_verbatim(self):
+        validator = extract_function_source(_COMPARE_SRC, "validate_items")
+        assert "normalize_for_quote_match(quote) not in haystack" in validator
+
+    def test_candidate_abstracts_are_refetched_by_the_server(self):
+        """PR6: クライアントから要旨本文を受け取らない（verbatim 検査の土台）。"""
+        run_compare = extract_function_source(_COMPARE_SRC, "run_compare")
+        assert "arxiv_client.fetch_by_ids" in run_compare
+        assert "summary" not in extract_function_source(_ROUTE_SRC, "radar_compare")
+
+    def test_compare_results_are_not_persisted(self):
+        assert_source_forbids(
+            _COMPARE_SRC,
+            ["INSERT", "UPDATE", "DELETE", "commit("],
+            context="core/paper_discovery/compare.py",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 3. arXiv への行儀（PR6）
+# ---------------------------------------------------------------------------
+
+
+class TestArxivClientAddition:
+    def test_fetch_by_ids_goes_through_the_shared_http_helper(self):
+        src = (CORE_DIR / "arxiv_client.py").read_text(encoding="utf-8")
+        fetch = extract_function_source(src, "fetch_by_ids")
+        assert "_http_get(params, timeout)" in fetch
+        # 宛先を渡せる引数を作らない（URL は _api_url() の定数ホストのまま）。
+        assert_source_forbids(fetch, ["http://", "https://"], context="fetch_by_ids")
+        assert "_throttle()" in extract_function_source(src, "_http_get")
+
+
+# ---------------------------------------------------------------------------
+# 4. 副作用ゼロ（PR3 / PR5）
+# ---------------------------------------------------------------------------
+
+
+class TestNoSideEffects:
+    def test_radar_does_not_write_subscriptions_or_dismissals(self):
+        assert_source_forbids(
+            _RADAR_SRC,
+            [
+                "touch_last_checked",
+                "upsert_subscription",
+                "dismissed_ids",
+                "store.dismiss",
+                "store.restore",
+                "INSERT",
+                "UPDATE",
+                "DELETE",
+            ],
+            context="core/paper_discovery/radar.py",
+        )
+
+    def test_radar_routes_do_not_write_or_audit(self):
+        for fn_name in ("get_radar_seed", "radar_search", "radar_compare"):
+            src = extract_function_source(_ROUTE_SRC, fn_name)
+            assert_source_forbids(
+                src,
+                [
+                    "record_review_event",
+                    "touch_last_checked",
+                    "pd_store.upsert_subscription",
+                    "pd_store.dismiss",
+                    "pd_queue.enqueue_items",
+                    "url_fetch",
+                    "_accept_material_source",
+                ],
+                context=f"routes.paper_discovery.{fn_name}",
+            )
+
+    def test_no_radar_specific_ingest_endpoint(self):
+        """PR3: 取り込みの弁は既存の ``/ingest`` / ``/ingest-batch`` の2本だけ。"""
+        radar_routes = [
+            line for line in _ROUTE_SRC.splitlines() if "@router." in line and "radar" in line
+        ]
+        assert sorted(radar_routes) == sorted(
+            [
+                '@router.get("/radar/seed")',
+                '@router.post("/radar/search")',
+                '@router.post("/radar/compare")',
+            ]
+        )
+
+    def test_worker_does_not_import_radar(self):
+        """PR5: worker / cron からレーダーを呼ぶ経路を作らない。"""
+        src = WORKER_SOURCE.read_text(encoding="utf-8")
+        assert_source_forbids(
+            src,
+            ["radar", "compare", "fetch_by_ids"],
+            context="api/ingest_worker.py",
+        )
+
+
+# ---------------------------------------------------------------------------
+# 5. 学習者に出さない・migration ゼロ（PR8 / PR1）
+# ---------------------------------------------------------------------------
+
+
+class TestScope:
+    def test_no_learning_route_source(self):
+        learning_dir_files = [
+            BACKEND / "api" / "routes" / "learning.py",
+            BACKEND / "api" / "routes" / "corpus.py",
+        ]
+        for path in learning_dir_files:
+            if not path.is_file():
+                continue
+            assert_source_forbids(
+                path.read_text(encoding="utf-8"),
+                ["paper_discovery.radar", "pd_radar", "radar/search"],
+                context=str(path),
+            )
+
+    def test_no_migration_is_added_for_the_radar(self):
+        """PR1: 新テーブル・新列ゼロ（構造的な確認）。"""
+        sql_files = sorted((BACKEND / "db").glob("*.sql"))
+        offending = [
+            path.name
+            for path in sql_files
+            if "radar" in path.name.lower()
+            or "radar" in path.read_text(encoding="utf-8").lower()
+        ]
+        assert offending == [], f"radar must not add DDL: {offending}"
+
+
+# ---------------------------------------------------------------------------
+# 6. 距離ラベルの正本（PR2）
+# ---------------------------------------------------------------------------
+
+
+class TestDistanceLabelCanon:
+    def test_labels_and_thresholds_live_only_in_label_vocab(self):
+        from core.label_vocab import (
+            RADAR_DISTANCE_SCALE,
+            RADAR_DISTANCE_THRESHOLD_MID,
+            RADAR_DISTANCE_THRESHOLD_NEAR,
+        )
+
+        assert "RADAR_DISTANCE_SCALE" in _RANKING_SRC
+        for literal in RADAR_DISTANCE_SCALE.labels:
+            assert f'"{literal}"' not in _RANKING_SRC, literal
+            assert f'"{literal}"' not in _RADAR_SRC, literal
+            assert f'"{literal}"' not in _ROUTE_SRC, literal
+        for threshold in (RADAR_DISTANCE_THRESHOLD_NEAR, RADAR_DISTANCE_THRESHOLD_MID):
+            assert str(threshold) not in _RANKING_SRC
+            assert str(threshold) not in _RADAR_SRC
+
+    def test_thresholds_are_declared_once(self):
+        src = LABEL_VOCAB_SOURCE.read_text(encoding="utf-8")
+        assert src.count("RADAR_DISTANCE_THRESHOLD_NEAR = ") == 1
+        assert src.count("RADAR_DISTANCE_THRESHOLD_MID = ") == 1
+
+    def test_band_candidates_never_labels_an_unmeasured_candidate(self):
+        """PR2: ``None`` を ``label_for`` に渡さない構造（``is not None`` ガード）。"""
+        fn = extract_function_source(_RANKING_SRC, "band_candidates")
+        assert "if similarity is not None:" in fn
+        assert 'payload["distance_label"] = RADAR_DISTANCE_SCALE.label_for(similarity)' in fn
+        # ガードの内側にラベル付与があること（外に出ていない）。
+        guard_index = fn.index("if similarity is not None:")
+        assert fn.index('payload["distance_label"]') > guard_index
+
+    def test_no_raw_score_keys_in_the_new_modules(self):
+        forbidden = ('"score"', '"similarity"', '"confidence"', '"relevance"', '"rank"')
+        assert_source_forbids(_RADAR_SRC, forbidden, context="radar.py")
+        assert_source_forbids(_COMPARE_SRC, forbidden, context="compare.py")
