@@ -464,7 +464,11 @@ discuss Phase 3 予約を引き受けた専用設計書）。
   配置・縁・外のみ（骨格は既存 `GET /api/atlas?cartridge=` — 二重管理回避）。documents の
   母集合は「配置あり ∪ gap 信号あり」（分野帰属の捏造防止）。UI は `corpus-sea.js`
   （ES6・`window.CorpusSea`・サイドバー常設「🌊 論文の海」・簡易 SVG 地図・atlas-overlay
-  非流用）。アンカーは学習側 `sidebar.corpus-sea`。
+  非流用）。アンカーは学習側 `sidebar.corpus-sea`。**地図の密度表現（2026-08-28）**: 論文
+  マーカーの羅列をやめ、領域の塗り（4段ビン・fog は従来の霧のまま）とアンカーごとの段階
+  サイズの円1つ（固定3段・クリックで論文リスト絞り込み）+ 凡例「閲覧できる論文の厚み」で
+  厚みを示す（クライアント側の決定論導出・API/DB 変更なし）。**CR3 のオーナー裁定**:
+  段階ビン（離散の濃淡・サイズ）は可、連続比例と件数・閾値の表示は禁止。
 - **Phase B コース無し議論（discuss document 直付け）**: センチネル
   `course_id = "_doc:{document_id}"` の正本は `core/discuss/context.py`（組み立ては AST
   ガードレールで1ファイルに固定・migration 0）。`learning_chat` は本体を

@@ -11146,6 +11146,17 @@ button.element-card-item:focus-visible .element-card-item-label {
   fill: var(--color-background-secondary, #f5f5f7);
   stroke: var(--color-border-tertiary, #e5e5ea);
 }
+/* 情報密度の段階表現（4段の固定ビン。連続比例・数値は使わない — CR3）。
+   d0 は既定の薄灰のまま＝「置かれていない」を色で言い立てない。 */
+.corpus-sea-region.d1 rect { fill: rgba(47, 107, 143, 0.10); }
+.corpus-sea-region.d2 rect {
+  fill: rgba(47, 107, 143, 0.22);
+  stroke: rgba(47, 107, 143, 0.30);
+}
+.corpus-sea-region.d3 rect {
+  fill: rgba(47, 107, 143, 0.38);
+  stroke: rgba(47, 107, 143, 0.45);
+}
 .corpus-sea-region.fog rect {
   fill: var(--color-background-tertiary, #eeeef0);
   stroke-dasharray: 4 4;
@@ -11159,16 +11170,78 @@ button.element-card-item:focus-visible .element-card-item-label {
   font-size: 10px;
   fill: var(--color-text-secondary, #6e6e73);
 }
-.corpus-sea-marker { cursor: pointer; }
-.corpus-sea-marker circle {
-  fill: var(--color-background-primary, #fff);
-  stroke: var(--color-border-primary, #c6c6cc);
+/* アンカーの円1つ＝その場所の厚み（半径は段階ビン）。押すと右の一覧を絞る。 */
+.corpus-sea-anchor-dot { cursor: pointer; }
+.corpus-sea-anchor-dot circle {
+  fill: var(--color-text-info, #378add);
+  stroke: var(--color-background-primary, #fff);
+  stroke-width: 1.5;
 }
-.corpus-sea-marker text { font-size: 10px; }
-.corpus-sea-marker-more {
-  font-size: 12px;
-  fill: var(--color-text-tertiary, #aeaeb2);
+.corpus-sea-anchor-dot:hover circle,
+.corpus-sea-anchor-dot:focus circle,
+.corpus-sea-anchor-dot:focus-visible circle {
+  stroke: var(--color-text-primary, #1d1d1f);
+  stroke-width: 2.5;
 }
+.corpus-sea-anchor-dot:focus { outline: none; }
+
+.corpus-sea-density-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-density-legend-hd { font-weight: 700; }
+.corpus-sea-density-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.corpus-sea-density-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-secondary, #f5f5f7);
+}
+.corpus-sea-density-swatch.d1 { background: rgba(47, 107, 143, 0.10); }
+.corpus-sea-density-swatch.d2 {
+  background: rgba(47, 107, 143, 0.22);
+  border-color: rgba(47, 107, 143, 0.30);
+}
+.corpus-sea-density-swatch.d3 {
+  background: rgba(47, 107, 143, 0.38);
+  border-color: rgba(47, 107, 143, 0.45);
+}
+
+.corpus-sea-filter-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 6px;
+}
+.corpus-sea-filter-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-filter-clear {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-filter-clear:hover { background: var(--color-background-secondary, #f5f5f7); }
 
 .corpus-sea-sec-hd {
   font-size: 11px;

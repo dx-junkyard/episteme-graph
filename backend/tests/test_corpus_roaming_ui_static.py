@@ -98,6 +98,9 @@ class TestModulePresence:
             ".corpus-sea-edge",
             ".corpus-sea-frontier-btn",
             ".corpus-sea-discuss",
+            ".corpus-sea-anchor-dot",
+            ".corpus-sea-density-legend",
+            ".corpus-sea-filter-clear",
         ):
             assert selector in css, f"missing CSS selector: {selector}"
 
@@ -230,12 +233,118 @@ class TestNoNumbersShown:
         for banned in ("weight", "confidence", "score", "similarity", "percent", "%"):
             assert banned not in js, f"数値キー {banned!r} を参照/描画している"
 
-    def test_overflowing_markers_collapse_without_a_count(self):
-        """1ノードに載る論文が多いときも「+N」の件数を出さない（…に畳む）。"""
+    def test_anchor_density_is_drawn_as_one_binned_dot(self):
+        """アンカーに置かれた論文は円1つで表す。件数の羅列も「+N」も作らない。"""
         js = _read(CORPUS_JS)
         block = _extract_function_body(js, "function renderMap() {")
-        assert '"…"' in block or "…</text>" in block
-        assert '"+" + entries.length' not in block
+        assert "data-corpus-anchor" in block, "アンカー円に識別属性が無い"
+        assert "anchorRadius(" in block, "半径を段階ビン関数から取っていない"
+        for banned in ('"+" + entries.length', "entries.length *", "Math.sqrt"):
+            assert banned not in block, f"連続比例・件数表示 {banned!r} がある"
+
+
+class TestDensityIsGradedNotNumeric:
+    """情報密度の段階表現（案A）。段階ビンだけを描き、連続比例・数値は描かない（CR3）。"""
+
+    def _decl_line(self, js: str, name: str) -> str:
+        for line in js.splitlines():
+            if name in line and "=" in line and "const" in line:
+                return line
+        raise AssertionError(f"定数宣言 {name} が無い")
+
+    def test_region_density_has_exactly_four_fixed_bins(self):
+        js = _read(CORPUS_JS)
+        assert "[1, 3, 6]" in self._decl_line(js, "REGION_DENSITY_THRESHOLDS")
+        block = _extract_function_body(js, "function regionDensityLevel(count) {")
+        assert "REGION_DENSITY_THRESHOLDS" in block
+        for banned in ("Math.sqrt", "Math.log", "Math.pow", "/ total", "* count"):
+            assert banned not in block, f"段階ビンでない連続計算 {banned!r} がある"
+
+    def test_region_classes_are_the_four_graded_steps(self):
+        js = _read(CORPUS_JS)
+        block = _extract_function_body(js, "function renderMap() {")
+        assert '"corpus-sea-region d" + regionDensityLevel(' in block
+        css = _read(STYLES_CSS)
+        for cls in (".corpus-sea-region.d1", ".corpus-sea-region.d2", ".corpus-sea-region.d3"):
+            assert cls in css, f"密度クラス {cls} の定義が無い"
+
+    def test_fog_regions_keep_their_own_expression(self):
+        """霧の領域は骨格側の表現。密度クラスを重ねない（分岐で切り分ける）。"""
+        js = _read(CORPUS_JS)
+        block = _extract_function_body(js, "function renderMap() {")
+        assert 'const fog = r.kind === "fog";' in block
+        assert '? "corpus-sea-region fog"' in block
+
+    def test_anchor_radius_comes_from_fixed_bins(self):
+        js = _read(CORPUS_JS)
+        assert "[1, 2, 4]" in self._decl_line(js, "ANCHOR_RADIUS_THRESHOLDS")
+        assert "[6, 9, 12]" in self._decl_line(js, "ANCHOR_RADII")
+        block = _extract_function_body(js, "function anchorRadius(count) {")
+        assert "ANCHOR_RADII" in block
+        for banned in ("Math.sqrt", "Math.log", "Math.pow", "* count", "count *"):
+            assert banned not in block, f"段階ビンでない連続計算 {banned!r} がある"
+
+    def test_counts_never_reach_the_dom(self):
+        """段階に落とす前の数は描画にも aria にも出さない。"""
+        js = _read(CORPUS_JS)
+        block = _extract_function_body(js, "function renderMap() {")
+        for banned in ("countOf(density.anchors, anchorId) +", "+ countOf("):
+            assert banned not in block, "件数を文字列に連結している"
+        anchor = _extract_function_body(js, "function selectAnchor(anchorId) {")
+        assert "length" not in anchor, "絞り込みで件数を作らない"
+
+    def test_legend_labels_are_words_not_numbers(self):
+        js = _read(CORPUS_JS)
+        line = self._decl_line(js, "DENSITY_LEGEND_LABELS")
+        for label in ("なし", "少しある", "蓄積あり", "厚い"):
+            assert label in line, f"凡例の段階ラベル {label} が無い"
+        assert not any(ch.isdigit() for ch in line), "凡例のラベルに数字がある（CR3）"
+        assert "閲覧できる論文の厚み" in self._decl_line(js, "DENSITY_LEGEND_TITLE")
+
+    def test_legend_is_rendered_only_with_a_map(self):
+        """骨格が無いときは地図ごと出さないので、凡例もそこに出ない（fail-closed）。"""
+        js = _read(CORPUS_JS)
+        block = _extract_function_body(js, "function renderMap() {")
+        head = block[: block.index("if (!lvl) {")]
+        assert "densityLegendHtml()" not in head
+        assert "box.innerHTML = svg + densityLegendHtml();" in block
+
+
+class TestAnchorFilter:
+    """アンカー円は右の論文リストを絞るだけ。地図・端・詳細の見え方は変えない（CR5）。"""
+
+    def test_clicking_an_anchor_filters_the_paper_list(self):
+        js = _read(CORPUS_JS)
+        block = _extract_function_body(js, "function selectAnchor(anchorId) {")
+        assert "state.anchorFilter" in block
+        assert "renderPapers();" in block
+        for banned in ("renderMap()", "renderEdges()", "renderDetail()"):
+            assert banned not in block, f"絞り込みが {banned} まで書き換えている"
+
+    def test_filter_can_be_cleared(self):
+        js = _read(CORPUS_JS)
+        assert "絞り込みを解除" in js
+        block = _extract_function_body(js, "function clearAnchorFilter() {")
+        assert "state.anchorFilter = null;" in block
+        papers = _extract_function_body(js, "function renderPapers() {")
+        assert "corpus-sea-filter-clear" in papers
+        assert "clearAnchorFilter" in papers
+
+    def test_filtered_heading_names_the_place_without_a_count(self):
+        js = _read(CORPUS_JS)
+        block = _extract_function_body(js, "function renderPapers() {")
+        assert "に置かれている論文" in block
+        for banned in ("rows.length +", "+ rows.length", "docIds).length"):
+            assert banned not in block, f"見出しに件数を連結している（{banned!r}）"
+
+    def test_filter_is_reset_on_domain_switch_and_invalidate(self):
+        js = _read(CORPUS_JS)
+        for signature in (
+            "async function selectDomain(domainKey) {",
+            "function invalidate() {",
+        ):
+            block = _extract_function_body(js, signature)
+            assert "state.anchorFilter = null;" in block, f"{signature} で絞り込みを残している"
 
 
 class TestFrontierInterest:

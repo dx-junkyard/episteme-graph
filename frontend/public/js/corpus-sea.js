@@ -36,11 +36,19 @@
 
   const API = "/api";
 
-  // 1つの概念ノードに重ねる論文マーカーの上限。溢れた分は「…」に畳む（件数は
-  // 出さない — CR3。全件は右の論文リストで読める）。
-  const MAX_MARKERS_PER_NODE = 4;
-  const MARKER_STEP = 14;
   const CONCEPT_OFFSET = [16, -14];
+
+  // 情報密度の段階表現（案A）。地図に出すのは「厚み」の**段階**だけで、件数も、
+  // 件数に比例する連続量も描かない（CR3。オーナー裁定: 段階ビンは可、連続比例と
+  // 数値は不可）。閾値は描画から見えない定数として1箇所に置く。
+  //   領域の塗り: 0 → d0 / 1〜2 → d1 / 3〜5 → d2 / 6以上 → d3
+  //   アンカーの円: 1 → 6 / 2〜3 → 9 / 4以上 → 12
+  const REGION_DENSITY_THRESHOLDS = [1, 3, 6];
+  const ANCHOR_RADIUS_THRESHOLDS = [1, 2, 4];
+  const ANCHOR_RADII = [6, 9, 12];
+  // 凡例の語彙。段階の名前であって、数量の言い換えではない（数字を書かない）。
+  const DENSITY_LEGEND_LABELS = ["なし", "少しある", "蓄積あり", "厚い"];
+  const DENSITY_LEGEND_TITLE = "閲覧できる論文の厚み";
 
   // 回答の出所（grounding）と根拠の格（tier）の表示語彙。app.js の GROUNDING_META /
   // TIER_META と同じ語彙を使う（学習者から見て同じものが同じ名前で見える必要がある）。
@@ -75,6 +83,9 @@
     skeleton: null,
     documents: [],
     selectedDocumentId: "",
+    // 地図のアンカー円を押したときの論文リスト絞り込み。null で全件。
+    // 押しても地図の見え方は変わらない（右のリストの範囲が変わるだけ）。
+    anchorFilter: null,
     loading: false,
     // 端への関心（Phase D）。この画面で押した分の trace_id を持つだけで、
     // 押した結果によって地図・論文リスト・端の文言は一切変わらない（CR5）。
@@ -285,6 +296,7 @@
     if (!domainKey) return;
     state.domainKey = domainKey;
     state.selectedDocumentId = "";
+    state.anchorFilter = null;
     state.landscape = null;
     state.skeleton = null;
     state.documents = [];
@@ -341,6 +353,72 @@
     return esc(s);
   }
 
+  // --- 情報密度（段階ビン） ---------------------------------------------
+  // 「厚み」の材料は distinct な document の集合。段階に落とす前の数は関数の外へ
+  // 出さない（描画・DOM・aria のいずれにも件数を出さない — CR3）。
+
+  // アンカー（概念ノード id / 領域 id）と領域ごとに、置かれた論文の集合を作る。
+  function densityIndex(posById, regionById) {
+    const anchors = {};
+    const regions = {};
+    placements().forEach(function (p) {
+      const anchorId = p.anchor_node_id || "";
+      const docId = p.document_id || "";
+      if (!anchorId || !docId) return;
+      (anchors[anchorId] = anchors[anchorId] || {})[docId] = true;
+      const node = posById[anchorId];
+      // 概念ノードは帰属領域へ、領域そのものへの配置はその領域へ寄せる。
+      const regionId = node ? (node.region || "") : (regionById[anchorId] ? anchorId : "");
+      if (!regionId) return;
+      (regions[regionId] = regions[regionId] || {})[docId] = true;
+    });
+    return { anchors: anchors, regions: regions };
+  }
+
+  function countOf(index, key) {
+    const bucket = index[key];
+    return bucket ? Object.keys(bucket).length : 0;
+  }
+
+  // 段階ビン。連続比例（半径や不透明度を件数に比例させる）はしない。
+  function regionDensityLevel(count) {
+    let level = 0;
+    for (let i = 0; i < REGION_DENSITY_THRESHOLDS.length; i++) {
+      if (count >= REGION_DENSITY_THRESHOLDS[i]) level = i + 1;
+    }
+    return level;
+  }
+
+  function anchorRadius(count) {
+    let r = ANCHOR_RADII[0];
+    for (let i = 0; i < ANCHOR_RADIUS_THRESHOLDS.length; i++) {
+      if (count >= ANCHOR_RADIUS_THRESHOLDS[i]) r = ANCHOR_RADII[i];
+    }
+    return r;
+  }
+
+  // アンカーの表示名（概念ノード → 骨格ノード辞書 → 領域 → id の順。作らない）。
+  function anchorLabel(anchorId, posById, regionById) {
+    const node = posById[anchorId];
+    if (node && node.label) return node.label;
+    const meta = ((state.skeleton && state.skeleton.nodes) || {})[anchorId];
+    if (meta && meta.label) return meta.label;
+    const region = regionById[anchorId];
+    if (region && region.label) return region.label;
+    return anchorId;
+  }
+
+  function densityLegendHtml() {
+    let html = '<div class="corpus-sea-density-legend">' +
+      '<span class="corpus-sea-density-legend-hd">' + esc(DENSITY_LEGEND_TITLE) + "</span>";
+    DENSITY_LEGEND_LABELS.forEach(function (label, i) {
+      html += '<span class="corpus-sea-density-step">' +
+        '<span class="corpus-sea-density-swatch d' + i + '"></span>' +
+        '<span class="corpus-sea-density-label">' + esc(label) + "</span></span>";
+    });
+    return html + "</div>";
+  }
+
   function renderMap() {
     const box = el("corpus-sea-map");
     if (!box) return;
@@ -358,11 +436,16 @@
     const regionById = {};
     (lvl.regions || []).forEach(function (r) { regionById[r.id] = r; });
 
+    const density = densityIndex(posById, regionById);
+
     let svg = '<svg viewBox="0 0 ' + vb[0] + " " + vb[1] + '" class="corpus-sea-svg" role="img" ' +
       'aria-label="この分野の地図と、閲覧できる論文の位置">';
-    // 領域
+    // 領域（塗りは「厚み」の段階。霧の領域は骨格側の表現を上書きしない＝密度で塗らない）
     (lvl.regions || []).forEach(function (r) {
-      const cls = "corpus-sea-region" + (r.kind === "fog" ? " fog" : "");
+      const fog = r.kind === "fog";
+      const cls = fog
+        ? "corpus-sea-region fog"
+        : "corpus-sea-region d" + regionDensityLevel(countOf(density.regions, r.id));
       svg += '<g class="' + cls + '">';
       svg += '<rect x="' + r.x + '" y="' + r.y + '" width="' + r.w + '" height="' + r.h +
         '" rx="10"></rect>';
@@ -378,41 +461,54 @@
         svgEsc(n.label || meta.label || n.id) + "</text>";
       svg += "</g>";
     });
-    // 論文マーカー（アンカーごとに束ねる）
-    const groups = {};
-    placements().forEach(function (p) {
-      const key = p.anchor_node_id || "";
-      if (!key) return;
-      (groups[key] = groups[key] || []).push(p);
-    });
-    Object.keys(groups).forEach(function (nodeId) {
-      const point = anchorPoint(nodeId, posById, regionById);
+    // アンカーごとに円1つ。半径は段階ビン（羅列も「…」も持たない＝数を数えさせない）。
+    Object.keys(density.anchors).forEach(function (anchorId) {
+      const point = anchorPoint(anchorId, posById, regionById);
       if (!point) return;
-      const entries = groups[nodeId];
-      const shown = entries.slice(0, MAX_MARKERS_PER_NODE);
-      shown.forEach(function (p, i) {
-        svg += '<g class="corpus-sea-marker" data-corpus-doc="' + esc(p.document_id) + '" tabindex="0" ' +
-          'role="button" aria-label="' + esc(p.document_title || "") + '">' +
-          '<circle cx="' + (point[0] + i * MARKER_STEP) + '" cy="' + point[1] + '" r="9"></circle>' +
-          '<text x="' + (point[0] + i * MARKER_STEP) + '" y="' + (point[1] + 3.5) +
-          '" text-anchor="middle">📄</text></g>';
-      });
-      if (entries.length > MAX_MARKERS_PER_NODE) {
-        // 溢れた分は数を出さず「…」に畳む（全件は右の論文リストにある）。
-        svg += '<text class="corpus-sea-marker-more" x="' +
-          (point[0] + MAX_MARKERS_PER_NODE * MARKER_STEP) + '" y="' + (point[1] + 4) +
-          '" text-anchor="middle">…</text>';
-      }
+      const label = anchorLabel(anchorId, posById, regionById);
+      svg += '<g class="corpus-sea-anchor-dot" data-corpus-anchor="' + esc(anchorId) +
+        '" tabindex="0" role="button" aria-label="' + esc(label + " に置かれている論文を見る") + '">' +
+        '<circle cx="' + point[0] + '" cy="' + point[1] + '" r="' +
+        anchorRadius(countOf(density.anchors, anchorId)) + '"></circle></g>';
     });
     svg += "</svg>";
-    box.innerHTML = svg;
-    box.querySelectorAll("[data-corpus-doc]").forEach(function (g) {
-      const open = function () { selectDocument(g.getAttribute("data-corpus-doc")); };
-      g.addEventListener("click", open);
+    box.innerHTML = svg + densityLegendHtml();
+    box.querySelectorAll("[data-corpus-anchor]").forEach(function (g) {
+      const pick = function () { selectAnchor(g.getAttribute("data-corpus-anchor")); };
+      g.addEventListener("click", pick);
       g.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); open(); }
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); pick(); }
       });
     });
+  }
+
+  // 地図のアンカーを押す → 右の論文リストをその場所の論文に絞る。
+  // 地図の描画も、端の文言も、詳細パネルも変えない（見え方を増やすのは一覧の範囲だけ）。
+  function selectAnchor(anchorId) {
+    if (!anchorId) return;
+    const lvl = level1();
+    const posById = {};
+    const regionById = {};
+    if (lvl) {
+      (lvl.nodes || []).forEach(function (n) { posById[n.id] = n; });
+      (lvl.regions || []).forEach(function (r) { regionById[r.id] = r; });
+    }
+    const docIds = {};
+    placements().forEach(function (p) {
+      if ((p.anchor_node_id || "") !== anchorId) return;
+      if (p.document_id) docIds[p.document_id] = true;
+    });
+    state.anchorFilter = {
+      anchorId: anchorId,
+      label: anchorLabel(anchorId, posById, regionById),
+      docIds: docIds,
+    };
+    renderPapers();
+  }
+
+  function clearAnchorFilter() {
+    state.anchorFilter = null;
+    renderPapers();
   }
 
   // -------------------------------------------------------------------
@@ -434,8 +530,23 @@
       box.innerHTML = '<div class="corpus-sea-empty">この分野で閲覧できる論文はまだありません。</div>';
       return;
     }
-    let html = '<div class="corpus-sea-sec-hd">閲覧できる論文（新しい順）</div>';
-    state.documents.forEach(function (d) {
+    const filter = state.anchorFilter;
+    const rows = filter
+      ? state.documents.filter(function (d) { return !!filter.docIds[d.document_id]; })
+      : state.documents;
+    let html;
+    if (filter) {
+      html = '<div class="corpus-sea-filter-hd">' +
+        '<span class="corpus-sea-filter-label">「' + esc(filter.label) + '」に置かれている論文</span>' +
+        '<button type="button" class="corpus-sea-filter-clear" id="corpus-sea-filter-clear">' +
+        "絞り込みを解除</button></div>";
+      if (!rows.length) {
+        html += '<div class="corpus-sea-empty">この場所に置かれている論文は、いまこの一覧には出せません。</div>';
+      }
+    } else {
+      html = '<div class="corpus-sea-sec-hd">閲覧できる論文（新しい順）</div>';
+    }
+    rows.forEach(function (d) {
       const active = d.document_id === state.selectedDocumentId ? " active" : "";
       const meta = [];
       if (Array.isArray(d.authors) && d.authors.length) meta.push(d.authors.join(", "));
@@ -450,6 +561,8 @@
       html += "</button>";
     });
     box.innerHTML = html;
+    const clearBtn = box.querySelector("#corpus-sea-filter-clear");
+    if (clearBtn) clearBtn.addEventListener("click", clearAnchorFilter);
     box.querySelectorAll("[data-corpus-doc-row]").forEach(function (btn) {
       btn.addEventListener("click", function () {
         selectDocument(this.getAttribute("data-corpus-doc-row"));
@@ -916,6 +1029,7 @@
     state.skeleton = null;
     state.documents = [];
     state.selectedDocumentId = "";
+    state.anchorFilter = null;
     state.interest = {};
     state.discuss = {
       documentId: "", title: "", scope: "course_sources",
