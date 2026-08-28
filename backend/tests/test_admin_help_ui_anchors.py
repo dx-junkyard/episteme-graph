@@ -136,7 +136,11 @@ class TestAdminUiAnchorsModule:
         #   .radar-search（arXiv のメタデータのみ・テキスト LLM 不使用）/
         #   .radar-compare（違いを分析。AI 推定・非保存・日次上限で無効化される — PR4）/
         #   .radar-ingest（取り込みの弁は既存 ingest と同一 — PR3）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 299
+        # + 論文レーダー 出所の後付け登録（paper_radar_design.md §11）の1件:
+        #   materials.radar-provenance（[この論文として登録する]。ファイル名からの推定は
+        #    書き込まず、自動記帳はタイトル完全一致時のみ。既存出所あり・編集権限なし・
+        #    arXiv 未到達では出ない/押せない）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 300
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

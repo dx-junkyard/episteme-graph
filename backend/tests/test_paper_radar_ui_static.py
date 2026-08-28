@@ -6,9 +6,12 @@
 
 - モジュールが ES5 で書かれ、`window.PaperRadar`（init / openModal）を公開し、
   DI 注入元（admin.js）より前に読み込まれること（開発ルール5・admin 系 JS の共通規約）。
-- 管理UI 3点セットの第3点 — モーダル系5つの `data-ui-anchor` 担体（radar-modal /
-  radar-distance / radar-search / radar-compare / radar-ingest）と、admin.js 側の
-  行メニュー担体（materials.row-radar）が実在すること。
+- 管理UI 3点セットの第3点 — モーダル系6つの `data-ui-anchor` 担体（radar-modal /
+  radar-distance / radar-search / radar-compare / radar-ingest / radar-provenance）と、
+  admin.js 側の行メニュー担体（materials.row-radar）が実在すること。
+- arXiv 出所の後付け登録: 推定を推定として言い、自動登録はタイトル一致時に1回だけ、
+  一致しないときは両タイトルを並置したうえで教員の明示確認を経ること。
+  `can_register === false` のときは登録導線を出さないこと。
 - PR1: 起点は教材1件（`document_ref` を渡す）で、候補を保存・キャッシュしないこと。
 - PR2: 距離帯はサーバの `distance_label` を素通しで描くこと。クライアントに
   閾値（0.45 / 0.30 等）も「距離キー → 帯ラベル」の変換表も持たないこと。
@@ -42,6 +45,7 @@ MODAL_ANCHORS = (
     "materials.radar-search",
     "materials.radar-compare",
     "materials.radar-ingest",
+    "materials.radar-provenance",
 )
 # 行メニュー側（admin.js）が担う1件。合計6件。
 ROW_ANCHOR = "materials.row-radar"
@@ -541,3 +545,126 @@ class TestCandidateStates:
     def test_search_sends_keyphrases_only_for_near(self):
         body = _extract_function(self.src, "runSearch")
         assert 'state.distance === "near" ? enabledKeyphrases() : []' in body
+
+
+# ---------------------------------------------------------------------------
+# ⑫ arXiv 出所の後付け登録（3段階: 推定表示 / 自動登録 / 明示確認）
+# ---------------------------------------------------------------------------
+
+
+class TestArxivProvenanceRegistration:
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+        self.code = _strip_comments(self.src)
+
+    def test_seed_provenance_is_kept_in_state(self):
+        assert "provenance: null," in self.code
+        assert "provenanceAutoAttempted: false," in self.code
+        body = _extract_function(self.src, "applySeed")
+        assert "state.provenance = (seed && seed.provenance) || null;" in body
+
+    def test_open_modal_resets_provenance_state(self):
+        body = _extract_function(self.src, "openModal")
+        assert "state.provenance = null;" in body
+        assert "state.provenanceAutoAttempted = false;" in body
+
+    def test_inferred_category_source_is_labelled_as_estimate(self):
+        """推定プリフィルを「arXiv 由来として登録済み」に見せない。"""
+        assert "arxiv_inferred:" in self.code
+        assert (
+            "ファイル名から推定した arXiv 情報です（教材の出所としては未登録）。"
+            in self.src
+        )
+
+    def test_inferred_facts_are_stated(self):
+        assert "ファイル名から arXiv-" in self.src
+        assert " と推定し、タイトルが一致しました。" in self.src
+        assert " と推定しましたが、arXiv から論文情報を取得できませんでした。" in self.src
+
+    def test_auto_registration_is_attempted_only_once(self):
+        body = _extract_function(self.src, "maybeAutoRegisterProvenance")
+        assert "if (state.provenanceAutoAttempted) return;" in body
+        assert "state.provenanceAutoAttempted = true;" in body
+        # 一致していない推定を黙って登録しない。
+        assert "prov.title_match" in body
+        assert "prov.fetched" in body
+        assert 'prov.status !== "inferred"' in body
+
+    def test_auto_registration_runs_from_render_seed(self):
+        body = _extract_function(self.src, "renderSeed")
+        assert "maybeAutoRegisterProvenance();" in body
+        assert "bindProvenanceActions(node);" in body
+
+    def test_cannot_register_hides_the_control(self):
+        """can_register === false のときだけ導線を隠す（未定義なら出す）。"""
+        body = _extract_function(self.src, "provenanceHtml")
+        assert "prov.can_register !== false" in body
+        gate = _extract_function(self.src, "maybeAutoRegisterProvenance")
+        assert "prov.can_register === false" in gate
+
+    def test_mismatch_shows_both_titles_escaped(self):
+        body = _extract_function(self.src, "provenanceHtml")
+        assert "prov.arxiv_title" in body
+        assert "prov.document_title" in body
+        assert "esc(PROV_ARXIV_TITLE_HEAD" in body
+        assert "esc(PROV_DOCUMENT_TITLE_HEAD" in body
+        assert "arXiv の論文: " in self.src
+        assert "この教材のタイトル: " in self.src
+
+    def test_mismatch_requires_explicit_confirmation(self):
+        body = _extract_function(self.src, "bindProvenanceActions")
+        assert "window.confirm(" in body
+        assert "PROV_ARXIV_TITLE_HEAD" in body
+        assert "PROV_DOCUMENT_TITLE_HEAD" in body
+        assert "registerProvenance(true);" in body
+
+    def test_register_button_carries_anchor_and_label(self):
+        assert 'id="pr-provenance-register"' in self.src
+        assert 'data-ui-anchor="materials.radar-provenance"' in self.src
+        assert "この論文として登録する" in self.src
+
+    def test_register_posts_confirm_flag_to_the_provenance_endpoint(self):
+        body = _extract_function(self.src, "registerProvenance")
+        assert '"/admin/discovery/radar/provenance"' in body
+        assert 'method: "POST"' in body
+        assert "document_ref: documentId" in body
+        assert "arxiv_id: prov.arxiv_id" in body
+        assert "confirm: !!confirmed" in body
+
+    def test_register_applies_returned_provenance_without_reverting_edits(self):
+        # 登録成功は出所表示（provenance / categories_source）だけを更新する。
+        # applySeed で seed 全体を差し替えると、POST の往復中に教員が編集した
+        # 条件チップ（カテゴリ・キーフレーズ）が巻き戻るため禁止。
+        body = _extract_function(self.src, "registerProvenance")
+        assert "applySeed(" not in body
+        assert "state.provenance = data.seed.provenance" in body
+        assert "state.categoriesSource = data.seed.categories_source" in body
+        assert "この教材の出所として登録しました。" in self.src
+
+    def test_search_response_does_not_degrade_provenance(self):
+        # 検索経路の seed は arXiv 再取得を省くため provenance が fetched=false に
+        # 劣化しうる。手元の情報が減る方向の上書きをしないこと。
+        body = _extract_function(self.src, "applySeedMeta")
+        assert 'incoming.status === "registered" || !state.provenance' in body
+
+    def test_register_failure_shows_server_detail_without_blocking_search(self):
+        body = _extract_function(self.src, "registerProvenance")
+        assert "detailText(err," in body
+        # 失敗時に検索・比較を止めない（notice を出すだけ）。
+        assert "state.searching" not in body
+        assert "disabled" not in body
+
+    def test_register_result_is_scoped_to_the_opened_document(self):
+        body = _extract_function(self.src, "registerProvenance")
+        assert "if (state.documentId !== documentId) return;" in body
+
+
+# ---------------------------------------------------------------------------
+# ⑬ キャッシュバスター（配信更新の取りこぼし防止）
+# ---------------------------------------------------------------------------
+
+
+class TestCacheBuster:
+    def test_admin_html_bumps_the_radar_cache_buster(self):
+        src = _read(ADMIN_HTML)
+        assert "js/admin-paper-radar.js?v=paper-radar-20260828-3" in src

@@ -4,6 +4,7 @@
   - ``GET  /api/admin/discovery/radar/seed``
   - ``POST /api/admin/discovery/radar/search``
   - ``POST /api/admin/discovery/radar/compare``
+  - ``POST /api/admin/discovery/radar/provenance``（arXiv 出所の後付け登録）
 
 ``tests/test_paper_discovery_api.py`` の流儀（実 app + ``TestClient`` + ``_pg_session``
 のフェイク差し替え）を踏襲する。DB・MinIO・arXiv・LLM には接続しない。
@@ -15,7 +16,11 @@
   4. 比較分析のエラー写像（空 422 / 上限超過 422 / 素材なし 422 / 日次上限 429 /
      LLM・arXiv 失敗 502）と ``caveat`` がサーバ側定数であること（PR4）
   5. DTO に cosine 生値・確度の数値が現れない（PR2 / PD4）
-  6. 副作用ゼロ（購読・見送りへ書かない・監査を記帳しない — PR5）
+  6. 副作用ゼロ（購読・見送りへ書かない・監査を記帳しない — PR5。例外は
+     ``/radar/provenance`` = 教員の明示操作 + 監査記帳）
+  7. arXiv 出所の後付け登録の3段階（推定 → タイトル一致で自動記帳 → 不一致は
+     ``confirm`` の明示確定）と、**edit 権限**の 403 / 権限フラグ ``can_register``
+     の注入
 """
 
 from __future__ import annotations
@@ -53,7 +58,36 @@ _SEED = {
     "categories_source": "arxiv",
     "keyphrase_candidates": [{"text": "dark energy", "source": "component", "enabled": True}],
     "domain_key": "astrophysics",
+    "provenance": {
+        "status": "registered",
+        "arxiv_id": "2608.20293",
+        "arxiv_title": "",
+        "arxiv_abs_url": None,
+        "document_title": "起点論文",
+        "title_match": False,
+        "fetched": False,
+    },
 }
+
+#: 後付け登録の対象（``source_url`` 未登録でファイル名から推定できた教材）の seed。
+_INFERRED_ID = "2407.01221"
+
+
+def _inferred_seed(*, title_match=True, fetched=True, arxiv_id=_INFERRED_ID) -> dict:
+    seed = dict(_SEED)
+    seed["arxiv_id"] = None
+    seed["abs_url"] = None
+    seed["categories_source"] = "arxiv_inferred"
+    seed["provenance"] = {
+        "status": "inferred",
+        "arxiv_id": arxiv_id,
+        "arxiv_title": "Dark Energy: A Review",
+        "arxiv_abs_url": f"https://arxiv.org/abs/{arxiv_id}",
+        "document_title": "Dark Energy: A Review",
+        "title_match": title_match,
+        "fetched": fetched,
+    }
+    return seed
 
 
 class _Result:
@@ -118,6 +152,8 @@ def env(monkeypatch):
             "notes": [],
         },
         "compare_error": None,
+        "register_calls": [],
+        "register_error": None,
     }
 
     monkeypatch.setattr(routes, "_pg_session", lambda: _Session())
@@ -158,9 +194,18 @@ def env(monkeypatch):
             raise state["compare_error"]
         return state["compare_result"]
 
+    def _register(session, document_id, arxiv_id):
+        if state["register_error"] is not None:
+            raise state["register_error"]
+        state["register_calls"].append((document_id, arxiv_id))
+        # 記帳後は「登録済み」の seed が導出されるようになる（route は再導出して返す）。
+        state["seed"] = dict(_SEED)
+        return f"https://arxiv.org/abs/{arxiv_id}"
+
     monkeypatch.setattr(routes.pd_radar, "resolve_seed", _resolve_seed)
     monkeypatch.setattr(routes.pd_radar, "run_radar_search", _run_radar_search)
     monkeypatch.setattr(routes.pd_compare, "run_compare", _run_compare)
+    monkeypatch.setattr(routes.pd_radar, "register_arxiv_provenance", _register)
 
     # 日次ゲートはプロセス内 in-memory なのでテストごとに初期化する。
     routes._radar_compare_gate.daily_counts.clear()
@@ -195,11 +240,13 @@ def _cap(env, monkeypatch, value: int) -> None:
 _SEED_PATH = "/api/admin/discovery/radar/seed?document_ref=doc-1"
 _SEARCH_PATH = "/api/admin/discovery/radar/search"
 _COMPARE_PATH = "/api/admin/discovery/radar/compare"
+_PROVENANCE_PATH = "/api/admin/discovery/radar/provenance"
 
 _ALL_ENDPOINTS = [
     ("get", _SEED_PATH, None),
     ("post", _SEARCH_PATH, {"document_ref": "doc-1", "distance": "near"}),
     ("post", _COMPARE_PATH, {"document_ref": "doc-1", "arxiv_ids": ["2608.00002"]}),
+    ("post", _PROVENANCE_PATH, {"document_ref": "doc-1", "arxiv_id": _INFERRED_ID}),
 ]
 
 
@@ -287,6 +334,35 @@ class TestRadarSeed:
     def test_no_audit_is_recorded(self, env):
         env["client"].get(_SEED_PATH, headers=_auth(env, "teacher"))
         assert env["audits"] == []
+
+    def test_inferred_provenance_is_passed_through(self, env):
+        env["seed"] = _inferred_seed()
+        seed = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()["seed"]
+        assert seed["arxiv_id"] is None, "推定を登録済み ID に昇格させない"
+        assert seed["categories_source"] == "arxiv_inferred"
+        assert seed["provenance"]["status"] == "inferred"
+        assert seed["provenance"]["arxiv_id"] == _INFERRED_ID
+
+    def test_can_register_is_injected_by_the_route(self, env):
+        """権限は core が知らないので route が注入する（フロントの導線出し分け用）。"""
+        seed = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()["seed"]
+        assert seed["provenance"]["can_register"] is True
+
+    def test_can_register_is_false_for_a_viewer(self, env):
+        env["access"] = env["services"].DocumentAccess(
+            document_id="doc-1", source_path="mat-1", uploaded_by="someone",
+            is_owner=False, can_view=True, can_edit=False,
+        )
+        seed = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()["seed"]
+        assert seed["provenance"]["can_register"] is False
+
+    def test_can_register_is_true_for_system_admin(self, env):
+        env["access"] = env["services"].DocumentAccess(
+            document_id="doc-1", source_path="mat-1", uploaded_by="someone",
+            is_owner=False, can_view=False, can_edit=False,
+        )
+        seed = env["client"].get(_SEED_PATH, headers=_auth(env, "admin")).json()["seed"]
+        assert seed["provenance"]["can_register"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -455,3 +531,150 @@ class TestRadarCompare:
     def test_no_audit_is_recorded(self, env):
         self._post(env, {"document_ref": "doc-1", "arxiv_ids": ["2608.00002"]})
         assert env["audits"] == []
+
+
+# ---------------------------------------------------------------------------
+# 6. arXiv 出所の後付け登録（3段階）
+# ---------------------------------------------------------------------------
+
+
+class TestRadarProvenance:
+    def _post(self, env, body, who="teacher"):
+        return env["client"].post(_PROVENANCE_PATH, json=body, headers=_auth(env, who))
+
+    def _body(self, **overrides) -> dict:
+        body = {"document_ref": "doc-1", "arxiv_id": _INFERRED_ID}
+        body.update(overrides)
+        return body
+
+    # ── 権限（view は 404・edit は 403）────────────────────────────────────
+    def test_viewer_without_edit_is_403(self, env):
+        env["seed"] = _inferred_seed()
+        env["access"] = env["services"].DocumentAccess(
+            document_id="doc-1", source_path="mat-1", uploaded_by="someone",
+            is_owner=False, can_view=True, can_edit=False,
+        )
+        res = self._post(env, self._body())
+        assert res.status_code == 403
+        assert res.json()["detail"] == env["routes"]._DETAIL_PROVENANCE_FORBIDDEN
+        assert env["register_calls"] == []
+
+    def test_system_admin_may_register_without_edit(self, env):
+        env["seed"] = _inferred_seed()
+        env["access"] = env["services"].DocumentAccess(
+            document_id="doc-1", source_path="mat-1", uploaded_by="someone",
+            is_owner=False, can_view=False, can_edit=False,
+        )
+        res = self._post(env, self._body(), who="admin")
+        assert res.status_code == 200
+        assert env["register_calls"] == [("doc-1", _INFERRED_ID)]
+
+    # ── 2段階目: タイトル一致は確認なしで記帳 ─────────────────────────────
+    def test_title_match_registers_without_confirmation(self, env):
+        env["seed"] = _inferred_seed(title_match=True)
+        res = self._post(env, self._body())
+        assert res.status_code == 200
+        payload = res.json()
+        assert payload["registered"] is True
+        assert env["register_calls"] == [("doc-1", _INFERRED_ID)]
+        # 記帳後の seed をそのまま返す（フロントが再取得しなくても表示を切り替えられる）。
+        assert payload["seed"]["provenance"]["status"] == "registered"
+        assert payload["seed"]["provenance"]["can_register"] is True
+
+    def test_registration_is_audited_with_the_method(self, env):
+        env["seed"] = _inferred_seed(title_match=True)
+        self._post(env, self._body())
+        assert len(env["audits"]) == 1
+        entity_type, entity_id, old, new, user_id, metadata = env["audits"][0]
+        from core.schema import AUDIT_ENTITY_PAPER_DISCOVERY
+
+        assert entity_type == AUDIT_ENTITY_PAPER_DISCOVERY
+        assert entity_id == "doc-1"
+        assert old == env["routes"]._STATUS_NONE
+        assert new == "provenance_registered"
+        assert user_id == _TEACHER
+        assert metadata["action"] == "register_provenance"
+        assert metadata["arxiv_id"] == _INFERRED_ID
+        assert metadata["method"] == env["routes"]._PROVENANCE_METHOD_AUTO
+
+    def test_version_suffix_is_normalized_before_matching(self, env):
+        env["seed"] = _inferred_seed(title_match=True)
+        res = self._post(env, self._body(arxiv_id=f"{_INFERRED_ID}v2"))
+        assert res.status_code == 200
+        assert env["register_calls"] == [("doc-1", _INFERRED_ID)]
+
+    # ── 3段階目: 不一致は明示確定でのみ ──────────────────────────────────
+    def test_title_mismatch_requires_confirmation(self, env):
+        env["seed"] = _inferred_seed(title_match=False)
+        res = self._post(env, self._body())
+        assert res.status_code == 409
+        assert res.json()["detail"] == env["routes"]._DETAIL_PROVENANCE_TITLE_MISMATCH
+        assert env["register_calls"] == []
+        assert env["audits"] == []
+
+    def test_confirmed_mismatch_is_registered_as_teacher_confirmed(self, env):
+        env["seed"] = _inferred_seed(title_match=False)
+        res = self._post(env, self._body(confirm=True))
+        assert res.status_code == 200
+        assert env["register_calls"] == [("doc-1", _INFERRED_ID)]
+        assert env["audits"][0][5]["method"] == env["routes"]._PROVENANCE_METHOD_CONFIRMED
+
+    # ── サーバ側の再検証（クライアントの提示を信用しない）──────────────────
+    def test_already_registered_is_409(self, env):
+        # 既定の seed は登録済み。
+        res = self._post(env, self._body())
+        assert res.status_code == 409
+        assert res.json()["detail"] == env["routes"]._DETAIL_PROVENANCE_ALREADY
+        assert env["register_calls"] == []
+
+    def test_id_mismatch_is_422(self, env):
+        env["seed"] = _inferred_seed(arxiv_id="2407.09999")
+        res = self._post(env, self._body())
+        assert res.status_code == 422
+        assert res.json()["detail"] == env["routes"]._DETAIL_PROVENANCE_MISMATCH
+        assert env["register_calls"] == []
+
+    def test_nothing_inferred_is_422(self, env):
+        seed = dict(_SEED)
+        seed["arxiv_id"] = None
+        seed["abs_url"] = None
+        seed["provenance"] = dict(_SEED["provenance"], status="none", arxiv_id=None)
+        env["seed"] = seed
+        res = self._post(env, self._body())
+        assert res.status_code == 422
+        assert env["register_calls"] == []
+
+    def test_unfetched_metadata_is_422_even_with_confirmation(self, env):
+        """照合材料が無いまま出所を確定させない（confirm でも記帳しない）。"""
+        env["seed"] = _inferred_seed(title_match=False, fetched=False)
+        res = self._post(env, self._body(confirm=True))
+        assert res.status_code == 422
+        assert res.json()["detail"] == env["routes"]._DETAIL_PROVENANCE_UNVERIFIED
+        assert env["register_calls"] == []
+
+    def test_unparsable_arxiv_id_is_422(self, env):
+        env["seed"] = _inferred_seed()
+        res = self._post(env, self._body(arxiv_id="not-an-id"))
+        assert res.status_code == 422
+        assert res.json()["detail"] == env["routes"]._DETAIL_INVALID_ARXIV_ID
+        assert env["register_calls"] == []
+
+    def test_concurrent_registration_is_409_with_the_core_message(self, env):
+        env["seed"] = _inferred_seed()
+        env["register_error"] = ValueError("この教材には、すでに取得元が登録されています。")
+        res = self._post(env, self._body())
+        assert res.status_code == 409
+        assert "すでに取得元" in res.json()["detail"]
+        assert env["audits"] == []
+
+    def test_error_details_carry_no_numbers_or_internal_data(self, env):
+        details = [
+            env["routes"]._DETAIL_PROVENANCE_FORBIDDEN,
+            env["routes"]._DETAIL_PROVENANCE_ALREADY,
+            env["routes"]._DETAIL_PROVENANCE_MISMATCH,
+            env["routes"]._DETAIL_PROVENANCE_UNVERIFIED,
+            env["routes"]._DETAIL_PROVENANCE_TITLE_MISMATCH,
+        ]
+        for detail in details:
+            assert not any(ch.isdigit() for ch in detail), detail
+            assert "http" not in detail

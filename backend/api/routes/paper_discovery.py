@@ -28,14 +28,17 @@
 - **PD6 閉世界の正直さ**: 検索は core の DTO（``query`` / ``closed_world_note``
   同梱）を素通しし、arXiv API 失敗を空一覧に化けさせない（502 + 事実文）。
 
-論文レーダー（``docs/features/paper_radar_design.md`` / PR1〜PR8）の3本
-（``/radar/seed`` / ``/radar/search`` / ``/radar/compare``）も同じルータに足す。
-本ルータが構造として守るのは:
+論文レーダー（``docs/features/paper_radar_design.md`` / PR1〜PR8）の4本
+（``/radar/seed`` / ``/radar/search`` / ``/radar/compare`` / ``/radar/provenance``）も
+同じルータに足す。本ルータが構造として守るのは:
 
 - **PR3 取り込みは既存の弁のみ**: レーダーは候補提示までで、専用の取得・取り込み
   エンドポイントを持たない（教員は既存の ``/ingest`` / ``/ingest-batch`` を叩く）。
-- **PR5 教員の明示操作のみ**: 3本とも読み取り専用で、購読・見送りへ書き込まない
+  ``/radar/provenance`` は**論文を取得しない** — 既にある教材の出所
+  （``documents.source_url``）を後から記帳するだけで、取得・解析経路には触れない。
+- **PR5 教員の明示操作のみ**: 探索の3本は読み取り専用で、購読・見送りへ書き込まない
   （``last_checked_at`` も更新しない）。監査も記帳しない（``/search`` と同じ扱い）。
+  唯一の書き込みは ``/radar/provenance``（教員の明示操作 + 監査記帳 + edit 権限）。
 - **PR8 教員専用 + document 可視性ゲート**: ``_radar_document_or_404`` が
   ``services.resolve_document_access`` で view を確認し、不可視と不在を同一 404 に
   する（``routes/landscape.py`` と同じ fail-closed の作法）。学習者向けの
@@ -152,6 +155,21 @@ _DETAIL_COMPARE_LIMIT = (
 _DETAIL_COMPARE_UNAVAILABLE = (
     "比較分析を実行できませんでした。時間をおいて再度お試しください。"
 )
+#: arXiv 出所の後付け登録（3段階）の事実文。数値・内部情報を載せない。
+_DETAIL_PROVENANCE_FORBIDDEN = "この教材の取得元を登録する権限がありません。"
+_DETAIL_PROVENANCE_ALREADY = "この教材には、すでに取得元が登録されています。"
+_DETAIL_PROVENANCE_MISMATCH = (
+    "指定された arXiv ID は、この教材から推定された ID と一致しません。"
+    "画面を再読み込みして、もう一度お試しください。"
+)
+_DETAIL_PROVENANCE_UNVERIFIED = (
+    "arXiv から論文情報を取得できなかったため、取得元を登録できません。"
+    "時間をおいて再度お試しください。"
+)
+_DETAIL_PROVENANCE_TITLE_MISMATCH = (
+    "教材のタイトルと arXiv 論文のタイトルが一致しません。"
+    "同じ論文であることを確認したうえで登録してください。"
+)
 
 #: 許可リストに arXiv の取得先が無いまま投入されたときの注記（黙って受理しない — PD6）。
 _NOTICE_DOMAIN_NOT_ALLOWED = (
@@ -166,6 +184,12 @@ _STATUS_DISMISSED = "dismissed"
 _STATUS_INGEST_REQUESTED = "ingest_requested"
 _STATUS_QUEUED = "queued"
 _STATUS_FAILED = "failed"
+_STATUS_PROVENANCE_REGISTERED = "provenance_registered"
+
+#: 出所を記帳した根拠（監査 metadata の ``method``）。``auto_title_match`` = タイトルが
+#: 正規化一致したので確認なしで記帳 / ``teacher_confirmed`` = 一致しないが教員が確定。
+_PROVENANCE_METHOD_AUTO = "auto_title_match"
+_PROVENANCE_METHOD_CONFIRMED = "teacher_confirmed"
 
 #: 分野が特定できない操作（取り込みは複数分野にまたがり得る）の監査 entity_id。
 _ENTITY_ID_FALLBACK = "arxiv"
@@ -266,6 +290,18 @@ class RadarSearchRequest(BaseModel):
     keyphrases: Optional[list] = None
     start: int = 0
     max_results: int = DEFAULT_SEARCH_RESULTS
+
+
+class RadarProvenanceRequest(BaseModel):
+    """arXiv 出所の後付け登録（``documents.source_url`` への記帳）。
+
+    ``confirm`` はタイトルが一致しないときの教員の明示確定。既定は ``False`` で、
+    照合できない候補を黙って記帳しない（3段階目の弁）。
+    """
+
+    document_ref: str = ""
+    arxiv_id: str = ""
+    confirm: bool = False
 
 
 class RadarCompareRequest(BaseModel):
@@ -873,6 +909,30 @@ def _radar_document_or_404(document_ref: str, current_user: dict):
     return access
 
 
+def _radar_can_register(access, current_user: dict) -> bool:
+    """``documents.source_url`` を記帳できる立場か（SYSTEM_ADMIN は edit を免除）。
+
+    権限は core（``radar.resolve_seed``）が知らない情報なので、DTO への注入は
+    route 層の責務（core が user を知らない構造を維持する）。
+    """
+    if str(current_user.get("role") or "") == ROLE_SYSTEM_ADMIN:
+        return True
+    return bool(getattr(access, "can_edit", False))
+
+
+def _with_can_register(seed: dict, access, current_user: dict) -> dict:
+    """seed DTO の ``provenance`` に ``can_register`` を注入して返す。
+
+    フロントはこの値が偽なら登録導線を出さない（**表示の補助**で、強制はサーバ側の
+    ``POST /radar/provenance`` の権限ゲート）。
+    """
+    payload = dict(seed or {})
+    provenance = dict(payload.get("provenance") or {})
+    provenance["can_register"] = _radar_can_register(access, current_user)
+    payload["provenance"] = provenance
+    return payload
+
+
 def _consume_radar_compare_quota(user_id: str) -> None:
     """比較分析の日次上限を1消費する。超過は 429 + 事実文（数値を返さない）。"""
     cap = int(getattr(get_settings(), "discovery_compare_max_calls_per_day", 20) or 0)
@@ -891,7 +951,13 @@ def get_radar_seed(
 
     保存はしない（毎回導出）。arXiv 由来として登録されていない教材では
     ``arxiv_id`` / ``abs_url`` が ``null`` で ``categories_source="manual"``
-    （判定不能を偽装しない — PD6）。
+    （判定不能を偽装しない — PD6）。ファイル名等から出所を**推定**できた場合は
+    ``provenance.status="inferred"`` で、``categories_source="arxiv_inferred"``。
+    推定の段階では ``documents`` へ何も書かない（記帳は
+    ``POST /radar/provenance`` の明示操作だけ）。
+
+    ``provenance.can_register`` は route 層で注入する権限フラグ（フロントの登録導線の
+    出し分け用。強制は登録 API 側のゲート）。
     """
     access = _radar_document_or_404(document_ref, current_user)
     session = _pg_session()
@@ -904,7 +970,7 @@ def get_radar_seed(
             ) from exc
     finally:
         session.close()
-    return {"seed": seed}
+    return {"seed": _with_can_register(seed, access, current_user)}
 
 
 @router.post("/radar/search")
@@ -930,7 +996,7 @@ def radar_search(
     session = _pg_session()
     try:
         try:
-            return pd_radar.run_radar_search(
+            result = pd_radar.run_radar_search(
                 session,
                 str(access.document_id or ""),
                 distance=distance,
@@ -950,6 +1016,11 @@ def radar_search(
             raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
     finally:
         session.close()
+    # seed を返す全ルートで can_register の注入を揃える（検索後の再描画で
+    # 閲覧専用の教員に登録導線が出ないように — 強制は POST 側のゲート）。
+    if isinstance(result, dict) and isinstance(result.get("seed"), dict):
+        result["seed"] = _with_can_register(result["seed"], access, current_user)
+    return result
 
 
 @router.post("/radar/compare")
@@ -999,3 +1070,106 @@ def radar_compare(
             raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
     finally:
         session.close()
+
+
+@router.post("/radar/provenance")
+def register_radar_provenance(
+    body: RadarProvenanceRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """手動アップロードされた教材に arXiv の出所を後から記帳する（3段階の 2・3）。
+
+    レーダーは ``documents.source_url`` が空の教材について、ファイル名・タイトルから
+    arXiv ID を**推定**して検索条件を埋める（1段階目・DB 非変更）。ここはその推定を
+    **出所として確定**する唯一の書き込み口で、次のいずれかでのみ記帳する:
+
+    - **2段階目（自動）**: arXiv 側のタイトルと教材のタイトルが正規化一致
+      （``method="auto_title_match"``）。
+    - **3段階目（明示確定）**: 一致しないので教員が ``confirm=true`` を送った
+      （``method="teacher_confirmed"``）。
+
+    クライアントが提示した ``arxiv_id`` は信用せず、**サーバが seed を導出し直して**
+    突き合わせる（不一致は 422）。照合材料が無い（arXiv に到達できなかった）ときは
+    ``confirm=true`` でも記帳しない — 根拠のない出所を書かない。
+
+    権限は view（不在・不可視は同一 404 — PR8）に加えて **edit**（403）。
+    記帳は ``theory_review_events``（``AUDIT_ENTITY_PAPER_DISCOVERY``）に監査する。
+    """
+    access = _radar_document_or_404(body.document_ref, current_user)
+    if not _radar_can_register(access, current_user):
+        raise HTTPException(status_code=403, detail=_DETAIL_PROVENANCE_FORBIDDEN)
+
+    requested_id = pd_schema.normalize_arxiv_id(body.arxiv_id)
+    if not requested_id:
+        raise HTTPException(status_code=422, detail=_DETAIL_INVALID_ARXIV_ID)
+
+    document_id = str(access.document_id or "")
+    session = _pg_session()
+    try:
+        try:
+            # arXiv 到達の失敗は core が fail-soft で握るため、ここでは
+            # ``fetched=False`` として現れる（下の 422 で「照合材料なし」になる）。
+            seed = pd_radar.resolve_seed(session, document_id, fetch_arxiv=True)
+        except LookupError as exc:
+            raise HTTPException(
+                status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND
+            ) from exc
+
+        provenance = dict(seed.get("provenance") or {})
+        status = str(provenance.get("status") or "")
+        if status == pd_radar.PROVENANCE_STATUS_REGISTERED:
+            raise HTTPException(status_code=409, detail=_DETAIL_PROVENANCE_ALREADY)
+        if status != pd_radar.PROVENANCE_STATUS_INFERRED or (
+            str(provenance.get("arxiv_id") or "") != requested_id
+        ):
+            raise HTTPException(status_code=422, detail=_DETAIL_PROVENANCE_MISMATCH)
+        if not provenance.get("fetched"):
+            # 照合材料ゼロで確定させない（confirm でも不可）。
+            raise HTTPException(status_code=422, detail=_DETAIL_PROVENANCE_UNVERIFIED)
+
+        title_match = bool(provenance.get("title_match"))
+        if not title_match and not body.confirm:
+            raise HTTPException(
+                status_code=409, detail=_DETAIL_PROVENANCE_TITLE_MISMATCH
+            )
+        method = _PROVENANCE_METHOD_AUTO if title_match else _PROVENANCE_METHOD_CONFIRMED
+
+        try:
+            pd_radar.register_arxiv_provenance(session, document_id, requested_id)
+        except ValueError as exc:
+            session.rollback()
+            # 同時実行で先に記帳された場合など（事実文は内部情報を含めない）。
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        session.commit()
+
+        # 記帳後の状態（``provenance.status="registered"``・``categories_source="arxiv"``）
+        # をそのまま返し、フロントが再取得しなくても表示を切り替えられるようにする。
+        registered_seed = pd_radar.resolve_seed(session, document_id, fetch_arxiv=True)
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    record_review_event(
+        AUDIT_ENTITY_PAPER_DISCOVERY,
+        document_id or _ENTITY_ID_FALLBACK,
+        _STATUS_NONE,
+        _STATUS_PROVENANCE_REGISTERED,
+        current_user["id"],
+        {
+            "action": "register_provenance",
+            "arxiv_id": requested_id,
+            "method": method,
+        },
+    )
+    logger.info(
+        "arXiv provenance registered by user=%s document=%s method=%s",
+        current_user["id"], document_id, method,
+    )
+    return {
+        "registered": True,
+        "seed": _with_can_register(registered_seed, access, current_user),
+    }

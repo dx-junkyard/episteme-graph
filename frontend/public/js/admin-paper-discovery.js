@@ -236,7 +236,9 @@
 
   function modalHtml() {
     return (
-      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:640px;max-width:840px;width:88vw;max-height:88vh;display:flex;flex-direction:column">' +
+      // overflow-y:auto は固定区画の合計が 88vh を超える低い画面でのフォールバック
+      // （通常は #pd-results の内部スクロールだけが効く）。
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:640px;max-width:840px;width:88vw;max-height:88vh;display:flex;flex-direction:column;overflow-y:auto">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
           '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">arXivから探す</h3>' +
           '<button type="button" id="pd-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +

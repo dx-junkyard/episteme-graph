@@ -265,6 +265,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.radar-distance",
         "materials.radar-ingest",
         "materials.radar-modal",
+        "materials.radar-provenance",
         "materials.radar-search",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
@@ -831,6 +832,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
     # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）
     "materials.radar-modal": "teacher/11-admin-materials.md#radar-modal",
+    # この論文として登録する（出所の後付け登録, paper_radar_design.md §11）—
+    # ファイル名からの推定は書き込まない・自動記帳はタイトル完全一致時のみ
+    "materials.radar-provenance": "teacher/11-admin-materials.md#radar-provenance",
     # この条件で検索（レーダー）— arXiv のメタデータのみ・テキスト LLM 不使用
     "materials.radar-search": "teacher/11-admin-materials.md#radar-search",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス

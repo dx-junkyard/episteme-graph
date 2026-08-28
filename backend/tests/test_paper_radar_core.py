@@ -76,8 +76,9 @@ ATOM_FIXTURE = """<?xml version="1.0" encoding="UTF-8"?>
 
 
 class _Result:
-    def __init__(self, rows=()):
+    def __init__(self, rows=(), rowcount=0):
         self._rows = list(rows)
+        self.rowcount = rowcount
 
     def fetchall(self):
         return list(self._rows)
@@ -101,6 +102,17 @@ class FakeSession:
         p = dict(params or {})
         self.calls.append((sql, p))
 
+        if sql.startswith("UPDATE documents"):
+            # radar.register_arxiv_provenance（source_url が空のときだけ書き換える）
+            changed = 0
+            for doc in self.documents:
+                if doc["id"] != p.get("document_id"):
+                    continue
+                if (doc.get("source_url") or "") != "":
+                    continue
+                doc["source_url"] = p.get("url")
+                changed += 1
+            return _Result(rowcount=changed)
         if "FROM documents" in sql and ":ref" in sql:
             ref = p.get("ref")
             rows = [
@@ -117,6 +129,7 @@ class FakeSession:
                         d.get("source_path") or "",
                         d.get("title") or "",
                         d.get("source_url") or "",
+                        d.get("filename") or "",
                     )
                     for d in rows
                 ]
@@ -326,6 +339,82 @@ class TestDocumentDomainKeys:
 
 
 # ---------------------------------------------------------------------------
+# 3b. arXiv 出所の推定（ファイル名・タイトル照合の純関数）
+# ---------------------------------------------------------------------------
+
+
+class TestArxivIdFromFilename:
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("arXiv-2407.01221v2.tar.gz", "2407.01221"),
+            ("2407.01221.pdf", "2407.01221"),
+            ("arxiv_2407.1234.tar.gz", "2407.1234"),
+            ("  arXiv-2407.01221v12.tar.gz  ", "2407.01221"),
+            ("Foo 2407.01221 bar", "2407.01221"),
+        ],
+    )
+    def test_extracts_the_new_style_id_without_the_version(self, value, expected):
+        assert schema.arxiv_id_from_filename(value) == expected
+
+    def test_same_paper_in_two_versions_is_one_id(self):
+        assert schema.arxiv_id_from_filename("2407.01221v1_2407.01221v2.tar.gz") == (
+            "2407.01221"
+        )
+
+    def test_two_distinct_ids_are_ambiguous_and_yield_nothing(self):
+        """曖昧なら推定しない（どちらが論文本体かを当て推量しない）。"""
+        assert schema.arxiv_id_from_filename("2407.01221_2408.00002.tar.gz") == ""
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "",
+            "lecture-notes.pdf",
+            "hep-ph/0101001.tar.gz",  # 旧形式は v1 非対応
+            "12345.678901.pdf",  # 桁が合わない数値列
+            "version 2.0.1 draft.pdf",
+            None,
+            12345,
+        ],
+    )
+    def test_non_matching_input_is_empty(self, value):
+        assert schema.arxiv_id_from_filename(value) == ""
+
+    def test_is_deterministic(self):
+        value = "arXiv-2407.01221v2.tar.gz"
+        assert schema.arxiv_id_from_filename(value) == schema.arxiv_id_from_filename(value)
+
+
+class TestTitleMatching:
+    def test_normalization_folds_case_width_and_punctuation(self):
+        assert schema.normalize_title_for_match(
+            "  Dark  Energy: A Review!\n"
+        ) == "darkenergyareview"
+        assert schema.normalize_title_for_match("ＡＢＣ１２３") == "abc123"
+
+    def test_non_string_is_empty(self):
+        assert schema.normalize_title_for_match(None) == ""
+
+    def test_matches_across_formatting_differences(self):
+        assert schema.titles_match(
+            "Dark Energy: A Review", "  dark   energy — a review\n"
+        )
+
+    def test_different_titles_do_not_match(self):
+        assert not schema.titles_match("Dark Energy: A Review", "Dark Matter: A Review")
+
+    def test_short_titles_never_match(self):
+        """短すぎるタイトルの偶然一致で自動記帳させない。"""
+        assert not schema.titles_match("Note", "note")
+        assert schema.TITLE_MATCH_MIN_LENGTH == 10
+
+    def test_empty_side_never_matches(self):
+        assert not schema.titles_match("", "")
+        assert not schema.titles_match("Dark Energy: A Review", "")
+
+
+# ---------------------------------------------------------------------------
 # 4. seed の解決
 # ---------------------------------------------------------------------------
 
@@ -421,6 +510,173 @@ class TestResolveSeed:
     def test_missing_document_raises(self, no_arxiv):
         with pytest.raises(LookupError):
             radar.resolve_seed(_seed_session(), "unknown")
+
+
+# ---------------------------------------------------------------------------
+# 4b. arXiv 出所の後付け（推定 seed + 記帳）
+# ---------------------------------------------------------------------------
+
+
+def _manual_session(**overrides) -> FakeSession:
+    """手動アップロード相当（``source_url`` が空でファイル名に arXiv ID が残る教材）。"""
+    document = {
+        "id": "doc-1",
+        "source_path": "mat-1",
+        "title": "Dark Energy: A Review",
+        "source_url": "",
+        "filename": "arXiv-2407.01221v2.tar.gz",
+    }
+    document.update(overrides)
+    return _seed_session(documents=[document], components=[])
+
+
+class TestResolveSeedProvenance:
+    def test_registered_material_reports_registered_provenance(self, monkeypatch):
+        _stub_fetch_by_ids(monkeypatch, [_entry("2608.20293", categories=["astro-ph.CO"])])
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        provenance = seed["provenance"]
+        assert provenance["status"] == radar.PROVENANCE_STATUS_REGISTERED
+        assert provenance["arxiv_id"] == "2608.20293"
+        assert provenance["fetched"] is False
+        assert provenance["title_match"] is False
+        assert "can_register" not in provenance, "権限は core が知らない（route が注入する）"
+
+    def test_nothing_to_infer_reports_none(self, no_arxiv):
+        session = _manual_session(filename="lecture-notes.pdf", title="講義ノート")
+        seed = radar.resolve_seed(session, "doc-1")
+        provenance = seed["provenance"]
+        assert provenance["status"] == radar.PROVENANCE_STATUS_NONE
+        assert provenance["arxiv_id"] is None
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_MANUAL
+
+    def test_infers_from_the_filename_and_prefills_the_conditions(self, monkeypatch):
+        calls: list[list[str]] = []
+        _stub_fetch_by_ids(
+            monkeypatch,
+            [
+                _entry(
+                    "2407.01221",
+                    title="Dark Energy: A Review",
+                    summary="An abstract.",
+                    categories=["astro-ph.CO"],
+                    primary_category="astro-ph.CO",
+                    abs_url="https://arxiv.org/abs/2407.01221",
+                )
+            ],
+            recorder=calls,
+        )
+        seed = radar.resolve_seed(_manual_session(), "doc-1")
+
+        assert calls == [["2407.01221"]]
+        assert seed["categories"] == ["astro-ph.CO"]
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_ARXIV_INFERRED
+        assert seed["summary"] == "An abstract."
+        # 推定は seed の登録済み ID に昇格しない（未記帳を偽装しない）。
+        assert seed["arxiv_id"] is None
+        assert seed["abs_url"] is None
+
+        provenance = seed["provenance"]
+        assert provenance["status"] == radar.PROVENANCE_STATUS_INFERRED
+        assert provenance["arxiv_id"] == "2407.01221"
+        assert provenance["fetched"] is True
+        assert provenance["arxiv_title"] == "Dark Energy: A Review"
+        assert provenance["arxiv_abs_url"] == "https://arxiv.org/abs/2407.01221"
+        assert provenance["document_title"] == "Dark Energy: A Review"
+        assert provenance["title_match"] is True
+
+    def test_falls_back_to_the_title_when_the_filename_has_no_id(self, monkeypatch):
+        _stub_fetch_by_ids(monkeypatch, [_entry("2407.01221", title="別の題名")])
+        session = _manual_session(filename="paper.pdf", title="arXiv:2407.01221 の論文")
+        provenance = radar.resolve_seed(session, "doc-1")["provenance"]
+        assert provenance["status"] == radar.PROVENANCE_STATUS_INFERRED
+        assert provenance["arxiv_id"] == "2407.01221"
+
+    def test_title_mismatch_is_reported_without_blocking_the_prefill(self, monkeypatch):
+        _stub_fetch_by_ids(
+            monkeypatch,
+            [_entry("2407.01221", title="A completely different paper",
+                    categories=["astro-ph.CO"])],
+        )
+        seed = radar.resolve_seed(_manual_session(), "doc-1")
+        assert seed["provenance"]["title_match"] is False
+        assert seed["provenance"]["fetched"] is True
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_ARXIV_INFERRED
+
+    def test_arxiv_failure_degrades_to_the_subscription_with_a_note(self, monkeypatch):
+        """PR7: 推定 ID でも到達失敗は黙らせず、供給元を正直に切り替える。"""
+        _stub_fetch_by_ids(monkeypatch, arxiv_client.ArxivApiError("接続に失敗しました"))
+        monkeypatch.setattr(
+            radar.store,
+            "get_subscription",
+            lambda session, key: {"arxiv_categories": ["astro-ph.GA"]},
+        )
+        seed = radar.resolve_seed(_manual_session(), "doc-1")
+        assert seed["note"] == radar.NOTE_ARXIV_METADATA_UNAVAILABLE
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_SUBSCRIPTION
+        assert seed["provenance"]["status"] == radar.PROVENANCE_STATUS_INFERRED
+        assert seed["provenance"]["fetched"] is False
+
+    def test_fetch_arxiv_false_keeps_the_inference_offline(self, no_arxiv):
+        """compare.py の経路（``fetch_arxiv=False``）はネットワークに触れない。"""
+        seed = radar.resolve_seed(_manual_session(), "doc-1", fetch_arxiv=False)
+        assert seed["provenance"]["status"] == radar.PROVENANCE_STATUS_INFERRED
+        assert seed["provenance"]["arxiv_id"] == "2407.01221"
+        assert seed["provenance"]["fetched"] is False
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_MANUAL
+
+    def test_resolve_seed_never_writes(self, monkeypatch):
+        """PR1: 推定を seed 解決の副作用で記帳しない。"""
+        _stub_fetch_by_ids(monkeypatch, [_entry("2407.01221", title="Dark Energy: A Review")])
+        session = _manual_session()
+        radar.resolve_seed(session, "doc-1")
+        assert "UPDATE" not in session.sql_log
+        assert "INSERT" not in session.sql_log
+        assert session.documents[0]["source_url"] == ""
+
+
+class TestRegisterArxivProvenance:
+    def test_writes_the_abs_url_without_the_version(self):
+        session = _manual_session()
+        url = radar.register_arxiv_provenance(session, "doc-1", "2407.01221v2")
+        assert url == "https://arxiv.org/abs/2407.01221"
+        assert session.documents[0]["source_url"] == url
+
+    def test_accepts_url_forms(self):
+        session = _manual_session()
+        url = radar.register_arxiv_provenance(
+            session, "doc-1", "https://arxiv.org/pdf/2407.01221v2"
+        )
+        assert url == "https://arxiv.org/abs/2407.01221"
+
+    def test_only_updates_when_the_source_url_is_empty(self):
+        session = _manual_session(source_url="https://arxiv.org/abs/2608.20293")
+        with pytest.raises(ValueError):
+            radar.register_arxiv_provenance(session, "doc-1", "2407.01221")
+        assert session.documents[0]["source_url"] == "https://arxiv.org/abs/2608.20293"
+
+    def test_unknown_document_raises(self):
+        with pytest.raises(ValueError):
+            radar.register_arxiv_provenance(_manual_session(), "doc-9", "2407.01221")
+
+    def test_unparsable_id_raises_before_touching_the_db(self):
+        session = _manual_session()
+        with pytest.raises(ValueError):
+            radar.register_arxiv_provenance(session, "doc-1", "not-an-id")
+        assert session.calls == []
+
+    def test_does_not_commit(self):
+        """トランザクションを閉じるのは route 層（FakeSession.commit は失敗させる）。"""
+        session = _manual_session()
+        radar.register_arxiv_provenance(session, "doc-1", "2407.01221")
+
+    def test_registered_material_then_resolves_as_registered(self, monkeypatch):
+        _stub_fetch_by_ids(monkeypatch, [_entry("2407.01221", categories=["astro-ph.CO"])])
+        session = _manual_session()
+        radar.register_arxiv_provenance(session, "doc-1", "2407.01221")
+        seed = radar.resolve_seed(session, "doc-1")
+        assert seed["arxiv_id"] == "2407.01221"
+        assert seed["provenance"]["status"] == radar.PROVENANCE_STATUS_REGISTERED
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_ARXIV
 
 
 # ---------------------------------------------------------------------------

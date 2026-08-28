@@ -11,7 +11,11 @@
 - 比較分析のプロンプト制約3文が原文で存在し、``caveat`` がサーバ側定数である（PR4）
 - ``fetch_by_ids`` がスロットルを通り、宛先が定数ホストである（PR6）
 - レーダー経路が購読・見送りへ書き込まない（``touch_last_checked`` を呼ばない — PR5）
-- レーダー専用の取得・取り込みエンドポイントが無い（PR3）
+- 探索経路（``resolve_seed`` / ``run_radar_search``）が DB へ書き込まず、書き込みは
+  arXiv 出所の後付け記帳（``register_arxiv_provenance`` の ``UPDATE documents``）
+  1箇所に閉じている（PR1 — 推定は推定のまま保存しない）
+- レーダー専用の取得・取り込みエンドポイントが無い（PR3。``/radar/provenance`` は
+  既存教材の出所を記帳するだけで、取得・受理経路に触れない）
 - ``/api/learning`` 配下にレーダー系ルートが無い（PR8）
 - migration ディレクトリにレーダーの採番が無い（PR1 — 新テーブル・新列ゼロ）
 - 取り込み worker がレーダーを import しない（PR5 — 自動探索の経路を作らない）
@@ -188,10 +192,32 @@ class TestNoSideEffects:
                 "store.dismiss",
                 "store.restore",
                 "INSERT",
-                "UPDATE",
                 "DELETE",
             ],
             context="core/paper_discovery/radar.py",
+        )
+
+    def test_the_only_write_is_the_provenance_registration(self):
+        """PR1: 探索は読むだけ。書き込みは出所の後付け記帳1箇所に閉じる。
+
+        推定（ファイル名からの arXiv ID）を seed 解決の副作用で保存しない
+        （「推定」を勝手に「登録済み」へ昇格させない）ことを構造で固定する。
+        """
+        for fn_name in ("_document_row", "seed_keyphrase_candidates", "resolve_seed",
+                        "run_radar_search"):
+            assert_source_forbids(
+                extract_function_source(_RADAR_SRC, fn_name),
+                ["INSERT", "UPDATE", "DELETE", "commit("],
+                context=f"core/paper_discovery/radar.{fn_name}",
+            )
+        registration = extract_function_source(_RADAR_SRC, "register_arxiv_provenance")
+        assert "UPDATE documents" in registration
+        # 空のときだけ上書きする（登録済みの出所を推定で塗り替えない）。
+        assert "COALESCE(source_url, '') = ''" in registration
+        assert _RADAR_SRC.count("UPDATE ") == 1
+        # commit は呼び出し側（route）の責務（core はトランザクションを閉じない）。
+        assert_source_forbids(
+            registration, ["commit("], context="register_arxiv_provenance"
         )
 
     def test_radar_routes_do_not_write_or_audit(self):
@@ -212,7 +238,12 @@ class TestNoSideEffects:
             )
 
     def test_no_radar_specific_ingest_endpoint(self):
-        """PR3: 取り込みの弁は既存の ``/ingest`` / ``/ingest-batch`` の2本だけ。"""
+        """PR3: 取り込みの弁は既存の ``/ingest`` / ``/ingest-batch`` の2本だけ。
+
+        ``/radar/provenance`` は既存教材の出所を記帳するだけで論文を取得しないので、
+        取得・受理経路（``url_fetch`` / ``_accept_material_source`` / キュー投入）に
+        触れないことも併せて固定する。
+        """
         radar_routes = [
             line for line in _ROUTE_SRC.splitlines() if "@router." in line and "radar" in line
         ]
@@ -221,8 +252,32 @@ class TestNoSideEffects:
                 '@router.get("/radar/seed")',
                 '@router.post("/radar/search")',
                 '@router.post("/radar/compare")',
+                '@router.post("/radar/provenance")',
             ]
         )
+        assert_source_forbids(
+            extract_function_source(_ROUTE_SRC, "register_radar_provenance"),
+            [
+                "url_fetch",
+                "_accept_material_source",
+                "pd_queue.enqueue_items",
+                "pd_store.upsert_subscription",
+                "touch_last_checked",
+            ],
+            context="routes.paper_discovery.register_radar_provenance",
+        )
+
+    def test_provenance_registration_is_gated_and_audited(self):
+        """後付け登録は edit 権限 + 監査記帳 + サーバ側の再導出（PR5 / PR8）。"""
+        fn = extract_function_source(_ROUTE_SRC, "register_radar_provenance")
+        assert "_radar_document_or_404" in fn
+        assert "_radar_can_register" in fn
+        assert "record_review_event" in fn
+        # クライアントが提示した ID を信用せず、サーバが seed を導出し直して照合する。
+        assert "pd_radar.resolve_seed" in fn
+        assert "PROVENANCE_STATUS_INFERRED" in fn
+        # 照合材料が無ければ confirm でも記帳しない。
+        assert 'provenance.get("fetched")' in fn
 
     def test_worker_does_not_import_radar(self):
         """PR5: worker / cron からレーダーを呼ぶ経路を作らない。"""

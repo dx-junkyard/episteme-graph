@@ -43,11 +43,29 @@
   // seed のカテゴリがどこから来たかを必ず1行で言う（判定不能を偽装しない — PD6）。
   var CATEGORY_SOURCE_NOTICES = {
     arxiv: "arXiv のカテゴリから取得",
+    arxiv_inferred:
+      "ファイル名から推定した arXiv 情報です（教材の出所としては未登録）。",
     subscription: "分野購読の条件から取得",
     manual: "カテゴリを入力してください"
   };
   var NO_ARXIV_NOTICE =
     "この教材は arXiv 由来として登録されていないため、カテゴリを指定してください。";
+
+  // arXiv 出所の後付け登録（3段階）。推定はあくまで推定として言い、
+  // タイトルが一致しないときは教員に両方を見せてから確認を取る（偽装しない）。
+  var PROV_INFERRED_HEAD = "ファイル名から arXiv-";
+  var PROV_TITLE_MATCH_TAIL = " と推定し、タイトルが一致しました。";
+  var PROV_NOT_FETCHED_TAIL =
+    " と推定しましたが、arXiv から論文情報を取得できませんでした。";
+  var PROV_MISMATCH_NOTICE =
+    " と推定しましたが、タイトルが一致しませんでした。内容を確認してください。";
+  var PROV_ARXIV_TITLE_HEAD = "arXiv の論文: ";
+  var PROV_DOCUMENT_TITLE_HEAD = "この教材のタイトル: ";
+  var PROV_REGISTER_LABEL = "この論文として登録する";
+  var PROV_REGISTERED_NOTICE = "この教材の出所として登録しました。";
+  var PROV_REGISTER_FAILED_NOTICE = "出所として登録できませんでした。";
+  var PROV_CONFIRM_TAIL =
+    "この教材の出所として登録しますか？（タイトルは一致していません）";
 
   // PD1: 取り込み前に必ず出す事実文（何が起きるかを省略しない）。
   // 分野購読モーダルと同一の文言・同一の境界（相互 import できないので同型に書く）。
@@ -103,6 +121,11 @@
     title: "",
     seed: null,
     seedError: "",
+    // arXiv 出所の後付け登録。推定は自動で1回だけ試し（タイトル一致時のみ）、
+    // 一致しないときは教員の明示確認を経てからでないと登録しない。
+    provenance: null,
+    provenanceAutoAttempted: false,
+    provenanceNotice: "",
     distance: "near",
     categories: [],
     categoriesSource: "",
@@ -257,7 +280,9 @@
 
   function modalHtml() {
     return (
-      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:640px;max-width:860px;width:88vw;max-height:88vh;display:flex;flex-direction:column">' +
+      // overflow-y:auto は固定区画（seed・検索条件・フッター）の合計が 88vh を超える
+      // 低い画面でのフォールバック。通常は #pr-results の内部スクロールだけが効く。
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:640px;max-width:860px;width:88vw;max-height:88vh;display:flex;flex-direction:column;overflow-y:auto">' +
         '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
           '<h3 style="margin:0;font-size:16px;color:var(--color-text-primary)">近い論文を探す</h3>' +
           '<button type="button" id="pr-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
@@ -336,6 +361,9 @@
     state.title = title || "";
     state.seed = null;
     state.seedError = "";
+    state.provenance = null;
+    state.provenanceAutoAttempted = false;
+    state.provenanceNotice = "";
     state.distance = "near";
     state.categories = [];
     state.categoriesSource = "";
@@ -432,6 +460,7 @@
   function applySeed(seed) {
     state.seed = seed;
     state.seedError = "";
+    state.provenance = (seed && seed.provenance) || null;
     state.categories = seed && seed.categories ? seed.categories.slice(0) : [];
     state.categoriesSource = (seed && seed.categories_source) || "";
     state.keyphrases = [];
@@ -481,6 +510,9 @@
             '" target="_blank" rel="noopener noreferrer" style="color:var(--color-accent, #2563eb)">arXiv で開く</a>'
           : "") +
         "</div>";
+    } else if (seed && provenanceStatus() === "inferred") {
+      // 推定は推定として下の区画で言う（未登録を「登録済み」に見せない）。
+      html += "";
     } else if (seed) {
       // PD6: 判定不能を偽装しない（arXiv 由来でない教材はカテゴリを手で決める）。
       html +=
@@ -491,7 +523,143 @@
       html +=
         '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">起点の論文を読み込んでいます...</div>';
     }
+
+    html += provenanceHtml();
     node.innerHTML = html;
+    // 動的描画のたびにイベントを付け直す（このモジュールの既存の流儀）。
+    bindProvenanceActions(node);
+    maybeAutoRegisterProvenance();
+  }
+
+  // ── arXiv 出所の後付け登録 ─────────────────────────────────────────────
+  function provenanceStatus() {
+    return (state.provenance && state.provenance.status) || "";
+  }
+
+  function provenanceFactHtml(text) {
+    return (
+      '<div class="pr-provenance-fact" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+      esc(text) +
+      "</div>"
+    );
+  }
+
+  // 推定・並置・登録ボタンをまとめた区画。registered / none のときは何も足さない
+  // （従来表示のまま）。can_register が false のときだけ登録導線を隠す
+  // （キーがサーバから来ない場合は表示し、403 は事実文で degrade する）。
+  function provenanceHtml() {
+    var prov = state.provenance;
+    var html = "";
+    if (prov && prov.status === "inferred") {
+      var arxivId = String(prov.arxiv_id || "");
+      if (!prov.fetched) {
+        html += provenanceFactHtml(
+          PROV_INFERRED_HEAD + arxivId + PROV_NOT_FETCHED_TAIL
+        );
+      } else if (prov.title_match) {
+        html += provenanceFactHtml(
+          PROV_INFERRED_HEAD + arxivId + PROV_TITLE_MATCH_TAIL
+        );
+      } else {
+        html += provenanceFactHtml(
+          PROV_INFERRED_HEAD + arxivId + PROV_MISMATCH_NOTICE
+        );
+        html +=
+          '<div class="pr-provenance-titles" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+          esc(PROV_ARXIV_TITLE_HEAD + String(prov.arxiv_title || "")) +
+          "</div>" +
+          '<div class="pr-provenance-titles" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:1px">' +
+          esc(PROV_DOCUMENT_TITLE_HEAD + String(prov.document_title || "")) +
+          "</div>";
+        if (prov.can_register !== false) {
+          html +=
+            '<div style="margin-top:4px">' +
+            '<button type="button" id="pr-provenance-register" data-ui-anchor="materials.radar-provenance" ' +
+            'class="admin-action-btn" style="font-size:11.5px;padding:1px 8px">' +
+            esc(PROV_REGISTER_LABEL) +
+            "</button></div>";
+        }
+      }
+    }
+    if (state.provenanceNotice) {
+      html +=
+        '<div id="pr-provenance-notice" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc(state.provenanceNotice) +
+        "</div>";
+    }
+    return html;
+  }
+
+  function bindProvenanceActions(root) {
+    var button = root.querySelector("#pr-provenance-register");
+    if (!button) return;
+    button.addEventListener("click", function () {
+      var prov = state.provenance || {};
+      var message =
+        PROV_ARXIV_TITLE_HEAD +
+        String(prov.arxiv_title || "") +
+        "\n" +
+        PROV_DOCUMENT_TITLE_HEAD +
+        String(prov.document_title || "") +
+        "\n\n" +
+        PROV_CONFIRM_TAIL;
+      if (!window.confirm(message)) return;
+      // 手動確定後は自動登録を二度と試みない。
+      state.provenanceAutoAttempted = true;
+      registerProvenance(true);
+    });
+  }
+
+  // タイトルが一致した推定だけ、1回に限り自動登録する（PR5: 教員の作業を
+  // 増やさないための例外。一致しない場合は必ず明示確認を経る）。
+  function maybeAutoRegisterProvenance() {
+    var prov = state.provenance;
+    if (state.provenanceAutoAttempted) return;
+    if (!prov || prov.status !== "inferred") return;
+    if (!prov.fetched || !prov.title_match) return;
+    if (prov.can_register === false) return;
+    state.provenanceAutoAttempted = true;
+    registerProvenance(false);
+  }
+
+  function registerProvenance(confirmed) {
+    var prov = state.provenance;
+    if (!prov || !prov.arxiv_id) return;
+    var documentId = state.documentId;
+    api("/admin/discovery/radar/provenance", {
+      method: "POST",
+      body: JSON.stringify({
+        document_ref: documentId,
+        arxiv_id: prov.arxiv_id,
+        confirm: !!confirmed
+      })
+    })
+      .then(function (res) {
+        if (!res.ok) return rejectWithBody(res);
+        return res.json();
+      })
+      .then(function (data) {
+        if (state.documentId !== documentId) return;
+        state.provenanceNotice = PROV_REGISTERED_NOTICE;
+        if (data && data.seed) {
+          // 登録の副作用で、POST の往復中に教員が編集した条件チップ
+          // （カテゴリ・キーフレーズ）を巻き戻さない。出所の表示だけ
+          // registered に更新する。
+          state.seed = data.seed;
+          if (data.seed.provenance) state.provenance = data.seed.provenance;
+          if (data.seed.categories_source) {
+            state.categoriesSource = data.seed.categories_source;
+          }
+        }
+        renderSeed();
+        renderCategoryChips();
+      })
+      .catch(function (err) {
+        if (state.documentId !== documentId) return;
+        // 403 / 409 / 422 はサーバの事実文をそのまま出すだけで、検索操作は妨げない。
+        state.provenanceNotice = detailText(err, PROV_REGISTER_FAILED_NOTICE);
+        renderSeed();
+      });
   }
 
   // ── チップ描画 ────────────────────────────────────────────────────────
@@ -687,9 +855,16 @@
   }
 
   // 検索レスポンスの seed は表示メタだけ更新する（教員が編集した条件は上書きしない）。
+  // provenance は検索経路だと arXiv 再取得を省くため fetched=false に劣化しうる。
+  // 手元の情報が減る方向の上書きはせず、registered 化（登録済みになった）か
+  // 手元が空のときだけ差し替える。
   function applySeedMeta(seed) {
     if (!seed) return;
     state.seed = seed;
+    var incoming = seed.provenance;
+    if (incoming && (incoming.status === "registered" || !state.provenance)) {
+      state.provenance = incoming;
+    }
     renderSeed();
   }
 

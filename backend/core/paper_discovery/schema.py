@@ -25,6 +25,7 @@ DDL は ``backend/db/071_paper_discovery.sql``。
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
@@ -160,6 +161,79 @@ def normalize_arxiv_id(ref: Any) -> Optional[str]:
     abs/pdf の URL 表記ゆれが同一論文へ畳まれる（設計書 §4.1）。
     """
     return split_arxiv_ref(ref)[0]
+
+
+# ---------------------------------------------------------------------------
+# ファイル名・タイトルからの arXiv 出所の推定（論文レーダーの後付け登録）
+# 正本: ``docs/features/paper_radar_design.md``（arXiv 出所の後付け登録・3段階）。
+#
+# 手動アップロードされた教材は ``documents.source_url`` が空なので、レーダーは
+# カテゴリ・要旨を引けない。ここでは**決定論の文字列処理だけ**で「たぶんこの論文だ」
+# という**推定**を作る（DB も外部 API も触らない純関数）。推定はあくまで推定として
+# 扱い、``documents.source_url`` への記帳は別途 route 層の明示操作でのみ行う。
+# ---------------------------------------------------------------------------
+
+#: 自由文字列に埋もれた新形式 arXiv ID（``arXiv-2407.01221v2.tar.gz`` 等）の走査パターン。
+#: 前後に数字が続く並び（``12345.678901`` のような別種の数値）は境界の否定先読み・
+#: 否定後読みで弾く。version サフィックスは ID の一部ではないので捨てる。
+#: 旧形式 ID（``hep-ph/0101001``）は v1 では推定に使わない（区切りのないファイル名では
+#: 分野名との切れ目が決まらず、当て推量になるため）。
+_FILENAME_ID_SCAN_RE = re.compile(r"(?<!\d)(\d{4}\.\d{4,5})(?:v\d+)?(?!\d)")
+
+
+def arxiv_id_from_filename(value: Any) -> str:
+    """ファイル名・タイトル等の自由文字列から新形式 arXiv ID を**推定**する。
+
+    ``"arXiv-2407.01221v2.tar.gz"`` → ``"2407.01221"``（version は落とす）。
+
+    **相異なる ID が2つ以上見つかったら空文字を返す**（どちらが論文本体かを決められない
+    以上、当て推量をしない = 曖昧なら推定しない）。同じ論文の版違い（``2407.01221v1`` と
+    ``2407.01221v2``）は :func:`normalize_arxiv_id` と同じ規則で1件へ畳む。
+
+    Returns:
+        正規化済み（version 抜き）の ID。該当なし・曖昧・旧形式は ``""``。
+    """
+    if not isinstance(value, str):
+        return ""
+    found: list[str] = []
+    for match in _FILENAME_ID_SCAN_RE.finditer(value):
+        normalized = normalize_arxiv_id(match.group(1))
+        if normalized and normalized not in found:
+            found.append(normalized)
+    if len(found) != 1:
+        return ""
+    return found[0]
+
+
+def normalize_title_for_match(value: Any) -> str:
+    """タイトル照合用の正規化（NFKC → casefold → 英数字以外を全除去）。
+
+    改行・空白・記号・全角半角・大小文字の揺れを吸収するためのもので、表示には使わない。
+    """
+    if not isinstance(value, str):
+        return ""
+    text = unicodedata.normalize("NFKC", value).casefold()
+    return "".join(ch for ch in text if ch.isalnum())
+
+
+#: 照合を成立させるのに必要な正規化後の最短長（短すぎるタイトルの偶然一致を防ぐ）。
+TITLE_MATCH_MIN_LENGTH = 10
+
+
+def titles_match(a: Any, b: Any) -> bool:
+    """2つのタイトルが「同じ論文とみなせる」ほど一致するか（決定論・非LLM）。
+
+    :func:`normalize_title_for_match` の結果が**完全一致**し、かつ
+    :data:`TITLE_MATCH_MIN_LENGTH` 文字以上あるときだけ真。部分一致・編集距離は
+    使わない（曖昧な一致で自動記帳しない — 不一致は教員の明示確定へ回す）。
+    """
+    left = normalize_title_for_match(a)
+    right = normalize_title_for_match(b)
+    if not left or not right:
+        return False
+    if len(left) < TITLE_MATCH_MIN_LENGTH:
+        return False
+    return left == right
 
 
 def pdf_url_for(arxiv_id: str) -> str:

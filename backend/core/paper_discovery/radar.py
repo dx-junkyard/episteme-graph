@@ -8,6 +8,9 @@
 
 - **PR1 起点は教材1件・候補は読み時導出**: seed の解決も候補一覧も毎回導出し、
   保存しない。レーダー専用のテーブル・列を持たない（migration 0）。
+  唯一の書き込みは :func:`register_arxiv_provenance`（既存列 ``documents.source_url``
+  への arXiv 出所の後付け記帳）で、これは教員の明示操作を受けた route 層だけが
+  呼ぶ。探索経路（:func:`resolve_seed` / :func:`run_radar_search`）は書き込まない。
 - **PR2 距離は段階ラベルのみ**: 帯分けは ``ranking.band_candidates`` に委ね、
   cosine の生値はここへ出てこない。測れなかった候補にはラベルが付かない。
 - **PR5 教員の明示操作のみ**: worker / cron からこのモジュールを呼ぶ経路を作らない
@@ -44,9 +47,11 @@ from core.paper_discovery import ranking as pd_ranking
 from core.paper_discovery.schema import (
     RADAR_DISTANCES,
     abs_url_for,
+    arxiv_id_from_filename,
     normalize_arxiv_id,
     normalize_categories,
     normalize_keyphrases,
+    titles_match,
 )
 
 logger = logging.getLogger(__name__)
@@ -55,6 +60,17 @@ logger = logging.getLogger(__name__)
 CATEGORIES_SOURCE_ARXIV = "arxiv"
 CATEGORIES_SOURCE_SUBSCRIPTION = "subscription"
 CATEGORIES_SOURCE_MANUAL = "manual"
+#: ``documents.source_url`` に**登録されていない**教材について、ファイル名・タイトルから
+#: 推定した arXiv ID のメタデータで検索条件を埋めた場合の供給元（登録済み ``arxiv`` とは
+#: 別語彙にして「推定である」ことを DTO に残す — PR7 / 出所の正直さ）。
+CATEGORIES_SOURCE_ARXIV_INFERRED = "arxiv_inferred"
+
+#: arXiv 出所（``documents.source_url``）の状態語彙（``seed["provenance"]["status"]``）。
+#: ``registered`` = 登録済み（取り込み経由 or 教員の確定） / ``inferred`` = ファイル名等
+#: からの推定のみ（**未記帳**） / ``none`` = 推定もできない。
+PROVENANCE_STATUS_REGISTERED = "registered"
+PROVENANCE_STATUS_INFERRED = "inferred"
+PROVENANCE_STATUS_NONE = "none"
 
 #: seed から供給するキーフレーズ候補の上限（チップ欄を埋め尽くさない控えめな値）。
 MAX_SEED_KEYPHRASES = 12
@@ -90,7 +106,8 @@ def _document_row(session, document_ref: str) -> Optional[dict[str, str]]:
             SELECT id::text,
                    COALESCE(source_path, ''),
                    COALESCE(NULLIF(title, ''), NULLIF(filename, ''), ''),
-                   COALESCE(source_url, '')
+                   COALESCE(source_url, ''),
+                   COALESCE(filename, '')
               FROM documents
              WHERE id::text = :ref OR source_path = :ref
              LIMIT 1
@@ -105,6 +122,8 @@ def _document_row(session, document_ref: str) -> Optional[dict[str, str]]:
         "source_path": str(row[1] or "").strip(),
         "title": _clean(row[2]),
         "source_url": str(row[3] or "").strip(),
+        # ファイル名は arXiv 出所の**推定**にだけ使う（``arXiv-2407.01221v2.tar.gz``）。
+        "filename": _clean(row[4]),
     }
 
 
@@ -164,18 +183,27 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
 
     1. ``documents.source_url`` から arXiv ID が取れ、``fetch_arxiv=True`` なら
        :func:`arxiv_client.fetch_by_ids` のメタデータ（``categories_source="arxiv"``。
-       要旨も同時に得る）。**arXiv 到達の失敗は fail-soft** で 2. へ縮退し、
+       要旨も同時に得る）。**arXiv 到達の失敗は fail-soft** で 3. へ縮退し、
        ``note`` に事実文を残す（黙って条件をすり替えない — PR7）。
-    2. seed の分野（:func:`corpus.document_domain_keys` の先頭）の購読
+    2. ``source_url`` が空でも、ファイル名（次点でタイトル）から arXiv ID を
+       **推定**できて ``fetch_arxiv=True`` なら、そのメタデータ
+       （``categories_source="arxiv_inferred"``）。推定であることは供給元語彙と
+       ``provenance`` の両方に残し、``documents`` へは**書かない**（記帳は教員の
+       明示操作だけ — 後付け登録 API の責務）。
+    3. seed の分野（:func:`corpus.document_domain_keys` の先頭）の購読
        ``arxiv_categories``（``categories_source="subscription"``）。
-    3. どちらも無ければ空（``categories_source="manual"`` = 教員の手入力待ち。
+    4. どれも無ければ空（``categories_source="manual"`` = 教員の手入力待ち。
        **条件ゼロでは arXiv を呼ばない** — PD6）。
 
     Returns:
         ``{document_id, title, arxiv_id, abs_url, summary, categories,
-        categories_source, keyphrase_candidates, domain_key, note?}``。
-        ``arxiv_id`` / ``abs_url`` は arXiv 由来として登録されていない教材では
-        ``None``（判定不能を偽装しない — 設計書 §8 の既存規約）。
+        categories_source, keyphrase_candidates, domain_key, provenance, note?}``。
+        ``arxiv_id`` / ``abs_url`` は **``source_url`` に登録済みの場合だけ**入る
+        （推定 ID をここへ混ぜない — 判定不能・未記帳を偽装しない）。推定の結果は
+        ``provenance``（``{status, arxiv_id, arxiv_title, arxiv_abs_url,
+        document_title, title_match, fetched}``）で読む。
+        ``provenance`` に権限情報（``can_register``）は入れない — core はユーザーを
+        知らないので、必要なら route 層が注入する。
 
     Raises:
         LookupError: document が存在しない（権限判定は route 層の責務）。
@@ -185,8 +213,32 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
         raise LookupError("document not found")
 
     arxiv_id = normalize_arxiv_id(row.get("source_url"))
+    inferred_id = ""
+    if not arxiv_id:
+        # 記帳されていない教材のみ推定する（登録済みの出所を推定で上書きしない）。
+        inferred_id = arxiv_id_from_filename(row.get("filename") or "") or (
+            arxiv_id_from_filename(row.get("title") or "")
+        )
+
     domain_keys = corpus.document_domain_keys(session, row["document_id"])
     domain_key = domain_keys[0] if domain_keys else ""
+
+    if arxiv_id:
+        provenance_status = PROVENANCE_STATUS_REGISTERED
+    elif inferred_id:
+        provenance_status = PROVENANCE_STATUS_INFERRED
+    else:
+        provenance_status = PROVENANCE_STATUS_NONE
+
+    provenance: dict[str, Any] = {
+        "status": provenance_status,
+        "arxiv_id": arxiv_id or inferred_id or None,
+        "arxiv_title": "",
+        "arxiv_abs_url": None,
+        "document_title": row.get("title") or "",
+        "title_match": False,
+        "fetched": False,
+    }
 
     seed: dict[str, Any] = {
         "document_id": row["document_id"],
@@ -198,6 +250,7 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
         "categories_source": CATEGORIES_SOURCE_MANUAL,
         "keyphrase_candidates": seed_keyphrase_candidates(session, row),
         "domain_key": domain_key,
+        "provenance": provenance,
     }
 
     if arxiv_id and fetch_arxiv:
@@ -219,6 +272,29 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
             if categories:
                 seed["categories"] = categories
                 seed["categories_source"] = CATEGORIES_SOURCE_ARXIV
+    elif inferred_id and fetch_arxiv:
+        try:
+            entries = arxiv_client.fetch_by_ids([inferred_id])
+        except arxiv_client.ArxivApiError:
+            # 推定 ID でも到達失敗は黙らせず、購読フォールバックへ続ける（PR7）。
+            logger.info("radar seed metadata unavailable for inferred %s", inferred_id)
+            entries = []
+            seed["note"] = NOTE_ARXIV_METADATA_UNAVAILABLE
+        if entries:
+            entry = entries[0]
+            provenance["fetched"] = True
+            provenance["arxiv_title"] = entry.title or ""
+            provenance["arxiv_abs_url"] = entry.abs_url or abs_url_for(inferred_id)
+            provenance["title_match"] = titles_match(
+                entry.title or "", row.get("title") or ""
+            )
+            categories = normalize_categories(
+                list(entry.categories) + ([entry.primary_category] if entry.primary_category else [])
+            )
+            seed["summary"] = entry.summary or ""
+            if categories:
+                seed["categories"] = categories
+                seed["categories_source"] = CATEGORIES_SOURCE_ARXIV_INFERRED
 
     if not seed["categories"] and domain_key:
         subscription = store.get_subscription(session, domain_key) or {}
@@ -403,14 +479,68 @@ def run_radar_search(
     return result
 
 
+# ---------------------------------------------------------------------------
+# arXiv 出所の後付け記帳（このモジュールで唯一の書き込み）
+# ---------------------------------------------------------------------------
+
+
+def register_arxiv_provenance(session, document_id: str, arxiv_id: str) -> str:
+    """``documents.source_url`` に arXiv の論文ページ URL を**後から**記帳する。
+
+    レーダーの探索経路（:func:`resolve_seed` / :func:`run_radar_search`）は一切
+    書き込まない（PR1 / PR5）。書き込むのはこの関数だけで、呼び出せるのは教員の
+    明示操作を受けた route 層に限る（自動記帳の経路を作らない）。判定材料
+    （推定 ID とタイトル照合）はサーバ側で導出し直したものを使う前提。
+
+    **空（``''`` / ``NULL``）のときだけ**上書きする。既に出所が入っている教材は
+    取り込み経由 or 確定済みなので、推定で塗り替えない（情報を落とさない）。
+    ``commit`` は呼び出し側の責務。
+
+    Args:
+        session: SQLAlchemy セッション。
+        document_id: ``documents.id``（UUID 文字列）。
+        arxiv_id: 記帳する arXiv ID（version 付き・URL 表記も正規化して受ける）。
+
+    Returns:
+        記帳した論文ページ URL（version 抜き）。
+
+    Raises:
+        ValueError: ID を解釈できない / 対象が無い / すでに出所が登録されている。
+    """
+    normalized = normalize_arxiv_id(arxiv_id)
+    if not normalized:
+        raise ValueError("arXiv ID として解釈できませんでした。")
+
+    url = abs_url_for(normalized)
+    result = session.execute(
+        sa_text(
+            """
+            UPDATE documents
+               SET source_url = :url
+             WHERE id::text = :document_id
+               AND COALESCE(source_url, '') = ''
+            """
+        ),
+        {"url": url, "document_id": str(document_id or "").strip()},
+    )
+    if int(getattr(result, "rowcount", 0) or 0) != 1:
+        raise ValueError("この教材には、すでに取得元が登録されています。")
+    return url
+
+
 __all__ = [
     "APPROVED_REVIEW_STATUSES",
     "CATEGORIES_SOURCE_ARXIV",
+    "CATEGORIES_SOURCE_ARXIV_INFERRED",
     "CATEGORIES_SOURCE_MANUAL",
     "CATEGORIES_SOURCE_SUBSCRIPTION",
     "MAX_SEED_KEYPHRASES",
     "NOTE_ARXIV_METADATA_UNAVAILABLE",
+    "PROVENANCE_STATUS_INFERRED",
+    "PROVENANCE_STATUS_NONE",
+    "PROVENANCE_STATUS_REGISTERED",
     "build_radar_query",
+    "register_arxiv_provenance",
     "resolve_seed",
     "run_radar_search",
     "seed_keyphrase_candidates",

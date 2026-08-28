@@ -443,8 +443,19 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   LLM 接触 allowlist の2本目。UI は `admin-paper-radar.js`（ES5・`window.PaperRadar`）、
   アンカー +6（`materials.row-radar` / `materials.radar-{modal,distance,search,compare,
   ingest}`）+ capability `materials.paper_radar`（guidance_only）。取り込みは既存
-  `/ingest`・`/ingest-batch` 再利用。ガードレールは `test_paper_radar_{core,api,
-  guardrails,ui_static}.py`。
+  `/ingest`・`/ingest-batch` 再利用。**出所の後付け登録（同日追補・§11・migration
+  なし）**: 手動アップロード教材（`documents.source_url` 空）でも `resolve_seed` が
+  ファイル名から arXiv ID を決定論推定（`schema.arxiv_id_from_filename`・相異なる ID
+  複数なら推定しない・推定ゼロなら arXiv を呼ばない = PD6）し、
+  `categories_source="arxiv_inferred"` + `seed.provenance` で「推定」と正直に出す
+  （書き込みなし = PR1）。タイトル正規化（NFKC→casefold→英数字以外除去・長さ≥10）の
+  **完全一致時のみ**フロントが `POST /radar/provenance` を1回自動記帳
+  （サーバが再照合。`method=auto_title_match`）、不一致は並置 + 「この論文として登録
+  する」の教員確定（`teacher_confirmed`）、arXiv 未到達は登録不可 422。記帳先は既存
+  `documents.source_url` のみ（404=不可視/不在・403=view のみ・409=既存出所は上書き
+  しない。監査 `AUDIT_ENTITY_PAPER_DISCOVERY` / `new_status="provenance_registered"`）。
+  API +1本（レーダーは4本）・アンカー +1（`materials.radar-provenance`）。
+  ガードレールは `test_paper_radar_{core,api,guardrails,ui_static}.py`。
 - **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
 - **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源。
   学習者向け表示・コーパス回遊は §7 → 専用設計書で**実装済み**（下記コーパス回遊層）。
