@@ -456,6 +456,22 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   `documents.source_url` のみ（404=不可視/不在・403=view のみ・409=既存出所は上書き
   しない。監査 `AUDIT_ENTITY_PAPER_DISCOVERY` / `new_status="provenance_registered"`）。
   API +1本（レーダーは4本）・アンカー +1（`materials.radar-provenance`）。
+  **重なり・差分提示（2026-08-29 追補・§12・migration / env / アンカー / LLM コール
+  いずれも増やさない）**: ①着地予測 — VA層 §8 の `landing`（node_label / region_label /
+  nearness_label / skeleton_version）を radar にも配線。`band_candidates` の候補ベクトル
+  流用で**追加 embedding ゼロ**、`radar.py` の import 境界は不変で route が
+  `_anchor_context` を `run_radar_search(anchor_context_resolver=)` に注入し、
+  `_merge_distance_labels` が landing も移す。top-level に
+  `relation_context: {available, skeleton_version}`。②非LLM チップ — 重なり
+  （`overlap_components`・seed の承認済み `theory_components` ラベルと候補の casefold
+  部分一致・最大6）/ 新しい面（`new_facets`・最上位帯アンカーのうち seed の
+  `landscape_placements`（status NOT IN superseded/rejected）に無い node・最大2）。
+  **未測定はキー自体を付けない**（PR2）。③compare の2区画化 — 既存1コールの
+  structured output に `overlaps: [{component_label, statement, evidence_quote}]` を追加
+  （プロンプトは seed 部品ラベルの閉世界リスト提示、validator は evidence_quote verbatim
+  で項目 drop + component_label のリスト実在検査でリスト外は空文字化して statement は
+  保持）。`common_ground` は後方互換で維持・非保存・日次20・caveat 不変。UI は凡例1行 +
+  着地1行 + 〈推定〉タグ付きチップ（重なり最大3表示 + ほか）+ 2区画比較。
   ガードレールは `test_paper_radar_{core,api,guardrails,ui_static}.py`。
 - **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
 - **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源。
@@ -904,13 +920,17 @@ confirmed 配置の evidence 引用の合成テキストを chunks と同一 emb
 - **着地予測**: discovery 検索の `order:"relevance"` 経路のみ、既存バッチの候補
   ベクトルを流用（追加呼び出しゼロ）して候補に `landing`（node_label / region_label /
   nearness_label / skeleton_version）を付与。下位帯・アンカー不在はキー自体なし。
-  radar / date 順は v1 非対象。
+  **論文レーダーにも配線済み（2026-08-29。seed のドメイン帰属は
+  `corpus.document_domain_keys` で解決・追加 embedding ゼロ。仕様の正本は
+  `paper_radar_design.md` §12）**。`query.new_facet_labels`（最上位帯アンカーのうち
+  seed の confirmed 系配置に無い node）も radar 向けに追加。date 順は v1 非対象。
 - **UI**: 分野の地図タブ「ベクトル索引」+「登録済みの別名」区画、gap カードの注記 +
   登録ボタン、discovery 候補行の着地1行。アンカー +3
   （`atlas.vector-refresh` / `atlas.aliases` / `atlas.gap-alias-register`）。
 - **ガードレール**: `test_atlas_vectors_{core,api,guardrails,ui_static}.py`。
-- **非スコープ（v1）**: radar への着地予測 / alias candidate 行の自動生成 /
-  配置共起のグラフ埋め込み（node2vec）/ 学習者向け表示 / skip-gram 自前学習。
+- **非スコープ（v1）**: date 順検索への着地予測（radar は 2026-08-29 に実装済み）/
+  alias candidate 行の自動生成 / 配置共起のグラフ埋め込み（node2vec）/
+  学習者向け表示 / skip-gram 自前学習。
 
 ### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
 

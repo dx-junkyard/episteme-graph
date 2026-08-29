@@ -265,6 +265,10 @@ prefiltered, prefilter_facts = atlas_vectors.query.prefilter_domains(
   LLM 接触 allowlist（ranking.py / compare.py のみ）を不変に保つ。
   atlas_vectors.store の**読み**（DB のみ）は allowlist 違反ではない。
 - date 順検索・radar は v1 非対象（radar は seed のドメイン帰属が多義のため §11）。
+  → **2026-08-29 解消（radar のみ）**: seed のドメイン帰属は既存の
+  `corpus.document_domain_keys`（複数所属時はコース作成日の新しい順の先頭）で決着し、
+  論文レーダーにも同じ `landing` を配線した。実装先は
+  [論文レーダー](paper_radar_design.md) §12。date 順検索は非対象のまま。
 - 下位帯・アンカー不在・骨格なしはキー自体を付けない（VA4/VA8）。UI は候補行に
   1行の事実文で表示（「地図上の近い領域: {region} / {node}（版{version}）」）。
 
@@ -299,7 +303,12 @@ ANCHOR_NEARNESS_SCALE = GradedScale(
 
 ## 11. 非スコープ（v1）
 
-- radar / date 順検索への着地予測（seed のドメイン帰属解決が必要 — v2）
+- ~~radar への着地予測~~ → **2026-08-29 実装済み**（seed のドメイン帰属は既存
+  `corpus.document_domain_keys` で解決。実装先は
+  [論文レーダー](paper_radar_design.md) §12 へ移管 — 本層は
+  `query.landing_for_vector` / `query.new_facet_labels` の提供側）。
+  **date 順検索**への着地予測は v1 非スコープのまま（候補ベクトルを作らない経路のため
+  追加 embedding が要る = §8 の「追加呼び出しゼロ」を満たさない）
 - 配置候補そのものをベクトルで生成すること（配置は LLM + evidence verbatim のまま。
   ベクトルは絞り込みと注記のみ）
 - ベクトル近傍からの alias **candidate 行**の自動生成（v1 は読み時注記のみ・保存
@@ -344,6 +353,15 @@ Fable 5 指揮 + Opus 5 サブエージェント4体（core / API / 統合 / フ
   ベクトル流用で追加 embedding ゼロ。`landing` キーは `node_label / region_label /
   nearness_label / skeleton_version` のみ（node_id / node_kind / 生スコアは載せない）。
   発見層 LLM 接触 allowlist（ranking.py / compare.py）は不変。
+- **着地予測の radar 配線（2026-08-29 追補）**: §11 で v2 送りにしていた論文レーダーにも
+  同じ `landing` を配線した（seed のドメイン帰属は既存 `corpus.document_domain_keys` で
+  決着 — 複数所属時はコース作成日の新しい順の先頭）。`band_candidates` が作った候補
+  ベクトルを流用するため**追加 embedding ゼロ**、`radar.py` の import 境界
+  （`core.llm` / `atlas_vectors` 非 import）も不変で、route 層が `_anchor_context` を
+  resolver として `run_radar_search(anchor_context_resolver=...)` に注入する。併せて
+  `query.new_facet_labels`（最上位帯で近いアンカーのうち、seed 教材の
+  `landscape_placements` に無い node のラベル）を本層に追加した — 読みのみ・非LLM・
+  生スコア非漏洩（VA2）。仕様の正本は [論文レーダー](paper_radar_design.md) §12。
 - **UI**: 分野の地図タブ「ベクトル索引」「登録済みの別名」区画 + gap カード注記と
   「別名として登録」（成功時のみ既存 gap 却下を理由自動填入で併用する2段動作）+
   discovery 候補行の着地1行（サーバ提供ラベルのみ・JS への段階ラベル直書きは
