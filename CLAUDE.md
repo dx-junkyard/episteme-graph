@@ -884,8 +884,10 @@ confirmed 配置の evidence 引用の合成テキストを chunks と同一 emb
 正本は `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録）。
 
 - **不変条項の要点**: VA1 ベクトルは候補生成器・確定は常に人間 / VA2 cosine 生値
-  非表示（段階ラベルの正本は `label_vocab.ANCHOR_NEARNESS_SCALE`「かなり近い/
-  近い可能性/遠い」、閾値 0.55/0.40）/ VA3 埋め込みは凍結時・教員起点・パイプライン
+  非表示（段階ラベルの正本は `label_vocab` の2表: gap 注記=ラベル×ラベルは
+  `ANCHOR_NEARNESS_SCALE` 0.55/0.40、着地予測・新しい面=論文テキスト×アンカーは
+  `ANCHOR_LANDING_SCALE` 0.36/0.30 — 言語間レジームの実測校正 2026-08-29、
+  設計書 §9。ラベルは共通「かなり近い/近い可能性/遠い」）/ VA3 埋め込みは凍結時・教員起点・パイプライン
   のみ（学習者起点ゼロ = CR7）/ VA4 fail-soft 全縮退（freeze を止めない・不在時は
   従来動作）/ VA5 モデルは chunks と同一（feature `embedding:atlas_anchors`・scene
   なし = M5）/ VA6 別名は status 遷移のみ（(domain, version) 単位の全置換再構築だけ

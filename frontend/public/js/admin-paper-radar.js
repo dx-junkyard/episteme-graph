@@ -371,20 +371,20 @@
 
         // ④ 候補一覧（PR7: 検索条件と閉世界注記を常に上に出す）
         '<div id="pr-query-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:4px"></div>' +
-        '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
-          '<button type="button" id="pr-compare-btn" data-ui-anchor="materials.radar-compare" class="admin-action-btn" style="font-size:11.5px;padding:1px 8px" disabled>違いを分析</button>' +
-          '<span id="pr-compare-note" style="font-size:11.5px;color:var(--color-text-tertiary)"></span>' +
-        "</div>" +
         '<div style="font-size:11.5px;color:var(--color-text-tertiary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px">' +
           esc(SOURCE_URL_NOTICE) +
         "</div>" +
         '<div id="pr-results" style="overflow-y:auto;flex:1;min-height:160px"></div>' +
 
-        // ⑤ 取り込み確認
+        // ⑤ 分析・取り込みのフッター行（承認済みモックの foot-row。比較と取り込みは
+        //    どちらも「選択した候補への操作」なので一覧の下に並べる）
         '<div style="border-top:1px solid var(--color-border-tertiary);margin-top:10px;padding-top:10px">' +
           '<div id="pr-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div id="pr-ingest-result" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
-          '<div style="display:flex;justify-content:flex-end;gap:8px">' +
+          '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
+            '<button type="button" id="pr-compare-btn" data-ui-anchor="materials.radar-compare" class="admin-action-btn" style="font-size:11.5px;padding:1px 8px" disabled>違いを分析</button>' +
+            '<span id="pr-compare-note" style="font-size:11.5px;color:var(--color-text-tertiary)"></span>' +
+            '<span style="flex:1"></span>' +
             '<button type="button" id="pr-cancel" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">閉じる</button>' +
             '<button type="button" id="pr-ingest-btn" data-ui-anchor="materials.radar-ingest" class="admin-action-btn" disabled>選択した論文を取り込む</button>' +
           "</div>" +

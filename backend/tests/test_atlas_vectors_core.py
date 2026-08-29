@@ -20,8 +20,10 @@ import pytest
 
 from core.atlas_vectors import annotate, builder, query, schema, store
 from core.label_vocab import (
+    ANCHOR_LANDING_SCALE,
+    ANCHOR_LANDING_THRESHOLD_MID,
+    ANCHOR_LANDING_THRESHOLD_NEAR,
     ANCHOR_NEARNESS_SCALE,
-    ANCHOR_NEARNESS_THRESHOLD_MID,
     ANCHOR_NEARNESS_THRESHOLD_NEAR,
 )
 
@@ -249,21 +251,21 @@ class TestLandingForVector:
         )
 
     def test_below_mid_threshold_returns_none(self):
-        anchor = self._anchor_at(ANCHOR_NEARNESS_THRESHOLD_MID - 0.05)
+        anchor = self._anchor_at(ANCHOR_LANDING_THRESHOLD_MID - 0.05)
         assert query.landing_for_vector([1.0, 0.0], [anchor]) is None
 
     def test_mid_band_returns_facts(self):
-        anchor = self._anchor_at((ANCHOR_NEARNESS_THRESHOLD_NEAR + ANCHOR_NEARNESS_THRESHOLD_MID) / 2)
+        anchor = self._anchor_at((ANCHOR_LANDING_THRESHOLD_NEAR + ANCHOR_LANDING_THRESHOLD_MID) / 2)
         got = query.landing_for_vector([1.0, 0.0], [anchor])
         assert got["node_id"] == "n1"
         assert got["node_label"] == "ノード1"
         assert got["region_label"] == "領域A"
-        assert got["nearness_label"] == ANCHOR_NEARNESS_SCALE.labels[1]
+        assert got["nearness_label"] == ANCHOR_LANDING_SCALE.labels[1]
 
     def test_near_band_uses_top_label(self):
         anchor = self._anchor_at(0.99)
         got = query.landing_for_vector([1.0, 0.0], [anchor])
-        assert got["nearness_label"] == ANCHOR_NEARNESS_SCALE.labels[0]
+        assert got["nearness_label"] == ANCHOR_LANDING_SCALE.labels[0]
 
     def test_no_raw_score_in_payload(self):
         got = query.landing_for_vector([1.0, 0.0], [self._anchor_at(0.99)])
@@ -295,8 +297,8 @@ class TestNewFacetLabels:
 
     def test_only_the_top_band_counts(self):
         """最上位帯（NEAR 閾値以上）だけ。中位帯は「新しい面」と言わない。"""
-        near = self._anchor_at(ANCHOR_NEARNESS_THRESHOLD_NEAR + 0.05, "near", "近いノード")
-        mid = self._anchor_at(ANCHOR_NEARNESS_THRESHOLD_NEAR - 0.05, "mid", "中位ノード")
+        near = self._anchor_at(ANCHOR_LANDING_THRESHOLD_NEAR + 0.05, "near", "近いノード")
+        mid = self._anchor_at(ANCHOR_LANDING_THRESHOLD_NEAR - 0.05, "mid", "中位ノード")
         assert query.new_facet_labels([1.0, 0.0], [near, mid], set()) == ["近いノード"]
 
     def test_excluded_nodes_are_dropped(self):

@@ -3,7 +3,9 @@
 正本: ``docs/features/atlas_vector_anchoring_design.md`` §6 / §8 / §9。
 
 本モジュールは**純関数のみ**。ベクトルとアンカーの一覧を受け取り、cosine を計算して
-段階ラベル（正本は ``core.label_vocab.ANCHOR_NEARNESS_SCALE``）へ変換する。
+段階ラベル（正本は ``core.label_vocab`` — 着地予測・新しい面は論文テキスト×アンカーの
+言語間レジーム用 ``ANCHOR_LANDING_SCALE``、gap 近傍注記はラベル×ラベル用
+``ANCHOR_NEARNESS_SCALE``）へ変換する。
 
 不変条項:
 
@@ -24,9 +26,9 @@ import math
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 from core.label_vocab import (
-    ANCHOR_NEARNESS_SCALE,
-    ANCHOR_NEARNESS_THRESHOLD_MID,
-    ANCHOR_NEARNESS_THRESHOLD_NEAR,
+    ANCHOR_LANDING_SCALE,
+    ANCHOR_LANDING_THRESHOLD_MID,
+    ANCHOR_LANDING_THRESHOLD_NEAR,
 )
 
 #: 着地予測・近傍注記に載せる region / concept の種別語彙（骨格側の値と一致）。
@@ -86,7 +88,7 @@ def landing_for_vector(
 ) -> Optional[dict]:
     """「この骨格の中で最も近いノード」の事実 dict（生スコアなし — VA2）。
 
-    最下帯（:data:`ANCHOR_NEARNESS_THRESHOLD_MID` 未満）は ``None`` を返す
+    最下帯（:data:`ANCHOR_LANDING_THRESHOLD_MID` 未満）は ``None`` を返す
     （「なんとなく関連」を出さない — 設計書 §9 / help_kb の保守的足切りと同じ思想）。
     アンカー不在・未測定も ``None``（キー自体を付けない = VA4）。
 
@@ -99,14 +101,14 @@ def landing_for_vector(
     if not best:
         return None
     anchor, similarity = best[0]
-    if similarity < ANCHOR_NEARNESS_THRESHOLD_MID:
+    if similarity < ANCHOR_LANDING_THRESHOLD_MID:
         return None
     return {
         "node_id": getattr(anchor, "node_id", ""),
         "node_kind": getattr(anchor, "node_kind", ""),
         "node_label": getattr(anchor, "label", "") or getattr(anchor, "node_id", ""),
         "region_label": getattr(anchor, "region_label", "") or "",
-        "nearness_label": ANCHOR_NEARNESS_SCALE.label_for(similarity),
+        "nearness_label": ANCHOR_LANDING_SCALE.label_for(similarity),
     }
 
 
@@ -125,7 +127,7 @@ def new_facet_labels(
 
     規律:
 
-    - **最上位帯のみ**（:data:`ANCHOR_NEARNESS_THRESHOLD_NEAR` 以上）。中位帯まで
+    - **最上位帯のみ**（:data:`ANCHOR_LANDING_THRESHOLD_NEAR` 以上）。中位帯まで
       拾うと「なんとなく関連」が新しい面として並ぶ（:func:`landing_for_vector` が
       最下帯を切るのと同じ思想の、さらに慎重な足切り — 設計書 §9）。
     - **未測定（cosine が ``None``）のアンカーは含めない**（:func:`nearest_anchors`
@@ -148,7 +150,7 @@ def new_facet_labels(
     out: list[str] = []
     seen: set[str] = set()
     for anchor, similarity in nearest_anchors(vector, items, limit=len(items)):
-        if similarity < ANCHOR_NEARNESS_THRESHOLD_NEAR:
+        if similarity < ANCHOR_LANDING_THRESHOLD_NEAR:
             # 近い順に並んでいるので、ここから先は全て帯の外。
             break
         node_id = str(getattr(anchor, "node_id", "") or "")

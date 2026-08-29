@@ -275,15 +275,30 @@ prefiltered, prefilter_facts = atlas_vectors.query.prefilter_domains(
 ## 9. 段階ラベル（label_vocab 正本）
 
 ```python
-ANCHOR_NEARNESS_THRESHOLD_NEAR = 0.55
+ANCHOR_NEARNESS_THRESHOLD_NEAR = 0.55   # ラベル×ラベル（gap 近傍注記・別名ヒント）
 ANCHOR_NEARNESS_THRESHOLD_MID = 0.40
 ANCHOR_NEARNESS_SCALE = GradedScale(
     (0.55, 0.40), ("かなり近い", "近い可能性", "遠い"))
+
+ANCHOR_LANDING_THRESHOLD_NEAR = 0.36    # 論文テキスト×アンカー（着地予測・新しい面）
+ANCHOR_LANDING_THRESHOLD_MID = 0.30
+ANCHOR_LANDING_SCALE = GradedScale(
+    (0.36, 0.30), ("かなり近い", "近い可能性", "遠い"))
 ```
 
 閾値・ラベルの正本は `core/label_vocab.py` のみ（重複定義はガードレールが検出）。
 ギャップ近傍注記は最上位帯のみ表示、着地予測は上位2帯を表示（最下帯は非表示 =
 「なんとなく関連」を出さない — help_kb の保守的足切りと同じ思想）。
+
+**スケールが2表あるのはレジームが違うため（2026-08-29 実測校正）**: gap 近傍注記は
+gap クラスタ label × アンカー合成テキスト（双方日本語の短文）で 0.55/0.40 が妥当。
+着地予測・新しい面（`landing_for_vector` / `new_facet_labels`）は英語アブスト・チャンク
+重心 × 日本語ラベル中心のプロトタイプという**言語間・長短文比較**で cosine の絶対水準が
+一段下がる。実測（astrophysics 骨格 59 アンカー × 実レーダー候補 20 件）では主題の合う
+候補の最良アンカーが 0.34〜0.38（最近接アンカーは意味的に正しい: CMB 複屈折→cmb）、
+主題の違う候補が 0.21〜0.29 で、旧閾値 0.55/0.40 ではこのレジームで一度も発火しなかった。
+0.36/0.30 は境界の雑音帯（0.28〜0.34）を「近い可能性」止まりにする保守側の校正値。
+実測での見直し前提は両表とも継承する。
 
 ## 10. ガードレール
 

@@ -833,4 +833,4 @@ class TestArxivProvenanceRegistration:
 class TestCacheBuster:
     def test_admin_html_bumps_the_radar_cache_buster(self):
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-radar.js?v=paper-radar-20260829-1" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20260829-2" in src

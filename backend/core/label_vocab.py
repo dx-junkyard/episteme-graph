@@ -44,6 +44,9 @@ from types import MappingProxyType
 from core.status import schema as status_schema
 
 __all__ = [
+    "ANCHOR_LANDING_SCALE",
+    "ANCHOR_LANDING_THRESHOLD_MID",
+    "ANCHOR_LANDING_THRESHOLD_NEAR",
     "ANCHOR_NEARNESS_SCALE",
     "ANCHOR_NEARNESS_THRESHOLD_MID",
     "ANCHOR_NEARNESS_THRESHOLD_NEAR",
@@ -254,6 +257,26 @@ ANCHOR_NEARNESS_THRESHOLD_MID = 0.40
 
 ANCHOR_NEARNESS_SCALE = GradedScale(
     (ANCHOR_NEARNESS_THRESHOLD_NEAR, ANCHOR_NEARNESS_THRESHOLD_MID),
+    ("かなり近い", "近い可能性", "遠い"),
+)
+
+# ── アンカー着地予測（論文テキスト × アンカープロトタイプ）───────────────────
+#
+# :data:`ANCHOR_NEARNESS_SCALE` と**レジームが違う**ための別表。あちらは
+# ラベル×ラベル（gap クラスタ label とアンカー合成テキスト — 双方日本語の短文）で、
+# 0.55/0.40 が妥当。こちらは論文由来テキスト（英語アブスト・チャンク重心）×
+# アンカープロトタイプ（日本語ラベル中心の合成テキスト）の**言語間・長短文比較**で、
+# cosine の絶対水準が一段下がる。2026-08-29 の実測校正（astrophysics 骨格 59 アンカー ×
+# 実レーダー候補20件）: 主題が合う候補の最良アンカー cosine は 0.34〜0.38 で、
+# 最近接アンカーは意味的に正しかった（CMB複屈折→cmb / LSS重力→cosmology）。
+# 主題が違う候補は 0.21〜0.29。旧閾値 0.55/0.40 ではこのレジームで一度も発火しない。
+# 閾値は境界の雑音帯（0.28〜0.34）を「近い可能性」止まりにする保守側で置く。
+# 実測での見直し前提は継承（変えるときは atlas_vector_anchoring_design.md §9 も更新）。
+ANCHOR_LANDING_THRESHOLD_NEAR = 0.36
+ANCHOR_LANDING_THRESHOLD_MID = 0.30
+
+ANCHOR_LANDING_SCALE = GradedScale(
+    (ANCHOR_LANDING_THRESHOLD_NEAR, ANCHOR_LANDING_THRESHOLD_MID),
     ("かなり近い", "近い可能性", "遠い"),
 )
 
