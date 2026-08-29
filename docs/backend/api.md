@@ -55,11 +55,12 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
   `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
   （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
   （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（21本、`main.py` の登録順）**:
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（22本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
-  （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
+  （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `atlas_edges`（/cartridges 配下）/
+  `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
   `discuss_observation.admin_router` / `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
@@ -231,7 +232,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/atlas/runtime-config` | 公開 | atlas-data.js のデータソース既定（api / fixture）を返す |
-| GET | `/api/atlas` | 要ログイン | 地図データ一式（骨格+キャッシュ+個人層。`course`/`topic`/`focus` をサーバ側で解決。骨格なしは 404） |
+| GET | `/api/atlas` | 要ログイン | 地図データ一式（骨格+キャッシュ+個人層。`course`/`topic`/`focus` をサーバ側で解決。骨格なしは 404）。**optional な top-level キー `threads`**（推定の糸 = RE層 §6。`{available, skeleton_version, items[]}`。導出不能・ベクトル不在・見送り済みのみのときは**キー自体を付けない**。cosine は載せず近さは段階ラベル） |
 | GET | `/api/atlas/node/{node_id}` | 要ログイン | 詳細パネル用のノード情報 |
 | GET | `/api/learning/atlas/{cartridge_id}/skeleton` | 要ログイン | 学習者向け骨格（凍結・レビュー済み版のみ。draft のみの domain は 404） |
 | GET | `/api/learning/atlas/cues/state` | 要ログイン | 導線の永続状態（first_login_seen。DB 不通時は seen=True の fail-closed） |
@@ -654,6 +655,24 @@ freeze フック）が主経路で、本ルーターの refresh はそれ以前�
 | GET | `/api/admin/cartridges/{cid}/atlas/aliases` | TEACHER | 登録済み別名の一覧（既定は confirmed のみ。`include_dismissed=true` で見送り済みも）。`node_label` は現行凍結骨格から補い、骨格に無いノードは空文字 |
 | POST | `/api/admin/cartridges/{cid}/atlas/aliases` | TEACHER | 別名の登録（教員の確定操作 — VA1）。`node_id` が現行凍結骨格に無い / 表記が空 / `source` が語彙外は 422。登録後に当該ノードのプロトタイプを best-effort で再構築（失敗しても登録は成功） |
 | POST | `/api/admin/cartridges/{cid}/atlas/aliases/{alias_id}/dismiss` | TEACHER | 別名を見送りにする（行は消さない）。別分野の id・不在はいずれも 404 |
+
+### 分野マップの関係表示 — 辺候補のレビュー（`routes/atlas_edges.py`、migration 076）
+
+骨格の辺（adjacent / depends / related）の候補を、VA層の**保存済み**アンカーベクトルと
+配置の共起から**毎回読み時導出**する（候補行を蓄積しない・embedding を呼ばない）。
+骨格 draft を書くのは教員の既存 `PUT .../atlas/skeleton/draft` だけで、本ルーターは
+骨格に書き込まない（RE3 / AB4 / KN-3）。**DELETE ルートは無い**（見送りは `dismissed`、
+その取り消しは `candidate` への遷移）。cosine・共起件数は返さない（RE4。近さは段階ラベル、
+共起の支持は論文タイトルの列挙）。凍結との接続（公開前チェックと `applied_version` の刻印）は
+`routes/atlas.py` の freeze 側にある。詳細は
+`docs/features/atlas_relation_edges_design.md` §5。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/cartridges/{cid}/atlas/edge-candidates` | TEACHER | 辺候補の一覧（毎回導出。`origins` / `nearness_label`（vector 由来のみ）/ `documents`（共起由来のみ）+ `decision`）+ `skeleton_version` / `draft_exists` / `draft_revision`。`include_dismissed=true` で見送り済みも返す。凍結版が無い分野は 404 |
+| POST | `/api/admin/cartridges/{cid}/atlas/edge-candidates/decide` | TEACHER | 候補を採用・見送りにする（見送りの取り消しも同 API）。採用は `kind`（adjacent / depends / related）必須、見送りは理由必須（いずれも語彙外・空は 422）。別分野の `edge_key` は 422、復帰対象なしは 404。骨格 draft は変わらない |
+| POST | `/api/admin/cartridges/{cid}/atlas/edge-candidates/incorporate-preview` | TEACHER | 採用済み候補を次版 draft へ追加する JSON Patch（op は add のみ）と適用後 draft の**提示のみ**。DB 非変更。未採用 / draft なしは 409、端点が draft に無い・同じ辺が既にあるは 422 |
+| POST | `/api/admin/cartridges/{cid}/atlas/edge-candidates/mark-incorporated` | TEACHER | 教員の `PUT draft` **成功後**に反映を記録（監査のみ。判断は `accepted` のまま）。無向ペアが現 draft の `edges` に無ければ 409（誤順序を弾く） |
 
 ### 知識ランドスケープ（`routes/landscape.py`、migration 065）
 

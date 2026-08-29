@@ -57,6 +57,7 @@ from routes import auth, learning, admin, lecture, groups, error_logs, export as
 from routes import figure_presentation as figure_presentation_routes
 from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
+from routes import atlas_edges as atlas_edges_routes
 from routes import atlas_gaps as atlas_gaps_routes
 from routes import atlas_vectors as atlas_vectors_routes
 from routes import atlas_view as atlas_view_routes
@@ -373,6 +374,9 @@ app.include_router(atlas_gaps_routes.router, prefix="/api/admin")
 # 分野マップのベクトル係留（atlas_vector_anchoring_design.md §5 索引の状態・再構築 /
 # §7 別名レジストリ。migration 074）。atlas_routes.router と同じ "/cartridges" 配下。
 app.include_router(atlas_vectors_routes.router, prefix="/api/admin")
+# 分野マップの関係表示（atlas_relation_edges_design.md §5 辺候補のレビュー・判断・
+# 次版下書きへの反映。migration 076）。atlas_routes.router と同じ "/cartridges" 配下。
+app.include_router(atlas_edges_routes.router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")

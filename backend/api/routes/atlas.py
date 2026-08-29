@@ -25,6 +25,7 @@ from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
 from core import llm_policy
+from core.atlas_edges import store as edge_store
 from core.atlas_gaps import store as gap_store
 from core.course_data import course_atlas_binding_pending, course_cartridge_id, course_topics
 from core.schema import (
@@ -153,6 +154,57 @@ def _pending_gap_candidates(
             exc_info=True,
         )
         return []
+
+
+def _edge_pairs_of(skeleton: atlas.AtlasSkeleton) -> list[tuple[str, str]]:
+    """骨格の辺を ``(from_id, to_id)`` の列にする（無向化は store 側が行う）。"""
+    return [(e.from_id, e.to_id) for e in getattr(skeleton, "edges", ()) or ()]
+
+
+def _pending_edge_candidates(
+    session, cartridge_id: str, draft: atlas.AtlasSkeleton
+) -> list[dict]:
+    """凍結前チェック: 採用済みでまだ次版の下書きに入っていない辺の候補。
+
+    正本: docs/features/atlas_relation_edges_design.md §5（gap の公開前チェックと同列）。
+    判定材料は「教員が採用した」判断行と「いまの下書きにある辺のペア」だけで、骨格へは
+    一切書き込まない (RE3)。
+
+    DB 不通・照会失敗は空リスト (fail-open) — 候補機構の不調で凍結という主要操作を
+    止めない。ガードレールは「採用済み未反映があるときに止まること」を検査する。
+    """
+    try:
+        return edge_store.list_pending_for_freeze(
+            session,
+            domain_key=cartridge_id,
+            draft_edge_pairs=_edge_pairs_of(draft),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas freeze: relation edge pending check skipped for %s",
+            cartridge_id,
+            exc_info=True,
+        )
+        return []
+
+
+def _edge_pair_label(
+    item: dict, *labels_from: atlas.AtlasSkeleton | None
+) -> str:
+    """「ラベルA — ラベルB」の1行（RE4: 件数を出さずラベルの列挙で示す）。
+
+    ラベルは下書き・現行凍結版の順に引き、どちらにも無ければ node id をそのまま出す
+    （fail-soft。名前が引けないことで凍結前チェックの提示を欠かさない）。
+    """
+    labels: dict[str, str] = {}
+    for skeleton in labels_from:
+        for region in getattr(skeleton, "regions", ()) or ():
+            for concept in getattr(region, "concepts", ()) or ():
+                labels.setdefault(concept.id, concept.label or concept.id)
+            labels.setdefault(region.id, region.label or region.id)
+    left = str(item.get("from_id") or "")
+    right = str(item.get("to_id") or "")
+    return f"{labels.get(left, left)} — {labels.get(right, right)}"
 
 
 def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | None:
@@ -638,6 +690,9 @@ def freeze_atlas_skeleton(
             session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
         )
         pending_gaps = _pending_gap_candidates(session, cartridge_id, draft_row["skeleton"])
+        pending_edges = _pending_edge_candidates(
+            session, cartridge_id, draft_row["skeleton"]
+        )
     finally:
         session.close()
     if pending_gaps:
@@ -648,6 +703,21 @@ def freeze_atlas_skeleton(
                 # 件数ではなくラベルの列挙で示す (LS5: 数値を見せない)。
                 "pending_labels": [
                     str(item.get("proposed_label") or "") for item in pending_gaps
+                ],
+            },
+        )
+    if pending_edges:
+        # 関係（辺）の候補も gap と同列の弁を通す (atlas_relation_edges_design.md §5)。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "採用済みでまだ次版に反映されていない辺の候補が残っています",
+                # 件数ではなく「ラベルA — ラベルB」の列挙で示す (RE4: 数値を見せない)。
+                "pending_edges": [
+                    _edge_pair_label(
+                        item, draft_row["skeleton"], current_frozen_for_impact
+                    )
+                    for item in pending_edges
                 ],
             },
         )
@@ -710,6 +780,13 @@ def freeze_atlas_skeleton(
             domain_key=cartridge_id,
             frozen_version=body.version,
             frozen_node_ids=list(frozen.concept_ids()) + list(frozen.region_ids()),
+        )
+        # 関係（辺）の候補も同じトランザクションで刻印する (RE3 / 設計書 §5)。
+        stamped_edges = edge_store.stamp_applied_versions(
+            session,
+            domain_key=cartridge_id,
+            frozen_version=body.version,
+            frozen_edge_pairs=_edge_pairs_of(frozen),
         )
         session.commit()
     except HTTPException:
@@ -788,6 +865,7 @@ def freeze_atlas_skeleton(
             "reports_migrated": report_summary.get("migrated", 0),
             # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
             "category_gaps_applied": list(stamped_gaps),
+            "relation_edges_applied": list(stamped_edges),
         },
     )
 
