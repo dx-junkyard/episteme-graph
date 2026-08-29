@@ -306,6 +306,110 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
     return seed
 
 
+def seed_placed_node_ids(session, document_id: str, domain_key: str) -> set[str]:
+    """起点論文が**その分野の地図で既に配置されている**ノード ID（読み取りのみ）。
+
+    「新しい面」チップ（設計書 §4.2 / VA層 §8）の差集合の材料。生きている配置
+    （``superseded`` / ``rejected`` 以外 = ``inferred`` / ``confirmed`` /
+    ``review_required``）の ``node_id`` を集める。AI 推定（``inferred``）も
+    「もう地図に現れている面」として扱う — 未確定の推定を「新しい面」として
+    二重に見せないための慎重側（PR2 / LS3）。
+
+    件数はここから外へ出さない（集合の要素だけを返す — 数を見せない PR2 / LS5）。
+    domain_key 不明・document_id が UUID として解釈できない・表が読めないは
+    いずれも**空集合**へ fail-soft（チップが出ないだけで検索は成立する — PR7）。
+    """
+    ref = _clean(document_id)
+    domain = _clean(domain_key)
+    if not ref or not domain:
+        return set()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT DISTINCT node_id
+                  FROM landscape_placements
+                 WHERE document_id = CAST(:document_id AS uuid)
+                   AND domain_key = :domain_key
+                   AND status NOT IN ('superseded', 'rejected')
+                """
+            ),
+            {"document_id": ref, "domain_key": domain},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 配置が読めないだけ（検索は成立させる）
+        logger.warning(
+            "landscape placements unavailable for document %s (non-fatal)",
+            ref, exc_info=True,
+        )
+        return set()
+    return {str(row[0] or "").strip() for row in rows if str(row[0] or "").strip()}
+
+
+# ---------------------------------------------------------------------------
+# 承認済み部品との語彙照合（非ベクトル・純関数）
+# ---------------------------------------------------------------------------
+
+
+#: 語彙照合で使う最短ラベル長（これ未満は部分一致の誤爆が多すぎるので見送る）。
+MIN_OVERLAP_LABEL_CHARS = 3
+
+
+def overlap_component_labels(
+    candidate: dict,
+    component_labels: Any,
+    *,
+    limit: int = 6,
+) -> list[str]:
+    """候補の題名・要旨に現れる、起点論文の**承認済み部品ラベル**（決定論・非LLM）。
+
+    「重なり」チップ（設計書 §4.2）の材料。ベクトルも LLM も使わない素朴な
+    部分一致で、`ラベルがそのまま候補の文面に現れた` という**観測できる事実**
+    だけを返す（意味の近さを主張しない — PR2）。
+
+    規律:
+
+    - 照合は casefold 同士の部分一致。並びは**入力順**（``component_labels`` は
+      :func:`seed_keyphrase_candidates` の決定論的な並びで来る）。
+    - :data:`MIN_OVERLAP_LABEL_CHARS` 未満のラベルは飛ばす（``CP`` のような短い
+      表記が無関係な語の一部に当たる誤爆を避ける）。
+    - 一致数・スコアは返さない（ラベル文字列だけ — PR2 / LS5）。
+    """
+    text = " ".join(
+        [
+            str(candidate.get("title") or ""),
+            str(candidate.get("summary") or ""),
+        ]
+    ).casefold()
+    if not text.strip() or int(limit or 0) <= 0:
+        return []
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for value in component_labels or ():
+        label = _clean(value)
+        key = label.casefold()
+        if len(label) < MIN_OVERLAP_LABEL_CHARS or key in seen:
+            continue
+        if key not in text:
+            continue
+        seen.add(key)
+        out.append(label)
+        if len(out) >= int(limit):
+            break
+    return out
+
+
+def _seed_component_labels(seed: dict) -> list[str]:
+    """seed の供給候補のうち、承認済み理論部品（``source="component"``）のラベル。"""
+    return [
+        _clean(item.get("text"))
+        for item in (seed.get("keyphrase_candidates") or [])
+        if isinstance(item, dict)
+        and str(item.get("source") or "") == "component"
+        and _clean(item.get("text"))
+    ]
+
+
 # ---------------------------------------------------------------------------
 # クエリ組み立て
 # ---------------------------------------------------------------------------
@@ -346,6 +450,46 @@ _DISTANCE_PRIMARY_LABELS = {
 }
 
 
+def _resolve_anchor_context(session, seed: dict, resolver: Any) -> Optional[dict]:
+    """アンカー文脈（VA層 §8）を注入された resolver から解決する（fail-soft）。
+
+    解決できたときだけ、起点論文が既に配置されているノード集合
+    （:func:`seed_placed_node_ids`）を ``exclude_node_ids`` として足す
+    （「新しい面」の差集合の材料 — 設計書 §4.2）。**起点論文がこの分野に
+    1件も配置されていないときはキー自体を足さない** — 「起点論文は未言及」
+    という対比の主張は、起点側の配置が最低1件あって初めて成立する
+    （配置ゼロの分野で全ての近傍アンカーを「新しい面」に見せない — 慎重側）。
+    resolver 不在・分野不明・解決失敗はいずれも ``None``
+    （着地予測も新しい面も出ないだけ — VA4）。
+    """
+    domain_key = _clean(seed.get("domain_key"))
+    if not resolver or not domain_key:
+        return None
+    try:
+        context = resolver(domain_key)
+    except Exception:  # noqa: BLE001 — 地図と突き合わせられないだけ（検索は成立させる）
+        logger.warning(
+            "anchor context unavailable for domain %s (non-fatal)",
+            domain_key, exc_info=True,
+        )
+        return None
+    if not context:
+        return None
+    context = dict(context)
+    placed = seed_placed_node_ids(session, seed.get("document_id") or "", domain_key)
+    if placed:
+        context["exclude_node_ids"] = placed
+    return context
+
+
+def _relation_context(anchor_context: Optional[dict]) -> dict:
+    """「どの骨格版と突き合わせたか」の事実（生スコア・件数なし — VA2 / VA8）。"""
+    version = _clean((anchor_context or {}).get("skeleton_version"))
+    if not anchor_context or not version:
+        return {"available": False}
+    return {"available": True, "skeleton_version": version}
+
+
 def _banding_info(banded: dict, distance: str) -> dict:
     info: dict[str, Any] = {"available": bool(banded.get("available"))}
     if info["available"]:
@@ -358,23 +502,31 @@ def _banding_info(banded: dict, distance: str) -> dict:
     return info
 
 
+#: 帯分けの側で候補に付き、元の並び順へ移し替える注釈キー（並びは動かさない）。
+#: ``distance_label`` = 距離帯 / ``landing`` = 着地予測 / ``new_facets`` = 新しい面
+#: （後者2つは VA層 §8。いずれも measured な候補にしか付かない — PR2）。
+_BANDED_ANNOTATION_KEYS = ("distance_label", "landing", "new_facets")
+
+
 def _merge_distance_labels(originals: list[dict], banded_items: list[dict]) -> list[dict]:
-    """元の並び順（新着順）を保ったまま ``distance_label`` だけを移す。
+    """元の並び順（新着順）を保ったまま、帯分けが付けた注釈だけを移す。
 
     ``mid`` / ``far`` は「遠い順に並べる」ことをしない（疑似精度になる — 設計書 §3）。
-    帯分けは付いたラベルだけを使い、並びは arXiv の新着順のままにする。
+    帯分けは付いた注釈（:data:`_BANDED_ANNOTATION_KEYS`）だけを使い、並びは arXiv の
+    新着順のままにする。付かなかった候補には**キー自体を足さない**（VA4 / PR2）。
     """
-    labels = {
-        str(item.get("arxiv_id") or ""): item["distance_label"]
-        for item in banded_items
-        if item.get("distance_label")
-    }
+    annotations: dict[str, dict] = {}
+    for item in banded_items:
+        found = {
+            key: item[key] for key in _BANDED_ANNOTATION_KEYS if item.get(key)
+        }
+        if found:
+            annotations[str(item.get("arxiv_id") or "")] = found
+
     out: list[dict] = []
     for item in originals:
         payload = dict(item)
-        label = labels.get(str(item.get("arxiv_id") or ""))
-        if label:
-            payload["distance_label"] = label
+        payload.update(annotations.get(str(item.get("arxiv_id") or "")) or {})
         out.append(payload)
     return out
 
@@ -388,17 +540,30 @@ def run_radar_search(
     keyphrases: Any = None,
     start: int = 0,
     max_results: int = search.DEFAULT_MAX_RESULTS,
+    anchor_context_resolver: Any = None,
 ) -> dict:
     """seed 教材の周辺を arXiv から探し、距離帯つきの候補一覧を返す。
 
     ``categories`` / ``keyphrases`` を渡した場合は seed 由来の供給より優先する
     （条件を保存せずに試せる。分野購読は書き換えない — PR1 / PD3）。
 
+    Args:
+        anchor_context_resolver: ``domain_key -> {"anchors", "skeleton_version"} | None``
+            の callable（省略時は着地予測・新しい面を導出しない = 完全後方互換）。
+            **注入で受ける**のは、このモジュールが ``core.atlas_vectors`` にも
+            ``core.llm`` にも触れない境界を保つため（呼び出し側 = route 層が
+            ``routes/paper_discovery.py::_anchor_context`` を渡す）。解決に失敗しても
+            例外にせず ``relation_context.available=False`` へ縮退する（VA4 / PR7）。
+
     Returns:
         ``{"seed", "query", "distance", "total", "start", "candidates", "banding",
-        "closed_world_note"}``。``candidates`` の各要素は
+        "relation_context", "closed_world_note"}``。``candidates`` の各要素は
         :meth:`ArxivEntry.to_dict` に ``status``（``new`` / ``ingested``）と
-        ``matched_keyphrases``、測れた場合のみ ``distance_label`` を足したもの。
+        ``matched_keyphrases``、承認済み部品との語彙一致があれば
+        ``overlap_components``、測れた場合のみ ``distance_label`` /（アンカーが
+        読めた場合のみ）``landing`` / ``new_facets`` を足したもの。
+        ``relation_context`` は ``{"available": bool, "skeleton_version"?: str}``
+        で、**キーは常に付く**（地図と突き合わせたのかどうかを黙らせない — VA8）。
         条件が空なら arXiv を呼ばず ``query=""`` / ``candidates=[]``（PD6）。
 
     Raises:
@@ -424,6 +589,8 @@ def run_radar_search(
 
     query = build_radar_query(distance, effective_categories, effective_keyphrases)
 
+    anchor_context = _resolve_anchor_context(session, seed, anchor_context_resolver)
+
     result: dict[str, Any] = {
         "seed": seed,
         "query": query,
@@ -432,6 +599,7 @@ def run_radar_search(
         "start": max(0, int(start or 0)),
         "candidates": [],
         "banding": {"available": False},
+        "relation_context": _relation_context(anchor_context),
         "closed_world_note": search.CLOSED_WORLD_NOTE,
     }
     if not query:
@@ -444,6 +612,7 @@ def run_radar_search(
 
     ingested = search.ingested_arxiv_ids(session)
     seed_arxiv_id = seed.get("arxiv_id") or ""
+    component_labels = _seed_component_labels(seed)
 
     candidates: list[dict] = []
     for entry in entries:
@@ -459,6 +628,11 @@ def run_radar_search(
             if distance == "near"
             else []
         )
+        # 承認済み部品との語彙一致（非ベクトル・帯分けの前に付ける = 帯分け側の
+        # dict コピーで並べ替え後の候補にもそのまま乗る）。空ならキー自体を足さない。
+        overlap = overlap_component_labels(payload, component_labels)
+        if overlap:
+            payload["overlap_components"] = overlap
         candidates.append(payload)
 
     banded = pd_ranking.band_candidates(
@@ -466,6 +640,7 @@ def run_radar_search(
         candidates,
         seed_vector=pd_ranking.document_centroid(session, seed["document_id"]),
         seed_text=seed.get("summary") or "",
+        anchor_context=anchor_context,
     )
     ordered = list(banded.get("ordered") or candidates)
     if distance == "near":
@@ -535,13 +710,16 @@ __all__ = [
     "CATEGORIES_SOURCE_MANUAL",
     "CATEGORIES_SOURCE_SUBSCRIPTION",
     "MAX_SEED_KEYPHRASES",
+    "MIN_OVERLAP_LABEL_CHARS",
     "NOTE_ARXIV_METADATA_UNAVAILABLE",
     "PROVENANCE_STATUS_INFERRED",
     "PROVENANCE_STATUS_NONE",
     "PROVENANCE_STATUS_REGISTERED",
     "build_radar_query",
+    "overlap_component_labels",
     "register_arxiv_provenance",
     "resolve_seed",
     "run_radar_search",
     "seed_keyphrase_candidates",
+    "seed_placed_node_ids",
 ]

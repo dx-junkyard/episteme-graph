@@ -8,7 +8,8 @@
 - ``radar.py`` / ``compare.py`` が FastAPI を import しない。``radar.py`` は
   ``core.llm`` にも触れない（LLM 接触点は ranking.py（embedding）と compare.py
   （比較文）の2本だけ — 既存 allowlist の改訂と対）
-- 比較分析のプロンプト制約3文が原文で存在し、``caveat`` がサーバ側定数である（PR4）
+- 比較分析のプロンプト制約文（違い3文 + 重なり3文 + 部品リスト見出し）が原文で存在し、
+  ``caveat`` がサーバ側定数である（PR4）。重なりの追加で **LLM コールは増えない**
 - ``fetch_by_ids`` がスロットルを通り、宛先が定数ホストである（PR6）
 - レーダー経路が購読・見送りへ書き込まない（``touch_last_checked`` を呼ばない — PR5）
 - 探索経路（``resolve_seed`` / ``run_radar_search``）が DB へ書き込まず、書き込みは
@@ -127,11 +128,30 @@ class TestCompareGuards:
         "アブストラクトに書かれていることだけを比較する",
         "断定せず推量形で書く",
         "数値スコア・優劣の評価を書かない",
+        # 重なり2区画（overlaps）— 閉世界の部品リストと逐語引用を原文で固定する。
+        "- 重なり（overlaps）は、起点論文と同じ内容を別の表現・文脈で扱っていそうな箇所だけを挙げる（最大3件）",
+        "- overlaps の component_label は、下の部品リストにある名前をそのまま使う（リストに無い重なりは component_label を空にする）",
+        "- 各重なりにも、その候補のアブストラクトからの逐語引用を evidence_quote として付ける",
+        "【起点論文の部品リスト】",
     )
 
     def test_prompt_constraints_exist_verbatim(self):
         for phrase in self._REQUIRED_PROMPT_CONSTRAINTS:
             assert phrase in _COMPARE_SRC, phrase
+
+    def test_overlap_constraints_stay_under_the_hedging_rule(self):
+        """重なりの指示が「断定せず推量形で書く」より後ろにある（制約の射程に入る）。"""
+        hedge = _COMPARE_SRC.index("断定せず推量形で書く")
+        assert _COMPARE_SRC.index("- 重なり（overlaps）は、") > hedge
+
+    def test_overlap_quotes_are_checked_verbatim_and_labels_are_closed_world(self):
+        """重なりも differences と同じ逐語ガード。部品名はリスト外なら空へ（P4）。"""
+        validator = extract_function_source(_COMPARE_SRC, "validate_items")
+        assert "for overlap in entry.overlaps or []:" in validator
+        # 逐語検査は differences と同一規則（2箇所とも同じ式）。
+        assert validator.count("normalize_for_quote_match(quote) not in haystack") == 2
+        # リスト外の名前は空文字へ落とす（項目は drop しない）。
+        assert '"component_label": label_by_key.get(label.casefold(), "")' in validator
 
     def test_caveat_is_a_server_side_constant(self):
         from core.paper_discovery.compare import CAVEAT
@@ -152,6 +172,12 @@ class TestCompareGuards:
         run_compare = extract_function_source(_COMPARE_SRC, "run_compare")
         assert "arxiv_client.fetch_by_ids" in run_compare
         assert "summary" not in extract_function_source(_ROUTE_SRC, "radar_compare")
+
+    def test_overlaps_do_not_add_an_llm_call(self):
+        """重なりは**同一コールの出力拡張**（1リクエスト = 1コールを崩さない）。"""
+        # 生成の呼び出し口は _call_llm 1本（import 行 + 呼び出し1回）。
+        assert _COMPARE_SRC.count("generate_text_with_structured_output(") == 1
+        assert extract_function_source(_COMPARE_SRC, "run_compare").count("_call_llm(") == 1
 
     def test_compare_results_are_not_persisted(self):
         assert_source_forbids(

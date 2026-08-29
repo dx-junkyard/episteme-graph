@@ -13,6 +13,8 @@
 4. U層計測（``usage_context("discovery:ranking")`` 下で1バッチだけ呼ぶ）
 5. API: ``order`` 不正値は 422 / 既定 ``date`` は Phase 1〜2 と完全に同一（``ranking``
    キーを付けない）/ ``relevance`` は並べ替え済み候補 + ``ranking`` を返す
+6. ``anchor_context``（VA層 §8）— ``rank_candidates`` / ``band_candidates`` の両方で
+   ``landing`` / ``new_facets`` が追加コールなしに付き、省略時は完全後方互換
 """
 
 from __future__ import annotations
@@ -474,6 +476,138 @@ class TestLandingPreview:
         assert result["available"] is False
         assert "landing" not in result["ordered"][0]
         assert calls == []
+
+
+class TestBandingAnchorContext:
+    """帯分け（論文レーダー）側の着地予測・新しい面（VA層 §8 / PR2）。
+
+    ``band_candidates`` は ``rank_candidates`` と同じ ``anchor_context`` を受け、
+    **同じ1バッチの候補ベクトル**から ``landing`` / ``new_facets`` を導出する
+    （追加 embedding ゼロ）。``anchor_context`` 省略時は完全後方互換。
+    """
+
+    _CANDIDATES = [{"arxiv_id": "2608.00001", "title": "a", "summary": "x"}]
+
+    def _context(self, anchors, *, version="2026.1", exclude=None):
+        context = {"anchors": anchors, "skeleton_version": version}
+        if exclude is not None:
+            context["exclude_node_ids"] = exclude
+        return context
+
+    def test_absent_without_anchor_context(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+        result = ranking.band_candidates(
+            FakeSession(), self._CANDIDATES, seed_vector=[1.0, 0.0]
+        )
+        assert result["available"] is True
+        assert "landing" not in result["ordered"][0]
+        assert "new_facets" not in result["ordered"][0]
+
+    def test_landing_is_attached_with_the_skeleton_version(self, monkeypatch):
+        calls: list[dict] = []
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]], recorder=calls)
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0], label="CMB", region_label="宇宙論")]
+
+        result = ranking.band_candidates(
+            FakeSession(),
+            self._CANDIDATES,
+            seed_vector=[1.0, 0.0],
+            anchor_context=self._context(anchors),
+        )
+
+        landing = result["ordered"][0]["landing"]
+        assert set(landing) == {
+            "node_label", "region_label", "nearness_label", "skeleton_version",
+        }
+        assert landing["node_label"] == "CMB"
+        assert landing["skeleton_version"] == "2026.1"
+        assert not [v for v in landing.values() if isinstance(v, (int, float))]
+        # 帯分けの1バッチのまま（着地予測でコールを増やさない）。
+        assert len(calls) == 1
+
+    def test_new_facets_exclude_the_seed_placements(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+        anchors = [
+            _FakeAnchor("cmb", [1.0, 0.0], label="CMB"),
+            _FakeAnchor("bao", [0.99, 0.01], label="BAO"),
+        ]
+        result = ranking.band_candidates(
+            FakeSession(),
+            self._CANDIDATES,
+            seed_vector=[1.0, 0.0],
+            anchor_context=self._context(anchors, exclude={"cmb"}),
+        )
+        assert result["ordered"][0]["new_facets"] == ["BAO"]
+
+    def test_new_facets_absent_without_the_exclude_key(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0], label="CMB")]
+        result = ranking.band_candidates(
+            FakeSession(),
+            self._CANDIDATES,
+            seed_vector=[1.0, 0.0],
+            anchor_context=self._context(anchors),
+        )
+        assert "new_facets" not in result["ordered"][0]
+
+    def test_all_anchors_placed_yields_no_key(self, monkeypatch):
+        """空リストになったらキー自体を付けない（VA4）。"""
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0], label="CMB")]
+        result = ranking.band_candidates(
+            FakeSession(),
+            self._CANDIDATES,
+            seed_vector=[1.0, 0.0],
+            anchor_context=self._context(anchors, exclude={"cmb"}),
+        )
+        assert "new_facets" not in result["ordered"][0]
+        # 着地予測は独立に付く（片方が空でももう片方を巻き添えにしない）。
+        assert result["ordered"][0]["landing"]["node_label"] == "CMB"
+
+    def test_unmeasured_candidates_get_nothing(self, monkeypatch):
+        """PR2: 測れなかった候補に地図の注釈を付けない。"""
+        _stub_embeddings(monkeypatch, [[0.0, 0.0]])
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0], label="CMB")]
+        result = ranking.band_candidates(
+            FakeSession(),
+            self._CANDIDATES,
+            seed_vector=[1.0, 0.0],
+            anchor_context=self._context(anchors, exclude=set()),
+        )
+        candidate = result["ordered"][0]
+        assert "distance_label" not in candidate
+        assert "landing" not in candidate and "new_facets" not in candidate
+
+    def test_empty_anchors_or_version_are_ignored(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0], [1.0, 0.0]])
+        anchors = [_FakeAnchor("cmb", [1.0, 0.0])]
+        assert "landing" not in ranking.band_candidates(
+            FakeSession(), self._CANDIDATES, seed_vector=[1.0, 0.0],
+            anchor_context=self._context([], exclude=set()),
+        )["ordered"][0]
+        assert "landing" not in ranking.band_candidates(
+            FakeSession(), self._CANDIDATES, seed_vector=[1.0, 0.0],
+            anchor_context=self._context(anchors, version="", exclude=set()),
+        )["ordered"][0]
+
+    def test_vector_layer_failure_does_not_break_the_banding(self, monkeypatch):
+        _stub_embeddings(monkeypatch, [[1.0, 0.0]])
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("vector layer down")
+
+        monkeypatch.setattr("core.atlas_vectors.query.new_facet_labels", _boom)
+        result = ranking.band_candidates(
+            FakeSession(),
+            self._CANDIDATES,
+            seed_vector=[1.0, 0.0],
+            anchor_context=self._context(
+                [_FakeAnchor("cmb", [1.0, 0.0])], exclude=set()
+            ),
+        )
+        assert result["available"] is True
+        assert result["ordered"][0]["distance_label"]
+        assert "new_facets" not in result["ordered"][0]
 
 
 # ---------------------------------------------------------------------------

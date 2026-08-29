@@ -277,10 +277,17 @@ def _embed(texts: list[str]) -> list[list[float]]:
 def _attach_landing(payload: dict, vector: Optional[Sequence[float]], anchor_context: Any) -> None:
     """候補に「取り込むと地図のどこに落ちそうか」の事実を足す（VA層 §8）。
 
-    ``anchor_context`` は ``{"anchors": [AnchorVector, ...], "skeleton_version": str}``。
-    **追加の embedding 呼び出しはゼロ**（並べ替えで既に作った候補ベクトルを流用する）。
-    骨格版は呼び出し側が知っている値をそのまま刻む（VA8 閉世界の正直さ）。
-    下位帯・アンカー不在・未測定では ``landing`` キー自体を付けない（VA4）。
+    ``anchor_context`` は ``{"anchors": [AnchorVector, ...], "skeleton_version": str}``
+    に、optional で ``exclude_node_ids``（起点論文が既に配置されているノードの集合）を
+    足したもの。**追加の embedding 呼び出しはゼロ**（並べ替え・帯分けで既に作った
+    候補ベクトルを流用する）。骨格版は呼び出し側が知っている値をそのまま刻む
+    （VA8 閉世界の正直さ）。
+
+    付くキーは2つで、それぞれ独立に足りなければ**キー自体を付けない**（VA4）:
+
+    - ``landing``: 最も近いアンカー（下位帯・アンカー不在・未測定では付かない）。
+    - ``new_facets``: ``exclude_node_ids`` が渡されたときだけ導出する「候補は近いのに
+      起点論文が配置されていないアンカー」のラベル（最上位帯のみ）。
     """
     if not anchor_context or not vector:
         return
@@ -289,20 +296,29 @@ def _attach_landing(payload: dict, vector: Optional[Sequence[float]], anchor_con
     if not anchors or not version:
         return
     try:
-        from core.atlas_vectors.query import landing_for_vector  # 遅延 import
+        from core.atlas_vectors.query import (  # 遅延 import
+            landing_for_vector,
+            new_facet_labels,
+        )
 
         landing = landing_for_vector(vector, anchors)
+        facets: list[str] = []
+        if "exclude_node_ids" in (anchor_context or {}):
+            facets = new_facet_labels(
+                vector, anchors, (anchor_context or {}).get("exclude_node_ids") or ()
+            )
     except Exception:  # noqa: BLE001 — 着地予測が出ないだけ（検索は成立させる）
         logger.warning("landing prediction failed (non-fatal)", exc_info=True)
         return
-    if not landing:
-        return
-    payload["landing"] = {
-        "node_label": landing.get("node_label") or "",
-        "region_label": landing.get("region_label") or "",
-        "nearness_label": landing.get("nearness_label") or "",
-        "skeleton_version": version,
-    }
+    if landing:
+        payload["landing"] = {
+            "node_label": landing.get("node_label") or "",
+            "region_label": landing.get("region_label") or "",
+            "nearness_label": landing.get("nearness_label") or "",
+            "skeleton_version": version,
+        }
+    if facets:
+        payload["new_facets"] = list(facets)
 
 
 def rank_candidates(
@@ -400,6 +416,7 @@ def band_candidates(
     seed_vector: Optional[Sequence[float]] = None,
     seed_text: str = "",
     daily_limit: Optional[int] = None,
+    anchor_context: Optional[dict] = None,
 ) -> dict:
     """候補を seed 教材からの距離帯に分ける（PR2 — 生スコアは返さない）。
 
@@ -427,6 +444,11 @@ def band_candidates(
         seed_vector: seed 教材の重心。``None`` なら ``seed_text`` を使う。
         seed_text: seed 論文の要旨（重心が作れないときのフォールバック素材）。
         daily_limit: 日次上限（省略時は ``DISCOVERY_RANKING_MAX_CALLS_PER_DAY``）。
+        anchor_context: 着地予測・「新しい面」（VA層 §8）の材料
+            ``{"anchors": [AnchorVector, ...], "skeleton_version": str,
+            "exclude_node_ids"?: set[str]}``。省略時は従来どおり ``landing`` /
+            ``new_facets`` キーを付けない（完全後方互換）。:func:`rank_candidates` と
+            同じく**候補の埋め込みは帯分けの1バッチを流用する**（追加コールはゼロ）。
 
     Returns:
         ``{"available": bool, "ordered": [candidate, ...], "note"?: str}``。
@@ -480,11 +502,15 @@ def band_candidates(
 
     scored: list[tuple[int, Optional[float], dict]] = []
     for index, (item, vector) in enumerate(zip(items, vectors)):
-        similarity = cosine_similarity(seed, _parse_vector(vector) or [])
+        parsed = _parse_vector(vector)
+        similarity = cosine_similarity(seed, parsed or [])
         payload = dict(item)
         if similarity is not None:
             # 測れたものにだけラベルを付ける（未測定はキーごと省略 — PR2）。
             payload["distance_label"] = RADAR_DISTANCE_SCALE.label_for(similarity)
+            # 着地予測・新しい面（VA層 §8）も measured な候補にだけ足す。
+            # 同じベクトルの使い回しなので追加コールは無い。
+            _attach_landing(payload, parsed, anchor_context)
         scored.append((index, similarity, payload))
 
     # 未測定（None）は最後尾へ。同点は入力順（= 新着順）を保つ安定ソート。

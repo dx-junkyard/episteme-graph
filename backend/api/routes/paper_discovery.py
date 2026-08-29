@@ -1033,6 +1033,11 @@ def radar_search(
                 keyphrases=body.keyphrases,
                 start=start,
                 max_results=max_results,
+                # 着地予測・新しい面（VA層 §8）の材料は**注入で渡す**
+                # （core/paper_discovery は core.atlas_vectors に触れない境界）。
+                anchor_context_resolver=lambda domain_key: _anchor_context(
+                    session, domain_key
+                ),
             )
         except LookupError as exc:
             raise HTTPException(
@@ -1049,6 +1054,9 @@ def radar_search(
     # 閲覧専用の教員に登録導線が出ないように — 強制は POST 側のゲート）。
     if isinstance(result, dict) and isinstance(result.get("seed"), dict):
         result["seed"] = _with_can_register(result["seed"], access, current_user)
+    # 地図と突き合わせられたかどうかは必ず返す（キーの不在で黙らせない — VA8）。
+    if isinstance(result, dict):
+        result.setdefault("relation_context", {"available": False})
     return result
 
 

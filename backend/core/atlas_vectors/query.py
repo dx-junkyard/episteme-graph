@@ -23,7 +23,11 @@ from __future__ import annotations
 import math
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
-from core.label_vocab import ANCHOR_NEARNESS_SCALE, ANCHOR_NEARNESS_THRESHOLD_MID
+from core.label_vocab import (
+    ANCHOR_NEARNESS_SCALE,
+    ANCHOR_NEARNESS_THRESHOLD_MID,
+    ANCHOR_NEARNESS_THRESHOLD_NEAR,
+)
 
 #: 着地予測・近傍注記に載せる region / concept の種別語彙（骨格側の値と一致）。
 _KIND_REGION = "region"
@@ -104,6 +108,60 @@ def landing_for_vector(
         "region_label": getattr(anchor, "region_label", "") or "",
         "nearness_label": ANCHOR_NEARNESS_SCALE.label_for(similarity),
     }
+
+
+def new_facet_labels(
+    vector: Optional[Sequence[float]],
+    anchors: Iterable[Any],
+    exclude_node_ids: Optional[Iterable[str]] = None,
+    *,
+    limit: int = 2,
+) -> list[str]:
+    """候補は近いのに ``exclude_node_ids`` に無いアンカーのラベル（生スコアなし — VA2）。
+
+    論文レーダー（``paper_radar_design.md``）の「新しい面」チップの材料。
+    ``exclude_node_ids`` には**起点論文が既に配置されているノード**を渡す想定で、
+    そこに現れないアンカーだけが「この候補が持ち込みそうな面」として残る。
+
+    規律:
+
+    - **最上位帯のみ**（:data:`ANCHOR_NEARNESS_THRESHOLD_NEAR` 以上）。中位帯まで
+      拾うと「なんとなく関連」が新しい面として並ぶ（:func:`landing_for_vector` が
+      最下帯を切るのと同じ思想の、さらに慎重な足切り — 設計書 §9）。
+    - **未測定（cosine が ``None``）のアンカーは含めない**（:func:`nearest_anchors`
+      の規律をそのまま継承。「測れなかった」を「近い」に化けさせない — PR2）。
+    - 返すのは**ラベル文字列だけ**（cosine の生値・件数・node_id を外へ出さない — VA2）。
+      ラベルが空のアンカーは ``node_id`` で代替し、重複ラベルは1つに畳む。
+    - ベクトル不在・アンカー不在・``limit <= 0`` は空リスト（呼び出し側はキー自体を
+      付けない = VA4）。
+
+    Returns:
+        近い順・最大 ``limit`` 件のラベル。
+    """
+    if not vector or int(limit or 0) <= 0:
+        return []
+    items = list(anchors or ())
+    if not items:
+        return []
+    excluded = {str(node_id or "") for node_id in (exclude_node_ids or ())}
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for anchor, similarity in nearest_anchors(vector, items, limit=len(items)):
+        if similarity < ANCHOR_NEARNESS_THRESHOLD_NEAR:
+            # 近い順に並んでいるので、ここから先は全て帯の外。
+            break
+        node_id = str(getattr(anchor, "node_id", "") or "")
+        if node_id in excluded:
+            continue
+        label = str(getattr(anchor, "label", "") or node_id).strip()
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        out.append(label)
+        if len(out) >= int(limit):
+            break
+    return out
 
 
 def prefilter_domains(
@@ -201,5 +259,6 @@ __all__ = [
     "cosine_similarity",
     "landing_for_vector",
     "nearest_anchors",
+    "new_facet_labels",
     "prefilter_domains",
 ]

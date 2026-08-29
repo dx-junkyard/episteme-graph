@@ -18,6 +18,8 @@
   5. DTO に cosine 生値・確度の数値が現れない（PR2 / PD4）
   6. 副作用ゼロ（購読・見送りへ書かない・監査を記帳しない — PR5。例外は
      ``/radar/provenance`` = 教員の明示操作 + 監査記帳）
+  6b. ``relation_context`` が**常に**返ること（アンカー不在は ``available:false``）と、
+     アンカー文脈が**注入 resolver 経由**で core へ渡ること（VA層 §8 / VA4 / VA8）
   7. arXiv 出所の後付け登録の3段階（推定 → タイトル一致で自動記帳 → 不一致は
      ``confirm`` の明示確定）と、**edit 権限**の 403 / 権限フラグ ``can_register``
      の注入
@@ -138,6 +140,18 @@ def env(monkeypatch):
                     "arxiv_id": "2608.00002",
                     "title": "候補",
                     "common_ground": "どちらも状態方程式を扱っているようです。",
+                    "overlaps": [
+                        {
+                            "component_label": "状態方程式",
+                            "statement": "同じ量を別の文脈で扱っていそうです。",
+                            "evidence_quote": "the equation of state",
+                        },
+                        {
+                            "component_label": "",
+                            "statement": "前提の置き方も重なっていそうです。",
+                            "evidence_quote": "a Bayesian approach",
+                        },
+                    ],
                     "differences": [
                         {
                             "aspect": "method",
@@ -450,6 +464,100 @@ class TestRadarSearch:
 
 
 # ---------------------------------------------------------------------------
+# 4b. 地図との関係（着地予測・新しい面の配線 — VA層 §8 / VA2 / VA8）
+# ---------------------------------------------------------------------------
+
+
+class TestRadarRelationContext:
+    def _post(self, env):
+        return env["client"].post(
+            _SEARCH_PATH,
+            json={"document_ref": "doc-1", "distance": "near"},
+            headers=_auth(env, "teacher"),
+        )
+
+    def test_relation_context_is_always_present(self, env):
+        """アンカーが読めない構成でも、キーの不在で黙らせない（VA8）。"""
+        body = self._post(env).json()
+        assert body["relation_context"] == {"available": False}
+
+    def test_available_true_carries_only_the_skeleton_version(self, env):
+        env["search_result"] = {
+            "seed": dict(_SEED),
+            "query": "(cat:astro-ph.CO)",
+            "distance": "near",
+            "total": 1,
+            "start": 0,
+            "candidates": [
+                {
+                    "arxiv_id": "2608.00002",
+                    "title": "候補",
+                    "status": "new",
+                    "matched_keyphrases": [],
+                    "distance_label": "近い",
+                    "landing": {
+                        "node_label": "CMB",
+                        "region_label": "宇宙論",
+                        "nearness_label": "かなり近い",
+                        "skeleton_version": "2026.1",
+                    },
+                    "new_facets": ["BAO"],
+                    "overlap_components": ["dark energy"],
+                }
+            ],
+            "banding": {"available": True},
+            "relation_context": {"available": True, "skeleton_version": "2026.1"},
+            "closed_world_note": env["routes"].pd_search.CLOSED_WORLD_NOTE,
+        }
+        body = self._post(env).json()
+        assert body["relation_context"] == {"available": True, "skeleton_version": "2026.1"}
+        candidate = body["candidates"][0]
+        # VA2: 生スコア・件数を出さない（段階ラベルとラベル文字列だけ）。
+        assert set(candidate["landing"]) == {
+            "node_label", "region_label", "nearness_label", "skeleton_version",
+        }
+        assert candidate["new_facets"] == ["BAO"]
+        assert candidate["overlap_components"] == ["dark energy"]
+        assert not [v for v in candidate.values() if isinstance(v, (int, float))]
+
+    def test_anchor_resolver_is_injected_and_degrades_to_none(self, env, monkeypatch):
+        """core は ``core.atlas_vectors`` を import せず、resolver 注入で受け取る。"""
+        self._post(env)
+        _document_id, kwargs = env["search_calls"][0]
+        resolver = kwargs["anchor_context_resolver"]
+        assert callable(resolver)
+
+        # アンカーが読めない（骨格なし・DB 不達）ときは None へ静かに縮退（VA4）。
+        import core.atlas_vectors.builder as builder
+
+        monkeypatch.setattr(
+            builder, "anchors_with_labels",
+            lambda session, domain_key: ([], ""),
+        )
+        assert resolver("astrophysics") is None
+
+        monkeypatch.setattr(
+            builder, "anchors_with_labels",
+            lambda session, domain_key: (_ for _ in ()).throw(RuntimeError("db down")),
+        )
+        assert resolver("astrophysics") is None
+
+    def test_anchor_resolver_returns_the_frozen_anchors(self, env, monkeypatch):
+        import core.atlas_vectors.builder as builder
+
+        anchors = [object()]
+        monkeypatch.setattr(
+            builder, "anchors_with_labels",
+            lambda session, domain_key: (anchors, "2026.1"),
+        )
+        self._post(env)
+        resolver = env["search_calls"][0][1]["anchor_context_resolver"]
+        assert resolver("astrophysics") == {
+            "anchors": anchors, "skeleton_version": "2026.1"
+        }
+
+
+# ---------------------------------------------------------------------------
 # 5. 比較分析
 # ---------------------------------------------------------------------------
 
@@ -471,6 +579,18 @@ class TestRadarCompare:
         assert not [v for v in item.values() if isinstance(v, float)]
         for difference in item["differences"]:
             assert set(difference) == {"aspect", "statement", "evidence_quote"}
+        for overlap in item["overlaps"]:
+            assert set(overlap) == {"component_label", "statement", "evidence_quote"}
+
+    def test_overlaps_pass_through_untouched(self, env):
+        """route は素通し（重なりの2区画はフロントが描く — サーバは加工しない）。"""
+        res = self._post(env, {"document_ref": "doc-1", "arxiv_ids": ["2608.00002"]})
+        assert res.status_code == 200
+        item = res.json()["items"][0]
+        assert [o["component_label"] for o in item["overlaps"]] == ["状態方程式", ""]
+        assert item["overlaps"][0]["evidence_quote"] == "the equation of state"
+        # 後方互換キーもそのまま残る（overlaps 空の旧レスポンスへ縮退できる）。
+        assert item["common_ground"] == "どちらも状態方程式を扱っているようです。"
 
     def test_empty_selection_is_422(self, env):
         res = self._post(env, {"document_ref": "doc-1", "arxiv_ids": []})

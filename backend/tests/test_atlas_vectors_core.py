@@ -6,7 +6,8 @@
 
 1. プロトタイプ合成テキストの決定論（別名は normalized 昇順・引用は200字で切る）
 2. ``source_hash`` の安定性
-3. cosine / nearest / landing（MID 未満は ``None``・ラベルは正本スケールから）
+3. cosine / nearest / landing（MID 未満は ``None``・ラベルは正本スケールから）と
+   new_facet_labels（最上位帯のみ・配置済みノードを除く・ラベル文字列だけ）
 4. 前段絞り込み（region を落とさない・ベクトルなし concept を残す・入力非変更）
 5. 近傍注記の fail-soft とキャッシュ
 6. builder の skip 理由（骨格なし・日次上限）
@@ -276,6 +277,74 @@ class TestLandingForVector:
 
     def test_no_anchors_returns_none(self):
         assert query.landing_for_vector([1.0, 0.0], []) is None
+
+
+class TestNewFacetLabels:
+    """「新しい面」= 候補は近いのに起点論文が配置されていないアンカー（§8 / PR2）。"""
+
+    @staticmethod
+    def _anchor_at(similarity: float, node_id="n1", label=""):
+        """``[1,0]`` との cosine が ``similarity`` になるアンカーを作る。"""
+        import math
+
+        return _anchor(
+            node_id,
+            [similarity, math.sqrt(max(0.0, 1.0 - similarity * similarity))],
+            label=label or node_id,
+        )
+
+    def test_only_the_top_band_counts(self):
+        """最上位帯（NEAR 閾値以上）だけ。中位帯は「新しい面」と言わない。"""
+        near = self._anchor_at(ANCHOR_NEARNESS_THRESHOLD_NEAR + 0.05, "near", "近いノード")
+        mid = self._anchor_at(ANCHOR_NEARNESS_THRESHOLD_NEAR - 0.05, "mid", "中位ノード")
+        assert query.new_facet_labels([1.0, 0.0], [near, mid], set()) == ["近いノード"]
+
+    def test_excluded_nodes_are_dropped(self):
+        a = self._anchor_at(0.99, "a", "アンカーA")
+        b = self._anchor_at(0.98, "b", "アンカーB")
+        assert query.new_facet_labels([1.0, 0.0], [a, b], {"a"}) == ["アンカーB"]
+        assert query.new_facet_labels([1.0, 0.0], [a, b], {"a", "b"}) == []
+
+    def test_orders_by_nearness_and_respects_the_limit(self):
+        anchors = [
+            self._anchor_at(0.90, "c", "C"),
+            self._anchor_at(0.99, "a", "A"),
+            self._anchor_at(0.95, "b", "B"),
+        ]
+        assert query.new_facet_labels([1.0, 0.0], anchors, set()) == ["A", "B"]
+        assert query.new_facet_labels([1.0, 0.0], anchors, set(), limit=1) == ["A"]
+        assert query.new_facet_labels([1.0, 0.0], anchors, set(), limit=0) == []
+
+    def test_unmeasurable_anchors_are_not_included(self):
+        """PR2: 測れなかったアンカーを「近い」に化けさせない。"""
+        anchors = [_anchor("no_vec", None, label="測れないノード"),
+                   self._anchor_at(0.99, "ok", "測れたノード")]
+        assert query.new_facet_labels([1.0, 0.0], anchors, set()) == ["測れたノード"]
+
+    def test_duplicate_labels_are_folded(self):
+        anchors = [self._anchor_at(0.99, "a", "同じ名前"),
+                   self._anchor_at(0.98, "b", "同じ名前")]
+        assert query.new_facet_labels([1.0, 0.0], anchors, set()) == ["同じ名前"]
+
+    def test_falls_back_to_the_node_id_when_the_label_is_empty(self):
+        anchor = store.AnchorVector(
+            node_id="n1", node_kind="concept", label="", region_label="",
+            vector=[1.0, 0.0],
+        )
+        assert query.new_facet_labels([1.0, 0.0], [anchor], set()) == ["n1"]
+
+    def test_empty_inputs_are_empty(self):
+        assert query.new_facet_labels(None, [self._anchor_at(0.99)], set()) == []
+        assert query.new_facet_labels([1.0, 0.0], [], set()) == []
+        assert query.new_facet_labels([1.0, 0.0], [self._anchor_at(0.99)], None) == ["n1"]
+
+    def test_returns_only_label_strings(self):
+        """VA2: 生スコア・件数・node_id を外へ出さない（文字列のリストだけ）。"""
+        got = query.new_facet_labels(
+            [1.0, 0.0], [self._anchor_at(0.99, "n1", "ノード1")], set()
+        )
+        assert got == ["ノード1"]
+        assert all(isinstance(value, str) for value in got)
 
 
 # ---------------------------------------------------------------------------

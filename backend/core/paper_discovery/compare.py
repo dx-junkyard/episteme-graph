@@ -3,14 +3,18 @@
 設計正本: ``docs/features/paper_radar_design.md`` §5.3（不変条項 PR4 / PR7）。
 
 seed 論文の要旨・中心命題と、選ばれた候補のアブストラクトを **1リクエスト = 1コール**で
-突き合わせ、「共通点 / 違い」を候補ごとの短い仮説文で返す。
+突き合わせ、「重なり / 違い」を候補ごとの短い仮説文で返す。重なりは可能なら
+**起点論文の部品（承認済み theory_components のラベル）に紐づけて**返し、どの部分が
+重なっていそうなのかを読めるようにする（LLM コール数は増やさない — 同一コールの出力拡張）。
 
 このモジュールが守るもの:
 
 - **PR4 比較文は AI の推定・非保存・出所明示**: 結果はレスポンス限りで DB に書かない。
-  各違いには候補アブストラクトからの **verbatim** ``evidence_quote`` を必須とし、
-  逐語で一致しないものは**その違いだけ** drop して ``notes`` に正直に積む
+  各違い・各重なりには候補アブストラクトからの **verbatim** ``evidence_quote`` を必須とし、
+  逐語で一致しないものは**その1件だけ** drop して ``notes`` に正直に積む
   （discuss_opening / figure_suggest と同じ捏造ガード）。
+  重なりの ``component_label`` も**供給した部品リストの閉世界**で照合し、リスト外の
+  名前は**空文字へ落として statement は残す**（P4 情報を落とさない — 項目ごと捨てない）。
   注意書き :data:`CAVEAT` は**サーバ側の固定文**で、LLM 出力に依存しない。
 - **PR6 候補の素材はサーバが取り直す**: 要旨はクライアントから受け取らず
   :func:`arxiv_client.fetch_by_ids` で取得する（verbatim 検査の土台を本物にする）。
@@ -60,6 +64,10 @@ ASPECT_UNKNOWN = "unknown"
 #: プロンプトへ載せる本文の上限（膨張の防波堤）。
 MAX_ABSTRACT_CHARS = 4000
 MAX_SEED_FIELD_CHARS = 1200
+
+#: 重なりに紐づけられる部品ラベルの供給元（``radar.seed_keyphrase_candidates`` の語彙。
+#: 承認済み theory_components だけが ``component`` で来る — 語彙を増やさない）。
+COMPONENT_LABEL_SOURCE = "component"
 
 #: 事実文（数値を含めない）。
 NOTE_QUOTE_NOT_VERBATIM = (
@@ -147,6 +155,30 @@ def build_seed_material(seed: dict, *, artifacts: Any = None) -> dict[str, str]:
     return material
 
 
+def seed_component_labels(seed: dict) -> list[str]:
+    """seed の部品ラベル（承認済み theory_components）を閉世界リストとして取り出す。
+
+    供給元は :func:`radar.seed_keyphrase_candidates`（``source="component"``・
+    ``MAX_SEED_KEYPHRASES`` 件で既に打ち止め）。ここでは語彙の絞り込みと重複除去だけを
+    行い、**新しい問い合わせをしない**（比較は 1 arXiv + 1 LLM コールのまま）。
+    リストが空でも比較そのものは従来どおり実行する（重なりに部品参照が付かないだけ）。
+    """
+    labels: list[str] = []
+    seen: set[str] = set()
+    for candidate in seed.get("keyphrase_candidates") or []:
+        if not isinstance(candidate, dict):
+            continue
+        if _clean(candidate.get("source")) != COMPONENT_LABEL_SOURCE:
+            continue
+        text = _clean(candidate.get("text"))
+        key = text.casefold()
+        if not text or key in seen:
+            continue
+        seen.add(key)
+        labels.append(text)
+    return labels
+
+
 def has_seed_material(material: dict[str, str]) -> bool:
     """比較の素材が1つでもあるか（タイトルだけでは比較にならないので数えない）。"""
     return any(
@@ -155,8 +187,16 @@ def has_seed_material(material: dict[str, str]) -> bool:
     )
 
 
-def build_prompt(material: dict[str, str], candidates: list[ArxivEntry]) -> str:
-    """比較分析のプロンプト（制約文はガードレールが原文 grep で固定する — PR4）。"""
+def build_prompt(
+    material: dict[str, str],
+    candidates: list[ArxivEntry],
+    component_labels: Optional[list[str]] = None,
+) -> str:
+    """比較分析のプロンプト（制約文はガードレールが原文 grep で固定する — PR4）。
+
+    ``component_labels`` は起点論文の部品リスト（閉世界）。空・未指定なら見出しごと
+    省略し、重なりの ``component_label`` は空で返させる（存在しない部品名を作らせない）。
+    """
     lines: list[str] = [
         "あなたは、ある論文（起点論文）と複数の候補論文を読み比べる研究者の補助をしています。",
         "起点論文と各候補論文について、共通点と違いを1件ずつ短くまとめてください。",
@@ -168,6 +208,9 @@ def build_prompt(material: dict[str, str], candidates: list[ArxivEntry]) -> str:
         "- 各違いには、その候補のアブストラクトからの逐語引用を evidence_quote として付ける",
         "  （原文の文字列をそのままコピーする。要約・翻訳・言い換えをしない）",
         "- 違いの観点 aspect は次のいずれか: " + " / ".join(COMPARE_ASPECTS),
+        "- 重なり（overlaps）は、起点論文と同じ内容を別の表現・文脈で扱っていそうな箇所だけを挙げる（最大3件）",
+        "- overlaps の component_label は、下の部品リストにある名前をそのまま使う（リストに無い重なりは component_label を空にする）",
+        "- 各重なりにも、その候補のアブストラクトからの逐語引用を evidence_quote として付ける",
         "- 候補ごとに arxiv_id を必ずそのまま返す",
         "",
         "【起点論文】",
@@ -182,6 +225,13 @@ def build_prompt(material: dict[str, str], candidates: list[ArxivEntry]) -> str:
         value = material.get(key) or ""
         if value:
             lines.append(f"{label}: {value}")
+
+    labels = [label for label in (component_labels or []) if label]
+    if labels:
+        lines.append("")
+        lines.append("【起点論文の部品リスト】")
+        for label in labels:
+            lines.append(f"- {label}")
 
     lines.append("")
     lines.append("【候補論文】")
@@ -205,9 +255,21 @@ class _DifferenceOut(BaseModel):
     evidence_quote: str = ""
 
 
+class _OverlapOut(BaseModel):
+    """重なり1件（strict schema のため全フィールド非 nullable + 空既定）。
+
+    ``component_label`` は空でよい（部品リストに載らない一般的な重なり）。
+    """
+
+    component_label: str = ""
+    statement: str = ""
+    evidence_quote: str = ""
+
+
 class _ItemOut(BaseModel):
     arxiv_id: str = ""
     common_ground: str = ""
+    overlaps: list[_OverlapOut] = Field(default_factory=list)
     differences: list[_DifferenceOut] = Field(default_factory=list)
 
 
@@ -223,17 +285,24 @@ class _CompareOutput(BaseModel):
 def validate_items(
     parsed: _CompareOutput,
     candidates: list[ArxivEntry],
+    component_labels: Optional[list[str]] = None,
 ) -> tuple[list[dict], list[str]]:
     """LLM 出力を検証し ``(items, notes)`` を返す（純粋関数）。
 
-    - ``evidence_quote`` が**当該候補の要旨の逐語部分文字列**でない違いは drop
+    - ``evidence_quote`` が**当該候補の要旨の逐語部分文字列**でない違い・重なりは drop
       （候補ごと全滅しても ``common_ground`` は残す — 情報を落とさない）。
     - ``aspect`` の語彙外は :data:`ASPECT_UNKNOWN` へ落とす（drop しない）。
+    - 重なりの ``component_label`` が供給リスト外なら**空文字へ落として statement は残す**
+      （存在しない部品名は出さないが、重なりの指摘そのものは捨てない — P4）。
     - 候補の並び順は**リクエストの順**（LLM の返却順に依存させない）。
     """
     by_id = {entry.arxiv_id: entry for entry in candidates}
     haystacks = {
         entry.arxiv_id: normalize_for_quote_match(entry.summary) for entry in candidates
+    }
+    # 部品名の照合は大小文字を無視し、**供給した表記**をそのまま返す（表記ゆれを作らない）。
+    label_by_key = {
+        label.casefold(): label for label in (component_labels or []) if label
     }
 
     parsed_by_id: dict[str, _ItemOut] = {}
@@ -251,6 +320,26 @@ def validate_items(
             continue
 
         haystack = haystacks.get(candidate.arxiv_id) or ""
+        overlaps: list[dict] = []
+        for overlap in entry.overlaps or []:
+            statement = _clean(overlap.statement)
+            quote = str(overlap.evidence_quote or "").strip()
+            if not statement or not quote:
+                dropped += 1
+                continue
+            if not haystack or normalize_for_quote_match(quote) not in haystack:
+                dropped += 1
+                continue
+            label = _clean(overlap.component_label)
+            overlaps.append(
+                {
+                    # リスト外の名前は空へ（statement は保持する）。
+                    "component_label": label_by_key.get(label.casefold(), ""),
+                    "statement": statement,
+                    "evidence_quote": quote,
+                }
+            )
+
         differences: list[dict] = []
         for difference in entry.differences or []:
             statement = _clean(difference.statement)
@@ -275,6 +364,7 @@ def validate_items(
                 "arxiv_id": candidate.arxiv_id,
                 "title": _clean(candidate.title),
                 "common_ground": _clean(entry.common_ground),
+                "overlaps": overlaps,
                 "differences": differences,
                 "caveat": CAVEAT,
             }
@@ -327,8 +417,10 @@ def run_compare(
         model: 明示指定（省略時は M層の解決）。
 
     Returns:
-        ``{"items": [{arxiv_id, title, common_ground, differences, caveat}],
+        ``{"items": [{arxiv_id, title, common_ground, overlaps, differences, caveat}],
         "skipped": [{arxiv_id, detail}], "notes": [事実文, ...]}``。
+        ``overlaps`` は ``{component_label, statement, evidence_quote}`` の並び
+        （``component_label`` は空文字あり得る）。``common_ground`` は後方互換のため維持する。
 
     Raises:
         LookupError: document が存在しない。
@@ -384,7 +476,9 @@ def run_compare(
             "この教材には、比較に使える要旨・解析結果がありません。"
         )
 
-    content = build_prompt(material, candidates)
+    # 部品リストは seed 解決の結果に既に入っている（追加クエリ・追加コールなし）。
+    component_labels = seed_component_labels(seed)
+    content = build_prompt(material, candidates, component_labels)
     resolved_model = model or resolve_model()
 
     with usage_context(
@@ -401,7 +495,7 @@ def run_compare(
             )
             raise CompareUnavailableError("比較分析を実行できませんでした。") from exc
 
-    items, notes = validate_items(parsed, candidates)
+    items, notes = validate_items(parsed, candidates, component_labels)
     return {"items": items, "skipped": skipped, "notes": notes}
 
 
@@ -409,6 +503,7 @@ __all__ = [
     "ASPECT_UNKNOWN",
     "CAVEAT",
     "COMPARE_ASPECTS",
+    "COMPONENT_LABEL_SOURCE",
     "CompareError",
     "CompareUnavailableError",
     "FEATURE_RADAR_COMPARE",
@@ -420,5 +515,6 @@ __all__ = [
     "normalize_for_quote_match",
     "resolve_model",
     "run_compare",
+    "seed_component_labels",
     "validate_items",
 ]
