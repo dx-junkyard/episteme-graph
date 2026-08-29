@@ -73,7 +73,7 @@ from typing import Any, Callable, Literal
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from dependencies import _require_teacher
+from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from core.config import get_settings
 from core.deliberation import (
     annotations as delib_annotations,
@@ -1009,9 +1009,15 @@ class GraphMessageCreateRequest(BaseModel):
 
 
 def _resolve_graph_document(document_id: str, current_user: dict) -> str:
-    """document_id / material_id を正規化し閲覧ゲートを通す（inventory と同じ fail-closed）。"""
+    """document_id / material_id を正規化し閲覧ゲートを通す（inventory と同じ fail-closed）。
+
+    SYSTEM_ADMIN は存在すれば閲覧可（承認・却下側の ``_ensure_document_editable`` の
+    ロール分岐と対称にする — 2026-08-29 レビュー是正。存在しない document は誰でも 404）。
+    """
     access = resolve_document_access(current_user.get("id"), document_id)
-    if not access.found or not access.can_view:
+    if not access.found:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if not access.can_view and current_user.get("role") != ROLE_SYSTEM_ADMIN:
         raise HTTPException(status_code=404, detail="Document not found")
     return access.document_id
 
@@ -1019,12 +1025,18 @@ def _resolve_graph_document(document_id: str, current_user: dict) -> str:
 @router.post("/documents/{document_id}/graph-sessions")
 def open_graph_dialogue_session(
     document_id: str,
+    force_new: bool = Query(
+        default=False,
+        description="既存セッションを再開せず常に新しいセッションを作る（セッション上限到達後の再開手段）。",
+    ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
     """グラフ全体対話セッションの get-or-create（本人 × document で最新を再開）。
 
     グラフ未構築（ノード0）はセッションを作らず 422 の事実文（GR5 — 根拠の無い
-    対話を開始しない）。
+    対話を開始しない）。``force_new=true`` は再開せず新規作成する — CostGate の
+    セッション上限（in-memory・セッションID単位）に達した対話をやり直す唯一の口
+    （2026-08-29 レビュー是正。履歴は旧セッションに残る = GR7）。
     """
     doc_id = _resolve_graph_document(document_id, current_user)
     graph = graph_dialogue.load_latest_graph(doc_id)
@@ -1032,7 +1044,7 @@ def open_graph_dialogue_session(
         graph_dialogue.build_graph_grounding(graph)
     except graph_dialogue.GraphNotAvailableError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    session = graph_dialogue.find_latest_graph_session(doc_id, current_user.get("id"))
+    session = None if force_new else graph_dialogue.find_latest_graph_session(doc_id, current_user.get("id"))
     created = False
     if not session:
         session = graph_dialogue.create_graph_session(doc_id, created_by=current_user.get("id"))
@@ -1072,12 +1084,6 @@ def post_graph_dialogue_message(
     if not user_content:
         raise HTTPException(status_code=422, detail="content is required")
 
-    if not dialogue.check_and_count_llm_call(session_id, current_user.get("id")):
-        raise HTTPException(
-            status_code=429,
-            detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
-        )
-
     requested_model = (body.model or "").strip() or None
     if requested_model:
         reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_DELIBERATION, requested_model)
@@ -1090,6 +1096,14 @@ def post_graph_dialogue_message(
     except graph_dialogue.GraphNotAvailableError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     grounding_text = graph_dialogue.graph_grounding_to_text(grounding)
+
+    # CostGate の消費は全 422 経路（モデル検証・グラフ不在）の**後**に置く —
+    # 失敗するリクエストで上限を焼かない（2026-08-29 レビュー是正）。
+    if not dialogue.check_and_count_llm_call(session_id, current_user.get("id")):
+        raise HTTPException(
+            status_code=429,
+            detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
+        )
 
     prior_messages = [
         {"role": str(m.get("role") or "user"), "content": str(m.get("content") or "")}

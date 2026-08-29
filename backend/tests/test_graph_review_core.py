@@ -111,12 +111,44 @@ class TestGroundingToText:
         assert "省略" in text
 
     def test_narrative_marked_as_ai_proposal(self):
+        # 本番の永続キーは graph_summary（persistence.py の _narrative_payload）。
+        # 旧キー summary の fixture では本番で常に空になる欠陥を隠していた
+        # （2026-08-29 レビュー是正）。
         grounding = gd.build_graph_grounding(_graph(
             nodes=[_node("m1")],
-            narrative={"summary": "この論文は…"},
+            narrative={"graph_summary": "この論文は…"},
         ))
         text = gd.graph_grounding_to_text(grounding)
         assert "AI提案・未確認" in text
+        assert "この論文は…" in text
+
+    def test_non_numeric_display_order_does_not_raise(self):
+        grounding = gd.build_graph_grounding(_graph(nodes=[
+            _node("a", display_order="not-a-number"),
+            _node("b", display_order=1),
+        ]))
+        assert len(grounding["main_nodes"]) == 2
+
+
+class TestMergeLiveReviewStatuses:
+    def test_human_decision_overrides_baked_value(self):
+        graph = _graph(nodes=[_node("c1"), _node("c2")])
+        merged = gd.merge_live_review_statuses(graph, {"c1": "teacher_approved"})
+        statuses = {gd._node_id(n): n["review_status"] for n in merged["nodes"]}
+        assert statuses["c1"] == "teacher_approved"
+        assert statuses["c2"] == "teacher_review_required"
+
+    def test_derived_live_value_does_not_override(self):
+        # live 側が導出語彙（source_backed 等）のときは焼き込み値を保つ。
+        graph = _graph(nodes=[_node("c1", review_status="source_backed")])
+        merged = gd.merge_live_review_statuses(graph, {"c1": "teacher_review_required"})
+        assert merged["nodes"][0]["review_status"] == "source_backed"
+
+    def test_original_graph_nodes_not_mutated(self):
+        node = _node("c1")
+        graph = _graph(nodes=[node])
+        gd.merge_live_review_statuses(graph, {"c1": "rejected"})
+        assert node["review_status"] == "teacher_review_required"
 
 
 class TestBuildLlmMessages:

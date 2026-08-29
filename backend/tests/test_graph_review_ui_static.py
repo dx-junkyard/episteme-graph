@@ -43,6 +43,8 @@ class TestAnchors:
             "graph-review.claim-approve",
             "graph-review.chat",
             "graph-review.graph-chat",
+            "graph-review.open-deliberation",
+            "graph-review.new-chat",
         ):
             assert 'data-ui-anchor="' + anchor + '"' in JS_SRC, anchor
 

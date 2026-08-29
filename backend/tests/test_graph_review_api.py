@@ -42,6 +42,7 @@ def _component(**overrides):
         "name": "テスト理論",
         "inputs": [_sourced_item("入力A")],
         "outputs": [_sourced_item("出力B")],
+        "source_chunks": [TheorySourceRef(chunk_id="c1", quote="q")],
         "source_scope": {"document_id": _DOC},
     }
     data.update(overrides)
@@ -77,24 +78,81 @@ class TestApproveComponent:
         assert exc.value.status_code == 422
         assert "出典" in str(exc.value.detail)
 
-    def test_approve_transitions_status_without_touching_content(self, monkeypatch):
+    def test_approve_uses_status_only_transition(self, monkeypatch):
+        """approve はフルオブジェクト往復ではなく遷移専用ヘルパーを使う（§11）。
+
+        往復方式には ①_row_to_out が component_type に自由語彙を投影するため CHECK
+        制約違反で 500 ②TheorySourceScope が extra を落とすため source_scope の
+        legacy_ids / figure_id を破壊、の2欠陥があった（2026-08-29 レビュー）。
+        """
         existing = _component(summary="元の要約")
         captured = {}
         monkeypatch.setattr(tc, "_get_component", lambda _id: existing)
         monkeypatch.setattr(tc, "_ensure_component_editable", lambda component, user: None)
 
-        def _fake_update(component_id, payload):
+        def _fake_transition(component_id, passed_existing, **kwargs):
             captured["component_id"] = component_id
-            captured["payload"] = payload
+            captured["existing"] = passed_existing
+            captured.update(kwargs)
             return existing
 
-        monkeypatch.setattr(tc, "_update_component", _fake_update)
+        monkeypatch.setattr(tc, "_transition_component_review", _fake_transition)
+        monkeypatch.setattr(
+            tc, "_update_component",
+            lambda *a, **k: pytest.fail("approve はフル UPDATE を使ってはならない"),
+        )
         tc.approve_theory_component(_COMPONENT, current_user=_TEACHER)
         assert captured["component_id"] == _COMPONENT
-        assert captured["payload"]["status"] == "teacher_reviewed"
-        assert captured["payload"]["review_status"] == "teacher_approved"
-        # 内容フィールドはサーバの現在値そのまま（画面の古いコピーで巻き戻さない）
-        assert captured["payload"]["summary"] == "元の要約"
+        assert captured["existing"] is existing
+        assert captured["status"] == "teacher_reviewed"
+        assert captured["review_status"] == "teacher_approved"
+        assert captured["approve"] is True
+        assert captured["user_id"] == _TEACHER["id"]
+
+    def test_transition_sql_touches_only_status_columns(self, monkeypatch):
+        """遷移 UPDATE が内容フィールド（source_scope / component_type 等）を含まない。"""
+        existing = _component(review_status="teacher_review_required")
+        fake = _FakeSession(None)
+        monkeypatch.setattr(tc, "_pg_session", lambda: fake)
+        monkeypatch.setattr(tc, "_get_component", lambda _id: _component(review_status="teacher_approved"))
+        events = []
+        monkeypatch.setattr(
+            tc, "_record_review_event",
+            lambda entity, entity_id, old, new, user_id: events.append((old, new, user_id)),
+        )
+        tc._transition_component_review(
+            _COMPONENT, existing,
+            status="teacher_reviewed", review_status="teacher_approved",
+            user_id=_TEACHER["id"], approve=True,
+        )
+        sql = fake.executed[0][0]
+        assert "source_scope" not in sql
+        assert "component_type" not in sql
+        assert "inputs" not in sql
+        assert "maturity_source = 'teacher_reviewed'" in sql
+        # 監査は実行者付き（_update_component 内の記帳は changed_by=NULL だった）
+        assert events == [("teacher_review_required", "teacher_approved", _TEACHER["id"])]
+
+    def test_reject_uses_status_only_transition(self, monkeypatch):
+        existing = _component()
+        captured = {}
+        monkeypatch.setattr(tc, "_get_component", lambda _id: existing)
+        monkeypatch.setattr(tc, "_ensure_component_editable", lambda component, user: None)
+        monkeypatch.setattr(
+            tc, "_transition_component_review",
+            lambda component_id, passed, **kw: captured.update(kw) or existing,
+        )
+        tc.reject_theory_component(_COMPONENT, current_user=_TEACHER)
+        assert captured["status"] == "rejected"
+        assert captured["review_status"] == "rejected"
+        assert captured["user_id"] == _TEACHER["id"]
+
+    def test_non_uuid_component_id_is_404_not_500(self):
+        """main 層集約ノード（theory_op_0001 等）は DB 行を持たない — CAST の
+        DataError で 500 にせず、_get_component が None → 404 に落ちる。"""
+        with pytest.raises(HTTPException) as exc:
+            tc.approve_theory_component("theory_op_0001", current_user=_TEACHER)
+        assert exc.value.status_code == 404
 
     def test_permission_gate_is_called(self, monkeypatch):
         called = {}
@@ -103,7 +161,10 @@ class TestApproveComponent:
             tc, "_ensure_component_editable",
             lambda component, user: called.setdefault("user", user),
         )
-        monkeypatch.setattr(tc, "_update_component", lambda _id, payload: _component())
+        monkeypatch.setattr(
+            tc, "_transition_component_review",
+            lambda component_id, existing, **kw: _component(),
+        )
         tc.approve_theory_component(_COMPONENT, current_user=_TEACHER)
         assert called["user"] is _TEACHER
 
@@ -236,6 +297,34 @@ class TestClaimReviewSideEffects:
         assert events == [(tc.AUDIT_ENTITY_CLAIM, _CLAIM, "teacher_review_required", "rejected")]
 
 
+class TestStoredGraphLiveReviewStatus:
+    """stored graph の焼き込み review_status より教員判断（live 値）を優先する
+    （2026-08-29 レビュー是正 — これが無いと承認してもレビューループが閉じない）。"""
+
+    def _stored_node(self, review_status="teacher_review_required"):
+        return {
+            "component_id": _COMPONENT,
+            "label": "Theory basis",
+            "graph_layer": "main",
+            "review_status": review_status,
+            "source_backing_status": "source_backed",
+        }
+
+    def test_human_decision_overrides_stored_value(self):
+        component = _component(review_status="teacher_approved")
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [self._stored_node()], "edges": []}, [component],
+        )
+        assert graph["nodes"][0]["review_status"] == "teacher_approved"
+
+    def test_derived_stored_value_is_kept_when_no_decision(self):
+        component = _component(review_status="teacher_review_required")
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [self._stored_node(review_status="source_backed")], "edges": []}, [component],
+        )
+        assert graph["nodes"][0]["review_status"] == "source_backed"
+
+
 # ---------------------------------------------------------------------------
 # グラフ全体対話（graph-sessions）
 # ---------------------------------------------------------------------------
@@ -283,7 +372,7 @@ class TestOpenGraphSession:
         monkeypatch.setattr(gd, "load_latest_graph", lambda doc: {"nodes": [{"component_id": "m1"}]})
         monkeypatch.setattr(gd, "find_latest_graph_session", lambda doc, user: _graph_session())
         monkeypatch.setattr(gd, "create_graph_session", lambda *a, **k: pytest.fail("must not create"))
-        result = delib_routes.open_graph_dialogue_session(_DOC, current_user=_TEACHER)
+        result = delib_routes.open_graph_dialogue_session(_DOC, force_new=False, current_user=_TEACHER)
         assert result["created"] is False
         assert result["session"]["id"] == _SESSION
 
@@ -294,9 +383,35 @@ class TestOpenGraphSession:
         monkeypatch.setattr(gd, "create_graph_session", lambda doc, **kw: _graph_session())
         events = []
         monkeypatch.setattr(delib_routes, "record_review_event", lambda *a, **k: events.append(a))
-        result = delib_routes.open_graph_dialogue_session(_DOC, current_user=_TEACHER)
+        result = delib_routes.open_graph_dialogue_session(_DOC, force_new=False, current_user=_TEACHER)
         assert result["created"] is True
         assert events, "セッション作成は監査記帳される（GR4）"
+
+    def test_force_new_skips_reuse(self, monkeypatch):
+        """セッション上限到達後の再開手段（2026-08-29 レビュー是正）: force_new=true は
+        既存セッションを再開せず常に新規作成する。"""
+        monkeypatch.setattr(delib_routes, "resolve_document_access", lambda uid, ref: _Access())
+        monkeypatch.setattr(gd, "load_latest_graph", lambda doc: {"nodes": [{"component_id": "m1"}]})
+        monkeypatch.setattr(
+            gd, "find_latest_graph_session",
+            lambda doc, user: pytest.fail("force_new では既存を探さない"),
+        )
+        monkeypatch.setattr(gd, "create_graph_session", lambda doc, **kw: _graph_session())
+        monkeypatch.setattr(delib_routes, "record_review_event", lambda *a, **k: None)
+        result = delib_routes.open_graph_dialogue_session(_DOC, force_new=True, current_user=_TEACHER)
+        assert result["created"] is True
+
+    def test_system_admin_can_open_without_view_grant(self, monkeypatch):
+        """SYSTEM_ADMIN は存在する document なら閲覧ゲートを通れる（編集ゲートと対称）。"""
+        monkeypatch.setattr(
+            delib_routes, "resolve_document_access", lambda uid, ref: _Access(can_view=False),
+        )
+        monkeypatch.setattr(gd, "load_latest_graph", lambda doc: {"nodes": [{"component_id": "m1"}]})
+        monkeypatch.setattr(gd, "find_latest_graph_session", lambda doc, user: _graph_session(
+            created_by="99999999-9999-9999-9999-999999999999"))
+        admin = {"id": "99999999-9999-9999-9999-999999999999", "role": "SYSTEM_ADMIN"}
+        result = delib_routes.open_graph_dialogue_session(_DOC, force_new=False, current_user=admin)
+        assert result["session"]["id"] == _SESSION
 
 
 class TestPostGraphMessage:
@@ -329,6 +444,26 @@ class TestPostGraphMessage:
         with pytest.raises(HTTPException) as exc:
             delib_routes.post_graph_dialogue_message(
                 _DOC, _SESSION, delib_routes.GraphMessageCreateRequest(content="  "), current_user=_TEACHER,
+            )
+        assert exc.value.status_code == 422
+
+    def test_invalid_model_422_does_not_consume_cost_gate(self, monkeypatch):
+        """CostGate の消費は全 422 経路の後（2026-08-29 レビュー是正 — 失敗する
+        リクエストで上限を焼かない）。"""
+        self._setup(monkeypatch)
+        monkeypatch.setattr(
+            delib_routes.dialogue, "check_and_count_llm_call",
+            lambda sid, uid: pytest.fail("422 経路で CostGate を消費してはならない"),
+        )
+        monkeypatch.setattr(
+            delib_routes.llm_policy, "validate_model_for_scene",
+            lambda scene, model: "そのモデルは選択できません",
+        )
+        with pytest.raises(HTTPException) as exc:
+            delib_routes.post_graph_dialogue_message(
+                _DOC, _SESSION,
+                delib_routes.GraphMessageCreateRequest(content="q", model="bad-model"),
+                current_user=_TEACHER,
             )
         assert exc.value.status_code == 422
 

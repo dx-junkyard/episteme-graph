@@ -11609,6 +11609,7 @@ button.element-card-item:focus-visible .element-card-item-label {
 .graph-review-chat-msg.is-user { background: var(--color-background-info, #eef2ff); margin-left: 18%; }
 .graph-review-chat-msg.is-assistant { background: var(--color-background-secondary, #f8fafc); margin-right: 12%; }
 .graph-review-chat-annotations { max-height: 180px; overflow-y: auto; }
+.graph-review-chat-newchat:not(:empty) { margin: 4px 0 6px; }
 .graph-review-annotation {
   border: 1px dashed var(--color-border-info, #a5b4fc);
   border-radius: 8px;

@@ -427,7 +427,24 @@ def _select_components_sql(where: str) -> str:
     """
 
 
+def _is_db_uuid(value: str) -> bool:
+    """theory_components.id（UUID）として照合可能な文字列か。
+
+    理論グラフの main 層集約ノード等は agent 側 ID（``theory_op_0001`` 等）を
+    component_id に持ち DB 行が無い。そのまま ``CAST(:id AS uuid)`` に流すと
+    Postgres の DataError → 500 になるため、呼び出し側で 404 に落とせるよう
+    事前判定する（2026-08-29 レビュー是正）。
+    """
+    try:
+        uuid.UUID(str(value or ""))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _get_component(component_id: str) -> TheoryComponentOut | None:
+    if not _is_db_uuid(component_id):
+        return None
     session = _pg_session()
     try:
         row = session.execute(
@@ -1996,6 +2013,13 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         if not display_label:
             display_label = f"{final_label}: {theory_object}" if theory_object else final_label
         node_review_status = str(node.get("review_status") or (component.review_status if component else "teacher_review_required"))
+        # グラフ対話レビュー（graph_dialogue_review_design.md §11 / 2026-08-29 レビュー是正）:
+        # stored graph の review_status はパイプライン構築時の焼き込み値（常に非空）なので、
+        # 教員が承認/却下しても再取得に反映されず、レビューループが閉じなかった。
+        # **人間の判断**（承認/却下/要修正）は theory_components の live 値を常に優先する。
+        # 導出値（source_backed 等）は従来どおり stored 側を保つ（表示互換）。
+        if component and str(component.review_status or "") in _HUMAN_REVIEW_DECISION_STATUSES:
+            node_review_status = str(component.review_status)
         node_backing = str(node.get("source_backing_status") or "")
         node_reasons = node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else []
         # Issue #319 criterion 9: review_required / inferred nodes must explain why.
@@ -2148,7 +2172,10 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
 
 _REFERENCE_TEXT_SNIPPET_MAX = 200
 
-_NODE_CLAIM_ID_KEYS = ("linked_claim_ids",)
+# linked_claim_ids は normalizer が input/output/required の和集合として書くが、
+# 旧版・手書きグラフでは分離したままの可能性があるため、UI（グラフ対話レビューの
+# claim 行）が読む4キーすべてを解決対象にする（2026-08-29 レビュー是正）。
+_NODE_CLAIM_ID_KEYS = ("linked_claim_ids", "input_claim_ids", "output_claim_ids", "required_claim_ids")
 _NODE_EVIDENCE_ID_KEYS = ("linked_evidence_ids",)
 _NODE_DERIVATION_ID_KEYS = ("linked_derivation_ids",)
 _EDGE_CLAIM_ID_KEYS = ("evidence_claim_ids",)
@@ -2714,6 +2741,10 @@ def _apply_claim_review_side_effects(
 # claim レビュー遷移の許可語彙（グラフ対話レビュー設計書 §4。これ以外は 422）。
 _CLAIM_REVIEW_STATUSES = ("teacher_approved", "rejected", "needs_revision", "teacher_review_required")
 
+# 「人間の判断」とみなす component の review_status（stored graph の焼き込み値より
+# live 値を優先する対象。導出語彙 source_backed / review_required は含めない）。
+_HUMAN_REVIEW_DECISION_STATUSES = ("teacher_approved", "teacher_reviewed", "endorsed", "rejected", "needs_revision")
+
 
 class ClaimReviewRequest(BaseModel):
     review_status: str
@@ -2736,6 +2767,10 @@ def review_claim(
     review_status = (body.review_status or "").strip()
     if review_status not in _CLAIM_REVIEW_STATUSES:
         raise HTTPException(status_code=422, detail="Invalid review_status")
+    # 非 UUID の claim_id（agent 側 ID 等）は CAST で DataError → 500 になるため
+    # 事前に 404 へ落とす（2026-08-29 レビュー是正）。
+    if not _is_db_uuid(claim_id):
+        raise HTTPException(status_code=404, detail="Claim not found")
     session = _pg_session()
     try:
         existing = session.execute(
@@ -2768,6 +2803,9 @@ def review_claim(
         raise HTTPException(status_code=500, detail="Failed to review claim")
     finally:
         session.close()
+    if not row:
+        # 存在チェックと UPDATE の間に行が消えた場合（TOCTOU）は 500 でなく 404。
+        raise HTTPException(status_code=404, detail="Claim not found")
     updated = _row_to_claim(row)
     _apply_claim_review_side_effects(
         claim_id, existing[1], updated, current_user.get("id"),
@@ -3013,8 +3051,17 @@ _APPROVAL_FIELD_LABELS = {
 
 
 def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
-    """承認できない理由の事実文一覧を返す（空なら承認可）。"""
+    """承認できない理由の事実文一覧を返す（空なら承認可）。
+
+    基準は PUT 承認経路の ``_validate_for_review`` の blocking 集合
+    （name / source_chunks / inputs / outputs / 各項目の出典）と揃える —
+    グラフレビューからだけ緩く承認できる非対称を作らない（2026-08-29 レビュー是正）。
+    """
     problems: list[str] = []
+    if not str(component.name or "").strip():
+        problems.append("名前が空です")
+    if not component.source_chunks:
+        problems.append("出典チャンク（source_chunks）が未設定です")
     if not component.inputs:
         problems.append("入力（inputs）が未設定です")
     if not component.outputs:
@@ -3033,6 +3080,78 @@ def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
     return problems
 
 
+def _transition_component_review(
+    component_id: str,
+    existing: TheoryComponentOut,
+    *,
+    status: str,
+    review_status: str,
+    user_id: str | None,
+    approve: bool = False,
+) -> TheoryComponentOut:
+    """status / review_status **だけ**を遷移する（内容フィールドは一切変更しない）。
+
+    approve / reject の実体（グラフ対話レビュー設計書 §4・§11）。かつては
+    ``_dump_model(existing)`` → ``_update_component`` のフルオブジェクト往復で
+    実装していたが、2026-08-29 レビューで2つの破壊経路が確定した:
+    ① ``_row_to_out`` は ``component_type`` に自由語彙（component_type_text 由来の
+      "RelationComponent" 等）を投影するため、そのまま UPDATE すると CHECK 制約
+      違反で 500 になる。
+    ② ``TheorySourceScope`` は extra を落とすため、往復で source_scope の
+      ``legacy_ids`` / ``figure_id`` / ``figure_key`` 等（agent ID 解決・図対応の正本）
+      を破壊する。
+    このため列を限定した UPDATE に置き換えた。承認時は PUT 経路
+    （``_normalize_payload``）との整合で maturity_source='teacher_reviewed'・
+    validation_warnings=[] も併せて更新する。監査は実行者 user_id 付きで記帳する
+    （``_update_component`` 内の記帳は changed_by=NULL だった — GR4 の帰属を保つ）。
+    却下時の伝播（``_propagate_rejected_component``）も従来と同じ。
+    """
+    session = _pg_session()
+    try:
+        if approve:
+            session.execute(
+                sa_text("""
+                    UPDATE theory_components
+                    SET status = :status,
+                        review_status = :review_status,
+                        maturity_source = 'teacher_reviewed',
+                        validation_warnings = CAST('[]' AS jsonb),
+                        updated_at = now()
+                    WHERE id = CAST(:id AS uuid)
+                """),
+                {"id": component_id, "status": status, "review_status": review_status},
+            )
+        else:
+            session.execute(
+                sa_text("""
+                    UPDATE theory_components
+                    SET status = :status,
+                        review_status = :review_status,
+                        updated_at = now()
+                    WHERE id = CAST(:id AS uuid)
+                """),
+                {"id": component_id, "status": status, "review_status": review_status},
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to transition theory component %s", component_id)
+        raise HTTPException(status_code=500, detail="Failed to update theory component")
+    finally:
+        session.close()
+    updated = _get_component(component_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    if existing.review_status != updated.review_status:
+        _record_review_event(
+            AUDIT_ENTITY_COMPONENT, component_id,
+            existing.review_status, updated.review_status, user_id,
+        )
+        if updated.review_status == "rejected" or updated.status == "rejected":
+            _propagate_rejected_component(component_id)
+    return updated
+
+
 @router.post("/theory-components/{component_id}/approve", response_model=TheoryComponentOut)
 def approve_theory_component(
     component_id: str,
@@ -3042,9 +3161,9 @@ def approve_theory_component(
 
     グラフ対話レビュー画面の承認ボタンの実体（設計書 §4）。フルオブジェクト PUT と
     違い、画面が読み込んだ時点のオブジェクトで内容を上書きしない（同時編集の
-    巻き戻し防止）。承認可能性（inputs/outputs 非空 + 全項目に出典）はサーバ側で
-    強制し、満たさなければ 422 の事実文（GR1: 確定は人間 / evidence-based）。
-    監査は `_update_component` 内の review_status 遷移記帳がそのまま効く（GR4）。
+    巻き戻し防止）。承認可能性（名前・source_chunks・inputs/outputs 非空 + 全項目に
+    出典）はサーバ側で強制し、満たさなければ 422 の事実文
+    （GR1: 確定は人間 / evidence-based）。監査は実行者付きで記帳する（GR4）。
     """
     existing = _get_component(component_id)
     if not existing:
@@ -3053,10 +3172,11 @@ def approve_theory_component(
     problems = _component_approval_problems(existing)
     if problems:
         raise HTTPException(status_code=422, detail="承認できません: " + "、".join(problems))
-    payload = _dump_model(existing)
-    payload["status"] = "teacher_reviewed"
-    payload["review_status"] = "teacher_approved"
-    return _update_component(component_id, payload)
+    return _transition_component_review(
+        component_id, existing,
+        status="teacher_reviewed", review_status="teacher_approved",
+        user_id=current_user.get("id"), approve=True,
+    )
 
 
 @router.post("/theory-components/{component_id}/reject", response_model=TheoryComponentOut)
@@ -3068,10 +3188,11 @@ def reject_theory_component(
     if not existing:
         raise HTTPException(status_code=404, detail="Theory component not found")
     _ensure_component_editable(existing, current_user)
-    payload = _dump_model(existing)
-    payload["status"] = "rejected"
-    payload["review_status"] = "rejected"
-    return _update_component(component_id, payload)
+    return _transition_component_review(
+        component_id, existing,
+        status="rejected", review_status="rejected",
+        user_id=current_user.get("id"),
+    )
 
 
 @router.post("/courses/{course_id}/theory-components/validate-connection")

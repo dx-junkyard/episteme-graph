@@ -212,8 +212,10 @@ admin.js から DI 注入）:
   AI 応答経路から承認 API を呼ぶコードが無い / プロンプトの仮説文体・断定禁止の契約
   フレーズ / confidence 生値非漏洩 / CostGate 相乗り（専用 env 定数を作っていない）。
 - `test_graph_review_ui_static.py`: モーダル構造 / 承認・却下・claim 承認ボタンと
-  data-ui-anchor / ES5（アロー関数・const 不使用）/ ComponentGraphView への委譲
-  （admin-graph-review.js 内に vis.DataSet 直接構築が無い）。
+  data-ui-anchor / ES5（アロー関数・const 不使用）/ graphView への委譲
+  （レイアウト・spec 生成・オプションは graphView から取得。`vis.DataSet` /
+  `vis.Network` の**構築自体**は各画面が行う — スタジオも同じ分担。スタイル定数の
+  二重実装が無いことを検証する）。
 - 既存網羅: `test_admin_help_ui_anchors.py`（アンカー3点セット）・
   `test_docs_registry_guardrails.py`（migration 075・本設計書の索引）・
   スタジオ回帰（既存 studio ui_static テスト群）。
@@ -272,11 +274,49 @@ admin.js から DI 注入）:
   `_apply_claim_review_side_effects` 抽出）/ `frontend/public/js/admin-graph-review.js`
   （ES5・`window.GraphReview`）/ admin.js（行ボタン・DI・アンカー解決）/
   admin.html / styles.css（テーマ変数のみ）。
-- **3点セット**: マニュアル `docs/manual/teacher/26-admin-graph-review.md`（11節）+
-  `ADMIN_UI_ANCHORS` 10件（graph-review.* 9件 + materials.row-graph-review。
-  カウント 313）+ data-ui-anchor。
-- **テスト**: `test_graph_review_{core,api,guardrails,ui_static}.py`（計71assert規模）+
-  既存網羅（anchors / docs registry / studio 静的群）。バックエンド全 12,131 pass。
+- **3点セット**: マニュアル `docs/manual/teacher/26-admin-graph-review.md` +
+  `ADMIN_UI_ANCHORS`（graph-review.* + materials.row-graph-review。正確な件数は
+  `backend/tests/test_admin_help_ui_anchors.py` が正）+ data-ui-anchor。
+- **テスト**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
+  既存網羅（anchors / docs registry / studio 静的群）。
 - **残課題**: docker 実機 E2E（グラフ描画・対話・承認の通し確認）。原稿スタジオ側の
   論理要素カードの承認（フル PUT 経路）は非改変のまま — 将来 approve エンドポイントへ
   寄せるかは別判断。
+
+### §11.1 実装レビューと是正（2026-08-29 同日・Opus 3系統の敵対的レビュー）
+
+初回実装（8cdead7）に対し独立レビュー（backend / frontend / integration）を実施し、
+確認された欠陥を全て是正した:
+
+- **[critical] approve/reject を遷移専用 UPDATE に変更**（`_transition_component_review`）:
+  旧実装の `_dump_model(existing)` → `_update_component` 往復には ①`_row_to_out` が
+  `component_type` に自由語彙（component_type_text）を投影するため CHECK 制約違反で
+  500 ②`TheorySourceScope` が extra を落とすため `source_scope.legacy_ids` /
+  `figure_id` / `figure_key` を破壊、の2欠陥があった。遷移は status / review_status
+  （承認時は maturity_source / validation_warnings も）だけを UPDATE し、監査は
+  **実行者 user_id 付き**で記帳する（`_update_component` 内の記帳は changed_by=NULL
+  だった）。却下伝播は従来同等。
+- **[critical] 集約 main ノード（graph-native ID）の 500 防止**: `theory_op_0001` 等は
+  theory_components 行を持たず `CAST(:id AS uuid)` が DataError → 500 だった。
+  `_get_component` / `review_claim` に UUID 事前判定（`_is_db_uuid`）を追加して 404 化し、
+  UI は非 UUID ノードに承認/却下ボタンを出さず事実文で案内（設計 §3 の規定どおり）。
+- **[critical] レビューループの閉塞是正**: stored graph の焼き込み `review_status` が
+  常に優先され、承認しても再取得に反映されなかった。**人間の判断**
+  （approved/rejected/needs_revision 系）は live の `theory_components.review_status`
+  を優先する（`_normalize_stored_component_graph` + core 側
+  `merge_live_review_statuses` — 導出語彙 source_backed 等は焼き込み値を保つ）。
+- **[major] narrative キー是正**: 永続キーは `graph_summary`（旧 `summary` 参照は本番で
+  常に空 — テスト fixture のキー誤りが隠していた）。
+- **[major] セッション上限後の再開手段**: graph-sessions に `force_new=true` を追加し、
+  UI はグラフ全体対話の 429 時のみ「新しい対話を開始」（`graph-review.new-chat`）を出す
+  （旧対話の記録は残る = GR7）。
+- **[minor 一式]**: CostGate 消費を全 422 経路の後へ移動 / `_resolve_graph_document` に
+  SYSTEM_ADMIN 分岐（編集ゲートと対称）/ 承認可能性チェックに name・source_chunks を
+  追加（PUT 経路 `_validate_for_review` と同基準）/ `_NODE_CLAIM_ID_KEYS` を UI と同じ
+  4キーに拡張 / claim レビューの TOCTOU 404 化。
+- **[frontend 一式]**: チャット送受信のセッションキャッシュ書き戻し（タブ往復で会話が
+  消えない）/ 送信時のモード・ノード固定（作成中の切替で別対象へ grounding される競合の
+  解消）/ グラフ未ロード時の null ガード / vis 不在の事実文 / 操作結果メッセージの
+  再描画持ち越し / 未解決 claim の内部 ID 非表示 / 承認後再読み込みでのズーム・パン維持 /
+  「深く検討」にアンカー付与。アンカーは +2（`graph-review.open-deliberation` /
+  `graph-review.new-chat`）。

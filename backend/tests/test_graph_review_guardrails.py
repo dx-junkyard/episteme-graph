@@ -81,7 +81,12 @@ class TestNoAiApprovalPath:
             assert "/claims/" not in body, fn
 
     def test_core_never_imports_review_transition(self):
-        assert "theory_components" not in CORE_SRC
+        # core は theory_components を SELECT で**読む**だけ（live review_status の合成）。
+        # 書き込み・承認遷移の呼び出しは一切持たない（GR1/GR2）。
+        assert "UPDATE theory_components" not in CORE_SRC
+        assert "INSERT INTO theory_components" not in CORE_SRC
+        assert "_transition_component_review" not in CORE_SRC
+        assert "review_claim" not in CORE_SRC
 
 
 def _js_function_body(source: str, name: str) -> str:

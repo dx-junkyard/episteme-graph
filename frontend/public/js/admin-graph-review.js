@@ -33,6 +33,8 @@
     chatMessages: [],  // 表示中モードのメッセージ [{role, content}]
     chatAnnotations: [], // 直近応答の候補注釈
     chatBusy: false,
+    detailNotice: null, // 再描画をまたいで一度だけ再表示する操作結果 {message, kind}
+    preserveViewOnce: false, // 次の再描画でズーム・パンを維持する（fit しない）
   };
 
   // component / claim の review_status → 表示ラベル（graphView と同じ語彙世界。
@@ -86,8 +88,23 @@
   }
 
   function unreviewedNodesInView() {
+    // グラフ未ロード・読み込み失敗中は空扱い（filterByLayer に null を渡さない）。
+    if (!state.graph) return [];
     var view = gv().filterByLayer(state.graph, state.layer);
     return (view.nodes || []).filter(isUnreviewedNode);
+  }
+
+  // theory_components の行 ID（DB UUID）かどうか。集約 main ノード（theory_op_0001 等の
+  // graph-native ID）は行を持たないため、承認・却下の対象にしない。
+  function isDbUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
+  }
+
+  // 送信時にキャプチャした表示コンテキストが、応答到着時もまだ表示中かどうか。
+  function isCurrentContext(mode, nodeKey) {
+    if (state.chatMode !== mode) return false;
+    if (mode === "node" && state.selectedNodeId !== nodeKey) return false;
+    return true;
   }
 
   // -------------------------------------------------------------------------
@@ -128,6 +145,7 @@
                 '<button type="button" id="graph-review-chat-tab-node" class="graph-review-chat-tab">選択中のノードとAI対話</button>' +
               '</div>' +
               '<div id="graph-review-chat-log" class="graph-review-chat-log"></div>' +
+              '<div id="graph-review-chat-newchat" class="graph-review-chat-newchat"></div>' +
               '<div id="graph-review-chat-annotations" class="graph-review-chat-annotations"></div>' +
               '<div class="graph-review-chat-input-row">' +
                 '<textarea id="graph-review-chat-input" rows="2" placeholder="このグラフについて質問（例: 裏付けが弱いのはどこですか）"></textarea>' +
@@ -150,6 +168,8 @@
     });
     modal.querySelector("#graph-review-unreviewed-toggle").addEventListener("change", function () {
       state.unreviewedOnly = !!this.checked;
+      // 強調の切替は見ている範囲を変えない（ズーム・パンを保つ）。
+      state.preserveViewOnce = true;
       renderNetwork();
     });
     modal.querySelector("#graph-review-next-unreviewed").addEventListener("click", gotoNextUnreviewed);
@@ -181,7 +201,11 @@
   // -------------------------------------------------------------------------
 
   function open(documentId, title) {
-    if (!deps.apiFetch || !gv()) return;
+    if (!deps.apiFetch || !gv()) {
+      // 無言の no-op にしない（依存の読み込み漏れを教員に事実として伝える）。
+      window.alert("グラフ描画モジュールを読み込めていないため、グラフレビューを開けません。ページを再読み込みしてください。");
+      return;
+    }
     state.documentId = documentId;
     state.title = title || "教材";
     state.graph = null;
@@ -193,6 +217,8 @@
     state.graphSession = null;
     state.chatMessages = [];
     state.chatAnnotations = [];
+    state.detailNotice = null;
+    state.preserveViewOnce = false;
     var modal = ensureModal();
     modal.hidden = false;
     document.getElementById("graph-review-title-text").textContent = state.title;
@@ -231,6 +257,8 @@
             "info"
           );
         }
+        // レビュー確定後の再読み込みでは、見ている範囲（ズーム・パン）を保つ。
+        if (keepSelection) state.preserveViewOnce = true;
         render();
       })
       .catch(function (err) {
@@ -274,6 +302,8 @@
         renderUnreviewedCount();
         renderNetwork();
         renderDetail();
+        // 選択が外れたのでノード対話タブは維持しない（送信時のエラーを防ぐ）。
+        switchChatMode("graph");
       });
     });
   }
@@ -288,12 +318,29 @@
   function renderNetwork() {
     var container = document.getElementById("graph-review-network");
     if (!container || !state.graph) return;
+    // 破棄前に現在の視点を控える（preserveViewOnce のときだけ新 network へ引き継ぐ）。
+    var savedPosition = null;
+    var savedScale = null;
     if (state.network) {
+      try {
+        savedPosition = state.network.getViewPosition();
+        savedScale = state.network.getScale();
+      } catch (e) { savedPosition = null; savedScale = null; }
       try { state.network.destroy(); } catch (e) { /* noop */ }
       state.network = null;
     }
-    if (!graphNodes().length || !window.vis) {
+    if (!graphNodes().length) {
+      // ノード0件の事実文は loadGraph が出しているので、ここではステータスを触らない。
       container.innerHTML = "";
+      return;
+    }
+    if (!window.vis || !window.vis.Network) {
+      container.innerHTML = "";
+      setStatus(
+        "graph-review-graph-status",
+        "グラフ描画ライブラリを読み込めていません。ページを再読み込みしてください。",
+        "error"
+      );
       return;
     }
     var view = gv().filterByLayer(state.graph, state.layer);
@@ -328,7 +375,17 @@
       edges: new window.vis.DataSet(edgeSpecs),
     }, g.networkOptions());
     state.network = network;
-    network.once("afterDrawing", function () { network.fit({ animation: false }); });
+    var keepView = !!(state.preserveViewOnce && savedPosition && typeof savedScale === "number");
+    state.preserveViewOnce = false; // フラグは一度きり
+    network.once("afterDrawing", function () {
+      if (keepView) {
+        try {
+          network.moveTo({ position: savedPosition, scale: savedScale, animation: false });
+          return;
+        } catch (e) { /* 失敗時は fit へ落とす */ }
+      }
+      network.fit({ animation: false });
+    });
     network.on("click", function (params) {
       if (params.nodes && params.nodes.length && byId[params.nodes[0]]) {
         selectNode(params.nodes[0]);
@@ -336,7 +393,12 @@
       }
       state.selectedNodeId = "";
       renderDetail();
-      renderChatShell();
+      if (state.chatMode === "node") {
+        // 選択が外れたのでノード対話タブは維持しない。
+        switchChatMode("graph");
+      } else {
+        renderChatShell();
+      }
     });
     if (state.selectedNodeId && byId[state.selectedNodeId]) {
       try { network.selectNodes([state.selectedNodeId]); } catch (e) { /* noop */ }
@@ -405,10 +467,12 @@
     if (!container) return;
     if (!state.graph || !graphNodes().length) {
       container.innerHTML = '<div class="graph-review-empty">グラフがありません。</div>';
+      state.detailNotice = null; // 表示先が無くなったので持ち越さない
       return;
     }
     var node = state.selectedNodeId ? nodeById(state.selectedNodeId) : null;
     if (!node) {
+      state.detailNotice = null; // 対象ノードが無いので持ち越さない
       var pending = unreviewedNodesInView().length;
       container.innerHTML = '<div class="graph-review-empty">' +
         'ノードを選ぶと詳細とレビュー操作が表示されます。' +
@@ -442,14 +506,24 @@
         : "");
 
     // component 承認・却下（server が最終判定。GR1: 教員の明示操作のみ）。
-    var approveDisabled = isApproved(status) ? " disabled" : "";
-    var rejectDisabled = isRejected(status) ? " disabled" : "";
-    html += '<div class="graph-review-detail-actions">' +
-      '<button type="button" class="admin-action-btn" data-graph-review-action="approve" data-ui-anchor="graph-review.approve"' + approveDisabled + ">承認</button>" +
-      '<button type="button" class="admin-action-btn" data-graph-review-action="reject" data-ui-anchor="graph-review.reject"' + rejectDisabled + ">却下</button>" +
-      '<button type="button" class="admin-action-btn" data-graph-review-action="deliberate">深く検討</button>' +
-      "</div>" +
-      '<div id="graph-review-detail-status" class="graph-review-status"></div>';
+    // 集約 main ノード（DB UUID でない graph-native ID）は theory_components の行を
+    // 持たないため、承認・却下ボタン自体を出さない。
+    var reviewable = isDbUuid(nodeId);
+    if (reviewable) {
+      var approveDisabled = isApproved(status) ? " disabled" : "";
+      var rejectDisabled = isRejected(status) ? " disabled" : "";
+      html += '<div class="graph-review-detail-actions">' +
+        '<button type="button" class="admin-action-btn" data-graph-review-action="approve" data-ui-anchor="graph-review.approve"' + approveDisabled + ">承認</button>" +
+        '<button type="button" class="admin-action-btn" data-graph-review-action="reject" data-ui-anchor="graph-review.reject"' + rejectDisabled + ">却下</button>" +
+        '<button type="button" class="admin-action-btn" data-graph-review-action="deliberate" data-ui-anchor="graph-review.open-deliberation">深く検討</button>' +
+        "</div>";
+    } else {
+      html += '<div class="graph-review-empty">このノードは複数の要素を集約した表示用ノードのため、承認・却下は集約元の各要素（式の詳細層のノードや根拠 claim）で行います。</div>' +
+        '<div class="graph-review-detail-actions">' +
+        '<button type="button" class="admin-action-btn" data-graph-review-action="deliberate" data-ui-anchor="graph-review.open-deliberation">深く検討</button>' +
+        "</div>";
+    }
+    html += '<div id="graph-review-detail-status" class="graph-review-status"></div>';
 
     if (claims.length) {
       html += '<div class="graph-review-claims"><div class="graph-review-claims-title">根拠 claim</div>' +
@@ -460,8 +534,12 @@
             ? '<button type="button" class="admin-action-btn graph-review-claim-approve" data-graph-review-claim="' +
               esc(claim.claim_id) + '" data-ui-anchor="graph-review.claim-approve"' + (approved ? " disabled" : "") + ">承認</button>"
             : "";
+          // 未解決の claim でも内部 ID（agent_id）は教員 UI に出さない。
+          var claimText = String(claim.text || "").trim()
+            ? esc(claim.text)
+            : "未解決の根拠（本文を取得できません）";
           return '<div class="graph-review-claim-row">' +
-            '<div class="graph-review-claim-text">' + esc(claim.text || claim.agent_id) + "</div>" +
+            '<div class="graph-review-claim-text">' + claimText + "</div>" +
             '<div class="graph-review-claim-meta"><span class="graph-review-chip">' + esc(label) + "</span>" + button + "</div>" +
             "</div>";
         }).join("") +
@@ -483,6 +561,12 @@
         approveClaim(this.getAttribute("data-graph-review-claim"));
       });
     });
+
+    // 操作結果は再読み込み後の再描画で消えるため、ここで一度だけ再表示する。
+    if (state.detailNotice) {
+      setStatus("graph-review-detail-status", state.detailNotice.message, state.detailNotice.kind);
+      state.detailNotice = null;
+    }
   }
 
   function openDeliberation(node) {
@@ -519,7 +603,10 @@
         });
       })
       .then(function () {
-        setStatus("graph-review-detail-status", action === "approve" ? "承認しました" : "却下しました", "success");
+        var message = action === "approve" ? "承認しました" : "却下しました";
+        setStatus("graph-review-detail-status", message, "success");
+        // 直後の再読み込み → renderDetail() で消えないよう、再表示用に積む。
+        state.detailNotice = { message: message, kind: "success" };
         loadGraph(true);
       })
       .catch(function (err) {
@@ -545,6 +632,7 @@
       })
       .then(function () {
         setStatus("graph-review-detail-status", "claim を承認しました", "success");
+        state.detailNotice = { message: "claim を承認しました", kind: "success" };
         loadGraph(true);
       })
       .catch(function (err) {
@@ -560,6 +648,7 @@
     state.chatMode = mode;
     state.chatMessages = [];
     state.chatAnnotations = [];
+    clearNewChatButton();
     renderChatShell();
     // 履歴の復元: セッションが既にあればそのメッセージを流し込む。
     var session = activeSession();
@@ -677,11 +766,21 @@
       });
   }
 
-  function ensureSession(cb) {
-    var existing = activeSession();
-    if (existing) { cb(existing); return; }
-    if (state.chatMode === "graph") {
-      deps.apiFetch("/admin/deliberation/documents/" + encodeURIComponent(state.documentId) + "/graph-sessions", {
+  // mode / nodeKey は呼び出し時にキャプチャした値を使う（セッション作成中にモードや
+  // ノードを切り替えても、応答は必ず開始時の対象へ紐づける）。
+  function ensureSession(mode, nodeKey, cb) {
+    var called = false;
+    function done(session) {
+      // 二重コールバック防止（cb 内の同期例外が失敗経路を再び呼ばないようにする）。
+      if (called) return;
+      called = true;
+      cb(session);
+    }
+    var existing = mode === "graph" ? state.graphSession : (state.nodeSessions[nodeKey] || null);
+    if (existing) { done(existing); return; }
+    if (mode === "graph") {
+      var documentId = state.documentId;
+      deps.apiFetch("/admin/deliberation/documents/" + encodeURIComponent(documentId) + "/graph-sessions", {
         method: "POST",
         body: "{}",
       })
@@ -693,18 +792,19 @@
         })
         .then(function (data) {
           state.graphSession = data.session;
-          state.chatMessages = sessionMessages(data.session);
-          renderChatLog();
-          cb(data.session);
-        })
-        .catch(function (err) {
+          if (isCurrentContext(mode, nodeKey)) {
+            state.chatMessages = sessionMessages(data.session);
+            renderChatLog();
+          }
+          done(data.session);
+        }, function (err) {
           setStatus("graph-review-chat-status", (err && err.message) || "対話を開始できませんでした", "error");
-          cb(null);
+          done(null);
         });
       return;
     }
-    var node = nodeById(state.selectedNodeId);
-    if (!node) { cb(null); return; }
+    var node = nodeById(nodeKey);
+    if (!node) { done(null); return; }
     var componentId = gv().nodeId(node);
     deps.apiFetch("/admin/deliberation/sessions", {
       method: "POST",
@@ -718,19 +818,65 @@
     })
       .then(function (res) {
         if (res.ok) return res.json();
+        // 404 / 422 はいずれも「論理要素として解決できない」縮退（サーバの内部文言を素通ししない）。
+        var unresolvable = res.status === 404 || res.status === 422;
         return res.json().then(function (body) {
-          throw new Error(res.status === 404
+          throw new Error(unresolvable
             ? "このノードは論理要素として解決できないため、ノード対話は開始できません。グラフ全体との対話をご利用ください。"
             : ((body && typeof body.detail === "string" && body.detail) || "対話を開始できませんでした"));
-        }, function () { throw new Error("対話を開始できませんでした"); });
+        }, function () {
+          throw new Error(unresolvable
+            ? "このノードは論理要素として解決できないため、ノード対話は開始できません。グラフ全体との対話をご利用ください。"
+            : "対話を開始できませんでした");
+        });
       })
       .then(function (data) {
-        state.nodeSessions[state.selectedNodeId] = data.session;
-        cb(data.session);
-      })
-      .catch(function (err) {
+        state.nodeSessions[nodeKey] = data.session;
+        done(data.session);
+      }, function (err) {
         setStatus("graph-review-chat-status", (err && err.message) || "対話を開始できませんでした", "error");
-        cb(null);
+        done(null);
+      });
+  }
+
+  // グラフ全体対話の上限（429）に達したときだけ出す再開ボタン。
+  function clearNewChatButton() {
+    var container = document.getElementById("graph-review-chat-newchat");
+    if (container) container.innerHTML = "";
+  }
+
+  function renderNewChatButton() {
+    var container = document.getElementById("graph-review-chat-newchat");
+    if (!container || container.innerHTML) return; // 一度だけ
+    container.innerHTML = '<button type="button" class="admin-action-btn" id="graph-review-new-chat" data-ui-anchor="graph-review.new-chat">新しい対話を開始</button>';
+    var button = document.getElementById("graph-review-new-chat");
+    if (button) button.addEventListener("click", startNewGraphChat);
+  }
+
+  function startNewGraphChat() {
+    var documentId = state.documentId;
+    setStatus("graph-review-chat-status", "新しい対話を開始しています...", "info");
+    deps.apiFetch("/admin/deliberation/documents/" + encodeURIComponent(documentId) + "/graph-sessions?force_new=true", {
+      method: "POST",
+      body: "{}",
+    })
+      .then(function (res) {
+        if (res.ok) return res.json();
+        return res.json().then(function (body) {
+          throw new Error((body && typeof body.detail === "string" && body.detail) || "新しい対話を開始できませんでした");
+        }, function () { throw new Error("新しい対話を開始できませんでした"); });
+      })
+      .then(function (data) {
+        if (state.documentId !== documentId) return; // 別教材へ切替済みの遅延応答は破棄
+        state.graphSession = data.session;
+        state.chatMessages = [];
+        state.chatAnnotations = [];
+        clearNewChatButton();
+        setStatus("graph-review-chat-status", "", "");
+        renderChatLog();
+        renderChatAnnotations();
+      }, function (err) {
+        setStatus("graph-review-chat-status", (err && err.message) || "新しい対話を開始できませんでした", "error");
       });
   }
 
@@ -739,29 +885,50 @@
     var input = document.getElementById("graph-review-chat-input");
     var content = (input && input.value || "").trim();
     if (!content) return;
-    if (state.chatMode === "node" && !state.selectedNodeId) {
+    // 送信時点の表示コンテキストを固定する（応答到着までに切り替わっても混線させない）。
+    var mode = state.chatMode;
+    var nodeKey = state.selectedNodeId;
+    var documentId = state.documentId;
+    if (mode === "node" && !nodeKey) {
       setStatus("graph-review-chat-status", "ノードが選択されていません。", "error");
       return;
     }
     state.chatBusy = true;
     setStatus("graph-review-chat-status", "AI が応答を作成中...", "info");
-    ensureSession(function (session) {
+    ensureSession(mode, nodeKey, function (session) {
       if (!session) { state.chatBusy = false; return; }
-      var path = state.chatMode === "graph"
-        ? "/admin/deliberation/documents/" + encodeURIComponent(state.documentId) + "/graph-sessions/" + encodeURIComponent(session.id) + "/messages"
+      var path = mode === "graph"
+        ? "/admin/deliberation/documents/" + encodeURIComponent(documentId) + "/graph-sessions/" + encodeURIComponent(session.id) + "/messages"
         : "/admin/deliberation/sessions/" + encodeURIComponent(session.id) + "/messages";
-      state.chatMessages.push({ role: "user", content: content });
-      renderChatLog();
+      // セッションキャッシュにも積む（タブ往復で表示上の会話が消えないように）。
+      session.messages = session.messages || [];
+      var userMessage = { role: "user", content: content };
+      session.messages.push(userMessage);
+      if (isCurrentContext(mode, nodeKey)) {
+        state.chatMessages.push(userMessage);
+        renderChatLog();
+      }
       if (input) input.value = "";
       deps.apiFetch(path, { method: "POST", body: JSON.stringify({ content: content }) })
         .then(function (res) {
           if (res.ok) return res.json();
+          var httpStatus = res.status;
           return res.json().then(function (body) {
-            throw new Error((body && typeof body.detail === "string" && body.detail) || "応答の取得に失敗しました");
-          }, function () { throw new Error("応答の取得に失敗しました"); });
+            var error = new Error((body && typeof body.detail === "string" && body.detail) || "応答の取得に失敗しました");
+            error.httpStatus = httpStatus;
+            throw error;
+          }, function () {
+            var error = new Error("応答の取得に失敗しました");
+            error.httpStatus = httpStatus;
+            throw error;
+          });
         })
         .then(function (data) {
-          state.chatMessages.push({ role: "assistant", content: data.reply || "" });
+          var replyMessage = { role: "assistant", content: data.reply || "" };
+          session.messages.push(replyMessage);
+          // 表示コンテキストが変わっていたら書き戻しだけで終える（再描画しない）。
+          if (!isCurrentContext(mode, nodeKey)) return;
+          state.chatMessages.push(replyMessage);
           state.chatAnnotations = (data.annotations || []).concat(state.chatAnnotations);
           renderChatLog();
           renderChatAnnotations();
@@ -769,6 +936,11 @@
         })
         .catch(function (err) {
           setStatus("graph-review-chat-status", (err && err.message) || "応答の取得に失敗しました", "error");
+          // グラフ全体対話が上限に達したときのみ、新しい対話を始める手段を出す
+          // （ノード対話は別ノードを選べば別セッションになるため出さない）。
+          if (err && err.httpStatus === 429 && mode === "graph" && isCurrentContext(mode, nodeKey)) {
+            renderNewChatButton();
+          }
         })
         .finally(function () {
           state.chatBusy = false;

@@ -2353,13 +2353,22 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   GR8 グラフ描画の正本はスタジオの lsGraph* 群 — `window.LectureStudio.graphView` として
   公開し、レビュー画面は委譲する（描画ロジックを二重実装しない）。
 - **承認 API（遷移専用・新設2本）**: `POST /api/admin/theory-components/{id}/approve`
-  （内容フィールド非変更。承認可能性 = inputs/outputs 非空 + 全項目に出典、をサーバ強制
-  — 満たさなければ 422 事実文）と `POST /api/admin/claims/{id}/review`
-  （body `{review_status}`・許可4語彙のみ）。遷移副作用（監査・却下伝播・承認時の R層
+  （内容フィールド非変更。承認可能性 = name・source_chunks・inputs/outputs 非空 +
+  全項目に出典、をサーバ強制 — 満たさなければ 422 事実文）と
+  `POST /api/admin/claims/{id}/review`（body `{review_status}`・許可4語彙のみ）。
+  **component の遷移実体は `_transition_component_review`（status 系の列だけを UPDATE・
+  監査は実行者付き・却下伝播あり）** — `_dump_model` 往復のフル UPDATE は
+  component_type CHECK 違反と source_scope（legacy_ids / figure_id）破壊を起こすため
+  使わない（設計書 §11.1）。claim 側の遷移副作用（監査・却下伝播・承認時の R層
   item オーサリング起動）は `_apply_claim_review_side_effects` に抽出しフル upsert と共通。
   **権限は `_ensure_component_editable`（document 単位が主経路・course フォールバック）** —
   既存 `/reject` も同ゲートに是正済み（course_id 無しのパイプライン component が 404 に
-  なる旧バグの解消）。フル PUT / PATCH（upsert）は非改変。
+  なる旧バグの解消）。非 UUID の component/claim id（集約 main ノード等）は
+  `_is_db_uuid` で 404 に落とす。フル PUT / PATCH（upsert）は非改変。
+  **stored graph のノード review_status は、人間の判断（approved/rejected 等）のとき
+  live の `theory_components.review_status` が焼き込み値に勝つ**
+  （`_normalize_stored_component_graph` + core `merge_live_review_statuses` — これが
+  無いと承認してもレビューループが閉じない）。
 - **グラフ全体対話**: `core/deliberation/graph_dialogue.py`（FastAPI 非 import）。
   疑似要素型 `document_graph`（migration 075 = `deliberation_sessions.element_type` CHECK
   への追加のみ。**`element_annotations` の CHECK と `ElementRef`/`ELEMENT_TYPES` は
@@ -2367,8 +2376,9 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   最新 `theory_component_graphs` からの非LLM 決定論投影（main バックボーン + 関係 +
   式の詳細層の規模 + 未レビュー一覧 + validation + narrative）。グラフ未構築は 422。
   **候補注釈を生成しない**（要素単位の注釈はノード対話 = 既存 W層 sessions の責務）。
-  API は `POST /api/admin/deliberation/documents/{id}/graph-sessions`（get-or-create）+
-  `.../graph-sessions/{sid}/messages`。
+  API は `POST /api/admin/deliberation/documents/{id}/graph-sessions`（get-or-create。
+  `?force_new=true` = セッション上限到達後の再開手段・旧履歴は保持）+
+  `.../graph-sessions/{sid}/messages`（CostGate 消費は全 422 経路の後）。
 - **UI**: `admin-graph-review.js`（ES5・`window.GraphReview`・DI 注入）。層トグル・
   未レビューのみ強調（非該当は薄く残す）・「次の未レビューへ」ナビ・ノード詳細
   （承認/却下/深く検討 + 根拠 claim 行の承認。claim の DB UUID / review_status は

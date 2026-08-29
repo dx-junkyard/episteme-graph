@@ -160,7 +160,11 @@ class TestAdminUiAnchorsModule:
         #    状態遷移で、学習者側の推定の関係からも消える — RE5/RE8）/
         #   atlas.edge-incorporate（[次版の下書きへ反映…]。採用済み・下書きあり・
         #    分野がアクティブのときだけ押せる。書くのは常に教員の PUT draft — RE3）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 316
+        # + グラフ対話レビューのレビュー是正（2026-08-29 §11）の2件:
+        #   graph-review.open-deliberation（ノード詳細の「深く検討」— W層完全版への遷移）/
+        #   graph-review.new-chat（グラフ全体対話のセッション上限到達時の再開ボタン。
+        #    force_new=true で新規セッション。旧対話の記録は残る — GR7）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 318
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

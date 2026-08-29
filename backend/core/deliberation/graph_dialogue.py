@@ -96,8 +96,61 @@ class GraphNotAvailableError(Exception):
 # ---------------------------------------------------------------------------
 
 
+# 「人間の判断」とみなす review_status（stored graph の焼き込み値より live 値を優先
+# する対象。routes 層の同名タプルと同語彙 — core は routes を import しないため
+# ここに持つ。導出語彙 source_backed / review_required は含めない）。
+HUMAN_REVIEW_DECISION_STATUSES = (
+    "teacher_approved", "teacher_reviewed", "endorsed", "rejected", "needs_revision",
+)
+
+
+def _live_review_status_map(document_id: str) -> dict[str, str]:
+    """document の theory_components の live review_status（component_id → status）。"""
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                """
+                SELECT id::text, review_status
+                FROM theory_components
+                WHERE source_scope->>'document_id' = :document_id
+                """
+            ),
+            {"document_id": document_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return {str(r[0]): str(r[1] or "") for r in rows}
+
+
+def merge_live_review_statuses(graph: dict[str, Any], status_by_id: dict[str, str]) -> dict[str, Any]:
+    """stored graph のノード review_status に教員判断の live 値を合成する（純粋関数）。
+
+    stored graph の review_status はパイプライン構築時の焼き込み値のため、承認/却下が
+    grounding（未レビュー一覧）に反映されない欠陥があった（2026-08-29 レビュー是正）。
+    live 値が :data:`HUMAN_REVIEW_DECISION_STATUSES` のときだけ上書きし、導出値は保つ。
+    """
+    if not status_by_id or not isinstance(graph.get("nodes"), list):
+        return graph
+    merged = dict(graph)
+    merged_nodes: list[Any] = []
+    for node in graph["nodes"]:
+        if isinstance(node, dict):
+            live = status_by_id.get(_node_id(node), "")
+            if live in HUMAN_REVIEW_DECISION_STATUSES and node.get("review_status") != live:
+                node = dict(node)
+                node["review_status"] = live
+        merged_nodes.append(node)
+    merged["nodes"] = merged_nodes
+    return merged
+
+
 def load_latest_graph(document_id: str) -> dict[str, Any]:
-    """最新の theory_component_graphs 行を返す（無ければ空 dict）。"""
+    """最新の theory_component_graphs 行を返す（無ければ空 dict）。
+
+    ノードの review_status には live の教員判断を合成する
+    （:func:`merge_live_review_statuses`。取得失敗は焼き込み値のまま fail-soft）。
+    """
     if not str(document_id or "").strip():
         return {}
     session = get_session()
@@ -122,12 +175,29 @@ def load_latest_graph(document_id: str) -> dict[str, Any]:
     if isinstance(graph, dict) and "validation_results" not in graph:
         graph = dict(graph)
         graph["validation_results"] = row[1] if isinstance(row[1], list) else []
-    return graph if isinstance(graph, dict) else {}
+    if not isinstance(graph, dict):
+        return {}
+    try:
+        graph = merge_live_review_statuses(graph, _live_review_status_map(document_id))
+    except Exception:  # noqa: BLE001 — 合成は best-effort（grounding 自体を止めない）
+        logger.warning(
+            "graph dialogue: live review status merge failed for document %s",
+            document_id, exc_info=True,
+        )
+    return graph
 
 
 # ---------------------------------------------------------------------------
 # grounding 構築（純粋関数 — fake graph dict でテスト可能）
 # ---------------------------------------------------------------------------
+
+
+def _safe_int(value: Any) -> int:
+    """display_order 等の防御的 int 変換（非数値は 0 — 500 にしない）。"""
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _node_id(node: dict[str, Any]) -> str:
@@ -166,7 +236,7 @@ def build_graph_grounding(graph: dict[str, Any]) -> dict[str, Any]:
 
     main_nodes = sorted(
         (n for n in nodes if _node_layer(n) == "main"),
-        key=lambda n: (int(n.get("display_order") or 0), _node_label(n)),
+        key=lambda n: (_safe_int(n.get("display_order")), _node_label(n)),
     )
     detail_nodes = [n for n in nodes if _node_layer(n) == "equation_detail"]
     debug_nodes = [n for n in nodes if _node_layer(n) == "debug"]
@@ -266,7 +336,9 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
             lines.append(f"- ({severity or 'info'}) {message}")
 
     narrative = grounding.get("narrative") or {}
-    summary = str(narrative.get("summary") or "").strip()
+    # NarrativeAnnotator の永続キーは graph_summary（persistence.py の _narrative_payload）。
+    # summary は防御的フォールバック（2026-08-29 レビュー是正 — 旧キー名は本番で常に空だった）。
+    summary = str(narrative.get("graph_summary") or narrative.get("summary") or "").strip()
     if summary:
         lines.append(f"[グラフの読み方（AI提案・未確認）] {summary}")
 
