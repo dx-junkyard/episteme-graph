@@ -345,6 +345,172 @@ class TestCompareAnalysis:
         assert "localStorage" not in code
         assert "sessionStorage" not in code
 
+    # ── 重なり / 違いの2区画化 ────────────────────────────────────────────
+
+    def test_compare_sections_have_fixed_heads(self):
+        """「同じ内容」と「別の知識」を同じ箇条書きに混ぜない（主語を分ける）。"""
+        assert "≒ 重なっていそうな要素 — 別の表現・文脈で同じ内容" in self.src
+        assert "✚ 異なっていそうな要素 — 関連するが別の知識" in self.src
+
+    def test_compare_overlaps_are_rendered_when_returned(self):
+        body = _extract_function(self.src, "compareBlockHtml")
+        assert "item.overlaps || []" in body
+        assert "overlap.statement" in body
+        assert "overlap.evidence_quote" in body
+        # component_label は空文字で来ることがあるので有無を必ず見る。
+        assert "overlap.component_label" in body
+
+    def test_compare_falls_back_to_common_ground_without_overlaps(self):
+        """overlaps を返さない旧レスポンスでも共通点を落とさない（後方互換）。"""
+        body = _extract_function(self.src, "compareBlockHtml")
+        assert "} else if (item.common_ground) {" in body
+        assert "COMPARE_COMMON_HEAD" in body
+
+    def test_compare_empty_notice_needs_both_sections_empty(self):
+        body = _extract_function(self.src, "compareBlockHtml")
+        assert "!overlaps.length && !item.common_ground" in body
+        assert "比較できる違いは返されませんでした。" in self.src
+
+    def test_compare_quotes_are_collapsed_not_dropped(self):
+        """逐語引用は畳むが省かない（PR4: 引用を必ず添える）。"""
+        body = _extract_function(self.src, "compareQuoteHtml")
+        assert "<details" in body
+        assert "COMPARE_QUOTE_SUMMARY" in body
+        assert "根拠（要旨からの逐語引用）" in self.src
+        # 常時表示の「引用: 」前置きは details に置き換えた（二重表示にしない）。
+        assert "COMPARE_QUOTE_HEAD" not in self.src
+
+    def test_compare_difference_aspect_is_shown_as_a_chip(self):
+        body = _extract_function(self.src, "compareBlockHtml")
+        assert "diff.aspect" in body
+        assert "compareItemChipHtml(" in body
+
+
+# ---------------------------------------------------------------------------
+# ⑥-b 重なり・差分表示（landing / overlap_components / new_facets）
+#     いずれもサーバが付けたラベルの素通し。数値・閾値をクライアントに持たない。
+# ---------------------------------------------------------------------------
+
+
+class TestOverlapAndFacetDisplay:
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+        self.code = _strip_comments(self.src)
+
+    def test_legend_declares_symbols_and_estimation(self):
+        """記号の意味と「推定である」ことを一覧の先頭で1回だけ宣言する。"""
+        assert "≒ 重なり = 既存の部品・語彙と同じ内容を扱っていそう" in self.src
+        assert "✚ 新しい面 = 起点論文が触れていない主題に近そう" in self.src
+        assert (
+            "いずれもタイトル・要旨からの推定です（取り込み後の解析・教員確認で確定します）"
+            in self.src
+        )
+
+    def test_legend_is_rendered_once_before_the_bands(self):
+        body = _extract_function(self.src, "renderCandidates")
+        assert "var html = relationLegendHtml();" in body
+        assert 'id="pr-relation-legend"' in self.src
+
+    def test_legend_is_gated_by_actual_signals(self):
+        """関係の注記が1件も無い検索では凡例ごと出さない。"""
+        legend = _extract_function(self.src, "relationLegendHtml")
+        assert "if (!hasRelationSignals()) return" in legend
+        body = _extract_function(self.src, "hasRelationSignals")
+        assert "candidate.landing" in body
+        assert "candidate.overlap_components" in body
+        assert "candidate.new_facets" in body
+
+    def test_landing_line_uses_server_labels_only(self):
+        body = _extract_function(self.src, "landingLineHtml")
+        for key in (
+            "landing.node_label",
+            "landing.region_label",
+            "landing.nearness_label",
+            "landing.skeleton_version",
+        ):
+            assert key in body, f"着地行がサーバの {key} を読んでいない"
+        assert "取り込むと: " in self.src
+        assert "の近くに落ちそうです" in self.src
+        # 骨格の版を伏せない（VA8: 閉世界の言明は版を明示する）。
+        assert "骨格 版" in self.src
+
+    def test_landing_line_is_optional(self):
+        body = _extract_function(self.src, "landingLineHtml")
+        assert 'if (!landing || !landing.node_label) return "";' in body
+
+    def test_chips_state_overlap_and_new_facet_in_fixed_words(self):
+        assert "≒ 部品「" in self.src
+        assert "」と重なりそう" in self.src
+        assert "✚ 「" in self.src
+        assert "」の近く（起点論文は未言及）" in self.src
+        assert "〈推定〉" in self.src
+
+    def test_chip_counts_are_capped_and_remainder_is_kept(self):
+        """表示上限で落とした分は「ほか」で存在だけ残す（件数は出さない）。"""
+        assert re.search(r"var OVERLAP_CHIP_MAX = 3;", self.src)
+        assert re.search(r"var FACET_CHIP_MAX = 2;", self.src)
+        body = _extract_function(self.src, "relationChipsHtml")
+        assert "OVERLAP_CHIP_MAX" in body
+        assert "FACET_CHIP_MAX" in body
+        assert "CHIP_MORE_LABEL" in body
+        assert "ほか" in self.src
+
+    def test_chips_are_optional(self):
+        body = _extract_function(self.src, "relationChipsHtml")
+        assert "(candidate && candidate.overlap_components) || []" in body
+        assert "(candidate && candidate.new_facets) || []" in body
+        assert 'if (!overlaps.length && !facets.length) return "";' in body
+
+    def test_unmeasured_fact_is_gated_by_relation_context(self):
+        """下地ごと無いときは注記を出さない（全候補に同じ行を並べない）。"""
+        body = _extract_function(self.src, "relationUnmeasuredHtml")
+        assert "state.relationContext" in body
+        assert "context.available" in body
+        assert '!context.available) return "";' in body
+        # 着地が測れた候補には出さない（重複した注記を並べない）。
+        assert "candidate.landing" in body
+        assert (
+            "着地・重なりの近さは測定できませんでした（このまま取り込みできます）"
+            in self.src
+        )
+
+    def test_relation_context_comes_from_the_search_response(self):
+        body = _extract_function(self.src, "runSearch")
+        assert "data.relation_context" in body
+        opened = _extract_function(self.src, "openModal")
+        assert "state.relationContext = null;" in opened
+
+    def test_card_renders_landing_then_chips(self):
+        body = _extract_function(self.src, "candidateCardHtml")
+        assert "landingLineHtml(candidate)" in body
+        assert "relationUnmeasuredHtml(candidate)" in body
+        assert "relationChipsHtml(candidate)" in body
+        assert body.index("landingLineHtml") < body.index("relationChipsHtml")
+
+    def test_relation_text_is_escaped(self):
+        for name in (
+            "relationChipHtml",
+            "landingLineHtml",
+            "relationUnmeasuredHtml",
+            "relationChipsHtml",
+            "relationLegendHtml",
+        ):
+            body = _extract_function(self.src, name)
+            assert "esc(" in body, f"{name} が esc() を通していない"
+
+    def test_no_client_side_relation_scoring(self):
+        """近さはサーバが決める。クライアントで計算・描画しない（PR2 / VA2）。"""
+        for banned in (
+            "Math.sqrt",
+            "cosine",
+            "similarity",
+            "dot_product",
+            "overlap_score",
+            "重なり度",
+            "スコア",
+        ):
+            assert banned not in self.code, f"数値算出の痕跡: {banned}"
+
 
 # ---------------------------------------------------------------------------
 # ⑦ PR3: 取り込みは既存の弁のみ
@@ -667,4 +833,4 @@ class TestArxivProvenanceRegistration:
 class TestCacheBuster:
     def test_admin_html_bumps_the_radar_cache_buster(self):
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-radar.js?v=paper-radar-20260828-3" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20260829-1" in src

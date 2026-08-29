@@ -104,11 +104,49 @@
   var BANDING_UNAVAILABLE_NOTICE =
     "距離の判定はできませんでした。候補を新着順のまま表示しています。";
 
+  // ── 重なり・差分の表示（VA層の着地予測と関係注記）────────────────────────
+  // PR2 / VA2 を継承: サーバが確定したラベル・部品名をそのまま描くだけで、
+  // 近さの数値も閾値もクライアントに持たない。推定であることは凡例で一度だけ
+  // 宣言し、各行では短いタグ〈推定〉で思い出させる（断定に化けさせない）。
+  var RELATION_LEGEND =
+    "≒ 重なり = 既存の部品・語彙と同じ内容を扱っていそう ／ " +
+    "✚ 新しい面 = 起点論文が触れていない主題に近そう — " +
+    "いずれもタイトル・要旨からの推定です（取り込み後の解析・教員確認で確定します）";
+  var LANDING_HEAD = "取り込むと: ";
+  var LANDING_TAIL = " の近くに落ちそうです";
+  var OVERLAP_CHIP_HEAD = "≒ 部品「";
+  var OVERLAP_CHIP_TAIL = "」と重なりそう";
+  var FACET_CHIP_HEAD = "✚ 「";
+  var FACET_CHIP_TAIL = "」の近く（起点論文は未言及）";
+  var ESTIMATE_TAG = "〈推定〉";
+  var CHIP_MORE_LABEL = "ほか";
+  // 一覧の可読性のための表示上限。落とした分は「ほか」で存在だけ残す（黙って捨てない）。
+  var OVERLAP_CHIP_MAX = 3;
+  var FACET_CHIP_MAX = 2;
+  // VA4 継承の縮退表示: 関係の下地はあるのに、この候補だけ測れなかったことを
+  // 正直に言う。下地ごと無い（available でない）ときは1行も出さない
+  // （全候補に同じ注記が並ぶノイズを避ける）。
+  var RELATION_UNMEASURED_NOTICE =
+    "着地・重なりの近さは測定できませんでした（このまま取り込みできます）";
+
+  // 重なり=緑系 / 新しい面=紫系。styles.css の --color-text-success（#5dcaa5）は
+  // 白地の 11px 文字には薄すぎるため、地色付きピル用に濃度を落とした固定色を使う
+  // （どちらも中間色 + 半透明地なので明暗どちらの地でも読める）。
+  var OVERLAP_CHIP_STYLE =
+    "color:#1b6b5a;background:rgba(27,107,90,0.12);border:1px solid rgba(27,107,90,0.28)";
+  var FACET_CHIP_STYLE =
+    "color:#6d4fa3;background:rgba(109,79,163,0.12);border:1px solid rgba(109,79,163,0.28)";
+
   // PR4: 比較分析。見出しに「AI 推定」と明記し、caveat はサーバの文字列をそのまま出す。
   var COMPARE_MAX = 10;
   var COMPARE_HEAD = "起点論文との違い（AI 推定）";
   var COMPARE_COMMON_HEAD = "共通点: ";
-  var COMPARE_QUOTE_HEAD = "引用: ";
+  var COMPARE_OVERLAP_HEAD = "≒ 重なっていそうな要素 — 別の表現・文脈で同じ内容";
+  var COMPARE_DIFF_HEAD = "✚ 異なっていそうな要素 — 関連するが別の知識";
+  // 逐語引用は畳んでおく（省かない。読みたい教員だけが開く）。
+  var COMPARE_QUOTE_SUMMARY = "根拠（要旨からの逐語引用）";
+  var COMPARE_PART_HEAD = "部品「";
+  var COMPARE_PART_TAIL = "」";
   var COMPARE_EMPTY_NOTICE = "比較できる違いは返されませんでした。";
   var COMPARE_NONE_SELECTED_NOTICE =
     "比較する論文を選択してください（チェックボックスで選びます）。";
@@ -135,6 +173,9 @@
     closedWorldNote: "",
     total: null,
     banding: null,
+    // 重なり・着地の下地が使えたか（サーバの relation_context）。使えなかったときは
+    // 未測定の注記も出さない（無い下地の説明を候補ごとに繰り返さない）。
+    relationContext: null,
     searched: false,
     searching: false,
     // 教員が開いた帯は開いたまま保つ（比較結果の描き直しで畳まない）。
@@ -373,6 +414,7 @@
     state.closedWorldNote = "";
     state.total = null;
     state.banding = null;
+    state.relationContext = null;
     state.searched = false;
     state.searching = false;
     state.openBands = {};
@@ -834,6 +876,8 @@
         state.closedWorldNote = (data && data.closed_world_note) || "";
         state.total = data && typeof data.total === "number" ? data.total : null;
         state.banding = (data && data.banding) || null;
+        // 古いレスポンス（キーなし）でも壊れない。null なら未測定注記を出さない。
+        state.relationContext = (data && data.relation_context) || null;
         state.searched = true;
         state.openBands = {};
         state.selected = {};
@@ -893,6 +937,111 @@
     node.textContent = parts.join(" ／ ");
   }
 
+  // ── 重なり・差分の描画 ────────────────────────────────────────────────
+  // どのキーも optional。無ければその行ごと描かない（キー欠落で例外を出さない）。
+  function relationChipHtml(text, style) {
+    return (
+      '<span class="pr-relation-chip" style="' +
+      style +
+      ';display:inline-block;border-radius:10px;padding:0 7px;font-size:11px;line-height:16px">' +
+      esc(text) +
+      "</span>"
+    );
+  }
+
+  // VA層の着地予測。サーバの node_label / region_label / nearness_label /
+  // skeleton_version をそのまま連結するだけ（版を伏せない — VA8）。
+  function landingLineHtml(candidate) {
+    var landing = candidate && candidate.landing;
+    if (!landing || !landing.node_label) return "";
+    var parts = [];
+    if (landing.nearness_label) parts.push(String(landing.nearness_label));
+    if (landing.skeleton_version) {
+      parts.push("骨格 版" + String(landing.skeleton_version));
+    }
+    return (
+      '<div class="pr-landing" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' +
+      esc(
+        LANDING_HEAD +
+          (landing.region_label ? String(landing.region_label) + " / " : "") +
+          String(landing.node_label) +
+          LANDING_TAIL +
+          (parts.length ? "（" + parts.join("・") + "）" : "")
+      ) +
+      "</div>"
+    );
+  }
+
+  // 下地はあるのにこの候補だけ測れなかったことを言う（取り込みは妨げない）。
+  function relationUnmeasuredHtml(candidate) {
+    var context = state.relationContext;
+    if (!context || !context.available) return "";
+    if (candidate && candidate.landing && candidate.landing.node_label) return "";
+    return (
+      '<div class="pr-relation-unmeasured" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' +
+      esc(RELATION_UNMEASURED_NOTICE) +
+      "</div>"
+    );
+  }
+
+  function relationChipsHtml(candidate) {
+    var overlaps = (candidate && candidate.overlap_components) || [];
+    var facets = (candidate && candidate.new_facets) || [];
+    if (!overlaps.length && !facets.length) return "";
+    var html =
+      '<div class="pr-relation-chips" style="margin-top:3px;display:flex;gap:5px;flex-wrap:wrap;align-items:center">';
+    var overlapShown =
+      overlaps.length > OVERLAP_CHIP_MAX ? OVERLAP_CHIP_MAX : overlaps.length;
+    for (var i = 0; i < overlapShown; i++) {
+      html += relationChipHtml(
+        OVERLAP_CHIP_HEAD + String(overlaps[i]) + OVERLAP_CHIP_TAIL,
+        OVERLAP_CHIP_STYLE
+      );
+    }
+    if (overlaps.length > overlapShown) {
+      // 上限で落とした分は存在だけ残す（件数は出さない — 数値を見せない）。
+      html +=
+        '<span class="pr-relation-more" style="font-size:11px;color:var(--color-text-tertiary)">' +
+        esc(CHIP_MORE_LABEL) +
+        "</span>";
+    }
+    var facetShown = facets.length > FACET_CHIP_MAX ? FACET_CHIP_MAX : facets.length;
+    for (var f = 0; f < facetShown; f++) {
+      html += relationChipHtml(
+        FACET_CHIP_HEAD + String(facets[f]) + FACET_CHIP_TAIL,
+        FACET_CHIP_STYLE
+      );
+    }
+    html +=
+      '<span class="pr-relation-estimate" style="font-size:11px;color:var(--color-text-tertiary)">' +
+      esc(ESTIMATE_TAG) +
+      "</span>";
+    return html + "</div>";
+  }
+
+  // 凡例は結果リストの先頭で1回だけ。記号の意味と「推定である」ことをここで宣言し、
+  // 各カードでは繰り返さない（PR7: 何を見ているかを一覧の上で明示する）。
+  function hasRelationSignals() {
+    for (var i = 0; i < state.candidates.length; i++) {
+      var candidate = state.candidates[i] || {};
+      if (candidate.landing && candidate.landing.node_label) return true;
+      if (candidate.overlap_components && candidate.overlap_components.length) {
+        return true;
+      }
+      if (candidate.new_facets && candidate.new_facets.length) return true;
+    }
+    return false;
+  }
+
+  function relationLegendHtml() {
+    if (!hasRelationSignals()) return "";
+    return (
+      '<div id="pr-relation-legend" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:6px">' +
+      esc(RELATION_LEGEND) +
+      "</div>"
+    );
+  }
+
   // ── 候補一覧 ──────────────────────────────────────────────────────────
   function candidateCardHtml(candidate) {
     var arxivId = (candidate && candidate.arxiv_id) || "";
@@ -941,6 +1090,11 @@
       esc(meta.join(" ・ ")) +
       "</div>";
 
+    // 着地（測れたとき）か、測れなかった事実（下地があるとき）のどちらか一方。
+    html += landingLineHtml(candidate);
+    html += relationUnmeasuredHtml(candidate);
+    html += relationChipsHtml(candidate);
+
     if (matched.length) {
       // なぜ候補なのかを1行で言う（ブラックボックスのおすすめにしない・数値は出さない）。
       html +=
@@ -975,8 +1129,42 @@
     return html;
   }
 
+  // 逐語引用は details に畳む（省かず、既定では statement の読みを妨げない）。
+  function compareQuoteHtml(quote) {
+    if (!quote) return "";
+    return (
+      '<details class="pr-compare-quote" style="margin-top:1px">' +
+      '<summary style="font-size:11px;color:var(--color-text-tertiary);cursor:pointer">' +
+      esc(COMPARE_QUOTE_SUMMARY) +
+      "</summary>" +
+      '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:1px">' +
+      esc('"' + String(quote) + '"') +
+      "</div></details>"
+    );
+  }
+
+  function compareSectionHeadHtml(text) {
+    return (
+      '<div class="pr-compare-section-head" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:5px">' +
+      esc(text) +
+      "</div>"
+    );
+  }
+
+  function compareItemChipHtml(text, style) {
+    return (
+      '<span style="' +
+      style +
+      ';display:inline-block;border-radius:10px;padding:0 6px;font-size:10.5px;line-height:15px;margin-right:4px">' +
+      esc(text) +
+      "</span>"
+    );
+  }
+
   // PR4: 比較結果は候補カード内の一時的な注釈。出所ラベルとサーバの caveat を
   // そのまま添える（クライアントで注意書きを作らない・断定に書き換えない）。
+  // 「重なり」と「違い」は主語が別なので区画を分けて見出しを付ける
+  // （同じ箇条書きに混ぜると、同じ内容なのか別の知識なのかが読めない）。
   function compareBlockHtml(arxivId) {
     var item = state.compareById[arxivId];
     if (!item) return "";
@@ -986,7 +1174,28 @@
       esc(COMPARE_HEAD) +
       "</div>";
 
-    if (item.common_ground) {
+    var overlaps = item.overlaps || [];
+    if (overlaps.length) {
+      html += compareSectionHeadHtml(COMPARE_OVERLAP_HEAD);
+      html += '<ul style="margin:3px 0 0 16px;padding:0">';
+      for (var o = 0; o < overlaps.length; o++) {
+        var overlap = overlaps[o] || {};
+        html +=
+          '<li style="font-size:12px;color:var(--color-text-secondary);margin-bottom:3px">';
+        // component_label は空文字で来ることがある（部品に紐づかない重なり）。
+        if (overlap.component_label) {
+          html += compareItemChipHtml(
+            COMPARE_PART_HEAD + String(overlap.component_label) + COMPARE_PART_TAIL,
+            OVERLAP_CHIP_STYLE
+          );
+        }
+        html += esc(overlap.statement || "");
+        html += compareQuoteHtml(overlap.evidence_quote);
+        html += "</li>";
+      }
+      html += "</ul>";
+    } else if (item.common_ground) {
+      // overlaps を返さないサーバ（旧レスポンス）では従来どおり共通点を出す。
       html +=
         '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:3px">' +
         esc(COMPARE_COMMON_HEAD + item.common_ground) +
@@ -995,22 +1204,21 @@
 
     var differences = item.differences || [];
     if (differences.length) {
-      html += '<ul style="margin:4px 0 0 16px;padding:0">';
+      html += compareSectionHeadHtml(COMPARE_DIFF_HEAD);
+      html += '<ul style="margin:3px 0 0 16px;padding:0">';
       for (var i = 0; i < differences.length; i++) {
         var diff = differences[i] || {};
         html +=
-          '<li style="font-size:12px;color:var(--color-text-secondary);margin-bottom:3px">' +
-          esc(diff.statement || "");
-        if (diff.evidence_quote) {
-          html +=
-            '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:1px">' +
-            esc(COMPARE_QUOTE_HEAD + '"' + diff.evidence_quote + '"') +
-            "</div>";
+          '<li style="font-size:12px;color:var(--color-text-secondary);margin-bottom:3px">';
+        if (diff.aspect) {
+          html += compareItemChipHtml(String(diff.aspect), FACET_CHIP_STYLE);
         }
+        html += esc(diff.statement || "");
+        html += compareQuoteHtml(diff.evidence_quote);
         html += "</li>";
       }
       html += "</ul>";
-    } else if (!item.common_ground) {
+    } else if (!overlaps.length && !item.common_ground) {
       html +=
         '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">' +
         esc(COMPARE_EMPTY_NOTICE) +
@@ -1112,7 +1320,8 @@
       return;
     }
 
-    var html = "";
+    // 凡例は帯見出しより前に1回だけ（記号の意味を先に置く）。
+    var html = relationLegendHtml();
     if (state.banding && state.banding.available === false) {
       // 帯分けができなかったときは帯を作らず、新着順のまま一覧にする（PR2）。
       for (var i = 0; i < state.candidates.length; i++) {
