@@ -68,6 +68,7 @@ __all__ = [
     "DISCOVERY_RELEVANCE_SCALE",
     "DISCOVERY_RELEVANCE_THRESHOLD_HIGH",
     "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
+    "EDGE_KIND_LABELS",
     "GradedScale",
     "MATERIAL_STATE_LABELS",
     "RADAR_DISTANCE_LABEL_FAR",
@@ -278,6 +279,18 @@ ANCHOR_LANDING_THRESHOLD_MID = 0.30
 ANCHOR_LANDING_SCALE = GradedScale(
     (ANCHOR_LANDING_THRESHOLD_NEAR, ANCHOR_LANDING_THRESHOLD_MID),
     ("かなり近い", "近い可能性", "遠い"),
+)
+
+# ── 骨格の辺種別（SkeletonEdge.kind → 日本語）──────────────────────────────────
+#
+# 正本は core/atlas.py::EDGE_KINDS（adjacent / depends / related）。表示語彙は
+# ここが唯一の定義（atlas_relation_edges_design.md §8。フロントはミラー規律で追随）。
+EDGE_KIND_LABELS = MappingProxyType(
+    {
+        "adjacent": "隣接",
+        "depends": "依存",
+        "related": "関連",
+    }
 )
 
 

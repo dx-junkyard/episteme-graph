@@ -502,6 +502,10 @@ AUDIT_ENTITY_PAPER_DISCOVERY = "paper_discovery"
 # alias_register・見送り alias_dismiss。metadata.action で区別, migration 074）
 AUDIT_ENTITY_ATLAS_VECTOR = "atlas_vector"
 
+# 分野マップの辺候補レビュー（atlas_relation_edges_design.md §8、migration 076）。
+# 辺候補の accept / dismiss / restore / mark_incorporated を記帳する。
+AUDIT_ENTITY_ATLAS_EDGE = "atlas_edge"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -543,4 +547,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
     AUDIT_ENTITY_PAPER_DISCOVERY,
     AUDIT_ENTITY_ATLAS_VECTOR,
+    AUDIT_ENTITY_ATLAS_EDGE,
 )
