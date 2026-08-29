@@ -344,6 +344,9 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "admin:atlas_assist": ("atlas_assist_llm_model", "analysis"),
     "deliberation:chat": ("deliberation_llm_model", "fast"),
     "deliberation:vision": ("deliberation_llm_model", "fast"),
+    # グラフ対話レビューの「グラフ全体対話」（graph_dialogue_review_design.md §5）。
+    # scene は deliberation:* prefix で SCENE_DELIBERATION に束ねられる。
+    "deliberation:graph_chat": ("deliberation_llm_model", "fast"),
     # 図再解析は vision 経路（scene_for_feature の注記参照）— deliberation では
     # なく apparatus のモデル設定に従う（従来挙動の保存）。
     "deliberation:figure_reanalysis": ("apparatus_llm_model", "analysis"),

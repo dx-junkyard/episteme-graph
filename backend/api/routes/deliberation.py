@@ -80,6 +80,7 @@ from core.deliberation import (
     context_lens,
     decomposition,
     dialogue,
+    graph_dialogue,
     identity_links,
     inventory,
     positioning,
@@ -988,6 +989,135 @@ def post_deliberation_message(
         "annotations": [_annotation_response(a) for a in created_annotations],
         "degraded": result.degraded,
     }
+
+
+# ---------------------------------------------------------------------------
+# グラフ対話レビュー: グラフ全体対話（graph_dialogue_review_design.md §5）
+# ---------------------------------------------------------------------------
+#
+# 疑似要素型 ``document_graph`` のセッション（migration 075）。要素単位の対話と違い
+# ElementRef を経由せず（refs.py 非改変）、grounding は最新の theory_component_graphs
+# から core/deliberation/graph_dialogue.py が決定論的に組み立てる。**候補注釈は生成
+# しない**（GR — 確定につながる操作は要素単位に降りてから）。コスト上限は要素対話と
+# 同じ CostGate に相乗り（GR5）。閲覧できれば対話できる（W5 と同水準・GR6）。
+
+
+class GraphMessageCreateRequest(BaseModel):
+    content: str
+    # M層: この実行だけのモデル上書き（scene "deliberation" として検証。vision なし）。
+    model: str | None = None
+
+
+def _resolve_graph_document(document_id: str, current_user: dict) -> str:
+    """document_id / material_id を正規化し閲覧ゲートを通す（inventory と同じ fail-closed）。"""
+    access = resolve_document_access(current_user.get("id"), document_id)
+    if not access.found or not access.can_view:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return access.document_id
+
+
+@router.post("/documents/{document_id}/graph-sessions")
+def open_graph_dialogue_session(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """グラフ全体対話セッションの get-or-create（本人 × document で最新を再開）。
+
+    グラフ未構築（ノード0）はセッションを作らず 422 の事実文（GR5 — 根拠の無い
+    対話を開始しない）。
+    """
+    doc_id = _resolve_graph_document(document_id, current_user)
+    graph = graph_dialogue.load_latest_graph(doc_id)
+    try:
+        graph_dialogue.build_graph_grounding(graph)
+    except graph_dialogue.GraphNotAvailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    session = graph_dialogue.find_latest_graph_session(doc_id, current_user.get("id"))
+    created = False
+    if not session:
+        session = graph_dialogue.create_graph_session(doc_id, created_by=current_user.get("id"))
+        created = True
+        record_review_event(
+            AUDIT_ENTITY_DELIBERATION,
+            session["id"],
+            "",
+            "session_started",
+            current_user.get("id"),
+            {
+                "action": "graph_session.create",
+                "element_type": graph_dialogue.ELEMENT_DOCUMENT_GRAPH,
+                "element_id": doc_id,
+            },
+        )
+    return {"session": _session_response(session), "created": created}
+
+
+@router.post("/documents/{document_id}/graph-sessions/{session_id}/messages")
+def post_graph_dialogue_message(
+    document_id: str,
+    session_id: str,
+    body: GraphMessageCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """グラフ全体対話の1ターン（1 LLM コール・W6。候補注釈なし）。"""
+    doc_id = _resolve_graph_document(document_id, current_user)
+    session = _ensure_session_owner(delib_store.get_session_by_id(session_id), current_user)
+    if (
+        session.get("element_type") != graph_dialogue.ELEMENT_DOCUMENT_GRAPH
+        or session.get("element_id") != doc_id
+    ):
+        raise HTTPException(status_code=404, detail="deliberation session not found")
+
+    user_content = (body.content or "").strip()
+    if not user_content:
+        raise HTTPException(status_code=422, detail="content is required")
+
+    if not dialogue.check_and_count_llm_call(session_id, current_user.get("id")):
+        raise HTTPException(
+            status_code=429,
+            detail="本日またはこのセッションでの対話回数の上限に達しました。しばらくしてから再度お試しください。",
+        )
+
+    requested_model = (body.model or "").strip() or None
+    if requested_model:
+        reason = llm_policy.validate_model_for_scene(llm_policy.SCENE_DELIBERATION, requested_model)
+        if reason:
+            raise HTTPException(status_code=422, detail=reason)
+
+    graph = graph_dialogue.load_latest_graph(doc_id)
+    try:
+        grounding = graph_dialogue.build_graph_grounding(graph)
+    except graph_dialogue.GraphNotAvailableError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    grounding_text = graph_dialogue.graph_grounding_to_text(grounding)
+
+    prior_messages = [
+        {"role": str(m.get("role") or "user"), "content": str(m.get("content") or "")}
+        for m in (session.get("messages") or [])
+        if isinstance(m, dict)
+    ]
+    # 要素対話と同じウィンドウ規約（16/4000/head_keep=1 — 先頭 user に grounding が乗る）。
+    prior_messages = window_history(prior_messages, max_messages=16, max_chars=4000, head_keep=1)
+
+    result = graph_dialogue.run_graph_turn(
+        doc_id,
+        prior_messages=prior_messages,
+        user_content=user_content,
+        grounding_text=grounding_text,
+        model=requested_model,
+        user_id=current_user.get("id"),
+    )
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    delib_store.append_messages(
+        session_id,
+        [
+            {"role": "user", "content": user_content, "created_at": now_iso},
+            {"role": "assistant", "content": result.reply, "created_at": now_iso},
+        ],
+    )
+
+    return {"reply": result.reply, "degraded": result.degraded}
 
 
 @router.get("/elements/{element_type}/{element_id}/annotations")

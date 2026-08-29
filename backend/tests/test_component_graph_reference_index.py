@@ -133,15 +133,20 @@ class TestResolveClaimReferenceIndex:
                 _CLAIM_UUID_A,
                 "X" * 250,  # 200字超のスニペット丸め確認用
                 {"span_id": "span_001_13", "legacy_ids": ["claim_span_001_13_sub04"]},
+                "teacher_approved",
             ),
-            (_CLAIM_UUID_B, "Other claim text", {"legacy_ids": []}),
+            (_CLAIM_UUID_B, "Other claim text", {"legacy_ids": []}, None),
         ]
 
     def test_resolves_by_legacy_agent_id(self, monkeypatch):
         monkeypatch.setattr(tc, "_pg_session", lambda: _FakeClaimsSession(self._rows()))
         index = tc._resolve_claim_reference_index("doc-1", {"claim_span_001_13_sub04"})
         assert index == {
-            "claim_span_001_13_sub04": {"claim_id": _CLAIM_UUID_A, "text": "X" * 200}
+            "claim_span_001_13_sub04": {
+                "claim_id": _CLAIM_UUID_A,
+                "text": "X" * 200,
+                "review_status": "teacher_approved",
+            }
         }
 
     def test_resolves_by_span_id(self, monkeypatch):
@@ -150,9 +155,17 @@ class TestResolveClaimReferenceIndex:
         assert index["span_001_13"]["claim_id"] == _CLAIM_UUID_A
 
     def test_resolves_by_db_uuid_itself(self, monkeypatch):
+        # review_status が NULL の行は既定語彙 teacher_review_required に正規化される
+        # （グラフ対話レビュー画面の claim 行が承認ボタンの活性判定に使う）。
         monkeypatch.setattr(tc, "_pg_session", lambda: _FakeClaimsSession(self._rows()))
         index = tc._resolve_claim_reference_index("doc-1", {_CLAIM_UUID_B})
-        assert index == {_CLAIM_UUID_B: {"claim_id": _CLAIM_UUID_B, "text": "Other claim text"}}
+        assert index == {
+            _CLAIM_UUID_B: {
+                "claim_id": _CLAIM_UUID_B,
+                "text": "Other claim text",
+                "review_status": "teacher_review_required",
+            }
+        }
 
     def test_unreferenced_claim_ids_are_not_included(self, monkeypatch):
         monkeypatch.setattr(tc, "_pg_session", lambda: _FakeClaimsSession(self._rows()))
@@ -350,6 +363,7 @@ class TestBuildGraphReferenceIndex:
                 _CLAIM_UUID_A,
                 "Full claim text",
                 {"legacy_ids": ["claim_span_001_13_sub04"]},
+                "teacher_review_required",
             )
         ]
         monkeypatch.setattr(tc, "_pg_session", lambda: _FakeClaimsSession(claim_rows))
@@ -358,7 +372,11 @@ class TestBuildGraphReferenceIndex:
         index = tc._build_graph_reference_index("doc-1", self._graph_payload())
 
         assert index["claims"] == {
-            "claim_span_001_13_sub04": {"claim_id": _CLAIM_UUID_A, "text": "Full claim text"}
+            "claim_span_001_13_sub04": {
+                "claim_id": _CLAIM_UUID_A,
+                "text": "Full claim text",
+                "review_status": "teacher_review_required",
+            }
         }
         assert index["evidence"] == {"ev_0042": {"text": "quoted PDF text", "block_id": "block_9"}}
         assert index["derivations"]["derivation_claim_0003"]["label"] == "Explains X."
@@ -393,7 +411,7 @@ class TestBuildGraphReferenceIndex:
     def test_artifacts_lookup_failure_is_fail_open(self, monkeypatch):
         """document_run_artifacts 自体が例外を出しても claims 解決は独立して継続する。"""
         claim_rows = [
-            (_CLAIM_UUID_A, "Full claim text", {"legacy_ids": ["claim_span_001_13_sub04"]})
+            (_CLAIM_UUID_A, "Full claim text", {"legacy_ids": ["claim_span_001_13_sub04"]}, "teacher_review_required")
         ]
         monkeypatch.setattr(tc, "_pg_session", lambda: _FakeClaimsSession(claim_rows))
 
@@ -405,7 +423,11 @@ class TestBuildGraphReferenceIndex:
         index = tc._build_graph_reference_index("doc-1", self._graph_payload())
 
         assert index["claims"] == {
-            "claim_span_001_13_sub04": {"claim_id": _CLAIM_UUID_A, "text": "Full claim text"}
+            "claim_span_001_13_sub04": {
+                "claim_id": _CLAIM_UUID_A,
+                "text": "Full claim text",
+                "review_status": "teacher_review_required",
+            }
         }
         assert index["evidence"] == {}
         assert index["derivations"] == {}
@@ -448,7 +470,7 @@ class TestGetComponentGraphRouteWiring:
             lambda document_id, graph, components: dict(stored),
         )
         claim_rows = [
-            (_CLAIM_UUID_A, "Full claim text", {"legacy_ids": ["claim_span_001_13_sub04"]})
+            (_CLAIM_UUID_A, "Full claim text", {"legacy_ids": ["claim_span_001_13_sub04"]}, "teacher_review_required")
         ]
         monkeypatch.setattr(tc, "_pg_session", lambda: _FakeClaimsSession(claim_rows))
         monkeypatch.setattr(tc, "document_run_artifacts", lambda document_id: {})

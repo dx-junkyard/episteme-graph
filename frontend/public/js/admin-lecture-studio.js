@@ -5084,7 +5084,13 @@
   // Return a graph filtered to the currently selected layer. Edges are kept
   // only when both endpoints remain visible.
   function lsGraphForCurrentLayer(graph) {
-    var filter = lsState.graphLayerFilter || "main";
+    return lsGraphFilterByLayer(graph, lsState.graphLayerFilter || "main");
+  }
+
+  // 純粋な層フィルタ（graph_dialogue_review_design.md §6 / GR8: グラフレビュー画面と
+  // 共有するため lsState 非依存に分離。window.LectureStudio.graphView から公開）。
+  function lsGraphFilterByLayer(graph, filter) {
+    filter = filter || "main";
     var nodes = graph.nodes || [];
     var edges = graph.edges || [];
     if (filter === "all") return graph;
@@ -5262,98 +5268,79 @@
     return true;
   }
 
-  function lsInitComponentGraphNetwork(graph, readingPath) {
-    var networkEl = document.getElementById("ls-component-network");
-    if (!networkEl) return;
-    lsActiveComponentGraph = graph;
-    // Issue #452: ordered reading-path overlay (id -> 1-based step).
-    var pathOrder = {};
-    (readingPath || []).forEach(function (id, i) { pathOrder[id] = i + 1; });
+  // vis-network のノード/エッジ仕様とオプションの正本（graph_dialogue_review_design.md
+  // §6 / GR8）。スタジオのグラフパネルとグラフレビュー画面（admin-graph-review.js）の
+  // 両方がここを通る — 描画スタイルを二重実装しない。
+  function lsGraphVisNodeSpec(node, index, layoutPositions, pathOrder) {
+    pathOrder = pathOrder || {};
+    var id = lsGraphNodeId(node) || ("node-" + index);
+    var group = lsGraphNodeGroup(node);
+    var pos = (layoutPositions || {})[id] || { x: 0, y: index * 160 };
+    var backing = String((node && node.source_backing_status) || "").toLowerCase();
+    var visNode = {
+      id: id,
+      label: lsGraphNodeDisplayLabel(node, id),
+      x: pos.x,
+      y: pos.y,
+      group: group,
+      title: lsGraphNodeTooltip(node),
+    };
+    if (lsGraphNodeDashed(node, group) || backing === "review_required") {
+      visNode.shapeProperties = { borderDashes: [6, 5] };
+    }
+    if (backing === "partially_source_backed") {
+      visNode.borderWidth = 1;
+    }
+    if (lsGraphNodeFaded(node, backing)) {
+      visNode.opacity = 0.55;
+    }
+    // Issue #449: thesis-anchor nodes (the goal of the argument) must always be
+    // visually distinguishable. Emphasis comes from the node's own
+    // is_thesis_anchor flag — never from ID string matching — so it works
+    // regardless of any prefix mismatch between artifacts (#443 is separate).
+    if (node && node.is_thesis_anchor) {
+      visNode.label = "★ " + visNode.label;
+      visNode.borderWidth = 4;
+      visNode.borderWidthSelected = 5;
+      visNode.font = { multi: true, color: "#b45309" };
+      visNode.shadow = { enabled: true, color: "rgba(245, 158, 11, 0.45)", size: 16, x: 0, y: 0 };
+    }
+    // Issue #452: number path nodes in reading order and emphasise their border.
+    if (pathOrder[id]) {
+      visNode.label = lsCircledNumber(pathOrder[id]) + " " + visNode.label;
+      if (!(node && node.is_thesis_anchor)) {
+        visNode.borderWidth = Math.max(visNode.borderWidth || 2, 3);
+      }
+    }
+    return visNode;
+  }
 
-    var nodes = graph.nodes || [];
-    var edges = graph.edges || [];
-    var graphEdges = lsGraphDisplayEdges(edges);
-    var layoutPositions = lsGraphLayoutPositions(nodes, graphEdges);
-    var nodeById = {};
-    nodes.forEach(function (node) {
-      var id = lsGraphNodeId(node);
-      if (id) nodeById[id] = node;
-    });
-    // Issue #450: map vis edge id -> edge so edge selection can render its detail.
-    var edgeById = {};
-    graphEdges.forEach(function (edge, index) {
-      edgeById[edge.edge_id || ("edge-" + index)] = edge;
-    });
+  function lsGraphVisEdgeSpec(edge, index, pathOrder) {
+    pathOrder = pathOrder || {};
+    var from = edge.source_component_id || edge.source || edge.from;
+    var to = edge.target_component_id || edge.target || edge.to;
+    var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
+    var visEdge = {
+      id: edge.edge_id || ("edge-" + index),
+      from: from,
+      to: to,
+      label: lsGraphEdgeLabel(relation),
+      arrows: "to",
+      dashes: lsGraphEdgeDashed(edge),
+      width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
+      color: { color: lsGraphEdgeColor(edge) },
+    };
+    // Issue #452: highlight forward edges that lie on the recommended path.
+    if (pathOrder[from] && pathOrder[to] && pathOrder[to] > pathOrder[from]) {
+      visEdge.color = { color: "#4f46e5", highlight: "#4338ca" };
+      visEdge.width = 4;
+      visEdge.dashes = false;
+    }
+    return visEdge;
+  }
 
-    var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
-      var id = lsGraphNodeId(node) || ("node-" + index);
-      var group = lsGraphNodeGroup(node);
-      var pos = layoutPositions[id] || { x: 0, y: index * 160 };
-      var backing = String((node && node.source_backing_status) || "").toLowerCase();
-      var visNode = {
-        id: id,
-        label: lsGraphNodeDisplayLabel(node, id),
-        x: pos.x,
-        y: pos.y,
-        group: group,
-        title: lsGraphNodeTooltip(node),
-      };
-      if (lsGraphNodeDashed(node, group) || backing === "review_required") {
-        visNode.shapeProperties = { borderDashes: [6, 5] };
-      }
-      if (backing === "partially_source_backed") {
-        visNode.borderWidth = 1;
-      }
-      if (lsGraphNodeFaded(node, backing)) {
-        visNode.opacity = 0.55;
-      }
-      // Issue #449: thesis-anchor nodes (the goal of the argument) must always be
-      // visually distinguishable. Emphasis comes from the node's own
-      // is_thesis_anchor flag — never from ID string matching — so it works
-      // regardless of any prefix mismatch between artifacts (#443 is separate).
-      if (node && node.is_thesis_anchor) {
-        visNode.label = "★ " + visNode.label;
-        visNode.borderWidth = 4;
-        visNode.borderWidthSelected = 5;
-        visNode.font = { multi: true, color: "#b45309" };
-        visNode.shadow = { enabled: true, color: "rgba(245, 158, 11, 0.45)", size: 16, x: 0, y: 0 };
-      }
-      // Issue #452: number path nodes in reading order and emphasise their border.
-      if (pathOrder[id]) {
-        visNode.label = lsCircledNumber(pathOrder[id]) + " " + visNode.label;
-        if (!(node && node.is_thesis_anchor)) {
-          visNode.borderWidth = Math.max(visNode.borderWidth || 2, 3);
-        }
-      }
-      return visNode;
-    }));
-
-    var visEdges = new window.vis.DataSet(graphEdges.map(function (edge, index) {
-      var from = edge.source_component_id || edge.source || edge.from;
-      var to = edge.target_component_id || edge.target || edge.to;
-      var relation = edge.relation || edge.edge_type || edge.type || "RELATED_TO";
-      var visEdge = {
-        id: edge.edge_id || ("edge-" + index),
-        from: from,
-        to: to,
-        label: lsGraphEdgeLabel(relation),
-        arrows: "to",
-        dashes: lsGraphEdgeDashed(edge),
-        width: Math.max(1, Math.min(4, Number(edge.confidence || 0.7) * 4)),
-        color: { color: lsGraphEdgeColor(edge) },
-      };
-      // Issue #452: highlight forward edges that lie on the recommended path.
-      if (pathOrder[from] && pathOrder[to] && pathOrder[to] > pathOrder[from]) {
-        visEdge.color = { color: "#4f46e5", highlight: "#4338ca" };
-        visEdge.width = 4;
-        visEdge.dashes = false;
-      }
-      return visEdge;
-    }).filter(function (edge) {
-      return edge.from && edge.to;
-    }));
-
-    var network = new window.vis.Network(networkEl, { nodes: visNodes, edges: visEdges }, {
+  function lsGraphNetworkOptions() {
+    return {
       layout: {
         hierarchical: false,
       },
@@ -5379,7 +5366,43 @@
         uncertainty: { color: { background: "#fff7ed", border: "#f97316", highlight: { background: "#ffedd5", border: "#ea580c" } }, shape: "ellipse" },
       },
       interaction: { hover: true, tooltipDelay: 180 },
+    };
+  }
+
+  function lsInitComponentGraphNetwork(graph, readingPath) {
+    var networkEl = document.getElementById("ls-component-network");
+    if (!networkEl) return;
+    lsActiveComponentGraph = graph;
+    // Issue #452: ordered reading-path overlay (id -> 1-based step).
+    var pathOrder = {};
+    (readingPath || []).forEach(function (id, i) { pathOrder[id] = i + 1; });
+
+    var nodes = graph.nodes || [];
+    var edges = graph.edges || [];
+    var graphEdges = lsGraphDisplayEdges(edges);
+    var layoutPositions = lsGraphLayoutPositions(nodes, graphEdges);
+    var nodeById = {};
+    nodes.forEach(function (node) {
+      var id = lsGraphNodeId(node);
+      if (id) nodeById[id] = node;
     });
+    // Issue #450: map vis edge id -> edge so edge selection can render its detail.
+    var edgeById = {};
+    graphEdges.forEach(function (edge, index) {
+      edgeById[edge.edge_id || ("edge-" + index)] = edge;
+    });
+
+    var visNodes = new window.vis.DataSet(nodes.map(function (node, index) {
+      return lsGraphVisNodeSpec(node, index, layoutPositions, pathOrder);
+    }));
+
+    var visEdges = new window.vis.DataSet(graphEdges.map(function (edge, index) {
+      return lsGraphVisEdgeSpec(edge, index, pathOrder);
+    }).filter(function (edge) {
+      return edge.from && edge.to;
+    }));
+
+    var network = new window.vis.Network(networkEl, { nodes: visNodes, edges: visEdges }, lsGraphNetworkOptions());
     lsActiveComponentNetwork = network;
 
     var fitBtn = document.getElementById("ls-component-graph-fit");
@@ -8900,6 +8923,26 @@
   window.LectureStudio = {
     init: init,
     openExportModal: openExportModal,
-    getScreenContext: getScreenContext
+    getScreenContext: getScreenContext,
+    // グラフ描画の正本の公開面（graph_dialogue_review_design.md §6 / GR8）。
+    // グラフレビュー画面（admin-graph-review.js）が同じレイアウト・スタイル・語彙で
+    // 描画するために使う。ここに列挙するのは lsState 非依存の純関数のみ。
+    graphView: {
+      nodeId: lsGraphNodeId,
+      filterByLayer: lsGraphFilterByLayer,
+      layerOptions: lsGraphLayerOptions,
+      layoutPositions: lsGraphLayoutPositions,
+      displayEdges: lsGraphDisplayEdges,
+      visNodeSpec: lsGraphVisNodeSpec,
+      visEdgeSpec: lsGraphVisEdgeSpec,
+      networkOptions: lsGraphNetworkOptions,
+      semanticLabel: lsGraphSemanticLabel,
+      detailHeading: lsGraphDetailHeading,
+      nodeTooltip: lsGraphNodeTooltip,
+      roleLabel: lsGraphRoleLabel,
+      sourceBackingLabel: lsGraphSourceBackingLabel,
+      reviewReasonLabel: lsGraphReviewReasonLabel,
+      edgeLabel: lsGraphEdgeLabel
+    }
   };
 })();

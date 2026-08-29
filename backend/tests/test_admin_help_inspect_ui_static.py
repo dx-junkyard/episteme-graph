@@ -213,6 +213,7 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-discovery.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js",
+    ROOT / "frontend" / "public" / "js" / "admin-graph-review.js",
     ROOT / "frontend" / "public" / "js" / "admin-next-steps.js",
     ROOT / "frontend" / "public" / "js" / "admin-manual-editor.js",
     ROOT / "frontend" / "public" / "js" / "admin-discuss-observation.js",

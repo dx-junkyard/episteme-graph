@@ -2207,7 +2207,7 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
     session = _pg_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id, text, source_scope FROM theory_claims WHERE document_id = :document_id"),
+            sa_text("SELECT id, text, source_scope, review_status FROM theory_claims WHERE document_id = :document_id"),
             {"document_id": document_id},
         ).fetchall()
     finally:
@@ -2217,6 +2217,9 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
         text = str(row[1] or "")
         snippet = text[:_REFERENCE_TEXT_SNIPPET_MAX]
         source_scope = _json_value(row[2], {})
+        # review_status はグラフ対話レビュー画面の claim 行（承認ボタンの活性判定）が
+        # 使う（graph_dialogue_review_design.md §3。additive — 既存キーは不変）。
+        review_status = str(row[3] or "teacher_review_required")
         candidate_keys = {claim_uuid}
         if isinstance(source_scope, dict):
             span_id = source_scope.get("span_id")
@@ -2226,7 +2229,7 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
             if isinstance(legacy_ids, list):
                 candidate_keys.update(str(v) for v in legacy_ids if v)
         for key in candidate_keys & ref_ids:
-            index[key] = {"claim_id": claim_uuid, "text": snippet}
+            index[key] = {"claim_id": claim_uuid, "text": snippet, "review_status": review_status}
     return index
 
 
@@ -2666,19 +2669,10 @@ def update_claim(
         ).fetchone()
         session.commit()
         updated = _row_to_claim(row)
-        if existing[1] != updated.review_status:
-            _record_review_event(AUDIT_ENTITY_CLAIM, claim_id, existing[1], updated.review_status, current_user.get("id"))
-            if updated.review_status == "rejected":
-                _propagate_rejected_claim(claim_id)
-            # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
-            # （best-effort。失敗はチャット/編集を止めない）。トリガー詳細は設計 §5 の未決事項。
-            elif updated.review_status in ("teacher_approved", "teacher_reviewed", "endorsed"):
-                try:
-                    from core.reconstruction.worker import maybe_schedule_item_authoring
-
-                    maybe_schedule_item_authoring(updated.document_id or existing[0] or "")
-                except Exception:
-                    logger.debug("reconstruction authoring scheduling skipped", exc_info=True)
+        _apply_claim_review_side_effects(
+            claim_id, existing[1], updated, current_user.get("id"),
+            fallback_document_id=existing[0] or "",
+        )
         return updated
     except Exception:
         session.rollback()
@@ -2686,6 +2680,100 @@ def update_claim(
         raise HTTPException(status_code=500, detail="Failed to update claim")
     finally:
         session.close()
+
+
+def _apply_claim_review_side_effects(
+    claim_id: str,
+    old_review_status: str | None,
+    updated: ClaimOut,
+    user_id: str | None,
+    *,
+    fallback_document_id: str = "",
+) -> None:
+    """claim の review_status 遷移に伴う共通副作用（監査・却下伝播・R層フック）。
+
+    フル upsert（`update_claim`）と遷移専用 API（`review_claim`）の両方が使う
+    （グラフ対話レビュー設計書 §4 — 二重実装しない）。遷移が無ければ何もしない。
+    """
+    if (old_review_status or "") == updated.review_status:
+        return
+    _record_review_event(AUDIT_ENTITY_CLAIM, claim_id, old_review_status or "", updated.review_status, user_id)
+    if updated.review_status == "rejected":
+        _propagate_rejected_claim(claim_id)
+    # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
+    # （best-effort。失敗はチャット/編集を止めない）。トリガー詳細は設計 §5 の未決事項。
+    elif updated.review_status in ("teacher_approved", "teacher_reviewed", "endorsed"):
+        try:
+            from core.reconstruction.worker import maybe_schedule_item_authoring
+
+            maybe_schedule_item_authoring(updated.document_id or fallback_document_id or "")
+        except Exception:
+            logger.debug("reconstruction authoring scheduling skipped", exc_info=True)
+
+
+# claim レビュー遷移の許可語彙（グラフ対話レビュー設計書 §4。これ以外は 422）。
+_CLAIM_REVIEW_STATUSES = ("teacher_approved", "rejected", "needs_revision", "teacher_review_required")
+
+
+class ClaimReviewRequest(BaseModel):
+    review_status: str
+
+
+@router.post("/claims/{claim_id}/review", response_model=ClaimOut)
+def review_claim(
+    claim_id: str,
+    body: ClaimReviewRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> ClaimOut:
+    """claim の review_status だけを遷移する（本文フィールドは一切変更しない）。
+
+    グラフ対話レビュー画面の claim 承認の実体（設計書 §4）。フル upsert の
+    `PATCH /claims/{id}` を画面から使うと、画面が読み込んだ時点の本文で同時編集を
+    巻き戻す事故経路になるため、遷移専用に分離した。副作用（監査・却下伝播・
+    承認時の R層 item オーサリング起動）は `_apply_claim_review_side_effects` で
+    フル upsert と共通（GR4）。
+    """
+    review_status = (body.review_status or "").strip()
+    if review_status not in _CLAIM_REVIEW_STATUSES:
+        raise HTTPException(status_code=422, detail="Invalid review_status")
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text("SELECT document_id, review_status FROM theory_claims WHERE id = CAST(:claim_id AS uuid)"),
+            {"claim_id": claim_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    _ensure_document_editable(existing[0] or "", current_user)
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE theory_claims
+                SET review_status = :review_status,
+                    updated_at = now()
+                WHERE id = CAST(:claim_id AS uuid)
+                RETURNING id, document_id, chunk_id, source_scope, claim_type, text,
+                          normalized_text, concepts, equation, support_status, evidence_text,
+                          review_status, created_by, created_at, updated_at
+            """),
+            {"claim_id": claim_id, "review_status": review_status},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to review claim %s", claim_id)
+        raise HTTPException(status_code=500, detail="Failed to review claim")
+    finally:
+        session.close()
+    updated = _row_to_claim(row)
+    _apply_claim_review_side_effects(
+        claim_id, existing[1], updated, current_user.get("id"),
+        fallback_document_id=existing[0] or "",
+    )
+    return updated
 
 
 @router.get("/documents/{document_id}/sections/{section_id}/components", response_model=list[TheoryComponentOut])
@@ -2866,6 +2954,111 @@ def update_theory_component(
     return _update_component(component_id, payload)
 
 
+def _component_document_id(component: TheoryComponentOut) -> str:
+    """component の帰属 document_id を解決する（source_scope 優先・DB 列フォールバック）。
+
+    パイプライン生成の component は course_id を持たない（document-scoped）ため、
+    権限判定は document 単位が主経路（グラフ対話レビュー設計書 §4 / GR6）。
+    """
+    scope = component.source_scope or {}
+    if isinstance(scope, dict):
+        doc_id = str(scope.get("document_id") or "").strip()
+    else:
+        doc_id = str(getattr(scope, "document_id", "") or "").strip()
+    if doc_id:
+        return doc_id
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT document_id FROM theory_components WHERE id = CAST(:id AS uuid)"),
+            {"id": component.id},
+        ).fetchone()
+    finally:
+        session.close()
+    return str(row[0]) if row and row[0] else ""
+
+
+def _ensure_component_editable(component: TheoryComponentOut, current_user: dict) -> None:
+    """component の編集権限を document 単位で判定する（course 単位フォールバック付き）。
+
+    従来の reject は `_ensure_editable(course_id)` のみで、course_id を持たない
+    パイプライン生成 component（document-scoped）が常に 404 になっていた。
+    document 共有（editor）でも編集できるのが本来の権限モデル（migration 035/044）。
+    """
+    document_id = _component_document_id(component)
+    if document_id:
+        try:
+            _ensure_document_editable(document_id, current_user)
+            return
+        except HTTPException:
+            if not component.course_id:
+                raise
+    if component.course_id:
+        _ensure_editable(component.course_id, current_user)
+        return
+    raise HTTPException(status_code=404, detail="Theory component not found")
+
+
+# 承認可能性チェックの対象フィールド（原稿スタジオのクライアント側ゲート
+# lsTheoryCanApprove と同基準。グラフ対話レビュー設計書 §4 でサーバ側に強制した）。
+_APPROVAL_EVIDENCE_FIELDS = ("inputs", "outputs", "preconditions", "constraints", "invalid_conditions")
+
+_APPROVAL_FIELD_LABELS = {
+    "inputs": "入力",
+    "outputs": "出力",
+    "preconditions": "成立条件",
+    "constraints": "制約",
+    "invalid_conditions": "注意条件",
+}
+
+
+def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
+    """承認できない理由の事実文一覧を返す（空なら承認可）。"""
+    problems: list[str] = []
+    if not component.inputs:
+        problems.append("入力（inputs）が未設定です")
+    if not component.outputs:
+        problems.append("出力（outputs）が未設定です")
+    for field_name in _APPROVAL_EVIDENCE_FIELDS:
+        label = _APPROVAL_FIELD_LABELS.get(field_name, field_name)
+        for item in getattr(component, field_name, None) or []:
+            if getattr(item, "needs_source", None):
+                problems.append(f"{label}に出典未確定（needs_source）の項目があります")
+                break
+            source_refs = getattr(item, "source_refs", None) or []
+            evidence_claims = getattr(item, "evidence_claims", None) or []
+            if not source_refs and not evidence_claims:
+                problems.append(f"{label}に出典（source_refs / evidence_claims）の無い項目があります")
+                break
+    return problems
+
+
+@router.post("/theory-components/{component_id}/approve", response_model=TheoryComponentOut)
+def approve_theory_component(
+    component_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> TheoryComponentOut:
+    """component を承認へ遷移する（内容フィールドは一切変更しない）。
+
+    グラフ対話レビュー画面の承認ボタンの実体（設計書 §4）。フルオブジェクト PUT と
+    違い、画面が読み込んだ時点のオブジェクトで内容を上書きしない（同時編集の
+    巻き戻し防止）。承認可能性（inputs/outputs 非空 + 全項目に出典）はサーバ側で
+    強制し、満たさなければ 422 の事実文（GR1: 確定は人間 / evidence-based）。
+    監査は `_update_component` 内の review_status 遷移記帳がそのまま効く（GR4）。
+    """
+    existing = _get_component(component_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    _ensure_component_editable(existing, current_user)
+    problems = _component_approval_problems(existing)
+    if problems:
+        raise HTTPException(status_code=422, detail="承認できません: " + "、".join(problems))
+    payload = _dump_model(existing)
+    payload["status"] = "teacher_reviewed"
+    payload["review_status"] = "teacher_approved"
+    return _update_component(component_id, payload)
+
+
 @router.post("/theory-components/{component_id}/reject", response_model=TheoryComponentOut)
 def reject_theory_component(
     component_id: str,
@@ -2874,7 +3067,7 @@ def reject_theory_component(
     existing = _get_component(component_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Theory component not found")
-    _ensure_editable(existing.course_id, current_user)
+    _ensure_component_editable(existing, current_user)
     payload = _dump_model(existing)
     payload["status"] = "rejected"
     payload["review_status"] = "rejected"
