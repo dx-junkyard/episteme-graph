@@ -146,7 +146,21 @@ class TestAdminUiAnchorsModule:
         #   atlas.aliases（登録済みの別名の区画。見送りは行削除ではなく状態遷移 — VA6）/
         #   atlas.gap-alias-register（ギャップ候補カードの [別名として登録]。近傍注記の
         #    ある候補にだけ出る。注記は可能性の提示で、確定は教員 — VA1 / VA8）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 303
+        # + グラフ対話レビュー（graph_dialogue_review_design.md §7）の10件:
+        #   materials.row-graph-review（教材行の入口。document_id を持つ行のみ）/
+        #   graph-review.modal / .layer / .filter-unreviewed / .next-unreviewed（見取り図と
+        #    レビューナビ）/ .approve / .reject（component の状態遷移のみ。承認可能性は
+        #    サーバが 422 の事実文で強制 — GR1/GR6）/ .claim-approve（backing claim の承認。
+        #    R層オーサリングのトリガーにつながる）/ .chat（ノード対話 = W層セッション再利用）/
+        #   .graph-chat（グラフ全体対話。候補注釈を生成しない）。
+        # + 分野マップの関係表示（atlas_relation_edges_design.md §7）の3件:
+        #   atlas.edge-candidates（関係（辺）の候補のグループ全体。候補は読み時導出で、
+        #    採用しても下書きへ反映して凍結するまで骨格は変わらない — RE3/RE6）/
+        #   atlas.edge-dismissed-filter（見送り済みも表示。見送りは行削除ではなく
+        #    状態遷移で、学習者側の推定の関係からも消える — RE5/RE8）/
+        #   atlas.edge-incorporate（[次版の下書きへ反映…]。採用済み・下書きあり・
+        #    分野がアクティブのときだけ押せる。書くのは常に教員の PUT draft — RE3）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 316
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

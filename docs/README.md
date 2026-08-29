@@ -188,6 +188,8 @@ PDF アップロード
 - [知識ランドスケープ（配置層）](features/knowledge_landscape_design.md)
 - [カテゴリギャップ候補（地図を論文から育てる）](features/category_gap_candidates_design.md)
 - [分野マップのベクトル係留層（VA層 — アンカー埋め込み・別名レジストリ・着地予測）](features/atlas_vector_anchoring_design.md)
+- [分野マップの関係表示（辺候補レビューと推定の糸）](features/atlas_relation_edges_design.md)
+  ・親: [表示原則の討議記録](architecture/field_map_display_principles_2026-08-29.md)
 - [リリース前の確認フロー](features/release_review_flow_design.md)
 
 ### 群5: 疑いと検証
@@ -202,6 +204,7 @@ PDF アップロード
   ／[外部レビュー](features/element_deliberation_workspace_review.md)
   ／[要素中心コンテキストレンズ（#498）](features/element_context_lens_design.md)
   ／[要素インベントリ](features/element_inventory_design.md)
+  ／[グラフ対話レビュー（教材起点のグラフ確認・承認画面）](features/graph_dialogue_review_design.md)
 - [二層説明（generic/contextual）+ 図のコース流通](features/hierarchical_context_explanation_design.md)
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)

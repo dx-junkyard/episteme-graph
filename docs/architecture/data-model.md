@@ -370,6 +370,8 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `072_paper_discovery_ingest_queue.sql` | 論文ディスカバリー層 Phase 2（バッチ取り込み）— `paper_discovery_ingest_items`（`status ∈ {queued, fetching, accepted, failed}`・`requested_by` は FK なし・失敗は行を消さず `detail` に事実文を残す）。**シード行を入れない**。行を作るのは教員の明示操作（`POST /ingest-batch`）だけで、候補のスナップショットではない |
 | `073_corpus_roaming_search_state.sql` | コーパス回遊層 Phase C（地図の端 — 外の輪）— `paper_discovery_subscriptions.last_search_found_new BOOLEAN`（教員の最後の検索で `status='new'` の候補が1件以上あったかの**集約1ビット**）。候補のスナップショットを持たない（PD5 と両立）・**シード / 初期値を入れない**（NULL =「まだ検索していない」で、外の輪を行ごと出さない）。学習者起点で arXiv を呼ばないための材料（CR7） |
 | `074_atlas_vector_anchoring.sql` | VA層（ベクトル係留）— `atlas_anchor_embeddings`（骨格ノードのプロトタイプベクトル。`UNIQUE(domain_key, skeleton_version, node_id)`・`vector(3072)`・FK なし・index なし（小規模表）。導出データで (domain, version) 単位の全置換再構築が設計明示の例外）+ `atlas_anchor_aliases`（教員確定の別名レジストリ。`status ∈ {confirmed, dismissed}` の状態遷移のみ・削除 API なし・版非依存）。**シード行を入れない** |
+| `075_graph_dialogue_sessions.sql` | グラフ対話レビュー — `deliberation_sessions.element_type` CHECK に `'document_graph'`（グラフ全体対話の疑似要素型。element_id = document UUID）を追加。**`element_annotations` の CHECK は変更しない**（グラフ全体対話は候補注釈を生成しない）。新テーブル・シードなし |
+| `076_atlas_edge_decisions.sql` | 分野マップの関係表示（辺候補レビュー）— `atlas_edge_decisions`（無向・版非依存の `edge_key` UNIQUE・status ∈ {candidate, accepted, dismissed}・見送りは理由必須・`edge_kind` は採用時に教員が選択・`applied_version` で採用と凍結反映を分離）。候補スナップショットは持たない（読み時導出）・**シード行を入れない** |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

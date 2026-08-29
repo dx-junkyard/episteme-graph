@@ -52,6 +52,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.discard-draft",
         "atlas.domain-restore",
         "atlas.domain-retire",
+        "atlas.edge-candidates",
+        "atlas.edge-dismissed-filter",
+        "atlas.edge-incorporate",
         "atlas.freeze",
         "atlas.gap-accept",
         "atlas.gap-alias-register",
@@ -140,6 +143,15 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "error-analysis.select-all",
         "error-analysis.select-row",
         "error-analysis.time-range",
+        "graph-review.approve",
+        "graph-review.chat",
+        "graph-review.claim-approve",
+        "graph-review.filter-unreviewed",
+        "graph-review.graph-chat",
+        "graph-review.layer",
+        "graph-review.modal",
+        "graph-review.next-unreviewed",
+        "graph-review.reject",
         "groups.create-form",
         "groups.delete-btn",
         "groups.invite-btn",
@@ -283,6 +295,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-figures",
         "materials.row-inventory",
         "materials.row-landscape",
+        "materials.row-graph-review",
         "materials.row-more-menu",
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
@@ -379,6 +392,12 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.domain-restore": "teacher/17-admin-atlas.md#domain-restore",
     # この分野を廃止する
     "atlas.domain-retire": "teacher/17-admin-atlas.md#domain-retire",
+    # 関係（辺）の候補（グループ全体）
+    "atlas.edge-candidates": "teacher/17-admin-atlas.md#edge-candidates",
+    # 見送り済みも表示（辺候補）
+    "atlas.edge-dismissed-filter": "teacher/17-admin-atlas.md#edge-dismissed-filter",
+    # 次版の下書きへ反映…（採用済みの辺候補にだけ押せる）
+    "atlas.edge-incorporate": "teacher/17-admin-atlas.md#edge-incorporate",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
     # 論文の解析から見つかった候補 — 採用
@@ -567,6 +586,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "error-analysis.select-row": "system_admin/12-admin-error-analysis.md#select-row",
     # 期間を選ぶ
     "error-analysis.time-range": "system_admin/12-admin-error-analysis.md#time-range",
+
+    # --- graph-review.* — グラフ対話レビュー（graph_dialogue_review_design.md） --------
+    # 教材行から開く、理論操作グラフ起点のレビュー画面（承認・却下・AI対話）。
+    "graph-review.approve": "teacher/26-admin-graph-review.md#node-approve",
+    "graph-review.chat": "teacher/26-admin-graph-review.md#node-chat",
+    "graph-review.claim-approve": "teacher/26-admin-graph-review.md#claim-approve",
+    "graph-review.filter-unreviewed": "teacher/26-admin-graph-review.md#filter-unreviewed",
+    "graph-review.graph-chat": "teacher/26-admin-graph-review.md#graph-chat",
+    "graph-review.layer": "teacher/26-admin-graph-review.md#layer-toggle",
+    "graph-review.modal": "teacher/26-admin-graph-review.md#graph-review-modal",
+    "graph-review.next-unreviewed": "teacher/26-admin-graph-review.md#next-unreviewed",
+    "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
 
     # --- groups.* — グループタブ --------------------------------------------------------
     # グループを作成
@@ -872,6 +903,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
     # 位置づけ（分野マップ）…
     "materials.row-landscape": "teacher/11-admin-materials.md#landscape-open",
+    # 🕸 グラフレビュー…（graph_dialogue_review_design.md: グラフ対話レビューの入口）
+    "materials.row-graph-review": "teacher/26-admin-graph-review.md#graph-review-open",
     # 操作メニュー（⋯）— 行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）
     "materials.row-more-menu": "teacher/11-admin-materials.md#row-more-menu",
     # PDF再登録

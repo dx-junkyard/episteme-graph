@@ -19,7 +19,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（**074 以降**。044〜073 は使用済み — §3 参照）へ採番し直すこと。
+  着手時は次の空き番号（**077 以降**。044〜076 は使用済み — §3 参照）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
   （設計書表記 039 → 実装 038）/ G層（038 → 039）/ W層 W-β（046 → 048）/
@@ -76,6 +76,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 知識ランドスケープ | Knowledge Landscape（論文→地図の多観点配置） | `docs/features/knowledge_landscape_design.md`（LS1〜LS10） | `backend/core/landscape/` + `routes/landscape.py` + `landscape-layer.js` + `backend/atlas_domains/` | 065 | 実装済み（v1） |
 | カテゴリギャップ候補 | 分野マップを論文から育てる層 | `docs/features/category_gap_candidates_design.md`（§10 実装記録） | `backend/core/atlas_gaps/` + `routes/atlas_gaps.py` | 066 | 実装済み（v1-a〜v1-d） |
 | VA層 | ベクトル係留（アンカー埋め込み・別名レジストリ・配置プレフィルタ・着地予測） | `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録） | `backend/core/atlas_vectors/` + `routes/atlas_vectors.py` | 074 | 実装済み（v1） |
+| グラフ対話レビュー | 教材行から開くグラフ起点のレビュー画面（承認/却下・claim承認・ノード対話・グラフ全体対話） | `docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録） | `backend/core/deliberation/graph_dialogue.py` + `routes/deliberation.py`（graph-sessions）+ `routes/theory_components.py`（approve / claim review）+ `admin-graph-review.js` | 075 | 実装済み（v1） |
 | 教材図スタジオ | Teaching Figure Studio（AI対話 SVG 生成） | `docs/features/teaching_figure_studio_design.md`（FG1〜FG9・§13 実装記録） | `backend/core/teaching_figures/` + `routes/teaching_figures.py` + `admin-figure-studio.js` | 063 | 実装済み（v1） |
 | リリース前の確認 | Release Review Flow（3ステップウィザード） | `docs/features/release_review_flow_design.md`（RR1〜RR7） | `routes/landscape.py`（course-scoped）+ `admin-release-review.js` | 不要（既存 API の束ね） | 実装済み（v1） |
 | 教員の弁と計器 | 負荷順トリアージ + 静かな計器（コスト見通し・WMレンズ） | `docs/features/teacher_triage_instruments_design.md`（TT1〜TT6・§6 実装記録） | `backend/core/teacher_triage.py` + `core/llm_usage/forecast.py` + `core/lecture_wm.py` + 既存キュー2ルートの sort 拡張 | 不要（読み時導出とソートのみ） | 実装済み（Phase 4 v1） |
@@ -156,7 +157,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 072 | `072_paper_discovery_ingest_queue` | 論文ディスカバリー層 Phase 2（取り込みキュー `paper_discovery_ingest_items`。失敗は行を消さず `failed` 保持） |
 | 073 | `073_corpus_roaming_search_state` | **コーパス回遊層** Phase C（地図の端 — 外の輪。`paper_discovery_subscriptions.last_search_found_new` の集約1ビットのみ） |
 | 074 | `074_atlas_vector_anchoring` | **VA層（ベクトル係留）**（アンカー埋め込み + 別名レジストリの2表） |
+| 075 | `075_graph_dialogue_sessions` | **グラフ対話レビュー**（`deliberation_sessions.element_type` に `'document_graph'` を追加。新テーブルなし） |
+| 076 | `076_atlas_edge_decisions` | **分野マップの関係表示（RE追補）**（辺候補の教員判断 `atlas_edge_decisions` 1表。候補は読み時導出） |
 
-次の空き番号は **075**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **077**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

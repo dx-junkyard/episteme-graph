@@ -453,6 +453,12 @@
       var inventoryBtn = m.document_id
         ? '<button class="ls-menu-item admin-inventory-btn" type="button" data-ui-anchor="materials.row-inventory" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示">検出要素</button>'
         : "";
+      // グラフ対話レビュー（graph_dialogue_review_design.md）: 理論操作グラフを見取り図に
+      // AI と対話しながら component / claim を承認する画面（document_id が必要。
+      // 検出要素の隣＝パイプライン成果の導線群に並べる）。
+      var graphReviewBtn = m.document_id
+        ? '<button class="ls-menu-item admin-graph-review-btn" type="button" data-ui-anchor="materials.row-graph-review" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="理論操作グラフを見ながらAIと対話し、論理要素・claim を承認します">🕸 グラフレビュー…</button>'
+        : "";
       // U層（LLM使用量推計, migration 043）: 解析前の事前トークン見積り（TEACHER・レンジのみ・金額なし, G2-U）
       var estimateBtn = m.material_id
         ? '<button class="ls-menu-item admin-estimate-btn" type="button" data-ui-anchor="materials.row-estimate" data-material-id="' + escHtml(m.material_id) + '" title="解析パイプラインが使うトークン量の目安をレンジで表示します（金額は表示されません）">解析コスト見積り…</button>'
@@ -467,6 +473,7 @@
           '<div class="ls-menu material-more-panel" hidden>' +
             figuresBtn +
             inventoryBtn +
+            graphReviewBtn +
             shareBtn +
             versionBtn +
             landscapeBtn +
@@ -526,6 +533,15 @@
           window.Deliberation.openInventory(this.getAttribute("data-document-id"), {
             title: this.getAttribute("data-title")
           });
+        }
+      });
+    });
+
+    // グラフ対話レビュー（graph_dialogue_review_design.md）
+    tbody.querySelectorAll(".admin-graph-review-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.GraphReview) {
+          window.GraphReview.open(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
         }
       });
     });
@@ -5231,6 +5247,7 @@
         renderAtlasOverview();
         updateLifecycleUI();
         loadGapCandidates();
+        loadEdgeCandidates();
         loadVectorPanel();
         return;
       }
@@ -5246,6 +5263,8 @@
       // カテゴリギャップ候補（migration 066）。ポーリングはせず、この読み込みと
       // 各操作の成功後だけ取り直す。
       loadGapCandidates();
+      // 関係（辺）の候補（RE層）も同じ規律（読み時導出・ポーリングなし）で読み直す。
+      loadEdgeCandidates();
       // ベクトル索引・別名レジストリ（VA層）も同じ規律で読み直す。
       loadVectorPanel();
     }
@@ -6189,6 +6208,401 @@
     }
 
     buildGapsGroup();
+
+    // ── 関係（辺）の候補（RE層, migration 076） ───────────────────────
+    // 正本: docs/features/atlas_relation_edges_design.md
+    //   §7   管理 UI（修正報告セクション内の第3グループ。専用タブを作らない。
+    //        admin.html は変更せず、buildGapsGroup と同じ後付けパターンで生成する）
+    //   RE1  主張するのは名前付きの辺だけ（地形・ノードの位置には触れない）
+    //   RE3  恒久配線は candidate → 教員確定 → 凍結のみ。**骨格を書くのは常に教員の
+    //        PUT draft**（preview → 既存の draft 保存経路 → mark-incorporated の3手）
+    //   RE4  数値を出さない（近さはサーバが確定した段階ラベルをそのまま描き、共起の
+    //        支持は論文タイトルの列挙で示す。件数バッジ・生の類似度を描画しない）
+    //   RE5  判断は status 遷移だけ（見送りは理由必須・戻せる・行削除しない）
+    //   RE6  候補はサーバの読み時導出。完了フラグをクライアントに持たず、ポーリングも
+    //        しない（分野の選択・画面の更新・各操作の成功後だけ読み直す）
+    var EDGE_GROUP_TITLE = "関係（辺）の候補";
+    var EDGE_GROUP_INTRO = "アンカーのプロトタイプ近傍と、論文の配置の共起から導かれた関係の候補です。採用して次版の下書きに反映し、公開するまで地図の関係は変わりません。";
+    //: SkeletonEdge.kind → 日本語。正本は backend/core/label_vocab.py::EDGE_KIND_LABELS
+    //  （フロントはミラー規律。ズレは backend/tests/test_atlas_edges_admin_ui_static.py が検出する）。
+    var EDGE_KIND_LABELS = { "adjacent": "隣接", "depends": "依存", "related": "関連" };
+    var EDGE_KIND_ORDER = ["adjacent", "depends", "related"];
+    var EDGE_ORIGIN_VECTOR_LABEL = "プロトタイプ近傍";
+    var EDGE_ORIGIN_CO_OCCURRENCE_LABEL = "共起";
+    var EDGE_ORIGIN_NOTE = "AIによる推定（未確認）";
+    var EDGE_KIND_REQUIRED = "採用するには関係の種類を選んでください";
+    var EDGE_DISMISS_REASON_REQUIRED = "見送りには理由が必要です";
+    var EDGE_ACCEPT_NOTE = "[採用] は「この関係は妥当」という判断だけを記録します。次版の下書きはこの操作では変わりません。";
+    var EDGE_DISMISS_NOTE = "見送った関係は既定の一覧に出なくなります。「見送り済みも表示」から戻せます。";
+    var EDGE_NO_DRAFT_TEXT = "次版の下書きがまだありません。「現在の版から次版の下書きを作る」を実行すると反映できます。";
+    var EDGE_NOT_ACCEPTED_TEXT = "[採用] を押すと、次版の下書きへ反映できます。";
+    var EDGE_RETIRED_TEXT = "この分野は廃止済みです。「復帰する」で戻すと操作できます。";
+    var EDGE_EMPTY_TEXT = "いまレビューする関係の候補はありません。";
+
+    var edgeIncludeDismissed = false;
+    var edgeBusy = false;
+    var latestEdgeData = null;
+    // 教員がその場で選んだ関係の種類（edge_key → kind）。判断のたびに一覧を読み直す
+    // ため、選択途中の値が消えないようクライアント側で保持する。
+    var edgeKindSelections = {};
+    var edgesGroupEl = null;
+    var edgesListEl = null;
+    var edgesStatusEl = null;
+
+    function edgesPath() {
+      return "/admin/cartridges/" + encodeURIComponent(select.value) + "/atlas/edge-candidates";
+    }
+
+    function setEdgesStatus(text, isError) {
+      if (!edgesStatusEl) return;
+      edgesStatusEl.textContent = text || "";
+      edgesStatusEl.style.color = isError ? "var(--color-text-danger, #e53935)" : "var(--color-text-secondary)";
+    }
+
+    // 修正報告セクション内の第3グループとして生成する（admin.html は変更しない）。
+    function buildEdgesGroup() {
+      var section = document.getElementById("atlas-reports-section");
+      if (!section || document.getElementById("atlas-edges-group")) return;
+      var group = document.createElement("div");
+      group.id = "atlas-edges-group";
+      group.setAttribute("data-ui-anchor", "atlas.edge-candidates");
+      group.style.cssText = "margin-top:18px;padding-top:14px;border-top:1px solid var(--color-border)";
+      group.innerHTML =
+        '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;margin-bottom:6px">' +
+          '<h4 style="font-size:13px;margin:0">' + escHtml(EDGE_GROUP_TITLE) + '</h4>' +
+          '<label data-ui-anchor="atlas.edge-dismissed-filter" style="font-size:12px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">' +
+            '<input type="checkbox" id="atlas-edges-show-dismissed"> 見送り済みも表示' +
+          '</label>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 8px">' + escHtml(EDGE_GROUP_INTRO) + '</p>' +
+        '<div id="atlas-edges-list" style="font-size:12.5px"></div>' +
+        '<div id="atlas-edges-status" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px"></div>';
+      section.appendChild(group);
+      edgesGroupEl = group;
+      edgesListEl = document.getElementById("atlas-edges-list");
+      edgesStatusEl = document.getElementById("atlas-edges-status");
+      group.style.display = "none";
+
+      document.getElementById("atlas-edges-show-dismissed").addEventListener("change", function () {
+        edgeIncludeDismissed = !!this.checked;
+        loadEdgeCandidates();
+      });
+      edgesListEl.addEventListener("change", function (e) {
+        var sel = e.target;
+        if (!sel || !sel.classList || !sel.classList.contains("atlas-edge-kind-select")) return;
+        var owner = sel.closest ? sel.closest("[data-edge-key]") : null;
+        if (owner) edgeKindSelections[owner.getAttribute("data-edge-key")] = sel.value;
+      });
+      edgesListEl.addEventListener("click", function (e) {
+        var btn = e.target.closest ? e.target.closest("[data-edge-action]") : null;
+        if (!btn || btn.disabled) return;
+        var card = btn.closest("[data-edge-key]");
+        if (!card) return;
+        handleEdgeAction(card.getAttribute("data-edge-key"), btn.getAttribute("data-edge-action"), card);
+      });
+    }
+
+    // 骨格が無い分野（404）はグループごと非表示にする（fail-closed。空の枠を出さない）。
+    function loadEdgeCandidates() {
+      if (!edgesGroupEl) return;
+      if (!select.value) {
+        latestEdgeData = null;
+        edgesGroupEl.style.display = "none";
+        return;
+      }
+      apiFetch(edgesPath() + (edgeIncludeDismissed ? "?include_dismissed=true" : ""))
+        .then(function (res) {
+          if (res.status === 404) return null;
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        })
+        .then(function (data) {
+          if (!data) {
+            latestEdgeData = null;
+            edgesGroupEl.style.display = "none";
+            return;
+          }
+          edgesGroupEl.style.display = "";
+          renderEdgeCandidates(data);
+          setEdgesStatus("");
+        })
+        .catch(function (err) {
+          latestEdgeData = null;
+          edgesGroupEl.style.display = "";
+          if (edgesListEl) edgesListEl.innerHTML = "";
+          setEdgesStatus("候補の読み込みに失敗しました: " + err.message, true);
+        });
+    }
+
+    // RE4: 出所チップ。近さは nearness_label（サーバが確定した段階の言葉）をそのまま
+    // 描く（生の類似度・閾値をフロントで持たない）。共起は件数を出さず、下の論文
+    // タイトルの列挙で支持を示す。
+    function _edgeOriginChipsHtml(candidate) {
+      var origins = (candidate && candidate.origins) || [];
+      var chips = "";
+      origins.forEach(function (origin) {
+        var text = "";
+        if (origin === "vector") {
+          text = EDGE_ORIGIN_VECTOR_LABEL +
+            (candidate.nearness_label ? "（" + candidate.nearness_label + "）" : "");
+        } else if (origin === "co_occurrence") {
+          text = EDGE_ORIGIN_CO_OCCURRENCE_LABEL;
+        }
+        if (!text) return;
+        chips += '<span class="atlas-edge-origin" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' +
+          escHtml(text) + '</span>';
+      });
+      return chips;
+    }
+
+    // 共起の支持論文はタイトルの列挙で示す（件数バッジを出さない — RE4）。
+    function _edgeDocumentsHtml(candidate) {
+      var docs = (candidate && candidate.documents) || [];
+      if (!docs.length) return "";
+      var html = '<div class="atlas-edge-documents" style="margin-top:6px">' +
+        '<div style="font-size:11.5px;color:var(--color-text-tertiary)">両方の項目に配置がある論文</div>';
+      docs.forEach(function (d) {
+        html += '<div class="atlas-edge-document" style="font-size:12px;color:var(--color-text-secondary);padding-left:12px">' +
+          escHtml((d && d.title) || "無題の論文") + '</div>';
+      });
+      html += '</div>';
+      return html;
+    }
+
+    function _edgeSelectedKind(edgeKey, decision) {
+      if (edgeKindSelections.hasOwnProperty(edgeKey)) return edgeKindSelections[edgeKey];
+      return (decision && decision.edge_kind) || "";
+    }
+
+    function _edgeKindSelectHtml(edgeKey, decision, disabled) {
+      var selected = _edgeSelectedKind(edgeKey, decision);
+      var html = '<select class="atlas-edge-kind-select" style="font-size:12px;padding:2px 4px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-bg-secondary);color:var(--color-text-primary)"' +
+        (disabled ? " disabled" : "") + '>' +
+        '<option value="">関係の種類を選ぶ</option>';
+      EDGE_KIND_ORDER.forEach(function (kind) {
+        html += '<option value="' + escHtml(kind) + '"' + (selected === kind ? " selected" : "") + '>' +
+          escHtml(EDGE_KIND_LABELS[kind]) + '</option>';
+      });
+      html += '</select>';
+      return html;
+    }
+
+    function _edgeCandidateByKey(edgeKey) {
+      var candidates = (latestEdgeData && latestEdgeData.candidates) || [];
+      for (var i = 0; i < candidates.length; i++) {
+        if (candidates[i] && candidates[i].edge_key === edgeKey) return candidates[i];
+      }
+      return null;
+    }
+
+    // 反映ボタンが押せない理由の事実文（督促・数値を出さない）。
+    function _edgeBlockedText(accepted, draftExists, retired) {
+      if (retired) return EDGE_RETIRED_TEXT;
+      if (!accepted) return EDGE_NOT_ACCEPTED_TEXT;
+      if (!draftExists) return EDGE_NO_DRAFT_TEXT;
+      return "";
+    }
+
+    function _edgePairText(candidate) {
+      return ((candidate && candidate.from_label) || (candidate && candidate.from_id) || "") +
+        " — " + ((candidate && candidate.to_label) || (candidate && candidate.to_id) || "");
+    }
+
+    function _edgeCandidateCardHtml(candidate, draftExists, retired) {
+      var edgeKey = (candidate && candidate.edge_key) || "";
+      var decision = (candidate && candidate.decision) || null;
+      var status = (decision && decision.status) || "candidate";
+      var accepted = status === "accepted";
+      var suppressed = status === "dismissed";
+      var appliedVersion = (decision && decision.applied_version) || "";
+      var html = '<div class="atlas-edge-card" data-edge-key="' + escHtml(edgeKey) +
+        '" style="border:1px solid var(--color-border);border-radius:6px;padding:8px 10px;margin-bottom:8px">';
+      html += '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
+        '<span class="atlas-edge-pair" style="font-size:13px;color:var(--color-text-primary)">' + escHtml(_edgePairText(candidate)) + '</span>' +
+        _edgeOriginChipsHtml(candidate) +
+        '<span class="atlas-edge-note" style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(EDGE_ORIGIN_NOTE) + '</span>' +
+        (decision && decision.status_label
+          ? '<span class="atlas-edge-decision" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' + escHtml(decision.status_label) + '</span>'
+          : "") +
+        (appliedVersion
+          ? '<span class="atlas-edge-applied" style="font-size:11px;color:var(--color-text-secondary);border:1px solid var(--color-border);border-radius:4px;padding:0 6px">' + escHtml("版" + appliedVersion + "で反映済み") + '</span>'
+          : "") +
+      '</div>';
+      html += _edgeDocumentsHtml(candidate);
+      if (decision && decision.review_note) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">判断のメモ: ' + escHtml(decision.review_note) + '</div>';
+      }
+
+      html += '<div style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap;align-items:center">';
+      if (suppressed) {
+        html += '<button type="button" class="admin-action-btn" data-edge-action="restore">見送りから戻す</button>';
+      } else {
+        html += _edgeKindSelectHtml(edgeKey, decision, !!retired);
+        html += '<button type="button" class="admin-action-btn" data-edge-action="accept"' +
+          (retired ? " disabled" : "") + '>採用</button>';
+        html += '<button type="button" class="admin-action-btn" data-edge-action="dismiss"' +
+          (retired ? " disabled" : "") + '>見送り…</button>';
+        html += '<button type="button" class="admin-action-btn" data-edge-action="incorporate" data-ui-anchor="atlas.edge-incorporate"' +
+          (!accepted || !draftExists || retired ? " disabled" : "") + '>次版の下書きへ反映…</button>';
+      }
+      html += '</div>';
+
+      if (!suppressed) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px">' + escHtml(EDGE_ACCEPT_NOTE) + '</div>';
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:2px">' + escHtml(EDGE_DISMISS_NOTE) + '</div>';
+        var blocked = _edgeBlockedText(accepted, draftExists, retired);
+        if (blocked) {
+          html += '<div class="atlas-edge-blocked" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:2px">' + escHtml(blocked) + '</div>';
+        }
+      }
+      html += '</div>';
+      return html;
+    }
+
+    function renderEdgeCandidates(data) {
+      latestEdgeData = data || null;
+      if (!edgesListEl) return;
+      var candidates = (data && data.candidates) || [];
+      var draftExists = !!(data && data.draft_exists);
+      var retired = !!select.value && domainLifecycles[select.value] === "retired";
+      if (!candidates.length) {
+        edgesListEl.innerHTML = '<div style="color:var(--color-text-tertiary)">' + escHtml(EDGE_EMPTY_TEXT) + '</div>';
+        return;
+      }
+      var html = "";
+      candidates.forEach(function (candidate) {
+        html += _edgeCandidateCardHtml(candidate, draftExists, retired);
+      });
+      edgesListEl.innerHTML = html;
+    }
+
+    function _edgeKindFromCard(card) {
+      var sel = card ? card.querySelector(".atlas-edge-kind-select") : null;
+      return sel ? sel.value : "";
+    }
+
+    function handleEdgeAction(edgeKey, action, card) {
+      if (!edgeKey || edgeBusy) return;
+      if (action === "restore") {
+        edgeDecide(edgeKey, "restore", "", "");
+        return;
+      }
+      if (action === "accept") {
+        // 採用には関係の種類が要る（未選択のまま送らない。サーバも 422 で拒否する）。
+        var kind = _edgeKindFromCard(card);
+        if (!kind) { setEdgesStatus(EDGE_KIND_REQUIRED, true); return; }
+        edgeDecide(edgeKey, "accept", "", kind);
+        return;
+      }
+      if (action === "dismiss") {
+        // 見送りは理由必須（空は送信しない。サーバ側も 422 で拒否する）。
+        var note = prompt("見送りの理由（必須）") || "";
+        if (!note.trim()) { setEdgesStatus(EDGE_DISMISS_REASON_REQUIRED, true); return; }
+        edgeDecide(edgeKey, "dismiss", note, "");
+        return;
+      }
+      if (action === "incorporate") edgeIncorporate(edgeKey);
+    }
+
+    function edgeDecide(edgeKey, action, note, kind) {
+      edgeBusy = true;
+      setEdgesStatus("処理中...");
+      var body = { edge_key: edgeKey, action: action, review_note: note || "" };
+      if (kind) body.kind = kind;
+      apiFetch(edgesPath() + "/decide", {
+        method: "POST",
+        body: JSON.stringify(body),
+      })
+        // サーバの detail（事実文）をそのまま使う共通ヘルパ。
+        .then(_gapResponse)
+        .then(function () { edgeBusy = false; setEdgesStatus(""); loadEdgeCandidates(); })
+        .catch(function (err) { edgeBusy = false; setEdgesStatus("処理に失敗しました: " + err.message, true); });
+    }
+
+    // 反映の3手 (1) 読み取り専用の patch プレビュー（RE3。サーバは下書きを書かない）
+    function edgeIncorporate(edgeKey) {
+      if (edgeBusy) return;
+      edgeBusy = true;
+      setEdgesStatus("反映する内容を確認中...");
+      apiFetch(edgesPath() + "/incorporate-preview", {
+        method: "POST",
+        body: JSON.stringify({ edge_key: edgeKey }),
+      })
+        .then(_gapResponse)
+        .then(function (preview) {
+          edgeBusy = false;
+          setEdgesStatus("");
+          openEdgeIncorporateConfirm(edgeKey, preview || {});
+        })
+        .catch(function (err) {
+          edgeBusy = false;
+          setEdgesStatus("反映を準備できませんでした: " + err.message, true);
+        });
+    }
+
+    // 反映の3手 (2) 事実文の確認（つなぐ2項目・関係の種類 + 検証結果）。検証エラーが
+    // あるとき・patch が組めなかったときは確認を出さずに事実文で止める。
+    function openEdgeIncorporateConfirm(edgeKey, preview) {
+      var candidate = _edgeCandidateByKey(edgeKey);
+      var validation = preview.validation || {};
+      var errors = validation.errors || [];
+      var lines = [];
+      lines.push("つなぐ項目: " + (candidate ? _edgePairText(candidate) : (preview.from_id || "") + " — " + (preview.to_id || "")));
+      if (preview.kind) {
+        lines.push("関係の種類: " + (EDGE_KIND_LABELS[preview.kind] || preview.kind));
+      }
+      (validation.warnings || []).forEach(function (issue) {
+        var text = _gapIssueText(issue);
+        if (text) lines.push("検証: " + text);
+      });
+      var errorLines = [];
+      errors.forEach(function (issue) {
+        var text = _gapIssueText(issue);
+        if (text) errorLines.push(text);
+      });
+      if (errorLines.length || !preview.patched_draft) {
+        setEdgesStatus(
+          "この関係は下書きに追加できませんでした: " + (errorLines.join(" / ") || lines.join(" / ") || "内容を確認してください"),
+          true
+        );
+        return;
+      }
+      lines.push("この内容を次版の下書きに保存します。学習者には表示されません。");
+      openDangerConfirmModal({
+        title: "次版の下書きへ反映する",
+        message: lines,
+        confirmLabel: "下書きに追加する",
+      }, function () { edgeApplyIncorporation(edgeKey, preview); });
+    }
+
+    // 反映の3手 (3) 教員の既存 PUT draft（applyAssistProposal → saveDraft。楽観ロック
+    // 409 は saveDraft 側の事実文 + 再読込に委ねる）→ 成功後に mark-incorporated で刻印。
+    // **骨格を書くのは常にこの PUT** — 辺候補の API は下書きを書かない（RE3）。
+    function edgeApplyIncorporation(edgeKey, preview) {
+      edgeBusy = true;
+      setEdgesStatus("次版の下書きに保存中...");
+      applyAssistProposal(preview.patched_draft)
+        .then(function () {
+          return apiFetch(edgesPath() + "/mark-incorporated", {
+            method: "POST",
+            body: JSON.stringify({ edge_key: edgeKey }),
+          }).then(_gapResponse);
+        })
+        .then(function () {
+          edgeBusy = false;
+          // 反映済みの候補は次の導出で消えるので、選択中の種類も持ち越さない。
+          if (edgeKindSelections.hasOwnProperty(edgeKey)) delete edgeKindSelections[edgeKey];
+          setEdgesStatus("次版の下書きに追加しました");
+          loadEdgeCandidates();
+        })
+        .catch(function (err) {
+          edgeBusy = false;
+          setEdgesStatus("反映に失敗しました: " + err.message, true);
+          loadEdgeCandidates();
+        });
+    }
+
+    buildEdgesGroup();
 
     function addDomainOption(key, label) {
       for (var i = 0; i < select.options.length; i++) {
@@ -10822,6 +11236,10 @@
       if (window.Deliberation) {
         window.Deliberation.init({ apiFetch: apiFetch, apiFetchRaw: apiFetchRaw, escHtml: escHtml });
       }
+      // グラフ対話レビュー（graph_dialogue_review_design.md）— 教材行「🕸 グラフレビュー…」。
+      if (window.GraphReview) {
+        window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml });
+      }
     }
     initStumbles();
     initAtlas();
@@ -10961,6 +11379,10 @@
       // W層/開幕素材レビュー: 教材行の「検出要素」ボタン（要素インベントリを開く）。
       material_inventory_button: function (id) {
         return _matRowActionAnchor(id, ".admin-inventory-btn");
+      },
+      // グラフ対話レビュー: 教材行の「🕸 グラフレビュー…」ボタン（⋯メニュー内）。
+      material_graph_review_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-graph-review-btn");
       },
       // ゼミ前ブリーフ: 教材行の「ゼミ前ブリーフ…」ボタン（⋯メニュー内）。
       seminar_brief_button: function (id) {

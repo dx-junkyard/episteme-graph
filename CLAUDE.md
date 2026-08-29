@@ -934,6 +934,56 @@ confirmed 配置の evidence 引用の合成テキストを chunks と同一 emb
   alias candidate 行の自動生成 / 配置共起のグラフ埋め込み（node2vec）/
   学習者向け表示 / skip-gram 自前学習。
 
+### 分野マップの関係表示（辺候補レビューと推定の糸, RE追補, migration 076, 2026-08-29）
+
+VA層の直後にオーナー討議で確定した表示原則（正本
+`docs/architecture/field_map_display_principles_2026-08-29.md` — 原則①′
+「地形は人間・関係は離散の辺」ほか5箇条。**分野マップに表示を足すときはこの記録に
+照らす**）の実装。設計正本は `docs/features/atlas_relation_edges_design.md`
+（RE1〜RE8・§11 実装記録）。
+
+- **不変条項の要点**: RE1 地形不変・主張は離散の辺のみ / RE2 推定は点線 +
+  「AIによる推定（未確認）」+ 骨格版明示 / RE3 恒久配線は candidate → 教員確定 →
+  凍結のみ（preview は patched_draft を返すだけ・draft への反映は教員の既存 PUT）/
+  RE4 数値非表示 / RE5 判断は status 遷移のみ（行削除なし・見送りは理由必須）/
+  RE6 候補は読み時導出・保存は判断のみ・**embedding API を呼ばない**（保存済み
+  アンカーベクトルの読みのみ）/ RE7 糸は concept–concept・NEAR 閾値のみ・
+  ノードあたり2本・全体30本 / RE8 教員の dismiss は学習者の糸からも消える。
+- **DB（migration 076・シードなし）**: `atlas_edge_decisions`（無向・版非依存の
+  `edge_key = "edge|{domain}|{min}|{max}"` UNIQUE・status =
+  candidate/accepted/dismissed・`edge_kind` は採用時に教員が選択・
+  `applied_version` で採用と凍結反映を分離 — gap decisions の辺版で `merged` /
+  `draft_node_id` なし（draft 反映済みかは draft の edges 実在で判定））。
+- **core（`backend/core/atlas_edges/`、FastAPI/LLM 非 import）**: schema（edge_key /
+  語彙・上限定数）/ derive（候補 = ①アンカーcosine ≥ `ANCHOR_NEARNESS_THRESHOLD_NEAR`
+  ②live 配置の共起 distinct 2論文以上。既存辺・同一 region 内・region 端点は除外）/
+  store（**遷移は `core/candidate_flow.py` 経由 — 本番初適用**。record_audit は注入）/
+  patching（op=add `/edges/-` — `apply_json_patch` がそのまま適用可）/ threads
+  （学習者向け糸の読み時導出・(domain, version) キャッシュ・dismissed 除外・
+  fail-soft で `{"available": False}`）。
+- **API（`routes/atlas_edges.py`、main.py 直接登録・全て `_require_teacher`）**:
+  edge-candidates GET / decide（accept は kind 必須・dismiss は理由必須）/
+  incorporate-preview（読み取り専用）/ mark-incorporated（draft に辺実在で 409 判定 +
+  監査のみ — 専用列を持たない）。**freeze 統合**: gap と同列の pending ゲート
+  （採用済み未反映の辺で 409・`pending_edges` はラベル列挙）+ 凍結トランザクション内
+  `stamp_applied_versions`。監査 `AUDIT_ENTITY_ATLAS_EDGE`（カタログ40語彙目）。
+- **学習者向け「推定の糸」**: `GET /api/atlas` に optional key `threads`（route 層で
+  fail-soft 合流・不能時はキー自体なし）。表示は `atlas-threads-layer.js`
+  （landscape-layer と同じ3フック型・L2 のみ・点線・既定オフ・事実文
+  「AIによる推定（未確認）・骨格 版{v}」・localStorage 不使用）。学習者アンカー
+  `atlas.relation-threads` + `docs/manual/student/02-student.md#relation-threads`。
+- **管理UI**: `atlas-reports-section` の第3グループ「関係（辺）の候補」（gap 群と
+  同じ後付けパターン。出所チップ・kind 選択（正本 `label_vocab.EDGE_KIND_LABELS` =
+  隣接/依存/関連・JS はミラー規律）・採用/見送り/戻す/下書きへ反映 =
+  preview → confirm → `applyAssistProposal` → mark-incorporated の gap 同型3段）。
+  管理アンカー +3（`atlas.edge-candidates` / `atlas.edge-dismissed-filter` /
+  `atlas.edge-incorporate`）。
+- **ガードレール**: `test_atlas_edges_{core,api,guardrails,admin_ui_static}.py` +
+  `test_atlas_threads_ui_static.py`。
+- **非スコープ（v1）**: co_occurrence 由来の糸（学習者は vector のみ）/ region を
+  含む辺候補 / 辺の削除・改名候補 / 糸のホバー・L1/L3 描画 / node2vec 由来候補 /
+  G層 To-Do。
+
 ### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
 
 「AI が作った地図をリリース前に提示し、教員が明示的に直さなければそのまま公開される」ための
@@ -2286,6 +2336,48 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
 - **ガードレール**: `test_deliberation_guardrails.py` / `test_deliberation_positioning.py` /
   `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
   candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。
+
+### グラフ対話レビュー（教材起点のグラフ確認・承認画面, migration 075, 2026-08-29）
+
+教材管理の各行 `⋯` メニュー「🕸 グラフレビュー…」から開くフルスクリーンモーダル。
+理論操作グラフを見取り図に、①構造を見る ②AI と確かめる ③その場で確定する
+（component 承認/却下・backing claim 承認）を1画面で行う。正本は
+`docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録）。
+
+- **不変条項の要点**: GR1 確定は人間のみ（AI 応答から承認 API を呼ぶ経路なし・プロンプトは
+  仮説文体 + 承認判断の非代行を強制）/ GR2 A層非改変 / GR3 数値非表示 / GR4 監査は既存
+  `AUDIT_ENTITY_COMPONENT` / `AUDIT_ENTITY_CLAIM`（新 entity_type なし）/ GR5 グラフ全体
+  対話は1コール・CostGate は W層 `DELIBERATION_MAX_CALLS_*` に相乗り（U層 feature のみ
+  `deliberation:graph_chat` を分離。scene は `deliberation` 共用・専用 env なし）/
+  GR6 閲覧・対話 = viewable / 承認・却下 = editable / GR7 却下も status 遷移 /
+  GR8 グラフ描画の正本はスタジオの lsGraph* 群 — `window.LectureStudio.graphView` として
+  公開し、レビュー画面は委譲する（描画ロジックを二重実装しない）。
+- **承認 API（遷移専用・新設2本）**: `POST /api/admin/theory-components/{id}/approve`
+  （内容フィールド非変更。承認可能性 = inputs/outputs 非空 + 全項目に出典、をサーバ強制
+  — 満たさなければ 422 事実文）と `POST /api/admin/claims/{id}/review`
+  （body `{review_status}`・許可4語彙のみ）。遷移副作用（監査・却下伝播・承認時の R層
+  item オーサリング起動）は `_apply_claim_review_side_effects` に抽出しフル upsert と共通。
+  **権限は `_ensure_component_editable`（document 単位が主経路・course フォールバック）** —
+  既存 `/reject` も同ゲートに是正済み（course_id 無しのパイプライン component が 404 に
+  なる旧バグの解消）。フル PUT / PATCH（upsert）は非改変。
+- **グラフ全体対話**: `core/deliberation/graph_dialogue.py`（FastAPI 非 import）。
+  疑似要素型 `document_graph`（migration 075 = `deliberation_sessions.element_type` CHECK
+  への追加のみ。**`element_annotations` の CHECK と `ElementRef`/`ELEMENT_TYPES` は
+  非改変** — overview / context / annotations / identity の対象にしない）。grounding は
+  最新 `theory_component_graphs` からの非LLM 決定論投影（main バックボーン + 関係 +
+  式の詳細層の規模 + 未レビュー一覧 + validation + narrative）。グラフ未構築は 422。
+  **候補注釈を生成しない**（要素単位の注釈はノード対話 = 既存 W層 sessions の責務）。
+  API は `POST /api/admin/deliberation/documents/{id}/graph-sessions`（get-or-create）+
+  `.../graph-sessions/{sid}/messages`。
+- **UI**: `admin-graph-review.js`（ES5・`window.GraphReview`・DI 注入）。層トグル・
+  未レビューのみ強調（非該当は薄く残す）・「次の未レビューへ」ナビ・ノード詳細
+  （承認/却下/深く検討 + 根拠 claim 行の承認。claim の DB UUID / review_status は
+  `reference_index.claims` に additive 追加済み）・チャット2タブ（ノード = W層セッション
+  再利用 / グラフ全体）。アンカー10件（`materials.row-graph-review` + `graph-review.*` 9件）
+  + マニュアル `docs/manual/teacher/26-admin-graph-review.md`。
+- **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py`。
+- **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /
+  G層 To-Do ルール（恒常点灯するため運用実測後に判断）/ 学習者向け表示。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
