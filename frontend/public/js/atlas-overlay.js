@@ -151,6 +151,9 @@
     // 知識ランドスケープ (§10.1): 「論文の位置」トグル。配置データが無ければ
     // LandscapeLayer 側が領域ごと隠す (fail-closed)。
     if (window.LandscapeLayer) window.LandscapeLayer.mountControls(sheet);
+    // 推定の糸 (atlas_relation_edges_design.md §6): 「推定の糸」トグル。糸データが
+    // 無ければ AtlasThreadsLayer 側が領域ごと隠す (fail-closed・既定オフ)。
+    if (window.AtlasThreadsLayer) window.AtlasThreadsLayer.mountControls(sheet);
 
     ov.addEventListener("keydown", (e) => {
       if (e.key === "Escape") { e.stopPropagation(); closeOverlay(); }
@@ -492,6 +495,9 @@
     // 知識ランドスケープ (§10.1): L1 かつ「論文の位置」ON のときだけ 📄 マーカーを
     // 1レイヤー重ねる。既存ノード・エッジ・ミニマップには触らない (LS7)。
     if (window.LandscapeLayer) window.LandscapeLayer.onLevelRendered(level, canvas);
+    // 推定の糸 (§6): L2 かつトグル ON のときだけ、確定前の関係を点線で重ねる。
+    // 既存の実線エッジ・ノード・地形には触れない (RE1/RE2)。
+    if (window.AtlasThreadsLayer) window.AtlasThreadsLayer.onLevelRendered(level, canvas);
   }
 
   function selectNode(id, opts) {
@@ -621,6 +627,8 @@
     if (window.PersonalMap) window.PersonalMap.onOverlayClosed();
     // 知識ランドスケープ (§10.1): マーカーのポップオーバー等を後始末する。
     if (window.LandscapeLayer) window.LandscapeLayer.onOverlayClosed();
+    // 推定の糸 (§6): 描いた点線を片付け、トグルを既定オフへ戻す。
+    if (window.AtlasThreadsLayer) window.AtlasThreadsLayer.onOverlayClosed();
   }
 
   window.AtlasOverlay = {

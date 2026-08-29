@@ -929,3 +929,34 @@
   font-size: 11px;
   color: var(--color-text-tertiary, #aeaeb2);
 }
+
+/* ── 推定の糸 (Relation Threads) — 確定前の関係を L2 に重ねるレイヤー ──────────
+ * 設計正本: docs/features/atlas_relation_edges_design.md §6。
+ * 既定 OFF・糸データが無ければ atlas-threads-layer.js が .threads-controls を
+ * hidden にする (fail-closed)。cosine・共起件数は描かない (RE4) — 表示は点線と
+ * 出所ラベル「AIによる推定（未確認）」+ 骨格版だけ (RE2)。 */
+.threads-controls {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 0.5px dashed var(--color-border, #e5e5ea);
+}
+.threads-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--color-text-primary, #1d1d1f);
+  cursor: pointer;
+}
+.threads-toggle input { cursor: pointer; }
+/* 出所の事実行 (RE2) — 骨格版と「未確認」であることだけを事実として置く */
+.threads-fact {
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+/* 糸そのもの。実線の骨格辺 (#B4B2A9) と混ざらないよう点線・淡色で描く (RE2)。
+ * 線の属性は atlas-threads-layer.js が明示指定するため、ここでは装飾のみ。 */
+.threads-line {
+  pointer-events: none;
+}

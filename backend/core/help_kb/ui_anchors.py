@@ -72,6 +72,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
         # サイドバー最上部の常設入口「🌊 論文の海」（コース未選択でも押せる）。
         "sidebar.corpus-sea",
+        # 推定の糸（docs/features/atlas_relation_edges_design.md §6）:
+        # 分野の地図オーバーレイ（コースレベル）の「推定の糸」トグル。既定オフ。
+        "atlas.relation-threads",
     }
 )
 
@@ -94,7 +97,10 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # 2026-08-22 に確認問題モーダルの選択肢2ボタン（check.discuss / check.skip）を
 # 追加し、全24種がマップ済み。
 # 2026-08-27 にコーパス回遊層（corpus_roaming_design.md §4.2）の sidebar.corpus-sea
-# （サイドバー最上部の「🌊 論文の海」）を追加し、全25種がマップ済み。両者は「確認問題の3つの選択肢」を1つの節で
+# （サイドバー最上部の「🌊 論文の海」）を追加し、全25種がマップ済み。
+# 2026-08-29 に推定の糸（atlas_relation_edges_design.md §6）の atlas.relation-threads
+# （分野の地図オーバーレイの「推定の糸」トグル）を追加し、全26種がマップ済み。
+# check.discuss / check.skip の両者は「確認問題の3つの選択肢」を1つの節で
 # 並べて説明しているため、同じ参照先を指す。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
@@ -150,6 +156,8 @@ UI_ANCHORS: dict[str, str] = {
     "check.skip": "student/02-student.md#check-options",
     # サイドバー最上部の「🌊 論文の海」＝コースの外から論文を見わたす入口。
     "sidebar.corpus-sea": "student/02-student.md#corpus-sea",
+    # 分野の地図（コースレベル）の「推定の糸」トグル＝確定前の関係の点線表示。
+    "atlas.relation-threads": "student/02-student.md#relation-threads",
 }
 
 
