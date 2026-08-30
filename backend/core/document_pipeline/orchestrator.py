@@ -516,6 +516,10 @@ def run_document_pipeline(
         course_id=str(course_id) if course_id else None,
     )
 
+    # restart（start_stage 指定）で artifact が欠けていたため live 実行で補完した
+    # earlier stage 名（追加順）。note_backfilled_stage が積む。
+    backfilled_stages: list[str] = []
+
     def report(stage: str, payload: dict | None = None, *, run_status: str = "running") -> None:
         payload = payload or {}
         if progress_callback:
@@ -575,15 +579,60 @@ def run_document_pipeline(
     def artifact(stage: str) -> Any | None:
         return previous_artifacts.get(stage)
 
+    def note_backfilled_stage(stage: str) -> None:
+        """restart 時に artifact が欠けていた earlier stage を記録する。
+
+        正直さの原則: 「前回 run に無かったので今回 live 実行で補完した」ことを
+        ログと run の ``stage_outputs.resume.backfilled_stages`` に残す（無音で
+        埋めない）。``stage_outputs`` は upsert 側で top-level の shallow merge
+        （``||``）なので、``resume`` キーは丸ごと置き換わる。既存の
+        ``{"resumed": True}`` も併せて書き直すことで情報を落とさない。
+        """
+        if stage in backfilled_stages:
+            return
+        backfilled_stages.append(stage)
+        logger.warning(
+            "restart 対象より前のステージ '%s' の artifact が無いため live 実行で補完する"
+            " (document=%s material=%s start_stage=%s)",
+            stage, document_id, material_id, start_stage,
+        )
+        try:
+            upsert_analysis_run(
+                run_id=run_id,
+                document_id=document_id,
+                material_id=material_id,
+                cartridge_id=cartridge_id,
+                status="running",
+                current_stage=stage,
+                stage_outputs={
+                    "resume": {
+                        "resumed": True,
+                        "backfilled_stages": list(backfilled_stages),
+                    }
+                },
+            )
+        except Exception:
+            logger.warning(
+                "failed to record backfilled stage '%s' on run %s (non-fatal)",
+                stage, run_id, exc_info=True,
+            )
+
     def should_use_artifact(stage: str) -> bool:
         has_artifact = artifact(stage) is not None
         if start_index is not None:
             if stage_order[stage] < start_index:
                 if not has_artifact:
-                    raise PipelineStageError(
-                        stage,
-                        f"required artifact '{stage}' is missing for restart from '{start_stage}'",
-                    )
+                    # ステージは後から追加される（例: figure_image_extraction は
+                    # 2026-07 追加）ため、それ以前に解析された run には当該
+                    # artifact が構造的に存在しない。ここで hard error にすると
+                    # 「新ステージが増えるたびに古い run が restart 不能になる」
+                    # ので、live 実行へフォールバックする（各ステージ本体は
+                    # live 経路を持ち、ctx.pdf_bytes は常に供給される）。
+                    # 欠落＝そのステージ追加前の run なので、再利用する後続
+                    # artifact が当該ステージ出力を参照していることはなく、
+                    # live 補完は additive で整合する。
+                    note_backfilled_stage(stage)
+                    return False
                 return True
             return False
         if target_stage is not None and target_stage != stage and not has_artifact:
