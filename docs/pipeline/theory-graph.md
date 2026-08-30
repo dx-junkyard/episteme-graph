@@ -128,6 +128,12 @@ node の主たる backing は **atomic claim**（短く evidence_text 非空、p
 無ければ `missing_atomic_claim` を付け、equation ID だけの label は `partially_source_backed` に留める。
 空の evidence_text を強い backing として扱わない。
 
+claim の `evidence_text` は呼び出し側（`orchestrator._component_graph_claims`）が EvidenceRegistry から
+解決して渡す（`ClaimObjectRecord` は `source_evidence_ids` の参照しか持たない）。解決できない参照・
+`support_status` が strong 系（`source_backed`）でない claim は空のまま＝強い backing にしない。
+なお `claim_level` はパイプライン経路では供給されないため、atomic 判定で実際に効くのは
+`is_atomic` と text 長の2条件。
+
 ### UI 表示（admin.js）
 `source_backing_status` で表示を区別（source_backed=通常 / partially=細線 / review_required=点線枠 / inferred・fallback=薄色+⚠）。
 グラフ層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切替、既定は main 優先。

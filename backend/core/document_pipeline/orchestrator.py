@@ -1518,6 +1518,111 @@ def _stage_component_assembly(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("component_assembly", component_done_payload)
 
 
+def _evidence_text_index(evidence: Any) -> dict[str, str]:
+    """``evidence_id -> evidence_text`` (built once per stage, never per claim).
+
+    Records with empty text are skipped so a blank duplicate cannot hide a later
+    record that actually carries the quote.
+    """
+    index: dict[str, str] = {}
+    for record in (getattr(evidence, "records", []) or []):
+        ev_id = str(getattr(record, "evidence_id", "") or "").strip()
+        if not ev_id or ev_id in index:
+            continue
+        text = str(getattr(record, "evidence_text", "") or "")
+        if not text.strip():
+            continue
+        index[ev_id] = text
+    return index
+
+
+# Only these ``ClaimObjectRecord.support_status`` values may carry evidence text
+# into the graph. The normalizer promotes *any* atomic claim with non-empty
+# ``evidence_text`` to ``source_backed``, which D層 ledger_builder in turn maps to
+# a learner-facing verification label — so a claim whose evidence link was judged
+# weak (``partially_source_backed``) or broken (``review_required``), or that is
+# not source-text backed at all (``derived`` / ``inferred`` / ``external`` /
+# ``unknown``), must not be able to reach that tier. A層 gates its own confirmed
+# tier on the same single status (``ClaimObjectBuilder._concept_assignment_status``).
+_STRONG_BACKING_SUPPORT_STATUSES = frozenset({"source_backed"})
+
+
+def _claim_may_back_strongly(claim: Any) -> bool:
+    """Whether this claim is allowed to supply ``evidence_text`` (strong backing)."""
+    from episteme_graph.agents.claim_object_builder.schema import normalize_atomicity
+
+    # A missing/blank support_status means the legacy artifact predates the field;
+    # ClaimObjectRecord's own default is source_backed, so keep that reading.
+    # Every other value has to be on the allowlist (fail-closed on unknown vocabulary).
+    status = str(getattr(claim, "support_status", "") or "").strip().lower() or "source_backed"
+    if status not in _STRONG_BACKING_SUPPORT_STATUSES:
+        return False
+    # Defence against legacy artifacts whose is_atomic contradicts atomicity
+    # (e.g. is_atomic=True alongside "non_atomic"): the stricter signal wins.
+    raw_atomicity = str(getattr(claim, "atomicity", "") or "").strip()
+    if raw_atomicity and normalize_atomicity(raw_atomicity) != "atomic":
+        return False
+    return True
+
+
+def _component_graph_claims(ctx: PipelineContext) -> list[dict[str, Any]]:
+    """Flatten claims for ComponentGraphAgent (Material 4 + atomic-claim backing).
+
+    ``ComponentGraphAgent._build_claim_index`` reads ``text`` / ``evidence_text`` /
+    ``is_atomic`` and the normalizer's ``_atomic_claim_ids`` only counts a claim as
+    strong (atomic) backing when ``is_atomic`` is not False **and** ``evidence_text``
+    is non-empty (issue #306 / #317). ``ClaimObjectRecord`` stores the evidence by
+    reference (``source_evidence_ids``), so the registry text has to be resolved here
+    — otherwise every node ends up with ``missing_atomic_claim`` and no node can ever
+    reach ``source_backed``.
+
+    Evidence text is only supplied for claims that may become strong backing
+    (see ``_claim_may_back_strongly``); every other claim is still forwarded with
+    its id / text / ``is_atomic`` but keeps an empty ``evidence_text``, so the node
+    stays on the cautious side with ``missing_atomic_claim``. Unresolvable evidence
+    likewise stays empty (no placeholder text).
+    """
+    evidence_texts = _evidence_text_index(getattr(ctx, "evidence", None))
+    flat_claims: list[dict[str, Any]] = []
+    eligible = 0
+    resolved = 0
+    for claim in (getattr(ctx.claim_objects, "claims", []) or []):
+        evidence_ids = [
+            ev_id for ev_id in
+            (str(raw or "").strip() for raw in (getattr(claim, "source_evidence_ids", []) or []))
+            if ev_id
+        ]
+        evidence_text = ""
+        if evidence_ids and _claim_may_back_strongly(claim):
+            eligible += 1
+            for ev_id in evidence_ids:
+                text = evidence_texts.get(ev_id, "")
+                if text.strip():
+                    evidence_text = text
+                    resolved += 1
+                    break
+        entry: dict[str, Any] = {
+            "claim_id": getattr(claim, "claim_id", ""),
+            "text": getattr(claim, "text", "") or "",
+            "evidence_text": evidence_text,
+        }
+        # ClaimObjectRecord has no `claim_level`; only the fields it really owns
+        # are forwarded (do not invent metadata the record does not carry).
+        # `atomicity` is not forwarded either — `_build_claim_index` never reads it.
+        is_atomic = getattr(claim, "is_atomic", None)
+        if is_atomic is not None:
+            entry["is_atomic"] = is_atomic
+        flat_claims.append(entry)
+    if eligible and not resolved:
+        logger.warning(
+            "component_graph claim enrichment resolved no evidence text: "
+            "document=%s material=%s claims=%d eligible=%d evidence_records=%d",
+            getattr(ctx, "document_id", None), getattr(ctx, "material_id", None),
+            len(flat_claims), eligible, len(evidence_texts),
+        )
+    return flat_claims
+
+
 def _stage_component_graph(ctx: PipelineContext) -> bool:
     # ── Stage 12a: component_graph (hybrid deterministic/LLM edge builder) ─
     component_graph_artifact = ctx.artifact("component_graph")
@@ -1528,11 +1633,8 @@ def _stage_component_graph(ctx: PipelineContext) -> bool:
         ctx.report_start("component_graph", total=1, unit="llm_call")
         try:
             cg_agent = _instantiate(ctx.agent_classes["ComponentGraphAgent"])
-            # Flatten claims for Material 4 context
-            flat_claims = [
-                {"claim_id": c.claim_id, "text": c.text}
-                for c in (getattr(ctx.claim_objects, "claims", []) or [])
-            ]
+            # Flatten claims for Material 4 context + atomic-claim backing
+            flat_claims = _component_graph_claims(ctx)
             # Flatten evidence records for Material 4 context
             flat_evidence = [
                 {"evidence_id": r.evidence_id, "evidence_text": r.evidence_text}

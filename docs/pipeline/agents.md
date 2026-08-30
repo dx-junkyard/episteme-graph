@@ -125,6 +125,8 @@
 
 ### ComponentGraphAgent（#266, #302）— 決定論 + LLM エッジ
 `component_graph/agent.py` + `normalizer.py`。DerivationChain から **理論操作グラフ（TheoryOperationGraph）** を構築。ノード生成は決定論的、エッジ推論に LLM。詳細は [DSL と理論操作グラフ](theory-graph.md)。
+- 入力: `components` / `dsl` / `derivations` / `claims`（`orchestrator._component_graph_claims` が
+  EvidenceRegistry から `evidence_text` を解決して enrich 済み）/ `evidence_snippets`
 - 出力: `ComponentGraphResult`（2 層: main / equation_detail、ソースバッキング状態つき）
 
 ### NarrativeAnnotator（#360）— LLM-first（構造非変更）
