@@ -119,7 +119,13 @@ def scene_for_feature(feature: str) -> str | None:
         "learning:help_usage",
     ):
         return SCENE_LEARNING_CHAT
-    if feature.startswith("learning:voice_"):
+    if feature.startswith("learning:voice_") or feature.startswith("deliberation:voice_"):
+        # 音声（STT/TTS）は呼び出し元が学習側か管理画面（グラフレビューの音声対話）かに
+        # 関わらず policy の解決経路を通らない（STT は ``settings.llm_transcribe_model``
+        # 直参照、TTS は provider 固定）。設定できるのに何も起きない場面を増やさない
+        # ため、書き込み可能な `deliberation` scene ではなく読み取り専用の音声場面へ
+        # 束ねる（`READ_ONLY_SCENE_KEYS`・M4/M5）。**この分岐は
+        # `deliberation:` prefix の分岐より前に置くこと。**
         return SCENE_LEARNING_VOICE
     if feature in (
         "learning:tension",

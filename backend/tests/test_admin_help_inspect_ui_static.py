@@ -214,6 +214,9 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-paper-discovery.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js",
     ROOT / "frontend" / "public" / "js" / "admin-graph-review.js",
+    # DOM 非依存の音声エンジン（アンカー担体は admin-graph-review.js 側）。
+    # 将来ここに UI が生えたときの登録漏れを検出するため対象に入れる。
+    ROOT / "frontend" / "public" / "js" / "admin-voice-chat.js",
     ROOT / "frontend" / "public" / "js" / "admin-next-steps.js",
     ROOT / "frontend" / "public" / "js" / "admin-manual-editor.js",
     ROOT / "frontend" / "public" / "js" / "admin-discuss-observation.js",

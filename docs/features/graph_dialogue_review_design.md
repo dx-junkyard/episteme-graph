@@ -2,7 +2,8 @@
 
 > **状態: 実装済み（正本）**（2026-08-29 起票・同日実装。migration **075**
 > — `deliberation_sessions.element_type` CHECK への `'document_graph'` 追加のみ。
-> 新テーブルなし。実装記録は §11）
+> 新テーブルなし。実装記録は §11。**音声対話の追補は §12**（2026-08-29・
+> migration なし・API 2本と `admin-voice-chat.js` の追加のみ））
 
 **正本**: 本ドキュメント。
 **関連**: [要素検討ワークスペース（W層）](element_deliberation_workspace_design.md)
@@ -193,7 +194,9 @@ admin.js から DI 注入）:
 - `ADMIN_UI_ANCHORS` 追加（値の正確な数はテストが正）: `materials.row-graph-review` /
   `graph-review.modal` / `graph-review.layer` / `graph-review.filter-unreviewed` /
   `graph-review.next-unreviewed` / `graph-review.approve` / `graph-review.reject` /
-  `graph-review.claim-approve` / `graph-review.chat` / `graph-review.graph-chat`。
+  `graph-review.claim-approve` / `graph-review.chat` / `graph-review.graph-chat`
+  （+ §11.1 で `graph-review.open-deliberation` / `graph-review.new-chat`、
+  §12 で `graph-review.voice`）。
 - マニュアル: `docs/manual/teacher/26-admin-graph-review.md`（新設。操作要素1つ=1節、
   無効化され得る要素は「無効になっている場合」の節を持つ）。
 - フロントの `data-ui-anchor` は上記と1:1（双方向網羅テストが落ちないこと）。
@@ -320,3 +323,62 @@ admin.js から DI 注入）:
   再描画持ち越し / 未解決 claim の内部 ID 非表示 / 承認後再読み込みでのズーム・パン維持 /
   「深く検討」にアンカー付与。アンカーは +2（`graph-review.open-deliberation` /
   `graph-review.new-chat`）。
+
+## 12. 音声対話追補（2026-08-29）
+
+同日、グラフレビュー画面のチャットをハンズフリー音声で進められるようにした
+（migration なし・新テーブルなし・新しい判断経路なし）。
+
+- **目的**: 学習画面のハンズフリー音声会話と同等の操作感を、教員のレビュー画面にも
+  持ち込む。グラフを見ながら発話し、応答を聞きながら次を考える — キーボードから手を
+  離してレビューを進めるための入出力手段であって、判断の経路ではない。
+- **学習側資産を流用しない判断**: 学習画面の音声ループは `app.js` にベタ書きで、既存の
+  静的テストが本文の文字列を直接検査している（学習側の改変は回帰の危険が大きい）。
+  そこで **DOM 非依存のエンジン `frontend/public/js/admin-voice-chat.js`**
+  （ES5・`window.AdminVoiceChat`・VAD 定数とセグメント方式は学習側と同一）を新設し、
+  画面・API・文言はすべて呼び出し側がコールバックで注入する形にした。**学習側
+  （`app.js` / `index.html` / `routes/learning.py`）は非改変**。
+- **API 2本**: `POST /api/admin/deliberation/voice/transcribe`（multipart・1発話分・
+  上限10MB）/ `POST /api/admin/deliberation/voice/speak`（MP3 base64）。いずれも
+  `_require_teacher` の fail-closed で、**DB を変更しない**。読み上げ前に
+  `core.tts.strip_text_for_speech` で LaTeX・markdown 記号・出典マーカーを除去する。
+  openai プロバイダ以外では STT が 503（未対応を正直に返す）。
+- **コスト上限（day-only CostGate）**: 正本は
+  `core/deliberation/dialogue.py::check_and_count_voice_call`。STT / TTS 共通の
+  1ユーザー日次カウンタ1本で、env は `DELIBERATION_VOICE_MAX_CALLS_PER_DAY`（既定
+  200）。**GR5 の対話上限（W層 `DELIBERATION_MAX_CALLS_*`）とは独立**  — 音声は
+  入出力の手段であって対話ターンそのものではないため、セッション単位の上限は持たない。
+  上限到達は 429 + 数値を含まない日本語事実文。
+- **U層 feature の分離**: `deliberation:voice_stt` / `deliberation:voice_tts` を
+  `KNOWN_FEATURES` に追加（学習側 `learning:voice_*` と混ぜない）。scene は
+  **読み取り専用の音声場面**へ束ねる（STT は `settings.llm_transcribe_model` 直参照・
+  TTS は provider 固定で、どちらも policy の解決経路を通らない。設定できるのに何も
+  起きない場面を増やさない — M4/M5）。`llm_policy.scene_for_feature` の音声分岐は
+  `deliberation:` prefix の分岐より前に置く。
+- **GR1 の維持**: 音声からできるのはチャットの送受信だけで、承認・却下 API を呼ぶ経路は
+  作らない。文字起こし結果は既存のテキスト送信経路（`sendChatText`）にそのまま渡り、
+  表示・セッション・上限の扱いはテキスト入力と同一になる。確定は従来どおり教員の
+  ボタン操作のみ。
+- **停止条件と数値非表示**: 429（音声上限・対話上限のいずれも）を受けたらループを止め、
+  事実文だけを残す（回し続けない）。画面を閉じたとき・再度開いたときも必ず停止して
+  マイクを解放する。残回数・上限値・秒数などの数値は UI に出さない（GR3）。
+- **実装ファイル**: `frontend/public/js/admin-voice-chat.js`（新設）/
+  `frontend/public/js/admin-graph-review.js`（🎤 トグル・状態表示・`sendChat` →
+  `sendChatText(content, cb)` の分離・音声配線）/ `frontend/public/js/admin.js`
+  （`getAuthToken()` 新設と DI — multipart は JSON 前提の `apiFetch` を通せないため
+  素の fetch に Bearer を載せる）/ `frontend/public/admin.html`（読み込み順は
+  lecture-studio < voice-chat < graph-review < admin.js）/ `css/styles.css` /
+  `backend/api/routes/deliberation.py` / `backend/core/deliberation/dialogue.py` /
+  `backend/core/config.py` / `backend/core/llm_usage/schema.py` /
+  `backend/core/llm_policy.py` / `.env.example`。
+- **3点セット**: マニュアル節
+  `docs/manual/teacher/26-admin-graph-review.md#voice-chat`（音声で対話する）+
+  `ADMIN_UI_ANCHORS` の `graph-review.voice` + フロントの
+  `data-ui-anchor="graph-review.voice"`（正確な件数は
+  `backend/tests/test_admin_help_ui_anchors.py` が正）。
+- **テスト**: `test_graph_review_voice_api.py`（権限 fail-closed・空/過大音声・上限 429 の
+  数値非漏洩・`strip_text_for_speech` 適用・U層 feature の帰属・DB 非変更）+
+  `test_graph_review_ui_static.py::TestVoiceChat`（エンジンの ES5・`window.AdminVoiceChat`・
+  DOM 非依存＝`data-ui-anchor` 不在・読み込み順・音声区画から承認/却下 API を呼ばない
+  こと・429 でのループ停止・close での停止）+ 既存網羅（anchors / docs registry）。
+- **残課題**: docker 実機 E2E（マイク許可・無音区切り・読み上げの通し確認）。

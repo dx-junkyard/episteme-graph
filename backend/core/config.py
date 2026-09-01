@@ -309,6 +309,14 @@ class Settings(BaseSettings):
         default=5,
         validation_alias=AliasChoices("DELIBERATION_IDENTITY_CANDIDATES_TOP_K"),
     )
+    # 管理画面（グラフレビュー等）の音声対話 — 1ユーザー1日あたりの音声 API コール上限
+    # （STT + TTS の共通カウンタ。会話1往復で 2 コール消費する想定。共通規約
+    # `docs/features/assistant_common_infra_design.md`: 同期・単発 AI にも
+    # CostGate(day-only) を置く）
+    deliberation_voice_max_calls_per_day: int = Field(
+        default=200,
+        validation_alias=AliasChoices("DELIBERATION_VOICE_MAX_CALLS_PER_DAY"),
+    )
 
     # --- 教材図スタジオ（Teaching Figure Studio, migration 063） — コスト制御・上限 ---
     # 正本: docs/features/teaching_figure_studio_design.md §4.3

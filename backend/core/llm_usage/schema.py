@@ -105,6 +105,11 @@ KNOWN_FEATURES = (
     # docs/features/graph_dialogue_review_design.md §5）。コスト上限は W層対話の
     # CostGate に相乗り（GR5）— 計測上の帰属だけを分離する。
     "deliberation:graph_chat",
+    # グラフレビュー画面の音声対話（管理画面のハンズフリー入出力）。学習側の
+    # ``learning:voice_*`` と同じく STT / TTS の呼び出しで、モデル選択の対象外
+    # （scene は読み取り専用の音声場面へ束ねる）。教員・管理者のみ。
+    "deliberation:voice_stt",
+    "deliberation:voice_tts",
     # --- 論文ディスカバリー層 Phase 3（正本 docs/features/paper_discovery_design.md §6）---
     # 候補アブストラクトの埋め込み（1検索 = 1バッチコール）。発見層で LLM/embedding を
     # 使う唯一の地点で、モデル選択の対象外（embedding は M5 で scene を持たない）。

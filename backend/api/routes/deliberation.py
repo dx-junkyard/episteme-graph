@@ -66,15 +66,19 @@ core 側（`core.deliberation`）は FastAPI を import しない。
 
 from __future__ import annotations
 
+import base64
 import logging
 from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from pydantic import BaseModel, Field
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from core.config import get_settings
+from core.llm import transcribe_audio
+from core.llm_usage import usage_context
+from core.tts import generate_tts_audio, strip_text_for_speech
 from core.deliberation import (
     annotations as delib_annotations,
     context_lens,
@@ -1335,3 +1339,86 @@ def get_document_element_inventory(
     if not access.found or not access.can_view:
         raise HTTPException(status_code=404, detail="Document not found")
     return inventory.build(access.document_id)
+
+
+# ---------------------------------------------------------------------------
+# 音声対話（グラフレビュー画面のハンズフリー入出力）
+# ---------------------------------------------------------------------------
+#
+# グラフ対話レビュー（`docs/features/graph_dialogue_review_design.md`）のチャットを
+# 音声で進めるための入出力2本。学習側の `/api/learning/voice/{transcribe,speak}`
+# （`routes/learning.py`）と同型だが、教員専用（`_require_teacher`・fail-closed）で
+# コスト上限を持つ点が異なる。
+#
+# 音声は**チャットの入出力手段**であって判断の経路ではない（GR1）— ここから承認・
+# 却下 API を呼ぶ経路は作らない。文字起こし結果は既存の graph-sessions / sessions の
+# messages 経路にフロントが渡すだけで、本エンドポイントは DB を変更しない。
+#
+# 共通規約（`docs/features/assistant_common_infra_design.md`）に従い、同期・単発の
+# AI 呼び出しにも CostGate(day-only) を置く（STT/TTS 共通の日次カウンタ。正本は
+# `core.deliberation.dialogue.check_and_count_voice_call`）。上限到達は 429 +
+# 数値を含まない日本語事実文。
+
+# アップロード音声の上限（無音区切りの1発話分。学習側の `_VOICE_MAX_AUDIO_BYTES` と同値）
+_VOICE_MAX_AUDIO_BYTES = 10 * 1024 * 1024
+
+_VOICE_LIMIT_DETAIL = "本日の音声対話の利用上限に達しました。しばらくしてから再度お試しください。"
+
+
+class DeliberationVoiceSpeakRequest(BaseModel):
+    text: str
+
+
+@router.post("/voice/transcribe")
+async def deliberation_voice_transcribe_route(
+    audio: UploadFile = File(...),
+    language: str = "ja",
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """音声（1発話分）を文字起こしする（管理画面の音声対話用）。
+
+    フロントの無音検知が区切った短い音声チャンクを受ける。openai プロバイダ以外では
+    ``transcribe_audio`` が RuntimeError を投げるため 503（未対応を正直に返す）。
+    """
+    data = await audio.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="音声データが空です。")
+    if len(data) > _VOICE_MAX_AUDIO_BYTES:
+        raise HTTPException(status_code=413, detail="音声データが大きすぎます。")
+    if not dialogue.check_and_count_voice_call(current_user.get("id")):
+        raise HTTPException(status_code=429, detail=_VOICE_LIMIT_DETAIL)
+    try:
+        with usage_context("deliberation:voice_stt", user_id=current_user.get("id")):
+            text = transcribe_audio(data, audio.filename or "audio.webm", language=language)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("deliberation voice transcribe failed")
+        raise HTTPException(status_code=500, detail="音声の文字起こしに失敗しました。") from exc
+    return {"text": text}
+
+
+@router.post("/voice/speak")
+def deliberation_voice_speak_route(
+    body: DeliberationVoiceSpeakRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict[str, Any]:
+    """応答テキストを TTS で MP3(base64) に変換する（読み上げ用）。
+
+    読み上げ前に LaTeX・markdown 記号・出典マーカーを除去する
+    （`core.tts.strip_text_for_speech`）。除去後に読み上げる文が残らなければ 400。
+    """
+    spoken = strip_text_for_speech(body.text)
+    if not spoken:
+        raise HTTPException(status_code=400, detail="読み上げるテキストがありません。")
+    if not dialogue.check_and_count_voice_call(current_user.get("id")):
+        raise HTTPException(status_code=429, detail=_VOICE_LIMIT_DETAIL)
+    try:
+        with usage_context("deliberation:voice_tts", user_id=current_user.get("id")):
+            audio_bytes = generate_tts_audio(spoken)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("deliberation voice speak failed")
+        raise HTTPException(status_code=500, detail="音声の生成に失敗しました。") from exc
+    if audio_bytes is None:
+        raise HTTPException(status_code=503, detail="読み上げ用の音声プロバイダを利用できません。")
+    return {"audio_base64": base64.b64encode(audio_bytes).decode("ascii"), "format": "mp3"}

@@ -164,7 +164,10 @@ class TestAdminUiAnchorsModule:
         #   graph-review.open-deliberation（ノード詳細の「深く検討」— W層完全版への遷移）/
         #   graph-review.new-chat（グラフ全体対話のセッション上限到達時の再開ボタン。
         #    force_new=true で新規セッション。旧対話の記録は残る — GR7）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 318
+        # + グラフ対話レビューの音声対話追補（2026-08-29 §12）の1件:
+        #   graph-review.voice（🎤 音声トグル。ハンズフリーの発話→文字起こし→応答の
+        #    読み上げ。音声は対話の入出力手段のみで、承認・却下は教員のボタン — GR1）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 319
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

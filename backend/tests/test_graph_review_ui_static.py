@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 JS_SRC = (ROOT / "frontend" / "public" / "js" / "admin-graph-review.js").read_text(encoding="utf-8")
+VOICE_SRC = (ROOT / "frontend" / "public" / "js" / "admin-voice-chat.js").read_text(encoding="utf-8")
 ADMIN_SRC = (ROOT / "frontend" / "public" / "js" / "admin.js").read_text(encoding="utf-8")
 STUDIO_SRC = (ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8")
 HTML_SRC = (ROOT / "frontend" / "public" / "admin.html").read_text(encoding="utf-8")
@@ -45,6 +46,7 @@ class TestAnchors:
             "graph-review.graph-chat",
             "graph-review.open-deliberation",
             "graph-review.new-chat",
+            "graph-review.voice",
         ):
             assert 'data-ui-anchor="' + anchor + '"' in JS_SRC, anchor
 
@@ -62,7 +64,10 @@ class TestAdminWiring:
         assert "window.GraphReview.open(" in ADMIN_SRC
 
     def test_init_injected(self):
-        assert "window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml })" in ADMIN_SRC
+        assert (
+            "window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken })"
+            in ADMIN_SRC
+        )
 
     def test_assistant_anchor_resolver_registered(self):
         assert "material_graph_review_button" in ADMIN_SRC
@@ -117,6 +122,54 @@ class TestChat:
 
     def test_degraded_reply_is_labeled(self):
         assert "縮退応答" in JS_SRC
+
+
+class TestVoiceChat:
+    """音声対話追補（設計書 §12）— エンジンの独立性と GR1 の維持を静的に固定する。"""
+
+    def _voice_section(self) -> str:
+        # 音声配線の区画（ハンズフリー音声対話 〜 公開 API の直前）。
+        start = JS_SRC.index("ハンズフリー音声対話")
+        end = JS_SRC.index("公開 API", start)
+        return JS_SRC[start:end]
+
+    def test_engine_is_es5(self):
+        # 管理画面 JS は ES5 互換（開発ルール5）。
+        assert "=>" not in VOICE_SRC
+        assert not re.search(r"\bconst\s", VOICE_SRC)
+        assert not re.search(r"\blet\s", VOICE_SRC)
+        assert "`" not in VOICE_SRC
+
+    def test_engine_public_api(self):
+        assert "window.AdminVoiceChat" in VOICE_SRC
+        assert '"use strict"' in VOICE_SRC
+
+    def test_engine_is_dom_independent(self):
+        # エンジンは画面を知らない（アンカー担体は admin-graph-review.js 側）。
+        assert "data-ui-anchor" not in VOICE_SRC
+
+    def test_script_order_engine_before_review(self):
+        voice = HTML_SRC.index('src="/js/admin-voice-chat.js')
+        review = HTML_SRC.index('src="/js/admin-graph-review.js')
+        assert voice < review
+
+    def test_voice_section_never_calls_decision_api(self):
+        # GR1: 音声は対話の入出力手段のみ。承認・却下 API を呼ぶ経路を作らない。
+        section = self._voice_section()
+        assert "/approve" not in section
+        assert "/reject" not in section
+
+    def test_voice_loop_stops_on_rate_limit(self):
+        # 上限（429）に達したら回し続けない。
+        idx = JS_SRC.index("function voiceUtterance")
+        body = JS_SRC[idx: JS_SRC.index("function voiceTranscribe", idx)]
+        assert "429" in body
+        assert "stopVoice(" in body
+
+    def test_close_stops_voice(self):
+        # 画面を閉じたらマイクを解放する（見えない場所で録音を続けない）。
+        idx = JS_SRC.index("function close()")
+        assert "stopVoice()" in JS_SRC[idx: idx + 600]
 
 
 class TestHtmlAndCss:

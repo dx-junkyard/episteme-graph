@@ -2383,9 +2383,23 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   未レビューのみ強調（非該当は薄く残す）・「次の未レビューへ」ナビ・ノード詳細
   （承認/却下/深く検討 + 根拠 claim 行の承認。claim の DB UUID / review_status は
   `reference_index.claims` に additive 追加済み）・チャット2タブ（ノード = W層セッション
-  再利用 / グラフ全体）。アンカー10件（`materials.row-graph-review` + `graph-review.*` 9件）
-  + マニュアル `docs/manual/teacher/26-admin-graph-review.md`。
-- **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py`。
+  再利用 / グラフ全体）。アンカーは `materials.row-graph-review` + `graph-review.*`
+  （§11.1 の open-deliberation / new-chat と §12 の voice を含む。**正確な件数は
+  `test_admin_help_ui_anchors.py` が正**）+ マニュアル
+  `docs/manual/teacher/26-admin-graph-review.md`。
+- **音声対話（§12 追補・2026-08-29・migration なし）**: チャットのハンズフリー入出力。
+  API 2本 `POST /api/admin/deliberation/voice/{transcribe,speak}`（`_require_teacher`・
+  DB 非変更・読み上げ前に `core.tts.strip_text_for_speech`）+ day-only CostGate
+  `dialogue.check_and_count_voice_call`（STT/TTS 共通・env
+  `DELIBERATION_VOICE_MAX_CALLS_PER_DAY` 既定200。**GR5 の対話上限とは独立**）+
+  U層 feature `deliberation:voice_stt` / `deliberation:voice_tts`（読み取り専用の音声
+  scene に束ねる。学習側 `learning:voice_*` と混ぜない）。フロントは DOM 非依存エンジン
+  `admin-voice-chat.js`（ES5・`window.AdminVoiceChat`。**学習側 app.js は非改変**）で、
+  `admin-graph-review.js` は 🎤 トグル（`graph-review.voice`）と
+  `sendChatText` への配線だけを持つ。429 でループ停止・close でマイク解放・数値非表示。
+  **音声から承認 API を呼ぶ経路は作らない（GR1）**。
+- **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
+  `test_graph_review_voice_api.py`。
 - **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /
   G層 To-Do ルール（恒常点灯するため運用実測後に判断）/ 学習者向け表示。
 

@@ -12,11 +12,14 @@
  * - 承認・却下は教員の明示ボタンのみ（GR1）。AI 応答から承認 API を呼ぶ経路は無い。
  * - ノード対話 = 既存 W層 sessions API / グラフ全体対話 = graph-sessions API。
  *   confidence の生値は扱わない（GR3 — API 側が confidence_label のみ返す）。
+ * - ハンズフリー音声対話は window.AdminVoiceChat（DOM 非依存エンジン）へ委譲し、
+ *   ここは「文字起こし → sendChatText → 読み上げ」の配線だけを持つ。音声から
+ *   承認・却下 API を呼ぶ経路は作らない（GR1: 確定は教員の明示ボタンのみ）。
  */
 (function () {
   "use strict";
 
-  var deps = { apiFetch: null, escHtml: null };
+  var deps = { apiFetch: null, escHtml: null, getToken: null };
 
   var state = {
     documentId: null,
@@ -35,6 +38,8 @@
     chatBusy: false,
     detailNotice: null, // 再描画をまたいで一度だけ再表示する操作結果 {message, kind}
     preserveViewOnce: false, // 次の再描画でズーム・パンを維持する（fit しない）
+    voiceLoop: null,    // AdminVoiceChat のコントローラ（起動中のみ）
+    voicePlayer: null,  // 読み上げ中の Audio（停止時に止める）
   };
 
   // component / claim の review_status → 表示ラベル（graphView と同じ語彙世界。
@@ -150,7 +155,9 @@
               '<div class="graph-review-chat-input-row">' +
                 '<textarea id="graph-review-chat-input" rows="2" placeholder="このグラフについて質問（例: 裏付けが弱いのはどこですか）"></textarea>' +
                 '<button type="button" id="graph-review-chat-send" class="admin-action-btn">送信</button>' +
+                '<button type="button" id="graph-review-voice-btn" class="admin-action-btn graph-review-voice-btn" data-ui-anchor="graph-review.voice">🎤 音声</button>' +
               '</div>' +
+              '<span id="graph-review-voice-status" class="graph-review-voice-status"></span>' +
               '<div id="graph-review-chat-status" class="graph-review-status"></div>' +
             '</div>' +
           '</div>' +
@@ -180,6 +187,7 @@
       if (state.selectedNodeId) switchChatMode("node");
     });
     modal.querySelector("#graph-review-chat-send").addEventListener("click", sendChat);
+    modal.querySelector("#graph-review-voice-btn").addEventListener("click", toggleVoice);
     modal.querySelector("#graph-review-chat-input").addEventListener("keydown", function (e) {
       if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
         e.preventDefault();
@@ -221,6 +229,7 @@
     state.preserveViewOnce = false;
     var modal = ensureModal();
     modal.hidden = false;
+    stopVoice(); // 前回の音声セッションを持ち越さない
     document.getElementById("graph-review-title-text").textContent = state.title;
     document.getElementById("graph-review-unreviewed-toggle").checked = false;
     setStatus("graph-review-graph-status", "グラフを読み込み中...", "info");
@@ -231,6 +240,8 @@
   function close() {
     var modal = document.getElementById("graph-review-modal");
     if (modal) modal.hidden = true;
+    // 画面を閉じたらマイクを必ず解放する（見えない場所で録音を続けない）。
+    stopVoice();
     if (state.network) {
       try { state.network.destroy(); } catch (e) { /* noop */ }
       state.network = null;
@@ -881,22 +892,45 @@
   }
 
   function sendChat() {
-    if (state.chatBusy) return;
     var input = document.getElementById("graph-review-chat-input");
     var content = (input && input.value || "").trim();
     if (!content) return;
+    sendChatText(content);
+  }
+
+  // テキスト送信の中核。入力欄からもハンズフリー音声からも同じ経路を通す。
+  // cb(err, replyText) — err.httpStatus は呼び出し側の分岐（429 等）に使う。
+  function sendChatText(content, cb) {
+    var finished = false;
+    function finish(err, reply) {
+      if (finished) return;
+      finished = true;
+      // 呼び出し側（音声ループ）の失敗を送信経路のエラー扱いにしない。
+      try {
+        if (typeof cb === "function") cb(err || null, reply || "");
+      } catch (e) { /* noop */ }
+    }
+    if (state.chatBusy) { finish(new Error("応答を作成中です。")); return; }
+    content = String(content == null ? "" : content).trim();
+    if (!content) { finish(new Error("送信する内容がありません。")); return; }
+    var input = document.getElementById("graph-review-chat-input");
     // 送信時点の表示コンテキストを固定する（応答到着までに切り替わっても混線させない）。
     var mode = state.chatMode;
     var nodeKey = state.selectedNodeId;
     var documentId = state.documentId;
     if (mode === "node" && !nodeKey) {
       setStatus("graph-review-chat-status", "ノードが選択されていません。", "error");
+      finish(new Error("ノードが選択されていません。"));
       return;
     }
     state.chatBusy = true;
     setStatus("graph-review-chat-status", "AI が応答を作成中...", "info");
     ensureSession(mode, nodeKey, function (session) {
-      if (!session) { state.chatBusy = false; return; }
+      if (!session) {
+        state.chatBusy = false;
+        finish(new Error("対話を開始できませんでした"));
+        return;
+      }
       var path = mode === "graph"
         ? "/admin/deliberation/documents/" + encodeURIComponent(documentId) + "/graph-sessions/" + encodeURIComponent(session.id) + "/messages"
         : "/admin/deliberation/sessions/" + encodeURIComponent(session.id) + "/messages";
@@ -908,7 +942,8 @@
         state.chatMessages.push(userMessage);
         renderChatLog();
       }
-      if (input) input.value = "";
+      // 入力欄から送った分だけを消す（音声経路や入力し直しの途中文字を消さない）。
+      if (input && input.value.trim() === content) input.value = "";
       deps.apiFetch(path, { method: "POST", body: JSON.stringify({ content: content }) })
         .then(function (res) {
           if (res.ok) return res.json();
@@ -927,12 +962,14 @@
           var replyMessage = { role: "assistant", content: data.reply || "" };
           session.messages.push(replyMessage);
           // 表示コンテキストが変わっていたら書き戻しだけで終える（再描画しない）。
-          if (!isCurrentContext(mode, nodeKey)) return;
-          state.chatMessages.push(replyMessage);
-          state.chatAnnotations = (data.annotations || []).concat(state.chatAnnotations);
-          renderChatLog();
-          renderChatAnnotations();
-          setStatus("graph-review-chat-status", data.degraded ? "AI 応答を生成できなかったため縮退応答を表示しています。" : "", data.degraded ? "info" : "");
+          if (isCurrentContext(mode, nodeKey)) {
+            state.chatMessages.push(replyMessage);
+            state.chatAnnotations = (data.annotations || []).concat(state.chatAnnotations);
+            renderChatLog();
+            renderChatAnnotations();
+            setStatus("graph-review-chat-status", data.degraded ? "AI 応答を生成できなかったため縮退応答を表示しています。" : "", data.degraded ? "info" : "");
+          }
+          finish(null, replyMessage.content);
         })
         .catch(function (err) {
           setStatus("graph-review-chat-status", (err && err.message) || "応答の取得に失敗しました", "error");
@@ -941,11 +978,144 @@
           if (err && err.httpStatus === 429 && mode === "graph" && isCurrentContext(mode, nodeKey)) {
             renderNewChatButton();
           }
+          finish(err || new Error("応答の取得に失敗しました"));
         })
         .finally(function () {
           state.chatBusy = false;
         });
     });
+  }
+
+  // -------------------------------------------------------------------------
+  // ハンズフリー音声対話（エンジンは AdminVoiceChat。ここは配線のみ）
+  // 音声からは対話しか行わない。承認・却下は教員のボタン操作だけ（GR1）。
+  // -------------------------------------------------------------------------
+
+  function setVoiceStatus(kind, label) {
+    var el = document.getElementById("graph-review-voice-status");
+    if (!el) return;
+    el.textContent = label || "";
+    el.className = "graph-review-voice-status" + (kind && kind !== "off" ? " is-" + kind : "");
+  }
+
+  function updateVoiceButton() {
+    var btn = document.getElementById("graph-review-voice-btn");
+    if (!btn) return;
+    var active = !!(state.voiceLoop && state.voiceLoop.isActive());
+    btn.textContent = active ? "⏹ 音声停止" : "🎤 音声";
+    btn.className = "admin-action-btn graph-review-voice-btn" + (active ? " is-active" : "");
+  }
+
+  function toggleVoice() {
+    if (state.voiceLoop && state.voiceLoop.isActive()) {
+      stopVoice("音声対話を終了しました。");
+      return;
+    }
+    startVoice();
+  }
+
+  function startVoice() {
+    if (!window.AdminVoiceChat || !window.AdminVoiceChat.createLoop) {
+      setVoiceStatus("error", "音声対話モジュールを読み込めていないため開始できません。ページを再読み込みしてください。");
+      return;
+    }
+    state.voiceLoop = window.AdminVoiceChat.createLoop({
+      transcribe: voiceTranscribe,
+      speak: voiceSpeak,
+      onUtterance: voiceUtterance,
+      onStatus: function (kind, label) {
+        setVoiceStatus(kind, label);
+        updateVoiceButton();
+      },
+      onStopped: function () {
+        state.voiceLoop = null;
+        updateVoiceButton();
+      },
+    });
+    state.voiceLoop.start();
+    updateVoiceButton();
+  }
+
+  function stopVoice(message) {
+    if (state.voicePlayer) {
+      try { state.voicePlayer.pause(); } catch (e) { /* noop */ }
+      state.voicePlayer = null;
+    }
+    if (state.voiceLoop) {
+      var loop = state.voiceLoop;
+      state.voiceLoop = null;
+      try { loop.stop(); } catch (e) { /* noop */ }
+    }
+    updateVoiceButton();
+    setVoiceStatus(message ? "error" : "off", message || "");
+  }
+
+  // 発話 → 既存のテキスト送信経路（表示・セッション・上限の扱いはテキストと同一）。
+  function voiceUtterance(text, done) {
+    sendChatText(text, function (err, reply) {
+      if (err && err.httpStatus === 429) {
+        // 上限に達したら回し続けない（事実文だけを残して終了する）。
+        stopVoice("利用の上限に達したため音声対話を終了しました。テキストで続けるか、新しい対話を開始してください。");
+        return;
+      }
+      done(err, reply);
+    });
+  }
+
+  // multipart は JSON 前提の apiFetch を通せないため、素の fetch で送る。
+  function voiceTranscribe(blob, done) {
+    var token = deps.getToken ? deps.getToken() : null;
+    var headers = {};
+    if (token) headers["Authorization"] = "Bearer " + token;
+    var ext = String(blob && blob.type || "").indexOf("mp4") >= 0 ? "mp4" : "webm";
+    var form = new FormData();
+    form.append("audio", blob, "speech." + ext);
+    fetch("/api/admin/deliberation/voice/transcribe?language=ja", {
+      method: "POST",
+      headers: headers,
+      body: form,
+    })
+      .then(function (res) {
+        if (res.ok) return res.json();
+        var error = new Error("音声を文字起こしできませんでした");
+        error.httpStatus = res.status;
+        throw error;
+      })
+      .then(function (data) { done(null, (data && data.text) || ""); })
+      .catch(function (err) { done(err || new Error("音声を文字起こしできませんでした")); });
+  }
+
+  function voiceSpeak(text, done) {
+    var called = false;
+    function finish(err, played) {
+      if (called) return;
+      called = true;
+      state.voicePlayer = null;
+      done(err || null, !!played);
+    }
+    deps.apiFetch("/admin/deliberation/voice/speak", {
+      method: "POST",
+      body: JSON.stringify({ text: text }),
+    })
+      .then(function (res) {
+        if (res.ok) return res.json();
+        var error = new Error("音声を再生できませんでした");
+        error.httpStatus = res.status;
+        throw error;
+      })
+      .then(function (data) {
+        var audioB64 = (data && data.audio_base64) || "";
+        if (!audioB64) { finish(null, false); return; }
+        var player = new Audio("data:audio/mp3;base64," + audioB64);
+        state.voicePlayer = player;
+        player.onended = function () { finish(null, true); };
+        player.onerror = function () { finish(null, false); };
+        var playing = player.play();
+        if (playing && playing.catch) {
+          playing.catch(function () { finish(null, false); });
+        }
+      })
+      .catch(function (err) { finish(err || new Error("音声を再生できませんでした"), false); });
   }
 
   // -------------------------------------------------------------------------
@@ -956,6 +1126,9 @@
     init: function (options) {
       deps.apiFetch = options.apiFetch;
       deps.escHtml = options.escHtml;
+      // multipart（音声の文字起こし）だけは素の fetch を使うため、認証トークンの
+      // 取得関数を受け取る（トークンの保持は admin.js 側の責務のまま）。
+      deps.getToken = options.getToken || null;
     },
     open: open,
     close: close,

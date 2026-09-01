@@ -50,6 +50,12 @@
   }
 
   // ── API helpers ────────────────────────────────────────────────────
+  // 現在の認証トークン。apiFetch を通せない multipart 送信（音声の文字起こし等）を
+  // 行うモジュールへ DI するための読み取り関数（トークンの保持は admin.js が正本）。
+  function getAuthToken() {
+    return state.token;
+  }
+
   function apiFetch(path, opts) {
     opts = opts || {};
     var headers = opts.headers || {};
@@ -11238,7 +11244,7 @@
       }
       // グラフ対話レビュー（graph_dialogue_review_design.md）— 教材行「🕸 グラフレビュー…」。
       if (window.GraphReview) {
-        window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml });
+        window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken });
       }
     }
     initStumbles();

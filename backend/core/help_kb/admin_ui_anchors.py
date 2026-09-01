@@ -154,6 +154,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "graph-review.next-unreviewed",
         "graph-review.open-deliberation",
         "graph-review.reject",
+        "graph-review.voice",
         "groups.create-form",
         "groups.delete-btn",
         "groups.invite-btn",
@@ -602,6 +603,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "graph-review.next-unreviewed": "teacher/26-admin-graph-review.md#next-unreviewed",
     "graph-review.open-deliberation": "teacher/26-admin-graph-review.md#open-deliberation",
     "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
+    "graph-review.voice": "teacher/26-admin-graph-review.md#voice-chat",
 
     # --- groups.* — グループタブ --------------------------------------------------------
     # グループを作成

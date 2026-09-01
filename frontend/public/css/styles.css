@@ -11628,6 +11628,21 @@ button.element-card-item:focus-visible .element-card-item-label {
   border: 1px solid var(--color-border, #cbd5e1);
   border-radius: 8px;
 }
+.graph-review-voice-btn { white-space: nowrap; }
+.graph-review-voice-btn.is-active {
+  background: var(--color-background-info, #eef2ff);
+  border-color: var(--color-border-info, #6366f1);
+  color: var(--color-text-info, #3730a3);
+}
+.graph-review-voice-status {
+  display: block;
+  min-height: 16px;
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--color-text-secondary, #64748b);
+}
+.graph-review-voice-status.is-error { color: var(--color-text-danger, #dc2626); }
+.graph-review-voice-status.is-speaking { color: var(--color-text-info, #3730a3); }
 .graph-review-status { min-height: 16px; font-size: 12px; padding: 2px 0; }
 .graph-review-status.is-error { color: var(--color-text-danger, #dc2626); }
 .graph-review-status.is-success { color: var(--color-text-success, #16a34a); }
