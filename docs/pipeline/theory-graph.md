@@ -134,10 +134,78 @@ claim の `evidence_text` は呼び出し側（`orchestrator._component_graph_cl
 なお `claim_level` はパイプライン経路では供給されないため、atomic 判定で実際に効くのは
 `is_atomic` と text 長の2条件。
 
+### step ⇄ claim 参照のバックフィル契約
+node の `linked_claim_ids` は derivation step の claim 参照が供給元だが、`derivation_chain` は
+式由来の合成 claim（`synth_claim_*`）を作る**前**に走るため、合成 claim は agent 自身には
+決して結べない。散文 claim に `equation_ids` が付かない文書では step の `required_claim_ids` が
+空のままになる。そこで結び直しは合成フック（`orchestrator._hook_equation_claim_synthesis` →
+`_backfill_derivation_claim_refs`）の責務とし、新規実行・resume のどちらでも実行する
+（フックは artifact ゲートを持たないので restart 起点に依存しない。ただし
+`target_stage` が hook より手前で止まる単一ステージ実行では hook 自体が走らない）。
+
+処理は2段:
+- **追加** — `equation_id → claim_id` 索引（正本 `orchestrator._claim_equation_link_index`）から
+  step の**出力式および入力式**に紐づく claim を `required_claim_ids` へ additive に足す。
+  agent の `_walk_back` は出力式のみだが、`chain_type="system_level"` の step は出力式が
+  空になり得るため入力式からも引く。追加先は `required_claim_ids` だけで
+  `input_claim_ids` / `output_claim_ids` には書き足さない（それらは agent 側が埋める）。
+- **掃除** — `_canonicalize_derivation_claim_refs` に委譲。legacy 形式 id の正規化と、
+  最終 claim 集合に解決できない参照（旧版合成の stale な ID 等）の除去を step の claim 参照
+  4フィールドすべてに対して行い、落とした参照は `unresolved_claim_ref_dropped` の
+  ValidationIssue として記録する（黙って捨てない）。
+  既知の限界: 位置決めの synth id が別の式へ再割り当てされた場合は id として解決してしまうため
+  検出できない（canonicalization 自体と同じ限界）。
+
+変更があったときだけ `derivation_chain` artifact を再保存する（冪等 — 2回目の通過は no-op）。
+合成が例外で失敗した run ではバックフィルを実行しない（未確定の claim 集合で生きた参照を
+落とさないため）。
+
+**限界（意図的）**: バックフィルが回復するのはノードの **claim 接続**であって強い backing では
+ない。合成 claim は `support_status="equation_backed"` で strong backing ゲート
+（`source_backed` のみ）の外なので `evidence_text` は供給されず、ノードには
+`missing_atomic_claim` が残る（上記「空の evidence_text を強い backing として扱わない」の帰結）。
+
+### step ⇄ evidence 参照のバックフィル契約
+node の `linked_evidence_ids` は derivation step の `source_evidence_ids` が供給元で、step は
+式レコードの `semantics.source_evidence_ids` をそのまま写す。ところがこのフィールドは
+`equation_semantics` の LLM 出力項目でありながら prompt / validator が一切要求しないため
+**常に空**で agent を出る。式ブロックの逐語 evidence（`equation_quote`。EvidenceRegistry が
+式ブロックごとに登録済み）との結線は `to_equations_export(evidence_index=...)` の中にしか無く、
+**export ルートにしか流れていなかった** — evidence は存在するのに結線だけが欠け、グラフの
+全ノードが `missing_evidence_link` で出るという処理の欠陥だった（2026-09 修正）。
+
+決定論的に（LLM を追加で呼ばず）2箇所で補う:
+- **式レコードへ** — `orchestrator._hook_equation_evidence_backfill`（`evidence_registry` の直後・
+  `claim_object_builder` の前に走る between-stage フック）が
+  `_backfill_equation_evidence_refs` で block 索引（`_evidence_ids_by_block`。
+  `to_equations_export` と同一規則）から `semantics.source_evidence_ids` へ additive に還流させる。
+  以降の consumer（derivation_chain / symbol_registry / component_assembly / 式 claim 合成 /
+  component_graph）が同じ evidence を見る。
+- **derivation step へ** — `_stage_derivation_chain` の防御的後処理
+  `_backfill_derivation_evidence_refs` が step の入出力式の evidence を additive に補う。
+  式側が空だった run（上記フック以前の artifact からの resume）でも結線が戻る。
+
+いずれも変更があったときだけ artifact を再保存する（冪等 — 2回目の通過は no-op）。索引に
+無い式・evidence を持たない step は空のまま（捏造しない）。
+
+evidence が結ばれると `_node_backing` の強い backing 条件が満たされ、式 backing のある node は
+`source_backed`（= `review_status: source_backed`）になる。ただし最小命題の claim が無い限り
+`missing_atomic_claim` は warning として残る（#306 の意図した帰結。上記「限界（意図的）」参照）。
+
 ### UI 表示（admin.js）
 `source_backing_status` で表示を区別（source_backed=通常 / partially=細線 / review_required=点線枠 / inferred・fallback=薄色+⚠）。
 グラフ層トグル（主グラフ / 式の詳細 / すべて）で `graph_layer` を切替、既定は main 優先。
 → [管理機能](../features/admin.md)。
+
+`review_reasons` は**構築時の焼き込み値**なので、そのまま「要確認の理由」として出すと
+教員が承認した構造や `source_backed` で確定した構造まで欠陥に見える。読み時射影
+（`routes/theory_components.py::_normalize_stored_component_graph`。`graph_json` は書き換えない）が
+次を添える:
+- `review_reasons_at_analysis` — 教員が承認したノードの理由（`review_reasons` から移す。
+  レビュー要求としては出さないが破棄もしない）。
+- `review_reasons_advisory` — 参考情報として読むべき理由か（承認済み、または `source_backed`）。
+- `graph_updated_at` — そのグラフが構築された時点（`theory_component_graphs.updated_at`）。
+  パイプライン修正は**再解析まで既存グラフに反映されない**ため、古さの判断材料として返す。
 
 ---
 

@@ -1106,6 +1106,32 @@ def _stage_evidence_registry(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("evidence_registry", {"records": len(getattr(ctx.evidence, "records", []) or []), "total": 1, "processed": 1})
 
 
+def _hook_equation_evidence_backfill(ctx: PipelineContext) -> bool:
+    """Between evidence_registry and claim_object_builder: resume に関係なく毎回実行。
+
+    ── Stage 8b.1: equation ⇄ evidence back-fill ────────────────────────
+    式ブロックの逐語 evidence を式レコードへ決定論的に還流させる
+    （``_backfill_equation_evidence_refs`` の docstring が根本原因の記録）。
+    非致命: 失敗しても以降のステージはそのまま進む（evidence 未結線の従来動作）。
+    """
+    try:
+        report = _backfill_equation_evidence_refs(
+            equations=ctx.equations, evidence=ctx.evidence,
+        )
+        if report["equations_changed"]:
+            ctx.save_artifact("equation_semantics", ctx.equations)
+            logger.info(
+                "Back-filled equation evidence refs for document %s: equations=%d added=%d",
+                ctx.document_id, report["equations_changed"], report["refs_added"],
+            )
+    except Exception:
+        logger.warning(
+            "equation evidence back-fill failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    return False
+
+
 def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
     # ── Stage 8c: claim_object_builder (deterministic claims.json) ─────
     claim_object_artifact = ctx.artifact("claim_object_builder")
@@ -1291,6 +1317,27 @@ def _stage_derivation_chain(ctx: PipelineContext) -> bool:
             "derivation claim-ref canonicalization failed (non-fatal): document=%s",
             ctx.document_id, exc_info=True,
         )
+    # Defensive evidence back-fill: the agent copies each step's evidence from the
+    # equation record, so a chain built before the equation ⇄ evidence back-fill
+    # (Stage 8b.1) — i.e. any resumed derivation_chain artifact — still carries
+    # empty ``source_evidence_ids`` and produces graph nodes flagged
+    # ``missing_evidence_link``. Deterministic, additive, idempotent, non-fatal.
+    try:
+        evidence_backfill = _backfill_derivation_evidence_refs(
+            derivations=ctx.derivations, equations=ctx.equations,
+        )
+        if evidence_backfill["steps_changed"]:
+            ctx.save_artifact("derivation_chain", ctx.derivations)
+            logger.info(
+                "Back-filled derivation step evidence refs for document %s: steps=%d added=%d",
+                ctx.document_id, evidence_backfill["steps_changed"],
+                evidence_backfill["refs_added"],
+            )
+    except Exception:
+        logger.warning(
+            "derivation evidence back-fill failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
     ctx.report_done("derivation_chain", {
         "chains": len(getattr(ctx.derivations, "chains", []) or []),
         "total": 1,
@@ -1308,6 +1355,7 @@ def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
     # propositions. Additive and non-fatal: synthesised claims are appended to
     # the claim_object_builder artifact (and to claim_objects so downstream
     # component assembly can cite them).
+    synthesis_ok = False
     try:
         synthesized = _synthesize_equation_claims(
             equations=ctx.equations, derivations=ctx.derivations, claim_objects=ctx.claim_objects,
@@ -1319,9 +1367,48 @@ def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
                 "Synthesised %d equation/derivation-backed claims for document %s",
                 len(synthesized), ctx.document_id,
             )
+        synthesis_ok = True
     except Exception:
         logger.warning(
             "equation claim synthesis failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+
+    # ── Stage 8d.2: derivation step ⇄ claim back-fill ────────────────
+    # derivation_chain runs *before* the synthesis above, so any claim that only
+    # exists as an equation-derived synth claim can never be linked to a step by
+    # the agent itself — on a document whose prose claims carry no `equation_ids`
+    # that leaves every step with an empty `required_claim_ids` and the
+    # theory-operation graph with claim-less nodes. Re-link the already-built
+    # chains against the final claim set here (idempotent: a second pass rewrites
+    # nothing and saves no artifact). This restores the *claim link*, not strong
+    # backing: synth claims are `equation_backed`, so `missing_atomic_claim`
+    # stays on the node by design (#306).
+    #
+    # Gated on `synthesis_ok`: when the synthesis above raised, the claim set is
+    # not the final one, so re-linking against it could drop live refs and save a
+    # damaged derivation_chain artifact. In that case leave the artifact alone.
+    if not synthesis_ok:
+        logger.warning(
+            "skipping derivation claim back-fill because claim synthesis failed: document=%s",
+            ctx.document_id,
+        )
+        return False
+    try:
+        backfill = _backfill_derivation_claim_refs(
+            derivations=ctx.derivations, claim_objects=ctx.claim_objects,
+        )
+        if backfill["steps_changed"]:
+            ctx.save_artifact("derivation_chain", ctx.derivations)
+            logger.info(
+                "Back-filled derivation step claim refs for document %s: "
+                "steps=%d added=%d dropped=%d",
+                ctx.document_id, backfill["steps_changed"],
+                backfill["refs_added"], backfill["refs_dropped"],
+            )
+    except Exception:
+        logger.warning(
+            "derivation claim back-fill failed (non-fatal): document=%s",
             ctx.document_id, exc_info=True,
         )
     return False
@@ -2264,6 +2351,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
         vision_optional=True,
     ),
     PipelineStageDef("evidence_registry", _stage_evidence_registry, progress_unit="builder"),
+    PipelineStageDef(None, _hook_equation_evidence_backfill),
     PipelineStageDef("claim_object_builder", _stage_claim_object_builder, progress_unit="builder"),
     PipelineStageDef(None, _hook_claim_equation_canonicalization),
     PipelineStageDef("symbol_registry", _stage_symbol_registry, progress_unit="builder"),
@@ -2650,9 +2738,7 @@ def _build_evidence_registry(
 
     # Register evidence for each equation block.
     for record in getattr(equations, "equations", []) or []:
-        src = getattr(record, "source_extraction", None)
-        loc = getattr(src, "source_location", None) if src else None
-        block_id = (loc.get("block_id") if isinstance(loc, dict) else None) or getattr(record, "block_id", None)
+        block_id = _equation_block_id(record)
         if not block_id or block_id in seen_block_ids:
             continue
         builder.add_for_block(block_id, evidence_role="equation_quote")
@@ -2736,6 +2822,28 @@ def _empty_claim_object_result(document_id: str, cartridge_id: str | None):
     )
 
 
+def _claim_equation_link_index(claim_objects: Any) -> dict[str, list[str]]:
+    """``equation_id -> [claim_id, ...]`` from claim_object_builder.
+
+    Single source of truth for the DerivationChainAgent's ``claim_link_index``
+    contract: the agent joins a step's *output* equation ids through this index
+    to fill ``required_claim_ids``. Built both when the agent runs
+    (``_build_derivation_chains``) and when the synthesis hook back-fills the
+    already-built chains (``_backfill_derivation_claim_refs``, which also joins
+    the *input* equation ids so ``system_level`` steps — whose output list can be
+    empty — are covered) — the index itself must stay identical, so do not
+    re-implement it inline.
+    """
+    index: dict[str, list[str]] = {}
+    for claim in getattr(claim_objects, "claims", []) or []:
+        cid = getattr(claim, "claim_id", None)
+        if not cid:
+            continue
+        for eq_id in getattr(claim, "equation_ids", []) or []:
+            index.setdefault(eq_id, []).append(cid)
+    return index
+
+
 def _build_derivation_chains(
     *,
     agent_classes: dict,
@@ -2750,14 +2858,7 @@ def _build_derivation_chains(
         agent_classes, "DerivationChainAgent", DerivationChainAgent
     )
 
-    # equation_id -> [claim_id, ...] from claim_object_builder.
-    claim_link_index: dict[str, list[str]] = {}
-    for claim in getattr(claim_objects, "claims", []) or []:
-        cid = getattr(claim, "claim_id", None)
-        if not cid:
-            continue
-        for eq_id in getattr(claim, "equation_ids", []) or []:
-            claim_link_index.setdefault(eq_id, []).append(cid)
+    claim_link_index = _claim_equation_link_index(claim_objects)
 
     return agent.run(
         equations=equations,
@@ -2841,24 +2942,246 @@ def _synthesize_equation_claims(*, equations: Any, derivations: Any, claim_objec
     """Synthesise equation/derivation-backed atomic claims (issue #388).
 
     Returns new ClaimObjectRecord objects to append to the claim artifact. The
-    next synth index continues past any synthesised claims already present so a
-    resumed run does not collide IDs.
+    previously synthesised claims are rebuilt deterministically from index 1
+    instead of being duplicated, so a resumed run does not collide IDs.
+
+    ``claim_objects`` is only mutated once the synthesis has actually produced a
+    replacement set: stripping the old ``synth_claim_*`` records up front would
+    leave the context (and everything downstream, notably the step ⇄ claim
+    back-fill) reading a claim set with live references missing whenever the
+    synthesiser raises or returns nothing.
     """
     from episteme_graph.agents.claim_object_builder.equation_claim_synthesis import (
         synthesize_equation_claims,
     )
 
     existing = list(getattr(claim_objects, "claims", []) or [])
-    # Drop any previously synthesised claims so a resumed run rebuilds them
-    # deterministically instead of duplicating, then re-synthesise from index 1.
     prose_claims = [c for c in existing if not str(getattr(c, "claim_id", "")).startswith("synth_claim_")]
-    claim_objects.claims = prose_claims
-    return synthesize_equation_claims(
+    synthesized = synthesize_equation_claims(
         equations,
         derivations=derivations,
         existing_claims=prose_claims,
         start_index=1,
     )
+    if synthesized:
+        claim_objects.claims = prose_claims
+    return synthesized
+
+
+def _step_claim_ref_snapshot(step: Any, fields: tuple[str, ...]) -> tuple:
+    """Comparable snapshot of a step's claim reference fields (change detection)."""
+    return tuple(
+        tuple(str(v) for v in (getattr(step, name, None) or []))
+        for name in fields
+    )
+
+
+def _backfill_derivation_claim_refs(*, derivations: Any, claim_objects: Any) -> dict[str, int]:
+    """Re-link derivation steps to the *final* claim set (鶏と卵の順序欠陥の是正).
+
+    ``derivation_chain`` は ``claim_object_builder`` の直後・equation claim 合成の
+    **前**に走るため、式由来の合成 claim（``synth_claim_*``）は agent 自身には
+    決して結べない。散文 claim に ``equation_ids`` が付かない文書では、その結果
+    全 step の ``required_claim_ids`` が空のままになり、理論操作グラフのノードが
+    claim 未接続で出る（restart 時だけ、前回 artifact に残った合成 claim で
+    偶然結べていた）。
+
+    2段で処理する:
+
+    1. **追加**: 合成後の claim 集合で作った ``equation_id -> claim_id`` 索引
+       （``_claim_equation_link_index``）から、step の出力式**および入力式**に
+       紐づく claim を ``required_claim_ids`` へ additive に足す。agent の
+       ``_walk_back`` 規則は出力式のみだが、``chain_type="system_level"`` の step は
+       出力式が空になり得るため入力式からも引く（既存参照の保持と同じく additive
+       なので害がない）。本関数が**追加**するのは ``required_claim_ids`` だけで、
+       ``input_claim_ids`` / ``output_claim_ids`` には書き足さない（それらは
+       ``_build_claim_chains`` / system_derivation が埋める agent 側の領分）。
+    2. **掃除**: ``_canonicalize_derivation_claim_refs`` に委譲し、legacy 形式 id
+       （``claim:blk:span``）の正規 id への remap と、最終 claim 集合に解決できない
+       参照（旧版合成の stale な ID 等）の除去を行う。掃除は step の claim 参照
+       4フィールドすべてに及び、落とした参照は canonicalization と同じ
+       ``unresolved_claim_ref_dropped`` の ValidationIssue として記録される
+       （黙って捨てない = P4）。
+
+    このバックフィルが回復するのはノードの **claim 接続**（``linked_claim_ids``）
+    であって強い backing ではない。合成 claim は ``support_status="equation_backed"``
+    で ``_STRONG_BACKING_SUPPORT_STATUSES``（``source_backed`` のみ）の外なので
+    ``evidence_text`` が供給されず、ノードには ``missing_atomic_claim`` が残る。
+    これは「空の evidence を強い backing にしない」#306 設計の意図した帰結。
+
+    既知の限界: 位置決めの synth id（``synth_claim_0001`` など）が別の式へ再割り当て
+    された場合、id としては解決してしまうので検出できない（canonicalization 自体と
+    同じ限界）。
+
+    Returns a report dict (``{"steps_changed", "refs_added", "refs_dropped"}``);
+    ``steps_changed == 0`` means nothing was rewritten (2回目の呼び出しは no-op)。
+    """
+    # 掃除対象フィールドの正本は id_canonicalization 側（ここで別表を作らない）。
+    from episteme_graph.agents.id_canonicalization import (
+        _DERIVATION_STEP_CLAIM_FIELDS as CLAIM_REF_FIELDS,
+    )
+
+    report = {"steps_changed": 0, "refs_added": 0, "refs_dropped": 0}
+    steps = [
+        step
+        for chain in (getattr(derivations, "chains", []) or [])
+        for step in (getattr(chain, "steps", []) or [])
+    ]
+    if not steps:
+        return report
+
+    before = [_step_claim_ref_snapshot(step, CLAIM_REF_FIELDS) for step in steps]
+
+    # ① 追加（出力式 ∪ 入力式 → claim）
+    claim_link_index = _claim_equation_link_index(claim_objects)
+    for step in steps:
+        linked: list[str] = []
+        equation_ids = (
+            list(getattr(step, "output_equation_ids", []) or [])
+            + list(getattr(step, "input_equation_ids", []) or [])
+        )
+        for eq_id in equation_ids:
+            linked.extend(claim_link_index.get(eq_id, []))
+        if not linked:
+            continue
+        current = [str(cid) for cid in (getattr(step, "required_claim_ids", []) or [])]
+        updated = sorted(set(current) | set(linked))
+        if updated != current:
+            step.required_claim_ids = updated
+            report["refs_added"] += len(set(updated) - set(current))
+
+    # ② 掃除（legacy remap + 未解決の除去 + ValidationIssue 記録）
+    for entry in _canonicalize_derivation_claim_refs(derivations, claim_objects):
+        report["refs_dropped"] += len(entry.get("dropped_claim_ids") or [])
+
+    for step, snapshot in zip(steps, before):
+        if _step_claim_ref_snapshot(step, CLAIM_REF_FIELDS) != snapshot:
+            report["steps_changed"] += 1
+    return report
+
+
+def _evidence_ids_by_block(evidence: Any) -> dict[str, list[str]]:
+    """``block_id -> [evidence_id, ...]``（EvidenceRegistry の実 ID 索引）。
+
+    figure/table の caption リンク（``_build_figure_table_semantics``）と式 ⇄ evidence の
+    バックフィル（``_backfill_equation_evidence_refs``）が同じ索引を使う。
+    ``EquationSemanticsResult.to_equations_export`` の enrichment 規則と同一
+    （block 単位・出現順）なので、export と graph が別の evidence を見ることはない。
+    """
+    index: dict[str, list[str]] = {}
+    for record in getattr(evidence, "records", []) or []:
+        block_id = str(getattr(getattr(record, "source", None), "block_id", "") or "").strip()
+        ev_id = str(getattr(record, "evidence_id", "") or "").strip()
+        if block_id and ev_id and ev_id not in index.setdefault(block_id, []):
+            index[block_id].append(ev_id)
+    return index
+
+
+def _equation_block_id(record: Any) -> str:
+    """EquationRecord の出所 block_id（``source_extraction.source_location`` が正）。"""
+    src = getattr(record, "source_extraction", None)
+    loc = getattr(src, "source_location", None) if src else None
+    block_id = (loc.get("block_id") if isinstance(loc, dict) else None) or getattr(
+        record, "block_id", None
+    )
+    return str(block_id or "").strip()
+
+
+def _backfill_equation_evidence_refs(*, equations: Any, evidence: Any) -> dict[str, int]:
+    """式 ⇄ evidence の結線を決定論的に補う（LLM を呼ばない）。
+
+    ``EquationSemantics.source_evidence_ids`` は LLM 出力フィールドだが
+    ``equation_semantics`` の prompt / validator はこの項目を一切要求しないため、
+    実際には**常に空**で agent を出る（``_make_provisional_record`` も空固定）。
+    式ブロックの逐語 evidence（``evidence_role="equation_quote"``、
+    ``_build_evidence_registry`` が式ブロックごとに必ず登録する）は
+    ``to_equations_export(evidence_index=...)`` の中でしか結ばれておらず、
+    その enrichment は **export ルートにしか流れていなかった**。
+
+    結果として derivation_chain の step（``current_record.semantics.source_evidence_ids``
+    をそのまま持つ）と、そこから作られる理論操作グラフの全ノードが
+    ``linked_evidence_ids`` 空 = ``missing_evidence_link`` で出ていた（本来
+    evidence は登録済みで、結線だけが欠けている＝処理の欠陥）。
+
+    ここで export と同じ block 単位の索引を使って式レコード側に還流させるので、
+    以降の consumer（derivation_chain / symbol_registry / component_assembly /
+    equation claim 合成 / component_graph）が同じ evidence を見る。既存値は
+    保持（additive・union）で、索引に無い式は空のまま（捏造しない）。
+
+    Returns ``{"equations_changed", "refs_added"}``; 2回目の呼び出しは no-op。
+    """
+    report = {"equations_changed": 0, "refs_added": 0}
+    records = list(getattr(equations, "equations", []) or [])
+    if not records:
+        return report
+    index = _evidence_ids_by_block(evidence)
+    if not index:
+        return report
+    for record in records:
+        sem = getattr(record, "semantics", None)
+        if sem is None:
+            continue
+        block_id = _equation_block_id(record)
+        linked = index.get(block_id) or []
+        if not linked:
+            continue
+        current = [str(v) for v in (getattr(sem, "source_evidence_ids", None) or [])]
+        updated = sorted(set(current) | set(linked))
+        if updated != current:
+            sem.source_evidence_ids = updated
+            report["equations_changed"] += 1
+            report["refs_added"] += len(set(updated) - set(current))
+    return report
+
+
+def _backfill_derivation_evidence_refs(*, derivations: Any, equations: Any) -> dict[str, int]:
+    """derivation step ⇄ evidence の結線を式経由で補う（決定論・LLM 非使用）。
+
+    step の ``source_evidence_ids`` は ``DerivationChainAgent`` が式レコードの
+    ``semantics.source_evidence_ids`` から写すだけなので、①その式側が空だった run
+    （``_backfill_equation_evidence_refs`` 以前の artifact からの resume）②claim 由来の
+    chain 以外は、step の evidence が空のまま残る。step の入出力式の逐語 evidence を
+    additive に補い、理論操作グラフのノードが ``missing_evidence_link`` のまま出るのを
+    防ぐ。式が evidence を持たない step は空のまま（捏造しない）。
+
+    Returns ``{"steps_changed", "refs_added"}``; 2回目の呼び出しは no-op。
+    """
+    report = {"steps_changed": 0, "refs_added": 0}
+    steps = [
+        step
+        for chain in (getattr(derivations, "chains", []) or [])
+        for step in (getattr(chain, "steps", []) or [])
+    ]
+    if not steps:
+        return report
+    evidence_by_equation: dict[str, list[str]] = {}
+    for record in getattr(equations, "equations", []) or []:
+        eq_id = str(getattr(record, "equation_id", "") or "").strip()
+        sem = getattr(record, "semantics", None)
+        if not eq_id or sem is None:
+            continue
+        ev_ids = [str(v) for v in (getattr(sem, "source_evidence_ids", None) or []) if str(v or "").strip()]
+        if ev_ids:
+            evidence_by_equation[eq_id] = ev_ids
+    if not evidence_by_equation:
+        return report
+    for step in steps:
+        linked: list[str] = []
+        equation_ids = (
+            list(getattr(step, "output_equation_ids", None) or [])
+            + list(getattr(step, "input_equation_ids", None) or [])
+        )
+        for eq_id in equation_ids:
+            linked.extend(evidence_by_equation.get(str(eq_id), []))
+        if not linked:
+            continue
+        current = [str(v) for v in (getattr(step, "source_evidence_ids", None) or [])]
+        updated = sorted(set(current) | set(linked))
+        if updated != current:
+            step.source_evidence_ids = updated
+            report["steps_changed"] += 1
+            report["refs_added"] += len(set(updated) - set(current))
+    return report
 
 
 def _build_figure_table_semantics(
@@ -2879,12 +3202,7 @@ def _build_figure_table_semantics(
     )
 
     # block_id -> [evidence_id, ...] for caption blocks.
-    evidence_index: dict[str, list[str]] = {}
-    for record in getattr(evidence, "records", []) or []:
-        block_id = getattr(getattr(record, "source", None), "block_id", None)
-        ev_id = getattr(record, "evidence_id", None)
-        if block_id and ev_id:
-            evidence_index.setdefault(block_id, []).append(ev_id)
+    evidence_index = _evidence_ids_by_block(evidence)
 
     # claim_link_index: block_id -> [claim_id, ...] (F1 cross-link contract).
     #

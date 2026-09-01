@@ -79,6 +79,10 @@
 ### DerivationChainAgent（#237）— 決定論
 `derivation_chain/agent.py`。EquationSemantics のリンクから **式間導出チェーン**を構築（leaf-first 後方走査）。任意で claim チェーンも。
 - 出力: `DerivationChainResult`（steps, operations, claims）
+- step ⇄ claim 参照（`required_claim_ids`）は本 agent の実行時点では未確定（式由来の合成 claim は
+  本 agent より後に生まれるため結べない）。合成フックが実行後に結び直し（出力式 ∪ 入力式）、
+  未解決参照を掃除して `derivation_chain` artifact を再保存する
+  → [DSL と理論操作グラフ](theory-graph.md)「step ⇄ claim 参照のバックフィル契約」。
 
 ### FigureTableSemanticsAgent（#237）— caption-first
 `figure_table_semantics/agent.py`。図表の意味を caption 優先で復元（LLM enricher は任意）。
