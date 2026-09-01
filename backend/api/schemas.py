@@ -1087,6 +1087,15 @@ class ComponentGraphNode(BaseModel):
     linked_evidence_ids: list[str] = Field(default_factory=list)
     source_backing_status: str = ""
     review_reasons: list[str] = Field(default_factory=list)
+    # review_reasons は解析時点の焼き込み値。レビューを待っていないノードで「要確認の
+    # 理由」として提示すると確定済みの構造まで欠陥に見えるため、読み時射影
+    # (`_normalize_stored_component_graph`) が次の2つを添える:
+    #   review_reasons_at_analysis … 教員が承認したノードの理由（review_reasons から
+    #     移す。レビュー要求としては出さないが破棄もしない）
+    #   review_reasons_advisory … 参考情報として読むべき理由か（承認済み、または
+    #     source_backed で確定したノード。例: #306 の missing_atomic_claim warning）
+    review_reasons_at_analysis: list[str] = Field(default_factory=list)
+    review_reasons_advisory: bool = False
     # Layer linkage between main TheoryOperationNode and equation_detail nodes (issue #306).
     parent_component_id: str = ""
     member_component_ids: list[str] = Field(default_factory=list)
@@ -1142,6 +1151,11 @@ class ComponentGraphResponse(BaseModel):
     # {"claims": {id: {"claim_id", "text"}}, "evidence": {id: {"text",
     # "block_id"}}, "derivations": {id: {"label", "kind", "operation"}}}.
     reference_index: dict = Field(default_factory=dict)
+    # 保存済みグラフが構築された時点（ISO8601。読み時組み立て経路では空）。
+    # review_reasons / source_backing_status は構築時の焼き込み値なので、
+    # パイプライン修正は再解析まで既存グラフに反映されない — その古さを教員が
+    # 判断できるようにする事実（表示・注意文は UI 側）。
+    graph_updated_at: str = ""
 
 
 class LectureStudioSettings(BaseModel):

@@ -11561,6 +11561,11 @@ button.element-card-item:focus-visible .element-card-item-label {
 .graph-review-chip-status { background: var(--color-background-warning, #fefce8); border-color: var(--color-border-secondary, #eab308); color: var(--color-text-warning, #854d0e); }
 .graph-review-detail-desc { font-size: 12.5px; line-height: 1.6; margin-bottom: 8px; }
 .graph-review-detail-reasons { font-size: 12px; color: var(--color-text-warning, #b45309); margin-bottom: 8px; }
+/* 参考メモ（source_backed の warning）・承認済みノードの解析時点メモは
+   レビュー要求と区別し、警告色を使わない（要確認に見せない）。 */
+.graph-review-detail-reasons-advisory,
+.graph-review-detail-reasons-archived { color: var(--color-text-tertiary, #6b7280); }
+.graph-review-graph-updated { font-size: 11.5px; font-weight: normal; color: var(--color-text-tertiary, #6b7280); margin-left: 8px; }
 .graph-review-detail-actions { display: flex; gap: 8px; margin: 8px 0; }
 .graph-review-claims-title { font-weight: 600; font-size: 12.5px; margin: 10px 0 6px; }
 .graph-review-claim-row {

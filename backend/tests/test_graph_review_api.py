@@ -325,6 +325,77 @@ class TestStoredGraphLiveReviewStatus:
         assert graph["nodes"][0]["review_status"] == "source_backed"
 
 
+class TestStoredGraphReviewReasonProjection:
+    """review_reasons は構築時の焼き込み値なので、レビューを待っていないノードで
+    「要確認の理由」として出すと確定済みの構造まで欠陥に見える。読み時射影だけで
+    是正し（graph_json は書き換えない）、理由自体は破棄しない。"""
+
+    def _stored_node(self, **overrides):
+        node = {
+            "component_id": _COMPONENT,
+            "label": "Theory basis",
+            "graph_layer": "main",
+            "review_status": "teacher_review_required",
+            "source_backing_status": "partially_source_backed",
+            "review_reasons": ["missing_atomic_claim"],
+        }
+        node.update(overrides)
+        return node
+
+    def _node(self, stored_node, component):
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [stored_node], "edges": []}, [component],
+        )
+        return graph["nodes"][0]
+
+    def test_approved_node_moves_reasons_out_of_the_review_field(self):
+        node = self._node(self._stored_node(), _component(review_status="teacher_approved"))
+        assert node["review_reasons"] == []
+        assert node["review_reasons_at_analysis"] == ["missing_atomic_claim"]
+        assert node["review_reasons_advisory"] is True
+
+    def test_unreviewed_node_keeps_its_reasons_as_review_requests(self):
+        node = self._node(self._stored_node(), _component(review_status="teacher_review_required"))
+        assert node["review_reasons"] == ["missing_atomic_claim"]
+        assert node["review_reasons_at_analysis"] == []
+        assert node["review_reasons_advisory"] is False
+
+    def test_source_backed_node_keeps_reasons_but_marks_them_advisory(self):
+        # #306: 式・evidence で裏付いていても最小命題の claim が無いことは warning
+        # として残す。表示側が「要確認」と読ませないための宣言。
+        node = self._node(
+            self._stored_node(review_status="source_backed", source_backing_status="source_backed"),
+            _component(review_status="teacher_review_required"),
+        )
+        assert node["review_reasons"] == ["missing_atomic_claim"]
+        assert node["review_reasons_advisory"] is True
+
+    def test_rejected_node_still_shows_why(self):
+        node = self._node(self._stored_node(), _component(review_status="rejected"))
+        assert node["review_reasons"] == ["missing_atomic_claim"]
+        assert node["review_reasons_advisory"] is False
+
+    def test_approved_status_vocabulary_is_shared_with_core(self):
+        # routes 側で語彙表を作り直していないこと（test_issue_319 の exec スタブが
+        # 参照している値もこれ）。
+        assert tc.APPROVED_REVIEW_STATUSES == gd.APPROVED_REVIEW_STATUSES
+        assert tc.APPROVED_REVIEW_STATUSES == ("teacher_approved", "teacher_reviewed", "endorsed")
+
+    def test_graph_updated_at_is_passed_through(self):
+        graph = tc._normalize_stored_component_graph(
+            _DOC,
+            {"nodes": [self._stored_node()], "edges": [], "graph_updated_at": "2026-08-29T00:00:00+00:00"},
+            [_component()],
+        )
+        assert graph["graph_updated_at"] == "2026-08-29T00:00:00+00:00"
+
+    def test_graph_updated_at_is_empty_when_unknown(self):
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [self._stored_node()], "edges": []}, [_component()],
+        )
+        assert graph["graph_updated_at"] == ""
+
+
 # ---------------------------------------------------------------------------
 # グラフ全体対話（graph-sessions）
 # ---------------------------------------------------------------------------
@@ -497,3 +568,204 @@ class TestPostGraphMessage:
         assert appended and appended[0][0] == _SESSION
         roles = [m["role"] for m in appended[0][1]]
         assert roles == ["user", "assistant"]
+
+
+# ---------------------------------------------------------------------------
+# 「深く検討」の要素解決（2026-09 是正、設計書 §11）
+#
+# 理論操作グラフの main / equation_detail ノードは graph-native ID
+# （theory_op_0001 / eq_op_0001）で theory_components の行を持たない。レビュー画面は
+# 代わりに集約元の代表要素（representative_component_id = component_assembly の
+# agent 側 ID）を渡すため、overview / annotations / sessions が agent 側 ID を
+# document_id スコープで解決できることを固定する（fail-closed のまま）。
+# ---------------------------------------------------------------------------
+
+_AGENT_COMPONENT_ID = "comp_003"
+_GRAPH_NATIVE_NODE_ID = "theory_op_0001"
+_RESOLVED_COMPONENT_UUID = "66666666-6666-6666-6666-666666666666"
+
+
+class _RefsResult:
+    def __init__(self, row):
+        self._row = row
+
+    def fetchone(self):
+        return self._row
+
+
+class _RefsSession:
+    """``refs._resolve_by_legacy_id`` の SQL を document スコープごと再現する fake。"""
+
+    def __init__(self, rows):
+        self.rows = rows
+        self.statements = []
+        self.params = []
+        self.closed = False
+
+    def execute(self, statement, params=None):
+        self.statements.append(str(statement))
+        self.params.append(dict(params or {}))
+        key = (str((params or {}).get("doc_id")), str((params or {}).get("raw_id")))
+        return _RefsResult(self.rows.get(key))
+
+    def close(self):
+        self.closed = True
+
+
+def _patch_legacy_refs(monkeypatch, rows):
+    session = _RefsSession(rows)
+    monkeypatch.setattr(delib_routes.refs, "get_session", lambda: session)
+    return session
+
+
+def _forbid_refs_db(monkeypatch):
+    def boom():
+        raise AssertionError("document スコープなしで DB を触ってはならない")
+
+    monkeypatch.setattr(delib_routes.refs, "get_session", boom)
+
+
+def _patch_overview_faces(monkeypatch):
+    monkeypatch.setattr(delib_routes, "_ensure_document_viewable", lambda *a, **k: None)
+    monkeypatch.setattr(
+        delib_routes.decomposition, "build",
+        lambda ref: {"element_type": ref.element_type, "label": "L", "fields": {}, "notes": []},
+    )
+    monkeypatch.setattr(delib_routes.positioning, "build", lambda ref: {})
+    monkeypatch.setattr(delib_routes.context_lens, "build", lambda ref: None)
+    monkeypatch.setattr(delib_routes.decomposition, "explanations_for_element", lambda ref: [])
+
+
+class TestOverviewAcceptsAgentSideComponentId:
+    def test_agent_id_resolves_to_db_uuid_within_document_scope(self, monkeypatch):
+        session = _patch_legacy_refs(
+            monkeypatch, {(_DOC, _AGENT_COMPONENT_ID): (_RESOLVED_COMPONENT_UUID,)}
+        )
+        _patch_overview_faces(monkeypatch)
+
+        result = delib_routes.get_element_overview(
+            "theory_component", _AGENT_COMPONENT_ID, document_id=_DOC, current_user=_TEACHER,
+        )
+        assert result["ref"]["element_id"] == _RESOLVED_COMPONENT_UUID
+        assert result["ref"]["document_id"] == _DOC
+        # SQL は document スコープで絞る（別論文の同名要素に一致しない・fail-closed）。
+        assert session.params[0] == {"doc_id": _DOC, "raw_id": _AGENT_COMPONENT_ID}
+        assert "document_id = :doc_id" in session.statements[0]
+
+    def test_agent_id_in_other_document_is_404(self, monkeypatch):
+        _patch_legacy_refs(monkeypatch, {("other-doc", _AGENT_COMPONENT_ID): (_RESOLVED_COMPONENT_UUID,)})
+        _patch_overview_faces(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            delib_routes.get_element_overview(
+                "theory_component", _AGENT_COMPONENT_ID, document_id=_DOC, current_user=_TEACHER,
+            )
+        assert exc.value.status_code == 404
+
+    def test_agent_id_without_document_scope_is_404_before_touching_db(self, monkeypatch):
+        _forbid_refs_db(monkeypatch)
+        _patch_overview_faces(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            delib_routes.get_element_overview(
+                "theory_component", _AGENT_COMPONENT_ID, document_id=None, current_user=_TEACHER,
+            )
+        assert exc.value.status_code == 404
+
+    def test_graph_native_node_id_is_not_resolved(self, monkeypatch):
+        """集約 main ノードの ID そのものは要素として解決しない（実体が無い）。"""
+        _patch_legacy_refs(monkeypatch, {})
+        _patch_overview_faces(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            delib_routes.get_element_overview(
+                "theory_component", _GRAPH_NATIVE_NODE_ID, document_id=_DOC, current_user=_TEACHER,
+            )
+        assert exc.value.status_code == 404
+
+
+class TestResolutionErrorDetailIsFactual:
+    """422/404 の detail は事実文のみ。原因と無関係の固定文言（equation の
+    document_id 案内）や内部 ID・英語の例外メッセージを教員 UI に出さない。"""
+
+    def test_not_found_detail_has_no_internal_id_or_equation_hint(self, monkeypatch):
+        _patch_legacy_refs(monkeypatch, {})
+        _patch_overview_faces(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            delib_routes.get_element_overview(
+                "theory_component", _GRAPH_NATIVE_NODE_ID, document_id=_DOC, current_user=_TEACHER,
+            )
+        detail = str(exc.value.detail)
+        assert _GRAPH_NATIVE_NODE_ID not in detail
+        assert "equation" not in detail
+        assert "theory_component" not in detail
+        assert detail == "この要素は見つかりませんでした。"
+
+    def test_invalid_element_type_detail_is_factual(self, monkeypatch):
+        _forbid_refs_db(monkeypatch)
+        _patch_overview_faces(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            delib_routes.get_element_overview(
+                "nonsense", "x", document_id=_DOC, current_user=_TEACHER,
+            )
+        assert exc.value.status_code == 422
+        detail = str(exc.value.detail)
+        assert "nonsense" not in detail
+        assert "equation" not in detail
+
+
+class TestNodeSessionAcceptsAgentSideComponentId:
+    """ノード対話（W層 sessions）も同じ解決規約。永続化するのは常に DB UUID。"""
+
+    def test_session_stores_canonical_db_uuid(self, monkeypatch):
+        _patch_legacy_refs(monkeypatch, {(_DOC, _AGENT_COMPONENT_ID): (_RESOLVED_COMPONENT_UUID,)})
+        monkeypatch.setattr(delib_routes, "_ensure_document_viewable", lambda *a, **k: None)
+        monkeypatch.setattr(delib_routes, "record_review_event", lambda *a, **k: None)
+        created = {}
+
+        def _create_session(ref, *, title, created_by):
+            created["element_id"] = ref.element_id
+            created["document_id"] = ref.document_id
+            return {
+                "id": _SESSION, "scope": ref.scope, "element_type": ref.element_type,
+                "element_id": ref.element_id, "document_id": ref.document_id,
+                "domain_key": ref.domain_key, "title": title, "messages": [],
+                "created_by": created_by, "created_at": "",
+            }
+
+        monkeypatch.setattr(delib_routes.delib_store, "create_session", _create_session)
+
+        result = delib_routes.create_deliberation_session(
+            delib_routes.SessionCreateRequest(
+                scope="document",
+                element_type="theory_component",
+                element_id=_AGENT_COMPONENT_ID,
+                document_id=_DOC,
+                title="t",
+            ),
+            current_user=_TEACHER,
+        )
+        assert created["element_id"] == _RESOLVED_COMPONENT_UUID
+        assert created["document_id"] == _DOC
+        assert result["session"]["element_id"] == _RESOLVED_COMPONENT_UUID
+
+
+class TestAnnotationsListAcceptsAgentSideComponentId:
+    def test_annotations_are_looked_up_by_canonical_id(self, monkeypatch):
+        _patch_legacy_refs(monkeypatch, {(_DOC, _AGENT_COMPONENT_ID): (_RESOLVED_COMPONENT_UUID,)})
+        monkeypatch.setattr(delib_routes, "_ensure_document_viewable", lambda *a, **k: None)
+        seen = {}
+
+        def _list(element_type, element_id, *, document_id=None, domain_key=None):
+            seen["element_id"] = element_id
+            return []
+
+        monkeypatch.setattr(delib_routes.delib_store, "list_annotations_for_element", _list)
+
+        result = delib_routes.list_element_annotations(
+            "theory_component", _AGENT_COMPONENT_ID, document_id=_DOC, current_user=_TEACHER,
+        )
+        assert result["annotations"] == []
+        assert seen["element_id"] == _RESOLVED_COMPONENT_UUID

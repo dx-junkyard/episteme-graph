@@ -105,6 +105,32 @@
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(value || ""));
   }
 
+  // 「深く検討」／ノード対話が指す実体要素の ID。
+  //
+  // 理論操作グラフのノードは3種類の ID を持ちうる:
+  //   - DB UUID（component ノード。debug 層や旧グラフ）→ そのまま theory_components の行。
+  //   - graph-native ID（theory_op_0001 = 集約 main ノード / eq_op_0001 = 式の詳細層）
+  //     → theory_components の行を持たないため、それ自体では要素として開けない。
+  //     代わりに集約元の代表要素（representative_component_id。component_assembly の
+  //     agent 側 ID）を使う。backend は agent 側 ID を document_id スコープで解決する。
+  // どれも取れないノードは実体要素に解決できないので、ボタンを出さず事実文で案内する
+  // （422 を「指定が不正」として見せない）。
+  function deliberationTargetId(node) {
+    if (!node) return "";
+    var nodeId = gv().nodeId(node);
+    if (isDbUuid(nodeId)) return nodeId;
+    var representative = String(node.representative_component_id || "").trim();
+    if (representative) return representative;
+    var linked = node.linked_component_ids;
+    if (linked && linked.length) {
+      for (var i = 0; i < linked.length; i++) {
+        var candidate = String(linked[i] || "").trim();
+        if (candidate) return candidate;
+      }
+    }
+    return "";
+  }
+
   // 送信時にキャプチャした表示コンテキストが、応答到着時もまだ表示中かどうか。
   function isCurrentContext(mode, nodeKey) {
     if (state.chatMode !== mode) return false;
@@ -126,7 +152,8 @@
     modal.innerHTML = "" +
       '<div class="graph-review-frame" role="dialog" aria-label="グラフレビュー" data-ui-anchor="graph-review.modal">' +
         '<div class="graph-review-header">' +
-          '<div class="graph-review-title">🕸 グラフレビュー — <span id="graph-review-title-text"></span></div>' +
+          '<div class="graph-review-title">🕸 グラフレビュー — <span id="graph-review-title-text"></span>' +
+            '<span id="graph-review-graph-updated" class="graph-review-graph-updated"></span></div>' +
           '<div class="graph-review-toolbar">' +
             '<span id="graph-review-layer-toolbar" data-ui-anchor="graph-review.layer"></span>' +
             '<label class="graph-review-filter" data-ui-anchor="graph-review.filter-unreviewed">' +
@@ -231,6 +258,7 @@
     modal.hidden = false;
     stopVoice(); // 前回の音声セッションを持ち越さない
     document.getElementById("graph-review-title-text").textContent = state.title;
+    document.getElementById("graph-review-graph-updated").textContent = "";
     document.getElementById("graph-review-unreviewed-toggle").checked = false;
     setStatus("graph-review-graph-status", "グラフを読み込み中...", "info");
     renderChatShell();
@@ -285,11 +313,22 @@
   // -------------------------------------------------------------------------
 
   function render() {
+    renderGraphUpdatedAt();
     renderLayerToolbar();
     renderUnreviewedCount();
     renderNetwork();
     renderDetail();
     renderChatShell();
+  }
+
+  // グラフの鮮度の事実文。裏付け・要確認の情報は graph_json に解析時点で焼き込まれる
+  // ため、解析処理の修正・承認後の状況は再解析まで反映されない — いつのグラフを
+  // 見ているかを教員に隠さない（GR6 と同じ「正直な提示」の流儀）。
+  function renderGraphUpdatedAt() {
+    var el = document.getElementById("graph-review-graph-updated");
+    if (!el) return;
+    var updatedAt = String((state.graph && state.graph.graph_updated_at) || "");
+    el.textContent = updatedAt ? "（" + updatedAt.slice(0, 10) + " の解析結果を表示しています）" : "";
   }
 
   function renderLayerToolbar() {
@@ -498,6 +537,13 @@
     var reasons = (node.review_reasons || []).map(function (reason) {
       return g.reviewReasonLabel(reason);
     }).filter(Boolean);
+    // サーバの読み時射影（theory_components.py）: 承認済みノードの理由は
+    // review_reasons_at_analysis へ移り、source_backed の warning は advisory 宣言される。
+    // 「要確認の理由」の見出しはレビュー要求のときだけ使う（承認済み・参考メモに使わない）。
+    var reasonsAdvisory = !!node.review_reasons_advisory;
+    var archivedReasons = (node.review_reasons_at_analysis || []).map(function (reason) {
+      return g.reviewReasonLabel(reason);
+    }).filter(Boolean);
     var claims = collectClaimRefs(node);
 
     var html = "" +
@@ -513,26 +559,39 @@
         ? '<div class="graph-review-detail-desc">' + esc(node.description) + "</div>"
         : "") +
       (reasons.length
-        ? '<div class="graph-review-detail-reasons">要確認の理由: ' + esc(reasons.join(" / ")) + "</div>"
+        ? '<div class="graph-review-detail-reasons' + (reasonsAdvisory ? " graph-review-detail-reasons-advisory" : "") + '">' +
+          (reasonsAdvisory ? "解析メモ（参考）: " : "要確認の理由: ") + esc(reasons.join(" / ")) + "</div>"
+        : "") +
+      (archivedReasons.length
+        ? '<div class="graph-review-detail-reasons graph-review-detail-reasons-archived">解析時点のメモ（承認済みのため確認は不要です）: ' +
+          esc(archivedReasons.join(" / ")) + "</div>"
         : "");
 
     // component 承認・却下（server が最終判定。GR1: 教員の明示操作のみ）。
     // 集約 main ノード（DB UUID でない graph-native ID）は theory_components の行を
     // 持たないため、承認・却下ボタン自体を出さない。
     var reviewable = isDbUuid(nodeId);
+    // 「深く検討」は実体要素に解決できるときだけ出す（解決できないノードで押させて
+    // サーバ 422 を見せない）。集約ノードでは代表要素を開くことを事実文で明示する。
+    var deliberationTarget = deliberationTargetId(node);
+    var deliberateBtn = deliberationTarget
+      ? '<button type="button" class="admin-action-btn" data-graph-review-action="deliberate" data-ui-anchor="graph-review.open-deliberation">深く検討</button>'
+      : "";
     if (reviewable) {
       var approveDisabled = isApproved(status) ? " disabled" : "";
       var rejectDisabled = isRejected(status) ? " disabled" : "";
       html += '<div class="graph-review-detail-actions">' +
         '<button type="button" class="admin-action-btn" data-graph-review-action="approve" data-ui-anchor="graph-review.approve"' + approveDisabled + ">承認</button>" +
         '<button type="button" class="admin-action-btn" data-graph-review-action="reject" data-ui-anchor="graph-review.reject"' + rejectDisabled + ">却下</button>" +
-        '<button type="button" class="admin-action-btn" data-graph-review-action="deliberate" data-ui-anchor="graph-review.open-deliberation">深く検討</button>' +
+        deliberateBtn +
         "</div>";
     } else {
-      html += '<div class="graph-review-empty">このノードは複数の要素を集約した表示用ノードのため、承認・却下は集約元の各要素（式の詳細層のノードや根拠 claim）で行います。</div>' +
-        '<div class="graph-review-detail-actions">' +
-        '<button type="button" class="admin-action-btn" data-graph-review-action="deliberate" data-ui-anchor="graph-review.open-deliberation">深く検討</button>' +
-        "</div>";
+      html += '<div class="graph-review-empty">このノードは複数の要素を集約した表示用ノードのため、承認・却下は集約元の各要素（式の詳細層のノードや根拠 claim）で行います。' +
+        (deliberationTarget
+          ? "「深く検討」は集約元の代表要素を開きます。"
+          : "集約元の要素を特定できないため、このノードでは「深く検討」を開けません。式の詳細層のノードや根拠 claim から確認してください。") +
+        "</div>" +
+        (deliberateBtn ? '<div class="graph-review-detail-actions">' + deliberateBtn + "</div>" : "");
     }
     html += '<div id="graph-review-detail-status" class="graph-review-status"></div>';
 
@@ -583,7 +642,14 @@
   function openDeliberation(node) {
     if (!window.Deliberation || !window.Deliberation.openElement) return;
     var g = gv();
-    window.Deliberation.openElement("theory_component", g.nodeId(node), {
+    var targetId = deliberationTargetId(node);
+    if (!targetId) {
+      // ボタン自体を出していない経路だが、状態変化と競合した場合も 422 を見せない。
+      setStatus("graph-review-detail-status",
+        "このノードは実体要素に解決できないため、深く検討を開けません。", "info");
+      return;
+    }
+    window.Deliberation.openElement("theory_component", targetId, {
       documentId: state.documentId,
       title: g.detailHeading(node, g.nodeId(node)),
     });
@@ -816,7 +882,16 @@
     }
     var node = nodeById(nodeKey);
     if (!node) { done(null); return; }
-    var componentId = gv().nodeId(node);
+    // 「深く検討」と同じ解決規則（DB UUID → 代表要素の agent 側 ID）。解決できない
+    // ノードはリクエストせずに事実文だけ出す（サーバの 422 を待たない）。
+    var componentId = deliberationTargetId(node);
+    if (!componentId) {
+      setStatus("graph-review-chat-status",
+        "このノードは論理要素として解決できないため、ノード対話は開始できません。グラフ全体との対話をご利用ください。",
+        "info");
+      done(null);
+      return;
+    }
     deps.apiFetch("/admin/deliberation/sessions", {
       method: "POST",
       body: JSON.stringify({
@@ -824,7 +899,7 @@
         element_type: "theory_component",
         element_id: componentId,
         document_id: state.documentId,
-        title: gv().detailHeading(node, componentId),
+        title: gv().detailHeading(node, gv().nodeId(node)),
       }),
     })
       .then(function (res) {

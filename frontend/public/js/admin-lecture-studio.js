@@ -5862,17 +5862,42 @@
       reviewNotes: (node.review_reasons || []).map(lsGraphReviewReasonLabel),
       onCenter: lsGraphCenterOnItem
     };
+    // 「深く検討」の対象は実体要素へ解決する（admin-graph-review.js の
+    // deliberationTargetId と同じ規則）。main / equation_detail の graph-native
+    // ノード ID（theory_op_* / eq_op_*）は theory_components の行を持たず、
+    // そのまま渡すとサーバ 422 になるため、代表要素に解決できないノードでは
+    // ボタン自体を出さない。
+    var deliberationTarget = lsGraphDeliberationTargetId(node, nodeId);
     if (window.Deliberation) {
-      opts.deliberateAnchor = "lecture-studio.component-deliberate";
-      opts.onDeliberate = function () {
-        if (!nodeId) return;
-        window.Deliberation.openElement("theory_component", nodeId, {
-          documentId: lsGraphActiveDocumentId(),
-          title: lsGraphDetailHeading(node, nodeId)
-        });
-      };
+      if (deliberationTarget) {
+        opts.deliberateAnchor = "lecture-studio.component-deliberate";
+        opts.onDeliberate = function () {
+          window.Deliberation.openElement("theory_component", deliberationTarget, {
+            documentId: lsGraphActiveDocumentId(),
+            title: lsGraphDetailHeading(node, nodeId)
+          });
+        };
+      }
     }
     return opts;
+  }
+
+  // 「深く検討」が指す実体要素の ID（DB UUID → 代表 component → linked 先頭）。
+  function lsGraphDeliberationTargetId(node, nodeId) {
+    if (!node) return "";
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(nodeId || ""))) {
+      return String(nodeId);
+    }
+    var representative = String(node.representative_component_id || "").trim();
+    if (representative) return representative;
+    var linked = node.linked_component_ids;
+    if (linked && linked.length) {
+      for (var i = 0; i < linked.length; i++) {
+        var candidate = String(linked[i] || "").trim();
+        if (candidate) return candidate;
+      }
+    }
+    return "";
   }
 
   function lsRenderGraphNodeDetail(node, graph) {
@@ -6283,16 +6308,26 @@
     return labels[String(status || "").toLowerCase()] || status || "";
   }
 
+  // review_reasons 語彙の日本語表示（正本の語彙は
+  // src/episteme_graph/agents/component_graph/schema.py::REVIEW_REASONS）。
+  // 「未紐付け」系の内部語（atomic claim / evidence / equation）をそのまま出すと、
+  // 解析が何を取れていないかの事実が「結線に失敗した不具合」に読めるため、何が
+  // 特定できていないかを平易に述べる（学習者向けの平易化は
+  // backend/core/discuss/opening.py 側が別に持つ）。未知コードはコードのまま出す
+  // （情報を落とさない）。
   function lsGraphReviewReasonLabel(reason) {
     var labels = {
-      missing_atomic_claim: "atomicなclaim未紐付け",
-      missing_evidence_link: "evidence未紐付け",
-      missing_equation_link: "equation未紐付け",
-      missing_derivation_link: "derivation未紐付け",
+      missing_atomic_claim: "根拠となる最小の主張が未特定",
+      missing_evidence_link: "原文の該当箇所が未特定",
+      missing_equation_link: "関係する式が未特定",
+      missing_derivation_link: "導出の過程が未特定",
       equation_needs_math_review: "数式の確認が必要",
-      edge_not_source_backed: "edgeに出典がない",
-      fallback_or_inferred_node: "fallback / 推論ノード",
-      source_span_missing: "原文spanがない",
+      edge_not_source_backed: "関係の出典が未確認",
+      fallback_or_inferred_node: "解析が推定で補った箇所",
+      source_span_missing: "原文の位置が未特定",
+      generic_operation: "操作の種類が一般的なまま",
+      orphan_detail_node: "主グラフの集約先が未対応",
+      empty_main_node: "集約された式ステップがない",
     };
     return labels[String(reason || "")] || reason || "";
   }

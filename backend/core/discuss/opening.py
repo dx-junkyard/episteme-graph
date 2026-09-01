@@ -152,6 +152,10 @@ _REVIEW_REASON_FACT_PHRASES = {
     "edge_not_source_backed": "つながりの根拠を論文の中で確認できていません",
     "fallback_or_inferred_node": "解析が推定で補った箇所です",
     "source_span_missing": "元の文章のどこにあたるかを特定できていません",
+    # 以下は語彙には元からあったが事実文が無く、コードのまま学習者に出ていた。
+    "generic_operation": "どんな操作なのかをまだ具体的に特定できていません",
+    "orphan_detail_node": "全体像のどこに位置づくかをまだ対応づけできていません",
+    "empty_main_node": "この段階にあたる式の手順をまだ取れていません",
 }
 
 # 「まだ確認できていないところ」の前置き。主語がシステム（解析）であることを文面で明示する

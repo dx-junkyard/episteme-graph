@@ -382,3 +382,65 @@ admin.js から DI 注入）:
   DOM 非依存＝`data-ui-anchor` 不在・読み込み順・音声区画から承認/却下 API を呼ばない
   こと・429 でのループ停止・close での停止）+ 既存網羅（anchors / docs registry）。
 - **残課題**: docker 実機 E2E（マイク許可・無音区切り・読み上げの通し確認）。
+
+## 13. 「深く検討」の要素解決の是正（2026-09-01）
+
+グラフレビューでノードを選び「深く検討」を押すと、ほぼ全てのノードで
+「この要素の指定が不正です（equation は document_id が必要です）」と表示され、
+W層モーダルが開けなかった。原因と是正:
+
+- **根本原因（ID の層のずれ）**: 理論操作グラフのノード ID は **graph-native**
+  （`normalizer.py` が付ける `theory_op_0001` = 集約 main ノード / `eq_op_0001` =
+  式の詳細層）で、`persistence.persist_component_graph` の
+  `component_id_map.get(agent_id, agent_id)` にも一致しないため、そのまま
+  `theory_component_graphs.graph_json` に残る。つまり main / equation_detail の
+  **全ノードは theory_components の行を持たない**（DB UUID になるのは、derivation が
+  空でフォールバックした component ノードと debug 層の component ノードだけ）。
+  旧 `openDeliberation` はこのノード ID を `theory_component` の element_id として
+  そのまま渡していたため、overview（厳格な `refs.resolve`）が
+  `ElementResolutionError(kind="invalid")` → 422 を返し続けていた。
+- **表示の二重の誤り**: フロント `deliberation.js::_renderError` は 422 を一律
+  「equation は document_id が必要です」と表示していたため、原因と無関係の文言が出ていた。
+- **是正1（受け口）**: `overview` / `annotations`（一覧）/ `sessions`（作成）を
+  `refs.resolve_with_agent_id` に切り替え、theory_component / theory_claim の
+  **agent 側 ID（`comp_003` 等）を `document_id` スコープで解決**できるようにした
+  （context ルートと同じ規約。document_id が無ければ解決しない fail-closed）。
+  永続化・後続呼び出しに載るのは常に解決後の DB UUID なので
+  `POST .../sessions/{id}/messages` は厳格な `resolve` のまま。
+- **是正2（渡す ID）**: `admin-graph-review.js` に `deliberationTargetId(node)` を追加し、
+  DB UUID → `representative_component_id` → `linked_component_ids[0]` の順で代表要素へ
+  解決する。どれも無いノードでは **ボタンを出さず事実文で案内**する（承認・却下ボタンの
+  `isDbUuid` 分岐と同じ流儀。422 の裏に隠さない）。集約ノードでは「深く検討は集約元の
+  代表要素を開く」ことを事実文で明示する。ノード対話（W層 sessions）も同じ解決規則を
+  使い、解決できないノードではリクエストせず事実文だけを出す。
+- **是正3（事実文）**: `_http_from_resolution_error` の detail を日本語の事実文に統一し
+  （内部 ID・英語の例外メッセージを教員 UI に出さない。原因は logger 側へ）、
+  `_renderError(status, detail)` はサーバの detail をそのまま表示する（無いときだけ
+  status 由来の汎用文言へ縮退）。agent 側 ID のときは `_documentIdQuery` が
+  `document_id` を必ず載せ、overview の応答 `ref` で `chatState.ref` を正準化する。
+- **テスト**: `test_graph_review_api.py`（agent 側 ID の解決・document スコープ外は 404・
+  document_id なしは DB を触らず 404・graph-native ID は解決しない・detail の事実文性と
+  内部 ID 非漏洩・sessions/annotations が正準 DB UUID を使うこと）+
+  `test_graph_review_ui_static.py::TestDeliberationTargetResolution` +
+  `test_deliberation_ui_static.py`（旧固定文言の不在・detail 優先・agent 側 ID の
+  document スコープ・ref の正準化）。
+- **非変更**: A層（`src/episteme_graph/agents/`）・承認 API・グラフ描画・stored graph の
+  ノード ID（既存グラフを書き換えない）。集約 main ノードそのものを承認対象にはしない
+  （v1 の非スコープ）。
+
+### §13 追補（同日・統合時）
+
+- **原稿スタジオの同根修正**: `admin-lecture-studio.js` のグラフ詳細カード
+  （`lsGraphNodeCardOpts`）も生ノード ID を `openElement("theory_component", ...)` に
+  渡していたため、同じ規則の `lsGraphDeliberationTargetId(node, nodeId)`
+  （DB UUID → 代表 component → linked 先頭）に切り替え、解決できないノードでは
+  「深く検討」ボタンを出さない。回帰は
+  `test_graph_review_ui_static.py::TestStudioDeliberationTargetResolution`。
+- **review_reasons の表示是正（グラフレビュー詳細ペイン）**: サーバの読み時射影
+  （`theory_components.py::_normalize_stored_component_graph`）に合わせて、
+  ①レビュー要求（従来どおり「要確認の理由: 」・警告色）②`source_backed` ノードの
+  warning（「解析メモ（参考）: 」・非警告色）③承認済みノードの解析時点メモ
+  （`review_reasons_at_analysis` を「解析時点のメモ（承認済みのため確認は不要です）: 」・
+  非警告色）を見出しと色で区別する。ヘッダーに `graph_updated_at` の事実文
+  「（YYYY-MM-DD の解析結果を表示しています）」を常時表示し、焼き込みグラフの鮮度を
+  隠さない。回帰は `test_graph_review_ui_static.py::TestReviewReasonPresentation`。

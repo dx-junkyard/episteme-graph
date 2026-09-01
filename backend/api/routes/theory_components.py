@@ -53,6 +53,7 @@ from core.schema import (
 )
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
 from core.course_data import course_source_material_ids, course_sources
+from core.deliberation.graph_dialogue import APPROVED_REVIEW_STATUSES
 from core.deliberation.refs import document_run_artifacts
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
@@ -1962,7 +1963,7 @@ def _stored_component_graph(document_id: str) -> dict:
     try:
         row = session.execute(
             sa_text("""
-                SELECT graph_json, validation_results
+                SELECT graph_json, validation_results, updated_at
                 FROM theory_component_graphs
                 WHERE document_id = :document_id
                 ORDER BY updated_at DESC
@@ -1975,9 +1976,16 @@ def _stored_component_graph(document_id: str) -> dict:
     if not row:
         return {}
     graph = _json_value(row[0], {})
-    if isinstance(graph, dict) and "validation_results" not in graph:
+    if not isinstance(graph, dict):
+        return {}
+    if "validation_results" not in graph:
         graph["validation_results"] = _json_value(row[1], [])
-    return graph if isinstance(graph, dict) else {}
+    # このグラフが「いつの解析結果か」を事実として持ち回る（表示は UI 側）。
+    # review_reasons はこの時点の焼き込み値なので、パイプライン修正後も再解析まで
+    # 変わらない — 教員が古さを判断できるようにする最小の読み時導出。
+    if row[2] is not None:
+        graph["graph_updated_at"] = row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])
+    return graph
 
 
 def _normalize_stored_component_graph(document_id: str, graph: dict, components: list[TheoryComponentOut]) -> dict:
@@ -2025,6 +2033,23 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         # Issue #319 criterion 9: review_required / inferred nodes must explain why.
         if not node_reasons and (node_backing in ("review_required", "inferred") or node_review_status == "review_required"):
             node_reasons = ["fallback_or_inferred_node" if node_backing == "inferred" else "missing_evidence_link"]
+        # review_reasons は「解析時点の焼き込み値」なので、レビューを待っていないノードで
+        # そのまま「要確認の理由」として出すと、確定済みの構造まで欠陥に見える
+        # （graph_dialogue_review_design.md §11 と同じ非対称の是正。読み時射影のみで
+        # graph_json は書き換えない = 情報を落とさない）。
+        #   - 教員が承認したノード: 理由は review_reasons から
+        #     review_reasons_at_analysis へ移す（レビュー要求として出さないが破棄もしない）。
+        #   - AI が出典で確定したノード（source_backed）: 理由は残すが advisory と宣言する
+        #     （例: 式・evidence で裏付いているが最小命題の claim が無い #306 の warning）。
+        node_reasons_at_analysis: list[str] = []
+        node_reasons_advisory = (
+            node_review_status in APPROVED_REVIEW_STATUSES
+            or node_backing == "source_backed"
+            or node_review_status == "source_backed"
+        )
+        if node_review_status in APPROVED_REVIEW_STATUSES and node_reasons:
+            node_reasons_at_analysis = [str(r) for r in node_reasons]
+            node_reasons = []
         normalized_nodes.append({
             "component_id": component_id,
             "label": final_label,
@@ -2060,6 +2085,9 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "linked_evidence_ids": node.get("linked_evidence_ids") if isinstance(node.get("linked_evidence_ids"), list) else [],
             "source_backing_status": node_backing,
             "review_reasons": node_reasons,
+            # 上のコメント参照: 承認済みノードの解析時点メモ / 参考情報フラグ。
+            "review_reasons_at_analysis": node_reasons_at_analysis,
+            "review_reasons_advisory": node_reasons_advisory,
             "parent_component_id": str(node.get("parent_component_id") or ""),
             "member_component_ids": node.get("member_component_ids") if isinstance(node.get("member_component_ids"), list) else [],
             "visual_label": str(node.get("visual_label") or ""),
@@ -2155,6 +2183,9 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         "validation_results": graph.get("validation_results") if isinstance(graph.get("validation_results"), list) else [],
         # NarrativeAnnotator reading layer (issue #360); pass through as-is.
         "narrative": graph.get("narrative") if isinstance(graph.get("narrative"), dict) else {},
+        # このグラフが構築された時点（`_stored_component_graph` が付ける事実。
+        # 未保存グラフの読み時組み立て経路では空）。
+        "graph_updated_at": str(graph.get("graph_updated_at") or ""),
     }
 
 

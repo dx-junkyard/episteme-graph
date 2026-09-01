@@ -61,6 +61,15 @@ context / sessions / annotations の各経路で「中心にできる」よう�
 語彙の正本は `core.deliberation.schema.IDENTITY_LINKABLE_ELEMENT_TYPES`）。面②位置づけは
 両型に対応するレンズを持たないため空レーン + 事実文へ縮退する（v1・§16）。
 
+agent 側 ID の受け口（2026-09 是正、`graph_dialogue_review_design.md` §11）: theory_claim /
+theory_component は `overview` / `annotations`（一覧）/ `sessions`（作成）でも agent 側 ID
+（`comp_001` 等）を受け付ける（`refs.resolve_with_agent_id`。**`document_id` スコープ必須の
+fail-closed**）。理論操作グラフの main / equation_detail ノードは graph-native ID
+（`theory_op_0001` / `eq_op_0001`）で theory_components の行を持たないため、グラフレビューの
+「深く検討」はノードの `representative_component_id`（agent 側 ID）を渡す。永続化される
+`ref.element_id` は常に DB UUID なので、`POST .../sessions/{id}/messages` は厳格な
+`refs.resolve` のままで解決できる。
+
 core 側（`core.deliberation`）は FastAPI を import しない。
 """
 
@@ -114,9 +123,24 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/deliberation", tags=["deliberation"])
 
 
+# 要素解決の失敗をユーザーに伝える事実文（W3: 断定・煽りを足さない / 内部 ID・英語の
+# 例外メッセージ・内部語彙を教員 UI に出さない）。原因の詳細は logger 側に残す。
+_RESOLUTION_ERROR_DETAILS = {
+    # 例: agent 側 ID でも DB UUID でもない graph-native ID（theory_op_0001 等）、未知の要素型。
+    "invalid": "この要素は指定の形式が正しくないため開けません。",
+    # 例: 行が無い / この教材の解析結果に含まれない / document_id が必要な要素型で未指定。
+    "not_found": "この要素は見つかりませんでした。",
+}
+
+
 def _http_from_resolution_error(exc: ElementResolutionError) -> HTTPException:
-    status = 422 if getattr(exc, "kind", "not_found") == "invalid" else 404
-    return HTTPException(status_code=status, detail=str(exc))
+    kind = str(getattr(exc, "kind", "not_found") or "not_found")
+    status = 422 if kind == "invalid" else 404
+    logger.info("deliberation element resolution failed (%s): %s", kind, exc)
+    return HTTPException(
+        status_code=status,
+        detail=_RESOLUTION_ERROR_DETAILS.get(kind, _RESOLUTION_ERROR_DETAILS["not_found"]),
+    )
 
 
 def _require_identity_linkable(element_type: str) -> None:
@@ -315,7 +339,7 @@ def get_element_overview(
     document_id: str | None = Query(
         default=None,
         description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化）。"
-        "他型では無視される。",
+        "theory_claim / theory_component は agent 側 ID（comp_001 等）の解決スコープにも使う。",
     ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
@@ -325,12 +349,18 @@ def get_element_overview(
       ``_ensure_document_viewable`` を通す（fail-closed・W5）。
     - domain-scoped（shared_part）は L層方針で本文テキストを教員全体に開示するため
       ``_require_teacher`` のみ（画像含有等の狭い開示は本エンドポイントの対象外）。
+    - theory_claim / theory_component は agent 側 ID（``comp_001`` 等）でも呼べる
+      （``refs.resolve_with_agent_id``。context ルートと同じ規約で、agent 側 ID は必ず
+      ``document_id`` スコープ内で解決され、スコープ外の同名要素には一致しない）。
+      グラフ対話レビューの「深く検討」は理論操作グラフのノードから
+      ``representative_component_id``（component_assembly の agent 側 ID）を渡すため、
+      この経路が無いと集約ノード由来の要素が一切開けなかった。
     - 数値（confidence 等）は返さない（W8）。
     - 面②の cross_corpus レンズ（§4.2、Phase 1）は他 document の候補を返しうるため、
       閲覧不可 document 由来の候補をこの route 層でフィルタする（``_apply_cross_corpus_gate``）。
     """
     try:
-        ref = refs.resolve(element_type, element_id, document_id=document_id)
+        ref = refs.resolve_with_agent_id(element_type, element_id, document_id=document_id)
     except ElementResolutionError as exc:
         raise _http_from_resolution_error(exc) from exc
 
@@ -836,9 +866,16 @@ def create_deliberation_session(
 
     ゲート: document-scoped 要素は ``_ensure_document_viewable``（fail-closed・W5）。
     domain-scoped（shared_part）は L層方針により ``_require_teacher`` のみ。
+
+    ID 解決は overview と同じ規約（``refs.resolve_with_agent_id``。agent 側 ID は
+    ``document_id`` スコープ必須の fail-closed）。永続化するのは解決後の
+    ``ref.element_id``（常に DB UUID）なので、以降の ``POST .../messages`` は
+    厳格な ``refs.resolve`` のままで解決できる。
     """
     try:
-        ref = refs.resolve(body.element_type, body.element_id, document_id=body.document_id)
+        ref = refs.resolve_with_agent_id(
+            body.element_type, body.element_id, document_id=body.document_id
+        )
     except ElementResolutionError as exc:
         raise _http_from_resolution_error(exc) from exc
     if ref.scope != body.scope:
@@ -1145,13 +1182,18 @@ def list_element_annotations(
     document_id: str | None = Query(
         default=None,
         description="equation / evidence / derivation 要素で必須（独立テーブルを持たないため document で一意化)。"
-        "他型では無視される。",
+        "theory_claim / theory_component は agent 側 ID（comp_001 等）の解決スコープにも使う。",
     ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict[str, Any]:
-    """要素に付いた候補/確定/却下注釈の一覧（confidence はラベル・W8）。"""
+    """要素に付いた候補/確定/却下注釈の一覧（confidence はラベル・W8）。
+
+    overview と同じ解決規約（``refs.resolve_with_agent_id``）を使う — モーダルは
+    overview より先にこの一覧を取るため、agent 側 ID で開いたときに既存注釈だけが
+    復元されない非対称が生じないようにする（W4）。
+    """
     try:
-        ref = refs.resolve(element_type, element_id, document_id=document_id)
+        ref = refs.resolve_with_agent_id(element_type, element_id, document_id=document_id)
     except ElementResolutionError as exc:
         raise _http_from_resolution_error(exc) from exc
     if ref.scope == SCOPE_DOCUMENT:

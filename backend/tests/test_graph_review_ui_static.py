@@ -182,3 +182,88 @@ class TestHtmlAndCss:
     def test_css_defined(self):
         assert ".graph-review-modal" in CSS_SRC
         assert ".graph-review-modal[hidden]" in CSS_SRC
+
+
+class TestDeliberationTargetResolution:
+    """「深く検討」・ノード対話の要素解決（2026-09 是正、設計書 §11）。
+
+    理論操作グラフの main / equation_detail ノードは graph-native ID
+    （theory_op_0001 / eq_op_0001）で theory_components の行を持たない。ノード ID を
+    そのまま渡すとサーバ 422 になるため、代表要素（representative_component_id =
+    component_assembly の agent 側 ID）へ解決し、解決できないノードではボタンを
+    出さずに事実文で案内する（GR3: 数値を出さない・原因を偽らない）。
+    """
+
+    def _block(self, name: str) -> str:
+        start = JS_SRC.index("function " + name + "(")
+        return JS_SRC[start: JS_SRC.index("\n  }\n", start) + 4]
+
+    def test_target_resolver_prefers_db_uuid_then_representative(self):
+        block = self._block("deliberationTargetId")
+        assert "isDbUuid(nodeId)" in block
+        assert "representative_component_id" in block
+        assert "linked_component_ids" in block
+
+    def test_open_deliberation_uses_resolved_target(self):
+        block = self._block("openDeliberation")
+        assert "deliberationTargetId(node)" in block
+        assert 'openElement("theory_component", targetId' in block
+        # 生のノード ID を要素 ID として渡さない（422 の原因）。
+        assert 'openElement("theory_component", g.nodeId(node)' not in JS_SRC
+
+    def test_button_hidden_when_node_has_no_resolvable_element(self):
+        # 解決できないノードは 422 の裏に隠さず、事実文で案内する。
+        assert "集約元の要素を特定できないため" in JS_SRC
+        assert "「深く検討」は集約元の代表要素を開きます。" in JS_SRC
+        assert "var deliberateBtn = deliberationTarget" in JS_SRC
+
+    def test_node_chat_uses_same_target(self):
+        block = self._block("ensureSession")
+        assert "deliberationTargetId(node)" in block
+        assert "element_id: componentId" in block
+
+
+class TestReviewReasonPresentation:
+    """review_reasons の表示是正（2026-09-01）。
+
+    サーバの読み時射影（theory_components.py::_normalize_stored_component_graph）が
+    ①承認済みノードの理由を review_reasons_at_analysis へ移し、②source_backed の
+    warning を review_reasons_advisory と宣言する。UI はレビュー要求（要確認の理由）と
+    参考メモ・解析時点メモを見出しと色で区別し、承認済みノードにレビューを促す
+    表示を残さない。
+    """
+
+    def test_advisory_reasons_use_non_review_heading(self):
+        assert "review_reasons_advisory" in JS_SRC
+        assert "解析メモ（参考）: " in JS_SRC
+        assert "要確認の理由: " in JS_SRC
+
+    def test_archived_reasons_rendered_without_review_prompt(self):
+        assert "review_reasons_at_analysis" in JS_SRC
+        assert "解析時点のメモ（承認済みのため確認は不要です）: " in JS_SRC
+
+    def test_advisory_and_archived_styles_are_not_warning_colored(self):
+        assert ".graph-review-detail-reasons-advisory" in CSS_SRC
+        assert ".graph-review-detail-reasons-archived" in CSS_SRC
+
+    def test_graph_updated_at_fact_line(self):
+        # いつの解析結果を見ているかを隠さない（焼き込みグラフの鮮度の事実文）。
+        assert "graph_updated_at" in JS_SRC
+        assert "の解析結果を表示しています" in JS_SRC
+        assert ".graph-review-graph-updated" in CSS_SRC
+
+
+class TestStudioDeliberationTargetResolution:
+    """原稿スタジオのグラフ詳細も同じ要素解決規則を使う（同根の 422 の再発防止）。"""
+
+    def test_studio_resolves_target_before_open_element(self):
+        assert "function lsGraphDeliberationTargetId(" in STUDIO_SRC
+        assert 'openElement("theory_component", deliberationTarget' in STUDIO_SRC
+        # 生のグラフノード ID を要素 ID として渡す旧形が存在しない。
+        assert 'openElement("theory_component", nodeId' not in STUDIO_SRC
+
+    def test_studio_resolver_order(self):
+        start = STUDIO_SRC.index("function lsGraphDeliberationTargetId(")
+        block = STUDIO_SRC[start: STUDIO_SRC.index("\n  }\n", start) + 4]
+        assert "representative_component_id" in block
+        assert "linked_component_ids" in block
