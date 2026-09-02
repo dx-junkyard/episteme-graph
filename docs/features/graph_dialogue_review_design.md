@@ -444,3 +444,125 @@ W層モーダルが開けなかった。原因と是正:
   非警告色）を見出しと色で区別する。ヘッダーに `graph_updated_at` の事実文
   「（YYYY-MM-DD の解析結果を表示しています）」を常時表示し、焼き込みグラフの鮮度を
   隠さない。回帰は `test_graph_review_ui_static.py::TestReviewReasonPresentation`。
+
+## 14. 根拠 claim の読み時 artifact フォールバック（2026-09-02）
+
+**症状**: ノード詳細ペインの「根拠 claim」行が「未解決の根拠（本文を取得できません）」
+＋チップ「未解決」になり、根拠の中身が読めない。
+
+**構造的な原因（承認ステータスのフィルタではない）**: グラフのノードが参照する
+`linked_claim_ids` / `input_claim_ids` / `output_claim_ids` / `required_claim_ids` /
+`evidence_claim_ids` には、**`theory_claims` に行が存在しない claim ID** が含まれる。
+`persist_qualified_claims`（`core/document_pipeline/persistence.py`）が永続化するのは
+ClaimQualification の `qualified_spans` だけで、
+
+- ClaimObjectBuilder の atomic rewrite 子 claim（親 ID + 連番サフィックス。
+  `claim_object_builder/builder.py::_make_claim_id` / `_dedup_id`）
+- orchestrator の `_hook_equation_claim_synthesis` が作る式由来の合成 claim
+  （`synth_claim_*`）
+
+は DB へ落ちない。`_resolve_claim_reference_index` は `theory_claims` だけを索いていた
+ため、これらが常に未解決になっていた。**claim_objects の claim を `theory_claims` へ
+永続化するかどうかはオーナー判断の別件**（A層・persistence の変更を伴う）なので、
+本修正は読み時のフォールバックに留める。
+
+**修正（`api/routes/theory_components.py` のみ・migration なし・A層非改変）**:
+`_resolve_claim_reference_index(document_id, ref_ids, artifacts=None)` を2段解決にした。
+第1段は従来どおり `theory_claims`（DB UUID / `source_scope.span_id` / `legacy_ids`）。
+第2段は DB で解決できなかった ID を `claim_object_builder` artifact
+（`ClaimObjectBuildResult.to_dict()`）から解決する。artifact は
+`_build_graph_reference_index` が claim / evidence / derivation で**1回だけ**読み、
+以降へ渡す（追加 SELECT を増やさない）。artifact が無い古い run では第1段の結果が
+そのまま返る（fail-soft。例外は log + 継続）。
+
+**`reference_index.claims[ref_id]` の契約（additive。既存キーは不変）**:
+
+| 経路 | 内容 |
+|---|---|
+| DB 解決 | `{"claim_id": <DB uuid>, "text": 本文, "review_status": <語彙>, "resolution": "db"}` |
+| artifact 解決 | `{"claim_id": "", "text": 本文, "review_status": "", "resolution": "artifact", "origin": ..., "support_status": ..., "is_atomic": ..., "parent_claim_id": ..., "parent_review_status": ...}` |
+
+- `claim_id` が空 = DB 行が無く**承認 API の対象にならない**ことの明示（UI はこれで
+  承認ボタンの有無を判断する。本文は出したうえで「未承認（解析結果）」と正直に見せる）。
+- `origin`: `synth_claim_` 接頭辞 → `equation_synthesis` / `parent_claim_id` を持つか
+  「artifact 内に実在する親 ID + 連番サフィックス」 → `atomic_rewrite` / それ以外 →
+  `claim_object`。
+- `parent_claim_id` / `parent_review_status`: artifact 側の `parent_claim_id` および
+  `source_span_ids` を、**第1段で取得済みの同一 document の `theory_claims` 行**
+  （span_id / legacy_ids キー）へ突き合わせて解決する。claim ごとの追加 SQL は発行
+  しない。解決できなければ空文字。
+- **GR3**: confidence 等の生数値と LLM の `reason` / `qualification_reason` は載せない。
+  索引のキー以外に agent 側 ID を露出させない。
+
+**テスト**: `test_component_graph_reference_index.py`（`TestArtifactClaimFallback` =
+synth claim の origin・atomic 子 claim の親 UUID と review_status・DB 解決の優先・
+未解決 ID は索引に載らない・数値非漏洩・壊れた artifact で例外を出さない、および
+`TestBuildGraphReferenceIndex` の結線と artifact 単一ロード）。既存の DB 解決テストは
+`"resolution": "db"` の追加のみ。
+
+**非変更**: A層（`src/episteme_graph/agents/`）・`persistence.py`・DB スキーマ・
+承認 API・グラフ描画。
+
+### 14.1 追補: 式由来 claim の数式表示（2026-09-03）
+
+**症状**: 上記フォールバックで本文が出るようになった結果、式由来の合成 claim
+（`origin="equation_synthesis"`）が
+`In equation (delta-fourier), F_n(\mathbf{k}_1,\ldots,\mathbf{k}_n) depends on ...` /
+`Equation (eq_tex_b55) defines P_{\rm L}(k).` のように**生 LaTeX がそのまま散文に
+埋まった状態**で表示される。区切り子が無いため数式として描画できない。
+
+**原因**: `src/episteme_graph/agents/claim_object_builder/equation_claim_synthesis.py`
+が `sem.defined_symbols[].symbol` / `sem.used_symbols` / derivation の
+`eliminated_symbols` / `retained_symbols` を f-string へ素のまま補間していた。
+本文中のインライン数式の記法は `$...$`（原稿スタジオの `preserveMath` が扱う記法）。
+
+**修正1 — 生成側（決定論・LLM なし）**: 同ファイルに `_math(symbol)` /
+`_math_list(symbols, limit=4)` を追加し、**全テンプレート**（`Equation ({label})
+defines ...` / `In equation ({label}), ... depends on ...`（入力記号は個別に包んで
+`", "` 結合）/ `... to eliminate ...` / `while retaining ...` / `... relating ...`）が
+記号を `$...$` で包むようにした。`_math` は冪等（既に `$...$` / `\(...\)` の記号は
+二重に包まない・前後の空白は除去・空文字は空文字）。`relating` のフォールバック文言
+`the listed quantities` は記号ではないので**包まない**。`normalized_text == text` の
+関係と、`concepts[].name`（下流で概念名・記号名として使う）が**素の記号のまま**で
+あることは不変。
+
+**修正2 — 読み時の旧 artifact 投影**: 既存 run の artifact には区切り子の無い本文が
+残っている。`api/routes/theory_components.py` に純関数
+`_delimit_synth_claim_math(text, concept_names)` を追加し、
+`_resolve_artifact_claim_reference_index` が `origin == "equation_synthesis"` かつ
+本文に `$` も `\(` も無いレコードにだけ適用する（`atomic_rewrite` / `claim_object` は
+対象外）。規則は決定論:
+
+- 対象は当該レコードの `concepts[].name`。長い名前から順に走査し、包んだ区間は
+  以降の走査対象にしない（二重包み・入れ子が起きない）。
+- `\ _ ^ { } ( )` を含む名前（LaTeX 記号）は部分一致。それ以外は**独立トークン**
+  （前後が非英数字）でのみ一致。さらに純 ASCII アルファベットの語は4文字以上と
+  テンプレート語（`a` / `in` / `the` / `system` / `equation` …）を除外する
+  （`n` が "In equation" に当たる類の誤包みを構造的に防ぐ。包み損ねは表示の劣化に
+  留まるので慎重側へ倒す）。
+- スニペット丸め（`_REFERENCE_TEXT_SNIPPET_MAX = 200`）は `_truncate_reference_text`
+  へ切り出し、**`$...$` の途中で切らない**（切り口の `$` が奇数個なら直前の開き `$`
+  の手前で切る）。投影は丸めの**前**に適用する。
+
+**旧 artifact の自然解消**: `_hook_equation_claim_synthesis`（`core/document_pipeline/
+orchestrator.py`）は `_PIPELINE_STEPS` に `PipelineStageDef(None, ...)` として登録された
+**フック**で、ステージ名を持たないため `should_use_artifact` による resume スキップの
+対象にならず、ランナーループがそこへ到達する限り**毎回実行される**。その中の
+`_synthesize_equation_claims` は既存の `synth_claim_*` を claim 集合から外して
+（`prose_claims`）index 1 から作り直し、生成物があれば
+`ctx.save_artifact("claim_object_builder", ...)` で artifact を上書き保存する
+（resume 時も `ctx.equations` / `ctx.claim_objects` は artifact から再水和されるので
+入力は揃う）。よって**再解析（restart）が合成フックまで到達すれば、その run の
+artifact は `$` 付きの本文で作り直される**。逆に、合成が例外を投げた場合・合成結果が
+空の場合は artifact を保存しない（既存の live 参照を壊さないための既存挙動）ので、
+その run では旧本文が残り、読み時投影が受け持つ。
+
+**テスト**: `src/tests/agents/claim_object_builder/test_equation_claim_synthesis.py`
+（各テンプレートの厳密文言・LaTeX 記号の `$` 付与・二重包みなし・concept 名に `$` が
+付かないこと・フォールバック文言・`_math` の冪等性）/
+`backend/tests/test_component_graph_reference_index.py`
+（`TestLegacySynthClaimMathDelimiting` = 旧本文への付与・テンプレート語の非包み・
+既に `$` 付きの本文は不変・`atomic_rewrite` / `claim_object` は不変・丸めが数式を
+割らない）。
+
+**非変更**: DB スキーマ・migration・LLM 呼び出し・A層の他 agent・承認 API。

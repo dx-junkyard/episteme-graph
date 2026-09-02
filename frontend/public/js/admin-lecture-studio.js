@@ -5499,6 +5499,17 @@
     return s.length > limit ? s.slice(0, limit - 1) + "…" : s;
   }
 
+  // claim 本文には数式が $…$ / \(…\) 付きで入る。ElementCard のラベルは
+  // 記号（element_type=symbol）以外は数式レンダリングしない仕様なので、
+  // ラベルに使うときは **区切り記号だけ**を外して TeX ソースを残す
+  // （$P_{\rm L}(k)$ → P_{\rm L}(k)）。ElementCard 側に数式描画を足さない。
+  function lsGraphStripMathDelimiters(text) {
+    return String(text || "")
+      .replace(/\$\$([\s\S]+?)\$\$/g, "$1")
+      .replace(/\\\(([\s\S]+?)\\\)/g, "$1")
+      .replace(/\$([^\$\n]+?)\$/g, "$1");
+  }
+
   // kind: "component" | "equation" | "claim" | "evidence" | "derivation"
   function lsGraphResolveRef(resolver, kind, id) {
     var ref = { id: id, kind: kind, resolved: false, label: id, navNodeId: "", latex: "" };
@@ -5521,12 +5532,12 @@
       var claim = resolver.claimMap[id];
       if (claim) {
         ref.resolved = true;
-        ref.label = lsGraphSnippet(claim.text || claim.normalized_text || id);
+        ref.label = lsGraphSnippet(lsGraphStripMathDelimiters(claim.text || claim.normalized_text || id));
       } else {
         var refClaim = (resolver.refClaims || {})[id];
         if (refClaim) {
           ref.resolved = true;
-          ref.label = lsGraphSnippet(refClaim.text || id);
+          ref.label = lsGraphSnippet(lsGraphStripMathDelimiters(refClaim.text || id));
         }
       }
     } else if (kind === "evidence") {
@@ -7442,6 +7453,47 @@
     return '<div class="ls-extracted-formulas-block">' + items.join("") + '</div>';
   }
 
+  // 「地の文に TeX が混ざる短い文字列」（claim 本文・ノードの説明など）を HTML にする。
+  //
+  // - 地の文は必ず escHtml でエスケープする（数式区切りの外は常に平文扱い）
+  // - $$…$$ はブロック、$…$（改行を挟まない）と \(…\) はインラインとして
+  //   lsRenderKatex に渡す（window.katex 不在時は同関数が <code> チップへ縮退する）
+  // - 閉じない $ は数式にせず、そのまま文字として出す（勝手に食わない）
+  //
+  // 教材本文のプレビュー系（lsRenderMaterialPreview 等）は [[FORMULA]] 埋め込みや
+  // markdown も解決する別パイプラインなので、この関数はそちらを置き換えない。
+  // グラフレビュー画面（admin-graph-review.js）は graphView.inlineMathHtml として
+  // **この1本だけ**を使う（GR8: 数式描画の実装を画面ごとに増やさない）。
+  function lsInlineMathHtml(text) {
+    var source = String(text === null || text === undefined ? "" : text);
+    if (!source) return "";
+    var mathBlocks = [];
+    function hold(expr, display) {
+      var idx = mathBlocks.length;
+      mathBlocks.push({ expr: expr, display: display });
+      return "@@EG_INLINE_MATH_" + idx + "@@";
+    }
+    var preserved = source.replace(/\$\$([\s\S]+?)\$\$/g, function (_m, expr) {
+      return hold(expr, true);
+    });
+    preserved = preserved.replace(/\\\(([\s\S]+?)\\\)/g, function (_m, expr) {
+      return hold(expr, false);
+    });
+    preserved = preserved.replace(/\$([^\$\n]+?)\$/g, function (_m, expr) {
+      return hold(expr, false);
+    });
+    var html = escHtml(preserved);
+    return html.replace(/@@EG_INLINE_MATH_(\d+)@@/g, function (marker, idx) {
+      var block = mathBlocks[parseInt(idx, 10)];
+      if (!block) return marker;
+      var rendered = lsRenderKatex(block.expr, block.display);
+      // 空式など描画できないものは記述を落とさず元の区切り付きで平文表示する。
+      if (rendered) return rendered;
+      var delimiter = block.display ? "$$" : "$";
+      return escHtml(delimiter + block.expr + delimiter);
+    });
+  }
+
   function lsRenderKatex(expr, display) {
     var formula = lsNormalizeKatexFormula(expr, display);
     if (!formula) return "";
@@ -8977,7 +9029,9 @@
       roleLabel: lsGraphRoleLabel,
       sourceBackingLabel: lsGraphSourceBackingLabel,
       reviewReasonLabel: lsGraphReviewReasonLabel,
-      edgeLabel: lsGraphEdgeLabel
+      edgeLabel: lsGraphEdgeLabel,
+      // 地の文に混ざる TeX（$…$ / \(…\) / $$…$$）を数式として描画する共通口。
+      inlineMathHtml: lsInlineMathHtml
     }
   };
 })();

@@ -7,8 +7,13 @@ CSS の存在を、Node 実行なしのソース検査で確認する。
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 JS_SRC = (ROOT / "frontend" / "public" / "js" / "admin-graph-review.js").read_text(encoding="utf-8")
@@ -251,6 +256,338 @@ class TestReviewReasonPresentation:
         assert "graph_updated_at" in JS_SRC
         assert "の解析結果を表示しています" in JS_SRC
         assert ".graph-review-graph-updated" in CSS_SRC
+
+
+class TestArtifactResolvedClaims:
+    """解析結果由来の根拠 claim の表示（2026-09-02 是正）。
+
+    atomic rewrite の細分化 claim / 式から合成した claim は theory_claims の行を
+    持たないため、従来は本文ごと「未解決の根拠（本文を取得できません）」に落ちていた。
+    バックエンドが reference_index を artifact 解決へ拡張したので、UI は本文を出し、
+    承認行が無いことを「未承認（解析結果）」と明示する（隠さない・偽らない）。
+    """
+
+    def test_artifact_labels_present(self):
+        assert "未承認（解析結果）" in JS_SRC
+        assert '"式から合成"' in JS_SRC
+        assert '"主張の細分化"' in JS_SRC
+        assert "元の主張: " in JS_SRC
+        assert ">元の主張を承認</button>" in JS_SRC
+        assert "解析結果のみの根拠で、承認対象の行はありません。" in JS_SRC
+
+    def test_unresolved_fallback_kept(self):
+        # 参照インデックスに無い ID は従来どおり正直に未解決と告げる。
+        assert "未解決の根拠（本文を取得できません）" in JS_SRC
+        assert '"未解決"' in JS_SRC
+
+    def test_parent_approval_reuses_existing_anchor_and_attribute(self):
+        # 新しいアンカー ID を作らない（ADMIN_UI_ANCHORS の網羅テストと二重管理にしない）。
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        block = block[: block.index("\n  function ")]
+        assert 'data-ui-anchor="graph-review.claim-approve"' in block
+        assert 'data-graph-review-claim="' in block
+        assert "isApproved(claim.parent_review_status)" in block
+
+    def test_agent_ids_never_interpolated_into_row(self):
+        # 内部 ID（synth_claim_0001 等）は教員 UI に出さない。
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        block = block[: block.index("\n  function ")]
+        assert "agent_id" not in block
+
+    def test_es5_in_new_block(self):
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        block = block[: block.index("\n  function ")]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+
+_CLAIM_ROW_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[2], "utf8");
+function extractFrom(s0, name){
+  const s = s0.indexOf("function " + name + "(");
+  if (s<0) throw new Error("missing "+name);
+  let d=0, started=false;
+  for(let j=s0.indexOf("{",s); j<s0.length; j++){
+    const c=s0[j];
+    if(c==="{"){d++;started=true;}
+    else if(c==="}"){d--;if(started&&d===0)return s0.slice(s,j+1);}
+  }
+  throw new Error("unbalanced "+name);
+}
+function extractObjVar(s0, name){
+  const s = s0.indexOf("var " + name + " = {");
+  if (s<0) throw new Error("missing var "+name);
+  const e = s0.indexOf("\n  };\n", s);
+  if (e<0) throw new Error("unbalanced var "+name);
+  return s0.slice(s, e + 6);
+}
+function extractLineVar(s0, name){
+  const m = new RegExp("var " + name + " = \\{[^\\n]*\\};").exec(s0);
+  if (!m) throw new Error("missing line var "+name);
+  return m[0];
+}
+var deps = { escHtml: function (t) {
+  return String(t == null ? "" : t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+} };
+// 原稿スタジオ未ロードの縮退経路（richText → esc）を検証するため window は空にする。
+var window = {};
+var state = { graph: { reference_index: { claims: {
+  "claim_uuid_ref": { claim_id: "11111111-2222-3333-4444-555555555555",
+                      text: "DB 由来の主張", review_status: "teacher_review_required",
+                      resolution: "db" },
+  "synth_claim_0001": { claim_id: "", text: "式から合成された主張", review_status: "",
+                        resolution: "artifact", origin: "equation_synthesis",
+                        support_status: "source_backed", is_atomic: true,
+                        parent_claim_id: "", parent_review_status: "" },
+  "claim_span_001_13_sub04": { claim_id: "", text: "細分化された主張", review_status: "",
+                               resolution: "artifact", origin: "atomic_rewrite",
+                               support_status: "source_backed", is_atomic: true,
+                               parent_claim_id: "99999999-8888-7777-6666-555555555555",
+                               parent_review_status: "teacher_review_required" },
+  "legacy_ref": { claim_id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", text: "旧グラフの主張",
+                  review_status: "teacher_approved" }
+} } } };
+eval(extractObjVar(src, "REVIEW_STATUS_LABELS"));
+eval(extractLineVar(src, "APPROVED_STATUSES"));
+eval(extractObjVar(src, "CLAIM_ORIGIN_LABELS"));
+eval(extractFrom(src, "esc"));
+eval(extractFrom(src, "gv"));
+eval(extractFrom(src, "richText"));
+eval(extractFrom(src, "reviewStatusLabel"));
+eval(extractFrom(src, "isApproved"));
+eval(extractFrom(src, "collectClaimRefs"));
+eval(extractFrom(src, "claimRowHtml"));
+
+const refs = collectClaimRefs({ linked_claim_ids: [
+  "claim_uuid_ref", "synth_claim_0001", "claim_span_001_13_sub04", "legacy_ref", "ghost_claim_42"
+] });
+const byAgent = {};
+refs.forEach(function (r) { byAgent[r.agent_id] = r; });
+const rows = {};
+refs.forEach(function (r) { rows[r.agent_id] = claimRowHtml(r); });
+const all = refs.map(function (r) { return rows[r.agent_id]; }).join("");
+
+process.stdout.write(JSON.stringify({
+  dbResolution: byAgent["claim_uuid_ref"].resolution,
+  legacyInferredDb: byAgent["legacy_ref"].resolution,
+  artifactResolution: byAgent["synth_claim_0001"].resolution,
+  missingResolution: byAgent["ghost_claim_42"].resolution,
+  synthShowsText: rows["synth_claim_0001"].indexOf("式から合成された主張") >= 0,
+  synthUnapprovedChip: rows["synth_claim_0001"].indexOf("未承認（解析結果）") >= 0,
+  synthOriginChip: rows["synth_claim_0001"].indexOf("式から合成") >= 0,
+  synthHasNoButton: rows["synth_claim_0001"].indexOf("<button") < 0,
+  synthHasNote: rows["synth_claim_0001"].indexOf("承認対象の行はありません") >= 0,
+  subShowsText: rows["claim_span_001_13_sub04"].indexOf("細分化された主張") >= 0,
+  subOriginChip: rows["claim_span_001_13_sub04"].indexOf("主張の細分化") >= 0,
+  subParentChip: rows["claim_span_001_13_sub04"].indexOf("元の主張: 未レビュー") >= 0,
+  subParentButton:
+    rows["claim_span_001_13_sub04"].indexOf(
+      'data-graph-review-claim="99999999-8888-7777-6666-555555555555"') >= 0 &&
+    rows["claim_span_001_13_sub04"].indexOf(">元の主張を承認</button>") >= 0,
+  subParentButtonEnabled: rows["claim_span_001_13_sub04"].indexOf("disabled") < 0,
+  subHasNoNote: rows["claim_span_001_13_sub04"].indexOf("承認対象の行はありません") < 0,
+  dbRowUnchanged:
+    rows["claim_uuid_ref"].indexOf(">承認</button>") >= 0 &&
+    rows["claim_uuid_ref"].indexOf("未レビュー") >= 0 &&
+    rows["claim_uuid_ref"].indexOf("未承認（解析結果）") < 0,
+  legacyApprovedDisabled: rows["legacy_ref"].indexOf("disabled") >= 0,
+  missingRowFallback:
+    rows["ghost_claim_42"].indexOf("未解決の根拠（本文を取得できません）") >= 0 &&
+    rows["ghost_claim_42"].indexOf("<button") < 0,
+  noAgentIdLeak:
+    all.indexOf("synth_claim_0001") < 0 &&
+    all.indexOf("claim_span_001_13_sub04") < 0 &&
+    all.indexOf("ghost_claim_42") < 0
+}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node unavailable")
+def test_claim_row_rendering_behaviour_node(tmp_path):
+    """DB 由来 / 解析結果由来 / 未解決 の3系統が期待どおり描き分けられること。"""
+    harness = tmp_path / "claim_row.js"
+    harness.write_text(_CLAIM_ROW_HARNESS, encoding="utf-8")
+    js_path = ROOT / "frontend" / "public" / "js" / "admin-graph-review.js"
+    proc = subprocess.run(["node", str(harness), str(js_path)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["dbResolution"] == "db"
+    assert out["legacyInferredDb"] == "db", "旧グラフ（resolution 無し）は claim_id で DB 判定"
+    assert out["artifactResolution"] == "artifact"
+    assert out["missingResolution"] == ""
+    assert out["synthShowsText"], "解析結果由来でも本文を隠さない"
+    assert out["synthUnapprovedChip"]
+    assert out["synthOriginChip"]
+    assert out["synthHasNoButton"], "式から合成した claim は単体では承認できない"
+    assert out["synthHasNote"]
+    assert out["subShowsText"]
+    assert out["subOriginChip"]
+    assert out["subParentChip"]
+    assert out["subParentButton"], "元の主張へ承認を導く"
+    assert out["subParentButtonEnabled"]
+    assert out["subHasNoNote"]
+    assert out["dbRowUnchanged"], "DB 由来の行は従来どおり"
+    assert out["legacyApprovedDisabled"], "承認済みは再承認させない"
+    assert out["missingRowFallback"], "本当に解決できない参照は正直に未解決と告げる"
+    assert out["noAgentIdLeak"], "内部 ID を教員 UI に出さない"
+
+
+class TestInlineMathInClaimText:
+    """根拠 claim 本文・ノード説明の数式描画（2026-09-03）。
+
+    claim 本文はインライン数式を ``$…$`` で持つ（バックエンドの合成・修復とも同規約）。
+    生の ``$P_{\\rm L}(k)$`` を教員に読ませないため KaTeX で描画するが、描画の実装は
+    原稿スタジオの正本に一本化する（GR8: 画面ごとに数式パイプラインを増やさない）。
+    """
+
+    def _claim_row_block(self) -> str:
+        block = JS_SRC[JS_SRC.index("function claimRowHtml("):]
+        return block[: block.index("\n  function ")]
+
+    def _studio_helper_block(self) -> str:
+        block = STUDIO_SRC[STUDIO_SRC.index("function lsInlineMathHtml("):]
+        return block[: block.index("\n  function lsRenderKatex(")]
+
+    def test_claim_text_rendered_through_inline_math_helper(self):
+        block = self._claim_row_block()
+        assert "richText(claim.text)" in block
+        assert "esc(claim.text)" not in block
+        # 未解決の正直な事実文は残す。
+        assert "未解決の根拠（本文を取得できません）" in block
+
+    def test_rich_text_delegates_to_graph_view_with_esc_fallback(self):
+        block = JS_SRC[JS_SRC.index("function richText("):]
+        block = block[: block.index("\n  function ")]
+        assert "gv()" in block
+        assert "view.inlineMathHtml" in block
+        assert "return esc(text);" in block, "graphView 未ロード時は素のエスケープへ縮退"
+
+    def test_node_description_uses_same_helper(self):
+        assert 'graph-review-detail-desc">\' + richText(node.description)' in JS_SRC
+
+    def test_review_js_has_no_own_math_pipeline(self):
+        # 4本目の preserveMath / KaTeX 直呼びを作らない。
+        assert "katex" not in JS_SRC.replace("inlineMathHtml", "")
+        assert "preserveMath" not in JS_SRC
+
+    def test_helper_defined_and_exported_on_graph_view(self):
+        assert "function lsInlineMathHtml(" in STUDIO_SRC
+        assert "inlineMathHtml: lsInlineMathHtml" in STUDIO_SRC
+        # graphView オブジェクトの中に載っていること（既存キーの隣）。
+        view_block = STUDIO_SRC[STUDIO_SRC.index("graphView: {"):]
+        view_block = view_block[: view_block.index("}")]
+        assert "inlineMathHtml: lsInlineMathHtml" in view_block
+        assert "nodeId: lsGraphNodeId" in view_block, "既存キーを落とさない"
+
+    def test_helper_reuses_ls_render_katex(self):
+        block = self._studio_helper_block()
+        assert "lsRenderKatex(block.expr, block.display)" in block
+        assert "renderToString" not in block, "KaTeX 直呼びを増やさない"
+        assert "escHtml(" in block, "地の文は必ずエスケープする"
+
+    def test_helper_is_es5(self):
+        block = self._studio_helper_block()
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+    def test_studio_claim_labels_strip_math_delimiters(self):
+        # ElementCard は symbol 以外のラベルを数式描画しない（element-card.js の
+        # renderMathGated は element_type=symbol のみ）。ラベルでは区切りだけ外す。
+        assert "function lsGraphStripMathDelimiters(" in STUDIO_SRC
+        assert "lsGraphSnippet(lsGraphStripMathDelimiters(claim.text" in STUDIO_SRC
+        assert "lsGraphSnippet(lsGraphStripMathDelimiters(refClaim.text" in STUDIO_SRC
+
+    def test_css_aligns_inline_math_with_row_text(self):
+        assert ".graph-review-claim-text .katex" in CSS_SRC
+        assert ".graph-review-detail-desc .katex" in CSS_SRC
+
+
+_INLINE_MATH_HARNESS = r"""
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[2], "utf8");
+function extractFrom(s0, name){
+  const s = s0.indexOf("function " + name + "(");
+  if (s<0) throw new Error("missing "+name);
+  let d=0, started=false;
+  for(let j=s0.indexOf("{",s); j<s0.length; j++){
+    const c=s0[j];
+    if(c==="{"){d++;started=true;}
+    else if(c==="}"){d--;if(started&&d===0)return s0.slice(s,j+1);}
+  }
+  throw new Error("unbalanced "+name);
+}
+var deps = { escHtml: function (t) {
+  return String(t == null ? "" : t).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+} };
+var window = { katex: { renderToString: function (formula, opts) {
+  return '<span class="katex-fake" data-display="' + (opts.displayMode ? "1" : "0") + '">' +
+    String(formula) + "</span>";
+} } };
+eval(extractFrom(src, "escHtml"));
+eval(extractFrom(src, "lsNormalizeKatexFormula"));
+eval(extractFrom(src, "lsRenderKatex"));
+eval(extractFrom(src, "lsInlineMathHtml"));
+eval(extractFrom(src, "lsGraphStripMathDelimiters"));
+
+const inline = lsInlineMathHtml("Equation defines $P_{\\rm L}(k)$ here.");
+const display = lsInlineMathHtml("before $$a = b$$ after");
+const paren = lsInlineMathHtml("value \\(x_i\\) end");
+const unbalanced = lsInlineMathHtml("costs $5 per <unit> & more");
+const noKatex = (function () {
+  const saved = window.katex; window.katex = null;
+  const out = lsInlineMathHtml("see $\\alpha$ now");
+  window.katex = saved; return out;
+})();
+
+process.stdout.write(JSON.stringify({
+  inlineWrapped: inline.indexOf('class="lecture-formula visible"') >= 0,
+  inlineKeepsTex: inline.indexOf("P_{\\rm L}(k)") >= 0,
+  inlineNoDollar: inline.indexOf("$") < 0,
+  inlineProseKept: inline.indexOf("Equation defines ") >= 0 && inline.indexOf(" here.") >= 0,
+  displayWrapped: display.indexOf('class="lecture-formula-block visible"') >= 0,
+  parenWrapped: paren.indexOf('class="lecture-formula visible"') >= 0 &&
+    paren.indexOf("x_i") >= 0 && paren.indexOf("\\(") < 0,
+  unbalancedLiteral: unbalanced.indexOf("$5 per") >= 0,
+  unbalancedEscaped: unbalanced.indexOf("&lt;unit&gt;") >= 0 &&
+    unbalanced.indexOf("&amp;") >= 0,
+  unbalancedNoMath: unbalanced.indexOf("lecture-formula") < 0,
+  noKatexChip: noKatex.indexOf("ls-formula-chip") >= 0 &&
+    noKatex.indexOf("\\alpha") >= 0,
+  emptyStays: lsInlineMathHtml("") === "",
+  stripKeepsTex: lsGraphStripMathDelimiters("defines $P_{\\rm L}(k)$ here") ===
+    "defines P_{\\rm L}(k) here"
+}));
+"""
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node unavailable")
+def test_inline_math_helper_behaviour_node(tmp_path):
+    """$…$ / \\(…\\) / $$…$$ の描画と、閉じない $ の literal 維持。"""
+    harness = tmp_path / "inline_math.js"
+    harness.write_text(_INLINE_MATH_HARNESS, encoding="utf-8")
+    js_path = ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js"
+    proc = subprocess.run(["node", str(harness), str(js_path)],
+                          capture_output=True, text=True, timeout=30)
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["inlineWrapped"], "$…$ は lecture-formula ラッパで描画"
+    assert out["inlineKeepsTex"]
+    assert out["inlineNoDollar"], "区切りの $ は出力に残さない"
+    assert out["inlineProseKept"]
+    assert out["displayWrapped"], "$$…$$ はブロック"
+    assert out["parenWrapped"]
+    assert out["unbalancedLiteral"], "閉じない $ は数式にしない"
+    assert out["unbalancedEscaped"], "地の文は必ずエスケープ"
+    assert out["unbalancedNoMath"]
+    assert out["noKatexChip"], "window.katex 不在時は <code> チップへ縮退"
+    assert out["emptyStays"]
+    assert out["stripKeepsTex"], "ラベルでは区切りだけ外して TeX ソースを残す"
 
 
 class TestStudioDeliberationTargetResolution:

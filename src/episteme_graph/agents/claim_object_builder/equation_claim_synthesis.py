@@ -40,6 +40,31 @@ _OPERATION_TO_CLAIM_TYPE = {
 }
 
 
+def _math(symbol: object) -> str:
+    """Wrap a symbol as inline math (``$...$``) for the synthesised prose.
+
+    Symbols come straight out of the equation / derivation artifacts and are raw
+    LaTeX (``\\mathbf{k}``, ``P_{\\rm L}(k)``). Interpolated bare into a sentence
+    they cannot be rendered, so every symbol that reaches a claim ``text`` goes
+    through here. Idempotent: an already delimited symbol (``$x$`` / ``\\(x\\)``)
+    is returned untouched, and an empty symbol stays empty. Concept names keep the
+    bare symbol — only the prose carries the delimiters.
+    """
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    if len(s) >= 2 and s.startswith("$") and s.endswith("$"):
+        return s
+    if s.startswith("\\(") and s.endswith("\\)"):
+        return s
+    return f"${s}$"
+
+
+def _math_list(symbols: Iterable[str], limit: int = 4) -> str:
+    """``", "``-joined inline math for the first ``limit`` non-empty symbols."""
+    return ", ".join(m for m in (_math(s) for s in list(symbols)[:limit]) if m)
+
+
 def _concepts(symbols: Iterable[str]) -> list[ClaimConcept]:
     out: list[ClaimConcept] = []
     seen: set[str] = set()
@@ -115,7 +140,7 @@ def synthesize_equation_claims(
             claim = _make_claim(
                 index, document_id,
                 claim_type=DEFINITION_CLAIM,
-                text=f"Equation ({label}) defines {symbol}.",
+                text=f"Equation ({label}) defines {_math(symbol)}.",
                 equation_ids=[eq_id],
                 evidence_ids=evidence_ids,
                 concepts=_concepts(defined),
@@ -125,11 +150,11 @@ def synthesize_equation_claims(
             )
         elif primary in ("relation", "result", "constraint", "transformation") and len(used) >= 2:
             target = defined[0] if defined else used[0]
-            inputs = ", ".join(used[:4])
+            inputs = _math_list(used)
             claim = _make_claim(
                 index, document_id,
                 claim_type=RESULT_CLAIM if primary == "result" else DEPENDENCY_CLAIM,
-                text=f"In equation ({label}), {target} depends on {inputs}.",
+                text=f"In equation ({label}), {_math(target)} depends on {inputs}.",
                 equation_ids=[eq_id],
                 evidence_ids=evidence_ids,
                 concepts=_concepts([target] + used),
@@ -155,13 +180,16 @@ def synthesize_equation_claims(
         evidence_ids = list(getattr(chain, "source_evidence_ids", []) or [])
         review_reasons = list(getattr(chain, "review_reasons", []) or [])
         if eliminated:
+            retained_math = _math_list(retained)
             text = (
                 f"The equation system {operation}s to eliminate "
-                f"{', '.join(eliminated[:4])}"
-                + (f" while retaining {', '.join(retained[:4])}." if retained else ".")
+                f"{_math_list(eliminated)}"
+                + (f" while retaining {retained_math}." if retained_math else ".")
             )
         else:
-            text = f"The equation system supports a {operation} relating {', '.join(retained[:4] or ['the listed quantities'])}."
+            # The fallback wording is prose, not a symbol — it must stay undelimited.
+            relating = _math_list(retained) or "the listed quantities"
+            text = f"The equation system supports a {operation} relating {relating}."
         support_status = "derived_from_linked_artifacts" if evidence_ids or equation_ids else "review_required"
         claim = _make_claim(
             index, document_id,

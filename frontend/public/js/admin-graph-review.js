@@ -56,12 +56,28 @@
   };
   var APPROVED_STATUSES = { teacher_approved: true, teacher_reviewed: true, endorsed: true };
 
+  // 解析結果にしか無い根拠 claim の出所（reference_index の origin）→ 表示ラベル。
+  // claim_object（通常の claim 生成物）は出所を書かない（情報量ゼロのチップを増やさない）。
+  var CLAIM_ORIGIN_LABELS = {
+    equation_synthesis: "式から合成",
+    atomic_rewrite: "主張の細分化",
+  };
+
   function esc(text) {
     return deps.escHtml ? deps.escHtml(text == null ? "" : String(text)) : String(text == null ? "" : text);
   }
 
   function gv() {
     return (window.LectureStudio && window.LectureStudio.graphView) || null;
+  }
+
+  // claim 本文・ノードの説明は「地の文に TeX が混ざる」文字列。数式は数式として出す
+  // （生の $P_{\rm L}(k)$ を教員に読ませない）。描画の実装は原稿スタジオの正本
+  // graphView.inlineMathHtml に委譲し、未ロード時は素のエスケープへ縮退する（GR8）。
+  function richText(text) {
+    var view = gv();
+    if (view && view.inlineMathHtml) return view.inlineMathHtml(text);
+    return esc(text);
   }
 
   function reviewStatus(node) {
@@ -503,13 +519,78 @@
     var claimIndex = (state.graph && state.graph.reference_index && state.graph.reference_index.claims) || {};
     return unique.map(function (agentId) {
       var resolved = claimIndex[agentId];
+      if (!resolved) {
+        // 参照インデックスに無い＝本当に解決できない参照（新契約では稀）。
+        return { agent_id: agentId, resolution: "", claim_id: "", text: "", review_status: "" };
+      }
+      var claimId = String(resolved.claim_id || "");
+      // 旧グラフ・旧バックエンドは resolution を持たない。claim_id があれば DB 由来。
+      var resolution = String(resolved.resolution || (claimId ? "db" : ""));
       return {
         agent_id: agentId,
-        claim_id: resolved ? resolved.claim_id : "",
-        text: resolved ? resolved.text : "",
-        review_status: resolved ? (resolved.review_status || "teacher_review_required") : "",
+        resolution: resolution,
+        claim_id: claimId,
+        text: resolved.text || "",
+        // DB 行を持たない解析由来の claim は review_status を持たない（既定を捏造しない）。
+        review_status: claimId ? (resolved.review_status || "teacher_review_required") : "",
+        origin: String(resolved.origin || ""),
+        support_status: String(resolved.support_status || ""),
+        is_atomic: !!resolved.is_atomic,
+        parent_claim_id: String(resolved.parent_claim_id || ""),
+        parent_review_status: String(resolved.parent_review_status || ""),
       };
     });
+  }
+
+  // 根拠 claim 1行分の HTML。
+  //
+  // 参照インデックスの解決元は2種類ある（設計書 §11 / backend の reference_index）:
+  //   - resolution="db"       … theory_claims の行がある。従来どおり承認できる。
+  //   - resolution="artifact" … 解析結果（atomic rewrite の細分化 claim / 式から合成した
+  //                             claim）にしか存在せず、承認行を持たない。本文は出したうえで
+  //                             「未承認（解析結果）」と明示し、元の主張がある場合だけ
+  //                             そちらの承認へ導く（GR1: 確定は教員の明示操作のみ）。
+  // どちらでも内部 ID（agent_id）は教員 UI に出さない。
+  function claimRowHtml(claim) {
+    var artifact = claim.resolution === "artifact";
+    var chips = [];
+    var button = "";
+    var note = "";
+
+    if (artifact) {
+      chips.push("未承認（解析結果）");
+      var originLabel = CLAIM_ORIGIN_LABELS[claim.origin] || "";
+      if (originLabel) chips.push(originLabel);
+      if (claim.parent_claim_id) {
+        chips.push("元の主張: " + reviewStatusLabel(claim.parent_review_status));
+        button = '<button type="button" class="admin-action-btn graph-review-claim-approve" data-graph-review-claim="' +
+          esc(claim.parent_claim_id) + '" data-ui-anchor="graph-review.claim-approve"' +
+          (isApproved(claim.parent_review_status) ? " disabled" : "") + ">元の主張を承認</button>";
+      } else {
+        note = "解析結果のみの根拠で、承認対象の行はありません。";
+      }
+    } else if (claim.claim_id) {
+      chips.push(reviewStatusLabel(claim.review_status));
+      button = '<button type="button" class="admin-action-btn graph-review-claim-approve" data-graph-review-claim="' +
+        esc(claim.claim_id) + '" data-ui-anchor="graph-review.claim-approve"' +
+        (isApproved(claim.review_status) ? " disabled" : "") + ">承認</button>";
+    } else {
+      chips.push("未解決");
+    }
+
+    var claimText = String(claim.text || "").trim()
+      ? richText(claim.text)
+      : "未解決の根拠（本文を取得できません）";
+    return '<div class="graph-review-claim-row">' +
+      '<div class="graph-review-claim-text">' + claimText + "</div>" +
+      (note ? '<div class="graph-review-claim-note">' + esc(note) + "</div>" : "") +
+      '<div class="graph-review-claim-meta">' +
+        chips.map(function (chip) {
+          return '<span class="graph-review-chip">' + esc(chip) + "</span>";
+        }).join("") +
+        button +
+      "</div>" +
+      "</div>";
   }
 
   function renderDetail() {
@@ -556,7 +637,7 @@
         "</div>" +
       "</div>" +
       (String(node.description || "").trim()
-        ? '<div class="graph-review-detail-desc">' + esc(node.description) + "</div>"
+        ? '<div class="graph-review-detail-desc">' + richText(node.description) + "</div>"
         : "") +
       (reasons.length
         ? '<div class="graph-review-detail-reasons' + (reasonsAdvisory ? " graph-review-detail-reasons-advisory" : "") + '">' +
@@ -597,22 +678,7 @@
 
     if (claims.length) {
       html += '<div class="graph-review-claims"><div class="graph-review-claims-title">根拠 claim</div>' +
-        claims.map(function (claim) {
-          var label = claim.claim_id ? reviewStatusLabel(claim.review_status) : "未解決";
-          var approved = isApproved(claim.review_status);
-          var button = claim.claim_id
-            ? '<button type="button" class="admin-action-btn graph-review-claim-approve" data-graph-review-claim="' +
-              esc(claim.claim_id) + '" data-ui-anchor="graph-review.claim-approve"' + (approved ? " disabled" : "") + ">承認</button>"
-            : "";
-          // 未解決の claim でも内部 ID（agent_id）は教員 UI に出さない。
-          var claimText = String(claim.text || "").trim()
-            ? esc(claim.text)
-            : "未解決の根拠（本文を取得できません）";
-          return '<div class="graph-review-claim-row">' +
-            '<div class="graph-review-claim-text">' + claimText + "</div>" +
-            '<div class="graph-review-claim-meta"><span class="graph-review-chip">' + esc(label) + "</span>" + button + "</div>" +
-            "</div>";
-        }).join("") +
+        claims.map(claimRowHtml).join("") +
         "</div>";
     }
 

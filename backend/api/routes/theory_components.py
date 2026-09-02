@@ -2252,12 +2252,163 @@ def _collect_graph_reference_ids(graph_payload: dict) -> tuple[set[str], set[str
     return claim_ids, evidence_ids, derivation_ids
 
 
-def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
-    """``theory_claims`` を document_id で引き、参照済み ID → {claim_id, text} を作る。
+# atomic rewrite の子 claim ID は ClaimObjectBuilder が親 ID に連番サフィックスを
+# 付けて作る（``claim_span_001_13_sub04`` / 衝突時の ``claim_span_001_13_7``。
+# builder.py の ``_dedup_id`` 参照）。parent_claim_id を持たない旧 artifact でも
+# 「親 ID + 連番」なら atomic rewrite 由来と判定するために使う。
+_ARTIFACT_CLAIM_SUBID_RE = re.compile(r"^(?P<base>.+?)_(?:sub)?\d+$")
 
-    各行の ``source_scope`` の ``span_id`` / ``legacy_ids``（agent 側の atomic claim
-    ID を含む。persistence.py 参照）と DB UUID 自身の両方をキー候補にし、
-    ``ref_ids`` と交差するものだけを採用する。
+# 式由来の合成 claim（orchestrator の ``_hook_equation_claim_synthesis`` が作る）。
+_ARTIFACT_SYNTH_CLAIM_PREFIX = "synth_claim_"
+
+_CLAIM_ORIGIN_EQUATION_SYNTHESIS = "equation_synthesis"
+_CLAIM_ORIGIN_ATOMIC_REWRITE = "atomic_rewrite"
+_CLAIM_ORIGIN_CLAIM_OBJECT = "claim_object"
+
+# 記号らしさの判定に使う LaTeX 由来の文字（`\mathbf{k}` / `P_{\rm L}(k)` など）。
+_SYNTH_MATH_SPECIAL_CHARS = frozenset("\\_^{}()")
+
+# 式由来合成 claim のテンプレート語（equation_claim_synthesis.py の定型文）。
+# 短い英単語の concept 名がテンプレート側の語に当たるのを防ぐための除外表。
+_SYNTH_TEMPLATE_WORDS = frozenset({
+    "a", "an", "and", "in", "on", "to", "the", "of", "system", "equation",
+    "equations", "defines", "depends", "supports", "relating", "while",
+    "retaining", "eliminate", "eliminates", "listed", "quantities",
+})
+
+
+def _is_token_bounded(text: str, start: int, length: int) -> bool:
+    """``text[start:start+length]`` の前後が非英数字（＝独立トークン）か。"""
+    before = text[start - 1] if start > 0 else ""
+    after = text[start + length] if start + length < len(text) else ""
+    return not (before.isalnum() or after.isalnum())
+
+
+def _synth_math_match_mode(name: str) -> str | None:
+    """concept 名の照合方式（``substring`` / ``token``）。対象外なら None。
+
+    LaTeX 記号（``\\`` ``_`` ``^`` ``{}`` ``()`` を含む）は本文中に必ず記号として
+    現れるので部分一致で拾う。それ以外は独立トークンでのみ拾い、さらに純 ASCII
+    アルファベットの語はテンプレート語との衝突（``n`` が "In equation" に当たる等）を
+    避けるため4文字以上とテンプレート語を除外する。
+    """
+    n = name.strip()
+    if not n:
+        return None
+    if any(ch in _SYNTH_MATH_SPECIAL_CHARS for ch in n):
+        return "substring"
+    if n.isascii() and n.isalpha():
+        if len(n) > 3 or n.lower() in _SYNTH_TEMPLATE_WORDS:
+            return None
+    return "token"
+
+
+def _delimit_synth_claim_math(text: str, concept_names: list[str]) -> str:
+    """旧 artifact の式由来合成 claim 本文に ``$...$`` を補う（読み時の投影のみ）。
+
+    2026-09-03 以降に生成される artifact は ``equation_claim_synthesis._math()`` が
+    生成時に ``$`` を付けるため、本関数の対象は**既存 run の旧 artifact だけ**である
+    （DB もファイルも書き換えない。再解析（restart）で artifact が作り直されれば
+    自然に不要になる）。concept 名を長い順に走査して本文中の出現を ``$名$`` に
+    包む。既に包んだ区間は再走査しないので二重包みは起きない。
+    """
+    if not text or "$" in text or "\\(" in text:
+        return text
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in concept_names:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        mode = _synth_math_match_mode(name)
+        if mode is None:
+            continue
+        seen.add(name)
+        candidates.append((name, mode))
+    if not candidates:
+        return text
+    candidates.sort(key=lambda item: len(item[0]), reverse=True)
+
+    # (文字列, 数式か) の並びに切り分けていく。数式区間は以降の走査対象にしない。
+    segments: list[tuple[str, bool]] = [(text, False)]
+    for name, mode in candidates:
+        rebuilt: list[tuple[str, bool]] = []
+        for chunk, is_math in segments:
+            if is_math:
+                rebuilt.append((chunk, True))
+            else:
+                rebuilt.extend(_split_on_symbol(chunk, name, mode == "token"))
+        segments = rebuilt
+    return "".join(f"${chunk}$" if is_math else chunk for chunk, is_math in segments)
+
+
+def _split_on_symbol(segment: str, name: str, token_only: bool) -> list[tuple[str, bool]]:
+    """``segment`` を ``name`` の出現で (文字列, 数式か) に切り分ける（左から順に）。"""
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    search = 0
+    length = len(name)
+    while True:
+        idx = segment.find(name, search)
+        if idx < 0:
+            break
+        if token_only and not _is_token_bounded(segment, idx, length):
+            search = idx + 1
+            continue
+        if idx > pos:
+            out.append((segment[pos:idx], False))
+        out.append((name, True))
+        pos = idx + length
+        search = pos
+    if not out:
+        return [(segment, False)]
+    if pos < len(segment):
+        out.append((segment[pos:], False))
+    return out
+
+
+def _truncate_reference_text(text: str, limit: int = _REFERENCE_TEXT_SNIPPET_MAX) -> str:
+    """スニペット丸め。``$...$`` の途中で切らない（閉じない ``$`` を残さない）。"""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if cut.count("$") % 2 == 1:
+        cut = cut[:cut.rfind("$")]
+    return cut
+
+
+def _artifact_claim_concept_names(record: dict) -> list[str]:
+    concepts = record.get("concepts")
+    if not isinstance(concepts, list):
+        return []
+    return [
+        str(c.get("name") or "")
+        for c in concepts
+        if isinstance(c, dict) and c.get("name")
+    ]
+
+
+def _resolve_claim_reference_index(
+    document_id: str, ref_ids: set[str], artifacts: dict | None = None
+) -> dict:
+    """参照済み claim ID → 表示用エントリの索引を作る（DB → artifact の2段解決）。
+
+    第1段（DB）: ``theory_claims`` を document_id で引き、各行の ``source_scope`` の
+    ``span_id`` / ``legacy_ids``（agent 側の atomic claim ID を含む。persistence.py
+    参照）と DB UUID 自身をキー候補にして ``ref_ids`` と交差するものを採用する。
+    エントリは ``resolution="db"``。
+
+    第2段（artifact, 2026-09-02 追加）: グラフのノードが参照する claim ID には
+    ``theory_claims`` に**行が存在しない**ものがある — ClaimObjectBuilder の atomic
+    rewrite 子 claim と、式由来の合成 claim（``synth_claim_*``）である。
+    ``persist_qualified_claims`` は qualified_spans しか永続化しないため、これらは
+    構造的に DB へ落ちない（永続化するか否かはオーナー判断の別件）。そこで DB で
+    解決できなかった ID を ``claim_object_builder`` artifact から読み時に解決し、
+    本文を出せるようにする（``resolution="artifact"`` / ``claim_id=""`` = DB 行が
+    無いので承認操作の対象にならないことを、UI が区別できる形で明示する）。
+    artifact が無い古い run では第1段の結果がそのまま返る（fail-soft）。
+
+    GR3（数値非表示）: confidence など生数値と LLM の reason 文はエントリに載せない。
     """
     index: dict[str, dict] = {}
     if not ref_ids or not str(document_id or "").strip():
@@ -2270,6 +2421,9 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
         ).fetchall()
     finally:
         session.close()
+    # 参照有無に関わらず全キーを控える（artifact 由来 claim の親 claim 解決に使う。
+    # claim ごとの追加 SQL は発行しない）。
+    db_by_key: dict[str, tuple[str, str]] = {}
     for row in rows:
         claim_uuid = str(row[0])
         text = str(row[1] or "")
@@ -2286,8 +2440,98 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
             legacy_ids = source_scope.get("legacy_ids")
             if isinstance(legacy_ids, list):
                 candidate_keys.update(str(v) for v in legacy_ids if v)
+        for key in candidate_keys:
+            db_by_key.setdefault(key, (claim_uuid, review_status))
         for key in candidate_keys & ref_ids:
-            index[key] = {"claim_id": claim_uuid, "text": snippet, "review_status": review_status}
+            index[key] = {
+                "claim_id": claim_uuid,
+                "text": snippet,
+                "review_status": review_status,
+                "resolution": "db",
+            }
+
+    unresolved = {ref for ref in ref_ids if ref not in index}
+    if unresolved and isinstance(artifacts, dict) and artifacts:
+        try:
+            index.update(
+                _resolve_artifact_claim_reference_index(artifacts, unresolved, db_by_key)
+            )
+        except Exception:
+            logger.debug(
+                "reference_index: artifact claim fallback failed for document %s",
+                document_id,
+                exc_info=True,
+            )
+    return index
+
+
+def _artifact_claim_origin(claim_id: str, record: dict, known_ids: set[str]) -> str:
+    """artifact 由来 claim の出所（equation_synthesis / atomic_rewrite / claim_object）。"""
+    if claim_id.startswith(_ARTIFACT_SYNTH_CLAIM_PREFIX):
+        return _CLAIM_ORIGIN_EQUATION_SYNTHESIS
+    if str(record.get("parent_claim_id") or "").strip():
+        return _CLAIM_ORIGIN_ATOMIC_REWRITE
+    matched = _ARTIFACT_CLAIM_SUBID_RE.match(claim_id)
+    if matched and matched.group("base") in known_ids:
+        # 親 claim が artifact 内に実在する連番サフィックス ID = atomic rewrite の子。
+        return _CLAIM_ORIGIN_ATOMIC_REWRITE
+    return _CLAIM_ORIGIN_CLAIM_OBJECT
+
+
+def _resolve_artifact_claim_reference_index(
+    artifacts: dict, ref_ids: set[str], db_by_key: dict[str, tuple[str, str]]
+) -> dict:
+    """``claim_object_builder`` artifact（ClaimObjectBuildResult.to_dict()）から
+    DB 未解決の claim ID → 表示用エントリを作る。
+
+    ``claim_id`` は空文字（DB 行が無い＝承認操作の対象外）。親 span claim が
+    ``theory_claims`` に永続化されていれば、その DB UUID と review_status を
+    ``parent_claim_id`` / ``parent_review_status`` として添える（``db_by_key`` の
+    再利用のみ。claim ごとの追加 SQL は発行しない）。
+    """
+    index: dict[str, dict] = {}
+    if not ref_ids:
+        return index
+    stage = artifacts.get("claim_object_builder") if isinstance(artifacts, dict) else None
+    records = stage.get("claims") if isinstance(stage, dict) else None
+    if not isinstance(records, list):
+        return index
+    known_ids = {
+        str(r.get("claim_id") or "") for r in records if isinstance(r, dict)
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        claim_id = str(record.get("claim_id") or "")
+        if not claim_id or claim_id not in ref_ids:
+            continue
+        text = str(record.get("text") or "").strip() or str(record.get("normalized_text") or "")
+        parent_uuid = ""
+        parent_review_status = ""
+        parent_candidates = [str(record.get("parent_claim_id") or "")]
+        source_span_ids = record.get("source_span_ids")
+        if isinstance(source_span_ids, list):
+            parent_candidates.extend(str(v) for v in source_span_ids if v)
+        for candidate in parent_candidates:
+            if candidate and candidate in db_by_key:
+                parent_uuid, parent_review_status = db_by_key[candidate]
+                break
+        origin = _artifact_claim_origin(claim_id, record, known_ids)
+        if origin == _CLAIM_ORIGIN_EQUATION_SYNTHESIS:
+            # 旧 artifact（生成時に ``$`` を付けていなかった run）の救済。
+            text = _delimit_synth_claim_math(text, _artifact_claim_concept_names(record))
+        index[claim_id] = {
+            # DB 行が無いので承認 API の対象にならない（UI は claim_id 空で判別する）。
+            "claim_id": "",
+            "text": _truncate_reference_text(text),
+            "review_status": "",
+            "resolution": "artifact",
+            "origin": origin,
+            "support_status": str(record.get("support_status") or ""),
+            "is_atomic": bool(record.get("is_atomic", False)),
+            "parent_claim_id": parent_uuid,
+            "parent_review_status": parent_review_status,
+        }
     return index
 
 
@@ -2386,19 +2630,26 @@ def _build_graph_reference_index(document_id: str, graph_payload: dict) -> dict:
 
     claim_ids, evidence_ids, derivation_ids = _collect_graph_reference_ids(graph_payload)
 
+    # artifacts は claim（DB 未解決分の読み時フォールバック）/ evidence / derivation の
+    # 3者で共有するので1回だけ読む。
+    artifacts: dict = {}
+    if claim_ids or evidence_ids or derivation_ids:
+        try:
+            artifacts = document_run_artifacts(document_id)
+        except Exception:
+            artifacts = {}
+
     if claim_ids:
         try:
-            reference_index["claims"] = _resolve_claim_reference_index(document_id, claim_ids)
+            reference_index["claims"] = _resolve_claim_reference_index(
+                document_id, claim_ids, artifacts
+            )
         except Exception:
             logger.debug(
                 "reference_index: claim resolution failed for document %s", document_id, exc_info=True
             )
 
     if evidence_ids or derivation_ids:
-        try:
-            artifacts = document_run_artifacts(document_id)
-        except Exception:
-            artifacts = {}
         if evidence_ids:
             try:
                 reference_index["evidence"] = _resolve_evidence_reference_index(artifacts, evidence_ids)

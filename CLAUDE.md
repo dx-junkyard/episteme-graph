@@ -2369,6 +2369,26 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   live の `theory_components.review_status` が焼き込み値に勝つ**
   （`_normalize_stored_component_graph` + core `merge_live_review_statuses` — これが
   無いと承認してもレビューループが閉じない）。
+- **根拠 claim の読み時解決は DB → artifact の2段（2026-09-02・migration なし）**:
+  グラフのノードが参照する claim ID には `theory_claims` に**行が無い**ものがある
+  （ClaimObjectBuilder の atomic rewrite 子 claim と式由来の合成 claim `synth_claim_*`。
+  `persist_qualified_claims` は qualified_spans しか永続化しない — claim_objects を
+  永続化するかはオーナー判断の別件）。`_resolve_claim_reference_index` は DB で
+  解決できない ID を `claim_object_builder` artifact から解決し、エントリに
+  `resolution="db"|"artifact"` を付ける（artifact は `claim_id=""` / `origin` =
+  equation_synthesis | atomic_rewrite | claim_object / 親 span claim が DB にあれば
+  `parent_claim_id` + `parent_review_status`。追加 SQL なし・confidence と reason は
+  載せない）。UI は artifact 由来を**隠さず本文を出したうえで「未承認（解析結果）」**
+  と明示し、親があれば「元の主張を承認」（既存アンカー `graph-review.claim-approve`
+  再利用）へ導く。「承認状態で根拠を隠す」設計にはしない（設計書 §14）。
+  **claim 本文の数式（2026-09-03・§14.1）**: 式由来合成 claim の記号は生成時に
+  `equation_claim_synthesis._math()` が `$...$` で区切る（concept 名は素の記号のまま）。
+  旧 artifact は `_delimit_synth_claim_math`（origin=equation_synthesis・`$` 無しの本文に
+  concept 名を長い順に包む読み時投影・書き込みなし）で補い、snippet 切り詰めは `$` 区間を
+  割らない。表示は `graphView.inlineMathHtml`（`lsInlineMathHtml` = `$..$` / `\(..\)` /
+  `$$..$$` を `lsRenderKatex` で描く共有ヘルパ。preserveMath の4本目を作らない）を
+  `admin-graph-review.js::richText` が使い、studio 側のラベル経路は `$` 区切りだけ剥がす
+  （ElementCard は symbol 型以外のラベルに数式描画をしない）。
 - **グラフ全体対話**: `core/deliberation/graph_dialogue.py`（FastAPI 非 import）。
   疑似要素型 `document_graph`（migration 075 = `deliberation_sessions.element_type` CHECK
   への追加のみ。**`element_annotations` の CHECK と `ElementRef`/`ELEMENT_TYPES` は
