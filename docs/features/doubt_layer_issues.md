@@ -9,6 +9,15 @@
 > D層節と本書自身を正とする。
 > **位置づけ**: A層（構造化）・B層（学習）・C層（承認）に続く第四の層。
 > 本書は構想を **1 issue ≒ 1 PR** の粒度に分割し、実装順序・依存関係・UX 設計を確定させる。
+> **追補（2026-09-03 コード照合）**: `backend/core/doubt/` に本書の全 issue 相当の実装
+> （`ledger_builder` / `load_calculator` / `assumption_mining` / `scope_candidates` /
+> `counterfactual` / `open_assumptions` / `naive_signal` / `metrics`）が現存する。
+> D層の読み手はその後も増えており、いずれも**本層のテーブル・意味論を変えずに読む側**である —
+> SL層（`stakes_ledger_design.md`、migration 067）/ ゼミ前ブリーフ（`core/doubt/seminar_brief.py`、
+> `seminar_brief_mirroring_design.md`）/ わたしの地図「いまここの周り」の検証状態表示
+> （`personal_map_nearby_design.md` PMN-3）/ discuss 開幕の「この論文が確かめていないこと」
+> （`discussion_mode_design.md`）。閉世界語彙（「このコーパスの中では検証記録がありません」）と
+> 数値非表示は、これら全ての読み手に継承されている。
 
 ---
 

@@ -1,6 +1,17 @@
 # 分野の地図 — 骨格の DB 管理化（設計と決定事項）
 
-> **ステータス: S1〜S3 実装済み（2026-07-05, migration 027）**
+> **ステータス: S1〜S3 実装済み（2026-07-05, migration 027）— 正本・凍結**
+>
+> 追補（2026-09-03 コード照合）: `core/atlas_store.py` の骨格ストア・generate /
+> draft PUT（`revision` 楽観ロック）/ freeze / `GET /api/admin/atlas/domains`・
+> バインディング API は現存し、本文の記述と一致する。以下 2 点だけ現行と表記が異なる。
+> ①migration の適用は `main.py` ではなく **`backend/core/migrations.py` のランナー**
+> （毎起動・番号順に冪等再実行。Tier 3-13）。`atlas_store.import_bundled_skeletons()` の
+> 起動時取込は `main.py` の lifespan のままで正しい。②同梱骨格の探索先は
+> カートリッジ配下に加えて **`backend/atlas_domains/<domain_key>/skeleton.yaml`**
+> （カートリッジ一式を持たない骨格専用ドメイン。`knowledge_landscape_design.md`）。
+> その後の拡張（ドメイン retire/restore = migration 057 / ベクトル係留 = 074 /
+> 辺候補 = 076）はそれぞれ専用設計書が正本。
 > 関連: `field_atlas_binding.md` / `field_atlas_skeleton.md` / `field_atlas_overlay_spec.md`
 >
 > 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは

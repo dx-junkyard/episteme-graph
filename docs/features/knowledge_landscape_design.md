@@ -2,7 +2,9 @@
 
 - 文書バージョン: 1.0
 - 作成日: 2026-08-04
-- ステータス: **この文書が知識ランドスケープ機能の正本**
+- ステータス: **実装済み（正本・凍結）** — v1 全実装（2026-08-05、migration **065**
+  `065_landscape_placements.sql`、コミット `407c5b0`）。本文書が知識ランドスケープ機能の正本で、
+  以後は §15 実装記録の追記のみ（Phase 2〜4 は §12 のとおり非スコープ）
 - 入力仕様: `/Users/Shared/issues/episteme_graph_knowledge_landscape_astrophysics_spec.md`
   （知識ランドスケープ／宇宙物理基準地図 仕様書 v0.1。以下「入力仕様書」）
 - 関連文書: `field_atlas_overlay_spec.md`（分野の地図。※原本消失につき現存するのは
@@ -576,3 +578,28 @@ Fable 5 が指揮・設計・統合、Opus 5 サブエージェントが実装�
 | AC-008 分野ビューと方法ビューの位置差 | perspective 別の配置行として保持・表示（専用ビューは Phase 2） |
 | AC-009 表現困難な関係の候補保存 | unplaced_domains の記録+教員提示（LS10）。Predicate 提案は Phase 4 |
 | AC-010 コーパス・生成日・版の確認 | corpus 事実行 + skeleton_version + run の `_stage_models`（LS8） |
+
+---
+
+## 15. 実装記録（2026-08-05 実装 / 2026-09-03 コード照合）
+
+- **migration**: `backend/db/065_landscape_placements.sql`（`landscape_placements`。
+  想定番号ではなく**実際に採番された番号**。コミット `407c5b0`）。
+- **core**: `backend/core/landscape/`（`schema.py` = perspective / status 語彙とラベルの正本 /
+  `store.py`（DELETE 文なし・空 candidates は SQL 非発行）/ `builder.py`
+  （`build_and_store_placements` — パイプラインと教員の手動再提案が同一経路・同一 CostGate）/
+  `projection.py`）。
+- **agent**: `src/episteme_graph/agents/landscape_placement/`。パイプラインステージ
+  `landscape_placement`（`discuss_opening` の直後）。
+- **API**: `backend/api/routes/landscape.py` — 教員 `GET /api/admin/landscape/documents/{ref}/placements` /
+  `PATCH .../placements/{id}` / `POST .../placements/propose` /
+  `GET /api/admin/landscape/courses/{id}/placements` / `POST .../placements/accept`
+  （リリース前の確認ウィザードの実体。`release_review_flow_design.md`）/
+  `GET /api/admin/landscape/overview`、学習者 `GET /api/learning/courses/{id}/landscape`。
+  **DELETE ルートは無い**。
+- **基準骨格の同梱**: `backend/atlas_domains/astrophysics/`（骨格専用ドメインの新経路）。
+- **UI**: 学習者 = `landscape-layer.js`（オーバーレイの「論文の位置」トグル + 出典タブの
+  「分野の中の位置づけ」）、教員 = 教材管理の `⋯`「位置づけ（分野マップ）…」
+  （UI アンカー `materials.row-landscape` / `landscape-modal` / `landscape-propose`）。
+- 本層の上に積まれた後続層（いずれも別設計書が正本）: カテゴリギャップ候補（migration 066）・
+  VA層の配置プレフィルタ（074）。

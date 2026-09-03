@@ -268,45 +268,58 @@ LLM-first + 決定論 validator/repair）。図・装置は **L層**（画像抽
 RAG チャット（tier / content_grounding / 可視性 fail-closed）・カジュアル/ハンズフリー音声・
 **discuss モード**（論文と最初から議論する: 開幕素材・着地・歩調合わせ・生成的問い返し）・
 **レクチャー**（スライド=表示と読み上げの同期最小単位・トピック音声・原稿スタジオ）・
+**コーパス回遊**（コースの外の「論文の海」・コース無しの論文議論・地図の端）・
 学習画面のインスペクト/ホバー係留。
 
 → [features/learning.md](features/learning.md) / [backend/rag-chat.md](backend/rag-chat.md) /
 [discussion_mode_design.md](features/discussion_mode_design.md) /
-[lecture_slide_sync_design.md](features/lecture_slide_sync_design.md)
+[lecture_slide_sync_design.md](features/lecture_slide_sync_design.md) /
+[corpus_roaming_design.md](features/corpus_roaming_design.md)
 
 ### 群3: 理解の産出と痕跡 — 学習者が作り、残し、再訪する（§3/§5.2）
 
 **R層 再構成ループ**（構造照合＝仮説、権威＝出典）・**理解サイクル**（OPEN〜REVISIT、
 intention/carryover 痕跡・帰り道の景色）・tension / 構造帰属の問い・
 **個人知識ネットワーク**（本人確定痕跡からの毎回導出、「わたしの地図」、旅、橋候補の
-k-匿名集約）・教材内の要素文脈（チップ・ホバー・文脈 API）。
+k-匿名集約）・教材内の要素文脈（チップ・ホバー・文脈 API）・**主権台帳「わたしの記録」**
+（痕跡 kind 登録簿と本人だけの一覧・持ち出し）・**帰還の扉**（帰還の三段）・
+**構造の降下路**（足場ダイヤル・楽屋）。
 
 → [reconstruction_loop_design.md](features/reconstruction_loop_design.md) /
 [understanding_cycle_design.md](features/understanding_cycle_design.md) /
 [structure-anchored-questions.md](features/structure-anchored-questions.md) /
-[personal_knowledge_network_design.md](features/personal_knowledge_network_design.md)
+[personal_knowledge_network_design.md](features/personal_knowledge_network_design.md) /
+[trace_registry_sovereignty_ledger_design.md](features/trace_registry_sovereignty_ledger_design.md) /
+[return_door_design.md](features/return_door_design.md) /
+[structure_descent_design.md](features/structure_descent_design.md)
 
 ### 群4: 地図と位置づけ — 分野の中の「いまここ」（§2.1/§2.3）
 
 **Field Atlas**（骨格の生成→教員レビュー→凍結、コース⇄地図バインディング、ミニマップ、
 修正報告、ドメインライフサイクル）・**知識ランドスケープ**（論文を多観点で骨格に配置、
 AI 配置は inferred 止まり）・**カテゴリギャップ候補**（「置けなかった」の反復から地図を
-育てる、共有骨格への流路に人間の弁）・**リリース前の確認**（提示されたものが出る、を
-教員の1操作で承認とみなす）。
+育てる、共有骨格への流路に人間の弁）・**VA層 ベクトル係留**（アンカーのプロトタイプ埋め込み・
+別名レジストリ・配置プレフィルタ・着地予測。cosine 生値は見せず段階ラベルのみ）・
+**RE追補 関係表示**（辺候補の教員レビューと学習者向け「推定の糸」— 地形は人間・関係は離散の辺）・
+**リリース前の確認**（提示されたものが出る、を教員の1操作で承認とみなす）。
 
-→ [field_atlas_skeleton.md](features/field_atlas_skeleton.md) ほか field_atlas_*.md /
+→ [field_atlas_overlay_spec.md](features/field_atlas_overlay_spec.md) ほか field_atlas_*.md /
 [knowledge_landscape_design.md](features/knowledge_landscape_design.md) /
 [category_gap_candidates_design.md](features/category_gap_candidates_design.md) /
+[atlas_vector_anchoring_design.md](features/atlas_vector_anchoring_design.md) /
+[atlas_relation_edges_design.md](features/atlas_relation_edges_design.md) /
 [release_review_flow_design.md](features/release_review_flow_design.md)
 
 ### 群5: 疑いと検証の制度 — 認識的地位の台帳（§2.2/§2.4）
 
 **D層**（epistemic ledger・暗黙前提マイニング・前提の地図・疑義・検証提案・反実仮想）・
 **SL層**（反証条件レジストリ・観測の反実仮想・独立支持経路・晴れ間 — 出口は
-verification_proposals に一本化）。学習者へは読み取り専用の事実併記のみ。
+verification_proposals に一本化）・**ゼミ前ブリーフと鏡面化**（論文の賭け金の read-only 合成ビュー）。
+学習者へは読み取り専用の事実併記のみ。
 
 → [doubt_layer_issues.md](features/doubt_layer_issues.md) /
-[stakes_ledger_design.md](features/stakes_ledger_design.md)
+[stakes_ledger_design.md](features/stakes_ledger_design.md) /
+[seminar_brief_mirroring_design.md](features/seminar_brief_mirroring_design.md)
 
 ### 群6: 教員の検討と共同体の合意（§5.1/§5.3）
 
@@ -314,29 +327,41 @@ verification_proposals に一本化）。学習者へは読み取り専用の事
 内訳・4+1レンズ・対話的検討・候補注釈のコミットルーティング・同一性リンク・標準化判定）・
 **二層説明**（generic/contextual・レビューキュー）・**L層ライブラリ**（教員共同財への
 人間による昇格のみ）・**教材図スタジオ**（AI 対話 SVG 生成・sanitizer が唯一の入口）・
-要素インベントリ。
+**グラフ対話レビュー**（教材起点でグラフを見ながら承認・却下する。AI 応答から承認 API を
+呼ぶ経路は作らない）と**グラフの論文層**（フレームに論文の章・式・図表を肉付けする読み時射影）・
+**教員の弁と計器**（負荷順トリアージ・静かな計器）・要素インベントリ。
 
 → [endorsement-sharing.md](features/endorsement-sharing.md) /
 [element_deliberation_workspace_design.md](features/element_deliberation_workspace_design.md) /
 [hierarchical_context_explanation_design.md](features/hierarchical_context_explanation_design.md) /
-[teaching_figure_studio_design.md](features/teaching_figure_studio_design.md)
+[teaching_figure_studio_design.md](features/teaching_figure_studio_design.md) /
+[graph_dialogue_review_design.md](features/graph_dialogue_review_design.md) /
+[graph_paper_layer_design.md](features/graph_paper_layer_design.md) /
+[teacher_triage_instruments_design.md](features/teacher_triage_instruments_design.md)
 
 ### 群7: 運営基盤 — 弁と観測装置のインフラ（§4/§6）
 
-認可・Visibility・グループ共有 / **V層** 共有物のバージョン管理 / 状態通知基盤（導出 status +
-遷移イベント + 統合インボックス）/ **G層** 次にやること（完了フラグなしの導出 To-Do）/
-**Admin Copilot**（capability registry を単一の真実源とする説明・道案内・代行）/
-**help_kb**（マニュアルの AI 知識源化・インスペクトモード）/ **U層** 使用量計測 /
-**M層** 場面別モデル選択 / discuss 観測基盤。
+認可・Visibility・グループ共有 / **アカウントライフサイクル管理**（停止・リセット・削除は
+状態遷移と墓標化で行い users 行を物理 DELETE しない）/ **V層** 共有物のバージョン管理 /
+状態通知基盤（導出 status + 遷移イベント + 統合インボックス）/ **G層** 次にやること
+（完了フラグなしの導出 To-Do）/ **Admin Copilot**（capability registry を単一の真実源とする
+説明・道案内・代行）/ **help_kb**（マニュアルの AI 知識源化・インスペクトモード）/
+**U層** 使用量計測 / **M層** 場面別モデル選択 / discuss 観測基盤 /
+**コーパスの成長ループ**（URL 指定の教材取得 = 許可リスト + SSRF ガード、arXiv 論文
+ディスカバリーと論文レーダー = 発見は自動・取り込みは教員の明示承認のみ）。
 
 → [auth-visibility.md](features/auth-visibility.md) /
+[account_lifecycle_management_design.md](features/account_lifecycle_management_design.md) /
 [shared_versioning_design.md](features/shared_versioning_design.md) /
 [status_notification_design.md](features/status_notification_design.md) /
 [guidance_layer_design.md](features/guidance_layer_design.md) /
 [admin_assistant_design.md](features/admin_assistant_design.md) /
 [manual_help_kb_design.md](features/manual_help_kb_design.md) /
 [llm_usage_metering_design.md](features/llm_usage_metering_design.md) /
-[llm_model_selection_design.md](features/llm_model_selection_design.md)
+[llm_model_selection_design.md](features/llm_model_selection_design.md) /
+[url_material_upload_design.md](features/url_material_upload_design.md) /
+[paper_discovery_design.md](features/paper_discovery_design.md) /
+[paper_radar_design.md](features/paper_radar_design.md)
 
 ---
 
@@ -344,7 +369,7 @@ verification_proposals に一本化）。学習者へは読み取り専用の事
 
 | 構想 | 内容 | 状態 |
 |---|---|---|
-| E層（Exposition Layer） | 段階的翻訳レイヤー | 設計のみ（唯一の未実装層）。着手時は migration 再採番（068以降）と既存横断基盤への接続追補が必要 — [exposition_layer_design.md](features/exposition_layer_design.md) |
+| E層（Exposition Layer） | 段階的翻訳レイヤー | 設計のみ（唯一の未実装層）。着手時は migration の再採番（**採番前に `ls backend/db/` で空き番号を確認**。2026-09-03 時点は 077 以降）と既存横断基盤への接続追補が必要 — [exposition_layer_design.md](features/exposition_layer_design.md) |
 | 時間レンズ（Chronicle Lens） | 式・概念の伝記を歩く W層第5レンズ + journey 時間方向 hop | 提案（[vision_expansion_proposals_2026-08.md](features/vision_expansion_proposals_2026-08.md) 提案4）。着手時は専用設計書 |
 | 橋の生態系 | 転移プローブ・独立再発見・つながりの弁による同一性リンクの自己持続ループ | 提案（同 提案5）。安全装置3点（判断前非開示・2名確定・来歴刻印）が前提 |
 | 静かな開通と欲望の小径 | 匿名・非同期・数値ゼロの「他者の気配」の環境表現 | 提案（同 提案6）。討論で最も懸念が集中、5条件のガードレール確定が先 |

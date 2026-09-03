@@ -5,7 +5,8 @@
 CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層してきた各レイヤー（層）の
 名称・正本・実装場所・migration 番号を1枚にまとめた索引。
 （初版は `docs/architecture/consolidation_survey_2026-07.md` Tier 0 の「レイヤー命名の混乱」
-再発防止として作成。**2026-08-13 のドキュメント総点検で migration 067 まで全面更新**。）
+再発防止として作成。2026-08-13 のドキュメント総点検で migration 067 まで全面更新し、
+**2026-09-03 の実装照合で migration 076 と新規レイヤー行まで更新**。）
 
 ## 0. 先に知っておくこと（命名の混乱への注記）
 
@@ -15,11 +16,14 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   A→B→C→D→（Field Atlas/S）→R(036)→V(037)→状態通知基盤(038)→G(039)→L(041/042)→U(043)
   →W(048〜050)→L追補(051〜054)→二層説明(055/056)→S追補(057)→help_kb(058/059)
   →discuss観測(060)→M(061)→discuss開幕(062)→教材図(063)→W Phase5(064)
-  →ランドスケープ(065)→カテゴリギャップ(066)→SL(067) であり、序数はどれにも一意に対応しない。
+  →ランドスケープ(065)→カテゴリギャップ(066)→SL(067)→アカウントライフサイクル(068/069)
+  →URL教材取得(070)→論文ディスカバリー(071/072)→コーパス回遊(073)→VA(074)
+  →グラフ対話レビュー(075)→RE(076) であり、序数はどれにも一意に対応しない。
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（**077 以降**。044〜076 は使用済み — §3 参照）へ採番し直すこと。
+  着手時は次の空き番号（2026-09-03 時点で **077 以降**。044〜076 は使用済み — §3 参照。
+  採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
   （設計書表記 039 → 実装 038）/ G層（038 → 039）/ W層 W-β（046 → 048）/
@@ -37,7 +41,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 - **アーキテクチャ整理 Tier 3（migration 044/045）はレイヤーをまたいで既存テーブルを統合した**:
   `object_group_permissions`（044 = 010 + 035 の統合）と `user_notifications`（045 = 038 + V層
   `share_notifications` の統合）。統合してもレイヤー自体の主 migration 番号は変更されていない。
-  なお **054〜069 に統合系 migration は無い**（すべて機能追加）。
+  なお **054〜076 に統合系 migration は無い**（すべて機能追加。既存表への列追加・CHECK 拡張
+  だけの回（067 / 069 / 073 / 075）も含む）。
 - **索引とレイヤーの相互欠落は双方向に起きる**: かつては「実装済みなのに CLAUDE.md に無い層」
   （V層）が問題だったが、2026-08 の点検では「CLAUDE.md にあって本表・README に無い層」が
   11件見つかった。**新しい層を追加したら、①専用設計書 ②本表 ③CLAUDE.md ④docs/README.md
@@ -54,12 +59,12 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **B層** | 学習者体験レイヤー（関心痕跡・tension・構造帰属・casual/voice 等） | 機能ごとに分散: `docs/features/learning.md` / `structure-anchored-questions.md` | `backend/core/tension/`、`backend/core/structure_anchor/`、`backend/api/routes/learning.py` | 020, 022, 025 | 実装済み |
 | **C層** | 承認・共有レイヤー | `docs/features/endorsement-sharing.md` | `backend/api/routes/theory_components.py` | 021 | 実装済み |
 | **D層** | 疑義・認識的地位台帳（Doubt Layer） | `docs/features/doubt_layer_issues.md` | `backend/core/doubt/` + `backend/api/routes/doubt.py` | 029〜033 | 実装済み |
-| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は 073 以降へ採番し直し** + 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
+| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は次の空き番号へ採番し直し**（2026-09-03 時点は 077）+ 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
 | **G層** | ガイダンス層（次にやることバッジ + 状態導出型To-Do） | `docs/features/guidance_layer_design.md`（表記 038 → 実装 039） | `backend/core/admin_assistant/next_steps.py` + `admin-next-steps.js` | 039 | 実装済み |
 | **L層** | 画像読み取りパイプライン + 分野別ナレッジライブラリ | `docs/features/image_pipeline_knowledge_library_design.md`（§14〜16 追補含む）+ `contextual_figure_analysis_iterative_verification.md`（#499）+ `guided_figure_reanalysis_design.md` | `backend/core/document_pipeline/figure_images.py`、`src/episteme_graph/agents/apparatus_semantics/`、`backend/core/library/` + `routes/library.py`、`backend/core/figure_presentation.py` + `routes/figure_presentation.py` | 041, 042, 051, 052/053, **054（反証型反復照合 #499）** | 実装済み |
 | **M層** | 場面別 LLM モデル選択（LLM Model Selection） | `docs/features/llm_model_selection_design.md`（M1〜M10） | `backend/core/llm_policy.py` / `llm_policy_store.py` + `routes/llm_models.py` + `admin-llm-models.js` | 061 | 実装済み（Phase 0〜4。ユーザー別保存が正・tier名/金額は UI 非表示） |
 | **R層** | 再構成ループ（Reconstruction Loop） | `docs/features/reconstruction_loop_design.md` | `backend/core/reconstruction/` + `routes/reconstruction.py` + `reconstruction.js` | 036 | 実装済み |
-| **S層**（便宜ラベル） | 分野の地図（Field Atlas） | `field_atlas_*.md`（6ファイル）+ `atlas_binding_lifecycle_design.md`（計7ファイル。※「正本」とされる `field_atlas_overlay_spec.md` は未コミットで欠落 — [不具合報告](doc_review_findings_2026-08-13.md) §1-1） | `backend/core/atlas*.py` + `routes/atlas.py` / `atlas_view.py` + `atlas-*.js` | 023, 024, 026, 027, 028, 046, **057（ドメイン lifecycle）** | 実装済み |
+| **S層**（便宜ラベル） | 分野の地図（Field Atlas） | `field_atlas_overlay_spec.md`（オーバーレイ仕様の正本。原本消失のため **2026-08-14 の再構成版**が現行 — [不具合報告](doc_review_findings_2026-08-13.md) §1-1 は解消済み）+ `field_atlas_*.md`（骨格 / バインディング / 修正報告 / DB管理化 / 詳細パネル / 骨格エディタ）+ `atlas_binding_lifecycle_design.md` | `backend/core/atlas*.py` + `routes/atlas.py` / `atlas_view.py` + `atlas-*.js` | 023, 024, 026, 027, 028, 046, **057（ドメイン lifecycle）** | 実装済み |
 | **SL層** | 賭け金の台帳（Stakes Ledger）＝理解サイクル Phase 3 | `docs/features/stakes_ledger_design.md`（SL1〜SL10・§15 実装記録） | `backend/core/doubt/` 配下の SL 系モジュール + `routes/doubt.py` 拡張（D層の双対拡張・既存意味論は非改変） | 067 | 実装済み（SL-1〜SL-5） |
 | **U層** | LLM トークン使用量推計（Usage Metering） | `docs/features/llm_usage_metering_design.md` | `backend/core/llm_usage/` + `routes/llm_usage.py` | 043, **069（ユーザー別集計軸）** | 実装済み |
 | **（運営基盤）** | アカウントライフサイクル管理（一覧・停止・削除・リセット・最終ログイン・利用実績照会） | `docs/features/account_lifecycle_management_design.md`（AL1〜AL10） | `backend/core/account_status.py` / `auth_events.py` / `account_lifecycle.py` + `routes/admin.py` User Management 節 + `routes/auth.py` | 068, 069 | 実装済み（Phase 0〜3） |
@@ -76,6 +81,11 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 知識ランドスケープ | Knowledge Landscape（論文→地図の多観点配置） | `docs/features/knowledge_landscape_design.md`（LS1〜LS10） | `backend/core/landscape/` + `routes/landscape.py` + `landscape-layer.js` + `backend/atlas_domains/` | 065 | 実装済み（v1） |
 | カテゴリギャップ候補 | 分野マップを論文から育てる層 | `docs/features/category_gap_candidates_design.md`（§10 実装記録） | `backend/core/atlas_gaps/` + `routes/atlas_gaps.py` | 066 | 実装済み（v1-a〜v1-d） |
 | VA層 | ベクトル係留（アンカー埋め込み・別名レジストリ・配置プレフィルタ・着地予測） | `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録） | `backend/core/atlas_vectors/` + `routes/atlas_vectors.py` | 074 | 実装済み（v1） |
+| RE追補 | 分野マップの関係表示（辺候補レビュー + 学習者向け「推定の糸」） | `docs/features/atlas_relation_edges_design.md`（RE1〜RE8・§11 実装記録）・親: [表示原則の討議記録](field_map_display_principles_2026-08-29.md) | `backend/core/atlas_edges/` + `routes/atlas_edges.py` + `atlas-threads-layer.js` | 076 | 実装済み（v1） |
+| 論文ディスカバリー層 | arXiv 分野購読による論文発見と、教員の明示承認による取り込み（+ バッチ取り込みキュー・関連度ランキング・引用グラフ拡張口） | `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録） | `backend/core/paper_discovery/` + `routes/paper_discovery.py` + `backend/api/ingest_worker.py` + `admin-paper-discovery.js` | 071, 072 | 実装済み（Phase 1〜3） |
+| 論文レーダー | 教材（seed）起点の類似論文探索・距離3択・AI 比較分析・arXiv 出所の後付け登録 | `docs/features/paper_radar_design.md`（PR1〜PR8・§10〜§12 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（radar.py / compare.py ほか）+ `routes/paper_discovery.py` + `admin-paper-radar.js` | 不要（既存表の読み + `documents.source_url` の記帳のみ） | 実装済み（v1 + 重なり・差分提示） |
+| コーパス回遊層 | 論文の海（コーパス地図）・コース無しの論文議論・地図の端・関心信号 | `docs/features/corpus_roaming_design.md`（CR1〜CR10・§12 実装記録） | `backend/core/corpus_view.py` + `core/discuss/context.py` + `routes/corpus.py` + `corpus-sea.js` | 073 | 実装済み（Phase A〜D） |
+| 構造の降下路 | 足場ダイヤル・楽屋（理解の粒度を降りる導線） | `docs/features/structure_descent_design.md` | `backend/core/descent/` + `routes/descent.py` | 不要 | 実装済み（v1。パーソナライズ実装計画 Phase 3） |
 | グラフ対話レビュー | 教材行から開くグラフ起点のレビュー画面（承認/却下・claim承認・ノード対話・グラフ全体対話） | `docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録） | `backend/core/deliberation/graph_dialogue.py` + `routes/deliberation.py`（graph-sessions）+ `routes/theory_components.py`（approve / claim review）+ `admin-graph-review.js` | 075 | 実装済み（v1） |
 | グラフの論文層 | Paper Layer（理論操作グラフのフレームに論文の章・式・図表・claim・narrative を肉付けする読み時射影。フレーム→論文 / 論文→フレーム / 被覆） | `docs/features/graph_paper_layer_design.md`（PL1〜PL8・§10 実装記録） | `backend/core/graph_paper_layer/` + `routes/theory_components.py`（paper-layer）+ `admin-graph-review.js` | 不要（読み時導出・保存なし） | 実装済み（Phase 0） |
 | 教材図スタジオ | Teaching Figure Studio（AI対話 SVG 生成） | `docs/features/teaching_figure_studio_design.md`（FG1〜FG9・§13 実装記録） | `backend/core/teaching_figures/` + `routes/teaching_figures.py` + `admin-figure-studio.js` | 063 | 実装済み（v1） |
@@ -93,10 +103,14 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   実装を追う際に1ファイルだけ読んで判断しないこと。
 - **migration を伴わない実装済みレイヤーも本表に載せる**（理解サイクル / リリース前確認 /
   個人知識ネットワーク等。「migration が無い＝機能が無い」ではない）。
-- 監査語彙（`AUDIT_ENTITY_TYPES`）の正本は `backend/core/schema.py`（2026-08-13 時点 35語彙）。
+- 監査語彙（`AUDIT_ENTITY_TYPES`）の正本は `backend/core/schema.py`（2026-09-03 時点 40語彙）。
   ドキュメントに全列挙を書き写さないこと（陳腐化するため）。
+- UI アンカー表の正本は `backend/core/help_kb/admin_ui_anchors.py`（管理画面）/
+  `ui_anchors.py`（学習画面）。件数は 2026-09-03 時点で管理 321・学習 26
+  （管理側の網羅・双方向整合は `backend/tests/test_admin_help_ui_anchors.py` と
+  `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜067、2026-08-13 時点）
+## 3. migration 帰属一覧（init〜076、2026-09-03 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 

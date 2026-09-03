@@ -5,6 +5,19 @@
 > 理解ネットワーク」「旅」「全体の完成形は無い」）の延長線上にある機能拡張候補を、
 > 多分野専門家ペルソナの討論形式で発散・相互批評・統合した記録である。
 > 個別提案を実装に進める際は、本書を出発点として通常どおり専用の設計文書を切ること。
+>
+> **追記（2026-09-03）:** 本書の状態は「記録」のままだが、§3 の統合提案のうち次のものは
+> その後**専用設計書が切られて実装済み**である（実装状態の正本は各設計書の状態ヘッダ）。
+> 本書の §5「実装優先度の見立て」は起草時点の見通しであり、現況ではない。
+>
+> | 本書の提案 | 実装先の設計書 |
+> |---|---|
+> | 提案1 予測ファースト読解 | [understanding_cycle_design.md](understanding_cycle_design.md)（UCサイクル。migration 不要） |
+> | 提案2 一晩の航海（セッション境界） | [return_door_design.md](return_door_design.md)（帰還の扉）／[understanding_cycle_design.md](understanding_cycle_design.md) の LEAVE / REVISIT |
+> | 提案3 賭け金の台帳 | [stakes_ledger_design.md](stakes_ledger_design.md)（SL層。migration 067） |
+> | 提案4 時間レンズ | 未実装（専用設計書なし） |
+> | 提案5 橋の生態系 | 部分的（W層の同一性リンクは既存。自己持続ループとしての実装はなし） |
+> | 提案6 静かな開通・欲望の小径 | 未実装（「好奇心の文法」としての近縁実装は [personal_map_curiosity_design.md](personal_map_curiosity_design.md)） |
 
 ---
 

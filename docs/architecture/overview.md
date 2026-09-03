@@ -47,8 +47,12 @@ episteme-graph/
 │   │   ├── index.html            # 学習UI（3パネル）
 │   │   ├── admin.html            # 管理UI
 │   │   ├── css/styles.css        # デザインシステム
-│   │   └── js/{app.js, admin.js} # 学習SPA / 管理SPA
-│   └── nginx.conf                # リバースプロキシ
+│   │   └── js/                   # app.js（学習SPA）/ admin.js（管理SPA）+ 機能別モジュール
+│   │                             #   （atlas-*, personal-map-*, discuss, deliberation,
+│   │                             #    admin-lecture-studio, admin-graph-review,
+│   │                             #    admin-paper-discovery/radar, corpus-sea …）
+│   │                             #   2026-09-03 時点 38 ファイル（正は `ls frontend/public/js/`）
+│   └── nginx.conf                # リバースプロキシ（/api/* の 10 location）
 │
 ├── backend/
 │   ├── api/                      # FastAPI（→ backend/api.md）
@@ -56,8 +60,11 @@ episteme-graph/
 │   │   ├── dependencies.py       # 認証・RBAC 依存関係
 │   │   ├── schemas.py            # API 固有 Pydantic モデル
 │   │   ├── services.py           # 共通ビジネスロジック
-│   │   └── routes/               # auth / learning / admin / lecture / groups / deliberation ほか
-│   │                             #   計31モジュール + lecture_studio/ パッケージ（実測）
+│   │   ├── routes/               # auth / learning / admin / lecture / groups / deliberation /
+│   │   │                         #   descent / corpus / paper_discovery / atlas_vectors /
+│   │   │                         #   atlas_edges / seminar_brief / my_records ほか
+│   │   │                         #   2026-09-03 時点 38 モジュール + lecture_studio/ パッケージ
+│   │   └── ingest_worker.py      # 論文ディスカバリー取り込みキューの worker（lifespan 起動）
 │   ├── core/                     # コアエンジン（→ backend/core-engine.md）
 │   │   ├── schema.py             # 全 Pydantic モデル（OntologyType, CorePredicate など）
 │   │   ├── extractor.py / embedder.py / chat.py / lecture.py / tts.py
@@ -69,16 +76,22 @@ episteme-graph/
 │   │   ├── document_pipeline/    # Agent パイプライン オーケストレータ（revision/ を含む）
 │   │   ├── graphs/               # 学生向けグラフ組み立て（student_graph）
 │   │   ├── tension/ structure_anchor/ doubt/ reconstruction/ deliberation/ …（各層の実装）
-│   │   └── ほか計49モジュール + 20パッケージ（実測。層別の索引は layer_registry.md）
+│   │   ├── atlas_vectors/ atlas_edges/ atlas_gaps/ landscape/ paper_discovery/
+│   │   ├── corpus_view.py descent/ cycle/ discuss/ graph_paper_layer/ personal_graph/
+│   │   ├── account_lifecycle.py account_status.py auth_events.py url_fetch.py
+│   │   └── ほか 2026-09-03 時点 61 モジュール + 25 パッケージ（層別の索引は layer_registry.md）
 │   ├── cartridges/               # ドメインカートリッジ（particle_physics）
 │   ├── atlas_domains/            # 骨格専用バンドルドメイン（astrophysics の skeleton.yaml）
-│   ├── db/                       # SQL マイグレーション（init.sql, 002〜067）
+│   ├── config/                   # M層モデルカタログ（llm_models.json）
+│   ├── db/                       # SQL マイグレーション（init.sql, 002〜076（2026-09-03 時点））
 │   └── tests/                    # pytest（FastAPI / core）
 │
 ├── src/episteme_graph/agents/    # PDF解析 Agent 群（→ pipeline/agents.md）
 ├── src/tests/agents/             # Agent 用 pytest
 ├── docker-compose.yml            # 本番 / CI 用
-├── docker-compose.local.yml      # 開発用（postgres, ngrok 等を追加）
+├── docker-compose.local.yml      # 開発用（postgres 等を追加）
+├── docker-compose.prod.yml       # 本番補助（ngrok 等）
+├── docs/                         # 本ドキュメント群（イメージには admin_operations/ と manual/ のみ COPY）
 └── .env.example
 ```
 
@@ -123,7 +136,7 @@ episteme-graph/
 
 | サブシステム | 概要 | 詳細 |
 |---|---|---|
-| PDF 解析パイプライン | アップロードされた PDF を 29 ステージ（`_PIPELINE_STEPS` の named stage・実測）の Agent 群で構造化 | [pipeline/overview.md](../pipeline/overview.md) |
+| PDF 解析パイプライン | アップロードされた PDF を 29 ステージ（`_PIPELINE_STEPS` の named stage。`PIPELINE_STAGES` は終端マーカー `completed` を含め 30 エントリ）の Agent 群で構造化 | [pipeline/overview.md](../pipeline/overview.md) |
 | RAG チャット | pgvector 検索（tier 付き）でコンテキストを組み、LLM が回答 | [backend/rag-chat.md](../backend/rag-chat.md) |
 | 動的スキーマ進化 | 未回答クエリから新しい OntologyType/CorePredicate を提案・検証・反映 | [pipeline/schema-evolution.md](../pipeline/schema-evolution.md) |
 | 理論操作グラフ | 導出チェーンから理論の操作構造を 2 層グラフで表現 | [pipeline/theory-graph.md](../pipeline/theory-graph.md) |
@@ -148,6 +161,14 @@ episteme-graph/
 | Admin Copilot（横断ユーティリティ層） | 管理画面横断の AI アシスタント。capability registry で権限 fail-closed | [features/admin_assistant_design.md](../features/admin_assistant_design.md) |
 | 状態管理・通知基盤 | 状態の読み取りモデル + 遷移検知 watcher + 統合通知インボックス | [features/status_notification_design.md](../features/status_notification_design.md) |
 | 利用者マニュアル KB（help_kb） | docs/manual を AI アシスタントの知識源にする非ベクトル KB（+ ベクトル補助層） | [features/manual_help_kb_design.md](../features/manual_help_kb_design.md) |
+| 分野マップのベクトル係留（VA層） | 骨格ノードのプロトタイプ埋め込み・別名レジストリ・配置プレフィルタ・着地予測 | [features/atlas_vector_anchoring_design.md](../features/atlas_vector_anchoring_design.md) |
+| 分野マップの関係表示（RE追補） | 辺候補の教員レビューと学習者向け「推定の糸」（点線・既定オフ） | [features/atlas_relation_edges_design.md](../features/atlas_relation_edges_design.md) |
+| グラフ対話レビュー / 論文層 | 教材行から開くグラフ起点の承認画面と、フレームに論文を肉付けする読み時射影 | [features/graph_dialogue_review_design.md](../features/graph_dialogue_review_design.md) ／[features/graph_paper_layer_design.md](../features/graph_paper_layer_design.md) |
+| 論文ディスカバリー / レーダー | arXiv 分野購読と教材起点の類似論文探索。発見は自動・取り込みは教員の明示承認のみ | [features/paper_discovery_design.md](../features/paper_discovery_design.md) ／[features/paper_radar_design.md](../features/paper_radar_design.md) |
+| コーパス回遊層 | コースの外から論文の海（コーパス地図）を歩き、コース無しで論文と議論する | [features/corpus_roaming_design.md](../features/corpus_roaming_design.md) |
+| URL指定による教材取得 | 許可リスト + SSRF ガード付きダウンローダで既存アップロード経路へ合流 | [features/url_material_upload_design.md](../features/url_material_upload_design.md) |
+| アカウントライフサイクル管理 | 一覧・停止/再開・パスワードリセット・削除（移管→墓標化→purge）・認証イベント台帳 | [features/account_lifecycle_management_design.md](../features/account_lifecycle_management_design.md) |
+| 主権台帳（わたしの記録） | `interest_traces` kind 登録簿と、本人だけが読める痕跡の一覧・持ち出し | [features/trace_registry_sovereignty_ledger_design.md](../features/trace_registry_sovereignty_ledger_design.md) |
 
 ---
 

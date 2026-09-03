@@ -1,18 +1,22 @@
 # E層（Exposition Layer / 段階的翻訳レイヤー）設計
 
-> **状態: 未実装（2026-07-12 時点、実装コードなし）**。本書は設計のみで、
-> `backend/core/exposition/` / `backend/api/routes/exposition.py` / migration 034
-> （`exposition_views` 等）はいずれもリポジトリに存在しない。「第五の層」を名乗る
+> **状態: 設計中（未実装）**。本書は設計のみで、
+> `backend/core/exposition/` / `backend/api/routes/exposition.py` /
+> `exposition_views` 等のテーブルはいずれもリポジトリに存在しない。「第五の層」を名乗る
 > R層（migration 036）・V層（migration 037）は実装済みだが、E層は issue化・着手ともに
 > 未了。実装に着手する際は本書 §10 の issue 分割を正本として使うこと。
+> （2026-07-12 起草時の判定を **2026-09-03 に再確認**。`backend/core/` / `backend/api/routes/` /
+> `backend/db/` のいずれにも exposition 相当の実装は無い。）
 
 > **着手前提の更新（2026-07-17、vision×UX ギャップ調査 N41）**: 本書起草後にリポジトリの
 > 前提が4点変わった。§10 の issue 分割は有効なまま、着手時に以下を織り込むこと。
 >
-> 1. **migration は 068 以降で採番する**（2026-08-14 時点の空き番号。本書の「migration 034」は
->    Admin Copilot（`034_assistant_actions.sql`）と衝突済みで、044〜067 も他機能
->    （object_group_permissions 〜 賭け金の台帳）で使用済み）。一次情報は `backend/db/0NN_*.sql`
->    の実ファイル名（`docs/architecture/layer_registry.md` §3 参照）。
+> 1. **migration は着手時に「次の空き番号」で採番する**（本書本文の「migration 034」は
+>    Admin Copilot（`034_assistant_actions.sql`）と衝突済み。以降の番号も他機能で消費され続けて
+>    いるため、**想定番号を書かない**（`docs/development_checklist.md` §5-4）。一次情報は
+>    `ls backend/db/` の実ファイル名（`docs/architecture/layer_registry.md` §3 参照）。
+>    ※ 2026-08-14 時点の注記にあった「068 以降」は、その 068〜076 が
+>    アカウントライフサイクル〜辺候補で消費済みのため無効。）
 > 2. **生成 worker は独立モジュールの新設ではなく `backend/core/llm_worker/` への
 >    アダプタ接続で実装する**（現行の家風。tension / structure_anchor / reconstruction /
 >    doubt×2 / deliberation.standardization に続く7系統目として、`BaseJSONLLMClient` +

@@ -33,12 +33,12 @@
 | 群 | やること | 主なキーワード |
 |---|---|---|
 | 1. 知の構造化 | PDF を概念・主張・数式・導出・理論操作グラフに自動構造化 | A層パイプライン / L層（図・装置）/ カートリッジ |
-| 2. 学びの対話と講義 | 構造の上での RAG チャット・論文との議論・音声講義 | discuss / casual音声 / レクチャー |
-| 3. 理解の産出と痕跡 | 予測・再構成・違和感・問いを本人の痕跡として育てる | R層 / 理解サイクル / tension / わたしの地図 |
-| 4. 地図と位置づけ | 分野の中の「いまここ」と論文の位置づけ | Field Atlas / ランドスケープ / カテゴリギャップ |
-| 5. 疑いと検証 | 合意と検証を分離した認識的地位の台帳 | D層 / SL層（賭け金の台帳） |
-| 6. 教員の検討と共同体 | 説明の並存・承認・要素検討・共通部品化 | C層 / W層 / ライブラリ / 図スタジオ |
-| 7. 運営基盤 | 権限・版管理・通知・ガイダンス・AI運用 | V層 / G層 / Copilot / U層 / M層 / help_kb |
+| 2. 学びの対話と講義 | 構造の上での RAG チャット・論文との議論・音声講義 | discuss / casual音声 / レクチャー / コーパス回遊（論文の海） |
+| 3. 理解の産出と痕跡 | 予測・再構成・違和感・問いを本人の痕跡として育てる | R層 / 理解サイクル / tension / わたしの地図 / わたしの記録 / 帰還の扉 / 構造の降下路 |
+| 4. 地図と位置づけ | 分野の中の「いまここ」と論文の位置づけ | Field Atlas / ランドスケープ / カテゴリギャップ / VA層（ベクトル係留）/ RE層（辺候補・推定の糸） |
+| 5. 疑いと検証 | 合意と検証を分離した認識的地位の台帳 | D層 / SL層（賭け金の台帳）/ ゼミ前ブリーフ |
+| 6. 教員の検討と共同体 | 説明の並存・承認・要素検討・共通部品化 | C層 / W層 / ライブラリ / 図スタジオ / グラフ対話レビュー（+論文層） |
+| 7. 運営基盤 | 権限・アカウント・版管理・通知・ガイダンス・AI運用・コーパスの成長 | V層 / G層 / Copilot / U層 / M層 / help_kb / アカウントライフサイクル / URL取得 / 論文ディスカバリー・レーダー |
 
 ---
 
@@ -82,7 +82,8 @@
 - **LLM / TTS** — OpenAI または Gemini（`LLM_PROVIDER` で切替）、TTS は OpenAI / Google。モデルの場面別選択は M層（`core/llm_policy.py`）が単一正本
 
 > 旧 Neo4j は書き込み経路がなく実質未使用だったため 2026-07 に撤去済み。
-> マイグレーションは `backend/db/*.sql`（init + 002〜067、毎起動・番号順・冪等再実行）が唯一の正本。
+> マイグレーションは `backend/db/*.sql`（init + 002〜076（2026-09-03 時点）、毎起動・番号順・
+> 冪等再実行）が唯一の正本。番号の一次情報は常に `ls backend/db/` の実ファイル名。
 
 詳細は [アーキテクチャ概要](architecture/overview.md) と [デプロイ構成](architecture/deployment.md) を参照。
 
@@ -92,9 +93,10 @@
 
 ### 教材投入（教員）
 ```
-PDF アップロード
+PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー・論文レーダーからの取り込み）
   → MinIO 保存 → GROBID / PyMuPDF でテキスト化
-  → PDF解析 Agent パイプライン（named 29 ステージ）で
+  → PDF解析 Agent パイプライン（named 29 ステージ。`PIPELINE_STAGES` は終端マーカー
+     `completed` を含め 30 エントリ）で
      構造・主張・数式・導出・理論操作グラフ・文脈説明・discuss開幕素材・
      ランドスケープ配置を段階的に生成
   → チャンク+埋め込みを PostgreSQL(pgvector) へ
@@ -109,6 +111,8 @@ PDF アップロード
   → トピック選択 → RAG チャット / discuss（論文と議論）/ レクチャー受講
   → 予測・再構成・違和感・問いが本人確定の痕跡として蓄積
   → 「わたしの地図」・分野の地図で自分の位置と旅を確認
+  → コースの外は「論文の海」（コーパス回遊）から可視の論文へ直接議論
+  → 痕跡の一覧は「わたしの記録」（主権台帳）で本人だけが読める
 ```
 → [学習機能](features/learning.md) / [RAG チャット](backend/rag-chat.md)
 
@@ -178,7 +182,8 @@ PDF アップロード
 
 ### 群4: 地図と位置づけ
 
-- 分野の地図（Field Atlas）: [骨格](features/field_atlas_skeleton.md) /
+- 分野の地図（Field Atlas）: [オーバーレイ仕様（正本・2026-08-14 再構成版）](features/field_atlas_overlay_spec.md) /
+  [骨格](features/field_atlas_skeleton.md) /
   [バインディング](features/field_atlas_binding.md) /
   [修正報告](features/field_atlas_correction_reports.md) /
   [DB 管理化](features/field_atlas_db_managed_skeleton.md) /
@@ -254,7 +259,7 @@ PDF アップロード
 ### フロントエンド
 
 - [フロントエンド構成](frontend/overview.md) — SPA 構成、画面フロー、API 連携
-  （注: JSモジュール一覧は 2026-07 時点の記載。現状は31ファイル — 更新候補）
+  （`frontend/public/js/` は 2026-09-03 時点で 38 ファイル。正確な構成は `ls frontend/public/js/` を正とする）
 
 ---
 
@@ -271,8 +276,8 @@ docker compose up -d
 # ログ確認
 docker compose logs -f api-server
 
-# テスト
-cd backend && pytest backend/tests/
+# テスト（backend/ からの相対パスは tests/。リポジトリルートからなら backend/tests/）
+cd backend && pytest tests/
 ```
 
 アクセス先・開発手順の詳細は [デプロイ構成](architecture/deployment.md) を参照してください。

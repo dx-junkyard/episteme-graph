@@ -2,9 +2,10 @@
 
 [← ドキュメント目次](../README.md) ｜ [← パイプライン概要](overview.md)
 
-> **更新注記（2026-08-14）:** **ContextualExplanationAgent** / **DiscussOpeningAgent** /
-> **LandscapePlacementAgent** の3 agent を §2 に追補し、実在しない `graph_narrative/` の記述を
-> 削除、§3 の共有モジュール表に `figure_modes.py` を追加した。
+> **更新注記（2026-09-03）:** §1 のディレクトリ構成を「LLM agent と決定論 builder では
+> 実ファイル構成が違う」実態に合わせて訂正。ApparatusSemanticsAgent に反復照合モード（#499）、
+> FigureTableSemanticsAgent に mention クロスリンク、ClaimObjectBuilder に式由来 claim 合成を追記。
+> §3 の共有モジュール表に `ref_resolution.py` / `cartridge_loader.py` / `cartridge_context.py` を追加。
 
 各 Agent の役割・入出力・LLM/決定論の区別をまとめます。実装は `src/episteme_graph/agents/<agent_name>/`。
 
@@ -12,13 +13,20 @@
 
 ## 1. Agent ディレクトリの共通構造
 
-各 Agent ディレクトリは最低限、次のファイルを持ちます（実装ルール: `backend/` ではなく `src/episteme_graph/agents/` に置く）。
+実装ルール: Agent は `backend/` ではなく `src/episteme_graph/agents/<agent_name>/` に置きます。
+公開インターフェースは `agent.py` の `run()`（決定論 builder は `builder.py` の同等関数）で、
+LLM SDK を `agent.py` から直接呼ばず `llm_client.py` に分離します。
+
+**LLM-first の Agent**（`paper_skeleton` / `rhetorical_role` / `claim_qualification` /
+`equation_semantics` / `apparatus_semantics` / `thesis_reconstruction` / `dsl_linking` /
+`component_assembly` / `component_graph` / `narrative_annotator` / `contextual_explanation` /
+`discuss_opening` / `landscape_placement`）は次のフルセットを持ちます。
 
 ```
 <agent_name>/
   __init__.py
   agent.py            # Agent 本体クラス。run() が公開インターフェース
-  cartridge_loader.py # CartridgeLoader（共通インターフェース）
+  cartridge_loader.py # CartridgeLoader（正本 agents/cartridge_loader.py の薄い再エクスポート）
   input_builder.py    # LLM 入力の構築
   prompt.py           # プロンプト定義
   llm_client.py       # LLM API 呼び出し（structured output）
@@ -27,6 +35,12 @@
   repair.py           # validation 失敗時の再試行
   examples/           # サンプル入出力 JSON
 ```
+
+**決定論的な builder**（`evidence_registry` / `claim_object_builder` / `symbol_registry` /
+`derivation_chain` / `figure_table_semantics` / `course_mapping` / `blueprint`）は LLM を呼ばないため
+`prompt.py` / `llm_client.py` / `repair.py` を持たず、`builder.py`（または `agent.py`）+ `schema.py`
+を中心とした縮小構成です。各 Agent が実際に持つファイルは
+`ls src/episteme_graph/agents/<agent_name>/` が正。
 
 共通ルール:
 1. **cartridge-aware** — active cartridge があれば語彙・検証に使う。無くても単独動作する（すべて Optional）。
@@ -42,9 +56,15 @@
 ## 2. 各 Agent
 
 ### DocumentStructureAgent（#216）— structure-first
-`document_structure/agent.py`。PDF（または TEI-XML）から **ブロック・セクション・メタデータ**を復元。パーサ/レイアウト優先で意味解釈はしない。曖昧なブロックのみ LLM 補助。
-- 入力: PDF bytes / TEI-XML
+`document_structure/agent.py`。PDF（または TEI-XML）から **ブロック・セクション・メタデータ**を復元。パーサ/レイアウト優先で意味解釈はしない。
+- 入力: PDF bytes / TEI-XML（`source_kind="tex_archive"` の教材は agent を通さず
+  `backend/core/document_pipeline/tex_archive.py::build_structure_from_tex_archive` が同じ
+  `DocumentStructureResult` を組み立てる）
 - 出力: `DocumentStructureResult`（blocks, sections, metadata）
+- 設計上は「曖昧なブロックのみ LLM 補助」だが**その補助は未実装**で、実態は完全に決定論的
+  （`_PIPELINE_STEPS` の宣言も `llm_kind="none"`。orchestrator の当該行のコメントが正）。
+  型付けはフォント比・太字・中央寄せ・数式記号密度などのルール判定（`classifier.py`）で、
+  判断できないものは `unknown` に落とす。
 
 ### EvidenceRegistryBuilder（#237）— 決定論
 `evidence_registry/builder.py`。PDF **原文由来の evidence** を一元管理。`evidence_id → evidence_text`（ソース位置つき）のインデックスを作り、重複排除。
@@ -68,9 +88,30 @@
 ### EquationSemanticsAgent（#220）— LLM-first
 `equation_semantics/agent.py`。数式ブロックの意味役割（equation_type、定義/使用シンボル、仮定、入出力式）を復元。`to_equations_export()` で `equations.json` 化。受理判定は `EquationAcceptanceGate`。
 - 出力: `EquationSemanticsResult`（EquationRecord のリスト）
+- `EquationRecord` は「PDF 原文由来（`source_extraction`）」と「文脈補完で復元した部分
+  （`reconstruction`）」を分離して保持する（混同禁止）
+- **条件付き vision**: PDF の数式テキスト層は inline / display を問わず信用しないため、
+  `source_is_trusted` でない候補だけ `image_extractor.py` が該当領域を切り出して画像を添付し、
+  「画像を LaTeX 復元の一次ソースとせよ」と指示する。画像が取れなければ捏造せず
+  `needs_reconstruction` のまま理由付きで残す。M層のモデル選択上は **text ステージ**扱い
+  （`_PIPELINE_STEPS` の `vision_optional=True`。`VISION_STAGE_NAMES` には入らない）
 
 ### ClaimObjectBuilder（#237, #317）— 決定論
 `claim_object_builder/builder.py`。ClaimQualification の atomic 候補 + EvidenceRegistry から **最終 claims.json** を組立。atomic rewrite はせず、変換・リンク・検証に責務を限定。`source_evidence_ids` を付与し atomicity を検証。**最終 claim_id の真実の源**（ID 正規化の基準）。
+
+同ディレクトリの `equation_claim_synthesis.py`（決定論・非 LLM）は、**散文としては書かれていないが
+数式構造が語っている主張**を atomic claim に起こす。orchestrator の
+`_hook_equation_claim_synthesis`（`derivation_chain` の直後）から呼ばれ、`synth_claim_*` の ID を持つ
+claim を作る。
+- claim 種別は domain-neutral（`definition_claim` / `dependency_claim` / `equation_system_claim` /
+  `derivation_claim` / `constraint_claim` / `result_claim`）。
+- `support_status` は原文散文の裏付けが無いので `source_backed` にはせず、
+  `equation_backed` / `derived_from_linked_artifacts` / `review_required` に留める。
+- 生成文に埋め込む記号は `_math()` が `$...$` で囲む（記号は生 LaTeX（`\mathbf{k}` 等）なので、
+  裸で文に混ぜると描画できないため。冪等 — 既に `$x$` / `\(x\)` の形なら二重にしない。
+  `concepts` 側は素の記号のまま＝区切りを付けるのは散文だけ）。
+- **これらの合成 claim は `theory_claims` に永続化されない**（artifact のみ。→
+  [パイプライン概要 §3](overview.md#3-データの依存関係抜粋)）。
 
 ### SymbolRegistryBuilder（#355）— 決定論
 `symbol_registry/builder.py`。数式記号の定義・表記ゆれ・スコープを一元管理。LaTeX 正規化（`\mathrm` 除去、`\beta`→`β`、数式の大文字小文字は保持）+ カートリッジ aliases で重複排除、再定義検出。
@@ -85,8 +126,18 @@
   → [DSL と理論操作グラフ](theory-graph.md)「step ⇄ claim 参照のバックフィル契約」。
 
 ### FigureTableSemanticsAgent（#237）— caption-first
-`figure_table_semantics/agent.py`。図表の意味を caption 優先で復元（LLM enricher は任意）。
-- 出力: `FigureTableSemanticsResult`
+`figure_table_semantics/agent.py`。図表の意味を caption 優先で復元。
+- 出力: `FigureTableSemanticsResult`（`FigureRecord` / `TableRecord`）
+- **LLM enricher は任意で、現状は未配線**（`_PIPELINE_STEPS` の宣言も `llm_kind="none"` = 決定論）
+- **mention クロスリンク**（`crosslink.py`、決定論・非 LLM）: caption block は claim スパンにならない
+  （rhetorical_role の対象は `body_paragraph` のみ）ので caption 経由のリンクは常に空振りする。
+  そこで本文中の `Fig. N` / `Figure N` / `図N` / `Table N` 等の参照メンションを文書順に走査し、
+  メンションを含む block の `block_id` で claim 索引を引いて `FigureRecord.linked_claim_ids` /
+  `TableRecord.linked_claim_ids` に足す。GROBID 由来テキストで頻出する番号内部のスペース揺れ
+  （`Fig. 3 .3`）も吸収する。
+- **claim ⇄ 図・表リンクの正本はこの `linked_claim_ids` の一箇所**で、claim 側の `figure_ids` は
+  artifact の冪等性のため意図的に populate しない
+  （→ [図⇄概念構造の接続 設計書](../features/figure_concept_linking_design.md)）
 
 ### ApparatusSemanticsAgent（L層）— vision LLM・オプトイン
 `apparatus_semantics/agent.py`。図画像（`document_figures` + MinIO `figure-images`）から
@@ -108,8 +159,23 @@
   `source_backed` を自動付与しない（確定は人間のみ）。role は本文からの verbatim quote で
   裏付け、根拠のない役割は書かせない。2 回修復失敗した図も `match_status='unknown'` /
   `confidence=0.0` の 1 レコードとして保持（P4）
+- **反復照合モードが既定**（#499、`iterative.py::IterativeFigureAnalyzer`。正本:
+  [反証型反復パイプライン](../features/contextual_figure_analysis_iterative_verification.md)）。
+  one-shot ではなく **文脈仮説 → 独立画像観察 → 照合 → ギャップ駆動再スキャン → 決定論的収束判定**
+  の状態機械で動く。①仮説はテキストのみ（画像を見せない）②観察は画像 + inner_labels のみ
+  （**caption・近傍本文を渡さない** = 確証バイアスの遮断）③照合は画像を渡さないテキスト統合で、
+  parts は観察根拠（`observation_refs` / `label_ref`）必須（validator の hard error。
+  「文章にあるから画像で発見した」を構造的に禁止）。非収束時も `review_questions` /
+  `unresolved_conflicts` を残して人間へ引き継ぐ。
+  切替は `APPARATUS_ANALYSIS_MODE`（既定 `iterative`、`one_shot` で旧方式）、
+  試行回数は `APPARATUS_VERIFY_MAX_ITERATIONS`（既定 3）/ 教員指示付き再解析（同期 API）は
+  `APPARATUS_REANALYZE_MAX_ITERATIONS`（既定 1）
 - 上限: `APPARATUS_MAX_IMAGES_PER_DOCUMENT`（既定 20）/ `APPARATUS_MAX_CALLS_PER_DAY`
-  （既定 30）。超過分は `skipped_by_limit` で保持しステージは正常完了
+  （既定 30。vision 呼び出し数の意味で、orchestrator が日次残数を反復エンジンの予算として渡す）。
+  超過分は `skipped_by_limit` で保持しステージは正常完了。
+  周辺本文の収集上限は `APPARATUS_CONTEXT_MAX_ITEMS`（既定 12）/ `APPARATUS_CONTEXT_MAX_CHARS`
+  （既定 6000）、ライブラリ retrieval 候補数は `APPARATUS_RETRIEVAL_TOP_K`（既定 5）、
+  例示画像の few-shot 添付 `APPARATUS_FEWSHOT_IMAGES` は既定 off
 - vision 呼び出しは `core/llm.py` の `generate_structured_with_images()`（v1 は OpenAI 経路のみ）。
   装置候補は ComponentAssembly 経由で `status='candidate'` の theory_components になるが、
   **TheoryOperationGraph には組み込まない**（式 backing が無いため）
@@ -131,7 +197,11 @@
 `component_graph/agent.py` + `normalizer.py`。DerivationChain から **理論操作グラフ（TheoryOperationGraph）** を構築。ノード生成は決定論的、エッジ推論に LLM。詳細は [DSL と理論操作グラフ](theory-graph.md)。
 - 入力: `components` / `dsl` / `derivations` / `claims`（`orchestrator._component_graph_claims` が
   EvidenceRegistry から `evidence_text` を解決して enrich 済み）/ `evidence_snippets`
-- 出力: `ComponentGraphResult`（2 層: main / equation_detail、ソースバッキング状態つき）
+- 出力: `ComponentGraphResult`（2 層 + debug 層: main / equation_detail / debug、ソースバッキング状態つき）
+- **M層のステージ別モデル選択の対象外**（`_PIPELINE_STEPS` で `llm_kind="text"` かつ
+  `model_policy=False`）。LLM は呼ぶが `GET /api/admin/llm-models/pipeline-stages` には現れず、
+  `stage_outputs._stage_models` にも記録されない。集合に足すと API 応答とラベル表が変わるため、
+  事実（LLM を呼ぶ）と意図的除外を宣言で分けたまま据え置かれている（オーナー判断の未決事項）
 
 ### NarrativeAnnotator（#360）— LLM-first（構造非変更）
 `narrative_annotator/agent.py`。main graph に reader 向けの narrative（`narrative_role`, `transition_text`, `graph_summary`）を**注釈として**付与。グラフ構造は一切変更しない（スナップショット比較で検証、違反は hard error）。出力はすべて `llm_proposed`。
@@ -222,6 +292,8 @@ equation）に **2 層の説明**を生成する（正本:
 | `claim_selection.py` | LLM ステージへ渡す claim の選択ポリシー。tier（paper_core→…）+ 関連度（headline 重なり）+ confidence で並べ、上限を超えた分は理由つきで除外 |
 | `content_normalization.py` | 横断再利用のための claim/equation ハッシュ。散文は casefold、数式トークンは大文字小文字保持。`CONTENT_HASH_VERSION` でルール変更を検知 |
 | `id_canonicalization.py` | 横断参照を canonical claim_id に揃える。`canonical_claim_id_for_span()` / `canonicalize_claim_refs()`。解決不能な参照は drop + warning |
+| `ref_resolution.py` | 参照文字列の正規化・解決の正本（#443）。`normalize_ref()` は先頭 1 つの `scope:` 接頭辞のみ吸収（区切りが 2 つ以上ある構造的 id は温存）、`RefResolver.is_dangling` は**純粋な集合所属判定**で「legacy っぽい見た目」で分岐しない。`CANONICAL_FIELD_MAP` / `detect_field_alias_conflicts()` が同一概念の別名フィールド衝突を検出。`export_validation_gate.py` と export API が利用 |
+| `cartridge_loader.py` / `cartridge_context.py` | `CartridgeLoader` / `CartridgeContext` の**正本**（2026-07 整理で 12 コピーを統合）。各 agent の `cartridge_loader.py` はここからの薄い再エクスポートで、必須フィールドが増える `component_assembly` / `component_graph` だけが固有の `CartridgeContext` を維持する → [カートリッジシステム](cartridges.md) |
 | `cartridge_paths.py` | カートリッジのパス解決（`EPISTEME_CARTRIDGES_DIR` → 自動探索） |
 | `llm_json_client.py` | プロバイダ対応の JSON LLM クライアント（`core.llm.generate_text` をラップ、タイムアウト/構造化出力/raw 追跡） |
 

@@ -70,7 +70,7 @@ PDF
 - `evidence_role`（6 種）: `source_quote` / `section_summary` / `equation_quote` / `figure_caption_quote` / `table_caption_quote` / `sentence_quote`。
 - 各 claim / equation はここを `source_evidence_ids` で参照する。
 
-> **実行順の注意**: エビデンス登録（stage 11 `evidence_registry`）は、実際には**採否判定と数式解析の後**に走る。`_build_evidence_registry(...)` は `structure` に加えて `qualified`（claim_qualification の採択スパン）と `equations`（equation_semantics の結果）を入力に取り、採択済みのブロック・式・キャプションに絞って逐語根拠を張る。[overview.md §2 のステージ表](overview.md#2-パイプライン-26-ステージ)の順序が正。
+> **実行順の注意**: エビデンス登録（stage 11 `evidence_registry`）は、実際には**採否判定と数式解析の後**に走る。`_build_evidence_registry(...)` は `structure` に加えて `qualified`（claim_qualification の採択スパン）と `equations`（equation_semantics の結果）を入力に取り、採択済みのブロック・式・キャプションに絞って逐語根拠を張る。[overview.md §2 のステージ表](overview.md#2-パイプライン-29-ステージ)の順序が正。
 
 ---
 
@@ -94,8 +94,15 @@ PDF
   - atomic 化できない箇所は `atomicity="non_atomic"` / `status="review_required"` で保持する（捨てない）。
 - `claim_object_builder/`（[ClaimObjectBuilder](agents.md#claimobjectbuilder237-317-決定論)、非 LLM）が候補を最終 `claims.json`（`ClaimObjectRecord`）に**変換・リンク・検証**する（atomic rewrite はしない）。複数命題は「compound 親 + atomic 子」の木構造にする。**最終 `claim_id` の真実の源**。
   - `ClaimObjectRecord` の主なフィールド: `claim_id` / `claim_type` / `text` / `source_evidence_ids`（③への根拠リンク）/ `support_status` / `review_status` / `is_atomic` / `parent_claim_id` / `subclaim_ids` / `concepts` / `equation_ids` / `figure_ids` …。
-  - `support_status`: `source_backed` / `partially_source_backed` / `derived` / `inferred` / `review_required` / `external` / `unknown`。
-  - `claim_type` は約 28 種のオントロジー（`definition` / `assumption` / `result` / `conclusion` / `causal_or_dependency_claim` …）。
+  - `support_status`: `source_backed` / `partially_source_backed` / `derived` / `inferred` / `review_required` / `external` / `unknown`（+ 式由来の合成 claim だけが使う `equation_backed` / `derived_from_linked_artifacts`）。
+  - `claim_type` は 30 種のオントロジー（`definition` / `assumption` / `result` / `conclusion` / `causal_or_dependency_claim` …。2026-09-03 時点。正本は `claim_object_builder/schema.py::CLAIM_TYPE_ONTOLOGY`）。
+
+さらに、**散文としては書かれていないが数式構造が語っている主張**は
+`claim_object_builder/equation_claim_synthesis.py`（決定論・非 LLM）が `synth_claim_*` として起こす。
+orchestrator の `_hook_equation_claim_synthesis`（`derivation_chain` の直後）から呼ばれ、
+散文の裏付けが無いので `support_status` は `source_backed` にせず `equation_backed` /
+`derived_from_linked_artifacts` / `review_required` に留める。生成文中の記号は生 LaTeX なので
+`$...$` で囲んでから埋め込む（`concepts` 側は素の記号のまま）。
 
 ### ⑥ 数式まわり ── 3 つの単位
 
@@ -137,6 +144,27 @@ PDF
 | 2 | 図・表 | `FigureRecord` / `TableRecord` | `figure_table_semantics/` | caption-first | caption block |
 | 2 | 中心命題 | `ThesisNode` | `thesis_reconstruction/` | LLM | claim / equation ids |
 | 2 | **theory component** | `ComponentRecord` | `component_assembly/` | LLM | 全 `linked_*_ids` |
+
+### 単位 ↔ 永続化先
+
+上表の単位のうち **DB のテーブルになるのは 3 つだけ**で、残りは
+`document_analysis_runs.stage_outputs` の artifact に留まります（正本:
+`backend/core/document_pipeline/persistence.py`）。
+
+| 単位 | 永続化先 | 補足 |
+|---|---|---|
+| チャンク | `chunks`（+ pgvector） | `persist_source_chunks` |
+| 図画像 | `document_figures` + MinIO `figure-images` | `figure_image_extraction` ステージ |
+| claim（**採択スパン単位**） | `theory_claims` | `persist_qualified_claims` が保存するのは `claim_qualification` の `qualified_spans`。`evidence_text` は空文字で、逐語根拠は EvidenceRegistry artifact に委譲する（#257） |
+| theory component | `theory_components` / `theory_component_links` | `persist_components` |
+| 理論操作グラフ | `theory_component_graphs` | `persist_component_graph`（narrative 注釈を含む） |
+| ブロック / セクション / エビデンス / atomic claim / 数式 / 記号 / 導出チェーン / 図表レコード / 中心命題 | **artifact のみ** | `stage_outputs._artifacts.<stage>` |
+
+> **注意（既知の非対称）**: ClaimObjectBuilder が組み立てた `claim_objects`（atomic 子 claim と
+> 式由来の合成 claim `synth_claim_*`）は `theory_claims` に**保存されません**。
+> 理論操作グラフの `linked_claim_ids` にはこれらの ID が入り得るため、DB の claim 行だけを
+> 引くと「未解決」になります。読み手（グラフレビュー画面）が artifact から読み時に解決する
+> 設計で、この非対称を解消するかはオーナー判断の未決事項です。
 
 ---
 

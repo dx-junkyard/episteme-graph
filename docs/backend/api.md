@@ -10,8 +10,9 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 > （materials / course / lecture_studio / atlas / doubt / library / llm_usage / interest_dashboard /
 > users / system）に委ねる。手順の詳細をここに書かない。
 >
-> **網羅性（2026-08-14 時点）**: `backend/api/routes/` の全ルーターデコレータ + `/healthz` を
-> 突合し、本ページの一覧と過不足なく一致することを確認済み（346 経路。`GET
+> **網羅性（2026-09-03 時点）**: 起動後の `app.routes`（`backend/api/routes/` の全ルーター +
+> `/healthz`。FastAPI 自動生成の `/docs` `/openapi.json` `/redoc` は除く）と本ページの一覧を
+> 突合し、過不足なく一致することを確認済み（メソッド×パスで 411 経路。`GET
 > /api/admin/documents/{id}/figures` は admin.py と figure_presentation.py の2定義が
 > 1経路に収束するため1行）。ルーターやエンドポイントを追加したら本ページの該当節にも行を足すこと。
 
@@ -26,6 +27,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | `backend/api/schemas.py` | API 固有の Pydantic リクエスト/レスポンスモデル |
 | `backend/api/services.py` | 共通ビジネスロジック（バックグラウンドタスク CRUD、権限判定 `resolve_document_access` など） |
 | `backend/api/routes/*.py` | 機能別ルーター（下記マウント一覧参照。`export_artifacts.py` はルーターではなく export のヘルパー） |
+| `backend/api/ingest_worker.py` | 論文ディスカバリーの取り込みキュー worker（daemon スレッド。lifespan 起動・**arxiv_client を import しない**＝発見しない。migration 072） |
 
 **lifespan（`main.py::_lifespan`）の起動時処理**: ①マイグレーション適用
 （`core/migrations.py::run_migrations`。PostgreSQL 起動待ちで最大10回リトライ）→
@@ -34,17 +36,19 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 ④ビルトインスキーマ型・述語の seed（`core.schema_registry.seed_builtin_schema`）→
 ⑤L層ナレッジライブラリの同梱シード取込（`core.library.seed`、migration 042）→
 ⑥M層 LLM モデルポリシーの env → DB シード取込と `DbPolicyBackend` への差し替え（migration 061）→
-⑦V層の削除猶予スイーパ起動（`core.versioning.worker`、migration 037）→
-⑧状態管理・通知基盤の遷移検知 watcher 起動（`core.status.watcher`、migration 038）→
-⑨help_kb のバリデーション3種（`validate_manual` / `check_ui_anchor_mappings` /
-`check_admin_ui_anchor_mappings`）→ ⑩help_kb 配信スナップショットの content-hash 監査記帳
-（`core.help_kb.audit`）→ ⑪help_kb ベクトル補助層の同期（バックグラウンドスレッド、migration 058）。
-③〜⑪はすべて fail-open（失敗しても起動を止めず warning ログのみ）。
+⑦V層の削除猶予スイーパ起動（`core.versioning.worker`、migration 037。アカウント削除予約の
+purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディスカバリーの取り込みキュー worker 起動
+（`backend/api/ingest_worker.py`、migration 072。`PAPER_DISCOVERY_WORKER_ENABLED` 既定 on）→
+⑨状態管理・通知基盤の遷移検知 watcher 起動（`core.status.watcher`、migration 038）→
+⑩help_kb のバリデーション3種（`validate_manual` / `check_ui_anchor_mappings` /
+`check_admin_ui_anchor_mappings`）→ ⑪help_kb 配信スナップショットの content-hash 監査記帳
+（`core.help_kb.audit`）→ ⑫help_kb ベクトル補助層の同期（バックグラウンドスレッド、migration 058）。
+③〜⑫はすべて fail-open（失敗しても起動を止めず warning ログのみ）。
 
 **ルーターのマウント（main.py、Tier 3-17c でフラット化）**: 全ルーターは `main.py` から直接
 `app.include_router(...)` で登録される（admin.py 経由の二段ネストは廃止済み）。
 
-- **自前 prefix で直接登録（25本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
+- **自前 prefix で直接登録（26本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
   （/api/learning）/ `figure_presentation`（/api/admin）/ `element_explanations`（/api/admin）/
   `admin`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`（/api/learning/lecture）/
   `groups`（prefix なし。/api/groups・/api/me をパスに直書き）/ `export`（prefix なし。
@@ -52,9 +56,11 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
   `atlas.report_router`（/api/atlas）/ `atlas_view`（/api/atlas）/ `doubt.learning_router`
   （/api/learning）/ `reconstruction.learning_router`（/api/learning）/
   `discuss_observation.learning_router`（/api/learning）/ `cycle.learning_router`（/api/learning）/
-  `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
-  （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
-  （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）
+  `descent.learning_router`（/api/learning）/ `library`（/api/admin/library）/ `llm_usage`
+  （/api/admin/llm-usage）/ `llm_models`（/api/admin/llm-models）/ `personal_map.router`
+  （/api/learning）/ `personal_map.me_router`（/api/me）/ `my_records.me_router`（/api/me）/
+  `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
+  `corpus.learning_router`（/api/learning）
 - **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（22本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
@@ -222,7 +228,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
-| GET | `/api/learning/lecture/courses/{cid}/topics/{tid}/sequence` | 受講者（コース可視性） | レクチャーシーケンス構築（トピック教材 `_lecture_uses_topic_material` 優先、無ければ PDF チャンク経路） |
+| GET | `/api/learning/lecture/courses/{cid}/topics/{tid}/sequence` | 受講者（コース可視性） | レクチャーシーケンス構築（トピック教材 `core/lecture.py::lecture_uses_topic_material` 優先、無ければ PDF チャンク経路） |
 | POST | `/api/learning/lecture/courses/{cid}/topics/{tid}/tts` | 受講者 | **キャッシュ済み** TTS 音声の配信のみ（未生成は 404。生成は管理側バッチ限定。`topic:{tid}` 形式はトピック音声キャッシュから） |
 | GET | `/api/learning/lecture/courses/{cid}/topics/{tid}/audio-status` | 受講者 | 再生可能な音声の有無を軽量判定（レクチャーボタン活性用。生成は行わない） |
 | POST | `/api/learning/lecture/courses/{cid}/topics/{tid}/interrupt` | 受講者 | レクチャー一時停止中の質問チャット（現在チャンクをコンテキストに回答） |
@@ -342,7 +348,7 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 
 ### 管理 `/api/admin`（`routes/admin.py`）
 
-教材・コース・スキーマ・ユーザー管理の中核ルーター（43 エンドポイント）。
+教材・コース・スキーマ・ユーザー管理の中核ルーター（2026-09-03 時点 54 エンドポイント）。
 手順の正本: [admin_operations/materials.md](../admin_operations/materials.md) /
 [admin_operations/course.md](../admin_operations/course.md) /
 [admin_operations/users.md](../admin_operations/users.md)（グループ管理） /
@@ -363,6 +369,24 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | PUT | `/api/admin/materials/{id}/visibility` | 教材所有者のみ | 開示範囲（public/group/private）を更新 |
 | DELETE | `/api/admin/materials/{id}` | 教材所有者 + `confirm_name` 一致必須 | 教材削除（参照コース・チャンク・W層孤児行も削除、V層 teardown 通知） |
 | GET | `/api/admin/tasks/{task_id}` | TEACHER | バックグラウンドタスクのステータス（ポーリング用） |
+
+#### URL 指定による教材取得（migration 070）
+
+教員が論文 URL（PDF / TeX `.tar.gz`）を指定するとサーバが取得し、**既存のアップロード
+パイプラインへそのまま流す**（`_accept_material_source` に合流。新しい教材種別・新しい
+ポーリングを作らない）。SSRF ガードと形式判定の正本は `core/url_fetch.py`
+（ドット境界のドメイン照合・`getaddrinfo` の全アドレス検査・リダイレクト各ホップ再検証・
+実バイトのマジックによる形式判定・100MB / 60秒上限）。**許可リストの初期状態は空 = 機能無効**で、
+照合はサーバ側で強制する（UI の無効化は補助）。エラーの `detail` に解決した IP 等の内部情報を
+載せない。監査 `entity_type='url_fetch_domain'`。詳細は
+`docs/features/url_material_upload_design.md`（UF1〜UF6）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/materials/upload-from-url` | TEACHER | URL から取得して教材として受理（202・レスポンスは `materials/upload` と同形）。取得はリクエスト内同期。許可ドメイン未設定 / 非許可ドメイン / 私設アドレス / 非対応形式は 422、サイズ超過は 413、取得失敗は 502 |
+| GET | `/api/admin/url-fetch-domains` | TEACHER | 取得先ドメインの許可リスト（教員も「どのドメインなら使えるか」を知る必要があるため参照は TEACHER 以上） |
+| POST | `/api/admin/url-fetch-domains` | SYSTEM_ADMIN | 許可ドメインの登録（201・冪等。形式不正は 422） |
+| DELETE | `/api/admin/url-fetch-domains/{domain}` | SYSTEM_ADMIN | 許可ドメインの解除（未登録は 404） |
 
 #### コースビルダー
 
@@ -411,6 +435,30 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | POST | `/api/admin/users/student` | TEACHER | 学生（learner）アカウント作成（重複 409） |
 | POST | `/api/admin/users/teacher` | SYSTEM_ADMIN | 教員（instructor）アカウント作成 |
 | GET | `/api/admin/system/materials-stats` | SYSTEM_ADMIN | 全コースのパイプライン進捗・受講者数・チャット数 |
+
+#### アカウントライフサイクル（migration 068 / 069）
+
+一覧・停止/再開・パスワードリセット・削除（移管 → 墓標化 → 選択的 purge）・利用実績照会の層。
+**`users` 行を物理 DELETE しない**（削除 = `status` 遷移 + 匿名化墓標 + 明示 purge。AL1）。
+失効はトークン世代（JWT の `gen` クレーム）で行い、停止・リセット API は
+`core/account_status.py::invalidate()` を必ず呼ぶ。停止の効果は**認証拒否のみ**で
+所有権・共有・受講は不変（AL2）。対象が教員・管理者なら SYSTEM_ADMIN を要求し
+（`_require_role_for_target`、TEACHER は 403）、自分自身と bootstrap `Administrator` への
+停止・削除予約は 422（AL10）。不在・不正 id はすべて同一 404（存在を教えない）。
+平文パスワード・ハッシュを監査 / ログ / `auth_events` に入れない（AL4）。
+監査 `entity_type='user_account'`。詳細は
+`docs/features/account_lifecycle_management_design.md`（AL1〜AL10）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/users` | TEACHER（`role` は learner に強制固定の fail-closed）/ SYSTEM_ADMIN は全ロール | アカウント一覧（`role` / `status` / `q` / `limit` / `offset`。語彙外の `role` / `status` は 422） |
+| POST | `/api/admin/users/{uid}/suspend` | TEACHER（対象が学生のとき）/ 教員・管理者への操作は SYSTEM_ADMIN | 停止（active → suspended。`reason` 必須＝空は 422、active 以外は 422） |
+| POST | `/api/admin/users/{uid}/restore` | 同上 | 停止の解除（suspended → active）。`pending_deletion` の解除はここではなく削除予約の取消 API |
+| POST | `/api/admin/users/{uid}/password-reset` | SYSTEM_ADMIN（**対象ロールを問わない**） | パスワード再設定 + トークン世代 ++ で発行済みトークンを即時失効。自分自身に実行した場合は `self_reset` を返す |
+| GET | `/api/admin/users/{uid}/activity` | SYSTEM_ADMIN | 個票（`auth_events` の時系列 + LLM 利用サマリ。`limit` / `before` でページング）。学習評価に使わない（AL7） |
+| POST | `/api/admin/users/{uid}/deletion` | SYSTEM_ADMIN | 削除予約（**停止済みが前提**。suspended → pending_deletion + `purge_after`。`grace_days` 既定14日・範囲外は 422）。期限後に V層スイーパが purge |
+| DELETE | `/api/admin/users/{uid}/deletion` | SYSTEM_ADMIN | 削除予約の取消（pending_deletion → suspended。予約中でなければ 422） |
+| POST | `/api/admin/users/{uid}/transfer-ownership` | SYSTEM_ADMIN | 所有物（教材 / コース / グループ）の後任への移管。移管先は教員・管理者かつ利用中で、対象本人は不可（いずれも 422）。受講状態・共有・V層の版はそのまま生きる |
 
 #### スキーマ進化（[動的スキーマ進化](../pipeline/schema-evolution.md)）
 
@@ -547,6 +595,7 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | GET | `/api/admin/documents/{id}/component-graph` | TEACHER + document 閲覧権 | 保存済み TheoryOperationGraph の正規化返却（無ければ決定論的に構築） |
 | GET | `/api/admin/documents/{id}/paper-layer` | TEACHER + document 閲覧権 | 理論操作グラフの論文層（フレーム→論文 / 論文→フレーム / 被覆）の読み時射影。LLM 0回・保存なし |
 | PATCH | `/api/admin/claims/{claim_id}` | TEACHER + document 編集権 | claim の全項目更新（review_status 遷移は監査、rejected は伝播、承認時は R層 item オーサリングを非同期起動） |
+| POST | `/api/admin/claims/{claim_id}/review` | TEACHER + document 編集権 | **遷移専用**（本文フィールドを一切変更しない）。グラフ対話レビュー画面の claim 承認の実体で、フル upsert の PATCH を画面から使うと同時編集を巻き戻すため分離した。`review_status` は許可4語彙のみ（語彙外 422）、非 UUID の claim_id は 404。副作用（監査 / 却下伝播 / 承認時の R層オーサリング起動）は PATCH と共通 |
 
 #### 理論コンポーネント CRUD（コース単位）
 
@@ -556,7 +605,8 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | POST | `/api/admin/chunks/{chunk_id}/theory-components/extract` | TEACHER + 当該教材を含む編集可能コース | SMILES DSL からの構造抽出（`use_llm` で LLM 補強）を candidate として upsert |
 | POST | `/api/admin/courses/{cid}/theory-components` | TEACHER + コース編集 | コンポーネント手動作成（重複候補を自動付与） |
 | PUT | `/api/admin/theory-components/{comp_id}` | TEACHER + コース編集 | 全項目更新（review_status 遷移は監査・rejected 伝播） |
-| POST | `/api/admin/theory-components/{comp_id}/reject` | TEACHER + コース編集 | rejected 遷移（行削除しない）+ グラフエッジ無効化 |
+| POST | `/api/admin/theory-components/{comp_id}/approve` | TEACHER + document 編集権（`_ensure_component_editable`。document 単位が主経路で course はフォールバック） | **遷移専用**の承認（`teacher_reviewed` / `teacher_approved`）。内容フィールドは変更しない。承認可能性（名前・source_chunks・inputs/outputs 非空 + 全項目に出典）をサーバ側で強制し、満たさなければ 422 の事実文 |
+| POST | `/api/admin/theory-components/{comp_id}/reject` | 同上 | rejected 遷移（行削除しない）+ グラフエッジ無効化 |
 | POST | `/api/admin/courses/{cid}/theory-components/validate-connection` | TEACHER + コース閲覧 | 2コンポーネント間の接続妥当性を非LLM検証（warnings を返す） |
 
 #### C層: 説明バージョン・承認・引用
@@ -696,7 +746,7 @@ freeze フック）が主経路で、本ルーターの refresh はそれ以前�
 
 ### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071 / 072）
 
-arXiv を供給源とする分野購読と候補一覧。全12本が TEACHER 以上（`_require_teacher`）。
+arXiv を供給源とする分野購読と候補一覧。2026-09-03 時点 17本すべてが TEACHER 以上（`_require_teacher`）。
 **候補を保存するテーブルは無い**（PD5 — 取り込み済み判定は `documents.source_url`、
 見送りは `paper_discovery_dismissals` から毎回読み時導出）。**DELETE ルートは無い**
 （見送りの取り消しは `revoked` 遷移）。取り込みは教員の明示操作だけが入口で、
@@ -719,8 +769,9 @@ U層 feature `discovery:ranking` に帰属し、`DISCOVERY_RANKING_MAX_CALLS_PER
 スロットルの client（`core/paper_discovery/citation_client.py`）から
 Semantic Scholar recommendations API を引く（LLM 0回）。
 詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5 / §5 / §6。教材起点の
-`/radar/*` 3ルート（論文レーダー — seed 解決・距離帯つき探索・AI 比較分析）の正本は
-`docs/features/paper_radar_design.md`（PR1〜PR8。migration なし・読み時導出のみ）。
+`/radar/*` 4ルート（論文レーダー — seed 解決・距離帯つき探索・AI 比較分析・出所の後付け登録）の
+正本は `docs/features/paper_radar_design.md`（PR1〜PR8。migration なし。書き込みは
+`/radar/provenance` が `documents.source_url` に記帳する1点のみで、他3本は読み時導出）。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
@@ -739,6 +790,7 @@ Semantic Scholar recommendations API を引く（LLM 0回）。
 | GET | `/api/admin/discovery/radar/seed` | TEACHER | 論文レーダー（`docs/features/paper_radar_design.md`、migration なし）の seed 解決。`?document_ref=`（documents.id / source_path 両対応・**document 可視性ゲート**・不可視と不在は同一 404）。`{"seed": {document_id, title, arxiv_id?, abs_url?, summary, categories, categories_source ∈ {arxiv, subscription, manual}, keyphrase_candidates, domain_key}}`。arXiv 由来教材はメタデータを `id_list` で1コール取得（fail-soft — 失敗は購読条件へ縮退） |
 | POST | `/api/admin/discovery/radar/search` | TEACHER | 教材起点の候補探索。body `{document_ref, distance ∈ {near, mid, far}（語彙外 422）, categories?, keyphrases?, start?, max_results?}`。seed 自身を除外し `status`（new / ingested のみ — dismissal は読まない）+ near のみ `matched_keyphrases` + 測定できた候補のみ `distance_label`（「近い / 中間 / 遠い」、正本は `label_vocab.RADAR_DISTANCE_SCALE`）を注釈。`banding: {available, primary_label?, note?}`（帯分け不能は新着順のまま + 事実文の fail-soft）。**購読の `last_checked_at` を更新しない・監査記帳なし**（読み取り専用）。条件ゼロは arXiv 非呼び出し（PD6）。cosine 生値は返さない（PR2） |
 | POST | `/api/admin/discovery/radar/compare` | TEACHER | 選択候補と seed の比較分析（1 LLM コール・feature `discovery:compare`）。body `{document_ref, arxiv_ids}`（空 / 10件超は 422）。候補の要旨は**サーバが `id_list` で取り直し**、各 difference の `evidence_quote` を要旨に対して verbatim 検査（不一致はその項目のみ drop）。`{"items": [{arxiv_id, title, common_ground, differences: [{aspect, statement, evidence_quote}], caveat}], skipped, notes}`（`caveat` はサーバ固定文「アブストラクト（要旨）の比較に基づく AI の推定です。…」）。日次上限（`DISCOVERY_COMPARE_MAX_CALLS_PER_DAY`・ユーザー別）超過は 429、LLM / arXiv 全滅は 502。**結果は保存しない・監査記帳なし** |
+| POST | `/api/admin/discovery/radar/provenance` | TEACHER + document 閲覧権（不在・不可視は同一 404）**かつ編集権**（view のみは 403） | 手動アップロード教材への arXiv 出所の後付け登録（レーダーの3段階の 2・3）。クライアントの `arxiv_id` を信用せず**サーバが seed を導出し直して**突き合わせる（推定なし・不一致は 422、arXiv に到達できず照合材料が無ければ `confirm=true` でも 422）。タイトルが正規化一致すれば `method="auto_title_match"`、不一致は `confirm=true` の教員確定（`teacher_confirmed`）が必要で、`confirm` なしは 409。既存の出所は上書きしない（409）。記帳先は既存 `documents.source_url` のみ。監査 `action='provenance_registered'` |
 
 ### コーパス回遊 `/api/learning/corpus`（`routes/corpus.py`、migration 073）
 
@@ -763,7 +815,8 @@ weight / confidence / 件数を返さない（CR3。配置には出所ラベル�
 
 ### D層 — 管理 `/api/admin/doubt`（`routes/doubt.py` admin_router）
 
-全34本が TEACHER（metrics のみ SYSTEM_ADMIN）。withdraw（疑義者本人）と反実仮想 PATCH（作成者本人）を除き、
+2026-09-03 時点 admin_router の34本が TEACHER（metrics のみ SYSTEM_ADMIN。learning_router の2本は
+上記 D3-6 節）。withdraw（疑義者本人）と反実仮想 PATCH（作成者本人）を除き、
 course_id / target_id への所有・共有チェックは行わない（ロールゲートのみ）。
 手順の正本: [admin_operations/doubt.md](../admin_operations/doubt.md)。
 賭け金の台帳（SL層, migration 067）で反証条件・観測反実仮想の7本が加わっている
@@ -837,9 +890,12 @@ SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利
 
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 
-全17本が TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`（404 fail-closed）、
-domain-scoped 共通部品（shared_part = L層 `library_entries`）は TEACHER + 由来 document 権限での
-route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_design.md`。
+2026-09-03 時点 21本すべてが TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`
+（404 fail-closed）、domain-scoped 共通部品（shared_part = L層 `library_entries`）は TEACHER +
+由来 document 権限での route 層フィルタ。詳細は
+`docs/features/element_deliberation_workspace_design.md`。グラフ全体対話と音声入出力
+（下記2節）は グラフ対話レビュー（migration 075）が本ルーターへ相乗りしたもので、正本は
+`docs/features/graph_dialogue_review_design.md`（GR1〜GR8）。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
@@ -860,6 +916,31 @@ route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_
 | POST | `/api/admin/deliberation/shared-parts/{spid}/standardization/assess` | TEACHER | 共通部品1件の標準化判定（三角測量）を非同期開始（`force` なしで既評価はスキップ） |
 | POST | `/api/admin/deliberation/domains/{dkey}/standardization/assess` | TEACHER | domain 内 active 共通部品すべての標準化判定を非同期開始 |
 | GET | `/api/admin/deliberation/documents/{id}/elements` | TEACHER + document 閲覧権 | 要素インベントリ: 教材1件分の全検出要素（component/claim/equation/figure）を統一カード形式で返す |
+
+#### グラフ全体対話（グラフ対話レビュー、migration 075）
+
+疑似要素型 `document_graph`（`deliberation_sessions.element_type` への追加のみ。
+`element_annotations` の CHECK と `ElementRef` は非改変）。grounding は最新
+`theory_component_graphs` からの**非LLM 決定論投影**（main バックボーン + 関係 + 式の詳細層の
+規模 + 未レビュー一覧 + validation + narrative）で、**候補注釈を生成しない**（要素単位の注釈は
+上のノード対話の責務）。**AI 応答から承認 API を呼ぶ経路は作らない**（GR1）。CostGate は W層の
+`DELIBERATION_MAX_CALLS_*` に相乗りし、U層 feature だけ `deliberation:graph_chat` に分離する（GR5）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/deliberation/documents/{id}/graph-sessions` | TEACHER + document 閲覧権 | グラフ全体対話セッションの get-or-create（本人 × document で最新を再開）。グラフ未構築（ノード0）は 422 の事実文。`?force_new=true` はセッション上限に達した対話をやり直す唯一の口（旧履歴は残る） |
+| POST | `/api/admin/deliberation/documents/{id}/graph-sessions/{sid}/messages` | 作成者本人 + document 閲覧権 | 1ターン（1 LLM コール・候補注釈なし）。履歴は 16件 / 4000字 / head_keep=1 でウィンドウ化。モデル検証・グラフ不在の 422 を**すべて通過した後**に CostGate を消費し、超過は 429 |
+
+#### 音声対話（グラフ対話レビューのハンズフリー入出力、migration なし）
+
+管理画面チャットの音声入出力。DB 非変更・読み取り専用で、day-only の CostGate
+（`DELIBERATION_VOICE_MAX_CALLS_PER_DAY`）は上の対話上限とは**独立**。U層 feature は
+`deliberation:voice_stt` / `deliberation:voice_tts`（学習側 `learning:voice_*` と混ぜない）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/deliberation/voice/transcribe` | TEACHER | multipart 音声の文字起こし（空 400 / 10MB 超 413 / 上限超過 429 / openai プロバイダ以外 503） |
+| POST | `/api/admin/deliberation/voice/speak` | TEACHER | 読み上げ用 MP3(base64)。`core.tts.strip_text_for_speech` で LaTeX・markdown 記号・出典マーカーを除去し、残らなければ 400 |
 
 ### Admin Copilot + G層 `/api/admin/assistant`（`routes/admin_assistant.py`）
 

@@ -80,7 +80,7 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 | `theory_claims` | ソース由来の atomic claim（support_status, evidence_text, review_status） |
 | `theory_component_links` | コンポーネント間の関係 |
 | `theory_component_graphs` | TheoryOperationGraph の JSON（ドキュメント単位） |
-| `theory_review_events` | 状態変更の監査ログ（`entity_type`: claim / component / endorsement / explanation / citation） |
+| `theory_review_events` | 状態変更の監査ログ。**`entity_type` の語彙カタログの正本は `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数（`AUDIT_ENTITY_TYPES`。層が増えるたびに増える — 2026-09-03 時点 40 語彙）**。層をまたいで全ての確定操作がここに記帳される（claim / component / endorsement / explanation / citation から始まり、atlas / landscape / library / user_account / paper_discovery ほか）。ドキュメントに全列挙を書き写さない |
 
 ### 承認・共有レイヤー（C層, マイグレーション 021）
 A層（生成パイプライン）を書き換えず、その上に「教員による査読承認」と「教員間の共有」を積む層。詳細は [承認・共有レイヤー](../features/endorsement-sharing.md)。
@@ -261,6 +261,131 @@ A層は非改変。正本は `docs/features/element_deliberation_workspace_desig
 | `element_identity_links`（048） | 同一性リンク（Phase W-β）。インスタンス側（figure/theory_component/theory_claim/equation、`scope='document'` のポリモーフィック行・FK なし）と共通部品側（`shared_part_id` → `library_entries` への実FK）を非破壊に対応付ける。`status`(candidate/confirmed/rejected)。一意制約は `instance_document_id` を含む4列（equation の `element_id` は論文間で衝突しうるため） |
 | `deliberation_sessions`（049） | 対話的検討（Phase 2）のセッション。`scope`(document/domain)、`element_type`/`element_id`、`messages(JSONB)`（追記のみ） |
 | `element_annotations`（049） | 候補注釈（Phase 2）。`kind`(meaning/decomposition/positioning_note/interpretation/identity/standardization)、`status`(candidate/committed/dismissed)。`committed_target` にコミット先の既存構造を記録 |
+
+> `deliberation_sessions.element_type` の CHECK は後続 migration で拡張されている:
+> 064 で `evidence` / `derivation`（W層 Phase 5）、075 で `document_graph`（グラフ対話レビューの
+> 疑似要素型。`element_annotations` 側の CHECK は**変更していない** — グラフ全体対話は候補注釈を
+> 生成しないため）。
+
+### 二層説明（generic / contextual, マイグレーション 055・056・062）
+要素ごとの説明を「一般的な説明（generic）」と「この論文の文脈での説明（contextual）」に
+分けて並存させる台帳。正本は `docs/features/hierarchical_context_explanation_design.md`。
+
+| テーブル / 変更 | 役割 |
+|---|---|
+| `theory_components.thesis_context` / `theory_claims.thesis_refs`（055, ALTER） | thesis 構造メタの DB 永続化（次回再解析で埋まる冪等列） |
+| `element_explanations`（056） | 全要素型ポリモーフィックな説明台帳。`kind`(generic/contextual)、`status`(candidate/approved/dismissed/superseded)。要素側テーブルに列を足さない |
+| `element_explanations`（062, ALTER） | element_type に `'document'`（element_id = document_id）と `role`（NULL または `'discussion_seed'`）を追加。discuss 開幕素材オーサリングが同じ台帳に相乗りする |
+
+### 利用者マニュアル KB（help_kb, マイグレーション 058・059）
+`docs/manual` を AI アシスタントの知識源にする層。**`chunks` への相乗りは禁止**（全域検索の
+教材回答へ混入するため）。正本は `docs/features/manual_help_kb_design.md`。
+
+| テーブル | 役割 |
+|---|---|
+| `manual_sections`（058） | ベクトル補助層（Phase 3①）。専用テーブルで `chunks` を汚染しない。全置換スナップショット同期（孤児行は同一トランザクションで DELETE — 設計明示の例外）。凍結検証違反時は埋め込まない |
+| `manual_kb_drafts` / `manual_kb_versions` / `manual_kb_state`（059） | DB draft/freeze ストア（Phase 3②）。draft は `revision` 楽観ロック（衝突 409）、版は append-only。**配信既定は files のまま**で、DB 配信は freeze 実行後のみ |
+
+### discuss 観測基盤（マイグレーション 060）
+discuss Phase 3 の着手判断のための内部計測。正本は `docs/features/discuss_observation_design.md`
+（DO1〜DO6: 本文非含有 / 仮名化 / 学習者に数値非表示 / 削除 API なし / 参考目安を自動ゲートにしない）。
+
+| テーブル | 役割 |
+|---|---|
+| `discuss_metric_events`（060） | 発話本文を含まない append-only のイベント台帳（FK なし）。理解サイクルの `cycle_*` 語彙も同じ表に載る |
+
+### 場面別 LLM モデル選択（M層, マイグレーション 061）
+モデル決定の正本は `backend/core/llm_policy.py`。DB 行は解決順序のうち user / system 段。
+
+| テーブル | 役割 |
+|---|---|
+| `llm_model_policies`（061） | 場面（scene）ごとのモデル指定。`scope`(system\|user)。起動時に `*_LLM_MODEL` env を `scope='system'` 行として冪等シード（既存 DB 行は上書きしない） |
+
+### 教材図スタジオ（マイグレーション 063）
+AI 対話で生成した説明図（SVG）を `![[figure:id]]` で教材に埋め込む層。正本は
+`docs/features/teaching_figure_studio_design.md`。
+
+| テーブル | 役割 |
+|---|---|
+| `course_teaching_figures`（063） | 生成図。`svg_source` が正本で MinIO の `teaching/{course_id}/{id}.svg` は配信スナップショット。`status`(draft/adopted/retired)・行削除 API なし・`revisions(JSONB)` に旧版を append |
+| `teaching_figure_suggestions`（063） | 「図があると良さそうな箇所」のギャップ候補。再生成は candidate のみ superseded |
+
+### 知識ランドスケープ（配置層, マイグレーション 065）
+論文（document）を分野の地図のアンカーへ複数観点で配置する層。正本は
+`docs/features/knowledge_landscape_design.md`（LS1〜LS10。**weight / confidence は DB のみで
+教員にも数値を出さない**）。
+
+| テーブル | 役割 |
+|---|---|
+| `landscape_placements`（065） | 配置。`perspective` 6語彙（subject/question/method/theory/observation/application）、`status`(inferred/confirmed/rejected/review_required/superseded)。`documents(id)` FK CASCADE。一意制約は `status <> 'superseded'` の部分インデックス。再解析は inferred のみ supersede（confirmed / rejected は AI が復活させられない） |
+
+### カテゴリギャップ候補（マイグレーション 066）
+「地図に置けなかった」を構造化信号として残し、反復した主題だけを教員レビュー候補に浮上させる層。
+正本は `docs/features/category_gap_candidates_design.md`。**レビューキューは毎回読み時導出**で、
+完了フラグ・掃除バッチを持たない。
+
+| テーブル | 役割 |
+|---|---|
+| `landscape_gap_signals`（066） | 論文単位の gap 信号（`documents` FK CASCADE・LS3 と同型の supersede）。`layer`(region/concept)・`proposed_label`・`evidence_quote` |
+| `atlas_gap_decisions`（066） | cluster 単位の教員判断のみ。`cluster_key UNIQUE` は**版非依存**（却下ゾンビ防止）。`status`(candidate/accepted/dismissed/merged)、`draft_node_id` / `applied_version` で採用と反映を分離 |
+
+### 賭け金の台帳（SL層, マイグレーション 067）
+D層の既存5テーブルの意味論を変えずに「何が崩れたら危ういか」を載せる層（新テーブルなし）。
+正本は `docs/features/stakes_ledger_design.md`（SL1〜SL10）。
+
+| 変更対象 | 内容 |
+|---|---|
+| `epistemic_ledger`（067, ALTER） | `falsification_conditions`（人間の記帳）/ `falsification_candidates`（LLM 候補）/ `falsification_analyzed_at`（worker の冪等マーカー） |
+| `verification_proposals`（067, ALTER） | `course_id` / `reachability`（**人間専用語彙**。worker は書かない）/ `external_check`（昇格時必須・空は 422）/ `external_checked_by` |
+| `counterfactual_sessions`（067, ALTER） | `toggled_observations`（観測を仮に倒す。伝播ロジック自体は非改変） |
+
+### アカウントライフサイクル管理（マイグレーション 068・069）
+**`users` 行を物理 DELETE しない**（削除 = status 遷移 + 匿名化墓標 + 明示 purge）。正本は
+`docs/features/account_lifecycle_management_design.md`（AL1〜AL10）。
+
+| テーブル / 変更 | 役割 |
+|---|---|
+| `users`（068, ALTER） | 状態列を追加: `status`(active/suspended/pending_deletion/deleted)・`status_changed_at`/`status_changed_by`/`status_reason`・`token_generation`（JWT `gen` クレームの照合先＝失効の実体）・`password_updated_at`・`last_login_at`・`last_seen_at`（5分スロットルの列更新のみ）・`purge_after` |
+| `auth_events`（068） | 認証イベント台帳（**FK なし・append-only・削除 API なし**）。`event` 語彙の正本は `core/auth_events.py`。IP は X-Real-IP → XFF 末尾 |
+| `llm_usage_events`（069, INDEX） | `(user_id, occurred_at)` の部分インデックス（U層のユーザー別集計軸。043 のテーブル定義は非編集） |
+
+### URL指定による教材取得（マイグレーション 070）
+SSRF ガードの正本は `backend/core/url_fetch.py`。正本設計書は `docs/features/url_material_upload_design.md`。
+
+| テーブル | 役割 |
+|---|---|
+| `url_fetch_domains`（070） | 取得先ドメインの許可リスト。`domain` 主キー、`added_by` は FK なし（登録者が後に墓標化されうるため）。**migration でシードしない** — 初期状態は空＝機能無効で、管理者が削除した行が再起動で復活しない |
+
+### 論文ディスカバリー層 / コーパス回遊層（マイグレーション 071・072・073）
+分野購読で arXiv を検索し、教員が選んだ候補だけを既存の URL 取得経路へ流す層と、
+育てたコーパスを学習者がコースの外から歩ける層。正本は
+`docs/features/paper_discovery_design.md`（PD1〜PD8）/ `docs/features/corpus_roaming_design.md`（CR1〜CR10）。
+**候補一覧のテーブルは持たない**（毎回 API から読み時導出）。
+
+| テーブル / 変更 | 役割 |
+|---|---|
+| `paper_discovery_subscriptions`（071） | 分野（domain_key）単位1行の購読条件。`arxiv_categories TEXT[]` / `keyphrases(JSONB)`（要素に供給元 `source` と `enabled` を持ち、外した状態も保持）/ `followed_authors` / `last_checked_at`。教員の共同財で last-write-wins |
+| `paper_discovery_dismissals`（071） | 見送り記録。`PRIMARY KEY(domain_key, arxiv_id)`。行削除せず `revoked` 遷移で復帰 |
+| `documents.source_url`（071, ALTER） | URL 経由取り込みの出所。**「取り込み済み」判定の正本**（手動アップロード分は判定不能と正直に表示する） |
+| `paper_discovery_ingest_items`（072） | バッチ取り込みキュー。`status`(queued/fetching/accepted/failed)・`requested_by` は FK なし。失敗は行を消さず `detail` に事実文を残す。行を作るのは教員の明示操作だけ（候補のスナップショットではない） |
+| `paper_discovery_subscriptions.last_search_found_new`（073, ALTER） | コーパス回遊「地図の端 — 外の輪」の**集約1ビット**。教員の検索実行時のみ更新。DEFAULT なし = NULL は「まだ検索していない」。学習者起点で外部 API を呼ばないための材料（CR7） |
+
+### 分野マップのベクトル係留（VA層, マイグレーション 074）
+骨格ノードにプロトタイプベクトルを与え、配置プレフィルタ・別名レジストリ・着地予測を実現する層。
+正本は `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9。**cosine 生値は表示しない**）。
+
+| テーブル | 役割 |
+|---|---|
+| `atlas_anchor_embeddings`（074） | 骨格ノードのプロトタイプベクトル。`UNIQUE(domain_key, skeleton_version, node_id)`・`vector(3072)`・`node_kind`(region/concept)・FK / index なし（小規模表）。`source_hash` で不変ノードの再埋め込みをスキップ。(domain, version) 単位の全置換再構築が設計明示の例外 |
+| `atlas_anchor_aliases`（074） | 教員確定の別名レジストリ（版非依存）。`UNIQUE(domain_key, node_id, normalized_alias)`・`status`(confirmed/dismissed)・`source`(gap_signal/manual)。削除 API なし |
+
+### 分野マップの関係表示（RE追補, マイグレーション 076）
+辺候補は読み時導出で、**保存するのは教員の判断だけ**。正本は
+`docs/features/atlas_relation_edges_design.md`（RE1〜RE8）。
+
+| テーブル | 役割 |
+|---|---|
+| `atlas_edge_decisions`（076） | 無向・版非依存の `edge_key UNIQUE`（`edge\|{domain}\|{min}\|{max}`）。`status`(candidate/accepted/dismissed)・見送りは理由必須・`edge_kind` は採用時に教員が選択・`applied_version` で採用と凍結反映を分離。遷移は `core/candidate_flow.py` 経由（本番初適用） |
 
 ---
 
