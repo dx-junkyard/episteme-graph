@@ -4897,7 +4897,20 @@
       }
       tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">読み込み中...</td></tr>';
       apiFetch("/admin/courses/" + courseId + "/unanswered-queries")
-        .then(function (res) { return res.json(); })
+        .then(function (res) {
+          // 実 API は course owner / editor でなければ 404（学生名・質問・件数を返さない）。
+          // res.ok を見ないと 404 本文（{detail: ...}）が rows.forEach で例外になり、
+          // 「読み込み中...」のまま固まっていた。理由を事実文で出す。
+          if (!res.ok) {
+            var msg = res.status === 404
+              ? "このコースの所有者または編集権限がないため表示できません。"
+              : "つまづきデータの読み込みに失敗しました。";
+            var err = new Error(msg);
+            err.factText = msg;
+            throw err;
+          }
+          return res.json();
+        })
         .then(function (rows) {
           if (!rows || rows.length === 0) {
             tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-tertiary)">つまづきデータはまだありません</td></tr>';
@@ -4922,8 +4935,10 @@
           });
           tbody.innerHTML = html;
         })
-        .catch(function () {
-          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-danger)">読み込みに失敗しました</td></tr>';
+        .catch(function (err) {
+          var msg = (err && err.factText) || "つまづきデータの読み込みに失敗しました。";
+          tbody.innerHTML = '<tr><td colspan="4" style="text-align:center;color:var(--color-text-danger)">' +
+            escHtml(msg) + '</td></tr>';
         });
     }
 
@@ -6244,6 +6259,8 @@
     var EDGE_NOT_ACCEPTED_TEXT = "[採用] を押すと、次版の下書きへ反映できます。";
     var EDGE_RETIRED_TEXT = "この分野は廃止済みです。「復帰する」で戻すと操作できます。";
     var EDGE_EMPTY_TEXT = "いまレビューする関係の候補はありません。";
+    // 公開（freeze）の 409 ゲート（routes/atlas.py::freeze_atlas_skeleton の pending_edges）。
+    var EDGE_FREEZE_PENDING_TEXT = "採用済みでまだ次版に反映されていない関係（辺）の候補が残っています";
 
     var edgeIncludeDismissed = false;
     var edgeBusy = false;
@@ -6998,6 +7015,16 @@
                     var labels = (detail.pending_labels || []).join("、");
                     throw new Error(
                       (detail.message || GAP_FREEZE_PENDING_TEXT) + (labels ? ": " + labels : "")
+                    );
+                  }
+                  // 関係（辺）の候補の公開前ゲート（migration 076, RE4）: gap と同列の弁。
+                  // 「ラベルA — ラベルB」の列挙で示す（件数は出さない）。分岐が無いと
+                  // 辺で拒否されたときに理由が出ずに固まる。
+                  if (detail && detail.pending_edges) {
+                    scrollToAtlasSection("atlas-reports-section");
+                    var edgeLabels = (detail.pending_edges || []).join("、");
+                    throw new Error(
+                      (detail.message || EDGE_FREEZE_PENDING_TEXT) + (edgeLabels ? ": " + edgeLabels : "")
                     );
                   }
                   throw new Error(typeof detail === "string" ? detail : "HTTP " + res.status);
@@ -11363,6 +11390,30 @@
         return document.querySelector("#materials-tbody .material-more-trigger")
           || document.getElementById("materials-table");
       },
+      // 2026-09-03 是正: 行操作の大半は「⋯」メニュー内にあり、開くまで DOM に存在しない。
+      // メニュー項目を指す capability の locate_steps は、まずこのトリガーを点灯する。
+      // ここでは自動で開かない（P8: 誘導まで。開くのは本人）。
+      material_row_menu: function (id) {
+        if (id) _matLastAnchoredMaterialId = id;
+        var mid = id || _matLastAnchoredMaterialId;
+        return (mid && document.querySelector('#materials-tbody tr[data-material-id="' + mid + '"] .material-more-trigger'))
+          || document.querySelector("#materials-tbody .material-more-trigger")
+          || document.getElementById("materials-table");
+      },
+      // URL指定による教材取得（migration 070）: アップロード領域内の「URLから取得」ボタン。
+      url_upload_button: function () { return document.getElementById("url-upload-link"); },
+      // 開示範囲・グループ共有の入口（「⋯」メニュー内の「共有設定…」）。
+      material_share_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-share-doc-btn");
+      },
+      // 知識ランドスケープ（migration 065）: 「⋯」メニュー内の「位置づけ（分野マップ）…」。
+      material_landscape_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-landscape-doc-btn");
+      },
+      // 「⋯」メニュー末尾の「削除…」。
+      material_delete_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-delete-btn");
+      },
       material_row: function (id) {
         if (id) _matLastAnchoredMaterialId = id;
         return id
@@ -11403,7 +11454,16 @@
     });
     AA.registerUiAnchors("course-builder", {
       cb_material_select: function () { return document.getElementById("cb-material-select"); },
-      cb_chat_input: function () { return document.getElementById("cb-chat-input"); }
+      cb_chat_input: function () { return document.getElementById("cb-chat-input"); },
+      // 2026-09-03 是正: コース削除の UI はコース管理タブではなく、ここ（コース構築タブ）の
+      // 「既存コースを読込」モーダル内の行にしかない（openImportCourseModal）。
+      import_course_button: function () { return document.getElementById("import-course-btn"); },
+      // モーダルを開くまで DOM に存在しないので、未解決なら道案内はそこで止まる
+      // （P8 fail-closed。「この画面での操作のあとに案内します」に縮退する）。
+      course_delete_button: function (id) {
+        return (id && document.querySelector('#import-course-list .course-delete-btn[data-course-id="' + id + '"]'))
+          || document.querySelector("#import-course-list .course-delete-btn");
+      }
     });
     AA.registerUiAnchors("lecture-studio", {
       chunk_list: function () { return document.getElementById("ls-chunk-list"); },
@@ -11460,10 +11520,23 @@
         var cid = id || _cmLastAnchoredCourseId;
         return (cid && document.querySelector('#cm-tbody tr[data-course-id="' + cid + '"] .cm-version-btn'))
           || document.querySelector('#cm-tbody .cm-version-btn');
+      },
+      // リリース前の確認（release_review_flow_design.md）: コース行の「確認して公開」。
+      release_review_button: function (id) {
+        if (id) _cmLastAnchoredCourseId = id;
+        var cid = id || _cmLastAnchoredCourseId;
+        return (cid && document.querySelector('#cm-tbody tr[data-course-id="' + cid + '"] .cm-release-review-btn'))
+          || document.querySelector('#cm-tbody .cm-release-review-btn');
       }
     });
     AA.registerUiAnchors("atlas", {
-      atlas_generate_button: function () { return document.getElementById("atlas-generate"); }
+      atlas_generate_button: function () { return document.getElementById("atlas-generate"); },
+      // 修正報告・論文の解析から見つかった候補・関係（辺）の候補のレビュー区画。
+      atlas_reports_section: function () { return document.getElementById("atlas-reports-section"); },
+      // VA層（migration 074）: ベクトル索引の再構築と別名レジストリ。公開中の骨格がある
+      // 分野でのみ描画されるため、未解決なら道案内はそこで止まる（P8 fail-closed）。
+      atlas_vectors_refresh_button: function () { return document.getElementById("atlas-vectors-refresh"); },
+      atlas_aliases_section: function () { return document.getElementById("atlas-aliases-group"); }
     });
     // 2026-07-29 是正: 学生・教員アカウント作成フォームは #tab-groups ではなく
     // 独立タブ #tab-students / #tab-teachers 側にある（setupRoleBasedUI が動的生成）。
@@ -11507,7 +11580,10 @@
     AA.registerUiAnchors("doubt-atlas", {
       doubt_verification_form_button: function () { return document.querySelector("[data-doubt-vstatus-form]"); },
       doubt_challenge_withdraw_button: function () { return document.querySelector("[data-doubt-challenge-withdraw]"); },
-      doubt_challenge_proposal_button: function () { return document.querySelector("[data-doubt-challenge-proposal]"); }
+      doubt_challenge_proposal_button: function () { return document.querySelector("[data-doubt-challenge-proposal]"); },
+      // SL層（stakes_ledger_design.md）: 「覆る条件」区画の手動記帳フォームと AI 候補の取得。
+      doubt_falsification_form_button: function () { return document.querySelector("[data-doubt-falsification-form]"); },
+      doubt_falsification_refresh_button: function () { return document.querySelector("[data-doubt-falsification-refresh]"); }
     });
     // L層（G6）: ナレッジライブラリタブの分野・エントリ一覧、凍結ボタン。
     AA.registerUiAnchors("knowledge-library", {
@@ -11537,7 +11613,12 @@
     });
     // 2026-07-29 是正: AIモデルタブ（M層、システム既定の変更、SYSTEM_ADMIN のみ）。
     AA.registerUiAnchors("llm-models", {
-      llm_models_ops_table: function () { return document.getElementById("llm-models-ops-table") || document.getElementById("tab-llm-models"); }
+      llm_models_ops_table: function () { return document.getElementById("llm-models-ops-table") || document.getElementById("tab-llm-models"); },
+      // URL指定による教材取得（migration 070）: タブ末尾の許可ドメイン区画（SYSTEM_ADMIN のみ描画）。
+      url_fetch_domains_section: function () {
+        return document.getElementById("url-fetch-domain-input")
+          || document.getElementById("url-fetch-domains-section");
+      }
     });
 
     // --- 画面コンテキスト（現在の選択・可視要素） ---

@@ -655,6 +655,190 @@ class TestGuardrails:
         assert "admin-assistant-spotlight" in _ADMIN_JS
         assert "window.AdminAssistant" in _ADMIN_JS
 
+    def test_unenforced_scope_capabilities_have_no_action_handler(self):
+        """routes/admin_assistant.py が enforce する scope は `own_course` だけ。
+
+        それ以外の scope（`own_material` / `editable_course` 等）を宣言した action
+        capability に代行ハンドラを足すと、宣言だけあって強制の無い fail-open になる。
+        ハンドラを足すときは route 側の scope 判定も同時に足すこと（P1）。
+        """
+        enforced = {"own_course", "any"}
+        offenders = [
+            cap.id for cap in caps.all_capabilities()
+            if cap.kind == KIND_ACTION
+            and cap.scope not in enforced
+            and get_handler(cap.id) is not None
+        ]
+        assert offenders == [], (
+            "scope が route で強制されていないのに代行ハンドラを持つ capability: "
+            f"{offenders}"
+        )
+
+
+# ===========================================================================
+# Group A-5b: capability.api の実ルート突合（2026-09-03 追加）
+# ===========================================================================
+
+
+def _normalize_route_path(path: str) -> tuple:
+    """パスをセグメント列にし、`{param}` は `None`（任意リテラルに一致）にする。"""
+    segs = []
+    for seg in (path or "").strip("/").split("/"):
+        segs.append(None if seg.startswith("{") and seg.endswith("}") else seg)
+    return tuple(segs)
+
+
+def _route_matches(cap_segs: tuple, route_segs: tuple) -> bool:
+    """capability 側のパスが route のパスに一致するか。
+
+    route 側の `{param}` はどのセグメントにも一致する（capability が
+    `/shared/document/{object_id}/...` のように object_type を具体値で固定した
+    宣言をしていても実在扱いにする）。capability 側の `{param}` は route 側も
+    `{param}` であること（実リテラルをプレースホルダで隠さない）。
+    """
+    if len(cap_segs) != len(route_segs):
+        return False
+    for cap_seg, route_seg in zip(cap_segs, route_segs):
+        if route_seg is None:
+            continue           # route 側がパラメータ: 何でもよい
+        if cap_seg != route_seg:
+            return False
+    return True
+
+
+class TestCapabilityApiPathsExist:
+    """`Capability.api` が実在するルートを指していること。
+
+    2026-09-03: `atlas.generate_skeleton` / `atlas.freeze_skeleton` が
+    `/api/admin/{cartridge_id}/atlas/skeleton/...`（実際は `cartridges/` が必要）を
+    指したまま長く放置されていた。api は説明・KB の材料として利用者に見えるので、
+    実ルートと機械照合して黙った分裂を防ぐ。
+    """
+
+    def _app_routes(self):
+        pytest.importorskip("fastapi")
+        from api.main import app
+
+        routes = set()
+        for route in app.routes:
+            path = getattr(route, "path", "")
+            if not path:
+                continue
+            for method in getattr(route, "methods", None) or []:
+                routes.add((method.upper(), _normalize_route_path(path)))
+        return routes
+
+    def test_all_declared_api_paths_resolve(self):
+        routes = self._app_routes()
+        assert routes, "app.routes が空（パーサの健全性チェック）"
+        problems = []
+        for cap in caps.all_capabilities():
+            if not cap.api:
+                continue
+            method = str(cap.api.get("method", "")).upper()
+            path = str(cap.api.get("path", ""))
+            assert method and path, f"{cap.id}: api に method/path が無い"
+            cap_segs = _normalize_route_path(path)
+            if not any(
+                m == method and _route_matches(cap_segs, r)
+                for (m, r) in routes
+            ):
+                problems.append(f"{cap.id}: {method} {path} に一致するルートが無い")
+        assert problems == [], "\n".join(problems)
+
+    def test_matcher_rejects_missing_prefix(self):
+        """マッチャの健全性: 2026-09-03 に是正した誤りを再現して検出できること。"""
+        routes = self._app_routes()
+        bad = _normalize_route_path("/api/admin/{cartridge_id}/atlas/skeleton/freeze")
+        assert not any(
+            m == "POST" and _route_matches(bad, r) for (m, r) in routes
+        )
+        good = _normalize_route_path("/api/admin/cartridges/{cartridge_id}/atlas/skeleton/freeze")
+        assert any(m == "POST" and _route_matches(good, r) for (m, r) in routes)
+
+
+class TestReachabilityFixes20260903:
+    """2026-09-03 の docs 照合で見つかった「到達できない道案内」の是正を固定する。"""
+
+    def test_course_delete_points_at_course_builder(self):
+        """コース削除の UI はコース管理タブに無く、コース構築タブのモーダル内にある。"""
+        cap = caps.get_capability("course.delete")
+        assert cap.screen == "course-builder"
+        anchors = [st.anchor_id for st in cap.locate_steps]
+        assert anchors == ["import_course_button", "course_delete_button"]
+        assert all(st.screen == "course-builder" for st in cap.locate_steps)
+        # 実 API は user_can_edit_course（所有者 or editor）。own_course は狭すぎた。
+        assert cap.scope == "editable_course"
+
+    def test_materials_menu_capabilities_open_the_row_menu_first(self):
+        """「⋯」メニュー内の要素を指す道案内は、先にメニューのトリガーを点灯する。
+
+        メニューを開くまでメニュー項目は DOM に存在しないため、この step が無いと
+        道案内が「どこを押せばよいか分からない」状態で止まる。
+        """
+        menu_items = {
+            "material_share_button",
+            "material_delete_button",
+            "material_estimate_button",
+            "shared_version_button",
+            "material_figures_button",
+            "material_inventory_button",
+            "material_graph_review_button",
+            "material_landscape_button",
+        }
+        problems = []
+        for cap in caps.all_capabilities():
+            anchors = [st.anchor_id for st in cap.locate_steps if st.screen == "materials"]
+            for i, anchor in enumerate(anchors):
+                if anchor in menu_items and "material_row_menu" not in anchors[:i]:
+                    problems.append(f"{cap.id}: {anchor} の前に material_row_menu が無い")
+        assert problems == [], "\n".join(problems)
+
+    def test_stumbles_declares_editable_course_scope(self):
+        cap = caps.get_capability("stumbles.view")
+        assert cap.scope == "editable_course"
+
+    def test_newly_documented_sections_are_wired(self):
+        """2026-09-03 に新設した操作KB の節が capability から参照されていること。"""
+        expected = {
+            "course.discuss_opening_review": "admin_operations/materials.md#discuss-opening-review",
+            "materials.url_upload": "admin_operations/materials.md#url-upload",
+            "materials.row_actions_menu": "admin_operations/materials.md#row-menu",
+            "materials.graph_review": "admin_operations/materials.md#graph-review",
+            "materials.review_landscape": "admin_operations/materials.md#landscape",
+            "atlas.review_reports": "admin_operations/atlas.md#review-queue",
+            "atlas.vector_index_aliases": "admin_operations/atlas.md#vector-aliases",
+            "llm_models.manage_url_fetch_domains": "admin_operations/llm_models.md#url-fetch-domains",
+            "course.release_review": "admin_operations/course.md#release-review",
+            "doubt.record_falsification_conditions": "admin_operations/doubt.md#falsification-conditions",
+        }
+        for cap_id, howto in expected.items():
+            cap = caps.get_capability(cap_id)
+            assert cap is not None, f"{cap_id} が未登録"
+            assert cap.howto_doc == howto, f"{cap_id}: howto_doc が {cap.howto_doc!r}"
+            assert cap.kind == "guidance_only", f"{cap_id} は guidance_only であるべき"
+            section = kb.section_for_howto(cap.howto_doc)
+            assert section and section.get("body"), f"{cap_id}: KB 節が引けない"
+
+    def test_url_fetch_domain_management_is_system_admin_only(self):
+        """許可ドメインの追加・削除は SYSTEM_ADMIN のみ（fail-closed）。"""
+        cap = caps.get_capability("llm_models.manage_url_fetch_domains")
+        assert cap.required_role == "SYSTEM_ADMIN"
+        assert caps.can_access(cap.id, "TEACHER") is False
+
+    def test_atlas_freeze_409_handles_pending_edges(self):
+        """RE層の `detail.pending_edges` でも理由が出る（gap と同列の弁）。"""
+        assert "detail.pending_edges" in _ADMIN_JS_MAIN
+        assert "EDGE_FREEZE_PENDING_TEXT" in _ADMIN_JS_MAIN
+
+    def test_load_stumbles_checks_response_ok(self):
+        """404（所有者・編集権限なし）を事実文にする。res.ok 未判定に戻さない。"""
+        start = _ADMIN_JS_MAIN.index("function loadStumbles()")
+        body = _ADMIN_JS_MAIN[start:start + 2600]
+        assert "unanswered-queries" in body
+        assert "res.ok" in body
+        assert "所有者または編集権限" in body
+
 
 # ===========================================================================
 # Group A-6: status_query（Phase 3, 状態管理・通知基盤との統合）
