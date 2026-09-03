@@ -224,6 +224,7 @@ AL1〜AL10、migration 068/069）。
 ## 7. つまずき分析・エラー分析
 
 - つまずきデータ: `GET /api/admin/courses/{id}/unanswered-queries`（`student_stumble_events` / `unanswered_query_logs`）。
+- 構造帰属型の問いの集約: `GET /api/admin/courses/{id}/anchor-insights`（TEACHER + コース編集権。`core/structure_anchor/insights.py`）。理論構成の段階（theory stage）× 疑いの様相（doubt_type）の k-匿名集約（k=3・n<3 セル非表示・件数はレンジ表示のみ）。対象は本人が確定した帰属（`learner_selected` / `confirmed`）だけで、AI 候補（`llm_candidate`）は出さない。教材改善のための断面であり評価利用は禁止。**v1 は API のみで UI 未配線**。
 - エラー分析: キーワード/重大度/期間でログを絞り込み、複数形式で一括コピー。
 - システム統計: `GET /api/admin/system/materials-stats`（SYSTEM_ADMIN）。
 

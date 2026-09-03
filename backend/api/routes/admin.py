@@ -4496,6 +4496,41 @@ def get_bridge_insights(
 
 
 # ---------------------------------------------------------------------------
+# 構造帰属型の問い記録（B層, migration 025）— 教員向け anchor インサイト
+# 正本: docs/features/structure-anchored-questions.md §7 Stage 3 / §8-5
+# ---------------------------------------------------------------------------
+@router.get("/courses/{course_id}/anchor-insights")
+def get_anchor_insights(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """stage / doubt_type 単位の k-匿名集約（k=3・n<3 セル非表示・レンジ表示のみ）。
+
+    「理論構成のどの段階に、どういう型の引っかかりが集まっているか」を教材改善の
+    ためだけに返す粗い断面。個々の anchor 単位の内訳は D層の
+    `GET /api/admin/courses/{course_id}/naive-signals` が持つ（責務の重複を避ける）。
+
+    - 対象は本人が確定した帰属のみ（`learner_selected` / `confirmed`）。
+      LLM 候補（`llm_candidate`）は教員側に出さない（P1）。
+    - 個別の学習者・個別の痕跡行・質問原文・confidence は一切返さない（P3）。
+    - 読み取り専用・監査記帳なし・LLM 0 回。評価利用は禁止。
+
+    bridge-insights と同じく、k-匿名集約であっても権限のない教員へ集約の存在・
+    空非空・対象 course ID を開示しない。集約処理より **先に** course owner /
+    editor ゲートを通す（不在も権限なしも同一の 404）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
+
+    from core.structure_anchor.insights import aggregate_anchor_insights
+
+    session = _pg_session()
+    try:
+        return aggregate_anchor_insights(session, course_id)
+    finally:
+        session.close()
+
+
+# ---------------------------------------------------------------------------
 # Tier 3-17c: 従来ここで13個の子ルーター（lecture_studio / theory_components /
 # cartridges / revisions / atlas 系 / doubt / admin_assistant / reconstruction /
 # versioning / status / notifications）を import + include_router していたが、

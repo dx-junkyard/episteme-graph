@@ -484,6 +484,7 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 |---|---|---|---|
 | GET | `/api/admin/interest-dashboard` | TEACHER | interest_traces の集団集計（件数・比率・関与人数のみ。個人特定情報なし） |
 | GET | `/api/admin/courses/{cid}/bridge-insights` | TEACHER + コース編集権（所有者 / course editor / SYSTEM_ADMIN） | 学習者が connect した橋候補の k-匿名集約（k=3・人数レンジ表示）。認可は `aggregate_bridge_candidates()` より前（権限のない教員へ集約の存在・空非空を開示しない）。権限なし・不明コースは同一 404 |
+| GET | `/api/admin/courses/{cid}/anchor-insights` | TEACHER + コース編集権（所有者 / course editor / SYSTEM_ADMIN） | 構造帰属型の問いの k-匿名集約（`core/structure_anchor/insights.py`）。theory stage 別 anchor_type × doubt_type のセル（k=3・n<3 非表示・`count_range` のみ）。対象は `attribution_source ∈ (learner_selected, confirmed)` かつ `structure_anchor.status<>'dismissed'` かつ行 `status<>'superseded'`。全セルが k 未満なら `{"cells": [], "suppressed": true}`。認可はセッション取得より前・権限なし/不明コースは同一 404。読み取り専用・監査なし・LLM 0 回（**UI 未配線**） |
 
 ### 図の表示分類 `/api/admin`（`routes/figure_presentation.py`、#496）
 
