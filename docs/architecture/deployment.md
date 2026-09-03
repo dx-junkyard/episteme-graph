@@ -62,23 +62,49 @@ docker compose logs -f api-server
 ## 3. 主要な環境変数（.env.example）
 
 > **変数名と既定値の正本はコード側**（`backend/core/config.py` の `Settings` — `AliasChoices` で
-> env 名を宣言 — と、各モジュールの `os.getenv`）。`.env.example` はサンプルであって全変数を
-> 網羅していません（2026-09-03 時点で `.env.example` は 62 行、`Settings` の env 別名は 86 件）。
+> env 名を宣言 — と、各モジュールの `os.getenv`）。`.env.example` は**設定可能な変数を網羅**
+> しますが、既定値のままで良いものはコメントアウト行で示します（2026-09-03 時点で
+> `Settings` は 99 フィールド / 108 個の env 別名、`.env.example` の記載は 130 変数）。
+> 網羅は `backend/tests/test_compose_env_guardrails.py` が機械的に固定しています。
 > 以下は実コードで確認した主要な抜粋です。
 
-`api-server` の environment は `docker-compose.yml` の `api-server.environment:` で `.env` から
-注入されます。
+### `.env` の届き方（2026-09-03 修正）
 
-> **重要（2026-09-03 時点の実測）:** compose には `env_file:` の指定がなく、`backend/Dockerfile`
-> も `.env` をイメージに COPY しません（`Settings` の `env_file=".env"` はコンテナ内で対象
-> ファイルを見つけられない）。したがって **Docker 実行時に効くのは
-> `docker-compose.yml` の `environment:` に列挙された変数だけ**です。
-> 2026-09-03 時点で列挙されているのは `JWT_SECRET` / `LLM_*` / `GCP_*` / `GOOGLE_*` /
-> `DATABASE_URL` / `MINIO_*` / `ADMIN_PASSWORD` / `CORS_ORIGINS` / `EPISTEME_*` /
-> `GROBID_URL` / `LLM_TRANSCRIBE_MODEL` / `TENSION_*` / `LLM_MODEL_CATALOG_PATH` のみで、
-> 以下に挙げる機能別のコスト上限などは**列挙されていない＝コンテナではコード既定値が使われます**。
-> これらを実際に運用で変えたい場合は、compose の `environment:` に行を足すか `env_file:` を
-> 追加する必要があります（ローカルで `uvicorn` を直接動かす場合は `.env` が読まれるため効きます）。
+`api-server` は `docker-compose.yml` の **`env_file: - path: .env` / `required: false`** で
+`.env` をまるごと受け取ります。`backend/Dockerfile` は `.env` を COPY しない（シークレットを
+イメージに焼かない）ため、**この `env_file` がコンテナへ設定を届ける唯一の経路**です。
+`.env` は必須ではなく、無い場合はコード既定値で起動します（`required: false`）。
+
+> **注意（修正前の挙動）:** 2026-09-03 以前は compose に `env_file:` が無く、
+> `Settings` の `env_file=".env"` はコンテナ内で対象ファイルを見つけられませんでした。
+> そのため **Docker 実行時に効くのは `environment:` に列挙された約30キーだけ**で、
+> `LEARNING_CHAT_MAX_CALLS_PER_DAY` / `DELIBERATION_*` / `DISCOVERY_*` / `LANDSCAPE_*` /
+> `APPARATUS_*` / `ANCHOR_*` / `RECON_*` / `DOUBT_*` / `HELP_KB_VECTOR_ENABLED` /
+> `VERSION_SWEEPER_*` / `PAPER_DISCOVERY_WORKER_*` / `ATLAS_VECTOR_*` / `FIGURE_STUDIO_*`
+> などは `.env` に書いても無視されていました（ローカルで `uvicorn` を直接動かす場合のみ効く）。
+> 現在はこれらも `.env` の値がそのまま効きます。
+
+**優先順位:** compose では `environment:` が `env_file:` に**勝ちます**。`environment:` に残して
+あるのは「`.env` をそのまま渡すのでは足りない」6行だけです。
+
+| 変数 | 残す理由 |
+|---|---|
+| `LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` | `Settings` の別名に無い旧 env 名（`OPENAI_FAST_MODEL` / `OPENAI_ANALYSIS_MODEL`）を吸収し、tier 間のフォールバック連鎖を組む |
+| `DATABASE_URL` | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` から合成する（`.env` の `DATABASE_URL` より優先される） |
+| `GOOGLE_APPLICATION_CREDENTIALS` | コンテナ固有の既定値 `/app/.gcp/application_default_credentials.json`（ホスト側の値と異なる） |
+| `GROBID_URL` | コンテナ間はサービス名 `http://grobid:8070`（ホスト側の `localhost:8070` と異なる） |
+
+`VAR: ${VAR:-<コード既定値と同じ値>}` の重複行（`JWT_SECRET` / `LLM_PROVIDER` / `LLM_API_KEY` /
+`LLM_ANALYSIS_MODEL` / `LLM_EMBEDDING_*` / `GCP_*` / `GOOGLE_CLOUD_*` / `MINIO_*` /
+`ADMIN_PASSWORD` / `CORS_ORIGINS` / `EPISTEME_*` / `LLM_TRANSCRIBE_MODEL` / `TENSION_*` /
+`LLM_MODEL_CATALOG_PATH`）は 2026-09-03 に削除しました。compose 側が既定値を二重に持つと、
+`Settings` の既定値を変えても compose が黙って上書きし続けるためです（`OPENAI_*` /
+`MINIO_ROOT_*` / `GOOGLE_CLOUD_*` へのフォールバックは `Settings` の `AliasChoices` が継承します）。
+
+> `.env` のホスト名に注意: `.env.example` の `MINIO_ENDPOINT=localhost:9000` などはホストから
+> 直接 `uvicorn` を動かす場合の値です。Docker で動かすときは `minio:9000` のように
+> **compose のサービス名**へ書き換えてください（`DATABASE_URL` と `GROBID_URL` は上表のとおり
+> compose 側が正しい値を与えます）。
 
 ### LLM
 ```bash
@@ -194,13 +220,15 @@ PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS=30  # 同・キューが空のときの�
 DISCOVERY_CITATION_SOURCE_ENABLED=0  # 引用グラフ供給源（Semantic Scholar）のオプトイン（既定 off）
 ```
 
-> 上記のうち `.env.example` に記載があるのは一部だけで（2026-09-03 時点で
-> `LANDSCAPE_MAX_*` / `DELIBERATION_VOICE_MAX_CALLS_PER_DAY` / `DISCOVERY_COMPARE_*` など）、
-> 既定値の正本はコード側です — `backend/core/config.py` の `Settings`（`AliasChoices` で
+> **既定値の正本はコード側**です — `backend/core/config.py` の `Settings`（`AliasChoices` で
 > env 名を宣言）、`core/help_kb/vector.py`、`core/versioning/worker.py`、
-> `backend/api/ingest_worker.py`。`.env.example` に無い変数（`ANCHOR_*` / `STDPART_*` /
-> `LANDSCAPE_VECTOR_PREFILTER_TOPK` / `DISCOVERY_RANKING_*` / `DISCOVERY_CITATION_SOURCE_ENABLED` /
-> `ATLAS_VECTOR_MAX_CALLS_PER_DAY` / `PAPER_DISCOVERY_WORKER_*` 等）も同様に扱ってください。
+> `core/status/watcher.py`、`backend/api/ingest_worker.py`、
+> `core/document_pipeline/orchestrator.py`（`CTXEXPL_*` / `DISCUSS_OPENING_*`）、
+> `core/landscape/builder.py`（`LANDSCAPE_MAX_*`）。
+> 2026-09-03 の補完で、上記を含む**設定可能な変数はすべて `.env.example` に載りました**
+> （既定値のままで良いものはコメントアウト行）。新しい設定を足したときは
+> `.env.example` にも用途と既定値を書いてください —
+> `backend/tests/test_compose_env_guardrails.py` が網羅を機械的に検証します。
 
 ---
 

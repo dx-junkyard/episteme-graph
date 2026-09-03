@@ -25,44 +25,43 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    # ── .env をコンテナへ注入する（2026-09-03 追加） ────────────────────
+    # backend/core/config.py の Settings は env_file=".env" を宣言しているが、
+    # backend/Dockerfile は .env を COPY しない（シークレットをイメージに焼かない）ため、
+    # コンテナ内には読むべき .env が存在しない。この env_file が無いと、下の
+    # environment: に列挙した変数**以外はすべてコード既定値**になる（機能別のコール上限や
+    # worker の on/off を .env で調整しても Docker 実行時には効かない）。
+    #
+    # required: false … .env が無い環境（CI 等）でも compose を失敗させない
+    #                   （Compose Spec / docker compose v2.24 以降で利用可）。
+    # 優先順位 … compose では environment: が env_file: に**勝つ**（実測確認済み）。
+    env_file:
+      - path: .env
+        required: false
+    # ── environment: に残すのは「.env をそのまま渡すのでは足りない」行だけ ──
+    # 整理方針（2026-09-03）: env_file 追加により、`VAR: ${VAR:-<コード既定値と同じ値>}`
+    # 形式の行は単なる重複になり、しかも将来 Settings 側の既定値を変えても compose 側が
+    # 黙って上書きし続ける（正本の二重化）ため削除した。削除したのは
+    # JWT_SECRET / LLM_PROVIDER / LLM_API_KEY / LLM_ANALYSIS_MODEL / LLM_EMBEDDING_MODEL /
+    # LLM_EMBEDDING_DIM / GCP_* / GOOGLE_CLOUD_* / MINIO_ENDPOINT / MINIO_ACCESS_KEY /
+    # MINIO_SECRET_KEY / ADMIN_PASSWORD / CORS_ORIGINS / EPISTEME_* / LLM_TRANSCRIBE_MODEL /
+    # TENSION_* / LLM_MODEL_CATALOG_PATH の各行（いずれも Settings の既定値・
+    # AliasChoices と同一の内容だった。OPENAI_* / MINIO_ROOT_* / GOOGLE_CLOUD_* への
+    # フォールバックは Settings の AliasChoices が引き継ぐ）。
+    # 残す基準は「① コンテナ固有の既定値がホスト側の値と違う ② 複数変数を合成している
+    # ③ Settings が知らない旧 env 名（OPENAI_FAST_MODEL 等）を拾っている」のいずれか。
     environment:
-      JWT_SECRET: ${JWT_SECRET:-episteme-dev-secret-change-in-prod}
-      LLM_PROVIDER: ${LLM_PROVIDER:-openai}
-      LLM_API_KEY: ${LLM_API_KEY:-${OPENAI_API_KEY}}
+      # ①③ tier 既定が Settings（gpt-5.x 系）と異なり、旧 OPENAI_* も拾う
       LLM_FAST_MODEL: ${LLM_FAST_MODEL:-${OPENAI_FAST_MODEL:-o3-mini}}
       LLM_STANDARD_MODEL: ${LLM_STANDARD_MODEL:-${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}}
       LLM_DEEP_MODEL: ${LLM_DEEP_MODEL:-${LLM_STANDARD_MODEL:-${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}}}
-      LLM_ANALYSIS_MODEL: ${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}
-      LLM_EMBEDDING_MODEL: ${LLM_EMBEDDING_MODEL:-${OPENAI_EMBEDDING_MODEL:-text-embedding-3-large}}
-      LLM_EMBEDDING_DIM: ${LLM_EMBEDDING_DIM:-3072}
-      # Vertex AI ADC 設定 (LLM_PROVIDER=google)
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-${GOOGLE_CLOUD_PROJECT:-}}
-      GCP_LOCATION: ${GCP_LOCATION:-${GOOGLE_CLOUD_LOCATION:-us-central1}}
-      GCP_USE_VERTEX_AI: ${GCP_USE_VERTEX_AI:-true}
-      # 認証ファイルパス: ホストの .gcp/ をコンテナ内 /app/.gcp/ にマウントした場合の固定パス。
+      # ② DB_* から接続文字列を合成する（.env の DATABASE_URL より優先される）
+      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
+      # ① 認証ファイルパス: ホストの .gcp/ をコンテナ内 /app/.gcp/ にマウントした場合の固定パス。
       # .env で上書き可能 (例: GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/sa.json)
       GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-/app/.gcp/application_default_credentials.json}
-      # Vertex AI ADC 設定 (LLM_PROVIDER=gemini-vertex のときのみ有効、廃止予定)
-      GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
-      GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-us-central1}
-      DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
-      MINIO_ENDPOINT: ${MINIO_ENDPOINT}
-      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-${MINIO_ROOT_USER}}
-      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-${MINIO_ROOT_PASSWORD}}
-      ADMIN_PASSWORD: ${ADMIN_PASSWORD}
-      CORS_ORIGINS: ${CORS_ORIGINS:-*}
-      # Domain cartridge
-      EPISTEME_DEFAULT_CARTRIDGE_ID: ${EPISTEME_DEFAULT_CARTRIDGE_ID:-particle_physics}
-      EPISTEME_CARTRIDGES_DIR: ${EPISTEME_CARTRIDGES_DIR:-}
+      # ① コンテナ間はサービス名で解決する（ホスト側の localhost:8070 とは別）
       GROBID_URL: ${GROBID_URL:-http://grobid:8070}
-      # 音声文字起こし（ハンズフリー会話、openai プロバイダのみ）
-      LLM_TRANSCRIBE_MODEL: ${LLM_TRANSCRIBE_MODEL:-whisper-1}
-      # TensionMiningAgent (B層) — コスト制御
-      TENSION_MAX_CALLS_PER_SESSION: ${TENSION_MAX_CALLS_PER_SESSION:-3}
-      TENSION_MAX_CALLS_PER_DAY: ${TENSION_MAX_CALLS_PER_DAY:-10}
-      TENSION_LLM_MODEL: ${TENSION_LLM_MODEL:-}
-      # M層モデルカタログ（空なら同梱 backend/config/llm_models.json = /app/config/llm_models.json）
-      LLM_MODEL_CATALOG_PATH: ${LLM_MODEL_CATALOG_PATH:-}
     # ローカルの .gcp/ をコンテナに読み取り専用でマウントする。
     # ファイルが存在しない場合は空ディレクトリとしてマウントされる（エラーにはならない）。
     # サービスアカウントキーを使う場合: .gcp/credentials.json に配置する。

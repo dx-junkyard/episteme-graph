@@ -146,8 +146,27 @@ docker compose logs -f api-server
 
 ## 4. 主要環境変数 {#env-vars}
 
-`api-server` の environment は `docker-compose.yml` で `.env` から注入されます。実在する変数のみ
-記載しています。
+`api-server` へは、`docker-compose.yml` の `env_file` 指定により **`.env` の内容が
+まるごと注入されます**（2026-09-03 に修正。それ以前は compose の `environment:` に
+明示列挙した約30変数しか届いておらず、機能別のコール上限などを `.env` に書いても
+Docker 実行時には効きませんでした）。`.env` が無い場合はコード側の既定値で起動します。
+
+ただし `docker-compose.yml` の `environment:` に書かれた次の6変数は `.env` より**優先**
+されます。値を変えたい場合はこれらを承知のうえで操作してください。
+
+| 変数 | compose 側が上書きする理由 |
+|---|---|
+| `LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` | 旧変数名（`OPENAI_FAST_MODEL` / `OPENAI_ANALYSIS_MODEL`）からの引き継ぎとティア間フォールバックを組むため。`.env` にこれらを書けばその値が使われます |
+| `DATABASE_URL` | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` から組み立てるため。**`.env` の `DATABASE_URL` は無視されます**（接続先は `DB_*` で指定してください） |
+| `GOOGLE_APPLICATION_CREDENTIALS` | コンテナ内のマウント先 `/app/.gcp/application_default_credentials.json` を既定にするため。`.env` に書けばその値が優先されます |
+| `GROBID_URL` | コンテナ間はサービス名 `http://grobid:8070` で解決するため。`.env` に書けばその値が優先されます |
+
+`.env.example` の `MINIO_ENDPOINT=localhost:9000` などは、Docker を使わずホストで直接
+API を動かす場合の値です。**Docker で動かすときは `minio:9000` のように compose の
+サービス名へ書き換えてください。**
+
+以下の表は実在する変数のみを記載しています。設定可能な変数の一覧と既定値は
+`.env.example`（既定値のままで良いものはコメントアウト行として記載）を参照してください。
 
 ### 4.1 LLM プロバイダ {#env-llm-provider}
 
@@ -285,6 +304,31 @@ analysis tier のモデルに自動的に委譲されます（各変数のコメ
 |---|---|
 | `LLM_MODEL_CATALOG_PATH` | 「AIモデル」タブで選べるモデルのカタログ JSON のパス。**未設定なら同梱カタログ**（`backend/config/llm_models.json`）を使います。カタログを明示的に無効化したい場合のみ、存在しないパスを指定します |
 | `DISCOVERY_CITATION_SOURCE_ENABLED` | 引用グラフによる候補の追加供給源のオプトイン（既定 `false`。有効にすると外部 API を追加で参照します） |
+
+### 4.11 その他の上限・タイムアウト {#env-misc}
+
+通常は既定値のままで構いません（すべて `.env.example` にコメントアウトで記載しています）。
+2026-09-03 の `env_file` 修正以降、Docker 実行時にもこれらの指定が効きます。
+
+| 変数 | 既定値 | 説明 |
+|---|---|---|
+| `LLM_MAX_RETRIES` | 3 | LLM API 呼び出しのリトライ回数 |
+| `LLM_RETRY_BACKOFF_SECONDS` | 1.5 | 同・バックオフ係数（秒） |
+| `AGENT_LLM_TIMEOUT_SECONDS` | 300 | PDF 解析エージェントの LLM 呼び出しタイムアウト（秒） |
+| `AGENT_LLM_WALL_TIMEOUT_SECONDS` | 上記から自動算出 | 同・ウォールクロック上限（秒） |
+| `AGENT_LLM_MAX_TOKENS` | 未設定 | 出力トークン上限の一律上書き。未設定ならティア別の上限が使われます |
+| `THEORY_EXTRACTION_TIMEOUT_SECONDS` | 45 | 概念構造抽出の LLM 呼び出しタイムアウト（秒） |
+| `LECTURE_TTS_VOICE` | `alloy` | レクチャー読み上げの音声（多言語対応のため言語では分岐しません） |
+| `ANCHOR_CONFIRM_MAX_PER_SESSION` | 3 | 回答末尾の帰属確認プロンプトのセッション内提示上限（毎回は出しません） |
+| `CTXEXPL_MAX_ELEMENTS_PER_DOCUMENT` | 40 | 文脈依存説明を付ける要素数の 1 論文あたり上限 |
+| `DELIBERATION_IDENTITY_CANDIDATES_TOP_K` | 5 | 対話に添える共通部品候補の件数上限 |
+| `APPARATUS_CONTEXT_MAX_ITEMS` / `APPARATUS_CONTEXT_MAX_CHARS` | 12 / 6000 | 図ごとに集める周辺本文の上限（ブロック数 / 文字数） |
+| `LANDSCAPE_GAP_MAX_PER_DOCUMENT` | 3 | 1 論文あたりに保存するカテゴリギャップ信号の上限（追加の LLM 呼び出しはありません） |
+| `LANDSCAPE_VECTOR_PREFILTER_TOPK` | 32 | 配置候補生成の前段で AI に提示する概念数の上限（0 で絞り込み無効） |
+| `TEACHING_FIGURE_MAX_SVG_BYTES` | 200000 | 教材図スタジオで保存できる SVG のサイズ上限（バイト） |
+| `TEACHING_FIGURE_MAX_SUGGESTIONS` | 4 | 1 トピックあたりの図の提案件数の上限 |
+| `ATLAS_REFRESH_DELAY_SECONDS` | 60 | 分野の地図キャッシュ再計算をまとめる待ち時間（秒） |
+| `ISOM_OUTPUT_DIR` | `output/incoming` | ISOM の出力先ディレクトリ |
 
 ---
 
