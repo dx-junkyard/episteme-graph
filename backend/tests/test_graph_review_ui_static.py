@@ -604,3 +604,86 @@ class TestStudioDeliberationTargetResolution:
         block = STUDIO_SRC[start: STUDIO_SRC.index("\n  }\n", start) + 4]
         assert "representative_component_id" in block
         assert "linked_component_ids" in block
+
+
+class TestPaperLayer:
+    """グラフの論文層（graph_paper_layer_design.md §3/§4.1/§7）。
+
+    フレーム（理論操作グラフ）を触らず、論文側の骨格と各ノードの「論文での対応」を
+    読み時射影で足す層。UI 側の不変条項は PL2（LLM を呼ばない = 生成しない）・
+    PL3（リンクの無いものに位置を推定しない）・PL4（数値・件数を出さない）・
+    PL7（内部 ID を描かない）・PL8（欠落は事実文で明示）。
+    """
+
+    MANUAL_SRC = (ROOT / "docs" / "manual" / "teacher" / "26-admin-graph-review.md").read_text(
+        encoding="utf-8"
+    )
+
+    def test_anchors_present(self):
+        for anchor in ("graph-review.paper-view", "graph-review.paper-facing"):
+            assert 'data-ui-anchor="' + anchor + '"' in JS_SRC, anchor
+
+    def test_paper_layer_fetch_path_and_stale_guard(self):
+        start = JS_SRC.index("function loadPaperLayer(")
+        block = JS_SRC[start: JS_SRC.index("\n  }\n", start) + 4]
+        assert '"/admin/documents/" + encodeURIComponent(documentId) + "/paper-layer"' in block
+        # グラフ取得と同型の stale-response ガード（別教材へ切替済みの応答は破棄）。
+        assert "state.documentId !== documentId" in block
+        # 取得失敗はグラフ・レビュー操作を止めず、事実文だけを残す（PL8）。
+        assert "state.paperLayerError" in block
+
+    def test_view_toggle_attribute_and_state(self):
+        assert 'data-graph-review-view="graph"' in JS_SRC
+        assert 'data-graph-review-view="paper"' in JS_SRC
+        assert "function setView(" in JS_SRC
+        # 切替では network インスタンスを捨てず、包みの hidden を切り替える。
+        assert "graph-review-network-wrap" in JS_SRC
+
+    def test_outline_and_facing_class_names(self):
+        assert "graph-review-paper-section" in JS_SRC
+        assert "graph-review-paper-facing" in JS_SRC
+        assert "graph-review-paper-chip" in JS_SRC
+
+    def test_fact_sentences_present(self):
+        # PL3: 位置を推定せず、特定できない事実をそのまま出す。
+        assert "論文上の位置を特定できませんでした（式・根拠・claim へのリンクがありません）" in JS_SRC
+        # PL8: 掛かっていない章・取得失敗の事実文。
+        assert "このフレームには掛かっていません" in JS_SRC
+        assert "論文層を取得できませんでした。" in JS_SRC
+
+    def test_coverage_block_has_no_counts_or_warning(self):
+        start = JS_SRC.index("function paperCoverageHtml(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "フレームに掛かっていない要素" in block
+        # 件数バッジ・警告色を作らない（PL4 / 設計書 §3.2）。
+        assert ".length +" not in block
+        assert "警告" not in block
+        assert "is-error" not in block
+
+    def test_node_chips_never_print_internal_ids(self):
+        start = JS_SRC.index("function paperNodeLabel(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        # detailHeading が nodeId へ縮退したら DTO の label、それも無ければ表示名なし。
+        assert "detailHeading" in block
+        assert "heading !== nodeId" in block
+        assert "（表示名なし）" in block
+
+    def test_no_local_math_pipeline(self):
+        # 数式は共通の richText（graphView.inlineMathHtml）経由のみ（GR8）。
+        assert "katex" not in JS_SRC.lower()
+        assert 'richText("$" + latex + "$")' in JS_SRC
+
+    def test_paper_layer_block_is_es5(self):
+        block = JS_SRC[JS_SRC.index("function renderPaperOutline("):]
+        block = block[: block.index("\n  function markSelectedPaperChips(")]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+
+    def test_css_defined(self):
+        assert ".graph-review-paper-" in CSS_SRC
+        assert ".graph-review-paper[hidden]" in CSS_SRC
+
+    def test_manual_sections_exist(self):
+        assert "{#paper-view}" in self.MANUAL_SRC
+        assert "{#paper-facing}" in self.MANUAL_SRC

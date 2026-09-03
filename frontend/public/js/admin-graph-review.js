@@ -37,6 +37,9 @@
     chatAnnotations: [], // 直近応答の候補注釈
     chatBusy: false,
     detailNotice: null, // 再描画をまたいで一度だけ再表示する操作結果 {message, kind}
+    view: "graph",      // "graph" | "paper"（左ペインの表示。論文層 = graph_paper_layer_design.md）
+    paperLayer: null,   // 論文層 DTO（読み時射影。取得前は null）
+    paperLayerError: null, // 論文層の取得失敗の事実文（グラフ・レビュー操作は止めない）
     preserveViewOnce: false, // 次の再描画でズーム・パンを維持する（fit しない）
     voiceLoop: null,    // AdminVoiceChat のコントローラ（起動中のみ）
     voicePlayer: null,  // 読み上げ中の Audio（停止時に止める）
@@ -62,6 +65,27 @@
     equation_synthesis: "式から合成",
     atomic_rewrite: "主張の細分化",
   };
+
+  // 論文層（graph_paper_layer_design.md §3）の語彙 → 表示ラベル。
+  // いずれも論文層 DTO だけで閉じる小さな表で、graphView の語彙とは重ならない。
+  var EQUATION_ROLE_LABELS = {
+    input: "入力",
+    intermediate: "中間",
+    output: "出力",
+    definition: "定義",
+    constraint: "制約",
+    linked: "関連",
+  };
+  var SYMBOL_ROLE_LABELS = { eliminated: "消去", retained: "保持" };
+  var EXPLANATION_STATUS_LABELS = { approved: "承認済み", candidate: "候補" };
+
+  // 論文層の事実文（PL8: 欠落は例外にせず1行の事実として出す）。
+  var PAPER_LOADING_TEXT = "論文層を読み込んでいます…";
+  var PAPER_ERROR_TEXT = "論文層を取得できませんでした。";
+  var PAPER_UNAVAILABLE_TEXT = "この教材では、論文の順で表示できる解析結果がありません。";
+  var PAPER_SECTION_EMPTY_TEXT = "このフレームには掛かっていません";
+  var PAPER_UNLOCATED_TEXT = "論文上の位置を特定できませんでした（式・根拠・claim へのリンクがありません）";
+  var PAPER_NODE_MISSING_TEXT = "このノードに対応する論文側の情報はありません。";
 
   function esc(text) {
     return deps.escHtml ? deps.escHtml(text == null ? "" : String(text)) : String(text == null ? "" : text);
@@ -171,6 +195,10 @@
           '<div class="graph-review-title">🕸 グラフレビュー — <span id="graph-review-title-text"></span>' +
             '<span id="graph-review-graph-updated" class="graph-review-graph-updated"></span></div>' +
           '<div class="graph-review-toolbar">' +
+            '<span class="graph-review-viewtoggle" data-ui-anchor="graph-review.paper-view">表示: ' +
+              '<button type="button" class="graph-review-view-btn" data-graph-review-view="graph">グラフ</button>' +
+              '<button type="button" class="graph-review-view-btn" data-graph-review-view="paper">論文の順</button>' +
+            "</span>" +
             '<span id="graph-review-layer-toolbar" data-ui-anchor="graph-review.layer"></span>' +
             '<label class="graph-review-filter" data-ui-anchor="graph-review.filter-unreviewed">' +
               '<input type="checkbox" id="graph-review-unreviewed-toggle"> 未レビューのみ強調' +
@@ -182,7 +210,10 @@
         '</div>' +
         '<div class="graph-review-body">' +
           '<div class="graph-review-graph-pane">' +
-            '<div id="graph-review-network" class="graph-review-network" tabindex="0"></div>' +
+            '<div id="graph-review-network-wrap" class="graph-review-network-wrap">' +
+              '<div id="graph-review-network" class="graph-review-network" tabindex="0"></div>' +
+            "</div>" +
+            '<div id="graph-review-paper" class="graph-review-paper" hidden></div>' +
             '<div id="graph-review-graph-status" class="graph-review-status"></div>' +
           '</div>' +
           '<div class="graph-review-side">' +
@@ -221,6 +252,11 @@
       // 強調の切替は見ている範囲を変えない（ズーム・パンを保つ）。
       state.preserveViewOnce = true;
       renderNetwork();
+    });
+    modal.querySelectorAll("[data-graph-review-view]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        setView(this.getAttribute("data-graph-review-view"));
+      });
     });
     modal.querySelector("#graph-review-next-unreviewed").addEventListener("click", gotoNextUnreviewed);
     modal.querySelector("#graph-review-chat-tab-graph").addEventListener("click", function () {
@@ -270,6 +306,9 @@
     state.chatAnnotations = [];
     state.detailNotice = null;
     state.preserveViewOnce = false;
+    state.view = "graph";
+    state.paperLayer = null;
+    state.paperLayerError = null;
     var modal = ensureModal();
     modal.hidden = false;
     stopVoice(); // 前回の音声セッションを持ち越さない
@@ -277,8 +316,13 @@
     document.getElementById("graph-review-graph-updated").textContent = "";
     document.getElementById("graph-review-unreviewed-toggle").checked = false;
     setStatus("graph-review-graph-status", "グラフを読み込み中...", "info");
+    renderViewToggle();
+    renderPaperOutline();
     renderChatShell();
     loadGraph();
+    // 論文層はグラフと並行して遅延取得する（設計書 §4.1）。失敗してもグラフ表示・
+    // レビュー操作は止めない（PL8）。
+    loadPaperLayer(documentId);
   }
 
   function close() {
@@ -324,17 +368,71 @@
       });
   }
 
+  // 論文層（読み時射影・LLM 0回）。グラフとは別エンドポイントで、取得の成否は
+  // グラフ表示・承認操作に影響させない（PL8 / 設計書 §4.1）。
+  function loadPaperLayer(documentId) {
+    deps.apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/paper-layer")
+      .then(function (res) {
+        if (!res.ok) throw new Error(PAPER_ERROR_TEXT);
+        return res.json();
+      })
+      .then(function (data) {
+        if (state.documentId !== documentId) return; // 別教材へ切替済みの遅延応答は破棄
+        state.paperLayer = data || {};
+        state.paperLayerError = null;
+        renderPaperOutline();
+        renderDetail();
+      })
+      .catch(function () {
+        if (state.documentId !== documentId) return;
+        state.paperLayer = null;
+        state.paperLayerError = PAPER_ERROR_TEXT;
+        renderPaperOutline();
+        renderDetail();
+      });
+  }
+
   // -------------------------------------------------------------------------
   // 描画
   // -------------------------------------------------------------------------
 
   function render() {
     renderGraphUpdatedAt();
+    renderViewToggle();
     renderLayerToolbar();
     renderUnreviewedCount();
     renderNetwork();
+    renderPaperOutline();
     renderDetail();
     renderChatShell();
+  }
+
+  // 左ペインの表示切替（グラフ / 論文の順）。network インスタンスは破棄せず、
+  // 包みの hidden だけを切り替える。
+  function setView(view) {
+    var next = view === "paper" ? "paper" : "graph";
+    if (next === state.view) return;
+    state.view = next;
+    renderViewToggle();
+    renderPaperOutline();
+    if (next === "graph") {
+      // vis は非表示コンテナでの初期化・描画を苦手とするため、戻した時点で描き直す。
+      renderNetwork();
+      if (state.network) {
+        try { state.network.redraw(); } catch (e) { /* noop */ }
+      }
+    }
+  }
+
+  function renderViewToggle() {
+    var modal = document.getElementById("graph-review-modal");
+    if (!modal) return;
+    modal.querySelectorAll("[data-graph-review-view]").forEach(function (btn) {
+      var active = btn.getAttribute("data-graph-review-view") === state.view;
+      btn.className = "graph-review-view-btn" + (active ? " is-active" : "");
+    });
+    var wrap = document.getElementById("graph-review-network-wrap");
+    if (wrap) wrap.hidden = state.view !== "graph";
   }
 
   // グラフの鮮度の事実文。裏付け・要確認の情報は graph_json に解析時点で焼き込まれる
@@ -384,6 +482,9 @@
   function renderNetwork() {
     var container = document.getElementById("graph-review-network");
     if (!container || !state.graph) return;
+    // 論文の順で見ている間は vis を組まない（非表示コンテナでのレイアウトを避ける）。
+    // 戻したときに setView が描き直す。
+    if (state.view === "paper") return;
     // 破棄前に現在の視点を控える（preserveViewOnce のときだけ新 network へ引き継ぐ）。
     var savedPosition = null;
     var savedScale = null;
@@ -474,6 +575,7 @@
   function selectNode(nodeId) {
     state.selectedNodeId = nodeId;
     renderDetail();
+    markSelectedPaperChips(); // 論文の順で見ているときの選択強調（描き直さず class のみ）
     if (state.chatMode === "node") {
       // ノードを移ったら対話文脈も移す（セッションはノード単位）。
       switchChatMode("node");
@@ -499,6 +601,399 @@
         state.network.focus(nextId, { scale: 1.0, animation: { duration: 300, easingFunction: "easeInOutQuad" } });
       } catch (e) { /* noop */ }
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // 論文層（graph_paper_layer_design.md §3/§4.1）
+  //
+  // フレーム（理論操作グラフ）を触らず、論文側の骨格（章・式・図表・claim）と
+  // 各ノードの「論文での対応」を読み時射影で表示する。表示するのは display_label /
+  // title / text だけで、内部 ID（eq_op_0001 等）は描かない（PL7）。件数・
+  // confidence は出さない（PL4）。
+  // -------------------------------------------------------------------------
+
+  function paperData() {
+    return state.paperLayer || null;
+  }
+
+  function paperFactLine(text) {
+    return '<div class="graph-review-paper-fact">' + esc(text) + "</div>";
+  }
+
+  function paperFactLines(facts, fallback) {
+    var list = (facts || []).filter(function (fact) { return String(fact || "").trim(); });
+    if (!list.length) return fallback ? paperFactLine(fallback) : "";
+    return list.map(function (fact) { return paperFactLine(String(fact)); }).join("");
+  }
+
+  // 論文層 DTO のノード面（main は member を合算済みでサーバから来る）。
+  function paperNodeEntry(nodeId) {
+    var data = paperData();
+    var nodes = (data && data.nodes) || null;
+    if (!nodes || !nodeId) return null;
+    return nodes[nodeId] || null;
+  }
+
+  // 章タイトルの索引（evidence / 式の所在表示に使う。DTO は section_id しか持たない）。
+  function paperSectionTitles() {
+    var data = paperData();
+    var sections = (data && data.paper && data.paper.sections) || [];
+    var index = {};
+    for (var i = 0; i < sections.length; i++) {
+      var sid = String(sections[i].section_id || "");
+      if (sid) index[sid] = String(sections[i].title || "");
+    }
+    return index;
+  }
+
+  function paperPageLabel(start, end) {
+    var from = start == null || start === "" ? "" : String(start);
+    var to = end == null || end === "" ? "" : String(end);
+    if (from && to && from !== to) return "p." + from + "–" + to;
+    if (from) return "p." + from;
+    if (to) return "p." + to;
+    return "";
+  }
+
+  // 「章タイトル ・ p.4」。どちらも無ければ空文字（推測しない — PL3）。
+  function paperSourceLabel(sectionId, page, titles) {
+    var parts = [];
+    var title = titles ? String(titles[String(sectionId || "")] || "") : "";
+    if (title) parts.push(title);
+    var pageLabel = paperPageLabel(page, null);
+    if (pageLabel) parts.push(pageLabel);
+    return parts.join(" ・ ");
+  }
+
+  // ノードチップの表示名。グラフ側の見出し（stage ラベル / 式の見出し）を優先し、
+  // 取れないときだけ DTO の label を使う。どちらも無ければ内部 ID は出さない（PL7）。
+  function paperNodeLabel(nodeId) {
+    var view = gv();
+    var node = state.graph ? nodeById(nodeId) : null;
+    if (node && view && view.detailHeading) {
+      var heading = String(view.detailHeading(node, nodeId) || "");
+      if (heading && heading !== nodeId) return heading;
+    }
+    var entry = paperNodeEntry(nodeId);
+    var label = entry ? String(entry.label || "") : "";
+    if (label && label !== nodeId) return label;
+    return "（表示名なし）";
+  }
+
+  function paperNodeChips(nodeIds) {
+    var ids = (nodeIds || []).filter(function (id) { return String(id || "").trim(); });
+    if (!ids.length) return "";
+    return '<div class="graph-review-paper-chips">' + ids.map(function (nodeId) {
+      var selected = nodeId === state.selectedNodeId ? " is-selected" : "";
+      return '<button type="button" class="graph-review-paper-chip' + selected +
+        '" data-graph-review-node-id="' + esc(nodeId) + '">' + esc(paperNodeLabel(nodeId)) + "</button>";
+    }).join("") + "</div>";
+  }
+
+  function paperStaticChips(items) {
+    var list = (items || []).filter(function (item) {
+      return item && String(item.display_label || "").trim();
+    });
+    if (!list.length) return "";
+    return '<div class="graph-review-paper-chips">' + list.map(function (item) {
+      return '<span class="graph-review-paper-chip is-static">' + esc(String(item.display_label)) + "</span>";
+    }).join("") + "</div>";
+  }
+
+  function paperSectionHtml(section) {
+    var level = parseInt(section.level, 10);
+    if (!(level > 0)) level = 1;
+    if (level > 3) level = 3;
+    var pageLabel = paperPageLabel(section.page_start, section.page_end);
+    var title = String(section.title || "").trim() || "（無題の章）";
+    var nodeIds = section.node_ids || [];
+    var claims = (section.claims || []).filter(function (claim) {
+      return claim && String(claim.text || "").trim();
+    });
+    var body = "";
+    if (nodeIds.length) {
+      body += paperNodeChips(nodeIds);
+    } else {
+      body += paperFactLine(PAPER_SECTION_EMPTY_TEXT);
+    }
+    body += paperStaticChips(section.equations);
+    body += paperStaticChips(section.figures);
+    body += paperStaticChips(section.tables);
+    if (claims.length) {
+      body += '<details class="graph-review-paper-claims"><summary>この章の主張</summary><ul>' +
+        claims.map(function (claim) {
+          return "<li>" + richText(claim.text) + "</li>";
+        }).join("") + "</ul></details>";
+    }
+    return '<div class="graph-review-paper-section is-level-' + level + '" data-level="' + level + '">' +
+      '<div class="graph-review-paper-section-head">' + esc(title) +
+      (pageLabel ? '<span class="graph-review-paper-page">' + esc(pageLabel) + "</span>" : "") +
+      "</div>" + body + "</div>";
+  }
+
+  function paperHeaderHtml(paper) {
+    var rows = [];
+    function row(label, value, useMath) {
+      var text = String(value == null ? "" : value).trim();
+      if (!text) return;
+      rows.push('<div class="graph-review-paper-headrow"><span class="graph-review-paper-headlabel">' +
+        esc(label) + "</span>" + (useMath ? richText(text) : esc(text)) + "</div>");
+    }
+    row("タイトル", paper.title, false);
+    row("目的", paper.goal, true);
+    row("中心の問い", paper.central_question, true);
+    if (paper.central_thesis) row("中心命題", paper.central_thesis.text, true);
+    if (!rows.length) return "";
+    return '<div class="graph-review-paper-header">' + rows.join("") + "</div>";
+  }
+
+  function paperBackboneHtml(backbone) {
+    var list = (backbone || []).filter(function (block) {
+      return block && (String(block.label || "").trim() || String(block.summary || "").trim());
+    });
+    if (!list.length) return "";
+    return '<div class="graph-review-paper-block"><div class="graph-review-paper-block-title">論文の論理ブロック</div><ul>' +
+      list.map(function (block) {
+        var label = String(block.label || "").trim();
+        var summary = String(block.summary || "").trim();
+        return "<li>" + (label ? '<span class="graph-review-paper-strong">' + esc(label) + "</span>" : "") +
+          (summary ? " " + richText(summary) : "") + "</li>";
+      }).join("") + "</ul></div>";
+  }
+
+  // 被覆（掛かっていない論文要素）。失敗ではなく信号なので警告色にせず、件数も出さない
+  // （PL4 / 設計書 §3.2）。
+  function paperCoverageHtml(coverage) {
+    if (!coverage) return "";
+    var groups = [
+      { title: "掛かっていない式", items: coverage.unbound_equations, key: "display_label" },
+      { title: "掛かっていない図", items: coverage.unbound_figures, key: "display_label" },
+      { title: "掛かっていない主張", items: coverage.unbound_claims, key: "text" },
+    ];
+    var html = "";
+    groups.forEach(function (group) {
+      var list = (group.items || []).filter(function (item) {
+        return item && String(item[group.key] || "").trim();
+      });
+      if (!list.length) return;
+      html += '<div class="graph-review-paper-coverage-group"><div class="graph-review-paper-subtitle">' +
+        esc(group.title) + "</div><ul>" + list.map(function (item) {
+          var text = String(item[group.key]);
+          return "<li>" + (group.key === "text" ? richText(text) : esc(text)) + "</li>";
+        }).join("") + "</ul></div>";
+    });
+    if (!html) return "";
+    return '<div class="graph-review-paper-coverage"><div class="graph-review-paper-block-title">' +
+      "フレームに掛かっていない要素</div>" + html + "</div>";
+  }
+
+  function renderPaperOutline() {
+    var container = document.getElementById("graph-review-paper");
+    if (!container) return;
+    container.hidden = state.view !== "paper";
+    if (state.view !== "paper") { container.innerHTML = ""; return; }
+
+    if (state.paperLayerError) {
+      container.innerHTML = paperFactLine(state.paperLayerError);
+      return;
+    }
+    var data = paperData();
+    if (!data) {
+      container.innerHTML = paperFactLine(PAPER_LOADING_TEXT);
+      return;
+    }
+    if (data.available === false) {
+      container.innerHTML = paperFactLines(data.facts, PAPER_UNAVAILABLE_TEXT);
+      return;
+    }
+    var paper = data.paper || {};
+    var sections = paper.sections || [];
+    var html = paperFactLines(data.facts, "");
+    html += paperHeaderHtml(paper);
+    if (sections.length) {
+      html += sections.map(paperSectionHtml).join("");
+    } else {
+      html += paperFactLine(PAPER_UNAVAILABLE_TEXT);
+    }
+    html += paperBackboneHtml(paper.backbone);
+    html += paperCoverageHtml(data.coverage);
+    container.innerHTML = html;
+
+    container.querySelectorAll("[data-graph-review-node-id]").forEach(function (chip) {
+      chip.addEventListener("click", function () {
+        var nodeId = this.getAttribute("data-graph-review-node-id");
+        // 論文の順で見ている間は network を触らない（フォーカス移動もしない）。
+        selectNode(nodeId);
+      });
+    });
+  }
+
+  function markSelectedPaperChips() {
+    var container = document.getElementById("graph-review-paper");
+    if (!container) return;
+    container.querySelectorAll("[data-graph-review-node-id]").forEach(function (chip) {
+      var selected = chip.getAttribute("data-graph-review-node-id") === state.selectedNodeId;
+      chip.className = "graph-review-paper-chip" + (selected ? " is-selected" : "");
+    });
+  }
+
+  // 右ペイン「論文での対応」。取得前・失敗・available:false は区画ごと事実文1行に
+  // 縮退し、既存のレビュー操作には影響させない（設計書 §4.1）。
+  function paperFacingHtml(nodeId) {
+    var head = '<div class="graph-review-paper-facing" data-ui-anchor="graph-review.paper-facing">' +
+      '<div class="graph-review-paper-facing-title">論文での対応</div>';
+    var tail = "</div>";
+    if (state.paperLayerError) return head + paperFactLine(state.paperLayerError) + tail;
+    var data = paperData();
+    if (!data) return head + paperFactLine(PAPER_LOADING_TEXT) + tail;
+    if (data.available === false) {
+      return head + paperFactLines(data.facts, PAPER_UNAVAILABLE_TEXT) + tail;
+    }
+    var entry = paperNodeEntry(nodeId);
+    if (!entry) return head + paperFactLine(PAPER_NODE_MISSING_TEXT) + tail;
+
+    var titles = paperSectionTitles();
+    var html = "";
+
+    function block(title, body) {
+      if (!body) return;
+      html += '<div class="graph-review-paper-block"><div class="graph-review-paper-subtitle">' +
+        esc(title) + "</div>" + body + "</div>";
+    }
+
+    var narrativeRole = String(entry.narrative_role || "").trim();
+    if (narrativeRole) {
+      html += '<div class="graph-review-paper-role">' + esc(narrativeRole) + "</div>";
+    }
+
+    // 論文上の位置（PL3: リンクの実所在のみ。無ければ推定せず事実文）。
+    var sections = entry.sections || [];
+    if (entry.unlocated || !sections.length) {
+      html += paperFactLine(PAPER_UNLOCATED_TEXT);
+    } else {
+      block("論文上の位置", "<ul>" + sections.map(function (section) {
+        var pageLabel = paperPageLabel(section.page_start, null);
+        return "<li>" + esc(String(section.title || "").trim() || "（無題の章）") +
+          (pageLabel ? '<span class="graph-review-paper-page">' + esc(pageLabel) + "</span>" : "") + "</li>";
+      }).join("") + "</ul>");
+    }
+
+    var thesisRoles = (entry.thesis_roles || []).filter(function (role) {
+      return role && (String(role.section_label || "").trim() || String(role.text || "").trim());
+    });
+    if (thesisRoles.length) {
+      block("中心命題での役割", "<ul>" + thesisRoles.map(function (role) {
+        var label = String(role.section_label || "").trim();
+        return "<li>" + (label ? '<span class="graph-review-paper-strong">' + esc(label) + "</span> " : "") +
+          richText(String(role.text || "")) + "</li>";
+      }).join("") + "</ul>");
+    }
+
+    var equations = entry.equations || [];
+    if (equations.length) {
+      block("式", equations.map(function (equation) {
+        var chips = [];
+        var roleLabel = EQUATION_ROLE_LABELS[String(equation.role || "")] || "";
+        if (roleLabel) chips.push(roleLabel);
+        if (equation.needs_math_review) chips.push("数式要確認");
+        var latex = String(equation.latex || "").trim();
+        var body = latex ? richText("$" + latex + "$") : esc(String(equation.plain_text || ""));
+        return '<div class="graph-review-paper-item">' +
+          '<div class="graph-review-paper-item-head">' +
+            '<span class="graph-review-paper-chip is-static">' + esc(String(equation.display_label || "")) + "</span>" +
+            chips.map(function (chip) {
+              return '<span class="graph-review-chip">' + esc(chip) + "</span>";
+            }).join("") +
+          "</div>" +
+          '<div class="graph-review-paper-item-body">' + body + "</div>" +
+          "</div>";
+      }).join(""));
+    }
+
+    var evidence = (entry.evidence || []).filter(function (item) {
+      return item && String(item.text || "").trim();
+    });
+    if (evidence.length) {
+      block("根拠の逐語引用", evidence.map(function (item) {
+        var source = paperSourceLabel(item.section_id, item.page, titles);
+        return '<blockquote class="graph-review-paper-quote">' + richText(String(item.text)) +
+          (source ? '<cite class="graph-review-paper-source">' + esc(source) + "</cite>" : "") +
+          "</blockquote>";
+      }).join(""));
+    }
+
+    var media = [].concat(entry.figures || []).concat(entry.tables || []).filter(function (item) {
+      return item && (String(item.display_label || "").trim() || String(item.caption || "").trim());
+    });
+    if (media.length) {
+      block("図・表", "<ul>" + media.map(function (item) {
+        var label = String(item.display_label || "").trim();
+        var caption = String(item.caption || "").trim();
+        return "<li>" + (label ? '<span class="graph-review-paper-strong">' + esc(label) + "</span>" : "") +
+          (caption ? " " + esc(caption) : "") + "</li>";
+      }).join("") + "</ul>");
+    }
+
+    var symbols = (entry.symbols || []).filter(function (item) {
+      return item && String(item.symbol || "").trim();
+    });
+    if (symbols.length) {
+      block("記号", "<ul>" + symbols.map(function (item) {
+        var roleLabel = SYMBOL_ROLE_LABELS[String(item.role || "")] || "";
+        var quote = String(item.definition_quote || "").trim();
+        return "<li>" + richText("$" + String(item.symbol) + "$") +
+          (roleLabel ? '<span class="graph-review-chip">' + esc(roleLabel) + "</span>" : "") +
+          (quote ? '<div class="graph-review-paper-note">' + richText(quote) + "</div>" : "") +
+          "</li>";
+      }).join("") + "</ul>");
+    }
+
+    var derivations = entry.derivations || [];
+    if (derivations.length) {
+      block("導出", derivations.map(function (derivation) {
+        var steps = (derivation.steps || []).map(function (step) {
+          var inputs = (step.input_labels || []).join(" , ");
+          var outputs = (step.output_labels || []).join(" , ");
+          var flow = inputs || outputs ? esc(inputs) + " → " + esc(outputs) : "";
+          var reason = String(step.reason || "").trim();
+          return "<li>" + esc(String(step.operation || "")) +
+            (flow ? '<div class="graph-review-paper-flow">' + flow + "</div>" : "") +
+            (reason ? '<div class="graph-review-paper-note">' + richText(reason) + "</div>" : "") +
+            "</li>";
+        }).join("");
+        return '<div class="graph-review-paper-item">' +
+          '<div class="graph-review-paper-item-head">' +
+            '<span class="graph-review-paper-strong">' + esc(String(derivation.operation || "")) + "</span>" +
+          "</div>" +
+          (steps ? "<ul>" + steps + "</ul>" : "") +
+          "</div>";
+      }).join(""));
+    }
+
+    if (entry.explanation && String(entry.explanation.body || "").trim()) {
+      var statusLabel = EXPLANATION_STATUS_LABELS[String(entry.explanation.status || "")] || "";
+      block("この論文での説明",
+        (statusLabel ? '<span class="graph-review-chip">' + esc(statusLabel) + "</span>" : "") +
+        '<div class="graph-review-paper-item-body">' + richText(String(entry.explanation.body)) + "</div>");
+    }
+
+    if (entry.component) {
+      var componentRows = "";
+      [
+        { label: "要約", value: entry.component.summary },
+        { label: "教えどころ", value: entry.component.teaching_takeaway },
+        { label: "中心命題での位置", value: entry.component.role_in_thesis },
+      ].forEach(function (row) {
+        var text = String(row.value == null ? "" : row.value).trim();
+        if (!text) return;
+        componentRows += '<div class="graph-review-paper-headrow"><span class="graph-review-paper-headlabel">' +
+          esc(row.label) + "</span>" + richText(text) + "</div>";
+      });
+      if (componentRows) block("論理要素の説明", componentRows);
+    }
+
+    if (!html) html = paperFactLine(PAPER_NODE_MISSING_TEXT);
+    return head + html + tail;
   }
 
   // -------------------------------------------------------------------------
@@ -646,7 +1141,9 @@
       (archivedReasons.length
         ? '<div class="graph-review-detail-reasons graph-review-detail-reasons-archived">解析時点のメモ（承認済みのため確認は不要です）: ' +
           esc(archivedReasons.join(" / ")) + "</div>"
-        : "");
+        : "") +
+      // 論文での対応（読み時射影。承認状態は変えない — PL1/PL5）。
+      paperFacingHtml(nodeId);
 
     // component 承認・却下（server が最終判定。GR1: 教員の明示操作のみ）。
     // 集約 main ノード（DB UUID でない graph-native ID）は theory_components の行を

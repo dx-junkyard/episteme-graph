@@ -2423,6 +2423,51 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
 - **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /
   G層 To-Do ルール（恒常点灯するため運用実測後に判断）/ 学習者向け表示。
 
+### グラフの論文層（Paper Layer — フレームに論文を肉付けする層, migration なし, 2026-09-03）
+
+理論操作グラフは #308 の規律で main ラベルが theory stage 名に固定されているため、
+「このノードは論文の何か」がグラフ単体では読めない。本層は **フレーム（graph_json）を
+触らず・保存せず・LLM を呼ばず**、既存 artifact（document_structure / equation_semantics /
+evidence_registry / claim_object_builder / symbol_registry / derivation_chain /
+figure_table_semantics / paper_skeleton / thesis_reconstruction / component_assembly）と
+`element_explanations`（contextual）・`document_figures` を読み時に join して、
+①フレーム→論文（ノードごとの「論文側の顔」）②論文→フレーム（章立て・式番号・図番号の
+論文順の背骨にノードを吊る）③被覆（フレームに掛かっていない章・式・図・claim）を
+1つの DTO で返す。正本は `docs/features/graph_paper_layer_design.md`（PL1〜PL8・§3 DTO 契約・
+§10 実装記録）。
+
+- **不変条項の要点**: PL1 フレーム非改変（graph_json・#308 ラベル規律・成果テーブルの列に
+  触れない）/ PL2 決定論・非LLM / PL3 リンクの無いものに対応を推定しない（章の解決は
+  式の `source_location.section_id` → evidence `source.section_id` → claim `section_id` →
+  `block_id` → `document_structure.blocks[].section_id` の実所在のみ。無ければ `unlocated`）/
+  PL4 数値非表示（confidence / weight / candidate_score / qualification_reason を DTO に
+  載せない・件数バッジなし）/ PL5 承認オブジェクトを増やさない（承認は component / claim
+  のまま）/ PL6 権限 = document viewable / PL7 内部 ID（`eq_op_*` / `theory_op_*` / `ev_*`）を
+  表示ラベルに使わない（式は印字番号「式 (12)」、章は見出し、図表は `figure_label`）/
+  PL8 fail-soft（artifact 欠落ごとに `facts[]` へ事実文1行・グラフ未構築は `available:false`）。
+- **core**: `backend/core/graph_paper_layer/`（schema / builder。FastAPI・sqlalchemy・LLM
+  非 import の純関数 `build_paper_layer(graph, artifacts, *, figure_rows, explanation_rows)`。
+  入力を mutate しない）。結び付けの粒度は **式の詳細層（detail）**、main は
+  `member_component_ids` の合算（多対多を隠さない）。図は `FigureRecord.linked_claim_ids` ∩
+  ノード claim → `document_figures` 行を `normalize_figure_join_key` の二段キーで照合。
+  thesis 上の役割は `thesis_ref`（`central_thesis` / `support:{section}:{idx}`）+
+  `label_vocab.SUPPORT_SECTION_LABELS`（新しい訳語表を作らない）。
+- **API**: `GET /api/admin/documents/{document_id}/paper-layer`（`routes/theory_components.py`・
+  TEACHER + `_ensure_document_viewable`）。既存 `component-graph` レスポンスは不変（別
+  エンドポイント・レビュー画面が遅延取得）。builder 例外は 500 にせず `available:false` +
+  事実文で 200。
+- **UI**（`admin-graph-review.js`）: ツールバー「表示: グラフ | 論文の順」
+  （`graph-review.paper-view`）で左ペインを章アウトライン（章 → ノード・式・図表チップ、
+  ノードの無い章は「このフレームには掛かっていません」、末尾に被覆）に切替。右ペイン詳細に
+  「論文での対応」区画（`graph-review.paper-facing`: narrative_role → 位置 → thesis 役割 →
+  式 → 逐語引用 → 図表 → 記号 → 導出 → contextual 説明 → component 要約）。既存の承認・
+  却下・claim 承認・チャットは非改変。数式は `richText`（graphView.inlineMathHtml）のみ。
+- **ガードレール**: `test_graph_paper_layer_{core,api,guardrails}.py` +
+  `test_graph_review_ui_static.py::TestPaperLayer`。
+- **非スコープ（v1）**: 学習者向け表示 / 論文層の保存 / LLM による章推定・一段落説明
+  （Phase 1 — まず contextual 説明の join で足りるか実測）/ 被覆の下流（G層・候補化 = Phase 2）/
+  図画像のインライン表示。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは

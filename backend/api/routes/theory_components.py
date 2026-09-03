@@ -2171,6 +2171,10 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
             # Issue #451: preserve relation polarity for UI visualisation.
             "polarity": str(edge.get("polarity") or ""),
+            # 論文層（graph_paper_layer）が NarrativeAnnotator の edge_narratives と
+            # 突合するための edge_id。persistence は保存しているが、ここで落とすと
+            # 遷移文（transition_text）が辺に結び付かない。
+            "edge_id": str(edge.get("edge_id") or ""),
         })
     if not normalized_nodes and not normalized_edges:
         return {}
@@ -3133,6 +3137,157 @@ def get_component_graph(
     payload["reference_index"] = _build_graph_reference_index(document_id, payload)
     return ComponentGraphResponse(**payload)
 
+
+# ---------------------------------------------------------------------------
+# 論文層（Paper Layer） — 正本: docs/features/graph_paper_layer_design.md
+# ---------------------------------------------------------------------------
+
+_PAPER_LAYER_FAILURE_FACT = "論文層の導出に失敗したため表示できません。"
+
+
+def _build_paper_layer_payload(
+    graph: dict,
+    artifacts: dict,
+    *,
+    figure_rows: list[dict],
+    explanation_rows: list[dict],
+) -> dict:
+    """core の純関数 ``build_paper_layer`` への薄い間接層。
+
+    ``core.graph_paper_layer`` は別モジュールとして着地するため import は遅延させる
+    （route モジュールの import がその着地に依存しないようにする）。テストはこの関数を
+    monkeypatch して builder を差し替える。
+    """
+    from core.graph_paper_layer import build_paper_layer
+
+    return build_paper_layer(
+        graph,
+        artifacts,
+        figure_rows=figure_rows,
+        explanation_rows=explanation_rows,
+    )
+
+
+def _paper_layer_figure_rows(document_id: str) -> list[dict]:
+    """document_figures の抽出済み行（図→ノード照合と db_id 付与に使う）。
+
+    取得失敗は例外にせず空リストへ縮退する（PL8 fail-soft）。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id::text AS id, figure_key, figure_label, page, caption_text
+                FROM document_figures
+                WHERE document_id = :document_id AND status = 'extracted'
+            """),
+            {"document_id": document_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {
+            "id": row.id,
+            "figure_key": row.figure_key,
+            "figure_label": row.figure_label,
+            "page": row.page,
+            "caption_text": row.caption_text,
+        }
+        for row in rows
+    ]
+
+
+def _paper_layer_explanation_rows(document_id: str) -> list[dict]:
+    """component の contextual 説明（approved 優先・candidate も status 付きで返す）。
+
+    ``element_explanations.document_id`` は UUID 列なので、UUID でない参照
+    （source_path 等）ではクエリ自体を投げない（DataError → 500 の回避）。
+    """
+    if not _is_db_uuid(document_id):
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT element_id, body, status
+                FROM element_explanations
+                WHERE document_id = CAST(:document_id AS uuid)
+                  AND element_type = 'theory_component'
+                  AND kind = 'contextual'
+                  AND status IN ('approved', 'candidate')
+            """),
+            {"document_id": document_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {"element_id": row.element_id, "body": row.body, "status": row.status}
+        for row in rows
+    ]
+
+
+# DTO の契約は設計書 §3（core 側の純関数が正本）。Pydantic モデルを重ねると
+# core schema の二重管理になるため response_model は持たない。
+@router.get("/documents/{document_id}/paper-layer", response_model=None)
+def get_document_paper_layer(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """理論操作グラフの論文層（読み時射影・LLM 0回・保存なし）。
+
+    正本は ``docs/features/graph_paper_layer_design.md`` §3（DTO 契約）。
+    既存 ``GET .../component-graph`` のレスポンスには一切触れない（別経路・遅延取得）。
+    """
+    _ensure_document_viewable(document_id, current_user)  # PL6
+
+    components = _components_for_document(document_id)
+    graph = _normalize_stored_component_graph(document_id, _stored_component_graph(document_id), components)
+    if not graph:
+        graph = _build_component_graph_payload(document_id, components)
+    graph["reference_index"] = _build_graph_reference_index(document_id, graph)
+
+    # NOTE: `_build_graph_reference_index` も内部で `document_run_artifacts` を読むため
+    # 現状 artifact の取得は2回になる。論文層は読み時導出で保存もしないため許容し、
+    # reference_index 側のリファクタは行わない（既存経路を触らない方針）。
+    try:
+        artifacts = document_run_artifacts(document_id)
+    except Exception:
+        logger.debug("paper_layer: artifacts unavailable for document %s", document_id, exc_info=True)
+        artifacts = {}
+
+    try:
+        figure_rows = _paper_layer_figure_rows(document_id)
+    except Exception:
+        logger.debug("paper_layer: figure rows unavailable for document %s", document_id, exc_info=True)
+        figure_rows = []
+
+    try:
+        explanation_rows = _paper_layer_explanation_rows(document_id)
+    except Exception:
+        logger.debug(
+            "paper_layer: explanation rows unavailable for document %s", document_id, exc_info=True
+        )
+        explanation_rows = []
+
+    try:
+        return _build_paper_layer_payload(
+            graph,
+            artifacts,
+            figure_rows=figure_rows,
+            explanation_rows=explanation_rows,
+        )
+    except Exception:
+        logger.debug("paper_layer: build failed for document %s", document_id, exc_info=True)
+        return {
+            "document_id": document_id,
+            "available": False,
+            "facts": [_PAPER_LAYER_FAILURE_FACT],
+            "paper": None,
+            "nodes": {},
+            "edges": {},
+            "coverage": {},
+            "narrative": {},
+        }
 
 
 @router.get("/courses/{course_id}/theory-components", response_model=list[TheoryComponentOut])

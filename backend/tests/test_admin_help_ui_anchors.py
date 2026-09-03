@@ -167,7 +167,13 @@ class TestAdminUiAnchorsModule:
         # + グラフ対話レビューの音声対話追補（2026-08-29 §12）の1件:
         #   graph-review.voice（🎤 音声トグル。ハンズフリーの発話→文字起こし→応答の
         #    読み上げ。音声は対話の入出力手段のみで、承認・却下は教員のボタン — GR1）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 319
+        # + グラフの論文層（graph_paper_layer_design.md §4.1）の2件:
+        #   graph-review.paper-view（ツールバーの表示切替「グラフ / 論文の順」。論文の順は
+        #    章立てに沿ったアウトラインで、掛かっていない章・要素も正直に列挙する —
+        #    PL3/PL4）/
+        #   graph-review.paper-facing（ノード詳細の「論文での対応」区画。既存の解析結果の
+        #    読み時射影で、LLM 生成も承認状態の変更も伴わない — PL1/PL2/PL5）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 321
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

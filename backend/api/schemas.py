@@ -1129,6 +1129,9 @@ class ComponentGraphEdge(BaseModel):
     # Issue #451: relation polarity ("+" / "-" / "" non-polar). Mirrors
     # DSLEdge.polarity; the UI visualises polarity from this field, not the label.
     polarity: str = ""
+    # NarrativeAnnotator の edge_narratives と突合するための辺 ID（論文層が使う。
+    # 旧 graph_json では空文字）。
+    edge_id: str = ""
 
 
 class ComponentGraphResponse(BaseModel):

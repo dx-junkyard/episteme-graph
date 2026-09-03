@@ -205,6 +205,7 @@ PDF アップロード
   ／[要素中心コンテキストレンズ（#498）](features/element_context_lens_design.md)
   ／[要素インベントリ](features/element_inventory_design.md)
   ／[グラフ対話レビュー（教材起点のグラフ確認・承認画面）](features/graph_dialogue_review_design.md)
+  ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
 - [二層説明（generic/contextual）+ 図のコース流通](features/hierarchical_context_explanation_design.md)
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)

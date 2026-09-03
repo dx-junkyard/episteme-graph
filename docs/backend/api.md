@@ -545,6 +545,7 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | GET | `/api/admin/documents/{id}/chunks/{chunk_id}/claims` | TEACHER + document 閲覧権 | チャンク単位の theory_claims（0件ならドキュメント全体にフォールバック） |
 | GET | `/api/admin/documents/{id}/sections/{sid}/components` | TEACHER + document 閲覧権 | セクション単位の theory_components（0件ならドキュメント全体にフォールバック） |
 | GET | `/api/admin/documents/{id}/component-graph` | TEACHER + document 閲覧権 | 保存済み TheoryOperationGraph の正規化返却（無ければ決定論的に構築） |
+| GET | `/api/admin/documents/{id}/paper-layer` | TEACHER + document 閲覧権 | 理論操作グラフの論文層（フレーム→論文 / 論文→フレーム / 被覆）の読み時射影。LLM 0回・保存なし |
 | PATCH | `/api/admin/claims/{claim_id}` | TEACHER + document 編集権 | claim の全項目更新（review_status 遷移は監査、rejected は伝播、承認時は R層 item オーサリングを非同期起動） |
 
 #### 理論コンポーネント CRUD（コース単位）

@@ -153,6 +153,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "graph-review.new-chat",
         "graph-review.next-unreviewed",
         "graph-review.open-deliberation",
+        "graph-review.paper-facing",
+        "graph-review.paper-view",
         "graph-review.reject",
         "graph-review.voice",
         "groups.create-form",
@@ -602,6 +604,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "graph-review.new-chat": "teacher/26-admin-graph-review.md#new-chat",
     "graph-review.next-unreviewed": "teacher/26-admin-graph-review.md#next-unreviewed",
     "graph-review.open-deliberation": "teacher/26-admin-graph-review.md#open-deliberation",
+    "graph-review.paper-facing": "teacher/26-admin-graph-review.md#paper-facing",
+    "graph-review.paper-view": "teacher/26-admin-graph-review.md#paper-view",
     "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
     "graph-review.voice": "teacher/26-admin-graph-review.md#voice-chat",
 
