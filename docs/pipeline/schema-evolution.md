@@ -128,11 +128,15 @@ PostgreSQL: schema_ontology_types / schema_predicates
 >   Before が空になり、差分が意味を持ちません
 >   （→ [DSL と理論操作グラフ §4](theory-graph.md#4-理論コンポーネント抽出theory_componentspy)）。
 >   After は実際の再抽出ではなく **LLM に変化を推測させるインメモリのシミュレーション**です。
-> - **`approve-with-scope` の `scope="canary"` は、再抽出の対象を実際には絞りません。**
->   対象件数（`total_docs`）だけコース由来で数え、実行は `_run_canary_reextraction` →
->   `_run_reextraction_job`（= 全 `status='completed'` ドキュメント）にそのまま委譲されます
->   （`core/simulator.py` に `TODO: course_ids によるフィルタリングを追加` が残る）。
->   「一部コースだけに適用される」と読まないでください。
+> - **`approve-with-scope` の `scope="canary"` は、対象コース由来のドキュメントだけを再抽出します**
+>   （2026-09-03 修正。それ以前は対象件数だけコース由来で数え、実行は全 `status='completed'`
+>   ドキュメントに及んでいました）。`_canary_target_document_ids(course_ids)` が
+>   `documents × chunks × learning_courses` の JOIN で対象 document.id を解決し、
+>   `total_docs`（= 解決件数）と実行対象を**同じクエリから**導きます。解決結果が 0 件のときは
+>   全件へフォールバックせず、`processed_docs=0` のまま完了します。
+>   `course_ids` はバインドパラメータ（`= ANY(:course_ids)`）で渡します（リクエストボディ由来の
+>   値を SQL 文字列へ埋め込まない）。ガードレールは
+>   `backend/tests/test_simulator_canary.py`。
 
 ---
 

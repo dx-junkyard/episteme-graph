@@ -77,8 +77,43 @@ def enqueue_reextraction(proposal_id: str) -> dict:
     }
 
 
-def _run_reextraction_job(job_id: str) -> None:
-    """再抽出ジョブを実行する（バックグラウンドスレッド）。"""
+# 処理対象ドキュメントの取得（値の埋め込みをしないよう2本の固定 SQL に分ける）
+_DOCS_SQL = """
+    SELECT id, title, filename, source_path
+    FROM documents
+    WHERE status = 'completed' AND filename IS NOT NULL
+    ORDER BY created_at
+"""
+
+_DOCS_SQL_FILTERED = """
+    SELECT id, title, filename, source_path
+    FROM documents
+    WHERE status = 'completed' AND filename IS NOT NULL
+      AND CAST(id AS text) = ANY(:doc_ids)
+    ORDER BY created_at
+"""
+
+
+def _run_reextraction_job(job_id: str, document_ids: list[str] | None = None) -> None:
+    """再抽出ジョブを実行する（バックグラウンドスレッド）。
+
+    ``document_ids`` を指定すると、その document.id（テキスト表現）に含まれる
+    ドキュメントだけを再抽出する（カナリアリリース用）。``None`` は従来どおり
+    ``status='completed'`` の全ドキュメントが対象。空リストは「対象 0 件」であり
+    全件へのフォールバックはしない（SQL も発行しない）。
+
+    .. warning::
+       **既知の破壊的副作用（本タスクでは未修正・整理の要否はオーナー判断）** —
+       この処理は A層パイプラインではなく旧 ``services.*`` 経路を使い、対象ドキュメントの
+       チャンクを ``DELETE FROM chunks`` で全削除してから 1000 字固定で作り直す。
+       そのため A層由来の列（``display_text`` / ``spoken_text`` / ``formulas`` /
+       ``block_ids`` / ``section_id`` / ``page_start`` / ``page_end``）が失われ、
+       レクチャー原稿・スライド分割・根拠リンクが壊れる。``theory_claims`` /
+       ``theory_components`` / ``theory_component_graphs`` / ``document_analysis_runs``
+       は touch されないため、チャンクだけが A層成果物と食い違う状態になる。
+       復旧は当該教材の再解析（``POST /api/admin/documents/{id}/reanalyze``）。
+       詳細は ``docs/pipeline/schema-evolution.md`` §5 の警告節。
+    """
     from services import (
         build_knowledge_graph,
         chunk_text,
@@ -106,18 +141,22 @@ def _run_reextraction_job(job_id: str) -> None:
         session.close()
 
     # 処理対象ドキュメント取得
-    session = _pg_session()
-    try:
-        docs = session.execute(
-            sa_text("""
-                SELECT id, title, filename, source_path
-                FROM documents
-                WHERE status = 'completed' AND filename IS NOT NULL
-                ORDER BY created_at
-            """),
-        ).fetchall()
-    finally:
-        session.close()
+    if document_ids is not None and not document_ids:
+        # 対象 0 件: 全件へフォールバックせず、SQL も発行しない
+        docs = []
+        logger.info("Reextraction job %s has no target documents (scoped, 0 docs)", job_id)
+    else:
+        session = _pg_session()
+        try:
+            if document_ids is None:
+                docs = session.execute(sa_text(_DOCS_SQL)).fetchall()
+            else:
+                docs = session.execute(
+                    sa_text(_DOCS_SQL_FILTERED),
+                    {"doc_ids": [str(d) for d in document_ids]},
+                ).fetchall()
+        finally:
+            session.close()
 
     processed = 0
     errors = []
@@ -151,6 +190,9 @@ def _run_reextraction_job(job_id: str) -> None:
             chunks = chunk_text(text, chunk_size=1000, overlap=100)
 
             # 既存チャンクを削除
+            # 【既知の破壊的副作用 / 未修正】この DELETE → 再挿入は A層由来の列
+            # （display_text / spoken_text / formulas / block_ids / section_id 等）を失う。
+            # 関数 docstring の warning と docs/pipeline/schema-evolution.md §5 を参照。
             session = _pg_session()
             try:
                 session.execute(
