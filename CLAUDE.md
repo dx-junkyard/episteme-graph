@@ -31,10 +31,10 @@ docker compose up -d --build api-server
 docker compose logs -f api-server
 
 # テスト実行（全件）
-cd backend && pytest backend/tests/
+cd backend && pytest tests/
 
 # テスト実行（単一ファイル）
-cd backend && pytest backend/tests/test_diff_merge.py -v
+cd backend && pytest tests/test_docs_registry_guardrails.py -v
 
 # アクセス先
 # http://localhost:3000        → 学習UI
@@ -62,7 +62,7 @@ src/tests/                     → agents 用 pytest テスト
 | ファイル | 役割 |
 |---|---|
 | `backend/core/schema.py` | 全 Pydantic モデル定義（OntologyType, CorePredicate, PaperStructure など） |
-| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **19本（2026-08-14 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
+| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **22本（2026-09-03 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
 | `backend/api/routes/lecture_studio/` | 原稿スタジオルーター（Tier 3-17a で `_shared` / `scripts` / `pipeline` / `topics` に分割したパッケージ。`__init__.py` が router と互換シンボルを再エクスポートするため import 面は旧単一ファイルと同じ） |
 | `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）。orchestrator の下請け。旧 diff/merge は本番未使用のため削除済み（2026-07） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
@@ -2467,6 +2467,49 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **非スコープ（v1）**: 学習者向け表示 / 論文層の保存 / LLM による章推定・一段落説明
   （Phase 1 — まず contextual 説明の join で足りるか実測）/ 被覆の下流（G層・候補化 = Phase 2）/
   図画像のインライン表示。
+
+### 個人化5フェーズ（討論由来、migration なし、2026-08-15）
+
+`docs/architecture/ai_assistant_personalization_debate_2026-08-15.md` の討論から出た5提案を、
+既存機構の薄い拡張として同日に実装した層群。計画は `docs/architecture/personalization_implementation_plan.md`、
+各フェーズの正本設計書は下記（すべて「実装済み」・§実装記録あり）。いずれも新テーブルなし・
+数値非表示・本人のみ可視・AI は候補提示までの各層不変条項を継承する。
+
+- **Phase 1 主権台帳 v1「わたしの記録」**（`trace_registry_sovereignty_ledger_design.md`）:
+  `core/trace_registry.py`（kind 登録簿の正本）+ `core/trace_ledger.py` + `routes/my_records.py`
+  （GET のみ・本人のみ）。詳細は下記「横断基盤」の `trace_registry.py` 項。
+- **Phase 2 帰還の扉**（`return_door_design.md`）: `core/cycle/schema.py` の `ROLE_LEAVE_NOTE`
+  （INTENTION_ROLES 4値化）/ `core/cycle/derive.py::build_return_door` / `build_todays_words` /
+  `routes/cycle.py` の GET `return-door`・`todays-words`。フロントは `discuss.js` の書き置き欄 +
+  逐語トレイ、`app.js` の扉インレイ `#return-door` と欄外の印 `#margin-marks`（上限12・
+  `map_excluded` 除外・トグルは localStorage `eg_margin_marks:<courseId>`）。扉の last_tension は
+  `map_excluded` を意図的に尊重しない（扉は地図ではなく本人の言葉の再提示）。アンカー
+  `material.return-door`。
+- **Phase 3 構造の降下路（足場ダイヤル・楽屋）**（`structure_descent_design.md`）:
+  `backend/core/descent/`（`engine.py::build_ladder` / `build_backstage_path`、`resolve.py`）+
+  `routes/descent.py`（GET `ladder`・`backstage-path`、受講ゲート・element_type 422）。楽屋の
+  痕跡は kind `backstage_question`（登録簿宣言・教員集約から除外・`entry_mode:'discuss'` を
+  焼き込まない）。`learning_chat` は `_is_backstage` をハンドラ冒頭で判定し、楽屋では
+  `action` / `atlas_context` を無効化・`anchor_confirm` を出さない。楽屋の notation_patterns
+  段は明示 cartridge のみ（`load_cartridge(None)` の既定カートリッジ縮退を踏まない）。
+  アンカー `material.descent-ladder`。
+- **Phase 4 宣言された弁と静かな計器（教員支援）**（`teacher_triage_instruments_design.md`）:
+  `core/teacher_triage.py`（説明レビューキュー / R層 review-queue の `sort=load` — 台帳の
+  負荷度による安定ソート・導出不能は末尾・`sort` 不正値 422・course 混在時は全件導出不能扱い）/
+  `core/llm_usage/forecast.py`（`GET /api/admin/llm-usage/forecast[/documents/{id}]`、4カウンタ
+  最小残数の近似・`{show, message}` のみ・`daily_limit <= 0` は無効化扱いで除外）/
+  `core/lecture_wm.py`（preview-split の optional `document_id` で WM レンズ相乗り・
+  `label_vocab.WM_INTERACTION` 3段・縮退文はサーバ fact `WM_DEGRADED_NOTICE` に一本化）。
+- **Phase 5 ゼミ前ブリーフと鏡面化**（`seminar_brief_mirroring_design.md`）:
+  `core/doubt/seminar_brief.py`（4区画 `fragile_assumptions` / `single_support_lines` /
+  `clear_skies` / `learner_handoff`、SL1 閉世界語彙のガードレール対象）+ `routes/seminar_brief.py`
+  （GET 1本・権限2段ゲート）+ 教材行 ⋯ メニュー「ゼミ前ブリーフ…」。鏡面化は
+  `_get_discuss_system_prompt` の 〔鏡〕 契約 + `core/discuss/mirroring.py::extract_mirror`
+  （鏡文中の**すべて**の「」引用が学習者の直前発話の逐語部分文字列であること・最短2文字・
+  不合格はマーカー剥がしの縮退）+ `LearningChatResponse.mirror` + `app.js` の `.mirror-block`。
+- **ガードレール**: `test_return_door_{core,api,ui_static}.py` / `test_descent_{core,guardrails,api,ui_static}.py` /
+  `test_teacher_triage_{core,api}.py` / `test_quiet_instruments_{core,ui_static}.py` /
+  `test_seminar_brief_{api,ui_static}.py` / `test_mirroring_prompt_guardrails.py` / `test_mirroring_ui_static.py`。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
