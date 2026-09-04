@@ -2911,10 +2911,14 @@ def _learning_chat_core(
             "※選択中の検索範囲には、この質問に直接関連する箇所は見当たりませんでした。"
             "範囲は広げていません。一般的な学術知識で回答する場合は、この論文由来ではないことを明示してください。"
         )
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+        # 楽屋（backstage）の質問は本人専用（SD4 / 原則5）。unanswered_query_logs は
+        # 教員の「未回答の質問」表に氏名付きで出る経路なので、楽屋では記録しない。
+        if not _is_backstage:
+            log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
     else:
         context_block = "※この質問に直接関連する教材セクションは見つかりませんでした。一般的な学術知識を用いて回答してください。"
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+        if not _is_backstage:
+            log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
     # 5. 回答の生成（ルート統合）
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。

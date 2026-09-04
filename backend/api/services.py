@@ -2967,9 +2967,27 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "learners": learners,  # 関与人数（個人は特定しない）
         })
 
+    # k-匿名化（原則5 / 指標カタログ `k_anonymity=True` の宣言どおり）: 関与人数が
+    # 最小集計単位に満たないコースは、トピック別件数・未消化総量も含めて表示しない
+    # （受講者1〜2名のコースでは「トピック × 件数」が個人の記録に一致してしまう）。
+    # 「痕跡が無い」と「人数が足りず伏せた」を UI が区別できるよう suppressed を立てる。
+    if int(cohort) < K_ANONYMITY:
+        return {
+            "course_id": course_id,
+            "cohort_size": 0,
+            "k_anonymity_suppressed": True,
+            "hotspots": [],
+            "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
+            "tension_heatmap": [],
+            "anchor_heatmap": [],
+        }
+
     hotspots = []
     for r in rows:
         tid, cnt, unfinished, learners = r[0], int(r[1]), int(r[2]), int(r[3])
+        # トピック単位でも関与人数 n<k のセルは出さない（ヒートマップと同じゲート）。
+        if learners < K_ANONYMITY:
+            continue
         hotspots.append({
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
             "interest_count": cnt,

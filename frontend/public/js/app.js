@@ -1825,7 +1825,7 @@
     var head = '<div class="src-popup-head">' +
       '<span class="src-popup-title">' + escHtml(title) + '</span>' +
       tierBadge(tier) +
-      (score ? '<span class="src-popup-score">類似度 ' + escHtml(score) + '</span>' : '') +
+      // 類似度（cosine）の生値は学習者に見せない（数値非表示の原則。VA2 と同じ）。
       '<button class="src-popup-close" aria-label="閉じる">×</button></div>';
     pop.innerHTML = head + '<div class="src-popup-body">読み込み中…</div>';
     document.body.appendChild(pop);
@@ -2665,7 +2665,7 @@
             html += '<div class="lx-oos-note">この点は登録教材に十分な根拠が見つかりませんでした。断定は避けます。</div>';
           } else {
             if (s.quote) html += '<div class="lx-src-quote">「' + escHtml(s.quote) + '」</div>';
-            if (typeof s.score === "number") html += '<div class="lx-score">類似度 ' + s.score.toFixed(2) + '</div>';
+            // 類似度（cosine）の生値は描かない（数値非表示の原則。tier ラベルのみで足りる）。
           }
           html += '</div>';
         });

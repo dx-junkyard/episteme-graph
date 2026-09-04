@@ -4443,16 +4443,19 @@ def get_interest_dashboard(
     interest_traces を集団集計し、件数・比率・関与人数のみを返す（個人特定情報なし）。
     course_id 未指定なら空集計を返す（フロントでコースを選択する）。
     """
-    from services import aggregate_interest_dashboard, _fetch_course_data_row
+    from services import aggregate_interest_dashboard
 
     if not course_id:
         return {"course_id": None, "cohort_size": 0, "hotspots": [],
                 "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
                 "indicator_id": "interest-dashboard"}
 
+    # 集約処理より先に course owner / editor ゲートを通す（anchor-insights 等の他の
+    # 教員向け集約と同じ。不在も権限なしも同一の 404 — 原則11 オブジェクトスコープ）。
+    data = _require_editable_course_or_404(course_id, current_user)
+
     title_map: dict = {}
     try:
-        data = _fetch_course_data_row(course_id) or {}
         for t in course_topics(data):
             if isinstance(t, dict) and t.get("id"):
                 title_map[t["id"]] = t.get("title") or t["id"]

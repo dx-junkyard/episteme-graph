@@ -7528,6 +7528,11 @@
     apiFetch("/admin/interest-dashboard?course_id=" + encodeURIComponent(courseId))
       .then(function (res) { return res.json(); })
       .then(function (data) {
+        if (data.k_anonymity_suppressed) {
+          // 「痕跡が無い」と「人数が足りず伏せた」を区別して事実文で示す（数値は出さない）。
+          body.innerHTML = '<div style="color:var(--color-text-tertiary)">関わった受講者の人数が最小集計単位に満たないため、このコースの集計は表示しません。</div>';
+          return;
+        }
         if ((data.cohort_size || 0) === 0 && (!data.hotspots || data.hotspots.length === 0)) {
           body.innerHTML = '<div style="color:var(--color-text-tertiary)">このコースにはまだ関心痕跡が記録されていません。</div>';
           return;

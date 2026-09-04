@@ -667,3 +667,65 @@ class TestSourceChunkCourseScope:
 
         assert no_course.value.status_code == no_chunk.value.status_code == 404
         assert no_course.value.detail == no_chunk.value.detail
+
+
+# ---------------------------------------------------------------------------
+# F. GET /api/admin/interest-dashboard?course_id=  （2026-09-05 ビジョン監査 C3）
+# ---------------------------------------------------------------------------
+
+
+class TestInterestDashboardAuthorization:
+    """関心集約ダッシュボードも他の教員向け集約（anchor / bridge）と同じ course
+    owner / editor ゲートを、集約処理より先に通す（原則11 オブジェクトスコープ）。"""
+
+    @pytest.mark.parametrize(
+        "user", [_user(OWNER), _user(EDITOR), _user(ADMIN, role="SYSTEM_ADMIN")],
+    )
+    def test_allowed_users_receive_the_aggregate(self, monkeypatch, user):
+        import services as services_module
+
+        calls: list[str] = []
+
+        def _aggregate(course_id, title_map=None, top_n=10):
+            calls.append(course_id)
+            return {"course_id": course_id, "cohort_size": 5, "hotspots": []}
+
+        monkeypatch.setattr(services_module, "aggregate_interest_dashboard", _aggregate)
+
+        result = admin_module.get_interest_dashboard(COURSE_ID, current_user=user)
+
+        assert calls == [COURSE_ID]
+        assert result["indicator_id"] == "interest-dashboard"
+
+    @pytest.mark.parametrize(
+        "user_id,course_id",
+        [
+            (OTHER_TEACHER, COURSE_ID),
+            (VIEWER, COURSE_ID),
+            (OWNER, UNKNOWN_COURSE_ID),
+        ],
+    )
+    def test_denied_users_get_404_and_the_aggregate_is_never_called(
+        self, monkeypatch, user_id, course_id,
+    ):
+        import services as services_module
+
+        def _aggregate(*_a, **_k):
+            raise AssertionError("認可失敗時に集約処理を呼んではならない")
+
+        monkeypatch.setattr(services_module, "aggregate_interest_dashboard", _aggregate)
+
+        with pytest.raises(HTTPException) as exc:
+            admin_module.get_interest_dashboard(course_id, current_user=_user(user_id))
+        assert exc.value.status_code == 404
+
+    def test_detail_identical_for_missing_and_forbidden(self):
+        with pytest.raises(HTTPException) as missing:
+            admin_module.get_interest_dashboard(UNKNOWN_COURSE_ID, current_user=_user(OWNER))
+        with pytest.raises(HTTPException) as forbidden:
+            admin_module.get_interest_dashboard(COURSE_ID, current_user=_user(OTHER_TEACHER))
+        assert missing.value.detail == forbidden.value.detail
+
+    def test_gate_precedes_the_aggregate_call(self):
+        src = extract_function_source(_ADMIN_SRC, "get_interest_dashboard")
+        assert src.index("_require_editable_course_or_404") < src.index("aggregate_interest_dashboard(course_id")
