@@ -1,8 +1,12 @@
 """Episteme Graph — 設定の一元管理モジュール。
 
-すべての環境変数をこのモジュールに集約し、他のモジュールでは
-``os.environ`` を直接参照しない。pydantic-settings の ``BaseSettings``
-を利用してバリデーション付きで読み込む。
+環境変数はこのモジュールに集約するのが原則で、新しい設定は必ず ``Settings`` に
+フィールドとして足し、``get_settings()`` 経由で読む。pydantic-settings の
+``BaseSettings`` を利用してバリデーション付きで読み込む。
+
+**ただし現状は完全ではない**: 機能フラグや上限値など、``core`` / ``api`` の複数モジュール
+に ``os.environ`` / ``os.getenv`` の直接参照が残っている（既存の残存であり、新規に増やさ
+ないこと）。触る機会があれば ``Settings`` へ寄せる。
 
 Usage::
 
@@ -17,7 +21,9 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+import os
+
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -73,17 +79,48 @@ class Settings(BaseSettings):
     )
 
     # --- LLM マルチモード設定 ---
+    # tier モデルの解決順序は「明示 env（LLM_*_MODEL、旧名は AliasChoices）→ 上位 tier からの
+    # フォールバック（standard ← LLM_ANALYSIS_MODEL / deep ← standard）→ 既定値」。
+    # かつて docker-compose.yml の `${VAR:-...}` 連鎖が担っていた旧名吸収・tier 間フォール
+    # バックを 2026-09-05 にここへ移設した（compose の既定値 `o3-mini` が Settings の既定を
+    # 黙って上書きしていたため。モデル決定の正本は core 側に一本化する）。
     # Fast: 意図分類、フォーマット整形など軽量タスク
-    llm_fast_model: str = "gpt-5.4-nano"
+    llm_fast_model: str = Field(
+        default="gpt-5.4-nano",
+        validation_alias=AliasChoices("LLM_FAST_MODEL", "OPENAI_FAST_MODEL"),
+    )
     llm_fast_effort: Literal["low", "medium", "high"] = "low"
 
     # Standard: 通常の対話、前提知識評価、論理構造抽出
-    llm_standard_model: str = "gpt-5.2"
+    # 未設定時は LLM_ANALYSIS_MODEL（旧 OPENAI_ANALYSIS_MODEL）が明示されていればそれに従う。
+    llm_standard_model: str = Field(
+        default="gpt-5.2",
+        validation_alias=AliasChoices("LLM_STANDARD_MODEL"),
+    )
     llm_standard_effort: Literal["low", "medium", "high"] = "medium"
 
     # Deep: 深刻な誤解の訂正、複雑な数式展開、グラフ依存関係解決
-    llm_deep_model: str = "gpt-5.2"
+    # 未設定時は standard（解決後）に従う。
+    llm_deep_model: str = Field(
+        default="gpt-5.2",
+        validation_alias=AliasChoices("LLM_DEEP_MODEL"),
+    )
     llm_deep_effort: Literal["low", "medium", "high"] = "high"
+
+    @model_validator(mode="after")
+    def _apply_tier_model_fallback_chain(self) -> "Settings":
+        """standard ← analysis / deep ← standard のフォールバック（明示 env がある場合のみ）。
+
+        env に無い tier だけを埋める。既定値どうしの関係（standard と deep はともに gpt-5.2）は
+        変えない。参照する env 名は各フィールドの AliasChoices と同じ綴りに限る。
+        """
+        env = os.environ
+        analysis_explicit = any(env.get(k) for k in ("LLM_ANALYSIS_MODEL", "OPENAI_ANALYSIS_MODEL"))
+        if not env.get("LLM_STANDARD_MODEL") and analysis_explicit and self.llm_analysis_model:
+            self.llm_standard_model = self.llm_analysis_model
+        if not env.get("LLM_DEEP_MODEL") and (env.get("LLM_STANDARD_MODEL") or analysis_explicit):
+            self.llm_deep_model = self.llm_standard_model
+        return self
 
     # --- モデルティアごとの最大出力トークン数 ---
     # エージェント LLM 呼び出しの ``max_tokens`` は、使用モデルのティアに応じて

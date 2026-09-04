@@ -151,12 +151,14 @@ docker compose logs -f api-server
 明示列挙した約30変数しか届いておらず、機能別のコール上限などを `.env` に書いても
 Docker 実行時には効きませんでした）。`.env` が無い場合はコード側の既定値で起動します。
 
-ただし `docker-compose.yml` の `environment:` に書かれた次の6変数は `.env` より**優先**
+ただし `docker-compose.yml` の `environment:` に書かれた次の3変数は `.env` より**優先**
 されます。値を変えたい場合はこれらを承知のうえで操作してください。
+（`LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` は 2026-09-05 に compose から
+外れ、`.env` の値がそのまま届きます。未設定時のティア間フォールバックと旧変数名
+`OPENAI_FAST_MODEL` の引き継ぎはコード側の設定に移りました。）
 
 | 変数 | compose 側が上書きする理由 |
 |---|---|
-| `LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` | 旧変数名（`OPENAI_FAST_MODEL` / `OPENAI_ANALYSIS_MODEL`）からの引き継ぎとティア間フォールバックを組むため。`.env` にこれらを書けばその値が使われます |
 | `DATABASE_URL` | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` から組み立てるため。**`.env` の `DATABASE_URL` は無視されます**（接続先は `DB_*` で指定してください） |
 | `GOOGLE_APPLICATION_CREDENTIALS` | コンテナ内のマウント先 `/app/.gcp/application_default_credentials.json` を既定にするため。`.env` に書けばその値が優先されます |
 | `GROBID_URL` | コンテナ間はサービス名 `http://grobid:8070` で解決するため。`.env` に書けばその値が優先されます |

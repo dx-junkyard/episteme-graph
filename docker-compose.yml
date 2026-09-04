@@ -48,13 +48,16 @@ services:
     # TENSION_* / LLM_MODEL_CATALOG_PATH の各行（いずれも Settings の既定値・
     # AliasChoices と同一の内容だった。OPENAI_* / MINIO_ROOT_* / GOOGLE_CLOUD_* への
     # フォールバックは Settings の AliasChoices が引き継ぐ）。
-    # 残す基準は「① コンテナ固有の既定値がホスト側の値と違う ② 複数変数を合成している
-    # ③ Settings が知らない旧 env 名（OPENAI_FAST_MODEL 等）を拾っている」のいずれか。
+    # 残す基準は「① コンテナ固有の既定値がホスト側の値と違う ② 複数変数を合成している」の
+    # いずれか（かつて③として「Settings が知らない旧 env 名を拾う」を挙げていたが、
+    # 下記のとおり 2026-09-05 に廃止した）。
     environment:
-      # ①③ tier 既定が Settings（gpt-5.x 系）と異なり、旧 OPENAI_* も拾う
-      LLM_FAST_MODEL: ${LLM_FAST_MODEL:-${OPENAI_FAST_MODEL:-o3-mini}}
-      LLM_STANDARD_MODEL: ${LLM_STANDARD_MODEL:-${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}}
-      LLM_DEEP_MODEL: ${LLM_DEEP_MODEL:-${LLM_STANDARD_MODEL:-${LLM_ANALYSIS_MODEL:-${OPENAI_ANALYSIS_MODEL:-o3-mini}}}}
+      # LLM_FAST_MODEL / LLM_STANDARD_MODEL / LLM_DEEP_MODEL の行は削除した（2026-09-05）。
+      # `${VAR:-o3-mini}` の既定値が Settings（core/config.py の gpt-5.x 系）を黙って
+      # 上書きしていたため。旧名 OPENAI_FAST_MODEL の吸収と tier 間フォールバック
+      # （standard ← LLM_ANALYSIS_MODEL / deep ← standard）は core/config.py の Settings
+      # （AliasChoices + model_validator）へ移設済みで、.env の LLM_*_MODEL は env_file で
+      # そのまま届く。compose には空でない既定を書けない（`${VAR}` は未設定時に空文字を渡す）。
       # ② DB_* から接続文字列を合成する（.env の DATABASE_URL より優先される）
       DATABASE_URL: postgresql://${DB_USER}:${DB_PASSWORD}@${DB_HOST}:${DB_PORT}/${DB_NAME}
       # ① 認証ファイルパス: ホストの .gcp/ をコンテナ内 /app/.gcp/ にマウントした場合の固定パス。
