@@ -11769,3 +11769,18 @@ button.element-card-item:focus-visible .element-card-item-label {
 }
 .graph-review-paper-facing-title { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; }
 .graph-review-paper-role { color: var(--color-text-secondary, #475569); margin-bottom: 4px; }
+
+/* ---------------------------------------------------------------------------
+ * 制度指標カタログの事実文（docs/features/indicator_governance_design.md, IG1）。
+ * 計器パネルの先頭に置く1行。強調・警告色にしない（注意を引くためではなく、
+ * 「これは何のための計器か」を常に読める場所に置くためのもの）。
+ * ------------------------------------------------------------------------- */
+.indicator-fact {
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--color-border, #e2e8f0);
+  background: var(--color-bg-secondary, #f8fafc);
+  color: var(--color-text-tertiary, #6b7280);
+  font-size: 11.5px;
+  line-height: 1.6;
+}

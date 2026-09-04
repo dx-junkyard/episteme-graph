@@ -2172,7 +2172,10 @@ def get_doubt_metrics(
     current_user: dict = Depends(_require_system_admin),
 ) -> dict:
     """運用判断用の内部 KPI（数値をユーザーに見せる API・UI は作らない）。"""
-    return collect_doubt_metrics()
+    metrics = collect_doubt_metrics()
+    # 制度指標カタログへの参照（IG1）。定義は GET /api/indicators/doubt-metrics。
+    metrics["indicator_id"] = "doubt-metrics"
+    return metrics
 
 
 # ---------------------------------------------------------------------------

@@ -4447,7 +4447,8 @@ def get_interest_dashboard(
 
     if not course_id:
         return {"course_id": None, "cohort_size": 0, "hotspots": [],
-                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0}}
+                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
+                "indicator_id": "interest-dashboard"}
 
     title_map: dict = {}
     try:
@@ -4458,7 +4459,10 @@ def get_interest_dashboard(
     except Exception:
         title_map = {}
 
-    return aggregate_interest_dashboard(course_id, title_map)
+    payload = aggregate_interest_dashboard(course_id, title_map)
+    # 制度指標カタログへの参照（IG1）。定義は GET /api/indicators/interest-dashboard。
+    payload["indicator_id"] = "interest-dashboard"
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -4492,6 +4496,8 @@ def get_bridge_insights(
         "course_id": course_id,
         "bridges": bridges,
         "note": "学習者個人は特定できません（k-匿名集約・人数はレンジ表示のみ）。評価利用は禁止です。",
+        # 制度指標カタログへの参照（IG1）。定義は GET /api/indicators/bridge-insights。
+        "indicator_id": "bridge-insights",
     }
 
 

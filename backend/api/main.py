@@ -75,6 +75,7 @@ from routes import my_records as my_records_routes
 from routes import landscape as landscape_routes
 from routes import paper_discovery as paper_discovery_routes
 from routes import corpus as corpus_routes
+from routes import indicators as indicators_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -355,6 +356,10 @@ app.include_router(paper_discovery_routes.router)
 # migration 073）。ルーター自身が /api/learning プレフィックスを持つため追加
 # prefix は付けない（コース非依存 — 可視性ゲートは CR1 の document 可視集合）。
 app.include_router(corpus_routes.learning_router)
+# 制度指標カタログ（indicator_governance_design.md、IG1）。**定義だけ**を返す
+# 読み取り専用ルーターで、値は一切持たない。教員・管理者ゲートを掛けない
+# （観察される側の学習者も定義を読めなければ「全当事者に公開」にならない）。
+app.include_router(indicators_routes.router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で

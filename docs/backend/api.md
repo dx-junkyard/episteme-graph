@@ -60,7 +60,7 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   （/api/admin/llm-usage）/ `llm_models`（/api/admin/llm-models）/ `personal_map.router`
   （/api/learning）/ `personal_map.me_router`（/api/me）/ `my_records.me_router`（/api/me）/
   `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
-  `corpus.learning_router`（/api/learning）
+  `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）
 - **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（22本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
@@ -292,6 +292,25 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 
 > このルーターは**読み取り専用**（書き込み API を作らないことをガードレールで固定）。
 > 訂正操作（map-exclude / map-restore）は `routes/learning.py` 側にある。
+
+### 制度指標カタログ（`routes/indicators.py`、読み取り専用）
+
+制度を観察するための集約計器の**定義だけ**を公開する（正本は
+`backend/core/indicator_catalog.py`、設計は
+`docs/features/indicator_governance_design.md` の IG1〜IG5）。**値は1つも返さない**ため
+教員・管理者ゲートを掛けず、認証済みなら学習者も読める（IG1: 観察される側が定義を
+読めなければ「全当事者に公開」にならない）。値の閲覧権限は各計器の API 側のまま。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/indicators` | 認証済み全ユーザー（`_get_current_user`） | 全計器の定義（`label` / `definition` / `purpose` / `values_audience` / `granularity` / `source` / `retention` / `k_anonymity` / `route` / `consumer` / `not_used_for` / `design_doc` / `side_effect_review`）+ 固定事実文 `note` + `k_anonymity`（`core/privacy.py` の正本値）。各項目に `readable_by_me`（呼び出し元が**値**を読める立場かの投影であって、この API の認可ではない） |
+| GET | `/api/indicators/{indicator_id}` | 同上 | 1件。未知の id は 404 |
+
+> 書き込みメソッドを作らない（カタログはコードが正本）。数値・件数・レンジを1つも
+> 含まないことを `test_indicator_catalog.py` が再帰走査で固定する。
+> 既存の計器レスポンス6本（llm-usage metrics / doubt metrics / discuss observation-status /
+> interest-dashboard / bridge-insights / stumble-summary）にはトップレベル
+> `indicator_id` を1キー追加してある（キー集合をテストで固定している経路には足さない）。
 
 ### わたしの記録（`routes/my_records.py`、読み取り専用）
 

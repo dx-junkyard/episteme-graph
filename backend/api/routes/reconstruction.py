@@ -769,4 +769,8 @@ def document_stumble_summary(
     from routes.theory_components import _ensure_document_viewable
 
     _ensure_document_viewable(document_id, current_user)
-    return get_stumble_summary(document_id)
+    summary = get_stumble_summary(document_id)
+    # 制度指標カタログへの参照（IG1）。定義は
+    # GET /api/indicators/claims-stumble-summary。
+    summary["indicator_id"] = "claims-stumble-summary"
+    return summary

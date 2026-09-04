@@ -221,6 +221,9 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-manual-editor.js",
     ROOT / "frontend" / "public" / "js" / "admin-discuss-observation.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-usage.js",
+    # 制度指標カタログの事実文（DOM は既存パネル側。将来ここに UI が生えたときの
+    # 登録漏れを検出するため対象に入れる）。
+    ROOT / "frontend" / "public" / "js" / "admin-indicators.js",
     ROOT / "frontend" / "public" / "js" / "versioning.js",
     ROOT / "frontend" / "public" / "js" / "deliberation.js",
     ROOT / "frontend" / "public" / "js" / "doubt-atlas.js",

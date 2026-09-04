@@ -221,6 +221,7 @@
           'ここでの表示は参考目安であり、自動的に何かが起きることはありません。' +
           '自動更新（ポーリング）は行わないため、最新の状況は「取得」ボタンで手動更新してください。' +
         '</p>' +
+        '<div id="ado-indicator-fact"></div>' +
         '<div id="ado-generated-at" class="ado-note"></div>' +
         '<div id="ado-dump-status" class="ado-note"></div>' +
         '<div id="ado-body">' +
@@ -234,6 +235,13 @@
     if (targzBtn) targzBtn.addEventListener("click", function () { doDownload("tar.gz"); });
     var zipBtn = document.getElementById("ado-dump-zip-btn");
     if (zipBtn) zipBtn.addEventListener("click", function () { doDownload("zip"); });
+
+    // 制度指標カタログの事実文（IG1）。取得できないときは何も描かれない（fail-soft）。
+    if (window.AdminIndicators) {
+      window.AdminIndicators.mount(
+        document.getElementById("ado-indicator-fact"), "discuss-observation-status"
+      );
+    }
   }
 
   // ---------------------------------------------------------------------

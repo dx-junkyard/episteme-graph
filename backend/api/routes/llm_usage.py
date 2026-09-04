@@ -128,6 +128,9 @@ def get_llm_usage_metrics(
         )
         if "user_id" in fields:
             _attach_user_display_names(session, result["rows"])
+        # 制度指標カタログへの参照（IG1）。値は変えず、この応答が「どの計器か」を
+        # 名乗るキーを1つ足すだけ（定義は GET /api/indicators/{id}）。
+        result["indicator_id"] = "llm-usage-metrics"
         return result
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

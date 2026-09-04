@@ -857,6 +857,10 @@
         <p style="font-size:12px;color:var(--color-text-tertiary);margin-bottom:12px">
           クラス全体の関心傾向を、個人を特定しない集団集計で表示します（点数・ランキングではなく問いの深まりを見せる設計）。
         </p>
+        <!-- 制度指標カタログの事実文（indicator_governance_design.md, IG1）。
+             admin-indicators.js が /api/indicators から label / purpose を入れる。
+             カタログを取得できないときは空のまま（捏造しない）。 -->
+        <div id="interest-dashboard-indicator-fact"></div>
         <div id="interest-dashboard-body" class="interest-dashboard" data-ui-anchor="interest-dashboard.dashboard-body">
           <div style="color:var(--color-text-tertiary)">コースを選択してください</div>
         </div>
@@ -980,6 +984,10 @@
   <script src="/js/admin-lecture-studio.js?v=teaching-figure-studio-20260731-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->
   <script src="/js/deliberation.js?v=gap-fixes-20260716-1"></script>
+  <!-- 制度指標カタログ（indicator_governance_design.md, IG1）— 計器の定義の1行表示。
+       計器パネル（admin-llm-usage / admin-discuss-observation / admin.js の関心集約）が
+       window.AdminIndicators.mount() を呼ぶため、それらより前に読み込む。 -->
+  <script src="/js/admin-indicators.js?v=indicator-governance-20260904-1"></script>
   <!-- U層（LLM トークン使用量推計, migration 043）管理 UI — SYSTEM_ADMIN メトリクス + TEACHER 事前見積り -->
   <script src="/js/admin-llm-usage.js?v=gap-fixes-20260716-2"></script>
   <!-- 利用者マニュアル KB（help_kb）draft/freeze 管理 UI（manual_help_kb_design.md Phase 3 ②）— SYSTEM_ADMIN のみ -->
