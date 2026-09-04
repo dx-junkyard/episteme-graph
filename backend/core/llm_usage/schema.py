@@ -75,6 +75,16 @@ KNOWN_FEATURES = (
     "admin:lecture_rewrite",
     "admin:lecture_generate",
     "admin:lecture_tts",
+    # コース内容生成（原稿スタジオの「コース内容を生成」/ パイプライン完了後の自動生成）。
+    # core/course_content_builder.py::_generate_course_topic_drafts が
+    # トピック1件 = 1コールで授業用ドラフト（student_material / spoken_script 等）を作る。
+    # 従来は帰属なし（unattributed）で記録されていた配線漏れの是正。
+    "admin:course_content",
+    # 原稿スタジオ「理論」タブの理論コンポーネント抽出・補完
+    # （core/theory_components.py::extract_theory_components_from_chunk /
+    #  enrich_theory_components_with_llm）。C層の質問→候補生成
+    # （admin:component_candidates）とは別経路なので feature を分ける。
+    "admin:component_extract",
     "admin:component_candidates",
     "admin:assistant",
     "admin:reconstruction_authoring",

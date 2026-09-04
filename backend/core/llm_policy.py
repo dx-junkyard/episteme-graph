@@ -135,7 +135,16 @@ def scene_for_feature(feature: str) -> str | None:
         return SCENE_LEARNING_BACKGROUND
     if feature == "admin:course_builder":
         return SCENE_COURSE_BUILDER
-    if feature in ("admin:lecture_rewrite", "admin:lecture_generate", "admin:lecture_tts"):
+    if feature in (
+        "admin:lecture_rewrite",
+        "admin:lecture_generate",
+        "admin:lecture_tts",
+        # コース内容生成・理論コンポーネント抽出はどちらも原稿スタジオの画面から
+        # 起動する操作（前者は「コース内容を生成」、後者は「理論」タブの抽出・補完）。
+        # 教員から見て同じ場面なので、原稿スタジオの scene に束ねる。
+        "admin:course_content",
+        "admin:component_extract",
+    ):
         return SCENE_LECTURE_STUDIO
     if feature in ("admin:atlas_skeleton", "admin:atlas_assist"):
         return SCENE_ATLAS
@@ -398,6 +407,11 @@ _FEATURE_DIRECT_ENV: dict[str, tuple[str, str]] = {
 _FEATURE_TIER_ONLY: dict[str, str] = {
     "admin:lecture_rewrite": "fast",
     "admin:lecture_generate": "fast",
+    # コース内容生成（course_content_builder）・理論コンポーネント抽出/補完
+    # （core/theory_components.py）も `get_llm_params("fast")` 固定で呼ばれていたため、
+    # policy 経由に切り替えた後も「ポリシー行も env も無い環境では fast tier」を維持する。
+    "admin:course_content": "fast",
+    "admin:component_extract": "fast",
 }
 
 # 上記マッピングに無い feature（その他 pipeline:* 全般・unattributed 等）の既定 tier。

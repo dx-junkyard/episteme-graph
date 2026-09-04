@@ -444,7 +444,7 @@ def classifier_help_env(monkeypatch):
     monkeypatch.setattr(learning_mod, "get_settings", lambda: settings)
     monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
     monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
-    monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message: False)
+    monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message, **kwargs: False)
 
     persist_mock = MagicMock(return_value={"user_message_id": "msg-1"})
     monkeypatch.setattr(learning_mod, "persist_chat_history", persist_mock)
@@ -504,7 +504,7 @@ class TestClassifierRoutedUsageHelp:
         monkeypatch.setattr(llm_policy_mod, "get_settings", lambda: settings)
         monkeypatch.setattr(learning_mod, "_learning_chat_cost_gate", CostGate())
         monkeypatch.setattr(learning_mod, "get_course_data", lambda user_id, course_id: _course_data())
-        monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message: False)
+        monkeypatch.setattr(learning_mod, "_is_usage_question", lambda message, **kwargs: False)
         monkeypatch.setattr(learning_mod, "search_chunks_with_metadata", lambda *a, **k: [])
         monkeypatch.setattr(learning_mod, "log_unanswered_query", lambda *a, **k: None)
         monkeypatch.setattr(learning_mod, "check_prerequisites", lambda *a, **k: None)

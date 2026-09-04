@@ -17,6 +17,7 @@ from core.course_data import course_chapters, course_source_material_ids, course
 from core.deliberation import labels as labels_mod
 from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
+from core.llm_usage.context import usage_context
 from core.postgres import get_session as _pg_session
 from core.text_excerpt import excerpt, looks_like_tex_math
 from episteme_graph.agents.equation_semantics.schema import (
@@ -26,6 +27,10 @@ from episteme_graph.agents.equation_semantics.schema import (
 )
 
 logger = logging.getLogger(__name__)
+
+# U層 feature（正本 core/llm_usage/schema.py::KNOWN_FEATURES）。M層の scene は
+# llm_policy.scene_for_feature が原稿スタジオ（SCENE_LECTURE_STUDIO）へ束ねる。
+FEATURE_COURSE_CONTENT = "admin:course_content"
 
 
 def _strip_nuls(value: Any) -> Any:
@@ -107,7 +112,9 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         chunks_by_material = _load_chunks(session, material_ids)
         figures_index = _load_document_figures_index(session, document_ids)
         enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material, figures_index)
-        draft_result = _generate_course_topic_drafts(course, enriched_topics)
+        draft_result = _generate_course_topic_drafts(
+            course, enriched_topics, user_id=str(user_id), course_id=str(course_id)
+        )
         course["topics"] = enriched_topics
         # referenced_sections は生成しない（2026-07-26）。トピック→component_id の内部対応表を
         # そのまま学習者の出典タブに出しており、内部 ID（comp_001）と agent クラス名だけが
@@ -1914,38 +1921,63 @@ class _CourseContentDraftResponse(BaseModel):
     check_questions: list[_CourseContentCheckQuestionDraft] = Field(default_factory=list)
 
 
-def _generate_course_topic_drafts(course: dict, topics: list[dict]) -> dict:
+def _generate_course_topic_drafts(
+    course: dict,
+    topics: list[dict],
+    *,
+    user_id: str | None = None,
+    course_id: str | None = None,
+) -> dict:
+    """トピックごとの授業用ドラフトを LLM で生成する（1トピック = 1コール）。
+
+    U層（帰属）/ M層（モデル選択）の配線:
+      - ``usage_context(FEATURE_COURSE_CONTENT, ...)`` で feature / user_id / course_id を
+        張る（張らないと ``unattributed`` で記録され、誰のどのコースの消費か分からない）。
+        呼び出し元は3系統（コース登録直後のバックグラウンド生成 / パイプライン完走後の
+        自動生成 / 原稿スタジオの明示「コース内容を生成」）あり、いずれも別スレッドから
+        呼ばれるため、**核となるこの関数側で1箇所だけ**張る。
+      - モデルは ``model=None``（＝引数を渡さない）で ``core/llm.py`` 入口の
+        ``resolve_scene_model`` に委ねる（M1: env を読んでモデルを決める処理を新規に
+        書かない）。ポリシー行も env も無い環境では ``llm_policy._FEATURE_TIER_ONLY`` に
+        より従来と同じ fast tier に解決される（挙動不変）。
+      - ``reasoning_effort`` は従来どおり tier の値を渡す（``effort_for_call`` は
+        呼び出し側の明示指定を常に優先するため、挙動は変わらない）。
+    """
     if not topics:
         return {"drafted_topics": 0, "draft_errors": 0}
     course_context = _course_context_for_prompt(course, topics)
     params = get_llm_params("fast")
     drafted = 0
     errors = 0
-    for index, topic in enumerate(topics):
-        try:
-            result = _generate_single_topic_draft(
-                course_context=course_context,
-                topics=topics,
-                topic=topic,
-                index=index,
-                model=params["model"],
-                reasoning_effort=params["reasoning_effort"],
-            )
-            topic["key_concepts"] = result["key_concepts"]
-            topic["student_material"] = result["student_material"]
-            topic["spoken_script"] = result["spoken_script"]
-            topic["cautions"] = result["cautions"]
-            topic["check_questions"] = result["check_questions"]
-            topic["draft_source"] = "course_content_generation"
-            drafted += 1
-        except Exception:
-            errors += 1
-            logger.exception(
-                "Failed to generate course topic draft: course=%s topic=%s",
-                course.get("id") or course.get("title"),
-                topic.get("id") or topic.get("title"),
-            )
-            _apply_deterministic_topic_draft_fallback(topic)
+    with usage_context(
+        FEATURE_COURSE_CONTENT,
+        user_id=str(user_id) if user_id else None,
+        course_id=str(course_id) if course_id else None,
+    ):
+        for index, topic in enumerate(topics):
+            try:
+                result = _generate_single_topic_draft(
+                    course_context=course_context,
+                    topics=topics,
+                    topic=topic,
+                    index=index,
+                    reasoning_effort=params["reasoning_effort"],
+                )
+                topic["key_concepts"] = result["key_concepts"]
+                topic["student_material"] = result["student_material"]
+                topic["spoken_script"] = result["spoken_script"]
+                topic["cautions"] = result["cautions"]
+                topic["check_questions"] = result["check_questions"]
+                topic["draft_source"] = "course_content_generation"
+                drafted += 1
+            except Exception:
+                errors += 1
+                logger.exception(
+                    "Failed to generate course topic draft: course=%s topic=%s",
+                    course.get("id") or course.get("title"),
+                    topic.get("id") or topic.get("title"),
+                )
+                _apply_deterministic_topic_draft_fallback(topic)
     return {"drafted_topics": drafted, "draft_errors": errors}
 
 
@@ -1955,7 +1987,6 @@ def _generate_single_topic_draft(
     topics: list[dict],
     topic: dict,
     index: int,
-    model: str,
     reasoning_effort: str | None,
 ) -> dict:
     prompt = _COURSE_CONTENT_DRAFT_PROMPT.format(
@@ -1967,15 +1998,15 @@ def _generate_single_topic_draft(
     )
     parsed: object
     try:
+        # model は渡さない（M1）— core/llm.py 入口の resolve_scene_model が
+        # usage_context の feature（admin:course_content）から解決する。
         parsed = generate_text_with_structured_output(
             messages=[{"role": "user", "content": prompt}],
             response_format=_CourseContentDraftResponse,
-            model=model,
         )
     except Exception:
         raw = generate_text(
             messages=[{"role": "user", "content": prompt}],
-            model=model,
             reasoning_effort=reasoning_effort,
         )
         parsed = _parse_topic_draft_json(raw)

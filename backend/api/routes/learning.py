@@ -9,6 +9,7 @@ import threading
 import uuid
 from contextlib import nullcontext
 from dataclasses import asdict
+from functools import lru_cache
 from typing import Callable
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -82,6 +83,7 @@ from services import (
 )
 from pydantic import BaseModel
 from core.course_data import (
+    course_cartridge_id,
     course_focus,
     course_llm_models,
     course_source_material_ids,
@@ -91,6 +93,7 @@ from core.course_data import (
     iter_all_topics,
 )
 from core.teaching_figures import store as teaching_figures_store
+from core.cartridges import load_cartridge
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import element_explanations
@@ -780,9 +783,13 @@ def _is_greeting(message: str) -> bool:
 #   - 「UI・システム参照語」と「使い方の問い形」の**組み合わせ**でのみ真にする
 #     （どちらか片方だけでは弱すぎる誤爆源になる）。「使い方」は参照語・問い形の
 #     両方に置く（「使い方を教えて」単体で成立させるための意図的な重複）。
-#   - 教材内容の質問（数式・物理概念）は誤爆コストの方が大きいため、UI参照語と
-#     問い形が両方揃っていても、数式・物理用語らしき語（_CONTENT_QUESTION_TERMS）が
-#     共起していれば偽に倒す（例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - 教材内容の質問は誤爆コストの方が大きいため、UI参照語と問い形が両方揃っていても、
+#     学術教材の内容語らしき語（_CONTENT_QUESTION_TERMS）が共起していれば偽に倒す
+#     （例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - **この語彙に特定分野（物理など）の用語を書かない**（このシステムは分野を限定
+#     しない）。分野固有の語は、コースのカートリッジ ontology から読み時に足す
+#     （:func:`_cartridge_content_terms`）。カートリッジが無い／読めない分野でも
+#     下の分野非依存語だけで判定が成立する（フェイルソフト）。
 #   - メッセージが長い（雑談・複合質問らしい）場合も偽にする（保守的に絞る）。
 _HELP_CONTEXT_TERMS = (
     "画面", "ボタン", "操作", "アプリ", "この機能", "音声モード", "音声入力",
@@ -791,22 +798,75 @@ _HELP_CONTEXT_TERMS = (
 _HELP_QUESTION_FORMS = (
     "使い方", "どう使", "どうやって", "方法", "どこ",
 )
+# 分野非依存の「教材内容らしさ」語彙（学問一般の語のみ。分野固有語は書かない）。
 _CONTENT_QUESTION_TERMS = (
     "式", "方程式", "定理", "法則", "証明", "導出", "定義", "公式",
-    "エネルギー", "運動", "力学", "波動", "ベクトル", "微分", "積分",
-    "質量", "加速度", "速度", "粒子", "理論",
+    "理論", "概念", "仮定", "前提条件", "モデル", "計算", "関数", "係数",
+    "変数", "近似", "観測", "実験", "論文",
 )
 
+# カートリッジ由来の内容語を引くときの下限文字数（"SM" のような短い別名を
+# 部分一致に使うと、無関係な文が内容語ありと誤判定されるため）。
+_CARTRIDGE_TERM_MIN_LEN = 3
+_CARTRIDGE_TERM_LIMIT = 200
 
-def _is_usage_question(message: str) -> bool:
+
+@lru_cache(maxsize=16)
+def _cartridge_content_terms(cartridge_id: str) -> tuple[str, ...]:
+    """カートリッジ ontology から分野固有の「教材内容語」を集める（フェイルソフト）。
+
+    分野名・分野語彙をコードにハードコードしないための供給口（開発ルール7
+    「domain-specific なロジックを埋め込まず cartridge から読む」と同じ方針）。
+    読めない・存在しないカートリッジでは空タプルを返し、呼び出し側は分野非依存語
+    （:data:`_CONTENT_QUESTION_TERMS`）だけで判定する。
+
+    ``cartridge_id`` が空のときは呼び出さないこと（``load_cartridge(None)`` は
+    既定カートリッジへ縮退するため、無関係な分野の語彙を引いてしまう）。
+    """
+    cid = (cartridge_id or "").strip()
+    if not cid:
+        return ()
+    try:
+        cartridge = load_cartridge(cid)
+    except Exception:  # noqa: BLE001 — 分野語彙は補助。読めなければ無しで続行する
+        logger.debug("cartridge content terms unavailable: %s", cid, exc_info=True)
+        return ()
+    terms: list[str] = []
+
+    def _add(value: object) -> None:
+        text = str(value or "").strip()
+        if not text or len(text) < _CARTRIDGE_TERM_MIN_LEN:
+            return
+        if text not in terms:
+            terms.append(text)
+
+    for concept_type in cartridge.ontology.concept_types:
+        if isinstance(concept_type, dict):
+            _add(concept_type.get("label_ja"))
+            for example in concept_type.get("examples") or []:
+                _add(example)
+    for alias_entry in cartridge.ontology.aliases:
+        if isinstance(alias_entry, dict):
+            _add(alias_entry.get("canonical"))
+            for alias in alias_entry.get("aliases") or []:
+                _add(alias)
+    return tuple(terms[:_CARTRIDGE_TERM_LIMIT])
+
+
+def _is_usage_question(message: str, *, cartridge_id: str | None = None) -> bool:
     """メッセージが画面・システムの使い方についての質問かどうかを保守的に判定する。
 
     非LLM・同期（casual/音声バイパスより手前で評価するための決定論判定）。
+    ``cartridge_id`` を渡すと、その分野の語彙も「教材内容らしさ」の判定に足す
+    （分野語のハードコードを避けるための供給口。省略時は分野非依存語のみ）。
     """
     msg = (message or "").strip()
     if not msg or len(msg) >= 50:
         return False
     if any(term in msg for term in _CONTENT_QUESTION_TERMS):
+        return False
+    lowered = msg.lower()
+    if any(term.lower() in lowered for term in _cartridge_content_terms(cartridge_id or "")):
         return False
     has_context = any(term in msg for term in _HELP_CONTEXT_TERMS)
     has_form = any(term in msg for term in _HELP_QUESTION_FORMS)
@@ -870,7 +930,9 @@ def _classify_intent(
         "- CHIT_CHAT: 学習と無関係な雑談・日常会話（天気、食事、娯楽、個人的な話題など）\n"
         "- LEARNING_ADVICE: 学習の進め方・方法に関するメタ質問（どう進めるか、何から学ぶか、学習計画の相談など）\n"
         "- USAGE_HELP: アプリ・画面の使い方、ボタンや機能の操作方法についての質問（教材の内容そのものではない）\n"
-        "- DOMAIN_RAG: 物理学・数学などの専門知識・概念に関する質問\n\n"
+        # 分野名をハードコードしない（コースごとに分野が異なる）。コース名は
+        # プロンプト冒頭で提示済みなので、ここでは「このコースが扱う専門分野」と書く。
+        "- DOMAIN_RAG: このコースが扱う専門分野の知識・概念に関する質問\n\n"
         "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n\n"
         f"質問: {message}\n\n"
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
@@ -2687,7 +2749,12 @@ def _learning_chat_core(
     if not (isinstance(body.atlas_context, dict) and body.atlas_context):
         _is_usage_help = (
             _route_for_typed_action(body.support_action) == "USAGE_HELP"
-            or _is_usage_question(body.message)
+            # 分野語彙（内容質問の誤爆ガード）はコースのカートリッジから読む
+            # （分野名をコードに書かない。導出できないコースでは分野非依存語のみ）。
+            or _is_usage_question(
+                body.message,
+                cartridge_id=course_cartridge_id(course_data) or None,
+            )
         )
         if _is_usage_help:
             with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
@@ -2741,9 +2808,12 @@ def _learning_chat_core(
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
     if intent == "CHIT_CHAT":
+        # 分野名はハードコードしない（コースごとに分野が異なる）。コース名が引ければ
+        # それを、引けなければ中立表現へフォールバックする。
+        _scope_label = f"「{course_title}」" if course_title and course_title != course_id else "この教材"
         chit_chat_answer = (
-            "申し訳ありませんが、私は物理学の学習支援に特化したAIです。\n\n"
-            "物理学・数学の概念についての質問や、学習の進め方についての相談でしたら、"
+            f"申し訳ありませんが、私は{_scope_label}の学習支援に特化したAIです。\n\n"
+            f"{_scope_label}で扱う概念についての質問や、学習の進め方についての相談でしたら、"
             "喜んでお答えします。学習に関する質問をぜひ聞かせてください！\n\n"
             "画面の使い方についての質問にもお答えできます。"
         )

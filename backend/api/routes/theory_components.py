@@ -3368,10 +3368,19 @@ def extract_theory_components(
     structural_components = extract_theory_components_from_dsl(chunk)
     raw_components = structural_components
     if body.use_llm and raw_components:
-        raw_components = _preserve_structural_io(
-            enrich_theory_components_with_llm(chunk, raw_components),
-            structural_components,
-        )
+        # U層（帰属）/ M層（モデル選択）: 補完は LLM を1コール使うので必ず feature を張る
+        # （張らないと unattributed で記録され、モデル選択も scene に解決されない）。
+        # core 側は `_submit_with_context` で contextvars をワーカースレッドへ伝搬する。
+        with usage_context(
+            "admin:component_extract",
+            user_id=current_user["id"],
+            course_id=course_id,
+            document_id=str(chunk.get("document_id") or "") or None,
+        ):
+            raw_components = _preserve_structural_io(
+                enrich_theory_components_with_llm(chunk, raw_components),
+                structural_components,
+            )
     saved: list[TheoryComponentOut] = []
     for raw in raw_components:
         payload = _normalize_payload(_raw_component_to_request(raw, chunk), chunk)
