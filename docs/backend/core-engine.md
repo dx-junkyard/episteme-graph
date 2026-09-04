@@ -65,7 +65,9 @@ OpenAI / Gemini(REST) / Vertex AI を 1 つのインターフェースで扱い�
 > （`document_pipeline/`）が担います。[パイプライン概要](../pipeline/overview.md) を参照。
 
 ### `embedder.py` — pgvector への保存
-- `embed_and_store(chunks, material_id, extracted_structure)` — チャンクを 100 件単位で埋め込み、`documents` を upsert、`chunks` に `embedding(halfvec 3072)` + `smiles_dsl` / `variables` / `ancestors` を保存
+- `embed_and_store(chunks, material_id, extracted_structure)` — チャンクを 100 件単位で埋め込み、`documents` を upsert、`chunks` に `embedding(vector(3072))` + `smiles_dsl` / `variables` / `ancestors` を保存
+  （列の型は `vector(3072)`。HNSW インデックスだけが `halfvec(3072)` へのキャストで張られる —
+  `vector` は HNSW 2000 次元上限のため。`backend/db/016_embedding_dim_3072.sql`）
 
 ### `chat.py` — **レガシー**（現行の呼び出し元なし）
 tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_query()`）。
@@ -180,6 +182,8 @@ tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_quer
 | `trace_ledger.py` | 主権台帳v1「わたしの記録」の合成（本人の全痕跡の一望 + 持ち出し JSON。読み取り専用） |
 | `url_fetch.py` | URL 教材取得の SSRF ガードの正本（ドット境界のドメイン照合・`getaddrinfo` の全アドレス検査・リダイレクト各ホップ再検証・実バイトのマジックによる形式判定・100MB / 60秒上限）。`allowed_domains` は必須引数で空は専用エラー |
 | `account_status.py` / `account_lifecycle.py` / `auth_events.py` | アカウントライフサイクル（migration 068/069）。トークン世代の照合（30秒 TTL キャッシュ）/ `PURGE_TABLES`・`RETAIN_TABLES` と移管 / 認証イベント語彙の正本 |
+| `decision_context.py` | 一括確定の**確定文脈**ブロックの正本（`build_decision_context` / `attach_decision_context`）。提示と適用を別キーで持ち一致は集合比較で導出（申告できない）・代替が空なら `ValueError`・クライアント申告は `client_reported` に隔離。記帳先は既存 `theory_review_events.metadata`（新テーブル・新 entity_type を作らない）。設計は [確定文脈](../features/decision_context_design.md) |
+| `indicator_catalog.py` | **制度指標カタログの正本**（集約計器の定義・目的・宛先・粒度・出所・保持・非利用・副作用レビュー）。値を1つも持たず定義だけを全当事者に公開する。非利用4項目（ranking / grading / recommendation / auto_gate）は `IndicatorSpec.__post_init__` が全 spec に強制。設計は [制度指標カタログ](../features/indicator_governance_design.md) |
 | `migrations.py` | 上記「1. データストア接続」参照 |
 
 ---

@@ -26,26 +26,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## コマンド
 
 ```bash
-# 開発サーバー起動
-docker compose up -d
+# 開発サーバー起動（ローカル開発は local オーバーレイを重ねる。
+# ベース単独はマネージド DB 前提で postgres コンテナを持たず、開発用ポートも公開しない）
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 
 # APIサーバーのみ再ビルド（コード変更後）
-docker compose up -d --build api-server
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build api-server
 
 # ログ確認
 docker compose logs -f api-server
 
-# テスト実行（全件）
+# テスト実行（全件 / backend）
 cd backend && pytest tests/
+
+# テスト実行（全件 / agents）
+cd src && ../backend/.venv/bin/python -m pytest tests -q
 
 # テスト実行（単一ファイル）
 cd backend && pytest tests/test_docs_registry_guardrails.py -v
 
 # アクセス先
-# http://localhost:3000        → 学習UI
-# http://localhost:8001/docs   → Swagger UI
-# http://localhost:9001        → MinIO コンソール
+# http://localhost:3000              → 学習UI（nginx）
+# http://localhost:3000/admin.html   → 管理UI（nginx）
+# http://localhost:9001              → MinIO コンソール（docker-compose.local.yml 併用時のみ）
 ```
+
+**外部公開ポートは frontend:3000 のみ**。`api-server`（8001）はどの compose でも publish せず、
+nginx の `/api/*` proxy 経由でのみ到達する（`frontend/nginx.conf`）。Swagger UI（`/docs`）は
+nginx に proxy location が無いため**ブラウザからは開けない**。スキーマを見たいときは
+`docker compose exec api-server curl -s localhost:8001/openapi.json` を使う。
 
 ## アーキテクチャ
 
@@ -105,24 +114,30 @@ src/tests/                     → agents 用 pytest テスト
 
 #### パイプライン概要
 
+**実行順序の正本は `orchestrator._PIPELINE_STEPS`**（全ステージ一覧・種別は
+`docs/pipeline/overview.md` §2）。下図は主要 agent の連なりの見取り図で、**ここに順序を
+書き写して二重管理しないこと**（保存・埋め込み等の非 agent ステージも省いてある）。
+
 ```
 PDF ファイル
     ↓
 [#216] DocumentStructureAgent   — 文書構造復元（structure-first, parser-driven）
     ↓  DocumentStructureResult (JSON)
-[#237] EvidenceRegistryBuilder  — PDF 原文由来 evidence の一元管理（非LLM）
-    ↓  EvidenceRegistryResult (JSON)
 [#217] PaperSkeletonAgent       — 論文backbone仮説化（LLM-first）
     ↓  PaperSkeletonResult (JSON)
 [#218] RhetoricalRoleAgent      — chunk/span の論理役割判定（LLM-first）
     ↓  RhetoricalRoleResult (JSON)
 [#219] ClaimQualificationAgent  — Claim採否・区分・粒度 + atomic rewrite（LLM-first, #317）
     ↓  ClaimQualificationResult (JSON; atomic_claims を含む)
-[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM, #317）
-    ↓  ClaimObjectBuildResult (JSON)
 [#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
                                   + to_equations_export() で equations.json 化
     ↓  EquationSemanticsResult (JSON)
+[#237] EvidenceRegistryBuilder  — PDF 原文由来 evidence の一元管理（非LLM）
+                                  ※ 採択スパン・式に絞って逐語根拠を張るため
+                                    claim_qualification / equation_semantics の後段に置く
+    ↓  EvidenceRegistryResult (JSON)
+[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM, #317）
+    ↓  ClaimObjectBuildResult (JSON)
 [#355] SymbolRegistryBuilder    — 数式記号の定義・表記ゆれ・スコープの一元管理（非LLM）
     ↓  SymbolRegistryResult (JSON)
 [#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
@@ -164,6 +179,11 @@ src/episteme_graph/agents/
   component_assembly/   → ComponentAssemblyAgent (#223)
   component_graph/      → ComponentGraphAgent (#266) — TheoryOperationGraph 構築
   narrative_annotator/  → NarrativeAnnotator (#360) — main graph への narrative 注釈（LLM-first, graph 構造非変更）
+  contextual_explanation/ → ContextualExplanationAgent — 要素の二層説明（generic / contextual）候補生成（LLM-first・バッチ）
+  discuss_opening/      → DiscussOpeningAgent — discuss 開幕の「議論のきっかけ」候補生成（LLM-first・1 document = 1 コール）
+  landscape_placement/  → LandscapePlacementAgent — 凍結骨格への論文配置候補 + カテゴリギャップ候補（LLM-first・全ドメイン1コール）
+  blueprint/            → BlueprintAgent — CourseMapping + Component からナラティブアーク合成（決定論）
+  document_unit_boundary/ → DocumentUnitBoundaryAgent — block 単位の分析対象ユニット検出（非LLM・**パイプライン未統合**）
 ```
 
 各Agentディレクトリは最低限以下のファイルを持つ:
@@ -348,7 +368,8 @@ class CartridgeContext:
 - **ガードレール**: `test_account_lifecycle_{auth,api,guardrails,purge,ui_static}.py`
   （AL1 の ORM 削除語彙込み検査・purge 網羅性 = `REFERENCES users(id)` 全表が
   PURGE ∪ RETAIN に現れる・判定順序・fail-closed・数値開示）。
-  UI アンカーは実装時点で 277 件（件数の正は `test_admin_help_ui_anchors.py`）。
+  UI アンカーの件数の正本は `backend/tests/test_admin_help_ui_anchors.py`（表の正本は
+  `core/help_kb/admin_ui_anchors.py`）。
 
 ### URL指定による教材取得（migration 070, 2026-08-25）
 
@@ -810,7 +831,8 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   出典タブ「分野の中の位置づけ」セクション + コーパス事実行（LS8）。教員 = 教材管理⋯メニュー
   「位置づけ（分野マップ）…」→ レビューモーダル（ドメイン別グループ・status チップ・
   [確認][却下][再検討]・[AIで再提案]・unplaced 事実文）。アンカー3点セット登録済み
-  （`materials.row-landscape` / `landscape-modal` / `landscape-propose`、カウント 244）。
+  （`materials.row-landscape` / `landscape-modal` / `landscape-propose`。件数の正本は
+  `test_admin_help_ui_anchors.py`）。
 - **env**: `LANDSCAPE_PLACEMENT_LLM_MODEL`（fast 既定）/ `LANDSCAPE_MAX_CALLS_PER_DAY`(20) /
   `LANDSCAPE_MAX_PLACEMENTS_PER_DOCUMENT`(8)。
 - **ガードレール**: `test_landscape_guardrails.py`（core 非FastAPI・DELETE 不在・migration⇄schema
@@ -876,7 +898,8 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   dismiss 理由必須・捏造ガード文言・禁止語彙）+
   `test_atlas_gaps_{schema,store,patching,api,admin_ui_static}.py` +
   `test_personal_graph_provisional.py` + `src/tests/agents/landscape_placement/test_category_gaps.py`。
-  管理UI アンカー7件（`atlas.gap-*`、カウント 255）+ teacher マニュアル節はA5実装時に3点セット済み。
+  管理UI アンカー（`atlas.gap-*`。件数の正本は `test_admin_help_ui_anchors.py`）+ teacher
+  マニュアル節はA5実装時に3点セット済み。
 - **非スコープ（v1, §7）**: 削除/改名/統合の候補化（additive-only）/ 学習者信号の入力混合
   （KN-4）/ 件数バッジ・カバー率・横断ダッシュボード / 過去論文の自動再配置 / 浮遊アンカー・
   EmergentRegion（Phase 2/3）/ G層 To-Do（運用実測後に判断 — §4.6 裁定）。
@@ -971,7 +994,8 @@ VA層の直後にオーナー討議で確定した表示原則（正本
   incorporate-preview（読み取り専用）/ mark-incorporated（draft に辺実在で 409 判定 +
   監査のみ — 専用列を持たない）。**freeze 統合**: gap と同列の pending ゲート
   （採用済み未反映の辺で 409・`pending_edges` はラベル列挙）+ 凍結トランザクション内
-  `stamp_applied_versions`。監査 `AUDIT_ENTITY_ATLAS_EDGE`（カタログ40語彙目）。
+  `stamp_applied_versions`。監査 `AUDIT_ENTITY_ATLAS_EDGE`（語彙カタログの正本は
+  `core/schema.py` の `AUDIT_ENTITY_TYPES`）。
 - **学習者向け「推定の糸」**: `GET /api/atlas` に optional key `threads`（route 層で
   fail-soft 合流・不能時はキー自体なし）。表示は `atlas-threads-layer.js`
   （landscape-layer と同じ3フック型・L2 のみ・点線・既定オフ・事実文
@@ -1017,7 +1041,8 @@ VA層の直後にオーナー討議で確定した表示原則（正本
   atlas-binding パネルへ縮退）/ コース管理の所有行「確認して公開」。
 - **UI**: `frontend/public/js/admin-release-review.js`（ES5・`window.AdminReleaseReview`・
   admin.js から DI 注入）。ポーリングしない。アンカー4点登録済み
-  （`course-management.release-review-btn` / `release-review.{modal,next,publish}`、カウント 248）。
+  （`course-management.release-review-btn` / `release-review.{modal,next,publish}`。件数の正本は
+  `test_admin_help_ui_anchors.py`）。
 - **ガードレール**: `test_release_review.py`（accept が inferred 限定・空入力で SQL 非発行・
   監査語彙・404 統一）+ `test_release_review_ui_static.py`（3ステップ・「次へ」の意味の明示・
   既存 UI への委譲・数値非表示・fail-open で公開を止めない）。
@@ -1268,7 +1293,7 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 - **管理画面「？使い方」＝admin インスペクト・モード（2026-07-30、migration 不要）**:
   学習画面のインスペクト・モード（`core/help_kb/ui_anchors.py`）の管理画面版。
   ①アンカー表の正本は `core/help_kb/admin_ui_anchors.py`（`KNOWN_ADMIN_UI_ANCHOR_IDS` /
-  `ADMIN_UI_ANCHORS` 260件（2026-08-14 時点。正確な件数は `test_admin_help_ui_anchors.py` が正）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
+  `ADMIN_UI_ANCHORS`（件数の正本は `test_admin_help_ui_anchors.py`）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
   構造的禁止**、`resolve_admin_ui_anchors(role)` は TEACHER=teacher/ のみ・SYSTEM_ADMIN=+
   system_admin/ のロール fail-closed）。②配信 `GET /api/admin/assistant/help/ui-anchors`、
   no_hit 記録 `POST /api/admin/assistant/help/ui-anchor-events`（`_require_teacher`・30分
@@ -1303,10 +1328,14 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 督促・数値スコア禁止）/ G8 道案内は誘導まで（`AdminAssistant.runLocatePlan` を呼ぶだけ）。
 
 - **エンジン**: `backend/core/admin_assistant/next_steps.py`（FastAPI / LLM 非 import）。
-  `compute_next_steps(session, user)` がルールカタログ v1（6件）を本人所有の教材・コースに
-  対して評価: `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
-  `course.not_published` / `course.no_atlas_binding`（recommended）、`course.audio_missing`
-  （optional）。severity→古い順、上限 10 件（切り捨ては `truncated: true` で正直に返す）。
+  `compute_next_steps(session, user)` がルールカタログ（**正本は同ファイルの `RULE_CATALOG` /
+  `_RULE_EVALUATORS`** — 件数をここに書き写さない）を本人所有の教材・コースに対して評価:
+  `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
+  `course.not_published` / `course.no_atlas_binding` / `course.atlas_binding_ready` /
+  `course.atlas_binding_stale` / `figure.unreviewed_modes`（未レビューの図分類が残る教材）/
+  `course.discuss_opening_unreviewed` / `manual.help_gaps_pending`（recommended）、
+  `course.audio_missing` / `assistant_kb.undocumented` / `manual.todo_unresolved`（optional）。
+  severity→古い順、上限 10 件（切り捨ては `truncated: true` で正直に返す）。
   ルールは「次の一歩だけ」を出すチェーン設計（教材登録→コース作成→binding/公開と順に現れる）。
 - **API**（`routes/admin_assistant.py`、TEACHER 以上）: `GET /api/admin/assistant/next-steps`
   → `{steps, hidden, truncated, assistant_cue_pending}`。
@@ -2516,6 +2545,73 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   `test_teacher_triage_{core,api}.py` / `test_quiet_instruments_{core,ui_static}.py` /
   `test_seminar_brief_{api,ui_static}.py` / `test_mirroring_prompt_guardrails.py` / `test_mirroring_ui_static.py`。
 
+### 制度指標カタログ（Indicator Governance, migration なし, 2026-09-04）
+
+集約計器（教員・管理者が値を読む指標）の**定義・目的・宛先・粒度・出所・保持・非利用・
+副作用レビュー**を1つの機械可読カタログに宣言し、**学習者を含む全当事者に公開**する層。
+正本は `docs/features/indicator_governance_design.md`（IG1〜IG5・§9 実装記録）。vision §6
+**改訂原則4**（「数値を見せない」→「数値の用途と粒度を統治する」）の実装。
+
+- **不変条項の要点**: IG1 値の宛先は変えない・定義だけを公開する（カタログは値を1つも
+  持たず、`GET /api/indicators` の依存は `_get_current_user` で **`_require_teacher` では
+  ない**。各計器の値は従来どおり各 API のロールゲートの内側）/ IG2 非利用4項目
+  （`ranking` / `grading` / `recommendation` / `auto_gate`）は `IndicatorSpec.__post_init__`
+  が全 spec に強制（「この計器だけは成績に使う」spec は書けない）/ IG3 個人ランキング・
+  自動ゲートを作らない（discuss 観測 DO5 の一般化）/ IG4 カタログに無い集約 API を
+  新設しない（教員・管理者に集約を見せる経路を足したらカタログにも1件足す）/
+  IG5 定義の変更は設計書とカタログの両方に記録する。
+- **実装**: `backend/core/indicator_catalog.py`（**カタログ本体の正本**。FastAPI /
+  sqlalchemy / `core.llm` 非 import。粒度語彙5種 = `aggregate_k_anonymous` /
+  `aggregate_system` / `self_only` / `per_item_no_person` / `per_account_operational`。
+  k の正本は `core/privacy.py::K_ANONYMITY`）+ `backend/api/routes/indicators.py`
+  （`GET /api/indicators` / `GET /api/indicators/{indicator_id}`。**書き込みメソッドを
+  作らない** — カタログはコードが正本）+ `frontend/public/js/admin-indicators.js`
+  （ES5・`window.AdminIndicators`・DI 注入。`mount()` が事実文1行を差し込むだけで、
+  カタログ取得失敗時は**何も描かない** fail-soft）。
+- **nginx**: `/api/indicators/` と末尾スラッシュなしの `= /api/indicators` の2 location が
+  `frontend/nginx.conf` に必須（欠けると SPA フォールバックが index.html を 200 で返す —
+  `/api/atlas` と同じ事故形）。
+- **既存計器レスポンス**への追加は、キー集合をテストで固定していない経路にだけトップレベル
+  `indicator_id` を足す**ルート層**の変更に留める（core の集計関数の戻り値契約は変えない）。
+- **UI 配置**は計器が実際に描かれる箇所（LLM使用量 / discuss 観測状況 / 関心集約）。事実の
+  段落であって操作要素ではないため `data-ui-anchor` は付けない。**学習者側の UI 変更はなく**、
+  学習者への言明はマニュアル（student/ の節）に置く。
+- **ガードレール**: `test_indicator_catalog{,_guardrails}.py` / `test_indicators_api.py`
+  （core の純粋性・全 spec の `route` が実在の登録済みパスであること・IG4 の集約経路網羅・
+  公開ビューに値らしいキーが再帰的に無いこと・`_require_teacher` 不使用・全 `label` が
+  マニュアル節に逐語で現れること・JS がカタログから数値を読まないこと）。
+
+### 確定文脈の記帳（`decision_context`, migration なし, 2026-09-04）
+
+一括確定（「次へ＝承認」型・「選択したN件を承認」型）を、**後から再構成・異議申立できる
+手続**としてのみ成立させるための監査ブロック。正本は
+`docs/features/decision_context_design.md`（DC1〜DC4・§8 実装記録）。vision §6 **改訂原則1**
+（確定は十分な能力・情報・時間・拒否権を持つ人間の判断を含み、再構成可能な手続にのみ与える）
+の実装で、automation bias / moral crumple zone への具体的な歯止め。
+
+- **不変条項の要点**: DC1 一括確定は `decision_context` 無しに記帳しない（ガードレールが
+  各経路のソースを構造検査）/ DC2 提示（`presented`）と適用（`applied`）は別キーで持ち、
+  一致は**集合比較で導出**する（呼び出し側が「一致した」と申告できない。表示上限で切り
+  詰めた事実は `truncated`）/ DC3 代替の無い確定は記帳できない（`alternatives_available`
+  が空なら `ValueError`。`decline_possible` は引数ではなく導出値）/ DC4 クライアントの
+  来歴申告は `client_reported` に隔離し、未指定なら載せない。
+- **実装**: `backend/core/decision_context.py`（`build_decision_context(...) -> dict` /
+  `attach_decision_context(...)`。FastAPI / sqlalchemy / pydantic / openai 非 import・SQL を
+  書かない）。**新テーブル・新 `entity_type` を作らない** — 既存 `theory_review_events` の
+  `metadata` JSONB に1ブロック足すだけ。数値（`confidence` / `weight` / `score`）は載せない。
+- **適用済みの2経路**: ①リリース前の確認 ステップ2「この配置で次へ」
+  （`POST /api/admin/landscape/courses/{course_id}/placements/accept`、`basis`
+  `release_review.placements`）②説明レビューキューの一括承認・一括却下
+  （`POST /api/admin/documents/{document_id}/element-explanations/bulk-review`、`basis`
+  `explanation_review.bulk`）。**段階適用中**で、単発の承認・骨格の凍結・コース公開・
+  学習者側の確定は未適用（着手時は設計書 §4 に節を足し `basis` 定数を1本足す）。
+- **UI**（リリース前の確認）: 各行に根拠の逐語引用の折りたたみ（`release-review.evidence`。
+  引用が無い行でも折りたたみは出し「引用が残っていません」と事実で書く — 無い行だけ静かに
+  欠けると「見た／見ていない」が再構成できない）+ 再審経路の事実文 + 提示と適用の一致の
+  事実文（差があっても公開は止めない = RR7）。
+- **ガードレール**: `test_decision_context{,_guardrails}.py` + 経路側の
+  `test_release_review.py` / `test_teacher_triage_api.py`。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
@@ -2555,11 +2651,14 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
   `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
-  `core/schema.py` を数える — 2026-08-29 時点で39語彙）。
-  `theory_review_events` への記帳は原則
-  `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
-  同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は
-  必ずカタログ定数を使う）。
+  `core/schema.py` の `AUDIT_ENTITY_TYPES` を数える。件数をドキュメントに書き写さない）。
+  `theory_review_events` への記帳は、**API 層（route / services）からは
+  `services.record_review_event` に委譲する**のが原則。直接 `INSERT` を書いてよいのは
+  次の2種だけ: ①`core/` 配下のモジュールが FastAPI 非 import の制約下で自前セッションに
+  記帳する場合（`core/versioning/audit.py` / `core/help_kb/audit.py` /
+  `core/atlas_gaps/store.py` / `core/account_lifecycle.py` / `core/reconstruction/worker.py`）
+  ②呼び出し元トランザクションに同乗する `core/document_pipeline/persistence.py`。
+  いずれの経路でも entity_type は必ずカタログ定数（`core/schema.py` の `AUDIT_ENTITY_*`）を使う。
 - **`backend/core/notification_recipients.py`** — 通知宛先解決（所有者 / group member）の共通
   JOIN プリミティブ。宛先集合の方針（status 系 = owner+editor のみ / V層 = viewer+editor・owner 除外）
   は各層に残し、SQL だけを共有する。
@@ -2609,7 +2708,7 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   element=ITEM v2 の意図的世代差を維持）。
 - **`backend/core/trace_registry.py`**（2026-08-15 新設、正本設計書
   `docs/features/trace_registry_sovereignty_ledger_design.md`） — `interest_traces` の
-  **kind 登録簿の正本**（8 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、
+  **kind 登録簿の正本**（全 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、
   + 主要消費者の方式宣言 `CONSUMERS`）。**新しい kind・消費者は登録簿に宣言する** —
   `test_trace_registry_guardrails.py` が消費面ソースとの一致を固定し、`services._INTEREST_KINDS`
   は登録簿からの導出。最初の読み手は主権台帳v1「わたしの記録」（`core/trace_ledger.py` +

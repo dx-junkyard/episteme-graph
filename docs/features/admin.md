@@ -4,7 +4,9 @@
 
 教員・管理者向けの管理 UI を機能別に解説します。
 実装: `frontend/public/admin.html` + `frontend/public/js/admin.js`（ES5 互換 SPA）+ 分離モジュール
-（`admin-lecture-studio.js` / `admin-figure-studio.js` / `admin-assistant.js` /
+（`element-vocab.js` / `element-card.js`（統制語彙訳と統一パーツカード。**参照する全スクリプトより
+前に読み込む**）/ `admin-indicators.js`（制度指標カタログの事実文。計器パネルより前）/
+`admin-lecture-studio.js` / `admin-figure-studio.js` / `admin-assistant.js` /
 `admin-help-inspect.js` / `admin-next-steps.js` / `versioning.js` / `deliberation.js` /
 `admin-graph-review.js` / `admin-voice-chat.js` / `doubt-atlas.js` / `admin-llm-usage.js` /
 `admin-llm-models.js` / `admin-manual-editor.js` / `admin-discuss-observation.js` /

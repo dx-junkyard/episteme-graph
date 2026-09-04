@@ -14,8 +14,11 @@
 ## 1. Agent ディレクトリの共通構造
 
 実装ルール: Agent は `backend/` ではなく `src/episteme_graph/agents/<agent_name>/` に置きます。
-公開インターフェースは `agent.py` の `run()`（決定論 builder は `builder.py` の同等関数）で、
-LLM SDK を `agent.py` から直接呼ばず `llm_client.py` に分離します。
+公開インターフェースは `agent.py` の `run()` で、LLM SDK を `agent.py` から直接呼ばず
+`llm_client.py` に分離します。**決定論 builder には `agent.py` / `run()` を持たず
+`builder.py` の `build()` を公開するものがある**（`evidence_registry` /
+`claim_object_builder`）ので、呼び出し側は agent ごとの実際のシグネチャに合わせます
+（`symbol_registry` は `builder.py` に `run()` を持つ折衷型）。
 
 **LLM-first の Agent**（`paper_skeleton` / `rhetorical_role` / `claim_qualification` /
 `equation_semantics` / `apparatus_semantics` / `thesis_reconstruction` / `dsl_linking` /
@@ -44,6 +47,7 @@ LLM SDK を `agent.py` から直接呼ばず `llm_client.py` に分離します�
 
 共通ルール:
 1. **cartridge-aware** — active cartridge があれば語彙・検証に使う。無くても単独動作する（すべて Optional）。
+   ※ **DSLLinkingAgent は現状 cartridge を参照しない**（`cartridge_loader.py` を持たず、プロンプト・validator とも cartridge 非依存）。本ルールの既知の例外で、着手するときは別途設計判断が要る。
 2. **structured output** — LLM 出力は必ず JSON スキーマ検証し、失敗時は repair/retry。
 3. **evidence-based** — 各フィールドに `reason` と `confidence`(0.0〜1.0)。
 4. **情報を落とさない** — 不明は `unknown` / `deferred` で保持。
@@ -272,7 +276,7 @@ equation）に **2 層の説明**を生成する（正本:
 `blueprint/`。CourseMapping + Component からナラティブアーク（学習順序とステップラベル）を合成。
 
 ### ExportValidationGate — 決定論
-`backend/core/document_pipeline/export_validation_gate.py`。最終検証。成果物の完全性・ソースバッキング整合性・スキーマ妥当性をチェック。非 atomic / split_pending な claim が main graph に強い backing として使われていないか等を明示 report（一部は hard error）。
+`backend/core/document_pipeline/export_validation_gate.py`。最終検証。成果物の完全性・ソースバッキング整合性・スキーマ妥当性をチェック。非 atomic / `split_required`（旧称 `split_pending` / `non_atomic` は legacy エイリアス。正本語彙は `claim_object_builder/schema.py`）な claim が main graph に強い backing として使われていないか等を明示 report（一部は hard error）。
 
 ### 未統合のディレクトリ
 - `document_unit_boundary/` — 文書のユニット境界検出 Agent。実装（agent / detector / validator / schema）は

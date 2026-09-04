@@ -150,6 +150,7 @@ ID を直指定するエンドポイントは、対象オブジェクトへの�
 |---|---|
 | `GET /api/admin/courses/{cid}/unanswered-queries` | コース owner / editor（学生表示名・質問本文を返すため） |
 | `GET /api/admin/courses/{cid}/bridge-insights` | コース owner / editor（k-匿名集約でも権限外へは存在ごと隠す） |
+| `GET /api/admin/courses/{cid}/anchor-insights` | コース owner / editor（同上。集約処理より**先に** `_require_editable_course_or_404` を通し、不在も権限なしも同一の 404） |
 | `POST /api/admin/documents/{id}/reanalyze` | document owner / editor |
 | `PUT /api/admin/materials/{id}/pdf` | document owner / editor |
 | `GET /api/learning/courses/{cid}/source-chunk/{chunk_id}` | コースにアクセス可能、**かつ** chunk の document がそのコースの source |

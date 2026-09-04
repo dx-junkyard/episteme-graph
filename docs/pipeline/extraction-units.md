@@ -83,7 +83,7 @@ PDF
 `rhetorical_role/`（[RhetoricalRoleAgent](agents.md#rhetoricalroleagent218-llm-first)）は**ブロックごとに LLM を 1 回呼び**、ブロック内部を**文字オフセットで区切ったスパン**に分けて論理役割を付ける。
 
 - `SpanAnnotation`: `span_id` / `text` / `char_start` / `char_end` / `role_labels` / `is_claim_candidate` / `is_reject_candidate` / `confidence` / `reason`。
-- 役割ラベルは 23 種（`definition` / `relation` / `assumption` / `approximation` / `derivation_step` / `result` / `diagnostic_claim` …）。うち claim 候補になりうる 15 種と、除外する 7 種（`prior_work` / `figure_narration` / `table_narration` / `section_meta` / `meta_discourse` / `citation_context` / `background_general`）に振り分けられる。
+- 役割ラベル（正本は `rhetorical_role/schema.py::ROLE_LABELS`）は `definition` / `relation` / `assumption` / `approximation` / `derivation_step` / `result` / `diagnostic_claim` … の23種。内訳は claim 候補になりうる 15 種（`CORE_CLAIM_ROLES`）+ 除外する 7 種（`EXCLUSION_ROLES` = `prior_work` / `figure_narration` / `table_narration` / `section_meta` / `meta_discourse` / `citation_context` / `background_general`）+ **どちらにも属さない `unknown`**（判定できないものを捨てずに残す受け皿）。
 
 ### ⑤ atomic claim ── 意味抽出の中核（1 主張 = 1 最小命題）
 

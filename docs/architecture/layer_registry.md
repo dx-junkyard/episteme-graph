@@ -41,8 +41,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 - **アーキテクチャ整理 Tier 3（migration 044/045）はレイヤーをまたいで既存テーブルを統合した**:
   `object_group_permissions`（044 = 010 + 035 の統合）と `user_notifications`（045 = 038 + V層
   `share_notifications` の統合）。統合してもレイヤー自体の主 migration 番号は変更されていない。
-  なお **054〜076 に統合系 migration は無い**（すべて機能追加。既存表への列追加・CHECK 拡張
-  だけの回（067 / 069 / 073 / 075）も含む）。
+  なお **054〜076 に統合系 migration は無い**（すべて機能追加。新テーブルを作らず既存表への
+  列追加・CHECK 拡張・索引追加だけで済んだ回（**064** = CHECK 拡張のみ / 067 / **069** =
+  索引追加のみ / 073 / 075）も含む）。
 - **索引とレイヤーの相互欠落は双方向に起きる**: かつては「実装済みなのに CLAUDE.md に無い層」
   （V層）が問題だったが、2026-08 の点検では「CLAUDE.md にあって本表・README に無い層」が
   11件見つかった。**新しい層を追加したら、①専用設計書 ②本表 ③CLAUDE.md ④docs/README.md
@@ -93,6 +94,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 教員の弁と計器 | 負荷順トリアージ + 静かな計器（コスト見通し・WMレンズ） | `docs/features/teacher_triage_instruments_design.md`（TT1〜TT6・§6 実装記録） | `backend/core/teacher_triage.py` + `core/llm_usage/forecast.py` + `core/lecture_wm.py` + 既存キュー2ルートの sort 拡張 | 不要（読み時導出とソートのみ） | 実装済み（Phase 4 v1） |
 | ゼミ前ブリーフ・鏡面化 | 論文の賭け金の read-only 合成ビュー + discuss の鏡面化 move | `docs/features/seminar_brief_mirroring_design.md`（SB1〜SB4・EX-3b 逐条・§4 実装記録） | `backend/core/doubt/seminar_brief.py` + `routes/seminar_brief.py` + `core/discuss/mirroring.py` + discuss プロンプト拡張 | 不要（読み時合成とプロンプト move のみ） | 実装済み（Phase 5 v1） |
 | 主権台帳（わたしの記録） | 痕跡kind登録簿 + 学習痕跡の主権台帳v1 | `docs/features/trace_registry_sovereignty_ledger_design.md`（TR1〜TR7・§4 実装記録） | `backend/core/trace_registry.py` + `core/trace_ledger.py` + `routes/my_records.py` + `my-records.js` | 不要（`interest_traces` の読みのみ） | 実装済み（Phase 1 v1。封印・包含来歴は v2） |
+| 制度指標カタログ | Indicator Governance（集約計器の定義・用途・非利用を全当事者へ公開） | `docs/features/indicator_governance_design.md`（IG1〜IG5・§9 実装記録） | `backend/core/indicator_catalog.py` + `routes/indicators.py` + `admin-indicators.js` | 不要（カタログはコードが正本・値を持たない） | 実装済み（v1。vision §6 改訂原則4 の実装） |
+| 確定文脈の記帳 | `decision_context`（一括確定を再構成・異議申立できる手続にする監査ブロック） | `docs/features/decision_context_design.md`（DC1〜DC4・§8 実装記録） | `backend/core/decision_context.py` + `routes/landscape.py`（リリース前の確認）/ `routes/element_explanations.py`（説明の一括レビュー） | 不要（既存 `theory_review_events.metadata` に1ブロック） | 実装済み（一括確定2経路。単発承認・凍結・公開は段階適用中） |
 | 横断基盤（共有ユーティリティ） | 同型実装のコピペ増殖を止める正本モジュール群 | `docs/features/assistant_common_infra_design.md` + `docs/features/candidate_flow_design.md` + `docs/features/label_vocab_design.md` + `consolidation_survey_2026-07.md` | `backend/core/llm_worker/` / `privacy.py`（k=3 正本）/ `course_data.py` / `revision_store.py` / `candidate_flow.py`（候補→確定の共通制御フロー）/ `label_vocab.py`（段階ラベル・共有語彙表の正本）/ `trace_registry.py`（`interest_traces` kind 登録簿と消費者許可リストの正本）/ `learner_context_common.py`（学習者向け要素文脈の共通正本）/ `notification_recipients.py` / `schema.py` の `AUDIT_ENTITY_*` / `backend/tests/guardrail_helpers.py` | — | 実装済み（**新機能はコピペせずこれらに接続するのが規約**） |
 
 ## 2. 補足
@@ -103,11 +106,11 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   実装を追う際に1ファイルだけ読んで判断しないこと。
 - **migration を伴わない実装済みレイヤーも本表に載せる**（理解サイクル / リリース前確認 /
   個人知識ネットワーク等。「migration が無い＝機能が無い」ではない）。
-- 監査語彙（`AUDIT_ENTITY_TYPES`）の正本は `backend/core/schema.py`（2026-09-03 時点 40語彙）。
-  ドキュメントに全列挙を書き写さないこと（陳腐化するため）。
+- 監査語彙（`AUDIT_ENTITY_TYPES`）の正本は `backend/core/schema.py`。
+  ドキュメントに全列挙や語彙数を書き写さないこと（陳腐化するため）。
 - UI アンカー表の正本は `backend/core/help_kb/admin_ui_anchors.py`（管理画面）/
-  `ui_anchors.py`（学習画面）。件数は 2026-09-03 時点で管理 321・学習 26
-  （管理側の網羅・双方向整合は `backend/tests/test_admin_help_ui_anchors.py` と
+  `ui_anchors.py`（学習画面）。**件数はドキュメントに書かない** — 正本は
+  `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
 ## 3. migration 帰属一覧（init〜076、2026-09-03 時点）

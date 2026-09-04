@@ -72,10 +72,17 @@ ComponentGraphAgent（`component_graph/normalizer.py`）が、DerivationChain �
 そちらは操作を「操作ファミリー（+ カートリッジ由来 subtype）」へ分類する共有モジュール
 （→ [PDF 解析 Agent 詳細 §3](agents.md#3-共有モジュールagents-直下)）。本節の記述は
 すべて component_graph 側を指します。
+判定順序は ①`GENERIC_OPERATIONS` ②`_OPERATION_FULL_MAP`（`apply_definition` / `solve_linear_system`
+など、operation 名の完全一致表）③`_OPERATION_PREFIX_MAP`（第1トークンの prefix 表）の順。
+**prefix 表・完全一致表の正本はコード**（`component_graph/schema.py`）で、ここに全行を書き写さない。
+主要な prefix は次のとおり:
+
 ```
-define_*     → defines        linearize_* → linearizes     solve_*     → solves
-eliminate_*  → eliminates     derive_*    → derives        constrain_* → constrains
-diagnose_*   → diagnoses      compare_*   → compares
+define_*    → defines      construct_*   → constructs     normalize_*   → normalizes
+linearize_* → linearizes   approximate_* → approximates   substitute_*  → substitutes
+solve_*     → solves       eliminate_*   → eliminates     derive_*      → derives
+constrain_* → constrains   diagnose_*    → diagnoses      compare_*     → compares
+introduce_* / state_*      → defines      infer_*         → derives      flag_* → constrains
 ```
 `GENERIC_OPERATIONS`（`transform` / `relate` / `connect` / `support` / `associate` / 空文字）は
 generic 扱い（`edge_type="requires_review"`）。上の prefix 表にも完全一致表にも当たらない

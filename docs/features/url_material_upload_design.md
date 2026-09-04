@@ -170,7 +170,7 @@ FastAPI を import しない（開発ルール2）。HTTP ステータスへの�
 | `backend/tests/test_url_fetch_api.py` | 権限（参照 = TEACHER 以上 / 変更 = SYSTEM_ADMIN）・エラー写像（422 / 413 / 502）・**内部アドレス拒否時に内部情報を漏らさないこと**（UF6）・202 が既存 upload の経路へ合流すること・`analyze_images` / `models` の受け渡し・監査記帳。 |
 | `backend/tests/test_url_fetch_guardrails.py` | `core/url_fetch.py` が FastAPI / HTTPException / 環境変数に触れないこと・`fetch_source_from_url` が `allowed_domains` を必須引数に取り HTTP を行う公開入口が1つだけであること（UF1）・migration にシード INSERT と破壊的 DDL が無いこと（UF2）・リダイレクト自動追跡の無効化とホップ / サイズ / タイムアウト上限の存在（UF3）。 |
 | `backend/tests/test_url_fetch_ui_static.py` | 6アンカーの担体実在・モーダル要素 id・**許可リスト空時の無効化と理由の事実文**・`handleUploadAccepted` が `uploadFile` と `submitUrlUpload` の両方から呼ばれること（合流の単一性）・`ensureUrlFetchDomainsSection` が `tab-llm-models` を参照すること。 |
-| `backend/tests/test_admin_help_ui_anchors.py` | アンカー表とマニュアル節の整合・件数（283）・ロール fail-closed。 |
+| `backend/tests/test_admin_help_ui_anchors.py` | アンカー表とマニュアル節の整合・件数（**現行値の正本は同テスト**）・ロール fail-closed。 |
 | `backend/tests/test_docs_registry_guardrails.py` | migration 070 が data-model.md / layer_registry.md §3 に現れること・本設計書が索引から参照されていること。 |
 
 ---
@@ -187,8 +187,9 @@ v1 を同日中に実装した。
 - **フロント**: `admin.html` にリンク1本、`admin.js` にモーダルと SYSTEM_ADMIN 向け
   許可ドメイン区画。受理後は既存の `handleUploadAccepted` に合流。
 - **ドキュメント**: 本設計書 + `teacher/11-admin-materials.md` に3節 +
-  `system_admin/17-admin-url-fetch-domains.md` 新設 + アンカー表6件（計 283）+
-  data-model.md / layer_registry.md / docs/README.md / CLAUDE.md の更新。
+  `system_admin/17-admin-url-fetch-domains.md` 新設 + アンカー表に6件追加（総数の正本は
+  `test_admin_help_ui_anchors.py`）+ data-model.md / layer_registry.md / docs/README.md /
+  CLAUDE.md の更新。
 
 未実施: docker 実機での E2E 検証（arXiv からの実取得）。
 

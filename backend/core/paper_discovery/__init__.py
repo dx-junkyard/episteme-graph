@@ -17,13 +17,16 @@ DDL は ``backend/db/071_paper_discovery.sql``、API 層は
 - :mod:`~core.paper_discovery.corpus` — 分野 → 取り込み済み document の解決（正本）
 - :mod:`~core.paper_discovery.ranking` — 関連度ランキング（Phase 3。**このパッケージで
   唯一 embedding を使う**。並べ替えだけで候補を捨てない）
+- :mod:`~core.paper_discovery.compare` — 論文レーダーの AI 比較分析（1 コール・非保存。
+  ``ranking`` と並ぶ ``core.llm`` 接触の allowlist）
 - :mod:`~core.paper_discovery.citation_client` — 引用グラフ API の唯一の入口
   （Phase 3。宛先固定・3秒スロットル）
 - :mod:`~core.paper_discovery.citation_search` — 引用グラフによる候補供給（Phase 3。
   ``DISCOVERY_CITATION_SOURCE_ENABLED`` のオプトイン）
 
-FastAPI を import しない。``core.llm`` に触れるのは :mod:`ranking` だけで、
-そこでも関数内の遅延 import に閉じる（Phase 1〜2 の経路は LLM 0回のまま）。
+FastAPI を import しない。``core.llm`` に触れてよいのは :mod:`ranking`（embedding）と
+:mod:`compare`（比較分析の text LLM）の2ファイルだけで、どちらも関数内の遅延 import に
+閉じる（Phase 1〜2 の経路は LLM 0回のまま）。
 論文本体の取得は API 層が既存の URL 取得層（migration 070 / UF1〜UF6）を呼ぶ
 （PD2 — このパッケージは HTTP で論文を取りに行かない）。
 """

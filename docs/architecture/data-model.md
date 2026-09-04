@@ -42,11 +42,12 @@ ORM 定義は `backend/core/models.py`、スキーマ初期化は `backend/db/in
 | `learning_chat_history` | トピック単位のチャット履歴（前提知識チェックの判定に使用） |
 | `unanswered_query_logs` | システムが答えられなかった質問（スキーマ進化の入力） |
 | `student_stumble_events` | 学生のつまずきイベント（教員向け分析） |
+| `chunk_graph_mentions` | チャンク本文中に現れたグラフ要素の言及（マイグレーション 012）。`chunk_id` → `chunks(id)` CASCADE、`element_type` は concept / relationship / formula / keyword / reference / citation の6値 CHECK（017 が旧4値 DB を治癒）、`UNIQUE(chunk_id, element_id, element_type)` |
 
 ### 学習者体験・関心痕跡（B層, マイグレーション 020 / 022）
 | テーブル | 役割 |
 |---|---|
-| `interest_traces` | 学習者の問い・寄り道・誤答・違和感（tension）候補の痕跡。`kind`（raw / question / detour / misconception / **tension**）、`status`（open / revisited / resolved / **candidate / dismissed / articulated / connected / abstracted**）、`payload(JSONB)` に tension_type / paraphrase / evidence_quote / confidence / tension_hint / casual などを保持。tension の candidate / dismissed は「問いの軌跡」には出さず、本人向けダイジェスト経由でのみ提示 |
+| `interest_traces` | 学習者の問い・寄り道・誤答・違和感（tension）候補の痕跡。**`kind` 語彙の正本は `backend/core/trace_registry.py::TRACE_KINDS`**（raw / question / backstage_question / detour / misconception / tension / help_usage / intention / anchor_mark / frontier_interest。**新しい kind は登録簿に露出3宣言つきで足す**）。`status` は open / revisited / resolved / candidate / dismissed / articulated / connected / abstracted / superseded（表示ラベルの正本は `core/label_vocab.py::TRACE_STATUS_LABELS`。`superseded` は書き直し・削除で差し替えられた行で、worker・digest・問いの軌跡から除外される）。`payload(JSONB)` に tension_type / paraphrase / evidence_quote / confidence / tension_hint / casual などを保持。tension の candidate / dismissed は「問いの軌跡」には出さず、本人向けダイジェスト経由でのみ提示 |
 
 > tension 行は [TensionMiningAgent](../backend/rag-chat.md)（B層, マイグレーション 022）が `status='candidate'` で生成し、
 > 本人の confirm / dismiss を経てのみ確定します。教員へは k-匿名化した集計のみ提示されます。

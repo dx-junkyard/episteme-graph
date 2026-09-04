@@ -74,7 +74,8 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 
 ### 2.2 コース完了カード（サーバー正本の完了判定）
 
-確認問題（`POST .../topics/{tid}/check-question` → `.../check`）に合格すると、サーバーが
+確認問題（設問は `GET .../topics/{tid}/material` の `check_questions` から選び、採点は
+`POST .../topics/{tid}/check`）に合格すると、サーバーが
 `services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
 
 - `progress_data.completed_topics`（topic_id → 合格時刻 ISO8601。既存タイムスタンプは上書きしない）
@@ -147,7 +148,8 @@ RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（�
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
 - **誤解検出**: 回答に訂正シグナルが含まれると個人レイヤーに記録され、トピックに誤解バッジが付く。
 - **前提知識チェック**: 未習得の前提があれば逆質問（`mode="prerequisite_review"`）。
-- **理解度チェック**: `POST .../topics/{tid}/check-question` で習得を確認し次トピックへ。
+- **理解度チェック**: `POST .../topics/{tid}/check`（設問は `GET .../topics/{tid}/material` の
+  `check_questions`）で習得を確認し次トピックへ。
 
 ### 回答の出所表示（content_grounding）
 回答バブル下部と出典タブのバナーに、回答が何に基づくかをバッジで表示します

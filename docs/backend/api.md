@@ -12,9 +12,10 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 >
 > **網羅性（2026-09-03 時点）**: 起動後の `app.routes`（`backend/api/routes/` の全ルーター +
 > `/healthz`。FastAPI 自動生成の `/docs` `/openapi.json` `/redoc` は除く）と本ページの一覧を
-> 突合し、過不足なく一致することを確認済み（メソッド×パスで 411 経路。`GET
+> 突合し、過不足なく一致することを確認済み（`GET
 > /api/admin/documents/{id}/figures` は admin.py と figure_presentation.py の2定義が
-> 1経路に収束するため1行）。ルーターやエンドポイントを追加したら本ページの該当節にも行を足すこと。
+> 1経路に収束するため1行）。**経路数は本ページに書かない**（正は起動後の `app.routes`）。
+> ルーターやエンドポイントを追加したら本ページの該当節にも行を足すこと。
 
 ---
 
@@ -43,12 +44,15 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 ⑩help_kb のバリデーション3種（`validate_manual` / `check_ui_anchor_mappings` /
 `check_admin_ui_anchor_mappings`）→ ⑪help_kb 配信スナップショットの content-hash 監査記帳
 （`core.help_kb.audit`）→ ⑫help_kb ベクトル補助層の同期（バックグラウンドスレッド、migration 058）。
-③〜⑫はすべて fail-open（失敗しても起動を止めず warning ログのみ）。
+③⑤〜⑫は fail-open（失敗しても起動を止めず warning ログのみ）。**④ だけは fail-open ではない** —
+`seed_builtin_schema()` は①②と同じリトライループの中で例外を握らずに呼ばれるため、失敗すると
+リトライののち起動中止（`sys.exit(1)`）になる（[デプロイ構成](../architecture/deployment.md) の
+起動シーケンス表と同じ扱い）。
 
 **ルーターのマウント（main.py、Tier 3-17c でフラット化）**: 全ルーターは `main.py` から直接
 `app.include_router(...)` で登録される（admin.py 経由の二段ネストは廃止済み）。
 
-- **自前 prefix で直接登録（26本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
+- **自前 prefix で直接登録（`main.py` の登録順。本数の正は `main.py` の `include_router` 行）**: `auth`（/api/auth）/ `learning`
   （/api/learning）/ `figure_presentation`（/api/admin）/ `element_explanations`（/api/admin）/
   `admin`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`（/api/learning/lecture）/
   `groups`（prefix なし。/api/groups・/api/me をパスに直書き）/ `export`（prefix なし。
@@ -367,7 +371,8 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 
 ### 管理 `/api/admin`（`routes/admin.py`）
 
-教材・コース・スキーマ・ユーザー管理の中核ルーター（2026-09-03 時点 54 エンドポイント）。
+教材・コース・スキーマ・ユーザー管理の中核ルーター（エンドポイント数の正は `routes/admin.py` の
+デコレータ行）。
 手順の正本: [admin_operations/materials.md](../admin_operations/materials.md) /
 [admin_operations/course.md](../admin_operations/course.md) /
 [admin_operations/users.md](../admin_operations/users.md)（グループ管理） /

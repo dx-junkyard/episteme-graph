@@ -18,7 +18,9 @@ Agent のコードにドメイン知識をハードコードせず、ここか�
 ## 1. カートリッジのファイル構成
 
 `backend/cartridges/particle_physics/` の例（読み込むファイル名は `cartridge.json` の
-`files` マニフェストが宣言する）:
+`files` マニフェストが宣言する。**ただし `library/` と `examples/` はマニフェストに載らず、
+ディレクトリ走査で読まれる** — `core/library/seed.py` が `cartridge_directory(id)/"library"` を
+直接見る）:
 
 | ファイル | 役割 |
 |---|---|
@@ -30,9 +32,9 @@ Agent のコードにドメイン知識をハードコードせず、ここか�
 | `support_statuses.json` | サポートステータス定義（source_backed, inferred, review_required …） |
 | `maturity_levels.json` | 成熟度レベル定義（`maturity_levels` + `maturity_sources`） |
 | `extraction_prompt.md` / `review_prompt.md` | ドメイン向けプロンプト断片 |
-| `examples/*.json` | プロンプトの grounding 用サンプルコンポーネント |
+| `examples/*.json` | プロンプトの grounding 用サンプルコンポーネント（**マニフェスト非経由**・ディレクトリ走査） |
 | `atlas/skeleton.yaml` | 分野の地図（Field Atlas）の骨格シード。起動時に一度だけ DB（`atlas_skeletons`）へ冪等取込され、以降は DB が正本 |
-| `library/*.json` | L層ナレッジライブラリのシード（例: `apparatus_seed.json`）。同じく起動時に冪等取込され、パイプラインが読むのは**凍結版のみ** |
+| `library/*.json` | L層ナレッジライブラリのシード（例: `apparatus_seed.json`）。同じく起動時に冪等取込され、パイプラインが読むのは**凍結版のみ**。**マニフェスト非経由**で `library/` ディレクトリを走査する |
 
 > `atlas/` と `library/` は A層のパイプラインが直接読むものではなく、それぞれ
 > [分野の地図](../features/field_atlas_overlay_spec.md) と

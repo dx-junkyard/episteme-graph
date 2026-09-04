@@ -42,7 +42,7 @@
 
 | 表記 | 意味 |
 |---|---|
-| LLM | text LLM を呼び、M層のステージ別モデル選択の対象（`llm_kind="text"` + `model_policy=True` = `LLM_STAGE_NAMES`。2026-09-03 時点 12 ステージ） |
+| LLM | text LLM を呼び、M層のステージ別モデル選択の対象（`llm_kind="text"`。**`LLM_STAGE_NAMES` は `model_policy=True` のみから導出**され、vision ステージ（`apparatus_semantics`）も含む — 「text である」ことは条件ではない） |
 | vision LLM | vision LLM を呼ぶ（`llm_kind="vision"` = `VISION_STAGE_NAMES`。現状 `apparatus_semantics` のみ） |
 | LLM（M層対象外） | LLM は呼ぶが `model_policy=False` で、ステージ別モデル選択と `_stage_models` 記録の対象外（現状 `component_graph` のみ。`LLM_CALLING_STAGE_NAMES` と `LLM_STAGE_NAMES` の唯一の差分） |
 | Emb | embedding API を呼ぶ（`llm_kind="embedding"`。モデル選択の対象外 — pgvector の次元と結合しているため） |
@@ -117,7 +117,7 @@ PDF
 > この図は**実行順ではなくデータ依存関係**を示す（矢印は「どの成果物に依存するか」）。実際の実行順は §2 のステージ表が正。特に `evidence_registry` はステージ 11 で、`claim_qualification`（9）・`equation_semantics`（10）の**後**に走り、それらの採択スパン・式に絞って逐語根拠を張る（`_build_evidence_registry` は `structure` に加え `qualified` と `equations` を入力に取る）。
 
 責務分担の要点:
-- **Claim の atomic 化は ClaimQualificationAgent（LLM）が担当**。ClaimObjectBuilder は候補を変換・リンク・検証するだけ（atomic rewrite はしない）。非 atomic / split_pending は `review_required` で保持。
+- **Claim の atomic 化は ClaimQualificationAgent（LLM）が担当**。ClaimObjectBuilder は候補を変換・リンク・検証するだけ（atomic rewrite はしない）。非 atomic / split_required（旧称 `split_pending` / `non_atomic` は legacy エイリアスで、正本語彙は `claim_object_builder/schema.py` の `split_required`）は `review_required` で保持。
 - **Evidence は PDF 原文由来のみ**を EvidenceRegistry が一元管理。各 claim/equation は `source_evidence_ids` で参照する。
 - **理論操作グラフ（ComponentGraph）**は導出チェーンから決定論的に構築し、ソースバッキング状態とレビュー理由を必ず付与する。詳細 → [DSL と理論操作グラフ](theory-graph.md)。
 - **`contextual_explanation` / `discuss_opening` / `landscape_placement`（23〜25）は非致命**。グラフ・narrative が揃った位置に置かれ、既存成果物の解決済みテキストだけを読んで**候補**（`candidate` / `inferred`）を書く。ここで失敗しても `course_mapping` 以降（永続化）を止めない。確定は必ず教員が行う。

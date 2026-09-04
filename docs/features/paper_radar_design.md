@@ -378,6 +378,8 @@ Fable 5 指揮・Opus 5 並列サブエージェント3体（backend core+API / 
 1. **エンドポイントは3本**（設計 §5.5 の2本 + `GET /radar/seed` 追加）。モーダルを
    開いた時点で条件チップを prefill するには seed 解決が検索より先に要るため。
    seed 取得も読み取り専用・監査記帳なし。
+   （その後 §11.8 で `POST /radar/provenance` が加わり、レーダーのエンドポイントは
+   現在4本。）
 2. **`banding.primary_label` を追加** — 選択距離に対応する帯ラベル（正本は
    label_vocab）を banding に同梱し、UI が展開する帯を決定論にする（帯分け不能時は
    付けない）。フロントは `primary_label` 不在時に最大の帯へ fail-soft。
@@ -423,8 +425,9 @@ Fable 5 指揮・Opus 5 並列サブエージェント3体（backend core+API / 
 
 - 新旧2形式（`2407.01221v2` / `hep-ph/0501001`）をファイル名から拾い、
   `normalize_arxiv_id` で version を落として正規化する。
-- **相異なる ID が複数見つかったら推定しない**（`None`）。どれが本体か決められないものを
-  一つ選ぶのは判定不能の偽装にあたる（PD6）。同一 ID の重複出現は1件として扱う。
+- **相異なる ID が複数見つかったら推定しない**（戻り値は空文字列 `""`）。どれが本体か
+  決められないものを一つ選ぶのは判定不能の偽装にあたる（PD6）。同一 ID の重複出現は1件と
+  して扱う。
 - 推定 ID があるときに限り `arxiv_client.fetch_by_ids([id])` を1回呼び、カテゴリ・要旨・
   タイトルを取得して検索条件にプリフィルする。**推定 ID が無ければ arXiv を呼ばない**
   （PD6 の「条件ゼロで外部 API を呼ばない」と同じ規律を、ID 経路にも適用する）。
@@ -596,7 +599,7 @@ VA層 §8 の着地予測（`atlas_vectors.query.landing_for_vector`）を radar
 | チップ | 導出 | 上限 |
 |---|---|---|
 | **重なり**（`overlap_components: [str]`） | seed 教材の**承認済み** `theory_components` ラベル（`seed_keyphrase_candidates` と同じ供給源・同じ承認語彙定数）と候補タイトル+要旨の **casefold 部分一致**（`radar.overlap_component_labels`） | 6 |
-| **新しい面**（`new_facets: [str]`） | 候補ベクトルが**最上位帯**（`ANCHOR_NEARNESS_THRESHOLD_NEAR` 以上）で近いアンカーのうち、seed 教材の `landscape_placements`（`status NOT IN ('superseded','rejected')`）に**無い** node のラベル（`atlas_vectors.query.new_facet_labels`） | 2 |
+| **新しい面**（`new_facets: [str]`） | 候補ベクトルが**最上位帯**（`ANCHOR_LANDING_THRESHOLD_NEAR` 以上 — 着地予測と同じ「論文テキスト×アンカー」レジーム。VA層 §9）で近いアンカーのうち、seed 教材の `landscape_placements`（`status NOT IN ('superseded','rejected')`）に**無い** node のラベル（`atlas_vectors.query.new_facet_labels`） | 2 |
 
 - どちらも **LLM 0回**。重なりは文字列照合、新しい面は 12.2 と同じ使い回しベクトル。
 - **未測定の候補にはキー自体を付けない**（PR2 継承。「重なりなし」「新しい面なし」を

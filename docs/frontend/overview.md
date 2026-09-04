@@ -65,6 +65,7 @@
 | `versioning.js` | `Versioning` | V層 共有版モーダル（発行・版履歴・削除予約）+ 通知インボックス🔔 |
 | `deliberation.js` | `Deliberation` | W層 要素検討ワークスペース（「深く検討」パネル・要素インベントリ） |
 | `doubt-atlas.js` | `DoubtAtlas` | D層「前提の地図」タブ（Field Atlas とは別機能） |
+| `admin-indicators.js` | `AdminIndicators` | 制度指標カタログ（`GET /api/indicators`）の事実文1行を計器パネルへ差し込む。**カタログは値を持たないので数値を描く経路が無い**・取得失敗時は何も描かない fail-soft。計器パネル（`admin-llm-usage.js` / `admin-discuss-observation.js` / `admin.js` の関心集約）が `mount()` を呼ぶため**それらより前に読み込む** |
 | `admin-llm-usage.js` | `AdminLlmUsage` | U層 LLM 使用量タブ（SYSTEM_ADMIN）+ 教材見積りポップオーバー（TEACHER） |
 | `atlas-draft-preview.js` | `AtlasDraftPreview` | 分野の地図・骨格エディタのビジュアルプレビュー |
 | `atlas-assist-panel.js` | `AtlasAssistPanel` | 骨格エディタの AI アシスト編集パネル |
@@ -94,7 +95,7 @@
 `admin.html` の読み込み順: `element-vocab.js` → `element-card.js` → `doubt-atlas.js` →
 `atlas-draft-preview.js` → `atlas-assist-panel.js` → `admin-help-inspect.js` → `admin-assistant.js` →
 `admin-next-steps.js` → `versioning.js` → `admin-figure-studio.js` → `admin-lecture-studio.js` →
-`deliberation.js` → `admin-llm-usage.js` → `admin-manual-editor.js` → `admin-discuss-observation.js` →
+`deliberation.js` → `admin-indicators.js` → `admin-llm-usage.js` → `admin-manual-editor.js` → `admin-discuss-observation.js` →
 `admin-llm-models.js` → `admin-release-review.js` → `admin-paper-discovery.js` →
 `admin-paper-radar.js` → `admin-voice-chat.js` → `admin-graph-review.js` → **最後に `admin.js`**。
 `element-vocab.js` / `element-card.js` はここでも先頭固定（`admin-lecture-studio.js` /
@@ -184,13 +185,16 @@
 ## 4. nginx リバースプロキシ（nginx.conf）
 
 - ポート **3000** で静的 SPA を配信し、クライアントサイドルーティングのため `try_files $uri $uri/ /index.html`。
-- `/api/*` を `api-server`（内部 8001）へプロキシ。プロキシ対象パス:
-  `/api/learning/`, `/api/auth/`, `/api/admin/`, `/api/groups`(+ `/api/groups/`), `/api/me/`,
-  `/api/atlas`(+ `/api/atlas/`), `/api/courses/`, `/api/documents/`。
-- **運用注意: `/api/atlas` は明示 proxy が必須**。`location /api/atlas/` と末尾スラッシュなしの
-  `location = /api/atlas`（`GET /api/atlas?course=...` 用）の両方が nginx.conf に定義されている。
+- `/api/*` を `api-server`（内部 8001）へプロキシ。プロキシ対象パス（**正は `nginx.conf` の
+  `location` 行**）: `/api/learning/`, `/api/auth/`, `/api/admin/`, `/api/groups`(+ `/api/groups/`),
+  `/api/me/`, `/api/indicators`(+ `/api/indicators/`), `/api/atlas`(+ `/api/atlas/`),
+  `/api/courses/`, `/api/documents/`。
+- **運用注意: `/api/atlas` と `/api/indicators` は明示 proxy が必須**。それぞれ
+  `location /api/atlas/`・`location /api/indicators/` と末尾スラッシュなしの
+  `location = /api/atlas`（`GET /api/atlas?course=...` 用）・`location = /api/indicators` の
+  両方が nginx.conf に定義されている。
   この location が欠けると SPA フォールバック（`location /`）が index.html を 200 で返し、
-  フロント（atlas-data.js）の JSON パースが失敗する形で事故る。
+  フロント（atlas-data.js / admin-indicators.js）の JSON パースが失敗する形で事故る。
 - 全 proxy location でタイムアウト 120s。アップロード上限 `client_max_body_size 150m` は
   `location /api/admin/` にのみ設定（教材アップロードの経路）。`Host` / `X-Real-IP` /
   `X-Forwarded-For` / `X-Forwarded-Proto` を引き継ぐ（`X-Real-IP` は `auth_events` の

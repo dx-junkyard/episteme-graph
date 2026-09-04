@@ -266,7 +266,8 @@ def _unavailable(note: str, candidates: Sequence[dict]) -> dict:
 def _embed(texts: list[str]) -> list[list[float]]:
     """候補テキストをまとめて埋め込む（1検索 = 1バッチコール・U層計測つき）。"""
     # 依存の重さを入口に持ち込まないため、ここで遅延 import する
-    # （``core.paper_discovery`` の他ファイルは ``core.llm`` に触れない）。
+    # （``core.paper_discovery`` で ``core.llm`` に触れてよいのは本ファイルと
+    #  ``compare.py`` の2つだけ。ガードレールの ``LLM_EXEMPT_FILES`` が正本）。
     from core.llm import generate_embeddings
     from core.llm_usage.context import usage_context
 

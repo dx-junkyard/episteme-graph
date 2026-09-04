@@ -54,8 +54,8 @@ docker compose logs -f api-server
 ### ネットワーク設計（セキュリティ）
 - 外部公開ポートは **frontend:3000 のみ**。
 - `api-server`（8001）は本番・ローカルとも直接公開されず、必ず nginx（3000）経由でアクセスする。
-- API リバースプロキシの定義は `frontend/nginx.conf`。プロキシ対象は `/api/learning/`, `/api/auth/`, `/api/admin/`, `/api/groups/`（+ 末尾スラッシュなしの `= /api/groups`）, `/api/me/`, `/api/atlas/`（+ 末尾スラッシュなしの `= /api/atlas`）, `/api/courses/`, `/api/documents/` の10 location（`location /` の静的配信を除く）。詳細は [フロントエンド構成](../frontend/overview.md)。
-- **`/api/atlas` は必須項目**（末尾スラッシュ有無の2 location とも）。CLAUDE.md が明記するとおり、この location が欠落すると SPA フォールバック（`location /` の `try_files ... /index.html`）が index.html を **200 で返し**、フロントの JSON パースが失敗して分野の地図が事故る。
+- API リバースプロキシの定義は `frontend/nginx.conf`。プロキシ対象は `/api/learning/`, `/api/auth/`, `/api/admin/`, `/api/groups/`（+ 末尾スラッシュなしの `= /api/groups`）, `/api/me/`, `/api/indicators/`（+ `= /api/indicators`）, `/api/atlas/`（+ `= /api/atlas`）, `/api/courses/`, `/api/documents/` の12 location（`location /` の静的配信を除く。**正は `frontend/nginx.conf` の `location` 行**）。詳細は [フロントエンド構成](../frontend/overview.md)。
+- **`/api/atlas` と `/api/indicators` は必須項目**（それぞれ末尾スラッシュ有無の2 location とも）。CLAUDE.md が明記するとおり、この location が欠落すると SPA フォールバック（`location /` の `try_files ... /index.html`）が index.html を **200 で返し**、フロントの JSON パースが失敗して分野の地図・指標カタログが事故る。
 
 ---
 
@@ -89,10 +89,16 @@ docker compose logs -f api-server
 
 | 変数 | 残す理由 |
 |---|---|
-| `LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` | `Settings` の別名に無い旧 env 名（`OPENAI_FAST_MODEL` / `OPENAI_ANALYSIS_MODEL`）を吸収し、tier 間のフォールバック連鎖を組む |
 | `DATABASE_URL` | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` から合成する（`.env` の `DATABASE_URL` より優先される） |
 | `GOOGLE_APPLICATION_CREDENTIALS` | コンテナ固有の既定値 `/app/.gcp/application_default_credentials.json`（ホスト側の値と異なる） |
 | `GROBID_URL` | コンテナ間はサービス名 `http://grobid:8070`（ホスト側の `localhost:8070` と異なる） |
+
+`LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` の3行は 2026-09-05 に**削除**しました。
+旧 env 名の吸収と tier 間フォールバックのために置いていた行ですが、末尾の既定値が `o3-mini` で
+`Settings`（`core/config.py`）の既定を黙って上書きしていたためです。旧名 `OPENAI_FAST_MODEL` の
+吸収と tier 間フォールバック（standard ← `LLM_ANALYSIS_MODEL` / deep ← standard、いずれも
+明示 env があるときだけ）は `Settings` の `AliasChoices` と `model_validator` へ移設し、
+モデル決定の正本を core 側に一本化しました。`.env` の `LLM_*_MODEL` は `env_file` でそのまま届きます。
 
 `VAR: ${VAR:-<コード既定値と同じ値>}` の重複行（`JWT_SECRET` / `LLM_PROVIDER` / `LLM_API_KEY` /
 `LLM_ANALYSIS_MODEL` / `LLM_EMBEDDING_*` / `GCP_*` / `GOOGLE_CLOUD_*` / `MINIO_*` /
@@ -241,7 +247,7 @@ DISCOVERY_CITATION_SOURCE_ENABLED=0  # 引用グラフ供給源（Semantic Schol
 
 | # | 処理 | 実体 | 失敗時 |
 |---|---|---|---|
-| 1 | **マイグレーション適用** | `core/migrations.py::run_migrations()` が `backend/db/` の `init.sql` → `002_*.sql` 〜 番号順の最新（2026-09-03 時点 `076_*.sql`）までを**毎起動・番号順に全ファイル冪等再実行**する。多重起動は `pg_advisory_lock`（`MIGRATION_LOCK_KEY`）で排他し、ファイル単位で commit する | リトライ（10回失敗で起動中止） |
+| 1 | **マイグレーション適用** | `core/migrations.py::run_migrations()` が `backend/db/` の `init.sql` → `002_*.sql` 〜 番号順の最新（正は `ls backend/db/`）までを**毎起動・番号順に全ファイル冪等再実行**する。多重起動は `pg_advisory_lock`（`MIGRATION_LOCK_KEY`）で排他し、ファイル単位で commit する | リトライ（10回失敗で起動中止） |
 | 2 | **システム管理者アカウント初期化** | `users` に `Administrator` が無ければ `ADMIN_PASSWORD` で作成（migration 適用後に行う） | 同上 |
 | 3 | **分野の地図 骨格のシード取込** | `core/atlas_store.py::import_bundled_skeletons()`。① カートリッジ同梱 `cartridges/<id>/atlas/skeleton.yaml` と ② 骨格専用バンドルドメイン `backend/atlas_domains/<key>/skeleton.yaml`（+ 任意 `domain.json`）を、DB に同版が無いときだけ取り込む（以後 DB が正本） | 警告ログのみ（rollback して継続） |
 | 4 | **ビルトインスキーマの seed** | `core/schema_registry.py::seed_builtin_schema()` が `OntologyType` / `CorePredicate` を DB に投入 | リトライ対象 |

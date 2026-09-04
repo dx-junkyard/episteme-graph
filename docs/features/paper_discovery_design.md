@@ -232,7 +232,10 @@ ALTER TABLE documents ADD COLUMN IF NOT EXISTS source_url TEXT;
 
 `test_paper_discovery_{core,api,guardrails,ui_static}.py`。guardrails の検査項目:
 
-- `core/paper_discovery/` が FastAPI / `core.llm` を import しない
+- `core/paper_discovery/` が FastAPI を import しない。`core.llm` に触れてよいのは
+  **`ranking.py`（Phase 3 の関連度ランキング / レーダーの距離帯）と `compare.py`（レーダーの
+  比較分析）の2ファイルだけ**で、どちらも関数内の遅延 import に閉じる（テスト側の正本は
+  `LLM_EXEMPT_FILES`）
 - `store.py` に `DELETE FROM` が無い（見送りは `revoked` 遷移）
 - 数値スコア・類似度の生値がレスポンス DTO に現れない（PD4）
 - `arxiv_client.py` にスロットル実装が存在し、宛先が `export.arxiv.org` 定数である（PD7）
@@ -457,7 +460,7 @@ backend フルスイート 11,188 pass。
     ベクトル群を平均。チャンク数の多い論文が重心を独占しない2段平均。pgvector の
     text 表現も解釈）/ `rank_candidates()`（候補の `title + summary` を**1バッチ**で
     埋め込み → cosine 降順・同点は入力順を保つ安定ソート・未測定は最後尾）。
-    **このパッケージで唯一 `core.llm` に触れるファイル**で、その import も関数内に
+    `compare.py` と並ぶ **`core.llm` 接触 allowlist の1本目**で、その import も関数内に
     閉じる（Phase 1〜2 の経路は LLM 0回のまま）。
   - `citation_client.py` — Semantic Scholar recommendations API の唯一の入口。
     `arxiv_client.py` と同じ規律（宛先定数・**独立した**3秒スロットル・タイムアウト・

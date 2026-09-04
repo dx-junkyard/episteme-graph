@@ -51,8 +51,8 @@ episteme-graph/
 │   │                             #   （atlas-*, personal-map-*, discuss, deliberation,
 │   │                             #    admin-lecture-studio, admin-graph-review,
 │   │                             #    admin-paper-discovery/radar, corpus-sea …）
-│   │                             #   2026-09-03 時点 38 ファイル（正は `ls frontend/public/js/`）
-│   └── nginx.conf                # リバースプロキシ（/api/* の 10 location）
+│   │                             #   一覧の正は `ls frontend/public/js/`・読み込み順は各 html 末尾
+│   └── nginx.conf                # リバースプロキシ（/api/* の location 群。正は nginx.conf）
 │
 ├── backend/
 │   ├── api/                      # FastAPI（→ backend/api.md）
@@ -63,7 +63,7 @@ episteme-graph/
 │   │   ├── routes/               # auth / learning / admin / lecture / groups / deliberation /
 │   │   │                         #   descent / corpus / paper_discovery / atlas_vectors /
 │   │   │                         #   atlas_edges / seminar_brief / my_records ほか
-│   │   │                         #   2026-09-03 時点 38 モジュール + lecture_studio/ パッケージ
+│   │   │                         #   一覧の正は `ls backend/api/routes/` + lecture_studio/ パッケージ
 │   │   └── ingest_worker.py      # 論文ディスカバリー取り込みキューの worker（lifespan 起動）
 │   ├── core/                     # コアエンジン（→ backend/core-engine.md）
 │   │   ├── schema.py             # 全 Pydantic モデル（OntologyType, CorePredicate など）
@@ -79,11 +79,11 @@ episteme-graph/
 │   │   ├── atlas_vectors/ atlas_edges/ atlas_gaps/ landscape/ paper_discovery/
 │   │   ├── corpus_view.py descent/ cycle/ discuss/ graph_paper_layer/ personal_graph/
 │   │   ├── account_lifecycle.py account_status.py auth_events.py url_fetch.py
-│   │   └── ほか 2026-09-03 時点 61 モジュール + 25 パッケージ（層別の索引は layer_registry.md）
+│   │   └── ほか多数（一覧の正は `ls backend/core/`・層別の索引は layer_registry.md）
 │   ├── cartridges/               # ドメインカートリッジ（particle_physics）
 │   ├── atlas_domains/            # 骨格専用バンドルドメイン（astrophysics の skeleton.yaml）
 │   ├── config/                   # M層モデルカタログ（llm_models.json）
-│   ├── db/                       # SQL マイグレーション（init.sql, 002〜076（2026-09-03 時点））
+│   ├── db/                       # SQL マイグレーション（init.sql + 番号順ファイル群。正は `ls backend/db/`）
 │   └── tests/                    # pytest（FastAPI / core）
 │
 ├── src/episteme_graph/agents/    # PDF解析 Agent 群（→ pipeline/agents.md）
@@ -169,6 +169,8 @@ episteme-graph/
 | URL指定による教材取得 | 許可リスト + SSRF ガード付きダウンローダで既存アップロード経路へ合流 | [features/url_material_upload_design.md](../features/url_material_upload_design.md) |
 | アカウントライフサイクル管理 | 一覧・停止/再開・パスワードリセット・削除（移管→墓標化→purge）・認証イベント台帳 | [features/account_lifecycle_management_design.md](../features/account_lifecycle_management_design.md) |
 | 主権台帳（わたしの記録） | `interest_traces` kind 登録簿と、本人だけが読める痕跡の一覧・持ち出し | [features/trace_registry_sovereignty_ledger_design.md](../features/trace_registry_sovereignty_ledger_design.md) |
+| 制度指標カタログ | 集約計器の定義・目的・宛先・粒度・非利用を宣言し、値の宛先は変えずに定義だけを全当事者へ公開 | [features/indicator_governance_design.md](../features/indicator_governance_design.md) |
+| 確定文脈の記帳 | 一括確定に「何が提示され・何が選べ・どこから再審できるか」を必須記帳（新テーブルなし） | [features/decision_context_design.md](../features/decision_context_design.md) |
 
 ---
 
