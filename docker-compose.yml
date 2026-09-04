@@ -4,8 +4,8 @@ services:
   # ── Infrastructure ────────────────────────────────────────────────
   grobid:
     image: lfoppiano/grobid:0.8.1
-    ports:
-      - "8070:8070"
+    # ホストへのポート公開は開発時のみ（docker-compose.local.yml）。コンテナ間は
+    # http://grobid:8070 で到達できる（GROBID_URL 既定）。外部公開は frontend:3000 のみ。
     networks:
       - episteme
 
@@ -69,9 +69,9 @@ services:
     #   GOOGLE_APPLICATION_CREDENTIALS=/app/.gcp/application_default_credentials.json を .env に記載。
     volumes:
       - ./.gcp:/app/.gcp:ro
+    # postgres への依存は docker-compose.local.yml 側で足す（ベースはマネージド DB 前提で
+    # postgres サービスを持たないため、ここに書くと invalid compose project になる）。
     depends_on:
-      postgres:
-        condition: service_healthy
       minio:
         condition: service_started
       grobid:
