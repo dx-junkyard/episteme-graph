@@ -260,6 +260,46 @@ class TestExplanationAuditSortOrder:
         assert approve_capture[-1]["metadata"]["sort_order"] == "load"
         assert approve_capture[-1]["metadata"]["bulk"] is True
 
+        # DC1: 一括確定は確定文脈なしに記帳しない（vision §4 改訂原則1）。
+        ctx = approve_capture[-1]["metadata"]["decision_context"]
+        assert ctx["basis"] == "explanation_review.bulk"
+        assert ctx["presented"]["ids"] == ["e-claim"]
+        assert ctx["applied"]["ids"] == ["e-claim"]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["decline_possible"] is True
+        # 要素スコープの行では本文編集の導線が出ないので edit を代替に数えない（DC2）。
+        assert ctx["alternatives_available"] == ["deselect", "dismiss"]
+        assert ctx["reopen"]["path"].startswith("PATCH /api/admin/element-explanations")
+        assert ctx["reopen"]["statuses"] == []
+        # DC4: 並び順は来歴申告として隔離する（サーバ導出値と混ぜない）。
+        assert ctx["client_reported"] == {"sort_order": "load"}
+        assert r.json()["decision_context"]["basis"] == "explanation_review.bulk"
+
+    def test_bulk_dismiss_records_a_reachable_reopen_path(self, client, monkeypatch, approve_capture):
+        """DC2: 却下行は編集できないので、承認と同じ PATCH を再審経路として書かない。"""
+        import routes.element_explanations as ee_routes  # noqa: F401
+
+        row = _expl_row("theory_claim", "claim_agent_1", row_id="e-claim")
+        monkeypatch.setattr(
+            "core.element_explanations.bulk_transition",
+            lambda session, doc, ids, *, new_status, user_id: {
+                "updated": [dict(row, status=new_status)],
+                "skipped": [],
+            },
+        )
+        r = client.post(
+            f"/api/admin/documents/{DOC}/element-explanations/bulk-review",
+            headers=_headers(),
+            json={"action": "dismiss", "explanation_ids": ["e-claim"]},
+        )
+        assert r.status_code == 200
+        ctx = approve_capture[-1]["metadata"]["decision_context"]
+        assert ctx["reopen"]["path"] == "POST /api/admin/documents/{document_id}/reanalyze"
+        assert ctx["reopen"]["statuses"] == ["candidate"]
+        assert ctx["alternatives_available"] == ["deselect"]
+        # 並び順未指定なら来歴申告は載せない（偽装しない）。
+        assert ctx["client_reported"] is None
+
     def test_bulk_review_rejects_invalid_sort_order(self, client, approve_capture):
         r = client.post(
             f"/api/admin/documents/{DOC}/element-explanations/bulk-review",

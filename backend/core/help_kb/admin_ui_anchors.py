@@ -315,6 +315,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.url-upload",
         "materials.url-upload-modal",
         "materials.url-upload-submit",
+        "release-review.evidence",
         "release-review.modal",
         "release-review.next",
         "release-review.publish",
@@ -947,6 +948,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- release-review.* — リリース前の確認ウィザード（release_review_flow_design.md。コース管理/コースビルダーから開く横断UI） -
     # ウィザード本体（3ステップ: 学習マップ → 論文の位置づけ → 公開）
     "release-review.modal": "teacher/13-admin-course-management.md#release-review-modal",
+    # 各行の「根拠を見る」— 判断の材料（論文からの逐語引用）の折りたたみ
+    # （確定文脈の記帳 — decision_context_design.md）
+    "release-review.evidence": "teacher/13-admin-course-management.md#release-review-evidence",
     # 各ステップの主ボタン（＝確認したものとして記録する）
     "release-review.next": "teacher/13-admin-course-management.md#release-review-next",
     # 公開する

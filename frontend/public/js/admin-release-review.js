@@ -32,6 +32,16 @@
   // RR1/RR2: 「次へ」の意味を画面上で明示する（黙って承認扱いにしない）。
   var NOTICE_NEXT_MEANING =
     "「次へ」を押すと、表示されている内容を確認したものとして記録します。個別に直したいものは各行の[却下][再検討]で変更できます。";
+  // 改訂原則1（vision.md §4）: 確定は「後から再構成・異議申立できる手続」にのみ与える。
+  // 「次へ」の意味（NOTICE_NEXT_MEANING）に続けて、確定を覆せる経路を画面に書く。
+  var NOTICE_REOPEN =
+    "確認後も、教材管理の「位置づけ（分野マップ）」から個別に再検討・却下へ戻せます。";
+  // 記録した結果、提示されていたものと確認したものが一致したかの事実文（数値は出さない）。
+  var NOTICE_ACCEPT_MATCHED = "表示されていた配置と確認した配置は一致しています";
+  var NOTICE_ACCEPT_MISMATCH =
+    "表示と確認した配置に差がありました（画面を再読み込みしてください）";
+  var EVIDENCE_SUMMARY = "根拠を見る";
+  var EVIDENCE_EMPTY = "この配置には論文からの引用が残っていません。";
   var LANDSCAPE_EMPTY =
     "この論文の分野マップ上の位置づけはまだありません。このまま公開できます。";
   var LANDSCAPE_INTRO =
@@ -298,6 +308,36 @@
     );
   }
 
+  // 根拠（逐語引用）の折りたたみ。引用が無い行でも「根拠を見る」は出し、無いことを
+  // 事実文で書く（無い行だけ静かに欠けると「見た/見ていない」が再構成できない）。
+  function evidenceHtml(placement) {
+    var items = (placement && placement.evidence) || [];
+    var inner = "";
+    for (var i = 0; i < items.length; i++) {
+      var quote = (items[i] && items[i].quote) || "";
+      if (!quote) continue;
+      inner +=
+        '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        "&quot;" +
+        esc(quote) +
+        "&quot;</div>";
+    }
+    if (!inner) {
+      inner =
+        '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">' +
+        esc(EVIDENCE_EMPTY) +
+        "</div>";
+    }
+    return (
+      '<details class="release-review-evidence" data-ui-anchor="release-review.evidence" style="margin-top:3px">' +
+      '<summary style="font-size:11.5px;color:var(--color-text-tertiary);cursor:pointer">' +
+      esc(EVIDENCE_SUMMARY) +
+      "</summary>" +
+      inner +
+      "</details>"
+    );
+  }
+
   function placementRowHtml(placement) {
     var meta = [];
     if (placement && placement.perspective_label) meta.push(placement.perspective_label);
@@ -326,6 +366,10 @@
         esc(placement.reason) +
         "</div>";
     }
+    // 改訂原則1（確定文脈）: 何を見て判断したかを再構成できるように、判断の材料
+    // （論文からの逐語引用）を各行に畳んで置く。既定は閉じたまま（RR1: 画面を
+    // 重くしない）で、開けば原文がそのまま出る。
+    html += evidenceHtml(placement);
     // RR4: 個別の修正手段（却下・再検討）を常に出す。
     if (placement && placement.status !== "rejected") {
       html += '<div style="margin-top:4px;display:flex;gap:6px">';
@@ -394,7 +438,7 @@
 
     var facts = el("release-review-facts");
     if (facts) {
-      var parts = [NOTICE_NEXT_MEANING];
+      var parts = [NOTICE_NEXT_MEANING, NOTICE_REOPEN];
       var pending = Number((data && data.pending_count) || 0);
       if (pending) parts.push("未確認 " + pending + "件");
       var hidden = Number((data && data.hidden_document_count) || 0);
@@ -469,6 +513,20 @@
       .catch(function () {});
   }
 
+  // いま画面に「未確認（AI推定）」として描かれている配置の id（来歴申告用）。
+  function pendingPlacementIds() {
+    var ids = [];
+    var documents = (state.landscape && state.landscape.documents) || [];
+    for (var i = 0; i < documents.length; i++) {
+      var placements = (documents[i] && documents[i].placements) || [];
+      for (var j = 0; j < placements.length; j++) {
+        var p = placements[j] || {};
+        if (p.status === "inferred" && p.id) ids.push(p.id);
+      }
+    }
+    return ids;
+  }
+
   function acceptPlacements(btn) {
     if (state.busy) return;
     var pending = Number((state.landscape && state.landscape.pending_count) || 0);
@@ -483,7 +541,15 @@
       "/admin/landscape/courses/" +
         encodeURIComponent(state.courseId) +
         "/placements/accept",
-      { method: "POST" }
+      {
+        method: "POST",
+        // 来歴申告（サーバ側の提示集合の正本はサーバが取り直す）。evidence_shown は
+        // 各行に「根拠を見る」を必ず描いている事実（引用が無い行も注記付きで出る）。
+        body: JSON.stringify({
+          presented_placement_ids: pendingPlacementIds(),
+          evidence_shown: true
+        })
+      }
     )
       .then(function (res) {
         if (!res.ok) {
@@ -493,9 +559,21 @@
         }
         return res.json();
       })
-      .then(function () {
+      .then(function (data) {
         state.busy = false;
+        // RR7: 記録の結果に関わらず先へ進める。事実文は次ステップの描画
+        // （renderStep が notice を空にする）の後に出す。
         advance();
+        // 提示と確認の一致を事実文で残す（DC2: 一致を偽らない）。
+        var ctx = data && data.decision_context;
+        if (ctx) {
+          setNotice(
+            ctx.presented_matches_applied
+              ? NOTICE_ACCEPT_MATCHED
+              : NOTICE_ACCEPT_MISMATCH,
+            !ctx.presented_matches_applied
+          );
+        }
       })
       .catch(function (err) {
         // RR7: 記録に失敗しても公開は止めない（未確認のまま配信される）。

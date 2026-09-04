@@ -173,7 +173,11 @@ class TestAdminUiAnchorsModule:
         #    PL3/PL4）/
         #   graph-review.paper-facing（ノード詳細の「論文での対応」区画。既存の解析結果の
         #    読み時射影で、LLM 生成も承認状態の変更も伴わない — PL1/PL2/PL5）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 321
+        # + 確定文脈の記帳（decision_context_design.md §5）の1件:
+        #   release-review.evidence（リリース前の確認 ステップ2 各行の「根拠を見る」。
+        #    判断の材料（論文からの逐語引用）を畳んで置き、引用の無い行もその事実を
+        #    書く。何を見て確認したかを後から再構成できるようにするため — DC1/DC2）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 322
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

@@ -33,6 +33,7 @@ from sqlalchemy import text as sa_text
 
 import services
 from core import atlas_store
+from core import decision_context
 from core.course_data import course_cartridge_id, course_source_material_ids
 from core.landscape import builder as landscape_builder
 from core.landscape import projection
@@ -499,13 +500,24 @@ def propose_landscape_placements(
 
 
 class AcceptPlacementsRequest(BaseModel):
-    """一括確認 body。v1 は入力パラメータを持たない（空 body / body なしを許す）。"""
+    """一括確認 body。
+
+    いずれも**来歴申告**（DC4）で、サーバの判断には使わない（提示集合の正本は
+    サーバが click 時点の live 状態から取り直す）。空 body / body なしも許す。
+    """
+
+    #: 画面に描かれていた未確認配置の id（クライアント申告。サーバ導出値とは混ぜない）。
+    presented_placement_ids: list[str] | None = None
+    #: 根拠（逐語引用）の折りたたみを各行に出していたか。
+    evidence_shown: bool | None = None
 
 
 #: RR3: 「次へ」経由の確認を個別レビューと区別するための事実文（review_note に残す）。
 RELEASE_ACCEPT_NOTE = "リリース前の確認画面で一括確認"
 #: RR3: 監査の action。個別レビュー（"review"）と混ぜない。
 RELEASE_ACCEPT_ACTION = "accept_on_release"
+#: DC1/改訂原則1: 一括確認を覆せる経路（個別 PATCH）。監査に事実として残す。
+RELEASE_REOPEN_PATH = "PATCH /api/admin/landscape/placements/{placement_id}"
 
 
 def _course_source_access(
@@ -626,8 +638,11 @@ def accept_course_landscape_placements(
     - 教員が個別に却下・再検討した行は動かさない（``store`` 側で ``inferred`` 限定。RR4）。
     - 監査は1件ごとに ``theory_review_events``（``action='accept_on_release'``）で、
       個別レビューと区別できる形で残す（RR3）。
+    - 各記帳には**確定文脈**（``decision_context``）を必ず添える（DC1 / vision §4 改訂
+      原則1）。提示された配置（更新前に取り直した live の ``inferred``）と実際に適用した
+      配置を分けて残し、その一致は ``core.decision_context`` が集合比較で導出する
+      （呼び出し側が「一致した」と申告しない — DC2）。
     """
-    del body  # v1 はパラメータなし（将来の拡張のために受け口だけ残す）
     _, viewable, editable_ids, hidden = _course_source_access(course_id, current_user)
     # edit できないソース論文は確認の対象外（除外件数として正直に返す — RR7）。
     skipped_documents = hidden + len([d for d in viewable if d not in editable_ids])
@@ -635,6 +650,14 @@ def accept_course_landscape_placements(
 
     session = _session()
     try:
+        # DC2: 「提示されていたもの」はサーバが更新前に取り直す（クライアント申告に
+        # 依存しない）。edit できる document の live な inferred が「次へ」の対象として
+        # 画面に出ていた集合である。
+        presented_rows = landscape_store.list_for_documents(
+            session,
+            sorted(editable_ids),
+            statuses=[landscape_schema.STATUS_INFERRED],
+        )
         updated = landscape_store.accept_inferred_for_documents(
             session,
             sorted(editable_ids),
@@ -651,6 +674,42 @@ def accept_course_landscape_placements(
     finally:
         session.close()
 
+    client_reported: dict | None = None
+    if body is not None and (
+        body.presented_placement_ids is not None or body.evidence_shown is not None
+    ):
+        # DC4: 来歴申告はサーバ導出値と混ぜず、専用キーに隔離する（未指定は載せない）。
+        client_reported = {}
+        if body.presented_placement_ids is not None:
+            client_reported["presented_placement_ids"] = sorted(
+                {
+                    str(pid or "").strip()
+                    for pid in body.presented_placement_ids
+                    if str(pid or "").strip()
+                }
+            )[:decision_context.PRESENTED_IDS_MAX]
+        if body.evidence_shown is not None:
+            client_reported["evidence_shown"] = bool(body.evidence_shown)
+
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_RELEASE_REVIEW_PLACEMENTS,
+        presented_ids=[str(r.get("id") or "") for r in presented_rows],
+        applied_ids=[str(r.get("id") or "") for r in updated],
+        # RR4: 各行の [却下] [再検討] と、ステップの「あとで」が常に出ている。
+        alternatives=(
+            decision_context.ALT_REJECT,
+            decision_context.ALT_RECONSIDER,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        reopen_path=RELEASE_REOPEN_PATH,
+        reopen_statuses=(
+            landscape_schema.STATUS_REJECTED,
+            landscape_schema.STATUS_REVIEW_REQUIRED,
+        ),
+        evidence_shown=(None if body is None else body.evidence_shown),
+        client_reported=client_reported,
+    )
+
     for row in updated:
         services.record_review_event(
             AUDIT_ENTITY_LANDSCAPE_PLACEMENT,
@@ -658,17 +717,22 @@ def accept_course_landscape_placements(
             landscape_schema.STATUS_INFERRED,
             landscape_schema.STATUS_CONFIRMED,
             current_user.get("id"),
-            {
-                "action": RELEASE_ACCEPT_ACTION,
-                "course_id": course_id,
-                "document_id": str(row.get("document_id") or ""),
-            },
+            decision_context.attach_decision_context(
+                {
+                    "action": RELEASE_ACCEPT_ACTION,
+                    "course_id": course_id,
+                    "document_id": str(row.get("document_id") or ""),
+                },
+                ctx,
+            ),
         )
 
     return {
         "course_id": course_id,
         "confirmed": len(updated),
         "skipped_documents": skipped_documents,
+        # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す。
+        "decision_context": ctx,
     }
 
 
