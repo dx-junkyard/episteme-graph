@@ -34,6 +34,14 @@
 - ``aggregate_system`` — 個人ではなくシステム全体の状態・消費を集約したもの。
 - ``self_only`` — 本人の記録だけを本人に返すもの（他者は読めない）。
 - ``per_item_no_person`` — 教材・論文など**物**の単位で、人に紐づかないもの。
+- ``per_item_attributed`` — **物**（説明・承認・引用など）の単位だが、**行為者（教員）の
+  帰属を明示して**返すもの。C層／D層は「匿名の承認・匿名の疑義を作らない」を不変条項に
+  しており、帰属は仕様であって漏洩ではない。人に紐づかないと言うと嘘になるため、
+  ``per_item_no_person`` に丸めずに専用語彙を置く。
+- ``per_learner_identified`` — **学習者の個票**。集約でも匿名化でもなく、教員が
+  学習者の氏名と発話の原文をそのまま読む。粒度としては最も強い開示であり、
+  「集約だから安全」という誤読を防ぐために独立の語彙として宣言する
+  （この粒度の計器を増やすかどうかはオーナーの判断事項）。
 - ``per_account_operational`` — **1アカウント単位の運用データ**（認証イベント時系列・
   LLM 利用実績）。学習データではなく、不正利用・休眠検知というアカウント運用の
   ためだけに SYSTEM_ADMIN が読む（AL6/AL7）。学習記録の三領域分離（vision §5.4）
@@ -62,7 +70,9 @@ __all__ = [
     "GRANULARITY_AGGREGATE_SYSTEM",
     "GRANULARITY_LABELS",
     "GRANULARITY_PER_ACCOUNT_OPERATIONAL",
+    "GRANULARITY_PER_ITEM_ATTRIBUTED",
     "GRANULARITY_PER_ITEM_NO_PERSON",
+    "GRANULARITY_PER_LEARNER_IDENTIFIED",
     "GRANULARITY_SELF_ONLY",
     "INDICATORS",
     "IndicatorSpec",
@@ -129,6 +139,8 @@ GRANULARITY_AGGREGATE_K_ANONYMOUS = "aggregate_k_anonymous"
 GRANULARITY_AGGREGATE_SYSTEM = "aggregate_system"
 GRANULARITY_SELF_ONLY = "self_only"
 GRANULARITY_PER_ITEM_NO_PERSON = "per_item_no_person"
+GRANULARITY_PER_ITEM_ATTRIBUTED = "per_item_attributed"
+GRANULARITY_PER_LEARNER_IDENTIFIED = "per_learner_identified"
 GRANULARITY_PER_ACCOUNT_OPERATIONAL = "per_account_operational"
 
 GRANULARITIES: tuple[str, ...] = (
@@ -136,6 +148,8 @@ GRANULARITIES: tuple[str, ...] = (
     GRANULARITY_AGGREGATE_SYSTEM,
     GRANULARITY_SELF_ONLY,
     GRANULARITY_PER_ITEM_NO_PERSON,
+    GRANULARITY_PER_ITEM_ATTRIBUTED,
+    GRANULARITY_PER_LEARNER_IDENTIFIED,
     GRANULARITY_PER_ACCOUNT_OPERATIONAL,
 )
 
@@ -144,6 +158,8 @@ GRANULARITY_LABELS: Mapping[str, str] = MappingProxyType({
     GRANULARITY_AGGREGATE_SYSTEM: "システム全体の集約（個人単位ではない）",
     GRANULARITY_SELF_ONLY: "本人の記録のみ（他者は読めない）",
     GRANULARITY_PER_ITEM_NO_PERSON: "教材・論文など物の単位（人に紐づかない）",
+    GRANULARITY_PER_ITEM_ATTRIBUTED: "物の単位（説明・承認・引用）＋行為者である教員の帰属",
+    GRANULARITY_PER_LEARNER_IDENTIFIED: "学習者の個票（氏名と原文をそのまま表示。集約ではない）",
     GRANULARITY_PER_ACCOUNT_OPERATIONAL: "1アカウント単位の運用データ（学習データではない）",
 })
 
@@ -326,6 +342,32 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         design_doc="docs/features/teacher_triage_instruments_design.md",
     ),
     IndicatorSpec(
+        id="llm-usage-forecast-document",
+        label="AI利用枠の見通し（教材ごと）",
+        definition=(
+            "1つの教材を解析し直したときの消費見積りの**上振れ側**と、"
+            "システム全体で共有される日次呼び出し上限の残数を突き合わせて、"
+            "「今日の枠に収まらない可能性がある」かどうかを判定した1行の事実文です。"
+            "残回数・トークン数・金額は返さず、返すのは表示するかどうかの真偽値と"
+            "固定文だけです。導出に失敗したときは何も表示せず、処理は止めません。"
+        ),
+        purpose=(
+            "再解析を始める前に、分けて実行する選択肢があることを教員に事実として"
+            "伝えるため。実行を止めるためではありません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source=(
+            "llm_usage_events（当該 document の pipeline: 実績）と"
+            "各ステージの日次カウンタ"
+        ),
+        retention="保存しません（呼び出しのたびに実績とカウンタから導出します）。",
+        k_anonymity=False,
+        route="/api/admin/llm-usage/forecast/documents/{document_id}",
+        consumer="core/llm_usage/forecast.py::forecast_document_run",
+        design_doc="docs/features/teacher_triage_instruments_design.md",
+    ),
+    IndicatorSpec(
         id="llm-usage-estimate",
         label="教材ごとの解析トークン見積り",
         definition=(
@@ -342,6 +384,52 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         route="/api/admin/llm-usage/estimate/documents/{document_id}",
         consumer="core/llm_usage/document_estimate.py::estimate_document_run",
         design_doc="docs/features/llm_usage_metering_design.md",
+    ),
+    IndicatorSpec(
+        id="ingest-estimate",
+        label="論文取り込みの事前見積り",
+        definition=(
+            "これから取り込む論文を解析したときのトークン消費の事前見積りです。"
+            "直近に完了した解析の実績（中央値）から件数分を外挿し、"
+            "実測（プロバイダ申告）と推計は合算せず分けて、**レンジのみ**返します。"
+            "点推定・金額は返しません。実績が1件も無ければ捏造せず"
+            "「見積り不可」と正直に返します。"
+        ),
+        purpose=(
+            "複数の論文をまとめて取り込む前に、その処理規模を教員が把握するため。"
+            "取り込みを自動的に制限するためではありません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_AGGREGATE_SYSTEM,
+        source="llm_usage_events（直近の pipeline: 実績をシステム全体で集計）",
+        retention="保存しません（呼び出しのたびに実績から導出します）。",
+        k_anonymity=False,
+        route="/api/admin/discovery/ingest-estimate",
+        consumer="core/llm_usage/metrics.py::recent_document_run_estimate",
+        design_doc="docs/features/paper_discovery_design.md",
+    ),
+    # -- 運営（システム全体の状態） ----------------------------------------
+    IndicatorSpec(
+        id="materials-stats",
+        label="教材パイプラインの進捗統計",
+        definition=(
+            "全コースについて、素材（チャンク）のうち構造化・原稿・音声・主張が"
+            "どこまで揃っているかの件数を、コース単位で合算したものです。"
+            "数えるのは**教材の処理状態**であって、受講者の活動ではありません。"
+            "学習者の記録・発話・進捗は一切含みません。"
+        ),
+        purpose=(
+            "解析パイプラインがどこで止まっているかを運営者が把握し、"
+            "作り直し・再解析を判断するため。"
+        ),
+        values_audience=AUDIENCE_SYSTEM_ADMIN,
+        granularity=GRANULARITY_AGGREGATE_SYSTEM,
+        source="chunks / theory_claims / lecture_audio_cache / learning_courses",
+        retention="保存しません（呼び出しのたびに再集計します）。",
+        k_anonymity=False,
+        route="/api/admin/system/materials-stats",
+        consumer="api/routes/admin.py::get_materials_stats",
+        design_doc="docs/features/admin.md",
     ),
     # -- D層 KPI ------------------------------------------------------------
     IndicatorSpec(
@@ -366,6 +454,97 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         route="/api/admin/doubt/metrics",
         consumer="core/doubt/metrics.py::collect_doubt_metrics",
         design_doc="docs/features/doubt_layer_issues.md",
+    ),
+    IndicatorSpec(
+        id="ledger-summary",
+        label="認識的地位台帳のサマリ",
+        definition=(
+            "1コースの台帳行を対象の種別ごとに数え、"
+            "「検証スコープが記帳されている行」と「空欄のままの行」の件数を返します。"
+            "数える単位は主張・前提などの**対象**であって、人ではありません。"
+            "**空欄は欠陥ではなく事実**として返します（未記帳を警告として扱いません）。"
+        ),
+        purpose=(
+            "そのコースの理論のうち、どれだけが「どの範囲で確かめられたか」まで"
+            "書かれているかを教員が把握するため。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source="epistemic_ledger（migration 029）",
+        retention="保存しません（呼び出しのたびに再集計します）。台帳行は削除しません。",
+        k_anonymity=False,
+        route="/api/admin/doubt/courses/{course_id}/ledger-summary",
+        consumer="api/routes/doubt.py::get_ledger_summary",
+        design_doc="docs/features/doubt_layer_issues.md",
+    ),
+    IndicatorSpec(
+        id="open-assumptions",
+        label="未検証合意リスト",
+        definition=(
+            "台帳から「多くのものが依存しているのに、確かめられた範囲が書かれていない」"
+            "対象だけを抜き出して並べた一覧です（編集できない投影）。"
+            "負荷・スコープ被覆・疑義の数は段階ラベルで示し、生の点数は返しません。"
+            "「複数の受講者がここで問いを立てています」という行は、"
+            "関わった人数が最小集計単位に満たなければ現れません（真偽のみで件数は返しません）。"
+        ),
+        purpose=(
+            "確かめられていないまま合意されている箇所を教員が見つけ、"
+            "検証提案につなげるため。受講者を評価するためではありません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source="epistemic_ledger / challenges / verification_proposals（学習者由来の行は真偽のみ）",
+        retention="保存しません（呼び出しのたびに台帳から編纂します）。",
+        k_anonymity=False,
+        route="/api/admin/doubt/courses/{course_id}/open-assumptions",
+        consumer="core/doubt/open_assumptions.py::compile_open_assumptions",
+        design_doc="docs/features/stakes_ledger_design.md",
+    ),
+    IndicatorSpec(
+        id="assumption-atlas",
+        label="前提の地図",
+        definition=(
+            "台帳の各対象を「どれだけのものが依存しているか」×「どこまで確かめられたか」"
+            "の2軸に配置した散布データです。位置は段階に丸めて返し、生の点数・順位・"
+            "評価語は返しません。スコープが空欄の点は「空欄」と分かる形で返します"
+            "（欠陥として色を付けるかどうかは表示側の責務ですが、警告色にはしません）。"
+        ),
+        purpose=(
+            "コースの理論のどこに負荷が集中し、どこが確かめられていないかの分布を"
+            "教員が一望するため。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source="epistemic_ledger / assumption_nodes（migration 029/030）",
+        retention="保存しません（呼び出しのたびに台帳から導出します）。",
+        k_anonymity=False,
+        route="/api/admin/doubt/courses/{course_id}/assumption-atlas",
+        consumer="api/routes/doubt.py::get_assumption_atlas",
+        design_doc="docs/features/doubt_layer_issues.md",
+    ),
+    IndicatorSpec(
+        id="seminar-brief",
+        label="ゼミ前ブリーフ",
+        definition=(
+            "1つの論文について、①依存が多いのに確かめられていない前提 "
+            "②支持の経路が1本しかない箇所 ③このコーパスの中では検証記録が"
+            "見つからない箇所 ④学習者からの問い（現在は常に空欄）の4区画を、"
+            "台帳から読み取り専用で合成した事実の一覧です。段階ラベルのみで"
+            "生の数値は返しません。**言えるのは「このコーパスの中では」までで、"
+            "「分野で未検証」とは言いません**。"
+        ),
+        purpose=(
+            "指導の場に持ち込む論点を、教員が事前に事実として並べておくため。"
+            "研究価値の判定でも、学習者の評価でもありません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source="epistemic_ledger / challenges / 支持経路の導出（論文単位）",
+        retention="保存しません（呼び出しのたびに合成します）。",
+        k_anonymity=False,
+        route="/api/admin/documents/{document_ref}/seminar-brief",
+        consumer="core/doubt/seminar_brief.py::build_seminar_brief",
+        design_doc="docs/features/seminar_brief_mirroring_design.md",
     ),
     # -- discuss 観測基盤 ---------------------------------------------------
     IndicatorSpec(
@@ -510,6 +689,85 @@ _SPECS: tuple[IndicatorSpec, ...] = (
         route="/api/admin/discovery/frontier-interest",
         consumer="api/services.py::aggregate_frontier_interest",
         design_doc="docs/features/corpus_roaming_design.md",
+    ),
+    IndicatorSpec(
+        id="unanswered-queries",
+        label="未回答の質問一覧（個票）",
+        definition=(
+            "コースの対話で教材から答えを見つけられなかった質問を、"
+            "**受講者の表示名と質問の原文のまま**新しい順に返します。"
+            "**これは集約ではありません** — 匿名化も k-匿名の間引きもしておらず、"
+            "誰がいつ何を尋ねたかがそのまま読めます。読めるのはコースの所有者と"
+            "編集権を持つ教員（およびシステム管理者）だけで、権限が無ければ"
+            "件数も返しません。"
+        ),
+        purpose=(
+            "教材が答えられなかった問いを教員が読み、教材を書き足すため。"
+            "受講者の評価・比較には使いません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_LEARNER_IDENTIFIED,
+        source="unanswered_query_logs（質問本文と user_id）",
+        retention=(
+            "行として保持されます（この経路に削除 API はありません）。"
+            "アカウント削除時に purge 対象として消えます。"
+        ),
+        k_anonymity=False,
+        route="/api/admin/courses/{course_id}/unanswered-queries",
+        consumer="api/routes/admin.py::list_unanswered_queries",
+        design_doc="docs/features/admin.md",
+    ),
+    # -- C層（承認・共有） --------------------------------------------------
+    IndicatorSpec(
+        id="sharing-dashboard",
+        label="説明の承認と引用のダッシュボード",
+        definition=(
+            "1コースの説明ごとに、何人の教員が承認したか・何件引用されたかを"
+            "並べたものです。数えるのは**教員の行為**であって受講者の活動ではありません。"
+            "承認と引用は帰属を伴う行為なので、説明の作成者名は表示されます"
+            "（匿名の承認・匿名の疑義を作らないのが本システムの設計です）。"
+            "**受講者に対しては件数を出さず段階ラベルだけを見せます** — "
+            "生の件数を読めるのはこの教員向け画面だけです。"
+        ),
+        purpose=(
+            "どの説明が教員の間で使われているかを把握し、共有と再利用を"
+            "進めるため。教員の順位付け・評価には使いません。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_ATTRIBUTED,
+        source="component_explanations / component_endorsements / component_citations（migration 021）",
+        retention=(
+            "承認の取り消しは行削除ではなく取り消し状態への遷移で残ります。"
+            "集計自体は保存しません。"
+        ),
+        k_anonymity=False,
+        route="/api/admin/courses/{course_id}/sharing-dashboard",
+        consumer="api/routes/theory_components.py::sharing_dashboard",
+        design_doc="docs/features/admin.md",
+    ),
+    # -- 配置層（知識ランドスケープ） --------------------------------------
+    IndicatorSpec(
+        id="landscape-overview",
+        label="分野マップ上の論文の集まり",
+        definition=(
+            "分野の地図のノードごとに、そこへ配置されている論文を**題名の列挙**で"
+            "返します（自分が閲覧できる論文だけが対象です）。"
+            "**件数バッジ・カバー率・順位は返しません**。配置の確からしさは"
+            "段階ラベルのみで、生の重みは返しません。地図に存在しないノードへの"
+            "配置は集約に載せません。"
+        ),
+        purpose=(
+            "分野のどこに論文が集まり、どこが手薄かを教員が見渡し、"
+            "次に読む・取り込む論文を検討するため。"
+        ),
+        values_audience=AUDIENCE_TEACHER,
+        granularity=GRANULARITY_PER_ITEM_NO_PERSON,
+        source="landscape_placements（migration 065）と凍結済みの分野骨格",
+        retention="保存しません（呼び出しのたびに配置から導出します）。",
+        k_anonymity=False,
+        route="/api/admin/landscape/overview",
+        consumer="api/routes/landscape.py::get_landscape_overview",
+        design_doc="docs/features/knowledge_landscape_design.md",
     ),
     # -- R層（再構成ループ） ------------------------------------------------
     IndicatorSpec(
