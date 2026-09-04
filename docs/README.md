@@ -15,7 +15,7 @@
 
 | 目的 | ドキュメント |
 |---|---|
-| このシステムの**思想・設計原則**を知りたい | [ビジョンと思想（正本）](vision.md) — ミッション / 知識観・学習観 / AIの役割 / 横断14原則 / 機能群マップ |
+| このシステムの**思想・設計原則**を知りたい | [ビジョンと思想（正本）](vision.md) — ミッション / 知識観・学習観 / AIの役割 / 横断14原則（2026-09-04 改訂版）/ 機能群マップ |
 | **なぜこのシステムが必要か**を知りたい（外部ステークホルダー向け） | [サービスデザイン](service_design.md) — 現状認識 → 課題 → gap → UX → 機能への対応表 |
 | **どの層が何の機能で、どの migration か**を知りたい | [レイヤー索引表](architecture/layer_registry.md) |
 | 開発ルール・各層の実装規約を知りたい | [CLAUDE.md](../CLAUDE.md)（リポジトリルート） |
@@ -215,6 +215,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)
 - [宣言された弁と静かな計器（教員支援 v1）](features/teacher_triage_instruments_design.md) — パーソナライズ実装計画 Phase 4
+- [確定文脈の記帳（decision_context）](features/decision_context_design.md) — 一括確定（リリース前の確認・説明レビューの一括承認）に「何が提示され・何が選べ・どこから再審できるか」を監査 payload として必須記帳。vision.md §4 改訂原則1（2026-09-04）の実装
 - [ゼミ前ブリーフと鏡面化](features/seminar_brief_mirroring_design.md) — 同 Phase 5
 
 ### 群7: 運営基盤
@@ -226,6 +227,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [URL指定による教材取得（取得先ドメイン許可リスト + SSRF ガード）](features/url_material_upload_design.md)
 - [論文ディスカバリー層（arXiv 分野購読とコーパス成長ループ）](features/paper_discovery_design.md)
   ／[論文レーダー（教材起点の類似論文探索と比較分析）](features/paper_radar_design.md)
+- [制度指標カタログ（indicator governance）](features/indicator_governance_design.md) — 運営者・教員向け集約計器の定義・目的・宛先・粒度・非利用（ランキング / 成績 / 推薦 / 自動ゲート禁止）を一箇所に宣言し `GET /api/indicators` で全当事者に公開。vision.md §6.1 原則4 改訂（2026-09-04）の実装
 
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)
 - [状態管理・通知基盤](features/status_notification_design.md)
@@ -241,6 +243,12 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [知識ネットワークビジョン（KN-1〜4、W層/個人知識ネットワークの親文書）](features/knowledge_network_vision.md)
 - [ビジョン拡張提案（7分野専門家パネル討論, 2026-08）](features/vision_expansion_proposals_2026-08.md)
 - [ビジョン拡張・UX再設計提案書（理解サイクルの原案）](features/vision_expansion_ux_proposal_revised_2026-08-13.md)
+- [ビジョン再検証討論 2026-08-29（外部環境に照らした陳腐化チェック・UXギャップ監査）](architecture/vision_review_debate_2026-08-29.md)
+- [ビジョン展望討論 2026-09-03（学習・研究の未来と episteme-graph の寄り添い方。「遅さ→答責性」「消費側の半円→生産側の半円」）](architecture/vision_future_debate_2026-09-03.md)
+- [ビジョン草案討論 2026-09-04 第1回（「問いが公の知へ育つ共有地」草案の内部整合を叩く。近傍相対性・切断の強度・免疫記憶・段8の未検証可視）](architecture/vision-debate-commons-of-questions-2026-09-04.md)
+- [ビジョン草案討論 2026-09-04 第2回（中心テーマ「教育と研究はどこへ向かうべきか」に照らした第1回判定の再審。階段の頂点は職でない・検査に開かれた主張・近傍ごとの免疫記憶・group 上限・再統合の条件）](architecture/vision-debate-education-research-direction-2026-09-04.md)
+- [研究調査による再審 2026-09-04（討論の結論を関連研究と照合し、支持 / 条件付き支持 / 要修正 / 未証明を区別。中心比喩を「答責の階段」から「検証可能な判断の循環を学ぶ、保護された共有地」へ置き換え、14原則の改訂案と 12か月 pilot を提示）](architecture/vision-research-evaluation-and-reframed-direction-2026-09-04.md)
+- [ビジョン草案「問いが公の知へ育つ共有地」（復元版, 2026-09-04）](architecture/vision-draft-2026-09-04.md) — 原本消失のため討論記録から §骨格を復元したもの。**正本ではない**（正本は [vision.md](vision.md)）。各節の「→ 再審後の扱い」が採用/不採用の対応表を兼ねる
 - [段階的翻訳レイヤー（E層・**未実装**）](features/exposition_layer_design.md)
 
 ### 調査・レビュー記録（完了済みのスナップショット）
@@ -254,6 +262,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [管理画面UX課題 2026-08-01（全件実装済み）](architecture/admin_ux_issues_2026-08-01.md)
 - [Issue #494 実装レビュー（指摘6件は現行コードで解消済み）](architecture/issue_494_implementation_review_2026-07-16.md)
 - [ドキュメント総点検 2026-08-13（不具合報告）](architecture/doc_review_findings_2026-08-13.md)
+- [原則改訂の影響整理 2026-09-04（14原則改訂 → 影響機能 → 実装 / 文書 / 保留の処置表）](architecture/vision_revision_impact_2026-09-04.md)
   ／[機能整備提案](architecture/feature_consolidation_proposals_2026-08-13.md)
 
 ### フロントエンド

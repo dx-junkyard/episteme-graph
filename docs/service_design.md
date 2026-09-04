@@ -216,7 +216,7 @@ AI の出力 — 抽出された主張、説明文、図の解析、地図への
 | G7 | 共有には版があり、公開の前に確認がある | 群7 運営基盤 | 共有物のバージョン管理（V層）/ リリース前の確認 / 監査記録 / アカウントの停止・削除も状態遷移（所有物は移管してから purge） | [shared_versioning_design.md](features/shared_versioning_design.md) / [release_review_flow_design.md](features/release_review_flow_design.md) / [account_lifecycle_management_design.md](features/account_lifecycle_management_design.md) |
 
 補: 横断的な設計原則（数値を見せない・情報を落とさない・fail-closed 等の14原則）は
-[vision.md](vision.md) §6 に、機能と実装（データベース migration）の対応は
+[vision.md](vision.md) §6 に（2026-09-04 改訂版。原則4 は「数値の用途と粒度の統治」へ）、機能と実装（データベース migration）の対応は
 [レイヤー索引表](architecture/layer_registry.md) にまとまっている。
 
 ---
