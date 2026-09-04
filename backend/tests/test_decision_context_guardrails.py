@@ -31,6 +31,7 @@ LANDSCAPE_SRC = (BACKEND / "api" / "routes" / "landscape.py").read_text(encoding
 EXPLANATION_SRC = (
     BACKEND / "api" / "routes" / "element_explanations.py"
 ).read_text(encoding="utf-8")
+ATLAS_SRC = (BACKEND / "api" / "routes" / "atlas.py").read_text(encoding="utf-8")
 RELEASE_JS = (
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js"
 ).read_text(encoding="utf-8")
@@ -63,6 +64,7 @@ class TestVocabulary:
         assert dc.DECISION_CONTEXT_KEY == "decision_context"
         assert dc.BASIS_RELEASE_REVIEW_PLACEMENTS == "release_review.placements"
         assert dc.BASIS_EXPLANATION_REVIEW_BULK == "explanation_review.bulk"
+        assert dc.BASIS_ATLAS_BINDING_SAVE == "atlas_binding.save"
 
     def test_alternative_vocabulary_is_fixed(self):
         assert dc.ALTERNATIVES == (
@@ -120,6 +122,33 @@ class TestBulkRoutesRecordContext:
         # 既存の来歴申告（TT3）の作法は保つ。
         assert "teacher_triage.sort_metadata(" in src
         assert '"bulk": True' in src
+
+    def test_atlas_binding_save_builds_and_attaches_context(self):
+        """コース⇄地図バインディングの一括保存（第3経路）。
+
+        リリース前確認ウィザードのステップ1「この対応で次へ」も同じ保存 API を通る
+        （フロントはラベルを差し替えるだけ）ので、記帳は必ず確定文脈を伴う。
+        """
+        src = extract_function_source(ATLAS_SRC, "save_course_atlas_binding")
+        assert "decision_context.build_decision_context(" in src
+        assert "decision_context.attach_decision_context(" in src
+        assert "decision_context.BASIS_ATLAS_BINDING_SAVE" in src
+        # 提示集合はサーバが course_data から取り直す（クライアント申告に依存しない）。
+        assert "presented_ids=presented_topic_ids" in src
+        assert "applied_ids=applied_topic_ids" in src
+        # 根拠提示の有無は検証できないので True と申告しない（DC2）。
+        assert "evidence_shown=None" in src
+        assert "evidence_shown=True" not in src
+
+    def test_atlas_binding_basis_follows_the_naming_convention(self):
+        import routes.atlas as atlas_routes
+
+        assert dc.BASIS_ATLAS_BINDING_SAVE == "atlas_binding.save"
+        assert atlas_routes._BINDING_REOPEN_PATH.startswith("PUT /api/admin/")
+        # 代替が空なら core 側が ValueError を投げる（DC3）。ここでは語彙が
+        # ALTERNATIVES の範囲であることだけを確かめる。
+        for alt in ("deselect", "skip_step"):
+            assert alt in dc.ALTERNATIVES
 
     def test_client_reported_is_isolated_in_both_routes(self):
         """DC4: 来歴申告は専用引数へ渡す（トップレベルのサーバ導出値に混ぜない）。"""

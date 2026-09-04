@@ -30,6 +30,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user, _require_system_admin, _require_teacher
+# オブジェクトスコープ権限（P0）の正本ゲート。`_require_teacher` は「TEACHER 以上」しか
+# 保証しないため、course_id 直指定の経路は編集権限ゲートを必ず通す
+# （不在・権限なしはどちらも 404・detail 同一。admin.py の既存5経路と同型）。
+from routes.admin import _require_editable_course_or_404
 from core.doubt.assumption_mining.corpus_audit import run_corpus_audit
 from core.doubt.assumption_mining.worker import maybe_schedule_assumption_mining
 from core.doubt.counterfactual import compute_counterfactual, snapshot_subgraphs
@@ -53,6 +57,12 @@ from core.doubt.schema import (
     scope_coverage_level,
 )
 from core.doubt.scope_candidates.worker import maybe_schedule_scope_candidates
+# 学習者向け投影の生数値遮断は、ゼミ前ブリーフ（SB2）と**同じ語彙**を使う
+# （数値キーの表を二重に持たない。正本は core/doubt/seminar_brief.py）。
+from core.doubt.seminar_brief import (
+    _FORBIDDEN_NUMERIC_KEYS as LEARNER_FORBIDDEN_NUMERIC_KEYS,
+    _strip_numeric_keys as strip_learner_numeric_keys,
+)
 from core.doubt.support_paths import compute_support_lines
 from core.label_vocab import VERIFICATION_STATUS_LABELS_LEDGER
 from core.postgres import get_session as _pg_session
@@ -1161,7 +1171,11 @@ def get_observation_targets(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """観測系 claim の一覧（「観測を仮に倒す」の選択肢。identified_via 併記・数値なし）。"""
+    """観測系 claim の一覧（「観測を仮に倒す」の選択肢。identified_via 併記・数値なし）。
+
+    course_id 直指定なので、集約の前に編集権限ゲートを通す（P0 fail-closed）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
     session = _pg_session()
     try:
         targets = observation_claim_targets(session, course_id=course_id)
@@ -1180,7 +1194,12 @@ def get_naive_signals(
     course_id: str,
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """anchor 単位の k-匿名集計（k=3, n<3 セル非表示、件数はレンジ表示のみ）。"""
+    """anchor 単位の k-匿名集計（k=3, n<3 セル非表示、件数はレンジ表示のみ）。
+
+    学習痕跡由来の集約なので、k-匿名の前に編集権限ゲートを通す（P0 fail-closed。
+    無関係な教員が他コースの学習者信号を読めないようにする）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
     return aggregate_naive_signals(course_id)
 
 
@@ -2291,13 +2310,20 @@ def get_learner_open_assumptions(
     course_id: str,
     current_user: dict = Depends(_get_current_user),
 ) -> dict:
-    """未検証合意リストの閲覧（読み取り専用）。疑義者の氏名は含めない。"""
+    """未検証合意リストの閲覧（読み取り専用）。疑義者の氏名は含めない。
+
+    D層「煽らない・数値を見せない」: ``compile_open_assumptions`` は教員向けに
+    ``dependent_count``（下流到達数の生値）を載せるため、学習者へ返す前に
+    ゼミ前ブリーフ（SB2）と同じ語彙の安全網で落とす。段階は既に
+    ``load_level`` / ``scope_coverage`` / 各事実文が持っており、生数値は不要。
+    教員向けルート（``/api/admin/doubt/courses/{id}/open-assumptions``）は不変。
+    """
     course = get_accessible_course_data(str(current_user.get("id")), course_id)
     if course is None:
         raise HTTPException(status_code=404, detail="Course not found")
     session = _pg_session()
     try:
         items = compile_open_assumptions(session, course_id, include_challenger_names=False)
-        return {"course_id": course_id, "items": items}
+        return strip_learner_numeric_keys({"course_id": course_id, "items": items})
     finally:
         session.close()

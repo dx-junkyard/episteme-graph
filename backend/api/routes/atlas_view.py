@@ -578,15 +578,15 @@ def get_atlas_node(
     if row is None:
         raise HTTPException(status_code=404, detail="atlas node not found")
     evidence = row["evidence"] or {}
+    # C層原則1「承認の重みは学習者への評価点にしない」: このルートは学習者も叩ける
+    # （`_get_current_user`）ため、承認の生数値（endorser_count / strong_count /
+    # expertise_breadth）は DTO に載せず、既存の段階ラベル（`_endorsement_label`、
+    # 承認レイヤーの正本）だけを返す。事実行は従来どおり `endorse_line`。
     endorsements = []
     if evidence.get("endorser_count"):
-        endorsements.append(
-            {
-                "endorser_count": evidence.get("endorser_count", 0),
-                "strong_count": evidence.get("strong_count", 0),
-                "expertise_breadth": evidence.get("expertise_breadth", 0),
-            }
-        )
+        from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
+
+        endorsements.append({"label": _endorsement_label(evidence)})
     return {
         "node_id": node_id,
         "label": row["label"],

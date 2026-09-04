@@ -554,8 +554,27 @@ class TestGetAtlasNode:
         assert data["status"] == "verified"
         assert "原文3本に裏付け" in data["verify_line"]
         assert "式(12)" in data["evidence_refs"]
-        assert data["endorsements"][0]["endorser_count"] == 3
+        # C層原則1: 学習者も叩けるルートなので承認は段階ラベルのみ（生数値は出さない）。
+        assert data["endorsements"][0] == {"label": "強い支持: 3名の教員が承認(専門2分野)"}
         assert data["skeleton_version"] == "2026.1"
+
+    def test_detail_panel_never_leaks_raw_endorsement_counts(self, client, warm_cache):
+        """承認の重みを学習者への評価点にしない（生カウントのキー自体を出さない）。"""
+        data = client.get(
+            "/api/atlas/node/bc_sumrule?cartridge=particle_physics", headers=_headers()
+        ).json()
+        forbidden = {"endorser_count", "strong_count", "expertise_breadth"}
+
+        def _walk(value):
+            if isinstance(value, dict):
+                assert not (forbidden & set(value)), f"生数値キーが漏れている: {value!r}"
+                for v in value.values():
+                    _walk(v)
+            elif isinstance(value, list):
+                for v in value:
+                    _walk(v)
+
+        _walk(data)
 
     def test_assumed_node_detail(self, client, warm_cache):
         data = client.get(

@@ -366,6 +366,11 @@ class TestObservationTargetsEndpoint:
     def test_delegates_to_core_function(self, monkeypatch):
         session = _FakeSession([])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        # course_id 直指定の編集権限ゲート（P0）は通過済みとして委譲だけを見る。
+        # ゲート自体の検証は tests/test_object_scope_authorization.py。
+        monkeypatch.setattr(
+            doubt, "_require_editable_course_or_404", lambda _cid, _user: {"title": "c"},
+        )
         captured = {}
 
         def _fake_targets(_session, *, course_id="", document_id=""):

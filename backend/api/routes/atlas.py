@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 import services
 from core import atlas
 from core import atlas_lifecycle
+from core import decision_context
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
@@ -1331,6 +1332,12 @@ def propose_course_atlas_binding(
     }
 
 
+# 確定文脈（DC1）— コース⇄地図バインディングの一括保存（「この対応で次へ」/「保存」）。
+# 語彙の組み立ては core/decision_context.py の共通プリミティブに委ねる。basis の
+# 正本は decision_context.BASIS_ATLAS_BINDING_SAVE（既存2経路と同じ「画面.操作」規約）。
+_BINDING_REOPEN_PATH = "PUT /api/admin/courses/{course_id}/atlas-binding"
+
+
 @binding_router.put("/{course_id}/atlas-binding")
 def save_course_atlas_binding(
     course_id: str,
@@ -1378,16 +1385,24 @@ def save_course_atlas_binding(
         }
         applied = 0
         skipped: list[str] = []
+        # 確定文脈（DC2）: 提示された対象はサーバ側で取り直す（クライアント申告に依存しない）。
+        # この画面は「コースの全トピックを1行ずつ並べ、各行に骨格概念の select を出す」ので、
+        # 提示集合 = コースの全 topic_id、適用集合 = 実際に binding が入った topic_id。
+        presented_topic_ids: list[str] = []
+        applied_topic_ids: list[str] = []
         for topic in course_topics(course_data):
             if not isinstance(topic, dict):
                 continue
             topic_id = str(topic.get("id") or "")
+            if topic_id:
+                presented_topic_ids.append(topic_id)
             if topic_id not in requested:
                 continue
             node_id = requested[topic_id]
             if node_id and new_key and node_id in known_nodes:
                 topic["atlas_node_id"] = node_id
                 applied += 1
+                applied_topic_ids.append(topic_id)
             else:
                 if node_id:
                     skipped.append(topic_id)
@@ -1410,16 +1425,39 @@ def save_course_atlas_binding(
     finally:
         session.close()
 
+    # 改訂原則1（DC1）: 一括確定は確定文脈なしに記帳しない。この保存は
+    # 「1画面のトピック対応をまとめて確定する」操作（リリース前確認ウィザードの
+    # ステップ1「この対応で次へ」も同じ経路）なので、提示・適用・代替・再審経路を記帳する。
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_ATLAS_BINDING_SAVE,
+        presented_ids=presented_topic_ids,
+        applied_ids=applied_topic_ids,
+        # 各行の select は「（対応なし）」を選べる（＝一括の対象から外す）。ウィザードでは
+        # ステップごとに「あとで」があり、飛ばしても学習者側の表示は変わらない（RR1）。
+        alternatives=(
+            decision_context.ALT_DESELECT,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        # 再審は同じ保存経路（空選択で解除・別の概念へ付け替え）。status 語彙は持たない
+        # 層なので statuses は空のまま（「戻せる status がある」と偽らない）。
+        reopen_path=_BINDING_REOPEN_PATH,
+        # 提案の根拠（どの topic がどの概念に当たるか）が画面に出ていたかはサーバから
+        # 検証できないため不明のまま置く（無条件 True にしない）。
+        evidence_shown=None,
+    )
     _record_review_event(
         course_id,
         old_key,
         new_key,
         current_user.get("id"),
-        {
-            "action": "course_atlas_binding",
-            "bindings_applied": applied,
-            "bindings_skipped": skipped,
-        },
+        decision_context.attach_decision_context(
+            {
+                "action": "course_atlas_binding",
+                "bindings_applied": applied,
+                "bindings_skipped": skipped,
+            },
+            ctx,
+        ),
         entity_type=AUDIT_ENTITY_ATLAS_BINDING,
     )
     return {
@@ -1427,6 +1465,9 @@ def save_course_atlas_binding(
         "cartridge_id": new_key,
         "bindings_applied": applied,
         "bindings_skipped": skipped,
+        # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す
+        # （landscape の accept と同型）。
+        "decision_context": ctx,
     }
 
 

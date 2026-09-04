@@ -121,6 +121,7 @@ from core.schema import (
     AUDIT_ENTITY_DOCUMENT_SHARE,
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
     AUDIT_ENTITY_USER_ACCOUNT,
+    AUDIT_ENTITY_VISIBILITY,
 )
 from core.schema_registry import (
     add_ontology_type,
@@ -1468,6 +1469,17 @@ def update_material_visibility(
 
     session = _pg_session()
     try:
+        # 旧 visibility は監査記帳のために同一トランザクション内で読む
+        # （どこから どこへ 開いたかを記録するため。UPDATE の 404 判定は不変）。
+        previous = session.execute(
+            sa_text("""
+                SELECT COALESCE(visibility, 'private')
+                FROM documents
+                WHERE source_path = :material_id
+                  AND uploaded_by = CAST(:user_id AS uuid)
+            """),
+            {"material_id": material_id, "user_id": current_user["id"]},
+        ).fetchone()
         result = session.execute(
             sa_text("""
                 UPDATE documents
@@ -1497,6 +1509,20 @@ def update_material_visibility(
     logger.info(
         "Material %s visibility=%s group=%s by user=%s",
         material_id, body.visibility, body.group_id, current_user["id"],
+    )
+    # 原則14: 公開（開示範囲の変更）は取り消しの効かない操作なので必ず記帳する。
+    # 資料本文・受講者情報は載せない（対象と旧・新の範囲、実行者だけ）。
+    record_review_event(
+        AUDIT_ENTITY_VISIBILITY,
+        material_id,
+        str(previous[0]) if previous else "",
+        body.visibility,
+        current_user["id"],
+        {
+            "action": "material_visibility",
+            "object_type": "document",
+            "group_id": body.group_id if body.visibility == "group" else None,
+        },
     )
     return {
         "material_id": material_id,
@@ -1531,6 +1557,15 @@ def update_course_visibility(
 
     session = _pg_session()
     try:
+        # 旧 visibility は監査記帳のために同一トランザクション内で読む（材料と同型）。
+        previous = session.execute(
+            sa_text("""
+                SELECT COALESCE(visibility, 'private')
+                FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        ).fetchone()
         result = session.execute(
             sa_text("""
                 UPDATE learning_courses
@@ -1561,6 +1596,21 @@ def update_course_visibility(
     logger.info(
         "Course %s visibility=%s group=%s by user=%s",
         course_id, body.visibility, body.group_id, current_user["id"],
+    )
+    # 原則14: コースの公開・非公開の切替を記帳する（誰がいつどこへ開いたか）。
+    # リリース前確認ウィザード経由かどうかはサーバから判別できないため申告しない
+    # （偽装しない。ステップ2の一括確認は landscape 側で decision_context 付きに記帳される）。
+    record_review_event(
+        AUDIT_ENTITY_VISIBILITY,
+        course_id,
+        str(previous[0]) if previous else "",
+        body.visibility,
+        current_user["id"],
+        {
+            "action": "course_visibility",
+            "object_type": "course",
+            "group_id": body.group_id if body.visibility == "group" else None,
+        },
     )
     return {
         "course_id": course_id,
@@ -4315,12 +4365,55 @@ def list_schema_proposals(
     return [SchemaProposalOut(**p) for p in proposals]
 
 
+def _editable_course_ids(user_id: str) -> list[str]:
+    """本人が編集できるコース（所有 or editor グループ）の ID 一覧。
+
+    権限判定の述語は ``list_teacher_courses`` / ``services.user_can_edit_course`` と同一
+    （所有者、または ``object_group_permissions(object_type='course', permission='editor')``
+    のグループ員）。viewer は含めない — 学習者の質問原文を読む根拠にはならない。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT lc.id
+                FROM learning_courses lc
+                WHERE lc.user_id = CAST(:user_id AS uuid)
+                   OR EXISTS (
+                       SELECT 1 FROM object_group_permissions cgp
+                       JOIN group_members gm ON gm.group_id = cgp.group_id
+                       WHERE cgp.object_type = 'course'
+                         AND cgp.object_id = lc.id
+                         AND cgp.permission = 'editor'
+                         AND gm.user_id = CAST(:user_id AS uuid)
+                   )
+            """),
+            {"user_id": user_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [str(r[0]) for r in rows]
+
+
 @router.post("/schema-proposals/analyze", response_model=SchemaProposalOut | dict)
 def trigger_schema_analysis(
     current_user: dict = Depends(_require_teacher),
 ) -> SchemaProposalOut | dict:
-    """未回答クエリを分析してスキーマ拡張提案を生成する。"""
-    result = analyze_unanswered_queries()
+    """未回答クエリを分析してスキーマ拡張提案を生成する。
+
+    目的外利用の禁止: 分析対象は**本人が編集できるコース**の未回答クエリだけに限定する
+    （旧実装は全コースを横断し、他教員のコースの学生の質問原文を最大100件プロンプトへ
+    埋めていた）。SYSTEM_ADMIN は従来どおり全件を対象にできる。編集できるコースが
+    1件も無ければ LLM を呼ばず、事実文だけを返す。
+    """
+    scope: list[str] | None = None
+    if current_user.get("role") != ROLE_SYSTEM_ADMIN:
+        scope = _editable_course_ids(current_user["id"])
+        if not scope:
+            return {
+                "message": "分析対象がありません。あなたが編集できるコースがまだありません。"
+            }
+    result = analyze_unanswered_queries(course_ids=scope)
     if result is None:
         return {"message": "分析の結果、スキーマ拡張の提案はありません。未回答クエリが不足しているか、現在のスキーマで十分カバーされています。"}
     return SchemaProposalOut(**result)

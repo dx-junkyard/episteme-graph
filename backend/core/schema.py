@@ -506,6 +506,13 @@ AUDIT_ENTITY_ATLAS_VECTOR = "atlas_vector"
 # 辺候補の accept / dismiss / restore / mark_incorporated を記帳する。
 AUDIT_ENTITY_ATLAS_EDGE = "atlas_edge"
 
+# 開示範囲（visibility）の変更 — 教材（documents）とコース（learning_courses）の
+# public / group / private 切替。entity_id は material_id または course_id、
+# old_status / new_status に旧・新 visibility を入れる（metadata.object_type で区別）。
+# 公開は取り消しの効かない操作（一度出た資料は戻らない）なので、誰がいつどこへ開いたかを
+# 記帳する（原則14 監査可能性）。平文の資料本文・受講者情報は載せない。
+AUDIT_ENTITY_VISIBILITY = "visibility"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -548,4 +555,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_PAPER_DISCOVERY,
     AUDIT_ENTITY_ATLAS_VECTOR,
     AUDIT_ENTITY_ATLAS_EDGE,
+    AUDIT_ENTITY_VISIBILITY,
 )

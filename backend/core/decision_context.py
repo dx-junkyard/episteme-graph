@@ -47,6 +47,7 @@ __all__ = [
     "ALT_RECONSIDER",
     "ALT_REJECT",
     "ALT_SKIP_STEP",
+    "BASIS_ATLAS_BINDING_SAVE",
     "BASIS_EXPLANATION_REVIEW_BULK",
     "BASIS_RELEASE_REVIEW_PLACEMENTS",
     "DECISION_CONTEXT_KEY",
@@ -68,6 +69,8 @@ DECISION_CONTEXT_KEY = "decision_context"
 BASIS_RELEASE_REVIEW_PLACEMENTS = "release_review.placements"
 #: 説明レビューキューの一括承認・一括却下（E2）。
 BASIS_EXPLANATION_REVIEW_BULK = "explanation_review.bulk"
+#: 学習マップの対応付け保存（リリース前の確認 ステップ1「この対応で次へ」= topic 一括）。
+BASIS_ATLAS_BINDING_SAVE = "atlas_binding.save"
 
 # ---------------------------------------------------------------------------
 # 代替（確定者がその場で選べた「承認しない」選択肢）
