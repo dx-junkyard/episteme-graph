@@ -3869,8 +3869,7 @@ html.learn-page > body {
 .ls-work-tabs[hidden],
 .ls-mini-tabs[hidden],
 .ls-work-tab[hidden],
-.ls-mini-tab[hidden],
-.ls-sync-row[hidden] {
+.ls-mini-tab[hidden] {
   display: none !important;
 }
 
@@ -5698,14 +5697,6 @@ button.ls-course-evidence-head {
   color: var(--color-text-tertiary);
   font-size: 10px;
   font-family: monospace;
-}
-
-.ls-sync-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
 }
 
 .ls-assistant-modal {

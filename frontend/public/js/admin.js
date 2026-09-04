@@ -11502,7 +11502,11 @@
           || document.querySelector(".eg-rev-deliberate-btn");
       },
       // W層（G6）: 深く検討モーダル内の同一性リンク確定/却下ボタン（候補があるときのみ出現）。
-      identity_link_confirm_button: function () { return document.querySelector("[data-identity-action]"); }
+      identity_link_confirm_button: function () { return document.querySelector("[data-identity-action]"); },
+      // 教材図スタジオ（teaching_figure_studio_design.md §6.2-1）: 教材欄の上の
+      // [🖼 図を挿入]。トピックを開くまで DOM に存在しないので、未解決なら道案内は
+      // そこで止まる（P8 fail-closed）。
+      figure_studio_button: function () { return document.getElementById("ls-course-insert-figure-btn"); }
     });
     AA.registerUiAnchors("course-management", {
       course_list: function () { return document.getElementById("cm-table"); },
@@ -11589,7 +11593,10 @@
     // 知識ネットワークビジョン Phase B（G2-B）: 橋の候補セクション。
     AA.registerUiAnchors("interest-dashboard", {
       interest_dashboard_course_select: function () { return document.getElementById("interest-dashboard-course-select"); },
-      bridge_insights_section: function () { return document.getElementById("bridge-insights-section"); }
+      bridge_insights_section: function () { return document.getElementById("bridge-insights-section"); },
+      // 制度指標カタログ（indicator_governance_design.md IG1）: 計器のそばに置く定義の
+      // 1行。カタログが読めないときは空のままなので、そのときは道案内はここで止まる。
+      indicator_catalog_fact: function () { return document.getElementById("interest-dashboard-indicator-fact"); }
     });
     // U層（G2-U）: LLM使用量タブの主要コンテナ（SYSTEM_ADMIN 向けメトリクス）。
     AA.registerUiAnchors("llm-usage", {

@@ -1102,6 +1102,98 @@ _REGISTRY: list[Capability] = [
                   "タブ末尾の「URL取得の許可ドメイン」区画でドメインを入力して「追加」を押します"),
         ),
     ),
+    # -------------------------------------------------------------------
+    # 2026-09-05 是正: 実装済みなのに registry 未登録で「構造的に案内不能」だった
+    # 4画面を段階登録する（P1: registry が単一の真実源。載っていない機能は Copilot が
+    # 説明も道案内もできない）。いずれも guidance_only — 読み取り中心か、確定が人間の
+    # 明示操作である機能なので、代行 capability は登録しない。
+    # -------------------------------------------------------------------
+    # グラフの論文層（graph_paper_layer_design.md PL1〜PL8）: フレームを触らない読み時
+    # 射影で、グラフレビュー画面のツールバーから表示を切り替える。単独の入口を持たない
+    # ので、道案内はグラフレビューの入口までで止める（P8: 誘導まで）。
+    Capability(
+        id="materials.paper_layer",
+        screen="materials",
+        title="グラフを論文の並び（章・式番号・図番号）で確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#paper-layer",
+        description="グラフレビュー画面で「表示: 論文の順」に切り替えると、理論操作グラフの"
+                    "各ノードが論文のどの章・どの式・どの図表に対応するかを、論文の並びで"
+                    "確認できる。対応が付かないところは「掛かっていません」とそのまま出る"
+                    "（推測で埋めない）。表示だけの機能で、承認・却下は従来どおりグラフ表示側の操作。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_id}/paper-layer"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "material_graph_review_button",
+                  "「🕸 グラフレビュー…」を押し、ツールバーの「表示:」で「論文の順」に切り替えます",
+                  precondition="material_menu_open"),
+        ),
+    ),
+    # ゼミ前ブリーフ（seminar_brief_mirroring_design.md）: 読み取り専用のビューで、
+    # この画面からの確定操作は無い（記帳は D層の各画面のまま）。
+    Capability(
+        id="materials.seminar_brief",
+        screen="materials",
+        title="ゼミ前ブリーフを確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#seminar-brief",
+        description="輪講の前に、この論文の脆い前提・支持のしかた（一点吊りになっている箇所）・"
+                    "このコーパスの中では検証記録が無いところ・学習者から引き継いだ問いを"
+                    "1画面で確認する。読み取り専用で、この画面から確定操作はできない。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_ref}/seminar-brief"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "seminar_brief_button", "「ゼミ前ブリーフ…」を押します",
+                  precondition="material_menu_open"),
+        ),
+    ),
+    # 制度指標カタログ（indicator_governance_design.md IG1）: 計器の**定義だけ**を全当事者に
+    # 開く読み取り専用 API。値は返さないので、この capability も定義の在り処を案内するだけ。
+    Capability(
+        id="indicators.view_catalog",
+        screen="interest-dashboard",
+        title="制度指標カタログ（この計器は何のためのものか）を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/interest_dashboard.md#indicator-catalog",
+        description="集約された計器（関心集約・橋の候補・LLM使用量・discuss観測など）の"
+                    "定義・用途・**使わない用途**を確認する。カタログが返すのは定義だけで"
+                    "値は含まれない。個人の比較・成績・自動判定に使わないことが計器ごとに"
+                    "明記されている。学習者も同じ定義を読める。",
+        api={"method": "GET", "path": "/api/indicators"},
+        locate_steps=(
+            _step("interest-dashboard", "indicator_catalog_fact",
+                  "計器のすぐ上に「計器: … — …」の1行で、その計器の用途と非利用が出ます"),
+        ),
+    ),
+    # 教材図スタジオ（teaching_figure_studio_design.md FG1〜FG9）: AI と対話して説明図を
+    # 作る機能。採用（本文への挿入）は教員の明示操作なので、代行は登録しない。
+    Capability(
+        id="lecture_studio.figure_studio",
+        screen="lecture-studio",
+        title="AI と対話して説明図を作り、教材に挿入する（教材図スタジオ）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/lecture_studio.md#figure-studio",
+        description="教材のわかりづらい箇所に、AI と対話して説明図（SVG）を作り、"
+                    "`![[figure:id]]` として本文に挿入する。既存の図から選ぶこともできる。"
+                    "挿入・採用は教員の操作で、AI が本文を書き換えることはない。"
+                    "読み上げ原稿には挿入できない（図は読み上げから除かれる）。",
+        api={"method": "POST", "path": "/api/admin/courses/{course_id}/figure-studio/turn"},
+        locate_steps=(
+            _step("lecture-studio", "ls_course_select", "対象のコースを選びます"),
+            _step("lecture-studio", "figure_studio_button",
+                  "教材欄の上の「🖼 図を挿入」を押します（読み上げ原稿にフォーカスしていると"
+                  "無効になります）",
+                  precondition="course_selected"),
+        ),
+    ),
 ]
 
 _BY_ID = {cap.id: cap for cap in _REGISTRY}

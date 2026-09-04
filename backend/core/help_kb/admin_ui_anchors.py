@@ -232,6 +232,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.nav-components",
         "lecture-studio.nav-course",
         "lecture-studio.nav-document",
+        "lecture-studio.recon-item-restore",
         "lecture-studio.recon-review-btn",
         "lecture-studio.recon-review-sort",
         "lecture-studio.refresh-graph-btn",
@@ -773,6 +774,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.nav-course": "teacher/14-admin-lecture-studio.md#nav-tabs",
     # 文書構造（左ペインタブ）
     "lecture-studio.nav-document": "teacher/14-admin-lecture-studio.md#nav-tabs",
+    # 再構成の確認：自動配信に戻す（処理済み item の状態を auto へ戻す）
+    "lecture-studio.recon-item-restore": "teacher/14-admin-lecture-studio.md#recon-item-restore",
     # 再構成の確認
     "lecture-studio.recon-review-btn": "teacher/14-admin-lecture-studio.md#recon-review-btn",
     # 再構成の確認：並び順（負荷の高い順）トグル

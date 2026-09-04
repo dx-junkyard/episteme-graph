@@ -59,7 +59,6 @@
     evidenceView: "pdf",
     displayView: "preview",
     courseDraftView: "preview",
-    syncSpoken: true,
     pdfObjectUrl: null,
     pdfUrl: null,
     settings: {
@@ -1554,23 +1553,18 @@
       lsState.displayView = btn.getAttribute("data-ls-display") || "preview";
       lsRenderWorkspace();
     });
-    document.getElementById("ls-sync-spoken").addEventListener("change", function () {
-      lsState.syncSpoken = this.checked;
-      if (this.checked) {
-        document.getElementById("ls-spoken-text").value = document.getElementById("ls-display-text").value;
-      }
-      lsRenderWorkspace();
-    });
     document.getElementById("ls-display-text").addEventListener("input", function () {
       var chunk = lsGetSelectedChunk();
       if (chunk) {
         chunk.display_text = this.value;
         chunk.text = this.value;
       }
-      if (lsState.syncSpoken) {
-        document.getElementById("ls-spoken-text").value = this.value;
-        if (chunk) chunk.spoken_text = this.value;
-      }
+      // チャンクの読み上げ文は表示テキストに追随する。かつては #ls-sync-spoken で
+      // 切り替えられる想定だったが、そのチェックボックスは到達不能（表示条件の
+      // view === "audio" に入る経路が無い）で既定 ON のままだったため、2026-09-05 に
+      // 撤去して従来の実挙動をそのまま定数化した。
+      document.getElementById("ls-spoken-text").value = this.value;
+      if (chunk) chunk.spoken_text = this.value;
       lsRenderDisplayPreview();
     });
     document.getElementById("ls-spoken-text").addEventListener("input", function () {
@@ -1686,7 +1680,6 @@
     document.getElementById("ls-theory-panel").hidden = false;
     document.getElementById("ls-claims-panel").hidden = true;
     document.getElementById("ls-graph-panel").hidden = true;
-    document.getElementById("ls-sync-row").hidden = true;
     document.getElementById("ls-display-preview").hidden = true;
     document.getElementById("ls-pdf-view").hidden = true;
     if (formulasEl) formulasEl.hidden = true;
@@ -1753,7 +1746,6 @@
     document.getElementById("ls-theory-panel").hidden = true;
     document.getElementById("ls-claims-panel").hidden = true;
     document.getElementById("ls-graph-panel").hidden = true;
-    document.getElementById("ls-sync-row").hidden = true;
     document.getElementById("ls-pdf-view").hidden = true;
     document.getElementById("ls-source-text").hidden = false;
     document.getElementById("ls-display-preview").hidden = false;
@@ -2577,12 +2569,23 @@
       } else if (lsReconReviewSortOrder === "load") {
         loadLabel = ' · 影響度を導出できない候補';
       }
-      var actions = withActions
-        ? '<div class="ls-stumble-item-actions">' +
-            '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
-            '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
-          '</div>'
-        : '';
+      // status 遷移ボタン。auto（未処理）は [配信停止][追認]、処理済み
+      // （confirmed / retired / flagged）は [自動配信に戻す] を出す。API は
+      // PATCH の status で auto への遷移も受けるが、UI に戻し口が無く「一度
+      // retire したら二度と戻せない」ように見えていた（2026-09-05 是正）。
+      // 行は削除されず状態遷移だけで動く（P4）ので、戻す操作も同じ経路でよい。
+      var actions = "";
+      if (withActions && it.status === "auto") {
+        actions = '<div class="ls-stumble-item-actions">' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="retired" data-recon-item-id="' + escHtml(it.item_id) + '">配信停止（retire）</button>' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="confirmed" data-recon-item-id="' + escHtml(it.item_id) + '">追認（confirm）</button>' +
+          '</div>';
+      } else if (withActions) {
+        actions = '<div class="ls-stumble-item-actions">' +
+          '<button type="button" class="ls-stumble-mini" data-recon-item-status="auto" data-recon-item-id="' + escHtml(it.item_id) + '"' +
+            ' data-ui-anchor="lecture-studio.recon-item-restore">自動配信に戻す（auto）</button>' +
+          '</div>';
+      }
       return '<div class="ls-stumble-item" data-recon-item="' + escHtml(it.item_id) + '">' +
         '<div class="ls-stumble-item-tier">' + escHtml(it.rank_tier || "") + ' · ' + escHtml(it.elicit_mode || "") +
           (it.status ? ' · ' + escHtml(it.status) : '') + loadLabel + '</div>' +
@@ -2603,8 +2606,10 @@
       '</div>';
     html += '<div class="ls-recon-review-section">' +
       '<h4 class="ls-recon-review-section-title">その他（情報不足・処理済み）</h4>' +
+      // 情報不足の auto は従来どおり [配信停止][追認]、処理済みは [自動配信に戻す]。
+      // どちらも操作可（履歴表示のみの行き止まりにしない）。
       (others.length
-        ? others.map(function (it) { return itemCardHtml(it, it.status === "auto"); }).join("")
+        ? others.map(function (it) { return itemCardHtml(it, true); }).join("")
         : '<div class="ls-course-muted">該当する item はありません。</div>') +
       '</div>';
     list.innerHTML = html;
@@ -4368,6 +4373,10 @@
     spokenEl.disabled = false;
 
     var isStructure = lsState.view === "structure";
+    // 2026-09-05 の調査メモ: isAudio / isCompare は現状どちらも常に false。
+    // lsRenderWorkspace() は冒頭で lsUpdateWorkTabActive() を呼び、そこで
+    // lsNormalizeViewForCurrentMode() が "audio" を "edit" に畳む。"compare" は
+    // どの data-ls-view にも無い。以下の分岐は残置（削除は別途の整理で）。
     var isAudio = lsState.view === "audio";
     var isCompare = lsState.view === "compare";
     var isTheory = lsState.view === "theory";
@@ -4379,8 +4388,6 @@
     document.getElementById("ls-theory-panel").hidden = !isTheory;
     document.getElementById("ls-claims-panel").hidden = !isClaims;
     document.getElementById("ls-graph-panel").hidden = !isGraph;
-    document.getElementById("ls-sync-row").hidden = !isAudio;
-    document.getElementById("ls-sync-spoken").checked = lsState.syncSpoken;
 
     document.getElementById("ls-left-pane").hidden = isStructure || isAudio || isTheory || isClaims || isGraph;
     document.getElementById("ls-right-pane").hidden = isStructure || isTheory || isClaims || isGraph;
@@ -4435,7 +4442,7 @@
       if (slidesEl) slidesEl.hidden = true;
       if (slideToolsRow) slideToolsRow.hidden = false;
       spokenEl.hidden = false;
-      spokenEl.disabled = lsState.syncSpoken;
+      spokenEl.disabled = true;  // 読み上げ文は表示テキストに追随する（同期の切り替えは無い）
     } else {
       document.getElementById("ls-right-title").textContent = lsState.displayView === "formulas" ? "数式一覧" :
         lsState.displayView === "slides" ? "スライド" : "表示テキスト";

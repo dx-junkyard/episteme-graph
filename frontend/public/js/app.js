@@ -2227,12 +2227,12 @@
     // ② 問いの軌跡（資産化レイヤー・mock）
     html += renderProblemTrails();
 
-    // 既存の学習サマリ（章ごとの進捗・連続日数など）は補助情報として下に残す。
+    // 既存の学習サマリ（章ごとの進捗など）は補助情報として下に残す。
     html += '<div class="progress-head" style="margin:20px 0 8px"><h3 style="font-size:14px">学習サマリ</h3></div>';
     html += '<div class="ps"><div class="prog-ov">';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-info)">' + (p.learning_concepts || 0) + '</div><div class="lbl">学習中</div></div>';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-warning)">' + (p.misconceptions || 0) + '</div><div class="lbl">訂正された誤解</div></div>';
-    html += '<div class="prog-card"><div class="val">' + (p.streak_days || 0) + '</div><div class="lbl">連続学習日数</div></div>';
+    // 2026-09-05: 「連続学習日数」のカードを撤去（理解サイクル UC4）。
     html += "</div></div>";
 
     html += '<div class="ps"><h4>章ごとの進捗</h4>';
@@ -5458,12 +5458,6 @@
     // Restore select state in case it was disabled by empty state
     const select = document.getElementById("course-select");
     if (select) select.disabled = false;
-
-    const streakEl = document.getElementById("streak");
-    if (streakEl && progress) {
-      streakEl.textContent = (progress.streak_days || 0) + "日連続学習中";
-      streakEl.style.color = "var(--color-text-success)";
-    }
 
     renderSidebar();
     if (state.currentTopicId) {

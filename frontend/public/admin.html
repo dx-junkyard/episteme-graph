@@ -642,10 +642,11 @@
                 <div id="ls-component-graph" class="ls-theory-components"></div>
               </section>
 
-              <label id="ls-sync-row" class="ls-sync-row" hidden>
-                <input type="checkbox" id="ls-sync-spoken" checked>
-                <span>読み上げテキストを表示テキストと同期</span>
-              </label>
+              <!-- 2026-09-05: 「読み上げテキストを表示テキストと同期」チェックボックス
+                   （#ls-sync-spoken）を撤去した。表示条件が view === "audio" だったが、
+                   lsNormalizeViewForCurrentMode() が "audio" を常に "edit" へ畳むため
+                   到達不能で、既定の同期 ON のまま一度も切り替えられなかった。
+                   チャンクの読み上げ文は表示テキストに追随する（挙動は変更なし）。 -->
             </template>
           </div>
         </div>

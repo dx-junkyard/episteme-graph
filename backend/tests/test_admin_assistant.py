@@ -785,6 +785,8 @@ class TestReachabilityFixes20260903:
             "material_inventory_button",
             "material_graph_review_button",
             "material_landscape_button",
+            # 2026-09-05: ゼミ前ブリーフも「⋯」メニュー内なので同じ規律に載せる。
+            "seminar_brief_button",
         }
         problems = []
         for cap in caps.all_capabilities():
@@ -1423,3 +1425,66 @@ class TestExecutableDisclosureFrontend:
         assert "道案内のみ対応" in _ROUTE_SRC
         body = extract_function_source(_ROUTE_SRC, "_guidance_response")
         assert "_capability_display_title" in body
+
+
+class TestRegistryGaps20260905:
+    """2026-09-05 是正: 実装済みなのに registry 未登録で「構造的に案内不能」だった4件。
+
+    P1 の registry は単一の真実源なので、載っていない機能は Copilot が説明も道案内も
+    できない。いずれも guidance_only（読み取り中心 / 確定は人間の明示操作）。
+    """
+
+    _EXPECTED = {
+        "materials.paper_layer": (
+            "materials", "admin_operations/materials.md#paper-layer",
+            "/api/admin/documents/{document_id}/paper-layer",
+        ),
+        "materials.seminar_brief": (
+            "materials", "admin_operations/materials.md#seminar-brief",
+            "/api/admin/documents/{document_ref}/seminar-brief",
+        ),
+        "indicators.view_catalog": (
+            "interest-dashboard", "admin_operations/interest_dashboard.md#indicator-catalog",
+            "/api/indicators",
+        ),
+        "lecture_studio.figure_studio": (
+            "lecture-studio", "admin_operations/lecture_studio.md#figure-studio",
+            "/api/admin/courses/{course_id}/figure-studio/turn",
+        ),
+    }
+
+    def test_registered_as_guidance_only(self):
+        for cap_id, (screen, howto, path) in self._EXPECTED.items():
+            cap = caps.get_capability(cap_id)
+            assert cap is not None, f"{cap_id} が未登録"
+            assert cap.screen == screen, f"{cap_id}: screen が {cap.screen!r}"
+            assert cap.kind == "guidance_only", f"{cap_id} は guidance_only であるべき"
+            assert cap.required_role == "TEACHER"
+            assert cap.howto_doc == howto, f"{cap_id}: howto_doc が {cap.howto_doc!r}"
+            assert cap.api and cap.api["path"] == path, f"{cap_id}: api path"
+            assert cap.locate_steps, f"{cap_id} に locate_steps が無い"
+
+    def test_kb_sections_exist(self):
+        """P4: 説明の根拠になる KB 節が実在する（無ければ「未整備」としか言えない）。"""
+        for cap_id, (_screen, howto, _path) in self._EXPECTED.items():
+            section = kb.section_for_howto(howto)
+            assert section and section.get("body"), f"{cap_id}: KB 節が引けない"
+
+    def test_no_action_handler_registered(self):
+        """guidance_only なので代行ハンドラを持たない（確定は人間の明示操作のまま）。"""
+        for cap_id in self._EXPECTED:
+            assert get_handler(cap_id) is None, f"{cap_id} に代行ハンドラがある"
+
+    def test_locate_anchors_exist_for_declared_screen(self):
+        anchors = _parse_registered_anchors(_ADMIN_JS_MAIN)
+        for cap_id in self._EXPECTED:
+            cap = caps.get_capability(cap_id)
+            for st in cap.locate_steps:
+                base = st.anchor_id.split(":")[0]
+                assert base in anchors.get(st.screen, set()), (
+                    f"{cap_id}: anchor {base!r} が screen {st.screen!r} に未登録"
+                )
+
+    def test_teacher_can_reach_all_four(self):
+        teacher_ids = {c.id for c in caps.capabilities_for("TEACHER")}
+        assert set(self._EXPECTED) <= teacher_ids

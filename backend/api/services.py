@@ -2079,53 +2079,22 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
             "duration": f"{duration_min}分",
         })
 
-    streak = calculate_streak(user_id, course_id)
-
     completion = get_course_completion(user_id, course_id, course_data)
 
     return {
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
-        "streak_days": streak,
         "sessions": sessions_list[:5],
         "completed_topic_ids": completion["completed_topic_ids"],
         "course_completed": completion["course_completed"],
     }
 
 
-def calculate_streak(user_id: str, course_id: str) -> int:
-    """チャット履歴の日付から連続学習日数を算出する。"""
-    pg_session = _pg_session()
-    try:
-        records = pg_session.execute(
-            sa_text("""
-                SELECT DISTINCT DATE(updated_at) AS d
-                FROM learning_chat_history
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                ORDER BY d DESC
-            """),
-            {"user_id": user_id, "course_id": course_id},
-        ).fetchall()
-    finally:
-        pg_session.close()
-
-    if not records:
-        return 0
-
-    sorted_dates = [r[0] for r in records]
-    today = datetime.date.today()
-
-    if sorted_dates[0] < today - datetime.timedelta(days=1):
-        return 0
-
-    streak = 1
-    for i in range(1, len(sorted_dates)):
-        if sorted_dates[i] == sorted_dates[i - 1] - datetime.timedelta(days=1):
-            streak += 1
-        else:
-            break
-
-    return streak
+# 2026-09-05: `calculate_streak`（連続学習日数）を撤去した。理解サイクルの不変条項
+# UC4「セッション間は何もしない — 督促・連続日数・未消化バッジ・忘却曲線を作らない」に
+# 正面から反する計器で、学習者の画面（トップバー・学習サマリ）にだけ出ていた。
+# 学習者向けの数値表示なので DTO（schemas.LearningProgress.streak_days）ごと落としている。
+# 再導入するときは UC4 の裁定からやり直すこと。
 
 
 # ---------------------------------------------------------------------------

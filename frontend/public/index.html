@@ -25,9 +25,9 @@
           <option value="">読み込み中...</option>
         </select>
       </div>
+      <!-- 2026-09-05: 「◯日連続学習中」を撤去（理解サイクル UC4: 連続日数・督促・
+           未消化バッジを作らない）。セッション間に何も置かないこと自体が設計。 -->
       <div class="topbar-r">
-        <span id="streak" style="color:var(--color-text-success)"></span>
-        <span style="opacity:.3">|</span>
         <button id="groups-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
         <span style="opacity:.3">|</span>
         <button id="atlas-btn" data-ui-anchor="topbar.atlas" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>

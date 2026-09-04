@@ -270,7 +270,8 @@ class LearningSession(BaseModel):
 class LearningProgress(BaseModel):
     learning_concepts: int = 0
     misconceptions: int = 0
-    streak_days: int = 0
+    # 2026-09-05: `streak_days`（連続学習日数）を撤去（理解サイクル UC4: 連続日数・
+    # 督促・未消化バッジを作らない）。services.calculate_streak ごと削除済み。
     sessions: list[LearningSession] = []
     # コース完了判定のサーバー正本化: 保存済みの合格トピックと、それから毎回導出する完了状態
     # (services.get_course_completion / calculate_progress)。
