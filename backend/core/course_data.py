@@ -244,11 +244,21 @@ def course_topics(data: dict | None) -> list[dict]:
 
     章ネスト形 (``chapters[].topics[]``) は含まない。両方見る必要がある場合は
     ``iter_all_topics()`` を使うこと。
+
+    ``course_sources()`` と ``iter_all_topics()`` の章ネスト側と同じく、**非 dict 要素は
+    除外する**（``course_chapters()`` の docstring が「``course_topics()`` とは異なり
+    位置保存を優先する」と述べている側の挙動）。トピックは位置ではなく ``topic_id`` /
+    ``title`` で参照されるため、位置を保つ必要が無い。除外しないと ``None`` や文字列が
+    そのまま呼び出し側へ流れ、``topic.get(...)`` を呼ぶ各層（``lecture`` /
+    ``status.projector`` / ``next_steps`` ほか）で AttributeError になる — この
+    モジュールが素の dict アクセスを引き受けている意味が失われる。
     """
     if not isinstance(data, dict):
         return []
     topics = data.get("topics")
-    return topics if isinstance(topics, list) else []
+    if not isinstance(topics, list):
+        return []
+    return [t for t in topics if isinstance(t, dict)]
 
 
 def iter_all_topics(data: dict | None) -> list[dict]:

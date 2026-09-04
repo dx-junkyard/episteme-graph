@@ -776,3 +776,41 @@ class TestInputsAreNotMutated:
         first = build_paper_layer(graph, artifacts, figure_rows=figure_rows, explanation_rows=explanation_rows)
         second = build_paper_layer(graph, artifacts, figure_rows=figure_rows, explanation_rows=explanation_rows)
         assert first == second
+
+
+# ---------------------------------------------------------------------------
+# 壊れた数値フィールドでの fail-soft（PL8）
+# ---------------------------------------------------------------------------
+
+
+class TestMalformedOrderingValuesDegradeSoftly:
+    """``level`` / ``order`` / ``display_order`` は LLM 由来 artifact と過去に保存された
+    ``graph_json`` から読む。非整数が1つ紛れ込んだだけで論文層まるごとが落ちてはいけない
+    （route は例外を ``available: false`` に畳むため、1論文の論文層が全滅する）。
+    """
+
+    def test_non_numeric_display_order_does_not_raise(self):
+        graph = _graph([_node("n1", display_order="second"), _node("n2", display_order=1)])
+        result = build_paper_layer(graph, _full_artifacts())
+        assert result["available"] is True
+        assert set(result["nodes"]) == {"n1", "n2"}
+
+    def test_non_numeric_section_level_and_order_do_not_raise(self):
+        artifacts = _full_artifacts()
+        artifacts["document_structure"]["sections"][0]["level"] = "1.1"
+        artifacts["document_structure"]["sections"][1]["order"] = "second"
+        result = build_paper_layer(_graph([_node("n1")]), artifacts)
+        assert result["available"] is True
+        levels = {s["section_id"]: s["level"] for s in result["paper"]["sections"]}
+        orders = {s["section_id"] for s in result["paper"]["sections"]}
+        assert orders == {"s1", "s2"}
+        # 変換できない値は既定へ倒し、節そのものは落とさない（情報を落とさない）。
+        assert levels["s1"] == 1
+
+    def test_valid_integer_ordering_is_unchanged(self):
+        """既定へ倒すのは変換不能なときだけ（正常値の挙動は変えない）。"""
+        artifacts = _full_artifacts()
+        artifacts["document_structure"]["sections"][0]["order"] = 5
+        artifacts["document_structure"]["sections"][1]["order"] = 2
+        result = build_paper_layer(_graph([_node("n1")]), artifacts)
+        assert [s["section_id"] for s in result["paper"]["sections"]] == ["s2", "s1"]

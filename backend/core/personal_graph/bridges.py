@@ -85,7 +85,7 @@ def collect_bridge_entries(traces: list[dict]) -> list[tuple[str, str, str]]:
         user_id = str(trace.get("user_id") or "")
         if not user_id:
             continue
-        payload = trace.get("payload") or {}
+        payload = _payload_dict(trace.get("payload"))
         refs = payload.get("connected_refs")
         if not isinstance(refs, dict):
             # connected_refs を持たない connected 行（本機能導入前のデータ等）は

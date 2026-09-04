@@ -70,6 +70,23 @@ def _id_list(container: Any, key: str) -> list[str]:
     return [str(v) for v in values if str(v or "").strip()]
 
 
+def _int_or(value: Any, default: int) -> int:
+    """並び順・階層の整数化（PL8 fail-soft）。
+
+    ``level`` / ``order`` / ``display_order`` は LLM 由来 artifact と、過去に保存された
+    ``graph_json`` から読む値なので、``"1.1"`` や ``"second"`` のような非整数が
+    紛れ込みうる。``_dicts`` / ``_mapping`` / ``str(... or "")`` と同じ防御水準に揃え、
+    1件の異常値で論文層まるごとが ``available: false`` に落ちないようにする
+    （情報を落とさない = 既定値で並べて表示は続ける）。
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _node_id(node: dict) -> str:
     return str(node.get("id") or node.get("component_id") or "").strip()
 
@@ -120,8 +137,8 @@ class _PaperIndex:
             entry = {
                 "section_id": section_id,
                 "title": str(section.get("title") or ""),
-                "level": int(section.get("level") or 1),
-                "order": int(section.get("order") if section.get("order") is not None else order_fallback),
+                "level": _int_or(section.get("level") or 1, 1),
+                "order": _int_or(section.get("order"), order_fallback),
                 "page_start": section.get("page_start"),
                 "page_end": section.get("page_end"),
                 "parent_section_id": str(section.get("parent_section_id") or "") or None,
@@ -621,7 +638,7 @@ def build_paper_layer(
     bound_equation_ids: set[str] = set()
     bound_claim_ids: set[str] = set()
 
-    for node in sorted(nodes, key=lambda n: (int(n.get("display_order") or 0), _node_id(n))):
+    for node in sorted(nodes, key=lambda n: (_int_or(n.get("display_order"), 0), _node_id(n))):
         node_id = _node_id(node)
         graph_layer = str(node.get("graph_layer") or "main")
         member_ids = _dedup(

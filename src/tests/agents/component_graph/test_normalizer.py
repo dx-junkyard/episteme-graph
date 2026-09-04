@@ -1081,3 +1081,61 @@ def test_graph_payload_includes_visual_label_and_review_reason():
         assert "review_reason" in node_dict
     detail_nodes = [n for n in payload["nodes"] if n.get("graph_layer") == "equation_detail"]
     assert any(n["review_reason"] == reason for n in detail_nodes)
+
+
+def _chain_of(*operations):
+    """1 derivation = 与えた operation 列（各 step は入出力の式を1本ずつ持つ）。"""
+    steps = [
+        _step(operation, [f"eq_{i}"], [f"eq_{i + 1}"])
+        for i, operation in enumerate(operations)
+    ]
+    return DerivationChainResult(
+        document_id="doc",
+        cartridge_id=None,
+        chains=[
+            DerivationChainRecord(
+                derivation_id="deriv",
+                document_id="doc",
+                source_section_ids=[],
+                steps=steps,
+            )
+        ],
+    )
+
+
+def test_apply_equation_lands_on_a_canonical_stage_not_a_pseudo_stage():
+    """回帰: 非 generic な ``apply_equation`` が main で "Transforms" になっていた。
+
+    ``_group_records`` は stage の引けない edge_type を「edge_type 自身」を擬似 stage に
+    フォールバックさせるため、``transforms`` が stage 写像から漏れていた間、main node の
+    ラベルが ``THEORY_STAGE_LABELS`` の外（"Transforms"）になり #308 の
+    「main ラベルは正準 stage ラベルそのもの」に違反していた。
+    """
+    from episteme_graph.agents.component_graph.schema import THEORY_STAGE_LABELS
+
+    canonical = set(THEORY_STAGE_LABELS.values())
+    for operation in ("apply_equation", "apply_measurement_or_update"):
+        result = ComponentGraphNormalizer().normalize(
+            _empty_graph(), _empty_components(), _chain_of("define", operation)
+        )
+        main_labels = {n.label for n in _layer(result, "main")}
+        assert main_labels, f"{operation}: main node が作られていない"
+        assert main_labels <= canonical, (
+            f"{operation}: 正準 stage ラベル外の main ラベル "
+            f"{sorted(main_labels - canonical)}"
+        )
+        assert "Transforms" not in main_labels
+
+
+def test_generic_operations_never_reach_the_main_layer():
+    """generic operation は main node にしない（式 backing があっても detail 止まり）。"""
+    result = ComponentGraphNormalizer().normalize(
+        _empty_graph(), _empty_components(), _chain_of("transform", "relate", "associate")
+    )
+    assert _layer(result, "main") == []
+    for node in result.nodes:
+        assert node.graph_layer in ("equation_detail", "debug")
+        # fallback / inferred を確定扱いにしない
+        if node.source_backing_status == "inferred":
+            assert node.review_status == "review_required"
+            assert node.review_reasons, f"{node.component_id}: review_reasons が空"

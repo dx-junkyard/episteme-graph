@@ -5008,7 +5008,9 @@
     lsBindGraphLayerToolbar(documentId);
     lsBindGraphReadingPathToggle(documentId);
     if (window.DoubtAtlas) {
-      window.DoubtAtlas.bindCounterfactualToolbar(container, { documentId: documentId });
+      // courseId を渡す — 「観測を仮に倒す」は course 単位の observation-targets API を叩く
+      // （未渡しだと URL が /courses//observation-targets になり常に失敗する。2026-09-05 是正）。
+      window.DoubtAtlas.bindCounterfactualToolbar(container, { documentId: documentId, courseId: lsState.courseId || "" });
     }
 
     if (!window.vis || !window.vis.Network) {
