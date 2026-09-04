@@ -65,16 +65,19 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.gap-incorporate",
         "atlas.gap-restore",
         "atlas.generate",
+        "atlas.overview-action",
         "atlas.refresh",
         "atlas.report-incorporate",
         "atlas.report-resolve",
         "atlas.reports-filter",
+        "atlas.reports-refresh",
         "atlas.save-draft",
         "atlas.vector-refresh",
         "course-builder.approve-btn",
         "course-builder.atlas-binding-area",
         "course-builder.import-course-btn",
         "course-builder.material-card",
+        "course-builder.material-detail",
         "course-builder.material-filter",
         "course-builder.material-search",
         "course-builder.material-sort",
@@ -164,6 +167,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "groups.leave-btn",
         "groups.list",
         "groups.my-invitations",
+        "groups.refresh",
         "groups.remove-btn",
         "groups.rotate-btn",
         "header.copilot",
@@ -426,12 +430,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.generate": "teacher/17-admin-atlas.md#generate",
     # 更新
     "atlas.refresh": "teacher/17-admin-atlas.md#refresh",
+    # 状態カード下の「次にすること」ボタン（文言は状態で変わる・生成以外は画面内移動のみ）。
+    "atlas.overview-action": "teacher/17-admin-atlas.md#overview-action",
     # 次版で対応済みにする
     "atlas.report-incorporate": "teacher/17-admin-atlas.md#report-incorporate",
     # 採用（次版へ）／見送り（理由つき）／重複統合
     "atlas.report-resolve": "teacher/17-admin-atlas.md#report-resolve",
     # 修正報告の表示フィルタ
     "atlas.reports-filter": "teacher/17-admin-atlas.md#reports-filter",
+    # 修正報告の区画内にある「更新」（タブ最上部の atlas.refresh とは別ボタン）。
+    "atlas.reports-refresh": "teacher/17-admin-atlas.md#reports-refresh",
     # 次版を保存
     "atlas.save-draft": "teacher/17-admin-atlas.md#save-draft",
     # 索引を再構築
@@ -446,6 +454,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "course-builder.import-course-btn": "teacher/12-admin-course-builder.md#import-course-btn",
     # 教材カード
     "course-builder.material-card": "teacher/12-admin-course-builder.md#material-card",
+    # 教材カード右端の「詳細」（選択トグルとは独立・サーバ問い合わせなし）。
+    "course-builder.material-detail": "teacher/12-admin-course-builder.md#material-detail",
     # すべて / コース未作成 / 直近の生成 / 解析完了
     "course-builder.material-filter": "teacher/12-admin-course-builder.md#material-filter",
     # ファイル名・タイトルで検索…
@@ -625,6 +635,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "groups.list": "teacher/15-admin-groups.md#list",
     # 未承諾の招待
     "groups.my-invitations": "teacher/15-admin-groups.md#my-invitations",
+    # グループ管理タブ見出し右の「更新」（一覧と招待の再取得）。
+    "groups.refresh": "teacher/15-admin-groups.md#refresh",
     # 除名
     "groups.remove-btn": "teacher/15-admin-groups.md#remove-btn",
     # 招待コード再発行

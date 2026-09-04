@@ -177,7 +177,15 @@ class TestAdminUiAnchorsModule:
         #   release-review.evidence（リリース前の確認 ステップ2 各行の「根拠を見る」。
         #    判断の材料（論文からの逐語引用）を畳んで置き、引用の無い行もその事実を
         #    書く。何を見て確認したかを後から再構成できるようにするため — DC1/DC2）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 322
+        # + マニュアル突合（2026-09-05）で見つかった未係留の操作要素4件:
+        #   groups.refresh（グループ管理タブ見出し右の「更新」）/
+        #   atlas.reports-refresh（修正報告の区画内の「更新」。タブ最上部の
+        #    atlas.refresh とは別ボタン）/
+        #   atlas.overview-action（状態カード下の「次にすること」ボタン。文言は状態で
+        #    変わり、「最初の地図を作る」以外は画面内移動のみ）/
+        #   course-builder.material-detail（教材カード右端の「詳細」。選択トグルとは
+        #    独立で、サーバ問い合わせを伴わない）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 326
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

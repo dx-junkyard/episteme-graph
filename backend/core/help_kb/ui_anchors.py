@@ -100,7 +100,7 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # （サイドバー最上部の「🌊 論文の海」）を追加し、全25種がマップ済み。
 # 2026-08-29 に推定の糸（atlas_relation_edges_design.md §6）の atlas.relation-threads
 # （分野の地図オーバーレイの「推定の糸」トグル）を追加し、全26種がマップ済み。
-# check.discuss / check.skip の両者は「確認問題の3つの選択肢」を1つの節で
+# check.discuss / check.skip の両者は「確認問題の選択肢」を1つの節で
 # 並べて説明しているため、同じ参照先を指す。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
 # 議論する」の二枚看板を1つの節で等重に説明しているため、同じ参照先を指す
@@ -125,11 +125,11 @@ UI_ANCHORS: dict[str, str] = {
     "topbar.my-map": "student/02-student.md#personal-map",
     # 「❓ 使い方」ボタン＝インスペクト・モードの ON/OFF。
     "topbar.inspect": "student/02-student.md#inspect-mode",
-    # 右パネルの Context/Progress/Sources タブ全体を紹介する節
-    # （Context 個別の節はまだ無いため画面概要節で代用）。
-    "rightpanel.tab-context": "student/02-student.md#screen-overview",
-    # 右パネル Progress タブ＝違和感ダイジェストのカード提示先として明示されている節。
-    "rightpanel.tab-progress": "student/02-student.md#tension-digest",
+    # 右パネル Context タブ＝前提知識・誤解メモ・寄り道からの復帰導線の節。
+    "rightpanel.tab-context": "student/02-student.md#context-tab",
+    # 右パネル Progress タブ＝学習の現在地・問いの軌跡・学習サマリの節
+    # （違和感ダイジェストのカードもこのタブに出る）。
+    "rightpanel.tab-progress": "student/02-student.md#progress-tab",
     # 右パネル Sources タブ＝出典タブとして明示されている節。
     "rightpanel.tab-sources": "student/02-student.md#answer-origin-badge",
     # 「▸ このトピックの操作」内の「質疑応答履歴を削除」ボタン。

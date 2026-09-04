@@ -3897,7 +3897,7 @@
         html += '<div class="cb-mat-note">解析が完了すると選択できます</div>';
       }
       html += '</div>';
-      if (hasDetail) html += '<button class="cb-mat-detail-btn" data-mid="' + midE + '" type="button">詳細</button>';
+      if (hasDetail) html += '<button class="cb-mat-detail-btn" data-ui-anchor="course-builder.material-detail" data-mid="' + midE + '" type="button">詳細</button>';
       html += '</div>';
       html += '<div class="cb-mat-detail" style="display:none"></div>';
       html += '</div>';
@@ -5127,7 +5127,7 @@
           '<div class="atlas-admin-summary-card"><span class="atlas-admin-summary-label">コース配置</span><span class="atlas-admin-summary-value">' + escHtml(courseText) + '</span></div>' +
         '</div>' +
         '<div class="atlas-admin-next"><div class="atlas-admin-next-copy"><small>次にすること</small>' + escHtml(action.text) + '</div>' +
-          '<button type="button" id="atlas-overview-action" class="admin-action-btn atlas-admin-primary">' + escHtml(action.label) + '</button></div>';
+          '<button type="button" id="atlas-overview-action" data-ui-anchor="atlas.overview-action" class="admin-action-btn atlas-admin-primary">' + escHtml(action.label) + '</button></div>';
       var overviewAction = document.getElementById("atlas-overview-action");
       if (overviewAction) overviewAction.addEventListener("click", function () {
         if (action.generate && generateBtn) generateBtn.click();
