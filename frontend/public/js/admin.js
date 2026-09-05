@@ -438,10 +438,12 @@
       var landscapeBtn = m.document_id
         ? '<button class="ls-menu-item admin-landscape-doc-btn" type="button" data-ui-anchor="materials.row-landscape" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この論文が分野マップ（基準地図）のどこに位置づくかのAI候補を確認・却下・再検討します">位置づけ（分野マップ）…</button>'
         : "";
-      // 論文レーダー（paper_radar_design.md §4.1）: この論文を起点に arXiv から
-      // 近い / 中間 / 同じ分野の別テーマ の候補を探す（取り込みは既存の弁のみ。document_id が必要）
+      // 論文レーダー（paper_radar_design.md §4.1 / 2026-09-06 追補）: この論文を起点に arXiv から
+      // 近い / 中間 / 同じ分野の別テーマ の候補を探す（取り込みは既存の弁のみ。document_id が必要）。
+      // ⋯ メニューではなく行のアイコンボタン（📡）として「パイプラインを実行 ▼」の隣に出す。
+      var radarTitle = "近い論文を探す — この論文を起点に、距離（近い/中間/同じ分野の別テーマ）を選んで arXiv から候補を探します";
       var radarBtn = m.document_id
-        ? '<button class="ls-menu-item admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この論文を起点に、距離（近い/中間/同じ分野の別テーマ）を選んで arXiv から候補を探します">📡 近い論文を探す…</button>'
+        ? '<button class="admin-action-btn material-row-icon-btn admin-radar-doc-btn" type="button" data-ui-anchor="materials.row-radar" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="' + escHtml(radarTitle) + '" aria-label="近い論文を探す"><span class="material-row-icon material-row-icon-emoji" aria-hidden="true">📡</span></button>'
         : "";
       // ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1）: 輪講の前にこの論文の
       // 「賭け金」（脆い前提・一点吊りの支持線・晴れ間）を10分で把握する read-only
@@ -459,11 +461,14 @@
       var inventoryBtn = m.document_id
         ? '<button class="ls-menu-item admin-inventory-btn" type="button" data-ui-anchor="materials.row-inventory" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材からパイプラインが検出した要素の一覧を表示">検出要素</button>'
         : "";
-      // グラフ対話レビュー（graph_dialogue_review_design.md）: 理論操作グラフを見取り図に
-      // AI と対話しながら component / claim を承認する画面（document_id が必要。
-      // 検出要素の隣＝パイプライン成果の導線群に並べる）。
+      // グラフ対話レビュー（graph_dialogue_review_design.md / 2026-09-06 追補）: 理論操作グラフを
+      // 見取り図に AI と対話しながら component / claim を承認する画面（document_id が必要）。
+      // ⋯ メニューではなく行のアイコンボタン（ノードと辺のグラフ図形）として出す。
+      // アイコンは inline SVG（currentColor）— 🕸 は「蜘蛛の巣」、📊 は「統計グラフ」に読めるため、
+      // ノード・辺で描いた図形をグラフの意味で使う。
+      var graphReviewTitle = "グラフレビュー — 理論操作グラフを見ながらAIと対話し、論理要素・claim を承認します";
       var graphReviewBtn = m.document_id
-        ? '<button class="ls-menu-item admin-graph-review-btn" type="button" data-ui-anchor="materials.row-graph-review" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="理論操作グラフを見ながらAIと対話し、論理要素・claim を承認します">🕸 グラフレビュー…</button>'
+        ? '<button class="admin-action-btn material-row-icon-btn admin-graph-review-btn" type="button" data-ui-anchor="materials.row-graph-review" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="' + escHtml(graphReviewTitle) + '" aria-label="グラフレビュー"><svg class="material-row-icon" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false"><path d="M5.5 9.5 12 4M5.5 9.5l7 3M5.5 9.5 2.5 3.5M12 4l2.6 4.2M12.5 12.5l2.2 2" stroke="currentColor" stroke-width="1.3" stroke-linecap="round" fill="none"/><circle cx="5.5" cy="9.5" r="2.5" fill="currentColor"/><circle cx="12" cy="4" r="1.8" fill="currentColor"/><circle cx="12.5" cy="12.5" r="1.3" fill="currentColor"/><circle cx="2.8" cy="3.4" r="1.9" fill="currentColor"/><circle cx="14.6" cy="8.2" r="0.9" fill="currentColor"/></svg></button>'
         : "";
       // U層（LLM使用量推計, migration 043）: 解析前の事前トークン見積り（TEACHER・レンジのみ・金額なし, G2-U）
       var estimateBtn = m.material_id
@@ -471,19 +476,21 @@
         : "";
       var pdfBtn = '<button class="ls-menu-item admin-pdf-reupload-btn' + pdfBtnClass + '" type="button" data-ui-anchor="materials.row-pdf-reupload" data-material-id="' + escHtml(m.material_id) + '" title="' + escHtml(pdfBtnTitle) + '">' + pdfBtnLabel + '</button>';
       var deleteBtn = '<button class="ls-menu-item ls-menu-item-danger admin-delete-btn" type="button" data-ui-anchor="materials.row-delete" data-material-id="' + escHtml(m.material_id) + '" data-material-title="' + escHtml(m.title) + '" title="この教材と紐づく解析成果・コースを削除します">削除…</button>';
-      // §2.3: 行に出しっぱなしにするのは「パイプラインを実行 ▼」と「⋯」の2つだけ。
+      // §2.3: 行に出しっぱなしにするのは「パイプラインを実行 ▼」と「⋯」+ 高頻度の2アイコン
+      //（グラフレビュー / 近い論文を探す。2026-09-06 オーナー指示で ⋯ メニューから昇格。
+      //  admin_ux_issues_2026-08-01.md §2.3 追補）。それ以外は「⋯」に畳む。
       html += '<td><div class="materials-action-cell">' +
         materialPipelineMenuHtml(m) +
+        graphReviewBtn +
+        radarBtn +
         '<div class="material-more-menu ls-action-menu" data-material-id="' + escHtml(m.material_id) + '">' +
           '<button class="admin-action-btn ls-menu-trigger material-more-trigger" type="button" data-ui-anchor="materials.row-more-menu" title="この教材のその他の操作" aria-label="その他の操作">⋯</button>' +
           '<div class="ls-menu material-more-panel" hidden>' +
             figuresBtn +
             inventoryBtn +
-            graphReviewBtn +
             shareBtn +
             versionBtn +
             landscapeBtn +
-            radarBtn +
             seminarBriefBtn +
             estimateBtn +
             pdfBtn +
@@ -11292,7 +11299,7 @@
       if (window.Deliberation) {
         window.Deliberation.init({ apiFetch: apiFetch, apiFetchRaw: apiFetchRaw, escHtml: escHtml });
       }
-      // グラフ対話レビュー（graph_dialogue_review_design.md）— 教材行「🕸 グラフレビュー…」。
+      // グラフ対話レビュー（graph_dialogue_review_design.md）— 教材行のグラフアイコンボタン。
       if (window.GraphReview) {
         window.GraphReview.init({ apiFetch: apiFetch, escHtml: escHtml, getToken: getAuthToken });
       }
@@ -11407,10 +11414,11 @@
       upload_dropzone: function () { return document.getElementById("upload-zone"); },
       // 論文ディスカバリー（paper_discovery_design.md §4.4）: 「arXivから探す」入口ボタン。
       paper_discovery_button: function () { return document.getElementById("paper-discovery-link"); },
-      // 論文レーダー（paper_radar_design.md §4.1）: 入口は教材行の「⋯」メニュー内なので、
-      // 道案内はまずメニューのトリガーを点灯する（P8: 誘導まで。開くのは本人）。
-      paper_radar_row_menu: function () {
-        return document.querySelector("#materials-tbody .material-more-trigger")
+      // 論文レーダー（paper_radar_design.md §4.1 / 2026-09-06 追補）: 入口は教材行の
+      // 📡 アイコンボタン（⋯ メニュー外）。行 id 指定があればその行、無ければ直近に選んだ行
+      //（さらに無ければ先頭行）のボタンを点灯する（P8: 誘導まで。開くのは本人）。
+      paper_radar_row_button: function (id) {
+        return _matRowActionAnchor(id, ".admin-radar-doc-btn")
           || document.getElementById("materials-table");
       },
       // 2026-09-03 是正: 行操作の大半は「⋯」メニュー内にあり、開くまで DOM に存在しない。
@@ -11460,7 +11468,7 @@
       material_inventory_button: function (id) {
         return _matRowActionAnchor(id, ".admin-inventory-btn");
       },
-      // グラフ対話レビュー: 教材行の「🕸 グラフレビュー…」ボタン（⋯メニュー内）。
+      // グラフ対話レビュー: 教材行のグラフアイコンボタン（⋯メニュー外。2026-09-06 追補）。
       material_graph_review_button: function (id) {
         return _matRowActionAnchor(id, ".admin-graph-review-btn");
       },

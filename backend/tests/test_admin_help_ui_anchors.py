@@ -130,7 +130,7 @@ class TestAdminUiAnchorsModule:
         #   materials.arxiv-discovery-interest（学習者の関心。k-匿名レンジの事実行だけを
         #   出し、行が無ければ区画ごと非表示 — CR6 / CR10）。
         # + 論文レーダー（paper_radar_design.md §4.2）の6件:
-        #   materials.row-radar（⋯メニューの「📡 近い論文を探す…」）/
+        #   materials.row-radar（教材行の 📡 アイコン「近い論文を探す」。2026-09-06 に ⋯ メニューから昇格）/
         #   .radar-modal（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）/
         #   .radar-distance（近い / 中間 / 同じ分野の別テーマ。段階ラベルのみ — PR2）/
         #   .radar-search（arXiv のメタデータのみ・テキスト LLM 不使用）/
@@ -147,7 +147,8 @@ class TestAdminUiAnchorsModule:
         #   atlas.gap-alias-register（ギャップ候補カードの [別名として登録]。近傍注記の
         #    ある候補にだけ出る。注記は可能性の提示で、確定は教員 — VA1 / VA8）。
         # + グラフ対話レビュー（graph_dialogue_review_design.md §7）の10件:
-        #   materials.row-graph-review（教材行の入口。document_id を持つ行のみ）/
+        #   materials.row-graph-review（教材行のグラフアイコン。document_id を持つ行のみ。
+        #    2026-09-06 に ⋯ メニューから昇格）/
         #   graph-review.modal / .layer / .filter-unreviewed / .next-unreviewed（見取り図と
         #    レビューナビ）/ .approve / .reject（component の状態遷移のみ。承認可能性は
         #    サーバが 422 の事実文で強制 — GR1/GR6）/ .claim-approve（backing claim の承認。

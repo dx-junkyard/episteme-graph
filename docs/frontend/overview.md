@@ -76,8 +76,8 @@
 | `admin-discuss-observation.js` | `AdminDiscussObservation` | discuss 観測基盤（Observation Layer）の状況ダッシュボード + ダンプ取得（SYSTEM_ADMIN のみ） |
 | `admin-help-inspect.js` | `AdminHelpInspect` | 管理画面「❓ 使い方」インスペクト・モード（`[data-ui-anchor]` ホバーでマニュアル節ツールチップ） |
 | `admin-paper-discovery.js` | `PaperDiscovery` | 論文ディスカバリー（migration 071/072）。教材管理タブ「arXivから探す」モーダル（購読条件・候補・取り込みキュー・地図の端への関心） |
-| `admin-paper-radar.js` | `PaperRadar` | 論文レーダー。教材行「📡 近い論文を探す…」モーダル（距離3択・段階ラベル・比較分析・出所の後付け登録） |
-| `admin-graph-review.js` | `GraphReview` | グラフ対話レビュー（migration 075）。教材行「🕸 グラフレビュー…」の全画面モーダル（層トグル・未レビュー導線・承認/却下・ノード対話 / グラフ全体対話・「表示: グラフ｜論文の順」の論文層ビュー）。**グラフ描画は `LectureStudio.graphView` へ委譲**（二重実装しない = GR8） |
+| `admin-paper-radar.js` | `PaperRadar` | 論文レーダー。教材行の 📡 アイコン「近い論文を探す」から開くモーダル（距離3択・段階ラベル・比較分析・出所の後付け登録） |
+| `admin-graph-review.js` | `GraphReview` | グラフ対話レビュー（migration 075）。教材行のグラフアイコン（inline SVG・⋯ メニュー外）から開く全画面モーダル（層トグル・未レビュー導線・承認/却下・ノード対話 / グラフ全体対話・「表示: グラフ｜論文の順」の論文層ビュー）。**グラフ描画は `LectureStudio.graphView` へ委譲**（二重実装しない = GR8） |
 | `admin-voice-chat.js` | `AdminVoiceChat` | 管理画面向けハンズフリー音声対話エンジン（**DOM 非依存**。MediaRecorder + WebAudio 無音検知）。`admin-graph-review.js` が 🎤 トグルの配線だけを持つ。学習側 `app.js` は非改変 |
 
 ### 読み込み順と DI 注入の関係

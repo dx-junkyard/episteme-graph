@@ -2211,13 +2211,37 @@ html.learn-page > body {
 }
 
 /* 教材行の「⋯」メニュー（admin_ux_issues_2026-08-01.md §2.3）。
-   行に出しっぱなしにするのは「パイプラインを実行 ▼」とこのトリガーの2つだけ。 */
+   行に出しっぱなしにするのは「パイプラインを実行 ▼」・高頻度の2アイコン
+   （グラフレビュー / 近い論文を探す — §2.3 追補 2026-09-06）・このトリガー。 */
 .material-more-trigger {
   min-width: 0;
   padding: 6px 12px;
   line-height: 1;
   font-size: 15px;
   letter-spacing: 1px;
+}
+
+/* 教材行のアイコンボタン（グラフレビュー = inline SVG のノード・辺図形 / 近い論文を探す = 📡）。
+   ⋯ トリガーと同じ高さ・角丸に揃え、ラベルは title / aria-label で持つ。 */
+.material-row-icon-btn {
+  min-width: 0;
+  padding: 5px 9px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.material-row-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.material-row-icon-emoji {
+  font-size: 14px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .material-more-panel {

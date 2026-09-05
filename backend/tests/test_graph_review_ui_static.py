@@ -61,9 +61,23 @@ class TestAnchors:
 
 class TestAdminWiring:
     def test_row_button_requires_document_id(self):
-        # 検出要素ボタンと同条件: document_id を持つ行のみメニューに出す。
+        # 検出要素ボタンと同条件: document_id を持つ行のみ出す。
         idx = ADMIN_SRC.index("admin-graph-review-btn")
         assert "m.document_id" in ADMIN_SRC[max(0, idx - 600):idx]
+
+    def test_row_button_is_an_icon_button_outside_the_menu(self):
+        """2026-09-06: ⋯ メニュー項目ではなく、行に直接出るアイコンボタン。
+
+        アイコンは inline SVG のノード・辺図形（currentColor）。ラベルは aria-label / title。
+        """
+        start = ADMIN_SRC.index("var graphReviewBtn = ")
+        block = ADMIN_SRC[start : ADMIN_SRC.index(': "";', start)]
+        assert 'class="admin-action-btn material-row-icon-btn admin-graph-review-btn"' in block
+        assert "ls-menu-item" not in block
+        assert '<svg class="material-row-icon"' in block
+        assert 'aria-label="グラフレビュー"' in block
+        assert 'data-ui-anchor="materials.row-graph-review"' in block
+        assert "🕸" not in block
 
     def test_click_opens_graph_review(self):
         assert "window.GraphReview.open(" in ADMIN_SRC

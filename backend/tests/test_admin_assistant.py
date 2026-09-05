@@ -783,7 +783,8 @@ class TestReachabilityFixes20260903:
             "shared_version_button",
             "material_figures_button",
             "material_inventory_button",
-            "material_graph_review_button",
+            # material_graph_review_button は 2026-09-06 に行のアイコンボタンへ昇格
+            #（⋯ メニュー外）したため対象外。
             "material_landscape_button",
             # 2026-09-05: ゼミ前ブリーフも「⋯」メニュー内なので同じ規律に載せる。
             "seminar_brief_button",
@@ -794,6 +795,25 @@ class TestReachabilityFixes20260903:
             for i, anchor in enumerate(anchors):
                 if anchor in menu_items and "material_row_menu" not in anchors[:i]:
                     problems.append(f"{cap.id}: {anchor} の前に material_row_menu が無い")
+        assert problems == [], "\n".join(problems)
+
+    def test_row_icon_capabilities_do_not_require_the_menu(self):
+        """行に直接出ているアイコン（グラフレビュー / 論文レーダー）は「⋯」を開かせない。
+
+        2026-09-06 に ⋯ メニューから行のアイコンボタンへ昇格した2入口。道案内が不要な
+        「メニューを開きます」ステップを挟むと、開いたメニューに項目が無く迷わせる。
+        """
+        row_icons = {"material_graph_review_button", "paper_radar_row_button"}
+        problems = []
+        for cap in caps.all_capabilities():
+            anchors = [st.anchor_id for st in cap.locate_steps if st.screen == "materials"]
+            if not row_icons & set(anchors):
+                continue
+            if "material_row_menu" in anchors:
+                problems.append(f"{cap.id}: 行アイコンの入口に material_row_menu が残っている")
+            for st in cap.locate_steps:
+                if st.anchor_id in row_icons and st.precondition == "material_menu_open":
+                    problems.append(f"{cap.id}: {st.anchor_id} が material_menu_open を前提にしている")
         assert problems == [], "\n".join(problems)
 
     def test_stumbles_declares_editable_course_scope(self):

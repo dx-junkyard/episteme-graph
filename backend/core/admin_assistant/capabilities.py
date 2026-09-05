@@ -171,10 +171,9 @@ _REGISTRY: list[Capability] = [
         api={"method": "POST", "path": "/api/admin/deliberation/documents/{document_id}/graph-sessions"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
-            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+            _step("materials", "material_graph_review_button",
+                  "行のグラフのアイコン（グラフレビュー）を押します",
                   precondition="material_selected"),
-            _step("materials", "material_graph_review_button", "「🕸 グラフレビュー…」を押します",
-                  precondition="material_menu_open"),
         ),
     ),
     # 知識ランドスケープ（knowledge_landscape_design.md LS2）: AI 配置は inferred 止まりで、
@@ -233,8 +232,8 @@ _REGISTRY: list[Capability] = [
                     "取り込みは既存の取り込み操作（教員の明示操作）で行う。",
         api={"method": "POST", "path": "/api/admin/discovery/radar/search"},
         locate_steps=(
-            _step("materials", "paper_radar_row_menu",
-                  "起点にしたい教材の行の「⋯」メニューから「近い論文を探す…」を開けます"),
+            _step("materials", "paper_radar_row_button",
+                  "起点にしたい教材の行の 📡 アイコン（近い論文を探す）を押します"),
         ),
     ),
     # --- コース構築 (course-builder) ---
@@ -1125,11 +1124,9 @@ _REGISTRY: list[Capability] = [
         api={"method": "GET", "path": "/api/admin/documents/{document_id}/paper-layer"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
-            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
-                  precondition="material_selected"),
             _step("materials", "material_graph_review_button",
-                  "「🕸 グラフレビュー…」を押し、ツールバーの「表示:」で「論文の順」に切り替えます",
-                  precondition="material_menu_open"),
+                  "行のグラフのアイコン（グラフレビュー）を押し、ツールバーの「表示:」で「論文の順」に切り替えます",
+                  precondition="material_selected"),
         ),
     ),
     # ゼミ前ブリーフ（seminar_brief_mirroring_design.md）: 読み取り専用のビューで、

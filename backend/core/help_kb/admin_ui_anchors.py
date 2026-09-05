@@ -929,7 +929,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
     # 位置づけ（分野マップ）…
     "materials.row-landscape": "teacher/11-admin-materials.md#landscape-open",
-    # 🕸 グラフレビュー…（graph_dialogue_review_design.md: グラフ対話レビューの入口）
+    # グラフレビュー（graph_dialogue_review_design.md: グラフ対話レビューの入口。
+    # 2026-09-06 から ⋯ メニューではなく行のアイコンボタン）
     "materials.row-graph-review": "teacher/26-admin-graph-review.md#graph-review-open",
     # 操作メニュー（⋯）— 行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）
     "materials.row-more-menu": "teacher/11-admin-materials.md#row-more-menu",
@@ -937,7 +938,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-pdf-reupload": "teacher/11-admin-materials.md#pdf-reupload",
     # パイプラインを実行 ▼
     "materials.row-pipeline-run": "teacher/11-admin-materials.md#pipeline-run",
-    # 📡 近い論文を探す…（paper_radar_design.md §4.1: 教材起点の類似論文探索の入口）
+    # 📡 近い論文を探す（paper_radar_design.md §4.1: 教材起点の類似論文探索の入口。
+    # 2026-09-06 から ⋯ メニューではなく行のアイコンボタン）
     "materials.row-radar": "teacher/11-admin-materials.md#radar-open",
     # 解析再開
     "materials.row-resume-analysis": "teacher/11-admin-materials.md#resume-analysis",

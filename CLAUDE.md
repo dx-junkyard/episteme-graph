@@ -457,7 +457,7 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   `test_admin_help_ui_anchors.py` が正）。
 - **論文レーダー（教材起点の類似論文探索, 2026-08-28・migration なし）**: 正本は
   `docs/features/paper_radar_design.md`（PR1〜PR8・§10 実装記録。PD1〜PD8 を全継承）。
-  教材行 `⋯` メニュー「📡 近い論文を探す…」→ 距離3択（near=カテゴリ+キーフレーズ /
+  教材行の 📡 アイコンボタン「近い論文を探す」（2026-09-06 に `⋯` メニューから昇格）→ 距離3択（near=カテゴリ+キーフレーズ /
   mid・far=カテゴリのみ）で arXiv 検索し、seed 教材のチャンク重心（`ranking.
   document_centroid`・不能時は seed 要旨を同一バッチ埋め込み）との cosine を3帯の
   段階ラベル（`label_vocab.RADAR_DISTANCE_SCALE`「近い/中間/遠い」・未測定はラベルなし =
@@ -2373,7 +2373,8 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
 
 ### グラフ対話レビュー（教材起点のグラフ確認・承認画面, migration 075, 2026-08-29）
 
-教材管理の各行 `⋯` メニュー「🕸 グラフレビュー…」から開くフルスクリーンモーダル。
+教材管理の各行のグラフアイコンボタン（inline SVG のノード・辺図形。2026-09-06 に `⋯` メニューから
+昇格し、📡 レーダーと並ぶ）から開くフルスクリーンモーダル。
 理論操作グラフを見取り図に、①構造を見る ②AI と確かめる ③その場で確定する
 （component 承認/却下・backing claim 承認）を1画面で行う。正本は
 `docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録）。

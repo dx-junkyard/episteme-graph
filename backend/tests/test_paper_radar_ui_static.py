@@ -113,18 +113,37 @@ class TestModuleWiring:
         """document_id の無い行にはレーダー入口を出さない（landscape と同じガード）。"""
         src = _read(ADMIN_JS)
         start = src.index("var radarBtn = ")
-        block = src[start : start + 700]
+        block = src[start : src.index(': "";', start)]
         assert "m.document_id" in block
-        assert 'class="ls-menu-item admin-radar-doc-btn"' in block
-        assert "近い論文を探す" in block
+        # 2026-09-06: ⋯ メニュー項目（ls-menu-item）ではなく行のアイコンボタン。
+        assert 'class="admin-action-btn material-row-icon-btn admin-radar-doc-btn"' in block
+        assert "ls-menu-item" not in block
+        assert "📡" in block
+        assert 'aria-label="近い論文を探す"' in block
+        assert 'data-ui-anchor="materials.row-radar"' in block
+
+    def test_row_button_sits_outside_the_more_menu(self):
+        """レーダーとグラフレビューは行に直接並び、⋯ メニューのパネル内には入れない。"""
+        src = _read(ADMIN_JS)
+        cell = src.index('<div class="materials-action-cell">')
+        panel = src.index('<div class="ls-menu material-more-panel" hidden>', cell)
+        panel_end = src.index("deleteBtn +", panel)
+        row_part = src[cell:panel]
+        panel_part = src[panel:panel_end]
+        assert "graphReviewBtn +" in row_part and "radarBtn +" in row_part
+        assert "graphReviewBtn" not in panel_part and "radarBtn" not in panel_part
+        # 並び順: パイプライン実行 → グラフレビュー → レーダー → ⋯
+        assert row_part.index("materialPipelineMenuHtml(m)") < row_part.index("graphReviewBtn +") \
+            < row_part.index("radarBtn +") < row_part.index("material-more-trigger")
 
     def test_logical_anchor_for_locate_is_registered(self):
-        """Copilot 道案内の論理ID（data-ui-anchor とは別系統）。"""
+        """Copilot 道案内の論理ID（data-ui-anchor とは別系統）。行のボタンを直接指す。"""
         src = _read(ADMIN_JS)
-        assert "paper_radar_row_menu:" in src
-        start = src.index("paper_radar_row_menu:")
+        assert "paper_radar_row_menu" not in src
+        assert "paper_radar_row_button:" in src
+        start = src.index("paper_radar_row_button:")
         block = src[start : start + 300]
-        assert "material-more-trigger" in block
+        assert ".admin-radar-doc-btn" in block
 
 
 # ---------------------------------------------------------------------------

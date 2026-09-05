@@ -85,10 +85,10 @@ Admin Copilot（`admin-assistant.js`）が載る。
 | 共有版 | `materials.row-version` | V層の版発行・履歴・削除予約（[shared_versioning_design.md](shared_versioning_design.md)） |
 | 検出要素の一覧 | `materials.row-inventory` | 要素インベントリ → 「深く検討」（[element_inventory_design.md](element_inventory_design.md)） |
 | 図・画像 | `materials.row-figures` | 図モーダル（bbox オーバーレイ・パーツ・提示モード・ライブラリ昇格） |
-| 🕸 グラフレビュー… | `materials.row-graph-review` | 理論操作グラフの確認・承認 + AI との対話（§9） |
+| グラフレビュー（行アイコン・⋯ メニュー外） | `materials.row-graph-review` | 理論操作グラフの確認・承認 + AI との対話（§9） |
 | 位置づけ（分野マップ）… | `materials.row-landscape` | 知識ランドスケープの配置レビュー（[knowledge_landscape_design.md](knowledge_landscape_design.md)） |
 | ゼミ前ブリーフ… | `materials.row-seminar-brief` | 下記 |
-| 📡 近い論文を探す… | `materials.row-radar` | 論文レーダー（[paper_radar_design.md](paper_radar_design.md)） |
+| 📡 近い論文を探す（行アイコン・⋯ メニュー外） | `materials.row-radar` | 論文レーダー（[paper_radar_design.md](paper_radar_design.md)） |
 | 解析の見積り | `materials.row-estimate` | U層の事前見積り（レンジのみ・金額なし） |
 | 再解析 / 再開 / ステージ再試行 / PDF 差し替え / 削除 | `materials.row-pipeline-run` ほか | パイプラインの再実行系 |
 
@@ -255,7 +255,7 @@ AL1〜AL10、migration 068/069）。
 
 ## 9. グラフ対話レビュー
 
-教材行の `⋯` メニュー「🕸 グラフレビュー…」（`materials.row-graph-review`）から開く
+教材行のグラフアイコンボタン（`materials.row-graph-review`。2026-09-06 に `⋯` メニューから昇格）から開く
 フルスクリーンモーダル（`admin-graph-review.js` / `window.GraphReview`。正本:
 [graph_dialogue_review_design.md](graph_dialogue_review_design.md) GR1〜GR8、migration 075）。
 理論操作グラフを見取り図に、①構造を見る ②AI と確かめる ③その場で確定する を1画面で行う。

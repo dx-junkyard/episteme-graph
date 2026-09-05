@@ -80,6 +80,15 @@
 
 教材管理の各行 `⋯` メニューに「🕸 グラフレビュー…」を追加（`data-ui-anchor:
 materials.row-graph-review`。`document_id` を持つ行のみ表示 — 検出要素ボタンと同条件）。
+
+> **2026-09-06 追補（オーナー指示）**: 入口を `⋯` メニュー項目から**行のアイコンボタン**へ
+> 昇格した（📡 論文レーダーと並べ、「パイプラインを実行 ▼」の右隣）。アイコンは inline SVG の
+> ノード・辺図形（`currentColor`・`aria-hidden`）— 🕸 は「蜘蛛の巣」、📊 は「統計グラフ」に
+> 読めるため採用しない。ラベルは `title` / `aria-label`（「グラフレビュー」）。`data-ui-anchor` /
+> ハンドラ / document_id ガード / モーダル側の見出しは不変。Copilot 道案内
+> （`graph_review.open` / `graph_review.paper_layer`）は `material_row_menu` ステップを外し
+> `material_graph_review_button` を `material_selected` 前提で直接点灯する。決定の記録は
+> `docs/architecture/admin_ux_issues_2026-08-01.md` §2.3 追補。
 押下でフルスクリーンモーダル（`admin-graph-review.js`、ES5・`window.GraphReview`・
 admin.js から DI 注入）:
 

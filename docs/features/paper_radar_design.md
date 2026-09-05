@@ -95,6 +95,14 @@ PD1〜PD8 をすべて継承したうえで、本層固有の条項を足す。
   `m.document_id` が無い行には出さない — `materials.row-landscape` と同じガード・同じ
   ハンドラ配線パターン）。配置は `landscapeBtn` の直後。
 
+> **2026-09-06 追補（オーナー指示）**: 入口を `⋯` メニュー項目から**行のアイコンボタン**へ
+> 昇格した。`class="admin-action-btn material-row-icon-btn admin-radar-doc-btn"`、アイコンは
+> 📡（従来と同じ）、ラベルは `title` / `aria-label`（「近い論文を探す」）。配置は
+> 「パイプラインを実行 ▼」→ グラフレビューアイコン → 📡 → `⋯` の順。`data-ui-anchor` /
+> ハンドラ / document_id ガードは不変。Copilot 道案内の論理アンカーは
+> `paper_radar_row_menu`（`⋯` トリガー点灯）から `paper_radar_row_button`（ボタン直接点灯）に
+> 改名。決定の記録は `docs/architecture/admin_ux_issues_2026-08-01.md` §2.3 追補。
+
 ### 4.2 モーダル（`frontend/public/js/admin-paper-radar.js`、ES5・`window.PaperRadar`・DI 注入）
 
 `admin-paper-discovery.js` と同じ構造（IIFE + `init(deps)` / `openModal(documentId, title)` /
@@ -360,8 +368,9 @@ Fable 5 指揮・Opus 5 並列サブエージェント3体（backend core+API / 
   `POST /radar/search` / `POST /radar/compare`。可視性ゲートは landscape の
   `_document_access_or_404` 同型・compare の CostGate は route 層でユーザー別日次キー）
 - **UI**: `frontend/public/js/admin-paper-radar.js`（新規・ES5・`window.PaperRadar`・
-  `pr-` プレフィックス・PaperDiscovery と同じ DI）+ `admin.js`（行 `⋯` メニューに
-  `radarBtn`・ハンドラ・DI init・論理アンカー `paper_radar_row_menu`）+ `admin.html`
+  `pr-` プレフィックス・PaperDiscovery と同じ DI）+ `admin.js`（行に `radarBtn`（当初は `⋯`
+  メニュー項目・2026-09-06 から行アイコン）・ハンドラ・DI init・論理アンカー
+  `paper_radar_row_button`（旧 `paper_radar_row_menu`））+ `admin.html`
 - **3点セット**: `docs/manual/teacher/11-admin-materials.md` に7節（`{#radar}` 概要 +
   6アンカー節）/ `ADMIN_UI_ANCHORS` 6件（総数 293→299。正は
   `test_admin_help_ui_anchors.py`）/ capability `materials.paper_radar`
