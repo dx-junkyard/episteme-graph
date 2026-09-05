@@ -11221,6 +11221,17 @@
       onTabActivate("llm-models", ensureUrlFetchDomainsSection);
     }
 
+    // 制度指標カタログ（docs/features/indicator_governance_design.md, IG1）—
+    // 各計器のそばに「これは何のための計器か」の事実文を置くための定義取得。
+    // 値は一切扱わない。M層と同じく、依存注入は mount() を呼ぶどの経路よりも前に
+    // 行うこと。initInterestDashboard() は同期的に AdminIndicators.mount() を叩き、
+    // admin-llm-usage.js / admin-discuss-observation.js もタブ活性化時に mount() を
+    // 呼ぶため、ここより後ろに置くと注入前呼び出しになり initApp() の残り
+    // （教材一覧など）ごと初期化が止まる。取得失敗時は何も描かない（fail-soft）。
+    if (window.AdminIndicators) {
+      window.AdminIndicators.init({ apiFetch: apiFetch });
+    }
+
     if (state.role !== "SYSTEM_ADMIN") {
       initUpload();
       initUrlUpload();
@@ -11300,14 +11311,6 @@
     initSystemStats();
     initKnowledgeLibraryTab();
     initLogout();
-
-    // 制度指標カタログ（docs/features/indicator_governance_design.md, IG1）—
-    // 各計器のそばに「これは何のための計器か」の事実文を置くための定義取得。
-    // 値は一切扱わない。取得失敗時は何も描かない（fail-soft）。計器パネルより
-    // 先に起動して、カタログの取得を先行させる。
-    if (window.AdminIndicators) {
-      window.AdminIndicators.init({ apiFetch: apiFetch });
-    }
 
     // U層（LLM トークン使用量推計, migration 043）— SYSTEM_ADMIN メトリクスタブ +
     // TEACHER 向け教材見積りポップオーバー。DI 注入して疎結合に起動する（G2-U）。

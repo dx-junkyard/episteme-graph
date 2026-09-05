@@ -24,9 +24,19 @@
   // IG2: 全計器に共通の非利用宣言（サーバの CATALOG_NOTE と同趣旨の1行版）。
   var NON_USE_LINE = "個人の比較・成績・自動判定には使いません。";
 
+  // fail-soft の要: 注入前に呼ばれても**同期例外を投げない**（rejected Promise を
+  // 返して load() の .catch に吸わせる）。ここで throw すると mount() の呼び出し元
+  // （initApp() の initInterestDashboard() など）ごと初期化が止まる。
   function apiFetch(path, opts) {
     var fn = deps.apiFetch || window.apiFetch;
-    return fn(path, opts);
+    if (typeof fn !== "function") {
+      return Promise.reject(new Error("AdminIndicators: apiFetch is not injected"));
+    }
+    try {
+      return Promise.resolve(fn(path, opts));
+    } catch (err) {
+      return Promise.reject(err);
+    }
   }
 
   function escHtml(value) {
@@ -86,7 +96,14 @@
    */
   function mount(containerEl, indicatorId) {
     if (!containerEl) return;
-    load().then(function () {
+    var pending;
+    try {
+      pending = load();
+    } catch (err) {
+      return;  // fail-soft: 事実文が描かれないだけで、呼び出し元は止めない。
+    }
+    if (!pending || typeof pending.then !== "function") return;
+    pending.then(function () {
       var text = factLine(indicatorId);
       if (!text) return;
       var existing = containerEl.querySelector(
@@ -101,6 +118,8 @@
       p.setAttribute("data-indicator-id", indicatorId);
       p.textContent = text;
       containerEl.insertBefore(p, containerEl.firstChild);
+    }).catch(function () {
+      // fail-soft: 描画時の例外も握り潰す（事実文が出ないだけ）。
     });
   }
 
