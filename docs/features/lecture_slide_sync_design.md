@@ -218,7 +218,9 @@ display_text = スライド本文、spoken_text = そのスライドのナレー
 
 - `#ls-display-text` / `#ls-spoken-text` の間に **「スライド区切りを挿入」ボタン**:
   両 textarea のカーソル位置（spoken 側は対応する区切り番目の末尾）に `===` 行を挿入。
-- `syncSpoken`（表示⇄読み上げ同期チェック）はマーカー行を同期対象に含める。
+- 表示テキストの編集は読み上げ文へ無条件に追随し、マーカー行も同期対象に含める
+  （旧 `syncSpoken` チェックボックス `#ls-sync-spoken` は audio ビューの廃止で到達不能に
+  なっていたため 2026-09-05 に撤去。既定 ON だった挙動を無条件化しただけで挙動は不変）。
 - コーストピックドラフト（`#ls-course-material-text` / `#ls-course-spoken-script`）にも
   同じ挿入ボタンと整合インジケータを付ける。
 

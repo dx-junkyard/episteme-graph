@@ -67,7 +67,10 @@ class TestSingleFilteredSearchFeedsCitedSources:
     """
 
     def _learning_chat_body(self) -> str:
-        return extract_function_source(_LEARNING_SRC, "learning_chat")
+        # コーパス回遊 Phase B（corpus_roaming_design.md §5.3）で learning_chat は
+        # 共通コア `_learning_chat_core` への薄い委譲になった（コース経路 /
+        # document 直付け経路が同じコアを通る）。構造検査の対象はコア本体。
+        return extract_function_source(_LEARNING_SRC, "_learning_chat_core")
 
     def test_search_chunks_with_metadata_called_exactly_once(self):
         body = self._learning_chat_body()

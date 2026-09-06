@@ -2,15 +2,24 @@
 
 [← ドキュメント目次](../README.md) ｜ [← コアエンジン](core-engine.md)
 
-> **更新注記（2026-08-14）:** `intent_mode` の 4 値目 discuss（§3・§3.5）と
-> 可視性フィルタ（§2.5）を追補した。他の節は 2026-07-17 時点の記述で、
-> 残る差分は CLAUDE.md の該当節を参照。
+> **更新注記（2026-09-03）:** 実装（`api/routes/learning.py`）と再突合し、
+> 会話履歴のウィンドウ化・コスト上限・LLM 失敗時の縮退・楽屋（backstage）フラグ・
+> `_learning_chat_core` への分離（§2.6〜§2.9）を追補した。
 
 学生の質問に答える RAG（Retrieval-Augmented Generation）の流れを解説します。
 実チャットの正本は `POST /api/learning/courses/{cid}/topics/{tid}/chat`（`api/routes/learning.py::learning_chat`）で、
 コンテキスト構築・出所判定（content_grounding）・casual / discuss のモード分岐までここに実装されています。
-`backend/core/chat.py` は tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_query()`）のみを提供する下請けモジュールで、
-`learning_chat` の RAG 検索自体は `services.py::search_chunks_with_metadata()` を使います。
+
+ルートハンドラ `learning_chat` は 1 行の委譲で、本体は **`_learning_chat_core(course_id, topic_id, body, current_user)`**
+に分離されています。コーパス回遊 Phase B の「コース無し論文議論」
+（`POST /api/learning/documents/{ref}/discuss/chat`）が同じコアを、予約センチネル
+`course_id = "_doc:{document_id}"`（正本 `core/discuss/context.py`）で呼び出すためです
+（コース経路の挙動は不変）。
+
+`backend/core/chat.py` は tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_query()`）を持つ
+**レガシーモジュール**で、本番の呼び出し元はありません（参照するのは
+`backend/tests/test_learner_experience_layer.py` のみ）。`_learning_chat_core` の RAG 検索は
+`services.py::search_chunks_with_metadata()` を使います。
 
 ---
 
@@ -37,6 +46,8 @@
   ⑥ 誤解検出 → 個人レイヤーへ記録        … learning.py + detect_and_record_misconception()
   │
   ⑦ 関心痕跡の記録 + tension プレフィルタ … services.py + core/tension/prefilter.py（同期・非LLM）
+  │   痕跡 kind は既存シグナルから決定（楽屋なら backstage_question。§2.8）。
+  │   ヒットすれば tension / structure_anchor の非同期 worker を best-effort で起動
   ▼
 回答 + next_actions + content_grounding + course_update（誤解・アンカー）
 ```
@@ -107,7 +118,63 @@ discuss とは独立に、通常の学習チャットにも効いています）
   も必須キーワード引数で、`GET /courses/{cid}/source-chunk/{chunk_id}` は
   「全域可視集合」ではなく **URL の course の sources** をスコープにします
   （そのコースに紐づかない別コース・public 文書のチャンクを読ませないため。
-  積集合は取らない — コースへの正規アクセスが開示根拠）。
+  積集合は取らない — コースへの正規アクセスが開示根拠）。副作用として、コース sources 外の
+  引用（`other_material` grounding・discuss の `all_visible`）の出典ポップアップは 404 へ
+  縮退し、フロントは事実文で degrade します。
+
+---
+
+## 2.6 会話履歴のウィンドウ化（`window_history`）
+
+LLM へ渡す会話履歴は、必ず横断基盤の
+`core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep, current_message)`
+を通します（チャット型 AI の共通規約。**保存用の履歴はウィンドウ化しない**）。
+
+- 学習チャット本体: **20 件 / 2000 字**
+- グラフ要素タップの説明生成パス（承認済み説明が無いとき）: **6 件 / 2000 字**
+
+他のチャット型 AI の窓（コースビルダー 20/4000/head_keep=2、W層 16/4000/head_keep=1、
+Copilot 8/500）は [assistant_common_infra_design.md](../features/assistant_common_infra_design.md) を参照。
+
+---
+
+## 2.7 コスト上限と LLM 失敗時の縮退
+
+- **CostGate（day-only）**: `LEARNING_CHAT_MAX_CALLS_PER_DAY`（既定 300・`(日付, user_id)` キー）。
+  消費は **そのリクエストで最初に LLM を呼ぶ直前に 1 回だけ**（意図分類〜本体まで含めて 1）で、
+  LLM を一度も呼ばないパス（承認済み説明があるグラフ要素タップ、usage_help のテキスト経路等）は
+  消費しません。超過は **429 + 事実文のみ**（残数などの数値を返さない）。
+  CostGate は in-memory・プロセスローカルです。
+- **LLM 失敗は 500 にしない**: 本体生成が失敗したときは `degraded=true` の固定文 + 200 を返し、
+  履歴は保存します。回答本文に依存する後処理（ドリルダウンマーカーの構造化・誤解検出・
+  `out_of_source_notice` の付与）は degraded ターンではスキップします。
+
+---
+
+## 2.8 楽屋（backstage）フラグ
+
+構造の降下路（`docs/features/structure_descent_design.md`）の「楽屋」からの質問は、
+`LearningChatRequest.backstage = true` で送られます。サーバ側は typed action / 地図アクションを
+無視して常に通常の楽屋質問として処理し、痕跡の kind を **`backstage_question`** にします
+（`payload.backstage = true`）。この kind は教員向け集約・digest・わたしの地図から除外され、
+tension プレフィルタも常に打ち消されます（SD4）。
+
+---
+
+## 2.9 判定順（早期 return の並び）
+
+`_learning_chat_core` の冒頭は次の順に判定します。**この順序は崩さないこと**。
+
+1. `cycle_mode` の語彙検証（`elicit` / `diff` 以外は **422**）
+2. 楽屋フラグ（`backstage`）の確定
+3. **usage_help pre-route**（typed action `usage_help` または非LLM の `_is_usage_question()`。
+   分野の地図の ↗ アクション（`atlas_context`）が無いときのみ判定）— casual バイパスより
+   **手前**。音声・casual 経路にマニュアル回答を届ける唯一の位置。テキスト経路は
+   マニュアル本文の素通し + `manual_citations` で **LLM 0 回・quota 非消費**、
+   音声 / casual 経路のみ 1 コールで会話調に整えます（U層 feature `learning:help_usage`）
+4. casual 判定（`_is_casual`）
+5. discuss 判定（`_is_discuss`）と `discuss_scope` の検証（**422**。書き直しによる履歴
+   truncate よりも前）
 
 ---
 
@@ -236,7 +303,7 @@ evidence-based / 応答を遅延させない / 演技化させない）は [CLAU
 
 ## 6. レスポンス形
 
-学習チャットのレスポンス（概形）:
+スキーマの正本は `api/schemas.py::LearningChatResponse`。概形:
 
 ```jsonc
 {
@@ -247,7 +314,17 @@ evidence-based / 応答を遅延させない / 演技化させない）は [CLAU
   "support_mode": "normal | detail_explanation | prerequisite_review | return_to_learning_path",
   "status_label": "…",
   "origin": { "topic_id": "…", "topic_title": "…" },
+  "sources": [ { "chunk_id": "…", "tier": "…" } ],   // L1: 各根拠の tier
+  "overall_tier": "…",                                // 最弱根拠へ安全側集約
   "content_grounding": "course_material | other_material | model_generated",
+  "position_anchor": { … },                           // L2: 復帰位置アンカー
+  "atlas_path_card": { … },                           // 「ここから学ぶ」カード（通常は null）
+  "structure_anchor": { … },                          // 同期記録した明示アンカー（方法A）
+  "anchor_confirm": { … },                            // 回答末尾の1タップ確認（毎回は出さない）
+  "mirror": { "text": "…" },                          // discuss の鏡面化 move（verbatim 検査合格時のみ）
+  "manual_citations": [ { "file": "…", "anchor": "…", "title": "…" } ],  // usage_help のみ
+  "mock": false,
+  "degraded": false,                                  // LLM 失敗で固定文へ縮退したターン
   "course_update": {
     "personal_layer": {
       "misconceptions_by_topic": { "…": [ … ] },
@@ -256,6 +333,9 @@ evidence-based / 応答を遅延させない / 演技化させない）は [CLAU
   }
 }
 ```
+
+`manual_citations` は既存 `sources` / `overall_tier` に**相乗りさせません**
+（未知 tier が `out_of_source=0` に落ちてしまうため）。
 
 UI 側の扱いは [学習機能](../features/learning.md)・[フロントエンド構成](../frontend/overview.md) を参照。
 

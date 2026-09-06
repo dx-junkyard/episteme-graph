@@ -194,9 +194,16 @@ class TestReviewQueueCourseScope:
         assert captured["document_ids"] == []
 
     def test_no_course_id_keeps_existing_document_id_behavior(self, client_and_tokens, monkeypatch):
-        """course_id 未指定時は従来どおり document_id をそのまま渡す（既存挙動を維持）。"""
+        """course_id 未指定時は従来どおり document_id をそのまま渡す（既存挙動を維持）。
+
+        document_id 直指定にも編集権限ゲート（P0）が入ったので、ここでは通過済みに
+        して委譲だけを見る（ゲートの検証は tests/test_object_scope_authorization.py）。
+        """
         client, _s, teacher = client_and_tokens
         import routes.reconstruction as route_mod
+        import routes.theory_components as tc_mod
+
+        monkeypatch.setattr(tc_mod, "_ensure_document_editable", lambda did, user: [])
 
         captured = {}
 

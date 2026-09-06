@@ -34,7 +34,10 @@
   var INACTIVITY_MS = 15 * 60 * 1000; // 無活動タイムアウト（トリガー③）
   var SUPPRESS_MS = 10 * 60 * 1000;   // 直近表示済みの抑制窓（うるさくしない）
 
-  var ctx = { courseId: "" };
+  // 会話コンテキスト。既定はコース文脈（従来どおり）。コーパス回遊層（Phase B、
+  // docs/features/corpus_roaming_design.md §5）の document 直付け議論では kind が
+  // "document" になり、開幕画面の取得口と送信口だけが切り替わる。
+  var ctx = { courseId: "", kind: "course", documentId: "", onAsk: null, onSeed: null };
   var turnCount = 0;
   var lastShownAt = 0;
   var inactivityTimer = null;
@@ -82,7 +85,11 @@
   // discuss 観測基盤（docs/features/discuss_observation_design.md §3）: UI イベントの
   // fire-and-forget 送信。await しない・失敗は握りつぶす（DO6）。レスポンス
   // （{recorded:n}）は学習者に見せないため中身を読まない・DOM にも出さない（DO3）。
+  // コーパス回遊層の document 直付け議論では ctx.courseId が空のため、この経路からは
+  // 何も送らない（観測イベントは course_id をキーに持つ計器で、document 直付けの
+  // 語彙はサーバ側の実装マター — corpus_roaming_design.md §5.5）。
   function sendDiscussMetric(event, payload) {
+    if (ctx.kind === "document") return;
     if (!ctx.courseId) return;
     apiFetch("/learning/discuss/metric-events", {
       method: "POST",
@@ -101,6 +108,59 @@
   function stillInDiscussContext() {
     var body = document.getElementById("material-body");
     return !!body && body.dataset.discussActive === "true";
+  }
+
+  // ── 会話コンテキストの正規化（コーパス回遊層 Phase B, corpus_roaming_design.md §5）──
+  // renderOpening の第2引数は、従来どおりの courseId 文字列（コース文脈。挙動は完全に
+  // 不変）か、{ documentId, onAsk?, onSeed? } の文脈オブジェクト（document 直付け）。
+  // 取得口の組み立てをここ一箇所に閉じ込め、他所で分岐を増やさない。
+  function normalizeOpeningContext(arg) {
+    if (arg && typeof arg === "object") {
+      var docId = String(arg.documentId || "");
+      return {
+        kind: "document",
+        courseId: "",
+        documentId: docId,
+        // キャッシュ・重複計測用のキー。センチネル course_id はサーバ側の正本
+        // （backend/core/discuss/context.py）だけが組み立てる — ここでは作らない。
+        key: docId ? "document:" + docId : "",
+        openingPath: "/learning/documents/" + encodeURIComponent(docId) + "/discuss/opening",
+        onAsk: typeof arg.onAsk === "function" ? arg.onAsk : null,
+        onSeed: typeof arg.onSeed === "function" ? arg.onSeed : null,
+      };
+    }
+    var cid = arg || "";
+    return {
+      kind: "course",
+      courseId: cid,
+      documentId: "",
+      key: cid,
+      openingPath: "/learning/courses/" + encodeURIComponent(cid) + "/discuss/opening",
+      onAsk: null,
+      onSeed: null,
+    };
+  }
+
+  // document 直付けの文脈から抜ける（コーパス回遊層が議論ビューを閉じたとき）。
+  // コース側の状態（ctx.courseId・往復回数・無活動タイマー）には触らない — 回遊の
+  // 閲覧が、進行中のコース discuss セッションを終わらせないため（CR2）。
+  function exitDocumentContext() {
+    if (ctx.kind !== "document") return;
+    ctx.kind = "course";
+    ctx.documentId = "";
+    ctx.onAsk = null;
+    ctx.onSeed = null;
+  }
+
+  // 非同期応答が戻った時点でも、まだ同じ開幕画面が生きているか。コース文脈は従来どおり
+  // #material-body の合図を見る。document 文脈では呼び出し側（corpus-sea.js）が
+  // 差し込んだ容器そのものに合図が立っているかを見る。
+  function stillInOpeningContext(containerEl) {
+    if (ctx.kind === "document") {
+      return !!containerEl && containerEl.getAttribute("data-discuss-active") === "true" &&
+        !!containerEl.parentNode;
+    }
+    return stillInDiscussContext();
   }
 
   // ── 理解サイクル Phase 1（OPEN / ELICIT / DIFF, docs/features/understanding_cycle_design.md
@@ -767,6 +827,10 @@
         } else {
           sendDiscussMetric("opening_starter_clicked", {});
         }
+        // コーパス回遊層 Phase B: document 直付け議論では、コース会話ではなく
+        // 呼び出し側（corpus-sea.js）の会話欄へ送る。構造帰属（経路A）はコースの
+        // 痕跡機構に載る仕組みなので、document 直付けでは添えない（§5.4 の縮退）。
+        if (ctx.kind === "document" && ctx.onAsk) { if (text) ctx.onAsk(text); return; }
         if (!text || !window.sendPrompt) return;
         // 構造帰属（経路A・明示アンカー, DM3 / 設計 §3.4）: 元要素の id があれば
         // 既存の element_id / element_type / element_label で添える。これで
@@ -789,6 +853,7 @@
       btn.addEventListener("click", function () {
         var text = this.getAttribute("data-discuss-seed-ask");
         sendDiscussMetric("opening_starter_clicked", {});
+        if (ctx.kind === "document" && ctx.onSeed) { if (text) ctx.onSeed(text); return; }
         if (text && window.discussPostSeedPrompt) window.discussPostSeedPrompt(text);
       });
     });
@@ -865,15 +930,25 @@
   // fail-closed に縮退する）。
   async function renderOpening(containerEl, courseId) {
     if (!containerEl) return;
-    courseId = courseId || "";
-    ctx.courseId = courseId;
+    // 第2引数はコース文脈では courseId 文字列（従来どおり）、コーパス回遊層の
+    // document 直付け議論では文脈オブジェクト。以降の courseId は「文脈キー」で、
+    // コース文脈では courseId 文字列そのものなので挙動は変わらない。
+    var cx = normalizeOpeningContext(courseId);
+    ctx.kind = cx.kind;
+    ctx.documentId = cx.documentId;
+    ctx.onAsk = cx.onAsk;
+    ctx.onSeed = cx.onSeed;
+    courseId = cx.key;
+    // document 文脈では ctx.courseId を触らない（CR2: 進行中のコース discuss
+    // セッション＝着地判定・無活動タイマーの文脈を、回遊の閲覧で壊さない）。
+    if (cx.kind === "course") ctx.courseId = cx.courseId;
     if (!courseId) return;
 
-    // 既に同じコースで取得済みなら再フェッチせず即描画する（送信のたびに
+    // 既に同じ文脈で取得済みなら再フェッチせず即描画する（送信のたびに
     // renderMaterialRegion が呼ばれても毎回ネットワーク往復させないため）。
     if (openingCache.courseId === courseId && openingCache.data) {
       var cachedHtml = buildOpeningHtml(openingCache.data);
-      if (cachedHtml && stillInDiscussContext()) {
+      if (cachedHtml && stillInOpeningContext(containerEl)) {
         containerEl.innerHTML = cachedHtml;
         bindOpeningEvents(containerEl);
         notifyOpeningShown(courseId);
@@ -883,7 +958,7 @@
 
     var reqId = ++openingReqSeq;
     try {
-      var res = await apiFetch("/learning/courses/" + encodeURIComponent(courseId) + "/discuss/opening");
+      var res = await apiFetch(cx.openingPath);
       if (!res.ok) return; // fail-closed: プレースホルダのまま
       var data = await res.json();
       if (reqId !== openingReqSeq) return; // 遅延応答ガード（別コースへ切替済み）
@@ -891,7 +966,7 @@
       var html = buildOpeningHtml(data);
       if (!html) return; // documents 空 → プレースホルダのまま
       openingCache = { courseId: courseId, data: data };
-      if (stillInDiscussContext()) {
+      if (stillInOpeningContext(containerEl)) {
         containerEl.innerHTML = html;
         bindOpeningEvents(containerEl);
         notifyOpeningShown(courseId);
@@ -1563,6 +1638,8 @@
   window.Discuss = {
     init: init,
     renderOpening: renderOpening,
+    // コーパス回遊層 Phase B: document 直付けの議論ビューを閉じたときに呼ぶ。
+    exitDocumentContext: exitDocumentContext,
     maybeShowLanding: maybeShowLanding,
     notifyActivity: notifyActivity,
     renderBranchChips: renderBranchChips,
@@ -1577,6 +1654,11 @@
       lastShownAt = 0;
       openingShownCourseId = "";
       ctx.courseId = "";
+      // コーパス回遊層 Phase B: document 直付けの文脈も残さない（コース文脈へ戻す）。
+      ctx.kind = "course";
+      ctx.documentId = "";
+      ctx.onAsk = null;
+      ctx.onSeed = null;
       _cycleLandingCandidates = [];
       invalidateOpeningCache();
       closeLanding();

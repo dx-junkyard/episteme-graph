@@ -1,18 +1,23 @@
 # E層（Exposition Layer / 段階的翻訳レイヤー）設計
 
-> **状態: 未実装（2026-07-12 時点、実装コードなし）**。本書は設計のみで、
-> `backend/core/exposition/` / `backend/api/routes/exposition.py` / migration 034
-> （`exposition_views` 等）はいずれもリポジトリに存在しない。「第五の層」を名乗る
+> **状態: 設計中（未実装）**。本書は設計のみで、
+> `backend/core/exposition/` / `backend/api/routes/exposition.py` /
+> `exposition_views` 等のテーブルはいずれもリポジトリに存在しない。「第五の層」を名乗る
 > R層（migration 036）・V層（migration 037）は実装済みだが、E層は issue化・着手ともに
 > 未了。実装に着手する際は本書 §10 の issue 分割を正本として使うこと。
+> （2026-07-12 起草時の判定を **2026-09-03 に再確認**。`backend/core/` / `backend/api/routes/` /
+> `backend/db/` のいずれにも exposition 相当の実装は無い。）
 
 > **着手前提の更新（2026-07-17、vision×UX ギャップ調査 N41）**: 本書起草後にリポジトリの
-> 前提が4点変わった。§10 の issue 分割は有効なまま、着手時に以下を織り込むこと。
+> 前提が変わった点と、2026-09-04 のビジョン改訂で加わった前提を、着手時に織り込むこと
+> （§10 の issue 分割は有効なまま）。
 >
-> 1. **migration は 068 以降で採番する**（2026-08-14 時点の空き番号。本書の「migration 034」は
->    Admin Copilot（`034_assistant_actions.sql`）と衝突済みで、044〜067 も他機能
->    （object_group_permissions 〜 賭け金の台帳）で使用済み）。一次情報は `backend/db/0NN_*.sql`
->    の実ファイル名（`docs/architecture/layer_registry.md` §3 参照）。
+> 1. **migration は着手時に「次の空き番号」で採番する**（本書本文の「migration 034」は
+>    Admin Copilot（`034_assistant_actions.sql`）と衝突済み。以降の番号も他機能で消費され続けて
+>    いるため、**想定番号を書かない**（`docs/development_checklist.md` §5-4）。一次情報は
+>    `ls backend/db/` の実ファイル名（`docs/architecture/layer_registry.md` §3 参照）。
+>    ※ 2026-08-14 時点の注記にあった「068 以降」は、その 068〜076 が
+>    アカウントライフサイクル〜辺候補で消費済みのため無効。）
 > 2. **生成 worker は独立モジュールの新設ではなく `backend/core/llm_worker/` への
 >    アダプタ接続で実装する**（現行の家風。tension / structure_anchor / reconstruction /
 >    doubt×2 / deliberation.standardization に続く7系統目として、`BaseJSONLLMClient` +
@@ -28,6 +33,14 @@
 >    いる。E層ビューが同じ視覚語彙を使うと「また別の地図？」という混乱を生むため、
 >    E層ビューは Atlas・わたしの地図と**視覚語彙を意図的に差別化**する設計検討
 >    （レイアウト・ノード形状・配色・呼称）を issue 分割に追加すること。
+> 5. **足場と主張は別の台帳**（[vision.md](../vision.md) §2.7）。E層が生成する段階的翻訳は
+>    **学習者へ通すための足場であって、答責の対象になる主張ではない**。したがって
+>    ①E層ビューを共通部品（L層 `library_entries`）や `theory_components` へ還流させない
+>    ②承認・引用・疑義の対象を A層の主張側に置いたまま、E層のノードにぶら下げ替えない
+>    ③足場は捨てられる道具として、破棄・作り直しが主張の来歴を汚さない構造にする。
+>    §5 のテーブル設計（A層 `graph_json` に混ぜず独立テーブル）はこの前提と整合するが、
+>    「C層 endorsement をノード単位に付けられる FK 実体を持つため」という理由づけは
+>    本条項に照らして着手時に再検討すること。
 
 > **目的**: A層パイプラインが論文から再構成した component / claim / equation / TheoryOperationGraph は
 > 「その分野の専門家だからこそ読める」構造物である。これを、入門的立場の学生や非専門家が

@@ -1437,3 +1437,58 @@ class TestGenerateTtsAudioProviderSelection:
         import pytest
         with pytest.raises(TtsFatalError, match="認証エラー"):
             tts_module.generate_tts_audio("テストテキスト")
+
+
+class TestUnreachableSyncSpokenRemoved:
+    """2026-09-05 是正: 到達不能だった読み上げ同期チェックボックスの撤去。
+
+    `#ls-sync-spoken` を含む `#ls-sync-row` の表示条件は `view === "audio"` だったが、
+    `lsRenderWorkspace()` は冒頭で `lsUpdateWorkTabActive()` を呼び、そこで
+    `lsNormalizeViewForCurrentMode()` が "audio" を無条件に "edit" へ畳む。
+    `data-ls-view="audio"` のタブも存在しないため、チェックボックスは一度も表示されず、
+    既定の同期 ON のまま切り替えられなかった。**挙動（表示テキスト→読み上げ文の追随）は
+    変えずに**、操作できない UI と使われないフラグだけを落とす。
+    """
+
+    @staticmethod
+    def _sources():
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        return (
+            (root / "frontend" / "public" / "admin.html").read_text(encoding="utf-8"),
+            (root / "frontend" / "public" / "js" / "admin-lecture-studio.js").read_text(encoding="utf-8"),
+            (root / "frontend" / "public" / "css" / "styles.css").read_text(encoding="utf-8"),
+        )
+
+    def test_checkbox_and_row_are_gone_from_dom(self):
+        html, _js, _css = self._sources()
+        assert 'id="ls-sync-spoken"' not in html
+        assert 'id="ls-sync-row"' not in html
+
+    def test_no_js_references_to_removed_elements(self):
+        """getElementById("ls-sync-row") が残っていると null 参照で落ちる。"""
+        _html, js, _css = self._sources()
+        assert 'getElementById("ls-sync-row")' not in js
+        assert 'getElementById("ls-sync-spoken")' not in js
+        assert "lsState.syncSpoken" not in js
+        assert "syncSpoken:" not in js
+
+    def test_css_rules_removed(self):
+        _html, _js, css = self._sources()
+        assert ".ls-sync-row" not in css
+
+    def test_display_text_still_syncs_to_spoken_text(self):
+        """撤去は挙動の変更ではない（既定 ON だった同期はそのまま残る）。"""
+        _html, js, _css = self._sources()
+        marker = 'document.getElementById("ls-display-text").addEventListener("input", function () {'
+        start = js.index(marker)
+        block = js[start:start + 1200]
+        assert 'document.getElementById("ls-spoken-text").value = this.value;' in block
+        assert "chunk.spoken_text = this.value;" in block
+
+    def test_audio_view_is_structurally_unreachable(self):
+        """撤去の根拠（"audio" は正規化で必ず "edit" になる）を固定する。"""
+        html, js, _css = self._sources()
+        assert 'if (view === "audio") return "edit";' in js
+        assert 'data-ls-view="audio"' not in html

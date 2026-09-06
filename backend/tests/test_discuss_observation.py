@@ -379,11 +379,15 @@ class TestMetricEventVocabAndPayloadWhitelist:
         "cycle_carryover_saved",
         "cycle_revisit_answered",
         "cycle_anchor_quick",
+        # コーパス回遊 Phase B（corpus_roaming_design.md §5.5）: document 直付け discuss の
+        # 分離集計2語彙（サーバ側 best-effort 記録）。
+        "document_discuss_opened",
+        "document_discuss_turn",
     }
 
-    def test_vocab_matches_design_doc_20_events(self):
+    def test_vocab_matches_design_doc_22_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 20
+        assert len(observation.METRIC_EVENT_VOCAB) == 22
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(

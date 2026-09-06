@@ -617,3 +617,26 @@ index.html を **200 で**返し、フロントの `res.ok` 判定をすり抜�
 
 出典: 上表「参照元」列の各ファイル（`field_atlas_overlay_spec.md` §N という形の言及を
 全文検索して収集した）
+
+---
+
+## 13. 追補（2026-09-03 コード照合）
+
+本書 §1〜§12 は 2026-08-14 時点の再構成である。以後に地図の**周辺**へ積まれた層を、
+本文を書き換えずにここへ列挙する（いずれも骨格の地形・座標・状態導出には手を入れない）。
+各層の仕様の正本は右列の設計書で、本書の対象外。
+
+| 追加 | 現れ方 | 正本 |
+|---|---|---|
+| 論文の位置（配置層） | オーバーレイ L1 に 📄 マーカーを重ねる `landscape-layer.js` のトグル。出典タブの「分野の中の位置づけ」と同じデータを共有 | `knowledge_landscape_design.md`（migration 065） |
+| カテゴリギャップ候補 | 管理画面「分野の地図」タブのレビュー区画に第2グループ「論文の解析から見つかった候補」 | `category_gap_candidates_design.md`（migration 066） |
+| ベクトル係留（VA層） | 「ベクトル索引」「登録済みの別名」区画。配置プレフィルタ・着地予測・別名レジストリ | `atlas_vector_anchoring_design.md`（migration 074） |
+| 関係（辺）候補と推定の糸 | 同レビュー区画の第3グループ + 学習者側は `GET /api/atlas` の **optional キー `threads`** を読む `atlas-threads-layer.js`（L2・点線・既定オフ） | `atlas_relation_edges_design.md`（migration 076） |
+| 骨格専用ドメインの同梱 | `backend/atlas_domains/<domain_key>/skeleton.yaml`（+ `domain.json`）を起動時に冪等シード。カートリッジ一式を持たない分野でも骨格を配れる | `knowledge_landscape_design.md` |
+| 該当なし UX とドメインライフサイクル | propose の retired 除外・pending バインド・retire/restore・freeze-impact | `atlas_binding_lifecycle_design.md`（migration 057） |
+| G層 fail-closed の徹底 | `atlas-data.js` の既定カートリッジ（`particle_physics`）フォールバックを撤去。コース文脈も明示 `cartridge` も無ければ取得せず `null`＝地図領域ごと非表示 | `guidance_layer_design.md` Phase 0 |
+
+§9 の API 一覧（2026-08-14 時点・計 29 本）にも、上記のうち
+`routes/atlas_vectors.py`（vectors status / refresh・aliases）と
+`routes/atlas_edges.py`（edge-candidates 系）が加わっている。本数を数え直す場合は
+`backend/api/routes/atlas*.py` の実定義を一次情報とすること。

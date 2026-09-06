@@ -125,7 +125,13 @@ eval(extractMany(src, ["lsGraphBuildResolver","lsGraphSnippet","lsGraphResolveRe
 const graph = {
   nodes: [],
   reference_index: {
-    claims: { "claim_span_001_13_sub04": { claim_id: "uuid-1", text: "命題のスニペット本文" } },
+    claims: {
+      "claim_span_001_13_sub04": { claim_id: "uuid-1", text: "命題のスニペット本文", resolution: "db" },
+      // 解析結果にしか存在しない claim（theory_claims の行を持たない）。原稿スタジオの
+      // 根拠リンクは text だけを使うため、DB 行の有無にかかわらず解決できる。
+      "synth_claim_0001": { claim_id: "", text: "式から合成された主張本文",
+                            resolution: "artifact", origin: "equation_synthesis" }
+    },
     evidence: { "ev_0007": { text: "引用元テキストの抜粋", block_id: "b1" } },
     derivations: { "deriv_3": { label: "式3から式5を導出", kind: "derivation", operation: "derive_result" } }
   }
@@ -133,6 +139,7 @@ const graph = {
 const resolver = lsGraphBuildResolver(graph);
 
 const claimRef = lsGraphResolveRef(resolver, "claim", "claim_span_001_13_sub04");
+const artifactClaimRef = lsGraphResolveRef(resolver, "claim", "synth_claim_0001");
 const evidenceRef = lsGraphResolveRef(resolver, "evidence", "ev_0007");
 const derivationRef = lsGraphResolveRef(resolver, "derivation", "deriv_3");
 const unknownRef = lsGraphResolveRef(resolver, "evidence", "ev_does_not_exist");
@@ -146,6 +153,9 @@ const unknownItem = lsGraphRefItem(resolver, "evidence", "ev_does_not_exist", "�
 const out = {
   claimResolved: claimRef.resolved,
   claimLabelHasSnippet: claimRef.label.indexOf("命題のスニペット本文") >= 0,
+  artifactClaimResolved: artifactClaimRef.resolved,
+  artifactClaimLabelHasSnippet: artifactClaimRef.label.indexOf("式から合成された主張本文") >= 0,
+  artifactClaimLabelHidesAgentId: artifactClaimRef.label.indexOf("synth_claim_0001") < 0,
   evidenceResolved: evidenceRef.resolved,
   evidenceLabelHasSnippet: evidenceRef.label.indexOf("引用元テキストの抜粋") >= 0,
   derivationResolved: derivationRef.resolved,
@@ -170,6 +180,11 @@ process.stdout.write(JSON.stringify(out));
     out = json.loads(proc.stdout)
     assert out["claimResolved"], "claim id must resolve via reference_index fallback"
     assert out["claimLabelHasSnippet"]
+    assert out["artifactClaimResolved"], (
+        "解析結果由来（DB 行なし）の claim も reference_index で解決される"
+    )
+    assert out["artifactClaimLabelHasSnippet"]
+    assert out["artifactClaimLabelHidesAgentId"], "内部 ID を教員 UI に出さない"
     assert out["evidenceResolved"], "evidence kind must resolve via reference_index"
     assert out["evidenceLabelHasSnippet"]
     assert out["derivationResolved"], "derivation kind must resolve via reference_index"

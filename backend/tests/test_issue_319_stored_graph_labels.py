@@ -52,6 +52,13 @@ def _load_normalize_stored_component_graph():
             "RELATED_TO", "REQUIRES", "ENABLES", "defines", "derives",
             "constrains", "solves", "eliminates",
         },
+        # review_status 語彙のスタブ（正本は core/deliberation/graph_dialogue.py と
+        # routes 側の `_HUMAN_REVIEW_DECISION_STATUSES`。ここで実物を import すると
+        # sqlalchemy 連鎖を引くため、値の一致は test_graph_review_api.py 側で固定する）。
+        "APPROVED_REVIEW_STATUSES": ("teacher_approved", "teacher_reviewed", "endorsed"),
+        "_HUMAN_REVIEW_DECISION_STATUSES": (
+            "teacher_approved", "teacher_reviewed", "endorsed", "rejected", "needs_revision",
+        ),
     }
     exec(code, ns)  # noqa: S102
     return ns["_normalize_stored_component_graph"]

@@ -5,6 +5,17 @@
 > 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
 > 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
 
+> **実装状況 (2026-09-03 時点・コード照合):** 本 issue は実装済み。
+> `core/atlas.py::match_topic_to_concept` /
+> `core/atlas_state.py::{resolve_course_cartridge, course_has_skeleton_anchor,
+> resolve_topic_concept_via_corpus}` / `GET /api/atlas/runtime-config` /
+> `Settings.atlas_data_source`（既定 `api`）はいずれも現存し、本文の記述と一致する。
+> その後の追加分は別文書が正本 — **該当なし UX とドメインライフサイクル**（migration 057、
+> `atlas_binding_lifecycle_design.md`）、および **G層 fail-closed の徹底**
+> （`atlas-data.js` の `DEFAULT_CARTRIDGE = "particle_physics"` フォールバックは
+> 撤去済み。コース文脈も明示 cartridge も無ければ取得せず `null` = 地図領域ごと非表示。
+> `guidance_layer_design.md` Phase 0）。
+
 ## 背景
 
 issue F 完了後のレビューで、地図は描けているが「いまここ (現在地の実感)」が

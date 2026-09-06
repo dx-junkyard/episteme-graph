@@ -211,10 +211,19 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-figure-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-models.js",
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js",
+    ROOT / "frontend" / "public" / "js" / "admin-paper-discovery.js",
+    ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js",
+    ROOT / "frontend" / "public" / "js" / "admin-graph-review.js",
+    # DOM 非依存の音声エンジン（アンカー担体は admin-graph-review.js 側）。
+    # 将来ここに UI が生えたときの登録漏れを検出するため対象に入れる。
+    ROOT / "frontend" / "public" / "js" / "admin-voice-chat.js",
     ROOT / "frontend" / "public" / "js" / "admin-next-steps.js",
     ROOT / "frontend" / "public" / "js" / "admin-manual-editor.js",
     ROOT / "frontend" / "public" / "js" / "admin-discuss-observation.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-usage.js",
+    # 制度指標カタログの事実文（DOM は既存パネル側。将来ここに UI が生えたときの
+    # 登録漏れを検出するため対象に入れる）。
+    ROOT / "frontend" / "public" / "js" / "admin-indicators.js",
     ROOT / "frontend" / "public" / "js" / "versioning.js",
     ROOT / "frontend" / "public" / "js" / "deliberation.js",
     ROOT / "frontend" / "public" / "js" / "doubt-atlas.js",

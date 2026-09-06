@@ -25,9 +25,9 @@
           <option value="">読み込み中...</option>
         </select>
       </div>
+      <!-- 2026-09-05: 「◯日連続学習中」を撤去（理解サイクル UC4: 連続日数・督促・
+           未消化バッジを作らない）。セッション間に何も置かないこと自体が設計。 -->
       <div class="topbar-r">
-        <span id="streak" style="color:var(--color-text-success)"></span>
-        <span style="opacity:.3">|</span>
         <button id="groups-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
         <span style="opacity:.3">|</span>
         <button id="atlas-btn" data-ui-anchor="topbar.atlas" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
@@ -222,7 +222,15 @@
        地図オーバーレイの「論文の位置」レイヤー + 出典タブへのデータ供給。
        atlas-overlay.js のフックから呼ばれるので personal-map.js の後に読み込む。 -->
   <script src="/js/landscape-layer.js?v=knowledge-landscape-20260804"></script>
+  <!-- 推定の糸（docs/features/atlas_relation_edges_design.md §6）:
+       地図オーバーレイ L2 の「推定の糸」レイヤー（確定前の関係を点線で重ねる・既定オフ）。
+       atlas-overlay.js のフックから呼ばれるので landscape-layer.js の後に読み込む。 -->
+  <script src="/js/atlas-threads-layer.js?v=relation-threads-20260829"></script>
   <script src="/js/reconstruction.js"></script>
   <script src="/js/discuss.js"></script>
+  <!-- コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
+       コース非依存の「論文の海」（コーパス地図・論文リスト・地図の端・コース無し論文議論）。
+       開幕画面は discuss.js を document 文脈で再利用するため、その後に読み込む。 -->
+  <script src="/js/corpus-sea.js?v=corpus-roaming-20260827"></script>
 </body>
 </html>

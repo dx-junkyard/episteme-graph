@@ -55,6 +55,7 @@ SCENE_DOUBT = "doubt"
 SCENE_DELIBERATION = "deliberation"
 SCENE_ASSISTANT = "assistant"
 SCENE_FIGURE_STUDIO = "figure_studio"
+SCENE_DISCOVERY_COMPARE = "discovery_compare"
 
 _SCENE_LABELS: dict[str, str] = {
     SCENE_PIPELINE: "教材の解析",
@@ -69,6 +70,7 @@ _SCENE_LABELS: dict[str, str] = {
     SCENE_DELIBERATION: "要素検討ワークスペース",
     SCENE_ASSISTANT: "管理アシスタント",
     SCENE_FIGURE_STUDIO: "教材図スタジオ",
+    SCENE_DISCOVERY_COMPARE: "類似論文の比較分析",
 }
 
 
@@ -77,7 +79,8 @@ def scene_for_feature(feature: str) -> str | None:
 
     None を返すのは次の場合のみ:
       - ``unattributed`` / 未知の feature（policy 非適用 = 従来挙動）
-      - ``embedding:*`` / ``admin:help_kb_embed``（embedding は選択対象外、M5）
+      - ``embedding:*`` / ``admin:help_kb_embed`` / ``discovery:ranking``
+        （いずれも実体は embedding 呼び出し。embedding は選択対象外、M5）
 
     ``admin:component_candidates``（C層の質問→候補生成、正本
     ``core/component_candidates.py``）は設計書 §2 の場面表に明示の行を持たないが、
@@ -88,7 +91,13 @@ def scene_for_feature(feature: str) -> str | None:
     """
     if not feature or feature == UNATTRIBUTED:
         return None
-    if feature.startswith("embedding:") or feature == "admin:help_kb_embed":
+    if (
+        feature.startswith("embedding:")
+        or feature == "admin:help_kb_embed"
+        # 論文ディスカバリーの関連度ランキング（設計書 paper_discovery §6）も実体は
+        # embedding 呼び出しなので、embedding と同じくモデル選択の対象外（M5）。
+        or feature == "discovery:ranking"
+    ):
         return None
     if feature in ("pipeline:apparatus_semantics", "deliberation:figure_reanalysis"):
         # 教員指示付き図再解析（deliberation:figure_reanalysis）は W層の導線から
@@ -110,7 +119,13 @@ def scene_for_feature(feature: str) -> str | None:
         "learning:help_usage",
     ):
         return SCENE_LEARNING_CHAT
-    if feature.startswith("learning:voice_"):
+    if feature.startswith("learning:voice_") or feature.startswith("deliberation:voice_"):
+        # 音声（STT/TTS）は呼び出し元が学習側か管理画面（グラフレビューの音声対話）かに
+        # 関わらず policy の解決経路を通らない（STT は ``settings.llm_transcribe_model``
+        # 直参照、TTS は provider 固定）。設定できるのに何も起きない場面を増やさない
+        # ため、書き込み可能な `deliberation` scene ではなく読み取り専用の音声場面へ
+        # 束ねる（`READ_ONLY_SCENE_KEYS`・M4/M5）。**この分岐は
+        # `deliberation:` prefix の分岐より前に置くこと。**
         return SCENE_LEARNING_VOICE
     if feature in (
         "learning:tension",
@@ -120,7 +135,16 @@ def scene_for_feature(feature: str) -> str | None:
         return SCENE_LEARNING_BACKGROUND
     if feature == "admin:course_builder":
         return SCENE_COURSE_BUILDER
-    if feature in ("admin:lecture_rewrite", "admin:lecture_generate", "admin:lecture_tts"):
+    if feature in (
+        "admin:lecture_rewrite",
+        "admin:lecture_generate",
+        "admin:lecture_tts",
+        # コース内容生成・理論コンポーネント抽出はどちらも原稿スタジオの画面から
+        # 起動する操作（前者は「コース内容を生成」、後者は「理論」タブの抽出・補完）。
+        # 教員から見て同じ場面なので、原稿スタジオの scene に束ねる。
+        "admin:course_content",
+        "admin:component_extract",
+    ):
         return SCENE_LECTURE_STUDIO
     if feature in ("admin:atlas_skeleton", "admin:atlas_assist"):
         return SCENE_ATLAS
@@ -133,6 +157,11 @@ def scene_for_feature(feature: str) -> str | None:
         # ギャップ提案は教員から見て同じ場面なので、1つの scene に束ねる（vision 不要 —
         # SVG はテキスト生成なので _VISION_REQUIRED_SCENE_KEYS には入れない）。
         return SCENE_FIGURE_STUDIO
+    if feature == "discovery:compare":
+        # 論文レーダーの比較分析（設計書 paper_radar_design.md §5.3）。同じ発見層でも
+        # ``discovery:ranking`` は embedding なので scene を持たない（上の分岐で None）—
+        # モデルを選べるのはテキスト生成のこの1本だけ。
+        return SCENE_DISCOVERY_COMPARE
     if feature == "admin:assistant":
         return SCENE_ASSISTANT
     if feature == "admin:component_candidates":
@@ -225,6 +254,7 @@ _SCENE_REPRESENTATIVE_FEATURE: dict[str, str] = {
     SCENE_DELIBERATION: "deliberation:chat",
     SCENE_ASSISTANT: "admin:assistant",
     SCENE_FIGURE_STUDIO: "admin:figure_studio",
+    SCENE_DISCOVERY_COMPARE: "discovery:compare",
 }
 
 
@@ -329,6 +359,9 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     "admin:atlas_assist": ("atlas_assist_llm_model", "analysis"),
     "deliberation:chat": ("deliberation_llm_model", "fast"),
     "deliberation:vision": ("deliberation_llm_model", "fast"),
+    # グラフ対話レビューの「グラフ全体対話」（graph_dialogue_review_design.md §5）。
+    # scene は deliberation:* prefix で SCENE_DELIBERATION に束ねられる。
+    "deliberation:graph_chat": ("deliberation_llm_model", "fast"),
     # 図再解析は vision 経路（scene_for_feature の注記参照）— deliberation では
     # なく apparatus のモデル設定に従う（従来挙動の保存）。
     "deliberation:figure_reanalysis": ("apparatus_llm_model", "analysis"),
@@ -348,6 +381,8 @@ _FEATURE_ENV_SETTINGS: dict[str, tuple[str, str]] = {
     # （deliberation の chat/vision と同じパターン）。
     "admin:figure_studio": ("figure_studio_llm_model", "fast"),
     "admin:figure_suggest": ("figure_studio_llm_model", "fast"),
+    # 論文レーダーの比較分析（paper_radar_design.md §5.6）。
+    "discovery:compare": ("discovery_compare_llm_model", "fast"),
 }
 
 # 特例: Settings に専用フィールドが無く、呼び出し元が os.getenv で直接読んでいる feature
@@ -372,6 +407,11 @@ _FEATURE_DIRECT_ENV: dict[str, tuple[str, str]] = {
 _FEATURE_TIER_ONLY: dict[str, str] = {
     "admin:lecture_rewrite": "fast",
     "admin:lecture_generate": "fast",
+    # コース内容生成（course_content_builder）・理論コンポーネント抽出/補完
+    # （core/theory_components.py）も `get_llm_params("fast")` 固定で呼ばれていたため、
+    # policy 経由に切り替えた後も「ポリシー行も env も無い環境では fast tier」を維持する。
+    "admin:course_content": "fast",
+    "admin:component_extract": "fast",
 }
 
 # 上記マッピングに無い feature（その他 pipeline:* 全般・unattributed 等）の既定 tier。

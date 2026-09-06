@@ -173,6 +173,36 @@ def check_and_count_llm_call(session_id: str, user_id: str | None) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# 音声対話（管理画面のグラフレビュー等）のコスト上限
+#
+# 共通規約（`docs/features/assistant_common_infra_design.md`）: 同期チャット・単発 AI
+# にも CostGate(day-only) を置く。音声は 1 往復で STT + TTS の 2 コールを消費するため、
+# セッション単位の上限は持たず**日次1本のカウンタ**を STT/TTS で共有する
+# （対話本体の session/day カウンタとは独立。音声は入出力の手段であって
+# 対話ターンそのものではない）。
+# ---------------------------------------------------------------------------
+
+_voice_cost_gate = CostGate()
+
+
+def check_and_count_voice_call(user_id: str | None) -> bool:
+    """1ユーザー1日あたりの音声 API コール上限内なら True を返し消費する。
+
+    上限超過なら False（呼び出し側は HTTP 429 + 事実文 detail にマッピングする。
+    残数・上限値などの数値は返さない）。
+    """
+    settings = get_settings()
+    per_day = int(getattr(settings, "deliberation_voice_max_calls_per_day", 200))
+    ok = _voice_cost_gate.check_and_count(
+        daily_limit=per_day,
+        daily_key=(today_str(), user_id or ""),
+    )
+    if not ok:
+        logger.info("deliberation voice call skipped: daily cap reached")
+    return ok
+
+
+# ---------------------------------------------------------------------------
 # grounding 構築（純粋部と DB 読み出し部を分離）
 # ---------------------------------------------------------------------------
 

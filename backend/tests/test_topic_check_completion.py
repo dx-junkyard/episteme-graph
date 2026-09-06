@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 #
 # ``learning_states.progress_data`` の状態を保持し、SQL 文の部分一致で
 # SELECT/UPDATE を素朴にエミュレートする。その他の SQL（INSERT ... ON CONFLICT /
-# personal_graph / learning_chat_history / streak 用の日付集計等）は無害な
+# personal_graph / learning_chat_history の日付集計等）は無害な
 # 空結果を返す。
 # ---------------------------------------------------------------------------
 
@@ -70,7 +70,7 @@ class _FakeSession:
             return _Result(None)
 
         # INSERT ... ON CONFLICT DO NOTHING / personal_graph / chat history /
-        # streak 集計など、本テストの関心外の SQL は無害な空結果でよい。
+        # 本テストの関心外の SQL は無害な空結果でよい。
         return _Result(None)
 
     def commit(self):
@@ -290,7 +290,6 @@ class TestCalculateProgressIncludesCompletion:
             services, "get_personal_layer",
             lambda user_id, course_id: {"misconceptions_by_topic": {}, "chat_anchors": {}},
         )
-        monkeypatch.setattr(services, "calculate_streak", lambda user_id, course_id: 0)
 
         progress = services.calculate_progress(
             "user-1", "course-1", _course_data(["t1", "t2"]),
@@ -310,7 +309,6 @@ class TestCalculateProgressIncludesCompletion:
             services, "get_personal_layer",
             lambda user_id, course_id: {"misconceptions_by_topic": {}, "chat_anchors": {}},
         )
-        monkeypatch.setattr(services, "calculate_streak", lambda user_id, course_id: 0)
 
         progress = services.calculate_progress(
             "user-1", "course-1", _course_data(["t1", "t2"]),
@@ -363,7 +361,6 @@ class TestSchemaFields:
         progress_dict = {
             "learning_concepts": 1,
             "misconceptions": 0,
-            "streak_days": 2,
             "sessions": [],
             "completed_topic_ids": ["t1"],
             "course_completed": False,

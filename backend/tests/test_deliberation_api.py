@@ -154,7 +154,11 @@ class TestOverviewContext:
     PATH = "/api/admin/deliberation/elements/theory_claim/c1/overview"
 
     def _patch_decomposition_and_positioning(self, monkeypatch, route_mod):
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.decomposition, "build",
@@ -236,7 +240,11 @@ class TestOverviewExplanations:
     PATH = "/api/admin/deliberation/elements/theory_claim/c1/overview"
 
     def _patch_decomposition_and_positioning(self, monkeypatch, route_mod):
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.decomposition, "build",
@@ -334,7 +342,11 @@ class TestCreateSessionHappyPath:
         client, _s, teacher = client_and_tokens
         import routes.deliberation as route_mod
 
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.delib_store, "create_session",
@@ -360,7 +372,11 @@ class TestCreateSessionHappyPath:
         client, _s, teacher = client_and_tokens
         import routes.deliberation as route_mod
 
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
 
         response = client.post(
             "/api/admin/deliberation/sessions",
@@ -512,7 +528,11 @@ class TestListAnnotations:
         client, _s, teacher = client_and_tokens
         import routes.deliberation as route_mod
 
-        monkeypatch.setattr(route_mod.refs, "resolve", lambda *a, **k: _fake_document_ref())
+        # overview / annotations / sessions は agent 側 ID も受ける経路（route が
+        # refs.resolve_with_agent_id を呼ぶ。graph_dialogue_review_design.md §11）。
+        monkeypatch.setattr(
+            route_mod.refs, "resolve_with_agent_id", lambda *a, **k: _fake_document_ref()
+        )
         monkeypatch.setattr(route_mod, "_ensure_document_viewable", lambda *a, **k: None)
         monkeypatch.setattr(
             route_mod.delib_store, "list_annotations_for_element",

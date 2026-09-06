@@ -39,6 +39,7 @@ from typing import Iterable, Optional, Sequence
 from urllib.parse import unquote, urljoin, urlparse, urlsplit
 
 import requests
+import urllib3.util
 from sqlalchemy import text as sa_text
 
 logger = logging.getLogger(__name__)
@@ -286,7 +287,11 @@ def _is_public_address(ip: ipaddress._BaseAddress) -> bool:
         or ip.is_unspecified
     ):
         return False
-    return True
+    # 上の列挙は IANA 特殊用途レジストリの区分が変わると穴があく（実例: Python 3.13 で
+    # 共有アドレス空間 100.64.0.0/10（CGNAT）が ``is_private`` から外れ、上の条件を
+    # すべてすり抜けるようになった）。``is_global`` は同レジストリを直接参照するため、
+    # 個別列挙の取りこぼしをまとめて塞ぐ最後の関門として併用する（fail-closed）。
+    return bool(ip.is_global)
 
 
 def _assert_public_host(host: str) -> None:
@@ -319,19 +324,71 @@ def _assert_public_host(host: str) -> None:
             raise PrivateAddressError("URL の接続先が内部アドレスのため取得できません")
 
 
+def _parsed_hostname(url: str) -> str:
+    """``urlparse`` でホスト名を取り出す（不正 URL は :class:`DomainNotAllowedError`）。
+
+    ``parsed.hostname`` は角括弧の対応が取れていない URL（``https://arxiv.org]/x`` 等）で
+    ``ValueError`` を送出する。ここで畳んでおかないと API 層の
+    :class:`UrlFetchError` 写像を素通りして 500 になる。
+    """
+    try:
+        return (urlparse(url).hostname or "").lower().rstrip(".")
+    except ValueError as exc:
+        raise DomainNotAllowedError("URLの形式が正しくありません") from exc
+
+
+def _assert_single_authority(url: str, host: str) -> None:
+    """検証したホストと、HTTP クライアントが実際に接続するホストの一致を強制する。
+
+    :func:`urlparse`（RFC 3986: userinfo は最後の ``@`` で分割）と、requests/urllib3 が
+    送信時に使う ``urllib3.util.parse_url``（WHATWG: ``\\`` も authority の終端）は
+    同じ URL から**別のホスト**を導きうる。この差分があると、許可リストと IP 検査は
+    片方のホストに対して行われ、ソケットはもう片方へ繋がる。
+
+        https://169.254.169.254\\@arxiv.org/x
+            urlparse   → arxiv.org        （許可リスト通過・公開 IP と判定）
+            urllib3    → 169.254.169.254  （実際の接続先）
+
+    そこで送信側パーサでも解析し、ホストが一致しなければ拒否する（fail-closed）。
+    個別文字の denylist ではなく**両パーサの合意**を要求することで、将来のパーサ差分にも
+    そのまま効く。
+    """
+    try:
+        sent_host = urllib3.util.parse_url(url).host
+    except Exception as exc:  # noqa: BLE001 — LocationParseError 等は不正 URL として畳む
+        raise DomainNotAllowedError("URLの形式が正しくありません") from exc
+
+    normalized_sent = str(sent_host or "").lower().rstrip(".").strip("[]")
+    if normalized_sent != host.strip("[]"):
+        # detail に解析結果のホストを載せない（内部到達先の示唆を避ける）。
+        raise DomainNotAllowedError("URLの形式が正しくありません")
+
+
 def _validated_target(url: str, allowed_domains: Sequence[str]) -> str:
     """1ホップ分の URL を検証し、ホスト名を返す（scheme / 許可リスト / IP）。"""
-    parsed = urlparse(url)
-    scheme = (parsed.scheme or "").lower()
+    parsed = urlparse(url) if _is_parseable(url) else None
+    scheme = (parsed.scheme if parsed else "").lower()
     if scheme not in ALLOWED_SCHEMES:
         raise DomainNotAllowedError("http/https 以外の URL は取得できません")
 
-    host = (parsed.hostname or "").lower().rstrip(".")
+    host = _parsed_hostname(url)
+    # 許可リスト照合・IP 検査の前に、送信側パーサとホストが一致することを確かめる
+    # （食い違ったまま先へ進むと、以降の検証が別のホストに対する検証になる）。
+    _assert_single_authority(url, host)
+
     if not domain_allowed(host, allowed_domains):
         raise DomainNotAllowedError("このURLのドメインは許可されていません")
 
     _assert_public_host(host)
     return host
+
+
+def _is_parseable(url: str) -> bool:
+    try:
+        urlparse(url)
+        return True
+    except ValueError:
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -481,7 +538,13 @@ def fetch_source_from_url(url: str, allowed_domains: Sequence[str]) -> FetchedSo
                 if response.status_code != 200:
                     raise FetchFailedError("URLからの取得に失敗しました")
 
-                content = _read_limited(response)
+                # 本文読み出し中の失敗（read timeout・接続リセット・chunked 破損）も
+                # UrlFetchError に畳む。session.get だけを包んでいると、ここから
+                # requests の例外が素通りして API 層で 500 になる。
+                try:
+                    content = _read_limited(response)
+                except requests.RequestException as exc:
+                    raise FetchFailedError("URLからの取得に失敗しました") from exc
                 content_disposition = response.headers.get("Content-Disposition")
             finally:
                 try:

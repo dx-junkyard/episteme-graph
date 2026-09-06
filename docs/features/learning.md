@@ -6,10 +6,16 @@
 > 検証状態の事実併記（§3.10）を追補した。他の節は 2026-07-18 時点の記述で、
 > 残る差分は CLAUDE.md の該当節を参照。
 > **更新注記（2026-08-15）:** わたしの記録（§6.5、主権台帳v1）と帰還の扉（§3.11）を追補した。
+> **更新注記（2026-09-03）:** 実装（`frontend/public/index.html` / `app.js` / 各モジュール）と
+> 照合し、論文の海（§5.5）・論文の位置と推定の糸（§5）・共有版の削除予定バナー（§2.4）を
+> 追補、わたしの地図のタブ構成（§6、4→3 タブ）と音声・レクチャーのボタン表記を実装に合わせた。
 
 学生向け学習 UI の機能を、画面と裏側の API の両面から解説します。
-実装: `frontend/public/index.html` + `frontend/public/js/app.js`（ES6+ SPA）。
-バックエンドは `/api/learning/*`（[API](../backend/api.md)）。
+実装: `frontend/public/index.html` + `frontend/public/js/app.js`（ES6+ SPA）+ 分離モジュール
+（`discuss.js` / `reconstruction.js` / `personal-map.js` / `personal-map-home.js` /
+`my-records.js` / `corpus-sea.js` / `landscape-layer.js` / `atlas-threads-layer.js` /
+`atlas-overlay.js` ほか。読み込み順は `index.html` 末尾が正）。
+バックエンドは `/api/learning/*` と `/api/me/*`（[API](../backend/api.md)）。
 
 ---
 
@@ -22,6 +28,28 @@
 | 右パネル（300px） | Context / Progress / Sources タブ（前提知識・誤解・学習支援ヒント、章進捗、PDF 出典） |
 
 主要 state（`app.js`）: `token / role / courseId / course(マスター) / personalLayer(誤解・アンカー) / currentTopicId / chatMessages / topicMaterial / learningSupport` に加え、`lastGrounding / lastSources / lastOverallTier`（出所・出典表示）、`interestTraces`（問いの軌跡）、`tensionDigest / tensionDeferred`（違和感ダイジェスト）、`topicHasAudio`（レクチャー音声の有無）。
+
+### 1.1 トップバー
+
+| ボタン | UI アンカー | 内容 |
+|---|---|---|
+| グループ | — | グループ一覧・招待の承諾（未処理の招待があるとバッジ） |
+| 地図 | `topbar.atlas` | 分野の地図オーバーレイ（§5） |
+| わたしの地図 | `topbar.my-map` | 個人知識ネットワークの最上位パネル（§6） |
+| わたしの記録 | `topbar.my-records` | 痕跡の主権台帳（§6.5） |
+| ❓ 使い方 | `topbar.inspect` | **インスペクト・モード**の ON/OFF トグル |
+
+「❓ 使い方」は押した瞬間に質問を送るボタンではなく、ON の間だけ `[data-ui-anchor]` を
+持つ UI 部品にホバーするとマニュアル節をツールチップ表示するモードになる（正本:
+[learning_ui_inspect_hover_design.md](learning_ui_inspect_hover_design.md)）。
+配信は `GET /api/learning/help/ui-anchors`（ログイン後 1 回だけ取得）、対応節が無い部品への
+ホバーは `POST /api/learning/help/ui-anchor-events` に記録して未整備の発見に回す
+（捏造で埋めない）。アンカー ID の正本は `backend/core/help_kb/ui_anchors.py`
+（値は必ず `docs/manual/student/` の節を指す。teacher / system_admin 側は構造的に参照しない）。
+インスペクト ON のまま入力欄・音声で発話すると、その発話は無条件に使い方ルート
+（`support_action="usage_help"`）へ確定し、マニュアル本文の素通し + 出典（`manual_citations`）で
+答える（テキスト経路は **LLM 0 回・利用回数を消費しない**）。OFF のときも、使い方らしい
+質問は非 LLM の pre-route で同じ経路に入る。無ヒットは固定文で正直に返す（捏造しない）。
 
 ---
 
@@ -46,7 +74,8 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 
 ### 2.2 コース完了カード（サーバー正本の完了判定）
 
-確認問題（`POST .../topics/{tid}/check-question` → `.../check`）に合格すると、サーバーが
+確認問題（設問は `GET .../topics/{tid}/material` の `check_questions` から選び、採点は
+`POST .../topics/{tid}/check`）に合格すると、サーバーが
 `services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
 
 - `progress_data.completed_topics`（topic_id → 合格時刻 ISO8601。既存タイムスタンプは上書きしない）
@@ -60,6 +89,11 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 （`PersonalMapHome.open()`）への導線を添える。
 
 ### 2.3 確認問題の採点結果（合格時も講評を出す）
+
+確認問題モーダル（`app.js::openCheckModal`）の出口は3つ — 「回答する」／
+「AIと議論して理解を深める」（UI アンカー `check.discuss`。書きかけの回答と講評を捨てずに
+議論へ持ち出す）／弱いリンク「今回は確認せず次へ進む」（同 `check.skip`。押し付けないための
+逃げ道なので API を呼ばず痕跡も残さない）。
 
 `/check` は**合否に関わらず** `feedback` / `model_answer` / `explanation` /
 `answer_requirements` を返す。かつてフロントは合格時に `overlay.remove()` → 即
@@ -84,6 +118,21 @@ select を元の値へ戻し、失敗時はモーダル内にエラー表示し�
 合格後の議論では `state.checkScaffoldActive = false` として通常のチャット（教材にもとづく
 RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（合格=「講評:」／不合格=「指摘された点:」）。
 
+### 2.4 共有版の削除予定バナー（V層）
+
+受講中のコースが削除予約されている場合、コース読込時に主カラム（`.mn`）先頭へ
+一行バナーを出す（`app.js::showVersionNoticeBanner`）。取得は
+`GET /api/learning/courses/{id}/version-notice` で、`lifecycle === 'pending_deletion'`
+のときだけ描画する。
+
+- 文面は事実文のみ（「このコースは {日付} 以降に削除される予定です。それまでは通常どおり
+  学習できます。」＋所有者が入力した理由。期限が取れないときは「近日中に」へ縮退）。
+- コース本体の削除予約に加え、**元教材の削除予約**（教材の purge はそれを参照するコースを
+  巻き添えにする）もサーバー側で検出して同じ通知に載せる。
+- 取得失敗・版未発行は何も出さない（fail-open。学習を止めない）。学習者側に版のピン留め
+  （adopt）UI は無い — 版の取り込みは教員側の操作（[管理機能](admin.md)）。
+- ログアウト・コース離脱で必ず除去する（`removeVersionNoticeBanner`）。
+
 ---
 
 ## 3. RAG チャット
@@ -99,7 +148,8 @@ RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（�
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
 - **誤解検出**: 回答に訂正シグナルが含まれると個人レイヤーに記録され、トピックに誤解バッジが付く。
 - **前提知識チェック**: 未習得の前提があれば逆質問（`mode="prerequisite_review"`）。
-- **理解度チェック**: `POST .../topics/{tid}/check-question` で習得を確認し次トピックへ。
+- **理解度チェック**: `POST .../topics/{tid}/check`（設問は `GET .../topics/{tid}/material` の
+  `check_questions`）で習得を確認し次トピックへ。
 
 ### 回答の出所表示（content_grounding）
 回答バブル下部と出典タブのバナーに、回答が何に基づくかをバッジで表示します
@@ -119,7 +169,8 @@ RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（�
 
 ## 3.5 ハンズフリー音声会話（カジュアル対話モード）
 
-チャット入力欄の 🤖 ボタンで「気軽に話せる先生」との音声会話を開始します（`app.js`）。
+チャット入力欄の「🎤 音声で話す」ボタン（`#voice-mode-btn`、UI アンカー `composer.voice`）で
+「気軽に話せる先生」との音声会話を開始します（`app.js`）。
 
 1. MediaRecorder + WebAudio の無音検知（発話後 ~1.4 秒の沈黙）で発話を自動区切り
 2. `POST /api/learning/voice/transcribe` で Whisper 文字起こし
@@ -178,7 +229,8 @@ DM1〜DM8 / 対話の進め方は
 新テーブル・新チャットエンドポイントは持たない。
 
 ### 入口 — 二枚看板
-サイドバー最上部に「**順番に学ぶ**」（現行の逐次型・無変更）と「**論文と議論**」を
+サイドバー上部（コース非依存の「🌊 論文の海」入口の直下。§5.5）に
+「**順番に学ぶ**」（現行の逐次型・無変更）と「**論文と議論**」を
 同じ視覚的重みで並べたセグメントコントロール（`app.js` の `discuss-mode-switch`。
 UI アンカー `sidebar.mode-sequential` / `sidebar.mode-discuss`）。入口はここに一本化されており、
 チャット欄の常設リンク「もっと自由に話す」は重複のため廃止済み。discuss は
@@ -394,7 +446,11 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 
 ## 4. インタラクティブ・レクチャーモード
 
-論文チャンクを **セミナー形式の音声講義**に変換する没入型機能。「🎙️ レクチャー」ボタンで起動。
+論文チャンクを **セミナー形式の音声講義**に変換する没入型機能。教材ヘッダの表示形式
+セグメント `[📖 読む | 🎙 講義]`（`#lecture-toggle`、UI アンカー `material.lecture-toggle`）で
+切り替える（ラベルは静的固定。discuss モード中・コース未選択時はセグメントごと隠す）。
+スライド分割・音声・言語の規約は
+[lecture_slide_sync_design.md](lecture_slide_sync_design.md) が正本。
 
 ### シーケンス構築
 - `GET /api/learning/lecture/courses/{id}/topics/{tid}/sequence`
@@ -435,7 +491,43 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
   見せる UI は無い）。
 - **データ取得**: `GET /api/atlas`（`atlas-data.js`。状態判定はサーバー側のみ）。
   骨格の無いコース・カートリッジでは 404 → 地図領域ごと非表示（fail-closed。フィクスチャへの
-  自動退避はしない）。
+  自動退避はしない）。コース文脈も明示 `cartridge` も無ければ**取得せず null**
+  （既定カートリッジへのフォールバックは廃止済み）。
+
+### 5.1 オーバーレイに重なる 3 つのレイヤー
+
+骨格の描画（領域・概念ノード・状態ドット・霧・足あと）には手を入れず、
+`mountControls / onLevelRendered / onOverlayClosed` の同じ 3 フック契約で重なる薄い層が
+3 つある。いずれも既定オフ・取得失敗時はその層ごと静かに消える（fail-closed）。
+
+| レイヤー | 実装 | トグル | 内容 |
+|---|---|---|---|
+| 自分の記録 | `personal-map.js` | 「わたしの地図」 | 本人の確定痕跡を骨格に重ねる（§6） |
+| 論文の位置 | `landscape-layer.js` | 「論文の位置」 | 論文（document）の配置を L1 の概念ノード横に 📄 マーカーで置く。表示は段階ラベル（`weight_label`）と出所ラベル（「AIによる推定（未確認）」／「教員確認済み」）のみで、weight・confidence の生値は API にも UI にも出ない（正本: [knowledge_landscape_design.md](knowledge_landscape_design.md) LS1〜LS10）。出典タブの「分野の中の位置づけ」（UI アンカー `sources.paper-placement`）は同じ `getData(courseId)` を共有する |
+| 推定の糸 | `atlas-threads-layer.js` | 「推定の糸」（UI アンカー `atlas.relation-threads`） | 骨格 L2 の概念間に「まだ凍結されていない関係」を**点線**で重ねる。`GET /api/atlas` の optional キー `threads` をそのまま読むだけで追加フェッチをしない。必ず「AIによる推定（未確認）」＋骨格版を伴い、実線の凍結エッジと視覚的に混ざらない。教員が見送った辺はサーバーが返さない（正本: [atlas_relation_edges_design.md](atlas_relation_edges_design.md) RE1〜RE8） |
+
+---
+
+## 5.5 論文の海（コーパス回遊）
+
+コースの外から、閲覧できる論文コーパスを歩ける常設の入口（正本:
+[corpus_roaming_design.md](corpus_roaming_design.md) CR1〜CR10）。サイドバー最上部の
+「🌊 論文の海」（UI アンカー `sidebar.corpus-sea`、`corpus-sea.js` / `window.CorpusSea`）から
+オーバーレイで開く。**自動では開かない・ポーリングしない**。コース未選択でも押せる。
+
+- **可視性が唯一のゲート**（CR1）: 見えるのは本人が閲覧できる document だけ。コース学習の
+  挙動は一切変えない（CR2。atlas-overlay は流用せず自前の簡易 SVG で描く）。
+- **コーパス地図**: `GET /api/learning/corpus/{domains,landscape,documents}`。骨格そのものは
+  返さず（骨格は既存 `GET /api/atlas?cartridge=`）、配置・縁・外だけを返す。地図は領域の塗りと
+  アンカーごとの円で**厚みの段階**だけを示し、件数・比例した連続量・閾値は描かない（CR3）。
+- **コース無しの論文議論**: 論文を選ぶとその論文に直付けした discuss ができる
+  （`GET/POST /api/learning/documents/{ref}/discuss/{opening,chat,history}`。ゲートは document の
+  閲覧可否のみで、不可視と不在は同じ 404）。コース経路の discuss（§3.8）は非改変。
+- **地図の端**: 縁（現行凍結版に実在する領域の事実文）と外（教員の購読条件で新着があったか
+  という集約 1 ビット）を事実文で示す。教員の判断内容は学習者に出さない（CR4）。
+- **この先を知りたい**: 端への関心は**明示タップのときだけ**送る（`POST /api/learning/corpus/
+  frontier-interest`、取り消しは `.../withdraw` の状態遷移）。バッジ・督促・連続日数は作らない
+  （CR5/CR6）。学習者起点で外部 API（arXiv 等）を呼ぶ経路は無い（CR7）。
 
 ---
 
@@ -446,7 +538,9 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 保存物ではなく導出・**本人のみ可視**・candidate は数えない・数値を見せない。
 
 - **最上位パネル**（`personal-map-home.js`、ヘッダ「わたしの地図」ボタン `#my-map-btn`）:
-  「いまここの周り / いまの地図 / 問いからの旅 / 振り返り」の 4 タブ（既定は先頭）。
+  「いまここの周り / いまの地図 / 問いからの旅」の 3 タブ（既定は先頭）。
+  ※「振り返り」タブは月別の再掲でしかなく独自の情報価値が無いため 2026-08-22 に削除済み
+  （設計書 §17）。
   データソースは正本 API `GET /api/me/personal-network`
   （+ `GET /api/me/personal-network/journey?node_id=` / `GET /api/me/personal-network/nearby`）のみ。
   常設注記「この地図はあなたにだけ表示されます。成績評価には使用されません。」
@@ -546,6 +640,9 @@ TR1〜TR7）。ヘッダの「わたしの記録」ボタン（`#my-records-btn`
 1. ログイン `POST /api/auth/login` → JWT 取得
 2. `localStorage["eg_token"]` に保存
 3. 以降のリクエストに `Authorization: Bearer {token}`
+
+アカウントが停止された場合や管理者がパスワードをリセットした場合は、期限内のトークンでも
+サーバー側の世代照合（`gen` クレーム）で 401 になる（学習画面はログイン画面へ戻る）。
 
 → ロール・権限の詳細は [認証・権限・開示範囲](auth-visibility.md)。
 

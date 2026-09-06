@@ -15,6 +15,7 @@ from pathlib import Path
 from episteme_graph.agents.landscape_placement.agent import LandscapePlacementAgent
 from episteme_graph.agents.landscape_placement.input_builder import (
     LandscapePlacementInputBuilder,
+    PREFILTER_NOTE,
 )
 from episteme_graph.agents.landscape_placement.prompt import (
     LandscapePlacementPromptFactory,
@@ -230,6 +231,32 @@ class TestPromptClosedWorld:
         assert "最大 3 件" in content
         for layer in GAP_LAYERS:
             assert layer in content
+
+
+class TestPromptPrefilterHonesty:
+    """前段絞り込み（atlas_vector_anchoring_design.md §6）を隠さない。"""
+
+    def _prefiltered_input(self):
+        domains = _domains()
+        domains[0].prefiltered = True
+        return _input(domains=domains)
+
+    def test_unfiltered_prompt_is_unchanged(self):
+        content = PROMPT.build_content(_input())
+        assert PREFILTER_NOTE not in content
+        assert "絞り込み提示について" not in content
+
+    def test_prefiltered_domain_carries_the_note_and_the_reading_guide(self):
+        content = PROMPT.build_content(self._prefiltered_input())
+        assert PREFILTER_NOTE in content
+        assert "絞り込み提示について" in content
+        # 閉世界の言明は残しつつ、絞り込んだドメインだけ緩める。
+        assert "そこに並んでいるものだけです" in content
+
+    def test_required_literals_survive_the_prefilter(self):
+        content = PROMPT.build_content(self._prefiltered_input())
+        for literal in REQUIRED_PROMPT_LITERALS:
+            assert literal in content, literal
 
 
 # ---------------------------------------------------------------------------

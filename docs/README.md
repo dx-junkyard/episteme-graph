@@ -15,7 +15,7 @@
 
 | 目的 | ドキュメント |
 |---|---|
-| このシステムの**思想・設計原則**を知りたい | [ビジョンと思想（正本）](vision.md) — ミッション / 知識観・学習観 / AIの役割 / 横断14原則 / 機能群マップ |
+| このシステムの**思想・設計原則**を知りたい | [ビジョンと思想（正本）](vision.md) — ミッション / 知識観・学習観 / AIの役割 / 横断14原則（2026-09-04 改訂版）/ 機能群マップ |
 | **なぜこのシステムが必要か**を知りたい（外部ステークホルダー向け） | [サービスデザイン](service_design.md) — 現状認識 → 課題 → gap → UX → 機能への対応表 |
 | **どの層が何の機能で、どの migration か**を知りたい | [レイヤー索引表](architecture/layer_registry.md) |
 | 開発ルール・各層の実装規約を知りたい | [CLAUDE.md](../CLAUDE.md)（リポジトリルート） |
@@ -33,12 +33,12 @@
 | 群 | やること | 主なキーワード |
 |---|---|---|
 | 1. 知の構造化 | PDF を概念・主張・数式・導出・理論操作グラフに自動構造化 | A層パイプライン / L層（図・装置）/ カートリッジ |
-| 2. 学びの対話と講義 | 構造の上での RAG チャット・論文との議論・音声講義 | discuss / casual音声 / レクチャー |
-| 3. 理解の産出と痕跡 | 予測・再構成・違和感・問いを本人の痕跡として育てる | R層 / 理解サイクル / tension / わたしの地図 |
-| 4. 地図と位置づけ | 分野の中の「いまここ」と論文の位置づけ | Field Atlas / ランドスケープ / カテゴリギャップ |
-| 5. 疑いと検証 | 合意と検証を分離した認識的地位の台帳 | D層 / SL層（賭け金の台帳） |
-| 6. 教員の検討と共同体 | 説明の並存・承認・要素検討・共通部品化 | C層 / W層 / ライブラリ / 図スタジオ |
-| 7. 運営基盤 | 権限・版管理・通知・ガイダンス・AI運用 | V層 / G層 / Copilot / U層 / M層 / help_kb |
+| 2. 学びの対話と講義 | 構造の上での RAG チャット・論文との議論・音声講義 | discuss / casual音声 / レクチャー / コーパス回遊（論文の海） |
+| 3. 理解の産出と痕跡 | 予測・再構成・違和感・問いを本人の痕跡として育てる | R層 / 理解サイクル / tension / わたしの地図 / わたしの記録 / 帰還の扉 / 構造の降下路 |
+| 4. 地図と位置づけ | 分野の中の「いまここ」と論文の位置づけ | Field Atlas / ランドスケープ / カテゴリギャップ / VA層（ベクトル係留）/ RE層（辺候補・推定の糸） |
+| 5. 疑いと検証 | 合意と検証を分離した認識的地位の台帳 | D層 / SL層（賭け金の台帳）/ ゼミ前ブリーフ |
+| 6. 教員の検討と共同体 | 説明の並存・承認・要素検討・共通部品化 | C層 / W層 / ライブラリ / 図スタジオ / グラフ対話レビュー（+論文層） |
+| 7. 運営基盤 | 権限・アカウント・版管理・通知・ガイダンス・AI運用・コーパスの成長 | V層 / G層 / Copilot / U層 / M層 / help_kb / アカウントライフサイクル / URL取得 / 論文ディスカバリー・レーダー |
 
 ---
 
@@ -82,7 +82,8 @@
 - **LLM / TTS** — OpenAI または Gemini（`LLM_PROVIDER` で切替）、TTS は OpenAI / Google。モデルの場面別選択は M層（`core/llm_policy.py`）が単一正本
 
 > 旧 Neo4j は書き込み経路がなく実質未使用だったため 2026-07 に撤去済み。
-> マイグレーションは `backend/db/*.sql`（init + 002〜067、毎起動・番号順・冪等再実行）が唯一の正本。
+> マイグレーションは `backend/db/*.sql`（init + 002〜076（2026-09-03 時点）、毎起動・番号順・
+> 冪等再実行）が唯一の正本。番号の一次情報は常に `ls backend/db/` の実ファイル名。
 
 詳細は [アーキテクチャ概要](architecture/overview.md) と [デプロイ構成](architecture/deployment.md) を参照。
 
@@ -92,9 +93,10 @@
 
 ### 教材投入（教員）
 ```
-PDF アップロード
+PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー・論文レーダーからの取り込み）
   → MinIO 保存 → GROBID / PyMuPDF でテキスト化
-  → PDF解析 Agent パイプライン（named 29 ステージ）で
+  → PDF解析 Agent パイプライン（named 29 ステージ。`PIPELINE_STAGES` は終端マーカー
+     `completed` を含め 30 エントリ）で
      構造・主張・数式・導出・理論操作グラフ・文脈説明・discuss開幕素材・
      ランドスケープ配置を段階的に生成
   → チャンク+埋め込みを PostgreSQL(pgvector) へ
@@ -109,6 +111,8 @@ PDF アップロード
   → トピック選択 → RAG チャット / discuss（論文と議論）/ レクチャー受講
   → 予測・再構成・違和感・問いが本人確定の痕跡として蓄積
   → 「わたしの地図」・分野の地図で自分の位置と旅を確認
+  → コースの外は「論文の海」（コーパス回遊）から可視の論文へ直接議論
+  → 痕跡の一覧は「わたしの記録」（主権台帳）で本人だけが読める
 ```
 → [学習機能](features/learning.md) / [RAG チャット](backend/rag-chat.md)
 
@@ -153,6 +157,7 @@ PDF アップロード
   ／[対話の歩調合わせ](features/discuss_dialogue_alignment_design.md)
   ／[開幕素材のオーサリング](features/discuss_opening_authoring_design.md)
   ／[観測基盤](features/discuss_observation_design.md)
+  ／[コーパス回遊層（コース無し議論・コーパス地図・地図の端）](features/corpus_roaming_design.md)
 - [レクチャースライド同期 + 音声言語切替](features/lecture_slide_sync_design.md)
   ／[音声生成の準備確認フロー（#491）](features/lecture_audio_generation_readiness.md)
 - [学習画面UI再編 + インスペクト/ホバー係留](features/learning_ui_inspect_hover_design.md)
@@ -177,7 +182,8 @@ PDF アップロード
 
 ### 群4: 地図と位置づけ
 
-- 分野の地図（Field Atlas）: [骨格](features/field_atlas_skeleton.md) /
+- 分野の地図（Field Atlas）: [オーバーレイ仕様（正本・2026-08-14 再構成版）](features/field_atlas_overlay_spec.md) /
+  [骨格](features/field_atlas_skeleton.md) /
   [バインディング](features/field_atlas_binding.md) /
   [修正報告](features/field_atlas_correction_reports.md) /
   [DB 管理化](features/field_atlas_db_managed_skeleton.md) /
@@ -186,6 +192,9 @@ PDF アップロード
   [バインディング該当なしUX + ドメインライフサイクル](features/atlas_binding_lifecycle_design.md)
 - [知識ランドスケープ（配置層）](features/knowledge_landscape_design.md)
 - [カテゴリギャップ候補（地図を論文から育てる）](features/category_gap_candidates_design.md)
+- [分野マップのベクトル係留層（VA層 — アンカー埋め込み・別名レジストリ・着地予測）](features/atlas_vector_anchoring_design.md)
+- [分野マップの関係表示（辺候補レビューと推定の糸）](features/atlas_relation_edges_design.md)
+  ・親: [表示原則の討議記録](architecture/field_map_display_principles_2026-08-29.md)
 - [リリース前の確認フロー](features/release_review_flow_design.md)
 
 ### 群5: 疑いと検証
@@ -200,10 +209,13 @@ PDF アップロード
   ／[外部レビュー](features/element_deliberation_workspace_review.md)
   ／[要素中心コンテキストレンズ（#498）](features/element_context_lens_design.md)
   ／[要素インベントリ](features/element_inventory_design.md)
+  ／[グラフ対話レビュー（教材起点のグラフ確認・承認画面）](features/graph_dialogue_review_design.md)
+  ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
 - [二層説明（generic/contextual）+ 図のコース流通](features/hierarchical_context_explanation_design.md)
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)
 - [宣言された弁と静かな計器（教員支援 v1）](features/teacher_triage_instruments_design.md) — パーソナライズ実装計画 Phase 4
+- [確定文脈の記帳（decision_context）](features/decision_context_design.md) — 一括確定（リリース前の確認・説明レビューの一括承認）に「何が提示され・何が選べ・どこから再審できるか」を監査 payload として必須記帳。vision.md §4 改訂原則1（2026-09-04）の実装
 - [ゼミ前ブリーフと鏡面化](features/seminar_brief_mirroring_design.md) — 同 Phase 5
 
 ### 群7: 運営基盤
@@ -213,6 +225,10 @@ PDF アップロード
   ／[オブジェクトスコープ権限是正（Security Phase 3）指示書](features/security_and_context_phase3_implementation_directive.md)
   ・[完了報告](features/security_and_context_phase3_completion_report.md)
 - [URL指定による教材取得（取得先ドメイン許可リスト + SSRF ガード）](features/url_material_upload_design.md)
+- [論文ディスカバリー層（arXiv 分野購読とコーパス成長ループ）](features/paper_discovery_design.md)
+  ／[論文レーダー（教材起点の類似論文探索と比較分析）](features/paper_radar_design.md)
+- [制度指標カタログ（indicator governance）](features/indicator_governance_design.md) — 運営者・教員向け集約計器の定義・目的・宛先・粒度・非利用（ランキング / 成績 / 推薦 / 自動ゲート禁止）を一箇所に宣言し `GET /api/indicators` で全当事者に公開。vision.md §6.1 原則4 改訂（2026-09-04）の実装
+
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)
 - [状態管理・通知基盤](features/status_notification_design.md)
 - [ガイダンス層（G層）](features/guidance_layer_design.md)
@@ -227,6 +243,12 @@ PDF アップロード
 - [知識ネットワークビジョン（KN-1〜4、W層/個人知識ネットワークの親文書）](features/knowledge_network_vision.md)
 - [ビジョン拡張提案（7分野専門家パネル討論, 2026-08）](features/vision_expansion_proposals_2026-08.md)
 - [ビジョン拡張・UX再設計提案書（理解サイクルの原案）](features/vision_expansion_ux_proposal_revised_2026-08-13.md)
+- [ビジョン再検証討論 2026-08-29（外部環境に照らした陳腐化チェック・UXギャップ監査）](architecture/vision_review_debate_2026-08-29.md)
+- [ビジョン展望討論 2026-09-03（学習・研究の未来と episteme-graph の寄り添い方。「遅さ→答責性」「消費側の半円→生産側の半円」）](architecture/vision_future_debate_2026-09-03.md)
+- [ビジョン草案討論 2026-09-04 第1回（「問いが公の知へ育つ共有地」草案の内部整合を叩く。近傍相対性・切断の強度・免疫記憶・段8の未検証可視）](architecture/vision-debate-commons-of-questions-2026-09-04.md)
+- [ビジョン草案討論 2026-09-04 第2回（中心テーマ「教育と研究はどこへ向かうべきか」に照らした第1回判定の再審。階段の頂点は職でない・検査に開かれた主張・近傍ごとの免疫記憶・group 上限・再統合の条件）](architecture/vision-debate-education-research-direction-2026-09-04.md)
+- [研究調査による再審 2026-09-04（討論の結論を関連研究と照合し、支持 / 条件付き支持 / 要修正 / 未証明を区別。中心比喩を「答責の階段」から「検証可能な判断の循環を学ぶ、保護された共有地」へ置き換え、14原則の改訂案と 12か月 pilot を提示）](architecture/vision-research-evaluation-and-reframed-direction-2026-09-04.md)
+- [ビジョン草案「問いが公の知へ育つ共有地」（復元版, 2026-09-04）](architecture/vision-draft-2026-09-04.md) — 原本消失のため討論記録から §骨格を復元したもの。**正本ではない**（正本は [vision.md](vision.md)）。各節の「→ 再審後の扱い」が採用/不採用の対応表を兼ねる
 - [段階的翻訳レイヤー（E層・**未実装**）](features/exposition_layer_design.md)
 
 ### 調査・レビュー記録（完了済みのスナップショット）
@@ -240,12 +262,13 @@ PDF アップロード
 - [管理画面UX課題 2026-08-01（全件実装済み）](architecture/admin_ux_issues_2026-08-01.md)
 - [Issue #494 実装レビュー（指摘6件は現行コードで解消済み）](architecture/issue_494_implementation_review_2026-07-16.md)
 - [ドキュメント総点検 2026-08-13（不具合報告）](architecture/doc_review_findings_2026-08-13.md)
+- [原則改訂の影響整理 2026-09-04（14原則改訂 → 影響機能 → 実装 / 文書 / 保留の処置表）](architecture/vision_revision_impact_2026-09-04.md)
   ／[機能整備提案](architecture/feature_consolidation_proposals_2026-08-13.md)
 
 ### フロントエンド
 
 - [フロントエンド構成](frontend/overview.md) — SPA 構成、画面フロー、API 連携
-  （注: JSモジュール一覧は 2026-07 時点の記載。現状は31ファイル — 更新候補）
+  （`frontend/public/js/` は 2026-09-03 時点で 38 ファイル。正確な構成は `ls frontend/public/js/` を正とする）
 
 ---
 
@@ -262,8 +285,8 @@ docker compose up -d
 # ログ確認
 docker compose logs -f api-server
 
-# テスト
-cd backend && pytest backend/tests/
+# テスト（backend/ からの相対パスは tests/。リポジトリルートからなら backend/tests/）
+cd backend && pytest tests/
 ```
 
 アクセス先・開発手順の詳細は [デプロイ構成](architecture/deployment.md) を参照してください。

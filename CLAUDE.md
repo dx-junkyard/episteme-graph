@@ -7,6 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 大学院生の学習プロセスを支援する知識グラフ管理システム。
 文献から抽出した知識をグラフ構造で管理し、RAGベースの対話型学習を実現する。
 
+横断設計原則の正本は `docs/vision.md` §6（2026-09-04 改訂版・14原則）。新しい層・機能を
+設計するときは §6 の表に照らし、原則の例外は設計書に明記する。特に**原則1 の改訂**
+（確定は再構成可能な手続にのみ — 一括確定は `decision_context` を記帳）と**原則4 の改訂**
+（制度指標は定義・用途を公開、個人ランキングは作らない）を新規実装で守る。
+
 ## 技術スタック
 
 | レイヤー | 技術 |
@@ -21,26 +26,35 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## コマンド
 
 ```bash
-# 開発サーバー起動
-docker compose up -d
+# 開発サーバー起動（ローカル開発は local オーバーレイを重ねる。
+# ベース単独はマネージド DB 前提で postgres コンテナを持たず、開発用ポートも公開しない）
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d
 
 # APIサーバーのみ再ビルド（コード変更後）
-docker compose up -d --build api-server
+docker compose -f docker-compose.yml -f docker-compose.local.yml up -d --build api-server
 
 # ログ確認
 docker compose logs -f api-server
 
-# テスト実行（全件）
-cd backend && pytest backend/tests/
+# テスト実行（全件 / backend）
+cd backend && pytest tests/
+
+# テスト実行（全件 / agents）
+cd src && ../backend/.venv/bin/python -m pytest tests -q
 
 # テスト実行（単一ファイル）
-cd backend && pytest backend/tests/test_diff_merge.py -v
+cd backend && pytest tests/test_docs_registry_guardrails.py -v
 
 # アクセス先
-# http://localhost:3000        → 学習UI
-# http://localhost:8001/docs   → Swagger UI
-# http://localhost:9001        → MinIO コンソール
+# http://localhost:3000              → 学習UI（nginx）
+# http://localhost:3000/admin.html   → 管理UI（nginx）
+# http://localhost:9001              → MinIO コンソール（docker-compose.local.yml 併用時のみ）
 ```
+
+**外部公開ポートは frontend:3000 のみ**。`api-server`（8001）はどの compose でも publish せず、
+nginx の `/api/*` proxy 経由でのみ到達する（`frontend/nginx.conf`）。Swagger UI（`/docs`）は
+nginx に proxy location が無いため**ブラウザからは開けない**。スキーマを見たいときは
+`docker compose exec api-server curl -s localhost:8001/openapi.json` を使う。
 
 ## アーキテクチャ
 
@@ -62,7 +76,7 @@ src/tests/                     → agents 用 pytest テスト
 | ファイル | 役割 |
 |---|---|
 | `backend/core/schema.py` | 全 Pydantic モデル定義（OntologyType, CorePredicate, PaperStructure など） |
-| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **19本（2026-08-14 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
+| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **22本（2026-09-03 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
 | `backend/api/routes/lecture_studio/` | 原稿スタジオルーター（Tier 3-17a で `_shared` / `scripts` / `pipeline` / `topics` に分割したパッケージ。`__init__.py` が router と互換シンボルを再エクスポートするため import 面は旧単一ファイルと同じ） |
 | `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）。orchestrator の下請け。旧 diff/merge は本番未使用のため削除済み（2026-07） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
@@ -100,24 +114,30 @@ src/tests/                     → agents 用 pytest テスト
 
 #### パイプライン概要
 
+**実行順序の正本は `orchestrator._PIPELINE_STEPS`**（全ステージ一覧・種別は
+`docs/pipeline/overview.md` §2）。下図は主要 agent の連なりの見取り図で、**ここに順序を
+書き写して二重管理しないこと**（保存・埋め込み等の非 agent ステージも省いてある）。
+
 ```
 PDF ファイル
     ↓
 [#216] DocumentStructureAgent   — 文書構造復元（structure-first, parser-driven）
     ↓  DocumentStructureResult (JSON)
-[#237] EvidenceRegistryBuilder  — PDF 原文由来 evidence の一元管理（非LLM）
-    ↓  EvidenceRegistryResult (JSON)
 [#217] PaperSkeletonAgent       — 論文backbone仮説化（LLM-first）
     ↓  PaperSkeletonResult (JSON)
 [#218] RhetoricalRoleAgent      — chunk/span の論理役割判定（LLM-first）
     ↓  RhetoricalRoleResult (JSON)
 [#219] ClaimQualificationAgent  — Claim採否・区分・粒度 + atomic rewrite（LLM-first, #317）
     ↓  ClaimQualificationResult (JSON; atomic_claims を含む)
-[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM, #317）
-    ↓  ClaimObjectBuildResult (JSON)
 [#220] EquationSemanticsAgent   — 数式ブロック意味役割復元（LLM-first）
                                   + to_equations_export() で equations.json 化
     ↓  EquationSemanticsResult (JSON)
+[#237] EvidenceRegistryBuilder  — PDF 原文由来 evidence の一元管理（非LLM）
+                                  ※ 採択スパン・式に絞って逐語根拠を張るため
+                                    claim_qualification / equation_semantics の後段に置く
+    ↓  EvidenceRegistryResult (JSON)
+[#237] ClaimObjectBuilder       — 最終 claims.json の決定論的組立（非LLM, #317）
+    ↓  ClaimObjectBuildResult (JSON)
 [#355] SymbolRegistryBuilder    — 数式記号の定義・表記ゆれ・スコープの一元管理（非LLM）
     ↓  SymbolRegistryResult (JSON)
 [#237] DerivationChainAgent     — 式間導出チェーン構築（非LLM）
@@ -159,6 +179,11 @@ src/episteme_graph/agents/
   component_assembly/   → ComponentAssemblyAgent (#223)
   component_graph/      → ComponentGraphAgent (#266) — TheoryOperationGraph 構築
   narrative_annotator/  → NarrativeAnnotator (#360) — main graph への narrative 注釈（LLM-first, graph 構造非変更）
+  contextual_explanation/ → ContextualExplanationAgent — 要素の二層説明（generic / contextual）候補生成（LLM-first・バッチ）
+  discuss_opening/      → DiscussOpeningAgent — discuss 開幕の「議論のきっかけ」候補生成（LLM-first・1 document = 1 コール）
+  landscape_placement/  → LandscapePlacementAgent — 凍結骨格への論文配置候補 + カテゴリギャップ候補（LLM-first・全ドメイン1コール）
+  blueprint/            → BlueprintAgent — CourseMapping + Component からナラティブアーク合成（決定論）
+  document_unit_boundary/ → DocumentUnitBoundaryAgent — block 単位の分析対象ユニット検出（非LLM・**パイプライン未統合**）
 ```
 
 各Agentディレクトリは最低限以下のファイルを持つ:
@@ -343,7 +368,8 @@ class CartridgeContext:
 - **ガードレール**: `test_account_lifecycle_{auth,api,guardrails,purge,ui_static}.py`
   （AL1 の ORM 削除語彙込み検査・purge 網羅性 = `REFERENCES users(id)` 全表が
   PURGE ∪ RETAIN に現れる・判定順序・fail-closed・数値開示）。
-  UI アンカーは実装時点で 277 件（件数の正は `test_admin_help_ui_anchors.py`）。
+  UI アンカーの件数の正本は `backend/tests/test_admin_help_ui_anchors.py`（表の正本は
+  `core/help_kb/admin_ui_anchors.py`）。
 
 ### URL指定による教材取得（migration 070, 2026-08-25）
 
@@ -367,6 +393,162 @@ class CartridgeContext:
   `detail` に載せない。UI アンカーは `materials.url-upload{,-modal,-submit}` +
   `llm-models.url-fetch-domain{s,-add,-remove}` の6件（件数の正はテスト）。
 - ガードレールは `test_url_fetch_{core,api,guardrails,ui_static}.py`。
+
+### 論文ディスカバリー層（arXiv 分野購読, migration 071/072, 2026-08-27）
+
+分野（atlas ドメイン / cartridge_id 名前空間）ごとの購読条件（arXiv カテゴリ + キーフレーズ）で
+arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得（migration 070）→ 解析パイプラインへ
+流す層。正本は `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録。§7 の
+コーパス回遊は v2 提案 — 着手時は専用設計書）。
+
+- **PD1 発見は自動・取り込みは教員の明示承認のみ**（全自動クロール・worker/cron からの
+  ingest 経路なし。ガードレールが構造的に固定）。**PD2 取得は `url_fetch` 経由のみ**
+  （UF1〜UF6 継承。`arxiv.org` が許可リストに無ければ候補は見えても取り込めない —
+  UI 無効化は補助・強制はサーバ側）。
+- **DB（migration 071・シードしない）**: `paper_discovery_subscriptions`（domain_key PK・
+  分野単位の教員共同財・last-write-wins）+ `paper_discovery_dismissals`（見送り。行削除せず
+  `revoked` 遷移で復帰）+ `documents.source_url`（URL 経由取り込みの出所。**取り込み済み
+  判定の正本** — 手動アップロード分は判定不能と正直に表示）。候補は保存せず毎回 API から
+  読み時導出（PD5）。
+- **core（`backend/core/paper_discovery/`、FastAPI・LLM 非 import）**: `schema.py`
+  （`normalize_arxiv_id` = version 抜き正規化・URL 両形式吸収）/ `arxiv_client.py`
+  （宛先 `export.arxiv.org` 固定・**3秒スロットル**・Atom パース。PD7）/ `vocab.py`
+  （キーフレーズ供給: 骨格概念 + カートリッジ aliases + 承認済み theory_components。
+  出所5語彙 `skeleton|cartridge|component|alias|manual` — PD3。`alias` は VA層の教員確定別名）/
+  `store.py`（`DELETE FROM` なし）/
+  `search.py`（条件ゼロなら arXiv を呼ばない・`closed_world_note` 必須 — PD6。数値スコア
+  なし — PD4）。発見層は LLM 0回・embedding 0回。
+- **API（`routes/paper_discovery.py`、main.py 直接登録、`/api/admin/discovery/...`、全て
+  `_require_teacher`）**: subscriptions GET/PUT・keyphrase-candidates・search・
+  ingest（**上限5件/回**・部分失敗は `failed[]`・202）・dismiss/restore。ingest は
+  `_accept_material_source(source_url=...)` へ合流（レスポンス形は既存 upload と同一）。
+  監査は `AUDIT_ENTITY_PAPER_DISCOVERY`。
+- **UI**: 教材管理タブ「arXivから探す」→ 3区画モーダル（`admin-paper-discovery.js`、ES5・
+  `window.PaperDiscovery`・DI 注入）。検索条件と閉世界注記を常時表示、供給チップは外しても
+  打ち消し表示で保持、既存購読への新規供給候補は enabled=false で追加（AI が教員の操作なしに
+  条件を広げない）。ポーリング・バッジ・G層ルールなし（PD8）。アンカーは
+  `materials.arxiv-discovery{,-modal,-search,-ingest,-subscribe}` の5件 + Copilot capability
+  `materials.arxiv_discovery`（guidance_only）。
+- **Phase 2（同日実装）**: バッチ取り込みキュー `paper_discovery_ingest_items`（migration 072・
+  status = queued/fetching/accepted/failed・FK なし）。**キュー store は core
+  （`ingest_queue.py`、threading 非使用のまま）・worker ループは api 層
+  （`backend/api/ingest_worker.py`、lifespan 起動・`PAPER_DISCOVERY_WORKER_ENABLED` 既定 on /
+  `PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS` 既定 30）**。worker は arxiv_client 非 import
+  （発見しない = PD1）・claim は `FOR UPDATE SKIP LOCKED`・アイテム間3秒・許可リストは取得の
+  たびに再読込。API は ingest-batch（上限50・202・queued/skipped/notice）/ ingest-queue /
+  retry（failed のみ）/ ingest-estimate（`core/llm_usage/metrics.py::
+  recent_document_run_estimate` — 実績中央値±25%・reported/estimated 非合算 = U1・レンジのみ =
+  U5・実績ゼロは available:false）。フロントは選択5件以下 = 同期 / 6件以上 = キュー登録
+  （候補行を ingested に偽装しない）・キュー欄は手動[更新]のみ。アンカー +2（`materials.
+  arxiv-discovery-queue{,-refresh}`）。
+- **Phase 3（同日実装・migration なし）**: ①関連度ランキング — `POST /search` の
+  `order: "relevance"`（既定 date は完全後方互換）。`core/paper_discovery/ranking.py` が
+  分野コーパス（`corpus.py` = 分野→document 解決の正本）のチャンク重心と候補アブストの
+  cosine で並べ替え。**発見層で唯一 `core.llm` に触れるファイル**（`generate_embeddings`
+  1バッチ・feature `discovery:ranking`・scene は None = M5 embedding 扱い・
+  `DISCOVERY_RANKING_MAX_CALLS_PER_DAY` 既定100）。生スコア非漏洩、段階ラベルの正本は
+  `label_vocab.DISCOVERY_RELEVANCE_SCALE`（関連: 高/中/低）。不能時は新着順のまま
+  `ranking.available:false` + 事実文（fail-soft）。②引用グラフ拡張口 —
+  `POST /citation-search`（`citation_client.py` = `api.semanticscholar.org` 固定・独立3秒
+  スロットル・`externalIds.ArXiv` 持ちのみ・LLM 0回）。シード = 取り込み済み arXiv 論文
+  最大5件・`derived_from` で出所明示・候補提示のみ（取り込みは既存経路 = PD1）。
+  オプトインは env `DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off・ゲートは core 側）。
+  アンカー +2（`materials.arxiv-discovery-{order,citation-search}`、正確な総数は
+  `test_admin_help_ui_anchors.py` が正）。
+- **論文レーダー（教材起点の類似論文探索, 2026-08-28・migration なし）**: 正本は
+  `docs/features/paper_radar_design.md`（PR1〜PR8・§10 実装記録。PD1〜PD8 を全継承）。
+  教材行の 📡 アイコンボタン「近い論文を探す」（2026-09-06 に `⋯` メニューから昇格）→ 距離3択（near=カテゴリ+キーフレーズ /
+  mid・far=カテゴリのみ）で arXiv 検索し、seed 教材のチャンク重心（`ranking.
+  document_centroid`・不能時は seed 要旨を同一バッチ埋め込み）との cosine を3帯の
+  段階ラベル（`label_vocab.RADAR_DISTANCE_SCALE`「近い/中間/遠い」・未測定はラベルなし =
+  慎重側フォールバック不使用）に変換。API 3本 `/api/admin/discovery/radar/{seed,search,
+  compare}`（全て可視性ゲート・監査記帳なし・購読 `last_checked_at` 非更新・dismissal
+  非関与）。compare = 1 LLM コール（feature `discovery:compare`・scene
+  `discovery_compare`・`DISCOVERY_COMPARE_MAX_CALLS_PER_DAY` 既定20・ユーザー別日次
+  キー）で候補要旨をサーバが `id_list` 取り直し → evidence_quote verbatim 検査 →
+  仮説文体 + サーバ固定 caveat・**非保存**。`compare.py` は ranking.py と並ぶ発見層
+  LLM 接触 allowlist の2本目。UI は `admin-paper-radar.js`（ES5・`window.PaperRadar`）、
+  アンカー +6（`materials.row-radar` / `materials.radar-{modal,distance,search,compare,
+  ingest}`）+ capability `materials.paper_radar`（guidance_only）。取り込みは既存
+  `/ingest`・`/ingest-batch` 再利用。**出所の後付け登録（同日追補・§11・migration
+  なし）**: 手動アップロード教材（`documents.source_url` 空）でも `resolve_seed` が
+  ファイル名から arXiv ID を決定論推定（`schema.arxiv_id_from_filename`・相異なる ID
+  複数なら推定しない・推定ゼロなら arXiv を呼ばない = PD6）し、
+  `categories_source="arxiv_inferred"` + `seed.provenance` で「推定」と正直に出す
+  （書き込みなし = PR1）。タイトル正規化（NFKC→casefold→英数字以外除去・長さ≥10）の
+  **完全一致時のみ**フロントが `POST /radar/provenance` を1回自動記帳
+  （サーバが再照合。`method=auto_title_match`）、不一致は並置 + 「この論文として登録
+  する」の教員確定（`teacher_confirmed`）、arXiv 未到達は登録不可 422。記帳先は既存
+  `documents.source_url` のみ（404=不可視/不在・403=view のみ・409=既存出所は上書き
+  しない。監査 `AUDIT_ENTITY_PAPER_DISCOVERY` / `new_status="provenance_registered"`）。
+  API +1本（レーダーは4本）・アンカー +1（`materials.radar-provenance`）。
+  **重なり・差分提示（2026-08-29 追補・§12・migration / env / アンカー / LLM コール
+  いずれも増やさない）**: ①着地予測 — VA層 §8 の `landing`（node_label / region_label /
+  nearness_label / skeleton_version）を radar にも配線。`band_candidates` の候補ベクトル
+  流用で**追加 embedding ゼロ**、`radar.py` の import 境界は不変で route が
+  `_anchor_context` を `run_radar_search(anchor_context_resolver=)` に注入し、
+  `_merge_distance_labels` が landing も移す。top-level に
+  `relation_context: {available, skeleton_version}`。②非LLM チップ — 重なり
+  （`overlap_components`・seed の承認済み `theory_components` ラベルと候補の casefold
+  部分一致・最大6）/ 新しい面（`new_facets`・最上位帯アンカーのうち seed の
+  `landscape_placements`（status NOT IN superseded/rejected）に無い node・最大2）。
+  **未測定はキー自体を付けない**（PR2）。③compare の2区画化 — 既存1コールの
+  structured output に `overlaps: [{component_label, statement, evidence_quote}]` を追加
+  （プロンプトは seed 部品ラベルの閉世界リスト提示、validator は evidence_quote verbatim
+  で項目 drop + component_label のリスト実在検査でリスト外は空文字化して statement は
+  保持）。`common_ground` は後方互換で維持・非保存・日次20・caveat 不変。UI は凡例1行 +
+  着地1行 + 〈推定〉タグ付きチップ（重なり最大3表示 + ほか）+ 2区画比較。
+  ガードレールは `test_paper_radar_{core,api,guardrails,ui_static}.py`。
+- **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
+- **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源。
+  学習者向け表示・コーパス回遊は §7 → 専用設計書で**実装済み**（下記コーパス回遊層）。
+
+### コーパス回遊層（コース無し論文議論・コーパス地図・地図の端, migration 073, 2026-08-27）
+
+育てたコーパスを学習者がコースの外から歩ける層。正本は
+`docs/features/corpus_roaming_design.md`（CR1〜CR10・§12 実装記録。ディスカバリー §7 と
+discuss Phase 3 予約を引き受けた専用設計書）。
+
+- **不変条項の要点**: CR1 document 可視性が唯一のゲート（fail-closed・SQL 内 `ANY(:doc_ids)`
+  強制）/ CR2 コース学習の非改変 / CR3 数値非表示 / CR4 閉世界の正直さ / CR5 好奇心の文法
+  （バッジ・督促・自動表示なし）/ CR6 監視しない（明示タップのみ・k=3）/ **CR7 学習者起点で
+  外部 API を呼ばない** / CR8 行削除なし / CR9 同期パス非LLM / CR10 取り込みの弁は教員のまま。
+- **Phase A コーパス地図**: `core/corpus_view.py`（FastAPI/LLM 非 import・読み時導出）+
+  `routes/corpus.py`（`/api/learning/corpus/{domains,landscape,documents}`）。**骨格は返さず**
+  配置・縁・外のみ（骨格は既存 `GET /api/atlas?cartridge=` — 二重管理回避）。documents の
+  母集合は「配置あり ∪ gap 信号あり」（分野帰属の捏造防止）。UI は `corpus-sea.js`
+  （ES6・`window.CorpusSea`・サイドバー常設「🌊 論文の海」・簡易 SVG 地図・atlas-overlay
+  非流用）。アンカーは学習側 `sidebar.corpus-sea`。**地図の密度表現（2026-08-28）**: 論文
+  マーカーの羅列をやめ、領域の塗り（4段ビン・fog は従来の霧のまま）とアンカーごとの段階
+  サイズの円1つ（固定3段・クリックで論文リスト絞り込み）+ 凡例「閲覧できる論文の厚み」で
+  厚みを示す（クライアント側の決定論導出・API/DB 変更なし）。**CR3 のオーナー裁定**:
+  段階ビン（離散の濃淡・サイズ）は可、連続比例と件数・閾値の表示は禁止。
+- **Phase B コース無し議論（discuss document 直付け）**: センチネル
+  `course_id = "_doc:{document_id}"` の正本は `core/discuss/context.py`（組み立ては AST
+  ガードレールで1ファイルに固定・migration 0）。`learning_chat` は本体を
+  `_learning_chat_core` に分離（route は1行委譲・コース経路は不変・分岐4点のみ）。
+  API 4本 `/api/learning/documents/{ref}/discuss/{opening,chat,history,messages}` — ゲートは
+  `resolve_document_access.can_view` のみ・不可視と不在は同一 404。opening の
+  `fragile_points` は空・`action`/`atlas_context`/`cycle_mode` はサーバ側 null 化（縮退の
+  明示）。観測は `document_discuss_{opened,turn}`（サーバ側記録）。コストは既存
+  `LEARNING_CHAT_MAX_CALLS_PER_DAY` 相乗り。
+- **Phase C 地図の端**: 縁 = `landscape_gap_signals` の学習者向け事実文（現行凍結版に実在
+  する region のみ・可視論文タイトルのみ・教員判断は非開示）。外 = migration 073
+  `paper_discovery_subscriptions.last_search_found_new BOOLEAN`（教員の `POST /search` 実行時
+  のみ更新・候補スナップショットなし = PD5 両立の集約1ビット。DEFAULT なし = NULL は
+  「まだ検索していない」）。
+- **Phase D 関心信号**: kind `frontier_interest`（trace_registry 宣言済み: 問いの軌跡×・
+  教員=専用 k-匿名集約のみ・わたしの地図×・わたしの記録○）。痕跡 course_id はセンチネル
+  `services.CORPUS_TRACE_COURSE_ID="_corpus"`。学習者は「この先を知りたい」明示タップ +
+  withdraw（`status='dismissed'` 遷移）。教員向け `GET /api/admin/discovery/
+  frontier-interest`（k=3・レンジのみ・dismissed 非計上）をディスカバリーモーダルに表示
+  （行ゼロ・取得失敗は区画ごと非表示 = 「関心なし」と言わない）。アンカー
+  `materials.arxiv-discovery-interest`。
+- **ガードレール**: `test_corpus_roaming_{core,api,guardrails,ui_static}.py` +
+  `test_document_discuss_{api,guardrails}.py`。
+- **非スコープ（v1）**: document 直付けの出典タブ・数式レンダリング・着地画面・
+  tension/anchor digest・fragile_points / EmergentRegion 系 / G層ルール /
+  関心信号による自動化（CR10 で恒久禁止）。
 
 ### 資料の開示範囲 (Visibility)
 教材 (Document) や コース (LearningCourse) は、以下のいずれかの開示範囲を持つ。
@@ -649,7 +831,8 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   出典タブ「分野の中の位置づけ」セクション + コーパス事実行（LS8）。教員 = 教材管理⋯メニュー
   「位置づけ（分野マップ）…」→ レビューモーダル（ドメイン別グループ・status チップ・
   [確認][却下][再検討]・[AIで再提案]・unplaced 事実文）。アンカー3点セット登録済み
-  （`materials.row-landscape` / `landscape-modal` / `landscape-propose`、カウント 244）。
+  （`materials.row-landscape` / `landscape-modal` / `landscape-propose`。件数の正本は
+  `test_admin_help_ui_anchors.py`）。
 - **env**: `LANDSCAPE_PLACEMENT_LLM_MODEL`（fast 既定）/ `LANDSCAPE_MAX_CALLS_PER_DAY`(20) /
   `LANDSCAPE_MAX_PLACEMENTS_PER_DOCUMENT`(8)。
 - **ガードレール**: `test_landscape_guardrails.py`（core 非FastAPI・DELETE 不在・migration⇄schema
@@ -715,10 +898,120 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   dismiss 理由必須・捏造ガード文言・禁止語彙）+
   `test_atlas_gaps_{schema,store,patching,api,admin_ui_static}.py` +
   `test_personal_graph_provisional.py` + `src/tests/agents/landscape_placement/test_category_gaps.py`。
-  管理UI アンカー7件（`atlas.gap-*`、カウント 255）+ teacher マニュアル節はA5実装時に3点セット済み。
+  管理UI アンカー（`atlas.gap-*`。件数の正本は `test_admin_help_ui_anchors.py`）+ teacher
+  マニュアル節はA5実装時に3点セット済み。
 - **非スコープ（v1, §7）**: 削除/改名/統合の候補化（additive-only）/ 学習者信号の入力混合
   （KN-4）/ 件数バッジ・カバー率・横断ダッシュボード / 過去論文の自動再配置 / 浮遊アンカー・
   EmergentRegion（Phase 2/3）/ G層 To-Do（運用実測後に判断 — §4.6 裁定）。
+
+### 分野マップのベクトル係留層（VA層, migration 074, 2026-08-29）
+
+骨格ノード（region / concept）に**プロトタイプベクトル**（label + 教員確定別名 +
+confirmed 配置の evidence 引用の合成テキストを chunks と同一 embedding で埋め込み）を
+与え、①配置プレフィルタ ②別名レジストリ（語彙標準化） ③着地予測を実現する層。
+正本は `docs/features/atlas_vector_anchoring_design.md`（VA1〜VA9・§12 実装記録）。
+
+- **不変条項の要点**: VA1 ベクトルは候補生成器・確定は常に人間 / VA2 cosine 生値
+  非表示（段階ラベルの正本は `label_vocab` の2表: gap 注記=ラベル×ラベルは
+  `ANCHOR_NEARNESS_SCALE` 0.55/0.40、着地予測・新しい面=論文テキスト×アンカーは
+  `ANCHOR_LANDING_SCALE` 0.36/0.30 — 言語間レジームの実測校正 2026-08-29、
+  設計書 §9。ラベルは共通「かなり近い/近い可能性/遠い」）/ VA3 埋め込みは凍結時・教員起点・パイプライン
+  のみ（学習者起点ゼロ = CR7）/ VA4 fail-soft 全縮退（freeze を止めない・不在時は
+  従来動作）/ VA5 モデルは chunks と同一（feature `embedding:atlas_anchors`・scene
+  なし = M5）/ VA6 別名は status 遷移のみ（(domain, version) 単位の全置換再構築だけ
+  設計明示例外）/ VA7 プレフィルタの間引きは `stage_outputs.vector_prefilter` に記録 /
+  VA8 骨格版を明示した閉世界言明のみ / VA9 `atlas_skeletons` への書き込み経路なし
+  （KN-3/AB4 継承・ガードレールで固定）。
+- **DB（migration 074・シードなし）**: `atlas_anchor_embeddings`（`UNIQUE(domain_key,
+  skeleton_version, node_id)`・vector(3072)・FK/index なし・`source_hash` で不変
+  ノードの再埋め込みスキップ）+ `atlas_anchor_aliases`（版非依存・
+  `UNIQUE(domain_key, node_id, normalized_alias)`・normalize は atlas_gaps の
+  `normalize_label` 正本を流用・status = confirmed/dismissed・削除 API なし）。
+- **core（`backend/core/atlas_vectors/`、FastAPI 非 import）**: schema（合成テキスト
+  `build_anchor_source_text` / 語彙）/ store（全置換保存・AnchorVector・alias CRUD =
+  状態遷移のみ）/ builder（`build_anchor_embeddings` = 1バッチ embed + CostGate 日次
+  ゲート `ATLAS_VECTOR_MAX_CALLS_PER_DAY` 既定50、`anchors_with_labels`）/ query
+  （純計算: cosine・`prefilter_domains`・`landing_for_vector`）/ annotate（gap
+  クラスタ label の近傍注記・in-process キャッシュ・fail-soft）。
+- **構築トリガー**: freeze 後の best-effort daemon thread（`routes/atlas.py`）+ 手動
+  `POST /api/admin/cartridges/{id}/atlas/vectors/refresh`（TEACHER・retired 409）。
+  起動時の自動バックフィルはしない。status は `GET .../atlas/vectors/status`。
+- **別名レジストリ（語彙標準化の回路）**: gap レビューキューに読み時 `near_anchor`
+  注記（最上位帯のみ・保存しない）→ 教員の「別名として登録」（`POST .../atlas/
+  aliases`、現行凍結版に node 実在必須 422）→ ①プロトタイプへ還流（単ノード
+  best-effort 再埋め込み）②keyphrase 供給へ還流（`vocab.py` の alias サプライヤ。
+  KEYPHRASE_SOURCES は5語彙に拡張済み）。登録時は既存 gap 却下 API を理由自動填入で
+  併用（2段動作・フロント）。監査は `AUDIT_ENTITY_ATLAS_VECTOR`
+  （vectors_refresh / alias_register / alias_dismiss）。
+- **配置プレフィルタ**: `landscape/builder.py` が論文重心（`ranking.document_centroid`
+  再利用・追加 embedding ゼロ）× アンカー cosine で concept を上位
+  `LANDSCAPE_VECTOR_PREFILTER_TOPK`（既定32・0=off）に絞って LLM へ閉世界提示
+  （region は常に全提示・ベクトルなし concept は保持・プロンプトに絞り込み注記）。
+- **着地予測**: discovery 検索の `order:"relevance"` 経路のみ、既存バッチの候補
+  ベクトルを流用（追加呼び出しゼロ）して候補に `landing`（node_label / region_label /
+  nearness_label / skeleton_version）を付与。下位帯・アンカー不在はキー自体なし。
+  **論文レーダーにも配線済み（2026-08-29。seed のドメイン帰属は
+  `corpus.document_domain_keys` で解決・追加 embedding ゼロ。仕様の正本は
+  `paper_radar_design.md` §12）**。`query.new_facet_labels`（最上位帯アンカーのうち
+  seed の confirmed 系配置に無い node）も radar 向けに追加。date 順は v1 非対象。
+- **UI**: 分野の地図タブ「ベクトル索引」+「登録済みの別名」区画、gap カードの注記 +
+  登録ボタン、discovery 候補行の着地1行。アンカー +3
+  （`atlas.vector-refresh` / `atlas.aliases` / `atlas.gap-alias-register`）。
+- **ガードレール**: `test_atlas_vectors_{core,api,guardrails,ui_static}.py`。
+- **非スコープ（v1）**: date 順検索への着地予測（radar は 2026-08-29 に実装済み）/
+  alias candidate 行の自動生成 / 配置共起のグラフ埋め込み（node2vec）/
+  学習者向け表示 / skip-gram 自前学習。
+
+### 分野マップの関係表示（辺候補レビューと推定の糸, RE追補, migration 076, 2026-08-29）
+
+VA層の直後にオーナー討議で確定した表示原則（正本
+`docs/architecture/field_map_display_principles_2026-08-29.md` — 原則①′
+「地形は人間・関係は離散の辺」ほか5箇条。**分野マップに表示を足すときはこの記録に
+照らす**）の実装。設計正本は `docs/features/atlas_relation_edges_design.md`
+（RE1〜RE8・§11 実装記録）。
+
+- **不変条項の要点**: RE1 地形不変・主張は離散の辺のみ / RE2 推定は点線 +
+  「AIによる推定（未確認）」+ 骨格版明示 / RE3 恒久配線は candidate → 教員確定 →
+  凍結のみ（preview は patched_draft を返すだけ・draft への反映は教員の既存 PUT）/
+  RE4 数値非表示 / RE5 判断は status 遷移のみ（行削除なし・見送りは理由必須）/
+  RE6 候補は読み時導出・保存は判断のみ・**embedding API を呼ばない**（保存済み
+  アンカーベクトルの読みのみ）/ RE7 糸は concept–concept・NEAR 閾値のみ・
+  ノードあたり2本・全体30本 / RE8 教員の dismiss は学習者の糸からも消える。
+- **DB（migration 076・シードなし）**: `atlas_edge_decisions`（無向・版非依存の
+  `edge_key = "edge|{domain}|{min}|{max}"` UNIQUE・status =
+  candidate/accepted/dismissed・`edge_kind` は採用時に教員が選択・
+  `applied_version` で採用と凍結反映を分離 — gap decisions の辺版で `merged` /
+  `draft_node_id` なし（draft 反映済みかは draft の edges 実在で判定））。
+- **core（`backend/core/atlas_edges/`、FastAPI/LLM 非 import）**: schema（edge_key /
+  語彙・上限定数）/ derive（候補 = ①アンカーcosine ≥ `ANCHOR_NEARNESS_THRESHOLD_NEAR`
+  ②live 配置の共起 distinct 2論文以上。既存辺・同一 region 内・region 端点は除外）/
+  store（**遷移は `core/candidate_flow.py` 経由 — 本番初適用**。record_audit は注入）/
+  patching（op=add `/edges/-` — `apply_json_patch` がそのまま適用可）/ threads
+  （学習者向け糸の読み時導出・(domain, version) キャッシュ・dismissed 除外・
+  fail-soft で `{"available": False}`）。
+- **API（`routes/atlas_edges.py`、main.py 直接登録・全て `_require_teacher`）**:
+  edge-candidates GET / decide（accept は kind 必須・dismiss は理由必須）/
+  incorporate-preview（読み取り専用）/ mark-incorporated（draft に辺実在で 409 判定 +
+  監査のみ — 専用列を持たない）。**freeze 統合**: gap と同列の pending ゲート
+  （採用済み未反映の辺で 409・`pending_edges` はラベル列挙）+ 凍結トランザクション内
+  `stamp_applied_versions`。監査 `AUDIT_ENTITY_ATLAS_EDGE`（語彙カタログの正本は
+  `core/schema.py` の `AUDIT_ENTITY_TYPES`）。
+- **学習者向け「推定の糸」**: `GET /api/atlas` に optional key `threads`（route 層で
+  fail-soft 合流・不能時はキー自体なし）。表示は `atlas-threads-layer.js`
+  （landscape-layer と同じ3フック型・L2 のみ・点線・既定オフ・事実文
+  「AIによる推定（未確認）・骨格 版{v}」・localStorage 不使用）。学習者アンカー
+  `atlas.relation-threads` + `docs/manual/student/02-student.md#relation-threads`。
+- **管理UI**: `atlas-reports-section` の第3グループ「関係（辺）の候補」（gap 群と
+  同じ後付けパターン。出所チップ・kind 選択（正本 `label_vocab.EDGE_KIND_LABELS` =
+  隣接/依存/関連・JS はミラー規律）・採用/見送り/戻す/下書きへ反映 =
+  preview → confirm → `applyAssistProposal` → mark-incorporated の gap 同型3段）。
+  管理アンカー +3（`atlas.edge-candidates` / `atlas.edge-dismissed-filter` /
+  `atlas.edge-incorporate`）。
+- **ガードレール**: `test_atlas_edges_{core,api,guardrails,admin_ui_static}.py` +
+  `test_atlas_threads_ui_static.py`。
+- **非スコープ（v1）**: co_occurrence 由来の糸（学習者は vector のみ）/ region を
+  含む辺候補 / 辺の削除・改名候補 / 糸のホバー・L1/L3 描画 / node2vec 由来候補 /
+  G層 To-Do。
 
 ### リリース前の確認（Release Review Flow, migration 不要, 2026-08-05）
 
@@ -748,7 +1041,8 @@ atlas 側の既存フロー（draft→freeze・binding・retire）を**非改変
   atlas-binding パネルへ縮退）/ コース管理の所有行「確認して公開」。
 - **UI**: `frontend/public/js/admin-release-review.js`（ES5・`window.AdminReleaseReview`・
   admin.js から DI 注入）。ポーリングしない。アンカー4点登録済み
-  （`course-management.release-review-btn` / `release-review.{modal,next,publish}`、カウント 248）。
+  （`course-management.release-review-btn` / `release-review.{modal,next,publish}`。件数の正本は
+  `test_admin_help_ui_anchors.py`）。
 - **ガードレール**: `test_release_review.py`（accept が inferred 限定・空入力で SQL 非発行・
   監査語彙・404 統一）+ `test_release_review_ui_static.py`（3ステップ・「次へ」の意味の明示・
   既存 UI への委譲・数値非表示・fail-open で公開を止めない）。
@@ -999,7 +1293,7 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 - **管理画面「？使い方」＝admin インスペクト・モード（2026-07-30、migration 不要）**:
   学習画面のインスペクト・モード（`core/help_kb/ui_anchors.py`）の管理画面版。
   ①アンカー表の正本は `core/help_kb/admin_ui_anchors.py`（`KNOWN_ADMIN_UI_ANCHOR_IDS` /
-  `ADMIN_UI_ANCHORS` 260件（2026-08-14 時点。正確な件数は `test_admin_help_ui_anchors.py` が正）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
+  `ADMIN_UI_ANCHORS`（件数の正本は `test_admin_help_ui_anchors.py`）。値は `teacher/` か `system_admin/` の節のみ — **student/ 参照は
   構造的禁止**、`resolve_admin_ui_anchors(role)` は TEACHER=teacher/ のみ・SYSTEM_ADMIN=+
   system_admin/ のロール fail-closed）。②配信 `GET /api/admin/assistant/help/ui-anchors`、
   no_hit 記録 `POST /api/admin/assistant/help/ui-anchor-events`（`_require_teacher`・30分
@@ -1034,10 +1328,14 @@ docs/manual を AI アシスタントの知識源にする非ベクトル KB。�
 督促・数値スコア禁止）/ G8 道案内は誘導まで（`AdminAssistant.runLocatePlan` を呼ぶだけ）。
 
 - **エンジン**: `backend/core/admin_assistant/next_steps.py`（FastAPI / LLM 非 import）。
-  `compute_next_steps(session, user)` がルールカタログ v1（6件）を本人所有の教材・コースに
-  対して評価: `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
-  `course.not_published` / `course.no_atlas_binding`（recommended）、`course.audio_missing`
-  （optional）。severity→古い順、上限 10 件（切り捨ては `truncated: true` で正直に返す）。
+  `compute_next_steps(session, user)` がルールカタログ（**正本は同ファイルの `RULE_CATALOG` /
+  `_RULE_EVALUATORS`** — 件数をここに書き写さない）を本人所有の教材・コースに対して評価:
+  `materials.none` / `material.analysis_failed` / `material.no_course`（required）、
+  `course.not_published` / `course.no_atlas_binding` / `course.atlas_binding_ready` /
+  `course.atlas_binding_stale` / `figure.unreviewed_modes`（未レビューの図分類が残る教材）/
+  `course.discuss_opening_unreviewed` / `manual.help_gaps_pending`（recommended）、
+  `course.audio_missing` / `assistant_kb.undocumented` / `manual.todo_unresolved`（optional）。
+  severity→古い順、上限 10 件（切り捨ては `truncated: true` で正直に返す）。
   ルールは「次の一歩だけ」を出すチェーン設計（教材登録→コース作成→binding/公開と順に現れる）。
 - **API**（`routes/admin_assistant.py`、TEACHER 以上）: `GET /api/admin/assistant/next-steps`
   → `{steps, hidden, truncated, assistant_cue_pending}`。
@@ -2073,6 +2371,248 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   `test_deliberation_ui_static.py` / `test_deliberation_annotations.py`（FastAPI 非 import・
   candidate-only・削除 API 不在・権限ゲート・confidence 生値非漏洩・A層非改変）。
 
+### グラフ対話レビュー（教材起点のグラフ確認・承認画面, migration 075, 2026-08-29）
+
+教材管理の各行のグラフアイコンボタン（inline SVG のノード・辺図形。2026-09-06 に `⋯` メニューから
+昇格し、📡 レーダーと並ぶ）から開くフルスクリーンモーダル。
+理論操作グラフを見取り図に、①構造を見る ②AI と確かめる ③その場で確定する
+（component 承認/却下・backing claim 承認）を1画面で行う。正本は
+`docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録）。
+
+- **不変条項の要点**: GR1 確定は人間のみ（AI 応答から承認 API を呼ぶ経路なし・プロンプトは
+  仮説文体 + 承認判断の非代行を強制）/ GR2 A層非改変 / GR3 数値非表示 / GR4 監査は既存
+  `AUDIT_ENTITY_COMPONENT` / `AUDIT_ENTITY_CLAIM`（新 entity_type なし）/ GR5 グラフ全体
+  対話は1コール・CostGate は W層 `DELIBERATION_MAX_CALLS_*` に相乗り（U層 feature のみ
+  `deliberation:graph_chat` を分離。scene は `deliberation` 共用・専用 env なし）/
+  GR6 閲覧・対話 = viewable / 承認・却下 = editable / GR7 却下も status 遷移 /
+  GR8 グラフ描画の正本はスタジオの lsGraph* 群 — `window.LectureStudio.graphView` として
+  公開し、レビュー画面は委譲する（描画ロジックを二重実装しない）。
+- **承認 API（遷移専用・新設2本）**: `POST /api/admin/theory-components/{id}/approve`
+  （内容フィールド非変更。承認可能性 = name・source_chunks・inputs/outputs 非空 +
+  全項目に出典、をサーバ強制 — 満たさなければ 422 事実文）と
+  `POST /api/admin/claims/{id}/review`（body `{review_status}`・許可4語彙のみ）。
+  **component の遷移実体は `_transition_component_review`（status 系の列だけを UPDATE・
+  監査は実行者付き・却下伝播あり）** — `_dump_model` 往復のフル UPDATE は
+  component_type CHECK 違反と source_scope（legacy_ids / figure_id）破壊を起こすため
+  使わない（設計書 §11.1）。claim 側の遷移副作用（監査・却下伝播・承認時の R層
+  item オーサリング起動）は `_apply_claim_review_side_effects` に抽出しフル upsert と共通。
+  **権限は `_ensure_component_editable`（document 単位が主経路・course フォールバック）** —
+  既存 `/reject` も同ゲートに是正済み（course_id 無しのパイプライン component が 404 に
+  なる旧バグの解消）。非 UUID の component/claim id（集約 main ノード等）は
+  `_is_db_uuid` で 404 に落とす。フル PUT / PATCH（upsert）は非改変。
+  **stored graph のノード review_status は、人間の判断（approved/rejected 等）のとき
+  live の `theory_components.review_status` が焼き込み値に勝つ**
+  （`_normalize_stored_component_graph` + core `merge_live_review_statuses` — これが
+  無いと承認してもレビューループが閉じない）。
+- **根拠 claim の読み時解決は DB → artifact の2段（2026-09-02・migration なし）**:
+  グラフのノードが参照する claim ID には `theory_claims` に**行が無い**ものがある
+  （ClaimObjectBuilder の atomic rewrite 子 claim と式由来の合成 claim `synth_claim_*`。
+  `persist_qualified_claims` は qualified_spans しか永続化しない — claim_objects を
+  永続化するかはオーナー判断の別件）。`_resolve_claim_reference_index` は DB で
+  解決できない ID を `claim_object_builder` artifact から解決し、エントリに
+  `resolution="db"|"artifact"` を付ける（artifact は `claim_id=""` / `origin` =
+  equation_synthesis | atomic_rewrite | claim_object / 親 span claim が DB にあれば
+  `parent_claim_id` + `parent_review_status`。追加 SQL なし・confidence と reason は
+  載せない）。UI は artifact 由来を**隠さず本文を出したうえで「未承認（解析結果）」**
+  と明示し、親があれば「元の主張を承認」（既存アンカー `graph-review.claim-approve`
+  再利用）へ導く。「承認状態で根拠を隠す」設計にはしない（設計書 §14）。
+  **claim 本文の数式（2026-09-03・§14.1）**: 式由来合成 claim の記号は生成時に
+  `equation_claim_synthesis._math()` が `$...$` で区切る（concept 名は素の記号のまま）。
+  旧 artifact は `_delimit_synth_claim_math`（origin=equation_synthesis・`$` 無しの本文に
+  concept 名を長い順に包む読み時投影・書き込みなし）で補い、snippet 切り詰めは `$` 区間を
+  割らない。表示は `graphView.inlineMathHtml`（`lsInlineMathHtml` = `$..$` / `\(..\)` /
+  `$$..$$` を `lsRenderKatex` で描く共有ヘルパ。preserveMath の4本目を作らない）を
+  `admin-graph-review.js::richText` が使い、studio 側のラベル経路は `$` 区切りだけ剥がす
+  （ElementCard は symbol 型以外のラベルに数式描画をしない）。
+- **グラフ全体対話**: `core/deliberation/graph_dialogue.py`（FastAPI 非 import）。
+  疑似要素型 `document_graph`（migration 075 = `deliberation_sessions.element_type` CHECK
+  への追加のみ。**`element_annotations` の CHECK と `ElementRef`/`ELEMENT_TYPES` は
+  非改変** — overview / context / annotations / identity の対象にしない）。grounding は
+  最新 `theory_component_graphs` からの非LLM 決定論投影（main バックボーン + 関係 +
+  式の詳細層の規模 + 未レビュー一覧 + validation + narrative）。グラフ未構築は 422。
+  **候補注釈を生成しない**（要素単位の注釈はノード対話 = 既存 W層 sessions の責務）。
+  API は `POST /api/admin/deliberation/documents/{id}/graph-sessions`（get-or-create。
+  `?force_new=true` = セッション上限到達後の再開手段・旧履歴は保持）+
+  `.../graph-sessions/{sid}/messages`（CostGate 消費は全 422 経路の後）。
+- **UI**: `admin-graph-review.js`（ES5・`window.GraphReview`・DI 注入）。層トグル・
+  未レビューのみ強調（非該当は薄く残す）・「次の未レビューへ」ナビ・ノード詳細
+  （承認/却下/深く検討 + 根拠 claim 行の承認。claim の DB UUID / review_status は
+  `reference_index.claims` に additive 追加済み）・チャット2タブ（ノード = W層セッション
+  再利用 / グラフ全体）。アンカーは `materials.row-graph-review` + `graph-review.*`
+  （§11.1 の open-deliberation / new-chat と §12 の voice を含む。**正確な件数は
+  `test_admin_help_ui_anchors.py` が正**）+ マニュアル
+  `docs/manual/teacher/26-admin-graph-review.md`。
+- **音声対話（§12 追補・2026-08-29・migration なし）**: チャットのハンズフリー入出力。
+  API 2本 `POST /api/admin/deliberation/voice/{transcribe,speak}`（`_require_teacher`・
+  DB 非変更・読み上げ前に `core.tts.strip_text_for_speech`）+ day-only CostGate
+  `dialogue.check_and_count_voice_call`（STT/TTS 共通・env
+  `DELIBERATION_VOICE_MAX_CALLS_PER_DAY` 既定200。**GR5 の対話上限とは独立**）+
+  U層 feature `deliberation:voice_stt` / `deliberation:voice_tts`（読み取り専用の音声
+  scene に束ねる。学習側 `learning:voice_*` と混ぜない）。フロントは DOM 非依存エンジン
+  `admin-voice-chat.js`（ES5・`window.AdminVoiceChat`。**学習側 app.js は非改変**）で、
+  `admin-graph-review.js` は 🎤 トグル（`graph-review.voice`）と
+  `sendChatText` への配線だけを持つ。429 でループ停止・close でマイク解放・数値非表示。
+  **音声から承認 API を呼ぶ経路は作らない（GR1）**。
+- **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
+  `test_graph_review_voice_api.py`。
+- **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /
+  G層 To-Do ルール（恒常点灯するため運用実測後に判断）/ 学習者向け表示。
+
+### グラフの論文層（Paper Layer — フレームに論文を肉付けする層, migration なし, 2026-09-03）
+
+理論操作グラフは #308 の規律で main ラベルが theory stage 名に固定されているため、
+「このノードは論文の何か」がグラフ単体では読めない。本層は **フレーム（graph_json）を
+触らず・保存せず・LLM を呼ばず**、既存 artifact（document_structure / equation_semantics /
+evidence_registry / claim_object_builder / symbol_registry / derivation_chain /
+figure_table_semantics / paper_skeleton / thesis_reconstruction / component_assembly）と
+`element_explanations`（contextual）・`document_figures` を読み時に join して、
+①フレーム→論文（ノードごとの「論文側の顔」）②論文→フレーム（章立て・式番号・図番号の
+論文順の背骨にノードを吊る）③被覆（フレームに掛かっていない章・式・図・claim）を
+1つの DTO で返す。正本は `docs/features/graph_paper_layer_design.md`（PL1〜PL8・§3 DTO 契約・
+§10 実装記録）。
+
+- **不変条項の要点**: PL1 フレーム非改変（graph_json・#308 ラベル規律・成果テーブルの列に
+  触れない）/ PL2 決定論・非LLM / PL3 リンクの無いものに対応を推定しない（章の解決は
+  式の `source_location.section_id` → evidence `source.section_id` → claim `section_id` →
+  `block_id` → `document_structure.blocks[].section_id` の実所在のみ。無ければ `unlocated`）/
+  PL4 数値非表示（confidence / weight / candidate_score / qualification_reason を DTO に
+  載せない・件数バッジなし）/ PL5 承認オブジェクトを増やさない（承認は component / claim
+  のまま）/ PL6 権限 = document viewable / PL7 内部 ID（`eq_op_*` / `theory_op_*` / `ev_*`）を
+  表示ラベルに使わない（式は印字番号「式 (12)」、章は見出し、図表は `figure_label`）/
+  PL8 fail-soft（artifact 欠落ごとに `facts[]` へ事実文1行・グラフ未構築は `available:false`）。
+- **core**: `backend/core/graph_paper_layer/`（schema / builder。FastAPI・sqlalchemy・LLM
+  非 import の純関数 `build_paper_layer(graph, artifacts, *, figure_rows, explanation_rows)`。
+  入力を mutate しない）。結び付けの粒度は **式の詳細層（detail）**、main は
+  `member_component_ids` の合算（多対多を隠さない）。図は `FigureRecord.linked_claim_ids` ∩
+  ノード claim → `document_figures` 行を `normalize_figure_join_key` の二段キーで照合。
+  thesis 上の役割は `thesis_ref`（`central_thesis` / `support:{section}:{idx}`）+
+  `label_vocab.SUPPORT_SECTION_LABELS`（新しい訳語表を作らない）。
+- **API**: `GET /api/admin/documents/{document_id}/paper-layer`（`routes/theory_components.py`・
+  TEACHER + `_ensure_document_viewable`）。既存 `component-graph` レスポンスは不変（別
+  エンドポイント・レビュー画面が遅延取得）。builder 例外は 500 にせず `available:false` +
+  事実文で 200。
+- **UI**（`admin-graph-review.js`）: ツールバー「表示: グラフ | 論文の順」
+  （`graph-review.paper-view`）で左ペインを章アウトライン（章 → ノード・式・図表チップ、
+  ノードの無い章は「このフレームには掛かっていません」、末尾に被覆）に切替。右ペイン詳細に
+  「論文での対応」区画（`graph-review.paper-facing`: narrative_role → 位置 → thesis 役割 →
+  式 → 逐語引用 → 図表 → 記号 → 導出 → contextual 説明 → component 要約）。既存の承認・
+  却下・claim 承認・チャットは非改変。数式は `richText`（graphView.inlineMathHtml）のみ。
+- **ガードレール**: `test_graph_paper_layer_{core,api,guardrails}.py` +
+  `test_graph_review_ui_static.py::TestPaperLayer`。
+- **非スコープ（v1）**: 学習者向け表示 / 論文層の保存 / LLM による章推定・一段落説明
+  （Phase 1 — まず contextual 説明の join で足りるか実測）/ 被覆の下流（G層・候補化 = Phase 2）/
+  図画像のインライン表示。
+
+### 個人化5フェーズ（討論由来、migration なし、2026-08-15）
+
+`docs/architecture/ai_assistant_personalization_debate_2026-08-15.md` の討論から出た5提案を、
+既存機構の薄い拡張として同日に実装した層群。計画は `docs/architecture/personalization_implementation_plan.md`、
+各フェーズの正本設計書は下記（すべて「実装済み」・§実装記録あり）。いずれも新テーブルなし・
+数値非表示・本人のみ可視・AI は候補提示までの各層不変条項を継承する。
+
+- **Phase 1 主権台帳 v1「わたしの記録」**（`trace_registry_sovereignty_ledger_design.md`）:
+  `core/trace_registry.py`（kind 登録簿の正本）+ `core/trace_ledger.py` + `routes/my_records.py`
+  （GET のみ・本人のみ）。詳細は下記「横断基盤」の `trace_registry.py` 項。
+- **Phase 2 帰還の扉**（`return_door_design.md`）: `core/cycle/schema.py` の `ROLE_LEAVE_NOTE`
+  （INTENTION_ROLES 4値化）/ `core/cycle/derive.py::build_return_door` / `build_todays_words` /
+  `routes/cycle.py` の GET `return-door`・`todays-words`。フロントは `discuss.js` の書き置き欄 +
+  逐語トレイ、`app.js` の扉インレイ `#return-door` と欄外の印 `#margin-marks`（上限12・
+  `map_excluded` 除外・トグルは localStorage `eg_margin_marks:<courseId>`）。扉の last_tension は
+  `map_excluded` を意図的に尊重しない（扉は地図ではなく本人の言葉の再提示）。アンカー
+  `material.return-door`。
+- **Phase 3 構造の降下路（足場ダイヤル・楽屋）**（`structure_descent_design.md`）:
+  `backend/core/descent/`（`engine.py::build_ladder` / `build_backstage_path`、`resolve.py`）+
+  `routes/descent.py`（GET `ladder`・`backstage-path`、受講ゲート・element_type 422）。楽屋の
+  痕跡は kind `backstage_question`（登録簿宣言・教員集約から除外・`entry_mode:'discuss'` を
+  焼き込まない）。`learning_chat` は `_is_backstage` をハンドラ冒頭で判定し、楽屋では
+  `action` / `atlas_context` を無効化・`anchor_confirm` を出さない。楽屋の notation_patterns
+  段は明示 cartridge のみ（`load_cartridge(None)` の既定カートリッジ縮退を踏まない）。
+  アンカー `material.descent-ladder`。
+- **Phase 4 宣言された弁と静かな計器（教員支援）**（`teacher_triage_instruments_design.md`）:
+  `core/teacher_triage.py`（説明レビューキュー / R層 review-queue の `sort=load` — 台帳の
+  負荷度による安定ソート・導出不能は末尾・`sort` 不正値 422・course 混在時は全件導出不能扱い）/
+  `core/llm_usage/forecast.py`（`GET /api/admin/llm-usage/forecast[/documents/{id}]`、4カウンタ
+  最小残数の近似・`{show, message}` のみ・`daily_limit <= 0` は無効化扱いで除外）/
+  `core/lecture_wm.py`（preview-split の optional `document_id` で WM レンズ相乗り・
+  `label_vocab.WM_INTERACTION` 3段・縮退文はサーバ fact `WM_DEGRADED_NOTICE` に一本化）。
+- **Phase 5 ゼミ前ブリーフと鏡面化**（`seminar_brief_mirroring_design.md`）:
+  `core/doubt/seminar_brief.py`（4区画 `fragile_assumptions` / `single_support_lines` /
+  `clear_skies` / `learner_handoff`、SL1 閉世界語彙のガードレール対象）+ `routes/seminar_brief.py`
+  （GET 1本・権限2段ゲート）+ 教材行 ⋯ メニュー「ゼミ前ブリーフ…」。鏡面化は
+  `_get_discuss_system_prompt` の 〔鏡〕 契約 + `core/discuss/mirroring.py::extract_mirror`
+  （鏡文中の**すべて**の「」引用が学習者の直前発話の逐語部分文字列であること・最短2文字・
+  不合格はマーカー剥がしの縮退）+ `LearningChatResponse.mirror` + `app.js` の `.mirror-block`。
+- **ガードレール**: `test_return_door_{core,api,ui_static}.py` / `test_descent_{core,guardrails,api,ui_static}.py` /
+  `test_teacher_triage_{core,api}.py` / `test_quiet_instruments_{core,ui_static}.py` /
+  `test_seminar_brief_{api,ui_static}.py` / `test_mirroring_prompt_guardrails.py` / `test_mirroring_ui_static.py`。
+
+### 制度指標カタログ（Indicator Governance, migration なし, 2026-09-04）
+
+集約計器（教員・管理者が値を読む指標）の**定義・目的・宛先・粒度・出所・保持・非利用・
+副作用レビュー**を1つの機械可読カタログに宣言し、**学習者を含む全当事者に公開**する層。
+正本は `docs/features/indicator_governance_design.md`（IG1〜IG5・§9 実装記録）。vision §6
+**改訂原則4**（「数値を見せない」→「数値の用途と粒度を統治する」）の実装。
+
+- **不変条項の要点**: IG1 値の宛先は変えない・定義だけを公開する（カタログは値を1つも
+  持たず、`GET /api/indicators` の依存は `_get_current_user` で **`_require_teacher` では
+  ない**。各計器の値は従来どおり各 API のロールゲートの内側）/ IG2 非利用4項目
+  （`ranking` / `grading` / `recommendation` / `auto_gate`）は `IndicatorSpec.__post_init__`
+  が全 spec に強制（「この計器だけは成績に使う」spec は書けない）/ IG3 個人ランキング・
+  自動ゲートを作らない（discuss 観測 DO5 の一般化）/ IG4 カタログに無い集約 API を
+  新設しない（教員・管理者に集約を見せる経路を足したらカタログにも1件足す）/
+  IG5 定義の変更は設計書とカタログの両方に記録する。
+- **実装**: `backend/core/indicator_catalog.py`（**カタログ本体の正本**。FastAPI /
+  sqlalchemy / `core.llm` 非 import。粒度語彙5種 = `aggregate_k_anonymous` /
+  `aggregate_system` / `self_only` / `per_item_no_person` / `per_account_operational`。
+  k の正本は `core/privacy.py::K_ANONYMITY`）+ `backend/api/routes/indicators.py`
+  （`GET /api/indicators` / `GET /api/indicators/{indicator_id}`。**書き込みメソッドを
+  作らない** — カタログはコードが正本）+ `frontend/public/js/admin-indicators.js`
+  （ES5・`window.AdminIndicators`・DI 注入。`mount()` が事実文1行を差し込むだけで、
+  カタログ取得失敗時は**何も描かない** fail-soft）。
+- **nginx**: `/api/indicators/` と末尾スラッシュなしの `= /api/indicators` の2 location が
+  `frontend/nginx.conf` に必須（欠けると SPA フォールバックが index.html を 200 で返す —
+  `/api/atlas` と同じ事故形）。
+- **既存計器レスポンス**への追加は、キー集合をテストで固定していない経路にだけトップレベル
+  `indicator_id` を足す**ルート層**の変更に留める（core の集計関数の戻り値契約は変えない）。
+- **UI 配置**は計器が実際に描かれる箇所（LLM使用量 / discuss 観測状況 / 関心集約）。事実の
+  段落であって操作要素ではないため `data-ui-anchor` は付けない。**学習者側の UI 変更はなく**、
+  学習者への言明はマニュアル（student/ の節）に置く。
+- **ガードレール**: `test_indicator_catalog{,_guardrails}.py` / `test_indicators_api.py`
+  （core の純粋性・全 spec の `route` が実在の登録済みパスであること・IG4 の集約経路網羅・
+  公開ビューに値らしいキーが再帰的に無いこと・`_require_teacher` 不使用・全 `label` が
+  マニュアル節に逐語で現れること・JS がカタログから数値を読まないこと）。
+
+### 確定文脈の記帳（`decision_context`, migration なし, 2026-09-04）
+
+一括確定（「次へ＝承認」型・「選択したN件を承認」型）を、**後から再構成・異議申立できる
+手続**としてのみ成立させるための監査ブロック。正本は
+`docs/features/decision_context_design.md`（DC1〜DC4・§8 実装記録）。vision §6 **改訂原則1**
+（確定は十分な能力・情報・時間・拒否権を持つ人間の判断を含み、再構成可能な手続にのみ与える）
+の実装で、automation bias / moral crumple zone への具体的な歯止め。
+
+- **不変条項の要点**: DC1 一括確定は `decision_context` 無しに記帳しない（ガードレールが
+  各経路のソースを構造検査）/ DC2 提示（`presented`）と適用（`applied`）は別キーで持ち、
+  一致は**集合比較で導出**する（呼び出し側が「一致した」と申告できない。表示上限で切り
+  詰めた事実は `truncated`）/ DC3 代替の無い確定は記帳できない（`alternatives_available`
+  が空なら `ValueError`。`decline_possible` は引数ではなく導出値）/ DC4 クライアントの
+  来歴申告は `client_reported` に隔離し、未指定なら載せない。
+- **実装**: `backend/core/decision_context.py`（`build_decision_context(...) -> dict` /
+  `attach_decision_context(...)`。FastAPI / sqlalchemy / pydantic / openai 非 import・SQL を
+  書かない）。**新テーブル・新 `entity_type` を作らない** — 既存 `theory_review_events` の
+  `metadata` JSONB に1ブロック足すだけ。数値（`confidence` / `weight` / `score`）は載せない。
+- **適用済みの2経路**: ①リリース前の確認 ステップ2「この配置で次へ」
+  （`POST /api/admin/landscape/courses/{course_id}/placements/accept`、`basis`
+  `release_review.placements`）②説明レビューキューの一括承認・一括却下
+  （`POST /api/admin/documents/{document_id}/element-explanations/bulk-review`、`basis`
+  `explanation_review.bulk`）。**段階適用中**で、単発の承認・骨格の凍結・コース公開・
+  学習者側の確定は未適用（着手時は設計書 §4 に節を足し `basis` 定数を1本足す）。
+- **UI**（リリース前の確認）: 各行に根拠の逐語引用の折りたたみ（`release-review.evidence`。
+  引用が無い行でも折りたたみは出し「引用が残っていません」と事実で書く — 無い行だけ静かに
+  欠けると「見た／見ていない」が再構成できない）+ 再審経路の事実文 + 提示と適用の一致の
+  事実文（差があっても公開は止めない = RR7）。
+- **ガードレール**: `test_decision_context{,_guardrails}.py` + 経路側の
+  `test_release_review.py` / `test_teacher_triage_api.py`。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
@@ -2112,11 +2652,14 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   **k=3 をリテラルで再定義しない**。
 - **監査 entity_type カタログ** — `backend/core/schema.py` の `AUDIT_ENTITY_*` 定数 +
   `AUDIT_ENTITY_TYPES`（**正本はコード**。層が増えるたびに本数も増えるので、必要なときは
-  `core/schema.py` を数える — 2026-08-25 時点で37語彙）。
-  `theory_review_events` への記帳は原則
-  `services.record_review_event` に委譲する（core 層からの記帳と、呼び出し元トランザクションに
-  同乗する `document_pipeline/persistence.py` のみ例外として直接 INSERT を許容。entity_type は
-  必ずカタログ定数を使う）。
+  `core/schema.py` の `AUDIT_ENTITY_TYPES` を数える。件数をドキュメントに書き写さない）。
+  `theory_review_events` への記帳は、**API 層（route / services）からは
+  `services.record_review_event` に委譲する**のが原則。直接 `INSERT` を書いてよいのは
+  次の2種だけ: ①`core/` 配下のモジュールが FastAPI 非 import の制約下で自前セッションに
+  記帳する場合（`core/versioning/audit.py` / `core/help_kb/audit.py` /
+  `core/atlas_gaps/store.py` / `core/account_lifecycle.py` / `core/reconstruction/worker.py`）
+  ②呼び出し元トランザクションに同乗する `core/document_pipeline/persistence.py`。
+  いずれの経路でも entity_type は必ずカタログ定数（`core/schema.py` の `AUDIT_ENTITY_*`）を使う。
 - **`backend/core/notification_recipients.py`** — 通知宛先解決（所有者 / group member）の共通
   JOIN プリミティブ。宛先集合の方針（status 系 = owner+editor のみ / V層 = viewer+editor・owner 除外）
   は各層に残し、SQL だけを共有する。
@@ -2166,7 +2709,7 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   element=ITEM v2 の意図的世代差を維持）。
 - **`backend/core/trace_registry.py`**（2026-08-15 新設、正本設計書
   `docs/features/trace_registry_sovereignty_ledger_design.md`） — `interest_traces` の
-  **kind 登録簿の正本**（8 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、
+  **kind 登録簿の正本**（全 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、
   + 主要消費者の方式宣言 `CONSUMERS`）。**新しい kind・消費者は登録簿に宣言する** —
   `test_trace_registry_guardrails.py` が消費面ソースとの一致を固定し、`services._INTEREST_KINDS`
   は登録簿からの導出。最初の読み手は主権台帳v1「わたしの記録」（`core/trace_ledger.py` +

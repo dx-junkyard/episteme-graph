@@ -184,6 +184,66 @@ class TestProjectMaterialStatusesBulk:
         assert bulk["mat-2"] == single2
         assert sb.execute.call_count == 2
 
+    def test_bulk_picks_the_newest_run_across_both_join_keys(self):
+        """回帰: 最新 run が material_id でしか一致しないとき、単体とバッチが食い違った。
+
+        単体の ``_fetch_latest_run`` は ``document_id = :d OR material_id = :m`` の
+        **和集合の最新1件**を採る。バッチが ``by_document or by_material`` と
+        document_id 一致を優先していたため、最新の失敗 run を見落として
+        ``analyzed`` を返し、教材一覧（バッチ）と個票・G層（単体）が別の状態を
+        表示しうる状態だった（Tier3-16 の状態導出1本化が壊れる）。
+        """
+        import datetime as dt
+
+        older = dt.datetime(2026, 1, 1, 10, 0)
+        newer = dt.datetime(2026, 1, 1, 11, 0)
+        doc = _doc_row("doc-1", "mat-1", "completed", 5)
+        # 古い run は document_id だけ、新しい run は material_id だけで一致する。
+        run_old = _run_row("run-old", "doc-1", None, status="completed",
+                           current_stage="", updated_at=older, completed_at=older,
+                           created_at=older)
+        run_new = _run_row("run-new", None, "mat-1", status="failed",
+                           current_stage="paper_skeleton", error_message="boom",
+                           updated_at=newer, completed_at=newer, created_at=newer)
+
+        s1 = MagicMock()
+        s1.execute.side_effect = [_result(mappings_fetchone=doc), _result(mappings_fetchone=run_new)]
+        single = projector.project_material_status(s1, "mat-1")
+
+        sb = MagicMock()
+        sb.execute.side_effect = [
+            _result(mappings_all=[doc]),
+            _result(mappings_all=[run_new, run_old]),  # created_at DESC
+        ]
+        bulk = projector.project_material_statuses_bulk(sb, ["mat-1"])["mat-1"]
+
+        assert single.state == schema.MATERIAL_STATE_ANALYSIS_FAILED
+        assert bulk == single
+        assert bulk.run_id == "run-new"
+
+    def test_bulk_uses_the_document_match_when_material_match_is_older(self):
+        """逆向き（document_id 一致のほうが新しい）でも和集合の最新を採る。"""
+        import datetime as dt
+
+        older = dt.datetime(2026, 1, 1, 10, 0)
+        newer = dt.datetime(2026, 1, 1, 11, 0)
+        doc = _doc_row("doc-1", "mat-1", "completed", 5)
+        run_old = _run_row("run-old", None, "mat-1", status="failed",
+                           error_message="stale", updated_at=older, completed_at=older,
+                           created_at=older)
+        run_new = _run_row("run-new", "doc-1", None, status="completed",
+                           current_stage="", updated_at=newer, completed_at=newer,
+                           created_at=newer)
+
+        sb = MagicMock()
+        sb.execute.side_effect = [
+            _result(mappings_all=[doc]),
+            _result(mappings_all=[run_new, run_old]),
+        ]
+        bulk = projector.project_material_statuses_bulk(sb, ["mat-1"])["mat-1"]
+        assert bulk.run_id == "run-new"
+        assert bulk.state == schema.MATERIAL_STATE_ANALYZED
+
     def test_bulk_unknown_for_missing_document(self):
         sb = MagicMock()
         sb.execute.side_effect = [_result(mappings_all=[]), _result(mappings_all=[])]

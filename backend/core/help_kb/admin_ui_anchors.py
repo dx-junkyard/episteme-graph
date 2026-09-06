@@ -16,7 +16,8 @@ SYSTEM_ADMIN は teacher/ + system_admin/ の両方を解決する（fail-closed
 
 対応する節がまだ無い（＝マニュアルがまだこの UI 要素を説明していない）論理アンカーは
 ``ADMIN_UI_ANCHORS`` に **入れない**（``KNOWN_ADMIN_UI_ANCHOR_IDS`` にのみ登録し、
-no_hit 経路で需要を計測する）。全283アンカーがマップ済み
+no_hit 経路で需要を計測する）。現状は全アンカーがマップ済み
+（正確な件数は ``backend/tests/test_admin_help_ui_anchors.py`` が正）
 （版の管理モーダルの発行/削除予約ボタンは versioning.* が正 — course-management 側の
 重複IDは DOM 担体を持てないため収載しない。節自体は 13-admin-course-management.md に残る）。
 
@@ -41,6 +42,7 @@ from . import manual as _manual
 KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
     {
         "atlas.add-domain-toggle",
+        "atlas.aliases",
         "atlas.assist-toggle",
         "atlas.binding-course-select",
         "atlas.binding-new-domain",
@@ -50,8 +52,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.discard-draft",
         "atlas.domain-restore",
         "atlas.domain-retire",
+        "atlas.edge-candidates",
+        "atlas.edge-dismissed-filter",
+        "atlas.edge-incorporate",
         "atlas.freeze",
         "atlas.gap-accept",
+        "atlas.gap-alias-register",
         "atlas.gap-candidates",
         "atlas.gap-dismiss",
         "atlas.gap-dismissed-filter",
@@ -59,15 +65,19 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.gap-incorporate",
         "atlas.gap-restore",
         "atlas.generate",
+        "atlas.overview-action",
         "atlas.refresh",
         "atlas.report-incorporate",
         "atlas.report-resolve",
         "atlas.reports-filter",
+        "atlas.reports-refresh",
         "atlas.save-draft",
+        "atlas.vector-refresh",
         "course-builder.approve-btn",
         "course-builder.atlas-binding-area",
         "course-builder.import-course-btn",
         "course-builder.material-card",
+        "course-builder.material-detail",
         "course-builder.material-filter",
         "course-builder.material-search",
         "course-builder.material-sort",
@@ -136,6 +146,20 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "error-analysis.select-all",
         "error-analysis.select-row",
         "error-analysis.time-range",
+        "graph-review.approve",
+        "graph-review.chat",
+        "graph-review.claim-approve",
+        "graph-review.filter-unreviewed",
+        "graph-review.graph-chat",
+        "graph-review.layer",
+        "graph-review.modal",
+        "graph-review.new-chat",
+        "graph-review.next-unreviewed",
+        "graph-review.open-deliberation",
+        "graph-review.paper-facing",
+        "graph-review.paper-view",
+        "graph-review.reject",
+        "graph-review.voice",
         "groups.create-form",
         "groups.delete-btn",
         "groups.invite-btn",
@@ -143,6 +167,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "groups.leave-btn",
         "groups.list",
         "groups.my-invitations",
+        "groups.refresh",
         "groups.remove-btn",
         "groups.rotate-btn",
         "header.copilot",
@@ -207,6 +232,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.nav-components",
         "lecture-studio.nav-course",
         "lecture-studio.nav-document",
+        "lecture-studio.recon-item-restore",
         "lecture-studio.recon-review-btn",
         "lecture-studio.recon-review-sort",
         "lecture-studio.refresh-graph-btn",
@@ -242,6 +268,16 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "manual-editor.switch-to-db",
         "manual-editor.switch-to-files",
         "materials.analyze-images",
+        "materials.arxiv-discovery",
+        "materials.arxiv-discovery-citation-search",
+        "materials.arxiv-discovery-ingest",
+        "materials.arxiv-discovery-interest",
+        "materials.arxiv-discovery-modal",
+        "materials.arxiv-discovery-order",
+        "materials.arxiv-discovery-queue",
+        "materials.arxiv-discovery-queue-refresh",
+        "materials.arxiv-discovery-search",
+        "materials.arxiv-discovery-subscribe",
         "materials.cost-forecast-note",
         "materials.export-modal",
         "materials.figure-deliberate",
@@ -250,6 +286,12 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.figures-modal",
         "materials.landscape-modal",
         "materials.landscape-propose",
+        "materials.radar-compare",
+        "materials.radar-distance",
+        "materials.radar-ingest",
+        "materials.radar-modal",
+        "materials.radar-provenance",
+        "materials.radar-search",
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
@@ -263,9 +305,11 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-figures",
         "materials.row-inventory",
         "materials.row-landscape",
+        "materials.row-graph-review",
         "materials.row-more-menu",
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
+        "materials.row-radar",
         "materials.row-resume-analysis",
         "materials.row-retry-stage",
         "materials.row-seminar-brief",
@@ -276,6 +320,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.url-upload",
         "materials.url-upload-modal",
         "materials.url-upload-submit",
+        "release-review.evidence",
         "release-review.modal",
         "release-review.next",
         "release-review.publish",
@@ -338,6 +383,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- atlas.* — 分野の地図タブ --------------------------------------------------------
     # 新しい分野マップを作る
     "atlas.add-domain-toggle": "teacher/17-admin-atlas.md#add-domain",
+    # 登録済みの別名（別名レジストリの区画全体）
+    "atlas.aliases": "teacher/17-admin-atlas.md#aliases",
     # AIと部分修正
     "atlas.assist-toggle": "teacher/17-admin-atlas.md#assist",
     # コース配置のコース選択
@@ -356,10 +403,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.domain-restore": "teacher/17-admin-atlas.md#domain-restore",
     # この分野を廃止する
     "atlas.domain-retire": "teacher/17-admin-atlas.md#domain-retire",
+    # 関係（辺）の候補（グループ全体）
+    "atlas.edge-candidates": "teacher/17-admin-atlas.md#edge-candidates",
+    # 見送り済みも表示（辺候補）
+    "atlas.edge-dismissed-filter": "teacher/17-admin-atlas.md#edge-dismissed-filter",
+    # 次版の下書きへ反映…（採用済みの辺候補にだけ押せる）
+    "atlas.edge-incorporate": "teacher/17-admin-atlas.md#edge-incorporate",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
     # 論文の解析から見つかった候補 — 採用
     "atlas.gap-accept": "teacher/17-admin-atlas.md#gap-accept",
+    # 別名として登録（近傍注記のある候補にだけ出る）
+    "atlas.gap-alias-register": "teacher/17-admin-atlas.md#gap-alias-register",
     # 論文の解析から見つかった候補（グループ全体）
     "atlas.gap-candidates": "teacher/17-admin-atlas.md#gap-candidates",
     # 却下…（理由必須）
@@ -376,14 +431,20 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.generate": "teacher/17-admin-atlas.md#generate",
     # 更新
     "atlas.refresh": "teacher/17-admin-atlas.md#refresh",
+    # 状態カード下の「次にすること」ボタン（文言は状態で変わる・生成以外は画面内移動のみ）。
+    "atlas.overview-action": "teacher/17-admin-atlas.md#overview-action",
     # 次版で対応済みにする
     "atlas.report-incorporate": "teacher/17-admin-atlas.md#report-incorporate",
     # 採用（次版へ）／見送り（理由つき）／重複統合
     "atlas.report-resolve": "teacher/17-admin-atlas.md#report-resolve",
     # 修正報告の表示フィルタ
     "atlas.reports-filter": "teacher/17-admin-atlas.md#reports-filter",
+    # 修正報告の区画内にある「更新」（タブ最上部の atlas.refresh とは別ボタン）。
+    "atlas.reports-refresh": "teacher/17-admin-atlas.md#reports-refresh",
     # 次版を保存
     "atlas.save-draft": "teacher/17-admin-atlas.md#save-draft",
+    # 索引を再構築
+    "atlas.vector-refresh": "teacher/17-admin-atlas.md#vector-refresh",
 
     # --- course-builder.* — コースビルダータブ ---------------------------------------------
     # 承認してコースを登録
@@ -394,6 +455,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "course-builder.import-course-btn": "teacher/12-admin-course-builder.md#import-course-btn",
     # 教材カード
     "course-builder.material-card": "teacher/12-admin-course-builder.md#material-card",
+    # 教材カード右端の「詳細」（選択トグルとは独立・サーバ問い合わせなし）。
+    "course-builder.material-detail": "teacher/12-admin-course-builder.md#material-detail",
     # すべて / コース未作成 / 直近の生成 / 解析完了
     "course-builder.material-filter": "teacher/12-admin-course-builder.md#material-filter",
     # ファイル名・タイトルで検索…
@@ -541,6 +604,23 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 期間を選ぶ
     "error-analysis.time-range": "system_admin/12-admin-error-analysis.md#time-range",
 
+    # --- graph-review.* — グラフ対話レビュー（graph_dialogue_review_design.md） --------
+    # 教材行から開く、理論操作グラフ起点のレビュー画面（承認・却下・AI対話）。
+    "graph-review.approve": "teacher/26-admin-graph-review.md#node-approve",
+    "graph-review.chat": "teacher/26-admin-graph-review.md#node-chat",
+    "graph-review.claim-approve": "teacher/26-admin-graph-review.md#claim-approve",
+    "graph-review.filter-unreviewed": "teacher/26-admin-graph-review.md#filter-unreviewed",
+    "graph-review.graph-chat": "teacher/26-admin-graph-review.md#graph-chat",
+    "graph-review.layer": "teacher/26-admin-graph-review.md#layer-toggle",
+    "graph-review.modal": "teacher/26-admin-graph-review.md#graph-review-modal",
+    "graph-review.new-chat": "teacher/26-admin-graph-review.md#new-chat",
+    "graph-review.next-unreviewed": "teacher/26-admin-graph-review.md#next-unreviewed",
+    "graph-review.open-deliberation": "teacher/26-admin-graph-review.md#open-deliberation",
+    "graph-review.paper-facing": "teacher/26-admin-graph-review.md#paper-facing",
+    "graph-review.paper-view": "teacher/26-admin-graph-review.md#paper-view",
+    "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
+    "graph-review.voice": "teacher/26-admin-graph-review.md#voice-chat",
+
     # --- groups.* — グループタブ --------------------------------------------------------
     # グループを作成
     "groups.create-form": "teacher/15-admin-groups.md#create-form",
@@ -556,6 +636,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "groups.list": "teacher/15-admin-groups.md#list",
     # 未承諾の招待
     "groups.my-invitations": "teacher/15-admin-groups.md#my-invitations",
+    # グループ管理タブ見出し右の「更新」（一覧と招待の再取得）。
+    "groups.refresh": "teacher/15-admin-groups.md#refresh",
     # 除名
     "groups.remove-btn": "teacher/15-admin-groups.md#remove-btn",
     # 招待コード再発行
@@ -692,6 +774,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.nav-course": "teacher/14-admin-lecture-studio.md#nav-tabs",
     # 文書構造（左ペインタブ）
     "lecture-studio.nav-document": "teacher/14-admin-lecture-studio.md#nav-tabs",
+    # 再構成の確認：自動配信に戻す（処理済み item の状態を auto へ戻す）
+    "lecture-studio.recon-item-restore": "teacher/14-admin-lecture-studio.md#recon-item-restore",
     # 再構成の確認
     "lecture-studio.recon-review-btn": "teacher/14-admin-lecture-studio.md#recon-review-btn",
     # 再構成の確認：並び順（負荷の高い順）トグル
@@ -770,6 +854,26 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- materials.* — 教材管理タブ -----------------------------------------------------
     # 図面・画像を解析する
     "materials.analyze-images": "teacher/11-admin-materials.md#analyze-images",
+    # arXivから探す（論文ディスカバリー, paper_discovery_design.md）— アップロードゾーン内のリンク
+    "materials.arxiv-discovery": "teacher/11-admin-materials.md#arxiv-discovery",
+    # 引用グラフから探す（取り込み済み論文をシードにした第2の候補供給。env オプトインで既定は無効）
+    "materials.arxiv-discovery-citation-search": "teacher/11-admin-materials.md#arxiv-discovery-citation-search",
+    # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
+    "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
+    # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）
+    "materials.arxiv-discovery-interest": "teacher/11-admin-materials.md#arxiv-discovery-interest",
+    # arXivから探すモーダル（検索・購読パネル / 候補一覧 / 取り込みの3区画）
+    "materials.arxiv-discovery-modal": "teacher/11-admin-materials.md#arxiv-discovery-modal",
+    # 並び順（新着順 / 関連度順。次の検索から適用・関連度は段階ラベルのみで数値を出さない）
+    "materials.arxiv-discovery-order": "teacher/11-admin-materials.md#arxiv-discovery-order",
+    # 取り込みキュー（6件以上のバッチ登録の進捗。既定で閉じた欄・自動更新なし）
+    "materials.arxiv-discovery-queue": "teacher/11-admin-materials.md#arxiv-discovery-queue",
+    # キューの更新（開いたとき・登録直後・このボタンのときだけ読む）
+    "materials.arxiv-discovery-queue-refresh": "teacher/11-admin-materials.md#arxiv-discovery-queue-refresh",
+    # この条件で検索（arXiv のメタデータのみ・LLM 不使用）
+    "materials.arxiv-discovery-search": "teacher/11-admin-materials.md#arxiv-discovery-search",
+    # この条件を保存（分野単位の購読条件。外したキーフレーズも保持される）
+    "materials.arxiv-discovery-subscribe": "teacher/11-admin-materials.md#arxiv-discovery-subscribe",
     # AI利用枠の見通し（コスト見通しの一行。アップロードゾーン + 再解析モーダル）
     "materials.cost-forecast-note": "teacher/11-admin-materials.md#cost-forecast-note",
     # 外部レビュー用に書き出しモーダル
@@ -786,6 +890,19 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.landscape-modal": "teacher/11-admin-materials.md#landscape-modal",
     # AIで再提案（配置候補の再生成）
     "materials.landscape-propose": "teacher/11-admin-materials.md#landscape-propose",
+    # 違いを分析（論文レーダー, paper_radar_design.md §4.2）— 要旨比較の AI 推定・非保存
+    "materials.radar-compare": "teacher/11-admin-materials.md#radar-compare",
+    # 距離（近い / 中間 / 同じ分野の別テーマ。段階ラベルのみ・数値は出さない）
+    "materials.radar-distance": "teacher/11-admin-materials.md#radar-distance",
+    # 選択した論文を取り込む（レーダー）— 取り込みの弁は既存 ingest と同一
+    "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
+    # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）
+    "materials.radar-modal": "teacher/11-admin-materials.md#radar-modal",
+    # この論文として登録する（出所の後付け登録, paper_radar_design.md §11）—
+    # ファイル名からの推定は書き込まない・自動記帳はタイトル完全一致時のみ
+    "materials.radar-provenance": "teacher/11-admin-materials.md#radar-provenance",
+    # この条件で検索（レーダー）— arXiv のメタデータのみ・テキスト LLM 不使用
+    "materials.radar-search": "teacher/11-admin-materials.md#radar-search",
     # 統合先ラジオ（新規作成 / 既存エントリへ統合）+ 例示画像を含めるチェックボックス
     "materials.library-entry-merge-target": "teacher/11-admin-materials.md#library-entry-merge-target",
     # ライブラリへ昇格モーダル
@@ -812,12 +929,18 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
     # 位置づけ（分野マップ）…
     "materials.row-landscape": "teacher/11-admin-materials.md#landscape-open",
+    # グラフレビュー（graph_dialogue_review_design.md: グラフ対話レビューの入口。
+    # 2026-09-06 から ⋯ メニューではなく行のアイコンボタン）
+    "materials.row-graph-review": "teacher/26-admin-graph-review.md#graph-review-open",
     # 操作メニュー（⋯）— 行操作の2層化（admin_ux_issues_2026-08-01.md §2.3）
     "materials.row-more-menu": "teacher/11-admin-materials.md#row-more-menu",
     # PDF再登録
     "materials.row-pdf-reupload": "teacher/11-admin-materials.md#pdf-reupload",
     # パイプラインを実行 ▼
     "materials.row-pipeline-run": "teacher/11-admin-materials.md#pipeline-run",
+    # 📡 近い論文を探す（paper_radar_design.md §4.1: 教材起点の類似論文探索の入口。
+    # 2026-09-06 から ⋯ メニューではなく行のアイコンボタン）
+    "materials.row-radar": "teacher/11-admin-materials.md#radar-open",
     # 解析再開
     "materials.row-resume-analysis": "teacher/11-admin-materials.md#resume-analysis",
     # ステージ再実行（縮退時のみ表示されるリンク）
@@ -842,6 +965,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # --- release-review.* — リリース前の確認ウィザード（release_review_flow_design.md。コース管理/コースビルダーから開く横断UI） -
     # ウィザード本体（3ステップ: 学習マップ → 論文の位置づけ → 公開）
     "release-review.modal": "teacher/13-admin-course-management.md#release-review-modal",
+    # 各行の「根拠を見る」— 判断の材料（論文からの逐語引用）の折りたたみ
+    # （確定文脈の記帳 — decision_context_design.md）
+    "release-review.evidence": "teacher/13-admin-course-management.md#release-review-evidence",
     # 各ステップの主ボタン（＝確認したものとして記録する）
     "release-review.next": "teacher/13-admin-course-management.md#release-review-next",
     # 公開する

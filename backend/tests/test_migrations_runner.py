@@ -358,7 +358,66 @@ _SIMPLE_FORBIDDEN_PATTERNS: list[tuple[re.Pattern, str]] = [
         re.compile(r"\bADD\s+CONSTRAINT\b", re.IGNORECASE),
         "ADD CONSTRAINT outside a DO $$ guard (constraint swap must be guarded)",
     ),
+    # -- 以下、毎起動・全ファイル再実行方式で2回目に失敗する / 黙ってデータを変える DDL。
+    #    現行 002〜076 はいずれも違反ゼロ（追加時に確認済み）で、将来の追加を防ぐための
+    #    網である。いずれも DO $$ ガード内に書けばマスクされる。
+    (
+        re.compile(r"\bCREATE\s+TYPE\b", re.IGNORECASE),
+        "CREATE TYPE outside a DO $$ guard (duplicate_object on the second boot; "
+        "PostgreSQL has no CREATE TYPE IF NOT EXISTS)",
+    ),
+    (
+        re.compile(r"\bCREATE\s+VIEW\b", re.IGNORECASE),
+        "CREATE VIEW without OR REPLACE (duplicate_table on the second boot)",
+    ),
+    (
+        re.compile(r"\bCREATE\s+MATERIALIZED\s+VIEW\s+(?!IF\s+NOT\s+EXISTS\b)", re.IGNORECASE),
+        "CREATE MATERIALIZED VIEW without IF NOT EXISTS",
+    ),
+    (
+        re.compile(r"\bCREATE\s+SEQUENCE\s+(?!IF\s+NOT\s+EXISTS\b)", re.IGNORECASE),
+        "CREATE SEQUENCE without IF NOT EXISTS",
+    ),
+    (
+        re.compile(r"\bCREATE\s+TRIGGER\b", re.IGNORECASE),
+        "CREATE TRIGGER outside a DO $$ guard (no IF NOT EXISTS in PostgreSQL)",
+    ),
+    (
+        re.compile(r"\bCREATE\s+FUNCTION\b", re.IGNORECASE),
+        "CREATE FUNCTION without OR REPLACE",
+    ),
+    (
+        re.compile(r"\bDROP\s+INDEX\s+(?!IF\s+EXISTS\b)", re.IGNORECASE),
+        "DROP INDEX without IF EXISTS",
+    ),
+    (
+        re.compile(r"\bDROP\s+CONSTRAINT\s+(?!IF\s+EXISTS\b)", re.IGNORECASE),
+        "DROP CONSTRAINT without IF EXISTS",
+    ),
+    (
+        re.compile(r"\bDROP\s+COLUMN\s+(?!IF\s+EXISTS\b)", re.IGNORECASE),
+        "DROP COLUMN without IF EXISTS",
+    ),
+    (
+        re.compile(r"\bRENAME\s+(?:COLUMN|TO|CONSTRAINT)\b", re.IGNORECASE),
+        "RENAME outside a DO $$ guard (the second boot renames nothing and errors)",
+    ),
+    (
+        re.compile(r"\bADD\s+PRIMARY\s+KEY\b", re.IGNORECASE),
+        "ADD PRIMARY KEY outside a DO $$ guard",
+    ),
+    (
+        re.compile(r"\bALTER\s+COLUMN\s+\w+\s+TYPE\b", re.IGNORECASE),
+        "ALTER COLUMN ... TYPE outside a DO $$ guard "
+        "(re-running a type change can silently rewrite/erase data — the documented "
+        "worst case is a vector column retype wiping every embedding on each boot)",
+    ),
 ]
+
+#: シード INSERT の検出（``migration でシードしない`` — 設計書 070 / 071 / 076）。
+#: ``ON CONFLICT`` の無い INSERT は、2回目の起動で行を二重に入れるか、管理者が
+#: 削除した行を復活させて「削除が効かない」状態を作る。
+_INSERT_RE = re.compile(r"\bINSERT\s+INTO\b", re.IGNORECASE)
 
 
 def _strip_comments_and_dollar_blocks(sql: str) -> str:
@@ -410,6 +469,20 @@ def _collect_idempotency_violations(directory: Path) -> list[str]:
                 "(ON CONFLICT ... DO UPDATE and WHERE-guarded backfills are fine)"
             )
 
+        # シード INSERT（ON CONFLICT の無い INSERT）。毎起動再実行で行が二重に入るか、
+        # 管理者が削除した行が復活して削除が効かなくなる。
+        for match in _INSERT_RE.finditer(stripped):
+            end = stripped.find(";", match.start())
+            statement = stripped[match.start(): end if end != -1 else len(stripped)]
+            if re.search(r"\bON\s+CONFLICT\b", statement, re.IGNORECASE):
+                continue
+            violations.append(
+                f"{path.name}:{_line_of(stripped, match.start())}: "
+                "INSERT without ON CONFLICT outside a DO $$ guard "
+                "(migrations must not seed rows: the second boot duplicates them, "
+                "or resurrects rows an admin deleted)"
+            )
+
     return violations
 
 
@@ -422,6 +495,91 @@ class TestIdempotencyLint:
             f"{len(violations)} idempotency violation(s) found:\n"
             + "\n".join(violations)
         )
+
+
+class TestIdempotencyLintDetectsNonIdempotentDdl:
+    """lint そのものの単体テスト（パターン自体の退行を検出する）。
+
+    ``_collect_idempotency_violations`` は実ディレクトリにしか当てられておらず、
+    「現行ファイルが違反ゼロ」であることは、パターンが**機能している**ことの
+    証拠にならない（全パターンを壊しても緑のまま）。1件ずつ合成ファイルを
+    食わせて、確かに検出することを固定する。
+    """
+
+    NON_IDEMPOTENT = [
+        ("CREATE TABLE t (id int);", "CREATE TABLE"),
+        ("CREATE INDEX idx_a ON t (a);", "CREATE INDEX"),
+        ("CREATE INDEX CONCURRENTLY idx_b ON t (b);", "CONCURRENTLY"),
+        ("ALTER TABLE t ADD COLUMN c int;", "ADD COLUMN"),
+        ("CREATE EXTENSION vector;", "CREATE EXTENSION"),
+        ("DROP TABLE t;", "DROP TABLE"),
+        ("ALTER TABLE t ADD CONSTRAINT t_chk CHECK (a > 0);", "ADD CONSTRAINT"),
+        ("CREATE TYPE mood AS ENUM ('a');", "CREATE TYPE"),
+        ("CREATE VIEW v AS SELECT 1;", "CREATE VIEW"),
+        ("CREATE MATERIALIZED VIEW mv AS SELECT 1;", "MATERIALIZED VIEW"),
+        ("CREATE SEQUENCE s;", "CREATE SEQUENCE"),
+        ("CREATE TRIGGER trg BEFORE INSERT ON t EXECUTE FUNCTION f();", "CREATE TRIGGER"),
+        ("CREATE FUNCTION f() RETURNS int AS 'SELECT 1' LANGUAGE sql;", "CREATE FUNCTION"),
+        ("DROP INDEX idx_a;", "DROP INDEX"),
+        ("ALTER TABLE t DROP CONSTRAINT t_chk;", "DROP CONSTRAINT"),
+        ("ALTER TABLE t DROP COLUMN c;", "DROP COLUMN"),
+        ("ALTER TABLE t RENAME COLUMN a TO b;", "RENAME"),
+        ("ALTER TABLE t ADD PRIMARY KEY (id);", "ADD PRIMARY KEY"),
+        ("ALTER TABLE chunks ALTER COLUMN embedding TYPE vector(1536);", "ALTER COLUMN"),
+        ("INSERT INTO seeds (id) VALUES (1);", "INSERT without ON CONFLICT"),
+        ("UPDATE t SET a = 1;", "without WHERE"),
+        ("DELETE FROM t;", "without WHERE"),
+        ("BEGIN;", "BEGIN"),
+    ]
+
+    IDEMPOTENT = [
+        "CREATE TABLE IF NOT EXISTS t (id int);",
+        "CREATE INDEX IF NOT EXISTS idx_a ON t (a);",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_u ON t (a);",
+        "ALTER TABLE t ADD COLUMN IF NOT EXISTS c int;",
+        "CREATE EXTENSION IF NOT EXISTS vector;",
+        "DROP TABLE IF EXISTS t;",
+        "CREATE OR REPLACE VIEW v AS SELECT 1;",
+        "CREATE OR REPLACE FUNCTION f() RETURNS int AS 'SELECT 1' LANGUAGE sql;",
+        "INSERT INTO seeds (id) VALUES (1) ON CONFLICT (id) DO NOTHING;",
+        "INSERT INTO t (id, n) VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET n = 2;",
+        "UPDATE t SET a = 1 WHERE a IS NULL;",
+        "DELETE FROM t WHERE id = 1;",
+        "ALTER TABLE t ALTER COLUMN c DROP NOT NULL;",
+    ]
+
+    def _lint(self, tmp_path: Path, body: str) -> list[str]:
+        (tmp_path / "init.sql").write_text("-- init\n", encoding="utf-8")
+        (tmp_path / "002_probe.sql").write_text(body, encoding="utf-8")
+        return _collect_idempotency_violations(tmp_path)
+
+    @pytest.mark.parametrize("statement,needle", NON_IDEMPOTENT)
+    def test_flags_non_idempotent_statement(self, tmp_path: Path, statement, needle):
+        violations = self._lint(tmp_path, statement + "\n")
+        assert violations, f"lint missed a non-idempotent statement: {statement!r}"
+        assert any(needle.lower() in v.lower() for v in violations), (
+            f"{statement!r} flagged, but not for {needle!r}: {violations}"
+        )
+
+    @pytest.mark.parametrize("statement", IDEMPOTENT)
+    def test_accepts_idempotent_statement(self, tmp_path: Path, statement):
+        assert self._lint(tmp_path, statement + "\n") == [], (
+            f"lint false-positives on an idempotent statement: {statement!r}"
+        )
+
+    def test_do_block_masks_guarded_statements(self, tmp_path: Path):
+        """DO $$ ガード内は既存方針どおりマスクする（挙動の明示）。"""
+        body = (
+            "DO $$ BEGIN\n"
+            "  IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'mood') THEN\n"
+            "    CREATE TYPE mood AS ENUM ('a');\n"
+            "  END IF;\n"
+            "END $$;\n"
+        )
+        assert self._lint(tmp_path, body) == []
+
+    def test_line_comments_are_not_linted(self, tmp_path: Path):
+        assert self._lint(tmp_path, "-- CREATE TABLE t (id int);\n") == []
 
 
 # ---------------------------------------------------------------------------

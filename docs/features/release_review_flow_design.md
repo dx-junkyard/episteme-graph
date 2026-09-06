@@ -123,7 +123,7 @@ accept_inferred_for_documents(session, document_ids, *, reviewer_id, note="") ->
 | メソッド・パス | 役割 |
 |---|---|
 | `GET /api/admin/landscape/courses/{course_id}/placements` | コースのソース論文の live 配置をまとめて返す（document 別・DTO は既存 `admin_placement_dto`）。`unplaced_domains`・骨格版・`pending_count`（未確認件数）・`hidden_count`（閲覧不可 document 由来の件数）を同梱。 |
-| `POST /api/admin/landscape/courses/{course_id}/placements/accept` | 「次へ」の実体。**edit 権限のある** document の `inferred` を一括 `confirmed` にし、1件ごとに監査記帳（`action="accept_on_release"`）。戻り値は `{confirmed, skipped_documents, pending_after}`。 |
+| `POST /api/admin/landscape/courses/{course_id}/placements/accept` | 「次へ」の実体。**edit 権限のある** document の `inferred` を一括 `confirmed` にし、1件ごとに監査記帳（`action="accept_on_release"`）。戻り値は `{course_id, confirmed, skipped_documents, decision_context}`（`decision_context` は 2026-09-04 追補 — §6）。 |
 
 - コースのゲートは `services.get_accessible_course_data`、document のゲートは
   `services.resolve_document_access`（read=view / accept=edit）。権限の無い document は
@@ -196,3 +196,50 @@ accept_inferred_for_documents(session, document_ids, *, reviewer_id, note="") ->
 - **`GET /api/admin/landscape/overview` の UI 配線**（API は実装済み・UI ゼロ）。分野の地図
   タブに「この分野に何本の論文が置かれているか」を出す。
 - 学習者への「教員が一括確認したか個別確認したか」の開示（意図的にしない）。
+
+---
+
+## 6. 追補（2026-09-04）— 確定文脈の記帳
+
+[`docs/vision.md`](../vision.md) §4 の改訂原則1（研究調査による再審）を受け、「次へ」による
+一括確認に**確定文脈**（`decision_context`）の記帳を追加した。プリミティブとスキーマの
+正本は [確定文脈の記帳](decision_context_design.md)（DC1〜DC4）。
+
+### 6.1 RR2 の解釈補足
+
+RR2（承認は人間の1操作）は変更しない。ただしその読み方を次のように限定する。
+
+> **「次へ」が承認と読めるのは、①そのとき何が提示されていたか ②承認しない選択肢
+> （却下・再検討・あとで）があったこと ③後から誰がどの経路で覆せるか が記帳される
+> 限りにおいてである。**
+
+記帳を伴わない一括確認は、教員を「確定者」ではなく事故時の責任の置き場（moral crumple
+zone）に置くだけであり、RR3（出所を偽らない）の趣旨にも反する。§0 の「承認ラベルに
+ついての明示的なトレードオフ」で緩和策は RR3 のみと書いたが、2026-09-04 以降は
+**RR3 + 確定文脈**の2本になる。
+
+### 6.2 実装差分
+
+- **evidence の表示**: ステップ2の各行に「根拠を見る」（`<details>`、アンカー
+  `release-review.evidence`）を追加し、`admin_placement_dto.evidence[].quote` を逐語で
+  描く。引用の無い行でも折りたたみは出し、その事実を書く（提示の有無を行ごとに
+  静かに変えない）。
+- **accept の body**: `AcceptPlacementsRequest` に optional の `presented_placement_ids` /
+  `evidence_shown` を追加。**どちらも来歴申告**で、サーバの判断には使わない
+  （`client_reported` に隔離 — DC4）。提示集合の正本は、更新前にサーバが
+  `list_for_documents(..., statuses=[inferred])` で取り直した live の状態である。
+- **accept のレスポンス**: `decision_context` を追加（既存キーは不変）。画面は
+  `presented_matches_applied` から一致／不一致の事実文を1行出す。不一致でも公開は
+  止めない（RR7）。
+- **監査**: per-row の payload に `decision_context` を添付（既存キー `action` /
+  `course_id` / `document_id` と `action="accept_on_release"` は不変）。ゼロ件確認で
+  監査を出さない挙動も不変。
+- **画面の事実文**: 「次へ」の意味に続けて「確認後も、教材管理の『位置づけ（分野マップ）』
+  から個別に再検討・却下へ戻せます。」を常時表示する。
+
+### 6.3 ドキュメントの是正
+
+§3.1 の API 表にあった戻り値 `pending_after` は実装に存在しなかった（実際は
+`{course_id, confirmed, skipped_documents}`）。2026-09-04 の追加分と併せて
+`{course_id, confirmed, skipped_documents, decision_context}` に是正した。
+

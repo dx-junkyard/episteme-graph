@@ -456,6 +456,58 @@ class TestGetAtlas:
         assert data["initial_selection"]["1"] == "dual"
         assert data["initial_selection"]["2"] == "dual"
 
+    def test_relation_threads_key_is_absent_without_the_edges_layer(
+        self, client, warm_cache
+    ):
+        """推定の糸 (RE層 §6) は導出できないときキー自体を付けない (RE2 の fail-closed)。"""
+        data = client.get(
+            "/api/atlas?cartridge=particle_physics", headers=_headers()
+        ).json()
+        assert "threads" not in data
+
+    def test_relation_threads_are_merged_when_available(
+        self, client, warm_cache, monkeypatch
+    ):
+        from core.atlas_edges import threads as threads_module
+
+        payload = {
+            "available": True,
+            "skeleton_version": "2026.1",
+            "items": [
+                {
+                    "from": "ope",
+                    "to": "dual",
+                    "from_label": "演算子積展開",
+                    "to_label": "双対性",
+                    "nearness_label": "かなり近い",
+                }
+            ],
+        }
+        monkeypatch.setattr(
+            threads_module, "threads_for_domain", lambda _s, domain: payload
+        )
+        data = client.get(
+            "/api/atlas?cartridge=particle_physics", headers=_headers()
+        ).json()
+        assert data["threads"] == payload
+        # 生スコアは載らない (RE4)。
+        assert "similarity" not in str(data["threads"])
+
+    def test_relation_threads_failure_does_not_break_the_map(
+        self, client, warm_cache, monkeypatch
+    ):
+        from core.atlas_edges import threads as threads_module
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("edge layer down")
+
+        monkeypatch.setattr(threads_module, "threads_for_domain", _boom)
+        response = client.get(
+            "/api/atlas?cartridge=particle_physics", headers=_headers()
+        )
+        assert response.status_code == 200
+        assert "threads" not in response.json()
+
     def test_no_evaluative_language_over_api(self, client, warm_cache):
         """受け入れ条件6: API 応答の検証行・承認行に評価語が無い。"""
         from core import atlas_state as st
@@ -502,8 +554,27 @@ class TestGetAtlasNode:
         assert data["status"] == "verified"
         assert "原文3本に裏付け" in data["verify_line"]
         assert "式(12)" in data["evidence_refs"]
-        assert data["endorsements"][0]["endorser_count"] == 3
+        # C層原則1: 学習者も叩けるルートなので承認は段階ラベルのみ（生数値は出さない）。
+        assert data["endorsements"][0] == {"label": "強い支持: 3名の教員が承認(専門2分野)"}
         assert data["skeleton_version"] == "2026.1"
+
+    def test_detail_panel_never_leaks_raw_endorsement_counts(self, client, warm_cache):
+        """承認の重みを学習者への評価点にしない（生カウントのキー自体を出さない）。"""
+        data = client.get(
+            "/api/atlas/node/bc_sumrule?cartridge=particle_physics", headers=_headers()
+        ).json()
+        forbidden = {"endorser_count", "strong_count", "expertise_breadth"}
+
+        def _walk(value):
+            if isinstance(value, dict):
+                assert not (forbidden & set(value)), f"生数値キーが漏れている: {value!r}"
+                for v in value.values():
+                    _walk(v)
+            elif isinstance(value, list):
+                for v in value:
+                    _walk(v)
+
+        _walk(data)
 
     def test_assumed_node_detail(self, client, warm_cache):
         data = client.get(

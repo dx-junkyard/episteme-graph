@@ -1,8 +1,12 @@
 """Episteme Graph — 設定の一元管理モジュール。
 
-すべての環境変数をこのモジュールに集約し、他のモジュールでは
-``os.environ`` を直接参照しない。pydantic-settings の ``BaseSettings``
-を利用してバリデーション付きで読み込む。
+環境変数はこのモジュールに集約するのが原則で、新しい設定は必ず ``Settings`` に
+フィールドとして足し、``get_settings()`` 経由で読む。pydantic-settings の
+``BaseSettings`` を利用してバリデーション付きで読み込む。
+
+**ただし現状は完全ではない**: 機能フラグや上限値など、``core`` / ``api`` の複数モジュール
+に ``os.environ`` / ``os.getenv`` の直接参照が残っている（既存の残存であり、新規に増やさ
+ないこと）。触る機会があれば ``Settings`` へ寄せる。
 
 Usage::
 
@@ -17,7 +21,9 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import AliasChoices, Field
+import os
+
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -73,17 +79,48 @@ class Settings(BaseSettings):
     )
 
     # --- LLM マルチモード設定 ---
+    # tier モデルの解決順序は「明示 env（LLM_*_MODEL、旧名は AliasChoices）→ 上位 tier からの
+    # フォールバック（standard ← LLM_ANALYSIS_MODEL / deep ← standard）→ 既定値」。
+    # かつて docker-compose.yml の `${VAR:-...}` 連鎖が担っていた旧名吸収・tier 間フォール
+    # バックを 2026-09-05 にここへ移設した（compose の既定値 `o3-mini` が Settings の既定を
+    # 黙って上書きしていたため。モデル決定の正本は core 側に一本化する）。
     # Fast: 意図分類、フォーマット整形など軽量タスク
-    llm_fast_model: str = "gpt-5.4-nano"
+    llm_fast_model: str = Field(
+        default="gpt-5.4-nano",
+        validation_alias=AliasChoices("LLM_FAST_MODEL", "OPENAI_FAST_MODEL"),
+    )
     llm_fast_effort: Literal["low", "medium", "high"] = "low"
 
     # Standard: 通常の対話、前提知識評価、論理構造抽出
-    llm_standard_model: str = "gpt-5.2"
+    # 未設定時は LLM_ANALYSIS_MODEL（旧 OPENAI_ANALYSIS_MODEL）が明示されていればそれに従う。
+    llm_standard_model: str = Field(
+        default="gpt-5.2",
+        validation_alias=AliasChoices("LLM_STANDARD_MODEL"),
+    )
     llm_standard_effort: Literal["low", "medium", "high"] = "medium"
 
     # Deep: 深刻な誤解の訂正、複雑な数式展開、グラフ依存関係解決
-    llm_deep_model: str = "gpt-5.2"
+    # 未設定時は standard（解決後）に従う。
+    llm_deep_model: str = Field(
+        default="gpt-5.2",
+        validation_alias=AliasChoices("LLM_DEEP_MODEL"),
+    )
     llm_deep_effort: Literal["low", "medium", "high"] = "high"
+
+    @model_validator(mode="after")
+    def _apply_tier_model_fallback_chain(self) -> "Settings":
+        """standard ← analysis / deep ← standard のフォールバック（明示 env がある場合のみ）。
+
+        env に無い tier だけを埋める。既定値どうしの関係（standard と deep はともに gpt-5.2）は
+        変えない。参照する env 名は各フィールドの AliasChoices と同じ綴りに限る。
+        """
+        env = os.environ
+        analysis_explicit = any(env.get(k) for k in ("LLM_ANALYSIS_MODEL", "OPENAI_ANALYSIS_MODEL"))
+        if not env.get("LLM_STANDARD_MODEL") and analysis_explicit and self.llm_analysis_model:
+            self.llm_standard_model = self.llm_analysis_model
+        if not env.get("LLM_DEEP_MODEL") and (env.get("LLM_STANDARD_MODEL") or analysis_explicit):
+            self.llm_deep_model = self.llm_standard_model
+        return self
 
     # --- モデルティアごとの最大出力トークン数 ---
     # エージェント LLM 呼び出しの ``max_tokens`` は、使用モデルのティアに応じて
@@ -309,6 +346,14 @@ class Settings(BaseSettings):
         default=5,
         validation_alias=AliasChoices("DELIBERATION_IDENTITY_CANDIDATES_TOP_K"),
     )
+    # 管理画面（グラフレビュー等）の音声対話 — 1ユーザー1日あたりの音声 API コール上限
+    # （STT + TTS の共通カウンタ。会話1往復で 2 コール消費する想定。共通規約
+    # `docs/features/assistant_common_infra_design.md`: 同期・単発 AI にも
+    # CostGate(day-only) を置く）
+    deliberation_voice_max_calls_per_day: int = Field(
+        default=200,
+        validation_alias=AliasChoices("DELIBERATION_VOICE_MAX_CALLS_PER_DAY"),
+    )
 
     # --- 教材図スタジオ（Teaching Figure Studio, migration 063） — コスト制御・上限 ---
     # 正本: docs/features/teaching_figure_studio_design.md §4.3
@@ -346,6 +391,22 @@ class Settings(BaseSettings):
     landscape_gap_max_per_document: int = Field(
         default=3,
         validation_alias=AliasChoices("LANDSCAPE_GAP_MAX_PER_DOCUMENT"),
+    )
+
+    # --- 分野マップのベクトル係留層（VA層, migration 074） ---
+    # 正本: docs/features/atlas_vector_anchoring_design.md §5
+    # アンカーベクトル構築・ギャップ近傍注記の embedding バッチ回数の日次上限
+    # （CostGate は in-memory。超過は fail-soft で従来動作へ縮退する — VA4）
+    atlas_vector_max_calls_per_day: int = Field(
+        default=50,
+        validation_alias=AliasChoices("ATLAS_VECTOR_MAX_CALLS_PER_DAY"),
+    )
+    # 正本: 同 §6（配置の前段絞り込み）
+    # ドメインごとに LLM へ閉世界提示する concept ノードの上限（0 で絞り込み無効。
+    # region は常に全提示 — gap 検出の親 region 選択肢を狭めないため）
+    landscape_vector_prefilter_topk: int = Field(
+        default=32,
+        validation_alias=AliasChoices("LANDSCAPE_VECTOR_PREFILTER_TOPK"),
     )
 
     # --- 標準化判定 worker（Phase S, 知識ネットワークビジョン §6） — コスト制御（他機能とは独立） ---
@@ -511,6 +572,34 @@ class Settings(BaseSettings):
     llm_price_table_path: str = Field(
         default="",
         validation_alias=AliasChoices("LLM_PRICE_TABLE_PATH"),
+    )
+
+    # --- 論文ディスカバリー層 Phase 3（正本: docs/features/paper_discovery_design.md §6） ---
+    # 候補の関連度ランキング（embedding 1バッチ = 1コール）の1日あたり上限。
+    # 上限到達は失敗ではなく「新着順で表示する」への fail-soft（検索自体は成立させる）。
+    discovery_ranking_max_calls_per_day: int = Field(
+        default=100,
+        validation_alias=AliasChoices("DISCOVERY_RANKING_MAX_CALLS_PER_DAY"),
+    )
+    # 引用グラフによる第2の候補供給源（Semantic Scholar）のオプトイン。
+    # 既定 off — 外部 API の追加は SYSTEM_ADMIN の明示設定で有効化する（設計書 §6）。
+    discovery_citation_source_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("DISCOVERY_CITATION_SOURCE_ENABLED"),
+    )
+
+    # --- 論文レーダー（正本: docs/features/paper_radar_design.md §5.6） ---
+    # 起点論文と候補の比較分析（1リクエスト = 1コール）の1日あたり上限（教員ごと）。
+    # 上限到達は 429 + 事実文（数値を返さない）。検索・帯分けとは独立のカウンタで、
+    # 帯分けの embedding は既存 DISCOVERY_RANKING_MAX_CALLS_PER_DAY を共有する。
+    discovery_compare_max_calls_per_day: int = Field(
+        default=20,
+        validation_alias=AliasChoices("DISCOVERY_COMPARE_MAX_CALLS_PER_DAY"),
+    )
+    # 比較分析のモデル。空文字なら fast tier（llm_fast_model）に委譲。
+    discovery_compare_llm_model: str = Field(
+        default="",
+        validation_alias=AliasChoices("DISCOVERY_COMPARE_LLM_MODEL"),
     )
 
     # --- M層（LLM モデル選択, core/llm_policy.py） ---

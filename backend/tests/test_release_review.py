@@ -428,6 +428,11 @@ class TestCoursePlacementsAccept:
         env["monkeypatch"].setattr(
             routes.landscape_store, "accept_inferred_for_documents", _accept
         )
+        # DC2: 「提示されていたもの」は更新前にサーバが取り直す。
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents",
+            lambda _s, ids, statuses=(): [_placement_row()],
+        )
         response = client.post(
             f"/api/admin/landscape/courses/{_COURSE}/placements/accept",
             headers={"Authorization": "Bearer " + teacher},
@@ -457,12 +462,83 @@ class TestCoursePlacementsAccept:
         assert args[5]["action"] != "review"
         assert args[5]["course_id"] == _COURSE
 
+        # DC1: 一括確定は確定文脈なしに記帳しない（vision §4 改訂原則1）。
+        ctx = args[5]["decision_context"]
+        assert ctx["basis"] == "release_review.placements"
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["presented"]["ids"] == [_PLACEMENT]
+        assert ctx["applied"]["ids"] == [_PLACEMENT]
+        assert ctx["decline_possible"] is True
+        assert ctx["alternatives_available"] == ["reconsider", "reject", "skip_step"]
+        assert ctx["reopen"]["path"] == routes.RELEASE_REOPEN_PATH
+        assert ctx["reopen"]["statuses"] == ["rejected", "review_required"]
+        # body 未指定なら来歴申告は載せない（DC4: 偽装しない）。
+        assert ctx["client_reported"] is None
+        assert ctx["evidence_shown"] is None
+        # 画面が事実文を出せるように同じ dict をレスポンスにも返す。
+        assert body["decision_context"]["basis"] == "release_review.placements"
+
+    def test_client_reported_is_isolated_from_server_derived_ids(self, client_and_teacher, env):
+        """DC4: クライアント申告は専用キーに隔離し、提示集合の正本にしない。"""
+        client, teacher = client_and_teacher
+        routes = env["routes"]
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "accept_inferred_for_documents",
+            lambda *a, **k: [_placement_row(status="confirmed")],
+        )
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents",
+            lambda _s, ids, statuses=(): [_placement_row()],
+        )
+        response = client.post(
+            f"/api/admin/landscape/courses/{_COURSE}/placements/accept",
+            headers={"Authorization": "Bearer " + teacher},
+            json={"presented_placement_ids": ["bogus-id"], "evidence_shown": True},
+        )
+        assert response.status_code == 200
+        ctx = response.json()["decision_context"]
+        # サーバ導出の提示集合は申告に汚染されない。
+        assert ctx["presented"]["ids"] == [_PLACEMENT]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["client_reported"] == {
+            "presented_placement_ids": ["bogus-id"],
+            "evidence_shown": True,
+        }
+        assert ctx["evidence_shown"] is True
+
+    def test_presented_but_not_applied_is_reported_honestly(self, client_and_teacher, env):
+        """DC2: 提示されたのに適用されなかった行があれば一致を偽らない。"""
+        client, teacher = client_and_teacher
+        routes = env["routes"]
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "accept_inferred_for_documents",
+            lambda *a, **k: [_placement_row(status="confirmed")],
+        )
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents",
+            lambda _s, ids, statuses=(): [
+                _placement_row(), _placement_row(id=_PLACEMENT_2)
+            ],
+        )
+        response = client.post(
+            f"/api/admin/landscape/courses/{_COURSE}/placements/accept",
+            headers={"Authorization": "Bearer " + teacher},
+        )
+        ctx = response.json()["decision_context"]
+        assert ctx["presented_matches_applied"] is False
+        assert ctx["presented"]["count"] == 2
+        assert ctx["applied"]["count"] == 1
+
     def test_nothing_to_accept_is_success_with_zero(self, client_and_teacher, env):
         client, teacher = client_and_teacher
         routes = env["routes"]
         env["monkeypatch"].setattr(
             routes.landscape_store, "accept_inferred_for_documents",
             lambda *args, **kwargs: [],
+        )
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents",
+            lambda _s, ids, statuses=(): [],
         )
         response = client.post(
             f"/api/admin/landscape/courses/{_COURSE}/placements/accept",

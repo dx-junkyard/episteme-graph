@@ -44,6 +44,12 @@ from types import MappingProxyType
 from core.status import schema as status_schema
 
 __all__ = [
+    "ANCHOR_LANDING_SCALE",
+    "ANCHOR_LANDING_THRESHOLD_MID",
+    "ANCHOR_LANDING_THRESHOLD_NEAR",
+    "ANCHOR_NEARNESS_SCALE",
+    "ANCHOR_NEARNESS_THRESHOLD_MID",
+    "ANCHOR_NEARNESS_THRESHOLD_NEAR",
     "AUDIO_STATUS_LABELS",
     "CONFIDENCE_LABELS_LOW_MED_HIGH",
     "CONFIDENCE_LABEL_HIGH",
@@ -56,8 +62,21 @@ __all__ = [
     "CONFIDENCE_TENTATIVE_REFERENCE_HIGH",
     "CONFIDENCE_THRESHOLD_HIGH",
     "CONFIDENCE_THRESHOLD_MEDIUM",
+    "DISCOVERY_RELEVANCE_LABEL_HIGH",
+    "DISCOVERY_RELEVANCE_LABEL_LOW",
+    "DISCOVERY_RELEVANCE_LABEL_MEDIUM",
+    "DISCOVERY_RELEVANCE_SCALE",
+    "DISCOVERY_RELEVANCE_THRESHOLD_HIGH",
+    "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
+    "EDGE_KIND_LABELS",
     "GradedScale",
     "MATERIAL_STATE_LABELS",
+    "RADAR_DISTANCE_LABEL_FAR",
+    "RADAR_DISTANCE_LABEL_MID",
+    "RADAR_DISTANCE_LABEL_NEAR",
+    "RADAR_DISTANCE_SCALE",
+    "RADAR_DISTANCE_THRESHOLD_MID",
+    "RADAR_DISTANCE_THRESHOLD_NEAR",
     "SCRIPT_STATUS_LABELS",
     "SUPPORT_SECTION_LABELS",
     "TRACE_STATUS_LABELS",
@@ -156,6 +175,122 @@ CONFIDENCE_TENTATIVE_REFERENCE_HIGH = GradedScale(
         CONFIDENCE_LABEL_REFERENCE,
         CONFIDENCE_LABEL_TENTATIVE,
     ),
+)
+
+
+# ── 論文ディスカバリーの関連度（PD4: 数値スコアを教員にも見せない）──────────────
+# 候補論文のアブストラクト埋め込みと、分野の取り込み済みコーパス重心との
+# **cosine 類似度**（-1〜1）の段階化。生値は API / UI へ出さず、並び順とこのラベル
+# だけを見せる（``core/paper_discovery/ranking.py``、設計書 §6）。
+#
+# 閾値は発明値（実測データ非由来）。参考にしたのは help_kb ベクトル補助層の
+# ``_MAX_COSINE_DISTANCE = 0.55``（= cosine 類似度 0.45 未満は「なんとなく関連」で
+# 捏造に見えるため足切りする、という同一モデル族での保守的な判断）。ここでは
+# 足切りはせず（PD6 — 候補を黙って消さない）、
+#   * 0.45 以上 = help_kb が「提示してよい」とした水準       → 「関連: 高」
+#   * 0.30 以上 = 同語彙圏だが主題が離れうる水準             → 「関連: 中」
+#   * それ未満・未測定                                       → 「関連: 低」
+# とする。実測での見直し前提（変えるときは設計書 §6 も更新する）。
+DISCOVERY_RELEVANCE_THRESHOLD_HIGH = 0.45
+DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM = 0.30
+
+DISCOVERY_RELEVANCE_LABEL_HIGH = "関連: 高"
+DISCOVERY_RELEVANCE_LABEL_MEDIUM = "関連: 中"
+DISCOVERY_RELEVANCE_LABEL_LOW = "関連: 低"
+
+DISCOVERY_RELEVANCE_SCALE = GradedScale(
+    (DISCOVERY_RELEVANCE_THRESHOLD_HIGH, DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM),
+    (
+        DISCOVERY_RELEVANCE_LABEL_HIGH,
+        DISCOVERY_RELEVANCE_LABEL_MEDIUM,
+        DISCOVERY_RELEVANCE_LABEL_LOW,
+    ),
+)
+
+
+# ── 論文レーダーの距離帯（PR2: 段階ラベルのみ・測れないものにラベルを付けない）────
+# seed 教材のチャンク重心（または seed 論文要旨）と候補アブストラクトの **cosine
+# 類似度**の段階化（``core/paper_discovery/ranking.py::band_candidates``、正本
+# ``docs/features/paper_radar_design.md`` §5.2）。分野重心の代わりに教材1件の重心を
+# 使うだけで、写す数値の意味は :data:`DISCOVERY_RELEVANCE_SCALE` と同じなので、
+# **閾値も同じ 0.45 / 0.30 を初期値に採用する**（発明値・実測見直し前提。ヒストグラムを
+# 見て変えるときは設計書 §9 も更新する）。
+#
+# **未測定（``None``）はこのスケールに通さない**（PR2）。:class:`GradedScale` の慎重側
+# フォールバックはここでは偽装になる — 「測れなかった」と「遠い」は別の事実であり、
+# 未測定候補には ``distance_label`` キー自体を付けない（呼び出し側
+# ``ranking.band_candidates`` が ``None`` を弾いてからラベルを引く）。
+RADAR_DISTANCE_THRESHOLD_NEAR = 0.45
+RADAR_DISTANCE_THRESHOLD_MID = 0.30
+
+RADAR_DISTANCE_LABEL_NEAR = "近い"
+RADAR_DISTANCE_LABEL_MID = "中間"
+RADAR_DISTANCE_LABEL_FAR = "遠い"
+
+RADAR_DISTANCE_SCALE = GradedScale(
+    (RADAR_DISTANCE_THRESHOLD_NEAR, RADAR_DISTANCE_THRESHOLD_MID),
+    (
+        RADAR_DISTANCE_LABEL_NEAR,
+        RADAR_DISTANCE_LABEL_MID,
+        RADAR_DISTANCE_LABEL_FAR,
+    ),
+)
+
+
+# ── 骨格アンカーへの近さ（分野マップのベクトル係留層 VA2）──────────────────────
+# 骨格ノード（region / concept）の**プロトタイプベクトル**と、論文重心 / 候補
+# アブストラクト / ギャップ候補ラベルとの **cosine 類似度**の段階化（正本
+# ``docs/features/atlas_vector_anchoring_design.md`` §9、算出は
+# ``core/atlas_vectors/query.py``）。cosine の生値は DB / 内部計算に留め、外へ出るのは
+# このスケールのラベルだけ（VA2 数値非表示）。
+#
+# 閾値は :data:`DISCOVERY_RELEVANCE_SCALE` より**高く**取る（0.55 / 0.40）。あちらは
+# 「候補を捨てずに並べ替える」ための相対順位づけだが、こちらは「地図のこのノードの
+# 近くに落ちる」という**係留の言明**であり、外すと閉世界の正直さ（VA8）を損なうため。
+# 0.55 は help_kb ベクトル補助層の保守的足切り（``_MAX_COSINE_DISTANCE = 0.55``）と
+# 同じ「提示してよい」水準に合わせた発明値で、実測での見直し前提
+# （変えるときは設計書 §9 も更新する）。
+#
+# 使い分け（設計書 §9）: ギャップ近傍注記は最上位帯（NEAR 以上）のみ表示、着地予測は
+# 上位2帯（MID 以上）を表示し、最下帯は表示しない（「なんとなく関連」を出さない）。
+ANCHOR_NEARNESS_THRESHOLD_NEAR = 0.55
+ANCHOR_NEARNESS_THRESHOLD_MID = 0.40
+
+ANCHOR_NEARNESS_SCALE = GradedScale(
+    (ANCHOR_NEARNESS_THRESHOLD_NEAR, ANCHOR_NEARNESS_THRESHOLD_MID),
+    ("かなり近い", "近い可能性", "遠い"),
+)
+
+# ── アンカー着地予測（論文テキスト × アンカープロトタイプ）───────────────────
+#
+# :data:`ANCHOR_NEARNESS_SCALE` と**レジームが違う**ための別表。あちらは
+# ラベル×ラベル（gap クラスタ label とアンカー合成テキスト — 双方日本語の短文）で、
+# 0.55/0.40 が妥当。こちらは論文由来テキスト（英語アブスト・チャンク重心）×
+# アンカープロトタイプ（日本語ラベル中心の合成テキスト）の**言語間・長短文比較**で、
+# cosine の絶対水準が一段下がる。2026-08-29 の実測校正（astrophysics 骨格 59 アンカー ×
+# 実レーダー候補20件）: 主題が合う候補の最良アンカー cosine は 0.34〜0.38 で、
+# 最近接アンカーは意味的に正しかった（CMB複屈折→cmb / LSS重力→cosmology）。
+# 主題が違う候補は 0.21〜0.29。旧閾値 0.55/0.40 ではこのレジームで一度も発火しない。
+# 閾値は境界の雑音帯（0.28〜0.34）を「近い可能性」止まりにする保守側で置く。
+# 実測での見直し前提は継承（変えるときは atlas_vector_anchoring_design.md §9 も更新）。
+ANCHOR_LANDING_THRESHOLD_NEAR = 0.36
+ANCHOR_LANDING_THRESHOLD_MID = 0.30
+
+ANCHOR_LANDING_SCALE = GradedScale(
+    (ANCHOR_LANDING_THRESHOLD_NEAR, ANCHOR_LANDING_THRESHOLD_MID),
+    ("かなり近い", "近い可能性", "遠い"),
+)
+
+# ── 骨格の辺種別（SkeletonEdge.kind → 日本語）──────────────────────────────────
+#
+# 正本は core/atlas.py::EDGE_KINDS（adjacent / depends / related）。表示語彙は
+# ここが唯一の定義（atlas_relation_edges_design.md §8。フロントはミラー規律で追随）。
+EDGE_KIND_LABELS = MappingProxyType(
+    {
+        "adjacent": "隣接",
+        "depends": "依存",
+        "related": "関連",
+    }
 )
 
 

@@ -2211,13 +2211,37 @@ html.learn-page > body {
 }
 
 /* 教材行の「⋯」メニュー（admin_ux_issues_2026-08-01.md §2.3）。
-   行に出しっぱなしにするのは「パイプラインを実行 ▼」とこのトリガーの2つだけ。 */
+   行に出しっぱなしにするのは「パイプラインを実行 ▼」・高頻度の2アイコン
+   （グラフレビュー / 近い論文を探す — §2.3 追補 2026-09-06）・このトリガー。 */
 .material-more-trigger {
   min-width: 0;
   padding: 6px 12px;
   line-height: 1;
   font-size: 15px;
   letter-spacing: 1px;
+}
+
+/* 教材行のアイコンボタン（グラフレビュー = inline SVG のノード・辺図形 / 近い論文を探す = 📡）。
+   ⋯ トリガーと同じ高さ・角丸に揃え、ラベルは title / aria-label で持つ。 */
+.material-row-icon-btn {
+  min-width: 0;
+  padding: 5px 9px;
+  line-height: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.material-row-icon {
+  display: block;
+  width: 16px;
+  height: 16px;
+}
+
+.material-row-icon-emoji {
+  font-size: 14px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .material-more-panel {
@@ -3869,8 +3893,7 @@ html.learn-page > body {
 .ls-work-tabs[hidden],
 .ls-mini-tabs[hidden],
 .ls-work-tab[hidden],
-.ls-mini-tab[hidden],
-.ls-sync-row[hidden] {
+.ls-mini-tab[hidden] {
   display: none !important;
 }
 
@@ -5698,14 +5721,6 @@ button.ls-course-evidence-head {
   color: var(--color-text-tertiary);
   font-size: 10px;
   font-family: monospace;
-}
-
-.ls-sync-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--color-text-secondary);
 }
 
 .ls-assistant-modal {
@@ -11039,4 +11054,748 @@ button.element-card-item:focus-visible .element-card-item-label {
   margin-top: 4px;
   font-size: 11px;
   color: var(--color-text-secondary, #6e6e73);
+}
+
+/* ── コーパス回遊層「論文の海」（docs/features/corpus_roaming_design.md §4.2）──────
+   コース非依存の全画面ビュー。既存のコース学習の DOM・スタイルには触らず、
+   corpus-sea- 接頭辞で完全に分離する（CR2）。数値・バッジ・督促の表現を持たない
+   （CR3 / CR5）。 */
+.corpus-sea-entry {
+  padding: 10px 12px 4px;
+}
+.corpus-sea-entry-btn {
+  width: 100%;
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-entry-btn:hover { background: var(--color-background-secondary, #f5f5f7); }
+
+.corpus-sea-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1400;
+  background: rgba(0, 0, 0, 0.42);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+.corpus-sea-overlay[hidden] { display: none; }
+.corpus-sea-sheet {
+  width: min(1180px, 100%);
+  height: min(88vh, 900px);
+  background: var(--color-background-primary, #fff);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.corpus-sea-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border-tertiary, #e5e5ea);
+  flex: 0 0 auto;
+}
+.corpus-sea-title { font-size: 14px; font-weight: 700; }
+.corpus-sea-domain-picker { display: flex; gap: 6px; flex-wrap: wrap; flex: 1 1 auto; }
+.corpus-sea-domain-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-domain-btn.active {
+  background: var(--color-background-secondary, #f5f5f7);
+  border-color: var(--color-border-primary, #c6c6cc);
+}
+.corpus-sea-domain-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--color-text-info, #378add);
+}
+.corpus-sea-close {
+  appearance: none;
+  border: none;
+  background: none;
+  font-size: 20px;
+  line-height: 1;
+  color: var(--color-text-secondary, #6e6e73);
+  cursor: pointer;
+}
+.corpus-sea-note {
+  padding: 8px 16px;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-note[hidden] { display: none; }
+
+.corpus-sea-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  gap: 14px;
+  padding: 12px 16px 16px;
+}
+.corpus-sea-body[hidden] { display: none; }
+.corpus-sea-mapcol { flex: 1 1 60%; min-width: 0; overflow-y: auto; }
+.corpus-sea-side { flex: 1 1 40%; min-width: 260px; overflow-y: auto; }
+.corpus-sea-svg { width: 100%; height: auto; }
+.corpus-sea-region rect {
+  fill: var(--color-background-secondary, #f5f5f7);
+  stroke: var(--color-border-tertiary, #e5e5ea);
+}
+/* 情報密度の段階表現（4段の固定ビン。連続比例・数値は使わない — CR3）。
+   d0 は既定の薄灰のまま＝「置かれていない」を色で言い立てない。 */
+.corpus-sea-region.d1 rect { fill: rgba(47, 107, 143, 0.10); }
+.corpus-sea-region.d2 rect {
+  fill: rgba(47, 107, 143, 0.22);
+  stroke: rgba(47, 107, 143, 0.30);
+}
+.corpus-sea-region.d3 rect {
+  fill: rgba(47, 107, 143, 0.38);
+  stroke: rgba(47, 107, 143, 0.45);
+}
+.corpus-sea-region.fog rect {
+  fill: var(--color-background-tertiary, #eeeef0);
+  stroke-dasharray: 4 4;
+}
+.corpus-sea-region text {
+  font-size: 11px;
+  fill: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-node circle { fill: var(--color-border-primary, #c6c6cc); }
+.corpus-sea-node text {
+  font-size: 10px;
+  fill: var(--color-text-secondary, #6e6e73);
+}
+/* アンカーの円1つ＝その場所の厚み（半径は段階ビン）。押すと右の一覧を絞る。 */
+.corpus-sea-anchor-dot { cursor: pointer; }
+.corpus-sea-anchor-dot circle {
+  fill: var(--color-text-info, #378add);
+  stroke: var(--color-background-primary, #fff);
+  stroke-width: 1.5;
+}
+.corpus-sea-anchor-dot:hover circle,
+.corpus-sea-anchor-dot:focus circle,
+.corpus-sea-anchor-dot:focus-visible circle {
+  stroke: var(--color-text-primary, #1d1d1f);
+  stroke-width: 2.5;
+}
+.corpus-sea-anchor-dot:focus { outline: none; }
+
+.corpus-sea-density-legend {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-density-legend-hd { font-weight: 700; }
+.corpus-sea-density-step {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.corpus-sea-density-swatch {
+  display: inline-block;
+  width: 14px;
+  height: 10px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-secondary, #f5f5f7);
+}
+.corpus-sea-density-swatch.d1 { background: rgba(47, 107, 143, 0.10); }
+.corpus-sea-density-swatch.d2 {
+  background: rgba(47, 107, 143, 0.22);
+  border-color: rgba(47, 107, 143, 0.30);
+}
+.corpus-sea-density-swatch.d3 {
+  background: rgba(47, 107, 143, 0.38);
+  border-color: rgba(47, 107, 143, 0.45);
+}
+
+.corpus-sea-filter-hd {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 10px 0 6px;
+}
+.corpus-sea-filter-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-filter-clear {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-filter-clear:hover { background: var(--color-background-secondary, #f5f5f7); }
+
+.corpus-sea-sec-hd {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-secondary, #6e6e73);
+  margin: 10px 0 6px;
+}
+.corpus-sea-loading,
+.corpus-sea-empty {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding: 8px 0;
+}
+.corpus-sea-paper {
+  display: block;
+  width: 100%;
+  text-align: left;
+  appearance: none;
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  background: var(--color-background-primary, #fff);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-paper.active { border-color: var(--color-border-info, #378add); }
+.corpus-sea-paper-title { display: block; font-size: 13px; color: var(--color-text-primary, #1d1d1f); }
+.corpus-sea-paper-meta,
+.corpus-sea-paper-note {
+  display: block;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-top: 2px;
+}
+.corpus-sea-detail-card {
+  border: 1px solid var(--color-border-tertiary, #e5e5ea);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-top: 10px;
+}
+.corpus-sea-detail-title { font-size: 13px; font-weight: 700; }
+.corpus-sea-detail-meta,
+.corpus-sea-detail-fact {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  margin-top: 4px;
+}
+.corpus-sea-placement {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  margin: 4px 0;
+}
+.corpus-sea-placement-node { color: var(--color-text-primary, #1d1d1f); }
+.corpus-sea-placement-persp,
+.corpus-sea-placement-source {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 999px;
+  padding: 1px 8px;
+}
+.corpus-sea-discuss-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-primary, #1d1d1f);
+  border-radius: 6px;
+  padding: 5px 12px;
+  margin-top: 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.corpus-sea-edges { margin-top: 12px; }
+.corpus-sea-edge {
+  border: 1px dashed var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.corpus-sea-edge-region {
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-edge-fact {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--color-text-primary, #1d1d1f);
+}
+.corpus-sea-edge-papers {
+  margin: 6px 0 0 18px;
+  font-size: 11px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-frontier-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 999px;
+  padding: 3px 10px;
+  margin-top: 8px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-frontier-btn.on { border-color: var(--color-border-primary, #c6c6cc); }
+
+.corpus-sea-discuss {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 12px 16px 16px;
+}
+.corpus-sea-discuss[hidden] { display: none; }
+.corpus-sea-discuss-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+.corpus-sea-back {
+  appearance: none;
+  border: none;
+  background: none;
+  color: var(--color-text-secondary, #6e6e73);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-mode {
+  background: var(--color-background-secondary, #f5f5f7);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+}
+.corpus-sea-scope-label { font-size: 11px; }
+.corpus-sea-doc-title { color: var(--color-text-primary, #1d1d1f); }
+.corpus-sea-scope-toggle { display: flex; gap: 4px; }
+.corpus-sea-scope-opt {
+  appearance: none;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  background: var(--color-background-primary, #fff);
+  color: var(--color-text-secondary, #6e6e73);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+.corpus-sea-scope-opt.active {
+  background: var(--color-background-secondary, #f5f5f7);
+  color: var(--color-text-primary, #1d1d1f);
+}
+.corpus-sea-opening {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0;
+}
+.corpus-sea-chat {
+  flex: 1 1 auto;
+  min-height: 120px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 8px 0;
+}
+.corpus-sea-chat-hint {
+  font-size: 12px;
+  color: var(--color-text-secondary, #6e6e73);
+}
+.corpus-sea-msg-ops { margin-left: 8px; }
+.corpus-sea-msg-op {
+  appearance: none;
+  border: none;
+  background: none;
+  font-size: 11px;
+  cursor: pointer;
+  opacity: 0.6;
+}
+.corpus-sea-composer {
+  flex: 0 0 auto;
+  display: flex;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border-tertiary, #e5e5ea);
+}
+.corpus-sea-composer input {
+  flex: 1 1 auto;
+  border: 1px solid var(--color-border-secondary, #d2d2d7);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+  font-family: inherit;
+}
+.corpus-sea-send-btn {
+  appearance: none;
+  border: 1px solid var(--color-border-info, #378add);
+  background: var(--color-text-info, #378add);
+  /* 送信ボタンの文字色は「情報色の上に置く地の色」= 背景プライマリ。生の #fff を
+     書かない（テーマ変数だけで色を決める規約。test_element_card_ui_static.py）。 */
+  color: var(--color-background-primary, #fff);
+  border-radius: 8px;
+  padding: 8px 16px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+/* ===========================================================================
+   グラフ対話レビュー（graph_dialogue_review_design.md）
+   識別子は graph-review- プレフィックス（atlas- / doubt- / deliberation- と非衝突）
+   =========================================================================== */
+.graph-review-modal {
+  position: fixed;
+  inset: 0;
+  background: color-mix(in srgb, var(--color-text-primary, #0f172a) 55%, transparent);
+  z-index: 1200;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  padding: 18px;
+}
+.graph-review-modal[hidden] { display: none !important; }
+.graph-review-frame {
+  background: var(--color-bg, #fff);
+  border-radius: 12px;
+  width: 100%;
+  max-width: 1500px;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  box-shadow: 0 18px 48px color-mix(in srgb, var(--color-text-primary, #0f172a) 35%, transparent);
+}
+.graph-review-header {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+.graph-review-title { font-weight: 700; font-size: 15px; }
+.graph-review-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.graph-review-layer-btn {
+  border: 1px solid var(--color-border, #cbd5e1);
+  background: transparent;
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.graph-review-layer-btn.is-active {
+  background: var(--color-background-info, #eef2ff);
+  border-color: var(--color-border-info, #6366f1);
+  color: var(--color-text-info, #3730a3);
+}
+.graph-review-layer-count { opacity: 0.65; margin-left: 2px; }
+.graph-review-filter { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
+.graph-review-count { color: var(--color-text-secondary, #475569); }
+.graph-review-body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+}
+.graph-review-graph-pane {
+  flex: 1 1 58%;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-right: 1px solid var(--color-border, #e2e8f0);
+}
+.graph-review-network { flex: 1 1 auto; min-height: 420px; }
+.graph-review-side {
+  flex: 1 1 42%;
+  min-width: 360px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.graph-review-detail {
+  flex: 1 1 50%;
+  overflow-y: auto;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border, #e2e8f0);
+}
+.graph-review-detail-title { font-weight: 700; font-size: 14px; margin-bottom: 6px; }
+.graph-review-detail-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.graph-review-chip {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-size: 11.5px;
+  color: var(--color-text-secondary, #475569);
+}
+.graph-review-chip-status { background: var(--color-background-warning, #fefce8); border-color: var(--color-border-secondary, #eab308); color: var(--color-text-warning, #854d0e); }
+.graph-review-detail-desc { font-size: 12.5px; line-height: 1.6; margin-bottom: 8px; }
+.graph-review-detail-reasons { font-size: 12px; color: var(--color-text-warning, #b45309); margin-bottom: 8px; }
+/* 参考メモ（source_backed の warning）・承認済みノードの解析時点メモは
+   レビュー要求と区別し、警告色を使わない（要確認に見せない）。 */
+.graph-review-detail-reasons-advisory,
+.graph-review-detail-reasons-archived { color: var(--color-text-tertiary, #6b7280); }
+.graph-review-graph-updated { font-size: 11.5px; font-weight: normal; color: var(--color-text-tertiary, #6b7280); margin-left: 8px; }
+.graph-review-detail-actions { display: flex; gap: 8px; margin: 8px 0; }
+.graph-review-claims-title { font-weight: 600; font-size: 12.5px; margin: 10px 0 6px; }
+.graph-review-claim-row {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+}
+.graph-review-claim-text { font-size: 12.5px; line-height: 1.55; margin-bottom: 6px; }
+/* 本文に混ざるインライン数式（graphView.inlineMathHtml）。KaTeX 既定の 1.21em では
+   12.5px の地の文から浮くので、行の文字サイズに合わせて縦揃えを保つ。 */
+.graph-review-claim-text .katex,
+.graph-review-detail-desc .katex { font-size: 1.05em; }
+.graph-review-claim-text .lecture-formula,
+.graph-review-detail-desc .lecture-formula { margin: 0; vertical-align: baseline; }
+/* 承認対象の行が無い根拠の事実文。警告色は使わない（欠落ではなく状態の説明）。 */
+.graph-review-claim-note {
+  font-size: 11.5px;
+  color: var(--color-text-tertiary, #6b7280);
+  margin-bottom: 6px;
+}
+.graph-review-claim-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.graph-review-chat {
+  flex: 1 1 50%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 14px 12px;
+}
+.graph-review-chat-tabs { display: flex; gap: 6px; margin-bottom: 8px; }
+.graph-review-chat-tab {
+  border: 1px solid var(--color-border, #cbd5e1);
+  background: transparent;
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.graph-review-chat-tab.is-active { background: var(--color-background-info, #eef2ff); border-color: var(--color-border-info, #6366f1); color: var(--color-text-info, #3730a3); }
+.graph-review-chat-tab:disabled { opacity: 0.45; cursor: default; }
+.graph-review-chat-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 120px;
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 6px;
+}
+.graph-review-chat-msg {
+  border-radius: 8px;
+  padding: 6px 10px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+.graph-review-chat-msg.is-user { background: var(--color-background-info, #eef2ff); margin-left: 18%; }
+.graph-review-chat-msg.is-assistant { background: var(--color-background-secondary, #f8fafc); margin-right: 12%; }
+.graph-review-chat-annotations { max-height: 180px; overflow-y: auto; }
+.graph-review-chat-newchat:not(:empty) { margin: 4px 0 6px; }
+.graph-review-annotation {
+  border: 1px dashed var(--color-border-info, #a5b4fc);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 6px;
+  font-size: 12px;
+}
+.graph-review-annotation-head { font-weight: 600; margin-bottom: 4px; }
+.graph-review-annotation-actions { display: flex; gap: 8px; margin-top: 6px; }
+.graph-review-chat-input-row { display: flex; gap: 8px; align-items: flex-end; }
+.graph-review-chat-input-row textarea {
+  flex: 1 1 auto;
+  resize: vertical;
+  font-size: 12.5px;
+  padding: 6px 8px;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 8px;
+}
+.graph-review-voice-btn { white-space: nowrap; }
+.graph-review-voice-btn.is-active {
+  background: var(--color-background-info, #eef2ff);
+  border-color: var(--color-border-info, #6366f1);
+  color: var(--color-text-info, #3730a3);
+}
+.graph-review-voice-status {
+  display: block;
+  min-height: 16px;
+  font-size: 12px;
+  padding: 2px 0;
+  color: var(--color-text-secondary, #64748b);
+}
+.graph-review-voice-status.is-error { color: var(--color-text-danger, #dc2626); }
+.graph-review-voice-status.is-speaking { color: var(--color-text-info, #3730a3); }
+.graph-review-status { min-height: 16px; font-size: 12px; padding: 2px 0; }
+.graph-review-status.is-error { color: var(--color-text-danger, #dc2626); }
+.graph-review-status.is-success { color: var(--color-text-success, #16a34a); }
+.graph-review-status.is-info { color: var(--color-text-secondary, #64748b); }
+.graph-review-empty { color: var(--color-text-secondary, #64748b); font-size: 12.5px; line-height: 1.7; }
+
+/* --- 論文層（graph_paper_layer_design.md §4.1）------------------------------
+   左ペインの「論文の順」アウトラインと、右ペイン詳細の「論文での対応」区画。
+   被覆（掛かっていない要素）は失敗ではなく信号なので警告色を使わない（PL4）。 */
+.graph-review-network-wrap { flex: 1 1 auto; display: flex; min-height: 0; }
+.graph-review-network-wrap[hidden] { display: none !important; }
+.graph-review-paper {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  min-height: 0;
+  padding: 8px 10px 12px;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.graph-review-paper[hidden] { display: none !important; }
+.graph-review-viewtoggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--color-text-secondary, #475569);
+}
+.graph-review-view-btn {
+  border: 1px solid var(--color-border, #cbd5e1);
+  background: transparent;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+.graph-review-view-btn.is-active {
+  background: var(--color-background-info, #eef2ff);
+  border-color: var(--color-border-info, #6366f1);
+  color: var(--color-text-info, #3730a3);
+}
+.graph-review-paper-fact { color: var(--color-text-secondary, #64748b); font-size: 12px; margin: 4px 0; }
+.graph-review-paper-header {
+  border: 1px solid var(--color-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.graph-review-paper-headrow { margin-bottom: 4px; }
+.graph-review-paper-headlabel {
+  display: inline-block;
+  min-width: 6.5em;
+  color: var(--color-text-tertiary, #6b7280);
+  font-size: 11.5px;
+  margin-right: 6px;
+}
+.graph-review-paper-section { margin: 0 0 10px; padding-left: 0; }
+.graph-review-paper-section.is-level-2 { padding-left: 14px; }
+.graph-review-paper-section.is-level-3 { padding-left: 28px; }
+.graph-review-paper-section-head { font-weight: 600; margin-bottom: 4px; }
+.graph-review-paper-page { color: var(--color-text-tertiary, #6b7280); font-size: 11.5px; margin-left: 8px; }
+.graph-review-paper-chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.graph-review-paper-chip {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  background: var(--color-background-secondary, #f8fafc);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11.5px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+.graph-review-paper-chip.is-static { background: transparent; cursor: default; }
+.graph-review-paper-chip.is-selected {
+  background: var(--color-background-info, #eef2ff);
+  border-color: var(--color-border-info, #6366f1);
+  color: var(--color-text-info, #3730a3);
+}
+.graph-review-paper-claims { margin: 4px 0 0; font-size: 12px; }
+.graph-review-paper-claims summary { cursor: pointer; color: var(--color-text-secondary, #64748b); }
+.graph-review-paper-claims ul,
+.graph-review-paper-block ul,
+.graph-review-paper-coverage ul { margin: 4px 0 0 1.1em; padding: 0; }
+.graph-review-paper-block { margin: 8px 0; }
+.graph-review-paper-block-title { font-weight: 600; margin: 12px 0 4px; }
+.graph-review-paper-subtitle { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
+.graph-review-paper-strong { font-weight: 600; }
+.graph-review-paper-note { color: var(--color-text-secondary, #64748b); font-size: 12px; }
+.graph-review-paper-flow { font-size: 12px; }
+.graph-review-paper-item { margin: 4px 0 6px; }
+.graph-review-paper-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.graph-review-paper-item-body { margin-top: 2px; }
+.graph-review-paper-quote {
+  margin: 4px 0;
+  padding: 4px 0 4px 10px;
+  border-left: 2px solid var(--color-border, #cbd5e1);
+  color: var(--color-text-primary, #0f172a);
+  font-size: 12px;
+}
+.graph-review-paper-source { display: block; margin-top: 2px; color: var(--color-text-tertiary, #6b7280); font-size: 11.5px; font-style: normal; }
+.graph-review-paper-coverage { margin-top: 10px; }
+.graph-review-paper-coverage-group { margin-bottom: 6px; }
+.graph-review-paper-facing {
+  border-top: 1px solid var(--color-border, #e2e8f0);
+  margin: 10px 0 8px;
+  padding-top: 8px;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+.graph-review-paper-facing-title { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; }
+.graph-review-paper-role { color: var(--color-text-secondary, #475569); margin-bottom: 4px; }
+
+/* ---------------------------------------------------------------------------
+ * 制度指標カタログの事実文（docs/features/indicator_governance_design.md, IG1）。
+ * 計器パネルの先頭に置く1行。強調・警告色にしない（注意を引くためではなく、
+ * 「これは何のための計器か」を常に読める場所に置くためのもの）。
+ * ------------------------------------------------------------------------- */
+.indicator-fact {
+  margin: 0 0 10px;
+  padding: 6px 8px;
+  border-left: 3px solid var(--color-border, #e2e8f0);
+  background: var(--color-bg-secondary, #f8fafc);
+  color: var(--color-text-tertiary, #6b7280);
+  font-size: 11.5px;
+  line-height: 1.6;
 }

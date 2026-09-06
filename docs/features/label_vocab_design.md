@@ -64,18 +64,24 @@ class GradedScale:
     def label_for(self, value: object) -> str
 ```
 
-宣言済みスケール:
+宣言済みスケール（**一覧と現行値の正本は `core/label_vocab.py` の `__all__`**。ここは初版と
+その後の追加の見取り図で、閾値をコードから写して二重管理しない）:
 
 | 名前 | 境界 | ラベル | 利用 |
 |---|---|---|---|
 | `CONFIDENCE_LOW_MED_HIGH` | 0.75 / 0.5 | 高 / 中 / 低 | `core/teaching_figures/schema.py`・`core/atlas_gaps/schema.py` |
 | `CONFIDENCE_TENTATIVE_REFERENCE_HIGH` | 0.75 / 0.5 | 確度高 / 参考 / 暫定 | `core/deliberation/identity_links.py` |
-| `WEIGHT_LEVEL_SCALE` | 0.7 / 0.4 | strong / medium / weak | `core/landscape/schema.py::weight_level` |
-| `WEIGHT_RELATION` | 0.7 / 0.4 | 強い関連 / 関連 / 弱い関連 | `core/landscape/schema.py::weight_label` |
+| `WEIGHT_LEVEL_SCALE` / `WEIGHT_RELATION` | 0.7 / 0.4 | strong / medium / weak ／ 強い関連 / 関連 / 弱い関連 | `core/landscape/schema.py::weight_level` / `weight_label` |
+| `DISCOVERY_RELEVANCE_SCALE` | — | 関連: 高 / 中 / 低 | 論文ディスカバリーの `order:"relevance"`（`core/paper_discovery/ranking.py`） |
+| `RADAR_DISTANCE_SCALE` | — | 近い / 中間 / 遠い | 論文レーダーの距離帯（PR2。未測定はラベルを付けない） |
+| `ANCHOR_NEARNESS_SCALE` / `ANCHOR_LANDING_SCALE` | — | かなり近い / 近い可能性 / 遠い | VA層の2レジーム（**ラベル×ラベル** = gap 近傍注記・別名ヒント ／ **論文テキスト×アンカー** = 着地予測・新しい面）。境界が別なのは実測校正の結果で、統合しない（VA層設計書 §9） |
+| `WM_INTERACTION_LEVEL_SCALE` / `WM_INTERACTION_DENSITY` | — | very_many / many / few ／ 表示側 | WM レンズ（教員支援 Phase 4） |
 
 共有表: `SUPPORT_SECTION_LABELS` / `VERIFICATION_STATUS_LABELS_LEDGER` /
 `VERIFICATION_STATUS_LABELS_LENS` / `MATERIAL_STATE_LABELS` / `SCRIPT_STATUS_LABELS` /
-`AUDIO_STATUS_LABELS` / `WEIGHT_LABELS`。
+`AUDIO_STATUS_LABELS` / `WEIGHT_LABELS` / `TRACE_STATUS_LABELS`（`interest_traces.status`）/
+`EDGE_KIND_LABELS`（RE追補の辺種別）/ `WM_INTERACTION_LABELS`。**表を1つ足すたびに
+`__all__` に載せる**（一覧をここに写し取らない）。
 
 ## §4 委譲した箇所（W1）
 
@@ -131,11 +137,12 @@ class GradedScale:
 4. 移行済みモジュールに段階ラベルのリテラル再定義が復活していないこと
 5. **重複表検出**: `backend/core` + `backend/api` の module-level を ast で走査し、値が全て
    日本語の表がバイト一致で2箇所に存在したら fail（許容リストは**空**）
-6. **黙った分裂の検出**: 同じキー集合で値が違う表は理由コメント付き allowlist に登録が必要。
-   現在6グループ（`atlas_path` の状態ラベル×台帳注記 / discuss 開幕の stage 表示名×統制語彙訳 /
-   本モジュールの verification status 2表 / `personas` の2プロンプト / `reconstruction/diff` の
-   3テンプレート / `teaching_figures` の図タイプ名×ギャップ説明）。allowlist は「存在しない表が
-   残っていないか」も検査して墓場化を防ぐ
+6. **黙った分裂の検出**: 同じキー集合で値が違う表は理由コメント付き allowlist
+   （`_ALLOWED_VALUE_SPLITS`。**登録内容の正本はテスト**）に登録が必要。現在5グループ
+   （`atlas_path` の状態ラベル×台帳注記 / 本モジュールの verification status 2表 /
+   `personas` の2プロンプト / `reconstruction/diff` の3テンプレート / `teaching_figures` の
+   図タイプ名×ギャップ説明）。allowlist は「存在しない表が残っていないか」も検査して
+   墓場化を防ぐ
 7. `frontend/public/js/*.js` にリテラル NUL バイトが無いこと
 
 `backend/tests/test_doubt_vocab_mirror.py`（11項）: `doubt-atlas.js` の9表 ⇄ Python 正本の逐語
@@ -145,10 +152,12 @@ class GradedScale:
 
 ## §7 非スコープ
 
-- **訳語の統一そのもの**（例: theory stage の「方程式系」/「式の体系」、
-  「AI推定（未確認）」/「AIによる推定（未確認）」）— 出力文字列を変える判断であり、既存の静的
-  テストが原文を固定しているためオーナー判断事項として繰り延べ。ガードレール6が
-  allowlist として**分裂を可視化**するところまでを本作業の範囲とする。
+- **訳語の統一そのもの**（例:「AI推定（未確認）」/「AIによる推定（未確認）」）— 出力文字列を
+  変える判断であり、既存の静的テストが原文を固定しているためオーナー判断事項として繰り延べ。
+  ガードレール6が allowlist として**分裂を可視化**するところまでを本作業の範囲とする。
+  （うち theory stage の「方程式系」/「式の体系」は**解消済み** — `core/discuss/opening.py` が
+  独自表を捨てて `core/element_vocab.py::THEORY_STAGE_LABELS` へ委譲し、allowlist からも
+  外れた。§8 の発見事項を参照。）
 - **語彙エンドポイント**（select / SVG 用の語彙をサーバから配信する）— 同上。
 - フロント側の表の全廃（API が段階ラベルを返す形への移行）。
 - `core/privacy.py`（k-匿名）・`core/element_vocab.py`（統制語彙訳）の統合。役割が違う別正本。
@@ -162,6 +171,9 @@ class GradedScale:
 - `frontend/public/js/admin-lecture-studio.js`: リテラル NUL → JS エスケープ（挙動同一）
 - `backend/tests/test_label_vocab_guardrails.py`（35 tests）/
   `backend/tests/test_doubt_vocab_mirror.py`（11 tests）新設
-- 発見事項として記録: 重複表（バイト一致）は本作業後 **0 件**。同キー・異値の分裂は 6 グループで、
+- 発見事項として記録: 重複表（バイト一致）は本作業後 **0 件**。同キー・異値の分裂は当時 6 グループで、
   うち `core/discuss/opening.py::_STAGE_LABELS` ⇄ `core/element_vocab.py::THEORY_STAGE_LABELS`
-  は**訳語の実質的な分裂**（`equation_system`: 方程式系 / 式の体系）。§7 のとおり統一は繰り延べ。
+  は**訳語の実質的な分裂**（`equation_system`: 方程式系 / 式の体系）だった。
+- **追記（解消）**: その分裂は `core/discuss/opening.py` が独自表を捨てて
+  `element_vocab.THEORY_STAGE_LABELS` へ委譲したことで解消し、`_ALLOWED_VALUE_SPLITS` は
+  現在5グループ。allowlist の現行内容は常にテスト側が正本。

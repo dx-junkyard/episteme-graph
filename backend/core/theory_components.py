@@ -35,11 +35,11 @@ _MAX_SOURCE_CHARS = 6000
 _MAX_CONTEXT_CHARS = 3000
 
 
-_PROMPT = """あなたは素粒子物理学の教材から、理論コンポーネント候補を抽出するアシスタントです。
+_PROMPT = """あなたは学術教材（論文・講義資料）から、理論コンポーネント候補を抽出するアシスタントです。
 
 重要な制約:
 - 以下のソース本文に明示されている内容だけを使ってください。
-- 一般的な物理学知識で補完しないでください。
+- ソース本文の外側にある一般知識で補完しないでください。
 - 明示的な根拠がない項目には needs_source: true を付けてください。
 - 各 input/output/precondition/constraint/invalid_condition には、可能な限り source_refs を付けてください。
 - quote はソース本文からの短い引用だけにしてください。
@@ -94,11 +94,11 @@ graph_elements:
 }}
 """
 
-_ENRICH_PROMPT = """あなたは素粒子物理学教材の理論コンポーネント候補を補完するアシスタントです。
+_ENRICH_PROMPT = """あなたは学術教材の理論コンポーネント候補を補完するアシスタントです。
 
 重要な制約:
 - まずソース本文と既存DSLに明示されている内容を優先してください。
-- ソース本文だけで不足する場合は、一般的な素粒子物理学・場の理論・有効理論の知識で補ってください。
+- ソース本文だけで不足する場合は、ソース本文が扱っている分野で一般的とされる知識で補ってください（分野は本文から判断し、書かれていない分野の話に広げないでください）。
 - 一般知識で補った項目は needs_source: true とし、source_refs は空配列にしてください。
 - 既存DSLの REQUIRES / CAUSES / DEFINES / EQUIVALENT などの関係は、ソース本文と同じく根拠として扱ってください。
 - summary は教材・理論の意味を説明してください。「DSLから生成した候補」のような実装説明は禁止です。
@@ -450,6 +450,10 @@ def enrich_theory_components_with_llm(
     if not source_text:
         return [_component_with_missing_markers(component) for component in components]
 
+    # M層: model は渡さず（M1）、core/llm.py 入口の resolve_scene_model に委ねる。
+    # feature は呼び出し元（routes/theory_components.py）が張る usage_context
+    # （admin:component_extract）。ポリシー行も env も無い環境では
+    # llm_policy._FEATURE_TIER_ONLY により従来と同じ fast tier に解決される。
     params = get_llm_params("fast")
     prompt = _ENRICH_PROMPT.format(
         source_text=_clip(source_text, _MAX_SOURCE_CHARS),
@@ -463,7 +467,6 @@ def enrich_theory_components_with_llm(
     def _call_llm() -> str:
         return generate_text(
             messages=[{"role": "user", "content": prompt}],
-            model=params.get("model"),
             reasoning_effort=params.get("reasoning_effort"),
             temperature=0.0,
             max_tokens=1600,
@@ -564,7 +567,6 @@ def extract_theory_components_from_chunk(chunk: dict[str, Any]) -> list[dict[str
     def _call_llm() -> str:
         return generate_text(
             messages=[{"role": "user", "content": prompt}],
-            model=params.get("model"),
             reasoning_effort=params.get("reasoning_effort"),
             temperature=0.0,
             max_tokens=1800,

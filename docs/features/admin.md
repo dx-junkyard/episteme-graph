@@ -4,9 +4,15 @@
 
 教員・管理者向けの管理 UI を機能別に解説します。
 実装: `frontend/public/admin.html` + `frontend/public/js/admin.js`（ES5 互換 SPA）+ 分離モジュール
-（`admin-lecture-studio.js` / `admin-assistant.js` / `admin-next-steps.js` / `versioning.js` /
-`deliberation.js` / `doubt-atlas.js` / `admin-llm-usage.js` / `atlas-draft-preview.js` /
-`atlas-assist-panel.js`。モジュール一覧と DI 注入は [フロントエンド構成](../frontend/overview.md)）。
+（`element-vocab.js` / `element-card.js`（統制語彙訳と統一パーツカード。**参照する全スクリプトより
+前に読み込む**）/ `admin-indicators.js`（制度指標カタログの事実文。計器パネルより前）/
+`admin-lecture-studio.js` / `admin-figure-studio.js` / `admin-assistant.js` /
+`admin-help-inspect.js` / `admin-next-steps.js` / `versioning.js` / `deliberation.js` /
+`admin-graph-review.js` / `admin-voice-chat.js` / `doubt-atlas.js` / `admin-llm-usage.js` /
+`admin-llm-models.js` / `admin-manual-editor.js` / `admin-discuss-observation.js` /
+`admin-release-review.js` / `admin-paper-discovery.js` / `admin-paper-radar.js` /
+`atlas-draft-preview.js` / `atlas-assist-panel.js`。**読み込み順の正は `admin.html` 末尾の
+`<script>` 群**。モジュール一覧と DI 注入は [フロントエンド構成](../frontend/overview.md)）。
 バックエンドは主に `/api/admin/*`（[API](../backend/api.md)）。
 
 ## タブ構成
@@ -33,13 +39,21 @@
 | 運用 | システム統計（`system-stats`） | SYSTEM_ADMIN のみ | 教材統計 |
 | 運用 | LLM使用量（`llm-usage`） | SYSTEM_ADMIN のみ | U層 使用量メトリクス（`admin-llm-usage.js` が描画） |
 | 運用 | エラー解析（`error-analysis`） | SYSTEM_ADMIN のみ | 5xx エラーログの絞り込み・一括コピー |
+| 運用 | マニュアル編集（`manual-editor`） | SYSTEM_ADMIN のみ | 利用者マニュアル KB の draft / 凍結（`admin-manual-editor.js`。配信既定は files のまま、freeze 実行後に DB 配信へ） |
+| 運用 | discuss 観測（`discuss-observation`） | SYSTEM_ADMIN のみ | discuss 観測基盤の蓄積状況・分析ダンプ（`admin-discuss-observation.js`） |
+| 運用 | AIモデル（`llm-models`） | SYSTEM_ADMIN のみ | M層 場面別モデルのシステム既定（`admin-llm-models.js`）＋ **URL取得の許可ドメイン**区画（教材管理タブが SYSTEM_ADMIN では非表示のため、この末尾に動的生成） |
 
 ※ ロール別の挙動: **STUDENT** は管理画面へアクセスすると学習画面（`/`）へリダイレクト。
 **SYSTEM_ADMIN** はコンテンツ系4タブ（教材管理/コース構築/コース管理/原稿スタジオ）が
 非表示になり、初期タブはエラー解析になる（コンテンツ管理は教員の画面という整理）。
+「学生管理」「教員管理」の各パネルには**アカウントライフサイクル**の区画（一覧・停止/再開・
+パスワードリセット・削除予約・移管）が同居する（§6）。
 
 タブのほかに、ヘッダへ常設の「📋 次にやること」（G層バッジ、`admin-next-steps.js`）と
-「🔔 通知」（V層インボックス、`versioning.js`）、および Admin Copilot（`admin-assistant.js`）が載る。
+「🔔 通知」（V層インボックス、`versioning.js`）、「❓ 使い方」（管理画面のインスペクト・モード。
+ON の間だけ `[data-ui-anchor]` を持つ部品のツールチップにマニュアル節を出す。
+`admin-help-inspect.js` + `GET /api/admin/assistant/help/ui-anchors`）、および
+Admin Copilot（`admin-assistant.js`）が載る。
 
 ---
 
@@ -48,6 +62,8 @@
 | 機能 | API |
 |---|---|
 | PDF / TeX アーカイブのアップロード（非同期, 202 + task_id） | `POST /api/admin/materials/upload` |
+| **URL から取得**（許可ドメインのみ。取得後は通常アップロードと同一経路へ合流） | `POST /api/admin/materials/upload-from-url` |
+| 許可ドメインの参照 / 追加・削除（参照は TEACHER 以上、変更は SYSTEM_ADMIN） | `GET/POST/DELETE /api/admin/url-fetch-domains` |
 | 教材一覧（自分 + 公開 + グループ共有 + コース参照） | `GET /api/admin/materials` |
 | 教材詳細（抽出された知識グラフ構造） | `GET /api/admin/materials/{id}` |
 | PDF 取得 / 差し替え | `GET/PUT /api/admin/materials/{id}/pdf` |
@@ -57,6 +73,33 @@
 
 アップロード後は **PDF 解析パイプライン**が非同期で走ります（[パイプライン概要](../pipeline/overview.md)）。
 進捗は `GET /api/admin/tasks/{task_id}` でポーリング。ステージ: `uploaded → document-analysis → script-generation → audio-generation`。
+
+### 教材行の操作（`⋯` メニュー）
+
+一覧の各行に、権限に応じて次の入口が並ぶ（UI アンカーの正本は
+`backend/core/help_kb/admin_ui_anchors.py`。件数は `backend/tests/test_admin_help_ui_anchors.py` が正）。
+
+| 入口 | UI アンカー | 内容・正本 |
+|---|---|---|
+| 共有 | `materials.row-share` | グループへの viewer / editor 付与（解析成果はドキュメント権限を継承） |
+| 共有版 | `materials.row-version` | V層の版発行・履歴・削除予約（[shared_versioning_design.md](shared_versioning_design.md)） |
+| 検出要素の一覧 | `materials.row-inventory` | 要素インベントリ → 「深く検討」（[element_inventory_design.md](element_inventory_design.md)） |
+| 図・画像 | `materials.row-figures` | 図モーダル（bbox オーバーレイ・パーツ・提示モード・ライブラリ昇格） |
+| グラフレビュー（行アイコン・⋯ メニュー外） | `materials.row-graph-review` | 理論操作グラフの確認・承認 + AI との対話（§9） |
+| 位置づけ（分野マップ）… | `materials.row-landscape` | 知識ランドスケープの配置レビュー（[knowledge_landscape_design.md](knowledge_landscape_design.md)） |
+| ゼミ前ブリーフ… | `materials.row-seminar-brief` | 下記 |
+| 📡 近い論文を探す（行アイコン・⋯ メニュー外） | `materials.row-radar` | 論文レーダー（[paper_radar_design.md](paper_radar_design.md)） |
+| 解析の見積り | `materials.row-estimate` | U層の事前見積り（レンジのみ・金額なし） |
+| 再解析 / 再開 / ステージ再試行 / PDF 差し替え / 削除 | `materials.row-pipeline-run` ほか | パイプラインの再実行系 |
+
+アップロードゾーンには「**URLから取得（arXiv など）**」（`materials.url-upload`）と
+「**arXivから探す**」（`materials.arxiv-discovery`）のリンクが並ぶ。前者は許可ドメイン
+（SYSTEM_ADMIN が管理・**初期状態は空＝機能無効**）だけを取得し、SSRF ガードは
+`backend/core/url_fetch.py` が正本（正本: [url_material_upload_design.md](url_material_upload_design.md)）。
+後者は分野ごとの購読条件で
+arXiv を検索して**教員が選んだ候補だけ**を既存の URL 取得 → 解析パイプラインへ流す
+（`POST /api/admin/discovery/{search,ingest,ingest-batch}` ほか。自動クロール・自動取り込みの
+経路は無い。正本: [paper_discovery_design.md](paper_discovery_design.md) PD1〜PD8）。
 
 ### ゼミ前ブリーフ
 
@@ -152,6 +195,30 @@ LLM との対話形式でコース構造（章・トピック・前提知識・�
 | 学生アカウント作成（TEACHER+） | `POST /api/admin/users/student` |
 | 教師アカウント作成（SYSTEM_ADMIN のみ） | `POST /api/admin/users/teacher` |
 
+### アカウントライフサイクル
+
+「学生管理」「教員管理」パネルには、作成フォームの下にアカウント一覧の区画が同居する
+（正本: [account_lifecycle_management_design.md](account_lifecycle_management_design.md)
+AL1〜AL10、migration 068/069）。
+
+| 操作 | API | 権限 |
+|---|---|---|
+| 一覧（状態・最終ログイン等） | `GET /api/admin/users` | TEACHER 以上（TEACHER は learner 固定に fail-closed） |
+| 停止 / 再開 | `POST /api/admin/users/{id}/suspend` / `.../restore` | 学生は TEACHER 以上、教員への操作は SYSTEM_ADMIN |
+| パスワードリセット | `POST /api/admin/users/{id}/password-reset` | SYSTEM_ADMIN |
+| 利用実績の照会 | `GET /api/admin/users/{id}/activity` | SYSTEM_ADMIN |
+| 削除予約 / 取消 | `POST` / `DELETE /api/admin/users/{id}/deletion` | SYSTEM_ADMIN |
+| 所有物の移管 | `POST /api/admin/users/{id}/transfer-ownership` | SYSTEM_ADMIN |
+
+- **`users` 行を物理 DELETE しない**（AL1）。削除は状態遷移（`active` → `suspended` →
+  `pending_deletion` → 匿名化墓標）＋明示 purge で表現し、猶予期間（既定14日）経過後に
+  V層スイーパが相乗りで実行する。所有物（教材・コース・グループ）が残っていれば purge は
+  中止して通知する。
+- 停止・パスワードリセットは**トークン世代**（`users.token_generation`）を進めるため、
+  期限内の JWT も即座に無効化される。
+- 自分自身と bootstrap の `Administrator` は停止・削除できない（422）。
+- 平文パスワード・ハッシュは監査・ログ・イベントに入れない。
+
 → ロール・開示範囲の詳細は [認証・権限・開示範囲](auth-visibility.md)。
 
 ---
@@ -159,6 +226,7 @@ LLM との対話形式でコース構造（章・トピック・前提知識・�
 ## 7. つまずき分析・エラー分析
 
 - つまずきデータ: `GET /api/admin/courses/{id}/unanswered-queries`（`student_stumble_events` / `unanswered_query_logs`）。
+- 構造帰属型の問いの集約: `GET /api/admin/courses/{id}/anchor-insights`（TEACHER + コース編集権。`core/structure_anchor/insights.py`）。理論構成の段階（theory stage）× 疑いの様相（doubt_type）の k-匿名集約（k=3・n<3 セル非表示・件数はレンジ表示のみ）。対象は本人が確定した帰属（`learner_selected` / `confirmed`）だけで、AI 候補（`llm_candidate`）は出さない。教材改善のための断面であり評価利用は禁止。**v1 は API のみで UI 未配線**。
 - エラー分析: キーワード/重大度/期間でログを絞り込み、複数形式で一括コピー。
 - システム統計: `GET /api/admin/system/materials-stats`（SYSTEM_ADMIN）。
 
@@ -182,6 +250,31 @@ LLM との対話形式でコース構造（章・トピック・前提知識・�
 - **WMレンズ**: 原稿スタジオのスライドプレビュー（`preview-split` 応答の optional `wm`）で、
   高負荷スライドにのみ段階ラベル + 事実文（degraded 時は「記号の照合は表記の一致による
   近似です」を併記）。`===` を挿すのは教員の手のみ（TT6 — 自動挿入・分割候補の提示はしない）。
+
+---
+
+## 9. グラフ対話レビュー
+
+教材行のグラフアイコンボタン（`materials.row-graph-review`。2026-09-06 に `⋯` メニューから昇格）から開く
+フルスクリーンモーダル（`admin-graph-review.js` / `window.GraphReview`。正本:
+[graph_dialogue_review_design.md](graph_dialogue_review_design.md) GR1〜GR8、migration 075）。
+理論操作グラフを見取り図に、①構造を見る ②AI と確かめる ③その場で確定する を1画面で行う。
+
+- **描画は原稿スタジオの実装に委譲**（`window.LectureStudio.graphView`）。グラフ描画を二重に
+  実装しない（GR8）。層トグル・「次の未レビューへ」ナビ・未レビューの強調を持つ。
+- **確定は人間のみ**（GR1）: ノード詳細から `POST /api/admin/theory-components/{id}/approve`
+  （遷移専用。承認可能性はサーバーが強制し、満たさなければ 422 の事実文）と、根拠 claim 行の
+  `POST /api/admin/claims/{id}/review`。AI 応答から承認 API を呼ぶ経路は作らない。
+- **対話は2タブ**（ノード単位＝W層セッションの再利用 / グラフ全体＝
+  `POST /api/admin/deliberation/documents/{id}/graph-sessions[/{sid}/messages]`）。グラフ全体対話は
+  1コールで、CostGate は W層の上限に相乗りする。グラフ未構築は 422。
+- **音声対話**: チャットの 🎤 トグル（`graph-review.voice`）で
+  `POST /api/admin/deliberation/voice/{transcribe,speak}`。音声から承認 API は呼ばない。
+- **論文の順**: ツールバーの「表示: グラフ | 論文の順」（`graph-review.paper-view`）で、
+  `GET /api/admin/documents/{document_id}/paper-layer` の読み時射影（章立て・式番号・図番号に
+  ノードを吊るす + 被覆）へ切り替える（正本:
+  [graph_paper_layer_design.md](graph_paper_layer_design.md)。フレームは書き換えない・LLM 0 回）。
+- 権限は閲覧・対話 = document viewable / 承認・却下 = document editable（GR6）。
 
 ---
 

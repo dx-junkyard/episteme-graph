@@ -183,6 +183,7 @@ def get_atlas(
         raise HTTPException(status_code=422, detail="level は 1..3 を指定してください")
     session = _session()
     resolved_focus = focus
+    relation_threads: dict | None = None  # 推定の糸 (RE層 §6)。既定は「キーなし」
     try:
         # --- カートリッジ決定 (course 指定時はコースから導出。gap3) ---
         cartridge_id = (cartridge or "").strip()
@@ -253,6 +254,22 @@ def get_atlas(
             resolved_focus = atlas_module.match_topic_to_concept(
                 topic_info, skeleton, bound_concept_id=bound
             )
+
+        # --- 推定の糸 (RE層 §6。optional トップレベルキー threads) ---
+        # 付加物なので、導出できないときはキーごと落とす (fail-soft = RE2/RE6)。
+        # セッションが要るので取得はここで行い、レスポンスへのマージは組み立て後に行う。
+        if session is not None:
+            try:
+                from core.atlas_edges.threads import threads_for_domain
+
+                relation_threads = threads_for_domain(session, cartridge_id)
+            except Exception:  # noqa: BLE001 — 糸の失敗で地図を壊さない
+                logger.warning(
+                    "atlas relation threads unavailable for %s (non-fatal)",
+                    cartridge_id,
+                    exc_info=True,
+                )
+                relation_threads = None
     finally:
         if session is not None:
             session.close()
@@ -487,7 +504,7 @@ def get_atlas(
         "3": "… › 導出チェーン",
     }
 
-    return {
+    payload: dict = {
         "skeleton_version": skeleton.version,
         "cartridge": cartridge_id,
         "provenance": "AI生成・教員レビュー済",
@@ -533,6 +550,11 @@ def get_atlas(
             "unvisited": sorted(set(node_rows.keys()) - visited),
         },
     }
+    # 推定の糸は「導出できたときだけ」載せる。available が偽ならキー自体を付けない
+    # (フロントはコントロールごと非表示 = RE2 の fail-closed)。
+    if isinstance(relation_threads, dict) and relation_threads.get("available"):
+        payload["threads"] = relation_threads
+    return payload
 
 
 @router.get("/node/{node_id}")
@@ -556,15 +578,15 @@ def get_atlas_node(
     if row is None:
         raise HTTPException(status_code=404, detail="atlas node not found")
     evidence = row["evidence"] or {}
+    # C層原則1「承認の重みは学習者への評価点にしない」: このルートは学習者も叩ける
+    # （`_get_current_user`）ため、承認の生数値（endorser_count / strong_count /
+    # expertise_breadth）は DTO に載せず、既存の段階ラベル（`_endorsement_label`、
+    # 承認レイヤーの正本）だけを返す。事実行は従来どおり `endorse_line`。
     endorsements = []
     if evidence.get("endorser_count"):
-        endorsements.append(
-            {
-                "endorser_count": evidence.get("endorser_count", 0),
-                "strong_count": evidence.get("strong_count", 0),
-                "expertise_breadth": evidence.get("expertise_breadth", 0),
-            }
-        )
+        from routes.theory_components import _endorsement_label  # 遅延 import(循環回避)
+
+        endorsements.append({"label": _endorsement_label(evidence)})
     return {
         "node_id": node_id,
         "label": row["label"],

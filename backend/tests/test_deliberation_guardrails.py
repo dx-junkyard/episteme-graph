@@ -130,13 +130,18 @@ class TestReadOnlyPhase0:
     def test_post_endpoints_are_scoped_to_known_write_routes(self):
         # POST は identity-links の作成・確定・却下 / sessions の作成・messages 送信 /
         # annotations の commit・dismiss のみ（overview 等の読み取り専用経路に
-        # 書き込みを混ぜない）。
+        # 書き込みを混ぜない）。voice は音声対話の入出力変換で DB を変更しないが、
+        # 音声バイナリ・本文を body で受けるため POST になる（GR1: 音声から承認 API を
+        # 呼ぶ経路は作らない）。
         paths = re.findall(r'@router\.post\("([^"]+)"\)', _ROUTE_SRC)
         assert paths, "expected at least one @router.post(...) route"
-        allowed_fragments = ("identity-links", "sessions", "annotations", "standardization")
+        allowed_fragments = (
+            "identity-links", "sessions", "annotations", "standardization", "voice",
+        )
         for path in paths:
             assert any(fragment in path for fragment in allowed_fragments), (
-                f"unexpected POST route outside identity-links/sessions/annotations/standardization: {path}"
+                "unexpected POST route outside "
+                f"identity-links/sessions/annotations/standardization/voice: {path}"
             )
 
 

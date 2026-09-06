@@ -21,10 +21,12 @@ from pydantic import BaseModel, Field
 import services
 from core import atlas
 from core import atlas_lifecycle
+from core import decision_context
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
 from core import llm_policy
+from core.atlas_edges import store as edge_store
 from core.atlas_gaps import store as gap_store
 from core.course_data import course_atlas_binding_pending, course_cartridge_id, course_topics
 from core.schema import (
@@ -153,6 +155,57 @@ def _pending_gap_candidates(
             exc_info=True,
         )
         return []
+
+
+def _edge_pairs_of(skeleton: atlas.AtlasSkeleton) -> list[tuple[str, str]]:
+    """骨格の辺を ``(from_id, to_id)`` の列にする（無向化は store 側が行う）。"""
+    return [(e.from_id, e.to_id) for e in getattr(skeleton, "edges", ()) or ()]
+
+
+def _pending_edge_candidates(
+    session, cartridge_id: str, draft: atlas.AtlasSkeleton
+) -> list[dict]:
+    """凍結前チェック: 採用済みでまだ次版の下書きに入っていない辺の候補。
+
+    正本: docs/features/atlas_relation_edges_design.md §5（gap の公開前チェックと同列）。
+    判定材料は「教員が採用した」判断行と「いまの下書きにある辺のペア」だけで、骨格へは
+    一切書き込まない (RE3)。
+
+    DB 不通・照会失敗は空リスト (fail-open) — 候補機構の不調で凍結という主要操作を
+    止めない。ガードレールは「採用済み未反映があるときに止まること」を検査する。
+    """
+    try:
+        return edge_store.list_pending_for_freeze(
+            session,
+            domain_key=cartridge_id,
+            draft_edge_pairs=_edge_pairs_of(draft),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas freeze: relation edge pending check skipped for %s",
+            cartridge_id,
+            exc_info=True,
+        )
+        return []
+
+
+def _edge_pair_label(
+    item: dict, *labels_from: atlas.AtlasSkeleton | None
+) -> str:
+    """「ラベルA — ラベルB」の1行（RE4: 件数を出さずラベルの列挙で示す）。
+
+    ラベルは下書き・現行凍結版の順に引き、どちらにも無ければ node id をそのまま出す
+    （fail-soft。名前が引けないことで凍結前チェックの提示を欠かさない）。
+    """
+    labels: dict[str, str] = {}
+    for skeleton in labels_from:
+        for region in getattr(skeleton, "regions", ()) or ():
+            for concept in getattr(region, "concepts", ()) or ():
+                labels.setdefault(concept.id, concept.label or concept.id)
+            labels.setdefault(region.id, region.label or region.id)
+    left = str(item.get("from_id") or "")
+    right = str(item.get("to_id") or "")
+    return f"{labels.get(left, left)} — {labels.get(right, right)}"
 
 
 def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | None:
@@ -638,6 +691,9 @@ def freeze_atlas_skeleton(
             session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
         )
         pending_gaps = _pending_gap_candidates(session, cartridge_id, draft_row["skeleton"])
+        pending_edges = _pending_edge_candidates(
+            session, cartridge_id, draft_row["skeleton"]
+        )
     finally:
         session.close()
     if pending_gaps:
@@ -648,6 +704,21 @@ def freeze_atlas_skeleton(
                 # 件数ではなくラベルの列挙で示す (LS5: 数値を見せない)。
                 "pending_labels": [
                     str(item.get("proposed_label") or "") for item in pending_gaps
+                ],
+            },
+        )
+    if pending_edges:
+        # 関係（辺）の候補も gap と同列の弁を通す (atlas_relation_edges_design.md §5)。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "採用済みでまだ次版に反映されていない辺の候補が残っています",
+                # 件数ではなく「ラベルA — ラベルB」の列挙で示す (RE4: 数値を見せない)。
+                "pending_edges": [
+                    _edge_pair_label(
+                        item, draft_row["skeleton"], current_frozen_for_impact
+                    )
+                    for item in pending_edges
                 ],
             },
         )
@@ -711,6 +782,13 @@ def freeze_atlas_skeleton(
             frozen_version=body.version,
             frozen_node_ids=list(frozen.concept_ids()) + list(frozen.region_ids()),
         )
+        # 関係（辺）の候補も同じトランザクションで刻印する (RE3 / 設計書 §5)。
+        stamped_edges = edge_store.stamp_applied_versions(
+            session,
+            domain_key=cartridge_id,
+            frozen_version=body.version,
+            frozen_edge_pairs=_edge_pairs_of(frozen),
+        )
         session.commit()
     except HTTPException:
         session.rollback()
@@ -735,6 +813,28 @@ def freeze_atlas_skeleton(
         atlas_state.schedule_overlay_refresh(cartridge_id)
     except Exception:  # noqa: BLE001
         logger.warning("atlas overlay refresh scheduling failed", exc_info=True)
+
+    # 新版のアンカーベクトル索引を作り直す (VA3 の呼び出し地点①: 凍結時の
+    # best-effort 再構築。atlas_vector_anchoring_design.md §5)。埋め込みは外部 API を
+    # 呼ぶため daemon thread に逃がし、どんな失敗も警告ログだけにする —
+    # **凍結は止めない**し、レスポンスの形も変えない (VA4)。
+    try:
+        import threading
+
+        def _atlas_anchor_embed() -> None:
+            try:
+                from core.atlas_vectors.builder import build_anchor_embeddings
+
+                result = build_anchor_embeddings(cartridge_id)
+                logger.info("atlas anchor embeddings after freeze: %s", result)
+            except Exception:  # noqa: BLE001
+                logger.warning("atlas anchor embedding after freeze failed", exc_info=True)
+
+        threading.Thread(
+            target=_atlas_anchor_embed, name="atlas-anchor-embed", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas anchor embedding scheduling skipped", exc_info=True)
 
     report_summary = {"applied": 0, "migrated": 0}
     if report_session is not None:
@@ -766,6 +866,7 @@ def freeze_atlas_skeleton(
             "reports_migrated": report_summary.get("migrated", 0),
             # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
             "category_gaps_applied": list(stamped_gaps),
+            "relation_edges_applied": list(stamped_edges),
         },
     )
 
@@ -1231,6 +1332,12 @@ def propose_course_atlas_binding(
     }
 
 
+# 確定文脈（DC1）— コース⇄地図バインディングの一括保存（「この対応で次へ」/「保存」）。
+# 語彙の組み立ては core/decision_context.py の共通プリミティブに委ねる。basis の
+# 正本は decision_context.BASIS_ATLAS_BINDING_SAVE（既存2経路と同じ「画面.操作」規約）。
+_BINDING_REOPEN_PATH = "PUT /api/admin/courses/{course_id}/atlas-binding"
+
+
 @binding_router.put("/{course_id}/atlas-binding")
 def save_course_atlas_binding(
     course_id: str,
@@ -1278,16 +1385,24 @@ def save_course_atlas_binding(
         }
         applied = 0
         skipped: list[str] = []
+        # 確定文脈（DC2）: 提示された対象はサーバ側で取り直す（クライアント申告に依存しない）。
+        # この画面は「コースの全トピックを1行ずつ並べ、各行に骨格概念の select を出す」ので、
+        # 提示集合 = コースの全 topic_id、適用集合 = 実際に binding が入った topic_id。
+        presented_topic_ids: list[str] = []
+        applied_topic_ids: list[str] = []
         for topic in course_topics(course_data):
             if not isinstance(topic, dict):
                 continue
             topic_id = str(topic.get("id") or "")
+            if topic_id:
+                presented_topic_ids.append(topic_id)
             if topic_id not in requested:
                 continue
             node_id = requested[topic_id]
             if node_id and new_key and node_id in known_nodes:
                 topic["atlas_node_id"] = node_id
                 applied += 1
+                applied_topic_ids.append(topic_id)
             else:
                 if node_id:
                     skipped.append(topic_id)
@@ -1310,16 +1425,39 @@ def save_course_atlas_binding(
     finally:
         session.close()
 
+    # 改訂原則1（DC1）: 一括確定は確定文脈なしに記帳しない。この保存は
+    # 「1画面のトピック対応をまとめて確定する」操作（リリース前確認ウィザードの
+    # ステップ1「この対応で次へ」も同じ経路）なので、提示・適用・代替・再審経路を記帳する。
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_ATLAS_BINDING_SAVE,
+        presented_ids=presented_topic_ids,
+        applied_ids=applied_topic_ids,
+        # 各行の select は「（対応なし）」を選べる（＝一括の対象から外す）。ウィザードでは
+        # ステップごとに「あとで」があり、飛ばしても学習者側の表示は変わらない（RR1）。
+        alternatives=(
+            decision_context.ALT_DESELECT,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        # 再審は同じ保存経路（空選択で解除・別の概念へ付け替え）。status 語彙は持たない
+        # 層なので statuses は空のまま（「戻せる status がある」と偽らない）。
+        reopen_path=_BINDING_REOPEN_PATH,
+        # 提案の根拠（どの topic がどの概念に当たるか）が画面に出ていたかはサーバから
+        # 検証できないため不明のまま置く（無条件 True にしない）。
+        evidence_shown=None,
+    )
     _record_review_event(
         course_id,
         old_key,
         new_key,
         current_user.get("id"),
-        {
-            "action": "course_atlas_binding",
-            "bindings_applied": applied,
-            "bindings_skipped": skipped,
-        },
+        decision_context.attach_decision_context(
+            {
+                "action": "course_atlas_binding",
+                "bindings_applied": applied,
+                "bindings_skipped": skipped,
+            },
+            ctx,
+        ),
         entity_type=AUDIT_ENTITY_ATLAS_BINDING,
     )
     return {
@@ -1327,6 +1465,9 @@ def save_course_atlas_binding(
         "cartridge_id": new_key,
         "bindings_applied": applied,
         "bindings_skipped": skipped,
+        # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す
+        # （landscape の accept と同型）。
+        "decision_context": ctx,
     }
 
 

@@ -1226,7 +1226,6 @@ def test_generate_single_topic_draft_wires_figure_injection_after_equations():
             topics=[topic],
             topic=topic,
             index=0,
-            model="gpt-4o",
             reasoning_effort=None,
         )
 

@@ -1,0 +1,25 @@
+-- Migration 073: コーパス回遊層（Phase C「地図の端 — 外の輪」）
+--
+-- 設計正本: docs/features/corpus_roaming_design.md §6.2 / §8（不変条項 CR4 / CR7）。
+-- このファイルが DDL の正本。適用は `backend/core/migrations.py` のランナーが起動時に
+-- 行う（冪等・毎起動・番号順に再実行）。
+--
+-- 追加するのは購読行の**集約1ビット**だけ:
+--
+--   `last_search_found_new` = 教員が最後に `POST /api/admin/discovery/search` を
+--   実行したとき、`status='new'`（未取り込み・未見送り）の候補が1件以上あったか。
+--
+-- 設計上の要点:
+--   1. **候補スナップショットを持たない**（PD5 と両立させる）。学習者に見せるのは
+--      「教員の検索条件では、まだ取り込まれていない論文が arXiv にありました
+--      （{last_checked_at} 時点）」という存在の事実だけで、タイトル・件数は出さない
+--      （好奇心の文法 = CR5）。そのため列は BOOLEAN 1つで足りる。
+--   2. **学習者起点で arXiv を呼ばない**（CR7）。外の輪はこのビットからの読み時導出で、
+--      学習者のアクセスが外部リクエストを発生させない。
+--   3. **シード・初期値を入れない**。NULL は「まだ検索が実行されていない」を意味し、
+--      その分野の外の輪は行ごと出さない（偽の初期値を置くと「検索したが新着なし」と
+--      区別できなくなる — 情報を落とさない P4）。
+--   4. 購読行を新たに作らない。列を足すだけで、更新は既存の
+--      `store.touch_last_checked`（購読行が無ければ 0 行更新）に相乗りする（PD3）。
+ALTER TABLE paper_discovery_subscriptions
+    ADD COLUMN IF NOT EXISTS last_search_found_new BOOLEAN;

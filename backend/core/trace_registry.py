@@ -60,8 +60,9 @@ class TraceKindSpec:
     dead: bool = False               # 書き込み経路が現存しない語彙（TR3: 削除せず保持）
 
 
-# 9 kind の宣言（2026-08-15 時点の実態調査の確定値 + 構造の降下路の
-# ``backstage_question``。既存 kind の露出の意味論は変えない）。宣言順は台帳
+# 10 kind の宣言（2026-08-15 時点の実態調査の確定値 + 構造の降下路の
+# ``backstage_question`` + コーパス回遊層 Phase D の ``frontier_interest``。
+# 既存 kind の露出の意味論は変えない）。宣言順は台帳
 # 「わたしの記録」の系統表示順の正本でもある（dict の挿入順）。
 TRACE_KINDS: dict[str, TraceKindSpec] = {
     "question": TraceKindSpec(
@@ -189,6 +190,30 @@ TRACE_KINDS: dict[str, TraceKindSpec] = {
         teacher_dashboard=False,
         personal_map=False,
     ),
+    "frontier_interest": TraceKindSpec(
+        kind="frontier_interest",
+        label="地図の端への関心",
+        writers=(
+            "backend/api/routes/corpus.py の「この先を知りたい」1タップ"
+            "（services.record_frontier_interest 経由。コーパス回遊層 Phase D、"
+            "docs/features/corpus_roaming_design.md §7）",
+        ),
+        # 取り消しは行削除ではなく 'dismissed' 遷移（CR8）。
+        statuses=frozenset({"open", "dismissed"}),
+        # 発話ではなく「端の先を知りたい」という1タップの意思表示なので
+        # 「問いの軌跡」には出さない。個人の回遊履歴を教員に見せない（CR6）ため
+        # dashboard の対象にもせず、地図（personal_graph）の導出にも使わない。
+        learner_trajectory=False,
+        teacher_dashboard=False,
+        personal_map=False,
+        # ただし分野×領域×輪の単位で k-匿名集約され教員に届く（CR6/§7）。
+        # TR5: 台帳「わたしの記録」が「あなた以外には表示されません」と偽らないよう
+        # 宣言する。
+        teacher_aggregations=(
+            "backend/api/services.py::aggregate_frontier_interest"
+            "（GET /api/admin/discovery/frontier-interest の k-匿名レンジ集計）",
+        ),
+    ),
 }
 
 
@@ -302,6 +327,14 @@ CONSUMERS: dict[str, dict] = {
         "function": None,
         "mode": "allowlist",
         "kinds": frozenset({"tension"}),
+    },
+    # コーパス回遊層 Phase D — 端への関心の教員向け k-匿名集約（本 kind 専用。
+    # 既存の aggregate_interest_dashboard には出さない = denylist 側で除外済み）。
+    "frontier_interest_aggregate": {
+        "module": "backend/api/services.py",
+        "function": "aggregate_frontier_interest",
+        "mode": "allowlist",
+        "kinds": frozenset({"frontier_interest"}),
     },
     "cycle_queries": {
         "module": "backend/core/cycle/queries.py",

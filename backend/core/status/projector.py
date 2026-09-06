@@ -197,6 +197,31 @@ def _fetch_latest_runs_bulk(
     return by_document_id, by_material_id
 
 
+def _newer_run(by_document: dict | None, by_material: dict | None) -> dict | None:
+    """document_id 一致・material_id 一致の2候補から**新しい方**を選ぶ（Tier3-16）。
+
+    単体経路 ``_fetch_latest_run`` は ``WHERE document_id = :d OR material_id = :m
+    ORDER BY created_at DESC LIMIT 1``、つまり和集合の最新1件を採る。バッチ側が
+    ``by_document or by_material`` と document_id 一致を優先すると、最新 run が
+    material_id でしか一致しない教材で**単体とバッチが違う状態を返す**
+    （例: 最新の失敗 run を見落として ``analyzed`` と表示する）。状態導出を1本化した
+    意味が無くなるので、ここでも和集合の最新を選ぶ。
+    """
+    if by_document is None:
+        return by_material
+    if by_material is None:
+        return by_document
+    if by_document.get("id") == by_material.get("id"):
+        return by_document
+    left = by_document.get("created_at")
+    right = by_material.get("created_at")
+    if left is None:
+        return by_material
+    if right is None:
+        return by_document
+    return by_document if left >= right else by_material
+
+
 def project_material_statuses_bulk(
     session: Session, document_refs: list[str],
 ) -> dict[str, schema.MaterialStatus]:
@@ -224,7 +249,7 @@ def project_material_statuses_bulk(
             continue
         document_id = doc["id"]
         material_id = doc["source_path"] or document_id
-        run = latest_by_doc.get(document_id) or latest_by_mat.get(material_id)
+        run = _newer_run(latest_by_doc.get(document_id), latest_by_mat.get(material_id))
         result[ref] = derive_material_status(
             document_id, material_id, doc["status"], doc["chunk_count"], doc["updated_at"], run,
         )

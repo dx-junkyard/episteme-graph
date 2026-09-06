@@ -57,7 +57,9 @@ from routes import auth, learning, admin, lecture, groups, error_logs, export as
 from routes import figure_presentation as figure_presentation_routes
 from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
+from routes import atlas_edges as atlas_edges_routes
 from routes import atlas_gaps as atlas_gaps_routes
+from routes import atlas_vectors as atlas_vectors_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
@@ -71,6 +73,9 @@ from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
 from routes import my_records as my_records_routes
 from routes import landscape as landscape_routes
+from routes import paper_discovery as paper_discovery_routes
+from routes import corpus as corpus_routes
+from routes import indicators as indicators_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -211,6 +216,15 @@ async def _lifespan(application: FastAPI):
     except Exception:  # noqa: BLE001
         logger.warning("versioning sweeper startup skipped", exc_info=True)
 
+    # 論文ディスカバリー層 Phase 2（migration 072）: 取り込みキューの worker を起動
+    # （best-effort。教員がキューに積んだ行だけを処理する — PD1）
+    try:
+        import ingest_worker as _ingest_worker
+
+        _ingest_worker.start_background_worker()
+    except Exception:  # noqa: BLE001
+        logger.warning("paper discovery ingest worker startup skipped", exc_info=True)
+
     # 状態管理・通知基盤（migration 038）: 遷移検知 watcher を起動（best-effort）
     try:
         from core.status import watcher as _status_watcher
@@ -334,6 +348,18 @@ app.include_router(my_records_routes.me_router)
 # 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
 # ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
 app.include_router(landscape_routes.learning_router)
+# 論文ディスカバリー層（paper_discovery_design.md §4.3、migration 071）。
+# ルーター自身が /api/admin/discovery プレフィックスを持つため追加 prefix は付けない
+# （landscape と同じ「直接登録」の扱い。admin.router には include しない）。
+app.include_router(paper_discovery_routes.router)
+# コーパス回遊層の学習者向け読み取り（corpus_roaming_design.md §4 / §6 / §7、
+# migration 073）。ルーター自身が /api/learning プレフィックスを持つため追加
+# prefix は付けない（コース非依存 — 可視性ゲートは CR1 の document 可視集合）。
+app.include_router(corpus_routes.learning_router)
+# 制度指標カタログ（indicator_governance_design.md、IG1）。**定義だけ**を返す
+# 読み取り専用ルーターで、値は一切持たない。教員・管理者ゲートを掛けない
+# （観察される側の学習者も定義を読めなければ「全当事者に公開」にならない）。
+app.include_router(indicators_routes.router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で
@@ -350,6 +376,12 @@ app.include_router(atlas_routes.binding_router, prefix="/api/admin")
 # カテゴリギャップ候補のレビュー（category_gap_candidates_design.md §5.4）。
 # atlas_routes.router と同じ "/cartridges" 配下だがパスが衝突しないためフラット登録で足りる。
 app.include_router(atlas_gaps_routes.router, prefix="/api/admin")
+# 分野マップのベクトル係留（atlas_vector_anchoring_design.md §5 索引の状態・再構築 /
+# §7 別名レジストリ。migration 074）。atlas_routes.router と同じ "/cartridges" 配下。
+app.include_router(atlas_vectors_routes.router, prefix="/api/admin")
+# 分野マップの関係表示（atlas_relation_edges_design.md §5 辺候補のレビュー・判断・
+# 次版下書きへの反映。migration 076）。atlas_routes.router と同じ "/cartridges" 配下。
+app.include_router(atlas_edges_routes.router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")

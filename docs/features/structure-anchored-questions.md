@@ -6,6 +6,49 @@
 > `app.js` の doubt_type 選択 UI。現行仕様の要約は CLAUDE.md
 > 「構造帰属型の問い記録（Structure-Anchored Questions, B層, migration 025）」を参照。
 > 本書は起草時の設計提案として保持する（以下の本文は提案時点の記述）。
+> **追補（2026-09-03 コード照合）:** Stage 1〜2（明示アンカー・非同期 LLM 帰属・
+> `attribution_source` の3値・digest / confirm / dismiss）と `doubt_type` の
+> 1タップ選択 UI（`app.js`）は現存する。§7 Stage 3 / §8-5 の**教員向け集約は当時未実装**
+> だった（`GET /api/admin/courses/{id}/anchor-insights` に相当するルートが存在せず、
+> 教員が見られるのは関心ダッシュボード（`aggregate_interest_dashboard`。トピック単位の
+> k-匿名集計で、stage / doubt_type 単位の内訳は持たない）だけだった）。
+> `interest_traces` の kind ごとの露出可否は
+> `backend/core/trace_registry.py` が登録簿の正本。
+>
+> **追補（2026-09-03 実装）:** 教員向け集約を実装した（migration 不要・新テーブルなし）。
+>
+> - 集約の正本: `backend/core/structure_anchor/insights.py`
+>   （FastAPI 非 import。`collect_anchor_entries`（読み取り SQL）+
+>   `aggregate_cells`（純関数）+ `aggregate_anchor_insights(session, course_id)`）。
+> - ルート: `GET /api/admin/courses/{course_id}/anchor-insights`
+>   （`backend/api/routes/admin.py`。`_require_teacher` + `_require_editable_course_or_404`。
+>   認可はセッション取得より前で、不在も権限なしも同一 404）。読み取り専用・監査記帳なし・
+>   LLM 0 回。
+> - **集計軸**: `anchor_type`（`anchor_type == "stage"` の行は `anchor_id` を
+>   `schema.THEORY_STAGES` で検証して stage 別セルに割る。訳語は
+>   `core/element_vocab.py::THEORY_STAGE_LABELS` が正本）× `doubt_type`。
+>   stage 以外は `anchor_id` を持ち出さず、個別要素まで割らない。
+> - **対象行**: `kind='question'` かつ行 `status <> 'superseded'` かつ
+>   `structure_anchor.attribution_source ∈ (learner_selected, confirmed)` かつ
+>   `structure_anchor.status <> 'dismissed'`。`llm_candidate` は入れない（P1）。
+>   `payload.map_excluded`（「わたしの地図」の表示除外）は参照しない — 地図に出さない
+>   選択を教員向け集約への opt-out に読み替えない。
+> - **k-匿名（§8-5 の論点）**: k は既存レイヤーと同じ **k=3**（正本は
+>   `core/privacy.py`。リテラルで再定義しない）。distinct 学習者数で判定し、
+>   閾値未満のセルは返さない。件数は `bucket_count_range` のレンジ文字列のみで、
+>   生件数・`user_id`・質問原文・`confidence`・`anchor_id` は返さない。
+>   並びは語彙の辞書順に固定（多い順のランキングにしない。P7）。
+> - **DTO**: `{"course_id", "cells": [{"anchor_type", "anchor_type_label",
+>   "stage"?, "stage_label"?, "doubt_type", "doubt_type_label", "count_range"}],
+>   "suppressed", "note"}`。集計候補はあったが全セルが k 未満なら
+>   `{"cells": [], "suppressed": true}` で「まだ出せない」ことを正直に返す
+>   （どのセルが伏せられたかは開示しない）。
+> - **責務の切り分け**: anchor 単位（`anchor_type` × `anchor_id`。tension も合流）の
+>   集計は D層 `core/doubt/naive_signal.py` /
+>   `GET /api/admin/courses/{id}/naive-signals` が引き続き担当する。本 API は
+>   「理論構成のどの段階に、どういう型の引っかかりが集まっているか」の粗い断面に限る。
+> - **v1 は API のみ — UI は未配線**（関心集約タブへの表示は行っていない）。
+> - テスト: `backend/tests/test_structure_anchor_insights.py`。
 > **目的:** 学習チャットの「問い」を質問文そのままではなく、
 > **「提示された情報構造のどこに、どう引っかかったか」** として記録し、
 > 受講者の考えを正確に把握して効果的な学習機会につなげる。

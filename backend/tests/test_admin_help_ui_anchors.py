@@ -115,7 +115,81 @@ class TestAdminUiAnchorsModule:
         #   materials.url-upload / .url-upload-modal / .url-upload-submit（teacher/ 節）+
         #   llm-models.url-fetch-domains / .url-fetch-domain-add / .url-fetch-domain-remove
         #   （AIモデルタブ末尾の SYSTEM_ADMIN 限定区画 → system_admin/ 節）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 283
+        # + 論文ディスカバリー（paper_discovery_design.md §4.4、Phase 1）の5件:
+        #   materials.arxiv-discovery（アップロードゾーン内の入口リンク）/
+        #   .arxiv-discovery-modal / .arxiv-discovery-search / .arxiv-discovery-subscribe /
+        #   .arxiv-discovery-ingest（許可ドメイン未設定・未選択のとき無効化される）。
+        # + 論文ディスカバリー Phase 2（バッチ取り込み + 取り込みキュー）の2件:
+        #   materials.arxiv-discovery-queue（既定で閉じた取り込みキュー欄）/
+        #   .arxiv-discovery-queue-refresh（[更新] ボタン。自動更新はしない — PD8）。
+        # + 論文ディスカバリー Phase 3（並べ替えの強化 + 引用グラフ供給）の2件:
+        #   materials.arxiv-discovery-order（新着順 / 関連度順。関連度は段階ラベルのみ — PD4）/
+        #   .arxiv-discovery-citation-search（[引用グラフから探す]。
+        #    DISCOVERY_CITATION_SOURCE_ENABLED のオプトインで既定は無効化される）。
+        # + コーパス回遊層 Phase D（corpus_roaming_design.md §7）の1件:
+        #   materials.arxiv-discovery-interest（学習者の関心。k-匿名レンジの事実行だけを
+        #   出し、行が無ければ区画ごと非表示 — CR6 / CR10）。
+        # + 論文レーダー（paper_radar_design.md §4.2）の6件:
+        #   materials.row-radar（教材行の 📡 アイコン「近い論文を探す」。2026-09-06 に ⋯ メニューから昇格）/
+        #   .radar-modal（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）/
+        #   .radar-distance（近い / 中間 / 同じ分野の別テーマ。段階ラベルのみ — PR2）/
+        #   .radar-search（arXiv のメタデータのみ・テキスト LLM 不使用）/
+        #   .radar-compare（違いを分析。AI 推定・非保存・日次上限で無効化される — PR4）/
+        #   .radar-ingest（取り込みの弁は既存 ingest と同一 — PR3）。
+        # + 論文レーダー 出所の後付け登録（paper_radar_design.md §11）の1件:
+        #   materials.radar-provenance（[この論文として登録する]。ファイル名からの推定は
+        #    書き込まず、自動記帳はタイトル完全一致時のみ。既存出所あり・編集権限なし・
+        #    arXiv 未到達では出ない/押せない）。
+        # + 分野マップのベクトル係留層（atlas_vector_anchoring_design.md §5 / §7）の3件:
+        #   atlas.vector-refresh（[索引を再構築]。凍結骨格なし・日次上限では
+        #    作り直されず、その事実が出る — VA4）/
+        #   atlas.aliases（登録済みの別名の区画。見送りは行削除ではなく状態遷移 — VA6）/
+        #   atlas.gap-alias-register（ギャップ候補カードの [別名として登録]。近傍注記の
+        #    ある候補にだけ出る。注記は可能性の提示で、確定は教員 — VA1 / VA8）。
+        # + グラフ対話レビュー（graph_dialogue_review_design.md §7）の10件:
+        #   materials.row-graph-review（教材行のグラフアイコン。document_id を持つ行のみ。
+        #    2026-09-06 に ⋯ メニューから昇格）/
+        #   graph-review.modal / .layer / .filter-unreviewed / .next-unreviewed（見取り図と
+        #    レビューナビ）/ .approve / .reject（component の状態遷移のみ。承認可能性は
+        #    サーバが 422 の事実文で強制 — GR1/GR6）/ .claim-approve（backing claim の承認。
+        #    R層オーサリングのトリガーにつながる）/ .chat（ノード対話 = W層セッション再利用）/
+        #   .graph-chat（グラフ全体対話。候補注釈を生成しない）。
+        # + 分野マップの関係表示（atlas_relation_edges_design.md §7）の3件:
+        #   atlas.edge-candidates（関係（辺）の候補のグループ全体。候補は読み時導出で、
+        #    採用しても下書きへ反映して凍結するまで骨格は変わらない — RE3/RE6）/
+        #   atlas.edge-dismissed-filter（見送り済みも表示。見送りは行削除ではなく
+        #    状態遷移で、学習者側の推定の関係からも消える — RE5/RE8）/
+        #   atlas.edge-incorporate（[次版の下書きへ反映…]。採用済み・下書きあり・
+        #    分野がアクティブのときだけ押せる。書くのは常に教員の PUT draft — RE3）。
+        # + グラフ対話レビューのレビュー是正（2026-08-29 §11）の2件:
+        #   graph-review.open-deliberation（ノード詳細の「深く検討」— W層完全版への遷移）/
+        #   graph-review.new-chat（グラフ全体対話のセッション上限到達時の再開ボタン。
+        #    force_new=true で新規セッション。旧対話の記録は残る — GR7）。
+        # + グラフ対話レビューの音声対話追補（2026-08-29 §12）の1件:
+        #   graph-review.voice（🎤 音声トグル。ハンズフリーの発話→文字起こし→応答の
+        #    読み上げ。音声は対話の入出力手段のみで、承認・却下は教員のボタン — GR1）。
+        # + グラフの論文層（graph_paper_layer_design.md §4.1）の2件:
+        #   graph-review.paper-view（ツールバーの表示切替「グラフ / 論文の順」。論文の順は
+        #    章立てに沿ったアウトラインで、掛かっていない章・要素も正直に列挙する —
+        #    PL3/PL4）/
+        #   graph-review.paper-facing（ノード詳細の「論文での対応」区画。既存の解析結果の
+        #    読み時射影で、LLM 生成も承認状態の変更も伴わない — PL1/PL2/PL5）。
+        # + 確定文脈の記帳（decision_context_design.md §5）の1件:
+        #   release-review.evidence（リリース前の確認 ステップ2 各行の「根拠を見る」。
+        #    判断の材料（論文からの逐語引用）を畳んで置き、引用の無い行もその事実を
+        #    書く。何を見て確認したかを後から再構成できるようにするため — DC1/DC2）。
+        # + マニュアル突合（2026-09-05）で見つかった未係留の操作要素4件:
+        #   groups.refresh（グループ管理タブ見出し右の「更新」）/
+        #   atlas.reports-refresh（修正報告の区画内の「更新」。タブ最上部の
+        #    atlas.refresh とは別ボタン）/
+        #   atlas.overview-action（状態カード下の「次にすること」ボタン。文言は状態で
+        #    変わり、「最初の地図を作る」以外は画面内移動のみ）/
+        #   course-builder.material-detail（教材カード右端の「詳細」。選択トグルとは
+        #    独立で、サーバ問い合わせを伴わない）。
+        # + 2026-09-05: lecture-studio.recon-item-restore（再構成レビューキューの
+        #   「自動配信に戻す（auto）」。PATCH は auto への遷移を受けるのに UI に
+        #   戻し口が無く、retire が一方通行に見えていた）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 327
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

@@ -220,3 +220,50 @@ class TestNoForbiddenVocabularyOrPolling:
         src = _read()
         block = _function_block(src, "lsRefreshReconReviewBadge")
         assert "setInterval" not in block
+
+
+class TestReconItemRestoreToAuto:
+    """2026-09-05 是正: 処理済み item を auto に戻す導線。
+
+    PATCH /api/admin/reconstruction/items/{id} は auto / flagged / retired /
+    confirmed の全遷移を受けるのに、モーダルには confirm / retire しか無く、
+    一度 retire すると UI からは二度と戻せない一方通行に見えていた。P4（行は
+    削除せず状態遷移で保持）の実装なのだから、戻す操作も同じ経路で出す。
+    """
+
+    def test_restore_button_targets_auto_status(self):
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        assert 'data-recon-item-status="auto"' in block
+
+    def test_restore_button_has_ui_anchor(self):
+        """3点セット（マニュアル節 + ADMIN_UI_ANCHORS + data-ui-anchor）の担体。"""
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        assert 'data-ui-anchor="lecture-studio.recon-item-restore"' in block
+
+    def test_restore_reuses_existing_patch_path(self):
+        """専用 API・専用ハンドラを増やさない（既存の click 委譲に相乗り）。"""
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        # 遷移ボタンは全て data-recon-item-id を持ち、末尾の1つの委譲で拾われる。
+        assert block.count("data-recon-item-id=") >= 3
+        assert 'querySelectorAll("[data-recon-item-id]")' in block
+
+    def test_processed_items_are_not_dead_ends(self):
+        """「その他」区画は履歴表示のみにせず、常に操作可で描画する。"""
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        assert "itemCardHtml(it, it.status === \"auto\")" not in block
+
+    def test_auto_items_keep_confirm_and_retire(self):
+        """auto（未処理）の item は従来どおり confirm / retire を出す。"""
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        assert 'data-recon-item-status="retired"' in block
+        assert 'data-recon-item-status="confirmed"' in block
+
+    def test_no_delete_introduced(self):
+        src = _read()
+        block = _function_block(src, "lsRenderReconReviewModalList")
+        assert '"DELETE"' not in block and "'DELETE'" not in block

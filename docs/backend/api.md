@@ -10,10 +10,12 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 > （materials / course / lecture_studio / atlas / doubt / library / llm_usage / interest_dashboard /
 > users / system）に委ねる。手順の詳細をここに書かない。
 >
-> **網羅性（2026-08-14 時点）**: `backend/api/routes/` の全ルーターデコレータ + `/healthz` を
-> 突合し、本ページの一覧と過不足なく一致することを確認済み（346 経路。`GET
+> **網羅性（2026-09-03 時点）**: 起動後の `app.routes`（`backend/api/routes/` の全ルーター +
+> `/healthz`。FastAPI 自動生成の `/docs` `/openapi.json` `/redoc` は除く）と本ページの一覧を
+> 突合し、過不足なく一致することを確認済み（`GET
 > /api/admin/documents/{id}/figures` は admin.py と figure_presentation.py の2定義が
-> 1経路に収束するため1行）。ルーターやエンドポイントを追加したら本ページの該当節にも行を足すこと。
+> 1経路に収束するため1行）。**経路数は本ページに書かない**（正は起動後の `app.routes`）。
+> ルーターやエンドポイントを追加したら本ページの該当節にも行を足すこと。
 
 ---
 
@@ -26,6 +28,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | `backend/api/schemas.py` | API 固有の Pydantic リクエスト/レスポンスモデル |
 | `backend/api/services.py` | 共通ビジネスロジック（バックグラウンドタスク CRUD、権限判定 `resolve_document_access` など） |
 | `backend/api/routes/*.py` | 機能別ルーター（下記マウント一覧参照。`export_artifacts.py` はルーターではなく export のヘルパー） |
+| `backend/api/ingest_worker.py` | 論文ディスカバリーの取り込みキュー worker（daemon スレッド。lifespan 起動・**arxiv_client を import しない**＝発見しない。migration 072） |
 
 **lifespan（`main.py::_lifespan`）の起動時処理**: ①マイグレーション適用
 （`core/migrations.py::run_migrations`。PostgreSQL 起動待ちで最大10回リトライ）→
@@ -34,17 +37,22 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 ④ビルトインスキーマ型・述語の seed（`core.schema_registry.seed_builtin_schema`）→
 ⑤L層ナレッジライブラリの同梱シード取込（`core.library.seed`、migration 042）→
 ⑥M層 LLM モデルポリシーの env → DB シード取込と `DbPolicyBackend` への差し替え（migration 061）→
-⑦V層の削除猶予スイーパ起動（`core.versioning.worker`、migration 037）→
-⑧状態管理・通知基盤の遷移検知 watcher 起動（`core.status.watcher`、migration 038）→
-⑨help_kb のバリデーション3種（`validate_manual` / `check_ui_anchor_mappings` /
-`check_admin_ui_anchor_mappings`）→ ⑩help_kb 配信スナップショットの content-hash 監査記帳
-（`core.help_kb.audit`）→ ⑪help_kb ベクトル補助層の同期（バックグラウンドスレッド、migration 058）。
-③〜⑪はすべて fail-open（失敗しても起動を止めず warning ログのみ）。
+⑦V層の削除猶予スイーパ起動（`core.versioning.worker`、migration 037。アカウント削除予約の
+purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディスカバリーの取り込みキュー worker 起動
+（`backend/api/ingest_worker.py`、migration 072。`PAPER_DISCOVERY_WORKER_ENABLED` 既定 on）→
+⑨状態管理・通知基盤の遷移検知 watcher 起動（`core.status.watcher`、migration 038）→
+⑩help_kb のバリデーション3種（`validate_manual` / `check_ui_anchor_mappings` /
+`check_admin_ui_anchor_mappings`）→ ⑪help_kb 配信スナップショットの content-hash 監査記帳
+（`core.help_kb.audit`）→ ⑫help_kb ベクトル補助層の同期（バックグラウンドスレッド、migration 058）。
+③⑤〜⑫は fail-open（失敗しても起動を止めず warning ログのみ）。**④ だけは fail-open ではない** —
+`seed_builtin_schema()` は①②と同じリトライループの中で例外を握らずに呼ばれるため、失敗すると
+リトライののち起動中止（`sys.exit(1)`）になる（[デプロイ構成](../architecture/deployment.md) の
+起動シーケンス表と同じ扱い）。
 
 **ルーターのマウント（main.py、Tier 3-17c でフラット化）**: 全ルーターは `main.py` から直接
 `app.include_router(...)` で登録される（admin.py 経由の二段ネストは廃止済み）。
 
-- **自前 prefix で直接登録（24本、`main.py` の登録順）**: `auth`（/api/auth）/ `learning`
+- **自前 prefix で直接登録（`main.py` の登録順。本数の正は `main.py` の `include_router` 行）**: `auth`（/api/auth）/ `learning`
   （/api/learning）/ `figure_presentation`（/api/admin）/ `element_explanations`（/api/admin）/
   `admin`（/api/admin）/ `error_logs`（/api/admin/error-logs）/ `lecture`（/api/learning/lecture）/
   `groups`（prefix なし。/api/groups・/api/me をパスに直書き）/ `export`（prefix なし。
@@ -52,14 +60,17 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
   `atlas.report_router`（/api/atlas）/ `atlas_view`（/api/atlas）/ `doubt.learning_router`
   （/api/learning）/ `reconstruction.learning_router`（/api/learning）/
   `discuss_observation.learning_router`（/api/learning）/ `cycle.learning_router`（/api/learning）/
-  `library`（/api/admin/library）/ `llm_usage`（/api/admin/llm-usage）/ `llm_models`
-  （/api/admin/llm-models）/ `personal_map.router`（/api/learning）/ `personal_map.me_router`
-  （/api/me）/ `my_records.me_router`（/api/me） / `descent.learning_router`（/api/learning）/ `landscape.learning_router`（/api/learning）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（20本、`main.py` の登録順）**:
+  `descent.learning_router`（/api/learning）/ `library`（/api/admin/library）/ `llm_usage`
+  （/api/admin/llm-usage）/ `llm_models`（/api/admin/llm-models）/ `personal_map.router`
+  （/api/learning）/ `personal_map.me_router`（/api/me）/ `my_records.me_router`（/api/me）/
+  `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
+  `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（22本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
-  （/cartridges 配下）/ `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
+  （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `atlas_edges`（/cartridges 配下）/
+  `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
   `discuss_observation.admin_router` / `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
@@ -155,6 +166,28 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | GET | `/api/learning/courses/{cid}/discuss/opening` | 所有者 or 受講者 | 開幕画面（非LLM・読み取り専用）。中心命題・支持構造・別の見方・理論のバックボーン・「最も脆い一手」（主語別）・`course_focus`・教員承認済みの「議論のきっかけ」（`documents[].discussion_seeds`）を投影 |
 | POST | `/api/learning/courses/{cid}/discuss/reflection` | 本人のみ | 着地画面「今日の理解を自分の言葉で」を `kind='tension'` / `status='articulated'` の痕跡として直接記録（LLM 0回・候補を経由しない。空文字は 422） |
 
+#### コース無し論文議論（document 直付け discuss、コーパス回遊 Phase B）
+
+正本: `docs/features/corpus_roaming_design.md` §5（CR1/CR2/CR8/CR9）。**受講ゲートを一切
+経由せず、ゲートは document 可視性のみ**（`resolve_document_access(...).can_view` =
+`user_can_view_document` と同一判定。閲覧不可も不在も同じ 404）。会話は既存の
+`learning_chat_history` / `interest_traces` に予約センチネル
+`course_id = "_doc:{document_id}"`（正本 `core/discuss/context.py`）+ `topic_id = "_discussion"`
+で載せる（migration 0・新テーブルなし）。`{ref}` は `documents.id`(UUID) と
+`source_path`(material_id) の両対応。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/learning/documents/{ref}/discuss/opening` | document 閲覧権のみ | コース版と同じ `build_opening` をセンチネル + 単一 document で呼ぶ（LLM 0回）。レスポンスはコース版の DTO + `document_context: {document_id, title, context_id, topic_id, label}`。既知の縮退: `fragile_points` は `epistemic_ledger.course_id` 基準のため空／UCサイクルの `intention` は同梱しない |
+| POST | `/api/learning/documents/{ref}/discuss/chat` | document 閲覧権のみ | 既存 `learning_chat` の discuss 経路のファサード（本体は共通コア `_learning_chat_core`）。body は `LearningChatRequest`（`message` 必須 / `history` / `discuss_scope` / `replace_message_id` / `message_id` / `selection_text` 等）。`intent_mode` はサーバが `discuss` に固定し、`action` / `atlas_context` / `cycle_mode` は落とす（§5.4 の縮退）。RAG は既定で当該 document のみ、`discuss_scope="all_visible"` のときだけ `list_visible_document_ids` まで。不正な `discuss_scope` は 422。レスポンスは `LearningChatResponse`（コース版と同型・`origin` は常に null） |
+| GET | `/api/learning/documents/{ref}/discuss/history` | document 閲覧権のみ | センチネルキーの履歴（`LearningChatHistoryResponse`。形はコース版 `GET .../topics/{tid}/chat` と同一） |
+| DELETE | `/api/learning/documents/{ref}/discuss/messages/{mid}` | document 閲覧権のみ | 指定メッセージ以降の往復を truncate（`truncate_chat_and_supersede`。派生 interest_traces は削除せず `superseded` 化 = CR8）。不明 mid は 404 |
+
+コストは既存 `LEARNING_CHAT_MAX_CALLS_PER_DAY` に相乗り（専用上限なし）。U層 feature は
+`learning:chat_discuss` を流用し、内部計測は `discuss_metric_events` の
+`document_discuss_opened` / `document_discuss_turn`（サーバ側 best-effort 記録・payload 空・
+学習者に数値を返さない）で分離する。痕跡の `context_label` は「論文との議論（コース外）」。
+
 #### 問いの軌跡（interest_traces）・地図導線
 
 | メソッド | パス | 権限 | 説明 |
@@ -199,7 +232,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
-| GET | `/api/learning/lecture/courses/{cid}/topics/{tid}/sequence` | 受講者（コース可視性） | レクチャーシーケンス構築（トピック教材 `_lecture_uses_topic_material` 優先、無ければ PDF チャンク経路） |
+| GET | `/api/learning/lecture/courses/{cid}/topics/{tid}/sequence` | 受講者（コース可視性） | レクチャーシーケンス構築（トピック教材 `core/lecture.py::lecture_uses_topic_material` 優先、無ければ PDF チャンク経路） |
 | POST | `/api/learning/lecture/courses/{cid}/topics/{tid}/tts` | 受講者 | **キャッシュ済み** TTS 音声の配信のみ（未生成は 404。生成は管理側バッチ限定。`topic:{tid}` 形式はトピック音声キャッシュから） |
 | GET | `/api/learning/lecture/courses/{cid}/topics/{tid}/audio-status` | 受講者 | 再生可能な音声の有無を軽量判定（レクチャーボタン活性用。生成は行わない） |
 | POST | `/api/learning/lecture/courses/{cid}/topics/{tid}/interrupt` | 受講者 | レクチャー一時停止中の質問チャット（現在チャンクをコンテキストに回答） |
@@ -209,7 +242,7 @@ FastAPI バックエンドのエンドポイント構成、認証・RBAC、開�
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/atlas/runtime-config` | 公開 | atlas-data.js のデータソース既定（api / fixture）を返す |
-| GET | `/api/atlas` | 要ログイン | 地図データ一式（骨格+キャッシュ+個人層。`course`/`topic`/`focus` をサーバ側で解決。骨格なしは 404） |
+| GET | `/api/atlas` | 要ログイン | 地図データ一式（骨格+キャッシュ+個人層。`course`/`topic`/`focus` をサーバ側で解決。骨格なしは 404）。**optional な top-level キー `threads`**（推定の糸 = RE層 §6。`{available, skeleton_version, items[]}`。導出不能・ベクトル不在・見送り済みのみのときは**キー自体を付けない**。cosine は載せず近さは段階ラベル） |
 | GET | `/api/atlas/node/{node_id}` | 要ログイン | 詳細パネル用のノード情報 |
 | GET | `/api/learning/atlas/{cartridge_id}/skeleton` | 要ログイン | 学習者向け骨格（凍結・レビュー済み版のみ。draft のみの domain は 404） |
 | GET | `/api/learning/atlas/cues/state` | 要ログイン | 導線の永続状態（first_login_seen。DB 不通時は seen=True の fail-closed） |
@@ -263,6 +296,25 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 
 > このルーターは**読み取り専用**（書き込み API を作らないことをガードレールで固定）。
 > 訂正操作（map-exclude / map-restore）は `routes/learning.py` 側にある。
+
+### 制度指標カタログ（`routes/indicators.py`、読み取り専用）
+
+制度を観察するための集約計器の**定義だけ**を公開する（正本は
+`backend/core/indicator_catalog.py`、設計は
+`docs/features/indicator_governance_design.md` の IG1〜IG5）。**値は1つも返さない**ため
+教員・管理者ゲートを掛けず、認証済みなら学習者も読める（IG1: 観察される側が定義を
+読めなければ「全当事者に公開」にならない）。値の閲覧権限は各計器の API 側のまま。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/indicators` | 認証済み全ユーザー（`_get_current_user`） | 全計器の定義（`label` / `definition` / `purpose` / `values_audience` / `granularity` / `source` / `retention` / `k_anonymity` / `route` / `consumer` / `not_used_for` / `design_doc` / `side_effect_review`）+ 固定事実文 `note` + `k_anonymity`（`core/privacy.py` の正本値）。各項目に `readable_by_me`（呼び出し元が**値**を読める立場かの投影であって、この API の認可ではない） |
+| GET | `/api/indicators/{indicator_id}` | 同上 | 1件。未知の id は 404 |
+
+> 書き込みメソッドを作らない（カタログはコードが正本）。数値・件数・レンジを1つも
+> 含まないことを `test_indicator_catalog.py` が再帰走査で固定する。
+> 既存の計器レスポンス6本（llm-usage metrics / doubt metrics / discuss observation-status /
+> interest-dashboard / bridge-insights / stumble-summary）にはトップレベル
+> `indicator_id` を1キー追加してある（キー集合をテストで固定している経路には足さない）。
 
 ### わたしの記録（`routes/my_records.py`、読み取り専用）
 
@@ -319,7 +371,8 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 
 ### 管理 `/api/admin`（`routes/admin.py`）
 
-教材・コース・スキーマ・ユーザー管理の中核ルーター（43 エンドポイント）。
+教材・コース・スキーマ・ユーザー管理の中核ルーター（エンドポイント数の正は `routes/admin.py` の
+デコレータ行）。
 手順の正本: [admin_operations/materials.md](../admin_operations/materials.md) /
 [admin_operations/course.md](../admin_operations/course.md) /
 [admin_operations/users.md](../admin_operations/users.md)（グループ管理） /
@@ -340,6 +393,24 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | PUT | `/api/admin/materials/{id}/visibility` | 教材所有者のみ | 開示範囲（public/group/private）を更新 |
 | DELETE | `/api/admin/materials/{id}` | 教材所有者 + `confirm_name` 一致必須 | 教材削除（参照コース・チャンク・W層孤児行も削除、V層 teardown 通知） |
 | GET | `/api/admin/tasks/{task_id}` | TEACHER | バックグラウンドタスクのステータス（ポーリング用） |
+
+#### URL 指定による教材取得（migration 070）
+
+教員が論文 URL（PDF / TeX `.tar.gz`）を指定するとサーバが取得し、**既存のアップロード
+パイプラインへそのまま流す**（`_accept_material_source` に合流。新しい教材種別・新しい
+ポーリングを作らない）。SSRF ガードと形式判定の正本は `core/url_fetch.py`
+（ドット境界のドメイン照合・`getaddrinfo` の全アドレス検査・リダイレクト各ホップ再検証・
+実バイトのマジックによる形式判定・100MB / 60秒上限）。**許可リストの初期状態は空 = 機能無効**で、
+照合はサーバ側で強制する（UI の無効化は補助）。エラーの `detail` に解決した IP 等の内部情報を
+載せない。監査 `entity_type='url_fetch_domain'`。詳細は
+`docs/features/url_material_upload_design.md`（UF1〜UF6）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/materials/upload-from-url` | TEACHER | URL から取得して教材として受理（202・レスポンスは `materials/upload` と同形）。取得はリクエスト内同期。許可ドメイン未設定 / 非許可ドメイン / 私設アドレス / 非対応形式は 422、サイズ超過は 413、取得失敗は 502 |
+| GET | `/api/admin/url-fetch-domains` | TEACHER | 取得先ドメインの許可リスト（教員も「どのドメインなら使えるか」を知る必要があるため参照は TEACHER 以上） |
+| POST | `/api/admin/url-fetch-domains` | SYSTEM_ADMIN | 許可ドメインの登録（201・冪等。形式不正は 422） |
+| DELETE | `/api/admin/url-fetch-domains/{domain}` | SYSTEM_ADMIN | 許可ドメインの解除（未登録は 404） |
 
 #### コースビルダー
 
@@ -389,6 +460,30 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 | POST | `/api/admin/users/teacher` | SYSTEM_ADMIN | 教員（instructor）アカウント作成 |
 | GET | `/api/admin/system/materials-stats` | SYSTEM_ADMIN | 全コースのパイプライン進捗・受講者数・チャット数 |
 
+#### アカウントライフサイクル（migration 068 / 069）
+
+一覧・停止/再開・パスワードリセット・削除（移管 → 墓標化 → 選択的 purge）・利用実績照会の層。
+**`users` 行を物理 DELETE しない**（削除 = `status` 遷移 + 匿名化墓標 + 明示 purge。AL1）。
+失効はトークン世代（JWT の `gen` クレーム）で行い、停止・リセット API は
+`core/account_status.py::invalidate()` を必ず呼ぶ。停止の効果は**認証拒否のみ**で
+所有権・共有・受講は不変（AL2）。対象が教員・管理者なら SYSTEM_ADMIN を要求し
+（`_require_role_for_target`、TEACHER は 403）、自分自身と bootstrap `Administrator` への
+停止・削除予約は 422（AL10）。不在・不正 id はすべて同一 404（存在を教えない）。
+平文パスワード・ハッシュを監査 / ログ / `auth_events` に入れない（AL4）。
+監査 `entity_type='user_account'`。詳細は
+`docs/features/account_lifecycle_management_design.md`（AL1〜AL10）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/users` | TEACHER（`role` は learner に強制固定の fail-closed）/ SYSTEM_ADMIN は全ロール | アカウント一覧（`role` / `status` / `q` / `limit` / `offset`。語彙外の `role` / `status` は 422） |
+| POST | `/api/admin/users/{uid}/suspend` | TEACHER（対象が学生のとき）/ 教員・管理者への操作は SYSTEM_ADMIN | 停止（active → suspended。`reason` 必須＝空は 422、active 以外は 422） |
+| POST | `/api/admin/users/{uid}/restore` | 同上 | 停止の解除（suspended → active）。`pending_deletion` の解除はここではなく削除予約の取消 API |
+| POST | `/api/admin/users/{uid}/password-reset` | SYSTEM_ADMIN（**対象ロールを問わない**） | パスワード再設定 + トークン世代 ++ で発行済みトークンを即時失効。自分自身に実行した場合は `self_reset` を返す |
+| GET | `/api/admin/users/{uid}/activity` | SYSTEM_ADMIN | 個票（`auth_events` の時系列 + LLM 利用サマリ。`limit` / `before` でページング）。学習評価に使わない（AL7） |
+| POST | `/api/admin/users/{uid}/deletion` | SYSTEM_ADMIN | 削除予約（**停止済みが前提**。suspended → pending_deletion + `purge_after`。`grace_days` 既定14日・範囲外は 422）。期限後に V層スイーパが purge |
+| DELETE | `/api/admin/users/{uid}/deletion` | SYSTEM_ADMIN | 削除予約の取消（pending_deletion → suspended。予約中でなければ 422） |
+| POST | `/api/admin/users/{uid}/transfer-ownership` | SYSTEM_ADMIN | 所有物（教材 / コース / グループ）の後任への移管。移管先は教員・管理者かつ利用中で、対象本人は不可（いずれも 422）。受講状態・共有・V層の版はそのまま生きる |
+
 #### スキーマ進化（[動的スキーマ進化](../pipeline/schema-evolution.md)）
 
 | メソッド | パス | 権限 | 説明 |
@@ -413,6 +508,7 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 |---|---|---|---|
 | GET | `/api/admin/interest-dashboard` | TEACHER | interest_traces の集団集計（件数・比率・関与人数のみ。個人特定情報なし） |
 | GET | `/api/admin/courses/{cid}/bridge-insights` | TEACHER + コース編集権（所有者 / course editor / SYSTEM_ADMIN） | 学習者が connect した橋候補の k-匿名集約（k=3・人数レンジ表示）。認可は `aggregate_bridge_candidates()` より前（権限のない教員へ集約の存在・空非空を開示しない）。権限なし・不明コースは同一 404 |
+| GET | `/api/admin/courses/{cid}/anchor-insights` | TEACHER + コース編集権（所有者 / course editor / SYSTEM_ADMIN） | 構造帰属型の問いの k-匿名集約（`core/structure_anchor/insights.py`）。theory stage 別 anchor_type × doubt_type のセル（k=3・n<3 非表示・`count_range` のみ）。対象は `attribution_source ∈ (learner_selected, confirmed)` かつ `structure_anchor.status<>'dismissed'` かつ行 `status<>'superseded'`。全セルが k 未満なら `{"cells": [], "suppressed": true}`。認可はセッション取得より前・権限なし/不明コースは同一 404。読み取り専用・監査なし・LLM 0 回（**UI 未配線**） |
 
 ### 図の表示分類 `/api/admin`（`routes/figure_presentation.py`、#496）
 
@@ -522,7 +618,9 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | GET | `/api/admin/documents/{id}/chunks/{chunk_id}/claims` | TEACHER + document 閲覧権 | チャンク単位の theory_claims（0件ならドキュメント全体にフォールバック） |
 | GET | `/api/admin/documents/{id}/sections/{sid}/components` | TEACHER + document 閲覧権 | セクション単位の theory_components（0件ならドキュメント全体にフォールバック） |
 | GET | `/api/admin/documents/{id}/component-graph` | TEACHER + document 閲覧権 | 保存済み TheoryOperationGraph の正規化返却（無ければ決定論的に構築） |
+| GET | `/api/admin/documents/{id}/paper-layer` | TEACHER + document 閲覧権 | 理論操作グラフの論文層（フレーム→論文 / 論文→フレーム / 被覆）の読み時射影。LLM 0回・保存なし |
 | PATCH | `/api/admin/claims/{claim_id}` | TEACHER + document 編集権 | claim の全項目更新（review_status 遷移は監査、rejected は伝播、承認時は R層 item オーサリングを非同期起動） |
+| POST | `/api/admin/claims/{claim_id}/review` | TEACHER + document 編集権 | **遷移専用**（本文フィールドを一切変更しない）。グラフ対話レビュー画面の claim 承認の実体で、フル upsert の PATCH を画面から使うと同時編集を巻き戻すため分離した。`review_status` は許可4語彙のみ（語彙外 422）、非 UUID の claim_id は 404。副作用（監査 / 却下伝播 / 承認時の R層オーサリング起動）は PATCH と共通 |
 
 #### 理論コンポーネント CRUD（コース単位）
 
@@ -532,7 +630,8 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | POST | `/api/admin/chunks/{chunk_id}/theory-components/extract` | TEACHER + 当該教材を含む編集可能コース | SMILES DSL からの構造抽出（`use_llm` で LLM 補強）を candidate として upsert |
 | POST | `/api/admin/courses/{cid}/theory-components` | TEACHER + コース編集 | コンポーネント手動作成（重複候補を自動付与） |
 | PUT | `/api/admin/theory-components/{comp_id}` | TEACHER + コース編集 | 全項目更新（review_status 遷移は監査・rejected 伝播） |
-| POST | `/api/admin/theory-components/{comp_id}/reject` | TEACHER + コース編集 | rejected 遷移（行削除しない）+ グラフエッジ無効化 |
+| POST | `/api/admin/theory-components/{comp_id}/approve` | TEACHER + document 編集権（`_ensure_component_editable`。document 単位が主経路で course はフォールバック） | **遷移専用**の承認（`teacher_reviewed` / `teacher_approved`）。内容フィールドは変更しない。承認可能性（名前・source_chunks・inputs/outputs 非空 + 全項目に出典）をサーバ側で強制し、満たさなければ 422 の事実文 |
+| POST | `/api/admin/theory-components/{comp_id}/reject` | 同上 | rejected 遷移（行削除しない）+ グラフエッジ無効化 |
 | POST | `/api/admin/courses/{cid}/theory-components/validate-connection` | TEACHER + コース閲覧 | 2コンポーネント間の接続妥当性を非LLM検証（warnings を返す） |
 
 #### C層: 説明バージョン・承認・引用
@@ -616,6 +715,41 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/incorporate-preview` | TEACHER | 採用済み候補を次版 draft へ追加する JSON Patch（op は add のみ）と適用後 draft の**提示のみ**。DB 非変更。未採用 / draft なしは 409、満杯領域・親領域不在は 422 |
 | POST | `/api/admin/cartridges/{cid}/atlas/gap-candidates/mark-incorporated` | TEACHER | 教員の `PUT draft` **成功後**に取り込み先 node を刻印。`draft_node_id` が現 draft に無ければ 409（誤順序を弾く） |
 
+### 分野マップのベクトル係留（`routes/atlas_vectors.py`、migration 074）
+
+凍結骨格の各ノードに**プロトタイプベクトル**（label + 確定別名 + 確定配置の evidence 引用の
+埋め込み）を与える層の管理 API。索引の構築は凍結後の best-effort 再構築（`routes/atlas.py` の
+freeze フック）が主経路で、本ルーターの refresh はそれ以前に凍結された骨格のバックフィル手段。
+**DELETE ルートは無い**（別名の見送りは `status='dismissed'` への遷移で、同じ表記の再登録が復帰）。
+返す数値は索引カバレッジだけで、cosine / 類似度は返さない（VA2）。詳細は
+`docs/features/atlas_vector_anchoring_design.md` §5 / §7。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/cartridges/{cid}/atlas/vectors/status` | TEACHER | 索引の状態（`total_nodes` / `embedded_nodes` / `built_at` / `stale`）。凍結骨格が無い分野は 404 ではなく `{available: false}` |
+| POST | `/api/admin/cartridges/{cid}/atlas/vectors/refresh` | TEACHER | 現行凍結版のアンカー索引を作り直す。builder の要約（`completed` / `skipped` + 理由）をそのまま返す。retired ドメインは 409、構築失敗は 422（detail は数値・内部情報を含まない事実文） |
+| GET | `/api/admin/cartridges/{cid}/atlas/aliases` | TEACHER | 登録済み別名の一覧（既定は confirmed のみ。`include_dismissed=true` で見送り済みも）。`node_label` は現行凍結骨格から補い、骨格に無いノードは空文字 |
+| POST | `/api/admin/cartridges/{cid}/atlas/aliases` | TEACHER | 別名の登録（教員の確定操作 — VA1）。`node_id` が現行凍結骨格に無い / 表記が空 / `source` が語彙外は 422。登録後に当該ノードのプロトタイプを best-effort で再構築（失敗しても登録は成功） |
+| POST | `/api/admin/cartridges/{cid}/atlas/aliases/{alias_id}/dismiss` | TEACHER | 別名を見送りにする（行は消さない）。別分野の id・不在はいずれも 404 |
+
+### 分野マップの関係表示 — 辺候補のレビュー（`routes/atlas_edges.py`、migration 076）
+
+骨格の辺（adjacent / depends / related）の候補を、VA層の**保存済み**アンカーベクトルと
+配置の共起から**毎回読み時導出**する（候補行を蓄積しない・embedding を呼ばない）。
+骨格 draft を書くのは教員の既存 `PUT .../atlas/skeleton/draft` だけで、本ルーターは
+骨格に書き込まない（RE3 / AB4 / KN-3）。**DELETE ルートは無い**（見送りは `dismissed`、
+その取り消しは `candidate` への遷移）。cosine・共起件数は返さない（RE4。近さは段階ラベル、
+共起の支持は論文タイトルの列挙）。凍結との接続（公開前チェックと `applied_version` の刻印）は
+`routes/atlas.py` の freeze 側にある。詳細は
+`docs/features/atlas_relation_edges_design.md` §5。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/cartridges/{cid}/atlas/edge-candidates` | TEACHER | 辺候補の一覧（毎回導出。`origins` / `nearness_label`（vector 由来のみ）/ `documents`（共起由来のみ）+ `decision`）+ `skeleton_version` / `draft_exists` / `draft_revision`。`include_dismissed=true` で見送り済みも返す。凍結版が無い分野は 404 |
+| POST | `/api/admin/cartridges/{cid}/atlas/edge-candidates/decide` | TEACHER | 候補を採用・見送りにする（見送りの取り消しも同 API）。採用は `kind`（adjacent / depends / related）必須、見送りは理由必須（いずれも語彙外・空は 422）。別分野の `edge_key` は 422、復帰対象なしは 404。骨格 draft は変わらない |
+| POST | `/api/admin/cartridges/{cid}/atlas/edge-candidates/incorporate-preview` | TEACHER | 採用済み候補を次版 draft へ追加する JSON Patch（op は add のみ）と適用後 draft の**提示のみ**。DB 非変更。未採用 / draft なしは 409、端点が draft に無い・同じ辺が既にあるは 422 |
+| POST | `/api/admin/cartridges/{cid}/atlas/edge-candidates/mark-incorporated` | TEACHER | 教員の `PUT draft` **成功後**に反映を記録（監査のみ。判断は `accepted` のまま）。無向ペアが現 draft の `edges` に無ければ 409（誤順序を弾く） |
+
 ### 知識ランドスケープ（`routes/landscape.py`、migration 065）
 
 論文（document）を分野の地図（atlas 骨格の凍結版）のアンカーへ複数観点で配置する層。
@@ -635,9 +769,79 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | GET | `/api/admin/landscape/overview` | TEACHER | 本人可視 document の live 配置をノード別に集約（`domain_key` 必須。凍結骨格なしは 404）。骨格に無いノードの配置は集約に載せない |
 | GET | `/api/learning/courses/{cid}/landscape` | 受講ゲート（`get_accessible_course_data`） | 学習者向け「論文の位置づけ」。対象はコース sources のみ・status は `confirmed` / `inferred` / `review_required` のみ。配置ゼロ・骨格なしでも 200 で空構造（非表示への縮退はフロント責務）。`unplaced_documents` / `skeleton_version` を同梱し、weight / confidence / claim_id は投影が構造的に落とす |
 
+### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071 / 072）
+
+arXiv を供給源とする分野購読と候補一覧。2026-09-03 時点 17本すべてが TEACHER 以上（`_require_teacher`）。
+**候補を保存するテーブルは無い**（PD5 — 取り込み済み判定は `documents.source_url`、
+見送りは `paper_discovery_dismissals` から毎回読み時導出）。**DELETE ルートは無い**
+（見送りの取り消しは `revoked` 遷移）。取り込みは教員の明示操作だけが入口で、
+取得は既存の `core/url_fetch.py`（許可ドメイン照合・SSRF ガード）へ完全合流する
+（PD1 / PD2）。類似度・一致度の生数値は返さない（PD4）。監査は
+`entity_type='paper_discovery'`（`metadata.action` = subscribe / ingest / ingest_batch /
+ingest_retry / dismiss / restore）。
+Phase 2（migration 072）はまとまった件数を**キューへ積むだけ**の経路を並置する
+（実際の取得・受理は `backend/api/ingest_worker.py` の daemon スレッドが1件ずつ行い、
+アイテム間に3秒の間隔を置く。進捗は教材一覧の既存 status が正本で、専用の進捗
+ポーリングは作らない）。失敗した項目は行を消さず `status='failed'` + 事実文で残り、
+再試行は教員の明示操作だけが `queued` へ戻す（P4 / PD1）。
+Phase 3 は**並べ替えの強化**（`POST /search` の `order`）と**引用グラフ拡張口**
+（`POST /citation-search`）を足す。関連度は分野コーパス（取り込み済み document の
+チャンク重心）と候補アブストラクトの cosine で並べ替えるだけで候補を捨てず、生スコアは
+返さない（段階ラベル `relevance_label` のみ — PD4）。embedding は `core.llm` 経由で
+U層 feature `discovery:ranking` に帰属し、`DISCOVERY_RANKING_MAX_CALLS_PER_DAY`
+（既定100）の日次上限に達しても検索は新着順で成立する（fail-soft）。引用グラフは
+`DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off）の明示オプトインで、宛先固定・3秒
+スロットルの client（`core/paper_discovery/citation_client.py`）から
+Semantic Scholar recommendations API を引く（LLM 0回）。
+詳細は `docs/features/paper_discovery_design.md` §4.3 / §4.5 / §5 / §6。教材起点の
+`/radar/*` 4ルート（論文レーダー — seed 解決・距離帯つき探索・AI 比較分析・出所の後付け登録）の
+正本は `docs/features/paper_radar_design.md`（PR1〜PR8。migration なし。書き込みは
+`/radar/provenance` が `documents.source_url` に記帳する1点のみで、他3本は読み時導出）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/discovery/subscriptions` | TEACHER | 分野購読の一覧（分野単位の共同財）。`{"subscriptions": [...], "citation_source_enabled": bool}`（後者は引用グラフ供給のオプトイン状態。フロントの活性判定用の補助で、強制はサーバ側） |
+| PUT | `/api/admin/discovery/subscriptions/{domain_key}` | TEACHER | 購読の作成・更新（カテゴリ / キーフレーズ / 著者）。`enabled=false` のフレーズも保存する。分野キー空は 422。監査 `action='subscribe'` |
+| GET | `/api/admin/discovery/subscriptions/{domain_key}/keyphrase-candidates` | TEACHER | 分野語彙（骨格概念 / カートリッジ ontology / 承認済み理論部品）からのキーフレーズ候補を出所付きで返す（PD3）。購読行には書かない |
+| POST | `/api/admin/discovery/search` | TEACHER | 購読条件（body で上書き可）で arXiv を検索。副作用は `last_checked_at` の更新のみ。`query` / `closed_world_note` を必ず同梱し、条件ゼロなら arXiv を呼ばず空（PD6）。`max_results` はサーバ側で 1〜100 に丸める。arXiv 到達失敗は 502 + 事実文（空一覧に化けさせない）。`order`（`date` 既定 / `relevance`、語彙外は 422・空文字は既定）で並べ替えを指定でき、`relevance` のときだけ `order` と `ranking: {available, note?}` を足して候補を並べ替え、各候補に `relevance_label`（「関連: 高 / 中 / 低」）を付ける。並べ替え不能（コーパス無し / embedding 失敗 / 日次上限）は `ranking.available=false` + 事実文で**新着順のまま**返す。既定の `date` では `order` / `ranking` キー自体を付けない（Phase 1〜2 と完全に同一） |
+| POST | `/api/admin/discovery/citation-search` | TEACHER | 取り込み済み論文（`documents.source_url` から arXiv ID が取れるもの・新しい順に最大5件）をシードに、引用グラフ API の推薦から候補を導出する（Phase 3）。**候補提示のみで取り込みはしない**（PD1）ため副作用ゼロ・監査記帳なし。`{"enabled", "available", "candidates": [{...arXiv メタデータ, status, derived_from: [{arxiv_id, title}]}], "seeds": [...], "closed_world_note"}`。`externalIds.ArXiv` を持つ推薦のみ返す（既存の取得経路に乗るもの — PD2）。オプトイン未設定は 403/404 ではなく `{"enabled": false, "note": ...}`、シードゼロは `available:false` + 事実文、外部 API 到達不能は 502 + 固定事実文（内部情報を載せない） |
+| POST | `/api/admin/discovery/ingest` | TEACHER | 選択した候補を取得し既存アップロード経路へ流す（`_accept_material_source`、`documents.source_url` に PDF URL を保存）。**1リクエスト5件まで**（超過・空は 422）。1件ごとの取得失敗は `failed[{arxiv_id, detail}]` に積み残りを続行、許可ドメイン未設定のみ全体を 422。レスポンスは `{"accepted": [upload と同形 + arxiv_id], "failed": [...]}`。監査 `action='ingest'` |
+| POST | `/api/admin/discovery/dismiss` / `/restore` | TEACHER | 候補の見送り / 復帰（`revoked` 遷移。行削除しない）。復帰対象の記録が無ければ 404。監査 `action='dismiss'` / `'restore'` |
+| POST | `/api/admin/discovery/ingest-batch` | TEACHER | 選択した候補を取り込みキューへ積む（Phase 2）。**1リクエスト50件まで**（超過・空は 422）。`models` はここで fail-closed 検証し、worker は再検証しない。202 + `{"queued": [{item_id, arxiv_id, title}], "skipped": [{arxiv_id, detail}]}`。積まない条件は「ID 不正 / 取り込み済み / 既にキュー内」の3つで、いずれも事実文つきで返す。arXiv が許可リストに無くても**受理はする**が `notice` に事実文を添える（PD6）。監査 `action='ingest_batch'` |
+| GET | `/api/admin/discovery/ingest-queue` | TEACHER | 取り込みキューを新しい順に返す。`?domain_key=` / `?limit=`（1〜500、既定50）。`{"items": [{item_id, domain_key, arxiv_id, title, status, detail, material_id, task_id, attempts, requested_at, ...}]}`。`status ∈ {queued, fetching, accepted, failed}` |
+| POST | `/api/admin/discovery/ingest-queue/{item_id}/retry` | TEACHER | 失敗した項目を `queued` へ戻す（前回の `detail` は消さない）。`failed` 以外・不在は 422。`{"item": {...}}`。監査 `action='ingest_retry'` |
+| GET | `/api/admin/discovery/ingest-estimate` | TEACHER | 取り込み前のトークン目安（`?count=` 既定1・上限200）。`llm_usage_events` の `feature LIKE 'pipeline:%'` を document 単位に合算した直近実績から導出し、**実測（reported）と推計（estimated）を分離**して `per_document` / `batch` の `total_tokens_range: [low, high]` を返す（U1）。**点推定・金額は返さない**（U5）。実績ゼロは `{"available": false, "note": ...}`（捏造しない） |
+| GET | `/api/admin/discovery/frontier-interest` | TEACHER | 地図の端への学習者の関心（コーパス回遊層 Phase D、migration 073）。`?domain_key=` 任意。集計単位は **分野 × 領域 × 輪**（`ring ∈ {fringe, outer}`）で、返すのは `{"rows": [{domain_key, region_id, ring, range_label}]}` の **k-匿名レンジのみ**（k=3・`3-5` / `6-10` / `11+`。`core/privacy.py` 委譲・n<3 の行は返さない）。**個人・時系列・順位・生の件数を返さない**（CR6）。取り消し済み（`dismissed`）は数えない。この行は需要の提示であって、購読条件・取り込み・骨格を自動変更する入力にしない（CR10） |
+| GET | `/api/admin/discovery/radar/seed` | TEACHER | 論文レーダー（`docs/features/paper_radar_design.md`、migration なし）の seed 解決。`?document_ref=`（documents.id / source_path 両対応・**document 可視性ゲート**・不可視と不在は同一 404）。`{"seed": {document_id, title, arxiv_id?, abs_url?, summary, categories, categories_source ∈ {arxiv, subscription, manual}, keyphrase_candidates, domain_key}}`。arXiv 由来教材はメタデータを `id_list` で1コール取得（fail-soft — 失敗は購読条件へ縮退） |
+| POST | `/api/admin/discovery/radar/search` | TEACHER | 教材起点の候補探索。body `{document_ref, distance ∈ {near, mid, far}（語彙外 422）, categories?, keyphrases?, start?, max_results?}`。seed 自身を除外し `status`（new / ingested のみ — dismissal は読まない）+ near のみ `matched_keyphrases` + 測定できた候補のみ `distance_label`（「近い / 中間 / 遠い」、正本は `label_vocab.RADAR_DISTANCE_SCALE`）を注釈。`banding: {available, primary_label?, note?}`（帯分け不能は新着順のまま + 事実文の fail-soft）。**購読の `last_checked_at` を更新しない・監査記帳なし**（読み取り専用）。条件ゼロは arXiv 非呼び出し（PD6）。cosine 生値は返さない（PR2） |
+| POST | `/api/admin/discovery/radar/compare` | TEACHER | 選択候補と seed の比較分析（1 LLM コール・feature `discovery:compare`）。body `{document_ref, arxiv_ids}`（空 / 10件超は 422）。候補の要旨は**サーバが `id_list` で取り直し**、各 difference の `evidence_quote` を要旨に対して verbatim 検査（不一致はその項目のみ drop）。`{"items": [{arxiv_id, title, common_ground, differences: [{aspect, statement, evidence_quote}], caveat}], skipped, notes}`（`caveat` はサーバ固定文「アブストラクト（要旨）の比較に基づく AI の推定です。…」）。日次上限（`DISCOVERY_COMPARE_MAX_CALLS_PER_DAY`・ユーザー別）超過は 429、LLM / arXiv 全滅は 502。**結果は保存しない・監査記帳なし** |
+| POST | `/api/admin/discovery/radar/provenance` | TEACHER + document 閲覧権（不在・不可視は同一 404）**かつ編集権**（view のみは 403） | 手動アップロード教材への arXiv 出所の後付け登録（レーダーの3段階の 2・3）。クライアントの `arxiv_id` を信用せず**サーバが seed を導出し直して**突き合わせる（推定なし・不一致は 422、arXiv に到達できず照合材料が無ければ `confirm=true` でも 422）。タイトルが正規化一致すれば `method="auto_title_match"`、不一致は `confirm=true` の教員確定（`teacher_confirmed`）が必要で、`confirm` なしは 409。既存の出所は上書きしない（409）。記帳先は既存 `documents.source_url` のみ。監査 `action='provenance_registered'` |
+
+### コーパス回遊 `/api/learning/corpus`（`routes/corpus.py`、migration 073）
+
+コース非依存の「論文の海」。**受講ゲートを一切経由せず、`services.list_visible_document_ids`
+（所有 / public / group / object_group_permissions / アクセス可能コースの sources）だけを
+ゲートにする**（CR1。可視性交差は `core/corpus_view.py` の SQL 内 `= ANY(:doc_ids)` で強制し、
+空集合は SQL を発行せず空を返す）。読み取りは非LLM・読み時導出・保存物なしで、
+weight / confidence / 件数を返さない（CR3。配置には出所ラベルを必ず付ける）。
+**DELETE ルートは無い**（関心の取り消しは `status='dismissed'` 遷移 — CR8）。
+学習者本人の回遊・関心タップは監査記帳しない（本人行動の記帳は観察面の拡大 — 主権台帳 v1 と
+同じ判断）。骨格そのもの（領域配置・座標）は既存の `GET /api/atlas?cartridge={domain_key}` が
+返すため本ルーターは返さない（描画資産を二重管理しない）。
+詳細は `docs/features/corpus_roaming_design.md` §4 / §6 / §7。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/learning/corpus/domains` | 認証済み本人 | 凍結骨格を持つ **active** ドメインの一覧。`{"domains": [{domain_key, domain_name, frozen_version, has_visible_papers}]}`。`has_visible_papers` は bool のみで**件数を返さない**。retired ドメインは並べない |
+| GET | `/api/learning/corpus/landscape?domain_key=` | 認証済み本人 | 1分野のコーパス地図。`{domain_key, skeleton_version, placements, fringe, outer}`。`placements` は本人可視 document × `confirmed`/`inferred`/`review_required` の配置で `source_label`（「AIによる推定（未確認）」/「教員確認済み」）必須・現行骨格に無いノードは落とす。`fringe`（縁）は `landscape_gap_signals` の active を領域単位に集約した `{region_id, region_label, fact_line, paper_titles}`（支持論文は**可視 document のタイトルのみ**・件数なし。教員の判断 = `atlas_gap_decisions` は一切読まない）。`outer`（外）は購読の `last_search_found_new` が TRUE かつ時点があるときだけ `{fact_line}`、他は `null`。`domain_key` 空は 422、凍結骨格なしは **404**（地図領域ごと非表示） |
+| GET | `/api/learning/corpus/documents?domain_key=` | 認証済み本人 | この分野に関係づけられた可視論文（配置あり ∪ 置けなかった信号あり）を**新しい順**で返す。`{"documents": [{document_id, title, authors, year, placed, can_discuss}]}`。`placed=false` は「取り込まれているが現行の地図には置かれていない」という事実。数値スコア・並べ替え指定は無い。`domain_key` 空は 422 |
+| POST | `/api/learning/corpus/frontier-interest` | 認証済み本人 | 「この先を知りたい」の1タップ（Phase D）。body `{domain_key, ring, region_id?}`（`ring ∈ {fringe, outer}`、語彙外・分野空は 422）。`interest_traces` に kind `frontier_interest` で1行（**本文・質問文を持たない**。payload は `domain_key` / `region_id` / `ring` のみ）。201 + `{"ok": true, "trace_id"}` |
+| POST | `/api/learning/corpus/frontier-interest/{trace_id}/withdraw` | 認証済み本人 | 関心の取り消し（`status='dismissed'` 遷移のみ・行削除しない）。他人の行・不在はどちらも 404 |
+
 ### D層 — 管理 `/api/admin/doubt`（`routes/doubt.py` admin_router）
 
-全34本が TEACHER（metrics のみ SYSTEM_ADMIN）。withdraw（疑義者本人）と反実仮想 PATCH（作成者本人）を除き、
+2026-09-03 時点 admin_router の34本が TEACHER（metrics のみ SYSTEM_ADMIN。learning_router の2本は
+上記 D3-6 節）。withdraw（疑義者本人）と反実仮想 PATCH（作成者本人）を除き、
 course_id / target_id への所有・共有チェックは行わない（ロールゲートのみ）。
 手順の正本: [admin_operations/doubt.md](../admin_operations/doubt.md)。
 賭け金の台帳（SL層, migration 067）で反証条件・観測反実仮想の7本が加わっている
@@ -711,9 +915,12 @@ SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利
 
 ### W層 — 要素検討ワークスペース `/api/admin/deliberation`（`routes/deliberation.py`）
 
-全17本が TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`（404 fail-closed）、
-domain-scoped 共通部品（shared_part = L層 `library_entries`）は TEACHER + 由来 document 権限での
-route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_design.md`。
+2026-09-03 時点 21本すべてが TEACHER。document-scoped 要素は `_ensure_document_viewable/editable`
+（404 fail-closed）、domain-scoped 共通部品（shared_part = L層 `library_entries`）は TEACHER +
+由来 document 権限での route 層フィルタ。詳細は
+`docs/features/element_deliberation_workspace_design.md`。グラフ全体対話と音声入出力
+（下記2節）は グラフ対話レビュー（migration 075）が本ルーターへ相乗りしたもので、正本は
+`docs/features/graph_dialogue_review_design.md`（GR1〜GR8）。
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
@@ -734,6 +941,31 @@ route 層フィルタ。詳細は `docs/features/element_deliberation_workspace_
 | POST | `/api/admin/deliberation/shared-parts/{spid}/standardization/assess` | TEACHER | 共通部品1件の標準化判定（三角測量）を非同期開始（`force` なしで既評価はスキップ） |
 | POST | `/api/admin/deliberation/domains/{dkey}/standardization/assess` | TEACHER | domain 内 active 共通部品すべての標準化判定を非同期開始 |
 | GET | `/api/admin/deliberation/documents/{id}/elements` | TEACHER + document 閲覧権 | 要素インベントリ: 教材1件分の全検出要素（component/claim/equation/figure）を統一カード形式で返す |
+
+#### グラフ全体対話（グラフ対話レビュー、migration 075）
+
+疑似要素型 `document_graph`（`deliberation_sessions.element_type` への追加のみ。
+`element_annotations` の CHECK と `ElementRef` は非改変）。grounding は最新
+`theory_component_graphs` からの**非LLM 決定論投影**（main バックボーン + 関係 + 式の詳細層の
+規模 + 未レビュー一覧 + validation + narrative）で、**候補注釈を生成しない**（要素単位の注釈は
+上のノード対話の責務）。**AI 応答から承認 API を呼ぶ経路は作らない**（GR1）。CostGate は W層の
+`DELIBERATION_MAX_CALLS_*` に相乗りし、U層 feature だけ `deliberation:graph_chat` に分離する（GR5）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/deliberation/documents/{id}/graph-sessions` | TEACHER + document 閲覧権 | グラフ全体対話セッションの get-or-create（本人 × document で最新を再開）。グラフ未構築（ノード0）は 422 の事実文。`?force_new=true` はセッション上限に達した対話をやり直す唯一の口（旧履歴は残る） |
+| POST | `/api/admin/deliberation/documents/{id}/graph-sessions/{sid}/messages` | 作成者本人 + document 閲覧権 | 1ターン（1 LLM コール・候補注釈なし）。履歴は 16件 / 4000字 / head_keep=1 でウィンドウ化。モデル検証・グラフ不在の 422 を**すべて通過した後**に CostGate を消費し、超過は 429 |
+
+#### 音声対話（グラフ対話レビューのハンズフリー入出力、migration なし）
+
+管理画面チャットの音声入出力。DB 非変更・読み取り専用で、day-only の CostGate
+（`DELIBERATION_VOICE_MAX_CALLS_PER_DAY`）は上の対話上限とは**独立**。U層 feature は
+`deliberation:voice_stt` / `deliberation:voice_tts`（学習側 `learning:voice_*` と混ぜない）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/admin/deliberation/voice/transcribe` | TEACHER | multipart 音声の文字起こし（空 400 / 10MB 超 413 / 上限超過 429 / openai プロバイダ以外 503） |
+| POST | `/api/admin/deliberation/voice/speak` | TEACHER | 読み上げ用 MP3(base64)。`core.tts.strip_text_for_speech` で LaTeX・markdown 記号・出典マーカーを除去し、残らなければ 400 |
 
 ### Admin Copilot + G層 `/api/admin/assistant`（`routes/admin_assistant.py`）
 

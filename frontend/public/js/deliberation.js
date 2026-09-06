@@ -167,9 +167,31 @@
     return !!IDENTITY_LINKABLE_ELEMENT_TYPES[String(elementType || "")];
   }
 
+  // AGENT_ID_RESOLVABLE: backend が agent 側 ID（comp_001 / claim_span_007 等）でも
+  //   解決できる要素型（refs.resolve_with_agent_id）。agent 側 ID は論文ごとの採番で
+  //   文書間で衝突しうるため、**document_id スコープが無いと解決されない（fail-closed）**。
+  //   そのため DB UUID でない ID のときは document_id を必ず送る（グラフ対話レビューの
+  //   「深く検討」は集約ノードの representative_component_id = agent 側 ID を渡す）。
+  var AGENT_ID_RESOLVABLE_ELEMENT_TYPES = {
+    theory_component: true,
+    theory_claim: true
+  };
+  var _DB_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function _isDbUuid(value) {
+    return _DB_UUID_RE.test(String(value || ""));
+  }
+
+  function _refNeedsDocumentId(ref) {
+    ref = ref || {};
+    if (_needsDocumentId(ref.elementType)) return true;
+    if (!AGENT_ID_RESOLVABLE_ELEMENT_TYPES[String(ref.elementType || "")]) return false;
+    return !_isDbUuid(ref.elementId);
+  }
+
   function _documentIdQuery(ref) {
     ref = ref || {};
-    if (!_needsDocumentId(ref.elementType) || !ref.documentId) return "";
+    if (!_refNeedsDocumentId(ref) || !ref.documentId) return "";
     return "?document_id=" + encodeURIComponent(ref.documentId);
   }
 
@@ -2150,12 +2172,15 @@
     });
   }
 
-  function _renderError(status) {
+  // サーバの detail（事実文）をそのまま出す。原因と無関係な固定文言を被せない
+  // （旧実装は 422 を一律「equation は document_id が必要です」と表示していた）。
+  // detail が無いときだけ status 由来の汎用文言へ縮退する。
+  function _renderError(status, detail) {
     var body = document.getElementById("deliberation-modal-body");
     if (!body) return;
-    var message = "内訳の読み込みに失敗しました";
-    if (status === 404) message = "この要素は見つかりませんでした";
-    else if (status === 422) message = "この要素の指定が不正です（equation は document_id が必要です）";
+    var message = "";
+    if (typeof detail === "string") message = detail.trim();
+    if (!message) message = status === 404 ? "この要素は見つかりませんでした" : "内訳の読み込みに失敗しました";
     body.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">' + escHtml(message) + '</div>';
   }
 
@@ -2426,7 +2451,7 @@
   function _loadAnnotations(elementType, elementId, documentId) {
     var path = "/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" +
       encodeURIComponent(elementId) + "/annotations" +
-      _documentIdQuery({ elementType: elementType, documentId: documentId });
+      _documentIdQuery({ elementType: elementType, elementId: elementId, documentId: documentId });
     apiFetch(path)
       .then(_parseJsonResponse)
       .then(function (data) {
@@ -2443,11 +2468,29 @@
       encodeURIComponent(ref.elementId) + "/overview" + _documentIdQuery(ref);
   }
 
+  // overview は解決済みの ref（element_id は常に DB UUID）を返す。agent 側 ID で開いた
+  // 場合はここで正準 ID に差し替え、以降の呼び出し（annotations / identity-links /
+  // sessions）が同じ要素を確実に指すようにする（agent 側 ID を持ち回らない）。
+  function _syncRefFromOverview(data) {
+    var resolved = data && data.ref;
+    if (!resolved || !chatState.ref) return;
+    var canonicalId = resolved.element_id;
+    if (canonicalId && canonicalId !== chatState.ref.elementId) {
+      chatState.ref.elementId = canonicalId;
+      var trail = navState.trail || [];
+      if (trail.length && trail[trail.length - 1]) trail[trail.length - 1].elementId = canonicalId;
+    }
+    if (resolved.document_id && !chatState.ref.documentId) {
+      chatState.ref.documentId = resolved.document_id;
+    }
+  }
+
   function _reloadOverview() {
     var ref = chatState.ref || {};
     return apiFetch(_overviewPath(ref))
       .then(_parseJsonResponse)
       .then(function (data) {
+        _syncRefFromOverview(data);
         _resetFigureImageState();
         _renderModalBody(data);
         _bindStandardizationAssessButton(ref);
@@ -2467,16 +2510,9 @@
   // 無いため）。
   function _loadAndRenderElement() {
     return apiFetch(_overviewPath(chatState.ref))
-      .then(function (res) {
-        if (!res.ok) {
-          var status = res.status;
-          var err = new Error("status " + status);
-          err.status = status;
-          throw err;
-        }
-        return res.json();
-      })
+      .then(_parseJsonResponse)
       .then(function (data) {
+        _syncRefFromOverview(data);
         _renderModalBody(data);
         _bindStandardizationAssessButton(chatState.ref);
         _bindIdentityLinkSearch(chatState.ref);
@@ -2484,7 +2520,7 @@
         return data;
       })
       .catch(function (err) {
-        _renderError(err && err.status);
+        _renderError(err && err.status, err && err.detail);
       });
   }
 

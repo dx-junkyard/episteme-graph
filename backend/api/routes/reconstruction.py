@@ -647,6 +647,14 @@ def review_queue(
         # fail-closed で {"items": [], ...} を返す（全件フォールバックしない）。
         payload = get_review_queue(document_ids=scope["doc_refs"])
     else:
+        if document_id:
+            # P0: document_id 直指定にもオブジェクトスコープゲートを通す
+            # （course_id 経由だけ守っても、教材 ID を直接指定されれば
+            #  無関係な教員が他人の教材の item / つまづき集約を読めてしまう）。
+            # 不在・権限なしはどちらも 404（detail 同一）。
+            from routes.theory_components import _ensure_document_editable
+
+            _ensure_document_editable(document_id, current_user)
         payload = get_review_queue(document_id)
     if sort == teacher_triage.SORT_LOAD:
         return _apply_load_sort_to_queue(payload)
@@ -769,4 +777,8 @@ def document_stumble_summary(
     from routes.theory_components import _ensure_document_viewable
 
     _ensure_document_viewable(document_id, current_user)
-    return get_stumble_summary(document_id)
+    summary = get_stumble_summary(document_id)
+    # 制度指標カタログへの参照（IG1）。定義は
+    # GET /api/indicators/claims-stumble-summary。
+    summary["indicator_id"] = "claims-stumble-summary"
+    return summary

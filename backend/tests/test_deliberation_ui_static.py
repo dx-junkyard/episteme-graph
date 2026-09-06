@@ -1719,3 +1719,70 @@ class TestIterativeAnalysisUi:
         assert re.search(r"\bconst\s+\w", block) is None
         assert re.search(r"\blet\s+\w", block) is None
         assert "`" not in block
+
+
+# ---------------------------------------------------------------------------
+# 要素解決の誤表示是正（2026-09、正本: graph_dialogue_review_design.md §11）。
+#
+# グラフ対話レビューの「深く検討」は理論操作グラフの集約ノードから代表要素の
+# agent 側 ID（comp_003 等）を渡す。deliberation.js 側の受け入れ条件:
+#   - agent 側 ID のときは document_id を必ずクエリに載せる（backend は
+#     document スコープが無いと解決しない fail-closed）
+#   - overview が返す正準 ref（DB UUID）で以降の呼び出しを行う
+#   - エラー表示はサーバの detail（事実文）を出し、原因と無関係の固定文言
+#     （「equation は document_id が必要です」）を 422 に被せない
+# ---------------------------------------------------------------------------
+
+
+class TestElementResolutionErrorMessaging:
+    def test_stale_422_fixed_message_is_gone(self):
+        src = _read(DELIBERATION_JS)
+        assert "この要素の指定が不正です" not in src
+
+    def test_render_error_prefers_server_detail(self):
+        src = _read(DELIBERATION_JS)
+        assert "function _renderError(status, detail)" in src
+        block = src[src.index("function _renderError(status, detail)"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert 'typeof detail === "string"' in block
+        # detail が無いときだけ status 由来の汎用文言へ縮退する。
+        assert "この要素は見つかりませんでした" in block
+        assert "内訳の読み込みに失敗しました" in block
+
+    def test_overview_failure_passes_detail_to_render_error(self):
+        src = _read(DELIBERATION_JS)
+        block = src[src.index("function _loadAndRenderElement()"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert "_parseJsonResponse" in block  # detail を保持した Error を投げる共通処理
+        assert "_renderError(err && err.status, err && err.detail)" in block
+
+
+class TestAgentSideElementIdScoping:
+    def test_agent_id_resolvable_types_declared(self):
+        src = _read(DELIBERATION_JS)
+        assert "AGENT_ID_RESOLVABLE_ELEMENT_TYPES" in src
+        block = src[src.index("var AGENT_ID_RESOLVABLE_ELEMENT_TYPES"):]
+        block = block[: block.index("};") + 2]
+        assert "theory_component: true" in block
+        assert "theory_claim: true" in block
+
+    def test_document_id_is_sent_for_non_uuid_ids(self):
+        src = _read(DELIBERATION_JS)
+        block = src[src.index("function _refNeedsDocumentId(ref)"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert "_isDbUuid(ref.elementId)" in block
+        query = src[src.index("function _documentIdQuery(ref)"):]
+        query = query[: query.index("\n  }\n") + 4]
+        assert "_refNeedsDocumentId(ref)" in query
+
+    def test_overview_ref_is_canonicalized_for_later_calls(self):
+        src = _read(DELIBERATION_JS)
+        assert "function _syncRefFromOverview(data)" in src
+        block = src[src.index("function _syncRefFromOverview(data)"):]
+        block = block[: block.index("\n  }\n") + 4]
+        assert "resolved.element_id" in block
+        assert "chatState.ref.elementId = canonicalId" in block
+        for caller in ("function _reloadOverview()", "function _loadAndRenderElement()"):
+            body = src[src.index(caller):]
+            body = body[: body.index("\n  }\n") + 4]
+            assert "_syncRefFromOverview(data)" in body, caller

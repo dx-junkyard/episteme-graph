@@ -36,7 +36,7 @@ docker compose logs -f api-server
 
 ## 2. サービス一覧（docker-compose.yml）
 
-`docker-compose.yml:3-93`（`services:` ブロック）の内容。
+`docker-compose.yml` の `services:` ブロックの内容（行番号は変動するため示さない）。
 
 | サービス | イメージ / ビルド | 役割 |
 |---|---|---|
@@ -54,18 +54,63 @@ docker compose logs -f api-server
 ### ネットワーク設計（セキュリティ）
 - 外部公開ポートは **frontend:3000 のみ**。
 - `api-server`（8001）は本番・ローカルとも直接公開されず、必ず nginx（3000）経由でアクセスする。
-- API リバースプロキシの定義は `frontend/nginx.conf`。プロキシ対象は `/api/learning/`, `/api/auth/`, `/api/admin/`, `/api/groups/`（+ 末尾スラッシュなしの `= /api/groups`）, `/api/me/`, `/api/atlas/`（+ 末尾スラッシュなしの `= /api/atlas`）, `/api/courses/`, `/api/documents/` の10 location（`location /` の静的配信を除く）。詳細は [フロントエンド構成](../frontend/overview.md)。
-- **`/api/atlas` は必須項目**（末尾スラッシュ有無の2 location とも）。CLAUDE.md が明記するとおり、この location が欠落すると SPA フォールバック（`location /` の `try_files ... /index.html`）が index.html を **200 で返し**、フロントの JSON パースが失敗して分野の地図が事故る。
+- API リバースプロキシの定義は `frontend/nginx.conf`。プロキシ対象は `/api/learning/`, `/api/auth/`, `/api/admin/`, `/api/groups/`（+ 末尾スラッシュなしの `= /api/groups`）, `/api/me/`, `/api/indicators/`（+ `= /api/indicators`）, `/api/atlas/`（+ `= /api/atlas`）, `/api/courses/`, `/api/documents/` の12 location（`location /` の静的配信を除く。**正は `frontend/nginx.conf` の `location` 行**）。詳細は [フロントエンド構成](../frontend/overview.md)。
+- **`/api/atlas` と `/api/indicators` は必須項目**（それぞれ末尾スラッシュ有無の2 location とも）。CLAUDE.md が明記するとおり、この location が欠落すると SPA フォールバック（`location /` の `try_files ... /index.html`）が index.html を **200 で返し**、フロントの JSON パースが失敗して分野の地図・指標カタログが事故る。
 
 ---
 
 ## 3. 主要な環境変数（.env.example）
 
-> **環境変数の正本は `.env.example`（全変数）。以下は主要な抜粋です。**
-> 既定値の正本はコード側（`backend/core/config.py` の `Settings` / 各モジュールの `os.getenv`）で、
-> `.env.example` に現れない変数もあります（本節では実コードで確認した既定値を併記）。
+> **変数名と既定値の正本はコード側**（`backend/core/config.py` の `Settings` — `AliasChoices` で
+> env 名を宣言 — と、各モジュールの `os.getenv`）。`.env.example` は**設定可能な変数を網羅**
+> しますが、既定値のままで良いものはコメントアウト行で示します（2026-09-03 時点で
+> `Settings` は 99 フィールド / 108 個の env 別名、`.env.example` の記載は 130 変数）。
+> 網羅は `backend/tests/test_compose_env_guardrails.py` が機械的に固定しています。
+> 以下は実コードで確認した主要な抜粋です。
 
-`api-server` の environment は `docker-compose.yml:28-65` で `.env` から注入されます。
+### `.env` の届き方（2026-09-03 修正）
+
+`api-server` は `docker-compose.yml` の **`env_file: - path: .env` / `required: false`** で
+`.env` をまるごと受け取ります。`backend/Dockerfile` は `.env` を COPY しない（シークレットを
+イメージに焼かない）ため、**この `env_file` がコンテナへ設定を届ける唯一の経路**です。
+`.env` は必須ではなく、無い場合はコード既定値で起動します（`required: false`）。
+
+> **注意（修正前の挙動）:** 2026-09-03 以前は compose に `env_file:` が無く、
+> `Settings` の `env_file=".env"` はコンテナ内で対象ファイルを見つけられませんでした。
+> そのため **Docker 実行時に効くのは `environment:` に列挙された約30キーだけ**で、
+> `LEARNING_CHAT_MAX_CALLS_PER_DAY` / `DELIBERATION_*` / `DISCOVERY_*` / `LANDSCAPE_*` /
+> `APPARATUS_*` / `ANCHOR_*` / `RECON_*` / `DOUBT_*` / `HELP_KB_VECTOR_ENABLED` /
+> `VERSION_SWEEPER_*` / `PAPER_DISCOVERY_WORKER_*` / `ATLAS_VECTOR_*` / `FIGURE_STUDIO_*`
+> などは `.env` に書いても無視されていました（ローカルで `uvicorn` を直接動かす場合のみ効く）。
+> 現在はこれらも `.env` の値がそのまま効きます。
+
+**優先順位:** compose では `environment:` が `env_file:` に**勝ちます**。`environment:` に残して
+あるのは「`.env` をそのまま渡すのでは足りない」6行だけです。
+
+| 変数 | 残す理由 |
+|---|---|
+| `DATABASE_URL` | `DB_USER` / `DB_PASSWORD` / `DB_HOST` / `DB_PORT` / `DB_NAME` から合成する（`.env` の `DATABASE_URL` より優先される） |
+| `GOOGLE_APPLICATION_CREDENTIALS` | コンテナ固有の既定値 `/app/.gcp/application_default_credentials.json`（ホスト側の値と異なる） |
+| `GROBID_URL` | コンテナ間はサービス名 `http://grobid:8070`（ホスト側の `localhost:8070` と異なる） |
+
+`LLM_FAST_MODEL` / `LLM_STANDARD_MODEL` / `LLM_DEEP_MODEL` の3行は 2026-09-05 に**削除**しました。
+旧 env 名の吸収と tier 間フォールバックのために置いていた行ですが、末尾の既定値が `o3-mini` で
+`Settings`（`core/config.py`）の既定を黙って上書きしていたためです。旧名 `OPENAI_FAST_MODEL` の
+吸収と tier 間フォールバック（standard ← `LLM_ANALYSIS_MODEL` / deep ← standard、いずれも
+明示 env があるときだけ）は `Settings` の `AliasChoices` と `model_validator` へ移設し、
+モデル決定の正本を core 側に一本化しました。`.env` の `LLM_*_MODEL` は `env_file` でそのまま届きます。
+
+`VAR: ${VAR:-<コード既定値と同じ値>}` の重複行（`JWT_SECRET` / `LLM_PROVIDER` / `LLM_API_KEY` /
+`LLM_ANALYSIS_MODEL` / `LLM_EMBEDDING_*` / `GCP_*` / `GOOGLE_CLOUD_*` / `MINIO_*` /
+`ADMIN_PASSWORD` / `CORS_ORIGINS` / `EPISTEME_*` / `LLM_TRANSCRIBE_MODEL` / `TENSION_*` /
+`LLM_MODEL_CATALOG_PATH`）は 2026-09-03 に削除しました。compose 側が既定値を二重に持つと、
+`Settings` の既定値を変えても compose が黙って上書きし続けるためです（`OPENAI_*` /
+`MINIO_ROOT_*` / `GOOGLE_CLOUD_*` へのフォールバックは `Settings` の `AliasChoices` が継承します）。
+
+> `.env` のホスト名に注意: `.env.example` の `MINIO_ENDPOINT=localhost:9000` などはホストから
+> 直接 `uvicorn` を動かす場合の値です。Docker で動かすときは `minio:9000` のように
+> **compose のサービス名**へ書き換えてください（`DATABASE_URL` と `GROBID_URL` は上表のとおり
+> compose 側が正しい値を与えます）。
 
 ### LLM
 ```bash
@@ -145,6 +190,11 @@ STDPART_MAX_CALLS_PER_DAY=10            # W層 Phase S 標準化判定
 FIGURE_STUDIO_MAX_CALLS_PER_DAY=60      # 教材図スタジオ 対話生成
 FIGURE_SUGGEST_MAX_CALLS_PER_DAY=20     # 同・ギャップ提案（対話とは独立）
 ATLAS_ASSIST_MAX_CALLS_PER_DAY=60       # 分野の地図 骨格エディタの AI アシスト
+DISCOVERY_COMPARE_MAX_CALLS_PER_DAY=20  # 論文レーダー 比較分析（教員ごと・日次）
+DISCOVERY_COMPARE_LLM_MODEL=            # 同・モデル（空 = fast tier）
+DISCOVERY_RANKING_MAX_CALLS_PER_DAY=100 # ディスカバリー / レーダーの関連度ランキング（embedding）
+DELIBERATION_VOICE_MAX_CALLS_PER_DAY=200 # グラフ対話レビューの音声 STT/TTS（対話上限とは独立）
+ATLAS_VECTOR_MAX_CALLS_PER_DAY=50       # VA層 アンカー埋め込みの構築（embedding）
 
 # パイプラインのステージ（1 document = 1 コール系）
 DISCUSS_OPENING_MAX_CALLS_PER_DAY=20       # discuss 開幕素材の生成
@@ -152,6 +202,7 @@ DISCUSS_OPENING_MAX_ITEMS_PER_DOCUMENT=4
 LANDSCAPE_MAX_CALLS_PER_DAY=20             # 知識ランドスケープの配置候補
 LANDSCAPE_MAX_PLACEMENTS_PER_DOCUMENT=8
 LANDSCAPE_GAP_MAX_PER_DOCUMENT=3           # カテゴリギャップ候補（同一コールに相乗り）
+LANDSCAPE_VECTOR_PREFILTER_TOPK=32         # VA層の配置プレフィルタ（0 で無効。region は常に全提示）
 
 # 画像読み取りパイプライン（L層, apparatus_semantics）
 APPARATUS_LLM_MODEL=gpt-4o                 # vision 同定モデル（v1 は OpenAI 経路のみ）
@@ -170,12 +221,20 @@ LLM_PRICE_TABLE_PATH=        # U層の単価表 JSON。空なら cost_usd は常
 HELP_KB_VECTOR_ENABLED=1     # help_kb ベクトル補助層の同期・検索（既定 on。0 で無効）
 VERSION_SWEEPER_ENABLED=1    # V層 削除猶予スイーパの起動（既定 on）
 VERSION_SWEEP_INTERVAL_SECONDS=3600  # 同・実行周期（秒）
+PAPER_DISCOVERY_WORKER_ENABLED=1     # 論文ディスカバリー 取り込みキュー worker（既定 on）
+PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS=30  # 同・キューが空のときの待ち時間（秒）
+DISCOVERY_CITATION_SOURCE_ENABLED=0  # 引用グラフ供給源（Semantic Scholar）のオプトイン（既定 off）
 ```
 
-> `HELP_KB_VECTOR_ENABLED` / `VERSION_SWEEPER_ENABLED` / `VERSION_SWEEP_INTERVAL_SECONDS` /
-> `ANCHOR_*` / `DELIBERATION_*` / `STDPART_*` / `LANDSCAPE_GAP_MAX_PER_DOCUMENT` は
-> `.env.example` に記載がなく、既定値は `backend/core/config.py` および各モジュール
-> （`core/help_kb/vector.py` / `core/versioning/worker.py`）が持ちます。
+> **既定値の正本はコード側**です — `backend/core/config.py` の `Settings`（`AliasChoices` で
+> env 名を宣言）、`core/help_kb/vector.py`、`core/versioning/worker.py`、
+> `core/status/watcher.py`、`backend/api/ingest_worker.py`、
+> `core/document_pipeline/orchestrator.py`（`CTXEXPL_*` / `DISCUSS_OPENING_*`）、
+> `core/landscape/builder.py`（`LANDSCAPE_MAX_*`）。
+> 2026-09-03 の補完で、上記を含む**設定可能な変数はすべて `.env.example` に載りました**
+> （既定値のままで良いものはコメントアウト行）。新しい設定を足したときは
+> `.env.example` にも用途と既定値を書いてください —
+> `backend/tests/test_compose_env_guardrails.py` が網羅を機械的に検証します。
 
 ---
 
@@ -188,7 +247,7 @@ VERSION_SWEEP_INTERVAL_SECONDS=3600  # 同・実行周期（秒）
 
 | # | 処理 | 実体 | 失敗時 |
 |---|---|---|---|
-| 1 | **マイグレーション適用** | `core/migrations.py::run_migrations()` が `backend/db/` の `init.sql` → `002_*.sql` 〜 `067_*.sql` を**毎起動・番号順に全ファイル冪等再実行**する。多重起動は `pg_advisory_lock`（`MIGRATION_LOCK_KEY`）で排他し、ファイル単位で commit する | リトライ（10回失敗で起動中止） |
+| 1 | **マイグレーション適用** | `core/migrations.py::run_migrations()` が `backend/db/` の `init.sql` → `002_*.sql` 〜 番号順の最新（正は `ls backend/db/`）までを**毎起動・番号順に全ファイル冪等再実行**する。多重起動は `pg_advisory_lock`（`MIGRATION_LOCK_KEY`）で排他し、ファイル単位で commit する | リトライ（10回失敗で起動中止） |
 | 2 | **システム管理者アカウント初期化** | `users` に `Administrator` が無ければ `ADMIN_PASSWORD` で作成（migration 適用後に行う） | 同上 |
 | 3 | **分野の地図 骨格のシード取込** | `core/atlas_store.py::import_bundled_skeletons()`。① カートリッジ同梱 `cartridges/<id>/atlas/skeleton.yaml` と ② 骨格専用バンドルドメイン `backend/atlas_domains/<key>/skeleton.yaml`（+ 任意 `domain.json`）を、DB に同版が無いときだけ取り込む（以後 DB が正本） | 警告ログのみ（rollback して継続） |
 | 4 | **ビルトインスキーマの seed** | `core/schema_registry.py::seed_builtin_schema()` が `OntologyType` / `CorePredicate` を DB に投入 | リトライ対象 |
@@ -200,12 +259,13 @@ VERSION_SWEEP_INTERVAL_SECONDS=3600  # 同・実行周期（秒）
 | # | 処理 | 実体 |
 |---|---|---|
 | 7 | **V層 削除猶予スイーパの起動** | `core/versioning/worker.py::start_background_sweeper()`（daemon スレッド。`VERSION_SWEEPER_ENABLED` / `VERSION_SWEEP_INTERVAL_SECONDS`） |
-| 8 | **状態遷移 watcher の起動** | `core/status/watcher.py::start_watcher()`（状態管理・通知基盤） |
-| 9 | **help_kb マニュアルの検証** | `core/help_kb/validator.py::validate_manual()`（front-matter・anchor・リンク。違反は warning ログ） |
-| 10 | **学習画面 UI アンカー表の検証** | 同 `check_ui_anchor_mappings()`（`core/help_kb/ui_anchors.py` の実在・audience 越境） |
-| 11 | **管理画面 UI アンカー表の検証** | 同 `check_admin_ui_anchor_mappings()`（`core/help_kb/admin_ui_anchors.py`） |
-| 12 | **help_kb 配信スナップショットの content-hash 監査記帳** | `core/help_kb/audit.py::record_snapshot_if_changed()`（変化時のみ `theory_review_events` へ記帳・冪等） |
-| 13 | **help_kb ベクトル補助層の同期** | `core/help_kb/vector.py::sync_manual_vectors()` をバックグラウンドスレッドで実行（外部 API を呼ぶため非同期） |
+| 8 | **論文ディスカバリー 取り込みキュー worker の起動** | `backend/api/ingest_worker.py::start_background_worker()`（daemon スレッド。`PAPER_DISCOVERY_WORKER_ENABLED` / `PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS`）。**arXiv を検索しない**（`arxiv_client` を import せず、教員がキューに積んだ行だけを処理する — PD1） |
+| 9 | **状態遷移 watcher の起動** | `core/status/watcher.py::start_watcher()`（状態管理・通知基盤） |
+| 10 | **help_kb マニュアルの検証** | `core/help_kb/validator.py::validate_manual()`（front-matter・anchor・リンク。違反は warning ログ） |
+| 11 | **学習画面 UI アンカー表の検証** | 同 `check_ui_anchor_mappings()`（`core/help_kb/ui_anchors.py` の実在・audience 越境） |
+| 12 | **管理画面 UI アンカー表の検証** | 同 `check_admin_ui_anchor_mappings()`（`core/help_kb/admin_ui_anchors.py`） |
+| 13 | **help_kb 配信スナップショットの content-hash 監査記帳** | `core/help_kb/audit.py::record_snapshot_if_changed()`（変化時のみ `theory_review_events` へ記帳・冪等） |
+| 14 | **help_kb ベクトル補助層の同期** | `core/help_kb/vector.py::sync_manual_vectors()` をバックグラウンドスレッドで実行（外部 API を呼ぶため非同期） |
 
 マイグレーション一覧は [データモデル](data-model.md#マイグレーション一覧) を参照。
 

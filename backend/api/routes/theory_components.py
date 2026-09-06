@@ -53,6 +53,7 @@ from core.schema import (
 )
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
 from core.course_data import course_source_material_ids, course_sources
+from core.deliberation.graph_dialogue import APPROVED_REVIEW_STATUSES
 from core.deliberation.refs import document_run_artifacts
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
@@ -427,7 +428,24 @@ def _select_components_sql(where: str) -> str:
     """
 
 
+def _is_db_uuid(value: str) -> bool:
+    """theory_components.id（UUID）として照合可能な文字列か。
+
+    理論グラフの main 層集約ノード等は agent 側 ID（``theory_op_0001`` 等）を
+    component_id に持ち DB 行が無い。そのまま ``CAST(:id AS uuid)`` に流すと
+    Postgres の DataError → 500 になるため、呼び出し側で 404 に落とせるよう
+    事前判定する（2026-08-29 レビュー是正）。
+    """
+    try:
+        uuid.UUID(str(value or ""))
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def _get_component(component_id: str) -> TheoryComponentOut | None:
+    if not _is_db_uuid(component_id):
+        return None
     session = _pg_session()
     try:
         row = session.execute(
@@ -1945,7 +1963,7 @@ def _stored_component_graph(document_id: str) -> dict:
     try:
         row = session.execute(
             sa_text("""
-                SELECT graph_json, validation_results
+                SELECT graph_json, validation_results, updated_at
                 FROM theory_component_graphs
                 WHERE document_id = :document_id
                 ORDER BY updated_at DESC
@@ -1958,9 +1976,16 @@ def _stored_component_graph(document_id: str) -> dict:
     if not row:
         return {}
     graph = _json_value(row[0], {})
-    if isinstance(graph, dict) and "validation_results" not in graph:
+    if not isinstance(graph, dict):
+        return {}
+    if "validation_results" not in graph:
         graph["validation_results"] = _json_value(row[1], [])
-    return graph if isinstance(graph, dict) else {}
+    # このグラフが「いつの解析結果か」を事実として持ち回る（表示は UI 側）。
+    # review_reasons はこの時点の焼き込み値なので、パイプライン修正後も再解析まで
+    # 変わらない — 教員が古さを判断できるようにする最小の読み時導出。
+    if row[2] is not None:
+        graph["graph_updated_at"] = row[2].isoformat() if hasattr(row[2], "isoformat") else str(row[2])
+    return graph
 
 
 def _normalize_stored_component_graph(document_id: str, graph: dict, components: list[TheoryComponentOut]) -> dict:
@@ -1996,11 +2021,35 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         if not display_label:
             display_label = f"{final_label}: {theory_object}" if theory_object else final_label
         node_review_status = str(node.get("review_status") or (component.review_status if component else "teacher_review_required"))
+        # グラフ対話レビュー（graph_dialogue_review_design.md §11 / 2026-08-29 レビュー是正）:
+        # stored graph の review_status はパイプライン構築時の焼き込み値（常に非空）なので、
+        # 教員が承認/却下しても再取得に反映されず、レビューループが閉じなかった。
+        # **人間の判断**（承認/却下/要修正）は theory_components の live 値を常に優先する。
+        # 導出値（source_backed 等）は従来どおり stored 側を保つ（表示互換）。
+        if component and str(component.review_status or "") in _HUMAN_REVIEW_DECISION_STATUSES:
+            node_review_status = str(component.review_status)
         node_backing = str(node.get("source_backing_status") or "")
         node_reasons = node.get("review_reasons") if isinstance(node.get("review_reasons"), list) else []
         # Issue #319 criterion 9: review_required / inferred nodes must explain why.
         if not node_reasons and (node_backing in ("review_required", "inferred") or node_review_status == "review_required"):
             node_reasons = ["fallback_or_inferred_node" if node_backing == "inferred" else "missing_evidence_link"]
+        # review_reasons は「解析時点の焼き込み値」なので、レビューを待っていないノードで
+        # そのまま「要確認の理由」として出すと、確定済みの構造まで欠陥に見える
+        # （graph_dialogue_review_design.md §11 と同じ非対称の是正。読み時射影のみで
+        # graph_json は書き換えない = 情報を落とさない）。
+        #   - 教員が承認したノード: 理由は review_reasons から
+        #     review_reasons_at_analysis へ移す（レビュー要求として出さないが破棄もしない）。
+        #   - AI が出典で確定したノード（source_backed）: 理由は残すが advisory と宣言する
+        #     （例: 式・evidence で裏付いているが最小命題の claim が無い #306 の warning）。
+        node_reasons_at_analysis: list[str] = []
+        node_reasons_advisory = (
+            node_review_status in APPROVED_REVIEW_STATUSES
+            or node_backing == "source_backed"
+            or node_review_status == "source_backed"
+        )
+        if node_review_status in APPROVED_REVIEW_STATUSES and node_reasons:
+            node_reasons_at_analysis = [str(r) for r in node_reasons]
+            node_reasons = []
         normalized_nodes.append({
             "component_id": component_id,
             "label": final_label,
@@ -2036,6 +2085,9 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "linked_evidence_ids": node.get("linked_evidence_ids") if isinstance(node.get("linked_evidence_ids"), list) else [],
             "source_backing_status": node_backing,
             "review_reasons": node_reasons,
+            # 上のコメント参照: 承認済みノードの解析時点メモ / 参考情報フラグ。
+            "review_reasons_at_analysis": node_reasons_at_analysis,
+            "review_reasons_advisory": node_reasons_advisory,
             "parent_component_id": str(node.get("parent_component_id") or ""),
             "member_component_ids": node.get("member_component_ids") if isinstance(node.get("member_component_ids"), list) else [],
             "visual_label": str(node.get("visual_label") or ""),
@@ -2119,6 +2171,10 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             "evidence": edge.get("evidence") if isinstance(edge.get("evidence"), dict) else {"reason": edge.get("reason") or ""},
             # Issue #451: preserve relation polarity for UI visualisation.
             "polarity": str(edge.get("polarity") or ""),
+            # 論文層（graph_paper_layer）が NarrativeAnnotator の edge_narratives と
+            # 突合するための edge_id。persistence は保存しているが、ここで落とすと
+            # 遷移文（transition_text）が辺に結び付かない。
+            "edge_id": str(edge.get("edge_id") or ""),
         })
     if not normalized_nodes and not normalized_edges:
         return {}
@@ -2131,6 +2187,9 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         "validation_results": graph.get("validation_results") if isinstance(graph.get("validation_results"), list) else [],
         # NarrativeAnnotator reading layer (issue #360); pass through as-is.
         "narrative": graph.get("narrative") if isinstance(graph.get("narrative"), dict) else {},
+        # このグラフが構築された時点（`_stored_component_graph` が付ける事実。
+        # 未保存グラフの読み時組み立て経路では空）。
+        "graph_updated_at": str(graph.get("graph_updated_at") or ""),
     }
 
 
@@ -2148,7 +2207,10 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
 
 _REFERENCE_TEXT_SNIPPET_MAX = 200
 
-_NODE_CLAIM_ID_KEYS = ("linked_claim_ids",)
+# linked_claim_ids は normalizer が input/output/required の和集合として書くが、
+# 旧版・手書きグラフでは分離したままの可能性があるため、UI（グラフ対話レビューの
+# claim 行）が読む4キーすべてを解決対象にする（2026-08-29 レビュー是正）。
+_NODE_CLAIM_ID_KEYS = ("linked_claim_ids", "input_claim_ids", "output_claim_ids", "required_claim_ids")
 _NODE_EVIDENCE_ID_KEYS = ("linked_evidence_ids",)
 _NODE_DERIVATION_ID_KEYS = ("linked_derivation_ids",)
 _EDGE_CLAIM_ID_KEYS = ("evidence_claim_ids",)
@@ -2194,12 +2256,163 @@ def _collect_graph_reference_ids(graph_payload: dict) -> tuple[set[str], set[str
     return claim_ids, evidence_ids, derivation_ids
 
 
-def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
-    """``theory_claims`` を document_id で引き、参照済み ID → {claim_id, text} を作る。
+# atomic rewrite の子 claim ID は ClaimObjectBuilder が親 ID に連番サフィックスを
+# 付けて作る（``claim_span_001_13_sub04`` / 衝突時の ``claim_span_001_13_7``。
+# builder.py の ``_dedup_id`` 参照）。parent_claim_id を持たない旧 artifact でも
+# 「親 ID + 連番」なら atomic rewrite 由来と判定するために使う。
+_ARTIFACT_CLAIM_SUBID_RE = re.compile(r"^(?P<base>.+?)_(?:sub)?\d+$")
 
-    各行の ``source_scope`` の ``span_id`` / ``legacy_ids``（agent 側の atomic claim
-    ID を含む。persistence.py 参照）と DB UUID 自身の両方をキー候補にし、
-    ``ref_ids`` と交差するものだけを採用する。
+# 式由来の合成 claim（orchestrator の ``_hook_equation_claim_synthesis`` が作る）。
+_ARTIFACT_SYNTH_CLAIM_PREFIX = "synth_claim_"
+
+_CLAIM_ORIGIN_EQUATION_SYNTHESIS = "equation_synthesis"
+_CLAIM_ORIGIN_ATOMIC_REWRITE = "atomic_rewrite"
+_CLAIM_ORIGIN_CLAIM_OBJECT = "claim_object"
+
+# 記号らしさの判定に使う LaTeX 由来の文字（`\mathbf{k}` / `P_{\rm L}(k)` など）。
+_SYNTH_MATH_SPECIAL_CHARS = frozenset("\\_^{}()")
+
+# 式由来合成 claim のテンプレート語（equation_claim_synthesis.py の定型文）。
+# 短い英単語の concept 名がテンプレート側の語に当たるのを防ぐための除外表。
+_SYNTH_TEMPLATE_WORDS = frozenset({
+    "a", "an", "and", "in", "on", "to", "the", "of", "system", "equation",
+    "equations", "defines", "depends", "supports", "relating", "while",
+    "retaining", "eliminate", "eliminates", "listed", "quantities",
+})
+
+
+def _is_token_bounded(text: str, start: int, length: int) -> bool:
+    """``text[start:start+length]`` の前後が非英数字（＝独立トークン）か。"""
+    before = text[start - 1] if start > 0 else ""
+    after = text[start + length] if start + length < len(text) else ""
+    return not (before.isalnum() or after.isalnum())
+
+
+def _synth_math_match_mode(name: str) -> str | None:
+    """concept 名の照合方式（``substring`` / ``token``）。対象外なら None。
+
+    LaTeX 記号（``\\`` ``_`` ``^`` ``{}`` ``()`` を含む）は本文中に必ず記号として
+    現れるので部分一致で拾う。それ以外は独立トークンでのみ拾い、さらに純 ASCII
+    アルファベットの語はテンプレート語との衝突（``n`` が "In equation" に当たる等）を
+    避けるため4文字以上とテンプレート語を除外する。
+    """
+    n = name.strip()
+    if not n:
+        return None
+    if any(ch in _SYNTH_MATH_SPECIAL_CHARS for ch in n):
+        return "substring"
+    if n.isascii() and n.isalpha():
+        if len(n) > 3 or n.lower() in _SYNTH_TEMPLATE_WORDS:
+            return None
+    return "token"
+
+
+def _delimit_synth_claim_math(text: str, concept_names: list[str]) -> str:
+    """旧 artifact の式由来合成 claim 本文に ``$...$`` を補う（読み時の投影のみ）。
+
+    2026-09-03 以降に生成される artifact は ``equation_claim_synthesis._math()`` が
+    生成時に ``$`` を付けるため、本関数の対象は**既存 run の旧 artifact だけ**である
+    （DB もファイルも書き換えない。再解析（restart）で artifact が作り直されれば
+    自然に不要になる）。concept 名を長い順に走査して本文中の出現を ``$名$`` に
+    包む。既に包んだ区間は再走査しないので二重包みは起きない。
+    """
+    if not text or "$" in text or "\\(" in text:
+        return text
+    candidates: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in concept_names:
+        name = str(raw or "").strip()
+        if not name or name in seen:
+            continue
+        mode = _synth_math_match_mode(name)
+        if mode is None:
+            continue
+        seen.add(name)
+        candidates.append((name, mode))
+    if not candidates:
+        return text
+    candidates.sort(key=lambda item: len(item[0]), reverse=True)
+
+    # (文字列, 数式か) の並びに切り分けていく。数式区間は以降の走査対象にしない。
+    segments: list[tuple[str, bool]] = [(text, False)]
+    for name, mode in candidates:
+        rebuilt: list[tuple[str, bool]] = []
+        for chunk, is_math in segments:
+            if is_math:
+                rebuilt.append((chunk, True))
+            else:
+                rebuilt.extend(_split_on_symbol(chunk, name, mode == "token"))
+        segments = rebuilt
+    return "".join(f"${chunk}$" if is_math else chunk for chunk, is_math in segments)
+
+
+def _split_on_symbol(segment: str, name: str, token_only: bool) -> list[tuple[str, bool]]:
+    """``segment`` を ``name`` の出現で (文字列, 数式か) に切り分ける（左から順に）。"""
+    out: list[tuple[str, bool]] = []
+    pos = 0
+    search = 0
+    length = len(name)
+    while True:
+        idx = segment.find(name, search)
+        if idx < 0:
+            break
+        if token_only and not _is_token_bounded(segment, idx, length):
+            search = idx + 1
+            continue
+        if idx > pos:
+            out.append((segment[pos:idx], False))
+        out.append((name, True))
+        pos = idx + length
+        search = pos
+    if not out:
+        return [(segment, False)]
+    if pos < len(segment):
+        out.append((segment[pos:], False))
+    return out
+
+
+def _truncate_reference_text(text: str, limit: int = _REFERENCE_TEXT_SNIPPET_MAX) -> str:
+    """スニペット丸め。``$...$`` の途中で切らない（閉じない ``$`` を残さない）。"""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    if cut.count("$") % 2 == 1:
+        cut = cut[:cut.rfind("$")]
+    return cut
+
+
+def _artifact_claim_concept_names(record: dict) -> list[str]:
+    concepts = record.get("concepts")
+    if not isinstance(concepts, list):
+        return []
+    return [
+        str(c.get("name") or "")
+        for c in concepts
+        if isinstance(c, dict) and c.get("name")
+    ]
+
+
+def _resolve_claim_reference_index(
+    document_id: str, ref_ids: set[str], artifacts: dict | None = None
+) -> dict:
+    """参照済み claim ID → 表示用エントリの索引を作る（DB → artifact の2段解決）。
+
+    第1段（DB）: ``theory_claims`` を document_id で引き、各行の ``source_scope`` の
+    ``span_id`` / ``legacy_ids``（agent 側の atomic claim ID を含む。persistence.py
+    参照）と DB UUID 自身をキー候補にして ``ref_ids`` と交差するものを採用する。
+    エントリは ``resolution="db"``。
+
+    第2段（artifact, 2026-09-02 追加）: グラフのノードが参照する claim ID には
+    ``theory_claims`` に**行が存在しない**ものがある — ClaimObjectBuilder の atomic
+    rewrite 子 claim と、式由来の合成 claim（``synth_claim_*``）である。
+    ``persist_qualified_claims`` は qualified_spans しか永続化しないため、これらは
+    構造的に DB へ落ちない（永続化するか否かはオーナー判断の別件）。そこで DB で
+    解決できなかった ID を ``claim_object_builder`` artifact から読み時に解決し、
+    本文を出せるようにする（``resolution="artifact"`` / ``claim_id=""`` = DB 行が
+    無いので承認操作の対象にならないことを、UI が区別できる形で明示する）。
+    artifact が無い古い run では第1段の結果がそのまま返る（fail-soft）。
+
+    GR3（数値非表示）: confidence など生数値と LLM の reason 文はエントリに載せない。
     """
     index: dict[str, dict] = {}
     if not ref_ids or not str(document_id or "").strip():
@@ -2207,16 +2420,22 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
     session = _pg_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id, text, source_scope FROM theory_claims WHERE document_id = :document_id"),
+            sa_text("SELECT id, text, source_scope, review_status FROM theory_claims WHERE document_id = :document_id"),
             {"document_id": document_id},
         ).fetchall()
     finally:
         session.close()
+    # 参照有無に関わらず全キーを控える（artifact 由来 claim の親 claim 解決に使う。
+    # claim ごとの追加 SQL は発行しない）。
+    db_by_key: dict[str, tuple[str, str]] = {}
     for row in rows:
         claim_uuid = str(row[0])
         text = str(row[1] or "")
         snippet = text[:_REFERENCE_TEXT_SNIPPET_MAX]
         source_scope = _json_value(row[2], {})
+        # review_status はグラフ対話レビュー画面の claim 行（承認ボタンの活性判定）が
+        # 使う（graph_dialogue_review_design.md §3。additive — 既存キーは不変）。
+        review_status = str(row[3] or "teacher_review_required")
         candidate_keys = {claim_uuid}
         if isinstance(source_scope, dict):
             span_id = source_scope.get("span_id")
@@ -2225,8 +2444,98 @@ def _resolve_claim_reference_index(document_id: str, ref_ids: set[str]) -> dict:
             legacy_ids = source_scope.get("legacy_ids")
             if isinstance(legacy_ids, list):
                 candidate_keys.update(str(v) for v in legacy_ids if v)
+        for key in candidate_keys:
+            db_by_key.setdefault(key, (claim_uuid, review_status))
         for key in candidate_keys & ref_ids:
-            index[key] = {"claim_id": claim_uuid, "text": snippet}
+            index[key] = {
+                "claim_id": claim_uuid,
+                "text": snippet,
+                "review_status": review_status,
+                "resolution": "db",
+            }
+
+    unresolved = {ref for ref in ref_ids if ref not in index}
+    if unresolved and isinstance(artifacts, dict) and artifacts:
+        try:
+            index.update(
+                _resolve_artifact_claim_reference_index(artifacts, unresolved, db_by_key)
+            )
+        except Exception:
+            logger.debug(
+                "reference_index: artifact claim fallback failed for document %s",
+                document_id,
+                exc_info=True,
+            )
+    return index
+
+
+def _artifact_claim_origin(claim_id: str, record: dict, known_ids: set[str]) -> str:
+    """artifact 由来 claim の出所（equation_synthesis / atomic_rewrite / claim_object）。"""
+    if claim_id.startswith(_ARTIFACT_SYNTH_CLAIM_PREFIX):
+        return _CLAIM_ORIGIN_EQUATION_SYNTHESIS
+    if str(record.get("parent_claim_id") or "").strip():
+        return _CLAIM_ORIGIN_ATOMIC_REWRITE
+    matched = _ARTIFACT_CLAIM_SUBID_RE.match(claim_id)
+    if matched and matched.group("base") in known_ids:
+        # 親 claim が artifact 内に実在する連番サフィックス ID = atomic rewrite の子。
+        return _CLAIM_ORIGIN_ATOMIC_REWRITE
+    return _CLAIM_ORIGIN_CLAIM_OBJECT
+
+
+def _resolve_artifact_claim_reference_index(
+    artifacts: dict, ref_ids: set[str], db_by_key: dict[str, tuple[str, str]]
+) -> dict:
+    """``claim_object_builder`` artifact（ClaimObjectBuildResult.to_dict()）から
+    DB 未解決の claim ID → 表示用エントリを作る。
+
+    ``claim_id`` は空文字（DB 行が無い＝承認操作の対象外）。親 span claim が
+    ``theory_claims`` に永続化されていれば、その DB UUID と review_status を
+    ``parent_claim_id`` / ``parent_review_status`` として添える（``db_by_key`` の
+    再利用のみ。claim ごとの追加 SQL は発行しない）。
+    """
+    index: dict[str, dict] = {}
+    if not ref_ids:
+        return index
+    stage = artifacts.get("claim_object_builder") if isinstance(artifacts, dict) else None
+    records = stage.get("claims") if isinstance(stage, dict) else None
+    if not isinstance(records, list):
+        return index
+    known_ids = {
+        str(r.get("claim_id") or "") for r in records if isinstance(r, dict)
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        claim_id = str(record.get("claim_id") or "")
+        if not claim_id or claim_id not in ref_ids:
+            continue
+        text = str(record.get("text") or "").strip() or str(record.get("normalized_text") or "")
+        parent_uuid = ""
+        parent_review_status = ""
+        parent_candidates = [str(record.get("parent_claim_id") or "")]
+        source_span_ids = record.get("source_span_ids")
+        if isinstance(source_span_ids, list):
+            parent_candidates.extend(str(v) for v in source_span_ids if v)
+        for candidate in parent_candidates:
+            if candidate and candidate in db_by_key:
+                parent_uuid, parent_review_status = db_by_key[candidate]
+                break
+        origin = _artifact_claim_origin(claim_id, record, known_ids)
+        if origin == _CLAIM_ORIGIN_EQUATION_SYNTHESIS:
+            # 旧 artifact（生成時に ``$`` を付けていなかった run）の救済。
+            text = _delimit_synth_claim_math(text, _artifact_claim_concept_names(record))
+        index[claim_id] = {
+            # DB 行が無いので承認 API の対象にならない（UI は claim_id 空で判別する）。
+            "claim_id": "",
+            "text": _truncate_reference_text(text),
+            "review_status": "",
+            "resolution": "artifact",
+            "origin": origin,
+            "support_status": str(record.get("support_status") or ""),
+            "is_atomic": bool(record.get("is_atomic", False)),
+            "parent_claim_id": parent_uuid,
+            "parent_review_status": parent_review_status,
+        }
     return index
 
 
@@ -2325,19 +2634,26 @@ def _build_graph_reference_index(document_id: str, graph_payload: dict) -> dict:
 
     claim_ids, evidence_ids, derivation_ids = _collect_graph_reference_ids(graph_payload)
 
+    # artifacts は claim（DB 未解決分の読み時フォールバック）/ evidence / derivation の
+    # 3者で共有するので1回だけ読む。
+    artifacts: dict = {}
+    if claim_ids or evidence_ids or derivation_ids:
+        try:
+            artifacts = document_run_artifacts(document_id)
+        except Exception:
+            artifacts = {}
+
     if claim_ids:
         try:
-            reference_index["claims"] = _resolve_claim_reference_index(document_id, claim_ids)
+            reference_index["claims"] = _resolve_claim_reference_index(
+                document_id, claim_ids, artifacts
+            )
         except Exception:
             logger.debug(
                 "reference_index: claim resolution failed for document %s", document_id, exc_info=True
             )
 
     if evidence_ids or derivation_ids:
-        try:
-            artifacts = document_run_artifacts(document_id)
-        except Exception:
-            artifacts = {}
         if evidence_ids:
             try:
                 reference_index["evidence"] = _resolve_evidence_reference_index(artifacts, evidence_ids)
@@ -2666,19 +2982,10 @@ def update_claim(
         ).fetchone()
         session.commit()
         updated = _row_to_claim(row)
-        if existing[1] != updated.review_status:
-            _record_review_event(AUDIT_ENTITY_CLAIM, claim_id, existing[1], updated.review_status, current_user.get("id"))
-            if updated.review_status == "rejected":
-                _propagate_rejected_claim(claim_id)
-            # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
-            # （best-effort。失敗はチャット/編集を止めない）。トリガー詳細は設計 §5 の未決事項。
-            elif updated.review_status in ("teacher_approved", "teacher_reviewed", "endorsed"):
-                try:
-                    from core.reconstruction.worker import maybe_schedule_item_authoring
-
-                    maybe_schedule_item_authoring(updated.document_id or existing[0] or "")
-                except Exception:
-                    logger.debug("reconstruction authoring scheduling skipped", exc_info=True)
+        _apply_claim_review_side_effects(
+            claim_id, existing[1], updated, current_user.get("id"),
+            fallback_document_id=existing[0] or "",
+        )
         return updated
     except Exception:
         session.rollback()
@@ -2686,6 +2993,111 @@ def update_claim(
         raise HTTPException(status_code=500, detail="Failed to update claim")
     finally:
         session.close()
+
+
+def _apply_claim_review_side_effects(
+    claim_id: str,
+    old_review_status: str | None,
+    updated: ClaimOut,
+    user_id: str | None,
+    *,
+    fallback_document_id: str = "",
+) -> None:
+    """claim の review_status 遷移に伴う共通副作用（監査・却下伝播・R層フック）。
+
+    フル upsert（`update_claim`）と遷移専用 API（`review_claim`）の両方が使う
+    （グラフ対話レビュー設計書 §4 — 二重実装しない）。遷移が無ければ何もしない。
+    """
+    if (old_review_status or "") == updated.review_status:
+        return
+    _record_review_event(AUDIT_ENTITY_CLAIM, claim_id, old_review_status or "", updated.review_status, user_id)
+    if updated.review_status == "rejected":
+        _propagate_rejected_claim(claim_id)
+    # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
+    # （best-effort。失敗はチャット/編集を止めない）。トリガー詳細は設計 §5 の未決事項。
+    elif updated.review_status in ("teacher_approved", "teacher_reviewed", "endorsed"):
+        try:
+            from core.reconstruction.worker import maybe_schedule_item_authoring
+
+            maybe_schedule_item_authoring(updated.document_id or fallback_document_id or "")
+        except Exception:
+            logger.debug("reconstruction authoring scheduling skipped", exc_info=True)
+
+
+# claim レビュー遷移の許可語彙（グラフ対話レビュー設計書 §4。これ以外は 422）。
+_CLAIM_REVIEW_STATUSES = ("teacher_approved", "rejected", "needs_revision", "teacher_review_required")
+
+# 「人間の判断」とみなす component の review_status（stored graph の焼き込み値より
+# live 値を優先する対象。導出語彙 source_backed / review_required は含めない）。
+_HUMAN_REVIEW_DECISION_STATUSES = ("teacher_approved", "teacher_reviewed", "endorsed", "rejected", "needs_revision")
+
+
+class ClaimReviewRequest(BaseModel):
+    review_status: str
+
+
+@router.post("/claims/{claim_id}/review", response_model=ClaimOut)
+def review_claim(
+    claim_id: str,
+    body: ClaimReviewRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> ClaimOut:
+    """claim の review_status だけを遷移する（本文フィールドは一切変更しない）。
+
+    グラフ対話レビュー画面の claim 承認の実体（設計書 §4）。フル upsert の
+    `PATCH /claims/{id}` を画面から使うと、画面が読み込んだ時点の本文で同時編集を
+    巻き戻す事故経路になるため、遷移専用に分離した。副作用（監査・却下伝播・
+    承認時の R層 item オーサリング起動）は `_apply_claim_review_side_effects` で
+    フル upsert と共通（GR4）。
+    """
+    review_status = (body.review_status or "").strip()
+    if review_status not in _CLAIM_REVIEW_STATUSES:
+        raise HTTPException(status_code=422, detail="Invalid review_status")
+    # 非 UUID の claim_id（agent 側 ID 等）は CAST で DataError → 500 になるため
+    # 事前に 404 へ落とす（2026-08-29 レビュー是正）。
+    if not _is_db_uuid(claim_id):
+        raise HTTPException(status_code=404, detail="Claim not found")
+    session = _pg_session()
+    try:
+        existing = session.execute(
+            sa_text("SELECT document_id, review_status FROM theory_claims WHERE id = CAST(:claim_id AS uuid)"),
+            {"claim_id": claim_id},
+        ).fetchone()
+    finally:
+        session.close()
+    if not existing:
+        raise HTTPException(status_code=404, detail="Claim not found")
+    _ensure_document_editable(existing[0] or "", current_user)
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE theory_claims
+                SET review_status = :review_status,
+                    updated_at = now()
+                WHERE id = CAST(:claim_id AS uuid)
+                RETURNING id, document_id, chunk_id, source_scope, claim_type, text,
+                          normalized_text, concepts, equation, support_status, evidence_text,
+                          review_status, created_by, created_at, updated_at
+            """),
+            {"claim_id": claim_id, "review_status": review_status},
+        ).fetchone()
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to review claim %s", claim_id)
+        raise HTTPException(status_code=500, detail="Failed to review claim")
+    finally:
+        session.close()
+    if not row:
+        # 存在チェックと UPDATE の間に行が消えた場合（TOCTOU）は 500 でなく 404。
+        raise HTTPException(status_code=404, detail="Claim not found")
+    updated = _row_to_claim(row)
+    _apply_claim_review_side_effects(
+        claim_id, existing[1], updated, current_user.get("id"),
+        fallback_document_id=existing[0] or "",
+    )
+    return updated
 
 
 @router.get("/documents/{document_id}/sections/{section_id}/components", response_model=list[TheoryComponentOut])
@@ -2725,6 +3137,157 @@ def get_component_graph(
     payload["reference_index"] = _build_graph_reference_index(document_id, payload)
     return ComponentGraphResponse(**payload)
 
+
+# ---------------------------------------------------------------------------
+# 論文層（Paper Layer） — 正本: docs/features/graph_paper_layer_design.md
+# ---------------------------------------------------------------------------
+
+_PAPER_LAYER_FAILURE_FACT = "論文層の導出に失敗したため表示できません。"
+
+
+def _build_paper_layer_payload(
+    graph: dict,
+    artifacts: dict,
+    *,
+    figure_rows: list[dict],
+    explanation_rows: list[dict],
+) -> dict:
+    """core の純関数 ``build_paper_layer`` への薄い間接層。
+
+    ``core.graph_paper_layer`` は別モジュールとして着地するため import は遅延させる
+    （route モジュールの import がその着地に依存しないようにする）。テストはこの関数を
+    monkeypatch して builder を差し替える。
+    """
+    from core.graph_paper_layer import build_paper_layer
+
+    return build_paper_layer(
+        graph,
+        artifacts,
+        figure_rows=figure_rows,
+        explanation_rows=explanation_rows,
+    )
+
+
+def _paper_layer_figure_rows(document_id: str) -> list[dict]:
+    """document_figures の抽出済み行（図→ノード照合と db_id 付与に使う）。
+
+    取得失敗は例外にせず空リストへ縮退する（PL8 fail-soft）。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT id::text AS id, figure_key, figure_label, page, caption_text
+                FROM document_figures
+                WHERE document_id = :document_id AND status = 'extracted'
+            """),
+            {"document_id": document_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {
+            "id": row.id,
+            "figure_key": row.figure_key,
+            "figure_label": row.figure_label,
+            "page": row.page,
+            "caption_text": row.caption_text,
+        }
+        for row in rows
+    ]
+
+
+def _paper_layer_explanation_rows(document_id: str) -> list[dict]:
+    """component の contextual 説明（approved 優先・candidate も status 付きで返す）。
+
+    ``element_explanations.document_id`` は UUID 列なので、UUID でない参照
+    （source_path 等）ではクエリ自体を投げない（DataError → 500 の回避）。
+    """
+    if not _is_db_uuid(document_id):
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT element_id, body, status
+                FROM element_explanations
+                WHERE document_id = CAST(:document_id AS uuid)
+                  AND element_type = 'theory_component'
+                  AND kind = 'contextual'
+                  AND status IN ('approved', 'candidate')
+            """),
+            {"document_id": document_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [
+        {"element_id": row.element_id, "body": row.body, "status": row.status}
+        for row in rows
+    ]
+
+
+# DTO の契約は設計書 §3（core 側の純関数が正本）。Pydantic モデルを重ねると
+# core schema の二重管理になるため response_model は持たない。
+@router.get("/documents/{document_id}/paper-layer", response_model=None)
+def get_document_paper_layer(
+    document_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """理論操作グラフの論文層（読み時射影・LLM 0回・保存なし）。
+
+    正本は ``docs/features/graph_paper_layer_design.md`` §3（DTO 契約）。
+    既存 ``GET .../component-graph`` のレスポンスには一切触れない（別経路・遅延取得）。
+    """
+    _ensure_document_viewable(document_id, current_user)  # PL6
+
+    components = _components_for_document(document_id)
+    graph = _normalize_stored_component_graph(document_id, _stored_component_graph(document_id), components)
+    if not graph:
+        graph = _build_component_graph_payload(document_id, components)
+    graph["reference_index"] = _build_graph_reference_index(document_id, graph)
+
+    # NOTE: `_build_graph_reference_index` も内部で `document_run_artifacts` を読むため
+    # 現状 artifact の取得は2回になる。論文層は読み時導出で保存もしないため許容し、
+    # reference_index 側のリファクタは行わない（既存経路を触らない方針）。
+    try:
+        artifacts = document_run_artifacts(document_id)
+    except Exception:
+        logger.debug("paper_layer: artifacts unavailable for document %s", document_id, exc_info=True)
+        artifacts = {}
+
+    try:
+        figure_rows = _paper_layer_figure_rows(document_id)
+    except Exception:
+        logger.debug("paper_layer: figure rows unavailable for document %s", document_id, exc_info=True)
+        figure_rows = []
+
+    try:
+        explanation_rows = _paper_layer_explanation_rows(document_id)
+    except Exception:
+        logger.debug(
+            "paper_layer: explanation rows unavailable for document %s", document_id, exc_info=True
+        )
+        explanation_rows = []
+
+    try:
+        return _build_paper_layer_payload(
+            graph,
+            artifacts,
+            figure_rows=figure_rows,
+            explanation_rows=explanation_rows,
+        )
+    except Exception:
+        logger.debug("paper_layer: build failed for document %s", document_id, exc_info=True)
+        return {
+            "document_id": document_id,
+            "available": False,
+            "facts": [_PAPER_LAYER_FAILURE_FACT],
+            "paper": None,
+            "nodes": {},
+            "edges": {},
+            "coverage": {},
+            "narrative": {},
+        }
 
 
 @router.get("/courses/{course_id}/theory-components", response_model=list[TheoryComponentOut])
@@ -2805,10 +3368,19 @@ def extract_theory_components(
     structural_components = extract_theory_components_from_dsl(chunk)
     raw_components = structural_components
     if body.use_llm and raw_components:
-        raw_components = _preserve_structural_io(
-            enrich_theory_components_with_llm(chunk, raw_components),
-            structural_components,
-        )
+        # U層（帰属）/ M層（モデル選択）: 補完は LLM を1コール使うので必ず feature を張る
+        # （張らないと unattributed で記録され、モデル選択も scene に解決されない）。
+        # core 側は `_submit_with_context` で contextvars をワーカースレッドへ伝搬する。
+        with usage_context(
+            "admin:component_extract",
+            user_id=current_user["id"],
+            course_id=course_id,
+            document_id=str(chunk.get("document_id") or "") or None,
+        ):
+            raw_components = _preserve_structural_io(
+                enrich_theory_components_with_llm(chunk, raw_components),
+                structural_components,
+            )
     saved: list[TheoryComponentOut] = []
     for raw in raw_components:
         payload = _normalize_payload(_raw_component_to_request(raw, chunk), chunk)
@@ -2866,6 +3438,193 @@ def update_theory_component(
     return _update_component(component_id, payload)
 
 
+def _component_document_id(component: TheoryComponentOut) -> str:
+    """component の帰属 document_id を解決する（source_scope 優先・DB 列フォールバック）。
+
+    パイプライン生成の component は course_id を持たない（document-scoped）ため、
+    権限判定は document 単位が主経路（グラフ対話レビュー設計書 §4 / GR6）。
+    """
+    scope = component.source_scope or {}
+    if isinstance(scope, dict):
+        doc_id = str(scope.get("document_id") or "").strip()
+    else:
+        doc_id = str(getattr(scope, "document_id", "") or "").strip()
+    if doc_id:
+        return doc_id
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("SELECT document_id FROM theory_components WHERE id = CAST(:id AS uuid)"),
+            {"id": component.id},
+        ).fetchone()
+    finally:
+        session.close()
+    return str(row[0]) if row and row[0] else ""
+
+
+def _ensure_component_editable(component: TheoryComponentOut, current_user: dict) -> None:
+    """component の編集権限を document 単位で判定する（course 単位フォールバック付き）。
+
+    従来の reject は `_ensure_editable(course_id)` のみで、course_id を持たない
+    パイプライン生成 component（document-scoped）が常に 404 になっていた。
+    document 共有（editor）でも編集できるのが本来の権限モデル（migration 035/044）。
+    """
+    document_id = _component_document_id(component)
+    if document_id:
+        try:
+            _ensure_document_editable(document_id, current_user)
+            return
+        except HTTPException:
+            if not component.course_id:
+                raise
+    if component.course_id:
+        _ensure_editable(component.course_id, current_user)
+        return
+    raise HTTPException(status_code=404, detail="Theory component not found")
+
+
+# 承認可能性チェックの対象フィールド（原稿スタジオのクライアント側ゲート
+# lsTheoryCanApprove と同基準。グラフ対話レビュー設計書 §4 でサーバ側に強制した）。
+_APPROVAL_EVIDENCE_FIELDS = ("inputs", "outputs", "preconditions", "constraints", "invalid_conditions")
+
+_APPROVAL_FIELD_LABELS = {
+    "inputs": "入力",
+    "outputs": "出力",
+    "preconditions": "成立条件",
+    "constraints": "制約",
+    "invalid_conditions": "注意条件",
+}
+
+
+def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
+    """承認できない理由の事実文一覧を返す（空なら承認可）。
+
+    基準は PUT 承認経路の ``_validate_for_review`` の blocking 集合
+    （name / source_chunks / inputs / outputs / 各項目の出典）と揃える —
+    グラフレビューからだけ緩く承認できる非対称を作らない（2026-08-29 レビュー是正）。
+    """
+    problems: list[str] = []
+    if not str(component.name or "").strip():
+        problems.append("名前が空です")
+    if not component.source_chunks:
+        problems.append("出典チャンク（source_chunks）が未設定です")
+    if not component.inputs:
+        problems.append("入力（inputs）が未設定です")
+    if not component.outputs:
+        problems.append("出力（outputs）が未設定です")
+    for field_name in _APPROVAL_EVIDENCE_FIELDS:
+        label = _APPROVAL_FIELD_LABELS.get(field_name, field_name)
+        for item in getattr(component, field_name, None) or []:
+            if getattr(item, "needs_source", None):
+                problems.append(f"{label}に出典未確定（needs_source）の項目があります")
+                break
+            source_refs = getattr(item, "source_refs", None) or []
+            evidence_claims = getattr(item, "evidence_claims", None) or []
+            if not source_refs and not evidence_claims:
+                problems.append(f"{label}に出典（source_refs / evidence_claims）の無い項目があります")
+                break
+    return problems
+
+
+def _transition_component_review(
+    component_id: str,
+    existing: TheoryComponentOut,
+    *,
+    status: str,
+    review_status: str,
+    user_id: str | None,
+    approve: bool = False,
+) -> TheoryComponentOut:
+    """status / review_status **だけ**を遷移する（内容フィールドは一切変更しない）。
+
+    approve / reject の実体（グラフ対話レビュー設計書 §4・§11）。かつては
+    ``_dump_model(existing)`` → ``_update_component`` のフルオブジェクト往復で
+    実装していたが、2026-08-29 レビューで2つの破壊経路が確定した:
+    ① ``_row_to_out`` は ``component_type`` に自由語彙（component_type_text 由来の
+      "RelationComponent" 等）を投影するため、そのまま UPDATE すると CHECK 制約
+      違反で 500 になる。
+    ② ``TheorySourceScope`` は extra を落とすため、往復で source_scope の
+      ``legacy_ids`` / ``figure_id`` / ``figure_key`` 等（agent ID 解決・図対応の正本）
+      を破壊する。
+    このため列を限定した UPDATE に置き換えた。承認時は PUT 経路
+    （``_normalize_payload``）との整合で maturity_source='teacher_reviewed'・
+    validation_warnings=[] も併せて更新する。監査は実行者 user_id 付きで記帳する
+    （``_update_component`` 内の記帳は changed_by=NULL だった — GR4 の帰属を保つ）。
+    却下時の伝播（``_propagate_rejected_component``）も従来と同じ。
+    """
+    session = _pg_session()
+    try:
+        if approve:
+            session.execute(
+                sa_text("""
+                    UPDATE theory_components
+                    SET status = :status,
+                        review_status = :review_status,
+                        maturity_source = 'teacher_reviewed',
+                        validation_warnings = CAST('[]' AS jsonb),
+                        updated_at = now()
+                    WHERE id = CAST(:id AS uuid)
+                """),
+                {"id": component_id, "status": status, "review_status": review_status},
+            )
+        else:
+            session.execute(
+                sa_text("""
+                    UPDATE theory_components
+                    SET status = :status,
+                        review_status = :review_status,
+                        updated_at = now()
+                    WHERE id = CAST(:id AS uuid)
+                """),
+                {"id": component_id, "status": status, "review_status": review_status},
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.exception("Failed to transition theory component %s", component_id)
+        raise HTTPException(status_code=500, detail="Failed to update theory component")
+    finally:
+        session.close()
+    updated = _get_component(component_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    if existing.review_status != updated.review_status:
+        _record_review_event(
+            AUDIT_ENTITY_COMPONENT, component_id,
+            existing.review_status, updated.review_status, user_id,
+        )
+        if updated.review_status == "rejected" or updated.status == "rejected":
+            _propagate_rejected_component(component_id)
+    return updated
+
+
+@router.post("/theory-components/{component_id}/approve", response_model=TheoryComponentOut)
+def approve_theory_component(
+    component_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> TheoryComponentOut:
+    """component を承認へ遷移する（内容フィールドは一切変更しない）。
+
+    グラフ対話レビュー画面の承認ボタンの実体（設計書 §4）。フルオブジェクト PUT と
+    違い、画面が読み込んだ時点のオブジェクトで内容を上書きしない（同時編集の
+    巻き戻し防止）。承認可能性（名前・source_chunks・inputs/outputs 非空 + 全項目に
+    出典）はサーバ側で強制し、満たさなければ 422 の事実文
+    （GR1: 確定は人間 / evidence-based）。監査は実行者付きで記帳する（GR4）。
+    """
+    existing = _get_component(component_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Theory component not found")
+    _ensure_component_editable(existing, current_user)
+    problems = _component_approval_problems(existing)
+    if problems:
+        raise HTTPException(status_code=422, detail="承認できません: " + "、".join(problems))
+    return _transition_component_review(
+        component_id, existing,
+        status="teacher_reviewed", review_status="teacher_approved",
+        user_id=current_user.get("id"), approve=True,
+    )
+
+
 @router.post("/theory-components/{component_id}/reject", response_model=TheoryComponentOut)
 def reject_theory_component(
     component_id: str,
@@ -2874,11 +3633,12 @@ def reject_theory_component(
     existing = _get_component(component_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Theory component not found")
-    _ensure_editable(existing.course_id, current_user)
-    payload = _dump_model(existing)
-    payload["status"] = "rejected"
-    payload["review_status"] = "rejected"
-    return _update_component(component_id, payload)
+    _ensure_component_editable(existing, current_user)
+    return _transition_component_review(
+        component_id, existing,
+        status="rejected", review_status="rejected",
+        user_id=current_user.get("id"),
+    )
 
 
 @router.post("/courses/{course_id}/theory-components/validate-connection")

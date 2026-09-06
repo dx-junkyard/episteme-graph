@@ -121,6 +121,7 @@ from core.schema import (
     AUDIT_ENTITY_DOCUMENT_SHARE,
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
     AUDIT_ENTITY_USER_ACCOUNT,
+    AUDIT_ENTITY_VISIBILITY,
 )
 from core.schema_registry import (
     add_ontology_type,
@@ -455,6 +456,7 @@ def _accept_material_source(
     analyze_images: bool,
     models_option: dict | None,
     current_user: dict,
+    source_url: str | None = None,
 ) -> dict:
     """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
@@ -464,6 +466,12 @@ def _accept_material_source(
     処理スレッド起動 → レスポンス組立を1箇所に集約する。
 
     レスポンス形は既存のアップロード API と**完全に同一**（フロントの分岐を増やさない）。
+
+    ``source_url``（migration 071 / 論文ディスカバリー層 PD5）: URL 経由で取得した
+    場合の出所 URL。``documents.source_url`` に保存し、arXiv 候補一覧の「取り込み済み」
+    判定（``core.paper_discovery.search.ingested_arxiv_ids``）の**読み時導出**の材料に
+    する。multipart アップロードは ``None`` のまま（出所 URL が存在しないため、
+    重複判定できないことを偽装しない — 設計書 §8）。
     """
     import datetime
 
@@ -489,8 +497,8 @@ def _accept_material_source(
     try:
         session.execute(
             sa_text("""
-                INSERT INTO documents (id, title, filename, status, uploaded_by, doc_type, source_path)
-                VALUES (:id, :title, :filename, 'uploaded', CAST(:uploaded_by AS uuid), 'textbook', :material_id)
+                INSERT INTO documents (id, title, filename, status, uploaded_by, doc_type, source_path, source_url)
+                VALUES (:id, :title, :filename, 'uploaded', CAST(:uploaded_by AS uuid), 'textbook', :material_id, :source_url)
             """),
             {
                 "id": doc_id,
@@ -498,6 +506,7 @@ def _accept_material_source(
                 "filename": filename,
                 "uploaded_by": current_user["id"],
                 "material_id": material_id,
+                "source_url": (source_url or None),
             },
         )
         session.commit()
@@ -743,6 +752,7 @@ def upload_material_from_url(
         analyze_images=body.analyze_images,
         models_option=models_option,
         current_user=current_user,
+        source_url=body.url,
     )
 
 
@@ -1459,6 +1469,17 @@ def update_material_visibility(
 
     session = _pg_session()
     try:
+        # 旧 visibility は監査記帳のために同一トランザクション内で読む
+        # （どこから どこへ 開いたかを記録するため。UPDATE の 404 判定は不変）。
+        previous = session.execute(
+            sa_text("""
+                SELECT COALESCE(visibility, 'private')
+                FROM documents
+                WHERE source_path = :material_id
+                  AND uploaded_by = CAST(:user_id AS uuid)
+            """),
+            {"material_id": material_id, "user_id": current_user["id"]},
+        ).fetchone()
         result = session.execute(
             sa_text("""
                 UPDATE documents
@@ -1488,6 +1509,20 @@ def update_material_visibility(
     logger.info(
         "Material %s visibility=%s group=%s by user=%s",
         material_id, body.visibility, body.group_id, current_user["id"],
+    )
+    # 原則14: 公開（開示範囲の変更）は取り消しの効かない操作なので必ず記帳する。
+    # 資料本文・受講者情報は載せない（対象と旧・新の範囲、実行者だけ）。
+    record_review_event(
+        AUDIT_ENTITY_VISIBILITY,
+        material_id,
+        str(previous[0]) if previous else "",
+        body.visibility,
+        current_user["id"],
+        {
+            "action": "material_visibility",
+            "object_type": "document",
+            "group_id": body.group_id if body.visibility == "group" else None,
+        },
     )
     return {
         "material_id": material_id,
@@ -1522,6 +1557,15 @@ def update_course_visibility(
 
     session = _pg_session()
     try:
+        # 旧 visibility は監査記帳のために同一トランザクション内で読む（材料と同型）。
+        previous = session.execute(
+            sa_text("""
+                SELECT COALESCE(visibility, 'private')
+                FROM learning_courses
+                WHERE id = :course_id AND user_id = CAST(:user_id AS uuid)
+            """),
+            {"course_id": course_id, "user_id": current_user["id"]},
+        ).fetchone()
         result = session.execute(
             sa_text("""
                 UPDATE learning_courses
@@ -1552,6 +1596,21 @@ def update_course_visibility(
     logger.info(
         "Course %s visibility=%s group=%s by user=%s",
         course_id, body.visibility, body.group_id, current_user["id"],
+    )
+    # 原則14: コースの公開・非公開の切替を記帳する（誰がいつどこへ開いたか）。
+    # リリース前確認ウィザード経由かどうかはサーバから判別できないため申告しない
+    # （偽装しない。ステップ2の一括確認は landscape 側で decision_context 付きに記帳される）。
+    record_review_event(
+        AUDIT_ENTITY_VISIBILITY,
+        course_id,
+        str(previous[0]) if previous else "",
+        body.visibility,
+        current_user["id"],
+        {
+            "action": "course_visibility",
+            "object_type": "course",
+            "group_id": body.group_id if body.visibility == "group" else None,
+        },
     )
     return {
         "course_id": course_id,
@@ -4306,12 +4365,55 @@ def list_schema_proposals(
     return [SchemaProposalOut(**p) for p in proposals]
 
 
+def _editable_course_ids(user_id: str) -> list[str]:
+    """本人が編集できるコース（所有 or editor グループ）の ID 一覧。
+
+    権限判定の述語は ``list_teacher_courses`` / ``services.user_can_edit_course`` と同一
+    （所有者、または ``object_group_permissions(object_type='course', permission='editor')``
+    のグループ員）。viewer は含めない — 学習者の質問原文を読む根拠にはならない。
+    """
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text("""
+                SELECT lc.id
+                FROM learning_courses lc
+                WHERE lc.user_id = CAST(:user_id AS uuid)
+                   OR EXISTS (
+                       SELECT 1 FROM object_group_permissions cgp
+                       JOIN group_members gm ON gm.group_id = cgp.group_id
+                       WHERE cgp.object_type = 'course'
+                         AND cgp.object_id = lc.id
+                         AND cgp.permission = 'editor'
+                         AND gm.user_id = CAST(:user_id AS uuid)
+                   )
+            """),
+            {"user_id": user_id},
+        ).fetchall()
+    finally:
+        session.close()
+    return [str(r[0]) for r in rows]
+
+
 @router.post("/schema-proposals/analyze", response_model=SchemaProposalOut | dict)
 def trigger_schema_analysis(
     current_user: dict = Depends(_require_teacher),
 ) -> SchemaProposalOut | dict:
-    """未回答クエリを分析してスキーマ拡張提案を生成する。"""
-    result = analyze_unanswered_queries()
+    """未回答クエリを分析してスキーマ拡張提案を生成する。
+
+    目的外利用の禁止: 分析対象は**本人が編集できるコース**の未回答クエリだけに限定する
+    （旧実装は全コースを横断し、他教員のコースの学生の質問原文を最大100件プロンプトへ
+    埋めていた）。SYSTEM_ADMIN は従来どおり全件を対象にできる。編集できるコースが
+    1件も無ければ LLM を呼ばず、事実文だけを返す。
+    """
+    scope: list[str] | None = None
+    if current_user.get("role") != ROLE_SYSTEM_ADMIN:
+        scope = _editable_course_ids(current_user["id"])
+        if not scope:
+            return {
+                "message": "分析対象がありません。あなたが編集できるコースがまだありません。"
+            }
+    result = analyze_unanswered_queries(course_ids=scope)
     if result is None:
         return {"message": "分析の結果、スキーマ拡張の提案はありません。未回答クエリが不足しているか、現在のスキーマで十分カバーされています。"}
     return SchemaProposalOut(**result)
@@ -4434,22 +4536,29 @@ def get_interest_dashboard(
     interest_traces を集団集計し、件数・比率・関与人数のみを返す（個人特定情報なし）。
     course_id 未指定なら空集計を返す（フロントでコースを選択する）。
     """
-    from services import aggregate_interest_dashboard, _fetch_course_data_row
+    from services import aggregate_interest_dashboard
 
     if not course_id:
         return {"course_id": None, "cohort_size": 0, "hotspots": [],
-                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0}}
+                "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
+                "indicator_id": "interest-dashboard"}
+
+    # 集約処理より先に course owner / editor ゲートを通す（anchor-insights 等の他の
+    # 教員向け集約と同じ。不在も権限なしも同一の 404 — 原則11 オブジェクトスコープ）。
+    data = _require_editable_course_or_404(course_id, current_user)
 
     title_map: dict = {}
     try:
-        data = _fetch_course_data_row(course_id) or {}
         for t in course_topics(data):
             if isinstance(t, dict) and t.get("id"):
                 title_map[t["id"]] = t.get("title") or t["id"]
     except Exception:
         title_map = {}
 
-    return aggregate_interest_dashboard(course_id, title_map)
+    payload = aggregate_interest_dashboard(course_id, title_map)
+    # 制度指標カタログへの参照（IG1）。定義は GET /api/indicators/interest-dashboard。
+    payload["indicator_id"] = "interest-dashboard"
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -4483,7 +4592,44 @@ def get_bridge_insights(
         "course_id": course_id,
         "bridges": bridges,
         "note": "学習者個人は特定できません（k-匿名集約・人数はレンジ表示のみ）。評価利用は禁止です。",
+        # 制度指標カタログへの参照（IG1）。定義は GET /api/indicators/bridge-insights。
+        "indicator_id": "bridge-insights",
     }
+
+
+# ---------------------------------------------------------------------------
+# 構造帰属型の問い記録（B層, migration 025）— 教員向け anchor インサイト
+# 正本: docs/features/structure-anchored-questions.md §7 Stage 3 / §8-5
+# ---------------------------------------------------------------------------
+@router.get("/courses/{course_id}/anchor-insights")
+def get_anchor_insights(
+    course_id: str,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """stage / doubt_type 単位の k-匿名集約（k=3・n<3 セル非表示・レンジ表示のみ）。
+
+    「理論構成のどの段階に、どういう型の引っかかりが集まっているか」を教材改善の
+    ためだけに返す粗い断面。個々の anchor 単位の内訳は D層の
+    `GET /api/admin/courses/{course_id}/naive-signals` が持つ（責務の重複を避ける）。
+
+    - 対象は本人が確定した帰属のみ（`learner_selected` / `confirmed`）。
+      LLM 候補（`llm_candidate`）は教員側に出さない（P1）。
+    - 個別の学習者・個別の痕跡行・質問原文・confidence は一切返さない（P3）。
+    - 読み取り専用・監査記帳なし・LLM 0 回。評価利用は禁止。
+
+    bridge-insights と同じく、k-匿名集約であっても権限のない教員へ集約の存在・
+    空非空・対象 course ID を開示しない。集約処理より **先に** course owner /
+    editor ゲートを通す（不在も権限なしも同一の 404）。
+    """
+    _require_editable_course_or_404(course_id, current_user)
+
+    from core.structure_anchor.insights import aggregate_anchor_insights
+
+    session = _pg_session()
+    try:
+        return aggregate_anchor_insights(session, course_id)
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------

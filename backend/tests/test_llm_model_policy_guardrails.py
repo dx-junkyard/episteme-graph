@@ -172,6 +172,12 @@ class TestFeatureCoverage:
             "embedding:chunks",
             "embedding:library_search",
             "admin:help_kb_embed",
+            # 論文ディスカバリーの関連度ランキング（Phase 3）。実体は embedding 呼び出し
+            # なので、他の embedding 系と同じくモデル選択の対象外（M5）。
+            "discovery:ranking",
+            # 分野マップのベクトル係留層（VA5）。pgvector 3072次元と結合しているため
+            # モデル切替は非対応（`embedding:` プレフィックスで自動的に scene 対象外）。
+            "embedding:atlas_anchors",
         }
         for feature in KNOWN_FEATURES:
             scene = llm_policy.scene_for_feature(feature)

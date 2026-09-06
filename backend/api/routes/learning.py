@@ -9,6 +9,7 @@ import threading
 import uuid
 from contextlib import nullcontext
 from dataclasses import asdict
+from functools import lru_cache
 from typing import Callable
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -69,6 +70,7 @@ from services import (
     record_learner_articulated_tension,
     record_student_stumble_event,
     record_topic_check_pass,
+    resolve_document_access,
     resolve_interest_trace,
     save_course_data,
     set_trace_map_exclusion,
@@ -81,6 +83,7 @@ from services import (
 )
 from pydantic import BaseModel
 from core.course_data import (
+    course_cartridge_id,
     course_focus,
     course_llm_models,
     course_source_material_ids,
@@ -90,6 +93,7 @@ from core.course_data import (
     iter_all_topics,
 )
 from core.teaching_figures import store as teaching_figures_store
+from core.cartridges import load_cartridge
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import element_explanations
@@ -124,6 +128,10 @@ from core.element_context import (
 )
 from core.discuss.opening import build_opening as build_discussion_opening
 from core.discuss.mirroring import extract_mirror
+# コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.1）: コース無し論文議論の
+# 会話コンテキスト・センチネル。**"_doc:" の組み立て・判定はこの正本関数以外に書かない**。
+from core.discuss.context import document_context_id, parse_document_context
+from core.discuss import observation as discuss_observation
 from core.cycle.derive import build_intention_dto
 from core.cycle.queries import fetch_active_carryover, fetch_intentions
 from core.course_content_builder import build_course_content_background, build_topic_evidence_items
@@ -201,6 +209,10 @@ router = APIRouter(prefix="/api/learning", tags=["Learning"])
 # 痕跡 context_label 用のラベル変換は topic_title 決定の1箇所でのみ行う。
 DISCUSSION_TOPIC_ID = "_discussion"
 DISCUSSION_TOPIC_LABEL = "論文との議論"
+# コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.4）: コースを経由しない
+# document 直付けの議論は、表示・プロンプト・痕跡 context_label すべてで「コース外」だと
+# 正直に名乗る（コース経路のラベルと取り違えさせない）。
+DOCUMENT_DISCUSSION_TOPIC_LABEL = "論文との議論（コース外）"
 
 # discuss 開幕画面の「このコースで議論したいこと」（Phase 0b）の入力上限。
 # 開幕画面の先頭に地の文として出す短い提示なので、長文（教材本文の代替）にはさせない。
@@ -771,9 +783,13 @@ def _is_greeting(message: str) -> bool:
 #   - 「UI・システム参照語」と「使い方の問い形」の**組み合わせ**でのみ真にする
 #     （どちらか片方だけでは弱すぎる誤爆源になる）。「使い方」は参照語・問い形の
 #     両方に置く（「使い方を教えて」単体で成立させるための意図的な重複）。
-#   - 教材内容の質問（数式・物理概念）は誤爆コストの方が大きいため、UI参照語と
-#     問い形が両方揃っていても、数式・物理用語らしき語（_CONTENT_QUESTION_TERMS）が
-#     共起していれば偽に倒す（例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - 教材内容の質問は誤爆コストの方が大きいため、UI参照語と問い形が両方揃っていても、
+#     学術教材の内容語らしき語（_CONTENT_QUESTION_TERMS）が共起していれば偽に倒す
+#     （例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - **この語彙に特定分野（物理など）の用語を書かない**（このシステムは分野を限定
+#     しない）。分野固有の語は、コースのカートリッジ ontology から読み時に足す
+#     （:func:`_cartridge_content_terms`）。カートリッジが無い／読めない分野でも
+#     下の分野非依存語だけで判定が成立する（フェイルソフト）。
 #   - メッセージが長い（雑談・複合質問らしい）場合も偽にする（保守的に絞る）。
 _HELP_CONTEXT_TERMS = (
     "画面", "ボタン", "操作", "アプリ", "この機能", "音声モード", "音声入力",
@@ -782,22 +798,75 @@ _HELP_CONTEXT_TERMS = (
 _HELP_QUESTION_FORMS = (
     "使い方", "どう使", "どうやって", "方法", "どこ",
 )
+# 分野非依存の「教材内容らしさ」語彙（学問一般の語のみ。分野固有語は書かない）。
 _CONTENT_QUESTION_TERMS = (
     "式", "方程式", "定理", "法則", "証明", "導出", "定義", "公式",
-    "エネルギー", "運動", "力学", "波動", "ベクトル", "微分", "積分",
-    "質量", "加速度", "速度", "粒子", "理論",
+    "理論", "概念", "仮定", "前提条件", "モデル", "計算", "関数", "係数",
+    "変数", "近似", "観測", "実験", "論文",
 )
 
+# カートリッジ由来の内容語を引くときの下限文字数（"SM" のような短い別名を
+# 部分一致に使うと、無関係な文が内容語ありと誤判定されるため）。
+_CARTRIDGE_TERM_MIN_LEN = 3
+_CARTRIDGE_TERM_LIMIT = 200
 
-def _is_usage_question(message: str) -> bool:
+
+@lru_cache(maxsize=16)
+def _cartridge_content_terms(cartridge_id: str) -> tuple[str, ...]:
+    """カートリッジ ontology から分野固有の「教材内容語」を集める（フェイルソフト）。
+
+    分野名・分野語彙をコードにハードコードしないための供給口（開発ルール7
+    「domain-specific なロジックを埋め込まず cartridge から読む」と同じ方針）。
+    読めない・存在しないカートリッジでは空タプルを返し、呼び出し側は分野非依存語
+    （:data:`_CONTENT_QUESTION_TERMS`）だけで判定する。
+
+    ``cartridge_id`` が空のときは呼び出さないこと（``load_cartridge(None)`` は
+    既定カートリッジへ縮退するため、無関係な分野の語彙を引いてしまう）。
+    """
+    cid = (cartridge_id or "").strip()
+    if not cid:
+        return ()
+    try:
+        cartridge = load_cartridge(cid)
+    except Exception:  # noqa: BLE001 — 分野語彙は補助。読めなければ無しで続行する
+        logger.debug("cartridge content terms unavailable: %s", cid, exc_info=True)
+        return ()
+    terms: list[str] = []
+
+    def _add(value: object) -> None:
+        text = str(value or "").strip()
+        if not text or len(text) < _CARTRIDGE_TERM_MIN_LEN:
+            return
+        if text not in terms:
+            terms.append(text)
+
+    for concept_type in cartridge.ontology.concept_types:
+        if isinstance(concept_type, dict):
+            _add(concept_type.get("label_ja"))
+            for example in concept_type.get("examples") or []:
+                _add(example)
+    for alias_entry in cartridge.ontology.aliases:
+        if isinstance(alias_entry, dict):
+            _add(alias_entry.get("canonical"))
+            for alias in alias_entry.get("aliases") or []:
+                _add(alias)
+    return tuple(terms[:_CARTRIDGE_TERM_LIMIT])
+
+
+def _is_usage_question(message: str, *, cartridge_id: str | None = None) -> bool:
     """メッセージが画面・システムの使い方についての質問かどうかを保守的に判定する。
 
     非LLM・同期（casual/音声バイパスより手前で評価するための決定論判定）。
+    ``cartridge_id`` を渡すと、その分野の語彙も「教材内容らしさ」の判定に足す
+    （分野語のハードコードを避けるための供給口。省略時は分野非依存語のみ）。
     """
     msg = (message or "").strip()
     if not msg or len(msg) >= 50:
         return False
     if any(term in msg for term in _CONTENT_QUESTION_TERMS):
+        return False
+    lowered = msg.lower()
+    if any(term.lower() in lowered for term in _cartridge_content_terms(cartridge_id or "")):
         return False
     has_context = any(term in msg for term in _HELP_CONTEXT_TERMS)
     has_form = any(term in msg for term in _HELP_QUESTION_FORMS)
@@ -861,7 +930,9 @@ def _classify_intent(
         "- CHIT_CHAT: 学習と無関係な雑談・日常会話（天気、食事、娯楽、個人的な話題など）\n"
         "- LEARNING_ADVICE: 学習の進め方・方法に関するメタ質問（どう進めるか、何から学ぶか、学習計画の相談など）\n"
         "- USAGE_HELP: アプリ・画面の使い方、ボタンや機能の操作方法についての質問（教材の内容そのものではない）\n"
-        "- DOMAIN_RAG: 物理学・数学などの専門知識・概念に関する質問\n\n"
+        # 分野名をハードコードしない（コースごとに分野が異なる）。コース名は
+        # プロンプト冒頭で提示済みなので、ここでは「このコースが扱う専門分野」と書く。
+        "- DOMAIN_RAG: このコースが扱う専門分野の知識・概念に関する質問\n\n"
         "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n\n"
         f"質問: {message}\n\n"
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
@@ -2480,7 +2551,40 @@ def learning_chat(
     body: LearningChatRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningChatResponse:
-    """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。"""
+    """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。
+
+    本体は ``_learning_chat_core``。コーパス回遊 Phase B（コース無し論文議論、
+    ``docs/features/corpus_roaming_design.md`` §5.3）の document 直付けファサード
+    （``document_discuss_chat``）と**同じコア**を通すための薄い委譲で、コース経路の
+    挙動・シグネチャ・処理順序は完全に不変（CR2）。
+    """
+    return _learning_chat_core(course_id, topic_id, body, current_user)
+
+
+def _learning_chat_core(
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    current_user: dict,
+    *,
+    course_data: dict | None = None,
+    scope_document_ids: set[str] | None = None,
+) -> LearningChatResponse:
+    """学習チャット本体（コース経路 / document 直付け経路の共通コア）。
+
+    コース経路（``learning_chat``）は追加引数を渡さず、従来どおり
+    ``get_course_data`` でコースを解決する（処理順序を含め挙動不変）。
+
+    コーパス回遊 Phase B の document 直付け経路（``document_discuss_chat``）は
+    ``course_id`` にセンチネル（``core.discuss.context.document_context_id``）、
+    ``course_data`` に document 由来の合成データ、``scope_document_ids`` に
+    RAG スコープ（当該 document のみ）を渡す。可視性ゲート
+    （``user_can_view_document``）は呼び出し側で済ませている前提（CR1）。
+
+    - ``course_data``: 解決済みのコースデータ。``None`` なら従来どおり本関数内で解決する。
+    - ``scope_document_ids``: RAG の ``allowed_document_ids`` の明示指定。
+      ``None`` ならコース経路の従来ロジック（discuss_scope / 可視集合）。
+    """
     # チャット型AI支援の共通基盤整理 §1: このリクエストで最初に LLM を呼ぶ直前に1回だけ
     # コスト上限を消費する（リクエストスコープの quota_state で多重カウントを防止）。
     _quota_state: dict = {"consumed": False}
@@ -2529,10 +2633,16 @@ def learning_chat(
         body.action = None
         body.atlas_context = None
 
-    # 1. コースデータを取得
-    course_data = get_course_data(current_user["id"], course_id)
+    # 1. コースデータを取得（document 直付けファサードは解決済みの合成データを渡すため
+    #    ここでのコース解決自体を行わない = センチネル course_id が
+    #    get_course_data / _apply_course_version_view に流れ込まない）。
+    if course_data is None:
+        course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+    # コーパス回遊 Phase B（設計 §5.1）: センチネル判定はここ1箇所で行い、以降の
+    # ラベル・コース単位設定の読み出しの分岐に使う（文字列組み立ては core/discuss/context.py が正本）。
+    _document_context_id = parse_document_context(course_id)
 
     # 機能3（書き直し）: replace_message_id 指定時は、その往復以降をサーバ正本の履歴から
     # 取り除き、派生 interest_traces を supersede してから、message を同じ位置から再処理する。
@@ -2550,8 +2660,13 @@ def learning_chat(
     # find_course_topic は None を返し topic_title は生の topic_id にフォールバックする。
     # ここでラベル変換することで、表示・プロンプト・痕跡 context_label すべてに一括で効く。
     if topic_id == DISCUSSION_TOPIC_ID:
-        topic_title = DISCUSSION_TOPIC_LABEL
-        _origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": DISCUSSION_TOPIC_LABEL}
+        # コーパス回遊 Phase B（設計 §5.4）: コース外（document 直付け）の議論は
+        # 「論文との議論（コース外）」と正直に名乗る。ラベル変換はここ1箇所なので、
+        # 表示・プロンプト・痕跡 context_label すべてに一括で効く。
+        topic_title = (
+            DOCUMENT_DISCUSSION_TOPIC_LABEL if _document_context_id else DISCUSSION_TOPIC_LABEL
+        )
+        _origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": topic_title}
     else:
         topic_title = topic_info["title"] if topic_info else topic_id
         _origin_topic_info = topic_info
@@ -2634,7 +2749,12 @@ def learning_chat(
     if not (isinstance(body.atlas_context, dict) and body.atlas_context):
         _is_usage_help = (
             _route_for_typed_action(body.support_action) == "USAGE_HELP"
-            or _is_usage_question(body.message)
+            # 分野語彙（内容質問の誤爆ガード）はコースのカートリッジから読む
+            # （分野名をコードに書かない。導出できないコースでは分野非依存語のみ）。
+            or _is_usage_question(
+                body.message,
+                cartridge_id=course_cartridge_id(course_data) or None,
+            )
         )
         if _is_usage_help:
             with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
@@ -2688,9 +2808,12 @@ def learning_chat(
 
     # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
     if intent == "CHIT_CHAT":
+        # 分野名はハードコードしない（コースごとに分野が異なる）。コース名が引ければ
+        # それを、引けなければ中立表現へフォールバックする。
+        _scope_label = f"「{course_title}」" if course_title and course_title != course_id else "この教材"
         chit_chat_answer = (
-            "申し訳ありませんが、私は物理学の学習支援に特化したAIです。\n\n"
-            "物理学・数学の概念についての質問や、学習の進め方についての相談でしたら、"
+            f"申し訳ありませんが、私は{_scope_label}の学習支援に特化したAIです。\n\n"
+            f"{_scope_label}で扱う概念についての質問や、学習の進め方についての相談でしたら、"
             "喜んでお答えします。学習に関する質問をぜひ聞かせてください！\n\n"
             "画面の使い方についての質問にもお答えできます。"
         )
@@ -2794,7 +2917,12 @@ def learning_chat(
             status_code=422,
             detail=f"discuss_scope には course_sources か all_visible を指定してください（受信値: {_discuss_scope!r}）。",
         )
-    if _is_discuss and _discuss_scope == "all_visible":
+    # コーパス回遊 Phase B（設計 §5.2）: document 直付けの既定スコープは**当該 document のみ**。
+    # 呼び出し側（document_discuss_chat）が解決済みの集合を渡す。"all_visible" を明示された
+    # ときだけ本人可視集合まで広げる（コース経路の意味論と対応）。
+    if scope_document_ids is not None and not (_is_discuss and _discuss_scope == "all_visible"):
+        allowed_document_ids = scope_document_ids
+    elif _is_discuss and _discuss_scope == "all_visible":
         allowed_document_ids = list_visible_document_ids(current_user["id"])
     elif _is_discuss:
         allowed_document_ids = list_course_source_document_ids(course_data)
@@ -2853,10 +2981,14 @@ def learning_chat(
             "※選択中の検索範囲には、この質問に直接関連する箇所は見当たりませんでした。"
             "範囲は広げていません。一般的な学術知識で回答する場合は、この論文由来ではないことを明示してください。"
         )
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+        # 楽屋（backstage）の質問は本人専用（SD4 / 原則5）。unanswered_query_logs は
+        # 教員の「未回答の質問」表に氏名付きで出る経路なので、楽屋では記録しない。
+        if not _is_backstage:
+            log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
     else:
         context_block = "※この質問に直接関連する教材セクションは見つかりませんでした。一般的な学術知識を用いて回答してください。"
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+        if not _is_backstage:
+            log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
     # 5. 回答の生成（ルート統合）
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
@@ -2951,7 +3083,13 @@ def learning_chat(
     # 版スナップショットを返しうるため、専用の live-only SELECT を別途使う
     # （get_course_live_llm_models）。未設定なら resolve_model() 内の既存解決順序
     # （user policy → system policy → env → tier既定）がそのまま効く（挙動不変）。
-    _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+    # コーパス回遊 Phase B: センチネル course_id は実在コース行を持たないため
+    # learning_courses への無駄な SELECT を出さない（結果は常に未設定 = 既存の解決順序）。
+    _course_chat_model = (
+        None
+        if _document_context_id
+        else get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+    )
     _course_chat_override = (
         llm_policy.model_override(_course_chat_model, source=llm_policy.SOURCE_COURSE_OVERRIDE)
         if _course_chat_model else nullcontext()
@@ -3253,6 +3391,190 @@ def record_discuss_reflection(
     if result is None:
         raise HTTPException(status_code=500, detail="Failed to record reflection")
     return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# コーパス回遊 Phase B — コース無し論文議論（document 直付け discuss）
+# 正本設計書: docs/features/corpus_roaming_design.md §5（CR1/CR2/CR8/CR9）
+#
+# 会話は既存の learning_chat_history / interest_traces に、予約センチネル
+# course_id="_doc:{document_id}" + topic_id="_discussion" で載せる（migration 0）。
+# アクセスゲートは受講ゲートではなく **document 可視性のみ**（CR1・fail-closed）。
+# ---------------------------------------------------------------------------
+
+
+def _resolve_discuss_document(user_id: str, document_ref: str) -> tuple[str, str, str]:
+    """document_ref（documents.id UUID / source_path=material_id）を解決し、
+    閲覧可否を fail-closed で判定して ``(document_id, source_path, title)`` を返す。
+
+    CR1: ゲートは ``user_can_view_document`` と同一判定（``resolve_document_access``
+    の ``can_view``）。**不可・不在はいずれも 404 に統一**する（存在推測をさせない
+    既存流儀 — 403 と 404 を撃ち分けない）。
+    """
+    access = resolve_document_access(user_id, document_ref)
+    if not access.found or not access.can_view:
+        raise HTTPException(status_code=404, detail="Document not found")
+    document_id = str(access.document_id)
+    title = ""
+    try:
+        from core.personal_graph.queries import fetch_document_titles
+
+        title = (fetch_document_titles([document_id]) or {}).get(document_id, "") or ""
+    except Exception:  # noqa: BLE001 — タイトルは表示用。取得失敗で議論を止めない。
+        logger.warning("document discuss: title lookup failed for %s", document_id, exc_info=True)
+    return document_id, access.source_path or "", title or access.source_path or document_id
+
+
+def _document_discuss_course_data(document_id: str, source_path: str, title: str) -> dict:
+    """document 直付け議論のための合成 course_data（DB には保存しない読み時の器）。
+
+    ``_learning_chat_core`` がコースから読む項目（title / domain / sources / topics）だけを
+    最小限で満たす。``sources`` に当該 document を入れることで、出所分類
+    （``content_grounding``）がこの論文由来のチャンクを ``course_material``
+    （＝いま議論している論文）として扱う。
+    """
+    source: dict = {"document_id": document_id, "title": title}
+    if source_path:
+        source["material_id"] = source_path
+    return {
+        "title": title,
+        "sources": [source],
+        "topics": [],
+        "concepts": [],
+    }
+
+
+def _record_document_discuss_event(event: str, user_id: str, context_id: str) -> None:
+    """discuss 観測イベント（設計 §5.5）を best-effort で1件記録する。
+
+    DO6（計測失敗で UX を止めない）: 例外は握り潰す。payload は常に空
+    （DO1: 本文非含有）。学習者にはこの数値を一切返さない（DO3）。
+    """
+    try:
+        discuss_observation.insert_metric_events(
+            user_id, [{"event": event, "course_id": context_id, "payload": {}}]
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("document discuss: metric event %s failed", event, exc_info=True)
+
+
+@router.get("/documents/{document_ref}/discuss/opening")
+def get_document_discussion_opening(
+    document_ref: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """コース無し論文議論の開幕画面（設計 §5.3・非LLM・読み取り専用）。
+
+    コース版（``GET /courses/{course_id}/discuss/opening``）と**同じ**
+    ``core.discuss.opening.build_opening`` を、センチネル course_id と単一 document で
+    呼ぶだけ。``documents[].discussion_seeds``（教員承認済みの議論のきっかけ）は
+    document 単位の素材なのでそのまま出る。LLM 呼び出し 0 回（CR9）。
+
+    既知の縮退（設計 §5.4）: ``fragile_points``（D層台帳の未検証合意リスト）は
+    ``epistemic_ledger.course_id`` 基準の投影のため、コース外のセッションでは空になる。
+    UCサイクルの ``intention``（course 配下の持ち越し）も同梱しない。
+    """
+    document_id, _source_path, title = _resolve_discuss_document(current_user["id"], document_ref)
+    context_id = document_context_id(document_id)
+    result = build_discussion_opening(context_id, [document_id], course_focus="")
+    # フロントがこの後のチャット・履歴 API に使う会話キーと、画面に出す論文名。
+    result["document_context"] = {
+        "document_id": document_id,
+        "title": title,
+        "context_id": context_id,
+        "topic_id": DISCUSSION_TOPIC_ID,
+        "label": DOCUMENT_DISCUSSION_TOPIC_LABEL,
+    }
+    _record_document_discuss_event("document_discuss_opened", current_user["id"], context_id)
+    return result
+
+
+@router.post("/documents/{document_ref}/discuss/chat", response_model=LearningChatResponse)
+def document_discuss_chat(
+    document_ref: str,
+    body: LearningChatRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningChatResponse:
+    """コース無し論文議論のチャット（設計 §5.2/§5.3）。
+
+    既存 ``learning_chat`` の discuss 経路の**ファサード**で、本体は同じ
+    ``_learning_chat_core`` を通る（応答様式 DA1〜DA6・書き直し/削除の truncate・
+    tension プレフィルタ・痕跡記録・観測タグ ``learning:chat_discuss`` は共通コア由来）。
+
+    - ゲートは document 可視性のみ（CR1）。受講ゲートは一切通らない。
+    - 会話キーは ``course_id=_doc:{document_id}`` / ``topic_id=_discussion``（§5.1）。
+    - RAG は既定で当該 document のみ。``discuss_scope="all_visible"`` のときだけ
+      本人可視集合まで広げる（該当チャンクゼロでの無断フォールバックは無し = DM1）。
+    - コストは既存 ``LEARNING_CHAT_MAX_CALLS_PER_DAY`` に相乗り（新設しない・CR9）。
+
+    コース前提のペイロード（``action``＝グラフ要素説明 / ``atlas_context``＝分野の地図の
+    ↗ アクション / ``cycle_mode``＝理解サイクルの AI モード）は v1 では提供しないので
+    サーバ側で落とす（§5.4 の縮退を黙って壊さず、明示的に無効化する）。
+    """
+    document_id, source_path, title = _resolve_discuss_document(current_user["id"], document_ref)
+    context_id = document_context_id(document_id)
+
+    # 常に discuss として扱う（このエンドポイントに他の intent_mode は無い）。
+    body.intent_mode = "discuss"
+    body.action = None
+    body.atlas_context = None
+    body.cycle_mode = None
+
+    response = _learning_chat_core(
+        context_id,
+        DISCUSSION_TOPIC_ID,
+        body,
+        current_user,
+        course_data=_document_discuss_course_data(document_id, source_path, title),
+        scope_document_ids={document_id},
+    )
+    _record_document_discuss_event("document_discuss_turn", current_user["id"], context_id)
+    return response
+
+
+@router.get(
+    "/documents/{document_ref}/discuss/history",
+    response_model=LearningChatHistoryResponse,
+)
+def get_document_discussion_history(
+    document_ref: str,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningChatHistoryResponse:
+    """コース無し論文議論の履歴（センチネルキー）。形は既存 ``get_chat_history`` と同一。"""
+    document_id, _source_path, _title = _resolve_discuss_document(current_user["id"], document_ref)
+    return get_chat_history(
+        document_context_id(document_id), DISCUSSION_TOPIC_ID, current_user
+    )
+
+
+@router.delete("/documents/{document_ref}/discuss/messages/{message_id}")
+def delete_document_discussion_message_from(
+    document_ref: str,
+    message_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """機能3（削除）の document 直付け版: 指定メッセージ以降の往復を取り除く。
+
+    既存のコース経路と同じ ``truncate_chat_and_supersede`` の truncate セマンティクス
+    （当該 user メッセージ・その回答・以降の往復を履歴から除き、派生 interest_traces は
+    削除せず ``status='superseded'`` に遷移させる = CR8/P4）。行削除 API ではない。
+    """
+    document_id, _source_path, _title = _resolve_discuss_document(current_user["id"], document_ref)
+    try:
+        result = truncate_chat_and_supersede(
+            current_user["id"], document_context_id(document_id), DISCUSSION_TOPIC_ID, message_id
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete document discuss message for user=%s doc=%s msg=%s",
+            current_user["id"], document_id, message_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to delete chat message")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return {"status": "deleted", "removed_count": result["removed_count"]}
 
 
 @router.get("/courses/{course_id}/source-chunk/{chunk_id}")

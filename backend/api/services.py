@@ -2079,53 +2079,22 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
             "duration": f"{duration_min}分",
         })
 
-    streak = calculate_streak(user_id, course_id)
-
     completion = get_course_completion(user_id, course_id, course_data)
 
     return {
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
-        "streak_days": streak,
         "sessions": sessions_list[:5],
         "completed_topic_ids": completion["completed_topic_ids"],
         "course_completed": completion["course_completed"],
     }
 
 
-def calculate_streak(user_id: str, course_id: str) -> int:
-    """チャット履歴の日付から連続学習日数を算出する。"""
-    pg_session = _pg_session()
-    try:
-        records = pg_session.execute(
-            sa_text("""
-                SELECT DISTINCT DATE(updated_at) AS d
-                FROM learning_chat_history
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                ORDER BY d DESC
-            """),
-            {"user_id": user_id, "course_id": course_id},
-        ).fetchall()
-    finally:
-        pg_session.close()
-
-    if not records:
-        return 0
-
-    sorted_dates = [r[0] for r in records]
-    today = datetime.date.today()
-
-    if sorted_dates[0] < today - datetime.timedelta(days=1):
-        return 0
-
-    streak = 1
-    for i in range(1, len(sorted_dates)):
-        if sorted_dates[i] == sorted_dates[i - 1] - datetime.timedelta(days=1):
-            streak += 1
-        else:
-            break
-
-    return streak
+# 2026-09-05: `calculate_streak`（連続学習日数）を撤去した。理解サイクルの不変条項
+# UC4「セッション間は何もしない — 督促・連続日数・未消化バッジ・忘却曲線を作らない」に
+# 正面から反する計器で、学習者の画面（トップバー・学習サマリ）にだけ出ていた。
+# 学習者向けの数値表示なので DTO（schemas.LearningProgress.streak_days）ごと落としている。
+# 再導入するときは UC4 の裁定からやり直すこと。
 
 
 # ---------------------------------------------------------------------------
@@ -2799,6 +2768,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   -- 理解サイクル（UCサイクル §4/§11-1）: intention（OPEN/LEAVE の本人メモ）と
                   -- anchor_mark（軽量アンカー）は本人専用メモであり「問いの軌跡」には出さない
                   AND kind NOT IN ('intention', 'anchor_mark')
+                  -- コーパス回遊層（§7）: frontier_interest は「地図の端の先を知りたい」の
+                  -- 1タップであって発話ではない。「問いの軌跡」には出さない（台帳には出る）
+                  AND kind <> 'frontier_interest'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -2831,7 +2803,13 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
     # 数えない（UC3 / §1-3-8 / 構造の降下路 SD4 と同型の除外。除外集合の正本は
     # core/trace_registry.py の DASHBOARD_EXCLUDED_KINDS — 登録簿ガードレールが
     # 全要素の出現を強制する）。
-    _dashboard_excluded_kinds = "('help_usage', 'intention', 'anchor_mark', 'backstage_question')"
+    # frontier_interest（コーパス回遊層 §7）はコース非依存の1タップで、専用の
+    # k-匿名集約（aggregate_frontier_interest）だけが読む — コース単位の本集計には
+    # 混ぜない（センチネル course_id のため実際には一致しないが、除外を明示する）。
+    _dashboard_excluded_kinds = (
+        "('help_usage', 'intention', 'anchor_mark', 'backstage_question', "
+        "'frontier_interest')"
+    )
     session = _pg_session()
     try:
         cohort = session.execute(
@@ -2958,9 +2936,27 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "learners": learners,  # 関与人数（個人は特定しない）
         })
 
+    # k-匿名化（原則5 / 指標カタログ `k_anonymity=True` の宣言どおり）: 関与人数が
+    # 最小集計単位に満たないコースは、トピック別件数・未消化総量も含めて表示しない
+    # （受講者1〜2名のコースでは「トピック × 件数」が個人の記録に一致してしまう）。
+    # 「痕跡が無い」と「人数が足りず伏せた」を UI が区別できるよう suppressed を立てる。
+    if int(cohort) < K_ANONYMITY:
+        return {
+            "course_id": course_id,
+            "cohort_size": 0,
+            "k_anonymity_suppressed": True,
+            "hotspots": [],
+            "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
+            "tension_heatmap": [],
+            "anchor_heatmap": [],
+        }
+
     hotspots = []
     for r in rows:
         tid, cnt, unfinished, learners = r[0], int(r[1]), int(r[2]), int(r[3])
+        # トピック単位でも関与人数 n<k のセルは出さない（ヒートマップと同じゲート）。
+        if learners < K_ANONYMITY:
+            continue
         hotspots.append({
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
             "interest_count": cnt,
@@ -3333,6 +3329,129 @@ def record_learner_articulated_tension(
     _record_tension_event(trace_id, "", "articulated", user_id,
                           {"origin": origin} if origin else None)
     return {"trace_id": str(trace_id), "status": "articulated"}
+
+
+# ---------------------------------------------------------------------------
+# コーパス回遊層 Phase D — 地図の端への関心信号
+# 正本: docs/features/corpus_roaming_design.md §7（CR6 / CR8 / CR10）。
+# migration 0（interest_traces の kind 'frontier_interest' に相乗り）。kind の
+# 露出宣言は core/trace_registry.py（TR1）。
+# ---------------------------------------------------------------------------
+
+#: 端への関心はコースに属さない（コース非依存の回遊）。course_id 列は NOT NULL の
+#: ため、コース id と衝突しないセンチネルを使う（help_usage の "_ui" と同型）。
+CORPUS_TRACE_COURSE_ID = "_corpus"
+
+
+def record_frontier_interest(
+    user_id: str, domain_key: str, ring: str, region_id: str = ""
+) -> str | None:
+    """「この先を知りたい」の1タップを記録する（本人の明示操作のみ — CR6）。
+
+    本文・質問文は持たない（payload は ``domain_key`` / ``region_id`` / ``ring`` のみ）。
+    閲覧・滞在の暗黙計測を関心として扱わないため、書き込み経路はこの1本だけにする。
+    記録は ``record_interest_trace`` の唯一入口を経由する（TR1）。
+    """
+    domain_key = (domain_key or "").strip()
+    if not domain_key:
+        return None
+    return record_interest_trace(
+        user_id,
+        CORPUS_TRACE_COURSE_ID,
+        None,
+        kind="frontier_interest",
+        text="",
+        context_label="",
+        extra_payload={
+            "domain_key": domain_key,
+            "region_id": (region_id or "").strip(),
+            "ring": (ring or "").strip(),
+        },
+        status="open",
+    )
+
+
+def withdraw_frontier_interest(user_id: str, trace_id: str) -> bool:
+    """関心の取り消し（``status='dismissed'`` 遷移のみ — 行削除しない, CR8）。
+
+    本人の行だけを対象にする（他人の行は 0 行更新 = False → 呼び出し側は 404）。
+    """
+    trace_id = (trace_id or "").strip()
+    if not trace_id:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                   SET status = 'dismissed'
+                 WHERE id = CAST(:tid AS uuid)
+                   AND user_id = CAST(:uid AS uuid)
+                   AND kind = 'frontier_interest'
+                 RETURNING id
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception as exc:
+        session.rollback()
+        logger.warning("withdraw_frontier_interest failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
+def aggregate_frontier_interest(domain_key: str | None = None) -> list[dict]:
+    """端への関心の教員向け k-匿名集約（§7。個人・時系列・順位を出さない）。
+
+    集計単位は ``domain_key × region_id × ring``。閾値・レンジは
+    ``core/privacy.py`` の共通ゲート（k=3 / 3-5 / 6-10 / 11+）に委譲し、
+    ``n < k`` の行は**返さない**。取り消し済み（``status='dismissed'``）は数えない。
+    生の件数・user_id・時刻は一切返さない（CR3 / CR6）。
+    """
+    from core.privacy import bucket_count_range, meets_k_anonymity
+
+    clauses = ["kind = 'frontier_interest'", "status = 'open'"]
+    params: dict = {}
+    key = (domain_key or "").strip()
+    if key:
+        clauses.append("payload->>'domain_key' = :domain_key")
+        params["domain_key"] = key
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(f"""
+                SELECT COALESCE(payload->>'domain_key', '') AS domain_key,
+                       COALESCE(payload->>'region_id', '')  AS region_id,
+                       COALESCE(payload->>'ring', '')       AS ring,
+                       COUNT(DISTINCT user_id)              AS learners
+                  FROM interest_traces
+                 WHERE {" AND ".join(clauses)}
+                 GROUP BY 1, 2, 3
+                 ORDER BY 1, 2, 3
+            """),
+            params,
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("aggregate_frontier_interest failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    out: list[dict] = []
+    for row in rows:
+        learners = int(row[3] or 0)
+        if not meets_k_anonymity(learners):
+            continue
+        out.append({
+            "domain_key": str(row[0] or ""),
+            "region_id": str(row[1] or ""),
+            "ring": str(row[2] or ""),
+            "range_label": bucket_count_range(learners),
+        })
+    return out
 
 
 def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool:

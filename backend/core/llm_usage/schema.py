@@ -75,6 +75,16 @@ KNOWN_FEATURES = (
     "admin:lecture_rewrite",
     "admin:lecture_generate",
     "admin:lecture_tts",
+    # コース内容生成（原稿スタジオの「コース内容を生成」/ パイプライン完了後の自動生成）。
+    # core/course_content_builder.py::_generate_course_topic_drafts が
+    # トピック1件 = 1コールで授業用ドラフト（student_material / spoken_script 等）を作る。
+    # 従来は帰属なし（unattributed）で記録されていた配線漏れの是正。
+    "admin:course_content",
+    # 原稿スタジオ「理論」タブの理論コンポーネント抽出・補完
+    # （core/theory_components.py::extract_theory_components_from_chunk /
+    #  enrich_theory_components_with_llm）。C層の質問→候補生成
+    # （admin:component_candidates）とは別経路なので feature を分ける。
+    "admin:component_extract",
     "admin:component_candidates",
     "admin:assistant",
     "admin:reconstruction_authoring",
@@ -101,12 +111,33 @@ KNOWN_FEATURES = (
     "deliberation:vision",
     "deliberation:figure_reanalysis",
     "deliberation:standardization",
+    # グラフ対話レビューの「グラフ全体対話」（正本
+    # docs/features/graph_dialogue_review_design.md §5）。コスト上限は W層対話の
+    # CostGate に相乗り（GR5）— 計測上の帰属だけを分離する。
+    "deliberation:graph_chat",
+    # グラフレビュー画面の音声対話（管理画面のハンズフリー入出力）。学習側の
+    # ``learning:voice_*`` と同じく STT / TTS の呼び出しで、モデル選択の対象外
+    # （scene は読み取り専用の音声場面へ束ねる）。教員・管理者のみ。
+    "deliberation:voice_stt",
+    "deliberation:voice_tts",
+    # --- 論文ディスカバリー層 Phase 3（正本 docs/features/paper_discovery_design.md §6）---
+    # 候補アブストラクトの埋め込み（1検索 = 1バッチコール）。発見層で LLM/embedding を
+    # 使う唯一の地点で、モデル選択の対象外（embedding は M5 で scene を持たない）。
+    "discovery:ranking",
+    # 論文レーダー（正本 docs/features/paper_radar_design.md §5.3）— 起点論文と候補
+    # アブストラクトの比較分析（1リクエスト = 1コール）。発見層で**テキスト**生成を
+    # 使う唯一の地点で、教員の明示ボタンでのみ発火する（PR5）。
+    "discovery:compare",
     # --- 埋め込み ---
     "embedding:chunks",
     "embedding:library_search",
     # help_kb ベクトル補助層（Phase 3 ①、正本 docs/features/manual_help_kb_design.md
     # §5）。core/help_kb/vector.py::sync_manual_vectors が凍結節を埋め込む際に使う。
     "admin:help_kb_embed",
+    # 分野マップのベクトル係留層（正本 docs/features/atlas_vector_anchoring_design.md
+    # §4/§5）。骨格ノードのプロトタイプ埋め込みとギャップ候補ラベルの埋め込みが使う。
+    # VA5 でモデル切替は非対応（`embedding:` プレフィックスにより scene 対象外）。
+    "embedding:atlas_anchors",
 )
 
 

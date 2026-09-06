@@ -11,10 +11,45 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 
 - **JWT (HS256)**、有効期限 24 時間。`JWT_SECRET` で署名。
 - パスワードは **bcrypt**（passlib）でハッシュ化。
-- トークン payload: `{sub, username, email, role, exp}`。
+- トークン payload: `{sub, username, email, role, gen, exp}`。`gen` は発行時点の
+  `users.token_generation`（欠落は 0 とみなすので旧トークンと後方互換）。
 - フロントは `localStorage["eg_token"]` に保持し、`Authorization: Bearer {token}` を付与。
 
 ログイン/自己情報は `/api/auth`（`/login`, `/me`）。
+
+### 1.1 トークン検証はアカウント状態も見る（AL3）
+
+`_get_current_user()`（`backend/api/dependencies.py`）は署名・期限の検証に加えて、
+`backend/core/account_status.py`（30 秒 TTL キャッシュ）経由で `users` の状態を照合する。
+
+| 条件 | 結果 |
+|---|---|
+| `status <> 'active'` | 401（`token_rejected_suspended`） |
+| `gen`（欠落は 0）≠ `users.token_generation` | 401（`token_rejected_stale`） |
+| 行が存在しない | 401 |
+| DB 例外 | **そのときだけ fail-open**（payload だけで通し warning ログ） |
+
+停止・パスワードリセットの API は `account_status.invalidate()` を必ず呼ぶため、
+期限内のトークンでも即座に無効化される。通過時は `last_seen_at` を 5 分スロットルで
+列更新する（イベント化しない）。
+
+### 1.2 ログインの判定順序と `auth_events`
+
+- **資格情報 → status の順**で判定する（先に status を見ると停止中アカウントの列挙リークに
+  なるため）。`password_hash IS NULL` は照合せず 401。
+- 認証の出来事は `auth_events`（migration 068、**FK なし・append-only・削除 API なし**）に
+  記録する。語彙の正本は `backend/core/auth_events.py`
+  （`login_success` / `login_failed` / `login_rejected_suspended` /
+  `token_rejected_suspended` / `token_rejected_stale` / `password_reset`）。
+  IP は `X-Real-IP` → `X-Forwarded-For` 末尾。平文パスワード・ハッシュは入れない。
+
+### 1.3 アカウント状態（migration 068）
+
+`users.status ∈ {active, suspended, pending_deletion, deleted}`。**行を物理 DELETE しない**
+（AL1）— 削除は状態遷移 + 匿名化墓標 + 明示 purge で表現する。停止は認証を拒否するだけで、
+所有権・共有・受講の関係は変わらない（AL2）。運用手順は
+[管理機能 §6](admin.md#6-グループユーザー管理) と
+[account_lifecycle_management_design.md](account_lifecycle_management_design.md) を参照。
 
 ---
 
@@ -44,8 +79,16 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 | 範囲 | 意味 | アクセス可否 |
 |---|---|---|
 | `public` | システム全体に公開 | 全ユーザー（コースは `is_published=true`） |
-| `group` | 指定グループのメンバーのみ | `object_group_permissions`（`object_type='course'`。旧 `course_group_permissions`、マイグレーション044で統合）の権限（viewer/editor）を持つグループ員 |
+| `group` | 指定グループのメンバーのみ | `object_group_permissions`（`object_type ∈ {course, document}`。旧 `course_group_permissions` / `document_group_permissions` をマイグレーション044で統合）の権限（viewer/editor）を持つグループ員 |
 | `private` | 作成者のみ | オーナーのみ |
+
+教材（document）側の共有は**コースを作らずに解析成果を教員間で共有する**ための層でもある。
+権限はドキュメント単位に集約し、`theory_components` / `theory_claims` /
+`theory_component_graphs` / `document_analysis_runs` はそれを継承する（成果テーブルに
+権限列を足さない）。判定の入口は `services.resolve_document_access()` /
+`user_can_view_document()` / `user_can_edit_document()` /
+`user_owns_document()`（共有設定の変更は所有者のみ）。`object_id` に FK は張らない
+（ポリモーフィックのため）ので、document / course の削除経路が明示 DELETE で孤児行を防ぐ。
 
 ルール（例: `learning.py`）:
 - `visibility='group'` の場合は有効な `group_id`（ユーザーが所属するグループ）が必要。
@@ -63,7 +106,7 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 | `groups` | グループ（`invite_code` UNIQUE, `created_by`） |
 | `group_members` | メンバーシップ（`role`: admin/member, `UNIQUE(group_id, user_id)`） |
 | `group_invitations` | 招待（`status`: pending/accepted/declined/revoked） |
-| `object_group_permissions`（旧 `course_group_permissions`。マイグレーション044で `document_group_permissions` と統合） | コース×グループの権限（viewer/editor）。`object_type='course'` 行が対応。詳細は `docs/architecture/data-model.md`「グループ権限テーブルの統合（マイグレーション 044）」参照 |
+| `object_group_permissions`（旧 `course_group_permissions`。マイグレーション044で `document_group_permissions` と統合） | オブジェクト×グループの権限（viewer/editor）。`PRIMARY KEY(object_type, object_id, group_id)` で、`object_type='course'` 行がコース共有、`'document'` 行が教材（解析成果）共有に対応。詳細は `docs/architecture/data-model.md`「グループ権限テーブルの統合（マイグレーション 044）」参照 |
 
 参加経路は 2 つ:
 1. **管理者による直接招待** — `POST /groups/{id}/members` → 招待者が `POST /me/invitations/{id}/accept`
@@ -107,6 +150,7 @@ ID を直指定するエンドポイントは、対象オブジェクトへの�
 |---|---|
 | `GET /api/admin/courses/{cid}/unanswered-queries` | コース owner / editor（学生表示名・質問本文を返すため） |
 | `GET /api/admin/courses/{cid}/bridge-insights` | コース owner / editor（k-匿名集約でも権限外へは存在ごと隠す） |
+| `GET /api/admin/courses/{cid}/anchor-insights` | コース owner / editor（同上。集約処理より**先に** `_require_editable_course_or_404` を通し、不在も権限なしも同一の 404） |
 | `POST /api/admin/documents/{id}/reanalyze` | document owner / editor |
 | `PUT /api/admin/materials/{id}/pdf` | document owner / editor |
 | `GET /api/learning/courses/{cid}/source-chunk/{chunk_id}` | コースにアクセス可能、**かつ** chunk の document がそのコースの source |
@@ -118,6 +162,35 @@ ID を直指定するエンドポイントは、対象オブジェクトへの�
 本人の全域可視集合（`list_visible_document_ids`）は使いません — 使うと URL のコースに
 紐づかない別コース・public 文書のチャンクまで読めてしまいます。逆に積集合も取りません
 （コースへの正規アクセスが source 文書の開示根拠、という現行設計を保つため）。
+
+---
+
+## 4.6 RAG 検索とチャンク直読みの可視性（fail-closed）
+
+全域ベクトル検索とチャンクの直読みは、**必須キーワード引数 `allowed_document_ids`** で
+SQL 内 `ANY(:doc_ids)` として可視性を強制する。空集合なら SQL を発行せず空結果
+（`None` はテスト・本番未接続コード専用の抜け道であり、通常経路では渡さない）。
+
+| 関数 | 用途 | 可視集合の作り方 |
+|---|---|---|
+| `services.search_chunks_with_metadata(...)` | RAG 検索 | 全域: `services.list_visible_document_ids(user_id)` |
+| `services.get_chunk_passage(...)` | 出典ポップアップ | **URL のコースの sources のみ**（§4.5） |
+| `services.get_chunk_claim_refs(..., user_id=)` | 出典タブの claim 併記 | コース sources ∪ 本人可視 document |
+
+`list_visible_document_ids(user_id)` は 1 SQL で次の和集合を返す（チャンクごとに
+権限判定を呼ぶ N+1 は禁止）:
+
+1. document へ直接アクセスできるもの（所有 / public / 単一グループ共有 /
+   `object_group_permissions('document', …)`）
+2. **アクセス可能なコース**（所有 / 公開テンプレート / グループ / 受講中）の
+   `sources[]` が指す document
+
+2 を含めるのは、受講コースのソース論文（教員 private が多い）を RAG できないと既存の学習
+体験が壊れるため。コース sources → document の解決は
+`services.list_course_source_document_ids(course_data)` が正本。
+
+`search_chunks_with_metadata` は `material_id` を SELECT し続けること — 回答の出所判定
+（`content_grounding`）がこの値に依存している（[RAG チャットフロー](../backend/rag-chat.md)）。
 
 ---
 
