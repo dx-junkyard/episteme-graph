@@ -602,6 +602,31 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DISCOVERY_COMPARE_LLM_MODEL"),
     )
 
+    # --- コーパスを補う論文（正本: docs/features/corpus_complement_design.md §6） ---
+    # レンズA「地図の薄い領域」: 生きた配置の distinct document 数がこの値**以下**の
+    # concept ノードを「薄い」とみなす（0 = 未配置のみ）。件数は DTO に出さない（CC4）。
+    discovery_complement_thin_max_documents: int = Field(
+        default=1,
+        validation_alias=AliasChoices("DISCOVERY_COMPLEMENT_THIN_MAX_DOCUMENTS"),
+    )
+    # レンズC「基盤論文」: 候補として浮上させる最低の「引用している取り込み済み論文」数
+    # （カテゴリギャップ候補の MIN_DOCUMENTS_FOR_CANDIDATE と同じ思想 — 反復した信号だけ）。
+    discovery_foundation_min_citing_seeds: int = Field(
+        default=2,
+        validation_alias=AliasChoices("DISCOVERY_FOUNDATION_MIN_CITING_SEEDS"),
+    )
+    # レンズC: 1回の教員操作で新たに参照リストを取りに行くシード論文数の上限
+    # （3秒スロットル × この件数が体感待ち時間。残りは次の操作で続きを読む）。
+    discovery_foundation_fetch_per_call: int = Field(
+        default=5,
+        validation_alias=AliasChoices("DISCOVERY_FOUNDATION_FETCH_PER_CALL"),
+    )
+    # レンズC: 参照リストのキャッシュ（paper_discovery_reference_cache）を新鮮とみなす日数。
+    discovery_reference_cache_ttl_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices("DISCOVERY_REFERENCE_CACHE_TTL_DAYS"),
+    )
+
     # --- M層（LLM モデル選択, core/llm_policy.py） ---
     # モデルカタログ (JSON) のパス。空/不在/パース不能なら catalog_models() は空リスト
     # を返す（M4: 選択肢を捏造しない）。正本: docs/features/llm_model_selection_design.md §5

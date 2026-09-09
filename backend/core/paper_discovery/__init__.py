@@ -23,6 +23,13 @@ DDL は ``backend/db/071_paper_discovery.sql``、API 層は
   （Phase 3。宛先固定・3秒スロットル）
 - :mod:`~core.paper_discovery.citation_search` — 引用グラフによる候補供給（Phase 3。
   ``DISCOVERY_CITATION_SOURCE_ENABLED`` のオプトイン）
+- :mod:`~core.paper_discovery.complement` — コーパスを補う論文のレンズA（地図の薄い領域）/
+  レンズB（検証記録の無い前提）。純計算 + 台帳・配置の読み出しのみ（embedding は
+  ``ranking`` のバッチに相乗り）。正本 ``docs/features/corpus_complement_design.md``
+- :mod:`~core.paper_discovery.foundation` — 同レンズC（基盤論文 — 取り込み済み論文が共通に
+  引用する未取り込み論文）。``citation_client`` の参照リスト API + ``reference_cache``
+- :mod:`~core.paper_discovery.reference_cache` — 参照リストの外部事実キャッシュ
+  （migration 077。upsert のみ・DELETE なし）
 
 FastAPI を import しない。``core.llm`` に触れてよいのは :mod:`ranking`（embedding）と
 :mod:`compare`（比較分析の text LLM）の2ファイルだけで、どちらも関数内の遅延 import に
@@ -37,9 +44,12 @@ from core.paper_discovery import (
     arxiv_client,
     citation_client,
     citation_search,
+    complement,
     corpus,
+    foundation,
     ingest_queue,
     ranking,
+    reference_cache,
     schema,
     search,
     store,

@@ -50,6 +50,7 @@ __all__ = [
     "ANCHOR_NEARNESS_SCALE",
     "ANCHOR_NEARNESS_THRESHOLD_MID",
     "ANCHOR_NEARNESS_THRESHOLD_NEAR",
+    "COMPLEMENT_SKY_THRESHOLD",
     "AUDIO_STATUS_LABELS",
     "CONFIDENCE_LABELS_LOW_MED_HIGH",
     "CONFIDENCE_LABEL_HIGH",
@@ -235,6 +236,17 @@ RADAR_DISTANCE_SCALE = GradedScale(
         RADAR_DISTANCE_LABEL_FAR,
     ),
 )
+
+
+# ── コーパスを補う論文 — 検証記録の無い前提との近さ（CC4: 数値非表示）─────────
+# 台帳で ``untested`` かつスコープ空欄の前提文（assumption / claim 本文）と候補
+# アブストラクトの **cosine 類似度**の足切り（``core/paper_discovery/complement.py``、
+# 正本 ``docs/features/corpus_complement_design.md`` §5.2）。段階ラベルは作らず
+# 「近い内容を扱っている可能性がある」の**有無だけ**を判定する（表は持たない）。
+# 自然文×自然文の同一レジームなので :data:`DISCOVERY_RELEVANCE_THRESHOLD_HIGH`
+# （help_kb が「提示してよい」とした水準）と同じ 0.45 を初期値に採用する（発明値・
+# 実測見直し前提。変えるときは設計書 §5.2 も更新する）。未測定（``None``）は不一致扱い。
+COMPLEMENT_SKY_THRESHOLD = 0.45
 
 
 # ── 骨格アンカーへの近さ（分野マップのベクトル係留層 VA2）──────────────────────

@@ -322,6 +322,61 @@ def _attach_landing(payload: dict, vector: Optional[Sequence[float]], anchor_con
         payload["new_facets"] = list(facets)
 
 
+def _sky_texts(complement_context: Any) -> list[str]:
+    """レンズB の前提文を埋め込みバッチへ載せる形に整える（空文は落とさない）。
+
+    候補テキストと**同じバッチ**に連結するため、位置（index）は
+    ``complement_context["sky_statements"]`` と1対1で保つ（空文でもプレースホルダを
+    残し、後段で ``None`` 扱いにする）。
+    """
+    statements = list((complement_context or {}).get("sky_statements") or [])
+    return [
+        " ".join(str(item.get("statement") or "").split())[:MAX_CANDIDATE_TEXT_CHARS]
+        for item in statements
+    ]
+
+
+def _attach_complement(
+    payload: dict,
+    vector: Optional[Sequence[float]],
+    complement_context: Any,
+    anchor_context: Any,
+    sky_vectors: Sequence[Optional[list[float]]],
+) -> None:
+    """候補に「このコーパスに何を足しそうか」の事実を足す（コーパス補完層 §5.2）。
+
+    **追加の embedding 呼び出しはゼロ**（並べ替えで既に作った候補ベクトルと、同じ
+    バッチに相乗りさせた前提文ベクトルを流用する）。判定は
+    ``core.paper_discovery.complement`` の純関数に委ね、ここは結線だけを行う。
+
+    付くのは ``complement`` キー1つで、``fills``（レンズA: 地図の薄い領域）と
+    ``skies``（レンズB: 検証記録の無い前提）のうち**非空の側だけ**を持つ。両方空なら
+    キー自体を付けない（VA4 の流儀 — 該当なしを空配列で見せない）。
+    """
+    if not complement_context or not vector:
+        return
+    from core.paper_discovery import complement  # 遅延 import（循環回避）
+
+    anchors = list((anchor_context or {}).get("anchors") or [])
+    thin_ids = set((complement_context or {}).get("thin_node_ids") or ())
+    statements = list((complement_context or {}).get("sky_statements") or [])
+
+    try:
+        fills = complement.fills_for_vector(vector, anchors, thin_ids)
+        skies = complement.skies_for_vector(vector, sky_vectors, statements)
+    except Exception:  # noqa: BLE001 — 補完の注釈が出ないだけ（検索は成立させる）
+        logger.warning("complement annotation failed (non-fatal)", exc_info=True)
+        return
+
+    block: dict[str, Any] = {}
+    if fills:
+        block["fills"] = fills
+    if skies:
+        block["skies"] = skies
+    if block:
+        payload["complement"] = block
+
+
 def rank_candidates(
     session,
     domain_key: str,
@@ -329,6 +384,7 @@ def rank_candidates(
     *,
     daily_limit: Optional[int] = None,
     anchor_context: Optional[dict] = None,
+    complement_context: Optional[dict] = None,
 ) -> dict:
     """候補を分野の重心との関連度で並べ替える（PD4 — 生スコアは返さない）。
 
@@ -339,17 +395,36 @@ def rank_candidates(
             アンカーとの照合は DB・LLM に触れない純計算
             （``core.atlas_vectors.query.landing_for_vector``）で、**候補の埋め込みは
             並べ替えの1バッチを流用する**（発見層の embedding 予算は増えない）。
+        complement_context: コーパス補完（``corpus_complement_design.md`` §5.2）の材料
+            ``core.paper_discovery.complement.build_complement_context()`` の返り値。
+            渡すと前提文（レンズB）が候補テキストと**同じ1バッチ**に載り（コールは
+            1回のまま・日次ゲートも1消費のまま）、候補に ``complement`` キーが付く。
+            レンズA はここの ``thin_node_ids`` と ``anchor_context`` のアンカーで判定
+            するため、``anchor_context`` が無ければ ``fills`` は付かない。
+            省略時は従来と**完全に同じ**挙動（``complement_facts`` キーも付けない）。
 
     Returns:
         ``{"available": bool, "ordered": [candidate, ...], "note"?: str}``。
         ``available=True`` のとき ``ordered`` の各要素は入力候補の複製に
         ``relevance_label``（段階ラベル）を足したもの。``available=False`` のときは
         入力の順序（新着順）そのままで、ラベルは付けない（測れていないものを
-        測れたように見せない）。
+        測れたように見せない）。``complement_context`` を渡したときだけ
+        ``"complement_facts": {"coverage": {...}, "skies": {...}}`` が加わり、
+        並べ替えが成立しなかったときは両レンズが事実文で縮退する（CC8）。
     """
     items = list(candidates or [])
+
+    def _degraded(note: str) -> dict:
+        """並べ替え不成立の返り値（補完のレンズも同じ事実文で縮退させる）。"""
+        out = _unavailable(note, items)
+        if complement_context is not None:
+            from core.paper_discovery import complement  # 遅延 import（循環回避）
+
+            out["complement_facts"] = complement.degraded_facts()
+        return out
+
     if not items:
-        return _unavailable(NOTE_NO_CANDIDATES, items)
+        return _degraded(NOTE_NO_CANDIDATES)
 
     if daily_limit is None:
         from core.config import get_settings  # 遅延 import（core の純粋性を保つ）
@@ -361,33 +436,40 @@ def rank_candidates(
         centroid = field_centroid(session, domain_key)
     except Exception:  # noqa: BLE001 — 重心が作れなくても検索は成立させる
         logger.warning("field centroid failed for domain %s", domain_key, exc_info=True)
-        return _unavailable(NOTE_UNAVAILABLE, items)
+        return _degraded(NOTE_UNAVAILABLE)
     if centroid is None:
-        return _unavailable(NOTE_NO_CORPUS, items)
+        return _degraded(NOTE_NO_CORPUS)
 
     texts = [candidate_text(item) for item in items]
     if not any(texts):
-        return _unavailable(NOTE_UNAVAILABLE, items)
+        return _degraded(NOTE_UNAVAILABLE)
+
+    # レンズB の前提文は候補と**同じバッチ**に載せる（コールは1回のまま — CC2）。
+    sky_texts = _sky_texts(complement_context)
+    batch = texts + sky_texts
 
     if not _gate.check_and_count(
         daily_limit=int(daily_limit),
         daily_key=(_DAILY_KEY_PREFIX, today_str()),
         prune_stale_daily=True,
     ):
-        return _unavailable(NOTE_LIMIT_REACHED, items)
+        return _degraded(NOTE_LIMIT_REACHED)
 
     try:
-        vectors = _embed(texts)
+        vectors = _embed(batch)
     except Exception:  # noqa: BLE001 — embedding の失敗で検索を落とさない
         logger.warning("candidate embedding failed for domain %s", domain_key, exc_info=True)
-        return _unavailable(NOTE_UNAVAILABLE, items)
+        return _degraded(NOTE_UNAVAILABLE)
 
-    if len(vectors) != len(items):
+    if len(vectors) != len(batch):
         logger.warning(
             "embedding count mismatch for domain %s (%s vs %s)",
-            domain_key, len(vectors), len(items),
+            domain_key, len(vectors), len(batch),
         )
-        return _unavailable(NOTE_UNAVAILABLE, items)
+        return _degraded(NOTE_UNAVAILABLE)
+
+    sky_vectors = [_parse_vector(v) for v in vectors[len(items):]]
+    vectors = list(vectors[: len(items)])
 
     scored: list[tuple[int, Optional[float], dict]] = []
     for index, (item, vector) in enumerate(zip(items, vectors)):
@@ -398,11 +480,16 @@ def rank_candidates(
         payload["relevance_label"] = DISCOVERY_RELEVANCE_SCALE.label_for(similarity)
         # 着地予測（VA層 §8）。同じベクトルの使い回しなので追加コールは無い。
         _attach_landing(payload, parsed, anchor_context)
+        # コーパス補完（レンズA / B）。ここも同じバッチのベクトルを使い回す。
+        _attach_complement(payload, parsed, complement_context, anchor_context, sky_vectors)
         scored.append((index, similarity, payload))
 
     # 未測定（None）は最後尾へ。同点は入力順（= 新着順）を保つ安定ソート。
     scored.sort(key=lambda row: (-(row[1] if row[1] is not None else -math.inf), row[0]))
-    return {"available": True, "ordered": [row[2] for row in scored]}
+    result: dict[str, Any] = {"available": True, "ordered": [row[2] for row in scored]}
+    if complement_context is not None:
+        result["complement_facts"] = dict(complement_context.get("facts") or {})
+    return result
 
 
 # ---------------------------------------------------------------------------
