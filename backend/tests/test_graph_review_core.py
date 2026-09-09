@@ -160,8 +160,11 @@ class TestBuildLlmMessages:
         )
         assert "GROUNDING" in messages[0]["content"]
         assert "GROUNDING" not in messages[2]["content"]
-        # 契約フレーズ（仮説文体・承認判断の非代行）がヘッダに含まれる
+        # 契約フレーズ（留保はラベルで・承認判断の非代行）がヘッダに含まれる
         assert "承認・却下の判断は教員が行います" in messages[0]["content"]
+        assert "簡潔な断定調で書いてください" in messages[0]["content"]
+        # text 経路には読み上げ契約を混ぜない（既定の入力は改訂前と同一）。
+        assert "spoken" not in messages[0]["content"]
 
     def test_no_prior_messages_injects_into_current(self):
         messages = gd.build_llm_messages([], "こんにちは", "G")
@@ -195,3 +198,90 @@ class TestRunGraphTurn:
         assert result.degraded is False
         # GraphTurnResult は注釈フィールド自体を持たない（グラフ全体対話は注釈なし）
         assert not hasattr(result, "annotations")
+
+
+# ---------------------------------------------------------------------------
+# 応答文体の改訂（§15）: 読み上げモード・text 経路の非変更・制御シーケンス除去
+# ---------------------------------------------------------------------------
+
+
+class TestSpokenMode:
+    def _patch_llm(self, monkeypatch, output):
+        seen = {}
+
+        def _fake(messages, model_cls, **kwargs):
+            seen["messages"] = messages
+            seen["model_cls"] = model_cls
+            return output
+
+        monkeypatch.setattr(gd, "generate_conversation_turn", _fake)
+        monkeypatch.setattr(gd.dialogue, "resolve_turn_model", lambda feature: "fast-model")
+        return seen
+
+    def test_text_mode_llm_input_is_byte_identical_to_the_default(self, monkeypatch):
+        """回帰: response_mode="text" の入力は引数なしのときと一字も変わらない。"""
+        assert gd.build_llm_messages([], "q", "G") == gd.build_llm_messages(
+            [], "q", "G", response_mode="text"
+        )
+        seen = self._patch_llm(monkeypatch, type("_O", (), {"reply": "r"})())
+        gd.run_graph_turn("doc-1", prior_messages=[], user_content="q", grounding_text="G")
+        assert seen["messages"] == gd.build_llm_messages([], "q", "G")
+        assert seen["model_cls"] is gd._GraphTurnOutput  # スキーマも従来のまま
+
+    def test_spoken_contract_is_appended_only_in_spoken_mode(self):
+        spoken = gd.build_llm_messages([], "q", "G", response_mode="spoken")[0]["content"]
+        assert "音声で読み上げるための spoken を別に返してください。" in spoken
+        assert "箇条書き・見出し・記号・LaTeX を使わず" in spoken
+
+    def test_spoken_is_returned_and_stripped(self, monkeypatch):
+        out = type("_O", (), {
+            "reply": r"密度は $\delta$ です。",
+            "spoken": "- 結論です\n式 $\delta$ は密度ゆらぎ デルタ です。",
+        })()
+        seen = self._patch_llm(monkeypatch, out)
+        result = gd.run_graph_turn(
+            "doc-1", prior_messages=[], user_content="q", grounding_text="G",
+            response_mode="spoken",
+        )
+        assert seen["model_cls"] is gd._GraphTurnOutputSpoken
+        assert result.spoken
+        assert "$" not in result.spoken
+        assert "\\(" not in result.spoken
+        assert "- " not in result.spoken  # 箇条書き記号を読み上げない
+
+    def test_text_mode_returns_no_spoken(self, monkeypatch):
+        self._patch_llm(monkeypatch, type("_O", (), {"reply": "r"})())
+        result = gd.run_graph_turn(
+            "doc-1", prior_messages=[], user_content="q", grounding_text="G",
+        )
+        assert result.spoken is None
+
+    def test_missing_spoken_falls_back_to_reply(self, monkeypatch):
+        self._patch_llm(monkeypatch, type("_O", (), {"reply": "本文です。", "spoken": ""})())
+        result = gd.run_graph_turn(
+            "doc-1", prior_messages=[], user_content="q", grounding_text="G",
+            response_mode="spoken",
+        )
+        assert result.spoken == "本文です。"
+
+    def test_degraded_spoken_mode_still_has_spoken(self, monkeypatch):
+        def _boom(*a, **k):
+            raise RuntimeError("llm down")
+
+        monkeypatch.setattr(gd, "generate_conversation_turn", _boom)
+        monkeypatch.setattr(gd.dialogue, "resolve_turn_model", lambda feature: "fast-model")
+        result = gd.run_graph_turn(
+            "doc-1", prior_messages=[], user_content="q", grounding_text="G",
+            response_mode="spoken",
+        )
+        assert result.degraded is True
+        assert result.spoken
+
+    def test_control_sequence_residue_is_scrubbed_from_reply(self, monkeypatch):
+        self._patch_llm(
+            monkeypatch, type("_O", (), {"reply": "\x1b[0m結論[0mです"})(),
+        )
+        result = gd.run_graph_turn(
+            "doc-1", prior_messages=[], user_content="q", grounding_text="G",
+        )
+        assert result.reply == "結論です"

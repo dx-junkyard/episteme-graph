@@ -34,6 +34,7 @@ figure 要素は vision（画像 + caption + 近傍本文）。画像バイト�
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -47,10 +48,13 @@ from core.library.schema import ENTRY_TYPE_APPARATUS, ENTRY_TYPE_THEORY_COMPONEN
 from core.library.search import search_frozen_entries
 from core.llm import generate_conversation_turn
 from core.llm_usage import usage_context
+from core.label_vocab import AI_READING_LABEL
 from core.llm_worker.client import resolve_model as _resolve_model_key
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
 from core.storage import get_storage_client
+from core.text_hygiene import strip_control_sequences
+from core.tts import strip_text_for_speech
 from core.deliberation import context_lens, decomposition, positioning
 from core.deliberation.schema import (
     CONTEXT_ROLE_STATUS_UNIDENTIFIED,
@@ -85,11 +89,29 @@ _GROUNDING_SKIP_FIELD_KEYS = ("frozen_content", "graph_node", "apparatus_candida
 # （実在する library_entries の id）が grounding に供給されている場合のみ、その一覧の id に
 # 限定して identity を許可する（KN-3: LLM に同一視を促しすぎない・供給は事実の一覧のみ）。
 # 供給0件時は grounding 側の一文（_IDENTITY_GUARD_NO_CANDIDATES）で identity を明示禁止する。
+
+# 数式の表記（2026-09-10）: 画面・読み上げの両方が `$…$` 前提のレンダラ/除去規則を
+# 持つため、`\(…\)` を使わせない（オーナー報告の生 LaTeX 漏れの再発防止）。
+_MATH_DELIMITER_INSTRUCTION = r"数式は必ず `$…$` で区切ってください（`\(…\)` は使わない）。"
+
+# 読み上げ用の別テキスト（response_mode="spoken" のときだけヘッダに足す。text 経路の
+# 入力は一字も変えない = 回帰テストで固定）。1ターン=1 LLM コールは不変（W6/GR5）。
+_SPOKEN_CONTRACT = (
+    "音声で読み上げるための spoken を別に返してください。"
+    "結論を先に、3〜5文、箇条書き・見出し・記号・LaTeX を使わず、"
+    "数式は言葉で読み下してください（例: 密度ゆらぎ デルタ、波数 k のフーリエ変換）。"
+)
+
 _INSTRUCTION_HEADER = (
     "あなたは大学院生の学習支援システムの教員向け機能「要素検討ワークスペース」の対話補助です。"
     "以下は教員が深く検討している1つの要素の内訳と位置づけです。これを踏まえて教員の質問・"
-    "コメントに答えてください。断定は避け「〜の可能性がある」「〜と考えられる」のような"
-    "仮説的な言い回しにしてください。もし対話の中で注釈として記録する価値がある解釈・"
+    "コメントに答えてください。"
+    # 応答文体の改訂（2026-09-10・オーナー裁定。graph_dialogue_review_design.md §15）:
+    # 文ごとの留保をやめ、不確かさは返答全体に1つ付くラベル（AI_READING_LABEL）で示す。
+    "文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。"
+    "不確かさは返答全体に付く「" + AI_READING_LABEL + "」のラベルで示されます。"
+    + _MATH_DELIMITER_INSTRUCTION +
+    "もし対話の中で注釈として記録する価値がある解釈・"
     "意味づけ・内訳の補足などがあれば、annotations に候補として追加してください"
     "（0件でも構いません）。annotations の各項目には必ず"
     "kind（'meaning'|'decomposition'|'positioning_note'|'interpretation'|'identity'|"
@@ -587,11 +609,23 @@ class _DialogueTurnOutput(BaseModel):
     annotations: list[_AnnotationCandidateOut] = Field(default_factory=list)
 
 
+class _DialogueTurnOutputSpoken(_DialogueTurnOutput):
+    """読み上げモードの structured output（``spoken`` を同一コールで受け取る）。
+
+    text 経路のスキーマ（``_DialogueTurnOutput``）は**一切変えない** — 既存の
+    プロンプト・スキーマをバイト単位で維持するため、別クラスに分ける。
+    """
+
+    spoken: str = ""
+
+
 @dataclass
 class DialogueTurnResult:
     reply: str
     annotations: list[dict[str, Any]] = field(default_factory=list)
     degraded: bool = False
+    #: 読み上げ用テキスト（``response_mode="spoken"`` のときのみ。text 経路は None）。
+    spoken: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -603,11 +637,17 @@ def build_llm_messages(
     prior_messages: list[dict[str, str]],
     user_content: str,
     grounding_text: str,
+    response_mode: str = "text",
 ) -> list[dict[str, str]]:
     """会話履歴 + 新規ユーザー発話から LLM 送信用メッセージ列を組み立てる。
 
     grounding_text は**最初の user メッセージにのみ**注入する（設計書 §5）。
+    ``response_mode="spoken"`` のときだけ読み上げ契約（:data:`_SPOKEN_CONTRACT`）を
+    ヘッダ末尾に足す（text 経路の入力は従来と一字も変わらない）。
     """
+    header = _INSTRUCTION_HEADER
+    if response_mode == "spoken":
+        header = _INSTRUCTION_HEADER + _SPOKEN_CONTRACT
     turns = list(prior_messages) + [{"role": "user", "content": user_content}]
     messages: list[dict[str, str]] = []
     first_user_injected = False
@@ -617,9 +657,31 @@ def build_llm_messages(
         if not first_user_injected and role == "user":
             first_user_injected = True
             if grounding_text:
-                content = _INSTRUCTION_HEADER + "\n\n" + grounding_text + "\n\n---\n\n" + content
+                content = header + "\n\n" + grounding_text + "\n\n---\n\n" + content
         messages.append({"role": role, "content": content})
     return messages
+
+
+#: 行頭の箇条書きマーカー（読み上げでは読まない。`-` は markdown 除去の対象外なので個別に落とす）。
+_LIST_MARKER_RE = re.compile(r"^[ \t]*(?:[-*+・‣]|\d+[.)])[ \t]+", re.MULTILINE)
+
+
+def _for_speech(text: str) -> str:
+    """読み上げ用の整形（制御シーケンス除去 → 箇条書きマーカー除去 → 既存の TTS 前処理）。"""
+    cleaned = _LIST_MARKER_RE.sub("", strip_control_sequences(str(text or "")))
+    return strip_text_for_speech(cleaned).strip()
+
+
+def resolve_spoken_text(spoken: Any, reply: str) -> str:
+    """LLM の ``spoken`` をサーバ側で検証・整形する（欠落時は reply から生成）。
+
+    LaTeX・markdown・制御シーケンスの除去は ``core.tts.strip_text_for_speech``
+    （読み上げ経路の既存正本）に委譲する — 読み上げ前処理を二重実装しない。
+    """
+    candidate = _for_speech(spoken)
+    if candidate:
+        return candidate
+    return _for_speech(reply)
 
 
 # ---------------------------------------------------------------------------
@@ -636,14 +698,22 @@ def run_turn(
     images: list[bytes] | None = None,
     model: str | None = None,
     user_id: str | None = None,
+    response_mode: str = "text",
 ) -> DialogueTurnResult:
     """1ターンを実行する（W6: 1応答=1 LLM コール）。
 
     LLM 呼び出しが失敗した場合（API エラー・構造化出力パース失敗等）は
     ``run_with_repair`` を使わず、注釈なし・応答本文のみの縮退（``degraded=True``）で
     返す（同期パスを重くしない）。
+
+    ``response_mode="spoken"`` でも **LLM コールは1回のまま**（同じ structured output
+    で ``spoken`` を同時に受け取る）。LLM が ``spoken`` を返さなかった場合は
+    ``reply`` から決定論的に生成する（:func:`resolve_spoken_text`）。
     """
-    llm_messages = build_llm_messages(prior_messages, user_content, grounding_text)
+    spoken_mode = response_mode == "spoken"
+    llm_messages = build_llm_messages(
+        prior_messages, user_content, grounding_text, response_mode=response_mode,
+    )
     feature = _FEATURE_VISION if images else _FEATURE_CHAT
     document_id = ref.document_id if ref.scope == SCOPE_DOCUMENT else None
 
@@ -656,20 +726,29 @@ def run_turn(
         # 解決を usage_context の**内側**で行うのは、user 別ポリシー（解決順③）が
         # ``current_usage_context().user_id`` を見るため（外側では常に None だった）。
         resolved_model = model or resolve_turn_model(feature)
+        output_model = _DialogueTurnOutputSpoken if spoken_mode else _DialogueTurnOutput
         try:
             parsed = generate_conversation_turn(
-                llm_messages, _DialogueTurnOutput, images=images, model=resolved_model,
+                llm_messages, output_model, images=images, model=resolved_model,
             )
         except Exception:  # noqa: BLE001
             logger.warning(
                 "deliberation dialogue: LLM turn failed for %s:%s", ref.element_type, ref.element_id,
                 exc_info=True,
             )
-            return DialogueTurnResult(reply=_DEGRADED_REPLY, annotations=[], degraded=True)
+            return DialogueTurnResult(
+                reply=_DEGRADED_REPLY,
+                annotations=[],
+                degraded=True,
+                spoken=resolve_spoken_text("", _DEGRADED_REPLY) if spoken_mode else None,
+            )
 
     raw_annotations = [a.model_dump() for a in (parsed.annotations or [])]
-    reply = (parsed.reply or "").strip() or _DEGRADED_REPLY
-    return DialogueTurnResult(reply=reply, annotations=raw_annotations, degraded=False)
+    reply = strip_control_sequences((parsed.reply or "")).strip() or _DEGRADED_REPLY
+    spoken = resolve_spoken_text(getattr(parsed, "spoken", ""), reply) if spoken_mode else None
+    return DialogueTurnResult(
+        reply=reply, annotations=raw_annotations, degraded=False, spoken=spoken,
+    )
 
 
 __all__ = [
@@ -681,6 +760,7 @@ __all__ = [
     "identity_entry_type_for_element",
     "grounding_to_text",
     "build_llm_messages",
+    "resolve_spoken_text",
     "run_turn",
     "figure_image_bytes",
     "resolve_model",

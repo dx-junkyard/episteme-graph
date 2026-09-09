@@ -7496,6 +7496,22 @@ body.admin-inspect-mode textarea:disabled {
   border-radius: 12px 12px 12px 4px;
 }
 
+/* AI 応答の立場ラベル。操作要素ではないので押せる見た目にしない（控えめな小チップ）。 */
+.deliberation-chat-stance {
+  display: inline-block;
+  border: 1px solid var(--color-border, #d2d2d7);
+  border-radius: 999px;
+  padding: 0 7px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary, #8b949e);
+  white-space: nowrap;
+}
+/* 応答本文に混ざるインライン数式（graphView.inlineMathHtml）を地の文に揃える。 */
+.deliberation-chat-msg .katex { font-size: 1.05em; }
+.deliberation-chat-msg .lecture-formula { margin: 0; vertical-align: baseline; }
+
 .deliberation-chat-note {
   align-self: flex-start;
   font-size: 12px;
@@ -11640,6 +11656,21 @@ button.element-card-item:focus-visible .element-card-item-label {
 }
 .graph-review-chat-msg.is-user { background: var(--color-background-info, #eef2ff); margin-left: 18%; }
 .graph-review-chat-msg.is-assistant { background: var(--color-background-secondary, #f8fafc); margin-right: 12%; }
+/* AI 応答の立場ラベル。操作要素ではないので押せる見た目にしない（控えめな小チップ）。 */
+.graph-review-chat-stance {
+  display: inline-block;
+  border: 1px solid var(--color-border, #cbd5e1);
+  border-radius: 999px;
+  padding: 0 7px;
+  margin-bottom: 4px;
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--color-text-tertiary, #6b7280);
+  white-space: nowrap;
+}
+/* 応答本文に混ざるインライン数式（graphView.inlineMathHtml）を地の文に揃える。 */
+.graph-review-chat-msg .katex { font-size: 1.05em; }
+.graph-review-chat-msg .lecture-formula { margin: 0; vertical-align: baseline; }
 .graph-review-chat-annotations { max-height: 180px; overflow-y: auto; }
 .graph-review-chat-newchat:not(:empty) { margin: 4px 0 6px; }
 .graph-review-annotation {

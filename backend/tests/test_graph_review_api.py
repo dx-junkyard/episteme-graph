@@ -612,6 +612,63 @@ class TestPostGraphMessage:
         roles = [m["role"] for m in appended[0][1]]
         assert roles == ["user", "assistant"]
 
+    def test_stance_label_is_returned_and_never_persisted(self, monkeypatch):
+        """§15: 留保は返答全体のラベルで示し、保存するのは reply だけ。"""
+        from core.label_vocab import AI_READING_LABEL
+
+        self._setup(monkeypatch)
+        monkeypatch.setattr(delib_routes.dialogue, "check_and_count_llm_call", lambda sid, uid: True)
+        monkeypatch.setattr(
+            gd, "run_graph_turn",
+            lambda doc, **kw: gd.GraphTurnResult(reply="結論です", degraded=False),
+        )
+        appended = []
+        monkeypatch.setattr(
+            delib_routes.delib_store, "append_messages",
+            lambda sid, msgs: appended.append((sid, msgs)),
+        )
+        result = delib_routes.post_graph_dialogue_message(
+            _DOC, _SESSION, delib_routes.GraphMessageCreateRequest(content="どこが弱い？"),
+            current_user=_TEACHER,
+        )
+        assert result["stance_label"] == AI_READING_LABEL
+        assert result["spoken"] is None  # 既定は text モード
+        persisted = appended[0][1]
+        assert [m["content"] for m in persisted] == ["どこが弱い？", "結論です"]
+        for message in persisted:
+            assert "spoken" not in message and "stance_label" not in message
+
+    def test_spoken_mode_is_passed_through_and_returned(self, monkeypatch):
+        self._setup(monkeypatch)
+        monkeypatch.setattr(delib_routes.dialogue, "check_and_count_llm_call", lambda sid, uid: True)
+        seen = {}
+
+        def _fake(doc, **kw):
+            seen.update(kw)
+            return gd.GraphTurnResult(reply="結論です", degraded=False, spoken="結論から言うと")
+
+        monkeypatch.setattr(gd, "run_graph_turn", _fake)
+        appended = []
+        monkeypatch.setattr(
+            delib_routes.delib_store, "append_messages",
+            lambda sid, msgs: appended.append((sid, msgs)),
+        )
+        result = delib_routes.post_graph_dialogue_message(
+            _DOC, _SESSION,
+            delib_routes.GraphMessageCreateRequest(content="どこが弱い？", response_mode="spoken"),
+            current_user=_TEACHER,
+        )
+        assert seen["response_mode"] == "spoken"
+        assert result["spoken"] == "結論から言うと"
+        # 読み上げ用テキストは保存しない。
+        assert [m["content"] for m in appended[0][1]] == ["どこが弱い？", "結論です"]
+
+    def test_invalid_response_mode_is_rejected(self):
+        import pydantic
+
+        with pytest.raises(pydantic.ValidationError):
+            delib_routes.GraphMessageCreateRequest(content="q", response_mode="song")
+
 
 # ---------------------------------------------------------------------------
 # 「深く検討」の要素解決（2026-09 是正、設計書 §11）

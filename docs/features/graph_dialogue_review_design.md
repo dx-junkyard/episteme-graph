@@ -575,3 +575,111 @@ artifact は `$` 付きの本文で作り直される**。逆に、合成が例�
 割らない）。
 
 **非変更**: DB スキーマ・migration・LLM 呼び出し・A層の他 agent・承認 API。
+
+## 15. 応答文体の改訂 — 留保はラベルで（2026-09-10）
+
+グラフレビューのチャット（テキスト・音声とも）で、オーナーから3点の不具合報告が
+あった。①応答に生 LaTeX（`\(\delta(t,\bm{x})\)`）と `[0m`（ANSI カラーリセットの
+残骸）がそのまま出る ②音声モードが書き言葉の応答をそのまま読み上げる（箇条書き・
+記号・聞き手を想定しない言い回し）③**すべての文が「〜の可能性があります」で終わる**
+（プロンプト契約が文ごとの留保を要求していたため）。
+
+**オーナー裁定（確定・拘束的）**: 留保は**返答全体に1つ付く固定ラベル**にする。
+文ごとの仮説文体はやめ、応答は簡潔な断定調で書く。**GR1（承認・却下の推奨をしない）・
+捏造ガード（grounding に無い関係・根拠を作らない）・数値の確信度を出さない**の3点は
+一切変えない — 変えるのは**文体**であって、AI が確定に関与しない構造ではない。
+
+> 実装番号の注記: 本節は当初「§13」として起票されたが、§13（要素解決の是正）・
+> §14（根拠 claim の artifact フォールバック）が先に埋まっていたため §15 とした。
+
+### 15.1 プロンプト契約の変更（両対話モジュール）
+
+`core/deliberation/graph_dialogue.py::_INSTRUCTION_HEADER` と
+`core/deliberation/dialogue.py::_INSTRUCTION_HEADER` の**文ごとの留保の指示を撤去**し、
+以下の**新しい固定文**へ置き換えた（両ヘッダに同文を置く。ガードレールが原文 grep する）。
+
+```
+文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。
+不確かさは返答全体に付く「AIの読み（未確認）」のラベルで示されます。
+```
+
+併せて数式の表記契約を両ヘッダに足した（生 LaTeX 漏れの再発防止）。
+
+```
+数式は必ず `$…$` で区切ってください（`\(…\)` は使わない）。
+```
+
+撤去した旧文言は、graph_dialogue が
+「内容の正しさについては断定せず、「〜の可能性があります」のような仮説の文体で述べてください。」、
+dialogue が「断定は避け「〜の可能性がある」「〜と考えられる」のような仮説的な言い回しに
+してください。」。**逐語で維持した契約フレーズ**は
+「承認・却下の判断は教員が行います」/
+「グラフに現れていない関係・根拠を作らないでください（無い場合は「グラフには現れていません」と述べる）」/
+「数値の確信度・スコアを述べないでください」の3つ。
+
+**ラベル定数の正本は1箇所**: `core/label_vocab.py::AI_READING_LABEL = "AIの読み（未確認）"`。
+段階スケールではなく単一の固定文字列なので表は作らない。両対話モジュールと route 層は
+これを import し、リテラルを重複させない（ガードレールが重複を検出する）。
+
+### 15.2 読み上げモード（`response_mode` / `spoken`）
+
+**LLM コールは1ターン1回のまま**（GR5 のコスト相乗り・W6 を崩さない）。
+
+- `dialogue.run_turn` / `graph_dialogue.run_graph_turn`（および両者の
+  `build_llm_messages`）に `response_mode: str = "text"` を追加した。
+  `"spoken"` のときだけヘッダ末尾に読み上げ契約を足す。
+
+  ```
+  音声で読み上げるための spoken を別に返してください。結論を先に、3〜5文、
+  箇条書き・見出し・記号・LaTeX を使わず、数式は言葉で読み下してください
+  （例: 密度ゆらぎ デルタ、波数 k のフーリエ変換）。
+  ```
+
+- `spoken` は**同じ structured output コール**で受け取る。text 経路のスキーマを
+  一切変えないため、出力モデルは継承で分けた（`_DialogueTurnOutput` /
+  `_DialogueTurnOutputSpoken`、`_GraphTurnOutput` / `_GraphTurnOutputSpoken`）。
+  **`response_mode="text"` のときの LLM 入力（メッセージ列・スキーマ）は改訂前と
+  バイト同一**（回帰テストで固定）。
+- **サーバ側検証**: `dialogue.resolve_spoken_text(spoken, reply)` が
+  `core.text_hygiene.strip_control_sequences` → `core.tts.strip_text_for_speech`
+  （読み上げ整形の既存正本。二重実装しない）を通す。LLM が `spoken` を省いた場合は
+  `reply` から決定論的に生成する（読み上げが無音にならない）。
+- 結果 DTO は `DialogueTurnResult.spoken` / `GraphTurnResult.spoken`（text 経路は
+  `None`）。degraded 応答でも spoken モードなら固定文の読み上げ用テキストを返す。
+
+### 15.3 テキスト衛生層（`core/text_hygiene.py`）
+
+新設の純粋モジュール（FastAPI / DB / LLM を import しない）。
+`strip_control_sequences(text)` が ANSI エスケープ（`\x1b[...m`）・ESC が落ちた裸の
+SGR 残骸（`[0m` / `[1;32m`）・`\n` `\t` 以外の C0 制御文字を除去する。適用箇所は3つ:
+
+1. 両 `run_turn` 経路の LLM 応答（`reply` / `spoken`）— 画面へ出す前。
+2. `core/assistant_context/registry.py::render_block` の各事実文 — grounding が
+   制御残骸を運ぶと LLM の応答へ転写されるため、入口で落とす（SA層は非改変・
+   解決器の契約は不変）。
+3. `core/graph_paper_layer/schema.py::truncate_snippet` — artifact 由来のスニペット。
+
+`core/tts.py::strip_text_for_speech` も同じ除去に加えて `\(…\)` / `\[…\]` 形式の
+LaTeX を落とすようにした（シグネチャ・既存の除去規則は不変）。
+
+### 15.4 API
+
+`MessageCreateRequest` / `GraphMessageCreateRequest` に
+`response_mode: Literal["text","spoken"] = "text"`（未指定は完全な従来動作）。両
+メッセージ応答に `spoken`（str|None）と `stance_label`（常に `AI_READING_LABEL`）を
+追加した。**永続化するのは従来どおり `reply` のみ** — `spoken` もラベルも
+`deliberation_sessions.messages` に書かない（SA6 と同型: 表示のための派生物は保存しない。
+ラベルはサーバ定数なので過去メッセージにも同じものが付く）。音声 `speak` ルートの
+`strip_text_for_speech` 適用は不変。
+
+### 15.5 テスト
+
+`test_graph_review_guardrails.py`（新契約文の原文存在・**旧の文ごと留保指示の不在**・
+ラベル定数の単一正本＝リテラル重複の禁止）/ `test_graph_review_core.py`（spoken 経路の
+出力・text 経路のメッセージ列がバイト同一）/ `test_graph_review_api.py`・
+`test_deliberation_api.py`（`stance_label` / `spoken` の返却・保存は reply のみ）/
+`test_deliberation_dialogue.py`（`resolve_spoken_text` の縮退）/ `test_text_hygiene.py`
+（新設）/ `test_tts_strip_text_for_speech.py`（新設）。
+
+**非変更**: migration・DB スキーマ・CostGate・U層 feature・M層 scene・承認 API・
+grounding の構築規則・A層。

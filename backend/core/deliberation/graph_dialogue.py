@@ -30,9 +30,11 @@ from typing import Any
 from pydantic import BaseModel
 from sqlalchemy import text as sa_text
 
+from core.label_vocab import AI_READING_LABEL
 from core.llm import generate_conversation_turn
 from core.llm_usage import usage_context
 from core.postgres import get_session
+from core.text_hygiene import strip_control_sequences
 from core.deliberation import dialogue
 
 logger = logging.getLogger(__name__)
@@ -52,14 +54,29 @@ _MAX_EDGE_LINES = 60
 _MAX_UNREVIEWED_LINES = 30
 _MAX_VALIDATION_LINES = 10
 
+# 数式の表記（2026-09-10・§15）: 画面と読み上げの両方が `$…$` 前提のため
+# `\(…\)` を使わせない（生 LaTeX が画面・音声に漏れる事故の再発防止）。
+_MATH_DELIMITER_INSTRUCTION = r"数式は必ず `$…$` で区切ってください（`\(…\)` は使わない）。"
+
+# 読み上げ用の別テキスト（response_mode="spoken" のときだけヘッダ末尾に足す。
+# text 経路の LLM 入力・スキーマは一字も変えない）。1ターン=1 LLM コール（GR5/W6）。
+_SPOKEN_CONTRACT = (
+    "音声で読み上げるための spoken を別に返してください。"
+    "結論を先に、3〜5文、箇条書き・見出し・記号・LaTeX を使わず、"
+    "数式は言葉で読み下してください（例: 密度ゆらぎ デルタ、波数 k のフーリエ変換）。"
+)
+
 # 対話の契約（ガードレールが原文 grep する固定文言を含む）:
-# - 仮説文体・グラフに現れる関係のみ・承認判断の非代行（GR1）・数値 confidence 禁止。
+# - 留保はラベルで（§15。文ごとの仮説文体は廃止）・グラフに現れる関係のみ・
+#   承認判断の非代行（GR1）・数値 confidence 禁止。
 _INSTRUCTION_HEADER = (
     "あなたは教員による理論構造レビューを補助する検討パートナーです。"
     "以下は1本の論文からパイプラインが構築した理論操作グラフの事実の一覧です。"
     "この一覧に現れているノード・関係・裏付け状態だけを根拠に答え、"
     "グラフに現れていない関係・根拠を作らないでください（無い場合は「グラフには現れていません」と述べる）。"
-    "内容の正しさについては断定せず、「〜の可能性があります」のような仮説の文体で述べてください。"
+    "文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。"
+    "不確かさは返答全体に付く「" + AI_READING_LABEL + "」のラベルで示されます。"
+    + _MATH_DELIMITER_INSTRUCTION +
     "承認・却下の判断は教員が行います。「承認すべき」「却下すべき」のような指示・推奨はせず、"
     "裏付けの状態と考えられる論点を事実として示すに留めてください。"
     "数値の確信度・スコアを述べないでください。"
@@ -439,21 +456,38 @@ class _GraphTurnOutput(BaseModel):
     reply: str = ""
 
 
+class _GraphTurnOutputSpoken(_GraphTurnOutput):
+    """読み上げモードの structured output（``spoken`` を**同じ1コール**で受け取る）。
+
+    text 経路のスキーマ（``_GraphTurnOutput``）は変えない — 既存プロンプト・
+    スキーマをバイト単位で維持するため別クラスにする（§15）。
+    """
+
+    spoken: str = ""
+
+
 @dataclass
 class GraphTurnResult:
     reply: str
     degraded: bool = False
+    #: 読み上げ用テキスト（``response_mode="spoken"`` のときのみ。text 経路は None）。
+    spoken: str | None = None
 
 
 def build_llm_messages(
     prior_messages: list[dict[str, str]],
     user_content: str,
     grounding_text: str,
+    response_mode: str = "text",
 ) -> list[dict[str, str]]:
     """会話履歴 + 新規発話から LLM 送信用メッセージ列を組み立てる。
 
     grounding_text は**最初の user メッセージにのみ**注入する（dialogue.py と同じ規約）。
+    ``response_mode="spoken"`` のときだけ読み上げ契約を足す（text 経路は従来と同一）。
     """
+    header = _INSTRUCTION_HEADER
+    if response_mode == "spoken":
+        header = _INSTRUCTION_HEADER + _SPOKEN_CONTRACT
     turns = list(prior_messages) + [{"role": "user", "content": user_content}]
     messages: list[dict[str, str]] = []
     first_user_injected = False
@@ -463,7 +497,7 @@ def build_llm_messages(
         if not first_user_injected and role == "user":
             first_user_injected = True
             if grounding_text:
-                content = _INSTRUCTION_HEADER + "\n\n" + grounding_text + "\n\n---\n\n" + content
+                content = header + "\n\n" + grounding_text + "\n\n---\n\n" + content
         messages.append({"role": role, "content": content})
     return messages
 
@@ -476,24 +510,39 @@ def run_graph_turn(
     grounding_text: str,
     model: str | None = None,
     user_id: str | None = None,
+    response_mode: str = "text",
 ) -> GraphTurnResult:
     """グラフ全体対話の1ターンを実行する。
 
-    候補注釈は生成しない（structured output は reply のみ）。LLM 失敗は degraded
-    固定文で返す（同期パスを重くしない・W6）。
+    候補注釈は生成しない（structured output は reply（+ 読み上げ時の spoken）のみ）。
+    LLM 失敗は degraded 固定文で返す（同期パスを重くしない・W6）。
+
+    ``response_mode="spoken"`` でも **LLM コールは1回のまま**で、同じ structured
+    output の ``spoken`` フィールドを使う（GR5 のコスト相乗りを崩さない）。
     """
-    llm_messages = build_llm_messages(prior_messages, user_content, grounding_text)
+    spoken_mode = response_mode == "spoken"
+    llm_messages = build_llm_messages(
+        prior_messages, user_content, grounding_text, response_mode=response_mode,
+    )
     with usage_context(_FEATURE_GRAPH_CHAT, user_id=user_id, document_id=document_id):
         resolved_model = model or dialogue.resolve_turn_model(_FEATURE_GRAPH_CHAT)
+        output_model = _GraphTurnOutputSpoken if spoken_mode else _GraphTurnOutput
         try:
-            parsed = generate_conversation_turn(llm_messages, _GraphTurnOutput, model=resolved_model)
+            parsed = generate_conversation_turn(llm_messages, output_model, model=resolved_model)
         except Exception:  # noqa: BLE001
             logger.warning(
                 "graph dialogue: LLM turn failed for document %s", document_id, exc_info=True,
             )
-            return GraphTurnResult(reply=_DEGRADED_REPLY, degraded=True)
-    reply = (parsed.reply or "").strip() or _DEGRADED_REPLY
-    return GraphTurnResult(reply=reply, degraded=False)
+            return GraphTurnResult(
+                reply=_DEGRADED_REPLY,
+                degraded=True,
+                spoken=dialogue.resolve_spoken_text("", _DEGRADED_REPLY) if spoken_mode else None,
+            )
+    reply = strip_control_sequences(getattr(parsed, "reply", "") or "").strip() or _DEGRADED_REPLY
+    spoken = (
+        dialogue.resolve_spoken_text(getattr(parsed, "spoken", ""), reply) if spoken_mode else None
+    )
+    return GraphTurnResult(reply=reply, degraded=False, spoken=spoken)
 
 
 __all__ = [

@@ -323,6 +323,45 @@ class TestDeliberationDialoguePhase2:
         card_end = src.index("function _buildAnnotationCard")
         assert src[card_start:card_end].count("escHtml(") >= 3
 
+    def test_assistant_bubble_shows_stance_chip(self):
+        """W2: AI 応答は候補。留保を本文に散らす代わりに、非対話の立場チップ1枚が
+        「AI の読みであって確定ではない」ことを引き受ける。文言の正はサーバの
+        stance_label で、返らないときだけ定数のフォールバックへ落ちる。"""
+        src = _read(DELIBERATION_JS)
+        msg_start = src.index("function _appendChatMessage")
+        msg_end = src.index("function _appendChatNote")
+        block = src[msg_start:msg_end]
+        assert "deliberation-chat-stance" in block
+        assert "STANCE_LABEL_FALLBACK" in block
+        assert 'var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";' in src
+        assert src.count("AIの読み（未確認）") == 1
+        # 応答の stance_label をそのまま渡す（画面側で言い換えない）。
+        assert '_appendChatMessage("ai", (data && data.reply) || "", data && data.stance_label);' in src
+        # 事実の1行であって操作要素ではない。
+        assert "<button" not in block
+        assert "data-ui-anchor" not in block
+        css = _read(ROOT / "frontend" / "public" / "css" / "styles.css")
+        assert ".deliberation-chat-stance" in css
+
+    def test_assistant_bubble_renders_inline_math(self):
+        """応答本文の $…$ は数式として描く（生 TeX を教員に読ませない）。描画は
+        原稿スタジオの正本 graphView.inlineMathHtml に委譲し、レンダラを増やさない。"""
+        src = _read(DELIBERATION_JS)
+        assert "function _chatRichText" in src
+        rich_start = src.index("function _chatRichText")
+        rich_end = src.index("function _appendChatMessage")
+        rich = src[rich_start:rich_end]
+        assert "window.LectureStudio" in rich and "graphView" in rich
+        assert "inlineMathHtml" in rich
+        # 未ロード時は素のエスケープへ縮退する（描画できないより素で出す）。
+        assert "return escHtml(text);" in rich
+        msg_start = src.index("function _appendChatMessage")
+        msg_end = src.index("function _appendChatNote")
+        block = src[msg_start:msg_end]
+        assert "_chatRichText(text)" in block
+        # 教員の発話は素のエスケープのまま（入力を数式として解釈しない）。
+        assert "escHtml(text)" in block
+
 
 class TestAdminHtmlIntegration:
     def test_script_tag_present_before_admin_js(self):

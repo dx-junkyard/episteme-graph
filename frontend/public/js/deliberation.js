@@ -2204,14 +2204,35 @@
     return '<div class="deliberation-chat-empty">この要素について質問できます。まだ対話はありません。</div>';
   }
 
-  function _appendChatMessage(role, text) {
+  // AI 応答の立場ラベル（W2 と同じ規律）。留保を本文に散らす代わりに、この1枚の
+  // チップが「AI の読みであって確定ではない」ことを引き受ける。文字列の正はサーバの
+  // stance_label で、縮退応答のようにラベルが返らないときだけここへ落ちる。
+  var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";
+
+  // 応答本文に混ざる $…$ / \(…\) は数式として描く。描画の実装は原稿スタジオの正本
+  // graphView.inlineMathHtml へ委譲し（数式レンダラを画面ごとに増やさない）、
+  // 未ロード時は素のエスケープへ縮退する。
+  function _chatRichText(text) {
+    var view = window.LectureStudio && window.LectureStudio.graphView;
+    if (view && view.inlineMathHtml) return view.inlineMathHtml(text);
+    return escHtml(text);
+  }
+
+  function _appendChatMessage(role, text, stance) {
     var container = document.getElementById("deliberation-chat-messages");
     if (!container) return;
     var empty = container.querySelector(".deliberation-chat-empty");
     if (empty) empty.remove();
+    var isAi = role !== "user";
     var div = document.createElement("div");
-    div.className = "deliberation-chat-msg " + (role === "user" ? "user" : "ai");
-    div.innerHTML = escHtml(text).replace(/\n/g, "<br>");
+    div.className = "deliberation-chat-msg " + (isAi ? "ai" : "user");
+    // 教員の発話は素のエスケープ、AI 応答は本文の数式を数式として出す
+    // （生の $\Lambda$ を読ませない）。立場チップは操作要素にしない。
+    var body = (isAi ? _chatRichText(text) : escHtml(text)).replace(/\n/g, "<br>");
+    var chip = isAi
+      ? '<div class="deliberation-chat-stance">' + escHtml(stance || STANCE_LABEL_FALLBACK) + "</div>"
+      : "";
+    div.innerHTML = chip + body;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
   }
@@ -2285,7 +2306,7 @@
       })
       .then(_parseJsonResponse)
       .then(function (data) {
-        _appendChatMessage("ai", (data && data.reply) || "");
+        _appendChatMessage("ai", (data && data.reply) || "", data && data.stance_label);
         if (data && data.degraded) {
           _appendChatNote("（AI 応答は生成できませんでした）");
         }

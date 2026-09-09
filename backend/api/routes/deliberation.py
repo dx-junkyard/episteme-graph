@@ -85,6 +85,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from core.config import get_settings
+from core.label_vocab import AI_READING_LABEL
 from core.llm import transcribe_audio
 from core.llm_usage import usage_context
 from core.tts import generate_tts_audio, strip_text_for_speech
@@ -859,6 +860,9 @@ class ScreenContextPayload(BaseModel):
 class MessageCreateRequest(BaseModel):
     content: str
     selected_context: SelectedFigureContext | None = None
+    # 応答文体の改訂（§15）: 音声モードは読み上げ用の spoken を**同じ1コールで**
+    # 受け取る（新エンドポイント・追加コールを作らない）。既定は従来どおり text。
+    response_mode: Literal["text", "spoken"] = "text"
     # 画面文脈アダプター（§4.2）: 参照だけの optional フィールド。未指定は従来動作。
     screen_context: ScreenContextPayload | None = None
     # M層 Phase 3（llm_model_selection_design.md §6.5）: この実行だけのモデル上書き
@@ -1101,6 +1105,7 @@ def post_deliberation_message(
         images=images,
         model=requested_model,
         user_id=current_user.get("id"),
+        response_mode=body.response_mode,
     )
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1128,10 +1133,13 @@ def post_deliberation_message(
             {"action": "annotation.candidate_generated", "kind": annotation["kind"], "session_id": session_id},
         )
 
+    # spoken / stance_label は**保存しない**（永続化するのは reply のみ = SA6 と同型）。
     return {
         "reply": result.reply,
         "annotations": [_annotation_response(a) for a in created_annotations],
         "degraded": result.degraded,
+        "spoken": result.spoken,
+        "stance_label": AI_READING_LABEL,
     }
 
 
@@ -1148,6 +1156,8 @@ def post_deliberation_message(
 
 class GraphMessageCreateRequest(BaseModel):
     content: str
+    # 応答文体の改訂（§15）: 要素対話と同じ読み上げモード（既定は text）。
+    response_mode: Literal["text", "spoken"] = "text"
     # 画面文脈アダプター（§4.2）: 要素対話と同じ optional フィールド・同じ解決経路。
     screen_context: ScreenContextPayload | None = None
     # M層: この実行だけのモデル上書き（scene "deliberation" として検証。vision なし）。
@@ -1273,6 +1283,7 @@ def post_graph_dialogue_message(
         grounding_text=grounding_text,
         model=requested_model,
         user_id=current_user.get("id"),
+        response_mode=body.response_mode,
     )
 
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -1284,7 +1295,13 @@ def post_graph_dialogue_message(
         ],
     )
 
-    return {"reply": result.reply, "degraded": result.degraded}
+    # spoken / stance_label は保存しない（append_messages は reply のみ）。
+    return {
+        "reply": result.reply,
+        "degraded": result.degraded,
+        "spoken": result.spoken,
+        "stance_label": AI_READING_LABEL,
+    }
 
 
 @router.get("/elements/{element_type}/{element_id}/annotations")

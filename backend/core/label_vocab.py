@@ -44,6 +44,7 @@ from types import MappingProxyType
 from core.status import schema as status_schema
 
 __all__ = [
+    "AI_READING_LABEL",
     "ANCHOR_LANDING_SCALE",
     "ANCHOR_LANDING_THRESHOLD_MID",
     "ANCHOR_LANDING_THRESHOLD_NEAR",
@@ -439,3 +440,16 @@ AUDIO_STATUS_LABELS = MappingProxyType({
     status_schema.AUDIO_STATUS_PARTIAL: "一部生成",
     status_schema.AUDIO_STATUS_GENERATED: "生成済み",
 })
+
+
+# ---------------------------------------------------------------------------
+# 対話応答の姿勢ラベル（W層 / グラフ対話レビュー）
+# ---------------------------------------------------------------------------
+#
+# 文ごとの留保（「〜の可能性があります」の反復）をやめ、**返答全体に1つ付く固定
+# ラベル**で不確かさを示す（オーナー裁定 2026-09-10。正本は
+# ``docs/features/graph_dialogue_review_design.md`` §15）。段階スケールではなく
+# 単一の固定文字列なので表を作らない — この1箇所だけが正本で、
+# ``core/deliberation/{dialogue,graph_dialogue}.py`` と route 層は import して使う。
+
+AI_READING_LABEL = "AIの読み（未確認）"

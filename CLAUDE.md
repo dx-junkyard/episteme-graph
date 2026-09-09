@@ -2344,7 +2344,7 @@ annotations / store / identity_links / standardization/。FastAPI 非 import）+
 
 **不変条項**: W1 A層非改変（成果テーブルに列を足さず W層専用テーブルに積む）/
 W2 確定は人間・AI は候補のみ（対話の解釈は常に `status='candidate'`、`source_backed` を
-自動付与しない）/ W3 evidence-based（evidence + reason + confidence、断定せず仮説文体）/
+自動付与しない）/ W3 evidence-based（evidence + reason + confidence。**2026-09-10 改訂**: 文ごとの仮説文体は廃止し、不確かさは返答冒頭の固定ラベル `label_vocab.AI_READING_LABEL`「AIの読み（未確認）」1つで示す — 本文は簡潔な断定調）/
 W4 情報を落とさない（対話ログ・候補・却下は削除せず `candidate → committed / dismissed`
 遷移。行削除 API なし）/ W5 権限 fail-closed（document-scoped は
 `_ensure_document_viewable/editable`、domain-scoped 共通部品は L層の権限モデル）/
@@ -2415,7 +2415,7 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
 `docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録）。
 
 - **不変条項の要点**: GR1 確定は人間のみ（AI 応答から承認 API を呼ぶ経路なし・プロンプトは
-  仮説文体 + 承認判断の非代行を強制）/ GR2 A層非改変 / GR3 数値非表示 / GR4 監査は既存
+  承認判断の非代行 + 捏造ガードを強制。文体は 2026-09-10 改訂で「留保はラベル・本文は断定調」）/ GR2 A層非改変 / GR3 数値非表示 / GR4 監査は既存
   `AUDIT_ENTITY_COMPONENT` / `AUDIT_ENTITY_CLAIM`（新 entity_type なし）/ GR5 グラフ全体
   対話は1コール・CostGate は W層 `DELIBERATION_MAX_CALLS_*` に相乗り（U層 feature のみ
   `deliberation:graph_chat` を分離。scene は `deliberation` 共用・専用 env なし）/
@@ -2488,6 +2488,17 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   `admin-graph-review.js` は 🎤 トグル（`graph-review.voice`）と
   `sendChatText` への配線だけを持つ。429 でループ停止・close でマイク解放・数値非表示。
   **音声から承認 API を呼ぶ経路は作らない（GR1）**。
+- **応答文体の改訂 — 留保はラベルで（§15・2026-09-10・migration なし）**: 教員の指摘
+  「数式が生 LaTeX / 読み上げが書き言葉のまま / 文ごとの「可能性があります」が聞きづらい」に
+  対するオーナー裁定。①文ごとの仮説文体をやめ、不確かさは返答全体に付く固定ラベル
+  `label_vocab.AI_READING_LABEL`「AIの読み（未確認）」で示す（`stance_label` として応答に載せ、
+  UI は非操作チップで描く・保存も読み上げもしない）。GR1 の承認判断の非代行・捏造ガード・
+  数値禁止は不変。W層 `dialogue.py` も同じ契約（W3 改訂）。②`response_mode: "text"|"spoken"`
+  （音声経路のみ spoken）— 同一の1コールの structured output に聞き手向け `spoken`（結論先・
+  3〜5文・箇条書きと LaTeX なし・数式は言葉で）を足し、TTS は `spoken || reply` を読む。
+  LLM 回数・CostGate 不変。③数式は `$…$` に統一し、吹き出しは `richText` で描く。
+  ④制御文字の衛生: `core/text_hygiene.py::strip_control_sequences`（ANSI・`[0m` 残骸・C0）を
+  LLM 応答・画面文脈の事実文・論文層 snippet に適用し、`strip_text_for_speech` は `\(…\)` も除去。
 - **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
   `test_graph_review_voice_api.py`。
 - **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /

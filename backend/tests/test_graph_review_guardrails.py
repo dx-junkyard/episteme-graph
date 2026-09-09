@@ -28,6 +28,7 @@ from tests.guardrail_helpers import (  # noqa: E402
 CORE_PATH = BACKEND / "core" / "deliberation" / "graph_dialogue.py"
 CORE_SRC = CORE_PATH.read_text(encoding="utf-8")
 ROUTE_SRC = (BACKEND / "api" / "routes" / "deliberation.py").read_text(encoding="utf-8")
+DIALOGUE_SRC = (BACKEND / "core" / "deliberation" / "dialogue.py").read_text(encoding="utf-8")
 TC_SRC = (BACKEND / "api" / "routes" / "theory_components.py").read_text(encoding="utf-8")
 MIGRATION_SRC = (BACKEND / "db" / "075_graph_dialogue_sessions.sql").read_text(encoding="utf-8")
 JS_PATH = ROOT / "frontend" / "public" / "js" / "admin-graph-review.js"
@@ -55,12 +56,66 @@ class TestCoreIsolation:
 
 
 class TestPromptContract:
-    def test_hypothesis_style_and_no_approval_directive(self):
-        # GR1: 仮説文体 + 承認判断の非代行 + 捏造ガード + 数値禁止の契約フレーズ。
-        assert "〜の可能性があります" in CORE_SRC
+    def test_stance_label_contract_and_no_approval_directive(self):
+        # §15: 留保はラベルで（文ごとの仮説文体は撤去）+ 承認判断の非代行 +
+        # 捏造ガード + 数値禁止の契約フレーズ。
+        assert (
+            "文ごとに「〜の可能性があります」のような留保を繰り返さず、簡潔な断定調で書いてください。"
+            in CORE_SRC
+        )
+        assert "不確かさは返答全体に付く「" in CORE_SRC
+        assert "」のラベルで示されます。" in CORE_SRC
         assert "承認・却下の判断は教員が行います" in CORE_SRC
         assert "グラフに現れていない関係・根拠を作らないでください" in CORE_SRC
         assert "数値の確信度・スコアを述べないでください" in CORE_SRC
+
+    def test_per_sentence_hedging_instruction_is_gone(self):
+        # 旧契約（文ごとの留保を要求する指示）が復活していないこと（§15 のオーナー裁定）。
+        for forbidden in (
+            "のような仮説の文体で述べてください",
+            "内容の正しさについては断定せず",
+            "仮説的な言い回しにしてください",
+        ):
+            assert forbidden not in CORE_SRC, forbidden
+            assert forbidden not in DIALOGUE_SRC, forbidden
+
+    def test_math_delimiter_contract_in_both_headers(self):
+        # 生 LaTeX（\(…\)）の漏れを塞ぐ表記契約は両対話モジュールに入れる。
+        needle = "数式は必ず `$…$` で区切ってください"
+        assert needle in CORE_SRC
+        assert needle in DIALOGUE_SRC
+
+    def test_spoken_contract_is_opt_in_and_single_call(self):
+        # 読み上げ契約は response_mode="spoken" のときだけ足す（1ターン=1コールは不変）。
+        assert "音声で読み上げるための spoken を別に返してください。" in CORE_SRC
+        assert "音声で読み上げるための spoken を別に返してください。" in DIALOGUE_SRC
+        for src in (CORE_SRC, DIALOGUE_SRC):
+            assert 'response_mode == "spoken"' in src
+            # 追加の LLM コール（2回目の generate_*）を作らない。
+            assert src.count("generate_conversation_turn(") == 1
+
+    def test_stance_label_constant_has_a_single_home(self):
+        """ラベル定数の正本は core/label_vocab.py の1箇所だけ（リテラル重複の禁止）。"""
+        from core.label_vocab import AI_READING_LABEL
+
+        assert AI_READING_LABEL == "AIの読み（未確認）"
+        for src, name in (
+            (CORE_SRC, "core/deliberation/graph_dialogue.py"),
+            (DIALOGUE_SRC, "core/deliberation/dialogue.py"),
+            (ROUTE_SRC, "api/routes/deliberation.py"),
+        ):
+            assert "from core.label_vocab import" in src and "AI_READING_LABEL" in src, name
+            assert AI_READING_LABEL not in src, name  # リテラルの再定義・コピペを禁止
+
+        offenders = []
+        for path in sorted((BACKEND / "core").rglob("*.py")) + sorted(
+            (BACKEND / "api").rglob("*.py")
+        ):
+            if path.name == "label_vocab.py":
+                continue
+            if AI_READING_LABEL in path.read_text(encoding="utf-8"):
+                offenders.append(str(path.relative_to(BACKEND)))
+        assert not offenders, offenders
 
     def test_grounding_never_emits_confidence_numbers(self):
         # graph_grounding_to_text が edge/node の confidence を書き出す行を持たない。

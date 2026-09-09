@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from core.text_hygiene import strip_control_sequences
+
 # ---------------------------------------------------------------------------
 # 語彙
 # ---------------------------------------------------------------------------
@@ -171,9 +173,11 @@ def truncate_snippet(text: Any, limit: int = TEXT_SNIPPET_MAX) -> str:
     """本文スニペットの丸め。``$...$`` の途中で切らない。
 
     ``routes/theory_components.py::_truncate_reference_text`` と同じ規則
-    （閉じない ``$`` を残さない）。
+    （閉じない ``$`` を残さない）。artifact 由来のスニペットには ANSI 残骸
+    （``[0m`` 等）が混ざることがあるため、丸める前に除去する
+    （2026-09-10・graph_dialogue_review_design.md §15）。
     """
-    value = str(text or "")
+    value = strip_control_sequences(str(text or ""))
     if len(value) <= limit:
         return value
     cut = value[:limit]

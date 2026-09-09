@@ -123,6 +123,11 @@ W層は A層成果（`theory_components` / `theory_claims` / `theory_component_g
   反映しない。`source_backed` を自動付与しない。
 - **W3 evidence-based**: すべての AI 出力に `evidence`（逐語引用・要素参照）+ `reason` +
   `confidence` を付ける。断定形にせず「〜の可能性」の仮説文体（D層 §0 と同じ）。
+  **追補（2026-09-10・オーナー裁定）**: 文ごとの仮説文体は**冒頭ラベル方式**へ改める —
+  留保は返答全体に1つ付く固定ラベル `AIの読み（未確認）`（正本
+  `core/label_vocab.py::AI_READING_LABEL`）で示し、本文は簡潔な断定調で書く。
+  `evidence` / `reason` 必須と confidence の数値非表示（W8）は**不変**。詳細は
+  [グラフ対話レビュー §15](graph_dialogue_review_design.md#15-応答文体の改訂--留保はラベルで2026-09-10)。
 - **W4 情報を落とさない（P4）**: 対話ログ・候補注釈・却下は削除しない。status 遷移
   （`candidate → committed` / `candidate → dismissed`）で保持。行削除 API を作らない。
 - **W5 権限 fail-closed（スコープで分岐）**: document-scoped 要素は `_ensure_document_viewable`

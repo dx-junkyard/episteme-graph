@@ -164,6 +164,110 @@ class TestChat:
         assert "JSON.stringify" not in block
 
 
+class TestChatBubbleAndStance:
+    """応答バブルの数式描画と立場ラベル。
+
+    留保を応答本文に散らす代わりに、1枚の非対話チップが「AI の読みであって確定では
+    ない」ことを引き受ける（GR1）。数式は共通の richText 一本で描く（GR8）。
+    """
+
+    def _chat_log_block(self) -> str:
+        start = JS_SRC.index("function renderChatLog(")
+        return JS_SRC[start: JS_SRC.index("\n  function ", start)]
+
+    def test_assistant_bubble_uses_rich_text(self):
+        # 生の $P_{\\rm L}(k)$ を教員に読ませない（右ペインと同じ描画に揃える）。
+        block = self._chat_log_block()
+        assert "richText(m.content)" in block
+        # 教員の発話は素のエスケープのまま（入力を数式として解釈しない）。
+        assert "esc(m.content)" in block
+
+    def test_no_second_math_renderer(self):
+        # 数式描画の実装は graphView.inlineMathHtml 一本（richText 経由）だけ。
+        block = self._chat_log_block()
+        assert "katex" not in block.lower()
+        # 呼ぶのは richText だけ（graphView へ直接触らない）。
+        assert "inlineMathHtml(" not in block
+        assert "gv()" not in block
+
+    def test_stance_chip_rendered_with_single_fallback_literal(self):
+        block = self._chat_log_block()
+        assert "graph-review-chat-stance" in block
+        assert "STANCE_LABEL_FALLBACK" in block
+        # 文言の正はサーバの stance_label。フォールバック文字列は1箇所（定数）のみ。
+        assert 'var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";' in JS_SRC
+        assert JS_SRC.count("AIの読み（未確認）") == 1
+        assert "m.stance" in block and "state.chatStanceLabel" in block
+
+    def test_stance_chip_is_not_interactive(self):
+        # 事実の1行であって操作要素ではない（button・data-ui-anchor を足さない）。
+        block = self._chat_log_block()
+        assert "<button" not in block
+        assert "data-ui-anchor" not in block
+
+    def test_stance_label_stored_from_response(self):
+        start = JS_SRC.index("function sendChatText(")
+        block = JS_SRC[start: JS_SRC.index("\n  // ---", start)]
+        assert "data.stance_label" in block
+        assert "state.chatStanceLabel = stanceLabel" in block
+        # タブ往復（履歴の再流し込み）でもチップの文言を落とさない。
+        session_map = JS_SRC[JS_SRC.index("function sessionMessages("):]
+        session_map = session_map[: session_map.index("\n  function ")]
+        assert "stance:" in session_map
+
+    def test_css_class_defined_and_muted(self):
+        assert ".graph-review-chat-stance" in CSS_SRC
+        rule = CSS_SRC[CSS_SRC.index(".graph-review-chat-stance"):]
+        rule = rule[: rule.index("}")]
+        # 控えめな注記であって警告ではない（警告色を使わない）。
+        assert "red" not in rule and "#ef4444" not in rule
+
+    def test_es5_in_chat_blocks(self):
+        block = self._chat_log_block()
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
+
+class TestSpokenResponseMode:
+    """音声のときだけ話し言葉の応答を求め、読み上げにはそれを使う。"""
+
+    def _send_block(self) -> str:
+        start = JS_SRC.index("function sendChatText(")
+        return JS_SRC[start: JS_SRC.index("\n  // ---", start)]
+
+    def test_response_mode_is_opt_in_from_the_caller(self):
+        block = self._send_block()
+        assert "function sendChatText(content, cb, opts)" in block
+        assert "opts.responseMode" in block
+        # 既定（テキスト送信）はキー自体を載せない。
+        assert "if (responseMode) requestBody.response_mode = responseMode;" in block
+
+    def test_spoken_literal_only_on_the_voice_path(self):
+        # "spoken" を渡すのは音声ループの配線1箇所だけ（テキスト送信は素のまま）。
+        start = JS_SRC.index("function voiceUtterance(")
+        voice = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert '{ responseMode: "spoken" }' in voice
+        assert JS_SRC.count('responseMode: "spoken"') == 1
+        assert "sendChat()" not in voice
+
+    def test_tts_text_prefers_spoken_reply(self):
+        block = self._send_block()
+        # バブルは書き言葉の reply、読み上げは話し言葉の spoken（あれば）。
+        assert "finish(null, data.spoken || replyMessage.content);" in block
+        assert 'content: data.reply || ""' in block
+
+    def test_stance_label_is_not_spoken(self):
+        # 立場ラベルは画面のチップが引き受ける。読み上げ文へ混ぜない。
+        block = self._send_block()
+        assert "stanceLabel + " not in block
+        start = JS_SRC.index("function voiceUtterance(")
+        voice = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "STANCE_LABEL_FALLBACK" not in voice
+        assert "stance" not in voice
+
+
 class TestScreenContext:
     """画面文脈アダプター（assistant_screen_adapter_design.md §4.1 / SA1）。
 

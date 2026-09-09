@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from typing import Any, Callable, Mapping
 
+from core.text_hygiene import strip_control_sequences
+
 from .schema import BLOCK_HEADER, MAX_BLOCK_CHARS, TRUNCATION_LINE, ScreenContext
 
 #: 解決器の型。入力を mutate せず・例外を出さず・事実文の列を返す純関数。
@@ -70,8 +72,16 @@ def render_block(facts: list[str] | None) -> str:
 
     空なら空文字。``MAX_BLOCK_CHARS`` を超える場合は**行境界**で打ち切り、
     最終行に ``…（以下省略）`` を置く（件数は書かない = SA4）。
+
+    事実文は制御シーケンス（ANSI エスケープ・``[0m`` 型の裸の残骸）を除去してから
+    載せる（2026-09-10・graph_dialogue_review_design.md §15 — grounding が制御文字を
+    運ぶと LLM の応答へ転写され、画面・読み上げに漏れる）。
     """
-    cleaned = [f.strip() for f in (facts or []) if isinstance(f, str) and f.strip()]
+    cleaned = [
+        strip_control_sequences(f).strip()
+        for f in (facts or [])
+        if isinstance(f, str) and strip_control_sequences(f).strip()
+    ]
     if not cleaned:
         return ""
     lines = [f"- {fact}" for fact in cleaned]

@@ -33,8 +33,9 @@
     chatMode: "graph", // "graph" | "node"
     nodeSessions: {},  // component_id -> session dict
     graphSession: null,
-    chatMessages: [],  // 表示中モードのメッセージ [{role, content}]
+    chatMessages: [],  // 表示中モードのメッセージ [{role, content, stance}]
     chatAnnotations: [], // 直近応答の候補注釈
+    chatStanceLabel: "", // 直近応答の stance_label（履歴分の表示にも使う）
     chatBusy: false,
     detailNotice: null, // 再描画をまたいで一度だけ再表示する操作結果 {message, kind}
     view: "graph",      // "graph" | "paper"（左ペインの表示。論文層 = graph_paper_layer_design.md）
@@ -105,6 +106,11 @@
   var SCREEN_CONTEXT_SCREEN = "graph_review";
   var SCREEN_CONTEXT_MAX_ENTITIES = 20;
   var SCREEN_CONTEXT_MAX_TITLE_CHARS = 40;
+
+  // AI 応答の立場ラベル（GR1）。応答本文に留保を散らす代わりに、この1枚のチップが
+  // 「AI の読みであって確定ではない」ことを引き受ける。文字列の正はサーバの
+  // stance_label で、履歴の再読み込み（サーバ応答を伴わない描画）だけがここへ落ちる。
+  var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";
 
   function esc(text) {
     return deps.escHtml ? deps.escHtml(text == null ? "" : String(text)) : String(text == null ? "" : text);
@@ -1441,7 +1447,11 @@
     return ((session && session.messages) || []).filter(function (m) {
       return m && typeof m === "object";
     }).map(function (m) {
-      return { role: String(m.role || "user"), content: String(m.content || "") };
+      return {
+        role: String(m.role || "user"),
+        content: String(m.content || ""),
+        stance: m.stance ? String(m.stance) : "",
+      };
     });
   }
 
@@ -1474,8 +1484,17 @@
       return;
     }
     log.innerHTML = state.chatMessages.map(function (m) {
-      var roleClass = m.role === "assistant" ? "assistant" : "user";
-      return '<div class="graph-review-chat-msg is-' + roleClass + '">' + esc(m.content) + "</div>";
+      var isAssistant = m.role === "assistant";
+      var roleClass = isAssistant ? "assistant" : "user";
+      // 学習者の発話は素のエスケープ、AI 応答は本文の数式を数式として出す
+      // （生の $\Lambda$ を教員に読ませない。描画は richText = graphView.inlineMathHtml 一本）。
+      var body = isAssistant ? richText(m.content) : esc(m.content);
+      // 立場ラベルは操作要素ではなく事実の1行（クリックできる要素を増やさない）。
+      var stance = isAssistant
+        ? '<div class="graph-review-chat-stance">' +
+            esc(m.stance || state.chatStanceLabel || STANCE_LABEL_FALLBACK) + "</div>"
+        : "";
+      return '<div class="graph-review-chat-msg is-' + roleClass + '">' + stance + body + "</div>";
     }).join("");
     log.scrollTop = log.scrollHeight;
   }
@@ -1729,7 +1748,11 @@
 
   // テキスト送信の中核。入力欄からもハンズフリー音声からも同じ経路を通す。
   // cb(err, replyText) — err.httpStatus は呼び出し側の分岐（429 等）に使う。
-  function sendChatText(content, cb) {
+  // opts.responseMode = "spoken" のとき、サーバへ読み上げ向けの応答も併せて求め、
+  // cb には読み上げ用テキストを渡す（画面のバブルは常に書き言葉の reply）。
+  function sendChatText(content, cb, opts) {
+    opts = opts || {};
+    var responseMode = opts.responseMode ? String(opts.responseMode) : "";
     var finished = false;
     function finish(err, reply) {
       if (finished) return;
@@ -1777,6 +1800,8 @@
       // 音声経路もこの関数を通るため自動的に同じものが載る。サーバ側で解決できない・
       // 権限外の参照は静かに落とされる（SA2）ので、送信の成否には影響しない。
       var requestBody = { content: content, screen_context: getScreenContext() };
+      // 既定（テキスト送信）はキー自体を載せない。音声ループのときだけ "spoken" を足す。
+      if (responseMode) requestBody.response_mode = responseMode;
       deps.apiFetch(path, { method: "POST", body: JSON.stringify(requestBody) })
         .then(function (res) {
           if (res.ok) return res.json();
@@ -1792,17 +1817,21 @@
           });
         })
         .then(function (data) {
-          var replyMessage = { role: "assistant", content: data.reply || "" };
+          var stanceLabel = data.stance_label ? String(data.stance_label) : "";
+          var replyMessage = { role: "assistant", content: data.reply || "", stance: stanceLabel };
           session.messages.push(replyMessage);
           // 表示コンテキストが変わっていたら書き戻しだけで終える（再描画しない）。
           if (isCurrentContext(mode, nodeKey)) {
+            if (stanceLabel) state.chatStanceLabel = stanceLabel;
             state.chatMessages.push(replyMessage);
             state.chatAnnotations = (data.annotations || []).concat(state.chatAnnotations);
             renderChatLog();
             renderChatAnnotations();
             setStatus("graph-review-chat-status", data.degraded ? "AI 応答を生成できなかったため縮退応答を表示しています。" : "", data.degraded ? "info" : "");
           }
-          finish(null, replyMessage.content);
+          // 読み上げには話し言葉版があればそれを渡す（バブルは書き言葉のまま）。
+          // 立場ラベルは読み上げない（画面のチップが引き受ける）。
+          finish(null, data.spoken || replyMessage.content);
         })
         .catch(function (err) {
           setStatus("graph-review-chat-status", (err && err.message) || "応答の取得に失敗しました", "error");
@@ -1884,6 +1913,7 @@
   }
 
   // 発話 → 既存のテキスト送信経路（表示・セッション・上限の扱いはテキストと同一）。
+  // 音声のときだけ response_mode="spoken" を足し、読み上げには話し言葉版を使う。
   function voiceUtterance(text, done) {
     sendChatText(text, function (err, reply) {
       if (err && err.httpStatus === 429) {
@@ -1892,7 +1922,7 @@
         return;
       }
       done(err, reply);
-    });
+    }, { responseMode: "spoken" });
   }
 
   // multipart は JSON 前提の apiFetch を通せないため、素の fetch で送る。
