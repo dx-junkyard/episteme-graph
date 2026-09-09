@@ -81,7 +81,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Literal
 
 from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from core.config import get_settings
@@ -113,6 +113,17 @@ from core.deliberation.schema import (
     IDENTITY_LINK_STATUS_REJECTED,
     SCOPE_DOCUMENT,
     ElementResolutionError,
+)
+from core.assistant_context import (
+    normalize_screen_context,
+    render_block,
+    resolve as resolve_screen_context,
+)
+# 上限は core 側の定数だけを正本にする（SA7: env で緩めない・route で再定義しない）。
+from core.assistant_context.schema import (
+    MAX_ID_CHARS,
+    MAX_TITLE_CHARS,
+    MAX_VISIBLE_ENTITIES,
 )
 from core.schema import AUDIT_ENTITY_DELIBERATION
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
@@ -802,13 +813,99 @@ class SelectedFigureContext(BaseModel):
     label: str = Field(min_length=1, max_length=300)
 
 
+#: 画面 ID の上限（登録語彙は数文字。壊れた画面提供の長文を持ち回らないための足切り）。
+_MAX_SCREEN_CHARS = 40
+
+
+class ScreenContextPayload(BaseModel):
+    """画面がいま表示している対象の**参照だけ**（``assistant_screen_adapter_design.md`` §4.1/§4.2）。
+
+    描画テキスト・DTO 本体・数値は受け取らない（SA1）。**未知の ``screen`` や上限超過で
+    422 にしない**（画面の提供が壊れても対話を止めない = §4.2）: 長すぎる値は
+    切り詰め、解決できない参照は core の正規化が ``None`` に落として無視する。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    screen: str = ""
+    selection: dict[str, Any] = Field(default_factory=dict)
+    view: dict[str, Any] = Field(default_factory=dict)
+    visible_entities: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("screen")
+    @classmethod
+    def _clip_screen(cls, value: str) -> str:
+        return str(value or "")[:_MAX_SCREEN_CHARS]
+
+    @field_validator("visible_entities")
+    @classmethod
+    def _clip_entities(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """件数・``id``/``title`` の長さを**切り詰める**（拒否しない）。"""
+        clipped: list[dict[str, Any]] = []
+        for item in (value or [])[:MAX_VISIBLE_ENTITIES]:
+            if not isinstance(item, dict):
+                continue
+            entity: dict[str, Any] = {}
+            for key, raw in item.items():
+                if isinstance(raw, str):
+                    limit = MAX_TITLE_CHARS if key == "title" else MAX_ID_CHARS
+                    entity[key] = raw[:limit]
+                else:
+                    entity[key] = raw
+            clipped.append(entity)
+        return clipped
+
+
 class MessageCreateRequest(BaseModel):
     content: str
     selected_context: SelectedFigureContext | None = None
+    # 画面文脈アダプター（§4.2）: 参照だけの optional フィールド。未指定は従来動作。
+    screen_context: ScreenContextPayload | None = None
     # M層 Phase 3（llm_model_selection_design.md §6.5）: この実行だけのモデル上書き
     # （scene "deliberation"。figure 要素は "deliberation:vision" として vision
     # capability を必須検証する）。未指定は従来どおり resolve_model()。
     model: str | None = None
+
+
+def _screen_context_block(body: Any, document_id: str) -> str:
+    """``body.screen_context`` を事実文ブロックへ解決する（§4.4・両対話経路の共通経路）。
+
+    - セッションの document と ``selection.document_id`` が一致するときだけ解決する
+      （不一致は無視 = 他文書の参照で越境させない）。
+    - sources の取得は ``GET .../paper-layer`` と同じ ``build_paper_layer_for_document``
+      （二重実装しない）。import は遅延させて route 間の循環 import を避ける。
+    - どこで失敗しても空文字を返す（SA2 fail-soft: 対話は止めない・「見えないものが
+      ある」と言わない）。**保存する message content には決して混ぜない**（SA6）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return ""
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return ""
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 防御的（正規化は例外を出さない契約）
+        return ""
+    if ctx is None:
+        return ""
+    if str(ctx.selection.get("document_id") or "") != doc_id:
+        return ""
+
+    sources: dict[str, Any] = {}
+    try:
+        from routes.theory_components import build_paper_layer_for_document
+
+        sources = {"paper_layer": build_paper_layer_for_document(doc_id)}
+    except Exception:
+        logger.debug("screen_context: paper layer unavailable for %s", doc_id, exc_info=True)
+        sources = {}
+
+    try:
+        return render_block(resolve_screen_context(ctx, sources))
+    except Exception:  # pragma: no cover - 防御的（resolve/render は例外を出さない契約）
+        logger.debug("screen_context: resolution failed for %s", doc_id, exc_info=True)
+        return ""
 
 
 def _session_response(session: dict[str, Any]) -> dict[str, Any]:
@@ -972,6 +1069,12 @@ def post_deliberation_message(
             f"kind={context.kind}; id={context.id}; label={context.label}\n\n"
             + user_content
         )
+    # 画面文脈（§4.4）: 独立ブロックとして当該ターンの入力の先頭にだけ足す。
+    # document scope の要素だけが対象（domain scope の共通部品は論文層を持たない）。
+    if ref.scope == SCOPE_DOCUMENT:
+        screen_block = _screen_context_block(body, ref.document_id or "")
+        if screen_block:
+            llm_user_content = screen_block + "\n\n" + llm_user_content
 
     images: list[bytes] | None = None
     if ref.element_type == ELEMENT_FIGURE:
@@ -1045,6 +1148,8 @@ def post_deliberation_message(
 
 class GraphMessageCreateRequest(BaseModel):
     content: str
+    # 画面文脈アダプター（§4.2）: 要素対話と同じ optional フィールド・同じ解決経路。
+    screen_context: ScreenContextPayload | None = None
     # M層: この実行だけのモデル上書き（scene "deliberation" として検証。vision なし）。
     model: str | None = None
 
@@ -1154,10 +1259,17 @@ def post_graph_dialogue_message(
     # 要素対話と同じウィンドウ規約（16/4000/head_keep=1 — 先頭 user に grounding が乗る）。
     prior_messages = window_history(prior_messages, max_messages=16, max_chars=4000, head_keep=1)
 
+    # 画面文脈（§4.4）: 当該ターンの LLM 入力にだけ足す。保存する content は
+    # 生の user_content のまま（SA6）。
+    llm_user_content = user_content
+    screen_block = _screen_context_block(body, doc_id)
+    if screen_block:
+        llm_user_content = screen_block + "\n\n" + llm_user_content
+
     result = graph_dialogue.run_graph_turn(
         doc_id,
         prior_messages=prior_messages,
-        user_content=user_content,
+        user_content=llm_user_content,
         grounding_text=grounding_text,
         model=requested_model,
         user_id=current_user.get("id"),

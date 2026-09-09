@@ -814,3 +814,156 @@ class TestMalformedOrderingValuesDegradeSoftly:
         artifacts["document_structure"]["sections"][1]["order"] = 2
         result = build_paper_layer(_graph([_node("n1")]), artifacts)
         assert [s["section_id"] for s in result["paper"]["sections"]] == ["s2", "s1"]
+
+
+# ---------------------------------------------------------------------------
+# 本流パイプラインの永続化形（`persist_component_graph` が保存する node）
+#
+# 設計 §5.2 / assistant_screen_adapter_design.md §5.2:
+# `persist_component_graph` は node の `id` / `component_id` を **DB UUID** に差し替え、
+# agent 側 ID を `agent_component_id` に退避して保存する（claim ID は差し替えない＝
+# agent 側の ID のまま）。論文層は agent 側 ID で component_assembly / 説明を引くので、
+# この形でも要約・説明・図・章が解決できることを固定する。
+# ---------------------------------------------------------------------------
+
+_DB_UUID_MAIN = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+_DB_UUID_DETAIL = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+
+
+def _persisted_case():
+    """`persist_component_graph` が保存する形に沿った現実的フィクスチャ。"""
+    detail = _node(
+        _DB_UUID_DETAIL,
+        id=_DB_UUID_DETAIL,
+        agent_component_id="comp_1",
+        type="component",
+        graph_layer="equation_detail",
+        label="Linearize",
+        display_order=1,
+        input_equation_ids=["eq_12"],
+        linked_equation_ids=["eq_12"],
+        linked_claim_ids=["claim_a"],
+        linked_evidence_ids=["ev_0001"],
+        linked_derivation_ids=["der_1"],
+        eliminated_symbols=["k"],
+    )
+    main = _node(
+        _DB_UUID_MAIN,
+        id=_DB_UUID_MAIN,
+        agent_component_id="comp_main",
+        type="component",
+        graph_layer="main",
+        label="Equation system",
+        member_component_ids=[_DB_UUID_DETAIL],
+    )
+    graph = _graph([main, detail], reference_index=_reference_index())
+    figure_rows = [
+        {"id": "fig-uuid-1", "figure_key": "fig_3_3", "figure_label": "Figure 3.3", "page": 5, "caption_text": "Setup"}
+    ]
+    explanation_rows = [{"element_id": "comp_1", "body": "この段は線形化です", "status": "approved"}]
+    return graph, _full_artifacts(), figure_rows, explanation_rows
+
+
+def _build_persisted():
+    graph, artifacts, figure_rows, explanation_rows = _persisted_case()
+    return build_paper_layer(
+        graph, artifacts, figure_rows=figure_rows, explanation_rows=explanation_rows
+    )
+
+
+class TestPersistedPipelineShape:
+    def test_component_summary_resolves_via_agent_component_id(self):
+        node = _build_persisted()["nodes"][_DB_UUID_DETAIL]
+        assert node["component"]["summary"] == "Linearises the system."
+        assert node["component"]["teaching_takeaway"] == "Take the first order."
+
+    def test_explanation_resolves_via_agent_component_id(self):
+        node = _build_persisted()["nodes"][_DB_UUID_DETAIL]
+        assert node["explanation"] == {"body": "この段は線形化です", "status": "approved"}
+
+    def test_equations_and_evidence_resolve_from_agent_ids(self):
+        node = _build_persisted()["nodes"][_DB_UUID_DETAIL]
+        assert [e["display_label"] for e in node["equations"]] == ["式 (12)"]
+        assert [e["text"] for e in node["evidence"]] == ["we assume the linear regime"]
+
+    def test_figures_resolve_through_linked_claims(self):
+        node = _build_persisted()["nodes"][_DB_UUID_DETAIL]
+        assert [f["display_label"] for f in node["figures"]] == ["Figure 3.3"]
+        assert [t["display_label"] for t in node["tables"]] == ["Table 1"]
+
+    def test_sections_resolve_and_node_is_located(self):
+        node = _build_persisted()["nodes"][_DB_UUID_DETAIL]
+        assert [s["section_id"] for s in node["sections"]] == ["s2"]
+        assert node["unlocated"] is False
+
+    def test_main_node_aggregates_member_by_db_uuid(self):
+        node = _build_persisted()["nodes"][_DB_UUID_MAIN]
+        assert [e["display_label"] for e in node["equations"]] == ["式 (12)"]
+        # main は自身の agent ID（comp_main）では引けないが、member 経由で解決する。
+        assert node["component"]["summary"] == "Linearises the system."
+
+    def test_paper_spine_binds_the_persisted_node(self):
+        out = _build_persisted()
+        sections = {s["section_id"]: s for s in out["paper"]["sections"]}
+        assert _DB_UUID_DETAIL in sections["s2"]["node_ids"]
+
+    def test_dropping_agent_component_id_loses_the_paper_face(self):
+        """回帰の芯: normalizer が `agent_component_id` を落とすと要約・説明が空になる。"""
+        graph, artifacts, figure_rows, explanation_rows = _persisted_case()
+        for node in graph["nodes"]:
+            node.pop("agent_component_id", None)
+        out = build_paper_layer(
+            graph, artifacts, figure_rows=figure_rows, explanation_rows=explanation_rows
+        )
+        node = out["nodes"][_DB_UUID_DETAIL]
+        assert node["component"] is None
+        assert node["explanation"] is None
+
+
+# ---------------------------------------------------------------------------
+# extra_facts（呼び出し側が知っている状況の事実文・設計 §5.2）
+# ---------------------------------------------------------------------------
+
+
+class TestExtraFacts:
+    def test_extra_facts_are_prepended(self):
+        graph, artifacts, figure_rows, explanation_rows = _full_case()
+        out = build_paper_layer(
+            graph,
+            artifacts,
+            figure_rows=figure_rows,
+            explanation_rows=explanation_rows,
+            extra_facts=[pl_schema.FACT_NO_STORED_GRAPH],
+        )
+        assert out["facts"][0] == pl_schema.FACT_NO_STORED_GRAPH
+        assert out["available"] is True
+
+    def test_extra_facts_do_not_duplicate_existing_facts(self):
+        out = build_paper_layer(
+            _graph([_node("n1")]),
+            {},
+            extra_facts=[pl_schema.FACT_NO_EQUATIONS, pl_schema.FACT_NO_EQUATIONS],
+        )
+        assert out["facts"].count(pl_schema.FACT_NO_EQUATIONS) == 1
+
+    def test_extra_facts_default_keeps_previous_behaviour(self):
+        graph, artifacts, figure_rows, explanation_rows = _full_case()
+        base = build_paper_layer(
+            graph, artifacts, figure_rows=figure_rows, explanation_rows=explanation_rows
+        )
+        explicit = build_paper_layer(
+            graph,
+            artifacts,
+            figure_rows=figure_rows,
+            explanation_rows=explanation_rows,
+            extra_facts=None,
+        )
+        assert base == explicit
+
+    def test_extra_facts_survive_the_unavailable_path(self):
+        out = build_paper_layer(
+            {"nodes": [], "edges": []}, {}, extra_facts=[pl_schema.FACT_NO_STORED_GRAPH]
+        )
+        assert out["available"] is False
+        assert pl_schema.FACT_NO_GRAPH in out["facts"]
+        assert pl_schema.FACT_NO_STORED_GRAPH in out["facts"]

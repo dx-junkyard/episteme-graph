@@ -2613,6 +2613,48 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **ガードレール**: `test_decision_context{,_guardrails}.py` + 経路側の
   `test_release_review.py` / `test_teacher_triage_api.py`。
 
+### 画面文脈アダプター（Assistant Screen Adapter, SA層, migration なし, 2026-09-06）
+
+各画面の AI 対話（テキスト・音声）に「教員がいま画面で選んでいるもの」を渡す層。**画面は
+参照だけを渡し、サーバが既存の権限ゲート付き core でそれを解決して当該ターンの入力に足す**。
+正本は `docs/features/assistant_screen_adapter_design.md`（SA1〜SA7・§10 実装記録）。
+第1適用先はグラフレビュー（ノード対話 = W層セッション / グラフ全体対話）で、論文層
+（`core/graph_paper_layer`）の DTO を解決器が事実文にする。
+
+- **不変条項の要点**: SA1 画面は参照のみ（ID・種別・表示モード・見えている項目の ID と40字
+  以内の題名。描画テキスト・数値・DTO 本体を送らない）/ SA2 解決はサーバ側・既存の権限
+  ゲート付き経路のみ（権限外・不在は静かに落とす）/ SA3 決定論・非LLM・事前解決（LLM に
+  取得ツールを持たせない。1ターン1コール・CostGate 不変）/ SA4 数値・内部 ID 非表示
+  （`graph_paper_layer.schema.FORBIDDEN_KEYS` / PL7 継承）/ SA5 読み取り専用（書き込み経路
+  なし・音声も同じ）/ SA6 `screen_context` は保存しない（message・session・監査に永続化しない
+  — W層 `selected_context` と同じ位置・同じ規約）/ SA7 プロンプト予算はコード定数
+  （`MAX_BLOCK_CHARS` と解決器ごとの項目上限。env で緩めない）。
+- **core（`backend/core/assistant_context/`、FastAPI / sqlalchemy / LLM 非 import）**:
+  `schema.py`（`ScreenContext` / `normalize_screen_context` = 未知 screen は None・上限で
+  切り詰め・例外を出さない / `BLOCK_HEADER` / `MAX_BLOCK_CHARS`）/ `registry.py`
+  （`register(screen, kind, resolver)` / `resolve(ctx, sources) -> facts[]` / `render_block`）/
+  `resolvers/graph_review.py`（kind `graph_node` = 選択ノードの章・式・逐語引用・図表・記号・
+  導出・中心命題での役割・contextual 説明 / `document_graph` = 章→ノードの背骨 + 被覆のラベル
+  列挙（件数なし）/ `view` = 表示モードの事実1行）。解決器は入力を mutate せず例外を外に出さない。
+- **契約**: フロントは `window.<Screen>.getScreenContext()` を
+  `{screen, selection, view, visible_entities}` の統一形で公開し（グラフレビューは
+  `window.GraphReview.getScreenContext`）、送信ボディの optional `screen_context` に載せる。
+  route（`routes/deliberation.py` の要素対話 / グラフ全体対話 messages）は
+  `selection.document_id` がセッションの document と一致するときだけ解決し、結果ブロックを
+  `llm_user_content` の先頭に prepend（`selected_context` より前・当該ターンのみ）。**保存する
+  `message.content` は不変**。sources の組み立ては `routes/theory_components.py::
+  build_paper_layer_for_document`（GET paper-layer と同一経路）に一本化 — 二重実装しない。
+- **横展開（設計予約、着手時に設計書へ §追加）**: Phase 2 = W層要素モーダル / Phase 3 = Admin
+  Copilot（既存 `collectScreenContext()` に `screen` を足して同じ語彙へ）/ Phase 4 = 学習チャット
+  （`learner_context_common` の学習者射影のみ）。**新しい画面に AI 対話を置くときは、画面
+  テキストを送らず、この規約で参照を渡して解決器を1本足す。**
+- **ガードレール**: `test_assistant_context_{core,guardrails}.py` + 経路側
+  `test_deliberation_api.py` / `test_graph_review_api.py`（保存 content 非汚染・document 不一致の
+  無視・CostGate 位置不変）+ `test_graph_review_ui_static.py`（送信ボディ・`getScreenContext`
+  が本文フィールドを参照しない）。
+- **非スコープ（v1）**: LLM のツール呼び出し（SA3 で恒久排除）/ 画面状態の保存・集約 /
+  解決結果からの書き込み / DOM テキスト・スクリーンショットの送信 / 学習者向け Phase 4 の実装。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは

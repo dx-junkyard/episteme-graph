@@ -2050,7 +2050,7 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
         if node_review_status in APPROVED_REVIEW_STATUSES and node_reasons:
             node_reasons_at_analysis = [str(r) for r in node_reasons]
             node_reasons = []
-        normalized_nodes.append({
+        normalized_node = {
             "component_id": component_id,
             "label": final_label,
             "review_status": node_review_status,
@@ -2098,7 +2098,16 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             # Issue #449: preserve the thesis-anchor flag so the UI can emphasise
             # the argument's goal nodes (flag-based, not ID string matching).
             "is_thesis_anchor": bool(node.get("is_thesis_anchor", False)),
-        })
+        }
+        # 論文層（graph_paper_layer）が component_assembly / element_explanations を
+        # 引くための agent 側 ID（`NODE_COMPONENT_REF_KEYS` の先頭キー）。
+        # `persist_component_graph` は保存しているが、ここで落とすとノードの
+        # 「論文側の顔」（要約・contextual 説明）が空になる（設計 §5.2）。
+        # additive: 保存グラフに無い旧行ではキー自体を足さない。
+        agent_component_id = str(node.get("agent_component_id") or "").strip()
+        if agent_component_id:
+            normalized_node["agent_component_id"] = agent_component_id
+        normalized_nodes.append(normalized_node)
         seen_nodes.add(component_id)
     normalized_edges = []
     relation_map = {
@@ -3151,6 +3160,7 @@ def _build_paper_layer_payload(
     *,
     figure_rows: list[dict],
     explanation_rows: list[dict],
+    extra_facts: list[str] | None = None,
 ) -> dict:
     """core の純関数 ``build_paper_layer`` への薄い間接層。
 
@@ -3165,6 +3175,7 @@ def _build_paper_layer_payload(
         artifacts,
         figure_rows=figure_rows,
         explanation_rows=explanation_rows,
+        extra_facts=extra_facts,
     )
 
 
@@ -3239,11 +3250,30 @@ def get_document_paper_layer(
     既存 ``GET .../component-graph`` のレスポンスには一切触れない（別経路・遅延取得）。
     """
     _ensure_document_viewable(document_id, current_user)  # PL6
+    return build_paper_layer_for_document(document_id)
 
+
+def build_paper_layer_for_document(document_id: str) -> dict:
+    """論文層 DTO を組み立てる（**権限ゲートは呼び出し側の責務**）。
+
+    ``GET .../paper-layer`` の本体であり、画面文脈アダプター（``core.assistant_context``）
+    の sources もこれを使う（``assistant_screen_adapter_design.md`` §4.4 — 取得経路を
+    二重実装しない）。呼び出す前に必ず ``_ensure_document_viewable`` 等の閲覧ゲートを
+    通すこと（PL6 / SA2）。
+    """
     components = _components_for_document(document_id)
     graph = _normalize_stored_component_graph(document_id, _stored_component_graph(document_id), components)
+    # 設計 §5.2: 保存済みグラフが無いフォールバックでは、ノードは並ぶが式・根拠・章の
+    # リンクを持たないため論文層は全ノード空になる。「空」ではなく事実文で言う。
+    extra_facts: list[str] = []
     if not graph:
         graph = _build_component_graph_payload(document_id, components)
+        try:
+            from core.graph_paper_layer.schema import FACT_NO_STORED_GRAPH
+
+            extra_facts.append(FACT_NO_STORED_GRAPH)
+        except Exception:  # pragma: no cover - 防御的（事実文が引けなくても表示は続ける）
+            logger.debug("paper_layer: no-stored-graph fact unavailable", exc_info=True)
     graph["reference_index"] = _build_graph_reference_index(document_id, graph)
 
     # NOTE: `_build_graph_reference_index` も内部で `document_run_artifacts` を読むため
@@ -3270,11 +3300,14 @@ def get_document_paper_layer(
         explanation_rows = []
 
     try:
+        # extra_facts は空のときキー自体を渡さない（既存の呼び出し契約を変えない）。
+        optional_kwargs = {"extra_facts": extra_facts} if extra_facts else {}
         return _build_paper_layer_payload(
             graph,
             artifacts,
             figure_rows=figure_rows,
             explanation_rows=explanation_rows,
+            **optional_kwargs,
         )
     except Exception:
         logger.debug("paper_layer: build failed for document %s", document_id, exc_info=True)

@@ -1,7 +1,8 @@
 # グラフの論文層（Paper Layer — フレームに論文を肉付けする層）
 
 > **状態: 実装済み（正本・凍結）**（2026-09-03 起票・同日 Phase 0 実装。migration なし・
-> 新テーブルなし・LLM 0回の読み時射影。実装記録は §10。Phase 1/2 は別途起票）
+> 新テーブルなし・LLM 0回の読み時射影。実装記録は §10。表示の是正（Phase 1・フロントのみ）は
+> §11。Phase 2 は別途起票）
 
 **正本**: 本ドキュメント。
 **関連**: [グラフ対話レビュー](graph_dialogue_review_design.md)（GR1〜GR8 — 表示先の画面。
@@ -315,3 +316,89 @@ ID の対応関係は 2026-09-03 時点の実装から次のとおり（正本�
   `source_evidence_ids` を graph_json に保存していない（`edge_id` は保存済み）。このため
   `edges[].equation_labels` は保存済みグラフでは空になりやすい。永続化の是正は再解析後にしか
   効かないため別件で扱う（本層の DTO は不変）。
+
+---
+
+## 11. Phase 1 — 表示の是正と画面文脈アダプター（2026-09-06）
+
+Phase 0 で DTO は揃ったが、**描かれていない部分**（ノードの `claims[]`・`available:true`
+のときの `facts[]`）と、**キャンバスから論文層の存在が読めない**問題が残っていた。
+本 Phase はフロント（`admin-graph-review.js` / `styles.css`）だけを触り、
+DTO 契約（§3）・core・route・migration・アンカーはいずれも変えていない。
+併せて、同画面の AI 対話に「いま見ている画面」を渡す
+[画面文脈アダプター](assistant_screen_adapter_design.md) §5.1 のフロント側を実装した。
+
+### 11.1 キャンバスの離散マーク（設計書 §5.3 / PL4）
+
+- `state.paperLayer` が届いた時点で、そのノードの論文層エントリに
+  `sections` / `equations` / `evidence` / `figures` / `tables` のいずれかがあれば、
+  vis のノードラベル末尾に `¶` を1文字足す（`renderNetwork` の
+  `gv().visNodeSpec` 直後。既存の `★`（thesis anchor）・`①`（path order）と同じ
+  「ラベルに1文字足す」流儀で、新しい描画経路を作らない = GR8）。
+- tooltip には**種別だけ**を並べる（`論文要素: 式 / 引用 / 図表`）。**件数は出さない**
+  （PL4）。`paperNodeElementKinds()` は種別ラベルの配列を返し、長さは真偽判定にしか
+  使わない。
+- 凡例はツールバーの層トグルの隣に1行 `¶ 論文要素あり`（`renderPaperCueLegend`）。
+  マークの付いたノードが表示中の層に1つも無ければ**凡例自体を出さない**（説明だけが
+  残らないように）。警告色にしない。
+- 論文層はグラフより後に届くため、`loadPaperLayer` の解決時に
+  `preserveViewOnce` を立てて `renderNetwork()` を1回やり直す（見ている範囲は動かさない）。
+
+### 11.2 詳細ペイン
+
+- **`nodes[].claims[]` を描く**（区画「論文側の主張」。§3 の DTO にあったが Phase 0 では
+  未描画だった）。状態は既存の表示ラベル（`reviewStatusLabel`）で書き、
+  `resolution="artifact"` は既存語彙「未承認（解析結果）」に写す —
+  **生の status コード・`resolution` の値は描かない**。所在（章）が解決できている場合だけ
+  章タイトルを添える。**承認ボタンは置かない**: 確定の出口は従来どおり右下の
+  「根拠 claim」行に一本化する（GR1 — 同じ確定に2つの入口を作らない）。
+- **`facts[]` を「論文での対応」区画の先頭に描く**。従来は `available:false` のときしか
+  出していなかったが、`available:true` でも事実文は出る（例: 理論操作グラフが未構築で
+  ノードの対応を導出できない — §5.2 でバックエンドが足した事実文）。欠落を無言にしない
+  （PL8）。論文の順ビュー側は Phase 0 から先頭に描いている。
+- **未選択時の案内文**を差し替えた:
+  「ノードを選ぶと、論文側の対応（章・式・引用・図表）と対話が使えます。」
+  「詳細とレビュー操作（承認・却下）も同じ場所に表示されます。」（従来の1文が
+  レビュー操作にしか触れておらず、論文層と対話の存在が画面から読めなかった）。
+
+### 11.3 双方向ハイライト
+
+- **グラフ表示中 → 論文**: 「論文での対応」の見出し行に、選択ノードの**章チップ**を
+  並べる（`paperFacingHead`。`.graph-review-paper-facing-head`）。ビューを切り替えずに
+  「いま見ているノードが論文のどこか」が読める。
+- **論文の順 → グラフ**: 章の下のノードチップを押すと `state.focusNodeOnce` を立て、
+  次にグラフを描いたとき（`setView("graph")` → `renderNetwork`）その視点へ
+  `network.focus()` する。`graphView` 自体は focus/select API を公開していない（GR8 の
+  公開面は lsState 非依存の純関数のみ）ため、モジュールが既に握っている vis network
+  ハンドルを使う — `gotoNextUnreviewed` と同じ経路で、新しい依存を増やしていない。
+  論文の順で見ている間は network を描かない方針は不変。
+
+### 11.4 画面文脈アダプター（フロント側・`assistant_screen_adapter_design.md` §4.1/§5.1）
+
+- `window.GraphReview.getScreenContext()` を公開。返すのは**参照だけ**（SA1）:
+  `screen: "graph_review"` / `selection`（`document_id` / `node_id` /
+  `component_id` = 既存 `deliberationTargetId` の解決結果 or null / `graph_layer` =
+  選択ノード自身の層）/ `view`（`mode: "graph"|"paper"` / `layer: "main"|"detail"|"all"`
+  — 層トグルの `equation_detail` を契約語彙 `detail` に写す）/ `visible_entities`
+  （表示中の層の**最大20件**・`title` は `graphView.detailHeading` を**40字で切る**）。
+- **DTO 本体・描画されたテキストは渡さない**: 論文層の式・引用・説明・caption・
+  description には触れない（静的 grep でガードレール化）。
+- 送信は `sendChatText` の1箇所だけで `{content, screen_context}` にする。
+  ノード対話（`/sessions/{id}/messages`）とグラフ全体対話
+  （`/graph-sessions/{id}/messages`）は同じ関数を通り、**音声経路も
+  `sendChatText` へ合流している**ため自動的に同じボディになる（GR1 の
+  「音声から承認 API を呼ばない」は不変 — 足したのは対話ボディのみ）。
+- 保存・監査への影響はない（画面文脈はサーバ側で当該ターンの LLM 入力にだけ使われる
+  = SA6。フロントはセッションキャッシュにも `content` しか積まない）。
+
+### 11.5 3点セット・テスト
+
+- **新しい操作要素を足していない**ため `data-ui-anchor` は増やしていない（凡例は事実の
+  1行、章チップは `is-static` の非インタラクティブ表示、`claims[]` は既存
+  `graph-review.paper-facing` 区画の中身）。`admin_ui_anchors.py` とマニュアル
+  `26-admin-graph-review.md` は無変更。
+- CSS 追加は `.graph-review-paper-facing-head` / `.graph-review-paper-cue-legend` の2つ
+  （どちらも警告色を使わない）。
+- テストは `test_graph_review_ui_static.py` に
+  `TestScreenContext`（契約の形・上限・本文非送信・ES5）と `TestChat` の2件、
+  `TestPaperLayer` の Phase 1 分7件を追加。

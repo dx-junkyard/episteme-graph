@@ -41,6 +41,7 @@
     paperLayer: null,   // 論文層 DTO（読み時射影。取得前は null）
     paperLayerError: null, // 論文層の取得失敗の事実文（グラフ・レビュー操作は止めない）
     preserveViewOnce: false, // 次の再描画でズーム・パンを維持する（fit しない）
+    focusNodeOnce: "",  // 次の描画で視点を合わせるノード（論文の順 → グラフの双方向）
     voiceLoop: null,    // AdminVoiceChat のコントローラ（起動中のみ）
     voicePlayer: null,  // 読み上げ中の Audio（停止時に止める）
   };
@@ -86,6 +87,24 @@
   var PAPER_SECTION_EMPTY_TEXT = "このフレームには掛かっていません";
   var PAPER_UNLOCATED_TEXT = "論文上の位置を特定できませんでした（式・根拠・claim へのリンクがありません）";
   var PAPER_NODE_MISSING_TEXT = "このノードに対応する論文側の情報はありません。";
+
+  // キャンバスの離散マーク（設計書 §5.3）。論文側の要素（章・式・引用・図表）が
+  // 結び付いているノードに1文字だけ足す。**種別だけ**を示し、件数は出さない（PL4）。
+  var PAPER_CUE_GLYPH = "¶";
+  var PAPER_CUE_LEGEND_TEXT = "¶ 論文要素あり";
+  var PAPER_CUE_KIND_LABELS = [
+    { key: "sections", label: "章" },
+    { key: "equations", label: "式" },
+    { key: "evidence", label: "引用" },
+    { key: "figures", label: "図表" },
+    { key: "tables", label: "図表" },
+  ];
+
+  // 画面文脈アダプター（assistant_screen_adapter_design.md §4.1 / SA1）。
+  // 画面が AI 対話へ渡すのは「参照だけ」。描画されたテキスト・DTO 本体は渡さない。
+  var SCREEN_CONTEXT_SCREEN = "graph_review";
+  var SCREEN_CONTEXT_MAX_ENTITIES = 20;
+  var SCREEN_CONTEXT_MAX_TITLE_CHARS = 40;
 
   function esc(text) {
     return deps.escHtml ? deps.escHtml(text == null ? "" : String(text)) : String(text == null ? "" : text);
@@ -200,6 +219,7 @@
               '<button type="button" class="graph-review-view-btn" data-graph-review-view="paper">論文の順</button>' +
             "</span>" +
             '<span id="graph-review-layer-toolbar" data-ui-anchor="graph-review.layer"></span>' +
+            '<span id="graph-review-paper-cue-legend" class="graph-review-paper-cue-legend"></span>' +
             '<label class="graph-review-filter" data-ui-anchor="graph-review.filter-unreviewed">' +
               '<input type="checkbox" id="graph-review-unreviewed-toggle"> 未レビューのみ強調' +
             '</label>' +
@@ -306,6 +326,7 @@
     state.chatAnnotations = [];
     state.detailNotice = null;
     state.preserveViewOnce = false;
+    state.focusNodeOnce = "";
     state.view = "graph";
     state.paperLayer = null;
     state.paperLayerError = null;
@@ -380,6 +401,13 @@
         if (state.documentId !== documentId) return; // 別教材へ切替済みの遅延応答は破棄
         state.paperLayer = data || {};
         state.paperLayerError = null;
+        // 論文層はグラフより後に届く。キャンバスの離散マークはこの時点で初めて
+        // 決まるので描き直す（見ている範囲は動かさない）。
+        if (state.view === "graph" && state.network) {
+          state.preserveViewOnce = true;
+          renderNetwork();
+        }
+        renderPaperCueLegend();
         renderPaperOutline();
         renderDetail();
       })
@@ -387,6 +415,7 @@
         if (state.documentId !== documentId) return;
         state.paperLayer = null;
         state.paperLayerError = PAPER_ERROR_TEXT;
+        renderPaperCueLegend();
         renderPaperOutline();
         renderDetail();
       });
@@ -402,6 +431,7 @@
     renderLayerToolbar();
     renderUnreviewedCount();
     renderNetwork();
+    renderPaperCueLegend();
     renderPaperOutline();
     renderDetail();
     renderChatShell();
@@ -422,6 +452,7 @@
         try { state.network.redraw(); } catch (e) { /* noop */ }
       }
     }
+    renderPaperCueLegend();
   }
 
   function renderViewToggle() {
@@ -465,11 +496,27 @@
         renderLayerToolbar();
         renderUnreviewedCount();
         renderNetwork();
+        renderPaperCueLegend();
         renderDetail();
         // 選択が外れたのでノード対話タブは維持しない（送信時のエラーを防ぐ）。
         switchChatMode("graph");
       });
     });
+  }
+
+  // キャンバスの離散マークの凡例（設計書 §5.3）。マークの付いたノードが1つも無い
+  // ときは出さない（説明だけが残らないように）。件数は書かない（PL4）。
+  function renderPaperCueLegend() {
+    var el = document.getElementById("graph-review-paper-cue-legend");
+    if (!el) return;
+    if (state.view !== "graph" || !state.graph || !paperData()) { el.textContent = ""; return; }
+    var view = gv().filterByLayer(state.graph, state.layer);
+    var nodes = view.nodes || [];
+    var marked = false;
+    for (var i = 0; i < nodes.length; i++) {
+      if (paperNodeHasElements(gv().nodeId(nodes[i]))) { marked = true; break; }
+    }
+    el.textContent = marked ? PAPER_CUE_LEGEND_TEXT : "";
   }
 
   function renderUnreviewedCount() {
@@ -525,6 +572,14 @@
       if (g.nodeId(node) === state.selectedNodeId) {
         spec.borderWidth = Math.max(spec.borderWidth || 2, 4);
       }
+      // 論文要素あり（設計書 §5.3）。既存の ★ / ①（visNodeSpec）と同じくラベルへ
+      // 1文字足すだけの離散マークで、件数は出さない（PL4）。tooltip には種別だけを
+      // 並べる（式・引用・図表…）。
+      var cueKinds = paperNodeElementKinds(g.nodeId(node));
+      if (cueKinds.length) {
+        spec.label = String(spec.label || "") + " " + PAPER_CUE_GLYPH;
+        spec.title = String(spec.title || "") + "\n論文要素: " + cueKinds.join(" / ");
+      }
       return spec;
     });
     var edgeSpecs = displayEdges.map(function (edge, index) {
@@ -544,7 +599,16 @@
     state.network = network;
     var keepView = !!(state.preserveViewOnce && savedPosition && typeof savedScale === "number");
     state.preserveViewOnce = false; // フラグは一度きり
+    var focusOnce = state.focusNodeOnce && byId[state.focusNodeOnce] ? state.focusNodeOnce : "";
+    state.focusNodeOnce = "";
     network.once("afterDrawing", function () {
+      if (focusOnce) {
+        // 「論文の順」で選んだノードへ、グラフへ戻ったときに視点を合わせる（§5.3 双方向）。
+        try {
+          network.focus(focusOnce, { scale: 1.0, animation: false });
+          return;
+        } catch (e) { /* 失敗時は下の keepView / fit へ落とす */ }
+      }
       if (keepView) {
         try {
           network.moveTo({ position: savedPosition, scale: savedScale, animation: false });
@@ -632,6 +696,28 @@
     var nodes = (data && data.nodes) || null;
     if (!nodes || !nodeId) return null;
     return nodes[nodeId] || null;
+  }
+
+  // このノードに結び付いている論文要素の**種別**（設計書 §5.3 / PL4: 件数は出さない）。
+  // 空配列 = 論文層に対応が無い（マークを出さない）。
+  function paperNodeElementKinds(nodeId) {
+    var entry = paperNodeEntry(nodeId);
+    if (!entry) return [];
+    var kinds = [];
+    var seen = {};
+    for (var i = 0; i < PAPER_CUE_KIND_LABELS.length; i++) {
+      var kind = PAPER_CUE_KIND_LABELS[i];
+      var list = entry[kind.key];
+      if (!list || !list.length) continue;
+      if (seen[kind.label]) continue;
+      seen[kind.label] = true;
+      kinds.push(kind.label);
+    }
+    return kinds;
+  }
+
+  function paperNodeHasElements(nodeId) {
+    return paperNodeElementKinds(nodeId).length > 0;
   }
 
   // 章タイトルの索引（evidence / 式の所在表示に使う。DTO は section_id しか持たない）。
@@ -822,7 +908,10 @@
     container.querySelectorAll("[data-graph-review-node-id]").forEach(function (chip) {
       chip.addEventListener("click", function () {
         var nodeId = this.getAttribute("data-graph-review-node-id");
-        // 論文の順で見ている間は network を触らない（フォーカス移動もしない）。
+        // 論文の順で見ている間は network を触らない（描画されていないため）。
+        // 代わりに「次にグラフを描くときの視点」だけを覚えておき、グラフへ戻った
+        // ときにそのノードへ合わせる（設計書 §5.3 の双方向ハイライト）。
+        state.focusNodeOnce = nodeId;
         selectNode(nodeId);
       });
     });
@@ -837,19 +926,38 @@
     });
   }
 
+  // 区画の見出し。選択ノードの章チップを見出しに並べることで、グラフを見たままでも
+  // 「論文のどこか」が読める（設計書 §5.3 の双方向ハイライト。論文の順ビューでの
+  // チップ選択強調と対になる）。章タイトルが無いノードでは見出しだけになる。
+  function paperFacingHead(entry) {
+    var chips = "";
+    if (entry) {
+      var sections = (entry.sections || []).map(function (section) {
+        return { display_label: String(section.title || "").trim() };
+      });
+      chips = paperStaticChips(sections);
+    }
+    return '<div class="graph-review-paper-facing" data-ui-anchor="graph-review.paper-facing">' +
+      '<div class="graph-review-paper-facing-head">' +
+        '<div class="graph-review-paper-facing-title">論文での対応</div>' + chips +
+      "</div>";
+  }
+
   // 右ペイン「論文での対応」。取得前・失敗・available:false は区画ごと事実文1行に
   // 縮退し、既存のレビュー操作には影響させない（設計書 §4.1）。
   function paperFacingHtml(nodeId) {
-    var head = '<div class="graph-review-paper-facing" data-ui-anchor="graph-review.paper-facing">' +
-      '<div class="graph-review-paper-facing-title">論文での対応</div>';
     var tail = "</div>";
-    if (state.paperLayerError) return head + paperFactLine(state.paperLayerError) + tail;
+    if (state.paperLayerError) return paperFacingHead(null) + paperFactLine(state.paperLayerError) + tail;
     var data = paperData();
-    if (!data) return head + paperFactLine(PAPER_LOADING_TEXT) + tail;
+    if (!data) return paperFacingHead(null) + paperFactLine(PAPER_LOADING_TEXT) + tail;
     if (data.available === false) {
-      return head + paperFactLines(data.facts, PAPER_UNAVAILABLE_TEXT) + tail;
+      return paperFacingHead(null) + paperFactLines(data.facts, PAPER_UNAVAILABLE_TEXT) + tail;
     }
+    // 論文層の事実文（PL8）は available:true でも出る（例: 理論操作グラフが未構築で
+    // ノードの対応を導出できない）。区画の先頭に置いて、欠落を無言にしない。
+    var factsHtml = paperFactLines(data.facts, "");
     var entry = paperNodeEntry(nodeId);
+    var head = paperFacingHead(entry) + factsHtml;
     if (!entry) return head + paperFactLine(PAPER_NODE_MISSING_TEXT) + tail;
 
     var titles = paperSectionTitles();
@@ -886,6 +994,31 @@
         var label = String(role.section_label || "").trim();
         return "<li>" + (label ? '<span class="graph-review-paper-strong">' + esc(label) + "</span> " : "") +
           richText(String(role.text || "")) + "</li>";
+      }).join("") + "</ul>");
+    }
+
+    // 論文側の主張（DTO の nodes[].claims）。右下の「根拠 claim」がグラフの参照
+    // インデックス由来なのに対し、こちらは論文層が章まで解決した対応。状態は
+    // 既存の表示ラベルで書き（生の status コード・resolution は出さない）、
+    // 承認操作は既存の「根拠 claim」行に一本化する（GR1: 出口を増やさない）。
+    var paperClaims = (entry.claims || []).filter(function (claim) {
+      return claim && String(claim.text || "").trim();
+    });
+    if (paperClaims.length) {
+      block("論文側の主張", "<ul>" + paperClaims.map(function (claim) {
+        var chips = [];
+        if (String(claim.resolution || "") === "artifact") {
+          chips.push("未承認（解析結果）");
+        } else if (String(claim.review_status || "")) {
+          chips.push(reviewStatusLabel(claim.review_status));
+        }
+        var source = paperSourceLabel(claim.section_id, null, titles);
+        return "<li>" + richText(String(claim.text)) +
+          chips.map(function (chip) {
+            return '<span class="graph-review-chip">' + esc(chip) + "</span>";
+          }).join("") +
+          (source ? '<div class="graph-review-paper-note">' + esc(source) + "</div>" : "") +
+          "</li>";
       }).join("") + "</ul>");
     }
 
@@ -1101,7 +1234,8 @@
       state.detailNotice = null; // 対象ノードが無いので持ち越さない
       var pending = unreviewedNodesInView().length;
       container.innerHTML = '<div class="graph-review-empty">' +
-        'ノードを選ぶと詳細とレビュー操作が表示されます。' +
+        'ノードを選ぶと、論文側の対応（章・式・引用・図表）と対話が使えます。' +
+        '<br>詳細とレビュー操作（承認・却下）も同じ場所に表示されます。' +
         (pending ? "<br>この層の未レビューは " + pending + " 件です。「次の未レビューへ」で順に確認できます。" : "") +
         "</div>";
       return;
@@ -1529,6 +1663,63 @@
       });
   }
 
+  // -------------------------------------------------------------------------
+  // 画面文脈（assistant_screen_adapter_design.md §4.1 / §5.1）
+  //
+  // AI 対話へ渡すのは**参照だけ**（SA1）: 選択中の要素の ID・表示モード・見えている
+  // ノードの ID と短い題名まで。描画されたテキスト・論文層 DTO の本体（式・引用・
+  // 説明の文字列）は渡さない。解決はサーバ側が権限ゲート付きの経路で行う（SA2）。
+  // -------------------------------------------------------------------------
+
+  function screenContextTitle(text) {
+    var value = String(text == null ? "" : text).trim();
+    if (value.length <= SCREEN_CONTEXT_MAX_TITLE_CHARS) return value;
+    return value.slice(0, SCREEN_CONTEXT_MAX_TITLE_CHARS);
+  }
+
+  // 表示中の層トグル（main / equation_detail / all）→ 契約の語彙（main / detail / all）。
+  function screenContextLayer() {
+    var layer = String(state.layer || "main");
+    if (layer === "equation_detail") return "detail";
+    if (layer === "all") return "all";
+    return "main";
+  }
+
+  function screenContextEntities() {
+    if (!state.graph || !gv()) return [];
+    var view = gv().filterByLayer(state.graph, state.layer);
+    var nodes = (view.nodes || []).slice(0, SCREEN_CONTEXT_MAX_ENTITIES);
+    var entities = [];
+    nodes.forEach(function (node) {
+      var nodeId = gv().nodeId(node);
+      if (!nodeId) return;
+      entities.push({
+        type: "node",
+        id: nodeId,
+        title: screenContextTitle(gv().detailHeading(node, nodeId)),
+      });
+    });
+    return entities;
+  }
+
+  function getScreenContext() {
+    var node = state.selectedNodeId ? nodeById(state.selectedNodeId) : null;
+    return {
+      screen: SCREEN_CONTEXT_SCREEN,
+      selection: {
+        document_id: String(state.documentId || ""),
+        node_id: String(state.selectedNodeId || ""),
+        component_id: node ? (deliberationTargetId(node) || null) : null,
+        graph_layer: node ? String(node.graph_layer || "main") : "",
+      },
+      view: {
+        mode: state.view === "paper" ? "paper" : "graph",
+        layer: screenContextLayer(),
+      },
+      visible_entities: screenContextEntities(),
+    };
+  }
+
   function sendChat() {
     var input = document.getElementById("graph-review-chat-input");
     var content = (input && input.value || "").trim();
@@ -1582,7 +1773,11 @@
       }
       // 入力欄から送った分だけを消す（音声経路や入力し直しの途中文字を消さない）。
       if (input && input.value.trim() === content) input.value = "";
-      deps.apiFetch(path, { method: "POST", body: JSON.stringify({ content: content }) })
+      // 画面文脈は参照だけを足す（SA1）。ノード対話・グラフ全体対話とも同じボディで、
+      // 音声経路もこの関数を通るため自動的に同じものが載る。サーバ側で解決できない・
+      // 権限外の参照は静かに落とされる（SA2）ので、送信の成否には影響しない。
+      var requestBody = { content: content, screen_context: getScreenContext() };
+      deps.apiFetch(path, { method: "POST", body: JSON.stringify(requestBody) })
         .then(function (res) {
           if (res.ok) return res.json();
           var httpStatus = res.status;
@@ -1770,5 +1965,7 @@
     },
     open: open,
     close: close,
+    // 画面文脈アダプター（assistant_screen_adapter_design.md §4.1）。参照だけを返す。
+    getScreenContext: getScreenContext,
   };
 })();

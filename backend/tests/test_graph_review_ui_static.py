@@ -142,6 +142,102 @@ class TestChat:
     def test_degraded_reply_is_labeled(self):
         assert "縮退応答" in JS_SRC
 
+    def test_send_body_carries_screen_context(self):
+        """画面文脈アダプター（assistant_screen_adapter_design.md §5.1）。
+
+        ノード対話・グラフ全体対話は同じ送信関数を通るため、ボディの組み立ては
+        1箇所。音声経路も `sendChatText` に合流しているので同じものが載る。
+        """
+        start = JS_SRC.index("function sendChatText(")
+        block = JS_SRC[start:]
+        block = block[: block.index("\n  // ---")]
+        assert "screen_context: getScreenContext()" in block
+        assert "JSON.stringify(requestBody)" in block
+        # content は従来どおり素の発話のみ（画面文脈を本文に混ぜない）。
+        assert "content: content" in block
+
+    def test_voice_path_shares_the_same_send_function(self):
+        # 音声発話は sendChatText へ委譲する（送信ボディを二重実装しない）。
+        start = JS_SRC.index("function voiceUtterance(")
+        block = JS_SRC[start: JS_SRC.index("\n  function ", start)]
+        assert "sendChatText(" in block
+        assert "JSON.stringify" not in block
+
+
+class TestScreenContext:
+    """画面文脈アダプター（assistant_screen_adapter_design.md §4.1 / SA1）。
+
+    画面が渡すのは**参照だけ**（選択の ID・表示モード・見えているノードの ID と
+    40字以内の題名）。描画されたテキスト・論文層 DTO の本体は渡さない。
+    """
+
+    def _block(self) -> str:
+        start = JS_SRC.index("function getScreenContext(")
+        return JS_SRC[start: JS_SRC.index("\n  function ", start)]
+
+    def test_public_api_exposes_getter(self):
+        assert "getScreenContext: getScreenContext" in JS_SRC
+
+    def test_contract_shape(self):
+        block = self._block()
+        for key in (
+            'screen: SCREEN_CONTEXT_SCREEN',
+            "document_id:",
+            "node_id:",
+            "component_id:",
+            "graph_layer:",
+            "visible_entities:",
+        ):
+            assert key in block, key
+        assert 'SCREEN_CONTEXT_SCREEN = "graph_review"' in JS_SRC
+        # 表示モードは "graph" | "paper"、層は "main" | "detail" | "all"。
+        assert '"paper" : "graph"' in block
+        assert 'layer: screenContextLayer()' in block
+        layer_fn = JS_SRC[JS_SRC.index("function screenContextLayer("):]
+        layer_fn = layer_fn[: layer_fn.index("\n  function ")]
+        assert '"detail"' in layer_fn and '"all"' in layer_fn and '"main"' in layer_fn
+
+    def test_component_id_uses_existing_resolver(self):
+        assert "deliberationTargetId(node) || null" in self._block()
+
+    def test_no_dto_body_text_is_sent(self):
+        """SA1: 本文・DTO 本体を渡さない（参照と短い題名だけ）。"""
+        source = (
+            self._block()
+            + JS_SRC[JS_SRC.index("function screenContextEntities("): JS_SRC.index("function getScreenContext(")]
+        )
+        for forbidden in (
+            "display_text",
+            "plain_text",
+            "caption",
+            "summary",
+            "body",
+            "description",
+            "latex",
+            "evidence",
+            "paperLayer",
+        ):
+            assert forbidden not in source, forbidden
+
+    def test_visible_entities_are_bounded(self):
+        assert "SCREEN_CONTEXT_MAX_ENTITIES = 20" in JS_SRC
+        assert "SCREEN_CONTEXT_MAX_TITLE_CHARS = 40" in JS_SRC
+        entities = JS_SRC[JS_SRC.index("function screenContextEntities("):]
+        entities = entities[: entities.index("\n  function ")]
+        assert "slice(0, SCREEN_CONTEXT_MAX_ENTITIES)" in entities
+        title_fn = JS_SRC[JS_SRC.index("function screenContextTitle("):]
+        title_fn = title_fn[: title_fn.index("\n  function ")]
+        assert "SCREEN_CONTEXT_MAX_TITLE_CHARS" in title_fn
+        assert "slice(0, SCREEN_CONTEXT_MAX_TITLE_CHARS)" in title_fn
+
+    def test_screen_context_block_is_es5(self):
+        start = JS_SRC.index("function screenContextTitle(")
+        block = JS_SRC[start: JS_SRC.index("\n  function sendChat(", start)]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+        assert "`" not in block
+
 
 class TestVoiceChat:
     """音声対話追補（設計書 §12）— エンジンの独立性と GR1 の維持を静的に固定する。"""
@@ -701,3 +797,81 @@ class TestPaperLayer:
     def test_manual_sections_exist(self):
         assert "{#paper-view}" in self.MANUAL_SRC
         assert "{#paper-facing}" in self.MANUAL_SRC
+
+    # --- Phase 1 表示の是正（設計書 §11 / 画面文脈アダプター §5.3）------------
+
+    def test_canvas_cue_is_a_discrete_mark_without_counts(self):
+        # ラベルに1文字足すだけの離散マーク（★ / ① と同じ流儀）。件数は出さない（PL4）。
+        assert 'PAPER_CUE_GLYPH = "¶"' in JS_SRC
+        assert "PAPER_CUE_LEGEND_TEXT" in JS_SRC
+        assert '"¶ 論文要素あり"' in JS_SRC
+        kinds = JS_SRC[JS_SRC.index("function paperNodeElementKinds("):]
+        kinds = kinds[: kinds.index("\n  function ")]
+        # 種別だけを集める（長さは真偽判定にしか使わず、外へ出さない）。
+        assert ".length +" not in kinds
+        assert "kinds.push(kind.label)" in kinds
+        legend = JS_SRC[JS_SRC.index("function renderPaperCueLegend("):]
+        legend = legend[: legend.index("\n  function ")]
+        assert "件" not in legend
+
+    def test_canvas_cue_applied_in_vis_node_spec_path(self):
+        start = JS_SRC.index("function renderNetwork(")
+        block = JS_SRC[start: JS_SRC.index("\n  function selectNode(", start)]
+        assert "paperNodeElementKinds(" in block
+        assert "PAPER_CUE_GLYPH" in block
+
+    def test_canvas_cue_rerendered_when_paper_layer_arrives(self):
+        # 論文層はグラフより後に届く（並行取得）。届いた時点で描き直す。
+        start = JS_SRC.index("function loadPaperLayer(")
+        block = JS_SRC[start: JS_SRC.index("\n  // ---", start)]
+        assert "renderNetwork()" in block
+        assert "renderPaperCueLegend()" in block
+        # 見ている範囲は動かさない。
+        assert "state.preserveViewOnce = true" in block
+
+    def test_node_claims_rendered_with_labels_not_raw_codes(self):
+        start = JS_SRC.index("var paperClaims = ")
+        block = JS_SRC[start: JS_SRC.index("var equations = entry.equations", start)]
+        assert "entry.claims" in JS_SRC[JS_SRC.index("function paperFacingHtml("):]
+        assert "論文側の主張" in block
+        # 生の status コード・resolution 値をそのまま描かない（既存のラベル関数を使う）。
+        assert "reviewStatusLabel(claim.review_status)" in block
+        assert "未承認（解析結果）" in block
+        assert "esc(claim.resolution)" not in block
+        assert "esc(String(claim.resolution" not in block
+
+    def test_empty_detail_pane_points_at_paper_and_chat(self):
+        assert "ノードを選ぶと、論文側の対応（章・式・引用・図表）と対話が使えます。" in JS_SRC
+        # レビュー操作の案内も残す（既存の役割を落とさない）。
+        assert "詳細とレビュー操作（承認・却下）も同じ場所に表示されます。" in JS_SRC
+
+    def test_facts_rendered_in_paper_facing_block(self):
+        # PL8: available:true でも欠落の事実文（グラフ未構築など）は出す。
+        start = JS_SRC.index("function paperFacingHtml(")
+        block = JS_SRC[start: JS_SRC.index("var titles = paperSectionTitles();", start)]
+        assert "var factsHtml = paperFactLines(data.facts" in block
+        assert "paperFacingHead(entry) + factsHtml" in block
+        # 論文の順ビュー側は従来どおり先頭に facts を描く。
+        outline = JS_SRC[JS_SRC.index("function renderPaperOutline("):]
+        outline = outline[: outline.index("\n  function markSelectedPaperChips(")]
+        assert "paperFactLines(data.facts" in outline
+
+    def test_bidirectional_highlight(self):
+        # グラフ表示中でも、選択ノードの章チップが「論文での対応」の見出しに出る。
+        head = JS_SRC[JS_SRC.index("function paperFacingHead("):]
+        head = head[: head.index("\n  function paperFacingHtml(")]
+        assert "graph-review-paper-facing-head" in head
+        assert "entry.sections" in head
+        # 論文の順でチップを押すと、グラフへ戻ったときにその視点へ合わせる。
+        assert "state.focusNodeOnce = nodeId" in JS_SRC
+        network = JS_SRC[JS_SRC.index("function renderNetwork("):]
+        network = network[: network.index("\n  function selectNode(")]
+        assert "network.focus(focusOnce" in network
+
+    def test_new_css_classes_defined(self):
+        assert ".graph-review-paper-facing-head" in CSS_SRC
+        assert ".graph-review-paper-cue-legend" in CSS_SRC
+        # 凡例は事実の1行。警告色にしない（PL4）。
+        legend_css = CSS_SRC[CSS_SRC.index(".graph-review-paper-cue-legend"):]
+        legend_css = legend_css[: legend_css.index("}")]
+        assert "red" not in legend_css and "#ef4444" not in legend_css

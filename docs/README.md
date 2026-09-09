@@ -211,6 +211,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[要素インベントリ](features/element_inventory_design.md)
   ／[グラフ対話レビュー（教材起点のグラフ確認・承認画面）](features/graph_dialogue_review_design.md)
   ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
+  ／[画面文脈アダプター（AI 対話に「いま見ている画面」を渡す層）](features/assistant_screen_adapter_design.md)
 - [二層説明（generic/contextual）+ 図のコース流通](features/hierarchical_context_explanation_design.md)
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)

@@ -588,19 +588,33 @@ def build_paper_layer(
     *,
     figure_rows: list[dict] | None = None,
     explanation_rows: list[dict] | None = None,
+    extra_facts: list[str] | None = None,
 ) -> dict:
-    """論文層 DTO（設計 §3）を組み立てる。入力は一切 mutate しない。"""
+    """論文層 DTO（設計 §3）を組み立てる。入力は一切 mutate しない。
+
+    ``extra_facts`` は呼び出し側（route）が知っている状況の事実文を ``facts`` の
+    先頭に足すためのもの（例: 保存済みグラフが無く読み時組み立てにフォールバック
+    した = 設計 §5.2）。重複は落とすだけで、他の挙動は変えない。
+    """
     graph_payload = _mapping(graph)
     nodes = [n for n in _dicts(graph_payload.get("nodes")) if _node_id(n)]
     index = _PaperIndex(_mapping(artifacts), _dicts(figure_rows), _dicts(explanation_rows))
 
     facts: list[str] = []
+
+    def _add_fact(value: Any) -> None:
+        text = str(value or "").strip()
+        if text and text not in facts:
+            facts.append(text)
+
+    for fact in extra_facts or []:
+        _add_fact(fact)
     for stage, collection_key, fact in MISSING_ARTIFACT_FACTS:
         stage_payload = _mapping(index.artifacts.get(stage))
         collection = stage_payload.get(collection_key)
         present = bool(collection) if not isinstance(collection, dict) else bool(collection.get("text"))
         if not present:
-            facts.append(fact)
+            _add_fact(fact)
 
     document_id = str(graph_payload.get("document_id") or "")
     graph_updated_at = str(graph_payload.get("graph_updated_at") or "") or None

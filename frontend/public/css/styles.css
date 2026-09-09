@@ -11784,6 +11784,16 @@ button.element-card-item:focus-visible .element-card-item-label {
 }
 .graph-review-paper-facing-title { font-weight: 700; font-size: 12.5px; margin-bottom: 4px; }
 .graph-review-paper-role { color: var(--color-text-secondary, #475569); margin-bottom: 4px; }
+/* 見出し行に選択ノードの章チップを並べる（双方向ハイライト。設計書 §11）。 */
+.graph-review-paper-facing-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.graph-review-paper-facing-head .graph-review-paper-chips { margin: 0; }
+/* キャンバスの離散マーク「¶ 論文要素あり」の凡例。件数を出さない事実の1行なので
+   強調・警告色にしない（PL4）。 */
+.graph-review-paper-cue-legend {
+  color: var(--color-text-tertiary, #6b7280);
+  font-size: 11.5px;
+  white-space: nowrap;
+}
 
 /* ---------------------------------------------------------------------------
  * 制度指標カタログの事実文（docs/features/indicator_governance_design.md, IG1）。

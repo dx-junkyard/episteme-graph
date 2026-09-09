@@ -111,21 +111,30 @@ def _install_common(monkeypatch, *, artifacts=None, sessions=None, graph=None, b
     captured["sessions"] = session_list
     monkeypatch.setattr(tc, "_pg_session", lambda: session_list.pop(0))
 
-    def _default_builder(graph_arg, artifacts_arg, *, figure_rows, explanation_rows):
+    def _default_builder(graph_arg, artifacts_arg, *, figure_rows, explanation_rows, extra_facts=None):
         captured["graph"] = graph_arg
         captured["artifacts"] = artifacts_arg
         captured["figure_rows"] = figure_rows
         captured["explanation_rows"] = explanation_rows
-        return {"document_id": _DOC, "available": True, "facts": [], "nodes": {}}
+        captured["extra_facts"] = extra_facts
+        return {
+            "document_id": _DOC,
+            "available": True,
+            "facts": list(extra_facts or []),
+            "nodes": {},
+        }
 
-    def _wrapped(graph_arg, artifacts_arg, *, figure_rows, explanation_rows):
+    def _wrapped(graph_arg, artifacts_arg, *, figure_rows, explanation_rows, extra_facts=None):
         captured["graph"] = graph_arg
         captured["artifacts"] = artifacts_arg
         captured["figure_rows"] = figure_rows
         captured["explanation_rows"] = explanation_rows
-        return (builder or _default_builder)(
-            graph_arg, artifacts_arg, figure_rows=figure_rows, explanation_rows=explanation_rows
-        )
+        captured["extra_facts"] = extra_facts
+        target = builder or _default_builder
+        kwargs = {"figure_rows": figure_rows, "explanation_rows": explanation_rows}
+        if target is _default_builder:
+            kwargs["extra_facts"] = extra_facts
+        return target(graph_arg, artifacts_arg, **kwargs)
 
     monkeypatch.setattr(tc, "_build_paper_layer_payload", _wrapped)
     return captured
@@ -211,6 +220,56 @@ class TestBuilderInputs:
         tc.get_document_paper_layer(_DOC, current_user=_TEACHER)
         assert captured["graph"]["nodes"] == []
         assert "reference_index" in captured["graph"]
+
+    def test_fallback_graph_adds_no_stored_graph_fact(self, monkeypatch):
+        """設計 §5.2: 保存済みグラフが無い経路は「空」ではなく事実文で言う。"""
+        from core.graph_paper_layer.schema import FACT_NO_STORED_GRAPH
+
+        captured = _install_common(monkeypatch)
+        monkeypatch.setattr(tc, "_normalize_stored_component_graph", lambda doc, stored, comps: {})
+        monkeypatch.setattr(
+            tc, "_build_component_graph_payload", lambda doc, comps: {"nodes": [], "edges": []}
+        )
+        result = tc.get_document_paper_layer(_DOC, current_user=_TEACHER)
+        assert captured["extra_facts"] == [FACT_NO_STORED_GRAPH]
+        assert FACT_NO_STORED_GRAPH in result["facts"]
+        # available は builder の判断のまま（事実文を足すだけ・他の挙動を変えない）。
+        assert result["available"] is True
+
+    def test_stored_graph_path_passes_no_extra_facts(self, monkeypatch):
+        """保存済みグラフがある通常経路は extra_facts を渡さない（呼び出し契約を変えない）。"""
+        captured = _install_common(monkeypatch)
+        result = tc.get_document_paper_layer(_DOC, current_user=_TEACHER)
+        assert captured["extra_facts"] is None
+        assert result["facts"] == []
+
+
+class TestBuildPaperLayerForDocument:
+    """画面文脈アダプターと GET が同一経路を使う（assistant_screen_adapter_design §4.4）。"""
+
+    def test_route_delegates_to_the_shared_builder(self, monkeypatch):
+        seen = {}
+
+        def _fake(doc):
+            seen["doc"] = doc
+            return {"available": True}
+
+        monkeypatch.setattr(tc, "_ensure_document_viewable", lambda doc, user: None)
+        monkeypatch.setattr(tc, "build_paper_layer_for_document", _fake)
+        result = tc.get_document_paper_layer(_DOC, current_user=_TEACHER)
+        assert seen["doc"] == _DOC
+        assert result == {"available": True}
+
+    def test_shared_builder_has_no_permission_gate_of_its_own(self, monkeypatch):
+        """ゲートは呼び出し側の責務（GET は _ensure_document_viewable を通す）。"""
+        captured = _install_common(monkeypatch)
+        monkeypatch.setattr(
+            tc, "_ensure_document_viewable",
+            lambda doc, user: pytest.fail("共有ビルダーはゲートを持たない（呼び出し側の責務）"),
+        )
+        result = tc.build_paper_layer_for_document(_DOC)
+        assert result["available"] is True
+        assert captured["graph"]["nodes"] == [{"component_id": "n1"}]
 
     def test_sessions_are_closed(self, monkeypatch):
         captured = _install_common(monkeypatch)

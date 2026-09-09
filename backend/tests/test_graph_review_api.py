@@ -325,6 +325,49 @@ class TestStoredGraphLiveReviewStatus:
         assert graph["nodes"][0]["review_status"] == "source_backed"
 
 
+class TestStoredGraphAgentComponentId:
+    """論文層（graph_paper_layer）が component_assembly / 説明を引くための agent 側 ID を
+    normalizer が落とさない（assistant_screen_adapter_design.md §5.2 の穴の是正）。
+
+    ``persist_component_graph`` は node の component_id を DB UUID に差し替えて agent 側 ID を
+    ``agent_component_id`` に退避する。ここで落とすとノードの「論文側の顔」（要約・
+    contextual 説明）が全て空になる。
+    """
+
+    def _stored_node(self, **overrides):
+        node = {
+            "component_id": _COMPONENT,
+            "id": _COMPONENT,
+            "agent_component_id": "comp_003",
+            "label": "Theory basis",
+            "graph_layer": "main",
+            "review_status": "source_backed",
+            "source_backing_status": "source_backed",
+        }
+        node.update(overrides)
+        return node
+
+    def test_agent_component_id_is_passed_through(self):
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [self._stored_node()], "edges": []}, [],
+        )
+        assert graph["nodes"][0]["agent_component_id"] == "comp_003"
+        # 既存キーは不変（additive）。
+        assert graph["nodes"][0]["component_id"] == _COMPONENT
+
+    def test_key_is_absent_when_stored_node_has_none(self):
+        node = self._stored_node()
+        node.pop("agent_component_id")
+        graph = tc._normalize_stored_component_graph(_DOC, {"nodes": [node], "edges": []}, [])
+        assert "agent_component_id" not in graph["nodes"][0]
+
+    def test_blank_agent_component_id_is_not_added(self):
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [self._stored_node(agent_component_id="   ")], "edges": []}, [],
+        )
+        assert "agent_component_id" not in graph["nodes"][0]
+
+
 class TestStoredGraphReviewReasonProjection:
     """review_reasons は構築時の焼き込み値なので、レビューを待っていないノードで
     「要確認の理由」として出すと確定済みの構造まで欠陥に見える。読み時射影だけで
