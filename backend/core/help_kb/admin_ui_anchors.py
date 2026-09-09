@@ -270,6 +270,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.analyze-images",
         "materials.arxiv-discovery",
         "materials.arxiv-discovery-citation-search",
+        "materials.arxiv-discovery-complement",
+        "materials.arxiv-discovery-foundation",
         "materials.arxiv-discovery-ingest",
         "materials.arxiv-discovery-interest",
         "materials.arxiv-discovery-modal",
@@ -858,6 +860,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.arxiv-discovery": "teacher/11-admin-materials.md#arxiv-discovery",
     # 引用グラフから探す（取り込み済み論文をシードにした第2の候補供給。env オプトインで既定は無効）
     "materials.arxiv-discovery-citation-search": "teacher/11-admin-materials.md#arxiv-discovery-citation-search",
+    # コーパスを補う候補を探す（地図の薄い領域・検証記録の無い前提の2レンズ。LLM 不使用）
+    "materials.arxiv-discovery-complement": "teacher/11-admin-materials.md#arxiv-discovery-complement",
+    # 基盤論文を探す（取り込み済み論文の参照リストから導出。引用グラフ供給と同じオプトイン）
+    "materials.arxiv-discovery-foundation": "teacher/11-admin-materials.md#arxiv-discovery-foundation",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）

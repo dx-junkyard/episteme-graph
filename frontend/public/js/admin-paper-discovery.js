@@ -106,6 +106,30 @@
   var CITATION_EMPTY_NOTICE =
     "引用グラフからは候補が見つかりませんでした。取り込み済みの論文が増えると候補が変わることがあります。";
 
+  // ── コーパスを補う論文（docs/features/corpus_complement_design.md, CC1〜CC8）──
+  // 「近い論文」ではなく「読むと知見が足される論文」。補完の根拠はコーパスの構造
+  // （地図の薄い領域 / 検証記録の無い前提 / 取り込み済み論文の参照リスト）だけで、
+  // 学習者の痕跡は入力に混ぜない（CC1）。判定はサーバが決定論的に行う（LLM 0回）。
+  // このモジュールは**サーバが付けたキーの有無をそのまま描く**だけで、閾値判定・
+  // 並べ替え・件数の表示をしない（CC4 / CC6）。
+  var COMPLEMENT_ORDER_NOTE = "並び順: 補完の根拠がある候補を先に（関連度順）";
+  var COMPLEMENT_SKELETON_HEAD = "地図の版: ";
+  // CC6: 補完の判定は推定であり、その出所を剥がさない（常時表示のタグ）。
+  var COMPLEMENT_ESTIMATE_TAG = "〈推定〉";
+  var COMPLEMENT_FILLS_HEAD = "地図の薄い領域に着地: ";
+  var COMPLEMENT_SKIES_HEAD = "検証記録の無い前提に近い: ";
+  var COMPLEMENT_UNAVAILABLE_FALLBACK = "補完の判定は行われませんでした。";
+  var COMPLEMENT_SEARCH_PROGRESS = "コーパスを補う候補を探しています...";
+  var COMPLEMENT_ERROR_FALLBACK = "コーパスを補う候補を取得できませんでした。";
+  var FOUNDATION_MODE_LABEL = "候補の出所: 取り込み済み論文の参照リスト";
+  var FOUNDATION_SEEDS_HEAD = "参照を読んだ論文: ";
+  var FOUNDATION_PENDING_NOTICE =
+    "まだ参照リストを読んでいない取り込み済み論文があります。もう一度押すと続きを読みます。";
+  var FOUNDATION_SEARCH_PROGRESS = "取り込み済み論文の参照リストを読んでいます...";
+  var FOUNDATION_UNAVAILABLE_FALLBACK = "基盤論文の候補を取得できませんでした。";
+  var FOUNDATION_EMPTY_NOTICE =
+    "取り込み済みの複数の論文が共通に引用している未取り込みの論文は、読めた範囲では見つかりませんでした。";
+
   var state = {
     open: false,
     domainKey: "",
@@ -136,12 +160,20 @@
     order: "date",
     appliedOrder: "date",
     ranking: null,
-    // 一覧の出所（"search" = 通常検索 / "citation" = 引用グラフ）。混ぜない。
+    // 一覧の出所（"search" = 通常検索 / "citation" = 引用グラフ /
+    // "complement" = コーパスを補う候補 / "foundation" = 基盤論文）。混ぜない。
     mode: "search",
     citationEnabled: null,
     citationNote: "",
     citationSeeds: [],
     citationSearching: false,
+    // コーパスを補う論文（CC8: レンズ単位の縮退はサーバの事実文をそのまま出す）。
+    complement: null,
+    complementSearching: false,
+    foundationSeeds: [],
+    foundationNote: "",
+    foundationPending: false,
+    foundationSearching: false,
     // Phase D（コーパス回遊）: 学習者の関心（k-匿名レンジの行のみ）。
     // 取得はモーダルを開いたときと分野を選んだときの各1回だけ（ポーリングしない）。
     interest: []
@@ -300,7 +332,11 @@
 
           '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">' +
             '<button type="button" id="pd-search-btn" data-ui-anchor="materials.arxiv-discovery-search" class="admin-action-btn">この条件で検索</button>' +
+            // コーパスを補う候補（CC7: 候補を並べるだけ。取り込みは既存の弁のまま）。
+            '<button type="button" id="pd-complement-btn" data-ui-anchor="materials.arxiv-discovery-complement" class="admin-action-btn">コーパスを補う候補を探す</button>' +
             '<button type="button" id="pd-citation-btn" data-ui-anchor="materials.arxiv-discovery-citation-search" class="admin-action-btn" disabled>引用グラフから探す</button>' +
+            // 基盤論文（レンズC）は引用グラフ供給と同じオプトインを共有する（強制はサーバ側）。
+            '<button type="button" id="pd-foundation-btn" data-ui-anchor="materials.arxiv-discovery-foundation" class="admin-action-btn" disabled>基盤論文を探す</button>' +
             '<button type="button" id="pd-subscribe-btn" data-ui-anchor="materials.arxiv-discovery-subscribe" class="admin-action-btn">この条件を保存</button>' +
             '<span id="pd-subscribe-note" style="font-size:11.5px;color:var(--color-text-tertiary)"></span>' +
           "</div>" +
@@ -315,7 +351,9 @@
 
         // ② 候補一覧（PD6: 検索条件を常に上に出す）
         '<div id="pd-query-note" style="font-size:11.5px;color:var(--color-text-tertiary);padding-bottom:4px"></div>' +
-        '<div id="pd-ranking-note" style="font-size:11.5px;color:var(--color-text-secondary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px"></div>' +
+        '<div id="pd-ranking-note" style="font-size:11.5px;color:var(--color-text-secondary);padding-bottom:4px"></div>' +
+        // CC8: レンズが1つ成立しなくても検索は成立させ、縮退はレンズごとの事実文で言う。
+        '<div id="pd-complement-note" style="font-size:11.5px;color:var(--color-text-secondary);border-bottom:1px solid var(--color-border-tertiary);padding-bottom:6px;margin-bottom:6px"></div>' +
         '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:6px">' +
           '<label style="font-size:11.5px;color:var(--color-text-secondary);display:flex;align-items:center;gap:4px">' +
             '<input type="checkbox" id="pd-show-dismissed">見送り済みを表示' +
@@ -378,6 +416,12 @@
     state.citationNote = "";
     state.citationSeeds = [];
     state.citationSearching = false;
+    state.complement = null;
+    state.complementSearching = false;
+    state.foundationSeeds = [];
+    state.foundationNote = "";
+    state.foundationPending = false;
+    state.foundationSearching = false;
     state.interest = [];
 
     var overlay = document.createElement("div");
@@ -394,7 +438,9 @@
     el("pd-close").addEventListener("click", close);
     el("pd-cancel").addEventListener("click", close);
     el("pd-search-btn").addEventListener("click", runSearch);
+    el("pd-complement-btn").addEventListener("click", runComplementSearch);
     el("pd-citation-btn").addEventListener("click", runCitationSearch);
+    el("pd-foundation-btn").addEventListener("click", runFoundationSearch);
     el("pd-subscribe-btn").addEventListener("click", saveSubscription);
     // 並び順の変更だけでは検索しない（PD8: 押し付けない・自動 fetch しない）。
     el("pd-order").addEventListener("change", function () {
@@ -421,6 +467,7 @@
     renderChips();
     renderQueryNote();
     renderRankingNote();
+    renderComplementNote();
     renderCitationControl();
     renderCandidates();
     renderIngestSummary();
@@ -571,6 +618,7 @@
     renderChips();
     renderQueryNote();
     renderRankingNote();
+    renderComplementNote();
     renderCitationControl();
     renderCandidates();
     renderIngestSummary();
@@ -892,10 +940,11 @@
       .then(function (data) {
         state.searching = false;
         if (button) button.disabled = false;
-        // 通常検索の結果は引用グラフ一覧と混ぜない（出所を上書きする）。
+        // 通常検索の結果は引用グラフ・補完・基盤論文の一覧と混ぜない（出所を上書きする）。
         state.mode = "search";
         state.citationNote = "";
         state.citationSeeds = [];
+        clearComplementState();
         state.candidates = (data && data.candidates) || [];
         state.query = (data && data.query) || "";
         state.closedWorldNote = (data && data.closed_world_note) || "";
@@ -909,6 +958,7 @@
         setNotice("");
         renderQueryNote();
         renderRankingNote();
+        renderComplementNote();
         renderCandidates();
         renderIngestSummary();
       })
@@ -936,6 +986,19 @@
     if (!node) return;
     var parts = [];
 
+    // 基盤論文（レンズC）は arXiv 検索ではなく参照リストから来る別の一覧。
+    if (state.mode === "foundation") {
+      parts.push(FOUNDATION_MODE_LABEL);
+      var read = foundationSeedTitles();
+      if (read.length) parts.push(FOUNDATION_SEEDS_HEAD + read.join(" ・ "));
+      if (state.closedWorldNote) parts.push(state.closedWorldNote);
+      if (state.foundationNote) parts.push(state.foundationNote);
+      // 読み残しがあることを黙らない（もう一度押せば続きを読む — PD6）。
+      if (state.foundationPending) parts.push(FOUNDATION_PENDING_NOTICE);
+      node.textContent = parts.join(" ／ ");
+      return;
+    }
+
     // 引用グラフ一覧は通常検索と別の出所。条件行ごと切り替えて混同を防ぐ。
     if (state.mode === "citation") {
       parts.push(CITATION_MODE_LABEL);
@@ -955,6 +1018,17 @@
     } else {
       parts.push("検索条件: まだ検索していません。");
     }
+    // 補完モードは並び順が固定（補完の根拠がある候補を先に）。骨格の版を明示して
+    // 「この版の地図の中での言明」に留める（CC5 / VA8）。
+    if (state.mode === "complement") {
+      parts.push(COMPLEMENT_ORDER_NOTE);
+      var version = complementSkeletonVersion();
+      if (version) parts.push(COMPLEMENT_SKELETON_HEAD + version);
+      if (state.closedWorldNote) parts.push(state.closedWorldNote);
+      node.textContent = parts.join(" ／ ");
+      return;
+    }
+
     if (state.searched) {
       // 実際に適用された並び順を書く（要求した並び順ではなく）。
       parts.push(
@@ -984,6 +1058,194 @@
     node.textContent = ranking.note ? String(ranking.note) : "";
   }
 
+  // ── コーパスを補う論文（CC1〜CC8。PD8: ボタンを押したときだけ実行する）──────
+  // 参照リストを読んだ論文（レンズC のシード）を名前で言う。
+  function foundationSeedTitles() {
+    var out = [];
+    for (var i = 0; i < state.foundationSeeds.length; i++) {
+      var seed = state.foundationSeeds[i] || {};
+      var text = seed.title || seed.arxiv_id || "";
+      if (text) out.push(String(text));
+    }
+    return out;
+  }
+
+  // 骨格の版はサーバが返した値をそのまま出す（クライアントで版を推定しない）。
+  function complementSkeletonVersion() {
+    var complement = state.complement;
+    if (!complement || complement.skeleton_version == null) return "";
+    return String(complement.skeleton_version);
+  }
+
+  // 別の出所の一覧へ移るときに、補完・基盤論文の注記を持ち越さない。
+  function clearComplementState() {
+    state.complement = null;
+    state.foundationSeeds = [];
+    state.foundationNote = "";
+    state.foundationPending = false;
+  }
+
+  // CC8: レンズごとの縮退はサーバの事実文をそのまま出す（検索自体は成立させる）。
+  function renderComplementNote() {
+    var node = el("pd-complement-note");
+    if (!node) return;
+    var complement = state.complement;
+    if (state.mode !== "complement" || !complement) {
+      node.textContent = "";
+      return;
+    }
+    var lines = [];
+    var lenses = complement.lenses || {};
+    var coverage = lenses.coverage;
+    if (coverage && coverage.note) lines.push(String(coverage.note));
+    var skies = lenses.skies;
+    if (skies && skies.note) lines.push(String(skies.note));
+    if (!lines.length && complement.available === false) {
+      lines.push(COMPLEMENT_UNAVAILABLE_FALLBACK);
+    }
+    node.textContent = lines.join(" ／ ");
+  }
+
+  function runComplementSearch() {
+    if (state.complementSearching || state.searching) return;
+    var input = el("pd-domain");
+    var domainKey = input ? input.value.trim() : state.domainKey;
+    if (!domainKey) {
+      setNotice("分野を入力してください。", true);
+      return;
+    }
+    if (domainKey !== state.domainKey) selectDomain(domainKey);
+
+    state.complementSearching = true;
+    setNotice(COMPLEMENT_SEARCH_PROGRESS);
+    var button = el("pd-complement-btn");
+    if (button) button.disabled = true;
+
+    api("/admin/discovery/complement/search", {
+      method: "POST",
+      body: JSON.stringify({
+        // 並び順はこの経路では常に補完優先（order を送らない）。
+        domain_key: state.domainKey,
+        categories: state.categories,
+        keyphrases: enabledKeyphrases()
+      })
+    })
+      .then(function (res) {
+        if (!res.ok) return rejectWithBody(res);
+        return res.json();
+      })
+      .then(function (data) {
+        state.complementSearching = false;
+        if (button) button.disabled = false;
+        applyComplementResult(data || {});
+      })
+      .catch(function (err) {
+        state.complementSearching = false;
+        if (button) button.disabled = false;
+        setNotice(detailText(err, COMPLEMENT_ERROR_FALLBACK), true);
+      });
+  }
+
+  function applyComplementResult(data) {
+    state.mode = "complement";
+    state.searched = true;
+    state.selected = {};
+    state.citationNote = "";
+    state.citationSeeds = [];
+    clearComplementState();
+    state.candidates = (data && data.candidates) || [];
+    state.query = (data && data.query) || "";
+    state.closedWorldNote = (data && data.closed_world_note) || "";
+    state.total = data && typeof data.total === "number" ? data.total : null;
+    state.appliedOrder =
+      data && data.order === "relevance" ? "relevance" : "date";
+    state.ranking = (data && data.ranking) || null;
+    state.complement = (data && data.complement) || null;
+
+    setNotice("");
+    renderQueryNote();
+    renderRankingNote();
+    renderComplementNote();
+    renderCandidates();
+    renderIngestSummary();
+  }
+
+  function runFoundationSearch() {
+    if (state.foundationSearching) return;
+    var button = el("pd-foundation-btn");
+    if (button && button.disabled) return;
+    var input = el("pd-domain");
+    var domainKey = input ? input.value.trim() : state.domainKey;
+    if (!domainKey) {
+      setNotice("分野を入力してください。", true);
+      return;
+    }
+    if (domainKey !== state.domainKey) selectDomain(domainKey);
+
+    state.foundationSearching = true;
+    renderCitationControl();
+    setNotice(FOUNDATION_SEARCH_PROGRESS);
+
+    api("/admin/discovery/complement/foundation", {
+      method: "POST",
+      body: JSON.stringify({ domain_key: state.domainKey })
+    })
+      .then(function (res) {
+        if (!res.ok) return rejectWithBody(res);
+        return res.json();
+      })
+      .then(function (data) {
+        state.foundationSearching = false;
+        applyFoundationResult(data || {});
+      })
+      .catch(function (err) {
+        state.foundationSearching = false;
+        renderCitationControl();
+        // 502（外部 API 不達）等はサーバの事実文をそのまま見せる。
+        setNotice(detailText(err, FOUNDATION_UNAVAILABLE_FALLBACK), true);
+      });
+  }
+
+  function applyFoundationResult(data) {
+    state.mode = "foundation";
+    state.searched = true;
+    state.selected = {};
+    // 参照リスト由来の一覧は並べ替えの対象外。前回検索の表示を持ち越さない。
+    state.ranking = null;
+    state.appliedOrder = "date";
+    state.query = "";
+    state.total = null;
+    state.citationNote = "";
+    state.citationSeeds = [];
+    clearComplementState();
+    state.foundationSeeds = (data && data.seeds_read) || [];
+    state.foundationPending = !!(data && data.pending_seeds);
+    state.closedWorldNote = (data && data.closed_world_note) || "";
+    state.foundationNote = data && data.note ? String(data.note) : "";
+
+    if (data.enabled === false || data.available === false) {
+      // 供給されていない・使えないときは候補を作らず、サーバの事実文だけを出す。
+      state.candidates = [];
+      if (!state.foundationNote) {
+        state.foundationNote =
+          data.enabled === false
+            ? CITATION_DISABLED_NOTICE
+            : FOUNDATION_UNAVAILABLE_FALLBACK;
+      }
+      if (data.enabled === false) state.citationEnabled = false;
+    } else {
+      state.candidates = (data && data.candidates) || [];
+    }
+
+    setNotice("");
+    renderQueryNote();
+    renderRankingNote();
+    renderComplementNote();
+    renderCitationControl();
+    renderCandidates();
+    renderIngestSummary();
+  }
+
   // ── 引用グラフからの候補（PD8: ボタンを押したときだけ実行する）──────────
   function renderCitationControl() {
     var button = el("pd-citation-btn");
@@ -996,6 +1258,13 @@
       } else {
         note.textContent = "";
       }
+    }
+    // 基盤論文（レンズC）は同じオプトイン（引用グラフ供給）を共有するため、
+    // 有効/無効の判定と事実文もここで共有する（第2の判定を作らない）。
+    var foundation = el("pd-foundation-btn");
+    if (foundation) {
+      foundation.disabled =
+        state.citationEnabled !== true || state.foundationSearching;
     }
     if (!button) return;
     // 分野未入力の案内は runCitationSearch 側の事実文で出す（検索ボタンと同じ流儀）。
@@ -1068,12 +1337,75 @@
     setNotice("");
     renderQueryNote();
     renderRankingNote();
+    renderComplementNote();
     renderCitationControl();
     renderCandidates();
     renderIngestSummary();
   }
 
   // ── 候補一覧 ──────────────────────────────────────────────────────────
+  // 補完の根拠行（最大3行）。サーバが付けたキーが無ければ行そのものを作らない
+  // （CC4: 件数・点数を出さない。CC5: 閉世界の事実文はサーバの値をそのまま出す）。
+  function complementLines(candidate) {
+    var lines = [];
+    var complement = (candidate && candidate.complement) || null;
+    if (complement) {
+      var fills = complement.fills || [];
+      var fillTexts = [];
+      for (var i = 0; i < fills.length; i++) {
+        var fill = fills[i] || {};
+        if (!fill.node_label) continue;
+        fillTexts.push(
+          (fill.region_label ? fill.region_label + " / " : "") +
+            String(fill.node_label)
+        );
+      }
+      if (fillTexts.length) {
+        var version = complementSkeletonVersion();
+        lines.push(
+          COMPLEMENT_FILLS_HEAD +
+            fillTexts.join(" ・ ") +
+            (version ? "（骨格 版" + version + "）" : "")
+        );
+      }
+      var skies = complement.skies || [];
+      var skyTexts = [];
+      var skyNote = "";
+      for (var j = 0; j < skies.length; j++) {
+        var sky = skies[j] || {};
+        if (!sky.statement) continue;
+        skyTexts.push(
+          "『" +
+            String(sky.statement) +
+            "』" +
+            (sky.document_title ? "（" + String(sky.document_title) + "）" : "")
+        );
+        if (!skyNote && sky.closed_world_note) {
+          skyNote = String(sky.closed_world_note);
+        }
+      }
+      if (skyTexts.length) {
+        lines.push(
+          COMPLEMENT_SKIES_HEAD +
+            skyTexts.join(" ・ ") +
+            (skyNote ? " ／ " + skyNote : "")
+        );
+      }
+    }
+    // 基盤論文（レンズC）は「どの取り込み済み論文が引用しているか」を名前で言う。
+    var citedBy = (candidate && candidate.cited_by) || [];
+    var origins = [];
+    for (var k = 0; k < citedBy.length; k++) {
+      var origin = citedBy[k] || {};
+      var originText = origin.title || origin.arxiv_id || "";
+      if (originText) origins.push(String(originText));
+    }
+    if (origins.length) {
+      lines.push(CITATION_DERIVED_HEAD + origins.join(" ・ "));
+    }
+    return lines;
+  }
+
   function candidateCardHtml(candidate) {
     var arxivId = (candidate && candidate.arxiv_id) || "";
     var status = (candidate && candidate.status) || "new";
@@ -1157,6 +1489,21 @@
         "</div>";
     }
 
+    // コーパスを補う論文（CC4 / CC6）: サーバが付けたキーの有無をそのまま描く。
+    // 閾値判定・並べ替え・件数の表示をせず、〈推定〉であることを常時添える。
+    var complementRows = complementLines(candidate);
+    if (complementRows.length) {
+      html +=
+        '<div class="pd-complement" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px;border-left:2px solid var(--color-border-tertiary);padding-left:6px">' +
+        '<span class="pd-complement-tag" style="color:var(--color-text-tertiary)">' +
+        esc(COMPLEMENT_ESTIMATE_TAG) +
+        "</span>";
+      for (var c = 0; c < complementRows.length; c++) {
+        html += "<div>" + esc(complementRows[c]) + "</div>";
+      }
+      html += "</div>";
+    }
+
     if (matched.length) {
       // なぜ候補なのかを1行で言う（ブラックボックスのおすすめにしない・数値は出さない）。
       html +=
@@ -1221,6 +1568,9 @@
       if (state.mode === "citation") {
         // 引用グラフ経路で「見つからない」と「使えない」を取り違えない（PD6）。
         emptyText = state.citationNote || CITATION_EMPTY_NOTICE;
+      } else if (state.mode === "foundation") {
+        // 参照リスト経路も同じく「読めた範囲では見つからない」と「使えない」を分ける。
+        emptyText = state.foundationNote || FOUNDATION_EMPTY_NOTICE;
       } else if (state.searched) {
         emptyText = EMPTY_RESULT_NOTICE;
       } else {

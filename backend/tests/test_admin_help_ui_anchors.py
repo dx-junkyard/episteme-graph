@@ -189,7 +189,10 @@ class TestAdminUiAnchorsModule:
         # + 2026-09-05: lecture-studio.recon-item-restore（再構成レビューキューの
         #   「自動配信に戻す（auto）」。PATCH は auto への遷移を受けるのに UI に
         #   戻し口が無く、retire が一方通行に見えていた）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 327
+        # + 2026-09-09: materials.arxiv-discovery-complement /
+        #   materials.arxiv-discovery-foundation（コーパスを補う論文の2ボタン。
+        #   docs/features/corpus_complement_design.md §8）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 329
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""
