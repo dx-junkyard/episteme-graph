@@ -44,6 +44,21 @@
   する（``routes/landscape.py`` と同じ fail-closed の作法）。学習者向けの
   レーダー系ルートは作らない。
 
+コーパスを補う論文（``docs/features/corpus_complement_design.md`` / CC1〜CC8）の2本
+（``/complement/search`` / ``/complement/foundation``）も同じルータに足す。本ルータが
+構造として守るのは:
+
+- **CC2 決定論・非LLM**: 補完の2本は LLM を呼ばない。レンズ A/B の埋め込みは既存の
+  関連度バッチ（``ranking.rank_candidates`` の1コール）へ相乗りし、発見層の
+  ``core.llm`` 接触点を増やさない。
+- **CC3 保存は外部事実のキャッシュだけ**: 候補・レンズ判定は保存しない（PD5）。
+  ``/complement/foundation`` の書き込みは参照リストキャッシュ（migration 077）の
+  upsert のみで、教員の判断を含まないため**監査記帳もしない**。
+- **CC7 取り込みは既存の弁のみ**: 補完も候補提示までで、専用の取得・取り込み
+  エンドポイントを持たない（既存の ``/ingest`` / ``/ingest-batch`` をそのまま使う）。
+- **CC8 fail-soft**: レンズが成立しなくても検索は 200 で成立させ、縮退した
+  そのレンズだけを ``available:false`` + 事実文で正直に返す。
+
 エラーは日本語の事実文で、内部情報（解決 IP・スタックトレース）を ``detail`` に
 載せない（UF6 継承）。
 """
@@ -68,6 +83,8 @@ from core.paper_discovery import arxiv_client
 from core.paper_discovery import citation_client as pd_citation_client
 from core.paper_discovery import citation_search as pd_citation_search
 from core.paper_discovery import compare as pd_compare
+from core.paper_discovery import complement as pd_complement
+from core.paper_discovery import foundation as pd_foundation
 from core.paper_discovery import ingest_queue as pd_queue
 from core.paper_discovery import radar as pd_radar
 from core.paper_discovery import ranking as pd_ranking
@@ -1210,3 +1227,232 @@ def register_radar_provenance(
         "registered": True,
         "seed": _with_can_register(registered_seed, access, current_user),
     }
+
+
+# ---------------------------------------------------------------------------
+# コーパスを補う論文（正本 docs/features/corpus_complement_design.md §5.5）
+#
+# 「近さ」ではなく「このコーパスに何が足されるか」で候補を選ぶ第3の探し方。
+# 本ルータが構造として守るもの:
+#
+# - **CC2 決定論・非LLM**: このモジュールは LLM を呼ばない。レンズ A/B の埋め込みは
+#   既存の関連度バッチ（``ranking.rank_candidates`` の1コール）に相乗りし、発見層の
+#   ``core.llm`` 接触点を増やさない。レンズC（参照リスト）は外部 API のみ。
+# - **CC3 保存は外部事実のキャッシュだけ**: 候補・レンズ判定は保存しない（PD5）。
+#   ``/complement/foundation`` の書き込みは参照リストキャッシュの upsert のみで、
+#   教員の判断を含まないため**監査記帳もしない**（``/search`` / ``/citation-search``
+#   と同じ扱い）。
+# - **CC4 数値非表示**: core の DTO をそのまま返し、cosine・引用元の本数・配置件数を
+#   足さない（生値は core の内側から出てこない）。
+# - **CC8 fail-soft**: レンズが成立しなくても検索そのものは 200 で成立させ、
+#   縮退した**そのレンズだけ** ``available:false`` + 事実文で正直に返す。
+# ---------------------------------------------------------------------------
+
+
+def _complement_block(
+    facts: Optional[dict],
+    anchor_context: Optional[dict],
+) -> dict:
+    """レンズ2つの成否を DTO 形へ整える（``{available, skeleton_version?, lenses}``）。
+
+    ``facts`` は ``ranking.rank_candidates`` が返す ``complement_facts``
+    （= ``complement.build_complement_context`` の ``facts``）。並べ替えが不成立
+    だったときは両レンズが縮退した事実文で渡ってくる（CC8）。
+
+    top-level の ``available`` は**どちらか一方でも成立していれば真**にする
+    （片方が縮退しても補完の提示自体は成立するため）。骨格版はアンカーが読めた
+    ときだけ添える（VA8 — 版を明示しない言明を作らない）。
+    """
+    source = dict(facts or pd_complement.degraded_facts())
+    lenses: dict[str, Any] = {}
+    for name in ("coverage", "skies"):
+        lens = dict(source.get(name) or {})
+        entry: dict[str, Any] = {"available": bool(lens.get("available"))}
+        note = lens.get("note")
+        if note:
+            entry["note"] = note
+        lenses[name] = entry
+
+    block: dict[str, Any] = {
+        "available": any(entry["available"] for entry in lenses.values()),
+        "lenses": lenses,
+    }
+    version = str((anchor_context or {}).get("skeleton_version") or "").strip()
+    if version:
+        block["skeleton_version"] = version
+    return block
+
+
+def _apply_complement_order(session, domain_key: str, result: dict) -> dict:
+    """検索結果に補完の注釈を足し、補完のある候補を先頭へ寄せる。
+
+    ``_apply_relevance_order`` と同じ流儀で、**どの段で失敗しても候補を捨てない**。
+    材料（薄いノード・前提文）が組めない、並べ替えが不成立、といった縮退はいずれも
+    事実文で返し、検索そのものは成立させる（CC8 / PD6）。
+    """
+    candidates = list(result.get("candidates") or [])
+    settings = get_settings()
+
+    anchor_context: Optional[dict] = None
+    complement_context: Optional[dict] = None
+    try:
+        anchor_context = _anchor_context(session, domain_key)
+        complement_context = pd_complement.build_complement_context(
+            session,
+            domain_key,
+            anchor_context,
+            thin_max_documents=settings.discovery_complement_thin_max_documents,
+        )
+    except Exception:  # noqa: BLE001 — 補完の材料が組めなくても検索は成立させる
+        logger.warning(
+            "complement context unavailable for domain %s", domain_key, exc_info=True
+        )
+        complement_context = None
+
+    try:
+        ranked = pd_ranking.rank_candidates(
+            session,
+            domain_key,
+            candidates,
+            anchor_context=anchor_context,
+            complement_context=complement_context,
+        )
+    except Exception:  # noqa: BLE001 — 並べ替えの失敗で検索結果を捨てない
+        logger.warning("complement ordering failed for domain %s", domain_key, exc_info=True)
+        ranked = {
+            "available": False,
+            "note": pd_ranking.NOTE_UNAVAILABLE,
+            "ordered": candidates,
+            "complement_facts": pd_complement.degraded_facts(),
+        }
+
+    ordered = list(ranked.get("ordered") or candidates)
+    try:
+        ordered = pd_complement.order_complement_first(ordered)
+    except Exception:  # noqa: BLE001 — 並べ替えられなくても候補は返す
+        logger.warning(
+            "complement ordering (first) failed for domain %s", domain_key, exc_info=True
+        )
+
+    payload = dict(result)
+    payload["order"] = ORDER_RELEVANCE
+    payload["candidates"] = ordered
+    ranking_info: dict[str, Any] = {"available": bool(ranked.get("available"))}
+    note = ranked.get("note")
+    if note:
+        ranking_info["note"] = note
+    payload["ranking"] = ranking_info
+    payload["complement"] = _complement_block(
+        ranked.get("complement_facts"), anchor_context
+    )
+    return payload
+
+
+@router.post("/complement/search")
+def complement_search_candidates(
+    body: SearchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """コーパスを補う候補を検索する（レンズA 地図の薄い領域 / レンズB 検証記録の無い前提）。
+
+    候補集合と副作用は ``POST /search`` と**同一**（arXiv 1リクエスト・
+    ``last_checked_at`` の更新のみ）。違いは並び順と注釈だけで、
+
+    - 並び順は常に関連度（``body.order`` は**無視する** — 補完の提示は関連度順を
+      土台にした安定ソートでのみ意味を持つため）。
+    - 補完の根拠がある候補（``candidate.complement``）を先頭へ寄せる。候補は
+      捨てない・件数は変えない（PD6）。
+    - top-level に ``complement: {available, skeleton_version?, lenses:{coverage, skies}}``
+      を足す。レンズは独立に縮退し、片方が成立しなくても他方は動く（CC8）。
+
+    LLM は呼ばない（CC2）。埋め込みは関連度の1バッチに相乗りし、日次ゲート
+    （``DISCOVERY_RANKING_MAX_CALLS_PER_DAY``）の消費も1回のまま。arXiv API の失敗は
+    **502 + 事実文**で、空一覧を「該当なし」と偽らない（PD6）。
+    """
+    requested = body.max_results if body.max_results is not None else DEFAULT_SEARCH_RESULTS
+    max_results = max(1, min(MAX_SEARCH_RESULTS, int(requested)))
+    start = max(0, int(body.start if body.start is not None else 0))
+
+    session = _pg_session()
+    try:
+        try:
+            result = pd_search.run_search(
+                session,
+                body.domain_key,
+                categories=body.categories,
+                keyphrases=body.keyphrases,
+                followed_authors=body.followed_authors,
+                start=start,
+                max_results=max_results,
+            )
+        except ValueError as exc:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=f"検索条件が正しくありません: {exc}") from exc
+        except arxiv_client.ArxivApiError as exc:
+            session.rollback()
+            logger.info(
+                "arXiv complement search failed for user=%s: %s", current_user["id"], exc
+            )
+            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+        session.commit()
+        result = _apply_complement_order(session, body.domain_key, result)
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    return result
+
+
+@router.post("/complement/foundation")
+def complement_foundation_candidates(
+    body: CitationSearchRequest,
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """取り込み済み論文の参照リストから「基盤論文」の候補を導出する（レンズC）。
+
+    **候補提示のみ**で取り込みはしない（CC7 — 取り込みは既存の ``/ingest`` /
+    ``/ingest-batch`` を教員が明示的に叩く）。候補は保存せず（PD5）、書き込みは
+    参照リストという**外部事実**のキャッシュ（migration 077）の upsert だけなので
+    監査も記帳しない（CC3。``/search`` / ``/citation-search`` と同じ扱い）。
+    その upsert を確定させるため、成功時は必ず ``commit`` する。
+
+    オプトイン（``DISCOVERY_CITATION_SOURCE_ENABLED``）が無効なときは 403 / 404 に
+    せず ``{"enabled": false, "note": ...}`` を返す（機能の存在は隠さない）。
+    1操作で新たに参照リストを引くシードは ``DISCOVERY_FOUNDATION_FETCH_PER_CALL``
+    本までで、残りは ``pending_seeds`` で正直に示す（PD7 の行儀）。参照リストを
+    1件も読めなかったときは **502 + 事実文**で、空一覧を「該当なし」と偽らない（PD6）。
+    """
+    settings = get_settings()
+    session = _pg_session()
+    try:
+        try:
+            result = pd_foundation.run_foundation_search(
+                session,
+                body.domain_key,
+                min_citing_seeds=settings.discovery_foundation_min_citing_seeds,
+                fetch_per_call=settings.discovery_foundation_fetch_per_call,
+                ttl_days=settings.discovery_reference_cache_ttl_days,
+            )
+        except pd_citation_client.CitationApiError as exc:
+            session.rollback()
+            logger.info(
+                "foundation search failed for user=%s: %s", current_user["id"], exc
+            )
+            raise HTTPException(
+                status_code=502, detail=_DETAIL_CITATION_UNAVAILABLE
+            ) from exc
+        # 参照リストキャッシュ（外部事実の写し）の upsert を確定させる。
+        session.commit()
+    except HTTPException:
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    return result
