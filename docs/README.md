@@ -228,6 +228,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [URL指定による教材取得（取得先ドメイン許可リスト + SSRF ガード）](features/url_material_upload_design.md)
 - [論文ディスカバリー層（arXiv 分野購読とコーパス成長ループ）](features/paper_discovery_design.md)
   ／[論文レーダー（教材起点の類似論文探索と比較分析）](features/paper_radar_design.md)
+  ／[コーパスを補う論文（地図の薄い領域・検証記録の無い前提・基盤論文）](features/corpus_complement_design.md)
 - [制度指標カタログ（indicator governance）](features/indicator_governance_design.md) — 運営者・教員向け集約計器の定義・目的・宛先・粒度・非利用（ランキング / 成績 / 推薦 / 自動ゲート禁止）を一箇所に宣言し `GET /api/indicators` で全当事者に公開。vision.md §6.1 原則4 改訂（2026-09-04）の実装
 
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)

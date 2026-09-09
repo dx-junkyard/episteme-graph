@@ -388,6 +388,15 @@ SSRF ガードの正本は `backend/core/url_fetch.py`。正本設計書は `doc
 |---|---|
 | `atlas_edge_decisions`（076） | 無向・版非依存の `edge_key UNIQUE`（`edge\|{domain}\|{min}\|{max}`）。`status`(candidate/accepted/dismissed)・見送りは理由必須・`edge_kind` は採用時に教員が選択・`applied_version` で採用と凍結反映を分離。遷移は `core/candidate_flow.py` 経由（本番初適用） |
 
+### コーパスを補う論文（マイグレーション 077）
+候補もレンズ判定も保存しない（PD5 継承）。保存するのは**外部 API が公開しているメタデータの
+写し**だけで、教員の判断でも候補のスナップショットでもない。正本は
+`docs/features/corpus_complement_design.md`（CC1〜CC8。CC3 の設計明示例外 = §6.3）。
+
+| テーブル | 役割 |
+|---|---|
+| `paper_discovery_reference_cache`（077） | レンズC（基盤論文）の参照リストキャッシュ。`arxiv_id`（引用している側 = 取り込み済みシードの正規化 ID）主キー・`reference_entries JSONB`（`references` は予約語のため）（arXiv ID を持つ参照のみ）・`fetch_status`(ok/failed)・`fetched_at`。FK なし・**シード行を入れない**・DELETE 文なし（更新は upsert）。TTL で陳腐化を抑え、取得失敗も `failed` で記録して TTL 内の再取得を抑える（外部 API の行儀 — PD7） |
+
 ---
 
 ## 2. 重要な設計パターン
@@ -498,6 +507,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `074_atlas_vector_anchoring.sql` | VA層（ベクトル係留）— `atlas_anchor_embeddings`（骨格ノードのプロトタイプベクトル。`UNIQUE(domain_key, skeleton_version, node_id)`・`vector(3072)`・FK なし・index なし（小規模表）。導出データで (domain, version) 単位の全置換再構築が設計明示の例外）+ `atlas_anchor_aliases`（教員確定の別名レジストリ。`status ∈ {confirmed, dismissed}` の状態遷移のみ・削除 API なし・版非依存）。**シード行を入れない** |
 | `075_graph_dialogue_sessions.sql` | グラフ対話レビュー — `deliberation_sessions.element_type` CHECK に `'document_graph'`（グラフ全体対話の疑似要素型。element_id = document UUID）を追加。**`element_annotations` の CHECK は変更しない**（グラフ全体対話は候補注釈を生成しない）。新テーブル・シードなし |
 | `076_atlas_edge_decisions.sql` | 分野マップの関係表示（辺候補レビュー）— `atlas_edge_decisions`（無向・版非依存の `edge_key` UNIQUE・status ∈ {candidate, accepted, dismissed}・見送りは理由必須・`edge_kind` は採用時に教員が選択・`applied_version` で採用と凍結反映を分離）。候補スナップショットは持たない（読み時導出）・**シード行を入れない** |
+| `077_paper_discovery_reference_cache.sql` | コーパスを補う論文（レンズC 基盤論文）— `paper_discovery_reference_cache`（`arxiv_id` 主キー・`reference_entries JSONB`（`references` は予約語のため）・`fetch_status ∈ {ok, failed}`・`fetched_at`）。**外部 API が公開しているメタデータの写し**であり、候補・教員判断のスナップショットではない（CC3 の設計明示例外）。FK なし・**シード行を入れない**・DELETE 文なし（更新は upsert・TTL で陳腐化を抑える） |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

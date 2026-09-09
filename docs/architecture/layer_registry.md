@@ -18,11 +18,11 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   →discuss観測(060)→M(061)→discuss開幕(062)→教材図(063)→W Phase5(064)
   →ランドスケープ(065)→カテゴリギャップ(066)→SL(067)→アカウントライフサイクル(068/069)
   →URL教材取得(070)→論文ディスカバリー(071/072)→コーパス回遊(073)→VA(074)
-  →グラフ対話レビュー(075)→RE(076) であり、序数はどれにも一意に対応しない。
+  →グラフ対話レビュー(075)→RE(076)→コーパス補完(077) であり、序数はどれにも一意に対応しない。
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-03 時点で **077 以降**。044〜076 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-09-09 時点で **078 以降**。044〜077 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -41,7 +41,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 - **アーキテクチャ整理 Tier 3（migration 044/045）はレイヤーをまたいで既存テーブルを統合した**:
   `object_group_permissions`（044 = 010 + 035 の統合）と `user_notifications`（045 = 038 + V層
   `share_notifications` の統合）。統合してもレイヤー自体の主 migration 番号は変更されていない。
-  なお **054〜076 に統合系 migration は無い**（すべて機能追加。新テーブルを作らず既存表への
+  なお **054〜077 に統合系 migration は無い**（すべて機能追加。新テーブルを作らず既存表への
   列追加・CHECK 拡張・索引追加だけで済んだ回（**064** = CHECK 拡張のみ / 067 / **069** =
   索引追加のみ / 073 / 075）も含む）。
 - **索引とレイヤーの相互欠落は双方向に起きる**: かつては「実装済みなのに CLAUDE.md に無い層」
@@ -60,7 +60,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | **B層** | 学習者体験レイヤー（関心痕跡・tension・構造帰属・casual/voice 等） | 機能ごとに分散: `docs/features/learning.md` / `structure-anchored-questions.md` | `backend/core/tension/`、`backend/core/structure_anchor/`、`backend/api/routes/learning.py` | 020, 022, 025 | 実装済み |
 | **C層** | 承認・共有レイヤー | `docs/features/endorsement-sharing.md` | `backend/api/routes/theory_components.py` | 021 | 実装済み |
 | **D層** | 疑義・認識的地位台帳（Doubt Layer） | `docs/features/doubt_layer_issues.md` | `backend/core/doubt/` + `backend/api/routes/doubt.py` | 029〜033 | 実装済み |
-| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は次の空き番号へ採番し直し**（2026-09-03 時点は 077）+ 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
+| **E層** | 段階的翻訳レイヤー（Exposition Layer） | `docs/features/exposition_layer_design.md` | なし | 設計書は 034 を提案（衝突。**着手時は次の空き番号へ採番し直し**（2026-09-09 時点は 078）+ 横断基盤接続の追補が必要） | **未実装**（唯一の設計のみ層） |
 | **G層** | ガイダンス層（次にやることバッジ + 状態導出型To-Do） | `docs/features/guidance_layer_design.md`（表記 038 → 実装 039） | `backend/core/admin_assistant/next_steps.py` + `admin-next-steps.js` | 039 | 実装済み |
 | **L層** | 画像読み取りパイプライン + 分野別ナレッジライブラリ | `docs/features/image_pipeline_knowledge_library_design.md`（§14〜16 追補含む）+ `contextual_figure_analysis_iterative_verification.md`（#499）+ `guided_figure_reanalysis_design.md` | `backend/core/document_pipeline/figure_images.py`、`src/episteme_graph/agents/apparatus_semantics/`、`backend/core/library/` + `routes/library.py`、`backend/core/figure_presentation.py` + `routes/figure_presentation.py` | 041, 042, 051, 052/053, **054（反証型反復照合 #499）** | 実装済み |
 | **M層** | 場面別 LLM モデル選択（LLM Model Selection） | `docs/features/llm_model_selection_design.md`（M1〜M10） | `backend/core/llm_policy.py` / `llm_policy_store.py` + `routes/llm_models.py` + `admin-llm-models.js` | 061 | 実装済み（Phase 0〜4。ユーザー別保存が正・tier名/金額は UI 非表示） |
@@ -86,6 +86,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 論文ディスカバリー層 | arXiv 分野購読による論文発見と、教員の明示承認による取り込み（+ バッチ取り込みキュー・関連度ランキング・引用グラフ拡張口） | `docs/features/paper_discovery_design.md`（PD1〜PD8・§10 実装記録） | `backend/core/paper_discovery/` + `routes/paper_discovery.py` + `backend/api/ingest_worker.py` + `admin-paper-discovery.js` | 071, 072 | 実装済み（Phase 1〜3） |
 | 論文レーダー | 教材（seed）起点の類似論文探索・距離3択・AI 比較分析・arXiv 出所の後付け登録 | `docs/features/paper_radar_design.md`（PR1〜PR8・§10〜§12 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（radar.py / compare.py ほか）+ `routes/paper_discovery.py` + `admin-paper-radar.js` | 不要（既存表の読み + `documents.source_url` の記帳のみ） | 実装済み（v1 + 重なり・差分提示） |
 | コーパス回遊層 | 論文の海（コーパス地図）・コース無しの論文議論・地図の端・関心信号 | `docs/features/corpus_roaming_design.md`（CR1〜CR10・§12 実装記録） | `backend/core/corpus_view.py` + `core/discuss/context.py` + `routes/corpus.py` + `corpus-sea.js` | 073 | 実装済み（Phase A〜D） |
+| コーパスを補う論文 | 「近さ」ではなく「コーパスに何が足されるか」で候補を選ぶ第3の探し方（レンズA 地図の薄い領域 / レンズB 検証記録の無い前提 / レンズC 基盤論文）。3レンズとも決定論・LLM 0回で、embedding は既存の関連度バッチに相乗りする | `docs/features/corpus_complement_design.md`（CC1〜CC8・§11 実装記録。PD1〜PD8 を全継承） | `backend/core/paper_discovery/`（complement.py / foundation.py / reference_cache.py）+ `routes/paper_discovery.py`（complement/*）+ `admin-paper-discovery.js` | 077 | 実装済み（v1） |
 | 構造の降下路 | 足場ダイヤル・楽屋（理解の粒度を降りる導線） | `docs/features/structure_descent_design.md` | `backend/core/descent/` + `routes/descent.py` | 不要 | 実装済み（v1。パーソナライズ実装計画 Phase 3） |
 | グラフ対話レビュー | 教材行から開くグラフ起点のレビュー画面（承認/却下・claim承認・ノード対話・グラフ全体対話） | `docs/features/graph_dialogue_review_design.md`（GR1〜GR8・§11 実装記録） | `backend/core/deliberation/graph_dialogue.py` + `routes/deliberation.py`（graph-sessions）+ `routes/theory_components.py`（approve / claim review）+ `admin-graph-review.js` | 075 | 実装済み（v1） |
 | グラフの論文層 | Paper Layer（理論操作グラフのフレームに論文の章・式・図表・claim・narrative を肉付けする読み時射影。フレーム→論文 / 論文→フレーム / 被覆） | `docs/features/graph_paper_layer_design.md`（PL1〜PL8・§10 実装記録） | `backend/core/graph_paper_layer/` + `routes/theory_components.py`（paper-layer）+ `admin-graph-review.js` | 不要（読み時導出・保存なし） | 実装済み（Phase 0） |
@@ -114,7 +115,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜076、2026-09-03 時点）
+## 3. migration 帰属一覧（init〜077、2026-09-09 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -178,7 +179,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 074 | `074_atlas_vector_anchoring` | **VA層（ベクトル係留）**（アンカー埋め込み + 別名レジストリの2表） |
 | 075 | `075_graph_dialogue_sessions` | **グラフ対話レビュー**（`deliberation_sessions.element_type` に `'document_graph'` を追加。新テーブルなし） |
 | 076 | `076_atlas_edge_decisions` | **分野マップの関係表示（RE追補）**（辺候補の教員判断 `atlas_edge_decisions` 1表。候補は読み時導出） |
+| 077 | `077_paper_discovery_reference_cache` | **コーパスを補う論文**（Semantic Scholar 参照リストの外部事実キャッシュ1表。候補・判断は保存しない） |
 
-次の空き番号は **077**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **078**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

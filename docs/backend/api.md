@@ -769,9 +769,9 @@ freeze フック）が主経路で、本ルーターの refresh はそれ以前�
 | GET | `/api/admin/landscape/overview` | TEACHER | 本人可視 document の live 配置をノード別に集約（`domain_key` 必須。凍結骨格なしは 404）。骨格に無いノードの配置は集約に載せない |
 | GET | `/api/learning/courses/{cid}/landscape` | 受講ゲート（`get_accessible_course_data`） | 学習者向け「論文の位置づけ」。対象はコース sources のみ・status は `confirmed` / `inferred` / `review_required` のみ。配置ゼロ・骨格なしでも 200 で空構造（非表示への縮退はフロント責務）。`unplaced_documents` / `skeleton_version` を同梱し、weight / confidence / claim_id は投影が構造的に落とす |
 
-### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071 / 072）
+### 論文ディスカバリー `/api/admin/discovery`（`routes/paper_discovery.py`、migration 071 / 072 / 077）
 
-arXiv を供給源とする分野購読と候補一覧。2026-09-03 時点 17本すべてが TEACHER 以上（`_require_teacher`）。
+arXiv を供給源とする分野購読と候補一覧。2026-09-09 時点 19本すべてが TEACHER 以上（`_require_teacher`）。
 **候補を保存するテーブルは無い**（PD5 — 取り込み済み判定は `documents.source_url`、
 見送りは `paper_discovery_dismissals` から毎回読み時導出）。**DELETE ルートは無い**
 （見送りの取り消しは `revoked` 遷移）。取り込みは教員の明示操作だけが入口で、
@@ -798,6 +798,21 @@ Semantic Scholar recommendations API を引く（LLM 0回）。
 正本は `docs/features/paper_radar_design.md`（PR1〜PR8。migration なし。書き込みは
 `/radar/provenance` が `documents.source_url` に記帳する1点のみで、他3本は読み時導出）。
 
+**コーパスを補う論文**（`/complement/*` 2ルート、migration 077）は「近さ」ではなく
+「このコーパスに何が足されるか」で候補を選ぶ第3の探し方で、正本は
+`docs/features/corpus_complement_design.md`（CC1〜CC8。PD1〜PD8 を全継承）。3レンズ
+（A 地図の薄い領域 = 生きた配置 × VA層アンカーベクトル / B 検証記録の無い前提 =
+`epistemic_ledger` の `untested` × 空スコープ / C 基盤論文 = 取り込み済み論文の参照リスト）は
+いずれも**決定論・LLM 0回**で、レンズ A/B の embedding は既存の関連度バッチ
+（`ranking.py` の1コール・`DISCOVERY_RANKING_MAX_CALLS_PER_DAY` を1消費）へ**相乗り**する
+（発見層の `core.llm` 接触 allowlist を増やさない）。レンズC は
+`DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off）のオプトインで、`citation_client` の
+宛先固定・3秒スロットルを共有する。cosine・引用元の本数・配置件数・被引用数は返さず、
+根拠は**名前の列挙**（ノード名・前提文・引用元タイトル）で示す（CC4）。レンズB の事実文は
+SL1 の固定文に限る（CC5）。候補・レンズ判定は保存せず（PD5）、書き込みは参照リストという
+**外部事実**のキャッシュ（`paper_discovery_reference_cache`）の upsert だけなので監査記帳は
+しない（CC3）。取り込みは既存 `/ingest` / `/ingest-batch` のまま（CC7）。
+
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
 | GET | `/api/admin/discovery/subscriptions` | TEACHER | 分野購読の一覧（分野単位の共同財）。`{"subscriptions": [...], "citation_source_enabled": bool}`（後者は引用グラフ供給のオプトイン状態。フロントの活性判定用の補助で、強制はサーバ側） |
@@ -816,6 +831,8 @@ Semantic Scholar recommendations API を引く（LLM 0回）。
 | POST | `/api/admin/discovery/radar/search` | TEACHER | 教材起点の候補探索。body `{document_ref, distance ∈ {near, mid, far}（語彙外 422）, categories?, keyphrases?, start?, max_results?}`。seed 自身を除外し `status`（new / ingested のみ — dismissal は読まない）+ near のみ `matched_keyphrases` + 測定できた候補のみ `distance_label`（「近い / 中間 / 遠い」、正本は `label_vocab.RADAR_DISTANCE_SCALE`）を注釈。`banding: {available, primary_label?, note?}`（帯分け不能は新着順のまま + 事実文の fail-soft）。**購読の `last_checked_at` を更新しない・監査記帳なし**（読み取り専用）。条件ゼロは arXiv 非呼び出し（PD6）。cosine 生値は返さない（PR2） |
 | POST | `/api/admin/discovery/radar/compare` | TEACHER | 選択候補と seed の比較分析（1 LLM コール・feature `discovery:compare`）。body `{document_ref, arxiv_ids}`（空 / 10件超は 422）。候補の要旨は**サーバが `id_list` で取り直し**、各 difference の `evidence_quote` を要旨に対して verbatim 検査（不一致はその項目のみ drop）。`{"items": [{arxiv_id, title, common_ground, differences: [{aspect, statement, evidence_quote}], caveat}], skipped, notes}`（`caveat` はサーバ固定文「アブストラクト（要旨）の比較に基づく AI の推定です。…」）。日次上限（`DISCOVERY_COMPARE_MAX_CALLS_PER_DAY`・ユーザー別）超過は 429、LLM / arXiv 全滅は 502。**結果は保存しない・監査記帳なし** |
 | POST | `/api/admin/discovery/radar/provenance` | TEACHER + document 閲覧権（不在・不可視は同一 404）**かつ編集権**（view のみは 403） | 手動アップロード教材への arXiv 出所の後付け登録（レーダーの3段階の 2・3）。クライアントの `arxiv_id` を信用せず**サーバが seed を導出し直して**突き合わせる（推定なし・不一致は 422、arXiv に到達できず照合材料が無ければ `confirm=true` でも 422）。タイトルが正規化一致すれば `method="auto_title_match"`、不一致は `confirm=true` の教員確定（`teacher_confirmed`）が必要で、`confirm` なしは 409。既存の出所は上書きしない（409）。記帳先は既存 `documents.source_url` のみ。監査 `action='provenance_registered'` |
+| POST | `/api/admin/discovery/complement/search` | TEACHER | コーパスを補う候補の検索（レンズ A/B）。body は `/search` と同形だが `order` は無視し常に関連度順で、補完の根拠がある候補を先頭へ寄せる（安定ソート・候補は捨てない）。各候補に optional `complement: {fills?: [{node_label, region_label}], skies?: [{statement, document_title, closed_world_note}]}`（該当なしはキー自体を付けない）。top-level に `complement: {available, skeleton_version?, lenses: {coverage: {available, note?}, skies: {available, note?}}}` を返し、レンズが1つでも成立しなければ**そのレンズだけ**事実文で縮退して検索自体は 200 で成立させる（CC8）。LLM 0回・embedding は関連度バッチに相乗り（1コール）。副作用は `/search` と同じ `last_checked_at` の更新のみ・監査記帳なし |
+| POST | `/api/admin/discovery/complement/foundation` | TEACHER | 基盤論文の候補（レンズC）。body `{domain_key}`。取り込み済み arXiv 論文をシードに Semantic Scholar の**参照リスト**を引き、複数のシードが共通に引用していて未取り込みの論文を候補にする。1操作で新規取得するシードは `DISCOVERY_FOUNDATION_FETCH_PER_CALL`（既定5）本までで、残りは `pending_seeds: true` の事実文で正直に示す（続きは再実行）。各候補に `cited_by: [{arxiv_id, title}]` と `status`（new / ingested / dismissed — 取り込み済みも候補から外さず status で示す）。`{"enabled", "available", "candidates", "seeds_read", "pending_seeds", "closed_world_note", "note"?, "partial"?}`。オプトイン未設定は 403/404 ではなく `{"enabled": false, "note": ...}`、シードゼロ・候補ゼロは `available` と事実文で区別、全シードの取得失敗は 502（空一覧を「該当なし」と偽らない）。書き込みは参照キャッシュの upsert のみ・監査記帳なし |
 
 ### コーパス回遊 `/api/learning/corpus`（`routes/corpus.py`、migration 073）
 

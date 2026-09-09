@@ -499,6 +499,41 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   保持）。`common_ground` は後方互換で維持・非保存・日次20・caveat 不変。UI は凡例1行 +
   着地1行 + 〈推定〉タグ付きチップ（重なり最大3表示 + ほか）+ 2区画比較。
   ガードレールは `test_paper_radar_{core,api,guardrails,ui_static}.py`。
+- **コーパスを補う論文（近さではなく「何が足されるか」で選ぶ第3の探し方, migration 077,
+  2026-09-09）**: 正本は `docs/features/corpus_complement_design.md`（CC1〜CC8・§11 実装記録。
+  PD1〜PD8 を全継承）。**3レンズはすべて既存構造からの決定論導出**で、A 地図の薄い領域
+  （`landscape_placements` の live 配置 distinct document 数 ≤
+  `DISCOVERY_COMPLEMENT_THIN_MAX_DOCUMENTS` の concept × VA層アンカーベクトル。region は
+  対象外）/ B 検証記録の無い前提（`epistemic_ledger` の `verification_status='untested'` かつ
+  スコープ空。本文は**人間が確定した** assumption / 承認済み claim のみ）/ C 基盤論文
+  （Semantic Scholar の参照リストで2本以上のシードが共通に引用 ∧ 未取り込み ∧ arXiv ID あり）。
+  **CC1 学習者信号を混ぜない**（`frontier_interest` / stumble / tension を選定入力にしない —
+  CR10・IG2 を構造的に守る）/ **CC2 LLM 0回**（embedding は `ranking.py` の既存1バッチに
+  相乗り。発見層の `core.llm` 接触 allowlist を増やさない）/ **CC3 候補は読み時導出・保存は
+  外部事実のキャッシュだけ**（migration 077 は参照リストという外部 API のメタデータの写しで、
+  教員の判断でも候補のスナップショットでもない = PD5 の設計明示例外）/ CC4 数値非表示
+  （cosine・引用元の本数・配置件数・被引用数を出さず、根拠は名前の列挙）/ CC5 レンズB は
+  SL1 の固定文のみ・レンズA は骨格版を明示（VA8）/ CC6 仮説文体・〈推定〉を剥がさない /
+  CC7 取り込みは既存 `/ingest` `/ingest-batch` の弁のみ（worker・cron から本層を呼ばない・
+  バッジ / G層ルール / ポーリングなし）/ CC8 TEACHER 以上・レンズ単位の fail-soft
+  （成立しないレンズだけ事実文で縮退し検索は必ず成立）。**core**（FastAPI / LLM 非 import）=
+  `backend/core/paper_discovery/complement.py`（薄い concept 集合・前提文の解決・純関数の
+  fills / skies 判定・補完あり先頭の安定ソート）+ `foundation.py`（シード集約・キャッシュ
+  read-through・部分失敗の続行）+ `reference_cache.py`（upsert のみ・`DELETE FROM` なし。
+  `store.py` には触れない）+ `citation_client.references_for_arxiv`（宛先固定・3秒スロットル
+  共有）。**API 2本**（`routes/paper_discovery.py`・`_require_teacher`・監査記帳なし）=
+  `POST /api/admin/discovery/complement/{search,foundation}`。**env** =
+  `DISCOVERY_COMPLEMENT_THIN_MAX_DOCUMENTS`(1) / `DISCOVERY_FOUNDATION_MIN_CITING_SEEDS`(2) /
+  `DISCOVERY_FOUNDATION_FETCH_PER_CALL`(5) / `DISCOVERY_REFERENCE_CACHE_TTL_DAYS`(30)。
+  レンズC は既存 `DISCOVERY_CITATION_SOURCE_ENABLED`（既定 off）、レンズ A/B は既存
+  `DISCOVERY_RANKING_MAX_CALLS_PER_DAY` を1消費（**新カウンタなし**）。UI は既存モーダル
+  （`admin-paper-discovery.js`）にボタン2つ + 注釈行を足すだけで、新モーダル・新タブを
+  作らない。アンカーは `materials.arxiv-discovery-{complement,foundation}` の2件（件数の
+  正本は `test_admin_help_ui_anchors.py`）。ガードレールは
+  `test_corpus_complement_{core,foundation,api,guardrails,ui_static}.py`。
+  **非スコープ（v1）**: LLM による「読むと何が足されるか」の一段落説明 / 外部の被引用数の
+  利用・表示 / 学習者向け表示（CR7）/ レンズC の被引用（citations）方向への拡張 /
+  参照キャッシュの起動時バックフィル・定期更新 / レンズ結果の購読条件への自動還流（PD3）。
 - **ガードレール**: `test_paper_discovery_{core,api,guardrails,ui_static,worker,ranking,citation}.py`。
 - **非スコープ（v1）**: 引用グラフ候補の関連度ランキング / OpenAlex 等の第3供給源。
   学習者向け表示・コーパス回遊は §7 → 専用設計書で**実装済み**（下記コーパス回遊層）。
