@@ -6,7 +6,6 @@ import json
 import logging
 from collections import Counter
 from pathlib import Path
-import random
 import re
 import threading
 import time
@@ -43,7 +42,6 @@ from services import (
     user_can_edit_document,
     user_can_view_document,
 )
-from core.config import get_settings
 from core.schema import (
     AUDIT_ENTITY_CITATION,
     AUDIT_ENTITY_CLAIM,
@@ -341,46 +339,6 @@ def _normalize_internal_flow_items(value: Any) -> list[dict]:
         elif isinstance(item, str) and item.strip():
             normalized.append({"description": item.strip()})
     return normalized
-
-
-class LLMStructuredOutputError(RuntimeError):
-    def __init__(self, code: str, message: str, attempts: int, **context: Any) -> None:
-        super().__init__(message)
-        self.code = code
-        self.message = message
-        self.attempts = attempts
-        self.context = context
-
-    def detail(self) -> dict:
-        return {"code": self.code, "message": self.message, "attempts": self.attempts, **self.context}
-
-
-def _llm_retry_policy() -> tuple[int, float]:
-    settings = get_settings()
-    return max(1, int(settings.llm_max_retries)), max(0.0, float(settings.llm_retry_backoff_seconds))
-
-
-def _is_resource_exhausted(exc: Exception) -> bool:
-    """Return True if the exception indicates a 429 / resource exhausted error."""
-    msg = str(exc).lower()
-    class_name = type(exc).__name__.lower()
-    return (
-        "429" in msg
-        or "resource exhausted" in msg
-        or "resourceexhausted" in class_name
-        or "rate limit" in msg
-        or "ratelimit" in class_name
-        or "quota" in msg
-    )
-
-
-def _backoff_seconds(attempt: int, base: float, is_rate_limited: bool) -> float:
-    """Compute wait time: exponential for 429, linear otherwise, always with jitter."""
-    if is_rate_limited:
-        wait = min(60.0, base * (2 ** (attempt - 1)))
-    else:
-        wait = base * attempt
-    return wait + random.random()
 
 
 def _row_to_out(row: Any) -> TheoryComponentOut:
@@ -922,22 +880,6 @@ def _claim_rows_for_section(document_id: str, section_id: str) -> list[ClaimOut]
         return [_row_to_claim(row) for row in rows]
     finally:
         session.close()
-
-
-def _parse_json_object(raw: str) -> dict[str, Any]:
-    cleaned = (raw or "").strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        parsed = json.loads(cleaned, strict=False)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        match = re.search(r"\{[\s\S]*\}", cleaned)
-        if not match:
-            return {}
-        try:
-            parsed = json.loads(match.group(), strict=False)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
 
 
 def _redact_for_log(value: str, limit: int = 700) -> str:

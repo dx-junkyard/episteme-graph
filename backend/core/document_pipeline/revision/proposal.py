@@ -13,6 +13,8 @@ import json
 import re
 from typing import Callable
 
+from core.llm_worker.single_shot import extract_json
+
 from .operations import ENTITY_REGISTRY, OPERATIONS, make_operation
 
 _BUCKET = {
@@ -465,11 +467,16 @@ def _proposal_messages(audit_result: dict, inventory: dict) -> list[dict]:
 
 
 def _extract_json(text: str) -> dict:
-    text = (text or "").strip()
-    start, end = text.find("{"), text.rfind("}")
-    if start == -1 or end == -1 or end < start:
-        raise ValueError("no JSON object in proposal response")
-    return json.loads(text[start:end + 1])
+    """提案応答から JSON を取り出す（共通実装へ委譲）。
+
+    正本は ``core/llm_worker/single_shot.py::extract_json``。従来の最外 ``{...}``
+    だけの実装に対し、markdown フェンスで包まれた応答も読めるようになる（緩和方向
+    のみ。取り出せなければ従来どおり送出し、呼び出し側が手動レビュー項目に落とす）。
+    """
+    try:
+        return extract_json(text)
+    except ValueError as exc:
+        raise ValueError("no JSON object in proposal response") from exc
 
 
 def propose_operations(

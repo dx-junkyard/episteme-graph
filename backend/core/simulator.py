@@ -20,6 +20,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core.llm import generate_text
+from core.llm_worker.single_shot import json_call
 from core.postgres import get_session as _pg_session
 from core.schema_registry import (
     build_ontology_type_prompt,
@@ -351,18 +352,14 @@ def _simulate_extraction_for_doc(
         "- JSONのみで回答してください。"
     )
 
-    try:
-        raw = generate_text(messages=[{"role": "user", "content": prompt}])
-        # JSONを抽出
-        import re
-        match = re.search(r"\{[\s\S]*\}", raw)
-        if match:
-            sim_result = json.loads(match.group())
-        else:
-            sim_result = {}
-    except Exception:
-        logger.warning("Simulation extraction failed for doc %s", doc.get("doc_id", ""))
-        sim_result = {}
+    # 抽出は共通実装へ委譲（フェンス付き応答も読めるようになる。取り出せなければ
+    # 従来どおり空 dict へ縮退し、差分ゼロのシミュレーション結果として返す）。
+    sim_result = json_call(
+        prompt,
+        call=generate_text,
+        degraded={},
+        log_label=f"schema simulation doc={doc.get('doc_id', '')}",
+    )
 
     return {
         "doc_id": doc["doc_id"],

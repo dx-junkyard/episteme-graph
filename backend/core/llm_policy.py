@@ -117,6 +117,9 @@ def scene_for_feature(feature: str) -> str | None:
         "learning:cycle_diff",
         "learning:understanding_check",
         "learning:help_usage",
+        # レクチャー割込み質問（routes/lecture.py）は学習チャットと同じ「受講中の
+        # 1往復」なので同じ場面に束ねる。専用 env は持たない（tier 既定は analysis）。
+        "learning:lecture_interrupt",
     ):
         return SCENE_LEARNING_CHAT
     if feature.startswith("learning:voice_") or feature.startswith("deliberation:voice_"):
@@ -165,6 +168,11 @@ def scene_for_feature(feature: str) -> str | None:
     if feature == "admin:assistant":
         return SCENE_ASSISTANT
     if feature == "admin:component_candidates":
+        return SCENE_ASSISTANT
+    if feature in ("admin:schema_analysis", "admin:schema_simulate"):
+        # スキーマ拡張の分析・Shadow Testing（core/meta_analyzer.py / core/simulator.py）。
+        # ``admin:component_candidates`` と同じ「管理画面の小粒度 AI 支援」なので
+        # assistant scene へ束ねる（専用 scene を増やさない）。
         return SCENE_ASSISTANT
     return None
 

@@ -41,6 +41,11 @@ _LLM_ENTRY_FUNCTIONS = {
     "generate_text_with_structured_output",
     "generate_conversation_turn",
     "generate_structured_with_images",
+    # 単発呼び出しの共通骨格（core/llm_worker/single_shot.py）経由の呼び出しも
+    # 同じ検査対象にする。``model=`` を渡せる引数を持つため、素の入口と同列で
+    # 「明示モデルを渡さない」（M1）を固定する必要がある。
+    "json_call",
+    "structured_call",
 }
 
 
@@ -118,7 +123,10 @@ class TestUsageContextWiring:
         伝搬させる ``_submit_with_context`` を経由し続けること。"""
         src = _read(_CORE_THEORY)
         assert "contextvars.copy_context()" in src
-        assert src.count("_submit_with_context(_call_llm)") == 2
+        # LLM を呼ぶ経路は enrich_theory_components_with_llm の1本だけ
+        # （旧 extract_theory_components_from_chunk は呼び出し元ゼロのため撤去済み。
+        #  抽出の本番経路は非LLM の extract_theory_components_from_dsl）。
+        assert src.count("_submit_with_context(_call_llm)") == 1
 
 
 # ===========================================================================

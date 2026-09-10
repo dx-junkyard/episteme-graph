@@ -58,6 +58,7 @@ from core import lecture_wm
 from core import llm_policy
 from core.llm import generate_text, get_llm_params
 from core.llm_usage.context import bind_usage_context, usage_context
+from core.llm_worker.single_shot import extract_json
 from core.personas import course_persona_settings, normalize_persona_id, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.tts import TtsFatalError, generate_tts_audio
@@ -1032,12 +1033,9 @@ def rewrite_lecture_script(
                 model=effective_model,
                 reasoning_effort=effective_effort,
             )
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            lines = cleaned.split("\n")
-            lines = [ln for ln in lines if not ln.strip().startswith("```")]
-            cleaned = "\n".join(lines)
-        result = _normalize_rewrite_result(json.loads(cleaned, strict=False), studio_view)
+        # 取り出しは共通実装（``core/llm_worker/single_shot.py::extract_json``）。
+        # 失敗は下の except が拾って 500（明示操作なので degraded にしない）。
+        result = _normalize_rewrite_result(extract_json(raw), studio_view)
         theory_components = result.get("theory_components", [])
         display_text = result.get("display_text") or current_display
         spoken_text = result.get("spoken_text", current_spoken)

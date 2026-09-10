@@ -119,14 +119,27 @@ class TestCoreIsolation:
                 "core import llm",
                 "generate_text",
                 "generate_embeddings",
+                # 埋め込みの共通実装（core/llm_worker/embedding.py）経由の迂回も塞ぐ。
+                "embed_with_context",
             ],
         )
 
     def test_ranking_calls_embeddings_through_core_llm_with_usage_context(self):
-        """embedding は ``core.llm`` 経由 + U層計測（設計書 §6 / U3）。"""
+        """embedding は ``core.llm`` 経由 + U層計測（設計書 §6 / U3）。
+
+        遅延 import と ``usage_context`` の張り方は共通実装
+        （``core/llm_worker/embedding.py::embed_with_context`` — ``core.llm`` を
+        関数内で遅延 import し ``usage_context(feature)`` 配下で
+        ``generate_embeddings`` を呼ぶ）へ集約した。ranking.py 側に固定するのは
+        「共通実装に委譲していること」と「feature 文字列」で、共通実装が実際に
+        ``core.llm`` 経由で計測つきに呼ぶことは
+        ``tests/test_llm_single_shot_guardrails.py`` が固定する。
+        ``LLM_EXEMPT_FILES`` の allowlist は不変（他ファイルは埋め込みの共通実装にも
+        触れないことを下の走査で固定する）。
+        """
         src = _read("ranking.py")
-        assert "from core.llm import generate_embeddings" in src
-        assert 'usage_context("discovery:ranking")' in src
+        assert "from core.llm_worker.embedding import embed_with_context" in src
+        assert 'feature="discovery:ranking"' in src
 
         from core.llm_usage.schema import KNOWN_FEATURES
 

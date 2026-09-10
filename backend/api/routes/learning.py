@@ -17,6 +17,7 @@ from fastapi.responses import Response
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
+from quota import consume_daily_quota
 from schemas import (
     ChunkContent,
     CourseCreateRequest,
@@ -107,8 +108,9 @@ from core.llm import generate_text, get_llm_params, transcribe_audio
 from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
-from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.cost_gate import CostGate
 from core.llm_worker.history import window_history
+from core.llm_worker.single_shot import json_call
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
@@ -234,6 +236,10 @@ _MAX_COURSE_FOCUS_CHARS = 600
 # ---------------------------------------------------------------------------
 _learning_chat_cost_gate = CostGate()
 
+#: LLM 失敗時の degraded 固定文（設計書 I3「会話は死なせない」）。チャット本体と
+#: グラフ要素説明の2経路が同じ文を返す（経路ごとに言い換えない）。
+_CHAT_DEGRADED_MESSAGE = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+
 
 def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
     """そのリクエストで最初に LLM を呼ぶ直前に1回だけコスト上限を消費するヘルパー。
@@ -244,20 +250,14 @@ def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
     要素タップ等）からはそもそも呼ばれないため消費されない。超過時は 429（事実文のみ・
     数値非表示, I2）。
     """
-    if quota_state.get("consumed"):
-        return
-    quota_state["consumed"] = True
     settings = get_settings()
-    limit = int(getattr(settings, "learning_chat_max_calls_per_day", 300) or 0)
-    ok = _learning_chat_cost_gate.check_and_count(
-        daily_limit=limit,
-        daily_key=(today_str(), user_id),
+    consume_daily_quota(
+        _learning_chat_cost_gate,
+        user_id=user_id,
+        limit=int(getattr(settings, "learning_chat_max_calls_per_day", 300) or 0),
+        message="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+        quota_state=quota_state,
     )
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -1748,6 +1748,7 @@ def _generate_graph_element_explanation(
         )
         return LearningChatResponse(answer=approved_answer, course_update=None)
 
+    degraded = False
     graph_description = (context.get("graph_description") or "").strip()
     related_chunks = context.get("related_chunks") or []
     target_formula = context.get("target_formula") or {}
@@ -1798,13 +1799,24 @@ def _generate_graph_element_explanation(
         )
         if on_llm_call:
             on_llm_call()
-        answer = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params["model"],
-            reasoning_effort=params["reasoning_effort"],
-            temperature=0.3,
-        )
-        if target_formula_latex:
+        try:
+            answer = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+                temperature=0.3,
+            )
+        except Exception:
+            # 会話は死なせない（設計書 I3）: チャット本体と同じ degraded 規約に揃える。
+            # 以前はここだけ try/except が無く、LLM 失敗が 500 になっていた（本体は
+            # degraded 固定文 + 200）。履歴は保存し、本文依存の後処理（数式の差し込み）は
+            # スキップする（I4）。
+            logger.exception(
+                "Graph element explanation LLM call failed for element %s", body.element_id
+            )
+            answer = _CHAT_DEGRADED_MESSAGE
+            degraded = True
+        if not degraded and target_formula_latex:
             formula_id = str(target_formula.get("id") or "").strip() if isinstance(target_formula, dict) else ""
             if formula_id:
                 answer = answer.replace(formula_id, f"${target_formula_latex}$")
@@ -1814,7 +1826,7 @@ def _generate_graph_element_explanation(
         user_id, course_id, topic_id,
         body.history, user_message, answer,
     )
-    return LearningChatResponse(answer=answer, course_update=None)
+    return LearningChatResponse(answer=answer, course_update=None, degraded=degraded)
 
 
 def _topic_student_material(topic: dict) -> str:
@@ -2219,36 +2231,33 @@ def check_topic_understanding(
     # （params）を使う — 挙動を変えない。
     _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
 
-    parsed: dict = {}
-    try:
-        with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
-            if _course_chat_model:
-                # override 時は呼び出し引数として直接渡す（call_argument が最優先, §3-1）。
-                # reasoning_effort は明示しない（カタログの既定 effort に委ねる）。
-                raw = generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=_course_chat_model,
-                    temperature=0.1,
-                )
-            else:
-                raw = generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=params["model"],
-                    reasoning_effort=params["reasoning_effort"],
-                    temperature=0.1,
-                )
-        import json
-        import re
-        match = re.search(r"\{[\s\S]*\}", raw or "")
-        parsed = json.loads(match.group(0) if match else raw)
-        degraded = False
-    except Exception:
-        # 原則9 の degraded 規約: 判定を生まず、要件との見比べを本人に返す。
-        # 旧実装の「40字以上なら合格」のような文字数フォールバックは作らない
-        # （長く書けば通る、という演技を学ばせない）。
-        logger.warning("Check question juxtaposition failed; degrading to facts", exc_info=True)
-        parsed = {}
-        degraded = True
+    if _course_chat_model:
+        # override 時は呼び出し引数として直接渡す（call_argument が最優先, §3-1）。
+        # reasoning_effort は明示しない（カタログの既定 effort に委ねる）。
+        _call_kwargs: dict = {"model": _course_chat_model}
+    else:
+        _call_kwargs = {
+            "model": params["model"],
+            "reasoning_effort": params["reasoning_effort"],
+        }
+
+    with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
+        # 取り出しは共通実装へ委譲（``core/llm_worker/single_shot.py::json_call``）。
+        _result = json_call(
+            prompt,
+            call=generate_text,
+            temperature=0.1,
+            degraded=None,
+            log_label="check question juxtaposition",
+            **_call_kwargs,
+        )
+    # 原則9 の degraded 規約: 判定を生まず、要件との見比べを本人に返す。
+    # 旧実装の「40字以上なら合格」のような文字数フォールバックは作らない
+    # （長く書けば通る、という演技を学ばせない）。
+    degraded = _result is None
+    parsed: dict = _result or {}
+    if degraded:
+        logger.warning("Check question juxtaposition failed; degrading to facts")
 
     observations = check_review.parsed_observations(parsed, answer_requirements)
     covered, not_mentioned = check_review.split_observations(observations)
@@ -3387,7 +3396,7 @@ def _learning_chat_core(
         # 会話は死なせない（設計書 I3）: 500 即死をやめ、degraded 固定文 + 200 へ縮退する。
         # 履歴は保存し、回答本文に依存する後処理（誤解検出・ドリルダウン抽出）はスキップする（I4）。
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
-        answer = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+        answer = _CHAT_DEGRADED_MESSAGE
         degraded = True
 
     # 出典マーカーの突き合わせ: 根拠の無い [出典N]（捏造・番号超過）を本文から取り除き、

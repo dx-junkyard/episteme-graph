@@ -314,11 +314,18 @@ class TestAuditAndUsageRegistration:
         assert scene_for_feature("embedding:atlas_anchors") is None
 
     def test_embedding_call_is_attributed(self):
-        """埋め込みは必ず ``usage_context("embedding:atlas_anchors")`` 配下で行う（U3）。"""
+        """埋め込みは必ず ``embedding:atlas_anchors`` の帰属つきで行う（U3）。
+
+        遅延 import と ``usage_context`` の張り方は共通実装
+        （``core/llm_worker/embedding.py::embed_with_context``）に集約したので、
+        ここでは「共通実装に委譲していること」と「feature 文字列」を固定する。
+        共通実装が実際に ``usage_context`` + ``generate_embeddings`` を通ることは
+        ``tests/test_llm_single_shot_guardrails.py`` が固定する。
+        """
         src = _PKG_SOURCES["builder.py"]
         embed = extract_function_source(src, "embed_texts")
-        assert 'usage_context("embedding:atlas_anchors")' in embed
-        assert "generate_embeddings" in embed
+        assert "embed_with_context(" in embed
+        assert 'feature="embedding:atlas_anchors"' in embed
 
     def test_only_builder_touches_llm(self):
         """LLM（embedding）接触点は ``builder.py`` の1箇所だけ。"""
@@ -326,6 +333,7 @@ class TestAuditAndUsageRegistration:
             if name == "builder.py":
                 continue
             assert "generate_embeddings" not in src, name
+            assert "embed_with_context" not in src, name
 
 
 # ---------------------------------------------------------------------------

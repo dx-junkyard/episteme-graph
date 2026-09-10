@@ -26,6 +26,7 @@ from dependencies import (
     ROLE_SYSTEM_ADMIN,
     ROLE_TEACHER,
 )
+from quota import consume_daily_quota
 from schemas import (
     ApproveWithScopeRequest,
     AuthEventOut,
@@ -108,8 +109,9 @@ from core.llm import generate_text
 from core.llm_usage import metrics as llm_usage_metrics
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
-from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.cost_gate import CostGate
 from core.llm_worker.history import window_history
+from core.llm_worker.single_shot import strip_code_fence
 from core.meta_analyzer import (
     analyze_unanswered_queries,
     approve_proposal,
@@ -2134,12 +2136,10 @@ def _extract_course_draft_from_answer(raw_answer: str) -> tuple[str, dict | None
     answer = raw_answer[: marker.start()].strip()
     json_part = raw_answer[marker.end() :].strip()
 
-    if json_part.startswith("```"):
-        json_part = json_part.split("\n", 1)[1] if "\n" in json_part else json_part[3:]
-        if "```" in json_part:
-            json_part = json_part.split("```", 1)[0]
-
-    json_part = json_part.strip()
+    # フェンス除去は共通実装（core/llm_worker/single_shot.py::strip_code_fence）へ委譲する。
+    # **マーカー分離と raw_decode（本文と JSON が1応答に同居する COURSE_DRAFT_JSON
+    # プロトコル）はこのルート固有**なので残す。
+    json_part = strip_code_fence(json_part)
     if json_part.lower().startswith("json"):
         json_part = json_part[4:].strip()
 
@@ -2497,14 +2497,12 @@ def course_builder_chat(
 ) -> _CourseBuilderChatResponseOut:
     """教員がAIと対話しながらコースを設計するエンドポイント。"""
     settings = get_settings()
-    daily_cap = int(getattr(settings, "course_builder_max_calls_per_day", 100) or 0)
-    if not _course_builder_cost_gate.check_and_count(
-        daily_limit=daily_cap, daily_key=(today_str(), current_user["id"])
-    ):
-        raise HTTPException(
-            status_code=429,
-            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
-        )
+    consume_daily_quota(
+        _course_builder_cost_gate,
+        user_id=current_user["id"],
+        limit=int(getattr(settings, "course_builder_max_calls_per_day", 100) or 0),
+        message="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+    )
 
     # M層 Phase 3（§6.2）: この実行だけのモデル上書き（scene "course_builder"）。
     # 未指定なら従来どおり resolve_model() の解決順序に委ねる（挙動不変）。
@@ -4594,7 +4592,10 @@ def trigger_schema_analysis(
             return {
                 "message": "分析対象がありません。あなたが編集できるコースがまだありません。"
             }
-    result = analyze_unanswered_queries(course_ids=scope)
+    # U層計測（U3）: 計測点は core/llm.py に一元化されているが、帰属は呼び出し側が
+    # 張る。ここを張らないと未回答クエリ分析の消費が unattributed に落ちる。
+    with usage_context("admin:schema_analysis", user_id=current_user["id"]):
+        result = analyze_unanswered_queries(course_ids=scope)
     if result is None:
         return {"message": "分析の結果、スキーマ拡張の提案はありません。未回答クエリが不足しているか、現在のスキーマで十分カバーされています。"}
     return SchemaProposalOut(**result)
@@ -4664,7 +4665,10 @@ def simulate_schema_proposal(
     """
     from core.simulator import run_simulation
 
-    result = run_simulation(proposal_id)
+    # U層計測（U3）: シミュレーションは文書ごとに LLM を呼ぶ。帰属を張らないと
+    # まとまった消費が unattributed に落ちる。
+    with usage_context("admin:schema_simulate", user_id=current_user["id"]):
+        result = run_simulation(proposal_id)
     if result is None:
         raise HTTPException(
             status_code=404,

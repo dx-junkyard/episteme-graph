@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -34,6 +33,7 @@ from core.course_content_builder import (
 )
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
+from core.llm_worker.single_shot import LLMSingleShotError, structured_call
 from core.postgres import get_session as _pg_session
 from core import element_explanations
 # 教材図スタジオ（teaching_figure_studio_design.md §7.3）: 原稿スタジオプレビューの
@@ -526,35 +526,6 @@ class CourseTopicDraftLLMResponse(BaseModel):
     check_questions: list[dict] = Field(default_factory=list)
 
 
-def _parse_course_topic_draft_json(raw: str) -> dict:
-    cleaned = (raw or "").strip()
-    if cleaned.startswith("```"):
-      lines = cleaned.split("\n")
-      lines = [ln for ln in lines if not ln.strip().startswith("```")]
-      cleaned = "\n".join(lines).strip()
-
-    candidates = [cleaned]
-    match = re.search(r"\{[\s\S]*\}", cleaned)
-    if match and match.group() != cleaned:
-        candidates.append(match.group())
-
-    for candidate in list(candidates):
-        # LLMs often emit LaTeX like \Lambda inside JSON strings. JSON only
-        # allows a small set of backslash escapes, so preserve those and
-        # double every other single backslash before a second parse attempt.
-        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
-        if repaired != candidate:
-            candidates.append(repaired)
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate, strict=False)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            continue
-    return {}
-
-
 def _normalize_course_topic_draft_response(parsed: object) -> dict:
     if isinstance(parsed, BaseModel):
         parsed = parsed.model_dump()
@@ -639,29 +610,27 @@ def rewrite_lecture_studio_course_topic(
     parsed: object = {}
     consume_lecture_rewrite_quota(current_user["id"])
     with usage_context("admin:lecture_rewrite", user_id=current_user["id"], course_id=course_id):
+        # 構造化出力 → 失敗時のみテキスト JSON へ1回降格（共通実装
+        # ``core/llm_worker/single_shot.py::structured_call``。コース内容生成
+        # （core/course_content_builder.py）と同じ制御フロー）。本文に LaTeX が
+        # 混ざるため降格経路は ``repair_backslashes=True``。
         try:
-            parsed = generate_text_with_structured_output(
-                messages=[{"role": "user", "content": prompt}],
-                response_format=CourseTopicDraftLLMResponse,
+            parsed = structured_call(
+                prompt,
+                CourseTopicDraftLLMResponse,
+                structured_fn=generate_text_with_structured_output,
+                text_fn=generate_text,
                 model=effective_model,
+                text_fallback=True,
+                reasoning_effort=effective_effort,
+                repair_backslashes=True,
+                log_label=f"course topic draft course_id={course_id} topic_id={topic_id}",
             )
-        except Exception as structured_exc:
-            logger.warning(
-                "Structured course topic draft failed; retrying text JSON parse course_id=%s topic_id=%s error=%s",
-                course_id,
-                topic_id,
-                structured_exc,
+        except LLMSingleShotError:
+            logger.exception(
+                "AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id
             )
-            try:
-                raw = generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=effective_model,
-                    reasoning_effort=effective_effort,
-                )
-                parsed = _parse_course_topic_draft_json(raw)
-            except Exception:
-                logger.exception("AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id)
-                raise HTTPException(status_code=502, detail="AI draft generation failed")
+            raise HTTPException(status_code=502, detail="AI draft generation failed")
     result = _normalize_course_topic_draft_response(parsed)
     if not any([
         result["key_concepts"],

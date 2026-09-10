@@ -24,6 +24,7 @@ from core.course_data import (
     lecture_studio_settings as _lecture_studio_settings,
 )
 from core.llm import generate_text, get_llm_params
+from core.llm_worker.single_shot import extract_json
 from core.personas import persona_prompt
 
 logger = logging.getLogger(__name__)
@@ -156,13 +157,10 @@ def _parse_spoken_text_response(raw: str) -> dict:
     ValueError
         JSON パース失敗または formulas 内の必須キー欠落時
     """
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines)
-
-    result = json.loads(cleaned, strict=False)
+    # 取り出しは共通実装へ委譲（``core/llm_worker/single_shot.py::extract_json``）。
+    # **失敗は送出したまま**にすること — 上位の3回試行ループ（429 バックオフつき）が
+    # ValueError / JSONDecodeError を再試行の合図として使っている。
+    result = extract_json(raw)
 
     formulas = result.get("formulas", [])
     for i, f in enumerate(formulas):

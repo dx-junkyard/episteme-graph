@@ -72,14 +72,14 @@ def reset_daily_counter() -> None:
 def embed_texts(texts: list[str]) -> list[list[float]]:
     """テキスト群を1バッチで埋め込む（U層計測つき）。
 
-    依存の重さを入口に持ち込まないため、``core.llm`` はここで遅延 import する
+    遅延 import と計測の張り方は共通実装
+    （``core/llm_worker/embedding.py::embed_with_context``）へ委譲する
     （``core/help_kb/vector.py::_embed_texts`` / ``ranking.py::_embed`` と同型）。
+    feature は ``embedding:atlas_anchors``（VA5: chunks と同一モデル・scene 対象外）。
     """
-    from core.llm import generate_embeddings
-    from core.llm_usage.context import usage_context
+    from core.llm_worker.embedding import embed_with_context
 
-    with usage_context("embedding:atlas_anchors"):
-        return generate_embeddings(texts)
+    return embed_with_context(texts, feature="embedding:atlas_anchors")
 
 
 # ---------------------------------------------------------------------------

@@ -151,7 +151,14 @@ class TestUsageAndModelWiringPreserved:
 
     def test_single_llm_call(self):
         body = _route_source("check_topic_understanding")
-        assert body.count("generate_text(") == 2, "override 経路と既定経路の if/else の2箇所だけ"
+        # 呼び出しは共通骨格（core/llm_worker/single_shot.py::json_call）経由の1地点だけ。
+        # override 経路と既定経路の差は渡す kwargs（model / reasoning_effort）だけで、
+        # LLM 呼び出し自体を分岐で複製しない。
+        assert body.count("json_call(") == 1
+        assert body.count("call=generate_text") == 1
+        assert body.count("generate_text(") == 0, "素の LLM 呼び出し地点を増やさない"
+        # 修復再呼び出し（repair_prompt）は使わない = 1リクエスト1コールのまま。
+        assert "repair_prompt" not in body
 
     def test_self_check_route_calls_no_llm(self):
         body = _route_source("self_check_topic_understanding")

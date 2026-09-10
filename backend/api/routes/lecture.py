@@ -56,6 +56,7 @@ from core.lecture import (
 )
 from core.learning_support_agent import extract_inline_actions
 from core.llm import generate_text, get_llm_params
+from core.llm_usage.context import usage_context
 # 教材図スタジオ（teaching_figure_studio_design.md §7.1）: 採用済み生成図を既存の
 # figures_by_id マップへ合流させる（記法・解決・配信は既存資産に相乗り・FG9）。
 from core.teaching_figures.store import adopted_figures_map
@@ -557,7 +558,14 @@ def lecture_interrupt_chat(
     messages.append({"role": "user", "content": body.message})
 
     try:
-        answer = generate_text(messages=messages, temperature=0.3)
+        # U層計測（U3）: 計測点は core/llm.py に一元化されているが、帰属は呼び出し側が
+        # 張る。ここを張らないと講義中の割込み質問が unattributed に落ちる。
+        with usage_context(
+            "learning:lecture_interrupt",
+            user_id=current_user["id"],
+            course_id=course_id,
+        ):
+            answer = generate_text(messages=messages, temperature=0.3)
     except Exception as exc:
         logger.exception("Lecture interrupt chat failed for topic %s", topic_id)
         raise HTTPException(status_code=500, detail=f"Chat failed: {exc}") from exc

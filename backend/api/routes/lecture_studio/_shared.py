@@ -14,12 +14,13 @@ from fastapi import HTTPException
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN
+from quota import consume_daily_quota
 from services import get_editable_course_data, resolve_document_access
 from core.config import get_settings
 from core.course_data import course_source_material_ids
 from core.document_sections import enrich_chunks_with_sections
 from core.lecture import normalize_to_placeholder_format
-from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
 
 
@@ -149,15 +150,12 @@ def consume_lecture_rewrite_quota(user_id: str) -> None:
     （拒否されたリクエストを数えない）。
     """
     settings = get_settings()
-    cap = int(getattr(settings, "lecture_rewrite_max_calls_per_day", 100) or 0)
-    ok = _lecture_rewrite_cost_gate.check_and_count(
-        daily_limit=cap, daily_key=(today_str(), user_id)
+    consume_daily_quota(
+        _lecture_rewrite_cost_gate,
+        user_id=user_id,
+        limit=int(getattr(settings, "lecture_rewrite_max_calls_per_day", 100) or 0),
+        message="本日の原稿書き換え回数の上限に達しました。明日以降に再度お試しください。",
     )
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="本日の原稿書き換え回数の上限に達しました。明日以降に再度お試しください。",
-        )
 
 
 # ---------------------------------------------------------------------------

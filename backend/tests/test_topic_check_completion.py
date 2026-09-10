@@ -431,7 +431,10 @@ class TestCheckTopicUnderstandingRouteWiring:
         永続化例外がレスポンス自体を落とさないこと（return は最後の except の後）。"""
         body = self._route_source()
         response_idx = body.index("return LearningCheckQuestionResponse(")
-        # 採点用 LLM 呼び出しの try/except と、永続化用の try/except の最低2ブロックがある。
-        assert body.count("try:") >= 2
+        # LLM 呼び出しの try/except は共通実装（core/llm_worker/single_shot.py::json_call
+        # の ``degraded=None``）へ移り、ルートに残るのは現況取得（永続化読み）の
+        # fail-open ブロック。degraded 縮退の配線が残っていることも併せて確認する。
+        assert body.count("try:") >= 1
+        assert "degraded=None" in body
         last_except_idx = body.rindex("except Exception:")
         assert response_idx > last_except_idx

@@ -55,10 +55,14 @@ KNOWN_FEATURES = (
     "pipeline:export_validation",
     "pipeline:persist_claims_components_graph",
     "pipeline:extractor",
-    # --- 学習（core/chat.py・音声） ---
+    # --- 学習（routes/learning.py の各チャット経路・音声） ---
     "learning:chat",
     "learning:chat_casual",
     "learning:chat_discuss",
+    # レクチャー一時停止中の割込み質問（routes/lecture.py::lecture_interrupt_chat）。
+    # 講義中の1往復で、履歴も同じトピックのスレッドへ保存される。従来は帰属なし
+    # （unattributed）で記録されていた配線漏れの是正。
+    "learning:lecture_interrupt",
     # 理解サイクル Phase 2（docs/features/understanding_cycle_design.md §8）: AI 4モードの
     # うち Elicit/Diff は既存 learning_chat の1コール地点に相乗りするが、U層タグは
     # discuss/casual と同様に分離計測する。
@@ -80,12 +84,17 @@ KNOWN_FEATURES = (
     # トピック1件 = 1コールで授業用ドラフト（student_material / spoken_script 等）を作る。
     # 従来は帰属なし（unattributed）で記録されていた配線漏れの是正。
     "admin:course_content",
-    # 原稿スタジオ「理論」タブの理論コンポーネント抽出・補完
-    # （core/theory_components.py::extract_theory_components_from_chunk /
-    #  enrich_theory_components_with_llm）。C層の質問→候補生成
+    # 原稿スタジオ「理論」タブの理論コンポーネント補完
+    # （core/theory_components.py::enrich_theory_components_with_llm。抽出そのものは
+    #  非LLM の extract_theory_components_from_dsl）。C層の質問→候補生成
     # （admin:component_candidates）とは別経路なので feature を分ける。
     "admin:component_extract",
     "admin:component_candidates",
+    # スキーマ拡張の分析（core/meta_analyzer.py::analyze_unanswered_queries）と
+    # 提案の Shadow Testing（core/simulator.py::run_simulation。対象文書ごとに1コール）。
+    # どちらも運用系の明示操作で、従来は帰属なし（unattributed）だった配線漏れの是正。
+    "admin:schema_analysis",
+    "admin:schema_simulate",
     "admin:assistant",
     "admin:reconstruction_authoring",
     "admin:atlas_skeleton",

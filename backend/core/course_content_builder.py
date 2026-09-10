@@ -18,6 +18,7 @@ from core.deliberation import labels as labels_mod
 from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
+from core.llm_worker.single_shot import structured_call
 from core.postgres import get_session as _pg_session
 from core.text_excerpt import excerpt, looks_like_tex_math
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
@@ -2000,20 +2001,24 @@ def _generate_single_topic_draft(
         evidence_json=json.dumps(_topic_evidence_for_prompt(topic), ensure_ascii=False, indent=2)[:8000],
         draft_json=json.dumps(_topic_existing_draft(topic), ensure_ascii=False, indent=2)[:6000],
     )
-    parsed: object
-    try:
-        # model は渡さない（M1）— core/llm.py 入口の resolve_scene_model が
-        # usage_context の feature（admin:course_content）から解決する。
-        parsed = generate_text_with_structured_output(
-            messages=[{"role": "user", "content": prompt}],
-            response_format=_CourseContentDraftResponse,
-        )
-    except Exception:
-        raw = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            reasoning_effort=reasoning_effort,
-        )
-        parsed = _parse_topic_draft_json(raw)
+    # 構造化出力 → 失敗時のみテキスト JSON へ1回降格する（共通実装
+    # ``core/llm_worker/single_shot.py::structured_call``。原稿スタジオの
+    # トピック rewrite と同じ制御フロー）。
+    # model は渡さない（M1）— core/llm.py 入口の resolve_scene_model が
+    # usage_context の feature（admin:course_content）から解決する。
+    # 降格経路も失敗したら ``{}`` を返し、下の空判定で ValueError に落として
+    # 呼び出し側の決定論フォールバックへ渡す（従来と同じ終着点）。
+    parsed: object = structured_call(
+        prompt,
+        _CourseContentDraftResponse,
+        structured_fn=generate_text_with_structured_output,
+        text_fn=generate_text,
+        text_fallback=True,
+        reasoning_effort=reasoning_effort,
+        repair_backslashes=True,
+        degraded={},
+        log_label="course content topic draft",
+    )
     result = _normalize_topic_draft_response(parsed)
     _ensure_required_equations_in_material(result, topic)
     _ensure_required_figures_in_material(result, topic)
@@ -2148,29 +2153,6 @@ def _fallback_student_material(topic: dict) -> str:
 
 def _tokens_as_list(text: str) -> list[str]:
     return list(_tokens(text))[:6]
-
-
-def _parse_topic_draft_json(raw: str) -> dict:
-    cleaned = (raw or "").strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines).strip()
-    candidates = [cleaned]
-    match = re.search(r"\{[\s\S]*\}", cleaned)
-    if match and match.group() != cleaned:
-        candidates.append(match.group())
-    for candidate in list(candidates):
-        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
-        if repaired != candidate:
-            candidates.append(repaired)
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate, strict=False)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            continue
-    return {}
 
 
 def _normalize_topic_draft_response(parsed: object) -> dict:
