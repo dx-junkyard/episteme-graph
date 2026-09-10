@@ -1541,6 +1541,10 @@ html.learn-page > body {
 
 .check-box {
   width: min(560px, 100%);
+  /* 並置（観点・要件・解答例・自己確認）で中身が伸びるので、モーダル内でスクロールさせる
+     （画面外へはみ出して自己確認の3択が押せなくなるのを防ぐ）。 */
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
   background: var(--color-background-primary);
   border: 1px solid var(--color-border-secondary);
   border-radius: 8px;
@@ -1595,13 +1599,92 @@ html.learn-page > body {
   color: var(--color-text-danger);
 }
 
-/* 合格時の講評。合否は既に判定済みなので fail と対称の色を使うが、祝祭的な演出
-   （バッジ・アイコン・拡大）は付けない（事実文と本文だけを出す）。 */
-.check-feedback.pass {
-  color: var(--color-text-success);
+/* 是正 F1: 並置（AI の観点）の表示。合否ではないので成功色・警告色を使わず、
+   祝祭的な演出（バッジ・アイコン・拡大）も付けない（事実文と本文だけを出す）。 */
+.check-feedback.advisory {
+  color: var(--color-text-primary);
 }
 
-/* 合格時の解答例・解説は畳んで出す（一等地は講評だけ）。 */
+.check-advisory {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.check-statement {
+  margin: 6px 0 0;
+  line-height: 1.6;
+  color: var(--color-text-primary);
+}
+
+.check-observations {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  color: var(--color-text-secondary);
+}
+
+.check-obs {
+  margin-bottom: 4px;
+}
+
+.check-obs-req {
+  font-weight: 600;
+  color: var(--color-text-primary);
+}
+
+.check-obs-status {
+  margin-left: 6px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.check-obs-note {
+  display: block;
+  font-size: 12px;
+}
+
+/* 自己確認（1タップ）。R層の再構成カードと同じ位置づけの操作なので、強調色を付けず
+   横並びの3択に留める（既定の選択肢を作らない）。 */
+.check-selfcheck {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border-secondary);
+}
+
+.check-selfcheck-q {
+  font-size: 13px;
+  color: var(--color-text-primary);
+}
+
+.check-selfcheck-btns {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.check-sc {
+  padding: 6px 10px;
+  border: 1px solid var(--color-border-secondary);
+  border-radius: 6px;
+  background: var(--color-background-primary);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.check-sc:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.check-selfcheck-note,
+.check-selfcheck-done {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+/* 解答例・解説は畳んで出す（一等地は並置の事実文だけ）。 */
 .check-reveal {
   margin-top: 8px;
 }

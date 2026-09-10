@@ -24,8 +24,11 @@ from schemas import (
     LearningChatHistoryResponse,
     LearningChatRequest,
     LearningChatResponse,
+    LearningCheckObservation,
     LearningCheckQuestionRequest,
     LearningCheckQuestionResponse,
+    LearningCheckSelfCheckRequest,
+    LearningCheckSelfCheckResponse,
     LearningCourseDetail,
     LearningCourseLayeredResponse,
     LearningCourseOut,
@@ -68,7 +71,6 @@ from services import (
     record_internalization,
     record_interest_trace,
     record_learner_articulated_tension,
-    record_student_stumble_event,
     record_topic_check_pass,
     resolve_document_access,
     resolve_interest_trace,
@@ -96,6 +98,7 @@ from core.teaching_figures import store as teaching_figures_store
 from core.cartridges import load_cartridge
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
+from core import check_review
 from core import element_explanations
 from core import llm_policy
 from core.llm import generate_text, get_llm_params, transcribe_audio
@@ -1972,7 +1975,13 @@ def check_topic_understanding(
     body: LearningCheckQuestionRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCheckQuestionResponse:
-    """次セクションへ進む前の確認問題を採点し、未理解ならつまづきとして記録する。"""
+    """確認問題の回答を出題の要件と並置する（是正 F1: 合否を出さない・確定しない）。
+
+    AI の役割は Diff（並置）だけで、トピック完了の確定はここでは行わない。
+    先へ進むかどうかは本人の自己確認（``POST .../check/self-check``）が決める。
+    LLM 呼び出しは従来どおり1回（U層 feature ``learning:understanding_check`` /
+    M層のコース単位モデル上書きも維持）。
+    """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -1994,27 +2003,33 @@ def check_topic_understanding(
     requirements_text = "\n".join(f"- {r}" for r in answer_requirements) or "(未設定)"
     params = get_llm_params("fast")
     prompt = (
-        "あなたは確認問題を採点する大学教員です。JSONのみを返してください。\n"
-        "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\", \"explanation\": \"必要なら解説\"}\n\n"
+        "あなたは受講者の回答と出題の要件を並べて見せる補助役です。採点はしません。"
+        "JSONのみを返してください。\n"
+        "形式: {\"observations\": [{\"requirement\": \"回答に必要な要素（下のリストから"
+        "そのまま転記）\", \"status\": \"covered\" または \"not_mentioned\", "
+        "\"statement\": \"その要素について観察したことを推量形の1文で\"}], "
+        "\"model_answer\": \"解答例\", \"explanation\": \"必要なら解説\"}\n\n"
         f"コース: {_course_title(course_data, default=course_id)}\n"
         f"セクション: {topic.get('title', topic_id)}\n"
         f"教材:\n{material_text[:5000]}\n\n"
         f"確認問題: {question}\n"
-        f"模範解答（設定済みの場合はこれを基準にする）:\n{expected_model_answer or '(未設定)'}\n\n"
+        f"解答例（設定済みの場合はこれを基準にする）:\n{expected_model_answer or '(未設定)'}\n\n"
         f"回答に必要な要素:\n{requirements_text}\n\n"
-        f"解説（設定済みの場合はフィードバックに反映する）:\n{explanation or '(未設定)'}\n\n"
+        f"解説（設定済みの場合は explanation に反映する）:\n{explanation or '(未設定)'}\n\n"
         f"受講者の回答: {body.answer}\n\n"
-        "判定基準: 回答に必要な要素を概ね満たし、自分の言葉で説明できていれば passed=true。"
-        "核心が抜けている、逆に理解している、空欄に近い場合は false。\n"
-        "feedback は合否に関わらず必ず書いてください（合格時もフロントで学習者に提示します）。"
-        "passed=true のときは、回答が押さえられている点を事実として述べ、さらに踏み込める"
-        "観点があれば1つだけ添えてください。passed=false のときは、何が抜けているかを述べて"
-        "ください。いずれの場合も点数・正解率・達成度のような数値や評価の言い切りは書かず、"
-        "褒め言葉の羅列にもしないでください。"
+        "観点の書き方: 合否・正誤の判定は書かないでください。requirement は上の"
+        "「回答に必要な要素」の文字列をそのまま使い、リストに無い要素を作らないでください"
+        "（要素が未設定のときは observations を空にして構いません）。observations は最大"
+        f"{check_review.MAX_OBSERVATIONS}件までにし、触れられていない可能性のある要素を"
+        "優先してください。statement は「…への言及は見当たらないようです」"
+        "「…には触れているようです」のような推量形の1文にしてください。\n"
+        "禁止: 合格・不合格・正解・採点という語、点数・正解率・達成度のような数値、"
+        "評価の言い切り、褒め言葉の羅列。次に進むかどうかを指示しないでください"
+        "（それは受講者本人が決めます）。"
     )
 
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書きが設定されていれば
-    # 採点にも適用する（live 設定、版ピンと独立）。未設定時は従来どおり fast tier 固定
+    # この並置にも適用する（live 設定、版ピンと独立）。未設定時は従来どおり fast tier 固定
     # （params）を使う — 挙動を変えない。
     _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
 
@@ -2040,75 +2055,106 @@ def check_topic_understanding(
         import re
         match = re.search(r"\{[\s\S]*\}", raw or "")
         parsed = json.loads(match.group(0) if match else raw)
+        degraded = False
     except Exception:
-        logger.warning("Check question grading failed; using conservative fallback", exc_info=True)
-        passed = len((body.answer or "").strip()) >= 40
-        parsed = {
-            "passed": passed,
-            "feedback": "回答の具体性をもとに暫定判定しました。",
-            "model_answer": expected_model_answer or material_text[:800],
-            "explanation": explanation,
-        }
+        # 原則9 の degraded 規約: 判定を生まず、要件との見比べを本人に返す。
+        # 旧実装の「40字以上なら合格」のような文字数フォールバックは作らない
+        # （長く書けば通る、という演技を学ばせない）。
+        logger.warning("Check question juxtaposition failed; degrading to facts", exc_info=True)
+        parsed = {}
+        degraded = True
 
-    passed = bool(parsed.get("passed"))
-    feedback = str(parsed.get("feedback") or "")
+    observations = check_review.parsed_observations(parsed, answer_requirements)
+    covered, not_mentioned = check_review.split_observations(observations)
+    statements = check_review.build_statements(body.answer, observations, degraded=degraded)
     model_answer = str(parsed.get("model_answer") or expected_model_answer or material_text[:800])
     response_explanation = str(parsed.get("explanation") or explanation or "")
 
-    if not passed:
-        instructor_id = None
-        session = _pg_session()
-        try:
-            row = session.execute(
-                sa_text("SELECT user_id FROM learning_courses WHERE id = :course_id LIMIT 1"),
-                {"course_id": course_id},
-            ).fetchone()
-            instructor_id = str(row[0]) if row and row[0] else None
-        finally:
-            session.close()
-        record_student_stumble_event(
-            instructor_id=instructor_id,
-            student_id=current_user["id"],
-            course_id=course_id,
-            material_id=None,
-            chunk_id=None,
-            element_id=topic_id,
-            element_label=topic.get("title", topic_id),
-            event_type="misconception",
-            user_message=f"確認問題: {question}\n回答: {body.answer}",
-            generated_explanation=model_answer[:4000],
-        )
-
-    # コース完了判定のサーバー正本化: 採点結果だけでなく、合格トピック・コース完了状態を
-    # learning_states.progress_data に永続化する（フロントが「次のトピックが無い」ことだけで
-    # 完走と断定していた問題の是正）。永続化の失敗で採点レスポンス自体は落とさない（fail-open）。
-    topic_completed = False
+    # 完了はここでは書かない（是正 F1）。返すのは現況だけで、確定は self-check 経路に移る。
+    # 現況の取得に失敗しても並置レスポンス自体は落とさない（fail-open）。
     course_completed = False
     completed_topic_ids: list[str] = []
     try:
-        if passed:
-            completion = record_topic_check_pass(
-                current_user["id"], course_id, topic_id, course_data,
-            )
-            topic_completed = bool(completion.get("topic_completed"))
-            course_completed = bool(completion.get("course_completed"))
-            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
-        else:
-            completion = get_course_completion(current_user["id"], course_id, course_data)
-            course_completed = bool(completion.get("course_completed"))
-            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+        completion = get_course_completion(current_user["id"], course_id, course_data)
+        course_completed = bool(completion.get("course_completed"))
+        completed_topic_ids = list(completion.get("completed_topic_ids") or [])
     except Exception:
         logger.warning(
-            "Failed to persist topic check completion for user=%s course=%s topic=%s",
+            "Failed to read course completion for user=%s course=%s topic=%s",
             current_user["id"], course_id, topic_id, exc_info=True,
         )
 
     return LearningCheckQuestionResponse(
-        passed=passed,
-        feedback=feedback,
+        advisory=True,
+        degraded=degraded,
+        statements=statements,
+        observations=[LearningCheckObservation(**obs) for obs in observations],
+        covered=covered,
+        not_mentioned=not_mentioned,
         model_answer=model_answer,
         answer_requirements=answer_requirements,
         explanation=response_explanation,
+        self_check_required=True,
+        topic_completed=topic_id in completed_topic_ids,
+        course_completed=course_completed,
+        completed_topic_ids=completed_topic_ids,
+    )
+
+
+@router.post(
+    "/courses/{course_id}/topics/{topic_id}/check/self-check",
+    response_model=LearningCheckSelfCheckResponse,
+)
+def self_check_topic_understanding(
+    course_id: str,
+    topic_id: str,
+    body: LearningCheckSelfCheckRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningCheckSelfCheckResponse:
+    """確認問題の並置を見たあとの自己確認（本人の 1 タップ・非LLM）。
+
+    是正 F1: トピック完了を確定できるのはこの経路だけで、確定するのは本人が
+    「合っていた」/「違っていた（が、見比べて先へ進むと決めた）」を押したときに限る。
+    ``verdict_wrong``（AI の観点提示がおかしい）は申告として記録するが完了には使わない
+    — かつ進行を止めない（本人が改めて他の2択を押せば進める）。語彙は R層と共有
+    （``core/reconstruction/schema.py::SELF_CHECK_VALUES``）。
+    """
+    self_check = str(body.self_check or "").strip()
+    if self_check not in check_review.SELF_CHECK_VALUES:
+        raise HTTPException(status_code=422, detail="invalid self-check value")
+
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    topic = find_course_topic(course_data, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    topic_completed = False
+    course_completed = False
+    completed_topic_ids: list[str] = []
+    try:
+        if self_check in check_review.SELF_CHECK_ADVANCING:
+            completion = record_topic_check_pass(
+                current_user["id"], course_id, topic_id, course_data,
+            )
+            topic_completed = bool(completion.get("topic_completed"))
+        else:
+            # 申告の記録（本人の逐語・回答は残さない。AI の観点提示への異議という事実だけ）。
+            logger.info(
+                "check self-check verdict_wrong course=%s topic=%s", course_id, topic_id,
+            )
+            completion = get_course_completion(current_user["id"], course_id, course_data)
+        course_completed = bool(completion.get("course_completed"))
+        completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+    except Exception:
+        logger.warning(
+            "Failed to record check self-check for user=%s course=%s topic=%s",
+            current_user["id"], course_id, topic_id, exc_info=True,
+        )
+
+    return LearningCheckSelfCheckResponse(
+        self_check=self_check,
         topic_completed=topic_completed,
         course_completed=course_completed,
         completed_topic_ids=completed_topic_ids,

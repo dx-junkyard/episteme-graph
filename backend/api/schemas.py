@@ -419,14 +419,58 @@ class LearningCheckQuestionRequest(BaseModel):
     check_question: dict | None = None
 
 
+class LearningCheckObservation(BaseModel):
+    """確認問題の要件1つについての観点（AI の読み・判定ではない）。
+
+    語彙の正本は ``core/check_review.py``（status ∈ covered / not_mentioned / unclear）。
+    confidence・点数のような数値は持たない。
+    """
+    requirement: str = ""
+    status: str = "unclear"
+    statement: str = ""
+
+
 class LearningCheckQuestionResponse(BaseModel):
-    passed: bool
-    feedback: str
+    """確認問題の並置（DIFF）応答。**合否は返さない**（是正 F1）。
+
+    AI は要件との対応を並置するだけで、トピック完了の確定は本人の 1 タップ
+    （``POST .../check/self-check``）に移っている。``topic_completed`` /
+    ``course_completed`` はここでは**現況**（services.get_course_completion の導出）で、
+    この応答が完了を作ることはない。
+    """
+    #: この応答は判定ではなく並置であることの明示（常に True）。
+    advisory: bool = True
+    #: AI の観点提示が得られなかった（縮退・判定を生まない）。
+    degraded: bool = False
+    #: 並置の事実文（core/check_review.build_statements）。
+    statements: list[str] = Field(default_factory=list)
+    observations: list[LearningCheckObservation] = Field(default_factory=list)
+    #: 要件のうち、回答で触れられているようだ / 見当たらないようだ、と読まれたもの。
+    covered: list[str] = Field(default_factory=list)
+    not_mentioned: list[str] = Field(default_factory=list)
     model_answer: str = ""
     answer_requirements: list[str] = Field(default_factory=list)
     explanation: str = ""
-    # コース完了判定のサーバー正本化: 合格時は services.record_topic_check_pass の永続化結果、
-    # 不合格時は services.get_course_completion の現況（topic_completed=False のまま）。
+    #: 先へ進むかどうかは本人の自己確認で決まる（フロントが3択を出す契約）。
+    self_check_required: bool = True
+    # コース完了判定のサーバー正本化: /check は現況（services.get_course_completion）を返し、
+    # 完了の書き込みは self-check 経路だけが行う。
+    topic_completed: bool = False
+    course_completed: bool = False
+    completed_topic_ids: list[str] = Field(default_factory=list)
+
+
+class LearningCheckSelfCheckRequest(BaseModel):
+    """確認問題の並置を見たあとの自己確認（本人の 1 タップ）。
+
+    語彙は R層と共有（``core/reconstruction/schema.py::SELF_CHECK_VALUES``）。
+    """
+    self_check: str
+
+
+class LearningCheckSelfCheckResponse(BaseModel):
+    self_check: str
+    #: agreed / disagreed のときだけトピック完了を記録する（verdict_wrong は記録のみ）。
     topic_completed: bool = False
     course_completed: bool = False
     completed_topic_ids: list[str] = Field(default_factory=list)

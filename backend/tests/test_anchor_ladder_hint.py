@@ -401,7 +401,6 @@ class TestTypedActionPathsUnaffected:
             learning_mod, "_generate_graph_element_explanation",
             lambda **kwargs: LearningChatResponse(answer="説明します"),
         )
-        monkeypatch.setattr(learning_mod, "record_student_stumble_event", lambda *a, **k: None)
 
         spy = MagicMock(side_effect=AssertionError("EXPLAIN_GRAPH_ELEMENT 経路で呼ばれてはならない"))
         monkeypatch.setattr(learning_mod, "_build_anchor_ladder_hint", spy)

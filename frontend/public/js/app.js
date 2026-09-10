@@ -24,13 +24,12 @@
     // data-advance（サーバー応答なしの前進）経路が完了カードを出す判断に使う。
     // トピック切替・コース切替でリセットする（古いコースの完了状態を持ち越さない）。
     lastCheckCourseCompleted: false,
-    // 確認問題の「AIと議論して理解を深める」用。直近の採点結果（合否・講評・必要な要素）を
-    // 保持し、議論メッセージの材料にする（モーダルを開き直したらクリアする）。
-    lastCheckGrading: null,
-    // 合格時の採点結果（提出した回答・講評・解答例・解説）。合格でも講評を捨てず、
-    // モーダルを開き直したとき（議論から「確認問題に戻る」）は白紙のフォームではなく
-    // 「確認済み」の状態で再提示する。トピック単位なので切替で破棄する。
-    lastCheckPass: null,
+    // 確認問題の直近の並置結果（是正 F1: 合否は無い）。提出した回答・並置の事実文・
+    // 観点・解答例・解説と、本人の自己確認（agreed / disagreed / verdict_wrong）を保持する。
+    // モーダルを開き直したとき（議論から「確認問題に戻る」）は白紙のフォームに戻さず
+    // この並置を再提示し、「AIと議論して理解を深める」の材料にもする。
+    // トピック単位なので切替で破棄する。
+    lastCheckReview: null,
     // 確認問題の壁打ちモードが継続中か。true の間は sendMessage が check_scaffold を
     // 補い、AI は解答そのものを提示せず要素の説明と問いかけで支援する。
     // 確認問題モーダルを開き直したとき・トピックを移ったときに false へ戻す。
@@ -3354,8 +3353,8 @@
     clearMaterialElementContextCache();
     // P1: トピック切替で「直前の check 応答の course_completed」を持ち越さない。
     state.lastCheckCourseCompleted = false;
-    // 合格時の講評もトピック単位。別トピックへ移ったら持ち越さない。
-    state.lastCheckPass = null;
+    // 確認問題の並置もトピック単位。別トピックへ移ったら持ち越さない。
+    state.lastCheckReview = null;
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
     // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
     var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
@@ -3649,51 +3648,152 @@
     });
   }
 
-  // 合格時の「確認済み」表示。講評・解答例・解説をモーダル内に出し、主ボタンを前進
-  // （data-advance）へ切り替える。自動では次へ進まない — 講評を読む時間と、AI と
-  // 深掘りする選択肢を学習者に残すため（合格でも講評を捨てない）。
-  // 数値・スコア・祝祭演出は出さず、事実文と本文（講評・解答例・解説）だけを出す。
-  function applyCheckPassState(pass) {
-    if (!pass) return;
+  // 是正 F1（六つのレンズ 01_learner 提案2 / 05_ai 提案1）: 確認問題は AI が合否を
+  // 決めるゲートではなく、「要件との並置 → 解答例・解説の開示 → 本人の自己確認」に
+  // 分解されている。AI 応答に合否は無く、トピックを確認済みにするのは本人の3択だけ。
+  // 数値・スコア・祝祭演出は出さない。
+  var CHECK_ADVISORY_NOTE = "AI が並べた観点です（合否の判定ではありません）。";
+  var CHECK_SELFCHECK_STATUS_LABELS = {
+    covered: "触れられているようです",
+    not_mentioned: "見当たらないようです",
+    unclear: "読み取れませんでした",
+  };
+
+  function checkObservationsHtml(observations) {
+    if (!observations || !observations.length) return "";
+    var html = '<ul class="check-observations">';
+    observations.forEach(function (o) {
+      var status = o && o.status ? String(o.status) : "unclear";
+      var label = CHECK_SELFCHECK_STATUS_LABELS[status] || CHECK_SELFCHECK_STATUS_LABELS.unclear;
+      html += '<li class="check-obs ' + escHtml(status) + '">' +
+        (o.requirement ? '<span class="check-obs-req">' + escHtml(o.requirement) + '</span>' : "") +
+        '<span class="check-obs-status">' + escHtml(label) + '</span>' +
+        (o.statement ? '<span class="check-obs-note">' + escHtml(o.statement) + '</span>' : "") +
+        '</li>';
+    });
+    return html + '</ul>';
+  }
+
+  // 自己確認（1タップ・非LLM）。R層の再構成カード（reconstruction.js）と同型の問いかけ・
+  // ラベルにそろえる。ここには機械判定が無いので3つめだけ「観点がおかしい」にする。
+  function checkSelfCheckHtml(review) {
+    var done = review.selfCheck === "agreed" || review.selfCheck === "disagreed";
+    if (done) {
+      return '<div class="check-selfcheck" id="check-selfcheck">' +
+        '<div class="check-selfcheck-done">この確認を終えた記録を残しました' +
+        '（正誤の記録ではありません）。</div></div>';
+    }
+    var wrongNote = review.selfCheck === "verdict_wrong"
+      ? '<div class="check-selfcheck-done">観点がおかしいという申告を受け取りました。' +
+        '先へ進むかどうかは、下の3つからいつでも選べます。</div>'
+      : "";
+    return '<div class="check-selfcheck" id="check-selfcheck">' +
+      wrongNote +
+      '<div class="check-selfcheck-q">あなたの見立てはどうでしたか？</div>' +
+      '<div class="check-selfcheck-btns">' +
+        '<button type="button" class="check-sc" data-sc="agreed">合っていた</button>' +
+        '<button type="button" class="check-sc" data-sc="disagreed">違っていた</button>' +
+        '<button type="button" class="check-sc" data-sc="verdict_wrong">観点がおかしい</button>' +
+      '</div>' +
+      '<div class="check-selfcheck-note">「合っていた」「違っていた」は、あなたがこの確認を' +
+      '終えたという記録になります（どちらを選んでも記録の中身は同じです）。</div>' +
+      '</div>';
+  }
+
+  function applyCheckReviewState(review) {
+    if (!review) return;
     var answerEl = document.getElementById("check-answer");
     if (answerEl) {
-      // 提出済みの回答を見ながら講評を読めるようにする（書き換えはできない）。
-      answerEl.value = pass.answer || "";
-      answerEl.readOnly = true;
+      // 提出した回答は残す。書き換えて再回答（REVISE）できるよう readOnly にしない。
+      answerEl.value = review.answer || "";
+      answerEl.readOnly = false;
     }
     var feedbackEl = document.getElementById("check-feedback");
     if (feedbackEl) {
-      // 一等地は講評だけ。解答例・解説は本人が開くまで畳んでおく（合格した回答の
-      // 直後に長文を積み上げず、読み比べたい人だけが開ける）。
-      var reveal = "";
-      if (pass.model_answer || pass.explanation) {
-        reveal = '<details class="check-reveal"><summary>解答例と解説を読む</summary>' +
-          (pass.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(pass.model_answer) + '</div>' : "") +
-          (pass.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(pass.explanation) + '</div>' : "") +
+      var html = '<div class="check-advisory">' + escHtml(CHECK_ADVISORY_NOTE) + '</div>';
+      (review.statements || []).forEach(function (s) {
+        html += '<p class="check-statement">' + escHtml(s) + '</p>';
+      });
+      html += checkObservationsHtml(review.observations);
+      if (review.answer_requirements && review.answer_requirements.length) {
+        html += '<div class="check-model-answer"><span>回答に必要な要素</span><ul>' +
+          review.answer_requirements.map(function (r) {
+            return '<li>' + escHtml(r) + '</li>';
+          }).join("") + '</ul></div>';
+      }
+      // 解答例・解説（REVEAL）は本人が開くまで畳んでおく。
+      if (review.model_answer || review.explanation) {
+        html += '<details class="check-reveal"><summary>解答例と解説を読む</summary>' +
+          (review.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(review.model_answer) + '</div>' : "") +
+          (review.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(review.explanation) + '</div>' : "") +
           '</details>';
       }
-      feedbackEl.innerHTML = '<strong>この回答で次へ進めます。</strong><br>' +
-        escHtml(pass.feedback || "") + reveal;
-      feedbackEl.className = "check-feedback pass";
+      html += checkSelfCheckHtml(review);
+      feedbackEl.innerHTML = html;
+      feedbackEl.className = "check-feedback advisory";
+    }
+    var selfCheckEl = document.getElementById("check-selfcheck");
+    if (selfCheckEl) {
+      Array.prototype.forEach.call(selfCheckEl.querySelectorAll(".check-sc"), function (b) {
+        b.addEventListener("click", function () {
+          submitCheckSelfCheck(this.getAttribute("data-sc"));
+        });
+      });
     }
     var submitBtn = document.getElementById("check-submit");
     if (submitBtn) {
-      submitBtn.textContent = getNextTopic() ? "次へ進む" : "確認を終える";
       submitBtn.disabled = false;
-      submitBtn.setAttribute("data-advance", "true");
+      if (review.topicCompleted) {
+        // 本人が確認を終えたので、主ボタンは明示的な前進になる（自動遷移はしない）。
+        submitBtn.textContent = getNextTopic() ? "次へ進む" : "確認を終える";
+        submitBtn.setAttribute("data-advance", "true");
+      } else {
+        // まだ自己確認していない間は、書き直して再回答（REVISE）できる。
+        submitBtn.textContent = "もう一度答える";
+        submitBtn.removeAttribute("data-advance");
+      }
     }
-    // 確認したあとに「今回は確認せず進む」は事実でなくなるので出口ごと取り除く。
-    var skipBtn = document.getElementById("check-skip");
-    if (skipBtn) skipBtn.remove();
+    // 確認を終えたあとに「今回は確認せず進む」は事実でなくなるので出口ごと取り除く。
+    if (review.topicCompleted) {
+      var skipBtn = document.getElementById("check-skip");
+      if (skipBtn) skipBtn.remove();
+    }
+  }
+
+  // 自己確認の送信。トピック完了を確定できるのはこの経路だけ（AI の応答では確定しない）。
+  async function submitCheckSelfCheck(value) {
+    var review = state.lastCheckReview;
+    if (!review || !value) return;
+    var selfCheckEl = document.getElementById("check-selfcheck");
+    var btns = selfCheckEl ? selfCheckEl.querySelectorAll(".check-sc") : [];
+    Array.prototype.forEach.call(btns, function (b) { b.disabled = true; });
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/check/self-check",
+        { method: "POST", body: JSON.stringify({ self_check: value }) }
+      );
+      if (!res.ok) throw new Error("self-check failed");
+      var data = await res.json();
+      state.lastCheckCourseCompleted = !!data.course_completed;
+      review.selfCheck = value;
+      review.topicCompleted = !!data.topic_completed;
+      applyCheckReviewState(review);
+    } catch (err) {
+      Array.prototype.forEach.call(btns, function (b) { b.disabled = false; });
+      var note = selfCheckEl ? selfCheckEl.querySelector(".check-selfcheck-note") : null;
+      if (note) note.textContent = "記録できませんでした。もう一度お試しください。";
+    }
   }
 
   function openCheckModal() {
     if (!state.currentTopicId || state.checkingUnderstanding) return;
-    // G1-4: 最終トピック（次が無い）でも確認問題フローへ進み、合格後は完了カードへ繋ぐ。
+    // G1-4: 最終トピック（次が無い）でも確認問題フローへ進み、確認後は完了カードへ繋ぐ。
     var existing = document.getElementById("check-overlay");
     if (existing) existing.remove();
-    // 開き直しは前回の採点結果を持ち越さない（古い指摘で議論メッセージを作らない）。
-    state.lastCheckGrading = null;
+    // 開き直しは他トピックの並置結果を持ち越さない（古い観点で議論メッセージを作らない）。
+    if (state.lastCheckReview && state.lastCheckReview.topicId !== state.currentTopicId) {
+      state.lastCheckReview = null;
+    }
     // 確認問題に戻ってきたら壁打ちは終わり、通常チャットに復帰する。
     state.checkScaffoldActive = false;
 
@@ -3741,23 +3841,24 @@
     document.getElementById("check-discuss").addEventListener("click", async function () {
       var draftEl = document.getElementById("check-answer");
       var draft = draftEl ? draftEl.value.trim() : "";
-      var grading = state.lastCheckGrading;
-      var passedCheck = !!(grading && grading.passed);
-      // P4: 書きかけの回答と採点の講評を捨てず、そのまま議論の材料として持ち出す。
+      var review = state.lastCheckReview;
+      // 回答を提出して並置（と解答例の開示）まで済んでいるか。済んでいれば答えは
+      // すでに開示されているので、解答を伏せる壁打ちの拘束は目的を失う。
+      var revealedCheck = !!(review && review.topicId === state.currentTopicId);
+      // P4: 書きかけの回答と並置の観点を捨てず、そのまま議論の材料として持ち出す。
       var lines = [
         "確認問題「" + (question.question || "") + "」について、理解を深めたいので議論させてください。",
         "私の回答: " + (draft || "（まだ回答していません）"),
       ];
-      if (grading && grading.feedback) {
-        lines.push((passedCheck ? "講評: " : "指摘された点: ") + grading.feedback);
+      if (review && review.statements && review.statements.length) {
+        lines.push("並べて見えたこと: " + review.statements.join(" "));
       }
-      if (grading && grading.answer_requirements && grading.answer_requirements.length) {
-        lines.push("回答に必要な要素: " + grading.answer_requirements.join(" / "));
+      if (review && review.answer_requirements && review.answer_requirements.length) {
+        lines.push("回答に必要な要素: " + review.answer_requirements.join(" / "));
       }
       overlay.remove();
-      if (passedCheck) {
-        // 合格後の深掘りは壁打ちにしない: 答えは既に本人が組み立てているので、解答を
-        // 伏せる拘束は目的を失う。通常のチャット（教材に基づく応答）で内容を深める。
+      if (revealedCheck) {
+        // 開示後の深掘りは壁打ちにしない。通常のチャット（教材に基づく応答）で内容を深める。
         state.checkScaffoldActive = false;
         await sendMessage(lines.join("\n"));
       } else {
@@ -3768,15 +3869,10 @@
       }
       showCheckReturnChip();
     });
-    // 合格済みトピックで開き直したとき（議論から「確認問題に戻る」）は、白紙の
-    // フォームに戻さず講評を再提示する（P4: 一度出した講評を消さない）。
-    if (state.lastCheckPass && state.lastCheckPass.topicId === state.currentTopicId) {
-      state.lastCheckGrading = {
-        passed: true,
-        feedback: state.lastCheckPass.feedback || "",
-        answer_requirements: state.lastCheckPass.answer_requirements || [],
-      };
-      applyCheckPassState(state.lastCheckPass);
+    // 回答済みトピックで開き直したとき（議論から「確認問題に戻る」）は、白紙の
+    // フォームに戻さず並置を再提示する（P4: 一度出した観点を消さない）。
+    if (state.lastCheckReview && state.lastCheckReview.topicId === state.currentTopicId) {
+      applyCheckReviewState(state.lastCheckReview);
     }
     var answer = document.getElementById("check-answer");
     if (answer) answer.focus();
@@ -3857,70 +3953,23 @@
       var data = await res.json();
       // P1: サーバー正本の完了状態を保持する（data-advance 経路が後で参照する）。
       state.lastCheckCourseCompleted = !!data.course_completed;
-      if (data.passed) {
-        // 合格でも講評を捨てない: サーバーは合否に関わらず feedback / model_answer /
-        // explanation を返すので、その場に出して読ませ、次へ進むか AI と深掘りするかを
-        // 学習者に選ばせる（合格＝即遷移で講評が消える、をやめる）。
-        var passFeedback = String(data.feedback || "").trim();
-        var passModelAnswer = String(data.model_answer || "").trim();
-        var passExplanation = String(data.explanation || "").trim();
-        if (passFeedback || passModelAnswer || passExplanation) {
-          state.lastCheckGrading = {
-            passed: true,
-            feedback: data.feedback || "",
-            answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
-          };
-          // 議論から戻ってきたときに講評を復元するため、提出した回答ごと保持する。
-          state.lastCheckPass = {
-            topicId: state.currentTopicId,
-            answer: answer,
-            feedback: data.feedback || "",
-            answer_requirements: state.lastCheckGrading.answer_requirements,
-            model_answer: data.model_answer || "",
-            explanation: data.explanation || "",
-          };
-          applyCheckPassState(state.lastCheckPass);
-        } else {
-          // 見せる中身が無い（採点が講評を返さなかった・フォールバック採点）場合は、
-          // 空の枠を見せる意味が無いので従来どおり即座に次へ進む。
-          var next = getNextTopic();
-          var completedTopic = getCurrentTopic();
-          var overlay = document.getElementById("check-overlay");
-          if (overlay) overlay.remove();
-          // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
-          if (next) {
-            await selectTopic(next.id);
-            // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
-            showAtlasCueAfterAdvance(completedTopic, next);
-          } else {
-            // G1-4: 最終トピック合格 → コース完走の完了カードへ繋ぐ（事実文のみ・数値なし）。
-            // P1: サーバーが course_completed===true を確認したときのみ断定文言を出す。
-            if (lectureState.active) deactivateLecture();
-            showCourseCompletionCard(completedTopic, data.course_completed === true);
-          }
-        }
-      } else {
-        // 「AIと議論して理解を深める」が指摘・必要な要素を議論へ持ち出せるよう保持する。
-        state.lastCheckGrading = {
-          feedback: data.feedback || "",
-          answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
-        };
-        if (feedbackEl) {
-          feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
-            escHtml(data.feedback || "") +
-            (data.answer_requirements && data.answer_requirements.length
-              ? '<div class="check-model-answer"><span>回答に必要な要素</span><ul>' + data.answer_requirements.map(function (r) { return '<li>' + escHtml(r) + '</li>'; }).join("") + '</ul></div>'
-              : "") +
-            (data.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(data.model_answer) + '</div>' : "") +
-            (data.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(data.explanation) + '</div>' : "");
-          feedbackEl.className = "check-feedback fail";
-        }
-        if (submitBtn) {
-          submitBtn.textContent = "理解したので次へ";
-          submitBtn.disabled = false;
-          submitBtn.setAttribute("data-advance", "true");
-        }
-      }
+      // 是正 F1: 応答に合否は無い。並置（事実文・観点）と開示（解答例・解説）をその場に
+      // 出し、先へ進むかどうかは本人の自己確認（3択）に委ねる。
+      state.lastCheckReview = {
+        topicId: state.currentTopicId,
+        answer: answer,
+        degraded: !!data.degraded,
+        statements: Array.isArray(data.statements) ? data.statements : [],
+        observations: Array.isArray(data.observations) ? data.observations : [],
+        answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
+        model_answer: data.model_answer || "",
+        explanation: data.explanation || "",
+        selfCheck: "",
+        // サーバーの現況（このトピックを以前に確認済みなら true）。/check が確定させる
+        // ことはないので、未確認のトピックでは常に false で返ってくる。
+        topicCompleted: !!data.topic_completed,
+      };
+      applyCheckReviewState(state.lastCheckReview);
     } catch (err) {
       if (feedbackEl) {
         feedbackEl.textContent = "確認に失敗しました。もう一度お試しください。";
@@ -8070,7 +8119,7 @@
     if (!mn || !player || document.getElementById("lecture-complete-banner")) return;
     var next = getNextTopic();
     // G1-4: 最終トピックでも「確認して完了」で同じ確認問題フローに合流させ、
-    // 合格後の完了カードへ繋ぐ（レクチャーを黙って終わらせない）。
+    // 確認後の完了カードへ繋ぐ（レクチャーを黙って終わらせない）。
     var label = next ? "確認問題に進む" : "確認して完了";
     var banner = document.createElement("div");
     banner.className = "lecture-complete";

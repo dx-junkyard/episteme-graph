@@ -14,9 +14,10 @@ assert + 波括弧カウントによる関数・ハンドラ本体の抽出）�
    ハンドラは overlay 除去 → selectTopic のみ。apiFetch（サーバ記録）と
    showAtlasCueAfterAdvance（「〜を確認しました」の地図 cue = 確認していないのに
    出せば偽事実）を呼ばないことを構造的に固定する
-3. 議論は回答下書き（空なら「（まだ回答していません）」）と直前の採点結果を合成して
+3. 議論は回答下書き（空なら「（まだ回答していません）」）と直前の並置結果を合成して
    sendMessage で自動送信する（P4: 書きかけと指摘を捨てない）
-4. openCheckModal は冒頭で state.lastCheckGrading をクリアする（古い指摘の持ち越し禁止）
+4. openCheckModal は他トピックの並置結果（state.lastCheckReview）をクリアする
+   （古い観点の持ち越し禁止）
 5. チップは追加前に removeCheckReturnChip を呼び常に最新1枚。ポーリング（setInterval /
    setTimeout での再掲）をしない
 6. showCourseCompletionCard の opts.skipped 分岐（タイトル文言と「回答しました」行の抑止）
@@ -172,7 +173,7 @@ class TestSkipHandler:
 
 
 class TestDiscussHandler:
-    """議論は下書きと採点の指摘を捨てず、そのまま自動送信する（P4）。"""
+    """議論は下書きと並置の観点を捨てず、そのまま自動送信する（P4）。"""
 
     def test_discuss_auto_sends_via_send_message(self):
         body = _extract_body(_read(APP_JS), DISCUSS_HANDLER_SIG)
@@ -183,24 +184,25 @@ class TestDiscussHandler:
         assert "check-answer" in body
         assert "（まだ回答していません）" in body
 
-    def test_discuss_carries_grading_feedback_and_requirements(self):
+    def test_discuss_carries_review_statements_and_requirements(self):
         body = _extract_body(_read(APP_JS), DISCUSS_HANDLER_SIG)
-        assert "state.lastCheckGrading" in body
-        assert "grading.feedback" in body
-        assert "grading.answer_requirements" in body
+        assert "state.lastCheckReview" in body
+        assert "review.statements" in body
+        assert "review.answer_requirements" in body
 
     def test_discuss_shows_return_chip_after_sending(self):
         body = _extract_body(_read(APP_JS), DISCUSS_HANDLER_SIG)
         assert body.index("await sendMessage") < body.index("showCheckReturnChip()")
 
 
-class TestGradingNotCarriedOver:
-    """開き直しは前回の採点結果を持ち越さない（古い指摘で議論メッセージを作らない）。"""
+class TestReviewNotCarriedOver:
+    """開き直しは他トピックの並置結果を持ち越さない（古い観点で議論メッセージを作らない）。"""
 
-    def test_open_check_modal_clears_last_grading_before_wiring(self):
+    def test_open_check_modal_clears_other_topic_review_before_wiring(self):
         body = _extract_body(_read(APP_JS), OPEN_MODAL_SIG)
-        assert "state.lastCheckGrading = null;" in body
-        assert body.index("state.lastCheckGrading = null;") < body.index("check-discuss")
+        assert "state.lastCheckReview.topicId !== state.currentTopicId" in body
+        assert "state.lastCheckReview = null;" in body
+        assert body.index("state.lastCheckReview = null;") < body.index("check-discuss")
 
 
 class TestReturnChip:
@@ -250,7 +252,7 @@ class TestCompletionCardSkippedBranch:
         )
 
     def test_opts_defaults_to_empty_object(self):
-        """既存の2引数呼び出し（合格経路）を壊さない。"""
+        """既存の2引数呼び出し（前進経路）を壊さない。"""
         body = _extract_body(_read(APP_JS), COMPLETION_CARD_SIG)
         assert "opts = opts || {};" in body
 

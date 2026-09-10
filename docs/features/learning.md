@@ -72,51 +72,60 @@
 「受講する / キャンセル」）を経てから `POST .../enroll` を呼ぶ。キャンセル時は
 select を元の値へ戻し、失敗時はモーダル内にエラー表示して再試行できる。
 
-### 2.2 コース完了カード（サーバー正本の完了判定）
+### 2.2 コース完了カード（サーバー正本の完了判定・確定は本人）
 
-確認問題（設問は `GET .../topics/{tid}/material` の `check_questions` から選び、採点は
-`POST .../topics/{tid}/check`）に合格すると、サーバーが
-`services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
+確認問題（設問は `GET .../topics/{tid}/material` の `check_questions` から選ぶ）の
+`POST .../topics/{tid}/check` は**合否を返さない**（2026-09-10 是正 F1。正本は
+`backend/core/check_review.py`）。LLM は `answer_requirements` の各要素について「回答で触れられて
+いる / 触れられていない可能性 / 不明」の観点を並置し、模範解答・解説を開示するだけで、
+`passed` フィールドは存在しない。トピック完了の確定は本人の 1 タップ
+`POST .../topics/{tid}/check/self-check`（body `self_check ∈ {agreed, disagreed, verdict_wrong}`、
+語彙外は 422）に移り、`agreed` / `disagreed`（＝本人が見比べて先へ進むと決めた）のときだけ
+サーバーが `services.record_topic_check_pass()` で **`learning_states.progress_data`** に永続化する:
 
-- `progress_data.completed_topics`（topic_id → 合格時刻 ISO8601。既存タイムスタンプは上書きしない）
-- 全トピック合格時に `progress_data.course_completed_at` を一度だけ設定
+- `progress_data.completed_topics`（topic_id → 確認を終えた時刻 ISO8601。既存タイムスタンプは上書きしない）
+- 全トピックを終えたときに `progress_data.course_completed_at` を一度だけ設定
 
-`/check` レスポンスの `course_completed` / `completed_topic_ids` が**サーバー正本**で、
+`verdict_wrong`（「観点がおかしい」）は完了させず進行も止めない（本人が改めて他の 2 択を押せば
+進める）。LLM 失敗時は 200 + `degraded: true` + 固定文「AI の観点提示ができませんでした。出題の
+要件と自分の回答を見比べてください。」に縮退し、**判定を生まない**（旧「40 字以上で合格」の
+フォールバックは撤去）。不合格時に回答逐語を `student_stumble_events` へ記帳していた経路も撤去した
+（AI の判定を学習者の属性として書かない）。
+
+self-check レスポンスの `course_completed` / `completed_topic_ids` が**サーバー正本**で、
 フロント（`app.js` の `showCourseCompletionCard`）は `course_completed === true` のときだけ
 「全トピックを学習しました」と断定する（「次のトピックが無い」ことだけで完走と断定しない。
 未確認なら「まだ確認を終えていないトピックがあります」に縮退 — fail-closed）。カードは
 事実文のみ（数値・スコア・祝祭演出なし）で、「他のコースを見る」「わたしの地図を見る」
 （`PersonalMapHome.open()`）への導線を添える。
 
-### 2.3 確認問題の採点結果（合格時も講評を出す）
+### 2.3 確認問題の並置と自己確認（採点しない）
 
 確認問題モーダル（`app.js::openCheckModal`）の出口は3つ — 「回答する」／
-「AIと議論して理解を深める」（UI アンカー `check.discuss`。書きかけの回答と講評を捨てずに
+「AIと議論して理解を深める」（UI アンカー `check.discuss`。書きかけの回答と並置結果を捨てずに
 議論へ持ち出す）／弱いリンク「今回は確認せず次へ進む」（同 `check.skip`。押し付けないための
 逃げ道なので API を呼ばず痕跡も残さない）。
 
-`/check` は**合否に関わらず** `feedback` / `model_answer` / `explanation` /
-`answer_requirements` を返す。かつてフロントは合格時に `overlay.remove()` → 即
-`selectTopic(next)` としていたため、サーバーが作った講評が一度も表示されずに捨てられて
-いた。現在は合格時も講評をモーダル内に出し、前進はもう一段の操作にする
-（`app.js::applyCheckPassState`）:
+`/check` の応答は `{advisory: true, observations[{requirement, status, statement}], covered[],
+not_mentioned[], statements[], model_answer, explanation, answer_requirements, degraded,
+self_check_required, ...}`。フロントは要件との並置（触れられている / 触れられていない可能性）を
+一等地に出し、解答例・解説は `<details>`（「解答例と解説を読む」）に畳む。その下に R層の
+自己確認と同型の問いかけ「あなたの見立てはどうでしたか？」と 3 択
+**「合っていた」／「違っていた」／「観点がおかしい」**を置く（前 2 つはどちらを選んでも
+「この確認を終えた」という同じ記録になることを補足行で明記）。
 
-- 一等地は**講評だけ**。解答例・解説は `<details>`（「解答例と解説を読む」）に畳む
-  — 合格した回答の直後に長文を積み上げない。
-- 主ボタンは `data-advance="true"` の「次へ進む」／最終トピックでは「確認を終える」に
-  切り替え、既存の data-advance 経路（地図 cue・完了カード）に合流させる。**自動遷移しない**。
-- 提出した回答は `readOnly` で残す。合格の記録（`record_topic_check_pass`）は送信時点で
-  永続化済みなので、閉じても確認済みの事実は失われない。
-- 確認したあとに「今回は確認せず次へ進む」は事実でなくなるため、スキップ導線は取り除く。
-- 講評・解答例・解説がすべて空（採点フォールバック等）のときだけ、従来どおり即前進する
-  （空の枠を見せない）。
-- 合格結果は `state.lastCheckPass`（トピック単位・`selectTopic` で破棄）に保持し、議論から
-  「確認問題に戻る」で開き直したときは白紙のフォームに戻さず講評を再提示する（P4）。
+- 3 択を押すまで完了せず、押す前の主ボタンは「もう一度答える」（REVISE）。押した後は
+  `data-advance="true"` の「次へ進む」／最終トピックでは「確認を終える」に切り替え、既存の
+  data-advance 経路（地図 cue・完了カード）に合流させる。**自動遷移しない**。
+- 提出した回答は `readOnly` で残す。確認を終えたあとに「今回は確認せず次へ進む」は事実で
+  なくなるため、スキップ導線は取り除く。
+- UI 文言から「合格 / 不合格 / 正解 / 採点」の語彙を使わない
+  （`test_check_juxtaposition_ui_static.py` が固定）。
 
-**合格後の深掘りは壁打ちモードにしない。** `check_scaffold`（解答そのものを出さず要素の
+**確認後の深掘りは壁打ちモードにしない。** `check_scaffold`（解答そのものを出さず要素の
 説明と問いかけに留める拘束）は「まだ答えを組み立てていない学習者」のための拘束なので、
-合格後の議論では `state.checkScaffoldActive = false` として通常のチャット（教材にもとづく
-RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（合格=「講評:」／不合格=「指摘された点:」）。
+自己確認後の議論では `state.checkScaffoldActive = false` として通常のチャット（教材にもとづく
+RAG 応答）で送る。
 
 ### 2.4 共有版の削除予定バナー（V層）
 
@@ -148,8 +157,8 @@ RAG 応答）で送る。持ち出す材料の見出しも合否で分ける（�
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
 - **誤解検出**: 回答に訂正シグナルが含まれると個人レイヤーに記録され、トピックに誤解バッジが付く。
 - **前提知識チェック**: 未習得の前提があれば逆質問（`mode="prerequisite_review"`）。
-- **理解度チェック**: `POST .../topics/{tid}/check`（設問は `GET .../topics/{tid}/material` の
-  `check_questions`）で習得を確認し次トピックへ。
+- **確認問題**: `POST .../topics/{tid}/check`（設問は `GET .../topics/{tid}/material` の
+  `check_questions`）で要件との並置を得て、`POST .../check/self-check` の本人の 1 タップで確認を終える（§2.2）。
 
 ### 回答の出所表示（content_grounding）
 回答バブル下部と出典タブのバナーに、回答が何に基づくかをバッジで表示します

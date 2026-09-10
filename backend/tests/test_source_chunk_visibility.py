@@ -438,11 +438,10 @@ class TestGraphElementRouteWiring:
         monkeypatch.setattr(learning_module, "list_course_source_document_ids", lambda cd: set())
         monkeypatch.setattr(learning_module, "list_visible_document_ids", lambda uid: set())
 
-        def _unexpected_stumble(**kwargs):
-            raise AssertionError("stumble event must not be recorded for an invisible chunk")
-
-        monkeypatch.setattr(learning_module, "record_student_stumble_event", _unexpected_stumble)
-
+        # 是正 F1 で routes/learning.py から record_student_stumble_event の呼び出し口が
+        # 無くなったため（確認問題の不合格記帳が唯一の呼び出し元だった）、ここで
+        # 「記帳されないこと」を差し替えで確かめる必要はなくなった。学習ルート全体に
+        # 呼び出しが存在しないことは test_issue_283_stumble_scope.py が固定する。
         body = LearningChatRequest(
             message="", chunk_id="chunk-of-another-teacher",
             element_id="cid", element_type="concept",
@@ -467,7 +466,6 @@ class TestGraphElementRouteWiring:
         monkeypatch.setattr(
             learning_module, "list_visible_document_ids", lambda uid: {"doc-own"},
         )
-        monkeypatch.setattr(learning_module, "record_student_stumble_event", lambda **kw: None)
         monkeypatch.setattr(learning_module, "persist_chat_history", lambda *a, **kw: None)
 
         def _fake_context(course_data, chunk_id, element_id, element_type=None,

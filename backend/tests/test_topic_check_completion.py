@@ -327,7 +327,10 @@ class TestSchemaFields:
     def test_check_question_response_defaults(self):
         from schemas import LearningCheckQuestionResponse
 
-        resp = LearningCheckQuestionResponse(passed=True, feedback="ok")
+        resp = LearningCheckQuestionResponse(statements=["…"])
+        assert resp.advisory is True
+        assert resp.degraded is False
+        assert resp.self_check_required is True
         assert resp.topic_completed is False
         assert resp.course_completed is False
         assert resp.completed_topic_ids == []
@@ -336,8 +339,7 @@ class TestSchemaFields:
         from schemas import LearningCheckQuestionResponse
 
         resp = LearningCheckQuestionResponse(
-            passed=True,
-            feedback="ok",
+            statements=["…"],
             topic_completed=True,
             course_completed=True,
             completed_topic_ids=["t1", "t2"],
@@ -345,6 +347,14 @@ class TestSchemaFields:
         assert resp.topic_completed is True
         assert resp.course_completed is True
         assert resp.completed_topic_ids == ["t1", "t2"]
+
+    def test_self_check_response_defaults(self):
+        from schemas import LearningCheckSelfCheckResponse
+
+        resp = LearningCheckSelfCheckResponse(self_check="agreed")
+        assert resp.topic_completed is False
+        assert resp.course_completed is False
+        assert resp.completed_topic_ids == []
 
     def test_learning_progress_defaults(self):
         from schemas import LearningProgress
@@ -378,28 +388,36 @@ class TestSchemaFields:
 class TestCheckTopicUnderstandingRouteWiring:
     """backend/api/routes/learning.py::check_topic_understanding のソース検証。
 
-    永続化の失敗で採点レスポンス自体を落とさない（fail-open）ことと、
-    合格/不合格それぞれで正しいサービス関数を呼ぶことを検証する。
+    是正 F1 以降、``/check`` は**完了を書かない**（現況を読むだけ）。完了の書き込みは
+    自己確認 ``/check/self-check`` に移っている。現況取得の失敗で並置レスポンス自体を
+    落とさない（fail-open）ことも従来どおり検証する。
     """
 
     @staticmethod
-    def _route_source():
+    def _route_source(fn_name: str = "check_topic_understanding"):
         from pathlib import Path
 
         path = Path(__file__).resolve().parents[1] / "api" / "routes" / "learning.py"
         src = path.read_text(encoding="utf-8")
-        start = src.index("def check_topic_understanding")
+        start = src.index(f"def {fn_name}")
         tail = src[start + 1:]
         rel_end = tail.find("\n@router")
         end = start + 1 + rel_end if rel_end != -1 else len(src)
         return src[start:end]
 
-    def test_calls_record_on_pass(self):
+    def test_check_route_never_records_completion(self):
         body = self._route_source()
-        assert "record_topic_check_pass(" in body
+        assert "record_topic_check_pass(" not in body
 
-    def test_calls_get_course_completion_on_fail(self):
+    def test_check_route_reads_current_completion(self):
         body = self._route_source()
+        assert "get_course_completion(" in body
+
+    def test_self_check_route_is_the_only_writer(self):
+        body = self._route_source("self_check_topic_understanding")
+        assert "record_topic_check_pass(" in body
+        # 完了を書くのは本人が先へ進むと決めた2値のときだけ（verdict_wrong は書かない）。
+        assert "check_review.SELF_CHECK_ADVANCING" in body
         assert "get_course_completion(" in body
 
     def test_persistence_wrapped_in_try_except(self):

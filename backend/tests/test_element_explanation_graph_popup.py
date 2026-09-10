@@ -205,7 +205,6 @@ class TestApprovedGraphElementAnswer:
 
 class TestGenerateGraphElementExplanationPriority:
     @patch("api.routes.learning.persist_chat_history")
-    @patch("api.routes.learning.record_student_stumble_event")
     @patch("core.element_explanations.approved_for_elements")
     @patch("api.routes.learning._resolve_course_document_ids")
     @patch("api.routes.learning.get_graph_element_context")
@@ -216,7 +215,6 @@ class TestGenerateGraphElementExplanationPriority:
         mock_context,
         mock_resolve,
         mock_approved,
-        _mock_stumble,
         mock_persist,
     ):
         from api.routes.learning import _generate_graph_element_explanation
@@ -263,12 +261,11 @@ class TestGenerateGraphElementExplanationPriority:
         mock_persist.assert_called_once()
 
     @patch("api.routes.learning.persist_chat_history")
-    @patch("api.routes.learning.record_student_stumble_event")
     @patch("api.routes.learning._resolve_course_document_ids")
     @patch("api.routes.learning.get_graph_element_context")
     @patch("api.routes.learning.generate_text")
     def test_no_approved_explanation_falls_back_to_existing_graph_description(
-        self, mock_generate_text, mock_context, mock_resolve, _mock_stumble, mock_persist,
+        self, mock_generate_text, mock_context, mock_resolve, mock_persist,
     ):
         """approved が無い場合は既存のローカル生成（ここでは graph_description 経路）へ
         縮退する。element_type が concept のため element_explanations の参照すら試みない。"""
