@@ -448,7 +448,6 @@ def _validate_models_option(models: dict) -> dict:
     return validated
 
 
-def _accept_material_source(
 #: 分野（cartridge_id / atlas domain_key）として受け付ける形。DB 照合の手前で弾く。
 _CARTRIDGE_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -509,6 +508,7 @@ def _validate_cartridge_option(value: str | None) -> str | None:
     return text
 
 
+def _accept_material_source(
     *,
     source_bytes: bytes,
     filename: str | None,
@@ -517,8 +517,8 @@ def _validate_cartridge_option(value: str | None) -> str | None:
     models_option: dict | None,
     current_user: dict,
     source_url: str | None = None,
-) -> dict:
     cartridge_id: str | None = None,
+) -> dict:
     """教材ソース（実バイト）を受理して解析パイプラインを起動する共通処理。
 
     ``upload_material``（multipart アップロード）と ``upload_material_from_url``
@@ -533,12 +533,12 @@ def _validate_cartridge_option(value: str | None) -> str | None:
     判定（``core.paper_discovery.search.ingested_arxiv_ids``）の**読み時導出**の材料に
     する。multipart アップロードは ``None`` のまま（出所 URL が存在しないため、
     重複判定できないことを偽装しない — 設計書 §8）。
-    """
 
     ``cartridge_id``（分野）: 教員が入口で選んだ分野。``None`` は未指定
     （``run_document_pipeline`` が env → 分野中立の順で決める）、``""`` は
     「指定しない」の明示選択。値は既存列 ``document_analysis_runs.cartridge_id``
     に入るだけで、新しい列・テーブルは要らない。
+    """
     import datetime
 
     material_id = str(uuid.uuid4())[:12]
@@ -599,8 +599,8 @@ def _validate_cartridge_option(value: str | None) -> str | None:
     logger.info(
         "Material upload accepted: %s (%s) task=%s by user=%s analyze_images=%s models=%s cartridge=%s",
         material_id, filename, task_id, current_user["id"], analyze_images, bool(models_option),
-    )
         (cartridge_id if cartridge_id else ("(指定しない)" if cartridge_id == "" else "(未指定)")),
+    )
 
     return {
         "task_id": task_id,
@@ -619,8 +619,8 @@ def upload_material(
     file: UploadFile = File(...),
     analyze_images: bool = Form(False),
     models: str | None = Form(None),
-    current_user: dict = Depends(_require_teacher),
     cartridge_id: str | None = Form(None),
+    current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """PDF/TeX教材をアップロードし、バックグラウンドでグラフ化処理を開始する。
 
@@ -636,13 +636,13 @@ def upload_material(
     run 単位モデル上書き。未指定/空文字は従来どおり素通り（options に
     ``models`` キーを含めない）。指定時は ``_validate_models_option`` で
     fail-closed 検証し、``document_analysis_runs.options.models`` に保存する。
-    """
 
     ``cartridge_id``（分野・提案 C1）: この教材をどの分野として解析するか。
     未指定/空は「指定しない」= 分野固有の語彙・検証を注入しない**分野中立の解析**
     （A層 agent は cartridge なしで単独動作する）。必須入力にしない（原則12）。
     選択肢に無いキーは 422（``_validate_cartridge_option``）。値は既存列
     ``document_analysis_runs.cartridge_id`` に入る（migration 不要）。
+    """
     source_kind = _uploaded_source_kind(file.filename)
     if source_kind is None:
         raise HTTPException(status_code=400, detail="Only PDF files or TeX .tar.gz archives are accepted")
@@ -658,11 +658,11 @@ def upload_material(
         if parsed_models:
             models_option = _validate_models_option(parsed_models)
 
-    source_bytes = file.file.read()
     # 分野（提案 C1）: 未指定/空は None に畳む（アップロードは継承元が無いので
     # 「未指定」と「指定しない」を区別する必要がなく、env 既定の余地を残す）。
     cartridge_option = _validate_cartridge_option(cartridge_id) or None
 
+    source_bytes = file.file.read()
     if len(source_bytes) == 0:
         raise HTTPException(status_code=400, detail="Empty file")
 
@@ -673,8 +673,8 @@ def upload_material(
         analyze_images=analyze_images,
         models_option=models_option,
         current_user=current_user,
-    )
         cartridge_id=cartridge_option,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -704,8 +704,8 @@ class UploadFromUrlRequest(BaseModel):
     url: str
     analyze_images: bool = False
     models: dict[str, str] | None = None
-
     cartridge_id: str | None = None
+
 
 @router.get("/url-fetch-domains")
 def list_url_fetch_domains(current_user: dict = Depends(_require_teacher)) -> dict:
@@ -808,8 +808,8 @@ def upload_material_from_url(
     models_option: dict | None = None
     if body.models:
         models_option = _validate_models_option(body.models)
-
     cartridge_option = _validate_cartridge_option(body.cartridge_id) or None
+
     session = _pg_session()
     try:
         allowed = [row["domain"] for row in url_fetch.list_url_fetch_domains(session)]
@@ -834,8 +834,8 @@ def upload_material_from_url(
         models_option=models_option,
         current_user=current_user,
         source_url=body.url,
-    )
         cartridge_id=cartridge_option,
+    )
 
 
 class ReanalyzeRequest(BaseModel):
@@ -859,8 +859,8 @@ class ReanalyzeRequest(BaseModel):
     ``models`` / ``analyze_images`` と同じ流儀（明示があれば上書き、無ければ継承）。"""
     analyze_images: bool | None = None
     models: dict[str, str] | None = None
-
     cartridge_id: str | None = None
+
 
 def _previous_run_options(document_id: str, material_id: str) -> dict:
     """前回 run の ``options`` を best-effort で読む（読めなければ空 dict）。
@@ -881,7 +881,6 @@ def _previous_run_options(document_id: str, material_id: str) -> dict:
     return dict((previous_run or {}).get("options") or {})
 
 
-@router.post("/documents/{document_id}/reanalyze", status_code=202)
 def _previous_run_cartridge_id(document_id: str, material_id: str) -> str | None:
     """前回 run の分野（``document_analysis_runs.cartridge_id``）を best-effort で読む。
 
@@ -906,6 +905,7 @@ def _previous_run_cartridge_id(document_id: str, material_id: str) -> str | None
     return str(previous_run.get("cartridge_id") or "")
 
 
+@router.post("/documents/{document_id}/reanalyze", status_code=202)
 def reanalyze_document(
     document_id: str,
     body: ReanalyzeRequest | None = None,
@@ -923,11 +923,11 @@ def reanalyze_document(
     前回 run が無い場合の実効値は orchestrator 側の既定で False
     （明示オプトインのみ有効、原則6）。
 
-    権限（P0）: 再解析は成果物を作り直す**変更系**の操作なので、閲覧できるだけ
     ``body.cartridge_id``（分野・提案 C1）: 省略（None）時は前回 run の
     ``cartridge_id`` を引き継ぐ。空文字は「指定しない」への解除（分野中立で
     解析し直す）。
 
+    権限（P0）: 再解析は成果物を作り直す**変更系**の操作なので、閲覧できるだけ
     （public / viewer / コース経由）では実行させない。document owner / editor
     （SYSTEM_ADMIN は可）を要求し、不在・権限なしはどちらも 404 に畳む。
     MinIO 取得・前回 options 読み出し・background task 起動より先に判定する。
@@ -1009,7 +1009,6 @@ def reanalyze_document(
     if body is not None and body.models:
         models_option = _validate_models_option(body.models)
 
-    # orchestrator は options を **wholesale 置換**する（部分マージしない）ため、
     # 分野（提案 C1）: 明示があれば上書き（"" = 「指定しない」への解除）、無ければ
     # 前回 run の分野を引き継ぐ。継承値は env へフォールバックさせない
     # （前回が分野中立だった教材が、再解析で黙って env の分野を着せられない）。
@@ -1019,6 +1018,7 @@ def reanalyze_document(
     if cartridge_option is None:
         cartridge_option = _previous_run_cartridge_id(document_id, material_id)
 
+    # orchestrator は options を **wholesale 置換**する（部分マージしない）ため、
     # 片方だけを明示した再解析でも前回 run の options を土台にして組み立てる
     # （レビュー指摘 J1: models 未指定 + analyze_images 明示のとき、前回 run の
     # `options.models` が黙って捨てられ、モーダルが「前回と同じ」と表示しながら
@@ -1051,9 +1051,9 @@ def reanalyze_document(
     logger.info(
         "Document reanalysis accepted: doc=%s material=%s task=%s by user=%s cartridge=%s",
         document_id, material_id, task_id, current_user["id"],
-    )
         (cartridge_option if cartridge_option else
          ("(指定しない)" if cartridge_option == "" else "(未指定)")),
+    )
     return {
         "task_id": task_id,
         "document_id": document_id,
@@ -1335,12 +1335,12 @@ def list_materials(
             analysis_error=run_data.get("error_message") or None,
             # 最新 run の options（JSONB）。run が無ければ None（フロント契約: analysis_options）。
             analysis_options=(run_data.get("options") if run else None),
-            authors=authors,
             # 最新 run の分野（提案 C1）。run が無ければ None（未解析）、run はあるが
             # 分野中立で解析した場合は ""（「指定しない」で走った事実を偽装しない）。
             analysis_cartridge_id=(
                 str(run_data.get("cartridge_id") or "") if run else None
             ),
+            authors=authors,
             year=year,
             doc_type=doc_type,
             analyzed_at=analyzed_at,
