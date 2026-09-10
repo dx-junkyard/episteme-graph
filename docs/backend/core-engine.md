@@ -115,7 +115,6 @@ tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_quer
 | `learning_experience.py` | 学習体験レイヤー（B層）の共通ロジック（OutOfSourceGuard・tier 集約など） |
 | `component_candidates.py` | 質問→理論コンポーネント候補の生成（C層。AI は候補提示まで、確定は教員） |
 | `cartridges.py` | ドメインカートリッジローダー（`backend/cartridges/<id>/` の JSON/Markdown 一式を統合） |
-| `graphs/` | 学生向けリアルタイム対話のグラフ組み立て（`student_graph.py` / `state.py`） |
 
 ### 学習者向け要素文脈（読み取り専用・非LLM）
 

@@ -214,7 +214,7 @@ UI + テスト（1〜2日規模の実装単位）/ **L** = 新テーブル・新
 | F-19 | 指標カタログ: 値の履歴・独立監査者ロール・副作用レビューの自動化・学習者向け閲覧 UI | 新機能 | indicator_governance §8 | 非スコープ v1 | 未着手 | v1 は定義のみ | M | 独立監査者ロールを作るか（vision §6.1） |
 | F-20 | SA層 Phase 2〜4（W層要素モーダル / Admin Copilot / 学習チャットへの画面文脈） | 拡張 | assistant_screen_adapter §6 | 予約（着手時に §追加） | 未着手 | 第1適用先はグラフレビューのみ | M | Phase 4（学習者側）の可否 |
 | F-21 | Copilot 共通基盤: 音声 transcribe/speak の回数上限 / CostGate の DB 化 / 会話本文の不変監査ログ | 拡張 | assistant_common_infra §8 | 非スコープ | 一部（W層 voice は day-only CostGate あり・学習側は無し） | CLAUDE.md グラフ対話レビュー §12 | S | 会話本文の監査は P3 と衝突 |
-| F-22 | デッドコード削除（`chat_sessions`/`chat_messages`・`core/chat.py`・`_llm_retry_policy`） | 構造 | assistant_common_infra §8 / CLAUDE.md | 別タスク・削除候補 | 未着手 | `backend/core/chat.py` 現存・`chat_sessions` は init.sql に現存 | S | — |
+| F-22 | デッドコード削除（`chat_sessions`/`chat_messages`・`core/chat.py`・`_llm_retry_policy`） | 構造 | assistant_common_infra §8 / CLAUDE.md | 別タスク・削除候補 | **一部解消 2026-09-10**（`core/chat.py`・`_llm_retry_policy` 系・`core/graphs/`・`extract_theory_components_from_chunk`・`generate_missing_link_suggestions` を削除。`chat_sessions`/`chat_messages` は DB 表のため未着手） | `backend/core/chat.py` 現存・`chat_sessions` は init.sql に現存 | S | — |
 | F-23 | コースビルダーのドラフト注入のサーバ側移設 | 構造 | assistant_common_infra §8（§2-2） | 非スコープ | 未着手 | フロントが履歴先頭に疑似ターン2件を注入し続けている | M | — |
 | F-24 | Copilot: 応答文の LLM 生成化・画面コンテキストの全タブ展開・casual モードのテキスト UI | 拡張 | assistant_common_infra §8 | 非スコープ | 未着手 | — | M | — |
 | F-25 | `candidate_flow` への既存8系統の巻き取り | 構造 | candidate_flow §6 | 非スコープ（次の新系統から適用） | 未着手 | 既存コードは1行も変更していない | L | 巻き取りコストを払うか |

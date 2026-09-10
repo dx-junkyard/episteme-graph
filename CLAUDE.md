@@ -80,11 +80,10 @@ src/tests/                     → agents 用 pytest テスト
 | `backend/api/routes/lecture_studio/` | 原稿スタジオルーター（Tier 3-17a で `_shared` / `scripts` / `pipeline` / `topics` に分割したパッケージ。`__init__.py` が router と互換シンボルを再エクスポートするため import 面は旧単一ファイルと同じ） |
 | `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）。orchestrator の下請け。旧 diff/merge は本番未使用のため削除済み（2026-07） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
-| `backend/core/chat.py` | tier 付き chunk 検索ユーティリティ。**レガシー・現行の呼び出し元なし**（`search_chunks` を参照するのは `tests/test_learner_experience_layer.py` のみ。実 RAG チャットは `routes/learning.py`、可視性ゲート付き検索は `services.search_chunks_with_metadata`）。削除候補 |
 | `backend/core/postgres.py` | PostgreSQL セッション管理 |
 | `backend/core/llm.py` | OpenAI クライアントファクトリ |
 | `backend/core/storage.py` | MinIO S3互換ストレージ |
-| `backend/core/llm_worker/` | 非同期 LLM worker 共通基盤（client / run_with_repair / CostGate。フル骨格は6系統が利用、CostGate 等の部分利用が別途あり） |
+| `backend/core/llm_worker/` | LLM を呼ぶ系統の共通基盤（client / run_with_repair / CostGate / history に加え、2026-09-10 の棚卸しで `system.py`（worker 7系統の宣言スペック）/ `chat_turn.py`（会話ターン骨格）/ `single_shot.py`（単発 JSON 抽出・降格）/ `embedding.py` を新設。正本は `docs/architecture/agent_inventory_and_refactoring_2026-09-10.md`） |
 | `backend/core/privacy.py` | k-匿名ゲートの正本（K_ANONYMITY=3・件数レンジ導出） |
 | `backend/core/notification_recipients.py` | 通知宛先解決の共通 JOIN プリミティブ（status 系 / V層が利用） |
 | `backend/core/course_data.py` | `learning_courses.data` JSONB の正本スキーマ（CourseData 系 Pydantic モデル＝全て `extra="allow"` + アクセサ群）。course_data への素の dict アクセスを新規に書かない（Tier 3-18） |
@@ -2765,16 +2764,32 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 必ずこれらを使う**（正本の所在は `docs/architecture/consolidation_survey_2026-07.md` の
 実施記録も参照）。
 
-- **`backend/core/llm_worker/`** — 非同期 LLM worker の共通骨格。`client.py`
+- **`backend/core/llm_worker/`** — LLM を呼ぶ系統の共通骨格。`client.py`
   （`BaseJSONLLMClient(model_setting_key)`・`core.llm` 経由で U層計測を維持）/ `repair.py`
-  （`run_with_repair(...)`: 1+2回試行、修復失敗時の後処理は `on_repair_failed` 注入で各系統に残す）/
-  `cost_gate.py`（`CostGate`(session+daily) / `InMemoryCounterGate`）。フル骨格
-  （BaseJSONLLMClient + run_with_repair）は tension / structure_anchor / reconstruction /
-  doubt.scope_candidates / doubt.assumption_mining / deliberation.standardization の6系統が利用中。
-  ほかに deliberation の対話（`core/deliberation/dialogue.py`。同期パスのため run_with_repair は
-  意図的に不使用・縮退方式）と figure_reanalysis が CostGate / resolve_model のみ部分利用する。
-  **新系統はコピペせず15〜20行のアダプタで接続すること**。環境変数名・冪等性フラグ・
-  トリガー条件・DB 書き込みはドメイン側の責務。
+  （`run_with_repair(...)`: 1+2回試行、修復失敗時の後処理は `on_repair_failed` 注入で各系統に残す。
+  `call=` で `complete_json` 以外の呼び出し形も受ける）/ `cost_gate.py`（`CostGate`(session+daily) /
+  `InMemoryCounterGate`）/ `history.py`。**2026-09-10 の全件棚卸し**（正本
+  `docs/architecture/agent_inventory_and_refactoring_2026-09-10.md`）で次を追加:
+  ①`system.py::WorkerSystem / CostSpec` — 非同期 worker 7系統（tension / structure_anchor /
+  reconstruction / doubt.scope_candidates / doubt.assumption_mining / doubt.falsification_conditions /
+  deliberation.standardization）は各 `core/<系統>/system.py` に `SYSTEM = WorkerSystem(...)` を1つ宣言し、
+  client 生成・gate・`run_with_repair` 結線・daemon thread 起動（`SYSTEM.spawn(thread_factory=threading.Thread)`）
+  をそこから引く。**8系統目は `system.py` を1つ書いて接続する**（llm_client / repair / agent は
+  テスト seam と source-text ガードレールのための薄いシム。`test_llm_worker_guardrails.py` が
+  7系統の委譲と `CostGate()` の再インスタンス化禁止を固定）。②`chat_turn.py::structured_turn /
+  build_turn_messages / spoken_variant / TurnResult` — 同期の会話ターン骨格（grounding を指定ターンに
+  注入 → `usage_context` 内で 1 structured コール（model は callable 可・context 内で解決）→ 失敗は
+  degraded 固定文 → hygiene。W層 `dialogue.py` / `graph_dialogue.py` / 教材図 `generator.py` が利用。
+  `stance_label` は `TurnResult` に載る）。③`single_shot.py::extract_json / json_call / structured_call` —
+  単発呼び出しの JSON 抽出（フェンス・最外 `{...}`・opt-in の LaTeX バックスラッシュ修復・切り詰め復元）と
+  structured → text 降格。**LLM 関数は呼び出し側モジュールの属性を注入する**（`patch("<module>.generate_text")`
+  の seam を壊さない）。フェンス除去の自前実装は `test_llm_single_shot_guardrails.py` が禁止。
+  ④`embedding.py::embed_with_context` — U層帰属つき embedding の唯一のラッパ。
+  ⑤`api/quota.py::consume_daily_quota` — 同期 API の「settings → CostGate → 429 事実文」（FastAPI 層）。
+  **`src/episteme_graph/agents/llm_step.py`（パイプライン agent の repair ループ。例外で break・
+  `generate(messages)` プロトコル）とは意図的に別実装**で統合しない（discuss_opening / landscape_placement
+  は `run_with_repair` 側、他の LLM agent 10本は `llm_step` 側）。環境変数名・冪等性フラグ・
+  トリガー条件・DB 書き込み・grounding の中身・429 の文言はドメイン側の責務。
 - **チャット型 AI の共通規約（2026-07-20 整理、正本は
   `docs/features/assistant_common_infra_design.md`）** — ①会話履歴を LLM に渡すときは
   `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep,

@@ -134,7 +134,7 @@
 | G-08 | 🟡 学習チャットの `selection_text` が anchor 記録専用で、回答生成プロンプトに入らない | 是正 | user_assistant_agents §8 | 未着手 | 未着手 | `routes/learning.py:1294` の1箇所のみ（`build_anchor_payload` へ渡すだけ）。プロンプト構築側に出現しない | S | 選択箇所を回答に効かせると「選んだ範囲だけ答える」挙動になる — 出所の正直さとの兼ね合い |
 | G-09 | 🟡 チャット4者とも会話本文の**不変ログ**がない（`learning_chat_history` は上書き・削除で正本が消える） | 構造 | user_assistant_agents §8「説明責任」 | 未着手（P3 との緊張関係あり） | 未着手 | truncate+supersede 方式のまま（CLAUDE.md 機能3 節）。不変ログのテーブルなし | L | **要裁定**: 学習者の会話を不変に残すか（原則5「監視しない」と真正面から衝突。本人同意/インシデント限定等の条件が要る） |
 | G-10 | ⚪ デッドコード: レガシー `chat_sessions` / `chat_messages` テーブル | 構造 | user_assistant_agents §8 | 未着手 | 未着手 | `db/init.sql:180-199` に残存。`core/models.py:262,278` にモデルあり。参照は `account_lifecycle.py:112` の purge 対象のみ | S | 撤去すると AL層の PURGE 網羅テストの更新が要る（削除自体は低リスク） |
-| G-11 | ⚪ デッドコード: `core/chat.py`（`search_chunks` はテストのみが参照） | 構造 | user_assistant_agents §8 / CLAUDE.md（削除候補と明記） | 未着手 | 未着手 | 本番の import ゼロ。参照は `tests/test_learner_experience_layer.py:192,220` のみ | S | — |
+| G-11 | ⚪ デッドコード: `core/chat.py`（`search_chunks` はテストのみが参照） | 構造 | user_assistant_agents §8 / CLAUDE.md（削除候補と明記） | **2026-09-10 解消**（削除。agent_inventory_and_refactoring_2026-09-10.md §6） | 解消 | 本番の import ゼロ。参照は `tests/test_learner_experience_layer.py:192,220` のみ | S | — |
 | G-12 | ⚪ デッドコード: `theory_components.py` の `_llm_retry_policy` / `_is_resource_exhausted` / `_backoff_seconds` | 構造 | user_assistant_agents §8 | 未着手 | 未着手 | `routes/theory_components.py:355,360,374` に定義のみ・呼び出しゼロ（リトライ配線忘れの可能性） | S | 撤去するか、本来意図されたリトライ機構として配線するか |
 
 ---

@@ -74,7 +74,6 @@ episteme-graph/
 │   │   ├── learning_experience.py / learning_support_agent.py / personas.py
 │   │   ├── course_data.py / revision_store.py / privacy.py / llm_policy.py（横断基盤の正本）
 │   │   ├── document_pipeline/    # Agent パイプライン オーケストレータ（revision/ を含む）
-│   │   ├── graphs/               # 学生向けグラフ組み立て（student_graph）
 │   │   ├── tension/ structure_anchor/ doubt/ reconstruction/ deliberation/ …（各層の実装）
 │   │   ├── atlas_vectors/ atlas_edges/ atlas_gaps/ landscape/ paper_discovery/
 │   │   ├── corpus_view.py descent/ cycle/ discuss/ graph_paper_layer/ personal_graph/

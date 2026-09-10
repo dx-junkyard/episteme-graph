@@ -16,9 +16,8 @@
 `course_id = "_doc:{document_id}"`（正本 `core/discuss/context.py`）で呼び出すためです
 （コース経路の挙動は不変）。
 
-`backend/core/chat.py` は tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_query()`）を持つ
-**レガシーモジュール**で、本番の呼び出し元はありません（参照するのは
-`backend/tests/test_learner_experience_layer.py` のみ）。`_learning_chat_core` の RAG 検索は
+旧 `backend/core/chat.py`（tier 付き chunk 検索のレガシーモジュール・本番の呼び出し元なし）は
+2026-09-10 のエージェント棚卸しで削除済みです。`_learning_chat_core` の RAG 検索は
 `services.py::search_chunks_with_metadata()` を使います。
 
 ---

@@ -263,6 +263,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[再調査 2026-07-17（🔧/💬 全件解消済み）](architecture/vision_ux_gap_survey_2026-07-17.md)
 - [ビジョン×UXギャップ調査「六つのレンズ」2026-09-10（§9 非参照・6観点・是正11 + 提案30 + 着手の地図。詳細は architecture/six_lenses_2026-09-10/）](architecture/vision_ux_gap_six_lenses_2026-09-10.md)
 - [対ユーザー支援エージェント調査（推奨1〜6 実施済み）](architecture/user_assistant_agents_survey_2026-07.md)
+- [AI エージェント全件棚卸しと共通化リファクタリング 2026-09-10（パイプライン agent 22 / worker 7 / チャット型 11 / 単発 34地点を A 共通化・B アダプター・C 独自に分類し、llm_step / WorkerSystem / chat_turn / single_shot を新設）](architecture/agent_inventory_and_refactoring_2026-09-10.md)
 - [管理画面UX課題 2026-08-01（全件実装済み）](architecture/admin_ux_issues_2026-08-01.md)
 - [Issue #494 実装レビュー（指摘6件は現行コードで解消済み）](architecture/issue_494_implementation_review_2026-07-16.md)
 - [ドキュメント総点検 2026-08-13（不具合報告）](architecture/doc_review_findings_2026-08-13.md)
