@@ -213,7 +213,7 @@ API を動かす場合の値です。**Docker で動かすときは `minio:9000`
 | `ADMIN_PASSWORD` | 初期システム管理者パスワード |
 | `CORS_ORIGINS` | 許可オリジン（カンマ区切り）。既定 `*`（全許可・開発用）。本番は明示リスト推奨 |
 | `ADMIN_ERROR_LOG_MAX_ITEMS` | Admin エラー解析画面で保持・返却するログ最大件数（既定 1000） |
-| `EPISTEME_DEFAULT_CARTRIDGE_ID` | 既定のドメインカートリッジ（既定 `particle_physics`） |
+| `EPISTEME_DEFAULT_CARTRIDGE_ID` | 教材アップロードで分野を指定しなかったときの既定のドメインカートリッジ。**既定は空**（分野固有の語彙を使わない分野中立の解析）。分野は教員が教材ごとに「教材管理」タブの「分野」で選べるため、ここを埋めるのは全教材が同じ分野のときだけ |
 | `EPISTEME_CARTRIDGES_DIR` | カートリッジ定義ディレクトリの上書き（未指定時は `backend/cartridges`） |
 | `ATLAS_DATA_SOURCE` | 分野の地図のデータソース。`api`（既定・本番推奨）/ `fixture`（ローカル確認用のモック地図。本番で使うと全ユーザーにモック地図が表示されるため注意） |
 

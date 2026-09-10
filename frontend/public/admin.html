@@ -315,6 +315,15 @@
           <input type="checkbox" id="upload-analyze-images">
           図面・画像を解析する（装置図の同定に vision AI を使用）
         </label>
+        <!-- 分野（提案 C1「教材の入口に分野を置く」）: 既定は「指定しない」。
+             指定しない = 分野固有の語彙・検証を注入しない分野中立の解析。
+             必須入力にしない（原則12）。選択はこの解析だけに効く（既定として保存しない）。 -->
+        <div id="upload-domain-summary" data-ui-anchor="materials.upload-domain" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
+          分野: <span id="upload-domain-value">指定しない</span>
+          <button type="button" id="upload-domain-change-btn" data-ui-anchor="materials.upload-domain" class="admin-action-btn" style="padding:1px 8px;font-size:11px;margin-left:6px">変更</button>
+          <span id="upload-domain-note" style="color:var(--color-text-tertiary);font-size:11.5px;margin-left:6px" hidden></span>
+        </div>
+        <div id="upload-domain-panel" hidden></div>
         <!-- M層（LLM モデル選択, migration 061）: 解析モデルの1行サマリ + 変更パネル。
              中身は admin-llm-models.js が描画（AdminLlmModels.initMaterialsPanel）。 -->
         <div id="llm-model-summary" data-ui-anchor="materials.llm-model-change" style="font-size:12.5px;color:var(--color-text-secondary);margin-top:8px">
@@ -1012,6 +1021,6 @@
   <!-- グラフ対話レビュー（graph_dialogue_review_design.md）。LectureStudio.graphView に
        依存するため admin-lecture-studio.js より後・admin.js より前に読み込む -->
   <script src="/js/admin-graph-review.js?v=graph-review-20260829-1"></script>
-  <script src="/js/admin.js?v=indicators-init-order-20260906-1"></script>
+  <script src="/js/admin.js?v=material-domain-entry-20260910-1"></script>
 </body>
 </html>

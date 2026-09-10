@@ -607,5 +607,6 @@ class TestListMaterialsAnalysisOptions:
         m = re.search(r"def list_materials\b.*?return materials", src, re.DOTALL)
         assert m
         body = m.group(0)
-        assert "stage_outputs, options, updated_at" in body
+        # 分野（提案 C1）で cartridge_id も同じ DISTINCT ON クエリに相乗りする。
+        assert "stage_outputs, options, cartridge_id, updated_at" in body
         assert 'analysis_options=(run_data.get("options") if run else None)' in body

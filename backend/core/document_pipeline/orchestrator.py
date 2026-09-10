@@ -405,8 +405,13 @@ def run_document_pipeline(
         document_id: documents.id。後続で chunks/claims 等の document_id に使う。
         material_id: 教材 ID（chunks.material_id）。
         filename: 元ファイル名（任意・ログ用）。
-        cartridge_id: 使用カートリッジ。指定なしなら EPISTEME_DEFAULT_CARTRIDGE_ID
-            から決定。
+        cartridge_id: 使用カートリッジ（分野）。解決順は **引数 > env > None**。
+            ``None``（未指定）なら ``EPISTEME_DEFAULT_CARTRIDGE_ID`` を見て、それも
+            空なら ``None`` のまま = **分野中立の解析**（A層 agent は cartridge_id が
+            ``None`` のとき分野語彙・分野検証を読まずに単独動作する）。空文字は
+            「教員が明示的に『指定しない』を選んだ」の意味で、env へフォールバック
+            **しない**（入口の正直さ: 画面が「指定しない」と言っているのに env の
+            分野が黙って効く、を作らない）。
         course_id: 任意。指定された場合のみ component graph を course にも紐づける。
         user_id: 任意。この実行を起こした教員の users.id。U層の帰属（``usage_context``）に
             bind され、M層のモデル解決（``core.llm_policy.resolve_scene_model`` の
@@ -423,7 +428,12 @@ def run_document_pipeline(
         PipelineStageError: 任意 stage で復旧不能な失敗が起きた場合。
     """
     if cartridge_id is None:
-        cartridge_id = os.getenv("EPISTEME_DEFAULT_CARTRIDGE_ID") or None
+        # 未指定: env（空なら None = 分野中立）。既定の出荷値は空
+        # （.env.example: 「素粒子物理の検証用。他分野・混在コーパスでは空にする」）。
+        cartridge_id = (os.getenv("EPISTEME_DEFAULT_CARTRIDGE_ID") or "").strip() or None
+    else:
+        # 明示指定: 空文字は「指定しない」。env へは戻さない。
+        cartridge_id = cartridge_id.strip() or None
 
     if target_stage is not None and target_stage not in PIPELINE_STAGES:
         raise ValueError(f"unknown pipeline stage: {target_stage}")

@@ -1099,6 +1099,62 @@
     return null;
   }
 
+  // 再解析モーダルの「分野」区画（提案 C1）。
+  // previous は前回 run の分野（"" = 前回は「指定しない」で解析、null = 前回 run なし）。
+  // touched が false のあいだは cartridge_id を送らない（= サーバ側で前回値を継承）。
+  var _reanalyzeDomain = { previous: null, touched: false, value: "" };
+
+  function _reanalyzeDomainFactLine(previous, options) {
+    if (previous === null || previous === undefined) {
+      return "前回の解析の分野: 記録がありません";
+    }
+    if (previous === "") {
+      return "前回の解析の分野: 指定しない（分野固有の語彙を使わずに解析）";
+    }
+    return "前回の解析の分野: " +
+      escHtml(options ? domainOptionLabel(previous, options.names, options.lifecycles) : previous);
+  }
+
+  function _reanalyzeDomainInit(lastMaterial) {
+    var row = document.getElementById("reanalyze-domain-row");
+    if (!row) return;
+    var previous = (lastMaterial && typeof lastMaterial.analysis_cartridge_id === "string")
+      ? lastMaterial.analysis_cartridge_id
+      : null;
+    _reanalyzeDomain = { previous: previous, touched: false, value: previous || "" };
+    row.innerHTML =
+      '<div id="reanalyze-domain-fact">' + _reanalyzeDomainFactLine(previous, null) + '</div>' +
+      '<label style="display:block;margin-top:4px">この解析の分野' +
+        '<select id="reanalyze-domain-select" style="margin-left:6px;font-size:12.5px">' +
+          '<option value="">指定しない</option>' +
+        '</select>' +
+      '</label>';
+    var selectEl = document.getElementById("reanalyze-domain-select");
+    if (!selectEl) return;
+    loadDomainOptions()
+      .then(function (options) {
+        var factEl = document.getElementById("reanalyze-domain-fact");
+        if (factEl) factEl.innerHTML = _reanalyzeDomainFactLine(previous, options);
+        buildDomainSelect(selectEl, options, previous || "");
+        selectEl.addEventListener("change", function () {
+          _reanalyzeDomain.touched = true;
+          _reanalyzeDomain.value = selectEl.value || "";
+        });
+      })
+      .catch(function () {
+        // 一覧が取れないときは選び直させない（前回値の継承のまま実行する）。
+        var label = document.querySelector("#reanalyze-domain-row label");
+        if (label) label.remove();
+      });
+  }
+
+  // 再解析リクエストに載せる分野。触っていなければ null（サーバ側で前回値を継承）、
+  // 「指定しない」を選び直したときは "" を送る（明示的な解除）。
+  function getReanalyzeCartridgeId() {
+    if (!_reanalyzeDomain.touched) return null;
+    return _reanalyzeDomain.value || "";
+  }
+
   // 「解析再開」ボタンのフローにもアップロード時と同じチェックボックスを出す。
   function openReanalyzeOptionsModal(docId, filename, triggerBtn) {
     var existing = document.getElementById("reanalyze-options-modal");
@@ -1116,6 +1172,8 @@
           '<input type="checkbox" id="reanalyze-analyze-images">' +
           '図面・画像を解析する（装置図の同定に vision AI を使用）' +
         '</label>' +
+        /* 分野（提案 C1）: 前回の分野を事実文で示し、この解析だけ変更できる */
+        '<div id="reanalyze-domain-row" data-ui-anchor="materials.reanalyze-domain" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
         '<div id="reanalyze-llm-model-row" style="margin-bottom:16px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end">' +
           '<button id="reanalyze-cancel-btn" class="admin-action-btn">キャンセル</button>' +
@@ -1130,6 +1188,10 @@
     var analyzeImagesCheckbox = document.getElementById("reanalyze-analyze-images");
     if (analyzeImagesCheckbox) analyzeImagesCheckbox.checked = !!(lastOpts && lastOpts.analyze_images);
 
+    // 分野（提案 C1）: 前回 run の分野を事実文で示し、この解析だけ選び直せる。
+    // 触らなければ cartridge_id を送らず、サーバ側が前回 run の分野を継承する。
+    _reanalyzeDomainInit(lastMaterial);
+
     // M層（LLM モデル選択, migration 061）: 前回値を表示し「変更」で選び直せるようにする。
     // docId は静かな計器（コスト見通しの一行, teacher_triage_instruments_design.md §3.1）
     // の document 版 forecast 用。
@@ -1143,6 +1205,7 @@
     document.getElementById("reanalyze-confirm-btn").addEventListener("click", function () {
       var analyzeImages = document.getElementById("reanalyze-analyze-images").checked;
       var llmModels = window.AdminLlmModels ? window.AdminLlmModels.getReanalyzeModels(lastOpts, analyzeImages) : null;
+      var reanalyzeCartridgeId = getReanalyzeCartridgeId();
       // N6残: 前回 run が analyze_images=true で、今回チェックを外して実行する場合は
       // 未レビューの AI 図分類・装置候補が失われることを明示確認してから実行する
       // （明示 OFF はユーザーの意思なのでブロックはしないが、警告なしには通さない）。
@@ -1152,14 +1215,14 @@
         if (confirmBtn) confirmBtn.disabled = true; // 件数取得中の二重クリック防止
         _confirmExplicitImagesOff(docId, function () {
           overlay.remove();
-          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels);
+          performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId);
         }, function () {
           if (confirmBtn) confirmBtn.disabled = false; // キャンセル時は選び直せる
         });
         return;
       }
       overlay.remove();
-      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels);
+      performReanalyze(docId, filename, triggerBtn, analyzeImages, llmModels, reanalyzeCartridgeId);
     });
   }
 
@@ -1214,11 +1277,14 @@
       });
   }
 
-  function performReanalyze(docId, filename, btn, analyzeImages, models) {
+  function performReanalyze(docId, filename, btn, analyzeImages, models, cartridgeId) {
     if (btn) { btn.disabled = true; btn.textContent = "再開中..."; }
     var body = { analyze_images: !!analyzeImages };
     // M層（LLM モデル選択, migration 061）: 未指定（null）なら前回 run の options から自動継承される。
     if (models) body.models = models;
+    // 分野（提案 C1）: null（教員が触っていない）なら送らず、サーバ側が前回 run の
+    // 分野を引き継ぐ。"" は「指定しない」への明示的な解除として送る。
+    if (cartridgeId !== null && cartridgeId !== undefined) body.cartridge_id = cartridgeId;
     apiFetch("/admin/documents/" + docId + "/reanalyze", {
       method: "POST",
       body: JSON.stringify(body),
@@ -3156,6 +3222,145 @@
     });
   }
 
+  // ── 分野（cartridge_id / atlas domain_key）の選択肢 ────────────────
+  // GET /admin/cartridges（同梱カートリッジ）と GET /admin/atlas/domains
+  // （DB 骨格のドメイン。カートリッジファイルの無い新分野を含む）の合成。
+  // 「分野の地図」タブの分野セレクタ（initAtlas）と教材アップロードの「分野」行が
+  // **この1本を共有する**（同じ合成を2箇所に書かない）。
+  // 戻り値: Promise<{keys: [key...昇順], names: {key:名前}, lifecycles: {key:'active'|'retired'}}>
+  function loadDomainOptions() {
+    var names = {};
+    var lifecycles = {};
+    return apiFetch("/admin/cartridges")
+      .then(function (res) { return res.json(); })
+      .then(function (items) {
+        (items || []).forEach(function (c) {
+          if (c && c.cartridge_id) names[c.cartridge_id] = c.name;
+        });
+        return apiFetch("/admin/atlas/domains");
+      })
+      .then(function (res) { return res.ok ? res.json() : { domains: [] }; })
+      .then(function (data) {
+        var keys = {};
+        (data.domains || []).forEach(function (d) {
+          if (!d || !d.domain_key) return;
+          keys[d.domain_key] = true;
+          // migration 028: DB 永続化された domain_meta の名前をラベルに使う
+          // (カートリッジファイルの無い新分野。names には出てこない)
+          if (d.domain_name && !names[d.domain_key]) {
+            names[d.domain_key] = d.domain_name;
+          }
+          // migration 057: ドメインライフサイクル。meta 行の無いキーは既定 active。
+          lifecycles[d.domain_key] = d.lifecycle || "active";
+        });
+        Object.keys(names).forEach(function (k) { keys[k] = true; });
+        return {
+          keys: Object.keys(keys).sort(),
+          names: names,
+          lifecycles: lifecycles,
+        };
+      });
+  }
+
+  // 分野セレクタの表示ラベル（名前 (key) + 廃止済みの注記）。
+  function domainOptionLabel(key, names, lifecycles) {
+    var label = (names && names[key]) ? names[key] + " (" + key + ")" : key;
+    if (lifecycles && lifecycles[key] === "retired") label += "（廃止済み）";
+    return label;
+  }
+
+  // ── 教材アップロードの「分野」行（提案 C1）────────────────────────
+  // 既定は「指定しない」= 分野固有の語彙・検証を注入しない分野中立の解析。
+  // 選択は run 単位（ユーザー既定として保存しない）。
+  var _uploadDomain = { value: "", label: "指定しない", loaded: false, options: null };
+
+  function _uploadDomainRenderSummary() {
+    var valueEl = document.getElementById("upload-domain-value");
+    if (valueEl) valueEl.textContent = _uploadDomain.label;
+  }
+
+  function _uploadDomainNote(text) {
+    var noteEl = document.getElementById("upload-domain-note");
+    if (!noteEl) return;
+    noteEl.textContent = text || "";
+    noteEl.hidden = !text;
+  }
+
+  // 分野セレクタ（アップロード行・再解析モーダル共通）を options から描く。
+  // 先頭は必ず「指定しない」（value=""）。
+  function buildDomainSelect(selectEl, options, selectedKey) {
+    selectEl.innerHTML = "";
+    var none = document.createElement("option");
+    none.value = "";
+    none.textContent = "指定しない";
+    selectEl.appendChild(none);
+    (options.keys || []).forEach(function (k) {
+      var opt = document.createElement("option");
+      opt.value = k;
+      opt.textContent = domainOptionLabel(k, options.names, options.lifecycles);
+      selectEl.appendChild(opt);
+    });
+    selectEl.value = selectedKey || "";
+  }
+
+  function _uploadDomainOpenPanel() {
+    var panel = document.getElementById("upload-domain-panel");
+    if (!panel) return;
+    if (!panel.hidden) { panel.hidden = true; return; }
+    panel.hidden = false;
+    panel.innerHTML =
+      '<div style="border:1px solid var(--color-border);border-radius:6px;padding:10px;margin-top:6px;font-size:12.5px;color:var(--color-text-secondary)">' +
+        '<label style="display:block;margin-bottom:6px">この教材を解析する分野' +
+          '<select id="upload-domain-select" style="margin-left:6px;font-size:12.5px"><option value="">読み込み中...</option></select>' +
+        '</label>' +
+        '<div style="color:var(--color-text-tertiary);font-size:11.5px">' +
+          '「指定しない」のときは、分野固有の語彙や検証を使わずに解析します。' +
+          '分野を選ぶと、その分野のカートリッジ語彙・分野マップ・共通部品ライブラリが解析に使われます。' +
+          'この選択はこの解析にだけ効きます。' +
+        '</div>' +
+      '</div>';
+    var selectEl = document.getElementById("upload-domain-select");
+    if (!selectEl) return;
+    var apply = function (options) {
+      buildDomainSelect(selectEl, options, _uploadDomain.value);
+      selectEl.addEventListener("change", function () {
+        _uploadDomain.value = selectEl.value || "";
+        _uploadDomain.label = _uploadDomain.value
+          ? domainOptionLabel(_uploadDomain.value, options.names, options.lifecycles)
+          : "指定しない";
+        _uploadDomainRenderSummary();
+      });
+    };
+    if (_uploadDomain.loaded && _uploadDomain.options) {
+      apply(_uploadDomain.options);
+      return;
+    }
+    loadDomainOptions()
+      .then(function (options) {
+        _uploadDomain.options = options;
+        _uploadDomain.loaded = true;
+        apply(options);
+        _uploadDomainNote("");
+      })
+      .catch(function () {
+        selectEl.innerHTML = '<option value="">指定しない</option>';
+        _uploadDomainNote("分野の一覧を取得できませんでした（「指定しない」で解析されます）。");
+      });
+  }
+
+  function initUploadDomainRow() {
+    var btn = document.getElementById("upload-domain-change-btn");
+    if (!btn) return;
+    _uploadDomainRenderSummary();
+    btn.addEventListener("click", _uploadDomainOpenPanel);
+  }
+
+  // アップロード / URL取得のリクエストに載せる分野。
+  // 「指定しない」は送らない（サーバ側の既定 = 分野中立に委ねる）。
+  function getUploadCartridgeId() {
+    return _uploadDomain.value || "";
+  }
+
   // ── Task Polling State ──────────────────────────────────────────
   var _activePollingTimers = {};
 
@@ -3180,6 +3385,10 @@
       var uploadModels = window.AdminLlmModels.getUploadModels(analyzeImagesChecked);
       if (uploadModels) formData.append("models", JSON.stringify(uploadModels));
     }
+    // 分野（提案 C1）: 選ばれていれば run へ渡す。「指定しない」は送らない
+    // （サーバ側で分野中立の解析になる）。
+    var uploadCartridgeId = getUploadCartridgeId();
+    if (uploadCartridgeId) formData.append("cartridge_id", uploadCartridgeId);
 
     apiFetchRaw("/admin/materials/upload", {
       method: "POST",
@@ -3462,6 +3671,9 @@
       var uploadModels = window.AdminLlmModels.getUploadModels(analyzeImagesChecked);
       if (uploadModels) payload.models = uploadModels;
     }
+    // 分野（提案 C1）: ファイル選択時と同じ「分野」行の選択を引き継ぐ。
+    var urlCartridgeId = getUploadCartridgeId();
+    if (urlCartridgeId) payload.cartridge_id = urlCartridgeId;
 
     _urlUploadSubmitting = true;
     if (btn) btn.disabled = true;
@@ -6646,35 +6858,18 @@
 
     function loadCartridges() {
       if (cartridgesLoaded) { loadState(); return; }
-      // migration 027: 一覧はカートリッジ (名前) + DB 骨格の domain の合成
-      var names = {};
-      apiFetch("/admin/cartridges")
-        .then(function (res) { return res.json(); })
-        .then(function (items) {
-          (items || []).forEach(function (c) {
-            names[c.cartridge_id] = c.name;
-          });
-          return apiFetch("/admin/atlas/domains");
-        })
-        .then(function (res) { return res.ok ? res.json() : { domains: [] }; })
-        .then(function (data) {
+      // migration 027: 一覧はカートリッジ (名前) + DB 骨格の domain の合成。
+      // 合成は loadDomainOptions() が正本（教材アップロードの「分野」行と共有）。
+      loadDomainOptions()
+        .then(function (options) {
           var keys = {};
-          (data.domains || []).forEach(function (d) {
-            keys[d.domain_key] = true;
-            // migration 028: DB 永続化された domain_meta の名前をラベルに使う
-            // (カートリッジファイルの無い新分野。names には出てこない)
-            if (d.domain_name && !names[d.domain_key]) {
-              names[d.domain_key] = d.domain_name;
-            }
-            // migration 057: ドメインライフサイクル。meta 行の無いキーは既定 active。
-            domainLifecycles[d.domain_key] = d.lifecycle || "active";
-          });
-          Object.keys(names).forEach(function (k) { keys[k] = true; });
-          var sorted = Object.keys(keys).sort();
+          var sorted = options.keys || [];
           sorted.forEach(function (k) {
-            var label = names[k] ? names[k] + " (" + k + ")" : k;
-            if (domainLifecycles[k] === "retired") label += "（廃止済み）";
-            addDomainOption(k, label);
+            keys[k] = true;
+            domainLifecycles[k] = (options.lifecycles || {})[k] || "active";
+          });
+          sorted.forEach(function (k) {
+            addDomainOption(k, domainOptionLabel(k, options.names, options.lifecycles));
           });
           cartridgesLoaded = true;
           if (pendingFocusKey && keys[pendingFocusKey]) {
@@ -11252,6 +11447,8 @@
     if (state.role !== "SYSTEM_ADMIN") {
       initUpload();
       initUrlUpload();
+      // 提案 C1 — 教材アップロード区画の「分野」1行（既定は「指定しない」）。
+      initUploadDomainRow();
       // M層 — 教材アップロード区画の解析モデル1行サマリ（init 済みが前提）。
       if (window.AdminLlmModels) window.AdminLlmModels.initMaterialsPanel();
       initCourseBuilder();

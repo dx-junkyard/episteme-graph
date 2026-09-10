@@ -148,7 +148,7 @@ GROBID_URL=http://grobid:8070
 JWT_SECRET=...               # JWT 署名鍵（必ず変更）
 ADMIN_PASSWORD=...           # 初期システム管理者パスワード
 CORS_ORIGINS=*               # 本番は明示リスト推奨
-EPISTEME_DEFAULT_CARTRIDGE_ID=particle_physics
+EPISTEME_DEFAULT_CARTRIDGE_ID=      # 既定は空（分野中立の解析）。全教材が同じ分野のときだけ埋める
 EPISTEME_CARTRIDGES_DIR=     # カートリッジのパス上書き（未設定なら自動探索）
 ```
 

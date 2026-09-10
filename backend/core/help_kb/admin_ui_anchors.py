@@ -297,6 +297,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.library-entry-merge-target",
         "materials.library-entry-modal",
         "materials.llm-model-change",
+        "materials.reanalyze-domain",
         "materials.reanalyze-modal",
         "materials.refresh",
         "materials.revision-decision",
@@ -318,6 +319,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-share",
         "materials.row-version",
         "materials.seminar-brief-modal",
+        "materials.upload-domain",
         "materials.upload-zone",
         "materials.url-upload",
         "materials.url-upload-modal",
@@ -915,6 +917,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.library-entry-modal": "teacher/11-admin-materials.md#library-entry-modal",
     # 解析モデル 変更
     "materials.llm-model-change": "teacher/11-admin-materials.md#llm-model-change",
+    # 再解析モーダルの「分野」区画（前回の分野の事実文 + この解析だけの変更）
+    "materials.reanalyze-domain": "teacher/11-admin-materials.md#reanalyze-domain",
     # 解析を再開（オプション）モーダル
     "materials.reanalyze-modal": "teacher/11-admin-materials.md#reanalyze-modal",
     # 更新（教材一覧の再取得）
@@ -959,6 +963,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-version": "teacher/11-admin-materials.md#row-version",
     # ゼミ前ブリーフモーダル（4区画: 脆い前提 / 一点吊りの支持線 / 晴れ間 / 学習者からの問い）
     "materials.seminar-brief-modal": "teacher/11-admin-materials.md#seminar-brief-modal",
+    # 分野（この教材をどの分野として解析するか。既定は「指定しない」= 分野中立）
+    "materials.upload-domain": "teacher/11-admin-materials.md#upload-domain",
     # アップロードゾーン（ドラッグ&ドロップ / ファイルを選択）
     "materials.upload-zone": "teacher/11-admin-materials.md#upload-zone",
     # URLから取得（arXiv など）— アップロードゾーン内のリンク（migration 070）

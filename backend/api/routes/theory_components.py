@@ -51,10 +51,12 @@ from core.schema import (
     AUDIT_ENTITY_ENDORSEMENT,
     AUDIT_ENTITY_EXPLANATION,
 )
+from core.atlas_vectors import builder as atlas_vectors_builder
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
 from core.course_data import course_source_material_ids, course_sources
 from core.deliberation.graph_dialogue import APPROVED_REVIEW_STATUSES
 from core.deliberation.refs import document_run_artifacts
+from core.document_pipeline.persistence import get_latest_analysis_run
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
@@ -1038,7 +1040,56 @@ def _is_low_value_claim_text(text: str) -> bool:
     return any(re.search(pattern, lower) for pattern in bad_patterns)
 
 
-def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dict | None:
+def _document_cartridge_id(document_id: str) -> str:
+    """document の分野（最新 run の ``cartridge_id``）。未解析・分野中立・不明は ``""``。
+
+    提案 C2: 概念正規化はこの分野に**係留**する。空文字を返した場合、
+    ``normalize_concepts`` は分野語彙を読まず（既定カートリッジへ縮退させない）
+    元の名前をそのまま残す。
+    """
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return ""
+    try:
+        run = get_latest_analysis_run(document_id=doc_id)
+    except Exception:  # noqa: BLE001 — fail-soft（正規化しないだけ）
+        logger.warning("failed to resolve cartridge for document=%s", doc_id, exc_info=True)
+        return ""
+    return str((run or {}).get("cartridge_id") or "").strip()
+
+
+def _concept_normalization_context(document_id: str) -> tuple[str, dict[str, str]]:
+    """``(cartridge_id, {教員が確定した別名: 正規形})`` を返す。
+
+    第2の別名供給源は VA層 ``atlas_anchor_aliases``（教員が UI で確定した骨格別名。
+    出所は ``normalization_source="teacher_alias"`` として区別される）。分野が
+    分からないときは照会もしない（``("", {})``）。DB が読めない場合は別名なしに
+    縮退する（正規化そのものは止めない）。
+    """
+    cartridge_id = _document_cartridge_id(document_id)
+    if not cartridge_id:
+        return "", {}
+    session = _pg_session()
+    try:
+        aliases = atlas_vectors_builder.teacher_alias_canonical_map(session, cartridge_id)
+    except Exception:  # noqa: BLE001 — fail-soft
+        logger.warning(
+            "failed to load teacher aliases for domain=%s", cartridge_id, exc_info=True,
+        )
+        aliases = {}
+    finally:
+        session.close()
+    return cartridge_id, aliases
+
+
+def _normalize_claim_payload(
+    raw: dict,
+    chunk: dict,
+    strict: bool = True,
+    *,
+    cartridge_id: str | None = None,
+    teacher_aliases: dict | None = None,
+) -> dict | None:
     if not isinstance(raw, dict):
         raise ValueError("claim item must be an object")
     # evidence_text は不要フィールド化 (#257)。
@@ -1081,7 +1132,10 @@ def _normalize_claim_payload(raw: dict, chunk: dict, strict: bool = True) -> dic
         })
     if not normalized_concepts and not strict:
         normalized_concepts = _fallback_concepts(text)
-    normalized_concepts = normalize_concepts(normalized_concepts)
+    # 提案 C2: 分野に係留した正規化（cartridge_id が空なら raw のまま・置換しない）。
+    normalized_concepts = normalize_concepts(
+        normalized_concepts, cartridge_id, teacher_aliases=teacher_aliases,
+    )
     equation = _equation_payload_from_claim(raw, chunk)
     if claim_type.startswith("equation_") and not equation:
         raise ValueError("equation claim missing equation payload")
@@ -2986,6 +3040,9 @@ def update_claim(
     if not existing:
         raise HTTPException(status_code=404, detail="Claim not found")
     _ensure_document_editable(existing[0] or "", current_user)
+    # 提案 C2: concepts の正規化は document の分野へ係留する（分野が空なら正規化せず
+    # 元の名前をそのまま保存する。既定カートリッジの別名表で書き換えない）。
+    claim_cartridge_id, claim_teacher_aliases = _concept_normalization_context(existing[0] or "")
     session = _pg_session()
     try:
         row = session.execute(
@@ -3012,7 +3069,14 @@ def update_claim(
                 "claim_type": payload.get("claim_type") or "diagnostic_claim",
                 "text": payload.get("text") or "",
                 "normalized_text": payload.get("normalized_text") or payload.get("text") or "",
-                "concepts": json.dumps(normalize_concepts(payload.get("concepts") or []), ensure_ascii=False),
+                "concepts": json.dumps(
+                    normalize_concepts(
+                        payload.get("concepts") or [],
+                        claim_cartridge_id,
+                        teacher_aliases=claim_teacher_aliases,
+                    ),
+                    ensure_ascii=False,
+                ),
                 "equation": json.dumps(payload.get("equation") or {}, ensure_ascii=False),
                 "support_status": payload.get("support_status") or "source_backed",
                 "evidence_text": payload.get("evidence_text") or "",

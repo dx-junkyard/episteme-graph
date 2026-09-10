@@ -382,6 +382,46 @@ def anchors_with_labels(
     return out, version
 
 
+def teacher_alias_canonical_map(session: Any, domain_key: str) -> dict[str, str]:
+    """``{教員が確定した別名: 骨格ノードのラベル}``（現行凍結版に実在するノードのみ）。
+
+    設計書 §7 の「還流」の3本目 — 概念正規化（``core.concept_normalizer``）へ
+    教員別名を届ける入口。**埋め込みも LLM も呼ばない**（DB の読みだけ）。
+
+    骨格が読めない・別名が無いときは空 dict（fail-soft: 別名が効かないだけで
+    正規化そのものは止めない）。骨格から消えたノードの別名は返さない
+    （VA8 閉世界の正直さ）。
+    """
+    from core import atlas_store
+
+    domain = _clean(domain_key)
+    if not domain:
+        return {}
+    try:
+        skeleton = atlas_store.load_frozen_skeleton(session, domain)
+    except Exception:  # noqa: BLE001 — fail-soft
+        logger.warning("atlas alias map: skeleton load failed domain=%s", domain, exc_info=True)
+        return {}
+    if skeleton is None:
+        return {}
+    labels = {s["node_id"]: s["label"] for s in _skeleton_node_specs(skeleton)}
+    try:
+        aliases_by_node = store.confirmed_aliases_by_node(session, domain)
+    except Exception:  # noqa: BLE001 — fail-soft
+        logger.warning("atlas alias map: alias read failed domain=%s", domain, exc_info=True)
+        return {}
+    out: dict[str, str] = {}
+    for node_id, aliases in aliases_by_node.items():
+        label = _clean(labels.get(node_id))
+        if not label:
+            continue
+        for alias in aliases:
+            text = _clean(alias)
+            if text:
+                out.setdefault(text, label)
+    return out
+
+
 __all__ = [
     "SKIP_DAILY_LIMIT",
     "SKIP_NO_FROZEN_SKELETON",
@@ -392,4 +432,5 @@ __all__ = [
     "collect_evidence_quotes",
     "embed_texts",
     "reset_daily_counter",
+    "teacher_alias_canonical_map",
 ]

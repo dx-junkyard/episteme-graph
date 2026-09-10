@@ -192,7 +192,10 @@ class TestAdminUiAnchorsModule:
         # + 2026-09-09: materials.arxiv-discovery-complement /
         #   materials.arxiv-discovery-foundation（コーパスを補う論文の2ボタン。
         #   docs/features/corpus_complement_design.md §8）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 329
+        # + 2026-09-10: materials.upload-domain（教材アップロードの「分野」1行。既定は
+        #   「指定しない」= 分野中立の解析）/ materials.reanalyze-domain（再解析モーダルの
+        #   「分野」区画。前回値の事実文 + この解析だけの変更。六つのレンズ調査 提案 C1）。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 331
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

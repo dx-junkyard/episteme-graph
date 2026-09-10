@@ -7,7 +7,12 @@ Agent のコードにドメイン知識をハードコードせず、ここか�
 コアロジックを domain-independent に保ったままドメイン適応できます。
 
 - 配置: `backend/cartridges/<cartridge_id>/`
-- 既定カートリッジ: `particle_physics`（`EPISTEME_DEFAULT_CARTRIDGE_ID`、既定値も `particle_physics`）
+- 既定カートリッジ: **なし**（`EPISTEME_DEFAULT_CARTRIDGE_ID` の出荷既定は空 = 分野中立の解析）。
+  分野は教材ごとに入口で選ぶ（教材管理タブの「分野: 指定しない [変更]」→ upload / reanalyze の
+  `cartridge_id` → `document_analysis_runs.cartridge_id`）。env を埋めるのは「このインスタンスの
+  全教材が同じ分野」と言い切れるときだけ。なお `core.cartridges.load_cartridge(None)` 自体は
+  歴史的に `particle_physics` へフォールバックするため、**分野が空のときは load_cartridge を
+  呼ばない**のが呼び出し側の規律（A層 agent / concept_normalizer / descent / learning）
 - パス解決: `src/episteme_graph/agents/cartridge_paths.py`（`EPISTEME_CARTRIDGES_DIR` → 自動探索）
 - **同梱されている実カートリッジは `particle_physics` の 1 件のみ**（2026-09-03 時点。
   実物は `ls backend/cartridges/` が正）。新しい分野は「カートリッジ一式を作る」ほかに、

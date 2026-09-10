@@ -63,6 +63,10 @@ class MaterialOut(BaseModel):
     # run が無ければ None。フロントが再解析モーダルで前回選択を復元するための契約
     # フィールド（フィールド名 analysis_options は admin.js との確定契約）。
     analysis_options: dict | None = None
+    # 最新 document_analysis_runs.cartridge_id（分野・提案 C1）。run が無ければ None、
+    # run はあるが分野を指定せずに解析した場合は ""（= 分野中立で走った事実）。
+    # フロントは再解析モーダルで前回の分野を事実文として提示する。
+    analysis_cartridge_id: str | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
