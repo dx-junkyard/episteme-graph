@@ -23,7 +23,6 @@ from core.personal_graph import graph_data as personal_graph_data
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
 from core.schema import (
-    AUDIT_ENTITY_MISCONCEPTION,
     AUDIT_ENTITY_STRUCTURE_ANCHOR,
     AUDIT_ENTITY_TENSION,
     PaperStructure,
