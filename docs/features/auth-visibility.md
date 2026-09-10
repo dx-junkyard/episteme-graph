@@ -114,6 +114,11 @@ JWT 認証、RBAC（ロールベースアクセス制御）、グループ、Vis
 
 グループ管理者は招待コードの再発行（`POST /groups/{id}/invite-code/rotate`）やメンバー削除が可能。
 
+**メンバーの連絡先（2026-09-10、是正 B4①）**: `GET /api/groups/{id}` が返すメンバー情報のうち
+**メールアドレスはグループ admin と SYSTEM_ADMIN にのみ**返します（一般メンバーには表示名・
+ロール・参加日のみ。`invite_code` と同じ扱いで、サーバ側で落とします）。管理 UI は
+サーバがメールを返した場合だけ列を出す（UI の非表示は開示制御の根拠にしない）。
+
 ---
 
 ## 4.5 オブジェクトスコープの権限（ID 直指定エンドポイント）
@@ -154,6 +159,17 @@ ID を直指定するエンドポイントは、対象オブジェクトへの�
 | `POST /api/admin/documents/{id}/reanalyze` | document owner / editor |
 | `PUT /api/admin/materials/{id}/pdf` | document owner / editor |
 | `GET /api/learning/courses/{cid}/source-chunk/{chunk_id}` | コースにアクセス可能、**かつ** chunk の document がそのコースの source |
+| `POST /api/courses/{cid}/export-bundle` | コース**閲覧**可（所有 / editor・viewer 共有 / 公開テンプレート・グループ / SYSTEM_ADMIN）。`routes/export.py::_require_viewable_course_or_404` |
+| `POST /api/documents/{did}/export-bundle` | document 成果物の**閲覧**可（所有 / public / group / 共有 / コース経由 / SYSTEM_ADMIN）。`routes/export.py::_require_viewable_document_or_404` |
+
+export-bundle（2026-09-10、是正 F10）は**閲覧**を境界に採ります — 束の中身は既存の閲覧 API
+（`_ensure_document_viewable` 系の成果物 API / コース経由の可視集合）で読める範囲と同じで、
+編集権を要求すると読める人が書き出せない非対称が生まれるためです。判定は再実装せず
+`services.resolve_document_access()` / `get_viewable_course_data()` /
+`get_accessible_course_data()` / `_ensure_document_viewable()` へ委譲し、**DB 読み・ZIP 生成
+より先に**認可します。束は外へ出て戻らないため、`manifest.json` の `provenance`（出所・
+発行状態・解析 run・生成日時。**書き出した人は伏せる**）と監査記帳
+（`theory_review_events` / `entity_type='export'`）を必ず伴います。
 
 `source-chunk` のスコープは `services.get_accessible_course_data()` →
 `services.list_course_source_document_ids()` →

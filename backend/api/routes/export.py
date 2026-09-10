@@ -101,6 +101,159 @@ def _zip_filename(scope_type: str, scope_id: str) -> str:
     return f"episteme_export_{scope_type}_{safe_id}_{ts}.zip"
 
 
+# ---------------------------------------------------------------------------
+# 出口の弁 — 権限ゲート / 来歴 / 監査
+# （是正 F10・B4①。正本: docs/architecture/six_lenses_2026-09-10/04_community.md 提案4）
+#
+# export-bundle は PDF 逐語の evidence スニペットと（オプションで）LLM 生出力を
+# 含んだまま **システムの外へ出て行く** 経路なので、`_require_teacher`（ロール）
+# だけでは足りない。対象オブジェクトへの権限をサーバ側で確認し、**不在と権限なしを
+# 同一の 404 に畳む**（`docs/features/auth-visibility.md` §4.5 の流儀）。副作用
+# （DB 読み・artifact 読み・ZIP 生成）より先に認可する。
+#
+# 境界に「閲覧」を採るのは、この束の中身が既存の閲覧 API で読める範囲と同じだから
+# （document 成果物 = `_ensure_document_viewable`、コース = `get_viewable_course_data` /
+# `get_accessible_course_data`）。判定そのものは再実装せず、上記の正本へ委譲する。
+# ---------------------------------------------------------------------------
+
+_DOCUMENT_NOT_FOUND_DETAIL = "Document not found"
+_COURSE_NOT_FOUND_DETAIL = "Course not found"
+
+# 束の中身は「書き出し時点の作業コピー」であって発行版のスナップショットではない、
+# という事実文（原則: 出所の正直さ）。数値スコアは載せない。
+_PROVENANCE_NOTICE = (
+    "この束は書き出し時点の作業コピー（HEAD）の写しです。発行版（release）の"
+    "スナップショットではありません。各項目の確定状況は review_status を参照してください。"
+    "書き出した人の帰属は監査台帳（theory_review_events / entity_type='export'）に残ります。"
+)
+
+
+def _require_viewable_document_or_404(document_ref: str, current_user: dict) -> str:
+    """document への閲覧権限を要求し、canonical な document_id を返す。
+
+    許可: 所有者 / public / group 単一共有 / `object_group_permissions('document', …)` /
+    コース経由の閲覧（`_ensure_document_viewable` のフォールバック）/ SYSTEM_ADMIN。
+    不在・権限なしはどちらも 404（detail も同一）。
+    """
+    from dependencies import ROLE_SYSTEM_ADMIN
+    from services import resolve_document_access
+
+    access = resolve_document_access(current_user["id"], document_ref)
+    canonical = access.document_id or document_ref
+    if access.found and (access.can_view or current_user.get("role") == ROLE_SYSTEM_ADMIN):
+        return canonical
+    # document 単体では通らない場合のみ、コース経由の閲覧ゲート（成果物読み取りの正本）
+    # に委譲する。通らなければ同じ 404（同じ detail）に畳む。
+    from routes.theory_components import _ensure_document_viewable
+
+    try:
+        _ensure_document_viewable(canonical, current_user)
+    except HTTPException:
+        raise HTTPException(status_code=404, detail=_DOCUMENT_NOT_FOUND_DETAIL) from None
+    return canonical
+
+
+def _require_viewable_course_or_404(course_id: str, current_user: dict) -> None:
+    """コースへの閲覧権限を要求する（不在・権限なしはどちらも 404）。
+
+    許可: 所有者 / editor・viewer グループ共有（`get_viewable_course_data`）/
+    公開テンプレート・グループ可視（`get_accessible_course_data`）/ SYSTEM_ADMIN。
+    """
+    from dependencies import ROLE_SYSTEM_ADMIN
+    from services import get_accessible_course_data, get_viewable_course_data
+
+    if current_user.get("role") == ROLE_SYSTEM_ADMIN:
+        return  # 不在は後続の _load_course が同一の 404 に畳む
+    user_id = current_user["id"]
+    if get_viewable_course_data(user_id, course_id) is not None:
+        return
+    if get_accessible_course_data(user_id, course_id) is not None:
+        return
+    raise HTTPException(status_code=404, detail=_COURSE_NOT_FOUND_DETAIL)
+
+
+def _shared_release_state(scope_type: str, scope_id: str) -> dict | None:
+    """V層の発行状態を best-effort で読む（未発行・失敗は None）。"""
+    try:
+        from core.versioning import releases as _vreleases
+
+        return _vreleases.get_state(scope_type, scope_id)
+    except Exception:  # noqa: BLE001 — 来歴の欠落は書き出しを止めない
+        return None
+
+
+def _build_provenance(
+    *,
+    scope_type: str,
+    scope_id: str,
+    document_ids: list[str],
+    run_ids: dict[str, str],
+    options: dict,
+) -> dict:
+    """manifest に載せる来歴ブロック（additive）。
+
+    出所（object_type / object_id / 解析 run / 発行状態 / 生成日時）だけを載せる。
+    **書き出した人は束の中では伏せる**（帰属は監査台帳に残す）。confidence・weight
+    などの数値スコアは載せない。
+    """
+    state = _shared_release_state(scope_type, scope_id)
+    release: dict | None = None
+    if state and state.get("active_release_id"):
+        release = {
+            "active_release_id": state.get("active_release_id"),
+            "latest_version_no": state.get("latest_version_no"),
+            "lifecycle": state.get("lifecycle", ""),
+            "state_updated_at": state.get("updated_at"),
+        }
+    return {
+        "object_type": scope_type,
+        "object_id": scope_id,
+        "generated_at": _now_iso(),
+        # 生成者は非開示（監査台帳に残す）。
+        "exported_by": {"disclosed": False, "recorded_in": "audit_log"},
+        "content_source": "working_copy_head",
+        "shared_release": release,
+        "release_available": release is not None,
+        "analysis_runs": [
+            {"document_id": did, "analysis_run_id": (run_ids or {}).get(did, "")}
+            for did in (document_ids or [])
+        ],
+        "review_fields_included": bool(options.get("include_review_fields")),
+        "source_snippets_included": bool(options.get("include_source_snippets")),
+        "llm_raw_outputs_included": bool(options.get("include_llm_raw_outputs")),
+        "notice": _PROVENANCE_NOTICE,
+    }
+
+
+def _record_export_audit(
+    *,
+    scope_type: str,
+    scope_id: str,
+    export_id: str,
+    document_ids: list[str],
+    options: dict,
+    user_id: str | None,
+) -> None:
+    """書き出しを監査台帳に記帳する（best-effort。資料本文は載せない）。"""
+    from core.schema import AUDIT_ENTITY_EXPORT
+    from services import record_review_event
+
+    record_review_event(
+        AUDIT_ENTITY_EXPORT,
+        scope_id,
+        "",
+        "exported",
+        user_id,
+        {
+            "action": "exported",
+            "object_type": scope_type,
+            "export_id": export_id,
+            "document_ids": list(document_ids or []),
+            "options": dict(options or {}),
+        },
+    )
+
+
 def _load_json_field(value: Any, default: Any) -> Any:
     if value is None:
         return default
@@ -2571,6 +2724,7 @@ def _build_manifest(
     system_operations: list[dict] | None = None,
     theses: list[dict] | None = None,
     export_source: dict | None = None,
+    provenance: dict | None = None,
 ) -> dict:
     equations = equations or []
     equation_candidates = equation_candidates or []
@@ -2593,6 +2747,9 @@ def _build_manifest(
         "artifact_run_ids": (export_source or {}).get("artifact_run_ids", {}),
         "fallback_used": (export_source or {}).get("fallback_used", False),
         "fallback_sources": (export_source or {}).get("fallback_sources", []),
+        # 出口の弁（提案4）: 出所・発行状態・解析 run の来歴。生成者は伏せ、
+        # 帰属は監査台帳（entity_type='export'）に残す。数値スコアは載せない。
+        "provenance": provenance or {},
         "scope": {
             "type": scope_type,
             f"{scope_type}_id": scope_id,
@@ -2700,6 +2857,27 @@ Return your review as JSON with:
 - affected_claim_ids
 - affected_component_ids
 - affected_edge_ids
+
+## 来歴（この束の主張は誰がいつ確定したか）
+
+`manifest.json` の `provenance` ブロックが、この束の出所を記録します。
+
+- `object_type` / `object_id`: 書き出したオブジェクト（コース または 教材）
+- `generated_at`: 書き出した日時（UTC）
+- `content_source`: `working_copy_head` — **書き出し時点の作業コピーの写し**であり、
+  発行版（release）のスナップショットではありません
+- `shared_release`: 発行済みの場合の版の状態（`active_release_id` / `latest_version_no` /
+  `lifecycle`）。未発行なら `null`（`release_available: false`）
+- `analysis_runs`: 各教材の解析 run（`analysis_run_id`）。この束の成果物がどの解析実行に
+  由来するかを再構成できます
+- `exported_by`: **束の中では伏せます**（`disclosed: false`）。誰が書き出したかは
+  システム側の監査台帳に記録されます
+- `review_fields_included` / `source_snippets_included` / `llm_raw_outputs_included`:
+  この束に含めた範囲
+
+各項目（claim / component / explanation）の確定状況は、その項目の `review_status` を
+参照してください（`teacher_approved` 等が人間の確定、`teacher_review_required` は未確定）。
+`provenance` には confidence などの数値スコアを載せません。
 
 ## Notes
 
@@ -2831,7 +3009,15 @@ def export_course_bundle(
     req: ExportBundleRequest = ExportBundleRequest(),
     current_user: dict = Depends(_require_teacher),
 ) -> StreamingResponse:
-    """コース単位でエクスポートZIPを生成してダウンロードする。"""
+    """コース単位でエクスポートZIPを生成してダウンロードする。
+
+    権限（是正 F10）: 束は PDF 逐語スニペット等を含んでシステム外へ出るため、
+    `_require_teacher`（ロール）だけでは足りない。コースへの閲覧権限（所有 /
+    editor・viewer 共有 / 公開テンプレート・グループ可視 / SYSTEM_ADMIN）を
+    **DB 読み・ZIP 生成より先に**要求し、不在・権限なしはどちらも 404 に畳む。
+    """
+    _require_viewable_course_or_404(course_id, current_user)
+
     session = _pg_session()
     try:
         course = _load_course(session, course_id)
@@ -2948,6 +3134,13 @@ def export_course_bundle(
             system_operations=system_operations,
             theses=_build_theses_for_documents(artifacts_by_doc, document_ids),
             export_source=export_source,
+            provenance=_build_provenance(
+                scope_type="course",
+                scope_id=course_id,
+                document_ids=document_ids,
+                run_ids=run_ids,
+                options=options,
+            ),
             options=options,
         )
 
@@ -2979,6 +3172,15 @@ def export_course_bundle(
             export_validation=export_validation,
         )
 
+        _record_export_audit(
+            scope_type="course",
+            scope_id=course_id,
+            export_id=eid,
+            document_ids=document_ids,
+            options=options,
+            user_id=current_user.get("id"),
+        )
+
         filename = _zip_filename("course", course_id)
         return StreamingResponse(
             io.BytesIO(zip_bytes),
@@ -2995,7 +3197,16 @@ def export_document_bundle(
     req: ExportBundleRequest = ExportBundleRequest(),
     current_user: dict = Depends(_require_teacher),
 ) -> StreamingResponse:
-    """ドキュメント単位でエクスポートZIPを生成してダウンロードする。"""
+    """ドキュメント単位でエクスポートZIPを生成してダウンロードする。
+
+    権限（是正 F10）: コース版と同じく、成果物の閲覧権限（所有 / public /
+    group・object_group_permissions 共有 / コース経由 / SYSTEM_ADMIN）を
+    **DB 読み・ZIP 生成より先に**要求し、不在・権限なしはどちらも 404 に畳む。
+    ゲートは canonical な `documents.id` を返すため、以降はそれを使う
+    （material_id 指定でも解決される）。
+    """
+    document_id = _require_viewable_document_or_404(document_id, current_user)
+
     session = _pg_session()
     try:
         document = _load_document(session, document_id)
@@ -3108,6 +3319,13 @@ def export_document_bundle(
             system_operations=system_operations,
             theses=_build_theses_for_documents(artifacts_by_doc, document_ids),
             export_source=export_source,
+            provenance=_build_provenance(
+                scope_type="document",
+                scope_id=document_id,
+                document_ids=document_ids,
+                run_ids=run_ids,
+                options=options,
+            ),
             options=options,
         )
 
@@ -3137,6 +3355,15 @@ def export_document_bundle(
                 ),
             } if req.include_debug_data else None,
             export_validation=export_validation,
+        )
+
+        _record_export_audit(
+            scope_type="document",
+            scope_id=document_id,
+            export_id=eid,
+            document_ids=document_ids,
+            options=options,
+            user_id=current_user.get("id"),
         )
 
         filename = _zip_filename("document", document_id)

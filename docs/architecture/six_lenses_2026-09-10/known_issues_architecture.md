@@ -146,9 +146,9 @@
 | H-01 | N1〜N42 の 🔧/💬 全件 | 是正 | vision_ux_gap_survey 追補（2026-07-18） | 全件解消 | 済 | 追補節の解消記録（backend 4,382 pass） | — | — |
 | H-02 | `source-chunk` のチャンク可視性ゲート欠落 / 原稿スタジオのチャンク単位 API の所有チェック欠落 | 是正 | 同 追補末尾「未対応のコード課題」 | 別途判断 | 済 | CLAUDE.md discuss Phase 0 節に「チャンク直読み API も fail-closed（2026-07-25）」+ P0 オブジェクトスコープ是正（2026-08-11）。`_ensure_chunk_editable` も導入済み | — | — |
 | H-03 | 学習者向け open-assumptions の `dependent_count` 生整数露出 | 是正 | 同 追補末尾 | 別途判断 | 済 | `routes/doubt.py:2308-2326` の learner ルートが数値を落とす旨を docstring で明記し `include_challenger_names=False` で呼ぶ | — | — |
-| H-04 | `unanswered-queries`（学生名付きログが任意 TEACHER に可視） | 是正 | 同 追補末尾 | 別途判断 | 未着手（要確認） | `routes/admin.py:3343` に endpoint 現存。権限の詳細は本調査では未確認＝**推測**。原則5（監視しない）との整合が要確認 | S | **要裁定**: 学生名付きの未回答ログを教員に見せ続けるか（k-匿名化するか個票のまま告知するか） |
-| H-05 | `reanalyze` / `bridge-insights` のコース・document ゲート欠落 | 是正 | 同 追補末尾 | 別途判断 | 一部 | `bridge-insights` は `routes/admin.py:4567-4620` で権限のない教員への集約の存在秘匿がコメントで明記され対処済み。`reanalyze` 側は未確認＝**推測** | S | — |
-| H-06 | `PUT /api/admin/materials/{id}/pdf` が閲覧権のみで差し替え可 | 是正 | 同 追補末尾 | 別途判断 | 未着手（要確認） | `routes/admin.py:1366` に endpoint 現存。権限判定の実体は未確認＝**推測** | S | — |
+| H-04 | `unanswered-queries`（学生名付きログが任意 TEACHER に可視） | 是正 | 同 追補末尾 | 別途判断 | 済（権限）／裁定は未 | **2026-09-10 再監査（コード確認）**: `routes/admin.py:3354` が SQL 実行より先に `_require_editable_course_or_404` を通し、権限外はコース owner/editor 以外すべて 404（件数・学生名・質問・日時のいずれも返さない）。ゲートの回帰は `tests/test_object_scope_authorization.py` が固定。**任意 TEACHER に可視という指摘は現行コードでは成立しない**（権限は解消済み）。残るのは「owner/editor には個票のまま見せ続けるか」という原則5 の裁定 | S | **要裁定（権限とは別問題として残る）**: 学生名付きの未回答ログを owner/editor に個票で見せ続けるか（k-匿名化するか告知するか） |
+| H-05 | `reanalyze` / `bridge-insights` のコース・document ゲート欠落 | 是正 | 同 追補末尾 | 別途判断 | 済 | **2026-09-10 再監査（コード確認）**: `bridge-insights` は `routes/admin.py:4586` で `_require_editable_course_or_404`。document 再解析は `routes/admin.py:819` が `_require_editable_document_or_404`（MinIO 取得・前回 options 読み・background task 起動より先）、図の再解析は `routes/figure_presentation.py:202` が `_ensure_document_editable`。**ゲート欠落は現行コードでは成立しない** | S | — |
+| H-06 | `PUT /api/admin/materials/{id}/pdf` が閲覧権のみで差し替え可 | 是正 | 同 追補末尾 | 別途判断 | 済 | **2026-09-10 再監査（コード確認）**: `routes/admin.py:1381` が関数の最初の文で `_require_editable_document_or_404`（ファイル読取・PDF パース・類似度計算・MinIO upload より先）。**閲覧権のみで差し替え可という指摘は現行コードでは成立しない** | S | — |
 | H-07 | `theory_components.py` の旧インライン LLM 抽出機構の死蔵コード群 | 構造 | 同 追補末尾 | 別途判断 | 未着手 | G-12 と同根（同ファイル）。撤去判断は未実施 | S | — |
 | H-08 | `_classify_intent` 等の物理学ハードコード文言 | 是正 | 同 追補末尾 | 別途判断 | 未着手（要確認） | 非形式分野カートリッジ（B-05）の前提条件。本調査では文言の再確認まで未実施＝**推測** | S | — |
 
@@ -207,6 +207,11 @@
    マルチワーカー化の判断と同時にしか動かせない。
 7. **セキュリティ系の残り（H-04/H-05/H-06）は本調査で endpoint の存在までしか確認できていない。**
    権限判定の実体はコード実読が要るので、着手前に短時間の再監査を推奨する（3件とも S 規模）。
+   **→ 2026-09-10 再監査済み（第1波 #8）**: 3件とも権限ゲートは既に入っており是正はゼロ
+   （各行の判定根拠に `file:line` を追記）。H-04 は権限としては解消済みで、残るのは
+   「owner/editor に個票で見せ続けるか」という原則5 のオーナー裁定のみ。同じ再監査で
+   **未ゲートだったのは export-bundle 2本**（F10 / 04_community 付記1）で、こちらは同日に
+   閲覧ゲート + 来歴 + 監査を実装した。
 8. **文書の位置づけとして「棄却」に分類したのは2件だけ**（D-04 の意図的保持、
    future_debate §7.3 の棄却案群）。棄却案（問いの広場の一覧画面・第一種「同じ問いを持つ人」の接続・
    学習者産出物の無条件 public 化・段階的翻訳産物の還流・フィルターの可否利用）は、

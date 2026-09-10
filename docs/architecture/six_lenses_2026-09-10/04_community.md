@@ -526,6 +526,13 @@ UX には砂場の**終わり方**が無い。羅列は「まだ整理されて�
    「ID 直指定エンドポイントは対象オブジェクトへの権限をサーバ側で確認する」規約から漏れている。
    PDF 逐語引用と LLM 生出力を含む ZIP が、同一インスタンスの任意の教員に対して開いている。
    監査記帳も無い。→ 提案4。
+   **→ 2026-09-10 解消**（実装先: `backend/api/routes/export.py` の
+   `_require_viewable_course_or_404` / `_require_viewable_document_or_404` +
+   `manifest.provenance` + `entity_type='export'` の監査記帳。境界は提案4 が挙げた
+   編集権ではなく**閲覧権**を採った — 束の中身が既存の閲覧 API で読める範囲と同じで、
+   「読めるのに書き出せない」非対称を作らないため。理由は
+   `docs/features/auth-visibility.md` §4.5 に記載。ガードレールは
+   `backend/tests/test_export_governance.py`）。
 2. **学習者向けドキュメントに外部 LLM への転送の記述が無い** — `docs/manual/student/` を
    `OpenAI` / `外部` / `同意` / `利用規約` で grep して該当 0 件。指標カタログでは
    「何が数えられるか」を極めて丁寧に開示している一方で、「本文がどこへ行くか」だけが空白。
@@ -534,3 +541,8 @@ UX には砂場の**終わり方**が無い。羅列は「まだ整理されて�
    （`backend/api/routes/groups.py:204-227`）。学習者どうしが互いのメールアドレスを見られる
    唯一の経路で、可視性の第2軸（名前を見られる audience）としての宣言も、マニュアルの
    記述も無い。→ 提案2 のカタログ対象。
+   **→ 2026-09-10 解消**（実装先: `backend/api/routes/groups.py::get_group_detail` —
+   email はグループ admin / SYSTEM_ADMIN にのみ返し、一般メンバーには表示名・ロール・
+   参加日のみ。管理 UI（`frontend/public/js/admin.js`）はサーバがメールを返した場合だけ
+   列を出す。規約は `docs/features/auth-visibility.md` §4、ガードレールは
+   `backend/tests/test_export_governance.py::TestGroupMemberEmailDisclosure`）。

@@ -513,6 +513,14 @@ AUDIT_ENTITY_ATLAS_EDGE = "atlas_edge"
 # 記帳する（原則14 監査可能性）。平文の資料本文・受講者情報は載せない。
 AUDIT_ENTITY_VISIBILITY = "visibility"
 
+# 外部への書き出し（export bundle）— `POST /api/{courses|documents}/{id}/export-bundle`。
+# 束は PDF 逐語の evidence スニペットと（オプションで）LLM 生出力を含んだまま
+# システムの外へ出て行き戻ってこないため、誰がいつ何を持ち出したかを記帳する
+# （六つのレンズ 提案4 = 是正 F10。entity_id は course_id / document_id、
+# new_status="exported"、metadata に export_id / object_type / document_ids /
+# options を入れる。資料本文・逐語引用そのものは監査に載せない）。
+AUDIT_ENTITY_EXPORT = "export"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -556,4 +564,5 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_ATLAS_VECTOR,
     AUDIT_ENTITY_ATLAS_EDGE,
     AUDIT_ENTITY_VISIBILITY,
+    AUDIT_ENTITY_EXPORT,
 )

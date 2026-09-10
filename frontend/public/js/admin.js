@@ -9593,14 +9593,22 @@
     if (!bodyEl) return;
 
     var isAdmin = g.my_role === "admin";
-    var members = (g.members || []).map(function (m) {
+    // メール列は、サーバがメールを返した場合（グループ admin / SYSTEM_ADMIN）だけ出す。
+    // 一般メンバーには表示名・ロールのみが返るので、列ごと省いて表示名で足りるようにする。
+    var showEmail = false;
+    var memberList = g.members || [];
+    for (var mi = 0; mi < memberList.length; mi++) {
+      if (memberList[mi] && memberList[mi].email) { showEmail = true; break; }
+    }
+    var members = memberList.map(function (m) {
       var actions = "";
       if (isAdmin && m.role !== "admin") {
         actions = '<button class="admin-action-btn groups-remove-btn" data-ui-anchor="groups.remove-btn" data-uid="' + escHtml(m.user_id) + '" style="font-size:11px">除名</button>';
       } else if (!isAdmin && m.user_id === _meUserId()) {
         actions = '<button class="admin-action-btn groups-leave-btn" data-ui-anchor="groups.leave-btn" style="font-size:11px">退会</button>';
       }
-      return '<tr><td>' + escHtml(m.username) + '</td><td>' + escHtml(m.email || "") + '</td><td>' + escHtml(m.role) + '</td><td>' + actions + '</td></tr>';
+      var emailCell = showEmail ? '<td>' + escHtml(m.email || "") + '</td>' : "";
+      return '<tr><td>' + escHtml(m.username) + '</td>' + emailCell + '<td>' + escHtml(m.role) + '</td><td>' + actions + '</td></tr>';
     }).join("");
 
     var inviteCodeBlock = "";
@@ -9634,8 +9642,10 @@
     bodyEl.innerHTML =
       '<p style="color:var(--color-text-secondary);font-size:13px;margin:0 0 8px 0">' + escHtml(g.description || "") + "</p>" +
       inviteCodeBlock +
-      '<h4 style="font-size:13px;margin:16px 0 8px 0">メンバー (' + (g.members || []).length + ")</h4>" +
-      '<table class="admin-table"><thead><tr><th>ユーザー名</th><th>メール</th><th>ロール</th><th></th></tr></thead><tbody>' +
+      '<h4 style="font-size:13px;margin:16px 0 8px 0">メンバー (' + memberList.length + ")</h4>" +
+      '<table class="admin-table"><thead><tr><th>ユーザー名</th>' +
+      (showEmail ? '<th>メール</th>' : "") +
+      '<th>ロール</th><th></th></tr></thead><tbody>' +
       members + "</tbody></table>" +
       inviteByUser +
       dangerZone;

@@ -64,6 +64,15 @@ vision が最も強く語る 3 つの像にはそれぞれ実装上の「閉じ�
 | F10 | export-bundle が `_require_teacher` のみで対象権限判定・監査なし ✓。groups API が email を全員に返す ✓。外部 LLM 転送が学習者向けマニュアルに無い | 原則11・14 / §5.4 / 原則8 | `routes/export.py:2832,2996` · `routes/groups.py:204-227` | §5 B2・B4 | S |
 | F11 | 監査記帳の無い状態変更: 教材の物理削除・版 adopt・トピック保存 | 原則14 | `admin.py:1665` · `versioning.py:303` · `lecture_studio/topics.py:346` | `record_review_event` を 3 箇所に | S |
 
+**F10 → 2026-09-10 解消（第1波 #8。外部 LLM 転送のマニュアル記述だけは #9 に残る）**:
+export-bundle 2本に閲覧ゲート（`export.py::_require_viewable_{course,document}_or_404`）・
+`manifest.provenance`（出所・発行状態・解析 run。書き出した人は伏せる）・監査記帳
+（`entity_type='export'`）を実装し、`GET /api/groups/{id}` の email をグループ admin /
+SYSTEM_ADMIN 限定にした。あわせて H-04〜H-06 の3 endpoint を再監査し、**3件とも権限ゲートは
+既に入っており是正はゼロ**（H-04 に残るのは個票開示の裁定のみ）。詳細は
+[six_lenses_2026-09-10/known_issues_architecture.md](six_lenses_2026-09-10/known_issues_architecture.md)
+の H-04〜H-06 行と [04_community.md](six_lenses_2026-09-10/04_community.md) 付記1・3。
+
 F1・F3・F4・F5 は「学習者について AI が判断し挙動を変える」古い層。F2・F6・F8・F11 は
 「情報を落とさない・帰属付きで記帳する」の穴で、最古の層（A層 persist・C層承認・削除経路）にある。
 
