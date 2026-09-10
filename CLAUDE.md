@@ -293,6 +293,16 @@ split_pending claim（`is_atomic=False`）は ComponentGraph / TheoryOperationGr
 
 ドメイン固有の語彙・ルール・検証定義を持つJSONファイル群。`backend/cartridges/<cartridge_id>/` に配置する。
 
+**分野は入口で教員が選ぶ（2026-09-10 是正 F9 = 提案 C1・C2）**: `EPISTEME_DEFAULT_CARTRIDGE_ID` の出荷既定は
+**空**（素粒子物理は検証用の明示スイッチ）。upload / URL 取得 / reanalyze は optional `cartridge_id`（実在キーのみ・
+不明は 422。reanalyze は None=前回 run 継承 / `""`=「指定しない」の明示）を `document_analysis_runs.cartridge_id` に通し、
+orchestrator は「引数 > env > None」で解決する。**None のときは cartridge を読まない分野中立経路が走る**（A層 agent は
+None で縮退）。`load_cartridge(None)` の particle_physics フォールバック自体は残っているので、新規コードは
+「cartridge_id が空なら呼ばない」規律（descent / learning / concept_normalizer / orchestrator と同じ）を守る。
+`concept_normalizer.normalize_concepts` は `name` を上書きせず `canonical` / `canonical_name` を併記し、
+教員確定の別名（`atlas_anchor_aliases`）を `normalization_source="teacher_alias"` の第2供給源として受ける。
+UI は教材管理のアップロード直下「分野: 指定しない [変更]」（`admin.js loadDomainOptions()` が選択肢合成の唯一の正本）。
+
 ```
 backend/cartridges/particle_physics/
   ontology.json         → concept types / aliases / notation_patterns / normalization_hints

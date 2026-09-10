@@ -97,20 +97,20 @@ F1・F3・F4・F5 は「学習者について AI が判断し挙動を変える�
 
 | # | やること | 出典 | 規模 | 前提 |
 |---|---|---|---|---|
-| 1 | 確認問題の合否を LLM の確定から外す（並置 + 本人の 1 タップ。40 字フォールバック廃止。逐語記帳経路を外す） | F1 / L1 | M | — |
-| 2 | 誤解メモを candidate 化 + 3 択 + 5 件上限撤廃 | F5 / 既知 G-07・D-36 | S–M | — |
-| 3 | レクチャー沈黙適応の撤去（注記フラグ + 本人の「短く聴く」トグル）。マニュアル `02-student.md:566` 追随 | F3 | M | — |
+| 1 | 確認問題の合否を LLM の確定から外す（並置 + 本人の 1 タップ。40 字フォールバック廃止。逐語記帳経路を外す） | F1 / L1 | M | → **2026-09-10 解消**（7939a73。並置 + `check/self-check` の 3 択・40 字フォールバックと逐語記帳を撤去・正本 `core/check_review.py`） |
+| 2 | 誤解メモを candidate 化 + 3 択 + 5 件上限撤廃 | F5 / 既知 G-07・D-36 | S–M | → **2026-09-10 解消**（fb5a66b。candidate 化 + `misconceptions/{id}/review`・5 件切り詰め撤去・`AUDIT_ENTITY_MISCONCEPTION`） |
+| 3 | レクチャー沈黙適応の撤去（注記フラグ + 本人の「短く聴く」トグル）。マニュアル `02-student.md:566` 追随 | F3 | M | → **2026-09-10 解消**（dfa4ee3。内容改変ゼロ・`previously_touched` 注記・「短く聴く」トグル・履歴由来の習得推定を撤去） |
 | 4 | 前提知識の 3 段解決 + 全分岐に grounding。履歴による自動スキップ撤去 | F4 / H-08 | M | → **2026-09-10 解消**（`check_prerequisites` の判定を本人の明示的な答えの記帳 `progress_data.acknowledged_prerequisites` だけに寄せ、`learning_chat_history` 参照を撤去。前提の説明は ①同コース topic → ②`allowed_document_ids` 付き検索 → ③`model_generated` + 閉世界事実文の3段。`LEARNING_ADVICE` 全分岐に `content_grounding`。G層 `course.prerequisite_uncovered` 追加。正本は `docs/backend/rag-chat.md` §①/①-b） |
-| 5 | 警告の退避・理由プリフィル撤去・`evidence_shown` の隔離 | F6・F7 / A-04 部分 | S | — |
-| 6 | 監査 3 経路 + 一括取り込み・freeze・publish・単発承認への `decision_context`（記帳のみ） | F11 / A-04・F-18・監査 C6 | S–M | — |
-| 7 | 教材入口に「分野: 指定しない [変更]」、既定カートリッジを空に、`normalize_concepts` の係留と教員別名の還流 | F9 / C1・C2 / A-18 部分 | S | — |
-| 8 | export の権限・来歴・監査。groups email 停止。権限未確認 3 endpoint の再監査（unanswered-queries / reanalyze / PUT materials pdf） | F10 / B4① / H-04〜06 | S | — |
-| 9 | 外部 LLM 転送の事実文（マニュアル + 各対話 UI）と可視性 6 軸の宣言モジュール `disclosure_axes.py` + `GET /api/disclosure` | B2 最小形 | S–M | 同意ボタンの有無のみ D4 |
-| 10 | PDF 入力を untrusted とする信頼境界のガードレールテスト | 既知 B-01 | S | — |
+| 5 | 警告の退避・理由プリフィル撤去・`evidence_shown` の隔離 | F6・F7 / A-04 部分 | S | → **2026-09-10 解消**（29cfc28。警告の退避と承認画面への並置・プリフィル空・`evidence_shown` は全経路 None + `client_reported` 隔離） |
+| 6 | 監査 3 経路 + 一括取り込み・freeze・publish・単発承認への `decision_context`（記帳のみ） | F11 / A-04・F-18・監査 C6 | S–M | → **2026-09-10 解消**（87714a5。教材削除・トピック保存を記帳、版 adopt は既記帳で是正不要。`BASIS_*` 5 本追加 = 取り込み / freeze / publish / 単発承認 2） |
+| 7 | 教材入口に「分野: 指定しない [変更]」、既定カートリッジを空に、`normalize_concepts` の係留と教員別名の還流 | F9 / C1・C2 / A-18 部分 | S | → **2026-09-10 解消**（12252a9。既定カートリッジ空・upload / URL / reanalyze に `cartridge_id`・`normalize_concepts` の係留と `teacher_alias` 供給源） |
+| 8 | export の権限・来歴・監査。groups email 停止。権限未確認 3 endpoint の再監査（unanswered-queries / reanalyze / PUT materials pdf） | F10 / B4① / H-04〜06 | S | → **2026-09-10 解消**（8693ce2。export に viewable ゲート + 来歴 + `AUDIT_ENTITY_EXPORT`、groups email は admin / SYSTEM_ADMIN 限定。3 endpoint は既に fail-closed） |
+| 9 | 外部 LLM 転送の事実文（マニュアル + 各対話 UI）と可視性 6 軸の宣言モジュール `disclosure_axes.py` + `GET /api/disclosure` | B2 最小形 | S–M | 同意ボタンの有無のみ D4 → **2026-09-10 解消**（`core/disclosure_axes.py`（6軸 × 6 データ種別・DA1〜DA6）+ `routes/disclosure.py`（`_get_current_user`・読み取り専用）+ nginx 2 location + `disclosure-note.js` の常設事実文（学習 composer / 音声 / discuss 予想枠 / Copilot / W層 / グラフレビュー / コースビルダー）+ マニュアル2節。**D4 の告知カードは未実装のまま**＝常設の事実文までで同意 UI を作らない。正本は `docs/features/disclosure_axes_design.md`） |
+| 10 | PDF 入力を untrusted とする信頼境界のガードレールテスト | 既知 B-01 | S | → **2026-09-10 解消**（35b597e。`UNTRUSTED_SOURCE_NOTICE` を 10 経路に・`trust_boundary_pdf_input.md`・29 件のガードレール。A層 prompt は非改変・要検討 3 件） |
 | 11 | 文書ズレ 3 件: `layer_registry.md:79`（discuss Phase 3 実装済み）/ vision §9 decision_context 行を 3 経路に / 討論 §7.2 最優先「自分で確かめた痕跡」の §9 転記 | 既知 所見 | S | → **2026-09-10 解消**（`layer_registry.md` discuss 行 / `vision.md` §4・§9 + `decision_context_design.md` §3〜§8.1 / `vision.md` §9 に「自分で確かめた痕跡」1行）。§10 の非スコープ追随 5 件も同時に処理 |
 | 12 | 知識オブジェクトの版化（`stable_key` + `superseded_at`、persist の DELETE 撤去、W層 meaning commit の旧本文退避、ガードレール拡張） | F2 / K1 / F-01・D-11・D-47・E-13・A-22 | L | **D1** |
 
-1〜11 は互いに独立で並列可。12 は D1 の一言を待つ。
+1〜11 は互いに独立で並列可。12 は D1 の一言を待つ。**2026-09-10 時点: 1〜8・10・11 は解消済み（各行の注記のコミットを参照）。9 は D4 非依存部分のみ着手。**
 
 ---
 
