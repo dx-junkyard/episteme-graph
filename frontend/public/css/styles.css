@@ -3332,6 +3332,54 @@ html.learn-page > body {
   background: #fef5e6;
 }
 
+/* 「短く聴く」トグル（是正 F3 / 六つのレンズ 提案1）。既定 OFF で、押した本人だけが
+   「以前に触れた箇所」を畳める。督促・件数・バッジは出さない（原則12）。 */
+.lecture-condensed-btn {
+  padding: 6px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  font-family: inherit;
+  transition: all 0.15s;
+}
+
+.lecture-condensed-btn:hover {
+  background: var(--color-background-secondary);
+}
+
+.lecture-condensed-btn.active {
+  border-color: var(--color-text-info);
+  background: var(--color-background-info);
+  color: var(--color-text-info);
+}
+
+/* 畳んだ箇所に残す1行（消さずに畳む）。本文はここから「開く」で開ける。 */
+.lecture-folded {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+.lecture-folded-open {
+  padding: 8px 16px;
+  border-radius: 8px;
+  border: 1px dashed var(--color-border);
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.lecture-folded-open:hover {
+  background: var(--color-background-secondary);
+  color: var(--color-text-primary);
+}
+
 /* レクチャースライドステージ: 表示と音声の同期最小単位（スライド）を1枚だけ表示する
    面。縦スクロールはさせず、収まらない場合は #lecture-slide-inner 側で
    フォント段階縮小 → 等比縮小して全文を1画面に収める（fitLectureSlideContent）。 */

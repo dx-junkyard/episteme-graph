@@ -5853,7 +5853,7 @@
     active: false,
     segments: [],
     currentSegmentIndex: 0,
-    deck: [], // [{chunk_id, segment_index, slide_index, display_text, spoken_text, formulas, has_audio, duration_ms, language, segment_mode}]
+    deck: [], // [{chunk_id, segment_index, slide_index, display_text, spoken_text, formulas, has_audio, duration_ms, language, segment_mode, previously_touched}]
     currentDeckIndex: 0,
     playing: false,
     audio: null,
@@ -5866,7 +5866,82 @@
     // 手動一時停止（プレイヤーバーの▶/⏸）とは区別しない — どちらも composer から
     // 質問を送れば再開できるので、同じ「一時停止中」表示で足りる。
     pausedForQuestion: false,
+    // 是正 F3（六つのレンズ 提案1）: 本人が押した「短く聴く」で畳んでいる間だけ開いた
+    // スライドのキー集合（chunk_id + ":" + slide_index）。畳みは表示だけの操作なので
+    // 永続化しない（トグル自体の状態のみ localStorage）。
+    openedFoldedSlides: new Set(),
   };
+
+  // ── 「短く聴く」トグル（是正 F3 / 六つのレンズ 提案1）───────────────────
+  // サーバは学習者の状態でレクチャー内容を変えない（省略・要約をしない）。
+  // 「以前に触れた箇所」を畳むかどうかは本人が明示的に押すこのトグルだけが決める。
+  // 既定 OFF。状態はコース単位の localStorage（`eg_precision_reading` /
+  // `eg_margin_marks` と同型の許容例外。サーバに学習者設定テーブルを作らない）。
+  function lectureCondensedStorageKey(courseId) {
+    return "eg_lecture_condensed:" + (courseId || state.courseId || "");
+  }
+
+  function isLectureCondensedOn(courseId) {
+    try {
+      // 既定 OFF: 明示的に "1" のときだけ ON。
+      return localStorage.getItem(lectureCondensedStorageKey(courseId)) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setLectureCondensedOn(on) {
+    try {
+      localStorage.setItem(lectureCondensedStorageKey(), on ? "1" : "0");
+    } catch (_) { /* noop */ }
+  }
+
+  function lectureSlideKey(slide) {
+    if (!slide) return "";
+    return (slide.chunk_id || "") + ":" + (slide.slide_index || 0);
+  }
+
+  // このスライドが「いま畳まれている」か。畳むのは
+  //   ①「短く聴く」が ON ②サーバが previously_touched の注記を付けた ③本人がまだ開いていない
+  // の3条件が揃うときだけ。畳んでも中身は消さない（「開く」で開ける）。
+  function isLectureSlideFolded(index) {
+    if (!isLectureCondensedOn()) return false;
+    var slide = lectureState.deck[index];
+    if (!slide || !slide.previously_touched) return false;
+    return !lectureState.openedFoldedSlides.has(lectureSlideKey(slide));
+  }
+
+  function updateLectureCondensedBtn() {
+    var btn = document.getElementById("lecture-condensed");
+    if (!btn) return;
+    var on = isLectureCondensedOn();
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.classList.toggle("active", on);
+  }
+
+  function toggleLectureCondensed() {
+    var next = !isLectureCondensedOn();
+    setLectureCondensedOn(next);
+    // 畳み直しは表示の切り替えなので、開いた記録は都度リセットする。
+    lectureState.openedFoldedSlides = new Set();
+    updateLectureCondensedBtn();
+    if (!lectureState.active) return;
+    stopPlayback();
+    renderLectureStage();
+    updateLectureControls();
+  }
+
+  // 畳まれた箇所の「開く」: そのスライドだけを開いて再描画する（設定は変えない）。
+  function openFoldedLectureSlide() {
+    var slide = lectureState.deck[lectureState.currentDeckIndex];
+    if (!slide) return;
+    lectureState.openedFoldedSlides.add(lectureSlideKey(slide));
+    var wasPlaying = lectureState.playing;
+    stopPlayback();
+    renderLectureStage();
+    updateLectureControls();
+    if (wasPlaying) startPlayback();
+  }
 
   // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
   // 音声生成は管理画面のみで行う方針のため、ここでは生成は一切トリガーしない。
@@ -5981,6 +6056,7 @@
     var prevBtn = document.getElementById("lecture-prev");
     var nextBtn = document.getElementById("lecture-next");
     var questionBtn = document.getElementById("lecture-question");
+    var condensedBtn = document.getElementById("lecture-condensed");
     var fullscreenBtn = document.getElementById("lecture-fullscreen-btn");
     var nextTopicBtn = document.getElementById("next-topic-btn");
 
@@ -5996,6 +6072,9 @@
     // レクチャー外科手術 案①（§15）: 質問は通常 composer に一本化。プレイヤーバーの
     // 「質問」ボタンは一時停止して入力欄へフォーカスを移すだけ（第2 composer は廃止）。
     if (questionBtn) questionBtn.addEventListener("click", focusChatForLectureQuestion);
+    // 「短く聴く」（是正 F3）: 本人の明示操作のみ。既定 OFF の表示を反映しておく。
+    if (condensedBtn) condensedBtn.addEventListener("click", toggleLectureCondensed);
+    updateLectureCondensedBtn();
     if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleLectureFullscreen);
     if (nextTopicBtn) nextTopicBtn.addEventListener("click", openCheckModal);
 
@@ -6123,6 +6202,9 @@
           duration_ms: slide.duration_ms || 0,
           language: seg.language || "ja",
           segment_mode: seg.segment_mode || "full",
+          // 注記フラグ（是正 F3）。サーバはこれで内容を変えない。畳むのは
+          // 「短く聴く」が ON のときだけで、畳んだ箇所も「開く」で開ける。
+          previously_touched: !!seg.previously_touched,
         });
       });
     });
@@ -6169,6 +6251,8 @@
       var data = await res.json();
       lectureState.segments = data.segments || [];
       lectureState.deck = buildLectureDeck(lectureState.segments);
+      lectureState.openedFoldedSlides = new Set();
+      updateLectureCondensedBtn();
       lectureState.currentDeckIndex = 0;
       lectureState.currentSegmentIndex = lectureState.deck.length ? lectureState.deck[0].segment_index : 0;
       renderLectureStage();
@@ -6198,6 +6282,21 @@
     }
 
     var slide = lectureState.deck[lectureState.currentDeckIndex];
+
+    // 是正 F3: 「短く聴く」で畳んでいる箇所は、消さずに1行だけ残す。
+    // 本人が「開く」を押せばその場で本文が出る（サーバは何も省いていない）。
+    if (isLectureSlideFolded(lectureState.currentDeckIndex)) {
+      inner.style.fontSize = "";
+      inner.style.transform = "";
+      inner.innerHTML = '<div class="lecture-folded">' +
+        '<button type="button" class="lecture-folded-open" id="lecture-folded-open">前に触れた箇所（開く）</button>' +
+        '</div>';
+      var openBtn = document.getElementById("lecture-folded-open");
+      if (openBtn) openBtn.addEventListener("click", openFoldedLectureSlide);
+      if (badge) badge.hidden = true;
+      return;
+    }
+
     var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [], figures: slide.figures || [] };
     inner.style.fontSize = "";
     inner.style.transform = "";
@@ -7947,6 +8046,16 @@
     if (!lectureState.deck.length) return;
     // 音声フェッチ中の連打による多重再生を防ぐ。
     if (lectureState.loadingAudio) return;
+
+    // 是正 F3: 「短く聴く」で畳んでいるスライドは音声を再生せず次へ送る
+    // （ended 自動送りと同じ autoAdvance 経路に合流させ、進行の仕組みを増やさない）。
+    // 畳みは表示の操作なので、デッキからは落とさない（◀▶ で戻れば「開く」で開ける）。
+    if (isLectureSlideFolded(lectureState.currentDeckIndex)) {
+      lectureState.playing = true;
+      updateLectureControls();
+      autoAdvance();
+      return;
+    }
 
     // 同一スライドの一時停止からの再開: 音声を取得し直さず途中から続きを再生する。
     if (lectureState.audio && !lectureState.audio.ended) {

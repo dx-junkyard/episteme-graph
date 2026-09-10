@@ -139,6 +139,11 @@
           </div>
           <span class="lecture-time" id="lecture-time">0:00</span>
           <button class="lecture-next-btn" id="lecture-next" title="次のセグメント">&#9654;</button>
+          <!-- 是正 F3（六つのレンズ 提案1）: 「短く聴く」は本人が押すトグル（既定 OFF）。
+               サーバは省略しない。ON のときだけ「以前に触れた箇所」を畳み、畳んだ位置には
+               「前に触れた箇所（開く）」の1行を残す（消さずに畳む）。状態は
+               localStorage `eg_lecture_condensed:<courseId>` のみ（学習者設定テーブルを作らない）。 -->
+          <button type="button" class="lecture-condensed-btn" id="lecture-condensed" aria-pressed="false" data-ui-anchor="material.lecture-condensed" title="以前に触れた箇所を畳んで短く聴きます（畳んだ箇所は「開く」でいつでも開けます。もう一度押すと全部聴きます）">短く聴く</button>
           <button class="lecture-question-btn" id="lecture-question" title="質問する">&#10067; 質問</button>
         </div>
       </div>

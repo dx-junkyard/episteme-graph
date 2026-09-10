@@ -464,7 +464,18 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 ### シーケンス構築
 - `GET /api/learning/lecture/courses/{id}/topics/{tid}/sequence`
 - 返り値: `{segments: [{text, formulas: [{latex, spoken, is_display}], ...}]}`
-- **適応的**: 習得済み概念のセグメントはスキップ、部分理解は要約版に変換（`lecture.py`、習得状態は `learner_mastered_concepts`）。
+- **内容は学習者の状態で変えない（是正 F3、2026-09-10）**: かつて習得済み概念によるセグメントの
+  スキップ・要約版への置換（沈黙適応）を行っていたが、vision §3.6（沈黙適応をしない・UC5）と
+  §6 原則8 に抵触するため撤去した。`build_lecture_sequence` は**入力チャンクと同数のセグメントを
+  必ず返し**、`spoken_text` を書き換えない（`segment_mode` は `full` のみ。省略件数を返す
+  `skipped_segments` / `summary_segments` も撤去済み）。習得状態
+  （`learner_mastered_concepts` + course_data の `status="mastered"`。**チャット履歴からの推定は
+  しない**）は注記フラグ `previously_touched` の生成にだけ使う。
+- **畳むのは本人のトグル**: 再生バーの「短く聴く」（既定 OFF・localStorage
+  `eg_lecture_condensed:<courseId>`・UI アンカー `material.lecture-condensed`）が ON のときだけ
+  `previously_touched` のスライドを畳み、畳んだ位置に「前に触れた箇所（開く）」の1行を残す
+  （消さずに畳む。畳まれたスライドは音声を再生せず次へ送る）。設計の根拠は
+  `docs/architecture/six_lenses_2026-09-10/01_learner.md` §2 提案1。
 
 ### 再生・カラオケ風ハイライト
 - プレイヤーバー（前/再生/次、進捗バー、タイムスタンプ）

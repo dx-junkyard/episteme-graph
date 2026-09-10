@@ -85,8 +85,9 @@ tier 付き chunk 検索ユーティリティ（`search_chunks()` / `_embed_quer
 - `lecture_uses_topic_material(topic)` — **表示ソース判定の正本**。トピックが `student_material` / `content` / `summary` / `spoken_script` を持てばトピック教材経路、無ければ PDF チャンク経路。受講表示・音声生成・readiness の3者が同じ述語を使う
 - `split_slides()` / `build_topic_slides()` / `auto_paginate_slides()` — **スライド分割の正本**（決定論的・LLM 非使用）。プレビュー（`POST /api/admin/lecture-studio/preview-split`）と配信が同じ実装を通る。**クライアント側に分割ロジックを再実装しない**
 - `compute_material_audio_readiness()` — 音声準備完了判定の正本（スライド単位 + 言語一致）。`status/projector.py` と `routes/lecture.py` の両方がこれを呼ぶ
-- `build_lecture_sequence()` — チャンクを導入→詳細→まとめの講義フローに編成
-- `get_user_mastered_concepts()` — 習得済み概念で既知チャンクをスキップ判定
+- `build_lecture_sequence()` — チャンクを導入→詳細→まとめの講義フローに編成。**学習者の状態で内容を変えない**（是正 F3、2026-09-10。入力チャンクと同数のセグメントを返し、`spoken_text` を置換しない。習得済み概念は注記フラグ `previously_touched` の生成にだけ使う。畳むのは画面の「短く聴く」トグル＝本人の操作のみ）
+- `get_user_mastered_concepts()` — 習得済み概念（`learner_mastered_concepts` + course_data の `status="mastered"`）の収集。**チャット履歴からの習得推定は行わない**（接触の痕跡を能力推定に使わない・是正 F3）
+- `_is_previously_touched()` — 「以前に触れた前提概念だけを扱う短い区画」かの注記専用判定（非LLM・決定論。提示内容には影響しない）
 
 ### `lecture_wm.py` — WMレンズ（教員支援）
 スライドの相互作用性を段階ラベルで返す静かな計器。`preview-split` のレスポンスに

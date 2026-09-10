@@ -75,6 +75,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 推定の糸（docs/features/atlas_relation_edges_design.md §6）:
         # 分野の地図オーバーレイ（コースレベル）の「推定の糸」トグル。既定オフ。
         "atlas.relation-threads",
+        # レクチャー再生バーの「短く聴く」トグル（是正 F3 / 六つのレンズ 提案1）。既定 OFF。
+        # サーバ側の自動省略は撤去済みで、畳むのは本人のこの操作だけ。
+        "material.lecture-condensed",
     }
 )
 
@@ -100,6 +103,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # （サイドバー最上部の「🌊 論文の海」）を追加し、全25種がマップ済み。
 # 2026-08-29 に推定の糸（atlas_relation_edges_design.md §6）の atlas.relation-threads
 # （分野の地図オーバーレイの「推定の糸」トグル）を追加し、全26種がマップ済み。
+# 2026-09-10 に是正 F3（六つのレンズ 提案1・レクチャー沈黙適応の撤去）の
+# material.lecture-condensed（再生バーの「短く聴く」トグル）を追加した。
+# 件数の正本は KNOWN_UI_ANCHOR_IDS と test_help_ui_anchors.py（ここには書き写さない）。
 # check.discuss / check.skip の両者は「確認問題の選択肢」を1つの節で
 # 並べて説明しているため、同じ参照先を指す。
 # sidebar.mode-sequential / sidebar.mode-discuss は「順番に学ぶ」「この論文と
@@ -158,6 +164,8 @@ UI_ANCHORS: dict[str, str] = {
     "sidebar.corpus-sea": "student/02-student.md#corpus-sea",
     # 分野の地図（コースレベル）の「推定の糸」トグル＝確定前の関係の点線表示。
     "atlas.relation-threads": "student/02-student.md#relation-threads",
+    # レクチャー再生バーの「短く聴く」トグル＝前に触れた箇所を畳む（消さずに畳む）。
+    "material.lecture-condensed": "student/02-student.md#lecture-condensed",
 }
 
 
