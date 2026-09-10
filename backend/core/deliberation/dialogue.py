@@ -53,7 +53,7 @@ from core.llm_worker.client import resolve_model as _resolve_model_key
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
 from core.storage import get_storage_client
-from core.text_hygiene import strip_control_sequences
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.tts import strip_text_for_speech
 from core.deliberation import context_lens, decomposition, positioning
 from core.deliberation.schema import (
@@ -125,6 +125,10 @@ _INSTRUCTION_HEADER = (
     "また、[文脈: 中心要素]・[文脈: 上位構造]・[文脈: 下位構造] が示されている場合は、"
     "回答の中でそのどの関係・根拠に基づいたかを読み手が確認できる形式で述べ、"
     "AI候補（ステータスが「AI候補」の関係）を確定した事実であるかのように述べないでください。"
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: grounding には
+    # PDF 由来の逐語引用・caption・claim 本文が載る。第三者（論文著者）が書いた
+    # untrusted 入力なので、指示として解釈しない旨をここで明示する。
+    + UNTRUSTED_SOURCE_NOTICE
 )
 
 # 供給あり: 「該当がある場合のみ」を強調し、shared_part_id を一覧内の実在 id に限定する

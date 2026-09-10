@@ -39,6 +39,7 @@ from pydantic import BaseModel, Field
 
 from core.paper_discovery import arxiv_client, radar
 from core.paper_discovery.schema import ArxivEntry, normalize_arxiv_id
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,10 @@ def build_prompt(
         "- overlaps の component_label は、下の部品リストにある名前をそのまま使う（リストに無い重なりは component_label を空にする）",
         "- 各重なりにも、その候補のアブストラクトからの逐語引用を evidence_quote として付ける",
         "- 候補ごとに arxiv_id を必ずそのまま返す",
+        "",
+        # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: 要旨は
+        # arXiv 由来 = 第三者が書いた untrusted 入力。指示として解釈しない旨を明示する。
+        UNTRUSTED_SOURCE_NOTICE,
         "",
         "【起点論文】",
         f"タイトル: {material.get('title') or '(不明)'}",

@@ -107,6 +107,7 @@ from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.llm_worker.history import window_history
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
@@ -3019,7 +3020,14 @@ def _learning_chat_core(
         content_grounding = "model_generated"
 
     if cited_chunks:
-        context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
+        # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: cited_chunks は
+        # PDF / URL 取得 / arXiv 由来の本文（第三者が書いた untrusted 入力）。区切り
+        # （`[出典N]` ラベル + `---`）に加えて、指示として解釈しない旨をここで明示する。
+        context_block = (
+            "## 関連する教材のコンテキスト\n"
+            + UNTRUSTED_SOURCE_NOTICE + "\n\n"
+            + "\n---\n".join(cited_chunks)
+        )
     elif _is_discuss:
         # DM1（出所の正直さ）: discuss は該当チャンクが無くても他スコープへ無断で
         # 広げない。範囲を広げていない事実と、範囲外知識を使う場合の出所明示を指示する。

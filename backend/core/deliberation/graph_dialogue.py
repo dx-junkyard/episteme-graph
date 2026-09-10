@@ -34,7 +34,7 @@ from core.label_vocab import AI_READING_LABEL
 from core.llm import generate_conversation_turn
 from core.llm_usage import usage_context
 from core.postgres import get_session
-from core.text_hygiene import strip_control_sequences
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.deliberation import dialogue
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,9 @@ _INSTRUCTION_HEADER = (
     "承認・却下の判断は教員が行います。「承認すべき」「却下すべき」のような指示・推奨はせず、"
     "裏付けの状態と考えられる論点を事実として示すに留めてください。"
     "数値の確信度・スコアを述べないでください。"
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: grounding の
+    # ノード label / claim 本文 / 逐語引用は PDF 由来の untrusted 入力。
+    + UNTRUSTED_SOURCE_NOTICE
 )
 
 _BACKING_LABELS: dict[str, str] = {

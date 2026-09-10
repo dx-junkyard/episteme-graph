@@ -30,6 +30,7 @@ from core.storage import get_storage_client as _get_storage
 # 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
 # コース削除3経路すべてで明示削除する。
 from core.teaching_figures import store as _teaching_figures_store
+from core.text_hygiene import strip_control_sequences
 
 logger = logging.getLogger(__name__)
 
@@ -3049,7 +3050,10 @@ def get_chunk_passage(
 
     if not row:
         return None
-    raw_text = row[1] or row[0] or ""
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: chunks 本文は
+    # PDF 由来 = untrusted。出典ポップアップへ返す前に制御シーケンス（ANSI・裸の SGR
+    # 残骸・C0）を落とす（表示テキストとして残してよい形へ整えるだけ）。
+    raw_text = strip_control_sequences(row[1] or row[0] or "")
     raw_formulas = row[2] if row[2] else []
     text, formulas = _normalize_formulas(raw_text, raw_formulas)
     section = " · ".join([s for s in [row[3], row[4]] if s])

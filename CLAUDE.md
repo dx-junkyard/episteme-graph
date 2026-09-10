@@ -2835,6 +2835,14 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - `system` ロールと `temperature`/`max_tokens` を避ける（o1/o3-mini 互換のため）
 - シングルトンパターン: `llm.py`, `storage.py` は `@lru_cache` または同等の初期化済みインスタンスを使用
 - PostgreSQL セッションは `core/postgres.py` の `get_session()` を使い、必ず `try/finally` で `session.close()` する
+- **信頼境界**: PDF / URL 取得 / arXiv 由来のテキスト（chunks 本文・blocks・caption・
+  `inner_labels`・要旨、およびそこから A層が導出した claim 本文・逐語引用）は
+  **第三者が書いた untrusted 入力**。プロンプトへ載せる経路は①ラベル付き区画または
+  `json.dumps` で隔離し、②指示側に `core.text_hygiene.UNTRUSTED_SOURCE_NOTICE`
+  （固定文の正本。経路ごとに言い換えない）を添える。SQL / シェル / ファイルパスへ
+  資料由来文字列を補間しない。表示・読み上げ前に `strip_control_sequences` を通す。
+  規約と経路の調査表は `docs/architecture/trust_boundary_pdf_input.md`（TB1〜TB4）、
+  機械検証は `backend/tests/test_pdf_trust_boundary_guardrails.py`
 
 ### 5. フロントエンド
 - `admin.js` は Vanilla JS (ES5互換) で記述すること（既存コードに合わせる）

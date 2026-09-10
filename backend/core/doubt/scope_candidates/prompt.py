@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 from core.doubt.scope_candidates.schema import (
     MAX_CANDIDATES_PER_TARGET,
     ScopeTargetContext,
@@ -65,6 +66,11 @@ def build_content(context: ScopeTargetContext) -> str:
     lines.append(f"- target_id: {context.target_id}")
     if context.target_label:
         lines.append(f"- label: {context.target_label}")
+    lines.append("")
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: 出典テキストは
+    # PDF 由来 = untrusted。区画の直前に、指示として解釈しない旨を置く。
+    lines.append("# 信頼境界")
+    lines.append(UNTRUSTED_SOURCE_NOTICE)
     lines.append("")
     lines.append("# 出典テキスト")
     for block in context.source_blocks:
