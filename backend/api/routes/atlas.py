@@ -1151,7 +1151,8 @@ def _guard_assist_cost(user_id: str) -> None:
     if used >= limit:
         raise HTTPException(
             status_code=429,
-            detail=f"本日の AI アシスト編集の上限 ({limit} 回) に達しました。明日以降に再開してください",
+            # 事実文のみ（残数・上限値などの数値を利用者に出さない。他の CostGate と同じ規約）。
+            detail="本日の AI アシスト編集の上限に達しました。明日以降に再開してください",
         )
 
 

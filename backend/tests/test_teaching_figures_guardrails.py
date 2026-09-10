@@ -603,12 +603,14 @@ class TestConfidenceNeverLeaks:
         """FG8: 上限超過の事実文に回数・残数の数値を出さない。"""
         for fn in ("consume_figure_studio_quota", "consume_figure_suggest_quota"):
             body = extract_function_source(_ROUTE_SRC, fn)
-            detail = re.search(r'detail="([^"]*)"', body)
+            # 429 への写像は api/quota.py::consume_daily_quota に委譲済み
+            # （2026-09-10 棚卸し）。事実文はこの関数が message= で渡す。
+            detail = re.search(r'(?:detail|message)="([^"]*)"', body)
             assert detail, f"{fn} must return a factual 429 message"
             assert not re.search(r"\d", detail.group(1)), (
                 f"{fn}: 429 message must not contain numbers: {detail.group(1)}"
             )
-            assert "429" in body
+            assert "consume_daily_quota(" in body or "429" in body
 
 
 # ===========================================================================

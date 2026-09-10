@@ -23,15 +23,28 @@ MAX_REPAIR_ATTEMPTS = 2
 T = TypeVar("T")
 
 
+def _raw_text(data: Any) -> str:
+    """直前の出力を repair プロンプトへ添えるためのテキスト化。
+
+    dict（``complete_json`` 経路）は従来どおり ``json.dumps(..., ensure_ascii=False)``。
+    ``call`` 注入で pydantic モデル等が返る場合はそのシリアライザを使う。
+    """
+    dumper = getattr(data, "model_dump_json", None)
+    if callable(dumper):
+        return str(dumper())
+    return json.dumps(data, ensure_ascii=False)
+
+
 def run_with_repair(
     llm_client: Any,
     base_content: str,
     *,
-    validate: Callable[[dict], tuple[T | None, list[str], list[str]]],
+    validate: Callable[[Any], tuple[T | None, list[str], list[str]]],
     build_repair_prompt: Callable[[str, list[str]], str],
     on_repair_failed: Callable[[list[str]], T],
     max_attempts: int = MAX_REPAIR_ATTEMPTS,
     log_label: str = "llm worker",
+    call: Callable[[str], Any] | None = None,
 ) -> T:
     """LLM 呼び出し → 検証 → 失敗なら修復再試行（最大 max_attempts 回）。
 
@@ -45,6 +58,12 @@ def run_with_repair(
     on_repair_failed:
         max_attempts 回すべて失敗したときに呼ばれ、戻り値がそのまま返される
         （系統ごとの repair_failed 表現はここで決める）。
+    call:
+        LLM 呼び出しの実体（``content -> 出力``）。既定（None）は従来どおり
+        ``llm_client.complete_json``。structured output のように
+        ``complete_json`` を持たない呼び出し口でもこのループを再利用できるように
+        するための**追加のみ**の拡張で、既定の挙動は一切変えない。指定した場合
+        ``llm_client`` は None でよい。
     """
     previous_raw = ""
     errors: list[str] = []
@@ -54,13 +73,13 @@ def run_with_repair(
         else:
             content = base_content + "\n\n" + build_repair_prompt(previous_raw, errors)
         try:
-            data = llm_client.complete_json(content)
+            data = call(content) if call is not None else llm_client.complete_json(content)
         except Exception as exc:
             errors = [f"output was not valid JSON: {exc}"]
             previous_raw = ""
             logger.warning("%s LLM attempt %d failed to parse: %s", log_label, attempt + 1, exc)
             continue
-        previous_raw = json.dumps(data, ensure_ascii=False)
+        previous_raw = _raw_text(data)
         result, errors, _warnings = validate(data)
         if result is not None:
             return result

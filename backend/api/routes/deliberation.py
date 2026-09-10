@@ -1134,12 +1134,13 @@ def post_deliberation_message(
         )
 
     # spoken / stance_label は**保存しない**（永続化するのは reply のみ = SA6 と同型）。
+    # ラベルは対話結果（共通骨格 chat_turn.TurnResult 由来）から素通しする。
     return {
         "reply": result.reply,
         "annotations": [_annotation_response(a) for a in created_annotations],
         "degraded": result.degraded,
         "spoken": result.spoken,
-        "stance_label": AI_READING_LABEL,
+        "stance_label": result.stance_label or AI_READING_LABEL,
     }
 
 
@@ -1296,11 +1297,12 @@ def post_graph_dialogue_message(
     )
 
     # spoken / stance_label は保存しない（append_messages は reply のみ）。
+    # ラベルは対話結果（共通骨格 chat_turn.TurnResult 由来）から素通しする。
     return {
         "reply": result.reply,
         "degraded": result.degraded,
         "spoken": result.spoken,
-        "stance_label": AI_READING_LABEL,
+        "stance_label": result.stance_label or AI_READING_LABEL,
     }
 
 

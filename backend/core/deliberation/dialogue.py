@@ -47,8 +47,14 @@ from core.document_pipeline.persistence import get_latest_analysis_run
 from core.library.schema import ENTRY_TYPE_APPARATUS, ENTRY_TYPE_THEORY_COMPONENT
 from core.library.search import search_frozen_entries
 from core.llm import generate_conversation_turn
-from core.llm_usage import usage_context
 from core.label_vocab import AI_READING_LABEL
+from core.llm_worker.chat_turn import (
+    MATH_DELIMITER_INSTRUCTION,
+    SPOKEN_CONTRACT,
+    build_turn_messages,
+    spoken_variant,
+    structured_turn,
+)
 from core.llm_worker.client import resolve_model as _resolve_model_key
 from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session
@@ -92,15 +98,11 @@ _GROUNDING_SKIP_FIELD_KEYS = ("frozen_content", "graph_node", "apparatus_candida
 
 # 数式の表記（2026-09-10）: 画面・読み上げの両方が `$…$` 前提のレンダラ/除去規則を
 # 持つため、`\(…\)` を使わせない（オーナー報告の生 LaTeX 漏れの再発防止）。
-_MATH_DELIMITER_INSTRUCTION = r"数式は必ず `$…$` で区切ってください（`\(…\)` は使わない）。"
-
-# 読み上げ用の別テキスト（response_mode="spoken" のときだけヘッダに足す。text 経路の
-# 入力は一字も変えない = 回帰テストで固定）。1ターン=1 LLM コールは不変（W6/GR5）。
-_SPOKEN_CONTRACT = (
-    "音声で読み上げるための spoken を別に返してください。"
-    "結論を先に、3〜5文、箇条書き・見出し・記号・LaTeX を使わず、"
-    "数式は言葉で読み下してください（例: 密度ゆらぎ デルタ、波数 k のフーリエ変換）。"
-)
+# 読み上げ契約（response_mode="spoken" のときだけヘッダに足す。text 経路の入力は
+# 一字も変えない = 回帰テストで固定）とともに、正本は
+# core/llm_worker/chat_turn.py（グラフ全体対話と共有する表記契約）。
+_MATH_DELIMITER_INSTRUCTION = MATH_DELIMITER_INSTRUCTION
+_SPOKEN_CONTRACT = SPOKEN_CONTRACT
 
 _INSTRUCTION_HEADER = (
     "あなたは大学院生の学習支援システムの教員向け機能「要素検討ワークスペース」の対話補助です。"
@@ -613,14 +615,20 @@ class _DialogueTurnOutput(BaseModel):
     annotations: list[_AnnotationCandidateOut] = Field(default_factory=list)
 
 
-class _DialogueTurnOutputSpoken(_DialogueTurnOutput):
-    """読み上げモードの structured output（``spoken`` を同一コールで受け取る）。
-
-    text 経路のスキーマ（``_DialogueTurnOutput``）は**一切変えない** — 既存の
-    プロンプト・スキーマをバイト単位で維持するため、別クラスに分ける。
-    """
-
-    spoken: str = ""
+#: 読み上げモードの structured output（``spoken`` を同一コールで受け取る）。
+#: text 経路のスキーマ（``_DialogueTurnOutput``）は**一切変えない** — 既存の
+#: プロンプト・スキーマをバイト単位で維持するため、別クラスに分ける。生成器
+#: （``chat_turn.spoken_variant``）にクラス名と docstring をそのまま渡すことで、
+#: 構造化出力の JSON schema（title / description を含む）も従来と同一になる。
+_DialogueTurnOutputSpoken = spoken_variant(
+    _DialogueTurnOutput,
+    name="_DialogueTurnOutputSpoken",
+    doc=(
+        "読み上げモードの structured output（``spoken`` を同一コールで受け取る）。\n\n"
+        "    text 経路のスキーマ（``_DialogueTurnOutput``）は**一切変えない** — 既存の\n"
+        "    プロンプト・スキーマをバイト単位で維持するため、別クラスに分ける。\n    "
+    ),
+)
 
 
 @dataclass
@@ -630,6 +638,8 @@ class DialogueTurnResult:
     degraded: bool = False
     #: 読み上げ用テキスト（``response_mode="spoken"`` のときのみ。text 経路は None）。
     spoken: str | None = None
+    #: 返答全体に付く留保ラベル（§15）。保存しない — route が表示用に素通しする。
+    stance_label: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -648,22 +658,20 @@ def build_llm_messages(
     grounding_text は**最初の user メッセージにのみ**注入する（設計書 §5）。
     ``response_mode="spoken"`` のときだけ読み上げ契約（:data:`_SPOKEN_CONTRACT`）を
     ヘッダ末尾に足す（text 経路の入力は従来と一字も変わらない）。
+
+    組み立ての実体は共通骨格 ``chat_turn.build_turn_messages``（グラフ全体対話と
+    共有）。本関数は既存の呼び出し口（引数の並び・response_mode 語彙）を保つ薄い
+    ラッパー。
     """
-    header = _INSTRUCTION_HEADER
-    if response_mode == "spoken":
-        header = _INSTRUCTION_HEADER + _SPOKEN_CONTRACT
-    turns = list(prior_messages) + [{"role": "user", "content": user_content}]
-    messages: list[dict[str, str]] = []
-    first_user_injected = False
-    for turn in turns:
-        role = turn.get("role", "user")
-        content = turn.get("content", "")
-        if not first_user_injected and role == "user":
-            first_user_injected = True
-            if grounding_text:
-                content = header + "\n\n" + grounding_text + "\n\n---\n\n" + content
-        messages.append({"role": role, "content": content})
-    return messages
+    return build_turn_messages(
+        prior_messages,
+        user_content,
+        header=_INSTRUCTION_HEADER,
+        grounding_text=grounding_text,
+        inject="first_user",
+        spoken=response_mode == "spoken",
+        spoken_contract=_SPOKEN_CONTRACT,
+    )
 
 
 #: 行頭の箇条書きマーカー（読み上げでは読まない。`-` は markdown 除去の対象外なので個別に落とす）。
@@ -721,37 +729,41 @@ def run_turn(
     feature = _FEATURE_VISION if images else _FEATURE_CHAT
     document_id = ref.document_id if ref.scope == SCOPE_DOCUMENT else None
 
-    with usage_context(feature, user_id=user_id, document_id=document_id):
-        # M層（レビュー指摘 m2）: feature 単位で解決する。画像付き（figure 要素）は
-        # ``deliberation:vision`` として解決され、``llm_policy`` が vision capability を
-        # 要求するため、scene ``deliberation`` のシステム既定に非 vision モデルが
-        # 入っていても画像付きコールが text モデルへ落ちない（M5 の fail-closed。
-        # 満たさないポリシー行はスキップされ env → tier 既定へ落ちる）。
-        # 解決を usage_context の**内側**で行うのは、user 別ポリシー（解決順③）が
-        # ``current_usage_context().user_id`` を見るため（外側では常に None だった）。
-        resolved_model = model or resolve_turn_model(feature)
-        output_model = _DialogueTurnOutputSpoken if spoken_mode else _DialogueTurnOutput
-        try:
-            parsed = generate_conversation_turn(
-                llm_messages, output_model, images=images, model=resolved_model,
-            )
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "deliberation dialogue: LLM turn failed for %s:%s", ref.element_type, ref.element_id,
-                exc_info=True,
-            )
-            return DialogueTurnResult(
-                reply=_DEGRADED_REPLY,
-                annotations=[],
-                degraded=True,
-                spoken=resolve_spoken_text("", _DEGRADED_REPLY) if spoken_mode else None,
-            )
-
-    raw_annotations = [a.model_dump() for a in (parsed.annotations or [])]
-    reply = strip_control_sequences((parsed.reply or "")).strip() or _DEGRADED_REPLY
-    spoken = resolve_spoken_text(getattr(parsed, "spoken", ""), reply) if spoken_mode else None
+    # 1コール + 縮退の制御フローは共通骨格（``chat_turn.structured_turn``）。
+    # M層（レビュー指摘 m2）: feature 単位で解決する。画像付き（figure 要素）は
+    # ``deliberation:vision`` として解決され、``llm_policy`` が vision capability を
+    # 要求するため、scene ``deliberation`` のシステム既定に非 vision モデルが
+    # 入っていても画像付きコールが text モデルへ落ちない（M5 の fail-closed。
+    # 満たさないポリシー行はスキップされ env → tier 既定へ落ちる）。
+    # 解決を usage_context の**内側**で行うため callable で渡す（user 別ポリシー
+    # （解決順③）が ``current_usage_context().user_id`` を見るため。外側で解決すると
+    # 常に None だった）。
+    turn = structured_turn(
+        llm_messages,
+        _DialogueTurnOutputSpoken if spoken_mode else _DialogueTurnOutput,
+        feature=feature,
+        degraded_reply=_DEGRADED_REPLY,
+        model=model or (lambda: resolve_turn_model(feature)),
+        user_id=user_id,
+        document_id=document_id,
+        images=images,
+        spoken=spoken_mode,
+        spoken_resolver=resolve_spoken_text,
+        stance_label=AI_READING_LABEL,
+        # 信頼境界（TB4）: grounding の転写を含む応答は制御シーケンスを除去して返す。
+        hygiene=strip_control_sequences,
+        call=generate_conversation_turn,
+        log_label=f"deliberation dialogue {ref.element_type}:{ref.element_id}",
+    )
+    raw_annotations = [
+        a.model_dump() for a in (getattr(turn.parsed, "annotations", None) or [])
+    ]
     return DialogueTurnResult(
-        reply=reply, annotations=raw_annotations, degraded=False, spoken=spoken,
+        reply=turn.reply,
+        annotations=raw_annotations,
+        degraded=turn.degraded,
+        spoken=turn.spoken,
+        stance_label=turn.stance_label,
     )
 
 

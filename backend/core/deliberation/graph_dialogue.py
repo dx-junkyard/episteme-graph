@@ -32,7 +32,13 @@ from sqlalchemy import text as sa_text
 
 from core.label_vocab import AI_READING_LABEL
 from core.llm import generate_conversation_turn
-from core.llm_usage import usage_context
+from core.llm_worker.chat_turn import (
+    MATH_DELIMITER_INSTRUCTION,
+    SPOKEN_CONTRACT,
+    build_turn_messages,
+    spoken_variant,
+    structured_turn,
+)
 from core.postgres import get_session
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.deliberation import dialogue
@@ -55,16 +61,12 @@ _MAX_UNREVIEWED_LINES = 30
 _MAX_VALIDATION_LINES = 10
 
 # 数式の表記（2026-09-10・§15）: 画面と読み上げの両方が `$…$` 前提のため
-# `\(…\)` を使わせない（生 LaTeX が画面・音声に漏れる事故の再発防止）。
-_MATH_DELIMITER_INSTRUCTION = r"数式は必ず `$…$` で区切ってください（`\(…\)` は使わない）。"
-
-# 読み上げ用の別テキスト（response_mode="spoken" のときだけヘッダ末尾に足す。
-# text 経路の LLM 入力・スキーマは一字も変えない）。1ターン=1 LLM コール（GR5/W6）。
-_SPOKEN_CONTRACT = (
-    "音声で読み上げるための spoken を別に返してください。"
-    "結論を先に、3〜5文、箇条書き・見出し・記号・LaTeX を使わず、"
-    "数式は言葉で読み下してください（例: 密度ゆらぎ デルタ、波数 k のフーリエ変換）。"
-)
+# `\(…\)` を使わせない（生 LaTeX が画面・音声に漏れる事故の再発防止）。読み上げ契約
+# （response_mode="spoken" のときだけヘッダ末尾に足す。text 経路の LLM 入力・スキーマは
+# 一字も変えない。1ターン=1 LLM コール = GR5/W6）とともに、正本は
+# core/llm_worker/chat_turn.py（要素対話と共有する表記契約）。
+_MATH_DELIMITER_INSTRUCTION = MATH_DELIMITER_INSTRUCTION
+_SPOKEN_CONTRACT = SPOKEN_CONTRACT
 
 # 対話の契約（ガードレールが原文 grep する固定文言を含む）:
 # - 留保はラベルで（§15。文ごとの仮説文体は廃止）・グラフに現れる関係のみ・
@@ -459,14 +461,20 @@ class _GraphTurnOutput(BaseModel):
     reply: str = ""
 
 
-class _GraphTurnOutputSpoken(_GraphTurnOutput):
-    """読み上げモードの structured output（``spoken`` を**同じ1コール**で受け取る）。
-
-    text 経路のスキーマ（``_GraphTurnOutput``）は変えない — 既存プロンプト・
-    スキーマをバイト単位で維持するため別クラスにする（§15）。
-    """
-
-    spoken: str = ""
+#: 読み上げモードの structured output（``spoken`` を**同じ1コール**で受け取る）。
+#: text 経路のスキーマ（``_GraphTurnOutput``）は変えない — 既存プロンプト・
+#: スキーマをバイト単位で維持するため別クラスにする（§15）。生成器
+#: （``chat_turn.spoken_variant``）にクラス名と docstring をそのまま渡すことで、
+#: 構造化出力の JSON schema（title / description を含む）も従来と同一になる。
+_GraphTurnOutputSpoken = spoken_variant(
+    _GraphTurnOutput,
+    name="_GraphTurnOutputSpoken",
+    doc=(
+        "読み上げモードの structured output（``spoken`` を**同じ1コール**で受け取る）。\n\n"
+        "    text 経路のスキーマ（``_GraphTurnOutput``）は変えない — 既存プロンプト・\n"
+        "    スキーマをバイト単位で維持するため別クラスにする（§15）。\n    "
+    ),
+)
 
 
 @dataclass
@@ -475,6 +483,8 @@ class GraphTurnResult:
     degraded: bool = False
     #: 読み上げ用テキスト（``response_mode="spoken"`` のときのみ。text 経路は None）。
     spoken: str | None = None
+    #: 返答全体に付く留保ラベル（§15）。保存しない — route が表示用に素通しする。
+    stance_label: str | None = None
 
 
 def build_llm_messages(
@@ -487,22 +497,31 @@ def build_llm_messages(
 
     grounding_text は**最初の user メッセージにのみ**注入する（dialogue.py と同じ規約）。
     ``response_mode="spoken"`` のときだけ読み上げ契約を足す（text 経路は従来と同一）。
+
+    組み立ての実体は共通骨格 ``chat_turn.build_turn_messages``（要素対話と共有）。
+    本関数は既存の呼び出し口（引数の並び・response_mode 語彙）を保つ薄いラッパー。
     """
-    header = _INSTRUCTION_HEADER
-    if response_mode == "spoken":
-        header = _INSTRUCTION_HEADER + _SPOKEN_CONTRACT
-    turns = list(prior_messages) + [{"role": "user", "content": user_content}]
-    messages: list[dict[str, str]] = []
-    first_user_injected = False
-    for turn in turns:
-        role = turn.get("role", "user")
-        content = turn.get("content", "")
-        if not first_user_injected and role == "user":
-            first_user_injected = True
-            if grounding_text:
-                content = header + "\n\n" + grounding_text + "\n\n---\n\n" + content
-        messages.append({"role": role, "content": content})
-    return messages
+    return build_turn_messages(
+        prior_messages,
+        user_content,
+        header=_INSTRUCTION_HEADER,
+        grounding_text=grounding_text,
+        inject="first_user",
+        spoken=response_mode == "spoken",
+        spoken_contract=_SPOKEN_CONTRACT,
+    )
+
+
+def _scrub_reply(text: str) -> str:
+    """応答本文の衛生（信頼境界 TB4）。
+
+    grounding には PDF 由来の逐語引用・claim 本文が載るため、応答（その転写を含む）は
+    表示・読み上げの前に制御シーケンスを除去する。共通骨格
+    （``chat_turn.structured_turn``）へ渡す hygiene 関数をここで**明示**しておくことで、
+    骨格側の既定に依存せず「この系統は必ず除去を通す」ことがモジュール内で読める
+    （ガードレール: tests/test_pdf_trust_boundary_guardrails.py の TestDisplayHygiene）。
+    """
+    return strip_control_sequences(text)
 
 
 def run_graph_turn(
@@ -527,25 +546,29 @@ def run_graph_turn(
     llm_messages = build_llm_messages(
         prior_messages, user_content, grounding_text, response_mode=response_mode,
     )
-    with usage_context(_FEATURE_GRAPH_CHAT, user_id=user_id, document_id=document_id):
-        resolved_model = model or dialogue.resolve_turn_model(_FEATURE_GRAPH_CHAT)
-        output_model = _GraphTurnOutputSpoken if spoken_mode else _GraphTurnOutput
-        try:
-            parsed = generate_conversation_turn(llm_messages, output_model, model=resolved_model)
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "graph dialogue: LLM turn failed for document %s", document_id, exc_info=True,
-            )
-            return GraphTurnResult(
-                reply=_DEGRADED_REPLY,
-                degraded=True,
-                spoken=dialogue.resolve_spoken_text("", _DEGRADED_REPLY) if spoken_mode else None,
-            )
-    reply = strip_control_sequences(getattr(parsed, "reply", "") or "").strip() or _DEGRADED_REPLY
-    spoken = (
-        dialogue.resolve_spoken_text(getattr(parsed, "spoken", ""), reply) if spoken_mode else None
+    # 1コール + 縮退の制御フローは共通骨格（``chat_turn.structured_turn``）。モデル解決は
+    # usage_context の内側で行う（user 別ポリシーが user_id を見るため）ので callable で渡す。
+    turn = structured_turn(
+        llm_messages,
+        _GraphTurnOutputSpoken if spoken_mode else _GraphTurnOutput,
+        feature=_FEATURE_GRAPH_CHAT,
+        degraded_reply=_DEGRADED_REPLY,
+        model=model or (lambda: dialogue.resolve_turn_model(_FEATURE_GRAPH_CHAT)),
+        user_id=user_id,
+        document_id=document_id,
+        spoken=spoken_mode,
+        spoken_resolver=dialogue.resolve_spoken_text,
+        stance_label=AI_READING_LABEL,
+        hygiene=_scrub_reply,
+        call=generate_conversation_turn,
+        log_label=f"graph dialogue document {document_id}",
     )
-    return GraphTurnResult(reply=reply, degraded=False, spoken=spoken)
+    return GraphTurnResult(
+        reply=turn.reply,
+        degraded=turn.degraded,
+        spoken=turn.spoken,
+        stance_label=turn.stance_label,
+    )
 
 
 __all__ = [

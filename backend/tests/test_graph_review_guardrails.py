@@ -80,19 +80,36 @@ class TestPromptContract:
             assert forbidden not in DIALOGUE_SRC, forbidden
 
     def test_math_delimiter_contract_in_both_headers(self):
-        # 生 LaTeX（\(…\)）の漏れを塞ぐ表記契約は両対話モジュールに入れる。
+        # 生 LaTeX（\(…\)）の漏れを塞ぐ表記契約は両対話モジュールのヘッダに入る。
+        # 文言の正本は共通骨格（core/llm_worker/chat_turn.py）の1箇所で、各モジュールは
+        # それを連結する（リテラルの二重管理をしない）。
+        from core.deliberation import dialogue as dialogue_mod
+        from core.deliberation import graph_dialogue as graph_mod
+        from core.llm_worker.chat_turn import MATH_DELIMITER_INSTRUCTION
+
         needle = "数式は必ず `$…$` で区切ってください"
-        assert needle in CORE_SRC
-        assert needle in DIALOGUE_SRC
+        assert needle in MATH_DELIMITER_INSTRUCTION
+        assert MATH_DELIMITER_INSTRUCTION in graph_mod._INSTRUCTION_HEADER  # noqa: SLF001
+        assert MATH_DELIMITER_INSTRUCTION in dialogue_mod._INSTRUCTION_HEADER  # noqa: SLF001
+        # 各モジュールに文言リテラルをコピペし直していないこと。
+        assert needle not in CORE_SRC
+        assert needle not in DIALOGUE_SRC
 
     def test_spoken_contract_is_opt_in_and_single_call(self):
         # 読み上げ契約は response_mode="spoken" のときだけ足す（1ターン=1コールは不変）。
-        assert "音声で読み上げるための spoken を別に返してください。" in CORE_SRC
-        assert "音声で読み上げるための spoken を別に返してください。" in DIALOGUE_SRC
+        from core.deliberation import dialogue as dialogue_mod
+        from core.deliberation import graph_dialogue as graph_mod
+
+        needle = "音声で読み上げるための spoken を別に返してください。"
+        for build in (graph_mod.build_llm_messages, dialogue_mod.build_llm_messages):
+            assert needle not in build([], "q", "G")[0]["content"]
+            assert needle in build([], "q", "G", response_mode="spoken")[0]["content"]
         for src in (CORE_SRC, DIALOGUE_SRC):
             assert 'response_mode == "spoken"' in src
-            # 追加の LLM コール（2回目の generate_*）を作らない。
-            assert src.count("generate_conversation_turn(") == 1
+            # 追加の LLM コール（2回目の generate_*）を作らない。1ターンの実行は
+            # 共通骨格 structured_turn の1回だけで、直接呼びはそちらへ集約されている。
+            assert src.count("structured_turn(") == 1
+            assert "generate_conversation_turn(" not in src
 
     def test_stance_label_constant_has_a_single_home(self):
         """ラベル定数の正本は core/label_vocab.py の1箇所だけ（リテラル重複の禁止）。"""

@@ -12,6 +12,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from pydantic import BaseModel
 
 from core.llm_worker.client import BaseJSONLLMClient, parse_json_response, resolve_model
 from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate, today_str
@@ -173,6 +174,101 @@ class TestRunWithRepair:
             on_repair_failed=lambda errs: None,
         )
         assert result is None
+
+
+class TestRunWithRepairCallInjection:
+    """``call=`` 拡張（追加のみ・既定の挙動は不変）。
+
+    ``complete_json`` を持たない呼び出し口（structured output 等）でも同じ修復
+    ループを再利用できるようにするための注入口。``llm_client`` は None でよい。
+    """
+
+    def test_call_replaces_complete_json_and_client_may_be_none(self):
+        calls: list[str] = []
+
+        def _call(content: str) -> dict:
+            calls.append(content)
+            return {"value": "ok"}
+
+        result = run_with_repair(
+            None, "base",
+            validate=lambda data: (data, [], []),
+            build_repair_prompt=lambda prev, errs: "repair",
+            on_repair_failed=lambda errs: {"failed": True},
+            call=_call,
+        )
+        assert result == {"value": "ok"}
+        assert calls == ["base"]
+
+    def test_call_is_preferred_over_the_client(self):
+        client = _StubClient([{"value": "from client"}])
+        result = run_with_repair(
+            client, "base",
+            validate=lambda data: (data, [], []),
+            build_repair_prompt=lambda prev, errs: "repair",
+            on_repair_failed=lambda errs: None,
+            call=lambda content: {"value": "from call"},
+        )
+        assert result == {"value": "from call"}
+        assert client.calls == []
+
+    def test_pydantic_output_is_serialized_for_the_repair_prompt(self):
+        """dict 以外（structured output）でも previous_raw を組み立てられること。"""
+
+        class _Out(BaseModel):
+            value: str = ""
+
+        seen: list[str] = []
+        outputs = [_Out(value=""), _Out(value="ok")]
+
+        def _call(content: str) -> _Out:
+            return outputs[len(seen)]
+
+        def _build_repair(previous_raw: str, errors: list[str]) -> str:
+            seen.append(previous_raw)
+            return "repair"
+
+        result = run_with_repair(
+            None, "base",
+            validate=lambda out: ((out, [], []) if out.value else (None, ["empty"], [])),
+            build_repair_prompt=_build_repair,
+            on_repair_failed=lambda errs: None,
+            call=_call,
+        )
+        assert result is outputs[1]
+        assert seen == ['{"value":""}']
+
+    def test_call_exception_still_triggers_repair(self):
+        attempts = {"n": 0}
+
+        def _call(content: str) -> dict:
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise RuntimeError("provider error")
+            return {"value": "ok"}
+
+        result = run_with_repair(
+            None, "base",
+            validate=lambda data: (data, [], []),
+            build_repair_prompt=lambda prev, errs: "repair",
+            on_repair_failed=lambda errs: None,
+            call=_call,
+        )
+        assert result == {"value": "ok"}
+        assert attempts["n"] == 2
+
+    def test_dict_previous_raw_is_unchanged_by_the_extension(self):
+        """既定経路（dict）の repair プロンプト素材はバイト単位で従来どおり。"""
+        seen: list[str] = []
+        client = _StubClient([{"日本語": "値"}, {"value": "ok"}])
+
+        run_with_repair(
+            client, "base",
+            validate=lambda data: ((data, [], []) if "value" in data else (None, ["bad"], [])),
+            build_repair_prompt=lambda prev, errs: seen.append(prev) or "repair",
+            on_repair_failed=lambda errs: None,
+        )
+        assert seen == ['{"日本語": "値"}']
 
 
 class _StubClient:

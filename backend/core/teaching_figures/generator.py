@@ -12,6 +12,9 @@ structured output で「教員への返答 + 完全な SVG + title/caption/figur
   （プレビューは前回版のまま。FG3）。
 - **LLM 失敗は degraded 事実文で返す**（500 にしない。チャット型 AI の共通規約）。
 - **U層計測はここで張る**（``admin:figure_studio``）。route 側では張らない（二重計上防止）。
+  1コール分の「``usage_context`` の内側で structured output を1回 → 例外は縮退」の骨格は
+  ``core.llm_worker.chat_turn.structured_turn`` に集約されている（W層対話と共通）。
+  この系統固有の後処理（SVG サニタイズと1回の修復・title/caption の引き継ぎ）はここに残る。
 - 履歴は ``core.llm_worker.history.window_history`` を通す（head_keep=1 = grounding 注入
   先の先頭 user メッセージを保護。W層対話と同型）。会話履歴の永続化はしない
   （ブラウザ内のみ・atlas-assist の前例）。
@@ -30,7 +33,7 @@ from dataclasses import dataclass
 from pydantic import BaseModel
 
 from core.llm import generate_conversation_turn
-from core.llm_usage import usage_context
+from core.llm_worker.chat_turn import structured_turn
 from core.llm_worker.client import resolve_model as _resolve_model_key
 from core.llm_worker.history import window_history
 from core.teaching_figures import prompt, schema
@@ -130,6 +133,36 @@ def build_llm_messages(
     return list(windowed) + [{"role": "user", "content": content}]
 
 
+def _figure_turn_call(
+    messages: list[dict],
+    resolved_model: str,
+    *,
+    user_id: str,
+    course_id: str,
+    log_label: str | None = None,
+):
+    """1コール分を共通骨格（``chat_turn.structured_turn``）へ委譲する。
+
+    U層計測（``admin:figure_studio``）は骨格側の ``usage_context`` が張る。応答本文の
+    後処理は**この系統の従来どおり**にする — 制御シーケンス除去はかけず（``hygiene=None``）、
+    空応答も縮退文へ差し替えない（``empty_reply_fallback=None``。「図は変更していません。」
+    等の呼び出し側の既定に委ねる）。
+    """
+    return structured_turn(
+        messages,
+        _FigureTurnOutput,
+        feature=FEATURE_FIGURE_STUDIO,
+        degraded_reply=_DEGRADED_REPLY,
+        model=resolved_model,
+        user_id=user_id or None,
+        course_id=course_id or None,
+        hygiene=None,
+        empty_reply_fallback=None,
+        call=generate_conversation_turn,
+        log_label=log_label or f"figure studio (course={course_id})",
+    )
+
+
 def run_figure_turn(
     *,
     history: list[dict],
@@ -156,83 +189,75 @@ def run_figure_turn(
         grounding=grounding,
     )
 
-    with usage_context(FEATURE_FIGURE_STUDIO, user_id=user_id or None, course_id=course_id or None):
-        try:
-            parsed = generate_conversation_turn(
-                messages, _FigureTurnOutput, model=resolved_model
-            )
-        except Exception:  # noqa: BLE001 — 同期パスは 500 にしない（チャット型の共通規約）
-            logger.warning(
-                "figure studio: LLM turn failed (course=%s)", course_id, exc_info=True
-            )
+    turn = _figure_turn_call(messages, resolved_model, user_id=user_id, course_id=course_id)
+    if turn.degraded:
+        return FigureTurnResult(reply=_DEGRADED_REPLY, degraded=True)
+    parsed = turn.parsed
+
+    reply = turn.reply
+    raw_svg = (parsed.svg_source or "").strip()
+    title = (parsed.title or "").strip()
+    caption = (parsed.caption or "").strip()
+    figure_kind = _normalized_kind(parsed.figure_kind)
+
+    if not raw_svg:
+        # 変更なしターン（言葉で答えるだけ）。前回版のプレビューを維持する。
+        return FigureTurnResult(
+            reply=reply or "図は変更していません。",
+            title=title,
+            caption=caption,
+            figure_kind=figure_kind,
+        )
+
+    try:
+        sanitized = sanitize_svg(raw_svg, max_bytes=max_svg_bytes)
+    except SvgRejected as first_rejection:
+        logger.info(
+            "figure studio: SVG rejected, retrying once (course=%s): %s",
+            course_id,
+            first_rejection.reason,
+        )
+        repair_messages = messages + [
+            {"role": "assistant", "content": raw_svg[:HISTORY_MAX_CHARS]},
+            {
+                "role": "user",
+                "content": prompt.build_repair_instruction(first_rejection.reason),
+            },
+        ]
+        repair_turn = _figure_turn_call(
+            repair_messages, resolved_model, user_id=user_id, course_id=course_id,
+            log_label=f"figure studio repair (course={course_id})",
+        )
+        if repair_turn.degraded:
             return FigureTurnResult(reply=_DEGRADED_REPLY, degraded=True)
+        repaired = repair_turn.parsed
 
-        reply = (parsed.reply or "").strip()
-        raw_svg = (parsed.svg_source or "").strip()
-        title = (parsed.title or "").strip()
-        caption = (parsed.caption or "").strip()
-        figure_kind = _normalized_kind(parsed.figure_kind)
-
-        if not raw_svg:
-            # 変更なしターン（言葉で答えるだけ）。前回版のプレビューを維持する。
+        repaired_svg = (repaired.svg_source or "").strip()
+        reply = repair_turn.reply or reply
+        title = (repaired.title or "").strip() or title
+        caption = (repaired.caption or "").strip() or caption
+        figure_kind = _normalized_kind(repaired.figure_kind) or figure_kind
+        if not repaired_svg:
             return FigureTurnResult(
-                reply=reply or "図は変更していません。",
+                reply=_SANITIZE_FAILED_REPLY_PREFIX + first_rejection.reason,
                 title=title,
                 caption=caption,
                 figure_kind=figure_kind,
             )
-
         try:
-            sanitized = sanitize_svg(raw_svg, max_bytes=max_svg_bytes)
-        except SvgRejected as first_rejection:
+            sanitized = sanitize_svg(repaired_svg, max_bytes=max_svg_bytes)
+        except SvgRejected as second_rejection:
             logger.info(
-                "figure studio: SVG rejected, retrying once (course=%s): %s",
+                "figure studio: SVG rejected twice (course=%s): %s",
                 course_id,
-                first_rejection.reason,
+                second_rejection.reason,
             )
-            repair_messages = messages + [
-                {"role": "assistant", "content": raw_svg[:HISTORY_MAX_CHARS]},
-                {
-                    "role": "user",
-                    "content": prompt.build_repair_instruction(first_rejection.reason),
-                },
-            ]
-            try:
-                repaired = generate_conversation_turn(
-                    repair_messages, _FigureTurnOutput, model=resolved_model
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning(
-                    "figure studio: repair turn failed (course=%s)", course_id, exc_info=True
-                )
-                return FigureTurnResult(reply=_DEGRADED_REPLY, degraded=True)
-
-            repaired_svg = (repaired.svg_source or "").strip()
-            reply = (repaired.reply or "").strip() or reply
-            title = (repaired.title or "").strip() or title
-            caption = (repaired.caption or "").strip() or caption
-            figure_kind = _normalized_kind(repaired.figure_kind) or figure_kind
-            if not repaired_svg:
-                return FigureTurnResult(
-                    reply=_SANITIZE_FAILED_REPLY_PREFIX + first_rejection.reason,
-                    title=title,
-                    caption=caption,
-                    figure_kind=figure_kind,
-                )
-            try:
-                sanitized = sanitize_svg(repaired_svg, max_bytes=max_svg_bytes)
-            except SvgRejected as second_rejection:
-                logger.info(
-                    "figure studio: SVG rejected twice (course=%s): %s",
-                    course_id,
-                    second_rejection.reason,
-                )
-                return FigureTurnResult(
-                    reply=_SANITIZE_FAILED_REPLY_PREFIX + second_rejection.reason,
-                    title=title,
-                    caption=caption,
-                    figure_kind=figure_kind,
-                )
+            return FigureTurnResult(
+                reply=_SANITIZE_FAILED_REPLY_PREFIX + second_rejection.reason,
+                title=title,
+                caption=caption,
+                figure_kind=figure_kind,
+            )
 
     return FigureTurnResult(
         reply=reply or "図を更新しました。",
