@@ -11444,6 +11444,15 @@
       window.AdminIndicators.init({ apiFetch: apiFetch });
     }
 
+    // 可視性6軸の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA3）—
+    // AI 対話の入力欄のそばに「何が外部の AI プロバイダへ送られるか」を1行で置く。
+    // AdminIndicators と同じく、mount() を呼ぶどの経路よりも前に注入する
+    // （Copilot・W層・グラフレビューは開いた時点で mount() を呼ぶ）。取得失敗時は
+    // 何も描かない（fail-soft）。
+    if (window.DisclosureNote) {
+      window.DisclosureNote.init({ apiFetch: apiFetch });
+    }
+
     if (state.role !== "SYSTEM_ADMIN") {
       initUpload();
       initUrlUpload();

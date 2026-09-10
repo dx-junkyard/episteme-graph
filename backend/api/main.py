@@ -76,6 +76,7 @@ from routes import landscape as landscape_routes
 from routes import paper_discovery as paper_discovery_routes
 from routes import corpus as corpus_routes
 from routes import indicators as indicators_routes
+from routes import disclosure as disclosure_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -360,6 +361,10 @@ app.include_router(corpus_routes.learning_router)
 # 読み取り専用ルーターで、値は一切持たない。教員・管理者ゲートを掛けない
 # （観察される側の学習者も定義を読めなければ「全当事者に公開」にならない）。
 app.include_router(indicators_routes.router)
+# 可視性6軸カタログ（disclosure_axes_design.md、DA3）。**宣言だけ**を返す読み取り専用
+# ルーターで、値は一切持たない。外部 AI に何が送られるかを送っている当事者
+# （学習者を含む）が読めなければ告知にならないため、ロールゲートを掛けない。
+app.include_router(disclosure_routes.router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で

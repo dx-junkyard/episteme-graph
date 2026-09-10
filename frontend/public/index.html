@@ -167,6 +167,11 @@
              振り返る軽量モーダルを提示する（スキップ可・既定オン）。 -->
         <button type="button" class="discuss-end-btn" id="discuss-end-btn" data-ui-anchor="discuss.end" title="今日の議論を振り返って終える">議論を終える</button>
       </div>
+      <!-- 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA5）:
+           入力欄の直上に1行。文言は GET /api/disclosure が正本（provider はサーバが
+           実行時の設定から差し込む）。同意ボタン・閉じるボタンを持たない常設の段落で、
+           取得できないときは何も描かない（disclosure-note.js の fail-soft）。 -->
+      <div class="disclosure-note-slot" data-disclosure-note="learning_chat"></div>
       <div class="ia">
         <input type="text" id="chat-input" data-ui-anchor="composer.input" placeholder="質問や考えを入力…（Enterで送信）">
         <button id="send-btn" class="primary" data-ui-anchor="composer.send" title="送信（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">送信</button>
@@ -180,6 +185,9 @@
           <span class="voice-status" id="voice-status">準備中…</span>
           <button class="voice-close" id="voice-close" title="音声会話を終了">&times;</button>
         </div>
+        <!-- 外部 AI 転送の常設事実文（DA2）: 音声も同じデータ種別（録音した音声と
+             読み上げる回答文が送られる）。文言はサーバが正本。 -->
+        <div class="disclosure-note-slot" data-disclosure-note="learning_chat"></div>
         <div class="voice-transcript" id="voice-transcript"></div>
         <div class="voice-material" id="voice-material"></div>
       </div>
@@ -212,6 +220,10 @@
   <!-- ↑ 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。app.js より前に読み込む。 -->
   <script src="/js/element-card.js?v=element-card-20260801-1"></script>
   <!-- ↑ 統一パーツカード（§3.2）の編集不可バリアント。element-vocab.js の後・app.js より前。 -->
+  <!-- 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）:
+       入力欄のそばに1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、
+       取得できないときは何も描かない。app.js が init() で注入するため先に読み込む。 -->
+  <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
   <script src="/js/app.js"></script>
   <script src="/js/atlas-fixture.js"></script>
   <script src="/js/atlas-data.js"></script>

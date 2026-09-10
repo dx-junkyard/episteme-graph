@@ -230,6 +230,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[論文レーダー（教材起点の類似論文探索と比較分析）](features/paper_radar_design.md)
   ／[コーパスを補う論文（地図の薄い領域・検証記録の無い前提・基盤論文）](features/corpus_complement_design.md)
 - [制度指標カタログ（indicator governance）](features/indicator_governance_design.md) — 運営者・教員向け集約計器の定義・目的・宛先・粒度・非利用（ランキング / 成績 / 推薦 / 自動ゲート禁止）を一箇所に宣言し `GET /api/indicators` で全当事者に公開。vision.md §6.1 原則4 改訂（2026-09-04）の実装
+- [可視性6軸の宣言（disclosure axes）](features/disclosure_axes_design.md) — データ種別ごとに「誰に見えて、名前が出るか、引用できるか、評価に使うか、**外部の AI に渡るか**、いつ撤回できるか」を宣言し `GET /api/disclosure` で全当事者に公開。各対話 UI の入力欄には常設の事実文1行。vision.md §5.4（可視性を一軸に畳まない）の実装（2026-09-10）
 
 - [共有物のバージョン管理（V層）](features/shared_versioning_design.md)
 - [状態管理・通知基盤](features/status_notification_design.md)

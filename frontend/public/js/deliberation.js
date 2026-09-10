@@ -2686,6 +2686,8 @@
               '<span>質問対象: <strong id="deliberation-chat-context-label"></strong></span>' +
               '<button id="deliberation-chat-context-clear" type="button" aria-label="質問対象を解除">解除</button>' +
             '</div>' +
+            // 外部 AI 転送の常設事実文の担体（disclosure_axes_design.md, DA2）。
+            '<div class="disclosure-note-slot" id="deliberation-disclosure-note"></div>' +
             '<div class="deliberation-chat-inputrow" data-ui-anchor="deliberation.chat-send">' +
               '<textarea id="deliberation-chat-input" class="deliberation-chat-input" rows="2" placeholder="この要素について質問..."></textarea>' +
               '<button id="deliberation-chat-send" type="button" class="deliberation-chat-send" data-ui-anchor="deliberation.chat-send">送信</button>' +
@@ -2711,6 +2713,15 @@
 
     overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeModal(); });
     document.getElementById("deliberation-modal-close").addEventListener("click", _closeModal);
+
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: 対話区画の
+    // 先頭に1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、取得できないときは
+    // 何も描かない（fail-soft）。同意ボタン・モーダルは作らない（DA5）。
+    if (window.DisclosureNote) {
+      window.DisclosureNote.mount(
+        document.getElementById("deliberation-disclosure-note"), "course_materials"
+      );
+    }
 
     var chatInput = document.getElementById("deliberation-chat-input");
     var chatSendBtn = document.getElementById("deliberation-chat-send");

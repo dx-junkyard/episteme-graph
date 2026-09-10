@@ -224,6 +224,9 @@ _ADMIN_FRONTEND_SOURCES = [
     # 制度指標カタログの事実文（DOM は既存パネル側。将来ここに UI が生えたときの
     # 登録漏れを検出するため対象に入れる）。
     ROOT / "frontend" / "public" / "js" / "admin-indicators.js",
+    # 可視性6軸の事実文（DOM は各対話 UI 側。事実の段落であってアンカーは持たないが、
+    # 将来ここに操作要素が生えたときの登録漏れを検出するため対象に入れる）。
+    ROOT / "frontend" / "public" / "js" / "disclosure-note.js",
     ROOT / "frontend" / "public" / "js" / "versioning.js",
     ROOT / "frontend" / "public" / "js" / "deliberation.js",
     ROOT / "frontend" / "public" / "js" / "doubt-atlas.js",

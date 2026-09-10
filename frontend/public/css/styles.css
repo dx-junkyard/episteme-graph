@@ -12010,3 +12010,27 @@ button.element-card-item:focus-visible .element-card-item-label {
   font-size: 11.5px;
   line-height: 1.6;
 }
+
+/* ---------------------------------------------------------------------------
+ * 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA5）。
+ * 対話の入力欄のそばに置く1行。**警告色にしない**（注意を引くためではなく、
+ * 「どこへ送られるか」を常に読める場所に置くためのもの）。同意ボタン・閉じる
+ * ボタンを持たない常設の段落。
+ *
+ * 学習画面（1画面レイアウト）では composer と同じ下段に入るため、`flex: 0 0 auto`
+ * で縮まないこと（縮む設定にすると縦が足りないときに文だけ潰れて読めなくなる。
+ * ガードレール: backend/tests/test_disclosure_axes_guardrails.py）。
+ * ------------------------------------------------------------------------- */
+.disclosure-note {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 4px 2px 0;
+  color: var(--color-text-tertiary, #6b7280);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+/* 学習画面の composer 直上の担体（1行のみ・区切り線は composer 側が持つ）。 */
+.disclosure-note-slot {
+  flex: 0 0 auto;
+}

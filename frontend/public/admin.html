@@ -405,6 +405,10 @@
               例：「〇〇の教材を使って場の量子論の基礎コースを作って」
             </div>
           </div>
+          <!-- 外部 AI 転送の常設事実文（disclosure_axes_design.md, DA2/DA5）: 入力欄の
+               直上に1行。文言は GET /api/disclosure が正本（provider はサーバが実行時の
+               設定から差し込む）。同意ボタンは作らず、取得できないときは何も描かない。 -->
+          <div class="disclosure-note-slot" data-disclosure-note="course_materials"></div>
           <div class="ia">
             <input type="text" id="cb-chat-input" placeholder="コースの要件を入力してください...">
             <button id="cb-send-btn" data-ui-anchor="course-builder.send-btn">送信</button>
@@ -990,6 +994,11 @@
   <!-- 教材図スタジオ（Teaching Figure Studio）— 図の生成・調整・挿入モーダル。
        原稿スタジオ（admin-lecture-studio.js）の init() から init される。 -->
   <script src="/js/admin-figure-studio.js?v=teaching-figure-studio-20260731-1"></script>
+  <!-- 可視性6軸の常設事実文（disclosure_axes_design.md, DA2）— AI 対話の入力欄のそばに
+       「何が外部の AI プロバイダへ送られるか」を1行で置く共通部品。Copilot・W層・
+       グラフレビュー・コースビルダーが window.DisclosureNote.mount() を呼ぶため、
+       それらより前に読み込む。 -->
+  <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
   <!-- 原稿スタジオ（Lecture Script Studio, Issue #70）— admin.js から分離（Tier 3-17b） -->
   <script src="/js/admin-lecture-studio.js?v=teaching-figure-studio-20260731-1"></script>
   <!-- W層（要素検討ワークスペース, Phase 0）— 「深く検討」統合パネル -->

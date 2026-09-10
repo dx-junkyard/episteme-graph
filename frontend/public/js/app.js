@@ -252,6 +252,8 @@
       if (window.Discuss) window.Discuss.reset();
       // コーパス回遊層: 失効時に前ユーザーの取得結果を残さない（CR1 と同族）。
       if (window.CorpusSea) window.CorpusSea.invalidate();
+      // 可視性6軸の事実文（DA3）: 前ユーザーの取得結果を残さない。
+      if (window.DisclosureNote) window.DisclosureNote.invalidate();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -272,6 +274,8 @@
       if (window.Discuss) window.Discuss.reset();
       // コーパス回遊層: 失効時に前ユーザーの取得結果を残さない（CR1 と同族）。
       if (window.CorpusSea) window.CorpusSea.invalidate();
+      // 可視性6軸の事実文（DA3）: 前ユーザーの取得結果を残さない。
+      if (window.DisclosureNote) window.DisclosureNote.invalidate();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -5730,6 +5734,8 @@
         // コーパス回遊層: 前ユーザーの取得結果・議論の下書きを残さない（CR1 と同族の
         // fail-closed。可視集合はユーザーごとに違う）。
         if (window.CorpusSea) window.CorpusSea.invalidate();
+        // 可視性6軸の事実文（DA3）: 前ユーザーの取得結果を残さない。
+        if (window.DisclosureNote) window.DisclosureNote.invalidate();
         renderAuth();
       });
     }
@@ -8645,6 +8651,11 @@
     // コーパス回遊層（corpus_roaming_design.md §4.2）: 「論文の海」オーバーレイ。
     // 入口はサイドバーの常設ボタンだけで、ここでは自動で開かない（CR5）。
     if (window.CorpusSea) window.CorpusSea.init({});
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA3）:
+    // 入力欄・音声パネルの担体（data-disclosure-note）を1回の取得で埋める。文言は
+    // サーバが正本（provider は実行時の設定から差し込まれる）で、取得に失敗したら
+    // 何も描かない（fail-soft）。ポーリングしない。
+    if (window.DisclosureNote) window.DisclosureNote.init({ apiFetch: apiFetch });
     // 主権台帳 v1「わたしの記録」パネル（trace_registry_sovereignty_ledger_design.md §3.4）。
     if (window.MyRecords) window.MyRecords.init({});
     var myRecordsBtn = document.getElementById("my-records-btn");

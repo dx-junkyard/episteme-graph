@@ -2659,6 +2659,54 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **ガードレール**: `test_decision_context{,_guardrails}.py` + 経路側の
   `test_release_review.py` / `test_teacher_triage_api.py`。
 
+### 可視性6軸の宣言（disclosure_axes, migration なし, 2026-09-10）
+
+データ種別ごとに「誰に見えて、名前が出るか、引用できるか、評価に使うか、**外部の AI に
+渡るか**、いつ撤回できるか」の6軸を宣言し、**学習者を含む全当事者に公開**する層。正本は
+`docs/features/disclosure_axes_design.md`（DA1〜DA6・§7 実装記録）。vision §5.4「可視性は
+一軸に畳まない」の実装で、制度指標カタログ（IG1）が計器の定義に対して行ったことを可視性
+そのものに対して行う（第5軸は従来「常に渡る」で固定・学習者向け記述ゼロだった）。
+
+- **不変条項の要点**: DA1 宣言は現物から確認できることだけ（`basis` に挙げた実装を読んで
+  書く。ガードレールが `basis` のファイル実在を検査）/ DA2 **AI 通過点の宛先は provider
+  だけ**（モデル名・トークン数・金額を書かない = `FORBIDDEN_DESTINATION_TERMS` を
+  `__post_init__` で強制。provider はカタログに焼き込まず実行時の `llm_provider` から解決 —
+  `note` は `{provider}` プレースホルダのみ）/ DA3 ロールゲートを掛けない
+  （`_get_current_user`。送っている当事者が読めない告知は告知ではない）/ DA4 学習者向け
+  文言に内部名を出さない（`LEARNER_TEXT_DENYLIST` = help_kb の `STUDENT_DENYLIST` の
+  ミラー。包含関係はガードレールが固定 — core の推移的純粋性を崩さないため import しない）/
+  DA5 **同意を装わない**（書き込みメソッドなし・同意ボタン / チェックボックス / モーダルを
+  作らない。初回告知カードはオーナー判断 D4 で未決 = 非スコープ）/ DA6 外部 AI を**通らない**
+  経路も同じ表に書く（`without_ai`。学習者向け spec では非空を `validate_catalog()` が強制）。
+- **core**: `backend/core/disclosure_axes.py`（FastAPI / sqlalchemy / LLM 非 import の純宣言・
+  **値を1つも持たない**。`indicator_catalog.py` と同じ作法）。軸は vision §5.4 の6つに固定し
+  （`audience` / `name_disclosure` / `reuse` / `evaluation_use` / `external_transfer` /
+  `withdrawal`）、`retention` / `aggregation` / `portability` は軸に昇格させず補足3項目として
+  持つ。data_kind は6種（`learning_chat` / `learner_traces` / `check_answers` /
+  `course_materials` / `teacher_reviews` / `account`）で、値は既存の正本
+  （`trace_registry` の露出3宣言・`privacy.K_ANONYMITY`・`llm_policy` の provider・
+  `account_lifecycle` の PURGE/RETAIN）から導く。`ai_touchpoints[].feature` は
+  `llm_usage/schema.py::KNOWN_FEATURES` の要素であることをガードレールが固定する。
+- **API**: `GET /api/disclosure` / `GET /api/disclosure/{data_kind}`
+  （`backend/api/routes/disclosure.py`・main.py 直接登録・書き込みなし）。`frontend/nginx.conf`
+  に `/api/disclosure/` と `= /api/disclosure` の2 location が必須（`/api/indicators` と同じ
+  事故形）。
+- **常設の事実文**: `frontend/public/js/disclosure-note.js`（ES5・`window.DisclosureNote`）が
+  静的担体 `data-disclosure-note` と動的 `mount(container, data_kind)` の両方を埋める。
+  **文言をフロントに焼き込まない**（サーバの `note` をそのまま描く）・取得失敗時は何も
+  描かない fail-soft・ポーリングなし・警告色にしない。配置は学習 composer / 音声パネル /
+  discuss の予想枠 / Copilot / W層 / グラフレビュー / コースビルダー。事実の段落なので
+  `data-ui-anchor` は付けない（`admin-indicators.js` と同じ規律）。学習画面は
+  `flex: 0 0 auto` の下段に1行（`test_learning_layout_static.py` の規律）。
+- **マニュアル**: `docs/manual/student/02-student.md` §18（`{#disclosure}`）/
+  `docs/manual/teacher/10-admin-common.md`（`{#disclosure}`）。全 `label` がマニュアルに
+  逐語で現れることをガードレールが固定する。
+- **ガードレール**: `test_disclosure_axes{,_guardrails}.py` / `test_disclosure_api.py`。
+- **非スコープ（v1）**: 初回1回の告知カード（D4）/ 本人向け AI 通過点履歴
+  （`GET /api/me/ai-touchpoints`）/ opt-out（外部 AI を通さない学習モード）/ 第1軸の学習者側
+  （引き受けの段）・第2軸の帰属と開示の分離・第3軸の条件付き再利用（**宣言**の層であって
+  可視性の選択肢を増やす層ではない）。
+
 ### 画面文脈アダプター（Assistant Screen Adapter, SA層, migration なし, 2026-09-06）
 
 各画面の AI 対話（テキスト・音声）に「教員がいま画面で選んでいるもの」を渡す層。**画面は

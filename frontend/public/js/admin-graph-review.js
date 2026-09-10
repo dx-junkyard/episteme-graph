@@ -257,6 +257,8 @@
               '<div id="graph-review-chat-log" class="graph-review-chat-log"></div>' +
               '<div id="graph-review-chat-newchat" class="graph-review-chat-newchat"></div>' +
               '<div id="graph-review-chat-annotations" class="graph-review-chat-annotations"></div>' +
+              // 外部 AI 転送の常設事実文の担体（disclosure_axes_design.md, DA2）。
+              '<div class="disclosure-note-slot" id="graph-review-disclosure-note"></div>' +
               '<div class="graph-review-chat-input-row">' +
                 '<textarea id="graph-review-chat-input" rows="2" placeholder="このグラフについて質問（例: 裏付けが弱いのはどこですか）"></textarea>' +
                 '<button type="button" id="graph-review-chat-send" class="admin-action-btn">送信</button>' +
@@ -274,6 +276,14 @@
   }
 
   function bindModalEvents(modal) {
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: チャットの
+    // 入力欄の直上に1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、取得
+    // できないときは何も描かない（fail-soft）。同意ボタンは作らない（DA5）。
+    if (window.DisclosureNote) {
+      window.DisclosureNote.mount(
+        modal.querySelector("#graph-review-disclosure-note"), "course_materials"
+      );
+    }
     modal.querySelector("#graph-review-close").addEventListener("click", close);
     modal.addEventListener("click", function (e) {
       if (e.target === modal) close();

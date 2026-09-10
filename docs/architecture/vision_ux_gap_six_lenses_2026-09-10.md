@@ -64,7 +64,9 @@ vision が最も強く語る 3 つの像にはそれぞれ実装上の「閉じ�
 | F10 | export-bundle が `_require_teacher` のみで対象権限判定・監査なし ✓。groups API が email を全員に返す ✓。外部 LLM 転送が学習者向けマニュアルに無い | 原則11・14 / §5.4 / 原則8 | `routes/export.py:2832,2996` · `routes/groups.py:204-227` | §5 B2・B4 | S |
 | F11 | 監査記帳の無い状態変更: 教材の物理削除・版 adopt・トピック保存 | 原則14 | `admin.py:1665` · `versioning.py:303` · `lecture_studio/topics.py:346` | `record_review_event` を 3 箇所に | S |
 
-**F10 → 2026-09-10 解消（第1波 #8。外部 LLM 転送のマニュアル記述だけは #9 に残る）**:
+**F10 → 2026-09-10 解消（第1波 #8。外部 LLM 転送のマニュアル記述は同日 #9 で解消 —
+`docs/manual/student/02-student.md` §18「あなたの入力はどこへ送られるか」+
+`docs/manual/teacher/10-admin-common.md`「AI との対話で外部に送られるもの」）**:
 export-bundle 2本に閲覧ゲート（`export.py::_require_viewable_{course,document}_or_404`）・
 `manifest.provenance`（出所・発行状態・解析 run。書き出した人は伏せる）・監査記帳
 （`entity_type='export'`）を実装し、`GET /api/groups/{id}` の email をグループ admin /

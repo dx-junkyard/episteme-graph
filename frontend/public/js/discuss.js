@@ -264,6 +264,8 @@
     html += '</div>';
     diffArea.innerHTML = html;
     diffArea.hidden = false;
+    // 外部 AI 転送の常設事実文（DA2）: 「AIに違いの観点を出してもらう」の近傍に1行。
+    if (window.DisclosureNote) window.DisclosureNote.mount(diffArea, "learning_chat");
     sendDiscussMetric("cycle_diff_viewed", {});
     var saveBtn = document.getElementById("cycle-diff-reflect-save");
     if (saveBtn) {
@@ -327,6 +329,10 @@
     html += '<div class="cycle-diff-area" id="cycle-diff-area" hidden></div>';
     area.innerHTML = html;
     area.hidden = false;
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: この枠には
+    // AI に問い・観点を求めるボタンがあるので、入力欄のそばに1行置く（文言はサーバが
+    // 正本・取得できなければ何も描かない fail-soft）。同意ボタンは作らない（DA5）。
+    if (window.DisclosureNote) window.DisclosureNote.mount(area, "learning_chat");
     // 理解サイクル Phase 2（AI Elicit モード, 設計書 §8）: 答えを提示せず、予測を立てる
     // ための問いを一つだけもらう。既存 learning_chat の1コール地点に
     // cycle_mode="elicit" を添えて相乗りする（新エンドポイントを作らない）。
