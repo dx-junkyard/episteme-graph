@@ -4751,6 +4751,11 @@ def process_material_background(
     ``options``（画像パイプライン §3-2）はアップロード時オプションのスナップ
     ショット（例: ``{"analyze_images": True}``）。``run_document_pipeline`` へ
     そのまま受け渡し、``document_analysis_runs.options`` に保存される。
+
+    ``cartridge_id``（分野・提案 C1）も ``run_document_pipeline`` へそのまま渡す。
+    ``None`` は未指定（env → 分野中立）、``""`` は「指定しない」の明示選択
+    （env へフォールバックしない）。値は既存列
+    ``document_analysis_runs.cartridge_id`` に入る。
     """
     from core.document_pipeline import PipelineStageError, run_document_pipeline
 
@@ -4883,11 +4888,6 @@ def process_material_background(
                 "DBが不整合状態の可能性があります。"
                 " doc_id=%s material_id=%s error=%s",
                 doc_id, material_id, db_exc,
-
-    ``cartridge_id``（分野・提案 C1）も ``run_document_pipeline`` へそのまま渡す。
-    ``None`` は未指定（env → 分野中立）、``""`` は「指定しない」の明示選択
-    （env へフォールバックしない）。値は既存列
-    ``document_analysis_runs.cartridge_id`` に入る。
             )
 
 

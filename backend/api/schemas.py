@@ -713,14 +713,14 @@ class LectureSegment(BaseModel):
     segment_mode: str = "full"
     slides: list[LectureSlide] = []
     language: str = "ja"  # このセグメントの spoken_language（無指定は "ja"）
-
-
-class LectureSequenceResponse(BaseModel):
-    """レクチャーシーケンス API レスポンス。
     # 注記フラグ（是正 F3）: この区画が「以前に触れた前提概念だけを扱う短い区画」と
     # 判定された事実。提示内容は変わらない。画面側の「短く聴く」トグル（既定 OFF）が
     # ON のときだけ、本人の操作でこの区画を畳める（消さずに畳む）。
     previously_touched: bool = False
+
+
+class LectureSequenceResponse(BaseModel):
+    """レクチャーシーケンス API レスポンス。
 
     是正 F3（2026-09-10）で ``skipped_segments`` / ``summary_segments``（省略件数）を
     撤去した。サーバは省略しないので数えるものが無く、件数を返せば「何かが省かれた」と
