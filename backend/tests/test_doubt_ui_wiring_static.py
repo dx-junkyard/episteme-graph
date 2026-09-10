@@ -160,3 +160,38 @@ class TestNoHypeOrRawNumbers:
         src = _read()
         block = re.search(r"function bindVerificationStatusForm[\s\S]+?\n  \}\n", src).group(0)
         assert "confidence" not in block
+
+
+class TestConfirmReasonIsNotPrefilled:
+    """是正 F7a（2026-09-10・六つのレンズ §4 第1波 #5 / 02_teacher.md §1-3）。
+
+    前提の確定理由に既定文（「検出根拠を確認し、暗黙の前提として妥当と判断した」）を
+    プリフィルしていたため、Enter を押すだけで**確認した旨が本人の言葉として記帳される**
+    状態だった（vision §4「人間のクリックを正当性と誤認しない」への正面からの抵触）。
+    プリフィルは外し、理由必須（空なら中断）は維持する。
+    """
+
+    #: `window.prompt("…", "既定値")` の第2引数（文字列リテラルのみ）を拾う。
+    PROMPT_WITH_DEFAULT = re.compile(
+        r"window\.prompt\(\s*\"[^\"]*\"\s*,\s*\"([^\"]*)\"\s*\)"
+    )
+
+    def test_no_prompt_carries_a_non_empty_default_text(self):
+        for default in self.PROMPT_WITH_DEFAULT.findall(_read()):
+            assert default == "", f"prompt に既定文が残っている: {default!r}"
+
+    def test_confirm_reason_is_still_required(self):
+        """理由必須は維持する（空文字なら API を呼ばない）。"""
+        src = _read()
+        block = re.search(r"function bindAssumptionButtons[\s\S]+?\n  \}\n", src).group(0)
+        assert block.count("if (!reason.trim()) return;") >= 2
+        assert "/confirm" in block
+
+    def test_dismissed_reason_prefill_is_not_reintroduced(self):
+        """既定文をコードから復活させない（文言そのものが prompt 呼び出しに現れない）。"""
+        for line in _read().splitlines():
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                continue  # 是正の経緯を書いたコメントは対象外
+            assert "検出根拠を確認し" not in stripped
+            assert "文面を訂正のうえ" not in stripped

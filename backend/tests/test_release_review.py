@@ -504,7 +504,61 @@ class TestCoursePlacementsAccept:
             "presented_placement_ids": ["bogus-id"],
             "evidence_shown": True,
         }
-        assert ctx["evidence_shown"] is True
+        # 是正 F7（2026-09-10）: 「根拠が出ていたか」はサーバが検証できないので、
+        # 申告値をサーバ導出値の位置（トップレベル）へ載せ替えない（DC4）。
+        assert ctx["evidence_shown"] is None
+
+    def test_expanded_evidence_rows_are_reported_as_client_facts(self, client_and_teacher, env):
+        """是正 F7: 実際に根拠を開いた行だけを来歴申告として隔離する。"""
+        client, teacher = client_and_teacher
+        routes = env["routes"]
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "accept_inferred_for_documents",
+            lambda *a, **k: [_placement_row(status="confirmed")],
+        )
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents",
+            lambda _s, ids, statuses=(): [_placement_row()],
+        )
+        response = client.post(
+            f"/api/admin/landscape/courses/{_COURSE}/placements/accept",
+            headers={"Authorization": "Bearer " + teacher},
+            json={
+                "presented_placement_ids": [_PLACEMENT],
+                "evidence_expanded_placement_ids": [_PLACEMENT, "", _PLACEMENT],
+            },
+        )
+        assert response.status_code == 200
+        ctx = response.json()["decision_context"]
+        assert ctx["client_reported"] == {
+            "presented_placement_ids": [_PLACEMENT],
+            "evidence_expanded_placement_ids": [_PLACEMENT],
+        }
+        assert ctx["evidence_shown"] is None
+
+    def test_no_expanded_evidence_is_recorded_honestly(self, client_and_teacher, env):
+        """是正 F7: 1件も開かずに確定した事実は空配列としてそのまま残る（確定は止めない）。"""
+        client, teacher = client_and_teacher
+        routes = env["routes"]
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "accept_inferred_for_documents",
+            lambda *a, **k: [_placement_row(status="confirmed")],
+        )
+        env["monkeypatch"].setattr(
+            routes.landscape_store, "list_for_documents",
+            lambda _s, ids, statuses=(): [_placement_row()],
+        )
+        response = client.post(
+            f"/api/admin/landscape/courses/{_COURSE}/placements/accept",
+            headers={"Authorization": "Bearer " + teacher},
+            json={"evidence_expanded_placement_ids": []},
+        )
+        assert response.status_code == 200
+        ctx = response.json()["decision_context"]
+        assert ctx["client_reported"] == {"evidence_expanded_placement_ids": []}
+        assert ctx["evidence_shown"] is None
+        # RR7: 記帳の内容にかかわらず確認は成立する。
+        assert response.json()["confirmed"] == 1
 
     def test_presented_but_not_applied_is_reported_honestly(self, client_and_teacher, env):
         """DC2: 提示されたのに適用されなかった行があれば一致を偽らない。"""

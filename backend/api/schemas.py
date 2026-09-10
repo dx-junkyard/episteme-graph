@@ -1097,6 +1097,11 @@ class ComponentGraphNode(BaseModel):
     #     source_backed で確定したノード。例: #306 の missing_atomic_claim warning）
     review_reasons_at_analysis: list[str] = Field(default_factory=list)
     review_reasons_advisory: bool = False
+    # 是正 F6（2026-09-10）: 解析時の警告（``theory_components.validation_warnings``
+    # の読み時射影 = {"field", "message"}）。承認時に消さず退避し、承認画面が
+    # 「解析時点のメモ」として承認ボタンの隣に並置する（vision §4 改訂原則1 —
+    # 何を見て確定したかを後から再構成できるように）。数値は載せない。
+    validation_warnings: list[dict] = Field(default_factory=list)
     # Layer linkage between main TheoryOperationNode and equation_detail nodes (issue #306).
     parent_component_id: str = ""
     member_component_ids: list[str] = Field(default_factory=list)

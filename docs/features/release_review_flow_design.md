@@ -225,9 +225,16 @@ zone）に置くだけであり、RR3（出所を偽らない）の趣旨にも�
   描く。引用の無い行でも折りたたみは出し、その事実を書く（提示の有無を行ごとに
   静かに変えない）。
 - **accept の body**: `AcceptPlacementsRequest` に optional の `presented_placement_ids` /
-  `evidence_shown` を追加。**どちらも来歴申告**で、サーバの判断には使わない
+  `evidence_expanded_placement_ids`（+ 後方互換の `evidence_shown`）を持つ。
+  **いずれも来歴申告**で、サーバの判断には使わない
   （`client_reported` に隔離 — DC4）。提示集合の正本は、更新前にサーバが
   `list_for_documents(..., statuses=[inferred])` で取り直した live の状態である。
+  **2026-09-10（是正 F7）**: 固定の `evidence_shown: true` を送るのをやめ、根拠の
+  折りたたみを**実際に開いた行**の id（`<details>` の `toggle` イベント由来）だけを
+  送るようにした。トップレベルの `evidence_shown` はサーバから常に `None`
+  （「根拠が出ていたか」をサーバが断言しない）。1件も開かなければ空配列がそのまま
+  記帳され、確定は止めない（RR7）。詳細は
+  [確定文脈の記帳](decision_context_design.md) §3 / §8.2。
 - **accept のレスポンス**: `decision_context` を追加（既存キーは不変）。画面は
   `presented_matches_applied` から一致／不一致の事実文を1行出す。不一致でも公開は
   止めない（RR7）。

@@ -2928,6 +2928,21 @@
     '</section>';
   }
 
+  // 是正 F7（六つのレンズ §4 第1波 #5 / 02_teacher.md 提案7）: 一括確定の来歴申告。
+  // 「根拠（逐語引用）が画面に描かれていた行」を DOM から実測する（カードが描画され、
+  // その中に .deliberation-annotation-reason があるか）。サーバは検証しないので
+  // client_reported に隔離される。数値は送らず、確定は止めない。
+  function _explanationReviewEvidenceRenderedIds(ids) {
+    var rendered = [];
+    (ids || []).forEach(function (id) {
+      var card = document.querySelector(
+        '.deliberation-explanation-review-card[data-explanation-id="' + id + '"]'
+      );
+      if (card && card.querySelector(".deliberation-annotation-reason")) rendered.push(id);
+    });
+    return rendered;
+  }
+
   function _explanationReviewSelectedIds() {
     var ids = [];
     (explanationReviewState.items || []).forEach(function (exp) {
@@ -3139,10 +3154,14 @@
       apiFetch(_explanationReviewBasePath(documentId) + "/bulk-review", {
         method: "POST",
         // sort_order は TT3（来歴を偽らない）の監査 metadata 用。
+        // 是正 F7（2026-09-10）: 以前はサーバが根拠提示を真と断言していた。
+        // 「根拠が出ていた」はクライアント側の事実なので、実際に逐語引用が描かれて
+        // いた行の id だけを申告する（サーバは検証せず client_reported に隔離 = DC4）。
         body: JSON.stringify({
           action: action,
           explanation_ids: ids,
-          sort_order: explanationReviewState.sortOrder || "default"
+          sort_order: explanationReviewState.sortOrder || "default",
+          evidence_rendered_ids: _explanationReviewEvidenceRenderedIds(ids)
         })
       })
         .then(_parseJsonResponse)

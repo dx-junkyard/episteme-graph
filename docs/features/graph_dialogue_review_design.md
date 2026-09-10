@@ -683,3 +683,41 @@ LaTeX を落とすようにした（シグネチャ・既存の除去規則は�
 
 **非変更**: migration・DB スキーマ・CostGate・U層 feature・M層 scene・承認 API・
 grounding の構築規則・A層。
+
+---
+
+## 16. 解析時の警告を承認で消さない（是正 F6・2026-09-10）
+
+[六つのレンズ調査](../architecture/vision_ux_gap_six_lenses_2026-09-10.md) §4 第1波 #5
+（`six_lenses_2026-09-10/05_ai.md` 提案2 の前半・`02_teacher.md` §1-8）の是正。
+migration なし・LLM コールなし・承認可能性の判定は非改変。
+
+**問題**: component の承認時に `theory_components.validation_warnings` を空配列で上書きして
+いた（`_transition_component_review` の UPDATE と `_normalize_payload`）。承認ゲート
+（`_component_approval_problems`）は出典を `source_refs` **または** `evidence_claims` で
+認めるのに対し、警告の導出（`_validation_warnings`）は `source_refs` のみを見るため、
+**承認できる component にも解析時の警告が残る**。それを消すと「何を見て承認したか」を
+後から再構成できない（vision §4 改訂原則1 / 原則3 = 情報を落とさない）。
+
+**是正**:
+
+- 消去をやめ、承認後も列にそのまま**退避**する（ノードの `review_reasons_at_analysis` と
+  同じ流儀。graph_json は書き換えない）。
+- `ComponentGraphNode` に additive キー `validation_warnings`（`{"field", "message"}` の
+  配列）。読み時射影 `_node_validation_warnings(component)` が live component から作り、
+  数値（`confidence` / `weight`）は落とす（GR3 / PL4）。component 行を持たない集約 main
+  ノードは空配列（キーは常に出す）。
+- レビュー画面（`admin-graph-review.js`）はノード詳細の**承認ボタンより前**に事実文として
+  並置する（`ANALYSIS_WARNING_HEADING` =「解析時点の警告（承認は止めません。内容を確認の
+  うえ判断してください）:」）。件数バッジは作らず、警告があっても承認ボタンは活性のまま
+  （弁を増やさない・確定を止めない）。CSS は警告色を使わない
+  （`.graph-review-detail-analysis-warnings`）。
+
+**非スコープ（この波では入れない）**: 05_ai.md 提案2 の後半（否定側だけを見る検査 worker と
+`element_annotations.kind='inspection'` の追加）は LLM 系統・migration を伴うため別件。
+本是正は「既にある警告を消さない・見えるところに置く」までを担う。
+
+**テスト**: `test_graph_review_guardrails.py::TestApprovalKeepsAnalysisWarnings`（空配列
+代入の不在・承認ゲート非改変・射影に数値が無いこと）/ `test_graph_review_api.py::
+TestNodeAnalysisWarningProjection` + 遷移 SQL に `validation_warnings` が現れないこと /
+`test_graph_review_ui_static.py`（見出しの原文・承認ボタンより前・承認を無効化しないこと）。

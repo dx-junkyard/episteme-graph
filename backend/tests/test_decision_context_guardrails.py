@@ -160,14 +160,59 @@ class TestBulkRoutesRecordContext:
             assert "client_reported=" in fn_src
 
 
+class TestEvidenceShownIsNeverAssertedByTheServer:
+    """是正 F7b（2026-09-10・六つのレンズ §4 第1波 #5 / 02_teacher.md 提案7）。
+
+    「根拠が画面に出ていたか」はサーバが検証できない。以前は説明の一括承認が
+    ``evidence_shown=True`` をハードコードで断言し、リリース前の確認は
+    クライアント申告をそのままサーバ導出値の位置に載せていた。どちらも
+    「描画するコードがある」ことしか意味しないので、申告は ``client_reported``
+    にだけ隔離する（DC4）。
+    """
+
+    def test_no_bulk_route_asserts_evidence_shown_true(self):
+        for src, fn in (
+            (LANDSCAPE_SRC, "accept_course_landscape_placements"),
+            (EXPLANATION_SRC, "bulk_review_element_explanations"),
+            (ATLAS_SRC, "save_course_atlas_binding"),
+        ):
+            fn_src = extract_function_source(src, fn)
+            assert "evidence_shown=None" in fn_src, fn
+            assert "evidence_shown=True" not in fn_src, fn
+
+    def test_explanation_bulk_isolates_the_client_evidence_claim(self):
+        fn_src = extract_function_source(
+            EXPLANATION_SRC, "bulk_review_element_explanations"
+        )
+        # 申告は専用キーへ（サーバの断言に戻さない）。
+        assert "evidence_rendered_ids" in fn_src
+        assert 'client_reported["evidence_rendered_ids"]' in fn_src
+
+    def test_release_review_accept_isolates_the_expansion_facts(self):
+        fn_src = extract_function_source(
+            LANDSCAPE_SRC, "accept_course_landscape_placements"
+        )
+        assert 'reported["evidence_expanded_placement_ids"]' in fn_src
+
+
 class TestReleaseReviewFrontend:
-    def test_accept_reports_presented_ids_and_evidence(self):
+    def test_accept_reports_presented_ids_and_expanded_evidence(self):
         accept = RELEASE_JS[
             RELEASE_JS.index("function acceptPlacements") :
             RELEASE_JS.index("function renderPublishStep")
         ]
         assert "presented_placement_ids" in accept
-        assert "evidence_shown" in accept
+        # 是正 F7b: 固定の `evidence_shown: true` ではなく、実際に開いた行の id を送る。
+        assert "evidence_expanded_placement_ids" in accept
+        assert "evidence_shown" not in accept
+
+    def test_expansion_facts_come_from_dom_toggle_events_only(self):
+        """開いた/開かなかったの2値のみ。滞在時間・回数は測らない（原則5）。"""
+        assert 'addEventListener("toggle"' in RELEASE_JS
+        assert "state.evidenceExpanded" in RELEASE_JS
+        assert "function expandedEvidencePlacementIds" in RELEASE_JS
+        for banned in ("dwell", "Date.now()", "setInterval("):
+            assert banned not in RELEASE_JS
 
     def test_evidence_affordance_is_rendered_with_its_anchor(self):
         assert 'data-ui-anchor="release-review.evidence"' in RELEASE_JS

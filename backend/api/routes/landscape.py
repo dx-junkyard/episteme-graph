@@ -508,7 +508,13 @@ class AcceptPlacementsRequest(BaseModel):
 
     #: 画面に描かれていた未確認配置の id（クライアント申告。サーバ導出値とは混ぜない）。
     presented_placement_ids: list[str] | None = None
-    #: 根拠（逐語引用）の折りたたみを各行に出していたか。
+    #: 根拠（逐語引用）の折りたたみを**実際に開いた**行の id（DOM の toggle イベント
+    #: 由来の事実。是正 F7 / 2026-09-10 — 「根拠を描くコードがある」ことを
+    #: 「根拠が出ていた」と申告しない）。
+    evidence_expanded_placement_ids: list[str] | None = None
+    #: 旧: 根拠（逐語引用）の折りたたみを各行に出していたか。
+    #: 是正 F7 以降も後方互換で受けるが、**サーバ導出値としては使わない**
+    #: （`client_reported` にだけ載せる）。
     evidence_shown: bool | None = None
 
 
@@ -675,21 +681,29 @@ def accept_course_landscape_placements(
         session.close()
 
     client_reported: dict | None = None
-    if body is not None and (
-        body.presented_placement_ids is not None or body.evidence_shown is not None
-    ):
+    if body is not None:
         # DC4: 来歴申告はサーバ導出値と混ぜず、専用キーに隔離する（未指定は載せない）。
-        client_reported = {}
+        reported: dict = {}
         if body.presented_placement_ids is not None:
-            client_reported["presented_placement_ids"] = sorted(
+            reported["presented_placement_ids"] = sorted(
                 {
                     str(pid or "").strip()
                     for pid in body.presented_placement_ids
                     if str(pid or "").strip()
                 }
             )[:decision_context.PRESENTED_IDS_MAX]
+        # 是正 F7（2026-09-10）: 根拠を**実際に開いた**行だけを申告として残す。
+        if body.evidence_expanded_placement_ids is not None:
+            reported["evidence_expanded_placement_ids"] = sorted(
+                {
+                    str(pid or "").strip()
+                    for pid in body.evidence_expanded_placement_ids
+                    if str(pid or "").strip()
+                }
+            )[:decision_context.PRESENTED_IDS_MAX]
         if body.evidence_shown is not None:
-            client_reported["evidence_shown"] = bool(body.evidence_shown)
+            reported["evidence_shown"] = bool(body.evidence_shown)
+        client_reported = reported or None
 
     ctx = decision_context.build_decision_context(
         basis=decision_context.BASIS_RELEASE_REVIEW_PLACEMENTS,
@@ -706,7 +720,10 @@ def accept_course_landscape_placements(
             landscape_schema.STATUS_REJECTED,
             landscape_schema.STATUS_REVIEW_REQUIRED,
         ),
-        evidence_shown=(None if body is None else body.evidence_shown),
+        # 是正 F7（DC4）: サーバは「根拠が出ていたか」を検証できないので常に None
+        # （＝不明）。クライアントの申告は client_reported にだけ残す
+        # （以前は body.evidence_shown をそのままサーバ導出値の位置に載せていた）。
+        evidence_shown=None,
         client_reported=client_reported,
     )
 

@@ -67,7 +67,13 @@
     busy: false,
     landscape: null,
     mapSaved: false,
-    published: false
+    published: false,
+    // 是正 F7（2026-09-10・六つのレンズ §4 第1波 #5 / 02_teacher.md 提案7）:
+    // 「根拠（逐語引用）の折りたたみを実際に開いた行」を DOM の toggle イベントから
+    // だけ集める。開いた/開かなかったの2値のみで、滞在時間・視線などは測らない
+    // （原則5: 監視しない）。値は来歴申告としてサーバへ渡し、サーバは検証しない
+    // （DC4）。「根拠を描くコードがある」ことを「根拠が出ていた」と申告しない。
+    evidenceExpanded: {}
   };
 
   function esc(text) {
@@ -120,6 +126,8 @@
     state.landscape = null;
     state.mapSaved = false;
     state.published = false;
+    // 是正 F7: 開き直しは前回の「開いた」を引き継がない（この確定の来歴だけを申告する）。
+    state.evidenceExpanded = {};
 
     close();
     var overlay = document.createElement("div");
@@ -329,7 +337,10 @@
         "</div>";
     }
     return (
-      '<details class="release-review-evidence" data-ui-anchor="release-review.evidence" style="margin-top:3px">' +
+      '<details class="release-review-evidence" data-ui-anchor="release-review.evidence"' +
+      ' data-placement-id="' +
+      esc((placement && placement.id) || "") +
+      '" style="margin-top:3px">' +
       '<summary style="font-size:11.5px;color:var(--color-text-tertiary);cursor:pointer">' +
       esc(EVIDENCE_SUMMARY) +
       "</summary>" +
@@ -457,6 +468,17 @@
       facts.textContent = parts.join(" ・ ");
     }
 
+    // 是正 F7: 根拠を開いた事実だけを DOM の toggle イベントから拾う（開いた行の
+    // id を記録するだけ。閉じた操作・回数・滞在時間は記録しない）。
+    var evidenceDetails = node.querySelectorAll("details.release-review-evidence");
+    for (var e = 0; e < evidenceDetails.length; e++) {
+      evidenceDetails[e].addEventListener("toggle", function () {
+        if (!this.open) return;
+        var placementId = this.getAttribute("data-placement-id");
+        if (placementId) state.evidenceExpanded[placementId] = true;
+      });
+    }
+
     var rowButtons = node.querySelectorAll(".release-review-row-btn");
     for (var b = 0; b < rowButtons.length; b++) {
       rowButtons[b].addEventListener("click", function () {
@@ -513,6 +535,17 @@
       .catch(function () {});
   }
 
+  // 是正 F7: この確定までに根拠の折りたたみを開いた行の id（DOM の toggle イベント
+  // 由来の事実。開いていなければ空配列で、それがそのまま監査に残る）。
+  function expandedEvidencePlacementIds() {
+    var ids = [];
+    var map = state.evidenceExpanded || {};
+    for (var key in map) {
+      if (Object.prototype.hasOwnProperty.call(map, key) && map[key]) ids.push(key);
+    }
+    return ids;
+  }
+
   // いま画面に「未確認（AI推定）」として描かれている配置の id（来歴申告用）。
   function pendingPlacementIds() {
     var ids = [];
@@ -543,11 +576,13 @@
         "/placements/accept",
       {
         method: "POST",
-        // 来歴申告（サーバ側の提示集合の正本はサーバが取り直す）。evidence_shown は
-        // 各行に「根拠を見る」を必ず描いている事実（引用が無い行も注記付きで出る）。
+        // 来歴申告（サーバ側の提示集合の正本はサーバが取り直す）。是正 F7:
+        // 「根拠を描いている」という固定の申告はやめ、
+        // 実際に折りたたみを開いた行の id だけを送る（1件も開いていなければ空配列
+        // ＝「開かずに確定した」が正直に残る）。確定は止めない（RR7）。
         body: JSON.stringify({
           presented_placement_ids: pendingPlacementIds(),
-          evidence_shown: true
+          evidence_expanded_placement_ids: expandedEvidencePlacementIds()
         })
       }
     )

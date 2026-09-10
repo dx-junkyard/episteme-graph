@@ -274,6 +274,52 @@ class TestExplanationAuditSortOrder:
         # DC4: 並び順は来歴申告として隔離する（サーバ導出値と混ぜない）。
         assert ctx["client_reported"] == {"sort_order": "load"}
         assert r.json()["decision_context"]["basis"] == "explanation_review.bulk"
+        # 是正 F7b（2026-09-10）: 「根拠が出ていたか」をサーバが断言しない。
+        assert ctx["evidence_shown"] is None
+
+    def test_bulk_review_isolates_the_client_evidence_claim(self, client, monkeypatch, approve_capture):
+        """是正 F7b: 根拠が描かれていた行の申告は client_reported にだけ載る（DC4）。"""
+        row = _expl_row("theory_claim", "claim_agent_1", row_id="e-claim")
+        monkeypatch.setattr(
+            "core.element_explanations.bulk_transition",
+            lambda session, doc, ids, *, new_status, user_id: {
+                "updated": [dict(row, status=new_status)],
+                "skipped": [],
+            },
+        )
+        r = client.post(
+            f"/api/admin/documents/{DOC}/element-explanations/bulk-review",
+            headers=_headers(),
+            json={
+                "action": "approve",
+                "explanation_ids": ["e-claim"],
+                "evidence_rendered_ids": ["e-claim", "", "e-claim"],
+            },
+        )
+        assert r.status_code == 200
+        ctx = approve_capture[-1]["metadata"]["decision_context"]
+        assert ctx["client_reported"] == {"evidence_rendered_ids": ["e-claim"]}
+        assert ctx["evidence_shown"] is None
+
+    def test_bulk_review_without_evidence_claim_records_nothing(self, client, monkeypatch, approve_capture):
+        """未申告なら載せない（「根拠が出ていた」とも「出ていなかった」とも書かない）。"""
+        row = _expl_row("theory_claim", "claim_agent_1", row_id="e-claim")
+        monkeypatch.setattr(
+            "core.element_explanations.bulk_transition",
+            lambda session, doc, ids, *, new_status, user_id: {
+                "updated": [dict(row, status=new_status)],
+                "skipped": [],
+            },
+        )
+        r = client.post(
+            f"/api/admin/documents/{DOC}/element-explanations/bulk-review",
+            headers=_headers(),
+            json={"action": "approve", "explanation_ids": ["e-claim"]},
+        )
+        assert r.status_code == 200
+        ctx = approve_capture[-1]["metadata"]["decision_context"]
+        assert ctx["client_reported"] is None
+        assert ctx["evidence_shown"] is None
 
     def test_bulk_dismiss_records_a_reachable_reopen_path(self, client, monkeypatch, approve_capture):
         """DC2: 却下行は編集できないので、承認と同じ PATCH を再審経路として書かない。"""

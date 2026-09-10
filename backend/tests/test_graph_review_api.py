@@ -130,6 +130,8 @@ class TestApproveComponent:
         assert "component_type" not in sql
         assert "inputs" not in sql
         assert "maturity_source = 'teacher_reviewed'" in sql
+        # 是正 F6（2026-09-10）: 解析時の警告は承認しても消さない（退避する）。
+        assert "validation_warnings" not in sql
         # 監査は実行者付き（_update_component 内の記帳は changed_by=NULL だった）
         assert events == [("teacher_review_required", "teacher_approved", _TEACHER["id"])]
 
@@ -869,3 +871,66 @@ class TestAnnotationsListAcceptsAgentSideComponentId:
         )
         assert result["annotations"] == []
         assert seen["element_id"] == _RESOLVED_COMPONENT_UUID
+
+
+class TestNodeAnalysisWarningProjection:
+    """是正 F6（2026-09-10・六つのレンズ §4 第1波 #5）。
+
+    承認時に消していた解析時の警告を退避し、レビュー画面が承認ボタンの隣に並置
+    できるようノード DTO へ読み時射影する（graph_json は書き換えない）。
+    """
+
+    def _node(self, component):
+        stored = {
+            "component_id": _COMPONENT,
+            "label": "Theory basis",
+            "graph_layer": "main",
+            "review_status": "teacher_approved",
+            "source_backing_status": "source_backed",
+        }
+        graph = tc._normalize_stored_component_graph(
+            _DOC, {"nodes": [stored], "edges": []}, [component],
+        )
+        return graph["nodes"][0]
+
+    def test_warnings_are_projected_for_approved_components(self):
+        component = _component(
+            review_status="teacher_approved",
+            validation_warnings=[{"field": "outputs.0", "message": "出力B には出典がありません。"}],
+        )
+        node = self._node(component)
+        assert node["validation_warnings"] == [
+            {"field": "outputs.0", "message": "出力B には出典がありません。"}
+        ]
+
+    def test_key_is_always_present_and_empty_without_warnings(self):
+        node = self._node(_component(review_status="teacher_approved"))
+        assert node["validation_warnings"] == []
+
+    def test_aggregated_nodes_without_a_component_row_stay_empty(self):
+        graph = tc._normalize_stored_component_graph(
+            _DOC,
+            {"nodes": [{"component_id": "theory_op_1", "label": "Theory basis"}], "edges": []},
+            [],
+        )
+        assert graph["nodes"][0]["validation_warnings"] == []
+
+    def test_malformed_or_blank_warnings_are_dropped(self):
+        component = _component(
+            review_status="teacher_approved",
+            validation_warnings=[{"field": "inputs", "message": "   "}, {"message": "入力が未設定です。"}],
+        )
+        node = self._node(component)
+        assert node["validation_warnings"] == [{"field": "", "message": "入力が未設定です。"}]
+
+    def test_projection_carries_no_numbers(self):
+        component = _component(
+            review_status="teacher_approved",
+            validation_warnings=[
+                {"field": "inputs", "message": "入力が未設定です。", "confidence": 0.4}
+            ],
+        )
+        node = self._node(component)
+        assert node["validation_warnings"] == [
+            {"field": "inputs", "message": "入力が未設定です。"}
+        ]

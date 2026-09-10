@@ -465,6 +465,26 @@ class TestReviewReasonPresentation:
         assert ".graph-review-detail-reasons-advisory" in CSS_SRC
         assert ".graph-review-detail-reasons-archived" in CSS_SRC
 
+    def test_analysis_warnings_are_placed_before_the_review_actions(self):
+        """是正 F6（2026-09-10・六つのレンズ §4 第1波 #5）。
+
+        承認時に消していた解析時の警告を並置する。承認ボタンより前に描き、押す前に
+        「疑う材料」が目に入るようにする。件数バッジは作らない（GR3）。
+        """
+        assert "node.validation_warnings" in JS_SRC
+        assert "解析時点の警告（承認は止めません。内容を確認のうえ判断してください）:" in JS_SRC
+        assert ".graph-review-detail-analysis-warnings" in CSS_SRC
+        detail = JS_SRC[JS_SRC.index("function renderDetail") :]
+        warnings_at = detail.index("graph-review-detail-analysis-warnings")
+        actions_at = detail.index("graph-review-detail-actions")
+        assert warnings_at < actions_at
+
+    def test_analysis_warnings_do_not_disable_approval(self):
+        """警告があっても承認ボタンは活性のまま（弁を増やさない・確定は止めない）。"""
+        detail = JS_SRC[JS_SRC.index("function renderDetail") :]
+        assert "var approveDisabled = isApproved(status)" in detail
+        assert 'analysisWarnings.length ? " disabled"' not in detail
+
     def test_graph_updated_at_fact_line(self):
         # いつの解析結果を見ているかを隠さない（焼き込みグラフの鮮度の事実文）。
         assert "graph_updated_at" in JS_SRC

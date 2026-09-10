@@ -101,6 +101,11 @@
     { key: "tables", label: "図表" },
   ];
 
+  // 是正 F6（2026-09-10・六つのレンズ §4 第1波 #5）: 解析時の警告は承認しても
+  // 消えない（サーバが退避する）。承認ボタンの隣に事実文として並置し、押す前に
+  // 「疑う材料」が目に入るようにする（vision §4 改訂原則1）。件数は出さない。
+  var ANALYSIS_WARNING_HEADING = "解析時点の警告（承認は止めません。内容を確認のうえ判断してください）:";
+
   // 画面文脈アダプター（assistant_screen_adapter_design.md §4.1 / SA1）。
   // 画面が AI 対話へ渡すのは「参照だけ」。描画されたテキスト・DTO 本体は渡さない。
   var SCREEN_CONTEXT_SCREEN = "graph_review";
@@ -1260,6 +1265,13 @@
     var archivedReasons = (node.review_reasons_at_analysis || []).map(function (reason) {
       return g.reviewReasonLabel(reason);
     }).filter(Boolean);
+    // 是正 F6（2026-09-10）: 解析時の警告（出典の欠落など）は承認しても消えない
+    // （サーバが退避する）。承認ボタンの隣に事実文として並置し、押す前に「疑う材料」
+    // が目に入るようにする。件数バッジは作らない（GR3: 数値を出さない）。承認は
+    // 止めない（警告があっても承認ボタンは活性のまま = 弁を増やさない）。
+    var analysisWarnings = (node.validation_warnings || []).map(function (w) {
+      return String((w && w.message) || "").trim();
+    }).filter(Boolean);
     var claims = collectClaimRefs(node);
 
     var html = "" +
@@ -1281,6 +1293,15 @@
       (archivedReasons.length
         ? '<div class="graph-review-detail-reasons graph-review-detail-reasons-archived">解析時点のメモ（承認済みのため確認は不要です）: ' +
           esc(archivedReasons.join(" / ")) + "</div>"
+        : "") +
+      // 是正 F6: 解析時の警告を承認操作の直前に並置する（承認は止めない）。
+      (analysisWarnings.length
+        ? '<div class="graph-review-detail-reasons graph-review-detail-analysis-warnings">' +
+          esc(ANALYSIS_WARNING_HEADING) +
+          analysisWarnings.map(function (message) {
+            return '<div class="graph-review-detail-analysis-warning">・' + esc(message) + "</div>";
+          }).join("") +
+          "</div>"
         : "") +
       // 論文での対応（読み時射影。承認状態は変えない — PL1/PL5）。
       paperFacingHtml(nodeId);

@@ -377,6 +377,11 @@ class ElementExplanationBulkReview(BaseModel):
     explanation_ids: list[str]
     # どの並び順の下で一括確定したかの来歴申告（TT3。任意・未指定は監査に載せない）。
     sort_order: str | None = None
+    # 是正 F7（2026-09-10・六つのレンズ §4 第1波 #5）: 根拠（逐語引用）が実際に
+    # 画面に描かれていた行の id。**クライアントの来歴申告**で、サーバは検証できない
+    # ので `client_reported` に隔離する（DC4）。未指定は監査に載せない
+    # （「根拠が出ていた」とサーバが断言しない）。
+    evidence_rendered_ids: list[str] | None = None
 
 
 @router.post("/documents/{document_id}/element-explanations/bulk-review")
@@ -459,6 +464,24 @@ def bulk_review_element_explanations(
         for r in updated_rows
     ):
         alternatives.append(decision_context.ALT_EDIT)
+    # 是正 F7（DC4）: 「根拠が画面に出ていた」はクライアントの来歴申告であって
+    # サーバが検証できる事実ではない。以前は「キューの各行は本文と evidence_quote を
+    # 描いている」というコード上の観察を根拠に、サーバが根拠提示を真と断言して
+    # いたが、それは「描画するコードがある」ことしか意味せず、
+    # 記帳が形だけ整う（六つのレンズ 02_teacher.md 提案7）。申告は専用キーに隔離し、
+    # 未申告なら載せない。
+    client_reported: dict = {}
+    if body.sort_order:
+        client_reported["sort_order"] = body.sort_order
+    if body.evidence_rendered_ids is not None:
+        client_reported["evidence_rendered_ids"] = sorted(
+            {
+                str(eid or "").strip()
+                for eid in body.evidence_rendered_ids
+                if str(eid or "").strip()
+            }
+        )[:decision_context.PRESENTED_IDS_MAX]
+
     ctx = decision_context.build_decision_context(
         basis=decision_context.BASIS_EXPLANATION_REVIEW_BULK,
         presented_ids=ids,
@@ -473,12 +496,10 @@ def bulk_review_element_explanations(
         reopen_statuses=(
             () if body.action == "approve" else (store.STATUS_CANDIDATE,)
         ),
-        # キューの各行は本文と evidence_quote / reason を描いている
-        # （deliberation.js ``_explanationReviewCardHtml``）。
-        evidence_shown=True,
-        client_reported=(
-            {"sort_order": body.sort_order} if body.sort_order else None
-        ),
+        # 是正 F7: サーバは「根拠が出ていたか」を検証できないので None（＝不明）。
+        # クライアントの申告は上の client_reported に隔離する（DC4）。
+        evidence_shown=None,
+        client_reported=(client_reported or None),
     )
     for row in result["updated"]:
         record_review_event(

@@ -1277,7 +1277,11 @@
     Array.prototype.forEach.call(host.querySelectorAll("[data-doubt-assumption-confirm]"), function (btn) {
       btn.addEventListener("click", function () {
         var id = btn.getAttribute("data-doubt-assumption-confirm");
-        var reason = window.prompt("確定の理由（既定文の選択に相当・追記可）:", "検出根拠を確認し、暗黙の前提として妥当と判断した") || "";
+        // 是正 F7（2026-09-10・六つのレンズ §4 第1波 #5）: 既定文
+        // 「検出根拠を確認し、暗黙の前提として妥当と判断した」をプリフィルしていた。
+        // Enter を押すだけで「確認した」旨が本人の言葉として記帳される状態（ゴム印の
+        // literal な実装）だったので、既定値は置かない。理由必須（空なら中断）は維持する。
+        var reason = window.prompt("確定の理由（必須・本人の言葉で）:", "") || "";
         if (!reason.trim()) return;
         apiFetch("/admin/doubt/assumptions/" + encodeURIComponent(id) + "/confirm",
           { method: "POST", body: JSON.stringify({ reason: reason }) }).then(reloadAll);
@@ -1288,7 +1292,8 @@
         var id = btn.getAttribute("data-doubt-assumption-edit");
         var statement = window.prompt("前提文を訂正:", statementOf(id)) || "";
         if (!statement.trim()) return;
-        var reason = window.prompt("確定の理由:", "文面を訂正のうえ暗黙の前提として妥当と判断した") || "";
+        // 是正 F7: こちらも既定文（「文面を訂正のうえ…」）のプリフィルを外す。
+        var reason = window.prompt("確定の理由（必須・本人の言葉で）:", "") || "";
         if (!reason.trim()) return;
         apiFetch("/admin/doubt/assumptions/" + encodeURIComponent(id) + "/confirm",
           { method: "POST", body: JSON.stringify({ statement: statement, reason: reason }) }).then(reloadAll);

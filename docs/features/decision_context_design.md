@@ -73,8 +73,11 @@
     "statuses": ["rejected", "review_required"],
     "actor": "teacher"
   },
-  "evidence_shown": true,
-  "client_reported": {"presented_placement_ids": ["..."], "evidence_shown": true}
+  "evidence_shown": null,
+  "client_reported": {
+    "presented_placement_ids": ["..."],
+    "evidence_expanded_placement_ids": ["..."]
+  }
 }
 ```
 
@@ -94,8 +97,15 @@
   無ければ `statuses` は空のまま（「戻せる」と偽らない）。`actor` は v1 では `teacher` 固定
   （学習者からの異議申立は vision §9 の未実装項目）。
 - **`evidence_shown`** — 根拠（逐語引用）が画面に出ていたか。`None` は**不明**で、
-  確認していないものを `True` にしない。
+  確認していないものを `True` にしない。**2026-09-10（是正 F7）以降、適用中の全経路で
+  常に `None`** — 「根拠が出ていたか」はサーバが検証できないので、サーバが断言する位置
+  （このトップレベルのキー）には載せない。画面側の事実は `client_reported` へ隔離する。
 - **`client_reported`** — 検証していない自己申告。未指定・空なら `None`。
+  是正 F7 以降、根拠の提示に関する申告は**DOM の実測**だけを送る
+  （リリース前の確認 = `evidence_expanded_placement_ids`（折りたたみを実際に開いた行）/
+  説明レビューキュー = `evidence_rendered_ids`（逐語引用が実際に描かれていた行））。
+  開いた/描かれたの2値のみで、滞在時間・回数・視線は測らない（原則5: 監視しない）。
+  1件も開かずに確定した事実は**空配列としてそのまま残る**（確定は止めない）。
 
 `attach_decision_context(metadata, ctx)` は**新しい dict** を返す（引数を破壊しない）。
 1リクエストで複数行を記帳する一括確定で、同じ ctx を安全に使い回すため。
@@ -121,11 +131,12 @@
 | `applied_ids` | `accept_inferred_for_documents` が実際に遷移させた行 |
 | `alternatives` | `reject` / `reconsider` / `skip_step`（各行の [却下] [再検討] とステップの「あとで」— RR4 / RR1） |
 | `reopen` | `PATCH /api/admin/landscape/placements/{placement_id}` / `rejected`・`review_required` |
-| `evidence_shown` | body の申告値（未指定は `None`） |
-| `client_reported` | body に `presented_placement_ids` / `evidence_shown` があるときだけ |
+| `evidence_shown` | **常に `None`**（是正 F7 / 2026-09-10。サーバが検証できない値をサーバ導出値の位置に載せない） |
+| `client_reported` | body の申告があるときだけ。`presented_placement_ids` / `evidence_expanded_placement_ids`（実際に開いた行）/ 旧 `evidence_shown`（後方互換で受けるが `client_reported` 内に留まる） |
 
 body（`AcceptPlacementsRequest`）に optional の `presented_placement_ids` /
-`evidence_shown` を追加した。**どちらもサーバの判断には使わない**（提示集合の正本は
+`evidence_expanded_placement_ids`（+ 後方互換の `evidence_shown`）を持つ。
+**いずれもサーバの判断には使わない**（提示集合の正本は
 サーバ側の取り直し）。レスポンスに `decision_context` を追加し、画面が一致の事実文を
 出せるようにした（既存キー `course_id` / `confirmed` / `skipped_documents` は不変。
 GET のエンベロープは非改変）。
@@ -144,8 +155,8 @@ GET のエンベロープは非改変）。
 | `alternatives` | 常に `deselect`（チェックボックス）、承認時は `dismiss`（行ごとの [却下]）。`edit` は**適用行がすべて開幕素材（document スコープ）のときだけ** — 要素スコープの行には「本文を編集」が出ない（`deliberation.js::_explanationReviewCardHtml`）ので、出ていない代替を「あった」と書かない |
 | `reopen`（承認） | `PATCH /api/admin/element-explanations/{explanation_id}` / statuses は**空**。本文編集は旧行を `superseded` にして新 revision を作る（履歴保持）が、**status を `candidate` へ戻す経路は無い** |
 | `reopen`（却下） | `POST /api/admin/documents/{document_id}/reanalyze` / `candidate`。却下行は `_EDITABLE_STATUSES`（candidate / approved）に入らないため PATCH では覆せない。実際の復帰経路は再解析による新しい candidate の再生成である |
-| `evidence_shown` | `True`。キューの各行は本文に加えて `evidence_quote` / `reason` を描いている（`deliberation.js` の `_explanationReviewCardHtml`、`evidence.evidence_quote ? ...` の行） |
-| `client_reported` | `sort_order` が指定されたときだけ（TT3 の作法をそのまま踏襲） |
+| `evidence_shown` | **`None`**（是正 F7 / 2026-09-10。以前はキューの各行が `evidence_quote` / `reason` を描いているというコード上の観察を根拠にサーバが `True` を断言していたが、それは「描画するコードがある」ことしか意味しない） |
+| `client_reported` | `sort_order`（TT3 の作法）と `evidence_rendered_ids`（是正 F7。逐語引用が実際に描かれていた行を `deliberation.js` が DOM から実測して申告する）。いずれも指定されたときだけ |
 
 既存の `sort_metadata`（TT3）・`"bulk": True`・部分成功セマンティクスは不変。レスポンスに
 `decision_context` を追加した（既存キー `updated` / `skipped` は不変）。
@@ -184,8 +195,12 @@ GET のエンベロープは非改変）。
   「表示と確認した配置に差がありました（画面を再読み込みしてください）」を1行出す
   （差があっても公開は止めない — RR7）。数値は既存の「未確認 N件」以外に増やさない。
 - accept の body には `presented_placement_ids`（画面に `inferred` として描かれていた行）と
-  `evidence_shown: true` を載せる。`true` が正直であるのは、**引用の有無に関わらず全行に
-  折りたたみを出す**ようにしたためで、「根拠の提示が行われた」という事実に対応する。
+  `evidence_expanded_placement_ids`（**根拠の折りたたみを実際に開いた行**）を載せる
+  （是正 F7 / 2026-09-10）。固定の `evidence_shown: true` はやめた — 「引用の有無に
+  関わらず全行に折りたたみを出している」のは事実だが、それは「根拠が提示された」であって
+  「根拠が見られた」ではなく、後から見分けられなくなる。開いた行の id は `<details>` の
+  `toggle` イベントだけから集め（開いた/開かなかったの2値。滞在時間は測らない）、1件も
+  開いていなければ空配列がそのまま監査に残る（確定は止めない — RR7）。
 
 ---
 
@@ -220,8 +235,12 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
 - 適用済みの各経路のソースに `build_decision_context(` / `attach_decision_context(` /
   それぞれの `basis` 定数が現れること（DC1。経路が増えたら本テストに1ケース足す —
   2026-09-10 時点は §4.1〜§4.3 の3経路 + `basis` 命名規約の検査）
-- リリース前の確認 JS が `presented_placement_ids` / `evidence_shown` を送り、
-  `release-review.evidence` アンカー付きの折りたたみと再審の事実文を描くこと
+- リリース前の確認 JS が `presented_placement_ids` / `evidence_expanded_placement_ids` を
+  送り（固定の `evidence_shown` は送らない）、`release-review.evidence` アンカー付きの
+  折りたたみと再審の事実文を描くこと。開いた事実は `toggle` イベントだけから集め、
+  滞在時間・回数（`Date.now()` / `setInterval` / `dwell`）を測らないこと
+- 適用済みの全経路が `evidence_shown=None` を渡し、`evidence_shown=True` の断言が
+  ソースに現れないこと（是正 F7 / DC4）
 
 加えて `test_release_review.py`（提示と適用の一致・不一致・来歴申告の隔離）と
 `test_teacher_triage_api.py`（説明の一括承認・一括却下の `basis` / 代替 / 再審経路）が
@@ -258,3 +277,24 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
 §4.3）。文書側の追随はこのとき漏れており、
 [六つのレンズ調査](../architecture/vision_ux_gap_six_lenses_2026-09-10.md) §4 第1波 #11 の
 文書ズレとして 2026-09-10 に解消した（`docs/vision.md` §4/§9 と本書 §4/§6/§7）。
+
+### 8.2 追記（2026-09-10）— `evidence_shown` の隔離（是正 F7b）
+
+[六つのレンズ調査](../architecture/vision_ux_gap_six_lenses_2026-09-10.md) §4 第1波 #5
+（`six_lenses_2026-09-10/02_teacher.md` §1-8 と提案7）の是正。**「根拠が画面に出ていたか」を
+サーバが断言するのをやめた**。
+
+- `routes/element_explanations.py` — bulk-review の `evidence_shown=True`（コード上の観察を
+  根拠にした断言）を `None` にし、body に optional `evidence_rendered_ids` を追加。
+- `routes/landscape.py` — accept が body の申告値をトップレベル `evidence_shown` へ載せ替えて
+  いたのをやめ（常に `None`）、body に optional `evidence_expanded_placement_ids` を追加。
+  旧 `evidence_shown` は後方互換で受けるが `client_reported` に留まる。
+- `frontend/public/js/admin-release-review.js` — `<details class="release-review-evidence">` に
+  `data-placement-id` を付け、`toggle` イベントで開いた行だけを `state.evidenceExpanded` に
+  記録して送る（固定の `evidence_shown: true` を削除）。モーダルを開き直すとリセットする。
+- `frontend/public/js/deliberation.js` — 一括承認・一括却下が、選択行のうち逐語引用が実際に
+  描かれていた行（`.deliberation-annotation-reason` の実在）を DOM から実測して申告する。
+- 判断（迷った点）: 提案7 の (c)「1件も開かずに確定しようとしたら確認1行を出す」は本波では
+  入れなかった。リリース前の確認に確認ダイアログが無いこと自体が別の指摘（02_teacher.md
+  §1-7）で、そこと合わせて設計するのが筋だと判断した。空配列がそのまま記帳されるので、
+  「開かずに確定した」事実は今の実装でも失われない。

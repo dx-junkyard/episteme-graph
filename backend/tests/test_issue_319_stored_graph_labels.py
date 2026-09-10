@@ -43,7 +43,19 @@ def _load_normalize_stored_component_graph():
         re.MULTILINE | re.DOTALL,
     )
     assert match, "_normalize_stored_component_graph not found"
-    code = "from __future__ import annotations\n" + match.group(1)
+    # 是正 F6（2026-09-10）: 解析時の警告のノード射影は純関数
+    # `_node_validation_warnings`（依存なし）なので実物を同じ名前空間へ載せる。
+    warnings_match = re.search(
+        r"(^def _node_validation_warnings\(.*?)(?=^def )",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert warnings_match, "_node_validation_warnings not found"
+    code = (
+        "from __future__ import annotations\n"
+        + warnings_match.group(1)
+        + match.group(1)
+    )
     ns = {
         "__builtins__": __builtins__,
         "split_main_label": split_main_label,

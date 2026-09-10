@@ -1312,10 +1312,17 @@ def _normalize_payload(body: TheoryComponentUpsertRequest, chunk: dict | None = 
         "expand_if_unlearned": True,
         "requires_source_display": True,
     }
+    # 是正 F6（2026-09-10、六つのレンズ §4 第1波 #5）: 承認時に警告を空配列で
+    # 消していた（`payload["validation_warnings"] = []`）。承認可能性の判定
+    # （`_validate_for_review`）は blocking な警告を 422 で止めるので、通過後に
+    # 残るのは非 blocking な解析時メモだけであり、それを消すと「何を見て承認したか」
+    # を後から再構成できない（vision §4 改訂原則1 / 原則3 = 情報を落とさない）。
+    # 消去はやめ、承認後もそのまま**退避**する（ノードの
+    # `review_reasons_at_analysis` と同じ流儀。表示は読み時に「解析時点のメモ」と
+    # 宣言する。承認自体は止めない）。
     payload["validation_warnings"] = _validation_warnings(payload)
     if payload.get("status") == "teacher_reviewed":
         _validate_for_review(payload)
-        payload["validation_warnings"] = []
     elif payload.get("status") not in ("candidate", "draft", "rejected"):
         raise HTTPException(status_code=422, detail="Invalid status")
     return payload
@@ -1778,6 +1785,24 @@ def _resolve_component_reference(reference: str, components: list[TheoryComponen
     return None
 
 
+def _node_validation_warnings(component: TheoryComponentOut | None) -> list[dict]:
+    """ノードに並置する解析時の警告（是正 F6）。
+
+    数値は載せない（``field`` と事実文 ``message`` だけ）。component 行を持たない
+    集約 main ノードは空のまま返す（無いものを「無い」と偽らない = キーは常に出す）。
+    """
+    warnings = getattr(component, "validation_warnings", None) or []
+    out: list[dict] = []
+    for item in warnings:
+        if not isinstance(item, dict):
+            continue
+        message = str(item.get("message") or "").strip()
+        if not message:
+            continue
+        out.append({"field": str(item.get("field") or ""), "message": message})
+    return out
+
+
 def _build_component_graph_payload(document_id: str, components: list[TheoryComponentOut]) -> dict:
     paper_components = list(components)
     components = paper_components + _domain_components_from_cartridge()
@@ -1791,6 +1816,8 @@ def _build_component_graph_payload(document_id: str, components: list[TheoryComp
             "component_type": component.component_type,
             "component_type_text": component.component_type_text,
             "summary": component.summary,
+            # 是正 F6: 解析時の警告は承認後も残す（承認画面が並置する）。
+            "validation_warnings": _node_validation_warnings(component),
         }
         for idx, component in enumerate(components)
     ]
@@ -2088,6 +2115,9 @@ def _normalize_stored_component_graph(document_id: str, graph: dict, components:
             # 上のコメント参照: 承認済みノードの解析時点メモ / 参考情報フラグ。
             "review_reasons_at_analysis": node_reasons_at_analysis,
             "review_reasons_advisory": node_reasons_advisory,
+            # 是正 F6: 解析時の警告（出典の欠落など）を承認画面に並置できるように
+            # live component から読み時に射影する（承認しても消えない = 退避）。
+            "validation_warnings": _node_validation_warnings(component),
             "parent_component_id": str(node.get("parent_component_id") or ""),
             "member_component_ids": node.get("member_component_ids") if isinstance(node.get("member_component_ids"), list) else [],
             "visual_label": str(node.get("visual_label") or ""),
@@ -3580,10 +3610,19 @@ def _transition_component_review(
       ``legacy_ids`` / ``figure_id`` / ``figure_key`` 等（agent ID 解決・図対応の正本）
       を破壊する。
     このため列を限定した UPDATE に置き換えた。承認時は PUT 経路
-    （``_normalize_payload``）との整合で maturity_source='teacher_reviewed'・
-    validation_warnings=[] も併せて更新する。監査は実行者 user_id 付きで記帳する
+    （``_normalize_payload``）との整合で maturity_source='teacher_reviewed' も併せて
+    更新する（``validation_warnings`` は消さない — 下記 F6）。監査は実行者 user_id 付きで記帳する
     （``_update_component`` 内の記帳は changed_by=NULL だった — GR4 の帰属を保つ）。
     却下時の伝播（``_propagate_rejected_component``）も従来と同じ。
+
+    是正 F6（2026-09-10、六つのレンズ §4 第1波 #5）: 承認時に
+    ``validation_warnings`` 列を空配列で上書きして解析時の警告を消していたのをやめた。
+    承認可能性は ``_component_approval_problems`` がサーバ側で強制するが、その基準
+    （出典は ``source_refs`` **または** ``evidence_claims``）は ``_validation_warnings``
+    の基準（``source_refs`` のみ）より緩いので、承認できる component にも解析時の
+    警告が残ることがある。それを消すと「何を見て承認したか」を後から再構成できない
+    （vision §4 改訂原則1 / 原則3）。警告はそのまま**退避**し、承認画面が
+    「解析時点のメモ」として並置する（承認は止めない）。
     """
     session = _pg_session()
     try:
@@ -3594,7 +3633,6 @@ def _transition_component_review(
                     SET status = :status,
                         review_status = :review_status,
                         maturity_source = 'teacher_reviewed',
-                        validation_warnings = CAST('[]' AS jsonb),
                         updated_at = now()
                     WHERE id = CAST(:id AS uuid)
                 """),

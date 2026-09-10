@@ -199,6 +199,50 @@ class TestApprovalServerGate:
         assert "body" not in src.split("current_user")[0]
 
 
+class TestApprovalKeepsAnalysisWarnings:
+    """是正 F6（2026-09-10・六つのレンズ §4 第1波 #5 / 05_ai.md 提案2）。
+
+    承認時に解析時の警告を空配列で消していた（``validation_warnings = CAST('[]' AS jsonb)``
+    と ``payload["validation_warnings"] = []``）。消すと「何を見て承認したか」を
+    後から再構成できない（vision §4 改訂原則1 / 原則3）。警告は退避し、承認画面が
+    並置する。承認可能性の判定（サーバ強制）は変えない。
+    """
+
+    #: 空配列の代入（SQL / Python どちらの綴りも）。
+    CLEARED = re.compile(
+        r"validation_warnings\s*=\s*(?:CAST\(\s*'\[\]'|\[\s*\]|json\.dumps\(\s*\[\s*\])"
+    )
+
+    def test_transition_does_not_clear_warnings(self):
+        src = extract_function_source(TC_SRC, "_transition_component_review")
+        assert self.CLEARED.search(src) is None
+
+    def test_normalize_payload_does_not_clear_warnings_on_approval(self):
+        src = extract_function_source(TC_SRC, "_normalize_payload")
+        assert self.CLEARED.search(src) is None
+        # 警告の導出そのものは残す（保持であって計算の廃止ではない）。
+        assert "_validation_warnings(payload)" in src
+
+    def test_approval_gate_is_unchanged(self):
+        """警告を残すことで承認が止まるようにはしない（弁を増やさない）。"""
+        src = extract_function_source(TC_SRC, "approve_theory_component")
+        assert "_component_approval_problems(existing)" in src
+        assert "validation_warnings" not in src
+
+    def test_graph_nodes_project_warnings_for_the_review_screen(self):
+        src = extract_function_source(TC_SRC, "_node_validation_warnings")
+        # 数値は載せない（field と事実文 message のみ）。
+        assert '"message"' in src and '"field"' in src
+        for banned in ("confidence", "weight", "score"):
+            assert banned not in src
+
+    def test_review_screen_places_warnings_next_to_the_approve_button(self):
+        assert "ANALYSIS_WARNING_HEADING" in JS_SRC
+        assert "node.validation_warnings" in JS_SRC
+        # 件数バッジは作らない（GR3）。
+        assert "validation_warnings.length + \"件\"" not in JS_SRC
+
+
 def TC_SRC_FIELDS():
     import routes.theory_components as tc
 
