@@ -6079,6 +6079,41 @@ button.ls-course-evidence-head {
   padding-left: 8px;
 }
 
+/* 是正 F5: 誤解メモは AI の候補と本人の確定を見た目でも分ける。
+   候補は「判決」に見えないよう中立色・点線（未確認であることを色でも示す）。 */
+.mc-badge-candidate {
+  background: var(--color-bg-secondary);
+  color: var(--color-text-secondary);
+}
+
+.mc-candidate {
+  border-left: 3px dashed var(--color-border-secondary);
+}
+
+.mc-dismissed-row {
+  border-left: 3px solid var(--color-border-secondary);
+  opacity: 0.75;
+}
+
+.mc-wrong {
+  margin-bottom: 2px;
+}
+
+.mc-correct {
+  color: var(--color-text-secondary);
+}
+
+.mc-no-correction {
+  font-style: italic;
+}
+
+.mc-older > summary {
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin: 6px 0;
+}
+
 /* Narrative reading layer from NarrativeAnnotator (issue #360) */
 .ls-graph-narrative-summary {
   margin: 0 0 10px;

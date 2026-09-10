@@ -64,7 +64,8 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   （/api/admin/llm-usage）/ `llm_models`（/api/admin/llm-models）/ `personal_map.router`
   （/api/learning）/ `personal_map.me_router`（/api/me）/ `my_records.me_router`（/api/me）/
   `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
-  `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）
+  `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）/
+  `disclosure`（/api/disclosure）
 - **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（22本、`main.py` の登録順）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
@@ -208,6 +209,12 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | POST | `/api/learning/tension/{trace_id}/dismiss` | 本人の candidate 行のみ | 却下（dismissed 遷移。行は保持） |
 | POST | `/api/learning/tension/{trace_id}/connect` | 本人の open/articulated 行のみ + 接続先 document の閲覧可否を fail-closed 検証 | 確定済み tension をグラフ node/edge に接続（`connected_refs` に記録） |
 
+#### 誤解メモ（misconception、是正 F5）
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| POST | `/api/learning/courses/{cid}/topics/{tid}/misconceptions/{entry_id}/review` | 本人の candidate エントリのみ（受講ゲート + 語彙外は 422） | AI が候補として記録した誤解メモへの3択（`agreed`→confirmed / `disagreed`・`verdict_wrong`→dismissed。行は保持。監査 `entity_type='misconception'`） |
+
 #### 構造帰属型の問い（structure_anchor）
 
 | メソッド | パス | 権限 | 説明 |
@@ -315,6 +322,25 @@ intention / 軽量アンカーは行削除せず状態遷移のみで保持す�
 > 既存の計器レスポンス6本（llm-usage metrics / doubt metrics / discuss observation-status /
 > interest-dashboard / bridge-insights / stumble-summary）にはトップレベル
 > `indicator_id` を1キー追加してある（キー集合をテストで固定している経路には足さない）。
+
+### 可視性6軸カタログ（`routes/disclosure.py`、読み取り専用）
+
+各データ種別が「誰に見えて、どこへ送られ、いつ取り消せるか」の**宣言だけ**を公開する
+（正本は `backend/core/disclosure_axes.py`、設計は
+`docs/features/disclosure_axes_design.md` の DA1〜DA6）。**値は1つも返さない**ため
+ロールゲートを掛けず、認証済みなら学習者も読める（DA3: 外部の AI に送っている当事者が
+読めなければ告知にならない）。宛先は provider 名までで（DA2）、実行時の
+`llm_provider` 設定から解決して差し込む（カタログには `{provider}` プレースホルダしか
+無い）。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/disclosure` | 認証済み全ユーザー（`_get_current_user`） | 6軸の宣言（`axes`）+ 全データ種別（`data_kinds`: `label` / `what` / 対話 UI に置く1行 `note` / 軸ごとの事実文 `axes` / `ai_touchpoints`（操作・送られるもの・U層 feature）/ `without_ai` / `retention` / `aggregation` / `portability` / `source` / `basis` / `design_doc`）+ `provider`（key と表示名）+ 固定事実文 `note` + `k_anonymity` |
+| GET | `/api/disclosure/{data_kind}` | 同上 | 1件。未知の data_kind は 404 |
+
+> 書き込みメソッドを作らない（カタログはコードが正本。DA5: 同意を取る層ではない）。
+> `frontend/nginx.conf` に `/api/disclosure/` と `= /api/disclosure` の2 location が必須
+> （欠けると SPA フォールバックが index.html を 200 で返し、事実文が黙って消える）。
 
 ### わたしの記録（`routes/my_records.py`、読み取り専用）
 

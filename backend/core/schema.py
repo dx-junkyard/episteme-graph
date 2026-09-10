@@ -424,6 +424,12 @@ AUDIT_ENTITY_CITATION = "citation"
 AUDIT_ENTITY_TENSION = "tension"
 AUDIT_ENTITY_STRUCTURE_ANCHOR = "structure_anchor"
 
+# 誤解メモの本人レビュー（是正 F5 / 六つのレンズ 提案3, 2026-09-10）。
+# AI が候補として書いた誤解メモに対する本人の3択（agreed / disagreed / verdict_wrong）を
+# candidate → confirmed / dismissed の状態遷移として記帳する（tension と同型）。
+# 本人の逐語・訂正文そのものは載せない（metadata は decision / course_id / topic_id のみ）。
+AUDIT_ENTITY_MISCONCEPTION = "misconception"
+
 # 分野の地図（Field Atlas）
 AUDIT_ENTITY_ATLAS_SKELETON = "atlas_skeleton"
 AUDIT_ENTITY_ATLAS_ASSIST = "atlas_assist"
@@ -530,6 +536,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_CITATION,
     AUDIT_ENTITY_TENSION,
     AUDIT_ENTITY_STRUCTURE_ANCHOR,
+    AUDIT_ENTITY_MISCONCEPTION,
     AUDIT_ENTITY_ATLAS_SKELETON,
     AUDIT_ENTITY_ATLAS_ASSIST,
     AUDIT_ENTITY_ATLAS_BINDING,

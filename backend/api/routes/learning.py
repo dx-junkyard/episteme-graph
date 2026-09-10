@@ -72,6 +72,8 @@ from services import (
     record_interest_trace,
     record_learner_articulated_tension,
     record_topic_check_pass,
+    review_personal_misconception,
+    MISCONCEPTION_DECISIONS,
     resolve_document_access,
     resolve_interest_trace,
     save_course_data,
@@ -4212,6 +4214,61 @@ def dismiss_anchor_route(
     if result is None:
         raise HTTPException(status_code=404, detail="Anchor candidate not found")
     return {"ok": True, **result}
+
+
+# ---------------------------------------------------------------------------
+# 誤解メモ（AI 候補 → 本人の3択）— 是正 F5 / 六つのレンズ 提案3
+# ---------------------------------------------------------------------------
+# 誤解メモは非LLM の文字列一致で検出した **AI の候補** にすぎない。「誤解」として
+# 確定するのはこの経路の本人の3択だけで、却下も行を消さず status 遷移で保持する（P4）。
+# 語彙は R層の自己確認と共有（core/reconstruction/schema.py::SELF_CHECK_VALUES）。
+
+
+class MisconceptionReviewRequest(BaseModel):
+    """誤解メモ候補への本人の判断（agreed / disagreed / verdict_wrong）。"""
+
+    decision: str
+
+
+@router.post("/courses/{course_id}/topics/{topic_id}/misconceptions/{entry_id}/review")
+def review_misconception_route(
+    course_id: str,
+    topic_id: str,
+    entry_id: str,
+    body: MisconceptionReviewRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """誤解メモ候補を本人が確定 / 却下する（本人のみ・非LLM・migration 不要）。
+
+    - ``agreed``: そう、これは私の誤解だった → ``confirmed``
+    - ``disagreed``: これは誤解ではない → ``dismissed``（行は残す）
+    - ``verdict_wrong``: AI の訂正のほうが違う → ``dismissed``（理由を分けて記帳する）
+
+    語彙外は 422、候補が見つからない / すでに確定・却下済みは 404（他人の学習状態には
+    そもそも到達できない — 更新は user_id 一致の行だけを対象にする）。
+    """
+    decision = str(body.decision or "").strip()
+    if decision not in MISCONCEPTION_DECISIONS:
+        raise HTTPException(status_code=422, detail="invalid misconception decision")
+
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not find_course_topic(course_data, topic_id):
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    result = review_personal_misconception(
+        current_user["id"], course_id, topic_id, entry_id, decision,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Misconception candidate not found")
+
+    return {
+        "ok": True,
+        **result,
+        # 更新後の個人レイヤーをそのまま返す（フロントは chat 応答と同じ経路でマージする）。
+        "personal_layer": get_personal_layer(current_user["id"], course_id),
+    }
 
 
 # ---------------------------------------------------------------------------

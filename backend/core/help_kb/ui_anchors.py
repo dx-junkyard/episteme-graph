@@ -78,6 +78,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # レクチャー再生バーの「短く聴く」トグル（是正 F3 / 六つのレンズ 提案1）。既定 OFF。
         # サーバ側の自動省略は撤去済みで、畳むのは本人のこの操作だけ。
         "material.lecture-condensed",
+        # 誤解メモの3択（是正 F5 / 六つのレンズ 提案3）。右パネル「コンテキスト」タブの
+        # 「AI が訂正を提案した箇所（未確認）」カードの操作行。
+        "rightpanel.misconception-review",
     }
 )
 
@@ -105,6 +108,8 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # （分野の地図オーバーレイの「推定の糸」トグル）を追加し、全26種がマップ済み。
 # 2026-09-10 に是正 F3（六つのレンズ 提案1・レクチャー沈黙適応の撤去）の
 # material.lecture-condensed（再生バーの「短く聴く」トグル）を追加した。
+# 2026-09-10 に是正 F5（六つのレンズ 提案3・誤解メモの候補化）の
+# rightpanel.misconception-review（誤解メモ候補の3択）を追加した。
 # 件数の正本は KNOWN_UI_ANCHOR_IDS と test_help_ui_anchors.py（ここには書き写さない）。
 # check.discuss / check.skip の両者は「確認問題の選択肢」を1つの節で
 # 並べて説明しているため、同じ参照先を指す。
@@ -166,6 +171,8 @@ UI_ANCHORS: dict[str, str] = {
     "atlas.relation-threads": "student/02-student.md#relation-threads",
     # レクチャー再生バーの「短く聴く」トグル＝前に触れた箇所を畳む（消さずに畳む）。
     "material.lecture-condensed": "student/02-student.md#lecture-condensed",
+    # 誤解メモの3択＝AI が訂正を提案した箇所を、本人が確定 / 却下する操作行。
+    "rightpanel.misconception-review": "student/02-student.md#misconception-review",
 }
 
 

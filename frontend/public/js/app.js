@@ -46,6 +46,8 @@
     // ── 構造帰属（Structure-Anchored Questions） ──
     anchorDigest: null,     // 帰属候補ダイジェスト {items: [...]}（StructureAnchorAgent Stage 2）
     anchorDeferred: {},     // [あとで] で今セッション中は隠す trace_id の集合
+    // ── 誤解メモ（是正 F5: AI 候補 → 本人の3択） ──
+    misconceptionDeferred: {}, // [あとで] で今セッション中は隠す entry id の集合
     pendingSelection: null, // 方法A: 「ここについて質問」で選択したテキスト {text, segment_id}
     // discuss モード（論文と話す）のスコープ選択。トピック切替で discuss を離れても
     // 選択値自体は保持する（再入場時に前回の選択を引き継ぐ）。
@@ -629,13 +631,18 @@
         const cls = tActive ? "ni sub act" : tStatus === "locked" ? "ni sub lk" : "ni sub";
         const dotCls = tStatus === "completed" ? "dot-g" : tStatus === "in_progress" ? "dot-b" : "dot-x";
 
-        // Issue #145: 個人誤解がある場合は注釈マーカーを表示
+        // Issue #145 / 是正 F5: 誤解メモは「AI が提案した候補」と「本人が確定したもの」を
+        // 区別して示す。候補は件数を出さず印だけにする（判決の数を積み上げない）。
         const personalLayer = state.personalLayer || {};
         const misconsByTopic = personalLayer.misconceptions_by_topic || {};
-        const misconsCount = (misconsByTopic[t.id] || []).length;
-        const annotationBadge = misconsCount > 0
-          ? '<span class="mc-badge" title="' + misconsCount + '件の誤解が記録されています">⚑ ' + misconsCount + '</span>'
-          : "";
+        const misconEntries = misconsByTopic[t.id] || [];
+        const misconConfirmed = misconEntries.filter(isConfirmedMisconception).length;
+        const misconCandidates = misconEntries.filter(isCandidateMisconception).length;
+        const annotationBadge = misconConfirmed > 0
+          ? '<span class="mc-badge" title="' + misconConfirmed + '件の誤解メモを自分で確定しています">⚑ ' + misconConfirmed + '</span>'
+          : misconCandidates > 0
+            ? '<span class="mc-badge mc-badge-candidate" title="AI が訂正を提案した箇所があります（未確認）">⚑</span>'
+            : "";
         const support = state.learningSupport;
         const supportOrigin = support && support.origin;
         const supportBadge = supportOrigin && supportOrigin.topic_id === t.id
@@ -2123,6 +2130,163 @@
     renderSourcesTab();
   }
 
+  // ── 誤解メモ（是正 F5 / 六つのレンズ 提案3） ───────────────────────────
+  // 誤解メモは AI が訂正マーカーの文字列一致で見つけた**候補**にすぎない。候補には
+  // 「誤解」「間違い」と断定する文言を使わず、確定（confirmed）したものにだけ使う。
+  // 件数バッジは出さない（判決の数を積み上げない）。表示を絞るときは古い順に畳む
+  // （消さない・P4）。最新3件だけを一等地に出すのは tension ダイジェストと同じ制約。
+  const MISCONCEPTION_VISIBLE_CANDIDATES = 3;
+  const MISCONCEPTION_VISIBLE_CONFIRMED = 5;
+  const MISCONCEPTION_NO_CORRECTION_FACT =
+    "AI が訂正を示唆しましたが、訂正文を抽出できませんでした。";
+
+  function isCandidateMisconception(m) {
+    return !!m && (!m.status || m.status === "candidate");
+  }
+
+  function isConfirmedMisconception(m) {
+    return !!m && m.status === "confirmed";
+  }
+
+  function isDismissedMisconception(m) {
+    return !!m && m.status === "dismissed";
+  }
+
+  function misconceptionBodyHtml(m) {
+    var html = '<div class="mc-wrong">『' + escHtml(m.wrong || "") + "』</div>";
+    if (m.correct) {
+      html += '<div class="mc-correct">AI の訂正: ' + escHtml(m.correct) + "</div>";
+    } else {
+      html += '<div class="mc-correct mc-no-correction">' +
+        escHtml(MISCONCEPTION_NO_CORRECTION_FACT) + "</div>";
+    }
+    return html;
+  }
+
+  function misconceptionCandidateCardHtml(m) {
+    var id = escHtml(m.id || "");
+    var html = '<div class="cc mc-annotation mc-candidate" data-mc-card="' + id + '">';
+    html += '<div class="lb">' + escHtml(m.label || "訂正の提案") + "（未確認）</div>";
+    html += misconceptionBodyHtml(m);
+    html += '<div class="lx-trace-actions" data-ui-anchor="rightpanel.misconception-review">';
+    html += '<button class="lx-ghost" data-mc-decision="agreed" data-mc-id="' + id +
+      '">そう、これは私の誤解だった</button>';
+    html += '<button class="lx-ghost secondary" data-mc-decision="disagreed" data-mc-id="' + id +
+      '">これは誤解ではない</button>';
+    html += '<button class="lx-ghost secondary" data-mc-decision="verdict_wrong" data-mc-id="' + id +
+      '">AI の訂正のほうが違う</button>';
+    html += '<button class="lx-ghost secondary" data-mc-defer="' + id + '">あとで</button>';
+    html += "</div></div>";
+    return html;
+  }
+
+  function misconceptionRecordCardHtml(m, cls) {
+    var html = '<div class="cc mc-annotation ' + cls + '">';
+    html += '<div class="lb">⚑ ' + escHtml(m.label || "訂正") + "</div>";
+    html += misconceptionBodyHtml(m);
+    return html + "</div>";
+  }
+
+  function renderMisconceptionSection(topic) {
+    const personalLayer = state.personalLayer || {};
+    const misconsByTopic = personalLayer.misconceptions_by_topic || {};
+    const entries = topic ? (misconsByTopic[topic.id] || []) : [];
+    if (!entries.length) return "";
+
+    const candidates = entries.filter(function (m) {
+      return isCandidateMisconception(m) && !state.misconceptionDeferred[m.id];
+    });
+    const confirmed = entries.filter(isConfirmedMisconception);
+    const dismissed = entries.filter(isDismissedMisconception);
+
+    let html = "";
+
+    if (candidates.length) {
+      html += '<div class="ps mc-candidates"><h4>AI が訂正を提案した箇所（未確認）</h4>';
+      html += '<div class="mc-layer-note">AI の応答に訂正の気配があった箇所です。' +
+        'あなたの理解だったのかどうかは、あなたが決めます。答えなくても構いません。</div>';
+      candidates.slice(0, MISCONCEPTION_VISIBLE_CANDIDATES).forEach(function (m) {
+        html += misconceptionCandidateCardHtml(m);
+      });
+      const olderCandidates = candidates.slice(MISCONCEPTION_VISIBLE_CANDIDATES);
+      if (olderCandidates.length) {
+        html += '<details class="mc-older"><summary>これより前の提案も見る</summary>';
+        olderCandidates.forEach(function (m) {
+          html += misconceptionCandidateCardHtml(m);
+        });
+        html += "</details>";
+      }
+      html += "</div>";
+    }
+
+    if (confirmed.length) {
+      html += '<div class="ps mc-confirmed"><h4>あなたが確定した誤解メモ</h4>';
+      html += '<div class="mc-layer-note">あなたが「自分の誤解だった」と確定した記録です。</div>';
+      confirmed.slice(0, MISCONCEPTION_VISIBLE_CONFIRMED).forEach(function (m) {
+        html += misconceptionRecordCardHtml(m, "mc-confirmed-row");
+      });
+      const olderConfirmed = confirmed.slice(MISCONCEPTION_VISIBLE_CONFIRMED);
+      if (olderConfirmed.length) {
+        html += '<details class="mc-older"><summary>これより前の記録も見る</summary>';
+        olderConfirmed.forEach(function (m) {
+          html += misconceptionRecordCardHtml(m, "mc-confirmed-row");
+        });
+        html += "</details>";
+      }
+      html += "</div>";
+    }
+
+    if (dismissed.length) {
+      html += '<div class="ps mc-dismissed">';
+      html += '<details class="mc-older"><summary>受け入れなかった訂正も見る</summary>';
+      html += '<div class="mc-layer-note">あなたが受け入れなかった訂正です。記録は消えません。</div>';
+      dismissed.forEach(function (m) {
+        html += misconceptionRecordCardHtml(m, "mc-dismissed-row");
+      });
+      html += "</details></div>";
+    }
+
+    return html;
+  }
+
+  function bindMisconceptionActions(el) {
+    if (!el) return;
+    el.querySelectorAll("[data-mc-decision]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        reviewMisconception(
+          this.getAttribute("data-mc-id"), this.getAttribute("data-mc-decision"),
+        );
+      });
+    });
+    el.querySelectorAll("[data-mc-defer]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        // 今セッション中は隠すだけ（候補のまま保持する。押し付けない）。
+        state.misconceptionDeferred[this.getAttribute("data-mc-defer")] = true;
+        renderContextTab();
+      });
+    });
+  }
+
+  async function reviewMisconception(entryId, decision) {
+    if (!entryId || !decision || !state.courseId || !state.currentTopicId) return;
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + encodeURIComponent(state.courseId) +
+          "/topics/" + encodeURIComponent(state.currentTopicId) +
+          "/misconceptions/" + encodeURIComponent(entryId) + "/review",
+        { method: "POST", body: JSON.stringify({ decision: decision }) },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.personal_layer) {
+          state.personalLayer = data.personal_layer;
+        }
+      }
+    } catch (_) { /* best-effort: 失敗しても学習を止めない */ }
+    renderSidebar();
+    renderContextTab();
+  }
+
   function renderContextTab() {
     const el = document.getElementById("tab-context");
     if (!state.course || !state.currentTopicId) {
@@ -2174,21 +2338,13 @@
       html += "</div></div>";
     }
 
-    // Issue #145: 誤解は personal_layer から取得（マスターデータには含まれない）
-    const personalLayer = state.personalLayer || {};
-    const misconsByTopic = personalLayer.misconceptions_by_topic || {};
-    const misconceptions = topic ? (misconsByTopic[topic.id] || []) : [];
-    if (misconceptions.length > 0) {
-      html += '<div class="ps"><h4>あなたの誤解メモ <span class="mc-bd">' + misconceptions.length + '件</span></h4>';
-      html += '<div class="mc-layer-note">過去のチャットで指摘された理解の誤りです。</div>';
-      misconceptions.forEach(function (m) {
-        html += '<div class="cc mc-annotation"><div class="lb" style="color:#A32D2D">⚑ ' + escHtml(m.label || "訂正") + "</div>";
-        html += escHtml(m.wrong) + "<br>→ " + escHtml(m.correct) + "</div>";
-      });
-      html += "</div>";
-    }
+    // Issue #145: 誤解メモは personal_layer から取得（マスターデータには含まれない）
+    // 是正 F5: 候補 / 確定 / 却下を分けて描く（renderMisconceptionSection）。
+    html += renderMisconceptionSection(topic);
 
     el.innerHTML = html;
+
+    bindMisconceptionActions(el);
 
     // Bind prerequisite clicks
     el.querySelectorAll("[data-prereq]").forEach(function (pEl) {
@@ -2230,7 +2386,8 @@
     html += '<div class="progress-head" style="margin:20px 0 8px"><h3 style="font-size:14px">学習サマリ</h3></div>';
     html += '<div class="ps"><div class="prog-ov">';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-info)">' + (p.learning_concepts || 0) + '</div><div class="lbl">学習中</div></div>';
-    html += '<div class="prog-card"><div class="val" style="color:var(--color-text-warning)">' + (p.misconceptions || 0) + '</div><div class="lbl">訂正された誤解</div></div>';
+    // 是正 F5: 数に入るのは本人が確定した誤解メモだけ（AI の候補は数えない）。
+    html += '<div class="prog-card"><div class="val" style="color:var(--color-text-warning)">' + (p.misconceptions || 0) + '</div><div class="lbl">確定した誤解メモ</div></div>';
     // 2026-09-05: 「連続学習日数」のカードを撤去（理解サイクル UC4）。
     html += "</div></div>";
 

@@ -23,6 +23,7 @@ from core.personal_graph import graph_data as personal_graph_data
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
 from core.schema import (
+    AUDIT_ENTITY_MISCONCEPTION,
     AUDIT_ENTITY_STRUCTURE_ANCHOR,
     AUDIT_ENTITY_TENSION,
     PaperStructure,
@@ -325,8 +326,13 @@ def get_personal_layer(user_id: str, course_id: str) -> dict:
     """ユーザー固有の学習レイヤーデータを返す。
 
     Issue #145: マスターコースとは分離して管理される個人データ。
-    - misconceptions_by_topic: トピックIDをキーとした誤解リスト
+    - misconceptions_by_topic: トピックIDをキーとした誤解メモ（**AI の候補**）のリスト
     - chat_anchors: チャット履歴から生成された注釈データ（将来拡張用）
+
+    誤解メモは読み時に正規化して返す（是正 F5）: ``status`` の無い旧行は ``candidate``、
+    中身のない訂正文は ``correct=None`` になり、各行は安定 ``id`` を持つ。UI は
+    candidate を「AI が訂正を提案した箇所（未確認）」として仮説文体で出し、
+    ``confirmed`` にだけ「誤解」と書く。
     """
     session = _pg_session()
     try:
@@ -345,7 +351,7 @@ def get_personal_layer(user_id: str, course_id: str) -> dict:
         # （Phase P-0。素の dict アクセスを新規に書かない）。
         data = personal_graph_data.parse_personal_graph(raw)
         return {
-            "misconceptions_by_topic": dict(data.misconceptions_by_topic),
+            "misconceptions_by_topic": personal_graph_data.normalized_misconceptions_by_topic(data),
             "chat_anchors": dict(data.chat_anchors),
         }
     finally:
@@ -395,10 +401,11 @@ def record_personal_misconception(
     topic_id: str,
     misconception: dict,
 ) -> None:
-    """learning_states.personal_graph.misconceptions_by_topic に誤解を記録する。
+    """learning_states.personal_graph.misconceptions_by_topic に誤解メモを記録する。
 
-    受講者が学習チャットで検出した誤解は、マスターコースではなくこの per-user 状態に保存する。
-    per-topic で最新 5 件まで保持する（マスターの misconceptions と同じ上限）。
+    受講者が学習チャットで検出した誤解メモは、マスターコースではなくこの per-user 状態に
+    保存する。**件数上限は無い**（是正 F5: かつての「per-topic 最新5件」は 6件目で古い行が
+    黙って消えるため 2026-09-10 に撤廃した。原則3 情報を落とさない）。
     未受講の場合はレコードを自動生成してから書き込む（オーナーが自コースで学習する場合など）。
     """
     session = _pg_session()
@@ -422,7 +429,7 @@ def record_personal_misconception(
 
         personal_raw = row[0] if row and row[0] is not None else {}
         raw = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
-        # 「先頭に追加・最新5件」の上限ロジックはアクセサ側が正本（Phase P-0）。
+        # 「先頭に追加」（上限なし・古い行を消さない）はアクセサ側が正本（Phase P-0）。
         data = personal_graph_data.parse_personal_graph(raw)
         data = personal_graph_data.append_misconception(data, topic_id, misconception)
 
@@ -2034,9 +2041,17 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     learning = sum(1 for c in concepts if c.get("status") == "learning")
 
     # Issue #145: 個人誤解は personal_graph から取得（マスターデータには含まれない）
+    # 是正 F5: 数に入れるのは**本人が確定した**もの（confirmed）だけ。AI が訂正を提案した
+    # だけの候補を「訂正された誤解」として数えない（原則1: AI は候補まで）。
     personal = get_personal_layer(user_id, course_id)
     by_topic = personal.get("misconceptions_by_topic", {}) or {}
-    total_misconceptions = sum(len(v) for v in by_topic.values())
+    total_misconceptions = sum(
+        1
+        for entries in by_topic.values()
+        for entry in (entries or [])
+        if isinstance(entry, dict)
+        and entry.get("status") == personal_graph_data.MISCONCEPTION_STATUS_CONFIRMED
+    )
 
     sessions_list = []
     pg_session = _pg_session()
@@ -2506,8 +2521,20 @@ def truncate_chat_and_supersede(
 
 
 # ---------------------------------------------------------------------------
-# Misconception detection
+# Misconception detection（AI は候補まで・確定は本人の3択。是正 F5）
 # ---------------------------------------------------------------------------
+
+#: 本人の3択の語彙。R層の自己確認と共有する
+#: （``core/reconstruction/schema.py::SELF_CHECK_VALUES``。``core.check_review`` が再エクスポート）。
+#: - ``agreed``: そう、これは私の誤解だった → ``confirmed``
+#: - ``disagreed``: これは誤解ではない → ``dismissed``
+#: - ``verdict_wrong``: AI の訂正のほうが違う → ``dismissed``（理由を分けて記帳する）
+_MISCONCEPTION_DECISION_ACTIONS: dict[str, tuple[str, str]] = {
+    "agreed": (candidate_flow.ACTION_CONFIRM, ""),
+    "disagreed": (candidate_flow.ACTION_DISMISS, "本人が「これは誤解ではない」と判断"),
+    "verdict_wrong": (candidate_flow.ACTION_DISMISS, "本人が「AI の訂正のほうが違う」と判断"),
+}
+MISCONCEPTION_DECISIONS: tuple[str, ...] = tuple(_MISCONCEPTION_DECISION_ACTIONS)
 
 
 def detect_and_record_misconception(
@@ -2517,11 +2544,21 @@ def detect_and_record_misconception(
     topic_id: str,
     user_message: str,
     ai_response: str,
+    message_id: str | None = None,
 ) -> dict | None:
-    """AI応答から誤解を検出し、ユーザー個別の learning_states.personal_graph に記録する。
+    """AI応答の訂正シグナルを**候補として** learning_states.personal_graph に記録する。
 
-    Issue #133: マスターコースは不変に保ち、誤解はユーザーごとの learning_states に保存する。
-    レスポンス用にはマージ済みの topics をコピーして返す。
+    Issue #133: マスターコースは不変に保ち、誤解メモはユーザーごとの learning_states に保存する。
+
+    是正 F5（六つのレンズ 提案3, 2026-09-10）:
+
+    - 検出は非LLM の文字列一致にすぎないので、書き込みは常に ``status='candidate'``。
+      「誤解」として確定するのは本人の3択（``review_personal_misconception``）だけである。
+    - 訂正文が抽出できなかった場合に「（AIの応答を参照してください）」という中身のない行を
+      「あなたは間違っていた」として残すのをやめた。``correct`` は空のまま（読み出し時に
+      ``None``）保持し、UI が事実文で正直に出す。
+    - ``message_id`` を持たせる（機能3 の書き直し・削除で派生痕跡を supersede する将来の
+      連携のため。取れない経路では None）。
     """
     wrong = user_message
     if len(wrong) > 60:
@@ -2535,15 +2572,13 @@ def detect_and_record_misconception(
             correct = line.split(matched_marker, 1)[1].strip()
             break
 
-    if not correct:
-        correct = "（AIの応答を参照してください）"
-
     today = datetime.date.today()
-    misconception = {
-        "label": f"{today.month}/{today.day} の訂正",
-        "wrong": wrong,
-        "correct": correct,
-    }
+    misconception = personal_graph_data.new_misconception_entry(
+        label=f"{today.month}/{today.day} の訂正",
+        wrong=wrong,
+        correct=correct,
+        message_id=message_id,
+    )
 
     try:
         record_personal_misconception(user_id, course_id, topic_id, misconception)
@@ -2556,6 +2591,126 @@ def detect_and_record_misconception(
     # Issue #145: 個人レイヤー更新をそのまま返す（マスターデータは不変）
     personal = get_personal_layer(user_id, course_id)
     return {"personal_layer": personal}
+
+
+def review_personal_misconception(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    entry_id: str,
+    decision: str,
+) -> dict | None:
+    """誤解メモの候補に対する**本人の3択**を状態遷移として記帳する（是正 F5）。
+
+    遷移の可否判定・監査の呼び出し順は共通プリミティブ ``core.candidate_flow``
+    （:data:`core.personal_graph.graph_data.MISCONCEPTION_VOCAB`）に委ね、
+    JSONB の書き換えだけをここで行う（新しいワークフローを書かない）。
+
+    - 対象は ``status='candidate'`` の行だけ（確定済み・却下済みを押し直せない）。
+    - 却下は行を消さず ``dismissed`` へ遷移させる（P4）。理由の入力は本人に要求しない
+      （``require_dismiss_reason=False``。サーバ側の固定文を監査 reason に入れる）。
+    - 監査は ``theory_review_events``（``entity_type='misconception'``）。本人の逐語・
+      訂正文そのものは載せない。
+
+    Returns:
+        ``{"entry_id", "status", "decision"}``。対象が無い / 候補でない / 書き込みに
+        失敗したときは ``None``（呼び出し側が 404 にする）。
+
+    Raises:
+        ValueError: ``decision`` が語彙外のとき（呼び出し側が 422 にする）。
+    """
+    decision = str(decision or "").strip()
+    if decision not in _MISCONCEPTION_DECISION_ACTIONS:
+        raise ValueError(f"unknown misconception decision: {decision!r}")
+    action, audit_reason = _MISCONCEPTION_DECISION_ACTIONS[decision]
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        if not row:
+            return None
+        raw = row[0] if isinstance(row[0], dict) else json.loads(row[0] or "{}")
+        data = personal_graph_data.parse_personal_graph(raw)
+        found = personal_graph_data.find_misconception(data, topic_id, entry_id)
+        if found is None:
+            return None
+
+        def _apply_status(*, entity_id, old_status, new_status, actor_id, reason, metadata):
+            result = personal_graph_data.set_misconception_status(
+                data, topic_id, entity_id, new_status, decision=decision,
+            )
+            if result is None:  # pragma: no cover — 直前に find_misconception で確認済み
+                raise candidate_flow.CandidateTransitionError("misconception entry vanished")
+            updated, _old = result
+            session.execute(
+                sa_text("""
+                    UPDATE learning_states
+                    SET personal_graph = CAST(:personal AS jsonb), updated_at = now()
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                """),
+                {
+                    "user_id": user_id,
+                    "course_id": course_id,
+                    "personal": json.dumps(
+                        personal_graph_data.to_jsonb(updated), ensure_ascii=False,
+                    ),
+                },
+            )
+            session.commit()
+            return {"status": new_status}
+
+        def _record_audit(**kwargs):
+            record_review_event(
+                kwargs["entity_type"],
+                kwargs["entity_id"],
+                kwargs["old_status"],
+                kwargs["new_status"],
+                kwargs["actor_id"],
+                kwargs.get("metadata") or {},
+            )
+
+        flow = candidate_flow.CandidateFlow(
+            vocab=personal_graph_data.MISCONCEPTION_VOCAB,
+            audit_entity_type=AUDIT_ENTITY_MISCONCEPTION,
+            apply_status=_apply_status,
+            record_audit=_record_audit,
+            # 学習者自身の却下に理由入力を要求しない（candidate_flow の docstring 準拠）。
+            require_dismiss_reason=False,
+        )
+        transition = getattr(flow, action)(
+            entry_id,
+            current_status=found["status"],
+            actor_id=str(user_id),
+            reason=audit_reason,
+            # 逐語（wrong / correct）は監査に載せない。
+            metadata={"decision": decision, "course_id": course_id, "topic_id": topic_id},
+        )
+    except candidate_flow.CandidateTransitionError as exc:
+        session.rollback()
+        logger.info("review_personal_misconception rejected: %s", exc)
+        return None
+    except Exception:
+        session.rollback()
+        logger.warning(
+            "review_personal_misconception failed for user=%s course=%s topic=%s",
+            user_id, course_id, topic_id, exc_info=True,
+        )
+        return None
+    finally:
+        session.close()
+
+    return {
+        "entry_id": entry_id,
+        "status": transition["new_status"],
+        "decision": decision,
+    }
 
 
 # ---------------------------------------------------------------------------

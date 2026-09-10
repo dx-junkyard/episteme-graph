@@ -155,7 +155,17 @@ RAG 応答）で送る。
   - `support_mode` / `status_label` / `origin`
   - `content_grounding`（出所: 教材 / 別の資料 / モデル生成 — 下記）
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
-- **誤解検出**: 回答に訂正シグナルが含まれると個人レイヤーに記録され、トピックに誤解バッジが付く。
+- **誤解検出（AI は候補まで・是正 F5, 2026-09-10）**: 回答に訂正シグナル（`訂正：` 等の
+  文字列一致・非LLM）が含まれると個人レイヤーへ **`status="candidate"`** で記録される
+  （`services.detect_and_record_misconception` → `core/personal_graph/graph_data.py`）。
+  「誤解」として確定するのは本人の3択
+  `POST /api/learning/courses/{id}/topics/{tid}/misconceptions/{entry_id}/review`
+  （`decision ∈ {agreed, disagreed, verdict_wrong}` — R層の自己確認と同じ語彙。語彙外は 422）
+  だけで、却下は行を消さず `dismissed` へ遷移する（P4）。遷移の可否判定・監査は
+  `core/candidate_flow.py`（`entity_type='misconception'`）。トピックのバッジは
+  確定件数（`⚑ N`）と未確認の候補あり（数字なしの `⚑`）を区別し、進捗の
+  「確定した誤解メモ」には confirmed だけが入る。**per-topic 5件の上限は撤廃**
+  （古い行を黙って消さない。表示は古い順に畳む）。
 - **前提知識チェック**: 本人が「理解している」と答えていない前提があれば逆質問
   （`mode="prerequisite_review"`）。判定に使うのは本人の明示的な答えの記帳だけで、
   チャット履歴（接触の痕跡）は使わない。前提の**説明**は
