@@ -96,7 +96,7 @@ F1・F3・F4・F5 は「学習者について AI が判断し挙動を変える�
 | 8 | export の権限・来歴・監査。groups email 停止。権限未確認 3 endpoint の再監査（unanswered-queries / reanalyze / PUT materials pdf） | F10 / B4① / H-04〜06 | S | — |
 | 9 | 外部 LLM 転送の事実文（マニュアル + 各対話 UI）と可視性 6 軸の宣言モジュール `disclosure_axes.py` + `GET /api/disclosure` | B2 最小形 | S–M | 同意ボタンの有無のみ D4 |
 | 10 | PDF 入力を untrusted とする信頼境界のガードレールテスト | 既知 B-01 | S | — |
-| 11 | 文書ズレ 3 件: `layer_registry.md:79`（discuss Phase 3 実装済み）/ vision §9 decision_context 行を 3 経路に / 討論 §7.2 最優先「自分で確かめた痕跡」の §9 転記 | 既知 所見 | S | — |
+| 11 | 文書ズレ 3 件: `layer_registry.md:79`（discuss Phase 3 実装済み）/ vision §9 decision_context 行を 3 経路に / 討論 §7.2 最優先「自分で確かめた痕跡」の §9 転記 | 既知 所見 | S | → **2026-09-10 解消**（`layer_registry.md` discuss 行 / `vision.md` §4・§9 + `decision_context_design.md` §3〜§8.1 / `vision.md` §9 に「自分で確かめた痕跡」1行）。§10 の非スコープ追随 5 件も同時に処理 |
 | 12 | 知識オブジェクトの版化（`stable_key` + `superseded_at`、persist の DELETE 撤去、W層 meaning commit の旧本文退避、ガードレール拡張） | F2 / K1 / F-01・D-11・D-47・E-13・A-22 | L | **D1** |
 
 1〜11 は互いに独立で並列可。12 は D1 の一言を待つ。
@@ -236,6 +236,11 @@ C4・C6(1)・C5（D6 込み）/ S 規模の既知 B-02・B-06・F-02・F-05・F-
 - **push**: 調査時点で未 push は 6 コミット。各波の終わりに push。
 - **設計書の非スコープ節の追随**: 「非スコープ」と書かれたが別層で実装済みが 5 件（discuss
   Phase 3 / ディスカバリー §7 / VA層 radar 着地 / 構造帰属の教員集約 / 教材図 svg_source）。
+  → **2026-09-10 解消**。追記先は `discussion_mode_design.md`（ステータス行・§6.4・§8）/
+  `paper_discovery_design.md`（§7 見出しと注記・§8）/ `structure-anchored-questions.md`
+  （§7 Stage 3・§8-5。冒頭の追補は 2026-09-03 に済み）/ `teaching_figure_studio_design.md`
+  §13.1-6。VA層 `atlas_vector_anchoring_design.md` §11 は 2026-08-29 の取り消し線注記で
+  すでに追随済みだった（**date 順検索**への着地予測が非スコープのまま残るのは正しい）。
 - **「Phase 3」の多義性**: 設計書ごとに番号が独立し、同じ「Phase 3」が 4 つの別物を指す。
   会話では設計書名を添える。
 

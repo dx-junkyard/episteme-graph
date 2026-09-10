@@ -78,8 +78,9 @@
 }
 ```
 
-- **`basis`** — どの画面のどの一括確定か。語彙は `BASIS_RELEASE_REVIEW_PLACEMENTS` /
-  `BASIS_EXPLANATION_REVIEW_BULK`（新経路を足すときはここに定数を1本足す）。
+- **`basis`** — どの画面のどの一括確定か。語彙の正本は `core/decision_context.py` の
+  `BASIS_*` 定数（`BASIS_RELEASE_REVIEW_PLACEMENTS` / `BASIS_EXPLANATION_REVIEW_BULK` /
+  `BASIS_ATLAS_BINDING_SAVE`。新経路を足すときはここに定数を1本足し、§4 に節を足す）。
 - **`presented` / `applied`** — id は正規化（空除去・重複除去）・ソートのうえ
   `PRESENTED_IDS_MAX`（200）件まで列挙する。`count` は切り詰め前の件数で、`truncated` が
   切り詰めの事実を残す。**一致判定は切り詰め前の集合**で行う（表示上限の副作用で判定が
@@ -103,7 +104,11 @@
 
 ---
 
-## 4. 適用先（2026-09-04 時点の2経路）
+## 4. 適用先
+
+> **適用先の正本は `backend/core/decision_context.py` の `BASIS_*` 定数**（本節に件数を
+> 書き写さない — §5-6）。v1（2026-09-04）は §4.1 / §4.2 の2経路で、2026-09-10 時点は
+> §4.3（学習マップの対応付け保存）を含む3経路。
 
 ### 4.1 リリース前の確認 ステップ2「この配置で次へ」
 
@@ -145,6 +150,23 @@ GET のエンベロープは非改変）。
 既存の `sort_metadata`（TT3）・`"bulk": True`・部分成功セマンティクスは不変。レスポンスに
 `decision_context` を追加した（既存キー `updated` / `skipped` は不変）。
 
+### 4.3 学習マップの対応付け保存（2026-09-10 追記・v1 の後に追加）
+
+`PUT /api/admin/courses/{course_id}/atlas-binding`（リリース前の確認 ステップ1
+「この対応で次へ」も同じ経路。実装は `routes/atlas.py::save_course_atlas_binding`）
+
+| 項目 | 値 |
+|---|---|
+| `basis` | `atlas_binding.save` |
+| `presented_ids` | 画面に並んでいた topic id（サーバがコース構造から取り直す） |
+| `applied_ids` | 実際に `atlas_node_id` を確定させた topic id |
+| `alternatives` | `deselect`（各行の「（対応なし）」）/ `skip_step`（ウィザードの「あとで」— RR1） |
+| `reopen` | `PUT /api/admin/courses/{course_id}/atlas-binding` / statuses は**空**（status 語彙を持たない層なので「戻せる status がある」と偽らない） |
+| `evidence_shown` | `None`（提案の根拠が画面に出ていたかはサーバから検証できないため、無条件 `True` にしない） |
+
+レスポンスに `decision_context` を追加（既存キー `course_id` / `cartridge_id` /
+`bindings_applied` / `bindings_skipped` は不変）。
+
 ---
 
 ## 5. UI（リリース前の確認）
@@ -170,7 +192,8 @@ GET のエンベロープは非改変）。
 ## 6. 段階適用の残り
 
 vision §9 は本層を「段階適用中」と位置づけている。v1 で入れたのは**一括確定の2経路**だけで、
-以下は未適用（着手時は本書 §4 に節を足し、`basis` 定数を1本足す）。
+以下は未適用（着手時は本書 §4 に節を足し、`basis` 定数を1本足す）。**学習マップの対応付け
+保存は 2026-09-10 に §4.3 として追加済み**（本節の残りからは外れた）。
 
 - 単発の承認（component / claim / 説明の個別 approve・dismiss、W層注釈の commit）
 - 骨格の凍結（atlas freeze）・ライブラリの凍結
@@ -194,8 +217,9 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
 - 代替が空・未知語彙・`basis` 空・`reopen_path` 空は `ValueError`（DC3）
 - 上限 200 の切り詰めと `truncated`、一致判定が切り詰め前の集合であること
 - `client_reported` の隔離・未指定時 `None`・入力 dict の別名共有をしないこと（DC4）
-- 一括確定2経路のソースに `build_decision_context(` / `attach_decision_context(` /
-  それぞれの `basis` 定数が現れること（DC1）
+- 適用済みの各経路のソースに `build_decision_context(` / `attach_decision_context(` /
+  それぞれの `basis` 定数が現れること（DC1。経路が増えたら本テストに1ケース足す —
+  2026-09-10 時点は §4.1〜§4.3 の3経路 + `basis` 命名規約の検査）
 - リリース前の確認 JS が `presented_placement_ids` / `evidence_shown` を送り、
   `release-review.evidence` アンカー付きの折りたたみと再審の事実文を描くこと
 
@@ -226,3 +250,11 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
      偽らない）に反する。実際に効く経路（再解析による新しい candidate）を書いた。
   2. `edit` を説明の代替に無条件では入れなかった。「本文を編集」は開幕素材行にしか
      出ないため、適用行がすべて document スコープのときだけ記帳する。
+
+### 8.1 追記（2026-09-10）— 学習マップの対応付け保存への適用
+
+`PUT /api/admin/courses/{course_id}/atlas-binding`（`routes/atlas.py::save_course_atlas_binding`）を
+3本目の適用先として追加した（`BASIS_ATLAS_BINDING_SAVE` / `_BINDING_REOPEN_PATH`。値の詳細は
+§4.3）。文書側の追随はこのとき漏れており、
+[六つのレンズ調査](../architecture/vision_ux_gap_six_lenses_2026-09-10.md) §4 第1波 #11 の
+文書ズレとして 2026-09-10 に解消した（`docs/vision.md` §4/§9 と本書 §4/§6/§7）。

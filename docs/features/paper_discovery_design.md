@@ -278,10 +278,19 @@ Phase 1 の `POST /ingest` は同期・少数件。まとまった数を流せ�
 
 ---
 
-## 7. Phase 4 / v2 構想 — コーパス回遊と地図の端（提案・実装対象外）
+## 7. Phase 4 / v2 構想 — コーパス回遊と地図の端（→ 別層で実装済み）
 
-> → 2026-08-27 専用設計書 [corpus_roaming_design.md](corpus_roaming_design.md) を起票（設計中）。
-> 以後、本節の内容の正本はそちら。
+> → **2026-08-27 に別層で実装済み**（解消注記 2026-09-10）。専用設計書
+> [corpus_roaming_design.md](corpus_roaming_design.md)（CR1〜CR10・migration 073）が本節を
+> 引き受け、同日 Phase A〜D まで実装された。**以後、本節の内容の正本はそちら**で、以下の
+> 本文は構想時点の記録として残す。対応は ①「コース無しで論文と議論する」→ Phase B
+> （センチネル `_doc:{document_id}`・正本は `core/discuss/context.py`）②「論文を渡り歩く」
+> → Phase A「論文の海」（`core/corpus_view.py` + `corpus-sea.js`）③「地図の端」→ Phase C
+> （縁 = `landscape_gap_signals` の学習者向け事実文 / 外 =
+> `paper_discovery_subscriptions.last_search_found_new`）+ Phase D（関心信号
+> `frontier_interest` と教員向け k-匿名集約）。**v1 非スコープのまま**なのは、学習者への
+> 引用グラフ表示・未取り込み候補のタイトル開示、および document 直付けセッションでの
+> tension/anchor confirm・着地画面（`corpus_roaming_design.md` §9 の非スコープ）。
 
 > 本節は方向性の合意を記録するもの。着手時は専用設計書を切る（discuss Phase 3 の規約に
 > 従う）。学習者向け表示を含むため、実装前に各層の不変条項（P1/P3/P4/数値非表示）との
@@ -325,7 +334,10 @@ Phase 1 の `POST /ingest` は同期・少数件。まとまった数を流せ�
 - 全自動取り込み・スケジュール実行（PD1。発見の worker 化は Phase 2 のバッチ取り込みでも
   行わない — 検索はモーダルを開いたときだけ）
 - G層 next_steps ルール・通知・バッジ（PD8。運用実測後に再判断）
-- 学習者向け表示のすべて（§7 は専用設計書マター）
+- ~~学習者向け表示のすべて（§7 は専用設計書マター）~~ → **2026-08-27 に別層で実装済み**
+  （解消注記 2026-09-10）。[corpus_roaming_design.md](corpus_roaming_design.md) Phase A〜D
+  （migration 073）。学習者向けで**なお非スコープ**なのは同書 §9 の項目（引用グラフ表示・
+  未取り込み候補のタイトル開示・配置異議・G層ルール等）
 - ~~引用グラフ API 接続・embedding ランキング（Phase 3）~~ → 2026-08-27 に実装（§10）
 - arXiv 以外の供給源（bioRxiv / HAL 等。client インターフェースの一般化で拡張可能な形には
   しておくが実装しない）

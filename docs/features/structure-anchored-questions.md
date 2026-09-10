@@ -203,6 +203,10 @@ tension の方式に倣い `interest_traces.payload` の拡張で足りる。
   **「『消去』ステージの導出根拠に引っかかっていた問い」**へ構造化。
 - 教員側は **k-匿名化集約**で「この教材はこの導出に疑問が集中」を可視化
   → 教材改善ループ（評価利用は禁止, P3/P7）。
+  → **2026-09-03 実装済み**（解消注記 2026-09-10）: `GET /api/admin/courses/{course_id}/anchor-insights`
+  （集約の正本 `core/structure_anchor/insights.py`・`anchor_type` × `doubt_type` の粗い断面・
+  k=3 は `core/privacy.py` 正本・レンジのみ）。粒度は **stage 単位**に決着し（§8-5 の論点）、
+  claim 単位は採らなかった。詳細は本書冒頭の追補。再訪キューの構造化は未実装。
 
 ---
 
@@ -213,3 +217,6 @@ tension の方式に倣い `interest_traces.payload` の拡張で足りる。
 3. C（回答末尾の確認プロンプト）を出す**ゲート条件**（毎回は出さない）。
 4. 構造を持たない教材での**縮退ルール**の許容範囲。
 5. 教員向け集約の粒度（stage 単位 / claim 単位）と k の値。
+   → **2026-09-03 に決着**（解消注記 2026-09-10）: 粒度は `anchor_type` × `doubt_type`
+   （`anchor_type == "stage"` の行だけ stage 別セルに割る。個別要素まで割らない）、
+   k は既存レイヤーと同じ **k=3**（`core/privacy.py` が正本）。
