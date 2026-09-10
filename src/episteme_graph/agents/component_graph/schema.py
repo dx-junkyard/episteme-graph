@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 GRAPH_SCHEMA_VERSION = "0.1.0"
 COMPONENT_GRAPH_VERSION = "v1"
@@ -448,13 +449,6 @@ class ComponentGraphEdge:
     # visualised from the field, never guessed from the relation label string.
     polarity: str = ""
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

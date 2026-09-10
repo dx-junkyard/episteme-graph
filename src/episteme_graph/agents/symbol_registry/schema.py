@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 SYMBOL_REGISTRY_VERSION = "v1"
 
@@ -67,13 +68,6 @@ class SymbolRecord:
     confidence: float = 0.0
     reason: str = ""
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

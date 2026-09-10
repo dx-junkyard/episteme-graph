@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 
+from episteme_graph.agents.validation import ValidationIssue as SharedValidationIssue
+
 COMPONENTS_VERSION = "v1"
 
 CORE_COMPONENT_TYPES = [
@@ -260,11 +262,12 @@ class ComponentRecord:
 
 
 @dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
+class ValidationIssue(SharedValidationIssue):
+    """Shared issue + the component/claim the issue is attached to.
+
+    ``target_type`` / ``target_id`` let ``repair._issue_dict`` tell the model
+    exactly which component to fix; no other agent needs them.
+    """
     target_type: str | None = None
     target_id: str | None = None
 

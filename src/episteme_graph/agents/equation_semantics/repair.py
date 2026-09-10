@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.llm_step import MAX_REPAIR_ATTEMPTS, run_repair_loop
+
 from .llm_client import EquationSemanticsLLMClient
 from .normalizer import EquationNormalizer
 from .prompt import EquationSemanticsPromptFactory
@@ -26,7 +28,7 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
 # Deterministic, source-aware label validation for the final record (#368).
 _LABEL_NORMALIZER = EquationNormalizer()
@@ -75,30 +77,34 @@ class EquationSemanticsRepairer:
         validator: object,
         image: dict | None = None,
     ) -> EquationRecord:
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info("Equation semantics repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
-            messages = prompt_factory.build_repair_messages(
-                llm_input, raw_output, validation_issues, cartridge
-            )
-            try:
-                raw_output = llm_client.generate(messages, image=image)
-            except Exception as exc:
-                logger.warning("Repair LLM call failed: %s", exc)
-                break
-
-            record = _parse_record(raw_output, llm_input, candidate)
+        def _validate(record: EquationRecord) -> list[ValidationIssue]:
+            # The validator works on a whole result, so wrap the single record.
             partial = EquationSemanticsResult(
                 document_id=llm_input.document_id,
                 cartridge_id=llm_input.cartridge_id,
                 equation_candidates=[],
                 equations=[record],
             )
-            remaining = validator.validate(partial, cartridge)  # type: ignore[attr-defined]
-            if not [i for i in remaining if i.severity == "error"]:
-                return record
-            validation_issues = remaining
+            return validator.validate(partial, cartridge)  # type: ignore[attr-defined]
 
-        return _fallback_record(llm_input, candidate, "Repair failed after max attempts")
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_repair_messages(
+                llm_input, raw, issues, cartridge
+            ),
+            # The vision payload rides along on every attempt; the client is
+            # resolved at call time (tests swap ``agent._llm_client`` wholesale).
+            generate=lambda messages: llm_client.generate(messages, image=image),
+            parse=lambda raw: _parse_record(raw, llm_input, candidate),
+            validate=_validate,
+            # Success yields the bare record (no validation_issues field).
+            on_success=lambda record, _remaining: record,
+            on_exhausted=lambda _issues: _fallback_record(
+                llm_input, candidate, "Repair failed after max attempts"
+            ),
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Equation semantics",
+        )
 
 
 def _parse_record(

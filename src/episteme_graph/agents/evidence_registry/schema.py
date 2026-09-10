@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 EVIDENCE_ROLES = [
     "source_quote",         # PDF 原文の直接引用
@@ -52,13 +53,6 @@ class EvidenceRecord:
     # Sentence-level records point back at their block-level record (issue #363).
     parent_evidence_id: str | None = None
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

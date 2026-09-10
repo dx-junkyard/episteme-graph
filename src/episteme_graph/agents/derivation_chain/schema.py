@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 
 DEFAULT_OPERATION = "transform"
@@ -137,13 +138,6 @@ class DerivationChainRecord:
     review_required: bool = True
     review_reasons: list[str] = field(default_factory=list)
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

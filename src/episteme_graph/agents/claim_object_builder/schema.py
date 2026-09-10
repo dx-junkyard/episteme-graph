@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 SUPPORT_STATUSES = [
     "source_backed",            # PDF 原文に裏付けがある
@@ -208,13 +209,6 @@ class ClaimObjectRecord:
     synthesis_method: str = ""
     review_reasons: list[str] = field(default_factory=list)
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

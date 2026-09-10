@@ -11,6 +11,8 @@ import logging
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+
 from .cartridge_loader import CartridgeLoader
 from .input_builder import RhetoricalRoleInputBuilder
 from .llm_client import RhetoricalRoleLLMClient
@@ -121,13 +123,7 @@ class RhetoricalRoleAgent:
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
             return None
-        try:
-            return self._cartridge_loader.load(cartridge_id)
-        except FileNotFoundError:
-            logger.warning(
-                "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-            )
-            return None
+        return load_cartridge_or_none(self._cartridge_loader, cartridge_id)
 
     @staticmethod
     def _build_result(

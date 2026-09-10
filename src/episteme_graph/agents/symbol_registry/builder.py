@@ -16,6 +16,8 @@ from __future__ import annotations
 import logging
 import re
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+
 from .cartridge_loader import CartridgeContext, CartridgeLoader
 from .schema import (
     SYMBOL_REGISTRY_VERSION,
@@ -178,13 +180,7 @@ class SymbolRegistryBuilder:
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
             return None
-        try:
-            return self._cartridge_loader.load(cartridge_id)
-        except FileNotFoundError:
-            logger.warning(
-                "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-            )
-            return None
+        return load_cartridge_or_none(self._cartridge_loader, cartridge_id)
 
     @staticmethod
     def _alias_map(cartridge: CartridgeContext | None) -> dict[str, str]:
