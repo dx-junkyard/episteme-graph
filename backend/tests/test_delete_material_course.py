@@ -347,6 +347,68 @@ class TestDeleteMaterial:
         assert "course-2" not in data["deleted_courses"]
         mock_pg.commit.assert_called_once()
 
+    @patch("routes.admin.record_review_event")
+    @patch("routes.admin._pg_session")
+    def test_delete_material_is_audited(
+        self, mock_session, mock_record, client, auth_headers
+    ):
+        """原則14（是正 F11）: 教材の物理削除は不可逆なので必ず記帳する。
+
+        削除は学習者に届いている教材・チャンク・解析成果をまとめて消す。記帳が
+        無ければ「誰がいつ何を消したか」を後から再構成できない。
+        """
+        from core.schema import AUDIT_ENTITY_MATERIAL
+
+        mock_pg = MagicMock()
+        mock_pg.execute.return_value.fetchone.return_value = (
+            "doc-uuid-1", "テスト教材", "test.pdf", "mat-001",
+        )
+        mock_pg.execute.return_value.fetchall.return_value = []
+        mock_session.return_value = mock_pg
+
+        resp = client.request(
+            "DELETE",
+            "/api/admin/materials/mat-001",
+            json={"confirm_name": "テスト教材"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 200
+        assert mock_record.call_count == 1
+        entity_type, entity_id, old_status, new_status, actor, metadata = (
+            mock_record.call_args[0]
+        )
+        assert entity_type == AUDIT_ENTITY_MATERIAL
+        assert entity_id == "mat-001"
+        assert (old_status, new_status) == ("active", "deleted")
+        assert actor == "test-teacher-id"
+        assert metadata["action"] == "deleted"
+        assert metadata["document_id"] == "doc-uuid-1"
+        assert metadata["deleted_course_ids"] == []
+        assert metadata["confirm_name_matched"] is True
+        # 資料本文・タイトルは監査に載せない（監査は内容の写しではない）。
+        assert "テスト教材" not in json.dumps(metadata, ensure_ascii=False)
+
+    @patch("routes.admin.record_review_event")
+    @patch("routes.admin._pg_session")
+    def test_nothing_is_audited_when_the_name_does_not_match(
+        self, mock_session, mock_record, client, auth_headers
+    ):
+        """起きなかった削除を記帳しない（400 の確認ゲートで止まった場合）。"""
+        mock_pg = MagicMock()
+        mock_pg.execute.return_value.fetchone.return_value = (
+            "doc-uuid-1", "テスト教材", "test.pdf", "mat-001",
+        )
+        mock_session.return_value = mock_pg
+
+        resp = client.request(
+            "DELETE",
+            "/api/admin/materials/mat-001",
+            json={"confirm_name": "間違った名前"},
+            headers=auth_headers,
+        )
+        assert resp.status_code == 400
+        assert mock_record.call_count == 0
+
     def test_delete_material_requires_auth(self, client):
         """認証なしで401/403が返ること。"""
         resp = client.request(

@@ -53,6 +53,7 @@ from core.schema import (
 )
 from core.atlas_vectors import builder as atlas_vectors_builder
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
+from core import decision_context
 from core.course_data import course_source_material_ids, course_sources
 from core.deliberation.graph_dialogue import APPROVED_REVIEW_STATUSES
 from core.deliberation.refs import document_run_artifacts
@@ -3105,15 +3106,22 @@ def _apply_claim_review_side_effects(
     user_id: str | None,
     *,
     fallback_document_id: str = "",
+    audit_metadata: dict | None = None,
 ) -> None:
     """claim の review_status 遷移に伴う共通副作用（監査・却下伝播・R層フック）。
 
     フル upsert（`update_claim`）と遷移専用 API（`review_claim`）の両方が使う
     （グラフ対話レビュー設計書 §4 — 二重実装しない）。遷移が無ければ何もしない。
+
+    ``audit_metadata`` は監査 metadata へそのまま載せる追加ブロック（是正 F11 / A-04 の
+    `decision_context` 用の加算的な口）。却下伝播・R層フックには影響しない。
     """
     if (old_review_status or "") == updated.review_status:
         return
-    _record_review_event(AUDIT_ENTITY_CLAIM, claim_id, old_review_status or "", updated.review_status, user_id)
+    _record_review_event(
+        AUDIT_ENTITY_CLAIM, claim_id, old_review_status or "", updated.review_status,
+        user_id, audit_metadata or None,
+    )
     if updated.review_status == "rejected":
         _propagate_rejected_claim(claim_id)
     # R層: claim が承認済みへ遷移したら再構成 item のオーサリングを非同期起動する
@@ -3196,9 +3204,37 @@ def review_claim(
         # 存在チェックと UPDATE の間に行が消えた場合（TOCTOU）は 500 でなく 404。
         raise HTTPException(status_code=404, detail="Claim not found")
     updated = _row_to_claim(row)
+    # 改訂原則1（DC1）: 単発の確定でも「何が選べて・誰がどこから覆せるか」を記帳する
+    # （是正 A-04 / F-18）。却下（rejected）へ遷移する場合は代替が「再検討へ戻す」側に
+    # なるので、画面に出ていない `reject` を代替として書かない。
+    claim_alternatives: tuple[str, ...] = (
+        (decision_context.ALT_RECONSIDER, decision_context.ALT_SKIP_STEP)
+        if review_status == "rejected"
+        else (
+            decision_context.ALT_RECONSIDER,
+            decision_context.ALT_REJECT,
+            decision_context.ALT_SKIP_STEP,
+        )
+    )
     _apply_claim_review_side_effects(
         claim_id, existing[1], updated, current_user.get("id"),
         fallback_document_id=existing[0] or "",
+        audit_metadata=_single_review_audit_metadata(
+            decision_context.BASIS_CLAIM_REVIEW_SINGLE,
+            entity_id=claim_id,
+            reopen_path=_CLAIM_REOPEN_PATH,
+            # 同じ遷移専用 API で他の語彙へ戻せる（行は消さない）。
+            reopen_statuses=tuple(
+                s for s in _CLAIM_REVIEW_STATUSES if s != review_status
+            ),
+            # claim の承認画面（グラフ対話レビューの根拠 claim 行）が示す面は、
+            # その claim の出所（document）と支持状態。本文・confidence は載せない。
+            grounds={
+                "document_id": str(updated.document_id or existing[0] or ""),
+                "support_status": str(updated.support_status or ""),
+            },
+            alternatives=claim_alternatives,
+        ),
     )
     return updated
 
@@ -3653,6 +3689,58 @@ def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
     return problems
 
 
+# 確定文脈（DC2）— 単発の承認を覆す実際の経路。どちらも status 遷移だけで行を消さない。
+_COMPONENT_REOPEN_PATH = "POST /api/admin/theory-components/{component_id}/reject"
+_CLAIM_REOPEN_PATH = "POST /api/admin/claims/{claim_id}/review"
+
+
+def _single_review_audit_metadata(
+    basis: str,
+    *,
+    entity_id: str,
+    reopen_path: str,
+    reopen_statuses: tuple[str, ...],
+    grounds: dict,
+    alternatives: tuple[str, ...],
+) -> dict:
+    """単発の承認・却下の監査 metadata（`decision_context` + 提示された根拠）。
+
+    改訂原則1（DC1）を単発の確定へ広げた形（是正 A-04 / F-18）。**確定の対象は
+    1オブジェクトなので、`presented` と `applied` はどちらもそのオブジェクト**にする。
+    「画面に出ていた根拠（backing claim・退避した解析時の警告）」を `presented` へ
+    入れてしまうと、`presented_matches_applied` が構造的に常に False になり、
+    DC2 が用意した「提示と適用の差の検出」を意味の無い定数に変えてしまう
+    （提示集合と適用集合が別の種類のものになるため）。根拠は同じ監査行の隣接キー
+    （`grounds`）に、id / フィールド名だけで残す（本文・confidence は載せない）。
+    """
+    ctx = decision_context.build_decision_context(
+        basis=basis,
+        presented_ids=[entity_id],
+        applied_ids=[entity_id],
+        alternatives=alternatives,
+        reopen_path=reopen_path,
+        reopen_statuses=reopen_statuses,
+        # 根拠が実際に画面に出ていたか（ノード詳細を開いたか）はサーバから検証できない。
+        evidence_shown=None,
+    )
+    return decision_context.attach_decision_context(
+        {"grounds": grounds, "bulk": False}, ctx
+    )
+
+
+def _component_backing_claim_ids(component: TheoryComponentOut) -> list[str]:
+    """承認画面が根拠として並べる claim id（コンポーネント全体 + 各項目の evidence）。
+
+    承認可能性の判定（`_component_approval_problems`）が読むのと同じ集合。順序は
+    重複除去のうえ安定させる（監査行の差分が読めるように）。
+    """
+    ids: list[str] = list(getattr(component, "evidence_claims", None) or [])
+    for field_name in _APPROVAL_EVIDENCE_FIELDS:
+        for item in getattr(component, field_name, None) or []:
+            ids.extend(getattr(item, "evidence_claims", None) or [])
+    return sorted({str(i).strip() for i in ids if str(i or "").strip()})
+
+
 def _transition_component_review(
     component_id: str,
     existing: TheoryComponentOut,
@@ -3661,6 +3749,7 @@ def _transition_component_review(
     review_status: str,
     user_id: str | None,
     approve: bool = False,
+    audit_metadata: dict | None = None,
 ) -> TheoryComponentOut:
     """status / review_status **だけ**を遷移する（内容フィールドは一切変更しない）。
 
@@ -3687,6 +3776,10 @@ def _transition_component_review(
     警告が残ることがある。それを消すと「何を見て承認したか」を後から再構成できない
     （vision §4 改訂原則1 / 原則3）。警告はそのまま**退避**し、承認画面が
     「解析時点のメモ」として並置する（承認は止めない）。
+
+    ``audit_metadata`` は監査 metadata へそのまま載せる追加ブロック（是正 F11 /
+    A-04 の `decision_context` 用の**純粋に加算的な**口）。遷移する列・承認可能性の
+    判定・却下伝播はこの引数によって一切変わらない。
     """
     session = _pg_session()
     try:
@@ -3727,6 +3820,7 @@ def _transition_component_review(
         _record_review_event(
             AUDIT_ENTITY_COMPONENT, component_id,
             existing.review_status, updated.review_status, user_id,
+            audit_metadata or None,
         )
         if updated.review_status == "rejected" or updated.status == "rejected":
             _propagate_rejected_component(component_id)
@@ -3757,6 +3851,27 @@ def approve_theory_component(
         component_id, existing,
         status="teacher_reviewed", review_status="teacher_approved",
         user_id=current_user.get("id"), approve=True,
+        audit_metadata=_single_review_audit_metadata(
+            decision_context.BASIS_COMPONENT_REVIEW_SINGLE,
+            entity_id=component_id,
+            reopen_path=_COMPONENT_REOPEN_PATH,
+            reopen_statuses=("rejected",),
+            # 承認画面（グラフ対話レビューのノード詳細）は根拠 claim と、承認しても
+            # 消さない解析時の警告（是正 F6）を並置する。何を見て承認したかを
+            # 後から再構成できるよう、その「面」を id / フィールド名で残す。
+            grounds={
+                "backing_claim_ids": _component_backing_claim_ids(existing),
+                "retained_validation_warning_fields": [
+                    str(w.get("field") or "")
+                    for w in (existing.validation_warnings or [])
+                    if isinstance(w, dict) and w.get("field")
+                ],
+            },
+            alternatives=(
+                decision_context.ALT_REJECT,
+                decision_context.ALT_SKIP_STEP,
+            ),
+        ),
     )
 
 

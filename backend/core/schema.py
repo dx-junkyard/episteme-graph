@@ -519,6 +519,21 @@ AUDIT_ENTITY_ATLAS_EDGE = "atlas_edge"
 # 記帳する（原則14 監査可能性）。平文の資料本文・受講者情報は載せない。
 AUDIT_ENTITY_VISIBILITY = "visibility"
 
+# 教材の物理削除 — `DELETE /api/admin/materials/{material_id}`。教材本体とチャンク・
+# 解析成果・巻き添えコースを DB から実際に消す**不可逆**な操作で、V層の版・購読の
+# 後始末（teardown_versioning）はその後に走る。原則14（監査可能性）の穴として
+# 六つのレンズ 是正 F11 で塞いだ。entity_id は material_id、new_status="deleted"、
+# metadata に document_id / 巻き添えで消えたコース id を入れる（資料本文・タイトルは
+# 載せない — 監査は「誰が何を消したか」であって内容の写しではない）。
+AUDIT_ENTITY_MATERIAL = "material"
+
+# 原稿スタジオのコーストピック保存 — `PUT /api/admin/courses/{id}/lecture-studio/
+# course-topics/{topic_id}`。学習者に配信される授業用教材・読み上げ原稿を上書きし、
+# 副作用として当該トピックの生成済み音声を無効化する（是正 F11）。entity_id は
+# course_id、metadata に topic_id / 変更されたフィールド名の列挙を入れる
+# （本文そのものは載せない）。
+AUDIT_ENTITY_COURSE_TOPIC = "course_topic"
+
 # 外部への書き出し（export bundle）— `POST /api/{courses|documents}/{id}/export-bundle`。
 # 束は PDF 逐語の evidence スニペットと（オプションで）LLM 生出力を含んだまま
 # システムの外へ出て行き戻ってこないため、誰がいつ何を持ち出したかを記帳する
@@ -571,5 +586,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_ATLAS_VECTOR,
     AUDIT_ENTITY_ATLAS_EDGE,
     AUDIT_ENTITY_VISIBILITY,
+    AUDIT_ENTITY_MATERIAL,
+    AUDIT_ENTITY_COURSE_TOPIC,
     AUDIT_ENTITY_EXPORT,
 )

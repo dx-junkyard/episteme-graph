@@ -1067,6 +1067,47 @@ class TestIngestBatch:
         assert metadata["arxiv_ids"] == ["2608.20293"]
         assert metadata["queued"] == 1
 
+    def test_audit_carries_the_decision_context(self, env):
+        """DC1（是正 A-04 / F-18）: 一括取り込みは確定文脈なしに記帳しない。"""
+        from core import decision_context as dc
+
+        env["session"].domains = ["arxiv.org"]
+        self._post(
+            env,
+            {
+                "items": [{"arxiv_id": "2608.20293"}, {"arxiv_id": "not-an-id"}],
+                "domain_key": "astrophysics",
+            },
+        )
+        metadata = env["audits"][0][5]
+        assert metadata["bulk"] is True
+        ctx = metadata[dc.DECISION_CONTEXT_KEY]
+        assert ctx["basis"] == dc.BASIS_DISCOVERY_INGEST_BATCH
+        # 提示 = 選ばれた候補集合 / 適用 = 実際に積まれた行（差は隠さない — DC2）。
+        assert ctx["presented"]["ids"] == ["2608.20293", "not-an-id"]
+        assert ctx["applied"]["ids"] == ["2608.20293"]
+        assert ctx["presented_matches_applied"] is False
+        assert ctx["alternatives_available"] == ["deselect", "dismiss"]
+        assert ctx["decline_possible"] is True
+        assert ctx["reopen"]["path"].startswith("DELETE /api/admin/materials/")
+        assert ctx["reopen"]["statuses"] == []
+        assert ctx["evidence_shown"] is None
+        assert ctx["client_reported"] is None
+
+    def test_decision_context_matches_when_everything_is_queued(self, env):
+        from core import decision_context as dc
+
+        env["session"].domains = ["arxiv.org"]
+        self._post(env, {"items": [{"arxiv_id": "2608.20293"}]})
+        ctx = env["audits"][0][5][dc.DECISION_CONTEXT_KEY]
+        assert ctx["presented_matches_applied"] is True
+
+    def test_response_shape_is_unchanged(self, env):
+        """B（記帳のみ・挙動不変）: レスポンスに確定文脈を足していない。"""
+        env["session"].domains = ["arxiv.org"]
+        res = self._post(env, {"items": [{"arxiv_id": "2608.20293"}]})
+        assert set(res.json()) == {"queued", "skipped"}
+
     def test_session_is_committed_and_closed(self, env):
         self._post(env, {"items": [{"arxiv_id": "2608.20293"}]})
         assert env["session"].commits >= 1

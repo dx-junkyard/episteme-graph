@@ -224,10 +224,22 @@ class TestApprovalKeepsAnalysisWarnings:
         assert "_validation_warnings(payload)" in src
 
     def test_approval_gate_is_unchanged(self):
-        """警告を残すことで承認が止まるようにはしない（弁を増やさない）。"""
+        """警告を残すことで承認が止まるようにはしない（弁を増やさない）。
+
+        2026-09-10（是正 F11 / A-04）以降、承認ルートは警告を1回**読む** —
+        監査の `decision_context` に「何を見て承認したか」を残すためだけで、
+        承認可能性の判定（`_component_approval_problems`）には入れない。
+        """
         src = extract_function_source(TC_SRC, "approve_theory_component")
         assert "_component_approval_problems(existing)" in src
-        assert "validation_warnings" not in src
+        # 警告を消さない（是正 F6）。
+        assert self.CLEARED.search(src) is None
+        # 判定と 422 の区画に警告は現れない（弁にしない）。
+        gate = src.split("problems = ")[1].split("return _transition_component_review")[0]
+        assert "validation_warnings" not in gate
+        # 判定関数そのものも警告を見ない。
+        problems_src = extract_function_source(TC_SRC, "_component_approval_problems")
+        assert "validation_warnings" not in problems_src
 
     def test_graph_nodes_project_warnings_for_the_review_screen(self):
         src = extract_function_source(TC_SRC, "_node_validation_warnings")

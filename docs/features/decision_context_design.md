@@ -81,9 +81,10 @@
 }
 ```
 
-- **`basis`** — どの画面のどの一括確定か。語彙の正本は `core/decision_context.py` の
-  `BASIS_*` 定数（`BASIS_RELEASE_REVIEW_PLACEMENTS` / `BASIS_EXPLANATION_REVIEW_BULK` /
-  `BASIS_ATLAS_BINDING_SAVE`。新経路を足すときはここに定数を1本足し、§4 に節を足す）。
+- **`basis`** — どの画面のどの確定か。語彙の正本は `core/decision_context.py` の
+  `BASIS_*` 定数（カタログ `BASIS_VALUES` が全値を列挙する。**新経路を足すときは定数を
+  1本足し、§4 に節を足す** — 本書に一覧を書き写さない）。値は `画面.操作` の規約
+  （小文字）で、カタログは検査用であって検証ゲートではない（任意の `basis` を弾かない）。
 - **`presented` / `applied`** — id は正規化（空除去・重複除去）・ソートのうえ
   `PRESENTED_IDS_MAX`（200）件まで列挙する。`count` は切り詰め前の件数で、`truncated` が
   切り詰めの事実を残す。**一致判定は切り詰め前の集合**で行う（表示上限の副作用で判定が
@@ -117,8 +118,18 @@
 ## 4. 適用先
 
 > **適用先の正本は `backend/core/decision_context.py` の `BASIS_*` 定数**（本節に件数を
-> 書き写さない — §5-6）。v1（2026-09-04）は §4.1 / §4.2 の2経路で、2026-09-10 時点は
-> §4.3（学習マップの対応付け保存）を含む3経路。
+> 書き写さない — §5-6）。v1（2026-09-04）は §4.1 / §4.2 の一括2経路、2026-09-10 に
+> §4.3（学習マップの対応付け保存）と §4.4〜§4.7（一括取り込み・骨格の凍結・コースの公開・
+> 単発の承認）を追加した。カタログ `BASIS_VALUES` と定数集合の一致・命名規約（`画面.操作`・
+> 小文字）は `test_decision_context_guardrails.py` が固定する。
+
+**単発の確定における `presented` / `applied`（§4.6〜§4.7 の設計判断）**: 確定の対象が1
+オブジェクトの経路では、`presented_ids` と `applied_ids` は**どちらもそのオブジェクト**に
+する。「画面に出ていた根拠（backing claim・退避した解析時の警告）」を `presented` に
+入れると、2つの集合が別の種類のものになるため `presented_matches_applied` が構造的に常に
+`False` になり、DC2 が用意した「提示と適用の差の検出」を意味の無い定数に変えてしまう
+（監査行に、起きていない不一致が毎回書かれることになる）。根拠は**同じ監査行の隣接キー
+`grounds`** に id / フィールド名だけで残す（本文・`confidence` は載せない）。
 
 ### 4.1 リリース前の確認 ステップ2「この配置で次へ」
 
@@ -178,6 +189,86 @@ GET のエンベロープは非改変）。
 レスポンスに `decision_context` を追加（既存キー `course_id` / `cartridge_id` /
 `bindings_applied` / `bindings_skipped` は不変）。
 
+### 4.4 arXiv 候補の一括取り込み（2026-09-10 追記）
+
+`POST /api/admin/discovery/ingest-batch`（`routes/paper_discovery.py::ingest_batch`）
+
+| 項目 | 値 |
+|---|---|
+| `basis` | `discovery.ingest_batch` |
+| `presented_ids` | body の `items[].arxiv_id`。**教員が画面で選んだ集合そのものが提示集合**（§4.2 と同じ理由） |
+| `applied_ids` | `enqueue_items` が実際にキューへ積んだ行（不正 ID 等は `skipped` に事実文つきで残る） |
+| `alternatives` | `deselect`（候補行のチェックボックス）/ `dismiss`（行ごとの「見送る」= `POST /dismiss`。行削除ではなく status 遷移で保持） |
+| `reopen` | `DELETE /api/admin/materials/{material_id}` / statuses は**空**。キュー行の `retry` は「失敗の再試行」であって取り込みの取り消しではないので、実際に覆せる経路（教材そのものの削除。§4 の是正 F11 で記帳されるようになった）を書く |
+| `evidence_shown` | `None` |
+
+取り込みは知識の確定ではなく資料の受け入れだが、**取り込みの弁は教員だけが持つ**（PD1）
+＝「選択した N 件を承認した」型の一括確定なので記帳の対象に含めた
+（[六つのレンズ 02_teacher.md](../architecture/six_lenses_2026-09-10/02_teacher.md) 付記の
+未決を「対象とする」で決着させた）。監査 metadata には既存キーに加えて `"bulk": True`。
+**レスポンスは非改変**（`queued` / `skipped` / `notice` のみ — この波は記帳だけを足す）。
+
+### 4.5 分野の地図 骨格の凍結（2026-09-10 追記）
+
+`POST /api/admin/cartridges/{cartridge_id}/atlas/skeleton/freeze`（`routes/atlas.py::freeze_atlas_skeleton`）
+
+| 項目 | 値 |
+|---|---|
+| `basis` | `atlas_skeleton.freeze` |
+| `presented_ids` | 影響プレビュー（`freeze-impact`）が計算対象にした **draft の node id**（region + concept） |
+| `applied_ids` | 実際に版へ入った **frozen の node id**。presented とは別オブジェクトから導出するので、一致判定が本物の検査になる |
+| `alternatives` | `edit`（凍結せず draft を直す）/ `skip_step`（凍結を見送り draft のまま置く）— 影響プレビューは事実文つき confirm で提示される |
+| `reopen` | `POST /api/admin/cartridges/{cartridge_id}/atlas/skeleton/draft/from-frozen` / statuses は**空**。凍結版は不変（AB3）で「戻せる status」は無く、実際に覆す道は次版 draft を起こして直すことだけ |
+| `evidence_shown` | `None`（confirm を読んだかはサーバから検証できない） |
+
+プレビューで**見せた影響そのもの**は監査 metadata の隣接キーに事実として残す
+（`impact_removed_node_ids` / `impact_added_node_ids` / `impact_affected_course_ids`）。
+既存キー（`version` / `note` / `report_credits` / `category_gaps_applied` /
+`relation_edges_applied` 等）とレスポンス（`cartridge_id` / `frozen` / `impact` /
+`notified`）は不変。
+
+### 4.6 コースの公開（2026-09-10 追記）
+
+`PUT /api/admin/courses/{course_id}/visibility` の **`visibility="public"` のときだけ**
+（`routes/admin.py::update_course_visibility`。リリース前の確認 ステップ3「公開する」も
+同じ経路を通るので、記帳はこの1箇所で足りる）
+
+| 項目 | 値 |
+|---|---|
+| `basis` | `course_visibility.publish` |
+| `presented_ids` / `applied_ids` | どちらも `[course_id]`（確定の対象はコース1件 — 上記「単発の確定における presented / applied」） |
+| `alternatives` | `skip_step`（ウィザードの各ステップの「あとで」。飛ばしても学習者側の表示は変わらない — RR1） |
+| `reopen` | `PUT /api/admin/courses/{course_id}/visibility` / `group`・`private`（同じ経路で非公開へ戻せる。ただし**一度見られた事実**は戻らない） |
+| `evidence_shown` | `None`。ウィザード経由かどうかもサーバから判別できないので `client_reported` も使わない（既存の「申告しない」方針を維持） |
+
+`group` / `private` への遷移は従来の記帳のまま（確定文脈を付けない）。公開だけが
+「一度出たら戻らない」開示だからである。レスポンス（`course_id` / `visibility` /
+`group_id`）は不変。
+
+### 4.7 単発の承認 — component / claim（2026-09-10 追記）
+
+`POST /api/admin/theory-components/{component_id}/approve` と
+`POST /api/admin/claims/{claim_id}/review`（グラフ対話レビュー画面の承認ボタン・
+根拠 claim 行の承認／却下。実装は `routes/theory_components.py`）
+
+| 項目 | component | claim |
+|---|---|---|
+| `basis` | `component_review.single` | `claim_review.single` |
+| `presented_ids` / `applied_ids` | `[component_id]` | `[claim_id]` |
+| `grounds`（隣接キー） | `backing_claim_ids`（コンポーネント全体 + 各項目の `evidence_claims`。承認可能性の判定が読むのと同じ集合）/ `retained_validation_warning_fields`（是正 F6 で**消さずに退避**した解析時の警告のフィールド名） | `document_id` / `support_status` |
+| `alternatives` | `reject`（却下ボタン）/ `skip_step`（「次の未レビューへ」= 判断を保留して飛ばす） | `reconsider` + `skip_step`。却下でないときは `reject` も。**却下へ遷移するときは画面に出ていない `reject` を書かない** |
+| `reopen` | `POST /api/admin/theory-components/{component_id}/reject` / `rejected` | `POST /api/admin/claims/{claim_id}/review` / 適用した語彙以外の `_CLAIM_REVIEW_STATUSES` |
+| `evidence_shown` | `None` | `None` |
+
+**承認可能性の判定（`_component_approval_problems`）と遷移実体
+（`_transition_component_review` / `_apply_claim_review_side_effects`）は非改変**。両者に
+optional の `audit_metadata` を足しただけで、遷移する列・却下伝播・R層の item オーサリング
+起動は一切変わらない（ガードレールが「判定と 422 の区画に警告が現れない」ことと
+「SQL が status 系の列だけ」を固定する）。component の**却下**（`/reject`）には v1 では
+確定文脈を付けない（却下は「学習者に出す」確定ではなく差し戻しであり、`reject` 経路自体が
+`approve` の再審経路として記帳される側だから）。レスポンス（`TheoryComponentOut` /
+`ClaimOut`）は不変。
+
 ---
 
 ## 5. UI（リリース前の確認）
@@ -207,15 +298,18 @@ GET のエンベロープは非改変）。
 ## 6. 段階適用の残り
 
 vision §9 は本層を「段階適用中」と位置づけている。v1 で入れたのは**一括確定の2経路**だけで、
-以下は未適用（着手時は本書 §4 に節を足し、`basis` 定数を1本足す）。**学習マップの対応付け
-保存は 2026-09-10 に §4.3 として追加済み**（本節の残りからは外れた）。
+2026-09-10 に §4.3〜§4.7（学習マップの対応付け保存・一括取り込み・骨格の凍結・コースの
+公開・単発の承認）を追加した。以下がまだ未適用（着手時は本書 §4 に節を足し、`basis` 定数を
+1本足す）。
 
-- 単発の承認（component / claim / 説明の個別 approve・dismiss、W層注釈の commit）
-- 骨格の凍結（atlas freeze）・ライブラリの凍結
-- コースの公開（visibility → public）
+- 説明の**個別**の approve / dismiss、W層注釈の commit（`element_annotations` の
+  candidate → committed）— 一括経路（§4.2）と単発経路の記帳が非対称なまま
+- ライブラリの凍結（L層 `library_entries` の freeze）
 - 学習者側の確定（tension / anchor の confirm）— 本人の痕跡は監視しない原則（PN-1 / P3）と
   の兼ね合いを先に決める。**「本人が自分の確定を後から再構成できる」ための記帳**であって、
   教員・運営が読むための記帳にしてはならない。
+- component の**却下**（`/reject`）— 却下は差し戻しであって「学習者に出す」確定ではなく、
+  それ自体が §4.7 の再審経路として記帳される側なので、v1 では意図的に対象外にした
 
 `reopen.actor` に `learner` を足すのは、学習者からの異議申立経路（vision §9「切断・撤回の
 一級化」「帰属記帳と開示の分離」）が実装されてからにする。
@@ -233,8 +327,18 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
 - 上限 200 の切り詰めと `truncated`、一致判定が切り詰め前の集合であること
 - `client_reported` の隔離・未指定時 `None`・入力 dict の別名共有をしないこと（DC4）
 - 適用済みの各経路のソースに `build_decision_context(` / `attach_decision_context(` /
-  それぞれの `basis` 定数が現れること（DC1。経路が増えたら本テストに1ケース足す —
-  2026-09-10 時点は §4.1〜§4.3 の3経路 + `basis` 命名規約の検査）
+  それぞれの `basis` 定数が現れること（DC1。経路が増えたら本テストに1ケース足す）
+- カタログ `BASIS_VALUES` が `BASIS_*` 定数の集合と一致し、ソート済みで、全ての値が
+  `画面.操作`（小文字・ドット1つ以上）の規約に従うこと。カタログは**検証ゲートではない**
+  （任意の `basis` を弾かない — 既存呼び出しを壊さない）
+- 全 `basis` で DC1〜DC4 が同じ形で成り立つこと（basis ごとの例外を作らない。
+  `alternatives=()` は basis を問わず `ValueError`）
+- 単発の確定が `presented_ids == applied_ids == [対象]` であること（§4 の設計判断。
+  `presented_matches_applied` を構造的な定数にしない）
+- 記帳の無い状態変更を塞いだ3経路（原則14 / 是正 F11）の回帰検出 —
+  教材の物理削除が commit **後**に記帳されること・タイトルを metadata に載せないこと /
+  トピック保存が変更フィールド名だけを載せ本文を載せないこと / 版の adopt が
+  `core/versioning/audit.py` 経由で記帳され、route 側で二重記帳しないこと
 - リリース前の確認 JS が `presented_placement_ids` / `evidence_expanded_placement_ids` を
   送り（固定の `evidence_shown` は送らない）、`release-review.evidence` アンカー付きの
   折りたたみと再審の事実文を描くこと。開いた事実は `toggle` イベントだけから集め、
@@ -298,3 +402,52 @@ vision §9 は本層を「段階適用中」と位置づけている。v1 で入
   入れなかった。リリース前の確認に確認ダイアログが無いこと自体が別の指摘（02_teacher.md
   §1-7）で、そこと合わせて設計するのが筋だと判断した。空配列がそのまま記帳されるので、
   「開かずに確定した」事実は今の実装でも失われない。
+
+### 8.3 追記（2026-09-10）— 段階適用の第2波 + 記帳の無い状態変更の是正
+
+[六つのレンズ調査](../architecture/vision_ux_gap_six_lenses_2026-09-10.md) §4 第1波 #6
+（是正 F11 / 既知 A-04・F-18 / 監査 C6）の実装。**A. 記帳の無い状態変更**と
+**B. `decision_context` の適用拡張（記帳のみ・挙動不変）**の2つを同時に入れた。
+
+**A. 記帳の無い状態変更（原則14 の穴）**
+
+| 経路 | entity_type | 記帳 |
+|---|---|---|
+| `DELETE /api/admin/materials/{material_id}`（`routes/admin.py::delete_material`） | `material`（新設） | `active → deleted` + `action="deleted"` / `document_id` / `deleted_course_ids` / `confirm_name_matched`。**DB 削除の commit 後**に記帳する（ロールバックした削除を「消した」と書かない）。タイトル・本文は載せない。既存の V層 `teardown_versioning` 後始末は非改変 |
+| `PUT .../lecture-studio/course-topics/{topic_id}`（`routes/lecture_studio/topics.py`） | `course_topic`（新設） | `"" → edited` + `action="topic_draft_saved"` / `topic_id` / `changed_fields` / `topic_audio_cache_invalidated`。**本文は載せず変わったフィールド名だけ**。未設定 → 空を「変更」と書かないため `_TOPIC_DRAFT_FIELD_EMPTY` の正規形で前後比較する |
+| 版の adopt（`versioning.py::adopt_release`） | — | **是正不要（調査の偽陽性）**。V層は CLAUDE.md が認めた core 直記帳（`core/versioning/audit.py`）で既に `shared_subscription` / `action="adopt"` を記帳している。調査はルートファイルの `record_review_event` を grep した結果で「無い」と読んだ。route に足すと1操作2行になるので**足さず**、`test_shared_versioning_guardrails.py` に「core 側で記帳・route 側で二重記帳しない」の回帰検出を置いた |
+
+新 entity_type 2本は `core/schema.py` の `AUDIT_ENTITY_*` カタログと `AUDIT_ENTITY_TYPES` に
+登録し、`test_audit_entity_catalog_guardrails.py` の `_AUDIT_CALLER_FILES` に
+`lecture_studio/topics.py`（+ `paper_discovery.py`）を追加した（生文字列の混入検出の対象に
+含める）。
+
+**B. 適用拡張** — §4.4〜§4.7（`BASIS_DISCOVERY_INGEST_BATCH` /
+`BASIS_ATLAS_SKELETON_FREEZE` / `BASIS_COURSE_VISIBILITY_PUBLISH` /
+`BASIS_COMPONENT_REVIEW_SINGLE` / `BASIS_CLAIM_REVIEW_SINGLE`）。あわせてカタログ
+`BASIS_VALUES` を追加した（適用先の正本は定数のままで、カタログは命名規約と網羅の**検査用**。
+`build_decision_context` は任意の `basis` を受け続ける）。**この波はレスポンスを1つも
+変えていない**（記帳のみ）。
+
+**判断（迷った点）**
+
+1. **単発の確定の `presented`** — ブリーフは「presented = 承認画面に出ていた backing claim /
+   validation_warnings の ID 集合」としていたが、そうすると提示集合と適用集合が別の種類の
+   ものになり `presented_matches_applied` が構造的に常に `False` になる。DC2 は「一致を
+   偽らない」ための条項であって、起きていない不一致を毎回書くのは同じ条項に反する。
+   よって **presented = applied = 対象オブジェクト**とし、根拠は隣接キー `grounds` に
+   移した（記帳される情報量は同じで、再構成に必要な面は落ちていない）。§4 に明記した。
+2. **`_transition_component_review` / `_apply_claim_review_side_effects` の非改変** —
+   監査の記帳がこの2関数の中にあるため、確定文脈を「加算的に」渡すには口が必要だった。
+   optional `audit_metadata` を1つ足し、遷移 SQL・承認可能性の判定・却下伝播・R層フックは
+   一切触っていない（ガードレールで固定）。
+3. **骨格の凍結の `presented`** — 「プレビューで見せた影響コース／差分」を `presented` に
+   入れると 1 と同じ問題が起きる。`presented` = プレビューの計算対象になった draft の node、
+   `applied` = 版に入った node とし（別オブジェクトからの導出なので一致判定が本物の検査に
+   なる）、見せた影響そのものは `impact_*` の隣接キーに残した。
+4. **取り込み（ingest-batch）を対象に含めた** — 02_teacher.md 付記は「取り込みは知識の確定
+   ではないので対象外という整理はありうる」と未決にしていたが、**取り込みの弁は教員だけが
+   持つ**（PD1）＝「選択した N 件を承認した」型の一括確定であり、しかも取り消しには教材の
+   削除（不可逆）が必要なので、記帳の対象に含めるほうが答責性の実装として一貫すると判断した。
+5. **公開だけに付けた** — `group` / `private` への遷移は可逆で「一度出たら戻らない」性質を
+   持たないので、従来の記帳のままにした（確定文脈の意味を薄めない）。

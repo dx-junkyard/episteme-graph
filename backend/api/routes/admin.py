@@ -89,6 +89,7 @@ from services import (
 from core import account_lifecycle
 from core import account_status
 from core import auth_events as auth_events_module
+from core import decision_context
 from core.config import get_settings
 from core.course_data import (
     course_cartridge_id,
@@ -119,6 +120,7 @@ from core.postgres import get_session as _pg_session
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
 from core.schema import (
     AUDIT_ENTITY_DOCUMENT_SHARE,
+    AUDIT_ENTITY_MATERIAL,
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
     AUDIT_ENTITY_USER_ACCOUNT,
     AUDIT_ENTITY_VISIBILITY,
@@ -1735,17 +1737,43 @@ def update_course_visibility(
     # 原則14: コースの公開・非公開の切替を記帳する（誰がいつどこへ開いたか）。
     # リリース前確認ウィザード経由かどうかはサーバから判別できないため申告しない
     # （偽装しない。ステップ2の一括確認は landscape 側で decision_context 付きに記帳される）。
+    metadata: dict = {
+        "action": "course_visibility",
+        "object_type": "course",
+        "group_id": body.group_id if body.visibility == "group" else None,
+    }
+    if body.visibility == "public":
+        # 改訂原則1（DC1）: 公開＝「このコースを学習者に出す」確定で、一度出た資料は
+        # 戻らない。リリース前の確認ウィザードのステップ3もこの経路を通る（フロントは
+        # ボタンのラベルだけを差し替える）ので、記帳はこの1箇所で足りる。
+        # 確定の対象はコース1件なので、提示集合と適用集合はどちらもそのコースである
+        # （提示を「ウィザードで見せた配置」にすると、この経路の一致判定が常に不一致に
+        # なってしまい、DC2 の「差の検出」を意味の無い定数に変えてしまう）。
+        metadata = decision_context.attach_decision_context(
+            metadata,
+            decision_context.build_decision_context(
+                basis=decision_context.BASIS_COURSE_VISIBILITY_PUBLISH,
+                presented_ids=[course_id],
+                applied_ids=[course_id],
+                # ウィザードには各ステップに「あとで」があり、飛ばしても学習者側の表示は
+                # 変わらない（RR1）。コース管理から公開せずに置いておくのも同じ選択。
+                alternatives=(decision_context.ALT_SKIP_STEP,),
+                # 公開はこの同じ経路で group / private へ戻せる（visibility の語彙が
+                # そのまま「戻せる status」になる。ただし一度見られた事実は戻らない）。
+                reopen_path="PUT /api/admin/courses/{course_id}/visibility",
+                reopen_statuses=("group", "private"),
+                # 公開前に何が画面に出ていたか（配置・対応付けの確認）はサーバから
+                # 検証できない。ウィザード経由かどうかも判別できない（上記コメント）。
+                evidence_shown=None,
+            ),
+        )
     record_review_event(
         AUDIT_ENTITY_VISIBILITY,
         course_id,
         str(previous[0]) if previous else "",
         body.visibility,
         current_user["id"],
-        {
-            "action": "course_visibility",
-            "object_type": "course",
-            "group_id": body.group_id if body.visibility == "group" else None,
-        },
+        metadata,
     )
     return {
         "course_id": course_id,
@@ -1964,6 +1992,24 @@ def delete_material(
     logger.info(
         "Material %s (%s) deleted by user=%s, cascade-deleted courses: %s",
         material_id, doc_title, current_user["id"], deleted_course_ids,
+    )
+    # 原則14（是正 F11）: 教材の物理削除は不可逆で、学習者に届いている教材と解析成果を
+    # まとめて消す。誰がいつ何を消したか（と巻き添えで消えたコース）を記帳する。
+    # 資料本文・タイトルは載せない（監査は内容の写しではない）。DB 削除の commit 後に
+    # 記帳するのは、ロールバックした削除を「消した」と書かないため。
+    record_review_event(
+        AUDIT_ENTITY_MATERIAL,
+        material_id,
+        "active",
+        "deleted",
+        current_user["id"],
+        {
+            "action": "deleted",
+            "document_id": str(doc_id),
+            "deleted_course_ids": list(deleted_course_ids),
+            # 削除は確認用の教材名入力を通過している（`DeleteConfirmRequest`）。
+            "confirm_name_matched": True,
+        },
     )
     # V層（migration 037）: 教材とその巻き添えコースの共有版状態を掃除し購読者へ通知する
     _versioning_teardown_after_delete(

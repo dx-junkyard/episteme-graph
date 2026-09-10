@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sys
 from pathlib import Path
 
@@ -32,6 +33,19 @@ EXPLANATION_SRC = (
     BACKEND / "api" / "routes" / "element_explanations.py"
 ).read_text(encoding="utf-8")
 ATLAS_SRC = (BACKEND / "api" / "routes" / "atlas.py").read_text(encoding="utf-8")
+ADMIN_SRC = (BACKEND / "api" / "routes" / "admin.py").read_text(encoding="utf-8")
+DISCOVERY_SRC = (
+    BACKEND / "api" / "routes" / "paper_discovery.py"
+).read_text(encoding="utf-8")
+COMPONENTS_SRC = (
+    BACKEND / "api" / "routes" / "theory_components.py"
+).read_text(encoding="utf-8")
+TOPICS_SRC = (
+    BACKEND / "api" / "routes" / "lecture_studio" / "topics.py"
+).read_text(encoding="utf-8")
+VERSIONING_SUBSCRIPTIONS_SRC = (
+    BACKEND / "core" / "versioning" / "subscriptions.py"
+).read_text(encoding="utf-8")
 RELEASE_JS = (
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js"
 ).read_text(encoding="utf-8")
@@ -65,6 +79,34 @@ class TestVocabulary:
         assert dc.BASIS_RELEASE_REVIEW_PLACEMENTS == "release_review.placements"
         assert dc.BASIS_EXPLANATION_REVIEW_BULK == "explanation_review.bulk"
         assert dc.BASIS_ATLAS_BINDING_SAVE == "atlas_binding.save"
+        # 2026-09-10（是正 A-04 / F-18）— 段階適用の第2波。
+        assert dc.BASIS_DISCOVERY_INGEST_BATCH == "discovery.ingest_batch"
+        assert dc.BASIS_ATLAS_SKELETON_FREEZE == "atlas_skeleton.freeze"
+        assert dc.BASIS_COURSE_VISIBILITY_PUBLISH == "course_visibility.publish"
+        assert dc.BASIS_COMPONENT_REVIEW_SINGLE == "component_review.single"
+        assert dc.BASIS_CLAIM_REVIEW_SINGLE == "claim_review.single"
+
+    def test_basis_catalog_is_complete_and_follows_the_naming_convention(self):
+        """basis の正本はカタログ（件数を文書に書き写さない — 開発規約 §5）。"""
+        constants = {
+            getattr(dc, name) for name in dir(dc) if name.startswith("BASIS_")
+        } - {dc.BASIS_VALUES}
+        assert set(dc.BASIS_VALUES) == constants
+        assert dc.BASIS_VALUES == tuple(sorted(dc.BASIS_VALUES))
+        for value in dc.BASIS_VALUES:
+            subject, _, operation = value.partition(".")
+            assert subject and operation, value
+            assert value == value.lower()
+
+    def test_basis_catalog_is_not_a_validation_gate(self):
+        """カタログは検査用（任意の basis を弾かない — 既存呼び出しを壊さない）。"""
+        assert dc.build_decision_context(
+            basis="not_in_catalog.x",
+            presented_ids=["a"],
+            applied_ids=["a"],
+            alternatives=[dc.ALT_REJECT],
+            reopen_path="POST /x",
+        )["basis"] == "not_in_catalog.x"
 
     def test_alternative_vocabulary_is_fixed(self):
         assert dc.ALTERNATIVES == (
@@ -175,6 +217,11 @@ class TestEvidenceShownIsNeverAssertedByTheServer:
             (LANDSCAPE_SRC, "accept_course_landscape_placements"),
             (EXPLANATION_SRC, "bulk_review_element_explanations"),
             (ATLAS_SRC, "save_course_atlas_binding"),
+            # 2026-09-10 の第2波（是正 A-04 / F-18）も同じ規律に従う。
+            (ATLAS_SRC, "freeze_atlas_skeleton"),
+            (DISCOVERY_SRC, "ingest_batch"),
+            (ADMIN_SRC, "update_course_visibility"),
+            (COMPONENTS_SRC, "_single_review_audit_metadata"),
         ):
             fn_src = extract_function_source(src, fn)
             assert "evidence_shown=None" in fn_src, fn
@@ -234,3 +281,150 @@ class TestReleaseReviewFrontend:
         ):
             assert fact in RELEASE_JS
             assert "%" not in fact
+
+
+class TestStagedRoutesRecordContext:
+    """段階適用の第2波（2026-09-10・是正 A-04 / F-18 / 六つのレンズ §4 第1波 #6）。
+
+    一括取り込み・骨格の凍結・コースの公開・単発の承認まで DC1 を広げた。適用先の
+    正本は ``core/decision_context.py`` の ``BASIS_*``（件数はここに書き写さない —
+    :meth:`TestVocabulary.test_basis_catalog_is_complete_and_follows_the_naming_convention`
+    がカタログと定数の一致を固定する）。
+    """
+
+    def test_discovery_ingest_batch_builds_and_attaches_context(self):
+        src = extract_function_source(DISCOVERY_SRC, "ingest_batch")
+        assert "decision_context.build_decision_context(" in src
+        assert "decision_context.attach_decision_context(" in src
+        assert "decision_context.BASIS_DISCOVERY_INGEST_BATCH" in src
+        # 提示集合はリクエストの候補集合、適用集合は実際にキューへ積まれた行。
+        assert "presented_ids=[item.arxiv_id for item in items]" in src
+        assert 'applied_ids=[entry["arxiv_id"] for entry in result["queued"]]' in src
+        # 覆す経路は「教材の削除」（キューの retry は取り消しではない — DC2）。
+        assert "reopen_path=_INGEST_REOPEN_PATH" in src
+
+    def test_atlas_freeze_builds_and_attaches_context(self):
+        src = extract_function_source(ATLAS_SRC, "freeze_atlas_skeleton")
+        assert "decision_context.build_decision_context(" in src
+        assert "decision_context.attach_decision_context(" in src
+        assert "decision_context.BASIS_ATLAS_SKELETON_FREEZE" in src
+        # 提示 = プレビューが計算対象にした draft の node / 適用 = 版へ入った node。
+        assert "draft.region_ids()" in src and "draft.concept_ids()" in src
+        assert "frozen.region_ids()" in src and "frozen.concept_ids()" in src
+        # 凍結版は不変（AB3）なので「戻せる status」を書かない。
+        assert "reopen_path=_FREEZE_REOPEN_PATH" in src
+        assert "reopen_statuses" not in src
+        # プレビューで見せた影響そのものは隣接キーに事実として残す。
+        assert "impact_removed_node_ids" in src
+        assert "impact_affected_course_ids" in src
+
+    def test_atlas_freeze_reopen_path_is_the_next_draft(self):
+        import routes.atlas as atlas_routes
+
+        assert atlas_routes._FREEZE_REOPEN_PATH.startswith("POST /api/admin/")
+        assert "draft/from-frozen" in atlas_routes._FREEZE_REOPEN_PATH
+
+    def test_course_publish_builds_and_attaches_context(self):
+        src = extract_function_source(ADMIN_SRC, "update_course_visibility")
+        assert "decision_context.build_decision_context(" in src
+        assert "decision_context.attach_decision_context(" in src
+        assert "decision_context.BASIS_COURSE_VISIBILITY_PUBLISH" in src
+        # 公開（取り消しの効かない開示）だけが確定文脈を伴う。
+        assert 'if body.visibility == "public":' in src
+        # 非公開へ戻せる（visibility の語彙がそのまま再審の status になる）。
+        assert 'reopen_statuses=("group", "private")' in src
+
+    def test_single_component_approval_builds_context(self):
+        src = extract_function_source(COMPONENTS_SRC, "approve_theory_component")
+        assert "_single_review_audit_metadata(" in src
+        assert "decision_context.BASIS_COMPONENT_REVIEW_SINGLE" in src
+        # 承認可能性の判定と遷移実体は非改変（audit_metadata は加算のみ）。
+        assert "_component_approval_problems(existing)" in src
+        assert 'status="teacher_reviewed", review_status="teacher_approved"' in src
+        # 承認画面が並置する面（根拠 claim・退避した警告）を id で残す。
+        assert "backing_claim_ids" in src
+        assert "retained_validation_warning_fields" in src
+
+    def test_single_claim_review_builds_context(self):
+        src = extract_function_source(COMPONENTS_SRC, "review_claim")
+        assert "_single_review_audit_metadata(" in src
+        assert "decision_context.BASIS_CLAIM_REVIEW_SINGLE" in src
+        # 却下のときは画面に出ていない `reject` を代替として書かない（DC2）。
+        assert 'if review_status == "rejected"' in src
+
+    def test_single_confirmation_keeps_the_match_flag_meaningful(self):
+        """単発の確定は presented = applied = そのオブジェクト（DC2 の差の検出を守る）。
+
+        「画面に出ていた根拠」を `presented` に入れると
+        `presented_matches_applied` が構造的に常に False になり、差の検出が
+        意味の無い定数になる。根拠は隣接キー `grounds` に置く。
+        """
+        src = extract_function_source(COMPONENTS_SRC, "_single_review_audit_metadata")
+        assert "presented_ids=[entity_id]" in src
+        assert "applied_ids=[entity_id]" in src
+        assert '"grounds": grounds' in src
+
+    def test_single_confirmation_metadata_carries_no_numbers(self):
+        import routes.theory_components as tc
+
+        meta = tc._single_review_audit_metadata(
+            dc.BASIS_COMPONENT_REVIEW_SINGLE,
+            entity_id="c1",
+            reopen_path=tc._COMPONENT_REOPEN_PATH,
+            reopen_statuses=("rejected",),
+            grounds={"backing_claim_ids": ["cl1"]},
+            alternatives=(dc.ALT_REJECT, dc.ALT_SKIP_STEP),
+        )
+        ctx = meta[dc.DECISION_CONTEXT_KEY]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["decline_possible"] is True
+        assert ctx["evidence_shown"] is None
+        assert meta["bulk"] is False
+        for banned in ("confidence", "weight", "score"):
+            assert banned not in json.dumps(meta, ensure_ascii=False)
+
+
+class TestNoStateChangeWithoutAudit:
+    """原則14（是正 F11）— 記帳の無い状態変更を塞いだ3経路の回帰検出。
+
+    「監査を書かずに状態を変える」経路は、後から再構成しようとしたときに存在しない。
+    とくに教材の物理削除は不可逆で、学習者に届いている教材と解析成果をまとめて消す。
+    """
+
+    def test_material_deletion_is_audited(self):
+        src = extract_function_source(ADMIN_SRC, "delete_material")
+        assert "record_review_event(" in src
+        assert "AUDIT_ENTITY_MATERIAL" in src
+        assert '"deleted"' in src
+        # 巻き添えで消えたコースも残す（何が消えたかを後から追えるように）。
+        assert "deleted_course_ids" in src
+        # 監査は DB 削除の commit 後（ロールバックした削除を「消した」と書かない）。
+        assert src.index("session.commit()") < src.index("record_review_event(")
+        # 資料本文・タイトルは監査に載せない。
+        assert "doc_title" not in src.split("record_review_event(")[1]
+
+    def test_topic_save_is_audited_with_field_names_only(self):
+        src = extract_function_source(TOPICS_SRC, "save_lecture_studio_course_topic")
+        assert "record_review_event(" in src
+        assert "AUDIT_ENTITY_COURSE_TOPIC" in src
+        assert '"action": "topic_draft_saved"' in src
+        assert "changed_fields" in src
+        # 音声キャッシュ無効化という副作用も事実として残す。
+        assert "topic_audio_cache_invalidated" in src
+        # 本文そのものは載せない（フィールド名の列挙だけ）。
+        call = src.split("record_review_event(")[1].split('return {"course_id"')[0]
+        for banned in ("source_text", "target[", "body.get("):
+            assert banned not in call
+
+    def test_release_adoption_is_audited_in_core(self):
+        """版の adopt は core 側（`core/versioning/audit.py`）で記帳済み。
+
+        六つのレンズ F11 はルートファイルの `record_review_event` を grep して
+        「記帳が無い」と読んだが、V層は CLAUDE.md が認めた core 直記帳の経路で
+        （`versioning.py` の route は `subscriptions.adopt_latest` へ委譲する）
+        既に監査している。**route 側に足すと1操作2行になる**ので足さない。
+        """
+        src = extract_function_source(VERSIONING_SUBSCRIPTIONS_SRC, "adopt_latest")
+        assert "audit.record_event(" in src
+        assert "schema.AUDIT_SUBSCRIPTION" in src
+        assert '"action": "adopt"' in src

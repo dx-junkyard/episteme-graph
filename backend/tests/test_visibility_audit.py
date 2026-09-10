@@ -186,10 +186,14 @@ class TestCourseVisibilityIsAudited:
         assert recorded == []
 
     def test_release_wizard_provenance_is_not_fabricated(self):
-        """ウィザード経由かどうかはサーバから判別できない → 申告しない（偽装しない）。"""
-        from tests.guardrail_helpers import extract_function_source
+        """ウィザード経由かどうかはサーバから判別できない → 申告しない（偽装しない）。
 
+        2026-09-10（是正 A-04 / F-18）で公開に `decision_context` を足したが、
+        「どの画面から来たか」の申告は増やしていない（`client_reported` を使わない）。
+        """
         from pathlib import Path
+
+        from tests.guardrail_helpers import extract_function_source
 
         src = extract_function_source(
             (Path(__file__).resolve().parents[1] / "api" / "routes" / "admin.py").read_text(
@@ -197,6 +201,62 @@ class TestCourseVisibilityIsAudited:
             ),
             "update_course_visibility",
         )
-        assert "build_decision_context(" not in src
-        assert "attach_decision_context(" not in src
-        assert "release_review.publish" not in src
+        assert "client_reported" not in src
+        assert "release_review" not in src
+
+    def test_publish_carries_the_decision_context(self, monkeypatch, recorded):
+        """DC1: 公開は「取り消しの効かない確定」なので確定文脈を伴う。"""
+        from core import decision_context as dc
+
+        monkeypatch.setattr(admin_module, "_pg_session", lambda: _FakeSession("private"))
+
+        admin_module.update_course_visibility(
+            COURSE_ID, body=_Body("public"), current_user=_user(),
+        )
+
+        metadata = recorded[0][0][5]
+        ctx = metadata[dc.DECISION_CONTEXT_KEY]
+        assert ctx["basis"] == dc.BASIS_COURSE_VISIBILITY_PUBLISH
+        # 確定の対象はコース1件（提示と適用は同じ — DC2 の差の検出を殺さない）。
+        assert ctx["presented"]["ids"] == [COURSE_ID]
+        assert ctx["applied"]["ids"] == [COURSE_ID]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["alternatives_available"] == ["skip_step"]
+        assert ctx["decline_possible"] is True
+        assert ctx["reopen"]["path"].endswith("/visibility")
+        assert ctx["reopen"]["statuses"] == ["group", "private"]
+        assert ctx["reopen"]["actor"] == "teacher"
+        assert ctx["evidence_shown"] is None
+        assert ctx["client_reported"] is None
+        # 既存キーは不変（additive）。
+        assert metadata["action"] == "course_visibility"
+        assert metadata["object_type"] == "course"
+
+    @pytest.mark.parametrize("visibility", ["group", "private"])
+    def test_non_public_transitions_carry_no_decision_context(
+        self, monkeypatch, recorded, visibility
+    ):
+        """公開だけが「一度出たら戻らない」確定。非公開化は従来の記帳のまま。"""
+        from core import decision_context as dc
+
+        monkeypatch.setattr(admin_module, "_pg_session", lambda: _FakeSession("public"))
+        monkeypatch.setattr(admin_module, "user_can_access_group", lambda uid, gid: True)
+
+        admin_module.update_course_visibility(
+            COURSE_ID,
+            body=_Body(visibility, GROUP_ID if visibility == "group" else None),
+            current_user=_user(),
+        )
+
+        metadata = recorded[0][0][5]
+        assert dc.DECISION_CONTEXT_KEY not in metadata
+        assert set(metadata) == {"action", "object_type", "group_id"}
+
+    def test_response_shape_is_unchanged(self, monkeypatch, recorded):
+        """B（記帳のみ・挙動不変）: レスポンスに確定文脈を足していない。"""
+        monkeypatch.setattr(admin_module, "_pg_session", lambda: _FakeSession("private"))
+
+        out = admin_module.update_course_visibility(
+            COURSE_ID, body=_Body("public"), current_user=_user(),
+        )
+        assert set(out) == {"course_id", "visibility", "group_id"}

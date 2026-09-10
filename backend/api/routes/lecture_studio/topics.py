@@ -16,7 +16,8 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
-from services import get_viewable_course_data
+from services import get_viewable_course_data, record_review_event
+from core.schema import AUDIT_ENTITY_COURSE_TOPIC
 from core.course_data import (
     course_chapters,
     course_source_material_ids,
@@ -342,6 +343,33 @@ def _normalize_check_questions(value: object) -> list[dict]:
     return normalized
 
 
+#: 原稿スタジオのトピック保存が書き換えるフィールドと、その「空」の正規形
+#: （監査の ``changed_fields`` の母集合。保存は未指定フィールドを空で埋めるので、
+#: 未設定 → 空を「変更」と書かないために正規形で比較する）。本文そのものは監査に
+#: 載せず、**どのフィールドが変わったか**だけを列挙する（是正 F11）。
+_TOPIC_DRAFT_FIELD_EMPTY: dict[str, object] = {
+    "student_material": None,
+    "key_concepts": [],
+    "spoken_script": "",
+    "cautions": [],
+    "check_questions": [],
+}
+_TOPIC_DRAFT_FIELDS = tuple(_TOPIC_DRAFT_FIELD_EMPTY)
+
+
+def _topic_field_snapshot(topic: dict) -> dict[str, str]:
+    """保存前後の比較用に各フィールドを決定論的な文字列へ畳む（値は監査に出さない）。"""
+    snapshot: dict[str, str] = {}
+    for field, empty in _TOPIC_DRAFT_FIELD_EMPTY.items():
+        value = topic.get(field)
+        if value is None or value == [] or value == "":
+            value = empty
+        snapshot[field] = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, default=str
+        )
+    return snapshot
+
+
 @router.put("/courses/{course_id}/lecture-studio/course-topics/{topic_id}")
 def save_lecture_studio_course_topic(
     course_id: str,
@@ -354,6 +382,8 @@ def save_lecture_studio_course_topic(
     target = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
     if target is None:
         raise HTTPException(status_code=404, detail="Topic not found")
+
+    before = _topic_field_snapshot(target)
 
     student_material = body.get("student_material")
     if isinstance(student_material, dict):
@@ -414,6 +444,25 @@ def save_lecture_studio_course_topic(
     finally:
         session.close()
 
+    # 原則14（是正 F11）: このトピック保存は**学習者に配信される**授業用教材・読み上げ原稿を
+    # 上書きし、副作用として当該トピックの生成済み音声を消す。誰がいつどのトピックの
+    # 何を変えたかを記帳する（本文は載せず、変わったフィールド名だけを列挙する）。
+    after = _topic_field_snapshot(target)
+    changed_fields = [f for f in _TOPIC_DRAFT_FIELDS if before.get(f) != after.get(f)]
+    record_review_event(
+        AUDIT_ENTITY_COURSE_TOPIC,
+        course_id,
+        "",
+        "edited",
+        current_user.get("id"),
+        {
+            "action": "topic_draft_saved",
+            "topic_id": topic_id,
+            "changed_fields": changed_fields,
+            # 保存の副作用（教員には保存前に告知される）も事実として残す。
+            "topic_audio_cache_invalidated": True,
+        },
+    )
     return {"course_id": course_id, "topic_id": topic_id, "status": "edited"}
 
 

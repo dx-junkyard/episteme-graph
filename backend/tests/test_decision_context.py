@@ -194,3 +194,62 @@ class TestAttach:
 
     def test_key_constant(self):
         assert dc.DECISION_CONTEXT_KEY == "decision_context"
+
+
+class TestStagedBases:
+    """段階適用の第2波（2026-09-10・是正 A-04 / F-18）で足した basis の不変条項。
+
+    どの basis でも DC1〜DC4 は同じ形で成り立つ（basis ごとの例外を作らない）。
+    """
+
+    @pytest.mark.parametrize("basis", dc.BASIS_VALUES)
+    def test_every_basis_satisfies_the_invariants(self, basis):
+        ctx = _ctx(basis=basis)
+        assert ctx["basis"] == basis
+        # DC3: 断れない確定は表現しない（導出値）。
+        assert ctx["decline_possible"] is True
+        # DC2: 一致は導出（同じ集合を渡したので True）。
+        assert ctx["presented_matches_applied"] is True
+        # DC4: 申告が無ければ載せない。
+        assert ctx["client_reported"] is None
+        # 数値（confidence / weight / score）は載せない（原則4）。
+        payload = json.dumps(ctx, ensure_ascii=False)
+        for banned in ("confidence", "weight", "score"):
+            assert banned not in payload
+
+    @pytest.mark.parametrize("basis", dc.BASIS_VALUES)
+    def test_every_basis_still_requires_alternatives(self, basis):
+        """DC3: basis ごとの抜け道を作らない（一括でも単発でも同じ）。"""
+        with pytest.raises(ValueError):
+            _ctx(basis=basis, alternatives=())
+
+    def test_single_confirmation_shape(self):
+        """単発の確定は presented = applied = そのオブジェクト（DC2 を守る形）。"""
+        ctx = _ctx(
+            basis=dc.BASIS_COMPONENT_REVIEW_SINGLE,
+            presented_ids=["comp-1"],
+            applied_ids=["comp-1"],
+            alternatives=(dc.ALT_REJECT, dc.ALT_SKIP_STEP),
+            reopen_path="POST /api/admin/theory-components/{component_id}/reject",
+            reopen_statuses=("rejected",),
+        )
+        assert ctx["presented"]["ids"] == ["comp-1"]
+        assert ctx["applied"]["ids"] == ["comp-1"]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["reopen"]["statuses"] == ["rejected"]
+        assert ctx["reopen"]["actor"] == dc.REOPEN_ACTOR_TEACHER
+
+    def test_freeze_detects_a_diff_between_preview_and_frozen_nodes(self):
+        """骨格の凍結は「プレビューの対象」と「版に入った node」を本当に比べる。"""
+        ctx = _ctx(
+            basis=dc.BASIS_ATLAS_SKELETON_FREEZE,
+            presented_ids=["r1", "c1", "c2"],
+            applied_ids=["r1", "c1"],
+            alternatives=(dc.ALT_EDIT, dc.ALT_SKIP_STEP),
+            reopen_path=(
+                "POST /api/admin/cartridges/{cartridge_id}/atlas/skeleton/draft/from-frozen"
+            ),
+        )
+        assert ctx["presented_matches_applied"] is False
+        # 凍結版に「戻せる status」は無い（偽らない）。
+        assert ctx["reopen"]["statuses"] == []

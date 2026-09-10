@@ -48,8 +48,14 @@ __all__ = [
     "ALT_REJECT",
     "ALT_SKIP_STEP",
     "BASIS_ATLAS_BINDING_SAVE",
+    "BASIS_ATLAS_SKELETON_FREEZE",
+    "BASIS_CLAIM_REVIEW_SINGLE",
+    "BASIS_COMPONENT_REVIEW_SINGLE",
+    "BASIS_COURSE_VISIBILITY_PUBLISH",
+    "BASIS_DISCOVERY_INGEST_BATCH",
     "BASIS_EXPLANATION_REVIEW_BULK",
     "BASIS_RELEASE_REVIEW_PLACEMENTS",
+    "BASIS_VALUES",
     "DECISION_CONTEXT_KEY",
     "PRESENTED_IDS_MAX",
     "REOPEN_ACTOR_TEACHER",
@@ -71,6 +77,30 @@ BASIS_RELEASE_REVIEW_PLACEMENTS = "release_review.placements"
 BASIS_EXPLANATION_REVIEW_BULK = "explanation_review.bulk"
 #: 学習マップの対応付け保存（リリース前の確認 ステップ1「この対応で次へ」= topic 一括）。
 BASIS_ATLAS_BINDING_SAVE = "atlas_binding.save"
+#: arXiv 候補の一括取り込み（`POST /api/admin/discovery/ingest-batch`。PD1 の「教員が承認した」）。
+BASIS_DISCOVERY_INGEST_BATCH = "discovery.ingest_batch"
+#: 分野の地図 骨格の凍結（凍結版は不変。修正は次版 — 後戻りが最も効かない確定）。
+BASIS_ATLAS_SKELETON_FREEZE = "atlas_skeleton.freeze"
+#: コースの公開（`PUT /api/admin/courses/{id}/visibility` で public へ。RR ステップ3）。
+BASIS_COURSE_VISIBILITY_PUBLISH = "course_visibility.publish"
+#: component の単発の承認（グラフ対話レビューの承認ボタン）。
+BASIS_COMPONENT_REVIEW_SINGLE = "component_review.single"
+#: claim の単発のレビュー遷移（グラフ対話レビューの根拠 claim 承認・却下）。
+BASIS_CLAIM_REVIEW_SINGLE = "claim_review.single"
+
+#: basis 語彙のカタログ（「画面.操作」規約の検査用。**検証はしない** —
+#: :func:`build_decision_context` は任意の basis を受ける。経路が定数を使うことは
+#: ``test_decision_context_guardrails.py`` が構造的に検査する）。
+BASIS_VALUES = (
+    BASIS_ATLAS_BINDING_SAVE,
+    BASIS_ATLAS_SKELETON_FREEZE,
+    BASIS_CLAIM_REVIEW_SINGLE,
+    BASIS_COMPONENT_REVIEW_SINGLE,
+    BASIS_COURSE_VISIBILITY_PUBLISH,
+    BASIS_DISCOVERY_INGEST_BATCH,
+    BASIS_EXPLANATION_REVIEW_BULK,
+    BASIS_RELEASE_REVIEW_PLACEMENTS,
+)
 
 # ---------------------------------------------------------------------------
 # 代替（確定者がその場で選べた「承認しない」選択肢）

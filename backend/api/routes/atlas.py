@@ -658,6 +658,13 @@ def discard_atlas_skeleton_draft(
     return {"cartridge_id": cartridge_id, "discarded": True}
 
 
+# 確定文脈（DC2）— 凍結を覆す実際の経路。凍結版は不変（AB3）なので「戻す」経路は無く、
+# 現行凍結版から次版 draft を起こして直すのが唯一の道である（使えない経路を書かない）。
+_FREEZE_REOPEN_PATH = (
+    "POST /api/admin/cartridges/{cartridge_id}/atlas/skeleton/draft/from-frozen"
+)
+
+
 @router.post("/{cartridge_id}/atlas/skeleton/freeze")
 def freeze_atlas_skeleton(
     cartridge_id: str,
@@ -852,22 +859,54 @@ def freeze_atlas_skeleton(
         finally:
             report_session.close()
 
+    # 改訂原則1（DC1）: 凍結は「この骨格でいく」を一括で確定する操作で、凍結版は不変
+    # （修正は次版）＝後戻りが最も効かない確定なので、提示・適用・代替・再審経路を記帳する。
+    # 提示集合は freeze-impact のプレビューが計算対象にした draft の node、適用集合は
+    # 実際に版へ入った node（両者は別オブジェクトから導出するので、一致は本物の検査になる）。
+    # プレビューで見せた影響そのもの（消える node・影響コース）は隣接キーに事実として残す。
+    freeze_ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_ATLAS_SKELETON_FREEZE,
+        presented_ids=list(draft.region_ids()) + list(draft.concept_ids()),
+        applied_ids=list(frozen.region_ids()) + list(frozen.concept_ids()),
+        # 影響プレビューは事実文つきの confirm で提示され、凍結せずに draft を直す /
+        # 凍結を見送る（draft のまま置く）を選べる。
+        alternatives=(
+            decision_context.ALT_EDIT,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        # 凍結版に「戻せる status」は無い（AB3: 不変）。実際に覆す経路は現行凍結版から
+        # 次版 draft を起こして直すことなので、statuses は空のままにする。
+        reopen_path=_FREEZE_REOPEN_PATH,
+        # 影響プレビューが画面に出ていたか（confirm を読んだか）はサーバから検証できない。
+        evidence_shown=None,
+    )
     _record_review_event(
         cartridge_id,
         atlas.STATUS_DRAFT,
         atlas.STATUS_FROZEN,
         current_user.get("id"),
-        {
-            "action": "freeze",
-            "version": body.version,
-            "note": body.note,
-            "report_credits": atlas_reports.credits_from_reports(accepted_reports),
-            "reports_applied": report_summary.get("applied", 0),
-            "reports_migrated": report_summary.get("migrated", 0),
-            # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
-            "category_gaps_applied": list(stamped_gaps),
-            "relation_edges_applied": list(stamped_edges),
-        },
+        decision_context.attach_decision_context(
+            {
+                "action": "freeze",
+                "version": body.version,
+                "note": body.note,
+                "report_credits": atlas_reports.credits_from_reports(accepted_reports),
+                "reports_applied": report_summary.get("applied", 0),
+                "reports_migrated": report_summary.get("migrated", 0),
+                # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
+                "category_gaps_applied": list(stamped_gaps),
+                "relation_edges_applied": list(stamped_edges),
+                # プレビューで提示した影響（DC2: 「何を見せたか」を後から再構成できるように）。
+                "impact_removed_node_ids": list(freeze_impact.get("removed_node_ids") or []),
+                "impact_added_node_ids": list(freeze_impact.get("added_node_ids") or []),
+                "impact_affected_course_ids": [
+                    str(c.get("course_id") or "")
+                    for c in (freeze_impact.get("affected_courses") or [])
+                    if isinstance(c, dict) and c.get("course_id")
+                ],
+            },
+            freeze_ctx,
+        ),
     )
 
     # 凍結時の通知 (§3.4)。best-effort — 通知の成否は凍結の成否に影響させない。

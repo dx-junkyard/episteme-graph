@@ -75,6 +75,7 @@ import services
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
 from services import aggregate_frontier_interest, record_review_event
 
+from core import decision_context
 from core import url_fetch
 from core.config import get_settings
 from core.llm_usage import metrics as usage_metrics
@@ -210,6 +211,11 @@ _PROVENANCE_METHOD_CONFIRMED = "teacher_confirmed"
 
 #: 分野が特定できない操作（取り込みは複数分野にまたがり得る）の監査 entity_id。
 _ENTITY_ID_FALLBACK = "arxiv"
+
+#: 確定文脈（DC2）— 一括取り込みを覆せる実際の経路。キュー行の retry は「失敗の再試行」
+#: であって取り込みの取り消しではないので、覆す経路は教材そのものの削除で書く
+#: （その削除も監査される — 是正 F11）。
+_INGEST_REOPEN_PATH = "DELETE /api/admin/materials/{material_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -746,19 +752,42 @@ def ingest_batch(
     if result["queued"] and not fetch_allowed:
         payload["notice"] = _NOTICE_DOMAIN_NOT_ALLOWED
 
+    # 改訂原則1（DC1）: これは「選択した N 件を取り込む」型の一括確定で、取り込みの弁は
+    # 教員だけが持つ（PD1）。提示集合はリクエストの候補集合そのもの（説明レビューキューの
+    # 一括承認と同じ理由 — 教員が画面で選んだ集合が提示集合である）で、適用集合は実際に
+    # キューへ積まれた行。積まなかった候補は ``skipped`` に残る（黙って落とさない）。
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_DISCOVERY_INGEST_BATCH,
+        presented_ids=[item.arxiv_id for item in items],
+        applied_ids=[entry["arxiv_id"] for entry in result["queued"]],
+        # 候補行のチェックボックスは外せる（一括の対象にしない）し、行ごとに「見送る」
+        # （`/dismiss`。行削除ではなく status 遷移で保持）を選べる。
+        alternatives=(
+            decision_context.ALT_DESELECT,
+            decision_context.ALT_DISMISS,
+        ),
+        # 取り込んだ結果は教材として削除で取り消せる（その削除も記帳される — 是正 F11）。
+        # キュー行の status（queued/failed 等）は「戻せる status」ではないので空のまま。
+        reopen_path=_INGEST_REOPEN_PATH,
+        evidence_shown=None,
+    )
     record_review_event(
         AUDIT_ENTITY_PAPER_DISCOVERY,
         str(body.domain_key or "").strip() or _ENTITY_ID_FALLBACK,
         _STATUS_CANDIDATE,
         _STATUS_QUEUED,
         current_user["id"],
-        {
-            "action": "ingest_batch",
-            "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
-            "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
-            "queued": len(result["queued"]),
-            "skipped": len(result["skipped"]),
-        },
+        decision_context.attach_decision_context(
+            {
+                "action": "ingest_batch",
+                "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
+                "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
+                "queued": len(result["queued"]),
+                "skipped": len(result["skipped"]),
+                "bulk": True,
+            },
+            ctx,
+        ),
     )
     logger.info(
         "arXiv ingest batch queued by user=%s queued=%s skipped=%s",

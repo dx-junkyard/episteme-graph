@@ -118,7 +118,9 @@ class TestApproveComponent:
         events = []
         monkeypatch.setattr(
             tc, "_record_review_event",
-            lambda entity, entity_id, old, new, user_id: events.append((old, new, user_id)),
+            lambda entity, entity_id, old, new, user_id, metadata=None: events.append(
+                (old, new, user_id, metadata)
+            ),
         )
         tc._transition_component_review(
             _COMPONENT, existing,
@@ -132,8 +134,92 @@ class TestApproveComponent:
         assert "maturity_source = 'teacher_reviewed'" in sql
         # 是正 F6（2026-09-10）: 解析時の警告は承認しても消さない（退避する）。
         assert "validation_warnings" not in sql
-        # 監査は実行者付き（_update_component 内の記帳は changed_by=NULL だった）
-        assert events == [("teacher_review_required", "teacher_approved", _TEACHER["id"])]
+        # 監査は実行者付き（_update_component 内の記帳は changed_by=NULL だった）。
+        # audit_metadata 未指定なら metadata は None（従来の記帳と同じ形）。
+        assert events == [
+            ("teacher_review_required", "teacher_approved", _TEACHER["id"], None)
+        ]
+
+    def test_transition_passes_audit_metadata_through_without_changing_sql(self, monkeypatch):
+        """DC1 の口は純粋に加算的（遷移する列・判定は audit_metadata で変わらない）。"""
+        existing = _component(review_status="teacher_review_required")
+        fake = _FakeSession(None)
+        monkeypatch.setattr(tc, "_pg_session", lambda: fake)
+        monkeypatch.setattr(
+            tc, "_get_component", lambda _id: _component(review_status="teacher_approved")
+        )
+        events = []
+        monkeypatch.setattr(
+            tc, "_record_review_event",
+            lambda *a, **k: events.append(a),
+        )
+        tc._transition_component_review(
+            _COMPONENT, existing,
+            status="teacher_reviewed", review_status="teacher_approved",
+            user_id=_TEACHER["id"], approve=True,
+            audit_metadata={"grounds": {"backing_claim_ids": ["cl1"]}},
+        )
+        assert events[0][5] == {"grounds": {"backing_claim_ids": ["cl1"]}}
+        # SQL は audit_metadata の有無で変わらない（status 系の列だけ）。
+        sql = fake.executed[0][0]
+        assert "grounds" not in sql
+        assert "maturity_source = 'teacher_reviewed'" in sql
+
+    def test_approve_records_the_decision_context(self, monkeypatch):
+        """DC1（是正 A-04 / F-18）: 単発の承認も確定文脈を伴う。"""
+        from core import decision_context as dc
+
+        existing = _component(
+            review_status="teacher_review_required",
+            evidence_claims=["cl-2", "cl-1"],
+            validation_warnings=[{"field": "inputs.0", "message": "出典がありません。"}],
+        )
+        captured = {}
+        monkeypatch.setattr(tc, "_get_component", lambda _id: existing)
+        monkeypatch.setattr(tc, "_ensure_component_editable", lambda component, user: None)
+        monkeypatch.setattr(
+            tc, "_transition_component_review",
+            lambda component_id, passed, **kwargs: captured.update(kwargs) or existing,
+        )
+        tc.approve_theory_component(_COMPONENT, current_user=_TEACHER)
+
+        metadata = captured["audit_metadata"]
+        assert metadata["bulk"] is False
+        # 承認画面に出ていた面は隣接キー `grounds` に（提示/適用は対象そのもの）。
+        assert metadata["grounds"]["backing_claim_ids"] == ["cl-1", "cl-2"]
+        assert metadata["grounds"]["retained_validation_warning_fields"] == ["inputs.0"]
+        ctx = metadata[dc.DECISION_CONTEXT_KEY]
+        assert ctx["basis"] == dc.BASIS_COMPONENT_REVIEW_SINGLE
+        assert ctx["presented"]["ids"] == [_COMPONENT]
+        assert ctx["applied"]["ids"] == [_COMPONENT]
+        assert ctx["presented_matches_applied"] is True
+        assert ctx["alternatives_available"] == ["reject", "skip_step"]
+        assert ctx["decline_possible"] is True
+        assert ctx["reopen"]["path"].endswith("/reject")
+        assert ctx["reopen"]["statuses"] == ["rejected"]
+        assert ctx["evidence_shown"] is None
+
+    def test_backing_claim_ids_include_per_item_evidence(self):
+        item = TheoryIOItem(
+            label="入力A",
+            source_refs=[TheorySourceRef(chunk_id="c1", quote="q")],
+            evidence_claims=["cl-item"],
+        )
+        component = _component(inputs=[item], evidence_claims=["cl-top", "cl-top"])
+        assert tc._component_backing_claim_ids(component) == ["cl-item", "cl-top"]
+
+    def test_reject_keeps_recording_without_a_decision_context(self, monkeypatch):
+        """却下は「確定」ではなく差し戻しなので、v1 では確定文脈を付けない。"""
+        existing = _component()
+        captured = {}
+        monkeypatch.setattr(tc, "_get_component", lambda _id: existing)
+        monkeypatch.setattr(tc, "_ensure_component_editable", lambda component, user: None)
+        monkeypatch.setattr(
+            tc, "_transition_component_review",
+            lambda component_id, passed, **kwargs: captured.update(kwargs) or existing,
+        )
+        tc.reject_theory_component(_COMPONENT, current_user=_TEACHER)
+        assert captured.get("audit_metadata") is None
 
     def test_reject_uses_status_only_transition(self, monkeypatch):
         existing = _component()
@@ -292,11 +378,47 @@ class TestClaimReviewSideEffects:
         events = []
         monkeypatch.setattr(
             tc, "_record_review_event",
-            lambda entity, entity_id, old, new, user_id: events.append((entity, entity_id, old, new)),
+            lambda entity, entity_id, old, new, user_id, metadata=None: events.append(
+                (entity, entity_id, old, new)
+            ),
         )
         monkeypatch.setattr(tc, "_propagate_rejected_claim", lambda claim_id: None)
         tc._apply_claim_review_side_effects(_CLAIM, "teacher_review_required", self._updated("rejected"), "u1")
         assert events == [(tc.AUDIT_ENTITY_CLAIM, _CLAIM, "teacher_review_required", "rejected")]
+
+    def test_audit_metadata_is_passed_through(self, monkeypatch):
+        """DC1 の口は加算のみ（却下伝播・R層フックの挙動を変えない）。"""
+        events = []
+        monkeypatch.setattr(tc, "_record_review_event", lambda *a, **k: events.append(a))
+        propagated = []
+        monkeypatch.setattr(
+            tc, "_propagate_rejected_claim", lambda claim_id: propagated.append(claim_id)
+        )
+        tc._apply_claim_review_side_effects(
+            _CLAIM, "teacher_review_required", self._updated("rejected"), "u1",
+            audit_metadata={"bulk": False},
+        )
+        assert events[0][5] == {"bulk": False}
+        assert propagated == [_CLAIM]
+
+    def test_single_claim_review_metadata_shape(self):
+        """単発の claim レビューの確定文脈（代替は画面に出ていたものだけ）。"""
+        from core import decision_context as dc
+
+        meta = tc._single_review_audit_metadata(
+            dc.BASIS_CLAIM_REVIEW_SINGLE,
+            entity_id=_CLAIM,
+            reopen_path=tc._CLAIM_REOPEN_PATH,
+            reopen_statuses=("rejected", "needs_revision"),
+            grounds={"document_id": _DOC, "support_status": "source_backed"},
+            alternatives=(dc.ALT_RECONSIDER, dc.ALT_SKIP_STEP),
+        )
+        ctx = meta[dc.DECISION_CONTEXT_KEY]
+        assert ctx["basis"] == dc.BASIS_CLAIM_REVIEW_SINGLE
+        assert ctx["presented"]["ids"] == [_CLAIM] == ctx["applied"]["ids"]
+        assert ctx["alternatives_available"] == ["reconsider", "skip_step"]
+        assert ctx["reopen"]["path"] == "POST /api/admin/claims/{claim_id}/review"
+        assert meta["grounds"]["support_status"] == "source_backed"
 
 
 class TestStoredGraphLiveReviewStatus:
