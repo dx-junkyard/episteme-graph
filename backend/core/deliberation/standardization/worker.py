@@ -41,21 +41,27 @@ from core.deliberation.schema import (
 from core.deliberation.standardization.aggregate import decide
 from core.deliberation.standardization.agent import StandardizationAgent
 from core.deliberation.standardization.input_builder import build_target_context
+from core.deliberation.standardization.system import SYSTEM
 from core.library import store as library_store
 from core.llm_usage.context import bind_usage_context
-from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.cost_gate import CostGate
 
 logger = logging.getLogger(__name__)
 
 _FEATURE = "deliberation:standardization"
 
-_cost_gate = CostGate()
+# CostGate は core/deliberation/standardization/system.py の WorkerSystem が1個だけ持つ
+# （テストはこのモジュール属性を差し替えるので、参照はここを経由する）。
+_cost_gate: CostGate = SYSTEM.gate
 
 
 def _check_and_count_llm_call() -> bool:
-    settings = get_settings()
-    per_day = int(getattr(settings, "stdpart_max_calls_per_day", 10))
-    return _cost_gate.check_and_count(daily_limit=per_day, daily_key=today_str(), prune_stale_daily=True)
+    """日次上限内なら加算して True。上限超過なら False。
+
+    上限値の正本は core/deliberation/standardization/system.py の CostSpec
+    （stdpart_max_calls_per_day を settings から読む）。
+    """
+    return SYSTEM.check_and_count(gate=_cost_gate, settings=get_settings())
 
 
 def has_pending_or_committed_assessment(entry_id: str, domain_key: str) -> bool:
@@ -138,24 +144,24 @@ def run_assess_domain(domain_key: str, *, force: bool = False) -> dict:
     return {"assessed": assessed}
 
 
-def schedule_assess_shared_part(entry_id: str, *, force: bool = False) -> None:
+def schedule_assess_shared_part(entry_id: str, *, force: bool = False) -> bool:
     """1つの共通部品の評価をバックグラウンド daemon thread で開始する（P6 相当:
-    同期パスに LLM を入れない）。"""
-    thread = threading.Thread(
-        target=run_assess_shared_part,
-        kwargs={"entry_id": entry_id, "force": force},
-        name="deliberation-standardization",
-        daemon=True,
+    同期パスに LLM を入れない）。戻り値は起動できたかどうか（呼び出し側は無視してよい）。"""
+    return SYSTEM.spawn(
+        run_assess_shared_part,
+        thread_factory=threading.Thread,
+        thread_name="deliberation-standardization",
+        entry_id=entry_id,
+        force=force,
     )
-    thread.start()
 
 
-def schedule_assess_domain(domain_key: str, *, force: bool = False) -> None:
+def schedule_assess_domain(domain_key: str, *, force: bool = False) -> bool:
     """domain 内 active エントリすべての評価をバックグラウンド daemon thread で開始する。"""
-    thread = threading.Thread(
-        target=run_assess_domain,
-        kwargs={"domain_key": domain_key, "force": force},
-        name="deliberation-standardization-domain",
-        daemon=True,
+    return SYSTEM.spawn(
+        run_assess_domain,
+        thread_factory=threading.Thread,
+        thread_name="deliberation-standardization-domain",
+        domain_key=domain_key,
+        force=force,
     )
-    thread.start()

@@ -4,15 +4,17 @@ validation 失敗時、元出力＋エラーリストを添えて最大2回再�
 2回失敗したらバッチは破棄せず、呼び出し側（agent.py）が repair_failed=True の
 結果を返し、worker が unclassified の1行として保存する（P4: 情報を落とさない）。
 
-ループの骨格は core/llm_worker/repair.py に共通化済み。ここでは tension 固有の
-validate_output 呼び出しと repair_failed 時の TensionMiningResult 組み立てのみを持つ。
+ループの骨格は core/llm_worker/repair.py（呼び出しは core/llm_worker/system.py の
+WorkerSystem.run 経由）。ここでは tension 固有の validate_output 呼び出しと
+repair_failed 時の TensionMiningResult 組み立てのみを持つ。
 """
 
 from __future__ import annotations
 
-from core.llm_worker.repair import MAX_REPAIR_ATTEMPTS, run_with_repair as _run_with_repair
+from core.llm_worker.repair import MAX_REPAIR_ATTEMPTS
 from core.tension.prompt import build_repair_prompt
 from core.tension.schema import ConversationWindow, TensionMiningResult
+from core.tension.system import SYSTEM
 from core.tension.validator import validate_output
 
 __all__ = ["MAX_REPAIR_ATTEMPTS", "run_with_repair"]
@@ -31,7 +33,7 @@ def run_with_repair(
     TensionMiningResult
         成功時は検証済み結果。全試行失敗時は repair_failed=True の空結果。
     """
-    return _run_with_repair(
+    return SYSTEM.run(
         llm_client,
         base_content,
         validate=lambda data: validate_output(data, window, max_candidates),
@@ -39,5 +41,4 @@ def run_with_repair(
         on_repair_failed=lambda errors: TensionMiningResult(
             repair_failed=True, warnings=[f"repair_failed: {e}" for e in errors],
         ),
-        log_label="tension mining",
     )

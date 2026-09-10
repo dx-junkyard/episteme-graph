@@ -27,7 +27,7 @@ from sqlalchemy import text as sa_text
 from core.config import get_settings
 from core.course_data import course_chapters, course_topics
 from core.llm_usage.context import bind_usage_context
-from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate
+from core.llm_worker.cost_gate import CostGate, InMemoryCounterGate, today_str
 from core.postgres import get_session as _pg_session
 from core.structure_anchor.agent import StructureAnchorAgent
 from core.structure_anchor.schema import (
@@ -35,6 +35,7 @@ from core.structure_anchor.schema import (
     QuestionRecord,
     candidate_to_anchor_payload,
 )
+from core.structure_anchor.system import SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -51,36 +52,33 @@ _MAX_CLAIM_BLOCKS = 40
 _MAX_CONCEPT_BLOCKS = 30
 
 # コスト上限のプロセス内カウンタ（tension worker と同方式・独立のカウンタ）。
-# API サーバーは単一プロセス運用のため in-memory で足りる。
-# 実装は core/llm_worker/cost_gate.py の CostGate/InMemoryCounterGate に共通化済み
-# （session_call_counts / daily_call_counts / confirm_prompt_counts は同じ dict
-# オブジェクトへのエイリアス。既存テストの直接操作と互換）。
-_cost_gate = CostGate()
+# API サーバーは単一プロセス運用のため in-memory で足りる。CostGate は
+# core/structure_anchor/system.py の WorkerSystem が1個だけ持つ（session_call_counts /
+# daily_call_counts / confirm_prompt_counts は同じ dict オブジェクトへのエイリアス。
+# 既存テストの直接操作と互換）。
+_cost_gate: CostGate = SYSTEM.gate
 _session_call_counts: dict[tuple, int] = _cost_gate.session_counts
 _daily_call_counts: dict[tuple, int] = _cost_gate.daily_counts
 # 方法C（回答末尾の帰属確認プロンプト）のセッション内提示カウンタ（P7: 毎回出さない）
 _confirm_gate = InMemoryCounterGate()
 _confirm_prompt_counts: dict[tuple, int] = _confirm_gate.counts
 
-
-def _today() -> str:
-    return datetime.date.today().isoformat()
+_today = today_str
 
 
 def _check_and_count_llm_call(user_id: str, course_id: str, topic_id: str) -> bool:
-    """コスト上限内なら True を返しカウントを進める。上限超過なら False。"""
-    settings = get_settings()
-    per_session = int(getattr(settings, "anchor_max_calls_per_session", 3))
-    per_day = int(getattr(settings, "anchor_max_calls_per_day", 10))
-    skey = (user_id, course_id, topic_id, _today())
-    dkey = (user_id, _today())
-    ok = _cost_gate.check_and_count(
-        session_limit=per_session, session_key=skey,
-        daily_limit=per_day, daily_key=dkey,
+    """コスト上限内なら True を返しカウントを進める。上限超過なら False。
+
+    上限値の正本は core/structure_anchor/system.py の CostSpec
+    （anchor_max_calls_per_session / anchor_max_calls_per_day を settings から読む）。
+    ここは窓キー（セッション=トピック単位・日次=ユーザー単位）の組み立てだけを持つ。
+    """
+    return SYSTEM.check_and_count(
+        gate=_cost_gate,
+        settings=get_settings(),
+        session_key=(user_id, course_id, topic_id, _today()),
+        daily_key=(user_id, _today()),
     )
-    if not ok:
-        logger.info("anchor mining skipped: cost cap reached (session=%s, daily=%s)", skey, dkey)
-    return ok
 
 
 def check_and_count_confirm_prompt(user_id: str, course_id: str, topic_id: str | None) -> bool:
@@ -139,12 +137,11 @@ def maybe_schedule_anchor_mining(
                 should_run = idle >= datetime.timedelta(minutes=SESSION_IDLE_MINUTES)
         if not should_run:
             return False
-        threading.Thread(
-            target=run_anchor_mining,
+        return SYSTEM.spawn(
+            run_anchor_mining,
+            thread_factory=threading.Thread,
             args=(user_id, course_id, topic_id),
-            daemon=True,
-        ).start()
-        return True
+        )
     except Exception as exc:
         logger.warning("maybe_schedule_anchor_mining failed: %s", exc)
         return False
