@@ -156,7 +156,12 @@ RAG 応答）で送る。
   - `content_grounding`（出所: 教材 / 別の資料 / モデル生成 — 下記）
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
 - **誤解検出**: 回答に訂正シグナルが含まれると個人レイヤーに記録され、トピックに誤解バッジが付く。
-- **前提知識チェック**: 未習得の前提があれば逆質問（`mode="prerequisite_review"`）。
+- **前提知識チェック**: 本人が「理解している」と答えていない前提があれば逆質問
+  （`mode="prerequisite_review"`）。判定に使うのは本人の明示的な答えの記帳だけで、
+  チャット履歴（接触の痕跡）は使わない。前提の**説明**は
+  ①同コースのトピック → ②本人が閲覧できる資料 → ③どちらにも無ければ AI の説明
+  （`content_grounding="model_generated"` + 閉世界の事実文）の3段で解決する
+  （詳細は [../backend/rag-chat.md](../backend/rag-chat.md) §①/①-b）。
 - **確認問題**: `POST .../topics/{tid}/check`（設問は `GET .../topics/{tid}/material` の
   `check_questions`）で要件との並置を得て、`POST .../check/self-check` の本人の 1 タップで確認を終える（§2.2）。
 

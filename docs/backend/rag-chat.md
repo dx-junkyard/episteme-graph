@@ -28,8 +28,9 @@
 ```
 ユーザー質問
   │
-  ① 前提知識チェック                     … learning_support_agent.py: check_prerequisites()
-  │   未習得の前提があれば RAG より先に逆質問で会話を止める（casual/discuss/寄り道復帰時はスキップ）
+  ① 前提知識チェック                     … services.py: check_prerequisites()
+  │   本人が「理解している」と答えていない前提があれば RAG より先に逆質問で会話を止める
+  │   （casual/discuss/寄り道復帰時はスキップ。前提の説明要求は ①-b の3段解決へ）
   │
   ② pgvector で関連チャンク検索          … services.py: search_chunks_with_metadata() (top_k=8)
   │   本人が閲覧できる document に絞って検索（§2.5）、tier(L1信頼性) 付与、スコア 0.30 以上を採用
@@ -60,11 +61,40 @@
 
 ## 2. 各ステップ詳細
 
-### ① 前提知識チェック（`learning_support_agent.py::check_prerequisites`）
-- 現在トピックの `prerequisites` を取得し、各前提について関連トピックのチャット履歴（`learning_chat_history`）の有無で習得を判定。
+### ① 前提知識チェック（`services.py::check_prerequisites`）
+- 現在トピックの `prerequisites` を取得し、**本人が明示的に「理解している」と答えた記録**
+  （`learning_states.progress_data.acknowledged_prerequisites`。正規化名 → 記帳時刻）に
+  無いものを未習得として扱う。
 - 未習得なら逆質問を返し、`mode="prerequisite_review"` などの構造化アクションを付与して RAG より前に応答を返す。
 - 学生が「理解している」と答えれば、またはコース側の atlas 文脈中であればスキップして ② へ進む。
+  肯定の答えは記帳され、以後同じ前提では問い返さない（否定形を含む発話は記帳しない）。
 - 「学習パスに戻る」「詳細を続ける」などの遷移は `next_actions` として返り、UI がボタン化します。
+
+> **2026-09-10 是正（F4 / 六つのレンズ 提案6）**: 習得判定から
+> 「関連トピックのチャット履歴（`learning_chat_history`）の有無」を撤去した。質問した・
+> 開いたという**接触の痕跡は理解の根拠にならず**、履歴による自動スキップは学習者の状態を
+> AI が暗黙に推定する沈黙適応（UC5 / §3.6）だった。判定の根拠は本人への明示的な問いと
+> その答えだけに寄せてある。
+
+### ①-b 前提知識の説明（3段解決 / `routes/learning.py`）
+前提の**説明**（`support_action ∈ _PREREQUISITE_ACTIONS` または「前提知識…確認/復習/必要」の
+発話 → `LEARNING_ADVICE`）は、`_resolve_prerequisite_context()` が段階的に解決する。
+LLM の追加コールは無い（②相当の検索1回 = 通常の RAG ターンと同じ、生成は既存 advice の1コール）。
+
+1. **同コースの topic** に前提名が一致すれば、その `student_material` を抜粋にする
+   → `content_grounding="course_material"`。
+2. 一致しなければ **本人が閲覧できる document のチャンク**を
+   `search_chunks_with_metadata(..., allowed_document_ids=list_visible_document_ids(user_id))`
+   で1回検索し、スコア `>= 0.30` を `[出典N]` 付きの抜粋にする（コース sources 外のヒットは
+   `other_material`）。「その前提を扱っている」の判定は**逐語一致のみ** — ベクトル近傍で
+   引けただけの資料を「扱っている」とは言わない。
+3. どこにも無ければ LLM の説明を返すが `content_grounding="model_generated"` を設定し、
+   閉世界の事実文「このコーパスの中には、この前提を扱う資料がありません。」（SL1 継承。
+   分野レベルの不在は言わない）をサーバ側で添える。
+
+`LEARNING_ADVICE` のどの分岐でも `content_grounding` を `None` にしない（原則8）。
+学習相談の一般アドバイスは `model_generated`。教員側には G層ルール
+`course.prerequisite_uncovered`（recommended・道案内のみ）が対応する。
 
 ### ② ベクトル検索（`services.py::search_chunks_with_metadata`）
 コースの特定教材には絞らず、**本人が閲覧できる document 集合**（§2.5）の範囲でチャンクを pgvector 類似度検索し（`top_k=8`）、各チャンクに tier（L1信頼性、教員承認状況から導出）を付与して返します。スコア `>= 0.30` のチャンクのみ回答コンテキストの根拠として採用します。

@@ -968,10 +968,16 @@ def _generate_learning_advice_response(
     topic_info: dict | None = None,
     course_data: dict | None = None,
     on_llm_call: Callable[[], None] | None = None,
+    source_context: str | None = None,
 ) -> str:
     """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
     コース全体の構造と現在のトピックをベースに、学習アドバイスや導入メッセージを提供する。
+
+    ``source_context`` は前提知識の3段解決（是正 F4）で解決した資料の抜粋
+    （``[出典N]`` 付きの context block）。渡された場合だけ、説明を抜粋に基づかせ、
+    抜粋外の内容は一般的な学術知識であることを明示させる（原則8: 出所の正直さ）。
+    LLM コール数は渡しても渡さなくても1回のまま。
     """
     params = get_llm_params("standard")
 
@@ -1016,6 +1022,18 @@ def _generate_learning_advice_response(
     persona_instruction = persona_prompt(response_persona, target="response")
     persona_block = f"■ 口調設定:\n{persona_instruction}\n\n" if persona_instruction else ""
 
+    source_block = ""
+    if source_context:
+        source_block = (
+            f"{source_context}\n\n"
+            "■ 上の抜粋の扱い（出所の正直さ）:\n"
+            "  - 前提知識の説明は、まず上の抜粋に基づいて書くこと。\n"
+            "  - 抜粋を参照したときは、付された番号付き出典マーカー `[出典1]` `[出典2]` … を"
+            "本文に自然に挿入すること（番号は提示されたものに対応させ、独自の番号や"
+            "『書籍名』形式は使わないこと）。\n"
+            "  - 抜粋に無い内容を補ったときは、資料由来ではないことが読み手に分かるように書くこと。\n\n"
+        )
+
     prompt = (
         f"あなたは「{course_title}」の学習をサポートするナビゲーター教授です。\n"
         f"学生は現在「{topic_title}」のトピックを学習しています。\n\n"
@@ -1023,6 +1041,7 @@ def _generate_learning_advice_response(
         f"{topics_block}"
         f"{concepts_block}"
         f"{prereqs_block}"
+        f"{source_block}"
         f"学生からのメッセージ: {message}\n\n"
         "コース全体の構造と学生の現在位置を踏まえ、以下の構成で回答してください:\n"
         "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
@@ -1051,6 +1070,170 @@ def _generate_learning_advice_response(
             + (f"**必要な前提知識:** {', '.join(prerequisites)}\n\n" if prerequisites else "")
             + "下の選択肢から、前提知識の確認に進むか、最初の概念の説明に進むかを選んでください。"
         )
+
+
+# ---------------------------------------------------------------------------
+# 前提知識の3段解決（是正 F4 / 六つのレンズ レンズ6 提案6、2026-09-10）
+# ---------------------------------------------------------------------------
+#
+# 従来、前提知識の説明（LEARNING_ADVICE の前提確認分岐）は RAG を通らない LLM 説明で
+# `content_grounding` が None のまま返り、フロントは出所バッジを描かなかった
+# （＝一番あやふやな回答が一番確からしく見える）。ここでは解決を段階化する:
+#   ① 同コースの topic に一致する（コース内の教材）
+#   ② 本人が閲覧できる document のチャンク（既存 RAG と同じ
+#      `search_chunks_with_metadata(..., allowed_document_ids=...)` を使う。
+#      コース sources 外のヒットは既存判定どおり `other_material` になる）
+#   ③ どこにも無ければ LLM の説明を返すが `content_grounding="model_generated"` を必ず設定し、
+#      閉世界の事実文（SL1 継承）を添える。
+# LLM の追加コールは無い（②は検索1回=通常の RAG ターンと同じ、③は既存 advice 経路）。
+
+#: 解決できなかった前提について学習者に告げる固定文（SL1 の閉世界語彙）。
+#: 言えるのは「このコーパスの中には資料が無い」だけで、分野レベルの不在
+#: （分野で扱われていない・誰も書いていない）は言わない — 台帳・コーパスの
+#: 射影であって分野の射影ではない。
+PREREQUISITE_CLOSED_WORLD_FACT = "このコーパスの中には、この前提を扱う資料がありません。"
+
+#: 前提知識の解決で LLM に渡す抜粋の見出し（RAG 本経路の見出しとは別物）。
+_PREREQUISITE_CONTEXT_HEADING = "## この前提知識に関連する資料の抜粋"
+
+
+def _prerequisite_terms(message: str, topic_info: dict | None) -> list[str]:
+    """解決対象の前提知識名を決定論的に取り出す（現在トピックの `prerequisites`）。
+
+    発話に名前が含まれているものを優先して並べ替えるだけで、AI に推定させない。
+    """
+    terms: list[str] = []
+    for prereq in ((topic_info or {}).get("prerequisites") or []):
+        name = prereq.get("name", prereq) if isinstance(prereq, dict) else prereq
+        name = str(name or "").strip()
+        if name and name not in terms:
+            terms.append(name)
+    msg = message or ""
+    mentioned = [t for t in terms if t and t in msg]
+    rest = [t for t in terms if t not in mentioned]
+    return mentioned + rest
+
+
+def _resolve_prerequisite_context(
+    user_id: str,
+    course_data: dict,
+    terms: list[str],
+    *,
+    max_search_terms: int = 3,
+) -> dict:
+    """前提知識の①②を解決し、context block / 出典 / grounding / 未解決名を返す。
+
+    Returns
+    -------
+    dict
+        ``{"context_block", "cited_sources", "overall_tier", "content_grounding",
+        "resolved", "unresolved"}``。検索は1回だけ（前提名を連結したクエリ）。
+    """
+    resolved: list[str] = []
+    blocks: list[str] = []
+    cited_sources: list[dict] = []
+    has_course_topic_material = False
+
+    if terms:
+        course_material_ids = set(course_source_material_ids(course_data))
+
+        # ① 同コースの topic（章ネストも走査する。走査は course_data アクセサに委譲）
+        topics_by_title: dict[str, dict] = {}
+        for topic in iter_all_topics(course_data):
+            title = str(topic.get("title") or "").strip().casefold()
+            if title and title not in topics_by_title:
+                topics_by_title[title] = topic
+        for term in terms:
+            topic = topics_by_title.get(term.strip().casefold())
+            material = _topic_student_material(topic) if topic else ""
+            if material:
+                blocks.append(
+                    f"[コース内トピック『{topic.get('title') or term}』の教材]\n{material[:3000]}"
+                )
+                has_course_topic_material = True
+                if term not in resolved:
+                    resolved.append(term)
+
+        # ② 本人が閲覧できる document のチャンク（可視性は allowed_document_ids で fail-closed）
+        pending = [t for t in terms if t not in resolved]
+        if pending:
+            allowed_document_ids = list_visible_document_ids(user_id)
+            chunk_results = search_chunks_with_metadata(
+                "、".join(pending[:max_search_terms]),
+                top_k=6,
+                allowed_document_ids=allowed_document_ids,
+            )
+            matched_text: list[str] = []
+            for r in chunk_results:
+                if float(r.get("score") or 0.0) < 0.30:
+                    continue
+                _n = len(cited_sources) + 1
+                text = str(r.get("text") or "")
+                blocks.append(f"[出典{_n}] 『{r.get('source_title', '')}』\n{text}")
+                matched_text.append(text)
+                _quote = text.strip().replace("\n", " ")
+                cited_sources.append({
+                    "index": _n,
+                    "chunk_id": r.get("id", ""),
+                    "source_title": r.get("source_title", "不明な教材"),
+                    "tier": r.get("tier", TIER_OUT_OF_SOURCE),
+                    "score": round(float(r.get("score", 0.0)), 3),
+                    "quote": (_quote[:80] + "…") if len(_quote) > 80 else _quote,
+                    "meta": r.get("source_file") or "",
+                    "origin": (
+                        "course_material"
+                        if r.get("material_id") in course_material_ids
+                        else "other_material"
+                    ),
+                })
+            # 「その前提を扱っている」の判定は逐語一致だけ（決定論・追加コストなし）。
+            # ベクトル近傍で引けただけの資料を「この前提を扱っている」とは言わない。
+            haystack = " ".join(matched_text).casefold()
+            if haystack:
+                for term in pending:
+                    if term.strip().casefold() in haystack and term not in resolved:
+                        resolved.append(term)
+
+    unresolved = [t for t in terms if t not in resolved]
+
+    overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
+    if has_course_topic_material:
+        overall_tier = tier_floor(overall_tier, TIER_SOURCE)
+
+    if has_course_topic_material or any(s["origin"] == "course_material" for s in cited_sources):
+        content_grounding = "course_material"
+    elif cited_sources:
+        content_grounding = "other_material"
+    else:
+        content_grounding = "model_generated"
+
+    context_block = None
+    if blocks:
+        # 信頼境界（docs/architecture/trust_boundary_pdf_input.md）: 抜粋は第三者が
+        # 書いた untrusted 入力。区切り（ラベル + `---`）に加えて固定文を前置する。
+        context_block = (
+            _PREREQUISITE_CONTEXT_HEADING + "\n"
+            + UNTRUSTED_SOURCE_NOTICE + "\n\n"
+            + "\n---\n".join(blocks)
+        )
+
+    return {
+        "context_block": context_block,
+        "cited_sources": cited_sources,
+        "overall_tier": overall_tier,
+        "content_grounding": content_grounding,
+        "resolved": resolved,
+        "unresolved": unresolved,
+    }
+
+
+def _prerequisite_closed_world_note(unresolved: list[str]) -> str:
+    """解決できなかった前提についての閉世界事実文（数値は出さない）。"""
+    names = [n for n in (unresolved or []) if (n or "").strip()]
+    if not names:
+        return ""
+    listed = "、".join(f"「{n}」" for n in names[:3])
+    return f"{PREREQUISITE_CLOSED_WORLD_FACT}（対象: {listed}）"
 
 
 def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | None = None) -> str:
@@ -2885,18 +3068,34 @@ def _learning_chat_core(
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":
+        # 是正 F4（2026-09-10）: 前提知識の説明だけは3段解決を通す。①同コース topic /
+        # ②本人が閲覧できる document のチャンク（検索1回）→ その抜粋を同じ1コールへ渡し、
+        # ③どこにも無ければ model_generated として返す。どの分岐でも
+        # `content_grounding` を None にしない（原則8: 出所の正直さ）。
+        is_prereq = (
+            body.support_action in _PREREQUISITE_ACTIONS
+            or LearningSupportAgent.is_prerequisite_request(body.message)
+        )
+        prereq_context: dict | None = None
+        if is_prereq:
+            prereq_context = _resolve_prerequisite_context(
+                current_user["id"], course_data,
+                _prerequisite_terms(body.message, topic_info),
+            )
         with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
             advice_answer = _generate_learning_advice_response(
                 course_title, topic_title, body.message,
                 topic_info=topic_info, course_data=course_data,
                 on_llm_call=_consume_quota,
+                source_context=(prereq_context or {}).get("context_block"),
             )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
-        is_prereq = (
-            body.support_action in _PREREQUISITE_ACTIONS
-            or LearningSupportAgent.is_prerequisite_request(body.message)
-        )
-        if is_prereq:
+        if is_prereq and prereq_context is not None:
+            # 解決できなかった前提は、閉世界の事実文でサーバ側から添える（LLM に
+            # 言わせない・分野レベルの不在は言わない, SL1）。
+            _closed_world = _prerequisite_closed_world_note(prereq_context["unresolved"])
+            if _closed_world:
+                advice_answer = f"{advice_answer}\n\n{_closed_world}"
             # 前提確認は detour（origin=現在アンカー）。復帰導線を必ず付ける。
             result = support_agent.with_learning_actions(
                 answer=advice_answer,
@@ -2904,15 +3103,39 @@ def _learning_chat_core(
                 origin=support_origin,
                 extra_actions=inline_actions,
             )
+            _prereq_sources = prereq_context["cited_sources"]
+            _prereq_grounding = prereq_context["content_grounding"]
+            _prereq_tier = prereq_context["overall_tier"]
             persist_chat_history(
                 current_user["id"], course_id, topic_id,
                 body.history, body.message, result.answer,
+                assistant_meta={
+                    "sources": [
+                        {
+                            "index": s["index"],
+                            "chunk_id": s["chunk_id"],
+                            "source_title": s["source_title"],
+                            "tier": s["tier"],
+                            "score": s["score"],
+                        }
+                        for s in _prereq_sources
+                    ],
+                    "overall_tier": _prereq_tier,
+                    "content_grounding": _prereq_grounding,
+                },
             )
-            return LearningChatResponse(**result.model_dump(), course_update=None)
+            return LearningChatResponse(
+                **result.model_dump(),
+                course_update=None,
+                sources=_prereq_sources,
+                overall_tier=_prereq_tier,
+                content_grounding=_prereq_grounding,
+            )
         # 学習開始・一般アドバイスはパス上（detour ではない）。前進アクションを型付きで提示。
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
+            assistant_meta={"content_grounding": "model_generated"},
         )
         first_concept = ""
         for _c in (course_data.get("concepts") or []):
@@ -2926,6 +3149,9 @@ def _learning_chat_core(
             course_update=None,
             origin=asdict(support_origin),
             next_actions=[asdict(a) for a in (advice_next + inline_actions)],
+            # 学習相談の一般アドバイスは資料に基づかない（コース構造とモデルの知識だけ）。
+            # 出所を空欄のままにせず model_generated と正直に言う（是正 F4 / 原則8）。
+            content_grounding="model_generated",
         )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
@@ -3180,13 +3406,18 @@ def _learning_chat_core(
     # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
     # degraded ターンは回答本文が根拠を伴わない固定文のため、本文依存の後処理はスキップする
     # （設計書 §4・I3/I4: 会話は死なせない・履歴保存はそのまま行う）。
+    # 是正 F5: 記録されるのは **candidate**（AI が訂正を提案した箇所）だけで、「誤解」として
+    # 確定するのは本人の3択（POST .../misconceptions/{id}/review）に限る。
     course_update = None
     if not degraded:
         if not _is_casual and topic_info and any(
             kw in answer for kw in ["訂正", "より正確です", "誤解"]
         ):
             course_update = detect_and_record_misconception(
-                current_user["id"], course_id, course_data, topic_id, body.message, answer
+                current_user["id"], course_id, course_data, topic_id, body.message, answer,
+                # 機能3（書き直し・削除）で派生痕跡を supersede する将来の連携のため、
+                # 当該ターンの user メッセージ id を候補に持たせる（無い経路では None）。
+                message_id=body.message_id or None,
             )
 
     _persisted = persist_chat_history(

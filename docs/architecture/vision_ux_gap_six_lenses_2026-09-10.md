@@ -98,7 +98,7 @@ F1・F3・F4・F5 は「学習者について AI が判断し挙動を変える�
 | 1 | 確認問題の合否を LLM の確定から外す（並置 + 本人の 1 タップ。40 字フォールバック廃止。逐語記帳経路を外す） | F1 / L1 | M | — |
 | 2 | 誤解メモを candidate 化 + 3 択 + 5 件上限撤廃 | F5 / 既知 G-07・D-36 | S–M | — |
 | 3 | レクチャー沈黙適応の撤去（注記フラグ + 本人の「短く聴く」トグル）。マニュアル `02-student.md:566` 追随 | F3 | M | — |
-| 4 | 前提知識の 3 段解決 + 全分岐に grounding。履歴による自動スキップ撤去 | F4 / H-08 | M | — |
+| 4 | 前提知識の 3 段解決 + 全分岐に grounding。履歴による自動スキップ撤去 | F4 / H-08 | M | → **2026-09-10 解消**（`check_prerequisites` の判定を本人の明示的な答えの記帳 `progress_data.acknowledged_prerequisites` だけに寄せ、`learning_chat_history` 参照を撤去。前提の説明は ①同コース topic → ②`allowed_document_ids` 付き検索 → ③`model_generated` + 閉世界事実文の3段。`LEARNING_ADVICE` 全分岐に `content_grounding`。G層 `course.prerequisite_uncovered` 追加。正本は `docs/backend/rag-chat.md` §①/①-b） |
 | 5 | 警告の退避・理由プリフィル撤去・`evidence_shown` の隔離 | F6・F7 / A-04 部分 | S | — |
 | 6 | 監査 3 経路 + 一括取り込み・freeze・publish・単発承認への `decision_context`（記帳のみ） | F11 / A-04・F-18・監査 C6 | S–M | — |
 | 7 | 教材入口に「分野: 指定しない [変更]」、既定カートリッジを空に、`normalize_concepts` の係留と教員別名の還流 | F9 / C1・C2 / A-18 部分 | S | — |

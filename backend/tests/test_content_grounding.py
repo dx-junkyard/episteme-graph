@@ -118,9 +118,14 @@ class TestGroundingClassificationWiring:
         バナーが同時に出る矛盾の再発防止。approved への昇格はしない（tier_floor の下限は source）。
         """
         source = _read(LEARNING)
-        block = source.split("overall_tier = aggregate_overall_tier")[1][:600]
-        assert "if has_topic_material:" in block
-        assert "overall_tier = tier_floor(overall_tier, TIER_SOURCE)" in block
+        blocks = source.split("overall_tier = aggregate_overall_tier")[1:]
+        assert blocks, "aggregate_overall_tier の呼び出しが見つからない（実装が変わった？）"
+        # 是正 F4（2026-09-10）以降、集約は2箇所ある（本体 RAG と前提知識の3段解決）。
+        # どちらも「トピック教材を注入したら tier を source まで引き上げる」を持つこと。
+        for block in blocks:
+            window = block[:600]
+            assert "if has_topic_material:" in window or "if has_course_topic_material:" in window
+            assert "overall_tier = tier_floor(overall_tier, TIER_SOURCE)" in window
 
     def test_response_includes_content_grounding(self):
         source = _read(LEARNING)

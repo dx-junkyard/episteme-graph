@@ -68,6 +68,12 @@ RULE_FIGURE_UNREVIEWED_MODES = "figure.unreviewed_modes"
 # （element_explanations の element_type='document' / role='discussion_seed'）が残っている。
 RULE_COURSE_DISCUSS_OPENING_UNREVIEWED = "course.discuss_opening_unreviewed"
 
+# 是正 F4（六つのレンズ レンズ6 提案6、2026-09-10）: コースの topics[].prerequisites に
+# 書かれた前提知識のうち、コース内のトピックにも、コースのソース資料の本文にも対応が
+# 見つからないものがある。学習者側は3段解決の③（model_generated + 閉世界の事実文）へ
+# 落ちるので、教員には「資料が無い」事実だけを道案内で伝える（督促しない, G4/G6）。
+RULE_COURSE_PREREQUISITE_UNCOVERED = "course.prerequisite_uncovered"
+
 # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側 + 供給側の
 # 両面計器。改善ループを閉じるための3ルール（2026-07-25 追加）。
 RULE_MANUAL_HELP_GAPS_PENDING = "manual.help_gaps_pending"     # 需要側: help_usage 無ヒット/未整備の k-匿名集計
@@ -122,6 +128,12 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "course.discuss_opening_review",  # 道案内のみ（説明レビューキューへ）
+    },
+    # 是正 F4: 解消手段は「その前提を扱う資料を足す」なので既存 capability
+    # （教材アップロードへの道案内）を再利用する。新 capability を作らない（G3）。
+    RULE_COURSE_PREREQUISITE_UNCOVERED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.upload",  # 道案内のみ
     },
     # manual_help_kb_design.md §4-1: 需要側 + 供給側の両面計器。
     RULE_MANUAL_HELP_GAPS_PENDING: {
@@ -693,6 +705,169 @@ def _eval_course_discuss_opening_unreviewed(session, uid: str) -> list[tuple[Nex
     return out
 
 
+# 前提知識の被覆判定（是正 F4）の上限。同期・非LLM の投影なので、1 回の評価で
+# 走らせる照合は決定論的に切り詰める（超過分は次回の評価で見える — G1 と同型）。
+_PREREQ_MAX_TERMS_PER_EVALUATION = 30
+_PREREQ_MAX_DOCUMENTS_PER_EVALUATION = 60
+_PREREQ_MIN_TERM_LENGTH = 2
+_PREREQ_MAX_NAMES_IN_REASON = 3
+
+
+def _escape_like(term: str) -> str:
+    """ILIKE パターンに埋め込むための最小エスケープ（`\\` / `%` / `_`）。"""
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _course_prerequisite_terms(data: dict) -> list[str]:
+    """コースの topics[].prerequisites のうち、コース内トピックに対応が無い名前。
+
+    走査は course_data アクセサ（iter_all_topics）に委譲する。判定は
+    ``services.check_prerequisites`` の①と同じ「topic.title との小文字一致」。
+    """
+    titles: set[str] = set()
+    names: list[str] = []
+    seen: set[str] = set()
+    for topic in iter_all_topics(data):
+        title = str(topic.get("title") or "").strip().casefold()
+        if title:
+            titles.add(title)
+    for topic in iter_all_topics(data):
+        for prereq in (topic.get("prerequisites") or []):
+            raw = prereq.get("name", prereq) if isinstance(prereq, dict) else prereq
+            name = str(raw or "").strip()
+            key = name.casefold()
+            if not name or len(name) < _PREREQ_MIN_TERM_LENGTH or key in seen:
+                continue
+            seen.add(key)
+            if key in titles:
+                continue
+            names.append(name)
+    return names
+
+
+def _eval_course_prerequisite_uncovered(session, uid: str) -> list[tuple[NextStep, str]]:
+    """是正 F4: 前提知識に対応する資料がコーパスに無いコース。
+
+    - 判定は決定論・非LLM（G2）。コース内トピックの題名一致（①）と、コースのソース
+      資料の本文への逐語一致（②の軽量プロキシ = ILIKE）だけを見る。学習者の痕跡・
+      習得状態は一切入力にしない（原則5）。
+    - 点灯: 対応が見つからない前提が1件以上ある。消滅: 前提を扱う資料を足すか、
+      コースの前提記述を直せば自動で消える（G1: 完了フラグを持たない）。
+    - 事実文に件数を書かない（G6 / 原則4）。名前は最大3件 + 「など」。
+
+    クエリは3本（コース / document 解決 / 逐語一致）で、コースごとの N+1 は作らない。
+    """
+    rows = session.execute(
+        sa_text(
+            "SELECT id, title, data, created_at FROM learning_courses "
+            "WHERE user_id = CAST(:uid AS uuid) ORDER BY created_at ASC"
+        ),
+        {"uid": uid},
+    ).mappings().fetchall()
+
+    courses: list[tuple[Any, list[str], list[str]]] = []
+    refs: set[str] = set()
+    terms: list[str] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        course_terms = _course_prerequisite_terms(data)
+        if not course_terms:
+            continue
+        material_ids = [str(m) for m in course_source_material_ids(data) if m]
+        courses.append((row, course_terms, material_ids))
+        refs.update(material_ids)
+        for term in course_terms:
+            if term not in terms:
+                terms.append(term)
+    if not courses:
+        return []
+
+    terms = terms[:_PREREQ_MAX_TERMS_PER_EVALUATION]
+
+    # sources[].material_id は documents.id / documents.source_path のどちらでも
+    # 参照されうる（_resolve_document の慣例）ため両方で突合する。
+    ref_to_doc: dict[str, str] = {}
+    if refs:
+        doc_rows = session.execute(
+            sa_text(
+                "SELECT id::text AS id, source_path FROM documents "
+                "WHERE id::text = ANY(:refs) OR source_path = ANY(:refs)"
+            ),
+            {"refs": sorted(refs)},
+        ).mappings().fetchall()
+        for row in doc_rows:
+            doc_id = str(row["id"])
+            ref_to_doc[doc_id] = doc_id
+            if row["source_path"]:
+                ref_to_doc[str(row["source_path"])] = doc_id
+
+    doc_ids = sorted(set(ref_to_doc.values()))[:_PREREQ_MAX_DOCUMENTS_PER_EVALUATION]
+
+    # (term, document_id) の逐語一致集合。プレースホルダ名は連番で生成し、前提名は
+    # バインドパラメータ経由でのみ渡す（SQL に値を文字列連結しない）。
+    covered: dict[str, set[str]] = {}
+    if terms and doc_ids:
+        # 型を明示（VALUES の無型パラメータで «could not determine data type» を出さない）。
+        values_sql = ", ".join(f"(CAST(:t{i} AS text))" for i in range(len(terms)))
+        params: dict[str, Any] = {"doc_ids": doc_ids}
+        for i, term in enumerate(terms):
+            params[f"t{i}"] = _escape_like(term)
+        match_rows = session.execute(
+            sa_text(
+                f"WITH terms(term) AS (VALUES {values_sql}) "
+                "SELECT DISTINCT t.term AS term, m.document_id::text AS document_id "
+                "FROM terms t JOIN LATERAL ("
+                "  SELECT c.document_id FROM chunks c "
+                "  WHERE c.document_id::text = ANY(:doc_ids) "
+                "    AND c.text ILIKE '%' || t.term || '%' ESCAPE '\\' "
+                "  LIMIT 20"
+                ") m ON TRUE"
+            ),
+            params,
+        ).mappings().fetchall()
+        for row in match_rows:
+            covered.setdefault(str(row["term"]), set()).add(str(row["document_id"]))
+
+    # 照合済みの前提名（エスケープ後の値で戻ってくる）を元の名前へ引き直す。
+    covered_by_original: dict[str, set[str]] = {}
+    for term in terms:
+        hits = covered.get(_escape_like(term))
+        if hits:
+            covered_by_original[term] = hits
+
+    out: list[tuple[NextStep, str]] = []
+    for row, course_terms, material_ids in courses:
+        course_docs = {ref_to_doc[ref] for ref in material_ids if ref in ref_to_doc}
+        uncovered: list[str] = []
+        for term in course_terms:
+            if term not in terms:
+                continue  # 上限で切り詰めた分は次回の評価で見る
+            if course_docs & covered_by_original.get(term, set()):
+                continue
+            uncovered.append(term)
+        if not uncovered:
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        listed = "".join(f"「{n}」" for n in uncovered[:_PREREQ_MAX_NAMES_IN_REASON])
+        if len(uncovered) > _PREREQ_MAX_NAMES_IN_REASON:
+            listed += "など"
+        step = _make_step(
+            rule_id=RULE_COURSE_PREREQUISITE_UNCOVERED,
+            target_id=cid,
+            title=f"コース『{title}』の前提知識に対応する資料を確認する",
+            reason=(
+                f"コース『{title}』のトピックに書かれた前提知識のうち、コース内のトピックにも、"
+                f"コースのソース資料の本文にも対応が見つからないものがあります（{listed}）。"
+                "受講者がこの前提の説明を求めたときは、資料に基づかない説明"
+                "（出所ラベル「モデル生成」）として返ります。"
+            ),
+            target={"course_id": cid},
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 def _eval_manual_help_gaps_pending(session, uid: str) -> list[tuple[NextStep, str]]:
     """需要側計器（manual_help_kb_design.md §4-1）: 学生 HELP ルートの
 
@@ -820,6 +995,7 @@ _RULE_EVALUATORS = {
     RULE_COURSE_AUDIO_MISSING: _eval_course_audio_missing,
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
+    RULE_COURSE_PREREQUISITE_UNCOVERED: _eval_course_prerequisite_uncovered,
     RULE_MANUAL_HELP_GAPS_PENDING: _eval_manual_help_gaps_pending,
     RULE_ASSISTANT_KB_UNDOCUMENTED: _eval_assistant_kb_undocumented,
     RULE_MANUAL_TODO_UNRESOLVED: _eval_manual_todo_unresolved,

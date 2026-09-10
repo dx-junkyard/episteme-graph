@@ -2958,6 +2958,22 @@ DROP）。現行は「1つの不変なマスターコース（`learning_courses`
 （※Neo4j は2026-07 のアーキテクチャ整理（Tier 1）で完全撤去済み。現行の `check_prerequisites` は
 Neo4j 非依存で、コースデータの `topic.prerequisites` のみを参照する。）
 
+（※**2026-09-10 是正 F4**（六つのレンズ 提案6・migration 不要）: 上記2の「チャット履歴の有無で
+習得を判定」は撤去した。接触の痕跡（質問した・開いた）は理解の根拠にならず、履歴による自動
+スキップは沈黙適応（UC5 / §3.6）だったため。現行の判定は**本人が明示的に「理解している」と
+答えた記録**（`learning_states.progress_data.acknowledged_prerequisites`。書き込みは
+`services.record_prerequisite_acknowledgement`・否定形を含む発話は記帳しない）だけを見る。
+前提の**説明**は3段解決 — ①同コース topic → ②本人が閲覧できる document のチャンク
+（`search_chunks_with_metadata(..., allowed_document_ids=list_visible_document_ids(...))` を
+1回・逐語一致のみを「扱っている」と数える）→ ③どこにも無ければ LLM 説明 +
+`content_grounding="model_generated"` + 閉世界の事実文
+「このコーパスの中には、この前提を扱う資料がありません。」（SL1 継承・分野レベルの不在は
+言わない）。**`LEARNING_ADVICE` の全分岐で `content_grounding` を None にしない**（原則8）。
+教員側は G層 `course.prerequisite_uncovered`（recommended・道案内のみ・capability は
+`materials.upload` 再利用・件数なしの事実文）。正本は `docs/backend/rag-chat.md` §①/①-b、
+ガードレールは `test_prerequisite_grounding_guardrails.py` / `test_prerequisite_resolution.py` /
+`test_prerequisite_routing.py`。）
+
 ## 実装時の注意事項
 
 - マイグレーションSQLは `backend/db/` に `002_a1_a2_a3.sql` として配置する

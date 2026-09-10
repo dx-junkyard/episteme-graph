@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 from sqlalchemy import text as sa_text
 
+from core import candidate_flow
 from core.course_data import course_llm_models, course_source_material_ids, course_sources, course_topics
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
@@ -22,6 +23,7 @@ from core.personal_graph import graph_data as personal_graph_data
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
 from core.schema import (
+    AUDIT_ENTITY_MISCONCEPTION,
     AUDIT_ENTITY_STRUCTURE_ANCHOR,
     AUDIT_ENTITY_TENSION,
     PaperStructure,
@@ -2102,6 +2104,133 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
 # Prerequisites check (Adaptive Routing)
 # ---------------------------------------------------------------------------
 
+# 2026-09-10（是正 F4 / 六つのレンズ レンズ6 提案6）: 前提知識の習得判定から
+# **「そのトピックにチャット履歴があるか」という接触の痕跡を外した**。質問した・開いた
+# ことは理解の根拠にならず、履歴からの自動スキップは AI が学習者の状態を暗黙に推定する
+# 沈黙適応（UC5 / §3.6）そのものだった。判定の根拠は**本人への明示的な問い**とその答え
+# （逆質問 → 「はい、理解しています」）だけに寄せ、その答えを
+# ``learning_states.progress_data.acknowledged_prerequisites`` に記帳することで
+# 同じ前提を何度も問い返さない（migration 不要・JSONB の正本スキーマ流儀）。
+PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY = "acknowledged_prerequisites"
+
+# 本人の明示的な肯定だけを記帳の根拠にする（否定形を含む発話は記帳しない）。
+# 「理解できない」「理解していません」のような発話は従来どおり介入を抑止するだけで、
+# 恒久的な「理解している」の記録にはしない。
+_PREREQ_ACK_PHRASES = (
+    "はい、理解しています",
+    "理解しています",
+    "理解している",
+    "理解済み",
+    "わかっています",
+    "分かっています",
+    "知っています",
+    "学習済み",
+)
+_PREREQ_ACK_NEGATIONS = ("ない", "ません", "無い", "不安")
+
+
+def normalize_prerequisite_name(name: str) -> str:
+    """前提知識名の突合キー（小文字化 + 前後空白除去）。表記の正本は元の文字列。"""
+    return (name or "").strip().casefold()
+
+
+def _is_explicit_prerequisite_acknowledgement(message: str) -> bool:
+    """本人が「この前提は理解している」と明示的に答えた発話か（否定形は除外）。"""
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if any(neg in msg for neg in _PREREQ_ACK_NEGATIONS):
+        return False
+    return any(phrase in msg for phrase in _PREREQ_ACK_PHRASES)
+
+
+def get_acknowledged_prerequisites(user_id: str, course_id: str) -> set[str]:
+    """本人が「理解している」と明示的に答えた前提知識の正規化名集合（読み取り専用）。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    progress_raw = row[0] if row and row[0] is not None else {}
+    progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+    acknowledged = progress.get(PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY) or {}
+    if not isinstance(acknowledged, dict):
+        return set()
+    return {normalize_prerequisite_name(k) for k in acknowledged.keys() if str(k).strip()}
+
+
+def record_prerequisite_acknowledgement(
+    user_id: str,
+    course_id: str,
+    prerequisite_names: list[str],
+) -> None:
+    """本人の明示的な「理解している」を記帳する（既存の記録は上書きしない, P4）。
+
+    `learning_states.progress_data.acknowledged_prerequisites`（正規化名 → ISO8601 UTC）
+    への upsert のみ。行が無ければ record_topic_check_pass と同じパターンで作る。
+    書き込みに失敗しても会話は止めない（呼び出し側で例外は握る）。
+    """
+    names = [n for n in (prerequisite_names or []) if (n or "").strip()]
+    if not names:
+        return
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        progress_raw = row[0] if row and row[0] is not None else {}
+        progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+        acknowledged_raw = progress.get(PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY) or {}
+        acknowledged = dict(acknowledged_raw) if isinstance(acknowledged_raw, dict) else {}
+        for name in names:
+            key = normalize_prerequisite_name(name)
+            if key and key not in acknowledged:
+                acknowledged[key] = now_iso
+        progress[PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY] = acknowledged
+
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET progress_data = CAST(:progress AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 
 def check_prerequisites(
     user_id: str,
@@ -2112,6 +2241,9 @@ def check_prerequisites(
 ) -> dict | None:
     """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら介入情報を返す。
 
+    習得の判定に使うのは**本人の明示的な答えだけ**（`acknowledged_prerequisites`）。
+    チャット履歴の有無（＝接触の痕跡）は使わない（2026-09-10 是正 F4）。
+
     Returns
     -------
     dict | None
@@ -2120,8 +2252,6 @@ def check_prerequisites(
         構造化 ``next_actions`` として組み立てるため、ここでは本文のみを返す。
     """
     skip_keywords = ["理解", "わかります", "わかっています", "知っています", "できます", "学習済み"]
-    if any(kw in user_message for kw in skip_keywords):
-        return None
 
     try:
         current_topic = None
@@ -2147,37 +2277,32 @@ def check_prerequisites(
         if not prereq_names:
             return None
 
+        # 本人の明示的な肯定は「この前提は理解している」の確定として記帳し、以後
+        # 同じ前提では問い返さない（同一セッション内のループ抑止も、督促でも推定でも
+        # なくこの記帳だけを根拠にする）。記帳に失敗しても会話は止めない。
+        if _is_explicit_prerequisite_acknowledgement(user_message):
+            try:
+                record_prerequisite_acknowledgement(user_id, course_id, prereq_names)
+            except Exception:
+                logger.warning("Failed to record prerequisite acknowledgement", exc_info=True)
+            return None
+        # 否定形を含む「理解できない」等はゲートを挟まないだけ（記帳はしない）。
+        if any(kw in user_message for kw in skip_keywords):
+            return None
+
         explanation_keywords = ["教えて", "説明", "詳しく", "知りたい", "わからない", "分からない"]
         if any(name in user_message for name in prereq_names) and any(
             kw in user_message for kw in explanation_keywords
         ):
             return None
 
-        pg = _pg_session()
-        try:
-            rows = pg.execute(
-                sa_text("""
-                    SELECT topic_id FROM learning_chat_history
-                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                """),
-                {"user_id": user_id, "course_id": course_id},
-            ).fetchall()
-        finally:
-            pg.close()
-        topics_with_history: set[str] = {r[0] for r in rows}
+        acknowledged = get_acknowledged_prerequisites(user_id, course_id)
 
-        title_to_id: dict[str, str] = {}
-        for t in course_topics(course_data):
-            title = t.get("title", "").lower().strip()
-            if title:
-                title_to_id[title] = t.get("id", "")
-
-        unlearned: list[str] = []
-        for prereq_name in prereq_names:
-            prereq_topic_id = title_to_id.get(prereq_name.lower(), "")
-            if prereq_topic_id and prereq_topic_id in topics_with_history:
-                continue
-            unlearned.append(prereq_name)
+        unlearned: list[str] = [
+            prereq_name
+            for prereq_name in prereq_names
+            if normalize_prerequisite_name(prereq_name) not in acknowledged
+        ]
 
         if not unlearned:
             return None
