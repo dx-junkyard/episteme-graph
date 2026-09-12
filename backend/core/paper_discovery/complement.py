@@ -252,13 +252,13 @@ def _document_titles(session, document_ids: Sequence[str]) -> dict[str, str]:
 
 #: 台帳 → 本文の解決 SQL（assumption / claim で表と採用条件だけが違う）。
 _SKY_SQL_ASSUMPTION = """
-    SELECT l.target_id, l.document_id, a.statement
+    SELECT l.target_id, l.document_id::text AS document_id, a.statement
       FROM epistemic_ledger l
       JOIN assumption_nodes a ON a.id::text = l.target_id
      WHERE l.target_type = 'assumption'
        AND l.verification_status = 'untested'
        AND jsonb_array_length(l.verification_scopes) = 0
-       AND l.document_id = ANY(CAST(:document_ids AS text[]))
+       AND l.document_id = ANY(CAST(:document_ids AS uuid[]))
        AND a.status = ANY(CAST(:statuses AS text[]))
        AND COALESCE(a.statement, '') <> ''
      ORDER BY l.document_id, l.target_id
@@ -266,13 +266,13 @@ _SKY_SQL_ASSUMPTION = """
 """
 
 _SKY_SQL_CLAIM = """
-    SELECT l.target_id, l.document_id, c.text
+    SELECT l.target_id, l.document_id::text AS document_id, c.text
       FROM epistemic_ledger l
-      JOIN theory_claims c ON c.id::text = l.target_id
+      JOIN theory_claims_live c ON c.id::text = l.target_id
      WHERE l.target_type = 'claim'
        AND l.verification_status = 'untested'
        AND jsonb_array_length(l.verification_scopes) = 0
-       AND l.document_id = ANY(CAST(:document_ids AS text[]))
+       AND l.document_id = ANY(CAST(:document_ids AS uuid[]))
        AND c.review_status = ANY(CAST(:statuses AS text[]))
        AND COALESCE(c.text, '') <> ''
      ORDER BY l.document_id, l.target_id

@@ -105,7 +105,7 @@ def _derive_course_id(session, document_id: str) -> str:
             sa_text("""
                 SELECT course_id
                 FROM theory_component_graphs
-                WHERE document_id = :doc
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
                 ORDER BY created_at DESC, course_id
             """),
             {"doc": document_id},
@@ -190,7 +190,7 @@ def _single_support_lines(session, course_id: str, document_id: str) -> list[dic
             sa_text("""
                 SELECT target_id, target_type
                 FROM epistemic_ledger
-                WHERE document_id = :doc
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
             """),
             {"doc": document_id},
         ).fetchall()

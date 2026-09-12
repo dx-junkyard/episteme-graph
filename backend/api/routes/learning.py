@@ -2318,7 +2318,7 @@ def _load_figure_row_by_id(figure_id: str) -> dict | None:
     try:
         row = session.execute(
             sa_text("""
-                SELECT id::text, document_id, minio_key
+                SELECT id::text, document_id::text AS document_id, minio_key
                 FROM document_figures
                 WHERE id = CAST(:figure_id AS uuid)
                 LIMIT 1
@@ -5106,7 +5106,7 @@ def _tension_connect_edge_viewable(user_id: str, edge_id: str) -> bool:
         try:
             rows = session.execute(
                 sa_text("""
-                    SELECT DISTINCT document_id FROM theory_component_graphs
+                    SELECT DISTINCT document_id::text AS document_id FROM theory_component_graphs
                     WHERE graph_json->'edges' @> jsonb_build_array(
                         jsonb_build_object('edge_id', CAST(:eid AS text))
                     )

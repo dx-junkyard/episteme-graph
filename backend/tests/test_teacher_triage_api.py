@@ -431,7 +431,9 @@ class FakeReconItemSession:
 
     def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
-        if sql.startswith("SELECT status, claim_id::text, document_id FROM reconstruction_items"):
+        # migration 080 で reconstruction_items.document_id が uuid になり、
+        # 投影が document_id::text になった。
+        if sql.startswith("SELECT status, claim_id::text, document_id::text FROM reconstruction_items"):
             class _R:
                 def fetchone(_self):
                     return (self._status, CLAIM_UUID, DOC)

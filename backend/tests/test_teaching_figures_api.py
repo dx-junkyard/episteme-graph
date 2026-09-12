@@ -1651,8 +1651,12 @@ class TestOrphanCleanupPaths:
         assert "_purge_teaching_figures" in body
 
     def test_admin_delete_material(self):
+        """知識オブジェクト層 §8.1（KO9）以降、delete_material は DB 削除本体を
+        ``_purge_document`` に委譲する（教材図の掃除は委譲先のコース削除ループが担い、
+        MinIO キーは戻り値で受け取って best-effort で消す）。"""
         body = self._function_source(self._source("api/routes/admin.py"), "delete_material")
-        assert "delete_figures_for_course" in body
+        assert "_purge_document(" in body
+        assert "teaching_figure_keys" in body
 
     def test_admin_delete_course(self):
         body = self._function_source(self._source("api/routes/admin.py"), "delete_course")

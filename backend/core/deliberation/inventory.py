@@ -282,7 +282,7 @@ def build(document_id: str) -> dict[str, Any]:
                     """
                     SELECT id, name, component_type, status, review_status, summary,
                            source_scope, created_at
-                    FROM theory_components
+                    FROM theory_components_live
                     WHERE source_scope->>'document_id' = :document_id
                     ORDER BY created_at ASC
                     """
@@ -301,7 +301,7 @@ def build(document_id: str) -> dict[str, Any]:
                            tc.text AS text, tc.support_status AS support_status,
                            tc.evidence_text AS evidence_text, tc.review_status AS review_status,
                            tc.created_at AS created_at
-                    FROM theory_claims tc
+                    FROM theory_claims_live tc
                     LEFT JOIN chunks c ON c.id = tc.chunk_id
                     WHERE tc.document_id = :document_id
                     ORDER BY c.chunk_index ASC NULLS LAST, tc.created_at ASC
@@ -359,7 +359,7 @@ def build(document_id: str) -> dict[str, Any]:
                 """
                 SELECT instance_element_type, instance_element_id, status, COUNT(*) AS cnt
                 FROM element_identity_links
-                WHERE instance_document_id = :document_id
+                WHERE instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)
                 GROUP BY instance_element_type, instance_element_id, status
                 """
             ),

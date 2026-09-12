@@ -560,9 +560,9 @@ def _eval_figure_unreviewed_modes(session, uid: str) -> list[tuple[NextStep, str
             SELECT d.id::text AS id, d.source_path, d.title, d.created_at,
                    count(*) AS pending_count
             FROM documents d
-            -- document_figures.document_id は UUID の文字列表現（TEXT）で保持している。
-            -- documents.id（UUID）と比較する際は UUID 側を文字列化する。
-            JOIN document_figures f ON f.document_id = d.id::text
+            -- migration 080 以降 document_figures.document_id は uuid + FK なので
+            -- documents.id とそのまま突き合わせる（文字列化しない）。
+            JOIN document_figures f ON f.document_id = d.id
             WHERE d.uploaded_by = CAST(:uid AS uuid)
               AND f.mode_review_status = 'pending'
               AND f.suggested_mode <> 'unknown'

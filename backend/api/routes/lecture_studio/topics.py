@@ -818,7 +818,8 @@ def get_lecture_studio_components(
     component_filter = "course_id = :course_id"
     component_params: dict = {"course_id": course_id}
     if source_document_ids:
-        doc_placeholders = ", ".join(f":doc_{i}" for i in range(len(source_document_ids)))
+        # migration 080 以降 theory_components.document_id は uuid（バインドを明示キャストする）。
+        doc_placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(source_document_ids)))
         component_filter = f"({component_filter} OR document_id IN ({doc_placeholders}))"
         component_params.update({f"doc_{i}": doc_id for i, doc_id in enumerate(source_document_ids)})
 
@@ -833,7 +834,7 @@ def get_lecture_studio_components(
                        teacher_notes, source_scope, evidence_claims, maturity_level, maturity_source,
                        review_status, cautions, connectors, created_at, updated_at,
                        component_type_text, internal_flow, duplicate_candidates
-                FROM theory_components
+                FROM theory_components_live
                 WHERE {component_filter}
                 ORDER BY updated_at DESC, created_at DESC
             """),
@@ -882,7 +883,7 @@ def get_lecture_studio_components(
     try:
         graph_rows = session.execute(
             sa_text(f"""
-                SELECT document_id, graph_json, validation_results
+                SELECT document_id::text AS document_id, graph_json, validation_results
                 FROM theory_component_graphs
                 WHERE {component_filter}
                 ORDER BY updated_at DESC
@@ -911,7 +912,7 @@ def get_lecture_studio_components(
             status_rows = session.execute(
                 sa_text("""
                     SELECT status FROM document_analysis_runs
-                    WHERE document_id = ANY(:doc_ids)
+                    WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
                     ORDER BY created_at DESC
                     LIMIT 10
                 """),

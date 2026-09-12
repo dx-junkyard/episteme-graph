@@ -383,7 +383,7 @@ def _select_components_sql(where: str) -> str:
                teacher_notes, source_scope, evidence_claims, maturity_level, maturity_source,
                review_status, cautions, connectors, created_at, updated_at,
                component_type_text, internal_flow, duplicate_candidates
-        FROM theory_components
+        FROM theory_components_live
         WHERE {where}
         ORDER BY updated_at DESC, created_at DESC
     """
@@ -829,10 +829,10 @@ def _claim_rows_for_chunk(chunk_id: str) -> list[ClaimOut]:
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, document_id, chunk_id, source_scope, claim_type, text,
+                SELECT id, document_id::text AS document_id, chunk_id, source_scope, claim_type, text,
                        normalized_text, concepts, equation, support_status, evidence_text,
                        review_status, created_by, created_at, updated_at
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE chunk_id = CAST(:chunk_id AS uuid)
                 ORDER BY created_at ASC
             """),
@@ -848,10 +848,10 @@ def _claim_rows_for_document(document_id: str) -> list[ClaimOut]:
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, document_id, chunk_id, source_scope, claim_type, text,
+                SELECT id, document_id::text AS document_id, chunk_id, source_scope, claim_type, text,
                        normalized_text, concepts, equation, support_status, evidence_text,
                        review_status, created_by, created_at, updated_at
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE document_id = :document_id
                 ORDER BY created_at ASC
             """),
@@ -867,10 +867,10 @@ def _claim_rows_for_section(document_id: str, section_id: str) -> list[ClaimOut]
     try:
         rows = session.execute(
             sa_text("""
-                SELECT id, document_id, chunk_id, source_scope, claim_type, text,
+                SELECT id, document_id::text AS document_id, chunk_id, source_scope, claim_type, text,
                        normalized_text, concepts, equation, support_status, evidence_text,
                        review_status, created_by, created_at, updated_at
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE document_id = :document_id
                   AND source_scope->>'section_id' = :section_id
                 ORDER BY created_at ASC
@@ -1153,11 +1153,11 @@ def _insert_claim(document_id: str, chunk_id: str, payload: dict, user_id: str) 
                     concepts, equation, support_status, evidence_text, review_status, created_by
                 )
                 VALUES (
-                    :document_id, CAST(:chunk_id AS uuid), CAST(:source_scope AS jsonb),
+                    CAST(NULLIF(:document_id, '') AS uuid), CAST(:chunk_id AS uuid), CAST(:source_scope AS jsonb),
                     :claim_type, :text, :normalized_text, CAST(:concepts AS jsonb),
                     CAST(:equation AS jsonb), :support_status, :evidence_text, :review_status, CAST(:created_by AS uuid)
                 )
-                RETURNING id, document_id, chunk_id, source_scope, claim_type, text,
+                RETURNING id, document_id::text, chunk_id, source_scope, claim_type, text,
                           normalized_text, concepts, equation, support_status, evidence_text,
                           review_status, created_by, created_at, updated_at
             """),
@@ -2457,7 +2457,7 @@ def _resolve_claim_reference_index(
     session = _pg_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id, text, source_scope, review_status FROM theory_claims WHERE document_id = :document_id"),
+            sa_text("SELECT id, text, source_scope, review_status FROM theory_claims_live WHERE document_id = :document_id"),
             {"document_id": document_id},
         ).fetchall()
     finally:
@@ -2976,7 +2976,7 @@ def update_claim(
     session = _pg_session()
     try:
         existing = session.execute(
-            sa_text("SELECT document_id, review_status FROM theory_claims WHERE id = CAST(:claim_id AS uuid)"),
+            sa_text("SELECT document_id::text, review_status FROM theory_claims_live WHERE id = CAST(:claim_id AS uuid)"),
             {"claim_id": claim_id},
         ).fetchone()
     finally:
@@ -3003,7 +3003,7 @@ def update_claim(
                     review_status = :review_status,
                     updated_at = now()
                 WHERE id = CAST(:claim_id AS uuid)
-                RETURNING id, document_id, chunk_id, source_scope, claim_type, text,
+                RETURNING id, document_id::text, chunk_id, source_scope, claim_type, text,
                           normalized_text, concepts, equation, support_status, evidence_text,
                           review_status, created_by, created_at, updated_at
             """),
@@ -3114,7 +3114,7 @@ def review_claim(
     session = _pg_session()
     try:
         existing = session.execute(
-            sa_text("SELECT document_id, review_status FROM theory_claims WHERE id = CAST(:claim_id AS uuid)"),
+            sa_text("SELECT document_id::text, review_status FROM theory_claims_live WHERE id = CAST(:claim_id AS uuid)"),
             {"claim_id": claim_id},
         ).fetchone()
     finally:
@@ -3130,7 +3130,7 @@ def review_claim(
                 SET review_status = :review_status,
                     updated_at = now()
                 WHERE id = CAST(:claim_id AS uuid)
-                RETURNING id, document_id, chunk_id, source_scope, claim_type, text,
+                RETURNING id, document_id::text, chunk_id, source_scope, claim_type, text,
                           normalized_text, concepts, equation, support_status, evidence_text,
                           review_status, created_by, created_at, updated_at
             """),
@@ -3495,7 +3495,7 @@ def extract_theory_components(
         try:
             existing = session.execute(
                 sa_text(f"""
-                    SELECT id FROM theory_components
+                    SELECT id FROM theory_components_live
                     WHERE course_id = :course_id
                       AND primary_chunk_id = CAST(:chunk_id AS uuid)
                       AND lower(name) = lower(:name)
@@ -3560,7 +3560,7 @@ def _component_document_id(component: TheoryComponentOut) -> str:
     session = _pg_session()
     try:
         row = session.execute(
-            sa_text("SELECT document_id FROM theory_components WHERE id = CAST(:id AS uuid)"),
+            sa_text("SELECT document_id::text FROM theory_components_live WHERE id = CAST(:id AS uuid)"),
             {"id": component.id},
         ).fetchone()
     finally:
@@ -4497,7 +4497,7 @@ def _stamp_citation_source_version(citation_id: str, component_id: str | None, u
     session = _pg_session()
     try:
         comp = session.execute(
-            sa_text("SELECT document_id FROM theory_components WHERE id = CAST(:id AS uuid)"),
+            sa_text("SELECT document_id::text FROM theory_components_live WHERE id = CAST(:id AS uuid)"),
             {"id": component_id},
         ).fetchone()
     finally:
@@ -4600,12 +4600,13 @@ def _claims_for_course(course_id: str, current_user: dict, limit: int = 100) -> 
         document_ids = list(dict.fromkeys(document_ids))
         if not document_ids:
             return []
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        # migration 080 以降 theory_claims.document_id は uuid（バインドを明示キャストする）。
+        placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(document_ids)))
         params = {f"doc_{i}": d for i, d in enumerate(document_ids)}
         params["limit"] = limit
         rows = session.execute(
             sa_text(
-                f"SELECT id, text FROM theory_claims "
+                f"SELECT id, text FROM theory_claims_live "
                 f"WHERE document_id IN ({placeholders}) AND review_status != 'rejected' "
                 f"ORDER BY updated_at DESC LIMIT :limit"
             ),

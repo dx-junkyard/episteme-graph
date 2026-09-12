@@ -55,7 +55,7 @@ def _claim_pending_targets(session, document_id: str, course_id: str) -> list[tu
     filters = ["scope_candidates_analyzed_at IS NULL"]
     params: dict = {"limit": _BATCH_LIMIT}
     if document_id:
-        filters.append("document_id = :doc")
+        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
     if course_id:
         filters.append("course_id = :course")

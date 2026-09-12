@@ -134,7 +134,7 @@ def _live_review_status_map(document_id: str) -> dict[str, str]:
             sa_text(
                 """
                 SELECT id::text, review_status
-                FROM theory_components
+                FROM theory_components_live
                 WHERE source_scope->>'document_id' = :document_id
                 """
             ),
@@ -372,7 +372,7 @@ def graph_grounding_to_text(grounding: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 _SESSION_COLUMNS_SQL = """
-    id::text, scope, element_type, element_id, document_id, domain_key,
+    id::text, scope, element_type, element_id, document_id::text AS document_id, domain_key,
     title, messages, created_by::text, created_at, updated_at
 """
 
@@ -430,7 +430,8 @@ def create_graph_session(document_id: str, *, title: str = "", created_by: str |
                 INSERT INTO deliberation_sessions
                     (scope, element_type, element_id, document_id, domain_key, title, created_by)
                 VALUES
-                    ('document', :element_type, :element_id, :document_id, NULL,
+                    ('document', :element_type, :element_id,
+                     CAST(NULLIF(:document_id, '') AS uuid), NULL,
                      :title, CAST(:created_by AS uuid))
                 RETURNING {_SESSION_COLUMNS_SQL}
                 """

@@ -110,14 +110,14 @@ def build_dependency_graph(session, course_id: str = "", document_id: str = "") 
         filters.append("course_id = :course")
         params["course"] = course_id
     if document_id:
-        filters.append("document_id = :doc")
+        filters.append("document_id = CAST(NULLIF(:doc, '') AS uuid)")
         params["doc"] = document_id
     if not filters:
         filters.append("TRUE")
 
     rows = session.execute(
         sa_text(f"""
-            SELECT document_id, graph_json
+            SELECT document_id::text AS document_id, graph_json
             FROM theory_component_graphs
             WHERE {' AND '.join(filters)}
         """),

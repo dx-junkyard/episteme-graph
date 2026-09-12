@@ -705,11 +705,12 @@ def _course_figures_index(
 
     session = _pg_session()
     try:
-        placeholders = ", ".join(f":did_{i}" for i in range(len(document_ids)))
+        # migration 080 以降 document_figures.document_id は uuid（バインドを明示キャストする）。
+        placeholders = ", ".join(f"CAST(:did_{i} AS uuid)" for i in range(len(document_ids)))
         params: dict = {f"did_{i}": did for i, did in enumerate(document_ids)}
         rows = session.execute(
             sa_text(f"""
-                SELECT id::text, caption_text, document_id
+                SELECT id::text, caption_text, document_id::text AS document_id
                 FROM document_figures
                 WHERE document_id IN ({placeholders}) AND status = 'extracted'
             """),

@@ -839,13 +839,13 @@ def _load_claims_for_course(session: Any, course_id: str, document_ids: list[str
     # course_idに紐づくcomponentsのchunk経由で取得
     rows_by_course = session.execute(
         sa_text("""
-            SELECT DISTINCT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
+            SELECT DISTINCT tc.id, tc.document_id::text, tc.source_scope, tc.claim_type,
                    tc.text, tc.normalized_text, tc.concepts, tc.equation,
                    tc.support_status, tc.evidence_text, tc.review_status,
                    tc.created_at
-            FROM theory_claims tc
+            FROM theory_claims_live tc
             JOIN chunks c ON c.id = tc.chunk_id
-            JOIN theory_components tcomp ON tcomp.primary_chunk_id = c.id
+            JOIN theory_components_live tcomp ON tcomp.primary_chunk_id = c.id
             WHERE tcomp.course_id = :course_id
         """),
         {"course_id": course_id},
@@ -853,18 +853,21 @@ def _load_claims_for_course(session: Any, course_id: str, document_ids: list[str
 
     rows_by_doc: list = []
     if document_ids:
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        # migration 080 以降 theory_claims.document_id は uuid（chunks 側は元から uuid で、
+        # ここは ::text 比較のまま残す）。バインドは用途ごとに2形で組む。
+        uuid_ph = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(document_ids)))
+        text_ph = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
         params: dict = {f"doc_{i}": did for i, did in enumerate(document_ids)}
         rows_by_doc = session.execute(
             sa_text(f"""
-                SELECT DISTINCT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
+                SELECT DISTINCT tc.id, tc.document_id::text, tc.source_scope, tc.claim_type,
                        tc.text, tc.normalized_text, tc.concepts, tc.equation,
                        tc.support_status, tc.evidence_text, tc.review_status,
                        tc.created_at
-                FROM theory_claims tc
-                WHERE tc.document_id IN ({placeholders})
+                FROM theory_claims_live tc
+                WHERE tc.document_id IN ({uuid_ph})
                    OR tc.chunk_id IN (
-                       SELECT id FROM chunks WHERE document_id::text IN ({placeholders})
+                       SELECT id FROM chunks WHERE document_id::text IN ({text_ph})
                    )
             """),
             params,
@@ -876,12 +879,12 @@ def _load_claims_for_course(session: Any, course_id: str, document_ids: list[str
 def _load_claims_for_document(session: Any, document_id: str) -> list[dict]:
     rows = session.execute(
         sa_text("""
-            SELECT tc.id, tc.document_id, tc.source_scope, tc.claim_type,
+            SELECT tc.id, tc.document_id::text, tc.source_scope, tc.claim_type,
                    tc.text, tc.normalized_text, tc.concepts, tc.equation,
                    tc.support_status, tc.evidence_text, tc.review_status,
                    tc.created_at
-            FROM theory_claims tc
-            WHERE tc.document_id = :document_id
+            FROM theory_claims_live tc
+            WHERE tc.document_id = CAST(:document_id AS uuid)
                OR tc.chunk_id IN (SELECT id FROM chunks WHERE document_id::text = :document_id)
             ORDER BY tc.created_at
         """),
@@ -924,16 +927,17 @@ def _load_dsl_graph_for_course(session: Any, course_id: str, document_ids: list[
     where_parts = ["tc.course_id = :course_id"]
     params: dict = {"course_id": course_id}
     if document_ids:
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        uuid_ph = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(document_ids)))
+        text_ph = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
         params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
-        where_parts.append(f"(tc.document_id IN ({placeholders}) OR c.document_id::text IN ({placeholders}))")
+        where_parts.append(f"(tc.document_id IN ({uuid_ph}) OR c.document_id::text IN ({text_ph}))")
     where_clause = " OR ".join(f"({p})" for p in where_parts)
 
     rows = session.execute(
         sa_text(f"""
             SELECT DISTINCT c.id::text, c.smiles_dsl, c.variables, c.ancestors, c.document_id
             FROM chunks c
-            JOIN theory_components tc ON tc.primary_chunk_id = c.id
+            JOIN theory_components_live tc ON tc.primary_chunk_id = c.id
             WHERE ({where_clause})
               AND c.smiles_dsl IS NOT NULL AND c.smiles_dsl != ''
         """),
@@ -973,7 +977,7 @@ def _load_dsl_from_component_graphs(
         where_parts.append("course_id = :course_id")
         params["course_id"] = course_id
     if document_ids:
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(document_ids)))
         params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
         where_parts.append(f"document_id IN ({placeholders})")
     if not where_parts:
@@ -981,7 +985,7 @@ def _load_dsl_from_component_graphs(
 
     where_clause = " OR ".join(f"({p})" for p in where_parts)
     rows = session.execute(
-        sa_text(f"SELECT document_id, graph_json FROM theory_component_graphs WHERE {where_clause}"),
+        sa_text(f"SELECT document_id::text, graph_json FROM theory_component_graphs WHERE {where_clause}"),
         params,
     ).fetchall()
 
@@ -1128,7 +1132,7 @@ def _load_components_for_course(session: Any, course_id: str, document_ids: list
     where_parts = ["tc.course_id = :course_id"]
     params: dict = {"course_id": course_id}
     if document_ids:
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(document_ids)))
         params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
         where_parts.append(f"tc.document_id IN ({placeholders})")
     where_clause = " OR ".join(f"({p})" for p in where_parts)
@@ -1140,9 +1144,9 @@ def _load_components_for_course(session: Any, course_id: str, document_ids: list
                    tc.maturity_source, tc.review_status, tc.inputs, tc.outputs, tc.preconditions,
                    tc.cautions, tc.constraints, tc.invalid_conditions, tc.dependencies,
                    tc.connectors, tc.internal_flow, tc.teacher_notes, tc.created_at,
-                   tc.document_id,
+                   tc.document_id::text,
                    ch.smiles_dsl
-            FROM theory_components tc
+            FROM theory_components_live tc
             LEFT JOIN chunks ch ON ch.id = tc.primary_chunk_id
             WHERE {where_clause}
             ORDER BY tc.created_at
@@ -1160,11 +1164,11 @@ def _load_components_for_document(session: Any, document_id: str) -> list[dict]:
                    tc.maturity_source, tc.review_status, tc.inputs, tc.outputs, tc.preconditions,
                    tc.cautions, tc.constraints, tc.invalid_conditions, tc.dependencies,
                    tc.connectors, tc.internal_flow, tc.teacher_notes, tc.created_at,
-                   tc.document_id,
+                   tc.document_id::text,
                    ch.smiles_dsl
-            FROM theory_components tc
+            FROM theory_components_live tc
             LEFT JOIN chunks ch ON ch.id = tc.primary_chunk_id
-            WHERE tc.document_id = :document_id
+            WHERE tc.document_id = CAST(:document_id AS uuid)
                OR ch.document_id::text = :document_id
             ORDER BY tc.created_at
         """),
@@ -1218,14 +1222,14 @@ def _load_component_graph_for_course(session: Any, course_id: str, document_ids:
     where_parts = ["course_id = :course_id"]
     params: dict = {"course_id": course_id}
     if document_ids:
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+        placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(document_ids)))
         params.update({f"doc_{i}": did for i, did in enumerate(document_ids)})
         where_parts.append(f"document_id IN ({placeholders})")
     where_clause = " OR ".join(f"({p})" for p in where_parts)
 
     row = session.execute(
         sa_text(f"""
-            SELECT id, document_id, scope, graph_json
+            SELECT id, document_id::text, scope, graph_json
             FROM theory_component_graphs
             WHERE {where_clause}
             ORDER BY updated_at DESC
@@ -1241,9 +1245,9 @@ def _load_component_graph_for_course(session: Any, course_id: str, document_ids:
 def _load_component_graph_for_document(session: Any, document_id: str) -> dict:
     row = session.execute(
         sa_text("""
-            SELECT id, document_id, scope, graph_json
+            SELECT id, document_id::text, scope, graph_json
             FROM theory_component_graphs
-            WHERE document_id = :document_id
+            WHERE document_id = CAST(:document_id AS uuid)
             ORDER BY updated_at DESC
             LIMIT 1
         """),

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from sqlalchemy import text as sa_text
 
@@ -138,14 +139,18 @@ def _purge_teaching_figures(session, course_id: str) -> list[str]:
     return list(teaching_figures_store.delete_figures_for_course(session, course_id) or [])
 
 
-def _remove_teaching_figure_objects(minio_keys: list[str]) -> None:
-    """教材図の MinIO オブジェクトを best-effort で削除する（失敗は WARN のみ）。"""
+def _remove_figure_objects(minio_keys: list[str]) -> None:
+    """図画像（教材図 063 / PDF 抽出図 041）の MinIO オブジェクトを best-effort で削除する。
+
+    どちらも ``figure-images`` バケットに置かれる。失敗は WARN ログのみで、正本である
+    DB 行の削除を無効化しない。
+    """
     if not minio_keys:
         return
     try:
         storage = get_storage_client()
     except Exception:  # noqa: BLE001 — ストレージ不達でも DB 削除は有効
-        logger.warning("teaching figure object cleanup skipped (storage unavailable)", exc_info=True)
+        logger.warning("figure object cleanup skipped (storage unavailable)", exc_info=True)
         return
     for key in minio_keys:
         if not key:
@@ -153,7 +158,7 @@ def _remove_teaching_figure_objects(minio_keys: list[str]) -> None:
         try:
             storage.remove_object("figure-images", key)
         except Exception:  # noqa: BLE001 — best-effort
-            logger.warning("Failed to remove teaching figure object %s", key, exc_info=True)
+            logger.warning("Failed to remove figure object %s", key, exc_info=True)
 
 
 def _purge_course(session, course_id: str) -> list[str]:
@@ -175,20 +180,52 @@ def _purge_course(session, course_id: str) -> list[str]:
     return figure_keys
 
 
-def _purge_document(session, document_id: str) -> list[str]:
+class PurgedDocument(NamedTuple):
+    """``_purge_document`` の戻り値（教材削除の巻き添え範囲を呼び出し側へ返す）。
+
+    - ``course_ids``: 巻き添えで削除した所有者のコース（HTTP 層の応答・監査・V層 teardown 用）
+    - ``teaching_figure_keys``: 教材図（``course_teaching_figures``）の MinIO キー
+    - ``figure_image_keys``: PDF 抽出図（``document_figures``）の MinIO キー
+
+    MinIO の削除は core では行わない（core は storage を触らない規律）。commit 後に
+    呼び出し側が best-effort で消す。
+    """
+
+    course_ids: list[str]
+    teaching_figure_keys: list[str]
+    figure_image_keys: list[str]
+
+
+def _purge_document(session, document_id: str) -> PurgedDocument:
+    """1教材（document）とその巻き添え範囲を物理削除する（削除経路の正本）。
+
+    ``purge_object``（V層スイーパ）と ``routes/admin.py::delete_material``（教員の即時削除）の
+    **両方がこの関数に委譲する**（設計書 §8.1）。HTTP 層に残るのは所有者確認・確認名照合・
+    監査・V層 teardown・MinIO の best-effort 削除だけで、DB の削除本体はここ1本にする。
+
+    migration 080 以降、下記の明示 DELETE のうち document_id に FK CASCADE が付いた表
+    （theory_claims / theory_components / theory_component_links / theory_component_graphs /
+    document_analysis_runs / document_figures / epistemic_ledger / counterfactual_sessions /
+    element_annotations / deliberation_sessions / element_identity_links 等）は
+    ``DELETE FROM documents`` でも消える。**それでも明示 DELETE を残す**のは、
+    ①削除の順序（challenges / epistemic_ledger の target_id 掃除は theory_* を消す前に
+    対象 id を集める必要がある）②何がこの教材と一緒に消えるのかがコードだけで読めること
+    を優先するため。
+    """
     doc = session.execute(
         sa_text("SELECT source_path, uploaded_by::text FROM documents WHERE id = CAST(:id AS uuid)"),
         {"id": document_id},
     ).fetchone()
     source_path = (doc[0] if doc else "") or ""
     owner = doc[1] if doc else None
-    id_forms = {"a": document_id, "b": source_path or document_id}
+    doc_ref = {"a": document_id}
 
     # 1) この教材を source に含む所有者のコースを削除（delete_material と同スコープ）
-    figure_keys: list[str] = []
+    teaching_figure_keys: list[str] = []
+    course_ids: list[str] = []
     if owner and source_path:
         needle = json.dumps([{"material_id": source_path}])
-        course_ids = session.execute(
+        course_rows = session.execute(
             sa_text("""
                 SELECT id FROM learning_courses
                 WHERE user_id = CAST(:owner AS uuid)
@@ -196,8 +233,9 @@ def _purge_document(session, document_id: str) -> list[str]:
             """),
             {"owner": owner, "needle": needle},
         ).fetchall()
-        for (cid,) in course_ids:
-            session.execute(sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"), {"cid": cid})
+        for (cid,) in course_rows:
+            course_id = str(cid)
+            session.execute(sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"), {"cid": course_id})
             # object_group_permissions は course_id への FK が無いため明示削除する
             # （_purge_course と同じ理由。ここは _purge_course を経由しない独立した
             # コース削除経路なので、同じ後始末をここでも行う必要がある）。
@@ -206,70 +244,87 @@ def _purge_document(session, document_id: str) -> list[str]:
                     "DELETE FROM object_group_permissions "
                     "WHERE object_type = 'course' AND object_id = :cid"
                 ),
-                {"cid": cid},
+                {"cid": course_id},
             )
             # 教材図（migration 063）も course_id への FK が無いため明示削除する
             # （_purge_course と同じ理由。ここは _purge_course を経由しない独立した
             # コース削除経路なので、同じ後始末をここでも行う必要がある）。
-            figure_keys.extend(_purge_teaching_figures(session, cid))
-            session.execute(sa_text("DELETE FROM learning_courses WHERE id = :cid"), {"cid": cid})
+            teaching_figure_keys.extend(_purge_teaching_figures(session, course_id))
+            session.execute(sa_text("DELETE FROM learning_courses WHERE id = :cid"), {"cid": course_id})
+            course_ids.append(course_id)
 
-    # 2) document スコープの成果物（orphan gap 解消。document_id は UUID / material_id 両形）
+    # 2) document スコープの成果物。
     #    D層（migration 029-033）の challenges / epistemic_ledger は claim / component の id を
     #    target_id で参照するため、theory_* を消す前に対象 id を集める（FK が無く CASCADE されない）。
     target_rows = session.execute(
         sa_text("""
-            SELECT id::text FROM theory_claims WHERE document_id IN (:a, :b)
+            SELECT id::text FROM theory_claims WHERE document_id = CAST(:a AS uuid)
             UNION
-            SELECT id::text FROM theory_components WHERE document_id IN (:a, :b)
+            SELECT id::text FROM theory_components WHERE document_id = CAST(:a AS uuid)
         """),
-        id_forms,
+        doc_ref,
     ).fetchall()
     target_ids = [r[0] for r in target_rows]
 
-    for tbl in ("theory_claims", "theory_component_links", "theory_components", "theory_component_graphs"):
-        session.execute(sa_text(f"DELETE FROM {tbl} WHERE document_id IN (:a, :b)"), id_forms)
+    # PDF 抽出図（migration 041）の MinIO キーは行を消す前に集める（削除後は引けない）。
+    # 教材図（063）と同じく core は storage を触らず、キーだけ呼び出し側へ返す。
+    figure_image_keys = [
+        str(r[0])
+        for r in session.execute(
+            sa_text("SELECT minio_key FROM document_figures WHERE document_id = CAST(:a AS uuid)"),
+            doc_ref,
+        ).fetchall()
+        if r[0]
+    ]
 
-    # D層 polymorphic 行（FK-less TEXT。削除済み document / claim / component を指す孤児を掃除する）。
+    for tbl in ("theory_claims", "theory_component_links", "theory_components", "theory_component_graphs"):
+        session.execute(sa_text(f"DELETE FROM {tbl} WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+
+    # D層 polymorphic 行（削除済み document / claim / component を指す孤児を掃除する）。
     # verification_proposals は challenges に ON DELETE CASCADE なので challenges 削除で自動的に消える。
-    session.execute(sa_text("DELETE FROM epistemic_ledger WHERE document_id IN (:a, :b)"), id_forms)
-    session.execute(sa_text("DELETE FROM counterfactual_sessions WHERE document_id IN (:a, :b)"), id_forms)
-    # W層 同一性リンク（migration 048）: instance 側は document への FK が無い
-    # ポリモーフィック行（同じ orphan gap パターン）。shared_part_id 側は library_entries への
+    session.execute(sa_text("DELETE FROM epistemic_ledger WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    session.execute(sa_text("DELETE FROM counterfactual_sessions WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    # W層 同一性リンク（migration 048）: instance 側。shared_part_id 側は library_entries への
     # 実 FK があるが、library_entries 自体は document 削除で消えないため触らない。
-    session.execute(sa_text("DELETE FROM element_identity_links WHERE instance_document_id IN (:a, :b)"), id_forms)
-    # W層 対話セッション + 候補注釈（migration 049）: scope='document' 行は document_id への
-    # FK が無いポリモーフィック行（同じ orphan gap パターン）。scope='domain' 行は
-    # document_id が NULL のため、この WHERE には元々一致せず触らない（L層 library_entry の
-    # ライフサイクルに従う・P4）。
-    session.execute(sa_text("DELETE FROM element_annotations WHERE document_id IN (:a, :b)"), id_forms)
-    session.execute(sa_text("DELETE FROM deliberation_sessions WHERE document_id IN (:a, :b)"), id_forms)
-    # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳:
-    # document_id は（element_annotations 等と異なり）polymorphic TEXT ではなく
-    # documents.id に準拠する UUID 列（FK 無し）なので id_forms の a 形のみで十分。
     session.execute(
-        sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:a AS uuid)"),
-        {"a": document_id},
+        sa_text("DELETE FROM element_identity_links WHERE instance_document_id = CAST(:a AS uuid)"),
+        doc_ref,
     )
+    # W層 対話セッション + 候補注釈（migration 049）: scope='document' 行のみ。
+    # scope='domain' 行は document_id が NULL のため、この WHERE には一致せず触らない
+    # （L層 library_entry のライフサイクルに従う・P4）。
+    session.execute(sa_text("DELETE FROM element_annotations WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    session.execute(sa_text("DELETE FROM deliberation_sessions WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    # 図（migration 041）: MinIO キーは上で集めてある。
+    session.execute(sa_text("DELETE FROM document_figures WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳。
+    session.execute(sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:a AS uuid)"), doc_ref)
     if target_ids:
         session.execute(sa_text("DELETE FROM challenges WHERE target_id = ANY(:ids)"), {"ids": target_ids})
         session.execute(sa_text("DELETE FROM epistemic_ledger WHERE target_id = ANY(:ids)"), {"ids": target_ids})
 
     # object_group_permissions は document_id への FK が無いポリモーフィックテーブル
     # なので明示削除する（統合前の専用テーブル=migration 035 は documents への FK CASCADE で
-    # 自動的に消えていた）。object_id は書き込み時と同じ正規化（小文字 canonical text）で比較する。
+    # 自動的に消えていた）。object_id は書き込み時と同じ正規化（小文字 canonical text）で比較する
+    # （**この ::text は残す** — object_id は course / document を混在させる TEXT 列で、
+    # migration 080 の UUID 化の対象ではない）。
     session.execute(
         sa_text(
             "DELETE FROM object_group_permissions "
             "WHERE object_type = 'document' AND object_id = CAST(:a AS uuid)::text"
         ),
-        {"a": document_id},
+        doc_ref,
     )
-    # 3) チャンク → ドキュメント → 解析 Run（documents.active_analysis_run_id FK があるため runs は最後）
-    session.execute(sa_text("DELETE FROM chunks WHERE document_id = CAST(:a AS uuid)"), {"a": document_id})
-    session.execute(sa_text("DELETE FROM documents WHERE id = CAST(:a AS uuid)"), {"a": document_id})
-    session.execute(sa_text("DELETE FROM document_analysis_runs WHERE document_id IN (:a, :b)"), id_forms)
-    return figure_keys
+    # 3) チャンク → ドキュメント → 解析 Run。
+    #    documents.active_analysis_run_id → document_analysis_runs(id) は NO ACTION なので、
+    #    runs を先に消すと documents 行が残ったまま参照が切れて失敗する。documents を先に
+    #    消せば（migration 080 の CASCADE で runs も一緒に消え）参照チェックは文末に通る。
+    session.execute(sa_text("DELETE FROM chunks WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    session.execute(sa_text("DELETE FROM documents WHERE id = CAST(:a AS uuid)"), doc_ref)
+    # 080 以前の DB（FK 無し）で取り残さないための明示削除。080 以降は上の CASCADE で
+    # 既に消えているため 0 行になる。
+    session.execute(sa_text("DELETE FROM document_analysis_runs WHERE document_id = CAST(:a AS uuid)"), doc_ref)
+    return PurgedDocument(course_ids, teaching_figure_keys, figure_image_keys)
 
 
 def _cleanup_version_tables(session, object_type: str, object_id: str) -> None:
@@ -328,13 +383,14 @@ def purge_object(*, object_type: str, object_id: str) -> dict:
         if object_type == schema.OBJECT_TYPE_COURSE:
             figure_keys = _purge_course(session, object_id)
         else:
-            figure_keys = _purge_document(session, object_id)
+            purged = _purge_document(session, object_id)
+            figure_keys = list(purged.teaching_figure_keys) + list(purged.figure_image_keys)
 
         _cleanup_version_tables(session, object_type, object_id)
         session.commit()
         # MinIO オブジェクトは commit 後に best-effort で削除する（DB 削除が確定して
         # から消す — ロールバック時に画像だけ消える事故を防ぐ）。
-        _remove_teaching_figure_objects(figure_keys)
+        _remove_figure_objects(figure_keys)
         return {"purged": True}
     except Exception:
         session.rollback()

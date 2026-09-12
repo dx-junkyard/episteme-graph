@@ -805,7 +805,7 @@ def _load_graph_nodes(document_id: str) -> list[dict[str, Any]]:
             sa_text(
                 """
                 SELECT graph_json FROM theory_component_graphs
-                WHERE document_id = :doc ORDER BY updated_at DESC LIMIT 1
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) ORDER BY updated_at DESC LIMIT 1
                 """
             ),
             {"doc": document_id},
@@ -842,7 +842,7 @@ def _claim_label_index(document_id: str, artifacts: dict[str, Any]) -> dict[str,
         rows = session.execute(
             sa_text(
                 "SELECT id::text AS id, text, normalized_text, source_scope "
-                "FROM theory_claims WHERE document_id = :doc"
+                "FROM theory_claims_live WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)"
             ),
             {"doc": document_id},
         ).mappings().fetchall()

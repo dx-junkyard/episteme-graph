@@ -62,7 +62,8 @@ def _dump_json(value: Any) -> str:
 
 
 _COLUMNS_SQL = """
-    id::text, instance_element_type, instance_element_id, instance_document_id,
+    id::text, instance_element_type, instance_element_id,
+    instance_document_id::text AS instance_document_id,
     shared_part_id::text, status, local_expression, evidence, reason, confidence,
     created_by::text, decided_by::text, decided_at, created_at, updated_at
 """
@@ -140,7 +141,7 @@ def create_candidate(
                     shared_part_id, status, local_expression, evidence, reason,
                     confidence, created_by
                 ) VALUES (
-                    :element_type, :element_id, :document_id,
+                    :element_type, :element_id, CAST(:document_id AS uuid),
                     CAST(:shared_part_id AS uuid), :status,
                     CAST(:local_expression AS jsonb), CAST(:evidence AS jsonb),
                     :reason, :confidence, CAST(:created_by AS uuid)
@@ -153,7 +154,10 @@ def create_candidate(
             {
                 "element_type": instance_ref.element_type,
                 "element_id": instance_ref.element_id,
-                "document_id": instance_ref.document_id or "",
+                # migration 080 以降 instance_document_id は uuid NOT NULL。空文字を
+                # そのまま入れると例外になる（identity link は必ず document 由来の
+                # instance に張るので、空なら NOT NULL 違反として失敗するのが正しい）。
+                "document_id": instance_ref.document_id or None,
                 "shared_part_id": shared_part_id,
                 # status は引数として受け取らず、常にこの定数を束縛する（KN-3固定）。
                 "status": IDENTITY_LINK_STATUS_CANDIDATE,
@@ -173,7 +177,7 @@ def create_candidate(
                     SELECT {_COLUMNS_SQL} FROM element_identity_links
                     WHERE instance_element_type = :element_type
                       AND instance_element_id = :element_id
-                      AND instance_document_id = :document_id
+                      AND instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)
                       AND shared_part_id = CAST(:shared_part_id AS uuid)
                     """
                 ),
@@ -266,7 +270,7 @@ def list_for_instance(element_type: str, element_id: str, document_id: str) -> l
                 SELECT {_COLUMNS_SQL} FROM element_identity_links
                 WHERE instance_element_type = :element_type
                   AND instance_element_id = :element_id
-                  AND instance_document_id = :document_id
+                  AND instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)
                 ORDER BY created_at ASC
                 """
             ),
@@ -309,7 +313,7 @@ def confirmed_links_for_document(document_id: str) -> list[dict]:
             sa_text(
                 f"""
                 SELECT {_COLUMNS_SQL} FROM element_identity_links
-                WHERE instance_document_id = :document_id AND status = 'confirmed'
+                WHERE instance_document_id = CAST(NULLIF(:document_id, '') AS uuid) AND status = 'confirmed'
                 ORDER BY created_at ASC
                 """
             ),

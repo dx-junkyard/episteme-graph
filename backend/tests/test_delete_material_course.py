@@ -306,28 +306,36 @@ class TestDeleteMaterial:
         # 応答は呼び出し順（n 番目）ではなく **SQL の内容** で決める。孤児掃除の
         # DELETE が増えるたびに番号がずれて壊れるのを避けるため（教材図の掃除
         # （teaching_figure_studio_design.md §3.1）追加時に実際にずれた）。
-        course_data_by_id = {
-            "course-1": {"sources": [{"material_id": "mat-001", "title": "テスト教材"}]},
-            "course-2": {"sources": [{"material_id": "mat-999", "title": "別の教材"}]},
-        }
+        #
+        # 知識オブジェクト層 §8.1（KO9）以降、DB 削除本体は _purge_document に
+        # 委譲される。巻き添えコースの絞り込みは Python 側の走査ではなく
+        # ``data->'sources' @> ...`` の JSONB 条件（1クエリ）になったので、fake は
+        # 「その条件を満たすコースだけ」を返す。
 
         def side_effect_execute(*args, **kwargs):
             sql = " ".join(str(args[0]).split()) if args else ""
             params = args[1] if len(args) > 1 else (kwargs.get("params") or {})
             result = MagicMock()
-            if "FROM documents" in sql and "SELECT" in sql:
+            if "SELECT source_path, uploaded_by::text FROM documents" in sql:
+                # _purge_document が読む (source_path, uploaded_by)
+                result.fetchone.return_value = ("mat-001", "test-teacher-id")
+            elif "FROM documents" in sql and "SELECT" in sql:
                 result.fetchone.return_value = (
                     "doc-uuid-1", "テスト教材", "test.pdf", "mat-001"
                 )
             elif "SELECT id FROM learning_courses" in sql:
-                result.fetchall.return_value = [("course-1",), ("course-2",)]
-            elif "SELECT data FROM learning_courses" in sql:
-                cid = (params or {}).get("cid")
-                result.fetchone.return_value = (json.dumps(course_data_by_id.get(cid, {})),)
+                # @> の JSONB 条件で mat-001 を含むコースだけが返る（course-2 は返らない）
+                assert "data->'sources' @> " in sql
+                result.fetchall.return_value = [("course-1",)]
             elif "DELETE FROM course_teaching_figures" in sql:
+                result.fetchall.return_value = []
+            elif "SELECT minio_key FROM document_figures" in sql:
+                result.fetchall.return_value = []
+            elif sql.startswith("SELECT id::text FROM theory_claims"):
                 result.fetchall.return_value = []
             else:
                 result.rowcount = 1
+                result.fetchall.return_value = []
             return result
 
         mock_pg.execute.side_effect = side_effect_execute

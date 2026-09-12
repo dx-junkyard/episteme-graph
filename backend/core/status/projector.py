@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import uuid as _uuid
 
 from sqlalchemy import text as sa_text
 from sqlalchemy.orm import Session
@@ -56,7 +57,9 @@ def _fetch_latest_run(session: Session, document_id: str, material_id: str) -> d
         sa_text("""
             SELECT id::text, status, current_stage, error_message, updated_at, completed_at
             FROM document_analysis_runs
-            WHERE document_id = :document_id OR material_id = :material_id
+            -- migration 080 以降 document_id は uuid。ここは document_id 側が空
+            -- （material_id しか分からない経路）でも成立させたいので NULLIF で倒す。
+            WHERE document_id = CAST(NULLIF(:document_id, '') AS uuid) OR material_id = :material_id
             ORDER BY created_at DESC
             LIMIT 1
         """),
@@ -139,6 +142,26 @@ def project_material_status(session: Session, document_ref: str) -> schema.Mater
 # ---------------------------------------------------------------------------
 
 
+def _uuid_only(refs: list[str]) -> list[str]:
+    """参照値から UUID 形だけを取り出す（重複除去・順序安定）。
+
+    migration 080 で ``document_analysis_runs.document_id`` が uuid になったため、
+    material_id 形（``documents.source_path``）を混ぜたまま ``uuid[]`` にキャストすると
+    例外になる。SQL へ渡す前にここで落とす（material_id 側の照合は別条件が担う）。
+    """
+    out: list[str] = []
+    for ref in refs or []:
+        text = str(ref or "").strip()
+        if not text or text in out:
+            continue
+        try:
+            _uuid.UUID(text)
+        except (ValueError, AttributeError, TypeError):
+            continue
+        out.append(text)
+    return out
+
+
 def _fetch_documents_bulk(session: Session, document_refs: list[str]) -> dict[str, dict | None]:
     """document_ref（documents.id または source_path）-> documents 行、を1クエリで返す。"""
     refs = [r for r in document_refs if r]
@@ -174,15 +197,19 @@ def _fetch_latest_runs_bulk(
     ids = sorted({i for i in (list(document_ids) + list(material_ids)) if i})
     if not ids:
         return {}, {}
+    # migration 080 以降 document_analysis_runs.document_id は uuid。material_id 形が
+    # 混じった配列をそのまま uuid[] にキャストすると例外になるため、document_id 側の
+    # 照合は uuid 形の ID だけに絞る（material_id 側は従来どおり text 比較）。
+    uuid_ids = _uuid_only(ids)
     rows = session.execute(
         sa_text("""
-            SELECT id::text, document_id, material_id, status, current_stage,
+            SELECT id::text, document_id::text AS document_id, material_id, status, current_stage,
                    error_message, stage_outputs, updated_at, completed_at, created_at
             FROM document_analysis_runs
-            WHERE document_id = ANY(:ids) OR material_id = ANY(:ids)
+            WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) OR material_id = ANY(:ids)
             ORDER BY created_at DESC
         """),
-        {"ids": ids},
+        {"ids": ids, "doc_ids": uuid_ids},
     ).mappings().all()
     by_document_id: dict[str, dict] = {}
     by_material_id: dict[str, dict] = {}

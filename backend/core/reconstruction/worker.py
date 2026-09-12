@@ -70,10 +70,10 @@ def _fetch_authorable_claims(session, document_id: str, limit: int) -> list[dict
     approved = list(APPROVED_REVIEW_STATUSES)
     rows = session.execute(
         sa_text("""
-            SELECT c.id::text, c.document_id, c.claim_type, c.text, c.normalized_text,
+            SELECT c.id::text, c.document_id::text, c.claim_type, c.text, c.normalized_text,
                    c.concepts, c.equation, c.source_scope, c.evidence_text,
                    c.support_status, c.review_status
-            FROM theory_claims c
+            FROM theory_claims_live c
             WHERE c.document_id = :doc
               AND c.support_status = :backed
               AND c.review_status = ANY(:approved)
@@ -130,7 +130,7 @@ def _persist_item(session, claim: dict, result: ItemAuthoringResult) -> str | No
             INSERT INTO reconstruction_items
             (claim_id, document_id, elicit_mode, prompt, response_space, expected,
              claim_fields_used, author, author_confidence, status)
-            VALUES (CAST(:claim_id AS uuid), :document_id, :elicit_mode, :prompt,
+            VALUES (CAST(:claim_id AS uuid), CAST(NULLIF(:document_id, '') AS uuid), :elicit_mode, :prompt,
                     CAST(:response_space AS jsonb), CAST(:expected AS jsonb),
                     CAST(:claim_fields_used AS jsonb), 'llm', :author_confidence, 'auto')
             RETURNING id::text
@@ -160,7 +160,7 @@ def _persist_derivation_item(session, probe: dict) -> str | None:
             INSERT INTO reconstruction_items
             (claim_id, document_id, elicit_mode, prompt, response_space, expected,
              claim_fields_used, author, author_confidence, status)
-            VALUES (CAST(:claim_id AS uuid), :document_id, :elicit_mode, :prompt,
+            VALUES (CAST(:claim_id AS uuid), CAST(NULLIF(:document_id, '') AS uuid), :elicit_mode, :prompt,
                     CAST(:response_space AS jsonb), CAST(:expected AS jsonb),
                     CAST(:claim_fields_used AS jsonb), 'system', :author_confidence, 'auto')
             RETURNING id::text

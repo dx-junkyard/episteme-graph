@@ -891,7 +891,9 @@ def _load_document_figures_index(session, document_ids: list[str]) -> dict[str, 
     if not document_ids:
         return {}
     params = {f"did_{idx}": did for idx, did in enumerate(document_ids)}
-    placeholders = ", ".join(f":did_{idx}" for idx in range(len(document_ids)))
+    # migration 080 以降 document_figures.document_id は uuid。text のまま渡すと型不一致
+    # になるため、バインドを uuid にキャストする（以下の IN 句も同様）。
+    placeholders = ", ".join(f"CAST(:did_{idx} AS uuid)" for idx in range(len(document_ids)))
     rows = session.execute(
         sa_text(f"""
             SELECT id::text, document_id, figure_key, caption_text

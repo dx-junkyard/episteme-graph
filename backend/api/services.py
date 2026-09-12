@@ -133,7 +133,8 @@ def get_background_task(task_id: str) -> dict | None:
                     """
                     SELECT status, current_stage, error_message, stage_outputs
                     FROM document_analysis_runs
-                    WHERE document_id = :document_id
+                    -- migration 080 以降 document_id は uuid（空文字は NULLIF で倒す）。
+                    WHERE document_id = CAST(NULLIF(:document_id, '') AS uuid)
                       AND (run_type IS NULL OR run_type <> 'revision')
                     ORDER BY created_at DESC
                     LIMIT 1
@@ -3392,7 +3393,7 @@ def get_chunk_claim_refs(
         rows = session.execute(
             sa_text("""
                 SELECT id, claim_type, text, normalized_text
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE chunk_id = CAST(:cid AS uuid)
                 ORDER BY created_at ASC
             """),
@@ -3755,7 +3756,7 @@ def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool
         try:
             row = session.execute(
                 sa_text(
-                    "SELECT source_scope->>'document_id' FROM theory_components "
+                    "SELECT source_scope->>'document_id' FROM theory_components_live "
                     "WHERE id = CAST(:id AS uuid)"
                 ),
                 {"id": component_id},

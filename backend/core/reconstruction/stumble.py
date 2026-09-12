@@ -66,7 +66,7 @@ def _fetch_claim_meta(session, document_id: str, claim_ids: list[str]) -> dict[s
     rows = session.execute(
         sa_text("""
             SELECT id::text, claim_type, text, source_scope
-            FROM theory_claims
+            FROM theory_claims_live
             WHERE document_id = :doc AND id::text = ANY(:ids)
         """),
         {"doc": document_id, "ids": claim_ids},

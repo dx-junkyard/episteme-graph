@@ -146,6 +146,10 @@ from core.storage import get_storage_client
 # 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
 # コース物理削除の全経路で明示削除する（delete_material の巻き添え削除・delete_course）。
 from core.teaching_figures import store as _teaching_figures_store
+# 教材の物理削除は core 側の削除経路（V層スイーパと共用）に委譲する。
+# HTTP 層に残るのは所有者確認・確認名照合・監査・V層 teardown・MinIO の後始末だけ
+# （知識オブジェクト層 設計書 §8.1 = KO9）。
+from core.versioning.deletion import _purge_document
 from core.versioning.schema import DEFAULT_GRACE_DAYS
 # 画像パイプライン §7: 図画像 API は theory_components.py の
 # _ensure_document_viewable（document_id は UUID / material_id 両対応）を必ず通す。
@@ -1212,13 +1216,14 @@ def list_materials(
             uuid_to_mid = {r[9]: r[0] for r in records if r[9]}
             doc_uuids = [u for u in uuid_to_mid if u]
             if doc_uuids:
-                uuid_ph = ", ".join(f":u_{i}" for i in range(len(doc_uuids)))
+                # migration 080 以降 theory_components.document_id は uuid。
+                uuid_ph = ", ".join(f"CAST(:u_{i} AS uuid)" for i in range(len(doc_uuids)))
                 uuid_params = {f"u_{i}": u for i, u in enumerate(doc_uuids)}
                 comp_rows = session.execute(
                     sa_text(
                         f"""
                         SELECT document_id::text, name
-                        FROM theory_components
+                        FROM theory_components_live
                         WHERE document_id IN ({uuid_ph}) AND name IS NOT NULL
                         ORDER BY document_id,
                             CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
@@ -1885,117 +1890,17 @@ def delete_material(
         # V層（migration 037）: 削除でグループ権限が消える前に通知宛先を集めておく
         doc_recipients = _versioning_collect_recipients("document", doc_id)
 
-        # 2) この教材を sources に含むコースを特定して削除
-        course_rows = session.execute(
-            sa_text("""
-                SELECT id FROM learning_courses
-                WHERE user_id = CAST(:user_id AS uuid)
-            """),
-            {"user_id": current_user["id"]},
-        ).fetchall()
-
-        deleted_course_ids: list[str] = []
-        teaching_figure_keys: list[str] = []
-        for row in course_rows:
-            course_id = row[0]
-            course_data_row = session.execute(
-                sa_text("SELECT data FROM learning_courses WHERE id = :cid"),
-                {"cid": course_id},
-            ).fetchone()
-            if not course_data_row or not course_data_row[0]:
-                continue
-            data = course_data_row[0] if isinstance(course_data_row[0], dict) else json.loads(course_data_row[0])
-            sources = course_sources(data)
-            linked = any(
-                s.get("material_id") == material_id for s in sources if isinstance(s, dict)
-            )
-            if linked:
-                # 関連する学習チャット履歴を削除
-                session.execute(
-                    sa_text("DELETE FROM learning_chat_history WHERE course_id = :cid"),
-                    {"cid": course_id},
-                )
-                # object_group_permissions は course_id への FK が無いポリモーフィック
-                # テーブルなので明示削除する（孤児防止。migration 044）。
-                session.execute(
-                    sa_text(
-                        "DELETE FROM object_group_permissions "
-                        "WHERE object_type = 'course' AND object_id = :cid"
-                    ),
-                    {"cid": course_id},
-                )
-                # 教材図（course_teaching_figures / teaching_figure_suggestions、
-                # migration 063）も course_id への FK が無いため明示削除する
-                # （教材図スタジオ設計書 §3.1。MinIO オブジェクトは commit 後に
-                # best-effort で削除する）。
-                teaching_figure_keys.extend(
-                    _teaching_figures_store.delete_figures_for_course(session, course_id) or []
-                )
-                # コース削除
-                session.execute(
-                    sa_text("DELETE FROM learning_courses WHERE id = :cid"),
-                    {"cid": course_id},
-                )
-                deleted_course_ids.append(course_id)
-
-        # 3) チャンク削除
-        session.execute(
-            sa_text("DELETE FROM chunks WHERE document_id = :doc_id"),
-            {"doc_id": doc_id},
-        )
-
-        # object_group_permissions は document_id への FK が無いポリモーフィック
-        # テーブルなので明示削除する（孤児防止。migration 044）。
-        session.execute(
-            sa_text(
-                "DELETE FROM object_group_permissions "
-                "WHERE object_type = 'document' AND object_id = CAST(:doc_id AS uuid)::text"
-            ),
-            {"doc_id": doc_id},
-        )
-
-        # W層 同一性リンク（migration 048）の instance 側も document_id への FK が無い
-        # ポリモーフィック行なので明示削除する（孤児防止。_purge_document と同じ
-        # orphan gap パターン。document_id は UUID / material_id 両形で書かれ得るため
-        # 両方を見る）。
-        session.execute(
-            sa_text(
-                "DELETE FROM element_identity_links "
-                "WHERE instance_document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
-            ),
-            {"doc_id": doc_id, "material_id": material_id},
-        )
-
-        # W層 対話セッション + 候補注釈（migration 049）の scope='document' 行も document_id への
-        # FK が無いポリモーフィック行なので明示削除する（_purge_document と同じ orphan gap
-        # パターン。scope='domain' 行は document_id が NULL のため対象外・L層のライフサイクルに従う）。
-        session.execute(
-            sa_text(
-                "DELETE FROM element_annotations "
-                "WHERE document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
-            ),
-            {"doc_id": doc_id, "material_id": material_id},
-        )
-        session.execute(
-            sa_text(
-                "DELETE FROM deliberation_sessions "
-                "WHERE document_id IN (CAST(:doc_id AS uuid)::text, :material_id)"
-            ),
-            {"doc_id": doc_id, "material_id": material_id},
-        )
-
-        # Track A（hierarchical_context_explanation_design.md §5.2）の二層説明台帳:
-        # document_id は element_annotations 等と異なり documents.id に準拠する
-        # UUID 列（FK 無し）なので material_id 形は不要（孤児防止。_purge_document と同じ）。
-        session.execute(
-            sa_text("DELETE FROM element_explanations WHERE document_id = CAST(:doc_id AS uuid)"),
-            {"doc_id": doc_id},
-        )
-
-        # 4) ドキュメント削除
-        session.execute(
-            sa_text("DELETE FROM documents WHERE id = :doc_id"),
-            {"doc_id": doc_id},
+        # 2) DB の削除本体は core/versioning/deletion.py::_purge_document に委譲する
+        #    （知識オブジェクト層 設計書 §8.1 = KO9。教材の物理削除経路を1本にする）。
+        #    ここで消える範囲は purge_object（V層スイーパ）と同一で、この教材を sources に
+        #    含む所有者のコース・チャンク・解析 run・A層成果・D層/W層の polymorphic 行・
+        #    object_group_permissions・図画像を含む。委譲前に自前の DELETE を書き戻さない
+        #    （書き戻すと削除範囲の正本が2つに割れる）。
+        purged = _purge_document(session, doc_id)
+        deleted_course_ids: list[str] = list(purged.course_ids)
+        # 図画像（教材図 063 / PDF 抽出図 041）の MinIO キー。commit 後に best-effort で消す。
+        teaching_figure_keys: list[str] = (
+            list(purged.teaching_figure_keys) + list(purged.figure_image_keys)
         )
 
         session.commit()
@@ -2224,16 +2129,17 @@ def _build_material_context(
         # doc_uuid → source_path マッピング
         uuid_to_mid: dict[str, str] = {row[3]: row[0] for row in doc_rows}
         doc_uuids = list(uuid_to_mid.keys())
-        uuid_placeholders = ", ".join(f":uuid_{i}" for i in range(len(doc_uuids)))
+        # migration 080 以降 theory_* の document_id は uuid（バインドを明示キャストする）。
+        uuid_placeholders = ", ".join(f"CAST(:uuid_{i} AS uuid)" for i in range(len(doc_uuids)))
         uuid_params: dict = {f"uuid_{i}": uid for i, uid in enumerate(doc_uuids)}
 
         # --- 2) theory_components (主入力) ---
         component_rows = session.execute(
             sa_text(f"""
-                SELECT id::text, document_id, name, component_type, component_type_text,
+                SELECT id::text, document_id::text AS document_id, name, component_type, component_type_text,
                        summary, inputs, outputs, preconditions, cautions,
                        source_chunks, evidence_claims, review_status, maturity_level
-                FROM theory_components
+                FROM theory_components_live
                 WHERE document_id IN ({uuid_placeholders})
                 ORDER BY
                     CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
@@ -2250,7 +2156,7 @@ def _build_material_context(
         # --- 3) theory_component_graphs (主入力) ---
         graph_rows = session.execute(
             sa_text(f"""
-                SELECT document_id, graph_json
+                SELECT document_id::text AS document_id, graph_json
                 FROM theory_component_graphs
                 WHERE document_id IN ({uuid_placeholders})
             """),
@@ -2260,9 +2166,9 @@ def _build_material_context(
         # --- 4) theory_claims (補助入力) ---
         claim_rows = session.execute(
             sa_text(f"""
-                SELECT id::text, document_id, claim_type, text, normalized_text,
+                SELECT id::text, document_id::text AS document_id, claim_type, text, normalized_text,
                        source_scope, evidence_text, support_status, review_status
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE document_id IN ({uuid_placeholders})
                 ORDER BY
                     CASE review_status WHEN 'teacher_reviewed' THEN 0 ELSE 1 END,
@@ -3639,14 +3545,14 @@ def get_materials_stats(
                         COUNT(DISTINCT tc.chunk_id) AS claim_chunks
                     FROM CourseSources cs
                     JOIN chunks c ON c.material_id = cs.material_id
-                    JOIN theory_claims tc ON tc.chunk_id = c.id
+                    JOIN theory_claims_live tc ON tc.chunk_id = c.id
                     GROUP BY cs.course_id
                 ),
                 ComponentStats AS (
                     SELECT
                         course_id,
                         COUNT(DISTINCT source_scope->>'section_id') AS component_sections
-                    FROM theory_components
+                    FROM theory_components_live
                     WHERE source_scope->>'level' = 'section'
                     GROUP BY course_id
                 ),

@@ -149,8 +149,11 @@ def seed_keyphrase_candidates(session, document_row: dict[str, str]) -> list[dic
         sa_text(
             """
             SELECT DISTINCT name
-              FROM theory_components
-             WHERE document_id = ANY(CAST(:refs AS text[]))
+              FROM theory_components_live
+             -- refs は UUID 形と material_id 形の混在（corpus.domain_document_refs）。
+             -- migration 080 で document_id は uuid になったが、混在配列を uuid[] に
+             -- キャストすると例外になるため text 比較のまま突き合わせる。
+             WHERE document_id::text = ANY(CAST(:refs AS text[]))
                AND review_status = ANY(CAST(:statuses AS text[]))
                AND COALESCE(name, '') <> ''
              ORDER BY name

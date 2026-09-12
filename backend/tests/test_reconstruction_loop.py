@@ -276,7 +276,9 @@ class TestFetchHealthRowsDocumentIdsAggregation:
                 return _FakeResult()
 
         health_mod._fetch_health_rows(_FakeSession(), document_id="ignored", document_ids=["doc-a", "doc-b"])
-        assert "ANY(:docs)" in captured["sql"]
+        # migration 080 で reconstruction_items.document_id が uuid になったため
+        # バインドは uuid[] へ明示キャストする。
+        assert "ANY(CAST(:docs AS uuid[]))" in captured["sql"]
         assert captured["params"] == {"docs": ["doc-a", "doc-b"]}
 
     def test_falls_back_to_document_id_when_document_ids_is_none(self):

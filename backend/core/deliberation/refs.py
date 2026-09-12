@@ -148,7 +148,7 @@ def _resolve_theory_claim(element_id: str) -> ElementRef:
     try:
         row = session.execute(
             sa_text(
-                "SELECT document_id, chunk_id FROM theory_claims "
+                "SELECT document_id, chunk_id FROM theory_claims_live "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
@@ -173,7 +173,7 @@ def _resolve_theory_component(element_id: str) -> ElementRef:
     try:
         row = session.execute(
             sa_text(
-                "SELECT course_id, source_scope FROM theory_components "
+                "SELECT course_id, source_scope FROM theory_components_live "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
@@ -200,7 +200,7 @@ def _resolve_figure(element_id: str) -> ElementRef:
     try:
         row = session.execute(
             sa_text(
-                "SELECT document_id, run_id, figure_key FROM document_figures "
+                "SELECT document_id::text, run_id, figure_key FROM document_figures "
                 "WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},

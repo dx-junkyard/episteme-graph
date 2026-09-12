@@ -163,7 +163,7 @@ def _fetch_ledger_row(session, target_type: str, target_id: str):
     # SL-1（賭け金の台帳）用に末尾へ追加（既存インデックス 0-12 は不変）。
     return session.execute(
         sa_text("""
-            SELECT id::text, target_id, target_type, document_id, course_id,
+            SELECT id::text, target_id, target_type, document_id::text AS document_id, course_id,
                    verification_status, verification_scopes, scope_candidates,
                    consensus_explicit, consensus_behavioral, load_score,
                    created_at, updated_at, falsification_conditions, falsification_candidates
@@ -2019,7 +2019,7 @@ def save_counterfactual_session(
                      collapsed_subgraph, surviving_subgraph, indeterminate_subgraph,
                      notes, shared_scope, group_id)
                 VALUES
-                    (CAST(:uid AS uuid), :course, :doc, CAST(:toggled AS jsonb),
+                    (CAST(:uid AS uuid), :course, CAST(NULLIF(:doc, '') AS uuid), CAST(:toggled AS jsonb),
                      CAST(:toggled_obs AS jsonb),
                      CAST(:collapsed AS jsonb), CAST(:surviving AS jsonb),
                      CAST(:indeterminate AS jsonb),
@@ -2086,7 +2086,7 @@ def _counterfactual_session_out(row) -> dict:
 
 _CF_SELECT = """
     SELECT s.id::text, s.owner_id::text, COALESCE(u.display_name, ''),
-           s.course_id, s.document_id, s.toggled_assumption_ids,
+           s.course_id, s.document_id::text AS document_id, s.toggled_assumption_ids,
            s.collapsed_subgraph, s.surviving_subgraph, s.indeterminate_subgraph,
            s.notes, s.shared_scope, COALESCE(s.group_id::text, ''), s.created_at::text,
            s.toggled_observations

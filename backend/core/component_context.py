@@ -122,11 +122,11 @@ def _resolve_component_row(component_id: str, course_document_ids: set[str]) -> 
         row = session.execute(
             sa_text(
                 f"""
-                SELECT id::text AS id, document_id, course_id, name, component_type,
-                       component_type_text, summary, status, review_status,
+                SELECT id::text AS id, document_id::text AS document_id, course_id, name,
+                       component_type, component_type_text, summary, status, review_status,
                        source_scope, thesis_context
-                FROM theory_components
-                WHERE document_id = ANY(:doc_ids) AND ({where_clause})
+                FROM theory_components_live
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC
                 LIMIT 1
                 """
@@ -210,7 +210,7 @@ def _load_graph_narrative(document_id: str) -> dict:
             sa_text(
                 """
                 SELECT graph_json FROM theory_component_graphs
-                WHERE document_id = :doc ORDER BY updated_at DESC LIMIT 1
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) ORDER BY updated_at DESC LIMIT 1
                 """
             ),
             {"doc": document_id},

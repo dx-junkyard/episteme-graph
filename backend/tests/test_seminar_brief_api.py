@@ -413,7 +413,9 @@ class TestStructuralGuardrails:
     def test_open_assumptions_gained_optional_document_scope(self):
         """§3 精査④: optional document_id（既定 ""・percentile は course 全体のまま）。"""
         assert 'document_id: str = ""' in _OPEN_ASSUMPTIONS_SRC
-        assert "AND document_id = :doc" in _OPEN_ASSUMPTIONS_SRC
+        # migration 080 で document_id が uuid になったのでバインドを明示キャストする
+        # （空文字は NULLIF で NULL へ倒す）。
+        assert "AND document_id = CAST(NULLIF(:doc, '') AS uuid)" in _OPEN_ASSUMPTIONS_SRC
         # 支持線の共有文脈にも document_id を透過する
         assert (
             "build_support_context(session, course_id=course_id, document_id=document_id)"

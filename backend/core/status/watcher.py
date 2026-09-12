@@ -64,7 +64,7 @@ def _scan_analysis_runs(session) -> int:
     where_wm = "AND COALESCE(completed_at, updated_at) > :wm" if watermark else ""
     rows = session.execute(
         sa_text(f"""
-            SELECT id::text, document_id, material_id, status, current_stage, error_message,
+            SELECT id::text, document_id::text AS document_id, material_id, status, current_stage, error_message,
                    COALESCE(completed_at, updated_at) AS occurred_at
             FROM document_analysis_runs
             WHERE status IN ('completed', 'failed') {where_wm}

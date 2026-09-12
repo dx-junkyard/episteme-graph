@@ -96,9 +96,9 @@ def _agent_id_candidates_for_focus(session: Any, ref: ElementRef) -> set[str]:
     """
     match_ids = {str(ref.element_id)}
     if ref.element_type == ELEMENT_THEORY_COMPONENT:
-        sql = "SELECT source_scope FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"
+        sql = "SELECT source_scope FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"
     elif ref.element_type == ELEMENT_THEORY_CLAIM:
-        sql = "SELECT source_scope FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
+        sql = "SELECT source_scope FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"
     else:
         # figure / equation / evidence / derivation / shared_part: element_explanations は
         # 既に正準 ID なので（evidence / derivation は element_explanations の語彙自体に
@@ -173,7 +173,7 @@ def _decompose_theory_claim(ref: ElementRef) -> dict[str, Any]:
                 """
                 SELECT claim_type, text, normalized_text, concepts, equation,
                        support_status, evidence_text, review_status
-                FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1
+                FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": ref.element_id},
@@ -253,7 +253,7 @@ def _decompose_theory_component(ref: ElementRef) -> dict[str, Any]:
                 """
                 SELECT name, component_type, summary, status,
                        inputs, outputs, preconditions, constraints, dependencies
-                FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1
+                FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": ref.element_id},
@@ -296,7 +296,7 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
             sa_text(
                 """
                 SELECT figure_label, caption_text, page, status,
-                       extraction_method, caption_block_id, document_id, figure_key,
+                       extraction_method, caption_block_id, document_id::text AS document_id, figure_key,
                        suggested_mode, reviewed_mode, mode_reason, mode_review_status,
                        analysis_profile, bbox, inner_labels,
                        reviewed_analysis_mode, reviewed_analysis_profile,
@@ -312,7 +312,7 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
             sa_text(
                 """
                 SELECT id, name, component_type, status, summary
-                FROM theory_components
+                FROM theory_components_live
                 WHERE source_scope->>'document_id' = :document_id
                   AND component_type IN ('apparatus','instrument','part')
                 ORDER BY created_at ASC
