@@ -34,6 +34,10 @@ from core.llm_policy import (
 )
 from core.llm_usage.context import bind_usage_context, set_current_feature
 from core.llm_worker.cost_gate import CostGate, today_str
+from episteme_graph.agents.coverage_report import (
+    COVERAGE_REPORT_KEY,
+    build_coverage_report,
+)
 
 from .chunker import build_source_chunks
 from .dsl_text import dsl_result_to_search_text
@@ -152,6 +156,57 @@ def _stage_artifact_indicates_llm_skip(artifact_value: Any) -> bool:
         if artifact_value.get("llm_calls") == 0:
             return True
     return False
+
+
+def _attach_coverage(
+    payload: dict,
+    *,
+    population: int,
+    processed: int,
+    reasons: list[str] | tuple[str, ...] | None = None,
+    unit: str | None = None,
+    details: dict[str, Any] | None = None,
+) -> dict:
+    """ステージの done payload に「取りこぼしの量」報告を additive で足す（P0-10 / F-18）。
+
+    形式の正本は ``episteme_graph.agents.coverage_report.build_coverage_report``。
+    orchestrator 内で ``coverage`` キーを組み立てるのは**この関数だけ**にして、
+    ステージごとに自前 dict を書かない（ガードレール
+    ``backend/tests/test_pipeline_coverage_report.py`` が構造的に固定する）。
+
+    既存キー（``truncated_count`` / ``skipped_by_limit`` / ``unplaced_domains`` 等）は
+    一切変更せず、読み手が段階的に移行できるようにする（後方互換）。
+
+    呼び出し規約:
+    - **resume で artifact を再利用したステージには足さない**（前回 run の母集合を
+      今回の報告として捏造しない）。
+    - 母集合・処理数が事実として導けないステージには足さない（でっち上げない）。
+    - 報告の組み立てで例外を出してステージを落とさない（fail-soft）。
+    """
+    try:
+        payload[COVERAGE_REPORT_KEY] = build_coverage_report(
+            population=population,
+            processed=processed,
+            reasons=reasons,
+            unit=unit,
+            details=details,
+        )
+    except Exception:  # pragma: no cover - 防御的（報告でステージを止めない）
+        logger.warning("failed to build coverage report (non-fatal)", exc_info=True)
+    return payload
+
+
+def _blocks_of_type(structure: Any, block_type: str) -> list[Any]:
+    """``document_structure`` の blocks から指定 block_type だけを取り出す。
+
+    coverage の母集合（式ブロック数・caption ブロック数）を数えるためのごく薄い
+    ヘルパ。structure が無い / blocks を持たない場合は空リスト（fail-soft）。
+    """
+    blocks = getattr(structure, "blocks", None) or []
+    try:
+        return [b for b in blocks if getattr(b, "block_type", None) == block_type]
+    except Exception:  # pragma: no cover - 防御的
+        return []
 
 
 # contextual_explanation stage (hierarchical_context_explanation_design.md §5.1):
@@ -888,7 +943,8 @@ def _stage_figure_image_extraction(ctx: PipelineContext) -> bool:
     # ため直後に置く。チェックボックス (options.analyze_images) に関係なく常時
     # 実行する（決定 0-4-2）。非致命: 失敗しても pipeline は継続する。
     figure_extraction_artifact = ctx.artifact("figure_image_extraction")
-    if ctx.should_use_artifact("figure_image_extraction"):
+    resumed_from_artifact = ctx.should_use_artifact("figure_image_extraction")
+    if resumed_from_artifact:
         ctx.figure_extraction_summary = figure_extraction_artifact or {}
         logger.info(
             "Resuming document pipeline: loaded figure_image_extraction artifact for document %s",
@@ -916,8 +972,23 @@ def _stage_figure_image_extraction(ctx: PipelineContext) -> bool:
                 )
                 ctx.figure_extraction_summary = {"status": "completed", "error": str(exc)}
         ctx.save_artifact("figure_image_extraction", ctx.figure_extraction_summary)
-    ctx.report_done("figure_image_extraction", dict(ctx.figure_extraction_summary or {}))
-    return ctx.finish_target_stage("figure_image_extraction", dict(ctx.figure_extraction_summary or {}))
+    figure_done_payload = dict(ctx.figure_extraction_summary or {})
+    if not resumed_from_artifact and isinstance(figure_done_payload.get("figures"), int):
+        # P0-10: 母集合 = 抽出を試みた図（caption 対応 + 残余 embedded）、処理数 =
+        # そのうち保存まで通った図。図単位の失敗（`status='failed'` 行）だけが
+        # 取りこぼしで、PDF でない / PyMuPDF 不在で抽出自体が走らなかった run は
+        # `figures` キーを持たないので報告しない（母集合を推測しない）。
+        attempted = int(figure_done_payload.get("figures") or 0)
+        failed = int(figure_done_payload.get("failed") or 0)
+        _attach_coverage(
+            figure_done_payload,
+            population=attempted,
+            processed=max(attempted - failed, 0),
+            reasons=["failed"],
+            unit="figures",
+        )
+    ctx.report_done("figure_image_extraction", figure_done_payload)
+    return ctx.finish_target_stage("figure_image_extraction", figure_done_payload)
 
 
 def _stage_source_chunking(ctx: PipelineContext) -> bool:
@@ -1034,7 +1105,8 @@ def _stage_claim_qualification(ctx: PipelineContext) -> bool:
 def _stage_equation_semantics(ctx: PipelineContext) -> bool:
     # ── Stage 8: equation_semantics ────────────────────────────────────
     equations_artifact = ctx.artifact("equation_semantics")
-    if ctx.should_use_artifact("equation_semantics"):
+    resumed_from_artifact = ctx.should_use_artifact("equation_semantics")
+    if resumed_from_artifact:
         ctx.equations = _from_agent_dict("equation_semantics", equations_artifact)
         logger.info("Resuming document pipeline: loaded equation_semantics artifact for document %s", ctx.document_id)
     else:
@@ -1058,8 +1130,36 @@ def _stage_equation_semantics(ctx: PipelineContext) -> bool:
                 ctx.document_id,
                 exc_info=True,
             )
-    ctx.report_done("equation_semantics", {"equations": len(getattr(ctx.equations, "equations", []) or [])})
-    return ctx.finish_target_stage("equation_semantics", {"equations": len(getattr(ctx.equations, "equations", []) or [])})
+    equation_done_payload: dict[str, Any] = {
+        "equations": len(getattr(ctx.equations, "equations", []) or []),
+    }
+    if not resumed_from_artifact:
+        # P0-10: 母集合 = document_structure の式ブロック、処理数 = そのうち
+        # 候補化まで到達したブロック（EquationSemanticsInputBuilder は式ブロックを
+        # 先頭から順に候補化し `max_equations`（既定 64）で打ち切る）。上限に当たった
+        # 論文では「原本 176 式 → records 64」の切断がここまでどこにも現れなかった
+        # （F-18 / 定量サマリ）。inline math 由来の候補は式ブロック母集合の外なので
+        # 数えない（母集合と処理数の単位を混ぜない）。
+        equation_block_ids = {
+            str(getattr(b, "block_id", "") or "")
+            for b in _blocks_of_type(ctx.structure, "equation_block")
+        }
+        equation_block_ids.discard("")
+        covered_block_ids: set[str] = set()
+        for candidate in getattr(ctx.equations, "equation_candidates", []) or []:
+            location = getattr(candidate, "source_location", None) or {}
+            block_id = str((location.get("block_id") if isinstance(location, dict) else "") or "")
+            if block_id in equation_block_ids:
+                covered_block_ids.add(block_id)
+        _attach_coverage(
+            equation_done_payload,
+            population=len(equation_block_ids),
+            processed=len(covered_block_ids),
+            reasons=["max_equations"],
+            unit="equation_blocks",
+        )
+    ctx.report_done("equation_semantics", equation_done_payload)
+    return ctx.finish_target_stage("equation_semantics", equation_done_payload)
 
 
 def _stage_evidence_registry(ctx: PipelineContext) -> bool:
@@ -1427,7 +1527,8 @@ def _hook_equation_claim_synthesis(ctx: PipelineContext) -> bool:
 def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
     # ── Stage 8e: figure_table_semantics (caption-first deterministic) ─
     fig_tbl_artifact = ctx.artifact("figure_table_semantics")
-    if ctx.should_use_artifact("figure_table_semantics"):
+    resumed_from_artifact = ctx.should_use_artifact("figure_table_semantics")
+    if resumed_from_artifact:
         ctx.fig_tbl = _from_agent_dict("figure_table_semantics", fig_tbl_artifact)
         logger.info("Resuming document pipeline: loaded figure_table_semantics artifact for document %s", ctx.document_id)
     else:
@@ -1451,13 +1552,33 @@ def _stage_figure_table_semantics(ctx: PipelineContext) -> bool:
             )
             ctx.fig_tbl = _empty_figure_table_result(ctx.document_id, ctx.cartridge_id)
         ctx.save_artifact("figure_table_semantics", ctx.fig_tbl)
-    ctx.report_done("figure_table_semantics", {
+    fig_tbl_done_payload: dict[str, Any] = {
         "figures": len(getattr(ctx.fig_tbl, "figures", []) or []),
         "tables": len(getattr(ctx.fig_tbl, "tables", []) or []),
         "total": 1,
         "processed": 1,
-    })
-    return ctx.finish_target_stage("figure_table_semantics", {"figures": len(getattr(ctx.fig_tbl, "figures", []) or []), "tables": len(getattr(ctx.fig_tbl, "tables", []) or []), "total": 1, "processed": 1})
+    }
+    if not resumed_from_artifact:
+        # P0-10: caption-first の決定論ステージなので、母集合 = document_structure の
+        # figure_caption / table_caption ブロック、処理数 = 生成した figure / table
+        # レコード（agent は caption ブロック1つから1レコードを作る）。0/0 は
+        # 「caption ブロックが構造化されなかった」ことを上流へ指し示す正直な報告で、
+        # 図0件の論文でこの事実が読めるようにする（F-18 の定量サマリ）。
+        caption_population = (
+            len(_blocks_of_type(ctx.structure, "figure_caption"))
+            + len(_blocks_of_type(ctx.structure, "table_caption"))
+        )
+        _attach_coverage(
+            fig_tbl_done_payload,
+            population=caption_population,
+            processed=(
+                fig_tbl_done_payload["figures"] + fig_tbl_done_payload["tables"]
+            ),
+            reasons=["caption_unresolved"],
+            unit="captions",
+        )
+    ctx.report_done("figure_table_semantics", fig_tbl_done_payload)
+    return ctx.finish_target_stage("figure_table_semantics", fig_tbl_done_payload)
 
 
 def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
@@ -1486,6 +1607,24 @@ def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
         if not ctx.effective_options.get("analyze_images"):
             ctx.apparatus_result = None
             apparatus_done_payload = {"status": "completed", "skipped_by_option": True}
+            # P0-10: オプション off は「図が無い」ではなく「見ていない」。母集合は
+            # figure_image_extraction が保存できた図（試行 - 失敗）から導き、処理数 0 と
+            # 理由 `skipped_by_option` を残す。抽出が走らなかった run（`figures` キー
+            # 不在）は母集合を推測せず報告しない。
+            figure_summary = ctx.figure_extraction_summary or {}
+            if isinstance(figure_summary.get("figures"), int):
+                extracted = max(
+                    int(figure_summary.get("figures") or 0)
+                    - int(figure_summary.get("failed") or 0),
+                    0,
+                )
+                _attach_coverage(
+                    apparatus_done_payload,
+                    population=extracted,
+                    processed=0,
+                    reasons=["skipped_by_option"],
+                    unit="figures",
+                )
             ctx.save_artifact("apparatus_semantics", {"skipped_by_option": True})
         else:
             try:
@@ -3589,6 +3728,23 @@ def _build_apparatus_semantics(
     }
     if iterative_enabled:
         done_payload["convergence"] = convergence_counts
+    # P0-10: 母集合 = 抽出済み（`status='extracted'`）の図、処理数 = agent に渡した図。
+    # 上限で外した図は既存キー `skipped_by_limit`（図キーの列）に残っており、ここでは
+    # 理由コードだけを共通形式で足す。1 document あたりの上限と日次 vision 予算は
+    # どちらも「見ていない図」を生むので、効いた方を理由として並べる。
+    coverage_reasons: list[str] = []
+    if skipped_by_limit:
+        if allowed_images >= max_images:
+            coverage_reasons.append("skipped_by_limit")
+        else:
+            coverage_reasons.append("daily_call_limit_reached")
+    _attach_coverage(
+        done_payload,
+        population=len(figure_rows),
+        processed=len(figure_inputs),
+        reasons=coverage_reasons,
+        unit="figures",
+    )
     return result, done_payload
 
 
@@ -3700,7 +3856,32 @@ def _build_contextual_explanation(
         "agent_skipped": [],
     }
 
+    # P0-10 の母集合: 入力化できた候補（considered）+ 入力化できずに skipped として
+    # 記録した候補。処理数は「説明が1つ以上得られた要素」を後段で数える。
+    ctxexpl_population = int(meta.get("considered") or 0) + len(meta.get("skipped") or [])
+
+    def _ctxexpl_attach_coverage(explained: int) -> None:
+        reasons: list[str] = []
+        if int(payload.get("truncated_count") or 0) or payload.get("truncated"):
+            reasons.append("max_elements")
+        for entry in meta.get("skipped") or []:
+            code = str((entry or {}).get("reason") or "").strip()
+            if code:
+                reasons.append(code)
+        if payload.get("skipped_by_limit"):
+            reasons.append("skipped_by_limit")
+        if payload.get("agent_skipped"):
+            reasons.append("agent_skipped")
+        _attach_coverage(
+            payload,
+            population=ctxexpl_population,
+            processed=explained,
+            reasons=reasons,
+            unit="elements",
+        )
+
     if not elements:
+        _ctxexpl_attach_coverage(0)
         return payload
 
     daily_limit = _ctxexpl_max_calls_per_day()
@@ -3713,6 +3894,7 @@ def _build_contextual_explanation(
             "LLM generation for document=%s (%d element(s) considered)",
             daily_limit, document_id, len(elements),
         )
+        _ctxexpl_attach_coverage(0)
         return payload
 
     from episteme_graph.agents.contextual_explanation.agent import ContextualExplanationAgent
@@ -3730,6 +3912,7 @@ def _build_contextual_explanation(
 
     items: list[dict] = []
     agent_skipped: list[dict] = []
+    explained_elements: set[tuple[str, str]] = set()
     for element_result in result.elements:
         if element_result.skipped_reason:
             agent_skipped.append({
@@ -3743,6 +3926,12 @@ def _build_contextual_explanation(
             "reason": element_result.reason,
             "confidence": element_result.confidence,
         }
+        if element_result.contextual_explanation or element_result.generic_explanation:
+            # P0-10: 説明が1つでも得られた要素を「処理できた」と数える
+            # （contextual / generic の2行は同じ要素の2面なので二重に数えない）。
+            explained_elements.add(
+                (str(element_result.element_type), str(element_result.element_id))
+            )
         if element_result.contextual_explanation:
             items.append({
                 "element_type": element_result.element_type,
@@ -3762,6 +3951,7 @@ def _build_contextual_explanation(
                 "created_by": "pipeline",
             })
     payload["agent_skipped"] = agent_skipped
+    _ctxexpl_attach_coverage(len(explained_elements))
 
     if items:
         from core.postgres import get_session as _pg_session
@@ -3937,8 +4127,25 @@ def _build_discuss_opening(
     payload["assumption_count"] = len(agent_input.get("untested_assumptions") or [])
     payload["author_choice_count"] = len(agent_input.get("author_choices") or [])
 
+    # P0-10: このステージは 1 document = 1 コールで素材全体を見るので、母集合 =
+    # 組み立てた素材（未検証前提 + 著者の選択）、処理数 = 実際に LLM へ渡せたか
+    # （0 か全部）。素材ゼロは「取りこぼし」ではなく素材が無いという事実なので
+    # population=0 / truncated=0 のまま正直に残る。種（seed）の上限による
+    # 打ち切りは出力側の話で、既存キー ``truncated_count`` がそのまま持つ。
+    discuss_population = int(payload["assumption_count"]) + int(payload["author_choice_count"])
+
+    def _discuss_attach_coverage(processed: int, reasons: list[str] | None = None) -> None:
+        _attach_coverage(
+            payload,
+            population=discuss_population,
+            processed=processed,
+            reasons=reasons,
+            unit="source_items",
+        )
+
     if max_items <= 0:
         payload["skipped_reason"] = "item_limit_is_zero"
+        _discuss_attach_coverage(0, ["item_limit_is_zero"])
         return payload
 
     if not (payload["assumption_count"] or payload["author_choice_count"]):
@@ -3948,6 +4155,7 @@ def _build_discuss_opening(
             "skipping generation",
             document_id,
         )
+        _discuss_attach_coverage(0, ["no_source_material"])
         return payload
 
     daily_limit = _discuss_opening_max_calls_per_day()
@@ -3963,6 +4171,7 @@ def _build_discuss_opening(
             "for document=%s",
             daily_limit, document_id,
         )
+        _discuss_attach_coverage(0, ["daily_call_limit_reached"])
         return payload
 
     from episteme_graph.agents.discuss_opening.agent import DiscussOpeningAgent
@@ -3982,6 +4191,13 @@ def _build_discuss_opening(
         payload["skipped_reason"] = result.skipped_reason
     if result.review_notes:
         payload["review_notes"] = list(result.review_notes)
+
+    # LLM が素材全体を1コールで見た run は processed = 母集合。agent 自身が
+    # 生成を見送った（``skipped_reason``）run は素材を活かせなかったので 0 に倒す。
+    if result.skipped_reason and not payload["llm_calls"]:
+        _discuss_attach_coverage(0, [str(result.skipped_reason)])
+    else:
+        _discuss_attach_coverage(discuss_population)
 
     if not result.seeds:
         return payload
@@ -4049,11 +4265,48 @@ def _build_landscape_placement(ctx: PipelineContext) -> dict:
     """
     from core.landscape.builder import build_and_store_placements
 
-    return build_and_store_placements(
+    payload = build_and_store_placements(
         document_id=ctx.document_id,
         artifacts=ctx.all_artifacts(),
         run_id=ctx.run_id,
     )
+    if isinstance(payload, dict):
+        # P0-10: 母集合 = 照合した凍結骨格ドメイン（``domains_checked``）、処理数 =
+        # そのうち配置が付いたドメイン。配置できなかったドメインは既存キー
+        # ``unplaced_domains`` が理由付きで持っており（LS: 配置不能は失敗でなく信号）、
+        # ここでは共通形式の3値と理由コードだけを additive に足す。生成前に降りた run
+        # （骨格なし / 素材なし / 日次上限 / 上限0）は processed=0 + その理由コード。
+        domains_checked = [str(d) for d in (payload.get("domains_checked") or [])]
+        unplaced = payload.get("unplaced_domains") or []
+        unplaced_keys = [
+            str((u or {}).get("domain_key") or "")
+            for u in unplaced
+            if isinstance(u, dict) and (u or {}).get("domain_key")
+        ]
+        skipped_reason = str(payload.get("skipped_reason") or "").strip()
+        reasons: list[str] = []
+        details: dict[str, Any] = {}
+        if skipped_reason and not payload.get("llm_calls"):
+            processed = 0
+            reasons.append(skipped_reason)
+        else:
+            processed = max(len(domains_checked) - len(unplaced_keys), 0)
+            if unplaced_keys:
+                reasons.append("unplaced_domain")
+                details["unplaced_domain_keys"] = unplaced_keys
+            if payload.get("truncated"):
+                reasons.append("max_placements")
+            if skipped_reason:
+                reasons.append(skipped_reason)
+        _attach_coverage(
+            payload,
+            population=len(domains_checked),
+            processed=processed,
+            reasons=reasons,
+            unit="domains",
+            details=details or None,
+        )
+    return payload
 
 
 def _build_course_mapping(
