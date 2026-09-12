@@ -410,6 +410,15 @@ class LearningChatResponse(BaseModel):
     # チャット型AI支援の共通基盤整理 §4: LLM 例外時に固定文へ縮退したターンかどうか
     # （I3 会話は死なせない。degraded=true でも 200 を返し、履歴には保存済み）。
     degraded: bool = False
+    # 入口統合 Phase 1（docs/features/learning_chat_entry_unification_design.md §5、
+    # LC6 推定を隠さない / LC7 数値を見せない）: この往復をどの様相（会話の調子）で
+    # 答えたかの事実。**RAG 応答でのみ設定**し、HELP / 学習相談 / 地図 / 要素説明の
+    # 早期 return では None のまま。
+    #   {"stance": "tutor"|"casual_light"|"discuss"|"cycle_elicit"|"cycle_diff",
+    #    "source": "explicit"|"inferred",
+    #    "label": "<core/label_vocab.py の LEARNING_STANCE_LABELS>"}
+    # confidence・一致度・スコアのような数値キーは絶対に入れない。
+    stance: dict | None = None
 
 
 class LearningChatHistoryResponse(BaseModel):

@@ -163,6 +163,8 @@ class TestDumpProjectionDoesNotLeakFreeText:
             "overall_tier": "source",
             "content_grounding": "course_material",
             "discuss_scope": "course_sources",
+            "stance": "discuss",
+            "stance_source": "explicit",
             "tension_hint": True,
             "structure_anchor_present": False,
             "map_excluded": False,
@@ -184,6 +186,8 @@ class TestDumpProjectionDoesNotLeakFreeText:
             "overall_tier": "source",
             "content_grounding": "course_material",
             "discuss_scope": "course_sources",
+            "stance": "discuss",
+            "stance_source": "explicit",
             "tension_hint": True,
             "structure_anchor_present": False,
             "map_excluded": False,
@@ -383,17 +387,24 @@ class TestMetricEventVocabAndPayloadWhitelist:
         # 分離集計2語彙（サーバ側 best-effort 記録）。
         "document_discuss_opened",
         "document_discuss_turn",
+        # 入口統合 Phase 1（learning_chat_entry_unification_design.md §7）:
+        # 様相チップの訂正タップ（推定された様相を学習者が覆した回数）。
+        "stance_corrected",
     }
 
-    def test_vocab_matches_design_doc_22_events(self):
+    def test_vocab_matches_design_doc_23_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 22
+        assert len(observation.METRIC_EVENT_VOCAB) == 23
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(
-            {"scope": "course_sources", "reason": "topic_switch", "kind": "tension", "text": "leak", "extra": 1}
+            {"scope": "course_sources", "reason": "topic_switch", "kind": "tension",
+             "stance": "tutor", "text": "leak", "extra": 1}
         )
-        assert out == {"scope": "course_sources", "reason": "topic_switch", "kind": "tension"}
+        assert out == {
+            "scope": "course_sources", "reason": "topic_switch", "kind": "tension",
+            "stance": "tutor",
+        }
 
     def test_sanitize_event_payload_handles_non_dict_input(self):
         assert observation.sanitize_event_payload(None) == {}

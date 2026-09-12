@@ -122,6 +122,8 @@ from core.learning_experience import (
     out_of_source_notice,
     tier_floor,
 )
+from core.learning_stance.heuristic import prejudge as prejudge_stance_route
+from core.learning_stance.schema import build_stance_dto, resolve_stance
 from core.learning_support_agent import (
     LearningSupportAgent,
     LearningSupportResult,
@@ -1266,29 +1268,55 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 - コンテキストに番号付き出典（`[出典1]` …）が1つも無い場合は、出典マーカーを一切書かないこと。{persona_block}"""
 
 
-def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None = None) -> str:
+def _get_casual_teacher_system_prompt(
+    domain: str,
+    response_persona: str | None = None,
+    *,
+    spoken: bool = True,
+) -> str:
     """カジュアル対話モード（気軽に話せる先生）のシステムプロンプトを生成する。
 
-    ハンズフリー音声会話が主用途のため、短い会話調・記号なしの応答を強制する。
-    根拠の一線（教材コンテキスト優先・断定回避）はチューターモードと同じに保つ。
+    入口統合 Phase 1（``docs/features/learning_chat_entry_unification_design.md``
+    §4.4）で**様相（軽い調子）と伝達形式（読み上げ）を分離**した。畳まれていた
+    2つのうち、様相（相づち・聞き返し・採点しない）は両方で共通で、伝達形式だけが
+    ``spoken`` で変わる。
+
+    - ``spoken=True``（既定・ハンズフリー音声会話。**本文は従来のまま**）:
+      2〜4文の短い話し言葉・記号なし・LaTeX なし。
+    - ``spoken=False``（テキストの casual_light）: 軽い調子は保ったまま
+      **LaTeX と出典マーカー ``[出典N]`` を許可**する（数式を言葉に潰すのは
+      テキストでは劣化になる）。``[ACTION_BUTTON: ...]`` 等のシステム記法は
+      引き続き禁止（気軽な会話に UI 遷移を差し込まない）。
+
+    根拠の一線（教材コンテキスト優先・断定回避）はどちらでもチューターモードと同じ。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
     persona_instruction = persona_prompt(response_persona, target="response")
     persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    if spoken:
+        _delivery_rule = """1. 【会話調】音声で読み上げられます。1回の応答は2〜4文の短い話し言葉にしてください。
+   箇条書き・見出し・記号・絵文字は使わないでください。"""
+        _format_rule = """5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
+   システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。"""
+    else:
+        _delivery_rule = """1. 【会話調】文字で読まれます。1回の応答は短め（3〜6文程度）の話し言葉にしてください。
+   見出しや長い箇条書きで講義調にせず、立ち話の雰囲気を保ってください。"""
+        _format_rule = """5. 【書き方】数式が要るところは LaTeX（インラインは $...$、ディスプレイは $$...$$）で
+   そのまま書いてかまいません。教材のコンテキストに番号付き出典（`[出典1]` …）があれば、
+   言及したところに自然に添えてください（無い場合は出典マーカーを書かないこと）。
+   `[ACTION_BUTTON: ...]` などのシステム記法は出力しないでください。"""
     return f"""あなたは{domain_label}が大好きで、学生と雑談するのが楽しみな「気軽に話せる先生」です。
 研究室の廊下やゼミ後の立ち話のように、教材で扱っている題材について肩の力を抜いて一緒に面白がってください。
 
 **会話のルール:**
-1. 【会話調】音声で読み上げられます。1回の応答は2〜4文の短い話し言葉にしてください。
-   箇条書き・見出し・記号・絵文字は使わないでください。
+{_delivery_rule}
 2. 【一緒に面白がる】採点や訂正を急がず、学生の言葉をまず受け止めてください。
    「たしかにそう見えるよね」「いいところに気づいたね」のような相づちから入って構いません。
 3. 【聞き返す】ときどき「きみはどう思う?」「どこが引っかかった?」と軽く聞き返し、
    学生が自分の言葉で話す余地を残してください。毎回はしつこいので2〜3往復に1回程度。
 4. 【根拠は正直に】提供される「教材からのコンテキスト」があればそれに沿って話してください。
    教材に無い話題は、想像や一般論であることが伝わる言い方（「たぶん」「一般には」）で話してください。
-5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
-   システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。{persona_block}"""
+{_format_rule}{persona_block}"""
 
 
 def _get_discuss_system_prompt(domain: str, response_persona: str | None = None) -> str:
@@ -3039,30 +3067,57 @@ def _learning_chat_core(
         if _atlas_response is not None:
             return _atlas_response
 
+    # 入口統合 Phase 1（docs/features/learning_chat_entry_unification_design.md §4.2 の
+    # [2] 段）: 非LLM の一次判定。「明らかに教材内容の問い」だけを DOMAIN_RAG として
+    # 先に確定させ、意図分類の LLM コールを省く（LC5: どの経路でも現行を上回らない）。
+    #   - 明示の様相（casual / discuss / 地図アクション）が立っている往復では推定器を
+    #     走らせない（LC2: 明示は常に推定に勝つ。特に discuss 中の casual 推定は
+    #     スコープ表示との食い違い・痕跡の帰属漏れを起こすので構造的に禁止）。
+    #   - 挨拶・「はい…理解」の決定論ショートカット（_classify_intent 冒頭）は
+    #     先取りしない — _is_greeting が偽のときだけ計算する。
+    #   - 分野語はコードに書かない（分野非依存語 + コースのカートリッジ ontology 由来語を
+    #     渡す。cartridge_id が空なら _cartridge_content_terms を呼ばない）。
+    #   - 入力は**当該発話だけ**（履歴・過去の様相・学習者モデルを使わない = LC4）。
+    _prejudged: str | None = None
+    if not (_is_casual or _is_discuss or _atlas_ctx) and not _is_greeting(body.message):
+        _stance_cartridge_id = course_cartridge_id(course_data) or ""
+        _prejudged = prejudge_stance_route(
+            body.message,
+            content_terms=_CONTENT_QUESTION_TERMS
+            + (
+                _cartridge_content_terms(_stance_cartridge_id)
+                if _stance_cartridge_id
+                else ()
+            ),
+        )
+    # 明示 casual（音声ループ等が intent_mode="casual" を送った往復）と、CHIT_CHAT 判定から
+    # 合流する推定 casual_light を後段で区別するため、再代入より前の値を控える（LC6）。
+    _explicit_casual = _is_casual
+
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
     #    discuss は casual と同様に意図分類（雑談拒否）をバイパスする（設計 §6.2）。
     with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
         intent = None if (_is_casual or _is_discuss or _atlas_ctx) else (
             _route_for_typed_action(body.support_action)
+            or _prejudged
             or _classify_intent(body.message, course_title, on_llm_call=_consume_quota)
         )
 
-    # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
+    # ルート①: 雑談まじりの発話 → **拒否しない**。軽い調子（casual_light）の様相として
+    # そのまま通常の RAG フローへ合流させる（入口統合 Phase 1 設計 §4.3、オーナー判断 §12-1）。
+    #
+    # 旧実装はここで定型の拒否文（「…学習支援に特化したAIです」）を返して早期 return して
+    # いた。これは casual が丸ごとバイパスしていた分岐そのもので、「casual のテキスト入口が
+    # 1つも無い」ことの裏返しだった。拒否をやめても**根拠の一線は落ちない** — RAG 検索・
+    # tier 集約・OutOfSourceGuard の system 注入・content_grounding はこの下流で全経路共通に
+    # 効き、教材に無い話題は model_generated と正直に返る（原則8）。
+    #
+    # 実装は `_is_casual` の**再代入だけ**（LC8: 下流の条件式は無改変）。分類はこの行より
+    # 手前で走り終えているので、前提知識ゲート・プロンプト選択・notice 抑制・誤解検出・
+    # U層タグ・痕跡・detour 非化のすべてに自然に効く。使い方についての再誘導は HELP
+    # pre-route と分類の USAGE_HELP 委譲が担い、ここでは扱わない（経路の一本化）。
     if intent == "CHIT_CHAT":
-        # 分野名はハードコードしない（コースごとに分野が異なる）。コース名が引ければ
-        # それを、引けなければ中立表現へフォールバックする。
-        _scope_label = f"「{course_title}」" if course_title and course_title != course_id else "この教材"
-        chit_chat_answer = (
-            f"申し訳ありませんが、私は{_scope_label}の学習支援に特化したAIです。\n\n"
-            f"{_scope_label}で扱う概念についての質問や、学習の進め方についての相談でしたら、"
-            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！\n\n"
-            "画面の使い方についての質問にもお答えできます。"
-        )
-        persist_chat_history(
-            current_user["id"], course_id, topic_id,
-            body.history, body.message, chit_chat_answer,
-        )
-        return LearningChatResponse(answer=chit_chat_answer, course_update=None)
+        _is_casual = True
 
     # ルート①-b（設計 §4-4, Phase 2）: 意図分類 LLM が USAGE_HELP と判定した場合も
     # Phase 1 の HELP ハンドラへ委譲する。pre-route（_is_usage_question / typed action
@@ -3281,6 +3336,16 @@ def _learning_chat_core(
         if not _is_backstage:
             log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
 
+    # 入口統合 Phase 1（設計 §4.1 / §4.4）: casual に畳まれていた「様相（軽い調子）」と
+    # 「伝達形式（読み上げ向き）」を分離する。読み上げ向きに倒すのは
+    #   ① 画面が音声モード（body.screen_mode == "voice"。app.js が全送信経路で付与）
+    #   ② 明示 casual かつ screen_mode 未指定（後方互換 — 既存 API クライアント・
+    #      既存テストは intent_mode="casual" 単独で音声想定の応答を期待している）
+    # の2つだけで、テキストから推定された casual_light は spoken=False になる。
+    _casual_spoken = ((body.screen_mode or "").strip() == "voice") or (
+        _explicit_casual and not (body.screen_mode or "").strip()
+    )
+
     # 5. 回答の生成（ルート統合）
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
     # casual / discuss モードでも guard の注入（振る舞い）は維持する — 気軽さ・自由さ≠根拠の放棄。
@@ -3292,7 +3357,9 @@ def _learning_chat_core(
     elif _is_discuss:
         _system_prompt = _get_discuss_system_prompt(domain, response_persona)
     elif _is_casual:
-        _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
+        _system_prompt = _get_casual_teacher_system_prompt(
+            domain, response_persona, spoken=_casual_spoken,
+        )
     else:
         _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
     # 確認問題の壁打ちモード: どのモードの system プロンプトに対しても、解答の直接提示を
@@ -3475,6 +3542,17 @@ def _learning_chat_core(
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
     _sel_anchor = _learner_selected_anchor(body)
+    # 入口統合 Phase 1（設計 §4.2 の [4] / §7）: この往復の様相と、その出所を確定する。
+    # 語彙・優先順位の正本は core/learning_stance/schema.py（純関数）。**様相は
+    # discuss_scope / cycle_mode / backstage / check_scaffold を切り替えない**（LC1）。
+    _stance, _stance_source = resolve_stance(
+        cycle_mode=_cycle_mode,
+        is_discuss=_is_discuss,
+        is_casual=_is_casual,
+        explicit_casual=_explicit_casual,
+        has_typed_action=bool(_route_for_typed_action(body.support_action)),
+        has_atlas_context=bool(_atlas_ctx),
+    )
     _trace_payload = {
         "overall_tier": overall_tier,
         "position_anchor": position_anchor,
@@ -3501,6 +3579,15 @@ def _learning_chat_core(
         # 楽屋（構造の降下路 §4）: 本人の台帳表示・後方検証のために焼き込む
         # （kind='backstage_question' と対。楽屋以外にはキー自体を足さない）。
         **({"backstage": True} if _is_backstage else {}),
+        # 入口統合 Phase 1（設計 §7）: どの様相で答えたか・それが明示か推定かを
+        # enum 2つだけ焼き込む（本文・逐語は入れない = DO1。confidence も入れない = LC7）。
+        # 楽屋には焼き込まない（entry_mode と同じ SD4 のガード — 「集計に入りません」と
+        # 宣言した枠に観測用のキーを足さない）。
+        **(
+            {"stance": _stance, "stance_source": _stance_source}
+            if not _is_backstage
+            else {}
+        ),
     }
     # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
     # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
@@ -3596,6 +3683,10 @@ def _learning_chat_core(
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
         mirror=_mirror,
+        # 入口統合 Phase 1（設計 §5、LC6）: 推定したことを隠さず事実として返す。
+        # RAG 応答（この最終 return）だけが設定し、HELP / 学習相談 / 地図 / 要素説明の
+        # 早期 return は None のまま。数値キーは持たない（LC7）。
+        stance=build_stance_dto(_stance, _stance_source),
         mock=False,
         degraded=degraded,
     )

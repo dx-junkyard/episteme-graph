@@ -404,12 +404,27 @@ class TestInterestTraceRecording:
 
 
 class TestChitChatReguidanceAndServicesChanges:
-    def test_chit_chat_mentions_usage_help(self):
+    def test_usage_help_reguidance_is_routed_not_advertised_in_chit_chat(self):
+        """使い方への再誘導は HELP pre-route + 分類 USAGE_HELP 委譲の2経路に一本化された。
+
+        旧: CHIT_CHAT の拒否文に「画面の使い方についての質問にもお答えできます」という
+        案内文を添えていた。入口統合 Phase 1（設計 §4.3）で拒否文そのものが廃止され、
+        CHIT_CHAT は casual_light 様相として通常フローへ合流するため、案内文は消えた。
+        代わりに固定するのは「使い方の質問が HELP ハンドラへ確実に届く経路が2本ある」
+        という構造の方（そちらが実際に学習者を助ける唯一の仕掛け）。
+        """
         source = Path(learning_mod.__file__).read_text(encoding="utf-8")
-        idx = source.find('if intent == "CHIT_CHAT":')
-        assert idx > 0
-        block = source[idx: idx + 600]
-        assert "画面の使い方についての質問にもお答えできます" in block
+        # 経路1: 非LLM pre-route（typed action usage_help / _is_usage_question）。
+        preroute_idx = source.index("_is_usage_help = (")
+        assert '_route_for_typed_action(body.support_action) == "USAGE_HELP"' in source
+        assert "_is_usage_question(" in source
+        # 経路2: 意図分類が USAGE_HELP を返したときの同一ハンドラへの委譲。
+        delegate_idx = source.index('if intent == "USAGE_HELP":')
+        assert preroute_idx < delegate_idx
+        delegate_block = source[delegate_idx: delegate_idx + 300]
+        assert "_usage_help_response(" in delegate_block
+        # 廃止された拒否文の案内はもうどこにも無い（二重管理の残骸を残さない）。
+        assert "画面の使い方についての質問にもお答えできます" not in source
 
     def test_interest_kinds_includes_help_usage(self):
         import services

@@ -72,6 +72,7 @@ __all__ = [
     "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
     "EDGE_KIND_LABELS",
     "GradedScale",
+    "LEARNING_STANCE_LABELS",
     "MATERIAL_STATE_LABELS",
     "RADAR_DISTANCE_LABEL_FAR",
     "RADAR_DISTANCE_LABEL_MID",
@@ -453,3 +454,23 @@ AUDIO_STATUS_LABELS = MappingProxyType({
 # ``core/deliberation/{dialogue,graph_dialogue}.py`` と route 層は import して使う。
 
 AI_READING_LABEL = "AIの読み（未確認）"
+
+
+# ---------------------------------------------------------------------------
+# 学習チャットの様相ラベル（Phase 1 入口統合）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は ``core/learning_stance/schema.py`` の ``STANCES``、
+# **表示ラベルの正本はここ**（正本設計書
+# ``docs/features/learning_chat_entry_unification_design.md`` §5）。
+# フロントは ``label + "答えました。"`` を描くだけで日本語表を持たない
+# （JS 側にこの表をミラーしない = サーバが解決済みの文字列を返す）。
+# 数値・confidence は持たない（LC7）。
+
+LEARNING_STANCE_LABELS = MappingProxyType({
+    "tutor": "ふつうの質問として",
+    "casual_light": "気軽な調子で",
+    "discuss": "議論として",
+    "cycle_elicit": "予想を先に聞く形で",
+    "cycle_diff": "予想と照らし合わせる形で",
+})

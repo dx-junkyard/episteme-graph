@@ -70,15 +70,37 @@ def test_no_hardcoded_field_names(rel_path):
 
 
 class TestChitChatWording:
-    def test_chit_chat_uses_course_title_not_a_field_name(self):
+    """CHIT_CHAT 分岐の分野中立性（入口統合 Phase 1 で検査対象が移った）。
+
+    旧: 拒否文（「私は{分野}の学習支援に特化したAIです」）がコース名・中立表現から
+    組み立てられていること。
+    新: 拒否文そのものが廃止され、CHIT_CHAT は casual_light 様相として通常フローへ
+    合流する（``docs/features/learning_chat_entry_unification_design.md`` §4.3）。
+    分野語ハードコード禁止の趣旨は、合流先で学習者に見える文言 — すなわち様相
+    ラベル（``LEARNING_STANCE_LABELS``）と casual プロンプト — へ引き継ぐ。
+    """
+
+    def test_chit_chat_merges_into_casual_light_instead_of_refusing(self):
         src = (BACKEND / "api/routes/learning.py").read_text(encoding="utf-8")
         idx = src.find('if intent == "CHIT_CHAT":')
         assert idx > 0
-        block = src[idx: idx + 900]
-        assert "_scope_label" in block
-        assert "course_title" in block
-        # コース名が引けないとき（course_id しか無い等）の中立フォールバック
-        assert "この教材" in block
+        block = src[idx: idx + 200]
+        # 合流の実体は _is_casual の再代入だけ（下流は無改変 = LC8）。
+        assert "_is_casual = True" in block
+        # 拒否文は残っていない（分野中立かどうか以前に、文言自体が無い）。
+        # コメント行は対象外 — 廃止の経緯をコード注記に書き残せなくなるため
+        # （このファイルの _code_lines と同じ規約）。
+        code = "\n".join(line for _, line in _code_lines("api/routes/learning.py"))
+        assert "学習支援に特化したAI" not in code
+        assert "_scope_label" not in code
+
+    def test_stance_labels_have_no_hardcoded_field_names(self):
+        """様相ラベルは学習者に直接見える文言なので、分野名を含まないこと。"""
+        from core.label_vocab import LEARNING_STANCE_LABELS
+
+        for key, label in LEARNING_STANCE_LABELS.items():
+            for word in _FORBIDDEN_DOMAIN_WORDS:
+                assert word not in label, f"様相ラベルに分野名が入っている: {key}={label!r}"
 
 
 class TestUsageQuestionVocabulary:
