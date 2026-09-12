@@ -76,7 +76,7 @@ src/tests/                     → agents 用 pytest テスト
 | ファイル | 役割 |
 |---|---|
 | `backend/core/schema.py` | 全 Pydantic モデル定義（OntologyType, CorePredicate, PaperStructure など） |
-| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **22本（2026-09-03 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
+| `backend/api/main.py` | FastAPI アプリ本体（lifespan・全ルーターのフラット登録。admin 系子ルーターは `prefix="/api/admin"` で main.py から直接登録する — admin.router に子ルーターを include しない（Tier 3-17c）。本数は Tier 3-17c 当時の13本から増え **25本（2026-09-13 時点）**。正本はコードで、`prefix="/api/admin"` の登録行を数える） |
 | `backend/api/routes/lecture_studio/` | 原稿スタジオルーター（Tier 3-17a で `_shared` / `scripts` / `pipeline` / `topics` に分割したパッケージ。`__init__.py` が router と互換シンボルを再エクスポートするため import 面は旧単一ファイルと同じ） |
 | `backend/core/extractor.py` | GROBID 変換（PDF→TEI XML）。orchestrator の下請け。旧 diff/merge は本番未使用のため削除済み（2026-07） |
 | `backend/core/embedder.py` | pgvector ベクトル保存・検索 (PostgreSQL) |
@@ -3007,6 +3007,47 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **非スコープ（v1）**: 学ぶ単位 / 概念レジストリ / import・JSON-LD（Phase 2〜4）/ superseded 行の教員向け履歴 UI /
   `chunks.formulas` の ID 参照化 / W層 meaning commit の旧本文退避。
 
+### 学ぶ単位層（知識構造の見直し Phase 2, migration 081, 2026-09-13）
+
+論文の「教える単位」を `learning_units` の一級の行にし、コース topic を `topic.units` でその並びとして定義する層。正本は
+`docs/features/learning_units_design.md`（LU1〜LU9・§12 実装記録。親は `knowledge_structure_review_2026-09-12.md` §4 Phase 2）。
+オーナー判断は O-3(a) freeze を `decision_context` に記帳 / O-5(a) 承認ゼロ配信は教員へ事実文、UC5/UC7 の適応評価は恒久排除。
+
+- **不変条項の要点**: LU1 A層非改変・既存キー不変（`units` が空の topic は従来の文字列一致で動く）/ LU2 unit は candidate 始まり・
+  束ねる選択は教員（行削除なし）/ LU3 決定論・非LLM（LLM が触るのは候補から選ぶだけ・**候補に無い handle は捨てる**）/ LU4 stable_key +
+  supersede（Phase 1 と同じ作法）/ LU5 数値非表示 / LU6 前提検査はコース構造だけを入力にする / LU7 一括確定は `decision_context`
+  （候補ゼロなら記帳しない = DC3）/ LU8 配信は止めない / LU9 痕跡は本人可視のまま（新 kind なし）。
+- **DB（081）**: `knowledge_unit_kinds`（語彙表・`core/schema.py::LEARNING_UNIT_KINDS` と一致）+ `learning_units`（5 種別 =
+  `section_block` / `thesis_support` / `parent_component` / `dsl_node` / `figure`。`agent_payload.linked_component_agent_ids` は
+  コース側が artifact と突合する契約）+ `learning_units_live` + `theory_components.parent_component_id` / `parent_agent_component_id`
+  （FK なし・v1 は agent ID 側だけ書く）。**基表を読むのは persistence / deletion のみ**、他は live ビュー。
+- **導出・永続化**: `core/knowledge_objects/learning_units.py::build_learning_unit_items`（純関数・内部 ID を label にしない）→
+  `persistence.persist_learning_units`（components 保存後・`id_map` 確定後。5 種別とも素材 None のときだけ SQL 非発行）。
+  子 component の `name` / stable_key 材料は変えない — 「Transform representation: …」を学習者から消すのは表示側の `display_label`。
+- **コース側**: `core/course_units.py`（候補 `U1..Un` の決定論的な並び = (material_ids 順, kind 順, order_index, label)・
+  `resolve_unit_handles` は捏造ガード・`candidate_keys`）。コースビルダーは `_build_material_context` 末尾の「学ぶ単位の候補」区画 +
+  プロンプト規則で topic ごとに `"units": ["U3"]` を選ばせ、`admin.js` が handle を素通しし、`create_course` が解決する
+  （**document 順は `_build_material_context` と同じ material_ids 順** — ずれると handle が別の単位を指す）。freeze は
+  `topic.units` 優先で `content_source="learning_units"` / `content_confidence="unit_selection"`、units が空のときだけ
+  `_best_mapping`（救済・一致した component が unit の子なら `source:"title_match"` で後付け）。`topic.narrative` は blueprint 由来。
+  学習者向け `GET /api/learning/courses/{id}` は `learner_topic_units_projection`（kind / label のみ）を通す（KO10 ガードレールは
+  `routes/learning.py` に内部列名のリテラルがあるだけで落ちる）。
+- **前提（P2-4）**: `core/course_prerequisites.py`（`resolve_prerequisite_topic_ids` = 正規化題名の完全一致・曖昧なら引かない /
+  `analyze_prerequisite_order` = 循環・推移的冗長・未解決・前方参照の事実文・件数なし）+
+  `POST /api/admin/course-builder/prerequisite-check`（`routes/course_prerequisites.py`・main.py 直接登録）。`check_prerequisites`
+  は表示名だけ現在の題名にし、記帳キーは名前のまま。
+- **確定と G層（P2-5）**: `create_course` が候補提示ありのときだけ `BASIS_COURSE_REGISTER_UNITS` の `decision_context` を
+  `AUDIT_ENTITY_COURSE_TOPIC` に記帳。G層 `course.delivered_unreviewed`（公開コースの束ねた live component / claim に
+  `teacher_approved` が無い・capability `materials.graph_review` 再利用・units だけのコースには出さない）。
+- **痕跡（P2-7）**: `_learner_selected_anchor(body, screen_selection=, segment_texts=)` — 優先順は要素タップ > テキスト選択 >
+  画面文脈の選択要素。区画は申告 → `core/structure_anchor/selection_segment.py::resolve_selection_segment`（一意のときだけ）→ 空。
+  `app.js` は `.material-chunk` の `data-segment-index` から取り、取れなければ `selection_segment_id` を送らない（0 を既定にしない）。
+- **ガードレール**: `test_learning_units_{stable_key,derive,persist,guardrails}.py` / `test_course_units.py` /
+  `test_course_content_units.py` / `test_course_builder_units_ui_static.py` / `test_course_register_units.py` /
+  `test_course_prerequisites{,_api}.py` / `test_next_steps_delivered_unreviewed.py` / `test_structure_anchor_selection{,_ui_static}.py`。
+- **非スコープ（v1）**: unit の教員確定 UI / `display_label` のチップ描画配線（app.js・原稿スタジオ）/ `PUT /courses/{id}` での
+  handle 再解決 / freeze から component 投影を外すこと / `dsl_node` のコース提示 / 学習者向け `narrative` 表示。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
@@ -3122,6 +3163,9 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   これに委譲する。**学習者向け文脈の射影・遮断を再実装しない**（agent ID トークン遮断は
   component レーンのみ＝claim/equation への拡張はオーナー判断待ち。DTO は component=旧6キー /
   element=ITEM v2 の意図的世代差を維持）。
+- **`backend/core/course_units.py` / `core/course_prerequisites.py` / `core/knowledge_objects/learning_units.py`**（2026-09-13 新設、
+  正本設計書 `docs/features/learning_units_design.md`） — 学ぶ単位の候補提示・handle 解決・freeze 向けの読み / 前提の ID 解決と
+  半順序検査 / unit の決定論導出の正本。コース側で成果を束ねるときは `topic.units` を優先し、**タイトル文字列一致を新規に書かない**。
 - **`backend/core/knowledge_objects/`**（2026-09-13 新設、正本設計書 `docs/features/knowledge_objects_design.md`） —
   知識オブジェクトの同一性（`stable_key`）・live 行の同期（`sync_live_rows`）・参照の再係留
   （`record_and_reanchor`）の正本。**構造化成果を DB に書く経路を新設するときは DELETE → 再 INSERT を書かず

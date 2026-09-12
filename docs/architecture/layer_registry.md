@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-13 時点で **081 以降**。044〜080 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-09-13 時点で **082 以降**。044〜081 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -93,6 +93,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 画面文脈アダプター | Assistant Screen Adapter（画面が参照だけを渡し、サーバが既存の権限ゲート付き core で解決して AI 対話の grounding に足す層。第1適用先はグラフレビューのノード対話・グラフ全体対話） | `docs/features/assistant_screen_adapter_design.md`（SA1〜SA7・§10 実装記録） | `backend/core/assistant_context/` + `routes/deliberation.py`（messages の `screen_context`）+ `admin-graph-review.js`（`getScreenContext`） | 不要（読み時解決・保存なし） | 実装済み（Phase 1） |
 | LLM 応答のストリーミング | 学習チャット本文の逐次配信（SSE）と停止。`_learning_chat_core` を生成器にして前処理・生成・後処理を1本に保ち、転送方式だけを分岐する（表示の先行であって正本ではない） | `docs/features/llm_response_streaming_design.md`（ST1〜ST9・§12 実装記録） | `backend/core/llm.py::generate_text_stream` + `routes/learning.py`（`/chat/stream` / `/client-features`）+ `app.js`（逐次バブル・停止ボタン） | 不要（`llm_usage_events` は `operation='chat'` のまま・記録先は既存 `metadata`） | 実装済み（**Phase 3-a のみ**・`LEARNING_CHAT_STREAMING_ENABLED` 既定 off。3-b〜3-d は未着手） |
 | 知識オブジェクト層 | Knowledge Objects（claim 親子 / component / equation / evidence / derivation step / symbol を内容由来の版非依存キー `stable_key` を持つ一級の行にし、再解析を DELETE ではなく supersede 遷移にする。artifact は 1 run × 1 stage 1 行の生成ログへ降格、`document_id` は UUID + FK、型語彙は `core/schema.py` 正本 + 語彙表 FK） | `docs/features/knowledge_objects_design.md`（KO1〜KO10・§12 実装記録。親: [知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) Phase 1） | `backend/core/knowledge_objects/`（stable_key / sync / remap / backfill）+ `core/document_pipeline/persistence.py` + `routes/admin.py::delete_material` → `core/versioning/deletion.py::_purge_document` | 078, 079, 080 | 実装済み（Phase 1 v1。読み手は `theory_claims_live` / `theory_components_live` を読む） |
+| 学ぶ単位層 | Learning Units（skeleton の論理ブロック / thesis の支持構造 / component の LLM 原案 / DSL ノード / 図を `stable_key` 付きの `learning_units` 行にし、コース topic を `topic.units` でその並びとして定義する。前提は同コース topic の ID 参照 + 非LLM の半順序検査、コース登録は `decision_context` 付きの一括確定、承認ゼロ配信は G層の事実文、blueprint の語りの弧を topic へ、学習者の選択要素は `learner_selected` アンカーに着地） | `docs/features/learning_units_design.md`（LU1〜LU9・§12 実装記録。親: [知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) Phase 2） | `backend/core/knowledge_objects/learning_units.py` + `core/course_units.py` + `core/course_prerequisites.py` + `routes/course_prerequisites.py` + `core/structure_anchor/selection_segment.py` + `course_content_builder.py` / `routes/learning.py::create_course` | 081 | 実装済み（Phase 2 v1。unit の教員確定 UI は非スコープ） |
 | 教材図スタジオ | Teaching Figure Studio（AI対話 SVG 生成） | `docs/features/teaching_figure_studio_design.md`（FG1〜FG9・§13 実装記録） | `backend/core/teaching_figures/` + `routes/teaching_figures.py` + `admin-figure-studio.js` | 063 | 実装済み（v1） |
 | リリース前の確認 | Release Review Flow（3ステップウィザード） | `docs/features/release_review_flow_design.md`（RR1〜RR7） | `routes/landscape.py`（course-scoped）+ `admin-release-review.js` | 不要（既存 API の束ね） | 実装済み（v1） |
 | 教員の弁と計器 | 負荷順トリアージ + 静かな計器（コスト見通し・WMレンズ） | `docs/features/teacher_triage_instruments_design.md`（TT1〜TT6・§6 実装記録） | `backend/core/teacher_triage.py` + `core/llm_usage/forecast.py` + `core/lecture_wm.py` + 既存キュー2ルートの sort 拡張 | 不要（読み時導出とソートのみ） | 実装済み（Phase 4 v1） |
@@ -118,7 +119,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜080、2026-09-13 時点）
+## 3. migration 帰属一覧（init〜081、2026-09-13 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -186,7 +187,8 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 078 | `078_knowledge_objects` | **知識オブジェクト層 M1**（既存2表への stable_key / supersede 列、新4表 + `element_id_remap`、型語彙表2表と CHECK→FK 置換、live ビュー2つ） |
 | 079 | `079_analysis_artifacts` | **知識オブジェクト層 M2**（`document_analysis_artifacts` = 1 run × 1 stage 1 行。`stage_outputs._artifacts` blob の1回限りの移送） |
 | 080 | `080_document_id_uuid` | **知識オブジェクト層 M3**（`document_id` の TEXT → UUID 統一 + `documents(id)` への FK CASCADE。適用時に到達不能な孤児行を1回掃除） |
+| 081 | `081_learning_units` | **学ぶ単位層**（語彙表 `knowledge_unit_kinds` + 新表 `learning_units` + `learning_units_live`、`theory_components` の親参照列 `parent_component_id` / `parent_agent_component_id`。末尾で live ビュー2文を再作成） |
 
-次の空き番号は **081**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **082**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。

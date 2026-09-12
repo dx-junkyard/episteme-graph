@@ -66,14 +66,14 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
   `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）/
   `disclosure`（/api/disclosure）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（22本、`main.py` の登録順）**:
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（25本、2026-09-13 時点。正本はコードで `main.py` の登録行を数える）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
   （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `atlas_edges`（/cartridges 配下）/
   `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
-  `discuss_observation.admin_router` / `versioning` / `status`
+  `discuss_observation.admin_router` / `course_prerequisites`（/course-builder/prerequisite-check）/ `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
   `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
 - **例外（#496）**: `GET /api/admin/documents/{id}/figures` は admin.py にも定義が残るが、main.py が
@@ -945,6 +945,15 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 | GET | `/api/admin/doubt/counterfactual/sessions` | TEACHER（自分所有 + public + 所属グループ共有のみ） | セッション一覧（`course_id` 絞り込み可） |
 | PATCH | `/api/admin/doubt/counterfactual/sessions/{sid}` | 作成者本人のみ | notes・共有範囲の変更（scope 変更時のみ監査記録） |
 | GET | `/api/admin/doubt/metrics` | SYSTEM_ADMIN | 運用判断用の内部 KPI（ダッシュボード UI は作らない前提） |
+
+### コースビルダーの前提知識 半順序チェック（`routes/course_prerequisites.py`）
+
+`POST /api/admin/course-builder/prerequisite-check`（`_require_teacher`・DB 非変更・LLM 0 回）。body は
+course_draft の `chapters[]`（`topics[]` は文字列または `{title, prerequisites}`）。サーバが admin.js の登録と同じ規則で
+`t{index}` / `chapter_index` を振ってから `core/course_prerequisites.py::analyze_prerequisite_order` を通し、
+`{"available": bool, "facts": [str]}` を返す（循環 / 推移的冗長 / 未解決 / 前方参照の**事実文のみ・件数なし**）。
+学習者の入力・痕跡は一切読まない（UC5/UC7 恒久排除）。正本は
+[features/learning_units_design.md](../features/learning_units_design.md) §6.4。
 
 ### ゼミ前ブリーフ（`routes/seminar_brief.py` admin_router）
 

@@ -108,14 +108,14 @@ artifact 側の規模: A = claim_object_builder 132 claims / equations 53 / symb
 | 事実 | 出典 |
 |---|---|
 | 唯一の学習単位は `learning_courses.data.topics[]`。進捗・チャット・音声・確認問題が全部 topic キー | C 節③ |
-| topic ↔ 成果の結合はタイトル文字列の重なり率（0.18 / 0.12）。A コースは 26 topic 中 18 が `content_confidence="none"` | C-3 |
+| topic ↔ 成果の結合はタイトル文字列の重なり率（0.18 / 0.12）。A コースは 26 topic 中 18 が `content_confidence="none"` → **2026-09-13 解消**（§4 Phase 2 実装記録）（P2-3: `topic.units` 優先・文字列一致は救済のみ） | C-3 |
 | 無接続 topic の「出典」は `chunks[topic_index]` の位置代入。tier を source まで底上げする | C-4 |
 | 学習者が読むのは LLM 二次生成の日本語散文。claim 埋め込みは 2 コース合計 6 個、component 6 個 | C 節③ |
-| component 21 件は LLM 原案 8 個を決定論 refinement が分割した断片。名前は `{Operation}: {親}`、同名 4 件 | F-5 / A-3 |
+| component 21 件は LLM 原案 8 個を決定論 refinement が分割した断片。名前は `{Operation}: {親}`、同名 4 件 → **2026-09-13 解消**（§4 Phase 2 実装記録）（P2-2: 原案は `learning_units(parent_component)`・子行に `parent_agent_component_id`・学習者表示は `display_label`） | F-5 / A-3 |
 | 粒度が両極端: A は「1 operation = 1 単位」で細かすぎ、B は「第3章だけ 14 件」で粗すぎ。同じ規則が両方を生む | F-19 |
-| 前提知識は名前文字列（`prerequisites: [{"name": "…"}]`）で ID 参照ではない。半順序として検査されない | S-17 |
-| 文章層（skeleton の `logical_blocks` 9 件は B の第1〜8章を覆う / thesis の `support_structure` / DSL 16〜22 ノード）が最も忠実だが、**単位として永続化されず学習者に届かない** | F-14 / F-12 |
-| blueprint（語りの弧）は live 消費者ゼロ | C-9 |
+| 前提知識は名前文字列（`prerequisites: [{"name": "…"}]`）で ID 参照ではない。半順序として検査されない → **2026-09-13 解消**（§4 Phase 2 実装記録）（P2-4: `topic_id` 併記 + 非LLM 半順序検査 API） | S-17 |
+| 文章層（skeleton の `logical_blocks` 9 件は B の第1〜8章を覆う / thesis の `support_structure` / DSL 16〜22 ノード）が最も忠実だが、**単位として永続化されず学習者に届かない** → **2026-09-13 解消**（§4 Phase 2 実装記録）（P2-1: `learning_units` 表に5種別で永続化・コースビルダーの候補に提示） | F-14 / F-12 |
+| blueprint（語りの弧）は live 消費者ゼロ → **2026-09-13 解消**（§4 Phase 2 実装記録）（P2-6: freeze で `topic.narrative` に持ち込み・散文生成の文脈へ） | C-9 |
 | RAG は chunks 本文のみ。claims / components / equations / graph / 台帳を一切引かない | C-5 |
 
 ### D4. 概念の同一性が無い（共通化）
@@ -294,6 +294,26 @@ CASCADE、`sync_live_rows` の実 PG 往復（同キー = 同 UUID・保護列�
 | P2-5 | freeze を一括確定として `decision_context` に記帳（`basis` 定数 1 本追加）。承認 0 のまま配信されている事実を教員に事実文で提示（G層ルール 1 本） | 原則1改訂の適用。配信は止めない（RR7） | C-6 |
 | P2-6 | blueprint の `narrative_role` / `visual_strategy` を freeze 時に topic へ持ち込む（narrative_annotator と同経路） | 語りの弧が export ZIP の外に出る | C-9 |
 | P2-7 | 学習者が chat で選んだ `element` を `learner_selected` アンカーとしてそのまま記帳（AI 候補に回さない）。`seg_0` 固定の採番不具合を是正 | 痕跡が構造に着地する（vision §3.3） | C-11 |
+
+#### Phase 2 実装記録（2026-09-13）
+
+専用設計書 [learning_units_design.md](../features/learning_units_design.md)（LU1〜LU9・§12）に従い、Fable 5.1 指揮 +
+Opus 5 の 4 担当（A スキーマ・導出・永続化 / B コース側 / C 前提・G層 / D 痕跡の着地）で同日実装。migration は
+**081** に採番（`ls backend/db/` で確認）。オーナー判断は O-3(a)・O-5(a) を推奨どおり採用（設計書冒頭に明記・撤回可）。
+
+| # | 解消 | 実装先 |
+|---|---|---|
+| P2-1 | `learning_units`（5 種別 = section_block / thesis_support / parent_component / dsl_node / figure。stable_key・teaches・出典 block・review_status candidate 始まり・supersede）+ 語彙表 `knowledge_unit_kinds` + `learning_units_live`。導出は決定論・非LLM | 081・`core/knowledge_objects/learning_units.py`・`persistence.persist_learning_units` |
+| P2-2 | 決定論分割の子行に `parent_agent_component_id`（親 = LLM 原案は `parent_component` unit として一級化・子の `name` / stable_key 材料は不変）。学習者表示は unit 経由の `display_label` で親 label を優先（UI の描画配線は残課題） | 081・`persist_components`・`course_content_builder` |
+| P2-3 | `topic.units[{kind, stable_key, unit_id, label, source}]` を additive 追加。コースビルダーは候補 handle `U1..Un` を提示し LLM が選ぶ（候補に無い handle は捨てる）。freeze は units 優先・文字列一致は救済のみ（`source:"title_match"` で区別）。学習者 DTO は kind / label のみ | `core/course_units.py`・`routes/admin.py`・`admin.js`・`routes/learning.py::create_course` |
+| P2-4 | `prerequisites[].topic_id`（正規化題名の完全一致・曖昧なら引かない）+ 非LLM 半順序検査（循環 / 推移的冗長 / 未解決 / 前方参照の事実文・件数なし）`POST /api/admin/course-builder/prerequisite-check`。`check_prerequisites` は表示名だけ現在の題名に。学習者入力ゼロ（UC5/UC7 恒久排除） | `core/course_prerequisites.py`・`routes/course_prerequisites.py`・`services.check_prerequisites` |
+| P2-5 | コース登録を一括確定として `decision_context`（`basis=course_register.units`・presented = 候補 / applied = 束ねた unit・候補ゼロなら記帳しない）で `AUDIT_ENTITY_COURSE_TOPIC` に記帳。G層 `course.delivered_unreviewed`（公開コースの束ねた component / claim に承認が1件も無い事実文・capability `materials.graph_review` 再利用） | `routes/learning.py`・`core/admin_assistant/next_steps.py` |
+| P2-6 | blueprint `narrative_arc` を `component_id → {role, visual_strategy}` で索引化し、freeze で `topic.narrative` に持ち込み散文生成の文脈へ（数値・rationale は載せない） | `course_content_builder._collect_structured_content` / `_enrich_topics` |
+| P2-7 | 学習チャットの `screen_context.selection` の要素を `learner_selected`（reason=screen_selection）で記帳。`seg_0` 固定は廃止 — 区画はクライアント申告（選択範囲を含む `data-segment-index`）→ 教材本文との逐語一致（一意のときだけ）→ 決まらなければ空 | `routes/learning.py::_learner_selected_anchor`・`core/structure_anchor/selection_segment.py`・`app.js` |
+
+検証: backend 14,905 pass / src 1,924 pass（2026-09-13）。空 DB に init〜081 の 79 ファイルを 2 回適用して無変更（冪等）、
+`persist_learning_units` の実 PG 往復（同キー = 同 UUID 更新・`review_status` / `teacher_notes` 保護・不一致 = superseded・
+documents 削除で CASCADE）を確認。
 
 ### Phase 3 — 概念レジストリ（migration 1〜2 本）
 

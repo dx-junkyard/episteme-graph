@@ -167,6 +167,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 ①`theory_components` 行（UUID、legacy `comp_001`）②`course_mapping.linked_component_ids` の `comp_002__op1`③`epistemic_ledger.target_type='component'` の `eq_op_0001`（**graph の equation_detail ノード ID**）。台帳の「component の検証状態」を component context から join できない（0/194）。**改善方向**: 語彙を分離（`theory_unit` / `operation_node` / `graph_node`）するか、`epistemic_ledger` に `target_namespace` を足す。
 
 ### C-3. コース topic ↔ 成果の結合がタイトル文字列の重なり率
+→ **2026-09-13 解消**（本文 §4 Phase 2 実装記録: P2-3 — `topic.units` を優先し、文字列一致は units 空のときの救済のみ・`source` で区別）
 `course_content_builder.py:1570`（重なり 0.18）、`:1587`（重なり 0.12・上位3件）。DHOST は `exact_title` 0 / `title_similarity` 8 / `none` 18。「教員が自分の言葉で章立てするほど成果との接続が切れる」逆インセンティブ。`content_confidence` は教員 UI にも警告として出ない。**改善方向**: outline 生成時に topic へ `linked_component_ids` を**生成させる**。文字列一致は救済にとどめる。
 
 ### C-4. 無接続 topic の「出典」が位置による代入
@@ -177,6 +178,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 `api/services.py:1639` の SQL は `FROM chunks c LEFT JOIN documents d`。最大の資産（`CorePredicate` グラフ、導出鎖、記号レジストリ）が**学習者の対話に一度も現れない**。**改善方向**: 検索を「chunk 近傍 → その chunk を出典に持つ claim → その claim を backing に持つ graph ノード」へ 1 hop 拡張し決定論的に grounding へ足す。SA層に `kind="retrieved_structure"` 解決器を1本足すのが最小形。
 
 ### C-6. 承認ゲートの下流が全部空回りしている
+→ **2026-09-13 一部解消**（P2-5 — コース登録を `decision_context` 付きの一括確定として記帳・承認ゼロ配信を G層 `course.delivered_unreviewed` の事実文で教員に提示。承認語彙の実態合わせは未着手）
 `component_explanations` 0 / `component_endorsements` 0 / `element_explanations` approved 0 / `theory_components.review_status` に `teacher_approved` 0 / `theory_claims` 28 件全部 `teacher_review_required` / `theory_review_events` に component・claim・explanation・endorsement が **1 件も無い** / `reconstruction_items` **0 行** / `landscape_placements` confirmed 0。一方 freeze は**承認を経由せず** artifact から直接教材を作るので学習者には届く。**確定の弁を通らない経路だけが実際に機能している**。freeze 時の「コース登録」1操作が実質的な一括承認になっており `decision_context` の対象外。**改善方向**: ①freeze を「一括確定」として `decision_context` に記帳 ②承認 0 のまま配信されている事実を教員に事実文で見せる ③承認語彙の実態合わせはオーナー判断。
 
 ### C-7. 再解析が参照を壊し、壊れた参照が誰にも見えない
@@ -188,6 +190,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 `resolve_artifact_runs` の docstring は「成果物参照には active run」と明記するが `figure_presentation.py:39` と `decomposition.py:344` は latest を使う。**改善方向**: `document_run_artifacts(document_id, *, policy)` 1本に寄せる。
 
 ### C-9. blueprint が live に接続されていない
+→ **2026-09-13 解消**（P2-6 — freeze で `topic.narrative` に持ち込み）
 `narrative_arc` を読むのは export のみ。「論文の語りの弧」という転用価値の高い成果が export ZIP の中にしか無い。
 
 ### C-10. freeze スナップショットの 85% が同一式の重複
@@ -195,12 +198,14 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 `_fallback_formulas`（`:1638`）が位置代入チャンクの `formulas` を丸ごと content_blocks へ足す。**改善方向**: `linked_equation_ids` ∪ 本文参照 ID に絞る（新規 freeze のみ）。
 
 ### C-11. 学習者の痕跡が構造に着地していない
+→ **2026-09-13 解消**（P2-7 — 画面選択の要素を `learner_selected` で記帳・`seg_0` 既定を廃止し区画は申告→逐語一致→空）
 `structure_anchor` 付き 42 件のうち `segment` 33（`anchor_id` 全部 `'seg_0'`）、確定済み 1 件のみ。**改善方向**: ①`seg_0` 固定は segment ID 採番と slide_index の不接続に見える ②SA層で chat に渡している `element` 選択をそのまま `learner_selected` アンカーとして記帳する。
 
 ### C-12. 論文横断の横糸（同一性・別名・共通部品）が 0 件のまま
 受け皿は実装済みだが一度も使われていない。原因は「教員の明示操作が必要」+「候補を出す導線が細い」【推測】。**改善方向**: 2論文目の解析時に既存コーパスの component とのベクトル近傍を identity **候補**として自動生成し教員のレビューキューへ（確定は人間のまま）。
 
 ### C-13. 学習単位が topic に固定され、component/claim 単位の学習が存在しない
+→ **2026-09-13 解消（additive）**（P2-1 / P2-3 — `learning_units` を一級化し topic を `units` の並びとして定義。既存キーの意味は不変）
 component:topic が 1:1。**改善方向**: topic を「component の並び」として定義し直す（`topic.units: [{kind, id}]`）。大きな構造変更で不変条項との衝突を要検討。
 
 ### C-14. export は良いが片道

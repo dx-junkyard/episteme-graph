@@ -399,6 +399,21 @@ SSRF ガードの正本は `backend/core/url_fetch.py`。正本設計書は `doc
 
 ---
 
+### 学ぶ単位（Learning Units, マイグレーション 081）
+
+論文の「教える単位」を一級の行にし、コース topic を `topic.units[]`（`learning_courses.data` の
+additive な JSONB キー）でその並びとして参照する。正本は
+`docs/features/learning_units_design.md`（LU1〜LU9）。作法は知識オブジェクト層 Phase 1 と同じ
+（`stable_key` / `produced_by_run_id` / `superseded_at`・DELETE なし・読み手は live ビュー）。
+
+| テーブル | 役割 |
+|---|---|
+| `knowledge_unit_kinds`（081） | unit 種別の語彙表（`core/schema.py::LEARNING_UNIT_KINDS` と同じ5列挙をシード。label は `label_vocab.LEARNING_UNIT_KIND_LABELS` と逐語一致） |
+| `learning_units`（081） | 1 行 = 論文の教える単位（`section_block` / `thesis_support` / `parent_component` / `dsl_node` / `figure`）。`stable_key`・`agent_unit_id`・`teaches`（LRMI 相当）・出典 block / section 集合・`linked_*_ids`・`review_status`（candidate 始まり・人間の確定列）・`agent_payload`（`linked_component_agent_ids` を含む）。`document_id` は UUID + FK CASCADE、live 行の同一性は部分 UNIQUE。読み手は `learning_units_live` |
+| `theory_components.parent_component_id` / `parent_agent_component_id`（081） | 決定論分割の子から LLM 原案の親をたどる参照（FK なし。v1 は agent ID 側だけを書き、UUID 側は NULL） |
+
+---
+
 ## 2. 重要な設計パターン
 
 ### マスター / 個人レイヤーの分離（#133, マイグレーション 011）
@@ -511,6 +526,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `078_knowledge_objects.sql` | 知識オブジェクト層 M1 — `theory_claims` / `theory_components` へ `stable_key` / `agent_*_id` / `produced_by_run_id` / `superseded_at` 等の nullable 列追加（既存行は意味不変）、新表 `knowledge_equations` / `knowledge_evidence` / `knowledge_derivation_steps` / `knowledge_symbols` （`document_id` は UUID + FK CASCADE）、`element_id_remap`（参照再係留の記録簿）、語彙表 `knowledge_claim_types` / `knowledge_component_types`（`core/schema.py` と同じ列挙をシード・旧 CHECK は FK へ置換）、live ビュー `theory_claims_live` / `theory_components_live`。DELETE 文なし（再解析は supersede 遷移） |
 | `079_analysis_artifacts.sql` | 知識オブジェクト層 M2 — `document_analysis_artifacts`（`PRIMARY KEY(run_id, stage)`・FK CASCADE・GIN なし）。既存 `document_analysis_runs.stage_outputs->'_artifacts'` blob を1回だけ行へ移送し blob を除去する（自己収束・2回目は対象ゼロ）。artifact は知識の正本ではなく不変の生成ログ（KO6） |
 | `080_document_id_uuid.sql` | 知識オブジェクト層 M3 — TEXT だった `document_id`（`theory_claims` / `theory_components` / `theory_component_links` / `theory_component_graphs` / `document_analysis_runs` / `document_embeddings` / `document_figures` / `epistemic_ledger` / `counterfactual_sessions` / `reconstruction_items` / `section_assembly_status` / `deliberation_sessions` / `element_annotations` / `element_identity_links.instance_document_id`）を UUID に統一し `REFERENCES documents(id) ON DELETE CASCADE` を張る。適用時に material_id 形の行を UUID へ正規化し、`documents` に対応行の無い**到達不能な孤児行だけを1回掃除**する（本 Phase 唯一の破壊的ステップ・件数は `RAISE NOTICE`）。`''` は削除せず NULL に倒す。live ビューは型変更の前後で DROP → 再作成 |
+| `081_learning_units.sql` | 学ぶ単位の一級化 Phase 2 — 語彙表 `knowledge_unit_kinds`（`core/schema.py::LEARNING_UNIT_KINDS` と同一列挙をシード）と新表 `learning_units`（stable_key / unit_kind / teaches / 出典 block / review_status・`document_id` は UUID + FK CASCADE・部分 UNIQUE）+ `learning_units_live`、`theory_components` に親参照列 `parent_component_id` / `parent_agent_component_id`。末尾で `theory_claims_live` / `theory_components_live` を再作成（列追加時の規律）。DELETE 文なし |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

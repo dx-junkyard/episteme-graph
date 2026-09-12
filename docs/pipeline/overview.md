@@ -133,6 +133,7 @@ PDF
 | `knowledge_equations` / `knowledge_evidence` / `knowledge_derivation_steps` / `knowledge_symbols` | `equation_semantics` / `evidence_registry` / `derivation_chain` / `symbol_registry` | `persist_knowledge_objects`。record 全体は `agent_payload` に保持（`confidence` は列に昇格させない） |
 | `theory_components` / `theory_component_links` | `component_assembly` の components | `persist_components`。学習属性（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` / `linked_*_ids` / `operation`）を列に、残りを `agent_payload` に。links は派生構造で人間の書き込み経路が無いため document 単位の DELETE → 再作成（設計書の明示例外） |
 | `theory_component_graphs` | `component_graph` の graph（+ `narrative_annotator` の注釈） | `persist_component_graph`（1 document 1 行の upsert）。claim 参照は `claim_id_map` が全 claim を覆うため DB UUID になる |
+| `learning_units`（+ `theory_components.parent_agent_component_id`） | `paper_skeleton` / `thesis_reconstruction` / `component_assembly`（原案 + `refinement_report.split_actions`）/ `dsl_linking` / `figure_table_semantics` | `persist_learning_units`（components 保存後・`id_map` 確定後に呼ぶ。学ぶ単位の一級化 Phase 2 — 正本 [learning_units_design.md](../features/learning_units_design.md)）。5 種別とも素材 `None` のときだけ SQL 非発行 |
 | `element_id_remap` + 参照の再係留 | 上記の同期で agent ID だけが変わった組 | `core/knowledge_objects/remap.py`。`element_explanations` / `epistemic_ledger` / `challenges` / `element_annotations` / `deliberation_sessions` / `element_identity_links` の agent-ID 参照を書き換える（一意制約に当たる行はスキップを記録） |
 
 **再解析は DELETE しません**（KO3）。`stable_key`（`document_id` + 正規化テキスト + 出典 block 集合の内容由来キー、
