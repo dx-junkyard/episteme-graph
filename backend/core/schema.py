@@ -49,6 +49,9 @@ class CorePredicate(str, Enum):
     REQUIRES = "REQUIRES"
     CONTAINS = "CONTAINS"
     EQUIVALENT = "EQUIVALENT"
+    # 知識オブジェクト層（knowledge_objects_design.md §7）: dsl_linking の
+    # CORE_PREDICATES（10 語彙）と正本を揃える。src 側は非改変で、包含はテストで固定。
+    PRODUCES = "PRODUCES"
 
 
 class MetaIssueCategory(str, Enum):
@@ -542,6 +545,10 @@ AUDIT_ENTITY_COURSE_TOPIC = "course_topic"
 # options を入れる。資料本文・逐語引用そのものは監査に載せない）。
 AUDIT_ENTITY_EXPORT = "export"
 
+# 知識オブジェクト層（knowledge_objects_design.md KO10）: 再解析の supersede / 参照の
+# 再係留 / 語彙外型の丸めを記帳する。entity_id は document_id（run 単位の要約1行）。
+AUDIT_ENTITY_KNOWLEDGE_OBJECT = "knowledge_object"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -589,4 +596,59 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_MATERIAL,
     AUDIT_ENTITY_COURSE_TOPIC,
     AUDIT_ENTITY_EXPORT,
+    AUDIT_ENTITY_KNOWLEDGE_OBJECT,
+)
+
+
+# ---------------------------------------------------------------------------
+# 知識オブジェクト層の型語彙（knowledge_objects_design.md §7 / KO7）
+#
+# DB 側は CHECK ではなく語彙表（knowledge_claim_types / knowledge_component_types）への
+# FK で守り、その語彙表は migration が **ここと同じ列挙** をシードする（一致は
+# test_knowledge_objects_vocab.py が固定）。新しい型を足すときはここに足し、同じ値を
+# migration の seed にも足す。LLM の自称は claim_type_text / component_type_text に残す。
+# ---------------------------------------------------------------------------
+
+#: theory_claims.claim_type の語彙（旧 CHECK 17 ∪ claim_object_builder の CLAIM_TYPE_ONTOLOGY ∪ unknown）。
+CLAIM_TYPES: tuple[str, ...] = (
+    "definition", "assumption", "approximation", "equation", "relation",
+    "derivation_step", "observable_definition", "correction", "uncertainty",
+    "limitation", "result", "diagnostic_claim", "equation_definition",
+    "equation_relation", "equation_transformation", "equation_approximation",
+    "equation_constraint", "criterion", "setup", "operator_relation",
+    "measurement_or_update", "causal_or_dependency_claim",
+    "incompatibility_or_constraint", "comparison", "conclusion", "method_choice",
+    "background", "prior_work", "meta", "problem_statement", "method_motivation",
+    "theory_encoding", "method", "structural_property", "derivation_result",
+    "main_result", "interpretation", "unknown",
+)
+
+#: claim の階層（claim_qualification.schema.CLAIM_TIERS と同じ列挙・src 側非改変）。
+CLAIM_TIERS: tuple[str, ...] = ("paper_core", "paper_supporting", "background", "prior_work", "meta")
+
+#: theory_components.component_type の語彙（旧 CHECK 9 ∪ cartridge component_types.json ∪ unknown）。
+COMPONENT_TYPES: tuple[str, ...] = (
+    "theory", "concept", "law", "mechanism", "operator", "observation",
+    "apparatus", "instrument", "part",
+    "DomainConceptComponent", "DomainTheoryComponent", "DomainMethodComponent",
+    "DomainAssumptionComponent", "DomainObservableComponent", "PaperClaimComponent",
+    "PaperHypothesisComponent", "PaperRelationComponent", "PaperCorrectionComponent",
+    "PaperUncertaintyComponent", "PaperEvidenceComponent", "unknown",
+)
+
+#: theory_claims.origin — この claim 行がどの経路で生まれたか（§5.4）。
+CLAIM_ORIGIN_SPAN = "span"
+CLAIM_ORIGIN_CLAIM_OBJECT = "claim_object"
+CLAIM_ORIGIN_ATOMIC_REWRITE = "atomic_rewrite"
+CLAIM_ORIGIN_EQUATION_SYNTHESIS = "equation_synthesis"
+CLAIM_ORIGINS: tuple[str, ...] = (
+    CLAIM_ORIGIN_SPAN,
+    CLAIM_ORIGIN_CLAIM_OBJECT,
+    CLAIM_ORIGIN_ATOMIC_REWRITE,
+    CLAIM_ORIGIN_EQUATION_SYNTHESIS,
+)
+
+#: element_id_remap.object_kind / stable_key の種別接頭辞。
+KNOWLEDGE_OBJECT_KINDS: tuple[str, ...] = (
+    "claim", "component", "equation", "evidence", "derivation_step", "symbol",
 )

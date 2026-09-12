@@ -177,6 +177,28 @@ async def _lifespan(application: FastAPI):
             except Exception:  # noqa: BLE001
                 logger.warning("bundled library seed import skipped", exc_info=True)
 
+            # 知識オブジェクト層（migration 078）: live 行の stable_key バックフィル。
+            # fail-open — 失敗しても起動は続ける（旧行は stable_key NULL のまま残り、
+            # 次回起動か次の再解析で付く）。対象ゼロなら何もしない（冪等）。
+            try:
+                from core.knowledge_objects.backfill import backfill_stable_keys
+
+                ko_session = _pg_session()
+                try:
+                    counts = backfill_stable_keys(ko_session)
+                    ko_session.commit()
+                    if counts.get("claims") or counts.get("components"):
+                        logger.info(
+                            "knowledge_objects: stable_key backfill %s", counts
+                        )
+                except Exception:  # noqa: BLE001
+                    ko_session.rollback()
+                    logger.warning("knowledge_objects: stable_key backfill skipped", exc_info=True)
+                finally:
+                    ko_session.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("knowledge_objects: stable_key backfill unavailable", exc_info=True)
+
             # M層（LLM モデル選択, migration 061）: 起動時冪等 env → DB シード取込
             # （設計書 §3 手順⑤→④）+ PolicyBackend を DB 実装へ差し替え。
             # fail-open — シード・差し替えのいずれが失敗しても NullPolicyBackend の
