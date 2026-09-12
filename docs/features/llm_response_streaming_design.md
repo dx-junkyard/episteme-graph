@@ -7,6 +7,7 @@
 順序と依存の正本は [AI アシスタント UX ロードマップ](../architecture/assistant_ux_roadmap_2026-09-12.md)。
 Phase 1 = [学習チャットの入口統合](learning_chat_entry_unification_design.md)、
 Phase 2 = [画面文脈アダプター §11（SA層 Phase 4）](assistant_screen_adapter_design.md)。
+**Phase 1 / Phase 2 はいずれも 2026-09-12 実装済みで、本書が次の段**である。
 本書は Phase 1/2 の成果に依存せず単独で実装できる（触る地点が入口・grounding ではなく
 **生成の転送方式**だけのため）。
 

@@ -40,6 +40,9 @@
   ④ プロンプト組み立て                   … learning.py: _get_integrated_tutor_system_prompt() 等
   │   system プロンプト + 関連チャンク + 会話履歴。out_of_source なら OutOfSourceGuard を追加注入
   │
+  ④-b 画面文脈ブロック・選択箇所ブロック  … core/assistant_context/（SA層 Phase 4・決定論・非LLM）
+  │   画面が送った参照をサーバが学習者射影で解決し、当該ターンの発話の前にだけ置く（§④-b）
+  │
   ⑤ LLM 生成（temperature=0.3）          … llm.py: generate_text()
   │   末尾にドリルダウンリンクを Markdown で提示
   │
@@ -114,6 +117,42 @@ system プロンプトは通常モードで `_get_integrated_tutor_system_prompt
   ```
 
 生成は `generate_text(messages, temperature=0.3)`（精度重視）。`overall_tier == out_of_source` かつ非 casual のときは、`out_of_source_notice()` の注意書きを回答冒頭に追加します（discuss でも維持 — §3.5）。
+
+#### ④-b 画面文脈ブロック・選択箇所ブロック（SA層 Phase 4）
+
+**CostGate の直後・`generate_text` の前**（429 で返る往復では解決を走らせない）で、当該ターンの
+user メッセージだけを **「画面文脈ブロック → 選択箇所ブロック → 発話」** に組み替えます
+（正本: [assistant_screen_adapter_design.md](../features/assistant_screen_adapter_design.md)
+§11 / 実装記録 §11.15）。足場ターン（`messages[1]` = `context_block`）には混ぜません。
+
+- **画面文脈ブロック**: フロント（`app.js::getScreenContext`）が送るのは**参照だけ**
+  （要素の種別と ID・トピック・スライド・表示モード・チップの ID と40字の題名）。サーバが
+  権限3段（受講ゲート済み `course_data` → `scope_document_ids` または
+  `list_course_source_document_ids` → 各射影内の `ANY(:doc_ids)`）を通した**学習者射影**で解決し、
+  `core/assistant_context/resolvers/learning.py` の4解決器（`element` / `verification` /
+  `placement` / `view`）が事実文にします。**discuss の `all_visible` でも範囲は広がりません**（DM1）。
+  台帳の事実が実際に載った往復だけ、system の末尾に閉世界の拘束文
+  （`LEARNING_VERIFICATION_OUTPUT_CONSTRAINT`）が付きます。
+- **選択箇所ブロック**: `selection_text` の逐語（最大600字）を、表示中教材本文との突き合わせ
+  結果（「一致を確認済み」／「一致は確認できていません」）を**必ず併記して**載せます。
+  不一致でも落としません。画面の `segment_id` と `selection_segment_id` が食い違えば後者を
+  事実文に使います。
+- **信頼境界**: 両ブロックは PDF 由来の untrusted 入力（逐語・claim 抜粋）を運ぶので、足場に
+  `UNTRUSTED_SOURCE_NOTICE` が無い往復（検索ヒットもトピック教材も無いとき）は当該ターンの
+  先頭に同じ注意書きを1回だけ添えます（TB1〜TB4）。
+
+| 様相・モード | 画面文脈ブロック | 選択箇所ブロック |
+|---|---|---|
+| 通常（tutor / on_path / explore） | ○ | ○ |
+| `discuss`（`_doc:` 直付けを含む） | ○ | ○ |
+| `casual` | ✗（短い会話調と事実列挙が衝突する） | ○ |
+| `cycle_mode="elicit"` | 表示モードの事実1行だけ（主張本文・検証事実は問いの答えの手渡しになる。DB も引かない） | ○ |
+| `cycle_mode="diff"` / `backstage` / `check_scaffold` | ○ | ○ |
+
+**LLM 呼び出し回数は不変**（1ターン1コール）。`screen_context` を送らない要求では
+プロンプトが1バイトも変わりません。**保存（`learning_chat_history`）と痕跡には
+`screen_context` を焼き込みません**（SA6）。ブロックが非空の往復は、種別だけの観測イベント
+`structured_grounding_present` をサーバが記録します（学習者には何も表示しません）。
 
 ### ⑥ 誤解検出
 LLM の回答に誤解訂正のシグナル（`"訂正"`, `"より正確です"`, `"誤解"` など）が含まれると、

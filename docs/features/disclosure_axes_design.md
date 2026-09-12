@@ -136,3 +136,12 @@ AI 通過点（`ai_touchpoints`）は「どの操作で・何が送られるか�
   固定（core の推移的純粋性を崩さないため。`label_vocab` と同じ作法）。③音声も
   `learning_chat` と同じデータ種別として扱い、事実文1行に「音声のときは録音した音声」を
   含める（種別を増やすと同じ会話が2つの宣言に割れる）。
+
+**2026-09-12（学習チャットの宣言更新）**: 画面文脈アダプター Phase 4（構造 grounding。正本
+[assistant_screen_adapter_design.md](assistant_screen_adapter_design.md) §11.15）に合わせ、
+`learning_chat` の第5軸 `external_transfer` と `ai_touchpoints` を現物に追随させた
+（範囲選択した逐語と、画面で開いている要素についてサーバが解析結果から組み立てた事実が
+外部 AI へ送られる）。`learning:cycle_elicit` と `learning:cycle_diff` は**別項目に分けた**
+（elicit は構造の事実を受け取らないため、1項目にまとめると宣言が嘘になる）。`basis` に
+`core/assistant_context/resolvers/learning.py` を追加。**軸・`data_kind`・`label` は不変**で、
+学習者マニュアル（student §18）にも同じ事実を1文足した。

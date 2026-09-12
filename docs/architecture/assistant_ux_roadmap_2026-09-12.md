@@ -3,9 +3,10 @@
 [← アーキテクチャ概要](overview.md) ｜ 関連: [AI エージェント全件棚卸し（2026-09-10）](agent_inventory_and_refactoring_2026-09-10.md) /
 [チャット型 AI の共通規約](../features/assistant_common_infra_design.md) / [ビジョン §6](../vision.md#§6-横断設計原則カタログ)
 
-> **状態: 設計中**（Phase 1 = 入口統合は **2026-09-12 実装済み**。Phase 2 = 構造 grounding /
-> Phase 3 = ストリーミングは設計中。3段の順序と依存を確定した計画文書で、各段の正本設計書は
-> §3 の表。実装が済んだ段は各設計書側に §実装記録があり、本書は §6 の判定表だけを更新する）
+> **状態: 設計中**（Phase 1 = 入口統合・Phase 2 = 構造 grounding は **いずれも 2026-09-12
+> 実装済み**。**次は Phase 3 = ストリーミング**（未着手）。3段の順序と依存を確定した計画文書で、
+> 各段の正本設計書は §3 の表。実装が済んだ段は各設計書側に §実装記録があり、本書は §6 の
+> 判定表だけを更新する）
 
 ## 1. 問い — 「自然な知識へのアクセス」と「滑らかさ」の何が欠けているか
 
@@ -16,7 +17,7 @@
 | # | 欠落 | 事実（正本は各設計書） | 利用者が受ける影響 |
 |---|---|---|---|
 | 1 | **話し方を学習者が UI 語彙で選ぶ** | `intent_mode`（質問=on_path/explore / casual / discuss）・`cycle_mode`・`discuss_scope`・精読トグル・再構成・楽屋が別入口。サーバの4分類器 `_classify_intent` を casual は迂回し、**casual はテキストから入れない**（ハンズフリー音声のみ、`app.js` §ハンズフリー） | 「軽く聞く」と「論文と議論する」を学習者が事前に選ぶ。UI 語彙の学習コスト |
-| 2 | **会話の grounding が chunk 止まり** | 学習チャットの文脈 = 表示中教材 先頭5000字 + pgvector 上位8チャンク。パイプラインが作った claim / component / 理論操作グラフ / 台帳 / 配置は回答プロンプトに入らない。`selection_text` も帰属記録専用で回答に効かない。画面文脈アダプター（SA層）Phase 4 が未実装 | 構造の答えは別タブにあり、会話はチャンク文面の再構成になる。「ここについて質問」の期待とずれる |
+| 2 | **会話の grounding が chunk 止まり** | 学習チャットの文脈 = 表示中教材 先頭5000字 + pgvector 上位8チャンク。パイプラインが作った claim / component / 理論操作グラフ / 台帳 / 配置は回答プロンプトに入らない。`selection_text` も帰属記録専用で回答に効かない。画面文脈アダプター（SA層）Phase 4 が未実装（→ **2026-09-12 に解消**: SA層 §11.15。選択箇所と選択要素の構造事実が回答プロンプトに載る） | 構造の答えは別タブにあり、会話はチャンク文面の再構成になる。「ここについて質問」の期待とずれる |
 | 3 | **待ち時間が無音** | 意図分類 → 埋め込み検索 → 本体生成（+ advice / scaffold）が直列で、`core/llm.py` にストリーム経路が無い。`StreamingResponse` は export のみ | 長い回答ほど無音が伸びる。滑らかさへの影響が最大 |
 
 副次的な観察（本ロードマップの対象外・別件）: degraded 固定文の系統差（6種）、Copilot の応答が
@@ -47,7 +48,7 @@ KB テンプレートのみ、教員 AI モーダルの履歴保存先の不統�
 | Phase | 正本設計書 | 範囲 | migration | LLM 回数 |
 |---|---|---|---|---|
 | 1 入口統合 | [learning_chat_entry_unification_design.md](../features/learning_chat_entry_unification_design.md) | 単一 composer・様相はサーバ推定（HELP 非LLM pre-route の後）・明示 UI は override・casual のテキスト入口・`stance_source` の記録 | なし | +0〜1/ターン（既存分類器に吸収） |
-| 2 構造 grounding | [assistant_screen_adapter_design.md §11](../features/assistant_screen_adapter_design.md)（SA層 Phase 4） | `screen="learning"` の参照渡し・`learner_context_common` 射影のみで解決・選択テキストの注入・4-a〜4-d 段階導入 | なし | +0（SA3） |
+| 2 構造 grounding | [assistant_screen_adapter_design.md §11](../features/assistant_screen_adapter_design.md)（SA層 Phase 4） | `screen="learning"` の参照渡し・`learner_context_common` 射影のみで解決・選択テキストの注入・段階導入（**4-a / 4-b / 4-d 実装済み・4-c は保留**） | なし | +0（SA3） |
 | 3 ストリーミング | [llm_response_streaming_design.md](../features/llm_response_streaming_design.md) | `generate_text_stream`・`/chat/stream`（前処理 / 生成 / 後処理の分離）・終端イベントでメタ一括・U層の stream 計測 | なし | 不変 |
 
 ## 4. 3段に共通する不変条項（各設計書はこれを継承し、例外は設計書に明記する）
@@ -95,8 +96,8 @@ KB テンプレートのみ、教員 AI モーダルの履歴保存先の不統�
 | Phase | 受け入れ条件（体験） | 受け入れ条件（構造） | 状態 |
 |---|---|---|---|
 | 1 | 学習者が composer 1つで「軽い質問」「論文との議論」を書き分けずに済み、推定が外れたら1タップで直せる。casual にテキストから入れる | HELP pre-route の順序不変・DM1 のスコープ不変・discuss 中に casual を推定しない・cycle を推定で入らない・`stance_source` が痕跡に残る・LLM 回数 +0〜1 | **実装済み（2026-09-12）** — 記録は [入口統合設計書 §13](../features/learning_chat_entry_unification_design.md) |
-| 2 | 「ここについて質問」が選択箇所を踏まえて答える。表示中のチップ（claim / component / 式）に触れた質問が構造の事実で答えられる | `screen_context` 無しで byte 一致・解決器は学習者射影のみ経由・数値/内部ID/伏せフィールド非漏洩・LLM 回数 +0・`screen_context` 非保存 | 設計中 |
-| 3 | 最初の文字が数秒以内に出る。途中失敗でも同じ吹き出しが degraded に置き換わる | 非ストリーム API 不変・quota は最初のバイト前・終端イベントに DTO 全項目・hygiene は chunk と完成後・U層 usage を1回・reported/estimated を混ぜない | 設計中 |
+| 2 | 「ここについて質問」が選択箇所を踏まえて答える。表示中のチップ（claim / component / 式）に触れた質問が構造の事実で答えられる | `screen_context` 無しで byte 一致・解決器は学習者射影のみ経由・数値/内部ID/伏せフィールド非漏洩・LLM 回数 +0・`screen_context` 非保存 | **実装済み（2026-09-12）** — 4-a / 4-b / 4-d。4-c（表示中トピックの主張要約）は §11.13-3 のとおり保留。記録は [SA層設計書 §11.15](../features/assistant_screen_adapter_design.md) |
+| 3 | 最初の文字が数秒以内に出る。途中失敗でも同じ吹き出しが degraded に置き換わる | 非ストリーム API 不変・quota は最初のバイト前・終端イベントに DTO 全項目・hygiene は chunk と完成後・U層 usage を1回・reported/estimated を混ぜない | 設計中（**次はこの段**） |
 
 ## 7. 本ロードマップの範囲外（別件として記録）
 

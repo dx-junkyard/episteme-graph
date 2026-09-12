@@ -1,9 +1,9 @@
 # 画面文脈アダプター（Assistant Screen Adapter — AI 対話に「いま見ている画面」を渡す層）
 
 > **状態: 実装済み（正本・凍結）**（Phase 1 = グラフレビュー。Phase 2〜3 は §6 予約。
-> **Phase 4 = 学習チャットは §11 で設計中**）
+> **Phase 4 = 学習チャットは §11 で実装済み（2026-09-12・4-a/4-b/4-d。4-c は保留）**）
 > （2026-09-06 起票・同日実装。migration なし・新テーブルなし・LLM 呼び出し回数不変の
-> 読み時解決。実装記録は §10）
+> 読み時解決。実装記録は §10 = Phase 1 / §11.15 = Phase 4）
 
 **正本**: 本ドキュメント。
 **関連**: [グラフの論文層](graph_paper_layer_design.md)（PL1〜PL8 — Phase 1 の第1適用先で
@@ -171,8 +171,9 @@ kind "view"           : 表示モードの事実1行（「論文の順」を見�
 | 3 | Admin Copilot（全タブ） | 既存 `collectScreenContext()` に `screen` を追加 | 教材タブ: projector の status 事実 / コース管理: course_data の事実 | capability registry のロールで fail-closed（P1） |
 | 4 | 学習チャット（`app.js`） | 表示中トピック・スライド・選択テキスト（既存フィールド） | `learner_context_common` の学習者射影のみ | 本人可視の範囲だけ。数値・内部 ID・生 TeX 遮断を継承 |
 
-- **Phase 4 は §11 で設計に着手した**（2026-09-11 起票）。本表の行は要約のままとし、
-  語彙・解決器・予算・段階導入・ガードレールの正本は §11 に置く。
+- **Phase 4 は §11 で実装済み**（2026-09-11 起票・2026-09-12 実装。4-a/4-b/4-d）。本表の行は
+  要約のままとし、語彙・解決器・予算・段階導入・ガードレール・実装記録の正本は §11 に置く。
+- Phase 2（W層要素モーダル）/ Phase 3（Admin Copilot）は予約のまま未着手。
 
 
 
@@ -181,7 +182,7 @@ kind "view"           : 表示モードの事実1行（「論文の順」を見�
 - 画面状態の保存・履歴化・教員向け集約 — SA6。
 - 解決結果からの書き込み（承認・保存）— SA5。
 - 画面のスクリーンショット・DOM テキストの送信 — SA1。
-- 学習者向け Phase 4 の実装（設計予約のみ）。
+- 学習者向け Phase 4 の実装（v1 = Phase 1 時点では設計予約のみ。→ **2026-09-12 に実装** = §11 / §11.15）。
 
 ## 8. ガードレール（`backend/tests/test_assistant_context_{core,guardrails}.py` + 経路側）
 - `core/assistant_context/` が fastapi / sqlalchemy / `core.llm` を import しない。
@@ -291,12 +292,15 @@ content が生の発話である点（SA6）は設計どおり。
 
 ---
 
-## 11. Phase 4 — 学習チャットへの構造 grounding（設計）
+## 11. Phase 4 — 学習チャットへの構造 grounding
 
-> **状態: 設計中**（2026-09-11 起票）。3段の UX ロードマップの第2段
+> **状態: 実装済み（2026-09-12）**（2026-09-11 起票）。段階導入（§11.10）のうち
+> **4-a（選択テキストの注入）/ 4-b（`element` + `view`）/ 4-d（`verification` +
+> `placement`）が出荷済み**で、**4-c（`topic` / `visible`）は保留**（§11.13-3 の推奨どおり
+> 4-b の実測後に判断する）。3段の UX ロードマップの第2段
 > （Phase 1 = 入口統合 / **本節 = 構造 grounding** / Phase 3 = ストリーミング）。
-> migration なし・新テーブルなし・新エンドポイントなし・**LLM 呼び出し回数不変**を
-> 前提に置く（SA3）。実装着手時は本節に §11.x の実装記録を足す。
+> migration なし・新テーブルなし・新エンドポイントなし・**LLM 呼び出し回数不変**（SA3）。
+> 実装記録は §11.15。本文（§11.1〜§11.14）は設計時の記述で、実装との差分は §11.15 に置く。
 >
 > **前提の更新（2026-09-12）**: Phase 1（入口統合）は実装済み
 > （[learning_chat_entry_unification_design.md](learning_chat_entry_unification_design.md) §13）。
@@ -642,6 +646,8 @@ Phase 4 の価値（構造 grounding が回答を変えたか）を後から測�
    （`landscape.py:852` の `LEARNER_VISIBLE_STATUSES`）ので、**載せる（推奨）**。ただし
    画面に出ているものと AI が語るものでは、後者のほうが断定に聞こえやすい。
    → **推奨: 載せる。ただしラベルを事実文の中に含め、剥がれていないことをガードレールで固定する。**
+   → **採用（§11.15）**: `resolve_placement` が `provenance_label` を事実文の括弧内に載せ、
+   `test_assistant_context_learning_guardrails.py::TestProvenanceLabelsSurvive` が固定する。
 2. **SL1 の閉世界語彙は、生成プロンプトを通しても保てるか**。いまの SL1 は
    **サーバが書く文字列**に対する denylist で守られている。事実文として
    「このコーパスの中では検証記録がありません」を渡すと、LLM が
@@ -651,10 +657,17 @@ Phase 4 の価値（構造 grounding が回答を変えたか）を後から測�
    同型の固定指示文を1本足し（「検証記録の不在について言えるのは、このコーパスの中では、
    までである」）、その指示文の原文存在をガードレールで固定する。** 不変条項の解釈に
    関わるので、この2段構え（事実 + 出力側の拘束）でよいかをオーナー確認。
+   → **採用（§11.15）**: 拘束文は `LEARNING_VERIFICATION_OUTPUT_CONSTRAINT`
+   （`core/assistant_context/schema.py`）。**台帳由来の事実が実際にブロックへ載ったターンだけ**
+   system 末尾に足す。**禁止語を例示せず肯定形だけで書いた**（理由は定数のコメント —
+   本モジュールが SL1 denylist の走査対象であることと、表層形のプライミング回避）。
 3. **4-c（学習者が尋ねていないのに、表示中トピックの主張要約を毎ターン渡す）は
    「押し付けない」（原則12）に触れるか**。画面表示は変わらず AI の知識だけが増えるので
    触れないと読むが、AI が自発的に構造の話を始めるようになれば体験としては変わる。
    → **推奨: 4-b（明示選択のみ）までを先に出荷し、4-c は 4-b の実測後に判断する。**
+   → **採用（§11.15）**: 4-c は保留。`topic` / `visible` の解決器は**関数ごと存在しない**
+   （ガードレールが AST で不在を固定する）。判断材料は §11.7 の
+   `structured_grounding_present` の実測。
 
 ### 11.14 migration
 
@@ -663,3 +676,157 @@ Phase 4 の価値（構造 grounding が回答を変えたか）を後から測�
 ③`render_block` の additive kwarg ④`discuss_metric_events` の event 語彙1語
 （同テーブルの `event` は CHECK ではなくアプリ側の語彙表 — `observation.py:327` 近傍）。
 本節では**想定 migration 番号を書かない**（`docs/development_checklist.md` §5）。
+
+### 11.15 実装記録（2026-09-12）
+
+**範囲**: §11.10 の **4-a（選択テキストの注入）/ 4-b（`element` + `view`）/ 4-d
+（`verification` + `placement` — 選択要素に紐づく分だけ）**。**4-c（`topic` / `visible`）は
+保留**（§11.13-3 の推奨どおり、4-b の実測後に判断する）。migration なし・新テーブルなし・
+新エンドポイントなし・**LLM 呼び出し回数不変**（1ターン1コール・CostGate 消費位置も不変）。
+
+#### 11.15.1 ファイル
+
+| 層 | ファイル | 内容 |
+|---|---|---|
+| core | `backend/core/assistant_context/schema.py` | `SCREEN_LEARNING` / `KNOWN_SCREENS` への追加 / `BLOCK_HEADER_LEARNING` / `MAX_BLOCK_CHARS_LEARNING` / 選択ブロックの定数（ヘッダ・一致2文言・逐語上限）/ `LEARNING_VERIFICATION_OUTPUT_CONSTRAINT` / 学習側の項目上限・語彙表 / `infer_selection_kind()` |
+| core | `backend/core/assistant_context/registry.py` | `render_block(..., *, header, max_chars)` と `resolve(..., *, kinds)` の **additive kwarg**（既定は Phase 1 とバイト等価） |
+| core | `backend/core/assistant_context/selection.py`（新規） | `render_selection_block(selection_text, material_text)` — 制御文字除去 → 600字 → 空白正規化の部分文字列一致で「一致を確認済み」／「一致は確認できていません」を**必ず併記**（逐語は原文のまま・不一致でも落とさない） |
+| core | `backend/core/assistant_context/resolvers/learning.py`（新規） | 4解決器 `element` / `verification` / `placement` / `view`。`learner_context_common` からは **`contains_internal_id` / `is_internal_id_label` の純関数だけ** import する |
+| route | `backend/api/schemas.py` | `ScreenContextPayload` の移設（Phase 1 = W層と Phase 4 = 学習チャットの共通の受け口）+ `LearningChatRequest.screen_context`（optional） |
+| route | `backend/api/routes/deliberation.py` | `ScreenContextPayload` を `schemas` から再エクスポート（定義を二重化しない・import 面は不変） |
+| route | `backend/api/routes/learning.py` | `_screen_selected_element_type` / `_screen_element_sources` / `_screen_element_document_id` / `_learning_screen_sources` / `_learning_screen_context_block` + 合流点1箇所 + `_component_context_with_explanation` の抽出 |
+| route | `backend/api/routes/doubt.py` | `learner_ledger_line()` の抽出（`get_learner_ledger_line` は1行委譲・挙動不変） |
+| route | `backend/api/routes/landscape.py` | `learner_landscape_for_documents()` の抽出（`get_course_landscape` は `course_id` を付けて返すだけ・挙動不変） |
+| core | `backend/core/discuss/observation.py` | `METRIC_EVENT_VOCAB` に `structured_grounding_present` |
+| core | `backend/core/disclosure_axes.py` | `learning_chat` の `external_transfer` / `ai_touchpoints` / `basis` を現物に合わせて更新（§11.15.7） |
+| front | `frontend/public/js/app.js` | `getScreenContext(payload, latchKind)` + `window.LearningScreen` + `sendMessage` の送信ボディ1箇所 + ラッチの生 `kind` 保持 |
+
+#### 11.15.2 エンドポイント（新設ゼロ・optional フィールド1つ）
+
+`POST /api/learning/courses/{cid}/topics/{tid}/chat`（および同じコアを通る
+`POST /api/learning/documents/{ref}/discuss/chat`）に `screen_context:
+ScreenContextPayload | None` を足しただけ。**未指定・未知 `screen`・`selection.course_id`
+不一致では、LLM 入力が従来とバイト等価**（`render_block` が `""` を返す）。
+`ScreenContextPayload` の切り詰め規約（`screen` 40字 / `visible_entities` 20件 /
+`id` 160字 / `title` 40字・**422 にしない**）は §10.2 のまま。
+
+#### 11.15.3 合流点と prepend の順序
+
+合流点は `_learning_chat_core` の **`_consume_quota()` の直後・`generate_text` の前**1箇所。
+当該ターンの `messages[-1]` を
+
+```
+画面文脈ブロック（BLOCK_HEADER_LEARNING）
+↓
+選択箇所ブロック（SELECTION_BLOCK_HEADER + 一致の明示 + 引用）
+↓
+body.message（発話）
+```
+
+に組み替える（§11.5 の設計どおり。足場ターン `messages[1]` には混ぜない）。
+両ブロックは PDF 由来の untrusted 入力（逐語・claim 抜粋）を運ぶので、足場ターンに
+`UNTRUSTED_SOURCE_NOTICE` が無いターン（`cited_chunks` が空）では当該ターンの先頭に同じ
+注意書きを1回だけ添える（TB1〜TB4・§11.4。足場に既にあれば重複させない）。
+**保存と痕跡は不変**（`persist_chat_history` は `body.message` を受け取ったまま・痕跡 payload に
+`screen_context` のキーを足さない = SA6）。台帳由来の事実が**実際にブロックへ載ったとき**だけ、
+`messages[0]`（system）の末尾に `LEARNING_VERIFICATION_OUTPUT_CONSTRAINT` を足す。
+ブロックが非空のターンだけ観測イベント `structured_grounding_present` を**サーバ側で**記録する。
+
+**権限は3段**（§11.3 の設計どおり）: ①呼び出し元が解決済みの `course_data`（受講ゲート）
+②`scope_document_ids` があればそれ・無ければ `list_course_source_document_ids(course_data)`
+③各学習者射影の内部 SQL の `ANY(:doc_ids)`。**discuss の `all_visible` でも広げない**（DM1）。
+`screen_context` を送ってこないリクエストでは `list_course_source_document_ids` すら呼ばない
+（クエリを1本も増やさない）。
+
+#### 11.15.4 モード別（§11.5 の表の実装）
+
+| 様相・モード | 画面文脈ブロック | 選択箇所ブロック | 実装 |
+|---|---|---|---|
+| 通常（tutor / on_path / explore） | ○ | ○ | `kinds=None`（全解決器） |
+| `discuss`（`_doc:` 直付けを含む） | ○ | ○ | 同上。スコープは `scope_document_ids` のまま |
+| `casual` | ✗ | ○ | `_is_casual` のとき `_learning_screen_context_block` を**呼ばない** |
+| `cycle_mode="elicit"` | 表示モードの1行だけ | ○ | `kinds=("view",)` — `_learning_screen_sources` も**DB を1本も引かない** |
+| `cycle_mode="diff"` / `backstage` / `check_scaffold` | ○ | ○ | `kinds=None` |
+
+選択箇所ブロックは様相に依らず常に組む（学習者が明示的に選んだ箇所だけは渡す）。
+
+#### 11.15.5 設計本文との差分
+
+1. **`kinds` は sources の組み立てにも伝播させた**。§11.5 は解決器側の絞り込みだけを書いて
+   いたが、`kinds=("view",)` のときに射影を引いてから捨てるのは無駄で、かつ「elicit では
+   主張本文を**読みにも行かない**」ほうが条項として強い。`_learning_screen_sources` が
+   `kinds` を見て早期 return する。
+2. **`_screen_has_ledger` は「ブロックに載ったか」で判定する**。`sources` に台帳があるか
+   ではなく、`kinds=("verification",)` で再解決した事実文が**描画済みブロックに含まれるか**を
+   見る（予算超過で末尾から落ちた場合・`kinds` で外した場合を「載っていない」に含めるため）。
+   再解決は純関数で DB を引かない。
+3. **`segment_id` の申告条件をフロント側で絞った**。§11.2 は「`selection_segment_id` の写し」
+   としか書いていないが、通常チャットでは `currentAnchor().segment_id` が常に 0 を返すため、
+   そのまま載せると `kind` が永遠に `segment` になる（嘘になる）。申告するのは
+   ①「ここについて質問」の明示選択 ②レクチャー再生中の表示スライド、の2つだけ。
+   サーバ側は §11.2 のとおり `selection_segment_id` があれば画面申告の `segment_id` を
+   それで上書きする（`dataclasses.replace` で新しい `ScreenContext` を作る。入力は mutate しない）。
+   レクチャー中の表示スライド番号だけはクライアント申告のまま事実文に載る（表示状態の申告で
+   あってコーパス由来の事実ではない）。
+4. **`ScreenContextPayload` を `api/schemas.py` へ移した**。Phase 1 では
+   `routes/deliberation.py` に定義していたが、学習チャットの DTO が `schemas.py` にあるため
+   共通の受け口をそこへ置き、`deliberation.py` は再エクスポートだけにした（import 面は不変）。
+5. **学習者射影を2本、route から関数抽出した**（`learner_ledger_line` /
+   `learner_landscape_for_documents`）。§11.3 の「遮断を2箇所に書かない」を満たすための抽出で、
+   既存エンドポイントは委譲に置き換え**挙動は不変**。加えて `learning.py` 内で
+   `_component_context_with_explanation`（GET context と画面文脈の共通経路）を抽出した。
+6. **`element_type` の語彙吸収**。フロントの `structure_anchor` 語彙（`formula` 等）では
+   component と claim の区別が落ちるため、ラッチ元の生 `kind`（`data-evidence-ref` の前半）を
+   種別解決に使い、`formula → equation` はフロント・サーバの両方で吸収する（旧クライアント対策）。
+   どちらでも判別できなければ**種別を名乗らない**（推測で埋めない）。
+7. **`visible_entities` は受けるが解決しない**。フロントは契約どおり送る（SA1 の参照形）が、
+   4-c 保留のためサーバは正規化して捨てる。**事実文には一切現れない**ことをガードレールが固定する。
+8. **claim 本文の抜粋は 80 字の決定論切り出し**（`MAX_LEARNING_CLAIM_EXCERPT_CHARS`）。
+   要約しない（原則7）。
+9. **contextual 説明の status ラベル**: 学習者向け component 文脈 DTO の
+   `instance.explanation` は route が **`teacher_approved` の説明だけ**を充填し `status` キーを
+   持たないため、**status 不在は「承認済み」**とし、`candidate` / `pending` / `draft` /
+   `review_required` が明示されたときだけ「候補（未承認）」を付ける（未承認を承認済みと
+   言う側の誤りを構造的に防ぐ）。
+
+#### 11.15.6 オーナー判断（§11.13）の採否
+
+1. **AI 推定の配置を載せる** — 採用。`provenance_label`（「AIによる推定（未確認）」／
+   「教員確認済み」）を事実文の括弧内に含めたまま渡す。
+2. **台帳の事実 + 出力側の拘束の2段構え** — 採用。ただし拘束文は**禁止語を例示せず肯定形だけ**で
+   書いた（§11.13-2 の追記と定数のコメント）。拘束が付くのは事実が実際に載ったターンだけ。
+3. **4-c は保留** — 採用。解決器を書かず、不在をガードレールで固定した。
+
+#### 11.15.7 開示（可視性6軸）の追随
+
+`core/disclosure_axes.py` の `learning_chat` を現物に合わせた: `external_transfer` に
+「範囲選択した文」「画面で開いている要素についてサーバが組み立てた事実（要素の名前・関係する
+式や主張・検証記録の有無・分野の地図での位置）」を追記し、`ai_touchpoints` の
+`learning:cycle_elicit` と `learning:cycle_diff` を**別項目に分けた**（elicit は構造ブロックを
+受け取らないため、同じ説明文でまとめると嘘になる）。`basis` に
+`core/assistant_context/resolvers/learning.py` を追加。軸・`label` は変えていない。
+学習者マニュアル（`docs/manual/student/02-student.md` §18）にも同じ事実を1文足した。
+
+#### 11.15.8 テスト
+
+| ファイル | 固定する内容 |
+|---|---|
+| `backend/tests/test_assistant_context_learning_core.py` | 4解決器の事実文・上限・出所ラベル・入力非 mutate・数値/内部 ID 非漏洩・`render_block` の学習側ヘッダと予算（Phase 1 既定とのバイト等価も）・選択ブロックの一致判定・`infer_selection_kind` |
+| `backend/tests/test_assistant_context_learning_guardrails.py` | 新モジュールの推移的純粋性（fastapi / sqlalchemy / `core.llm` 非 import）・成果テーブル名や SQL 文字列の不在・書き込み動詞の不在・予算がコード定数であること・**登録 kind が `element` / `verification` / `placement` / `view` の4つだけ**・`resolve_topic` / `resolve_visible` が**関数として定義されていない**（AST）・`visible_entities` が事実文に出ないこと・SL1 denylist・拘束文の原文存在と「拘束文自身が禁止語を含まない」こと・出所ラベルの残存 |
+| `backend/tests/test_assistant_context_learning_route.py` | 後方互換（無指定でバイト等価・射影を1本も呼ばない）・`course_id` 不一致の無視・prepend 順・スコープ強制（`all_visible` でも広げない・空スコープは何も解決しない）・モード別（casual / elicit / diff / backstage / check_scaffold）・保存 content と痕跡 payload の非汚染・CostGate（429 では解決しない）・fail-soft・観測イベント・R層の伏せフィールドが届かないこと |
+| `backend/tests/test_learning_screen_context_ui_static.py` | `window.LearningScreen` の契約・キー集合と語彙・`segment_id` の申告条件・送信ボディ1箇所・**本文フィールドを読まない**（静的 grep）・題名40字と件数上限・重複排除・例外を出さない |
+| 追随（既存） | `test_assistant_context_guardrails.py`（`KNOWN_SCREENS` の各画面に解決器が登録されていること）/ `test_discuss_observation.py`（語彙表）/ `tests/api/test_doubt.py`（記帳者 ID 非開示の検査対象を `learner_ledger_line` へ） |
+
+件数の正本は上記テストファイル（本文に数を書き写さない）。
+
+#### 11.15.9 既知の限界と次の段
+
+- **配置の事実は選択要素の document が特定できたときだけ載る**。現行フロントは
+  `selection.document_id` を送らないため、component は射影 DTO（`instance.in_paper.document.id`）
+  から常に取れるが、claim / equation / figure は **evidence item に `document_id` があるとき**
+  に限られる。取れなければ配置の事実は**黙って出ない**（「見えないものがある」と言わせない = SA2）。
+- **版ピンとの意味論は §11.5 のまま不変**。参照集合は版ピン済みスナップショット・解決した中身は
+  live テーブルで、既存の `/components/{id}/context` と同じ（新しい凍結規約を発明していない）。
+- **次の段**: 4-c（`topic` / `visible`）の可否は `structured_grounding_present` の実測で判断する
+  （§11.13-3）。ロードマップの Phase 3 = ストリーミング
+  （[llm_response_streaming_design.md](llm_response_streaming_design.md)）が次。

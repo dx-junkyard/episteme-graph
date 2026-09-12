@@ -1957,7 +1957,8 @@ discuss 開幕画面の情報を「主語で分けて全部出す」層。正本
 選ばせるのをやめ、**入口を 1 つにして様相（会話の調子）を当該発話からサーバが読む**層。
 正本は `docs/features/learning_chat_entry_unification_design.md`（LC1〜LC8・§13 実装記録。
 AI アシスタント UX 3段ロードマップ `docs/architecture/assistant_ux_roadmap_2026-09-12.md` の
-Phase 1。Phase 2 = 構造 grounding（SA層 §11）/ Phase 3 = ストリーミングは未着手）。
+Phase 1。Phase 2 = 構造 grounding（SA層 §11）も 2026-09-12 実装済み / Phase 3 =
+ストリーミングは未着手）。
 
 - **不変条項の要点**: LC1 **推定してよいのは「様相」だけ**（`discuss_scope` / `cycle_mode` /
   `backstage` / `check_scaffold` はサーバが推定で切り替えない — DM1 / UC1 / SD4）/ LC2 明示は
@@ -2008,7 +2009,8 @@ Phase 1。Phase 2 = 構造 grounding（SA層 §11）/ Phase 3 = ストリーミ�
   `test_discuss_observation.py` の追随。
 - **非スコープ（v1）**: discuss / cycle / backstage の推定（LC1 で恒久排除）/ 様相の sticky 化・
   学習者ごとの既定様相の保存 / 教員向けの様相集約・誤ルーティング率の表示 / 精読モード・
-  再構成・楽屋の入口統合 / 学習チャットへの構造 grounding（= Phase 2）/ ストリーミング（= Phase 3）。
+  再構成・楽屋の入口統合 / ストリーミング（= Phase 3）。**Phase 2（学習チャットへの構造
+  grounding）は 2026-09-12 実装済み** — 上記「画面文脈アダプター（SA層）」節の Phase 4。
 
 ### 理解サイクル（Understanding Cycle, UCサイクル, migration 不要, 2026-08-13）
 
@@ -2806,16 +2808,41 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   `llm_user_content` の先頭に prepend（`selected_context` より前・当該ターンのみ）。**保存する
   `message.content` は不変**。sources の組み立ては `routes/theory_components.py::
   build_paper_layer_for_document`（GET paper-layer と同一経路）に一本化 — 二重実装しない。
+- **Phase 4 = 学習チャット（`screen="learning"`, 2026-09-12 実装・migration なし・新エンドポイント
+  なし・LLM 回数不変）**: 正本は同設計書 §11（実装記録 §11.15）。段階導入のうち **4-a（選択
+  テキストの注入）/ 4-b（`element` + `view`）/ 4-d（`verification` + `placement`）が出荷済みで、
+  4-c（`topic` / `visible`）は保留**（ガードレールが「登録 kind は element/verification/
+  placement/view の4つだけ・`resolve_topic` / `resolve_visible` が定義されていない」ことを AST で
+  固定。フロントは `visible_entities` を契約どおり送るがサーバは正規化して捨てる）。
+  core は `resolvers/learning.py`（4解決器。`learner_context_common` からは
+  `contains_internal_id` / `is_internal_id_label` の純関数のみ import）+ `selection.py`
+  （選択逐語は制御文字除去 → 600字 → 空白正規化の部分文字列一致で「一致を確認済み」／
+  「一致は確認できていません」を**必ず併記**・不一致でも落とさない）。`registry.py` は
+  `render_block(..., *, header, max_chars)` / `resolve(..., *, kinds)` の additive kwarg で、
+  既定は Phase 1 とバイト等価。合流点は `_learning_chat_core` の **`_consume_quota()` 直後・
+  `generate_text` 前**1箇所で、`messages[-1]` を「画面文脈ブロック → 選択箇所ブロック → 発話」に
+  差し替える（**保存 message・痕跡 payload は不変 = SA6**）。**モード別**: casual は画面文脈なし・
+  選択あり / `cycle_mode="elicit"` は `kinds=("view",)` で射影 DB クエリ0本 / diff・discuss・
+  楽屋・確認問題の壁打ちは両方。権限3段（受講ゲート済み course_data → `scope_document_ids` か
+  `list_course_source_document_ids` → 射影内 `ANY(:doc_ids)`）で、**discuss の `all_visible` でも
+  広げない**（DM1）。台帳の事実が実際にブロックへ載ったときだけ system 末尾に
+  `LEARNING_VERIFICATION_OUTPUT_CONSTRAINT`（SL1 の言い換え防止・**禁止語を例示せず肯定形**）。
+  `ScreenContextPayload` の正本は `backend/api/schemas.py`（`routes/deliberation.py` は再
+  エクスポート）。学習者射影は route から2本抽出（`routes/doubt.py::learner_ledger_line` /
+  `routes/landscape.py::learner_landscape_for_documents` — 既存 GET は1行委譲・挙動不変）。
+  観測は `discuss_metric_events` の `structured_grounding_present`（種別だけ・payload 空・
+  サーバ側記録）。ガードレールは `test_assistant_context_learning_{core,guardrails,route}.py` +
+  `test_learning_screen_context_ui_static.py`。
 - **横展開（設計予約、着手時に設計書へ §追加）**: Phase 2 = W層要素モーダル / Phase 3 = Admin
-  Copilot（既存 `collectScreenContext()` に `screen` を足して同じ語彙へ）/ Phase 4 = 学習チャット
-  （`learner_context_common` の学習者射影のみ）。**新しい画面に AI 対話を置くときは、画面
-  テキストを送らず、この規約で参照を渡して解決器を1本足す。**
+  Copilot（既存 `collectScreenContext()` に `screen` を足して同じ語彙へ）。**新しい画面に AI 対話を
+  置くときは、画面テキストを送らず、この規約で参照を渡して解決器を1本足す。**
 - **ガードレール**: `test_assistant_context_{core,guardrails}.py` + 経路側
   `test_deliberation_api.py` / `test_graph_review_api.py`（保存 content 非汚染・document 不一致の
   無視・CostGate 位置不変）+ `test_graph_review_ui_static.py`（送信ボディ・`getScreenContext`
   が本文フィールドを参照しない）。
-- **非スコープ（v1）**: LLM のツール呼び出し（SA3 で恒久排除）/ 画面状態の保存・集約 /
-  解決結果からの書き込み / DOM テキスト・スクリーンショットの送信 / 学習者向け Phase 4 の実装。
+- **非スコープ**: LLM のツール呼び出し（SA3 で恒久排除）/ 画面状態の保存・集約 /
+  解決結果からの書き込み / DOM テキスト・スクリーンショットの送信 / Phase 4 の 4-c
+  （表示中トピックの主張要約・`visible` の事実化。実測後に判断）。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
@@ -2850,8 +2877,9 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   は `run_with_repair` 側、他の LLM agent 10本は `llm_step` 側）。環境変数名・冪等性フラグ・
   トリガー条件・DB 書き込み・grounding の中身・429 の文言はドメイン側の責務。
 - **チャット型 AI の共通規約（2026-07-20 整理、正本は
-  `docs/features/assistant_common_infra_design.md`。学習者向け UX の次の3段＝入口統合 → 構造 grounding（SA層 Phase 4）→
-  ストリーミング は `docs/architecture/assistant_ux_roadmap_2026-09-12.md` が順序と依存の正本）** — ①会話履歴を LLM に渡すときは
+  `docs/features/assistant_common_infra_design.md`。学習者向け UX の3段＝入口統合 → 構造 grounding（SA層 Phase 4）→
+  ストリーミング は `docs/architecture/assistant_ux_roadmap_2026-09-12.md` が順序と依存の正本。
+  入口統合と構造 grounding は 2026-09-12 実装済みで、次はストリーミング）** — ①会話履歴を LLM に渡すときは
   `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep,
   current_message)` を必ず通す（学習チャット 20/2000、コースビルダー 20/4000/head_keep=2
   ＝フロントが履歴先頭に注入する course_draft 疑似ターン2件の保護、W層 16/4000/head_keep=1
