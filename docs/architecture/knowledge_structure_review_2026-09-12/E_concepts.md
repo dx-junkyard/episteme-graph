@@ -377,6 +377,7 @@ UI 導線の問題ではない（導線はどれも実装済み）。
 ## ⑥ 発見
 
 ### K-1 概念型の語彙が5セットに分裂し、DB は全部を1語に潰している
+→ **2026-09-13 一部解消**（本文 §4 Phase 1 実装記録: P1-4 — 型語彙の正本を `core/schema.py` に置き DB CHECK を語彙表 FK へ。`PRODUCES` の分裂も解消。concept 層の新設は Phase 3）
 **証拠**〔確〕: ① cartridge `concept_types` 8 / ② `component_types.json` 14 /
 ③ DB CHECK 9 / ④ `dsl_linking NODE_TYPES` 16 / ⑤ 未使用の `OntologyType` 11。
 `theory_components.component_type` は131行**全件 "theory"**、実際の型は自由文

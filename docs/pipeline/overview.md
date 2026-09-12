@@ -124,20 +124,22 @@ PDF
 
 ### 永続化されるもの / artifact に留まるもの
 
-最終ステージ `persist_claims_components_graph`（`document_pipeline/persistence.py`）が DB に書くのは次の3系統だけです。
+最終ステージ `persist_claims_components_graph`（`document_pipeline/persistence.py`）が DB に書くのは次の系統です
+（2026-09-13 知識オブジェクト層 Phase 1 — 正本 [knowledge_objects_design.md](../features/knowledge_objects_design.md)）。
 
 | 永続化先 | 元になる成果物 | 補足 |
 |---|---|---|
-| `theory_claims` | `claim_qualification` の `qualified_spans` | `persist_qualified_claims`。`evidence_text` は空文字で保存し、逐語根拠は EvidenceRegistry artifact に委譲する（#257）。`source_scope.legacy_ids` には `{block_id}:{span_id}` と、evidence→block_id の一意 join で結び付いた claim object の `claim_id`（親 + atomic 子）を入れる（2026-09-12 P0-6。span_id は block ごとに振り直されるため単独では逆引きできない） |
-| `theory_components` / `theory_component_links` | `component_assembly` の components | `persist_components` |
-| `theory_component_graphs` | `component_graph` の graph（+ `narrative_annotator` の注釈） | `persist_component_graph` |
+| `theory_claims` | `claim_object_builder` の **全 claim object**（親 / atomic 子 / 式由来合成）+ それに吸収されない `claim_qualification` の `qualified_spans` | `persist_qualified_claims`。各行に `origin`（`span` / `claim_object` / `atomic_rewrite` / `equation_synthesis`）・`parent_claim_id`・`claim_tier`・`stable_key`・`agent_claim_id`・`produced_by_run_id`。`claim_type` は `core/schema.py::CLAIM_TYPES` にあればその値（無ければ `unknown`・自称は `claim_type_text`）。`evidence_text` は空文字で保存し、逐語根拠は `knowledge_evidence` / EvidenceRegistry artifact に委譲する（#257）。`source_scope.legacy_ids` の旧キー（`{block_id}:{span_id}` 等）は維持 |
+| `knowledge_equations` / `knowledge_evidence` / `knowledge_derivation_steps` / `knowledge_symbols` | `equation_semantics` / `evidence_registry` / `derivation_chain` / `symbol_registry` | `persist_knowledge_objects`。record 全体は `agent_payload` に保持（`confidence` は列に昇格させない） |
+| `theory_components` / `theory_component_links` | `component_assembly` の components | `persist_components`。学習属性（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` / `linked_*_ids` / `operation`）を列に、残りを `agent_payload` に。links は派生構造で人間の書き込み経路が無いため document 単位の DELETE → 再作成（設計書の明示例外） |
+| `theory_component_graphs` | `component_graph` の graph（+ `narrative_annotator` の注釈） | `persist_component_graph`（1 document 1 行の upsert）。claim 参照は `claim_id_map` が全 claim を覆うため DB UUID になる |
+| `element_id_remap` + 参照の再係留 | 上記の同期で agent ID だけが変わった組 | `core/knowledge_objects/remap.py`。`element_explanations` / `epistemic_ledger` / `challenges` / `element_annotations` / `deliberation_sessions` / `element_identity_links` の agent-ID 参照を書き換える（一意制約に当たる行はスキップを記録） |
 
-**ClaimObjectBuilder が組み立てた `claim_objects`（atomic 子 claim・式由来の合成 claim `synth_claim_*`）は `theory_claims` に永続化されません。**
-これらは `document_analysis_runs.stage_outputs` の artifact にのみ存在します。したがって graph の
-`linked_claim_ids` には DB 行を持たない claim ID が混ざり得ます（グラフレビュー画面はこれを
-artifact から読み時に解決して「未承認（解析結果）」として表示する →
-[グラフの論文層 / グラフ対話レビュー](../features/admin.md)）。この非対称を解消するか（=
-claim_objects を永続化するか）はオーナー判断の未決事項です。
+**再解析は DELETE しません**（KO3）。`stable_key`（`document_id` + 正規化テキスト + 出典 block 集合の内容由来キー、
+`core/knowledge_objects/stable_key.py`）が一致する live 行は**同じ UUID のまま**内容を更新し、人間の確定列
+（`review_status` / `status` / `teacher_notes` 等）は触りません。一致しない旧行は `superseded_at` を刻んで残り、
+読み手は `theory_claims_live` / `theory_components_live` ビューだけを読みます（KO5）。監査は
+`theory_review_events`（`entity_type='knowledge_object'`）に run 単位で1行。
 
 なお `export_validation` が `failed_validation` を返した場合でも run は `completed` へ進み、
 エラー種別に応じて **components / graph の保存だけを落として claims は保存**する縮退
@@ -165,7 +167,7 @@ resume で artifact を再利用したステージには新規計算しない。
 
 ### artifact の run 選択（2026-09-12 P0-8）
 
-成果物（`stage_outputs._artifacts`）を読む側は `persistence.document_run_artifacts(document_id, *,
+成果物は `document_analysis_artifacts`（1 run × 1 stage = 1 行・migration 079。旧 `stage_outputs._artifacts` blob は 079 が1回だけ移送）に保存され、読む側は `persistence.document_run_artifacts(document_id, *,
 policy="adopted")`（1 document）か `resolve_artifact_runs(session, ids, *, policy)`（複数）を使う。
 `adopted` = `documents.active_analysis_run_id` → 無ければ最新の completed。`latest`（status 無視）は
 resume 判定・前回 run の options 継承（orchestrator / `routes/admin.py` の reanalyze 入口）専用。

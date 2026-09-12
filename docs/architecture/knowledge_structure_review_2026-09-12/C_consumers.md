@@ -158,6 +158,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 ## ⑤ 発見
 
 ### C-1. claim の ID 名前空間が3つに割れ、DB が正本でない
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録: P1-1 / P1-2 — 全 claim が `stable_key` 付きの DB 行になり、graph の claim 参照は DB UUID）
 **証拠**【確認】: `theory_claims.source_scope.legacy_ids` は `['claim_span_001','span_001']` の2値のみ。course の `linked_claim_ids` は `claim_span_001_9_sub02` 形式で **6/6・49/49 未解決**、graph は **0/30・0/72 未解決**、`element_explanations` の claim は **4/86**。根因は `persist_qualified_claims`（`persistence.py:550-`）が `qualified_spans` だけを保存し、ClaimObjectBuilder の atomic 子 claim と式合成 claim を保存しないこと。
 **困りごと**: claim が「承認・疑義・台帳・再構成出題・学習者アンカー」の共通の係留点になれず、各層が自前で artifact を開き直す。再解析で artifact が差し替わると**静かに別物を指す**。
 **改善方向**: atomic claim を一級の永続オブジェクトにする（`theory_claims` に `parent_claim_id` + `origin` を足して sub-claim も行にする）か、逆に「claim の正本は artifact」と決めて `theory_claims` を索引に降格する。中途半端な現状が最悪。
@@ -179,6 +180,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 `component_explanations` 0 / `component_endorsements` 0 / `element_explanations` approved 0 / `theory_components.review_status` に `teacher_approved` 0 / `theory_claims` 28 件全部 `teacher_review_required` / `theory_review_events` に component・claim・explanation・endorsement が **1 件も無い** / `reconstruction_items` **0 行** / `landscape_placements` confirmed 0。一方 freeze は**承認を経由せず** artifact から直接教材を作るので学習者には届く。**確定の弁を通らない経路だけが実際に機能している**。freeze 時の「コース登録」1操作が実質的な一括承認になっており `decision_context` の対象外。**改善方向**: ①freeze を「一括確定」として `decision_context` に記帳 ②承認 0 のまま配信されている事実を教員に事実文で見せる ③承認語彙の実態合わせはオーナー判断。
 
 ### C-7. 再解析が参照を壊し、壊れた参照が誰にも見えない
+→ **2026-09-13 解消**（P1-5 UUID 維持 + P1-6 `element_id_remap` と再係留）
 `epistemic_ledger` の 129 行が削除済み document のゾンビ。通常の reanalyze は台帳・注釈・痕跡の再係留をしない。**参照が切れた情報は落ちたのと同じ**。**改善方向**: 再解析時に `element_id_remap(document_id, run_id, old_id, new_id)` を1枚作る。`claim_id_map`（`persistence.py:695`）が既に存在するので**それを永続化するだけ**で大半は救える。
 
 ### C-8. artifact の run 選択ポリシが4種類

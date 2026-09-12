@@ -1,7 +1,9 @@
 # 知識構造の見直し提案 2026-09-12 — 論文の構造化成果を「学ぶ人の知識」として共通化・管理・転用するために
 
 > **状態: 提案（実装対象外）+ 調査記録（完了）**（2026-09-12。HEAD `c71fc32`・開発 DB の実データ2論文を
-> 原本と照合。**本調査以降の変更は未評価**。着手時は Phase ごとに専用設計書を切り、migration 番号は
+> 原本と照合。**Phase 0 は同日、Phase 1 は 2026-09-13 に実装済み**（§4 の各 Phase 実装記録・専用設計書
+> [knowledge_objects_design.md](../features/knowledge_objects_design.md)）。
+> **本調査以降の変更は未評価**。着手時は Phase ごとに専用設計書を切り、migration 番号は
 > `ls backend/db/` で採番する）
 >
 > **体制**: Fable 5.1 が指揮・統合、Opus 5 が5つの調査サブタスク（A 忠実度 / B 格納構造 / C 下流消費 /
@@ -86,19 +88,19 @@ artifact 側の規模: A = claim_object_builder 132 claims / equations 53 / symb
 
 | 事実 | 出典 |
 |---|---|
-| export API 自身が `export_source_policy: "artifact_first"` を名乗り DB を fallback とする。正規化2表は知識バイトの 1.4% / 0.8% | S-1 |
-| equation / evidence / derivation / symbol に DB テーブルが無い（92 テーブル中）。claim object の DB 化率 6.8% / 15.9% | S-2 |
+| export API 自身が `export_source_policy: "artifact_first"` を名乗り DB を fallback とする。正規化2表は知識バイトの 1.4% / 0.8% → **2026-09-13 Phase 1**: 知識オブジェクト層が正本（O-1(a)）・artifact は 1 run × 1 stage 1 行の生成ログへ | S-1 |
+| equation / evidence / derivation / symbol に DB テーブルが無い（92 テーブル中）。claim object の DB 化率 6.8% / 15.9% → **2026-09-13 解消**（P1-2 / P1-3: 全 claim object と `knowledge_*` 4 表） | S-2 |
 | 永続化される claim は `granularity="too_broad"` の**段落まるごと**（A 9/9）。atomic claim 132 件は捨てられる | F-2 |
-| claim_type 239 件の **84% が DB CHECK 語彙外** → 全行 `diagnostic_claim`。component_type は全行 `theory`。`claim_tier` は列が無い | F-3 |
+| claim_type 239 件の **84% が DB CHECK 語彙外** → 全行 `diagnostic_claim`。component_type は全行 `theory`。`claim_tier` は列が無い → **2026-09-13 解消**（P1-4） | F-3 |
 | `legacy_ids` は全行 `["claim_span_001","span_001"]`（span_id が block ごとに振り直され一意でない） | S-3 / F-4 |
-| agent ID は出現順由来。凍結コースが参照する `comp_002__r2` は現 DB に不在 | S-4 |
-| `content_hash` は artifact に存在するが保存されない | S-5 |
-| 再解析は `DELETE FROM theory_claims / theory_components` → 新 UUID・`teacher_review_required` 固定値で再 INSERT。C層承認・R層産出物が CASCADE で消える。六つのレンズ F2 の判断 D1 は済んでいるが**未実装** | S-6 |
-| `document_id` が TEXT で FK 無し。孤児 = document_figures 82.8% / epistemic_ledger 79.4% / theory_components 71.8%。孤児 run が stage_outputs の 17MB/18MB | S-8 |
-| stage_outputs 1 行が最大 10.5MB、revision ごとに deep merge で単調増加（7.4 倍） | S-9 |
+| agent ID は出現順由来。凍結コースが参照する `comp_002__r2` は現 DB に不在 → **2026-09-13 解消**（P1-1 stable_key。agent ID は `agent_*_id` 列に保持） | S-4 |
+| `content_hash` は artifact に存在するが保存されない → **2026-09-13 解消**（列に保存。同一性は `stable_key`） | S-5 |
+| 再解析は `DELETE FROM theory_claims / theory_components` → 新 UUID・`teacher_review_required` 固定値で再 INSERT。C層承認・R層産出物が CASCADE で消える。六つのレンズ F2 の判断 D1 は済んでいるが**未実装** → **2026-09-13 解消**（P1-5 `sync_live_rows`） | S-6 |
+| `document_id` が TEXT で FK 無し。孤児 = document_figures 82.8% / epistemic_ledger 79.4% / theory_components 71.8%。孤児 run が stage_outputs の 17MB/18MB → **2026-09-13 解消**（P1-7 migration 080） | S-8 |
+| stage_outputs 1 行が最大 10.5MB、revision ごとに deep merge で単調増加（7.4 倍） → **2026-09-13 解消**（P1-8 migration 079） | S-9 |
 | 同一 52 式が chunks に 19 回・凍結コースに 26 回・3 表現で複製（×46、3.7MB） | S-11 / C-10 |
-| `theory_components` は artifact の 60 フィールド中 46 を落とす（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` / `linked_*_ids`） | S-12 |
-| 説明・台帳・疑義が実体の無い ID に紐づく（`element_explanations` theory_claim 86 行中 82 行が対応行なし） | S-14 / F-13 |
+| `theory_components` は artifact の 60 フィールド中 46 を落とす（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` / `linked_*_ids`） → **2026-09-13 解消**（P1-9 列 + `agent_payload`） | S-12 |
+| 説明・台帳・疑義が実体の無い ID に紐づく（`element_explanations` theory_claim 86 行中 82 行が対応行なし） → **2026-09-13 解消**（P1-2 で全 claim が行に・P1-6 再係留。既存の宙に浮いた行は次の再解析で追随） | S-14 / F-13 |
 | export はあるが import が無い（転用は一方通行） | S-16 / C-14 |
 
 ### D3. 「学ぶ単位」が定義されていない（成果 → 教材 → 学習者）
@@ -257,6 +259,29 @@ src 1,859 → 1,924 pass（ベースラインからの増分がすべて追加�
 | P1-7 | `document_id` を UUID 統一して FK。`delete_material` を `_purge_document` に委譲 | 孤児 17MB の解消。削除経路 1 本 | S-8 |
 | P1-8 | artifacts を **1 ステージ 1 行**（`document_analysis_artifacts(run_id, stage, payload)`）に分割。`produced_by_run_id` を知識行へ | 部分更新・GIN・保持期間。「どの run のどのモデルが出したか」 | S-9 / S-10 |
 | P1-9 | `theory_components` から落ちている学習属性（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` / `linked_*_ids`）を列または GIN 付き `agent_payload` に | 学習単位属性の検索と**検証**（列でないものは検証されない） | S-12 / S-13 |
+
+#### Phase 1 実装記録（2026-09-13）
+
+専用設計書 [knowledge_objects_design.md](../features/knowledge_objects_design.md)（KO1〜KO10・§12）に従い、
+Fable 5.1 指揮 + Opus 5 の 4 担当（A スキーマ / B 永続化 / C 読み手 / D document_id・削除経路）で同日実装。
+migration は **078 / 079 / 080** に採番（`ls backend/db/` で確認）。オーナー判断は O-1(a)・O-2(a) を推奨どおり
+採用（設計書冒頭に明記・撤回可）。
+
+| # | 解消 | 実装先 |
+|---|---|---|
+| P1-1 | stable_key（`k1:` + sha256[:32]。材料は document_id + 正規化テキスト + 出典 block 集合）を claim / component / equation / evidence / derivation step / symbol に発行。既存行は起動時バックフィル | `core/knowledge_objects/stable_key.py` / `backfill.py`・078 |
+| P1-2 | claim object 全件（親 / atomic 子 / 式由来合成）+ 吸収されない span を `origin` / `parent_claim_id` / `claim_tier` 付きで行に。`claim_id_map` が全 claim を覆い graph の claim 参照が DB UUID になる | `persistence.persist_qualified_claims` |
+| P1-3 | `knowledge_equations` / `knowledge_evidence` / `knowledge_derivation_steps` / `knowledge_symbols` 新設・保存。`chunks.formulas` の ID 参照化は非スコープ（表を作るまで） | 078・`persistence.persist_knowledge_objects` |
+| P1-4 | 型語彙の正本を `core/schema.py`（CLAIM_TYPES 38 / COMPONENT_TYPES 21 / CLAIM_TIERS / CLAIM_ORIGINS）に。DB CHECK → 語彙表 FK。`CorePredicate.PRODUCES` | 078・`core/schema.py` |
+| P1-5 | 再解析は supersede（`sync_live_rows`: 一致 = 同 UUID 更新・人間の確定列は不変 / 不一致 = `superseded_at`）。DELETE は links の派生構造のみ明示例外。読み手は `theory_*_live` ビュー | `core/knowledge_objects/sync.py`・persistence・34 ファイルの読み手 |
+| P1-6 | `element_id_remap` + 6 表の再係留（一意制約はスキップ記録） | `core/knowledge_objects/remap.py`・078 |
+| P1-7 | 14 組の `document_id` を UUID + FK CASCADE、孤児は適用時に1回掃除、`delete_material` → `_purge_document` 委譲（図画像の MinIO も掃除） | 080・`deletion.py` / `routes/admin.py` |
+| P1-8 | `document_analysis_artifacts`（1 run × 1 stage 1 行）。旧 blob は 079 が1回移送。`save_artifact` は1ステージだけ書く。知識行に `produced_by_run_id` | 079・persistence・orchestrator |
+| P1-9 | components の学習属性を列に、残りを `agent_payload`（GIN） | 078・`persistence.persist_components` |
+
+検証: backend 14,637 pass / src 1,924 pass（2026-09-13）。開発 DB の複製に 3 本を 2 回適用して無変更、
+全 14 表が UUID + FK、孤児 0、artifact 78 行 = 移送元と一致、`DELETE FROM documents` 1 文で runs まで
+CASCADE、`sync_live_rows` の実 PG 往復（同キー = 同 UUID・保護列不変・不一致 = superseded）を確認。
 
 ### Phase 2 — 「学ぶ単位」の一級化（migration 1 本）
 

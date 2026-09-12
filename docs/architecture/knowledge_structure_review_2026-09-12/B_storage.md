@@ -141,11 +141,13 @@
 ## ⑤ 発見
 
 ### S-1 正本は artifact blob で、関係テーブルは劣化投影
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1: O-1(a) 知識オブジェクト層が正本・artifact は生成ログ）
 **[確認]** ① export が `artifact_first`（`export.py:3236`）で DB は fallback ② 永続グラフの参照は 100% agent ID ③ 正規化 2 表は知識バイトの 1.4%/0.8% ④ CLAUDE.md 自身が「artifact 併読」を正規手段として記述。
 **困りごと**: 検索・結合・制約・インデックス・トランザクションが知識本体に効かない。承認や同一視が、実体を持たない ID 文字列に対して行われる。
 **改善方向**: artifact を「不変の生成ログ」に降格し、知識オブジェクト（claim/equation/evidence/derivation/symbol）を一級の行として正規化する。
 
 ### S-2 知識オブジェクトの 9 割超に DB 行が無い
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-2 / P1-3: 全 claim object + `knowledge_equations` / `knowledge_evidence` / `knowledge_derivation_steps` / `knowledge_symbols`）
 **[確認]** 92 テーブルに equations/evidence/derivations/symbols は無い。`persist_qualified_claims`（`persistence.py:530-637`）は `qualified_spans` しか書かず、docstring(:130-141) が「`synth_claim_*` は never become a `theory_claims` row」と明記。
 **実測**: claim object 132→9（6.8%）/ 107→17（15.9%）。equation 53/64、evidence 101/207、derivation 11/5、symbol 238/119 は全部 DB 行ゼロ。
 **困りごと**: 「この式は他のどの論文で使われているか」が SQL で引けない。`element_identity_links` が live DB で **0 行**なのも、同一視すべき実体に行が無いことと無関係でない[推測]。
@@ -159,17 +161,20 @@
 **改善方向**: `block_id`+`span_id` の複合、または `content_hash` を論理キーに。`claim_link_index` は既に block_id キーへ移行済みなので同じ是正を適用。
 
 ### S-4 agent ID が位置依存で run を跨ぐと意味がずれる
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-1: `stable_key`。agent ID は `agent_*_id` 列に保持し `element_id_remap` で追跡）
 **[確認]** component は `comp_001`…連番＋`__op1`/`__r2`、claim は `claim_span_{span}_{n}_sub{m}`、evidence は `ev_0005`、node は `theory_op_0001`。すべて内容でなく出現順由来。
 **実測の dangling**: 凍結コース `5969a478` が参照する `comp_002__r2` は現 DB の legacy_ids 集合（`comp_002__op1..op5`, `comp_007__r1/r2`）に無い。2026-09-01 の再解析で refine 連番が振り直された[推測]が、参照が解決しないことは確認済み。
 **困りごと**: 再解析後に「教員が承認した component がどれだったか」を特定できない。差分レビューも原理的に不能。
 **改善方向**: 内容由来の安定キーを agent ID と別に発行し、永続化の同一性はそちらで取る。
 
 ### S-5 `content_hash` が既にあるのに使われていない
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-1: 列に保存。同一性判定は `stable_key`）
 **[確認]** `claim_object_builder.claims[].content_hash`（version 2）と `equation_semantics.equations[].content_hash` が artifact に存在。DB 側に列なし、persist も保存しない。
 **実測**: arXiv claim 132 中 83 に hash（`synth_claim_*` 49 は version 0 = 空）、distinct 84。equation は 53→52 distinct、fujimoto は 64→37 distinct（衝突あり）。
 **改善方向**: S-4 の安定キー第一候補。ただし `synth_claim_*` 未カバーと equation 衝突を先に潰す。
 
 ### S-6 再解析が教員の確定を物理削除する（F2/K1 未実装）
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-5: `core/knowledge_objects/sync.py::sync_live_rows` — 一致 = 同 UUID・確定列不変 / 不一致 = `superseded_at`）
 **[確認]** `persistence.py:567`(claims) `:700`(links) `:704`(components) `:1191`(graphs) `:261`(chunks)。chunks 削除は `theory_claims.chunk_id → chunks(id) CASCADE`(`db/013:37`) で claim を**二重に**消す。INSERT 側は固定値上書き（:741/:756/:600）。実データでも `theory_claims` 28 行すべてが `teacher_review_required`。
 **[確認] 連鎖**: `component_explanations→endorsements→citations`(`db/021:18,47,69`)、`reconstruction_items→learner_reconstructions`(`db/036:25,50`)。
 **[確認] 是正状況**: `docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md` §2 F2 行 / §4 第1波 項目12 / §9 判断 D1「認める。触るのは persistence.py のみ」。**migration もコミットも存在しない**（`stable_key`/`superseded_at` grep 0 件）。
@@ -177,10 +182,12 @@
 **改善方向**: 安定キー＋`superseded_at` で版化。DELETE を撤去し確定値を新行へ引き継ぐ。**`element_explanations`/`landscape_placements` が既に同型の規則を持つので、規則を発明せず移植すればよい。**
 
 ### S-7 早期 return で古い行が残る（S-6 の裏側）
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-5: 早期 return を撤去し空 incoming でも同期を走らせる）
 **[確認]** `persist_components` は components 空で `:657-659` 即 return（DELETE も走らない）。`persist_qualified_claims` は spans 空で `:556-558` 即 return。`ctx.skip_component_persist` が真でも persist ごとスキップ。
 **困りごと**: 「消える/古いまま残る」が抽出結果次第で変わり、どちらの状態かを画面からも事後にも判別できない（S-10）。
 
 ### S-8 `document_id` が TEXT で FK が無く、孤児が滞留
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-7: migration 080 で 14 組を UUID + FK CASCADE・孤児は適用時に1回掃除・`delete_material` → `_purge_document`）
 **[確認] 型**: TEXT = runs/components/claims/graphs/figures/deliberation_sessions/element_annotations/epistemic_ledger。UUID = chunks/element_explanations/landscape_placements/landscape_gap_signals。**同じ概念が 1 スキーマ内で 2 型**。
 **[確認] FK**: `documents` を参照する FK は chunks / landscape_placements / landscape_gap_signals の 3 本のみ。
 **孤児実測**: `document_figures` 560/676 (82.8%)、`epistemic_ledger` 323/407 (79.4%)、`theory_components` 94/131 (71.8%)、`theory_component_graphs` 9/13 (69.2%)、`document_analysis_runs` 19/39 (48.7%)、`theory_claims` 0/28（chunks CASCADE で偶然掃除される）。
@@ -190,6 +197,7 @@
 **改善方向**: `document_id` を UUID 統一して FK を張る。ポリモーフィック参照は削除経路を 1 本に集約（`delete_material` → `_purge_document` 委譲）。
 
 ### S-9 `stage_outputs` 単一行に全成果が乗る
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-8: migration 079 `document_analysis_artifacts`・`save_artifact` は1ステージだけ書く）
 **[確認] 実測**: 最大 10,462,715 chars（圧縮 2.83MB）。39 run 合計 69MB（圧縮 18MB）、平均 1.85MB。`_artifacts` が **99.5〜99.8%**。
 **[確認] revision での単調増加**（material `1c91e8ec-43a` の 9 run）:
 ```
@@ -208,11 +216,13 @@ revision  c427bd11  2,272,377  (accepted)
 **改善方向**: `document_analysis_artifacts(run_id, stage, payload)` に 1 ステージ 1 行で分割。
 
 ### S-10 生成物に run の刻印が無い
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-8: 知識行の `produced_by_run_id`）
 **[確認]** `theory_components`(32列)/`theory_claims`(16列)/`theory_component_graphs`(9列) に `run_id`/`model` 列が無い。`_stage_models` も部分的で、arXiv の run では 13 LLM ステージ中 6 つしか記録されていない（resume 再利用分は前回値保持）。per-record provenance は claim/equation の `content_hash` のみで、evidence/component はゼロ。
 **困りごと**: 「この component はどの run のどのモデルが出したか」に答えられず、モデル変更の比較評価ができない。
 **改善方向**: 版化と同時に `produced_by_run_id` を各知識行へ。
 
 ### S-11 同一 equation の巨大な複製
+→ **2026-09-13 一部解消**（P1-3: `knowledge_equations` が正本になった。`chunks.formulas` / 凍結コースの複製の ID 参照化は Phase 1 非スコープ）
 **[確認] 実測（arXiv、52 distinct equation ≒ 62KB）**
 
 | 所在 | 複製 | 実測バイト |
@@ -229,6 +239,7 @@ revision  c427bd11  2,272,377  (accepted)
 **改善方向**: equation を行にして ID 参照へ。`raw_text`/`plain_text` は導出可能なら列ごと落とす。少なくとも該当分だけに絞る。
 
 ### S-12 `theory_components` は artifact の 60 フィールド中 46 を落とす
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-9: 学習属性を列に・残りは `agent_payload`）
 **[確認]** artifact 60 キー vs DB 32 列。受け皿が無い主なもの:
 
 | 落ちるフィールド | 中身 | 「学ぶ単位」としての意味 |
@@ -258,6 +269,7 @@ comp_004 (fujimoto) ["e","x","t","l","c","r","a","sideband","n","i","cavity"]
 **改善方向**: 列に上げるか、export gate に「語彙項目の最小長」検証を足す。
 
 ### S-14 説明・台帳・疑義が「実体の無い ID」に紐づいている
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録 / [knowledge_objects_design.md](../../features/knowledge_objects_design.md)P1-2 + P1-6: 全 claim が行に・`element_id_remap` で再係留）
 **[確認] 実測**: `element_explanations` の `theory_claim` 86 行中 82 行（95.3%）が対応 `theory_claims` 行を持たない `element_id`。`equation` 150 行はテーブル自体が無い。`epistemic_ledger` は生存 doc 上でも claim target の 51% 未解決、equation target 31 行は全部 `eq_op_*`（グラフノード ID）。
 **[確認] 設計上は意図的**: agent ID をキーにすることで再解析の UUID 変更に耐える（S-6 への防御）。
 **困りごと**: 防御にはなるが参照整合性を DB で保証できない代償。承認済み説明が「存在しない要素の説明」になっても誰も気づかない。agent が同じ要素に別 ID を振れば旧行は superseded にもならず新 candidate と併存する[推測]。

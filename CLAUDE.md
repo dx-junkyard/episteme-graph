@@ -2911,8 +2911,8 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 論文の構造化成果を「学ぶ人の知識」として共通化・管理・転用するための見直し
 （正本 `docs/architecture/knowledge_structure_review_2026-09-12.md`、D1〜D5 の診断と Phase 0〜4）。
 Phase 0 の 10 項目は設計書を切らず同日に実装し、レビュー文書の各行に解消注記を付けた（§4 Phase 0
-実装記録）。Phase 1 以降（stable_key・claim 親子・equation/evidence テーブル・再解析 supersede・
-学習単位・概念レジストリ）は §6 のオーナー判断 O-1〜O-5 を待って Phase ごとに設計書を切る。
+実装記録）。Phase 1（知識オブジェクトの一級化）は 2026-09-13 に専用設計書を切って実装済み（次節）。Phase 2 以降
+（学ぶ単位・概念レジストリ・転用）は §6 のオーナー判断 O-3〜O-5 を待って Phase ごとに設計書を切る。
 
 - **P0-1 rhetorical_role の 64 打ち切り廃止**: 既定は全 body_paragraph を処理（env
   `RHETORICAL_ROLE_MAX_BLOCKS`、0 = 上限なし。`config["max_blocks"]` が優先）。上限があるときは
@@ -2950,6 +2950,62 @@ Phase 0 の 10 項目は設計書を切らず同日に実装し、レビュー�
   尽くし `details` に件数を入れない）。orchestrator は `_attach_coverage` だけがこのキーを組み立て
   （`test_pipeline_coverage_report.py`）、8 ステージに付与。新ステージで打ち切りがあるなら同じ形式で
   報告する（`docs/pipeline/overview.md` §4）。
+
+### 知識オブジェクト層（知識構造の見直し Phase 1, migration 078/079/080, 2026-09-13）
+
+論文の構造化成果を **stable_key（内容由来・版非依存キー）を持つ一級の行**にし、再解析を DELETE ではなく
+supersede 遷移にする層。正本は `docs/features/knowledge_objects_design.md`（KO1〜KO10・§12 実装記録。
+親は `docs/architecture/knowledge_structure_review_2026-09-12.md` §4 Phase 1）。オーナー判断は
+O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加で既存行不変、六つのレンズ D1
+（persistence.py への手入れを認める）を前提にした。**A層（`src/episteme_graph/agents/`）は非改変**。
+
+- **stable_key の正本は `core/knowledge_objects/stable_key.py`**（純関数。`digest = "k1:" + sha256[:32]`、材料は
+  `document_id` + 正規化テキスト + 出典 block_id 集合 + 種別固有の少数の構造項。正規化は agent 側 `content_hash`
+  と同じ `episteme_graph.agents.content_normalization`。run_id・出現順・agent ID・confidence を材料にしない。
+  同一 run 内の衝突は `dedupe_stable_keys` が agent ID 昇順で `#2`…）。既存行は起動時 `backfill_stable_keys`
+  （lifespan・fail-open・NULL 行のみ）で近似キーを埋める。
+- **再解析は DELETE しない（KO3）**: `core/knowledge_objects/sync.py::sync_live_rows` が「stable_key 一致 → 同 UUID で
+  内容列を更新（`review_status` / `status` / `teacher_notes` / `created_by`、人間が触った component の
+  `name` / `summary` は不変）/ 不一致の旧行 → `superseded_at` / `superseded_by_run_id` 刻印 / 新規 → INSERT」。
+  `persist_qualified_claims` / `persist_components` / revision accept の `_rebuild_*_in_session` はすべてこれを通る。
+  **`theory_component_links` だけは派生構造として DELETE → 再作成を明示例外**として維持。早期 return（S-7）は撤去。
+- **全知識オブジェクトが行になる（KO4）**: claim は claim object 全件（親 `claim_object` / atomic 子 `atomic_rewrite` /
+  式由来 `equation_synthesis`）+ 吸収されない span（`span`）を `origin` / `parent_claim_id` / `claim_tier` 付きで。
+  equation / evidence / derivation step / symbol は `knowledge_equations` / `knowledge_evidence` /
+  `knowledge_derivation_steps` / `knowledge_symbols`（`persist_knowledge_objects`。record 全体は `agent_payload`）。
+  components の学習属性（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` /
+  `linked_*_ids` / `operation`）は列に。`claim_id_map` は全 claim の agent ID を覆うので graph の claim 参照は DB UUID。
+- **読み手は live ビューを読む（KO5）**: `theory_claims_live` / `theory_components_live`（`superseded_at IS NULL`）。
+  基表を SELECT してよいのは `persistence.py` / `versioning/deletion.py` のみ（`test_knowledge_objects_guardrails.py`
+  が allowlist で固定）。**この2表に列を足す migration は末尾で `CREATE OR REPLACE VIEW` を再実行する**
+  （`test_knowledge_objects_vocab.py` が固定）。
+- **artifact は生成ログ（KO6）**: `document_analysis_artifacts(run_id, stage, payload)` に 1 run × 1 stage = 1 行
+  （migration 079 が旧 `stage_outputs._artifacts` blob を1回だけ移送）。`upsert_analysis_run` /
+  `update_revision_status` / `accept_revision` は `_artifacts` を表へ upsert し、orchestrator の `save_artifact`
+  は**その1ステージだけ**を渡す（S-9 の単調増加の解消）。読み手の契約（`document_run_artifacts()` が
+  `{stage: payload}` を返す・run getter が `stage_outputs["_artifacts"]` を hydrate）は不変。知識行は
+  `produced_by_run_id` で自分を出した run を指す。
+- **型語彙の正本は `core/schema.py`（KO7）**: `CLAIM_TYPES` / `CLAIM_TIERS` / `COMPONENT_TYPES` / `CLAIM_ORIGINS` /
+  `KNOWLEDGE_OBJECT_KINDS`、`CorePredicate.PRODUCES`。DB は CHECK ではなく語彙表 `knowledge_claim_types` /
+  `knowledge_component_types` への FK（migration がコードと同じ列挙を `ON CONFLICT DO NOTHING` でシード — 一致は
+  テストで固定）。語彙外は `claim_type='unknown'` / `component_type='theory'` に丸め、自称は `claim_type_text` /
+  `component_type_text` に残す。
+- **参照の再係留（KO8）**: `core/knowledge_objects/remap.py::record_and_reanchor` が `element_id_remap` に
+  (old_id → new_id) を残し、`element_explanations` / `epistemic_ledger` / `challenges` / `element_annotations` /
+  `deliberation_sessions` / `element_identity_links` の agent-ID 参照を同一トランザクションで書き換える
+  （一意制約に当たる行はスキップを `reanchored` に記録。推測で結び直さない）。
+- **`document_id` は UUID + FK（KO9）**: migration 080 が 14 組の (表, 列) を TEXT → UUID にし
+  `REFERENCES documents(id) ON DELETE CASCADE` を張る。適用時に material_id 形を UUID へ正規化し、`documents` に
+  対応行の無い**到達不能な孤児行だけを1回掃除**（本 Phase 唯一の破壊的ステップ。`''` は NULL に倒す）。
+  Python 側は `document_id IN (:a, :b)`（両形）/ `id::text = document_id` 比較を撲滅し、`SELECT document_id::text`
+  で str を返す（psycopg2 は uuid 列を `uuid.UUID` で返す）。**material_id しか無い経路は `_resolve_document` /
+  `resolve_document_access` で UUID に解決してから知識表を引く**。教材の物理削除は `_purge_document` 1 本
+  （`delete_material` は委譲。`document_figures.minio_key` も集めて best-effort で消す）。
+- **監査**: `AUDIT_ENTITY_KNOWLEDGE_OBJECT`（run 単位の要約1行・件数のみ）。学習者向け DTO に `stable_key` /
+  `produced_by_run_id` / `superseded_at` を出さない（KO10・ガードレール）。
+- **ガードレール**: `test_knowledge_objects_{guardrails,vocab,stable_key,backfill,sync,remap,persist,document_id}.py`。
+- **非スコープ（v1）**: 学ぶ単位 / 概念レジストリ / import・JSON-LD（Phase 2〜4）/ superseded 行の教員向け履歴 UI /
+  `chunks.formulas` の ID 参照化 / W層 meaning commit の旧本文退避。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
@@ -3066,6 +3122,10 @@ Phase 0 の 10 項目は設計書を切らず同日に実装し、レビュー�
   これに委譲する。**学習者向け文脈の射影・遮断を再実装しない**（agent ID トークン遮断は
   component レーンのみ＝claim/equation への拡張はオーナー判断待ち。DTO は component=旧6キー /
   element=ITEM v2 の意図的世代差を維持）。
+- **`backend/core/knowledge_objects/`**（2026-09-13 新設、正本設計書 `docs/features/knowledge_objects_design.md`） —
+  知識オブジェクトの同一性（`stable_key`）・live 行の同期（`sync_live_rows`）・参照の再係留
+  （`record_and_reanchor`）の正本。**構造化成果を DB に書く経路を新設するときは DELETE → 再 INSERT を書かず
+  `sync_live_rows` に接続し、読み手は `_live` ビューを読む**。
 - **`backend/core/trace_registry.py`**（2026-08-15 新設、正本設計書
   `docs/features/trace_registry_sovereignty_ledger_design.md`） — `interest_traces` の
   **kind 登録簿の正本**（全 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、
@@ -3097,7 +3157,8 @@ Phase 0 の 10 項目は設計書を切らず同日に実装し、レビュー�
 
 ### 3. ナレッジグラフ DSL
 - 概念間の関係は `CorePredicate` 列挙型で定義:
-  `CAUSES, INHIBITS, CORRELATES, DEFINES, MEASURES, TRANSFORMS, REQUIRES, CONTAINS, EQUIVALENT`
+  `CAUSES, INHIBITS, CORRELATES, DEFINES, MEASURES, TRANSFORMS, REQUIRES, CONTAINS, EQUIVALENT, PRODUCES`
+  （`PRODUCES` は 2026-09-13 に dsl_linking の `CORE_PREDICATES` と揃えて追加。包含はテストで固定）
 - 各エッジは `CausalEdge` スキーマに準拠
 - 抽象構造は SMILES DSL で表現: `(varID:OntologyType:value) ==[CorePredicate:verb:polarity]=> (...)`
   ※化学の SMILES ではなく独自形式

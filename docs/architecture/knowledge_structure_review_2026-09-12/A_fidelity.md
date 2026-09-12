@@ -114,10 +114,12 @@ summary も機械文（`"Reusable theory unit (transform_representation) within 
 - **示唆**: `persist_qualified_claims` が `claim_object_builder` の出力を親子2階層（`parent_claim_id`）で保存する。
 
 ### F-3. 型語彙が DB の CHECK 制約で潰れ、横断検索の軸が消える 🔴
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録: P1-4 — `core/schema.py` の CLAIM_TYPES / COMPONENT_TYPES / CLAIM_TIERS を正本に、DB は語彙表 FK。`claim_tier` は列に昇格）
 - claim_type 239件・23語彙のうち **201/239（84%）が CHECK 語彙外** → 全行 `diagnostic_claim`。component_type は全行 `theory`（実型は `component_type_text` 自由文字列のみ）。`claim_tier`（`paper_core` / `paper_supporting` / `background` / `prior_work`）は DB に列がなく永続化されない。
 - **示唆**: 語彙の正本を1箇所に置き、DB は CHECK を捨てて語彙テーブル参照に。`claim_tier` は列に昇格。
 
 ### F-4. claim の同一性（ID）が壊れている 🔴
+→ **2026-09-13 解消**（P1-1 `stable_key` + P1-2 全 claim の行化。P0-6 の `legacy_ids` は併存）
 - `legacy_ids` は**論文A 9件すべて `["claim_span_001","span_001"]`**。同一 claim を指す ID が3方式併存（`claim_span_001_9` / `claim:tex_b104:span_001` / DB UUID）、②形式は A 14件 / B 15件が解決不能。
 - **示唆**: span_id を `{block_id}:{n}` で一意化し、claim_id をそこから決定論導出。参照形式を全ステージで1方式に統一。
 
