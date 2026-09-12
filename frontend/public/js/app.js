@@ -52,6 +52,10 @@
     // discuss モード（論文と話す）のスコープ選択。トピック切替で discuss を離れても
     // 選択値自体は保持する（再入場時に前回の選択を引き継ぐ）。
     discussScope: "course_sources", // "course_sources" | "all_visible"
+    // LLM 応答ストリーミング Phase 3-a（llm_response_streaming_design.md §5 / ST9）:
+    // サーバが配る機能フラグの鏡。ログイン後に1回だけ取得し、取得失敗・非200 は
+    // false のまま（fail-to-current = 従来の JSON 経路だけを使う）。数値は持たない。
+    clientFeatures: { chat_streaming: false },
   };
 
   // 送信直後の描画で「新しい問い」の先頭へスクロールさせるための一時フラグ（state には
@@ -4378,6 +4382,267 @@
   // 画面文脈アダプターの契約（window.<Screen>.getScreenContext）。
   window.LearningScreen = { getScreenContext: getScreenContext };
 
+  // ══════════════════════════════════════════════════════════════════
+  // LLM 応答のストリーミング Phase 3-a
+  // （docs/features/llm_response_streaming_design.md §2.2 / §5, ST8/ST9）
+  //
+  // 応答の到着を待たせない。ただし**ストリームは表示の先行であって正本ではない**
+  // （ST1）ので、履歴・痕跡・出典チップ・数式・ドリルダウンはすべて `final` 後の
+  // 従来経路（renderChat）でだけ作る。delta は本文の素のテキストを足すだけ。
+  //
+  //  - EventSource は使えない（Authorization ヘッダを付けられない。§2.1）。
+  //    fetch + ReadableStream で text/event-stream を自前パースする。
+  //  - ストリーム中は renderChat() を呼ばない（毎回 innerHTML 全再構築のため）。
+  //  - 学習者に数値（トークン・秒・残回数）を出さない（ST8）。
+  // ══════════════════════════════════════════════════════════════════
+
+  // 停止・中断時の事実文（数値を含めない, ST8）。
+  const STREAM_STOP_NOTICE = "途中で止めました。この応答は記録に残していません。";
+  const STREAM_ERROR_NOTICE = "応答を受け取れませんでした。もう一度お試しください。";
+
+  const _streamState = {
+    active: false,      // ストリーム経路で送信中（停止ボタンを出す条件）
+    controller: null,   // AbortController（停止ボタン）
+    bubble: null,       // 逐次表示中の <div class="mg ai streaming">
+    stanceEl: null,     // start で先出しした様相の1行（final 後に除去して二重描画を防ぐ）
+    aborted: false,     // 本人が停止ボタンを押した
+    clientFeaturesFetched: false,
+  };
+
+  // renderChat() は ca.innerHTML を全消去するため、停止・失敗の事実文は
+  // renderChat() の**後**に1枚だけ足す（sendMessage の末尾で消費する）。
+  let _pendingStreamNotice = null;
+
+  // ログイン後に1回だけ取得する。失敗・非200 は false のまま（fail-to-current）。
+  async function fetchClientFeaturesOnce() {
+    if (_streamState.clientFeaturesFetched) return;
+    _streamState.clientFeaturesFetched = true;
+    try {
+      const res = await apiFetch("/learning/client-features");
+      if (!res.ok) return;
+      const data = await res.json();
+      state.clientFeatures = { chat_streaming: !!(data && data.chat_streaming) };
+    } catch (_) { /* fail-to-current: 従来の JSON 経路のみ */ }
+  }
+
+  // ストリーム経路を使ってよい送信か。通常のテキスト送信だけが対象で、
+  // 音声・casual（ハンズフリー）／書き直し（replace_message_id）／typed action は
+  // 従来の JSON 経路を1バイトも変えずに通す（§5.1 / §5.4）。
+  function shouldStreamChatTurn(payload, replaceMessageId) {
+    if (!state.clientFeatures || state.clientFeatures.chat_streaming !== true) return false;
+    if (replaceMessageId) return false;
+    if (typeof voiceState !== "undefined" && voiceState.active) return false;
+    if (!payload) return true;
+    if (payload.intent_mode === "casual") return false;
+    if (payload.support_action) return false;
+    if (payload.ui_anchor) return false;
+    return true;
+  }
+
+  // 自動スクロールは「すでに最下部付近にいるとき」だけ（読み返し中に引き戻さない, §5.3）。
+  const STREAM_AUTOSCROLL_SLACK_PX = 40;
+  function autoScrollChatIfAtBottom() {
+    const ca = document.getElementById("chat-area");
+    if (!ca) return;
+    const atBottom = ca.scrollHeight - ca.scrollTop - ca.clientHeight <= STREAM_AUTOSCROLL_SLACK_PX;
+    if (atBottom) ca.scrollTop = ca.scrollHeight;
+  }
+
+  // タイピングインジケータを逐次バブルに置き換える（renderChat は呼ばない）。
+  function openStreamingBubble() {
+    const ca = document.getElementById("chat-area");
+    if (!ca) return null;
+    const typing = ca.querySelector(".typing");
+    if (typing && typing.parentNode) typing.parentNode.remove();
+    const bubble = document.createElement("div");
+    bubble.className = "mg ai streaming";
+    ca.appendChild(bubble);
+    _streamState.bubble = bubble;
+    autoScrollChatIfAtBottom();
+    return bubble;
+  }
+
+  // ストリームが使えず従来の JSON 経路へ退避するときに、消したタイピングインジケータを
+  // 戻す（沈黙のまま待たせない）。renderChat は呼ばない（innerHTML 全再構築のため）。
+  function restoreTypingIndicator() {
+    const ca = document.getElementById("chat-area");
+    if (!ca || !state.sending || ca.querySelector(".typing")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "mg ai";
+    const typing = document.createElement("div");
+    typing.className = "typing";
+    for (let i = 0; i < 3; i++) typing.appendChild(document.createElement("span"));
+    wrap.appendChild(typing);
+    ca.appendChild(wrap);
+  }
+
+  function closeStreamingBubble() {
+    if (_streamState.stanceEl && _streamState.stanceEl.parentNode) _streamState.stanceEl.remove();
+    if (_streamState.bubble && _streamState.bubble.parentNode) _streamState.bubble.remove();
+    _streamState.stanceEl = null;
+    _streamState.bubble = null;
+  }
+
+  // start の様相（{stance, source, label}）を本文到着前に1行だけ出す。規則は
+  // renderStanceLine と同じ（推定・tutor 以外・discuss 中でない）。final 後の
+  // renderChat が同じ行を描くので、ここで出した要素は closeStreamingBubble で消す。
+  function showStreamingStanceLine(stance) {
+    if (!stance || stance.source !== "inferred" || !stance.stance || stance.stance === "tutor") return;
+    if (isDiscussMode()) return;
+    const ca = document.getElementById("chat-area");
+    if (!ca || !_streamState.bubble) return;
+    const el = document.createElement("div");
+    el.className = "stance-line";
+    el.setAttribute("data-ui-anchor", "chat.stance-chip");
+    const fact = document.createElement("span");
+    fact.className = "stance-fact";
+    fact.textContent = (stance.label || "") + "答えました。";
+    el.appendChild(fact);
+    ca.insertBefore(el, _streamState.bubble);
+    _streamState.stanceEl = el;
+  }
+
+  // 送信ボタンを送信中だけ「停止」に差し替える（新しい帯・行を作らない, §5.3）。
+  function setSendButtonStopMode(on) {
+    const btn = document.getElementById("send-btn");
+    if (!btn) return;
+    if (on) {
+      if (!btn.dataset.sendLabel) btn.dataset.sendLabel = btn.textContent;
+      btn.textContent = "停止";
+      btn.classList.add("stop-mode");
+      btn.title = "生成を止める（この応答は記録に残りません）";
+    } else {
+      btn.textContent = btn.dataset.sendLabel || "送信";
+      btn.classList.remove("stop-mode");
+      btn.title = "送信（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）";
+    }
+  }
+
+  function abortChatStream() {
+    if (!_streamState.active || !_streamState.controller) return;
+    _streamState.aborted = true;
+    try { _streamState.controller.abort(); } catch (_) { /* noop */ }
+  }
+
+  // `event: name` + `data: <JSON 1行>` の1フレームを分解する。
+  function parseSseFrame(frame) {
+    let name = "message";
+    const dataLines = [];
+    frame.split("\n").forEach(function (line) {
+      if (line.indexOf("event:") === 0) name = line.slice(6).trim();
+      else if (line.indexOf("data:") === 0) dataLines.push(line.slice(5).replace(/^ /, ""));
+    });
+    if (!dataLines.length) return null;
+    try {
+      return { name: name, data: JSON.parse(dataLines.join("\n")) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // SSE を読み切る。戻り値の status:
+  //   "final"       … final イベントを受け取った（data に LearningChatResponse 相当）
+  //   "aborted"     … 本人の停止（reason:"user"）／start 後の切断（reason:"error"）
+  //   "unsupported" … 404 or start 前のネットワーク失敗 → JSON 経路で1回だけ再送する
+  //   "http_error"  … 権限・quota 等（従来の JSON 経路と同じくエラー表示にする）
+  // この関数（と下請け）は renderChat() を呼ばない（delta ごとの全再構築禁止, §5.1）。
+  async function runChatStream(path, bodyText) {
+    const controller = new AbortController();
+    _streamState.controller = controller;
+    _streamState.aborted = false;
+    const headers = { "Content-Type": "application/json" };
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
+
+    let res;
+    try {
+      res = await fetch(API + path, {
+        method: "POST", headers: headers, body: bodyText, signal: controller.signal,
+      });
+    } catch (_) {
+      return { status: "unsupported" };  // start 前の失敗 → JSON 経路へ退避
+    }
+    // 404 = フラグ off。401 = トークン失効: 従来経路（apiFetch）に流して既存の
+    // ログアウト処理（トークン破棄・各モジュールの invalidate）へ合流させる。
+    if (res.status === 404 || res.status === 401) return { status: "unsupported" };
+    if (!res.ok || !res.body || typeof res.body.getReader !== "function") {
+      return { status: "http_error", httpStatus: res.status };
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let started = false;
+    let finalData = null;
+    let errorSeen = false;
+
+    for (;;) {
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (_) {
+        break;  // abort / 切断
+      }
+      if (chunk.done) break;
+      // 改行の正規化はバッファ全体に掛ける（CRLF が chunk 境界で割れても壊れない）。
+      buf = (buf + decoder.decode(chunk.value, { stream: true })).replace(/\r\n/g, "\n");
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const ev = parseSseFrame(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+        if (!ev) continue;
+        if (ev.name === "start") {
+          started = true;
+          if (!_streamState.bubble) openStreamingBubble();
+          showStreamingStanceLine(ev.data && ev.data.stance);
+        } else if (ev.name === "delta") {
+          if (!_streamState.bubble) openStreamingBubble();
+          if (_streamState.bubble && ev.data && typeof ev.data.t === "string") {
+            // HTML は挿入しない（textContent のみ）。整形は final 後の renderChat。
+            _streamState.bubble.textContent += ev.data.t;
+            autoScrollChatIfAtBottom();
+          }
+        } else if (ev.name === "final") {
+          finalData = ev.data;
+        } else if (ev.name === "error") {
+          errorSeen = true;
+        }
+      }
+      if (finalData) break;
+    }
+    try { reader.cancel(); } catch (_) { /* 既に閉じている */ }
+
+    // final が届いていればサーバ側の往復は完了・保存済みなので、停止ボタンと
+    // 競合したときも final を採る（保存された往復をクライアントだけ捨てない）。
+    if (finalData) return { status: "final", data: finalData };
+    if (_streamState.aborted) return { status: "aborted", reason: "user" };
+    if (errorSeen || started) return { status: "aborted", reason: "error" };
+    return { status: "unsupported" };  // 1バイトも受け取れていない → JSON 経路へ
+  }
+
+  // 中断・失敗した往復は記録しない（O-1 裁定 / ST1）。発話は入力欄へ戻し、
+  // クライアント履歴からも取り除く（片肺の往復を次の history に混ぜない, §5.1）。
+  function rollbackStreamedTurn(userMsgId, text, notice) {
+    const idx = _findMessageIndexById(userMsgId);
+    if (idx !== -1) state.chatMessages = state.chatMessages.slice(0, idx);
+    const input = document.getElementById("chat-input");
+    if (input && !input.value) {
+      input.value = text || "";
+      input.focus();
+    }
+    _pendingStreamNotice = notice;
+  }
+
+  // renderChat() の後に1枚だけ足す控えめな事実文（警告色にしない・数値を出さない）。
+  function showStreamNotice(message) {
+    const ca = document.getElementById("chat-area");
+    if (!ca || !message) return;
+    const el = document.createElement("div");
+    el.className = "stream-notice";
+    el.textContent = message;
+    ca.appendChild(el);
+    ca.scrollTop = ca.scrollHeight;
+  }
+
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return null;
     // レクチャー外科手術 案①（§15）: 講義再生中に composer（sendMessage は全送信経路の
@@ -4458,27 +4723,50 @@
       clearMaterialLatch(); // 使う/使わないに関わらず、送信の瞬間にラッチは消費される。
     }
 
+    const chatPath = "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat";
+    const requestBody = JSON.stringify({
+      message: text,
+      message_id: userMsgId,
+      history: state.chatMessages.slice(0, -1),
+      position_anchor: anchorAtAsk,
+      ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
+      ...payload,
+      // §4-3: ヘルプボタン・通常送信・音声経路すべてがこの1関数を通る
+      // （sendMessage が全送信経路の合流点のため、payload 側の値より必ず優先する）。
+      screen_mode: resolveScreenMode(),
+      // 画面文脈アダプター Phase 4（SA1）: 参照だけを足す。テキスト送信・🤖 音声
+      // ループ・チップからの質問・discuss すべてがこの1関数を通るため、ここ一箇所で
+      // 全経路に載る。組めなければ null（サーバは無視する）。
+      screen_context: getScreenContext(payload, _latchKind),
+    });
+
+    // LLM 応答のストリーミング Phase 3-a: 通常のテキスト送信だけ /chat/stream を試す。
+    // フラグ off・404・start 前の失敗はこの1回だけ従来の JSON 経路で再送する
+    // （fail-to-current）。中断・失敗した往復は記録しない（ST1 / O-1 裁定）。
+    let needJsonRequest = true;
+    let streamAborted = false;
     try {
-      const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
-        method: "POST",
-        body: JSON.stringify({
-          message: text,
-          message_id: userMsgId,
-          history: state.chatMessages.slice(0, -1),
-          position_anchor: anchorAtAsk,
-          ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
-          ...payload,
-          // §4-3: ヘルプボタン・通常送信・音声経路すべてがこの1関数を通る
-          // （sendMessage が全送信経路の合流点のため、payload 側の値より必ず優先する）。
-          screen_mode: resolveScreenMode(),
-          // 画面文脈アダプター Phase 4（SA1）: 参照だけを足す。テキスト送信・🤖 音声
-          // ループ・チップからの質問・discuss すべてがこの1関数を通るため、ここ一箇所で
-          // 全経路に載る。組めなければ null（サーバは無視する）。
-          screen_context: getScreenContext(payload, _latchKind),
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
+      // ストリーム経路と JSON 経路は「完成した応答（data）を1つ得る」ところまでが違うだけで、
+      // 以降の適用は下の `if (data)` ブロック1本を共有する（ST7: final は非ストリーム版と同値）。
+      let data = null;
+      if (shouldStreamChatTurn(payload, replaceMessageId)) {
+        const streamed = await runStreamingChatTurn(chatPath + "/stream", requestBody, userMsgId, text);
+        needJsonRequest = streamed.retryWithJson;
+        streamAborted = streamed.aborted;
+        data = streamed.data;
+      }
+      if (needJsonRequest && !streamAborted) {
+        const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
+          method: "POST",
+          body: requestBody,
+        });
+        if (res.ok) {
+          data = await res.json();
+        } else {
+          state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
+        }
+      }
+      if (data) {
         respData = data;
         // discuss モード（論文と話す）Phase 2: 着地画面の無活動タイムアウト（トリガー③）用。
         if (isDiscussMode() && window.Discuss) window.Discuss.notifyActivity();
@@ -4552,8 +4840,6 @@
           renderSidebar();
           renderRightPanel();
         }
-      } else {
-        state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
       }
     } catch (err) {
       state.chatMessages.push({ role: "assistant", content: "サーバーに接続できません。" });
@@ -4564,9 +4850,51 @@
     // どちらの経路でもここに合流するので1箇所で済む。
     _pendingScrollMsgId = userMsgId;
     renderChat();
+    // 停止・失敗の事実文は renderChat（innerHTML 全再構築）の後に1枚だけ足す。
+    if (_pendingStreamNotice) {
+      showStreamNotice(_pendingStreamNotice);
+      _pendingStreamNotice = null;
+    }
     renderRightPanel();  // L1: 直近回答の tier を Sources タブへ反映
     return respData;
   }
+
+  // ストリーム1往復の UI 制御（停止ボタン・逐次バブル・後始末）。本文の適用は
+  // 従来の JSON 経路とまったく同じ applyChatTurnResponse を通す（ST7）。
+  async function runStreamingChatTurn(streamPath, requestBody, userMsgId, text) {
+    _streamState.active = true;
+    setSendButtonStopMode(true);
+    openStreamingBubble();
+    let result;
+    try {
+      result = await runChatStream(streamPath, requestBody);
+    } finally {
+      _streamState.active = false;
+      _streamState.controller = null;
+      setSendButtonStopMode(false);
+      closeStreamingBubble();
+    }
+    if (result.status === "final") {
+      // 応答の適用（履歴・出典・チップ・数式）は sendMessage 側の共通ブロックが行う。
+      return { retryWithJson: false, aborted: false, data: result.data };
+    }
+    if (result.status === "aborted") {
+      rollbackStreamedTurn(
+        userMsgId, text,
+        result.reason === "user" ? STREAM_STOP_NOTICE : STREAM_ERROR_NOTICE
+      );
+      return { retryWithJson: false, aborted: true, data: null };
+    }
+    if (result.status === "http_error") {
+      state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
+      return { retryWithJson: false, aborted: false, data: null };
+    }
+    // unsupported: 以降のセッションでは試さず、この1回だけ従来経路で送り直す。
+    state.clientFeatures = { chat_streaming: false };
+    restoreTypingIndicator();
+    return { retryWithJson: true, aborted: false, data: null };
+  }
+
 
   // ── Tab Switching ──────────────────────────────────────────────────
   function initTabs() {
@@ -5079,6 +5407,15 @@
 
     function sendCurrent() { sendWith(Session.inDetour() ? "explore" : "on_path"); }
 
+    // LLM 応答のストリーミング Phase 3-a（§5.1/§5.3）: 送信ボタンは生成中だけ
+    // 「停止」に差し替わる（新しい帯・行を作らない）。停止ハンドラは送信ハンドラより
+    // **先に**登録し、ストリーム中だけ stopImmediatePropagation で送信へ渡さない
+    // （sendCurrent 自体は無改変 = Enter キーの挙動も従来どおり）。
+    btn.addEventListener("click", function (e) {
+      if (!_streamState.active) return;
+      e.stopImmediatePropagation();
+      abortChatStream();
+    });
     btn.addEventListener("click", sendCurrent);
     if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
     // ❓ 使い方ボタン（学習UI再編 Phase 2, §4）: 押下は使い方インスペクト・モードの
@@ -8779,6 +9116,9 @@
     // インスペクト・モード（学習UI再編 Phase 2, §5.2）: ログイン時に1回だけ
     // フェッチしてキャッシュする（ホバーごとの API コールはしない）。
     fetchUiAnchorsOnce();
+    // LLM 応答のストリーミング Phase 3-a（§3.4 / ST9）: 機能フラグもログイン後に
+    // 1回だけ取得する。取得できなければ従来の JSON 経路のみ（fail-to-current）。
+    fetchClientFeaturesOnce();
     initMaterialHoverLatch(); // 教材ホバー + ラッチ（学習UI再編 Phase 3）
     initDiscussUI();
     // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める

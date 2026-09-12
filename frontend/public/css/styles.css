@@ -634,6 +634,35 @@ html.learn-page > body {
   align-self: flex-start;
 }
 
+/* LLM 応答のストリーミング Phase 3-a（llm_response_streaming_design.md §5.2）:
+   逐次表示中のバブルは**プレーンテキストのまま**（段落整形・KaTeX は final 後の
+   renderChat が全文に対して行う）。改行だけ素直に見せるため pre-wrap にする。
+   .ca の内側に増えるだけで、下段（モードバー・composer）には触れない（§5.3）。 */
+.mg.ai.streaming {
+  white-space: pre-wrap;
+}
+
+/* 本文が届くまでの空バブル。タイピングインジケータの代わりの控えめな印
+   （DOM を書き換えないので delta の textContent 追記とぶつからない）。 */
+.mg.ai.streaming:empty::after {
+  content: "…";
+  color: var(--color-text-tertiary);
+}
+
+/* 停止・失敗の事実文（数値なし）。警告ではないので警告色にしない。 */
+.stream-notice {
+  align-self: flex-start;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+
+/* 生成中の送信ボタン（ラベルだけ「停止」に差し替える。新しい帯を作らない）。 */
+#send-btn.stop-mode {
+  background: var(--color-background-secondary, #fafbfd);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border, #d8dce4);
+}
+
 /* 機能3: ユーザーメッセージの書き直し・削除アクション */
 .mg-actions {
   display: flex;
