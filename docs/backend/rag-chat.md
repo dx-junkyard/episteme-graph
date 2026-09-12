@@ -204,6 +204,18 @@ tension プレフィルタも常に打ち消されます（SD4）。
 4. casual 判定（`_is_casual`）
 5. discuss 判定（`_is_discuss`）と `discuss_scope` の検証（**422**。書き直しによる履歴
    truncate よりも前）
+6. **様相（stance）の一次判定**（入口統合 Phase 1。正本:
+   [learning_chat_entry_unification_design.md](../features/learning_chat_entry_unification_design.md)
+   LC1〜LC8）— 非LLM の純関数 `core/learning_stance/heuristic.py::prejudge()` が
+   「明らかに教材内容の問い」だけを `DOMAIN_RAG` と先に確定させ、意図分類の LLM コールを
+   省きます。明示の様相（casual / discuss / 地図アクション）が立っている往復と、
+   挨拶（`_is_greeting`）では**そもそも計算しません**（LC2）。決められなければ `None` で
+   既存の `_classify_intent` へ落ちます（縮退はこの 1 本だけ）。
+   入力は**当該発話のみ**で、履歴・過去の様相・学習者モデルは使いません（LC4 / UC5）。
+
+**推定してよいのは「様相」（会話の調子）だけ**です（LC1）。検索範囲（`discuss_scope`）・
+出題モード（`cycle_mode`）・記録の私有化（`backstage`）・確認問題の壁打ち（`check_scaffold`）を
+サーバが推定で切り替えることはありません。
 
 ---
 
@@ -215,10 +227,15 @@ tension プレフィルタも常に打ち消されます（SD4）。
 
 | intent_mode | 用途 | 雑談拒否 | 前提知識ゲート | 誤解検出 | origin/status_label | U層 feature |
 |---|---|---|---|---|---|---|
-| explore（既定） | 寄り道・探索 | ✓ | ✓ | ✓ | 返す（復帰導線） | `learning:chat` |
-| on_path | 本筋の質問 | ✓ | ✓ | ✓ | 返さない | `learning:chat` |
+| explore（既定） | 寄り道・探索 | — ※2 | ✓ | ✓ | 返す（復帰導線） | `learning:chat` |
+| on_path | 本筋の質問 | — ※2 | ✓ | ✓ | 返さない | `learning:chat` |
 | **casual** | 気軽に話せる先生（音声会話主体） | スキップ | スキップ | スキップ | 返さない | `learning:chat_casual` |
 | **discuss** | 論文と話す（係留付きディスカッション） | スキップ | スキップ | 発火しない※ | 返さない | `learning:chat_discuss` |
+
+※2 **雑談は拒否しません**（入口統合 Phase 1・オーナー判断）。意図分類が `CHIT_CHAT` と
+読んだ往復は、定型の拒否文を返す代わりに `_is_casual = True` を再代入して
+**casual_light 様相で通常の RAG フローへ合流**します（下流の条件式は無改変）。根拠の一線
+（RAG 検索・tier 集約・OutOfSourceGuard の system 注入・`content_grounding`）は落ちません。
 
 ※ 誤解検出は `_is_discuss` では明示バイパスしていませんが、discuss の会話は
 予約疑似トピック `_discussion` の上で行われ `topic_info` が `None` になるため、
@@ -230,9 +247,33 @@ tension プレフィルタも常に打ち消されます（SD4）。
 可視の注意書きプレフィックスのみ省略します（tier はレスポンスで返す）。interest_traces 記録と
 tension プレフィルタも通常どおり効きます（payload に `casual: true`）。
 
-判定順は **usage_help pre-route（`_is_usage_question`）→ casual → discuss** で、
-この順序は崩さないこと（音声・casual 経路にマニュアル回答を届ける唯一の位置が
+判定順は **usage_help pre-route（`_is_usage_question`）→ casual → discuss → 様相の一次判定**
+で、この順序は崩さないこと（音声・casual 経路にマニュアル回答を届ける唯一の位置が
 pre-route であるため）。
+
+### 3.4 様相（stance）はサーバが読む
+
+`intent_mode` は「様相（会話の調子）」「伝達（読み上げ向きか）」「順路との関係（on_path /
+explore）」の 3 軸を 1 つの enum に畳んでいました。入口統合 Phase 1（正本:
+[learning_chat_entry_unification_design.md](../features/learning_chat_entry_unification_design.md)）
+は **enum を増やさずに**内部の扱いだけをほどきます。
+
+- **様相の推定はサーバ側で、明示は常に推定に勝つ（LC2）**。推定するのは `tutor` と
+  `casual_light` の**間だけ**で、`discuss` / `cycle_elicit` / `cycle_diff` は明示のみです
+  （範囲や出題モードの無断変更を作らないため = DM1 / UC1）。
+- **伝達形式は `screen_mode` から決定論導出**（§4.4）。
+  `_get_casual_teacher_system_prompt(..., spoken=)` が二枚に分かれ、`spoken=True`（音声モード、
+  および `screen_mode` 未指定の明示 casual）は従来どおり 2〜4 文・LaTeX 禁止、
+  `spoken=False`（テキストの casual_light）は**LaTeX と `[出典N]` を許可**します。
+- **解決した様相は事実として返す（LC6 / LC7）**。RAG 応答（最終 return）だけが
+  `LearningChatResponse.stance = {"stance", "source", "label"}` を設定します
+  （`source` は `explicit` / `inferred`、`label` の正本は `core/label_vocab.py` の
+  `LEARNING_STANCE_LABELS`）。**confidence・一致度などの数値は返しません**。
+  痕跡 `interest_traces.payload` にも enum 2 つ（`stance` / `stance_source`）だけを
+  焼き込みます（楽屋には焼き込まない = SD4）。
+- **LLM 回数は増えません（LC5）**。一次判定が決めた tutor 経路は分類コールが省かれて
+  2 → **1** コールになり、他の経路は不変です。CostGate は
+  `LEARNING_CHAT_MAX_CALLS_PER_DAY` に相乗りのまま（専用上限・専用 env なし）。
 
 ### 3.5 discuss モードの分岐
 

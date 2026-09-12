@@ -379,6 +379,18 @@ Phase 1/2 の U層実測でモードの価値を確認してから、専用の�
 - 教員による discuss 個別履歴の閲覧（k-匿名集約のみ）
 - explore（寄り道）語彙・UI の既存動作変更（discuss とは独立に維持）
 
+> **追補（2026-09-12、入口統合 Phase 1）**: 学習チャットの「様相（会話の調子）」を
+> サーバが読む層を積んだ（正本:
+> [learning_chat_entry_unification_design.md](learning_chat_entry_unification_design.md)
+> LC1〜LC8）が、**discuss は推定の対象外のまま**である。`intent_mode='discuss'` は
+> 常に明示（`stance.source = "explicit"`）で、推定器は discuss を提案すらしない —
+> discuss は検索スコープの意味変更を伴うため、無断のスコープ変更は DM1 違反になる。
+> discuss セッション中に casual_light が推定されることも構造的に無い（`_is_discuss` が
+> 真なら推定器を呼ばない）。**音声版 discuss（§6.4 近傍）は依然として非スコープ**で、
+> discuss 中の音声 fail-closed（`app.js` の `updateVoiceAvailability`）も維持している。
+> `_get_discuss_system_prompt` の DM4 必須要素・DA6 契約フレーズ・`entry_mode` の
+> 書き込み条件・`discuss_scope` の 2 段解決はいずれも無改変（LC8）。
+
 ---
 
 ## 9. 実装記録（2026-07-25、Phase 0〜2 完了）

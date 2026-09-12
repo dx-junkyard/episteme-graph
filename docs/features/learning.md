@@ -154,6 +154,7 @@ RAG 応答）で送る。
   - `next_actions`（「学習に戻る」「詳細を続ける」などをボタン化）
   - `support_mode` / `status_label` / `origin`
   - `content_grounding`（出所: 教材 / 別の資料 / モデル生成 — 下記）
+  - `stance`（どの様相で答えたか — 下記。RAG 応答のみ）
   - `course_update.personal_layer`（`misconceptions_by_topic`, `chat_anchors`）
 - **誤解検出（AI は候補まで・是正 F5, 2026-09-10）**: 回答に訂正シグナル（`訂正：` 等の
   文字列一致・非LLM）が含まれると個人レイヤーへ **`status="candidate"`** で記録される
@@ -187,6 +188,28 @@ RAG 応答）で送る。
 
 `tier`（教員承認状況のバッジ）とは別軸です。判定ロジックは [RAG チャットフロー](../backend/rag-chat.md#4-出所判定content_grounding)。
 
+### 様相（stance）— どう話すかを選ばせない
+
+話しかける前に「話し方」を UI の語彙で選ばせるのをやめ、**会話の調子（様相）は当該発話から
+サーバが読みます**（正本:
+[learning_chat_entry_unification_design.md](learning_chat_entry_unification_design.md) LC1〜LC8）。
+入力欄は 1 つのままで、`intent_mode` の値集合も増えていません。
+
+- **雑談は拒否しません**。雑談めいた発話には、根拠の一線（RAG 検索・tier・
+  OutOfSourceGuard・`content_grounding`）を保ったまま**気軽な調子で**応じます。
+  テキストでは数式（LaTeX）と `[出典N]` もそのまま使います。
+- **推定するのは調子だけ**です。検索範囲（discuss のスコープ）・予想を先に聞く形
+  （理解サイクル）・楽屋（記録の私有化）・確認問題の壁打ちは、**本人の明示操作のまま**
+  切り替わりません。「議論として続ける」も推定では起きません（入口は二枚看板のまま）。
+- **推定したことは隠しません**。応答の `stance` に
+  `{stance, source, label}` が入り（`source` は `explicit` = 明示 / `inferred` = 推定、
+  `label` の正本は `core/label_vocab.py` の `LEARNING_STANCE_LABELS`）、
+  推定で調子が変わった往復だけ回答の下に事実の 1 行が出て、1 タップで聞き直せます。
+  **確信度・当たり外れのような数値は出しません**。
+- **学習者モデルは作りません**。推定の入力は当該発話と画面の明示状態だけで、過去の
+  産出・正答率・滞在時間・前の往復の様相は使わず、セッションを跨いで持ち越しません
+  （UC5 沈黙適応をしない）。
+
 裏側の流れの詳細は [RAG チャットフロー](../backend/rag-chat.md)。
 
 ---
@@ -198,8 +221,10 @@ RAG 応答）で送る。
 
 1. MediaRecorder + WebAudio の無音検知（発話後 ~1.4 秒の沈黙）で発話を自動区切り
 2. `POST /api/learning/voice/transcribe` で Whisper 文字起こし
-3. `intent_mode='casual'` でチャット送信（雑談拒否・前提知識ゲート・誤解検出をバイパスし、
-   短い会話調で応答。RAG 検索・tier・OutOfSourceGuard はそのまま → [RAG チャットフロー](../backend/rag-chat.md#3-インテントモードon_path--explore--casual--discuss)）
+3. `intent_mode='casual'` でチャット送信（意図分類・前提知識ゲート・誤解検出をバイパスし、
+   短い会話調で応答。RAG 検索・tier・OutOfSourceGuard はそのまま → [RAG チャットフロー](../backend/rag-chat.md#3-インテントモードon_path--explore--casual--discuss)）。
+   読み上げ向きの本文（2〜4 文・記号なし・LaTeX なし）になるのは**音声モードのときだけ**で、
+   テキストで気軽な調子になった往復は数式・出典をそのまま使います（上記「様相」）
 4. 応答を `POST /api/learning/voice/speak`（TTS, MP3）で再生（再生中はマイク停止、終了で聞き取り再開）
 5. 応答の第 1 根拠チャンク（`sources[0].chunk_id`）を `GET .../source-chunk/{chunk_id}` で取得し、
    ボイスパネルに「いま話している題材」として教材表示

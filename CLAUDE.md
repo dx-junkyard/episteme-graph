@@ -1951,6 +1951,65 @@ discuss 開幕画面の情報を「主語で分けて全部出す」層。正本
   `test_discuss_opening_authoring_guardrails.py` / `test_discuss_opening_stage.py` +
   `test_next_steps_guardrails.py`（全却下抑止）+ `test_element_explanation_review_ui_static.py`。
 
+### 学習チャットの入口統合（様相はサーバが読む, migration なし, 2026-09-12）
+
+学習者に「どう話すか」を UI 語彙（`intent_mode` の on_path/explore/casual/discuss）で先に
+選ばせるのをやめ、**入口を 1 つにして様相（会話の調子）を当該発話からサーバが読む**層。
+正本は `docs/features/learning_chat_entry_unification_design.md`（LC1〜LC8・§13 実装記録。
+AI アシスタント UX 3段ロードマップ `docs/architecture/assistant_ux_roadmap_2026-09-12.md` の
+Phase 1。Phase 2 = 構造 grounding（SA層 §11）/ Phase 3 = ストリーミングは未着手）。
+
+- **不変条項の要点**: LC1 **推定してよいのは「様相」だけ**（`discuss_scope` / `cycle_mode` /
+  `backstage` / `check_scaffold` はサーバが推定で切り替えない — DM1 / UC1 / SD4）/ LC2 明示は
+  常に推定に勝つ / LC3 HELP pre-route は非LLM・最前段のまま（推定器はその後）/ LC4 推定の
+  入力は**当該発話 + 画面の明示状態だけ**・セッションを跨がない（UC5 沈黙適応との線引き
+  4条件は恒久条項）/ LC5 **LLM 呼び出しを増やさない**（非LLM 一次判定でむしろ減らし、失敗は
+  tutor へ縮退）/ LC6 推定した事実は記録し本人に見せ 1 タップで訂正できる / LC7 数値を
+  見せない / LC8 既存層は非改変（`_is_casual` / `_is_discuss` 以降の下流の条件式を書き換えず、
+  解決済みの様相を上流で確定させて流し込むだけ）。
+- **解決順は 4 段**（`_learning_chat_core`。判定順そのものは rag-chat §2.9 のまま崩さない）:
+  [0] HELP pre-route（非LLM・最前段）→ [1] 明示チェック（discuss / casual / cycle_mode /
+  typed action / atlas_context のいずれかが立っていれば推定器を走らせない）→
+  [2] 非LLM 一次判定 `prejudge`（「明らかに教材内容の問い」だけ `"DOMAIN_RAG"` を先に確定させ
+  意図分類の LLM コールを省く。決められなければ `None` で LLM 分類へ落とす）→
+  [3] 既存 `_classify_intent` → [4] ラベル→様相。
+- **正本モジュールは `backend/core/learning_stance/`**（FastAPI / sqlalchemy / `core.llm` 非
+  import の純データ + 純関数）: `schema.py` = 様相 5 語彙（`tutor` / `casual_light` /
+  `discuss` / `cycle_elicit` / `cycle_diff`）+ 出所 2 語彙（`explicit` / `inferred`）+
+  `resolve_stance()` / `build_stance_dto()` の正本、`heuristic.py` = `prejudge()`。
+  **分野語をこのモジュールに書かない** — 内容語は呼び出し側が
+  `_CONTENT_QUESTION_TERMS + _cartridge_content_terms(cartridge_id)`（空 cartridge_id では
+  後者を呼ばない）で渡す。表示ラベルの正本は `core/label_vocab.py::LEARNING_STANCE_LABELS`
+  で、**JS 側に日本語表をミラーしない**（サーバが解決済みの `label` を返す）。
+- **CHIT_CHAT の意味が変わった（オーナー判断）**: 定型の拒否文（「…学習支援に特化した
+  AIです」）は**廃止**し、`casual_light` 様相として通常の RAG フローへ合流させる（実装は
+  `_is_casual = True` の再代入 1 行で下流は無改変）。**根拠の一線は落ちない** — RAG 検索・
+  tier 集約・OutOfSourceGuard の system 注入・`content_grounding` は全経路共通。使い方への
+  再誘導は HELP pre-route + 分類 USAGE_HELP 委譲の 2 経路に一本化された。
+- **様相と伝達形式の分離**: `_get_casual_teacher_system_prompt(..., *, spoken: bool = True)`。
+  `spoken=True` の本文は従来のまま（2〜4文・記号なし・LaTeX 禁止）、`spoken=False`（テキストの
+  casual_light）は LaTeX と `[出典N]` を許可し `[ACTION_BUTTON: ...]` は引き続き禁止。
+  `spoken` は `screen_mode == "voice"` または（明示 casual かつ `screen_mode` 未指定）。
+- **DTO・痕跡・観測**: `LearningChatResponse.stance`（`{stance, source, label}` の 3 キーのみ・
+  数値キーなし・RAG 応答の最終 return だけが設定）/ 痕跡 payload に `stance`・`stance_source`
+  の enum 2 つ（**楽屋にはキー自体を足さない** = `entry_mode` と同じ SD4 のガード。レスポンス
+  には楽屋でも返す）/ 観測は `stance_corrected` イベント + `discuss_traces.jsonl` の 2 列
+  （行フィルタ `entry_mode='discuss'` は不変なので、誤ルーティングの後追いは主に
+  `stance_corrected`）。**教員向け集約は作らない**（作るなら `core/indicator_catalog.py` への
+  登録が必須 = IG4。v1 は 1 件も足していない）。
+- **フロント**（`app.js`）: `renderStanceLine()` は `source === "inferred"` かつ
+  `stance !== "tutor"` かつ非 discuss のときだけ 1 行（`chat.stance-chip`）。**tutor では
+  何も出さない**（既定は無表示＝静音）。`correctStance()` は新 API を作らず既存の書き直し経路
+  （`_replace_message_id` + typed action `ask_question`）に相乗りし、効くのはその 1 往復だけ
+  （sticky にしない）。`sendWith` / `sendCurrent` / 音声ループ・discuss 中の音声 fail-closed は
+  無改変。
+- **ガードレール**: `test_learning_stance_{core,routing,guardrails,ui_static}.py`（件数の正本は
+  この 4 ファイル）+ 既存 `test_domain_neutral_wording.py` / `test_help_usage_route.py` /
+  `test_discuss_observation.py` の追随。
+- **非スコープ（v1）**: discuss / cycle / backstage の推定（LC1 で恒久排除）/ 様相の sticky 化・
+  学習者ごとの既定様相の保存 / 教員向けの様相集約・誤ルーティング率の表示 / 精読モード・
+  再構成・楽屋の入口統合 / 学習チャットへの構造 grounding（= Phase 2）/ ストリーミング（= Phase 3）。
+
 ### 理解サイクル（Understanding Cycle, UCサイクル, migration 不要, 2026-08-13）
 
 AI を「回答装置」として改善するのではなく、**学習者が予測し、差を見て、理解を更新し、問いを

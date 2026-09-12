@@ -1,9 +1,11 @@
 # 学習チャットの入口統合（Learning Chat Entry Unification — 様相はサーバが読む）
 
-> **状態: 設計中**（3段ロードマップの Phase 1。Phase 2 = 学習チャットへの構造 grounding
-> ＝ SA層 Phase 4 / Phase 3 = ストリーミング。**migration は不要** — 既存 DTO の optional
-> フィールドと痕跡 payload のキー追加だけで足りる。新テーブル・新エンドポイントなし）
-> 起票 2026-09-11（現状の事実はすべて同日の実機 grep で裏取り）。
+> **状態: 実装済み（正本）**（3段ロードマップの Phase 1。Phase 2 = 学習チャットへの構造
+> grounding ＝ SA層 Phase 4 / Phase 3 = ストリーミングは**いずれも未着手**。
+> **migration なし** — 既存 DTO の optional フィールドと痕跡 payload のキー追加だけで足り、
+> 新テーブル・新エンドポイント・新 env・新 LLM コールはいずれも作っていない）
+> 起票 2026-09-11（現状の事実はすべて同日の実機 grep で裏取り）・実装 2026-09-12。
+> 以後は §13 実装記録の追記のみ。
 
 **正本**: 本ドキュメント。
 **関連**: [「論文と話す」discuss モード](discussion_mode_design.md)（DM1〜DM8 — 特に DM1 無断
@@ -58,7 +60,7 @@ HELP pre-route の位置）/ [チャット型 AI の共通規約](assistant_comm
 | **LC1** | **推定してよいのは「様相」だけ**。検索範囲（`discuss_scope`）・出題モード（`cycle_mode`）・記録の私有化（`backstage`）・確認問題の壁打ち（`check_scaffold`）はサーバが推定で切り替えない | DM1（無断でスコープを広げない）/ UC1（ELICIT-first は opt-in）/ SD4（楽屋は本人の宣言） |
 | **LC2** | **明示は常に推定に勝つ**。クライアントが様相を明示した往復では推定器を走らせない | 押し付けない（原則12） |
 | **LC3** | **HELP pre-route は非LLM・最前段のまま**。推定器はその**後**に置く | manual_help_kb §1-3（音声・casual にマニュアル回答を届ける唯一の位置）/ rag-chat §2.9 |
-| **LC4** | **推定の入力は「当該発話 + 画面の明示状態」だけ**。過去の産出・正答率・滞在時間・過去の様相からの学習者モデルを作らない。推定は**セッションを跨いで持ち越さない** | UC5（沈黙適応をしない）/ UC7（cold start で能力推定をしない） |
+| **LC4** | **推定の入力は「当該発話 + 画面の明示状態」だけ**。過去の産出・正答率・滞在時間・過去の様相からの学習者モデルを作らない。推定は**セッションを跨いで持ち越さない**。§11 末尾の**4条件**（①入力は当該発話 + 画面の明示状態のみ ②セッションを跨がない ③変わるのは文体だけ ④推定を本人に見せ 1 タップで覆せる）は**本条項の一部＝恒久条項**であり、どれかを外す拡張は UC5 の再解釈にあたるため本書の改訂を要する（2026-09-12 オーナー判断 §12-2 で格上げ） | UC5（沈黙適応をしない）/ UC7（cold start で能力推定をしない） |
 | **LC5** | **LLM 呼び出しを増やさない**。様相の判断は既存の意図分類コールに吸収し、非LLM 一次判定で**むしろ減らす**。分類不能・例外は tutor-RAG（現行既定）へ倒す | 原則9（同期パスに LLM を入れない）/ Copilot P6 |
 | **LC6** | **推定した事実は記録し、本人に見せ、1タップで訂正できる**。訂正は常に学習者の行為で、サーバが自動で様相を切り替え直さない | 原則1（確定は人間）/ 原則8（出所の正直さ） |
 | **LC7** | **数値を見せない**。confidence・一致度・推定の当たり外れをレスポンスにも UI にも出さない | 原則4 / DM6 / UC9 |
@@ -357,10 +359,15 @@ LLM コールが減り、casual_light がテキストで成立する）→ ②�
 ④推定したことを本人に見せ、1 タップで覆せる。この 4 条件のどれかを外す拡張は、UC5 の
 再解釈になるため本書の改訂を要する。
 
-## 12. 未決事項（オーナー判断が要るもの）
+## 12. オーナー判断（2026-09-12 判断済み・推奨どおり採用）
 
 実装方式（ヒューリスティックの語彙・モジュール配置・チップ文言・段階分割）は担当が決める。
-以下 2 件だけは**不変条項の解釈変更**にあたるため判断を仰ぐ。
+以下 2 件だけは**不変条項の解釈変更**にあたるため判断を仰ぎ、**いずれも推奨どおり採用された**。
+
+- **1 → 採用**（拒否をやめる）。実装は `_is_casual` の再代入 1 行のみで、下流は無改変
+  （§13.2）。根拠の一線（RAG 検索・tier 集約・OutOfSourceGuard・`content_grounding`）は
+  全経路共通のまま残っている。
+- **2 → 採用**（LC4 への格上げ）。§2 の LC4 行に 4 条件を恒久条項として明記した。
 
 1. **CHIT_CHAT の拒否をやめること**（§4.3）。現行は「私は…学習支援に特化したAIです」と
    突き放す。本設計はこれを casual_light 様相での応答に置き換える（RAG・tier・
@@ -377,7 +384,124 @@ LLM コールが減り、casual_light がテキストで成立する）→ ②�
 
 ---
 
-## 付録 変更予定ファイル一覧
+## 13. 実装記録（2026-09-12）
+
+§9 の段階①②③（サーバ → フロント → 観測）を同日にまとめて実装した。**migration なし・
+新エンドポイントなし・新 env なし・新 LLM コールなし**。以下は設計との差分を含む実装の事実で、
+以後の一次情報は常にコードとテスト。
+
+### 13.1 様相の正本モジュール（新設）
+
+`backend/core/learning_stance/`（`__init__` / `schema` / `heuristic`。FastAPI・sqlalchemy・
+`core.llm` を import しない純データ + 純関数）。
+
+- **`schema.py`** = 語彙の正本。`STANCES`（`tutor` / `casual_light` / `discuss` /
+  `cycle_elicit` / `cycle_diff`）・`STANCE_SOURCES`（`explicit` / `inferred`）・
+  `resolve_stance(...)`（優先順位は cycle → discuss → casual（`explicit_casual` なら明示・
+  でなければ推定）→ tutor（typed action か `atlas_context` があれば明示・自然文なら推定））・
+  `build_stance_dto(...)`（`{stance, source, label}` の 3 キーのみ。数値キーを持たない = LC7）。
+  **`discuss_scope` / `cycle_mode` / `backstage` / `check_scaffold` を引数に取らない設計**に
+  して、様相がそれらを切り替えられないことを型で固定した（LC1）。
+- **`heuristic.py::prejudge(message, *, content_terms)`** = 非LLM 一次判定。返り値は
+  `"DOMAIN_RAG"` か `None` の 2 値のみで、**casual らしさは判定しない**（§4.2）。
+  決める規則は 3 本 — A: 相異なる内容語 2 つ以上 / B: 数式らしさ（`$` が 2 つ以上・
+  LaTeX コマンド・`∫∂Σ√∝≒`・両隣が英数字の `=`）かつ（内容語 1 つ以上 or 問い形）/
+  C: 内容語 1 つ + 問い形 + 12 文字以上。内容語は**呼び出し側が渡す**
+  （`learning.py` の `_CONTENT_QUESTION_TERMS` + `_cartridge_content_terms(cartridge_id)`。
+  `cartridge_id` が空なら後者を呼ばない規律は呼び出し側に残した = 開発ルール7）。
+- 表示ラベルの正本は `core/label_vocab.py::LEARNING_STANCE_LABELS`
+  （ふつうの質問として / 気軽な調子で / 議論として / 予想を先に聞く形で /
+  予想と照らし合わせる形で）。**JS 側に日本語表をミラーしない** — サーバが解決済みの
+  文字列を返し、フロントは `label + "答えました。"` を描くだけにした。
+
+### 13.2 `learning.py`（LC8 の逐語を維持したままの差し込み）
+
+- 一次判定は `intent = None if (_is_casual or _is_discuss or _atlas_ctx) else (` の
+  **逐語を変えずに** `_route_for_typed_action(...) or _prejudged or _classify_intent(...)` の
+  順で差し込んだ。`_prejudged` の計算自体も `_is_casual / _is_discuss / _atlas_ctx` の
+  いずれかが立っていれば走らない（LC2）。
+- `_explicit_casual = _is_casual` を分類の直前で控え、**明示 casual（音声）と推定
+  casual_light（テキスト）を後段で区別できるように**した。
+- **CHIT_CHAT の拒否文を削除**し、分岐の中身を `_is_casual = True` の再代入 1 行にした
+  （§4.3・オーナー判断 §12-1）。下流（前提知識ゲート / プロンプト選択 / notice 抑制 /
+  誤解検出 / U層タグ / 痕跡 / detour 非化）は**条件式を 1 行も変えていない**。
+- `_get_casual_teacher_system_prompt(domain, persona, *, spoken: bool = True)` に分離。
+  `spoken=True` の本文は**従来のまま**（2〜4 文・記号なし・LaTeX 禁止）。`spoken=False` は
+  3〜6 文の話し言葉で **LaTeX と `[出典N]` を許可**し、`[ACTION_BUTTON: ...]` 等の
+  システム記法は引き続き禁止。`spoken` は `screen_mode == "voice"`、または
+  （明示 casual かつ `screen_mode` 未指定）の 2 条件（後者は既存 API クライアント・
+  既存テストの後方互換）。
+
+### 13.3 DTO・痕跡・観測
+
+- `LearningChatResponse.stance: dict | None = None`（optional 追加のみ。既存キーの意味・
+  順序は不変）。設定するのは RAG 応答の最終 return だけで、HELP / 学習相談 / 地図 /
+  要素説明の早期 return は `None` のまま。
+- 痕跡 payload に `stance` / `stance_source` の enum 2 つ（本文・逐語・confidence は
+  入れない）。**楽屋（`_is_backstage`）にはキー自体を足さない**（`entry_mode` と同じ
+  SD4 のガード）。`entry_mode` の書き込み条件・値・`trace_registry` の宣言は無改変。
+- 観測（`core/discuss/observation.py`）: `METRIC_EVENT_VOCAB` に `stance_corrected`、
+  payload 値語彙に `"stance": {"tutor", "casual_light"}`（v1 の訂正チップが出す 2 値だけに
+  絞った fail-closed。`STANCES` を import して広げると推定しない様相が計測に混ざる）、
+  `discuss_traces.jsonl` に `stance` / `stance_source` 列（ダンプ説明文も追随）。
+
+### 13.4 フロント（`app.js` / `styles.css`）
+
+- `renderStanceLine(msg)` = `source === "inferred"` かつ `stance !== "tutor"` かつ
+  非 discuss のときだけ、出所バッジの直後に 1 行（`.stance-line`・
+  `data-ui-anchor="chat.stance-chip"`）。**tutor では何も出さない**（既定は無表示＝静音）。
+- `correctStance(replyToId, stance)` = `sendDiscussMetric("stance_corrected", ...)` の後、
+  既存の書き直し経路に相乗り（`_replace_message_id` + `support_action: "ask_question"`＝
+  既存 typed action で DOMAIN_RAG を明示確定 + 寄り道状態から導いた `intent_mode`）。
+  **新しい API パスを作らない**・sticky にしない（効くのはその 1 往復だけ）。
+- assistant メッセージに `stance` と `reply_to_id` を**メモリ内だけ**保持する
+  （localStorage へ保存しない）。`sendWith` / `sendCurrent` / 音声ループ・discuss 中の
+  音声 fail-closed は**無改変**。
+- 学習側 UI アンカー `chat.stance-chip` → `docs/manual/student/02-student.md#stance-chip`
+  の 3 点セット（`core/help_kb/ui_anchors.py` + マニュアル節 + `data-ui-anchor`）を揃えた。
+
+### 13.5 設計と異なる判断（5 件）
+
+1. **`prejudge` に「降りる」条件を 2 つ追加した**（設計 §4.2 より保守的）。学習相談の合図
+   （進め方・学習計画・何から…）と**使い方の合図**（画面・ボタン・操作・マイク…）が
+   1 つでも含まれたら一次判定は `None` を返して LLM 分類へ落とす。理由: 一次判定が
+   `LEARNING_ADVICE` / `USAGE_HELP` の受け皿を奪うと、rag-chat §2.9 の判定順を実質的に
+   崩してしまうため（LC3 の趣旨を一次判定側でも守る）。HELP 側の pre-route が
+   「参照語 × 問い形」の共起で判定するのに対し、こちらは**参照語だけ**で降りる。
+2. **楽屋（backstage）でも `stance` DTO はレスポンスに返す**（痕跡には焼き込まない）。
+   SD4 は「楽屋の痕跡を集計に入れない」という宣言であって、本人への事実提示（LC6）を
+   止めるものではない、と解釈した。焼き込まないのは痕跡 payload だけ。
+3. **訂正チップは 1 種のみ**にした。設計 §6 は 2 種（`[ふつうの質問として聞き直す]` と
+   `[気軽に聞き直す]`）を挙げていたが、後者は tutor の往復＝**既定で何も表示しない**
+   往復に UI を足すことになるため置かなかった（静音を優先。原則12）。
+4. **変更が要った既存テストは §9 の 2 件ではなく 3 件**。`test_discuss_observation.py` が
+   `METRIC_EVENT_VOCAB` の件数とダンプ射影 dict を逐語で固定していたため追随した。
+   §9 の「2 件」は CHIT_CHAT の意味変更に伴う分の数え上げで、観測層（§7 の metric event
+   追加）は別軸だった — 事前の洗い出しが 1 軸ぶん足りていなかった。
+5. **観測ダンプで誤ルーティングを後追いできる範囲には限界がある**。`discuss_traces.jsonl`
+   の行フィルタは `entry_mode='discuss'` のままで（DO の既存契約を変えないため）、
+   `stance` / `stance_source` 列を足しても**通常チャットの往復はダンプに現れない**。
+   したがって「推定がどれだけ外れたか」を読む主たる材料は `discuss_ui_events.jsonl` の
+   `stance_corrected` イベントであり、母数（推定 casual_light で答えた往復の総数）は
+   このダンプからは取れない。教員向け集約は v1 で作らない（IG4）という判断は据え置きなので、
+   母数が要るなら指標カタログへの登録を伴う別件になる。
+
+### 13.6 テスト
+
+新規 `backend/tests/test_learning_stance_{core,routing,guardrails,ui_static}.py`
+（LC1〜LC8 の構造検査・解決順と明示優先・fail-safe・チップの既定無表示・語彙ミラー・
+スタイルが警告色でないこと。**件数の正本はこの 4 ファイル**）。
+
+変更した既存テストは 3 件 — `test_domain_neutral_wording.py`（分野中立の検査対象を
+拒否文から casual_light 合流の事実 + 様相ラベルへ移設）/ `test_help_usage_route.py`
+（使い方への再誘導が pre-route + 分類 USAGE_HELP 委譲の 2 経路であることへ移設）/
+`test_discuss_observation.py`（§13.5-4）。§9 が「green のまま通らなければならない」と
+挙げた既存テスト群（`test_discuss_mode.py` の逐語 grep・`test_voice_casual_chat.py`・
+`test_intent_routing.py` ほか）は無改変のまま通っている。
+
+---
+
+## 付録 変更ファイル一覧（実装済み）
 
 **新規**
 
@@ -391,19 +515,24 @@ LLM コールが減り、casual_light がテキストで成立する）→ ②�
 | `backend/tests/test_learning_stance_guardrails.py` | LC1〜LC8 の構造検査 |
 | `backend/tests/test_learning_stance_ui_static.py` | チップの既定無表示・訂正の再送経路・語彙ミラー |
 
-**変更**
+**変更**（行番号は書かない — 一次情報は常にコード）
 
 | ファイル | 変更点 |
 |---|---|
-| `backend/api/routes/learning.py` | 推定器の呼び出し（:3045 の `else (` 内へ一次判定を差し込み）/ CHIT_CHAT 分岐の置換（:3049〜）/ `_get_casual_teacher_system_prompt` の `spoken` 引数（:1269, :3294）/ 痕跡 payload に `stance`・`stance_source`（:3482）/ レスポンスへ `stance` |
-| `backend/api/schemas.py` | `LearningChatResponse.stance` の追加（:376〜。リクエストは無改変） |
+| `backend/api/routes/learning.py` | 一次判定 `_prejudged` の差し込み（`intent = None if (…) else (` の逐語は不変）/ `_explicit_casual` の控え / CHIT_CHAT 分岐を `_is_casual = True` の再代入へ置換 / `_get_casual_teacher_system_prompt` の `spoken` 引数と `_casual_spoken` の導出 / `resolve_stance` の呼び出し / 痕跡 payload に `stance`・`stance_source`（楽屋は除外）/ レスポンスへ `stance` |
+| `backend/api/schemas.py` | `LearningChatResponse.stance` の追加（リクエストは無改変） |
 | `backend/core/label_vocab.py` | `LEARNING_STANCE_LABELS`（表示ラベルの正本） |
-| `backend/core/discuss/observation.py` | `METRIC_EVENT_VOCAB` に `stance_corrected`（:318）/ payload 値語彙に `stance`（:358 付近）/ ダンプ列に `stance`・`stance_source`（:770 付近の説明文含む） |
-| `frontend/public/js/app.js` | 様相チップと訂正チップの描画・再送配線（`sendWith`:4864 は無改変）/ `stance_corrected` の送信 |
-| `docs/backend/rag-chat.md` | §2.9 判定順に推定器の位置を追記 / §3 の intent_mode 表に「様相はサーバが推定・明示は上書き」を追記（規約 5-1 の必須更新） |
+| `backend/core/discuss/observation.py` | `METRIC_EVENT_VOCAB` に `stance_corrected` / payload 値語彙に `stance` / ダンプ射影とダンプ列に `stance`・`stance_source`（README 説明文含む） |
+| `backend/core/help_kb/ui_anchors.py` | 学習側アンカー `chat.stance-chip` → `student/02-student.md#stance-chip`（設計時の一覧に無かった 3 点セットの 1 つ） |
+| `frontend/public/js/app.js` | `renderStanceLine` / `correctStance` / assistant メッセージへの `stance`・`reply_to_id` 保持（`sendWith` / `sendCurrent` / 音声ループは無改変） |
+| `frontend/public/css/styles.css` | `.stance-line` / `.stance-fact` / `.stance-correct-btn`（警告色・バッジを使わない控えめなトーン） |
+| `docs/backend/rag-chat.md` | §2.9 判定順に一次判定の位置 / §3 の intent_mode 表に様相軸の追記（規約 5-1 の必須更新） |
 | `docs/features/learning.md` | 学習者向け機能の記述更新（規約 5-1 の必須更新） |
-| `docs/features/discussion_mode_design.md` | §6.4 近傍に解消/非スコープ注記（音声版 discuss は依然非スコープであることの再確認、規約 5-3） |
-| `backend/tests/test_domain_neutral_wording.py` / `backend/tests/test_help_usage_route.py` | §9 の表のとおり 2 アサーションの移設 |
+| `docs/features/discussion_mode_design.md` | §8 非スコープの直後に追補（discuss は推定対象外・音声版 discuss は依然非スコープ、規約 5-3） |
+| `docs/manual/student/02-student.md` | 「答え方（調子）についての 1 行」節（`{#stance-chip}`）+ 目次 |
+| `backend/tests/test_domain_neutral_wording.py` / `backend/tests/test_help_usage_route.py` / `backend/tests/test_discuss_observation.py` | §13.5-4 のとおり 3 ファイルの移設・追随 |
+| `docs/README.md` / `docs/architecture/assistant_ux_roadmap_2026-09-12.md` / `CLAUDE.md` | 索引・ロードマップ §6 判定表・レイヤー節の追随（規約 5-1 / 5-2） |
 
 **migration: なし**（DB スキーマ変更なし。`interest_traces.payload` / `discuss_metric_events.payload`
-はいずれも既存 JSONB のキー追加のみ）。
+はいずれも既存 JSONB のキー追加のみ）。**新エンドポイント・新 env・新 LLM コール・新指標
+（`core/indicator_catalog.py`）もいずれも無し。**

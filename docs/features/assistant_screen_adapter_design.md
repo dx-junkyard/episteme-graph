@@ -297,6 +297,13 @@ content が生の発話である点（SA6）は設計どおり。
 > （Phase 1 = 入口統合 / **本節 = 構造 grounding** / Phase 3 = ストリーミング）。
 > migration なし・新テーブルなし・新エンドポイントなし・**LLM 呼び出し回数不変**を
 > 前提に置く（SA3）。実装着手時は本節に §11.x の実装記録を足す。
+>
+> **前提の更新（2026-09-12）**: Phase 1（入口統合）は実装済み
+> （[learning_chat_entry_unification_design.md](learning_chat_entry_unification_design.md) §13）。
+> `_learning_chat_core` は当該往復の**様相（stance）**を解決済みで持つため、本節の
+> 「どの様相のとき構造ブロックを足すか／省くか」は新たに推定せず、その解決結果を読めばよい
+> （様相は `discuss_scope` / `cycle_mode` / `backstage` を切り替えない = LC1 なので、
+> 解決器のスコープ判断は従来どおり明示状態から導く）。
 
 ### 11.1 目的と証拠 — パイプラインの構造成果は回答プロンプトに一度も届いていない
 
