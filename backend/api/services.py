@@ -2283,15 +2283,41 @@ def check_prerequisites(
         if not prereqs:
             return None
 
-        prereq_names: list[str] = []
+        # 学ぶ単位の一級化 P2-4（learning_units_design.md §6.4）: 前提要素に
+        # `topic_id` があれば同コース topic を引き、**表示名は現在の題名**を使う
+        # （題名を変えても接続が切れない）。判定材料（記帳キー）は従来どおり
+        # 前提の**名前**のままで互換を保つ（LU1: 既存キーの意味を変えない）。
+        topics_by_id = {
+            str(t.get("id")): t for t in course_topics(course_data) if t.get("id")
+        }
+        prereq_names: list[str] = []          # 記帳・突合キー（従来どおり名前）
+        prereq_display: dict[str, str] = {}   # 記帳キー → 表示名（現在の題名を優先）
         for prereq in prereqs:
-            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
-            prereq_name = prereq_name.strip()
-            if prereq_name:
-                prereq_names.append(prereq_name)
+            if isinstance(prereq, dict):
+                prereq_name = str(prereq.get("name") or "").strip()
+                prereq_topic_id = str(prereq.get("topic_id") or "").strip()
+            else:
+                prereq_name = str(prereq).strip()
+                prereq_topic_id = ""
+            display = prereq_name
+            linked = topics_by_id.get(prereq_topic_id) if prereq_topic_id else None
+            if linked:
+                linked_title = str(linked.get("title") or "").strip()
+                if linked_title:
+                    display = linked_title
+            if not prereq_name:
+                prereq_name = display  # topic_id だけの要素も記帳キーを持てるようにする
+            if not prereq_name:
+                continue
+            prereq_names.append(prereq_name)
+            prereq_display[prereq_name] = display or prereq_name
 
         if not prereq_names:
             return None
+
+        # 発話中の言及判定は「元の名前」と「現在の題名」の両方で見る（表示を変えた
+        # だけで説明要求が拾えなくなるのを防ぐ）。
+        mention_names = set(prereq_names) | set(prereq_display.values())
 
         # 本人の明示的な肯定は「この前提は理解している」の確定として記帳し、以後
         # 同じ前提では問い返さない（同一セッション内のループ抑止も、督促でも推定でも
@@ -2307,7 +2333,7 @@ def check_prerequisites(
             return None
 
         explanation_keywords = ["教えて", "説明", "詳しく", "知りたい", "わからない", "分からない"]
-        if any(name in user_message for name in prereq_names) and any(
+        if any(name in user_message for name in mention_names) and any(
             kw in user_message for kw in explanation_keywords
         ):
             return None
@@ -2315,7 +2341,7 @@ def check_prerequisites(
         acknowledged = get_acknowledged_prerequisites(user_id, course_id)
 
         unlearned: list[str] = [
-            prereq_name
+            prereq_display.get(prereq_name, prereq_name)
             for prereq_name in prereq_names
             if normalize_prerequisite_name(prereq_name) not in acknowledged
         ]

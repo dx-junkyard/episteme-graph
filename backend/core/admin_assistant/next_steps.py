@@ -74,6 +74,12 @@ RULE_COURSE_DISCUSS_OPENING_UNREVIEWED = "course.discuss_opening_unreviewed"
 # 落ちるので、教員には「資料が無い」事実だけを道案内で伝える（督促しない, G4/G6）。
 RULE_COURSE_PREREQUISITE_UNCOVERED = "course.prerequisite_uncovered"
 
+# 学ぶ単位の一級化 P2-5（learning_units_design.md §7・オーナー判断 O-5）: 公開済みの
+# コースが束ねている論理要素・主張に、教員が承認した（`teacher_approved`）ものが1件も
+# 無い。freeze は承認を経由しないため「承認0のまま配信」が構造上起こりうる（C-6）。
+# **配信は止めず**（LU8 / RR7）、事実だけを教員に見せる（学習者へは何も変えない）。
+RULE_COURSE_DELIVERED_UNREVIEWED = "course.delivered_unreviewed"
+
 # 利用者マニュアル KB（help_kb, manual_help_kb_design.md §4-1）: 需要側 + 供給側の
 # 両面計器。改善ループを閉じるための3ルール（2026-07-25 追加）。
 RULE_MANUAL_HELP_GAPS_PENDING = "manual.help_gaps_pending"     # 需要側: help_usage 無ヒット/未整備の k-匿名集計
@@ -134,6 +140,12 @@ RULE_CATALOG: dict[str, dict[str, str]] = {
     RULE_COURSE_PREREQUISITE_UNCOVERED: {
         "severity": SEVERITY_RECOMMENDED,
         "capability_id": "materials.upload",  # 道案内のみ
+    },
+    # P2-5: 解消手段はグラフ対話レビュー画面での承認・却下なので既存 capability を
+    # 再利用する（新 capability を作らない, G3）。
+    RULE_COURSE_DELIVERED_UNREVIEWED: {
+        "severity": SEVERITY_RECOMMENDED,
+        "capability_id": "materials.graph_review",  # 道案内のみ
     },
     # manual_help_kb_design.md §4-1: 需要側 + 供給側の両面計器。
     RULE_MANUAL_HELP_GAPS_PENDING: {
@@ -868,6 +880,133 @@ def _eval_course_prerequisite_uncovered(session, uid: str) -> list[tuple[NextSte
     return out
 
 
+def _course_bundled_refs(data: dict) -> tuple[list[str], list[str], list[str]]:
+    """コースの topics が束ねている論理要素・主張・学ぶ単位の参照を集める（重複排除・順序保存）。
+
+    `linked_component_ids` は agent ID / DB UUID のどちらでも入りうる（突合は呼び出し側で
+    両方見る）。`units[].unit_id` は**読むだけ**で、`learning_units` 表を JOIN しない
+    （表が無い環境でもこのルールが落ちないようにする。unit 経由の承認状態の追随は
+    learning_units_design.md §11 の非スコープ）。
+    """
+    component_refs: list[str] = []
+    claim_refs: list[str] = []
+    unit_ids: list[str] = []
+    seen_components: set[str] = set()
+    seen_claims: set[str] = set()
+    seen_units: set[str] = set()
+    for topic in iter_all_topics(data):
+        for raw in topic.get("linked_component_ids") or []:
+            ref = str(raw or "").strip()
+            if ref and ref not in seen_components:
+                seen_components.add(ref)
+                component_refs.append(ref)
+        for raw in topic.get("linked_claim_ids") or []:
+            ref = str(raw or "").strip()
+            if ref and ref not in seen_claims:
+                seen_claims.add(ref)
+                claim_refs.append(ref)
+        for unit in topic.get("units") or []:
+            if not isinstance(unit, dict):
+                continue
+            unit_id = str(unit.get("unit_id") or "").strip()
+            if unit_id and unit_id not in seen_units:
+                seen_units.add(unit_id)
+                unit_ids.append(unit_id)
+    return component_refs, claim_refs, unit_ids
+
+
+def _approved_refs(session, table: str, refs: list[str]) -> set[str]:
+    """`refs` のうち `review_status='teacher_approved'` の行に到達するものだけを返す。
+
+    突合は DB UUID（`id::text`）と agent ID（`source_scope.legacy_ids` の要素）の両方。
+    読むのは live ビュー（KO5: 基表を SELECT してよいのは persistence / deletion のみ）。
+    """
+    if not refs:
+        return set()
+    rows = session.execute(
+        sa_text(
+            "SELECT DISTINCT ref FROM ("
+            f"  SELECT t.id::text AS ref FROM {table} t"
+            "   WHERE t.review_status = 'teacher_approved' AND t.id::text = ANY(:refs)"
+            "  UNION"
+            f"  SELECT lid AS ref FROM {table} t,"
+            "   LATERAL jsonb_array_elements_text("
+            "     CASE WHEN jsonb_typeof(t.source_scope->'legacy_ids') = 'array'"
+            "          THEN t.source_scope->'legacy_ids' ELSE '[]'::jsonb END) AS lid"
+            "   WHERE t.review_status = 'teacher_approved' AND lid = ANY(:refs)"
+            ") m"
+        ),
+        {"refs": sorted(set(refs))},
+    ).mappings().fetchall()
+    return {str(row["ref"]) for row in rows if row["ref"]}
+
+
+def _eval_course_delivered_unreviewed(session, uid: str) -> list[tuple[NextStep, str]]:
+    """P2-5（learning_units_design.md §7・オーナー判断 O-5）: 公開済みのコースが束ねている
+    論理要素・主張に、教員が承認したものが1件も無い。
+
+    - 対象は本人所有・`is_published = TRUE` のコースだけ（下書きは対象外 — 配信されて
+      いない状態で「配信されています」とは書けない）。
+    - 束ねが 0 件のコースには出さない（承認対象が無いのは別の事実で、これは
+      「承認を経ずに配信されている」ルールではない）。
+    - 事実文に件数を書かない（LU5）。配信は止めない — 教員に事実を見せるだけ（LU8 / RR7）。
+    - 承認が1件でも付けば項目は自動消滅する（G1: 完了フラグを持たない）。
+    """
+    rows = session.execute(
+        sa_text("""
+            SELECT id, title, data, created_at FROM learning_courses
+            WHERE user_id = CAST(:uid AS uuid) AND is_published = TRUE
+            ORDER BY created_at ASC
+        """),
+        {"uid": uid},
+    ).mappings().fetchall()
+
+    courses: list[tuple[Any, list[str], list[str], list[str]]] = []
+    all_component_refs: list[str] = []
+    all_claim_refs: list[str] = []
+    for row in rows:
+        data = row["data"] if isinstance(row["data"], dict) else {}
+        component_refs, claim_refs, _unit_ids = _course_bundled_refs(data)
+        if not component_refs and not claim_refs:
+            continue
+        material_ids = [str(m) for m in course_source_material_ids(data) if m]
+        courses.append((row, component_refs, claim_refs, material_ids))
+        all_component_refs.extend(component_refs)
+        all_claim_refs.extend(claim_refs)
+    if not courses:
+        return []
+
+    approved_components = _approved_refs(session, "theory_components_live", all_component_refs)
+    approved_claims = _approved_refs(session, "theory_claims_live", all_claim_refs)
+
+    out: list[tuple[NextStep, str]] = []
+    for row, component_refs, claim_refs, material_ids in courses:
+        if approved_components.intersection(component_refs):
+            continue
+        if approved_claims.intersection(claim_refs):
+            continue
+        cid = row["id"]
+        title = row["title"] or cid
+        material_id = material_ids[0] if material_ids else ""
+        target: dict = {"course_id": cid}
+        ctx: dict = {"course_id": cid}
+        if material_id:
+            target["material_id"] = material_id
+            ctx["material_id"] = material_id
+        step = _make_step(
+            rule_id=RULE_COURSE_DELIVERED_UNREVIEWED,
+            target_id=cid,
+            title=f"コース『{title}』が使っている解析結果を確認する",
+            reason=(
+                f"コース『{title}』は、解析結果の確認（承認）を経ずに配信されています。"
+            ),
+            target=target,
+            ctx=ctx,
+        )
+        out.append((step, _iso(row["created_at"])))
+    return out
+
+
 def _eval_manual_help_gaps_pending(session, uid: str) -> list[tuple[NextStep, str]]:
     """需要側計器（manual_help_kb_design.md §4-1）: 学生 HELP ルートの
 
@@ -996,6 +1135,7 @@ _RULE_EVALUATORS = {
     RULE_FIGURE_UNREVIEWED_MODES: _eval_figure_unreviewed_modes,
     RULE_COURSE_DISCUSS_OPENING_UNREVIEWED: _eval_course_discuss_opening_unreviewed,
     RULE_COURSE_PREREQUISITE_UNCOVERED: _eval_course_prerequisite_uncovered,
+    RULE_COURSE_DELIVERED_UNREVIEWED: _eval_course_delivered_unreviewed,
     RULE_MANUAL_HELP_GAPS_PENDING: _eval_manual_help_gaps_pending,
     RULE_ASSISTANT_KB_UNDOCUMENTED: _eval_assistant_kb_undocumented,
     RULE_MANUAL_TODO_UNRESOLVED: _eval_manual_todo_unresolved,

@@ -63,6 +63,7 @@ from routes import atlas_vectors as atlas_vectors_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
+from routes import course_prerequisites as course_prerequisites_routes
 from routes import seminar_brief as seminar_brief_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
@@ -416,6 +417,10 @@ app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
 # （GET /api/admin/documents/{ref}/seminar-brief）。reconstruction.admin_router と同型。
 app.include_router(seminar_brief_routes.admin_router, prefix="/api/admin")
 app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
+# コースビルダーの前提知識 半順序チェック（learning_units_design.md §6.4 / P2-4）。
+# 下書きだけを入力に取る読み取り専用 API 1本（POST /api/admin/course-builder/prerequisite-check）。
+# routes/admin.py の /course-builder/* とはパスが衝突しないためフラット登録で足りる。
+app.include_router(course_prerequisites_routes.router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")
