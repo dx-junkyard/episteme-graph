@@ -2791,7 +2791,8 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   は `run_with_repair` 側、他の LLM agent 10本は `llm_step` 側）。環境変数名・冪等性フラグ・
   トリガー条件・DB 書き込み・grounding の中身・429 の文言はドメイン側の責務。
 - **チャット型 AI の共通規約（2026-07-20 整理、正本は
-  `docs/features/assistant_common_infra_design.md`）** — ①会話履歴を LLM に渡すときは
+  `docs/features/assistant_common_infra_design.md`。学習者向け UX の次の3段＝入口統合 → 構造 grounding（SA層 Phase 4）→
+  ストリーミング は `docs/architecture/assistant_ux_roadmap_2026-09-12.md` が順序と依存の正本）** — ①会話履歴を LLM に渡すときは
   `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep,
   current_message)` を必ず通す（学習チャット 20/2000、コースビルダー 20/4000/head_keep=2
   ＝フロントが履歴先頭に注入する course_draft 疑似ターン2件の保護、W層 16/4000/head_keep=1
