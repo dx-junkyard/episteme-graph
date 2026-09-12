@@ -101,6 +101,7 @@ from core.course_data import (
     course_title as _course_title,
     course_topics,
 )
+from core.course_units import list_unit_candidates, render_unit_candidates_block
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import (
@@ -2009,8 +2010,8 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
     {
       "title": "章タイトル",
       "topics": [
-        {"title": "トピック名", "prerequisites": []},
-        {"title": "トピック名", "prerequisites": ["前のトピック名"]}
+        {"title": "トピック名", "prerequisites": [], "units": ["U3"]},
+        {"title": "トピック名", "prerequisites": ["前のトピック名"], "units": ["U5", "U6"]}
       ]
     }
   ],
@@ -2036,6 +2037,11 @@ _COURSE_BUILDER_SYSTEM_PROMPT = """あなたは大学教員が学習コース（
 - topics[].prerequisites には、そのトピックを学ぶ前に習得しておくべき**同コース内の**トピックのタイトルを列挙する
   - 例: 第2章のトピックは第1章のトピックタイトルを prerequisites に入れる
   - 最初のトピックや前提知識不要なトピックは prerequisites を空配列 [] にする
+- topics[].units には、教材コンテキストの「学ぶ単位の候補」区画に列挙された handle（U1, U2 …）だけを列挙する
+  - 候補に無い handle を書いてはならない。単位を自分で作り出してもならない（候補に無いものは捨てられる）
+  - 1つのトピックには 1〜3 個の handle を選ぶ。適切な候補が無ければ空配列 [] にする
+  - 同じ handle を複数のトピックに置いてよい（同じ単位を別の角度から扱う場合）
+  - 候補区画そのものが無い場合は units を空配列 [] にする
 - domain フィールドは教材の分野情報（コンポーネントや旧ナレッジグラフの「**分野:**」）から引き継ぐこと
   - 教材の分野情報がなければ、コースの内容を踏まえて適切な専門分野名を設定する
 - sources フィールドは常に空配列 [] のままにすること（教材はシステムが自動的に設定する）"""
@@ -2197,6 +2203,28 @@ def _build_material_context(
         analysis_by_uuid: dict[str, dict] = (
             resolve_artifact_runs(session, doc_uuids) if doc_uuids else {}
         )
+
+        # --- 7) 学ぶ単位の候補（learning_units_design.md §6.2 / P2-3）---
+        # ``material_ids`` の順で document を並べ、handle（U1..Un）を決定論的に振る。
+        # **区画ごと fail-soft**: 表が無い / 読めない環境ではコンテキストからこの
+        # 区画が消えるだけで、コースビルダー自体は従来どおり動く。失敗した SELECT で
+        # トランザクションが中断状態になり得るため rollback してから縮退する
+        # （この時点まで書き込みは無い）。
+        ordered_doc_uuids = [
+            uuid_for_mid
+            for mid in material_ids
+            for uuid_for_mid in [next((u for u, m in uuid_to_mid.items() if m == mid), None)]
+            if uuid_for_mid
+        ]
+        try:
+            unit_candidates = list_unit_candidates(session, ordered_doc_uuids)
+        except Exception:
+            logger.warning("learning unit candidates unavailable", exc_info=True)
+            try:
+                session.rollback()
+            except Exception:
+                logger.warning("rollback after learning unit lookup failed", exc_info=True)
+            unit_candidates = []
 
     finally:
         session.close()
@@ -2381,6 +2409,13 @@ def _build_material_context(
                 sections.append("**主要概念 (legacy):**\n" + "\n".join(concept_lines))
 
         sections.append("")  # blank line separator
+
+    # 学ぶ単位の候補は document を跨いだ通し handle（U1..Un）なので、教材ごとの
+    # 区画ではなく末尾に1区画としてまとめる（handle の一意性を保つ）。
+    units_block = render_unit_candidates_block(unit_candidates)
+    if units_block:
+        sections.append(units_block)
+        sections.append("")
 
     return "\n".join(sections)
 

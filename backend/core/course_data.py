@@ -50,6 +50,42 @@ class CoursePrerequisite(BaseModel):
 
     name: str | None = None
     status: str | None = "not_started"  # mastered | partial | not_started
+    # learning_units_design.md §6.4 (P2-4): 前提を「名前」ではなく同コース topic の
+    # ``id`` で参照する additive 列。解決（正規化題名の完全一致）は
+    # ``core/course_prerequisites.py`` が担い、一致しなければ **None のまま**
+    # （推測しない）。``name`` は表示用として常に残す（情報を落とさない）。
+    topic_id: str | None = None
+
+
+#: ``topic.units[].source`` の語彙（learning_units_design.md §6.1）。
+#: - teacher_selected: コースビルダーで教員が選んだ（候補 handle 経由）
+#: - title_match: freeze の救済（文字列一致）で後付けした = 教員は選んでいない
+UNIT_SOURCE_TEACHER_SELECTED = "teacher_selected"
+UNIT_SOURCE_TITLE_MATCH = "title_match"
+COURSE_TOPIC_UNIT_SOURCES: tuple[str, ...] = (
+    UNIT_SOURCE_TEACHER_SELECTED,
+    UNIT_SOURCE_TITLE_MATCH,
+)
+
+
+class CourseTopicUnit(BaseModel):
+    """``topics[].units[]`` の要素（learning_units_design.md §6.1・additive）。
+
+    topic が束ねた「学ぶ単位」への参照。``stable_key`` が正本の参照キーで、
+    再解析（supersede）後も同じ単位を指す。``unit_id`` は保存時点の live 行の
+    UUID（表示・照合の補助）で、参照の同一性には使わない。
+
+    **学習者向け DTO には ``stable_key`` / ``unit_id`` を出さない**（KO10 と同じ規律。
+    射影は ``learner_topic_units_projection()`` が正本）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str | None = None  # core/schema.py::LEARNING_UNIT_KINDS
+    stable_key: str | None = None
+    unit_id: str | None = None
+    label: str | None = ""
+    source: str | None = None  # COURSE_TOPIC_UNIT_SOURCES
 
 
 class CourseMisconception(BaseModel):
@@ -80,6 +116,9 @@ class CourseTopic(BaseModel):
 
     prerequisites: list[CoursePrerequisite | str] = Field(default_factory=list)
     misconceptions: list[CourseMisconception] = Field(default_factory=list)
+    # learning_units_design.md §6.1 (P2-3): このトピックが束ねた「学ぶ単位」。
+    # 空のトピックは従来どおり文字列一致（救済）で成果と結ばれる（LU1）。
+    units: list[CourseTopicUnit] = Field(default_factory=list)
 
     summary: str | None = ""
     content: str | None = ""
@@ -278,6 +317,46 @@ def iter_all_topics(data: dict | None) -> list[dict]:
                 result.append(topic)
     result.extend(course_topics(data))
     return result
+
+
+def topic_units(topic: dict | None) -> list[dict]:
+    """``topic.units`` を dict のリストで返す（learning_units_design.md §6.1）。
+
+    非 dict 要素・``stable_key`` が空の要素は落とす（参照キーの無い unit は
+    freeze 側で何も束ねられないため、持ち回っても意味が無い）。順序は保存順。
+    """
+    if not isinstance(topic, dict):
+        return []
+    units = topic.get("units")
+    if not isinstance(units, list):
+        return []
+    return [u for u in units if isinstance(u, dict) and str(u.get("stable_key") or "").strip()]
+
+
+def topic_unit_keys(topic: dict | None) -> list[str]:
+    """``topic.units[].stable_key`` を順序保持・重複除去で返す。
+
+    freeze（``course_content_builder``）が ``learning_units_live`` を読むときの
+    キー集合。``topic_units()`` と同じ防御（非 dict / 空キーの除外）を通る。
+    """
+    return list(dict.fromkeys(str(u["stable_key"]).strip() for u in topic_units(topic)))
+
+
+def learner_topic_units_projection(topic: dict | None) -> list[dict]:
+    """学習者向け DTO 用の ``topic.units`` 射影（``kind`` / ``label`` だけ）。
+
+    learning_units_design.md §6.1 / KO10: ``stable_key`` / ``unit_id`` / 内部の
+    出所 ID を学習者へ出さない。``source``（teacher_selected / title_match）も
+    教員側の確定の来歴なので学習者へは出さない。``label`` が空の unit は落とす
+    （内部 ID を表示名に昇格させない）。
+    """
+    projected: list[dict] = []
+    for unit in topic_units(topic):
+        label = str(unit.get("label") or "").strip()
+        if not label:
+            continue
+        projected.append({"kind": str(unit.get("kind") or ""), "label": label})
+    return projected
 
 
 def course_chapters(data: dict | None) -> list:

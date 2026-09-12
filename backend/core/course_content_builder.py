@@ -12,8 +12,16 @@ from typing import Any
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
+from core import course_units as course_units_mod
 from core import element_explanations as element_explanations_store
-from core.course_data import course_chapters, course_source_material_ids, course_title, course_topics
+from core.course_data import (
+    UNIT_SOURCE_TITLE_MATCH,
+    course_chapters,
+    course_source_material_ids,
+    course_title,
+    course_topics,
+    topic_units,
+)
 from core.deliberation import labels as labels_mod
 from core.document_pipeline.figure_images import normalize_figure_join_key
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
@@ -113,7 +121,11 @@ def build_course_content(user_id: str, course_id: str) -> dict:
 
         chunks_by_material = _load_chunks(session, material_ids)
         figures_index = _load_document_figures_index(session, document_ids)
-        enriched_topics = _enrich_topics(course_topics(course), bundle, chunks_by_material, figures_index)
+        course_topic_list = course_topics(course)
+        units_by_key = _load_learning_units(session, document_ids)
+        enriched_topics = _enrich_topics(
+            course_topic_list, bundle, chunks_by_material, figures_index, units_by_key
+        )
         draft_result = _generate_course_topic_drafts(
             course, enriched_topics, user_id=str(user_id), course_id=str(course_id)
         )
@@ -698,6 +710,10 @@ def _collect_structured_content(
     """
     equation_explanations = equation_explanations or {}
     mapping_topics: list[dict] = []
+    # blueprint（語りの弧）の component_id -> {role, visual_strategy, order}（P2-6）。
+    # BlueprintAgent は決定論の合成で、ここでは読むだけ（LLM を呼ばない）。
+    narrative_by_component: dict[str, dict] = {}
+    narrative_order = 0
     components: dict[str, dict] = {}
     equations: dict[str, dict] = {}
     claims: dict[str, dict] = {}
@@ -733,6 +749,29 @@ def _collect_structured_content(
             role = str(node.get("narrative_role") or "").strip()
             if comp_id and role:
                 narrative_role_by_component_id[comp_id] = role
+
+        # blueprint（#C-9: live 消費者ゼロだった語りの弧）を component_id 名前空間へ
+        # 索引化する（learning_units_design.md §6.5 / P2-6）。``rationale`` は
+        # 載せない（プロンプトに出すのは role / visual_strategy だけ）。弧の順序は
+        # narrative_arc の並びをそのまま通し番号にする（``step`` 値には依存しない）。
+        blueprint_artifact = _as_dict(artifacts.get("blueprint"))
+        for step in _as_list(blueprint_artifact.get("narrative_arc")):
+            if not isinstance(step, dict):
+                continue
+            role = str(step.get("role") or "").strip()
+            visual_strategy = str(step.get("visual_strategy") or "").strip()
+            if not role and not visual_strategy:
+                continue
+            narrative_order += 1
+            for component_id in _as_list(step.get("linked_component_ids")):
+                component_id = str(component_id or "").strip()
+                if not component_id or component_id in narrative_by_component:
+                    continue
+                narrative_by_component[component_id] = {
+                    "role": role,
+                    "visual_strategy": visual_strategy,
+                    "order": narrative_order,
+                }
 
         assembly = _as_dict(artifacts.get("component_assembly"))
         for component in _as_list(assembly.get("components")):
@@ -824,6 +863,7 @@ def _collect_structured_content(
         "claims": claims,
         "evidence": evidence,
         "figure_claim_links": figure_claim_links,
+        "narrative_by_component": narrative_by_component,
     }
 
 
@@ -924,6 +964,32 @@ def _load_document_figures_index(session, document_ids: list[str]) -> dict[str, 
     return index
 
 
+def _load_learning_units(session, document_ids: list[str]) -> dict[str, dict]:
+    """コースの source document 集合の live な「学ぶ単位」を ``stable_key`` で引く。
+
+    正本は ``core/course_units.py``（読むのは ``learning_units_live`` ビューだけ
+    = KO5）。document 集合で1回読むのは、freeze が同じ dict を2つの用途に使うため:
+
+    1. トピックが選んだ unit（``topic.units[].stable_key``）の解決
+    2. 救済（文字列一致）で当たった component がどの unit の子かの逆引き（§6.3）
+
+    ``document_ids`` が空なら SQL を発行しない。表が無い / 読めない場合は空 dict へ
+    縮退する（LU1: units の無い従来経路と同じ文字列一致の救済に落ちるだけで、
+    freeze は止まらない）。
+    """
+    if not document_ids:
+        return {}
+    try:
+        return course_units_mod.load_units_for_documents(session, document_ids)
+    except Exception:
+        logger.warning("learning units unavailable for course build", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:
+            logger.warning("rollback after learning unit lookup failed", exc_info=True)
+        return {}
+
+
 def _resolve_figure_ref(
     figures_index: dict[str, dict],
     *,
@@ -948,23 +1014,195 @@ def _resolve_figure_ref(
     return None
 
 
+#: ``topic.content_confidence`` の値（units 経由で束ねたトピック）。文字列一致の
+#: 一致率語彙（exact_title / title_similarity / none）とは別の値にして、教員が選んだ
+#: 単位で束ねたことを区別できるようにする（learning_units_design.md §6.3）。
+UNIT_SELECTION_CONFIDENCE = "unit_selection"
+
+#: ``topic.content_source`` の値（units 経由）。
+UNIT_SELECTION_CONTENT_SOURCE = "learning_units"
+
+
+def _units_for_topic(topic: dict, units_by_key: dict[str, dict]) -> list[tuple[dict, dict]]:
+    """``topic.units[]`` を live 行と対にして返す（保存順・解決できないものは落とす）。
+
+    再解析で supersede された unit や、別 document の unit（``units_by_key`` は
+    コースの source document 集合で作られる）は live に居ないので落ちる — 推測で
+    復元しない（LU4: 参照は stable_key、消えたものは消えたと扱う）。
+    """
+    resolved: list[tuple[dict, dict]] = []
+    for entry in topic_units(topic):
+        row = units_by_key.get(str(entry.get("stable_key") or "").strip())
+        if isinstance(row, dict):
+            resolved.append((entry, row))
+    return resolved
+
+
+def _component_ids_from_units(
+    unit_rows: list[dict], components: dict[str, dict]
+) -> tuple[list[str], dict[str, str]]:
+    """unit が束ねる component の agent ID 一覧と、``component_id -> 親 unit label``。
+
+    突合に使うのは ``agent_payload.linked_component_agent_ids`` だけ（設計書 §4.1）。
+    ``linked_component_ids`` は DB UUID で artifact の component 索引とは別名前空間
+    なので混ぜない。artifact に居ない component は落とす（推測しない）。
+    """
+    ids: list[str] = []
+    display_labels: dict[str, str] = {}
+    for row in unit_rows:
+        unit_label = str(row.get("label") or "").strip()
+        for component_id in course_units_mod.unit_component_agent_ids(row):
+            if component_id not in components:
+                continue
+            if component_id not in display_labels and unit_label:
+                display_labels[component_id] = unit_label
+            ids.append(component_id)
+    return list(dict.fromkeys(ids)), display_labels
+
+
+def _equations_from_units(unit_rows: list[dict], equations: dict[str, dict]) -> list[str]:
+    """unit が束ねる式の agent equation_id（artifact に実在するものだけ）。"""
+    ids: list[str] = []
+    for row in unit_rows:
+        ids.extend(
+            eq_id
+            for eq_id in course_units_mod.unit_equation_agent_ids(row)
+            if eq_id in equations
+        )
+    return list(dict.fromkeys(ids))
+
+
+def _claim_ids_from_units(unit_rows: list[dict], claims: dict[str, dict]) -> list[str]:
+    """unit が束ねる claim の agent claim_id（artifact に実在するものだけ）。
+
+    ``learning_units.linked_claim_ids`` は DB UUID なので、そのままでは
+    ``![[claim:id]]`` の解決先（claim_object_builder の claim_id 名前空間）と
+    突合できない。``course_units.unit_claim_agent_ids`` が返す候補のうち
+    **artifact 索引に実在するものだけ**を採り、UUID をそのまま流さない。
+    """
+    ids: list[str] = []
+    for row in unit_rows:
+        ids.extend(
+            claim_id
+            for claim_id in course_units_mod.unit_claim_agent_ids(row)
+            if claim_id in claims
+        )
+    return list(dict.fromkeys(ids))
+
+
+def _unit_parent_index(units_by_key: dict[str, dict]) -> dict[str, dict]:
+    """``component agent ID -> その component を束ねている unit 行``（救済の逆引き）。
+
+    ``_best_mapping`` の文字列一致で当たった component が何かの unit の子なら、
+    その unit を ``topic.units`` に ``source="title_match"`` で後付けするために使う
+    （設計書 §6.3。教員が選んだ ``teacher_selected`` とは ``source`` で区別する）。
+    """
+    index: dict[str, dict] = {}
+    for row in units_by_key.values():
+        for component_id in course_units_mod.unit_component_agent_ids(row):
+            index.setdefault(component_id, row)
+    return index
+
+
+def _topic_narrative(components: list[dict], narrative_by_component: dict[str, dict]) -> dict:
+    """束ねた component から語りの弧（blueprint）を導出する（§6.5 / P2-6）。
+
+    ``roles`` は弧の順で重複を除いたもの、``visual_strategy`` は弧の先頭の非 ``none``。
+    ``rationale`` と数値は載せない（LU5）。材料が無ければ空 dict（呼び出し側が
+    キー自体を足さない）。
+    """
+    if not narrative_by_component:
+        return {}
+    entries: list[dict] = []
+    for component in components:
+        entry = narrative_by_component.get(str(component.get("component_id") or ""))
+        if isinstance(entry, dict):
+            entries.append(entry)
+    if not entries:
+        return {}
+    entries.sort(key=lambda item: item.get("order") or 0)
+    roles = list(dict.fromkeys(
+        str(entry.get("role") or "").strip() for entry in entries if str(entry.get("role") or "").strip()
+    ))
+    visual_strategy = ""
+    for entry in entries:
+        candidate = str(entry.get("visual_strategy") or "").strip()
+        if candidate and candidate != "none":
+            visual_strategy = candidate
+            break
+    narrative: dict = {}
+    if roles:
+        narrative["roles"] = roles
+    if visual_strategy:
+        narrative["visual_strategy"] = visual_strategy
+    return narrative
+
+
 def _enrich_topics(
     topics: list[dict],
     bundle: dict,
     chunks_by_material: dict[str, list[dict]],
     figures_index: dict[str, dict] | None = None,
+    units_by_key: dict[str, dict] | None = None,
 ) -> list[dict]:
     enriched: list[dict] = []
     all_chunks = [chunk for chunks in chunks_by_material.values() for chunk in chunks]
     # 出典解決の索引はコース単位で1回だけ組む（トピックごとに作り直さない）。
     block_index = _chunk_block_index(all_chunks)
     figures_index = figures_index or {}
+    units_by_key = units_by_key or {}
+    narrative_by_component = bundle.get("narrative_by_component") or {}
+    unit_parent_index = _unit_parent_index(units_by_key)
     for index, raw_topic in enumerate(topics):
         topic = dict(raw_topic) if isinstance(raw_topic, dict) else {"title": str(raw_topic)}
         mapping, mapping_confidence = _best_mapping(topic, bundle["mapping_topics"], index)
-        component_ids = _component_ids_for_topic(topic, mapping, bundle["components"])
+
+        # --- 束ねの決定（units 優先・文字列一致は救済）-----------------------
+        # 教員が選んだ「学ぶ単位」があれば、それが成果との結合の正本になる
+        # （learning_units_design.md §6.3）。units が空のときだけ従来の
+        # _best_mapping / _component_ids_for_topic（タイトル文字列の重なり）へ落ちる。
+        selected_units = _units_for_topic(topic, units_by_key)
+        unit_rows = [row for _entry, row in selected_units]
+        display_labels: dict[str, str] = {}
+        if unit_rows:
+            component_ids, display_labels = _component_ids_from_units(unit_rows, bundle["components"])
+        else:
+            component_ids = _component_ids_for_topic(topic, mapping, bundle["components"])
         components = [bundle["components"][cid] for cid in component_ids if cid in bundle["components"]]
         equations = _equations_for_components(components, bundle["equations"])
+        if unit_rows:
+            # unit が直接指している式も足す（component 経由で拾えない式を落とさない）。
+            known_equation_ids = {
+                str(eq.get("equation_id") or eq.get("id") or "") for eq in equations
+            }
+            for eq_id in _equations_from_units(unit_rows, bundle["equations"]):
+                if eq_id not in known_equation_ids:
+                    known_equation_ids.add(eq_id)
+                    equations.append(bundle["equations"][eq_id])
+        if unit_rows:
+            topic["units"] = [entry for entry, _row in selected_units]
+        elif components:
+            # 救済（文字列一致）で当たった component が何かの unit の子なら、その
+            # unit を後付けする。**教員が選んでいない**ことを source で区別する（§6.3）。
+            rescued: list[dict] = []
+            seen_keys: set[str] = set()
+            for component in components:
+                row = unit_parent_index.get(str(component.get("component_id") or ""))
+                if not isinstance(row, dict):
+                    continue
+                key = str(row.get("stable_key") or "")
+                if not key or key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                rescued.append({
+                    "kind": row.get("unit_kind") or "",
+                    "stable_key": key,
+                    "unit_id": row.get("unit_id") or "",
+                    "label": row.get("label") or "",
+                    "source": UNIT_SOURCE_TITLE_MATCH,
+                })
+            if rescued:
+                topic["units"] = rescued
 
         summary = _topic_summary(mapping, components)
         learning_objectives = _as_str_list(mapping.get("learning_objectives") if mapping else [])
@@ -1022,7 +1260,8 @@ def _enrich_topics(
         relevant_formulas = _relevant_chunk_formulas(source_chunks, allowed_formula_ids)
 
         # 対応付けが取れなかったトピック（mapping も component も無い）は、出典を
-        # 捏造せず空のまま事実文だけを載せる（原則8）。
+        # 捏造せず空のまま事実文だけを載せる（原則8）。units 経由で束ねたトピックは
+        # component が付いているので unlinked にならない。
         unlinked = mapping_confidence == "none" and not components
 
         topic.update({
@@ -1035,6 +1274,7 @@ def _enrich_topics(
                 equations,
                 assessment_prompts,
                 relevant_formulas,
+                display_labels=display_labels,
             ),
             "learning_objectives": learning_objectives,
             "prerequisite_concepts": prerequisite_concepts,
@@ -1043,16 +1283,24 @@ def _enrich_topics(
             "expected_misconceptions": _as_str_list(mapping.get("expected_misconceptions") if mapping else []),
             "linked_component_ids": component_ids,
             "linked_equation_ids": [str(e.get("equation_id") or e.get("id")) for e in equations if e.get("equation_id") or e.get("id")],
-            "linked_claim_ids": _linked_ids(components, "linked_claim_ids"),
+            "linked_claim_ids": list(dict.fromkeys(
+                _linked_ids(components, "linked_claim_ids")
+                + (_claim_ids_from_units(unit_rows, bundle.get("claims") or {}) if unit_rows else [])
+            )),
             "source_evidence_ids": evidence_ids,
             "evidence_links": evidence_links,
             "teaching_takeaways": teaching_takeaways,
             "material_chunk_ids": [] if unlinked else [c["id"] for c in source_chunks if c.get("id")],
             "source_excerpt": "" if unlinked or not source_chunks
             else _short_excerpt(source_chunks[0].get("text", "")),
-            "content_source": "unlinked" if unlinked else "agent_mapping",
-            "content_confidence": mapping_confidence,
+            "content_source": UNIT_SELECTION_CONTENT_SOURCE if unit_rows
+            else ("unlinked" if unlinked else "agent_mapping"),
+            "content_confidence": UNIT_SELECTION_CONFIDENCE if unit_rows else mapping_confidence,
         })
+        narrative = _topic_narrative(components, narrative_by_component)
+        if narrative:
+            # 材料が無ければキー自体を足さない（§6.5。空の語りの弧を作らない）。
+            topic["narrative"] = narrative
         if unlinked:
             # 事実文はサーバ定数。数値（一致率・件数）は載せない（原則4）。
             topic["grounding_note"] = UNLINKED_TOPIC_GROUNDING_NOTE
@@ -1404,6 +1652,10 @@ def _merge_component_rich_projection(item: dict, rich: dict | None) -> None:
         return
     if rich.get("label"):
         item["label"] = rich["label"]
+    if rich.get("display_label"):
+        # learning_units_design.md §5.1: 親 unit の label（表示名）。UI はこれを
+        # 優先し、内部名（label）は情報として残る。
+        item["display_label"] = rich["display_label"]
     if rich.get("narrative_role"):
         item["narrative_role"] = rich["narrative_role"]
     if rich.get("document_id"):
@@ -2019,6 +2271,8 @@ def _content_blocks(
     equations: list[dict],
     assessment_prompts: list[str],
     fallback_formulas: list[dict] | None = None,
+    *,
+    display_labels: dict[str, str] | None = None,
 ) -> list[dict]:
     """トピックの構造化本文ブロック。
 
@@ -2026,7 +2280,13 @@ def _content_blocks(
     もの）の補充枠。**そのトピックが参照する式だけ**を渡すこと（正本は
     ``_relevant_chunk_formulas``）。チャンクの ``formulas`` を丸ごと渡すと、全
     チャンクが同じ式集合を持つ論文で「全トピック × 全式」の複製になる（C-10）。
+
+    ``display_labels`` は ``component_id -> 親 unit の label``
+    （learning_units_design.md §5.1）。決定論 refinement が分割した子 component の
+    内部名（``Transform representation: …``）を学習者へ出さないための**表示名**で、
+    内部名は ``label`` に残す（情報を落とさない）。UI は ``display_label`` を優先する。
     """
+    display_labels = display_labels or {}
     blocks: list[dict] = []
     if summary:
         blocks.append({"type": "summary", "text": summary})
@@ -2039,6 +2299,9 @@ def _content_blocks(
                 {
                     "component_id": c.get("component_id"),
                     "label": c.get("label"),
+                    # learning_units_design.md §5.1: unit 経由で束ねた子 component は
+                    # 親 unit の label を表示名として併記する（内部名は label に残す）。
+                    "display_label": display_labels.get(str(c.get("component_id") or ""), ""),
                     "summary": c.get("summary"),
                     "teaching_takeaway": c.get("teaching_takeaway"),
                     # component_evidence_redesign.md Phase 1: 裸IDではなく接続の
@@ -2322,7 +2585,7 @@ def _course_context_for_prompt(course: dict, topics: list[dict]) -> dict:
 
 
 def _topic_context_for_prompt(topic: dict) -> dict:
-    return {
+    context = {
         "id": topic.get("id") or "",
         "title": topic.get("title") or "",
         "chapter_index": topic.get("chapter_index", 0),
@@ -2331,6 +2594,16 @@ def _topic_context_for_prompt(topic: dict) -> dict:
         "expected_misconceptions": topic.get("expected_misconceptions") or [],
         "content_confidence": topic.get("content_confidence") or "",
     }
+    # learning_units_design.md §6.5 (P2-6): 語りの弧（blueprint 由来）。散文生成が
+    # 「このトピックが論文の語りの中で果たす役割」を参照できるようにする。
+    # ``roles`` / ``visual_strategy`` だけで、``rationale`` も数値も渡さない（LU5）。
+    narrative = topic.get("narrative")
+    if isinstance(narrative, dict) and narrative:
+        context["narrative"] = {
+            "roles": [str(r) for r in (narrative.get("roles") or [])],
+            "visual_strategy": str(narrative.get("visual_strategy") or ""),
+        }
+    return context
 
 
 def _topic_sequence_context(topics: list[dict], index: int) -> dict:

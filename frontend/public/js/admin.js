@@ -4482,6 +4482,74 @@
     return html;
   }
 
+  // ── 学ぶ単位（learning_units_design.md §6.2）─────────────────────────
+  // 下書きの topic が持つ units を「候補 handle の文字列配列」に正規化する。
+  // AI が dict を返した場合は handle / unit キーを拾い、それ以外（数値・オブジェクト）は
+  // **捨てる**（サーバ側の候補表照合が最終の弁だが、ここでも型を絞る）。
+  function cbDraftUnitHandles(topic) {
+    if (!topic || typeof topic !== "object") return [];
+    var raw = topic.units;
+    if (!raw || !Array.isArray(raw)) return [];
+    var handles = [];
+    raw.forEach(function (item) {
+      var handle = "";
+      if (typeof item === "string") {
+        handle = item;
+      } else if (item && typeof item === "object") {
+        handle = item.handle || item.unit || "";
+      }
+      handle = String(handle || "").trim();
+      if (handle && handles.indexOf(handle) === -1) handles.push(handle);
+    });
+    return handles;
+  }
+
+  // 下書きの前提知識の並び（循環・冗長・未解決・前方参照）をサーバ側の非LLM検査に
+  // 問い合わせ、事実の段落として描く。失敗・available=false は何も描かない
+  // （fail-soft）。ポーリングはしない（プレビュー描画時の1回だけ）。
+  function cbRenderPrerequisiteFacts(draft) {
+    var host = document.getElementById("cb-prereq-facts");
+    if (!host) return;
+    host.innerHTML = "";
+    if (!draft || !draft.chapters || !draft.chapters.length) return;
+    var payload = {
+      chapters: (draft.chapters || []).map(function (ch) {
+        return {
+          title: (ch && ch.title) || "",
+          topics: ((ch && ch.topics) || []).map(function (t) {
+            var title = typeof t === "string" ? t : (t && t.title) || "";
+            var prereqs = [];
+            if (t && Array.isArray(t.prerequisites)) {
+              t.prerequisites.forEach(function (p) {
+                var name = typeof p === "string" ? p : (p && p.name ? p.name : "");
+                if (name) prereqs.push(name);
+              });
+            }
+            return { title: title, prerequisites: prereqs };
+          }),
+        };
+      }),
+    };
+    apiFetch("/admin/course-builder/prerequisite-check", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    })
+      .then(function (res) {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(function (data) {
+        if (!data || !data.available || !data.facts || !data.facts.length) return;
+        var facts = data.facts.map(function (fact) {
+          return '<div class="cb-draft-meta">' + escHtml(String(fact)) + "</div>";
+        });
+        host.innerHTML = facts.join("");
+      })
+      .catch(function () {
+        /* 事実文は補助表示。取得できなければ何も描かない。 */
+      });
+  }
+
   // ── Course Preview ─────────────────────────────────────────────────
   function renderCoursePreview() {
     var area = document.getElementById("cb-preview-area");
@@ -4509,6 +4577,9 @@
     if (draft.prerequisites && draft.prerequisites.length > 0) {
       html += '<div class="cb-draft-meta"><span class="cb-meta-label">前提知識:</span> ' + draft.prerequisites.map(escHtml).join(", ") + "</div>";
     }
+    // 前提知識の並びについての事実文（サーバ側の非LLM検査。操作要素ではないので
+    // data-ui-anchor は付けない = admin-indicators.js の規律）。
+    html += '<div id="cb-prereq-facts"></div>';
 
     // Chapters tree
     if (draft.chapters && draft.chapters.length > 0) {
@@ -4524,6 +4595,13 @@
           ch.topics.forEach(function (t) {
             html += '<div class="cb-tree-topic">';
             html += escHtml(t.title || t);
+            // 学ぶ単位（§6.2）: AI が選んだ候補 handle をそのまま出す。件数・
+            // 一致率などの数値は出さない（LU5）。
+            var unitHandles = cbDraftUnitHandles(t);
+            if (unitHandles.length) {
+              html += '<div class="cb-draft-meta"><span class="cb-meta-label">学ぶ単位:</span> '
+                + unitHandles.map(escHtml).join(", ") + "</div>";
+            }
             html += "</div>";
           });
         }
@@ -4553,6 +4631,7 @@
 
     area.innerHTML = html;
     approveArea.style.display = "block";
+    cbRenderPrerequisiteFacts(draft);
 
     // 登録済みセッションは承認ボタンを無効化
     var approveBtn = document.getElementById("cb-approve-btn");
@@ -4615,6 +4694,10 @@
           status: topicIndex === 0 ? "in_progress" : "locked",
           prerequisites: prereqs,
           misconceptions: [],
+          // 学ぶ単位（learning_units_design.md §6.2）: AI が選んだ候補 handle
+          // （"U3" 等）をそのままサーバへ渡す。候補表との突合・捏造 handle の
+          // 破棄はサーバ側（core/course_units.resolve_unit_handles）が行う。
+          units: cbDraftUnitHandles(t),
         });
         topicIndex++;
       });

@@ -152,6 +152,9 @@ class VisibilityUpdateRequest(BaseModel):
 class LearningPrerequisite(BaseModel):
     name: str
     status: str = "not_started"  # mastered | partial | not_started
+    # learning_units_design.md §6.4 (P2-4): 同コース topic への ID 参照（additive）。
+    # 解決できなければ None のまま（推測しない）。表示名は常に ``name`` 側に残る。
+    topic_id: str | None = None
 
 
 class LearningMisconception(BaseModel):
@@ -167,6 +170,12 @@ class LearningTopic(BaseModel):
     status: str = "locked"  # completed | in_progress | locked
     prerequisites: list[LearningPrerequisite] = Field(default_factory=list)
     misconceptions: list[LearningMisconception] = Field(default_factory=list)
+    # learning_units_design.md §6.1 (P2-3): このトピックが束ねた「学ぶ単位」。
+    # **リクエスト**（コースビルダーの登録）では候補 handle（``["U3"]`` の文字列配列）
+    # または解決済み dict が来る。**学習者向けレスポンス**へ載せるときは
+    # ``core.course_data.learner_topic_units_projection`` を通し、``kind`` / ``label``
+    # だけに射影する（``stable_key`` / ``unit_id`` を出さない = KO10）。
+    units: list[dict | str] = Field(default_factory=list)
     summary: str = ""
     content: str = ""
     content_blocks: list[dict] = Field(default_factory=list)
