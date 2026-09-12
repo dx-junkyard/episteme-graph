@@ -239,7 +239,16 @@ class TestBlockBudget:
 
 class TestVocabularyIsDeclared:
     def test_known_screens_only_contains_registered_screens(self):
-        assert ac_schema.KNOWN_SCREENS == (ac_schema.SCREEN_GRAPH_REVIEW,)
+        # Phase 4（§11.2）で学習チャットが加わった。語彙に足した画面には必ず
+        # 解決器が登録されていること（未知の screen は正規化で落ちる = fail-closed）。
+        assert ac_schema.KNOWN_SCREENS == (
+            ac_schema.SCREEN_GRAPH_REVIEW,
+            ac_schema.SCREEN_LEARNING,
+        )
+        from core.assistant_context import registered_kinds
+
+        for screen in ac_schema.KNOWN_SCREENS:
+            assert registered_kinds(screen), screen
 
     def test_equation_and_symbol_roles_match_the_paper_layer_vocabulary(self):
         assert set(ac_schema.EQUATION_ROLE_LABELS) == set(pl_schema.EQUATION_ROLES)

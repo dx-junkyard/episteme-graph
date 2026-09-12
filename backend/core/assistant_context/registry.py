@@ -13,7 +13,7 @@ DB も LLM も触らない（SA3）。
 
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 from core.text_hygiene import strip_control_sequences
 
@@ -45,16 +45,29 @@ def registered_kinds(screen: str) -> tuple[str, ...]:
     return tuple(kind for kind, _resolver in _REGISTRY.get(str(screen), ()))
 
 
-def resolve(ctx: ScreenContext | None, sources: Mapping[str, Any] | None = None) -> list[str]:
+def resolve(
+    ctx: ScreenContext | None,
+    sources: Mapping[str, Any] | None = None,
+    *,
+    kinds: Iterable[str] | None = None,
+) -> list[str]:
     """``ctx.screen`` に登録された解決器を登録順に適用し、事実文を集める。
 
     解決器の例外は握り潰す（1つの失敗で対話全体を止めない = SA2）。
+
+    ``kinds`` を渡すと、登録済みのうちその種別だけを**登録順のまま**適用する
+    （Phase 4 §11.5: ``cycle_mode="elicit"`` は表示モードの事実1行だけを許し、
+    主張本文・検証事実は渡さない = 問いの答えを手渡さない）。絞り込みは
+    **route が明示した時だけ**効き、既定（``None``）は Phase 1 と同一挙動。
     """
     if ctx is None:
         return []
+    allowed = None if kinds is None else {str(kind) for kind in kinds}
     payload: Mapping[str, Any] = sources if isinstance(sources, Mapping) else {}
     facts: list[str] = []
     for _kind, resolver in tuple(_REGISTRY.get(ctx.screen, ())):
+        if allowed is not None and _kind not in allowed:
+            continue
         try:
             produced = resolver(ctx, payload)
         except Exception:  # noqa: BLE001 - 解決器の失敗はその facts だけ欠ける
@@ -67,11 +80,20 @@ def resolve(ctx: ScreenContext | None, sources: Mapping[str, Any] | None = None)
     return facts
 
 
-def render_block(facts: list[str] | None) -> str:
+def render_block(
+    facts: list[str] | None,
+    *,
+    header: str = BLOCK_HEADER,
+    max_chars: int = MAX_BLOCK_CHARS,
+) -> str:
     """事実文の列を固定ヘッダ付きの独立ブロックへ描画する（SA7）。
 
-    空なら空文字。``MAX_BLOCK_CHARS`` を超える場合は**行境界**で打ち切り、
+    空なら空文字。``max_chars`` を超える場合は**行境界**で打ち切り、
     最終行に ``…（以下省略）`` を置く（件数は書かない = SA4）。
+
+    ``header`` / ``max_chars`` は additive kwarg で、既定値は Phase 1 と同じ
+    （学習側は ``BLOCK_HEADER_LEARNING`` / ``MAX_BLOCK_CHARS_LEARNING`` を渡す。
+    §11.3 — 教員向けヘッダをそのまま学習者に使うと文面が嘘になる）。
 
     事実文は制御シーケンス（ANSI エスケープ・``[0m`` 型の裸の残骸）を除去してから
     載せる（2026-09-10・graph_dialogue_review_design.md §15 — grounding が制御文字を
@@ -85,11 +107,11 @@ def render_block(facts: list[str] | None) -> str:
     if not cleaned:
         return ""
     lines = [f"- {fact}" for fact in cleaned]
-    block = "\n".join([BLOCK_HEADER, *lines])
-    if len(block) <= MAX_BLOCK_CHARS:
+    block = "\n".join([header, *lines])
+    if len(block) <= max_chars:
         return block
 
-    budget = MAX_BLOCK_CHARS - len(BLOCK_HEADER) - 1 - (len(TRUNCATION_LINE) + 1)
+    budget = max_chars - len(header) - 1 - (len(TRUNCATION_LINE) + 1)
     kept: list[str] = []
     used = 0
     for line in lines:
@@ -98,4 +120,4 @@ def render_block(facts: list[str] | None) -> str:
             break
         kept.append(line)
         used += need
-    return "\n".join([BLOCK_HEADER, *kept, TRUNCATION_LINE])
+    return "\n".join([header, *kept, TRUNCATION_LINE])

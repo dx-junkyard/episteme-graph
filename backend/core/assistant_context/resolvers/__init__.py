@@ -7,5 +7,6 @@
 from __future__ import annotations
 
 from . import graph_review  # noqa: F401  # import 副作用で解決器を登録する
+from . import learning  # noqa: F401  # import 副作用で解決器を登録する
 
-__all__ = ["graph_review"]
+__all__ = ["graph_review", "learning"]

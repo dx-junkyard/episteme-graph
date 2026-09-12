@@ -27,7 +27,10 @@ from typing import Any, Mapping
 
 SCREEN_GRAPH_REVIEW = "graph_review"
 
-KNOWN_SCREENS: tuple[str, ...] = (SCREEN_GRAPH_REVIEW,)
+#: 学習チャット（Phase 4 = §11）。教員側と**別のヘッダ・別の予算**を持つ。
+SCREEN_LEARNING = "learning"
+
+KNOWN_SCREENS: tuple[str, ...] = (SCREEN_GRAPH_REVIEW, SCREEN_LEARNING)
 
 # ---------------------------------------------------------------------------
 # 上限（SA1 / SA7）— すべてコード定数。env で緩めない。
@@ -147,6 +150,118 @@ MORE_ITEMS_MARK = "ほか"
 
 
 # ---------------------------------------------------------------------------
+# 学習チャット（Phase 4 = 設計書 §11）
+#
+# 教員側（Phase 1）の定数を**再利用しない**: ヘッダは「教員がいま画面で選んでいる
+# 対象」と書いてあり学習側では嘘になる（§11.3）。予算も既存プロンプト（トピック本文
+# 5000字 + 最大8チャンク）に対しては 2400 は過大なので別に持つ。
+# ---------------------------------------------------------------------------
+
+#: 学習側の解決結果ブロックの文字上限（§11.3。SA7: env で緩めない）。
+MAX_BLOCK_CHARS_LEARNING = 1200
+
+#: 学習側の固定ヘッダ（§11.3 の文言）。
+BLOCK_HEADER_LEARNING = (
+    "[画面文脈 — 学習者がいま画面で見ている対象について、サーバが解析結果から解決した事実。"
+    "根拠ではなく範囲の手がかり]"
+)
+
+# --- 選択箇所ブロック（§11.4）---------------------------------------------
+#
+# ``selection_text`` は**参照ではなく逐語テキスト**なので、``screen_context``
+# （参照だけ = SA1）と同じ袋に入れず第2ブロックとして注入する。一致検査の結果を
+# 必ず併記して、クライアント申告を根拠と区別できる状態のまま渡す。
+
+SELECTION_BLOCK_HEADER = (
+    "[学習者が選択した箇所 — 学習者が教材上で範囲選択した逐語。"
+    "ここについての質問である可能性が高い]"
+)
+
+#: 表示中教材の本文に逐語が見つかったとき。
+SELECTION_MATCH_CONFIRMED = "（表示中の教材と一致を確認済み）"
+
+#: 見つからなかったとき（**そのまま載せたうえで**正直に書く）。
+SELECTION_MATCH_UNCONFIRMED = "（本文との一致は確認できていません）"
+
+#: 選択逐語の文字上限（§11.4）。
+MAX_SELECTION_TEXT_CHARS = 600
+
+# --- 出力側の拘束（§11.13-2 のオーナー判断）---------------------------------
+#
+# SL1 の閉世界語彙は「サーバが書く文字列」への denylist で守られており、出力側には
+# 掛かっていない。台帳の事実文を渡す以上、LLM がそれを分野レベルの言明へ言い換える
+# 余地が生まれるので、``out_of_source_guard_instruction()`` と同型の固定指示文を
+# system 側に1本足す（route が使う）。
+#
+# **禁止語の例示を書かない**という判断（2026-09-12）:
+#   ① 本モジュール一式は SL1 denylist（語彙の正本は
+#      ``tests/test_stakes_ledger_guardrails.py`` の ``BANNED``）の走査対象で、
+#      例示を書くと定数自身が違反語を持つ。「禁止の文脈なら除外」という carve-out を
+#      作ると、denylist 検査は「文脈を読む」テストに劣化し、他所での本物の違反も
+#      見逃しやすくなる。
+#   ② 禁止したい表層形を指示文に書くこと自体が、その表層形のプライミングになる。
+# そのため**肯定形（どこまでなら言えるか）だけ**を書き、越えてはならない外側は
+# 「コーパスの外」という一般化した言い方で示す。
+LEARNING_VERIFICATION_OUTPUT_CONSTRAINT = (
+    "検証記録の不在について言えるのは「このコーパスの中では検証記録がありません」までです。"
+    "コーパスの外（分野全体・学界・世界）で確かめられているかどうかは、"
+    "この文脈からは分からないので述べないでください。"
+    "検証記録が無いことを、価値・新規性・優先度の主張に言い換えないでください。"
+)
+
+# --- 学習側の解決器の項目上限（§11.3 の表）---------------------------------
+
+#: 選択要素1件から出す事実文の上限（§11.3「1件・事実6行」）。
+MAX_LEARNING_ELEMENT_FACTS = 6
+
+#: 前提 / 入力 / 出力など supports 1行あたりの列挙上限。
+MAX_LEARNING_SUPPORT_ITEMS = 3
+
+#: 主張本文の先頭抜粋の上限（決定論的な切り出し。要約しない = 原則7）。
+MAX_LEARNING_CLAIM_EXCERPT_CHARS = 80
+
+#: 台帳由来の事実文の上限（§11.3「3件」）。
+MAX_LEARNING_VERIFICATION_FACTS = 3
+
+#: 分野内の位置づけの事実文の上限（§11.3「2件」）。
+MAX_LEARNING_PLACEMENT_FACTS = 2
+
+#: 学習側で解決対象にする要素型（学習者向け射影が存在する型だけ = fail-closed）。
+LEARNING_ELEMENT_TYPES: tuple[str, ...] = ("component", "claim", "equation", "figure")
+
+#: 選択要素の型 → 学習者向けの呼び名。既存の ``_GENERIC_ITEM_LABELS``
+#: （「関連する主張」等のレーン相手用）とは用途が違うので流用しない。
+LEARNING_ELEMENT_TYPE_LABELS: dict[str, str] = {
+    "component": "論理要素",
+    "claim": "主張",
+    "equation": "式",
+    "figure": "図",
+}
+
+#: ``selection.kind`` の語彙（§11.2）。
+LEARNING_SELECTION_KINDS: tuple[str, ...] = (
+    "topic",
+    "segment",
+    "chunk",
+    "element",
+    "document",
+)
+
+#: 表示モード（既存 ``screen_mode`` をそのまま写す。新語彙を作らない = §11.2）。
+LEARNING_VIEW_MODE_LABELS: dict[str, str] = {
+    "chat": "通常のチャット画面",
+    "lecture": "レクチャー再生画面",
+    "voice": "音声会話",
+}
+
+#: discuss の検索範囲（既存 ``discuss_scope`` の2語彙）。
+LEARNING_DISCUSS_SCOPE_LABELS: dict[str, str] = {
+    "course_sources": "このコースのソース論文",
+    "all_visible": "閲覧できる資料全体",
+}
+
+
+# ---------------------------------------------------------------------------
 # ScreenContext
 # ---------------------------------------------------------------------------
 
@@ -256,3 +371,25 @@ def normalize_screen_context(raw: Any) -> ScreenContext | None:
         )
     except Exception:  # pragma: no cover - 防御的（SA2 fail-soft）
         return None
+
+
+def infer_selection_kind(selection: Mapping[str, Any] | None) -> str:
+    """``selection`` の種別を決める（§11.2「画面の申告を必須にしない」）。
+
+    ``kind`` が語彙内ならそれを使い、無ければ
+    ``element_id`` → ``chunk_id`` → ``segment_id`` → ``topic_id`` の順に推定する。
+    どれも無ければ ``"document"``（最も粗い粒度へ縮退する）。純関数・例外を出さない。
+    """
+    mapping = _as_mapping(selection) or {}
+    declared = _clip_str(mapping.get("kind"), MAX_ID_CHARS)
+    if declared in LEARNING_SELECTION_KINDS:
+        return declared
+    for key, kind in (
+        ("element_id", "element"),
+        ("chunk_id", "chunk"),
+        ("segment_id", "segment"),
+        ("topic_id", "topic"),
+    ):
+        if _clip_str(mapping.get(key), MAX_ID_CHARS):
+            return kind
+    return "document"
