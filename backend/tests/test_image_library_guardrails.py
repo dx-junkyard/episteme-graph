@@ -489,6 +489,7 @@ class TestAnalyzeImagesSkippedByOption:
             ]),
             "persist_qualified_claims": MagicMock(return_value=[]),
             "persist_knowledge_objects": MagicMock(return_value={}),
+            "persist_learning_units": MagicMock(return_value={}),
             "persist_components": MagicMock(return_value={}),
             "persist_component_graph": MagicMock(return_value="graph-1"),
             "persist_document_embedding": MagicMock(return_value="emb-1"),

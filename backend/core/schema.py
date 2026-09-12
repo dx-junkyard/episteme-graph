@@ -652,3 +652,23 @@ CLAIM_ORIGINS: tuple[str, ...] = (
 KNOWLEDGE_OBJECT_KINDS: tuple[str, ...] = (
     "claim", "component", "equation", "evidence", "derivation_step", "symbol",
 )
+
+#: 学ぶ単位（learning_units.unit_kind）の語彙（learning_units_design.md §4 / 親文書 P2-1）。
+#: DB は CHECK ではなく語彙表 ``knowledge_unit_kinds`` への FK（KO7 と同じ作法）。
+#: - section_block: paper_skeleton の logical_block（章立ての論理ブロック）
+#: - thesis_support: thesis_reconstruction の central_thesis / support_structure の 1 項
+#: - parent_component: component_assembly の LLM 原案 component（決定論分割前の親）
+#: - dsl_node: dsl_linking のノード（Phase 3 概念レジストリの材料。コースビルダーには出さない）
+#: - figure: figure_table_semantics の図
+LEARNING_UNIT_KINDS: tuple[str, ...] = (
+    "section_block", "thesis_support", "parent_component", "dsl_node", "figure",
+)
+
+#: 学ぶ単位の確定状態（人間の確定列・supersede 時に保持）。candidate 始まり・行削除なし。
+LEARNING_UNIT_REVIEW_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "dismissed")
+
+#: コースビルダーへ候補として提示する unit 種別（dsl_node は概念レジストリ側の材料で、
+#: 章立て候補としては粒度が細かすぎるため出さない）。
+LEARNING_UNIT_KINDS_FOR_COURSE: tuple[str, ...] = (
+    "section_block", "thesis_support", "parent_component", "figure",
+)

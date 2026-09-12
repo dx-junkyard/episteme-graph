@@ -104,6 +104,26 @@ def symbol_stable_key(
     ])
 
 
+def learning_unit_stable_key(
+    document_id: str,
+    unit_kind: str,
+    text: str,
+    refs: Iterable[str],
+) -> str:
+    """学ぶ単位（learning_units_design.md §5・migration 081）。
+
+    材料は種別 + 正規化テキスト + 参照集合だけで、``order_index`` / run_id /
+    confidence は入れない（章の並びが変わっても同じ単位を指し続ける）。``refs`` の
+    中身は種別ごとに決まる（section_block = 出典 block 集合 / thesis_support =
+    出所 ID + claim・equation の agent ID 集合 / parent_component = 子の出典 block 集合 /
+    dsl_node = 空 / figure = figure_id）。集合なので順序には依存しない。
+    """
+    return digest([
+        "learning_unit", _clean(document_id), _clean(unit_kind),
+        normalize_text_for_hash(text), _join_sorted(refs),
+    ])
+
+
 # ---------------------------------------------------------------------------
 # 同一 run 内の衝突解消
 # ---------------------------------------------------------------------------

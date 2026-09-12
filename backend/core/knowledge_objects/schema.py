@@ -17,6 +17,9 @@ from core.schema import (  # noqa: F401  (re-export)
     CLAIM_TYPES,
     COMPONENT_TYPES,
     KNOWLEDGE_OBJECT_KINDS,
+    LEARNING_UNIT_KINDS,
+    LEARNING_UNIT_KINDS_FOR_COURSE,
+    LEARNING_UNIT_REVIEW_STATUSES,
 )
 
 #: stable_key のバージョン接頭辞。材料や正規化を変えるときは k2 にして旧キーと区別する。
@@ -35,10 +38,17 @@ TABLE_REMAP = "element_id_remap"
 TABLE_ARTIFACTS = "document_analysis_artifacts"
 TABLE_CLAIM_TYPES = "knowledge_claim_types"
 TABLE_COMPONENT_TYPES = "knowledge_component_types"
+#: 学ぶ単位（Phase 2 / migration 081。learning_units_design.md §4.1）
+TABLE_LEARNING_UNITS = "learning_units"
+TABLE_UNIT_KINDS = "knowledge_unit_kinds"
 
 #: live ビュー（読み手はこちらを読む。KO5）
 VIEW_CLAIMS_LIVE = "theory_claims_live"
 VIEW_COMPONENTS_LIVE = "theory_components_live"
+VIEW_LEARNING_UNITS_LIVE = "learning_units_live"
+
+#: learning_units.review_status の既定値（人間が触っていない = 候補）。
+DEFAULT_UNIT_REVIEW_STATUS = "candidate"
 
 #: 種別 → 知識表（新 4 表）。claim / component は既存 2 表。
 KIND_TABLES: dict[str, str] = {

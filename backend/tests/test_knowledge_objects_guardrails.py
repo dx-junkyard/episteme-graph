@@ -173,6 +173,10 @@ class TestAgentLayerIsUntouched:
         "element_id_remap",
         "theory_claims_live",
         "theory_components_live",
+        # Phase 2（学ぶ単位）の表・語彙表・親参照列も A層には持ち込まない。
+        "learning_units",
+        "knowledge_unit_kinds",
+        "parent_agent_component_id",
     )
 
     def test_src_does_not_learn_the_knowledge_object_vocabulary(self):

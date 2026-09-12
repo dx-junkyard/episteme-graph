@@ -11,6 +11,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.knowledge_objects import learning_units as ko_units
 from core.knowledge_objects import remap as ko_remap
 from core.knowledge_objects import stable_key as ko_keys
 from core.knowledge_objects.schema import (
@@ -21,6 +22,7 @@ from core.knowledge_objects.schema import (
     TABLE_DERIVATION_STEPS,
     TABLE_EQUATIONS,
     TABLE_EVIDENCE,
+    TABLE_LEARNING_UNITS,
     TABLE_SYMBOLS,
     normalize_claim_type,
     normalize_component_type,
@@ -1369,6 +1371,10 @@ _COMPONENT_CONTENT_COLUMNS = (
     "prerequisite_concepts", "assumptions", "approximations", "linked_claim_ids",
     "linked_equation_ids", "linked_evidence_ids", "linked_derivation_ids",
     "agent_payload",
+    # P2-2（learning_units_design.md §5.1）: 決定論 refinement が分割した子から
+    # LLM 原案（親）をたどるための agent 側 ID。``parent_component_id``（UUID 列）は
+    # v1 では常に NULL（原案は theory_components の行にしない）。
+    "parent_agent_component_id",
 )
 
 #: 人間の確定列（一致時に触らない。§5.3）。
@@ -1423,6 +1429,32 @@ def _claim_block_index(claim_id_map: dict[str, str]) -> dict[str, list[str]]:
         blocks = blocks_by_uuid.get(str(db_id))
         if blocks:
             out[str(key)] = sorted(blocks)
+    return out
+
+
+def _component_parent_index(component_result: Any) -> dict[str, str]:
+    """``子 agent component_id -> 親（LLM 原案）の agent component_id``（P2-2）。
+
+    出所は ``ComponentAssemblyResult.refinement_report.split_actions``
+    （``component_refiner.RefinementAction``: ``parent_component_id`` /
+    ``parent_label`` / ``child_component_ids``）。子 ID が親 ID と同じ組
+    （分割されなかった原案）は親子関係を作らない。``parent_label`` は
+    ``learning_units(unit_kind='parent_component')`` が持つのでここでは使わない。
+    """
+    report = getattr(component_result, "refinement_report", None)
+    if not isinstance(report, dict):
+        return {}
+    out: dict[str, str] = {}
+    for action in report.get("split_actions") or []:
+        if not isinstance(action, dict):
+            continue
+        parent_id = _text(action.get("parent_component_id"))
+        if not parent_id:
+            continue
+        for child in action.get("child_component_ids") or []:
+            child_id = _text(child)
+            if child_id and child_id != parent_id:
+                out.setdefault(child_id, parent_id)
     return out
 
 
@@ -1510,6 +1542,7 @@ def persist_components(
     claim_id_map = claim_id_map or {}
     claim_blocks = _claim_block_index(claim_id_map)
     evidence_blocks = _evidence_block_index(evidence_registry)
+    parent_index = _component_parent_index(component_result)
 
     items: list[dict] = []
     for comp in components:
@@ -1593,6 +1626,9 @@ def persist_components(
                 "linked_evidence_ids": _id_list(data.get("linked_evidence_ids")),
                 "linked_derivation_ids": _id_list(data.get("linked_derivation_ids")),
                 "agent_payload": agent_payload,
+                # P2-2: 分割されていない component では NULL のまま（親は自分自身では
+                # ないので、無い親を捏造しない）。
+                "parent_agent_component_id": parent_index.get(agent_id) or None,
             },
         })
 
@@ -2004,6 +2040,112 @@ def persist_knowledge_objects(
         raise
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# learning_units（学ぶ単位の一級化 Phase 2 / P2-1）
+# ---------------------------------------------------------------------------
+
+
+#: 再解析で上書きしてよい内容列（learning_units_design.md §4.1）。
+_LEARNING_UNIT_CONTENT_COLUMNS = (
+    "unit_kind", "label", "summary", "teaches", "order_index", "section_ids",
+    "source_block_ids", "linked_claim_ids", "linked_equation_ids",
+    "linked_component_ids", "linked_figure_ids", "agent_payload",
+)
+
+#: 人間の確定列（LU2。一致時は触らない・行削除もしない）。
+_LEARNING_UNIT_PRESERVED_COLUMNS = ("review_status", "teacher_notes")
+
+
+def persist_learning_units(
+    *,
+    document_id: str,
+    run_id: str | None = None,
+    skeleton: Any = None,
+    thesis: Any = None,
+    component_result: Any = None,
+    dsl: Any = None,
+    figures: Any = None,
+    claim_id_map: dict[str, str] | None = None,
+    component_id_map: dict[str, str] | None = None,
+    evidence_registry: Any = None,
+) -> dict:
+    """学ぶ単位を ``learning_units`` へ**同期**する（LU3 / LU4・migration 081）。
+
+    導出は :func:`core.knowledge_objects.learning_units.build_learning_unit_items`
+    （決定論・非LLM・純関数）で、ここは書き込みだけを受け持つ。claims / components と
+    同じ規則（``stable_key`` 一致 = 同 UUID 更新 / 不一致 = supersede 刻印 /
+    **DELETE なし**）で、``review_status`` / ``teacher_notes`` は触らない。
+
+    素材（``skeleton`` 等）が **5 種別とも ``None``** のときは SQL を一切発行しない
+    （素材が無いことを「単位が全部消えた」と解釈しない）。一部だけ ``None`` のときは
+    その種別を導出からスキップし、``skipped_kinds`` に正直に載せる。
+
+    ``element_id_remap`` への再係留は行わない — unit の agent 側 ID を参照している
+    テーブルが v1 には無く、``element_id_remap.object_kind`` の CHECK 語彙
+    （知識オブジェクト 6 種）も増やさないため。
+
+    Returns:
+        ``{"updated", "inserted", "superseded", "skipped_kinds", "units"}``。
+        素材ゼロのときは ``{"skipped_kinds": [...], "units": 0}`` のみ。
+    """
+    present_kinds, skipped_kinds = ko_units.available_kinds(
+        skeleton=skeleton,
+        thesis=thesis,
+        component_result=component_result,
+        dsl=dsl,
+        figures=figures,
+    )
+    if not present_kinds:
+        return {"skipped_kinds": skipped_kinds, "units": 0}
+
+    items = ko_units.build_learning_unit_items(
+        document_id,
+        skeleton=skeleton,
+        thesis=thesis,
+        component_result=component_result,
+        dsl=dsl,
+        figures=figures,
+        claim_id_map=claim_id_map,
+        component_id_map=component_id_map,
+        evidence_registry=evidence_registry,
+    )
+
+    session = _pg_session()
+    try:
+        sync = sync_live_rows(
+            session,
+            table=TABLE_LEARNING_UNITS,
+            document_id=document_id,
+            run_id=run_id,
+            incoming=items,
+            content_columns=_LEARNING_UNIT_CONTENT_COLUMNS,
+            preserved_columns=_LEARNING_UNIT_PRESERVED_COLUMNS,
+            agent_id_column="agent_unit_id",
+        )
+        summary = {
+            **dict(sync.stats),
+            "skipped_kinds": skipped_kinds,
+            "units": len(items),
+        }
+        _record_knowledge_audit(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            stats={"learning_units": summary},
+        )
+        session.commit()
+        logger.info(
+            "Synced learning_units for document %s: %s", document_id, summary
+        )
+        return summary
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
 
 # ---------------------------------------------------------------------------
 # theory_component_graphs

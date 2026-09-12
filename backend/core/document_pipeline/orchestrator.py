@@ -53,6 +53,7 @@ from .persistence import (
     persist_document_embedding,
     persist_equation_previews_to_chunks,
     persist_knowledge_objects,
+    persist_learning_units,
     persist_qualified_claims,
     persist_source_chunks,
     upsert_analysis_run,
@@ -2375,6 +2376,22 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                     run_id=ctx.run_id,
                 )
             ctx.report_item("persist_claims_components_graph", 2, 3, "tables")
+
+            # 学ぶ単位（P2-1）。component の id_map が要るので components の**後**に呼ぶ。
+            # components をスキップした run でも単位そのものは保存する（原案・章立て・
+            # 中心命題・図は component の成否と独立に読める）。
+            knowledge_stats["learning_units"] = persist_learning_units(
+                document_id=ctx.document_id,
+                run_id=ctx.run_id,
+                skeleton=ctx.skeleton,
+                thesis=ctx.thesis,
+                component_result=ctx.component_result,
+                dsl=ctx.dsl,
+                figures=ctx.fig_tbl,
+                claim_id_map=claim_id_map,
+                component_id_map=id_map,
+                evidence_registry=ctx.evidence,
+            )
 
             if ctx.skip_graph_persist or ctx.skip_component_persist:
                 logger.warning(

@@ -277,7 +277,13 @@ def _purge_document(session, document_id: str) -> PurgedDocument:
         if r[0]
     ]
 
-    for tbl in ("theory_claims", "theory_component_links", "theory_components", "theory_component_graphs"):
+    # learning_units（migration 081）も document_id に FK CASCADE が付いているが、
+    # 「この教材と一緒に何が消えるのか」をコードだけで読めるようにするため明示 DELETE を
+    # 並べる（同ブロックの theory_* と同じ理由）。
+    for tbl in (
+        "theory_claims", "theory_component_links", "theory_components",
+        "theory_component_graphs", "learning_units",
+    ):
         session.execute(sa_text(f"DELETE FROM {tbl} WHERE document_id = CAST(:a AS uuid)"), doc_ref)
 
     # D層 polymorphic 行（削除済み document / claim / component を指す孤児を掃除する）。

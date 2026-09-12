@@ -474,3 +474,22 @@ LEARNING_STANCE_LABELS = MappingProxyType({
     "cycle_elicit": "予想を先に聞く形で",
     "cycle_diff": "予想と照らし合わせる形で",
 })
+
+
+# ---------------------------------------------------------------------------
+# 学ぶ単位の種別ラベル（Phase 2 / learning_units）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は ``core/schema.py::LEARNING_UNIT_KINDS``、**表示ラベルの
+# 正本はここ**（正本設計書 ``docs/features/learning_units_design.md`` §4.1）。
+# migration 081 の ``knowledge_unit_kinds`` シードもこの文字列と一致させる
+# （一致は ``backend/tests/test_learning_units_guardrails.py`` が固定する）。
+# 数値・confidence は持たない（LU5）。
+
+LEARNING_UNIT_KIND_LABELS = MappingProxyType({
+    "section_block": "章立ての論理ブロック",
+    "thesis_support": "中心命題と支持構造",
+    "parent_component": "理論の部品（原案）",
+    "dsl_node": "概念ノード",
+    "figure": "図",
+})

@@ -51,6 +51,7 @@ __all__ = [
     "BASIS_ATLAS_SKELETON_FREEZE",
     "BASIS_CLAIM_REVIEW_SINGLE",
     "BASIS_COMPONENT_REVIEW_SINGLE",
+    "BASIS_COURSE_REGISTER_UNITS",
     "BASIS_COURSE_VISIBILITY_PUBLISH",
     "BASIS_DISCOVERY_INGEST_BATCH",
     "BASIS_EXPLANATION_REVIEW_BULK",
@@ -83,6 +84,9 @@ BASIS_DISCOVERY_INGEST_BATCH = "discovery.ingest_batch"
 BASIS_ATLAS_SKELETON_FREEZE = "atlas_skeleton.freeze"
 #: コースの公開（`PUT /api/admin/courses/{id}/visibility` で public へ。RR ステップ3）。
 BASIS_COURSE_VISIBILITY_PUBLISH = "course_visibility.publish"
+#: コース登録（freeze）= 学ぶ単位（learning_units）の一括確定（learning_units_design.md §7 / P2-5）。
+#: 「承認してコースを登録」の1操作で、提示された unit 候補のうち topic に束ねたものが学習者へ届く。
+BASIS_COURSE_REGISTER_UNITS = "course_register.units"
 #: component の単発の承認（グラフ対話レビューの承認ボタン）。
 BASIS_COMPONENT_REVIEW_SINGLE = "component_review.single"
 #: claim の単発のレビュー遷移（グラフ対話レビューの根拠 claim 承認・却下）。
@@ -96,6 +100,7 @@ BASIS_VALUES = (
     BASIS_ATLAS_SKELETON_FREEZE,
     BASIS_CLAIM_REVIEW_SINGLE,
     BASIS_COMPONENT_REVIEW_SINGLE,
+    BASIS_COURSE_REGISTER_UNITS,
     BASIS_COURSE_VISIBILITY_PUBLISH,
     BASIS_DISCOVERY_INGEST_BATCH,
     BASIS_EXPLANATION_REVIEW_BULK,
