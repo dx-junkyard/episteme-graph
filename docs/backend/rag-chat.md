@@ -43,8 +43,9 @@
   ④-b 画面文脈ブロック・選択箇所ブロック  … core/assistant_context/（SA層 Phase 4・決定論・非LLM）
   │   画面が送った参照をサーバが学習者射影で解決し、当該ターンの発話の前にだけ置く（§④-b）
   │
-  ⑤ LLM 生成（temperature=0.3）          … llm.py: generate_text()
+  ⑤ LLM 生成（temperature=0.3）          … llm.py: generate_text() / generate_text_stream()
   │   末尾にドリルダウンリンクを Markdown で提示
+  │   転送方式だけが分岐する（SSE の逐次配信は §④-c。前処理・後処理は 1 本のまま）
   │
   ⑥ 誤解検出 → 個人レイヤーへ記録        … learning.py + detect_and_record_misconception()
   │
@@ -154,6 +155,38 @@ user メッセージだけを **「画面文脈ブロック → 選択箇所ブ�
 `screen_context` を焼き込みません**（SA6）。ブロックが非空の往復は、種別だけの観測イベント
 `structured_grounding_present` をサーバが記録します（学習者には何も表示しません）。
 
+#### ④-c 転送方式の分岐（ストリーミング Phase 3-a）
+
+`_learning_chat_core` は **generator 関数**で、**前処理 → 生成 → 後処理は 1 本のまま**です。
+分岐するのは転送方式だけで、非ストリーム経路は同期ドライバ `_run_learning_turn(gen)` が
+`next()` を回して `StopIteration.value`（＝ `LearningChatResponse`）を受け取ります
+（正本: [llm_response_streaming_design.md](../features/llm_response_streaming_design.md)
+§3.3 / §12 実装記録。フラグ `LEARNING_CHAT_STREAMING_ENABLED` は**既定 off**）。
+
+継ぎ目は 1 箇所だけで、**前処理が終わった地点**（権限・可視性・値検証・CostGate・SA層の画面
+文脈注入まで済んだ直後）に置かれます。
+
+| イベント | 位置 | 中身 |
+|---|---|---|
+| `start` | `_consume_quota()` と §④-b の注入の**後**、生成の**前**に 1 回 | `{"stance": {stance, source, label}}`。`resolve_stance(...)` の入力6つは回答本文に依存しないので生成前に解決し、`final.stance` と**同じ値**を使う（`message_id` は載せない — この時点では `persist_chat_history` 前でサーバが id を持たないため） |
+| `delta` | `stream=True` のときだけ `_stream_answer(...)` が本文の差分ごとに | `{"t": "部分テキスト"}`。`strip_control_sequences` 済み（chunk 境界でエスケープ列が割れないよう末尾16文字を保留して終端でフラッシュ）。**本文以外のキーを載せない** |
+| `final` | 後処理をすべて終えた最後に 1 回 | `LearningChatResponse.model_dump()` そのまま（キーを間引かない）。同じ入力に対する非ストリーム経路のレスポンスと**同値** |
+| `error` | `final` すら組み立てられなかったときだけ | `{"reason": "upstream"}`。通常の LLM 失敗はここではなく `final`（`degraded: true`）で閉じる |
+
+- 本文の逐次生成は `core/llm.py::generate_text_stream`（**追加**。`generate_text` ほか既存3関数は
+  非改変で、非ストリーム経路は従来どおり `generate_text` をモジュール属性として呼ぶ）。
+  openai は `stream=True` + `stream_options={"include_usage": True}`、**非対応プロバイダは
+  `generate_text` の結果を 1 delta として返す**（「ストリームのふり」をしない）。
+- `yield` は `with usage_context(...)` / `model_override(...)` の**外**に置きます。Starlette は
+  同期ジェネレータを `next()` ごとに別スレッド（複製した context）で再開するため、`with` を
+  跨いだ yield は contextvar の reset で落ちます。U層の帰属は `_stream_answer` に**値渡し**します。
+- U層の記録は **1 ストリーム = 1 行**（`generate_text_stream` の `finally`）。`operation` は
+  `'chat'` のままで、転送方式は `metadata.streamed` / 中断は `metadata.client_aborted` に入ります
+  （`usage_source` の意味・`KNOWN_FEATURES` は不変 = U1）。
+- **中断（クライアント切断・停止ボタン）は後処理へ進みません**。`GeneratorExit` は
+  `except Exception` を素通りするので、保存（`persist_chat_history`）も痕跡も書かれません
+  （ストリームは表示の先行であって正本ではない = ST1。quota は消費されたまま）。
+
 ### ⑥ 誤解検出
 LLM の回答に誤解訂正のシグナル（`"訂正"`, `"より正確です"`, `"誤解"` など）が含まれると、
 `detect_and_record_misconception(...)` が誤解を抽出し、`event_type="misconception"` として個人レイヤーに記録します。
@@ -216,6 +249,12 @@ Copilot 8/500）は [assistant_common_infra_design.md](../features/assistant_com
 - **LLM 失敗は 500 にしない**: 本体生成が失敗したときは `degraded=true` の固定文 + 200 を返し、
   履歴は保存します。回答本文に依存する後処理（ドリルダウンマーカーの構造化・誤解検出・
   `out_of_source_notice` の付与）は degraded ターンではスキップします。
+- **ストリーム経路（§④-c）でも同じ**です。CostGate は `StreamingResponse` を組み立てる**前**に
+  消費するので、**429 は最初のバイトより前に通常の HTTP ステータスとして返ります**
+  （200 を返してから中で断らない）。生成の途中で LLM が失敗した往復は、部分テキストを捨てて
+  `final`（`degraded: true` + 既存と同じ固定文）で 200 のまま閉じ、履歴も従来どおり保存します。
+  **例外は中断**（クライアント切断・停止ボタン）で、この場合は後処理へ進まず履歴も痕跡も
+  書きません（quota は消費されたまま・残数は表示しません）。
 
 ---
 
@@ -445,6 +484,22 @@ evidence-based / 応答を遅延させない / 演技化させない）は [CLAU
 
 `manual_citations` は既存 `sources` / `overall_tier` に**相乗りさせません**
 （未知 tier が `out_of_source=0` に落ちてしまうため）。
+
+### 6.1 SSE 版（`POST .../chat/stream`）との対応
+
+ストリーム版（§④-c）は**別の DTO を持ちません**。上の JSON がそのまま最後の `final` イベントに
+載ります（`LearningChatResponse.model_dump()` — キーを間引かない）。
+
+| SSE イベント | 上の JSON との対応 |
+|---|---|
+| `start` | `{"stance": …}` のみ。`stance` は `final` の同名キーと**必ず同じ値**（`message_id` は載せない） |
+| `delta` | `answer` の部分文字列（`{"t": "…"}`）。**本文以外のキーを載せない** |
+| `final` | 上の JSON 全体。同じ入力に対する非ストリーム版のレスポンスと**同値**（`answer` に衛生処理を掛けないのもこのため） |
+| `error` | `{"reason": "upstream"}`。`final` すら組めなかったときだけの保険で、通常の LLM 失敗は `final`（`degraded: true`）で返ります |
+
+フラグが off のとき `POST .../chat/stream` は **404**（機能が存在しない状態を正直に返す）で、
+クライアントは従来の JSON 経路へ戻ります。配布は `GET /api/learning/client-features`
+（`{"chat_streaming": <bool>}` の 1 キーのみ・数値や上限は載せない）。
 
 UI 側の扱いは [学習機能](../features/learning.md)・[フロントエンド構成](../frontend/overview.md) を参照。
 

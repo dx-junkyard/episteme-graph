@@ -3,7 +3,8 @@
 > **状態: 実装済み（正本）**（3段ロードマップの Phase 1。Phase 2 = 学習チャットへの構造
 > grounding ＝ SA層 Phase 4 も **2026-09-12 実装済み**
 > （[assistant_screen_adapter_design.md](assistant_screen_adapter_design.md) §11.15）／
-> Phase 3 = ストリーミングは**未着手**。
+> Phase 3 = ストリーミングも **3-a のみ 2026-09-12 実装済み**（既定 off。
+> [llm_response_streaming_design.md](llm_response_streaming_design.md) §12。3-b〜3-d は未着手）。
 > **migration なし** — 既存 DTO の optional フィールドと痕跡 payload のキー追加だけで足り、
 > 新テーブル・新エンドポイント・新 env・新 LLM コールはいずれも作っていない）
 > 起票 2026-09-11（現状の事実はすべて同日の実機 grep で裏取り）・実装 2026-09-12。

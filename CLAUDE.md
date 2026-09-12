@@ -1957,8 +1957,8 @@ discuss 開幕画面の情報を「主語で分けて全部出す」層。正本
 選ばせるのをやめ、**入口を 1 つにして様相（会話の調子）を当該発話からサーバが読む**層。
 正本は `docs/features/learning_chat_entry_unification_design.md`（LC1〜LC8・§13 実装記録。
 AI アシスタント UX 3段ロードマップ `docs/architecture/assistant_ux_roadmap_2026-09-12.md` の
-Phase 1。Phase 2 = 構造 grounding（SA層 §11）も 2026-09-12 実装済み / Phase 3 =
-ストリーミングは未着手）。
+Phase 1。Phase 2 = 構造 grounding（SA層 §11）/ Phase 3 = ストリーミングの 3-a も
+2026-09-12 実装済み）。
 
 - **不変条項の要点**: LC1 **推定してよいのは「様相」だけ**（`discuss_scope` / `cycle_mode` /
   `backstage` / `check_scaffold` はサーバが推定で切り替えない — DM1 / UC1 / SD4）/ LC2 明示は
@@ -2011,6 +2011,68 @@ Phase 1。Phase 2 = 構造 grounding（SA層 §11）も 2026-09-12 実装済み 
   学習者ごとの既定様相の保存 / 教員向けの様相集約・誤ルーティング率の表示 / 精読モード・
   再構成・楽屋の入口統合 / ストリーミング（= Phase 3）。**Phase 2（学習チャットへの構造
   grounding）は 2026-09-12 実装済み** — 上記「画面文脈アダプター（SA層）」節の Phase 4。
+  **Phase 3 の 3-a も同日実装済み** — 下記「LLM 応答のストリーミング」節。
+
+### LLM 応答のストリーミング（Phase 3-a, migration なし, 2026-09-12）
+
+学習チャットの本文を **SSE で逐次配信**し、学習者が生成を止められるようにする層。正本は
+`docs/features/llm_response_streaming_design.md`（ST1〜ST9・§12 実装記録。UX 3段ロード
+マップの Phase 3）。**実装したのは 3-a（学習チャット本文のテキスト経路）のみ**で、3-b
+（グラフ要素の説明）/ 3-c（文単位 TTS）/ 3-d（W層・グラフ全体対話）は未着手。フラグ
+`LEARNING_CHAT_STREAMING_ENABLED` は**既定 false**（off の間は挙動が1バイトも変わらない）。
+
+- **不変条項の要点**: ST1 **ストリームは表示の先行であって正本ではない**（保存・痕跡・誤解
+  候補・出典突合は完成テキストにだけ行い、途中経過をどこにも保存しない）/ ST2 CostGate は
+  最初の1バイトより前に消費（429 は SSE の中でなく HTTP ステータス）/ ST3 1ストリーム =
+  `llm_usage_events` 1行（reported/estimated を混ぜない = U1）/ ST4 衛生は delta にだけ掛ける
+  （`final.answer` に掛けると非ストリーム版と値が食い違う）/ ST5 途中失敗は同じストリームの
+  中で degraded に落として 200 で閉じる・**部分テキストを正本にしない** / ST6 後処理由来の
+  メタは `final` に一括（**delta に本文以外を載せない**）/ ST7 **非ストリーム API は不変**
+  （リクエスト・レスポンス・処理順序・`api.routes.learning.generate_text` の patch seam）/
+  ST8 学習者に数値を見せない（トークン・秒・残回数・速度）/ ST9 段階導入は既定 off から。
+- **継ぎ目の方式（生成器）**: `_learning_chat_core` は **generator 関数**で、前処理・生成・
+  後処理は1本のまま。分岐するのは転送方式だけ。非ストリームは同期ドライバ
+  `_run_learning_turn(gen)` が `StopIteration.value` を返す（`learning_chat` /
+  `document_discuss_chat` の2ルートとも）。`yield ("start", stance_dto)` は `_consume_quota()`
+  と SA層の画面文脈注入の**後**（前処理の終わり）。**`yield` / `yield from` を
+  `with usage_context(` / `model_override(` の内側に置かない**（Starlette が `next()` ごとに
+  別スレッド・複製 context で再開するため contextvar の reset で落ちる）— U層の帰属は
+  `_stream_answer(..., usage_ctx=...)` の**値渡し**。`generate_text_stream` を呼ぶのは
+  `_stream_answer` の1箇所。中断（`GeneratorExit`）は `except Exception` を素通りするので
+  後処理へ進まない（＝ O-1 裁定の「中断した往復は保存しない」はこの構造で成立する）。
+- **ガードレールが固定している字面**: §3.3 の逐語3点（`window_history(...)` /
+  `if _is_discuss:` の scaffold / `messages: list[dict] = [`）・`learning_chat` と
+  `_learning_chat_core` の**間に `@router` を挟まない**（新ルートはコアの後ろ）・
+  `_learning_chat_core` の本体を別関数へ切り出さない（7本のテストが本体の字面を検査）・
+  フロントも `sendMessage` の本体に応答適用ブロックを置いたまま（`_function_block(
+  "sendMessage")` 検査）。
+- **API**: `POST /api/learning/courses/{cid}/topics/{tid}/chat/stream`（SSE。フラグ off は
+  404・最初の `next()` は `StreamingResponse` の**前**に同期で呼ぶ・`start` / `delta` /
+  `final` / `error`。`start` に `message_id` は載せない・`start.stance` と `final.stance` は
+  常に一致・`final` は `LearningChatResponse.model_dump()` そのまま）+
+  `GET /api/learning/client-features`（`{"chat_streaming": bool}` の1キーのみ）。
+  ヘッダは `X-Accel-Buffering: no` + `Cache-Control: no-cache`（**nginx.conf は非改変**）。
+- **UI**（`app.js`・新ファイルを作らない）: ログイン後1回の `fetchClientFeaturesOnce()`（失敗は
+  false = fail-to-current）/ `shouldStreamChatTurn()`（**音声・casual・書き直し・typed action・
+  `ui_anchor` は従来の JSON 経路**）/ `runChatStream()`（`fetch` + `ReadableStream`。
+  `EventSource` は Authorization を付けられないので不使用）/ 停止ボタンは送信ボタンの差し替え
+  （新しい帯を作らない）/ **ストリーム中は `renderChat()` を呼ばず** delta は `textContent`
+  追記のみ、`final` 後に1回だけ `renderChat()`（KaTeX・出典チップ・ドリルダウン・鏡）。
+  自動スクロールは最下部付近（40px）にいるときだけ。停止した往復は `rollbackStreamedTurn()`
+  で履歴から取り除き発話を入力欄へ戻す（事実文「途中で止めました。この応答は記録に残して
+  いません。」）。**`final` を受け取っていれば停止と競合しても `final` を採る**（サーバ側で
+  保存済みの往復をクライアントだけ捨てない）。
+- **U層**: `operation` は `'chat'` のまま（`OPERATIONS` を増やさない）。転送方式は
+  `metadata.streamed` / 中断は `metadata.client_aborted`。`observe_chat(..., extra_metadata=)`
+  の additive な引数1つだけが U層への変更で、`usage_source` の意味・`KNOWN_FEATURES`・
+  集計軸は不変。コストは既存 `LEARNING_CHAT_MAX_CALLS_PER_DAY` に相乗り（新カウンタなし）。
+- **env**: `LEARNING_CHAT_STREAMING_ENABLED`（既定 false・`core/config.py`）。
+- **ガードレール**: `test_llm_streaming_{core,api,guardrails,ui_static}.py`（件数の正本は
+  この4ファイル）。
+- **非スコープ（v1）**: 確認問題（構造化 JSON）/ コースビルダー / Copilot のストリーム化 /
+  意図分類・embedding 検索の短縮 / 部分マークダウン・数式の中間レンダリング（delta はプレーン
+  テキスト）/ 回答本文への `strip_control_sequences` 適用（別件・やるなら両エンドポイント同時）/
+  SSE の再接続・`Last-Event-ID` / document 直付け discuss のストリーム化 / `operation='stream'`。
 
 ### 理解サイクル（Understanding Cycle, UCサイクル, migration 不要, 2026-08-13）
 
@@ -2879,7 +2941,7 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **チャット型 AI の共通規約（2026-07-20 整理、正本は
   `docs/features/assistant_common_infra_design.md`。学習者向け UX の3段＝入口統合 → 構造 grounding（SA層 Phase 4）→
   ストリーミング は `docs/architecture/assistant_ux_roadmap_2026-09-12.md` が順序と依存の正本。
-  入口統合と構造 grounding は 2026-09-12 実装済みで、次はストリーミング）** — ①会話履歴を LLM に渡すときは
+  3段とも 2026-09-12 実装済み（ストリーミングは 3-a のみ・既定 off。残る 3-b〜3-d は未着手））** — ①会話履歴を LLM に渡すときは
   `core/llm_worker/history.py::window_history(history, max_messages, max_chars, head_keep,
   current_message)` を必ず通す（学習チャット 20/2000、コースビルダー 20/4000/head_keep=2
   ＝フロントが履歴先頭に注入する course_draft 疑似ターン2件の保護、W層 16/4000/head_keep=1

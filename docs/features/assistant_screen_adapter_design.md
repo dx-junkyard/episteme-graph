@@ -829,4 +829,6 @@ body.message（発話）
   live テーブルで、既存の `/components/{id}/context` と同じ（新しい凍結規約を発明していない）。
 - **次の段**: 4-c（`topic` / `visible`）の可否は `structured_grounding_present` の実測で判断する
   （§11.13-3）。ロードマップの Phase 3 = ストリーミング
-  （[llm_response_streaming_design.md](llm_response_streaming_design.md)）が次。
+  （[llm_response_streaming_design.md](llm_response_streaming_design.md)）が次
+  → **2026-09-12 に 3-a を実装済み**（同書 §12。SA層 Phase 4 の注入位置は継ぎ目の**前**の
+  ままで、本書の実装は非改変）。

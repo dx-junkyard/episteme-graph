@@ -153,6 +153,8 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | GET | `/api/learning/courses/{cid}/topics/{tid}/material` | 所有者 or 受講者 | トピック教材（`student_material` 最優先 → content/summary → PDF チャンク） |
 | POST | `/api/learning/courses/{cid}/topics/{tid}/check` | 所有者 or 受講者 | 確認問題の LLM 採点（不合格は誤解記録、合格はトピック完了を永続化） |
 | POST | `/api/learning/courses/{cid}/topics/{tid}/chat` | 所有者 or 受講者 | RAG チャット（意図分類・casual モード・書き直し `replace_message_id`・tier/grounding 判定・tension/anchor 痕跡記録を内包） |
+| POST | `/api/learning/courses/{cid}/topics/{tid}/chat/stream` | 所有者 or 受講者（上の `/chat` と同一ゲート） | 同じコア（`_learning_chat_core`）の SSE 版。`start`（`stance` のみ）→ `delta`（本文の部分文字列）→ `final`（`LearningChatResponse` と同値）。`LEARNING_CHAT_STREAMING_ENABLED`（既定 false）が off なら **404**。権限・422・429 は最初のバイトより前に通常の HTTP ステータスで返る。中断した往復は履歴・痕跡に残さない（quota は消費済みのまま） |
+| GET | `/api/learning/client-features` | 要ログイン | クライアントが使ってよい経路の配布。`{"chat_streaming": <bool>}` の bool 1キーのみ（数値・上限・モデル名は載せない）。取得失敗時フロントは false 扱い |
 | GET | `/api/learning/courses/{cid}/topics/{tid}/chat` | 本人の履歴のみ | チャット履歴取得 |
 | DELETE | `/api/learning/courses/{cid}/topics/{tid}/chat` | 所有者 or 受講者（本人の行のみ） | 本人のトピック別チャット履歴を全削除 |
 | DELETE | `/api/learning/courses/{cid}/topics/{tid}/chat/messages/{mid}` | 所有者 or 受講者（本人の履歴のみ） | 指定メッセージ以降の往復を truncate（派生 interest_traces は `superseded` 化。機能3） |

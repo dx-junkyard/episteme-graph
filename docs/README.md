@@ -213,7 +213,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
   ／[画面文脈アダプター（AI 対話に「いま見ている画面」を渡す層）](features/assistant_screen_adapter_design.md)
   ／[学習チャットの入口統合（様相はサーバが推定・casual のテキスト入口。**実装済み**）](features/learning_chat_entry_unification_design.md)
-  ／[LLM 応答ストリーミング（**設計中**）](features/llm_response_streaming_design.md)
+  ／[LLM 応答ストリーミング（学習チャットの逐次配信と停止。**Phase 3-a 実装済み**・既定 off）](features/llm_response_streaming_design.md)
 - [二層説明（generic/contextual）+ 図のコース流通](features/hierarchical_context_explanation_design.md)
 - [教材図スタジオ（AI対話SVG生成）](features/teaching_figure_studio_design.md)
 - [管理機能（教員/管理者UI）](features/admin.md)

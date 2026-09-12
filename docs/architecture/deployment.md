@@ -224,6 +224,8 @@ VERSION_SWEEP_INTERVAL_SECONDS=3600  # 同・実行周期（秒）
 PAPER_DISCOVERY_WORKER_ENABLED=1     # 論文ディスカバリー 取り込みキュー worker（既定 on）
 PAPER_DISCOVERY_WORKER_INTERVAL_SECONDS=30  # 同・キューが空のときの待ち時間（秒）
 DISCOVERY_CITATION_SOURCE_ENABLED=0  # 引用グラフ供給源（Semantic Scholar）のオプトイン（既定 off）
+LEARNING_CHAT_STREAMING_ENABLED=false  # 学習チャット応答の逐次配信（SSE）。既定 off = 従来どおり
+                                       # 完成した回答を一度に返す。on で POST .../chat/stream が有効
 ```
 
 > **既定値の正本はコード側**です — `backend/core/config.py` の `Settings`（`AliasChoices` で
