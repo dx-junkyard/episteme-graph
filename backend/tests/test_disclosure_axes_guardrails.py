@@ -21,6 +21,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -109,6 +110,29 @@ class TestCorePurity:
         docstring / コメントでの言及は説明として必要なので、**import の形**で検査する。
         """
         assert_module_tree_does_not_import([_CORE_SRC_PATH], ["core.help_kb", "help_kb"])
+
+    def test_dataclass_defaults_stay_python311_compatible(self):
+        """共有テーブル（``MappingProxyType``）はフィールドではなく ``ClassVar`` で持つ。
+
+        本番コンテナは Python 3.11 で、``dataclasses`` が「不変デフォルト」を
+        ``__hash__ is None`` で判定する。``mappingproxy`` が hashable になったのは
+        3.12 以降なので、3.13 のローカル venv では通るのにコンテナ起動時だけ
+        ``ValueError: mutable default ... mappingproxy`` で落ちる（2026-09-12）。
+        フィールドに出さなければ版差にかからない。
+        """
+        import dataclasses
+
+        for name, obj in vars(da).items():
+            if not (isinstance(obj, type) and dataclasses.is_dataclass(obj)):
+                continue
+            for field in dataclasses.fields(obj):
+                default = field.default
+                if default is dataclasses.MISSING:
+                    continue
+                assert not isinstance(default, (dict, list, set, MappingProxyType)), (
+                    f"{name}.{field.name}: 可変（3.11 で unhashable）な既定値は "
+                    "dataclass フィールドに置けません（ClassVar にするか default_factory）"
+                )
 
     def test_core_module_is_importable_standalone(self):
         import subprocess

@@ -44,7 +44,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Mapping
+from typing import ClassVar, Mapping
 
 __all__ = [
     "AXES",
@@ -275,7 +275,7 @@ class DisclosureSpec:
     learner_facing: bool = True          # 学習者が読み手か（DA4 の検査対象）
 
     #: 軸 id → フィールド名（公開ビューと検査の両方が使う）。
-    _AXIS_FIELDS: Mapping[str, str] = MappingProxyType({
+    _AXIS_FIELDS: ClassVar[Mapping[str, str]] = MappingProxyType({
         AXIS_AUDIENCE: "audience",
         AXIS_NAME_DISCLOSURE: "name_disclosure",
         AXIS_REUSE: "reuse",
