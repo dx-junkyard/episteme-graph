@@ -465,3 +465,17 @@ stale を付けない・D層非改変・repair 指示と validator の整合）/
 - docker 実機 E2E（migration 062 適用・実 LLM での生成・レビュー→配信の一巡）。
 - §7.2 の V層 freeze 非カバー（既知の限界として維持）。
 - §11 の同種の投影欠落（記号の意味・claim source_scope 等）は本実装のスコープ外のまま。
+
+## 13. 追補 — 開幕画面に「論文の骨格（章の流れ）」を出す（2026-09-12・P0-9）
+
+`docs/architecture/knowledge_structure_review_2026-09-12.md` §4 Phase 0 の P0-9（F-14: paper_skeleton の
+`logical_blocks` は第 1〜8 章を覆うのに学習者に届いていなかった）。OA1〜OA8 は不変・LLM 0 回・保存なし。
+
+- `build_opening` の `documents[]` に部分適用で `chapter_skeleton[]`（`{block_type, label, summary,
+  section_titles[]}`、`section_titles` は同じ artifacts dict の `document_structure.sections` に実在する
+  ものだけ）と `chapter_skeleton_truncated`（上限 `_MAX_CHAPTER_SKELETON = 12`）を足す。paper_skeleton
+  artifact が無い document には**キー自体を足さない**（OA4。Phase 0 DTO とバイト等価）。`available`
+  判定は不変。`_strip_numeric_keys` を通す。
+- UI（`discuss.js`）: 「この論文が答えようとした問い」の直後に「論文の骨格（章の流れ）」。既定は畳んだ
+  `<details>`（一等地の密度を変えない・展開すれば同じ画面から到達可 = OA7）。数値・件数・「寄り道」語彙なし。
+- テスト: `test_discuss_opening_p09.py`（18 件）。既存の projection / guardrails / ui_static は無改変で通る。

@@ -264,6 +264,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [ビジョン×UXギャップ調査 2026-07-16（22/25 修正済み）](architecture/vision_ux_gap_survey_2026-07.md)
   ／[再調査 2026-07-17（🔧/💬 全件解消済み）](architecture/vision_ux_gap_survey_2026-07-17.md)
 - [ビジョン×UXギャップ調査「六つのレンズ」2026-09-10（§9 非参照・6観点・是正11 + 提案30 + 着手の地図。詳細は architecture/six_lenses_2026-09-10/）](architecture/vision_ux_gap_six_lenses_2026-09-10.md)
+- [知識構造の見直し提案 2026-09-12（実論文2本の原本⇄構造化成果を照合。正本の所在・ID 安定性・学ぶ単位・概念同一性・外部標準の5観点で診断し、「知識オブジェクトの一級化 + 版非依存キー + 概念レジストリ」の段階案を提示。付属調査 A〜E は architecture/knowledge_structure_review_2026-09-12/）](architecture/knowledge_structure_review_2026-09-12.md)
 - [対ユーザー支援エージェント調査（推奨1〜6 実施済み）](architecture/user_assistant_agents_survey_2026-07.md)
 - [AI アシスタント UX ロードマップ 2026-09-12（入口統合 → 構造 grounding（SA層 Phase 4） → ストリーミング の3段。順序の根拠・依存・受け入れ条件）](architecture/assistant_ux_roadmap_2026-09-12.md)
 - [AI エージェント全件棚卸しと共通化リファクタリング 2026-09-10（パイプライン agent 22 / worker 7 / チャット型 11 / 単発 34地点を A 共通化・B アダプター・C 独自に分類し、llm_step / WorkerSystem / chat_turn / single_shot を新設）](architecture/agent_inventory_and_refactoring_2026-09-10.md)

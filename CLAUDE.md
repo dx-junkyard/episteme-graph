@@ -2906,6 +2906,51 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
   解決結果からの書き込み / DOM テキスト・スクリーンショットの送信 / Phase 4 の 4-c
   （表示中トピックの主張要約・`visible` の事実化。実測後に判断）。
 
+### 知識構造の見直し Phase 0（即効の是正, migration なし, 2026-09-12）
+
+論文の構造化成果を「学ぶ人の知識」として共通化・管理・転用するための見直し
+（正本 `docs/architecture/knowledge_structure_review_2026-09-12.md`、D1〜D5 の診断と Phase 0〜4）。
+Phase 0 の 10 項目は設計書を切らず同日に実装し、レビュー文書の各行に解消注記を付けた（§4 Phase 0
+実装記録）。Phase 1 以降（stable_key・claim 親子・equation/evidence テーブル・再解析 supersede・
+学習単位・概念レジストリ）は §6 のオーナー判断 O-1〜O-5 を待って Phase ごとに設計書を切る。
+
+- **P0-1 rhetorical_role の 64 打ち切り廃止**: 既定は全 body_paragraph を処理（env
+  `RHETORICAL_ROLE_MAX_BLOCKS`、0 = 上限なし。`config["max_blocks"]` が優先）。上限があるときは
+  先頭切り捨てではなく**節単位の層化サンプリング**。`order` が全ブロックで一意なら `order` のみで
+  整列（GROBID 経路の `page=1` 誤付与を先頭に集めない）。取りこぼしは `summary_stats["coverage"]`。
+- **P0-2 alias 照合は語境界付き**: 正本 `src/episteme_graph/agents/alias_matching.py`（3 文字以下は
+  大小区別の単語完全一致、それ以外は大小無視の語境界一致）。rhetorical_role validator /
+  component_assembly enrichment・refiner / claim_object_builder の 4 箇所が使う。**`alias in text` の
+  部分文字列一致を新規に書かない**（`SM` が `cosmological` に当たる F-7 の再発防止）。
+- **P0-3 概念層と記号層の分離**: `component_assembly/schema.py::concept_name_list`（str は 1 要素・
+  文字反復禁止）/ `is_symbol_like_concept_name`（ASCII 3 文字未満・非 ASCII 2 文字未満・LaTeX 制御
+  記法・各部分 2 文字以下の添字記法は記号。`重力` / `zero_recoil_limit` は概念）。式記号は
+  `component.concepts` に混ぜず symbol_registry が正本。導出 component の「数学性」は記号でなく
+  **式リンクの有無**で判定（export_validation_gate / component validator 同一規則、warning のまま）。
+- **P0-4 コース生成の位置代入出典の廃止**（`course_content_builder.py`、新規 freeze のみ）:
+  出典は component の evidence / claim / 式の block_id ∩ `chunks.block_ids`（document_id 込み・上限 5）。
+  無接続 topic は `material_chunk_ids=[]` / `content_source="unlinked"` / `grounding_note` +
+  `topic.coverage={status:"missing"}`。`content_blocks` の式は `linked_equation_ids` ∪ 本文参照に限定。
+- **P0-5 完全性ゲート**: TeX ラベル差集合 `equation_labels_missing_from_registry`（ラベル一覧が無い
+  PDF では走らない）と頁被覆 `structure_page_coverage_low`（`STRUCTURE_PAGE_COVERAGE_MIN = 0.9`、
+  `ingest_incomplete` とは別コード・gate の警告文も別）。
+- **P0-6 claim の `legacy_ids`**: `{block_id}:{span_id}` と claim object の `claim_id`（親 + atomic 子。
+  evidence→block_id の一意 join でのみ結ぶ）を追加。旧キーは残す。Phase 1 の stable_key までの応急。
+- **P0-7 L層シードの初版凍結**: `library/seed.py` が取込直後に `freeze_entry`、`bundled_import` 由来の
+  版ゼロ行を起動時にバックフィル（冪等・fail-soft）。凍結版しか読まない retrieval に L層が初めて見える。
+- **P0-8 artifact の run 選択を 1 本に**: `persistence.document_run_artifacts(document_id, *,
+  policy="adopted")` / `resolve_artifact_runs(..., policy)`・`ARTIFACT_RUN_POLICIES = ("adopted",
+  "latest")`。成果物表示は全て adopted、`latest`（`get_latest_analysis_run`）は resume / options
+  継承・走行中 run の進捗表示専用（`list_materials` は進捗を latest、見出し一覧を adopted と分離）。自前 SQL で `stage_outputs._artifacts` を読まない（`test_artifact_run_policy_guardrails.py`）。
+- **P0-9 文章層と DSL を読み時に出す**: 論文層 `paper.support_structure` / `paper.dsl` /
+  `coverage.unbound_backbone`（設計書 §12）、discuss 開幕 `documents[].chapter_skeleton`
+  （authoring 設計書 §13）。保存なし・LLM 0 回・新アンカーなし。
+- **P0-10 取りこぼしの共通報告形式**: 正本 `src/episteme_graph/agents/coverage_report.py`
+  （`{population, processed, truncated, reasons, unit?, details?}`、`truncated` は導出値・数値は 3 値で
+  尽くし `details` に件数を入れない）。orchestrator は `_attach_coverage` だけがこのキーを組み立て
+  （`test_pipeline_coverage_report.py`）、8 ステージに付与。新ステージで打ち切りがあるなら同じ形式で
+  報告する（`docs/pipeline/overview.md` §4）。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
@@ -2981,6 +3026,9 @@ figure_table_semantics / paper_skeleton / thesis_reconstruction / component_asse
 - **`backend/tests/guardrail_helpers.py`** — ガードレールテスト用共通アサーション
   （`assert_module_tree_does_not_import` / `assert_source_forbids` / `extract_function_source` 等）。
   新しい層のガードレールテストはこれを使って書く。
+- **`src/episteme_graph/agents/coverage_report.py` / `alias_matching.py`**（2026-09-12 新設） —
+  取りこぼし報告の共通形式と語境界付き alias 照合の正本（上記「知識構造の見直し Phase 0」）。
+  stdlib のみ依存で src / backend 双方から import する。
 - **`src/episteme_graph/agents/cartridge_loader.py` / `cartridge_context.py`** —
   agent 側 cartridge 読み込みの正本（上記「カートリッジシステム」参照）。
 - **`backend/core/course_data.py`**（Tier 3-18） — `learning_courses.data` の正本スキーマ + アクセサ

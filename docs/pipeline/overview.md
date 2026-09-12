@@ -57,7 +57,7 @@
 | 5 | `source_chunking` | ブロックからチャンク生成 | Det | チャンク |
 | 6 | `source_embedding` | チャンクを pgvector へ保存 | Emb | — |
 | 7 | `paper_skeleton` | **PaperSkeletonAgent** 論文 backbone 仮説化 | LLM | PaperSkeletonResult |
-| 8 | `rhetorical_role` | **RhetoricalRoleAgent** 論理役割判定 | LLM | RhetoricalRoleResult |
+| 8 | `rhetorical_role` | **RhetoricalRoleAgent** 論理役割判定（既定は全 body_paragraph。上限は env `RHETORICAL_ROLE_MAX_BLOCKS`、上限時は節単位の層化サンプリング。2026-09-12 P0-1） | LLM | RhetoricalRoleResult（`summary_stats.coverage` に取りこぼし報告） |
 | 9 | `claim_qualification` | **ClaimQualificationAgent** Claim 採否・区分 + atomic rewrite | LLM | ClaimQualificationResult |
 | 10 | `equation_semantics` | **EquationSemanticsAgent** 数式の意味役割復元（信用できない数式候補のみ切り出し画像を添付＝条件付き vision。M層では text 扱い） | LLM | EquationSemanticsResult |
 | 11 | `evidence_registry` | **EvidenceRegistryBuilder** PDF 原文 evidence の一元管理 | Det | EvidenceRegistryResult |
@@ -128,7 +128,7 @@ PDF
 
 | 永続化先 | 元になる成果物 | 補足 |
 |---|---|---|
-| `theory_claims` | `claim_qualification` の `qualified_spans` | `persist_qualified_claims`。`evidence_text` は空文字で保存し、逐語根拠は EvidenceRegistry artifact に委譲する（#257） |
+| `theory_claims` | `claim_qualification` の `qualified_spans` | `persist_qualified_claims`。`evidence_text` は空文字で保存し、逐語根拠は EvidenceRegistry artifact に委譲する（#257）。`source_scope.legacy_ids` には `{block_id}:{span_id}` と、evidence→block_id の一意 join で結び付いた claim object の `claim_id`（親 + atomic 子）を入れる（2026-09-12 P0-6。span_id は block ごとに振り直されるため単独では逆引きできない） |
 | `theory_components` / `theory_component_links` | `component_assembly` の components | `persist_components` |
 | `theory_component_graphs` | `component_graph` の graph（+ `narrative_annotator` の注釈） | `persist_component_graph` |
 
@@ -148,6 +148,29 @@ claim_objects を永続化するか）はオーナー判断の未決事項です
 ---
 
 ## 4. 実行と監視
+
+### 取りこぼしの報告（`stage_outputs[<stage>].coverage`、2026-09-12 P0-10）
+
+入力母集合を打ち切る・除外する・上限で間引くステージは、既存のステージ固有キー
+（`truncated_count` / `skipped_by_limit` / `unplaced_domains` …）に加えて、共通形式
+`coverage = {population, processed, truncated, reasons[], unit?, details?}` を stage payload に
+持つ。正本は `src/episteme_graph/agents/coverage_report.py::build_coverage_report`
+（`truncated` は `population - processed` の導出値。`reasons` は理由コードの列で数値を載せない。
+`details` に件数キーを入れない）。orchestrator では `_attach_coverage` だけがこのキーを組み立てる
+（ガードレール `backend/tests/test_pipeline_coverage_report.py`）。対象は rhetorical_role
+（agent の `summary_stats.coverage` がそのまま落ちる）/ figure_image_extraction / equation_semantics /
+figure_table_semantics / apparatus_semantics / contextual_explanation / discuss_opening /
+landscape_placement。`claim_qualification` は母集合を事実で導けないため未付与（保留）。
+resume で artifact を再利用したステージには新規計算しない。
+
+### artifact の run 選択（2026-09-12 P0-8）
+
+成果物（`stage_outputs._artifacts`）を読む側は `persistence.document_run_artifacts(document_id, *,
+policy="adopted")`（1 document）か `resolve_artifact_runs(session, ids, *, policy)`（複数）を使う。
+`adopted` = `documents.active_analysis_run_id` → 無ければ最新の completed。`latest`（status 無視）は
+resume 判定・前回 run の options 継承（orchestrator / `routes/admin.py` の reanalyze 入口）専用。
+`core/deliberation/refs.py::document_run_artifacts` は persistence への委譲。自前 SQL で
+`stage_outputs` を読む経路の新設はガードレール `test_artifact_run_policy_guardrails.py` が禁止する。
 
 - 起動: 教材アップロード（`POST /api/admin/materials/upload`）後、または `POST /api/admin/materials/{id}/document-pipeline/run` / `POST /api/admin/documents/{id}/reanalyze`。
 - 進捗: `GET /api/admin/materials/{id}/document-pipeline/status`、`GET /api/admin/tasks/{task_id}`。

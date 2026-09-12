@@ -402,3 +402,24 @@ DTO 契約（§3）・core・route・migration・アンカーはいずれも変�
 - テストは `test_graph_review_ui_static.py` に
   `TestScreenContext`（契約の形・上限・本文非送信・ES5）と `TestChat` の2件、
   `TestPaperLayer` の Phase 1 分7件を追加。
+
+## 12. Phase 0 追補 — 文章層と DSL を「章の骨格」として出す（2026-09-12・P0-9）
+
+`docs/architecture/knowledge_structure_review_2026-09-12.md` §4 Phase 0 の P0-9。F-12（DSL 層が最も
+忠実なのに届かない）/ F-14（文章層は忠実で、壊れているのは単位の側）への読み時の是正。PL1〜PL8 は不変
+（保存なし・LLM 0 回・追加 SQL 0 本・数値と内部 ID を表示に出さない）。
+
+- `paper` に additive で追加: `support_structure[]`（thesis_reconstruction の `support_structure` を
+  section ごとに。`section_label` は `label_vocab.SUPPORT_SECTION_LABELS`、`claim_ids` は DB UUID に
+  解決できたもののみ、`equation_labels` は印字番号、`node_ids` は既存 `thesis_roles` の裏返し）/
+  `dsl {nodes[], edges[]}`（dsl_linking の node を章順→artifact 順で。`node_value` が空のノードと端点を
+  失った辺は落とす。`polarity_label` はサーバ側で語に開く — 表示語表 `schema.DSL_POLARITY_LABELS` は
+  DSL 語彙が学習者側に出るようになったら `label_vocab` へ移す）。
+- `coverage.unbound_backbone[]`（skeleton の logical_blocks のうち node が 1 つも掛かっていないもの。
+  label 無しは出さない）。
+- 欠落 artifact の事実文に `FACT_NO_DSL` を追加（`MISSING_ARTIFACT_FACTS` に `dsl_linking`）。
+- UI（`admin-graph-review.js` の「論文の順」）: 章アウトライン → 骨格 → **中心命題の支持構造** →
+  **概念関係（DSL）** → 被覆（「掛かっていない骨格」グループ追加）。新しい `data-ui-anchor` は足していない
+  （既存 `graph-review.paper-view` 内の描画追加）。
+- テスト: `test_graph_paper_layer_p09.py`（23 件）+ `test_graph_paper_layer_core.py` /
+  `test_graph_review_ui_static.py` の追随。
