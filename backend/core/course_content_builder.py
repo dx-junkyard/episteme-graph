@@ -828,13 +828,22 @@ def _collect_structured_content(
 
 
 def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
+    """コースの教材チャンクを material_id ごとに読む。
+
+    ``document_id`` / ``block_ids`` も併せて読むのは、トピックの出典チャンクを
+    **位置ではなく構造から**決めるため（P0-4 / 原則8）。``block_ids`` は
+    ``chunker`` が書いた「このチャンクが含む DocumentStructure block の id」で、
+    evidence_registry / equation_semantics が持つ ``source.block_id`` との交差が
+    「このトピックの根拠はどのチャンクに載っているか」の唯一の決定論的な答えになる。
+    """
     if not material_ids:
         return {}
     params = {f"mid_{idx}": mid for idx, mid in enumerate(material_ids)}
     placeholders = ", ".join(f":mid_{idx}" for idx in range(len(material_ids)))
     rows = session.execute(
         sa_text(f"""
-            SELECT id::text, material_id, chunk_index, display_text, text, formulas, chapter, section
+            SELECT id::text, material_id, chunk_index, display_text, text, formulas, chapter, section,
+                   document_id::text, block_ids
             FROM chunks
             WHERE material_id IN ({placeholders})
             ORDER BY chunk_index ASC
@@ -844,6 +853,10 @@ def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
     chunks: dict[str, list[dict]] = defaultdict(list)
     for row in rows:
         material_id = row[1] or ""
+        # 旧 SELECT 形（8列）で書かれたテスト double からも壊れずに読めるよう
+        # 追加2列は長さを見てから取り出す（欠けていれば空として扱う = 交差ゼロ）。
+        document_id = str(row[8] or "") if len(row) > 8 else ""
+        raw_block_ids = row[9] if len(row) > 9 else None
         chunks[material_id].append({
             "id": row[0],
             "material_id": material_id,
@@ -852,6 +865,9 @@ def _load_chunks(session, material_ids: list[str]) -> dict[str, list[dict]]:
             "formulas": row[5] if isinstance(row[5], list) else [],
             "chapter": row[6],
             "section": row[7],
+            "document_id": document_id,
+            "block_ids": [str(b) for b in raw_block_ids if str(b or "").strip()]
+            if isinstance(raw_block_ids, list) else [],
         })
     return chunks
 
@@ -938,6 +954,8 @@ def _enrich_topics(
 ) -> list[dict]:
     enriched: list[dict] = []
     all_chunks = [chunk for chunks in chunks_by_material.values() for chunk in chunks]
+    # 出典解決の索引はコース単位で1回だけ組む（トピックごとに作り直さない）。
+    block_index = _chunk_block_index(all_chunks)
     figures_index = figures_index or {}
     for index, raw_topic in enumerate(topics):
         topic = dict(raw_topic) if isinstance(raw_topic, dict) else {"title": str(raw_topic)}
@@ -945,9 +963,8 @@ def _enrich_topics(
         component_ids = _component_ids_for_topic(topic, mapping, bundle["components"])
         components = [bundle["components"][cid] for cid in component_ids if cid in bundle["components"]]
         equations = _equations_for_components(components, bundle["equations"])
-        fallback_chunk = _fallback_chunk_for_topic(all_chunks, index, len(topics))
 
-        summary = _topic_summary(mapping, components, fallback_chunk)
+        summary = _topic_summary(mapping, components)
         learning_objectives = _as_str_list(mapping.get("learning_objectives") if mapping else [])
         assessment_prompts = _as_str_list(mapping.get("assessment_prompts") if mapping else [])
         prerequisite_concepts = _as_str_list(mapping.get("prerequisite_concepts") if mapping else [])
@@ -963,24 +980,59 @@ def _enrich_topics(
             figure_claim_links=bundle.get("figure_claim_links") or {},
         )
 
-        fallback_formulas = _fallback_formulas(fallback_chunk)
+        # --- 出典（material_chunk_ids / source_excerpt）の決定論導出 ---------
+        # 位置代入（旧 _fallback_chunk_for_topic）は廃止した。根拠 evidence の
+        # block_id と chunk.block_ids の交差だけが出典の根拠で、交差が無ければ空。
+        source_chunks = _topic_source_chunks(
+            all_chunks,
+            _topic_source_block_refs(
+                components,
+                equations,
+                bundle.get("claims") or {},
+                bundle.get("evidence") or {},
+            ),
+            block_index,
+        )
+        content = _compose_topic_content(
+            summary,
+            learning_objectives,
+            components,
+            equations,
+            assessment_prompts,
+        )
+        # content_blocks へ足すチャンク由来の式は「このトピックが実際に参照する式」
+        # だけに絞る（linked_equation_ids ∪ 本文参照。C-10）。
+        allowed_formula_ids = {
+            normalize_evidence_id(eq_id)
+            for eq_id in _linked_ids(components, "linked_equation_ids")
+            if str(eq_id or "").strip()
+        }
+        for component in components:
+            evidence_refs = component.get("evidence_refs")
+            if isinstance(evidence_refs, dict):
+                allowed_formula_ids.update(
+                    normalize_evidence_id(eq_id)
+                    for eq_id in _as_list(evidence_refs.get("equation_ids"))
+                    if str(eq_id or "").strip()
+                )
+        allowed_formula_ids.update(_referenced_formula_ids(summary, content))
+        allowed_formula_ids.discard("")
+        relevant_formulas = _relevant_chunk_formulas(source_chunks, allowed_formula_ids)
+
+        # 対応付けが取れなかったトピック（mapping も component も無い）は、出典を
+        # 捏造せず空のまま事実文だけを載せる（原則8）。
+        unlinked = mapping_confidence == "none" and not components
 
         topic.update({
             "summary": summary,
-            "content": _compose_topic_content(
-                summary,
-                learning_objectives,
-                components,
-                equations,
-                assessment_prompts,
-            ),
+            "content": content,
             "content_blocks": _content_blocks(
                 summary,
                 learning_objectives,
                 components,
                 equations,
                 assessment_prompts,
-                fallback_formulas,
+                relevant_formulas,
             ),
             "learning_objectives": learning_objectives,
             "prerequisite_concepts": prerequisite_concepts,
@@ -993,11 +1045,23 @@ def _enrich_topics(
             "source_evidence_ids": evidence_ids,
             "evidence_links": evidence_links,
             "teaching_takeaways": teaching_takeaways,
-            "material_chunk_ids": [fallback_chunk["id"]] if fallback_chunk else [],
-            "source_excerpt": _short_excerpt(fallback_chunk.get("text", "")) if fallback_chunk else "",
-            "content_source": "agent_mapping" if mapping_confidence != "none" or components else "source_excerpt",
+            "material_chunk_ids": [] if unlinked else [c["id"] for c in source_chunks if c.get("id")],
+            "source_excerpt": "" if unlinked or not source_chunks
+            else _short_excerpt(source_chunks[0].get("text", "")),
+            "content_source": "unlinked" if unlinked else "agent_mapping",
             "content_confidence": mapping_confidence,
         })
+        if unlinked:
+            # 事実文はサーバ定数。数値（一致率・件数）は載せない（原則4）。
+            topic["grounding_note"] = UNLINKED_TOPIC_GROUNDING_NOTE
+            # 原稿スタジオのカバレッジ表示（lsTopicCoverageStatus）は
+            # content_source == "source_excerpt" を "missing" の判定に使っていた。
+            # 語彙を "unlinked" に変えたことでその分岐が外れるため、同じ意味を
+            # topic.coverage（JS が最優先で読む既存フィールド）で明示する。
+            topic["coverage"] = {
+                "status": "missing",
+                "message": UNLINKED_TOPIC_GROUNDING_NOTE,
+            }
         enriched.append(topic)
     return enriched
 
@@ -1615,31 +1679,219 @@ def _equations_for_components(components: list[dict], equations: dict[str, dict]
     return out[:5]
 
 
-def _topic_summary(mapping: dict, components: list[dict], fallback_chunk: dict | None) -> str:
+def _topic_summary(mapping: dict, components: list[dict]) -> str:
+    """トピックの概要文。
+
+    出所は ①CourseMapping の description ②結びついた component の summary の2つだけ。
+    かつては「位置で割り当てたチャンク本文の先頭420字」を第3の供給源にしていたが、
+    それはそのトピックと無関係な段落を要約として見せる経路だったため廃止した
+    （P0-4 / 原則8「出所の正直さ」）。どちらも無ければ空文字を返す — 空欄は
+    「対応付けが無い」という事実であって、埋めるべき欠損ではない。
+    """
     if isinstance(mapping, dict) and mapping.get("description"):
         return str(mapping["description"]).strip()
     for component in components:
         if component.get("summary"):
             return str(component["summary"]).strip()
-    if fallback_chunk and fallback_chunk.get("text"):
-        return _short_excerpt(fallback_chunk["text"], limit=420)
     return ""
 
 
-def _fallback_chunk_for_topic(chunks: list[dict], topic_index: int, topic_count: int) -> dict | None:
-    if not chunks:
-        return None
-    if topic_index < len(chunks):
-        return chunks[topic_index]
-    mapped_index = min(int(topic_index * len(chunks) / max(topic_count, 1)), len(chunks) - 1)
-    return chunks[mapped_index] if mapped_index >= 0 else None
+# ---------------------------------------------------------------------------
+# トピックの出典（material_chunk_ids / source_excerpt）の決定論導出（P0-4）
+# ---------------------------------------------------------------------------
+#
+# 旧実装は ``chunks[topic_index]``（位置代入）でトピックの「出典」を決めていた。
+# 対応付けに失敗したトピックにも無関係な段落が出典として並び、さらにその本文が
+# 学習チャットで「実根拠あり」として tier を底上げしていた（C-4）。
+# 現在は **evidence の block_id ∩ chunk.block_ids** という構造の交差だけを使う。
+# 交差が空なら空のまま返す（推測で埋めない、原則8）。
+
+#: 対応付けが取れなかったトピックに載せる事実文（サーバ定数。断定も煽りもしない）。
+UNLINKED_TOPIC_GROUNDING_NOTE = (
+    "この項目は、論文の解析結果のどの要素にも対応付けられていません。"
+)
+
+#: 1トピックが持つ出典チャンクの上限（既存の根拠投影 ``_required_equation_items`` /
+#: ``_required_figure_items`` の limit=5 に合わせる）。
+_TOPIC_SOURCE_CHUNK_LIMIT = 5
+
+#: 本文中の数式参照。``[[FORMULA_3]]`` / ``![[equation:eq_2_7]]`` / ``[[equation:eq_2_7]]``。
+_FORMULA_PLACEHOLDER_RE = re.compile(r"\[\[\s*(FORMULA_\d+)\s*\]\]", re.IGNORECASE)
+_EQUATION_EMBED_RE = re.compile(r"!?\[\[\s*equation:([^\]\s]+)\s*\]\]", re.IGNORECASE)
 
 
-def _fallback_formulas(fallback_chunk: dict | None) -> list[dict]:
-    if not fallback_chunk:
+def _equation_block_id(eq: dict) -> str:
+    """式の掲載 block_id（asdict 形 / equations.json export 形の両方に対応）。
+
+    ``_equation_section_id`` と同じ走査規則（source_extraction 優先）。
+    """
+    source_extraction = eq.get("source_extraction") if isinstance(eq.get("source_extraction"), dict) else {}
+    for holder in (source_extraction, eq):
+        location = holder.get("source_location")
+        if isinstance(location, dict):
+            block_id = str(location.get("block_id") or "").strip()
+            if block_id:
+                return block_id
+    return str(eq.get("block_id") or "").strip()
+
+
+def _topic_source_block_refs(
+    components: list[dict],
+    equations: list[dict],
+    claims_by_id: dict[str, dict],
+    evidence_by_id: dict[str, dict],
+) -> list[tuple[str, str]]:
+    """トピックの根拠が載っている ``(document_id, block_id)`` を決定論的に集める。
+
+    解決経路は ``_topic_evidence_links`` が既に使っているものの再利用で、新しい
+    推測経路は作らない:
+
+    1. component の ``linked_evidence_ids`` / ``evidence_refs.evidence_ids``
+       → evidence_registry の ``source.block_id``
+    2. component の ``linked_claim_ids`` / ``evidence_refs.claim_ids``
+       → claim の ``source_evidence_ids`` → 同上
+    3. トピックに結びついた式の ``source_location.block_id``
+
+    順序は上記の並び（= component の宣言順）で、重複は先勝ちで落とす。
+    """
+    refs: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def add_evidence(evidence_id: object) -> None:
+        record = evidence_by_id.get(str(evidence_id or "").strip())
+        if not isinstance(record, dict):
+            return
+        source = record.get("source") if isinstance(record.get("source"), dict) else {}
+        block_id = str(source.get("block_id") or "").strip()
+        if not block_id:
+            return
+        key = (str(record.get("document_id") or ""), block_id)
+        if key in seen:
+            return
+        seen.add(key)
+        refs.append(key)
+
+    def ref_ids(field: str) -> list[str]:
+        ids = _linked_ids(components, field)
+        for component in components:
+            evidence_refs = component.get("evidence_refs")
+            if isinstance(evidence_refs, dict):
+                ids.extend(str(v) for v in _as_list(evidence_refs.get(field.replace("linked_", ""))) if v)
+        return list(dict.fromkeys(ids))
+
+    for evidence_id in ref_ids("linked_evidence_ids"):
+        add_evidence(evidence_id)
+
+    for claim_id in ref_ids("linked_claim_ids"):
+        claim = claims_by_id.get(str(claim_id))
+        if not isinstance(claim, dict):
+            continue
+        for evidence_id in _as_list(claim.get("source_evidence_ids")):
+            add_evidence(evidence_id)
+
+    for equation in equations:
+        block_id = _equation_block_id(equation)
+        if not block_id:
+            continue
+        key = (str(equation.get("document_id") or ""), block_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        refs.append(key)
+
+    return refs
+
+
+def _chunk_block_index(chunks: list[dict]) -> tuple[dict[tuple[str, str], list[int]], dict[str, list[int]]]:
+    """``(document_id, block_id)`` → チャンク位置 の索引を作る。
+
+    第2の戻り値は block_id 単独の索引だが、**その block_id がコーパス全体で
+    1つの document にしか現れないときだけ**残す。block_id（``b_0001`` 等）は
+    document 内でのみ一意なので、素の block_id 照合は別論文のチャンクを出典に
+    仕立ててしまう（fail-closed）。artifact 側の ``document_id`` が DB の
+    document_id と食い違った場合の救済としてのみ使う。
+    """
+    by_doc_block: dict[tuple[str, str], list[int]] = {}
+    block_documents: dict[str, set[str]] = {}
+    by_block: dict[str, list[int]] = {}
+    for position, chunk in enumerate(chunks):
+        document_id = str(chunk.get("document_id") or "")
+        for block_id in chunk.get("block_ids") or []:
+            block_id = str(block_id or "").strip()
+            if not block_id:
+                continue
+            by_doc_block.setdefault((document_id, block_id), []).append(position)
+            block_documents.setdefault(block_id, set()).add(document_id)
+            by_block.setdefault(block_id, []).append(position)
+    unique_by_block = {
+        block_id: positions
+        for block_id, positions in by_block.items()
+        if len(block_documents.get(block_id, set())) == 1
+    }
+    return by_doc_block, unique_by_block
+
+
+def _topic_source_chunks(
+    chunks: list[dict],
+    block_refs: list[tuple[str, str]],
+    block_index: tuple[dict[tuple[str, str], list[int]], dict[str, list[int]]],
+    limit: int = _TOPIC_SOURCE_CHUNK_LIMIT,
+) -> list[dict]:
+    """根拠 block_id からトピックの出典チャンクを引く（チャンクの並び順・上限 limit）。
+
+    交差が空なら空リスト。位置による代入は**しない**。
+    """
+    by_doc_block, unique_by_block = block_index
+    positions: set[int] = set()
+    for document_id, block_id in block_refs:
+        matched = by_doc_block.get((document_id, block_id))
+        if matched is None:
+            matched = unique_by_block.get(block_id)
+        for position in matched or []:
+            positions.add(position)
+    ordered = sorted(positions)[:limit]
+    return [chunks[position] for position in ordered]
+
+
+def _referenced_formula_ids(*texts: str) -> set[str]:
+    """本文が参照している数式 ID（``[[FORMULA_N]]`` / ``![[equation:ID]]``）。"""
+    found: set[str] = set()
+    for text in texts:
+        if not text:
+            continue
+        for match in _FORMULA_PLACEHOLDER_RE.finditer(str(text)):
+            found.add(normalize_evidence_id(match.group(1)))
+        for match in _EQUATION_EMBED_RE.finditer(str(text)):
+            found.add(normalize_evidence_id(match.group(1)))
+    return {value for value in found if value}
+
+
+def _relevant_chunk_formulas(source_chunks: list[dict], allowed_ids: set[str]) -> list[dict]:
+    """出典チャンクの ``formulas`` のうち、このトピックが実際に参照する式だけを返す。
+
+    旧実装は位置代入チャンクの ``formulas`` を丸ごと ``content_blocks`` に足して
+    いたため、全チャンクが同じ式集合を持つ論文では「全トピック × 全式」の複製が
+    凍結スナップショットに焼き込まれていた（C-10 / S-11）。ここでは
+    ``linked_equation_ids ∪ 本文が参照する式 ID`` に絞る。情報は落ちない —
+    式の正本は equation_semantics artifact 側に残っている。
+    """
+    if not allowed_ids:
         return []
-    formulas = fallback_chunk.get("formulas")
-    return [dict(f) for f in formulas if isinstance(f, dict)] if isinstance(formulas, list) else []
+    out: list[dict] = []
+    seen: set[str] = set()
+    for chunk in source_chunks:
+        formulas = chunk.get("formulas")
+        if not isinstance(formulas, list):
+            continue
+        for formula in formulas:
+            if not isinstance(formula, dict):
+                continue
+            formula_id = normalize_evidence_id(formula.get("id") or formula.get("equation_id") or "")
+            if not formula_id or formula_id in seen or formula_id not in allowed_ids:
+                continue
+            seen.add(formula_id)
+            out.append(dict(formula))
+    return out
 
 
 def _compose_topic_content(
@@ -1766,6 +2018,13 @@ def _content_blocks(
     assessment_prompts: list[str],
     fallback_formulas: list[dict] | None = None,
 ) -> list[dict]:
+    """トピックの構造化本文ブロック。
+
+    ``fallback_formulas`` はチャンク由来の数式（equation_semantics を通っていない
+    もの）の補充枠。**そのトピックが参照する式だけ**を渡すこと（正本は
+    ``_relevant_chunk_formulas``）。チャンクの ``formulas`` を丸ごと渡すと、全
+    チャンクが同じ式集合を持つ論文で「全トピック × 全式」の複製になる（C-10）。
+    """
     blocks: list[dict] = []
     if summary:
         blocks.append({"type": "summary", "text": summary})
