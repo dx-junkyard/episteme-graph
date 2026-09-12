@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import base64
+import json
 import logging
 import re
 import threading
@@ -14,7 +15,7 @@ from functools import lru_cache
 from typing import Callable
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
@@ -105,14 +106,19 @@ from core.lecture import find_figure_embed_ids, resolve_figure_embeds
 from core import check_review
 from core import element_explanations
 from core import llm_policy
-from core.llm import generate_text, get_llm_params, transcribe_audio
+from core.llm import (
+    generate_text,
+    generate_text_stream,
+    get_llm_params,
+    transcribe_audio,
+)
 from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
 from core.llm_worker.cost_gate import CostGate
 from core.llm_worker.history import window_history
 from core.llm_worker.single_shot import json_call
-from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
@@ -3087,6 +3093,36 @@ def _usage_help_response(
     )
 
 
+def _run_learning_turn(gen) -> LearningChatResponse:
+    """``_learning_chat_core`` の generator を同期に回し、最終 DTO だけを返すドライバ。
+
+    ストリーミング Phase 3-a（設計書 §3.3）: 非ストリーム経路は本関数を通ることで、
+    前処理・後処理を1つの関数に保ったまま従来と同じ ``LearningChatResponse`` を返す
+    （途中のイベントは捨てる = ST7「非ストリーム API は不変」）。
+    """
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+def _stream_answer(messages: list[dict], *, model: str, usage_ctx: dict):
+    """本文を逐次生成し ``("delta", text)`` を yield、全文を ``return`` する。
+
+    ストリーミング Phase 3-a（設計書 §3.3）: **このモジュールで
+    ``generate_text_stream`` を呼ぶのはここ1箇所**。U層の帰属は値渡し
+    （``usage_ctx``）で、contextvar を yield を跨いで開かない（§3.2）。
+    """
+    chunks: list[str] = []
+    for piece in generate_text_stream(messages=messages, temperature=0.3, model=model, usage_ctx=usage_ctx):
+        if not piece:
+            continue
+        chunks.append(piece)
+        yield ("delta", piece)
+    return "".join(chunks)
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -3103,8 +3139,11 @@ def learning_chat(
     ``docs/features/corpus_roaming_design.md`` §5.3）の document 直付けファサード
     （``document_discuss_chat``）と**同じコア**を通すための薄い委譲で、コース経路の
     挙動・シグネチャ・処理順序は完全に不変（CR2）。
+
+    ストリーミング Phase 3-a（設計書 §3.3）でコアが generator になったため、
+    ``_run_learning_turn`` で同期に回して従来と同じ DTO を返す（ST7）。
     """
-    return _learning_chat_core(course_id, topic_id, body, current_user)
+    return _run_learning_turn(_learning_chat_core(course_id, topic_id, body, current_user))
 
 
 def _learning_chat_core(
@@ -3115,8 +3154,15 @@ def _learning_chat_core(
     *,
     course_data: dict | None = None,
     scope_document_ids: set[str] | None = None,
-) -> LearningChatResponse:
+    stream: bool = False,
+):
     """学習チャット本体（コース経路 / document 直付け経路の共通コア）。
+
+    **generator 関数**（ストリーミング Phase 3-a, 設計書 §3.3「生成器の継ぎ目」）。
+    前処理・後処理を2つのエンドポイントが別々に持たないための構造で、値は
+    ``return LearningChatResponse(...)``（＝ ``StopIteration.value``）で返る。
+    同期に回すときは ``_run_learning_turn(...)`` を通す（イベントは捨てられる）。
+    ``stream=True`` のときだけ本文が ``("delta", text)`` として流れる。
 
     コース経路（``learning_chat``）は追加引数を渡さず、従来どおり
     ``get_course_data`` でコースを解決する（処理順序を含め挙動不変）。
@@ -3778,6 +3824,25 @@ def _learning_chat_core(
             "structured_grounding_present", current_user["id"], course_id
         )
 
+    # 入口統合 Phase 1（設計 §4.2 の [4] / §7）: この往復の様相と、その出所を確定する。
+    # 語彙・優先順位の正本は core/learning_stance/schema.py（純関数）。**様相は
+    # discuss_scope / cycle_mode / backstage / check_scaffold を切り替えない**（LC1）。
+    # ストリーミング Phase 3-a（§2.2 / §3.3）: 様相は回答本文に依存しないので生成の
+    # **前**に解決し、`start` イベントと最終 DTO の両方で同じ値を使う。
+    _stance, _stance_source = resolve_stance(
+        cycle_mode=_cycle_mode,
+        is_discuss=_is_discuss,
+        is_casual=_is_casual,
+        explicit_casual=_explicit_casual,
+        has_typed_action=bool(_route_for_typed_action(body.support_action)),
+        has_atlas_context=bool(_atlas_ctx),
+    )
+    # ストリーミング Phase 3-a: ここが本関数で唯一の「前処理の終わり」の目印。
+    # 権限・可視性・値検証・CostGate（ST2）・画面文脈の注入まで済んでいるので、
+    # ここで初めて 200 を返し始めてよい（route 側は最初の next() を
+    # StreamingResponse の前で同期に呼ぶ）。
+    yield ("start", build_stance_dto(_stance, _stance_source))
+
     degraded = False
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書き。運用パラメータのため
     # 版ピン中の学習者にも所有者の live（HEAD）設定を適用する — course_data は非所有者に
@@ -3797,10 +3862,26 @@ def _learning_chat_core(
     )
     try:
         with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id), _course_chat_override:
-            answer = generate_text(
-                messages=messages,
-                temperature=0.3,
-                model=resolve_model("learning_chat_llm_model", fallback="analysis"),
+            # M1: 実効モデルは contextvar（コース上書き）の内側で1回だけ確定する。
+            _effective_model = resolve_model("learning_chat_llm_model", fallback="analysis")
+            if not stream:
+                answer = generate_text(
+                    messages=messages,
+                    temperature=0.3,
+                    model=_effective_model,
+                )
+        if stream:
+            # contextvar の外で yield する（ストリーミング設計 §3.2。Starlette は
+            # next() ごとに copy_context() した別スレッドでジェネレータを再開するため、
+            # with を跨いだ yield は ContextVar.reset() の token 不一致で落ちる）。
+            answer = yield from _stream_answer(
+                messages,
+                model=_effective_model,
+                usage_ctx={
+                    "feature": _chat_feature,
+                    "user_id": current_user["id"],
+                    "course_id": course_id,
+                },
             )
     except Exception:
         # 会話は死なせない（設計書 I3）: 500 即死をやめ、degraded 固定文 + 200 へ縮退する。
@@ -3885,17 +3966,8 @@ def _learning_chat_core(
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
     _sel_anchor = _learner_selected_anchor(body)
-    # 入口統合 Phase 1（設計 §4.2 の [4] / §7）: この往復の様相と、その出所を確定する。
-    # 語彙・優先順位の正本は core/learning_stance/schema.py（純関数）。**様相は
-    # discuss_scope / cycle_mode / backstage / check_scaffold を切り替えない**（LC1）。
-    _stance, _stance_source = resolve_stance(
-        cycle_mode=_cycle_mode,
-        is_discuss=_is_discuss,
-        is_casual=_is_casual,
-        explicit_casual=_explicit_casual,
-        has_typed_action=bool(_route_for_typed_action(body.support_action)),
-        has_atlas_context=bool(_atlas_ctx),
-    )
+    # 様相（_stance / _stance_source）は生成の前に解決済み（ストリーミング §3.3 で
+    # `start` イベントへ載せるため前倒しした。入力6つはいずれも回答本文に依存しない）。
     _trace_payload = {
         "overall_tier": overall_tier,
         "position_anchor": position_anchor,
@@ -4033,6 +4105,120 @@ def _learning_chat_core(
         mock=False,
         degraded=degraded,
     )
+
+
+# ---------------------------------------------------------------------------
+# 学習チャットのストリーミング（Phase 3-a）
+#
+# 正本: docs/features/llm_response_streaming_design.md（ST1〜ST9 / §2.2 / §3.4）。
+# 前処理・後処理は `_learning_chat_core` の1本のまま（分岐は転送方式だけ）。
+# ---------------------------------------------------------------------------
+
+#: chunk 境界で ANSI エスケープ列が割れても衛生を掛け損ねないための保留幅（§4.2）。
+_SSE_HYGIENE_TAIL = 16
+
+
+def _sse_frame(event: str, payload: dict) -> str:
+    """SSE の1フレーム。``data:`` は必ず JSON 1行（本文の改行で枠が壊れない）。"""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _sse_frames(gen, first):
+    """``_learning_chat_core`` のイベント列を SSE フレーム列に変換する（§3.4 手順5）。
+
+    - ``start`` → delta（衛生済み）→ ``final``（``LearningChatResponse.model_dump()`` を
+      そのまま。キーを間引かない = ST7）。
+    - ``final`` すら組み立てられない例外だけ ``error`` フレーム（§2.2）。
+    - クライアント切断（``GeneratorExit``）は ``gen.close()`` へ伝える。コアの
+      ``except Exception`` は ``GeneratorExit`` を捕まえないので、保存・痕跡へは
+      進まない（ST1/ST5: 中断した往復は記録しない）。
+    """
+    _, stance_dto = first
+    try:
+        yield _sse_frame("start", {"stance": stance_dto})
+        pending = ""
+        try:
+            while True:
+                kind, value = next(gen)
+                if kind != "delta":
+                    continue
+                pending += value
+                if len(pending) > _SSE_HYGIENE_TAIL:
+                    emit, pending = pending[:-_SSE_HYGIENE_TAIL], pending[-_SSE_HYGIENE_TAIL:]
+                    cleaned = strip_control_sequences(emit)
+                    if cleaned:
+                        yield _sse_frame("delta", {"t": cleaned})
+        except StopIteration as stop:
+            response = stop.value
+        cleaned_tail = strip_control_sequences(pending)
+        if cleaned_tail:
+            yield _sse_frame("delta", {"t": cleaned_tail})
+        yield _sse_frame("final", response.model_dump())
+    except GeneratorExit:
+        gen.close()
+        raise
+    except Exception:
+        logger.exception("Learning chat stream failed")
+        gen.close()
+        yield _sse_frame("error", {"reason": "upstream"})
+
+
+@router.post("/courses/{course_id}/topics/{topic_id}/chat/stream")
+def learning_chat_stream(
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> StreamingResponse:
+    """学習チャットの逐次配信（SSE, ストリーミング Phase 3-a §3.4）。
+
+    非ストリーム版 ``learning_chat`` と**同じコア**（``_learning_chat_core``）を通し、
+    最後の ``final`` イベントは同一入力に対する JSON レスポンスと同値（ST7）。
+
+    ``settings.learning_chat_streaming_enabled`` が false のときは 404
+    （機能が存在しない状態を正直に返す。フロントは従来の JSON 経路へ = ST9）。
+    最初の ``next()`` は ``StreamingResponse`` を返す**前**に同期で呼ぶので、権限・
+    可視性・値検証・CostGate（429）は 200 を返す前に通常の HTTP ステータスで出る
+    （ST2 / 原則11）。
+    """
+    if not get_settings().learning_chat_streaming_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    gen = _learning_chat_core(course_id, topic_id, body, current_user, stream=True)
+    try:
+        first = next(gen)
+    except StopIteration as stop:
+        # LLM 非経由の確定応答（学習相談・HELP・地図・要素説明など）。delta を1つも
+        # 出さずに start + final だけを流し、クライアントのコードパスを1本に保つ。
+        response = stop.value
+
+        def _immediate():
+            yield _sse_frame("start", {"stance": response.stance})
+            yield _sse_frame("final", response.model_dump())
+
+        return StreamingResponse(
+            _immediate(),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    return StreamingResponse(
+        _sse_frames(gen, first),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/client-features")
+def learning_client_features(
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """クライアントが使ってよい経路の配布（ストリーミング §3.4）。
+
+    設定値の鏡で、bool 1キーのみ。数値・上限・モデル名は載せない（ST8 / M9）。
+    取得できないときフロントは false 扱い（fail-to-current）。
+    """
+    return {"chat_streaming": bool(get_settings().learning_chat_streaming_enabled)}
 
 
 @router.get("/courses/{course_id}/discuss/opening")
@@ -4250,14 +4436,14 @@ def document_discuss_chat(
     body.atlas_context = None
     body.cycle_mode = None
 
-    response = _learning_chat_core(
+    response = _run_learning_turn(_learning_chat_core(
         context_id,
         DISCUSSION_TOPIC_ID,
         body,
         current_user,
         course_data=_document_discuss_course_data(document_id, source_path, title),
         scope_document_ids={document_id},
-    )
+    ))
     _record_document_discuss_event("document_discuss_turn", current_user["id"], context_id)
     return response
 
