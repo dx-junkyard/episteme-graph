@@ -547,6 +547,15 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("ATLAS_DATA_SOURCE"),
     )
 
+    # --- 学習チャットのストリーミング（Phase 3-a, migration 不要） ---
+    # true のとき POST /api/learning/courses/{id}/topics/{tid}/chat/stream（SSE）が有効に
+    # なる。既定 false = 段階導入（ST9）。off のときストリーム経路は 404 を返し、
+    # フロントは従来の JSON 経路のみを使う（fail-to-current）。
+    learning_chat_streaming_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("LEARNING_CHAT_STREAMING_ENABLED"),
+    )
+
     # --- U層（LLM 使用量計測, migration 043） ---
     # false で record() を no-op に（テスト・ローカル用）
     llm_usage_tracking_enabled: bool = Field(
