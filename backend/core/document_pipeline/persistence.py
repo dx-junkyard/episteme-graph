@@ -6,13 +6,37 @@ import json
 import logging
 import re
 import uuid
+from dataclasses import asdict, is_dataclass
 from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.knowledge_objects import remap as ko_remap
+from core.knowledge_objects import stable_key as ko_keys
+from core.knowledge_objects.schema import (
+    DEFAULT_REVIEW_STATUS,
+    TABLE_ARTIFACTS,
+    TABLE_CLAIMS,
+    TABLE_COMPONENTS,
+    TABLE_DERIVATION_STEPS,
+    TABLE_EQUATIONS,
+    TABLE_EVIDENCE,
+    TABLE_SYMBOLS,
+    normalize_claim_type,
+    normalize_component_type,
+)
+from core.knowledge_objects.sync import sync_live_rows
 from core.llm import generate_embeddings
 from core.postgres import get_session as _pg_session
-from core.schema import AUDIT_ENTITY_REVISION_RUN
+from core.schema import (
+    AUDIT_ENTITY_KNOWLEDGE_OBJECT,
+    AUDIT_ENTITY_REVISION_RUN,
+    CLAIM_ORIGIN_ATOMIC_REWRITE,
+    CLAIM_ORIGIN_CLAIM_OBJECT,
+    CLAIM_ORIGIN_EQUATION_SYNTHESIS,
+    CLAIM_ORIGIN_SPAN,
+    CLAIM_TIERS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,7 +46,12 @@ ARTIFACTS_KEY = "_artifacts"
 
 
 def merge_revision_stage_outputs(existing: dict | None, payload: dict | None) -> dict:
-    """Pure model of update_revision_status's JSONB merge (#410 P0).
+    """Pure model of the **legacy** stage_outputs JSONB merge (#410 P0).
+
+    知識オブジェクト層（§6 / KO6）以降、artifact の格納先は生成ログ表
+    ``document_analysis_artifacts`` であり、``stage_outputs`` に ``_artifacts`` は
+    書かれない。本関数は旧 blob の意味論（兄弟 artifact を潰さない deep merge）を
+    記述したモデルとして残す（旧 run の blob を読み直すときの参照）。
 
     Mirrors the SQL exactly: non-``_artifacts`` keys are shallow-merged onto the
     existing stage_outputs, while ``_artifacts`` is merged key-by-key into the
@@ -64,6 +93,271 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(_strip_nuls(value), ensure_ascii=False)
 
 
+def _plain(value: Any) -> Any:
+    """dataclass を含む agent の出力を JSON 化可能な素データにする。
+
+    ``knowledge_objects.sync`` は dict / list をそのまま ``CAST(... AS jsonb)`` に
+    渡すため、渡す前にこの関数を通す（agent 側 dataclass をそのまま JSON 化しない）。
+    """
+    if is_dataclass(value) and not isinstance(value, type):
+        return _plain(asdict(value))
+    if isinstance(value, (list, tuple, set)):
+        return [_plain(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _plain(v) for k, v in value.items()}
+    if (
+        not isinstance(value, (str, bytes, bool, int, float, type(None)))
+        and hasattr(value, "__dict__")
+        and not isinstance(value, type)
+    ):
+        # agent の record 相当（dataclass 以外の単純オブジェクト）も素の dict にする。
+        return _plain(vars(value))
+    return value
+
+
+def _text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _id_list(values: Any) -> list[str]:
+    """agent 側 ID のリストを正規化する（空文字・重複を落とし順序は保つ）。"""
+    out: list[str] = []
+    for value in values or []:
+        item = _text(value)
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _record_knowledge_audit(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    stats: dict,
+    changed_by: str | None = None,
+) -> None:
+    """知識オブジェクト同期の run 単位サマリを1行記帳する（KO10）。
+
+    ``theory_review_events`` への直接 INSERT は persistence の既存例外
+    （呼び出し元トランザクションに同乗する）。数値は件数のみで、本文・逐語引用は
+    載せない。**監査は必須**（KO10）: INSERT の失敗は握らず、同じトランザクションの
+    知識行の保存と一緒に巻き戻す（PostgreSQL では失敗した文の後の commit は
+    どのみち通らないので、黙って続ける方が事故になる）。
+    """
+    session.execute(
+        sa_text(
+            """
+            INSERT INTO theory_review_events (
+                entity_type, entity_id, old_status, new_status, changed_by, metadata
+            )
+            VALUES (
+                :entity_type, :entity_id, :old_status, :new_status,
+                CAST(:changed_by AS uuid), CAST(:metadata AS jsonb)
+            )
+            """
+        ),
+        {
+            "entity_type": AUDIT_ENTITY_KNOWLEDGE_OBJECT,
+            "entity_id": _text(document_id),
+            "old_status": "",
+            "new_status": "synced",
+            "changed_by": changed_by,
+            "metadata": _json_dumps({**dict(stats or {}), "run_id": run_id}),
+        },
+    )
+
+
+
+def _apply_remaps(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    kind: str,
+    remaps: list[tuple[str, str, str]],
+) -> dict:
+    """:func:`core.knowledge_objects.remap.record_and_reanchor` の薄いラッパ。"""
+    if not remaps:
+        return {"recorded": 0, "reanchored": {}, "skipped": {}}
+    return ko_remap.record_and_reanchor(
+        session,
+        document_id=document_id,
+        run_id=run_id,
+        kind=kind,
+        remaps=remaps,
+    )
+
+
+# ---------------------------------------------------------------------------
+# equation の stable_key（claim / derivation / symbol のキー材料にもなる）
+# ---------------------------------------------------------------------------
+
+
+def _equation_records(equations: Any) -> list[Any]:
+    if equations is None:
+        return []
+    records = getattr(equations, "equations", None)
+    if records is None and isinstance(equations, dict):
+        records = equations.get("equations")
+    return list(records or [])
+
+
+def _equation_fields(record: Any) -> dict:
+    """EquationRecord（dataclass / dict 双方）から永続化に使う素の値を取り出す。"""
+    data = _plain(record)
+    if not isinstance(data, dict):
+        return {}
+    extraction = data.get("source_extraction") or {}
+    reconstruction = data.get("reconstruction") or {}
+    semantics = data.get("semantics") or {}
+    location = extraction.get("source_location") or {}
+    latex = extraction.get("latex") or reconstruction.get("latex") or ""
+    plain_text = extraction.get("plain_text") or reconstruction.get("plain_text") or ""
+    return {
+        "equation_id": _text(data.get("equation_id")),
+        "label": _text(data.get("label")),
+        "latex": _text(latex),
+        "plain_text": _text(plain_text),
+        "raw_text": _text(extraction.get("raw_text")),
+        "block_id": _text(location.get("block_id")),
+        "section_id": _text(location.get("section_id")),
+        "page": location.get("page"),
+        "equation_type": _text(semantics.get("equation_type")),
+        "semantic_status": _text(semantics.get("semantic_status")),
+        "content_hash": _text(data.get("content_hash")),
+        "defined_symbols": _plain(semantics.get("defined_symbols") or []),
+        "used_symbols": _id_list(semantics.get("used_symbols")),
+        "input_equation_ids": _id_list(semantics.get("input_equation_ids")),
+        "output_equation_ids": _id_list(semantics.get("output_equation_ids")),
+        "linked_claim_ids": _id_list(semantics.get("linked_claim_ids")),
+        "source_evidence_ids": _id_list(semantics.get("source_evidence_ids")),
+        "needs_math_review": bool(extraction.get("needs_math_review")),
+        "payload": data,
+    }
+
+
+def _equation_stable_key_map(document_id: str, equations: Any) -> dict[str, str]:
+    """``agent equation_id -> stable_key``（純計算・DB を読まない）。
+
+    claim の ``equation_stable_keys`` / derivation step / symbol のキー材料に使う。
+    """
+    out: dict[str, str] = {}
+    for record in _equation_records(equations):
+        fields = _equation_fields(record)
+        agent_id = fields.get("equation_id") or ""
+        if not agent_id:
+            continue
+        out[agent_id] = ko_keys.equation_stable_key(
+            document_id,
+            fields.get("latex"),
+            fields.get("plain_text") or fields.get("raw_text"),
+            fields.get("block_id"),
+            fields.get("label"),
+        )
+    return out
+
+
+def _resolved_equation_keys(agent_ids: Any, key_map: dict[str, str]) -> list[str]:
+    """式 agent ID 集合 → stable_key 集合（解決できない ID はそのまま材料にする）。"""
+    return [key_map.get(agent_id, agent_id) for agent_id in _id_list(agent_ids)]
+
+
+# ---------------------------------------------------------------------------
+# artifact（生成ログ・1 run × 1 stage = 1 行。§6 / KO6）
+# ---------------------------------------------------------------------------
+
+
+def _upsert_run_artifacts(session, run_id: str, artifacts: Any) -> None:
+    """``document_analysis_artifacts`` に stage ごと upsert する（commit しない）。"""
+    if not run_id or not isinstance(artifacts, dict) or not artifacts:
+        return
+    for stage, payload in artifacts.items():
+        stage_name = _text(stage)
+        if not stage_name:
+            continue
+        session.execute(
+            sa_text(
+                f"""
+                INSERT INTO {TABLE_ARTIFACTS} (run_id, stage, payload)
+                VALUES (CAST(:run_id AS uuid), :stage, CAST(:payload AS jsonb))
+                ON CONFLICT (run_id, stage) DO UPDATE
+                SET payload = EXCLUDED.payload, updated_at = now()
+                """
+            ),
+            {"run_id": run_id, "stage": stage_name, "payload": _json_dumps(payload)},
+        )
+
+
+def load_run_artifacts(session, run_ids: list[str]) -> dict[str, dict]:
+    """``{run_id: {stage: payload}}`` を生成ログ表から読む（§6）。
+
+    旧 blob（``stage_outputs._artifacts``）が残る run では、呼び出し側が blob を
+    下敷きにしてこの表の値を上書きする（表が勝つ）。
+    """
+    ids = [_text(rid) for rid in (run_ids or []) if _text(rid)]
+    if not ids:
+        return {}
+    placeholders = ", ".join(f"CAST(:run_{i} AS uuid)" for i in range(len(ids)))
+    params = {f"run_{i}": rid for i, rid in enumerate(ids)}
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT run_id::text, stage, payload
+                FROM {TABLE_ARTIFACTS}
+                WHERE run_id IN ({placeholders})
+                """
+            ),
+            params,
+        ).fetchall()
+    except Exception:
+        # 生成ログ表が無い環境（migration 未適用・fake session）でも読み取りを止めない。
+        logger.debug("load_run_artifacts failed; falling back to stage_outputs blob", exc_info=True)
+        return {}
+    out: dict[str, dict] = {}
+    for row in rows or []:
+        run_id = _text(row[0])
+        stage = _text(row[1])
+        if not run_id or not stage:
+            continue
+        payload = row[2]
+        if isinstance(payload, str):
+            try:
+                payload = json.loads(payload)
+            except (ValueError, TypeError):
+                continue
+        out.setdefault(run_id, {})[stage] = payload
+    return out
+
+
+def _hydrate_run_artifacts(session, run: dict | None) -> dict | None:
+    """run 行の ``stage_outputs['_artifacts']`` を生成ログ表から組み立て直す。
+
+    読み手の契約（``document_run_artifacts()`` が ``{stage: payload}`` を返す）は
+    不変で、blob が残る旧 run では blob を下敷きに表の値が勝つ。
+    """
+    if not run:
+        return run
+    run_id = _text(run.get("id") or run.get("run_id"))
+    if not run_id:
+        return run
+    stored = load_run_artifacts(session, [run_id]).get(run_id) or {}
+    if not stored:
+        return run
+    stage_outputs = run.get("stage_outputs")
+    if isinstance(stage_outputs, str):
+        try:
+            stage_outputs = json.loads(stage_outputs)
+        except (ValueError, TypeError):
+            stage_outputs = {}
+    stage_outputs = dict(stage_outputs or {})
+    blob = stage_outputs.get(ARTIFACTS_KEY)
+    stage_outputs[ARTIFACTS_KEY] = {**(blob if isinstance(blob, dict) else {}), **stored}
+    run["stage_outputs"] = stage_outputs
+    return run
+
+
 def claim_span_key(block_id: Any, span_id: Any) -> str:
     """``"{block_id}:{span_id}"``（文書内で一意な span の論理キー）を返す。
 
@@ -95,6 +389,11 @@ def _claim_legacy_keys(claim: dict) -> set[str]:
     span_id = claim.get("span_id")
     if claim_id:
         keys.add(str(claim_id))
+    # 知識オブジェクト層（KO4）: claim object も1行ずつ保存されるので、その行を
+    # 出した agent 側 ID も突合キーにする（claim_id は DB UUID なので別物）。
+    agent_claim_id = claim.get("agent_claim_id")
+    if agent_claim_id:
+        keys.add(str(agent_claim_id))
     if span_id:
         safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(span_id))
         keys.add(str(span_id))
@@ -681,6 +980,241 @@ def _claim_object_ids_by_span_key(
     return {key: sorted(values) for key, values in index.items()}
 
 
+_CLAIM_CONTENT_COLUMNS = (
+    "chunk_id", "source_scope", "claim_type", "claim_type_text", "text",
+    "normalized_text", "concepts", "equation", "support_status", "evidence_text",
+    "thesis_refs", "origin", "claim_tier", "content_hash",
+)
+
+#: 人間の確定列（一致時に触らない。§5.3）。
+_CLAIM_PRESERVED_COLUMNS = ("review_status", "created_by")
+
+_CLAIM_COLUMN_CASTS = {"chunk_id": "uuid"}
+
+
+def _claim_span_index(spans: list) -> tuple[dict, dict]:
+    """``{span_key: span}`` と ``{block_id: span_key}`` 的な索引をまとめて作る。"""
+    span_by_key: dict[str, Any] = {}
+    for span in spans:
+        key = claim_span_key(getattr(span, "block_id", None), getattr(span, "span_id", None))
+        if key and key not in span_by_key:
+            span_by_key[key] = span
+    return span_by_key, {}
+
+
+def _claim_object_span_keys(claim_ids_by_span_key: dict[str, list[str]]) -> dict[str, str]:
+    """``claim_object の claim_id -> span_key``（1対1に決まるものだけ）。
+
+    :func:`_claim_object_ids_by_span_key` の逆引き。複数 span に跨る claim は
+    **記録しない**（推測で1つに寄せない）。
+    """
+    owners: dict[str, set[str]] = {}
+    for span_key, claim_ids in (claim_ids_by_span_key or {}).items():
+        for claim_id in claim_ids:
+            owners.setdefault(str(claim_id), set()).add(span_key)
+    return {
+        claim_id: next(iter(keys))
+        for claim_id, keys in owners.items()
+        if len(keys) == 1
+    }
+
+
+def _build_claim_items(
+    *,
+    document_id: str,
+    spans: list,
+    claim_objects: Any,
+    claim_ids_by_span_key: dict[str, list[str]],
+    evidence_blocks: dict[str, str],
+    block_to_chunk: dict[str, str],
+    thesis_ref_index: dict,
+    equation_keys: dict[str, str],
+) -> list[dict]:
+    """claim object（親 → 子 → 式由来合成）+ 残りの span を同期用 item 列にする（§5.4）。
+
+    1 item = ``{"agent_id", "stable_key", "values", "span_id", "block_id", "text",
+    "parent_agent_id", "legacy_ids"}``。同じ stable_key を持つ span は claim object の
+    item に legacy_ids を合流させて **行を二重に作らない**（同じ命題を2行にしない）。
+    """
+    span_by_key, _ = _claim_span_index(spans)
+    span_key_of_claim = _claim_object_span_keys(claim_ids_by_span_key)
+
+    items: list[dict] = []
+    # claim object の item だけを stable_key で索く（span 同士は合流させない。
+    # 同じキーの span が2本あるのは「同じ命題が2箇所にある」ので、行は分けたまま
+    # dedupe_stable_keys が #2 … で区別する = KO2）。
+    by_key: dict[str, dict] = {}
+
+    def _register(item: dict, *, indexed: bool = False) -> None:
+        items.append(item)
+        if indexed:
+            by_key.setdefault(item["stable_key"], item)
+
+    for record in (getattr(claim_objects, "claims", None) or []):
+        data = _plain(record)
+        if not isinstance(data, dict):
+            continue
+        agent_id = _text(data.get("claim_id"))
+        if not agent_id:
+            continue
+        text_value = str(data.get("text") or "")
+        normalized = str(data.get("normalized_text") or "") or text_value
+        evidence_ids = _id_list(data.get("source_evidence_ids"))
+        block_ids = _id_list(
+            evidence_blocks[ev_id] for ev_id in evidence_ids if ev_id in evidence_blocks
+        )
+        span = span_by_key.get(span_key_of_claim.get(agent_id, ""))
+        span_block = _text(getattr(span, "block_id", "")) if span is not None else ""
+        span_id = getattr(span, "span_id", None) if span is not None else None
+        if not block_ids and span_block:
+            block_ids = [span_block]
+        primary_block = block_ids[0] if block_ids else (span_block or "")
+
+        parent_agent_id = _text(data.get("parent_claim_id"))
+        synthesis_method = _text(data.get("synthesis_method"))
+        if parent_agent_id:
+            origin = CLAIM_ORIGIN_ATOMIC_REWRITE
+        elif synthesis_method or agent_id.startswith("synth_claim_"):
+            origin = CLAIM_ORIGIN_EQUATION_SYNTHESIS
+        else:
+            origin = CLAIM_ORIGIN_CLAIM_OBJECT
+
+        qualification = getattr(span, "qualification", None) if span is not None else None
+        tier = qualification.get("tier") if isinstance(qualification, dict) else ""
+        claim_tier = _text(tier) if _text(tier) in CLAIM_TIERS else ""
+
+        equation_ids = _id_list(data.get("equation_ids"))
+        equation_payload = (
+            {
+                "equation_ids": equation_ids,
+                "equation_stable_keys": _resolved_equation_keys(equation_ids, equation_keys),
+            }
+            if equation_ids else {}
+        )
+        raw_claim_type = _text(data.get("claim_type"))
+        thesis_refs = _claim_thesis_refs_for_span(span_id, thesis_ref_index)
+        legacy_ids = {agent_id}
+        _register(indexed=True, item={
+            "agent_id": agent_id,
+            "stable_key": ko_keys.claim_stable_key(document_id, normalized, block_ids),
+            "parent_agent_id": parent_agent_id,
+            "span_id": span_id,
+            "block_id": primary_block or None,
+            "chunk_id": block_to_chunk.get(primary_block or ""),
+            "text": text_value,
+            "legacy_ids": legacy_ids,
+            "values": {
+                "chunk_id": block_to_chunk.get(primary_block or "") or None,
+                "source_scope": {
+                    "section_id": data.get("section_id"),
+                    "block_id": primary_block or None,
+                    "span_id": span_id,
+                    "legacy_ids": sorted(legacy_ids),
+                    "qualification_reason": _text(data.get("qualification_reason") or ""),
+                },
+                "claim_type": normalize_claim_type(raw_claim_type),
+                "claim_type_text": raw_claim_type,
+                "text": text_value,
+                "normalized_text": normalized,
+                "concepts": _plain(data.get("concepts") or []),
+                "equation": equation_payload,
+                "support_status": _text(data.get("support_status")) or "source_backed",
+                # PDF 原文根拠は EvidenceRegistry に委任する (#257)。
+                "evidence_text": "",
+                "thesis_refs": thesis_refs or None,
+                "origin": origin,
+                "claim_tier": claim_tier,
+                "content_hash": _text(data.get("content_hash")),
+                "review_status": DEFAULT_REVIEW_STATUS,
+            },
+        })
+
+    for span in spans:
+        qualification = getattr(span, "qualification", {}) or {}
+        decision = qualification.get("decision") if isinstance(qualification, dict) else None
+        if decision == "rejected":
+            continue
+        block_id = getattr(span, "block_id", None)
+        span_id = getattr(span, "span_id", None)
+        text_value = str(getattr(span, "text", "") or "")
+        span_key = claim_span_key(block_id, span_id)
+        legacy_ids = _claim_legacy_keys({"span_id": span_id, "block_id": block_id})
+        legacy_ids.update(claim_ids_by_span_key.get(span_key, []))
+        stable_key = ko_keys.claim_stable_key(
+            document_id, text_value, [block_id] if block_id else []
+        )
+        existing = by_key.get(stable_key)
+        if existing is not None:
+            # §5.4-2: 同じ命題を span 行と claim object 行の2本に分けて持たない。
+            # span 側の突合キー（span_id / claim_{span} / block:span）は claim object の
+            # 行に合流させるので、読み手の解決は落ちない（P4）。
+            existing["legacy_ids"] |= legacy_ids
+            existing["values"]["source_scope"]["legacy_ids"] = sorted(existing["legacy_ids"])
+            if not existing.get("span_id"):
+                existing["span_id"] = span_id
+                existing["values"]["source_scope"]["span_id"] = span_id
+            if not existing.get("block_id") and block_id:
+                existing["block_id"] = block_id
+                existing["values"]["source_scope"]["block_id"] = block_id
+                existing["values"]["chunk_id"] = block_to_chunk.get(block_id) or None
+            continue
+        chunk_id = block_to_chunk.get(block_id or "")
+        thesis_refs = _claim_thesis_refs_for_span(span_id, thesis_ref_index)
+        _register({
+            "agent_id": span_key or _text(span_id),
+            "stable_key": stable_key,
+            "parent_agent_id": "",
+            "span_id": span_id,
+            "block_id": block_id,
+            "chunk_id": chunk_id,
+            "text": text_value,
+            "legacy_ids": set(legacy_ids),
+            "values": {
+                "chunk_id": chunk_id or None,
+                "source_scope": {
+                    "section_id": getattr(span, "section_id", None),
+                    "block_id": block_id,
+                    "span_id": span_id,
+                    "legacy_ids": sorted(legacy_ids),
+                    # span.reason は LLM 判定理由 (review note) であり PDF 原文根拠ではない。
+                    # source-backed 判定の根拠として evidence_text に保存しない (#257)。
+                    "qualification_reason": _text(getattr(span, "reason", "") or ""),
+                },
+                "claim_type": normalize_claim_type(_normalize_claim_type(qualification)),
+                "claim_type_text": _text(
+                    qualification.get("claim_type_candidate")
+                    or qualification.get("claim_type")
+                    if isinstance(qualification, dict) else ""
+                ),
+                "text": text_value,
+                "normalized_text": text_value,
+                "concepts": [],
+                "equation": {},
+                "support_status": "source_backed",
+                "evidence_text": "",
+                "thesis_refs": thesis_refs or None,
+                "origin": CLAIM_ORIGIN_SPAN,
+                "claim_tier": (
+                    _text(qualification.get("tier"))
+                    if isinstance(qualification, dict)
+                    and _text(qualification.get("tier")) in CLAIM_TIERS else ""
+                ),
+                "content_hash": "",
+                "review_status": DEFAULT_REVIEW_STATUS,
+            },
+        })
+
+    # 同一 run 内の stable_key 衝突は agent ID 昇順で #2 … を付ける（KO2）。
+    final_keys = ko_keys.dedupe_stable_keys(
+        items,
+        key_of=lambda item: item["stable_key"],
+        agent_id_of=lambda item: item["agent_id"],
+    )
+    for item in items:
+        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+    return items
+
+
 def persist_qualified_claims(
     *,
     document_id: str,
@@ -689,131 +1223,129 @@ def persist_qualified_claims(
     thesis_result: Any = None,
     claim_objects: Any = None,
     evidence_registry: Any = None,
+    equations: Any = None,
+    run_id: str | None = None,
 ) -> list[dict]:
-    """ClaimQualificationResult.qualified_spans を `theory_claims` に保存する。
+    """claim を `theory_claims` に **同期**する（knowledge_objects_design.md §5.4 / KO3・KO4）。
+
+    かつては「document 単位の DELETE → 再 INSERT」だったため、再解析のたびに UUID が
+    変わり C層の承認・D層の台帳・R層の産出物が宙に浮いていた（S-6 / S-14）。現在は
+    内容由来の ``stable_key``（:mod:`core.knowledge_objects.stable_key`）で live 行と
+    突合し、一致は同じ UUID のまま内容列を更新、一致しない旧 live 行は
+    ``superseded_at`` を刻んで残す。**DELETE は発行しない**。
+
+    保存対象は span だけでなく claim object（親 / atomic 子 / 式由来合成）も含み、
+    それぞれ ``origin`` を持つ（KO4: artifact にしか無い知識を残さない）。
 
     Args:
-        chunk_index: persist_source_chunks の戻り値。block_id → chunk_id の
-            解決に使う。
-        thesis_result: ThesisReconstructionResult（省略可）。指定されると
-            central_thesis / support_structure の claim_ids を span_id 単位で
-            逆引きし、各行の `thesis_refs` に
-            `[{"thesis_ref", "kind", "text_excerpt"}]` を保存する
-            （hierarchical_context_explanation_design.md §4。決定論・非LLM）。
-        claim_objects: ClaimObjectBuildResult（省略可）。指定されると、その span に
-            対応する claim object（親 + atomic 子 `subclaim_ids`）の `claim_id` を
-            `source_scope.legacy_ids` に加える。対応付けの一意キーは
-            :func:`_claim_object_ids_by_span_key` の docstring 参照（block_id を
-            必ず含む。一意に決まらない claim は記録しない）。
-        evidence_registry: EvidenceRegistryResult（省略可）。claim object →
-            block_id の主経路（evidence_id → `source.block_id`）に使う。省略すると
-            span_id が1 block にしか現れない場合の従経路だけになる。
+        chunk_index: persist_source_chunks の戻り値。block_id → chunk_id の解決に使う。
+        thesis_result: ThesisReconstructionResult（省略可）。`thesis_refs` に
+            `[{"thesis_ref", "kind", "text_excerpt"}]` を保存する。
+        claim_objects: ClaimObjectBuildResult（省略可）。指定されると claim object も
+            1行ずつ保存し、対応する span の突合キーを同じ行に合流させる。
+        evidence_registry: EvidenceRegistryResult（省略可）。claim object → block_id の
+            主経路（evidence_id → `source.block_id`）。stable_key の材料でもある。
+        equations: EquationSemanticsResult（省略可）。`equation.equation_stable_keys` の
+            材料（純計算・DB は読まない）。
+        run_id: この保存を出した run（``produced_by_run_id`` / supersede の刻印）。
 
     Returns:
-        [{claim_id, span_id, block_id, chunk_id, text}] のリスト。
-
-    Note:
-        `source_scope.legacy_ids` には従来の `span_id` / `claim_{safe(span_id)}` に加え、
-        文書内一意な `"{block_id}:{span_id}"`（S-3 / F-4 の是正）と、解決できた
-        claim object の ID を入れる。読み側（`element_context` / `deliberation.refs` /
-        `personal_graph.queries` 等）はいずれも集合への包含で突合するため、
-        キーの追加は解決率を上げるだけで既存の突合を壊さない。
+        ``[{claim_id, agent_claim_id, span_id, block_id, chunk_id, text, stable_key,
+        legacy_ids}]``。呼び出し側（orchestrator の ``claim_id_map``）が **全 claim の
+        agent ID** → UUID を引けるように、突合キーを ``legacy_ids`` で併せて返す。
     """
     block_to_chunk: dict[str, str] = {}
-    for ch in chunk_index:
+    for ch in chunk_index or []:
         for bid in ch.get("block_ids") or []:
             block_to_chunk.setdefault(bid, ch["chunk_id"])
 
     spans = list(getattr(qualified_result, "qualified_spans", []) or [])
-    if not spans:
-        return []
-
     thesis_ref_index = _claim_thesis_ref_index(thesis_result)
     claim_ids_by_span_key = _claim_object_ids_by_span_key(
         qualified_result, claim_objects, evidence_registry
     )
+    evidence_blocks = _evidence_block_index(evidence_registry)
+    equation_keys = _equation_stable_key_map(document_id, equations)
 
-    saved: list[dict] = []
+    items = _build_claim_items(
+        document_id=document_id,
+        spans=spans,
+        claim_objects=claim_objects,
+        claim_ids_by_span_key=claim_ids_by_span_key,
+        evidence_blocks=evidence_blocks,
+        block_to_chunk=block_to_chunk,
+        thesis_ref_index=thesis_ref_index,
+        equation_keys=equation_keys,
+    )
+
     session = _pg_session()
     try:
-        # 同 document の既存 claim を削除（pipeline 再実行時の整合確保）
-        session.execute(
-            sa_text("DELETE FROM theory_claims WHERE document_id = :doc_id"),
-            {"doc_id": document_id},
+        # S-7 の早期 return は撤去する: incoming が空でも同期を走らせ、旧 live 行を
+        # superseded にする（「今回の解析には無い」ことを行の状態として残す）。
+        sync = sync_live_rows(
+            session,
+            table=TABLE_CLAIMS,
+            document_id=document_id,
+            run_id=run_id,
+            incoming=items,
+            content_columns=_CLAIM_CONTENT_COLUMNS,
+            preserved_columns=_CLAIM_PRESERVED_COLUMNS,
+            agent_id_column="agent_claim_id",
+            column_casts=_CLAIM_COLUMN_CASTS,
         )
-        for span in spans:
-            qualification = getattr(span, "qualification", {}) or {}
-            decision = qualification.get("decision") if isinstance(qualification, dict) else None
-            if decision == "rejected":
+
+        # 親子（atomic rewrite）は2パス: 全行を同期したあとに parent_claim_id を解く。
+        for item in items:
+            parent_agent_id = item.get("parent_agent_id") or ""
+            child_id = sync.id_map.get(item["agent_id"])
+            parent_id = sync.id_map.get(parent_agent_id) if parent_agent_id else None
+            if child_id and parent_id and child_id != parent_id:
+                session.execute(
+                    sa_text(
+                        f"""
+                        UPDATE {TABLE_CLAIMS}
+                        SET parent_claim_id = CAST(:parent_id AS uuid), updated_at = now()
+                        WHERE id = CAST(:child_id AS uuid)
+                        """
+                    ),
+                    {"parent_id": parent_id, "child_id": child_id},
+                )
+
+        remap_summary = _apply_remaps(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            kind="claim",
+            remaps=sync.remaps,
+        )
+        _record_knowledge_audit(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            stats={"claim": sync.stats, "remap": remap_summary},
+        )
+
+        saved: list[dict] = []
+        for item in items:
+            db_id = sync.id_map.get(item["agent_id"])
+            if not db_id:
                 continue
-            block_id = getattr(span, "block_id", None)
-            chunk_id = block_to_chunk.get(block_id or "")
-            span_id = getattr(span, "span_id", None)
-            thesis_refs = _claim_thesis_refs_for_span(span_id, thesis_ref_index)
-            # 文書内一意キー（block_id:span_id）+ 解決できた claim object の ID を
-            # 併記する。旧キー（span_id / claim_{safe}）は残す（P4）。
-            legacy_keys = _claim_legacy_keys(
-                {"span_id": span_id, "block_id": block_id}
-            )
-            legacy_keys.update(
-                claim_ids_by_span_key.get(claim_span_key(block_id, span_id), [])
-            )
-            params = {
-                "document_id": _strip_nuls(document_id),
-                "chunk_id": chunk_id,
-                "source_scope": _json_dumps({
-                    "section_id": getattr(span, "section_id", None),
-                    "block_id": block_id,
-                    "span_id": span_id,
-                    "legacy_ids": sorted(legacy_keys),
-                    # span.reason は LLM 判定理由 (review note) であり PDF 原文根拠ではない。
-                    # source-backed 判定の根拠として evidence_text に保存しない (#257)。
-                    "qualification_reason": _strip_nuls(getattr(span, "reason", "") or ""),
-                }),
-                "claim_type": _normalize_claim_type(qualification),
-                "text": _strip_nuls(getattr(span, "text", "") or ""),
-                "normalized_text": _strip_nuls(getattr(span, "text", "") or ""),
-                "concepts": _json_dumps([]),
-                "equation": _json_dumps({}),
-                "support_status": "source_backed",
-                # PDF 原文根拠は EvidenceRegistry artifact に委任する (#257)。
-                # span.reason を evidence_text に保存すると LLM 判定理由が
-                # source-backed evidence として扱われるため空文字に変更。
-                "evidence_text": "",
-                "review_status": "teacher_review_required",
-                "thesis_refs": _json_dumps(thesis_refs) if thesis_refs else None,
-            }
-            row = session.execute(
-                sa_text(
-                    """
-                    INSERT INTO theory_claims (
-                        document_id, chunk_id, source_scope, claim_type, text,
-                        normalized_text, concepts, equation, support_status,
-                        evidence_text, review_status, thesis_refs
-                    )
-                    VALUES (
-                        :document_id, CAST(:chunk_id AS uuid), CAST(:source_scope AS jsonb),
-                        :claim_type, :text, :normalized_text, CAST(:concepts AS jsonb),
-                        CAST(:equation AS jsonb), :support_status, :evidence_text, :review_status,
-                        CAST(:thesis_refs AS jsonb)
-                    )
-                    RETURNING id
-                    """
-                ),
-                params,
-            ).fetchone()
             saved.append({
-                "claim_id": str(row[0]),
-                "span_id": span_id,
+                "claim_id": db_id,
+                "agent_claim_id": item["agent_id"],
+                "span_id": item.get("span_id"),
                 # 呼び出し側（orchestrator の claim_id_map）が _claim_legacy_keys で
                 # 文書内一意キーまで引けるように block_id も返す。
-                "block_id": block_id,
-                "chunk_id": chunk_id,
-                "text": getattr(span, "text", ""),
+                "block_id": item.get("block_id"),
+                "chunk_id": item.get("chunk_id"),
+                "text": item.get("text") or "",
+                "stable_key": item["stable_key"],
+                "legacy_ids": sorted(item.get("legacy_ids") or set()),
             })
         session.commit()
         logger.info(
-            "Persisted %d theory_claims for document %s", len(saved), document_id
+            "Synced theory_claims for document %s: %s (remap=%s)",
+            document_id, sync.stats, remap_summary.get("recorded", 0),
         )
         return saved
     except Exception:
@@ -822,10 +1354,96 @@ def persist_qualified_claims(
     finally:
         session.close()
 
-
 # ---------------------------------------------------------------------------
 # theory_components & links
 # ---------------------------------------------------------------------------
+
+
+_COMPONENT_CONTENT_COLUMNS = (
+    "course_id", "name", "component_type", "component_type_text", "summary",
+    "source_chunks", "inputs", "outputs", "preconditions", "constraints",
+    "invalid_conditions", "dependencies", "blackbox_policy", "validation_warnings",
+    "source_scope", "evidence_claims", "maturity_level", "maturity_source",
+    "cautions", "connectors", "internal_flow", "duplicate_candidates",
+    "thesis_context", "operation", "teaching_takeaway", "teaching_granularity",
+    "prerequisite_concepts", "assumptions", "approximations", "linked_claim_ids",
+    "linked_equation_ids", "linked_evidence_ids", "linked_derivation_ids",
+    "agent_payload",
+)
+
+#: 人間の確定列（一致時に触らない。§5.3）。
+_COMPONENT_PRESERVED_COLUMNS = ("review_status", "status", "teacher_notes", "created_by")
+
+#: 「人間が触った行」でのみ追加で保護する内容列（§5.3）。
+_COMPONENT_PROTECTED_WHEN_TOUCHED = ("name", "summary", "maturity_source")
+
+#: 列に昇格させた agent フィールド（``agent_payload`` からは除く。confidence 等の
+#: 数値は列にせず payload の中にだけ残す — 原則4）。
+_COMPONENT_PAYLOAD_EXCLUDED = frozenset({
+    "component_id", "component_type", "label", "summary", "inputs", "outputs",
+    "preconditions", "cautions", "dependencies", "internal_flow", "review_status",
+    "maturity_source", "source_scope", "operation", "teaching_takeaway",
+    "teaching_granularity", "prerequisite_concepts", "assumptions", "approximations",
+    "linked_claim_ids", "linked_equation_ids", "linked_evidence_ids",
+    "linked_derivation_ids",
+})
+
+
+def _component_human_touched(row: Any) -> bool:
+    """live component 行を人間が触ったか（§5.3 の判定）。"""
+    status = _text(row.get("status") if hasattr(row, "get") else "")
+    review_status = _text(row.get("review_status") if hasattr(row, "get") else "")
+    teacher_notes = _text(row.get("teacher_notes") if hasattr(row, "get") else "")
+    maturity_source = _text(row.get("maturity_source") if hasattr(row, "get") else "")
+    return bool(
+        (status and status != "candidate")
+        or (review_status and review_status != DEFAULT_REVIEW_STATUS)
+        or teacher_notes
+        or maturity_source == "teacher_reviewed"
+    )
+
+
+def _claim_block_index(claim_id_map: dict[str, str]) -> dict[str, list[str]]:
+    """``agent claim ID -> [block_id]``（claim_id_map の逆引き）。
+
+    ``claim_id_map`` は「突合キー → DB UUID」で、キーのうち ``"{block_id}:{span_id}"``
+    形のものだけが block を含む（:func:`claim_span_key`）。同じ UUID を指す他の
+    agent ID にその block を配ることで、component の stable_key 材料（出典 block 集合）を
+    **推測なしに**引く。
+    """
+    blocks_by_uuid: dict[str, set[str]] = {}
+    for key, db_id in (claim_id_map or {}).items():
+        if ":" not in str(key):
+            continue
+        block = str(key).split(":", 1)[0].strip()
+        if block:
+            blocks_by_uuid.setdefault(str(db_id), set()).add(block)
+    out: dict[str, list[str]] = {}
+    for key, db_id in (claim_id_map or {}).items():
+        blocks = blocks_by_uuid.get(str(db_id))
+        if blocks:
+            out[str(key)] = sorted(blocks)
+    return out
+
+
+def _component_block_ids(
+    data: dict,
+    claim_blocks: dict[str, list[str]],
+    evidence_blocks: dict[str, str],
+) -> list[str]:
+    """component の出典 block 集合（linked claim / evidence 由来。§5.1）。"""
+    blocks: set[str] = set()
+    evidence_refs = data.get("evidence_refs") if isinstance(data.get("evidence_refs"), dict) else {}
+    claim_ids = _id_list(
+        list(data.get("linked_claim_ids") or []) + list(evidence_refs.get("claim_ids") or [])
+    )
+    for claim_id in claim_ids:
+        blocks.update(claim_blocks.get(claim_id, ()))
+    for evidence_id in _id_list(data.get("linked_evidence_ids")):
+        block = evidence_blocks.get(evidence_id)
+        if block:
+            blocks.add(block)
+    return sorted(blocks)
 
 
 def persist_components(
@@ -834,22 +1452,34 @@ def persist_components(
     component_result,
     course_id: str | None = None,
     claim_id_map: dict[str, str] | None = None,
+    evidence_registry: Any = None,
+    run_id: str | None = None,
 ) -> dict[str, str]:
-    """ComponentAssemblyResult.components を `theory_components` に保存する。
+    """component を `theory_components` に **同期**する（KO3 / KO4 / P1-9）。
+
+    claims と同じく DELETE を発行せず、``stable_key`` 一致で同じ UUID を保つ。人間が
+    触った行（``status`` / ``review_status`` / ``teacher_notes`` / ``maturity_source``）
+    では ``name`` / ``summary`` も上書きしない（§5.3）。
+
+    ``theory_component_links`` だけは本 Phase の明示例外で、document 単位の
+    DELETE → live component 間の再作成を維持する（派生構造で人間の書き込み経路が無い）。
+
+    Args:
+        evidence_registry: EvidenceRegistryResult（省略可）。stable_key の材料になる
+            出典 block 集合の解決に使う。
+        run_id: この保存を出した run（``produced_by_run_id`` / supersede の刻印）。
 
     Returns:
         agent component_id → DB UUID のマッピング（dependency 解決用）。
     """
     components = list(getattr(component_result, "components", []) or [])
-    if not components:
-        return {}
 
     # deterministic_fallback component は通常成果物として永続化しない (#347)。
     # ExportValidationGate が persist 前にブロックするのが正規経路だが、
     # 旧 artifact からの resume 等でここまで届いた場合の最終ガード。
     # 全件 fallback の場合は hard fail にする: silently return すると
-    # 同 document の既存 theory_components（前回 run の通常成果物）が
-    # 削除も置換もされず「成功」扱いのまま downstream に見え続けるため、
+    # 同 document の live な theory_components（前回 run の通常成果物）が
+    # 同期も supersede もされず「成功」扱いのまま downstream に見え続けるため、
     # 例外で run を failed にして再処理が必要なことを明示する。
     fallback_components = [
         c for c in components
@@ -877,124 +1507,128 @@ def persist_components(
             fallback_reason,
         )
 
-    id_map: dict[str, str] = {}
     claim_id_map = claim_id_map or {}
-    session = _pg_session()
-    try:
-        # 同 document の既存 component と link を削除
-        session.execute(
-            sa_text("DELETE FROM theory_component_links WHERE document_id = :doc_id"),
-            {"doc_id": document_id},
-        )
-        session.execute(
-            sa_text("DELETE FROM theory_components WHERE document_id = :doc_id"),
-            {"doc_id": document_id},
-        )
-        for comp in components:
-            evidence_refs = dict(getattr(comp, "evidence_refs", {}) or {})
-            if isinstance(evidence_refs.get("claim_ids"), list):
-                evidence_refs["claim_ids"] = _remap_string_list(evidence_refs["claim_ids"], claim_id_map)
-            inputs = _remap_nested_claim_refs(getattr(comp, "inputs", []) or [], claim_id_map)
-            outputs = _remap_nested_claim_refs(getattr(comp, "outputs", []) or [], claim_id_map)
-            preconditions = _remap_nested_claim_refs(getattr(comp, "preconditions", []) or [], claim_id_map)
-            cautions = _remap_nested_claim_refs(getattr(comp, "cautions", []) or [], claim_id_map)
-            raw_component_type = _strip_nuls(getattr(comp, "component_type", "") or "")
-            # source_scope は agent 側（例: apparatus_components.py の
-            # ComponentRecord.source_scope）をベースに document_id / legacy_ids を
-            # 上書きマージする（figure_concept_linking_design.md F2）。かつては
-            # {"document_id", "legacy_ids"} で全上書きしており、apparatus 候補の
-            # figure_id / figure_key / match_status 等が DB 行から失われていた。
-            # legacy_ids=[component_id] の既存セマンティクスは
-            # _component_id_lookup_from_rows（context_lens.py）が依存するため不変。
-            source_scope = dict(getattr(comp, "source_scope", {}) or {})
-            source_scope["document_id"] = document_id
-            source_scope["legacy_ids"] = [getattr(comp, "component_id", "")]
-            thesis_context = _component_thesis_context(comp)
-            params = {
+    claim_blocks = _claim_block_index(claim_id_map)
+    evidence_blocks = _evidence_block_index(evidence_registry)
+
+    items: list[dict] = []
+    for comp in components:
+        data = _plain(comp)
+        if not isinstance(data, dict):
+            continue
+        agent_id = _text(data.get("component_id"))
+        evidence_refs = dict(data.get("evidence_refs") or {})
+        if isinstance(evidence_refs.get("claim_ids"), list):
+            evidence_refs["claim_ids"] = _remap_string_list(evidence_refs["claim_ids"], claim_id_map)
+        inputs = _remap_nested_claim_refs(data.get("inputs") or [], claim_id_map)
+        outputs = _remap_nested_claim_refs(data.get("outputs") or [], claim_id_map)
+        preconditions = _remap_nested_claim_refs(data.get("preconditions") or [], claim_id_map)
+        cautions = _remap_nested_claim_refs(data.get("cautions") or [], claim_id_map)
+        raw_component_type = _text(data.get("component_type"))
+        # source_scope は agent 側（例: apparatus_components.py の
+        # ComponentRecord.source_scope）をベースに document_id / legacy_ids を
+        # 上書きマージする（figure_concept_linking_design.md F2）。
+        # legacy_ids=[component_id] の既存セマンティクスは
+        # _component_id_lookup_from_rows（context_lens.py）が依存するため不変。
+        source_scope = dict(data.get("source_scope") or {})
+        source_scope["document_id"] = document_id
+        source_scope["legacy_ids"] = [agent_id]
+        thesis_context = _component_thesis_context(comp)
+        operation = _text(data.get("operation")) or _text(data.get("primary_operation"))
+        block_ids = _component_block_ids(data, claim_blocks, evidence_blocks)
+        agent_payload = {
+            key: value for key, value in data.items()
+            if key not in _COMPONENT_PAYLOAD_EXCLUDED
+        }
+        items.append({
+            "agent_id": agent_id,
+            "stable_key": ko_keys.component_stable_key(
+                document_id, _text(data.get("label")), operation, block_ids
+            ),
+            "values": {
                 "course_id": course_id,
-                "document_id": document_id,
-                "name": _strip_nuls(getattr(comp, "label", "") or "Untitled"),
+                "name": _text(data.get("label")) or "Untitled",
                 # migration 041 で CHECK に追加された装置系語彙のみ実値を保存し、
-                # それ以外（assembly の自由語彙）は従来どおり 'theory' に丸める
+                # それ以外（assembly の自由語彙）は語彙表に載る値へ丸める
                 # （実語彙は component_type_text が正）。
                 "component_type": (
                     raw_component_type
                     if raw_component_type in ("apparatus", "instrument", "part")
-                    else "theory"
+                    else normalize_component_type(raw_component_type)
                 ),
                 "component_type_text": raw_component_type,
-                "summary": _strip_nuls(getattr(comp, "summary", "") or ""),
+                "summary": str(data.get("summary") or ""),
                 "status": "candidate",
-                "source_chunks": _json_dumps(
-                    evidence_refs.get("source_chunks") or []
-                ),
-                "inputs": _json_dumps(inputs),
-                "outputs": _json_dumps(outputs),
-                "preconditions": _json_dumps(preconditions),
-                "constraints": _json_dumps([]),
-                "invalid_conditions": _json_dumps([]),
-                "dependencies": _json_dumps(getattr(comp, "dependencies", []) or []),
-                "blackbox_policy": _json_dumps({
+                "source_chunks": list(evidence_refs.get("source_chunks") or []),
+                "inputs": inputs,
+                "outputs": outputs,
+                "preconditions": preconditions,
+                "constraints": [],
+                "invalid_conditions": [],
+                "dependencies": list(data.get("dependencies") or []),
+                "blackbox_policy": {
                     "default_level": "summary",
                     "expand_if_unlearned": True,
-                }),
-                "validation_warnings": _json_dumps([]),
+                },
+                "validation_warnings": [],
                 "teacher_notes": "",
-                "source_scope": _json_dumps(source_scope),
-                "evidence_claims": _json_dumps(
-                    evidence_refs.get("claim_ids") or []
-                ),
+                "source_scope": source_scope,
+                "evidence_claims": list(evidence_refs.get("claim_ids") or []),
                 "maturity_level": "paper_claim",
-                "maturity_source": _strip_nuls(
-                    getattr(comp, "maturity_source", "") or "llm_proposed"
-                ),
-                "review_status": _strip_nuls(
-                    getattr(comp, "review_status", "") or "teacher_review_required"
-                ),
-                "cautions": _json_dumps(cautions),
-                "connectors": _json_dumps({}),
-                "internal_flow": _json_dumps(getattr(comp, "internal_flow", []) or []),
-                "duplicate_candidates": _json_dumps([]),
-                "thesis_context": _json_dumps(thesis_context) if thesis_context is not None else None,
-            }
-            row = session.execute(
-                sa_text(
-                    """
-                    INSERT INTO theory_components (
-                        course_id, document_id, name, component_type,
-                        component_type_text, summary, status,
-                        source_chunks, inputs, outputs, preconditions, constraints,
-                        invalid_conditions, dependencies, blackbox_policy,
-                        validation_warnings, teacher_notes, source_scope,
-                        evidence_claims, maturity_level, maturity_source,
-                        review_status, cautions, connectors, internal_flow,
-                        duplicate_candidates, thesis_context
-                    )
-                    VALUES (
-                        :course_id, :document_id, :name, :component_type,
-                        :component_type_text, :summary, :status,
-                        CAST(:source_chunks AS jsonb), CAST(:inputs AS jsonb),
-                        CAST(:outputs AS jsonb), CAST(:preconditions AS jsonb),
-                        CAST(:constraints AS jsonb), CAST(:invalid_conditions AS jsonb),
-                        CAST(:dependencies AS jsonb), CAST(:blackbox_policy AS jsonb),
-                        CAST(:validation_warnings AS jsonb), :teacher_notes,
-                        CAST(:source_scope AS jsonb), CAST(:evidence_claims AS jsonb),
-                        :maturity_level, :maturity_source, :review_status,
-                        CAST(:cautions AS jsonb), CAST(:connectors AS jsonb),
-                        CAST(:internal_flow AS jsonb), CAST(:duplicate_candidates AS jsonb),
-                        CAST(:thesis_context AS jsonb)
-                    )
-                    RETURNING id
-                    """
-                ),
-                params,
-            ).fetchone()
-            db_id = str(row[0])
-            id_map[getattr(comp, "component_id", db_id)] = db_id
+                "maturity_source": _text(data.get("maturity_source")) or "llm_proposed",
+                "review_status": _text(data.get("review_status")) or DEFAULT_REVIEW_STATUS,
+                "cautions": cautions,
+                "connectors": {},
+                "internal_flow": list(data.get("internal_flow") or []),
+                "duplicate_candidates": [],
+                "thesis_context": thesis_context if thesis_context is not None else None,
+                "operation": operation,
+                "teaching_takeaway": str(data.get("teaching_takeaway") or ""),
+                "teaching_granularity": dict(data.get("teaching_granularity") or {}),
+                "prerequisite_concepts": list(data.get("prerequisite_concepts") or []),
+                "assumptions": list(data.get("assumptions") or []),
+                "approximations": list(data.get("approximations") or []),
+                "linked_claim_ids": _id_list(data.get("linked_claim_ids")),
+                "linked_equation_ids": _id_list(data.get("linked_equation_ids")),
+                "linked_evidence_ids": _id_list(data.get("linked_evidence_ids")),
+                "linked_derivation_ids": _id_list(data.get("linked_derivation_ids")),
+                "agent_payload": agent_payload,
+            },
+        })
 
-        # 依存リンクを生成
+    final_keys = ko_keys.dedupe_stable_keys(
+        items,
+        key_of=lambda item: item["stable_key"],
+        agent_id_of=lambda item: item["agent_id"],
+    )
+    for item in items:
+        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+
+    session = _pg_session()
+    try:
+        sync = sync_live_rows(
+            session,
+            table=TABLE_COMPONENTS,
+            document_id=document_id,
+            run_id=run_id,
+            incoming=items,
+            content_columns=_COMPONENT_CONTENT_COLUMNS,
+            preserved_columns=_COMPONENT_PRESERVED_COLUMNS,
+            agent_id_column="agent_component_id",
+            human_touched=_component_human_touched,
+            protected_when_touched=_COMPONENT_PROTECTED_WHEN_TOUCHED,
+            touch_columns=("maturity_source",),
+        )
+        id_map = dict(sync.id_map)
+
+        # links は派生構造（人間の書き込み経路が無い）ため、document 単位の
+        # DELETE → live component 間の再作成を明示例外として維持する（§4.1）。
+        session.execute(
+            sa_text("DELETE FROM theory_component_links WHERE document_id = :doc_id"),
+            {"doc_id": document_id},
+        )
         for comp in components:
-            src_db = id_map.get(getattr(comp, "component_id", ""))
+            src_db = id_map.get(_text(getattr(comp, "component_id", "")))
             if not src_db:
                 continue
             for dep in getattr(comp, "dependencies", []) or []:
@@ -1008,7 +1642,7 @@ def persist_components(
                     else "depends_on"
                 )
                 for ref in refs:
-                    dst_db = id_map.get(ref)
+                    dst_db = id_map.get(_text(ref))
                     if not dst_db or dst_db == src_db:
                         continue
                     session.execute(
@@ -1017,12 +1651,13 @@ def persist_components(
                             INSERT INTO theory_component_links (
                                 course_id, document_id,
                                 source_component_id, target_component_id,
-                                link_type, status, validation_result
+                                link_type, status, validation_result, produced_by_run_id
                             )
                             VALUES (
                                 :course_id, :document_id,
                                 CAST(:src AS uuid), CAST(:dst AS uuid),
-                                :link_type, 'candidate', CAST(:validation AS jsonb)
+                                :link_type, 'candidate', CAST(:validation AS jsonb),
+                                CAST(:run_id AS uuid)
                             )
                             """
                         ),
@@ -1032,16 +1667,31 @@ def persist_components(
                             "src": src_db,
                             "dst": dst_db,
                             "link_type": link_type,
+                            "run_id": run_id,
                             "validation": _json_dumps({
                                 "agent_dependency_type": dep_type,
                                 "reason": dep.get("reason"),
                             }),
                         },
                     )
+
+        remap_summary = _apply_remaps(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            kind="component",
+            remaps=sync.remaps,
+        )
+        _record_knowledge_audit(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            stats={"component": sync.stats, "remap": remap_summary},
+        )
         session.commit()
         logger.info(
-            "Persisted %d theory_components and dependency links for document %s",
-            len(id_map), document_id,
+            "Synced theory_components for document %s: %s (remap=%s)",
+            document_id, sync.stats, remap_summary.get("recorded", 0),
         )
         return id_map
     except Exception:
@@ -1050,6 +1700,310 @@ def persist_components(
     finally:
         session.close()
 
+
+# ---------------------------------------------------------------------------
+# knowledge_equations / knowledge_evidence / knowledge_derivation_steps /
+# knowledge_symbols（KO4: artifact にしか無い知識を残さない）
+# ---------------------------------------------------------------------------
+
+
+_EQUATION_CONTENT_COLUMNS = (
+    "label", "latex", "plain_text", "raw_text", "block_id", "section_id", "page",
+    "equation_type", "semantic_status", "content_hash", "defined_symbols",
+    "used_symbols", "input_equation_ids", "output_equation_ids", "linked_claim_ids",
+    "source_evidence_ids", "needs_math_review", "agent_payload",
+)
+
+_EVIDENCE_CONTENT_COLUMNS = (
+    "block_id", "section_id", "page", "span_start", "span_end", "evidence_text",
+    "evidence_role", "parent_evidence_id", "public_export_policy", "agent_payload",
+)
+
+_DERIVATION_CONTENT_COLUMNS = (
+    "agent_derivation_id", "step_index", "operation", "operation_subtype", "chain_type",
+    "input_equation_ids", "output_equation_ids", "input_claim_ids", "output_claim_ids",
+    "required_claim_ids", "assumption_ids", "source_evidence_ids", "teaching_takeaway",
+    "agent_payload",
+)
+
+_SYMBOL_CONTENT_COLUMNS = (
+    "canonical_symbol", "notation_variants", "kind", "unit", "scope",
+    "definition_status", "defining_equation_ids", "used_in_equation_ids",
+    "source_evidence_ids", "definition_evidence_texts", "agent_payload",
+)
+
+#: 新 4 表の人間の確定列（§5.3）。
+_KNOWLEDGE_PRESERVED_COLUMNS = ("review_status",)
+
+
+def _equation_items(document_id: str, equations: Any, equation_keys: dict[str, str]) -> list[dict]:
+    items: list[dict] = []
+    for record in _equation_records(equations):
+        fields = _equation_fields(record)
+        agent_id = fields.get("equation_id") or ""
+        if not agent_id:
+            continue
+        items.append({
+            "agent_id": agent_id,
+            "stable_key": equation_keys.get(agent_id, ""),
+            "values": {
+                "label": fields.get("label") or "",
+                "latex": fields.get("latex") or "",
+                "plain_text": fields.get("plain_text") or "",
+                "raw_text": fields.get("raw_text") or "",
+                "block_id": fields.get("block_id") or "",
+                "section_id": fields.get("section_id") or "",
+                "page": fields.get("page"),
+                "equation_type": fields.get("equation_type") or "",
+                "semantic_status": fields.get("semantic_status") or "",
+                "content_hash": fields.get("content_hash") or "",
+                "defined_symbols": fields.get("defined_symbols") or [],
+                "used_symbols": fields.get("used_symbols") or [],
+                "input_equation_ids": fields.get("input_equation_ids") or [],
+                "output_equation_ids": fields.get("output_equation_ids") or [],
+                "linked_claim_ids": fields.get("linked_claim_ids") or [],
+                "source_evidence_ids": fields.get("source_evidence_ids") or [],
+                "needs_math_review": bool(fields.get("needs_math_review")),
+                "agent_payload": fields.get("payload") or {},
+                "review_status": DEFAULT_REVIEW_STATUS,
+            },
+        })
+    return items
+
+
+def _evidence_items(document_id: str, evidence_registry: Any) -> list[dict]:
+    items: list[dict] = []
+    for record in (getattr(evidence_registry, "records", None) or []):
+        data = _plain(record)
+        if not isinstance(data, dict):
+            continue
+        agent_id = _text(data.get("evidence_id"))
+        if not agent_id:
+            continue
+        source = data.get("source") or {}
+        block_id = _text(source.get("block_id"))
+        evidence_text = str(data.get("evidence_text") or "")
+        items.append({
+            "agent_id": agent_id,
+            "stable_key": ko_keys.evidence_stable_key(document_id, block_id, evidence_text),
+            "values": {
+                "block_id": block_id,
+                "section_id": _text(source.get("section_id")),
+                "page": source.get("page"),
+                "span_start": source.get("span_start") or 0,
+                "span_end": source.get("span_end") or 0,
+                "evidence_text": evidence_text,
+                "evidence_role": _text(data.get("evidence_role")) or "source_quote",
+                "parent_evidence_id": _text(data.get("parent_evidence_id")),
+                "public_export_policy": _text(data.get("public_export_policy")) or "location_only",
+                "agent_payload": data,
+                "review_status": DEFAULT_REVIEW_STATUS,
+            },
+        })
+    return items
+
+
+def _derivation_items(
+    document_id: str, derivations: Any, equation_keys: dict[str, str]
+) -> list[dict]:
+    items: list[dict] = []
+    for chain in (getattr(derivations, "chains", None) or []):
+        data = _plain(chain)
+        if not isinstance(data, dict):
+            continue
+        derivation_id = _text(data.get("derivation_id"))
+        chain_type = _text(data.get("chain_type")) or "equation_chain"
+        steps = list(data.get("steps") or [])
+        if not steps:
+            # system-level derivation（steps を持たない操作）も 1 行として残す
+            # （artifact にしか無い知識を作らない = KO4）。
+            steps = [{
+                "step_id": _text(data.get("system_id")) or derivation_id,
+                "operation": _text(data.get("operation")) or _text(data.get("operation_family")),
+                "operation_subtype": data.get("operation_subtype"),
+                "input_equation_ids": data.get("input_equation_ids") or [],
+                "output_equation_ids": data.get("output_equation_ids") or [],
+                "input_claim_ids": data.get("input_claim_ids") or [],
+                "output_claim_ids": data.get("output_claim_ids") or [],
+                "assumption_ids": data.get("assumption_ids") or [],
+                "source_evidence_ids": data.get("source_evidence_ids") or [],
+            }]
+        for index, step in enumerate(steps):
+            if not isinstance(step, dict):
+                continue
+            agent_step_id = _text(step.get("step_id"))
+            if not agent_step_id:
+                continue
+            operation = _text(step.get("operation"))
+            input_keys = _resolved_equation_keys(step.get("input_equation_ids"), equation_keys)
+            output_keys = _resolved_equation_keys(step.get("output_equation_ids"), equation_keys)
+            items.append({
+                "agent_id": agent_step_id,
+                "stable_key": ko_keys.derivation_step_stable_key(
+                    document_id, operation, input_keys, output_keys
+                ),
+                "values": {
+                    "agent_derivation_id": derivation_id,
+                    "step_index": index,
+                    "operation": operation,
+                    "operation_subtype": _text(step.get("operation_subtype")),
+                    "chain_type": chain_type,
+                    "input_equation_ids": _id_list(step.get("input_equation_ids")),
+                    "output_equation_ids": _id_list(step.get("output_equation_ids")),
+                    "input_claim_ids": _id_list(step.get("input_claim_ids")),
+                    "output_claim_ids": _id_list(step.get("output_claim_ids")),
+                    "required_claim_ids": _id_list(step.get("required_claim_ids")),
+                    "assumption_ids": _id_list(step.get("assumption_ids")),
+                    "source_evidence_ids": _id_list(step.get("source_evidence_ids")),
+                    "teaching_takeaway": str(data.get("teaching_takeaway") or ""),
+                    "agent_payload": step,
+                    "review_status": DEFAULT_REVIEW_STATUS,
+                },
+            })
+    return items
+
+
+def _symbol_items(
+    document_id: str, symbol_registry: Any, equation_keys: dict[str, str]
+) -> list[dict]:
+    items: list[dict] = []
+    for record in (getattr(symbol_registry, "records", None) or []):
+        data = _plain(record)
+        if not isinstance(data, dict):
+            continue
+        agent_id = _text(data.get("symbol_id"))
+        if not agent_id:
+            continue
+        canonical = _text(data.get("canonical_symbol"))
+        scope = _text(data.get("scope")) or "equation_local"
+        defining_keys = _resolved_equation_keys(data.get("defining_equation_ids"), equation_keys)
+        items.append({
+            "agent_id": agent_id,
+            "stable_key": ko_keys.symbol_stable_key(
+                document_id, canonical, scope, defining_keys
+            ),
+            "values": {
+                "canonical_symbol": canonical,
+                "notation_variants": _id_list(data.get("notation_variants")),
+                "kind": _text(data.get("kind")) or "unknown",
+                # 単位は「書かれていない」を空文字で保つ（捏造しない・列は NOT NULL）。
+                "unit": _text(data.get("unit")),
+                "scope": scope,
+                "definition_status": _text(data.get("definition_status")) or "unknown",
+                "defining_equation_ids": _id_list(data.get("defining_equation_ids")),
+                "used_in_equation_ids": _id_list(data.get("used_in_equation_ids")),
+                "source_evidence_ids": _id_list(data.get("source_evidence_ids")),
+                "definition_evidence_texts": list(data.get("definition_evidence_texts") or []),
+                "agent_payload": data,
+                "review_status": DEFAULT_REVIEW_STATUS,
+            },
+        })
+    return items
+
+
+def persist_knowledge_objects(
+    *,
+    document_id: str,
+    run_id: str | None = None,
+    equations: Any = None,
+    evidence_registry: Any = None,
+    derivations: Any = None,
+    symbol_registry: Any = None,
+) -> dict:
+    """equation / evidence / derivation step / symbol を専用テーブルへ同期する（KO4）。
+
+    claims / components と同じ規則（stable_key 一致 = 同 UUID 更新 / 不一致 =
+    supersede 刻印 / DELETE なし）。式の stable_key を先に確定し、derivation step と
+    symbol のキー材料に使う（解決できない agent ID はそのまま材料にする）。
+
+    種別ごとに素材（``ctx.equations`` 等）が ``None`` なら **その種別だけ**スキップする
+    （素材が無いことを「全件消えた」と解釈しない）。
+
+    Returns:
+        ``{種別: {"updated", "inserted", "superseded"}}`` + ``{"skipped": [...]}``。
+    """
+    equation_keys = _equation_stable_key_map(document_id, equations)
+    plans: list[tuple[str, str, str, tuple[str, ...], list[dict]]] = []
+    skipped: list[str] = []
+
+    if equations is not None:
+        plans.append((
+            "equations", TABLE_EQUATIONS, "agent_equation_id",
+            _EQUATION_CONTENT_COLUMNS, _equation_items(document_id, equations, equation_keys),
+        ))
+    else:
+        skipped.append("equations")
+    if evidence_registry is not None:
+        plans.append((
+            "evidence", TABLE_EVIDENCE, "agent_evidence_id",
+            _EVIDENCE_CONTENT_COLUMNS, _evidence_items(document_id, evidence_registry),
+        ))
+    else:
+        skipped.append("evidence")
+    if derivations is not None:
+        plans.append((
+            "derivation_steps", TABLE_DERIVATION_STEPS, "agent_step_id",
+            _DERIVATION_CONTENT_COLUMNS,
+            _derivation_items(document_id, derivations, equation_keys),
+        ))
+    else:
+        skipped.append("derivation_steps")
+    if symbol_registry is not None:
+        plans.append((
+            "symbols", TABLE_SYMBOLS, "agent_symbol_id",
+            _SYMBOL_CONTENT_COLUMNS,
+            _symbol_items(document_id, symbol_registry, equation_keys),
+        ))
+    else:
+        skipped.append("symbols")
+
+    summary: dict[str, Any] = {"skipped": skipped}
+    if not plans:
+        return summary
+
+    session = _pg_session()
+    try:
+        for kind, table, agent_id_column, content_columns, items in plans:
+            final_keys = ko_keys.dedupe_stable_keys(
+                items,
+                key_of=lambda item: item["stable_key"],
+                agent_id_of=lambda item: item["agent_id"],
+            )
+            for item in items:
+                item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+            sync = sync_live_rows(
+                session,
+                table=table,
+                document_id=document_id,
+                run_id=run_id,
+                incoming=items,
+                content_columns=content_columns,
+                preserved_columns=_KNOWLEDGE_PRESERVED_COLUMNS,
+                agent_id_column=agent_id_column,
+            )
+            summary[kind] = dict(sync.stats)
+            remap_kind = "derivation_step" if kind == "derivation_steps" else kind.rstrip("s")
+            remap_summary = _apply_remaps(
+                session,
+                document_id=document_id,
+                run_id=run_id,
+                kind=remap_kind,
+                remaps=sync.remaps,
+            )
+            summary[f"{kind}_remap"] = remap_summary.get("recorded", 0)
+        _record_knowledge_audit(
+            session, document_id=document_id, run_id=run_id, stats=summary,
+        )
+        session.commit()
+        logger.info(
+            "Synced knowledge objects for document %s: %s", document_id, summary
+        )
+        return summary
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 # ---------------------------------------------------------------------------
 # theory_component_graphs
@@ -1170,6 +2124,7 @@ def persist_component_graph(
     component_graph_result=None,
     claim_id_map: dict[str, str] | None = None,
     narrative_result=None,
+    run_id: str | None = None,
 ) -> str | None:
     """document scope の component graph を `theory_component_graphs` に保存。
 
@@ -1326,17 +2281,20 @@ def persist_component_graph(
             sa_text(
                 """
                 INSERT INTO theory_component_graphs (
-                    course_id, document_id, scope, graph_json, validation_results
+                    course_id, document_id, scope, graph_json, validation_results,
+                    produced_by_run_id
                 )
                 VALUES (
                     :course_id, :document_id, CAST(:scope AS jsonb),
-                    CAST(:graph_json AS jsonb), CAST(:validation AS jsonb)
+                    CAST(:graph_json AS jsonb), CAST(:validation AS jsonb),
+                    CAST(:run_id AS uuid)
                 )
                 ON CONFLICT (document_id) DO UPDATE SET
                     course_id = EXCLUDED.course_id,
                     scope = EXCLUDED.scope,
                     graph_json = EXCLUDED.graph_json,
                     validation_results = EXCLUDED.validation_results,
+                    produced_by_run_id = EXCLUDED.produced_by_run_id,
                     updated_at = now()
                 RETURNING id
                 """
@@ -1344,6 +2302,7 @@ def persist_component_graph(
             {
                 "course_id": course_id,
                 "document_id": document_id,
+                "run_id": run_id,
                 "scope": _json_dumps({"level": "paper"}),
                 "graph_json": _json_dumps(graph),
                 "validation": _json_dumps([]),
@@ -1470,7 +2429,14 @@ def upsert_analysis_run(
     保存する。更新時は ``options`` が明示的に渡されたときのみ上書きし、
     ``None`` のときは既存値を保持する（呼び出し側が毎回 options を意識せず
     呼べるようにするため）。
+
+    ``stage_outputs`` の ``_artifacts`` は **stage_outputs に書かず**、生成ログ表
+    ``document_analysis_artifacts`` へ stage ごと upsert する（§6 / KO6）。読み手の
+    契約（``document_run_artifacts()``）は getter 側の hydrate で不変に保つ。
     """
+    payload = dict(stage_outputs or {})
+    artifacts = payload.pop(ARTIFACTS_KEY, None)
+    stage_outputs = payload
     session = _pg_session()
     try:
         if run_id is None:
@@ -1501,8 +2467,10 @@ def upsert_analysis_run(
                     "options": _json_dumps(options or {}),
                 },
             ).fetchone()
+            new_run_id = str(row[0])
+            _upsert_run_artifacts(session, new_run_id, artifacts)
             session.commit()
-            return str(row[0])
+            return new_run_id
         else:
             session.execute(
                 sa_text(
@@ -1529,6 +2497,7 @@ def upsert_analysis_run(
                     "options": _json_dumps(options or {}),
                 },
             )
+            _upsert_run_artifacts(session, run_id, artifacts)
             session.commit()
             return run_id
     except Exception:
@@ -1553,7 +2522,7 @@ def get_latest_analysis_run(
                        current_stage, error_message, stage_outputs, started_at,
                        completed_at, created_at, updated_at, options
                 FROM document_analysis_runs
-                WHERE document_id = :document_id
+                WHERE document_id = CAST(NULLIF(:document_id, '') AS uuid)
                   AND (:material_id IS NULL OR material_id = :material_id)
                 ORDER BY created_at DESC
                 LIMIT 1
@@ -1561,7 +2530,7 @@ def get_latest_analysis_run(
             ),
             {"document_id": document_id, "material_id": material_id},
         ).mappings().fetchone()
-        return dict(row) if row else None
+        return _hydrate_run_artifacts(session, dict(row) if row else None)
     finally:
         session.close()
 
@@ -1599,7 +2568,7 @@ def get_analysis_run(*, run_id: str) -> dict | None:
             ),
             {"run_id": run_id},
         ).mappings().fetchone()
-        return dict(row) if row else None
+        return _hydrate_run_artifacts(session, dict(row) if row else None)
     finally:
         session.close()
 
@@ -1624,7 +2593,7 @@ def get_active_analysis_run(*, document_id: str) -> dict | None:
             ),
             {"document_id": document_id},
         ).mappings().fetchone()
-        return dict(row) if row else None
+        return _hydrate_run_artifacts(session, dict(row) if row else None)
     finally:
         session.close()
 
@@ -1675,14 +2644,14 @@ _ARTIFACT_RUN_SELECT_SQL = {
                        COALESCE(
                            d.active_analysis_run_id,
                            (SELECT r2.id FROM document_analysis_runs r2
-                            WHERE r2.document_id = d.id::text AND r2.status = 'completed'
+                            WHERE r2.document_id = d.id AND r2.status = 'completed'
                             ORDER BY r2.completed_at DESC NULLS LAST,
                                      r2.created_at DESC, r2.id DESC
                             LIMIT 1)
                        )""",
     "latest": """
                        (SELECT r2.id FROM document_analysis_runs r2
-                        WHERE r2.document_id = d.id::text
+                        WHERE r2.document_id = d.id
                         ORDER BY r2.created_at DESC, r2.id DESC
                         LIMIT 1)""",
 }
@@ -1751,6 +2720,21 @@ def resolve_artifact_runs(
             # 短い行（既存テストの fake session 等）でも壊れないように防御的に読む。
             "cartridge_id": str(row[4] or "") if len(row) > 4 else "",
         }
+    # artifact は生成ログ表が正本（§6 / KO6）。旧 blob が残る run では blob を
+    # 下敷きにして表の値が勝つ（読み手の契約は不変）。
+    stored = load_run_artifacts(
+        session, [entry["run_id"] for entry in out.values() if entry.get("run_id")]
+    )
+    for entry in out.values():
+        artifacts = stored.get(str(entry.get("run_id") or ""))
+        if not artifacts:
+            continue
+        stage_outputs = dict(entry.get("stage_outputs") or {})
+        blob = stage_outputs.get(ARTIFACTS_KEY)
+        stage_outputs[ARTIFACTS_KEY] = {
+            **(blob if isinstance(blob, dict) else {}), **artifacts,
+        }
+        entry["stage_outputs"] = stage_outputs
     return out
 
 
@@ -1879,13 +2863,11 @@ def update_revision_status(
 ) -> None:
     """Update a revision run's revision_status (and optionally run status / artifacts).
 
-    Artifact merge is **deep at the ``_artifacts`` level** (#410 P0): PostgreSQL's
-    JSONB ``||`` only replaces top-level keys, so a shallow merge would wipe every
-    previously-stored artifact (baseline_inventory / audit_results / candidate / …)
-    each time a new stage writes ``{"_artifacts": {...}}``. We therefore merge the
-    incoming ``_artifacts`` into the existing ``_artifacts`` (preserving sibling
-    artifact keys) and shallow-merge any other top-level keys — all in a single
-    atomic SQL statement so concurrent stage writes cannot lose keys.
+    artifact は stage_outputs の JSONB blob ではなく生成ログ表
+    ``document_analysis_artifacts`` に stage ごと upsert する（§6 / KO6）。1 run ×
+    1 ステージ = 1 行なので、かつての ``jsonb_set`` による deep merge
+    （#410 P0: 浅マージだと兄弟 artifact が消える問題への対処）は不要になった。
+    stage_outputs 側は従来どおり top-level の浅マージのみ。
     """
     payload = dict(stage_outputs or {})
     artifacts_delta = payload.pop(ARTIFACTS_KEY, None)
@@ -1893,18 +2875,14 @@ def update_revision_status(
     try:
         session.execute(
             sa_text(
-                f"""
+                """
                 UPDATE document_analysis_runs SET
                     revision_status = :revision_status,
                     status = COALESCE(:status, status),
                     current_stage = COALESCE(:current_stage, current_stage),
                     error_message = COALESCE(:error_message, error_message),
-                    stage_outputs = jsonb_set(
-                        COALESCE(stage_outputs, '{{}}'::jsonb) || CAST(:other AS jsonb),
-                        '{{{ARTIFACTS_KEY}}}',
-                        COALESCE(stage_outputs->'{ARTIFACTS_KEY}', '{{}}'::jsonb)
-                            || CAST(:artifacts AS jsonb)
-                    ),
+                    stage_outputs = COALESCE(stage_outputs, '{}'::jsonb)
+                        || CAST(:other AS jsonb),
                     started_at = CASE WHEN :status = 'running' AND started_at IS NULL
                                       THEN now() ELSE started_at END,
                     completed_at = CASE WHEN :status IN ('completed', 'failed')
@@ -1921,9 +2899,9 @@ def update_revision_status(
                 "current_stage": current_stage,
                 "error_message": error_message,
                 "other": _json_dumps(payload),
-                "artifacts": _json_dumps(artifacts_delta or {}),
             },
         )
+        _upsert_run_artifacts(session, run_id, artifacts_delta)
         session.commit()
     except Exception:
         session.rollback()
@@ -2069,7 +3047,7 @@ def get_run_lineage(*, document_id: str) -> dict:
                        parent_revision_id::text, revision_status,
                        current_stage, created_by::text, created_at, completed_at
                 FROM document_analysis_runs
-                WHERE document_id = :document_id
+                WHERE document_id = CAST(NULLIF(:document_id, '') AS uuid)
                 ORDER BY created_at ASC, id ASC
                 """
             ),
@@ -2209,8 +3187,8 @@ def load_revision_projection_overlay(*, document_id: str) -> dict:
         session.close()
 
 
-# Allowed theory_claims.claim_type values (migration 013 CHECK). Candidate
-# claim types outside this set fall back to the generic diagnostic_claim.
+# Allowed theory_claims.claim_type values（旧 CHECK。現在の語彙の正本は
+# ``core/schema.py::CLAIM_TYPES`` で、丸め先は :func:`normalize_claim_type`）。
 _THEORY_CLAIM_TYPES = {
     "definition", "assumption", "approximation", "equation", "relation",
     "derivation_step", "observable_definition", "correction", "uncertainty",
@@ -2220,146 +3198,213 @@ _THEORY_CLAIM_TYPES = {
 }
 
 
-def _rebuild_theory_claims_in_session(session, document_id: str, claims: list) -> dict[str, str]:
-    """Rebuild theory_claims from candidate claim_object_builder claims (#410 P1-5).
+def _rebuild_theory_claims_in_session(
+    session, document_id: str, claims: list, run_id: str | None = None
+) -> dict[str, str]:
+    """候補 revision の claim_object_builder claims を theory_claims へ **同期**する。
 
-    Operates on the caller's transaction (no commit). Returns agent claim_id → db id.
+    呼び出し側のトランザクションで動く（commit しない）。パイプライン経路
+    （:func:`persist_qualified_claims`）と同じ ``stable_key`` 規則で live 行と突合し、
+    **DELETE は発行しない**（accept のたびに UUID が変わると C層の承認・D層の台帳が
+    宙に浮くため。KO3）。
+
+    Returns: agent claim_id → db id。
     """
-    session.execute(
-        sa_text("DELETE FROM theory_claims WHERE document_id = :doc"),
-        {"doc": document_id},
-    )
-    id_map: dict[str, str] = {}
+    items: list[dict] = []
     for c in claims or []:
         if not isinstance(c, dict):
             continue
-        agent_id = str(c.get("claim_id") or "")
-        ctype = c.get("claim_type") or "diagnostic_claim"
-        if ctype not in _THEORY_CLAIM_TYPES:
-            ctype = "diagnostic_claim"
-        equation_ids = [str(v) for v in (c.get("equation_ids") or []) if v]
+        agent_id = _text(c.get("claim_id"))
+        raw_type = _text(c.get("claim_type"))
+        equation_ids = _id_list(c.get("equation_ids"))
         source_scope = dict(c.get("source_scope") or {"section_id": c.get("section_id")})
-        legacy_ids = [str(v) for v in (source_scope.get("legacy_ids") or []) if v]
+        legacy_ids = _id_list(source_scope.get("legacy_ids"))
         if agent_id and agent_id not in legacy_ids:
             legacy_ids.append(agent_id)
         source_scope["legacy_ids"] = legacy_ids
-        row = session.execute(
-            sa_text(
-                """
-                INSERT INTO theory_claims (
-                    document_id, source_scope, claim_type, text, normalized_text,
-                    concepts, equation, support_status, evidence_text, review_status
-                )
-                VALUES (
-                    :document_id, CAST(:source_scope AS jsonb), :claim_type, :text,
-                    :normalized_text, CAST(:concepts AS jsonb), CAST(:equation AS jsonb),
-                    :support_status, :evidence_text, :review_status
-                )
-                RETURNING id
-                """
-            ),
-            {
-                "document_id": _strip_nuls(document_id),
-                "source_scope": _json_dumps(source_scope),
-                "claim_type": ctype,
-                "text": _strip_nuls(c.get("text") or ""),
-                "normalized_text": _strip_nuls(c.get("normalized_text") or c.get("text") or ""),
-                "concepts": _json_dumps(c.get("concepts") or []),
-                "equation": _json_dumps({"equation_ids": equation_ids} if equation_ids else {}),
-                "support_status": c.get("support_status") or "source_backed",
+        text_value = str(c.get("text") or "")
+        normalized = str(c.get("normalized_text") or "") or text_value
+        block_ids = _id_list([source_scope.get("block_id")])
+        parent_agent_id = _text(c.get("parent_claim_id"))
+        synthesis_method = _text(c.get("synthesis_method"))
+        if parent_agent_id:
+            origin = CLAIM_ORIGIN_ATOMIC_REWRITE
+        elif synthesis_method or agent_id.startswith("synth_claim_"):
+            origin = CLAIM_ORIGIN_EQUATION_SYNTHESIS
+        else:
+            origin = CLAIM_ORIGIN_CLAIM_OBJECT
+        items.append({
+            "agent_id": agent_id,
+            "stable_key": ko_keys.claim_stable_key(document_id, normalized, block_ids),
+            "parent_agent_id": parent_agent_id,
+            "values": {
+                "source_scope": source_scope,
+                "claim_type": normalize_claim_type(raw_type),
+                "claim_type_text": raw_type,
+                "text": text_value,
+                "normalized_text": normalized,
+                "concepts": _plain(c.get("concepts") or []),
+                "equation": {"equation_ids": equation_ids} if equation_ids else {},
+                "support_status": _text(c.get("support_status")) or "source_backed",
                 "evidence_text": "",
-                "review_status": c.get("review_status") or "teacher_review_required",
+                "origin": origin,
+                "claim_tier": (
+                    _text(c.get("claim_tier"))
+                    if _text(c.get("claim_tier")) in CLAIM_TIERS else ""
+                ),
+                "content_hash": _text(c.get("content_hash")),
+                "review_status": _text(c.get("review_status")) or DEFAULT_REVIEW_STATUS,
             },
-        ).fetchone()
-        if agent_id:
-            id_map[agent_id] = str(row[0])
-    return id_map
+        })
+
+    final_keys = ko_keys.dedupe_stable_keys(
+        items,
+        key_of=lambda item: item["stable_key"],
+        agent_id_of=lambda item: item["agent_id"],
+    )
+    for item in items:
+        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+
+    sync = sync_live_rows(
+        session,
+        table=TABLE_CLAIMS,
+        document_id=document_id,
+        run_id=run_id,
+        incoming=items,
+        content_columns=_CLAIM_CONTENT_COLUMNS,
+        preserved_columns=_CLAIM_PRESERVED_COLUMNS,
+        agent_id_column="agent_claim_id",
+        column_casts=_CLAIM_COLUMN_CASTS,
+    )
+    for item in items:
+        parent_agent_id = item.get("parent_agent_id") or ""
+        child_id = sync.id_map.get(item["agent_id"])
+        parent_id = sync.id_map.get(parent_agent_id) if parent_agent_id else None
+        if child_id and parent_id and child_id != parent_id:
+            session.execute(
+                sa_text(
+                    f"""
+                    UPDATE {TABLE_CLAIMS}
+                    SET parent_claim_id = CAST(:parent_id AS uuid), updated_at = now()
+                    WHERE id = CAST(:child_id AS uuid)
+                    """
+                ),
+                {"parent_id": parent_id, "child_id": child_id},
+            )
+    _apply_remaps(
+        session, document_id=document_id, run_id=run_id, kind="claim", remaps=sync.remaps,
+    )
+    return dict(sync.id_map)
 
 
 def _rebuild_theory_components_in_session(
-    session, document_id: str, components: list, claim_id_map: dict[str, str]
+    session,
+    document_id: str,
+    components: list,
+    claim_id_map: dict[str, str],
+    run_id: str | None = None,
 ) -> dict[str, str]:
-    """Rebuild theory_components + theory_component_links from candidate components."""
+    """候補 revision の components を theory_components へ同期し、links を張り直す。
+
+    claims と同じく DELETE を発行しない（links だけが明示例外。§4.1）。
+    """
+    claim_id_map = claim_id_map or {}
+    claim_blocks = _claim_block_index(claim_id_map)
+    items: list[dict] = []
+    for comp in components or []:
+        if not isinstance(comp, dict):
+            continue
+        agent_id = _text(comp.get("component_id"))
+        evidence_refs = comp.get("evidence_refs") if isinstance(comp.get("evidence_refs"), dict) else {}
+        linked_claim_ids = _id_list(comp.get("linked_claim_ids"))
+        evidence_claims_agent = _id_list(
+            linked_claim_ids + _id_list(evidence_refs.get("claim_ids"))
+        )
+        evidence_claims_db = [claim_id_map.get(a, a) for a in evidence_claims_agent]
+        operation = _text(comp.get("operation")) or _text(comp.get("primary_operation"))
+        block_ids = _component_block_ids(comp, claim_blocks, {})
+        raw_component_type = _text(comp.get("component_type")) or _text(comp.get("responsibility_type"))
+        agent_payload = {
+            key: value for key, value in comp.items()
+            if key not in _COMPONENT_PAYLOAD_EXCLUDED
+        }
+        items.append({
+            "agent_id": agent_id,
+            "stable_key": ko_keys.component_stable_key(
+                document_id, _text(comp.get("label") or comp.get("name")), operation, block_ids
+            ),
+            "values": {
+                "course_id": None,
+                "name": _text(comp.get("label") or comp.get("name")) or "Untitled",
+                "component_type": normalize_component_type(raw_component_type),
+                "component_type_text": raw_component_type,
+                "summary": str(comp.get("summary") or ""),
+                "status": "candidate",
+                "source_chunks": list(evidence_refs.get("source_chunks") or []),
+                "inputs": list(comp.get("inputs") or []),
+                "outputs": list(comp.get("outputs") or []),
+                "preconditions": list(comp.get("preconditions") or []),
+                "constraints": list(comp.get("constraints") or []),
+                "invalid_conditions": list(comp.get("invalid_conditions") or []),
+                "dependencies": list(comp.get("dependencies") or []),
+                "blackbox_policy": {"default_level": "summary", "expand_if_unlearned": True},
+                "validation_warnings": [],
+                "teacher_notes": str(comp.get("teaching_takeaway") or ""),
+                "source_scope": {"document_id": document_id, "legacy_ids": [agent_id]},
+                "evidence_claims": evidence_claims_db,
+                "maturity_level": _text(comp.get("maturity_level")) or "paper_claim",
+                "maturity_source": _text(comp.get("maturity_source")) or "llm_proposed",
+                "review_status": _text(comp.get("review_status")) or DEFAULT_REVIEW_STATUS,
+                "cautions": list(comp.get("cautions") or []),
+                "connectors": dict(comp.get("connectors") or {}),
+                "internal_flow": list(comp.get("internal_flow") or []),
+                "duplicate_candidates": [],
+                "operation": operation,
+                "teaching_takeaway": str(comp.get("teaching_takeaway") or ""),
+                "teaching_granularity": dict(comp.get("teaching_granularity") or {}),
+                "prerequisite_concepts": list(comp.get("prerequisite_concepts") or []),
+                "assumptions": list(comp.get("assumptions") or []),
+                "approximations": list(comp.get("approximations") or []),
+                "linked_claim_ids": linked_claim_ids,
+                "linked_equation_ids": _id_list(comp.get("linked_equation_ids")),
+                "linked_evidence_ids": _id_list(comp.get("linked_evidence_ids")),
+                "linked_derivation_ids": _id_list(comp.get("linked_derivation_ids")),
+                "agent_payload": agent_payload,
+            },
+        })
+
+    final_keys = ko_keys.dedupe_stable_keys(
+        items,
+        key_of=lambda item: item["stable_key"],
+        agent_id_of=lambda item: item["agent_id"],
+    )
+    for item in items:
+        item["stable_key"] = final_keys.get(item["agent_id"], item["stable_key"])
+
+    sync = sync_live_rows(
+        session,
+        table=TABLE_COMPONENTS,
+        document_id=document_id,
+        run_id=run_id,
+        incoming=items,
+        content_columns=_COMPONENT_CONTENT_COLUMNS,
+        preserved_columns=_COMPONENT_PRESERVED_COLUMNS,
+        agent_id_column="agent_component_id",
+        human_touched=_component_human_touched,
+        protected_when_touched=_COMPONENT_PROTECTED_WHEN_TOUCHED,
+        touch_columns=("maturity_source",),
+    )
+    id_map = dict(sync.id_map)
+
+    # Dependency links（派生構造の明示例外: document 単位で張り直す）。
     session.execute(
         sa_text("DELETE FROM theory_component_links WHERE document_id = :doc"),
         {"doc": document_id},
     )
-    session.execute(
-        sa_text("DELETE FROM theory_components WHERE document_id = :doc"),
-        {"doc": document_id},
-    )
-    claim_id_map = claim_id_map or {}
-    id_map: dict[str, str] = {}
     for comp in components or []:
         if not isinstance(comp, dict):
             continue
-        agent_id = str(comp.get("component_id") or "")
-        evidence_refs = comp.get("evidence_refs") if isinstance(comp.get("evidence_refs"), dict) else {}
-        linked_claim_ids = [str(v) for v in (comp.get("linked_claim_ids") or []) if v]
-        evidence_claims_agent = list(dict.fromkeys(
-            linked_claim_ids + [str(v) for v in (evidence_refs.get("claim_ids") or []) if v]
-        ))
-        evidence_claims_db = [claim_id_map.get(a, a) for a in evidence_claims_agent]
-        row = session.execute(
-            sa_text(
-                """
-                INSERT INTO theory_components (
-                    course_id, document_id, name, component_type, component_type_text,
-                    summary, status, source_chunks, inputs, outputs, preconditions,
-                    constraints, invalid_conditions, dependencies, blackbox_policy,
-                    validation_warnings, teacher_notes, source_scope, evidence_claims,
-                    maturity_level, maturity_source, review_status, cautions,
-                    connectors, internal_flow, duplicate_candidates
-                )
-                VALUES (
-                    NULL, :document_id, :name, 'theory', :component_type_text,
-                    :summary, 'candidate', CAST(:source_chunks AS jsonb),
-                    CAST(:inputs AS jsonb), CAST(:outputs AS jsonb),
-                    CAST(:preconditions AS jsonb), CAST(:constraints AS jsonb),
-                    CAST(:invalid_conditions AS jsonb), CAST(:dependencies AS jsonb),
-                    CAST(:blackbox_policy AS jsonb), CAST(:validation_warnings AS jsonb),
-                    :teacher_notes, CAST(:source_scope AS jsonb),
-                    CAST(:evidence_claims AS jsonb), :maturity_level, :maturity_source,
-                    :review_status, CAST(:cautions AS jsonb), CAST(:connectors AS jsonb),
-                    CAST(:internal_flow AS jsonb), CAST(:duplicate_candidates AS jsonb)
-                )
-                RETURNING id
-                """
-            ),
-            {
-                "document_id": document_id,
-                "name": _strip_nuls(comp.get("label") or comp.get("name") or "Untitled"),
-                "component_type_text": _strip_nuls(comp.get("component_type") or comp.get("responsibility_type") or ""),
-                "summary": _strip_nuls(comp.get("summary") or ""),
-                "source_chunks": _json_dumps(evidence_refs.get("source_chunks") or []),
-                "inputs": _json_dumps(comp.get("inputs") or []),
-                "outputs": _json_dumps(comp.get("outputs") or []),
-                "preconditions": _json_dumps(comp.get("preconditions") or []),
-                "constraints": _json_dumps(comp.get("constraints") or []),
-                "invalid_conditions": _json_dumps(comp.get("invalid_conditions") or []),
-                "dependencies": _json_dumps(comp.get("dependencies") or []),
-                "blackbox_policy": _json_dumps({"default_level": "summary", "expand_if_unlearned": True}),
-                "validation_warnings": _json_dumps([]),
-                "teacher_notes": _strip_nuls(comp.get("teaching_takeaway") or ""),
-                "source_scope": _json_dumps({"document_id": document_id, "legacy_ids": [agent_id]}),
-                "evidence_claims": _json_dumps(evidence_claims_db),
-                "maturity_level": comp.get("maturity_level") or "paper_claim",
-                "maturity_source": comp.get("maturity_source") or "llm_proposed",
-                "review_status": comp.get("review_status") or "teacher_review_required",
-                "cautions": _json_dumps(comp.get("cautions") or []),
-                "connectors": _json_dumps(comp.get("connectors") or {}),
-                "internal_flow": _json_dumps(comp.get("internal_flow") or []),
-                "duplicate_candidates": _json_dumps([]),
-            },
-        ).fetchone()
-        if agent_id:
-            id_map[agent_id] = str(row[0])
-
-    # Dependency links.
-    for comp in components or []:
-        if not isinstance(comp, dict):
-            continue
-        src_db = id_map.get(str(comp.get("component_id") or ""))
+        src_db = id_map.get(_text(comp.get("component_id")))
         if not src_db:
             continue
         for dep in comp.get("dependencies") or []:
@@ -2368,7 +3413,7 @@ def _rebuild_theory_components_in_session(
             dep_type = dep.get("dependency_type") or "depends_on"
             link_type = "requires" if dep_type == "requires" else "depends_on"
             for ref in dep.get("component_refs") or []:
-                dst_db = id_map.get(str(ref))
+                dst_db = id_map.get(_text(ref))
                 if not dst_db or dst_db == src_db:
                     continue
                 session.execute(
@@ -2376,21 +3421,26 @@ def _rebuild_theory_components_in_session(
                         """
                         INSERT INTO theory_component_links (
                             course_id, document_id, source_component_id,
-                            target_component_id, link_type, status, validation_result
+                            target_component_id, link_type, status, validation_result,
+                            produced_by_run_id
                         )
                         VALUES (
                             NULL, :document_id, CAST(:src AS uuid), CAST(:dst AS uuid),
-                            :link_type, 'candidate', CAST(:validation AS jsonb)
+                            :link_type, 'candidate', CAST(:validation AS jsonb),
+                            CAST(:run_id AS uuid)
                         )
                         """
                     ),
                     {
                         "document_id": document_id, "src": src_db, "dst": dst_db,
-                        "link_type": link_type,
+                        "link_type": link_type, "run_id": run_id,
                         "validation": _json_dumps({"agent_dependency_type": dep_type,
                                                    "reason": dep.get("reason")}),
                     },
                 )
+    _apply_remaps(
+        session, document_id=document_id, run_id=run_id, kind="component", remaps=sync.remaps,
+    )
     return id_map
 
 
@@ -2486,6 +3536,7 @@ def _rebuild_component_graph_in_session(
     graph_payload: dict,
     component_id_map: dict[str, str],
     claim_id_map: dict[str, str],
+    run_id: str | None = None,
 ) -> None:
     remapped_graph = _remap_revision_graph(
         graph_payload, component_id_map or {}, claim_id_map or {}
@@ -2493,13 +3544,20 @@ def _rebuild_component_graph_in_session(
     session.execute(
         sa_text(
             """
-            INSERT INTO theory_component_graphs (document_id, graph_json, scope, updated_at)
-            VALUES (:doc, CAST(:graph AS jsonb), CAST(:scope AS jsonb), now())
+            INSERT INTO theory_component_graphs (
+                document_id, graph_json, scope, produced_by_run_id, updated_at
+            )
+            VALUES (
+                :doc, CAST(:graph AS jsonb), CAST(:scope AS jsonb),
+                CAST(:run_id AS uuid), now()
+            )
             ON CONFLICT (document_id)
-            DO UPDATE SET graph_json = EXCLUDED.graph_json, updated_at = now()
+            DO UPDATE SET graph_json = EXCLUDED.graph_json,
+                          produced_by_run_id = EXCLUDED.produced_by_run_id,
+                          updated_at = now()
             """
         ),
-        {"doc": document_id, "graph": _json_dumps(remapped_graph),
+        {"doc": document_id, "graph": _json_dumps(remapped_graph), "run_id": run_id,
          "scope": _json_dumps({"level": "paper"})},
     )
 
@@ -2574,24 +3632,20 @@ def accept_revision(
             raise RevisionConflictError("base_run_id mismatch with candidate")
 
         # Materialize the adopted candidate into the normal artifact namespace.
-        # Keep `_artifacts.candidate.candidate_artifacts` and all revision audit
-        # metadata intact for lineage/diff inspection, while making the accepted
-        # run readable by existing Export/Course Builder consumers.
+        # Keep `candidate.candidate_artifacts` and all revision audit metadata
+        # intact for lineage/diff inspection, while making the accepted run
+        # readable by existing Export/Course Builder consumers. artifact の格納先は
+        # 生成ログ表（§6 / KO6）なので、jsonb_set の deep merge は不要になった。
+        _upsert_run_artifacts(session, run_id, promoted_artifacts)
         session.execute(
             sa_text(
-                f"""
+                """
                 UPDATE document_analysis_runs
-                SET stage_outputs = jsonb_set(
-                        COALESCE(stage_outputs, '{{}}'::jsonb),
-                        '{{{ARTIFACTS_KEY}}}',
-                        COALESCE(stage_outputs->'{ARTIFACTS_KEY}', '{{}}'::jsonb)
-                            || CAST(:promoted AS jsonb)
-                    ),
-                    updated_at = now()
+                SET updated_at = now()
                 WHERE id = CAST(:rid AS uuid)
                 """
             ),
-            {"rid": run_id, "promoted": _json_dumps(promoted_artifacts)},
+            {"rid": run_id},
         )
 
         switched = session.execute(
@@ -2616,9 +3670,11 @@ def accept_revision(
         claims = ((candidate_artifacts.get("claim_object_builder") or {}).get("claims")) or []
         components = ((candidate_artifacts.get("component_assembly") or {}).get("components")) or []
         graph_payload = candidate_artifacts.get("component_graph")
-        claim_id_map = _rebuild_theory_claims_in_session(session, document_id, claims)
+        claim_id_map = _rebuild_theory_claims_in_session(
+            session, document_id, claims, run_id=run_id
+        )
         component_id_map = _rebuild_theory_components_in_session(
-            session, document_id, components, claim_id_map
+            session, document_id, components, claim_id_map, run_id=run_id
         )
         if graph_payload is not None:
             _rebuild_component_graph_in_session(
@@ -2627,12 +3683,14 @@ def accept_revision(
                 graph_payload,
                 component_id_map,
                 claim_id_map,
+                run_id=run_id,
             )
         else:
-            # 候補に component_graph が無い場合、components は上で無条件に作り直され
-            # （DELETE→新UUID）ているため、古い theory_component_graphs 行を残すと
-            # 旧・削除済みUUIDを指す stale グラフになり、context_lens が component の
-            # 上位/下位を一切引けなくなる。同一トランザクション内で明示削除し整合させる
+            # 候補に component_graph が無い場合、components は上で同期され（一致行は
+            # 同 UUID・不一致行は supersede / 新規 INSERT）ているため、古い
+            # theory_component_graphs 行を残すと superseded・新規 UUID を指す stale
+            # グラフになり、context_lens が component の上位/下位を引けなくなる。
+            # 同一トランザクション内で明示削除し整合させる
             # （delete_component_graph と同義だが、accept_revision のトランザクションに
             # 同乗させるため inline で実行する）。
             session.execute(

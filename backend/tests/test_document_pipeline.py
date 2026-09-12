@@ -22,6 +22,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from tests.knowledge_object_fakes import FakeKnowledgeSession  # noqa: E402
+
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -803,6 +805,7 @@ def test_orchestrator_accepts_tex_archive_source_kind():
              "block_ids": ["tex_b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-tex"),
         "persist_document_embedding": MagicMock(return_value="emb-tex"),
@@ -913,6 +916,7 @@ def test_orchestrator_runs_all_stages_in_order():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1048,6 +1052,7 @@ def test_issue_266_orchestrator_passes_component_graph_result_to_persist():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": persist_mock,
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1485,6 +1490,7 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
              "block_ids": ["blk_1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1704,6 +1710,7 @@ def test_orchestrator_grobid_fallback_when_unavailable():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1802,6 +1809,7 @@ def test_orchestrator_passes_tei_xml_to_document_structure_agent():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1987,16 +1995,27 @@ def test_persist_components_hard_fails_when_all_components_are_fallback():
     session_factory.assert_not_called()
 
 
-def test_persist_components_empty_result_returns_empty_without_db_access():
+def test_persist_components_empty_result_supersedes_live_rows_without_delete():
+    """component ゼロでも同期は走り、旧 live 行は supersede される（S-7 の早期 return 撤去）。
+
+    「素材が無い」を「行はそのままでよい」と解釈しないための契約。DELETE は発行しない
+    （KO3。theory_component_links の張り直しだけが明示例外）。
+    """
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(components=[])
-    with patch.object(persistence, "_pg_session") as session_factory:
+    session = FakeKnowledgeSession(live_rows=[
+        {"id": "old-uuid", "stable_key": "k1:old", "agent_id": "comp_old",
+         "status": "candidate", "review_status": "teacher_review_required",
+         "teacher_notes": "", "created_by": None, "maturity_source": "llm_proposed"},
+    ])
+    with patch.object(persistence, "_pg_session", return_value=session):
         id_map = persistence.persist_components(
-            document_id="doc_1", component_result=component_result
+            document_id="doc_1", component_result=component_result, run_id="run-1"
         )
     assert id_map == {}
-    session_factory.assert_not_called()
+    assert session.superseded == ["old-uuid"]
+    assert not any("DELETE FROM theory_components" in sql for sql in session.sql)
 
 
 def test_persist_components_filters_fallback_but_persists_normal_components():
@@ -2005,17 +2024,14 @@ def test_persist_components_filters_fallback_but_persists_normal_components():
     component_result = types.SimpleNamespace(
         components=[_fallback_component(), _normal_component()]
     )
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-1",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid")
     with patch.object(persistence, "_pg_session", return_value=session):
         id_map = persistence.persist_components(
             document_id="doc_1", component_result=component_result
         )
     assert id_map == {"comp_001": "db-uuid-1"}
     inserted_names = [
-        call.args[1].get("name")
-        for call in session.execute.call_args_list
-        if len(call.args) > 1 and isinstance(call.args[1], dict) and "maturity_source" in call.args[1]
+        row.get("name") for row in session.inserted_into("theory_components")
     ]
     assert inserted_names == ["relation"]
 
@@ -2061,9 +2077,9 @@ def _apparatus_component(component_id="comp_apparatus_001", label="spectrometer"
 
 
 def _inserted_params_for(session, name):
-    for call in session.execute.call_args_list:
-        if len(call.args) > 1 and isinstance(call.args[1], dict) and call.args[1].get("name") == name:
-            return call.args[1]
+    for row in session.inserted_into("theory_components"):
+        if row.get("name") == name:
+            return row
     raise AssertionError(f"no INSERT params captured for name={name!r}")
 
 
@@ -2074,8 +2090,7 @@ def test_persist_components_preserves_agent_source_scope_for_apparatus_component
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(components=[_apparatus_component()])
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-apparatus",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid-apparatus")
     with patch.object(persistence, "_pg_session", return_value=session):
         persistence.persist_components(document_id="doc_1", component_result=component_result)
 
@@ -2101,8 +2116,7 @@ def test_persist_components_claim_derived_source_scope_stays_document_and_legacy
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(components=[_normal_component()])
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-1",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid")
     with patch.object(persistence, "_pg_session", return_value=session):
         persistence.persist_components(document_id="doc_1", component_result=component_result)
 
@@ -2123,8 +2137,7 @@ def test_persist_components_legacy_ids_always_component_id():
             _normal_component("comp_XYZ"),
         ]
     )
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-x",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid-x")
     with patch.object(persistence, "_pg_session", return_value=session):
         persistence.persist_components(document_id="doc_1", component_result=component_result)
 
@@ -2627,8 +2640,10 @@ def test_restart_reuses_present_earlier_stage_artifacts():
     assert result.final_stage == "source_chunking"
     # DocumentStructureAgent は呼ばれない（呼ばれたら _StructureAgent が raise）。
     assert captured["structure_agent_calls"] == 0
-    # 再利用したステージの artifact は前回のまま（作り直されない）。
-    assert captured["artifacts"]["document_structure"] == _restart_structure_artifact()
+    # 再利用したステージの artifact は **書き戻されない**（save_artifact が渡すのは
+    # その1ステージだけ。knowledge_objects_design.md §6 / KO6。従来は全 artifact を
+    # 毎回書き戻しており run の stage_outputs が単調増加していた = S-9）。
+    assert "document_structure" not in captured["artifacts"]
 
 
 def test_restart_records_backfilled_stages_in_resume_outputs():

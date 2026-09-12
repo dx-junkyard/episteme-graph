@@ -315,6 +315,7 @@ def stage_payloads():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),

@@ -52,6 +52,7 @@ from .persistence import (
     persist_components,
     persist_document_embedding,
     persist_equation_previews_to_chunks,
+    persist_knowledge_objects,
     persist_qualified_claims,
     persist_source_chunks,
     upsert_analysis_run,
@@ -630,7 +631,12 @@ def run_document_pipeline(
         report(stage, done_payload, run_status=run_status)
 
     def save_artifact(stage: str, value: Any) -> None:
-        previous_artifacts[stage] = _to_plain_data(value)
+        # in-memory の全 artifact は resume / should_use_artifact のために保つが、
+        # DB へ渡すのは **その1ステージだけ**（artifact は 1 run × 1 stage = 1 行の
+        # 生成ログ。knowledge_objects_design.md §6 / KO6。従来は全 artifact を毎回
+        # 書き戻しており、run の stage_outputs が単調増加していた = S-9）。
+        plain = _to_plain_data(value)
+        previous_artifacts[stage] = plain
         upsert_analysis_run(
             run_id=run_id,
             document_id=document_id,
@@ -638,7 +644,7 @@ def run_document_pipeline(
             cartridge_id=cartridge_id,
             status="running",
             current_stage=stage,
-            stage_outputs={ARTIFACTS_KEY: previous_artifacts},
+            stage_outputs={ARTIFACTS_KEY: {stage: plain}},
         )
 
     def artifact(stage: str) -> Any | None:
@@ -2326,13 +2332,31 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 # claim_object_builder と evidence_registry の成果を渡す。
                 claim_objects=ctx.claim_objects,
                 evidence_registry=ctx.evidence,
+                # equation.equation_stable_keys の材料（純計算・DB を読まない）。
+                equations=ctx.equations,
+                run_id=ctx.run_id,
             )
             claim_id_map: dict[str, str] = {}
             for saved in saved_claims:
-                for key in _claim_legacy_keys(saved):
+                # 突合キー（span_id / claim_{span} / block:span / agent claim ID）を
+                # すべて同じ UUID に向ける。知識オブジェクト層では claim object も
+                # 1行ずつ保存されるので、この map は **全 claim の agent ID** を覆う。
+                keys = set(_claim_legacy_keys(saved)) | set(saved.get("legacy_ids") or [])
+                for key in keys:
                     claim_id_map[key] = saved["claim_id"]
             ctx.result.claim_count = len(saved_claims)
             ctx.report_item("persist_claims_components_graph", 1, 3, "tables")
+
+            # equation / evidence / derivation step / symbol を専用テーブルへ
+            # （KO4: artifact にしか無い知識を残さない）。素材が無い種別だけスキップする。
+            knowledge_stats = persist_knowledge_objects(
+                document_id=ctx.document_id,
+                run_id=ctx.run_id,
+                equations=ctx.equations,
+                evidence_registry=ctx.evidence,
+                derivations=ctx.derivations,
+                symbol_registry=ctx.symbol_registry,
+            )
 
             id_map: dict[str, str] = {}
             if ctx.skip_component_persist:
@@ -2346,6 +2370,9 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                     component_result=ctx.component_result,
                     course_id=ctx.course_id,
                     claim_id_map=claim_id_map,
+                    # stable_key の材料（出典 block 集合）の解決に使う。
+                    evidence_registry=ctx.evidence,
+                    run_id=ctx.run_id,
                 )
             ctx.report_item("persist_claims_components_graph", 2, 3, "tables")
 
@@ -2374,6 +2401,7 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                     component_graph_result=ctx.component_graph_result,
                     claim_id_map=claim_id_map,
                     narrative_result=ctx.narrative,
+                    run_id=ctx.run_id,
                 )
             ctx.save_artifact("persist_claims_components_graph", {
                 "claims": ctx.result.claim_count,
@@ -2381,6 +2409,8 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 "graph_skipped": ctx.skip_graph_persist or ctx.skip_component_persist,
                 "components_skipped": ctx.skip_component_persist,
                 "degraded_stages": ctx.degraded_stages,
+                # 知識オブジェクト（式・根拠・導出・記号）の保存件数（KO4）。
+                "knowledge_objects": knowledge_stats,
             })
         except Exception as exc:
             logger.exception("persist_claims_components_graph stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)

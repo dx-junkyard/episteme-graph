@@ -34,45 +34,7 @@ from core.document_pipeline import persistence  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-class _FakeRow:
-    def __init__(self, value):
-        self._value = value
-
-    def __getitem__(self, idx):
-        return self._value
-
-
-class _FakeExec:
-    def __init__(self, row):
-        self._row = row
-
-    def fetchone(self):
-        return self._row
-
-
-class _FakeClaimsSession:
-    """INSERT のパラメータを順に捕捉する（DELETE は捕捉しない）。"""
-
-    def __init__(self):
-        self.inserted: list[dict] = []
-        self._counter = 0
-
-    def execute(self, _stmt, params=None):
-        params = params or {}
-        if "claim_type" in params:
-            self._counter += 1
-            self.inserted.append(dict(params))
-            return _FakeExec(_FakeRow(f"claim-uuid-{self._counter}"))
-        return _FakeExec(_FakeRow(None))
-
-    def commit(self):
-        pass
-
-    def rollback(self):
-        pass
-
-    def close(self):
-        pass
+from tests.knowledge_object_fakes import FakeKnowledgeSession  # noqa: E402
 
 
 def _span(span_id="span_001", block_id="b1", section_id="sec1", text="claim text"):
@@ -119,7 +81,7 @@ def _run(spans, **kwargs):
         {"chunk_id": "chunk-1", "block_ids": ["b1"]},
         {"chunk_id": "chunk-2", "block_ids": ["b104"]},
     ]
-    session = _FakeClaimsSession()
+    session = FakeKnowledgeSession()
     with patch.object(persistence, "_pg_session", return_value=session):
         saved = persistence.persist_qualified_claims(
             document_id="doc-1",
@@ -127,8 +89,12 @@ def _run(spans, **kwargs):
             chunk_index=chunk_index,
             **kwargs,
         )
+    # 知識オブジェクト層では claim object も1行ずつ入るため、span 由来の行だけを見る
+    # （origin='span'。knowledge_objects_design.md §5.4）。
     legacy = [
-        set(json.loads(p["source_scope"])["legacy_ids"]) for p in session.inserted
+        set(json.loads(row["source_scope"])["legacy_ids"])
+        for row in session.inserted_into("theory_claims")
+        if row.get("origin") == "span"
     ]
     return saved, session, legacy
 
