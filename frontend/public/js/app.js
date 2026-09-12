@@ -875,6 +875,14 @@
       });
     });
 
+    // 入口統合 Phase 1（§6）: 様相の訂正チップ。既存の書き直し経路に相乗りする
+    // （新しい API パスは作らない）。押した 1 往復にだけ効く。
+    ca.querySelectorAll("[data-stance-correct]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        correctStance(this.getAttribute("data-reply-to"), this.getAttribute("data-stance-correct"));
+      });
+    });
+
     // 構造帰属（方法C）: 回答末尾の1タップ様相選択（選択がそのまま帰属の確定になる）。
     ca.querySelectorAll("[data-anchor-prompt-doubt]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -1414,6 +1422,50 @@
     return html;
   }
 
+  // 入口統合 Phase 1（learning_chat_entry_unification_design.md §6, LC6/LC7）:
+  // 「どの様相（会話の調子）で答えたか」の 1 行。サーバが当該発話から**推定**した
+  // ときだけ出す事実であって、督促でも評価でもない。
+  //   - source === "explicit"（本人が選んだ）→ 何も出さない
+  //   - stance === "tutor"（現行の既定）    → 何も出さない（既定は無表示＝静音）
+  // 表示ラベルはサーバ（core/label_vocab.py の LEARNING_STANCE_LABELS）が付けた
+  // stance.label をそのまま描く — フロントに様相→日本語の表を持たない（ミラー規律）。
+  // confidence・一致度などの数値は DTO に無く、ここでも一切描かない（LC7）。
+  function renderStanceLine(msg) {
+    var st = msg && msg.stance;
+    if (!st || st.source !== "inferred" || !st.stance || st.stance === "tutor") return "";
+    // discuss 中はサーバ側が推定に入らない（LC1/§4.5）。念のための二重ガード。
+    if (isDiscussMode()) return "";
+    var html = '<div class="stance-line" data-ui-anchor="chat.stance-chip">';
+    html += '<span class="stance-fact">' + escHtml(st.label || "") + '答えました。</span>';
+    // 訂正は 1 タップで、その 1 往復にだけ効く（sticky にしない, §6）。
+    if (msg.reply_to_id) {
+      html += '<button type="button" class="lx-ghost secondary stance-correct-btn"' +
+        ' data-stance-correct="tutor"' +
+        ' data-reply-to="' + escHtml(msg.reply_to_id) + '">ふつうの質問として聞き直す</button>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // 様相の訂正: 新しいエンドポイントは作らず、元の問いを**明示**の typed action
+  // （ask_question = DOMAIN_RAG 確定）で同じ位置から再処理する（§5 / 既存の書き直し経路
+  // replace_message_id → truncate_chat_and_supersede。旧往復の派生痕跡は supersede で残る）。
+  function correctStance(replyToId, stance) {
+    if (state.sending || !replyToId) return;
+    var idx = _findMessageIndexById(replyToId);
+    if (idx === -1 || state.chatMessages[idx].role !== "user") return;
+    var text = state.chatMessages[idx].content || "";
+    if (!text) return;
+    // 書き直し中の状態が残っていると二重に差し替えてしまうため、先に解除する。
+    if (state.editingMessageId) cancelEditMessage();
+    sendDiscussMetric("stance_corrected", { stance: stance || "tutor" });
+    sendMessage(text, {
+      intent_mode: Session.inDetour() ? "explore" : "on_path",
+      support_action: "ask_question",
+      _replace_message_id: replyToId,
+    });
+  }
+
   // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。ゲート済み応答にのみ付く。
   // 選択しないまま流しても問い自体は unclassified で保持される（P4/P7）。
   function renderAnchorConfirmPrompt(msg) {
@@ -1755,6 +1807,10 @@
       bar += "</div>";
       html += bar;
     }
+
+    // 入口統合 Phase 1（§6）: 様相チップ（推定で答えたときだけの 1 行 + 訂正）。
+    // 出所（tier / grounding）の直後に置く — 根拠の提示は様相にかかわらず同じ。
+    html += renderStanceLine(msg);
 
     // ヘルプルート（§1-3-6）: マニュアル出典。HELP 応答時のみ非 null。
     // chunk ではないためクリック動作は持たせない（/source-chunk/ には接続しない）。
@@ -4348,6 +4404,11 @@
           // 鏡面化（EX-3b）: 言い直し部分（サーバ抽出済み）。メモリ内の表示にのみ使い、
           // localStorage へは保存しない・鏡文そのものを再送信しない。
           mirror: data.mirror || null,
+          // 入口統合 Phase 1（§5/§6）: この往復をどの様相で答えたかの事実
+          // （{stance, source, label}。数値は含まない）。推定のときだけ 1 行描く。
+          stance: data.stance || null,
+          // 訂正（聞き直し）で「同じ位置から」再処理するための元 user メッセージ id。
+          reply_to_id: userMsgId,
           mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する

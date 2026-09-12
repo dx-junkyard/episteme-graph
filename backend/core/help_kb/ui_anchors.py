@@ -69,6 +69,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 「AIと議論して理解を深める」「今回は確認せず次へ進む」の2ボタン。
         "check.discuss",
         "check.skip",
+        # 学習チャットの入口統合（docs/features/learning_chat_entry_unification_design.md §6）:
+        # 回答の下に出る様相の 1 行（推定で答えたときだけ）と「ふつうの質問として聞き直す」。
+        "chat.stance-chip",
         # コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
         # サイドバー最上部の常設入口「🌊 論文の海」（コース未選択でも押せる）。
         "sidebar.corpus-sea",
@@ -110,6 +113,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
 # material.lecture-condensed（再生バーの「短く聴く」トグル）を追加した。
 # 2026-09-10 に是正 F5（六つのレンズ 提案3・誤解メモの候補化）の
 # rightpanel.misconception-review（誤解メモ候補の3択）を追加した。
+# 2026-09-12 に学習チャットの入口統合 Phase 1
+# （learning_chat_entry_unification_design.md §6）の chat.stance-chip
+# （様相の 1 行と「ふつうの質問として聞き直す」）を追加した。
 # 件数の正本は KNOWN_UI_ANCHOR_IDS と test_help_ui_anchors.py（ここには書き写さない）。
 # check.discuss / check.skip の両者は「確認問題の選択肢」を1つの節で
 # 並べて説明しているため、同じ参照先を指す。
@@ -173,6 +179,8 @@ UI_ANCHORS: dict[str, str] = {
     "material.lecture-condensed": "student/02-student.md#lecture-condensed",
     # 誤解メモの3択＝AI が訂正を提案した箇所を、本人が確定 / 却下する操作行。
     "rightpanel.misconception-review": "student/02-student.md#misconception-review",
+    # 回答の下の様相の 1 行と「ふつうの質問として聞き直す」（入口統合 Phase 1）。
+    "chat.stance-chip": "student/02-student.md#stance-chip",
 }
 
 

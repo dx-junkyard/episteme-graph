@@ -6243,6 +6243,22 @@ button.ls-course-evidence-head {
 }
 .answer-tier-label { color: var(--color-text-secondary); }
 
+/* ── 様相の 1 行（入口統合 Phase 1, learning_chat_entry_unification_design.md §6）──
+   「気軽な調子で答えました。」のような事実の 1 行と、その 1 往復を聞き直す訂正チップ。
+   事実であって警告ではないので、警告色・強調色・バッジは使わない（.answer-tier-bar と
+   .mirror-block と同じ控えめなトーンに合わせる）。数値は一切描かない。 */
+.stance-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+}
+.stance-fact { color: var(--color-text-tertiary); }
+.stance-correct-btn { font-size: 12px; padding: 3px 10px; }
+
 /* ===== 右パネル再設計（episteme-right-panel-mock 由来。lx- 接頭辞で既存と分離）===== */
 :root {
   --lx-approved:#1f9d5b; --lx-approved-bg:#e9f7ef;
