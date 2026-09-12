@@ -2244,6 +2244,65 @@ def _learner_falsification_conditions(conditions: list[dict]) -> list[dict]:
     return result
 
 
+def learner_ledger_line(
+    session,
+    target_type: str,
+    target_id: str,
+    *,
+    include_support_lines: bool = True,
+) -> dict | None:
+    """台帳の学習者向け投影1件（読み取り専用）。台帳行が無ければ ``None``。
+
+    ``get_learner_ledger_line``（エンドポイント）と、画面文脈アダプター Phase 4
+    （``assistant_screen_adapter_design.md`` §11.3 kind ``verification``）の共通正本。
+    **学習者向けの遮断を2箇所に書かない**ため、投影はここだけに置く:
+    記帳者 ID を落とし・生スコアを返さず・SL1 の閉世界語彙をそのまま運ぶ。
+
+    ``session`` の open/close は呼び出し側の責務（既存エンドポイントの
+    ``try/finally`` 規約をそのまま使う）。
+    """
+    row = _fetch_ledger_row(session, target_type, target_id)
+    if row is None:
+        return None
+    status = str(row[5] or "unknown")
+    scopes = [_scope_out(s) for s in _jsonb_list(row[6]) if isinstance(s, dict)]
+    # 学習者へは記帳者 ID を出さない（帰属は教員向け表示のみ）
+    learner_scopes = [
+        {k: v for k, v in scope.items() if k in ("condition", "domain", "precision", "system")}
+        for scope in scopes
+    ]
+    falsification_conditions = _learner_falsification_conditions(
+        [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
+    )
+    # SL-3: 支持線は事実文のみ（内部の構成要素の列挙・記帳者情報は出さない）。
+    support_fact_line = ""
+    if include_support_lines:
+        try:
+            support_lines = compute_support_lines(
+                session, target_type, target_id,
+                course_id=str(row[4] or ""), document_id=str(row[3] or ""),
+            )
+            if support_lines:
+                support_fact_line = str(support_lines.get("fact_line") or "")
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "learner support lines computation failed for %s/%s", target_type, target_id,
+                exc_info=True,
+            )
+            support_fact_line = ""
+    return {
+        "target_id": target_id,
+        "target_type": target_type,
+        "verification_status": status,
+        "verification_status_label": _VERIFICATION_STATUS_LABELS.get(status, status),
+        "scopes": learner_scopes,
+        "scope_coverage": scope_coverage_level(len(scopes)),
+        "fact_line": _learner_fact_line(target_type, status, scopes),
+        "falsification_conditions": falsification_conditions,
+        **({"support_fact_line": support_fact_line} if support_fact_line else {}),
+    }
+
+
 @learning_router.get("/courses/{course_id}/ledger/{target_type}/{target_id}")
 def get_learner_ledger_line(
     course_id: str,
@@ -2262,45 +2321,10 @@ def get_learner_ledger_line(
         raise HTTPException(status_code=404, detail="Course not found")
     session = _pg_session()
     try:
-        row = _fetch_ledger_row(session, target_type, target_id)
-        if row is None:
+        line = learner_ledger_line(session, target_type, target_id)
+        if line is None:
             raise HTTPException(status_code=404, detail="Ledger entry not found")
-        status = str(row[5] or "unknown")
-        scopes = [_scope_out(s) for s in _jsonb_list(row[6]) if isinstance(s, dict)]
-        # 学習者へは記帳者 ID を出さない（帰属は教員向け表示のみ）
-        learner_scopes = [
-            {k: v for k, v in scope.items() if k in ("condition", "domain", "precision", "system")}
-            for scope in scopes
-        ]
-        falsification_conditions = _learner_falsification_conditions(
-            [c for c in _jsonb_list(row[13]) if isinstance(c, dict)]
-        )
-        # SL-3: 支持線は事実文のみ（内部の構成要素の列挙・記帳者情報は出さない）。
-        support_fact_line = ""
-        try:
-            support_lines = compute_support_lines(
-                session, target_type, target_id,
-                course_id=str(row[4] or ""), document_id=str(row[3] or ""),
-            )
-            if support_lines:
-                support_fact_line = str(support_lines.get("fact_line") or "")
-        except Exception:  # noqa: BLE001
-            logger.warning(
-                "learner support lines computation failed for %s/%s", target_type, target_id,
-                exc_info=True,
-            )
-            support_fact_line = ""
-        return {
-            "target_id": target_id,
-            "target_type": target_type,
-            "verification_status": status,
-            "verification_status_label": _VERIFICATION_STATUS_LABELS.get(status, status),
-            "scopes": learner_scopes,
-            "scope_coverage": scope_coverage_level(len(scopes)),
-            "fact_line": _learner_fact_line(target_type, status, scopes),
-            "falsification_conditions": falsification_conditions,
-            **({"support_fact_line": support_fact_line} if support_fact_line else {}),
-        }
+        return line
     finally:
         session.close()
 

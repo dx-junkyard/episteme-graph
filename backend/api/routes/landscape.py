@@ -874,6 +874,22 @@ def get_course_landscape(
         raise HTTPException(status_code=404, detail="コースが見つかりません")
 
     document_ids = services.list_course_source_document_ids(course_data)
+    return {"course_id": course_id, **learner_landscape_for_documents(course_data, document_ids)}
+
+
+def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
+    """学習者向け「論文の位置づけ」DTO（``course_id`` 付与前）を組み立てる。
+
+    ``get_course_landscape``（受講ゲート済み）と、画面文脈アダプター Phase 4
+    （``assistant_screen_adapter_design.md`` §11.3 kind ``placement``）の共通正本。
+    **権限判定はしない**（呼び出し側が受講ゲートと document スコープを解決済みである
+    ことが前提。``document_ids`` がそのスコープの正本）。
+
+    投影の遮断（weight / confidence / claim_id を落とす・
+    ``LEARNER_VISIBLE_STATUSES`` のみ・現行凍結骨格に無いノードは出さない）は
+    ``projection.learner_landscape_dto`` が持つ — ここで再実装しない（LS5 / §9.2）。
+    """
+    document_ids = list(document_ids or [])
     course_domain_key = course_cartridge_id(course_data) or ""
 
     session = _session()
@@ -926,7 +942,6 @@ def get_course_landscape(
     ]
 
     return {
-        "course_id": course_id,
         **dto,
         "unplaced_documents": unplaced_documents,
         "skeleton_version": _displayed_skeleton_version(dto.get("domains") or []),

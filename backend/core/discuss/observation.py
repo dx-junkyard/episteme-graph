@@ -356,6 +356,12 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         # 学習者に数値非表示・削除 API なし）。訂正そのものは既存の書き直し経路
         # （replace_message_id）で走り、このイベントは fire-and-forget の計測のみ。
         "stance_corrected",
+        # 画面文脈アダプター Phase 4（docs/features/assistant_screen_adapter_design.md §11.7）:
+        # 構造 grounding（学習者が画面で選んでいる要素の事実文）が回答プロンプトに載った
+        # ターンの**種別だけ**。どの解決器が事実を出したかは入れない — 出したか出さなかった
+        # かの1ビットに留める（DO1〜DO6 継承 — 本文非含有・学習者に数値非表示・削除 API なし）。
+        # **記録はサーバ側**（_learning_chat_core）が best-effort で行う（フロントから送らない）。
+        "structured_grounding_present",
     }
 )
 

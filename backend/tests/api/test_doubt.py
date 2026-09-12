@@ -183,8 +183,13 @@ class TestLearnerEndpoints:
         assert "404" in block
 
     def test_learner_scopes_hide_attribution(self):
-        """学習者へは記帳者 ID を出さない。"""
-        block = re.search(r"def get_learner_ledger_line[\s\S]+?def ", _SRC).group(0)
+        """学習者へは記帳者 ID を出さない。
+
+        投影の正本は ``learner_ledger_line``（エンドポイントと画面文脈アダプター
+        Phase 4 の共通経路。``assistant_screen_adapter_design.md`` §11.3
+        「生テーブルを引かない」＝遮断を2箇所に書かない）。
+        """
+        block = re.search(r"def learner_ledger_line[\s\S]+?\ndef ", _SRC).group(0)
         assert '"condition", "domain", "precision", "system"' in block
 
     def test_learner_open_assumptions_hide_names(self):

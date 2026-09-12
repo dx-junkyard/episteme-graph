@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import base64
 import logging
 import re
@@ -124,6 +125,22 @@ from core.learning_experience import (
 )
 from core.learning_stance.heuristic import prejudge as prejudge_stance_route
 from core.learning_stance.schema import build_stance_dto, resolve_stance
+# 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11）: 画面が渡した
+# 参照を正規化し、route が組んだ権限ゲート済み sources から事実文ブロックを描く。
+# 解決器は core 側（決定論・非LLM・読み取り専用）。
+from core.assistant_context import (
+    BLOCK_HEADER_LEARNING,
+    MAX_BLOCK_CHARS_LEARNING,
+    SCREEN_LEARNING,
+    normalize_screen_context,
+    render_block,
+    render_selection_block,
+    resolve as resolve_screen_context,
+)
+from core.assistant_context.schema import (
+    LEARNING_ELEMENT_TYPES,
+    LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+)
 from core.learning_support_agent import (
     LearningSupportAgent,
     LearningSupportResult,
@@ -144,7 +161,11 @@ from core.discuss.context import document_context_id, parse_document_context
 from core.discuss import observation as discuss_observation
 from core.cycle.derive import build_intention_dto
 from core.cycle.queries import fetch_active_carryover, fetch_intentions
-from core.course_content_builder import build_course_content_background, build_topic_evidence_items
+from core.course_content_builder import (
+    build_course_content_background,
+    build_topic_evidence_items,
+    normalize_evidence_id,
+)
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
@@ -173,6 +194,14 @@ from routes.lecture import (
 # 教材図スタジオ（teaching_figure_studio_design.md §7.2）: 学習者向け・教員向けの図配信が
 # 同じ SVG セキュリティヘッダ（nosniff + CSP sandbox）を通るよう、Response 組み立ての
 # 正本を共有する（定義を二重化しない・FG3）。
+# 画面文脈アダプター Phase 4（§11.3「生テーブルを引かない」）: 台帳・配置の**学習者向け
+# 射影**は各エンドポイントと同じ関数を通す（遮断を2箇所に書かない）。private helper の
+# クロスルーター再利用は routes.lecture / routes.teaching_figures と同じ既存パターン。
+from routes.doubt import learner_ledger_line
+from routes.landscape import learner_landscape_for_documents
+# agent 側 ID（DB 行を持たない集約ノード等）を台帳の照会に流さないための事前判定。
+# 正本は routes/theory_components.py（定義を二重化しない）。
+from routes.theory_components import _is_db_uuid
 from routes.teaching_figures import (
     STATUS_ADOPTED as TEACHING_FIGURE_STATUS_ADOPTED,
     figure_image_response,
@@ -1601,6 +1630,254 @@ def _build_anchor_ladder_hint(
         break  # 直近の assistant メッセージのみを見る（それより前へは遡らない）
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# 画面文脈アダプター Phase 4（正本 docs/features/assistant_screen_adapter_design.md §11）
+#
+# 画面は**参照だけ**を渡し（SA1）、ここ（route）が権限3段
+#   ①受講ゲート（呼び出し元が解決済みの course_data）
+#   ②コース sources / scope_document_ids（grounding_document_ids）
+#   ③各学習者射影の内部 SQL の ``ANY(:doc_ids)``
+# を通した DTO を ``sources`` に組み、core の解決器（純関数・非LLM）が事実文にする。
+#
+# 規律:
+# - **生テーブルを引かない**。学習者射影（component_context / element_context /
+#   doubt の learner_ledger_line / landscape の learner_landscape_for_documents）が
+#   持つ遮断（数値除去・内部 ID 遮断・scope 強制）を再実装しない（§11.3）。
+# - **キャッシュはリクエスト内のみ**（プロセス跨ぎのキャッシュを作らない = §11.6）。
+# - **fail-soft**。射影1本の例外はそのキーだけ None になり、全体が空なら
+#   ``render_block`` が "" を返して従来と同一のプロンプトになる（SA2）。
+# ---------------------------------------------------------------------------
+
+#: 学習側で台帳を引ける要素型（``core.doubt.schema.TargetType`` に実在する型だけ）。
+_SCREEN_LEDGER_TARGET_TYPES = {"component": "component", "claim": "claim"}
+
+
+def _screen_selected_element_type(ctx) -> str:
+    """``selection.element_type`` を学習側の語彙へ落とす（対象外なら ""）。"""
+    raw = str(ctx.selection.get("element_type") or "").strip()
+    # フロントは "formula"（教材埋め込みの語彙）を "equation" に写して送るが、
+    # 旧クライアント・別経路からの素通しに備えて受け側でも吸収する。
+    if raw == "formula":
+        raw = "equation"
+    return raw if raw in LEARNING_ELEMENT_TYPES else ""
+
+
+def _screen_element_sources(
+    ctx,
+    *,
+    course_id: str,
+    topic_info: dict | None,
+    grounding_document_ids: set[str],
+) -> dict:
+    """kind ``element`` の sources（選択チップ1件の射影 + evidence item）。"""
+    element_type = _screen_selected_element_type(ctx)
+    element_id = str(ctx.selection.get("element_id") or "").strip()
+    if not element_type or not element_id:
+        return {}
+
+    context = None
+    if element_type == "component":
+        context = _component_context_with_explanation(
+            element_id, course_id, set(grounding_document_ids)
+        )
+    elif element_type in CONTEXT_ELEMENT_TYPES:  # claim / equation
+        context = build_element_context(
+            element_type, element_id, set(grounding_document_ids)
+        )
+
+    # 題名だけの縮退材料。トピックに**公開済み**の参照からしか引かない
+    # （build_topic_evidence_items の契約 — クライアント入力から任意 ID を解決しない）。
+    item = None
+    try:
+        wanted = normalize_evidence_id(element_id)
+        for candidate in build_topic_evidence_items(topic_info or {}):
+            if str(candidate.get("kind") or "") != element_type:
+                continue
+            if normalize_evidence_id(candidate.get("id")) == wanted:
+                item = candidate
+                break
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: evidence item lookup failed", exc_info=True)
+        item = None
+
+    return {"element_type": element_type, "context": context, "item": item}
+
+
+def _screen_element_document_id(element: dict, ctx, grounding_document_ids: set[str]) -> str:
+    """選択要素が由来する document_id（``grounding_document_ids`` 内のものだけ）。
+
+    component は射影 DTO の ``instance.in_paper.document.id`` が正本。claim / equation /
+    figure は学習者射影が document_id を返さないので、evidence item と画面の申告
+    （参照 = SA1）を順に見て、**必ず grounding 集合への所属で検証**する（fail-closed）。
+    """
+    candidates: list[str] = []
+    context = element.get("context")
+    if isinstance(context, dict):
+        document = ((context.get("instance") or {}).get("in_paper") or {}).get("document") or {}
+        if isinstance(document, dict):
+            candidates.append(str(document.get("id") or ""))
+    item = element.get("item")
+    if isinstance(item, dict):
+        candidates.append(str(item.get("document_id") or ""))
+    candidates.append(str(ctx.selection.get("document_id") or ""))
+    for candidate in candidates:
+        if candidate and candidate in grounding_document_ids:
+            return candidate
+    return ""
+
+
+def _learning_screen_sources(
+    ctx,
+    *,
+    course_id: str,
+    course_data: dict,
+    topic_info: dict | None,
+    grounding_document_ids: set[str],
+    kinds: tuple[str, ...] | None = None,
+) -> dict:
+    """画面文脈の解決に渡す ``sources``（§11.3 の契約）を権限ゲート内で組む。
+
+    ``grounding_document_ids`` が空なら**何も引かない**（fail-closed）。
+    ``selection.course_id`` が URL の course_id と一致しないときは呼び出し側で弾く。
+    ``kinds`` で解決する種別が絞られているときは、**その種別が使う射影しか引かない**
+    （``cycle_mode="elicit"`` は表示モードの事実だけなので DB を1本も引かない）。
+    """
+    if not grounding_document_ids:
+        return {}
+    wanted = None if kinds is None else set(kinds)
+    if wanted is not None and not wanted & {"element", "verification", "placement"}:
+        return {}
+
+    sources: dict = {}
+    try:
+        element = _screen_element_sources(
+            ctx,
+            course_id=course_id,
+            topic_info=topic_info,
+            grounding_document_ids=grounding_document_ids,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: element projection failed", exc_info=True)
+        element = {}
+    if element:
+        sources["element"] = element
+
+    if not element:
+        return sources
+
+    # 台帳（SL1 の閉世界語彙のまま）。対象型は台帳に実在する型だけ・ID は DB UUID のみ
+    # （agent 側 ID では台帳行を引けないので引きにいかない）。
+    ledger_target = _SCREEN_LEDGER_TARGET_TYPES.get(str(element.get("element_type") or ""))
+    if ledger_target and (wanted is None or "verification" in wanted):
+        context = element.get("context")
+        target_id = ""
+        if isinstance(context, dict):
+            target_id = str(
+                context.get("component_id") or context.get("element_id") or ""
+            ).strip()
+        if target_id and _is_db_uuid(target_id):
+            session = _pg_session()
+            try:
+                line = learner_ledger_line(session, ledger_target, target_id)
+                if line:
+                    sources["ledger"] = line
+            except Exception:  # noqa: BLE001
+                logger.debug("screen_context: ledger projection failed", exc_info=True)
+            finally:
+                session.close()
+
+    # 分野の地図での位置づけ（出所ラベルを剥がさない = §11.13-1）。
+    document_id = (
+        _screen_element_document_id(element, ctx, grounding_document_ids)
+        if (wanted is None or "placement" in wanted)
+        else ""
+    )
+    if document_id:
+        try:
+            landscape = learner_landscape_for_documents(course_data, [document_id])
+            if (landscape or {}).get("documents"):
+                sources["landscape"] = landscape
+        except Exception:  # noqa: BLE001
+            logger.debug("screen_context: landscape projection failed", exc_info=True)
+
+    return sources
+
+
+def _learning_screen_context_block(
+    body: LearningChatRequest,
+    *,
+    course_id: str,
+    course_data: dict,
+    topic_info: dict | None,
+    grounding_document_ids: set[str],
+    kinds: tuple[str, ...] | None = None,
+) -> tuple[str, bool]:
+    """``(事実文ブロック, 台帳由来の事実を含むか)``。解決できなければ ``("", False)``。
+
+    ``kinds`` は ``cycle_mode="elicit"`` のときに ``("view",)`` を渡す
+    （問いの答えを手渡さない = §11.5）。どこで失敗しても空文字へ縮退する（SA2）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return "", False
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return "", False
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return "", False
+    # §11.2: 画面の ``selection.segment_id`` は ``selection_segment_id``（サーバが既に
+    # 痕跡記録で信頼している明示アンカー）の写しであってよい。両方あって食い違えば
+    # 後者を優先し、事実文に載る区画番号がクライアント申告だけで決まらないようにする。
+    if body.selection_segment_id is not None:
+        ctx = dataclasses.replace(
+            ctx,
+            selection={**ctx.selection, "segment_id": str(int(body.selection_segment_id))},
+        )
+    # 画面が別のコースを指しているなら丸ごと無視する（Phase 1 の document 不一致と同じ
+    # 扱い。センチネル course_id の経路でも「一致しなければ無視」でよい = §11.3）。
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return "", False
+
+    try:
+        sources = _learning_screen_sources(
+            ctx,
+            course_id=course_id,
+            course_data=course_data,
+            topic_info=topic_info,
+            grounding_document_ids=grounding_document_ids,
+            kinds=kinds,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: sources assembly failed", exc_info=True)
+        sources = {}
+
+    try:
+        facts = resolve_screen_context(ctx, sources, kinds=kinds)
+        block = render_block(
+            facts,
+            header=BLOCK_HEADER_LEARNING,
+            max_chars=MAX_BLOCK_CHARS_LEARNING,
+        )
+    except Exception:  # pragma: no cover - resolve/render は例外を出さない契約
+        logger.debug("screen_context: resolution failed", exc_info=True)
+        return "", False
+    if not block:
+        return "", False
+    # 台帳由来の事実が**実際にブロックへ載ったとき**だけ、出力側の拘束（SL1 の言い換え
+    # 防止）を足す（§11.13-2 の2段構え。事実が無いのに拘束だけ足さない — 予算超過で
+    # 落ちた場合・kinds で verification を外した場合も「載っていない」に含める）。
+    has_ledger = False
+    if kinds is None or "verification" in set(kinds):
+        try:
+            verification_facts = resolve_screen_context(ctx, sources, kinds=("verification",))
+        except Exception:  # pragma: no cover - resolve は例外を出さない契約
+            verification_facts = []
+        has_ledger = any(fact and fact in block for fact in verification_facts)
+    return block, has_ledger
 
 
 # 方法C の1タップ選択肢（unclassified は「その他」として提示しない — 未選択のまま
@@ -3435,6 +3712,72 @@ def _learning_chat_core(
     # この時点でリクエスト全体を通じて最初の（あるいは唯一の）LLM 呼び出しなら消費する
     # （intent 分類等ですでに消費済みなら no-op、§1）。
     _consume_quota()
+
+    # -----------------------------------------------------------------------
+    # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.4 / §11.5）
+    #
+    # 位置: **CostGate の直後・generate_text の前**（429 で返るリクエストでは射影を
+    # 走らせない = §11.6）。当該ターンの user メッセージだけを
+    # 「画面文脈ブロック → 選択箇所ブロック → 発話」に組み替える。足場ターン
+    # （messages[1]）には混ぜない — 足場は毎回同一に組み直す土台で、画面はターンごとに
+    # 変わるため（§11.5）。**保存（persist_chat_history）と痕跡は body.message の
+    # ままで不変**（SA6）。
+    #
+    # モード別（§11.5 の表）:
+    #   casual            → 画面文脈ブロックなし・選択ブロックあり（短い会話調と衝突する）
+    #   cycle_mode=elicit → 表示モードの事実1行だけ（主張本文・検証事実は問いの答えの
+    #                       手渡しになる）・選択ブロックあり
+    #   それ以外          → 両方（tutor / discuss / diff / 楽屋 / 確認問題の壁打ち）
+    # -----------------------------------------------------------------------
+    _screen_block = ""
+    _screen_has_ledger = False
+    if body.screen_context is not None and not _is_casual:
+        # 解決に使う document 集合は**明示スコープ**だけ（discuss の all_visible でも
+        # 広げない = 画面文脈が範囲を広げてはならない・DM1 / §11.5）。画面文脈を
+        # 送ってこないリクエストでは1クエリも増やさない（従来と完全に同じ経路）。
+        _screen_grounding_document_ids = (
+            set(scope_document_ids)
+            if scope_document_ids is not None
+            else set(list_course_source_document_ids(course_data))
+        )
+        _screen_block, _screen_has_ledger = _learning_screen_context_block(
+            body,
+            course_id=course_id,
+            course_data=course_data,
+            topic_info=topic_info,
+            grounding_document_ids=_screen_grounding_document_ids,
+            kinds=("view",) if _cycle_mode == "elicit" else None,
+        )
+    _selection_block = render_selection_block(
+        body.selection_text,
+        _topic_student_material(topic_info) if topic_info else "",
+    )
+    if _screen_block or _selection_block:
+        # 信頼境界（TB1〜TB4）: 画面文脈ブロック（claim 抜粋・逐語引用を含む）と選択箇所
+        # ブロックは PDF 由来の untrusted 入力を運ぶので、``UNTRUSTED_SOURCE_NOTICE`` を
+        # 添える。足場ターン（messages[1]）に既に同じ文があるときは重複させない
+        # （cited_chunks が空のターンでは足場に注意書きが無い — そのときだけここで補う）。
+        _turn_parts = [_screen_block, _selection_block, body.message]
+        if UNTRUSTED_SOURCE_NOTICE not in str(messages[1].get("content") or ""):
+            _turn_parts.insert(0, UNTRUSTED_SOURCE_NOTICE)
+        messages[-1] = {
+            "role": "user",
+            "content": "\n\n".join([part for part in _turn_parts if part]),
+        }
+    if _screen_has_ledger:
+        # §11.13-2 の2段構え: 台帳の事実を渡すときだけ、出力側にも閉世界の拘束を掛ける
+        # （SL1 の denylist はサーバが書く文字列にしか効かないため）。
+        messages[0] = {
+            "role": "system",
+            "content": messages[0]["content"] + "\n\n" + LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+        }
+    if _screen_block:
+        # §11.7: 構造 grounding が載ったターンの**種別だけ**を1ビット記録する
+        # （payload は常に空・痕跡には焼き込まない・学習者には見せない）。
+        _record_document_discuss_event(
+            "structured_grounding_present", current_user["id"], course_id
+        )
+
     degraded = False
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書き。運用パラメータのため
     # 版ピン中の学習者にも所有者の live（HEAD）設定を適用する — course_data は非所有者に
@@ -4716,6 +5059,25 @@ def _first_approved_component_explanation(component_id: str, course_id: str) -> 
     }
 
 
+def _component_context_with_explanation(
+    component_id: str, course_id: str, course_document_ids: set[str]
+) -> dict | None:
+    """コーススコープの component 文脈 DTO（C層の承認済み説明を充填済み）。解決不能なら ``None``。
+
+    ``get_course_component_context``（エンドポイント）と、画面文脈アダプター Phase 4
+    （``assistant_screen_adapter_design.md`` §11.3 kind ``element``）の共通正本。
+    document スコープの強制は ``core.component_context`` の SQL 内
+    （``ANY(:doc_ids)``）が持つ — ここで再実装しない。
+    """
+    context = build_component_context(component_id, course_id, course_document_ids)
+    if context is None:
+        return None
+    explanation = _first_approved_component_explanation(context["component_id"], course_id)
+    if explanation is not None:
+        context["instance"]["explanation"] = explanation
+    return context
+
+
 @router.get("/courses/{course_id}/components/{component_id}/context")
 def get_course_component_context(
     course_id: str,
@@ -4741,13 +5103,11 @@ def get_course_component_context(
         raise HTTPException(status_code=404, detail="Course not found")
 
     course_document_ids = set(_course_document_ids(course_data))
-    context = build_component_context(component_id, course_id, course_document_ids)
+    context = _component_context_with_explanation(
+        component_id, course_id, course_document_ids
+    )
     if context is None:
         raise HTTPException(status_code=404, detail="Component not found")
-
-    explanation = _first_approved_component_explanation(context["component_id"], course_id)
-    if explanation is not None:
-        context["instance"]["explanation"] = explanation
     return context
 
 

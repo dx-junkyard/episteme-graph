@@ -5,9 +5,68 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 画面文脈アダプター（assistant_screen_adapter_design.md §4.2 / §11.2）: 上限の正本は
+# core 側の定数（SA7: 予算はコード定数・env で緩めない）。leaf モジュールを直接 import
+# して、解決器の登録副作用（core.assistant_context.__init__）をスキーマ層に持ち込まない。
+from core.assistant_context.schema import (
+    MAX_ID_CHARS as _SCREEN_CONTEXT_MAX_ID_CHARS,
+    MAX_TITLE_CHARS as _SCREEN_CONTEXT_MAX_TITLE_CHARS,
+    MAX_VISIBLE_ENTITIES as _SCREEN_CONTEXT_MAX_VISIBLE_ENTITIES,
+)
+
+#: 画面 ID の上限（登録語彙は数文字。壊れた画面提供の長文を持ち回らないための足切り）。
+_MAX_SCREEN_CHARS = 40
+
+
+class ScreenContextPayload(BaseModel):
+    """画面がいま表示している対象の**参照だけ**（``assistant_screen_adapter_design.md`` §4.1/§4.2）。
+
+    描画テキスト・DTO 本体・数値は受け取らない（SA1）。**未知の ``screen`` や上限超過で
+    422 にしない**（画面の提供が壊れても対話を止めない = §4.2）: 長すぎる値は
+    切り詰め、解決できない参照は core の正規化が ``None`` に落として無視する。
+
+    Phase 1（W層・グラフレビュー）と Phase 4（学習チャット）の**共通の受け口**なので、
+    ここ（``api/schemas.py``）に置く。``routes/deliberation.py`` は後方互換のため
+    再エクスポートする。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    screen: str = ""
+    selection: dict[str, Any] = Field(default_factory=dict)
+    view: dict[str, Any] = Field(default_factory=dict)
+    visible_entities: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("screen")
+    @classmethod
+    def _clip_screen(cls, value: str) -> str:
+        return str(value or "")[:_MAX_SCREEN_CHARS]
+
+    @field_validator("visible_entities")
+    @classmethod
+    def _clip_entities(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """件数・``id``/``title`` の長さを**切り詰める**（拒否しない）。"""
+        clipped: list[dict[str, Any]] = []
+        for item in (value or [])[:_SCREEN_CONTEXT_MAX_VISIBLE_ENTITIES]:
+            if not isinstance(item, dict):
+                continue
+            entity: dict[str, Any] = {}
+            for key, raw in item.items():
+                if isinstance(raw, str):
+                    limit = (
+                        _SCREEN_CONTEXT_MAX_TITLE_CHARS
+                        if key == "title"
+                        else _SCREEN_CONTEXT_MAX_ID_CHARS
+                    )
+                    entity[key] = raw[:limit]
+                else:
+                    entity[key] = raw
+            clipped.append(entity)
+        return clipped
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +389,14 @@ class LearningChatRequest(BaseModel):
     element_label: str | None = None
     # 構造帰属（方法A）: 教材区画のテキスト選択→「ここについて質問」の明示アンカー。
     # 選択テキストの逐語と、選択があったセグメント番号（position_anchor とは独立に保持）。
+    # 画面文脈アダプター Phase 4（§11.2）: この2つは**参照ではなく逐語テキスト**なので
+    # screen_context には混ぜず、現在位置に残す（痕跡側 _learner_selected_anchor の互換も保つ）。
     selection_text: str | None = None
     selection_segment_id: int | None = None
+    # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.2）:
+    # 学習者がいま画面で見ている対象の**参照だけ**（ID・種別・表示モード・40字の題名）。
+    # 未指定・未知の screen は従来動作（プロンプトが1バイトも変わらない）。
+    screen_context: ScreenContextPayload | None = None
     # UI内コンテキストヘルプ（設計 §4-3）: 「？」ボタン押下時の画面文脈。
     # "lecture" | "chat" | "voice"。HELP ルートの search_manual に screen ヒントとして渡し、
     # front-matter screen: 一致節を検索の第一候補にする。未指定は従来挙動（screen=None）。

@@ -390,11 +390,14 @@ class TestMetricEventVocabAndPayloadWhitelist:
         # 入口統合 Phase 1（learning_chat_entry_unification_design.md §7）:
         # 様相チップの訂正タップ（推定された様相を学習者が覆した回数）。
         "stance_corrected",
+        # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.7）:
+        # 構造 grounding が回答プロンプトに載ったターンの1ビット（サーバ側 best-effort 記録）。
+        "structured_grounding_present",
     }
 
-    def test_vocab_matches_design_doc_23_events(self):
+    def test_vocab_matches_design_doc_24_events(self):
         assert observation.METRIC_EVENT_VOCAB == self._EXPECTED_VOCAB
-        assert len(observation.METRIC_EVENT_VOCAB) == 23
+        assert len(observation.METRIC_EVENT_VOCAB) == 24
 
     def test_sanitize_event_payload_keeps_only_whitelisted_keys(self):
         out = observation.sanitize_event_payload(

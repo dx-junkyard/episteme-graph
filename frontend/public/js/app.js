@@ -4266,6 +4266,118 @@
     return "chat";
   }
 
+  // ── 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.2/§11.8）──
+  //
+  // AI 対話へ渡すのは**参照だけ**（SA1）: いま選んでいる要素の種別と ID・表示中トピック
+  // とスライド・表示モード・画面に出ている ⚓ チップの ID と短い題名まで。描画された
+  // 本文（チャンク text / display_text / summary / latex）も、選択した逐語
+  // （selection_text — 従来どおり独立フィールドで送る）も、ここには入れない。
+  // 解決はサーバ側が権限ゲート付きの学習者射影で行う（SA2）ので、参照が権限外・不在の
+  // ときは静かに落とされ、送信の成否には影響しない。
+  //
+  // 材料はすべて既存のもの（state.topicMaterial の evidence_items / ラッチ / localStorage）で、
+  // **DOM のテキストを読む処理を新規に書かない**（§11.9 の静的 grep で固定）。
+  const SCREEN_CONTEXT_SCREEN = "learning";
+  const SCREEN_CONTEXT_MAX_TITLE_CHARS = 40;
+  const SCREEN_CONTEXT_MAX_ENTITIES = 20;
+  // 画面文脈で名乗れる要素の種別（サーバの解決器が分岐に使う語彙）。
+  const SCREEN_CONTEXT_ELEMENT_TYPES = ["component", "claim", "equation", "figure"];
+
+  function screenContextTitle(text) {
+    const value = String(text == null ? "" : text).trim();
+    if (value.length <= SCREEN_CONTEXT_MAX_TITLE_CHARS) return value;
+    return value.slice(0, SCREEN_CONTEXT_MAX_TITLE_CHARS);
+  }
+
+  // payload の element_type は structure_anchor 方法A の語彙（"formula" / "concept" /
+  // "citation" …）で、component と claim の区別が落ちている。ラッチ元の kind
+  // （data-evidence-ref の "kind:id" 前半）が分かるときはそちらを正とし、どちらでも
+  // 判別できなければ**種別を名乗らない**（推測で埋めない）。
+  function screenContextElementType(payload, latchKind) {
+    const raw = String((payload && payload.element_type) || "");
+    if (raw === "formula") return "equation";
+    if (SCREEN_CONTEXT_ELEMENT_TYPES.indexOf(raw) >= 0) return raw;
+    const kind = String(latchKind || "");
+    if (kind === "formula") return "equation";
+    if (SCREEN_CONTEXT_ELEMENT_TYPES.indexOf(kind) >= 0) return kind;
+    return "";
+  }
+
+  // 画面に出ている ⚓ チップの参照（種別・ID・40字の題名）。供給元は
+  // collectTopicComponentEvidence (:511) と同じ chunk.evidence_items で、新しい取得も
+  // DOM 走査もしない。本文系フィールド（text / summary / latex / caption 本文）は載せない。
+  function screenContextEntities() {
+    const chunks = state.topicMaterial || [];
+    const seen = {};
+    const entities = [];
+    chunks.forEach(function (chunk) {
+      ((chunk && chunk.evidence_items) || []).forEach(function (item) {
+        if (entities.length >= SCREEN_CONTEXT_MAX_ENTITIES) return;
+        if (!item || SCREEN_CONTEXT_ELEMENT_TYPES.indexOf(item.kind) < 0) return;
+        const id = String(item.id || "");
+        if (!id) return;
+        const key = item.kind + ":" + id;
+        if (seen[key]) return;
+        seen[key] = true;
+        entities.push({
+          type: item.kind,
+          id: id,
+          title: screenContextTitle(item.title || item.label || item.caption || ""),
+        });
+      });
+    });
+    return entities;
+  }
+
+  // 送信ボディの optional フィールド screen_context を組む。例外は外に出さない
+  // （組めなければ null を返し、サーバは None を無視する）。
+  function getScreenContext(payload, latchKind) {
+    try {
+      const p = payload || {};
+      const anchor = Session.currentAnchor() || {};
+      const elementId = String(p.element_id || "");
+      // 区画は「実際に区画を指しているとき」だけ申告する: ①「ここについて質問」の
+      // 明示選択（selection_segment_id。サーバは既にこちらを信頼している）②レクチャー
+      // 再生中の表示スライド。通常のチャットでは currentAnchor().segment_id が常に 0 を
+      // 返すため、そのまま載せると kind が永遠に "segment" になる（嘘になる）。
+      let segmentId = "";
+      if (p.selection_segment_id !== undefined && p.selection_segment_id !== null) {
+        segmentId = String(p.selection_segment_id);
+      } else if (resolveScreenMode() === "lecture" &&
+                 anchor.segment_id !== undefined && anchor.segment_id !== null) {
+        segmentId = String(anchor.segment_id);
+      }
+      const elementType = screenContextElementType(p, latchKind);
+      const selection = {
+        course_id: String(state.courseId || ""),
+        topic_id: String(state.currentTopicId || ""),
+        kind: elementId ? "element" : (segmentId ? "segment" : "topic"),
+      };
+      if (segmentId) selection.segment_id = segmentId;
+      if (elementId) selection.element_id = elementId;
+      if (elementType) selection.element_type = elementType;
+      if (p.chunk_id) selection.chunk_id = String(p.chunk_id);
+      const view = {
+        mode: resolveScreenMode(),
+        precision_reading: isPrecisionReadingOn(state.courseId),
+      };
+      // discuss のときだけスコープを申告する（画面文脈が範囲を広げてはならない = DM1。
+      // 実際の範囲決定はサーバの明示状態が正で、これは表示の事実にすぎない）。
+      if (p.discuss_scope) view.discuss_scope = String(p.discuss_scope);
+      return {
+        screen: SCREEN_CONTEXT_SCREEN,
+        selection: selection,
+        view: view,
+        visible_entities: screenContextEntities(),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 画面文脈アダプターの契約（window.<Screen>.getScreenContext）。
+  window.LearningScreen = { getScreenContext: getScreenContext };
+
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return null;
     // レクチャー外科手術 案①（§15）: 講義再生中に composer（sendMessage は全送信経路の
@@ -4332,7 +4444,11 @@
     // （composer/音声/discuss/書き直し等）の合流点のため、ここ一箇所で足りる。
     const _materialTip = document.getElementById("inspect-tooltip");
     const _pinVisible = _latchState.pinned && !!_materialTip && !_materialTip.hidden;
+    // 画面文脈アダプター Phase 4: ラッチ元の生 kind は clearMaterialLatch より前に控える
+    // （送信ボディには載せず、screen_context.selection.element_type の解決にだけ使う）。
+    let _latchKind = "";
     if (_pinVisible && _latchState.anchor) {
+      _latchKind = _latchState.anchor.kind || "";
       if (!payload.element_id) {
         payload.element_id = _latchState.anchor.element_id;
         payload.element_type = _latchState.anchor.element_type;
@@ -4355,6 +4471,10 @@
           // §4-3: ヘルプボタン・通常送信・音声経路すべてがこの1関数を通る
           // （sendMessage が全送信経路の合流点のため、payload 側の値より必ず優先する）。
           screen_mode: resolveScreenMode(),
+          // 画面文脈アダプター Phase 4（SA1）: 参照だけを足す。テキスト送信・🤖 音声
+          // ループ・チップからの質問・discuss すべてがこの1関数を通るため、ここ一箇所で
+          // 全経路に載る。組めなければ null（サーバは無視する）。
+          screen_context: getScreenContext(payload, _latchKind),
         }),
       });
       if (res.ok) {
@@ -4861,6 +4981,10 @@
       element_type: materialAnchorElementType(kind),
       element_label: (content && content.label) || id,
       chunk_id: _closestChunkId(el),
+      // 画面文脈アダプター Phase 4: data-evidence-ref の生 kind（component / claim /
+      // equation / figure）。element_type（structure_anchor 語彙）では component と
+      // claim の区別が落ちるため、送信ボディには使わず screen_context の種別解決にだけ使う。
+      kind: kind,
     };
     const tip = document.getElementById("inspect-tooltip");
     if (tip) tip.classList.add("pinned");

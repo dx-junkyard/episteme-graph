@@ -417,6 +417,10 @@ _SPECS: tuple[DisclosureSpec, ...] = (
         external_transfer=(
             "送られます。入力した文・直近のやりとり・検索で選ばれた教材本文が、"
             "回答を作るために外部の AI プロバイダに送られます。"
+            "教材の上で範囲選択した文は、そのまま引用として一緒に送られます。"
+            "画面で要素（論理要素・主張・式・図）を開いているときは、その要素について"
+            "サーバが解析結果から組み立てた事実（要素の名前、関係する式や主張、"
+            "検証記録の有無、分野の地図での位置）も一緒に送られます。"
             "音声会話では、録音した音声（文字にするため）と読み上げる回答文も送られます。"
         ),
         withdrawal=(
@@ -439,29 +443,56 @@ _SPECS: tuple[DisclosureSpec, ...] = (
         basis=(
             "backend/api/routes/learning.py::learning_chat",
             "backend/api/routes/admin.py::list_unanswered_queries",
+            "backend/core/assistant_context/resolvers/learning.py",
             "backend/core/llm_policy.py",
         ),
         design_doc="docs/features/disclosure_axes_design.md",
         ai_touchpoints=(
             AiTouchpoint(
                 operation="学習チャットの質問",
-                sends="入力した文・直近のやりとり・検索で選ばれた教材本文",
+                sends=(
+                    "入力した文・直近のやりとり・検索で選ばれた教材本文と、"
+                    "教材の上で範囲選択した文・画面で開いている要素についてサーバが"
+                    "解析結果から組み立てた事実（要素の名前、関係する式や主張、"
+                    "検証記録の有無、分野の地図での位置）"
+                ),
                 feature="learning:chat",
             ),
             AiTouchpoint(
                 operation="気軽に話せる先生（カジュアル）",
-                sends="入力した文・直近のやりとり・検索で選ばれた教材本文",
+                sends=(
+                    "入力した文・直近のやりとり・検索で選ばれた教材本文と、"
+                    "教材の上で範囲選択した文"
+                ),
                 feature="learning:chat_casual",
             ),
             AiTouchpoint(
                 operation="論文と議論する（discuss）",
-                sends="入力した文・直近のやりとり・対象論文の本文",
+                sends=(
+                    "入力した文・直近のやりとり・対象論文の本文と、"
+                    "教材の上で範囲選択した文・画面で開いている要素についてサーバが"
+                    "解析結果から組み立てた事実（要素の名前、関係する式や主張、"
+                    "検証記録の有無、分野の地図での位置）"
+                ),
                 feature="learning:chat_discuss",
             ),
             AiTouchpoint(
-                operation="予想の前の問い・予想との違いの観点",
-                sends="あなたが書いた予想の文と、対象論文の本文",
+                operation="予想の前の問い（予想を書く前）",
+                sends=(
+                    "あなたが書いた予想の文と、対象論文の本文、"
+                    "教材の上で範囲選択した文"
+                ),
                 feature="learning:cycle_elicit",
+            ),
+            AiTouchpoint(
+                operation="予想との違いの観点（予想を書いたあと）",
+                sends=(
+                    "あなたが書いた予想の文と、対象論文の本文、"
+                    "教材の上で範囲選択した文・画面で開いている要素についてサーバが"
+                    "解析結果から組み立てた事実（要素の名前、関係する式や主張、"
+                    "検証記録の有無、分野の地図での位置）"
+                ),
+                feature="learning:cycle_diff",
             ),
             AiTouchpoint(
                 operation="音声で話す（聞き取り）",
