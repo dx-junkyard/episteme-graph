@@ -25,6 +25,7 @@ from typing import Any, Iterable
 from core.label_vocab import SUPPORT_SECTION_LABELS
 
 from core.graph_paper_layer.schema import (
+    DSL_POLARITY_LABELS,
     EQUATION_ROLE_LINKED,
     EQUATION_ROLE_NODE_KEYS,
     EXPLANATION_STATUS_PRIORITY,
@@ -208,6 +209,9 @@ class _PaperIndex:
 
         self.skeleton = _mapping(self.artifacts.get("paper_skeleton"))
         self.thesis = _mapping(self.artifacts.get("thesis_reconstruction"))
+        # P0-9: DSL 層（``dsl_linking`` artifact）。16〜22 ノードで論文の骨格を最もよく
+        # 表すのに、これまで読み手がどこにも居なかった層（調査A F-12）。保存はしない。
+        self.dsl = _mapping(self.artifacts.get("dsl_linking"))
 
         self.components: dict[str, dict] = {}
         for record in _dicts(_mapping(self.artifacts.get("component_assembly")).get("components")):
@@ -640,6 +644,7 @@ def build_paper_layer(
                 "unbound_equations": [],
                 "unbound_figures": [],
                 "unbound_claims": [],
+                "unbound_backbone": [],
             },
             "narrative": {"graph_summary": str(narrative.get("graph_summary") or "")},
         }
@@ -730,8 +735,17 @@ def build_paper_layer(
         }
 
     edges = _build_edges(graph_payload, index, edge_narratives)
-    paper = _build_paper(index, section_nodes, bound_claim_ids, reference_claims, node_dtos)
-    coverage = _build_coverage(index, section_nodes, bound_equation_ids, bound_claim_ids, reference_claims)
+    # P0-9: 「論文側の ID → グラフノード」の逆引き（支持構造・DSL の結び付けに使う）。
+    lookups = _graph_node_lookups(node_dtos)
+    paper = _build_paper(index, section_nodes, bound_claim_ids, reference_claims, node_dtos, lookups)
+    coverage = _build_coverage(
+        index,
+        section_nodes,
+        bound_equation_ids,
+        bound_claim_ids,
+        reference_claims,
+        paper["backbone"],
+    )
 
     return {
         "document_id": document_id,
@@ -775,7 +789,192 @@ def _empty_paper(index: _PaperIndex) -> dict:
         "central_thesis": None,
         "sections": [],
         "backbone": [],
+        # P0-9: グラフが無くても DTO の形は保つ（フロントが分岐を増やさずに済む）。
+        "support_structure": [],
+        "dsl": {"nodes": [], "edges": []},
     }
+
+
+# ---------------------------------------------------------------------------
+# 文章層・DSL 層（P0-9）
+#
+# 調査 A の F-14 / F-12: 「理解可能な記述はすでに生成されているのに、保存される単位の
+# 側で捨てられている」。ここで足すのは**読み時射影だけ**で、保存も LLM 呼び出しもない。
+# 結び付けは既存の対応（claim → グラフノード / thesis_ref → グラフノード）を使い、
+# 名寄せ・類似度・推定はしない（PL3）。
+# ---------------------------------------------------------------------------
+
+
+def _graph_node_lookups(node_dtos: dict[str, dict]) -> dict[str, dict[str, list[str]]]:
+    """射影済みノード DTO から「論文側の ID → グラフノード ID」の逆引きを作る。
+
+    値は node_id の昇順（``sorted(node_dtos)`` を走査するため、各リストは自然に
+    ソート済みになる）。ここで作る対応は既に ``node_dtos`` に入っているものの裏返し
+    なので、新しい推定は一切していない。
+    """
+    by_thesis_ref: dict[str, list[str]] = {}
+    by_claim: dict[str, list[str]] = {}
+    by_equation: dict[str, list[str]] = {}
+    for node_id in sorted(node_dtos):
+        dto = node_dtos[node_id]
+        for role in dto.get("thesis_roles") or []:
+            ref = str(_mapping(role).get("thesis_ref") or "")
+            if ref:
+                by_thesis_ref.setdefault(ref, []).append(node_id)
+        for item in dto.get("claims") or []:
+            agent_id = str(_mapping(item).get("agent_id") or "")
+            if agent_id:
+                by_claim.setdefault(agent_id, []).append(node_id)
+        for item in dto.get("equations") or []:
+            equation_id = str(_mapping(item).get("equation_id") or "")
+            if equation_id:
+                by_equation.setdefault(equation_id, []).append(node_id)
+    return {"thesis_ref": by_thesis_ref, "claim": by_claim, "equation": by_equation}
+
+
+def _build_support_structure(
+    index: _PaperIndex,
+    reference_claims: dict,
+    lookups: dict[str, dict[str, list[str]]],
+) -> list[dict]:
+    """中心命題の支持構造（thesis_reconstruction の ``support_structure``）を射影する。
+
+    節キー（``direct_supports`` / ``assumptions`` …）の表示名は
+    ``core/label_vocab.py::SUPPORT_SECTION_LABELS`` からのみ引く（新しい訳語表を
+    作らない）。エントリの ``reason`` / ``confidence`` は載せない（PL4）。
+    """
+    support = _mapping(index.thesis.get("support_structure"))
+    sections: list[dict] = []
+    for section_key, items in support.items():
+        key = str(section_key)
+        entries: list[dict] = []
+        for idx, item in enumerate(_dicts(items)):
+            ref = thesis_ref_for(key, idx)
+            agent_claim_ids = _id_list(item, "claim_ids")
+            claim_ids = _dedup(
+                str(_mapping(reference_claims.get(agent_id)).get("claim_id") or "")
+                for agent_id in agent_claim_ids
+            )
+            claim_ids = [value for value in claim_ids if value]
+            equation_labels = _equation_labels(index, _id_list(item, "equation_ids"))
+            node_ids = list(lookups["thesis_ref"].get(ref, []))
+            text = truncate_snippet(item.get("text"))
+            if not (text or claim_ids or equation_labels or node_ids):
+                continue
+            entries.append({
+                "thesis_ref": ref,
+                "text": text,
+                "support_type": str(item.get("support_type") or ""),
+                "claim_ids": claim_ids,
+                "equation_labels": equation_labels,
+                "node_ids": node_ids,
+            })
+        if not entries:
+            continue
+        sections.append({
+            "section_key": key,
+            "section_label": _SUPPORT_SECTION_LABELS.get(key, key),
+            "entries": entries,
+        })
+    return sections
+
+
+def _dsl_section(index: _PaperIndex, claim_ids: list[str], equation_ids: list[str]) -> str:
+    """DSL ノードの章。claim → 式の順に**実所在だけ**を見る（PL3）。"""
+    for claim_id in claim_ids:
+        section_id = index.claim_section(claim_id)
+        if section_id:
+            return section_id
+    for equation_id in equation_ids:
+        section_id = index.equation_section(equation_id)
+        if section_id:
+            return section_id
+    return ""
+
+
+def _build_dsl(index: _PaperIndex, lookups: dict[str, dict[str, list[str]]]) -> dict:
+    """DSL 層（``dsl_linking`` artifact）を論文の順に射影する。
+
+    ``node_id``（``n_001`` 等）は内部 ID なので**表示ラベルには使わない**（PL7）。
+    DTO には識別キーとして残すが、本文が空のノードは丸ごと落とす（ID しか出せない
+    ノードを画面に出さないため）。辺は両端が残ったものだけを保つ。
+    """
+    nodes: list[dict] = []
+    kept: set[str] = set()
+    for order, record in enumerate(_dicts(index.dsl.get("nodes"))):
+        node_id = str(record.get("node_id") or "").strip()
+        if not node_id or node_id in kept:
+            continue
+        node_value = truncate_snippet(record.get("node_value")).strip()
+        if not node_value:
+            continue
+        refs = _mapping(record.get("source_refs"))
+        claim_ids = _id_list(refs, "claim_ids")
+        equation_ids = _id_list(refs, "equation_ids")
+        section_id = _dsl_section(index, claim_ids, equation_ids)
+        node_ids = _dedup(
+            [node for claim_id in claim_ids for node in lookups["claim"].get(claim_id, [])]
+            + [node for equation_id in equation_ids for node in lookups["equation"].get(equation_id, [])]
+        )
+        kept.add(node_id)
+        nodes.append({
+            "node_id": node_id,
+            "node_type": str(record.get("node_type") or ""),
+            "node_value": node_value,
+            "source_kind": str(record.get("source_kind") or ""),
+            "is_thesis_anchor": bool(record.get("is_thesis_anchor", False)),
+            "section_id": section_id,
+            "node_ids": sorted(node_ids),
+            "_order": order,
+        })
+    # 論文の順（章 → agent の出力順）。章が引けないノードは末尾へ寄せる。
+    nodes.sort(key=lambda item: (index.section_sort_key(item["section_id"]), item["_order"]))
+    for item in nodes:
+        item.pop("_order", None)
+
+    edges: list[dict] = []
+    seen: set[tuple[str, str, str, str]] = set()
+    for record in _dicts(index.dsl.get("edges")):
+        source = str(record.get("from_node_id") or "").strip()
+        target = str(record.get("to_node_id") or "").strip()
+        if source not in kept or target not in kept:
+            continue
+        predicate = str(record.get("core_predicate") or "").strip()
+        domain_verb = str(record.get("domain_verb") or "").strip()
+        key = (source, target, predicate, domain_verb)
+        if key in seen:
+            continue
+        seen.add(key)
+        polarity = str(record.get("polarity") or "").strip()
+        edges.append({
+            "from_node_id": source,
+            "to_node_id": target,
+            "core_predicate": predicate,
+            "domain_verb": domain_verb,
+            "polarity": polarity,
+            # 記号のままでは読めないので表示語も添える（未知の値は語を付けない）。
+            "polarity_label": DSL_POLARITY_LABELS.get(polarity, ""),
+        })
+    return {"nodes": nodes, "edges": edges}
+
+
+def _build_unbound_backbone(backbone: list[dict]) -> list[dict]:
+    """フレーム（理論操作グラフ）に掛かっていない論理ブロック（P0-9）。
+
+    論文Bのように成果が第6・7章にあるのにフレームが第3章しか覆っていない場合、
+    「骨格はあるがノードが無い章」を被覆として正直に出す（設計 §3.2 と同じ立場で、
+    失敗ではなく信号。件数は出さない = PL4）。ラベルの無いブロックは内部 ID に
+    なってしまうので出さない（PL7）。
+    """
+    out: list[dict] = []
+    for block in _dicts(backbone):
+        if block.get("node_ids"):
+            continue
+        label = str(block.get("label") or "").strip()
+        if not label:
+            continue
+        out.append({"label": label, "block_type": str(block.get("block_type") or "")})
+    return out
 
 
 def _build_paper(
@@ -784,6 +983,7 @@ def _build_paper(
     bound_claim_ids: set[str],
     reference_claims: dict,
     node_dtos: dict[str, dict],
+    lookups: dict[str, dict[str, list[str]]],
 ) -> dict:
     goal = str(_mapping(index.skeleton.get("paper_goal")).get("text") or "") or None
     central_question = (
@@ -937,6 +1137,9 @@ def _build_paper(
         "central_thesis": central_thesis,
         "sections": sections,
         "backbone": backbone,
+        # P0-9: 文章層（中心命題の支持構造）と DSL 層。どちらも読み時射影で保存しない。
+        "support_structure": _build_support_structure(index, reference_claims, lookups),
+        "dsl": _build_dsl(index, lookups),
     }
 
 
@@ -946,6 +1149,7 @@ def _build_coverage(
     bound_equation_ids: set[str],
     bound_claim_ids: set[str],
     reference_claims: dict,
+    backbone: list[dict] | None = None,
 ) -> dict:
     unbound_sections = [
         {"section_id": section["section_id"], "title": section["title"]}
@@ -1010,4 +1214,6 @@ def _build_coverage(
         "unbound_equations": unbound_equations,
         "unbound_figures": unbound_figures,
         "unbound_claims": unbound_claims,
+        # P0-9: 骨格（論理ブロック）のうちノードが1つも掛かっていないもの。
+        "unbound_backbone": _build_unbound_backbone(backbone or []),
     }

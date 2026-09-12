@@ -876,6 +876,8 @@
       { title: "掛かっていない式", items: coverage.unbound_equations, key: "display_label" },
       { title: "掛かっていない図", items: coverage.unbound_figures, key: "display_label" },
       { title: "掛かっていない主張", items: coverage.unbound_claims, key: "text" },
+      // P0-9: 骨格（論理ブロック）はあるのにノードが1つも掛かっていない箇所。
+      { title: "掛かっていない骨格", items: coverage.unbound_backbone, key: "label" },
     ];
     var html = "";
     groups.forEach(function (group) {
@@ -892,6 +894,83 @@
     if (!html) return "";
     return '<div class="graph-review-paper-coverage"><div class="graph-review-paper-block-title">' +
       "フレームに掛かっていない要素</div>" + html + "</div>";
+  }
+
+  // 中心命題の支持構造（P0-9 / 調査A F-14）。thesis_reconstruction の
+  // support_structure を節ラベルごとに並べ、agent が合成した1文をそのまま読ませる。
+  // 式は印字番号チップ、ノードは既存のノードチップ（クリックでそのノードへ）。
+  // 件数バッジ・confidence は出さない（PL4）。空なら区画ごと出さない。
+  function paperSupportStructureHtml(sections) {
+    var list = (sections || []).filter(function (sec) {
+      return sec && Array.isArray(sec.entries) && sec.entries.length;
+    });
+    if (!list.length) return "";
+    var html = '<div class="graph-review-paper-block">' +
+      '<div class="graph-review-paper-block-title">中心命題の支持構造</div>';
+    list.forEach(function (sec) {
+      var body = "";
+      (sec.entries || []).forEach(function (entry) {
+        var text = String((entry && entry.text) || "").trim();
+        var labels = (entry && entry.equation_labels) || [];
+        var item = text ? richText(text) : "";
+        if (labels.length) {
+          item += paperStaticChips(labels.map(function (label) {
+            return { display_label: label };
+          }));
+        }
+        item += paperNodeChips((entry && entry.node_ids) || []);
+        if (!item) return;
+        body += "<li>" + item + "</li>";
+      });
+      if (!body) return;
+      html += '<div class="graph-review-paper-coverage-group">' +
+        '<div class="graph-review-paper-subtitle">' +
+        esc(String(sec.section_label || sec.section_key || "")) + "</div><ul>" + body + "</ul></div>";
+    });
+    html += "</div>";
+    return html;
+  }
+
+  // 概念関係（DSL 層。P0-9 / 調査A F-12「最も忠実なのに下流に届いていない層」）。
+  // 主語は node_value で、node_id（n_001 等）は**表示しない**（PL7。DTO には
+  // 識別キーとして入っているが画面には出さない）。極性は記号ではなくサーバが
+  // 添えた語（polarity_label）で書く。
+  function paperDslHtml(dsl) {
+    var nodes = (dsl && Array.isArray(dsl.nodes)) ? dsl.nodes : [];
+    if (!nodes.length) return "";
+    var valueById = {};
+    nodes.forEach(function (node) {
+      var value = String((node && node.node_value) || "").trim();
+      if (node && node.node_id && value) valueById[String(node.node_id)] = value;
+    });
+    var html = '<div class="graph-review-paper-block">' +
+      '<div class="graph-review-paper-block-title">概念関係（DSL）</div><ul>';
+    nodes.forEach(function (node) {
+      var value = String((node && node.node_value) || "").trim();
+      if (!value) return;
+      html += '<li><span class="graph-review-paper-strong">' + esc(value) + "</span>" +
+        paperNodeChips((node && node.node_ids) || []) + "</li>";
+    });
+    html += "</ul>";
+    var edges = ((dsl && Array.isArray(dsl.edges)) ? dsl.edges : []).filter(function (edge) {
+      return edge && valueById[String(edge.from_node_id)] && valueById[String(edge.to_node_id)];
+    });
+    if (edges.length) {
+      html += '<div class="graph-review-paper-subtitle">関係</div><ul>';
+      edges.forEach(function (edge) {
+        var verb = String(edge.domain_verb || "").trim();
+        var predicate = String(edge.core_predicate || "").trim();
+        var relation = verb && predicate ? verb + " / " + predicate : (verb || predicate);
+        var polarity = String(edge.polarity_label || "").trim();
+        if (polarity) relation = relation ? relation + " ・ " + polarity : polarity;
+        html += "<li>" + esc(valueById[String(edge.from_node_id)]) +
+          ' <span class="graph-review-paper-rel">—[' + esc(relation) + "]→</span> " +
+          esc(valueById[String(edge.to_node_id)]) + "</li>";
+      });
+      html += "</ul>";
+    }
+    html += "</div>";
+    return html;
   }
 
   function renderPaperOutline() {
@@ -923,6 +1002,9 @@
       html += paperFactLine(PAPER_UNAVAILABLE_TEXT);
     }
     html += paperBackboneHtml(paper.backbone);
+    // P0-9: 文章層（支持構造）と DSL 層は骨格の隣に置く（章アウトラインの末尾）。
+    html += paperSupportStructureHtml(paper.support_structure);
+    html += paperDslHtml(paper.dsl);
     html += paperCoverageHtml(data.coverage);
     container.innerHTML = html;
 

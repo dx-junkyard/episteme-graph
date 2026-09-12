@@ -555,6 +555,55 @@
     return html;
   }
 
+  // 「論文の骨格（章の流れ）」（P0-9。主語=論文）。paper_skeleton の logical_blocks を
+  // サーバがそのまま射影したものを出す（要約・和訳・並べ替えはしない）。
+  //
+  // なぜ出すのか: 構造化成果（claim / component）は論文の一部の章しか覆わないことが
+  // あるのに対し、この骨格は第1章から最終章までを覆っている（調査A F-14）。
+  // 「見えているのに届いていない」層をそのまま読めるようにするのが目的で、新しい
+  // 単位を作ったわけではない。
+  //
+  // - block_type は A層の内部語彙なので、label / summary を主に見せて補助表示に留める。
+  // - 開幕画面の一等地を長い一覧で埋めないよう、既定は畳んだ details にする（押せば
+  //   同じ画面から到達できる = OA7）。
+  // - 骨格が無い論文ではキー自体がサーバから来ないので、区画ごと出ない（催促しない）。
+  function renderChapterSkeletonSection(doc) {
+    var blocks = (doc && Array.isArray(doc.chapter_skeleton)) ? doc.chapter_skeleton : [];
+    var usable = blocks.filter(function (b) {
+      return b && (String(b.label || "").trim() || String(b.summary || "").trim());
+    });
+    if (!usable.length) return "";
+    var html = '<details class="discuss-section discuss-section-chapters">';
+    html += '<summary class="discuss-section-hd">論文の骨格（章の流れ）</summary>';
+    html += '<div class="discuss-section-sub">この論文が、どんな順に組み立てられているかです。</div>';
+    html += '<ol class="discuss-chapter-list">';
+    usable.forEach(function (b) {
+      var label = String(b.label || "").trim();
+      var summary = String(b.summary || "").trim();
+      var kind = String(b.block_type || "").trim();
+      var titles = Array.isArray(b.section_titles) ? b.section_titles : [];
+      html += '<li class="discuss-chapter-item">';
+      if (label) html += '<span class="discuss-chapter-label">' + esc(label) + '</span>';
+      if (kind) html += '<span class="discuss-chapter-type">' + esc(kind) + '</span>';
+      if (summary) html += '<div class="discuss-chapter-summary">' + esc(summary) + '</div>';
+      if (titles.length) {
+        html += '<div class="discuss-chapter-sections">';
+        titles.forEach(function (t) {
+          html += '<span class="discuss-chapter-section">' + esc(String(t)) + '</span>';
+        });
+        html += '</div>';
+      }
+      html += '</li>';
+    });
+    html += '</ol>';
+    if (doc && doc.chapter_skeleton_truncated) {
+      html += '<div class="discuss-muted discuss-truncated-note">' +
+        'この一覧は主要なものに絞って表示しています。</div>';
+    }
+    html += '</details>';
+    return html;
+  }
+
   function renderThesisSection(doc) {
     var thesis = doc.thesis;
     var html = '<div class="discuss-section discuss-section-thesis">';
@@ -798,6 +847,9 @@
       html += '<div class="discuss-opening-doc">';
       if (multi) html += '<div class="discuss-opening-doc-title">' + esc(doc.title || "") + '</div>';
       html += renderQuestionSection(doc);
+      // 問いの直後に論文の骨格（章の流れ）を置く。既定は畳まれているので一等地の
+      // 密度は変わらない（P0-9）。
+      html += renderChapterSkeletonSection(doc);
       html += renderThesisSection(doc);
       // 承認済みの「議論のきっかけ」は一等地（折りたたみの外）に置く。無ければ何も出ない。
       html += renderDiscussionSeedsSection(doc);

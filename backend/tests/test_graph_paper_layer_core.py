@@ -214,9 +214,54 @@ def _full_artifacts():
             "central_question": "Is it linear in this regime?",
             "support_structure": {
                 "direct_supports": [
-                    {"text": "Because the residual is small.", "claim_ids": ["claim_a"], "equation_ids": []}
+                    {
+                        "text": "Because the residual is small.",
+                        "claim_ids": ["claim_a"],
+                        "equation_ids": ["eq_12"],
+                        "support_type": "empirical",
+                        "reason": "…",
+                        "confidence": 0.8,
+                    }
                 ]
             },
+        },
+        # P0-9: DSL 層（F-12「最も忠実なのに下流に届いていない層」）。
+        "dsl_linking": {
+            "dsl_version": "v1",
+            "nodes": [
+                {
+                    "node_id": "n_001",
+                    "node_type": "Approximation",
+                    "node_value": "linear regime approximation",
+                    "source_kind": "claim",
+                    "source_refs": {"claim_ids": ["claim_a"], "equation_ids": [], "thesis_refs": []},
+                    "reason": "…",
+                    "confidence": 0.6,
+                    "is_thesis_anchor": True,
+                },
+                {
+                    "node_id": "n_002",
+                    "node_type": "Observable",
+                    "node_value": "residual amplitude",
+                    "source_kind": "equation",
+                    "source_refs": {"claim_ids": [], "equation_ids": ["eq_12"], "thesis_refs": []},
+                    "reason": "…",
+                    "confidence": 0.4,
+                },
+            ],
+            "edges": [
+                {
+                    "edge_id": "e_001",
+                    "from_node_id": "n_001",
+                    "to_node_id": "n_002",
+                    "core_predicate": "DEFINES",
+                    "domain_verb": "defines",
+                    "polarity": "+",
+                    "evidence_refs": {"claim_ids": ["claim_a"]},
+                    "reason": "…",
+                    "confidence": 0.5,
+                }
+            ],
         },
         "component_assembly": {
             "components": [

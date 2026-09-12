@@ -999,3 +999,70 @@ class TestPaperLayer:
         legend_css = CSS_SRC[CSS_SRC.index(".graph-review-paper-cue-legend"):]
         legend_css = legend_css[: legend_css.index("}")]
         assert "red" not in legend_css and "#ef4444" not in legend_css
+
+    # --- P0-9 文章層（支持構造）と DSL 層 ----------------------------------
+    #
+    # 正本: docs/architecture/knowledge_structure_review_2026-09-12.md §4 の P0-9
+    # （A_fidelity.md の F-12 / F-14）。読み時射影で足した2区画を、既存の論文層と
+    # 同じ規律（PL4 数値なし / PL7 内部 ID なし / 空なら区画ごと非表示）で描く。
+
+    def test_support_structure_and_dsl_are_rendered_in_the_paper_view(self):
+        outline = JS_SRC[JS_SRC.index("function renderPaperOutline("):]
+        outline = outline[: outline.index("\n  function markSelectedPaperChips(")]
+        idx_backbone = outline.index("paperBackboneHtml(paper.backbone)")
+        idx_support = outline.index("paperSupportStructureHtml(paper.support_structure)")
+        idx_dsl = outline.index("paperDslHtml(paper.dsl)")
+        idx_coverage = outline.index("paperCoverageHtml(data.coverage)")
+        assert idx_backbone < idx_support < idx_dsl < idx_coverage
+
+    def test_support_structure_block_reuses_the_existing_chips(self):
+        block = JS_SRC[JS_SRC.index("function paperSupportStructureHtml("):]
+        block = block[: block.index("\n  // 概念関係")]
+        assert "中心命題の支持構造" in block
+        assert "sec.section_label" in block
+        # 式は印字番号チップ、ノードは既存のノードチップ（クリックで移動）を再利用する。
+        assert "entry.equation_labels" in block
+        assert "paperNodeChips(" in block
+        # 空なら区画ごと出さない。件数バッジ・警告色を作らない（PL4）。
+        assert 'if (!list.length) return ""' in block
+        assert ".length +" not in block
+        assert "警告" not in block
+
+    def test_dsl_block_shows_values_not_internal_ids(self):
+        block = JS_SRC[JS_SRC.index("function paperDslHtml("):]
+        block = block[: block.index("\n  function renderPaperOutline(")]
+        assert "概念関係（DSL）" in block
+        # 主語は node_value。node_id は照合キーとしてしか使わない（PL7）。
+        assert "node.node_value" in block
+        assert "esc(String(node.node_id))" not in block
+        assert "valueById[String(edge.from_node_id)]" in block
+        # 関係は A —[verb / PREDICATE]→ B の1行表記。極性は記号ではなく語（サーバ製）。
+        assert "domain_verb" in block and "core_predicate" in block
+        assert "edge.polarity_label" in block
+        assert 'if (!nodes.length) return ""' in block
+
+    def test_unbound_backbone_is_part_of_the_coverage_block(self):
+        block = JS_SRC[JS_SRC.index("function paperCoverageHtml("):]
+        block = block[: block.index("\n  // 中心命題の支持構造")]
+        assert "coverage.unbound_backbone" in block
+        assert "掛かっていない骨格" in block
+
+    def test_new_paper_blocks_are_es5(self):
+        block = JS_SRC[JS_SRC.index("function paperSupportStructureHtml("):]
+        block = block[: block.index("\n  function renderPaperOutline(")]
+        assert "=>" not in block
+        assert not re.search(r"\bconst\s", block)
+        assert not re.search(r"\blet\s", block)
+
+    def test_no_new_ui_anchor_was_introduced(self):
+        """既存 graph-review.paper-view の中の描画追加に留める（マニュアル3点セットを
+        増やさない）。アンカー一覧の正本は test_admin_help_ui_anchors.py。"""
+        anchors = set(re.findall(r'data-ui-anchor="([^"]+)"', JS_SRC))
+        assert "graph-review.paper-support" not in anchors
+        assert "graph-review.paper-dsl" not in anchors
+
+    def test_dsl_relation_style_is_defined_and_not_a_warning(self):
+        assert ".graph-review-paper-rel" in CSS_SRC
+        rel_css = CSS_SRC[CSS_SRC.index(".graph-review-paper-rel"):]
+        rel_css = rel_css[: rel_css.index("}")]
+        assert "red" not in rel_css and "#ef4444" not in rel_css

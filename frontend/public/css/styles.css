@@ -9586,6 +9586,41 @@ body.admin-inspect-mode textarea:disabled {
 .discuss-section-unverified > summary { cursor: pointer; }
 .discuss-section-unverified > summary.discuss-section-hd { margin-bottom: 4px; }
 
+/* 「論文の骨格（章の流れ）」（知識構造の見直し P0-9 / 調査A F-14）。paper_skeleton の
+   logical_blocks をそのまま読ませる区画。既定は畳んでおき、一等地の密度を変えない。
+   警告色・強調色は使わず、事実として並べる。 */
+.discuss-section-chapters > summary { cursor: pointer; }
+.discuss-section-chapters > summary.discuss-section-hd { margin-bottom: 4px; }
+.discuss-chapter-list {
+  margin: 4px 0 0;
+  padding-left: 1.2em;
+}
+.discuss-chapter-item {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--color-text-secondary);
+  margin-bottom: 6px;
+}
+.discuss-chapter-item:last-child { margin-bottom: 0; }
+.discuss-chapter-label { color: var(--color-text-primary); }
+/* block_type は A層の内部語彙なので、主役（label / summary）より弱く出す。 */
+.discuss-chapter-type {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  margin-left: 6px;
+}
+.discuss-chapter-summary { margin-top: 2px; }
+.discuss-chapter-sections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 2px;
+}
+.discuss-chapter-section {
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
 .discuss-backbone-list {
   display: flex;
   flex-wrap: wrap;
@@ -12007,6 +12042,8 @@ button.element-card-item:focus-visible .element-card-item-label {
 .graph-review-paper-subtitle { font-weight: 600; font-size: 12px; margin-bottom: 2px; }
 .graph-review-paper-strong { font-weight: 600; }
 .graph-review-paper-note { color: var(--color-text-secondary, #64748b); font-size: 12px; }
+/* 概念関係（DSL 層。P0-9）の述語表記 `A —[verb / PREDICATE]→ B` を主語より弱く出す。 */
+.graph-review-paper-rel { color: var(--color-text-tertiary, #6b7280); font-size: 11.5px; }
 .graph-review-paper-flow { font-size: 12px; }
 .graph-review-paper-item { margin: 4px 0 6px; }
 .graph-review-paper-item-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }

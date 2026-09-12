@@ -110,6 +110,22 @@ UNBOUND_CLAIM_SUPPORT_STATUS = "source_backed"
 #: 呼び出し側が問い合わせの時点で除外する）。
 EXPLANATION_STATUS_PRIORITY: tuple[str, ...] = ("approved", "candidate")
 
+#: DSL エッジの極性（P0-9）。語彙の正本は
+#: ``src/episteme_graph/agents/dsl_linking/schema.py::POLARITIES``（``+`` / ``-`` /
+#: ``+/-`` / ``?``）で、ここに置くのはその**表示語**だけである。記号のまま画面に出すと
+#: 「A —[derives +]→ B」のように読めないため、DTO 側で語に開いてから渡す
+#: （PL7 の「内部表現を表示ラベルにしない」と同じ趣旨）。
+#:
+#: ``core/label_vocab.py`` に置かないのは、あちらが「段階ラベル（数値→語）と状態投影」
+#: の正本であって DSL の関係語彙を持たないため。将来 DSL 層の語彙が学習者側にも出る
+#: ようになったら label_vocab へ移す（そのときは本表を削除して委譲する）。
+DSL_POLARITY_LABELS: dict[str, str] = {
+    "+": "順方向",
+    "-": "逆方向",
+    "+/-": "両方向",
+    "?": "向きは未確定",
+}
+
 # ---------------------------------------------------------------------------
 # 事実文（PL8）
 #
@@ -135,6 +151,9 @@ FACT_NO_FIGURES = "図表の解析結果が無いため、図表の対応は表�
 FACT_NO_SKELETON = "論文骨格の解析結果が無いため、論文の目的と論理ブロックは表示できません。"
 FACT_NO_THESIS = "中心命題の解析結果が無いため、命題上の役割は表示できません。"
 FACT_NO_COMPONENTS = "コンポーネントの解析結果が無いため、要約は表示できません。"
+#: P0-9: 文章層（中心命題の支持構造）と DSL 層を論文層に出すための事実文。
+#: ``FACT_NO_THESIS`` は支持構造の欠落も兼ねる（同じ artifact なので行を分けない）。
+FACT_NO_DSL = "概念関係（DSL）の解析結果が無いため、概念どうしの関係は表示できません。"
 
 #: artifact のステージ名 → 欠落時の事実文 + 主たるコレクションのキー。
 #: （値は事実文の**参照**なので、ラベル表の重複走査には当たらない。）
@@ -149,6 +168,7 @@ MISSING_ARTIFACT_FACTS: tuple[tuple[str, str, str], ...] = (
     ("paper_skeleton", "logical_blocks", FACT_NO_SKELETON),
     ("thesis_reconstruction", "central_thesis", FACT_NO_THESIS),
     ("component_assembly", "components", FACT_NO_COMPONENTS),
+    ("dsl_linking", "nodes", FACT_NO_DSL),
 )
 
 # ---------------------------------------------------------------------------
