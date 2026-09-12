@@ -14,7 +14,7 @@ from dependencies import _require_teacher
 from core import figure_reanalysis
 from core.deliberation.identity_links import confidence_label
 from core.document_pipeline.figure_images import load_document_figures
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import document_run_artifacts
 from core.figure_presentation import presentation_payload, set_reviewed_mode
 from core.schema import AUDIT_ENTITY_FIGURE_PRESENTATION
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
@@ -33,11 +33,14 @@ def _canonical_document_id(chunks: list[dict], fallback: str) -> str:
     return fallback
 
 
-def _latest_records(document_id: str) -> dict[str, dict]:
-    """Read current or pre-#496 artifacts; absence is a normal old-run case."""
+def _adopted_records(document_id: str) -> dict[str, dict]:
+    """Read current or pre-#496 artifacts; absence is a normal old-run case.
+
+    run の選び方は成果物参照の正本 ``document_run_artifacts``（adopted）に従う
+    （知識構造の見直し 2026-09-12 C-8。以前は status を問わない最新 run を読んでいた）。
+    """
     try:
-        latest_run = get_latest_analysis_run(document_id=document_id)
-        artifacts = (((latest_run or {}).get("stage_outputs") or {}).get("_artifacts") or {})
+        artifacts = document_run_artifacts(document_id)
         records = (artifacts.get("apparatus_semantics") or {}).get("apparatus_records") or []
         return {
             str(record.get("figure_id")): record
@@ -70,7 +73,7 @@ def list_document_figures_with_presentation(
         )
         viewer_is_owner = False
     rows = load_document_figures(canonical_document_id)
-    artifacts = _latest_records(canonical_document_id)
+    artifacts = _adopted_records(canonical_document_id)
     figures: list[dict] = []
     for row in rows:
         figure_id = str(row.get("id") or "")

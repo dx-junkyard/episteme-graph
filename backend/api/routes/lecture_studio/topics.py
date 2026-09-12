@@ -31,6 +31,7 @@ from core.course_content_builder import (
     _required_figure_items,
     build_topic_evidence_items,
 )
+from core.document_pipeline.persistence import resolve_artifact_runs
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
 from core.llm_worker.single_shot import LLMSingleShotError, structured_call
@@ -718,6 +719,22 @@ def get_lecture_studio_document_structure(
                 "doc_title": r[3] or "",
             }
 
+    # --- Agent 復元済み文書構造は**採用 run** から読む（C-8）---------------
+    # 知識構造の見直し 2026-09-12 C-8: 以前はここだけ material ごとに
+    # ``ORDER BY created_at DESC LIMIT 1``（status 不問）の自前 SQL を発行していたため、
+    # 走行中の再解析 run の途中構造が原稿スタジオに出得た。成果物参照の正本
+    # ``resolve_artifact_runs``（adopted）に寄せ、ついでに N+1 セッションも解消する。
+    # 本エンドポイントは「解析済みの構造」を返すものなので、``analysis_status`` も
+    # 同じ採用 run の状態にする（採用 run が無ければ "not_started" = 出せる構造がまだない）。
+    doc_ids = sorted({m["document_id"] for m in mat_map.values() if m["document_id"]})
+    adopted_runs: dict[str, dict] = {}
+    if doc_ids:
+        session = _pg_session()
+        try:
+            adopted_runs = resolve_artifact_runs(session, doc_ids)
+        finally:
+            session.close()
+
     documents_out = []
     for source in sources:
         mid = source.get("material_id", "")
@@ -726,34 +743,14 @@ def get_lecture_studio_document_structure(
         mat = mat_map[mid]
         doc_id = mat["document_id"]
 
-        # --- Agent復元済み文書構造を取得 ---
         agent_structure = None
         analysis_status = "not_started"
-        if doc_id:
-            session = _pg_session()
-            try:
-                run_row = session.execute(
-                    sa_text("""
-                        SELECT status, stage_outputs
-                        FROM document_analysis_runs
-                        WHERE document_id = :doc_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """),
-                    {"doc_id": doc_id},
-                ).fetchone()
-            finally:
-                session.close()
-            if run_row:
-                analysis_status = run_row[0] or "not_started"
-                stage_outputs = run_row[1] or {}
-                if isinstance(stage_outputs, str):
-                    try:
-                        stage_outputs = json.loads(stage_outputs)
-                    except Exception:
-                        stage_outputs = {}
-                artifacts = stage_outputs.get("_artifacts") or {}
-                agent_structure = artifacts.get("document_structure")
+        run_entry = adopted_runs.get(doc_id) if doc_id else None
+        if run_entry:
+            analysis_status = run_entry.get("status") or "not_started"
+            stage_outputs = run_entry.get("stage_outputs") or {}
+            artifacts = stage_outputs.get("_artifacts") or {}
+            agent_structure = artifacts.get("document_structure")
 
         # --- チャンクベースのフォールバック構造 ---
         chunks = _get_course_chunks(course_data)

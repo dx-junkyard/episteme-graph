@@ -55,7 +55,7 @@ from core import decision_context
 from core.course_data import course_source_material_ids, course_sources
 from core.deliberation.graph_dialogue import APPROVED_REVIEW_STATUSES
 from core.deliberation.refs import document_run_artifacts
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import document_run_cartridge_id
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
@@ -984,21 +984,22 @@ def _is_low_value_claim_text(text: str) -> bool:
 
 
 def _document_cartridge_id(document_id: str) -> str:
-    """document の分野（最新 run の ``cartridge_id``）。未解析・分野中立・不明は ``""``。
+    """document の分野（採用 run の ``cartridge_id``）。未解析・分野中立・不明は ``""``。
 
     提案 C2: 概念正規化はこの分野に**係留**する。空文字を返した場合、
     ``normalize_concepts`` は分野語彙を読まず（既定カートリッジへ縮退させない）
     元の名前をそのまま残す。
+
+    run の選び方は成果物参照と同一（adopted。知識構造の見直し 2026-09-12 C-8）。
     """
     doc_id = str(document_id or "").strip()
     if not doc_id:
         return ""
     try:
-        run = get_latest_analysis_run(document_id=doc_id)
+        return document_run_cartridge_id(doc_id)
     except Exception:  # noqa: BLE001 — fail-soft（正規化しないだけ）
         logger.warning("failed to resolve cartridge for document=%s", doc_id, exc_info=True)
         return ""
-    return str((run or {}).get("cartridge_id") or "").strip()
 
 
 def _concept_normalization_context(document_id: str) -> tuple[str, dict[str, str]]:

@@ -435,10 +435,19 @@ class TestConceptNormalizerAnchoring:
         assert "teacher_alias_canonical_map" in src
 
     def test_document_field_comes_from_the_analysis_run(self):
+        """分野は解析 run の ``cartridge_id`` から引く。
+
+        知識構造の見直し 2026-09-12 C-8（P0-8）で run 選択を成果物と同じ
+        **採用 run**（adopted）に一本化したため、ここが読むのは
+        ``get_latest_analysis_run`` ではなく ``document_run_cartridge_id``。
+        「run から分野を引く／既定カートリッジへ縮退しない」という本来の検査意図は
+        そのままで、run の選び方だけが変わっている。
+        """
         src = _read(THEORY_ROUTES)
         body = extract_function_source(src, "_document_cartridge_id")
-        assert "get_latest_analysis_run(document_id=doc_id)" in body
-        assert 'get("cartridge_id")' in body
+        assert "document_run_cartridge_id(doc_id)" in body
+        # 既定カートリッジへの縮退を足していないこと（空文字で返す）。
+        assert 'return ""' in body
 
 
 class TestTeacherAliasCanonicalMap:

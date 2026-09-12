@@ -103,7 +103,11 @@ from core.course_data import (
 )
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import (
+    document_run_artifacts,
+    get_latest_analysis_run,
+    resolve_artifact_runs,
+)
 from core import llm_policy
 from core.llm import generate_text
 from core.llm_usage import metrics as llm_usage_metrics
@@ -1175,6 +1179,10 @@ def list_materials(
         ).fetchall()
 
         material_ids = [r[0] for r in records if r[0]]
+        # NOTE: ここは**進捗表示**のための最新 run（status / current_stage /
+        # error_message / projector の status 合成）。走行中・失敗中の run も見たい
+        # 用途なので、意図的に latest ポリシのまま（C-8 の「成果物は採用 run」とは
+        # 別の軸）。成果物（document_structure）は下の adopted_structures で別に引く。
         latest_runs: dict[str, dict] = {}
         if material_ids:
             run_params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
@@ -1197,6 +1205,8 @@ def list_materials(
         # --- サマリ集約（?include=summary のときのみ）---------------------
         # 教材選択UI向け。すべて既存テーブルからの読み取りで、A層は非改変。
         components_by_mid: dict[str, list[str]] = {}
+        # material_id -> document_structure artifact（**採用 run** から。C-8）
+        adopted_structures: dict[str, dict] = {}
         materials_with_course: set[str] = set()
         if want_summary and records:
             uuid_to_mid = {r[9]: r[0] for r in records if r[9]}
@@ -1223,6 +1233,16 @@ def list_materials(
                     mid = uuid_to_mid.get(uid)
                     if mid:
                         components_by_mid.setdefault(mid, []).append(name)
+
+                # 見出しの出所は**成果物**なので採用 run から読む（C-8）。
+                # 進捗表示の latest_runs とは run が違い得る（走行中の再解析中でも
+                # 一覧には採用済みの構造が出る）。
+                for doc_uuid, entry in resolve_artifact_runs(session, doc_uuids).items():
+                    stage_outputs = entry.get("stage_outputs") or {}
+                    structure = (stage_outputs.get("_artifacts") or {}).get("document_structure")
+                    mid = uuid_to_mid.get(doc_uuid)
+                    if mid and isinstance(structure, dict):
+                        adopted_structures[mid] = structure
 
             # 自分がこの教材からコースを作成済みか（コース未作成リスト用）
             course_mid_rows = session.execute(
@@ -1308,8 +1328,8 @@ def list_materials(
                     name = c.get("name") if isinstance(c, dict) else str(c)
                     if name:
                         top_concepts.append(name)
-            # 文書構造の見出し
-            doc_structure = (stage_outputs.get("_artifacts") or {}).get("document_structure")
+            # 文書構造の見出し（採用 run の成果物。C-8）
+            doc_structure = adopted_structures.get(mid)
             if isinstance(doc_structure, dict):
                 struct_sections = doc_structure.get("sections") or doc_structure.get("blocks") or []
                 for sec in struct_sections[:12]:
@@ -2262,26 +2282,18 @@ def _build_material_context(
             params,
         ).fetchall()
 
-        # --- 6) document_analysis_runs: 完了状態確認 + document_structure ---
-        analysis_rows = session.execute(
-            sa_text(f"""
-                SELECT document_id, status, stage_outputs
-                FROM document_analysis_runs
-                WHERE document_id IN ({uuid_placeholders})
-                ORDER BY updated_at DESC
-            """),
-            uuid_params,
-        ).fetchall() if doc_uuids else []
+        # --- 6) 採用 run: 完了状態確認 + document_structure ---
+        # ここで見たいのは「この教材の成果物」なので、run 選択は成果物参照の正本
+        # ``resolve_artifact_runs``（adopted）に従う（知識構造の見直し 2026-09-12 C-8。
+        # 以前は status を問わない ``ORDER BY updated_at DESC`` の自前 SQL だったため、
+        # 走行中の再解析 run の途中構造をコース設計の文脈に混ぜ得た）。
+        # 戻り値は ``{document_id: {"run_id", "stage_outputs", "status", "cartridge_id"}}``。
+        analysis_by_uuid: dict[str, dict] = (
+            resolve_artifact_runs(session, doc_uuids) if doc_uuids else {}
+        )
 
     finally:
         session.close()
-
-    # 完了済み analysis run のマップ (doc_uuid → row)
-    analysis_by_uuid: dict[str, object] = {}
-    for row in analysis_rows:
-        uid = row[0]
-        if uid not in analysis_by_uuid:
-            analysis_by_uuid[uid] = row
 
     # --- 7) コンテキスト文字列を組み立て ---
     sections: list[str] = []
@@ -2301,7 +2313,9 @@ def _build_material_context(
 
         # Agent完了状態チェック
         analysis_run = analysis_by_uuid.get(doc_uuid)
-        pipeline_complete = analysis_run is not None and analysis_run[1] == "completed"
+        pipeline_complete = (
+            analysis_run is not None and analysis_run.get("status") == "completed"
+        )
 
         doc_components = [r for r in component_rows if r[1] == doc_uuid]
         doc_graphs = [r for r in graph_rows if r[0] == doc_uuid]
@@ -2421,7 +2435,7 @@ def _build_material_context(
 
         # ---- 補助入力: 文書構造 (document_structure) ----
         if analysis_run:
-            stage_outputs = analysis_run[2] if isinstance(analysis_run[2], dict) else {}
+            stage_outputs = analysis_run.get("stage_outputs") or {}
             doc_structure = (stage_outputs.get("_artifacts") or {}).get("document_structure")
             if doc_structure and isinstance(doc_structure, dict):
                 struct_sections = doc_structure.get("sections") or doc_structure.get("blocks") or []
@@ -3347,14 +3361,14 @@ def list_document_figures(
 
     rows = load_document_figures(canonical_document_id)
 
-    # 最新 run の apparatus_semantics artifact から figure_id 単位の候補を拾う
+    # 採用 run の apparatus_semantics artifact から figure_id 単位の候補を拾う
     # （無ければ空リスト。apparatus_semantics は常に review_required 系の
     # candidate であり、ここでは表示用に必要なフィールドだけを抜粋する）。
+    # run の選び方は成果物参照の正本 document_run_artifacts（adopted）に従う
+    # （知識構造の見直し 2026-09-12 C-8）。
     apparatus_by_figure: dict[str, list[dict]] = {}
     try:
-        latest_run = get_latest_analysis_run(document_id=canonical_document_id)
-        stage_outputs = (latest_run or {}).get("stage_outputs") or {}
-        artifacts = stage_outputs.get("_artifacts") or {}
+        artifacts = document_run_artifacts(canonical_document_id)
         apparatus_artifact = artifacts.get("apparatus_semantics") or {}
         for record in apparatus_artifact.get("apparatus_records") or []:
             fig_id = str(record.get("figure_id") or "")

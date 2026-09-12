@@ -23,7 +23,7 @@ from sqlalchemy import text as sa_text
 from core import element_explanations as element_explanations_store
 from core.postgres import get_session
 from core.figure_presentation import presentation_payload
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import document_run_artifacts
 from core.deliberation import identity_links as identity_links_mod
 from core.deliberation import refs as refs_mod
 from core.deliberation.schema import (
@@ -341,8 +341,9 @@ def _decompose_figure(ref: ElementRef) -> dict[str, Any]:
         notes.append("caption 対応なし（caption_block_id=NULL でも保持・P4）")
     artifact_record: dict[str, Any] = {}
     try:
-        latest_run = get_latest_analysis_run(document_id=ref.document_id or "")
-        artifacts = (((latest_run or {}).get("stage_outputs") or {}).get("_artifacts") or {})
+        # 成果物 run の選び方は document_run_artifacts（adopted）に一本化する
+        # （知識構造の見直し 2026-09-12 C-8）。
+        artifacts = document_run_artifacts(ref.document_id or "")
         for record in (artifacts.get("apparatus_semantics") or {}).get("apparatus_records") or []:
             if isinstance(record, dict) and str(record.get("figure_id") or "") == ref.element_id:
                 artifact_record = record

@@ -64,7 +64,32 @@ def _json_dumps(value: Any) -> str:
     return json.dumps(_strip_nuls(value), ensure_ascii=False)
 
 
+def claim_span_key(block_id: Any, span_id: Any) -> str:
+    """``"{block_id}:{span_id}"``（文書内で一意な span の論理キー）を返す。
+
+    rhetorical_role の ``span_id`` は **block ごとに ``span_001`` から振り直される**ため
+    単独では文書内一意にならない（知識構造の見直し 2026-09-12 S-3 / F-4: 論文Aの
+    claim 9行すべてが ``legacy_ids=["claim_span_001","span_001"]`` になり agent ID →
+    DB 行の逆引きが 9-way に曖昧だった）。``block_id`` は DocumentStructure が採番する
+    文書内一意 ID なので、両者の組は文書内で一意になる。片方でも欠ける場合は
+    「一意キーは作れない」意味で空文字を返す（推測でキーを作らない）。
+    """
+    block = str(block_id or "").strip()
+    span = str(span_id or "").strip()
+    if not block or not span:
+        return ""
+    return f"{block}:{span}"
+
+
 def _claim_legacy_keys(claim: dict) -> set[str]:
+    """claim（span）1件の突合キー集合。
+
+    既存の ``claim_id`` / ``span_id`` 分岐はそのまま維持しつつ（旧データ・旧参照の
+    解決を落とさない）、``block_id`` も渡された場合は文書内一意な
+    ``"{block_id}:{span_id}"``（:func:`claim_span_key`）を追加する。読み側はいずれも
+    「集合に含まれるか」で突合しているので、キーの追加は解決率を上げるだけで
+    既存の突合を壊さない。
+    """
     keys: set[str] = set()
     claim_id = claim.get("claim_id")
     span_id = claim.get("span_id")
@@ -74,6 +99,9 @@ def _claim_legacy_keys(claim: dict) -> set[str]:
         safe = re.sub(r"[^A-Za-z0-9_]+", "_", str(span_id))
         keys.add(str(span_id))
         keys.add(f"claim_{safe}")
+        unique_key = claim_span_key(claim.get("block_id"), span_id)
+        if unique_key:
+            keys.add(unique_key)
     return keys
 
 
@@ -527,12 +555,140 @@ def _normalize_claim_type(qualification: dict | None) -> str:
     return "diagnostic_claim"
 
 
+def _evidence_block_index(evidence_registry: Any) -> dict[str, str]:
+    """``evidence_id -> block_id``（EvidenceRegistry の逆引き）。
+
+    evidence_id は文書内で一意で、``EvidenceRecord.source.block_id`` は
+    その evidence が属する block そのものなので、この写像は曖昧にならない。
+    orchestrator の figure クロスリンク（``_build_figure_table_semantics`` の
+    ``claim_link_index``）が使う joins のうち **(1) の経路と同一**。
+    """
+    index: dict[str, str] = {}
+    for record in getattr(evidence_registry, "records", []) or []:
+        ev_id = str(getattr(record, "evidence_id", "") or "").strip()
+        block_id = str(
+            getattr(getattr(record, "source", None), "block_id", "") or ""
+        ).strip()
+        if ev_id and block_id:
+            index.setdefault(ev_id, block_id)
+    return index
+
+
+def _claim_object_ids_by_span_key(
+    qualified_result: Any,
+    claim_objects: Any,
+    evidence_registry: Any = None,
+) -> dict[str, list[str]]:
+    """``"{block_id}:{span_id}" -> [claim_object の claim_id, ...]`` を組む。
+
+    ClaimObjectBuilder の ``ClaimObjectRecord`` は **block_id 相当のフィールドを
+    持たない**（``source_span_ids`` / ``source_evidence_ids`` / ``section_id`` のみ）。
+    ``source_span_ids`` の span_id は block ごとに振り直されるため単独では
+    block を跨いで衝突する。そこで orchestrator の figure クロスリンクと同じ
+    2つの join を、向きを逆にして使う:
+
+    1. **evidence 経路（主・曖昧さなし）** — ``claim.source_evidence_ids`` →
+       EvidenceRegistry の ``source.block_id``。builder は claim の evidence を
+       その claim 自身の block からのみ解決する（``_resolve_evidence_ids`` /
+       ``_refine_evidence_ids`` とも block スコープ）ので、evidence_id → block_id は
+       一意に決まる。
+    2. **span_id 一意経路（従）** — ``span_id`` が文書内でちょうど1つの block に
+       しか現れない場合に限り、その block を採用する。
+
+    どちらでも block が1つに絞れない claim（両方が空 / 複数 block に割れる）は
+    **何も記録しない**。artifact 側には元の対応が残っているので情報は落ちておらず、
+    ここで推測して別の span に誤って結び付ける方が害が大きい
+    （``_claim_thesis_ref_index`` と同じ「完全一致だけを記録する」方針）。
+
+    親 claim が解決できた場合はその ``subclaim_ids``（atomic rewrite の子）も
+    同じ span に載せる。子自身も 1./2. の経路で解決できることが多いが、
+    子の evidence が文単位に絞り込まれている場合（#363）でもその文 record は
+    同じ block を指すため、いずれの経路でも同じ span に着地する。
+    """
+    spans = list(getattr(qualified_result, "qualified_spans", []) or [])
+    claims = list(getattr(claim_objects, "claims", []) or [])
+    if not spans or not claims:
+        return {}
+
+    # span_id -> {block_id}（一意に決まるときだけ従経路で使う）
+    span_to_blocks: dict[str, set[str]] = {}
+    # 実在する (block_id, span_id) の組だけを受け付ける（捏造キーを作らない）
+    known_span_keys: set[str] = set()
+    for span in spans:
+        span_id = str(getattr(span, "span_id", "") or "").strip()
+        block_id = str(getattr(span, "block_id", "") or "").strip()
+        if not span_id or not block_id:
+            continue
+        span_to_blocks.setdefault(span_id, set()).add(block_id)
+        known_span_keys.add(claim_span_key(block_id, span_id))
+
+    evidence_blocks = _evidence_block_index(evidence_registry)
+
+    by_id = {
+        str(getattr(c, "claim_id", "") or ""): c
+        for c in claims
+        if str(getattr(c, "claim_id", "") or "")
+    }
+
+    index: dict[str, list[str]] = {}
+
+    def _record(span_key: str, claim_id: str) -> None:
+        bucket = index.setdefault(span_key, [])
+        if claim_id not in bucket:
+            bucket.append(claim_id)
+
+    def _span_key_for(claim: Any) -> str:
+        span_ids = [
+            str(v or "").strip()
+            for v in (getattr(claim, "source_span_ids", []) or [])
+        ]
+        span_ids = [v for v in span_ids if v]
+        if not span_ids:
+            return ""
+        blocks = {
+            evidence_blocks[ev_id]
+            for ev_id in (
+                str(v or "").strip()
+                for v in (getattr(claim, "source_evidence_ids", []) or [])
+            )
+            if ev_id in evidence_blocks
+        }
+        if not blocks:
+            # 従経路: span_id が1 block にしか現れないときだけ採用する。
+            blocks = {
+                next(iter(span_to_blocks[sid]))
+                for sid in span_ids
+                if len(span_to_blocks.get(sid, ())) == 1
+            }
+        candidates = {
+            key
+            for block_id in blocks
+            for sid in span_ids
+            if (key := claim_span_key(block_id, sid)) in known_span_keys
+        }
+        return next(iter(candidates)) if len(candidates) == 1 else ""
+
+    for claim_id, claim in by_id.items():
+        span_key = _span_key_for(claim)
+        if not span_key:
+            continue
+        _record(span_key, claim_id)
+        for sub_id in getattr(claim, "subclaim_ids", []) or []:
+            sub_id = str(sub_id or "").strip()
+            if sub_id and sub_id in by_id:
+                _record(span_key, sub_id)
+
+    return {key: sorted(values) for key, values in index.items()}
+
+
 def persist_qualified_claims(
     *,
     document_id: str,
     qualified_result,
     chunk_index: list[dict],
     thesis_result: Any = None,
+    claim_objects: Any = None,
+    evidence_registry: Any = None,
 ) -> list[dict]:
     """ClaimQualificationResult.qualified_spans を `theory_claims` に保存する。
 
@@ -544,9 +700,24 @@ def persist_qualified_claims(
             逆引きし、各行の `thesis_refs` に
             `[{"thesis_ref", "kind", "text_excerpt"}]` を保存する
             （hierarchical_context_explanation_design.md §4。決定論・非LLM）。
+        claim_objects: ClaimObjectBuildResult（省略可）。指定されると、その span に
+            対応する claim object（親 + atomic 子 `subclaim_ids`）の `claim_id` を
+            `source_scope.legacy_ids` に加える。対応付けの一意キーは
+            :func:`_claim_object_ids_by_span_key` の docstring 参照（block_id を
+            必ず含む。一意に決まらない claim は記録しない）。
+        evidence_registry: EvidenceRegistryResult（省略可）。claim object →
+            block_id の主経路（evidence_id → `source.block_id`）に使う。省略すると
+            span_id が1 block にしか現れない場合の従経路だけになる。
 
     Returns:
-        [{claim_id, span_id, chunk_id, text}] のリスト。
+        [{claim_id, span_id, block_id, chunk_id, text}] のリスト。
+
+    Note:
+        `source_scope.legacy_ids` には従来の `span_id` / `claim_{safe(span_id)}` に加え、
+        文書内一意な `"{block_id}:{span_id}"`（S-3 / F-4 の是正）と、解決できた
+        claim object の ID を入れる。読み側（`element_context` / `deliberation.refs` /
+        `personal_graph.queries` 等）はいずれも集合への包含で突合するため、
+        キーの追加は解決率を上げるだけで既存の突合を壊さない。
     """
     block_to_chunk: dict[str, str] = {}
     for ch in chunk_index:
@@ -558,6 +729,9 @@ def persist_qualified_claims(
         return []
 
     thesis_ref_index = _claim_thesis_ref_index(thesis_result)
+    claim_ids_by_span_key = _claim_object_ids_by_span_key(
+        qualified_result, claim_objects, evidence_registry
+    )
 
     saved: list[dict] = []
     session = _pg_session()
@@ -572,17 +746,26 @@ def persist_qualified_claims(
             decision = qualification.get("decision") if isinstance(qualification, dict) else None
             if decision == "rejected":
                 continue
-            chunk_id = block_to_chunk.get(getattr(span, "block_id", ""))
+            block_id = getattr(span, "block_id", None)
+            chunk_id = block_to_chunk.get(block_id or "")
             span_id = getattr(span, "span_id", None)
             thesis_refs = _claim_thesis_refs_for_span(span_id, thesis_ref_index)
+            # 文書内一意キー（block_id:span_id）+ 解決できた claim object の ID を
+            # 併記する。旧キー（span_id / claim_{safe}）は残す（P4）。
+            legacy_keys = _claim_legacy_keys(
+                {"span_id": span_id, "block_id": block_id}
+            )
+            legacy_keys.update(
+                claim_ids_by_span_key.get(claim_span_key(block_id, span_id), [])
+            )
             params = {
                 "document_id": _strip_nuls(document_id),
                 "chunk_id": chunk_id,
                 "source_scope": _json_dumps({
                     "section_id": getattr(span, "section_id", None),
-                    "block_id": getattr(span, "block_id", None),
+                    "block_id": block_id,
                     "span_id": span_id,
-                    "legacy_ids": sorted(_claim_legacy_keys({"span_id": span_id})),
+                    "legacy_ids": sorted(legacy_keys),
                     # span.reason は LLM 判定理由 (review note) であり PDF 原文根拠ではない。
                     # source-backed 判定の根拠として evidence_text に保存しない (#257)。
                     "qualification_reason": _strip_nuls(getattr(span, "reason", "") or ""),
@@ -621,7 +804,10 @@ def persist_qualified_claims(
             ).fetchone()
             saved.append({
                 "claim_id": str(row[0]),
-                "span_id": getattr(span, "span_id", None),
+                "span_id": span_id,
+                # 呼び出し側（orchestrator の claim_id_map）が _claim_legacy_keys で
+                # 文書内一意キーまで引けるように block_id も返す。
+                "block_id": block_id,
                 "chunk_id": chunk_id,
                 "text": getattr(span, "text", ""),
             })
@@ -1476,15 +1662,57 @@ def resolve_artifact_run(*, document_id: str, material_id: str | None = None) ->
     return None
 
 
-def resolve_artifact_runs(session, document_ids: list[str]) -> dict[str, dict]:
-    """Resolve the *artifact* (adopted) run per document, using a caller session.
+# 成果物 run の選び方（C-8 の一本化）。
+#   adopted … documents.active_analysis_run_id → 無ければ最新 completed run。
+#             **成果物（artifact）を読むときは常にこれ**。
+#   latest  … status を問わない最新 run。resume / 進捗表示 / 前回 run の options・
+#             cartridge 継承のように「いま走っている run を見たい」用途専用。
+ARTIFACT_RUN_POLICIES = ("adopted", "latest")
 
-    For each document, prefer ``documents.active_analysis_run_id``; otherwise fall
-    back to the latest **completed** run (never a running/failed latest run, so a
-    fresh in-flight or rejected revision can't override the adopted artifacts).
-    Returns ``{document_id: {"run_id", "stage_outputs", "status"}}`` for documents
-    that have a resolvable artifact run (#408).
+# policy → targets CTE の run_id 選択式（SQL はこの1箇所にしか書かない）。
+_ARTIFACT_RUN_SELECT_SQL = {
+    "adopted": """
+                       COALESCE(
+                           d.active_analysis_run_id,
+                           (SELECT r2.id FROM document_analysis_runs r2
+                            WHERE r2.document_id = d.id::text AND r2.status = 'completed'
+                            ORDER BY r2.completed_at DESC NULLS LAST,
+                                     r2.created_at DESC, r2.id DESC
+                            LIMIT 1)
+                       )""",
+    "latest": """
+                       (SELECT r2.id FROM document_analysis_runs r2
+                        WHERE r2.document_id = d.id::text
+                        ORDER BY r2.created_at DESC, r2.id DESC
+                        LIMIT 1)""",
+}
+
+
+def _check_artifact_run_policy(policy: str) -> str:
+    if policy not in ARTIFACT_RUN_POLICIES:
+        raise ValueError(
+            f"unknown artifact run policy: {policy!r} "
+            f"(expected one of {ARTIFACT_RUN_POLICIES})"
+        )
+    return policy
+
+
+def resolve_artifact_runs(
+    session, document_ids: list[str], *, policy: str = "adopted"
+) -> dict[str, dict]:
+    """Resolve the *artifact* run per document, using a caller session.
+
+    ``policy="adopted"``（既定）は ``documents.active_analysis_run_id`` を優先し、
+    無ければ最新 **completed** run へ後方互換 fallback する（走行中・失敗中の
+    latest run が採用成果物を上書きしない）。``policy="latest"`` は status を問わない
+    最新 run で、resume / 進捗表示 / 前回 run の options 継承の専用経路
+    （成果物の参照には使わない。知識構造の見直し 2026-09-12 C-8）。
+
+    Returns:
+        ``{document_id: {"run_id", "stage_outputs", "status", "cartridge_id"}}``（#408）。
+        run を解決できない document はキーごと含まれない。
     """
+    _check_artifact_run_policy(policy)
     if not document_ids:
         return {}
     placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
@@ -1494,18 +1722,11 @@ def resolve_artifact_runs(session, document_ids: list[str]) -> dict[str, dict]:
             f"""
             WITH targets AS (
                 SELECT d.id::text AS document_id,
-                       COALESCE(
-                           d.active_analysis_run_id,
-                           (SELECT r2.id FROM document_analysis_runs r2
-                            WHERE r2.document_id = d.id::text AND r2.status = 'completed'
-                            ORDER BY r2.completed_at DESC NULLS LAST,
-                                     r2.created_at DESC, r2.id DESC
-                            LIMIT 1)
-                       ) AS run_id
+                       {_ARTIFACT_RUN_SELECT_SQL[policy]} AS run_id
                 FROM documents d
                 WHERE d.id::text IN ({placeholders})
             )
-            SELECT t.document_id, r.id::text, r.stage_outputs, r.status
+            SELECT t.document_id, r.id::text, r.stage_outputs, r.status, r.cartridge_id
             FROM targets t
             JOIN document_analysis_runs r ON r.id = t.run_id
             """
@@ -1527,8 +1748,64 @@ def resolve_artifact_runs(session, document_ids: list[str]) -> dict[str, dict]:
             "run_id": str(row[1]) if row[1] else None,
             "stage_outputs": stage_outputs if isinstance(stage_outputs, dict) else {},
             "status": row[3],
+            # 短い行（既存テストの fake session 等）でも壊れないように防御的に読む。
+            "cartridge_id": str(row[4] or "") if len(row) > 4 else "",
         }
     return out
+
+
+def document_run_artifacts(
+    document_id: str, *, policy: str = "adopted", session: Any = None
+) -> dict:
+    """1 document の ``stage_outputs._artifacts`` を返す（成果物参照の正本・#408 / C-8）。
+
+    run 選択は :data:`ARTIFACT_RUN_POLICIES` の1語彙で宣言する（既定 ``adopted``）。
+    成果物を読む経路はすべてこれを通し、``get_latest_analysis_run`` を直接読まない
+    （知識構造の見直し 2026-09-12 C-8: run 選択ポリシが4種に分裂していた是正）。
+
+    Args:
+        session: 呼び出し側のセッション（省略時は本関数が開閉する）。
+    Returns:
+        artifact の dict。run が無い・artifacts が無い場合は ``{}``。
+    """
+    _check_artifact_run_policy(policy)
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return {}
+    if session is not None:
+        resolved = resolve_artifact_runs(session, [doc_id], policy=policy)
+    else:
+        own = _pg_session()
+        try:
+            resolved = resolve_artifact_runs(own, [doc_id], policy=policy)
+        finally:
+            own.close()
+    stage_outputs = (resolved.get(doc_id) or {}).get("stage_outputs") or {}
+    artifacts = stage_outputs.get(ARTIFACTS_KEY) if isinstance(stage_outputs, dict) else None
+    return artifacts if isinstance(artifacts, dict) else {}
+
+
+def document_run_cartridge_id(
+    document_id: str, *, policy: str = "adopted", session: Any = None
+) -> str:
+    """1 document の分野（成果物 run の ``cartridge_id``）。未解析・分野中立は ``""``。
+
+    成果物と同じ run から引く（:func:`document_run_artifacts` と同一ポリシ）ので、
+    「成果物は採用 run・分野は最新 run」のような食い違いが起きない。
+    """
+    _check_artifact_run_policy(policy)
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return ""
+    if session is not None:
+        resolved = resolve_artifact_runs(session, [doc_id], policy=policy)
+    else:
+        own = _pg_session()
+        try:
+            resolved = resolve_artifact_runs(own, [doc_id], policy=policy)
+        finally:
+            own.close()
+    return str((resolved.get(doc_id) or {}).get("cartridge_id") or "").strip()
 
 
 def create_revision_run(

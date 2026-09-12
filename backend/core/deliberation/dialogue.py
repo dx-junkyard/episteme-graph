@@ -43,7 +43,7 @@ from sqlalchemy import text as sa_text
 
 from core import llm_policy
 from core.config import get_settings
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import document_run_cartridge_id
 from core.library.schema import ENTRY_TYPE_APPARATUS, ENTRY_TYPE_THEORY_COMPONENT
 from core.library.search import search_frozen_entries
 from core.llm import generate_conversation_turn
@@ -257,23 +257,26 @@ _IDENTITY_ENTRY_TYPE_BY_ELEMENT: dict[str, str | None] = {
 
 
 def document_domain_key(document_id: str) -> str:
-    """document → 最新解析 run の cartridge_id（= library domain_key と同一名前空間）。
+    """document → 採用解析 run の cartridge_id（= library domain_key と同一名前空間）。
 
     解析 run が無い・cartridge 未指定の document は空文字（→ 候補供給なしに縮退）。
     手動リンク作成 UI の候補検索エンドポイント（routes/deliberation.py）も
     同じ解決規約を共有する（フロントに domain 知識を持たせない）。
+
+    run の選び方は成果物と同一（adopted。知識構造の見直し 2026-09-12 C-8）。
+    以前は status を問わない最新 run を読んでいたため、内訳に出す成果物と
+    分野が別 run 由来になり得た。
     """
     if not str(document_id or "").strip():
         return ""
     try:
-        run = get_latest_analysis_run(document_id=document_id)
+        return document_run_cartridge_id(document_id)
     except Exception:  # noqa: BLE001 — domain 解決は best-effort（対話自体を止めない）
         logger.warning(
             "deliberation dialogue: domain_key resolution failed for document %s",
             document_id, exc_info=True,
         )
         return ""
-    return str((run or {}).get("cartridge_id") or "")
 
 
 def identity_query_text(breakdown: dict[str, Any]) -> str:

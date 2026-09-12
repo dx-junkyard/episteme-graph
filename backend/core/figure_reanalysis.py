@@ -26,7 +26,10 @@ from core.deliberation import store as deliberation_store
 from core.deliberation.schema import ELEMENT_FIGURE, SCOPE_DOCUMENT, ElementRef
 from core.document_pipeline.figure_context import collect_figure_context
 from core.document_pipeline.figure_images import load_document_figures
-from core.document_pipeline.persistence import get_latest_analysis_run
+from core.document_pipeline.persistence import (
+    document_run_artifacts,
+    document_run_cartridge_id,
+)
 from core.figure_presentation import (
     assign_review_question_ids,
     normalize_figure_analysis_candidate,
@@ -437,9 +440,14 @@ def _consume_budget(figure_id: str, user_id: str | None) -> None:
         )
 
 
-def _latest_context(document_id: str, row: dict[str, Any]) -> tuple[Any, dict | None, str | None]:
-    latest = get_latest_analysis_run(document_id=document_id) or {}
-    artifacts = ((latest.get("stage_outputs") or {}).get("_artifacts") or {})
+def _adopted_context(document_id: str, row: dict[str, Any]) -> tuple[Any, dict | None, str | None]:
+    """再解析の入力文脈（構造・図 record・分野）を**採用 run**から読む。
+
+    run の選び方は成果物参照の正本（adopted）に従う。知識構造の見直し 2026-09-12 C-8：
+    以前は status を問わない最新 run だったため、走行中の再解析 run の途中成果物を
+    読む可能性があった。
+    """
+    artifacts = document_run_artifacts(document_id)
     structure = artifacts.get("document_structure")
     figure_record = None
     figure_artifact = artifacts.get("figure_table_semantics") or {}
@@ -457,7 +465,7 @@ def _latest_context(document_id: str, row: dict[str, Any]) -> tuple[Any, dict | 
         ):
             figure_record = candidate
             break
-    return structure, figure_record, latest.get("cartridge_id")
+    return structure, figure_record, document_run_cartridge_id(document_id) or None
 
 
 def _summary(mode: str, profile: dict[str, Any]) -> str:
@@ -571,7 +579,7 @@ def reanalyze_figure(
         raise FigureReanalysisError("原図を取得できないため再解析できません", kind="invalid")
 
     try:
-        structure, figure_record, cartridge_id = _latest_context(document_id, row)
+        structure, figure_record, cartridge_id = _adopted_context(document_id, row)
     except Exception:
         logger.warning(
             "figure re-analysis: failed to load prior context document=%s figure=%s",

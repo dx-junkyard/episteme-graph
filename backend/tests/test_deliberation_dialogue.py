@@ -541,8 +541,8 @@ class TestCollectIdentityCandidates:
     def test_document_scoped_ref_collects_frozen_entries(self, monkeypatch):
         self._patch_settings(monkeypatch)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run",
-            lambda **k: {"cartridge_id": "particle_physics"},
+            dialogue, "document_run_cartridge_id",
+            lambda *a, **k: "particle_physics",
         )
         captured: dict = {}
 
@@ -574,7 +574,7 @@ class TestCollectIdentityCandidates:
     def test_figure_element_filters_apparatus_entries(self, monkeypatch):
         self._patch_settings(monkeypatch)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
         captured: dict = {}
 
@@ -602,7 +602,7 @@ class TestCollectIdentityCandidates:
 
     def test_unresolved_domain_key_returns_empty_without_search(self, monkeypatch):
         self._patch_settings(monkeypatch)
-        monkeypatch.setattr(dialogue, "get_latest_analysis_run", lambda **k: None)
+        monkeypatch.setattr(dialogue, "document_run_cartridge_id", lambda *a, **k: "")
         called = {"search": False}
         monkeypatch.setattr(
             dialogue, "search_frozen_entries",
@@ -617,7 +617,7 @@ class TestCollectIdentityCandidates:
     def test_zero_top_k_skips_search(self, monkeypatch):
         self._patch_settings(monkeypatch, top_k=0)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
         called = {"search": False}
         monkeypatch.setattr(
@@ -630,7 +630,7 @@ class TestCollectIdentityCandidates:
     def test_search_failure_degrades_to_empty(self, monkeypatch):
         self._patch_settings(monkeypatch)
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
 
         def boom(**kwargs):
@@ -648,7 +648,7 @@ class TestBuildGroundingIdentitySupply:
         )
         monkeypatch.setattr(dialogue.positioning, "build", lambda ref: {})
         monkeypatch.setattr(
-            dialogue, "get_latest_analysis_run", lambda **k: {"cartridge_id": "pp"}
+            dialogue, "document_run_cartridge_id", lambda *a, **k: "pp"
         )
         monkeypatch.setattr(
             dialogue, "search_frozen_entries",

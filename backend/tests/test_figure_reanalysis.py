@@ -111,7 +111,7 @@ def _patch_dependencies(monkeypatch):
     monkeypatch.setattr(figure_reanalysis, "load_document_figures", lambda _doc: [_row()])
     monkeypatch.setattr(
         figure_reanalysis,
-        "_latest_context",
+        "_adopted_context",
         lambda _doc, _row_value: (None, None, None),
     )
     monkeypatch.setattr(

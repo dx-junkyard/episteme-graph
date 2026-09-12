@@ -2182,6 +2182,11 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 qualified_result=ctx.qualified,
                 chunk_index=ctx.chunk_index,
                 thesis_result=ctx.thesis,
+                # legacy_ids の一意化（知識構造の見直し 2026-09-12 P0-6 / S-3 / F-4）:
+                # claim object の ID を span 行に載せるため、対応付けに必要な
+                # claim_object_builder と evidence_registry の成果を渡す。
+                claim_objects=ctx.claim_objects,
+                evidence_registry=ctx.evidence,
             )
             claim_id_map: dict[str, str] = {}
             for saved in saved_claims:
