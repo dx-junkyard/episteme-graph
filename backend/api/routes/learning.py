@@ -74,6 +74,7 @@ from services import (
     record_internalization,
     record_interest_trace,
     record_learner_articulated_tension,
+    record_review_event,
     record_topic_check_pass,
     review_personal_misconception,
     MISCONCEPTION_DECISIONS,
@@ -98,8 +99,14 @@ from core.course_data import (
     course_topics,
     find_course_topic,
     iter_all_topics,
+    learner_topic_units_projection,
+    topic_unit_keys,
 )
 from core.teaching_figures import store as teaching_figures_store
+from core import decision_context
+from core.course_prerequisites import resolve_prerequisite_topic_ids
+from core.course_units import candidate_keys, list_unit_candidates, resolve_unit_handles
+from core.schema import AUDIT_ENTITY_COURSE_TOPIC
 from core.cartridges import load_cartridge
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
@@ -177,11 +184,13 @@ from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
 from core.structure_anchor.schema import (
     ANCHOR_TYPE_LABELS,
+    ANCHOR_TYPES,
     ATTRIBUTION_LEARNER_SELECTED,
     DOUBT_TYPE_LABELS,
     anchor_type_for_element,
     build_anchor_payload,
 )
+from core.structure_anchor.selection_segment import resolve_selection_segment
 from core.structure_anchor.worker import (
     check_and_count_confirm_prompt,
     maybe_schedule_anchor_mining,
@@ -316,12 +325,140 @@ def _validate_visibility(visibility: str, group_id: str | None, user_id: str) ->
             )
 
 
+# ---------------------------------------------------------------------------
+# 学ぶ単位の一級化 Phase 2（learning_units_design.md §6.2 / §6.4 / §7）:
+# コース登録 = 「提示された unit 候補のうち topic に束ねたもの」の一括確定。
+# ---------------------------------------------------------------------------
+
+#: 登録後に unit の束ねを直す経路（原稿スタジオのトピック保存）。decision_context の reopen。
+_COURSE_TOPIC_REOPEN_PATH = "PUT /api/admin/courses/{course_id}/lecture-studio/course-topics/{topic_id}"
+
+
+def _ordered_source_document_ids(session, material_ids: list[str]) -> list[str]:
+    """sources の material_id 順に document.id（テキスト）を返す。
+
+    handle（U1..Un）は document 順に依存するため、コースビルダーの
+    ``_build_material_context`` と同じ **material_ids の順**で並べる（設計書 §6.2）。
+    解決できない material は落とす（推測しない）。
+    """
+    ordered = [str(m).strip() for m in (material_ids or []) if str(m or "").strip()]
+    if not ordered:
+        return []
+    placeholders = ", ".join(f":mid_{i}" for i in range(len(ordered)))
+    rows = session.execute(
+        sa_text(
+            f"SELECT source_path, id::text AS doc_id FROM documents "
+            f"WHERE source_path IN ({placeholders})"
+        ),
+        {f"mid_{i}": mid for i, mid in enumerate(ordered)},
+    ).fetchall()
+    by_material = {str(r[0]): str(r[1]) for r in rows if r and r[0] and r[1]}
+    return list(dict.fromkeys(by_material[m] for m in ordered if m in by_material))
+
+
+def _bind_topic_units(session, data: dict) -> tuple[list[dict], dict]:
+    """``topics[].units``（handle の配列）を候補表で解決し、決定文脈の材料を返す。
+
+    戻り値の第2要素は ``{"presented": [参照キー...], "applied": [参照キー...],
+    "unresolved": bool}``。候補に無い handle は捨てる（LU3）。候補がゼロ（解析済みの
+    unit が無い）なら units は空のまま・presented も空で、呼び出し側は記帳しない（LU7 / DC3）。
+    """
+    topics = [dict(t) for t in (data.get("topics") or []) if isinstance(t, dict)]
+    document_ids = _ordered_source_document_ids(session, course_source_material_ids(data))
+    candidates = list_unit_candidates(session, document_ids) if document_ids else []
+    applied: list[str] = []
+    unresolved = False
+    for topic in topics:
+        raw = topic.get("units")
+        requested = [u for u in raw if isinstance(u, (str, dict))] if isinstance(raw, list) else []
+        resolved = resolve_unit_handles(candidates, requested) if candidates else []
+        if len(resolved) < len(requested):
+            unresolved = True
+        topic["units"] = resolved
+        applied.extend(topic_unit_keys(topic))
+    info = {
+        "presented": candidate_keys(candidates),
+        "applied": list(dict.fromkeys(k for k in applied if k)),
+        "unresolved": unresolved,
+    }
+    return topics, info
+
+
+def _record_course_registration(course_id: str, user_id: str, info: dict) -> None:
+    """コース登録を一括確定として記帳する（設計書 §7・O-3(a)）。
+
+    候補が提示されていないときは呼ばない（代替の無い確定は記帳できない = DC3）。
+    新 entity_type は作らず ``AUDIT_ENTITY_COURSE_TOPIC`` に course 単位で 1 行。best-effort。
+    """
+    try:
+        ctx = decision_context.build_decision_context(
+            basis=decision_context.BASIS_COURSE_REGISTER_UNITS,
+            presented_ids=info.get("presented") or [],
+            applied_ids=info.get("applied") or [],
+            # コースビルダーでは下書きを編集してから登録でき、unit は topic から外せる。
+            alternatives=(decision_context.ALT_EDIT, decision_context.ALT_DESELECT),
+            reopen_path=_COURSE_TOPIC_REOPEN_PATH,
+            # unit の確定状態は candidate 始まりで、登録後も候補のまま見直せる（LU2）。
+            reopen_statuses=("candidate",),
+            # 候補区画に根拠（逐語）が出ていたかはサーバから検証できない（DC4）。
+            evidence_shown=None,
+        )
+        metadata = decision_context.attach_decision_context(
+            {
+                "action": "course_register",
+                "object_type": "course",
+                "course_id": course_id,
+                # 選ばれた handle のうち候補に無かったものを捨てた事実（件数は載せない・LU5）。
+                "unit_handles_unresolved": bool(info.get("unresolved")),
+            },
+            ctx,
+        )
+        record_review_event(
+            AUDIT_ENTITY_COURSE_TOPIC, course_id, "draft", "registered", user_id, metadata,
+        )
+    except Exception:  # noqa: BLE001 — 記帳の失敗で登録を止めない
+        logger.warning("course registration decision_context not recorded: course=%s", course_id, exc_info=True)
+
+
+def _project_topics_for_learner(data: dict) -> dict:
+    """学習者向け DTO 用に ``topics[].units`` を ``kind`` / ``label`` だけへ射影したコピーを返す
+    （設計書 §6.1 / KO10: 参照キー・unit_id・source を学習者に出さない）。保存データは変更しない。"""
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+
+    def _project(topic):
+        if not isinstance(topic, dict) or "units" not in topic:
+            return topic
+        projected = dict(topic)
+        projected["units"] = learner_topic_units_projection(topic)
+        return projected
+
+    if isinstance(out.get("topics"), list):
+        out["topics"] = [_project(t) for t in out["topics"]]
+    if isinstance(out.get("chapters"), list):
+        chapters = []
+        for ch in out["chapters"]:
+            if isinstance(ch, dict) and isinstance(ch.get("topics"), list):
+                ch = dict(ch)
+                ch["topics"] = [_project(t) for t in ch["topics"]]
+            chapters.append(ch)
+        out["chapters"] = chapters
+    return out
+
+
 @router.post("/courses", response_model=LearningCourseOut, status_code=201)
 def create_course(
     body: CourseCreateRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseOut:
-    """新しいコースを作成する。"""
+    """新しいコースを作成する。
+
+    学ぶ単位の一級化 Phase 2: ①前提を同コース topic の ID 参照に（`resolve_prerequisite_topic_ids`、
+    正規化題名の完全一致のみ）②`topics[].units` の handle を候補表で解決（候補に無い handle は
+    捨てる）③候補が提示されていたときだけ登録を一括確定として `decision_context` 付きで記帳する。
+    いずれも非LLM・保存前の決定論処理で、失敗しても登録は止めない。
+    """
     _validate_visibility(body.visibility, body.group_id, current_user["id"])
     course_id = str(uuid.uuid4())[:8]
 
@@ -335,6 +472,26 @@ def create_course(
         "referenced_sections": [],
     }
 
+    # P2-4: 前提を ID 参照に（入力を mutate せず新しい list を返す）。
+    try:
+        data["topics"] = resolve_prerequisite_topic_ids(data["topics"])
+    except Exception:  # noqa: BLE001 — 解決できなくても名前は残る（LU1）
+        logger.warning("prerequisite topic_id resolution failed: course=%s", course_id, exc_info=True)
+
+    # P2-3 / P2-5: unit handle の解決と一括確定の材料。
+    units_info: dict | None = None
+    session = _pg_session()
+    try:
+        data["topics"], units_info = _bind_topic_units(session, data)
+    except Exception:  # noqa: BLE001 — 候補表が読めなくても登録は止めない（LU8）
+        logger.warning("unit handle resolution failed: course=%s", course_id, exc_info=True)
+        for topic in data["topics"]:
+            if isinstance(topic, dict) and "units" in topic:
+                # 解決できなかった handle は意味を持たないので保存しない（学習者へ内部 ID を出さない）
+                topic["units"] = []
+    finally:
+        session.close()
+
     save_course_data(
         current_user["id"],
         course_id,
@@ -344,6 +501,10 @@ def create_course(
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
     )
+
+    # 候補が提示されていたときだけ「一括確定」として記帳する（LU7 / DC3）。
+    if units_info and units_info.get("presented"):
+        _record_course_registration(course_id, current_user["id"], units_info)
 
     threading.Thread(
         target=build_course_content_background,
@@ -596,7 +757,9 @@ def get_course(
 
     personal = get_personal_layer(current_user["id"], course_id)
     return LearningCourseLayeredResponse(
-        master_course=LearningCourseDetail(**_with_resolved_source_titles(data)),
+        master_course=LearningCourseDetail(
+            **_project_topics_for_learner(_with_resolved_source_titles(data))
+        ),
         personal_layer=PersonalLayer(**personal),
     )
 
@@ -1523,11 +1686,87 @@ def _reconcile_citation_markers(answer: str, valid_indices: set[int]) -> str:
     return re.sub(r"[ \t]+([。、．，])", r"\1", text)
 
 
-def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
+def _screen_selection_element_type(selection: dict) -> str:
+    """画面文脈 ``selection.element_type`` を学習側の語彙へ落とす（対象外なら ""）。
+
+    ``_screen_selected_element_type``（正規化済み ctx を受ける版）と同じ規則。
+    フロントは "formula"（教材埋め込みの語彙）を "equation" に写して送るが、旧
+    クライアント・別経路からの素通しに備えて受け側でも吸収する。
+    """
+    raw = str(selection.get("element_type") or "").strip()
+    if raw == "formula":
+        raw = "equation"
+    return raw if raw in LEARNING_ELEMENT_TYPES else ""
+
+
+def _screen_selection_anchor_type(element_type: str) -> str:
+    """画面文脈の要素型 → 構造帰属の粒度（``ANCHOR_TYPES``）。
+
+    claim / equation はそのまま同名の粒度に当たる。component は概念ノード
+    （``theory_components``）なので concept。figure は ``ANCHOR_TYPES`` に無いので
+    設計 §5 の規律どおり**粗い粒度へ縮退**させる（chunk = 教材の箇所）。
+    """
+    if element_type in ANCHOR_TYPES:
+        return element_type
+    if element_type == "figure":
+        return "chunk"
+    return anchor_type_for_element(element_type)
+
+
+def _screen_selection_for_anchor(
+    body: LearningChatRequest, *, course_id: str
+) -> dict | None:
+    """痕跡帰属に使える画面文脈の ``selection``（無ければ None）。
+
+    画面が別のコースを指しているなら丸ごと無視する（``_learning_screen_context_block``
+    と同じ扱い）。正規化・語彙判定は core 側（SA1: 画面は参照しか渡さない）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return None
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return None
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return None
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return None
+    return dict(ctx.selection)
+
+
+def _anchor_segment_texts(topic_info: dict | None) -> list[str] | None:
+    """区画番号の解決材料（教材区画の本文・表示順）。無ければ None。
+
+    ``get_topic_material`` が学習者へ配信する chunks と**同じ材料**を使う（フロントの
+    ``data-segment-index`` と同じ単位でなければ番号の意味が食い違う）。トピック本文が
+    無い後方互換経路（PDF 復元チャンク）のために DB を引き直すことはしない — 材料が
+    無ければ解決しない（推測しない・同期パスにクエリを増やさない）。
+    """
+    text = _topic_student_material(topic_info or {})
+    return [text] if text.strip() else None
+
+
+def _learner_selected_anchor(
+    body: LearningChatRequest,
+    *,
+    screen_selection: dict | None = None,
+    segment_texts: list[str] | None = None,
+) -> dict | None:
     """発話時の明示アンカー（構造帰属・方法A）を非LLMで構築する。無ければ None。
 
     「どこ（anchor）」はこの操作で確定するが「どう（doubt_type）」までは分からないため
     unclassified のまま保持する（P4。方法B/C が後から補い得る）。
+
+    優先順（学ぶ単位 P2-7・設計 §8）:
+
+    1. 要素タップ（``element_id``）— 従来どおり ground truth。
+    2. テキスト選択（``selection_text``）— 区画番号は ①クライアント申告
+       （``selection_segment_id``）②``segment_texts`` との逐語一致 の順に解決し、
+       どちらも決まらなければ ``anchor_id=""``（``seg_0`` を既定にしない = C-11 の是正）。
+    3. 画面文脈の選択要素（``screen_selection``）— 学習者が要素チップを選んでいる状態での
+       発話は明示アンカー。AI 候補（方法B）に回さず learner_selected で確定する。
     """
     if body.element_id:
         atype = anchor_type_for_element(body.element_type)
@@ -1546,6 +1785,10 @@ def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
     sel = (body.selection_text or "").strip()
     if sel:
         seg = body.selection_segment_id
+        if seg is None and segment_texts:
+            # 区画番号をクライアントが申告できなかったとき（レクチャー非再生など）は
+            # 教材区画の本文との逐語一致で埋める。一意に決まらなければ None のまま。
+            seg = resolve_selection_segment(segment_texts, sel)
         return build_anchor_payload(
             anchor_type="segment",
             anchor_id=f"seg_{int(seg)}" if seg is not None else "",
@@ -1556,6 +1799,21 @@ def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
             reason="text_selection",
             confidence=1.0,
         )
+    if screen_selection:
+        element_type = _screen_selection_element_type(screen_selection)
+        element_id = str(screen_selection.get("element_id") or "").strip()
+        if element_type and element_id:
+            label = str(screen_selection.get("element_label") or "").strip() or element_id
+            return build_anchor_payload(
+                anchor_type=_screen_selection_anchor_type(element_type),
+                anchor_id=element_id,
+                anchor_label=label,
+                doubt_type="unclassified",
+                attribution_source=ATTRIBUTION_LEARNER_SELECTED,
+                evidence_quote="",
+                reason="screen_selection",
+                confidence=1.0,
+            )
     return None
 
 
@@ -3965,7 +4223,14 @@ def _learning_chat_core(
     _tension_hint = False if _is_backstage else judge_tension_hint(body.message, _recent_user_texts)
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
-    _sel_anchor = _learner_selected_anchor(body)
+    # 学ぶ単位 P2-7（設計 §8）: ①区画番号が申告されていないテキスト選択は教材区画本文
+    # との逐語一致で埋める（決まらなければ場所は空のまま）②画面で要素チップを選んだ
+    # 状態の発話も明示アンカーとして確定する（course 不一致の画面文脈は無視される）。
+    _sel_anchor = _learner_selected_anchor(
+        body,
+        screen_selection=_screen_selection_for_anchor(body, course_id=course_id),
+        segment_texts=_anchor_segment_texts(topic_info),
+    )
     # 様相（_stance / _stance_source）は生成の前に解決済み（ストリーミング §3.3 で
     # `start` イベントへ載せるため前倒しした。入力6つはいずれも回答本文に依存しない）。
     _trace_payload = {

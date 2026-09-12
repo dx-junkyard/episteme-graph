@@ -1034,6 +1034,28 @@
     if (p) p.remove();
   }
 
+  // 学ぶ単位 P2-7（設計 §8）: 選択範囲が属する教材区画の番号を返す。決まらなければ
+  // null（0 を既定にしない — 痕跡の anchor_id が全部 seg_0 になっていた原因。
+  // null のときはサーバが教材本文との逐語一致で解決し、それでも決まらなければ
+  // 「場所は不明」のまま記録する）。レクチャー再生中は表示中スライドの区画が正。
+  function selectionSegmentIndex(range) {
+    try {
+      if (typeof lectureState !== "undefined" && lectureState.active) {
+        var lseg = lectureState.currentSegmentIndex;
+        return (typeof lseg === "number") ? lseg : null;
+      }
+      if (!range) return null;
+      var node = range.commonAncestorContainer;
+      var el = (node && node.nodeType === 1) ? node : (node ? node.parentElement : null);
+      var host = (el && el.closest) ? el.closest("[data-segment-index]") : null;
+      if (!host) return null;
+      var idx = parseInt(host.getAttribute("data-segment-index"), 10);
+      return isNaN(idx) ? null : idx;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // 教材区画（#material-body）内のテキスト選択にフローティングボタンを出す。
   function initSelectionAnchor() {
     if (document._anchorSelectionWired) return;
@@ -1062,7 +1084,7 @@
         // mousedown で選択が消えるのを防ぐ
         btn.addEventListener("mousedown", function (e) { e.preventDefault(); });
         btn.addEventListener("click", function () {
-          var seg = (Session.currentAnchor() || {}).segment_id || 0;
+          var seg = selectionSegmentIndex(range);
           state.pendingSelection = { text: text, segment_id: seg };
           hideSelectionAskButton();
           hideQuickAnchorPopover();
@@ -1085,13 +1107,15 @@
           qbtn.textContent = opt.label;
           qbtn.addEventListener("mousedown", function (e) { e.preventDefault(); });
           qbtn.addEventListener("click", async function () {
-            var seg = (Session.currentAnchor() || {}).segment_id || 0;
-            var ok = await postCycleAnchor({
+            var seg = selectionSegmentIndex(range);
+            var anchorPayload = {
               quick_label: opt.quick_label,
               topic_id: state.currentTopicId,
               selection_text: text,
-              selection_segment_id: seg,
-            });
+            };
+            // 区画が決まらなければキー自体を送らない（0 を既定にしない）。
+            if (seg !== null) anchorPayload.selection_segment_id = seg;
+            var ok = await postCycleAnchor(anchorPayload);
             sendDiscussMetric("cycle_anchor_quick", {});
             hideSelectionAskButton();
             hideQuickAnchorPopover();
@@ -1552,11 +1576,15 @@
       return;
     }
     var html = '<div class="material-block-header">教材</div>';
-    state.topicMaterial.forEach(function (chunk) {
+    state.topicMaterial.forEach(function (chunk, segmentIndex) {
       // Phase 3（ホバー+ラッチ, §7）: ラダー4位「直近回答の第1根拠チャンク」と同じ
       // chunk_id 系だが、ここではラッチ時に「どのチャンク内で注目したか」を拾うための
       // data 属性。既存の描画には影響しない（純粋な追加属性）。
-      html += '<div class="material-chunk" data-chunk-id="' + escHtml(chunk.id || "") + '">';
+      // data-segment-index は学ぶ単位 P2-7（設計 §8）: 選択範囲がどの教材区画に属するかを
+      // DOM から決定論的に取るための担体。サーバ側の区画番号解決
+      // （resolve_selection_segment）と同じ単位（配信された教材区画の表示順）。
+      html += '<div class="material-chunk" data-chunk-id="' + escHtml(chunk.id || "") + '"'
+        + ' data-segment-index="' + segmentIndex + '">';
       if (chunk.chapter || chunk.section) {
         var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
         html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
@@ -4696,7 +4724,12 @@
     // 構造帰属（方法A）: 「ここについて質問」で選択したテキストをこの1問にだけ添える。
     if (state.pendingSelection && !payload.selection_text) {
       payload.selection_text = state.pendingSelection.text;
-      payload.selection_segment_id = state.pendingSelection.segment_id;
+      // 区画が決まらなかった選択は番号を送らない（0 を既定にしない = 学ぶ単位 P2-7）。
+      // サーバが教材本文との逐語一致で解決し、決まらなければ場所は空のまま記録する。
+      if (state.pendingSelection.segment_id !== null &&
+          state.pendingSelection.segment_id !== undefined) {
+        payload.selection_segment_id = state.pendingSelection.segment_id;
+      }
     }
     clearPendingSelection();
 

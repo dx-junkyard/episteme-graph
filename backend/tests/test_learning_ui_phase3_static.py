@@ -340,9 +340,13 @@ class TestAnchorBearingElementsCarryDataEvidenceRef:
 
     def test_material_chunk_wrapper_carries_chunk_id_for_latch_lookup(self):
         """ラッチ時に「どのチャンク内で注目したか」を拾うための data-chunk-id
-        （method A の chunk_id フィールドに使う）。"""
+        （method A の chunk_id フィールドに使う）。
+
+        学ぶ単位 P2-7 で同じラッパに ``data-segment-index``（選択箇所の区画解決の担体）が
+        足されたため、属性列全体ではなく **chunk_id の担体であること**を固定する。
+        """
         js = _read(APP_JS)
-        assert 'html += \'<div class="material-chunk" data-chunk-id="\' + escHtml(chunk.id || "") + \'">\';' in js
+        assert 'html += \'<div class="material-chunk" data-chunk-id="\' + escHtml(chunk.id || "") + \'"\'' in js
 
     def test_lecture_slide_wrapper_carries_chunk_id_for_latch_lookup(self):
         js = _read(APP_JS)
