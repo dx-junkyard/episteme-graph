@@ -636,6 +636,19 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DISCOVERY_REFERENCE_CACHE_TTL_DAYS"),
     )
 
+    # --- A層パイプライン: rhetorical_role の入力上限（P0-1） ---
+    # 役割判定にかける body_paragraph ブロック数の上限。**0 = 上限なし（既定）**。
+    # かつて input_builder に 64 がハードコードされ、936 ブロックの論文で 6.8% しか
+    # 役割判定されず、構造化層の網羅性が事故で決まっていた（F-1）。上限を敷く運用だけが
+    # 明示的に値を入れる。上限がある場合も先頭切り捨てではなく節単位の層化サンプリングで
+    # 配分し、取りこぼしは summary_stats["coverage"] に必ず報告される。
+    # ※値の正本は env そのもの。A層 agent は src/backend の依存方向の制約でこの Settings を
+    #   読めないため、input_builder が同じ env を直接読む（ここは宣言・文書化のための定義）。
+    rhetorical_role_max_blocks: int = Field(
+        default=0,
+        validation_alias=AliasChoices("RHETORICAL_ROLE_MAX_BLOCKS"),
+    )
+
     # --- M層（LLM モデル選択, core/llm_policy.py） ---
     # モデルカタログ (JSON) のパス。空/不在/パース不能なら catalog_models() は空リスト
     # を返す（M4: 選択肢を捏造しない）。正本: docs/features/llm_model_selection_design.md §5

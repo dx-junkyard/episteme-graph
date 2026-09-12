@@ -52,13 +52,18 @@ class RhetoricalRoleAgent:
         progress_callback=None,
     ) -> RhetoricalRoleResult:
         cartridge = self._load_cartridge(cartridge_id)
-        llm_inputs = self._input_builder.build(
+        # P0-1: 入力と一緒に「取りこぼしの量」（母集合 / 処理数 / 打ち切り / 理由）を受け取り、
+        # summary_stats["coverage"] として stage_outputs まで運ぶ（F-18）。
+        llm_inputs, coverage = self._input_builder.build_with_coverage(
             structure, skeleton, cartridge=cartridge, config=config
         )
         if not llm_inputs:
-            return RhetoricalRoleResult.make_fallback(
+            fallback = RhetoricalRoleResult.make_fallback(
                 structure.document_id, cartridge_id, None, "No target blocks for role labeling"
             )
+            # 対象ゼロも「見た」ことの記録として残す（population=0 の報告）。
+            fallback.summary_stats["coverage"] = coverage
+            return fallback
 
         annotations: list[BlockRoleAnnotation] = []
         block_text_by_id = {i.block_id: i.block_text for i in llm_inputs}
@@ -114,6 +119,7 @@ class RhetoricalRoleAgent:
             document_id=structure.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             annotations=annotations,
+            coverage=coverage,
         )
         result.validation_issues = self._validator.validate(
             result, block_text_by_id, cartridge
@@ -130,6 +136,7 @@ class RhetoricalRoleAgent:
         document_id: str,
         cartridge_id: str | None,
         annotations: list[BlockRoleAnnotation],
+        coverage: dict | None = None,
     ) -> RhetoricalRoleResult:
         claim_count = sum(
             1
@@ -143,12 +150,15 @@ class RhetoricalRoleAgent:
             for span in annotation.span_annotations
             if span.is_reject_candidate
         )
+        summary_stats: dict = {
+            "claim_candidate_spans": claim_count,
+            "reject_candidate_spans": reject_count,
+        }
+        if coverage is not None:
+            summary_stats["coverage"] = coverage
         return RhetoricalRoleResult(
             document_id=document_id,
             cartridge_id=cartridge_id,
             role_annotations=annotations,
-            summary_stats={
-                "claim_candidate_spans": claim_count,
-                "reject_candidate_spans": reject_count,
-            },
+            summary_stats=summary_stats,
         )
