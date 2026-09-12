@@ -64,12 +64,12 @@ def approved_chunk_ids(session, chunk_ids: list[str]) -> set[str]:
             _sa_text("""
                 SELECT DISTINCT cid FROM (
                     SELECT primary_chunk_id::text AS cid
-                    FROM theory_components
+                    FROM theory_components_live
                     WHERE status = 'teacher_reviewed'
                       AND primary_chunk_id::text = ANY(:ids)
                     UNION
                     SELECT elem AS cid
-                    FROM theory_components tc,
+                    FROM theory_components_live tc,
                          LATERAL jsonb_array_elements_text(tc.source_chunks) AS elem
                     WHERE tc.status = 'teacher_reviewed'
                       AND elem = ANY(:ids)

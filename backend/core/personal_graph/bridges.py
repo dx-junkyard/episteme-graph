@@ -174,7 +174,7 @@ def _fetch_component_names(component_ids: list[str]) -> dict[str, str]:
         try:
             rows = session.execute(
                 sa_text(
-                    f"SELECT id::text, name FROM theory_components WHERE id IN ({placeholders})"
+                    f"SELECT id::text, name FROM theory_components_live WHERE id IN ({placeholders})"
                 ),
                 {f"id_{i}": component_id for i, component_id in enumerate(ids)},
             ).fetchall()

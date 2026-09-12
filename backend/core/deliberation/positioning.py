@@ -373,7 +373,7 @@ def _concept_labels_for_element(ref: ElementRef) -> list[str]:
         session = get_session()
         try:
             row = session.execute(
-                sa_text("SELECT concepts FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"),
+                sa_text("SELECT concepts FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
                 {"id": ref.element_id},
             ).fetchone()
         finally:
@@ -385,7 +385,7 @@ def _concept_labels_for_element(ref: ElementRef) -> list[str]:
         session = get_session()
         try:
             row = session.execute(
-                sa_text("SELECT name FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+                sa_text("SELECT name FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
                 {"id": ref.element_id},
             ).fetchone()
         finally:
@@ -584,7 +584,7 @@ def _cross_corpus_parts_claim(element_id: str) -> dict[str, Any]:
     try:
         row = session.execute(
             sa_text(
-                "SELECT text, normalized_text FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1"
+                "SELECT text, normalized_text FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1"
             ),
             {"id": element_id},
         ).fetchone()
@@ -599,7 +599,7 @@ def _cross_corpus_parts_component(element_id: str) -> dict[str, Any]:
     session = get_session()
     try:
         row = session.execute(
-            sa_text("SELECT name, summary FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            sa_text("SELECT name, summary FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
             {"id": element_id},
         ).fetchone()
     finally:

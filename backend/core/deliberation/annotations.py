@@ -245,7 +245,7 @@ def _commit_interpretation(annotation: dict, current_user_id: str | None) -> dic
     session = get_session()
     try:
         row = session.execute(
-            sa_text("SELECT course_id FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1"),
+            sa_text("SELECT course_id FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1"),
             {"id": component_id},
         ).fetchone()
     finally:

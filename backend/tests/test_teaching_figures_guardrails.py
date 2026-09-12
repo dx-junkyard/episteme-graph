@@ -523,14 +523,18 @@ class TestLearnerDataEgress:
         assert_module_tree_forbids(_TF_DIR, self._PERSONAL_ROW_TABLES)
 
     def test_only_expected_tables_appear_in_sql(self):
-        """SQL が触るテーブルは自層の2枚 + claim ラベル解決の theory_claims のみ。"""
+        """SQL が触るテーブルは自層の2枚 + claim ラベル解決の theory_claims_live のみ。
+
+        知識オブジェクト層 KO5 で読み手は live ビューを読むため、claim ラベル解決は
+        ``theory_claims_live``（基表 ``theory_claims`` は書き手だけが触る）。
+        """
         tables: set[str] = set()
         for path in sorted(_TF_DIR.rglob("*.py")):
             tables |= _sql_table_names(path.read_text(encoding="utf-8"))
         assert tables <= {
             "course_teaching_figures",
             "teaching_figure_suggestions",
-            "theory_claims",
+            "theory_claims_live",
         }, f"unexpected tables referenced from core/teaching_figures: {sorted(tables)}"
 
     def test_k_anonymity_is_not_redefined(self):

@@ -166,7 +166,7 @@ def _collect_context_blocks(session, course_id: str, cited_chunk_ids: list[str])
             rows = session.execute(
                 sa_text("""
                     SELECT id, claim_type, LEFT(text, 200)
-                    FROM theory_claims WHERE chunk_id::text = ANY(:ids)
+                    FROM theory_claims_live WHERE chunk_id::text = ANY(:ids)
                     LIMIT :lim
                 """),
                 {"ids": cited_chunk_ids, "lim": _MAX_CLAIM_BLOCKS},
@@ -184,7 +184,7 @@ def _collect_context_blocks(session, course_id: str, cited_chunk_ids: list[str])
             logger.info("anchor context: theory_claims lookup skipped: %s", exc)
     try:
         rows = session.execute(
-            sa_text("SELECT id, name FROM theory_components WHERE course_id = :cid LIMIT :lim"),
+            sa_text("SELECT id, name FROM theory_components_live WHERE course_id = :cid LIMIT :lim"),
             {"cid": course_id, "lim": _MAX_CONCEPT_BLOCKS},
         ).fetchall()
         blocks["concepts"] = [{"id": str(r[0]), "label": r[1] or ""} for r in rows]
