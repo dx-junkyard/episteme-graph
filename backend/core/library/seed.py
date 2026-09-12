@@ -4,6 +4,19 @@
 (domain_key, name, entry_type) が未存在の組み合わせのみ ``store.create_entry`` 経由で
 取り込む（冪等）。ファイルが無ければ何もしない。DB 接続不可時も起動を止めない
 （例外を握って warning ログ + エラー情報を戻り値に含める）。
+
+P0-7 / K-4: 取り込んだ draft はそのまま**初版を凍結**する。L層設計 §6 のとおり
+パイプラインの retrieval（``search_frozen_entries``）は ``library_entry_versions``
+だけを引くため、凍結しない限り同梱ライブラリはパイプラインから構造的に不可視で、
+同一性リンク・標準化判定といった下流機能がまとめて起動しない状態になっていた
+（実測 ``library_entries`` 3 / ``library_entry_versions`` 0）。
+
+**「昇格は人間の操作のみ」（LLM がライブラリへ書き込む経路を作らない）には反しない**:
+ここで凍結するのは同梱 JSON、すなわち人間が書いてリポジトリに置いたデータであり、
+LLM 出力ではない。起動処理が行うのは「人間が書いた初版をパイプラインから読める
+状態にする」ことだけで、新しい内容を生成しない。ただし ``store.freeze_entry`` は
+embedding を1エントリ1コール呼ぶため、**初回起動時のみ**エントリ数ぶんの埋め込み
+API コールが発生する（DB 不達・API 不達はいずれも fail-soft）。
 """
 
 from __future__ import annotations
@@ -20,6 +33,10 @@ from core.postgres import get_session
 from . import schema, store
 
 logger = logging.getLogger(__name__)
+
+# 同梱シード由来であることの目印（``library_entries.created_by`` / 版の発行者）。
+SEED_CREATED_BY = "bundled_import"
+SEED_FREEZE_NOTE = "同梱シードの初版（起動時自動凍結）"
 
 
 def _iter_bundled_entries(directory: Path) -> list[dict]:
@@ -42,34 +59,106 @@ def _iter_bundled_entries(directory: Path) -> list[dict]:
     return entries
 
 
+def _error_result(exc: Exception) -> dict:
+    """取込に着手できなかったときの戻り値（起動は止めない）。"""
+    return {"imported": 0, "skipped": 0, "frozen": 0, "freeze_failed": 0, "error": str(exc)}
+
+
+def _unfrozen_seed_entries(exclude_ids: set[str]) -> list[dict]:
+    """未凍結の同梱シード行（``created_by='bundled_import'`` かつ版ゼロかつ active）。
+
+    P0-7: 既に取り込み済みだが凍結されていない既存行のバックフィル用。通常運用では
+    一度凍結すれば ``latest_version_no >= 1`` になるので**起動ごとに 0 件**になる。
+
+    教員が draft を編集済みかどうかは判定できないため、条件は「同梱シード由来で版が
+    ゼロ」だけに絞る。凍結は ``revision`` を進めない append 操作
+    （``store.freeze_entry`` は ``library_entry_versions`` へ INSERT し
+    ``library_entries.latest_version_no`` のみ UPDATE する。``revision`` は
+    ``update_entry`` の楽観ロック経路でしか増えない）なので、編集途中の draft の
+    楽観ロックを壊さない。
+
+    行の取得は ``store.list_entries``（active のみの既存投影）に委ね、
+    ``created_by`` / ``latest_version_no`` の絞り込みだけを Python 側で行う
+    — seed 側に SELECT を二重化して store の正本と食い違わせないため。
+    """
+    try:
+        entries = store.list_entries()
+    except Exception:  # noqa: BLE001 — バックフィルの失敗で起動を止めない
+        logger.warning("failed to list library entries for seed freeze backfill", exc_info=True)
+        return []
+    return [
+        e
+        for e in entries
+        if str(e.get("created_by") or "") == SEED_CREATED_BY
+        and int(e.get("latest_version_no") or 0) == 0
+        and str(e.get("status") or "") == schema.STATUS_ACTIVE
+        and str(e.get("id") or "") not in exclude_ids
+    ]
+
+
 def import_bundled_library() -> dict:
-    """カートリッジ同梱ライブラリ JSON を起動時に冪等取込する。
+    """カートリッジ同梱ライブラリ JSON を起動時に冪等取込し、初版を凍結する。
 
     Returns:
-        {"imported": n, "skipped": n} — 正常時。
-        {"imported": 0, "skipped": 0, "error": "..."} — DB / カートリッジ走査が
-        使えなかった場合（起動は止めない）。
+        {"imported": n, "skipped": n, "frozen": n, "freeze_failed": n} — 正常時。
+        {"imported": 0, "skipped": 0, "frozen": 0, "freeze_failed": 0, "error": "..."}
+        — DB / カートリッジ走査が使えなかった場合（起動は止めない）。
     """
     try:
         from core.cartridges import cartridge_directory, list_cartridges
     except Exception as exc:  # noqa: BLE001
         logger.warning("cartridges module unavailable for library seed", exc_info=True)
-        return {"imported": 0, "skipped": 0, "error": str(exc)}
+        return _error_result(exc)
 
     try:
         summaries = list_cartridges()
     except Exception as exc:  # noqa: BLE001
         logger.warning("failed to list cartridges for library seed", exc_info=True)
-        return {"imported": 0, "skipped": 0, "error": str(exc)}
+        return _error_result(exc)
 
     try:
         session = get_session()
     except Exception as exc:  # noqa: BLE001
         logger.warning("library seed DB session unavailable", exc_info=True)
-        return {"imported": 0, "skipped": 0, "error": str(exc)}
+        return _error_result(exc)
 
     imported = 0
     skipped = 0
+    frozen = 0
+    freeze_failed = 0
+    # この起動で凍結を試みた entry。バックフィルで同じ行を二重に試さない。
+    freeze_attempted: set[str] = set()
+
+    def _freeze(entry_id: str, *, domain_key: str, name: str) -> None:
+        """初版を凍結する（P0-7）。失敗しても draft は残し、取込全体は止めない。"""
+        nonlocal frozen, freeze_failed
+        if not entry_id:
+            freeze_failed += 1
+            logger.warning(
+                "bundled library entry has no id; skipping initial freeze: domain=%s name=%s",
+                domain_key,
+                name,
+            )
+            return
+        freeze_attempted.add(entry_id)
+        try:
+            store.freeze_entry(
+                entry_id,
+                published_by=SEED_CREATED_BY,
+                note=SEED_FREEZE_NOTE,
+            )
+        except Exception:  # noqa: BLE001 — 凍結失敗はシード全体を止めない
+            freeze_failed += 1
+            logger.warning(
+                "failed to freeze bundled library entry: domain=%s name=%s id=%s",
+                domain_key,
+                name,
+                entry_id,
+                exc_info=True,
+            )
+            return
+        frozen += 1
+
     try:
         candidates: list[dict] = []
         for summary in summaries:
@@ -121,7 +210,7 @@ def import_bundled_library() -> dict:
 
         def _create(candidate: dict) -> None:
             entry = candidate["entry"]
-            store.create_entry(
+            created = store.create_entry(
                 domain_key=candidate["domain_key"],
                 entry_type=candidate["entry_type"],
                 name=candidate["name"],
@@ -130,7 +219,15 @@ def import_bundled_library() -> dict:
                 body=entry.get("body") or {},
                 source_component_ids=entry.get("source_component_ids") or [],
                 source_document_ids=entry.get("source_document_ids") or [],
-                created_by="bundled_import",
+                created_by=SEED_CREATED_BY,
+            )
+            # P0-7: draft のままだと retrieval（凍結版のみ）から見えないので初版を凍結する。
+            # 凍結の失敗はここで握る — idempotent_seed_import に伝播させると、draft は
+            # 作られているのに imported に数えられない（skipped 扱いになる）ため。
+            _freeze(
+                str((created or {}).get("id") or ""),
+                domain_key=candidate["domain_key"],
+                name=candidate["name"],
             )
 
         def _on_created(candidate: dict) -> None:
@@ -157,7 +254,21 @@ def import_bundled_library() -> dict:
         )
         imported += result["imported"]
         skipped += result["skipped"]
+
+        # P0-7 バックフィル: 凍結導入より前に取り込まれた（版ゼロの）同梱シード行を
+        # 冪等に凍結する。この起動で凍結を試みた行は除く。通常運用では 0 件。
+        for stale in _unfrozen_seed_entries(freeze_attempted):
+            _freeze(
+                str(stale.get("id") or ""),
+                domain_key=str(stale.get("domain_key") or ""),
+                name=str(stale.get("name") or ""),
+            )
     finally:
         session.close()
 
-    return {"imported": imported, "skipped": skipped}
+    return {
+        "imported": imported,
+        "skipped": skipped,
+        "frozen": frozen,
+        "freeze_failed": freeze_failed,
+    }

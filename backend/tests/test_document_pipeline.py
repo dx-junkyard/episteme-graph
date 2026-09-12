@@ -390,16 +390,25 @@ def test_completeness_passes_when_records_cover_tex_math():
     report = analyze_document_completeness(
         structure.to_dict(),
         document_id=structure.document_id,
+        # P0-5 / F-17: 件数だけでなく TeX ラベルの差集合も見るので、registry には
+        # eq:energy / eq:force の両方を持つ record が必要（ラベル無しの record 1件では
+        # 「registry に無いラベルが 2 件」として review に落ちる）。
         equations={
-            "equations": [{"equation_id": "eq_1"}],
+            "equations": [
+                {"equation_id": "eq_1", "label": "eq:energy"},
+                {"equation_id": "eq_2", "label": "eq:force"},
+            ],
             "equation_candidates": [
                 {"candidate_id": "c1", "acceptance_status": "accepted",
                  "accepted_equation_id": "eq_1"},
+                {"candidate_id": "c2", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_2"},
             ],
         },
     )
     cov = report["equation_artifact_coverage"]
     assert cov["tex_display_math_blocks"] == 3
+    assert cov["tex_labels_missing_from_registry"] == []
     assert cov["complete"] is True
 
 
@@ -422,11 +431,17 @@ def test_orchestrator_records_completeness_with_equation_records():
     structure = build_structure_from_tex_archive(
         _tex_archive_with_math(), document_id="doc-orch", source_file="paper.tar.gz"
     )
+    # P0-5 / F-17: record は TeX ラベル（eq:energy / eq:force）を持つ。
     equations = _FakeEquations({
-        "equations": [{"equation_id": "eq_1"}],
+        "equations": [
+            {"equation_id": "eq_1", "label": "eq:energy"},
+            {"equation_id": "eq_2", "label": "eq:force"},
+        ],
         "equation_candidates": [
             {"candidate_id": "c1", "acceptance_status": "accepted",
              "accepted_equation_id": "eq_1"},
+            {"candidate_id": "c2", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
         ],
     })
     saved: dict = {}
@@ -438,7 +453,7 @@ def test_orchestrator_records_completeness_with_equation_records():
         save_artifact=lambda name, value: saved.__setitem__(name, value),
     )
     cov = saved["document_completeness"]["equation_artifact_coverage"]
-    assert cov["equation_record_count"] == 1
+    assert cov["equation_record_count"] == 2
     assert cov["tex_display_math_blocks"] == 3
     assert cov["complete"] is True
     assert report["complete"] is True
@@ -488,11 +503,17 @@ def test_build_document_completeness_passes_equations_to_coverage():
         _tex_archive_with_math(), document_id="doc-route", source_file="paper.tar.gz"
     )
     struct_dict = structure.to_dict()
+    # P0-5 / F-17: record は TeX ラベル（eq:energy / eq:force）を持つ。
     equations = {
-        "equations": [{"equation_id": "eq_1"}],
+        "equations": [
+            {"equation_id": "eq_1", "label": "eq:energy"},
+            {"equation_id": "eq_2", "label": "eq:force"},
+        ],
         "equation_candidates": [
             {"candidate_id": "c1", "acceptance_status": "accepted",
              "accepted_equation_id": "eq_1"},
+            {"candidate_id": "c2", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
         ],
     }
     # Without equations → incomplete; with equations → complete.

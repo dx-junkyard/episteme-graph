@@ -379,7 +379,14 @@ class TestCompleteness:
 
     def test_parser_pages_processed_signals_reached_end(self):
         # Content sits only on pages 1-3, but the parser recorded that it
-        # processed all 20 pages: the rest are genuinely blank, not truncated.
+        # processed all 20 pages: the *tail* was reached, so this is not a
+        # truncation (``ingest_incomplete`` stays out of review_reasons).
+        #
+        # P0-5 / F-17 で判定が変わった点: 末尾に到達していても本文ブロックが
+        # 2/20 頁からしか出ていないので、頁被覆の理由コード
+        # ``structure_page_coverage_low`` で review に落ちる（sufficient=False）。
+        # 「末尾到達だけで sufficient=true」は 190頁・被覆 0.78 の実文書を
+        # complete と誤報していた経路そのものなので、ここは意図的に更新する。
         analyze = _import_completeness()
         structure = _short_ingest_structure(20)
         structure["metadata"]["parser_pages_processed"] = 20
@@ -387,8 +394,10 @@ class TestCompleteness:
         ingest = rep["ingest_coverage"]
         assert ingest["parser_pages_processed"] == 20
         assert ingest["reached_document_end"] is True
-        assert ingest["sufficient"] is True
         assert "ingest_incomplete" not in rep["review_reasons"]
+        assert ingest["structure_page_coverage_low"] is True
+        assert ingest["sufficient"] is False
+        assert "structure_page_coverage_low" in rep["review_reasons"]
 
     @pytest.mark.parametrize("last_page", [15, 16, 17, 19])
     def test_fractional_reach_never_proves_document_end(self, last_page):
@@ -410,6 +419,69 @@ class TestCompleteness:
             [last_page + 1, 20]
         ]
         assert "ingest_incomplete" in rep["review_reasons"]
+
+    # --- P0-5 / F-17: 頁被覆の閾値 ---------------------------------------
+    def _coverage_structure(self, content_pages: int, pages_total: int = 100) -> dict:
+        """末尾到達済み（parser_reached_eof）で本文が ``content_pages`` 頁だけの文書。
+
+        頁被覆だけが違う 2 本のテストで使う。末尾到達の信号は立てておくので、
+        判定に効くのは ``structure_page_coverage_ratio`` のみ。
+        """
+        blocks = [_heading("h_intro", 1, "1 Introduction")]
+        blocks += [_para(f"p_{p}", p, "body text") for p in range(1, content_pages + 1)]
+        blocks += [_heading("h_concl", 1, "5 Conclusion")]
+        return {
+            "blocks": blocks,
+            "sections": [
+                {"section_id": "h_intro", "title": "1 Introduction", "level": 1,
+                 "order": 0, "page_start": 1, "page_end": pages_total},
+            ],
+            "metadata": {
+                "title": "Coverage", "authors": ["Alice"], "pages": pages_total,
+                "parser_pages_processed": pages_total, "parser_reached_eof": True,
+            },
+        }
+
+    def test_low_structure_page_coverage_is_reviewed(self):
+        # 論文B の実測（頁被覆 0.7842）に相当。末尾到達だけを見ていた旧判定は
+        # sufficient=true を返していた。
+        analyze = _import_completeness()
+        rep = analyze(self._coverage_structure(78), None, document_id="doc_cov_low")
+        ingest = rep["ingest_coverage"]
+        assert ingest["reached_document_end"] is True
+        assert ingest["structure_page_coverage_ratio"] == 0.78
+        assert ingest["structure_page_coverage_low"] is True
+        assert ingest["sufficient"] is False
+        assert "structure_page_coverage_low" in rep["review_reasons"]
+        # 末尾には到達しているので truncation の理由コードは付かない。
+        assert "ingest_incomplete" not in rep["review_reasons"]
+        assert rep["complete"] is False
+
+    def test_high_structure_page_coverage_stays_sufficient(self):
+        analyze = _import_completeness()
+        rep = analyze(self._coverage_structure(95), None, document_id="doc_cov_ok")
+        ingest = rep["ingest_coverage"]
+        assert ingest["structure_page_coverage_ratio"] == 0.95
+        assert ingest["structure_page_coverage_low"] is False
+        assert ingest["sufficient"] is True
+        assert "structure_page_coverage_low" not in rep["review_reasons"]
+
+    def test_small_stub_is_exempt_from_page_coverage(self):
+        # enough_content 偽（本文ブロック < MIN_CONTENT_BLOCKS_FOR_CHECKS）の
+        # 小さなスタブには適用しない（既存の末尾到達チェックと同じ方針）。
+        analyze = _import_completeness()
+        structure = {
+            "blocks": [_para(f"p_{p}", p, "body text") for p in range(1, 4)],
+            "sections": [],
+            "metadata": {"title": "Stub", "authors": [], "pages": 100,
+                         "parser_reached_eof": True},
+        }
+        rep = analyze(structure, None, document_id="doc_stub")
+        ingest = rep["ingest_coverage"]
+        assert ingest["structure_page_coverage_ratio"] == 0.03
+        assert ingest["structure_page_coverage_low"] is False
+        assert ingest["sufficient"] is True
+        assert rep["review_reasons"] == []
 
     def test_parser_eof_allows_blank_trailing_pages(self):
         analyze = _import_completeness()
@@ -833,6 +905,52 @@ class TestPipelineGateCompleteness:
         assert res["publish_ready"] is False
         assert "DOCUMENT_INGEST_INCOMPLETE" in {w["code"] for w in res["warnings"]}
 
+    def test_gate_separates_page_coverage_from_truncated_ingest(self):
+        # P0-5 / F-17: 取り込みが不十分な理由は2つあり原因が違うので、gate の
+        # 警告コードと文言を分ける（①末尾未到達 ②本文ブロックのある頁の比率が
+        # 低い）。判定は completeness の review_reasons / ingest_coverage を
+        # 読むだけで、completeness 側の規則には触れない。
+        mod = _import_gate()
+
+        # ① 末尾未到達（従来の文言）
+        truncated = mod.ExportValidationGate().run(artifacts={
+            "document_structure": self._struct_dict(_short_ingest_structure(20), "doc_short"),
+        }).to_dict()
+        reach_msgs = [
+            w["message"] for w in truncated["warnings"]
+            if w["code"] == "DOCUMENT_INGEST_INCOMPLETE"
+        ]
+        assert reach_msgs and "did not reach the document end" in reach_msgs[0]
+
+        # ② 末尾には到達しているが頁被覆が低い（別コード・別文言）
+        blocks = [_heading("h_intro", 1, "1 Introduction")]
+        blocks += [_para(f"p_{page}", page, "body text") for page in range(1, 79)]
+        blocks += [_heading("h_concl", 1, "5 Conclusion")]
+        coverage_structure = {
+            "blocks": blocks,
+            "sections": [
+                {"section_id": "h_intro", "title": "1 Introduction", "level": 1,
+                 "order": 0, "page_start": 1, "page_end": 100},
+            ],
+            "metadata": {
+                "title": "Coverage", "authors": ["Alice"], "pages": 100,
+                "parser_pages_processed": 100, "parser_reached_eof": True,
+            },
+        }
+        low_coverage = mod.ExportValidationGate().run(artifacts={
+            "document_structure": self._struct_dict(coverage_structure, "doc_cov_low"),
+        }).to_dict()
+        codes = {w["code"] for w in low_coverage["warnings"]}
+        assert "DOCUMENT_STRUCTURE_PAGE_COVERAGE_LOW" in codes
+        # 末尾には到達しているので truncation の警告は流用しない。
+        assert "DOCUMENT_INGEST_INCOMPLETE" not in codes
+        coverage_msgs = [
+            w["message"] for w in low_coverage["warnings"]
+            if w["code"] == "DOCUMENT_STRUCTURE_PAGE_COVERAGE_LOW"
+        ]
+        assert "did not reach the document end" not in coverage_msgs[0]
+        assert "body blocks on only a small share" in coverage_msgs[0]
+
     def test_gate_prefers_precomputed_completeness_artifact(self):
         mod = _import_gate()
         # A structure that would look complete, but an orchestrator-computed
@@ -933,6 +1051,102 @@ class TestEquationArtifactCoverage:
         )
         assert cov["complete"] is True
         assert cov["review_reasons"] == []
+
+    # --- P0-5 / F-17: TeX ラベルの差集合 ---------------------------------
+    def test_tex_labels_missing_from_registry_is_incomplete(self):
+        # 29 ラベル中 17 欠落（件数比較だけでは complete を通ってしまう形）。
+        mod = _import_completeness_mod()
+        tex_labels = [f"eq:l{i:02d}" for i in range(1, 30)]
+        present = tex_labels[:12]
+        equations = {
+            "equations": [
+                {"equation_id": f"eq_{i}", "label": label}
+                for i, label in enumerate(present)
+            ],
+            "equation_candidates": [],
+        }
+        cov = mod.analyze_equation_artifact_coverage(
+            {}, equations,
+            tex_inventory={
+                "display_math_blocks": 29,
+                "labels": tex_labels,
+                "label_count": 29,
+            },
+            pages_total=0,
+        )
+        assert cov["equation_record_count"] == 12
+        assert cov["registry_equation_label_count"] == 12
+        assert len(cov["tex_labels_missing_from_registry"]) == 17
+        assert cov["tex_labels_missing_from_registry"][0] == "eq:l13"
+        assert "equation_labels_missing_from_registry" in cov["review_reasons"]
+        assert cov["complete"] is False
+
+    def test_label_diff_ignores_case_and_paren_and_label_wrapper(self):
+        # 表記ゆれ（大文字小文字 / (3.14) の括弧 / \label{...} 包み）を欠落と
+        # 誤報しない。誤報の逆方向を作らないための正規化。
+        mod = _import_completeness_mod()
+        equations = {
+            "equations": [
+                {"equation_id": "e1", "label": "EQ:Energy"},
+                {"equation_id": "e2", "label": r"\label{eq:force}"},
+                {"equation_id": "e3", "source_location": {"label": "(3.14)"}},
+            ],
+            "equation_candidates": [],
+        }
+        cov = mod.analyze_equation_artifact_coverage(
+            {}, equations,
+            tex_inventory={
+                "display_math_blocks": 3,
+                "labels": ["eq:energy", "eq:force", "3.14"],
+                "label_count": 3,
+            },
+            pages_total=0,
+        )
+        assert cov["tex_labels_missing_from_registry"] == []
+        assert cov["complete"] is True
+
+    def test_label_diff_does_not_run_without_tex_labels(self):
+        # PDF 文書（TeX ラベル一覧なし）では比較の土俵が無いので判定しない。
+        mod = _import_completeness_mod()
+        equations = {
+            "equations": [{"equation_id": "eq_1", "label": "3.1"}],
+            "equation_candidates": [],
+        }
+        cov = mod.analyze_equation_artifact_coverage(
+            {}, equations, tex_source=None, pages_total=20
+        )
+        assert cov["tex_equation_labels"] == []
+        assert cov["tex_labels_missing_from_registry"] == []
+        assert "equation_labels_missing_from_registry" not in cov["review_reasons"]
+        assert cov["complete"] is True
+
+    def test_label_diff_propagates_to_document_review_reasons(self):
+        mod = _import_completeness_mod()
+        structure = {
+            "document_id": "doc_tex_labels",
+            "metadata": {
+                "pages": 0,
+                "parser_reached_eof": True,
+                "tex_equation_inventory": {
+                    "display_math_blocks": 2,
+                    "labels": ["eq:a", "eq:b"],
+                    "label_count": 2,
+                },
+            },
+            "blocks": [],
+            "sections": [],
+        }
+        report = mod.analyze_document_completeness(
+            structure, None, document_id="doc_tex_labels",
+            equations={
+                "equations": [{"equation_id": "eq_1", "label": "eq:a"}],
+                "equation_candidates": [],
+            },
+        )
+        cov = report["equation_artifact_coverage"]
+        assert cov["tex_labels_missing_from_registry"] == ["eq:b"]
+        assert "equation_artifact_coverage_incomplete" in report["review_reasons"]
+        assert report["complete"] is False
 
     def test_gate_refreshes_coverage_from_equation_artifacts(self):
         # A precomputed (stale, pre-equation_semantics) completeness report gets
@@ -1053,9 +1267,11 @@ class TestEquationArtifactCoverage:
                 "sections": [],
             },
             "document_completeness": precomputed,
-            # Real EquationRecords now exist and cover the math.
+            # Real EquationRecords now exist and cover the math. P0-5: TeX の
+            # ラベル eq:a を実際に持つ record でなければ「registry に無い」と
+            # 判定される（件数だけでは覆えない）。
             "equation_semantics": {
-                "equations": [{"equation_id": "eq_1"}],
+                "equations": [{"equation_id": "eq_1", "label": "eq:a"}],
                 "equation_candidates": [
                     {"candidate_id": "c1", "acceptance_status": "accepted",
                      "accepted_equation_id": "eq_1"},
@@ -1106,8 +1322,9 @@ class TestEquationArtifactCoverage:
                 "sections": [],
             },
             "document_completeness": precomputed,
+            # P0-5: record は TeX ラベル eq:a を持つ（ラベル差集合が空になる）。
             "equation_semantics": {
-                "equations": [{"equation_id": "eq_1"}],
+                "equations": [{"equation_id": "eq_1", "label": "eq:a"}],
                 "equation_candidates": [
                     {"candidate_id": "c1", "acceptance_status": "accepted",
                      "accepted_equation_id": "eq_1"},

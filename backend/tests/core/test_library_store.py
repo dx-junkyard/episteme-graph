@@ -241,8 +241,15 @@ class TestRetiredIsReadOnly:
 
 
 class TestSeedImportIdempotency:
+    """P0-7 以降、戻り値は ``frozen`` / ``freeze_failed`` を含む4キーになった
+    （取込 = draft 作成 + 初版凍結。凍結しないと retrieval から不可視だったため）。
+    既存アサーションはキー追加に追随して更新している。"""
+
     def test_import_bundled_library_is_idempotent(self, fake, monkeypatch, tmp_path):
         monkeypatch.setattr(library_seed, "get_session", make_session_factory(fake))
+        # 凍結時の embedding をオフラインで固定する（失敗しても fail-soft だが、
+        # テストを外部 API に依存させない）。
+        monkeypatch.setattr("core.llm.generate_embeddings", lambda texts: [[0.1, 0.2]])
 
         class _Summary:
             cartridge_id = "particle_physics"
@@ -262,12 +269,19 @@ class TestSeedImportIdempotency:
         )
 
         first = library_seed.import_bundled_library()
-        assert first == {"imported": 1, "skipped": 0}
+        assert first == {"imported": 1, "skipped": 0, "frozen": 1, "freeze_failed": 0}
         assert len(fake.entries) == 1
+        # P0-7: 取込と同時に初版が凍結され、retrieval（凍結版のみ）から見える。
+        entry_id = next(iter(fake.entries))
+        versions = store.list_versions(entry_id)
+        assert [v["version_no"] for v in versions] == [1]
+        assert versions[0]["published_by"] == "bundled_import"
 
         second = library_seed.import_bundled_library()
-        assert second == {"imported": 0, "skipped": 1}
+        # 2回目は取込も凍結も起きない（バックフィルは版ゼロの行だけを対象にする）。
+        assert second == {"imported": 0, "skipped": 1, "frozen": 0, "freeze_failed": 0}
         assert len(fake.entries) == 1
+        assert [v["version_no"] for v in store.list_versions(entry_id)] == [1]
 
     def test_import_bundled_library_skips_invalid_entry_type(self, fake, monkeypatch, tmp_path):
         monkeypatch.setattr(library_seed, "get_session", make_session_factory(fake))
@@ -289,7 +303,7 @@ class TestSeedImportIdempotency:
         )
 
         result = library_seed.import_bundled_library()
-        assert result == {"imported": 0, "skipped": 1}
+        assert result == {"imported": 0, "skipped": 1, "frozen": 0, "freeze_failed": 0}
         assert len(fake.entries) == 0
 
     def test_import_bundled_library_no_cartridge_directory_no_op(self, fake, monkeypatch, tmp_path):
@@ -308,4 +322,4 @@ class TestSeedImportIdempotency:
         monkeypatch.setattr(cartridges_module, "cartridge_directory", _raise_not_found)
 
         result = library_seed.import_bundled_library()
-        assert result == {"imported": 0, "skipped": 0}
+        assert result == {"imported": 0, "skipped": 0, "frozen": 0, "freeze_failed": 0}

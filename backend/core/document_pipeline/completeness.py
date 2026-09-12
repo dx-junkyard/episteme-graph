@@ -10,11 +10,18 @@ reuse it:
     never ingested as equations (catches a tail truncation at (3.36)),
   * terminal section presence — a Conclusion / Summary-like tail section,
   * ingest reachability (issue #371) — did the DocumentStructure ingest reach
-    the *end* of the source document? The pass/fail signal is whether ingested
+    the *end* of the source document? The tail signal is whether ingested
     content extends close enough to the final page (no large trailing
-    un-ingested range), NOT what fraction of pages carry content. Blank /
-    figure-only / references-only pages are legitimate, so a sparse page
-    distribution alone does not mean the ingest was truncated.
+    un-ingested range). Blank / figure-only / references-only pages are
+    legitimate, so a *slightly* sparse page distribution is not truncation,
+  * structure page coverage (P0-5 / F-17) — 末尾に到達していても本文ブロックの
+    頁被覆が ``STRUCTURE_PAGE_COVERAGE_MIN`` を下回るなら review に落とす。
+    190頁の論文で頁被覆 0.78 のまま ``sufficient=true`` を返していた誤報の是正。
+    末尾未到達（``ingest_incomplete``）とは別の理由コード
+    （``structure_page_coverage_low``）で報告する,
+  * equation label coverage (P0-5 / F-17) — TeX の ``\\label{...}`` 一覧と最終
+    equation registry のラベル集合の**差集合**。件数比較だけでは 29 ラベル中 17
+    欠落でも complete を通してしまうため。
 
 The EvidenceRegistry page distribution is reported separately as an *audit-only*
 signal (``evidence_page_distribution``). EvidenceRegistry indexes adopted spans /
@@ -37,6 +44,14 @@ MIN_INGEST_REACH_RATIO = 0.8
 # EvidenceRegistry pages below this fraction of the document are flagged as
 # *sparse* — an audit signal only, never a completeness pass/fail (issue #371).
 EVIDENCE_SPARSE_RATIO = 0.5
+
+# DocumentStructure の本文ブロックが覆う頁の割合がこの閾値を下回ったら review。
+# P0-5 / F-17: 末尾到達（reached_document_end）だけを見ていたため、190頁の論文で
+# 頁被覆 0.78（= 22% の頁から本文ブロックが1つも出ていない）でも
+# ``ingest_coverage.sufficient = true`` と誤報していた。末尾到達と頁被覆は別の
+# 失敗であり、理由コードも ``ingest_incomplete`` と
+# ``structure_page_coverage_low`` に分けて報告する。
+STRUCTURE_PAGE_COVERAGE_MIN = 0.9
 
 # Coverage / terminal-section checks are only meaningful once enough content was
 # ingested; a small stub legitimately cannot cover many pages or carry a
@@ -261,6 +276,59 @@ def _equation_artifact_counts(equations: Any) -> dict:
     }
 
 
+def normalize_equation_label_key(value: Any) -> str:
+    """式ラベルを比較用のキーへ正規化する（P0-5 / F-17）。
+
+    TeX 側インベントリの ``\\label{...}`` 中身（``eq:foo``）と、equation registry
+    側のラベル（TeX 由来なら同じ記号ラベル、PDF 由来なら印字番号 ``(3.14)``）を
+    同じ土俵に載せるための最小限の正規化:
+
+      * ``\\label{eq:foo}`` 形式ならば中身 ``eq:foo`` を取り出す、
+      * 印字番号の外側の括弧 1 対だけを外す（``(3.14)`` → ``3.14``。
+        ``EquationNormalizer.validate_label`` と同じ規則）、
+      * 大文字小文字差だけの不一致を「欠落」と誤報しないため casefold する。
+
+    片方にしか無い表記体系（記号ラベル vs 印字番号）を無理に対応付けることは
+    しない。対応付けられないものは差集合として正直に報告する。
+    """
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    m = _TEX_LABEL_RE.search(text)
+    if m:
+        text = m.group(1).strip()
+    if (
+        text.startswith("(")
+        and text.endswith(")")
+        and text.count("(") == 1
+        and text.count(")") == 1
+    ):
+        text = text[1:-1].strip()
+    return text.casefold()
+
+
+def _registry_equation_label_keys(equations: Any) -> set[str]:
+    """equation registry（確定 record）側のラベル集合（正規化済み）。
+
+    ``_equation_artifact_counts`` と同じ record 集合を見る。ラベルは record の
+    ``label`` / ``equation_label``、および ``source_location`` の同名キーから拾う
+    （export 形と dataclass 形の両方に耐えるため）。
+    """
+    eq = equations if isinstance(equations, dict) else {}
+    records = [r for r in (eq.get("equations") or eq.get("records") or []) if isinstance(r, dict)]
+    keys: set[str] = set()
+    for r in records:
+        candidates = [r.get("label"), r.get("equation_label")]
+        src = r.get("source_location")
+        if isinstance(src, dict):
+            candidates += [src.get("label"), src.get("equation_label")]
+        for value in candidates:
+            key = normalize_equation_label_key(value)
+            if key:
+                keys.add(key)
+    return keys
+
+
 def _coerce_tex_inventory(inventory: Any) -> dict:
     """Normalize a precomputed TeX inventory dict to the canonical shape (#420)."""
     inv = inventory if isinstance(inventory, dict) else {}
@@ -296,6 +364,12 @@ def analyze_equation_artifact_coverage(
     The TeX inventory is taken from ``tex_source`` when given; otherwise the
     precomputed ``tex_inventory`` (persisted on the metadata at ingest, #420) is
     used so coverage works even when the raw source is not re-stored.
+
+    P0-5 / F-17: 件数比較だけでは「TeX に 29 ラベルあり registry に 12 しか無い」
+    文書が ``complete=true`` を通ってしまう。TeX ラベル一覧が取れている場合は
+    **ラベルの差集合**（``tex_labels_missing_from_registry``）を判定条件に加える。
+    ラベル一覧が無い入力（PDF 等）ではこの判定は走らない — 比較の土俵が無い所で
+    欠落を主張して逆向きの誤報を作らないため。
     """
     structure = structure if isinstance(structure, dict) else {}
     if tex_source:
@@ -320,10 +394,24 @@ def analyze_equation_artifact_coverage(
     if no_pages and tex["display_math_blocks"] > 0 and counts["record_count"] == 0:
         review_reasons.append("tex_display_math_without_equation_records")
 
+    # TeX ラベルの差集合（P0-5 / F-17）。件数比較では見えない「registry に入って
+    # いないラベル」を列挙する。TeX ラベルが1つも取れていない入力では走らない。
+    registry_label_keys = _registry_equation_label_keys(equations)
+    tex_labels_missing: list[str] = []
+    if tex["labels"]:
+        tex_labels_missing = [
+            label for label in tex["labels"]
+            if normalize_equation_label_key(label) not in registry_label_keys
+        ]
+    if tex_labels_missing:
+        review_reasons.append("equation_labels_missing_from_registry")
+
     return {
         "tex_display_math_blocks": tex["display_math_blocks"],
         "tex_equation_labels": tex["labels"],
         "tex_equation_label_count": tex["label_count"],
+        "tex_labels_missing_from_registry": tex_labels_missing,
+        "registry_equation_label_count": len(registry_label_keys),
         "equation_candidate_count": counts["candidate_count"],
         "accepted_candidate_count": counts["accepted_candidate_count"],
         "resolved_candidate_count": counts["resolved_candidate_count"],
@@ -470,6 +558,9 @@ def analyze_document_completeness(
     trailing_uningested_page_ranges: list[list[int]] = []
     reached_document_end = True
     ingest_sufficient = True
+    # P0-5 / F-17: 末尾到達とは独立した「頁被覆が低い」信号。
+    structure_page_coverage_low = False
+    ingest_reach_insufficient = False
     if isinstance(pages_total, int) and pages_total > 0:
         structure_page_coverage_ratio = round(len(content_pages) / pages_total, 4)
         # The furthest page the parser is known to have reached: ingested blocks
@@ -494,7 +585,17 @@ def analyze_document_completeness(
         # Reachability is only enforced once enough content was ingested; a small
         # stub legitimately cannot reach a 20-page tail.
         if enough_content:
-            ingest_sufficient = reached_document_end
+            ingest_reach_insufficient = not reached_document_end
+            # P0-5 / F-17: 末尾に到達していても、本文ブロックがどの頁からも出て
+            # いない範囲が広ければ取り込みは実質的に欠けている。小さなスタブ
+            # （enough_content 偽）には適用しない。
+            structure_page_coverage_low = (
+                structure_page_coverage_ratio is not None
+                and structure_page_coverage_ratio < STRUCTURE_PAGE_COVERAGE_MIN
+            )
+            ingest_sufficient = not (
+                ingest_reach_insufficient or structure_page_coverage_low
+            )
 
     # --- evidence page distribution (audit-only, issue #371) ----------------
     # EvidenceRegistry indexes adopted spans / equations / captions, not whole
@@ -606,8 +707,11 @@ def analyze_document_completeness(
         review_reasons.append("equation_label_discontinuity")
     if terminal_missing:
         review_reasons.append("terminal_section_missing")
-    if not ingest_sufficient:
+    if ingest_reach_insufficient:
         review_reasons.append("ingest_incomplete")
+    # 原因が違うので理由コードを分ける（末尾未到達 vs 頁被覆の低さ）。
+    if structure_page_coverage_low:
+        review_reasons.append("structure_page_coverage_low")
     if tail_truncation_suspected:
         review_reasons.append("tail_truncation_suspected")
     if not equation_coverage.get("complete", True):
@@ -647,6 +751,7 @@ def analyze_document_completeness(
             "reached_document_end": reached_document_end,
             "trailing_uningested_page_ranges": trailing_uningested_page_ranges,
             "structure_page_coverage_ratio": structure_page_coverage_ratio,
+            "structure_page_coverage_low": structure_page_coverage_low,
             "sufficient": ingest_sufficient,
         },
         "evidence_page_distribution": {
