@@ -21,6 +21,7 @@ from .schema import (
     CORE_DEPENDENCY_TYPES,
     CartridgeContext,
     ComponentAssemblyLLMInput,
+    concept_name_list,
 )
 from .claim_centered_planner import ClaimCenteredComponentPlanner
 
@@ -429,18 +430,12 @@ class ComponentAssemblyInputBuilder:
 
 
 def _concept_names(claim: object) -> list[str]:
-    names: list[str] = []
-    seen: set[str] = set()
-    for concept in getattr(claim, "concepts", []) or []:
-        name = str(
-            getattr(concept, "normalized", "")
-            or getattr(concept, "name", "")
-            or (concept.get("normalized") or concept.get("name") if isinstance(concept, dict) else "")
-        ).strip()
-        if name and name not in seen:
-            seen.add(name)
-            names.append(name)
-    return names
+    """claim の concepts を概念名の list[str] に正規化する（P0-3）。
+
+    正規化規則（str は 1 要素・``concept_type="symbol"`` と最小長未満の除外）の
+    正本は :func:`schema.concept_name_list`。ここで独自に展開し直さない。
+    """
+    return concept_name_list(getattr(claim, "concepts", []))
 
 
 def _claim_object_index(claim_objects) -> dict[str, object]:

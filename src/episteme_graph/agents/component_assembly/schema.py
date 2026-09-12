@@ -120,6 +120,157 @@ def normalize_dependencies(raw: object) -> list[dict]:
     return dependencies
 
 
+# ---------------------------------------------------------------------------
+# concepts の型契約（knowledge_structure_review_2026-09-12 §4 Phase 0 の P0-3）
+# ---------------------------------------------------------------------------
+# 概念名の最小長（**ASCII 英数字だけで書かれた名前**に適用）。``R`` / ``e`` /
+# ``b1`` のような短い ASCII トークンは概念ではなく記号とみなし concepts に
+# 載せない（F-6 / K-2）。記号は symbol_registry artifact が正本なので、ここで
+# 落としても情報は失われない。
+MIN_CONCEPT_NAME_LENGTH = 3
+
+# 非 ASCII の文字（ギリシャ文字・CJK など）を含む名前の最小長。「重力」のような
+# 2 文字の概念名を巻き込まないため ASCII より緩く、記号 1 文字（``λ`` / ``φ``）
+# だけを落とす。分野語をハードコードせずに記号を排除するための規則。
+MIN_UNICODE_CONCEPT_NAME_LENGTH = 2
+
+# LaTeX 制御記法を含む名前は長さによらず記号層（``\lambda`` は ASCII 7 文字なので
+# 長さ規則を通ってしまう）。先頭の ``\`` と ``{ } $`` の混入は常に記号とみなす。
+_LATEX_MARKUP_CHARS = frozenset("{}$")
+
+# 添字記法（``b_1`` / ``R_D`` / ``x^2``）。``_`` ``^`` の混入だけで切ると
+# ``zero_recoil_limit`` のような snake_case の概念名まで落ちるため、区切られた
+# 各部分が短い（2 文字以下）か数字だけのときに限って記号とみなす。
+_SUBSCRIPT_SEPARATORS = ("_", "^")
+_MAX_SUBSCRIPT_SEGMENT_LENGTH = 2
+
+# claim 側 concept の型のうち、概念層に載せないもの。equation_claim_synthesis が
+# 生成する claim concept は全件 ``concept_type="symbol"`` で、これがそのまま
+# component.concepts / prerequisite_concepts に流れていた（K-2）。
+SYMBOL_CONCEPT_TYPES = {"symbol"}
+
+
+def is_symbol_like_concept_name(name: str) -> bool:
+    """概念名が「記号層」に属するか（P0-3）。
+
+    判定は分野語をハードコードせず、書式だけで行う:
+
+    - LaTeX 制御記法を含む（先頭が ``\\`` / ``{ } $`` を含む）→ 記号
+      （``\\lambda`` は ASCII 7 文字なので長さ規則では落ちない）。
+    - 添字記法（``b_1`` / ``R_D`` / ``x^2``）→ 記号。``_`` ``^`` の混入だけで
+      切ると ``zero_recoil_limit`` のような snake_case の概念名まで落ちるため、
+      区切られた各部分が :data:`_MAX_SUBSCRIPT_SEGMENT_LENGTH` 以下か数字だけの
+      ときに限る。
+    - 非 ASCII の文字を含む名前は :data:`MIN_UNICODE_CONCEPT_NAME_LENGTH` 未満 →
+      記号（``λ`` は落ち、``重力`` は残る）。
+    - それ以外（ASCII のみ）は :data:`MIN_CONCEPT_NAME_LENGTH` 未満 → 記号
+      （``R`` / ``e`` / ``b1`` は落ちる）。
+
+    P0-3 は記号を消す規律ではなく symbol_registry に閉じる規律なので、概念層に
+    載らないことと情報が失われることは別（``R_D`` のような観測量の記号名は
+    symbol_registry から辿れる。概念レジストリの新設は Phase 3）。
+    """
+    token = str(name or "").strip()
+    if not token:
+        return True
+    if token.startswith("\\") or any(ch in _LATEX_MARKUP_CHARS for ch in token):
+        return True
+    if any(sep in token for sep in _SUBSCRIPT_SEPARATORS) and _is_subscripted_symbol(token):
+        return True
+    if any(ord(ch) > 127 for ch in token):
+        return len(token) < MIN_UNICODE_CONCEPT_NAME_LENGTH
+    return len(token) < MIN_CONCEPT_NAME_LENGTH
+
+
+def _is_subscripted_symbol(token: str) -> bool:
+    """``b_1`` / ``R_D`` / ``x^2`` のような添字付き記号か（snake_case は除く）。"""
+    segments = [token]
+    for sep in _SUBSCRIPT_SEPARATORS:
+        segments = [part for seg in segments for part in seg.split(sep)]
+    for segment in segments:
+        if not segment:
+            return True
+        if segment.isdigit() or len(segment) <= _MAX_SUBSCRIPT_SEGMENT_LENGTH:
+            return True
+    return False
+
+
+def _concept_name_and_type(item: object) -> tuple[str, str]:
+    """concepts の 1 要素から（概念名, concept_type）を取り出す。
+
+    受け付ける形は str / dict / ClaimConcept 等のオブジェクト。名前は
+    ``normalized`` → ``name`` → ``text`` の順で解決する（型が不明な形では
+    concept_type は空文字＝判定不能）。
+    """
+    if isinstance(item, bytes):
+        return (item.decode("utf-8", "replace").strip(), "")
+    if isinstance(item, str):
+        return (item.strip(), "")
+    if isinstance(item, dict):
+        name = str(
+            item.get("normalized")
+            or item.get("name")
+            or item.get("text")
+            or ""
+        ).strip()
+        return (name, str(item.get("concept_type") or "").strip())
+    name = str(
+        getattr(item, "normalized", "")
+        or getattr(item, "name", "")
+        or getattr(item, "text", "")
+        or ""
+    ).strip()
+    if not name:
+        name = str(item or "").strip()
+    return (name, str(getattr(item, "concept_type", "") or "").strip())
+
+
+def concept_name_list(value: object) -> list[str]:
+    """``concepts`` 値を「概念名の list[str]」へ正規化する単一の入口（P0-3）。
+
+    str / list[str] / list[dict] / list[ClaimConcept] のどれで来ても同じ結果に
+    なるよう揃える。**str は 1 要素の list として扱う**（``list("raptis")`` の
+    ように 1 文字ずつ回り ``['r','a','p','i','s','t']`` が前提知識として
+    学習者まで貫通した F0-6 の再発防止）。
+
+    併せて概念層と記号層を分離する（P0-3）:
+
+    - ``concept_type`` が ``symbol``（型が読める形のときのみ判定できる）の要素は
+      concept にしない。記号は symbol_registry artifact が正本。
+    - 書式から記号と分かる名前（:func:`is_symbol_like_concept_name`）は concept に
+      しない。型が読めない str 形でも記号を落とせる唯一の手掛かりが書式のため。
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, dict)):
+        items: list[object] = [value]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+    else:
+        try:
+            items = list(value)  # type: ignore[arg-type]
+        except TypeError:
+            items = [value]
+
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item is None:
+            continue
+        name, concept_type = _concept_name_and_type(item)
+        if not name:
+            continue
+        if concept_type.lower() in SYMBOL_CONCEPT_TYPES:
+            continue
+        if is_symbol_like_concept_name(name):
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
 @dataclass
 class CartridgeContext:
     cartridge_id: str
@@ -371,10 +522,12 @@ class ComponentAssemblyResult:
                 support_kind=c.get("support_kind", ""),
                 supports_thesis_node_ids=list(c.get("supports_thesis_node_ids") or []),
                 role_in_thesis=c.get("role_in_thesis", ""),
-                concepts=list(c.get("concepts") or []),
-                prerequisite_concepts=list(c.get("prerequisite_concepts") or []),
-                introduced_concepts=list(c.get("introduced_concepts") or []),
-                reused_concepts=list(c.get("reused_concepts") or []),
+                # P0-3: dict から復元するときも concepts の型契約を通す。
+                # 素の list() は str を 1 文字ずつに割るため使わない（F0-6）。
+                concepts=concept_name_list(c.get("concepts")),
+                prerequisite_concepts=concept_name_list(c.get("prerequisite_concepts")),
+                introduced_concepts=concept_name_list(c.get("introduced_concepts")),
+                reused_concepts=concept_name_list(c.get("reused_concepts")),
                 operation=c.get("operation", ""),
                 teaching_granularity=c.get("teaching_granularity") or {},
                 maturity_source=c.get("maturity_source", "llm_proposed"),

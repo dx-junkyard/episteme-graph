@@ -771,9 +771,11 @@ def test_concepts_recomputed_per_child_not_copied_wholesale():
     assert definition.prerequisite_concepts == ["alpha"]
 
 
-def test_concepts_recomputed_from_equation_symbols():
-    # No claims at all: child concepts must be derived from the equations'
-    # defined/used symbols, redistributed per responsibility.
+def test_equation_symbols_are_not_recomputed_into_child_concepts():
+    # P0-3（knowledge_structure_review_2026-09-12 §4 / F-6 / K-2）: 式の記号は
+    # 子 component の concepts に混ぜない（記号層の正本は symbol_registry で、
+    # 子からは equation_ids リンクで式に辿れるため情報は失われない）。claim が
+    # 無ければ子の concepts は空になる — 記号で埋めない。
     component = _component(
         component_id="comp_eqsym",
         linked_equation_ids=["eq_def", "eq_der"],
@@ -792,15 +794,19 @@ def test_concepts_recomputed_from_equation_symbols():
 
     definition = next(c for c in refined.components if c.responsibility_type == "definition")
     derivation = next(c for c in refined.components if c.responsibility_type == "derivation")
-    assert definition.concepts == ["sigma"]
-    assert set(derivation.concepts) == {"b_2", "delta"}
+    child_concepts = definition.concepts + derivation.concepts
+    for symbol in ("sigma", "b_2", "delta"):
+        assert symbol not in child_concepts
+    # 式リンク自体は保たれる（記号へ辿る道は残る）。
+    assert definition.linked_equation_ids or derivation.linked_equation_ids
     # The broad parent-only concept is not copied onto either child.
-    assert "broad_parent_concept" not in definition.concepts + derivation.concepts
+    assert "broad_parent_concept" not in child_concepts
 
 
 def test_non_atomic_claim_concepts_not_treated_as_confirmed():
     # A composite (non-atomic) claim's concepts must NOT become a child's
-    # confirmed concepts; only atomic-claim and equation-symbol concepts do.
+    # confirmed concepts; only atomic-claim concepts do（P0-3 で式の記号は
+    # concepts に入らなくなった）。
     component = _component(
         component_id="comp_lowconf_concept",
         linked_equation_ids=["eq_def", "eq_der"],

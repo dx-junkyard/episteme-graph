@@ -583,3 +583,107 @@ def test_claim_concept_fields_round_trip_through_serialization():
     assert [(c.name, c.normalized, c.concept_type, c.role) for c in restored.concepts] == [
         (c.name, c.normalized, c.concept_type, c.role) for c in original.concepts
     ]
+
+
+# ---------------------------------------------------------------------------
+# P0-3: ClaimObjectRecord.concepts の型契約
+# （knowledge_structure_review_2026-09-12 §4 Phase 0 / F0-6）
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_claim_concepts_wraps_str_and_dict_without_splitting():
+    from episteme_graph.agents.claim_object_builder.schema import (
+        ClaimConcept,
+        coerce_claim_concepts,
+    )
+
+    assert coerce_claim_concepts(None) == []
+    # 素の str は 1 概念（1 文字ずつに割らない）
+    assert [c.name for c in coerce_claim_concepts("raptis")] == ["raptis"]
+    # dict / ClaimConcept はそのまま包む。concept_type は与えられた値のみ採用し、
+    # 不明なら "unknown"（"symbol" を勝手に付けない）。
+    coerced = coerce_claim_concepts([
+        {"name": "skewness", "normalized": "Skewness", "concept_type": "observable"},
+        "gravity",
+        ClaimConcept(name="lambda", normalized="lambda", concept_type="symbol"),
+    ])
+    assert [(c.normalized, c.concept_type) for c in coerced] == [
+        ("Skewness", "observable"),
+        ("gravity", "unknown"),
+        ("lambda", "symbol"),
+    ]
+
+
+def test_from_dict_restores_concepts_given_as_plain_strings():
+    from episteme_graph.agents.claim_object_builder.schema import ClaimObjectBuildResult
+
+    restored = ClaimObjectBuildResult.from_dict({
+        "document_id": "doc",
+        "claims": [{
+            "claim_id": "claim_1",
+            "document_id": "doc",
+            "claim_type": "result",
+            "text": "text",
+            "source_evidence_ids": [],
+            "source_span_ids": [],
+            "concepts": ["Skewness", {"name": "gravity", "normalized": "Gravity"}],
+        }],
+    })
+
+    concepts = restored.claims[0].concepts
+    assert [c.normalized for c in concepts] == ["Skewness", "Gravity"]
+    assert all(c.concept_type == "unknown" for c in concepts)
+
+
+def test_custom_concept_resolver_returning_strings_is_not_dropped():
+    # 以前は isinstance(ClaimConcept) 以外を黙って捨てていた（情報を落とさない）。
+    structure = _make_structure_with("blk_x", "Skewness constrains gravity.")
+    ev_builder = EvidenceRegistryBuilder(structure)
+    ev_builder.add_for_block("blk_x")
+    registry = ev_builder.build("doc_test")
+
+    builder = ClaimObjectBuilder(
+        evidence_registry=registry,
+        concept_resolver=lambda text, roles, ontology: ["Skewness", "Gravity"],
+    )
+    result = builder.build(
+        "doc_test",
+        [_make_qualified("span_001", "blk_x", "Skewness constrains gravity.")],
+    )
+
+    assert [c.normalized for c in result.claims[0].concepts] == ["Skewness", "Gravity"]
+
+
+def test_cartridge_alias_matching_is_word_bounded():
+    # P0-2（F-7 / K-3 と同型）: 短い alias "SM" が "cosmological" に部分一致して
+    # 原本に無い概念 "Standard Model" を claim へ注入していた回帰。
+    ontology = {
+        "aliases": {"Standard Model": ["SM", "standard model"]},
+        "concept_types": {"Standard Model": "Theory"},
+    }
+    text = "We compute the cosmological mismatch of the bias model."
+    structure = _make_structure_with("blk_x", text)
+    ev_builder = EvidenceRegistryBuilder(structure)
+    ev_builder.add_for_block("blk_x")
+    builder = ClaimObjectBuilder(
+        evidence_registry=ev_builder.build("doc_test"),
+        cartridge_ontology=ontology,
+    )
+
+    result = builder.build("doc_test", [_make_qualified("span_001", "blk_x", text)])
+
+    assert [c.normalized for c in result.claims[0].concepts] == []
+
+    # 語として現れるときは従来どおり当たる（情報を落とさない）。
+    text2 = "The SM prediction is compared with the measurement."
+    structure2 = _make_structure_with("blk_y", text2)
+    ev_builder2 = EvidenceRegistryBuilder(structure2)
+    ev_builder2.add_for_block("blk_y")
+    builder2 = ClaimObjectBuilder(
+        evidence_registry=ev_builder2.build("doc_test"),
+        cartridge_ontology=ontology,
+    )
+
+    result2 = builder2.build("doc_test", [_make_qualified("span_002", "blk_y", text2)])
+
+    assert "Standard Model" in [c.normalized for c in result2.claims[0].concepts]

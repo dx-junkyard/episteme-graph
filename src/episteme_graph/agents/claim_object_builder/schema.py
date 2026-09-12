@@ -153,6 +153,73 @@ class ClaimConcept:
     role: str = "unknown"
 
 
+def coerce_claim_concept(value: object) -> "ClaimConcept | None":
+    """任意の形の concept 要素を :class:`ClaimConcept` に揃える（P0-3）。
+
+    ``ClaimObjectRecord.concepts`` の型契約は ``list[ClaimConcept]``。str や
+    dict が混ざる経路（外部 resolver・保存済み JSON の復元）で**落とさず包む**。
+    記号かどうかは呼び出し側が知っている ``concept_type`` からのみ取り、
+    分からなければ ``unknown``（``symbol`` を勝手に付けない）。
+    空文字など名前が取れないものだけ ``None`` を返す。
+    """
+    if value is None:
+        return None
+    if isinstance(value, ClaimConcept):
+        return value
+    if isinstance(value, bytes):
+        value = value.decode("utf-8", "replace")
+    if isinstance(value, str):
+        name = value.strip()
+        if not name:
+            return None
+        return ClaimConcept(name=name, normalized=name, concept_type="unknown")
+    if isinstance(value, dict):
+        name = str(value.get("name") or value.get("normalized") or "").strip()
+        normalized = str(value.get("normalized") or name).strip()
+        if not name and not normalized:
+            return None
+        return ClaimConcept(
+            name=name or normalized,
+            normalized=normalized or name,
+            concept_type=str(value.get("concept_type", "unknown") or "unknown"),
+            role=str(value.get("role", "unknown") or "unknown"),
+        )
+    name = str(getattr(value, "name", "") or getattr(value, "normalized", "") or "").strip()
+    if not name:
+        return None
+    return ClaimConcept(
+        name=name,
+        normalized=str(getattr(value, "normalized", "") or name).strip(),
+        concept_type=str(getattr(value, "concept_type", "unknown") or "unknown"),
+        role=str(getattr(value, "role", "unknown") or "unknown"),
+    )
+
+
+def coerce_claim_concepts(value: object) -> list["ClaimConcept"]:
+    """concepts 値全体を ``list[ClaimConcept]`` に揃える（P0-3）。
+
+    **str は 1 要素として扱う**（``list("raptis")`` の 1 文字反復が学習者向け
+    前提知識まで貫通した F0-6 の再発防止）。
+    """
+    if value is None:
+        return []
+    if isinstance(value, (str, bytes, dict)) or isinstance(value, ClaimConcept):
+        items: list[object] = [value]
+    elif isinstance(value, (list, tuple, set, frozenset)):
+        items = list(value)
+    else:
+        try:
+            items = list(value)  # type: ignore[arg-type]
+        except TypeError:
+            items = [value]
+    out: list[ClaimConcept] = []
+    for item in items:
+        concept = coerce_claim_concept(item)
+        if concept is not None:
+            out.append(concept)
+    return out
+
+
 @dataclass
 class ClaimObjectRecord:
     claim_id: str
@@ -231,15 +298,9 @@ class ClaimObjectBuildResult:
     def from_dict(cls, d: dict) -> "ClaimObjectBuildResult":
         claims = []
         for raw in d.get("claims", []):
-            concepts = [
-                ClaimConcept(
-                    name=c.get("name", ""),
-                    normalized=c.get("normalized", ""),
-                    concept_type=c.get("concept_type", "unknown"),
-                    role=c.get("role", "unknown"),
-                )
-                for c in raw.get("concepts", [])
-            ]
+            # P0-3: 復元時も型契約を通す。str / dict のどちらで保存されていても
+            # ClaimConcept に包み、str を 1 文字ずつに割らない。
+            concepts = coerce_claim_concepts(raw.get("concepts"))
             claims.append(ClaimObjectRecord(
                 claim_id=raw["claim_id"],
                 document_id=raw["document_id"],
