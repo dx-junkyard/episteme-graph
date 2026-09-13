@@ -171,6 +171,30 @@ def _record_knowledge_audit(
 
 
 
+def record_knowledge_audit(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    stats: dict,
+    changed_by: str | None = None,
+) -> None:
+    """:func:`_record_knowledge_audit` の公開ラッパ（他の core モジュールの記帳入口）。
+
+    ``theory_review_events`` への直接 INSERT を新しいファイルに増やさないための入口
+    （監査 entity_type カタログの規約: API 層は ``services.record_review_event`` /
+    core 層は所定のモジュールのみが自前 INSERT を持つ）。概念レジストリの同一性候補
+    （``core/library/identity_candidates.py``）が run 単位のサマリ 1 行を記帳する。
+    """
+    _record_knowledge_audit(
+        session,
+        document_id=document_id,
+        run_id=run_id,
+        stats=stats,
+        changed_by=changed_by,
+    )
+
+
 def _apply_remaps(
     session,
     *,
@@ -1021,6 +1045,44 @@ def _claim_object_span_keys(claim_ids_by_span_key: dict[str, list[str]]) -> dict
     }
 
 
+def _concept_grounding_index(concept_grounding: Any) -> dict[str, list]:
+    """接地 artifact → ``{claim_id: [出所 dict, ...]}``（形が違えば空）。
+
+    artifact は ``{"claims": {claim_id: [{normalized, name, canonical, source,
+    entry_id, mapping_justification}]}, "population", "processed", "coverage"}``。
+    読めない形は**黙って空**にする（永続化を落とさない = fail-soft）。
+    """
+    if not isinstance(concept_grounding, dict):
+        return {}
+    claims = concept_grounding.get("claims")
+    if not isinstance(claims, dict):
+        return {}
+    index: dict[str, list] = {}
+    for claim_id, items in claims.items():
+        if isinstance(items, list):
+            index[str(claim_id)] = items
+    return index
+
+
+def merge_concept_grounding(concepts: Any, grounded: Any) -> list:
+    """``concepts`` の各要素へ概念の出所を additive にマージする（CG §6）。
+
+    実体は :func:`core.library.claim_concept_grounding.merge_grounding_into_concepts`
+    （純関数）。``core/library`` が読めない環境でも永続化を落とさないよう、失敗時は
+    入力をそのまま返す。
+    """
+    items = list(concepts or [])
+    if not grounded:
+        return items
+    try:
+        from core.library.claim_concept_grounding import merge_grounding_into_concepts
+
+        return merge_grounding_into_concepts(items, list(grounded))
+    except Exception:  # noqa: BLE001 — 出所が付かないだけ（概念自体は残る = P4）
+        logger.warning("concept grounding merge skipped (non-fatal)", exc_info=True)
+        return items
+
+
 def _build_claim_items(
     *,
     document_id: str,
@@ -1031,15 +1093,22 @@ def _build_claim_items(
     block_to_chunk: dict[str, str],
     thesis_ref_index: dict,
     equation_keys: dict[str, str],
+    concept_grounding: Any = None,
 ) -> list[dict]:
     """claim object（親 → 子 → 式由来合成）+ 残りの span を同期用 item 列にする（§5.4）。
 
     1 item = ``{"agent_id", "stable_key", "values", "span_id", "block_id", "text",
     "parent_agent_id", "legacy_ids"}``。同じ stable_key を持つ span は claim object の
     item に legacy_ids を合流させて **行を二重に作らない**（同じ命題を2行にしない）。
+
+    ``concept_grounding`` は主張の概念接地 artifact（``claim_concept_grounding``）で、
+    渡されたときだけ ``concepts`` の各要素へ出所（``source`` / ``entry_id`` /
+    ``mapping_justification`` / ``canonical``）を **additive に**マージする
+    （``claim_concept_grounding_design.md`` §6。既存キー・列は不変）。
     """
     span_by_key, _ = _claim_span_index(spans)
     span_key_of_claim = _claim_object_span_keys(claim_ids_by_span_key)
+    grounded_by_claim = _concept_grounding_index(concept_grounding)
 
     items: list[dict] = []
     # claim object の item だけを stable_key で索く（span 同士は合流させない。
@@ -1118,7 +1187,10 @@ def _build_claim_items(
                 "claim_type_text": raw_claim_type,
                 "text": text_value,
                 "normalized_text": normalized,
-                "concepts": _plain(data.get("concepts") or []),
+                "concepts": merge_concept_grounding(
+                    _plain(data.get("concepts") or []),
+                    grounded_by_claim.get(agent_id),
+                ),
                 "equation": equation_payload,
                 "support_status": _text(data.get("support_status")) or "source_backed",
                 # PDF 原文根拠は EvidenceRegistry に委任する (#257)。
@@ -1226,6 +1298,7 @@ def persist_qualified_claims(
     claim_objects: Any = None,
     evidence_registry: Any = None,
     equations: Any = None,
+    concept_grounding: Any = None,
     run_id: str | None = None,
 ) -> list[dict]:
     """claim を `theory_claims` に **同期**する（knowledge_objects_design.md §5.4 / KO3・KO4）。
@@ -1249,6 +1322,10 @@ def persist_qualified_claims(
             主経路（evidence_id → `source.block_id`）。stable_key の材料でもある。
         equations: EquationSemanticsResult（省略可）。`equation.equation_stable_keys` の
             材料（純計算・DB は読まない）。
+        concept_grounding: 主張の概念接地 artifact（``claim_concept_grounding``・省略可）。
+            渡されると ``concepts`` の各要素へ ``source`` / ``entry_id`` /
+            ``mapping_justification`` / ``canonical`` を additive にマージする
+            （``claim_concept_grounding_design.md`` §6。列は増やさない）。
         run_id: この保存を出した run（``produced_by_run_id`` / supersede の刻印）。
 
     Returns:
@@ -1278,6 +1355,7 @@ def persist_qualified_claims(
         block_to_chunk=block_to_chunk,
         thesis_ref_index=thesis_ref_index,
         equation_keys=equation_keys,
+        concept_grounding=concept_grounding,
     )
 
     session = _pg_session()
@@ -2145,6 +2223,55 @@ def persist_learning_units(
         raise
     finally:
         session.close()
+
+
+def set_duplicate_candidates(session, component_id: str, candidates: Any) -> int:
+    """``theory_components.duplicate_candidates`` を置き換える（概念レジストリ §6.2 の 4）。
+
+    受け皿は migration 013 で用意されていたが常に ``[]`` のままだった（K-5）。同一性候補
+    （``core/library/identity_candidates.py``）が「この component にはこの概念候補が
+    ある」という**参照だけ**を書く。
+
+    規約:
+
+    - **基表 UPDATE はこのファイルに限る**（KO5 の allowlist と同じ理由。読み手は
+      ``theory_components_live`` を読む）。
+    - 1 件は ``{"component_id", "document_id", "entry_id", "mapping_justification"}``
+      のみ（**数値を入れない** = KR6。cosine / confidence は identity link 側の DB 列）。
+    - 呼び出し元トランザクションに同乗する（``session`` を受け取り commit / close しない）。
+    - 行は消さない。候補が空でも SQL は発行する（前回 run の候補を置き換えるため。
+      この列は AI 提案層であって教員の判断ではない — figure の再抽出と同じ扱い）。
+
+    Returns:
+        書き込んだ候補の件数。
+    """
+    key = _text(component_id)
+    if not key:
+        return 0
+    items: list[dict] = []
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        items.append(
+            {
+                "component_id": _text(candidate.get("component_id")) or key,
+                "document_id": _text(candidate.get("document_id")),
+                "entry_id": _text(candidate.get("entry_id")),
+                "mapping_justification": _text(candidate.get("mapping_justification")),
+            }
+        )
+    session.execute(
+        sa_text(
+            """
+            UPDATE theory_components
+               SET duplicate_candidates = CAST(:payload AS jsonb),
+                   updated_at = now()
+             WHERE id = CAST(:id AS uuid)
+            """
+        ),
+        {"id": key, "payload": _json_dumps(items)},
+    )
+    return len(items)
 
 
 # ---------------------------------------------------------------------------

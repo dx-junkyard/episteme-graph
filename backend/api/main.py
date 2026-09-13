@@ -64,6 +64,7 @@ from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
 from routes import course_prerequisites as course_prerequisites_routes
+from routes import cartridge_shape as cartridge_shape_routes
 from routes import seminar_brief as seminar_brief_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
@@ -289,6 +290,17 @@ async def _lifespan(application: FastAPI):
     except Exception:  # noqa: BLE001
         logger.warning("help_kb admin_ui_anchors validation skipped", exc_info=True)
 
+    # カートリッジの形の宣言（concept_registry_design.md §8 / P3-7）の起動時検証
+    # （fail-open）。expects.* が語彙表（core/schema.py）とずれていることを運用上の
+    # 警告として出すだけで、解析の入口は止めない。
+    try:
+        from core.cartridge_shape import validate_all_shapes
+
+        for violation in validate_all_shapes():
+            logger.warning("cartridge shape validation: %s", violation)
+    except Exception:  # noqa: BLE001
+        logger.warning("cartridge shape validation skipped", exc_info=True)
+
     # ヘルプKB Phase 3: content-hash 監査記帳（変化時のみ・冪等、§2-3）と
     # ベクトル補助層の同期（全置換スナップショット、§5 Phase 3 ①）。
     # 記帳は軽いので同期実行、埋め込みは外部 API を呼ぶためバックグラウンド
@@ -421,6 +433,10 @@ app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
 # 下書きだけを入力に取る読み取り専用 API 1本（POST /api/admin/course-builder/prerequisite-check）。
 # routes/admin.py の /course-builder/* とはパスが衝突しないためフラット登録で足りる。
 app.include_router(course_prerequisites_routes.router, prefix="/api/admin")
+# カートリッジの形の宣言と適合事実（concept_registry_design.md §8 / P3-7）。
+# 読み取り専用 API 1本（GET /api/admin/cartridges/{id}/fit）。既存 admin ルーターと
+# パスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
+app.include_router(cartridge_shape_routes.router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")

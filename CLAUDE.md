@@ -3048,6 +3048,103 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **非スコープ（v1）**: unit の教員確定 UI / `display_label` のチップ描画配線（app.js・原稿スタジオ）/ `PUT /courses/{id}` での
   handle 再解決 / freeze から component 投影を外すこと / `dsl_node` のコース提示 / 学習者向け `narrative` 表示。
 
+### 概念レジストリ層（知識構造の見直し Phase 3, migration 082, 2026-09-13）
+
+`library_entries` を概念レジストリに拡張し、10 系統に散った概念を **SKOS 語彙で「リンク」する**層（統合・置換ではない）。正本は
+`docs/features/concept_registry_design.md`（KR1〜KR10・§13 実装記録。親は `knowledge_structure_review_2026-09-12.md` §4 Phase 3・
+判断材料は付属調査 E）。オーナー判断 O-4 は **(b) `library_entries` を軸**（atlas 骨格は座標系として非改変・レジストリ ↔ node は版非依存の
+リンク表）。**A層（`src/episteme_graph/agents/`）は非改変**。
+
+- **不変条項の要点**: KR1 A層非改変（`SymbolRecord.concept_ref` は agent 側ではなく読み時の join）/ KR2 **確定は人間・AI は candidate まで**
+  （`library_entries.review_status='candidate'` の行は `freeze_entry` が 409 で拒否 → パイプラインの retrieval（凍結版のみ）・学習者・keyphrase
+  供給に届かない。`atlas_skeletons` への書き込み経路は増やさない）/ KR3 リンクであってマージではない（`exact_match` は 2 行を並存させる記録）/
+  KR4 **`mapping_justification` 必須**（未指定・語彙外は ValueError → 422。既存行は NULL = 記録なしで正直に残す）/ KR5 決定論・非LLM・
+  **embedding 呼び出しゼロ**（保存済みベクトルと正規化ラベル一致だけ。`core/library/{atlas_links,identity_candidates}.py` は `core.llm` 非 import）/
+  KR6 数値非表示（近さは `label_vocab.ANCHOR_NEARNESS_SCALE`）/ KR7 行削除なし・見送りは理由必須 / KR8 閉世界（「このコーパスの中では」）/
+  KR9 版非依存キー（`link_key = anode|{entry_id}|{domain_key}|{node_id}`・現行版に node が無い事実は読み時 `node_in_current_version`）/
+  KR10 TEACHER 以上・閲覧不可 document 由来の候補は除外して `hidden_count`。
+- **語彙の正本は `core/schema.py`**: `LIBRARY_ENTRY_TYPES`（apparatus / theory_component + concept / theory / method / observable / assumption /
+  quantity / process）/ `CONCEPT_LABEL_KINDS`（preferred / alternate / hidden）/ `CONCEPT_RELATION_KINDS`（broader / related / exact_match /
+  close_match）/ `MAPPING_JUSTIFICATIONS`（manual_curation / lexical_match / vector_similarity / cartridge_declared / corpus_cooccurrence /
+  llm_candidate）/ `CONCEPT_REVIEW_STATUSES`。DB は語彙表 `knowledge_{entry_types,label_kinds,relation_kinds,mapping_justifications}` への FK
+  （KO7 と同型・一致は `test_concept_registry_vocab.py`）。日本語表は `core/library/schema.py` の 5 表が正本で、`admin.js` の
+  `_library*Labels` 5 表は逐語ミラー（`test_library_vocab_mirror.py`）。`entry_type_for_component_type()` が既存型語彙 → entry_type の写像。
+- **DB（082）**: `library_entries` に `review_status` / `review_note` / `mapping_justification` / `candidate_key`（部分 UNIQUE）/ `decided_by/at`
+  （既存行は DEFAULT confirmed で意味不変。`dismissed` は候補の見送りで `status='retired'` とは別軸）+ 新表 `library_entry_labels`
+  （alternate / hidden。**preferred は `name` が正本で行にしない**。`aliases` JSONB は残し、store が同一トランザクションで alternate 行へ片方向
+  ミラー）/ `library_entry_relations`（無向 kind は `relation_key` で畳む・ドメイン跨ぎ可）/ `library_atlas_node_links`（exact_match / close_match
+  のみ・ハブ経由でドメイン跨ぎの同一概念を表す。node—node 直接リンクは作らない）+ `mapping_justification` を `element_identity_links` /
+  `atlas_anchor_aliases` / `atlas_gap_decisions` / `atlas_edge_decisions` / `landscape_placements` に additive 追加（バックフィルは provenance 等から
+  決定論的に導ける landscape / aliases のみ）+ `element_identity_links.instance_element_type` に `symbol` + `knowledge_symbols_live`。
+- **core**（`backend/core/library/`）: `registry.py`（labels / relations / node links の CRUD = 状態遷移のみ・`decide_entry_review` は
+  `candidate_flow` 経由・`annotate_node_links` 純関数）/ `atlas_links.py`（P3-4 候補導出 = 語彙一致 → exact_match・保存済みアンカー × 凍結版
+  embedding の cosine ≥ NEAR → close_match・別ドメインの双子は candidate entry 1 行 + node link 2 本。dismissed は再提案しない）/
+  `identity_candidates.py`（P3-6 = 当該 document の live **親** component（`parent_agent_component_id IS NULL`）を対象に ①confirmed entry の
+  ラベル一致 ②他 document の親 component との正規化名一致 ③chunk-proxy（`primary_chunk_id` の `chunks.embedding` × 他 document のチャンク・
+  `IDENTITY_CHUNK_PROXY_THRESHOLD`）→ candidate entry + `element_identity_links` candidate 2 本 + `theory_components.duplicate_candidates`
+  （既存の受け皿・`persistence.set_duplicate_candidates` 経由）。上限 `IDENTITY_CANDIDATES_MAX_PER_DOCUMENT`（既定 20）・超過は `coverage`）。
+  パイプラインステージ **`identity_candidates`**（`_PIPELINE_STEPS` 末尾・非LLM・非致命）。
+- **P3-5 記号 → 概念**: 概念参照は `symbol` instance の `element_identity_links`（confirmed のみ DTO に載る）。学習者 API
+  `GET /api/learning/courses/{id}/symbols/lookup?symbol=&equation_id=&chunk_id=`（`core/symbol_lookup.py`・コース sources に `ANY(:doc_ids)` 強制・
+  **ScholarPhi 規則 = タップ位置より前の最も近い定義**・無ければ後方 / 定義なしを事実文・LLM 0 回・quota 非消費）。UI は `app.js` の KaTeX 記号
+  クリック → `#symbol-lookup-popover`（アンカー `material.symbol-lookup`）。
+- **P3-7 cartridge の形の宣言**: `backend/cartridges/<id>/shape.json`（`covers` / `does_not_cover` / `expects.{entry_types,component_types,
+  claim_types}` / `atlas_domain_key`。読み手は `core/cartridge_shape.py`・A層は読まない・起動時 validator は fail-open）。`particle_physics` は
+  `description` / `target_domain` を実内容（フレーバー物理）に訂正（`cartridge_id` は不変）。適合事実 `GET /api/admin/cartridges/{id}/fit?
+  document_id=`（`routes/cartridge_shape.py`・adopted run の `unplaced_domains` / live 配置の有無 / `covers` 語の語境界一致の名前列挙・数値なし）
+  を再解析モーダル（`admin-cartridge-fit.js`・アンカー `materials.reanalyze-domain-fit`）に表示。アップロード時は解析前なので出さない。
+- **API**（`routes/library.py`・`_require_teacher`・DELETE なし）: `GET /entries?include_candidates=` / `POST /entries/{id}/review` /
+  `GET|POST /entries/{id}/labels` + `.../labels/{id}/dismiss` / `GET|POST /relations` + `.../relations/{id}/decide` / `GET /atlas-links` +
+  `POST /atlas-links/derive` + `.../atlas-links/{id}/decide` / `GET /identity-candidates`。リンクの確定は既存
+  `POST /api/admin/deliberation/identity-links/{id}/confirm|reject` を再利用。監査は既存 `AUDIT_ENTITY_LIBRARY_ENTRY`（action は
+  `core/library/schema.py::REGISTRY_AUDIT_ACTIONS`）。
+- **UI**: ナレッジライブラリタブに「同一性の候補」区画 + 詳細の「別名 / 隠しラベル / 関係 / 分野の地図との対応」4 区画 + 「地図との対応を導出」。
+  アンカー `knowledge-library.{identity-candidates,identity-derive,entry-review,labels,relations,atlas-links}`（件数の正本は
+  `test_admin_help_ui_anchors.py`）+ `docs/manual/teacher/19-admin-knowledge-library.md`。
+- **ガードレール**: `test_concept_registry_{vocab,store,guardrails,api,ui_static,atlas_links,identity_candidates,stage,candidates_api}.py` /
+  `test_symbol_lookup_{core,api,ui_static}.py` / `test_cartridge_shape_{core,api,ui_static}.py`。
+- **K-2 追補 = 主張の概念接地（`docs/features/claim_concept_grounding_design.md`・CG1〜CG7・migration なし・同日）**: 主張の `concepts` 欄が
+  記号だけになる原因は「辞書が空」（orchestrator が `cartridge_ontology=None` で組み立て、分野未指定では照合材料がゼロ）。オーナー判断
+  CG-O1 = **既存の `concept_resolver` 注入口に backend が合成した辞書を渡すのは A層非改変の範囲内** / CG-O2 = LLM 抽出ステージは実測後に
+  判断。辞書は `core/library/concept_dictionary.py`（②レジストリ confirmed entry の name + alternate / hidden ラベル → `registry_label` /
+  ③cartridge 別名（`cartridge_id` 非空のときだけ読む）→ `cartridge_alias` / ①DSL ノード名 → `dsl_node`。記号は `is_symbol_like_concept_name`
+  で除く・照合は `alias_matching.text_mentions_alias` の語境界一致のみ・`in text` を書かない）。前段は `_build_claim_objects(concept_resolver=)`、
+  後段は新フック `_hook_claim_concept_grounding`（`dsl_linking` 直後・DSL ノード名の照合 + `source_refs.claim_ids` の直接参照 →
+  `claim_object_builder` artifact を再保存 + `claim_concept_grounding` artifact に出所と `coverage`）。`concept_assignment_status` は**昇格させない**
+  （CG3）。永続化は `theory_claims.concepts` の各要素に `source` / `entry_id` / `mapping_justification` を additive マージ（列追加なし）。
+  `identity_candidates` の規則 ④ が `entry_id` 付き主張を `theory_claim → entry` の identity link candidate にする。学習者の概念マップ
+  （`create_course` の `data.concepts`）は記号を除き `excluded_symbol_concepts` に残す（学習者 DTO には出さない）。
+- **非スコープ（v1）**: 学習者向け概念一覧・コーパス全体の知識グラフ画面（原則6）/ `owl:sameAs` 的統合・行削除 / LLM による概念名・定義生成
+  （K-2 の LLM 抽出ステージ = CG-O2 実測後）/ W層モーダルでの `symbol` 要素の対象化 / atlas node_id の版間対応表（K-6）/ alias 候補行の自動生成。
+
+### 分野マップのノード版間対応（K-6 追補, migration なし, 2026-09-13）
+
+地図（atlas 骨格）を改訂すると node_id が総取り替えになり（実測: 版間の重なり 0）、`landscape_placements` の確認済みの位置づけが
+新版から見えなくなる問題（K-6）の是正。正本は `docs/features/atlas_node_correspondence_design.md`（NC1〜NC8・§11 実装記録）。
+オーナー判断は推奨案を採用: NC-O1 対応表を**持つ** / NC-O2 確定は**凍結前の `freeze-impact` 画面** / NC-O3 対応が付かないノードは
+**旧版の行を残し現行版では事実文**（自動付け替えなし・削除なし）。
+
+- **格納庫は新表ではなく骨格の既存スロット `AtlasSkeleton.id_migrations`**（`{from, to, version}`。修正報告の付け替えが既に使う）。
+  骨格へ書くのは教員の凍結操作（`POST .../atlas/skeleton/freeze` body `id_migrations: [{from, to}]`）だけ（NC1 = LS7 / AB4 継承）。
+- **候補は決定論・非LLM・embedding 0 回**（`core/atlas_correspondence.py::derive_correspondence_candidates`）: 旧版で消える node × draft で
+  増える node を `normalize_label` 完全一致 / 教員確定別名一致 / レジストリの confirmed node リンク経由で結ぶ。justification は
+  `lexical_match` / `manual_curation` のみ。**cosine は使わない**（draft にベクトルは無く、埋め込みを増やさない）。
+- **確定は人間・一括確定は `decision_context`**（basis `atlas_skeleton.node_correspondence`・候補ゼロなら記帳しない）。UI のチェックボックスは
+  **既定オフ**（選択済みに見せない）。1 旧 → 1 新（`from` 一意・merge 可・split は v1 非対応）。サーバは `from` が現行凍結版に・`to` が draft に
+  実在することを検証（422 事実文）。
+- **読み手は読み替えるだけで `node_id` を UPDATE しない**（NC5）: `atlas_store.load_frozen_history` で全凍結版の `id_migrations` を版順に辿る
+  `NodeResolver`（`current` / `migrated` / `unmapped`）を、landscape の配置 DTO（`current_node_id` / `node_status` を additive）・学習者
+  オーバーレイ（`current_node_id || node_id`）・論文の海（`corpus_view`）・Phase 3 `annotate_node_links` が共有する。unmapped は学習者向けでは
+  位置に置かず `facts` に「前の版（版 X）の地図で確認された位置づけで、現行版（版 Y）に対応する場所がありません」の 1 行。
+- **非改変**: コース binding（`topics[].atlas_node_id`）は既存 G層 `course.atlas_binding_stale` + propose で直す経路のまま。アンカーベクトルは
+  凍結後の再構築のまま（旧版の行は残る）。
+- UI: 凍結時の `confirm()` を小さなモーダルに置き換え（既存の事実文 + 「前の版のノードとの対応」区画 + 手動対応の select）。アンカー
+  `atlas.freeze-correspondence` / `atlas.freeze-correspondence-manual`（件数の正本は `test_admin_help_ui_anchors.py`）+
+  `docs/manual/teacher/17-admin-atlas.md`。配置行に `node_status` チップ（教材管理 landscape モーダル / リリース前の確認ステップ 2）。
+- ガードレール: `test_atlas_node_correspondence_{core,api,readthrough,guardrails,ui_static}.py`。
+- 非スコープ（v1）: split / 凍結後の対応の追加・訂正 UI / cosine 候補 / コース binding の自動読み替え / ベクトルの版間継承 /
+  対応表の学習者向け表示。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは
@@ -3166,6 +3263,10 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **`backend/core/course_units.py` / `core/course_prerequisites.py` / `core/knowledge_objects/learning_units.py`**（2026-09-13 新設、
   正本設計書 `docs/features/learning_units_design.md`） — 学ぶ単位の候補提示・handle 解決・freeze 向けの読み / 前提の ID 解決と
   半順序検査 / unit の決定論導出の正本。コース側で成果を束ねるときは `topic.units` を優先し、**タイトル文字列一致を新規に書かない**。
+- **`backend/core/library/{registry,atlas_links,identity_candidates}.py` / `core/symbol_lookup.py` / `core/cartridge_shape.py`**
+  （2026-09-13 新設、正本設計書 `docs/features/concept_registry_design.md`） — 概念レジストリ（SKOS ラベル / 関係 / 骨格リンクの状態遷移・
+  決定論の候補導出・記号の直前定義・cartridge 形の宣言）の正本。**概念の同一性・別名・関係を新たに書くときは `library_entries` を軸に
+  `mapping_justification` 付きの candidate として置き、独自の概念表・部分文字列一致・embedding 呼び出しを新設しない**。
 - **`backend/core/knowledge_objects/`**（2026-09-13 新設、正本設計書 `docs/features/knowledge_objects_design.md`） —
   知識オブジェクトの同一性（`stable_key`）・live 行の同期（`sync_live_rows`）・参照の再係留
   （`record_and_reanchor`）の正本。**構造化成果を DB に書く経路を新設するときは DELETE → 再 INSERT を書かず

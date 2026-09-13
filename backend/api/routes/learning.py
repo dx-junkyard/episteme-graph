@@ -98,6 +98,7 @@ from core.course_data import (
     course_title as _course_title,
     course_topics,
     find_course_topic,
+    is_symbol_concept_name,
     iter_all_topics,
     learner_topic_units_projection,
     topic_unit_keys,
@@ -166,6 +167,9 @@ from core.element_context import (
     SUPPORTED_ELEMENT_TYPES as CONTEXT_ELEMENT_TYPES,
     build_element_context,
 )
+# 概念レジストリ P3-5（concept_registry_design.md §7）: 記号の「直前の定義」。
+# 読み取り専用・LLM 0 回・コース sources へ SQL 内でスコープ強制する。
+from core.symbol_lookup import lookup_symbol_definition
 from core.discuss.opening import build_opening as build_discussion_opening
 from core.discuss.mirroring import extract_mirror
 # コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.1）: コース無し論文議論の
@@ -447,6 +451,58 @@ def _project_topics_for_learner(data: dict) -> dict:
     return out
 
 
+def _split_symbol_concepts(concepts: list) -> tuple[list, list[str]]:
+    """概念マップから記号を除き ``(残した概念, 除いた名前)`` を返す（案 E）。
+
+    正本: ``docs/features/claim_concept_grounding_design.md`` §8 / CG6「記号は概念に
+    しない」。判定は A層 P0-3 に委譲する共通述語 ``course_data.is_symbol_concept_name``
+    のみで行い、ここで第2の正規表現・分野語のリストを持たない。
+
+    - ``name`` が記号なら、その概念（と配下の ``children``）を概念マップから外す。
+    - ``name`` は概念でも ``children[]`` に記号が混じっていれば、その子だけを外して
+      概念自体は残す（除去の粒度を概念単位に丸めない）。
+    - 除いた名前は捨てずに出現順・重複除去で返す（CG5「情報を落とさない」）。呼び出し側が
+      ``data.excluded_symbol_concepts`` に残す。**学習者には出さない**。
+
+    入力は mutate せず、新しい list / dict を返す。
+    """
+    kept: list = []
+    excluded: list[str] = []
+
+    def _exclude(name: object) -> None:
+        token = str(name or "").strip()
+        if token and token not in excluded:
+            excluded.append(token)
+
+    for concept in concepts or []:
+        if not isinstance(concept, dict):
+            # 想定外の形（文字列など）は判定だけ掛けて素通しする（情報を落とさない）。
+            if is_symbol_concept_name(concept):
+                _exclude(concept)
+            else:
+                kept.append(concept)
+            continue
+        if is_symbol_concept_name(concept.get("name")):
+            _exclude(concept.get("name"))
+            for child in concept.get("children") or []:
+                _exclude(child)
+            continue
+        children = concept.get("children")
+        if isinstance(children, list):
+            kept_children = []
+            for child in children:
+                if is_symbol_concept_name(child):
+                    _exclude(child)
+                else:
+                    kept_children.append(child)
+            if len(kept_children) != len(children):
+                concept = dict(concept)
+                concept["children"] = kept_children
+        kept.append(concept)
+
+    return kept, excluded
+
+
 @router.post("/courses", response_model=LearningCourseOut, status_code=201)
 def create_course(
     body: CourseCreateRequest,
@@ -458,6 +514,9 @@ def create_course(
     正規化題名の完全一致のみ）②`topics[].units` の handle を候補表で解決（候補に無い handle は
     捨てる）③候補が提示されていたときだけ登録を一括確定として `decision_context` 付きで記帳する。
     いずれも非LLM・保存前の決定論処理で、失敗しても登録は止めない。
+
+    主張の概念接地（案 E）: ④学習者の概念マップから記号を除き、除いた名前を
+    ``data.excluded_symbol_concepts`` に残す（`claim_concept_grounding_design.md` §8）。
     """
     _validate_visibility(body.visibility, body.group_id, current_user["id"])
     course_id = str(uuid.uuid4())[:8]
@@ -471,6 +530,12 @@ def create_course(
         "sources": [s.model_dump() for s in body.sources],
         "referenced_sections": [],
     }
+
+    # 案 E（claim_concept_grounding_design.md §8 / CG6）: 学習者の概念マップに記号を
+    # 出さない。除いた名前は捨てずに残す（CG5）。決定論・LLM 0 回。
+    data["concepts"], excluded_symbol_names = _split_symbol_concepts(data["concepts"])
+    if excluded_symbol_names:
+        data["excluded_symbol_concepts"] = excluded_symbol_names
 
     # P2-4: 前提を ID 参照に（入力を mutate せず新しい list を返す）。
     try:
@@ -4788,6 +4853,54 @@ def get_source_chunk_route(
     if not passage:
         raise HTTPException(status_code=404, detail="Source chunk not found")
     return passage
+
+
+@router.get("/courses/{course_id}/symbols/lookup")
+def get_symbol_lookup_route(
+    course_id: str,
+    symbol: str = "",
+    equation_id: str = "",
+    chunk_id: str = "",
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """記号の「直前の定義」（概念レジストリ P3-5 / ``concept_registry_design.md`` §7）。
+
+    教材の数式の中の記号をタップしたときに、**その位置より前で最も近い定義**を
+    論文の逐語で返す。**LLM を 1 度も呼ばず**（既存データの読みだけ）、quota も
+    消費しない。
+
+    fail-closed は既存の学習者向け文脈 API（``get_course_component_context`` /
+    ``get_source_chunk_route``）と同じ3段:
+
+    1. ``get_accessible_course_data`` — 本人が当該コースを閲覧できる（不可なら 404）
+    2. ``list_course_source_document_ids(course_data)`` — そのコースの source 集合
+       （**全域可視集合へ広げない** — P0 オブジェクトスコープ是正と同じ規律）
+    3. ``core.symbol_lookup`` の SQL 内 ``document_id = ANY(...)`` で強制
+       （sources が空なら SQL を発行せず ``available=false``）
+
+    記号が空文字のときは 422（何を引くのか決まっていない照会は受けない）。記号は
+    見つかったが定義が無い場合は 404 ではなく 200 + 事実文（「この論文には定義の
+    記述が見つかりませんでした」）で返す — 定義の不在は異常ではなく事実である（KR8）。
+    """
+    if not str(symbol or "").strip():
+        raise HTTPException(status_code=422, detail="記号が指定されていません。")
+
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    allowed_document_ids = list_course_source_document_ids(course_data)
+    session = _pg_session()
+    try:
+        return lookup_symbol_definition(
+            session,
+            symbol=symbol,
+            document_ids=sorted(allowed_document_ids),
+            equation_id=equation_id,
+            chunk_id=chunk_id,
+        )
+    finally:
+        session.close()
 
 
 @router.get("/courses/{course_id}/chunks/{chunk_id}/claim-refs")

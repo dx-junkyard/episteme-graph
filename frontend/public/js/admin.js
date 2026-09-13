@@ -1174,6 +1174,9 @@
         '</label>' +
         /* 分野（提案 C1）: 前回の分野を事実文で示し、この解析だけ変更できる */
         '<div id="reanalyze-domain-row" data-ui-anchor="materials.reanalyze-domain" style="font-size:12.5px;color:var(--color-text-secondary);margin-bottom:10px"></div>' +
+        /* 分野の適合（概念レジストリ P3-7）: 選択中の分野の「形の宣言」と、この論文の
+           解析結果との適合を事実文で示す。中身は admin-cartridge-fit.js が描く。 */
+        '<div id="reanalyze-domain-fit-row" data-ui-anchor="materials.reanalyze-domain-fit" style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:10px"></div>' +
         '<div id="reanalyze-llm-model-row" style="margin-bottom:16px"></div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end">' +
           '<button id="reanalyze-cancel-btn" class="admin-action-btn">キャンセル</button>' +
@@ -1191,6 +1194,19 @@
     // 分野（提案 C1）: 前回 run の分野を事実文で示し、この解析だけ選び直せる。
     // 触らなければ cartridge_id を送らず、サーバ側が前回 run の分野を継承する。
     _reanalyzeDomainInit(lastMaterial);
+
+    // 分野の適合（概念レジストリ P3-7 / concept_registry_design.md §8）: 選択中の
+    // 分野の形の宣言（shape.json）と、この論文の解析結果との適合を事実文で示す。
+    // 取得失敗時は何も描かない（fail-soft・再解析の操作は妨げない）。
+    if (window.AdminCartridgeFit) {
+      var domainFitRow = document.getElementById("reanalyze-domain-fit-row");
+      if (domainFitRow) {
+        window.AdminCartridgeFit.mount(domainFitRow, {
+          documentId: docId,
+          cartridgeId: (lastMaterial && lastMaterial.analysis_cartridge_id) || "",
+        });
+      }
+    }
 
     // M層（LLM モデル選択, migration 061）: 前回値を表示し「変更」で選び直せるようにする。
     // docId は静かな計器（コスト見通しの一行, teacher_triage_instruments_design.md §3.1）
@@ -2199,7 +2215,13 @@
     onTabActivate("knowledge-library", function () {
       loadLibraryDomains();
       loadLibraryEntries();
+      loadLibraryIdentityCandidates();
     });
+
+    // 概念レジストリ: 分野の骨格 node とレジストリの対応候補を決定論的に導出する
+    // （LLM / embedding 呼び出しなし。書き込みは候補行の upsert のみ）。
+    var deriveBtn = document.getElementById("library-atlas-derive-btn");
+    if (deriveBtn) deriveBtn.addEventListener("click", function () { deriveLibraryAtlasLinks(); });
 
     var newBtn = document.getElementById("library-new-entry-btn");
     if (newBtn) newBtn.addEventListener("click", function () {
@@ -2258,6 +2280,7 @@
         });
         this.setAttribute("style", _libraryDomainButtonStyle(true));
         loadLibraryEntries();
+        loadLibraryIdentityCandidates();
       });
     });
   }
@@ -2274,6 +2297,9 @@
     if (qEl && qEl.value.trim()) params.push("q=" + encodeURIComponent(qEl.value.trim()));
     var retiredEl = document.getElementById("library-include-retired");
     if (retiredEl && retiredEl.checked) params.push("include_retired=true");
+    // 概念レジストリ: 候補（review_status='candidate'）も一覧に出し、行のチップで区別する
+    // （確定するまで凍結できず、パイプライン・学習者には届かない）。
+    params.push("include_candidates=true");
     var qs = params.length ? ("?" + params.join("&")) : "";
 
     apiFetch("/admin/library/entries" + qs)
@@ -2301,8 +2327,9 @@
       html += '<button type="button" class="library-entry-item" data-ui-anchor="knowledge-library.entries-list" data-entry-id="' + escHtml(e.id) + '" style="text-align:left;border:1px solid var(--color-border-tertiary);border-radius:4px;padding:6px 8px;background:' + (retired ? "var(--color-background-tertiary)" : "var(--color-background-primary)") + ';opacity:' + (retired ? "0.6" : "1") + ';cursor:pointer">' +
         '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' + escHtml(e.name) +
           (retired ? ' <span style="font-size:10.5px;color:var(--color-text-tertiary)">(廃止)</span>' : '') +
+          _libraryReviewChipHtml(e.review_status) +
         '</div>' +
-        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + (e.entry_type === "apparatus" ? "装置" : "理論コンポーネント") +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(_libraryEntryTypeLabel(e.entry_type)) +
           ' ・ 版 ' + (e.latest_version_no || 0) +
           (e.updated_by ? ' ・ 更新: ' + escHtml(e.updated_by) : '') +
         '</div>' +
@@ -2366,7 +2393,7 @@
 
     var html =
       '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;flex-wrap:wrap;gap:4px">' +
-        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.domain_key) + ' ・ ' + (isApparatus ? "装置" : "理論コンポーネント") + (isRetired ? ' ・ <span style="color:var(--color-text-danger)">廃止済み</span>' : '') + '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(entry.domain_key) + ' ・ ' + escHtml(_libraryEntryTypeLabel(entry.entry_type)) + (isRetired ? ' ・ <span style="color:var(--color-text-danger)">廃止済み</span>' : '') + '</div>' +
         '<div style="font-size:11px;color:var(--color-text-tertiary)">版 ' + (entry.latest_version_no || 0) + ' / revision ' + entry.revision + '</div>' +
       '</div>' +
 
@@ -2452,6 +2479,10 @@
              '<button id="lib-detail-retire" data-ui-anchor="knowledge-library.detail-retire" class="admin-action-btn" style="background:var(--color-text-danger);color:#fff">廃止</button>')) +
       '</div>' +
 
+      // 概念レジストリ（migration 082）の4区画。中身は renderLibraryRegistrySections が
+      // 埋める（取得失敗は区画ごと非表示の fail-soft）。
+      '<div id="library-registry-sections"></div>' +
+
       '<div style="font-size:12px;font-weight:600;margin-bottom:4px">版履歴</div>' +
       '<div id="lib-detail-versions" style="font-size:11.5px;color:var(--color-text-tertiary)">読み込み中...</div>';
 
@@ -2483,6 +2514,7 @@
     var restoreBtn = document.getElementById("lib-detail-restore");
     if (restoreBtn) restoreBtn.addEventListener("click", function () { restoreLibraryEntry(entry.id); });
 
+    renderLibraryRegistrySections(entry);
     loadLibraryVersions(entry.id);
   }
 
@@ -2632,6 +2664,525 @@
       .catch(function () { if (el) el.textContent = "版履歴の読み込みに失敗しました"; });
   }
 
+  // ===== 概念レジストリ（Concept Registry, migration 082）— ここから ==========
+  // 正本: docs/features/concept_registry_design.md
+  //   KR2 確定は人間・AI は candidate まで（候補行は凍結できず、学習者・パイプラインに届かない）
+  //   KR3 リンクであってマージではない（名前の書き換え・行の統合はしない）
+  //   KR4 mapping_justification は「なぜ同じと言えたか」の記録。空は「記録なし」と正直に書く
+  //   KR6 数値を見せない（cosine・confidence・候補数・一致数を描かない。近さは段階ラベル）
+  //   KR7 情報を落とさない（行削除の導線なし。見送りは理由必須の状態遷移）
+  //   KR8 閉世界の正直さ（「他に無い」と言わず「このコーパスの中では」に留める）
+  //   §9 API 一覧 / §10 UI（新モーダルを作らず、ナレッジライブラリタブに区画を足す）
+  //
+  // 日本語表はサーバ backend/core/library/schema.py の逐語ミラー
+  // （固定は backend/tests/test_library_vocab_mirror.py。片側だけ直すと落ちる）。
+  var _libraryEntryTypeLabels = {
+    apparatus: "装置",
+    theory_component: "理論コンポーネント",
+    concept: "概念",
+    theory: "理論",
+    method: "方法",
+    observable: "観測量",
+    assumption: "前提",
+    quantity: "量",
+    process: "過程",
+  };
+  var _libraryLabelKindLabels = {
+    preferred: "主ラベル",
+    alternate: "別名",
+    hidden: "隠しラベル",
+  };
+  var _libraryRelationKindLabels = {
+    broader: "上位",
+    related: "関連",
+    exact_match: "同じ",
+    close_match: "近い",
+  };
+  var _libraryJustificationLabels = {
+    manual_curation: "教員の判断",
+    lexical_match: "表記の一致",
+    vector_similarity: "意味の近さ",
+    cartridge_declared: "分野の宣言",
+    corpus_cooccurrence: "コーパス内の共起",
+    llm_candidate: "AI の候補",
+  };
+  var _libraryReviewStatusLabels = {
+    candidate: "候補",
+    confirmed: "確定",
+    dismissed: "見送り",
+  };
+
+  function _libraryEntryTypeLabel(entryType) {
+    return _libraryEntryTypeLabels.hasOwnProperty(entryType)
+      ? _libraryEntryTypeLabels[entryType]
+      : (entryType || "");
+  }
+
+  // KR4: 正当化が無い行は推測で埋めず「記録なし」と書く。
+  function _libraryJustificationText(justification) {
+    if (!justification) return "根拠の記録なし";
+    return _libraryJustificationLabels.hasOwnProperty(justification)
+      ? _libraryJustificationLabels[justification]
+      : justification;
+  }
+
+  function _libraryJustificationHtml(justification) {
+    return '<span style="color:var(--color-text-tertiary)">（' + escHtml(_libraryJustificationText(justification)) + '）</span>';
+  }
+
+  // 一覧・詳細の「候補」チップ。確定済み（confirmed）は既定なのでチップを出さない。
+  function _libraryReviewChipHtml(reviewStatus) {
+    if (!reviewStatus || reviewStatus === "confirmed") return "";
+    var label = _libraryReviewStatusLabels.hasOwnProperty(reviewStatus)
+      ? _libraryReviewStatusLabels[reviewStatus]
+      : reviewStatus;
+    var style = reviewStatus === "dismissed"
+      ? "background:var(--color-background-tertiary,#eeeef0);color:var(--color-text-secondary)"
+      : "background:var(--color-text-warning);color:#fff";
+    return ' <span class="admin-status" style="font-size:10.5px;padding:1px 6px;' + style + '">' + escHtml(label) + '</span>';
+  }
+
+  function _libraryStatusChipHtml(status) {
+    return _libraryReviewChipHtml(status);
+  }
+
+  // 見送りは理由必須（KR7）。空欄・取り消しのときは送らない。
+  function _libraryPromptDismissReason(what) {
+    var reason = prompt("「" + what + "」を見送る理由を入力してください（記録に残ります）");
+    if (reason === null) return null;
+    reason = reason.trim();
+    if (!reason) {
+      alert("見送りには理由が必要です。");
+      return null;
+    }
+    return reason;
+  }
+
+  function _librarySectionTitleHtml(title, anchorId, note) {
+    return '<div data-ui-anchor="' + anchorId + '" style="margin-top:12px;padding-top:10px;border-top:1px solid var(--color-border-tertiary)">' +
+      '<div style="font-size:12px;font-weight:600;margin-bottom:2px">' + escHtml(title) + '</div>' +
+      (note ? '<div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:6px">' + escHtml(note) + '</div>' : '');
+  }
+
+  // ── 同一性の候補（タブ上部） ────────────────────────────────────────
+  // パイプラインが決定論的に置いた candidate entry と、その支持となる identity link。
+  // 支持は論文タイトルの列挙で示す（件数バッジを出さない = KR6 / LS5 と同じ規律）。
+  function loadLibraryIdentityCandidates() {
+    var el = document.getElementById("library-identity-candidates");
+    if (!el) return;
+    el.innerHTML = '<div>読み込み中...</div>';
+    var qs = _libraryTabState.selectedDomain
+      ? ("?domain_key=" + encodeURIComponent(_libraryTabState.selectedDomain))
+      : "";
+    apiFetch("/admin/library/identity-candidates" + qs)
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) { renderLibraryIdentityCandidates(data || {}); })
+      .catch(function () {
+        // fail-soft: 区画ごと畳む（「候補なし」と断定しない）。
+        el.innerHTML = "";
+      });
+  }
+
+  function renderLibraryIdentityCandidates(data) {
+    var el = document.getElementById("library-identity-candidates");
+    if (!el) return;
+    var candidates = data.candidates || [];
+    var facts = data.facts || [];
+    var html = "";
+    facts.forEach(function (f) {
+      html += '<div style="color:var(--color-text-secondary)">' + escHtml(f) + '</div>';
+    });
+    if (!candidates.length) {
+      html += '<div>いま確認をお待ちしている同一性の候補はありません。</div>';
+      el.innerHTML = html;
+      return;
+    }
+    candidates.forEach(function (c) {
+      var entry = c.entry || {};
+      var links = c.links || [];
+      var titles = c.supporting_titles || [];
+      html += '<div class="library-identity-card" data-entry-id="' + escHtml(entry.id) + '" style="border:1px solid var(--color-border-tertiary);border-radius:4px;padding:8px;background:var(--color-background-primary)">' +
+        '<div style="font-size:12.5px;font-weight:600;color:var(--color-text-primary)">' + escHtml(entry.name || "") +
+          _libraryReviewChipHtml(entry.review_status) +
+        '</div>' +
+        '<div style="font-size:11px;color:var(--color-text-tertiary);margin-bottom:4px">' +
+          escHtml(_libraryEntryTypeLabel(entry.entry_type)) +
+          (entry.domain_key ? ' ・ ' + escHtml(entry.domain_key) : '') +
+        '</div>';
+      if (titles.length) {
+        html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:4px">この候補を支持する論文: ' +
+          titles.map(escHtml).join(" / ") + '</div>';
+      }
+      links.forEach(function (link) {
+        var inst = link.instance || {};
+        html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;font-size:11.5px;padding:3px 0">' +
+          '<span>' + escHtml(link.document_title || inst.document_id || "") +
+            (link.local_expression ? '「' + escHtml(link.local_expression) + '」' : '') +
+            _libraryStatusChipHtml(link.status) + ' ' + _libraryJustificationHtml(link.mapping_justification) +
+          '</span>' +
+          '<span style="display:flex;gap:4px">' +
+            '<button type="button" class="library-identity-link-confirm admin-action-btn" data-link-id="' + escHtml(link.link_id) + '" style="font-size:11px;padding:1px 7px">確認</button>' +
+            '<button type="button" class="library-identity-link-reject admin-action-btn" data-link-id="' + escHtml(link.link_id) + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
+          '</span>' +
+        '</div>';
+      });
+      if (c.hidden_count) {
+        html += '<div style="font-size:11px;color:var(--color-text-tertiary)">閲覧できない論文由来の候補が別にあります。</div>';
+      }
+      html += '<div data-ui-anchor="knowledge-library.entry-review" style="display:flex;gap:4px;margin-top:6px">' +
+          '<button type="button" class="library-entry-confirm admin-action-btn" data-entry-id="' + escHtml(entry.id) + '" style="font-size:11px;padding:1px 7px;background:var(--color-text-success);color:#fff">確定</button>' +
+          '<button type="button" class="library-entry-dismiss admin-action-btn" data-entry-id="' + escHtml(entry.id) + '" data-entry-name="' + escHtml(entry.name || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>' +
+        '</div>' +
+      '</div>';
+    });
+    el.innerHTML = html;
+
+    el.querySelectorAll(".library-identity-link-confirm").forEach(function (btn) {
+      btn.addEventListener("click", function () { _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "confirm"); });
+    });
+    el.querySelectorAll(".library-identity-link-reject").forEach(function (btn) {
+      btn.addEventListener("click", function () { _libraryDecideIdentityLink(this.getAttribute("data-link-id"), "reject"); });
+    });
+    el.querySelectorAll(".library-entry-confirm").forEach(function (btn) {
+      btn.addEventListener("click", function () { decideLibraryEntryReview(this.getAttribute("data-entry-id"), "confirmed", ""); });
+    });
+    el.querySelectorAll(".library-entry-dismiss").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var reason = _libraryPromptDismissReason(this.getAttribute("data-entry-name") || "この候補");
+        if (!reason) return;
+        decideLibraryEntryReview(this.getAttribute("data-entry-id"), "dismissed", reason);
+      });
+    });
+  }
+
+  // リンク1本 = 判断1回（entry を確定してもリンクは自動確定しない）。
+  function _libraryDecideIdentityLink(linkId, action) {
+    apiFetch("/admin/deliberation/identity-links/" + encodeURIComponent(linkId) + "/" + action, { method: "POST" })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+        loadLibraryIdentityCandidates();
+      })
+      .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+  }
+
+  function decideLibraryEntryReview(entryId, status, reviewNote, onDone) {
+    var payload = { status: status };
+    if (reviewNote) payload.review_note = reviewNote;
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/review", { method: "POST", body: JSON.stringify(payload) })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+        loadLibraryIdentityCandidates();
+        loadLibraryEntries();
+        // 詳細ペインからの操作は、反映後に読み直してから再描画する（先に描くと古い扱いが残る）。
+        if (onDone) onDone();
+      })
+      .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+  }
+
+  // ── 地図との対応の導出（分野単位） ──────────────────────────────────
+  // 決定論の候補づくり（表記の一致・保存済みベクトルの近さ）。骨格そのものは書き換えない。
+  function deriveLibraryAtlasLinks() {
+    var domainKey = _libraryTabState.selectedDomain;
+    if (!domainKey) {
+      alert("先に左の一覧から分野を選んでください。導出は分野ごとに行います。");
+      return;
+    }
+    openDangerConfirmModal({
+      title: "地図との対応を導出",
+      message: [
+        "分野「" + domainKey + "」の現在の凍結骨格と、この分野のライブラリエントリを突き合わせて、対応の候補を作ります。",
+        "作られるのは候補だけで、分野の地図（骨格）は書き換わりません。確定は候補ごとの操作で行います。",
+      ],
+      confirmLabel: "導出する",
+    }, function () {
+      apiFetch("/admin/library/atlas-links/derive", { method: "POST", body: JSON.stringify({ domain_key: domainKey }) })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "導出に失敗しました"); });
+          return res.json();
+        })
+        .then(function () {
+          loadLibraryEntries();
+          loadLibraryIdentityCandidates();
+        })
+        .catch(function (err) { alert(err.message || "導出に失敗しました"); });
+    });
+  }
+
+  // ── エントリ詳細の4区画（別名 / 隠しラベル / 関係 / 分野の地図との対応） ──
+  function renderLibraryRegistrySections(entry) {
+    var host = document.getElementById("library-registry-sections");
+    if (!host || !entry) return;
+    host.innerHTML =
+      _librarySectionTitleHtml("別名・隠しラベル", "knowledge-library.labels",
+        "別名は検索にも表示にも使われます。隠しラベルは表記ゆれ・OCR のノイズを捨てずに検索だけで拾うための器です。") +
+        '<div id="library-labels-list" style="font-size:11.5px;color:var(--color-text-secondary)">読み込み中...</div>' +
+        '<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">' +
+          '<select id="library-label-kind" style="font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+            '<option value="alternate">' + escHtml(_libraryLabelKindLabels.alternate) + '</option>' +
+            '<option value="hidden">' + escHtml(_libraryLabelKindLabels.hidden) + '</option>' +
+          '</select>' +
+          '<input type="text" id="library-label-text" placeholder="ラベルを入力..." style="flex:1;min-width:120px;font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+          '<button type="button" id="library-label-add" class="admin-action-btn" style="font-size:11px;padding:1px 7px">追加</button>' +
+        '</div>' +
+      '</div>' +
+
+      _librarySectionTitleHtml("関係", "knowledge-library.relations",
+        "他の概念との関係を記録します。関係はリンクであって統合ではありません（どちらの行も残ります）。") +
+        '<div id="library-relations-list" style="font-size:11.5px;color:var(--color-text-secondary)">読み込み中...</div>' +
+        '<div style="display:flex;gap:4px;margin-top:6px;flex-wrap:wrap">' +
+          '<select id="library-relation-kind" style="font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+            '<option value="broader">' + escHtml(_libraryRelationKindLabels.broader) + '</option>' +
+            '<option value="related">' + escHtml(_libraryRelationKindLabels.related) + '</option>' +
+            '<option value="exact_match">' + escHtml(_libraryRelationKindLabels.exact_match) + '</option>' +
+            '<option value="close_match">' + escHtml(_libraryRelationKindLabels.close_match) + '</option>' +
+          '</select>' +
+          '<input type="text" id="library-relation-object" placeholder="相手のエントリ ID..." style="flex:1;min-width:120px;font-size:11.5px;padding:2px 6px;border:1px solid var(--color-border);border-radius:4px;background:var(--color-background-secondary);color:var(--color-text-primary)">' +
+          '<button type="button" id="library-relation-add" class="admin-action-btn" style="font-size:11px;padding:1px 7px">追加</button>' +
+        '</div>' +
+      '</div>' +
+
+      _librarySectionTitleHtml("分野の地図との対応", "knowledge-library.atlas-links",
+        "分野の地図（骨格）のどのノードに当たるかの対応です。対応を確定しても骨格は書き換わりません。") +
+        '<div id="library-atlas-links-list" style="font-size:11.5px;color:var(--color-text-secondary)">読み込み中...</div>' +
+      '</div>' +
+
+      _librarySectionTitleHtml("この概念の扱い", "knowledge-library.entry-review",
+        "候補のままのエントリは凍結できず、解析パイプラインや学習者には届きません。") +
+        '<div id="library-entry-review-row" style="display:flex;gap:4px;align-items:center;flex-wrap:wrap">' +
+          '<span>いまの扱い: ' + escHtml(_libraryReviewStatusLabels.hasOwnProperty(entry.review_status || "confirmed") ? _libraryReviewStatusLabels[entry.review_status || "confirmed"] : (entry.review_status || "")) + '</span>' +
+          (entry.review_note ? '<span style="color:var(--color-text-tertiary)">理由: ' + escHtml(entry.review_note) + '</span>' : '') +
+          '<button type="button" id="library-entry-review-confirm" class="admin-action-btn" style="font-size:11px;padding:1px 7px">確定にする</button>' +
+          '<button type="button" id="library-entry-review-dismiss" class="admin-action-btn" style="font-size:11px;padding:1px 7px">見送る</button>' +
+        '</div>' +
+      '</div>';
+
+    var labelAdd = document.getElementById("library-label-add");
+    if (labelAdd) labelAdd.addEventListener("click", function () {
+      var kindEl = document.getElementById("library-label-kind");
+      var textEl = document.getElementById("library-label-text");
+      var label = textEl ? textEl.value.trim() : "";
+      if (!label) return;
+      apiFetch("/admin/library/entries/" + encodeURIComponent(entry.id) + "/labels", {
+        method: "POST",
+        body: JSON.stringify({ kind: kindEl ? kindEl.value : "alternate", label: label }),
+      })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "追加に失敗しました"); });
+          if (textEl) textEl.value = "";
+          loadLibraryEntryLabels(entry.id);
+        })
+        .catch(function (err) { alert(err.message || "追加に失敗しました"); });
+    });
+
+    var relationAdd = document.getElementById("library-relation-add");
+    if (relationAdd) relationAdd.addEventListener("click", function () {
+      var kindEl = document.getElementById("library-relation-kind");
+      var objectEl = document.getElementById("library-relation-object");
+      var objectId = objectEl ? objectEl.value.trim() : "";
+      if (!objectId) return;
+      apiFetch("/admin/library/relations", {
+        method: "POST",
+        body: JSON.stringify({
+          subject_entry_id: entry.id,
+          object_entry_id: objectId,
+          kind: kindEl ? kindEl.value : "related",
+        }),
+      })
+        .then(function (res) {
+          if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "追加に失敗しました"); });
+          if (objectEl) objectEl.value = "";
+          loadLibraryEntryRelations(entry.id);
+        })
+        .catch(function (err) { alert(err.message || "追加に失敗しました"); });
+    });
+
+    var reviewConfirm = document.getElementById("library-entry-review-confirm");
+    if (reviewConfirm) reviewConfirm.addEventListener("click", function () {
+      decideLibraryEntryReview(entry.id, "confirmed", "", function () { selectLibraryEntry(entry.id); });
+    });
+    var reviewDismiss = document.getElementById("library-entry-review-dismiss");
+    if (reviewDismiss) reviewDismiss.addEventListener("click", function () {
+      var reason = _libraryPromptDismissReason(entry.name || "このエントリ");
+      if (!reason) return;
+      decideLibraryEntryReview(entry.id, "dismissed", reason, function () { selectLibraryEntry(entry.id); });
+    });
+
+    loadLibraryEntryLabels(entry.id);
+    loadLibraryEntryRelations(entry.id);
+    loadLibraryEntryAtlasLinks(entry);
+  }
+
+  // 取得失敗は区画ごと畳む（fail-soft。「無い」と断定しない）。
+  function _libraryHideSection(listElId) {
+    var el = document.getElementById(listElId);
+    if (!el) return;
+    var section = el.parentNode;
+    if (section && section.parentNode) section.parentNode.removeChild(section);
+  }
+
+  function loadLibraryEntryLabels(entryId) {
+    var el = document.getElementById("library-labels-list");
+    if (!el) return;
+    apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/labels")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var labels = (data && data.labels) || [];
+        var target = document.getElementById("library-labels-list");
+        if (!target) return;
+        if (!labels.length) { target.innerHTML = "別名・隠しラベルはまだありません。"; return; }
+        var html = "";
+        labels.forEach(function (l) {
+          var dismissed = l.status === "dismissed";
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;padding:2px 0;opacity:' + (dismissed ? "0.6" : "1") + '">' +
+            '<span>' + escHtml(l.label || "") +
+              ' <span style="color:var(--color-text-tertiary)">' + escHtml(_libraryLabelKindLabels.hasOwnProperty(l.kind) ? _libraryLabelKindLabels[l.kind] : (l.kind || "")) + '</span>' +
+              _libraryStatusChipHtml(l.status) + ' ' + _libraryJustificationHtml(l.mapping_justification) +
+            '</span>' +
+            (dismissed ? '' : '<button type="button" class="library-label-dismiss admin-action-btn" data-label-id="' + escHtml(l.id) + '" data-label-text="' + escHtml(l.label || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>') +
+          '</div>';
+        });
+        target.innerHTML = html;
+        target.querySelectorAll(".library-label-dismiss").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var reason = _libraryPromptDismissReason(this.getAttribute("data-label-text") || "このラベル");
+            if (!reason) return;
+            apiFetch("/admin/library/entries/" + encodeURIComponent(entryId) + "/labels/" + encodeURIComponent(this.getAttribute("data-label-id")) + "/dismiss", {
+              method: "POST",
+              body: JSON.stringify({ review_note: reason }),
+            })
+              .then(function (res) {
+                if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+                loadLibraryEntryLabels(entryId);
+              })
+              .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+          });
+        });
+      })
+      .catch(function () { _libraryHideSection("library-labels-list"); });
+  }
+
+  function loadLibraryEntryRelations(entryId) {
+    var el = document.getElementById("library-relations-list");
+    if (!el) return;
+    apiFetch("/admin/library/relations?entry_id=" + encodeURIComponent(entryId))
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var relations = (data && data.relations) || [];
+        var target = document.getElementById("library-relations-list");
+        if (!target) return;
+        if (!relations.length) { target.innerHTML = "関係はまだ記録されていません。"; return; }
+        var html = "";
+        relations.forEach(function (r) {
+          var isSubject = r.subject_entry_id === entryId;
+          var other = isSubject ? (r.object_name || r.object_entry_id) : (r.subject_name || r.subject_entry_id);
+          var kindLabel = _libraryRelationKindLabels.hasOwnProperty(r.kind) ? _libraryRelationKindLabels[r.kind] : (r.kind || "");
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 0">' +
+            '<span>' + escHtml(kindLabel) + ': ' + escHtml(other || "") +
+              _libraryStatusChipHtml(r.status) + ' ' + _libraryJustificationHtml(r.mapping_justification) +
+              (r.reason ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(r.reason) + '</span>' : '') +
+            '</span>' +
+            '<span style="display:flex;gap:4px">' +
+              (r.status === "confirmed" ? '' : '<button type="button" class="library-relation-confirm admin-action-btn" data-relation-id="' + escHtml(r.id) + '" style="font-size:11px;padding:1px 7px">確定</button>') +
+              (r.status === "dismissed" ? '' : '<button type="button" class="library-relation-dismiss admin-action-btn" data-relation-id="' + escHtml(r.id) + '" data-relation-label="' + escHtml(kindLabel + ": " + (other || "")) + '" style="font-size:11px;padding:1px 7px">見送り</button>') +
+            '</span>' +
+          '</div>';
+        });
+        target.innerHTML = html;
+        target.querySelectorAll(".library-relation-confirm").forEach(function (btn) {
+          btn.addEventListener("click", function () { _libraryDecideRelation(entryId, this.getAttribute("data-relation-id"), "confirmed", ""); });
+        });
+        target.querySelectorAll(".library-relation-dismiss").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var reason = _libraryPromptDismissReason(this.getAttribute("data-relation-label") || "この関係");
+            if (!reason) return;
+            _libraryDecideRelation(entryId, this.getAttribute("data-relation-id"), "dismissed", reason);
+          });
+        });
+      })
+      .catch(function () { _libraryHideSection("library-relations-list"); });
+  }
+
+  function _libraryDecideRelation(entryId, relationId, status, reviewNote) {
+    var payload = { status: status };
+    if (reviewNote) payload.review_note = reviewNote;
+    apiFetch("/admin/library/relations/" + encodeURIComponent(relationId) + "/decide", { method: "POST", body: JSON.stringify(payload) })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+        loadLibraryEntryRelations(entryId);
+      })
+      .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+  }
+
+  function loadLibraryEntryAtlasLinks(entry) {
+    var el = document.getElementById("library-atlas-links-list");
+    if (!el) return;
+    apiFetch("/admin/library/atlas-links?domain_key=" + encodeURIComponent(entry.domain_key || ""))
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) {
+        var target = document.getElementById("library-atlas-links-list");
+        if (!target) return;
+        var links = ((data && data.links) || []).filter(function (l) { return l.entry_id === entry.id; });
+        var skeletonVersion = data && data.skeleton_version;
+        // KR9 / VA8: どの版の骨格に対する対応かを必ず明示する。
+        var head = skeletonVersion
+          ? '<div style="color:var(--color-text-tertiary)">分野の地図 版' + escHtml(String(skeletonVersion)) + ' に対する対応です。</div>'
+          : "";
+        if (!links.length) { target.innerHTML = head + "この概念に対応づけられたノードはまだありません。"; return; }
+        var html = head;
+        links.forEach(function (l) {
+          var kindLabel = _libraryRelationKindLabels.hasOwnProperty(l.kind) ? _libraryRelationKindLabels[l.kind] : (l.kind || "");
+          html += '<div style="display:flex;justify-content:space-between;align-items:center;gap:6px;flex-wrap:wrap;padding:2px 0">' +
+            '<span>' + escHtml(l.node_label || l.node_id || "") +
+              ' <span style="color:var(--color-text-tertiary)">' + escHtml(kindLabel) + '</span>' +
+              _libraryStatusChipHtml(l.status) + ' ' + _libraryJustificationHtml(l.mapping_justification) +
+              (l.nearness_label ? ' <span style="color:var(--color-text-tertiary)">' + escHtml(l.nearness_label) + '</span>' : '') +
+              (l.node_in_current_version === false ? ' <span style="color:var(--color-text-tertiary)">このノードは現在の版の地図にはありません</span>' : '') +
+            '</span>' +
+            '<span style="display:flex;gap:4px">' +
+              (l.status === "confirmed" ? '' : '<button type="button" class="library-atlas-link-confirm admin-action-btn" data-link-id="' + escHtml(l.id) + '" style="font-size:11px;padding:1px 7px">確定</button>') +
+              (l.status === "dismissed" ? '' : '<button type="button" class="library-atlas-link-dismiss admin-action-btn" data-link-id="' + escHtml(l.id) + '" data-link-label="' + escHtml(l.node_label || l.node_id || "") + '" style="font-size:11px;padding:1px 7px">見送り</button>') +
+            '</span>' +
+          '</div>';
+        });
+        target.innerHTML = html;
+        target.querySelectorAll(".library-atlas-link-confirm").forEach(function (btn) {
+          btn.addEventListener("click", function () { _libraryDecideAtlasLink(entry, this.getAttribute("data-link-id"), "confirmed", ""); });
+        });
+        target.querySelectorAll(".library-atlas-link-dismiss").forEach(function (btn) {
+          btn.addEventListener("click", function () {
+            var reason = _libraryPromptDismissReason(this.getAttribute("data-link-label") || "この対応");
+            if (!reason) return;
+            _libraryDecideAtlasLink(entry, this.getAttribute("data-link-id"), "dismissed", reason);
+          });
+        });
+      })
+      .catch(function () { _libraryHideSection("library-atlas-links-list"); });
+  }
+
+  function _libraryDecideAtlasLink(entry, linkId, status, reviewNote) {
+    var payload = { status: status };
+    if (reviewNote) payload.review_note = reviewNote;
+    apiFetch("/admin/library/atlas-links/" + encodeURIComponent(linkId) + "/decide", { method: "POST", body: JSON.stringify(payload) })
+      .then(function (res) {
+        if (!res.ok) return res.json().then(function (d) { throw new Error((d && d.detail) || "更新に失敗しました"); });
+        loadLibraryEntryAtlasLinks(entry);
+      })
+      .catch(function (err) { alert(err.message || "更新に失敗しました"); });
+  }
+  // ===== 概念レジストリ — ここまで ==========================================
+
   // ── 知識ランドスケープ（配置レビュー, migration 065） ─────────────────
   // 正本: docs/features/knowledge_landscape_design.md §4.1（教員UX）/ §9.1（admin API）/ §10.3。
   //   LS1 地図は正解ではなく投影（1論文が複数領域×複数観点に置かれるのが既定）
@@ -2751,6 +3302,23 @@
     else if (status === "rejected") { fg = "var(--color-text-tertiary)"; extra = ";text-decoration:line-through"; }
     return '<span class="admin-status landscape-status-chip" data-landscape-status="' + escHtml(status) +
       '" style="background:' + bg + ';color:' + fg + extra + '">' + escHtml(label) + '</span>';
+  }
+
+  // ノード版間対応（K-6 / atlas_node_correspondence_design.md §7）のチップ。
+  // node_status が無ければ描かない（fail-soft）。current は無表示（既定の状態を
+  // わざわざ飾らない）。件数・版の一致率は出さない（NC6）。
+  var LANDSCAPE_NODE_STATUS_LABELS = {
+    migrated: "前の版から対応づけ",
+    unmapped: "現行版に対応する場所なし",
+  };
+
+  function _landscapeNodeStatusChipHtml(placement) {
+    var status = (placement && placement.node_status) || "";
+    var label = LANDSCAPE_NODE_STATUS_LABELS[status];
+    if (!label) return "";
+    return '<span class="admin-status landscape-node-status-chip" data-node-status="' + escHtml(status) +
+      '" style="background:var(--color-background-tertiary);color:var(--color-text-secondary)">' +
+      escHtml(label) + "</span>";
   }
 
   function _landscapeEvidenceHtml(placement) {
@@ -2898,6 +3466,7 @@
             '<span style="font-size:13px;color:var(--color-text-primary)">' + escHtml((p && p.node_label) || (p && p.node_id) || "") + '</span>' +
             (meta.length ? '<span style="font-size:11px;color:var(--color-text-tertiary)">' + escHtml(meta.join(" ・ ")) + '</span>' : "") +
             _landscapeStatusChipHtml(p) +
+            _landscapeNodeStatusChipHtml(p) +
           '</div>' +
           ((p && p.reason) ? '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:4px">' + escHtml(p.reason) + '</div>' : "") +
           _landscapeEvidenceHtml(p) +
@@ -7250,6 +7819,197 @@
       });
     }
 
+    // ── 分野マップのノード版間対応（K-6）────────────────────────────────
+    //
+    // 正本: docs/features/atlas_node_correspondence_design.md §7。
+    // 凍結前の影響確認に「前の版のノードとの対応」区画を置く。候補はサーバ側の
+    // 決定論導出（名前の一致 / 別名 / 登録概念）で、**既定オフ**（NC3: 選択済みに
+    // 見せない）。教員がチェックした対と手で選んだ対だけが freeze body の
+    // id_migrations になる（NC5: 自動で付け替えない）。件数・一致率は描かない（NC6）。
+    var FREEZE_CORRESPONDENCE_TITLE = "前の版のノードとの対応";
+    var FREEZE_CORRESPONDENCE_NOTE =
+      "チェックした対応だけが次の版に記録されます。チェックを外したままでも公開はできます。";
+    var FREEZE_CORRESPONDENCE_UNMATCHED_TITLE = "対応の候補が見つからなかった項目";
+    var FREEZE_CORRESPONDENCE_MANUAL_LABEL = "対応先";
+    var FREEZE_CORRESPONDENCE_MANUAL_NONE = "対応づけない";
+    var FREEZE_CORRESPONDENCE_ALREADY_NOTE = "次版の下書きに既に記録されている対応:";
+
+    // 根拠のラベル。via="alias" は教員が確定した別名、manual_curation は登録概念
+    // （概念レジストリ）経由。いずれもサーバ側の justification をそのまま訳す。
+    function _freezeJustificationLabel(candidate) {
+      if (!candidate) return "";
+      if (candidate.via === "alias") return "別名";
+      if (candidate.justification === "manual_curation") return "登録概念";
+      if (candidate.justification === "lexical_match") return "名前の一致";
+      return "";
+    }
+
+    // draft 骨格（エディタの内容 = 直近に読み込んだ下書き）から node_id → ラベルを引く。
+    // 手動対応の選択肢（added_node_ids のラベル）に使う。引けない ID は ID のまま出す。
+    function _freezeDraftLabels() {
+      var labels = {};
+      var skeleton = parseSkeletonFromEditor();
+      var regions = (skeleton && skeleton.regions) || [];
+      for (var i = 0; i < regions.length; i++) {
+        var region = regions[i] || {};
+        if (region.id) labels[region.id] = region.label || region.id;
+        var concepts = region.concepts || [];
+        for (var j = 0; j < concepts.length; j++) {
+          var concept = concepts[j] || {};
+          if (concept.id) labels[concept.id] = concept.label || concept.id;
+        }
+      }
+      return labels;
+    }
+
+    // correspondence が無い（候補も未対応もゼロ）なら空文字を返し、区画ごと出さない。
+    function _freezeCorrespondenceHtml(impact) {
+      var correspondence = (impact && impact.correspondence) || {};
+      var candidates = correspondence.candidates || [];
+      var unmatched = correspondence.unmatched_removed || [];
+      if (!candidates.length && !unmatched.length) return "";
+
+      var labels = _freezeDraftLabels();
+      var addedIds = (impact && impact.added_node_ids) || [];
+      var optionsHtml = '<option value="">' + escHtml(FREEZE_CORRESPONDENCE_MANUAL_NONE) + "</option>";
+      for (var a = 0; a < addedIds.length; a++) {
+        var addedId = String(addedIds[a] || "");
+        if (!addedId) continue;
+        optionsHtml += '<option value="' + escHtml(addedId) + '">' +
+          escHtml(labels[addedId] || addedId) + "</option>";
+      }
+
+      var html = '<div data-ui-anchor="atlas.freeze-correspondence" data-role="freeze-correspondence"' +
+        ' style="margin-top:12px;padding:10px;border:1px solid var(--color-border-tertiary);border-radius:6px">' +
+        '<div style="font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:4px">' +
+        escHtml(FREEZE_CORRESPONDENCE_TITLE) + "</div>";
+
+      (correspondence.facts || []).forEach(function (fact) {
+        if (!fact) return;
+        html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:3px">' +
+          escHtml(fact) + "</div>";
+      });
+      html += '<div style="font-size:11.5px;color:var(--color-text-secondary);margin-bottom:6px">' +
+        escHtml(FREEZE_CORRESPONDENCE_NOTE) + "</div>";
+
+      candidates.forEach(function (candidate) {
+        var c = candidate || {};
+        var from = String(c.from_id || "");
+        var to = String(c.to_id || "");
+        if (!from || !to) return;
+        var reason = _freezeJustificationLabel(c);
+        html += '<label data-role="fc-candidate" style="display:flex;gap:6px;align-items:flex-start;font-size:12.5px;margin-top:4px">' +
+          '<input type="checkbox" data-role="fc-candidate-check" data-from="' + escHtml(from) +
+          '" data-to="' + escHtml(to) + '">' +
+          "<span>" + escHtml(c.from_label || from) + " → " + escHtml(c.to_label || to) +
+          (reason
+            ? '<span style="color:var(--color-text-tertiary)">（根拠: ' + escHtml(reason) + "）</span>"
+            : "") +
+          "</span></label>";
+      });
+
+      if (unmatched.length) {
+        html += '<div style="font-size:12px;color:var(--color-text-secondary);margin-top:8px">' +
+          escHtml(FREEZE_CORRESPONDENCE_UNMATCHED_TITLE) + "</div>";
+        unmatched.forEach(function (item) {
+          var u = item || {};
+          var nodeId = String(u.node_id || "");
+          if (!nodeId) return;
+          html += '<div data-role="fc-unmatched" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12.5px;margin-top:4px">' +
+            "<span>" + escHtml(u.label || nodeId) + "</span>" +
+            '<label style="font-size:11.5px;color:var(--color-text-secondary)">' +
+            escHtml(FREEZE_CORRESPONDENCE_MANUAL_LABEL) +
+            '<select data-ui-anchor="atlas.freeze-correspondence-manual" data-role="fc-manual"' +
+            ' data-from="' + escHtml(nodeId) + '" style="margin-left:4px;font-size:12px">' +
+            optionsHtml + "</select></label></div>";
+        });
+      }
+
+      var already = correspondence.already_declared || [];
+      if (already.length) {
+        var declared = [];
+        already.forEach(function (pair) {
+          var p = pair || {};
+          if (!p.from || !p.to) return;
+          declared.push((labels[p.from] || p.from) + " → " + (labels[p.to] || p.to));
+        });
+        if (declared.length) {
+          html += '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:8px">' +
+            escHtml(FREEZE_CORRESPONDENCE_ALREADY_NOTE + " " + declared.join("、")) + "</div>";
+        }
+      }
+
+      html += "</div>";
+      return html;
+    }
+
+    // 教員が選んだ対だけを拾う（チェックが優先。同じ旧ノードは 1 対だけ = NC7）。
+    function _freezeCollectIdMigrations(rootEl) {
+      var pairs = [];
+      var seen = {};
+      if (!rootEl) return pairs;
+      var checks = rootEl.querySelectorAll('[data-role="fc-candidate-check"]');
+      for (var i = 0; i < checks.length; i++) {
+        if (!checks[i].checked) continue;
+        var from = checks[i].getAttribute("data-from");
+        var to = checks[i].getAttribute("data-to");
+        if (!from || !to || seen[from]) continue;
+        seen[from] = true;
+        pairs.push({ from: from, to: to });
+      }
+      var selects = rootEl.querySelectorAll('[data-role="fc-manual"]');
+      for (var j = 0; j < selects.length; j++) {
+        var manualFrom = selects[j].getAttribute("data-from");
+        var manualTo = selects[j].value;
+        if (!manualFrom || !manualTo || seen[manualFrom]) continue;
+        seen[manualFrom] = true;
+        pairs.push({ from: manualFrom, to: manualTo });
+      }
+      return pairs;
+    }
+
+    // 影響確認モーダル（従来の confirm() の置き換え）。上段は既存の事実文、
+    // 中段は対応区画、下段は「この対応で凍結」。区画が無ければ従来どおりの確認だけ。
+    function openFreezeImpactModal(summaryLines, correspondenceHtml, onProceed) {
+      var existing = document.getElementById("atlas-freeze-impact-modal");
+      if (existing) existing.remove();
+
+      var overlay = document.createElement("div");
+      overlay.id = "atlas-freeze-impact-modal";
+      overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+
+      var linesHtml = "";
+      (summaryLines || []).forEach(function (line) {
+        if (!line) return;
+        linesHtml += '<p style="font-size:13px;color:var(--color-text-primary);margin:0 0 8px;white-space:pre-wrap">' +
+          escHtml(line) + "</p>";
+      });
+
+      overlay.innerHTML =
+        '<div style="background:var(--color-background-primary);border:1px solid var(--color-border-secondary);border-radius:8px;padding:24px;min-width:420px;max-width:560px;max-height:80vh;overflow-y:auto">' +
+          '<h3 style="margin:0 0 12px;font-size:16px;color:var(--color-text-primary)">凍結の影響</h3>' +
+          linesHtml +
+          (correspondenceHtml || "") +
+          '<div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">' +
+            '<button id="atlas-freeze-impact-cancel" style="padding:6px 16px;border:1px solid var(--color-border);border-radius:4px;background:none;color:var(--color-text-secondary);cursor:pointer;font-size:13px">キャンセル</button>' +
+            '<button id="atlas-freeze-impact-proceed" style="padding:6px 16px;border:none;border-radius:4px;background:var(--color-text-danger);color:#fff;cursor:pointer;font-size:13px">' +
+              (correspondenceHtml ? "この対応で凍結" : "凍結する") +
+            "</button>" +
+          "</div>" +
+        "</div>";
+
+      document.body.appendChild(overlay);
+      overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+      document.getElementById("atlas-freeze-impact-cancel").addEventListener("click", function () {
+        overlay.remove();
+      });
+      document.getElementById("atlas-freeze-impact-proceed").addEventListener("click", function () {
+        var pairs = _freezeCollectIdMigrations(overlay);
+        overlay.remove();
+        if (typeof onProceed === "function") onProceed(pairs);
+      });
+    }
+
     document.getElementById("atlas-freeze").addEventListener("click", function () {
       var version = document.getElementById("atlas-freeze-version").value.trim();
       var note = document.getElementById("atlas-freeze-note").value.trim();
@@ -7278,6 +8038,10 @@
         "この次版を学習者向けに公開しますか？取り消せません（修正は次版で行います）。",
       ];
 
+      // 影響確認モーダルで教員が確定したノード対応（K-6 / NC1: 骨格へ書くのは
+      // この凍結操作の body だけ）。確認を経ない経路では空のまま送らない。
+      var pendingIdMigrations = [];
+
       function openFreezeChecklist() {
         openDangerConfirmModal({
           title: "分野の地図骨格を公開前チェック",
@@ -7285,9 +8049,11 @@
           confirmLabel: "公開する",
         }, function () {
           setStatus("学習者向けに公開中...");
+          var freezeBody = { version: version, note: note };
+          if (pendingIdMigrations.length) freezeBody.id_migrations = pendingIdMigrations;
           apiFetch(basePath() + "/freeze", {
             method: "POST",
-            body: JSON.stringify({ version: version, note: note }),
+            body: JSON.stringify(freezeBody),
           })
             .then(function (res) {
               return res.json().then(function (body) {
@@ -7342,15 +8108,26 @@
             facts.forEach(function (fact) { if (fact) checkLines.push(fact); });
             checkLines.push(question);
           }
-          if (removedCount > 0 || affectedCourses.length > 0) {
-            var titles = affectedCourses.map(function (c) { return c.title; });
-            var shown = titles.slice(0, 5).join("、") + (titles.length > 5 ? " …" : "");
-            var proceed = confirm(
-              "この凍結で " + removedCount + " 概念が削除され、" + affectedCourses.length +
-              " コースの対応が外れます" + (shown ? ": " + shown : "") + "。" +
-              (facts.length ? facts.join("\n") + "\n" : "") + "凍結しますか？"
-            );
-            if (!proceed) return;
+          // §7: 従来の confirm() を小さなモーダルに置き換える。上段は既存の事実文
+          // （removed / affected / facts）そのまま、中段に「前の版のノードとの対応」。
+          var correspondenceHtml = _freezeCorrespondenceHtml(impact);
+          if (removedCount > 0 || affectedCourses.length > 0 || correspondenceHtml) {
+            var summaryLines = [];
+            if (removedCount > 0 || affectedCourses.length > 0) {
+              var titles = affectedCourses.map(function (c) { return c.title; });
+              var shown = titles.slice(0, 5).join("、") + (titles.length > 5 ? " …" : "");
+              summaryLines.push(
+                "この凍結で " + removedCount + " 概念が削除され、" + affectedCourses.length +
+                " コースの対応が外れます" + (shown ? ": " + shown : "") + "。"
+              );
+            }
+            facts.forEach(function (fact) { if (fact) summaryLines.push(fact); });
+            summaryLines.push("凍結しますか？");
+            openFreezeImpactModal(summaryLines, correspondenceHtml, function (idMigrations) {
+              pendingIdMigrations = idMigrations || [];
+              openFreezeChecklist();
+            });
+            return;
           }
           openFreezeChecklist();
         })
@@ -11525,6 +12302,13 @@
     // （教材一覧など）ごと初期化が止まる。取得失敗時は何も描かない（fail-soft）。
     if (window.AdminIndicators) {
       window.AdminIndicators.init({ apiFetch: apiFetch });
+    }
+
+    // 分野の適合（docs/features/concept_registry_design.md §8 / P3-7）— 再解析モーダルの
+    // 「分野の適合」区画。mount() は openReanalyzeOptionsModal から呼ぶので、
+    // それより前（ここ）で注入する。取得失敗時は何も描かない（fail-soft）。
+    if (window.AdminCartridgeFit) {
+      window.AdminCartridgeFit.init({ apiFetch: apiFetch });
     }
 
     // 可視性6軸の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA3）—

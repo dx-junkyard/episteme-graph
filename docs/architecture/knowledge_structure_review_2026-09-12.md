@@ -1,8 +1,9 @@
 # 知識構造の見直し提案 2026-09-12 — 論文の構造化成果を「学ぶ人の知識」として共通化・管理・転用するために
 
 > **状態: 提案（実装対象外）+ 調査記録（完了）**（2026-09-12。HEAD `c71fc32`・開発 DB の実データ2論文を
-> 原本と照合。**Phase 0 は同日、Phase 1 は 2026-09-13 に実装済み**（§4 の各 Phase 実装記録・専用設計書
-> [knowledge_objects_design.md](../features/knowledge_objects_design.md)）。
+> 原本と照合。**Phase 0 は同日、Phase 1・2・3 は 2026-09-13 に実装済み**（§4 の各 Phase 実装記録・専用設計書
+> [knowledge_objects_design.md](../features/knowledge_objects_design.md) / [learning_units_design.md](../features/learning_units_design.md) /
+> [concept_registry_design.md](../features/concept_registry_design.md)）。
 > **本調査以降の変更は未評価**。着手時は Phase ごとに専用設計書を切り、migration 番号は
 > `ls backend/db/` で採番する）
 >
@@ -328,6 +329,36 @@ documents 削除で CASCADE）を確認。
 | P3-5 | `SymbolRecord` に `concept_ref`。UI は記号タップで**直前の定義**を出す（ScholarPhi 規則。既存データのみ・LLM 0 回） | symbol_registry の未活用資産が学習者に届く | X-9 / F-10 |
 | P3-6 | 2 論文目以降の解析時に既存コーパスの unit / component とのベクトル近傍を identity **候補**として自動生成（`status='candidate'`）→ 教員レビューキュー | 横糸 0 件の解消。確定は人間のまま | K-5 / C-12 |
 | P3-7 | cartridge を語彙列挙から**形の宣言**（ORKG template / SHACL shape 相当）へ。名前と実内容の乖離（particle_physics = フレーバー物理）を解消。入口で論文との適合度を事実として提示（`unplaced_domains` が材料） | 分野中立性の回復 | X-15 / F-8 |
+
+#### Phase 3 実装記録（2026-09-13）
+
+専用設計書 [concept_registry_design.md](../features/concept_registry_design.md)（KR1〜KR10・§13）に従い、Fable 5.1 指揮 + Opus 5 の
+4 担当（A スキーマ・コア・正当化列 / B 候補導出・パイプラインステージ / C 記号の直前定義・cartridge 形の宣言 / D 管理 UI・マニュアル・
+docs 索引）で同日実装。migration は **082** に採番。オーナー判断 O-4 は (b) `library_entries` 拡張を推奨どおり採用（設計書冒頭に明記・撤回可）。
+
+| # | 解消 | 実装先 |
+|---|---|---|
+| P3-1 | `library_entries.entry_type` を語彙表 `knowledge_entry_types` FK へ（`LIBRARY_ENTRY_TYPES` = apparatus / theory_component + concept / theory / method / observable / assumption / quantity / process）。既存型語彙からの決定論写像 `entry_type_for_component_type` | 082・`core/schema.py`・`core/library/schema.py` |
+| P3-2 | SKOS 語彙だけを語彙表に（label 3 種 / 関係 4 種）。`library_entry_labels`（alternate / hidden。preferred は `name`）+ `library_entry_relations`（無向 kind は `relation_key`・ドメイン跨ぎ可）。RDF 化なし | 082・`core/library/registry.py` |
+| P3-3 | `knowledge_mapping_justifications` 6 語彙 + `mapping_justification` を identity_links / aliases / gap・edge decisions / placements と新 3 表に additive 追加（書き込みは必須・既存行は導出可能なものだけバックフィル） | 082・各 store |
+| P3-4 | `library_atlas_node_links`（版非依存 `link_key`・exact_match / close_match・ハブ経由でドメイン跨ぎ）+ 決定論の候補導出 + `POST /api/admin/library/atlas-links/derive` | `core/library/atlas_links.py` |
+| P3-5 | 記号 → 概念は `element_identity_links` の `symbol` instance（`SymbolRecord` は非改変 = A層非改変。`concept_ref` は読み時 join）+ 学習者 API `symbols/lookup`（ScholarPhi 規則「直前の定義」・LLM 0 回）+ KaTeX 記号クリックのポップオーバー | `core/symbol_lookup.py`・`routes/learning.py`・`app.js` |
+| P3-6 | パイプラインステージ `identity_candidates`（末尾・非LLM・embedding 0 回・非致命）が live 親 component の語彙一致 / 他 document との正規化名一致 / chunk-proxy 近傍から candidate entry + identity link を作り `duplicate_candidates` を埋める。教員レビューは `GET /identity-candidates` + ナレッジライブラリタブ「同一性の候補」 | `core/library/identity_candidates.py`・`orchestrator.py`・`admin.js` |
+| P3-7 | `shape.json`（`covers` / `does_not_cover` / `expects` / `atlas_domain_key`）+ `particle_physics` の description を実内容（フレーバー物理）に訂正 + 適合事実 `GET /api/admin/cartridges/{id}/fit`（`unplaced_domains` / live 配置 / covers 語の語境界一致・数値なし）を再解析モーダルに | `core/cartridge_shape.py`・`routes/cartridge_shape.py`・`admin-cartridge-fit.js` |
+
+検証: backend 15,276 pass / src 1,924 pass（2026-09-13）。実 DB での 082 適用・E2E は docker 復帰後。
+
+**K-6 追補（同日）**: atlas node_id の版間対応は [atlas_node_correspondence_design.md](../features/atlas_node_correspondence_design.md)
+（NC1〜NC8・migration なし）で実装。骨格の既存スロット `id_migrations` を格納庫にし、凍結前の `freeze-impact` に決定論候補を並べて教員が確定
+（`decision_context`）、読み手は `NodeResolver` で読み替えるだけ（`node_id` を UPDATE しない・未対応は事実文）。オーナー判断は推奨案
+（対応表を持つ / 確定は凍結前 / 未対応は旧行を残し事実文）を採用。
+
+**K-2 追補（同日）**: `claim.concepts` の concept 層は、オーナー判断（既存 `concept_resolver` 注入口への辞書供給 = A層非改変の範囲内 /
+LLM 抽出ステージ = 実測後に判断）を受けて [claim_concept_grounding_design.md](../features/claim_concept_grounding_design.md)
+（CG1〜CG7・migration なし・LLM 0 回）で実装。辞書 = レジストリ confirmed ラベル + cartridge 別名（分野指定時のみ）+ DSL ノード名
+（記号除外・語境界一致）。前段は builder への注入、後段は `dsl_linking` 直後の決定論フック `_hook_claim_concept_grounding`。
+出所は `theory_claims.concepts` の各要素へ additive、`identity_candidates` 規則 ④ で主張 → レジストリの糸。学習者の概念マップは記号を除く。
+`concept_assignment_status` は昇格させない（registry だけの run は非空の provenance-only ontology で `inferred` に留める）。
 
 ### Phase 4 — 転用（migration 0〜1 本）
 

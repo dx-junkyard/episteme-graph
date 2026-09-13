@@ -198,6 +198,9 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/atlas/domains": _R_OBJECT,
     "/api/admin/cartridges": _R_SETTING,
     "/api/admin/cartridges/{cartridge_id}": _R_SETTING,
+    # 分野の形の宣言（shape.json）とこの論文の解析結果の突き合わせ。返すのは事実文と
+    # 主題語の名前の列挙だけで、集約値を数えない（概念レジストリ P3-7 / §8）。
+    "/api/admin/cartridges/{cartridge_id}/fit": _R_SETTING,
     "/api/admin/cartridges/{cartridge_id}/atlas/aliases": _R_OBJECT,
     "/api/admin/cartridges/{cartridge_id}/atlas/edge-candidates": _R_WORKSPACE,
     "/api/admin/cartridges/{cartridge_id}/atlas/freeze-impact": _R_WORKSPACE,
@@ -282,6 +285,17 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/library/entries": _R_OBJECT,
     "/api/admin/library/entries/{entry_id}": _R_OBJECT,
     "/api/admin/library/entries/{entry_id}/versions": _R_OBJECT,
+    # -- 概念レジストリ（Phase 3 / concept_registry_design.md §9）------------
+    # いずれも「行の一覧」で、母集団に対する集約ではない（KR6 により数値も返さない）。
+    "/api/admin/library/entries/{entry_id}/labels": _R_OBJECT,
+    "/api/admin/library/relations": _R_OBJECT,
+    "/api/admin/library/atlas-links": _R_OBJECT,
+    # 教員が確定するための同一性候補（candidate entry + 同一性リンク）そのものの提示。
+    # 返す数値は「閲覧できない論文を何本隠したか」（hidden_count）だけで、これは
+    # 集約値ではなく**隠し方の事実**（W-β と同じ扱い）。
+    "/api/admin/library/identity-candidates": _R_WORKSPACE,
+    # 1論文に対する分野の適合の**事実文**のみ（スコア・件数を返さない = KR6 / KR8）。
+    "/api/admin/cartridges/{cartridge_id}/fit": _R_OBJECT,
     # -- M層（モデル選択） ---------------------------------------------------
     "/api/admin/llm-models/catalog": _R_SETTING,
     "/api/admin/llm-models/pipeline-stages": _R_SETTING,

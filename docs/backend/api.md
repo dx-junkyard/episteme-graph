@@ -66,14 +66,15 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
   `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）/
   `disclosure`（/api/disclosure）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（25本、2026-09-13 時点。正本はコードで `main.py` の登録行を数える）**:
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（26本、2026-09-13 時点。正本はコードで `main.py` の登録行を数える）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
   （/cartridges 配下）/ `atlas_vectors`（/cartridges 配下）/ `atlas_edges`（/cartridges 配下）/
   `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
-  `discuss_observation.admin_router` / `course_prerequisites`（/course-builder/prerequisite-check）/ `versioning` / `status`
+  `discuss_observation.admin_router` / `course_prerequisites`（/course-builder/prerequisite-check）/
+  `cartridge_shape`（/cartridges/{id}/fit。cartridge の形の宣言に対する適合事実の読み取り専用1本）/ `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
   `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
 - **例外（#496）**: `GET /api/admin/documents/{id}/figures` は admin.py にも定義が残るが、main.py が
@@ -161,6 +162,7 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
 | GET | `/api/learning/courses/{cid}/source-chunk/{chunk_id}` | 所有者 or 受講者 **かつ chunk の document が当該コースの source** | 出典ポップアップ用のチャンク本文・数式・出典名（音声会話の教材パネルにも使用）。スコープは `list_course_source_document_ids(course_data)` を `get_chunk_passage(..., allowed_document_ids=)` の SQL 内 `ANY(...)` で強制。コース非アクセス・コース source 外・不明 chunk はすべて同一 404 |
 | GET | `/api/learning/courses/{cid}/chunks/{chunk_id}/claim-refs` | 所有者 or 受講者 かつ chunk がコース教材に属する | 出典タブの台帳併記（D3-6）を claim へ拡張する読み取り。claim の id・claim_type・短い label のみ（confidence 等の数値なし）。属さない chunk は 404 |
 | GET | `/api/learning/courses/{cid}/figures/{fid}/image` | 受講ゲート + 図の出所条件（下記） | 学習者向け図画像配信。**抽出図**（`document_figures`）は「受講 ∧ 図の document がコース sources ∧ コース content から参照されている」の AND、**教材図**（`course_teaching_figures`）は「受講 ∧ 図の course_id 一致 ∧ 参照されている ∧ `status='adopted'`」の AND。いずれか欠ければ 404（draft/retired は学習者に出ない） |
+| GET | `/api/learning/courses/{cid}/symbols/lookup?symbol=&equation_id=&chunk_id=` | 所有者 or 受講者 かつ記号がコース sources の document 由来 | 記号の「直前の定義」（概念レジストリ §7・`core/symbol_lookup.py`）。受講ゲート → `list_course_source_document_ids` → `knowledge_symbols_live` を `document_id = ANY(:doc_ids)` で読む。**LLM 0 回・既存データのみ**。タップ位置より前にある定義のうち最も近いものを逐語で1件返し、前に無ければ後方の最初の定義を事実文付きで返す。定義が無ければ `definition_status` のラベルと「この論文には定義の記述が見つかりませんでした」。`concept_ref` は `confirmed` の識別リンクがあるときだけ（候補は出さない）。`confidence` / `stable_key` / 内部 ID は返さない |
 
 #### 「論文と話す」（discuss、B層）
 
@@ -714,8 +716,8 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | PUT | `/api/admin/cartridges/{cid}/atlas/skeleton/draft` | TEACHER | draft 保存（`revision` 楽観ロック、衝突 409） |
 | POST | `/api/admin/cartridges/{cid}/atlas/skeleton/draft/from-frozen` | TEACHER | 現行凍結版を複製して次版 draft を作る（決定論・LLM 不使用。既存 draft あり / retired は 409、凍結版なしは 404）。node_id を振り直さないため既存の binding・配置・足跡が切れない |
 | DELETE | `/api/admin/cartridges/{cid}/atlas/skeleton/draft` | TEACHER | draft の破棄（作業コピーのため AB3 の対象外。**retired 中も許可**する唯一の書き込み経路。凍結版履歴・学習者表示に影響しない） |
-| GET | `/api/admin/cartridges/{cid}/atlas/freeze-impact` | TEACHER | 凍結前の影響プレビュー（draft ⇄ 現行凍結版の node_id 差分 + バインド中コースの topic 影響。draft なしは 404） |
-| POST | `/api/admin/cartridges/{cid}/atlas/skeleton/freeze` | TEACHER | draft の凍結・版付与（レスポンスに `impact` 同梱。関係教員へ `atlas_skeleton_frozen` 通知） |
+| GET | `/api/admin/cartridges/{cid}/atlas/freeze-impact` | TEACHER | 凍結前の影響プレビュー（draft ⇄ 現行凍結版の node_id 差分 + バインド中コースの topic 影響。draft なしは 404）。`correspondence`（`candidates` / `unmatched_removed` / `already_declared` / `facts`）= 版間のノード対応の候補（決定論・非LLM・embedding 0 回） |
+| POST | `/api/admin/cartridges/{cid}/atlas/skeleton/freeze` | TEACHER | draft の凍結・版付与（レスポンスに `impact` 同梱。関係教員へ `atlas_skeleton_frozen` 通知）。body の `id_migrations: [{from, to}]`（additive・既定 []）に教員が確定したノード対応を載せると、凍結される骨格の `id_migrations` に記録される（`from` は現行凍結版・`to` は draft に実在し `from` は一意。違反は 422 の事実文） |
 | POST | `/api/admin/cartridges/{cid}/atlas/retire` | TEACHER | domain を retired にする（削除ではなく状態遷移。propose 候補から除外・generate/draft 保存/freeze は 409。学習者表示は不変。関係教員へ best-effort 通知） |
 | POST | `/api/admin/cartridges/{cid}/atlas/restore` | TEACHER | retired → active へ戻す（監査のみ・通知なし。retired でなければ 409） |
 | POST | `/api/admin/cartridges/{cid}/atlas/skeleton/assist/interpret` | TEACHER | AI アシスト: 教員の発言を対象・要望に解釈（まだ編集しない） |
@@ -1111,6 +1113,35 @@ SL層 `support_paths` + claim つまづきサマリー（k-匿名集約の再利
 | POST | `/api/admin/library/entries/{eid}/restore` | TEACHER | retire からの復帰 |
 | GET | `/api/admin/library/domains` | TEACHER | domain 別サマリ |
 | POST | `/api/admin/library/entries/similar` | TEACHER | 類似エントリ検索（昇格モーダルの統合候補提示用） |
+
+#### 概念レジストリ（migration 082）
+
+正本: [features/concept_registry_design.md](../features/concept_registry_design.md) §9。すべて
+`_require_teacher`。**DELETE ルートは無く**、判断はすべて状態遷移（見送りは理由必須 = 422）。
+候補づくりは決定論・非LLM・embedding 呼び出しゼロで、`detail` は数値なしの事実文。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/library/entries?include_candidates=` | TEACHER | 既定は `review_status='confirmed'` のみ（後方互換）。`include_candidates=true` で候補も返す |
+| POST | `/api/admin/library/entries/{eid}/review` | TEACHER | `review_status` 遷移（`confirmed` / `dismissed`（理由必須） / `candidate`＝戻す）。`candidate` のエントリは凍結できない（409） |
+| GET | `/api/admin/library/entries/{eid}/labels` | TEACHER | `alternate` / `hidden` ラベル一覧（`hidden` は検索にだけ効く SKOS hiddenLabel） |
+| POST | `/api/admin/library/entries/{eid}/labels` | TEACHER | ラベルの追加（手動は `manual_curation`） |
+| POST | `/api/admin/library/entries/{eid}/labels/{label_id}/dismiss` | TEACHER | ラベルの見送り（理由必須・行は残す） |
+| GET | `/api/admin/library/relations?entry_id=` | TEACHER | 概念間の関係一覧（`broader` / `related` / `exact_match` / `close_match`。ドメイン跨ぎ可） |
+| POST | `/api/admin/library/relations` | TEACHER | 関係の候補作成（手動 = `manual_curation`）。**リンクであってマージではない**（行の統合・名称の書き換えはしない） |
+| POST | `/api/admin/library/relations/{id}/decide` | TEACHER | 関係の確定 / 見送り（理由必須） / 戻す |
+| GET | `/api/admin/library/atlas-links?domain_key=` | TEACHER | レジストリ ↔ 分野の地図 node の対応一覧（版非依存。現行凍結版に node が無い行は `node_in_current_version: false` を付けて残す） |
+| POST | `/api/admin/library/atlas-links/derive` | TEACHER | 対応候補の決定論導出（表記の一致・**保存済み**アンカーベクトルの近さ。retired ドメインは 409。書き込みは候補行の upsert のみで `atlas_skeletons` には触れない） |
+| POST | `/api/admin/library/atlas-links/{id}/decide` | TEACHER | 対応の確定 / 見送り（理由必須） / 戻す |
+| GET | `/api/admin/library/identity-candidates?domain_key=&include_dismissed=` | TEACHER | 同一性候補のレビューキュー。閲覧不可 document 由来のリンクは除外し `hidden_count` を正直に返す。リンクの確定は既存 `POST /api/admin/deliberation/identity-links/{id}/confirm\|reject` を再利用（entry を確定してもリンクは自動確定しない） |
+
+### cartridge の形の宣言と適合事実 `/api/admin/cartridges/{id}/fit`（`routes/cartridge_shape.py`）
+
+正本: [features/concept_registry_design.md](../features/concept_registry_design.md) §8。
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/cartridges/{id}/fit?document_id=` | TEACHER + document 閲覧権 | `cartridges/<id>/shape.json` の宣言（covers / does_not_cover / expects）と、この論文の解析結果（配置の有無・`unplaced_domains`）を突き合わせた**事実文のみ**。数値・適合スコアは返さない。解析前は「まだ解析されていないため、適合の事実はありません」 |
 
 ### LLM 使用量 `/api/admin/llm-usage`（`routes/llm_usage.py`、U層）
 

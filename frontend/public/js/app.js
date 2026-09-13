@@ -5396,6 +5396,147 @@
     });
   }
 
+  // ── 記号の「直前の定義」（概念レジストリ P3-5）────────────────────────────
+  // 正本: docs/features/concept_registry_design.md §7。
+  // 教材の KaTeX 描画済み数式の中の記号トークンをタップすると、その位置より
+  // **前**で最も近い定義の逐語をポップオーバーで出す（ScholarPhi 規則）。
+  //
+  // - 自動では出さない（タップのときだけ。IH9 / KR5 と同じ「本人の明示操作」原則）。
+  // - **数値を出さない**（confidence / 件数 / 距離を描かない = KR6）。
+  // - 既存の数式導線（[[equation:id]] カードの「文脈を見る」ボタン・ホバーツール
+  //   チップ・テキスト選択の「ここについて質問」）とは競合しない: 対象は
+  //   `.katex` の**内側**の記号トークンだけで、stopPropagation もしない。
+  // - LLM を呼ばない（サーバ側も既存データの読みだけ）。
+
+  // 記号として扱う文字（ラテン文字・ギリシャ文字・よく使う数学記号。1〜3文字）。
+  const SYMBOL_TOKEN_RE = /^[A-Za-zͰ-Ͽ∂∇ℏÅ]{1,3}$/;
+
+  function isSymbolTokenText(text) {
+    return SYMBOL_TOKEN_RE.test(String(text || "").trim());
+  }
+
+  // 添字つきの記号（V_{cb} 等）は base + "_" + 添字 に組み直す。サーバ側の
+  // normalize_key が "V_{cb}" と "V_cb" を同じキーに畳むので、この形で送れば
+  // 記号レジストリの canonical_symbol と完全一致で当たる（部分一致はしない）。
+  function symbolTextFromToken(token) {
+    const base = String(token.textContent || "").trim();
+    const parent = token.parentElement;
+    if (!parent || !parent.classList || !parent.classList.contains("mord")) return base;
+    const supsub = parent.getElementsByClassName("msupsub")[0];
+    if (!supsub) return base;
+    const sub = String(supsub.textContent || "").replace(/[\s​‌﻿]/g, "");
+    return (base && sub) ? (base + "_" + sub) : base;
+  }
+
+  function hideSymbolLookupPopover() {
+    const p = document.getElementById("symbol-lookup-popover");
+    if (!p) return;
+    p.hidden = true;
+    p.innerHTML = "";
+  }
+
+  // サーバが解決済みの事実文をそのまま描く（フロントに文言を焼き込まない）。
+  function renderSymbolLookupPopover(data, rect) {
+    const p = document.getElementById("symbol-lookup-popover");
+    if (!p) return;
+    const facts = (data && data.facts) || [];
+    const definition = data && data.definition;
+    let html = '<div class="symbol-lookup-head">' +
+      '<span class="symbol-lookup-symbol">' + escHtml((data && data.symbol) || "") + '</span>';
+    if (data && data.scope_label) {
+      html += '<span class="symbol-lookup-scope">' + escHtml(data.scope_label) + '</span>';
+    }
+    if (data && data.unit) {
+      html += '<span class="symbol-lookup-scope">' + escHtml(data.unit) + '</span>';
+    }
+    html += '</div>';
+    if (definition && definition.text) {
+      html += '<div class="symbol-lookup-definition">' + escHtml(definition.text) + '</div>';
+      if (definition.equation_label) {
+        html += '<div class="symbol-lookup-fact">' + escHtml(definition.equation_label) + '</div>';
+      }
+    }
+    facts.forEach(function (fact) {
+      html += '<div class="symbol-lookup-fact">' + escHtml(fact) + '</div>';
+    });
+    if (data && data.concept_ref && data.concept_ref.name) {
+      html += '<div class="symbol-lookup-concept">概念: ' + escHtml(data.concept_ref.name) + '（登録済み）</div>';
+    }
+    if (data && data.source) {
+      html += '<div class="symbol-lookup-source">出典: ' + escHtml(data.source) + '</div>';
+    }
+    p.innerHTML = html;
+    p.hidden = false;
+    // 画面外へはみ出さない位置に寄せる（数値は描かない・位置だけの調整）。
+    const width = p.offsetWidth || 320;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    p.style.left = Math.round(left) + "px";
+    p.style.top = Math.round(rect.bottom + 6) + "px";
+  }
+
+  async function openSymbolLookup(token, symbolText) {
+    if (!state.courseId) return;
+    const chunkEl = token.closest ? token.closest("[data-chunk-id]") : null;
+    const equationEl = token.closest ? token.closest("[data-equation-id]") : null;
+    const params = new URLSearchParams({ symbol: symbolText });
+    if (equationEl) {
+      const eqId = equationEl.getAttribute("data-equation-id") || "";
+      if (eqId) params.set("equation_id", eqId);
+    }
+    if (chunkEl) {
+      const chunkId = chunkEl.getAttribute("data-chunk-id") || "";
+      if (chunkId) params.set("chunk_id", chunkId);
+    }
+    const rect = token.getBoundingClientRect();
+    let data = null;
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + encodeURIComponent(state.courseId) + "/symbols/lookup?" + params.toString()
+      );
+      if (!res.ok) return;
+      data = await res.json();
+    } catch (e) {
+      return; // 取得できないときは何も出さない（fail-soft・推測で埋めない）
+    }
+    if (!data) return;
+    if (!data.available) {
+      // 閉世界の正直さ（KR8）: 主語は常に「この論文」。分野レベルの不在は言わない。
+      renderSymbolLookupPopover(
+        { symbol: symbolText, facts: ["この論文には、この記号の記述が見つかりませんでした。"] },
+        rect
+      );
+      return;
+    }
+    renderSymbolLookupPopover(data, rect);
+  }
+
+  function initSymbolLookup() {
+    if (document._symbolLookupWired) return;
+    document._symbolLookupWired = true;
+    document.addEventListener("click", function (e) {
+      const target = e.target;
+      if (!target || !target.closest) return;
+      if (target.closest("#symbol-lookup-popover")) return; // ポップオーバー内は素通し
+      const body = target.closest("#material-body");
+      if (!body || !target.closest(".katex")) { hideSymbolLookupPopover(); return; }
+      const token = target.closest(".mord, .mop");
+      if (!token) { hideSymbolLookupPopover(); return; }
+      const symbolText = symbolTextFromToken(token);
+      if (!isSymbolTokenText(String(token.textContent || "").trim())) {
+        hideSymbolLookupPopover();
+        return;
+      }
+      openSymbolLookup(token, symbolText);
+    });
+    document.addEventListener("mousedown", function (e) {
+      if (e.target && e.target.closest && e.target.closest("#symbol-lookup-popover")) return;
+      hideSymbolLookupPopover();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") hideSymbolLookupPopover();
+    });
+  }
+
   // ── Input handling ─────────────────────────────────────────────────
   // 「教材に沿って質問」「自由に質問・探索」の2ボタンは廃止し「質問」1つに統合。
   // 事前に意図を選ばせず、常に RAG 検索を行った上で回答が何に基づくか
@@ -7541,7 +7682,10 @@
         if (body) {
           // 数式カードの隅に控えめな「文脈を見る」（claim/equation 文脈 API）。
           // 自動では開かない・数式が多い教材でも本文の邪魔をしない小さなボタンに留める。
-          return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
+          // data-equation-id は記号の「直前の定義」（概念レジストリ P3-5）が
+          // タップ位置として送る担体（純粋な追加属性・既存の描画には影響しない）。
+          return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '"' +
+            ' data-equation-id="' + escHtml(embedId) + '">' +
             body +
             renderMaterialElementContextButton("equation", embedId) +
           '</span>';
@@ -9153,6 +9297,7 @@
     // 1回だけ取得する。取得できなければ従来の JSON 経路のみ（fail-to-current）。
     fetchClientFeaturesOnce();
     initMaterialHoverLatch(); // 教材ホバー + ラッチ（学習UI再編 Phase 3）
+    initSymbolLookup(); // 記号の「直前の定義」（概念レジストリ P3-5, §7）
     initDiscussUI();
     // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める
     // ようにする DI（着地モーダルのコース一致ガードの防御の二重化に使う）。

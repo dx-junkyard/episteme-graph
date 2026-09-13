@@ -28,6 +28,7 @@ from core.label_vocab import (
     CONFIDENCE_TENTATIVE_REFERENCE_HIGH,
 )
 from core.postgres import get_session
+from core.schema import MAPPING_JUSTIFICATIONS
 from core.deliberation.schema import (
     ElementRef,
     ElementResolutionError,
@@ -65,7 +66,8 @@ _COLUMNS_SQL = """
     id::text, instance_element_type, instance_element_id,
     instance_document_id::text AS instance_document_id,
     shared_part_id::text, status, local_expression, evidence, reason, confidence,
-    created_by::text, decided_by::text, decided_at, created_at, updated_at
+    created_by::text, decided_by::text, decided_at, created_at, updated_at,
+    mapping_justification
 """
 
 
@@ -86,6 +88,9 @@ def _row_to_dict(row: Any) -> dict:
         "decided_at": row[12].isoformat() if row[12] else None,
         "created_at": row[13].isoformat() if row[13] else "",
         "updated_at": row[14].isoformat() if row[14] else "",
+        # 「なぜ同じと言えたか」（概念レジストリ KR4 / migration 082）。既存行は
+        # 導出できないので None = 「記録なし」のまま（推測で埋めない）。
+        "mapping_justification": row[15] if len(row) > 15 else None,
     }
 
 
@@ -98,6 +103,7 @@ def create_candidate(
     reason: str = "",
     confidence: float | None = None,
     created_by: str | None = None,
+    mapping_justification: str | None = None,
 ) -> dict:
     """同一性リンクの候補を1件作成する（常に ``status='candidate'``、KN-3）。
 
@@ -112,6 +118,11 @@ def create_candidate(
     要素型では ``element_id``（例: ``eq_1``）が論文間で衝突しうるため（レビュー指摘
     2026-07-15）。document_id を含めないと、別論文からの候補作成が別論文の既存行を
     返してしまう（衝突・情報漏えい）。
+
+    ``mapping_justification``（概念レジストリ KR4・migration 082）は「なぜ同じと
+    言えたか」の記録で、**新規作成では必須**（``core.schema.MAPPING_JUSTIFICATIONS``
+    の語彙内。未指定・語彙外は ``ValueError`` → route が 422）。W層 UI からの手動作成は
+    ``manual_curation``、決定論の候補導出は ``lexical_match`` / ``vector_similarity``。
     """
     if instance_ref.scope != SCOPE_DOCUMENT:
         raise ElementResolutionError(
@@ -130,6 +141,13 @@ def create_candidate(
         )
     if not str(shared_part_id or "").strip():
         raise ValueError("shared_part_id is required")
+    # KR4: 「なぜ同じと言えたか」の無い同一性候補は作らない。要素型・スコープの検査より
+    # **後**に置く（不正な source は従来どおり ElementResolutionError で返す）。
+    justification = str(mapping_justification or "").strip()
+    if not justification:
+        raise ValueError("mapping_justification is required")
+    if justification not in MAPPING_JUSTIFICATIONS:
+        raise ValueError(f"invalid mapping_justification: {mapping_justification!r}")
 
     session = get_session()
     try:
@@ -139,12 +157,12 @@ def create_candidate(
                 INSERT INTO element_identity_links (
                     instance_element_type, instance_element_id, instance_document_id,
                     shared_part_id, status, local_expression, evidence, reason,
-                    confidence, created_by
+                    confidence, created_by, mapping_justification
                 ) VALUES (
                     :element_type, :element_id, CAST(:document_id AS uuid),
                     CAST(:shared_part_id AS uuid), :status,
                     CAST(:local_expression AS jsonb), CAST(:evidence AS jsonb),
-                    :reason, :confidence, CAST(:created_by AS uuid)
+                    :reason, :confidence, CAST(:created_by AS uuid), :mapping_justification
                 )
                 ON CONFLICT (instance_element_type, instance_element_id, instance_document_id, shared_part_id)
                 DO NOTHING
@@ -166,6 +184,7 @@ def create_candidate(
                 "reason": reason or "",
                 "confidence": confidence,
                 "created_by": created_by,
+                "mapping_justification": justification,
             },
         ).fetchone()
         if row is None:

@@ -51,6 +51,18 @@
 答える（テキスト経路は **LLM 0 回・利用回数を消費しない**）。OFF のときも、使い方らしい
 質問は非 LLM の pre-route で同じ経路に入る。無ヒットは固定文で正直に返す（捏造しない）。
 
+### 1.2 概念マップ — 記号は出さない
+
+左サイドバーの概念マップ（`app.js` の `course.concepts` 描画）に**数式の記号は出さない**。
+コース登録時（`POST /api/learning/courses`）に `name` / `children[]` を記号判定
+（A層 `is_symbol_like_concept_name` = P0-3 に委譲する `core/course_data.py::
+is_symbol_concept_name`）で振り分け、記号は概念マップから外す。**外した名前は捨てず**
+`learning_courses.data.excluded_symbol_concepts` に残るが、学習者向け DTO
+（`LearningCourseDetail`）には出ない。記号そのものは `knowledge_symbols` /
+symbol_registry が正本で、教材の数式をタップすれば §3.13 の「直前の定義」から辿れる。
+
+正本: [claim_concept_grounding_design.md](claim_concept_grounding_design.md) §8 / CG5・CG6。
+
 ---
 
 ## 2. コース受講と進捗
@@ -540,6 +552,56 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 
 ---
 
+## 3.13 数式の記号の「直前の定義」（概念レジストリ P3-5）
+
+教材に描画された数式の中の**記号そのもの**をタップすると、その位置より**前**で最も近い
+定義を論文の逐語で返すポップオーバー（正本:
+[concept_registry_design.md](concept_registry_design.md) §7 / KR1〜KR10。migration 082 は
+担当 A の範囲で、本機能自体は読み取りのみ）。ScholarPhi の「直前の定義を出す」規則を、
+Phase 1 で行になった `knowledge_symbols` / `knowledge_equations` / `knowledge_evidence`
+から**決定論的に**導出する。**LLM を 1 度も呼ばず、quota も消費しない。**
+
+- **API**: `GET /api/learning/courses/{course_id}/symbols/lookup?symbol=&equation_id=&chunk_id=`
+  （`routes/learning.py::get_symbol_lookup_route` → `core/symbol_lookup.py::
+  lookup_symbol_definition`）。fail-closed は既存の学習者向け文脈 API と同じ3段 —
+  受講ゲート（`get_accessible_course_data`）→ コースの sources
+  （`list_course_source_document_ids`。**全域可視集合へ広げない**）→ core の SQL 内
+  `document_id = ANY(CAST(:doc_ids AS uuid[]))`。sources が空なら SQL を 1 本も発行せず
+  `available:false`。記号が空文字のときだけ 422。
+- **記号の一致は完全一致のみ**: `core/concept_normalizer.py::normalize_key` で正規化した
+  `canonical_symbol` / `notation_variants` との完全一致（部分一致をしない — `SM` が
+  `cosmological` に当たった F-7 / P0-2 の再発防止）。フロントは添字を `V_cb` の形に
+  組み直して送るので、`V_{cb}` と同じキーに畳まれる。
+- **位置の解決（ScholarPhi 規則）**: タップ位置は `equation_id` →
+  `knowledge_equations` の `block_id`、無ければ `chunk_id` → `chunks.block_ids`。
+  順序は `chunks.block_ids` を chunk 順に並べた連番（＝配信された本文の順）で、
+  それが引けないときだけ `page` を使う。**異なる順序空間どうしは比較しない**。
+  前に定義があればそれ、無ければ後ろの最初を「この位置より後で定義されています。」
+  付きで、位置が解けなければ「位置を特定できないため、最初の定義を表示しています。」
+  付きで返す（黙って先頭を出さない）。
+- **定義が無いとき**: `element_vocab.DEFINITION_STATUS_LABELS` のラベル（「定義なし」等）+
+  「この論文には定義の記述が見つかりませんでした。」。**主語は常に「この論文」**で、
+  分野レベルの不在は言わない（KR8 / SL1 の閉世界語彙）。
+- **概念参照（`concept_ref`）**: `element_identity_links` の `instance_element_type='symbol'`
+  かつ `status='confirmed'`、かつエントリが `active` のときだけ `{entry_id, name,
+  entry_type}` を 1 件返す（**candidate は出さない** = KR2。A層の `SymbolRecord` は不変
+  = KR1 — 読み時の join で実現する）。
+- **返さないもの**: `confidence` / `stable_key` / `produced_by_run_id` / 内部 ID
+  （`sym_…` / `eq_op_*` / `ev_*`）。返すのは `unit` / `scope_label`（`element_vocab`）と
+  出所（論文タイトル）。表示前に `core/text_hygiene.py::strip_control_sequences` を通す。
+- **UI**（`app.js` の `initSymbolLookup` / `openSymbolLookup` / `renderSymbolLookupPopover`）:
+  `#material-body` 内の KaTeX 描画済み数式（`.katex`）の記号トークン（1〜3文字のラテン /
+  ギリシャ文字）クリックで `#symbol-lookup-popover` を出す。**自動では出さない**
+  （タップのみ・ポーリングなし）。位置は最近傍の `[data-equation-id]`（数式カードに付く
+  追加属性）と `[data-chunk-id]`。既存の教材導線（テキスト選択の「ここについて質問」・
+  ホバーツールチップ・数式カードの「文脈を見る」）とは `stopPropagation` を使わずに
+  併存する。Escape / 外クリックで閉じる。
+- UI アンカーは `material.symbol-lookup`（マニュアル節
+  `student/02-student.md#symbol-lookup`）。ガードレールは
+  `backend/tests/test_symbol_lookup_{core,api,ui_static}.py`。
+
+---
+
 ## 4. インタラクティブ・レクチャーモード
 
 論文チャンクを **セミナー形式の音声講義**に変換する没入型機能。教材ヘッダの表示形式
@@ -610,7 +672,7 @@ discuss 専用のシステムプロンプト（`_get_discuss_system_prompt`）�
 | レイヤー | 実装 | トグル | 内容 |
 |---|---|---|---|
 | 自分の記録 | `personal-map.js` | 「わたしの地図」 | 本人の確定痕跡を骨格に重ねる（§6） |
-| 論文の位置 | `landscape-layer.js` | 「論文の位置」 | 論文（document）の配置を L1 の概念ノード横に 📄 マーカーで置く。表示は段階ラベル（`weight_label`）と出所ラベル（「AIによる推定（未確認）」／「教員確認済み」）のみで、weight・confidence の生値は API にも UI にも出ない（正本: [knowledge_landscape_design.md](knowledge_landscape_design.md) LS1〜LS10）。出典タブの「分野の中の位置づけ」（UI アンカー `sources.paper-placement`）は同じ `getData(courseId)` を共有する |
+| 論文の位置 | `landscape-layer.js` | 「論文の位置」 | 論文（document）の配置を L1 の概念ノード横に 📄 マーカーで置く。表示は段階ラベル（`weight_label`）と出所ラベル（「AIによる推定（未確認）」／「教員確認済み」）のみで、weight・confidence の生値は API にも UI にも出ない（正本: [knowledge_landscape_design.md](knowledge_landscape_design.md) LS1〜LS10）。出典タブの「分野の中の位置づけ」（UI アンカー `sources.paper-placement`）は同じ `getData(courseId)` を共有する。地図の改訂後に対応する場所が無い位置づけは、位置に置かず事実文で示す（位置の解決は `current_node_id || node_id`。正本: [atlas_node_correspondence_design.md](atlas_node_correspondence_design.md) NC5 / NC6） |
 | 推定の糸 | `atlas-threads-layer.js` | 「推定の糸」（UI アンカー `atlas.relation-threads`） | 骨格 L2 の概念間に「まだ凍結されていない関係」を**点線**で重ねる。`GET /api/atlas` の optional キー `threads` をそのまま読むだけで追加フェッチをしない。必ず「AIによる推定（未確認）」＋骨格版を伴い、実線の凍結エッジと視覚的に混ざらない。教員が見送った辺はサーバーが返さない（正本: [atlas_relation_edges_design.md](atlas_relation_edges_design.md) RE1〜RE8） |
 
 ---

@@ -30,7 +30,7 @@ from typing import Any
 from sqlalchemy import text as sa_text
 
 from core import label_vocab
-from core.course_data import UNIT_SOURCE_TEACHER_SELECTED
+from core.course_data import UNIT_SOURCE_TEACHER_SELECTED, is_symbol_concept_name
 from core.schema import LEARNING_UNIT_KINDS, LEARNING_UNIT_KINDS_FOR_COURSE
 
 logger = logging.getLogger(__name__)
@@ -211,6 +211,68 @@ def render_unit_candidates_block(candidates: list[UnitCandidate]) -> str:
             line += f" — {summary}"
         lines.append(line)
     return "\n".join(lines)
+
+
+def unit_concept_terms_by_document(
+    session, document_ids: list[str]
+) -> dict[str, list[str]]:
+    """``learning_units_live.teaches`` の **concept 項**（分野の言葉）を document ごとに読む。
+
+    正本: ``docs/features/claim_concept_grounding_design.md`` §8（案 E）。コースビルダー・
+    教材一覧へ渡す概念の供給を「記号の羅列」から Phase 2 の学ぶ単位が教える言葉に寄せる
+    ための読み。**決定論・非LLM**で、SQL は 1 本だけ発行する。
+
+    - 並びは **(kind 順, order_index, label)** = :func:`list_unit_candidates` と同じ規則で、
+      同じ入力なら常に同じ並び（DB の返す行順に依存しない）。
+    - ``review_status = 'dismissed'`` の unit は読まない（教員が見送った単位の言葉を出さない）。
+    - 記号は :func:`core.course_data.is_symbol_concept_name` で除く（CG6）。
+    - 表が無い / 読めない場合は空 dict へ縮退する（供給が消えるだけ = LU8）。
+    """
+    document_ids = [str(did).strip() for did in (document_ids or []) if str(did or "").strip()]
+    if not document_ids:
+        return {}
+
+    placeholders, params = _document_placeholders(document_ids, "did_")
+    try:
+        rows = session.execute(
+            sa_text(f"""
+                SELECT document_id::text, unit_kind, order_index, label, teaches
+                FROM learning_units_live
+                WHERE document_id IN ({placeholders})
+                  AND review_status <> 'dismissed'
+            """),
+            params,
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 供給ごと fail-soft
+        logger.warning("learning unit concept terms unavailable", exc_info=True)
+        return {}
+
+    ordered = sorted(
+        rows,
+        key=lambda row: (
+            str(row[0] or ""),
+            _KIND_ORDER.get(str(row[1] or ""), len(_KIND_ORDER)),
+            int(row[2]) if isinstance(row[2], int) else 0,
+            str(row[3] or ""),
+        ),
+    )
+
+    terms_by_document: dict[str, list[str]] = {}
+    for row in ordered:
+        document_id = str(row[0] or "").strip()
+        if not document_id:
+            continue
+        teaches = row[4] if isinstance(row[4], list) else []
+        for item in teaches:
+            if not isinstance(item, dict) or str(item.get("kind") or "") != "concept":
+                continue
+            name = str(item.get("label") or item.get("ref") or "").strip()
+            if not name or is_symbol_concept_name(name):
+                continue
+            bucket = terms_by_document.setdefault(document_id, [])
+            if name not in bucket:
+                bucket.append(name)
+    return terms_by_document
 
 
 def candidate_keys(candidates: list[UnitCandidate]) -> list[str]:

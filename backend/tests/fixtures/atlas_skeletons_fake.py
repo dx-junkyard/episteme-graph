@@ -165,6 +165,11 @@ class AtlasSkeletonTableFake:
             r = drafts[0]
             return FakeResult([(r["content"], r["revision"], r["generated_by"], "")])
 
+        if sql.startswith("SELECT content FROM") and "ORDER BY created_at ASC" in sql:
+            # atlas_store.load_frozen_history (ノード版間対応 NC8): 古い順に全凍結版。
+            rows = sorted(self._frozen(domain_key), key=lambda r: (r["seq"], r["version"]))
+            return FakeResult([(r["content"],) for r in rows])
+
         if sql.startswith("SELECT content FROM"):
             frozen = self._frozen(domain_key)
             if not frozen:

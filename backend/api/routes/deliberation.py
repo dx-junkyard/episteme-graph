@@ -109,6 +109,7 @@ from core.llm_worker.history import window_history
 from core.deliberation.schema import (
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
+    DIALOGUE_SESSION_ELEMENT_TYPES,
     IDENTITY_LINKABLE_ELEMENT_TYPES,
     IDENTITY_LINK_STATUS_CONFIRMED,
     IDENTITY_LINK_STATUS_REJECTED,
@@ -125,6 +126,9 @@ from core.assistant_context import (
 # （上限は core 側の定数が正本 = SA7）。
 from schemas import ScreenContextPayload
 from core.schema import AUDIT_ENTITY_DELIBERATION
+from core.library.schema import (
+    JUSTIFICATION_MANUAL as MAPPING_JUSTIFICATION_MANUAL,
+)
 from routes.theory_components import _ensure_document_editable, _ensure_document_viewable
 from services import record_review_event, resolve_document_access
 
@@ -582,6 +586,8 @@ def create_identity_link(
         evidence=body.evidence,
         reason=body.reason,
         created_by=current_user.get("id"),
+        # KR4（概念レジストリ §4.6）: W層 UI からの手動作成は教員の判断そのもの。
+        mapping_justification=MAPPING_JUSTIFICATION_MANUAL,
     )
     record_review_event(
         AUDIT_ENTITY_DELIBERATION,
@@ -938,6 +944,15 @@ def create_deliberation_session(
         raise HTTPException(
             status_code=422,
             detail=f"scope {body.scope!r} does not match the resolved element (scope={ref.scope!r})",
+        )
+    if ref.element_type not in DIALOGUE_SESSION_ELEMENT_TYPES:
+        # deliberation_sessions.element_type の CHECK（migration 049 / 064 / 075）と同じ
+        # 集合をコード側でも fail-closed に強制する。概念レジストリが同一性リンクの
+        # source として足した ``symbol`` は W層モーダルの対象ではない（§4.7 の非スコープ）
+        # ので、DB エラーで 500 になる前に事実文の 422 へ倒す。
+        raise HTTPException(
+            status_code=422,
+            detail="この要素では対話セッションを開始できません",
         )
     if ref.scope == SCOPE_DOCUMENT:
         _ensure_document_viewable(ref.document_id or "", current_user)

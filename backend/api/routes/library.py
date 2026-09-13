@@ -23,6 +23,7 @@ from typing import Any
 
 from fastapi import APIRouter, Body, Depends, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy import text as sa_text
 from sqlalchemy.exc import IntegrityError
 
 import services
@@ -30,10 +31,15 @@ from dependencies import _require_teacher
 
 from core.schema import AUDIT_ENTITY_LIBRARY_ENTRY
 from core.deliberation import identity_links as _identity_links
+from core import atlas_correspondence
+from core import atlas_store
+from core.library import atlas_links as library_atlas_links
+from core.library import registry as library_registry
 from core.library import schema as library_schema
 from core.library import search as library_search
 from core.library import store as library_store
 from core.library.store import LibraryConflictError, LibraryNotFoundError, LibraryRetiredError
+from core.postgres import get_session
 from core.status import cross_layer_notify
 
 logger = logging.getLogger(__name__)
@@ -94,6 +100,44 @@ class SimilarEntriesRequest(BaseModel):
     text: str
     entry_type: str | None = None
     top_k: int = 5
+
+
+# -- 概念レジストリ（Phase 3 / migration 082。concept_registry_design.md §9）-----------
+
+
+class EntryReviewRequest(BaseModel):
+    """概念（候補）の確定 / 見送り / 差し戻し。``dismissed`` は理由必須（KR7）。"""
+
+    status: str
+    review_note: str = ""
+
+
+class LabelCreateRequest(BaseModel):
+    """別名（alternate）・隠しラベル（hidden）の追加。手動追加は manual_curation。"""
+
+    kind: str
+    label: str
+    language: str = ""
+
+
+class LabelDismissRequest(BaseModel):
+    review_note: str = ""
+
+
+class RelationCreateRequest(BaseModel):
+    """概念どうしの関係候補の手動作成（KR3: リンクであってマージではない）。"""
+
+    subject_entry_id: str
+    object_entry_id: str
+    kind: str
+    reason: str = ""
+
+
+class DecideRequest(BaseModel):
+    """関係 / node リンクの判断（``confirmed`` / ``dismissed`` / ``candidate``）。"""
+
+    status: str
+    review_note: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -174,11 +218,21 @@ def list_entries(
     entry_type: str | None = None,
     q: str | None = None,
     include_retired: bool = False,
+    include_candidates: bool = False,
     current_user: dict = Depends(_require_teacher),
 ):
+    """エントリ一覧。
+
+    既定は確定済み（``review_status='confirmed'``）のみで後方互換。
+    ``include_candidates=true`` で AI が立てた候補・見送り済みも返す（§4.2）。
+    """
     try:
         entries = library_store.list_entries(
-            domain_key=domain_key, entry_type=entry_type, q=q, include_retired=include_retired
+            domain_key=domain_key,
+            entry_type=entry_type,
+            q=q,
+            include_retired=include_retired,
+            include_candidates=include_candidates,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -325,6 +379,10 @@ def freeze_entry(
     except LibraryRetiredError as exc:
         # N29: retired は読み取り専用（凍結には restore が先）。事実文をそのまま返す。
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except LibraryConflictError as exc:
+        # KR2: 未確定（candidate）・見送り（dismissed）の概念は凍結できない。凍結版は
+        # パイプライン retrieval と学習者に届く面なので、ここが教員確定の弁になる。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except IntegrityError as exc:
         # UNIQUE(entry_id, version_no) 競合 = 同時に別の凍結が同じ次版番号を確保した。
         # 素の 500 で漏らさず、draft 更新の楽観ロック衝突（409）と同じ流儀で返す。
@@ -440,3 +498,488 @@ def find_similar_entries(payload: SimilarEntriesRequest, current_user: dict = De
         top_k=payload.top_k,
     )
     return {"entries": entries}
+
+
+# ---------------------------------------------------------------------------
+# 概念レジストリ（Phase 3 / migration 082）— 確定・ラベル・関係・地図との対応
+#
+# 正本: docs/features/concept_registry_design.md §9（不変条項 KR1〜KR10 は §2）。
+# すべて TEACHER 以上（KR10）。行削除ルートは無い（KR7）— 見送りは状態遷移で表す。
+# 監査は既存 AUDIT_ENTITY_LIBRARY_ENTRY を流用する（新 entity_type を作らない・§11）。
+# 数値（cosine / confidence / 候補数）は返さない（KR6）。
+# ---------------------------------------------------------------------------
+
+
+def _registry_audit(**kwargs: Any) -> None:
+    """``core/library/registry.py`` が注入で呼ぶ監査記帳（core は services を知らない）。"""
+    _audit(
+        str(kwargs.get("entity_type") or AUDIT_ENTITY_LIBRARY_ENTRY),
+        str(kwargs.get("entity_id") or ""),
+        str(kwargs.get("old_status") or ""),
+        str(kwargs.get("new_status") or ""),
+        kwargs.get("actor_id"),
+        {
+            **dict(kwargs.get("metadata") or {}),
+            "action": kwargs.get("action"),
+            "reason": kwargs.get("reason") or "",
+        },
+    )
+
+
+@router.post("/entries/{entry_id}/review")
+def review_entry(
+    entry_id: str,
+    payload: EntryReviewRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """概念（候補）を確定 / 見送り / 差し戻す（KR2: 確定は人間のみ）。
+
+    ``confirmed`` になって初めて凍結でき、凍結して初めてパイプライン retrieval と
+    学習者に届く。``dismissed`` は理由必須（空は 422）。``status='retired'``（公開を
+    止める）とは別軸なので、この操作では ``status`` 列は変わらない。
+    """
+    uid = _uid(current_user)
+    _get_entry_or_404(entry_id)
+    try:
+        entry = library_registry.decide_entry_review(
+            entry_id,
+            status=payload.status,
+            actor_id=str(uid or ""),
+            review_note=payload.review_note,
+            record_audit=_registry_audit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if entry is None:
+        raise HTTPException(status_code=404, detail="library entry not found")
+    return {"entry": entry}
+
+
+@router.get("/entries/{entry_id}/labels")
+def list_entry_labels(
+    entry_id: str,
+    include_dismissed: bool = False,
+    current_user: dict = Depends(_require_teacher),
+):
+    """別名（alternate）・隠しラベル（hidden）の一覧。
+
+    ``preferred`` は ``library_entries.name`` が正本なので行として存在しない（§4.3）。
+    """
+    _get_entry_or_404(entry_id)
+    return {
+        "labels": library_registry.list_labels(
+            entry_id, include_dismissed=include_dismissed
+        )
+    }
+
+
+@router.post("/entries/{entry_id}/labels", status_code=201)
+def add_entry_label(
+    entry_id: str,
+    payload: LabelCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """別名・隠しラベルを1件足す。
+
+    ``hidden`` は OCR ノイズ・旧表記を**捨てずに検索から隠す**器（SKOS hiddenLabel・KR7）。
+    """
+    uid = _uid(current_user)
+    _get_entry_or_404(entry_id)
+    try:
+        label = library_registry.add_label(
+            entry_id,
+            kind=payload.kind,
+            label=payload.label,
+            language=payload.language,
+            actor_id=str(uid or ""),
+            record_audit=_registry_audit,
+        )
+    except library_registry.RegistryNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"label": label}
+
+
+@router.post("/entries/{entry_id}/labels/{label_id}/dismiss")
+def dismiss_entry_label(
+    entry_id: str,
+    label_id: str,
+    payload: LabelDismissRequest = Body(default=LabelDismissRequest()),
+    current_user: dict = Depends(_require_teacher),
+):
+    """ラベルを見送る（理由必須・**行は消さない** — KR7）。"""
+    uid = _uid(current_user)
+    _get_entry_or_404(entry_id)
+    try:
+        label = library_registry.dismiss_label(
+            label_id,
+            actor_id=str(uid or ""),
+            review_note=payload.review_note,
+            record_audit=_registry_audit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if label is None or label["entry_id"] != entry_id:
+        raise HTTPException(status_code=404, detail="label not found")
+    return {"label": label}
+
+
+def _entry_names(entry_ids: list[str]) -> dict[str, str]:
+    """関係の端点に表示名を添えるための名前引き（内部 ID を画面に出さないため）。"""
+    names: dict[str, str] = {}
+    for entry_id in {e for e in entry_ids if e}:
+        entry = library_store.get_entry(entry_id)
+        if entry:
+            names[entry_id] = entry["name"]
+    return names
+
+
+@router.get("/relations")
+def list_relations(
+    entry_id: str | None = None,
+    include_dismissed: bool = False,
+    current_user: dict = Depends(_require_teacher),
+):
+    """関係（broader / related / exact_match / close_match）の一覧。
+
+    **リンクであってマージではない**（KR3）— 2つの概念は並存したままで、
+    ``exact_match`` は「同じと言える」という記録にすぎない。
+    """
+    relations = library_registry.list_relations(
+        entry_id=entry_id, include_dismissed=include_dismissed
+    )
+    names = _entry_names(
+        [r["subject_entry_id"] for r in relations] + [r["object_entry_id"] for r in relations]
+    )
+    for relation in relations:
+        relation["subject_name"] = names.get(relation["subject_entry_id"], "")
+        relation["object_name"] = names.get(relation["object_entry_id"], "")
+    return {"relations": relations}
+
+
+@router.post("/relations", status_code=201)
+def create_relation(
+    payload: RelationCreateRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """関係を手動で1件作る（``manual_curation`` の候補として立つ）。
+
+    教員が作った候補もいったん ``candidate`` で、確定は ``/relations/{id}/decide``
+    での明示操作（KR2: 生成と確定を分ける）。
+    """
+    uid = _uid(current_user)
+    for entry_id in (payload.subject_entry_id, payload.object_entry_id):
+        _get_entry_or_404(entry_id)
+    try:
+        relation = library_registry.create_relation(
+            subject_entry_id=payload.subject_entry_id,
+            object_entry_id=payload.object_entry_id,
+            kind=payload.kind,
+            mapping_justification=library_schema.JUSTIFICATION_MANUAL,
+            reason=payload.reason,
+            actor_id=str(uid or ""),
+            record_audit=_registry_audit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {"relation": relation}
+
+
+@router.post("/relations/{relation_id}/decide")
+def decide_relation(
+    relation_id: str,
+    payload: DecideRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """関係の候補を確定 / 見送り / 差し戻す（見送りは理由必須）。"""
+    uid = _uid(current_user)
+    try:
+        relation = library_registry.decide_relation(
+            relation_id,
+            status=payload.status,
+            actor_id=str(uid or ""),
+            review_note=payload.review_note,
+            record_audit=_registry_audit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if relation is None:
+        raise HTTPException(status_code=404, detail="relation not found")
+    return {"relation": relation}
+
+
+@router.get("/atlas-links")
+def list_atlas_links(
+    domain_key: str | None = None,
+    entry_id: str | None = None,
+    include_dismissed: bool = False,
+    current_user: dict = Depends(_require_teacher),
+):
+    """概念 ↔ 分野の地図（骨格 node）の対応一覧（**版非依存** = KR9）。
+
+    リンクは骨格の版を持たないので、読み時に現行凍結版へ node が実在するかだけを
+    ``node_in_current_version`` として添える（版が変わっても行は消さない）。骨格が
+    読めないときは ``None``（「分からない」を false と偽らない）。
+    """
+    links = library_registry.list_node_links(
+        domain_key=domain_key, entry_id=entry_id, include_dismissed=include_dismissed
+    )
+    skeleton = None
+    version = ""
+    resolve = None
+    if domain_key:
+        session = get_session()
+        try:
+            skeleton = atlas_store.load_frozen_skeleton(session, domain_key)
+        except Exception:  # noqa: BLE001 — 骨格が読めなくても一覧は返す（fail-soft）
+            logger.debug("frozen skeleton lookup failed for %s", domain_key, exc_info=True)
+            skeleton = None
+        try:
+            # 骨格の改版で id が振り直されたリンクも現行版へ読み替える
+            # （ノード版間対応 §6・NC8。リンク行は書き換えない）。
+            resolve = atlas_correspondence.build_node_resolver(
+                atlas_store.load_frozen_history(session, domain_key)
+            ).resolve
+        except Exception:  # noqa: BLE001
+            logger.debug("frozen history lookup failed for %s", domain_key, exc_info=True)
+            resolve = None
+        finally:
+            session.close()
+        version = str(getattr(skeleton, "version", "") or "")
+    links = library_registry.annotate_node_links(links, skeleton, resolve=resolve)
+    names = _entry_names([link["entry_id"] for link in links])
+    for link in links:
+        link["entry_name"] = names.get(link["entry_id"], "")
+    return {"links": links, "skeleton_version": version}
+
+
+@router.post("/atlas-links/{link_id}/decide")
+def decide_atlas_link(
+    link_id: str,
+    payload: DecideRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """地図との対応候補を確定 / 見送り / 差し戻す。
+
+    確定しても骨格（``atlas_skeletons``）は変わらない（KR2 / LS7 / AB4: 対応の記録で
+    あって座標系の書き換えではない）。
+    """
+    uid = _uid(current_user)
+    try:
+        link = library_registry.decide_node_link(
+            link_id,
+            status=payload.status,
+            actor_id=str(uid or ""),
+            review_note=payload.review_note,
+            record_audit=_registry_audit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if link is None:
+        raise HTTPException(status_code=404, detail="atlas link not found")
+    return {"link": link}
+
+
+class AtlasLinkDeriveRequest(BaseModel):
+    """地図との対応候補の導出（§6.1）。分野キーだけを受ける。"""
+
+    domain_key: str
+
+
+@router.post("/atlas-links/derive")
+def derive_atlas_links(
+    payload: AtlasLinkDeriveRequest,
+    current_user: dict = Depends(_require_teacher),
+):
+    """概念 ↔ 分野の地図 node の対応候補を**決定論的に**導出する（§6.1）。
+
+    入力は現行凍結骨格 / **保存済み**アンカーベクトル / 確定済みエントリとその凍結版
+    embedding / ラベル表 / 教員確定別名だけで、**embedding API も LLM も呼ばない**
+    （KR5）。書き込みは候補行（``review_status='candidate'`` のエントリと
+    ``status='candidate'`` の node リンク）の upsert のみで、``atlas_skeletons`` には
+    一切触れない（KR2 / LS7 / AB4）。
+
+    retired なドメインは 409（読み取り専用 — atlas の既存規約と同型）。現行凍結版が
+    無ければ 422（数値なしの事実文）。
+
+    戻り値は §9.1 の ``{candidates, facts}`` + 骨格版。core が返す ``coverage``
+    （母集合と処理数の件数報告）は**載せない** — 教員に件数を見せないため（KR6）。
+    取りこぼしは ``facts`` の事実文が担う。
+    """
+    domain_key = (payload.domain_key or "").strip()
+    if not domain_key:
+        raise HTTPException(status_code=422, detail="分野を指定してください。")
+
+    session = get_session()
+    try:
+        try:
+            lifecycle = atlas_store.domain_lifecycle(session, domain_key)
+        except Exception:  # noqa: BLE001 — lifecycle が読めないときは従来どおり続行
+            logger.debug("domain lifecycle lookup failed for %s", domain_key, exc_info=True)
+            lifecycle = "active"
+        if lifecycle == "retired":
+            raise HTTPException(
+                status_code=409,
+                detail="この分野は使用を終了しています。再開してから対応を導出してください。",
+            )
+        try:
+            result = library_atlas_links.derive_node_link_candidates(
+                session, domain_key=domain_key
+            )
+        except library_atlas_links.SkeletonUnavailableError as exc:
+            session.rollback()
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _audit(
+        AUDIT_ENTITY_LIBRARY_ENTRY,
+        domain_key,
+        "",
+        "derived",
+        _uid(current_user),
+        {
+            "action": library_schema.AUDIT_ACTION_NODE_LINK_DERIVE,
+            "domain_key": domain_key,
+            "skeleton_version": result.get("skeleton_version", ""),
+        },
+    )
+    return {
+        "candidates": result.get("candidates", []),
+        "skeleton_version": result.get("skeleton_version", ""),
+        "facts": result.get("facts", []),
+    }
+
+
+def _document_titles(document_ids: list[str]) -> dict[str, str]:
+    """``{document_id: title}``（内部 ID を画面に出さないための名前引き）。"""
+    keys = [d for d in {str(d or "") for d in document_ids} if d]
+    if not keys:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text, COALESCE(title, '') FROM documents "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": keys},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — タイトルが引けなくても一覧は返す
+        logger.debug("document title lookup failed", exc_info=True)
+        return {}
+    finally:
+        session.close()
+    return {str(row[0]): str(row[1] or "") for row in rows}
+
+
+@router.get("/identity-candidates")
+def list_identity_candidates(
+    domain_key: str | None = None,
+    include_dismissed: bool = False,
+    current_user: dict = Depends(_require_teacher),
+):
+    """同一性候補のレビューキュー（§6.2 / §9.1）。
+
+    candidate なエントリ（``include_dismissed=true`` で見送り済みも）ごとに、そこへ
+    張られた同一性リンクを集める。**閲覧不可 document 由来のリンクは除外**し、隠した
+    件数を ``hidden_count`` として正直に返す（KR10 / W-β と同型 — 件数は「隠し方の
+    事実」であって指標ではない）。
+
+    リンクの確定は既存 ``POST /api/admin/deliberation/identity-links/{id}/confirm|reject``
+    を再利用する（新設しない）。エントリを確定してもリンクは自動確定しない
+    （1 リンク = 1 判断 = KR2）。
+    """
+    uid = str(_uid(current_user) or "")
+    statuses = [library_schema.REVIEW_STATUS_CANDIDATE]
+    if include_dismissed:
+        statuses.append(library_schema.REVIEW_STATUS_DISMISSED)
+
+    entries = [
+        entry
+        for entry in library_store.list_entries(
+            domain_key=domain_key, include_retired=True, include_candidates=True
+        )
+        if entry.get("review_status") in statuses
+    ]
+
+    access_cache: dict[str, bool] = {}
+
+    def _can_view(document_id: str) -> bool:
+        if not document_id:
+            return False
+        if document_id not in access_cache:
+            try:
+                access_cache[document_id] = bool(
+                    services.resolve_document_access(uid, document_id).can_view
+                )
+            except Exception:  # noqa: BLE001 — 判定できないものは見せない（fail-closed）
+                logger.debug("document access check failed", exc_info=True)
+                access_cache[document_id] = False
+        return access_cache[document_id]
+
+    candidates: list[dict] = []
+    for entry in entries:
+        links = _identity_links.list_for_shared_part(entry["id"])
+        visible: list[dict] = []
+        hidden = 0
+        for link in links:
+            document_id = str(link.get("instance_document_id") or "")
+            if not _can_view(document_id):
+                hidden += 1
+                continue
+            visible.append(link)
+        titles = _document_titles([l.get("instance_document_id") for l in visible])
+        supporting_titles: list[str] = []
+        items: list[dict] = []
+        for link in visible:
+            document_id = str(link.get("instance_document_id") or "")
+            title = titles.get(document_id, "")
+            if title and title not in supporting_titles:
+                supporting_titles.append(title)
+            items.append(
+                {
+                    "link_id": link["id"],
+                    "instance": {
+                        "element_type": link.get("instance_element_type") or "",
+                        "element_id": link.get("instance_element_id") or "",
+                        "document_id": document_id,
+                    },
+                    "document_title": title,
+                    "local_expression": link.get("local_expression") or {},
+                    "status": link.get("status") or "",
+                    "mapping_justification": link.get("mapping_justification"),
+                }
+            )
+        if not items and hidden == 0 and not include_dismissed:
+            # リンクがまだ 1 本も無い候補（entry だけ先にできた状態）は出さない
+            # （教員が判断する材料が無いため）。
+            continue
+        candidates.append(
+            {
+                "entry": {
+                    "id": entry["id"],
+                    "name": entry["name"],
+                    "entry_type": entry["entry_type"],
+                    "review_status": entry["review_status"],
+                    "domain_key": entry["domain_key"],
+                    "mapping_justification": entry.get("mapping_justification"),
+                },
+                "links": items,
+                "supporting_titles": supporting_titles,
+                "hidden_count": hidden,
+            }
+        )
+
+    facts: list[str] = []
+    if not candidates:
+        facts.append("確認をお待ちしている同一性の候補はありません。")
+    return {"candidates": candidates, "facts": facts}

@@ -195,7 +195,24 @@ class TestAdminUiAnchorsModule:
         # + 2026-09-10: materials.upload-domain（教材アップロードの「分野」1行。既定は
         #   「指定しない」= 分野中立の解析）/ materials.reanalyze-domain（再解析モーダルの
         #   「分野」区画。前回値の事実文 + この解析だけの変更。六つのレンズ調査 提案 C1）。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 331
+        # + 2026-09-13: 概念レジストリ（migration 082）の6件 —
+        #   knowledge-library.identity-candidates（同一性の候補の区画）/
+        #   knowledge-library.identity-derive（分野一覧の「地図との対応を導出」）/
+        #   knowledge-library.entry-review（候補 / 確定 / 見送りの切り替え）/
+        #   knowledge-library.labels（別名・隠しラベル）/
+        #   knowledge-library.relations（概念間の関係）/
+        #   knowledge-library.atlas-links（分野の地図との対応）。
+        #   docs/features/concept_registry_design.md §10。
+        # + 2026-09-13: materials.reanalyze-domain-fit（再解析モーダルの「分野の適合」
+        #   区画。形の宣言 shape.json とこの論文の解析結果の事実文・数値なし。
+        #   docs/features/concept_registry_design.md §8 / P3-7）。
+        # + 2026-09-13: 分野マップのノード版間対応（K-6）の2件 —
+        #   atlas.freeze-correspondence（凍結の影響モーダル内「前の版のノードとの
+        #    対応」区画。候補のチェックは既定オフ = NC3）/
+        #   atlas.freeze-correspondence-manual（候補が見つからなかった項目に手で
+        #    対応づける select）。
+        #   docs/features/atlas_node_correspondence_design.md §7。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 340
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""

@@ -99,6 +99,48 @@ class TestFrontEndMirrorPointsAtTheServer:
             assert "test_library_vocab_mirror.py" in src, filename
 
 
+#: 概念レジストリ（migration 082）の語彙表。サーバ `core/library/schema.py` の属性名 →
+#: (admin.js の var 名, 語彙集合の属性名)。フロントに独自の訳語表を作らないための固定。
+_REGISTRY_TABLES = {
+    "ENTRY_TYPE_LABELS": ("_libraryEntryTypeLabels", "LIBRARY_ENTRY_TYPES"),
+    "LABEL_KIND_LABELS": ("_libraryLabelKindLabels", "CONCEPT_LABEL_KINDS"),
+    "RELATION_KIND_LABELS": ("_libraryRelationKindLabels", "CONCEPT_RELATION_KINDS"),
+    "JUSTIFICATION_LABELS": ("_libraryJustificationLabels", "MAPPING_JUSTIFICATIONS"),
+    "REVIEW_STATUS_LABELS": ("_libraryReviewStatusLabels", "CONCEPT_REVIEW_STATUSES"),
+}
+
+
+class TestConceptRegistryVocabulary:
+    """概念レジストリ5表の Python ⇄ JS ミラー（KR6: 数値を見せない・語彙だけを描く）。
+
+    `standardization_status` と同じ規律で、サーバを正本にフロントは逐語ミラーにする。
+    片側だけを直したらここが落ちる。
+    """
+
+    def test_server_labels_cover_exactly_each_vocabulary(self):
+        for labels_attr, (_js_var, vocab_attr) in _REGISTRY_TABLES.items():
+            labels = getattr(library_schema, labels_attr)
+            vocab = getattr(library_schema, vocab_attr)
+            assert set(labels) == set(vocab), labels_attr + " と " + vocab_attr + " が不一致"
+
+    def test_no_label_is_blank(self):
+        for labels_attr in _REGISTRY_TABLES:
+            for key, text in getattr(library_schema, labels_attr).items():
+                assert text.strip(), labels_attr + "::" + key
+
+    def test_every_js_table_matches_the_server_canon(self):
+        for labels_attr, (js_var, _vocab_attr) in _REGISTRY_TABLES.items():
+            assert _js_table("admin.js", js_var) == dict(
+                getattr(library_schema, labels_attr)
+            ), "admin.js::" + js_var + " の Python ⇄ JS が不一致（" + labels_attr + "）"
+
+    def test_justification_labels_do_not_leak_numbers_or_scores(self):
+        """KR6: 「なぜ同じと言えたか」は根拠の種類であって一致度ではない。"""
+        for text in library_schema.JUSTIFICATION_LABELS.values():
+            for forbidden in ("cosine", "スコア", "確信", "％", "%"):
+                assert forbidden not in text, text
+
+
 class TestAdminBadgeKeepsTheDroppedGloss:
     """admin.js の旧ラベルが括弧で持っていた語釈を捨てない（P4）。
 

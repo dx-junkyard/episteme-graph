@@ -46,6 +46,9 @@ TABLE_UNIT_KINDS = "knowledge_unit_kinds"
 VIEW_CLAIMS_LIVE = "theory_claims_live"
 VIEW_COMPONENTS_LIVE = "theory_components_live"
 VIEW_LEARNING_UNITS_LIVE = "learning_units_live"
+#: 記号の live ビュー（Phase 3 / migration 082。concept_registry_design.md §4.8）。
+#: 学習者向けの「直前の定義」と同一性候補の導出はこのビューを読む。
+VIEW_SYMBOLS_LIVE = "knowledge_symbols_live"
 
 #: learning_units.review_status の既定値（人間が触っていない = 候補）。
 DEFAULT_UNIT_REVIEW_STATUS = "candidate"

@@ -166,6 +166,32 @@ def is_valid_provenance(value: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# mapping_justification（概念レジストリ KR4 / migration 082 §4.6）
+# ---------------------------------------------------------------------------
+#
+# 「なぜここに置けたか」。生成手段（provenance）から決定論的に導く。写像は migration
+# 082 のバックフィル UPDATE と**同じ規則**でなければならない（ガードレールが固定する）。
+# 語彙の正本は core/schema.py::MAPPING_JUSTIFICATIONS。
+
+JUSTIFICATION_MANUAL = "manual_curation"
+
+_JUSTIFICATION_BY_PROVENANCE: dict[str, str] = {
+    PROVENANCE_LLM: "llm_candidate",
+    PROVENANCE_HUMAN: JUSTIFICATION_MANUAL,
+    PROVENANCE_DETERMINISTIC: "lexical_match",
+}
+
+
+def justification_for_provenance(provenance: str) -> str | None:
+    """生成手段から ``mapping_justification`` を導く（未知は ``None`` = 記録しない）。
+
+    KR4「推測で埋めない」: 写像に無い値は黙って ``manual_curation`` に倒さず、
+    記録なし（NULL）のままにする。
+    """
+    return _JUSTIFICATION_BY_PROVENANCE.get(str(provenance or "").strip())
+
+
+# ---------------------------------------------------------------------------
 # ノード種別（骨格の region / concept）
 # ---------------------------------------------------------------------------
 
@@ -278,6 +304,8 @@ __all__ = [
     "is_valid_node_kind",
     "is_valid_perspective",
     "is_valid_provenance",
+    "justification_for_provenance",
+    "JUSTIFICATION_MANUAL",
     "is_valid_status",
     "normalize_weight",
     "perspective_label",

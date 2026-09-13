@@ -36,6 +36,7 @@ from typing import Any, Iterable, Mapping, Optional, Sequence
 from sqlalchemy import text as sa_text
 
 from core.atlas_vectors import schema
+from core.schema import MAPPING_JUSTIFICATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -431,6 +432,7 @@ def upsert_alias(
     source: str = "manual",
     evidence: Optional[Mapping[str, Any]] = None,
     user_id: str,
+    mapping_justification: str = "manual_curation",
 ) -> dict:
     """別名を登録する（既存 ``dismissed`` 行があれば ``confirmed`` へ復帰）。
 
@@ -443,6 +445,11 @@ def upsert_alias(
     - ``alias`` の正規化結果が空（空白のみ等）
     - ``user_id`` が空（帰属必須 — 匿名の確定操作を作らない）
     - ``source`` が :data:`schema.ALIAS_SOURCES` の語彙外
+    - ``mapping_justification`` が ``core.schema.MAPPING_JUSTIFICATIONS`` の語彙外
+
+    ``mapping_justification``（概念レジストリ KR4・migration 082）は「なぜ同じと
+    言えたか」の記録。別名は教員が確定したものしか行にならない（VA6）ので既定は
+    ``manual_curation``。``source``（どの画面から登録したか）とは別の軸である。
 
     ``node_id`` が現行凍結骨格に実在するかの検査は**呼び出し側（route 層）の責務**
     （骨格の読みは ``atlas_store`` 経由であり、store 層は骨格を知らない）。
@@ -461,6 +468,9 @@ def upsert_alias(
         raise ValueError("user_id is required")
     if not schema.is_valid_alias_source(source):
         raise ValueError(f"invalid alias source: {source!r}")
+    justification = _clean(mapping_justification)
+    if justification and justification not in MAPPING_JUSTIFICATIONS:
+        raise ValueError(f"invalid mapping_justification: {mapping_justification!r}")
     normalized = schema.normalize_label(text)
     if not normalized:
         raise ValueError("alias normalizes to an empty string")
@@ -470,16 +480,21 @@ def upsert_alias(
             f"""
             INSERT INTO atlas_anchor_aliases (
                 domain_key, node_id, alias, normalized_alias, status, source,
-                evidence, created_by, decided_by, created_at, updated_at
+                evidence, created_by, decided_by, mapping_justification,
+                created_at, updated_at
             ) VALUES (
                 :domain_key, :node_id, :alias, :normalized_alias, 'confirmed', :source,
                 CAST(:evidence AS jsonb), CAST(:user_id AS uuid), CAST(:user_id AS uuid),
+                NULLIF(:mapping_justification, ''),
                 now(), now()
             )
             ON CONFLICT (domain_key, node_id, normalized_alias) DO UPDATE
                SET status = 'confirmed',
                    alias = EXCLUDED.alias,
                    source = EXCLUDED.source,
+                   mapping_justification = COALESCE(
+                        EXCLUDED.mapping_justification,
+                        atlas_anchor_aliases.mapping_justification),
                    evidence = CASE WHEN EXCLUDED.evidence <> '{{}}'::jsonb
                         THEN EXCLUDED.evidence ELSE atlas_anchor_aliases.evidence END,
                    decided_by = EXCLUDED.decided_by,
@@ -495,6 +510,7 @@ def upsert_alias(
             "source": str(source),
             "evidence": json.dumps(dict(evidence or {}), ensure_ascii=False),
             "user_id": actor,
+            "mapping_justification": justification,
         },
     ).fetchone()
     return _alias_row_to_dict(row)

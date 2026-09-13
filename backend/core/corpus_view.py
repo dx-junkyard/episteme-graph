@@ -37,6 +37,7 @@ from typing import Any, Iterable, Sequence
 
 from sqlalchemy import text as sa_text
 
+from core import atlas_correspondence
 from core import atlas_store
 from core.atlas_gaps import schema as gap_schema
 from core.landscape import schema as landscape_schema
@@ -219,6 +220,34 @@ def list_corpus_domains(
 # ---------------------------------------------------------------------------
 
 
+def _node_resolve(session: Any, domain_key: str):
+    """旧 node_id → 現行 node_id の読み替え（ノード版間対応 NC5 / NC8）。
+
+    全凍結版の ``id_migrations`` を版順に辿るだけで、``landscape_placements`` の
+    ``node_id`` は書き換えない。履歴が読めなければ恒等写像へ縮退する（fail-soft）。
+    """
+    try:
+        history = atlas_store.load_frozen_history(session, domain_key)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "corpus view: frozen history unavailable for %s (non-fatal)",
+            domain_key, exc_info=True,
+        )
+        # 失敗した文でトランザクションが中断した場合に続きの読み取りを救う
+        # （本モジュールは読み取り専用なので巻き戻して失うものは無い）。
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            logger.debug("corpus view: rollback failed (non-fatal)", exc_info=True)
+        history = []
+    resolver = atlas_correspondence.build_node_resolver(history)
+
+    def _resolve(node_id: str) -> str:
+        return str(resolver.resolve(node_id).get("current_node_id") or "") or node_id
+
+    return _resolve
+
+
 def _visible_placements(session: Any, domain_key: str, doc_ids: Sequence[str]) -> list:
     if not doc_ids:
         return []
@@ -229,7 +258,8 @@ def _visible_placements(session: Any, domain_key: str, doc_ids: Sequence[str]) -
                    COALESCE(NULLIF(d.title, ''), NULLIF(d.filename, ''), '') AS title,
                    p.node_id,
                    p.perspective,
-                   p.status
+                   p.status,
+                   COALESCE(p.skeleton_version, '') AS skeleton_version
               FROM landscape_placements p
               JOIN documents d ON d.id = p.document_id
              WHERE p.domain_key = :domain_key
@@ -342,11 +372,13 @@ def build_corpus_landscape(
     （描画資産を二重管理しない）。
 
     Returns:
-        ``{domain_key, skeleton_version, placements, fringe, outer}``。
+        ``{domain_key, skeleton_version, placements, fringe, outer, facts}``。
 
         - ``placements``: ``{document_id, document_title, anchor_node_id, node_label,
           region_id, perspective, perspective_label, status, source_label}``。
-          現行骨格に無い ``node_id`` の配置は落とす（LS6 と同じ fail-closed）。
+          旧版の ``node_id`` は対応表（``id_migrations``）で現行版へ読み替え、それでも
+          現行骨格に無い配置は落とす（LS6 と同じ fail-closed）。落とした事実は
+          ``facts`` の一行に残す（黙って消さない）。
           重み・確からしさ・claim_id は構造的に載らない（CR3）。
         - ``fringe``: 領域単位の縁（:func:`_build_fringe`）。
         - ``outer``: 外の輪（:func:`_build_outer`）。無ければ ``None``。
@@ -358,13 +390,20 @@ def build_corpus_landscape(
     if skeleton is None:
         return None
     nodes, regions = _skeleton_index(skeleton)
+    skeleton_version = _clean(getattr(skeleton, "version", ""))
+    resolve = _node_resolve(session, key)
 
     doc_ids = _visible_ids(visible_doc_ids)
     placements: list[dict] = []
+    unmapped_versions: set[str] = set()
     for row in _visible_placements(session, key, doc_ids):
         node_id = _clean(row[2])
+        # 旧版の node_id は対応表で現行版へ読み替える（NC5: 行は書き換えない）。
+        node_id = resolve(node_id) or node_id
         info = nodes.get(node_id)
         if info is None:
+            # 読み替えできない配置は地図に置かない。存在だけを事実文で示す（NC6）。
+            unmapped_versions.add(_clean(row[5]) if len(row) > 5 else "")
             continue
         status = _clean(row[4])
         perspective = _clean(row[3])
@@ -385,10 +424,15 @@ def build_corpus_landscape(
 
     return {
         "domain_key": key,
-        "skeleton_version": _clean(getattr(skeleton, "version", "")),
+        "skeleton_version": skeleton_version,
         "placements": placements,
         "fringe": _build_fringe(_visible_gap_signals(session, key, doc_ids), regions),
         "outer": _build_outer(session, key),
+        # 読み替えできなかった配置の事実文（縁の事実文と同じ作法で1行ずつ・件数なし）。
+        "facts": [
+            atlas_correspondence.unmapped_placement_fact(old, skeleton_version)
+            for old in sorted(unmapped_versions)
+        ],
     }
 
 

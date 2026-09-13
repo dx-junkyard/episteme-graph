@@ -2,6 +2,10 @@
 
 [← ドキュメント目次](../README.md)
 
+> **更新注記（2026-09-13）:** §2 に主張の概念接地のフック `_hook_claim_concept_grounding`
+> （`dsl_linking` の直後）を追記し、フック列を 4 件・`_PIPELINE_STEPS` を 34 要素に更新した
+> （正本は `claim_concept_grounding_design.md`）。
+>
 > **更新注記（2026-09-03）:** §2 のフック列を現行の `_PIPELINE_STEPS`（フック 3 件）に合わせ、
 > 種別欄を各行の `llm_kind` / `model_policy` 宣言に合わせて訂正。§4 に restart 時の
 > 欠落 artifact 補完（`stage_outputs.resume.backfilled_stages`）を追記した。
@@ -31,11 +35,11 @@
 
 ---
 
-## 2. パイプライン 29 ステージ
+## 2. パイプライン 30 ステージ
 
-`orchestrator.py` の `_PIPELINE_STEPS` は 32 要素 = **名前付き 29 ステージ**（`PIPELINE_STAGES`
-の 30 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
-`_hook_*` フック 3 件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`。
+`orchestrator.py` の `_PIPELINE_STEPS` は 34 要素 = **名前付き 30 ステージ**（`PIPELINE_STAGES`
+の 31 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
+`_hook_*` フック 4 件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`。
 `report_start` / `finish_target_stage` を持たず、artifact ゲートも通らない）。
 
 種別欄の凡例（正本は `_PIPELINE_STEPS` 各行の `llm_kind` / `model_policy` 宣言）:
@@ -71,6 +75,7 @@
 | 16 | `apparatus_semantics` | **ApparatusSemanticsAgent**（L層）装置・パーツ候補抽出（`analyze_images=true` 時のみ、常に `review_required`。既定は反復照合モード #499） | vision LLM | ApparatusSemanticsResult |
 | 17 | `thesis_reconstruction` | **ThesisReconstructionAgent** 中心命題・支持構造の再構成 | LLM | ThesisReconstructionResult |
 | 18 | `dsl_linking` | **DSLLinkingAgent** Claim/Equation/Thesis → DSL グラフ接続 | LLM | DSLLinkingResult |
+| — | （フック） `_hook_claim_concept_grounding` | 主張の `concepts` に概念層の mention を追加（レジストリ確定ラベル / カートリッジ別名 / DSL ノード名の語境界照合 + DSL の `source_refs.claim_ids` 参照。決定論・LLM 0 回・`concept_assignment_status` は不変） | Det | `claim_object_builder`（再保存）/ `claim_concept_grounding` |
 | 19 | `dsl_embedding` | DSL を pgvector（`document_embeddings`）へ保存（検索用） | Emb | — |
 | 20 | `component_assembly` | **ComponentAssemblyAgent** 再利用可能コンポーネント生成 | LLM | ComponentAssemblyResult |
 | 21 | `component_graph` | **ComponentGraphAgent** 理論操作グラフ構築（ノード生成は決定論、エッジ推論に LLM） | LLM（M層対象外） | ComponentGraphResult |
@@ -82,6 +87,7 @@
 | 27 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
 | 28 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
 | 29 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
+| 30 | `identity_candidates` | 同一性候補の生成（概念レジストリ P3-6。正規化ラベル一致・他 document の live 親 component・**保存済み** `chunks.embedding` の近傍だけを見る決定論。LLM / embedding 0 回・非致命） | Det | `library_entries`（candidate）/ `element_identity_links`（candidate）/ `theory_components.duplicate_candidates` |
 | — | `completed` | ラン完了マーク | — | — |
 
 > **入力の種別**: `source_kind` は `"pdf"` と `"tex_archive"`（arXiv の TeX ソース `.tar.gz`）の
@@ -163,7 +169,9 @@ PDF
 （ガードレール `backend/tests/test_pipeline_coverage_report.py`）。対象は rhetorical_role
 （agent の `summary_stats.coverage` がそのまま落ちる）/ figure_image_extraction / equation_semantics /
 figure_table_semantics / apparatus_semantics / contextual_explanation / discuss_opening /
-landscape_placement。`claim_qualification` は母集合を事実で導けないため未付与（保留）。
+landscape_placement / identity_candidates（母集合 = 当該 document の live 親 component 数。
+`core/library/identity_candidates.py` が組み立てる）。`claim_qualification` は母集合を事実で
+導けないため未付与（保留）。
 resume で artifact を再利用したステージには新規計算しない。
 
 ### artifact の run 選択（2026-09-12 P0-8）

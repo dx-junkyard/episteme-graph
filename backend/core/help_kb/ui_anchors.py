@@ -84,6 +84,9 @@ KNOWN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 誤解メモの3択（是正 F5 / 六つのレンズ 提案3）。右パネル「コンテキスト」タブの
         # 「AI が訂正を提案した箇所（未確認）」カードの操作行。
         "rightpanel.misconception-review",
+        # 記号の「直前の定義」（docs/features/concept_registry_design.md §7 / P3-5）:
+        # 教材の数式の中の記号をタップしたときに出るポップオーバー。
+        "material.symbol-lookup",
     }
 )
 
@@ -181,6 +184,8 @@ UI_ANCHORS: dict[str, str] = {
     "rightpanel.misconception-review": "student/02-student.md#misconception-review",
     # 回答の下の様相の 1 行と「ふつうの質問として聞き直す」（入口統合 Phase 1）。
     "chat.stance-chip": "student/02-student.md#stance-chip",
+    # 数式の中の記号をタップして「直前の定義」を見る（概念レジストリ P3-5）。
+    "material.symbol-lookup": "student/02-student.md#symbol-lookup",
 }
 
 

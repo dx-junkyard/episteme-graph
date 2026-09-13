@@ -195,6 +195,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
 - [分野マップのベクトル係留層（VA層 — アンカー埋め込み・別名レジストリ・着地予測）](features/atlas_vector_anchoring_design.md)
 - [分野マップの関係表示（辺候補レビューと推定の糸）](features/atlas_relation_edges_design.md)
   ・親: [表示原則の討議記録](architecture/field_map_display_principles_2026-08-29.md)
+- [分野マップのノード版間対応（地図を改訂しても論文の位置づけが切れない）](features/atlas_node_correspondence_design.md)
 - [リリース前の確認フロー](features/release_review_flow_design.md)
 
 ### 群5: 疑いと検証
@@ -213,6 +214,8 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[グラフの論文層（フレームに論文を肉付けする層）](features/graph_paper_layer_design.md)
   ／[知識オブジェクト層（構造化成果を stable_key 付きの一級の行にし、再解析を supersede 遷移にする層。知識構造の見直し Phase 1）](features/knowledge_objects_design.md)
   ／[学ぶ単位の一級化（論文の「教える単位」を `learning_units` の行にし、コース topic をその並びにする層。知識構造の見直し Phase 2）](features/learning_units_design.md)
+  ／[概念レジストリ（`library_entries` を軸に、概念を SKOS 語彙でリンクする層。同一性候補・別名・関係・地図との対応。知識構造の見直し Phase 3）](features/concept_registry_design.md)
+  ／[主張の概念接地（主張の `concepts` 欄に分野の言葉を供給する。Phase 3 の追補 K-2。記号は概念マップに出さない）](features/claim_concept_grounding_design.md)
   ／[画面文脈アダプター（AI 対話に「いま見ている画面」を渡す層）](features/assistant_screen_adapter_design.md)
   ／[学習チャットの入口統合（様相はサーバが推定・casual のテキスト入口。**実装済み**）](features/learning_chat_entry_unification_design.md)
   ／[LLM 応答ストリーミング（学習チャットの逐次配信と停止。**Phase 3-a 実装済み**・既定 off）](features/llm_response_streaming_design.md)

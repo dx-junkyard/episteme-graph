@@ -349,6 +349,26 @@
     );
   }
 
+  // ノード版間対応（K-6 / atlas_node_correspondence_design.md §7）のチップ。
+  // node_status が無い（旧サーバ・導出不能）ときは描かない fail-soft。
+  // current は無表示。件数・一致率は出さない（NC6）。
+  var NODE_STATUS_LABELS = {
+    migrated: "前の版から対応づけ",
+    unmapped: "現行版に対応する場所なし",
+  };
+
+  function nodeStatusChipHtml(placement) {
+    var label = NODE_STATUS_LABELS[(placement && placement.node_status) || ""];
+    if (!label) return "";
+    return (
+      '<span class="release-review-node-status" data-node-status="' +
+      esc((placement && placement.node_status) || "") +
+      '" style="font-size:11px;color:var(--color-text-secondary)">' +
+      esc(label) +
+      "</span>"
+    );
+  }
+
   function placementRowHtml(placement) {
     var meta = [];
     if (placement && placement.perspective_label) meta.push(placement.perspective_label);
@@ -370,6 +390,7 @@
       '<span style="font-size:11px;color:var(--color-text-secondary)">' +
       esc(statusLabel(placement)) +
       "</span>" +
+      nodeStatusChipHtml(placement) +
       "</div>";
     if (placement && placement.reason) {
       html +=

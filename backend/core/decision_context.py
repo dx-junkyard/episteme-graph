@@ -48,6 +48,7 @@ __all__ = [
     "ALT_REJECT",
     "ALT_SKIP_STEP",
     "BASIS_ATLAS_BINDING_SAVE",
+    "BASIS_ATLAS_NODE_CORRESPONDENCE",
     "BASIS_ATLAS_SKELETON_FREEZE",
     "BASIS_CLAIM_REVIEW_SINGLE",
     "BASIS_COMPONENT_REVIEW_SINGLE",
@@ -82,6 +83,9 @@ BASIS_ATLAS_BINDING_SAVE = "atlas_binding.save"
 BASIS_DISCOVERY_INGEST_BATCH = "discovery.ingest_batch"
 #: 分野の地図 骨格の凍結（凍結版は不変。修正は次版 — 後戻りが最も効かない確定）。
 BASIS_ATLAS_SKELETON_FREEZE = "atlas_skeleton.freeze"
+#: 凍結時に確定する「前の版のノードとの対応」（ノード版間対応 NC3。凍結の記帳とは別行で、
+#: 提示した候補と実際に版へ載せた対応を分けて残す）。
+BASIS_ATLAS_NODE_CORRESPONDENCE = "atlas_skeleton.node_correspondence"
 #: コースの公開（`PUT /api/admin/courses/{id}/visibility` で public へ。RR ステップ3）。
 BASIS_COURSE_VISIBILITY_PUBLISH = "course_visibility.publish"
 #: コース登録（freeze）= 学ぶ単位（learning_units）の一括確定（learning_units_design.md §7 / P2-5）。
@@ -98,6 +102,7 @@ BASIS_CLAIM_REVIEW_SINGLE = "claim_review.single"
 BASIS_VALUES = (
     BASIS_ATLAS_BINDING_SAVE,
     BASIS_ATLAS_SKELETON_FREEZE,
+    BASIS_ATLAS_NODE_CORRESPONDENCE,
     BASIS_CLAIM_REVIEW_SINGLE,
     BASIS_COMPONENT_REVIEW_SINGLE,
     BASIS_COURSE_REGISTER_UNITS,

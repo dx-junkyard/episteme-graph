@@ -54,6 +54,7 @@ KNOWN_FEATURES = (
     "pipeline:blueprint",
     "pipeline:export_validation",
     "pipeline:persist_claims_components_graph",
+    "pipeline:identity_candidates",
     "pipeline:extractor",
     # --- 学習（routes/learning.py の各チャット経路・音声） ---
     "learning:chat",

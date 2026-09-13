@@ -393,6 +393,16 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("LANDSCAPE_GAP_MAX_PER_DOCUMENT"),
     )
 
+    # --- 概念レジストリ（Phase 3, migration 082） ---
+    # 正本: docs/features/concept_registry_design.md §6.2
+    # 1 document あたりに作る同一性候補（candidate entry + identity link）の上限。
+    # 追加 LLM・追加 embedding は無く（KR5）、超過分は coverage（Phase 0 の共通報告形式）で
+    # 正直に報告する。0 で候補生成を止める。
+    identity_candidates_max_per_document: int = Field(
+        default=20,
+        validation_alias=AliasChoices("IDENTITY_CANDIDATES_MAX_PER_DOCUMENT"),
+    )
+
     # --- 分野マップのベクトル係留層（VA層, migration 074） ---
     # 正本: docs/features/atlas_vector_anchoring_design.md §5
     # アンカーベクトル構築・ギャップ近傍注記の embedding バッチ回数の日次上限

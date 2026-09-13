@@ -35,6 +35,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# 記号判定の正本は A層の P0-3（``knowledge_structure_review_2026-09-12`` §4 Phase 0）。
+# ここで第2の正規表現・第2の閾値を書かない（``claim_concept_grounding_design.md`` CG6）。
+from episteme_graph.agents.component_assembly.schema import is_symbol_like_concept_name
+
 
 # ---------------------------------------------------------------------------
 # Pydantic モデル群（スキーマの正本・カタログ文書化）
@@ -55,6 +59,24 @@ class CoursePrerequisite(BaseModel):
     # ``core/course_prerequisites.py`` が担い、一致しなければ **None のまま**
     # （推測しない）。``name`` は表示用として常に残す（情報を落とさない）。
     topic_id: str | None = None
+
+
+def is_symbol_concept_name(name: object) -> bool:
+    """概念名が記号層に属するか（学習者の概念マップから外す判定）。
+
+    正本: ``docs/features/claim_concept_grounding_design.md`` §8 / CG6。判定は A層
+    :func:`is_symbol_like_concept_name`（P0-3）に委譲し、加えて 1 文字の名前を落とす
+    （設計書 §8 の「+ 1 文字」。``λ`` のような 1 文字は A層の規則でも落ちるが、
+    ``x`` のような 1 文字 ASCII も概念にしない意図をここで明示する）。
+
+    **記号を消す規律ではない**（P0-3 と同じ姿勢）: 概念マップに出さないだけで、
+    除いた名前は ``data.excluded_symbol_concepts`` に残り（CG5）、記号そのものは
+    ``knowledge_symbols`` / symbol_registry が正本として保持する。
+    """
+    token = str(name or "").strip()
+    if len(token) <= 1:
+        return True
+    return is_symbol_like_concept_name(token)
 
 
 #: ``topic.units[].source`` の語彙（learning_units_design.md §6.1）。
@@ -264,6 +286,9 @@ class CourseData(BaseModel):
     # PUT .../atlas-binding/pending のみ。バインド保存（PUT .../atlas-binding）成功時に
     # 自動クリアされる（意思決定がなされたため）。
     atlas_binding_pending: str | None = None
+    # claim_concept_grounding_design.md §8 / CG5・CG6: 概念マップから外した記号名。
+    # 書き手は routes/learning.py::create_course のみ（学習者向け DTO には出ない）。
+    excluded_symbol_concepts: list[str] = Field(default_factory=list)
 
     # --- 読み取り専用（書き手不在）。LLM プロンプト補助情報として読まれるのみ ---
     domain: str | None = None
@@ -446,6 +471,23 @@ def course_focus(data: dict | None) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("course_focus") or "").strip()
+
+
+def excluded_symbol_concepts(data: dict | None) -> list[str]:
+    """``data.excluded_symbol_concepts`` を list[str] で返す（無ければ ``[]``）。
+
+    コース登録時に概念マップから外した記号名（``claim_concept_grounding_design.md``
+    §8 / CG5「情報を落とさない」）。**学習者向け DTO には出さない**
+    （``api/schemas.py::LearningCourseDetail`` はホワイトリストなので、キーを足しても
+    学習者には届かない）。教員が「何が概念として扱われなかったか」を後から辿るための
+    記録で、件数・割合を UI に出す用途では使わない（CG7）。
+    """
+    if not isinstance(data, dict):
+        return []
+    values = data.get("excluded_symbol_concepts")
+    if not isinstance(values, list):
+        return []
+    return [str(v).strip() for v in values if str(v or "").strip()]
 
 
 def course_llm_models(data: dict | None) -> dict:

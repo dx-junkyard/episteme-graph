@@ -672,3 +672,48 @@ LEARNING_UNIT_REVIEW_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "dis
 LEARNING_UNIT_KINDS_FOR_COURSE: tuple[str, ...] = (
     "section_block", "thesis_support", "parent_component", "figure",
 )
+
+
+# ---------------------------------------------------------------------------
+# 概念レジストリの語彙（concept_registry_design.md §4.1 / KR2・KR4）
+#
+# DB 側は CHECK ではなく語彙表（knowledge_entry_types / knowledge_label_kinds /
+# knowledge_relation_kinds / knowledge_mapping_justifications）への FK で守り、その
+# 語彙表は migration 082 が **ここと同じ列挙** をシードする（一致は
+# test_concept_registry_vocab.py が固定）。日本語ラベルの正本は
+# core/library/schema.py の 5 表（フロントは逐語ミラー）。
+#
+# 新しい監査 entity_type は作らない — 概念レジストリの記帳は既存の
+# AUDIT_ENTITY_LIBRARY_ENTRY を流用する（action 語彙は core/library/schema.py の
+# REGISTRY_AUDIT_ACTIONS）。
+# ---------------------------------------------------------------------------
+
+#: library_entries.entry_type の語彙（既存2 + 概念レジストリの7）。
+#: core/library/schema.py::ENTRY_TYPES はここからの再エクスポート（二重定義しない）。
+LIBRARY_ENTRY_TYPES: tuple[str, ...] = (
+    "apparatus", "theory_component", "concept", "theory", "method",
+    "observable", "assumption", "quantity", "process",
+)
+
+#: library_entry_labels.kind（SKOS の prefLabel / altLabel / hiddenLabel）。
+#: preferred は library_entries.name が正本なので**行にしない**（語彙としては持つ）。
+CONCEPT_LABEL_KINDS: tuple[str, ...] = ("preferred", "alternate", "hidden")
+
+#: library_entry_relations.kind / library_atlas_node_links.kind（SKOS の broader /
+#: related / exactMatch / closeMatch）。node リンクは exact_match / close_match のみを
+#: コード側（core/library/registry.py）が強制する。
+CONCEPT_RELATION_KINDS: tuple[str, ...] = (
+    "broader", "related", "exact_match", "close_match",
+)
+
+#: 「なぜ同じと言えたか」の語彙（KR4）。候補・確定の書き込みは必ずこれを伴う。
+#: llm_candidate は「既存の LLM 由来候補に付ける語彙」であって、本層が LLM を呼ぶ
+#: ことではない（KR5: 概念レジストリのコードは core.llm を import しない）。
+MAPPING_JUSTIFICATIONS: tuple[str, ...] = (
+    "manual_curation", "lexical_match", "vector_similarity",
+    "cartridge_declared", "corpus_cooccurrence", "llm_candidate",
+)
+
+#: library_entries.review_status（候補 → 教員の確定。status='retired' とは別軸）。
+#: candidate の行は凍結できない（= パイプライン retrieval にも学習者にも届かない。KR2）。
+CONCEPT_REVIEW_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "dismissed")

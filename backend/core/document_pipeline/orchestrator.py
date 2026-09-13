@@ -18,6 +18,7 @@ artifact/resume/report/finish_target_stage の呼び出し順序・payload・非
 """
 from __future__ import annotations
 
+import copy
 import inspect
 import logging
 import os
@@ -258,6 +259,10 @@ PIPELINE_STAGES = [
     "blueprint",
     "export_validation",
     "persist_claims_components_graph",
+    # 概念レジストリ P3-6（concept_registry_design.md §6.2）。永続化の**後**に置く
+    # ことで、同一性候補は確定済みの component 行・stable_key を材料にできる。
+    # 決定論・非LLM・非致命。
+    "identity_candidates",
     "completed",
 ]
 
@@ -1257,6 +1262,13 @@ def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
         logger.info("Resuming document pipeline: loaded claim_object_builder artifact for document %s", ctx.document_id)
     else:
         ctx.report_start("claim_object_builder", total=1, unit="builder")
+        # 主張の概念接地 前段（claim_concept_grounding_design.md §5・案 B）:
+        # builder は概念を自分で決めず外から渡された辞書で本文を照合する設計なので、
+        # レジストリの確定ラベル + カートリッジ別名から辞書を組み、既存の注入口
+        # ``concept_resolver`` / ``cartridge_ontology`` へ渡す（DSL はまだ無いので
+        # ①（DSL ノード名）は後段フックが足す）。辞書が空なら **None のまま** =
+        # 従来動作。A層のコードは触らない（CG1）。
+        concept_resolver, cartridge_ontology = _claim_concept_inputs(ctx)
         try:
             ctx.claim_objects = _build_claim_objects(
                 agent_classes=ctx.agent_classes,
@@ -1266,6 +1278,8 @@ def _stage_claim_object_builder(ctx: PipelineContext) -> bool:
                 equations=ctx.equations,
                 evidence=ctx.evidence,
                 document_structure=ctx.structure,
+                concept_resolver=concept_resolver,
+                cartridge_ontology=cartridge_ontology,
             )
         except Exception as exc:
             logger.exception(
@@ -1715,6 +1729,50 @@ def _stage_dsl_linking(ctx: PipelineContext) -> bool:
         "nodes": len(ctx.dsl.nodes), "edges": len(ctx.dsl.edges), "total": 1, "processed": 1,
     })
     return ctx.finish_target_stage("dsl_linking", {"nodes": len(ctx.dsl.nodes), "edges": len(ctx.dsl.edges), "total": 1, "processed": 1})
+
+
+_CLAIM_CONCEPT_GROUNDING_ARTIFACT = "claim_concept_grounding"
+
+
+def _hook_claim_concept_grounding(ctx: PipelineContext) -> bool:
+    """Between dsl_linking and dsl_embedding: resume に関係なく毎回実行。
+
+    主張の概念接地（``claim_concept_grounding_design.md`` §5・案 B の後段 + 案 A）。
+    ``dsl_linking`` の直後に置くのは、DSL ノード名を辞書に足して本文を照合し（①）、
+    ``source_refs.claim_ids`` の直接参照からも概念を付ける（①'）ため。決定論・
+    LLM 0 回・embedding 0 回（CG2）。``concept_assignment_status`` は触らない（CG3）。
+
+    非致命: 失敗しても以降のステージはそのまま進む（概念が増えないだけ）。
+    """
+    try:
+        from core.library import claim_concept_grounding as _grounding
+        from core.library import concept_dictionary as _concept_dictionary
+
+        dictionary = _concept_dictionary.build_concept_dictionary(
+            cartridge_id=ctx.cartridge_id, dsl=ctx.dsl,
+        )
+        result = _grounding.ground_claims(ctx.claim_objects, ctx.dsl, dictionary)
+        if result.claims_changed:
+            ctx.save_artifact("claim_object_builder", ctx.claim_objects)
+        payload = result.to_dict()
+        _attach_coverage(
+            payload,
+            population=result.population,
+            processed=result.processed,
+            reasons=result.reasons,
+            unit="claims",
+        )
+        ctx.save_artifact(_CLAIM_CONCEPT_GROUNDING_ARTIFACT, payload)
+        logger.info(
+            "Grounded claim concepts for document %s: claims_changed=%d dictionary=%d",
+            ctx.document_id, result.claims_changed, len(dictionary),
+        )
+    except Exception:
+        logger.warning(
+            "claim concept grounding failed (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+    return False
 
 
 def _stage_dsl_embedding(ctx: PipelineContext) -> bool:
@@ -2335,6 +2393,10 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
                 evidence_registry=ctx.evidence,
                 # equation.equation_stable_keys の材料（純計算・DB を読まない）。
                 equations=ctx.equations,
+                # 主張の概念接地（CG §6）: 概念ごとの出所（source / entry_id /
+                # mapping_justification / canonical）を concepts の各要素へ additive に
+                # マージする材料。フックが走っていなければ None = 従来どおり。
+                concept_grounding=ctx.artifact(_CLAIM_CONCEPT_GROUNDING_ARTIFACT),
                 run_id=ctx.run_id,
             )
             claim_id_map: dict[str, str] = {}
@@ -2441,6 +2503,41 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
         "processed": 3,
     })
     return ctx.finish_target_stage("persist_claims_components_graph", {"claims": ctx.result.claim_count, "components": ctx.result.component_count, "total": 3, "processed": 3})
+
+
+def _stage_identity_candidates(ctx: PipelineContext) -> bool:
+    # ── Stage 30: identity_candidates (concept_registry_design.md §6.2).
+    # Registered at the very end, after persist_claims_components_graph: the
+    # component rows / stable_keys / knowledge_symbols must already exist before
+    # we can propose "this component is the same concept as that one". The stage
+    # is deterministic (no LLM, no embedding calls — it reads stored vectors) and
+    # non-fatal: a failure here never invalidates the analysis run, and every
+    # candidate it writes is `candidate` for a teacher to confirm (KR2).
+    identity_artifact = ctx.artifact("identity_candidates")
+    if ctx.should_use_artifact("identity_candidates"):
+        identity_payload = dict(identity_artifact or {})
+        logger.info(
+            "Resuming document pipeline: loaded identity_candidates artifact for document %s",
+            ctx.document_id,
+        )
+    else:
+        ctx.report_start("identity_candidates", total=1, unit="builder")
+        try:
+            from core.library.identity_candidates import run_identity_candidates
+
+            identity_payload = run_identity_candidates(
+                document_id=ctx.document_id, run_id=ctx.run_id
+            )
+            identity_payload.setdefault("status", "completed")
+        except Exception as exc:
+            logger.warning(
+                "identity_candidates stage failed (non-fatal): document=%s material=%s error=%s",
+                ctx.document_id, ctx.material_id, exc, exc_info=True,
+            )
+            identity_payload = {"status": "completed", "error": str(exc)}
+        ctx.save_artifact("identity_candidates", identity_payload)
+    ctx.report_done("identity_candidates", dict(identity_payload))
+    return ctx.finish_target_stage("identity_candidates", dict(identity_payload))
 
 
 def _stage_completed(ctx: PipelineContext) -> None:
@@ -2573,6 +2670,7 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
         "dsl_linking", _stage_dsl_linking,
         llm_kind=LLM_KIND_TEXT, model_policy=True, progress_unit="llm_call",
     ),
+    PipelineStageDef(None, _hook_claim_concept_grounding),
     PipelineStageDef(
         "dsl_embedding", _stage_dsl_embedding,
         llm_kind=LLM_KIND_EMBEDDING, progress_unit="embedding",
@@ -2613,6 +2711,11 @@ _PIPELINE_STEPS: list[PipelineStageDef] = [
     PipelineStageDef(
         "persist_claims_components_graph", _stage_persist_claims_components_graph,
         progress_unit="tables",
+    ),
+    # 概念レジストリ P3-6。決定論（llm_kind=none / model_policy=False）で、読むのは
+    # 保存済みベクトルだけ（embedding API を呼ばない = KR5）。
+    PipelineStageDef(
+        "identity_candidates", _stage_identity_candidates, progress_unit="builder",
     ),
 ]
 
@@ -2978,6 +3081,46 @@ def _empty_evidence_registry(document_id: str, cartridge_id: str | None):
     )
 
 
+def _claim_concept_inputs(ctx: PipelineContext) -> tuple[Any, dict | None]:
+    """``ClaimObjectBuilder`` へ渡す ``(concept_resolver, cartridge_ontology)``。
+
+    主張の概念接地（``claim_concept_grounding_design.md`` §5・案 B の前段）。辞書が
+    空なら ``(None, None)`` を返して**従来どおり**（辞書なし）に縮退する。
+    ``cartridge_ontology`` は cartridge が実際に解決できたときだけ渡す（builder の
+    ``_concepts_are_cartridge_backed`` が従来の設計どおり効く。空 cartridge では
+    読まない = 既定カートリッジへ縮退させない規律）。辞書の組み立てで落ちても
+    解析は止めない（fail-soft）。
+    """
+    try:
+        from core.library import concept_dictionary as _concept_dictionary
+
+        dictionary = _concept_dictionary.build_concept_dictionary(
+            cartridge_id=ctx.cartridge_id
+        )
+        if not dictionary:
+            return None, None
+        ontology = _concept_dictionary.cartridge_ontology_for(ctx.cartridge_id)
+        if ontology is None:
+            # CG3（概念は候補・確定は人間）: A層 builder の既存規則
+            # ``_concepts_are_cartridge_backed`` は「ontology が空で resolver がある」
+            # と無条件に True を返し、atomic × source_backed の claim の
+            # concept_assignment_status を source_backed へ上げる。レジストリ辞書だけ
+            # の run でそれが起きないよう、別名・型が空で出所だけを持つ**非空**の
+            # ontology を渡す（既知集合が空 → inferred に留まる）。A層は非改変。
+            ontology = _concept_dictionary.REGISTRY_ONLY_ONTOLOGY
+        logger.info(
+            "Claim concept dictionary ready for document %s: %d concept(s)",
+            ctx.document_id, len(dictionary),
+        )
+        return _concept_dictionary.make_concept_resolver(dictionary), copy.deepcopy(ontology)
+    except Exception:
+        logger.warning(
+            "claim concept dictionary unavailable (non-fatal): document=%s",
+            ctx.document_id, exc_info=True,
+        )
+        return None, None
+
+
 def _build_claim_objects(
     *,
     agent_classes: dict,
@@ -2987,6 +3130,8 @@ def _build_claim_objects(
     equations: Any,
     evidence: Any,
     document_structure: Any = None,
+    concept_resolver: Any = None,
+    cartridge_ontology: dict | None = None,
 ):
     from episteme_graph.agents.claim_object_builder.builder import ClaimObjectBuilder
 
@@ -3000,9 +3145,10 @@ def _build_claim_objects(
     builder = builder_cls(
         evidence_registry=evidence,
         equation_index=equation_index,
-        cartridge_ontology=None,
+        cartridge_ontology=cartridge_ontology,
         equation_semantics_result=equations,
         document_structure=document_structure,
+        concept_resolver=concept_resolver,
     )
     spans = list(getattr(qualified, "qualified_spans", []) or [])
     return builder.build(

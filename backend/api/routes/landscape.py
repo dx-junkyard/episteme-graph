@@ -32,6 +32,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 import services
+from core import atlas_correspondence
 from core import atlas_store
 from core import decision_context
 from core.course_data import course_cartridge_id, course_source_material_ids
@@ -204,6 +205,52 @@ def _load_skeletons(session, domain_keys: Iterable[str]) -> dict[str, Any]:
     return skeletons
 
 
+def _node_resolve(session, domain_keys: Iterable[str]):
+    """``(domain_key, node_id) -> {"current_node_id", "node_status", "via"}`` を作る。
+
+    正本: ``docs/features/atlas_node_correspondence_design.md`` §6（NC5 / NC8）。
+    骨格の全凍結版（``atlas_store.load_frozen_history``）の ``id_migrations`` を版順に
+    辿って旧 node_id を現行 node_id へ**読み替える**だけで、``landscape_placements`` の
+    ``node_id`` は書き換えない。
+
+    履歴が読めないドメインは「何も分からない」解決器になり、呼び出し側（projection）は
+    生の node_id を引く従来動作へ縮退する（fail-soft）。
+    """
+    resolvers: dict[str, Any] = {}
+    for key in domain_keys:
+        domain_key = str(key or "").strip()
+        if not domain_key or domain_key in resolvers:
+            continue
+        try:
+            history = atlas_store.load_frozen_history(session, domain_key)
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "landscape: failed to load frozen history for %s (non-fatal)",
+                domain_key, exc_info=True,
+            )
+            # 実 DB では失敗した文がトランザクションを中断させる。以降の読み取り
+            # （タイトル解決など）を巻き添えにしないよう巻き戻す（全て読み取り）。
+            try:
+                session.rollback()
+            except Exception:  # noqa: BLE001
+                logger.debug("landscape: rollback failed (non-fatal)", exc_info=True)
+            history = []
+        resolvers[domain_key] = atlas_correspondence.build_node_resolver(history)
+
+    def _resolve(domain_key: str, node_id: str) -> dict:
+        resolver = resolvers.get(str(domain_key or ""))
+        if resolver is None:
+            return {"current_node_id": node_id, "node_status": "", "via": []}
+        resolved = resolver.resolve(node_id)
+        return {
+            "current_node_id": resolved.get("current_node_id") or "",
+            "node_status": resolved.get("status") or "",
+            "via": list(resolved.get("via") or []),
+        }
+
+    return _resolve
+
+
 def _domain_facts(
     skeletons: Mapping[str, Any], names: Mapping[str, str]
 ) -> list[dict]:
@@ -350,6 +397,7 @@ def list_document_landscape_placements(
         domain_keys = {str(r.get("domain_key") or "") for r in rows}
         domain_keys.update(str(u.get("domain_key") or "") for u in unplaced)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+        resolve = _node_resolve(session, {k for k in domain_keys if k})
     finally:
         session.close()
 
@@ -361,7 +409,9 @@ def list_document_landscape_placements(
         "document_id": document_id,
         "title": titles.get(document_id, ""),
         "placements": [
-            projection.admin_placement_dto(row, node_index, domain_names=names)
+            projection.admin_placement_dto(
+                row, node_index, domain_names=names, resolve=resolve
+            )
             for row in rows
         ],
         "unplaced_domains": unplaced,
@@ -435,12 +485,13 @@ def update_landscape_placement_status(
     try:
         names = _domain_names(session)
         skeletons = _load_skeletons(session, [str(updated.get("domain_key") or "")])
+        resolve = _node_resolve(session, [str(updated.get("domain_key") or "")])
     finally:
         session.close()
     node_index = projection.skeleton_node_index(skeletons)
     return {
         "placement": projection.admin_placement_dto(
-            updated, node_index, domain_names=names
+            updated, node_index, domain_names=names, resolve=resolve
         )
     }
 
@@ -593,6 +644,7 @@ def list_course_landscape_placements(
         for entries in unplaced_by_document.values():
             domain_keys.update(str(u.get("domain_key") or "") for u in entries)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+        resolve = _node_resolve(session, {k for k in domain_keys if k})
     finally:
         session.close()
 
@@ -602,7 +654,9 @@ def list_course_landscape_placements(
     for row in rows:
         document_id = str(row.get("document_id") or "")
         by_document.setdefault(document_id, []).append(
-            projection.admin_placement_dto(row, node_index, domain_names=names)
+            projection.admin_placement_dto(
+                row, node_index, domain_names=names, resolve=resolve
+            )
         )
         if str(row.get("status") or "") == landscape_schema.STATUS_INFERRED:
             pending += 1
@@ -788,6 +842,7 @@ def get_landscape_overview(
             if document_id and document_id not in placed_ids:
                 placed_ids.append(document_id)
         titles = _document_titles(session, placed_ids)
+        resolve = _node_resolve(session, [key])
     except HTTPException:
         raise
     finally:
@@ -797,11 +852,14 @@ def get_landscape_overview(
     grouped: dict[str, list[dict]] = {}
     for row in rows:
         node_id = str(row.get("node_id") or "")
-        if (key, node_id) not in node_index:
+        # 旧版の node_id は対応表で現行版へ読み替えてから集約する（NC5: 行は変えない）。
+        resolved = resolve(key, node_id)
+        target = str(resolved.get("current_node_id") or "") or node_id
+        if (key, target) not in node_index:
             continue
         document_id = str(row.get("document_id") or "")
         status = str(row.get("status") or "")
-        grouped.setdefault(node_id, []).append(
+        grouped.setdefault(target, []).append(
             {
                 "document_id": document_id,
                 "title": titles.get(document_id, ""),
@@ -811,6 +869,13 @@ def get_landscape_overview(
                 # LS5: 生 weight は返さない（段階ラベルのみ）。
                 "weight_label": landscape_schema.weight_label(row.get("weight")),
                 "status": status,
+                # 読み替えた配置であることは事実として残す（旧 node_id は出さない）。
+                # 判定は索引の実在で決める（履歴が読めないときは current へ縮退する）。
+                "node_status": (
+                    atlas_correspondence.NODE_STATUS_CURRENT
+                    if target == node_id
+                    else atlas_correspondence.NODE_STATUS_MIGRATED
+                ),
             }
         )
 
@@ -903,6 +968,7 @@ def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
         if course_domain_key:
             domain_keys.add(course_domain_key)
         skeletons = _load_skeletons(session, {k for k in domain_keys if k})
+        resolve = _node_resolve(session, {k for k in domain_keys if k})
         names = _domain_names(session)
         rows = _document_rows(session, document_ids)
     finally:
@@ -928,6 +994,7 @@ def learner_landscape_for_documents(course_data: dict, document_ids) -> dict:
         course_domain_key or None,
         document_titles=titles,
         source_document_count=len(document_ids),
+        resolve=resolve,
     )
 
     # 配置ゼロの論文（LS10 / AB1）。DTO の documents に載らなかったソース論文がそれで、

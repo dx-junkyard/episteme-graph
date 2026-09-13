@@ -43,7 +43,7 @@ from core.candidate_flow import (
     CandidateFlow,
     CandidateVocabulary,
 )
-from core.schema import AUDIT_ENTITY_ATLAS_EDGE
+from core.schema import AUDIT_ENTITY_ATLAS_EDGE, MAPPING_JUSTIFICATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +247,9 @@ def _make_apply_status(session: Any) -> Callable[..., dict | None]:
                    SET status = :new_status,
                        edge_kind = CASE WHEN :edge_kind <> ''
                             THEN :edge_kind ELSE atlas_edge_decisions.edge_kind END,
+                       mapping_justification = CASE WHEN :mapping_justification <> ''
+                            THEN :mapping_justification
+                            ELSE atlas_edge_decisions.mapping_justification END,
                        review_note = CASE WHEN :review_note <> ''
                             THEN :review_note ELSE atlas_edge_decisions.review_note END,
                        decided_by = CAST(:actor_id AS uuid),
@@ -261,6 +264,7 @@ def _make_apply_status(session: Any) -> Callable[..., dict | None]:
                 "old_status": old_status,
                 "new_status": new_status,
                 "edge_kind": _clean(payload.get("edge_kind")),
+                "mapping_justification": _clean(payload.get("mapping_justification")),
                 "review_note": _clean(reason),
                 "actor_id": _clean(actor_id),
             },
@@ -281,6 +285,7 @@ def decide(
     actor_id: str,
     review_note: str = "",
     edge_kind: str = "",
+    mapping_justification: str | None = None,
     record_audit: Callable[..., Any],
 ) -> dict | None:
     """辺候補への教員の判断（``accept`` / ``dismiss`` / ``restore``）。
@@ -291,6 +296,10 @@ def decide(
 
     - ``action='accept'`` は ``edge_kind ∈ core.atlas.EDGE_KINDS`` を必須とする
       （種別の無い辺を骨格へ入れない。語彙外は ``ValueError`` → route が 422）。
+    - ``mapping_justification``（概念レジストリ KR4・migration 082）は「なぜこの関係を
+      立てられたか」の記録で、候補の ``origin``（vector / co_occurrence）から route が
+      変換して渡す。``None``（既定）のときは**書かない** — 既存値も消さない
+      （記録が無いことを推測で埋めない）。
 
     ``record_audit`` は呼び出し側が注入する監査記帳 callable（core は ``services`` を
     import しない）。``entity_type`` / ``entity_id`` / ``action`` / ``old_status`` /
@@ -313,6 +322,9 @@ def decide(
         raise ValueError(
             f"invalid action: {action!r} (must be one of {schema.DECIDE_ACTIONS!r})"
         )
+    justification = _clean(mapping_justification)
+    if justification and justification not in MAPPING_JUSTIFICATIONS:
+        raise ValueError(f"invalid mapping_justification: {mapping_justification!r}")
     kind = _clean(edge_kind)
     if act == schema.ACTION_ACCEPT and kind not in atlas_module.EDGE_KINDS:
         raise ValueError(
@@ -347,7 +359,10 @@ def decide(
         current_status=current["status"],
         actor_id=_clean(actor_id),
         reason=_clean(review_note),
-        metadata={"edge_kind": kind} if kind else {},
+        metadata={
+            **({"edge_kind": kind} if kind else {}),
+            **({"mapping_justification": justification} if justification else {}),
+        },
     )
     out = dict(result)
     # 呼び出し側（route / 監査）には API の語彙で返す（``confirm`` を漏らさない）。

@@ -210,6 +210,9 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-figure-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-models.js",
+    # 分野の適合（概念レジストリ P3-7）。担体は admin.js の再解析モーダル側だが、
+    # 将来ここに操作要素が生えたときの登録漏れを検出するため対象に入れる。
+    ROOT / "frontend" / "public" / "js" / "admin-cartridge-fit.js",
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-discovery.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js",

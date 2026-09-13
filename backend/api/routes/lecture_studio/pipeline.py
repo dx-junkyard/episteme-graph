@@ -97,6 +97,7 @@ DOCUMENT_PIPELINE_STAGE_LABELS: dict[str, str] = {
     "blueprint": "コース設計案の生成",
     "export_validation": "整合性の最終チェック",
     "persist_claims_components_graph": "解析結果の保存",
+    "identity_candidates": "共通する概念の候補づくり",
 }
 
 

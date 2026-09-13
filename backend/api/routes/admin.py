@@ -100,8 +100,13 @@ from core.course_data import (
     course_sources,
     course_title as _course_title,
     course_topics,
+    is_symbol_concept_name,
 )
-from core.course_units import list_unit_candidates, render_unit_candidates_block
+from core.course_units import (
+    list_unit_candidates,
+    render_unit_candidates_block,
+    unit_concept_terms_by_document,
+)
 from core.document_pipeline.figure_images import load_document_figures
 from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import (
@@ -1212,11 +1217,18 @@ def list_materials(
         components_by_mid: dict[str, list[str]] = {}
         # material_id -> document_structure artifact（**採用 run** から。C-8）
         adopted_structures: dict[str, dict] = {}
+        # material_id -> 学ぶ単位が教える言葉（claim_concept_grounding_design.md §8 / 案 E）。
+        unit_terms_by_mid: dict[str, list[str]] = {}
         materials_with_course: set[str] = set()
         if want_summary and records:
             uuid_to_mid = {r[9]: r[0] for r in records if r[9]}
             doc_uuids = [u for u in uuid_to_mid if u]
             if doc_uuids:
+                # 学ぶ単位（Phase 2）の teaches から分野の言葉を読む。記号は除いてある。
+                for doc_uuid, terms in unit_concept_terms_by_document(session, doc_uuids).items():
+                    mid_for_uuid = uuid_to_mid.get(doc_uuid)
+                    if mid_for_uuid and terms:
+                        unit_terms_by_mid[mid_for_uuid] = terms
                 # migration 080 以降 theory_components.document_id は uuid。
                 uuid_ph = ", ".join(f"CAST(:u_{i} AS uuid)" for i in range(len(doc_uuids)))
                 uuid_params = {f"u_{i}": u for i, u in enumerate(doc_uuids)}
@@ -1328,11 +1340,18 @@ def list_materials(
         if want_summary:
             component_names = components_by_mid.get(mid, [])
             has_course = mid in materials_with_course
-            # legacy knowledge_graph の概念名
+            # 概念名の供給（claim_concept_grounding_design.md §8 / 案 E）。
+            # ①学ぶ単位（Phase 2）の teaches が教える分野の言葉を先に並べる
+            # ②legacy knowledge_graph の概念名で補う
+            # いずれも記号（P0-3）は出さない。件数の上限は従来のまま増やさない。
+            top_concepts.extend(unit_terms_by_mid.get(mid, []))
             if isinstance(kg, dict):
                 for c in (kg.get("concepts") or [])[:8]:
                     name = c.get("name") if isinstance(c, dict) else str(c)
-                    if name:
+                    name = str(name or "").strip()
+                    if not name or is_symbol_concept_name(name):
+                        continue
+                    if name not in top_concepts:
                         top_concepts.append(name)
             # 文書構造の見出し（採用 run の成果物。C-8）
             doc_structure = adopted_structures.get(mid)
@@ -2095,6 +2114,9 @@ _MAX_CHUNK_CHARS_PER_MATERIAL = 4000
 _MAX_COMPONENTS_PER_MATERIAL = 40
 _MAX_CLAIMS_PER_MATERIAL = 80
 _MAX_GRAPH_EDGES_PER_MATERIAL = 80
+# 概念の供給（claim_concept_grounding_design.md §8 / 案 E）。学ぶ単位の teaches から
+# 取る分野の言葉の上限。既存区画の上限は増やさない。
+_MAX_CONCEPT_TERMS_PER_MATERIAL = 12
 
 
 def _build_material_context(
@@ -2225,6 +2247,11 @@ def _build_material_context(
             except Exception:
                 logger.warning("rollback after learning unit lookup failed", exc_info=True)
             unit_candidates = []
+
+        # --- 8) 概念の供給（claim_concept_grounding_design.md §8 / 案 E）---
+        # 学ぶ単位の ``teaches`` が教える**分野の言葉**（記号は除いてある）。読めない
+        # 環境では空 dict へ縮退する（区画ごと fail-soft）。
+        unit_terms_by_uuid = unit_concept_terms_by_document(session, ordered_doc_uuids)
 
     finally:
         session.close()
@@ -2382,6 +2409,16 @@ def _build_material_context(
                         if sec_title:
                             sections.append(f"- {sec_title}")
 
+        # ---- 概念の供給: 学ぶ単位が教える言葉（案 E・記号は含まない）----
+        # 記号（``R`` / ``\lambda``）の羅列ではなく分野の言葉を先に出す。
+        # 単位が無ければ区画ごと出さない（空欄を警告にしない）。
+        doc_concept_terms = unit_terms_by_uuid.get(doc_uuid) or []
+        if doc_concept_terms:
+            sections.append(
+                "#### この教材が教える言葉\n"
+                + "、".join(doc_concept_terms[:_MAX_CONCEPT_TERMS_PER_MATERIAL])
+            )
+
         # ---- fallback: 旧 knowledge_graph (Agent未実行の場合のみ) ----
         if not has_agent_data:
             logger.warning(
@@ -2398,6 +2435,9 @@ def _build_material_context(
                 concept_lines = []
                 for c in concepts:
                     name = c.get("name", "") if isinstance(c, dict) else str(c)
+                    # 案 E: 記号（P0-3）は概念として供給しない。
+                    if is_symbol_concept_name(name):
+                        continue
                     desc = c.get("description", "") if isinstance(c, dict) else ""
                     ctype = c.get("type", "") if isinstance(c, dict) else ""
                     line = f"- {name}"

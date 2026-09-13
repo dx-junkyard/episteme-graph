@@ -56,6 +56,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "atlas.edge-dismissed-filter",
         "atlas.edge-incorporate",
         "atlas.freeze",
+        "atlas.freeze-correspondence",
+        "atlas.freeze-correspondence-manual",
         "atlas.gap-accept",
         "atlas.gap-alias-register",
         "atlas.gap-candidates",
@@ -182,6 +184,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "interest-dashboard.course-select",
         "interest-dashboard.dashboard-body",
         "interest-dashboard.refresh-btn",
+        "knowledge-library.atlas-links",
         "knowledge-library.detail-deliberate",
         "knowledge-library.detail-freeze",
         "knowledge-library.detail-restore",
@@ -189,9 +192,14 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "knowledge-library.detail-save",
         "knowledge-library.domains-list",
         "knowledge-library.entries-list",
+        "knowledge-library.entry-review",
         "knowledge-library.filter-type",
+        "knowledge-library.identity-candidates",
+        "knowledge-library.identity-derive",
         "knowledge-library.include-retired",
+        "knowledge-library.labels",
         "knowledge-library.new-entry-btn",
+        "knowledge-library.relations",
         "knowledge-library.search",
         "lecture-studio.ai-assistant-btn",
         "lecture-studio.assistant-modal",
@@ -298,6 +306,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.library-entry-modal",
         "materials.llm-model-change",
         "materials.reanalyze-domain",
+        # 概念レジストリ P3-7（concept_registry_design.md §8）: 再解析モーダルの
+        # 「分野の適合」区画（形の宣言 shape.json とこの論文の解析結果の事実文）。
+        "materials.reanalyze-domain-fit",
         "materials.reanalyze-modal",
         "materials.refresh",
         "materials.revision-decision",
@@ -415,6 +426,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "atlas.edge-incorporate": "teacher/17-admin-atlas.md#edge-incorporate",
     # 公開前チェック
     "atlas.freeze": "teacher/17-admin-atlas.md#freeze",
+    # 前の版のノードとの対応（凍結の影響モーダル内の区画。チェックは既定オフ）
+    "atlas.freeze-correspondence": "teacher/17-admin-atlas.md#freeze-correspondence",
+    # 対応先（候補が見つからなかった項目に手で対応づける select）
+    "atlas.freeze-correspondence-manual": "teacher/17-admin-atlas.md#freeze-correspondence-manual",
     # 論文の解析から見つかった候補 — 採用
     "atlas.gap-accept": "teacher/17-admin-atlas.md#gap-accept",
     # 別名として登録（近傍注記のある候補にだけ出る）
@@ -675,7 +690,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 更新
     "interest-dashboard.refresh-btn": "teacher/21-admin-interest-dashboard.md#refresh-btn",
 
-    # --- knowledge-library.* — 分野別ナレッジライブラリタブ（L層） ---------------------------------
+    # --- knowledge-library.* — 分野別ナレッジライブラリタブ（L層 + 概念レジストリ） -----------------
+    # 分野の地図との対応（概念レジストリ, migration 082）
+    "knowledge-library.atlas-links": "teacher/19-admin-knowledge-library.md#atlas-links",
     # 深く検討
     "knowledge-library.detail-deliberate": "teacher/19-admin-knowledge-library.md#detail-deliberate",
     # 凍結（版発行）
@@ -690,12 +707,22 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "knowledge-library.domains-list": "teacher/19-admin-knowledge-library.md#domains-list",
     # エントリ一覧
     "knowledge-library.entries-list": "teacher/19-admin-knowledge-library.md#entries-list",
+    # この概念の扱い（候補 / 確定 / 見送り）
+    "knowledge-library.entry-review": "teacher/19-admin-knowledge-library.md#entry-review",
     # 種別で絞り込む
     "knowledge-library.filter-type": "teacher/19-admin-knowledge-library.md#filter-type",
+    # 同一性の候補
+    "knowledge-library.identity-candidates": "teacher/19-admin-knowledge-library.md#identity-candidates",
+    # 地図との対応を導出
+    "knowledge-library.identity-derive": "teacher/19-admin-knowledge-library.md#identity-derive",
     # 廃止済みも表示
     "knowledge-library.include-retired": "teacher/19-admin-knowledge-library.md#include-retired",
+    # 別名・隠しラベル
+    "knowledge-library.labels": "teacher/19-admin-knowledge-library.md#labels",
     # 新規エントリ作成
     "knowledge-library.new-entry-btn": "teacher/19-admin-knowledge-library.md#new-entry-btn",
+    # 関係
+    "knowledge-library.relations": "teacher/19-admin-knowledge-library.md#relations",
     # 名称・別名で検索
     "knowledge-library.search": "teacher/19-admin-knowledge-library.md#search",
 
@@ -919,6 +946,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.llm-model-change": "teacher/11-admin-materials.md#llm-model-change",
     # 再解析モーダルの「分野」区画（前回の分野の事実文 + この解析だけの変更）
     "materials.reanalyze-domain": "teacher/11-admin-materials.md#reanalyze-domain",
+    # 再解析モーダルの「分野の適合」区画（形の宣言と解析結果の事実文・数値なし）
+    "materials.reanalyze-domain-fit": "teacher/11-admin-materials.md#reanalyze-domain-fit",
     # 解析を再開（オプション）モーダル
     "materials.reanalyze-modal": "teacher/11-admin-materials.md#reanalyze-modal",
     # 更新（教材一覧の再取得）

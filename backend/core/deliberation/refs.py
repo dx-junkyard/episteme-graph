@@ -21,6 +21,7 @@ from core.deliberation.schema import (
     ELEMENT_EVIDENCE,
     ELEMENT_FIGURE,
     ELEMENT_SHARED_PART,
+    ELEMENT_SYMBOL,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_THEORY_COMPONENT,
     SCOPE_DOCUMENT,
@@ -295,6 +296,33 @@ def _resolve_derivation(element_id: str, document_id: str | None) -> ElementRef:
     )
 
 
+def _resolve_symbol(element_id: str, document_id: str | None) -> ElementRef:
+    # symbol も独立テーブルを持たない扱い（概念レジストリ §4.7）。element_id は
+    # symbol_registry の ``symbol_id``（``sym_{document_id}_{symbol}``）で、artifact 内に
+    # 実在するかだけを確かめる。v1 の用途は同一性リンクの source のみで、W層モーダルの
+    # 対象にはしない（``DIALOGUE_SESSION_ELEMENT_TYPES`` に入れていない）。
+    if not str(document_id or "").strip():
+        raise ElementResolutionError(
+            "symbol ElementRef requires document_id", kind="not_found"
+        )
+    for record in symbol_records(document_id):
+        if str(record.get("symbol_id") or "") != str(element_id):
+            continue
+        return ElementRef(
+            scope=SCOPE_DOCUMENT,
+            element_type=ELEMENT_SYMBOL,
+            element_id=str(element_id),
+            document_id=str(document_id),
+            provenance={
+                "canonical_symbol": str(record.get("canonical_symbol") or "") or None,
+                "definition_status": str(record.get("definition_status") or "") or None,
+            },
+        )
+    raise ElementResolutionError(
+        f"symbol not found in document {document_id}: {element_id}", kind="not_found"
+    )
+
+
 def _resolve_shared_part(element_id: str) -> ElementRef:
     if not _is_uuid(element_id):
         raise ElementResolutionError(f"invalid shared_part id: {element_id!r}", kind="invalid")
@@ -429,6 +457,8 @@ def resolve(
         ref = _resolve_evidence(element_id, document_id)
     elif element_type == ELEMENT_DERIVATION:
         ref = _resolve_derivation(element_id, document_id)
+    elif element_type == ELEMENT_SYMBOL:
+        ref = _resolve_symbol(element_id, document_id)
     elif element_type == ELEMENT_SHARED_PART:
         ref = _resolve_shared_part(element_id)
     else:

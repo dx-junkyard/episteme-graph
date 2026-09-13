@@ -414,6 +414,29 @@ additive な JSONB キー）でその並びとして参照する。正本は
 
 ---
 
+### 概念レジストリ（マイグレーション 082）
+
+`library_entries`（L層の共同財）を概念レジストリに拡張し、SKOS 相当の語彙で概念を**リンクする**
+（マージ・統合・行削除はしない = KR3 / KR7）。正本は
+`docs/features/concept_registry_design.md`（KR1〜KR10）。候補はすべて `candidate` 始まりで、
+確定は教員の明示操作のみ（KR2）。候補づくりは決定論・非LLM・embedding 呼び出しゼロ（KR5）。
+
+| テーブル | 役割 |
+|---|---|
+| `knowledge_entry_types`（082） | entry_type の語彙表（`core/schema.py::LIBRARY_ENTRY_TYPES` と同じ列挙をシード。既存の `apparatus` / `theory_component` + `concept` / `theory` / `method` / `observable` / `assumption` / `quantity` / `process`）。`library_entries.entry_type` は CHECK から本表への FK に置換 |
+| `knowledge_label_kinds`（082） | ラベル種別の語彙表（`preferred` / `alternate` / `hidden`。`preferred` は `library_entries.name` が正本なので行にしない） |
+| `knowledge_relation_kinds`（082） | 関係種別の語彙表（`broader` / `related` / `exact_match` / `close_match`） |
+| `knowledge_mapping_justifications`（082） | 「なぜ同じと言えたか」の語彙表（`manual_curation` / `lexical_match` / `vector_similarity` / `cartridge_declared` / `corpus_cooccurrence` / `llm_candidate`） |
+| `library_entries` の追加列（082） | `review_status`（`candidate` / `confirmed` / `dismissed`。既存行は DEFAULT `confirmed` で意味不変。**`dismissed` は `status='retired'` とは別軸**）・`review_note`・`mapping_justification`・`candidate_key`（`cand\|{domain_key}\|{normalize_label(name)}` の部分 UNIQUE。再提案を同一行に畳む）・`decided_by` / `decided_at`。`candidate` のエントリは**凍結できない**（409）ため、パイプラインの retrieval・学習者・keyphrase 供給には届かない |
+| `library_entry_labels`（082） | `alternate` / `hidden` ラベルの行（`UNIQUE(entry_id, kind, normalized_label)`。正規化は `atlas_gaps.schema.normalize_label` 正本）。`hidden` は表記ゆれ・OCR ノイズを**捨てずに検索から隠す**器（SKOS hiddenLabel）。`library_entries.aliases` JSONB は編集面として残し、store が `alternate` 行へ片方向ミラーする |
+| `library_entry_relations`（082） | 概念間の関係（`relation_key` UNIQUE。対称 kind は `min`/`max` で A—B と B—A を同一行に、`broader` は有向）。**ドメイン跨ぎ可**（`domain_key` は属性であって座標系ではない）。遷移は `candidate_flow.CandidateFlow`。`confidence` は DB のみ |
+| `library_atlas_node_links`（082） | レジストリ ↔ 分野の地図 node の**版非依存**リンク（`link_key = anode\|{entry_id}\|{domain_key}\|{node_id}` UNIQUE。`skeleton_version` を持たない = KR9）。kind は `exact_match` / `close_match` のみ。`atlas_skeletons` への FK・書き込みは無い（LS7 / AB4）。凍結で node が現行版から消えても行は残し、読み時に `node_in_current_version: false` を付けるだけ |
+| `mapping_justification` の additive 追加（082） | `element_identity_links` / `atlas_anchor_aliases` / `atlas_gap_decisions` / `atlas_edge_decisions` / `landscape_placements` に NULL 可の列を追加。バックフィルは既存列から決定論的に導ける場合のみ（`landscape_placements.provenance` / `atlas_anchor_aliases` は全行 `manual_curation`）。導出不能な表は NULL = 「記録なし」で正直に残す（KR4） |
+| `element_identity_links` の instance 型（082） | CHECK に `symbol` を追加（`instance_element_id` は `knowledge_symbols.agent_symbol_id`）。記号 → 概念の参照は `SymbolRecord` を変えず**読み時 join** で実現する（KR1） |
+| `knowledge_symbols_live`（082） | `knowledge_symbols` の live ビュー（`superseded_at IS NULL`）。学習者向け「直前の定義」の読み手はこれを読む |
+
+---
+
 ## 2. 重要な設計パターン
 
 ### マスター / 個人レイヤーの分離（#133, マイグレーション 011）
@@ -527,6 +550,7 @@ claim 紐づけの最終確定は必ず教員が行い、AI 候補は `backing_c
 | `079_analysis_artifacts.sql` | 知識オブジェクト層 M2 — `document_analysis_artifacts`（`PRIMARY KEY(run_id, stage)`・FK CASCADE・GIN なし）。既存 `document_analysis_runs.stage_outputs->'_artifacts'` blob を1回だけ行へ移送し blob を除去する（自己収束・2回目は対象ゼロ）。artifact は知識の正本ではなく不変の生成ログ（KO6） |
 | `080_document_id_uuid.sql` | 知識オブジェクト層 M3 — TEXT だった `document_id`（`theory_claims` / `theory_components` / `theory_component_links` / `theory_component_graphs` / `document_analysis_runs` / `document_embeddings` / `document_figures` / `epistemic_ledger` / `counterfactual_sessions` / `reconstruction_items` / `section_assembly_status` / `deliberation_sessions` / `element_annotations` / `element_identity_links.instance_document_id`）を UUID に統一し `REFERENCES documents(id) ON DELETE CASCADE` を張る。適用時に material_id 形の行を UUID へ正規化し、`documents` に対応行の無い**到達不能な孤児行だけを1回掃除**する（本 Phase 唯一の破壊的ステップ・件数は `RAISE NOTICE`）。`''` は削除せず NULL に倒す。live ビューは型変更の前後で DROP → 再作成 |
 | `081_learning_units.sql` | 学ぶ単位の一級化 Phase 2 — 語彙表 `knowledge_unit_kinds`（`core/schema.py::LEARNING_UNIT_KINDS` と同一列挙をシード）と新表 `learning_units`（stable_key / unit_kind / teaches / 出典 block / review_status・`document_id` は UUID + FK CASCADE・部分 UNIQUE）+ `learning_units_live`、`theory_components` に親参照列 `parent_component_id` / `parent_agent_component_id`。末尾で `theory_claims_live` / `theory_components_live` を再作成（列追加時の規律）。DELETE 文なし |
+| `082_concept_registry.sql` | 概念レジストリ Phase 3 — 語彙表4表（`knowledge_entry_types` / `knowledge_label_kinds` / `knowledge_relation_kinds` / `knowledge_mapping_justifications`。`core/schema.py` と同一列挙をシード）、`library_entries` のレビュー列群（`review_status` / `review_note` / `mapping_justification` / `candidate_key` / `decided_by` / `decided_at`）と `entry_type` の CHECK → FK 置換、新表 `library_entry_labels` / `library_entry_relations` / `library_atlas_node_links`、既存5表（`element_identity_links` / `atlas_anchor_aliases` / `atlas_gap_decisions` / `atlas_edge_decisions` / `landscape_placements`）への `mapping_justification` の additive 追加と導出可能な行だけの冪等バックフィル、`element_identity_links` の instance 型 CHECK に `symbol` を追加、`knowledge_symbols_live` ビュー。DELETE 文なし |
 
 > 注（2026-07 アーキテクチャ整理 Tier 3-13 で更新）: マイグレーションの実行方式を一本化した。
 > かつては `backend/db/*.sql` を正本リファレンスとしつつ、実際の適用は `backend/api/main.py` の

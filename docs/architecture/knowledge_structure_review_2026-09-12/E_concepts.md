@@ -377,7 +377,8 @@ UI 導線の問題ではない（導線はどれも実装済み）。
 ## ⑥ 発見
 
 ### K-1 概念型の語彙が5セットに分裂し、DB は全部を1語に潰している
-→ **2026-09-13 一部解消**（本文 §4 Phase 1 実装記録: P1-4 — 型語彙の正本を `core/schema.py` に置き DB CHECK を語彙表 FK へ。`PRODUCES` の分裂も解消。concept 層の新設は Phase 3）
+→ **2026-09-13 一部解消**（本文 §4 Phase 1 実装記録: P1-4 — 型語彙の正本を `core/schema.py` に置き DB CHECK を語彙表 FK へ。`PRODUCES` の分裂も解消）
+→ **2026-09-13 concept 層の受け皿も解消**（Phase 3 P3-1: `library_entries.entry_type` を語彙表 `knowledge_entry_types` FK に拡張し `LIBRARY_ENTRY_TYPES`（concept / theory / method / observable / assumption / quantity / process）を正本化。既存型語彙 → entry_type の決定論写像は `core/library/schema.py::entry_type_for_component_type`。正本 `docs/features/concept_registry_design.md` §4.1）
 **証拠**〔確〕: ① cartridge `concept_types` 8 / ② `component_types.json` 14 /
 ③ DB CHECK 9 / ④ `dsl_linking NODE_TYPES` 16 / ⑤ 未使用の `OntologyType` 11。
 `theory_components.component_type` は131行**全件 "theory"**、実際の型は自由文
@@ -392,6 +393,7 @@ UI 導線の問題ではない（導線はどれも実装済み）。
 A層非改変（W1）に触れるので、agent 側の語彙変更ではなく**永続化層の写像**として直すのが安全。
 
 ### K-2 claim/component の「概念」が記号（LaTeX 断片）であり、分野概念が1つも無い
+→ **2026-09-13 解消**（Phase 3 P3-5 で記号 → 概念の経路と「直前の定義」API。同日の追補 [claim_concept_grounding_design.md](../../features/claim_concept_grounding_design.md)（CG1〜CG7）で `claim.concepts` の concept 層を供給: 原因は「辞書が空」で、backend が合成した辞書（レジストリ confirmed ラベル + cartridge 別名 + DSL ノード名・記号除外・語境界一致）を A層 builder の既存 `concept_resolver` 注入口へ渡し、`dsl_linking` 直後のフックで DSL ノードの参照も写す。出所は `theory_claims.concepts` の各要素に additive。オーナー判断 CG-O1 = A層非改変の範囲内 / CG-O2 = LLM 抽出ステージは実測後。学習者の概念マップは記号を除く（`excluded_symbol_concepts` に保持））
 **証拠**〔確〕: `claim_object_builder.claims[].concepts` 610 mention が**全件**
 `concept_type="symbol"` / `role="subject"`。論文B component の `concepts` 17語のうち
 14語が1文字または記号。`concept_assignment_status` は239 claim 全件 `review_required`。
@@ -434,6 +436,7 @@ retrieval を「凍結版があればそれ、無ければ draft を `unfrozen` 
 どちらも freeze 追加なら守れる。
 
 ### K-5 同一性リンクの候補をパイプラインが1つも作らない（人間の確定以前の問題）
+→ **2026-09-13 解消**（Phase 3 P3-6: パイプライン末尾のステージ `identity_candidates`（`core/library/identity_candidates.py`・非LLM・embedding 0 回）が正規化名一致 / chunk-proxy 近傍から candidate entry + `element_identity_links` candidate を作り、`duplicate_candidates` を埋める。確定は教員のまま。正本 `concept_registry_design.md` §6.2）
 **証拠**〔確〕: `_PIPELINE_STEPS` 29ステージに同一性提案なし。`create_candidate` の
 呼び出し元は W層 commit と手動 API の2つ。`theory_components.duplicate_candidates` は
 `persistence.py` で**常に `[]` を書く**（L771 / L2075）。
@@ -448,6 +451,7 @@ retrieval を「凍結版があればそれ、無ければ draft を `unfrozen` 
 — 候補生成に留める限り全部守れる。LS7 / AB4（AI が骨格へ書かない）にも触れない。
 
 ### K-6 atlas node_id が版ごとに総取り替えで、配置・ベクトルだけが版に縛られている
+→ **2026-09-13 解消**（追補 [atlas_node_correspondence_design.md](../../features/atlas_node_correspondence_design.md)・NC1〜NC8・migration なし。格納庫は骨格の既存スロット `id_migrations`。凍結前の `freeze-impact` に決定論の候補（正規化ラベル一致 / 教員確定別名 / レジストリ経由）を並べ、教員が確認した対応だけを凍結 body `id_migrations` で載せる（`decision_context` 記帳・チェック既定オフ）。読み手（landscape 配置・学習者オーバーレイ・論文の海・レジストリ node リンク）は全凍結版の連鎖を辿る `NodeResolver` で読み替えるだけで `node_id` を UPDATE しない。対応の無い配置は旧版の行を残し現行版では事実文。オーナー判断 NC-O1〜O3 は推奨案を採用。ベクトルの版間継承は非スコープ）
 **証拠**〔確〕: modified_gravity 2026.0808 ↔ 2026.1 の node_id 重なり **0**。
 particle_physics / astrophysics も版間重なり 0。一方
 `atlas_anchor_aliases` / `atlas_gap_decisions.cluster_key` / `atlas_edge_decisions.edge_key` は
@@ -465,6 +469,7 @@ AB3（凍結版は読み取り専用）・LS7（AI が `atlas_skeletons` に書�
 「教員が凍結時に確認する差分」として扱えば AB4 に触れない（`freeze-impact` の拡張で足りる〔推〕）。
 
 ### K-7 ドメインをまたぐ同一概念に結合手段が無い（素材はもう揃っている）
+→ **2026-09-13 解消**（Phase 3 P3-4: `library_atlas_node_links`（版非依存 `link_key`・exact_match / close_match）でレジストリ entry をハブに別ドメインの node を結ぶ。候補導出 `atlas_links.derive_node_link_candidates` は保存済みアンカーベクトルと正規化ラベル一致だけ。node—node の直接辺（`atlas_edge_decisions` の拡張）ではなくハブ経由を採った。正本 `concept_registry_design.md` §4.5 / §6.1）
 **証拠**〔確〕: `large_scale_structure` / `galaxy_clusters` / `gravitational_waves` が
 astrophysics と modified_gravity に**同じ node_id・同じラベル**で重複。
 cos はそれぞれ 0.896 / 0.894 / 0.888。`cosmic_expansion` ↔
@@ -499,6 +504,7 @@ RE6（候補は読み時導出・embedding API を呼ばない）。ドメイン
 説明は description へ）と同じ思想を component 名にも適用するだけなので、新たな違反は無い。
 
 ### K-9 再解析が概念を増殖させ、孤児を残す
+→ **2026-09-13 解消**（本文 §4 Phase 1 実装記録: KO3 supersede 遷移 / KO9 `document_id` UUID + FK CASCADE）
 **証拠**〔確〕: 131行中 **94行（71.8%）**が `documents` に存在しない document_id を指す。
 `theory_components` に `document_id` の FK は無い（制約一覧に `course_id` / `created_by` /
 `primary_chunk_id` のみ）。同一論文の再解析ペアが名前一致14グループ・44行。
@@ -514,6 +520,7 @@ RE6（候補は読み時導出・embedding API を呼ばない）。ドメイン
 語彙追加が要る（migration 1本）。
 
 ### K-10 cartridge・atlas 骨格・L層ライブラリが「分野の語彙」を三重に持っている
+→ **2026-09-13 解消（役割分担の確定）**（Phase 3 O-4 = 概念名の正本は `library_entries`（レジストリ）・atlas 骨格は座標系・cartridge は `shape.json` による「形の宣言」（P3-7）。レジストリ ↔ 骨格は版非依存の `library_atlas_node_links`、cartridge 別名は `cartridge_declared` の正当化で流入。正本 `concept_registry_design.md` §3 / §8）
 **証拠**〔確〕: ④節の役割重複表。cartridge は alias 2件・notation 2件で実質未整備、
 しかも唯一効いている経路が誤爆（K-3）。atlas 骨格は 133 概念 + 157 ベクトルで稼働し、
 分野違いの検出（`unplaced_domains`）もできる。L層は凍結0で不稼働（K-4）。
@@ -525,6 +532,7 @@ RE6（候補は読み時導出・embedding API を呼ばない）。ドメイン
 **触れる不変条項**: 原則8（出所を混ぜない）・KN-2（正規化は追加）・KN-3（確定は人間）。
 
 ### K-11 `concept_normalizer` の適用先が空で、正規化が事実上走っていない
+→ **2026-09-13 前提解消・適用拡大は非スコープ**（Phase 1 KO4 で claim object 全件が `theory_claims` 行になり `normalize_concepts` の適用先が空でなくなった。component 側への適用拡大は Phase 3 でも行わず、代わりに正規化ラベル完全一致（`atlas_gaps.schema.normalize_label`）で同一性候補を決定論導出する — `concept_registry_design.md` §6）
 **証拠**〔確〕: `normalize_concepts` の呼び出し元は `routes/theory_components.py` の2箇所
 （claim の永続化時）のみ。`theory_claims` 28行の `concepts` は **全件 `[]`**。
 一方 artifact 側の claim（A 132 / B 107）には concepts があり、うち concepts 非空は
@@ -537,6 +545,7 @@ VA層の別名を登録しても、claim の正規化には届かない。
 **触れる不変条項**: KN-2（`name` を書き換えず `canonical` を併記）は現行実装が既に守っている。
 
 ### K-12 SKOS 相当の語彙がどこにも揃っていない
+→ **2026-09-13 解消**（Phase 3 P3-2 / P3-3: `knowledge_label_kinds`（preferred / alternate / hidden）・`knowledge_relation_kinds`（broader / related / exact_match / close_match）・`knowledge_mapping_justifications` の語彙表と `library_entry_labels` / `library_entry_relations` / `library_atlas_node_links` を migration 082 で新設。RDF 化はしない。正本 `concept_registry_design.md` §4）
 **現状の対応表**〔確〕:
 
 | SKOS 概念 | 今どこにあるか | 欠落 |

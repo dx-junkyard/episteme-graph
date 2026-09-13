@@ -169,6 +169,21 @@ class DecideEdgeCandidateRequest(BaseModel):
     review_note: str = Field(
         default="", description="判断の理由。見送り（dismiss）では必須（空は 422）"
     )
+    origin: str = Field(
+        default="",
+        description=(
+            "候補の出所（vector | co_occurrence）。"
+            "「なぜこの関係を立てられたか」の記録に変換する（概念レジストリ KR4）"
+        ),
+    )
+
+
+#: 候補の ``origin`` → ``mapping_justification``（概念レジストリ §4.6）。
+#: 語彙外・未指定は **記録しない**（推測で埋めない = KR4）。
+_JUSTIFICATION_BY_ORIGIN = {
+    edge_schema.ORIGIN_VECTOR: "vector_similarity",
+    edge_schema.ORIGIN_CO_OCCURRENCE: "corpus_cooccurrence",
+}
 
 
 class EdgeIncorporatePreviewRequest(BaseModel):
@@ -274,6 +289,9 @@ def decide_atlas_edge_candidate(
             actor_id=decided_by,
             review_note=str(body.review_note or ""),
             edge_kind=str(body.kind or ""),
+            mapping_justification=_JUSTIFICATION_BY_ORIGIN.get(
+                str(body.origin or "").strip()
+            ),
             record_audit=lambda **kwargs: pending_audits.append(dict(kwargs)),
         )
         if result is None:
