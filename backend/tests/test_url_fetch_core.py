@@ -619,3 +619,95 @@ class TestAllowlistCrud:
         session = CrudSession()
         assert url_fetch.remove_url_fetch_domain(session, "localhost") is False
         assert session.calls == []
+
+
+# ---------------------------------------------------------------------------
+# パーサ差分による allowlist / SSRF バイパス（回帰）
+# ---------------------------------------------------------------------------
+
+
+class TestAuthorityParserDivergence:
+    """``urlparse`` と、requests/urllib3 が送信時に使うパーサでホストが食い違う URL。
+
+    回帰: ``https://169.254.169.254\\@arxiv.org/x`` は ``urlparse`` では
+    ``arxiv.org``（userinfo は最後の ``@`` で分割）、urllib3 では
+    ``169.254.169.254``（``\\`` が authority の終端）になる。ガードは前者を検証し、
+    ソケットは後者へ繋ぐため、許可リストと内部アドレス検査の両方がすり抜けていた。
+    """
+
+    BYPASS_URL = "https://169.254.169.254\\@arxiv.org/x"
+
+    def test_backslash_authority_is_rejected(self, net):
+        session = net["install"](FakeResponse(body=PDF_BYTES))
+        net["resolve"]["arxiv.org"] = ["93.184.216.34"]
+        with pytest.raises(url_fetch.DomainNotAllowedError):
+            url_fetch.fetch_source_from_url(self.BYPASS_URL, ALLOWED)
+        # 1リクエストも飛ばさずに拒否する（検証前に接続しない）。
+        assert session.requested == []
+
+    def test_backslash_authority_in_redirect_is_rejected(self, net):
+        """悪意ある教員が不要なもう一方の経路 — 許可オリジンからの 302。"""
+        session = net["install"]({
+            "https://arxiv.org/start": FakeResponse(
+                status_code=302, headers={"Location": "https://127.0.0.1\\@arxiv.org/admin"}
+            ),
+        })
+        net["resolve"]["arxiv.org"] = ["93.184.216.34"]
+        with pytest.raises(url_fetch.DomainNotAllowedError):
+            url_fetch.fetch_source_from_url("https://arxiv.org/start", ALLOWED)
+        assert session.requested == ["https://arxiv.org/start"]
+
+    def test_plain_userinfo_still_resolves_to_the_real_host(self, net):
+        """``@`` だけの URL は従来どおり右側のホストとして扱い、拒否する。"""
+        net["install"](FakeResponse(body=PDF_BYTES))
+        with pytest.raises(url_fetch.DomainNotAllowedError):
+            url_fetch.fetch_source_from_url("https://arxiv.org@evil.com/x", ALLOWED)
+
+    def test_unbalanced_brackets_do_not_escape_as_valueerror(self, net):
+        """``parsed.hostname`` の ``ValueError`` を UrlFetchError へ畳む（500 回避）。"""
+        net["install"](FakeResponse(body=PDF_BYTES))
+        for url in ("https://arxiv.org]/x", "https://a[b].arxiv.org/x", "http://[::1/x"):
+            with pytest.raises(url_fetch.UrlFetchError):
+                url_fetch.fetch_source_from_url(url, ALLOWED)
+
+    def test_ordinary_url_is_unaffected(self, net):
+        """一致するかぎり従来どおり取得できる（過剰拒否していない）。"""
+        net["install"](FakeResponse(body=PDF_BYTES))
+        result = url_fetch.fetch_source_from_url("https://arxiv.org/pdf/1234.5678", ALLOWED)
+        assert result.source_kind == "pdf"
+
+
+class TestSharedAddressSpaceIsNotPublic:
+    """100.64.0.0/10（CGNAT / 共有アドレス空間）は外部扱いしない。
+
+    回帰: Python 3.13 で当該レンジが ``is_private`` から外れ、
+    ``is_loopback / is_link_local / is_reserved / is_multicast / is_unspecified``
+    のいずれにも該当しなくなったため、個別列挙だけの判定をすり抜けていた。
+    """
+
+    def test_cgnat_address_is_rejected(self, net):
+        session = net["install"](FakeResponse(body=PDF_BYTES))
+        net["resolve"]["arxiv.org"] = ["100.64.1.1"]
+        with pytest.raises(url_fetch.PrivateAddressError):
+            url_fetch.fetch_source_from_url("https://arxiv.org/x", ALLOWED)
+        assert session.requested == []
+
+    def test_public_addresses_are_still_allowed(self, net):
+        for ip in ("93.184.216.34", "8.8.8.8", "2606:4700:4700::1111"):
+            net["install"](FakeResponse(body=PDF_BYTES))
+            net["resolve"]["arxiv.org"] = [ip]
+            assert url_fetch.fetch_source_from_url("https://arxiv.org/x", ALLOWED).source_kind == "pdf"
+
+
+class TestBodyReadFailuresAreFolded:
+    def test_stream_failure_becomes_fetch_failed(self, net):
+        """本文読み出し中の requests 例外も UrlFetchError に畳む（500 回避）。"""
+
+        class _BrokenBody(FakeResponse):
+            def iter_content(self, chunk_size=None):
+                yield b"%PDF-1.7"
+                raise url_fetch.requests.exceptions.ChunkedEncodingError("boom")
+
+        net["install"](_BrokenBody(body=b""))
+        with pytest.raises(url_fetch.FetchFailedError):
+            url_fetch.fetch_source_from_url("https://arxiv.org/x", ALLOWED)

@@ -91,7 +91,10 @@ def test_atlas_domain_lifecycle_ui_present():
     assert 'id="atlas-domain-retire"' in html
     assert 'id="atlas-domain-restore"' in html
     assert 'id="atlas-domain-retired-note"' in html
-    assert "domainLifecycles[d.domain_key] = d.lifecycle" in js
+    # lifecycle は分野選択肢の共通ローダ（loadDomainOptions。教材アップロードの
+    # 「分野」行と共有）が読み、分野の地図タブ側が domainLifecycles へ写す。
+    assert "lifecycles[d.domain_key] = d.lifecycle" in js
+    assert 'domainLifecycles[k] = (options.lifecycles || {})[k] || "active"' in js
     assert "（廃止済み）" in js
     assert '"/atlas/retire"' in js
     assert '"/atlas/restore"' in js

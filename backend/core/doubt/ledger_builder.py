@@ -108,8 +108,8 @@ def _collect_targets(
     claim_rows = session.execute(
         sa_text("""
             SELECT id, claim_type, support_status, evidence_text, equation
-            FROM theory_claims
-            WHERE document_id = :doc
+            FROM theory_claims_live
+            WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
         """),
         {"doc": document_id},
     ).fetchall()
@@ -146,7 +146,7 @@ def _collect_targets(
         sa_text("""
             SELECT course_id, graph_json
             FROM theory_component_graphs
-            WHERE document_id = :doc
+            WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)
         """),
         {"doc": document_id},
     ).fetchall()
@@ -293,11 +293,12 @@ def _upsert_targets(session, targets: list[dict], document_id: str, course_id: s
                     (target_id, target_type, document_id, course_id,
                      verification_status, consensus_explicit, consensus_behavioral)
                 VALUES
-                    (:tid, :ttype, :doc, :course, :status,
+                    (:tid, :ttype, CAST(NULLIF(:doc, '') AS uuid), :course, :status,
                      CAST(:explicit AS jsonb), :behavioral)
                 ON CONFLICT (target_id, target_type) DO UPDATE SET
+                    -- migration 080 以降 document_id は uuid（未紐づけは '' ではなく NULL）。
                     document_id = CASE
-                        WHEN epistemic_ledger.document_id = '' THEN EXCLUDED.document_id
+                        WHEN epistemic_ledger.document_id IS NULL THEN EXCLUDED.document_id
                         ELSE epistemic_ledger.document_id END,
                     course_id = CASE
                         WHEN epistemic_ledger.course_id = '' THEN EXCLUDED.course_id
@@ -356,9 +357,11 @@ def backfill_all() -> dict:
     try:
         rows = session.execute(
             sa_text("""
-                SELECT DISTINCT document_id FROM theory_claims WHERE document_id <> ''
+                SELECT DISTINCT document_id::text FROM theory_claims_live
+                 WHERE document_id IS NOT NULL
                 UNION
-                SELECT DISTINCT document_id FROM theory_component_graphs WHERE document_id <> ''
+                SELECT DISTINCT document_id::text FROM theory_component_graphs
+                 WHERE document_id IS NOT NULL
             """)
         ).fetchall()
         document_ids = [str(r[0]) for r in rows]

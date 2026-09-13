@@ -136,9 +136,9 @@ def _resolve_row(
         row = session.execute(
             sa_text(
                 f"""
-                SELECT id::text AS id, document_id, source_scope
+                SELECT id::text AS id, document_id::text AS document_id, source_scope
                 FROM {table}
-                WHERE document_id = ANY(:doc_ids) AND ({where_clause})
+                WHERE document_id = ANY(CAST(:doc_ids AS uuid[])) AND ({where_clause})
                 ORDER BY (id::text = :raw_id) DESC, created_at ASC, id::text ASC
                 LIMIT 1
                 """

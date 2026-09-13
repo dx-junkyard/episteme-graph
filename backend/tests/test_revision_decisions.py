@@ -43,7 +43,12 @@ class _FakeSession:
         self.rolled_back = False
 
     def execute(self, statement, params=None):
-        self.sql.append(str(statement))
+        sql = str(statement)
+        self.sql.append(sql)
+        # artifact の生成ログ upsert（§6 / KO6）と live 行の SELECT（§5.2）は
+        # 「積んだ結果」を消費しない補助文なので、既定の空結果を返す。
+        if "document_analysis_artifacts" in sql or "superseded_at IS NULL" in sql:
+            return _FakeResult()
         return self._results.pop(0) if self._results else _FakeResult()
 
     def commit(self):
@@ -81,10 +86,11 @@ def test_accept_switches_active_and_records_decision(monkeypatch):
     assert session.committed is True
     joined = "\n".join(session.sql)
     assert "UPDATE documents" in joined and "IS NOT DISTINCT FROM" in joined
-    # all projections rebuilt in the same transaction
+    # all projections rebuilt in the same transaction（DELETE ではなく同期。KO3）
     assert "theory_component_graphs" in joined
-    assert "DELETE FROM theory_claims" in joined
-    assert "DELETE FROM theory_components" in joined
+    assert "DELETE FROM theory_claims" not in joined
+    assert "DELETE FROM theory_components" not in joined
+    assert "FROM theory_claims" in joined and "FROM theory_components" in joined
     assert "theory_review_events" in joined      # decision recorded
     assert "revision_status = 'accepted'" in joined
 

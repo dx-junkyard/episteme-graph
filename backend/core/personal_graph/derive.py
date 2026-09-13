@@ -53,6 +53,19 @@ def _truncate(text: str | None, limit: int = _TRACE_LABEL_LIMIT) -> str:
     return (text or "").strip()[:limit]
 
 
+def _payload(trace: dict) -> dict:
+    """痕跡行の ``payload`` を dict として取り出す（非 dict は ``{}`` に縮退）。
+
+    ``interest_traces.payload`` は JSONB なので、文字列・数値・真偽値といった JSON
+    スカラーも格納できてしまう。``trace.get("payload") or {}`` だけだと直後の
+    ``.get()`` で AttributeError になり、``routes/personal_map.py`` は例外を包まないため
+    **1行の壊れた payload で「わたしの地図」/ 近傍 / 旅がまるごと 500 になる**。
+    PN-7 は fail-closed（その行を導出対象から外す）を要求しているので、ここで畳む。
+    """
+    payload = trace.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
 def _sort_key(row: dict) -> tuple:
     """(created_at, id) の決定論順キー（§4）。両方とも文字列として辞書順比較する。"""
     return (str(row.get("created_at") or ""), str(row.get("id") or ""))
@@ -111,7 +124,7 @@ def _tension_anchor(
     topic 粒度へ縮退した場合の ``anchor_label`` はトピック題名（``topic_labels``、既定
     ``None``＝従来どおり空文字）。``_topic_anchor`` 参照。
     """
-    payload = trace.get("payload") or {}
+    payload = _payload(trace)
     if trace.get("status") == "connected":
         refs = payload.get("connected_refs") or {}
         component_ids = [str(c) for c in (refs.get("component_ids") or []) if c]
@@ -129,7 +142,7 @@ def _tension_node(
     *,
     topic_labels: dict[str, str] | None = None,
 ) -> PersonalNode:
-    payload = trace.get("payload") or {}
+    payload = _payload(trace)
     return PersonalNode(
         id=str(trace["id"]),
         node_kind=NODE_KIND_TENSION,
@@ -147,7 +160,7 @@ def _tension_bridge_edges(trace: dict) -> list[PersonalEdge]:
     （本人が connect 操作で明示的に指定した component_ids / edge_ids のみ。
     ``_tension_anchor`` と同じ理由で LLM 候補由来の ``target_refs`` は使わない・PN-3）
     の各要素へ橋を張る。"""
-    payload = trace.get("payload") or {}
+    payload = _payload(trace)
     refs = payload.get("connected_refs") or {}
     trace_id = str(trace["id"])
     edges: list[PersonalEdge] = []
@@ -188,7 +201,7 @@ def _question_anchor(
 
     戻り値は (anchor, attribution_source_for_source_meta)。
     """
-    payload = trace.get("payload") or {}
+    payload = _payload(trace)
     structure_anchor = payload.get("structure_anchor")
     if (
         isinstance(structure_anchor, dict)
@@ -215,7 +228,7 @@ def _question_node(
     *,
     topic_labels: dict[str, str] | None = None,
 ) -> PersonalNode:
-    payload = trace.get("payload") or {}
+    payload = _payload(trace)
     anchor, attribution_source = _question_anchor(trace, topic_atlas, topic_labels=topic_labels)
     return PersonalNode(
         id=str(trace["id"]),
@@ -356,7 +369,7 @@ def build_network(
     for trace in traces_sorted:
         kind = trace.get("kind")
         status = trace.get("status")
-        payload = trace.get("payload") or {}
+        payload = _payload(trace)
         if payload.get("map_excluded"):
             # 本人が「地図には反映しない」を選んだ痕跡（提案書 §6）。行は保持されるが
             # 個人ネットワークのノードにはしない（P4: 削除ではなく導出対象から外すだけ）。

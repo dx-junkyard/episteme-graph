@@ -210,11 +210,28 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-lecture-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-figure-studio.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-models.js",
+    # 分野の適合（概念レジストリ P3-7）。担体は admin.js の再解析モーダル側だが、
+    # 将来ここに操作要素が生えたときの登録漏れを検出するため対象に入れる。
+    ROOT / "frontend" / "public" / "js" / "admin-cartridge-fit.js",
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js",
+    ROOT / "frontend" / "public" / "js" / "admin-paper-discovery.js",
+    ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js",
+    # 束の取り込み（知識の転用層 P4-1）。モーダル本体とアンカー担体を持つ。
+    ROOT / "frontend" / "public" / "js" / "admin-knowledge-import.js",
+    ROOT / "frontend" / "public" / "js" / "admin-graph-review.js",
+    # DOM 非依存の音声エンジン（アンカー担体は admin-graph-review.js 側）。
+    # 将来ここに UI が生えたときの登録漏れを検出するため対象に入れる。
+    ROOT / "frontend" / "public" / "js" / "admin-voice-chat.js",
     ROOT / "frontend" / "public" / "js" / "admin-next-steps.js",
     ROOT / "frontend" / "public" / "js" / "admin-manual-editor.js",
     ROOT / "frontend" / "public" / "js" / "admin-discuss-observation.js",
     ROOT / "frontend" / "public" / "js" / "admin-llm-usage.js",
+    # 制度指標カタログの事実文（DOM は既存パネル側。将来ここに UI が生えたときの
+    # 登録漏れを検出するため対象に入れる）。
+    ROOT / "frontend" / "public" / "js" / "admin-indicators.js",
+    # 可視性6軸の事実文（DOM は各対話 UI 側。事実の段落であってアンカーは持たないが、
+    # 将来ここに操作要素が生えたときの登録漏れを検出するため対象に入れる）。
+    ROOT / "frontend" / "public" / "js" / "disclosure-note.js",
     ROOT / "frontend" / "public" / "js" / "versioning.js",
     ROOT / "frontend" / "public" / "js" / "deliberation.js",
     ROOT / "frontend" / "public" / "js" / "doubt-atlas.js",

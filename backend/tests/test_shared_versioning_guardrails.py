@@ -271,6 +271,24 @@ class TestAuditVocabulary:
     def test_audit_uses_review_events_table(self):
         assert "theory_review_events" in _AUDIT_SRC
 
+    def test_every_state_changing_operation_is_audited(self):
+        """原則14 — V層の状態変更（発行・予約・取消・purge・adopt）が全て記帳される。
+
+        六つのレンズ F11 は「版の adopt に記帳が無い」と読んだが、それは route 側の
+        `record_review_event` を grep した結果で、V層は CLAUDE.md が認めた core 直記帳
+        （`core/versioning/audit.py`）の経路で既に監査している。**route 側に足すと
+        1操作2行になる**ので、記帳はこの1箇所に保つ（回帰の検出をここで固定する）。
+        """
+        subs = (_CORE_DIR / "subscriptions.py").read_text(encoding="utf-8")
+        adopt = subs.split("def adopt_latest")[1].split("\ndef ")[0]
+        assert "audit.record_event(" in adopt
+        assert "schema.AUDIT_SUBSCRIPTION" in adopt
+        assert '"action": "adopt"' in adopt
+        # route は委譲するだけ（二重記帳しない）。
+        route_adopt = _ROUTE_SRC.split("def adopt_release")[1].split("\n@router")[0]
+        assert "record_review_event(" not in route_adopt
+        assert "subscriptions.adopt_latest(" in route_adopt
+
     def test_notification_kinds(self):
         for k in ("version_published", "deletion_scheduled", "deletion_cancelled", "deleted"):
             assert k in _SCHEMA_SRC, k

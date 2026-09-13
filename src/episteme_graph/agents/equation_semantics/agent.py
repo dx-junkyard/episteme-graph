@@ -14,6 +14,8 @@ from episteme_graph.agents.document_structure.schema import DocumentStructureRes
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+
 from .acceptance_gate import EquationAcceptanceGate
 from .cartridge_loader import CartridgeLoader
 from .fidelity import apply_fidelity_guards
@@ -341,13 +343,7 @@ class EquationSemanticsAgent:
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
             return None
-        try:
-            return self._cartridge_loader.load(cartridge_id)
-        except FileNotFoundError:
-            logger.warning(
-                "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-            )
-            return None
+        return load_cartridge_or_none(self._cartridge_loader, cartridge_id)
 
 
 def _apply_content_hashes(records: list[EquationRecord]) -> None:

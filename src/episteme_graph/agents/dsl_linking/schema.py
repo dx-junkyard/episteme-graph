@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 DSL_VERSION = "v1"
 
@@ -154,13 +155,6 @@ class DSLEdge:
     # Filled deterministically by cleanup when empty so it is never null.
     edge_type: str = ""
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

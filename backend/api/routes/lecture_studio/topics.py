@@ -9,14 +9,14 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN, _require_teacher
-from services import get_viewable_course_data
+from services import get_viewable_course_data, record_review_event
+from core.schema import AUDIT_ENTITY_COURSE_TOPIC
 from core.course_data import (
     course_chapters,
     course_source_material_ids,
@@ -31,8 +31,10 @@ from core.course_content_builder import (
     _required_figure_items,
     build_topic_evidence_items,
 )
+from core.document_pipeline.persistence import resolve_artifact_runs
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
+from core.llm_worker.single_shot import LLMSingleShotError, structured_call
 from core.postgres import get_session as _pg_session
 from core import element_explanations
 # 教材図スタジオ（teaching_figure_studio_design.md §7.3）: 原稿スタジオプレビューの
@@ -342,6 +344,33 @@ def _normalize_check_questions(value: object) -> list[dict]:
     return normalized
 
 
+#: 原稿スタジオのトピック保存が書き換えるフィールドと、その「空」の正規形
+#: （監査の ``changed_fields`` の母集合。保存は未指定フィールドを空で埋めるので、
+#: 未設定 → 空を「変更」と書かないために正規形で比較する）。本文そのものは監査に
+#: 載せず、**どのフィールドが変わったか**だけを列挙する（是正 F11）。
+_TOPIC_DRAFT_FIELD_EMPTY: dict[str, object] = {
+    "student_material": None,
+    "key_concepts": [],
+    "spoken_script": "",
+    "cautions": [],
+    "check_questions": [],
+}
+_TOPIC_DRAFT_FIELDS = tuple(_TOPIC_DRAFT_FIELD_EMPTY)
+
+
+def _topic_field_snapshot(topic: dict) -> dict[str, str]:
+    """保存前後の比較用に各フィールドを決定論的な文字列へ畳む（値は監査に出さない）。"""
+    snapshot: dict[str, str] = {}
+    for field, empty in _TOPIC_DRAFT_FIELD_EMPTY.items():
+        value = topic.get(field)
+        if value is None or value == [] or value == "":
+            value = empty
+        snapshot[field] = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, default=str
+        )
+    return snapshot
+
+
 @router.put("/courses/{course_id}/lecture-studio/course-topics/{topic_id}")
 def save_lecture_studio_course_topic(
     course_id: str,
@@ -354,6 +383,8 @@ def save_lecture_studio_course_topic(
     target = _find_course_topic(course_data, topic_id, body.get("chapter_index"), body.get("topic_index"))
     if target is None:
         raise HTTPException(status_code=404, detail="Topic not found")
+
+    before = _topic_field_snapshot(target)
 
     student_material = body.get("student_material")
     if isinstance(student_material, dict):
@@ -414,6 +445,25 @@ def save_lecture_studio_course_topic(
     finally:
         session.close()
 
+    # 原則14（是正 F11）: このトピック保存は**学習者に配信される**授業用教材・読み上げ原稿を
+    # 上書きし、副作用として当該トピックの生成済み音声を消す。誰がいつどのトピックの
+    # 何を変えたかを記帳する（本文は載せず、変わったフィールド名だけを列挙する）。
+    after = _topic_field_snapshot(target)
+    changed_fields = [f for f in _TOPIC_DRAFT_FIELDS if before.get(f) != after.get(f)]
+    record_review_event(
+        AUDIT_ENTITY_COURSE_TOPIC,
+        course_id,
+        "",
+        "edited",
+        current_user.get("id"),
+        {
+            "action": "topic_draft_saved",
+            "topic_id": topic_id,
+            "changed_fields": changed_fields,
+            # 保存の副作用（教員には保存前に告知される）も事実として残す。
+            "topic_audio_cache_invalidated": True,
+        },
+    )
     return {"course_id": course_id, "topic_id": topic_id, "status": "edited"}
 
 
@@ -475,35 +525,6 @@ class CourseTopicDraftLLMResponse(BaseModel):
     spoken_script: str = ""
     cautions: list[str] = Field(default_factory=list)
     check_questions: list[dict] = Field(default_factory=list)
-
-
-def _parse_course_topic_draft_json(raw: str) -> dict:
-    cleaned = (raw or "").strip()
-    if cleaned.startswith("```"):
-      lines = cleaned.split("\n")
-      lines = [ln for ln in lines if not ln.strip().startswith("```")]
-      cleaned = "\n".join(lines).strip()
-
-    candidates = [cleaned]
-    match = re.search(r"\{[\s\S]*\}", cleaned)
-    if match and match.group() != cleaned:
-        candidates.append(match.group())
-
-    for candidate in list(candidates):
-        # LLMs often emit LaTeX like \Lambda inside JSON strings. JSON only
-        # allows a small set of backslash escapes, so preserve those and
-        # double every other single backslash before a second parse attempt.
-        repaired = re.sub(r'\\(?!["\\/bfnrtu])', r"\\\\", candidate)
-        if repaired != candidate:
-            candidates.append(repaired)
-
-    for candidate in candidates:
-        try:
-            parsed = json.loads(candidate, strict=False)
-            return parsed if isinstance(parsed, dict) else {}
-        except json.JSONDecodeError:
-            continue
-    return {}
 
 
 def _normalize_course_topic_draft_response(parsed: object) -> dict:
@@ -590,29 +611,27 @@ def rewrite_lecture_studio_course_topic(
     parsed: object = {}
     consume_lecture_rewrite_quota(current_user["id"])
     with usage_context("admin:lecture_rewrite", user_id=current_user["id"], course_id=course_id):
+        # 構造化出力 → 失敗時のみテキスト JSON へ1回降格（共通実装
+        # ``core/llm_worker/single_shot.py::structured_call``。コース内容生成
+        # （core/course_content_builder.py）と同じ制御フロー）。本文に LaTeX が
+        # 混ざるため降格経路は ``repair_backslashes=True``。
         try:
-            parsed = generate_text_with_structured_output(
-                messages=[{"role": "user", "content": prompt}],
-                response_format=CourseTopicDraftLLMResponse,
+            parsed = structured_call(
+                prompt,
+                CourseTopicDraftLLMResponse,
+                structured_fn=generate_text_with_structured_output,
+                text_fn=generate_text,
                 model=effective_model,
+                text_fallback=True,
+                reasoning_effort=effective_effort,
+                repair_backslashes=True,
+                log_label=f"course topic draft course_id={course_id} topic_id={topic_id}",
             )
-        except Exception as structured_exc:
-            logger.warning(
-                "Structured course topic draft failed; retrying text JSON parse course_id=%s topic_id=%s error=%s",
-                course_id,
-                topic_id,
-                structured_exc,
+        except LLMSingleShotError:
+            logger.exception(
+                "AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id
             )
-            try:
-                raw = generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=effective_model,
-                    reasoning_effort=effective_effort,
-                )
-                parsed = _parse_course_topic_draft_json(raw)
-            except Exception:
-                logger.exception("AI course topic draft retry failed for course_id=%s topic_id=%s", course_id, topic_id)
-                raise HTTPException(status_code=502, detail="AI draft generation failed")
+            raise HTTPException(status_code=502, detail="AI draft generation failed")
     result = _normalize_course_topic_draft_response(parsed)
     if not any([
         result["key_concepts"],
@@ -700,6 +719,22 @@ def get_lecture_studio_document_structure(
                 "doc_title": r[3] or "",
             }
 
+    # --- Agent 復元済み文書構造は**採用 run** から読む（C-8）---------------
+    # 知識構造の見直し 2026-09-12 C-8: 以前はここだけ material ごとに
+    # ``ORDER BY created_at DESC LIMIT 1``（status 不問）の自前 SQL を発行していたため、
+    # 走行中の再解析 run の途中構造が原稿スタジオに出得た。成果物参照の正本
+    # ``resolve_artifact_runs``（adopted）に寄せ、ついでに N+1 セッションも解消する。
+    # 本エンドポイントは「解析済みの構造」を返すものなので、``analysis_status`` も
+    # 同じ採用 run の状態にする（採用 run が無ければ "not_started" = 出せる構造がまだない）。
+    doc_ids = sorted({m["document_id"] for m in mat_map.values() if m["document_id"]})
+    adopted_runs: dict[str, dict] = {}
+    if doc_ids:
+        session = _pg_session()
+        try:
+            adopted_runs = resolve_artifact_runs(session, doc_ids)
+        finally:
+            session.close()
+
     documents_out = []
     for source in sources:
         mid = source.get("material_id", "")
@@ -708,34 +743,14 @@ def get_lecture_studio_document_structure(
         mat = mat_map[mid]
         doc_id = mat["document_id"]
 
-        # --- Agent復元済み文書構造を取得 ---
         agent_structure = None
         analysis_status = "not_started"
-        if doc_id:
-            session = _pg_session()
-            try:
-                run_row = session.execute(
-                    sa_text("""
-                        SELECT status, stage_outputs
-                        FROM document_analysis_runs
-                        WHERE document_id = :doc_id
-                        ORDER BY created_at DESC
-                        LIMIT 1
-                    """),
-                    {"doc_id": doc_id},
-                ).fetchone()
-            finally:
-                session.close()
-            if run_row:
-                analysis_status = run_row[0] or "not_started"
-                stage_outputs = run_row[1] or {}
-                if isinstance(stage_outputs, str):
-                    try:
-                        stage_outputs = json.loads(stage_outputs)
-                    except Exception:
-                        stage_outputs = {}
-                artifacts = stage_outputs.get("_artifacts") or {}
-                agent_structure = artifacts.get("document_structure")
+        run_entry = adopted_runs.get(doc_id) if doc_id else None
+        if run_entry:
+            analysis_status = run_entry.get("status") or "not_started"
+            stage_outputs = run_entry.get("stage_outputs") or {}
+            artifacts = stage_outputs.get("_artifacts") or {}
+            agent_structure = artifacts.get("document_structure")
 
         # --- チャンクベースのフォールバック構造 ---
         chunks = _get_course_chunks(course_data)
@@ -803,7 +818,8 @@ def get_lecture_studio_components(
     component_filter = "course_id = :course_id"
     component_params: dict = {"course_id": course_id}
     if source_document_ids:
-        doc_placeholders = ", ".join(f":doc_{i}" for i in range(len(source_document_ids)))
+        # migration 080 以降 theory_components.document_id は uuid（バインドを明示キャストする）。
+        doc_placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(source_document_ids)))
         component_filter = f"({component_filter} OR document_id IN ({doc_placeholders}))"
         component_params.update({f"doc_{i}": doc_id for i, doc_id in enumerate(source_document_ids)})
 
@@ -818,7 +834,7 @@ def get_lecture_studio_components(
                        teacher_notes, source_scope, evidence_claims, maturity_level, maturity_source,
                        review_status, cautions, connectors, created_at, updated_at,
                        component_type_text, internal_flow, duplicate_candidates
-                FROM theory_components
+                FROM theory_components_live
                 WHERE {component_filter}
                 ORDER BY updated_at DESC, created_at DESC
             """),
@@ -867,7 +883,7 @@ def get_lecture_studio_components(
     try:
         graph_rows = session.execute(
             sa_text(f"""
-                SELECT document_id, graph_json, validation_results
+                SELECT document_id::text AS document_id, graph_json, validation_results
                 FROM theory_component_graphs
                 WHERE {component_filter}
                 ORDER BY updated_at DESC
@@ -896,7 +912,7 @@ def get_lecture_studio_components(
             status_rows = session.execute(
                 sa_text("""
                     SELECT status FROM document_analysis_runs
-                    WHERE document_id = ANY(:doc_ids)
+                    WHERE document_id = ANY(CAST(:doc_ids AS uuid[]))
                     ORDER BY created_at DESC
                     LIMIT 10
                 """),

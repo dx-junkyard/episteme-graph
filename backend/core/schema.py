@@ -49,6 +49,9 @@ class CorePredicate(str, Enum):
     REQUIRES = "REQUIRES"
     CONTAINS = "CONTAINS"
     EQUIVALENT = "EQUIVALENT"
+    # 知識オブジェクト層（knowledge_objects_design.md §7）: dsl_linking の
+    # CORE_PREDICATES（10 語彙）と正本を揃える。src 側は非改変で、包含はテストで固定。
+    PRODUCES = "PRODUCES"
 
 
 class MetaIssueCategory(str, Enum):
@@ -424,6 +427,12 @@ AUDIT_ENTITY_CITATION = "citation"
 AUDIT_ENTITY_TENSION = "tension"
 AUDIT_ENTITY_STRUCTURE_ANCHOR = "structure_anchor"
 
+# 誤解メモの本人レビュー（是正 F5 / 六つのレンズ 提案3, 2026-09-10）。
+# AI が候補として書いた誤解メモに対する本人の3択（agreed / disagreed / verdict_wrong）を
+# candidate → confirmed / dismissed の状態遷移として記帳する（tension と同型）。
+# 本人の逐語・訂正文そのものは載せない（metadata は decision / course_id / topic_id のみ）。
+AUDIT_ENTITY_MISCONCEPTION = "misconception"
+
 # 分野の地図（Field Atlas）
 AUDIT_ENTITY_ATLAS_SKELETON = "atlas_skeleton"
 AUDIT_ENTITY_ATLAS_ASSIST = "atlas_assist"
@@ -494,6 +503,58 @@ AUDIT_ENTITY_USER_ACCOUNT = "user_account"
 # metadata.action で区別, migration 070）
 AUDIT_ENTITY_URL_FETCH_DOMAIN = "url_fetch_domain"
 
+# 論文ディスカバリー層（arXiv 分野購読。購読の作成・更新 subscribe / 取り込み実行 ingest /
+# 見送り dismiss / 復帰 restore。metadata.action で区別, migration 071）
+AUDIT_ENTITY_PAPER_DISCOVERY = "paper_discovery"
+
+# 分野マップのベクトル係留層（アンカーベクトルの再構築 vectors_refresh / 別名の登録
+# alias_register・見送り alias_dismiss。metadata.action で区別, migration 074）
+AUDIT_ENTITY_ATLAS_VECTOR = "atlas_vector"
+
+# 分野マップの辺候補レビュー（atlas_relation_edges_design.md §8、migration 076）。
+# 辺候補の accept / dismiss / restore / mark_incorporated を記帳する。
+AUDIT_ENTITY_ATLAS_EDGE = "atlas_edge"
+
+# 開示範囲（visibility）の変更 — 教材（documents）とコース（learning_courses）の
+# public / group / private 切替。entity_id は material_id または course_id、
+# old_status / new_status に旧・新 visibility を入れる（metadata.object_type で区別）。
+# 公開は取り消しの効かない操作（一度出た資料は戻らない）なので、誰がいつどこへ開いたかを
+# 記帳する（原則14 監査可能性）。平文の資料本文・受講者情報は載せない。
+AUDIT_ENTITY_VISIBILITY = "visibility"
+
+# 教材の物理削除 — `DELETE /api/admin/materials/{material_id}`。教材本体とチャンク・
+# 解析成果・巻き添えコースを DB から実際に消す**不可逆**な操作で、V層の版・購読の
+# 後始末（teardown_versioning）はその後に走る。原則14（監査可能性）の穴として
+# 六つのレンズ 是正 F11 で塞いだ。entity_id は material_id、new_status="deleted"、
+# metadata に document_id / 巻き添えで消えたコース id を入れる（資料本文・タイトルは
+# 載せない — 監査は「誰が何を消したか」であって内容の写しではない）。
+AUDIT_ENTITY_MATERIAL = "material"
+
+# 原稿スタジオのコーストピック保存 — `PUT /api/admin/courses/{id}/lecture-studio/
+# course-topics/{topic_id}`。学習者に配信される授業用教材・読み上げ原稿を上書きし、
+# 副作用として当該トピックの生成済み音声を無効化する（是正 F11）。entity_id は
+# course_id、metadata に topic_id / 変更されたフィールド名の列挙を入れる
+# （本文そのものは載せない）。
+AUDIT_ENTITY_COURSE_TOPIC = "course_topic"
+
+# 外部への書き出し（export bundle）— `POST /api/{courses|documents}/{id}/export-bundle`。
+# 束は PDF 逐語の evidence スニペットと（オプションで）LLM 生出力を含んだまま
+# システムの外へ出て行き戻ってこないため、誰がいつ何を持ち出したかを記帳する
+# （六つのレンズ 提案4 = 是正 F10。entity_id は course_id / document_id、
+# new_status="exported"、metadata に export_id / object_type / document_ids /
+# options を入れる。資料本文・逐語引用そのものは監査に載せない）。
+AUDIT_ENTITY_EXPORT = "export"
+
+# 知識オブジェクト層（knowledge_objects_design.md KO10）: 再解析の supersede / 参照の
+# 再係留 / 語彙外型の丸めを記帳する。entity_id は document_id（run 単位の要約1行）。
+AUDIT_ENTITY_KNOWLEDGE_OBJECT = "knowledge_object"
+
+# 知識の転用層（knowledge_transfer_design.md KT8 / P4-1）: export bundle の取り込み。
+# entity_id は取り込み先 document_id、new_status="imported"、metadata に export_id /
+# 出所 document_ids / 束の sha256 / 件数（sync 統計）を入れる。束の本文・逐語引用は
+# 監査に載せない。取り込んだ人は束の中には書かず、この行の changed_by だけに残る。
+AUDIT_ENTITY_IMPORT = "import"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -503,6 +564,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_CITATION,
     AUDIT_ENTITY_TENSION,
     AUDIT_ENTITY_STRUCTURE_ANCHOR,
+    AUDIT_ENTITY_MISCONCEPTION,
     AUDIT_ENTITY_ATLAS_SKELETON,
     AUDIT_ENTITY_ATLAS_ASSIST,
     AUDIT_ENTITY_ATLAS_BINDING,
@@ -533,4 +595,148 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_CATEGORY_GAP,
     AUDIT_ENTITY_USER_ACCOUNT,
     AUDIT_ENTITY_URL_FETCH_DOMAIN,
+    AUDIT_ENTITY_PAPER_DISCOVERY,
+    AUDIT_ENTITY_ATLAS_VECTOR,
+    AUDIT_ENTITY_ATLAS_EDGE,
+    AUDIT_ENTITY_VISIBILITY,
+    AUDIT_ENTITY_MATERIAL,
+    AUDIT_ENTITY_COURSE_TOPIC,
+    AUDIT_ENTITY_EXPORT,
+    AUDIT_ENTITY_KNOWLEDGE_OBJECT,
+    AUDIT_ENTITY_IMPORT,
 )
+
+
+# ---------------------------------------------------------------------------
+# 知識オブジェクト層の型語彙（knowledge_objects_design.md §7 / KO7）
+#
+# DB 側は CHECK ではなく語彙表（knowledge_claim_types / knowledge_component_types）への
+# FK で守り、その語彙表は migration が **ここと同じ列挙** をシードする（一致は
+# test_knowledge_objects_vocab.py が固定）。新しい型を足すときはここに足し、同じ値を
+# migration の seed にも足す。LLM の自称は claim_type_text / component_type_text に残す。
+# ---------------------------------------------------------------------------
+
+#: theory_claims.claim_type の語彙（旧 CHECK 17 ∪ claim_object_builder の CLAIM_TYPE_ONTOLOGY ∪ unknown）。
+CLAIM_TYPES: tuple[str, ...] = (
+    "definition", "assumption", "approximation", "equation", "relation",
+    "derivation_step", "observable_definition", "correction", "uncertainty",
+    "limitation", "result", "diagnostic_claim", "equation_definition",
+    "equation_relation", "equation_transformation", "equation_approximation",
+    "equation_constraint", "criterion", "setup", "operator_relation",
+    "measurement_or_update", "causal_or_dependency_claim",
+    "incompatibility_or_constraint", "comparison", "conclusion", "method_choice",
+    "background", "prior_work", "meta", "problem_statement", "method_motivation",
+    "theory_encoding", "method", "structural_property", "derivation_result",
+    "main_result", "interpretation", "unknown",
+)
+
+#: claim の階層（claim_qualification.schema.CLAIM_TIERS と同じ列挙・src 側非改変）。
+CLAIM_TIERS: tuple[str, ...] = ("paper_core", "paper_supporting", "background", "prior_work", "meta")
+
+#: theory_components.component_type の語彙（旧 CHECK 9 ∪ cartridge component_types.json ∪ unknown）。
+COMPONENT_TYPES: tuple[str, ...] = (
+    "theory", "concept", "law", "mechanism", "operator", "observation",
+    "apparatus", "instrument", "part",
+    "DomainConceptComponent", "DomainTheoryComponent", "DomainMethodComponent",
+    "DomainAssumptionComponent", "DomainObservableComponent", "PaperClaimComponent",
+    "PaperHypothesisComponent", "PaperRelationComponent", "PaperCorrectionComponent",
+    "PaperUncertaintyComponent", "PaperEvidenceComponent", "unknown",
+)
+
+#: theory_claims.origin — この claim 行がどの経路で生まれたか（§5.4）。
+CLAIM_ORIGIN_SPAN = "span"
+CLAIM_ORIGIN_CLAIM_OBJECT = "claim_object"
+CLAIM_ORIGIN_ATOMIC_REWRITE = "atomic_rewrite"
+CLAIM_ORIGIN_EQUATION_SYNTHESIS = "equation_synthesis"
+CLAIM_ORIGINS: tuple[str, ...] = (
+    CLAIM_ORIGIN_SPAN,
+    CLAIM_ORIGIN_CLAIM_OBJECT,
+    CLAIM_ORIGIN_ATOMIC_REWRITE,
+    CLAIM_ORIGIN_EQUATION_SYNTHESIS,
+)
+
+#: element_id_remap.object_kind / stable_key の種別接頭辞。
+KNOWLEDGE_OBJECT_KINDS: tuple[str, ...] = (
+    "claim", "component", "equation", "evidence", "derivation_step", "symbol",
+)
+
+#: 学ぶ単位（learning_units.unit_kind）の語彙（learning_units_design.md §4 / 親文書 P2-1）。
+#: DB は CHECK ではなく語彙表 ``knowledge_unit_kinds`` への FK（KO7 と同じ作法）。
+#: - section_block: paper_skeleton の logical_block（章立ての論理ブロック）
+#: - thesis_support: thesis_reconstruction の central_thesis / support_structure の 1 項
+#: - parent_component: component_assembly の LLM 原案 component（決定論分割前の親）
+#: - dsl_node: dsl_linking のノード（Phase 3 概念レジストリの材料。コースビルダーには出さない）
+#: - figure: figure_table_semantics の図
+LEARNING_UNIT_KINDS: tuple[str, ...] = (
+    "section_block", "thesis_support", "parent_component", "dsl_node", "figure",
+)
+
+#: 学ぶ単位の確定状態（人間の確定列・supersede 時に保持）。candidate 始まり・行削除なし。
+LEARNING_UNIT_REVIEW_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "dismissed")
+
+#: コースビルダーへ候補として提示する unit 種別（dsl_node は概念レジストリ側の材料で、
+#: 章立て候補としては粒度が細かすぎるため出さない）。
+LEARNING_UNIT_KINDS_FOR_COURSE: tuple[str, ...] = (
+    "section_block", "thesis_support", "parent_component", "figure",
+)
+
+
+# ---------------------------------------------------------------------------
+# 概念レジストリの語彙（concept_registry_design.md §4.1 / KR2・KR4）
+#
+# DB 側は CHECK ではなく語彙表（knowledge_entry_types / knowledge_label_kinds /
+# knowledge_relation_kinds / knowledge_mapping_justifications）への FK で守り、その
+# 語彙表は migration 082 が **ここと同じ列挙** をシードする（一致は
+# test_concept_registry_vocab.py が固定）。日本語ラベルの正本は
+# core/library/schema.py の 5 表（フロントは逐語ミラー）。
+#
+# 新しい監査 entity_type は作らない — 概念レジストリの記帳は既存の
+# AUDIT_ENTITY_LIBRARY_ENTRY を流用する（action 語彙は core/library/schema.py の
+# REGISTRY_AUDIT_ACTIONS）。
+# ---------------------------------------------------------------------------
+
+#: library_entries.entry_type の語彙（既存2 + 概念レジストリの7）。
+#: core/library/schema.py::ENTRY_TYPES はここからの再エクスポート（二重定義しない）。
+LIBRARY_ENTRY_TYPES: tuple[str, ...] = (
+    "apparatus", "theory_component", "concept", "theory", "method",
+    "observable", "assumption", "quantity", "process",
+)
+
+#: library_entry_labels.kind（SKOS の prefLabel / altLabel / hiddenLabel）。
+#: preferred は library_entries.name が正本なので**行にしない**（語彙としては持つ）。
+CONCEPT_LABEL_KINDS: tuple[str, ...] = ("preferred", "alternate", "hidden")
+
+#: library_entry_relations.kind / library_atlas_node_links.kind（SKOS の broader /
+#: related / exactMatch / closeMatch）。node リンクは exact_match / close_match のみを
+#: コード側（core/library/registry.py）が強制する。
+CONCEPT_RELATION_KINDS: tuple[str, ...] = (
+    "broader", "related", "exact_match", "close_match",
+)
+
+#: 「なぜ同じと言えたか」の語彙（KR4）。候補・確定の書き込みは必ずこれを伴う。
+#: llm_candidate は「既存の LLM 由来候補に付ける語彙」であって、本層が LLM を呼ぶ
+#: ことではない（KR5: 概念レジストリのコードは core.llm を import しない）。
+MAPPING_JUSTIFICATIONS: tuple[str, ...] = (
+    "manual_curation", "lexical_match", "vector_similarity",
+    "cartridge_declared", "corpus_cooccurrence", "llm_candidate",
+)
+
+
+# ---------------------------------------------------------------------------
+# 引用の意図（knowledge_transfer_design.md §8 / X-7・CiTO の最小語彙）
+#
+# `component_citations.citation_intent`（migration 083）の許可語彙。教員が引用時に
+# 任意で選ぶ。NULL = 記録なし（既存行は推測で埋めない）。日本語ラベルは
+# `core/label_vocab.py::CITATION_INTENT_LABELS`。
+# ---------------------------------------------------------------------------
+CITATION_INTENTS: tuple[str, ...] = (
+    "uses_as_evidence",      # 根拠として使う
+    "extends",               # 発展させる
+    "qualifies",             # 条件を付ける・限定する
+    "contrasts_with",        # 対比する
+    "cites_for_background",  # 背景として引く
+)
+
+#: library_entries.review_status（候補 → 教員の確定。status='retired' とは別軸）。
+#: candidate の行は凍結できない（= パイプライン retrieval にも学習者にも届かない。KR2）。
+CONCEPT_REVIEW_STATUSES: tuple[str, ...] = ("candidate", "confirmed", "dismissed")

@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
+import dataclasses
 import base64
+import json
 import logging
 import re
 import threading
 import uuid
 from contextlib import nullcontext
 from dataclasses import asdict
+from functools import lru_cache
 from typing import Callable
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import text as sa_text
 
 from dependencies import _get_current_user
+from quota import consume_daily_quota
 from schemas import (
     ChunkContent,
     CourseCreateRequest,
@@ -23,8 +27,11 @@ from schemas import (
     LearningChatHistoryResponse,
     LearningChatRequest,
     LearningChatResponse,
+    LearningCheckObservation,
     LearningCheckQuestionRequest,
     LearningCheckQuestionResponse,
+    LearningCheckSelfCheckRequest,
+    LearningCheckSelfCheckResponse,
     LearningCourseDetail,
     LearningCourseLayeredResponse,
     LearningCourseOut,
@@ -67,8 +74,11 @@ from services import (
     record_internalization,
     record_interest_trace,
     record_learner_articulated_tension,
-    record_student_stumble_event,
+    record_review_event,
     record_topic_check_pass,
+    review_personal_misconception,
+    MISCONCEPTION_DECISIONS,
+    resolve_document_access,
     resolve_interest_trace,
     save_course_data,
     set_trace_map_exclusion,
@@ -81,25 +91,42 @@ from services import (
 )
 from pydantic import BaseModel
 from core.course_data import (
+    course_cartridge_id,
     course_focus,
     course_llm_models,
     course_source_material_ids,
     course_title as _course_title,
     course_topics,
     find_course_topic,
+    is_symbol_concept_name,
     iter_all_topics,
+    learner_topic_units_projection,
+    topic_unit_keys,
 )
 from core.teaching_figures import store as teaching_figures_store
+from core import decision_context
+from core.course_prerequisites import resolve_prerequisite_topic_ids
+from core.course_units import candidate_keys, list_unit_candidates, resolve_unit_handles
+from core.schema import AUDIT_ENTITY_COURSE_TOPIC
+from core.cartridges import load_cartridge
 from core.config import get_settings
 from core.lecture import find_figure_embed_ids, resolve_figure_embeds
+from core import check_review
 from core import element_explanations
 from core import llm_policy
-from core.llm import generate_text, get_llm_params, transcribe_audio
+from core.llm import (
+    generate_text,
+    generate_text_stream,
+    get_llm_params,
+    transcribe_audio,
+)
 from core.storage import get_storage_client
 from core.llm_usage.context import usage_context
 from core.llm_worker.client import resolve_model
-from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.cost_gate import CostGate
 from core.llm_worker.history import window_history
+from core.llm_worker.single_shot import json_call
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.tts import generate_tts_audio, strip_text_for_speech
 from core.learning_experience import (
     TIER_OUT_OF_SOURCE,
@@ -110,6 +137,26 @@ from core.learning_experience import (
     out_of_source_notice,
     tier_floor,
 )
+from core.learning_stance.heuristic import prejudge as prejudge_stance_route
+from core.learning_stance.schema import build_stance_dto, resolve_stance
+# 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11）: 画面が渡した
+# 参照を正規化し、route が組んだ権限ゲート済み sources から事実文ブロックを描く。
+# 解決器は core 側（決定論・非LLM・読み取り専用）。
+from core.assistant_context import (
+    BLOCK_HEADER_LEARNING,
+    BLOCK_HEADER_RETRIEVED,
+    MAX_BLOCK_CHARS_LEARNING,
+    SCREEN_LEARNING,
+    normalize_screen_context,
+    render_block,
+    render_selection_block,
+    resolve as resolve_screen_context,
+)
+from core.assistant_context.schema import (
+    LEARNING_ELEMENT_TYPES,
+    LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+    MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE,
+)
 from core.learning_support_agent import (
     LearningSupportAgent,
     LearningSupportResult,
@@ -118,25 +165,41 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.component_context import build_component_context
+# 知識の転用層 P4-2: 理論操作グラフの読み出しは W層の既存関数を再利用する
+# （main 層ノードの review_status 合成も含め、二重実装しない）。
+from core.deliberation.graph_dialogue import load_latest_graph
 from core.element_context import (
     SUPPORTED_ELEMENT_TYPES as CONTEXT_ELEMENT_TYPES,
     build_element_context,
 )
+# 概念レジストリ P3-5（concept_registry_design.md §7）: 記号の「直前の定義」。
+# 読み取り専用・LLM 0 回・コース sources へ SQL 内でスコープ強制する。
+from core.symbol_lookup import lookup_symbol_definition
 from core.discuss.opening import build_opening as build_discussion_opening
 from core.discuss.mirroring import extract_mirror
+# コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.1）: コース無し論文議論の
+# 会話コンテキスト・センチネル。**"_doc:" の組み立て・判定はこの正本関数以外に書かない**。
+from core.discuss.context import document_context_id, parse_document_context
+from core.discuss import observation as discuss_observation
 from core.cycle.derive import build_intention_dto
 from core.cycle.queries import fetch_active_carryover, fetch_intentions
-from core.course_content_builder import build_course_content_background, build_topic_evidence_items
+from core.course_content_builder import (
+    build_course_content_background,
+    build_topic_evidence_items,
+    normalize_evidence_id,
+)
 from core.atlas_path import build_learning_path_card
 from core.tension.prefilter import judge_tension_hint
 from core.tension.worker import maybe_schedule_tension_mining
 from core.structure_anchor.schema import (
     ANCHOR_TYPE_LABELS,
+    ANCHOR_TYPES,
     ATTRIBUTION_LEARNER_SELECTED,
     DOUBT_TYPE_LABELS,
     anchor_type_for_element,
     build_anchor_payload,
 )
+from core.structure_anchor.selection_segment import resolve_selection_segment
 from core.structure_anchor.worker import (
     check_and_count_confirm_prompt,
     maybe_schedule_anchor_mining,
@@ -155,6 +218,14 @@ from routes.lecture import (
 # 教材図スタジオ（teaching_figure_studio_design.md §7.2）: 学習者向け・教員向けの図配信が
 # 同じ SVG セキュリティヘッダ（nosniff + CSP sandbox）を通るよう、Response 組み立ての
 # 正本を共有する（定義を二重化しない・FG3）。
+# 画面文脈アダプター Phase 4（§11.3「生テーブルを引かない」）: 台帳・配置の**学習者向け
+# 射影**は各エンドポイントと同じ関数を通す（遮断を2箇所に書かない）。private helper の
+# クロスルーター再利用は routes.lecture / routes.teaching_figures と同じ既存パターン。
+from routes.doubt import learner_ledger_line
+from routes.landscape import learner_landscape_for_documents
+# agent 側 ID（DB 行を持たない集約ノード等）を台帳の照会に流さないための事前判定。
+# 正本は routes/theory_components.py（定義を二重化しない）。
+from routes.theory_components import _is_db_uuid
 from routes.teaching_figures import (
     STATUS_ADOPTED as TEACHING_FIGURE_STATUS_ADOPTED,
     figure_image_response,
@@ -201,6 +272,10 @@ router = APIRouter(prefix="/api/learning", tags=["Learning"])
 # 痕跡 context_label 用のラベル変換は topic_title 決定の1箇所でのみ行う。
 DISCUSSION_TOPIC_ID = "_discussion"
 DISCUSSION_TOPIC_LABEL = "論文との議論"
+# コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.4）: コースを経由しない
+# document 直付けの議論は、表示・プロンプト・痕跡 context_label すべてで「コース外」だと
+# 正直に名乗る（コース経路のラベルと取り違えさせない）。
+DOCUMENT_DISCUSSION_TOPIC_LABEL = "論文との議論（コース外）"
 
 # discuss 開幕画面の「このコースで議論したいこと」（Phase 0b）の入力上限。
 # 開幕画面の先頭に地の文として出す短い提示なので、長文（教材本文の代替）にはさせない。
@@ -216,6 +291,10 @@ _MAX_COURSE_FOCUS_CHARS = 600
 # ---------------------------------------------------------------------------
 _learning_chat_cost_gate = CostGate()
 
+#: LLM 失敗時の degraded 固定文（設計書 I3「会話は死なせない」）。チャット本体と
+#: グラフ要素説明の2経路が同じ文を返す（経路ごとに言い換えない）。
+_CHAT_DEGRADED_MESSAGE = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+
 
 def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
     """そのリクエストで最初に LLM を呼ぶ直前に1回だけコスト上限を消費するヘルパー。
@@ -226,20 +305,14 @@ def _consume_learning_chat_quota(user_id: str, quota_state: dict) -> None:
     要素タップ等）からはそもそも呼ばれないため消費されない。超過時は 429（事実文のみ・
     数値非表示, I2）。
     """
-    if quota_state.get("consumed"):
-        return
-    quota_state["consumed"] = True
     settings = get_settings()
-    limit = int(getattr(settings, "learning_chat_max_calls_per_day", 300) or 0)
-    ok = _learning_chat_cost_gate.check_and_count(
-        daily_limit=limit,
-        daily_key=(today_str(), user_id),
+    consume_daily_quota(
+        _learning_chat_cost_gate,
+        user_id=user_id,
+        limit=int(getattr(settings, "learning_chat_max_calls_per_day", 300) or 0),
+        message="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
+        quota_state=quota_state,
     )
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="本日のAI呼び出し回数の上限に達しました。明日以降に再度お試しください。",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -261,12 +334,195 @@ def _validate_visibility(visibility: str, group_id: str | None, user_id: str) ->
             )
 
 
+# ---------------------------------------------------------------------------
+# 学ぶ単位の一級化 Phase 2（learning_units_design.md §6.2 / §6.4 / §7）:
+# コース登録 = 「提示された unit 候補のうち topic に束ねたもの」の一括確定。
+# ---------------------------------------------------------------------------
+
+#: 登録後に unit の束ねを直す経路（原稿スタジオのトピック保存）。decision_context の reopen。
+_COURSE_TOPIC_REOPEN_PATH = "PUT /api/admin/courses/{course_id}/lecture-studio/course-topics/{topic_id}"
+
+
+def _ordered_source_document_ids(session, material_ids: list[str]) -> list[str]:
+    """sources の material_id 順に document.id（テキスト）を返す。
+
+    handle（U1..Un）は document 順に依存するため、コースビルダーの
+    ``_build_material_context`` と同じ **material_ids の順**で並べる（設計書 §6.2）。
+    解決できない material は落とす（推測しない）。
+    """
+    ordered = [str(m).strip() for m in (material_ids or []) if str(m or "").strip()]
+    if not ordered:
+        return []
+    placeholders = ", ".join(f":mid_{i}" for i in range(len(ordered)))
+    rows = session.execute(
+        sa_text(
+            f"SELECT source_path, id::text AS doc_id FROM documents "
+            f"WHERE source_path IN ({placeholders})"
+        ),
+        {f"mid_{i}": mid for i, mid in enumerate(ordered)},
+    ).fetchall()
+    by_material = {str(r[0]): str(r[1]) for r in rows if r and r[0] and r[1]}
+    return list(dict.fromkeys(by_material[m] for m in ordered if m in by_material))
+
+
+def _bind_topic_units(session, data: dict) -> tuple[list[dict], dict]:
+    """``topics[].units``（handle の配列）を候補表で解決し、決定文脈の材料を返す。
+
+    戻り値の第2要素は ``{"presented": [参照キー...], "applied": [参照キー...],
+    "unresolved": bool}``。候補に無い handle は捨てる（LU3）。候補がゼロ（解析済みの
+    unit が無い）なら units は空のまま・presented も空で、呼び出し側は記帳しない（LU7 / DC3）。
+    """
+    topics = [dict(t) for t in (data.get("topics") or []) if isinstance(t, dict)]
+    document_ids = _ordered_source_document_ids(session, course_source_material_ids(data))
+    candidates = list_unit_candidates(session, document_ids) if document_ids else []
+    applied: list[str] = []
+    unresolved = False
+    for topic in topics:
+        raw = topic.get("units")
+        requested = [u for u in raw if isinstance(u, (str, dict))] if isinstance(raw, list) else []
+        resolved = resolve_unit_handles(candidates, requested) if candidates else []
+        if len(resolved) < len(requested):
+            unresolved = True
+        topic["units"] = resolved
+        applied.extend(topic_unit_keys(topic))
+    info = {
+        "presented": candidate_keys(candidates),
+        "applied": list(dict.fromkeys(k for k in applied if k)),
+        "unresolved": unresolved,
+    }
+    return topics, info
+
+
+def _record_course_registration(course_id: str, user_id: str, info: dict) -> None:
+    """コース登録を一括確定として記帳する（設計書 §7・O-3(a)）。
+
+    候補が提示されていないときは呼ばない（代替の無い確定は記帳できない = DC3）。
+    新 entity_type は作らず ``AUDIT_ENTITY_COURSE_TOPIC`` に course 単位で 1 行。best-effort。
+    """
+    try:
+        ctx = decision_context.build_decision_context(
+            basis=decision_context.BASIS_COURSE_REGISTER_UNITS,
+            presented_ids=info.get("presented") or [],
+            applied_ids=info.get("applied") or [],
+            # コースビルダーでは下書きを編集してから登録でき、unit は topic から外せる。
+            alternatives=(decision_context.ALT_EDIT, decision_context.ALT_DESELECT),
+            reopen_path=_COURSE_TOPIC_REOPEN_PATH,
+            # unit の確定状態は candidate 始まりで、登録後も候補のまま見直せる（LU2）。
+            reopen_statuses=("candidate",),
+            # 候補区画に根拠（逐語）が出ていたかはサーバから検証できない（DC4）。
+            evidence_shown=None,
+        )
+        metadata = decision_context.attach_decision_context(
+            {
+                "action": "course_register",
+                "object_type": "course",
+                "course_id": course_id,
+                # 選ばれた handle のうち候補に無かったものを捨てた事実（件数は載せない・LU5）。
+                "unit_handles_unresolved": bool(info.get("unresolved")),
+            },
+            ctx,
+        )
+        record_review_event(
+            AUDIT_ENTITY_COURSE_TOPIC, course_id, "draft", "registered", user_id, metadata,
+        )
+    except Exception:  # noqa: BLE001 — 記帳の失敗で登録を止めない
+        logger.warning("course registration decision_context not recorded: course=%s", course_id, exc_info=True)
+
+
+def _project_topics_for_learner(data: dict) -> dict:
+    """学習者向け DTO 用に ``topics[].units`` を ``kind`` / ``label`` だけへ射影したコピーを返す
+    （設計書 §6.1 / KO10: 参照キー・unit_id・source を学習者に出さない）。保存データは変更しない。"""
+    if not isinstance(data, dict):
+        return data
+    out = dict(data)
+
+    def _project(topic):
+        if not isinstance(topic, dict) or "units" not in topic:
+            return topic
+        projected = dict(topic)
+        projected["units"] = learner_topic_units_projection(topic)
+        return projected
+
+    if isinstance(out.get("topics"), list):
+        out["topics"] = [_project(t) for t in out["topics"]]
+    if isinstance(out.get("chapters"), list):
+        chapters = []
+        for ch in out["chapters"]:
+            if isinstance(ch, dict) and isinstance(ch.get("topics"), list):
+                ch = dict(ch)
+                ch["topics"] = [_project(t) for t in ch["topics"]]
+            chapters.append(ch)
+        out["chapters"] = chapters
+    return out
+
+
+def _split_symbol_concepts(concepts: list) -> tuple[list, list[str]]:
+    """概念マップから記号を除き ``(残した概念, 除いた名前)`` を返す（案 E）。
+
+    正本: ``docs/features/claim_concept_grounding_design.md`` §8 / CG6「記号は概念に
+    しない」。判定は A層 P0-3 に委譲する共通述語 ``course_data.is_symbol_concept_name``
+    のみで行い、ここで第2の正規表現・分野語のリストを持たない。
+
+    - ``name`` が記号なら、その概念（と配下の ``children``）を概念マップから外す。
+    - ``name`` は概念でも ``children[]`` に記号が混じっていれば、その子だけを外して
+      概念自体は残す（除去の粒度を概念単位に丸めない）。
+    - 除いた名前は捨てずに出現順・重複除去で返す（CG5「情報を落とさない」）。呼び出し側が
+      ``data.excluded_symbol_concepts`` に残す。**学習者には出さない**。
+
+    入力は mutate せず、新しい list / dict を返す。
+    """
+    kept: list = []
+    excluded: list[str] = []
+
+    def _exclude(name: object) -> None:
+        token = str(name or "").strip()
+        if token and token not in excluded:
+            excluded.append(token)
+
+    for concept in concepts or []:
+        if not isinstance(concept, dict):
+            # 想定外の形（文字列など）は判定だけ掛けて素通しする（情報を落とさない）。
+            if is_symbol_concept_name(concept):
+                _exclude(concept)
+            else:
+                kept.append(concept)
+            continue
+        if is_symbol_concept_name(concept.get("name")):
+            _exclude(concept.get("name"))
+            for child in concept.get("children") or []:
+                _exclude(child)
+            continue
+        children = concept.get("children")
+        if isinstance(children, list):
+            kept_children = []
+            for child in children:
+                if is_symbol_concept_name(child):
+                    _exclude(child)
+                else:
+                    kept_children.append(child)
+            if len(kept_children) != len(children):
+                concept = dict(concept)
+                concept["children"] = kept_children
+        kept.append(concept)
+
+    return kept, excluded
+
+
 @router.post("/courses", response_model=LearningCourseOut, status_code=201)
 def create_course(
     body: CourseCreateRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCourseOut:
-    """新しいコースを作成する。"""
+    """新しいコースを作成する。
+
+    学ぶ単位の一級化 Phase 2: ①前提を同コース topic の ID 参照に（`resolve_prerequisite_topic_ids`、
+    正規化題名の完全一致のみ）②`topics[].units` の handle を候補表で解決（候補に無い handle は
+    捨てる）③候補が提示されていたときだけ登録を一括確定として `decision_context` 付きで記帳する。
+    いずれも非LLM・保存前の決定論処理で、失敗しても登録は止めない。
+
+    主張の概念接地（案 E）: ④学習者の概念マップから記号を除き、除いた名前を
+    ``data.excluded_symbol_concepts`` に残す（`claim_concept_grounding_design.md` §8）。
+    """
     _validate_visibility(body.visibility, body.group_id, current_user["id"])
     course_id = str(uuid.uuid4())[:8]
 
@@ -280,6 +536,32 @@ def create_course(
         "referenced_sections": [],
     }
 
+    # 案 E（claim_concept_grounding_design.md §8 / CG6）: 学習者の概念マップに記号を
+    # 出さない。除いた名前は捨てずに残す（CG5）。決定論・LLM 0 回。
+    data["concepts"], excluded_symbol_names = _split_symbol_concepts(data["concepts"])
+    if excluded_symbol_names:
+        data["excluded_symbol_concepts"] = excluded_symbol_names
+
+    # P2-4: 前提を ID 参照に（入力を mutate せず新しい list を返す）。
+    try:
+        data["topics"] = resolve_prerequisite_topic_ids(data["topics"])
+    except Exception:  # noqa: BLE001 — 解決できなくても名前は残る（LU1）
+        logger.warning("prerequisite topic_id resolution failed: course=%s", course_id, exc_info=True)
+
+    # P2-3 / P2-5: unit handle の解決と一括確定の材料。
+    units_info: dict | None = None
+    session = _pg_session()
+    try:
+        data["topics"], units_info = _bind_topic_units(session, data)
+    except Exception:  # noqa: BLE001 — 候補表が読めなくても登録は止めない（LU8）
+        logger.warning("unit handle resolution failed: course=%s", course_id, exc_info=True)
+        for topic in data["topics"]:
+            if isinstance(topic, dict) and "units" in topic:
+                # 解決できなかった handle は意味を持たないので保存しない（学習者へ内部 ID を出さない）
+                topic["units"] = []
+    finally:
+        session.close()
+
     save_course_data(
         current_user["id"],
         course_id,
@@ -289,6 +571,10 @@ def create_course(
         group_id=body.group_id if body.visibility == "group" else None,
         description=body.description,
     )
+
+    # 候補が提示されていたときだけ「一括確定」として記帳する（LU7 / DC3）。
+    if units_info and units_info.get("presented"):
+        _record_course_registration(course_id, current_user["id"], units_info)
 
     threading.Thread(
         target=build_course_content_background,
@@ -541,7 +827,9 @@ def get_course(
 
     personal = get_personal_layer(current_user["id"], course_id)
     return LearningCourseLayeredResponse(
-        master_course=LearningCourseDetail(**_with_resolved_source_titles(data)),
+        master_course=LearningCourseDetail(
+            **_project_topics_for_learner(_with_resolved_source_titles(data))
+        ),
         personal_layer=PersonalLayer(**personal),
     )
 
@@ -771,9 +1059,13 @@ def _is_greeting(message: str) -> bool:
 #   - 「UI・システム参照語」と「使い方の問い形」の**組み合わせ**でのみ真にする
 #     （どちらか片方だけでは弱すぎる誤爆源になる）。「使い方」は参照語・問い形の
 #     両方に置く（「使い方を教えて」単体で成立させるための意図的な重複）。
-#   - 教材内容の質問（数式・物理概念）は誤爆コストの方が大きいため、UI参照語と
-#     問い形が両方揃っていても、数式・物理用語らしき語（_CONTENT_QUESTION_TERMS）が
-#     共起していれば偽に倒す（例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - 教材内容の質問は誤爆コストの方が大きいため、UI参照語と問い形が両方揃っていても、
+#     学術教材の内容語らしき語（_CONTENT_QUESTION_TERMS）が共起していれば偽に倒す
+#     （例: 「この式はどう使うの」「運動方程式の使い方」）。
+#   - **この語彙に特定分野（物理など）の用語を書かない**（このシステムは分野を限定
+#     しない）。分野固有の語は、コースのカートリッジ ontology から読み時に足す
+#     （:func:`_cartridge_content_terms`）。カートリッジが無い／読めない分野でも
+#     下の分野非依存語だけで判定が成立する（フェイルソフト）。
 #   - メッセージが長い（雑談・複合質問らしい）場合も偽にする（保守的に絞る）。
 _HELP_CONTEXT_TERMS = (
     "画面", "ボタン", "操作", "アプリ", "この機能", "音声モード", "音声入力",
@@ -782,22 +1074,75 @@ _HELP_CONTEXT_TERMS = (
 _HELP_QUESTION_FORMS = (
     "使い方", "どう使", "どうやって", "方法", "どこ",
 )
+# 分野非依存の「教材内容らしさ」語彙（学問一般の語のみ。分野固有語は書かない）。
 _CONTENT_QUESTION_TERMS = (
     "式", "方程式", "定理", "法則", "証明", "導出", "定義", "公式",
-    "エネルギー", "運動", "力学", "波動", "ベクトル", "微分", "積分",
-    "質量", "加速度", "速度", "粒子", "理論",
+    "理論", "概念", "仮定", "前提条件", "モデル", "計算", "関数", "係数",
+    "変数", "近似", "観測", "実験", "論文",
 )
 
+# カートリッジ由来の内容語を引くときの下限文字数（"SM" のような短い別名を
+# 部分一致に使うと、無関係な文が内容語ありと誤判定されるため）。
+_CARTRIDGE_TERM_MIN_LEN = 3
+_CARTRIDGE_TERM_LIMIT = 200
 
-def _is_usage_question(message: str) -> bool:
+
+@lru_cache(maxsize=16)
+def _cartridge_content_terms(cartridge_id: str) -> tuple[str, ...]:
+    """カートリッジ ontology から分野固有の「教材内容語」を集める（フェイルソフト）。
+
+    分野名・分野語彙をコードにハードコードしないための供給口（開発ルール7
+    「domain-specific なロジックを埋め込まず cartridge から読む」と同じ方針）。
+    読めない・存在しないカートリッジでは空タプルを返し、呼び出し側は分野非依存語
+    （:data:`_CONTENT_QUESTION_TERMS`）だけで判定する。
+
+    ``cartridge_id`` が空のときは呼び出さないこと（``load_cartridge(None)`` は
+    既定カートリッジへ縮退するため、無関係な分野の語彙を引いてしまう）。
+    """
+    cid = (cartridge_id or "").strip()
+    if not cid:
+        return ()
+    try:
+        cartridge = load_cartridge(cid)
+    except Exception:  # noqa: BLE001 — 分野語彙は補助。読めなければ無しで続行する
+        logger.debug("cartridge content terms unavailable: %s", cid, exc_info=True)
+        return ()
+    terms: list[str] = []
+
+    def _add(value: object) -> None:
+        text = str(value or "").strip()
+        if not text or len(text) < _CARTRIDGE_TERM_MIN_LEN:
+            return
+        if text not in terms:
+            terms.append(text)
+
+    for concept_type in cartridge.ontology.concept_types:
+        if isinstance(concept_type, dict):
+            _add(concept_type.get("label_ja"))
+            for example in concept_type.get("examples") or []:
+                _add(example)
+    for alias_entry in cartridge.ontology.aliases:
+        if isinstance(alias_entry, dict):
+            _add(alias_entry.get("canonical"))
+            for alias in alias_entry.get("aliases") or []:
+                _add(alias)
+    return tuple(terms[:_CARTRIDGE_TERM_LIMIT])
+
+
+def _is_usage_question(message: str, *, cartridge_id: str | None = None) -> bool:
     """メッセージが画面・システムの使い方についての質問かどうかを保守的に判定する。
 
     非LLM・同期（casual/音声バイパスより手前で評価するための決定論判定）。
+    ``cartridge_id`` を渡すと、その分野の語彙も「教材内容らしさ」の判定に足す
+    （分野語のハードコードを避けるための供給口。省略時は分野非依存語のみ）。
     """
     msg = (message or "").strip()
     if not msg or len(msg) >= 50:
         return False
     if any(term in msg for term in _CONTENT_QUESTION_TERMS):
+        return False
+    lowered = msg.lower()
+    if any(term.lower() in lowered for term in _cartridge_content_terms(cartridge_id or "")):
         return False
     has_context = any(term in msg for term in _HELP_CONTEXT_TERMS)
     has_form = any(term in msg for term in _HELP_QUESTION_FORMS)
@@ -861,7 +1206,9 @@ def _classify_intent(
         "- CHIT_CHAT: 学習と無関係な雑談・日常会話（天気、食事、娯楽、個人的な話題など）\n"
         "- LEARNING_ADVICE: 学習の進め方・方法に関するメタ質問（どう進めるか、何から学ぶか、学習計画の相談など）\n"
         "- USAGE_HELP: アプリ・画面の使い方、ボタンや機能の操作方法についての質問（教材の内容そのものではない）\n"
-        "- DOMAIN_RAG: 物理学・数学などの専門知識・概念に関する質問\n\n"
+        # 分野名をハードコードしない（コースごとに分野が異なる）。コース名は
+        # プロンプト冒頭で提示済みなので、ここでは「このコースが扱う専門分野」と書く。
+        "- DOMAIN_RAG: このコースが扱う専門分野の知識・概念に関する質問\n\n"
         "教材の内容についての質問か操作方法についての質問か迷う場合は、DOMAIN_RAG に分類してください（安全側）。\n\n"
         f"質問: {message}\n\n"
         "上記のルートの中から最も適切な1つだけを返してください（説明不要）:"
@@ -893,10 +1240,16 @@ def _generate_learning_advice_response(
     topic_info: dict | None = None,
     course_data: dict | None = None,
     on_llm_call: Callable[[], None] | None = None,
+    source_context: str | None = None,
 ) -> str:
     """学習相談・メタ質問・学習開始への応答を生成する（ルート②: ナビゲーター）。
 
     コース全体の構造と現在のトピックをベースに、学習アドバイスや導入メッセージを提供する。
+
+    ``source_context`` は前提知識の3段解決（是正 F4）で解決した資料の抜粋
+    （``[出典N]`` 付きの context block）。渡された場合だけ、説明を抜粋に基づかせ、
+    抜粋外の内容は一般的な学術知識であることを明示させる（原則8: 出所の正直さ）。
+    LLM コール数は渡しても渡さなくても1回のまま。
     """
     params = get_llm_params("standard")
 
@@ -941,6 +1294,18 @@ def _generate_learning_advice_response(
     persona_instruction = persona_prompt(response_persona, target="response")
     persona_block = f"■ 口調設定:\n{persona_instruction}\n\n" if persona_instruction else ""
 
+    source_block = ""
+    if source_context:
+        source_block = (
+            f"{source_context}\n\n"
+            "■ 上の抜粋の扱い（出所の正直さ）:\n"
+            "  - 前提知識の説明は、まず上の抜粋に基づいて書くこと。\n"
+            "  - 抜粋を参照したときは、付された番号付き出典マーカー `[出典1]` `[出典2]` … を"
+            "本文に自然に挿入すること（番号は提示されたものに対応させ、独自の番号や"
+            "『書籍名』形式は使わないこと）。\n"
+            "  - 抜粋に無い内容を補ったときは、資料由来ではないことが読み手に分かるように書くこと。\n\n"
+        )
+
     prompt = (
         f"あなたは「{course_title}」の学習をサポートするナビゲーター教授です。\n"
         f"学生は現在「{topic_title}」のトピックを学習しています。\n\n"
@@ -948,6 +1313,7 @@ def _generate_learning_advice_response(
         f"{topics_block}"
         f"{concepts_block}"
         f"{prereqs_block}"
+        f"{source_block}"
         f"学生からのメッセージ: {message}\n\n"
         "コース全体の構造と学生の現在位置を踏まえ、以下の構成で回答してください:\n"
         "1. 【歓迎と目標】このトピックで学ぶことの全体像と、最終的な学習目標を簡潔に説明する。\n"
@@ -978,6 +1344,170 @@ def _generate_learning_advice_response(
         )
 
 
+# ---------------------------------------------------------------------------
+# 前提知識の3段解決（是正 F4 / 六つのレンズ レンズ6 提案6、2026-09-10）
+# ---------------------------------------------------------------------------
+#
+# 従来、前提知識の説明（LEARNING_ADVICE の前提確認分岐）は RAG を通らない LLM 説明で
+# `content_grounding` が None のまま返り、フロントは出所バッジを描かなかった
+# （＝一番あやふやな回答が一番確からしく見える）。ここでは解決を段階化する:
+#   ① 同コースの topic に一致する（コース内の教材）
+#   ② 本人が閲覧できる document のチャンク（既存 RAG と同じ
+#      `search_chunks_with_metadata(..., allowed_document_ids=...)` を使う。
+#      コース sources 外のヒットは既存判定どおり `other_material` になる）
+#   ③ どこにも無ければ LLM の説明を返すが `content_grounding="model_generated"` を必ず設定し、
+#      閉世界の事実文（SL1 継承）を添える。
+# LLM の追加コールは無い（②は検索1回=通常の RAG ターンと同じ、③は既存 advice 経路）。
+
+#: 解決できなかった前提について学習者に告げる固定文（SL1 の閉世界語彙）。
+#: 言えるのは「このコーパスの中には資料が無い」だけで、分野レベルの不在
+#: （分野で扱われていない・誰も書いていない）は言わない — 台帳・コーパスの
+#: 射影であって分野の射影ではない。
+PREREQUISITE_CLOSED_WORLD_FACT = "このコーパスの中には、この前提を扱う資料がありません。"
+
+#: 前提知識の解決で LLM に渡す抜粋の見出し（RAG 本経路の見出しとは別物）。
+_PREREQUISITE_CONTEXT_HEADING = "## この前提知識に関連する資料の抜粋"
+
+
+def _prerequisite_terms(message: str, topic_info: dict | None) -> list[str]:
+    """解決対象の前提知識名を決定論的に取り出す（現在トピックの `prerequisites`）。
+
+    発話に名前が含まれているものを優先して並べ替えるだけで、AI に推定させない。
+    """
+    terms: list[str] = []
+    for prereq in ((topic_info or {}).get("prerequisites") or []):
+        name = prereq.get("name", prereq) if isinstance(prereq, dict) else prereq
+        name = str(name or "").strip()
+        if name and name not in terms:
+            terms.append(name)
+    msg = message or ""
+    mentioned = [t for t in terms if t and t in msg]
+    rest = [t for t in terms if t not in mentioned]
+    return mentioned + rest
+
+
+def _resolve_prerequisite_context(
+    user_id: str,
+    course_data: dict,
+    terms: list[str],
+    *,
+    max_search_terms: int = 3,
+) -> dict:
+    """前提知識の①②を解決し、context block / 出典 / grounding / 未解決名を返す。
+
+    Returns
+    -------
+    dict
+        ``{"context_block", "cited_sources", "overall_tier", "content_grounding",
+        "resolved", "unresolved"}``。検索は1回だけ（前提名を連結したクエリ）。
+    """
+    resolved: list[str] = []
+    blocks: list[str] = []
+    cited_sources: list[dict] = []
+    has_course_topic_material = False
+
+    if terms:
+        course_material_ids = set(course_source_material_ids(course_data))
+
+        # ① 同コースの topic（章ネストも走査する。走査は course_data アクセサに委譲）
+        topics_by_title: dict[str, dict] = {}
+        for topic in iter_all_topics(course_data):
+            title = str(topic.get("title") or "").strip().casefold()
+            if title and title not in topics_by_title:
+                topics_by_title[title] = topic
+        for term in terms:
+            topic = topics_by_title.get(term.strip().casefold())
+            material = _topic_student_material(topic) if topic else ""
+            if material:
+                blocks.append(
+                    f"[コース内トピック『{topic.get('title') or term}』の教材]\n{material[:3000]}"
+                )
+                has_course_topic_material = True
+                if term not in resolved:
+                    resolved.append(term)
+
+        # ② 本人が閲覧できる document のチャンク（可視性は allowed_document_ids で fail-closed）
+        pending = [t for t in terms if t not in resolved]
+        if pending:
+            allowed_document_ids = list_visible_document_ids(user_id)
+            chunk_results = search_chunks_with_metadata(
+                "、".join(pending[:max_search_terms]),
+                top_k=6,
+                allowed_document_ids=allowed_document_ids,
+            )
+            matched_text: list[str] = []
+            for r in chunk_results:
+                if float(r.get("score") or 0.0) < 0.30:
+                    continue
+                _n = len(cited_sources) + 1
+                text = str(r.get("text") or "")
+                blocks.append(f"[出典{_n}] 『{r.get('source_title', '')}』\n{text}")
+                matched_text.append(text)
+                _quote = text.strip().replace("\n", " ")
+                cited_sources.append({
+                    "index": _n,
+                    "chunk_id": r.get("id", ""),
+                    "source_title": r.get("source_title", "不明な教材"),
+                    "tier": r.get("tier", TIER_OUT_OF_SOURCE),
+                    "score": round(float(r.get("score", 0.0)), 3),
+                    "quote": (_quote[:80] + "…") if len(_quote) > 80 else _quote,
+                    "meta": r.get("source_file") or "",
+                    "origin": (
+                        "course_material"
+                        if r.get("material_id") in course_material_ids
+                        else "other_material"
+                    ),
+                })
+            # 「その前提を扱っている」の判定は逐語一致だけ（決定論・追加コストなし）。
+            # ベクトル近傍で引けただけの資料を「この前提を扱っている」とは言わない。
+            haystack = " ".join(matched_text).casefold()
+            if haystack:
+                for term in pending:
+                    if term.strip().casefold() in haystack and term not in resolved:
+                        resolved.append(term)
+
+    unresolved = [t for t in terms if t not in resolved]
+
+    overall_tier = aggregate_overall_tier([s["tier"] for s in cited_sources])
+    if has_course_topic_material:
+        overall_tier = tier_floor(overall_tier, TIER_SOURCE)
+
+    if has_course_topic_material or any(s["origin"] == "course_material" for s in cited_sources):
+        content_grounding = "course_material"
+    elif cited_sources:
+        content_grounding = "other_material"
+    else:
+        content_grounding = "model_generated"
+
+    context_block = None
+    if blocks:
+        # 信頼境界（docs/architecture/trust_boundary_pdf_input.md）: 抜粋は第三者が
+        # 書いた untrusted 入力。区切り（ラベル + `---`）に加えて固定文を前置する。
+        context_block = (
+            _PREREQUISITE_CONTEXT_HEADING + "\n"
+            + UNTRUSTED_SOURCE_NOTICE + "\n\n"
+            + "\n---\n".join(blocks)
+        )
+
+    return {
+        "context_block": context_block,
+        "cited_sources": cited_sources,
+        "overall_tier": overall_tier,
+        "content_grounding": content_grounding,
+        "resolved": resolved,
+        "unresolved": unresolved,
+    }
+
+
+def _prerequisite_closed_world_note(unresolved: list[str]) -> str:
+    """解決できなかった前提についての閉世界事実文（数値は出さない）。"""
+    names = [n for n in (unresolved or []) if (n or "").strip()]
+    if not names:
+        return ""
+    listed = "、".join(f"「{n}」" for n in names[:3])
+    return f"{PREREQUISITE_CLOSED_WORLD_FACT}（対象: {listed}）"
+
+
 def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | None = None) -> str:
     """知識統合型チューターのシステムプロンプトを生成する。
 
@@ -1006,29 +1536,55 @@ def _get_integrated_tutor_system_prompt(domain: str, response_persona: str | Non
 - コンテキストに番号付き出典（`[出典1]` …）が1つも無い場合は、出典マーカーを一切書かないこと。{persona_block}"""
 
 
-def _get_casual_teacher_system_prompt(domain: str, response_persona: str | None = None) -> str:
+def _get_casual_teacher_system_prompt(
+    domain: str,
+    response_persona: str | None = None,
+    *,
+    spoken: bool = True,
+) -> str:
     """カジュアル対話モード（気軽に話せる先生）のシステムプロンプトを生成する。
 
-    ハンズフリー音声会話が主用途のため、短い会話調・記号なしの応答を強制する。
-    根拠の一線（教材コンテキスト優先・断定回避）はチューターモードと同じに保つ。
+    入口統合 Phase 1（``docs/features/learning_chat_entry_unification_design.md``
+    §4.4）で**様相（軽い調子）と伝達形式（読み上げ）を分離**した。畳まれていた
+    2つのうち、様相（相づち・聞き返し・採点しない）は両方で共通で、伝達形式だけが
+    ``spoken`` で変わる。
+
+    - ``spoken=True``（既定・ハンズフリー音声会話。**本文は従来のまま**）:
+      2〜4文の短い話し言葉・記号なし・LaTeX なし。
+    - ``spoken=False``（テキストの casual_light）: 軽い調子は保ったまま
+      **LaTeX と出典マーカー ``[出典N]`` を許可**する（数式を言葉に潰すのは
+      テキストでは劣化になる）。``[ACTION_BUTTON: ...]`` 等のシステム記法は
+      引き続き禁止（気軽な会話に UI 遷移を差し込まない）。
+
+    根拠の一線（教材コンテキスト優先・断定回避）はどちらでもチューターモードと同じ。
     """
     domain_label = domain.strip() if domain.strip() else "このコースの専門分野"
     persona_instruction = persona_prompt(response_persona, target="response")
     persona_block = f"\n\n**口調設定:**\n{persona_instruction}" if persona_instruction else ""
+    if spoken:
+        _delivery_rule = """1. 【会話調】音声で読み上げられます。1回の応答は2〜4文の短い話し言葉にしてください。
+   箇条書き・見出し・記号・絵文字は使わないでください。"""
+        _format_rule = """5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
+   システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。"""
+    else:
+        _delivery_rule = """1. 【会話調】文字で読まれます。1回の応答は短め（3〜6文程度）の話し言葉にしてください。
+   見出しや長い箇条書きで講義調にせず、立ち話の雰囲気を保ってください。"""
+        _format_rule = """5. 【書き方】数式が要るところは LaTeX（インラインは $...$、ディスプレイは $$...$$）で
+   そのまま書いてかまいません。教材のコンテキストに番号付き出典（`[出典1]` …）があれば、
+   言及したところに自然に添えてください（無い場合は出典マーカーを書かないこと）。
+   `[ACTION_BUTTON: ...]` などのシステム記法は出力しないでください。"""
     return f"""あなたは{domain_label}が大好きで、学生と雑談するのが楽しみな「気軽に話せる先生」です。
 研究室の廊下やゼミ後の立ち話のように、教材で扱っている題材について肩の力を抜いて一緒に面白がってください。
 
 **会話のルール:**
-1. 【会話調】音声で読み上げられます。1回の応答は2〜4文の短い話し言葉にしてください。
-   箇条書き・見出し・記号・絵文字は使わないでください。
+{_delivery_rule}
 2. 【一緒に面白がる】採点や訂正を急がず、学生の言葉をまず受け止めてください。
    「たしかにそう見えるよね」「いいところに気づいたね」のような相づちから入って構いません。
 3. 【聞き返す】ときどき「きみはどう思う?」「どこが引っかかった?」と軽く聞き返し、
    学生が自分の言葉で話す余地を残してください。毎回はしつこいので2〜3往復に1回程度。
 4. 【根拠は正直に】提供される「教材からのコンテキスト」があればそれに沿って話してください。
    教材に無い話題は、想像や一般論であることが伝わる言い方（「たぶん」「一般には」）で話してください。
-5. 【出さないもの】数式の羅列・LaTeX・出典番号マーカー・`[ACTION_BUTTON: ...]` などの
-   システム記法は一切出力しないでください。数式が必要なら言葉で言い換えてください。{persona_block}"""
+{_format_rule}{persona_block}"""
 
 
 def _get_discuss_system_prompt(domain: str, response_persona: str | None = None) -> str:
@@ -1200,11 +1756,87 @@ def _reconcile_citation_markers(answer: str, valid_indices: set[int]) -> str:
     return re.sub(r"[ \t]+([。、．，])", r"\1", text)
 
 
-def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
+def _screen_selection_element_type(selection: dict) -> str:
+    """画面文脈 ``selection.element_type`` を学習側の語彙へ落とす（対象外なら ""）。
+
+    ``_screen_selected_element_type``（正規化済み ctx を受ける版）と同じ規則。
+    フロントは "formula"（教材埋め込みの語彙）を "equation" に写して送るが、旧
+    クライアント・別経路からの素通しに備えて受け側でも吸収する。
+    """
+    raw = str(selection.get("element_type") or "").strip()
+    if raw == "formula":
+        raw = "equation"
+    return raw if raw in LEARNING_ELEMENT_TYPES else ""
+
+
+def _screen_selection_anchor_type(element_type: str) -> str:
+    """画面文脈の要素型 → 構造帰属の粒度（``ANCHOR_TYPES``）。
+
+    claim / equation はそのまま同名の粒度に当たる。component は概念ノード
+    （``theory_components``）なので concept。figure は ``ANCHOR_TYPES`` に無いので
+    設計 §5 の規律どおり**粗い粒度へ縮退**させる（chunk = 教材の箇所）。
+    """
+    if element_type in ANCHOR_TYPES:
+        return element_type
+    if element_type == "figure":
+        return "chunk"
+    return anchor_type_for_element(element_type)
+
+
+def _screen_selection_for_anchor(
+    body: LearningChatRequest, *, course_id: str
+) -> dict | None:
+    """痕跡帰属に使える画面文脈の ``selection``（無ければ None）。
+
+    画面が別のコースを指しているなら丸ごと無視する（``_learning_screen_context_block``
+    と同じ扱い）。正規化・語彙判定は core 側（SA1: 画面は参照しか渡さない）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return None
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return None
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return None
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return None
+    return dict(ctx.selection)
+
+
+def _anchor_segment_texts(topic_info: dict | None) -> list[str] | None:
+    """区画番号の解決材料（教材区画の本文・表示順）。無ければ None。
+
+    ``get_topic_material`` が学習者へ配信する chunks と**同じ材料**を使う（フロントの
+    ``data-segment-index`` と同じ単位でなければ番号の意味が食い違う）。トピック本文が
+    無い後方互換経路（PDF 復元チャンク）のために DB を引き直すことはしない — 材料が
+    無ければ解決しない（推測しない・同期パスにクエリを増やさない）。
+    """
+    text = _topic_student_material(topic_info or {})
+    return [text] if text.strip() else None
+
+
+def _learner_selected_anchor(
+    body: LearningChatRequest,
+    *,
+    screen_selection: dict | None = None,
+    segment_texts: list[str] | None = None,
+) -> dict | None:
     """発話時の明示アンカー（構造帰属・方法A）を非LLMで構築する。無ければ None。
 
     「どこ（anchor）」はこの操作で確定するが「どう（doubt_type）」までは分からないため
     unclassified のまま保持する（P4。方法B/C が後から補い得る）。
+
+    優先順（学ぶ単位 P2-7・設計 §8）:
+
+    1. 要素タップ（``element_id``）— 従来どおり ground truth。
+    2. テキスト選択（``selection_text``）— 区画番号は ①クライアント申告
+       （``selection_segment_id``）②``segment_texts`` との逐語一致 の順に解決し、
+       どちらも決まらなければ ``anchor_id=""``（``seg_0`` を既定にしない = C-11 の是正）。
+    3. 画面文脈の選択要素（``screen_selection``）— 学習者が要素チップを選んでいる状態での
+       発話は明示アンカー。AI 候補（方法B）に回さず learner_selected で確定する。
     """
     if body.element_id:
         atype = anchor_type_for_element(body.element_type)
@@ -1223,6 +1855,10 @@ def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
     sel = (body.selection_text or "").strip()
     if sel:
         seg = body.selection_segment_id
+        if seg is None and segment_texts:
+            # 区画番号をクライアントが申告できなかったとき（レクチャー非再生など）は
+            # 教材区画の本文との逐語一致で埋める。一意に決まらなければ None のまま。
+            seg = resolve_selection_segment(segment_texts, sel)
         return build_anchor_payload(
             anchor_type="segment",
             anchor_id=f"seg_{int(seg)}" if seg is not None else "",
@@ -1233,6 +1869,21 @@ def _learner_selected_anchor(body: LearningChatRequest) -> dict | None:
             reason="text_selection",
             confidence=1.0,
         )
+    if screen_selection:
+        element_type = _screen_selection_element_type(screen_selection)
+        element_id = str(screen_selection.get("element_id") or "").strip()
+        if element_type and element_id:
+            label = str(screen_selection.get("element_label") or "").strip() or element_id
+            return build_anchor_payload(
+                anchor_type=_screen_selection_anchor_type(element_type),
+                anchor_id=element_id,
+                anchor_label=label,
+                doubt_type="unclassified",
+                attribution_source=ATTRIBUTION_LEARNER_SELECTED,
+                evidence_quote="",
+                reason="screen_selection",
+                confidence=1.0,
+            )
     return None
 
 
@@ -1313,6 +1964,442 @@ def _build_anchor_ladder_hint(
         break  # 直近の assistant メッセージのみを見る（それより前へは遡らない）
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# 画面文脈アダプター Phase 4（正本 docs/features/assistant_screen_adapter_design.md §11）
+#
+# 画面は**参照だけ**を渡し（SA1）、ここ（route）が権限3段
+#   ①受講ゲート（呼び出し元が解決済みの course_data）
+#   ②コース sources / scope_document_ids（grounding_document_ids）
+#   ③各学習者射影の内部 SQL の ``ANY(:doc_ids)``
+# を通した DTO を ``sources`` に組み、core の解決器（純関数・非LLM）が事実文にする。
+#
+# 規律:
+# - **生テーブルを引かない**。学習者射影（component_context / element_context /
+#   doubt の learner_ledger_line / landscape の learner_landscape_for_documents）が
+#   持つ遮断（数値除去・内部 ID 遮断・scope 強制）を再実装しない（§11.3）。
+# - **キャッシュはリクエスト内のみ**（プロセス跨ぎのキャッシュを作らない = §11.6）。
+# - **fail-soft**。射影1本の例外はそのキーだけ None になり、全体が空なら
+#   ``render_block`` が "" を返して従来と同一のプロンプトになる（SA2）。
+# ---------------------------------------------------------------------------
+
+#: 学習側で台帳を引ける要素型（``core.doubt.schema.TargetType`` に実在する型だけ）。
+_SCREEN_LEDGER_TARGET_TYPES = {"component": "component", "claim": "claim"}
+
+
+def _screen_selected_element_type(ctx) -> str:
+    """``selection.element_type`` を学習側の語彙へ落とす（対象外なら ""）。"""
+    raw = str(ctx.selection.get("element_type") or "").strip()
+    # フロントは "formula"（教材埋め込みの語彙）を "equation" に写して送るが、
+    # 旧クライアント・別経路からの素通しに備えて受け側でも吸収する。
+    if raw == "formula":
+        raw = "equation"
+    return raw if raw in LEARNING_ELEMENT_TYPES else ""
+
+
+def _screen_element_sources(
+    ctx,
+    *,
+    course_id: str,
+    topic_info: dict | None,
+    grounding_document_ids: set[str],
+) -> dict:
+    """kind ``element`` の sources（選択チップ1件の射影 + evidence item）。"""
+    element_type = _screen_selected_element_type(ctx)
+    element_id = str(ctx.selection.get("element_id") or "").strip()
+    if not element_type or not element_id:
+        return {}
+
+    context = None
+    if element_type == "component":
+        context = _component_context_with_explanation(
+            element_id, course_id, set(grounding_document_ids)
+        )
+    elif element_type in CONTEXT_ELEMENT_TYPES:  # claim / equation
+        context = build_element_context(
+            element_type, element_id, set(grounding_document_ids)
+        )
+
+    # 題名だけの縮退材料。トピックに**公開済み**の参照からしか引かない
+    # （build_topic_evidence_items の契約 — クライアント入力から任意 ID を解決しない）。
+    item = None
+    try:
+        wanted = normalize_evidence_id(element_id)
+        for candidate in build_topic_evidence_items(topic_info or {}):
+            if str(candidate.get("kind") or "") != element_type:
+                continue
+            if normalize_evidence_id(candidate.get("id")) == wanted:
+                item = candidate
+                break
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: evidence item lookup failed", exc_info=True)
+        item = None
+
+    return {"element_type": element_type, "context": context, "item": item}
+
+
+def _screen_element_document_id(element: dict, ctx, grounding_document_ids: set[str]) -> str:
+    """選択要素が由来する document_id（``grounding_document_ids`` 内のものだけ）。
+
+    component は射影 DTO の ``instance.in_paper.document.id`` が正本。claim / equation /
+    figure は学習者射影が document_id を返さないので、evidence item と画面の申告
+    （参照 = SA1）を順に見て、**必ず grounding 集合への所属で検証**する（fail-closed）。
+    """
+    candidates: list[str] = []
+    context = element.get("context")
+    if isinstance(context, dict):
+        document = ((context.get("instance") or {}).get("in_paper") or {}).get("document") or {}
+        if isinstance(document, dict):
+            candidates.append(str(document.get("id") or ""))
+    item = element.get("item")
+    if isinstance(item, dict):
+        candidates.append(str(item.get("document_id") or ""))
+    candidates.append(str(ctx.selection.get("document_id") or ""))
+    for candidate in candidates:
+        if candidate and candidate in grounding_document_ids:
+            return candidate
+    return ""
+
+
+def _learning_screen_sources(
+    ctx,
+    *,
+    course_id: str,
+    course_data: dict,
+    topic_info: dict | None,
+    grounding_document_ids: set[str],
+    kinds: tuple[str, ...] | None = None,
+) -> dict:
+    """画面文脈の解決に渡す ``sources``（§11.3 の契約）を権限ゲート内で組む。
+
+    ``grounding_document_ids`` が空なら**何も引かない**（fail-closed）。
+    ``selection.course_id`` が URL の course_id と一致しないときは呼び出し側で弾く。
+    ``kinds`` で解決する種別が絞られているときは、**その種別が使う射影しか引かない**
+    （``cycle_mode="elicit"`` は表示モードの事実だけなので DB を1本も引かない）。
+    """
+    if not grounding_document_ids:
+        return {}
+    wanted = None if kinds is None else set(kinds)
+    if wanted is not None and not wanted & {"element", "verification", "placement"}:
+        return {}
+
+    sources: dict = {}
+    try:
+        element = _screen_element_sources(
+            ctx,
+            course_id=course_id,
+            topic_info=topic_info,
+            grounding_document_ids=grounding_document_ids,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: element projection failed", exc_info=True)
+        element = {}
+    if element:
+        sources["element"] = element
+
+    if not element:
+        return sources
+
+    # 台帳（SL1 の閉世界語彙のまま）。対象型は台帳に実在する型だけ・ID は DB UUID のみ
+    # （agent 側 ID では台帳行を引けないので引きにいかない）。
+    ledger_target = _SCREEN_LEDGER_TARGET_TYPES.get(str(element.get("element_type") or ""))
+    if ledger_target and (wanted is None or "verification" in wanted):
+        context = element.get("context")
+        target_id = ""
+        if isinstance(context, dict):
+            target_id = str(
+                context.get("component_id") or context.get("element_id") or ""
+            ).strip()
+        if target_id and _is_db_uuid(target_id):
+            session = _pg_session()
+            try:
+                line = learner_ledger_line(session, ledger_target, target_id)
+                if line:
+                    sources["ledger"] = line
+            except Exception:  # noqa: BLE001
+                logger.debug("screen_context: ledger projection failed", exc_info=True)
+            finally:
+                session.close()
+
+    # 分野の地図での位置づけ（出所ラベルを剥がさない = §11.13-1）。
+    document_id = (
+        _screen_element_document_id(element, ctx, grounding_document_ids)
+        if (wanted is None or "placement" in wanted)
+        else ""
+    )
+    if document_id:
+        try:
+            landscape = learner_landscape_for_documents(course_data, [document_id])
+            if (landscape or {}).get("documents"):
+                sources["landscape"] = landscape
+        except Exception:  # noqa: BLE001
+            logger.debug("screen_context: landscape projection failed", exc_info=True)
+
+    return sources
+
+
+def _learning_screen_context_block(
+    body: LearningChatRequest,
+    *,
+    course_id: str,
+    course_data: dict,
+    topic_info: dict | None,
+    grounding_document_ids: set[str],
+    kinds: tuple[str, ...] | None = None,
+) -> tuple[str, bool]:
+    """``(事実文ブロック, 台帳由来の事実を含むか)``。解決できなければ ``("", False)``。
+
+    ``kinds`` は ``cycle_mode="elicit"`` のときに ``("view",)`` を渡す
+    （問いの答えを手渡さない = §11.5）。どこで失敗しても空文字へ縮退する（SA2）。
+    """
+    payload = getattr(body, "screen_context", None)
+    if payload is None:
+        return "", False
+    try:
+        ctx = normalize_screen_context(payload.model_dump())
+    except Exception:  # pragma: no cover - 正規化は例外を出さない契約
+        return "", False
+    if ctx is None or ctx.screen != SCREEN_LEARNING:
+        return "", False
+    # §11.2: 画面の ``selection.segment_id`` は ``selection_segment_id``（サーバが既に
+    # 痕跡記録で信頼している明示アンカー）の写しであってよい。両方あって食い違えば
+    # 後者を優先し、事実文に載る区画番号がクライアント申告だけで決まらないようにする。
+    if body.selection_segment_id is not None:
+        ctx = dataclasses.replace(
+            ctx,
+            selection={**ctx.selection, "segment_id": str(int(body.selection_segment_id))},
+        )
+    # 画面が別のコースを指しているなら丸ごと無視する（Phase 1 の document 不一致と同じ
+    # 扱い。センチネル course_id の経路でも「一致しなければ無視」でよい = §11.3）。
+    declared_course_id = str(ctx.selection.get("course_id") or "")
+    if declared_course_id and declared_course_id != str(course_id):
+        return "", False
+
+    try:
+        sources = _learning_screen_sources(
+            ctx,
+            course_id=course_id,
+            course_data=course_data,
+            topic_info=topic_info,
+            grounding_document_ids=grounding_document_ids,
+            kinds=kinds,
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("screen_context: sources assembly failed", exc_info=True)
+        sources = {}
+
+    try:
+        facts = resolve_screen_context(ctx, sources, kinds=kinds)
+        block = render_block(
+            facts,
+            header=BLOCK_HEADER_LEARNING,
+            max_chars=MAX_BLOCK_CHARS_LEARNING,
+        )
+    except Exception:  # pragma: no cover - resolve/render は例外を出さない契約
+        logger.debug("screen_context: resolution failed", exc_info=True)
+        return "", False
+    if not block:
+        return "", False
+    # 台帳由来の事実が**実際にブロックへ載ったとき**だけ、出力側の拘束（SL1 の言い換え
+    # 防止）を足す（§11.13-2 の2段構え。事実が無いのに拘束だけ足さない — 予算超過で
+    # 落ちた場合・kinds で verification を外した場合も「載っていない」に含める）。
+    has_ledger = False
+    if kinds is None or "verification" in set(kinds):
+        try:
+            verification_facts = resolve_screen_context(ctx, sources, kinds=("verification",))
+        except Exception:  # pragma: no cover - resolve は例外を出さない契約
+            verification_facts = []
+        has_ledger = any(fact and fact in block for fact in verification_facts)
+    return block, has_ledger
+
+
+# ---------------------------------------------------------------------------
+# 知識の転用層 P4-2（knowledge_transfer_design.md §5）— RAG の構造 1 hop
+#
+# 「chunk 近傍 → その chunk に結ばれた主張 → 理論の骨格（main 層）のノード」を
+# **決定論・LLM 0 回・embedding 0 回**（KT3）で解決し、SA層の kind
+# ``retrieved_structure`` として当該ターンへ渡す。入口は画面の申告ではなく**回答に
+# 採用した出典**（``cited_sources``）なので、``screen_context`` が無いターンでも働く。
+#
+# 権限（KT6）: 当該ターンの ``allowed_document_ids`` を ``ANY(:doc_ids)`` で SQL に
+# 直接強制する（discuss の ``all_visible`` でも**検索範囲と同一**で、構造側で広げない）。
+# 取得の失敗はすべて握って空へ縮退する（対話を止めない = SA2）。
+# ---------------------------------------------------------------------------
+
+#: 1回の解決で読む主張行の上限（出典は最大8件・出典あたり2主張なので十分な余裕）。
+_RETRIEVED_STRUCTURE_ROW_LIMIT = 200
+
+#: 1回の解決で読む理論操作グラフの document 数の上限（出典が散っても有界にする）。
+_RETRIEVED_STRUCTURE_MAX_DOCUMENTS = 4
+
+
+def _retrieved_structure_claims(
+    chunk_ids: list[str], document_ids: list[str]
+) -> list[dict]:
+    """採用チャンクに結ばれた live の主張行を読む（DB 読み 1 本目）。
+
+    ``origin='equation_synthesis'`` は本文が式そのもの（§5 で v1 対象外）なので除く。
+    superseded の除外は live ビューが担う（KO5）。
+    """
+    if not chunk_ids or not document_ids:
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT id::text AS id,
+                       chunk_id::text AS chunk_id,
+                       document_id::text AS document_id,
+                       text,
+                       claim_type,
+                       COALESCE(agent_claim_id, '') AS agent_claim_id,
+                       source_scope
+                FROM theory_claims_live
+                WHERE chunk_id = ANY(CAST(:chunk_ids AS uuid[]))
+                  AND document_id = ANY(CAST(:doc_ids AS uuid[]))
+                  AND COALESCE(origin, '') <> 'equation_synthesis'
+                ORDER BY chunk_id, created_at, id
+                LIMIT {_RETRIEVED_STRUCTURE_ROW_LIMIT}
+                """
+            ),
+            {"chunk_ids": chunk_ids, "doc_ids": document_ids},
+        ).mappings().fetchall()
+    finally:
+        session.close()
+    return [dict(row) for row in (rows or [])]
+
+
+def _retrieved_structure_node_index(document_id: str) -> dict[str, dict]:
+    """``claim 参照 ID → main 層ノード``（DB 読み 2 本目・detail / debug は使わない）。
+
+    グラフ側の ``linked_claim_ids`` は DB UUID / agent 側 claim ID のどちらでも
+    入りうるので、キーは正規化せずそのまま引けるようにする。
+    """
+    graph = load_latest_graph(document_id) or {}
+    index: dict[str, dict] = {}
+    for node in (graph.get("nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("graph_layer") or "main") != "main":
+            continue
+        entry = {
+            "label": str(node.get("label") or ""),
+            "display_label": str(node.get("display_label") or ""),
+        }
+        for claim_id in (node.get("linked_claim_ids") or []):
+            key = str(claim_id or "").strip()
+            if key:
+                index.setdefault(key, entry)
+    return index
+
+
+def _retrieved_structure_sources(
+    cited_sources: list[dict], allowed_document_ids
+) -> dict:
+    """SA層 kind ``retrieved_structure`` の ``sources`` を組む（§5 の射影）。
+
+    戻り値は ``{"sources": [{"index": "1", "claims": [{text, claim_type, node}]}]}``。
+    数値（一致度・件数）は持たせない（KT7）。解決できなければ ``{}``。
+    """
+    document_ids = [str(d) for d in (allowed_document_ids or []) if str(d or "").strip()]
+    if not cited_sources or not document_ids:
+        return {}
+    # 出典番号は cited_sources と 1 対 1（同じ chunk が複数回出ることはない）。
+    index_by_chunk: dict[str, str] = {}
+    for source in cited_sources:
+        chunk_id = str((source or {}).get("chunk_id") or "").strip()
+        index = str((source or {}).get("index") or "").strip()
+        if chunk_id and index and _is_db_uuid(chunk_id):
+            index_by_chunk.setdefault(chunk_id, index)
+    if not index_by_chunk:
+        return {}
+
+    try:
+        rows = _retrieved_structure_claims(list(index_by_chunk), document_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("retrieved_structure: claim projection failed", exc_info=True)
+        return {}
+    if not rows:
+        return {}
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        index = index_by_chunk.get(str(row.get("chunk_id") or ""))
+        if not index:
+            continue
+        bucket = grouped.setdefault(index, [])
+        if len(bucket) >= MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE:
+            continue
+        bucket.append(row)
+    if not grouped:
+        return {}
+
+    # 理論の骨格は document ごとに1回だけ読む（有界）。失敗した document は node なし。
+    node_indexes: dict[str, dict[str, dict]] = {}
+    for row in (claim for bucket in grouped.values() for claim in bucket):
+        document_id = str(row.get("document_id") or "")
+        if not document_id or document_id in node_indexes:
+            continue
+        if len(node_indexes) >= _RETRIEVED_STRUCTURE_MAX_DOCUMENTS:
+            continue
+        try:
+            node_indexes[document_id] = _retrieved_structure_node_index(document_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("retrieved_structure: graph projection failed", exc_info=True)
+            node_indexes[document_id] = {}
+
+    entries: list[dict] = []
+    for index in sorted(grouped, key=lambda value: (len(value), value)):
+        claims: list[dict] = []
+        for row in grouped[index]:
+            node_index = node_indexes.get(str(row.get("document_id") or ""), {})
+            keys = [str(row.get("id") or ""), str(row.get("agent_claim_id") or "")]
+            scope = row.get("source_scope")
+            if isinstance(scope, dict):
+                keys.extend(str(v or "") for v in (scope.get("legacy_ids") or []))
+            node = None
+            for key in keys:
+                if key and key in node_index:
+                    node = node_index[key]
+                    break
+            claims.append(
+                {
+                    "text": str(row.get("text") or ""),
+                    "claim_type": str(row.get("claim_type") or ""),
+                    "node": node,
+                }
+            )
+        if claims:
+            entries.append({"index": index, "claims": claims})
+    return {"sources": entries} if entries else {}
+
+
+def _learning_retrieved_structure_block(
+    cited_sources: list[dict], allowed_document_ids
+) -> str:
+    """検索由来の構造ブロック（§5）。解決できなければ ``""``（従来と同一のプロンプト）。"""
+    try:
+        sources = _retrieved_structure_sources(cited_sources, allowed_document_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("retrieved_structure: sources assembly failed", exc_info=True)
+        return ""
+    if not sources:
+        return ""
+    ctx = normalize_screen_context({"screen": SCREEN_LEARNING})
+    try:
+        facts = resolve_screen_context(
+            ctx, {"retrieved_structure": sources}, kinds=("retrieved_structure",)
+        )
+        return render_block(
+            facts,
+            header=BLOCK_HEADER_RETRIEVED,
+            max_chars=MAX_BLOCK_CHARS_LEARNING,
+        )
+    except Exception:  # pragma: no cover - resolve/render は例外を出さない契約
+        logger.debug("retrieved_structure: resolution failed", exc_info=True)
+        return ""
 
 
 # 方法C の1タップ選択肢（unclassified は「その他」として提示しない — 未選択のまま
@@ -1488,6 +2575,7 @@ def _generate_graph_element_explanation(
         )
         return LearningChatResponse(answer=approved_answer, course_update=None)
 
+    degraded = False
     graph_description = (context.get("graph_description") or "").strip()
     related_chunks = context.get("related_chunks") or []
     target_formula = context.get("target_formula") or {}
@@ -1538,13 +2626,24 @@ def _generate_graph_element_explanation(
         )
         if on_llm_call:
             on_llm_call()
-        answer = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params["model"],
-            reasoning_effort=params["reasoning_effort"],
-            temperature=0.3,
-        )
-        if target_formula_latex:
+        try:
+            answer = generate_text(
+                messages=[{"role": "user", "content": prompt}],
+                model=params["model"],
+                reasoning_effort=params["reasoning_effort"],
+                temperature=0.3,
+            )
+        except Exception:
+            # 会話は死なせない（設計書 I3）: チャット本体と同じ degraded 規約に揃える。
+            # 以前はここだけ try/except が無く、LLM 失敗が 500 になっていた（本体は
+            # degraded 固定文 + 200）。履歴は保存し、本文依存の後処理（数式の差し込み）は
+            # スキップする（I4）。
+            logger.exception(
+                "Graph element explanation LLM call failed for element %s", body.element_id
+            )
+            answer = _CHAT_DEGRADED_MESSAGE
+            degraded = True
+        if not degraded and target_formula_latex:
             formula_id = str(target_formula.get("id") or "").strip() if isinstance(target_formula, dict) else ""
             if formula_id:
                 answer = answer.replace(formula_id, f"${target_formula_latex}$")
@@ -1554,7 +2653,7 @@ def _generate_graph_element_explanation(
         user_id, course_id, topic_id,
         body.history, user_message, answer,
     )
-    return LearningChatResponse(answer=answer, course_update=None)
+    return LearningChatResponse(answer=answer, course_update=None, degraded=degraded)
 
 
 def _topic_student_material(topic: dict) -> str:
@@ -1735,7 +2834,7 @@ def _load_figure_row_by_id(figure_id: str) -> dict | None:
     try:
         row = session.execute(
             sa_text("""
-                SELECT id::text, document_id, minio_key
+                SELECT id::text, document_id::text AS document_id, minio_key
                 FROM document_figures
                 WHERE id = CAST(:figure_id AS uuid)
                 LIMIT 1
@@ -1901,7 +3000,13 @@ def check_topic_understanding(
     body: LearningCheckQuestionRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningCheckQuestionResponse:
-    """次セクションへ進む前の確認問題を採点し、未理解ならつまづきとして記録する。"""
+    """確認問題の回答を出題の要件と並置する（是正 F1: 合否を出さない・確定しない）。
+
+    AI の役割は Diff（並置）だけで、トピック完了の確定はここでは行わない。
+    先へ進むかどうかは本人の自己確認（``POST .../check/self-check``）が決める。
+    LLM 呼び出しは従来どおり1回（U層 feature ``learning:understanding_check`` /
+    M層のコース単位モデル上書きも維持）。
+    """
     course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
@@ -1923,121 +3028,155 @@ def check_topic_understanding(
     requirements_text = "\n".join(f"- {r}" for r in answer_requirements) or "(未設定)"
     params = get_llm_params("fast")
     prompt = (
-        "あなたは確認問題を採点する大学教員です。JSONのみを返してください。\n"
-        "形式: {\"passed\": true/false, \"feedback\": \"短い講評\", \"model_answer\": \"模範解答\", \"explanation\": \"必要なら解説\"}\n\n"
+        "あなたは受講者の回答と出題の要件を並べて見せる補助役です。採点はしません。"
+        "JSONのみを返してください。\n"
+        "形式: {\"observations\": [{\"requirement\": \"回答に必要な要素（下のリストから"
+        "そのまま転記）\", \"status\": \"covered\" または \"not_mentioned\", "
+        "\"statement\": \"その要素について観察したことを推量形の1文で\"}], "
+        "\"model_answer\": \"解答例\", \"explanation\": \"必要なら解説\"}\n\n"
         f"コース: {_course_title(course_data, default=course_id)}\n"
         f"セクション: {topic.get('title', topic_id)}\n"
         f"教材:\n{material_text[:5000]}\n\n"
         f"確認問題: {question}\n"
-        f"模範解答（設定済みの場合はこれを基準にする）:\n{expected_model_answer or '(未設定)'}\n\n"
+        f"解答例（設定済みの場合はこれを基準にする）:\n{expected_model_answer or '(未設定)'}\n\n"
         f"回答に必要な要素:\n{requirements_text}\n\n"
-        f"解説（設定済みの場合はフィードバックに反映する）:\n{explanation or '(未設定)'}\n\n"
+        f"解説（設定済みの場合は explanation に反映する）:\n{explanation or '(未設定)'}\n\n"
         f"受講者の回答: {body.answer}\n\n"
-        "判定基準: 回答に必要な要素を概ね満たし、自分の言葉で説明できていれば passed=true。"
-        "核心が抜けている、逆に理解している、空欄に近い場合は false。\n"
-        "feedback は合否に関わらず必ず書いてください（合格時もフロントで学習者に提示します）。"
-        "passed=true のときは、回答が押さえられている点を事実として述べ、さらに踏み込める"
-        "観点があれば1つだけ添えてください。passed=false のときは、何が抜けているかを述べて"
-        "ください。いずれの場合も点数・正解率・達成度のような数値や評価の言い切りは書かず、"
-        "褒め言葉の羅列にもしないでください。"
+        "観点の書き方: 合否・正誤の判定は書かないでください。requirement は上の"
+        "「回答に必要な要素」の文字列をそのまま使い、リストに無い要素を作らないでください"
+        "（要素が未設定のときは observations を空にして構いません）。observations は最大"
+        f"{check_review.MAX_OBSERVATIONS}件までにし、触れられていない可能性のある要素を"
+        "優先してください。statement は「…への言及は見当たらないようです」"
+        "「…には触れているようです」のような推量形の1文にしてください。\n"
+        "禁止: 合格・不合格・正解・採点という語、点数・正解率・達成度のような数値、"
+        "評価の言い切り、褒め言葉の羅列。次に進むかどうかを指示しないでください"
+        "（それは受講者本人が決めます）。"
     )
 
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書きが設定されていれば
-    # 採点にも適用する（live 設定、版ピンと独立）。未設定時は従来どおり fast tier 固定
+    # この並置にも適用する（live 設定、版ピンと独立）。未設定時は従来どおり fast tier 固定
     # （params）を使う — 挙動を変えない。
     _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
 
-    parsed: dict = {}
-    try:
-        with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
-            if _course_chat_model:
-                # override 時は呼び出し引数として直接渡す（call_argument が最優先, §3-1）。
-                # reasoning_effort は明示しない（カタログの既定 effort に委ねる）。
-                raw = generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=_course_chat_model,
-                    temperature=0.1,
-                )
-            else:
-                raw = generate_text(
-                    messages=[{"role": "user", "content": prompt}],
-                    model=params["model"],
-                    reasoning_effort=params["reasoning_effort"],
-                    temperature=0.1,
-                )
-        import json
-        import re
-        match = re.search(r"\{[\s\S]*\}", raw or "")
-        parsed = json.loads(match.group(0) if match else raw)
-    except Exception:
-        logger.warning("Check question grading failed; using conservative fallback", exc_info=True)
-        passed = len((body.answer or "").strip()) >= 40
-        parsed = {
-            "passed": passed,
-            "feedback": "回答の具体性をもとに暫定判定しました。",
-            "model_answer": expected_model_answer or material_text[:800],
-            "explanation": explanation,
+    if _course_chat_model:
+        # override 時は呼び出し引数として直接渡す（call_argument が最優先, §3-1）。
+        # reasoning_effort は明示しない（カタログの既定 effort に委ねる）。
+        _call_kwargs: dict = {"model": _course_chat_model}
+    else:
+        _call_kwargs = {
+            "model": params["model"],
+            "reasoning_effort": params["reasoning_effort"],
         }
 
-    passed = bool(parsed.get("passed"))
-    feedback = str(parsed.get("feedback") or "")
+    with usage_context("learning:understanding_check", user_id=current_user["id"], course_id=course_id):
+        # 取り出しは共通実装へ委譲（``core/llm_worker/single_shot.py::json_call``）。
+        _result = json_call(
+            prompt,
+            call=generate_text,
+            temperature=0.1,
+            degraded=None,
+            log_label="check question juxtaposition",
+            **_call_kwargs,
+        )
+    # 原則9 の degraded 規約: 判定を生まず、要件との見比べを本人に返す。
+    # 旧実装の「40字以上なら合格」のような文字数フォールバックは作らない
+    # （長く書けば通る、という演技を学ばせない）。
+    degraded = _result is None
+    parsed: dict = _result or {}
+    if degraded:
+        logger.warning("Check question juxtaposition failed; degrading to facts")
+
+    observations = check_review.parsed_observations(parsed, answer_requirements)
+    covered, not_mentioned = check_review.split_observations(observations)
+    statements = check_review.build_statements(body.answer, observations, degraded=degraded)
     model_answer = str(parsed.get("model_answer") or expected_model_answer or material_text[:800])
     response_explanation = str(parsed.get("explanation") or explanation or "")
 
-    if not passed:
-        instructor_id = None
-        session = _pg_session()
-        try:
-            row = session.execute(
-                sa_text("SELECT user_id FROM learning_courses WHERE id = :course_id LIMIT 1"),
-                {"course_id": course_id},
-            ).fetchone()
-            instructor_id = str(row[0]) if row and row[0] else None
-        finally:
-            session.close()
-        record_student_stumble_event(
-            instructor_id=instructor_id,
-            student_id=current_user["id"],
-            course_id=course_id,
-            material_id=None,
-            chunk_id=None,
-            element_id=topic_id,
-            element_label=topic.get("title", topic_id),
-            event_type="misconception",
-            user_message=f"確認問題: {question}\n回答: {body.answer}",
-            generated_explanation=model_answer[:4000],
-        )
-
-    # コース完了判定のサーバー正本化: 採点結果だけでなく、合格トピック・コース完了状態を
-    # learning_states.progress_data に永続化する（フロントが「次のトピックが無い」ことだけで
-    # 完走と断定していた問題の是正）。永続化の失敗で採点レスポンス自体は落とさない（fail-open）。
-    topic_completed = False
+    # 完了はここでは書かない（是正 F1）。返すのは現況だけで、確定は self-check 経路に移る。
+    # 現況の取得に失敗しても並置レスポンス自体は落とさない（fail-open）。
     course_completed = False
     completed_topic_ids: list[str] = []
     try:
-        if passed:
-            completion = record_topic_check_pass(
-                current_user["id"], course_id, topic_id, course_data,
-            )
-            topic_completed = bool(completion.get("topic_completed"))
-            course_completed = bool(completion.get("course_completed"))
-            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
-        else:
-            completion = get_course_completion(current_user["id"], course_id, course_data)
-            course_completed = bool(completion.get("course_completed"))
-            completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+        completion = get_course_completion(current_user["id"], course_id, course_data)
+        course_completed = bool(completion.get("course_completed"))
+        completed_topic_ids = list(completion.get("completed_topic_ids") or [])
     except Exception:
         logger.warning(
-            "Failed to persist topic check completion for user=%s course=%s topic=%s",
+            "Failed to read course completion for user=%s course=%s topic=%s",
             current_user["id"], course_id, topic_id, exc_info=True,
         )
 
     return LearningCheckQuestionResponse(
-        passed=passed,
-        feedback=feedback,
+        advisory=True,
+        degraded=degraded,
+        statements=statements,
+        observations=[LearningCheckObservation(**obs) for obs in observations],
+        covered=covered,
+        not_mentioned=not_mentioned,
         model_answer=model_answer,
         answer_requirements=answer_requirements,
         explanation=response_explanation,
+        self_check_required=True,
+        topic_completed=topic_id in completed_topic_ids,
+        course_completed=course_completed,
+        completed_topic_ids=completed_topic_ids,
+    )
+
+
+@router.post(
+    "/courses/{course_id}/topics/{topic_id}/check/self-check",
+    response_model=LearningCheckSelfCheckResponse,
+)
+def self_check_topic_understanding(
+    course_id: str,
+    topic_id: str,
+    body: LearningCheckSelfCheckRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningCheckSelfCheckResponse:
+    """確認問題の並置を見たあとの自己確認（本人の 1 タップ・非LLM）。
+
+    是正 F1: トピック完了を確定できるのはこの経路だけで、確定するのは本人が
+    「合っていた」/「違っていた（が、見比べて先へ進むと決めた）」を押したときに限る。
+    ``verdict_wrong``（AI の観点提示がおかしい）は申告として記録するが完了には使わない
+    — かつ進行を止めない（本人が改めて他の2択を押せば進める）。語彙は R層と共有
+    （``core/reconstruction/schema.py::SELF_CHECK_VALUES``）。
+    """
+    self_check = str(body.self_check or "").strip()
+    if self_check not in check_review.SELF_CHECK_VALUES:
+        raise HTTPException(status_code=422, detail="invalid self-check value")
+
+    course_data = get_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    topic = find_course_topic(course_data, topic_id)
+    if not topic:
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    topic_completed = False
+    course_completed = False
+    completed_topic_ids: list[str] = []
+    try:
+        if self_check in check_review.SELF_CHECK_ADVANCING:
+            completion = record_topic_check_pass(
+                current_user["id"], course_id, topic_id, course_data,
+            )
+            topic_completed = bool(completion.get("topic_completed"))
+        else:
+            # 申告の記録（本人の逐語・回答は残さない。AI の観点提示への異議という事実だけ）。
+            logger.info(
+                "check self-check verdict_wrong course=%s topic=%s", course_id, topic_id,
+            )
+            completion = get_course_completion(current_user["id"], course_id, course_data)
+        course_completed = bool(completion.get("course_completed"))
+        completed_topic_ids = list(completion.get("completed_topic_ids") or [])
+    except Exception:
+        logger.warning(
+            "Failed to record check self-check for user=%s course=%s topic=%s",
+            current_user["id"], course_id, topic_id, exc_info=True,
+        )
+
+    return LearningCheckSelfCheckResponse(
+        self_check=self_check,
         topic_completed=topic_completed,
         course_completed=course_completed,
         completed_topic_ids=completed_topic_ids,
@@ -2470,6 +3609,36 @@ def _usage_help_response(
     )
 
 
+def _run_learning_turn(gen) -> LearningChatResponse:
+    """``_learning_chat_core`` の generator を同期に回し、最終 DTO だけを返すドライバ。
+
+    ストリーミング Phase 3-a（設計書 §3.3）: 非ストリーム経路は本関数を通ることで、
+    前処理・後処理を1つの関数に保ったまま従来と同じ ``LearningChatResponse`` を返す
+    （途中のイベントは捨てる = ST7「非ストリーム API は不変」）。
+    """
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        return stop.value
+
+
+def _stream_answer(messages: list[dict], *, model: str, usage_ctx: dict):
+    """本文を逐次生成し ``("delta", text)`` を yield、全文を ``return`` する。
+
+    ストリーミング Phase 3-a（設計書 §3.3）: **このモジュールで
+    ``generate_text_stream`` を呼ぶのはここ1箇所**。U層の帰属は値渡し
+    （``usage_ctx``）で、contextvar を yield を跨いで開かない（§3.2）。
+    """
+    chunks: list[str] = []
+    for piece in generate_text_stream(messages=messages, temperature=0.3, model=model, usage_ctx=usage_ctx):
+        if not piece:
+            continue
+        chunks.append(piece)
+        yield ("delta", piece)
+    return "".join(chunks)
+
+
 @router.post(
     "/courses/{course_id}/topics/{topic_id}/chat",
     response_model=LearningChatResponse,
@@ -2480,7 +3649,50 @@ def learning_chat(
     body: LearningChatRequest,
     current_user: dict = Depends(_get_current_user),
 ) -> LearningChatResponse:
-    """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。"""
+    """RAG統合された学習チャットエンドポイント（意図分類ルーティング付き）。
+
+    本体は ``_learning_chat_core``。コーパス回遊 Phase B（コース無し論文議論、
+    ``docs/features/corpus_roaming_design.md`` §5.3）の document 直付けファサード
+    （``document_discuss_chat``）と**同じコア**を通すための薄い委譲で、コース経路の
+    挙動・シグネチャ・処理順序は完全に不変（CR2）。
+
+    ストリーミング Phase 3-a（設計書 §3.3）でコアが generator になったため、
+    ``_run_learning_turn`` で同期に回して従来と同じ DTO を返す（ST7）。
+    """
+    return _run_learning_turn(_learning_chat_core(course_id, topic_id, body, current_user))
+
+
+def _learning_chat_core(
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    current_user: dict,
+    *,
+    course_data: dict | None = None,
+    scope_document_ids: set[str] | None = None,
+    stream: bool = False,
+):
+    """学習チャット本体（コース経路 / document 直付け経路の共通コア）。
+
+    **generator 関数**（ストリーミング Phase 3-a, 設計書 §3.3「生成器の継ぎ目」）。
+    前処理・後処理を2つのエンドポイントが別々に持たないための構造で、値は
+    ``return LearningChatResponse(...)``（＝ ``StopIteration.value``）で返る。
+    同期に回すときは ``_run_learning_turn(...)`` を通す（イベントは捨てられる）。
+    ``stream=True`` のときだけ本文が ``("delta", text)`` として流れる。
+
+    コース経路（``learning_chat``）は追加引数を渡さず、従来どおり
+    ``get_course_data`` でコースを解決する（処理順序を含め挙動不変）。
+
+    コーパス回遊 Phase B の document 直付け経路（``document_discuss_chat``）は
+    ``course_id`` にセンチネル（``core.discuss.context.document_context_id``）、
+    ``course_data`` に document 由来の合成データ、``scope_document_ids`` に
+    RAG スコープ（当該 document のみ）を渡す。可視性ゲート
+    （``user_can_view_document``）は呼び出し側で済ませている前提（CR1）。
+
+    - ``course_data``: 解決済みのコースデータ。``None`` なら従来どおり本関数内で解決する。
+    - ``scope_document_ids``: RAG の ``allowed_document_ids`` の明示指定。
+      ``None`` ならコース経路の従来ロジック（discuss_scope / 可視集合）。
+    """
     # チャット型AI支援の共通基盤整理 §1: このリクエストで最初に LLM を呼ぶ直前に1回だけ
     # コスト上限を消費する（リクエストスコープの quota_state で多重カウントを防止）。
     _quota_state: dict = {"consumed": False}
@@ -2529,10 +3741,16 @@ def learning_chat(
         body.action = None
         body.atlas_context = None
 
-    # 1. コースデータを取得
-    course_data = get_course_data(current_user["id"], course_id)
+    # 1. コースデータを取得（document 直付けファサードは解決済みの合成データを渡すため
+    #    ここでのコース解決自体を行わない = センチネル course_id が
+    #    get_course_data / _apply_course_version_view に流れ込まない）。
+    if course_data is None:
+        course_data = get_course_data(current_user["id"], course_id)
     if not course_data:
         raise HTTPException(status_code=404, detail="Course not found")
+    # コーパス回遊 Phase B（設計 §5.1）: センチネル判定はここ1箇所で行い、以降の
+    # ラベル・コース単位設定の読み出しの分岐に使う（文字列組み立ては core/discuss/context.py が正本）。
+    _document_context_id = parse_document_context(course_id)
 
     # 機能3（書き直し）: replace_message_id 指定時は、その往復以降をサーバ正本の履歴から
     # 取り除き、派生 interest_traces を supersede してから、message を同じ位置から再処理する。
@@ -2550,8 +3768,13 @@ def learning_chat(
     # find_course_topic は None を返し topic_title は生の topic_id にフォールバックする。
     # ここでラベル変換することで、表示・プロンプト・痕跡 context_label すべてに一括で効く。
     if topic_id == DISCUSSION_TOPIC_ID:
-        topic_title = DISCUSSION_TOPIC_LABEL
-        _origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": DISCUSSION_TOPIC_LABEL}
+        # コーパス回遊 Phase B（設計 §5.4）: コース外（document 直付け）の議論は
+        # 「論文との議論（コース外）」と正直に名乗る。ラベル変換はここ1箇所なので、
+        # 表示・プロンプト・痕跡 context_label すべてに一括で効く。
+        topic_title = (
+            DOCUMENT_DISCUSSION_TOPIC_LABEL if _document_context_id else DISCUSSION_TOPIC_LABEL
+        )
+        _origin_topic_info = {"id": DISCUSSION_TOPIC_ID, "title": topic_title}
     else:
         topic_title = topic_info["title"] if topic_info else topic_id
         _origin_topic_info = topic_info
@@ -2634,7 +3857,12 @@ def learning_chat(
     if not (isinstance(body.atlas_context, dict) and body.atlas_context):
         _is_usage_help = (
             _route_for_typed_action(body.support_action) == "USAGE_HELP"
-            or _is_usage_question(body.message)
+            # 分野語彙（内容質問の誤爆ガード）はコースのカートリッジから読む
+            # （分野名をコードに書かない。導出できないコースでは分野非依存語のみ）。
+            or _is_usage_question(
+                body.message,
+                cartridge_id=course_cartridge_id(course_data) or None,
+            )
         )
         if _is_usage_help:
             with usage_context("learning:help_usage", user_id=current_user["id"], course_id=course_id):
@@ -2678,27 +3906,57 @@ def learning_chat(
         if _atlas_response is not None:
             return _atlas_response
 
+    # 入口統合 Phase 1（docs/features/learning_chat_entry_unification_design.md §4.2 の
+    # [2] 段）: 非LLM の一次判定。「明らかに教材内容の問い」だけを DOMAIN_RAG として
+    # 先に確定させ、意図分類の LLM コールを省く（LC5: どの経路でも現行を上回らない）。
+    #   - 明示の様相（casual / discuss / 地図アクション）が立っている往復では推定器を
+    #     走らせない（LC2: 明示は常に推定に勝つ。特に discuss 中の casual 推定は
+    #     スコープ表示との食い違い・痕跡の帰属漏れを起こすので構造的に禁止）。
+    #   - 挨拶・「はい…理解」の決定論ショートカット（_classify_intent 冒頭）は
+    #     先取りしない — _is_greeting が偽のときだけ計算する。
+    #   - 分野語はコードに書かない（分野非依存語 + コースのカートリッジ ontology 由来語を
+    #     渡す。cartridge_id が空なら _cartridge_content_terms を呼ばない）。
+    #   - 入力は**当該発話だけ**（履歴・過去の様相・学習者モデルを使わない = LC4）。
+    _prejudged: str | None = None
+    if not (_is_casual or _is_discuss or _atlas_ctx) and not _is_greeting(body.message):
+        _stance_cartridge_id = course_cartridge_id(course_data) or ""
+        _prejudged = prejudge_stance_route(
+            body.message,
+            content_terms=_CONTENT_QUESTION_TERMS
+            + (
+                _cartridge_content_terms(_stance_cartridge_id)
+                if _stance_cartridge_id
+                else ()
+            ),
+        )
+    # 明示 casual（音声ループ等が intent_mode="casual" を送った往復）と、CHIT_CHAT 判定から
+    # 合流する推定 casual_light を後段で区別するため、再代入より前の値を控える（LC6）。
+    _explicit_casual = _is_casual
+
     # 2. 意図分類（Intent Routing）— UI ボタン由来の型付きアクションは分類を経由しない。
     #    discuss は casual と同様に意図分類（雑談拒否）をバイパスする（設計 §6.2）。
     with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
         intent = None if (_is_casual or _is_discuss or _atlas_ctx) else (
             _route_for_typed_action(body.support_action)
+            or _prejudged
             or _classify_intent(body.message, course_title, on_llm_call=_consume_quota)
         )
 
-    # ルート①: 雑談・無関係な質問 → 学習に関する質問を促す
+    # ルート①: 雑談まじりの発話 → **拒否しない**。軽い調子（casual_light）の様相として
+    # そのまま通常の RAG フローへ合流させる（入口統合 Phase 1 設計 §4.3、オーナー判断 §12-1）。
+    #
+    # 旧実装はここで定型の拒否文（「…学習支援に特化したAIです」）を返して早期 return して
+    # いた。これは casual が丸ごとバイパスしていた分岐そのもので、「casual のテキスト入口が
+    # 1つも無い」ことの裏返しだった。拒否をやめても**根拠の一線は落ちない** — RAG 検索・
+    # tier 集約・OutOfSourceGuard の system 注入・content_grounding はこの下流で全経路共通に
+    # 効き、教材に無い話題は model_generated と正直に返る（原則8）。
+    #
+    # 実装は `_is_casual` の**再代入だけ**（LC8: 下流の条件式は無改変）。分類はこの行より
+    # 手前で走り終えているので、前提知識ゲート・プロンプト選択・notice 抑制・誤解検出・
+    # U層タグ・痕跡・detour 非化のすべてに自然に効く。使い方についての再誘導は HELP
+    # pre-route と分類の USAGE_HELP 委譲が担い、ここでは扱わない（経路の一本化）。
     if intent == "CHIT_CHAT":
-        chit_chat_answer = (
-            "申し訳ありませんが、私は物理学の学習支援に特化したAIです。\n\n"
-            "物理学・数学の概念についての質問や、学習の進め方についての相談でしたら、"
-            "喜んでお答えします。学習に関する質問をぜひ聞かせてください！\n\n"
-            "画面の使い方についての質問にもお答えできます。"
-        )
-        persist_chat_history(
-            current_user["id"], course_id, topic_id,
-            body.history, body.message, chit_chat_answer,
-        )
-        return LearningChatResponse(answer=chit_chat_answer, course_update=None)
+        _is_casual = True
 
     # ルート①-b（設計 §4-4, Phase 2）: 意図分類 LLM が USAGE_HELP と判定した場合も
     # Phase 1 の HELP ハンドラへ委譲する。pre-route（_is_usage_question / typed action
@@ -2715,18 +3973,34 @@ def learning_chat(
 
     # ルート②: 学習相談・メタ質問 → RAGをスキップし、コース情報をベースにアドバイス
     if intent == "LEARNING_ADVICE":
+        # 是正 F4（2026-09-10）: 前提知識の説明だけは3段解決を通す。①同コース topic /
+        # ②本人が閲覧できる document のチャンク（検索1回）→ その抜粋を同じ1コールへ渡し、
+        # ③どこにも無ければ model_generated として返す。どの分岐でも
+        # `content_grounding` を None にしない（原則8: 出所の正直さ）。
+        is_prereq = (
+            body.support_action in _PREREQUISITE_ACTIONS
+            or LearningSupportAgent.is_prerequisite_request(body.message)
+        )
+        prereq_context: dict | None = None
+        if is_prereq:
+            prereq_context = _resolve_prerequisite_context(
+                current_user["id"], course_data,
+                _prerequisite_terms(body.message, topic_info),
+            )
         with usage_context("learning:chat", user_id=current_user["id"], course_id=course_id):
             advice_answer = _generate_learning_advice_response(
                 course_title, topic_title, body.message,
                 topic_info=topic_info, course_data=course_data,
                 on_llm_call=_consume_quota,
+                source_context=(prereq_context or {}).get("context_block"),
             )
         advice_answer, inline_actions = extract_inline_actions(advice_answer)
-        is_prereq = (
-            body.support_action in _PREREQUISITE_ACTIONS
-            or LearningSupportAgent.is_prerequisite_request(body.message)
-        )
-        if is_prereq:
+        if is_prereq and prereq_context is not None:
+            # 解決できなかった前提は、閉世界の事実文でサーバ側から添える（LLM に
+            # 言わせない・分野レベルの不在は言わない, SL1）。
+            _closed_world = _prerequisite_closed_world_note(prereq_context["unresolved"])
+            if _closed_world:
+                advice_answer = f"{advice_answer}\n\n{_closed_world}"
             # 前提確認は detour（origin=現在アンカー）。復帰導線を必ず付ける。
             result = support_agent.with_learning_actions(
                 answer=advice_answer,
@@ -2734,15 +4008,39 @@ def learning_chat(
                 origin=support_origin,
                 extra_actions=inline_actions,
             )
+            _prereq_sources = prereq_context["cited_sources"]
+            _prereq_grounding = prereq_context["content_grounding"]
+            _prereq_tier = prereq_context["overall_tier"]
             persist_chat_history(
                 current_user["id"], course_id, topic_id,
                 body.history, body.message, result.answer,
+                assistant_meta={
+                    "sources": [
+                        {
+                            "index": s["index"],
+                            "chunk_id": s["chunk_id"],
+                            "source_title": s["source_title"],
+                            "tier": s["tier"],
+                            "score": s["score"],
+                        }
+                        for s in _prereq_sources
+                    ],
+                    "overall_tier": _prereq_tier,
+                    "content_grounding": _prereq_grounding,
+                },
             )
-            return LearningChatResponse(**result.model_dump(), course_update=None)
+            return LearningChatResponse(
+                **result.model_dump(),
+                course_update=None,
+                sources=_prereq_sources,
+                overall_tier=_prereq_tier,
+                content_grounding=_prereq_grounding,
+            )
         # 学習開始・一般アドバイスはパス上（detour ではない）。前進アクションを型付きで提示。
         persist_chat_history(
             current_user["id"], course_id, topic_id,
             body.history, body.message, advice_answer,
+            assistant_meta={"content_grounding": "model_generated"},
         )
         first_concept = ""
         for _c in (course_data.get("concepts") or []):
@@ -2756,6 +4054,9 @@ def learning_chat(
             course_update=None,
             origin=asdict(support_origin),
             next_actions=[asdict(a) for a in (advice_next + inline_actions)],
+            # 学習相談の一般アドバイスは資料に基づかない（コース構造とモデルの知識だけ）。
+            # 出所を空欄のままにせず model_generated と正直に言う（是正 F4 / 原則8）。
+            content_grounding="model_generated",
         )
 
     # 3. Adaptive Routing: 前提知識の自動判定 (ルート③/④の前に実行)
@@ -2794,7 +4095,12 @@ def learning_chat(
             status_code=422,
             detail=f"discuss_scope には course_sources か all_visible を指定してください（受信値: {_discuss_scope!r}）。",
         )
-    if _is_discuss and _discuss_scope == "all_visible":
+    # コーパス回遊 Phase B（設計 §5.2）: document 直付けの既定スコープは**当該 document のみ**。
+    # 呼び出し側（document_discuss_chat）が解決済みの集合を渡す。"all_visible" を明示された
+    # ときだけ本人可視集合まで広げる（コース経路の意味論と対応）。
+    if scope_document_ids is not None and not (_is_discuss and _discuss_scope == "all_visible"):
+        allowed_document_ids = scope_document_ids
+    elif _is_discuss and _discuss_scope == "all_visible":
         allowed_document_ids = list_visible_document_ids(current_user["id"])
     elif _is_discuss:
         allowed_document_ids = list_course_source_document_ids(course_data)
@@ -2845,7 +4151,14 @@ def learning_chat(
         content_grounding = "model_generated"
 
     if cited_chunks:
-        context_block = "## 関連する教材のコンテキスト\n" + "\n---\n".join(cited_chunks)
+        # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: cited_chunks は
+        # PDF / URL 取得 / arXiv 由来の本文（第三者が書いた untrusted 入力）。区切り
+        # （`[出典N]` ラベル + `---`）に加えて、指示として解釈しない旨をここで明示する。
+        context_block = (
+            "## 関連する教材のコンテキスト\n"
+            + UNTRUSTED_SOURCE_NOTICE + "\n\n"
+            + "\n---\n".join(cited_chunks)
+        )
     elif _is_discuss:
         # DM1（出所の正直さ）: discuss は該当チャンクが無くても他スコープへ無断で
         # 広げない。範囲を広げていない事実と、範囲外知識を使う場合の出所明示を指示する。
@@ -2853,10 +4166,24 @@ def learning_chat(
             "※選択中の検索範囲には、この質問に直接関連する箇所は見当たりませんでした。"
             "範囲は広げていません。一般的な学術知識で回答する場合は、この論文由来ではないことを明示してください。"
         )
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+        # 楽屋（backstage）の質問は本人専用（SD4 / 原則5）。unanswered_query_logs は
+        # 教員の「未回答の質問」表に氏名付きで出る経路なので、楽屋では記録しない。
+        if not _is_backstage:
+            log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
     else:
         context_block = "※この質問に直接関連する教材セクションは見つかりませんでした。一般的な学術知識を用いて回答してください。"
-        log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+        if not _is_backstage:
+            log_unanswered_query(current_user["id"], course_id, topic_id, body.message)
+
+    # 入口統合 Phase 1（設計 §4.1 / §4.4）: casual に畳まれていた「様相（軽い調子）」と
+    # 「伝達形式（読み上げ向き）」を分離する。読み上げ向きに倒すのは
+    #   ① 画面が音声モード（body.screen_mode == "voice"。app.js が全送信経路で付与）
+    #   ② 明示 casual かつ screen_mode 未指定（後方互換 — 既存 API クライアント・
+    #      既存テストは intent_mode="casual" 単独で音声想定の応答を期待している）
+    # の2つだけで、テキストから推定された casual_light は spoken=False になる。
+    _casual_spoken = ((body.screen_mode or "").strip() == "voice") or (
+        _explicit_casual and not (body.screen_mode or "").strip()
+    )
 
     # 5. 回答の生成（ルート統合）
     # L1 OutOfSourceGuard: 未踏なら生成前に順序ゲート（断定回避・予想促し）を system へ注入する。
@@ -2869,7 +4196,9 @@ def learning_chat(
     elif _is_discuss:
         _system_prompt = _get_discuss_system_prompt(domain, response_persona)
     elif _is_casual:
-        _system_prompt = _get_casual_teacher_system_prompt(domain, response_persona)
+        _system_prompt = _get_casual_teacher_system_prompt(
+            domain, response_persona, spoken=_casual_spoken,
+        )
     else:
         _system_prompt = _get_integrated_tutor_system_prompt(domain, response_persona)
     # 確認問題の壁打ちモード: どのモードの system プロンプトに対しても、解答の直接提示を
@@ -2945,29 +4274,152 @@ def learning_chat(
     # この時点でリクエスト全体を通じて最初の（あるいは唯一の）LLM 呼び出しなら消費する
     # （intent 分類等ですでに消費済みなら no-op、§1）。
     _consume_quota()
+
+    # -----------------------------------------------------------------------
+    # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.4 / §11.5）
+    #
+    # 位置: **CostGate の直後・generate_text の前**（429 で返るリクエストでは射影を
+    # 走らせない = §11.6）。当該ターンの user メッセージだけを
+    # 「画面文脈ブロック → 選択箇所ブロック → 発話」に組み替える。足場ターン
+    # （messages[1]）には混ぜない — 足場は毎回同一に組み直す土台で、画面はターンごとに
+    # 変わるため（§11.5）。**保存（persist_chat_history）と痕跡は body.message の
+    # ままで不変**（SA6）。
+    #
+    # モード別（§11.5 の表）:
+    #   casual            → 画面文脈ブロックなし・選択ブロックあり（短い会話調と衝突する）
+    #   cycle_mode=elicit → 表示モードの事実1行だけ（主張本文・検証事実は問いの答えの
+    #                       手渡しになる）・選択ブロックあり
+    #   それ以外          → 両方（tutor / discuss / diff / 楽屋 / 確認問題の壁打ち）
+    # -----------------------------------------------------------------------
+    _screen_block = ""
+    _screen_has_ledger = False
+    if body.screen_context is not None and not _is_casual:
+        # 解決に使う document 集合は**明示スコープ**だけ（discuss の all_visible でも
+        # 広げない = 画面文脈が範囲を広げてはならない・DM1 / §11.5）。画面文脈を
+        # 送ってこないリクエストでは1クエリも増やさない（従来と完全に同じ経路）。
+        _screen_grounding_document_ids = (
+            set(scope_document_ids)
+            if scope_document_ids is not None
+            else set(list_course_source_document_ids(course_data))
+        )
+        _screen_block, _screen_has_ledger = _learning_screen_context_block(
+            body,
+            course_id=course_id,
+            course_data=course_data,
+            topic_info=topic_info,
+            grounding_document_ids=_screen_grounding_document_ids,
+            kinds=("view",) if _cycle_mode == "elicit" else None,
+        )
+    # -----------------------------------------------------------------------
+    # 知識の転用層 P4-2（knowledge_transfer_design.md §5）— RAG の構造 1 hop
+    #
+    # 入口は**回答に採用した出典**なので ``screen_context`` が無いターンでも働く。
+    # モード別は画面文脈ブロックと同じ考え方（casual は短い会話調と衝突する /
+    # elicit は主張本文が問いの答えの手渡しになる）。スコープは当該ターンの
+    # ``allowed_document_ids`` そのままで、構造側で広げない（KT6）。
+    # -----------------------------------------------------------------------
+    _retrieved_block = ""
+    if not _is_casual and _cycle_mode != "elicit":
+        _retrieved_block = _learning_retrieved_structure_block(
+            cited_sources, allowed_document_ids
+        )
+    _selection_block = render_selection_block(
+        body.selection_text,
+        _topic_student_material(topic_info) if topic_info else "",
+    )
+    if _screen_block or _retrieved_block or _selection_block:
+        # 信頼境界（TB1〜TB4）: 画面文脈ブロック（claim 抜粋・逐語引用を含む）・検索由来の
+        # 構造ブロック（claim 本文）・選択箇所ブロックは PDF 由来の untrusted 入力を運ぶので、
+        # ``UNTRUSTED_SOURCE_NOTICE`` を添える。足場ターン（messages[1]）に既に同じ文が
+        # あるときは重複させない（cited_chunks が空のターンでは足場に注意書きが無い —
+        # そのときだけここで補う）。
+        _turn_parts = [_screen_block, _retrieved_block, _selection_block, body.message]
+        if UNTRUSTED_SOURCE_NOTICE not in str(messages[1].get("content") or ""):
+            _turn_parts.insert(0, UNTRUSTED_SOURCE_NOTICE)
+        messages[-1] = {
+            "role": "user",
+            "content": "\n\n".join([part for part in _turn_parts if part]),
+        }
+    if _screen_has_ledger:
+        # §11.13-2 の2段構え: 台帳の事実を渡すときだけ、出力側にも閉世界の拘束を掛ける
+        # （SL1 の denylist はサーバが書く文字列にしか効かないため）。
+        messages[0] = {
+            "role": "system",
+            "content": messages[0]["content"] + "\n\n" + LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+        }
+    if _screen_block or _retrieved_block:
+        # §11.7: 構造 grounding が載ったターンの**種別だけ**を1ビット記録する
+        # （payload は常に空・痕跡には焼き込まない・学習者には見せない）。
+        # P4-2（knowledge_transfer_design.md §5）で検索由来の構造ブロックも同じ1ビットに
+        # 相乗りする — **どちらの由来かは payload に入れない**（出したか出さなかったかだけ）。
+        _record_document_discuss_event(
+            "structured_grounding_present", current_user["id"], course_id
+        )
+
+    # 入口統合 Phase 1（設計 §4.2 の [4] / §7）: この往復の様相と、その出所を確定する。
+    # 語彙・優先順位の正本は core/learning_stance/schema.py（純関数）。**様相は
+    # discuss_scope / cycle_mode / backstage / check_scaffold を切り替えない**（LC1）。
+    # ストリーミング Phase 3-a（§2.2 / §3.3）: 様相は回答本文に依存しないので生成の
+    # **前**に解決し、`start` イベントと最終 DTO の両方で同じ値を使う。
+    _stance, _stance_source = resolve_stance(
+        cycle_mode=_cycle_mode,
+        is_discuss=_is_discuss,
+        is_casual=_is_casual,
+        explicit_casual=_explicit_casual,
+        has_typed_action=bool(_route_for_typed_action(body.support_action)),
+        has_atlas_context=bool(_atlas_ctx),
+    )
+    # ストリーミング Phase 3-a: ここが本関数で唯一の「前処理の終わり」の目印。
+    # 権限・可視性・値検証・CostGate（ST2）・画面文脈の注入まで済んでいるので、
+    # ここで初めて 200 を返し始めてよい（route 側は最初の next() を
+    # StreamingResponse の前で同期に呼ぶ）。
+    yield ("start", build_stance_dto(_stance, _stance_source))
+
     degraded = False
     # M層 Phase 3（§6.4）: コース単位の学習チャットモデル上書き。運用パラメータのため
     # 版ピン中の学習者にも所有者の live（HEAD）設定を適用する — course_data は非所有者に
     # 版スナップショットを返しうるため、専用の live-only SELECT を別途使う
     # （get_course_live_llm_models）。未設定なら resolve_model() 内の既存解決順序
     # （user policy → system policy → env → tier既定）がそのまま効く（挙動不変）。
-    _course_chat_model = get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+    # コーパス回遊 Phase B: センチネル course_id は実在コース行を持たないため
+    # learning_courses への無駄な SELECT を出さない（結果は常に未設定 = 既存の解決順序）。
+    _course_chat_model = (
+        None
+        if _document_context_id
+        else get_course_live_llm_models(course_id).get(llm_policy.SCENE_LEARNING_CHAT)
+    )
     _course_chat_override = (
         llm_policy.model_override(_course_chat_model, source=llm_policy.SOURCE_COURSE_OVERRIDE)
         if _course_chat_model else nullcontext()
     )
     try:
         with usage_context(_chat_feature, user_id=current_user["id"], course_id=course_id), _course_chat_override:
-            answer = generate_text(
-                messages=messages,
-                temperature=0.3,
-                model=resolve_model("learning_chat_llm_model", fallback="analysis"),
+            # M1: 実効モデルは contextvar（コース上書き）の内側で1回だけ確定する。
+            _effective_model = resolve_model("learning_chat_llm_model", fallback="analysis")
+            if not stream:
+                answer = generate_text(
+                    messages=messages,
+                    temperature=0.3,
+                    model=_effective_model,
+                )
+        if stream:
+            # contextvar の外で yield する（ストリーミング設計 §3.2。Starlette は
+            # next() ごとに copy_context() した別スレッドでジェネレータを再開するため、
+            # with を跨いだ yield は ContextVar.reset() の token 不一致で落ちる）。
+            answer = yield from _stream_answer(
+                messages,
+                model=_effective_model,
+                usage_ctx={
+                    "feature": _chat_feature,
+                    "user_id": current_user["id"],
+                    "course_id": course_id,
+                },
             )
     except Exception:
         # 会話は死なせない（設計書 I3）: 500 即死をやめ、degraded 固定文 + 200 へ縮退する。
         # 履歴は保存し、回答本文に依存する後処理（誤解検出・ドリルダウン抽出）はスキップする（I4）。
         logger.exception("Learning chat LLM call failed for topic %s", topic_id)
-        answer = "AI 応答を生成できませんでした。しばらくしてからもう一度お試しください。"
+        answer = _CHAT_DEGRADED_MESSAGE
         degraded = True
 
     # 出典マーカーの突き合わせ: 根拠の無い [出典N]（捏造・番号超過）を本文から取り除き、
@@ -2988,13 +4440,18 @@ def learning_chat(
     # 誤解検出（マイルドな表現にも対応）。casual では採点・訂正の圧を掛けない。
     # degraded ターンは回答本文が根拠を伴わない固定文のため、本文依存の後処理はスキップする
     # （設計書 §4・I3/I4: 会話は死なせない・履歴保存はそのまま行う）。
+    # 是正 F5: 記録されるのは **candidate**（AI が訂正を提案した箇所）だけで、「誤解」として
+    # 確定するのは本人の3択（POST .../misconceptions/{id}/review）に限る。
     course_update = None
     if not degraded:
         if not _is_casual and topic_info and any(
             kw in answer for kw in ["訂正", "より正確です", "誤解"]
         ):
             course_update = detect_and_record_misconception(
-                current_user["id"], course_id, course_data, topic_id, body.message, answer
+                current_user["id"], course_id, course_data, topic_id, body.message, answer,
+                # 機能3（書き直し・削除）で派生痕跡を supersede する将来の連携のため、
+                # 当該ターンの user メッセージ id を候補に持たせる（無い経路では None）。
+                message_id=body.message_id or None,
             )
 
     _persisted = persist_chat_history(
@@ -3040,7 +4497,16 @@ def learning_chat(
     _tension_hint = False if _is_backstage else judge_tension_hint(body.message, _recent_user_texts)
     # 構造帰属（方法A・同期・非LLM）: テキスト選択・要素タップの明示アンカーがあれば
     # learner_selected で確定記録する。無ければ方法B（非同期LLM）の帰属対象になる。
-    _sel_anchor = _learner_selected_anchor(body)
+    # 学ぶ単位 P2-7（設計 §8）: ①区画番号が申告されていないテキスト選択は教材区画本文
+    # との逐語一致で埋める（決まらなければ場所は空のまま）②画面で要素チップを選んだ
+    # 状態の発話も明示アンカーとして確定する（course 不一致の画面文脈は無視される）。
+    _sel_anchor = _learner_selected_anchor(
+        body,
+        screen_selection=_screen_selection_for_anchor(body, course_id=course_id),
+        segment_texts=_anchor_segment_texts(topic_info),
+    )
+    # 様相（_stance / _stance_source）は生成の前に解決済み（ストリーミング §3.3 で
+    # `start` イベントへ載せるため前倒しした。入力6つはいずれも回答本文に依存しない）。
     _trace_payload = {
         "overall_tier": overall_tier,
         "position_anchor": position_anchor,
@@ -3067,6 +4533,15 @@ def learning_chat(
         # 楽屋（構造の降下路 §4）: 本人の台帳表示・後方検証のために焼き込む
         # （kind='backstage_question' と対。楽屋以外にはキー自体を足さない）。
         **({"backstage": True} if _is_backstage else {}),
+        # 入口統合 Phase 1（設計 §7）: どの様相で答えたか・それが明示か推定かを
+        # enum 2つだけ焼き込む（本文・逐語は入れない = DO1。confidence も入れない = LC7）。
+        # 楽屋には焼き込まない（entry_mode と同じ SD4 のガード — 「集計に入りません」と
+        # 宣言した枠に観測用のキーを足さない）。
+        **(
+            {"stance": _stance, "stance_source": _stance_source}
+            if not _is_backstage
+            else {}
+        ),
     }
     # gap1: 地図アクション由来でない通常学習でも、topic → 骨格概念を解決して atlas 帰属を
     # 焼き込む (個人層の「いまここ」を動かす)。地図由来 (_atlas_ctx) は上書きしない。
@@ -3162,9 +4637,127 @@ def learning_chat(
         structure_anchor=_sel_anchor,
         anchor_confirm=_anchor_confirm,
         mirror=_mirror,
+        # 入口統合 Phase 1（設計 §5、LC6）: 推定したことを隠さず事実として返す。
+        # RAG 応答（この最終 return）だけが設定し、HELP / 学習相談 / 地図 / 要素説明の
+        # 早期 return は None のまま。数値キーは持たない（LC7）。
+        stance=build_stance_dto(_stance, _stance_source),
         mock=False,
         degraded=degraded,
     )
+
+
+# ---------------------------------------------------------------------------
+# 学習チャットのストリーミング（Phase 3-a）
+#
+# 正本: docs/features/llm_response_streaming_design.md（ST1〜ST9 / §2.2 / §3.4）。
+# 前処理・後処理は `_learning_chat_core` の1本のまま（分岐は転送方式だけ）。
+# ---------------------------------------------------------------------------
+
+#: chunk 境界で ANSI エスケープ列が割れても衛生を掛け損ねないための保留幅（§4.2）。
+_SSE_HYGIENE_TAIL = 16
+
+
+def _sse_frame(event: str, payload: dict) -> str:
+    """SSE の1フレーム。``data:`` は必ず JSON 1行（本文の改行で枠が壊れない）。"""
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+
+def _sse_frames(gen, first):
+    """``_learning_chat_core`` のイベント列を SSE フレーム列に変換する（§3.4 手順5）。
+
+    - ``start`` → delta（衛生済み）→ ``final``（``LearningChatResponse.model_dump()`` を
+      そのまま。キーを間引かない = ST7）。
+    - ``final`` すら組み立てられない例外だけ ``error`` フレーム（§2.2）。
+    - クライアント切断（``GeneratorExit``）は ``gen.close()`` へ伝える。コアの
+      ``except Exception`` は ``GeneratorExit`` を捕まえないので、保存・痕跡へは
+      進まない（ST1/ST5: 中断した往復は記録しない）。
+    """
+    _, stance_dto = first
+    try:
+        yield _sse_frame("start", {"stance": stance_dto})
+        pending = ""
+        try:
+            while True:
+                kind, value = next(gen)
+                if kind != "delta":
+                    continue
+                pending += value
+                if len(pending) > _SSE_HYGIENE_TAIL:
+                    emit, pending = pending[:-_SSE_HYGIENE_TAIL], pending[-_SSE_HYGIENE_TAIL:]
+                    cleaned = strip_control_sequences(emit)
+                    if cleaned:
+                        yield _sse_frame("delta", {"t": cleaned})
+        except StopIteration as stop:
+            response = stop.value
+        cleaned_tail = strip_control_sequences(pending)
+        if cleaned_tail:
+            yield _sse_frame("delta", {"t": cleaned_tail})
+        yield _sse_frame("final", response.model_dump())
+    except GeneratorExit:
+        gen.close()
+        raise
+    except Exception:
+        logger.exception("Learning chat stream failed")
+        gen.close()
+        yield _sse_frame("error", {"reason": "upstream"})
+
+
+@router.post("/courses/{course_id}/topics/{topic_id}/chat/stream")
+def learning_chat_stream(
+    course_id: str,
+    topic_id: str,
+    body: LearningChatRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> StreamingResponse:
+    """学習チャットの逐次配信（SSE, ストリーミング Phase 3-a §3.4）。
+
+    非ストリーム版 ``learning_chat`` と**同じコア**（``_learning_chat_core``）を通し、
+    最後の ``final`` イベントは同一入力に対する JSON レスポンスと同値（ST7）。
+
+    ``settings.learning_chat_streaming_enabled`` が false のときは 404
+    （機能が存在しない状態を正直に返す。フロントは従来の JSON 経路へ = ST9）。
+    最初の ``next()`` は ``StreamingResponse`` を返す**前**に同期で呼ぶので、権限・
+    可視性・値検証・CostGate（429）は 200 を返す前に通常の HTTP ステータスで出る
+    （ST2 / 原則11）。
+    """
+    if not get_settings().learning_chat_streaming_enabled:
+        raise HTTPException(status_code=404, detail="Not Found")
+
+    gen = _learning_chat_core(course_id, topic_id, body, current_user, stream=True)
+    try:
+        first = next(gen)
+    except StopIteration as stop:
+        # LLM 非経由の確定応答（学習相談・HELP・地図・要素説明など）。delta を1つも
+        # 出さずに start + final だけを流し、クライアントのコードパスを1本に保つ。
+        response = stop.value
+
+        def _immediate():
+            yield _sse_frame("start", {"stance": response.stance})
+            yield _sse_frame("final", response.model_dump())
+
+        return StreamingResponse(
+            _immediate(),
+            media_type="text/event-stream",
+            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+        )
+
+    return StreamingResponse(
+        _sse_frames(gen, first),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+@router.get("/client-features")
+def learning_client_features(
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """クライアントが使ってよい経路の配布（ストリーミング §3.4）。
+
+    設定値の鏡で、bool 1キーのみ。数値・上限・モデル名は載せない（ST8 / M9）。
+    取得できないときフロントは false 扱い（fail-to-current）。
+    """
+    return {"chat_streaming": bool(get_settings().learning_chat_streaming_enabled)}
 
 
 @router.get("/courses/{course_id}/discuss/opening")
@@ -3255,6 +4848,190 @@ def record_discuss_reflection(
     return {"ok": True, **result}
 
 
+# ---------------------------------------------------------------------------
+# コーパス回遊 Phase B — コース無し論文議論（document 直付け discuss）
+# 正本設計書: docs/features/corpus_roaming_design.md §5（CR1/CR2/CR8/CR9）
+#
+# 会話は既存の learning_chat_history / interest_traces に、予約センチネル
+# course_id="_doc:{document_id}" + topic_id="_discussion" で載せる（migration 0）。
+# アクセスゲートは受講ゲートではなく **document 可視性のみ**（CR1・fail-closed）。
+# ---------------------------------------------------------------------------
+
+
+def _resolve_discuss_document(user_id: str, document_ref: str) -> tuple[str, str, str]:
+    """document_ref（documents.id UUID / source_path=material_id）を解決し、
+    閲覧可否を fail-closed で判定して ``(document_id, source_path, title)`` を返す。
+
+    CR1: ゲートは ``user_can_view_document`` と同一判定（``resolve_document_access``
+    の ``can_view``）。**不可・不在はいずれも 404 に統一**する（存在推測をさせない
+    既存流儀 — 403 と 404 を撃ち分けない）。
+    """
+    access = resolve_document_access(user_id, document_ref)
+    if not access.found or not access.can_view:
+        raise HTTPException(status_code=404, detail="Document not found")
+    document_id = str(access.document_id)
+    title = ""
+    try:
+        from core.personal_graph.queries import fetch_document_titles
+
+        title = (fetch_document_titles([document_id]) or {}).get(document_id, "") or ""
+    except Exception:  # noqa: BLE001 — タイトルは表示用。取得失敗で議論を止めない。
+        logger.warning("document discuss: title lookup failed for %s", document_id, exc_info=True)
+    return document_id, access.source_path or "", title or access.source_path or document_id
+
+
+def _document_discuss_course_data(document_id: str, source_path: str, title: str) -> dict:
+    """document 直付け議論のための合成 course_data（DB には保存しない読み時の器）。
+
+    ``_learning_chat_core`` がコースから読む項目（title / domain / sources / topics）だけを
+    最小限で満たす。``sources`` に当該 document を入れることで、出所分類
+    （``content_grounding``）がこの論文由来のチャンクを ``course_material``
+    （＝いま議論している論文）として扱う。
+    """
+    source: dict = {"document_id": document_id, "title": title}
+    if source_path:
+        source["material_id"] = source_path
+    return {
+        "title": title,
+        "sources": [source],
+        "topics": [],
+        "concepts": [],
+    }
+
+
+def _record_document_discuss_event(event: str, user_id: str, context_id: str) -> None:
+    """discuss 観測イベント（設計 §5.5）を best-effort で1件記録する。
+
+    DO6（計測失敗で UX を止めない）: 例外は握り潰す。payload は常に空
+    （DO1: 本文非含有）。学習者にはこの数値を一切返さない（DO3）。
+    """
+    try:
+        discuss_observation.insert_metric_events(
+            user_id, [{"event": event, "course_id": context_id, "payload": {}}]
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("document discuss: metric event %s failed", event, exc_info=True)
+
+
+@router.get("/documents/{document_ref}/discuss/opening")
+def get_document_discussion_opening(
+    document_ref: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """コース無し論文議論の開幕画面（設計 §5.3・非LLM・読み取り専用）。
+
+    コース版（``GET /courses/{course_id}/discuss/opening``）と**同じ**
+    ``core.discuss.opening.build_opening`` を、センチネル course_id と単一 document で
+    呼ぶだけ。``documents[].discussion_seeds``（教員承認済みの議論のきっかけ）は
+    document 単位の素材なのでそのまま出る。LLM 呼び出し 0 回（CR9）。
+
+    既知の縮退（設計 §5.4）: ``fragile_points``（D層台帳の未検証合意リスト）は
+    ``epistemic_ledger.course_id`` 基準の投影のため、コース外のセッションでは空になる。
+    UCサイクルの ``intention``（course 配下の持ち越し）も同梱しない。
+    """
+    document_id, _source_path, title = _resolve_discuss_document(current_user["id"], document_ref)
+    context_id = document_context_id(document_id)
+    result = build_discussion_opening(context_id, [document_id], course_focus="")
+    # フロントがこの後のチャット・履歴 API に使う会話キーと、画面に出す論文名。
+    result["document_context"] = {
+        "document_id": document_id,
+        "title": title,
+        "context_id": context_id,
+        "topic_id": DISCUSSION_TOPIC_ID,
+        "label": DOCUMENT_DISCUSSION_TOPIC_LABEL,
+    }
+    _record_document_discuss_event("document_discuss_opened", current_user["id"], context_id)
+    return result
+
+
+@router.post("/documents/{document_ref}/discuss/chat", response_model=LearningChatResponse)
+def document_discuss_chat(
+    document_ref: str,
+    body: LearningChatRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningChatResponse:
+    """コース無し論文議論のチャット（設計 §5.2/§5.3）。
+
+    既存 ``learning_chat`` の discuss 経路の**ファサード**で、本体は同じ
+    ``_learning_chat_core`` を通る（応答様式 DA1〜DA6・書き直し/削除の truncate・
+    tension プレフィルタ・痕跡記録・観測タグ ``learning:chat_discuss`` は共通コア由来）。
+
+    - ゲートは document 可視性のみ（CR1）。受講ゲートは一切通らない。
+    - 会話キーは ``course_id=_doc:{document_id}`` / ``topic_id=_discussion``（§5.1）。
+    - RAG は既定で当該 document のみ。``discuss_scope="all_visible"`` のときだけ
+      本人可視集合まで広げる（該当チャンクゼロでの無断フォールバックは無し = DM1）。
+    - コストは既存 ``LEARNING_CHAT_MAX_CALLS_PER_DAY`` に相乗り（新設しない・CR9）。
+
+    コース前提のペイロード（``action``＝グラフ要素説明 / ``atlas_context``＝分野の地図の
+    ↗ アクション / ``cycle_mode``＝理解サイクルの AI モード）は v1 では提供しないので
+    サーバ側で落とす（§5.4 の縮退を黙って壊さず、明示的に無効化する）。
+    """
+    document_id, source_path, title = _resolve_discuss_document(current_user["id"], document_ref)
+    context_id = document_context_id(document_id)
+
+    # 常に discuss として扱う（このエンドポイントに他の intent_mode は無い）。
+    body.intent_mode = "discuss"
+    body.action = None
+    body.atlas_context = None
+    body.cycle_mode = None
+
+    response = _run_learning_turn(_learning_chat_core(
+        context_id,
+        DISCUSSION_TOPIC_ID,
+        body,
+        current_user,
+        course_data=_document_discuss_course_data(document_id, source_path, title),
+        scope_document_ids={document_id},
+    ))
+    _record_document_discuss_event("document_discuss_turn", current_user["id"], context_id)
+    return response
+
+
+@router.get(
+    "/documents/{document_ref}/discuss/history",
+    response_model=LearningChatHistoryResponse,
+)
+def get_document_discussion_history(
+    document_ref: str,
+    current_user: dict = Depends(_get_current_user),
+) -> LearningChatHistoryResponse:
+    """コース無し論文議論の履歴（センチネルキー）。形は既存 ``get_chat_history`` と同一。"""
+    document_id, _source_path, _title = _resolve_discuss_document(current_user["id"], document_ref)
+    return get_chat_history(
+        document_context_id(document_id), DISCUSSION_TOPIC_ID, current_user
+    )
+
+
+@router.delete("/documents/{document_ref}/discuss/messages/{message_id}")
+def delete_document_discussion_message_from(
+    document_ref: str,
+    message_id: str,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """機能3（削除）の document 直付け版: 指定メッセージ以降の往復を取り除く。
+
+    既存のコース経路と同じ ``truncate_chat_and_supersede`` の truncate セマンティクス
+    （当該 user メッセージ・その回答・以降の往復を履歴から除き、派生 interest_traces は
+    削除せず ``status='superseded'`` に遷移させる = CR8/P4）。行削除 API ではない。
+    """
+    document_id, _source_path, _title = _resolve_discuss_document(current_user["id"], document_ref)
+    try:
+        result = truncate_chat_and_supersede(
+            current_user["id"], document_context_id(document_id), DISCUSSION_TOPIC_ID, message_id
+        )
+    except Exception:
+        logger.exception(
+            "Failed to delete document discuss message for user=%s doc=%s msg=%s",
+            current_user["id"], document_id, message_id,
+        )
+        raise HTTPException(status_code=500, detail="Failed to delete chat message")
+
+    if result is None:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    return {"status": "deleted", "removed_count": result["removed_count"]}
+
+
 @router.get("/courses/{course_id}/source-chunk/{chunk_id}")
 def get_source_chunk_route(
     course_id: str,
@@ -3285,6 +5062,54 @@ def get_source_chunk_route(
     if not passage:
         raise HTTPException(status_code=404, detail="Source chunk not found")
     return passage
+
+
+@router.get("/courses/{course_id}/symbols/lookup")
+def get_symbol_lookup_route(
+    course_id: str,
+    symbol: str = "",
+    equation_id: str = "",
+    chunk_id: str = "",
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """記号の「直前の定義」（概念レジストリ P3-5 / ``concept_registry_design.md`` §7）。
+
+    教材の数式の中の記号をタップしたときに、**その位置より前で最も近い定義**を
+    論文の逐語で返す。**LLM を 1 度も呼ばず**（既存データの読みだけ）、quota も
+    消費しない。
+
+    fail-closed は既存の学習者向け文脈 API（``get_course_component_context`` /
+    ``get_source_chunk_route``）と同じ3段:
+
+    1. ``get_accessible_course_data`` — 本人が当該コースを閲覧できる（不可なら 404）
+    2. ``list_course_source_document_ids(course_data)`` — そのコースの source 集合
+       （**全域可視集合へ広げない** — P0 オブジェクトスコープ是正と同じ規律）
+    3. ``core.symbol_lookup`` の SQL 内 ``document_id = ANY(...)`` で強制
+       （sources が空なら SQL を発行せず ``available=false``）
+
+    記号が空文字のときは 422（何を引くのか決まっていない照会は受けない）。記号は
+    見つかったが定義が無い場合は 404 ではなく 200 + 事実文（「この論文には定義の
+    記述が見つかりませんでした」）で返す — 定義の不在は異常ではなく事実である（KR8）。
+    """
+    if not str(symbol or "").strip():
+        raise HTTPException(status_code=422, detail="記号が指定されていません。")
+
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if course_data is None:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    allowed_document_ids = list_course_source_document_ids(course_data)
+    session = _pg_session()
+    try:
+        return lookup_symbol_definition(
+            session,
+            symbol=symbol,
+            document_ids=sorted(allowed_document_ids),
+            equation_id=equation_id,
+            chunk_id=chunk_id,
+        )
+    finally:
+        session.close()
 
 
 @router.get("/courses/{course_id}/chunks/{chunk_id}/claim-refs")
@@ -3608,6 +5433,61 @@ def dismiss_anchor_route(
 
 
 # ---------------------------------------------------------------------------
+# 誤解メモ（AI 候補 → 本人の3択）— 是正 F5 / 六つのレンズ 提案3
+# ---------------------------------------------------------------------------
+# 誤解メモは非LLM の文字列一致で検出した **AI の候補** にすぎない。「誤解」として
+# 確定するのはこの経路の本人の3択だけで、却下も行を消さず status 遷移で保持する（P4）。
+# 語彙は R層の自己確認と共有（core/reconstruction/schema.py::SELF_CHECK_VALUES）。
+
+
+class MisconceptionReviewRequest(BaseModel):
+    """誤解メモ候補への本人の判断（agreed / disagreed / verdict_wrong）。"""
+
+    decision: str
+
+
+@router.post("/courses/{course_id}/topics/{topic_id}/misconceptions/{entry_id}/review")
+def review_misconception_route(
+    course_id: str,
+    topic_id: str,
+    entry_id: str,
+    body: MisconceptionReviewRequest,
+    current_user: dict = Depends(_get_current_user),
+) -> dict:
+    """誤解メモ候補を本人が確定 / 却下する（本人のみ・非LLM・migration 不要）。
+
+    - ``agreed``: そう、これは私の誤解だった → ``confirmed``
+    - ``disagreed``: これは誤解ではない → ``dismissed``（行は残す）
+    - ``verdict_wrong``: AI の訂正のほうが違う → ``dismissed``（理由を分けて記帳する）
+
+    語彙外は 422、候補が見つからない / すでに確定・却下済みは 404（他人の学習状態には
+    そもそも到達できない — 更新は user_id 一致の行だけを対象にする）。
+    """
+    decision = str(body.decision or "").strip()
+    if decision not in MISCONCEPTION_DECISIONS:
+        raise HTTPException(status_code=422, detail="invalid misconception decision")
+
+    course_data = get_accessible_course_data(current_user["id"], course_id)
+    if not course_data:
+        raise HTTPException(status_code=404, detail="Course not found")
+    if not find_course_topic(course_data, topic_id):
+        raise HTTPException(status_code=404, detail="Topic not found")
+
+    result = review_personal_misconception(
+        current_user["id"], course_id, topic_id, entry_id, decision,
+    )
+    if result is None:
+        raise HTTPException(status_code=404, detail="Misconception candidate not found")
+
+    return {
+        "ok": True,
+        **result,
+        # 更新後の個人レイヤーをそのまま返す（フロントは chat 応答と同じ経路でマージする）。
+        "personal_layer": get_personal_layer(current_user["id"], course_id),
+    }
+
+
+# ---------------------------------------------------------------------------
 # 個人知識ネットワーク（わたしの地図）— 表示除外/復帰 (UX proposal §6)
 # ---------------------------------------------------------------------------
 # 「地図には反映しない」「地図に戻す」操作。痕跡は削除されず（P4）、地図の導出
@@ -3813,7 +5693,7 @@ def _tension_connect_edge_viewable(user_id: str, edge_id: str) -> bool:
         try:
             rows = session.execute(
                 sa_text("""
-                    SELECT DISTINCT document_id FROM theory_component_graphs
+                    SELECT DISTINCT document_id::text AS document_id FROM theory_component_graphs
                     WHERE graph_json->'edges' @> jsonb_build_array(
                         jsonb_build_object('edge_id', CAST(:eid AS text))
                     )
@@ -3952,6 +5832,25 @@ def _first_approved_component_explanation(component_id: str, course_id: str) -> 
     }
 
 
+def _component_context_with_explanation(
+    component_id: str, course_id: str, course_document_ids: set[str]
+) -> dict | None:
+    """コーススコープの component 文脈 DTO（C層の承認済み説明を充填済み）。解決不能なら ``None``。
+
+    ``get_course_component_context``（エンドポイント）と、画面文脈アダプター Phase 4
+    （``assistant_screen_adapter_design.md`` §11.3 kind ``element``）の共通正本。
+    document スコープの強制は ``core.component_context`` の SQL 内
+    （``ANY(:doc_ids)``）が持つ — ここで再実装しない。
+    """
+    context = build_component_context(component_id, course_id, course_document_ids)
+    if context is None:
+        return None
+    explanation = _first_approved_component_explanation(context["component_id"], course_id)
+    if explanation is not None:
+        context["instance"]["explanation"] = explanation
+    return context
+
+
 @router.get("/courses/{course_id}/components/{component_id}/context")
 def get_course_component_context(
     course_id: str,
@@ -3977,13 +5876,11 @@ def get_course_component_context(
         raise HTTPException(status_code=404, detail="Course not found")
 
     course_document_ids = set(_course_document_ids(course_data))
-    context = build_component_context(component_id, course_id, course_document_ids)
+    context = _component_context_with_explanation(
+        component_id, course_id, course_document_ids
+    )
     if context is None:
         raise HTTPException(status_code=404, detail="Component not found")
-
-    explanation = _first_approved_component_explanation(context["component_id"], course_id)
-    if explanation is not None:
-        context["instance"]["explanation"] = explanation
     return context
 
 

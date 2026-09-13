@@ -478,10 +478,52 @@ def _looks_like_symbol(name: str) -> bool:
 
 
 def _has_math_or_procedural_concept(concepts) -> bool:
+    """Whether the concept layer names a mathematical / procedural operation.
+
+    P0-3（knowledge_structure_review_2026-09-12 §4 / F-6 / K-2）: 以前は
+    ``_looks_like_symbol`` も合格条件だったため、``b_1`` のような記号ジャンクが
+    「数学的である」ことの根拠になっていた。記号は concepts から外れて
+    symbol_registry に閉じたので、ここでは**手続的な概念名**だけを見る。
+    数学性のもう一方の根拠（式リンク）は
+    :func:`_component_references_equation` が担う。
+    """
     for concept in concepts or []:
-        text = str(concept or "")
-        if text.lower() in _PROCEDURAL_CONCEPT_TERMS or _looks_like_symbol(text):
+        if str(concept or "").lower() in _PROCEDURAL_CONCEPT_TERMS:
             return True
+    return False
+
+
+# component が式を参照していることを示すフィールド（P0-3）。導出コンポーネントの
+# 数学性は、記号が概念層から外れた後は式リンクが担う。
+_EQUATION_REFERENCE_FIELDS = (
+    "linked_equation_ids",
+    "input_equation_ids",
+    "intermediate_equation_ids",
+    "output_equation_ids",
+    "definition_equation_ids",
+    "constraint_equation_ids",
+    "review_required_equation_ids",
+)
+
+
+def _component_references_equation(component) -> bool:
+    """Whether the component references at least one equation.
+
+    evidence_refs / 各 equation_role フィールド / inputs・outputs の equation 参照の
+    いずれかが非空なら真。参照の**有無**だけを見る（式の中身は別の検査の担当）。
+    """
+    refs = getattr(component, "evidence_refs", None) or {}
+    if isinstance(refs, dict) and (refs.get("equation_ids") or refs.get("equations")):
+        return True
+    for field_name in _EQUATION_REFERENCE_FIELDS:
+        if getattr(component, field_name, None):
+            return True
+    for field_name in ("inputs", "outputs", "preconditions", "cautions"):
+        for item in getattr(component, field_name, None) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("equation_ids") or item.get("equations"):
+                return True
     return False
 
 
@@ -495,7 +537,12 @@ def _has_named_concept(concepts) -> bool:
 
 
 def _component_concept_role_mismatch(component, concepts) -> str:
-    """Return a reason string when concepts contradict the support_role (issue #8)."""
+    """Return a reason string when concepts contradict the support_role (issue #8).
+
+    導出コンポーネントの「数学的である」根拠は、手続的な概念名 **または** 式への
+    リンク（P0-3 で記号が概念層から外れたため）。式も手続的概念も持たない導出
+    コンポーネントだけが warning に残る。severity は warning のまま。
+    """
     role = str(getattr(component, "support_role", "") or "")
     operation = str(getattr(component, "operation", "") or "").lower()
     responsibility = str(getattr(component, "responsibility_type", "") or "")
@@ -506,8 +553,16 @@ def _component_concept_role_mismatch(component, concepts) -> str:
         or responsibility == "derivation"
         or any(operation.startswith(p) for p in ("derive", "eliminate", "solve", "substitute", "linearize"))
     )
-    if is_derivation and concepts and not _has_math_or_procedural_concept(concepts):
-        return "derivation component lacks a mathematical or procedural concept"
+    if (
+        is_derivation
+        and concepts
+        and not _has_math_or_procedural_concept(concepts)
+        and not _component_references_equation(component)
+    ):
+        return (
+            "derivation component lacks a mathematical or procedural concept "
+            "and references no equation"
+        )
 
     if (role == "observable_bridge" or component_type == "ObservableComponent") and concepts and not _has_named_concept(concepts):
         return "observable component lacks an observable-name concept"
@@ -829,7 +884,21 @@ class ExportValidationGate:
                 path="$.completeness.terminal_section",
                 source_stage="export_validation",
             ))
-        if not ingest.get("sufficient", True):
+        # P0-5 / F-17: 取り込みが不十分な理由は2つあり、原因が違うので警告を分ける。
+        # ①末尾未到達（ingest_incomplete）②本文ブロックのある頁の比率が低い
+        # （structure_page_coverage_low）。判定は completeness の review_reasons /
+        # ingest_coverage を読むだけ（completeness.py 側の規則には触れない）。
+        review_reasons = list(report.get("review_reasons") or [])
+        reach_insufficient = (
+            "ingest_incomplete" in review_reasons
+            if review_reasons
+            else not ingest.get("sufficient", True)
+        )
+        coverage_low = bool(
+            "structure_page_coverage_low" in review_reasons
+            or ingest.get("structure_page_coverage_low")
+        )
+        if reach_insufficient:
             warnings.append(ValidationEntry(
                 code="DOCUMENT_INGEST_INCOMPLETE",
                 message=(
@@ -837,6 +906,20 @@ class ExportValidationGate:
                     f"last ingested page {ingest.get('last_ingested_page')} of "
                     f"{ingest.get('pages_total')}; trailing un-ingested ranges "
                     f"{ingest.get('trailing_uningested_page_ranges')}"
+                ),
+                artifact="document_structure",
+                path="$.completeness.ingest_coverage",
+                source_stage="export_validation",
+            ))
+        if coverage_low:
+            warnings.append(ValidationEntry(
+                code="DOCUMENT_STRUCTURE_PAGE_COVERAGE_LOW",
+                message=(
+                    f"document {document_id!r} has body blocks on only a small share of "
+                    f"its pages (structure page coverage "
+                    f"{ingest.get('structure_page_coverage_ratio')} of "
+                    f"{ingest.get('pages_total')} pages); ingest may be partial even "
+                    "though the document end was reached"
                 ),
                 artifact="document_structure",
                 path="$.completeness.ingest_coverage",

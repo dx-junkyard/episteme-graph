@@ -39,6 +39,13 @@ MAX_TITLE_CHARS = 300
 _TRUNCATION_MARK = "…"
 _WS_RE = re.compile(r"\s+")
 
+#: 前段絞り込み（``docs/features/atlas_vector_anchoring_design.md`` §6）が働いた
+#: ドメインに添える注記。閉世界の提示を絞った事実を LLM に隠さない（VA7 / VA8）。
+#: 文言の正本はここ1箇所（prompt.py は組み立てるだけ）。
+PREFILTER_NOTE = (
+    "この領域一覧は関連上位への絞り込み提示であり、骨格の全ノードではありません。"
+)
+
 
 def truncate(text: str, limit: int) -> str:
     text = str(text or "").strip()
@@ -122,6 +129,10 @@ class LandscapePlacementInputBuilder:
                 for region in regions
             ],
         }
+        if getattr(domain, "prefiltered", False):
+            # 絞り込んだドメインだけに注記を付ける（絞り込んでいないドメインの
+            # 「これで全部」という閉世界の言明は従来のまま保つ）。
+            prepared["note"] = PREFILTER_NOTE
         if orphans:
             prepared["other_concepts"] = [
                 {

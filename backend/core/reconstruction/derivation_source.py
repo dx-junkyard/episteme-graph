@@ -124,7 +124,7 @@ def _claim_id_lookup(document_id: str) -> dict[str, str]:
     session = _pg_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id::text AS id, source_scope FROM theory_claims WHERE document_id = :doc"),
+            sa_text("SELECT id::text AS id, source_scope FROM theory_claims_live WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)"),
             {"doc": document_id},
         ).fetchall()
     finally:

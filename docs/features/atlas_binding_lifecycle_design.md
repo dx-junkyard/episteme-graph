@@ -1,6 +1,7 @@
 # 分野マップ（Field Atlas）— コースバインディングの「該当なし」UX とドメインライフサイクル 設計書
 
-- 状態: 設計確定（2026-07-20）
+- 状態: **実装済み（正本・凍結）** — 2026-07-20 設計確定・同日実装（migration **057**
+  `057_atlas_domain_lifecycle.sql`、コミット `eda35c4`）。以後は §11 実装記録の追記のみ
 - 対象: コース⇄地図バインディング（S2）の該当なしケース、骨格ドメインの共有単位・ライフサイクル
 - 親文書: `field_atlas_overlay_spec.md`（3層モデル）、`field_atlas_db_managed_skeleton.md`（migration 027）
   - 注記（2026-08-14）: `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
@@ -338,3 +339,24 @@ ALTER TABLE atlas_domain_meta ADD COLUMN IF NOT EXISTS retire_note TEXT NOT NULL
 - 修正報告の incorporate 時の報告者への通知。
 - 学習者向けの改版通知。
 - stale バインドの自動修復（検出と提示まで。付け替えは教員操作）。
+
+---
+
+## 11. 実装記録（2026-07-20 実装 / 2026-09-03 コード照合）
+
+- **migration**: `backend/db/057_atlas_domain_lifecycle.sql`（`atlas_domain_meta.lifecycle`）。
+  想定ではなく**実際に採番された番号**（コミット `eda35c4`）。
+- **バックエンド**: `backend/core/atlas_lifecycle.py`（`compute_freeze_impact` /
+  `notify_atlas_event`）+ `backend/core/atlas_store.py`（`lock_domain_for_write` による
+  domain 単位 advisory lock）+ `backend/api/routes/atlas.py`
+  （`GET .../atlas/freeze-impact` / `POST .../atlas/retire` / `POST .../atlas/restore` /
+  `PUT|DELETE /api/admin/courses/{id}/atlas-binding/pending`）。
+- **course_data**: `atlas_binding_pending` の読みは `core/course_data.py` のアクセサ経由
+  （素の dict アクセスを書かない）。バインド保存・解除で pending は自動クリアされる。
+- **G層**: `course.atlas_binding_ready` / `course.atlas_binding_stale` の 2 ルール
+  （capability `course.atlas_binding` を再利用）。`course.no_atlas_binding` は pending 中の
+  コースには点灯しない。
+- **テスト**: §9 に列挙した `test_atlas_domain_lifecycle.py` /
+  `test_atlas_binding_pending.py` / `test_atlas_freeze_impact.py` ほか。
+- 本書の対象外（後続の別層）: カテゴリギャップ候補（migration 066）・
+  ベクトル係留（074）・辺候補（076）は、それぞれの設計書が正本。

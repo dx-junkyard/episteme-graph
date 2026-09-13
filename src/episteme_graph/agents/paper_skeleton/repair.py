@@ -9,6 +9,12 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.llm_step import (
+    MAX_REPAIR_ATTEMPTS,
+    attach_issues,
+    run_repair_loop,
+)
+
 from .llm_client import PaperSkeletonLLMClient
 from .prompt import PaperSkeletonPromptFactory
 from .schema import (
@@ -22,7 +28,7 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
 
 class PaperSkeletonRepairer:
@@ -37,38 +43,34 @@ class PaperSkeletonRepairer:
         validator: object,
     ) -> PaperSkeletonResult:
         """validation_issues を含む repair prompt で再試行する。"""
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info("Repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
-            messages = prompt_factory.build_repair_messages(
-                llm_input, raw_output, validation_issues, cartridge
+
+        def _on_exhausted(issues: list[ValidationIssue]) -> PaperSkeletonResult:
+            logger.warning(
+                "Repair exhausted for %s; returning fallback result", llm_input.document_id
             )
-            try:
-                raw_output = llm_client.generate(messages)
-            except Exception as exc:
-                logger.warning("Repair LLM call failed: %s", exc)
-                break
+            fallback = PaperSkeletonResult.make_fallback(
+                llm_input.document_id,
+                llm_input.cartridge_id,
+                "Repair failed after max attempts",
+            )
+            fallback.validation_issues = issues
+            return fallback
 
-            result = _parse_raw(raw_output, llm_input.document_id, llm_input.cartridge_id)
-            remaining = validator.validate(result, cartridge)  # type: ignore[attr-defined]
-
-            errors = [i for i in remaining if i.severity == "error"]
-            if not errors:
-                result.validation_issues = remaining
-                return result
-
-            validation_issues = remaining
-
-        # Exhausted retries — return fallback
-        logger.warning(
-            "Repair exhausted for %s; returning fallback result", llm_input.document_id
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_repair_messages(
+                llm_input, raw, issues, cartridge
+            ),
+            generate=lambda messages: llm_client.generate(messages),
+            parse=lambda raw: _parse_raw(
+                raw, llm_input.document_id, llm_input.cartridge_id
+            ),
+            validate=lambda result: validator.validate(result, cartridge),  # type: ignore[attr-defined]
+            on_success=attach_issues,
+            on_exhausted=_on_exhausted,
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Paper skeleton",
         )
-        fallback = PaperSkeletonResult.make_fallback(
-            llm_input.document_id,
-            llm_input.cartridge_id,
-            "Repair failed after max attempts",
-        )
-        fallback.validation_issues = validation_issues
-        return fallback
 
 
 def _parse_raw(raw: dict, document_id: str, cartridge_id: str | None) -> PaperSkeletonResult:

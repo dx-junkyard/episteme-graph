@@ -687,10 +687,13 @@ def test_build_course_content_deletes_topic_lecture_audio_cache_after_regenerati
         result = MagicMock()
         if "SELECT data, user_id" in sql:
             result.fetchone.return_value = (course_data, "user-1")
-        elif "document_id::text" in sql:
-            result.fetchall.return_value = [("doc-1",)]
+        # P0-4 以降、チャンク取得 SQL も document_id::text を SELECT する（出典を
+        # block_id の交差で決めるため）。チャンク取得を先に判定しないと
+        # _load_document_ids 用の 1 要素タプルがチャンク行として渡ってしまう。
         elif "chunk_index ASC" in sql:
             result.fetchall.return_value = []
+        elif "document_id::text" in sql:
+            result.fetchall.return_value = [("doc-1",)]
         elif "FROM document_figures" in sql:
             result.fetchall.return_value = []
         return result
@@ -1226,7 +1229,6 @@ def test_generate_single_topic_draft_wires_figure_injection_after_equations():
             topics=[topic],
             topic=topic,
             index=0,
-            model="gpt-4o",
             reasoning_effort=None,
         )
 

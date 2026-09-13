@@ -2,10 +2,17 @@
 
 [← ドキュメント目次](../README.md)
 
-> **更新注記（2026-08-14）:** §2 のステージ表を現行の `_PIPELINE_STEPS` に合わせて更新済み
-> （`contextual_explanation` / `discuss_opening` / `landscape_placement` を追補）。
+> **更新注記（2026-09-13）:** §2 に主張の概念接地のフック `_hook_claim_concept_grounding`
+> （`dsl_linking` の直後）を追記し、フック列を 4 件・`_PIPELINE_STEPS` を 34 要素に更新した
+> （正本は `claim_concept_grounding_design.md`）。
+>
+> **更新注記（2026-09-03）:** §2 のフック列を現行の `_PIPELINE_STEPS`（フック 3 件）に合わせ、
+> 種別欄を各行の `llm_kind` / `model_policy` 宣言に合わせて訂正。§4 に restart 時の
+> 欠落 artifact 補完（`stage_outputs.resume.backfilled_stages`）を追記した。
 > ステージ構成の一次情報は常に `backend/core/document_pipeline/orchestrator.py` の
-> `PIPELINE_STAGES` / `_PIPELINE_STEPS`。
+> `PIPELINE_STAGES` / `_PIPELINE_STEPS`（判定用の集合 `LLM_STAGE_NAMES` /
+> `LLM_CALLING_STAGE_NAMES` / `VISION_STAGE_NAMES` は `_PIPELINE_STEPS` からの導出値）。
+> 整合は `backend/tests/test_pipeline_stage_registry.py` が固定する。
 
 教材としてアップロードされた PDF を、再利用可能な理論コンポーネント／コース教材へ変換する
 **ドキュメントファースト・パイプライン**の全体像です。
@@ -28,39 +35,50 @@
 
 ---
 
-## 2. パイプライン 29 ステージ
+## 2. パイプライン 30 ステージ
 
-`orchestrator.py` の `_PIPELINE_STEPS` は 31 要素 = **名前付き 29 ステージ**（`PIPELINE_STAGES`
-の 30 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
-`_hook_*` フック2件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`）。
-LLM=LLM-first、Det=決定論的（非 LLM）、Det+LLM=LLM を呼ぶが M層のステージ別モデル選択の対象外
-（種別の正本は `_PIPELINE_STEPS` 各行の `llm_kind` / `model_policy` 宣言）。
+`orchestrator.py` の `_PIPELINE_STEPS` は 34 要素 = **名前付き 30 ステージ**（`PIPELINE_STAGES`
+の 31 要素から終端マーカー `completed` を除いた分）+ between-stage 決定論的後処理の
+`_hook_*` フック 4 件（`PIPELINE_STAGES` に対応エントリを持たない = `name=None`。
+`report_start` / `finish_target_stage` を持たず、artifact ゲートも通らない）。
+
+種別欄の凡例（正本は `_PIPELINE_STEPS` 各行の `llm_kind` / `model_policy` 宣言）:
+
+| 表記 | 意味 |
+|---|---|
+| LLM | text LLM を呼び、M層のステージ別モデル選択の対象（`llm_kind="text"`。**`LLM_STAGE_NAMES` は `model_policy=True` のみから導出**され、vision ステージ（`apparatus_semantics`）も含む — 「text である」ことは条件ではない） |
+| vision LLM | vision LLM を呼ぶ（`llm_kind="vision"` = `VISION_STAGE_NAMES`。現状 `apparatus_semantics` のみ） |
+| LLM（M層対象外） | LLM は呼ぶが `model_policy=False` で、ステージ別モデル選択と `_stage_models` 記録の対象外（現状 `component_graph` のみ。`LLM_CALLING_STAGE_NAMES` と `LLM_STAGE_NAMES` の唯一の差分） |
+| Emb | embedding API を呼ぶ（`llm_kind="embedding"`。モデル選択の対象外 — pgvector の次元と結合しているため） |
+| Det | LLM も embedding も呼ばない決定論的処理（`llm_kind="none"`） |
 
 | # | ステージ | 担当 Agent / 処理 | 種別 | 出力（要旨） |
 |---|---|---|---|---|
-| 1 | `save_pdf` | PDF を一時ファイルへ | Det | — |
+| 1 | `save_pdf` | 入力バイト列を一時ファイルへ | Det | — |
 | 2 | `grobid_parse` | GROBID で TEI-XML 抽出（失敗時 PyMuPDF へフォールバック、非致命的） | Det | TEI-XML |
-| 3 | `document_structure` | **DocumentStructureAgent** 文書構造復元 | structure-first | DocumentStructureResult（blocks, sections, metadata） |
+| 3 | `document_structure` | **DocumentStructureAgent** 文書構造復元 | Det（structure-first） | DocumentStructureResult（blocks, sections, metadata） |
 | 4 | `figure_image_extraction` | PyMuPDF 埋め込み画像抽出 + caption 近傍の領域レンダリング fallback（常時実行） | Det | document_figures（MinIO `figure-images`） |
 | 5 | `source_chunking` | ブロックからチャンク生成 | Det | チャンク |
-| 6 | `source_embedding` | チャンクを pgvector へ保存 | Det | — |
+| 6 | `source_embedding` | チャンクを pgvector へ保存 | Emb | — |
 | 7 | `paper_skeleton` | **PaperSkeletonAgent** 論文 backbone 仮説化 | LLM | PaperSkeletonResult |
-| 8 | `rhetorical_role` | **RhetoricalRoleAgent** 論理役割判定 | LLM | RhetoricalRoleResult |
+| 8 | `rhetorical_role` | **RhetoricalRoleAgent** 論理役割判定（既定は全 body_paragraph。上限は env `RHETORICAL_ROLE_MAX_BLOCKS`、上限時は節単位の層化サンプリング。2026-09-12 P0-1） | LLM | RhetoricalRoleResult（`summary_stats.coverage` に取りこぼし報告） |
 | 9 | `claim_qualification` | **ClaimQualificationAgent** Claim 採否・区分 + atomic rewrite | LLM | ClaimQualificationResult |
-| 10 | `equation_semantics` | **EquationSemanticsAgent** 数式の意味役割復元 | LLM | EquationSemanticsResult |
+| 10 | `equation_semantics` | **EquationSemanticsAgent** 数式の意味役割復元（信用できない数式候補のみ切り出し画像を添付＝条件付き vision。M層では text 扱い） | LLM | EquationSemanticsResult |
 | 11 | `evidence_registry` | **EvidenceRegistryBuilder** PDF 原文 evidence の一元管理 | Det | EvidenceRegistryResult |
+| — | （フック） `_hook_equation_evidence_backfill` | 式レコードへ `source_evidence_ids` を還流（決定論・追加のみ） | Det | — |
 | 12 | `claim_object_builder` | **ClaimObjectBuilder** 最終 claims.json 組立 | Det | ClaimObjectBuildResult |
 | — | （フック） `_hook_claim_equation_canonicalization` | claim/equation の正規化後処理 | Det | — |
 | 13 | `symbol_registry` | **SymbolRegistryBuilder** 数式記号の定義・表記ゆれ管理 | Det | SymbolRegistryResult |
 | 14 | `derivation_chain` | **DerivationChainAgent** 式間導出チェーン構築 | Det | DerivationChainResult |
-| — | （フック） `_hook_equation_claim_synthesis` | 式↔claim の合成後処理 | Det | — |
-| 15 | `figure_table_semantics` | **FigureTableSemanticsAgent** 図表の意味復元 | caption-first | FigureTableSemanticsResult |
-| 16 | `apparatus_semantics` | **ApparatusSemanticsAgent**（L層）装置・パーツ候補抽出（`analyze_images=true` 時のみ、常に `review_required`） | vision LLM | ApparatusSemanticsResult |
+| — | （フック） `_hook_equation_claim_synthesis` | 式↔claim の合成後処理 + step ⇄ claim 参照のバックフィル | Det | — |
+| 15 | `figure_table_semantics` | **FigureTableSemanticsAgent** 図表の意味復元（caption-first。LLM enricher は任意で現状未配線） | Det | FigureTableSemanticsResult |
+| 16 | `apparatus_semantics` | **ApparatusSemanticsAgent**（L層）装置・パーツ候補抽出（`analyze_images=true` 時のみ、常に `review_required`。既定は反復照合モード #499） | vision LLM | ApparatusSemanticsResult |
 | 17 | `thesis_reconstruction` | **ThesisReconstructionAgent** 中心命題・支持構造の再構成 | LLM | ThesisReconstructionResult |
 | 18 | `dsl_linking` | **DSLLinkingAgent** Claim/Equation/Thesis → DSL グラフ接続 | LLM | DSLLinkingResult |
-| 19 | `dsl_embedding` | DSL を pgvector へ保存（検索用） | Det | — |
+| — | （フック） `_hook_claim_concept_grounding` | 主張の `concepts` に概念層の mention を追加（レジストリ確定ラベル / カートリッジ別名 / DSL ノード名の語境界照合 + DSL の `source_refs.claim_ids` 参照。決定論・LLM 0 回・`concept_assignment_status` は不変） | Det | `claim_object_builder`（再保存）/ `claim_concept_grounding` |
+| 19 | `dsl_embedding` | DSL を pgvector（`document_embeddings`）へ保存（検索用） | Emb | — |
 | 20 | `component_assembly` | **ComponentAssemblyAgent** 再利用可能コンポーネント生成 | LLM | ComponentAssemblyResult |
-| 21 | `component_graph` | **ComponentGraphAgent** 理論操作グラフ構築 | Det+LLM | ComponentGraphResult |
+| 21 | `component_graph` | **ComponentGraphAgent** 理論操作グラフ構築（ノード生成は決定論、エッジ推論に LLM） | LLM（M層対象外） | ComponentGraphResult |
 | 22 | `narrative_annotator` | **NarrativeAnnotator** main graph への narrative 注釈（構造非変更） | LLM | NarrativeAnnotationResult |
 | 23 | `contextual_explanation` | **ContextualExplanationAgent** 要素の二層説明（contextual / generic）生成 | LLM | `element_explanations` の candidate（stage_outputs に件数・上限情報） |
 | 24 | `discuss_opening` | **DiscussOpeningAgent** discuss 開幕の「議論のきっかけ」生成（1 document = 1 コール） | LLM | `element_explanations`（`role='discussion_seed'`）の candidate |
@@ -69,7 +87,13 @@ LLM=LLM-first、Det=決定論的（非 LLM）、Det+LLM=LLM を呼ぶが M層の
 | 27 | `blueprint` | **BlueprintAgent** ナラティブアーク合成 | Det | Blueprint |
 | 28 | `export_validation` | **ExportValidationGate** 最終検証ゲート | Det | 検証結果 |
 | 29 | `persist_claims_components_graph` | claims/components/graph を PostgreSQL へ永続化 | Det | — |
+| 30 | `identity_candidates` | 同一性候補の生成（概念レジストリ P3-6。正規化ラベル一致・他 document の live 親 component・**保存済み** `chunks.embedding` の近傍だけを見る決定論。LLM / embedding 0 回・非致命） | Det | `library_entries`（candidate）/ `element_identity_links`（candidate）/ `theory_components.duplicate_candidates` |
 | — | `completed` | ラン完了マーク | — | — |
+
+> **入力の種別**: `source_kind` は `"pdf"` と `"tex_archive"`（arXiv の TeX ソース `.tar.gz`）の
+> 2 種で、それ以外は `ValueError`。`tex_archive` の場合は 3 の `document_structure` で
+> DocumentStructureAgent を通さず `core/document_pipeline/tex_archive.py::build_structure_from_tex_archive`
+> が同じ `DocumentStructureResult` を組み立てる（以降のステージは共通）。
 
 ---
 
@@ -99,10 +123,34 @@ PDF
 > この図は**実行順ではなくデータ依存関係**を示す（矢印は「どの成果物に依存するか」）。実際の実行順は §2 のステージ表が正。特に `evidence_registry` はステージ 11 で、`claim_qualification`（9）・`equation_semantics`（10）の**後**に走り、それらの採択スパン・式に絞って逐語根拠を張る（`_build_evidence_registry` は `structure` に加え `qualified` と `equations` を入力に取る）。
 
 責務分担の要点:
-- **Claim の atomic 化は ClaimQualificationAgent（LLM）が担当**。ClaimObjectBuilder は候補を変換・リンク・検証するだけ（atomic rewrite はしない）。非 atomic / split_pending は `review_required` で保持。
+- **Claim の atomic 化は ClaimQualificationAgent（LLM）が担当**。ClaimObjectBuilder は候補を変換・リンク・検証するだけ（atomic rewrite はしない）。非 atomic / split_required（旧称 `split_pending` / `non_atomic` は legacy エイリアスで、正本語彙は `claim_object_builder/schema.py` の `split_required`）は `review_required` で保持。
 - **Evidence は PDF 原文由来のみ**を EvidenceRegistry が一元管理。各 claim/equation は `source_evidence_ids` で参照する。
 - **理論操作グラフ（ComponentGraph）**は導出チェーンから決定論的に構築し、ソースバッキング状態とレビュー理由を必ず付与する。詳細 → [DSL と理論操作グラフ](theory-graph.md)。
 - **`contextual_explanation` / `discuss_opening` / `landscape_placement`（23〜25）は非致命**。グラフ・narrative が揃った位置に置かれ、既存成果物の解決済みテキストだけを読んで**候補**（`candidate` / `inferred`）を書く。ここで失敗しても `course_mapping` 以降（永続化）を止めない。確定は必ず教員が行う。
+
+### 永続化されるもの / artifact に留まるもの
+
+最終ステージ `persist_claims_components_graph`（`document_pipeline/persistence.py`）が DB に書くのは次の系統です
+（2026-09-13 知識オブジェクト層 Phase 1 — 正本 [knowledge_objects_design.md](../features/knowledge_objects_design.md)）。
+
+| 永続化先 | 元になる成果物 | 補足 |
+|---|---|---|
+| `theory_claims` | `claim_object_builder` の **全 claim object**（親 / atomic 子 / 式由来合成）+ それに吸収されない `claim_qualification` の `qualified_spans` | `persist_qualified_claims`。各行に `origin`（`span` / `claim_object` / `atomic_rewrite` / `equation_synthesis`）・`parent_claim_id`・`claim_tier`・`stable_key`・`agent_claim_id`・`produced_by_run_id`。`claim_type` は `core/schema.py::CLAIM_TYPES` にあればその値（無ければ `unknown`・自称は `claim_type_text`）。`evidence_text` は空文字で保存し、逐語根拠は `knowledge_evidence` / EvidenceRegistry artifact に委譲する（#257）。`source_scope.legacy_ids` の旧キー（`{block_id}:{span_id}` 等）は維持 |
+| `knowledge_equations` / `knowledge_evidence` / `knowledge_derivation_steps` / `knowledge_symbols` | `equation_semantics` / `evidence_registry` / `derivation_chain` / `symbol_registry` | `persist_knowledge_objects`。record 全体は `agent_payload` に保持（`confidence` は列に昇格させない） |
+| `theory_components` / `theory_component_links` | `component_assembly` の components | `persist_components`。学習属性（`teaching_takeaway` / `teaching_granularity` / `prerequisite_concepts` / `assumptions` / `linked_*_ids` / `operation`）を列に、残りを `agent_payload` に。links は派生構造で人間の書き込み経路が無いため document 単位の DELETE → 再作成（設計書の明示例外） |
+| `theory_component_graphs` | `component_graph` の graph（+ `narrative_annotator` の注釈） | `persist_component_graph`（1 document 1 行の upsert）。claim 参照は `claim_id_map` が全 claim を覆うため DB UUID になる |
+| `learning_units`（+ `theory_components.parent_agent_component_id`） | `paper_skeleton` / `thesis_reconstruction` / `component_assembly`（原案 + `refinement_report.split_actions`）/ `dsl_linking` / `figure_table_semantics` | `persist_learning_units`（components 保存後・`id_map` 確定後に呼ぶ。学ぶ単位の一級化 Phase 2 — 正本 [learning_units_design.md](../features/learning_units_design.md)）。5 種別とも素材 `None` のときだけ SQL 非発行 |
+| `element_id_remap` + 参照の再係留 | 上記の同期で agent ID だけが変わった組 | `core/knowledge_objects/remap.py`。`element_explanations` / `epistemic_ledger` / `challenges` / `element_annotations` / `deliberation_sessions` / `element_identity_links` の agent-ID 参照を書き換える（一意制約に当たる行はスキップを記録） |
+
+**再解析は DELETE しません**（KO3）。`stable_key`（`document_id` + 正規化テキスト + 出典 block 集合の内容由来キー、
+`core/knowledge_objects/stable_key.py`）が一致する live 行は**同じ UUID のまま**内容を更新し、人間の確定列
+（`review_status` / `status` / `teacher_notes` 等）は触りません。一致しない旧行は `superseded_at` を刻んで残り、
+読み手は `theory_claims_live` / `theory_components_live` ビューだけを読みます（KO5）。監査は
+`theory_review_events`（`entity_type='knowledge_object'`）に run 単位で1行。
+
+なお `export_validation` が `failed_validation` を返した場合でも run は `completed` へ進み、
+エラー種別に応じて **components / graph の保存だけを落として claims は保存**する縮退
+（`_compute_persist_degradation_flags`。落とした段階は `degraded_stages` に記録）を行います。
 
 > 上表の各出力を「論文の抽出単位（ブロック → チャンク / エビデンス → span → atomic claim → 理論部品）」という縦串で読み直すなら → [論文の抽出単位](extraction-units.md)。
 
@@ -110,10 +158,53 @@ PDF
 
 ## 4. 実行と監視
 
+### 取りこぼしの報告（`stage_outputs[<stage>].coverage`、2026-09-12 P0-10）
+
+入力母集合を打ち切る・除外する・上限で間引くステージは、既存のステージ固有キー
+（`truncated_count` / `skipped_by_limit` / `unplaced_domains` …）に加えて、共通形式
+`coverage = {population, processed, truncated, reasons[], unit?, details?}` を stage payload に
+持つ。正本は `src/episteme_graph/agents/coverage_report.py::build_coverage_report`
+（`truncated` は `population - processed` の導出値。`reasons` は理由コードの列で数値を載せない。
+`details` に件数キーを入れない）。orchestrator では `_attach_coverage` だけがこのキーを組み立てる
+（ガードレール `backend/tests/test_pipeline_coverage_report.py`）。対象は rhetorical_role
+（agent の `summary_stats.coverage` がそのまま落ちる）/ figure_image_extraction / equation_semantics /
+figure_table_semantics / apparatus_semantics / contextual_explanation / discuss_opening /
+landscape_placement / identity_candidates（母集合 = 当該 document の live 親 component 数。
+`core/library/identity_candidates.py` が組み立てる）。`claim_qualification` は母集合を事実で
+導けないため未付与（保留）。
+resume で artifact を再利用したステージには新規計算しない。
+
+### artifact の run 選択（2026-09-12 P0-8）
+
+成果物は `document_analysis_artifacts`（1 run × 1 stage = 1 行・migration 079。旧 `stage_outputs._artifacts` blob は 079 が1回だけ移送）に保存され、読む側は `persistence.document_run_artifacts(document_id, *,
+policy="adopted")`（1 document）か `resolve_artifact_runs(session, ids, *, policy)`（複数）を使う。
+`adopted` = `documents.active_analysis_run_id` → 無ければ最新の completed。`latest`（status 無視）は
+resume 判定・前回 run の options 継承（orchestrator / `routes/admin.py` の reanalyze 入口）専用。
+`core/deliberation/refs.py::document_run_artifacts` は persistence への委譲。自前 SQL で
+`stage_outputs` を読む経路の新設はガードレール `test_artifact_run_policy_guardrails.py` が禁止する。
+
 - 起動: 教材アップロード（`POST /api/admin/materials/upload`）後、または `POST /api/admin/materials/{id}/document-pipeline/run` / `POST /api/admin/documents/{id}/reanalyze`。
 - 進捗: `GET /api/admin/materials/{id}/document-pipeline/status`、`GET /api/admin/tasks/{task_id}`。
 - 実行履歴は `document_analysis_runs`（`current_stage`, `stage_outputs`, `status`）。リビジョン機能で再解析候補を並存させ、`documents.active_analysis_run_id` でアクティブを切替（[データモデル](../architecture/data-model.md#パイプライン実行リビジョン)）。
 - ステージ失敗時は `PipelineStageError` がどのステージで失敗したかを保持し、UI に返します。
+
+### resume / restart / 単一ステージ実行
+
+`run_document_pipeline()` は `start_stage`（restart）と `target_stage`（単一ステージの点検実行）を取り、
+前回 run の artifact（`stage_outputs._artifacts`）の再利用可否を `should_use_artifact()` で決めます。
+
+- **restart（`start_stage` 指定）** — `start_stage` より前のステージは artifact を再利用する。
+  ただし artifact が**無い**ステージは hard error にせず live 実行で補完する。ステージは後から追加される
+  （例: `figure_image_extraction` は 2026-07 追加）ため、hard error だと「新ステージが増えるたびに
+  古い run が restart 不能になる」ため。補完は無音では行わず、`logger.warning` と
+  `stage_outputs.resume.backfilled_stages`（補完したステージ名の配列）に残す。
+- **単一ステージ実行（`target_stage` 指定）** — 必要な先行 artifact が欠けていれば
+  `PipelineStageError`（挙動は不変）。DB は更新しない点検用の経路。
+- `_hook_*` フックは artifact ゲートを持たないため、restart の起点に関わらず毎回走る
+  （ただし `target_stage` がフックより手前で止まる単一ステージ実行では到達しない）。
+- **使用モデルの記録（M7）** — 実際に実行した LLM ステージ（`LLM_STAGE_NAMES`）だけ、解決済みモデル名を
+  `stage_outputs._stage_models` に記録する。artifact を再利用したステージは前回の記録がそのまま残り、
+  skip されたステージは記録しない。
 
 ---
 

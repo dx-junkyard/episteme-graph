@@ -1188,10 +1188,30 @@ class TestFigureStudioTurn:
         # grounding は文字列（prompt の [参考資料] セクションに入る）
         assert isinstance(captured["grounding"], str)
         assert "トピック" in captured["grounding"]
-        # 履歴は正規化される（role が user/assistant 以外は落ちる）
-        assert captured["history"] == [{"role": "user", "content": "前の指示"}]
+        # 履歴は generator へそのまま渡す（route では窓を掛けない = 二重ウィンドウ化の
+        # 撤去。head_keep=1 の先頭保護が効くのは generator 側の1箇所だけ）。
+        assert captured["history"] == [
+            {"role": "user", "content": "前の指示"},
+            {"role": "bogus", "content": "x"},
+        ]
+        # ただし LLM へ渡る前には正規化される（role が user/assistant 以外は落ちる）。
+        from core.teaching_figures.generator import build_llm_messages
+
+        messages = build_llm_messages(
+            captured["history"], user_instruction="3段階のプロセス図で",
+            current_svg="", grounding="",
+        )
+        assert [m["role"] for m in messages] == ["user", "user"]
+        assert messages[0]["content"] == "前の指示"
         # turn は DB を変更しない
         assert session.committed == 0
+
+    def test_route_does_not_pre_window_history_before_the_generator(self, tf):
+        """FG: 窓は generator の1箇所だけ（route 側で先に切ると head_keep が効かない）。"""
+        import inspect
+
+        src = inspect.getsource(tf.figure_studio_turn)
+        assert "window_history(" not in src
 
     def test_llm_failure_is_a_200_degraded_response_not_500(self, tf, monkeypatch):
         """LLM 失敗は 500 にせず ``degraded=true`` + 事実文で返す（チャット型の共通規約）。
@@ -1631,8 +1651,12 @@ class TestOrphanCleanupPaths:
         assert "_purge_teaching_figures" in body
 
     def test_admin_delete_material(self):
+        """知識オブジェクト層 §8.1（KO9）以降、delete_material は DB 削除本体を
+        ``_purge_document`` に委譲する（教材図の掃除は委譲先のコース削除ループが担い、
+        MinIO キーは戻り値で受け取って best-effort で消す）。"""
         body = self._function_source(self._source("api/routes/admin.py"), "delete_material")
-        assert "delete_figures_for_course" in body
+        assert "_purge_document(" in body
+        assert "teaching_figure_keys" in body
 
     def test_admin_delete_course(self):
         body = self._function_source(self._source("api/routes/admin.py"), "delete_course")

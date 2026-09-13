@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 
 DEFAULT_OPERATION = "transform"
@@ -39,10 +40,9 @@ OPERATION_ONTOLOGY = [
     # names must come from a cartridge, never from this core list (issues
     # #395 / #397).
     "linearize",
-    "substitute",
+    # "substitute" / "normalize" は上のコア語彙に既出（重複エントリを 2026-09-03 に除去）
     "eliminate",
     "solve",
-    "normalize",
     # Issue #433: additional domain-neutral generic operations. System-level and
     # cartridge operations resolve to one of these core verbs; paper-specific
     # names live in operation_subtype, never here.
@@ -138,13 +138,6 @@ class DerivationChainRecord:
     review_required: bool = True
     review_reasons: list[str] = field(default_factory=list)
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

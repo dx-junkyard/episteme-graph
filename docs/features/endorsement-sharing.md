@@ -40,7 +40,9 @@
   `kind='personal'`（教員の独自解釈）。標準説明は1コンポーネント1つ（部分ユニークインデックス）。
 - **`component_endorsements`** — 承認を1行ずつ（**explanation 単位**、`UNIQUE(explanation_id, endorser_id)`、
   取り消しは `revoked=TRUE`）。
-- **`component_citations`** — 引用の帰属記録。
+- **`component_citations`** — 引用の帰属記録。V層（migration 037）で版固定列
+  （`source_object_type` / `source_object_id` / `source_release_id` / `source_version_no`）が
+  追加され、引用時にその時点の発行版へ auto-pin される。
 - **`component_explanation_endorsement_summary`（VIEW）** — 承認の厚みを都度集計。
 
 ### なぜ explanation 単位か
@@ -109,9 +111,13 @@ teacher が Lecture Studio で査読
 
 ## 7. UI
 
-- **教員（`admin.js`, Lecture Studio）** — 理論コンポーネントのカードに「説明・共有の承認」ボタン。
+- **教員（原稿スタジオ = `admin-lecture-studio.js`）** — 理論コンポーネントのカードに
+  「説明・承認の共有」ボタン（UI アンカー `lecture-studio.component-endorse`）。
   モーダルで説明バージョン一覧、承認（level/専門タグ）・取消・査読承認・共有 ON/OFF・引用、
-  独自解釈の追加、質問からの候補生成を行う。
+  独自解釈の追加、質問からの候補生成を行う（原稿スタジオは Tier 3-17b で `admin.js` から
+  `window.LectureStudio` へ分離済み）。
+  説明そのもののレビューキュー（`kind='contextual'` の二層説明・discuss 開幕の議論のきっかけ）は
+  `deliberation.js` 側にある別導線。
 - **学習者（`app.js`）** — 教材の graph 要素が理論コンポーネントの場合、
   「標準の説明」「各教員の説明」を承認の厚みラベル付きでポップアップ表示（承認済みのみ）。
 

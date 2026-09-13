@@ -58,6 +58,7 @@ class SchemaAnalysisResult(BaseModel):
 def analyze_unanswered_queries(
     min_queries: int = 3,
     limit: int = 200,
+    course_ids: list[str] | None = None,
 ) -> dict | None:
     """未回答クエリを分析し、スキーマ拡張提案を生成する。
 
@@ -67,23 +68,39 @@ def analyze_unanswered_queries(
         分析に必要な最小クエリ数。これ未満の場合はNoneを返す。
     limit : int
         分析対象の最大クエリ数。
+    course_ids : list[str] | None
+        分析対象を限定するコース ID 群（**目的外利用の禁止**）。学習者の質問原文は
+        そのコースの運営者にだけ開かれる情報なので、呼び出し側（route 層）が
+        「その教員が編集できるコース」を解決して渡す。空リストは「対象ゼロ」で、
+        SQL も LLM も呼ばずに ``None`` を返す（fail-closed）。``None`` は制限なしで、
+        全コースを横断できる SYSTEM_ADMIN 経路専用。
 
     Returns
     -------
     dict | None
         提案がある場合はスキーマ提案のdict、ない場合はNone。
     """
-    # 未回答クエリを取得
+    if course_ids is not None and not course_ids:
+        # 対象コースがゼロなら、質問原文を1件も読まずに終える（LLM も呼ばない）。
+        logger.info("Schema analysis skipped: no course in scope for the caller")
+        return None
+
+    # 未回答クエリを取得（course_ids 指定時は SQL 内で対象を絞る）
+    scope_sql = "" if course_ids is None else "WHERE uql.course_id = ANY(:course_ids)"
+    params: dict = {"limit": limit}
+    if course_ids is not None:
+        params["course_ids"] = list(course_ids)
     session = _pg_session()
     try:
         rows = session.execute(
-            sa_text("""
+            sa_text(f"""
                 SELECT uql.question, uql.topic_id, uql.course_id, uql.asked_at
                 FROM unanswered_query_logs uql
+                {scope_sql}
                 ORDER BY uql.asked_at DESC
                 LIMIT :limit
             """),
-            {"limit": limit},
+            params,
         ).fetchall()
     finally:
         session.close()

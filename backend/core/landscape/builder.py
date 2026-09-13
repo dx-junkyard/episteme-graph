@@ -107,6 +107,69 @@ def _max_gaps_per_document() -> int:
         return DEFAULT_MAX_GAPS_PER_DOCUMENT
 
 
+def _vector_prefilter_topk() -> int:
+    """配置の前段絞り込みの上位件数（``core.config`` が正本。0 = 無効）。
+
+    正本: ``docs/features/atlas_vector_anchoring_design.md`` §6。設定を読めないときは
+    **0（無効）へ倒す** — ベクトル層が使えないなら従来どおり骨格を全提示する（VA4）。
+    """
+    try:
+        from core.config import get_settings
+
+        return max(
+            0, int(getattr(get_settings(), "landscape_vector_prefilter_topk", 0) or 0)
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("failed to read landscape_vector_prefilter_topk", exc_info=True)
+        return 0
+
+
+def _apply_vector_prefilter(document_id: str, domains: list[dict]) -> tuple[list[dict], dict]:
+    """骨格ノードを論文重心との近さで上位 top_k に絞る（VA層 §6）。
+
+    論文重心は既存チャンク埋め込みの平均（``paper_discovery.ranking.document_centroid``）
+    なので、**追加の embedding 呼び出しはゼロ**。判定そのものは純関数
+    （``atlas_vectors.query.prefilter_domains``）が持ち、ここは DB からアンカーを
+    読んで渡す配線だけを行う。
+
+    どこで失敗しても**元の domains をそのまま返す**（VA4 fail-soft）。返す facts は
+    間引き件数の正直な記録で、絞り込まなかった場合も ``applied: False`` を返す（VA7）。
+    """
+    facts: dict[str, Any] = {"applied": False, "omitted": 0, "domains": {}}
+    top_k = _vector_prefilter_topk()
+    if top_k <= 0 or not domains:
+        return domains, facts
+
+    session = None
+    try:
+        from core.atlas_vectors import store as vector_store
+        from core.atlas_vectors.query import prefilter_domains
+        from core.paper_discovery.ranking import document_centroid
+        from core.postgres import get_session
+
+        session = get_session()
+        centroid = document_centroid(session, str(document_id or ""))
+        if centroid is None:
+            # チャンク埋め込みが無い document は測れない = 絞り込まない（慎重側）。
+            return domains, facts
+        anchors_by_domain = vector_store.anchors_for_domains(session, domains)
+        if not anchors_by_domain:
+            return domains, facts
+        return prefilter_domains(centroid, domains, anchors_by_domain, top_k=top_k)
+    except Exception:  # noqa: BLE001 — 絞り込めないだけで配置は従来どおり成立させる
+        logger.warning(
+            "landscape_placement: vector prefilter unavailable (non-fatal): document=%s",
+            document_id, exc_info=True,
+        )
+        return domains, {"applied": False, "omitted": 0, "domains": {}}
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                logger.debug("landscape session close failed", exc_info=True)
+
+
 def _landscape_model() -> str:
     """M層の正本（``core.llm_policy.resolve_scene_model``）でモデルを決める。
 
@@ -377,6 +440,11 @@ def build_and_store_placements(
             document_id,
         )
         return payload
+
+    # 配置先の前段絞り込み（VA層 §6）。間引いた件数は**必ず**記録する（VA7 —
+    # 絞り込まなかった場合も applied:false を残し、silent truncation を作らない）。
+    domains, prefilter_facts = _apply_vector_prefilter(document_id, domains)
+    payload["vector_prefilter"] = prefilter_facts
 
     if artifacts is None:
         try:

@@ -15,9 +15,41 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
+from core import atlas_correspondence
 from core.landscape import schema
+
+#: ``(domain_key, node_id) -> {"current_node_id", "node_status", "via"}`` の読み替え器。
+#: 呼び出し側（route 層）が ``core.atlas_correspondence.NodeResolver`` から作って渡す。
+#: 未指定なら「骨格に在れば current・無ければ unmapped」の従来動作へ縮退する。
+NodeResolve = Callable[[str, str], Mapping[str, Any]]
+
+
+def _resolution(
+    resolve: NodeResolve | None,
+    node_index: Mapping[tuple[str, str], dict],
+    domain_key: str,
+    node_id: str,
+) -> tuple[str, str, dict | None]:
+    """``(current_node_id, node_status, info)`` を決める（NC5: 行は書き換えない）。
+
+    読み替え先が現行骨格に無ければ ``unmapped``。読み替え器が無い / 何も知らない
+    ときは生の ``node_id`` をそのまま引く（従来動作）。
+    """
+    target = node_id
+    if resolve is not None:
+        try:
+            resolved = resolve(domain_key, node_id) or {}
+        except Exception:  # noqa: BLE001 — 読み替えの失敗で配置一覧を落とさない
+            resolved = {}
+        target = str(resolved.get("current_node_id") or "") or node_id
+    info = _node_info(node_index, domain_key, target)
+    if info is None:
+        return target, atlas_correspondence.NODE_STATUS_UNMAPPED, None
+    if target == node_id:
+        return target, atlas_correspondence.NODE_STATUS_CURRENT, dict(info)
+    return target, atlas_correspondence.NODE_STATUS_MIGRATED, dict(info)
 
 
 # ---------------------------------------------------------------------------
@@ -99,6 +131,7 @@ def admin_placement_dto(
     node_index: Mapping[tuple[str, str], dict],
     *,
     domain_names: Mapping[str, str] | None = None,
+    resolve: NodeResolve | None = None,
 ) -> dict:
     """1配置行 → 教員 DTO（§9.1）。
 
@@ -112,14 +145,19 @@ def admin_placement_dto(
     """
     domain_key = str(row.get("domain_key") or "")
     node_id = str(row.get("node_id") or "")
-    info = _node_info(node_index, domain_key, node_id)
+    current_node_id, node_status, info = _resolution(
+        resolve, node_index, domain_key, node_id
+    )
     status = str(row.get("status") or "")
     names = domain_names or {}
     return {
         "id": str(row.get("id") or ""),
         "domain_key": domain_key,
         "domain_name": str(names.get(domain_key) or "") or domain_key,
+        # 行の node_id は**書き換えない**（読み替えは current_node_id に出す = NC5）。
         "node_id": node_id,
+        "current_node_id": current_node_id,
+        "node_status": node_status,
         "node_label": str((info or {}).get("label") or "") or node_id,
         "node_kind": str(
             (info or {}).get("kind") or row.get("node_kind") or schema.NODE_KIND_REGION
@@ -152,12 +190,21 @@ def admin_placement_dto(
 
 
 def _learner_placement_dto(
-    row: Mapping[str, Any], info: Mapping[str, Any]
+    row: Mapping[str, Any], info: Mapping[str, Any], *,
+    current_node_id: str = "", node_status: str = "",
 ) -> dict:
+    """1配置行 → 学習者 DTO。
+
+    ``node_id`` は**現行版の node_id**（読み替え後）で、旧 node_id・``via``（どの経路で
+    対応づいたか）は出さない（§6: 学習者には現行 node_id と事実文だけ）。
+    """
     status = str(row.get("status") or "")
+    resolved = str(current_node_id or "") or str(row.get("node_id") or "")
     return {
         "domain_key": str(row.get("domain_key") or ""),
-        "node_id": str(row.get("node_id") or ""),
+        "node_id": resolved,
+        "current_node_id": resolved,
+        "node_status": node_status or atlas_correspondence.NODE_STATUS_CURRENT,
         "node_label": str(info.get("label") or ""),
         "region_id": str(info.get("region_id") or ""),
         "node_kind": str(info.get("kind") or schema.NODE_KIND_REGION),
@@ -184,6 +231,7 @@ def learner_landscape_dto(
     *,
     document_titles: Mapping[str, str] | None = None,
     source_document_count: int | None = None,
+    resolve: NodeResolve | None = None,
 ) -> dict:
     """学習者向け「論文の位置づけ」DTO（§9.2）。
 
@@ -207,6 +255,8 @@ def learner_landscape_dto(
     """
     titles = dict(document_titles or {})
     grouped: dict[str, list[dict]] = {}
+    #: 読み替えできなかった配置の「元の版」（domain ごと・事実文の材料。件数は持たない）。
+    unmapped_versions: dict[str, set[str]] = {}
     for row in placements or []:
         if not isinstance(row, Mapping):
             continue
@@ -214,14 +264,24 @@ def learner_landscape_dto(
             continue
         domain_key = str(row.get("domain_key") or "")
         node_id = str(row.get("node_id") or "")
-        info = _node_info(node_index, domain_key, node_id)
+        current_node_id, node_status, info = _resolution(
+            resolve, node_index, domain_key, node_id
+        )
         if info is None:
-            # 現行の凍結骨格に無いノード（改版で消えた等）は地図に描けないので出さない。
+            # 現行の凍結骨格に無いノード（改版で消え、対応も付いていない）は地図に
+            # 描けないので位置に置かない。存在だけを domain の事実文で示す（NC5 / §6）。
+            unmapped_versions.setdefault(domain_key, set()).add(
+                str(row.get("skeleton_version") or "")
+            )
             continue
         document_id = str(row.get("document_id") or "")
         if not document_id:
             continue
-        grouped.setdefault(document_id, []).append(_learner_placement_dto(row, info))
+        grouped.setdefault(document_id, []).append(
+            _learner_placement_dto(
+                row, info, current_node_id=current_node_id, node_status=node_status
+            )
+        )
 
     ordered_ids = [d for d in titles if d in grouped]
     ordered_ids += [d for d in grouped if d not in titles]
@@ -246,14 +306,22 @@ def learner_landscape_dto(
         if not domain_key:
             continue
         is_course_map = bool(course_domain_key) and domain_key == course_domain_key
-        if domain_key not in placed_domain_keys and not is_course_map:
+        has_unmapped = domain_key in unmapped_versions
+        if domain_key not in placed_domain_keys and not is_course_map and not has_unmapped:
             continue
+        frozen_version = str(entry.get("frozen_version") or "")
         domain_dtos.append(
             {
                 "domain_key": domain_key,
                 "domain_name": str(entry.get("domain_name") or "") or domain_key,
-                "frozen_version": str(entry.get("frozen_version") or ""),
+                "frozen_version": frozen_version,
                 "is_course_map": is_course_map,
+                # 読み替えできなかった配置の事実文（版番号入り・件数なし = NC6）。
+                # 対応が付いている配置では空のまま（黙って消えることをしない）。
+                "facts": [
+                    atlas_correspondence.unmapped_placement_fact(old, frozen_version)
+                    for old in sorted(unmapped_versions.get(domain_key) or ())
+                ],
             }
         )
     # コースの地図を先頭に（§4.2 手順4）。以降は domain_key 昇順で決定論的に並べる。

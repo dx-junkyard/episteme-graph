@@ -68,6 +68,10 @@ _MAX_ALTERNATIVES = 3
 # 切ったこと自体を示す独立フラグは持たない（``project_thesis`` と同じ方針:
 # 設計契約に無いフィールドを増やさない）。
 _MAX_DISCUSSION_SEEDS = 4
+# 「論文の骨格（章の流れ）」（P0-9）の上限。paper_skeleton の logical_blocks は
+# 論文B で9件（第1章〜第8章を覆う）なので、通常は切らない桁に置く。切った場合は
+# ``documents[].truncated``（backbone 専用）と同じ流儀で専用フラグを立てて正直に言う。
+_MAX_CHAPTER_SKELETON = 12
 
 # alternative_theses は thesis_reconstruction artifact の中で唯一 claim_ids /
 # evidence_block_ids を持たない（agents/thesis_reconstruction/schema.py: text /
@@ -152,6 +156,10 @@ _REVIEW_REASON_FACT_PHRASES = {
     "edge_not_source_backed": "つながりの根拠を論文の中で確認できていません",
     "fallback_or_inferred_node": "解析が推定で補った箇所です",
     "source_span_missing": "元の文章のどこにあたるかを特定できていません",
+    # 以下は語彙には元からあったが事実文が無く、コードのまま学習者に出ていた。
+    "generic_operation": "どんな操作なのかをまだ具体的に特定できていません",
+    "orphan_detail_node": "全体像のどこに位置づくかをまだ対応づけできていません",
+    "empty_main_node": "この段階にあたる式の手順をまだ取れていません",
 }
 
 # 「まだ確認できていないところ」の前置き。主語がシステム（解析）であることを文面で明示する
@@ -485,6 +493,70 @@ def project_backbone(
     return projected, truncated
 
 
+def project_chapter_skeleton(
+    skeleton: dict[str, Any] | None,
+    structure: dict[str, Any] | None = None,
+    *,
+    limit: int = _MAX_CHAPTER_SKELETON,
+) -> tuple[list[dict[str, Any]], bool]:
+    """paper_skeleton の ``logical_blocks`` → 開幕画面の「論文の骨格（章の流れ）」（P0-9）。
+
+    ``knowledge_structure_review_2026-09-12`` の F-14: 文章層（skeleton の
+    ``logical_blocks`` / thesis の ``support_structure``）は**最も忠実**なのに、
+    保存される単位の側で落ちて学習者に届いていない。論文Bでは構造化成果（claim /
+    component）が第3章だけなのに対し、``logical_blocks`` は第1章から第8章までを
+    覆っている。ここでは新しい単位を作らず、artifact をそのまま**読み時に**出す。
+
+    - 並びは artifact の順（agent が論文の順で出す）。並べ替え・要約・和訳はしない。
+    - ``section_ids`` は ``document_structure.sections`` の title へ**実所在だけ**で
+      解決する（タイトルが引けなければ空のまま。捏造しない）。
+    - ``reason`` / ``confidence`` は載せない（DM6/W8。最終的に
+      ``_strip_numeric_keys`` も通る）。
+    - 上限で切ったら ``truncated`` を正直に返す（``project_backbone`` と同じ流儀）。
+    """
+    if not isinstance(skeleton, dict):
+        return [], False
+
+    titles: dict[str, str] = {}
+    if isinstance(structure, dict):
+        for section in structure.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            section_id = str(section.get("section_id") or "").strip()
+            title = str(section.get("title") or "").strip()
+            if section_id and title and section_id not in titles:
+                titles[section_id] = title
+
+    usable: list[dict[str, Any]] = []
+    for block in skeleton.get("logical_blocks") or []:
+        if not isinstance(block, dict):
+            continue
+        label = str(block.get("label") or "").strip()
+        summary = str(block.get("summary") or "").strip()
+        if not label and not summary:
+            # ラベルも要約も無いブロックは block_id しか出せない（内部 ID を
+            # 表示ラベルにしない）。
+            continue
+        section_titles = [
+            titles[section_id]
+            for section_id in (
+                str(s or "").strip() for s in (block.get("section_ids") or [])
+            )
+            if section_id and section_id in titles
+        ]
+        usable.append(
+            {
+                "block_type": str(block.get("block_type") or ""),
+                "label": label,
+                "summary": summary,
+                "section_titles": section_titles,
+            }
+        )
+
+    truncated = len(usable) > limit
+    return usable[:limit], truncated
+
+
 def _is_fragile_backbone_node(node: dict[str, Any]) -> bool:
     """backbone ノードのうち「最も脆い一手」候補か（review_required 系）。
 
@@ -733,7 +805,7 @@ def _load_graph_nodes(document_id: str) -> list[dict[str, Any]]:
             sa_text(
                 """
                 SELECT graph_json FROM theory_component_graphs
-                WHERE document_id = :doc ORDER BY updated_at DESC LIMIT 1
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) ORDER BY updated_at DESC LIMIT 1
                 """
             ),
             {"doc": document_id},
@@ -770,7 +842,7 @@ def _claim_label_index(document_id: str, artifacts: dict[str, Any]) -> dict[str,
         rows = session.execute(
             sa_text(
                 "SELECT id::text AS id, text, normalized_text, source_scope "
-                "FROM theory_claims WHERE document_id = :doc"
+                "FROM theory_claims_live WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)"
             ),
             {"doc": document_id},
         ).mappings().fetchall()
@@ -962,6 +1034,19 @@ def build_opening(
         seeds = project_discussion_seeds(_load_approved_discussion_seeds(document_id))
         if seeds:
             document_dto["discussion_seeds"] = seeds
+
+        # 「論文の骨格（章の流れ）」（P0-9）。paper_skeleton artifact が無い document では
+        # **キー自体を足さない** — discussion_seeds と同じ部分適用の流儀で、Phase 0 の
+        # DTO と完全一致させる（OA4: 劣化しない）。``available`` の判定にも影響させない
+        # （骨格の有無で開幕画面が出たり消えたりしない）。
+        structure_artifact = artifacts.get("document_structure")
+        chapter_skeleton, chapter_truncated = project_chapter_skeleton(
+            skeleton_artifact,
+            structure_artifact if isinstance(structure_artifact, dict) else None,
+        )
+        if chapter_skeleton:
+            document_dto["chapter_skeleton"] = chapter_skeleton
+            document_dto["chapter_skeleton_truncated"] = chapter_truncated
 
         documents.append(document_dto)
 

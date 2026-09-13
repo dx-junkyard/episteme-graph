@@ -86,7 +86,7 @@ def fetch_reconstructions(user_id: str, course_id: str) -> list[dict]:
                 SELECT r.id, r.item_id, r.claim_id, r.machine_verdict, r.self_check,
                        r.descended_to_symbol, r.revision_of, r.created_at, c.text
                 FROM learner_reconstructions r
-                LEFT JOIN theory_claims c ON c.id = r.claim_id
+                LEFT JOIN theory_claims_live c ON c.id = r.claim_id
                 WHERE r.user_id = CAST(:user_id AS uuid) AND r.course_id = :course_id
                 ORDER BY r.created_at, r.id
             """),
@@ -355,7 +355,7 @@ def fetch_reconstructions_for_user(user_id: str) -> list[dict]:
                        r.descended_to_symbol, r.revision_of, r.created_at, r.course_id,
                        c.text
                 FROM learner_reconstructions r
-                LEFT JOIN theory_claims c ON c.id = r.claim_id
+                LEFT JOIN theory_claims_live c ON c.id = r.claim_id
                 WHERE r.user_id = CAST(:user_id AS uuid)
                 ORDER BY r.created_at, r.id
             """),
@@ -487,7 +487,7 @@ def fetch_component_document_id(component_id: str) -> str | None:
         try:
             row = session.execute(
                 sa_text(
-                    "SELECT source_scope->>'document_id' FROM theory_components "
+                    "SELECT source_scope->>'document_id' FROM theory_components_live "
                     "WHERE id = CAST(:id AS uuid)"
                 ),
                 {"id": component_id},
@@ -505,7 +505,7 @@ def fetch_claim_document_id(claim_id: str) -> str | None:
     try:
         try:
             row = session.execute(
-                sa_text("SELECT document_id FROM theory_claims WHERE id = CAST(:id AS uuid)"),
+                sa_text("SELECT document_id::text FROM theory_claims_live WHERE id = CAST(:id AS uuid)"),
                 {"id": claim_id},
             ).fetchone()
         except Exception:
@@ -553,13 +553,15 @@ def fetch_claim_summaries(
     wanted = {str(c) for c in claim_ids if c}
     if not wanted:
         return {}
-    docs = [str(d) for d in document_ids if d]
+    # migration 080 以降 theory_claims.document_id は uuid。UUID 形でない ID は
+    # そもそも一致しないので、キャストで例外にせず静かに落とす（PN-7 fail-closed）。
+    docs = [str(d) for d in document_ids if d and _is_uuid_text(str(d))]
     uuid_ids = [c for c in sorted(wanted) if _is_uuid_text(c)]
 
     clauses: list[str] = []
     params: dict[str, str] = {}
     if docs:
-        placeholders = ", ".join(f":doc_{i}" for i in range(len(docs)))
+        placeholders = ", ".join(f"CAST(:doc_{i} AS uuid)" for i in range(len(docs)))
         clauses.append(f"document_id IN ({placeholders})")
         params.update({f"doc_{i}": doc_id for i, doc_id in enumerate(docs)})
     if uuid_ids:
@@ -575,7 +577,7 @@ def fetch_claim_summaries(
             rows = session.execute(
                 sa_text(f"""
                     SELECT id::text, text, support_status, review_status, source_scope
-                    FROM theory_claims
+                    FROM theory_claims_live
                     WHERE {" OR ".join(clauses)}
                 """),
                 params,

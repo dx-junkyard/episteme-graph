@@ -25,6 +25,8 @@ from episteme_graph.agents.content_normalization import (
     normalize_text_for_hash,
 )
 
+from episteme_graph.agents.alias_matching import text_mentions_alias
+
 from .schema import (
     CLAIM_TYPE_ONTOLOGY,
     ClaimConcept,
@@ -35,6 +37,7 @@ from .schema import (
     REVIEW_STATUSES,
     SUPPORT_STATUSES,
     ValidationIssue,
+    coerce_claim_concepts,
     derive_support_status,
     normalize_atomicity,
 )
@@ -819,7 +822,9 @@ class ClaimObjectBuilder:
         if self._concept_resolver is not None:
             try:
                 resolved = self._concept_resolver(text, role_labels, self._cartridge_ontology)
-                return [c for c in resolved if isinstance(c, ClaimConcept)]
+                # P0-3: 型契約は list[ClaimConcept]。str / dict で返す resolver の
+                # 結果も落とさず包む（以前は isinstance で黙って捨てていた）。
+                return coerce_claim_concepts(resolved)
             except Exception:
                 pass
         # Concept completion (issue #312): scan the claim text *and* the raw
@@ -836,13 +841,15 @@ class ClaimObjectBuilder:
         concept_types = ontology.get("concept_types", {}) or {}
         found: list[ClaimConcept] = []
         seen = set()
-        text_lower = match_text.lower()
+        # P0-2（F-7 / K-3 と同型）: alias の照合は語境界付き。部分文字列一致だと
+        # 短い alias（"SM"）が無関係な語（"cosmological"）に当たり、原本に無い
+        # 概念が claim へ注入される。規律の正本は agents/alias_matching.py。
         for concept_name, alias_list in aliases.items():
             candidates = [concept_name] + list(alias_list or [])
             for cand in candidates:
                 if not cand:
                     continue
-                if cand.lower() in text_lower and concept_name not in seen:
+                if text_mentions_alias(match_text, cand) and concept_name not in seen:
                     found.append(ClaimConcept(
                         name=cand,
                         normalized=concept_name,
@@ -851,7 +858,7 @@ class ClaimObjectBuilder:
                     seen.add(concept_name)
                     break
         for needle, (normalized, concept_type) in _DOMAIN_CONCEPT_FALLBACKS.items():
-            if needle in text_lower and normalized not in seen:
+            if text_mentions_alias(match_text, needle) and normalized not in seen:
                 found.append(ClaimConcept(
                     name=normalized,
                     normalized=normalized,

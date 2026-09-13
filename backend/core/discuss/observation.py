@@ -342,6 +342,29 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         "cycle_carryover_saved",
         "cycle_revisit_answered",
         "cycle_anchor_quick",
+        # コーパス回遊 Phase B（docs/features/corpus_roaming_design.md §5.5）:
+        # コース無し論文議論（document 直付け discuss）をコース discuss と分離集計する
+        # ための2語彙（DO1〜DO6 継承 — 本文非含有・payload 最小・学習者に数値非表示・
+        # 削除 API なし）。course_id 欄にはセンチネル ``_doc:{document_id}`` が入る。
+        # **記録はサーバ側**（opening / chat の各ルート）が best-effort で行うため、
+        # フロントからは送らない（二重計上の防止）。
+        "document_discuss_opened",
+        "document_discuss_turn",
+        # 入口統合 Phase 1（docs/features/learning_chat_entry_unification_design.md §7）:
+        # 様相チップの訂正タップ（「ふつうの質問として聞き直す」等）。誤ルーティングが
+        # どれだけ起きたかを後から読むための唯一の材料（DO1〜DO6 継承 — 本文非含有・
+        # 学習者に数値非表示・削除 API なし）。訂正そのものは既存の書き直し経路
+        # （replace_message_id）で走り、このイベントは fire-and-forget の計測のみ。
+        "stance_corrected",
+        # 画面文脈アダプター Phase 4（docs/features/assistant_screen_adapter_design.md §11.7）:
+        # 構造 grounding（学習者が画面で選んでいる要素の事実文）が回答プロンプトに載った
+        # ターンの**種別だけ**。どの解決器が事実を出したかは入れない — 出したか出さなかった
+        # かの1ビットに留める（DO1〜DO6 継承 — 本文非含有・学習者に数値非表示・削除 API なし）。
+        # **記録はサーバ側**（_learning_chat_core）が best-effort で行う（フロントから送らない）。
+        # 知識の転用層 P4-2（knowledge_transfer_design.md §5）の kind
+        # ``retrieved_structure``（検索で当たった箇所の構造）も**この1ビットへ相乗り**する。
+        # 画面由来か検索由来かを payload で区別しない（新しい event 語彙も作らない）。
+        "structured_grounding_present",
     }
 )
 
@@ -351,6 +374,11 @@ _METRIC_EVENT_PAYLOAD_VALUE_VOCAB: dict[str, frozenset[str]] = {
     "scope": frozenset({"course_sources", "all_visible"}),
     "reason": frozenset({"explicit", "topic_switch", "timeout"}),
     "kind": frozenset({"tension", "anchor"}),
+    # 入口統合 Phase 1: 訂正先の様相（学習者が「この調子で聞き直す」と選んだ側）。
+    # 語彙の正本は core/learning_stance/schema.py の STANCES だが、訂正チップが
+    # 出すのは v1 ではこの2つだけなので、ここも2値に絞って fail-closed にする
+    # （import して広げると、推定しない様相（discuss / cycle）が計測に混ざる）。
+    "stance": frozenset({"tutor", "casual_light"}),
 }
 _METRIC_EVENT_PAYLOAD_KEYS: frozenset[str] = frozenset(_METRIC_EVENT_PAYLOAD_VALUE_VOCAB.keys())
 
@@ -460,6 +488,10 @@ def project_trace_row(row: Mapping[str, Any]) -> dict:
         "overall_tier": row.get("overall_tier"),
         "content_grounding": row.get("content_grounding"),
         "discuss_scope": row.get("discuss_scope"),
+        # 入口統合 Phase 1（設計 §7）: 様相の enum 2つ（本文は含まない）。記録開始日
+        # 以前の痕跡には無いキーなので null のまま出る（U1 と同じ誠実さ）。
+        "stance": row.get("stance"),
+        "stance_source": row.get("stance_source"),
         "tension_hint": _truthy(row.get("tension_hint")),
         "structure_anchor_present": _truthy(row.get("structure_anchor_present")),
         "map_excluded": _truthy(row.get("map_excluded")),
@@ -517,6 +549,8 @@ def _fetch_discuss_trace_rows(session) -> tuple[list[dict], bool]:
                    payload->>'overall_tier' AS overall_tier,
                    payload->>'content_grounding' AS content_grounding,
                    payload->>'discuss_scope' AS discuss_scope,
+                   payload->>'stance' AS stance,
+                   payload->>'stance_source' AS stance_source,
                    COALESCE(payload->>'tension_hint', 'false') AS tension_hint,
                    (payload -> 'structure_anchor') IS NOT NULL AS structure_anchor_present,
                    COALESCE(payload->>'map_excluded', 'false') AS map_excluded
@@ -771,25 +805,29 @@ discuss / casual / 通常チャットの3タグ（`learning:chat_discuss` / `lea
 | overall_tier | 回答全体の tier（教員承認状況の集約） |
 | content_grounding | course_material / other_material / model_generated |
 | discuss_scope | course_sources / all_visible（discuss 以外は null） |
+| stance | どの様相で答えたか（tutor / casual_light / discuss / cycle_elicit / cycle_diff。記録開始前は null） |
+| stance_source | 様相が explicit（学習者・UI の明示）か inferred（サーバが当該発話から読んだ）か |
 | tension_hint | 違和感ヒントが立ったか（bool） |
 | structure_anchor_present | 構造帰属が付与されたか（bool。中身は含まない） |
 | map_excluded | 個人知識ネットワークから除外指定されているか（bool） |
 
 分析観点の例: `content_grounding` の分布推移（教材根拠 vs モデル生成の比率）、
-`overall_tier` と `content_grounding` の関係、`discuss_scope` の選択傾向。
+`overall_tier` と `content_grounding` の関係、`discuss_scope` の選択傾向、
+`stance` × `stance_source` の分布（推定された様相がどれだけ訂正されたかは
+`discuss_ui_events.jsonl` の `stance_corrected` と突き合わせて読む）。
 
 ### discuss_ui_events.jsonl
 
 discuss の UI 操作イベント（開幕画面・着地画面・分岐チップ等）です。全列を含みます。
-`payload` は取込時点で `scope` / `reason` / `kind` のみに絞り込み済みです（DO1）。
+`payload` は取込時点で `scope` / `reason` / `kind` / `stance` のみに絞り込み済みです（DO1）。
 
 | 列 | 内容 |
 |---|---|
 | created_at | イベント発生時刻 |
 | user_pseudonym | 仮名化された user_id |
 | course_id | コースID |
-| event | イベント種別（13語彙のいずれか） |
-| payload | scope/reason/kind のみを含む dict |
+| event | イベント種別（`METRIC_EVENT_VOCAB` の語彙のいずれか） |
+| payload | scope/reason/kind/stance のみを含む dict |
 
 分析観点の例: `opening_shown` に対する `opening_starter_clicked` / `opening_backbone_clicked`
 の比率（開幕画面の実効性）、`landing_shown` に対する `landing_confirmed` /

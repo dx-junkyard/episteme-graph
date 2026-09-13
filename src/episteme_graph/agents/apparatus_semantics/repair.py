@@ -18,6 +18,7 @@ import logging
 import re
 
 from episteme_graph.agents.figure_modes import analysis_profile_for_record
+from episteme_graph.agents.llm_step import MAX_REPAIR_ATTEMPTS, run_repair_loop
 
 from .llm_client import ApparatusSemanticsLLMClient
 from .prompt import ApparatusSemanticsPromptFactory
@@ -42,7 +43,7 @@ from .schema import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 _WHITESPACE_RE = re.compile(r"\s+")
 
 # Mirrors input_builder._MAX_GUIDANCE_TEXT_CHARS — guidance_note is an LLM
@@ -474,34 +475,26 @@ class ApparatusSemanticsRepairer:
         guidance: dict | None = None,
     ) -> ApparatusRecord:
         candidate_ids = {c.entry_id for c in candidates}
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info(
-                "apparatus_semantics repair attempt %d/%d figure=%s",
-                attempt, _MAX_REPAIR_ATTEMPTS, figure.figure_id,
-            )
-            messages = prompt_factory.build_repair_messages(
+
+        return run_repair_loop(
+            build_messages=lambda raw, issues: prompt_factory.build_repair_messages(
                 figure, candidate_briefs, nearby_text, cartridge_hints,
-                raw_output, validation_issues,
+                raw, issues,
                 inner_label_hints=inner_label_hints, abbreviations=abbreviations,
                 guidance=guidance,
-            )
-            try:
-                raw_output = llm_client.generate(messages, images=image_payloads)
-            except Exception as exc:
-                logger.warning(
-                    "apparatus_semantics repair LLM call failed figure=%s: %s",
-                    figure.figure_id, exc,
-                )
-                break
-
-            record = _parse_record(raw_output, figure, candidates)
-            remaining = validator.validate_record(  # type: ignore[attr-defined]
+            ),
+            generate=lambda messages: llm_client.generate(messages, images=image_payloads),
+            parse=lambda raw: _parse_record(raw, figure, candidates),
+            validate=lambda record: validator.validate_record(  # type: ignore[attr-defined]
                 record, figure=figure, candidate_ids=candidate_ids,
-            )
-            if not [i for i in remaining if i.severity == "error"]:
-                return record
-            validation_issues = remaining
-
-        return _fallback_record(
-            figure, "repair_failed_after_max_attempts", repair_failed=True,
+            ),
+            # Success yields the bare record (no validation_issues field).
+            on_success=lambda record, _remaining: record,
+            on_exhausted=lambda _issues: _fallback_record(
+                figure, "repair_failed_after_max_attempts", repair_failed=True,
+            ),
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="apparatus_semantics",
+            log_suffix=f" figure={figure.figure_id}",
         )

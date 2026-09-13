@@ -1,27 +1,18 @@
-"""標準化判定（Phase S）— LLM 呼び出しの薄いラッパ（llm_worker 6系統目アダプタ）。
+"""標準化判定（Phase S） — LLM 呼び出しの薄いラッパ。
 
-規約準拠: LLM 呼び出しは必ず core/llm.py の公開 API 経由（ベンダ SDK 直接利用禁止）。
-`system` ロール・`temperature` は使わず、instruction + 入力を user ロール1本に連結する。
-モデルは fast tier 既定（settings.stdpart_llm_model で上書き可）。
-
-共通実装は core/llm_worker/client.py（tension / structure_anchor / reconstruction /
-doubt.scope_candidates / doubt.assumption_mining に続く6系統目としてこれに接続する。
-コピペせず model_setting_key 注入のみで差分化する）。
+実体は core/llm_worker/client.py の BaseJSONLLMClient（規約・モデル解決はそちらが正本）。
+設定キーは core/deliberation/standardization/system.py の WorkerSystem 宣言が正本で、このクラスは
+「テストがモックに差し替える名前」を保つためのサブクラス。
 """
 
 from __future__ import annotations
 
-from core.llm_worker.client import BaseJSONLLMClient, parse_json_response
-from core.llm_worker.client import resolve_model as _resolve_model
+from core.deliberation.standardization.system import SYSTEM
+from core.llm_worker.client import BaseJSONLLMClient
 
-_MODEL_SETTING_KEY = "stdpart_llm_model"
+_MODEL_SETTING_KEY = SYSTEM.model_setting_key
 
-__all__ = ["resolve_model", "parse_json_response", "StandardizationLLMClient"]
-
-
-def resolve_model() -> str:
-    """STDPART_LLM_MODEL があればそれを、無ければ fast tier のモデルを使う。"""
-    return _resolve_model(_MODEL_SETTING_KEY)
+__all__ = ["StandardizationLLMClient"]
 
 
 class StandardizationLLMClient(BaseJSONLLMClient):

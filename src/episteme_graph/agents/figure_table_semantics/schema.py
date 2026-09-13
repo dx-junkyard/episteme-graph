@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 
 @dataclass
@@ -49,13 +50,6 @@ class TableRecord:
     teaching_takeaway: str = ""
     source_evidence_ids: list[str] = field(default_factory=list)
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

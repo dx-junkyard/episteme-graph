@@ -206,3 +206,49 @@ class TestSchemaAnalysisResultSerialization:
             reasoning="",
         )
         assert result.items == []
+
+
+class TestCourseScopeLimitsTheAnalysis:
+    """目的外利用の禁止: 分析対象は呼び出し側が渡したコースに限定される。
+
+    未回答クエリの本文（学習者の質問原文）はそのコースの運営者にだけ開かれる情報で、
+    全コース横断でプロンプトに埋めてよいものではない。``course_ids`` を渡した場合は
+    SQL 側で絞り、空リストなら SQL も LLM も呼ばない（fail-closed）。
+    """
+
+    @patch("core.meta_analyzer._pg_session")
+    def test_empty_scope_reads_nothing_and_calls_no_llm(self, mock_pg):
+        def _boom():
+            raise AssertionError("対象コースがゼロなら DB を触ってはならない")
+
+        mock_pg.side_effect = _boom
+
+        from core.meta_analyzer import analyze_unanswered_queries
+        assert analyze_unanswered_queries(min_queries=1, course_ids=[]) is None
+
+    @patch("core.meta_analyzer._pg_session")
+    def test_scope_is_pushed_into_the_sql(self, mock_pg):
+        mock_session = MagicMock()
+        mock_session.execute.return_value.fetchall.return_value = []
+        mock_pg.return_value = mock_session
+
+        from core.meta_analyzer import analyze_unanswered_queries
+        analyze_unanswered_queries(min_queries=99, course_ids=["c1", "c2"])
+
+        stmt, params = mock_session.execute.call_args[0]
+        assert "uql.course_id = ANY(:course_ids)" in str(stmt)
+        assert params["course_ids"] == ["c1", "c2"]
+
+    @patch("core.meta_analyzer._pg_session")
+    def test_none_scope_keeps_the_cross_course_query(self, mock_pg):
+        """``None``（= SYSTEM_ADMIN 経路）のときだけ従来どおり全件を読む。"""
+        mock_session = MagicMock()
+        mock_session.execute.return_value.fetchall.return_value = []
+        mock_pg.return_value = mock_session
+
+        from core.meta_analyzer import analyze_unanswered_queries
+        analyze_unanswered_queries(min_queries=99, course_ids=None)
+
+        stmt, params = mock_session.execute.call_args[0]
+        assert "course_id = ANY" not in str(stmt)
+        assert "course_ids" not in params

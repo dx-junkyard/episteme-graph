@@ -52,7 +52,7 @@ def build_target_context(session, target_type: str, target_id: str) -> ScopeTarg
             rows = session.execute(
                 sa_text("""
                     SELECT text, normalized_text, evidence_text
-                    FROM theory_claims WHERE id::text = :tid
+                    FROM theory_claims_live WHERE id::text = :tid
                 """),
                 {"tid": target_id},
             ).fetchall()
@@ -67,7 +67,7 @@ def build_target_context(session, target_type: str, target_id: str) -> ScopeTarg
             rows = session.execute(
                 sa_text("""
                     SELECT text, evidence_text, equation
-                    FROM theory_claims
+                    FROM theory_claims_live
                     WHERE (equation->>'equation_id') = :tid
                     ORDER BY created_at ASC
                 """),
@@ -86,7 +86,7 @@ def build_target_context(session, target_type: str, target_id: str) -> ScopeTarg
             rows = session.execute(
                 sa_text("""
                     SELECT name, summary, preconditions, constraints
-                    FROM theory_components WHERE id::text = :tid
+                    FROM theory_components_live WHERE id::text = :tid
                 """),
                 {"tid": target_id},
             ).fetchall()

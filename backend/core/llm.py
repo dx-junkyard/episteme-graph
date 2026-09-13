@@ -29,14 +29,15 @@ import os
 import re
 import time
 import types
+from contextlib import nullcontext
 from functools import lru_cache
-from typing import Any, Literal, TypeVar
+from typing import Any, Iterator, Literal, TypeVar
 
 from pydantic import BaseModel
 
 from core.config import get_settings
 from core.llm_policy import effort_for_call, resolve_scene_model
-from core.llm_usage.context import current_usage_context
+from core.llm_usage.context import current_usage_context, usage_context
 from core.llm_usage.observe import (
     observe_chat,
     observe_embeddings,
@@ -883,6 +884,132 @@ def generate_text(
         started_monotonic=started,
     )
     return text
+
+
+def generate_text_stream(
+    messages: list[dict[str, str]],
+    *,
+    model: str | None = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
+    timeout: float | None = None,
+    usage_ctx: dict | None = None,
+) -> Iterator[str]:
+    """チャット補完を**逐次**生成する（ストリーミング Phase 3-a, 設計書 §3.1）。
+
+    ``generate_text`` の**追加**であって置き換えではない（既存3関数は非改変 = ST7）。
+    返るのは本文の差分（delta）のイテレータで、全文は内部で蓄積し観測に使う。
+
+    Parameters
+    ----------
+    usage_ctx : dict | None
+        U層帰属の**値渡し**（``{"feature": ..., "user_id": ..., "course_id": ...}``）。
+        Starlette は同期ジェネレータを ``iterate_in_threadpool`` で回すため、
+        ``next()`` ごとに別スレッドになりうる。contextvar（``usage_context``）を
+        yield を跨いで開いたままにできないので、観測の**直前に開いて直後に閉じる**
+        （設計書 §3.2）。呼び出し側は yield を跨がない位置でモデルを解決し、
+        ``model=`` に具体名を渡す運用。
+
+    Notes
+    -----
+    - openai 以外のプロバイダは v1 ではストリームを実装せず、``generate_text`` の
+      結果を1個の delta として yield する（「ストリームのふり」をしない = 原則8）。
+      この経路の観測は ``generate_text`` 側が既に1回行うので、ここでは記録しない。
+    - openai 経路の観測は ``finally`` で必ず1回（正常終了・例外・呼び出し側の
+      ``close()`` = クライアント切断のいずれでも）。``operation`` は ``"chat"`` のまま
+      で、ストリームである事実は ``metadata.streamed`` に入れる（§6）。
+    """
+    settings = get_settings()
+    if model is not None:
+        model_name = model
+    else:
+        resolved = resolve_scene_model(current_usage_context().feature)
+        model_name = resolved.model
+        reasoning_effort = effort_for_call(resolved, requested_effort=reasoning_effort)
+
+    if settings.llm_provider != "openai":
+        # 非対応プロバイダ: 完成テキストを1個の delta として返す（UI のコードパスは同じ）。
+        # 観測は generate_text 側が行うので、U層帰属（usage_ctx）を値渡しで再セットして
+        # から呼ぶ（この generator は threadpool の別 context で再開されるため、呼び出し側の
+        # usage_context は見えない = §3.2）。yield は with の外。
+        _fallback_ctx = usage_context(**usage_ctx) if usage_ctx else nullcontext()
+        with _fallback_ctx:
+            _full_text = generate_text(
+                messages,
+                model=model_name,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                reasoning_effort=reasoning_effort,
+                timeout=timeout,
+            )
+        yield _full_text
+        return
+
+    client = _get_openai_client()
+    adapted_messages = _adapt_messages_for_model(messages, model_name)
+    api_kwargs = _build_api_kwargs(
+        model_name,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        reasoning_effort=reasoning_effort,
+    )
+
+    started = time.monotonic()
+    chunks: list[str] = []
+    usage_chunk = None
+    error: BaseException | None = None
+    aborted = False
+    try:
+        try:
+            stream = client.chat.completions.create(
+                model=model_name,
+                messages=adapted_messages,
+                timeout=timeout,
+                stream=True,
+                stream_options={"include_usage": True},
+                **api_kwargs,
+            )
+            for chunk in stream:
+                choices = getattr(chunk, "choices", None) or []
+                if not choices:
+                    # usage を伴う最終 chunk（include_usage）。表示には流さない。
+                    if getattr(chunk, "usage", None) is not None:
+                        usage_chunk = chunk
+                    continue
+                delta = getattr(choices[0], "delta", None)
+                piece = getattr(delta, "content", None) if delta is not None else None
+                if piece:
+                    chunks.append(piece)
+                    yield piece
+        except GeneratorExit:
+            # 呼び出し側の close()（クライアント切断・停止ボタン）。再送出して閉じる。
+            aborted = True
+            raise
+        except BaseException as exc:  # noqa: BLE001 — 観測してから再送出する
+            if not isinstance(exc, Exception):
+                aborted = True
+            else:
+                error = exc
+            raise
+    finally:
+        metadata: dict = {"streamed": True}
+        if aborted:
+            metadata["client_aborted"] = True
+        text = "".join(chunks)
+        _ctx = usage_context(**usage_ctx) if usage_ctx else nullcontext()
+        with _ctx:
+            observe_chat(
+                provider=settings.llm_provider,
+                model=model_name,
+                messages=messages,
+                operation="chat",
+                response=usage_chunk if error is None else None,
+                response_text=text if error is None else None,
+                error=error,
+                started_monotonic=started,
+                extra_metadata=metadata,
+            )
 
 
 def generate_text_with_structured_output(

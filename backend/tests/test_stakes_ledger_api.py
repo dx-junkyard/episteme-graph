@@ -92,6 +92,8 @@ _LEDGER_COLUMNS = (
     "verification_status", "verification_scopes", "scope_candidates",
     "consensus_explicit", "consensus_behavioral", "load_score",
     "created_at", "updated_at", "falsification_conditions", "falsification_candidates",
+    # P4-5（migration 083 / knowledge_transfer_design.md §8）で末尾に追加された列。
+    "evidence_lines",
 )
 
 
@@ -103,6 +105,7 @@ def _ledger_row(**overrides) -> tuple:
         "scope_candidates": [], "consensus_explicit": {}, "consensus_behavioral": 0,
         "load_score": None, "created_at": "2024-01-01", "updated_at": "2024-01-01",
         "falsification_conditions": [], "falsification_candidates": [],
+        "evidence_lines": [],
     }
     defaults.update(overrides)
     return tuple(defaults[c] for c in _LEDGER_COLUMNS)
@@ -366,6 +369,11 @@ class TestObservationTargetsEndpoint:
     def test_delegates_to_core_function(self, monkeypatch):
         session = _FakeSession([])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        # course_id 直指定の編集権限ゲート（P0）は通過済みとして委譲だけを見る。
+        # ゲート自体の検証は tests/test_object_scope_authorization.py。
+        monkeypatch.setattr(
+            doubt, "_require_editable_course_or_404", lambda _cid, _user: {"title": "c"},
+        )
         captured = {}
 
         def _fake_targets(_session, *, course_id="", document_id=""):

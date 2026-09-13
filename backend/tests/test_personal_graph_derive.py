@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import json
 import sys
+
+import pytest
 from pathlib import Path
 
 BACKEND = Path(__file__).resolve().parents[1]
@@ -847,3 +849,43 @@ class TestReconstructionNodeLabel:
         node_json = json.dumps(net.nodes[0].to_dict(), ensure_ascii=False)
         assert "伏せ" not in node_json
         assert net.nodes[0].label == "主張本文"
+
+
+class TestMalformedPayloadFailsClosed:
+    """``interest_traces.payload`` は JSONB なので JSON スカラーも入りうる。
+
+    回帰: ``trace.get("payload") or {}`` の直後に ``.get()`` を呼んでいたため、
+    非 dict の payload が 1 行あるだけで AttributeError になった。
+    ``api/routes/personal_map.py`` は導出を try/except で包まないので、
+    「わたしの地図」/ 近傍 / 旅がまるごと 500 になる（PN-7 は fail-closed を要求）。
+    """
+
+    @pytest.mark.parametrize("payload", ["notadict", 5, 1.5, True, ["x"], "", "null"])
+    def test_non_dict_payload_does_not_raise(self, payload):
+        row = _trace(id_="t1", kind="tension", status="open")
+        row["payload"] = payload
+        net = build_network([row], [], _ATLAS)
+        # 行は落とさず topic 粒度へ縮退する（P4: 削除ではない）。
+        assert len(net.nodes) == 1
+        assert net.nodes[0].anchor.anchor_type == "topic"
+        assert net.nodes[0].label == ""
+
+    def test_non_dict_payload_on_connected_tension_makes_no_bridge(self):
+        """connected でも壊れた payload から橋の根拠を作らない（fail-closed）。"""
+        row = _trace(id_="t1", kind="tension", status="connected")
+        row["payload"] = "notadict"
+        net = build_network([row], [], _ATLAS)
+        assert net.edges == []
+        assert net.nodes[0].anchor.anchor_type == "topic"
+
+    def test_non_dict_payload_on_question_degrades_to_topic(self):
+        row = _trace(id_="q1", kind="question", status="active")
+        row["payload"] = 42
+        net = build_network([row], [], _ATLAS)
+        assert len(net.nodes) == 1
+        assert net.nodes[0].anchor.anchor_type == "topic"
+
+    def test_map_excluded_still_honoured_for_dict_payloads(self):
+        """縮退の追加で既存の map_excluded 判定を壊していないこと。"""
+        row = _trace(id_="t1", kind="tension", status="open", payload={"map_excluded": True})
+        assert build_network([row], [], _ATLAS).nodes == []

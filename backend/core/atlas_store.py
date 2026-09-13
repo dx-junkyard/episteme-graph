@@ -92,6 +92,42 @@ def load_frozen_skeleton(session, domain_key: str) -> atlas_module.AtlasSkeleton
         return None
 
 
+def load_frozen_history(session, domain_key: str) -> list[atlas_module.AtlasSkeleton]:
+    """この分野の凍結版を**古い順**（``created_at ASC, version ASC``）に全部返す。
+
+    ノード版間対応（``docs/features/atlas_node_correspondence_design.md`` NC8）の
+    ``NodeResolver`` を組む唯一の読み口。読み手（landscape / corpus_view / registry）は
+    各自で SQL を書かず、必ずこの関数を通す。
+
+    壊れた行（parse できない content）は**その行だけ**飛ばす（履歴全体を落とさない）。
+    DB 不通・domain_key 空は空リスト（呼び出し側は読み替えを主張せず従来動作へ縮退する）。
+    """
+    if session is None or not domain_key:
+        return []
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT content FROM atlas_skeletons
+             WHERE domain_key = :domain_key AND status = 'frozen'
+             ORDER BY created_at ASC, version ASC
+            """
+        ),
+        {"domain_key": domain_key},
+    ).fetchall()
+    history: list[atlas_module.AtlasSkeleton] = []
+    for row in rows or []:
+        content = row[0] if row is not None else None
+        if content is None:
+            continue
+        try:
+            history.append(_content_to_skeleton(content))
+        except Exception:  # noqa: BLE001
+            logger.error(
+                "invalid atlas skeleton content in DB history for %s", domain_key, exc_info=True
+            )
+    return history
+
+
 def _cartridge_bundled_skeleton(domain_key: str) -> atlas_module.AtlasSkeleton | None:
     """カートリッジ同梱の凍結骨格 (`cartridges/<id>/atlas/skeleton.yaml`)。"""
     try:

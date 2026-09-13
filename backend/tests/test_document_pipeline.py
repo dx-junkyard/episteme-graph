@@ -22,6 +22,8 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from tests.knowledge_object_fakes import FakeKnowledgeSession  # noqa: E402
+
 
 # --- Helpers ---------------------------------------------------------------
 
@@ -390,16 +392,25 @@ def test_completeness_passes_when_records_cover_tex_math():
     report = analyze_document_completeness(
         structure.to_dict(),
         document_id=structure.document_id,
+        # P0-5 / F-17: 件数だけでなく TeX ラベルの差集合も見るので、registry には
+        # eq:energy / eq:force の両方を持つ record が必要（ラベル無しの record 1件では
+        # 「registry に無いラベルが 2 件」として review に落ちる）。
         equations={
-            "equations": [{"equation_id": "eq_1"}],
+            "equations": [
+                {"equation_id": "eq_1", "label": "eq:energy"},
+                {"equation_id": "eq_2", "label": "eq:force"},
+            ],
             "equation_candidates": [
                 {"candidate_id": "c1", "acceptance_status": "accepted",
                  "accepted_equation_id": "eq_1"},
+                {"candidate_id": "c2", "acceptance_status": "accepted",
+                 "accepted_equation_id": "eq_2"},
             ],
         },
     )
     cov = report["equation_artifact_coverage"]
     assert cov["tex_display_math_blocks"] == 3
+    assert cov["tex_labels_missing_from_registry"] == []
     assert cov["complete"] is True
 
 
@@ -422,11 +433,17 @@ def test_orchestrator_records_completeness_with_equation_records():
     structure = build_structure_from_tex_archive(
         _tex_archive_with_math(), document_id="doc-orch", source_file="paper.tar.gz"
     )
+    # P0-5 / F-17: record は TeX ラベル（eq:energy / eq:force）を持つ。
     equations = _FakeEquations({
-        "equations": [{"equation_id": "eq_1"}],
+        "equations": [
+            {"equation_id": "eq_1", "label": "eq:energy"},
+            {"equation_id": "eq_2", "label": "eq:force"},
+        ],
         "equation_candidates": [
             {"candidate_id": "c1", "acceptance_status": "accepted",
              "accepted_equation_id": "eq_1"},
+            {"candidate_id": "c2", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
         ],
     })
     saved: dict = {}
@@ -438,7 +455,7 @@ def test_orchestrator_records_completeness_with_equation_records():
         save_artifact=lambda name, value: saved.__setitem__(name, value),
     )
     cov = saved["document_completeness"]["equation_artifact_coverage"]
-    assert cov["equation_record_count"] == 1
+    assert cov["equation_record_count"] == 2
     assert cov["tex_display_math_blocks"] == 3
     assert cov["complete"] is True
     assert report["complete"] is True
@@ -488,11 +505,17 @@ def test_build_document_completeness_passes_equations_to_coverage():
         _tex_archive_with_math(), document_id="doc-route", source_file="paper.tar.gz"
     )
     struct_dict = structure.to_dict()
+    # P0-5 / F-17: record は TeX ラベル（eq:energy / eq:force）を持つ。
     equations = {
-        "equations": [{"equation_id": "eq_1"}],
+        "equations": [
+            {"equation_id": "eq_1", "label": "eq:energy"},
+            {"equation_id": "eq_2", "label": "eq:force"},
+        ],
         "equation_candidates": [
             {"candidate_id": "c1", "acceptance_status": "accepted",
              "accepted_equation_id": "eq_1"},
+            {"candidate_id": "c2", "acceptance_status": "accepted",
+             "accepted_equation_id": "eq_2"},
         ],
     }
     # Without equations → incomplete; with equations → complete.
@@ -782,6 +805,8 @@ def test_orchestrator_accepts_tex_archive_source_kind():
              "block_ids": ["tex_b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
+        "persist_learning_units": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-tex"),
         "persist_document_embedding": MagicMock(return_value="emb-tex"),
@@ -892,6 +917,8 @@ def test_orchestrator_runs_all_stages_in_order():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
+        "persist_learning_units": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1027,6 +1054,8 @@ def test_issue_266_orchestrator_passes_component_graph_result_to_persist():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
+        "persist_learning_units": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": persist_mock,
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1464,6 +1493,8 @@ def test_orchestrator_runs_newly_integrated_agents_and_saves_artifacts():
              "block_ids": ["blk_1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
+        "persist_learning_units": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1683,6 +1714,8 @@ def test_orchestrator_grobid_fallback_when_unavailable():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
+        "persist_learning_units": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1781,6 +1814,8 @@ def test_orchestrator_passes_tei_xml_to_document_structure_agent():
              "block_ids": ["b1"], "page_start": 1, "page_end": 1, "text": "Hello"}
         ]),
         "persist_qualified_claims": MagicMock(return_value=[]),
+        "persist_knowledge_objects": MagicMock(return_value={}),
+        "persist_learning_units": MagicMock(return_value={}),
         "persist_components": MagicMock(return_value={}),
         "persist_component_graph": MagicMock(return_value="graph-1"),
         "persist_document_embedding": MagicMock(return_value="emb-1"),
@@ -1966,16 +2001,27 @@ def test_persist_components_hard_fails_when_all_components_are_fallback():
     session_factory.assert_not_called()
 
 
-def test_persist_components_empty_result_returns_empty_without_db_access():
+def test_persist_components_empty_result_supersedes_live_rows_without_delete():
+    """component ゼロでも同期は走り、旧 live 行は supersede される（S-7 の早期 return 撤去）。
+
+    「素材が無い」を「行はそのままでよい」と解釈しないための契約。DELETE は発行しない
+    （KO3。theory_component_links の張り直しだけが明示例外）。
+    """
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(components=[])
-    with patch.object(persistence, "_pg_session") as session_factory:
+    session = FakeKnowledgeSession(live_rows=[
+        {"id": "old-uuid", "stable_key": "k1:old", "agent_id": "comp_old",
+         "status": "candidate", "review_status": "teacher_review_required",
+         "teacher_notes": "", "created_by": None, "maturity_source": "llm_proposed"},
+    ])
+    with patch.object(persistence, "_pg_session", return_value=session):
         id_map = persistence.persist_components(
-            document_id="doc_1", component_result=component_result
+            document_id="doc_1", component_result=component_result, run_id="run-1"
         )
     assert id_map == {}
-    session_factory.assert_not_called()
+    assert session.superseded == ["old-uuid"]
+    assert not any("DELETE FROM theory_components" in sql for sql in session.sql)
 
 
 def test_persist_components_filters_fallback_but_persists_normal_components():
@@ -1984,17 +2030,14 @@ def test_persist_components_filters_fallback_but_persists_normal_components():
     component_result = types.SimpleNamespace(
         components=[_fallback_component(), _normal_component()]
     )
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-1",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid")
     with patch.object(persistence, "_pg_session", return_value=session):
         id_map = persistence.persist_components(
             document_id="doc_1", component_result=component_result
         )
     assert id_map == {"comp_001": "db-uuid-1"}
     inserted_names = [
-        call.args[1].get("name")
-        for call in session.execute.call_args_list
-        if len(call.args) > 1 and isinstance(call.args[1], dict) and "maturity_source" in call.args[1]
+        row.get("name") for row in session.inserted_into("theory_components")
     ]
     assert inserted_names == ["relation"]
 
@@ -2040,9 +2083,9 @@ def _apparatus_component(component_id="comp_apparatus_001", label="spectrometer"
 
 
 def _inserted_params_for(session, name):
-    for call in session.execute.call_args_list:
-        if len(call.args) > 1 and isinstance(call.args[1], dict) and call.args[1].get("name") == name:
-            return call.args[1]
+    for row in session.inserted_into("theory_components"):
+        if row.get("name") == name:
+            return row
     raise AssertionError(f"no INSERT params captured for name={name!r}")
 
 
@@ -2053,8 +2096,7 @@ def test_persist_components_preserves_agent_source_scope_for_apparatus_component
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(components=[_apparatus_component()])
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-apparatus",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid-apparatus")
     with patch.object(persistence, "_pg_session", return_value=session):
         persistence.persist_components(document_id="doc_1", component_result=component_result)
 
@@ -2080,8 +2122,7 @@ def test_persist_components_claim_derived_source_scope_stays_document_and_legacy
     from core.document_pipeline import persistence
 
     component_result = types.SimpleNamespace(components=[_normal_component()])
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-1",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid")
     with patch.object(persistence, "_pg_session", return_value=session):
         persistence.persist_components(document_id="doc_1", component_result=component_result)
 
@@ -2102,8 +2143,7 @@ def test_persist_components_legacy_ids_always_component_id():
             _normal_component("comp_XYZ"),
         ]
     )
-    session = MagicMock()
-    session.execute.return_value.fetchone.return_value = ("db-uuid-x",)
+    session = FakeKnowledgeSession(id_prefix="db-uuid-x")
     with patch.object(persistence, "_pg_session", return_value=session):
         persistence.persist_components(document_id="doc_1", component_result=component_result)
 
@@ -2474,3 +2514,185 @@ def test_fig_tbl_stage_passes_ctx_qualified():
     sig = inspect.signature(orch._build_figure_table_semantics)
     assert "qualified" in sig.parameters
     assert sig.parameters["qualified"].default is None
+
+
+# --- restart: 新設ステージ以前の run の artifact 欠落は live 補完 -------------
+#
+# ステージは後から追加される（figure_image_extraction は 2026-07 追加）ため、
+# それ以前に解析された run には当該 artifact が構造的に存在しない。restart
+# （start_stage 指定）で hard error にすると「新ステージが増えるたびに古い run が
+# restart 不能になる」ので、欠落は live 実行へフォールバックする。
+
+
+def _restart_structure_artifact(document_id: str = "doc-restart") -> dict:
+    """DocumentStructureResult.from_dict が受理する最小 artifact。"""
+    return {
+        "document_id": document_id,
+        "source_file": "paper.pdf",
+        "cartridge_id": None,
+        "metadata": {"title": "Paper", "authors": [], "pages": 1},
+        "sections": [{
+            "section_id": "s1", "title": "Intro", "level": 1, "order": 1,
+            "page_start": 1, "page_end": 1, "parent_section_id": None,
+        }],
+        "blocks": [{
+            "block_id": "b1", "page": 1, "order": 0,
+            "text": "Body paragraph text. " * 20,
+            "block_type": "body_paragraph", "bbox": None, "confidence": 1.0,
+            "equation_label": None, "section_id": "s1", "raw": {},
+        }],
+        "validation_issues": [],
+    }
+
+
+def _restart_previous_run(artifacts: dict, *, document_id: str = "doc-restart") -> dict:
+    return {
+        "id": "run-restart",
+        "document_id": document_id,
+        "material_id": "mat-restart",
+        "cartridge_id": None,
+        "status": "running",
+        "current_stage": "document_structure",
+        "stage_outputs": {"_artifacts": dict(artifacts)},
+        "options": {},
+    }
+
+
+def _run_restart_pipeline(previous_run, *, start_stage, target_stage=None):
+    """restart 経路を最小構成で走らせる。
+
+    Returns: (result, captured) — captured は upsert された stage_outputs 群と
+    live 実行の呼び出し記録。
+    """
+    from core.document_pipeline import orchestrator
+
+    captured: dict = {
+        "artifacts": {},
+        "stage_outputs": [],
+        "structure_agent_calls": 0,
+        "figure_extract_calls": [],
+    }
+
+    def fake_upsert(*, run_id=None, document_id, material_id, cartridge_id=None,
+                    status="running", current_stage="save_pdf", stage_outputs=None,
+                    error_message=None, options=None):
+        if stage_outputs:
+            captured["stage_outputs"].append(dict(stage_outputs))
+            if "_artifacts" in stage_outputs:
+                captured["artifacts"].update(stage_outputs["_artifacts"])
+        return run_id or "run-restart"
+
+    class _StructureAgent:
+        def run(self, **kwargs):
+            captured["structure_agent_calls"] += 1
+            raise AssertionError("document_structure must be reused from artifact")
+
+    def fake_extract(**kwargs):
+        captured["figure_extract_calls"].append(kwargs)
+        return {"status": "completed", "figures": 1}
+
+    from core.document_pipeline import figure_images
+
+    with patch.object(orchestrator, "get_latest_analysis_run", return_value=previous_run), \
+            patch.object(orchestrator, "upsert_analysis_run", side_effect=fake_upsert), \
+            patch.object(orchestrator, "_import_agents",
+                         return_value={"DocumentStructureAgent": _StructureAgent()}), \
+            patch.object(figure_images, "extract_document_figures", side_effect=fake_extract):
+        result = orchestrator.run_document_pipeline(
+            pdf_bytes=b"%PDF-1.4 fake bytes",
+            document_id="doc-restart",
+            material_id="mat-restart",
+            agents=None,
+            resume=True,
+            start_stage=start_stage,
+            target_stage=target_stage,
+        )
+    return result, captured
+
+
+def test_restart_backfills_missing_earlier_stage_artifact_live():
+    """start_stage より前のステージの artifact が無くても restart は失敗せず、
+    そのステージだけ live 実行で補完される（新設ステージ以前の run の救済）。"""
+    previous_run = _restart_previous_run({
+        "grobid_parse": {"status": "ok", "tei_bytes": 5, "tei_xml": "<TEI/>"},
+        "document_structure": _restart_structure_artifact(),
+        # figure_image_extraction は当時のパイプラインに存在しないので欠落。
+    })
+
+    result, captured = _run_restart_pipeline(
+        previous_run, start_stage="source_chunking", target_stage="source_chunking",
+    )
+
+    assert result.final_stage == "source_chunking"
+    # 欠落ステージは live 実行され、artifact が新たに保存される。
+    assert captured["figure_extract_calls"], "figure_image_extraction was not run live"
+    assert captured["figure_extract_calls"][0]["document_id"] == "doc-restart"
+    assert captured["artifacts"]["figure_image_extraction"]["figures"] == 1
+    # start_stage 以降も通常どおり再実行される。
+    assert captured["artifacts"]["source_chunking"]
+
+
+def test_restart_reuses_present_earlier_stage_artifacts():
+    """artifact が有る earlier stage は従来どおり再利用され live 実行されない。"""
+    previous_run = _restart_previous_run({
+        "grobid_parse": {"status": "ok", "tei_bytes": 5, "tei_xml": "<TEI/>"},
+        "document_structure": _restart_structure_artifact(),
+    })
+
+    result, captured = _run_restart_pipeline(
+        previous_run, start_stage="source_chunking", target_stage="source_chunking",
+    )
+
+    assert result.final_stage == "source_chunking"
+    # DocumentStructureAgent は呼ばれない（呼ばれたら _StructureAgent が raise）。
+    assert captured["structure_agent_calls"] == 0
+    # 再利用したステージの artifact は **書き戻されない**（save_artifact が渡すのは
+    # その1ステージだけ。knowledge_objects_design.md §6 / KO6。従来は全 artifact を
+    # 毎回書き戻しており run の stage_outputs が単調増加していた = S-9）。
+    assert "document_structure" not in captured["artifacts"]
+
+
+def test_restart_records_backfilled_stages_in_resume_outputs():
+    """live 補完したステージ名は run の stage_outputs.resume に正直に残る。"""
+    previous_run = _restart_previous_run({
+        "grobid_parse": {"status": "ok", "tei_bytes": 5, "tei_xml": "<TEI/>"},
+        "document_structure": _restart_structure_artifact(),
+    })
+
+    _result, captured = _run_restart_pipeline(
+        previous_run, start_stage="source_chunking", target_stage="source_chunking",
+    )
+
+    resume_payloads = [
+        out["resume"] for out in captured["stage_outputs"] if "resume" in out
+    ]
+    assert resume_payloads
+    backfilled = resume_payloads[-1]
+    assert backfilled["resumed"] is True
+    assert backfilled["backfilled_stages"] == ["figure_image_extraction"]
+
+
+def test_single_stage_run_still_hard_errors_on_missing_artifact():
+    """target_stage 単独実行（DB 非更新の点検用途）の hard error は不変。"""
+    from core.document_pipeline import orchestrator
+
+    previous_run = _restart_previous_run({
+        "grobid_parse": {"status": "ok", "tei_bytes": 5, "tei_xml": "<TEI/>"},
+        # document_structure の artifact が無い。
+    })
+
+    with patch.object(orchestrator, "get_latest_analysis_run", return_value=previous_run), \
+            patch.object(orchestrator, "upsert_analysis_run", return_value="run-restart"), \
+            patch.object(orchestrator, "_import_agents", return_value={}):
+        with pytest.raises(orchestrator.PipelineStageError) as exc_info:
+            orchestrator.run_document_pipeline(
+                pdf_bytes=b"%PDF-1.4 fake bytes",
+                document_id="doc-restart",
+                material_id="mat-restart",
+                agents=None,
+                resume=True,
+                target_stage="source_chunking",
+            )
+
+    assert exc_info.value.stage == "document_structure"
+    assert "single-stage run" in str(exc_info.value)

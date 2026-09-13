@@ -47,6 +47,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import _require_teacher
+from quota import consume_daily_quota
 from services import record_review_event
 from core import llm_policy
 from core.config import get_settings
@@ -56,8 +57,7 @@ from core.course_data import (
     find_course_topic,
     iter_all_topics,
 )
-from core.llm_worker.cost_gate import CostGate, today_str
-from core.llm_worker.history import window_history
+from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
 from core.schema import AUDIT_ENTITY_TEACHING_FIGURE
 from core.storage import get_storage_client
@@ -162,24 +162,22 @@ _figure_suggest_cost_gate = CostGate()
 
 def consume_figure_studio_quota(user_id: str) -> None:
     """図スタジオ対話の日次上限を1消費する。超過は 429 + 事実文（数値非表示）。"""
-    cap = int(getattr(get_settings(), "figure_studio_max_calls_per_day", 60) or 0)
-    ok = _figure_studio_cost_gate.check_and_count(daily_limit=cap, daily_key=(today_str(), user_id))
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="本日の図の生成回数の上限に達しました。明日以降に再度お試しください。",
-        )
+    consume_daily_quota(
+        _figure_studio_cost_gate,
+        user_id=user_id,
+        limit=int(getattr(get_settings(), "figure_studio_max_calls_per_day", 60) or 0),
+        message="本日の図の生成回数の上限に達しました。明日以降に再度お試しください。",
+    )
 
 
 def consume_figure_suggest_quota(user_id: str) -> None:
     """図の提案生成の日次上限を1消費する。超過は 429 + 事実文（数値非表示）。"""
-    cap = int(getattr(get_settings(), "figure_suggest_max_calls_per_day", 20) or 0)
-    ok = _figure_suggest_cost_gate.check_and_count(daily_limit=cap, daily_key=(today_str(), user_id))
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="本日の図の提案生成の上限に達しました。明日以降に再度お試しください。",
-        )
+    consume_daily_quota(
+        _figure_suggest_cost_gate,
+        user_id=user_id,
+        limit=int(getattr(get_settings(), "figure_suggest_max_calls_per_day", 20) or 0),
+        message="本日の図の提案生成の上限に達しました。明日以降に再度お試しください。",
+    )
 
 
 def _max_svg_bytes() -> int:
@@ -530,19 +528,13 @@ def figure_studio_turn(
 
     grounding = _build_grounding(course_data, topic or {}, suggestion=suggestion)
 
-    # クライアント由来の履歴はここで正規化・ウィンドウ化する（境界での入力防御。
-    # 設計書 §4.2 の 12件/6000字。current_message で「送信直前に push された現在発話」の
-    # 二重化も除去する）。
-    history = window_history(
-        body.history,
-        max_messages=12,
-        max_chars=6000,
-        current_message=instruction,
-    )
-
+    # 履歴の正規化・ウィンドウ化は generator 側の1箇所に任せる（設計書 §4.2 の
+    # 12件/6000字 + head_keep=1）。ここで先に窓を掛けると head_keep なしの切り詰めが
+    # 走り、generator の先頭保護（grounding が乗る最初の user メッセージ）が効かなく
+    # なるため、二重には掛けない。
     consume_figure_studio_quota(current_user["id"])
     result = run_figure_turn(
-        history=history,
+        history=body.history or [],
         user_instruction=instruction,
         current_svg=str(body.current_svg or ""),
         grounding=_grounding_to_text(grounding),

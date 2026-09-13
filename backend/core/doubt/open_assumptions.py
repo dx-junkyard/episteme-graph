@@ -54,14 +54,14 @@ def target_label(session, target_type: str, target_id: str) -> str:
     try:
         if target_type == "claim":
             row = session.execute(
-                sa_text("SELECT COALESCE(NULLIF(normalized_text, ''), text) FROM theory_claims WHERE id::text = :tid"),
+                sa_text("SELECT COALESCE(NULLIF(normalized_text, ''), text) FROM theory_claims_live WHERE id::text = :tid"),
                 {"tid": target_id},
             ).fetchone()
             if row and row[0]:
                 return str(row[0])[:160]
         elif target_type == "component":
             row = session.execute(
-                sa_text("SELECT name FROM theory_components WHERE id::text = :tid"),
+                sa_text("SELECT name FROM theory_components_live WHERE id::text = :tid"),
                 {"tid": target_id},
             ).fetchone()
             if row and row[0]:
@@ -139,7 +139,7 @@ def compile_open_assumptions(
     params: dict[str, Any] = {"course": course_id}
     doc_filter = ""
     if document_id:
-        doc_filter = "AND document_id = :doc"
+        doc_filter = "AND document_id = CAST(NULLIF(:doc, '') AS uuid)"
         params["doc"] = document_id
     rows = session.execute(
         sa_text(f"""

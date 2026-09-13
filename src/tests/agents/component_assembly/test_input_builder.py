@@ -1,6 +1,9 @@
 """Tests for ComponentAssemblyInputBuilder."""
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult, QualifiedSpanRecord
-from episteme_graph.agents.component_assembly.input_builder import ComponentAssemblyInputBuilder
+from episteme_graph.agents.component_assembly.input_builder import (
+    ComponentAssemblyInputBuilder,
+    _concept_names,
+)
 from episteme_graph.agents.component_assembly.schema import CartridgeContext
 from episteme_graph.agents.id_canonicalization import (
     canonicalize_claim_refs,
@@ -395,3 +398,33 @@ def test_span_unresolvable_against_claim_objects_is_skipped():
     available_ids = {c["claim_id"] for c in llm_input.available_claims}
     assert accepted_ids == ["claim_s1"]
     assert set(accepted_ids) <= available_ids
+
+
+# ---------------------------------------------------------------------------
+# P0-3: concepts の型契約（knowledge_structure_review_2026-09-12 §4 Phase 0）
+# ---------------------------------------------------------------------------
+
+
+def test_concept_names_normalizes_str_dict_and_claim_concept():
+    """_concept_names は形が違っても概念名の list[str] に揃える。
+
+    str を 1 文字ずつに割らない（F0-6）／``concept_type="symbol"`` と 2 文字以下の
+    名前は概念にしない（F-6 / K-2）ことを型ごとに固定する。
+    """
+    class _Claim:
+        def __init__(self, concepts):
+            self.concepts = concepts
+
+    assert _concept_names(_Claim([])) == []
+    # 素の str（上流が list を渡さない経路）
+    assert _concept_names(_Claim("raptis")) == ["raptis"]
+    # dict 形（normalized 優先）
+    assert _concept_names(_Claim([{"name": "skewness", "normalized": "Skewness"}])) == ["Skewness"]
+    # ClaimConcept 形
+    assert _concept_names(_Claim([
+        ClaimConcept(name="skewness", normalized="Skewness", concept_type="observable"),
+        ClaimConcept(name="lambda", normalized="lambda", concept_type="symbol"),
+        ClaimConcept(name="R", normalized="R", concept_type="unknown"),
+    ])) == ["Skewness"]
+    # 重複は 1 回だけ
+    assert _concept_names(_Claim(["Skewness", "Skewness"])) == ["Skewness"]

@@ -1,6 +1,12 @@
 # 分野の地図 — 骨格エディタ改善（AIアシスト編集 + ビジュアルプレビュー）
 
-> **ステータス: 実装済み（P1〜P5、learning-ux ブランチ）**
+> **ステータス: 実装済み（P1〜P5）— 正本・凍結**
+> （起票時のブランチ名 `learning-ux` は現在の `ura-dev` にマージ済み。2026-09-03 コード照合で
+> `atlas_generator.{interpret_skeleton_instruction, propose_skeleton_edit, apply_json_patch}` と
+> `POST /api/admin/cartridges/{id}/atlas/skeleton/assist/{interpret,propose}`・
+> `ATLAS_ASSIST_MAX_CALLS_PER_DAY`・`atlas-draft-preview.js` / `atlas-assist-panel.js` の
+> 現存を確認した。`apply_json_patch` はその後、カテゴリギャップ候補・辺候補の
+> 「下書きへ反映」でも再利用されている）
 > 関連: `field_atlas_skeleton.md` / `field_atlas_db_managed_skeleton.md` / `field_atlas_overlay_spec.md`
 >
 > 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは

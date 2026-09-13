@@ -10,21 +10,25 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import re
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 import services
 from core import atlas
+from core import atlas_correspondence
 from core import atlas_lifecycle
+from core import decision_context
 from core import atlas_reports
 from core import atlas_store
 from core import cartridges as cartridges_module
 from core import llm_policy
+from core.atlas_edges import store as edge_store
 from core.atlas_gaps import store as gap_store
 from core.course_data import course_atlas_binding_pending, course_cartridge_id, course_topics
 from core.schema import (
@@ -155,6 +159,149 @@ def _pending_gap_candidates(
         return []
 
 
+def _rollback_quietly(session) -> None:
+    """読み取りの失敗でトランザクションが中断した場合に、続きの読み取りを救う。
+
+    候補の供給源（別名・レジストリ）は fail-soft だが、実 DB では失敗した文が
+    トランザクション全体を中断させるため、握り潰す側で必ず巻き戻す（ここまでの
+    操作は全て読み取りなので失うものは無い）。
+    """
+    try:
+        session.rollback()
+    except Exception:  # noqa: BLE001
+        logger.debug("atlas correspondence: rollback failed (non-fatal)", exc_info=True)
+
+
+def _correspondence_label(skeleton: atlas.AtlasSkeleton | None, node_id: str) -> str:
+    """骨格の node ラベル (見つからなければ空文字 — 内部 ID を表示ラベルにしない)。"""
+    if skeleton is None or not node_id:
+        return ""
+    for region in getattr(skeleton, "regions", ()) or ():
+        if str(getattr(region, "id", "") or "") == node_id:
+            return str(getattr(region, "label", "") or "")
+        for concept in getattr(region, "concepts", ()) or ():
+            if str(getattr(concept, "id", "") or "") == node_id:
+                return str(getattr(concept, "label", "") or "")
+    return ""
+
+
+def _correspondence_pair_key(from_id: Any, to_id: Any) -> str:
+    """確定文脈の presented / applied に並べる対のキー (``旧|新``)。"""
+    return f"{str(from_id or '')}|{str(to_id or '')}"
+
+
+def _correspondence_preview(
+    session,
+    cartridge_id: str,
+    draft: atlas.AtlasSkeleton | None,
+    frozen: atlas.AtlasSkeleton | None,
+) -> dict:
+    """凍結前に並べる「前の版のノードとの対応」の候補 (ノード版間対応 §4 / §5)。
+
+    候補は決定論・非LLM・embedding 0 回 (NC2)。別名・レジストリの照会が失敗しても
+    その供給源だけを落として候補導出は続ける (fail-soft) — 候補が出ないことは
+    「対応が無い」ではなく、教員が手で付けられる状態にとどまる (NC3)。
+    """
+    aliases: dict[str, list[str]] = {}
+    try:
+        from core.atlas_vectors import store as vector_store
+
+        aliases = vector_store.confirmed_aliases_by_node(session, cartridge_id)
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas correspondence: alias lookup skipped for %s", cartridge_id, exc_info=True
+        )
+        _rollback_quietly(session)
+
+    registry_links: list[dict] = []
+    try:
+        from core.library import registry as library_registry
+
+        registry_links = library_registry.list_node_links(
+            domain_key=cartridge_id, session=session
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas correspondence: registry link lookup skipped for %s",
+            cartridge_id,
+            exc_info=True,
+        )
+        _rollback_quietly(session)
+
+    try:
+        return atlas_correspondence.derive_correspondence_candidates(
+            frozen=frozen,
+            draft=draft,
+            confirmed_aliases_by_node=aliases,
+            registry_links=registry_links,
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas correspondence: candidate derivation failed for %s",
+            cartridge_id,
+            exc_info=True,
+        )
+        return {
+            "candidates": [],
+            "alternatives": [],
+            "unmatched_removed": [],
+            "already_declared": [],
+            "added_nodes": [],
+            "facts": [],
+        }
+
+
+def _edge_pairs_of(skeleton: atlas.AtlasSkeleton) -> list[tuple[str, str]]:
+    """骨格の辺を ``(from_id, to_id)`` の列にする（無向化は store 側が行う）。"""
+    return [(e.from_id, e.to_id) for e in getattr(skeleton, "edges", ()) or ()]
+
+
+def _pending_edge_candidates(
+    session, cartridge_id: str, draft: atlas.AtlasSkeleton
+) -> list[dict]:
+    """凍結前チェック: 採用済みでまだ次版の下書きに入っていない辺の候補。
+
+    正本: docs/features/atlas_relation_edges_design.md §5（gap の公開前チェックと同列）。
+    判定材料は「教員が採用した」判断行と「いまの下書きにある辺のペア」だけで、骨格へは
+    一切書き込まない (RE3)。
+
+    DB 不通・照会失敗は空リスト (fail-open) — 候補機構の不調で凍結という主要操作を
+    止めない。ガードレールは「採用済み未反映があるときに止まること」を検査する。
+    """
+    try:
+        return edge_store.list_pending_for_freeze(
+            session,
+            domain_key=cartridge_id,
+            draft_edge_pairs=_edge_pairs_of(draft),
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "atlas freeze: relation edge pending check skipped for %s",
+            cartridge_id,
+            exc_info=True,
+        )
+        return []
+
+
+def _edge_pair_label(
+    item: dict, *labels_from: atlas.AtlasSkeleton | None
+) -> str:
+    """「ラベルA — ラベルB」の1行（RE4: 件数を出さずラベルの列挙で示す）。
+
+    ラベルは下書き・現行凍結版の順に引き、どちらにも無ければ node id をそのまま出す
+    （fail-soft。名前が引けないことで凍結前チェックの提示を欠かさない）。
+    """
+    labels: dict[str, str] = {}
+    for skeleton in labels_from:
+        for region in getattr(skeleton, "regions", ()) or ():
+            for concept in getattr(region, "concepts", ()) or ():
+                labels.setdefault(concept.id, concept.label or concept.id)
+            labels.setdefault(region.id, region.label or region.id)
+    left = str(item.get("from_id") or "")
+    right = str(item.get("to_id") or "")
+    return f"{labels.get(left, left)} — {labels.get(right, right)}"
+
+
 def _skeleton_payload(skeleton: atlas.AtlasSkeleton | None) -> dict[str, Any] | None:
     if skeleton is None:
         return None
@@ -198,10 +345,32 @@ class SaveDraftRequest(BaseModel):
     )
 
 
+class IdMigrationIn(BaseModel):
+    """凍結時に確定する「前の版のノードとの対応」1件 (ノード版間対応 §5)。
+
+    JSON のキーは骨格の ``id_migrations`` と同じ ``{"from", "to"}``。``from`` は Python の
+    予約語なのでフィールド名は ``from_id`` / ``to_id`` にし alias で受ける
+    (``populate_by_name`` で両方の綴りを許す)。``version`` は body で受けない
+    (凍結する版そのものなのでサーバが付ける = NC1)。
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    from_id: str = Field(default="", alias="from", description="現行凍結版の node_id")
+    to_id: str = Field(default="", alias="to", description="draft の node_id")
+
+
 class FreezeSkeletonRequest(BaseModel):
     version: str = Field(description="凍結版の版数 (例: 2026.1)")
     note: str = Field(default="", description="changelog に残すメモ")
     credits: list[str] = Field(default_factory=list, description="修正報告者などの帰属")
+    id_migrations: list[IdMigrationIn] = Field(
+        default_factory=list,
+        description=(
+            "教員が確認した「前の版のノード → 新しい版のノード」の対応 (任意)。"
+            "未指定なら従来どおり draft の id_migrations だけが版に載る"
+        ),
+    )
 
 
 class AssistInterpretRequest(BaseModel):
@@ -605,6 +774,13 @@ def discard_atlas_skeleton_draft(
     return {"cartridge_id": cartridge_id, "discarded": True}
 
 
+# 確定文脈（DC2）— 凍結を覆す実際の経路。凍結版は不変（AB3）なので「戻す」経路は無く、
+# 現行凍結版から次版 draft を起こして直すのが唯一の道である（使えない経路を書かない）。
+_FREEZE_REOPEN_PATH = (
+    "POST /api/admin/cartridges/{cartridge_id}/atlas/skeleton/draft/from-frozen"
+)
+
+
 @router.post("/{cartridge_id}/atlas/skeleton/freeze")
 def freeze_atlas_skeleton(
     cartridge_id: str,
@@ -637,7 +813,13 @@ def freeze_atlas_skeleton(
         freeze_impact = atlas_lifecycle.compute_freeze_impact(
             session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
         )
+        correspondence = _correspondence_preview(
+            session, cartridge_id, draft_row["skeleton"], current_frozen_for_impact
+        )
         pending_gaps = _pending_gap_candidates(session, cartridge_id, draft_row["skeleton"])
+        pending_edges = _pending_edge_candidates(
+            session, cartridge_id, draft_row["skeleton"]
+        )
     finally:
         session.close()
     if pending_gaps:
@@ -651,7 +833,34 @@ def freeze_atlas_skeleton(
                 ],
             },
         )
+    if pending_edges:
+        # 関係（辺）の候補も gap と同列の弁を通す (atlas_relation_edges_design.md §5)。
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "message": "採用済みでまだ次版に反映されていない辺の候補が残っています",
+                # 件数ではなく「ラベルA — ラベルB」の列挙で示す (RE4: 数値を見せない)。
+                "pending_edges": [
+                    _edge_pair_label(
+                        item, draft_row["skeleton"], current_frozen_for_impact
+                    )
+                    for item in pending_edges
+                ],
+            },
+        )
     draft = draft_row["skeleton"]
+
+    # 前の版のノードとの対応 (ノード版間対応 §5)。検証は core の純関数で、骨格外の id・
+    # from の重複は 422 の事実文にする (NC7)。ここで通った対応だけが版に載る (NC1/NC3)。
+    try:
+        declared_migrations = atlas_correspondence.validate_migrations(
+            body.id_migrations,
+            frozen=current_frozen_for_impact,
+            draft=draft,
+            version=body.version,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # 採用済み報告の帰属を credits に合流する (受け入れ条件3)。
     # DB 不通時は明示 credits のみで凍結を続行する (報告の刻印は次版凍結時に再試行される)。
@@ -685,6 +894,21 @@ def freeze_atlas_skeleton(
             report_session.close()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    # 教員が確定した対応を新版の id_migrations に **追加** する (draft 由来分は保持 = NC4)。
+    # 同じ (from, to, version) が既にあれば足さない (二重記載を作らない)。
+    applied_migrations: list[atlas.IdMigration] = []
+    if declared_migrations:
+        existing = {(m.from_id, m.to_id, m.version) for m in frozen.id_migrations}
+        for migration in declared_migrations:
+            if (migration.from_id, migration.to_id, migration.version) in existing:
+                continue
+            existing.add((migration.from_id, migration.to_id, migration.version))
+            applied_migrations.append(migration)
+        if applied_migrations:
+            frozen = dataclasses.replace(
+                frozen, id_migrations=frozen.id_migrations + tuple(applied_migrations)
+            )
+
     # DB へ凍結版を追加し draft を消す (migration 027: DB が正本。ファイルは書かない)
     session = _skeleton_session()
     try:
@@ -711,6 +935,13 @@ def freeze_atlas_skeleton(
             frozen_version=body.version,
             frozen_node_ids=list(frozen.concept_ids()) + list(frozen.region_ids()),
         )
+        # 関係（辺）の候補も同じトランザクションで刻印する (RE3 / 設計書 §5)。
+        stamped_edges = edge_store.stamp_applied_versions(
+            session,
+            domain_key=cartridge_id,
+            frozen_version=body.version,
+            frozen_edge_pairs=_edge_pairs_of(frozen),
+        )
         session.commit()
     except HTTPException:
         session.rollback()
@@ -736,6 +967,28 @@ def freeze_atlas_skeleton(
     except Exception:  # noqa: BLE001
         logger.warning("atlas overlay refresh scheduling failed", exc_info=True)
 
+    # 新版のアンカーベクトル索引を作り直す (VA3 の呼び出し地点①: 凍結時の
+    # best-effort 再構築。atlas_vector_anchoring_design.md §5)。埋め込みは外部 API を
+    # 呼ぶため daemon thread に逃がし、どんな失敗も警告ログだけにする —
+    # **凍結は止めない**し、レスポンスの形も変えない (VA4)。
+    try:
+        import threading
+
+        def _atlas_anchor_embed() -> None:
+            try:
+                from core.atlas_vectors.builder import build_anchor_embeddings
+
+                result = build_anchor_embeddings(cartridge_id)
+                logger.info("atlas anchor embeddings after freeze: %s", result)
+            except Exception:  # noqa: BLE001
+                logger.warning("atlas anchor embedding after freeze failed", exc_info=True)
+
+        threading.Thread(
+            target=_atlas_anchor_embed, name="atlas-anchor-embed", daemon=True
+        ).start()
+    except Exception:  # noqa: BLE001
+        logger.warning("atlas anchor embedding scheduling skipped", exc_info=True)
+
     report_summary = {"applied": 0, "migrated": 0}
     if report_session is not None:
         try:
@@ -752,22 +1005,112 @@ def freeze_atlas_skeleton(
         finally:
             report_session.close()
 
+    # 改訂原則1（DC1）: 凍結は「この骨格でいく」を一括で確定する操作で、凍結版は不変
+    # （修正は次版）＝後戻りが最も効かない確定なので、提示・適用・代替・再審経路を記帳する。
+    # 提示集合は freeze-impact のプレビューが計算対象にした draft の node、適用集合は
+    # 実際に版へ入った node（両者は別オブジェクトから導出するので、一致は本物の検査になる）。
+    # プレビューで見せた影響そのもの（消える node・影響コース）は隣接キーに事実として残す。
+    freeze_ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_ATLAS_SKELETON_FREEZE,
+        presented_ids=list(draft.region_ids()) + list(draft.concept_ids()),
+        applied_ids=list(frozen.region_ids()) + list(frozen.concept_ids()),
+        # 影響プレビューは事実文つきの confirm で提示され、凍結せずに draft を直す /
+        # 凍結を見送る（draft のまま置く）を選べる。
+        alternatives=(
+            decision_context.ALT_EDIT,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        # 凍結版に「戻せる status」は無い（AB3: 不変）。実際に覆す経路は現行凍結版から
+        # 次版 draft を起こして直すことなので、statuses は空のままにする。
+        reopen_path=_FREEZE_REOPEN_PATH,
+        # 影響プレビューが画面に出ていたか（confirm を読んだか）はサーバから検証できない。
+        evidence_shown=None,
+    )
     _record_review_event(
         cartridge_id,
         atlas.STATUS_DRAFT,
         atlas.STATUS_FROZEN,
         current_user.get("id"),
-        {
-            "action": "freeze",
-            "version": body.version,
-            "note": body.note,
-            "report_credits": atlas_reports.credits_from_reports(accepted_reports),
-            "reports_applied": report_summary.get("applied", 0),
-            "reports_migrated": report_summary.get("migrated", 0),
-            # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
-            "category_gaps_applied": list(stamped_gaps),
-        },
+        decision_context.attach_decision_context(
+            {
+                "action": "freeze",
+                "version": body.version,
+                "note": body.note,
+                "report_credits": atlas_reports.credits_from_reports(accepted_reports),
+                "reports_applied": report_summary.get("applied", 0),
+                "reports_migrated": report_summary.get("migrated", 0),
+                # 反映された候補は freeze の監査に melt-in する (刻印自体の個別監査は作らない)。
+                "category_gaps_applied": list(stamped_gaps),
+                "relation_edges_applied": list(stamped_edges),
+                # プレビューで提示した影響（DC2: 「何を見せたか」を後から再構成できるように）。
+                "impact_removed_node_ids": list(freeze_impact.get("removed_node_ids") or []),
+                "impact_added_node_ids": list(freeze_impact.get("added_node_ids") or []),
+                "impact_affected_course_ids": [
+                    str(c.get("course_id") or "")
+                    for c in (freeze_impact.get("affected_courses") or [])
+                    if isinstance(c, dict) and c.get("course_id")
+                ],
+            },
+            freeze_ctx,
+        ),
     )
+
+    # 前の版のノードとの対応 (ノード版間対応 §5)。**候補を1件でも提示したときだけ**、
+    # 凍結の記帳とは別行で確定文脈を残す（提示ゼロなら判断の機会自体が無い = NC3/DC3）。
+    # 提示 = 導出した候補の `from|to`、適用 = 実際に版へ載せた対（別オブジェクトから
+    # 導出するので、一致は本物の検査になる = DC2）。
+    applied_correspondence = [
+        {
+            "from_id": migration.from_id,
+            "from_label": _correspondence_label(
+                current_frozen_for_impact, migration.from_id
+            ),
+            "to_id": migration.to_id,
+            "to_label": _correspondence_label(frozen, migration.to_id),
+        }
+        for migration in applied_migrations
+    ]
+    correspondence["applied"] = applied_correspondence
+    freeze_impact["correspondence"] = correspondence
+    if correspondence.get("candidates"):
+        correspondence_ctx = decision_context.build_decision_context(
+            basis=decision_context.BASIS_ATLAS_NODE_CORRESPONDENCE,
+            presented_ids=[
+                _correspondence_pair_key(c.get("from_id"), c.get("to_id"))
+                for c in correspondence.get("candidates") or []
+            ],
+            applied_ids=[
+                _correspondence_pair_key(item["from_id"], item["to_id"])
+                for item in applied_correspondence
+            ],
+            # 候補は既定オフで並ぶ（付けずに凍結する = このステップを飛ばす／
+            # 別の対応先に付け替える、のどちらも選べる）。
+            alternatives=(
+                decision_context.ALT_EDIT,
+                decision_context.ALT_SKIP_STEP,
+            ),
+            # 対応も凍結版の一部なので、覆す経路は凍結そのものと同じ（次版 draft）。
+            reopen_path=_FREEZE_REOPEN_PATH,
+            evidence_shown=None,
+        )
+        _record_review_event(
+            cartridge_id,
+            atlas.STATUS_DRAFT,
+            atlas.STATUS_FROZEN,
+            current_user.get("id"),
+            decision_context.attach_decision_context(
+                {
+                    "action": "node_correspondence",
+                    "version": body.version,
+                    # 対応を付けなかった旧ノードは「見送った」事実として残す（NC4）。
+                    "unmatched_removed_node_ids": [
+                        str(item.get("node_id") or "")
+                        for item in correspondence.get("unmatched_removed") or []
+                    ],
+                },
+                correspondence_ctx,
+            ),
+        )
 
     # 凍結時の通知 (§3.4)。best-effort — 通知の成否は凍結の成否に影響させない。
     notified = 0
@@ -820,6 +1163,10 @@ def get_atlas_freeze_impact(
     """凍結前の影響プレビュー (§4.4)。draft と現行凍結版 (DB) の node_id 差分を返す。
 
     draft が無ければ 404。現行凍結版が無ければ (初回凍結) removed は必ず空。
+
+    ノード版間対応 (§5) で ``correspondence`` を additive に足す
+    (``{candidates, alternatives, unmatched_removed, already_declared, added_nodes, facts}``)。
+    既存キーは不変。候補は決定論・非LLM で、確定は教員が凍結 body に載せた分だけ (NC1/NC3)。
     """
     session = _skeleton_session()
     try:
@@ -828,6 +1175,9 @@ def get_atlas_freeze_impact(
             raise HTTPException(status_code=404, detail="draft がありません")
         frozen = atlas_store.load_frozen_skeleton(session, cartridge_id)
         impact = atlas_lifecycle.compute_freeze_impact(
+            session, cartridge_id, draft_row["skeleton"], frozen
+        )
+        impact["correspondence"] = _correspondence_preview(
             session, cartridge_id, draft_row["skeleton"], frozen
         )
     finally:
@@ -1011,7 +1361,8 @@ def _guard_assist_cost(user_id: str) -> None:
     if used >= limit:
         raise HTTPException(
             status_code=429,
-            detail=f"本日の AI アシスト編集の上限 ({limit} 回) に達しました。明日以降に再開してください",
+            # 事実文のみ（残数・上限値などの数値を利用者に出さない。他の CostGate と同じ規約）。
+            detail="本日の AI アシスト編集の上限に達しました。明日以降に再開してください",
         )
 
 
@@ -1231,6 +1582,12 @@ def propose_course_atlas_binding(
     }
 
 
+# 確定文脈（DC1）— コース⇄地図バインディングの一括保存（「この対応で次へ」/「保存」）。
+# 語彙の組み立ては core/decision_context.py の共通プリミティブに委ねる。basis の
+# 正本は decision_context.BASIS_ATLAS_BINDING_SAVE（既存2経路と同じ「画面.操作」規約）。
+_BINDING_REOPEN_PATH = "PUT /api/admin/courses/{course_id}/atlas-binding"
+
+
 @binding_router.put("/{course_id}/atlas-binding")
 def save_course_atlas_binding(
     course_id: str,
@@ -1278,16 +1635,24 @@ def save_course_atlas_binding(
         }
         applied = 0
         skipped: list[str] = []
+        # 確定文脈（DC2）: 提示された対象はサーバ側で取り直す（クライアント申告に依存しない）。
+        # この画面は「コースの全トピックを1行ずつ並べ、各行に骨格概念の select を出す」ので、
+        # 提示集合 = コースの全 topic_id、適用集合 = 実際に binding が入った topic_id。
+        presented_topic_ids: list[str] = []
+        applied_topic_ids: list[str] = []
         for topic in course_topics(course_data):
             if not isinstance(topic, dict):
                 continue
             topic_id = str(topic.get("id") or "")
+            if topic_id:
+                presented_topic_ids.append(topic_id)
             if topic_id not in requested:
                 continue
             node_id = requested[topic_id]
             if node_id and new_key and node_id in known_nodes:
                 topic["atlas_node_id"] = node_id
                 applied += 1
+                applied_topic_ids.append(topic_id)
             else:
                 if node_id:
                     skipped.append(topic_id)
@@ -1310,16 +1675,39 @@ def save_course_atlas_binding(
     finally:
         session.close()
 
+    # 改訂原則1（DC1）: 一括確定は確定文脈なしに記帳しない。この保存は
+    # 「1画面のトピック対応をまとめて確定する」操作（リリース前確認ウィザードの
+    # ステップ1「この対応で次へ」も同じ経路）なので、提示・適用・代替・再審経路を記帳する。
+    ctx = decision_context.build_decision_context(
+        basis=decision_context.BASIS_ATLAS_BINDING_SAVE,
+        presented_ids=presented_topic_ids,
+        applied_ids=applied_topic_ids,
+        # 各行の select は「（対応なし）」を選べる（＝一括の対象から外す）。ウィザードでは
+        # ステップごとに「あとで」があり、飛ばしても学習者側の表示は変わらない（RR1）。
+        alternatives=(
+            decision_context.ALT_DESELECT,
+            decision_context.ALT_SKIP_STEP,
+        ),
+        # 再審は同じ保存経路（空選択で解除・別の概念へ付け替え）。status 語彙は持たない
+        # 層なので statuses は空のまま（「戻せる status がある」と偽らない）。
+        reopen_path=_BINDING_REOPEN_PATH,
+        # 提案の根拠（どの topic がどの概念に当たるか）が画面に出ていたかはサーバから
+        # 検証できないため不明のまま置く（無条件 True にしない）。
+        evidence_shown=None,
+    )
     _record_review_event(
         course_id,
         old_key,
         new_key,
         current_user.get("id"),
-        {
-            "action": "course_atlas_binding",
-            "bindings_applied": applied,
-            "bindings_skipped": skipped,
-        },
+        decision_context.attach_decision_context(
+            {
+                "action": "course_atlas_binding",
+                "bindings_applied": applied,
+                "bindings_skipped": skipped,
+            },
+            ctx,
+        ),
         entity_type=AUDIT_ENTITY_ATLAS_BINDING,
     )
     return {
@@ -1327,6 +1715,9 @@ def save_course_atlas_binding(
         "cartridge_id": new_key,
         "bindings_applied": applied,
         "bindings_skipped": skipped,
+        # 画面が「提示と適用が一致したか」を事実文で出せるように同じ dict を返す
+        # （landscape の accept と同型）。
+        "decision_context": ctx,
     }
 
 

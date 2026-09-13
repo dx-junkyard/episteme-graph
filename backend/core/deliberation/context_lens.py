@@ -1469,9 +1469,9 @@ def _load_claim_row(claim_id: str) -> dict[str, Any] | None:
         row = session.execute(
             sa_text(
                 """
-                SELECT id::text AS id, document_id, claim_type, text, normalized_text,
+                SELECT id::text AS id, document_id::text AS document_id, claim_type, text, normalized_text,
                        support_status, review_status, evidence_text, source_scope
-                FROM theory_claims WHERE id = CAST(:id AS uuid) LIMIT 1
+                FROM theory_claims_live WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": claim_id},
@@ -1492,7 +1492,7 @@ def _claims_by_id(ids: list[str]) -> dict[str, dict[str, Any]]:
     session = get_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id::text AS id, text, claim_type FROM theory_claims WHERE id::text = ANY(:ids)"),
+            sa_text("SELECT id::text AS id, text, claim_type FROM theory_claims_live WHERE id::text = ANY(:ids)"),
             {"ids": ids},
         ).mappings().all()
     finally:
@@ -1504,7 +1504,7 @@ def _claim_id_lookup(document_id: str) -> dict[str, str]:
     session = get_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id::text AS id, source_scope FROM theory_claims WHERE document_id = :doc"),
+            sa_text("SELECT id::text AS id, source_scope FROM theory_claims_live WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)"),
             {"doc": document_id},
         ).fetchall()
     finally:
@@ -1518,8 +1518,8 @@ def _components_supporting_claim(document_id: str, claim_id: str) -> list[dict[s
         rows = session.execute(
             sa_text(
                 """
-                SELECT id::text AS id, name FROM theory_components
-                WHERE document_id = :doc AND evidence_claims @> CAST(:claim_json AS jsonb)
+                SELECT id::text AS id, name FROM theory_components_live
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) AND evidence_claims @> CAST(:claim_json AS jsonb)
                 """
             ),
             {"doc": document_id, "claim_json": json.dumps([claim_id])},
@@ -1535,10 +1535,10 @@ def _load_component_row(component_id: str) -> dict[str, Any] | None:
         row = session.execute(
             sa_text(
                 """
-                SELECT id::text AS id, document_id, name, component_type, summary, status,
+                SELECT id::text AS id, document_id::text AS document_id, name, component_type, summary, status,
                        review_status, dependencies, evidence_claims, source_scope,
                        thesis_context, source_chunks
-                FROM theory_components WHERE id = CAST(:id AS uuid) LIMIT 1
+                FROM theory_components_live WHERE id = CAST(:id AS uuid) LIMIT 1
                 """
             ),
             {"id": component_id},
@@ -1563,7 +1563,7 @@ def _components_by_id(ids: list[str]) -> dict[str, dict[str, Any]]:
     session = get_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id::text AS id, name FROM theory_components WHERE id::text = ANY(:ids)"),
+            sa_text("SELECT id::text AS id, name FROM theory_components_live WHERE id::text = ANY(:ids)"),
             {"ids": ids},
         ).mappings().all()
     finally:
@@ -1575,7 +1575,7 @@ def _component_id_lookup(document_id: str) -> dict[str, str]:
     session = get_session()
     try:
         rows = session.execute(
-            sa_text("SELECT id::text AS id, source_scope FROM theory_components WHERE document_id = :doc"),
+            sa_text("SELECT id::text AS id, source_scope FROM theory_components_live WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)"),
             {"doc": document_id},
         ).fetchall()
     finally:
@@ -1601,8 +1601,8 @@ def _load_apparatus_components(document_id: str) -> list[dict[str, Any]]:
                 """
                 SELECT id::text AS id, name, component_type, status, review_status, summary,
                        source_scope
-                FROM theory_components
-                WHERE document_id = :doc AND component_type IN ('apparatus', 'instrument', 'part')
+                FROM theory_components_live
+                WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) AND component_type IN ('apparatus', 'instrument', 'part')
                 ORDER BY created_at ASC
                 """
             ),
@@ -1631,7 +1631,7 @@ def _load_components_with_evidence_claims(document_id: str) -> list[dict[str, An
     try:
         rows = session.execute(
             sa_text(
-                "SELECT id::text AS id, name, evidence_claims FROM theory_components WHERE document_id = :doc"
+                "SELECT id::text AS id, name, evidence_claims FROM theory_components_live WHERE document_id = CAST(NULLIF(:doc, '') AS uuid)"
             ),
             {"doc": document_id},
         ).mappings().all()
@@ -1674,7 +1674,7 @@ def _load_component_graph(document_id: str) -> dict[str, list[dict[str, Any]]]:
     try:
         row = session.execute(
             sa_text(
-                "SELECT graph_json FROM theory_component_graphs WHERE document_id = :doc "
+                "SELECT graph_json FROM theory_component_graphs WHERE document_id = CAST(NULLIF(:doc, '') AS uuid) "
                 "ORDER BY updated_at DESC LIMIT 1"
             ),
             {"doc": document_id},
@@ -1696,7 +1696,7 @@ def _load_figure_row(figure_id: str) -> dict[str, Any] | None:
         row = session.execute(
             sa_text(
                 """
-                SELECT id::text AS id, document_id, figure_key, figure_label, caption_text,
+                SELECT id::text AS id, document_id::text AS document_id, figure_key, figure_label, caption_text,
                        caption_block_id, page, bbox,
                        suggested_mode, mode_reason, analysis_profile, reviewed_mode,
                        mode_review_status, reviewed_analysis_mode, reviewed_analysis_profile,

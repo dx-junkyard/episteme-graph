@@ -21,6 +21,8 @@ from episteme_graph.agents.component_assembly.schema import ComponentAssemblyRes
 from episteme_graph.agents.derivation_chain.schema import DerivationChainResult
 from episteme_graph.agents.dsl_linking.schema import DSLLinkingResult
 
+from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+
 from .cartridge_loader import CartridgeLoader
 from .input_builder import ComponentGraphInputBuilder
 from .llm_client import ComponentGraphLLMClient
@@ -172,10 +174,4 @@ class ComponentGraphAgent:
     def _load_cartridge(self, cartridge_id: str | None) -> CartridgeContext | None:
         if not cartridge_id:
             return None
-        try:
-            return self._cartridge_loader.load(cartridge_id)
-        except FileNotFoundError:
-            logger.warning(
-                "Cartridge '%s' not found; proceeding without cartridge", cartridge_id
-            )
-            return None
+        return load_cartridge_or_none(self._cartridge_loader, cartridge_id)

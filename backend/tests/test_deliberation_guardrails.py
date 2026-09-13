@@ -130,13 +130,18 @@ class TestReadOnlyPhase0:
     def test_post_endpoints_are_scoped_to_known_write_routes(self):
         # POST は identity-links の作成・確定・却下 / sessions の作成・messages 送信 /
         # annotations の commit・dismiss のみ（overview 等の読み取り専用経路に
-        # 書き込みを混ぜない）。
+        # 書き込みを混ぜない）。voice は音声対話の入出力変換で DB を変更しないが、
+        # 音声バイナリ・本文を body で受けるため POST になる（GR1: 音声から承認 API を
+        # 呼ぶ経路は作らない）。
         paths = re.findall(r'@router\.post\("([^"]+)"\)', _ROUTE_SRC)
         assert paths, "expected at least one @router.post(...) route"
-        allowed_fragments = ("identity-links", "sessions", "annotations", "standardization")
+        allowed_fragments = (
+            "identity-links", "sessions", "annotations", "standardization", "voice",
+        )
         for path in paths:
             assert any(fragment in path for fragment in allowed_fragments), (
-                f"unexpected POST route outside identity-links/sessions/annotations/standardization: {path}"
+                "unexpected POST route outside "
+                f"identity-links/sessions/annotations/standardization/voice: {path}"
             )
 
 
@@ -449,8 +454,12 @@ class TestIdentityLinkOrphanCleanup:
         assert "element_identity_links" in body
 
     def test_delete_material_cleans_identity_links(self):
+        # 知識オブジェクト層 §8.1（KO9）以降、delete_material は DB 削除本体を
+        # _purge_document に委譲する。掃除の実体は上のテストが _purge_document 側で
+        # 固定しているので、ここでは「委譲していること」を固定する
+        # （自前の DELETE を書き戻すと削除範囲の正本が2つに割れる）。
         body = extract_function_source(_ADMIN_SRC, "delete_material")
-        assert "element_identity_links" in body
+        assert "_purge_document(" in body
 
 
 class TestIdentityLinksCoreModuleLayering:
@@ -539,7 +548,7 @@ class TestIdentityLinkCreateCandidateScopedByDocument:
         # （含まなければ別論文の既存行を誤って返してしまう）。
         select_start = body.index("SELECT {_COLUMNS_SQL} FROM element_identity_links")
         select_fragment = body[select_start : select_start + 400]
-        assert "instance_document_id = :document_id" in select_fragment
+        assert "instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)" in select_fragment
 
 
 class TestIdentityLinkListForInstanceRequiresDocumentId:
@@ -561,7 +570,7 @@ class TestIdentityLinkListForInstanceRequiresDocumentId:
 
     def test_query_filters_by_instance_document_id(self):
         body = extract_function_source(_IDENTITY_LINKS_SRC, "list_for_instance")
-        assert "instance_document_id = :document_id" in body
+        assert "instance_document_id = CAST(NULLIF(:document_id, '') AS uuid)" in body
 
 
 class TestIdentityLinkRouteScopedListCallSite:
@@ -1409,13 +1418,12 @@ class TestPhase2OrphanCleanup:
         body = extract_function_source(_DELETION_SRC, "_purge_document")
         assert "deliberation_sessions" in body
 
-    def test_delete_material_cleans_element_annotations(self):
+    def test_delete_material_delegates_to_purge_document(self):
+        # 知識オブジェクト層 §8.1（KO9）: delete_material は DB 削除本体を
+        # _purge_document に委譲する（element_annotations / deliberation_sessions の
+        # 掃除は上の2テストが _purge_document 側で固定している）。
         body = extract_function_source(_ADMIN_SRC, "delete_material")
-        assert "element_annotations" in body
-
-    def test_delete_material_cleans_deliberation_sessions(self):
-        body = extract_function_source(_ADMIN_SRC, "delete_material")
-        assert "deliberation_sessions" in body
+        assert "_purge_document(" in body
 
 
 class TestSessionOwnerOnlyAccessWiring:

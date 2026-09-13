@@ -20,8 +20,9 @@
       fail-closed — 未登録の操作は Copilot が説明も代行もしない仕様であることを踏まえ、
       「今回は登録しない」の判断も PR に書く）
 - [ ] **操作 KB**: `docs/admin_operations/*.md` に手順書を追加/更新したか？
-      （front-matter `capability` / `role` / `screen` 付き。KB に無い操作は Copilot が
-      「未整備」と答える）
+      （front-matter は `screen:` / `role:` の 2 キーのみ。**`capability` キーは存在しない** —
+      capability との結び付けは capability 側の `howto_doc` → `{#anchor}` が担う。
+      KB に無い操作は Copilot が「未整備」と答える）
 - [ ] **G層 next_steps ルール**: 新機能に「次にやること」として案内すべき状態遷移が
       あるか？（`backend/core/admin_assistant/next_steps.py` のルールカタログ。
       G4「押し付けない」に反するルールは追加しない判断も明記）
@@ -144,7 +145,8 @@ Copilot の道案内（Locate & Spotlight）は、capability の `locate_steps[]
 ### 5-5. リポジトリ外正本の禁止
 
 `field_atlas_overlay_spec.md`（8文書が §番号付きで参照する「正本」）が一度もコミットされて
-いなかった事故の再発防止。
+いなかった事故の再発防止（当該事故自体は 2026-08-14 の再構成版で解消済み — 旧§番号との
+対応は保証されない、という但し書き付きで `docs/features/` に実在する）。
 
 - [ ] 「正本」と呼ぶ文書は `docs/` 配下に**コミットされて実在**するか
       （バッククォート参照・§番号付き参照も対象。リンク実在検査は

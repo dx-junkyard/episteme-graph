@@ -2,12 +2,15 @@
   "cartridge_id": "particle_physics",
   "name": "Particle Physics Cartridge",
   "version": "0.1.0",
-  "description": "素粒子物理・理論物理文献から理論コンポーネントを抽出・検証するためのドメイン定義。",
+  "description": "フレーバー物理（半レプトン B 崩壊・Vcb・レプトン普遍性）を中心に、有効場理論（HQET）・形状因子・QCD 和則・格子QCD の文献から理論コンポーネントを抽出・検証するためのドメイン定義。名前は particle_physics だが、収録語彙・骨格の実内容はこの範囲に限られる（形の宣言は shape.json）。",
   "target_domain": [
     "particle_physics",
-    "quantum_field_theory",
     "flavor_physics",
-    "effective_field_theory"
+    "semileptonic_b_decays",
+    "heavy_quark_effective_theory",
+    "form_factors",
+    "qcd_sum_rules",
+    "lattice_qcd"
   ],
   "default_language": "ja",
   "source_policy": {
@@ -32,6 +35,7 @@
     "extraction_prompt": "extraction_prompt.md",
     "review_prompt": "review_prompt.md",
     "validation_rules": "validation_rules.json",
+    "shape": "shape.json",
     "atlas_skeleton": "atlas/skeleton.yaml"
   }
 }

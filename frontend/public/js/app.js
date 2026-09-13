@@ -24,13 +24,12 @@
     // data-advance（サーバー応答なしの前進）経路が完了カードを出す判断に使う。
     // トピック切替・コース切替でリセットする（古いコースの完了状態を持ち越さない）。
     lastCheckCourseCompleted: false,
-    // 確認問題の「AIと議論して理解を深める」用。直近の採点結果（合否・講評・必要な要素）を
-    // 保持し、議論メッセージの材料にする（モーダルを開き直したらクリアする）。
-    lastCheckGrading: null,
-    // 合格時の採点結果（提出した回答・講評・解答例・解説）。合格でも講評を捨てず、
-    // モーダルを開き直したとき（議論から「確認問題に戻る」）は白紙のフォームではなく
-    // 「確認済み」の状態で再提示する。トピック単位なので切替で破棄する。
-    lastCheckPass: null,
+    // 確認問題の直近の並置結果（是正 F1: 合否は無い）。提出した回答・並置の事実文・
+    // 観点・解答例・解説と、本人の自己確認（agreed / disagreed / verdict_wrong）を保持する。
+    // モーダルを開き直したとき（議論から「確認問題に戻る」）は白紙のフォームに戻さず
+    // この並置を再提示し、「AIと議論して理解を深める」の材料にもする。
+    // トピック単位なので切替で破棄する。
+    lastCheckReview: null,
     // 確認問題の壁打ちモードが継続中か。true の間は sendMessage が check_scaffold を
     // 補い、AI は解答そのものを提示せず要素の説明と問いかけで支援する。
     // 確認問題モーダルを開き直したとき・トピックを移ったときに false へ戻す。
@@ -47,10 +46,16 @@
     // ── 構造帰属（Structure-Anchored Questions） ──
     anchorDigest: null,     // 帰属候補ダイジェスト {items: [...]}（StructureAnchorAgent Stage 2）
     anchorDeferred: {},     // [あとで] で今セッション中は隠す trace_id の集合
+    // ── 誤解メモ（是正 F5: AI 候補 → 本人の3択） ──
+    misconceptionDeferred: {}, // [あとで] で今セッション中は隠す entry id の集合
     pendingSelection: null, // 方法A: 「ここについて質問」で選択したテキスト {text, segment_id}
     // discuss モード（論文と話す）のスコープ選択。トピック切替で discuss を離れても
     // 選択値自体は保持する（再入場時に前回の選択を引き継ぐ）。
     discussScope: "course_sources", // "course_sources" | "all_visible"
+    // LLM 応答ストリーミング Phase 3-a（llm_response_streaming_design.md §5 / ST9）:
+    // サーバが配る機能フラグの鏡。ログイン後に1回だけ取得し、取得失敗・非200 は
+    // false のまま（fail-to-current = 従来の JSON 経路だけを使う）。数値は持たない。
+    clientFeatures: { chat_streaming: false },
   };
 
   // 送信直後の描画で「新しい問い」の先頭へスクロールさせるための一時フラグ（state には
@@ -249,6 +254,10 @@
       localStorage.removeItem("eg_token");
       // discuss モード（論文と話す）: トークン失効時も discuss 内部状態を残さない。
       if (window.Discuss) window.Discuss.reset();
+      // コーパス回遊層: 失効時に前ユーザーの取得結果を残さない（CR1 と同族）。
+      if (window.CorpusSea) window.CorpusSea.invalidate();
+      // 可視性6軸の事実文（DA3）: 前ユーザーの取得結果を残さない。
+      if (window.DisclosureNote) window.DisclosureNote.invalidate();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -267,6 +276,10 @@
       localStorage.removeItem("eg_token");
       // discuss モード（論文と話す）: トークン失効時も discuss 内部状態を残さない。
       if (window.Discuss) window.Discuss.reset();
+      // コーパス回遊層: 失効時に前ユーザーの取得結果を残さない（CR1 と同族）。
+      if (window.CorpusSea) window.CorpusSea.invalidate();
+      // 可視性6軸の事実文（DA3）: 前ユーザーの取得結果を残さない。
+      if (window.DisclosureNote) window.DisclosureNote.invalidate();
       renderAuth();
       throw new Error("Unauthorized");
     }
@@ -543,11 +556,32 @@
     chip.click();
   }
 
+  // コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）: コース非依存の
+  // 常設入口「論文の海」。コース未選択でも押せる。既存の入口を置き換えず並置し、
+  // 自動では開かない・バッジも出さない（CR2 / CR5）。
+  function corpusSeaEntryHtml() {
+    return '<div class="corpus-sea-entry">' +
+      '<button type="button" class="corpus-sea-entry-btn" id="corpus-sea-btn"' +
+      ' data-ui-anchor="sidebar.corpus-sea"' +
+      ' title="コースに関係なく、閲覧できる論文を分野の地図の上で見わたします">🌊 論文の海</button>' +
+      "</div>";
+  }
+
+  function bindCorpusSeaEntry() {
+    var btn = document.getElementById("corpus-sea-btn");
+    if (btn) {
+      btn.addEventListener("click", function () {
+        if (window.CorpusSea) window.CorpusSea.open();
+      });
+    }
+  }
+
   // ── Render: Sidebar ────────────────────────────────────────────────
   function renderSidebar() {
     const sb = document.getElementById("sidebar");
     if (!state.course) {
-      sb.innerHTML = '<div class="sb-hd">コースを選択してください</div>';
+      sb.innerHTML = corpusSeaEntryHtml() + '<div class="sb-hd">コースを選択してください</div>';
+      bindCorpusSeaEntry();
       return;
     }
     const course = state.course;
@@ -563,7 +597,10 @@
     // 2行折り返しをやめて高さを詰める）。ラベルは短縮するが、アイコンのみにはしない
     // （初見で意味が取れなくなるため）。
     const discussActive = isDiscussMode();
-    let html = '<div class="discuss-mode-switch" role="group" aria-label="学び方の切替">' +
+    // コーパス回遊層の入口はコースの学び方の切替とは別レイヤーなので、二枚看板の
+    // 外（上）に置く。等重の二枚看板の並びには手を入れない。
+    let html = corpusSeaEntryHtml();
+    html += '<div class="discuss-mode-switch" role="group" aria-label="学び方の切替">' +
       '<button type="button" class="discuss-mode-btn' + (!discussActive ? " active" : "") +
       '" id="discuss-mode-sequential-btn" data-ui-anchor="sidebar.mode-sequential"' +
       ' aria-pressed="' + (!discussActive ? "true" : "false") + '"' +
@@ -602,13 +639,18 @@
         const cls = tActive ? "ni sub act" : tStatus === "locked" ? "ni sub lk" : "ni sub";
         const dotCls = tStatus === "completed" ? "dot-g" : tStatus === "in_progress" ? "dot-b" : "dot-x";
 
-        // Issue #145: 個人誤解がある場合は注釈マーカーを表示
+        // Issue #145 / 是正 F5: 誤解メモは「AI が提案した候補」と「本人が確定したもの」を
+        // 区別して示す。候補は件数を出さず印だけにする（判決の数を積み上げない）。
         const personalLayer = state.personalLayer || {};
         const misconsByTopic = personalLayer.misconceptions_by_topic || {};
-        const misconsCount = (misconsByTopic[t.id] || []).length;
-        const annotationBadge = misconsCount > 0
-          ? '<span class="mc-badge" title="' + misconsCount + '件の誤解が記録されています">⚑ ' + misconsCount + '</span>'
-          : "";
+        const misconEntries = misconsByTopic[t.id] || [];
+        const misconConfirmed = misconEntries.filter(isConfirmedMisconception).length;
+        const misconCandidates = misconEntries.filter(isCandidateMisconception).length;
+        const annotationBadge = misconConfirmed > 0
+          ? '<span class="mc-badge" title="' + misconConfirmed + '件の誤解メモを自分で確定しています">⚑ ' + misconConfirmed + '</span>'
+          : misconCandidates > 0
+            ? '<span class="mc-badge mc-badge-candidate" title="AI が訂正を提案した箇所があります（未確認）">⚑</span>'
+            : "";
         const support = state.learningSupport;
         const supportOrigin = support && support.origin;
         const supportBadge = supportOrigin && supportOrigin.topic_id === t.id
@@ -644,6 +686,9 @@
     html += "</div>";
 
     sb.innerHTML = html;
+
+    // コーパス回遊層（論文の海）の常設入口の配線
+    bindCorpusSeaEntry();
 
     // discuss モード二枚看板の配線
     var seqModeBtn = document.getElementById("discuss-mode-sequential-btn");
@@ -834,6 +879,14 @@
       });
     });
 
+    // 入口統合 Phase 1（§6）: 様相の訂正チップ。既存の書き直し経路に相乗りする
+    // （新しい API パスは作らない）。押した 1 往復にだけ効く。
+    ca.querySelectorAll("[data-stance-correct]").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        correctStance(this.getAttribute("data-reply-to"), this.getAttribute("data-stance-correct"));
+      });
+    });
+
     // 構造帰属（方法C）: 回答末尾の1タップ様相選択（選択がそのまま帰属の確定になる）。
     ca.querySelectorAll("[data-anchor-prompt-doubt]").forEach(function (btn) {
       btn.addEventListener("click", function () {
@@ -981,6 +1034,28 @@
     if (p) p.remove();
   }
 
+  // 学ぶ単位 P2-7（設計 §8）: 選択範囲が属する教材区画の番号を返す。決まらなければ
+  // null（0 を既定にしない — 痕跡の anchor_id が全部 seg_0 になっていた原因。
+  // null のときはサーバが教材本文との逐語一致で解決し、それでも決まらなければ
+  // 「場所は不明」のまま記録する）。レクチャー再生中は表示中スライドの区画が正。
+  function selectionSegmentIndex(range) {
+    try {
+      if (typeof lectureState !== "undefined" && lectureState.active) {
+        var lseg = lectureState.currentSegmentIndex;
+        return (typeof lseg === "number") ? lseg : null;
+      }
+      if (!range) return null;
+      var node = range.commonAncestorContainer;
+      var el = (node && node.nodeType === 1) ? node : (node ? node.parentElement : null);
+      var host = (el && el.closest) ? el.closest("[data-segment-index]") : null;
+      if (!host) return null;
+      var idx = parseInt(host.getAttribute("data-segment-index"), 10);
+      return isNaN(idx) ? null : idx;
+    } catch (e) {
+      return null;
+    }
+  }
+
   // 教材区画（#material-body）内のテキスト選択にフローティングボタンを出す。
   function initSelectionAnchor() {
     if (document._anchorSelectionWired) return;
@@ -1009,7 +1084,7 @@
         // mousedown で選択が消えるのを防ぐ
         btn.addEventListener("mousedown", function (e) { e.preventDefault(); });
         btn.addEventListener("click", function () {
-          var seg = (Session.currentAnchor() || {}).segment_id || 0;
+          var seg = selectionSegmentIndex(range);
           state.pendingSelection = { text: text, segment_id: seg };
           hideSelectionAskButton();
           hideQuickAnchorPopover();
@@ -1032,13 +1107,15 @@
           qbtn.textContent = opt.label;
           qbtn.addEventListener("mousedown", function (e) { e.preventDefault(); });
           qbtn.addEventListener("click", async function () {
-            var seg = (Session.currentAnchor() || {}).segment_id || 0;
-            var ok = await postCycleAnchor({
+            var seg = selectionSegmentIndex(range);
+            var anchorPayload = {
               quick_label: opt.quick_label,
               topic_id: state.currentTopicId,
               selection_text: text,
-              selection_segment_id: seg,
-            });
+            };
+            // 区画が決まらなければキー自体を送らない（0 を既定にしない）。
+            if (seg !== null) anchorPayload.selection_segment_id = seg;
+            var ok = await postCycleAnchor(anchorPayload);
             sendDiscussMetric("cycle_anchor_quick", {});
             hideSelectionAskButton();
             hideQuickAnchorPopover();
@@ -1373,6 +1450,50 @@
     return html;
   }
 
+  // 入口統合 Phase 1（learning_chat_entry_unification_design.md §6, LC6/LC7）:
+  // 「どの様相（会話の調子）で答えたか」の 1 行。サーバが当該発話から**推定**した
+  // ときだけ出す事実であって、督促でも評価でもない。
+  //   - source === "explicit"（本人が選んだ）→ 何も出さない
+  //   - stance === "tutor"（現行の既定）    → 何も出さない（既定は無表示＝静音）
+  // 表示ラベルはサーバ（core/label_vocab.py の LEARNING_STANCE_LABELS）が付けた
+  // stance.label をそのまま描く — フロントに様相→日本語の表を持たない（ミラー規律）。
+  // confidence・一致度などの数値は DTO に無く、ここでも一切描かない（LC7）。
+  function renderStanceLine(msg) {
+    var st = msg && msg.stance;
+    if (!st || st.source !== "inferred" || !st.stance || st.stance === "tutor") return "";
+    // discuss 中はサーバ側が推定に入らない（LC1/§4.5）。念のための二重ガード。
+    if (isDiscussMode()) return "";
+    var html = '<div class="stance-line" data-ui-anchor="chat.stance-chip">';
+    html += '<span class="stance-fact">' + escHtml(st.label || "") + '答えました。</span>';
+    // 訂正は 1 タップで、その 1 往復にだけ効く（sticky にしない, §6）。
+    if (msg.reply_to_id) {
+      html += '<button type="button" class="lx-ghost secondary stance-correct-btn"' +
+        ' data-stance-correct="tutor"' +
+        ' data-reply-to="' + escHtml(msg.reply_to_id) + '">ふつうの質問として聞き直す</button>';
+    }
+    html += '</div>';
+    return html;
+  }
+
+  // 様相の訂正: 新しいエンドポイントは作らず、元の問いを**明示**の typed action
+  // （ask_question = DOMAIN_RAG 確定）で同じ位置から再処理する（§5 / 既存の書き直し経路
+  // replace_message_id → truncate_chat_and_supersede。旧往復の派生痕跡は supersede で残る）。
+  function correctStance(replyToId, stance) {
+    if (state.sending || !replyToId) return;
+    var idx = _findMessageIndexById(replyToId);
+    if (idx === -1 || state.chatMessages[idx].role !== "user") return;
+    var text = state.chatMessages[idx].content || "";
+    if (!text) return;
+    // 書き直し中の状態が残っていると二重に差し替えてしまうため、先に解除する。
+    if (state.editingMessageId) cancelEditMessage();
+    sendDiscussMetric("stance_corrected", { stance: stance || "tutor" });
+    sendMessage(text, {
+      intent_mode: Session.inDetour() ? "explore" : "on_path",
+      support_action: "ask_question",
+      _replace_message_id: replyToId,
+    });
+  }
+
   // 構造帰属（方法C）: 回答末尾の1タップ確認プロンプト。ゲート済み応答にのみ付く。
   // 選択しないまま流しても問い自体は unclassified で保持される（P4/P7）。
   function renderAnchorConfirmPrompt(msg) {
@@ -1455,11 +1576,15 @@
       return;
     }
     var html = '<div class="material-block-header">教材</div>';
-    state.topicMaterial.forEach(function (chunk) {
+    state.topicMaterial.forEach(function (chunk, segmentIndex) {
       // Phase 3（ホバー+ラッチ, §7）: ラダー4位「直近回答の第1根拠チャンク」と同じ
       // chunk_id 系だが、ここではラッチ時に「どのチャンク内で注目したか」を拾うための
       // data 属性。既存の描画には影響しない（純粋な追加属性）。
-      html += '<div class="material-chunk" data-chunk-id="' + escHtml(chunk.id || "") + '">';
+      // data-segment-index は学ぶ単位 P2-7（設計 §8）: 選択範囲がどの教材区画に属するかを
+      // DOM から決定論的に取るための担体。サーバ側の区画番号解決
+      // （resolve_selection_segment）と同じ単位（配信された教材区画の表示順）。
+      html += '<div class="material-chunk" data-chunk-id="' + escHtml(chunk.id || "") + '"'
+        + ' data-segment-index="' + segmentIndex + '">';
       if (chunk.chapter || chunk.section) {
         var loc = [chunk.chapter, chunk.section].filter(Boolean).join(" › ");
         html += '<div class="material-chunk-loc">' + escHtml(loc) + '</div>';
@@ -1715,6 +1840,10 @@
       html += bar;
     }
 
+    // 入口統合 Phase 1（§6）: 様相チップ（推定で答えたときだけの 1 行 + 訂正）。
+    // 出所（tier / grounding）の直後に置く — 根拠の提示は様相にかかわらず同じ。
+    html += renderStanceLine(msg);
+
     // ヘルプルート（§1-3-6）: マニュアル出典。HELP 応答時のみ非 null。
     // chunk ではないためクリック動作は持たせない（/source-chunk/ には接続しない）。
     if (msg && msg.manual_citations && msg.manual_citations.length > 0) {
@@ -1794,7 +1923,7 @@
     var head = '<div class="src-popup-head">' +
       '<span class="src-popup-title">' + escHtml(title) + '</span>' +
       tierBadge(tier) +
-      (score ? '<span class="src-popup-score">類似度 ' + escHtml(score) + '</span>' : '') +
+      // 類似度（cosine）の生値は学習者に見せない（数値非表示の原則。VA2 と同じ）。
       '<button class="src-popup-close" aria-label="閉じる">×</button></div>';
     pop.innerHTML = head + '<div class="src-popup-body">読み込み中…</div>';
     document.body.appendChild(pop);
@@ -2093,6 +2222,163 @@
     renderSourcesTab();
   }
 
+  // ── 誤解メモ（是正 F5 / 六つのレンズ 提案3） ───────────────────────────
+  // 誤解メモは AI が訂正マーカーの文字列一致で見つけた**候補**にすぎない。候補には
+  // 「誤解」「間違い」と断定する文言を使わず、確定（confirmed）したものにだけ使う。
+  // 件数バッジは出さない（判決の数を積み上げない）。表示を絞るときは古い順に畳む
+  // （消さない・P4）。最新3件だけを一等地に出すのは tension ダイジェストと同じ制約。
+  const MISCONCEPTION_VISIBLE_CANDIDATES = 3;
+  const MISCONCEPTION_VISIBLE_CONFIRMED = 5;
+  const MISCONCEPTION_NO_CORRECTION_FACT =
+    "AI が訂正を示唆しましたが、訂正文を抽出できませんでした。";
+
+  function isCandidateMisconception(m) {
+    return !!m && (!m.status || m.status === "candidate");
+  }
+
+  function isConfirmedMisconception(m) {
+    return !!m && m.status === "confirmed";
+  }
+
+  function isDismissedMisconception(m) {
+    return !!m && m.status === "dismissed";
+  }
+
+  function misconceptionBodyHtml(m) {
+    var html = '<div class="mc-wrong">『' + escHtml(m.wrong || "") + "』</div>";
+    if (m.correct) {
+      html += '<div class="mc-correct">AI の訂正: ' + escHtml(m.correct) + "</div>";
+    } else {
+      html += '<div class="mc-correct mc-no-correction">' +
+        escHtml(MISCONCEPTION_NO_CORRECTION_FACT) + "</div>";
+    }
+    return html;
+  }
+
+  function misconceptionCandidateCardHtml(m) {
+    var id = escHtml(m.id || "");
+    var html = '<div class="cc mc-annotation mc-candidate" data-mc-card="' + id + '">';
+    html += '<div class="lb">' + escHtml(m.label || "訂正の提案") + "（未確認）</div>";
+    html += misconceptionBodyHtml(m);
+    html += '<div class="lx-trace-actions" data-ui-anchor="rightpanel.misconception-review">';
+    html += '<button class="lx-ghost" data-mc-decision="agreed" data-mc-id="' + id +
+      '">そう、これは私の誤解だった</button>';
+    html += '<button class="lx-ghost secondary" data-mc-decision="disagreed" data-mc-id="' + id +
+      '">これは誤解ではない</button>';
+    html += '<button class="lx-ghost secondary" data-mc-decision="verdict_wrong" data-mc-id="' + id +
+      '">AI の訂正のほうが違う</button>';
+    html += '<button class="lx-ghost secondary" data-mc-defer="' + id + '">あとで</button>';
+    html += "</div></div>";
+    return html;
+  }
+
+  function misconceptionRecordCardHtml(m, cls) {
+    var html = '<div class="cc mc-annotation ' + cls + '">';
+    html += '<div class="lb">⚑ ' + escHtml(m.label || "訂正") + "</div>";
+    html += misconceptionBodyHtml(m);
+    return html + "</div>";
+  }
+
+  function renderMisconceptionSection(topic) {
+    const personalLayer = state.personalLayer || {};
+    const misconsByTopic = personalLayer.misconceptions_by_topic || {};
+    const entries = topic ? (misconsByTopic[topic.id] || []) : [];
+    if (!entries.length) return "";
+
+    const candidates = entries.filter(function (m) {
+      return isCandidateMisconception(m) && !state.misconceptionDeferred[m.id];
+    });
+    const confirmed = entries.filter(isConfirmedMisconception);
+    const dismissed = entries.filter(isDismissedMisconception);
+
+    let html = "";
+
+    if (candidates.length) {
+      html += '<div class="ps mc-candidates"><h4>AI が訂正を提案した箇所（未確認）</h4>';
+      html += '<div class="mc-layer-note">AI の応答に訂正の気配があった箇所です。' +
+        'あなたの理解だったのかどうかは、あなたが決めます。答えなくても構いません。</div>';
+      candidates.slice(0, MISCONCEPTION_VISIBLE_CANDIDATES).forEach(function (m) {
+        html += misconceptionCandidateCardHtml(m);
+      });
+      const olderCandidates = candidates.slice(MISCONCEPTION_VISIBLE_CANDIDATES);
+      if (olderCandidates.length) {
+        html += '<details class="mc-older"><summary>これより前の提案も見る</summary>';
+        olderCandidates.forEach(function (m) {
+          html += misconceptionCandidateCardHtml(m);
+        });
+        html += "</details>";
+      }
+      html += "</div>";
+    }
+
+    if (confirmed.length) {
+      html += '<div class="ps mc-confirmed"><h4>あなたが確定した誤解メモ</h4>';
+      html += '<div class="mc-layer-note">あなたが「自分の誤解だった」と確定した記録です。</div>';
+      confirmed.slice(0, MISCONCEPTION_VISIBLE_CONFIRMED).forEach(function (m) {
+        html += misconceptionRecordCardHtml(m, "mc-confirmed-row");
+      });
+      const olderConfirmed = confirmed.slice(MISCONCEPTION_VISIBLE_CONFIRMED);
+      if (olderConfirmed.length) {
+        html += '<details class="mc-older"><summary>これより前の記録も見る</summary>';
+        olderConfirmed.forEach(function (m) {
+          html += misconceptionRecordCardHtml(m, "mc-confirmed-row");
+        });
+        html += "</details>";
+      }
+      html += "</div>";
+    }
+
+    if (dismissed.length) {
+      html += '<div class="ps mc-dismissed">';
+      html += '<details class="mc-older"><summary>受け入れなかった訂正も見る</summary>';
+      html += '<div class="mc-layer-note">あなたが受け入れなかった訂正です。記録は消えません。</div>';
+      dismissed.forEach(function (m) {
+        html += misconceptionRecordCardHtml(m, "mc-dismissed-row");
+      });
+      html += "</details></div>";
+    }
+
+    return html;
+  }
+
+  function bindMisconceptionActions(el) {
+    if (!el) return;
+    el.querySelectorAll("[data-mc-decision]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        reviewMisconception(
+          this.getAttribute("data-mc-id"), this.getAttribute("data-mc-decision"),
+        );
+      });
+    });
+    el.querySelectorAll("[data-mc-defer]").forEach(function (b) {
+      b.addEventListener("click", function () {
+        // 今セッション中は隠すだけ（候補のまま保持する。押し付けない）。
+        state.misconceptionDeferred[this.getAttribute("data-mc-defer")] = true;
+        renderContextTab();
+      });
+    });
+  }
+
+  async function reviewMisconception(entryId, decision) {
+    if (!entryId || !decision || !state.courseId || !state.currentTopicId) return;
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + encodeURIComponent(state.courseId) +
+          "/topics/" + encodeURIComponent(state.currentTopicId) +
+          "/misconceptions/" + encodeURIComponent(entryId) + "/review",
+        { method: "POST", body: JSON.stringify({ decision: decision }) },
+      );
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.personal_layer) {
+          state.personalLayer = data.personal_layer;
+        }
+      }
+    } catch (_) { /* best-effort: 失敗しても学習を止めない */ }
+    renderSidebar();
+    renderContextTab();
+  }
+
   function renderContextTab() {
     const el = document.getElementById("tab-context");
     if (!state.course || !state.currentTopicId) {
@@ -2144,21 +2430,13 @@
       html += "</div></div>";
     }
 
-    // Issue #145: 誤解は personal_layer から取得（マスターデータには含まれない）
-    const personalLayer = state.personalLayer || {};
-    const misconsByTopic = personalLayer.misconceptions_by_topic || {};
-    const misconceptions = topic ? (misconsByTopic[topic.id] || []) : [];
-    if (misconceptions.length > 0) {
-      html += '<div class="ps"><h4>あなたの誤解メモ <span class="mc-bd">' + misconceptions.length + '件</span></h4>';
-      html += '<div class="mc-layer-note">過去のチャットで指摘された理解の誤りです。</div>';
-      misconceptions.forEach(function (m) {
-        html += '<div class="cc mc-annotation"><div class="lb" style="color:#A32D2D">⚑ ' + escHtml(m.label || "訂正") + "</div>";
-        html += escHtml(m.wrong) + "<br>→ " + escHtml(m.correct) + "</div>";
-      });
-      html += "</div>";
-    }
+    // Issue #145: 誤解メモは personal_layer から取得（マスターデータには含まれない）
+    // 是正 F5: 候補 / 確定 / 却下を分けて描く（renderMisconceptionSection）。
+    html += renderMisconceptionSection(topic);
 
     el.innerHTML = html;
+
+    bindMisconceptionActions(el);
 
     // Bind prerequisite clicks
     el.querySelectorAll("[data-prereq]").forEach(function (pEl) {
@@ -2196,12 +2474,13 @@
     // ② 問いの軌跡（資産化レイヤー・mock）
     html += renderProblemTrails();
 
-    // 既存の学習サマリ（章ごとの進捗・連続日数など）は補助情報として下に残す。
+    // 既存の学習サマリ（章ごとの進捗など）は補助情報として下に残す。
     html += '<div class="progress-head" style="margin:20px 0 8px"><h3 style="font-size:14px">学習サマリ</h3></div>';
     html += '<div class="ps"><div class="prog-ov">';
     html += '<div class="prog-card"><div class="val" style="color:var(--color-text-info)">' + (p.learning_concepts || 0) + '</div><div class="lbl">学習中</div></div>';
-    html += '<div class="prog-card"><div class="val" style="color:var(--color-text-warning)">' + (p.misconceptions || 0) + '</div><div class="lbl">訂正された誤解</div></div>';
-    html += '<div class="prog-card"><div class="val">' + (p.streak_days || 0) + '</div><div class="lbl">連続学習日数</div></div>';
+    // 是正 F5: 数に入るのは本人が確定した誤解メモだけ（AI の候補は数えない）。
+    html += '<div class="prog-card"><div class="val" style="color:var(--color-text-warning)">' + (p.misconceptions || 0) + '</div><div class="lbl">確定した誤解メモ</div></div>';
+    // 2026-09-05: 「連続学習日数」のカードを撤去（理解サイクル UC4）。
     html += "</div></div>";
 
     html += '<div class="ps"><h4>章ごとの進捗</h4>';
@@ -2634,7 +2913,7 @@
             html += '<div class="lx-oos-note">この点は登録教材に十分な根拠が見つかりませんでした。断定は避けます。</div>';
           } else {
             if (s.quote) html += '<div class="lx-src-quote">「' + escHtml(s.quote) + '」</div>';
-            if (typeof s.score === "number") html += '<div class="lx-score">類似度 ' + s.score.toFixed(2) + '</div>';
+            // 類似度（cosine）の生値は描かない（数値非表示の原則。tier ラベルのみで足りる）。
           }
           html += '</div>';
         });
@@ -3323,8 +3602,8 @@
     clearMaterialElementContextCache();
     // P1: トピック切替で「直前の check 応答の course_completed」を持ち越さない。
     state.lastCheckCourseCompleted = false;
-    // 合格時の講評もトピック単位。別トピックへ移ったら持ち越さない。
-    state.lastCheckPass = null;
+    // 確認問題の並置もトピック単位。別トピックへ移ったら持ち越さない。
+    state.lastCheckReview = null;
     // 分野の地図 (gap3): course/topic の文脈を配線し、地図データを正しいカートリッジ・
     // 現在地で取得できるようにする (AtlasData / AtlasMinimap / AtlasCues が参照)。
     var _topicForAtlas = (state.course && (state.course.topics || []).find(function (t) {
@@ -3618,51 +3897,152 @@
     });
   }
 
-  // 合格時の「確認済み」表示。講評・解答例・解説をモーダル内に出し、主ボタンを前進
-  // （data-advance）へ切り替える。自動では次へ進まない — 講評を読む時間と、AI と
-  // 深掘りする選択肢を学習者に残すため（合格でも講評を捨てない）。
-  // 数値・スコア・祝祭演出は出さず、事実文と本文（講評・解答例・解説）だけを出す。
-  function applyCheckPassState(pass) {
-    if (!pass) return;
+  // 是正 F1（六つのレンズ 01_learner 提案2 / 05_ai 提案1）: 確認問題は AI が合否を
+  // 決めるゲートではなく、「要件との並置 → 解答例・解説の開示 → 本人の自己確認」に
+  // 分解されている。AI 応答に合否は無く、トピックを確認済みにするのは本人の3択だけ。
+  // 数値・スコア・祝祭演出は出さない。
+  var CHECK_ADVISORY_NOTE = "AI が並べた観点です（合否の判定ではありません）。";
+  var CHECK_SELFCHECK_STATUS_LABELS = {
+    covered: "触れられているようです",
+    not_mentioned: "見当たらないようです",
+    unclear: "読み取れませんでした",
+  };
+
+  function checkObservationsHtml(observations) {
+    if (!observations || !observations.length) return "";
+    var html = '<ul class="check-observations">';
+    observations.forEach(function (o) {
+      var status = o && o.status ? String(o.status) : "unclear";
+      var label = CHECK_SELFCHECK_STATUS_LABELS[status] || CHECK_SELFCHECK_STATUS_LABELS.unclear;
+      html += '<li class="check-obs ' + escHtml(status) + '">' +
+        (o.requirement ? '<span class="check-obs-req">' + escHtml(o.requirement) + '</span>' : "") +
+        '<span class="check-obs-status">' + escHtml(label) + '</span>' +
+        (o.statement ? '<span class="check-obs-note">' + escHtml(o.statement) + '</span>' : "") +
+        '</li>';
+    });
+    return html + '</ul>';
+  }
+
+  // 自己確認（1タップ・非LLM）。R層の再構成カード（reconstruction.js）と同型の問いかけ・
+  // ラベルにそろえる。ここには機械判定が無いので3つめだけ「観点がおかしい」にする。
+  function checkSelfCheckHtml(review) {
+    var done = review.selfCheck === "agreed" || review.selfCheck === "disagreed";
+    if (done) {
+      return '<div class="check-selfcheck" id="check-selfcheck">' +
+        '<div class="check-selfcheck-done">この確認を終えた記録を残しました' +
+        '（正誤の記録ではありません）。</div></div>';
+    }
+    var wrongNote = review.selfCheck === "verdict_wrong"
+      ? '<div class="check-selfcheck-done">観点がおかしいという申告を受け取りました。' +
+        '先へ進むかどうかは、下の3つからいつでも選べます。</div>'
+      : "";
+    return '<div class="check-selfcheck" id="check-selfcheck">' +
+      wrongNote +
+      '<div class="check-selfcheck-q">あなたの見立てはどうでしたか？</div>' +
+      '<div class="check-selfcheck-btns">' +
+        '<button type="button" class="check-sc" data-sc="agreed">合っていた</button>' +
+        '<button type="button" class="check-sc" data-sc="disagreed">違っていた</button>' +
+        '<button type="button" class="check-sc" data-sc="verdict_wrong">観点がおかしい</button>' +
+      '</div>' +
+      '<div class="check-selfcheck-note">「合っていた」「違っていた」は、あなたがこの確認を' +
+      '終えたという記録になります（どちらを選んでも記録の中身は同じです）。</div>' +
+      '</div>';
+  }
+
+  function applyCheckReviewState(review) {
+    if (!review) return;
     var answerEl = document.getElementById("check-answer");
     if (answerEl) {
-      // 提出済みの回答を見ながら講評を読めるようにする（書き換えはできない）。
-      answerEl.value = pass.answer || "";
-      answerEl.readOnly = true;
+      // 提出した回答は残す。書き換えて再回答（REVISE）できるよう readOnly にしない。
+      answerEl.value = review.answer || "";
+      answerEl.readOnly = false;
     }
     var feedbackEl = document.getElementById("check-feedback");
     if (feedbackEl) {
-      // 一等地は講評だけ。解答例・解説は本人が開くまで畳んでおく（合格した回答の
-      // 直後に長文を積み上げず、読み比べたい人だけが開ける）。
-      var reveal = "";
-      if (pass.model_answer || pass.explanation) {
-        reveal = '<details class="check-reveal"><summary>解答例と解説を読む</summary>' +
-          (pass.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(pass.model_answer) + '</div>' : "") +
-          (pass.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(pass.explanation) + '</div>' : "") +
+      var html = '<div class="check-advisory">' + escHtml(CHECK_ADVISORY_NOTE) + '</div>';
+      (review.statements || []).forEach(function (s) {
+        html += '<p class="check-statement">' + escHtml(s) + '</p>';
+      });
+      html += checkObservationsHtml(review.observations);
+      if (review.answer_requirements && review.answer_requirements.length) {
+        html += '<div class="check-model-answer"><span>回答に必要な要素</span><ul>' +
+          review.answer_requirements.map(function (r) {
+            return '<li>' + escHtml(r) + '</li>';
+          }).join("") + '</ul></div>';
+      }
+      // 解答例・解説（REVEAL）は本人が開くまで畳んでおく。
+      if (review.model_answer || review.explanation) {
+        html += '<details class="check-reveal"><summary>解答例と解説を読む</summary>' +
+          (review.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(review.model_answer) + '</div>' : "") +
+          (review.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(review.explanation) + '</div>' : "") +
           '</details>';
       }
-      feedbackEl.innerHTML = '<strong>この回答で次へ進めます。</strong><br>' +
-        escHtml(pass.feedback || "") + reveal;
-      feedbackEl.className = "check-feedback pass";
+      html += checkSelfCheckHtml(review);
+      feedbackEl.innerHTML = html;
+      feedbackEl.className = "check-feedback advisory";
+    }
+    var selfCheckEl = document.getElementById("check-selfcheck");
+    if (selfCheckEl) {
+      Array.prototype.forEach.call(selfCheckEl.querySelectorAll(".check-sc"), function (b) {
+        b.addEventListener("click", function () {
+          submitCheckSelfCheck(this.getAttribute("data-sc"));
+        });
+      });
     }
     var submitBtn = document.getElementById("check-submit");
     if (submitBtn) {
-      submitBtn.textContent = getNextTopic() ? "次へ進む" : "確認を終える";
       submitBtn.disabled = false;
-      submitBtn.setAttribute("data-advance", "true");
+      if (review.topicCompleted) {
+        // 本人が確認を終えたので、主ボタンは明示的な前進になる（自動遷移はしない）。
+        submitBtn.textContent = getNextTopic() ? "次へ進む" : "確認を終える";
+        submitBtn.setAttribute("data-advance", "true");
+      } else {
+        // まだ自己確認していない間は、書き直して再回答（REVISE）できる。
+        submitBtn.textContent = "もう一度答える";
+        submitBtn.removeAttribute("data-advance");
+      }
     }
-    // 確認したあとに「今回は確認せず進む」は事実でなくなるので出口ごと取り除く。
-    var skipBtn = document.getElementById("check-skip");
-    if (skipBtn) skipBtn.remove();
+    // 確認を終えたあとに「今回は確認せず進む」は事実でなくなるので出口ごと取り除く。
+    if (review.topicCompleted) {
+      var skipBtn = document.getElementById("check-skip");
+      if (skipBtn) skipBtn.remove();
+    }
+  }
+
+  // 自己確認の送信。トピック完了を確定できるのはこの経路だけ（AI の応答では確定しない）。
+  async function submitCheckSelfCheck(value) {
+    var review = state.lastCheckReview;
+    if (!review || !value) return;
+    var selfCheckEl = document.getElementById("check-selfcheck");
+    var btns = selfCheckEl ? selfCheckEl.querySelectorAll(".check-sc") : [];
+    Array.prototype.forEach.call(btns, function (b) { b.disabled = true; });
+    try {
+      var res = await apiFetch(
+        "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/check/self-check",
+        { method: "POST", body: JSON.stringify({ self_check: value }) }
+      );
+      if (!res.ok) throw new Error("self-check failed");
+      var data = await res.json();
+      state.lastCheckCourseCompleted = !!data.course_completed;
+      review.selfCheck = value;
+      review.topicCompleted = !!data.topic_completed;
+      applyCheckReviewState(review);
+    } catch (err) {
+      Array.prototype.forEach.call(btns, function (b) { b.disabled = false; });
+      var note = selfCheckEl ? selfCheckEl.querySelector(".check-selfcheck-note") : null;
+      if (note) note.textContent = "記録できませんでした。もう一度お試しください。";
+    }
   }
 
   function openCheckModal() {
     if (!state.currentTopicId || state.checkingUnderstanding) return;
-    // G1-4: 最終トピック（次が無い）でも確認問題フローへ進み、合格後は完了カードへ繋ぐ。
+    // G1-4: 最終トピック（次が無い）でも確認問題フローへ進み、確認後は完了カードへ繋ぐ。
     var existing = document.getElementById("check-overlay");
     if (existing) existing.remove();
-    // 開き直しは前回の採点結果を持ち越さない（古い指摘で議論メッセージを作らない）。
-    state.lastCheckGrading = null;
+    // 開き直しは他トピックの並置結果を持ち越さない（古い観点で議論メッセージを作らない）。
+    if (state.lastCheckReview && state.lastCheckReview.topicId !== state.currentTopicId) {
+      state.lastCheckReview = null;
+    }
     // 確認問題に戻ってきたら壁打ちは終わり、通常チャットに復帰する。
     state.checkScaffoldActive = false;
 
@@ -3710,23 +4090,24 @@
     document.getElementById("check-discuss").addEventListener("click", async function () {
       var draftEl = document.getElementById("check-answer");
       var draft = draftEl ? draftEl.value.trim() : "";
-      var grading = state.lastCheckGrading;
-      var passedCheck = !!(grading && grading.passed);
-      // P4: 書きかけの回答と採点の講評を捨てず、そのまま議論の材料として持ち出す。
+      var review = state.lastCheckReview;
+      // 回答を提出して並置（と解答例の開示）まで済んでいるか。済んでいれば答えは
+      // すでに開示されているので、解答を伏せる壁打ちの拘束は目的を失う。
+      var revealedCheck = !!(review && review.topicId === state.currentTopicId);
+      // P4: 書きかけの回答と並置の観点を捨てず、そのまま議論の材料として持ち出す。
       var lines = [
         "確認問題「" + (question.question || "") + "」について、理解を深めたいので議論させてください。",
         "私の回答: " + (draft || "（まだ回答していません）"),
       ];
-      if (grading && grading.feedback) {
-        lines.push((passedCheck ? "講評: " : "指摘された点: ") + grading.feedback);
+      if (review && review.statements && review.statements.length) {
+        lines.push("並べて見えたこと: " + review.statements.join(" "));
       }
-      if (grading && grading.answer_requirements && grading.answer_requirements.length) {
-        lines.push("回答に必要な要素: " + grading.answer_requirements.join(" / "));
+      if (review && review.answer_requirements && review.answer_requirements.length) {
+        lines.push("回答に必要な要素: " + review.answer_requirements.join(" / "));
       }
       overlay.remove();
-      if (passedCheck) {
-        // 合格後の深掘りは壁打ちにしない: 答えは既に本人が組み立てているので、解答を
-        // 伏せる拘束は目的を失う。通常のチャット（教材に基づく応答）で内容を深める。
+      if (revealedCheck) {
+        // 開示後の深掘りは壁打ちにしない。通常のチャット（教材に基づく応答）で内容を深める。
         state.checkScaffoldActive = false;
         await sendMessage(lines.join("\n"));
       } else {
@@ -3737,15 +4118,10 @@
       }
       showCheckReturnChip();
     });
-    // 合格済みトピックで開き直したとき（議論から「確認問題に戻る」）は、白紙の
-    // フォームに戻さず講評を再提示する（P4: 一度出した講評を消さない）。
-    if (state.lastCheckPass && state.lastCheckPass.topicId === state.currentTopicId) {
-      state.lastCheckGrading = {
-        passed: true,
-        feedback: state.lastCheckPass.feedback || "",
-        answer_requirements: state.lastCheckPass.answer_requirements || [],
-      };
-      applyCheckPassState(state.lastCheckPass);
+    // 回答済みトピックで開き直したとき（議論から「確認問題に戻る」）は、白紙の
+    // フォームに戻さず並置を再提示する（P4: 一度出した観点を消さない）。
+    if (state.lastCheckReview && state.lastCheckReview.topicId === state.currentTopicId) {
+      applyCheckReviewState(state.lastCheckReview);
     }
     var answer = document.getElementById("check-answer");
     if (answer) answer.focus();
@@ -3826,70 +4202,23 @@
       var data = await res.json();
       // P1: サーバー正本の完了状態を保持する（data-advance 経路が後で参照する）。
       state.lastCheckCourseCompleted = !!data.course_completed;
-      if (data.passed) {
-        // 合格でも講評を捨てない: サーバーは合否に関わらず feedback / model_answer /
-        // explanation を返すので、その場に出して読ませ、次へ進むか AI と深掘りするかを
-        // 学習者に選ばせる（合格＝即遷移で講評が消える、をやめる）。
-        var passFeedback = String(data.feedback || "").trim();
-        var passModelAnswer = String(data.model_answer || "").trim();
-        var passExplanation = String(data.explanation || "").trim();
-        if (passFeedback || passModelAnswer || passExplanation) {
-          state.lastCheckGrading = {
-            passed: true,
-            feedback: data.feedback || "",
-            answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
-          };
-          // 議論から戻ってきたときに講評を復元するため、提出した回答ごと保持する。
-          state.lastCheckPass = {
-            topicId: state.currentTopicId,
-            answer: answer,
-            feedback: data.feedback || "",
-            answer_requirements: state.lastCheckGrading.answer_requirements,
-            model_answer: data.model_answer || "",
-            explanation: data.explanation || "",
-          };
-          applyCheckPassState(state.lastCheckPass);
-        } else {
-          // 見せる中身が無い（採点が講評を返さなかった・フォールバック採点）場合は、
-          // 空の枠を見せる意味が無いので従来どおり即座に次へ進む。
-          var next = getNextTopic();
-          var completedTopic = getCurrentTopic();
-          var overlay = document.getElementById("check-overlay");
-          if (overlay) overlay.remove();
-          // 合格 → 次トピックへ再アンカー。detour 残はここで自動的に解消される。
-          if (next) {
-            await selectTopic(next.id);
-            // 分野の地図 (Issue F-2 導線1・2): 完了直後に「地図で現在地を見る」を提示
-            showAtlasCueAfterAdvance(completedTopic, next);
-          } else {
-            // G1-4: 最終トピック合格 → コース完走の完了カードへ繋ぐ（事実文のみ・数値なし）。
-            // P1: サーバーが course_completed===true を確認したときのみ断定文言を出す。
-            if (lectureState.active) deactivateLecture();
-            showCourseCompletionCard(completedTopic, data.course_completed === true);
-          }
-        }
-      } else {
-        // 「AIと議論して理解を深める」が指摘・必要な要素を議論へ持ち出せるよう保持する。
-        state.lastCheckGrading = {
-          feedback: data.feedback || "",
-          answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
-        };
-        if (feedbackEl) {
-          feedbackEl.innerHTML = '<strong>もう一度確認しましょう。</strong><br>' +
-            escHtml(data.feedback || "") +
-            (data.answer_requirements && data.answer_requirements.length
-              ? '<div class="check-model-answer"><span>回答に必要な要素</span><ul>' + data.answer_requirements.map(function (r) { return '<li>' + escHtml(r) + '</li>'; }).join("") + '</ul></div>'
-              : "") +
-            (data.model_answer ? '<div class="check-model-answer"><span>解答例</span>' + escHtml(data.model_answer) + '</div>' : "") +
-            (data.explanation ? '<div class="check-model-answer"><span>解説</span>' + escHtml(data.explanation) + '</div>' : "");
-          feedbackEl.className = "check-feedback fail";
-        }
-        if (submitBtn) {
-          submitBtn.textContent = "理解したので次へ";
-          submitBtn.disabled = false;
-          submitBtn.setAttribute("data-advance", "true");
-        }
-      }
+      // 是正 F1: 応答に合否は無い。並置（事実文・観点）と開示（解答例・解説）をその場に
+      // 出し、先へ進むかどうかは本人の自己確認（3択）に委ねる。
+      state.lastCheckReview = {
+        topicId: state.currentTopicId,
+        answer: answer,
+        degraded: !!data.degraded,
+        statements: Array.isArray(data.statements) ? data.statements : [],
+        observations: Array.isArray(data.observations) ? data.observations : [],
+        answer_requirements: Array.isArray(data.answer_requirements) ? data.answer_requirements : [],
+        model_answer: data.model_answer || "",
+        explanation: data.explanation || "",
+        selfCheck: "",
+        // サーバーの現況（このトピックを以前に確認済みなら true）。/check が確定させる
+        // ことはないので、未確認のトピックでは常に false で返ってくる。
+        topicCompleted: !!data.topic_completed,
+      };
+      applyCheckReviewState(state.lastCheckReview);
     } catch (err) {
       if (feedbackEl) {
         feedbackEl.textContent = "確認に失敗しました。もう一度お試しください。";
@@ -3969,6 +4298,379 @@
     return "chat";
   }
 
+  // ── 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.2/§11.8）──
+  //
+  // AI 対話へ渡すのは**参照だけ**（SA1）: いま選んでいる要素の種別と ID・表示中トピック
+  // とスライド・表示モード・画面に出ている ⚓ チップの ID と短い題名まで。描画された
+  // 本文（チャンク text / display_text / summary / latex）も、選択した逐語
+  // （selection_text — 従来どおり独立フィールドで送る）も、ここには入れない。
+  // 解決はサーバ側が権限ゲート付きの学習者射影で行う（SA2）ので、参照が権限外・不在の
+  // ときは静かに落とされ、送信の成否には影響しない。
+  //
+  // 材料はすべて既存のもの（state.topicMaterial の evidence_items / ラッチ / localStorage）で、
+  // **DOM のテキストを読む処理を新規に書かない**（§11.9 の静的 grep で固定）。
+  const SCREEN_CONTEXT_SCREEN = "learning";
+  const SCREEN_CONTEXT_MAX_TITLE_CHARS = 40;
+  const SCREEN_CONTEXT_MAX_ENTITIES = 20;
+  // 画面文脈で名乗れる要素の種別（サーバの解決器が分岐に使う語彙）。
+  const SCREEN_CONTEXT_ELEMENT_TYPES = ["component", "claim", "equation", "figure"];
+
+  function screenContextTitle(text) {
+    const value = String(text == null ? "" : text).trim();
+    if (value.length <= SCREEN_CONTEXT_MAX_TITLE_CHARS) return value;
+    return value.slice(0, SCREEN_CONTEXT_MAX_TITLE_CHARS);
+  }
+
+  // payload の element_type は structure_anchor 方法A の語彙（"formula" / "concept" /
+  // "citation" …）で、component と claim の区別が落ちている。ラッチ元の kind
+  // （data-evidence-ref の "kind:id" 前半）が分かるときはそちらを正とし、どちらでも
+  // 判別できなければ**種別を名乗らない**（推測で埋めない）。
+  function screenContextElementType(payload, latchKind) {
+    const raw = String((payload && payload.element_type) || "");
+    if (raw === "formula") return "equation";
+    if (SCREEN_CONTEXT_ELEMENT_TYPES.indexOf(raw) >= 0) return raw;
+    const kind = String(latchKind || "");
+    if (kind === "formula") return "equation";
+    if (SCREEN_CONTEXT_ELEMENT_TYPES.indexOf(kind) >= 0) return kind;
+    return "";
+  }
+
+  // 画面に出ている ⚓ チップの参照（種別・ID・40字の題名）。供給元は
+  // collectTopicComponentEvidence (:511) と同じ chunk.evidence_items で、新しい取得も
+  // DOM 走査もしない。本文系フィールド（text / summary / latex / caption 本文）は載せない。
+  function screenContextEntities() {
+    const chunks = state.topicMaterial || [];
+    const seen = {};
+    const entities = [];
+    chunks.forEach(function (chunk) {
+      ((chunk && chunk.evidence_items) || []).forEach(function (item) {
+        if (entities.length >= SCREEN_CONTEXT_MAX_ENTITIES) return;
+        if (!item || SCREEN_CONTEXT_ELEMENT_TYPES.indexOf(item.kind) < 0) return;
+        const id = String(item.id || "");
+        if (!id) return;
+        const key = item.kind + ":" + id;
+        if (seen[key]) return;
+        seen[key] = true;
+        entities.push({
+          type: item.kind,
+          id: id,
+          title: screenContextTitle(item.title || item.label || item.caption || ""),
+        });
+      });
+    });
+    return entities;
+  }
+
+  // 送信ボディの optional フィールド screen_context を組む。例外は外に出さない
+  // （組めなければ null を返し、サーバは None を無視する）。
+  function getScreenContext(payload, latchKind) {
+    try {
+      const p = payload || {};
+      const anchor = Session.currentAnchor() || {};
+      const elementId = String(p.element_id || "");
+      // 区画は「実際に区画を指しているとき」だけ申告する: ①「ここについて質問」の
+      // 明示選択（selection_segment_id。サーバは既にこちらを信頼している）②レクチャー
+      // 再生中の表示スライド。通常のチャットでは currentAnchor().segment_id が常に 0 を
+      // 返すため、そのまま載せると kind が永遠に "segment" になる（嘘になる）。
+      let segmentId = "";
+      if (p.selection_segment_id !== undefined && p.selection_segment_id !== null) {
+        segmentId = String(p.selection_segment_id);
+      } else if (resolveScreenMode() === "lecture" &&
+                 anchor.segment_id !== undefined && anchor.segment_id !== null) {
+        segmentId = String(anchor.segment_id);
+      }
+      const elementType = screenContextElementType(p, latchKind);
+      const selection = {
+        course_id: String(state.courseId || ""),
+        topic_id: String(state.currentTopicId || ""),
+        kind: elementId ? "element" : (segmentId ? "segment" : "topic"),
+      };
+      if (segmentId) selection.segment_id = segmentId;
+      if (elementId) selection.element_id = elementId;
+      if (elementType) selection.element_type = elementType;
+      if (p.chunk_id) selection.chunk_id = String(p.chunk_id);
+      const view = {
+        mode: resolveScreenMode(),
+        precision_reading: isPrecisionReadingOn(state.courseId),
+      };
+      // discuss のときだけスコープを申告する（画面文脈が範囲を広げてはならない = DM1。
+      // 実際の範囲決定はサーバの明示状態が正で、これは表示の事実にすぎない）。
+      if (p.discuss_scope) view.discuss_scope = String(p.discuss_scope);
+      return {
+        screen: SCREEN_CONTEXT_SCREEN,
+        selection: selection,
+        view: view,
+        visible_entities: screenContextEntities(),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // 画面文脈アダプターの契約（window.<Screen>.getScreenContext）。
+  window.LearningScreen = { getScreenContext: getScreenContext };
+
+  // ══════════════════════════════════════════════════════════════════
+  // LLM 応答のストリーミング Phase 3-a
+  // （docs/features/llm_response_streaming_design.md §2.2 / §5, ST8/ST9）
+  //
+  // 応答の到着を待たせない。ただし**ストリームは表示の先行であって正本ではない**
+  // （ST1）ので、履歴・痕跡・出典チップ・数式・ドリルダウンはすべて `final` 後の
+  // 従来経路（renderChat）でだけ作る。delta は本文の素のテキストを足すだけ。
+  //
+  //  - EventSource は使えない（Authorization ヘッダを付けられない。§2.1）。
+  //    fetch + ReadableStream で text/event-stream を自前パースする。
+  //  - ストリーム中は renderChat() を呼ばない（毎回 innerHTML 全再構築のため）。
+  //  - 学習者に数値（トークン・秒・残回数）を出さない（ST8）。
+  // ══════════════════════════════════════════════════════════════════
+
+  // 停止・中断時の事実文（数値を含めない, ST8）。
+  const STREAM_STOP_NOTICE = "途中で止めました。この応答は記録に残していません。";
+  const STREAM_ERROR_NOTICE = "応答を受け取れませんでした。もう一度お試しください。";
+
+  const _streamState = {
+    active: false,      // ストリーム経路で送信中（停止ボタンを出す条件）
+    controller: null,   // AbortController（停止ボタン）
+    bubble: null,       // 逐次表示中の <div class="mg ai streaming">
+    stanceEl: null,     // start で先出しした様相の1行（final 後に除去して二重描画を防ぐ）
+    aborted: false,     // 本人が停止ボタンを押した
+    clientFeaturesFetched: false,
+  };
+
+  // renderChat() は ca.innerHTML を全消去するため、停止・失敗の事実文は
+  // renderChat() の**後**に1枚だけ足す（sendMessage の末尾で消費する）。
+  let _pendingStreamNotice = null;
+
+  // ログイン後に1回だけ取得する。失敗・非200 は false のまま（fail-to-current）。
+  async function fetchClientFeaturesOnce() {
+    if (_streamState.clientFeaturesFetched) return;
+    _streamState.clientFeaturesFetched = true;
+    try {
+      const res = await apiFetch("/learning/client-features");
+      if (!res.ok) return;
+      const data = await res.json();
+      state.clientFeatures = { chat_streaming: !!(data && data.chat_streaming) };
+    } catch (_) { /* fail-to-current: 従来の JSON 経路のみ */ }
+  }
+
+  // ストリーム経路を使ってよい送信か。通常のテキスト送信だけが対象で、
+  // 音声・casual（ハンズフリー）／書き直し（replace_message_id）／typed action は
+  // 従来の JSON 経路を1バイトも変えずに通す（§5.1 / §5.4）。
+  function shouldStreamChatTurn(payload, replaceMessageId) {
+    if (!state.clientFeatures || state.clientFeatures.chat_streaming !== true) return false;
+    if (replaceMessageId) return false;
+    if (typeof voiceState !== "undefined" && voiceState.active) return false;
+    if (!payload) return true;
+    if (payload.intent_mode === "casual") return false;
+    if (payload.support_action) return false;
+    if (payload.ui_anchor) return false;
+    return true;
+  }
+
+  // 自動スクロールは「すでに最下部付近にいるとき」だけ（読み返し中に引き戻さない, §5.3）。
+  const STREAM_AUTOSCROLL_SLACK_PX = 40;
+  function autoScrollChatIfAtBottom() {
+    const ca = document.getElementById("chat-area");
+    if (!ca) return;
+    const atBottom = ca.scrollHeight - ca.scrollTop - ca.clientHeight <= STREAM_AUTOSCROLL_SLACK_PX;
+    if (atBottom) ca.scrollTop = ca.scrollHeight;
+  }
+
+  // タイピングインジケータを逐次バブルに置き換える（renderChat は呼ばない）。
+  function openStreamingBubble() {
+    const ca = document.getElementById("chat-area");
+    if (!ca) return null;
+    const typing = ca.querySelector(".typing");
+    if (typing && typing.parentNode) typing.parentNode.remove();
+    const bubble = document.createElement("div");
+    bubble.className = "mg ai streaming";
+    ca.appendChild(bubble);
+    _streamState.bubble = bubble;
+    autoScrollChatIfAtBottom();
+    return bubble;
+  }
+
+  // ストリームが使えず従来の JSON 経路へ退避するときに、消したタイピングインジケータを
+  // 戻す（沈黙のまま待たせない）。renderChat は呼ばない（innerHTML 全再構築のため）。
+  function restoreTypingIndicator() {
+    const ca = document.getElementById("chat-area");
+    if (!ca || !state.sending || ca.querySelector(".typing")) return;
+    const wrap = document.createElement("div");
+    wrap.className = "mg ai";
+    const typing = document.createElement("div");
+    typing.className = "typing";
+    for (let i = 0; i < 3; i++) typing.appendChild(document.createElement("span"));
+    wrap.appendChild(typing);
+    ca.appendChild(wrap);
+  }
+
+  function closeStreamingBubble() {
+    if (_streamState.stanceEl && _streamState.stanceEl.parentNode) _streamState.stanceEl.remove();
+    if (_streamState.bubble && _streamState.bubble.parentNode) _streamState.bubble.remove();
+    _streamState.stanceEl = null;
+    _streamState.bubble = null;
+  }
+
+  // start の様相（{stance, source, label}）を本文到着前に1行だけ出す。規則は
+  // renderStanceLine と同じ（推定・tutor 以外・discuss 中でない）。final 後の
+  // renderChat が同じ行を描くので、ここで出した要素は closeStreamingBubble で消す。
+  function showStreamingStanceLine(stance) {
+    if (!stance || stance.source !== "inferred" || !stance.stance || stance.stance === "tutor") return;
+    if (isDiscussMode()) return;
+    const ca = document.getElementById("chat-area");
+    if (!ca || !_streamState.bubble) return;
+    const el = document.createElement("div");
+    el.className = "stance-line";
+    el.setAttribute("data-ui-anchor", "chat.stance-chip");
+    const fact = document.createElement("span");
+    fact.className = "stance-fact";
+    fact.textContent = (stance.label || "") + "答えました。";
+    el.appendChild(fact);
+    ca.insertBefore(el, _streamState.bubble);
+    _streamState.stanceEl = el;
+  }
+
+  // 送信ボタンを送信中だけ「停止」に差し替える（新しい帯・行を作らない, §5.3）。
+  function setSendButtonStopMode(on) {
+    const btn = document.getElementById("send-btn");
+    if (!btn) return;
+    if (on) {
+      if (!btn.dataset.sendLabel) btn.dataset.sendLabel = btn.textContent;
+      btn.textContent = "停止";
+      btn.classList.add("stop-mode");
+      btn.title = "生成を止める（この応答は記録に残りません）";
+    } else {
+      btn.textContent = btn.dataset.sendLabel || "送信";
+      btn.classList.remove("stop-mode");
+      btn.title = "送信（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）";
+    }
+  }
+
+  function abortChatStream() {
+    if (!_streamState.active || !_streamState.controller) return;
+    _streamState.aborted = true;
+    try { _streamState.controller.abort(); } catch (_) { /* noop */ }
+  }
+
+  // `event: name` + `data: <JSON 1行>` の1フレームを分解する。
+  function parseSseFrame(frame) {
+    let name = "message";
+    const dataLines = [];
+    frame.split("\n").forEach(function (line) {
+      if (line.indexOf("event:") === 0) name = line.slice(6).trim();
+      else if (line.indexOf("data:") === 0) dataLines.push(line.slice(5).replace(/^ /, ""));
+    });
+    if (!dataLines.length) return null;
+    try {
+      return { name: name, data: JSON.parse(dataLines.join("\n")) };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // SSE を読み切る。戻り値の status:
+  //   "final"       … final イベントを受け取った（data に LearningChatResponse 相当）
+  //   "aborted"     … 本人の停止（reason:"user"）／start 後の切断（reason:"error"）
+  //   "unsupported" … 404 or start 前のネットワーク失敗 → JSON 経路で1回だけ再送する
+  //   "http_error"  … 権限・quota 等（従来の JSON 経路と同じくエラー表示にする）
+  // この関数（と下請け）は renderChat() を呼ばない（delta ごとの全再構築禁止, §5.1）。
+  async function runChatStream(path, bodyText) {
+    const controller = new AbortController();
+    _streamState.controller = controller;
+    _streamState.aborted = false;
+    const headers = { "Content-Type": "application/json" };
+    if (state.token) headers["Authorization"] = "Bearer " + state.token;
+
+    let res;
+    try {
+      res = await fetch(API + path, {
+        method: "POST", headers: headers, body: bodyText, signal: controller.signal,
+      });
+    } catch (_) {
+      return { status: "unsupported" };  // start 前の失敗 → JSON 経路へ退避
+    }
+    // 404 = フラグ off。401 = トークン失効: 従来経路（apiFetch）に流して既存の
+    // ログアウト処理（トークン破棄・各モジュールの invalidate）へ合流させる。
+    if (res.status === 404 || res.status === 401) return { status: "unsupported" };
+    if (!res.ok || !res.body || typeof res.body.getReader !== "function") {
+      return { status: "http_error", httpStatus: res.status };
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let started = false;
+    let finalData = null;
+    let errorSeen = false;
+
+    for (;;) {
+      let chunk;
+      try {
+        chunk = await reader.read();
+      } catch (_) {
+        break;  // abort / 切断
+      }
+      if (chunk.done) break;
+      // 改行の正規化はバッファ全体に掛ける（CRLF が chunk 境界で割れても壊れない）。
+      buf = (buf + decoder.decode(chunk.value, { stream: true })).replace(/\r\n/g, "\n");
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {
+        const ev = parseSseFrame(buf.slice(0, idx));
+        buf = buf.slice(idx + 2);
+        if (!ev) continue;
+        if (ev.name === "start") {
+          started = true;
+          if (!_streamState.bubble) openStreamingBubble();
+          showStreamingStanceLine(ev.data && ev.data.stance);
+        } else if (ev.name === "delta") {
+          if (!_streamState.bubble) openStreamingBubble();
+          if (_streamState.bubble && ev.data && typeof ev.data.t === "string") {
+            // HTML は挿入しない（textContent のみ）。整形は final 後の renderChat。
+            _streamState.bubble.textContent += ev.data.t;
+            autoScrollChatIfAtBottom();
+          }
+        } else if (ev.name === "final") {
+          finalData = ev.data;
+        } else if (ev.name === "error") {
+          errorSeen = true;
+        }
+      }
+      if (finalData) break;
+    }
+    try { reader.cancel(); } catch (_) { /* 既に閉じている */ }
+
+    // final が届いていればサーバ側の往復は完了・保存済みなので、停止ボタンと
+    // 競合したときも final を採る（保存された往復をクライアントだけ捨てない）。
+    if (finalData) return { status: "final", data: finalData };
+    if (_streamState.aborted) return { status: "aborted", reason: "user" };
+    if (errorSeen || started) return { status: "aborted", reason: "error" };
+    return { status: "unsupported" };  // 1バイトも受け取れていない → JSON 経路へ
+  }
+
+  // 中断・失敗した往復は記録しない（O-1 裁定 / ST1）。発話は入力欄へ戻し、
+  // クライアント履歴からも取り除く（片肺の往復を次の history に混ぜない, §5.1）。
+  function rollbackStreamedTurn(userMsgId, text, notice) {
+    const idx = _findMessageIndexById(userMsgId);
+    if (idx !== -1) state.chatMessages = state.chatMessages.slice(0, idx);
+    const input = document.getElementById("chat-input");
+    if (input && !input.value) {
+      input.value = text || "";
+      input.focus();
+    }
+    _pendingStreamNotice = notice;
+  }
+
+  // renderChat() の後に1枚だけ足す控えめな事実文（警告色にしない・数値を出さない）。
+  function showStreamNotice(message) {
+    const ca = document.getElementById("chat-area");
+    if (!ca || !message) return;
+    const el = document.createElement("div");
+    el.className = "stream-notice";
+    el.textContent = message;
+    ca.appendChild(el);
+    ca.scrollTop = ca.scrollHeight;
+  }
+
   async function sendMessage(text, actionPayload) {
     if (!text || state.sending || !state.currentTopicId) return null;
     // レクチャー外科手術 案①（§15）: 講義再生中に composer（sendMessage は全送信経路の
@@ -4022,7 +4724,12 @@
     // 構造帰属（方法A）: 「ここについて質問」で選択したテキストをこの1問にだけ添える。
     if (state.pendingSelection && !payload.selection_text) {
       payload.selection_text = state.pendingSelection.text;
-      payload.selection_segment_id = state.pendingSelection.segment_id;
+      // 区画が決まらなかった選択は番号を送らない（0 を既定にしない = 学ぶ単位 P2-7）。
+      // サーバが教材本文との逐語一致で解決し、決まらなければ場所は空のまま記録する。
+      if (state.pendingSelection.segment_id !== null &&
+          state.pendingSelection.segment_id !== undefined) {
+        payload.selection_segment_id = state.pendingSelection.segment_id;
+      }
     }
     clearPendingSelection();
 
@@ -4035,7 +4742,11 @@
     // （composer/音声/discuss/書き直し等）の合流点のため、ここ一箇所で足りる。
     const _materialTip = document.getElementById("inspect-tooltip");
     const _pinVisible = _latchState.pinned && !!_materialTip && !_materialTip.hidden;
+    // 画面文脈アダプター Phase 4: ラッチ元の生 kind は clearMaterialLatch より前に控える
+    // （送信ボディには載せず、screen_context.selection.element_type の解決にだけ使う）。
+    let _latchKind = "";
     if (_pinVisible && _latchState.anchor) {
+      _latchKind = _latchState.anchor.kind || "";
       if (!payload.element_id) {
         payload.element_id = _latchState.anchor.element_id;
         payload.element_type = _latchState.anchor.element_type;
@@ -4045,23 +4756,50 @@
       clearMaterialLatch(); // 使う/使わないに関わらず、送信の瞬間にラッチは消費される。
     }
 
+    const chatPath = "/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat";
+    const requestBody = JSON.stringify({
+      message: text,
+      message_id: userMsgId,
+      history: state.chatMessages.slice(0, -1),
+      position_anchor: anchorAtAsk,
+      ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
+      ...payload,
+      // §4-3: ヘルプボタン・通常送信・音声経路すべてがこの1関数を通る
+      // （sendMessage が全送信経路の合流点のため、payload 側の値より必ず優先する）。
+      screen_mode: resolveScreenMode(),
+      // 画面文脈アダプター Phase 4（SA1）: 参照だけを足す。テキスト送信・🤖 音声
+      // ループ・チップからの質問・discuss すべてがこの1関数を通るため、ここ一箇所で
+      // 全経路に載る。組めなければ null（サーバは無視する）。
+      screen_context: getScreenContext(payload, _latchKind),
+    });
+
+    // LLM 応答のストリーミング Phase 3-a: 通常のテキスト送信だけ /chat/stream を試す。
+    // フラグ off・404・start 前の失敗はこの1回だけ従来の JSON 経路で再送する
+    // （fail-to-current）。中断・失敗した往復は記録しない（ST1 / O-1 裁定）。
+    let needJsonRequest = true;
+    let streamAborted = false;
     try {
-      const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
-        method: "POST",
-        body: JSON.stringify({
-          message: text,
-          message_id: userMsgId,
-          history: state.chatMessages.slice(0, -1),
-          position_anchor: anchorAtAsk,
-          ...(replaceMessageId ? { replace_message_id: replaceMessageId } : {}),
-          ...payload,
-          // §4-3: ヘルプボタン・通常送信・音声経路すべてがこの1関数を通る
-          // （sendMessage が全送信経路の合流点のため、payload 側の値より必ず優先する）。
-          screen_mode: resolveScreenMode(),
-        }),
-      });
-      if (res.ok) {
-        const data = await res.json();
+      // ストリーム経路と JSON 経路は「完成した応答（data）を1つ得る」ところまでが違うだけで、
+      // 以降の適用は下の `if (data)` ブロック1本を共有する（ST7: final は非ストリーム版と同値）。
+      let data = null;
+      if (shouldStreamChatTurn(payload, replaceMessageId)) {
+        const streamed = await runStreamingChatTurn(chatPath + "/stream", requestBody, userMsgId, text);
+        needJsonRequest = streamed.retryWithJson;
+        streamAborted = streamed.aborted;
+        data = streamed.data;
+      }
+      if (needJsonRequest && !streamAborted) {
+        const res = await apiFetch("/learning/courses/" + state.courseId + "/topics/" + state.currentTopicId + "/chat", {
+          method: "POST",
+          body: requestBody,
+        });
+        if (res.ok) {
+          data = await res.json();
+        } else {
+          state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
+        }
+      }
+      if (data) {
         respData = data;
         // discuss モード（論文と話す）Phase 2: 着地画面の無活動タイムアウト（トリガー③）用。
         if (isDiscussMode() && window.Discuss) window.Discuss.notifyActivity();
@@ -4107,6 +4845,11 @@
           // 鏡面化（EX-3b）: 言い直し部分（サーバ抽出済み）。メモリ内の表示にのみ使い、
           // localStorage へは保存しない・鏡文そのものを再送信しない。
           mirror: data.mirror || null,
+          // 入口統合 Phase 1（§5/§6）: この往復をどの様相で答えたかの事実
+          // （{stance, source, label}。数値は含まない）。推定のときだけ 1 行描く。
+          stance: data.stance || null,
+          // 訂正（聞き直し）で「同じ位置から」再処理するための元 user メッセージ id。
+          reply_to_id: userMsgId,
           mock: isMock(data),
         });
         // Issue #145: 個人レイヤーの更新を反映する
@@ -4130,8 +4873,6 @@
           renderSidebar();
           renderRightPanel();
         }
-      } else {
-        state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
       }
     } catch (err) {
       state.chatMessages.push({ role: "assistant", content: "サーバーに接続できません。" });
@@ -4142,9 +4883,51 @@
     // どちらの経路でもここに合流するので1箇所で済む。
     _pendingScrollMsgId = userMsgId;
     renderChat();
+    // 停止・失敗の事実文は renderChat（innerHTML 全再構築）の後に1枚だけ足す。
+    if (_pendingStreamNotice) {
+      showStreamNotice(_pendingStreamNotice);
+      _pendingStreamNotice = null;
+    }
     renderRightPanel();  // L1: 直近回答の tier を Sources タブへ反映
     return respData;
   }
+
+  // ストリーム1往復の UI 制御（停止ボタン・逐次バブル・後始末）。本文の適用は
+  // 従来の JSON 経路とまったく同じ applyChatTurnResponse を通す（ST7）。
+  async function runStreamingChatTurn(streamPath, requestBody, userMsgId, text) {
+    _streamState.active = true;
+    setSendButtonStopMode(true);
+    openStreamingBubble();
+    let result;
+    try {
+      result = await runChatStream(streamPath, requestBody);
+    } finally {
+      _streamState.active = false;
+      _streamState.controller = null;
+      setSendButtonStopMode(false);
+      closeStreamingBubble();
+    }
+    if (result.status === "final") {
+      // 応答の適用（履歴・出典・チップ・数式）は sendMessage 側の共通ブロックが行う。
+      return { retryWithJson: false, aborted: false, data: result.data };
+    }
+    if (result.status === "aborted") {
+      rollbackStreamedTurn(
+        userMsgId, text,
+        result.reason === "user" ? STREAM_STOP_NOTICE : STREAM_ERROR_NOTICE
+      );
+      return { retryWithJson: false, aborted: true, data: null };
+    }
+    if (result.status === "http_error") {
+      state.chatMessages.push({ role: "assistant", content: "エラーが発生しました。もう一度お試しください。" });
+      return { retryWithJson: false, aborted: false, data: null };
+    }
+    // unsupported: 以降のセッションでは試さず、この1回だけ従来経路で送り直す。
+    state.clientFeatures = { chat_streaming: false };
+    restoreTypingIndicator();
+    return { retryWithJson: true, aborted: false, data: null };
+  }
+
 
   // ── Tab Switching ──────────────────────────────────────────────────
   function initTabs() {
@@ -4559,6 +5342,10 @@
       element_type: materialAnchorElementType(kind),
       element_label: (content && content.label) || id,
       chunk_id: _closestChunkId(el),
+      // 画面文脈アダプター Phase 4: data-evidence-ref の生 kind（component / claim /
+      // equation / figure）。element_type（structure_anchor 語彙）では component と
+      // claim の区別が落ちるため、送信ボディには使わず screen_context の種別解決にだけ使う。
+      kind: kind,
     };
     const tip = document.getElementById("inspect-tooltip");
     if (tip) tip.classList.add("pinned");
@@ -4609,6 +5396,147 @@
     });
   }
 
+  // ── 記号の「直前の定義」（概念レジストリ P3-5）────────────────────────────
+  // 正本: docs/features/concept_registry_design.md §7。
+  // 教材の KaTeX 描画済み数式の中の記号トークンをタップすると、その位置より
+  // **前**で最も近い定義の逐語をポップオーバーで出す（ScholarPhi 規則）。
+  //
+  // - 自動では出さない（タップのときだけ。IH9 / KR5 と同じ「本人の明示操作」原則）。
+  // - **数値を出さない**（confidence / 件数 / 距離を描かない = KR6）。
+  // - 既存の数式導線（[[equation:id]] カードの「文脈を見る」ボタン・ホバーツール
+  //   チップ・テキスト選択の「ここについて質問」）とは競合しない: 対象は
+  //   `.katex` の**内側**の記号トークンだけで、stopPropagation もしない。
+  // - LLM を呼ばない（サーバ側も既存データの読みだけ）。
+
+  // 記号として扱う文字（ラテン文字・ギリシャ文字・よく使う数学記号。1〜3文字）。
+  const SYMBOL_TOKEN_RE = /^[A-Za-zͰ-Ͽ∂∇ℏÅ]{1,3}$/;
+
+  function isSymbolTokenText(text) {
+    return SYMBOL_TOKEN_RE.test(String(text || "").trim());
+  }
+
+  // 添字つきの記号（V_{cb} 等）は base + "_" + 添字 に組み直す。サーバ側の
+  // normalize_key が "V_{cb}" と "V_cb" を同じキーに畳むので、この形で送れば
+  // 記号レジストリの canonical_symbol と完全一致で当たる（部分一致はしない）。
+  function symbolTextFromToken(token) {
+    const base = String(token.textContent || "").trim();
+    const parent = token.parentElement;
+    if (!parent || !parent.classList || !parent.classList.contains("mord")) return base;
+    const supsub = parent.getElementsByClassName("msupsub")[0];
+    if (!supsub) return base;
+    const sub = String(supsub.textContent || "").replace(/[\s​‌﻿]/g, "");
+    return (base && sub) ? (base + "_" + sub) : base;
+  }
+
+  function hideSymbolLookupPopover() {
+    const p = document.getElementById("symbol-lookup-popover");
+    if (!p) return;
+    p.hidden = true;
+    p.innerHTML = "";
+  }
+
+  // サーバが解決済みの事実文をそのまま描く（フロントに文言を焼き込まない）。
+  function renderSymbolLookupPopover(data, rect) {
+    const p = document.getElementById("symbol-lookup-popover");
+    if (!p) return;
+    const facts = (data && data.facts) || [];
+    const definition = data && data.definition;
+    let html = '<div class="symbol-lookup-head">' +
+      '<span class="symbol-lookup-symbol">' + escHtml((data && data.symbol) || "") + '</span>';
+    if (data && data.scope_label) {
+      html += '<span class="symbol-lookup-scope">' + escHtml(data.scope_label) + '</span>';
+    }
+    if (data && data.unit) {
+      html += '<span class="symbol-lookup-scope">' + escHtml(data.unit) + '</span>';
+    }
+    html += '</div>';
+    if (definition && definition.text) {
+      html += '<div class="symbol-lookup-definition">' + escHtml(definition.text) + '</div>';
+      if (definition.equation_label) {
+        html += '<div class="symbol-lookup-fact">' + escHtml(definition.equation_label) + '</div>';
+      }
+    }
+    facts.forEach(function (fact) {
+      html += '<div class="symbol-lookup-fact">' + escHtml(fact) + '</div>';
+    });
+    if (data && data.concept_ref && data.concept_ref.name) {
+      html += '<div class="symbol-lookup-concept">概念: ' + escHtml(data.concept_ref.name) + '（登録済み）</div>';
+    }
+    if (data && data.source) {
+      html += '<div class="symbol-lookup-source">出典: ' + escHtml(data.source) + '</div>';
+    }
+    p.innerHTML = html;
+    p.hidden = false;
+    // 画面外へはみ出さない位置に寄せる（数値は描かない・位置だけの調整）。
+    const width = p.offsetWidth || 320;
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - width - 8));
+    p.style.left = Math.round(left) + "px";
+    p.style.top = Math.round(rect.bottom + 6) + "px";
+  }
+
+  async function openSymbolLookup(token, symbolText) {
+    if (!state.courseId) return;
+    const chunkEl = token.closest ? token.closest("[data-chunk-id]") : null;
+    const equationEl = token.closest ? token.closest("[data-equation-id]") : null;
+    const params = new URLSearchParams({ symbol: symbolText });
+    if (equationEl) {
+      const eqId = equationEl.getAttribute("data-equation-id") || "";
+      if (eqId) params.set("equation_id", eqId);
+    }
+    if (chunkEl) {
+      const chunkId = chunkEl.getAttribute("data-chunk-id") || "";
+      if (chunkId) params.set("chunk_id", chunkId);
+    }
+    const rect = token.getBoundingClientRect();
+    let data = null;
+    try {
+      const res = await apiFetch(
+        "/learning/courses/" + encodeURIComponent(state.courseId) + "/symbols/lookup?" + params.toString()
+      );
+      if (!res.ok) return;
+      data = await res.json();
+    } catch (e) {
+      return; // 取得できないときは何も出さない（fail-soft・推測で埋めない）
+    }
+    if (!data) return;
+    if (!data.available) {
+      // 閉世界の正直さ（KR8）: 主語は常に「この論文」。分野レベルの不在は言わない。
+      renderSymbolLookupPopover(
+        { symbol: symbolText, facts: ["この論文には、この記号の記述が見つかりませんでした。"] },
+        rect
+      );
+      return;
+    }
+    renderSymbolLookupPopover(data, rect);
+  }
+
+  function initSymbolLookup() {
+    if (document._symbolLookupWired) return;
+    document._symbolLookupWired = true;
+    document.addEventListener("click", function (e) {
+      const target = e.target;
+      if (!target || !target.closest) return;
+      if (target.closest("#symbol-lookup-popover")) return; // ポップオーバー内は素通し
+      const body = target.closest("#material-body");
+      if (!body || !target.closest(".katex")) { hideSymbolLookupPopover(); return; }
+      const token = target.closest(".mord, .mop");
+      if (!token) { hideSymbolLookupPopover(); return; }
+      const symbolText = symbolTextFromToken(token);
+      if (!isSymbolTokenText(String(token.textContent || "").trim())) {
+        hideSymbolLookupPopover();
+        return;
+      }
+      openSymbolLookup(token, symbolText);
+    });
+    document.addEventListener("mousedown", function (e) {
+      if (e.target && e.target.closest && e.target.closest("#symbol-lookup-popover")) return;
+      hideSymbolLookupPopover();
+    });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape") hideSymbolLookupPopover();
+    });
+  }
+
   // ── Input handling ─────────────────────────────────────────────────
   // 「教材に沿って質問」「自由に質問・探索」の2ボタンは廃止し「質問」1つに統合。
   // 事前に意図を選ばせず、常に RAG 検索を行った上で回答が何に基づくか
@@ -4653,6 +5581,15 @@
 
     function sendCurrent() { sendWith(Session.inDetour() ? "explore" : "on_path"); }
 
+    // LLM 応答のストリーミング Phase 3-a（§5.1/§5.3）: 送信ボタンは生成中だけ
+    // 「停止」に差し替わる（新しい帯・行を作らない）。停止ハンドラは送信ハンドラより
+    // **先に**登録し、ストリーム中だけ stopImmediatePropagation で送信へ渡さない
+    // （sendCurrent 自体は無改変 = Enter キーの挙動も従来どおり）。
+    btn.addEventListener("click", function (e) {
+      if (!_streamState.active) return;
+      e.stopImmediatePropagation();
+      abortChatStream();
+    });
     btn.addEventListener("click", sendCurrent);
     if (clearBtn) clearBtn.addEventListener("click", clearChatHistory);
     // ❓ 使い方ボタン（学習UI再編 Phase 2, §4）: 押下は使い方インスペクト・モードの
@@ -5428,12 +6365,6 @@
     const select = document.getElementById("course-select");
     if (select) select.disabled = false;
 
-    const streakEl = document.getElementById("streak");
-    if (streakEl && progress) {
-      streakEl.textContent = (progress.streak_days || 0) + "日連続学習中";
-      streakEl.style.color = "var(--color-text-success)";
-    }
-
     renderSidebar();
     if (state.currentTopicId) {
       const [material, history] = await Promise.all([
@@ -5496,6 +6427,11 @@
         // discuss モード（論文と話す）: ログアウトでも discuss 内部状態
         // （無活動タイマー・ctx.courseId 等）を残さない。
         if (window.Discuss) window.Discuss.reset();
+        // コーパス回遊層: 前ユーザーの取得結果・議論の下書きを残さない（CR1 と同族の
+        // fail-closed。可視集合はユーザーごとに違う）。
+        if (window.CorpusSea) window.CorpusSea.invalidate();
+        // 可視性6軸の事実文（DA3）: 前ユーザーの取得結果を残さない。
+        if (window.DisclosureNote) window.DisclosureNote.invalidate();
         renderAuth();
       });
     }
@@ -5776,7 +6712,7 @@
     active: false,
     segments: [],
     currentSegmentIndex: 0,
-    deck: [], // [{chunk_id, segment_index, slide_index, display_text, spoken_text, formulas, has_audio, duration_ms, language, segment_mode}]
+    deck: [], // [{chunk_id, segment_index, slide_index, display_text, spoken_text, formulas, has_audio, duration_ms, language, segment_mode, previously_touched}]
     currentDeckIndex: 0,
     playing: false,
     audio: null,
@@ -5789,7 +6725,82 @@
     // 手動一時停止（プレイヤーバーの▶/⏸）とは区別しない — どちらも composer から
     // 質問を送れば再開できるので、同じ「一時停止中」表示で足りる。
     pausedForQuestion: false,
+    // 是正 F3（六つのレンズ 提案1）: 本人が押した「短く聴く」で畳んでいる間だけ開いた
+    // スライドのキー集合（chunk_id + ":" + slide_index）。畳みは表示だけの操作なので
+    // 永続化しない（トグル自体の状態のみ localStorage）。
+    openedFoldedSlides: new Set(),
   };
+
+  // ── 「短く聴く」トグル（是正 F3 / 六つのレンズ 提案1）───────────────────
+  // サーバは学習者の状態でレクチャー内容を変えない（省略・要約をしない）。
+  // 「以前に触れた箇所」を畳むかどうかは本人が明示的に押すこのトグルだけが決める。
+  // 既定 OFF。状態はコース単位の localStorage（`eg_precision_reading` /
+  // `eg_margin_marks` と同型の許容例外。サーバに学習者設定テーブルを作らない）。
+  function lectureCondensedStorageKey(courseId) {
+    return "eg_lecture_condensed:" + (courseId || state.courseId || "");
+  }
+
+  function isLectureCondensedOn(courseId) {
+    try {
+      // 既定 OFF: 明示的に "1" のときだけ ON。
+      return localStorage.getItem(lectureCondensedStorageKey(courseId)) === "1";
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setLectureCondensedOn(on) {
+    try {
+      localStorage.setItem(lectureCondensedStorageKey(), on ? "1" : "0");
+    } catch (_) { /* noop */ }
+  }
+
+  function lectureSlideKey(slide) {
+    if (!slide) return "";
+    return (slide.chunk_id || "") + ":" + (slide.slide_index || 0);
+  }
+
+  // このスライドが「いま畳まれている」か。畳むのは
+  //   ①「短く聴く」が ON ②サーバが previously_touched の注記を付けた ③本人がまだ開いていない
+  // の3条件が揃うときだけ。畳んでも中身は消さない（「開く」で開ける）。
+  function isLectureSlideFolded(index) {
+    if (!isLectureCondensedOn()) return false;
+    var slide = lectureState.deck[index];
+    if (!slide || !slide.previously_touched) return false;
+    return !lectureState.openedFoldedSlides.has(lectureSlideKey(slide));
+  }
+
+  function updateLectureCondensedBtn() {
+    var btn = document.getElementById("lecture-condensed");
+    if (!btn) return;
+    var on = isLectureCondensedOn();
+    btn.setAttribute("aria-pressed", on ? "true" : "false");
+    btn.classList.toggle("active", on);
+  }
+
+  function toggleLectureCondensed() {
+    var next = !isLectureCondensedOn();
+    setLectureCondensedOn(next);
+    // 畳み直しは表示の切り替えなので、開いた記録は都度リセットする。
+    lectureState.openedFoldedSlides = new Set();
+    updateLectureCondensedBtn();
+    if (!lectureState.active) return;
+    stopPlayback();
+    renderLectureStage();
+    updateLectureControls();
+  }
+
+  // 畳まれた箇所の「開く」: そのスライドだけを開いて再描画する（設定は変えない）。
+  function openFoldedLectureSlide() {
+    var slide = lectureState.deck[lectureState.currentDeckIndex];
+    if (!slide) return;
+    lectureState.openedFoldedSlides.add(lectureSlideKey(slide));
+    var wasPlaying = lectureState.playing;
+    stopPlayback();
+    renderLectureStage();
+    updateLectureControls();
+    if (wasPlaying) startPlayback();
+  }
 
   // 現トピックに再生可能な音声があるかを確認し、レクチャーボタンの有効/無効を更新する。
   // 音声生成は管理画面のみで行う方針のため、ここでは生成は一切トリガーしない。
@@ -5904,6 +6915,7 @@
     var prevBtn = document.getElementById("lecture-prev");
     var nextBtn = document.getElementById("lecture-next");
     var questionBtn = document.getElementById("lecture-question");
+    var condensedBtn = document.getElementById("lecture-condensed");
     var fullscreenBtn = document.getElementById("lecture-fullscreen-btn");
     var nextTopicBtn = document.getElementById("next-topic-btn");
 
@@ -5919,6 +6931,9 @@
     // レクチャー外科手術 案①（§15）: 質問は通常 composer に一本化。プレイヤーバーの
     // 「質問」ボタンは一時停止して入力欄へフォーカスを移すだけ（第2 composer は廃止）。
     if (questionBtn) questionBtn.addEventListener("click", focusChatForLectureQuestion);
+    // 「短く聴く」（是正 F3）: 本人の明示操作のみ。既定 OFF の表示を反映しておく。
+    if (condensedBtn) condensedBtn.addEventListener("click", toggleLectureCondensed);
+    updateLectureCondensedBtn();
     if (fullscreenBtn) fullscreenBtn.addEventListener("click", toggleLectureFullscreen);
     if (nextTopicBtn) nextTopicBtn.addEventListener("click", openCheckModal);
 
@@ -6046,6 +7061,9 @@
           duration_ms: slide.duration_ms || 0,
           language: seg.language || "ja",
           segment_mode: seg.segment_mode || "full",
+          // 注記フラグ（是正 F3）。サーバはこれで内容を変えない。畳むのは
+          // 「短く聴く」が ON のときだけで、畳んだ箇所も「開く」で開ける。
+          previously_touched: !!seg.previously_touched,
         });
       });
     });
@@ -6092,6 +7110,8 @@
       var data = await res.json();
       lectureState.segments = data.segments || [];
       lectureState.deck = buildLectureDeck(lectureState.segments);
+      lectureState.openedFoldedSlides = new Set();
+      updateLectureCondensedBtn();
       lectureState.currentDeckIndex = 0;
       lectureState.currentSegmentIndex = lectureState.deck.length ? lectureState.deck[0].segment_index : 0;
       renderLectureStage();
@@ -6121,6 +7141,21 @@
     }
 
     var slide = lectureState.deck[lectureState.currentDeckIndex];
+
+    // 是正 F3: 「短く聴く」で畳んでいる箇所は、消さずに1行だけ残す。
+    // 本人が「開く」を押せばその場で本文が出る（サーバは何も省いていない）。
+    if (isLectureSlideFolded(lectureState.currentDeckIndex)) {
+      inner.style.fontSize = "";
+      inner.style.transform = "";
+      inner.innerHTML = '<div class="lecture-folded">' +
+        '<button type="button" class="lecture-folded-open" id="lecture-folded-open">前に触れた箇所（開く）</button>' +
+        '</div>';
+      var openBtn = document.getElementById("lecture-folded-open");
+      if (openBtn) openBtn.addEventListener("click", openFoldedLectureSlide);
+      if (badge) badge.hidden = true;
+      return;
+    }
+
     var pseudoChunk = { text: slide.display_text || "", formulas: slide.formulas || [], figures: slide.figures || [] };
     inner.style.fontSize = "";
     inner.style.transform = "";
@@ -6647,7 +7682,10 @@
         if (body) {
           // 数式カードの隅に控えめな「文脈を見る」（claim/equation 文脈 API）。
           // 自動では開かない・数式が多い教材でも本文の邪魔をしない小さなボタンに留める。
-          return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '">' +
+          // data-equation-id は記号の「直前の定義」（概念レジストリ P3-5）が
+          // タップ位置として送る担体（純粋な追加属性・既存の描画には影響しない）。
+          return '<span class="ls-material-embed ls-material-formula-only" data-evidence-ref="equation:' + escHtml(embedId) + '"' +
+            ' data-equation-id="' + escHtml(embedId) + '">' +
             body +
             renderMaterialElementContextButton("equation", embedId) +
           '</span>';
@@ -7871,6 +8909,16 @@
     // 音声フェッチ中の連打による多重再生を防ぐ。
     if (lectureState.loadingAudio) return;
 
+    // 是正 F3: 「短く聴く」で畳んでいるスライドは音声を再生せず次へ送る
+    // （ended 自動送りと同じ autoAdvance 経路に合流させ、進行の仕組みを増やさない）。
+    // 畳みは表示の操作なので、デッキからは落とさない（◀▶ で戻れば「開く」で開ける）。
+    if (isLectureSlideFolded(lectureState.currentDeckIndex)) {
+      lectureState.playing = true;
+      updateLectureControls();
+      autoAdvance();
+      return;
+    }
+
     // 同一スライドの一時停止からの再開: 音声を取得し直さず途中から続きを再生する。
     if (lectureState.audio && !lectureState.audio.ended) {
       lectureState.playing = true;
@@ -8042,7 +9090,7 @@
     if (!mn || !player || document.getElementById("lecture-complete-banner")) return;
     var next = getNextTopic();
     // G1-4: 最終トピックでも「確認して完了」で同じ確認問題フローに合流させ、
-    // 合格後の完了カードへ繋ぐ（レクチャーを黙って終わらせない）。
+    // 確認後の完了カードへ繋ぐ（レクチャーを黙って終わらせない）。
     var label = next ? "確認問題に進む" : "確認して完了";
     var banner = document.createElement("div");
     banner.className = "lecture-complete";
@@ -8245,7 +9293,11 @@
     // インスペクト・モード（学習UI再編 Phase 2, §5.2）: ログイン時に1回だけ
     // フェッチしてキャッシュする（ホバーごとの API コールはしない）。
     fetchUiAnchorsOnce();
+    // LLM 応答のストリーミング Phase 3-a（§3.4 / ST9）: 機能フラグもログイン後に
+    // 1回だけ取得する。取得できなければ従来の JSON 経路のみ（fail-to-current）。
+    fetchClientFeaturesOnce();
     initMaterialHoverLatch(); // 教材ホバー + ラッチ（学習UI再編 Phase 3）
+    initSymbolLookup(); // 記号の「直前の定義」（概念レジストリ P3-5, §7）
     initDiscussUI();
     // discuss モード（論文と話す）: discuss.js が現在アプリの表示コースを読める
     // ようにする DI（着地モーダルのコース一致ガードの防御の二重化に使う）。
@@ -8299,6 +9351,14 @@
         if (window.PersonalMapHome) window.PersonalMapHome.open();
       });
     }
+    // コーパス回遊層（corpus_roaming_design.md §4.2）: 「論文の海」オーバーレイ。
+    // 入口はサイドバーの常設ボタンだけで、ここでは自動で開かない（CR5）。
+    if (window.CorpusSea) window.CorpusSea.init({});
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA3）:
+    // 入力欄・音声パネルの担体（data-disclosure-note）を1回の取得で埋める。文言は
+    // サーバが正本（provider は実行時の設定から差し込まれる）で、取得に失敗したら
+    // 何も描かない（fail-soft）。ポーリングしない。
+    if (window.DisclosureNote) window.DisclosureNote.init({ apiFetch: apiFetch });
     // 主権台帳 v1「わたしの記録」パネル（trace_registry_sovereignty_ledger_design.md §3.4）。
     if (window.MyRecords) window.MyRecords.init({});
     var myRecordsBtn = document.getElementById("my-records-btn");

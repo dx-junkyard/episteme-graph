@@ -42,7 +42,7 @@ from sqlalchemy import text as sa_text
 
 from core import atlas as atlas_module
 from core.atlas_gaps import schema
-from core.schema import AUDIT_ENTITY_CATEGORY_GAP
+from core.schema import AUDIT_ENTITY_CATEGORY_GAP, MAPPING_JUSTIFICATIONS
 
 logger = logging.getLogger(__name__)
 
@@ -682,6 +682,7 @@ def upsert_decision(
     decided_by: str,
     review_note: str = "",
     merged_into: str = "",
+    mapping_justification: str | None = None,
 ) -> dict:
     """cluster 単位の教員判断を記録する（``ON CONFLICT (cluster_key)`` で最新に上書き）。
 
@@ -692,6 +693,11 @@ def upsert_decision(
     - ``status`` が :data:`schema.DECISION_STATUSES` の語彙外
     - ``status='dismissed'`` で ``review_note`` が空（見送りは理由必須・§5.4）
     - ``status='merged'`` で ``merged_into`` が空（統合先の無い統合を作らない）
+    - ``mapping_justification`` が ``core.schema.MAPPING_JUSTIFICATIONS`` の語彙外
+
+    ``mapping_justification``（概念レジストリ KR4・migration 082）は「なぜこの候補を
+    立てられたか」の記録。``None``（既定）のときは**書かない** — 既存行の値も消さない
+    （記録が無いことを推測で埋めない）。
 
     ``review_note`` / ``merged_into`` が空文字のときは既存の値を保持する（P4:
     状態だけ変えたときに理由文を消さない。``landscape/store.update_status`` と同じ規則）。
@@ -714,18 +720,26 @@ def upsert_decision(
     merged = _clean(merged_into)
     if status in schema.MERGED_INTO_REQUIRED_STATUSES and not merged:
         raise ValueError("merged_into is required when merging a category gap")
+    justification = _clean(mapping_justification)
+    if justification and justification not in MAPPING_JUSTIFICATIONS:
+        raise ValueError(f"invalid mapping_justification: {mapping_justification!r}")
 
     row = session.execute(
         sa_text(
             f"""
             INSERT INTO atlas_gap_decisions (
-                cluster_key, status, review_note, merged_into, decided_by, decided_at
+                cluster_key, status, review_note, merged_into, decided_by, decided_at,
+                mapping_justification
             ) VALUES (
                 :cluster_key, :status, :review_note, :merged_into,
-                CAST(:decided_by AS uuid), now()
+                CAST(:decided_by AS uuid), now(),
+                NULLIF(:mapping_justification, '')
             )
             ON CONFLICT (cluster_key) DO UPDATE
                SET status = :status,
+                   mapping_justification = CASE WHEN :mapping_justification <> ''
+                        THEN :mapping_justification
+                        ELSE atlas_gap_decisions.mapping_justification END,
                    review_note = CASE WHEN :review_note <> ''
                         THEN :review_note ELSE atlas_gap_decisions.review_note END,
                    merged_into = CASE WHEN :merged_into <> ''
@@ -742,6 +756,7 @@ def upsert_decision(
             "review_note": note,
             "merged_into": merged,
             "decided_by": _clean(decided_by),
+            "mapping_justification": justification,
         },
     ).fetchone()
     if row is None:

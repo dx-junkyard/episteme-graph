@@ -28,7 +28,7 @@ from sqlalchemy import text as sa_text
 from core.config import get_settings
 from core.course_data import course_chapters, course_topics
 from core.llm_usage.context import bind_usage_context
-from core.llm_worker.cost_gate import CostGate
+from core.llm_worker.cost_gate import CostGate, today_str
 from core.postgres import get_session as _pg_session
 from core.tension.agent import DEFAULT_MAX_CANDIDATES, TensionMiningAgent
 from core.tension.input_builder import select_window_turns, turns_from_history
@@ -37,6 +37,7 @@ from core.tension.schema import (
     ConversationWindow,
     candidate_to_payload,
 )
+from core.tension.system import SYSTEM
 
 logger = logging.getLogger(__name__)
 
@@ -51,31 +52,29 @@ DIGEST_MAX_ITEMS = 3
 # コスト上限のプロセス内カウンタ（(user_id, course_id, topic_id, date) / (user_id, date)）。
 # API サーバーは単一プロセス運用のため in-memory で足りる。再起動でリセットされるが
 # 上限は安全側の防波堤であり厳密な会計ではない。
-# 実装は core/llm_worker/cost_gate.py の CostGate に共通化済み（session_call_counts /
-# daily_call_counts は同じ dict オブジェクトへのエイリアス。既存テストの直接操作と互換）。
-_cost_gate = CostGate()
+# 実装は core/llm_worker/cost_gate.py の CostGate（core/tension/system.py の
+# WorkerSystem が1個だけ持つ）。session_call_counts / daily_call_counts は同じ dict
+# オブジェクトへのエイリアス（既存テストの直接操作と互換）。
+_cost_gate: CostGate = SYSTEM.gate
 _session_call_counts: dict[tuple, int] = _cost_gate.session_counts
 _daily_call_counts: dict[tuple, int] = _cost_gate.daily_counts
 
-
-def _today() -> str:
-    return datetime.date.today().isoformat()
+_today = today_str
 
 
 def _check_and_count_llm_call(user_id: str, course_id: str, topic_id: str) -> bool:
-    """コスト上限内なら True を返しカウントを進める。上限超過なら False。"""
-    settings = get_settings()
-    per_session = int(getattr(settings, "tension_max_calls_per_session", 3))
-    per_day = int(getattr(settings, "tension_max_calls_per_day", 10))
-    skey = (user_id, course_id, topic_id, _today())
-    dkey = (user_id, _today())
-    ok = _cost_gate.check_and_count(
-        session_limit=per_session, session_key=skey,
-        daily_limit=per_day, daily_key=dkey,
+    """コスト上限内なら True を返しカウントを進める。上限超過なら False。
+
+    上限値の正本は core/tension/system.py の CostSpec
+    （tension_max_calls_per_session / tension_max_calls_per_day を settings から読む）。
+    ここは窓キー（セッション=トピック単位・日次=ユーザー単位）の組み立てだけを持つ。
+    """
+    return SYSTEM.check_and_count(
+        gate=_cost_gate,
+        settings=get_settings(),
+        session_key=(user_id, course_id, topic_id, _today()),
+        daily_key=(user_id, _today()),
     )
-    if not ok:
-        logger.info("tension mining skipped: cost cap reached (session=%s, daily=%s)", skey, dkey)
-    return ok
 
 
 def _fetch_pending_hints(session, user_id: str, course_id: str, topic_id: str) -> list:
@@ -123,12 +122,11 @@ def maybe_schedule_tension_mining(
                 should_run = idle >= datetime.timedelta(minutes=SESSION_IDLE_MINUTES)
         if not should_run:
             return False
-        threading.Thread(
-            target=run_tension_mining,
+        return SYSTEM.spawn(
+            run_tension_mining,
+            thread_factory=threading.Thread,
             args=(user_id, course_id, topic_id),
-            daemon=True,
-        ).start()
-        return True
+        )
     except Exception as exc:
         logger.warning("maybe_schedule_tension_mining failed: %s", exc)
         return False

@@ -80,7 +80,14 @@ class _DispatchSession:
 
 
 def _is_graph_rows_query(sql: str) -> bool:
-    return "theory_component_graphs" in sql and "SELECT document_id, graph_json" in sql
+    # migration 080 で document_id が uuid になり、投影が
+    # ``SELECT document_id::text AS document_id, graph_json`` になった。
+    # 列の並び（document_id, graph_json）だけを見て一致させる。
+    return (
+        "theory_component_graphs" in sql
+        and "SELECT document_id" in sql
+        and "graph_json" in sql
+    )
 
 
 def _is_qualified_adjacency_query(sql: str) -> bool:
@@ -704,7 +711,8 @@ class TestFalsificationWorker:
         assert rows == [("claim", "c1"), ("equation", "e1")]
         assert session.committed >= 1
         sql, params = session.calls[-1]
-        assert "document_id = :doc" in sql
+        # migration 080 で document_id が uuid になったのでバインドを明示キャストする。
+        assert "document_id = CAST(NULLIF(:doc, '') AS uuid)" in sql
         assert params["doc"] == "doc-1"
         assert "FOR UPDATE SKIP LOCKED" in sql
 

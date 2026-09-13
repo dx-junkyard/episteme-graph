@@ -646,7 +646,7 @@ def load_document_figures(document_id: str) -> list[dict]:
         rows = session.execute(
             sa_text(
                 """
-                SELECT id::text, document_id, run_id::text, figure_key, figure_label,
+                SELECT id::text, document_id::text AS document_id, run_id::text, figure_key, figure_label,
                        page, bbox, caption_block_id, caption_text, minio_key,
                        extraction_method, region_confidence, status, created_at, inner_labels,
                        suggested_mode, mode_reason, analysis_profile, reviewed_mode,

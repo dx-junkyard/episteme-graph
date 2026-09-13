@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 from episteme_graph.agents.cartridge_context import CartridgeContext
 
@@ -379,13 +380,6 @@ class ApparatusRecord:
     # a missing/non-dict value).
     iterative_analysis: IterativeAnalysisRecord | None = None
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

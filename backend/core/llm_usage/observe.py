@@ -127,12 +127,20 @@ def observe_chat(
     schema: dict | None = None,
     error: BaseException | None = None,
     started_monotonic: float | None = None,
+    extra_metadata: dict | None = None,
 ) -> None:
-    """chat / structured output 呼び出しの使用量を記録する。"""
+    """chat / structured output 呼び出しの使用量を記録する。
+
+    ``extra_metadata`` は転送方式など「呼び出し側しか知らない事実」を
+    ``UsageEvent.metadata`` に併記するための additive な口（ストリーミング Phase 3-a の
+    ``{"streamed": True}`` / ``{"client_aborted": True}``）。省略時は従来と完全に同じ
+    挙動（``operation`` や ``usage_source`` の意味は変えない — U1/ST3）。
+    """
     try:
         ctx = current_usage_context()
         duration_ms = _duration_ms(started_monotonic)
         input_characters = _messages_char_count(messages)
+        base_metadata: dict = dict(extra_metadata or {})
 
         if error is not None:
             input_estimate = estimator.estimate_messages_tokens(messages, model=model, schema=schema)
@@ -153,6 +161,7 @@ def observe_chat(
                     document_id=ctx.document_id,
                     course_id=ctx.course_id,
                     run_id=ctx.run_id,
+                    metadata=dict(base_metadata),
                 )
             )
             return
@@ -179,6 +188,7 @@ def observe_chat(
                     document_id=ctx.document_id,
                     course_id=ctx.course_id,
                     run_id=ctx.run_id,
+                    metadata=dict(base_metadata),
                 )
             )
             return
@@ -186,7 +196,7 @@ def observe_chat(
         # usage が取れない場合のフォールバック推計
         input_estimate = estimator.estimate_messages_tokens(messages, model=model, schema=schema)
         output_tokens = None
-        metadata: dict = {}
+        metadata: dict = dict(base_metadata)
         if response_text:
             output_estimate = estimator.estimate_text_tokens(response_text, model=model)
             output_tokens = output_estimate.tokens

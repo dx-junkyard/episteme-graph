@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 from episteme_graph.agents.cartridge_context import CartridgeContext
 
@@ -75,13 +76,6 @@ class SupportEntry:
     reason: str
     confidence: float
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

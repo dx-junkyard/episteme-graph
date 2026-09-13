@@ -239,3 +239,62 @@ class TestSourceBackingSerialization:
         assert restored.nodes[0].source_backing_status == "partially_source_backed"
         assert restored.nodes[0].review_reasons == ["missing_evidence_link"]
         assert restored.nodes[0].linked_equation_ids == ["eq_1"]
+
+
+class TestNonGenericEdgeTypeStageCoverage:
+    """#308: 非 generic operation の edge_type は必ず正準 theory stage に写る。
+
+    ``_group_records`` は stage が引けない edge_type を「edge_type 自身を擬似 stage」に
+    フォールバックさせるため、写像に穴があると main node のラベルが
+    ``THEORY_STAGE_LABELS`` の 7 語彙の外（例: ``"Transforms"``）になる。
+    回帰: ``apply_equation`` / ``apply_measurement_or_update`` の ``transforms`` が
+    未登録で、main ラベルが "Transforms" になっていた。
+    """
+
+    def _non_generic_edge_types(self) -> set[str]:
+        from episteme_graph.agents.component_graph import schema as cg_schema
+
+        edge_types = set()
+        for operation in list(cg_schema._OPERATION_FULL_MAP) + [
+            f"{prefix}_object" for prefix in cg_schema._OPERATION_PREFIX_MAP
+        ]:
+            _verb, edge_type, is_generic = cg_schema.classify_operation(operation)
+            if not is_generic:
+                edge_types.add(edge_type)
+        return edge_types
+
+    def test_every_non_generic_edge_type_maps_to_a_canonical_stage(self):
+        from episteme_graph.agents.component_graph.schema import (
+            THEORY_STAGES,
+            stage_for_edge_type,
+        )
+
+        unmapped = {
+            edge_type
+            for edge_type in self._non_generic_edge_types()
+            if stage_for_edge_type(edge_type) not in THEORY_STAGES
+        }
+        assert unmapped == set(), (
+            "非 generic な edge_type が theory stage に写らない: "
+            f"{sorted(unmapped)}。main node が正準 stage ラベル以外になる"
+        )
+
+    def test_transforms_maps_to_equation_system(self):
+        from episteme_graph.agents.component_graph.schema import (
+            THEORY_STAGE_EQUATION_SYSTEM,
+            stage_for_edge_type,
+        )
+
+        assert stage_for_edge_type("transforms") == THEORY_STAGE_EQUATION_SYSTEM
+
+    def test_generic_operations_still_have_no_stage(self):
+        """generic は main に上げない（stage 無しのまま）。"""
+        from episteme_graph.agents.component_graph.schema import (
+            classify_operation,
+            stage_for_edge_type,
+        )
+
+        for operation in ("transform", "relate", "connect", "support", "associate", ""):
+            _verb, edge_type, is_generic = classify_operation(operation)
+            assert is_generic is True
+            assert stage_for_edge_type(edge_type) == ""

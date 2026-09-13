@@ -67,10 +67,15 @@ BEGIN
     END IF;
 END $$;
 
+-- migration 078（知識オブジェクト層）が CHECK を語彙表 knowledge_claim_types への FK
+-- に置き換えたあとは、この CHECK を作り直さない（毎起動の DROP ↔ ADD の往復を避ける。
+-- 作り直すと 078 で許された語彙の行が次回起動で CHECK 違反になり、起動が止まる）。
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'theory_claims_claim_type_check'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'theory_claims_claim_type_fk'
     ) THEN
         ALTER TABLE theory_claims ADD CONSTRAINT theory_claims_claim_type_check CHECK (claim_type IN (
             'definition', 'assumption', 'approximation', 'equation', 'relation',

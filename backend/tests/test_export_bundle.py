@@ -145,7 +145,9 @@ class TestExportManifest:
         )
 
         assert "export_schema_version" in manifest
-        assert manifest["export_schema_version"] == "0.2.0"
+        # 0.2.0 → 0.3.0（knowledge_transfer_design.md §4.1）: JSON-LD 記述子と
+        # 各項目の stable_key が増え、取り込み（import）がこの版を前提にする。
+        assert manifest["export_schema_version"] == "0.3.0"
         assert "exported_at" in manifest
         assert "scope" in manifest
         assert manifest["scope"]["type"] == "course"

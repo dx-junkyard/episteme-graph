@@ -1,7 +1,10 @@
 # discuss 観測基盤（Observation Layer for Phase 3 Gate）設計書
 
 - 対象: episteme-graph（ura-dev）
-- ステータス: 設計確定（2026-07-25）・同日実装
+- ステータス: **実装済み（正本・凍結）** — 2026-07-25 設計確定・同日実装
+  （migration **060** `060_discuss_metric_events.sql`、コミット `55aab83`。`backend/core/discuss/observation.py` +
+  `backend/api/routes/discuss_observation.py` + `frontend/public/js/admin-discuss-observation.js`。
+  2026-09-03 コード照合で全経路の現存を確認）
 - 親文書: `docs/features/discussion_mode_design.md`（§6.4 Phase 3 ゲート・§7 観察ポイント・裁定 #9）
 - 目的: discuss モードの Phase 3（v2）着手判断を「実測ゲート」で行えるようにする。
   ①必要データの蓄積 ②蓄積状況のシステム管理者向け可視化 ③分析用ダンプ（tar.gz / zip）の3点。

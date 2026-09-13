@@ -151,7 +151,9 @@ class TestFigureUnreviewedModesRule:
         assert "suggested_mode <> 'unknown'" in src
         assert "uploaded_by = CAST(:uid AS uuid)" in src
         assert "document_figures" in src
-        assert "f.document_id = d.id::text" in src
+        # migration 080 以降 document_figures.document_id は uuid + FK なので
+        # documents.id とそのまま突き合わせる。
+        assert "f.document_id = d.id" in src
 
     def test_evaluator_builds_factual_step(self):
         session = _FakeSession([

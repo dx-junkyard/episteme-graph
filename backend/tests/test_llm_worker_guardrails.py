@@ -2,8 +2,11 @@
 
 正本: docs/architecture/consolidation_survey_2026-07.md Tier2 提案6「LLM worker 共通基盤」。
 tension / structure_anchor / reconstruction / doubt.scope_candidates /
-doubt.assumption_mining の5系統に個別実装されていた LLM クライアント・修復ループ・
-コスト上限カウンタの骨格を core/llm_worker/ に集約した。この集約先自身が
+doubt.assumption_mining / doubt.falsification_conditions /
+deliberation.standardization の7系統に個別実装されていた LLM クライアント・修復ループ・
+コスト上限カウンタ・デーモンスレッド起動の骨格を core/llm_worker/ に集約した
+（骨格の「組み方」の宣言は ``core/llm_worker/system.py`` の WorkerSystem、
+系統ごとのドメイン語彙は ``core/<system>/system.py``）。この集約先自身が
 既存の設計原則から逸脱しないことを構造的に守る。
 
 - core/llm_worker/ は FastAPI を import しない（開発ルール2、テスタビリティ確保）
@@ -88,45 +91,68 @@ class TestNoDeleteFrom:
         assert_module_tree_forbids(_CORE_DIR, ["DELETE FROM"])
 
 
-class TestFiveSystemsDelegateToCommonImplementation:
-    """5系統の llm_client.py / repair.py / worker.py が共通実装へ委譲していること
+class TestAllSystemsDelegateToCommonImplementation:
+    """7系統の llm_client.py / repair.py / worker.py が共通実装へ委譲していること
     （重複コードが再発していないことの軽量な回帰チェック）。
+
+    系統を追加したら ``_SYSTEM_DIRS`` に1行足す（llm_client / repair / worker /
+    system の4ファイルを持つのが標準形）。
     """
 
-    _CLIENT_FILES = [
-        BACKEND / "core" / "tension" / "llm_client.py",
-        BACKEND / "core" / "structure_anchor" / "llm_client.py",
-        BACKEND / "core" / "reconstruction" / "llm_client.py",
-        BACKEND / "core" / "doubt" / "scope_candidates" / "llm_client.py",
-        BACKEND / "core" / "doubt" / "assumption_mining" / "llm_client.py",
-    ]
-    _REPAIR_FILES = [
-        BACKEND / "core" / "tension" / "repair.py",
-        BACKEND / "core" / "structure_anchor" / "repair.py",
-        BACKEND / "core" / "reconstruction" / "repair.py",
-        BACKEND / "core" / "doubt" / "scope_candidates" / "repair.py",
-        BACKEND / "core" / "doubt" / "assumption_mining" / "repair.py",
-    ]
-    _WORKER_FILES = [
-        BACKEND / "core" / "tension" / "worker.py",
-        BACKEND / "core" / "structure_anchor" / "worker.py",
-        BACKEND / "core" / "reconstruction" / "worker.py",
-        BACKEND / "core" / "doubt" / "scope_candidates" / "worker.py",
-        BACKEND / "core" / "doubt" / "assumption_mining" / "worker.py",
+    _SYSTEM_DIRS = [
+        BACKEND / "core" / "tension",
+        BACKEND / "core" / "structure_anchor",
+        BACKEND / "core" / "reconstruction",
+        BACKEND / "core" / "doubt" / "scope_candidates",
+        BACKEND / "core" / "doubt" / "assumption_mining",
+        BACKEND / "core" / "doubt" / "falsification_conditions",
+        BACKEND / "core" / "deliberation" / "standardization",
     ]
 
     def test_llm_clients_delegate_to_base_client(self):
-        for path in self._CLIENT_FILES:
+        for directory in self._SYSTEM_DIRS:
+            path = directory / "llm_client.py"
             src = path.read_text(encoding="utf-8")
             assert "core.llm_worker.client import" in src, f"{path} does not delegate to core.llm_worker.client"
             assert "BaseJSONLLMClient" in src, f"{path} does not subclass BaseJSONLLMClient"
 
     def test_repairs_delegate_to_common_loop(self):
-        for path in self._REPAIR_FILES:
+        for directory in self._SYSTEM_DIRS:
+            path = directory / "repair.py"
             src = path.read_text(encoding="utf-8")
             assert "core.llm_worker.repair import" in src, f"{path} does not delegate to core.llm_worker.repair"
+            assert "SYSTEM.run(" in src, f"{path} does not delegate to WorkerSystem.run"
 
     def test_workers_delegate_to_cost_gate(self):
-        for path in self._WORKER_FILES:
+        for directory in self._SYSTEM_DIRS:
+            path = directory / "worker.py"
             src = path.read_text(encoding="utf-8")
             assert "core.llm_worker.cost_gate import" in src, f"{path} does not delegate to core.llm_worker.cost_gate"
+            assert "SYSTEM.gate" in src, f"{path} does not share the WorkerSystem cost gate"
+
+    def test_each_system_declares_exactly_one_worker_system(self):
+        """系統ごとの設定キー・feature・上限既定は system.py の1宣言が正本。"""
+        for directory in self._SYSTEM_DIRS:
+            path = directory / "system.py"
+            src = path.read_text(encoding="utf-8")
+            assert src.count("SYSTEM = WorkerSystem(") == 1, f"{path} must declare exactly one WorkerSystem"
+            assert "from core.llm_worker.system import" in src
+
+    def test_workers_start_threads_through_the_shared_spawn(self):
+        """デーモンスレッド起動は WorkerSystem.spawn に一本化（try/except・daemon・
+        命名の扱いを系統ごとに書き分けない）。thread_factory は各 worker 自身の
+        ``threading.Thread`` を渡す（テストの monkeypatch の継ぎ目）。"""
+        for directory in self._SYSTEM_DIRS:
+            src = (directory / "worker.py").read_text(encoding="utf-8")
+            if "threading.Thread" not in src:
+                continue
+            assert "SYSTEM.spawn(" in src, f"{directory}/worker.py starts a thread without WorkerSystem.spawn"
+            assert "thread_factory=threading.Thread" in src
+
+    def test_no_system_reimplements_the_repair_loop_or_gate(self):
+        """各系統が共通実装を迂回して独自ループ・独自 CostGate を持たないこと。"""
+        for directory in self._SYSTEM_DIRS:
+            for name in ("llm_client.py", "repair.py", "worker.py"):
+                src = (directory / name).read_text(encoding="utf-8")
+                assert "CostGate()" not in src, f"{directory}/{name} instantiates its own CostGate"
+                assert "from core.llm import" not in src, f"{directory}/{name} bypasses BaseJSONLLMClient"

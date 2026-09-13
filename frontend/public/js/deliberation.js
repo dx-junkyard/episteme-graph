@@ -167,9 +167,31 @@
     return !!IDENTITY_LINKABLE_ELEMENT_TYPES[String(elementType || "")];
   }
 
+  // AGENT_ID_RESOLVABLE: backend が agent 側 ID（comp_001 / claim_span_007 等）でも
+  //   解決できる要素型（refs.resolve_with_agent_id）。agent 側 ID は論文ごとの採番で
+  //   文書間で衝突しうるため、**document_id スコープが無いと解決されない（fail-closed）**。
+  //   そのため DB UUID でない ID のときは document_id を必ず送る（グラフ対話レビューの
+  //   「深く検討」は集約ノードの representative_component_id = agent 側 ID を渡す）。
+  var AGENT_ID_RESOLVABLE_ELEMENT_TYPES = {
+    theory_component: true,
+    theory_claim: true
+  };
+  var _DB_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+  function _isDbUuid(value) {
+    return _DB_UUID_RE.test(String(value || ""));
+  }
+
+  function _refNeedsDocumentId(ref) {
+    ref = ref || {};
+    if (_needsDocumentId(ref.elementType)) return true;
+    if (!AGENT_ID_RESOLVABLE_ELEMENT_TYPES[String(ref.elementType || "")]) return false;
+    return !_isDbUuid(ref.elementId);
+  }
+
   function _documentIdQuery(ref) {
     ref = ref || {};
-    if (!_needsDocumentId(ref.elementType) || !ref.documentId) return "";
+    if (!_refNeedsDocumentId(ref) || !ref.documentId) return "";
     return "?document_id=" + encodeURIComponent(ref.documentId);
   }
 
@@ -2150,12 +2172,15 @@
     });
   }
 
-  function _renderError(status) {
+  // サーバの detail（事実文）をそのまま出す。原因と無関係な固定文言を被せない
+  // （旧実装は 422 を一律「equation は document_id が必要です」と表示していた）。
+  // detail が無いときだけ status 由来の汎用文言へ縮退する。
+  function _renderError(status, detail) {
     var body = document.getElementById("deliberation-modal-body");
     if (!body) return;
-    var message = "内訳の読み込みに失敗しました";
-    if (status === 404) message = "この要素は見つかりませんでした";
-    else if (status === 422) message = "この要素の指定が不正です（equation は document_id が必要です）";
+    var message = "";
+    if (typeof detail === "string") message = detail.trim();
+    if (!message) message = status === 404 ? "この要素は見つかりませんでした" : "内訳の読み込みに失敗しました";
     body.innerHTML = '<div style="padding:16px;color:var(--color-text-danger);font-size:13px">' + escHtml(message) + '</div>';
   }
 
@@ -2179,14 +2204,35 @@
     return '<div class="deliberation-chat-empty">この要素について質問できます。まだ対話はありません。</div>';
   }
 
-  function _appendChatMessage(role, text) {
+  // AI 応答の立場ラベル（W2 と同じ規律）。留保を本文に散らす代わりに、この1枚の
+  // チップが「AI の読みであって確定ではない」ことを引き受ける。文字列の正はサーバの
+  // stance_label で、縮退応答のようにラベルが返らないときだけここへ落ちる。
+  var STANCE_LABEL_FALLBACK = "AIの読み（未確認）";
+
+  // 応答本文に混ざる $…$ / \(…\) は数式として描く。描画の実装は原稿スタジオの正本
+  // graphView.inlineMathHtml へ委譲し（数式レンダラを画面ごとに増やさない）、
+  // 未ロード時は素のエスケープへ縮退する。
+  function _chatRichText(text) {
+    var view = window.LectureStudio && window.LectureStudio.graphView;
+    if (view && view.inlineMathHtml) return view.inlineMathHtml(text);
+    return escHtml(text);
+  }
+
+  function _appendChatMessage(role, text, stance) {
     var container = document.getElementById("deliberation-chat-messages");
     if (!container) return;
     var empty = container.querySelector(".deliberation-chat-empty");
     if (empty) empty.remove();
+    var isAi = role !== "user";
     var div = document.createElement("div");
-    div.className = "deliberation-chat-msg " + (role === "user" ? "user" : "ai");
-    div.innerHTML = escHtml(text).replace(/\n/g, "<br>");
+    div.className = "deliberation-chat-msg " + (isAi ? "ai" : "user");
+    // 教員の発話は素のエスケープ、AI 応答は本文の数式を数式として出す
+    // （生の $\Lambda$ を読ませない）。立場チップは操作要素にしない。
+    var body = (isAi ? _chatRichText(text) : escHtml(text)).replace(/\n/g, "<br>");
+    var chip = isAi
+      ? '<div class="deliberation-chat-stance">' + escHtml(stance || STANCE_LABEL_FALLBACK) + "</div>"
+      : "";
+    div.innerHTML = chip + body;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
   }
@@ -2260,7 +2306,7 @@
       })
       .then(_parseJsonResponse)
       .then(function (data) {
-        _appendChatMessage("ai", (data && data.reply) || "");
+        _appendChatMessage("ai", (data && data.reply) || "", data && data.stance_label);
         if (data && data.degraded) {
           _appendChatNote("（AI 応答は生成できませんでした）");
         }
@@ -2426,7 +2472,7 @@
   function _loadAnnotations(elementType, elementId, documentId) {
     var path = "/admin/deliberation/elements/" + encodeURIComponent(elementType) + "/" +
       encodeURIComponent(elementId) + "/annotations" +
-      _documentIdQuery({ elementType: elementType, documentId: documentId });
+      _documentIdQuery({ elementType: elementType, elementId: elementId, documentId: documentId });
     apiFetch(path)
       .then(_parseJsonResponse)
       .then(function (data) {
@@ -2443,11 +2489,29 @@
       encodeURIComponent(ref.elementId) + "/overview" + _documentIdQuery(ref);
   }
 
+  // overview は解決済みの ref（element_id は常に DB UUID）を返す。agent 側 ID で開いた
+  // 場合はここで正準 ID に差し替え、以降の呼び出し（annotations / identity-links /
+  // sessions）が同じ要素を確実に指すようにする（agent 側 ID を持ち回らない）。
+  function _syncRefFromOverview(data) {
+    var resolved = data && data.ref;
+    if (!resolved || !chatState.ref) return;
+    var canonicalId = resolved.element_id;
+    if (canonicalId && canonicalId !== chatState.ref.elementId) {
+      chatState.ref.elementId = canonicalId;
+      var trail = navState.trail || [];
+      if (trail.length && trail[trail.length - 1]) trail[trail.length - 1].elementId = canonicalId;
+    }
+    if (resolved.document_id && !chatState.ref.documentId) {
+      chatState.ref.documentId = resolved.document_id;
+    }
+  }
+
   function _reloadOverview() {
     var ref = chatState.ref || {};
     return apiFetch(_overviewPath(ref))
       .then(_parseJsonResponse)
       .then(function (data) {
+        _syncRefFromOverview(data);
         _resetFigureImageState();
         _renderModalBody(data);
         _bindStandardizationAssessButton(ref);
@@ -2467,16 +2531,9 @@
   // 無いため）。
   function _loadAndRenderElement() {
     return apiFetch(_overviewPath(chatState.ref))
-      .then(function (res) {
-        if (!res.ok) {
-          var status = res.status;
-          var err = new Error("status " + status);
-          err.status = status;
-          throw err;
-        }
-        return res.json();
-      })
+      .then(_parseJsonResponse)
       .then(function (data) {
+        _syncRefFromOverview(data);
         _renderModalBody(data);
         _bindStandardizationAssessButton(chatState.ref);
         _bindIdentityLinkSearch(chatState.ref);
@@ -2484,7 +2541,7 @@
         return data;
       })
       .catch(function (err) {
-        _renderError(err && err.status);
+        _renderError(err && err.status, err && err.detail);
       });
   }
 
@@ -2629,6 +2686,8 @@
               '<span>質問対象: <strong id="deliberation-chat-context-label"></strong></span>' +
               '<button id="deliberation-chat-context-clear" type="button" aria-label="質問対象を解除">解除</button>' +
             '</div>' +
+            // 外部 AI 転送の常設事実文の担体（disclosure_axes_design.md, DA2）。
+            '<div class="disclosure-note-slot" id="deliberation-disclosure-note"></div>' +
             '<div class="deliberation-chat-inputrow" data-ui-anchor="deliberation.chat-send">' +
               '<textarea id="deliberation-chat-input" class="deliberation-chat-input" rows="2" placeholder="この要素について質問..."></textarea>' +
               '<button id="deliberation-chat-send" type="button" class="deliberation-chat-send" data-ui-anchor="deliberation.chat-send">送信</button>' +
@@ -2654,6 +2713,15 @@
 
     overlay.addEventListener("click", function (e) { if (e.target === overlay) _closeModal(); });
     document.getElementById("deliberation-modal-close").addEventListener("click", _closeModal);
+
+    // 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）: 対話区画の
+    // 先頭に1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、取得できないときは
+    // 何も描かない（fail-soft）。同意ボタン・モーダルは作らない（DA5）。
+    if (window.DisclosureNote) {
+      window.DisclosureNote.mount(
+        document.getElementById("deliberation-disclosure-note"), "course_materials"
+      );
+    }
 
     var chatInput = document.getElementById("deliberation-chat-input");
     var chatSendBtn = document.getElementById("deliberation-chat-send");
@@ -2871,6 +2939,21 @@
     '</section>';
   }
 
+  // 是正 F7（六つのレンズ §4 第1波 #5 / 02_teacher.md 提案7）: 一括確定の来歴申告。
+  // 「根拠（逐語引用）が画面に描かれていた行」を DOM から実測する（カードが描画され、
+  // その中に .deliberation-annotation-reason があるか）。サーバは検証しないので
+  // client_reported に隔離される。数値は送らず、確定は止めない。
+  function _explanationReviewEvidenceRenderedIds(ids) {
+    var rendered = [];
+    (ids || []).forEach(function (id) {
+      var card = document.querySelector(
+        '.deliberation-explanation-review-card[data-explanation-id="' + id + '"]'
+      );
+      if (card && card.querySelector(".deliberation-annotation-reason")) rendered.push(id);
+    });
+    return rendered;
+  }
+
   function _explanationReviewSelectedIds() {
     var ids = [];
     (explanationReviewState.items || []).forEach(function (exp) {
@@ -3082,10 +3165,14 @@
       apiFetch(_explanationReviewBasePath(documentId) + "/bulk-review", {
         method: "POST",
         // sort_order は TT3（来歴を偽らない）の監査 metadata 用。
+        // 是正 F7（2026-09-10）: 以前はサーバが根拠提示を真と断言していた。
+        // 「根拠が出ていた」はクライアント側の事実なので、実際に逐語引用が描かれて
+        // いた行の id だけを申告する（サーバは検証せず client_reported に隔離 = DC4）。
         body: JSON.stringify({
           action: action,
           explanation_ids: ids,
-          sort_order: explanationReviewState.sortOrder || "default"
+          sort_order: explanationReviewState.sortOrder || "default",
+          evidence_rendered_ids: _explanationReviewEvidenceRenderedIds(ids)
         })
       })
         .then(_parseJsonResponse)

@@ -24,6 +24,7 @@ from core.course_data import (
     lecture_studio_settings as _lecture_studio_settings,
 )
 from core.llm import generate_text, get_llm_params
+from core.llm_worker.single_shot import extract_json
 from core.personas import persona_prompt
 
 logger = logging.getLogger(__name__)
@@ -156,13 +157,10 @@ def _parse_spoken_text_response(raw: str) -> dict:
     ValueError
         JSON パース失敗または formulas 内の必須キー欠落時
     """
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [ln for ln in lines if not ln.strip().startswith("```")]
-        cleaned = "\n".join(lines)
-
-    result = json.loads(cleaned, strict=False)
+    # 取り出しは共通実装へ委譲（``core/llm_worker/single_shot.py::extract_json``）。
+    # **失敗は送出したまま**にすること — 上位の3回試行ループ（429 バックオフつき）が
+    # ValueError / JSONDecodeError を再試行の合図として使っている。
+    result = extract_json(raw)
 
     formulas = result.get("formulas", [])
     for i, f in enumerate(formulas):
@@ -1370,8 +1368,16 @@ def build_lecture_sequence(
 ) -> list[dict]:
     """トピックに紐づくチャンクを学習順序に並べてレクチャーシーケンスを構築する。
 
-    受講者の習得済み概念 (``mastered_concepts``) を考慮し、
-    既知の基礎概念に相当するセグメントをスキップまたは簡易版に変換する。
+    **内容は学習者の状態によって変わらない**（2026-09-10、六つのレンズ調査 提案1 /
+    是正 F3。正本: ``docs/architecture/six_lenses_2026-09-10/01_learner.md`` §2 提案1）。
+    かつては ``mastered_concepts`` から ``skip`` / ``summary`` を導いてチャンクを落としたり
+    読み上げを要約文へ置換していたが、これは vision §3.6（沈黙適応をしない・UC5）と
+    §6 原則8（出所の正直さ）に抵触するため撤去した。現在 ``mastered_concepts`` は
+    **注記フラグ ``previously_touched`` の生成にだけ使う**（内容改変ゼロ・入力チャンクと
+    同数のセグメントを必ず返す）。
+
+    何を畳んで聴くかの確定は学習者本人に戻してあり、畳む操作は画面側の「短く聴く」トグル
+    （既定 OFF・localStorage）のみが行う。畳んでも消さない（開けるようにする）。
 
     Parameters
     ----------
@@ -1382,12 +1388,14 @@ def build_lecture_sequence(
     chunks : list[dict]
         トピックに関連するチャンクのリスト
     mastered_concepts : set[str] | None
-        受講者が習得済みの概念名の集合。None の場合はスキップ判定を行わない。
+        受講者が習得済みの概念名の集合。None・空の場合は注記フラグを立てない
+        （内容は None のときと同一 — 判定の有無で提示が変わらない）。
 
     Returns
     -------
     list[dict]
-        セグメントのリスト (chunk_id, chunk_index, text, spoken_text, formulas, ...)
+        セグメントのリスト (chunk_id, chunk_index, text, spoken_text, formulas,
+        segment_mode（常に ``"full"``）, previously_touched)
     """
     if not chunks:
         return []
@@ -1415,17 +1423,11 @@ def build_lecture_sequence(
         formulas = chunk.get("formulas") or []
         text = chunk.get("text", "")
 
-        # 適応的スキップ判定: チャンクが習得済み前提知識のみに関わる場合
-        segment_mode = _classify_segment(
+        # 注記のみ: 「以前に触れた概念だけを扱う短い区画」という事実を立てる。
+        # 内容（text / spoken_text / formulas）はこの判定で一切変えない。
+        previously_touched = _is_previously_touched(
             text, mastered_lower, prerequisite_names,
         )
-
-        if segment_mode == "skip":
-            # 完全スキップ: 習得済み前提知識のみのチャンクは除外
-            continue
-        elif segment_mode == "summary":
-            # 簡易版: テキストを短い要約に置換
-            spoken = f"（この部分は既に習得済みの内容です。要約: {text[:80]}…）"
 
         segments.append({
             "chunk_id": str(chunk.get("id", "")),
@@ -1435,33 +1437,32 @@ def build_lecture_sequence(
             "formulas": formulas,
             "has_audio": chunk.get("has_audio", False),
             "duration_ms": chunk.get("duration_ms", 0),
-            "segment_mode": segment_mode,
+            # segment_mode の語彙（full / summary / skip）は下流（_build_slides_for_segment）
+            # の互換のため残すが、full 以外は**発生させない**（是正 F3）。
+            "segment_mode": "full",
+            "previously_touched": previously_touched,
         })
 
     return segments
 
 
-def _classify_segment(
+def _is_previously_touched(
     text: str,
     mastered_lower: set[str],
     prerequisite_names: set[str],
-) -> str:
-    """チャンクテキストと習得状態から、セグメントの扱いを分類する。
+) -> bool:
+    """このチャンクが「以前に触れた前提概念だけを扱う短い区画」かを判定する（注記専用）。
 
-    Returns
-    -------
-    str
-        ``"full"`` — 通常表示
-        ``"summary"`` — 簡易版 (習得済み前提概念の解説チャンク)
-        ``"skip"`` — 完全スキップ (習得済み概念のみで構成される短い定義チャンク)
+    旧 ``_classify_segment`` の ``skip`` / ``summary`` 条件の**和**をそのまま引き継いだ
+    決定論ヒューリスティック（非LLM）。ただし戻り値は注記フラグだけで、提示内容・提示順・
+    読み上げには一切影響しない（是正 F3。判定が外れても学習者が失うものは無い）。
     """
     if not mastered_lower:
-        return "full"
+        return False
 
     text_lower = text.lower()
     text_len = len(text)
 
-    # テキスト内に含まれる習得済み概念をカウント
     matched_mastered = 0
     matched_prereq = 0
     for concept in mastered_lower:
@@ -1470,18 +1471,14 @@ def _classify_segment(
             if concept in prerequisite_names:
                 matched_prereq += 1
 
-    if matched_mastered == 0:
-        return "full"
+    if matched_mastered == 0 or matched_prereq == 0:
+        return False
 
-    # 短いチャンク（200文字以下）で習得済み概念のみ → スキップ
-    if text_len <= 200 and matched_prereq > 0 and matched_mastered >= 1:
-        return "skip"
-
-    # やや長いチャンクで習得済み前提概念の説明が主 → 簡易版
-    if matched_prereq >= 2 and text_len <= 500:
-        return "summary"
-
-    return "full"
+    # 短い区画（200文字以下）で前提概念に一致、または
+    # やや長い区画（500文字以下）で前提概念が2つ以上一致。
+    if text_len <= 200:
+        return True
+    return matched_prereq >= 2 and text_len <= 500
 
 
 # ---------------------------------------------------------------------------
@@ -1490,11 +1487,16 @@ def _classify_segment(
 
 
 def get_user_mastered_concepts(user_id: str, course_id: str, course_data: dict) -> set[str]:
-    """受講者の習得済み概念名を収集する。
+    """受講者の習得済み概念名を収集する（レクチャーの ``previously_touched`` 注記の材料）。
 
     1. コースデータ内の concepts で status="mastered" のもの
     2. PostgreSQL の learner_mastered_concepts テーブル
-    3. チャット履歴が存在するトピックの概念 (学習済みとみなす)
+
+    どちらも**本人または教員の明示由来**の記録である。かつて第3の供給源として
+    「チャット履歴が存在するトピックの前提概念を習得済みとみなす」推定を持っていたが、
+    2026-09-10（六つのレンズ 提案1 / 是正 F3）に撤去した — 質問したという**接触の痕跡**を
+    能力の推定に使うと、理解していない箇所ほど質問して省略される逆向きの選択が起きる
+    （vision §3.6 沈黙適応をしない）。``learning_chat_history`` はここから読まない。
 
     Returns
     -------
@@ -1534,32 +1536,7 @@ def get_user_mastered_concepts(user_id: str, course_id: str, course_data: dict) 
     except Exception:
         logger.warning("Failed to fetch learner_mastered_concepts", exc_info=True)
 
-    # 3. チャット履歴があるトピックの関連概念を習得済みとみなす
-    try:
-        from core.postgres import get_session as _pg_session
-        from sqlalchemy import text as sa_text
-
-        session = _pg_session()
-        try:
-            rows = session.execute(
-                sa_text("""
-                    SELECT topic_id FROM learning_chat_history
-                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                """),
-                {"user_id": user_id, "course_id": course_id},
-            ).fetchall()
-            studied_topic_ids = {r[0] for r in rows}
-        finally:
-            session.close()
-
-        # 学習済みトピックに紐づく前提知識概念を mastered に追加
-        for t in course_topics(course_data):
-            if t.get("id") in studied_topic_ids:
-                for p in t.get("prerequisites", []):
-                    name = p.get("name", p) if isinstance(p, dict) else str(p)
-                    if name:
-                        mastered.add(name)
-    except Exception:
-        logger.warning("Failed to fetch chat history for mastery inference", exc_info=True)
+    # 3.（撤去済み）チャット履歴からの習得推定は行わない — 是正 F3。
+    #    course_id は呼び出し互換のため引数に残すが、この関数では参照しない。
 
     return mastered

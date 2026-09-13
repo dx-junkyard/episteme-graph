@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass, field
+from episteme_graph.agents.validation import ValidationIssue
 
 
 BLUEPRINT_VERSION = "v1"
@@ -48,13 +49,6 @@ class NarrativeStep:
     blackbox_equations: list[str] = field(default_factory=list)
     expand_equations: list[str] = field(default_factory=list)
 
-
-@dataclass
-class ValidationIssue:
-    rule_id: str
-    severity: str
-    message: str
-    field: str | None = None
 
 
 @dataclass

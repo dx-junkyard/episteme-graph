@@ -150,10 +150,17 @@ class TestVocabulary:
         assert ELEMENT_DERIVATION not in IDENTITY_LINKABLE_ELEMENT_TYPES
 
     def test_identity_linkable_matches_migration_048_check(self):
-        """コード側語彙と migration 048 の CHECK 集合が一致すること（二重管理の防止）。"""
+        """コード側語彙と DB の CHECK 集合が一致すること（二重管理の防止）。
+
+        CHECK の正本は migration 048（初版）+ 082（概念レジストリが ``symbol`` を追加、
+        concept_registry_design.md §4.7）に分かれるので、両方を合わせて突き合わせる。
+        """
         sql = (BACKEND / "db" / "048_element_identity_links.sql").read_text(encoding="utf-8")
+        sql += (BACKEND / "db" / "082_concept_registry.sql").read_text(encoding="utf-8")
         for element_type in IDENTITY_LINKABLE_ELEMENT_TYPES:
             assert f"'{element_type}'" in sql, element_type
+        # §16「できないこと」: evidence / derivation は共通部品化の単位ではないので、
+        # どちらの migration の CHECK 語彙にも現れない。
         assert "'evidence'" not in sql
         assert "'derivation'" not in sql
 

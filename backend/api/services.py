@@ -15,13 +15,16 @@ from dataclasses import dataclass
 
 from sqlalchemy import text as sa_text
 
+from core import candidate_flow
 from core.course_data import course_llm_models, course_source_material_ids, course_sources, course_topics
 from core.lecture import normalize_to_placeholder_format as _normalize_formulas
 from core.llm import generate_text, generate_text_with_structured_output, generate_embeddings, get_embedding_dim
+from core.llm_worker.single_shot import json_call
 from core.personal_graph import graph_data as personal_graph_data
 from core.postgres import get_session as _pg_session
 from core.privacy import K_ANONYMITY
 from core.schema import (
+    AUDIT_ENTITY_MISCONCEPTION,
     AUDIT_ENTITY_STRUCTURE_ANCHOR,
     AUDIT_ENTITY_TENSION,
     PaperStructure,
@@ -30,6 +33,7 @@ from core.storage import get_storage_client as _get_storage
 # 教材図（teaching_figure_studio_design.md §3.1）: course_id への FK を持たないため、
 # コース削除3経路すべてで明示削除する。
 from core.teaching_figures import store as _teaching_figures_store
+from core.text_hygiene import strip_control_sequences
 
 logger = logging.getLogger(__name__)
 
@@ -129,7 +133,8 @@ def get_background_task(task_id: str) -> dict | None:
                     """
                     SELECT status, current_stage, error_message, stage_outputs
                     FROM document_analysis_runs
-                    WHERE document_id = :document_id
+                    -- migration 080 以降 document_id は uuid（空文字は NULLIF で倒す）。
+                    WHERE document_id = CAST(NULLIF(:document_id, '') AS uuid)
                       AND (run_type IS NULL OR run_type <> 'revision')
                     ORDER BY created_at DESC
                     LIMIT 1
@@ -323,8 +328,13 @@ def get_personal_layer(user_id: str, course_id: str) -> dict:
     """ユーザー固有の学習レイヤーデータを返す。
 
     Issue #145: マスターコースとは分離して管理される個人データ。
-    - misconceptions_by_topic: トピックIDをキーとした誤解リスト
+    - misconceptions_by_topic: トピックIDをキーとした誤解メモ（**AI の候補**）のリスト
     - chat_anchors: チャット履歴から生成された注釈データ（将来拡張用）
+
+    誤解メモは読み時に正規化して返す（是正 F5）: ``status`` の無い旧行は ``candidate``、
+    中身のない訂正文は ``correct=None`` になり、各行は安定 ``id`` を持つ。UI は
+    candidate を「AI が訂正を提案した箇所（未確認）」として仮説文体で出し、
+    ``confirmed`` にだけ「誤解」と書く。
     """
     session = _pg_session()
     try:
@@ -343,7 +353,7 @@ def get_personal_layer(user_id: str, course_id: str) -> dict:
         # （Phase P-0。素の dict アクセスを新規に書かない）。
         data = personal_graph_data.parse_personal_graph(raw)
         return {
-            "misconceptions_by_topic": dict(data.misconceptions_by_topic),
+            "misconceptions_by_topic": personal_graph_data.normalized_misconceptions_by_topic(data),
             "chat_anchors": dict(data.chat_anchors),
         }
     finally:
@@ -393,10 +403,11 @@ def record_personal_misconception(
     topic_id: str,
     misconception: dict,
 ) -> None:
-    """learning_states.personal_graph.misconceptions_by_topic に誤解を記録する。
+    """learning_states.personal_graph.misconceptions_by_topic に誤解メモを記録する。
 
-    受講者が学習チャットで検出した誤解は、マスターコースではなくこの per-user 状態に保存する。
-    per-topic で最新 5 件まで保持する（マスターの misconceptions と同じ上限）。
+    受講者が学習チャットで検出した誤解メモは、マスターコースではなくこの per-user 状態に
+    保存する。**件数上限は無い**（是正 F5: かつての「per-topic 最新5件」は 6件目で古い行が
+    黙って消えるため 2026-09-10 に撤廃した。原則3 情報を落とさない）。
     未受講の場合はレコードを自動生成してから書き込む（オーナーが自コースで学習する場合など）。
     """
     session = _pg_session()
@@ -420,7 +431,7 @@ def record_personal_misconception(
 
         personal_raw = row[0] if row and row[0] is not None else {}
         raw = personal_raw if isinstance(personal_raw, dict) else json.loads(personal_raw)
-        # 「先頭に追加・最新5件」の上限ロジックはアクセサ側が正本（Phase P-0）。
+        # 「先頭に追加」（上限なし・古い行を消さない）はアクセサ側が正本（Phase P-0）。
         data = personal_graph_data.parse_personal_graph(raw)
         data = personal_graph_data.append_misconception(data, topic_id, misconception)
 
@@ -1636,8 +1647,8 @@ def search_chunks_with_metadata(
 
     discuss モード設計書 §6.1（Phase 0）: `allowed_document_ids` は必須キーワード引数にして
     呼び忘れを構造的に防ぐ（`core/help_kb/manual.py::search_manual(..., audience)` と同じ規律）。
-    `None` を渡すと無フィルタ（全域検索）になるが、これは **テスト・本番未接続コード専用**
-    （例: `core/graphs/student_graph.py::retrieval_node` — 本番ルートに未接続）。本番の呼び出し元
+    `None` を渡すと無フィルタ（全域検索）になるが、これは **テスト専用**
+    （本番未接続だった `core/graphs/student_graph.py::retrieval_node` は撤去済み）。本番の呼び出し元
     （`routes/learning.py` の learning_chat / `routes/lecture.py` の
     `_generate_sequence_from_search`）は必ず `list_visible_document_ids(user_id)` の結果を渡すこと。
 
@@ -2032,9 +2043,17 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
     learning = sum(1 for c in concepts if c.get("status") == "learning")
 
     # Issue #145: 個人誤解は personal_graph から取得（マスターデータには含まれない）
+    # 是正 F5: 数に入れるのは**本人が確定した**もの（confirmed）だけ。AI が訂正を提案した
+    # だけの候補を「訂正された誤解」として数えない（原則1: AI は候補まで）。
     personal = get_personal_layer(user_id, course_id)
     by_topic = personal.get("misconceptions_by_topic", {}) or {}
-    total_misconceptions = sum(len(v) for v in by_topic.values())
+    total_misconceptions = sum(
+        1
+        for entries in by_topic.values()
+        for entry in (entries or [])
+        if isinstance(entry, dict)
+        and entry.get("status") == personal_graph_data.MISCONCEPTION_STATUS_CONFIRMED
+    )
 
     sessions_list = []
     pg_session = _pg_session()
@@ -2079,58 +2098,154 @@ def calculate_progress(user_id: str, course_id: str, course_data: dict) -> dict:
             "duration": f"{duration_min}分",
         })
 
-    streak = calculate_streak(user_id, course_id)
-
     completion = get_course_completion(user_id, course_id, course_data)
 
     return {
         "learning_concepts": learning,
         "misconceptions": total_misconceptions,
-        "streak_days": streak,
         "sessions": sessions_list[:5],
         "completed_topic_ids": completion["completed_topic_ids"],
         "course_completed": completion["course_completed"],
     }
 
 
-def calculate_streak(user_id: str, course_id: str) -> int:
-    """チャット履歴の日付から連続学習日数を算出する。"""
-    pg_session = _pg_session()
-    try:
-        records = pg_session.execute(
-            sa_text("""
-                SELECT DISTINCT DATE(updated_at) AS d
-                FROM learning_chat_history
-                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                ORDER BY d DESC
-            """),
-            {"user_id": user_id, "course_id": course_id},
-        ).fetchall()
-    finally:
-        pg_session.close()
-
-    if not records:
-        return 0
-
-    sorted_dates = [r[0] for r in records]
-    today = datetime.date.today()
-
-    if sorted_dates[0] < today - datetime.timedelta(days=1):
-        return 0
-
-    streak = 1
-    for i in range(1, len(sorted_dates)):
-        if sorted_dates[i] == sorted_dates[i - 1] - datetime.timedelta(days=1):
-            streak += 1
-        else:
-            break
-
-    return streak
+# 2026-09-05: `calculate_streak`（連続学習日数）を撤去した。理解サイクルの不変条項
+# UC4「セッション間は何もしない — 督促・連続日数・未消化バッジ・忘却曲線を作らない」に
+# 正面から反する計器で、学習者の画面（トップバー・学習サマリ）にだけ出ていた。
+# 学習者向けの数値表示なので DTO（schemas.LearningProgress.streak_days）ごと落としている。
+# 再導入するときは UC4 の裁定からやり直すこと。
 
 
 # ---------------------------------------------------------------------------
 # Prerequisites check (Adaptive Routing)
 # ---------------------------------------------------------------------------
+
+# 2026-09-10（是正 F4 / 六つのレンズ レンズ6 提案6）: 前提知識の習得判定から
+# **「そのトピックにチャット履歴があるか」という接触の痕跡を外した**。質問した・開いた
+# ことは理解の根拠にならず、履歴からの自動スキップは AI が学習者の状態を暗黙に推定する
+# 沈黙適応（UC5 / §3.6）そのものだった。判定の根拠は**本人への明示的な問い**とその答え
+# （逆質問 → 「はい、理解しています」）だけに寄せ、その答えを
+# ``learning_states.progress_data.acknowledged_prerequisites`` に記帳することで
+# 同じ前提を何度も問い返さない（migration 不要・JSONB の正本スキーマ流儀）。
+PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY = "acknowledged_prerequisites"
+
+# 本人の明示的な肯定だけを記帳の根拠にする（否定形を含む発話は記帳しない）。
+# 「理解できない」「理解していません」のような発話は従来どおり介入を抑止するだけで、
+# 恒久的な「理解している」の記録にはしない。
+_PREREQ_ACK_PHRASES = (
+    "はい、理解しています",
+    "理解しています",
+    "理解している",
+    "理解済み",
+    "わかっています",
+    "分かっています",
+    "知っています",
+    "学習済み",
+)
+_PREREQ_ACK_NEGATIONS = ("ない", "ません", "無い", "不安")
+
+
+def normalize_prerequisite_name(name: str) -> str:
+    """前提知識名の突合キー（小文字化 + 前後空白除去）。表記の正本は元の文字列。"""
+    return (name or "").strip().casefold()
+
+
+def _is_explicit_prerequisite_acknowledgement(message: str) -> bool:
+    """本人が「この前提は理解している」と明示的に答えた発話か（否定形は除外）。"""
+    msg = (message or "").strip()
+    if not msg:
+        return False
+    if any(neg in msg for neg in _PREREQ_ACK_NEGATIONS):
+        return False
+    return any(phrase in msg for phrase in _PREREQ_ACK_PHRASES)
+
+
+def get_acknowledged_prerequisites(user_id: str, course_id: str) -> set[str]:
+    """本人が「理解している」と明示的に答えた前提知識の正規化名集合（読み取り専用）。"""
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+    finally:
+        session.close()
+
+    progress_raw = row[0] if row and row[0] is not None else {}
+    progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+    acknowledged = progress.get(PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY) or {}
+    if not isinstance(acknowledged, dict):
+        return set()
+    return {normalize_prerequisite_name(k) for k in acknowledged.keys() if str(k).strip()}
+
+
+def record_prerequisite_acknowledgement(
+    user_id: str,
+    course_id: str,
+    prerequisite_names: list[str],
+) -> None:
+    """本人の明示的な「理解している」を記帳する（既存の記録は上書きしない, P4）。
+
+    `learning_states.progress_data.acknowledged_prerequisites`（正規化名 → ISO8601 UTC）
+    への upsert のみ。行が無ければ record_topic_check_pass と同じパターンで作る。
+    書き込みに失敗しても会話は止めない（呼び出し側で例外は握る）。
+    """
+    names = [n for n in (prerequisite_names or []) if (n or "").strip()]
+    if not names:
+        return
+    now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    session = _pg_session()
+    try:
+        session.execute(
+            sa_text("""
+                INSERT INTO learning_states (id, user_id, course_id)
+                VALUES (gen_random_uuid(), CAST(:user_id AS uuid), :course_id)
+                ON CONFLICT (user_id, course_id) DO NOTHING
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        )
+        row = session.execute(
+            sa_text("""
+                SELECT progress_data FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        progress_raw = row[0] if row and row[0] is not None else {}
+        progress = progress_raw if isinstance(progress_raw, dict) else json.loads(progress_raw)
+        acknowledged_raw = progress.get(PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY) or {}
+        acknowledged = dict(acknowledged_raw) if isinstance(acknowledged_raw, dict) else {}
+        for name in names:
+            key = normalize_prerequisite_name(name)
+            if key and key not in acknowledged:
+                acknowledged[key] = now_iso
+        progress[PROGRESS_ACKNOWLEDGED_PREREQUISITES_KEY] = acknowledged
+
+        session.execute(
+            sa_text("""
+                UPDATE learning_states
+                SET progress_data = CAST(:progress AS jsonb),
+                    updated_at = now()
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+            """),
+            {
+                "user_id": user_id,
+                "course_id": course_id,
+                "progress": json.dumps(progress, ensure_ascii=False),
+            },
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
 
 
 def check_prerequisites(
@@ -2142,6 +2257,9 @@ def check_prerequisites(
 ) -> dict | None:
     """コースデータの prerequisites フィールドを基に前提知識を確認し、未習得なら介入情報を返す。
 
+    習得の判定に使うのは**本人の明示的な答えだけ**（`acknowledged_prerequisites`）。
+    チャット履歴の有無（＝接触の痕跡）は使わない（2026-09-10 是正 F4）。
+
     Returns
     -------
     dict | None
@@ -2150,8 +2268,6 @@ def check_prerequisites(
         構造化 ``next_actions`` として組み立てるため、ここでは本文のみを返す。
     """
     skip_keywords = ["理解", "わかります", "わかっています", "知っています", "できます", "学習済み"]
-    if any(kw in user_message for kw in skip_keywords):
-        return None
 
     try:
         current_topic = None
@@ -2167,47 +2283,68 @@ def check_prerequisites(
         if not prereqs:
             return None
 
-        prereq_names: list[str] = []
+        # 学ぶ単位の一級化 P2-4（learning_units_design.md §6.4）: 前提要素に
+        # `topic_id` があれば同コース topic を引き、**表示名は現在の題名**を使う
+        # （題名を変えても接続が切れない）。判定材料（記帳キー）は従来どおり
+        # 前提の**名前**のままで互換を保つ（LU1: 既存キーの意味を変えない）。
+        topics_by_id = {
+            str(t.get("id")): t for t in course_topics(course_data) if t.get("id")
+        }
+        prereq_names: list[str] = []          # 記帳・突合キー（従来どおり名前）
+        prereq_display: dict[str, str] = {}   # 記帳キー → 表示名（現在の題名を優先）
         for prereq in prereqs:
-            prereq_name = prereq.get("name", "") if isinstance(prereq, dict) else str(prereq)
-            prereq_name = prereq_name.strip()
-            if prereq_name:
-                prereq_names.append(prereq_name)
+            if isinstance(prereq, dict):
+                prereq_name = str(prereq.get("name") or "").strip()
+                prereq_topic_id = str(prereq.get("topic_id") or "").strip()
+            else:
+                prereq_name = str(prereq).strip()
+                prereq_topic_id = ""
+            display = prereq_name
+            linked = topics_by_id.get(prereq_topic_id) if prereq_topic_id else None
+            if linked:
+                linked_title = str(linked.get("title") or "").strip()
+                if linked_title:
+                    display = linked_title
+            if not prereq_name:
+                prereq_name = display  # topic_id だけの要素も記帳キーを持てるようにする
+            if not prereq_name:
+                continue
+            prereq_names.append(prereq_name)
+            prereq_display[prereq_name] = display or prereq_name
 
         if not prereq_names:
             return None
 
+        # 発話中の言及判定は「元の名前」と「現在の題名」の両方で見る（表示を変えた
+        # だけで説明要求が拾えなくなるのを防ぐ）。
+        mention_names = set(prereq_names) | set(prereq_display.values())
+
+        # 本人の明示的な肯定は「この前提は理解している」の確定として記帳し、以後
+        # 同じ前提では問い返さない（同一セッション内のループ抑止も、督促でも推定でも
+        # なくこの記帳だけを根拠にする）。記帳に失敗しても会話は止めない。
+        if _is_explicit_prerequisite_acknowledgement(user_message):
+            try:
+                record_prerequisite_acknowledgement(user_id, course_id, prereq_names)
+            except Exception:
+                logger.warning("Failed to record prerequisite acknowledgement", exc_info=True)
+            return None
+        # 否定形を含む「理解できない」等はゲートを挟まないだけ（記帳はしない）。
+        if any(kw in user_message for kw in skip_keywords):
+            return None
+
         explanation_keywords = ["教えて", "説明", "詳しく", "知りたい", "わからない", "分からない"]
-        if any(name in user_message for name in prereq_names) and any(
+        if any(name in user_message for name in mention_names) and any(
             kw in user_message for kw in explanation_keywords
         ):
             return None
 
-        pg = _pg_session()
-        try:
-            rows = pg.execute(
-                sa_text("""
-                    SELECT topic_id FROM learning_chat_history
-                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
-                """),
-                {"user_id": user_id, "course_id": course_id},
-            ).fetchall()
-        finally:
-            pg.close()
-        topics_with_history: set[str] = {r[0] for r in rows}
+        acknowledged = get_acknowledged_prerequisites(user_id, course_id)
 
-        title_to_id: dict[str, str] = {}
-        for t in course_topics(course_data):
-            title = t.get("title", "").lower().strip()
-            if title:
-                title_to_id[title] = t.get("id", "")
-
-        unlearned: list[str] = []
-        for prereq_name in prereq_names:
-            prereq_topic_id = title_to_id.get(prereq_name.lower(), "")
-            if prereq_topic_id and prereq_topic_id in topics_with_history:
-                continue
-            unlearned.append(prereq_name)
+        unlearned: list[str] = [
+            prereq_display.get(prereq_name, prereq_name)
+            for prereq_name in prereq_names
+            if normalize_prerequisite_name(prereq_name) not in acknowledged
+        ]
 
         if not unlearned:
             return None
@@ -2412,8 +2549,20 @@ def truncate_chat_and_supersede(
 
 
 # ---------------------------------------------------------------------------
-# Misconception detection
+# Misconception detection（AI は候補まで・確定は本人の3択。是正 F5）
 # ---------------------------------------------------------------------------
+
+#: 本人の3択の語彙。R層の自己確認と共有する
+#: （``core/reconstruction/schema.py::SELF_CHECK_VALUES``。``core.check_review`` が再エクスポート）。
+#: - ``agreed``: そう、これは私の誤解だった → ``confirmed``
+#: - ``disagreed``: これは誤解ではない → ``dismissed``
+#: - ``verdict_wrong``: AI の訂正のほうが違う → ``dismissed``（理由を分けて記帳する）
+_MISCONCEPTION_DECISION_ACTIONS: dict[str, tuple[str, str]] = {
+    "agreed": (candidate_flow.ACTION_CONFIRM, ""),
+    "disagreed": (candidate_flow.ACTION_DISMISS, "本人が「これは誤解ではない」と判断"),
+    "verdict_wrong": (candidate_flow.ACTION_DISMISS, "本人が「AI の訂正のほうが違う」と判断"),
+}
+MISCONCEPTION_DECISIONS: tuple[str, ...] = tuple(_MISCONCEPTION_DECISION_ACTIONS)
 
 
 def detect_and_record_misconception(
@@ -2423,11 +2572,21 @@ def detect_and_record_misconception(
     topic_id: str,
     user_message: str,
     ai_response: str,
+    message_id: str | None = None,
 ) -> dict | None:
-    """AI応答から誤解を検出し、ユーザー個別の learning_states.personal_graph に記録する。
+    """AI応答の訂正シグナルを**候補として** learning_states.personal_graph に記録する。
 
-    Issue #133: マスターコースは不変に保ち、誤解はユーザーごとの learning_states に保存する。
-    レスポンス用にはマージ済みの topics をコピーして返す。
+    Issue #133: マスターコースは不変に保ち、誤解メモはユーザーごとの learning_states に保存する。
+
+    是正 F5（六つのレンズ 提案3, 2026-09-10）:
+
+    - 検出は非LLM の文字列一致にすぎないので、書き込みは常に ``status='candidate'``。
+      「誤解」として確定するのは本人の3択（``review_personal_misconception``）だけである。
+    - 訂正文が抽出できなかった場合に「（AIの応答を参照してください）」という中身のない行を
+      「あなたは間違っていた」として残すのをやめた。``correct`` は空のまま（読み出し時に
+      ``None``）保持し、UI が事実文で正直に出す。
+    - ``message_id`` を持たせる（機能3 の書き直し・削除で派生痕跡を supersede する将来の
+      連携のため。取れない経路では None）。
     """
     wrong = user_message
     if len(wrong) > 60:
@@ -2441,15 +2600,13 @@ def detect_and_record_misconception(
             correct = line.split(matched_marker, 1)[1].strip()
             break
 
-    if not correct:
-        correct = "（AIの応答を参照してください）"
-
     today = datetime.date.today()
-    misconception = {
-        "label": f"{today.month}/{today.day} の訂正",
-        "wrong": wrong,
-        "correct": correct,
-    }
+    misconception = personal_graph_data.new_misconception_entry(
+        label=f"{today.month}/{today.day} の訂正",
+        wrong=wrong,
+        correct=correct,
+        message_id=message_id,
+    )
 
     try:
         record_personal_misconception(user_id, course_id, topic_id, misconception)
@@ -2462,6 +2619,126 @@ def detect_and_record_misconception(
     # Issue #145: 個人レイヤー更新をそのまま返す（マスターデータは不変）
     personal = get_personal_layer(user_id, course_id)
     return {"personal_layer": personal}
+
+
+def review_personal_misconception(
+    user_id: str,
+    course_id: str,
+    topic_id: str,
+    entry_id: str,
+    decision: str,
+) -> dict | None:
+    """誤解メモの候補に対する**本人の3択**を状態遷移として記帳する（是正 F5）。
+
+    遷移の可否判定・監査の呼び出し順は共通プリミティブ ``core.candidate_flow``
+    （:data:`core.personal_graph.graph_data.MISCONCEPTION_VOCAB`）に委ね、
+    JSONB の書き換えだけをここで行う（新しいワークフローを書かない）。
+
+    - 対象は ``status='candidate'`` の行だけ（確定済み・却下済みを押し直せない）。
+    - 却下は行を消さず ``dismissed`` へ遷移させる（P4）。理由の入力は本人に要求しない
+      （``require_dismiss_reason=False``。サーバ側の固定文を監査 reason に入れる）。
+    - 監査は ``theory_review_events``（``entity_type='misconception'``）。本人の逐語・
+      訂正文そのものは載せない。
+
+    Returns:
+        ``{"entry_id", "status", "decision"}``。対象が無い / 候補でない / 書き込みに
+        失敗したときは ``None``（呼び出し側が 404 にする）。
+
+    Raises:
+        ValueError: ``decision`` が語彙外のとき（呼び出し側が 422 にする）。
+    """
+    decision = str(decision or "").strip()
+    if decision not in _MISCONCEPTION_DECISION_ACTIONS:
+        raise ValueError(f"unknown misconception decision: {decision!r}")
+    action, audit_reason = _MISCONCEPTION_DECISION_ACTIONS[decision]
+
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                SELECT personal_graph FROM learning_states
+                WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                LIMIT 1
+            """),
+            {"user_id": user_id, "course_id": course_id},
+        ).fetchone()
+        if not row:
+            return None
+        raw = row[0] if isinstance(row[0], dict) else json.loads(row[0] or "{}")
+        data = personal_graph_data.parse_personal_graph(raw)
+        found = personal_graph_data.find_misconception(data, topic_id, entry_id)
+        if found is None:
+            return None
+
+        def _apply_status(*, entity_id, old_status, new_status, actor_id, reason, metadata):
+            result = personal_graph_data.set_misconception_status(
+                data, topic_id, entity_id, new_status, decision=decision,
+            )
+            if result is None:  # pragma: no cover — 直前に find_misconception で確認済み
+                raise candidate_flow.CandidateTransitionError("misconception entry vanished")
+            updated, _old = result
+            session.execute(
+                sa_text("""
+                    UPDATE learning_states
+                    SET personal_graph = CAST(:personal AS jsonb), updated_at = now()
+                    WHERE user_id = CAST(:user_id AS uuid) AND course_id = :course_id
+                """),
+                {
+                    "user_id": user_id,
+                    "course_id": course_id,
+                    "personal": json.dumps(
+                        personal_graph_data.to_jsonb(updated), ensure_ascii=False,
+                    ),
+                },
+            )
+            session.commit()
+            return {"status": new_status}
+
+        def _record_audit(**kwargs):
+            record_review_event(
+                kwargs["entity_type"],
+                kwargs["entity_id"],
+                kwargs["old_status"],
+                kwargs["new_status"],
+                kwargs["actor_id"],
+                kwargs.get("metadata") or {},
+            )
+
+        flow = candidate_flow.CandidateFlow(
+            vocab=personal_graph_data.MISCONCEPTION_VOCAB,
+            audit_entity_type=AUDIT_ENTITY_MISCONCEPTION,
+            apply_status=_apply_status,
+            record_audit=_record_audit,
+            # 学習者自身の却下に理由入力を要求しない（candidate_flow の docstring 準拠）。
+            require_dismiss_reason=False,
+        )
+        transition = getattr(flow, action)(
+            entry_id,
+            current_status=found["status"],
+            actor_id=str(user_id),
+            reason=audit_reason,
+            # 逐語（wrong / correct）は監査に載せない。
+            metadata={"decision": decision, "course_id": course_id, "topic_id": topic_id},
+        )
+    except candidate_flow.CandidateTransitionError as exc:
+        session.rollback()
+        logger.info("review_personal_misconception rejected: %s", exc)
+        return None
+    except Exception:
+        session.rollback()
+        logger.warning(
+            "review_personal_misconception failed for user=%s course=%s topic=%s",
+            user_id, course_id, topic_id, exc_info=True,
+        )
+        return None
+    finally:
+        session.close()
+
+    return {
+        "entry_id": entry_id,
+        "status": transition["new_status"],
+        "decision": decision,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -2799,6 +3076,9 @@ def get_interest_traces(user_id: str, course_id: str, topic_id: str | None = Non
                   -- 理解サイクル（UCサイクル §4/§11-1）: intention（OPEN/LEAVE の本人メモ）と
                   -- anchor_mark（軽量アンカー）は本人専用メモであり「問いの軌跡」には出さない
                   AND kind NOT IN ('intention', 'anchor_mark')
+                  -- コーパス回遊層（§7）: frontier_interest は「地図の端の先を知りたい」の
+                  -- 1タップであって発話ではない。「問いの軌跡」には出さない（台帳には出る）
+                  AND kind <> 'frontier_interest'
                 ORDER BY
                     CASE status WHEN 'revisited' THEN 0 WHEN 'open' THEN 1 ELSE 2 END,
                     created_at DESC
@@ -2831,7 +3111,13 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
     # 数えない（UC3 / §1-3-8 / 構造の降下路 SD4 と同型の除外。除外集合の正本は
     # core/trace_registry.py の DASHBOARD_EXCLUDED_KINDS — 登録簿ガードレールが
     # 全要素の出現を強制する）。
-    _dashboard_excluded_kinds = "('help_usage', 'intention', 'anchor_mark', 'backstage_question')"
+    # frontier_interest（コーパス回遊層 §7）はコース非依存の1タップで、専用の
+    # k-匿名集約（aggregate_frontier_interest）だけが読む — コース単位の本集計には
+    # 混ぜない（センチネル course_id のため実際には一致しないが、除外を明示する）。
+    _dashboard_excluded_kinds = (
+        "('help_usage', 'intention', 'anchor_mark', 'backstage_question', "
+        "'frontier_interest')"
+    )
     session = _pg_session()
     try:
         cohort = session.execute(
@@ -2958,9 +3244,27 @@ def aggregate_interest_dashboard(course_id: str, topic_title_map: dict | None = 
             "learners": learners,  # 関与人数（個人は特定しない）
         })
 
+    # k-匿名化（原則5 / 指標カタログ `k_anonymity=True` の宣言どおり）: 関与人数が
+    # 最小集計単位に満たないコースは、トピック別件数・未消化総量も含めて表示しない
+    # （受講者1〜2名のコースでは「トピック × 件数」が個人の記録に一致してしまう）。
+    # 「痕跡が無い」と「人数が足りず伏せた」を UI が区別できるよう suppressed を立てる。
+    if int(cohort) < K_ANONYMITY:
+        return {
+            "course_id": course_id,
+            "cohort_size": 0,
+            "k_anonymity_suppressed": True,
+            "hotspots": [],
+            "unfinished_summary": {"open_questions": 0, "repeated_detours": 0, "recurring_misconceptions": 0},
+            "tension_heatmap": [],
+            "anchor_heatmap": [],
+        }
+
     hotspots = []
     for r in rows:
         tid, cnt, unfinished, learners = r[0], int(r[1]), int(r[2]), int(r[3])
+        # トピック単位でも関与人数 n<k のセルは出さない（ヒートマップと同じゲート）。
+        if learners < K_ANONYMITY:
+            continue
         hotspots.append({
             "topic_title": title_map.get(tid) or tid or "(不明トピック)",
             "interest_count": cnt,
@@ -3053,7 +3357,10 @@ def get_chunk_passage(
 
     if not row:
         return None
-    raw_text = row[1] or row[0] or ""
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: chunks 本文は
+    # PDF 由来 = untrusted。出典ポップアップへ返す前に制御シーケンス（ANSI・裸の SGR
+    # 残骸・C0）を落とす（表示テキストとして残してよい形へ整えるだけ）。
+    raw_text = strip_control_sequences(row[1] or row[0] or "")
     raw_formulas = row[2] if row[2] else []
     text, formulas = _normalize_formulas(raw_text, raw_formulas)
     section = " · ".join([s for s in [row[3], row[4]] if s])
@@ -3112,7 +3419,7 @@ def get_chunk_claim_refs(
         rows = session.execute(
             sa_text("""
                 SELECT id, claim_type, text, normalized_text
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE chunk_id = CAST(:cid AS uuid)
                 ORDER BY created_at ASC
             """),
@@ -3335,6 +3642,129 @@ def record_learner_articulated_tension(
     return {"trace_id": str(trace_id), "status": "articulated"}
 
 
+# ---------------------------------------------------------------------------
+# コーパス回遊層 Phase D — 地図の端への関心信号
+# 正本: docs/features/corpus_roaming_design.md §7（CR6 / CR8 / CR10）。
+# migration 0（interest_traces の kind 'frontier_interest' に相乗り）。kind の
+# 露出宣言は core/trace_registry.py（TR1）。
+# ---------------------------------------------------------------------------
+
+#: 端への関心はコースに属さない（コース非依存の回遊）。course_id 列は NOT NULL の
+#: ため、コース id と衝突しないセンチネルを使う（help_usage の "_ui" と同型）。
+CORPUS_TRACE_COURSE_ID = "_corpus"
+
+
+def record_frontier_interest(
+    user_id: str, domain_key: str, ring: str, region_id: str = ""
+) -> str | None:
+    """「この先を知りたい」の1タップを記録する（本人の明示操作のみ — CR6）。
+
+    本文・質問文は持たない（payload は ``domain_key`` / ``region_id`` / ``ring`` のみ）。
+    閲覧・滞在の暗黙計測を関心として扱わないため、書き込み経路はこの1本だけにする。
+    記録は ``record_interest_trace`` の唯一入口を経由する（TR1）。
+    """
+    domain_key = (domain_key or "").strip()
+    if not domain_key:
+        return None
+    return record_interest_trace(
+        user_id,
+        CORPUS_TRACE_COURSE_ID,
+        None,
+        kind="frontier_interest",
+        text="",
+        context_label="",
+        extra_payload={
+            "domain_key": domain_key,
+            "region_id": (region_id or "").strip(),
+            "ring": (ring or "").strip(),
+        },
+        status="open",
+    )
+
+
+def withdraw_frontier_interest(user_id: str, trace_id: str) -> bool:
+    """関心の取り消し（``status='dismissed'`` 遷移のみ — 行削除しない, CR8）。
+
+    本人の行だけを対象にする（他人の行は 0 行更新 = False → 呼び出し側は 404）。
+    """
+    trace_id = (trace_id or "").strip()
+    if not trace_id:
+        return False
+    session = _pg_session()
+    try:
+        row = session.execute(
+            sa_text("""
+                UPDATE interest_traces
+                   SET status = 'dismissed'
+                 WHERE id = CAST(:tid AS uuid)
+                   AND user_id = CAST(:uid AS uuid)
+                   AND kind = 'frontier_interest'
+                 RETURNING id
+            """),
+            {"tid": trace_id, "uid": user_id},
+        ).fetchone()
+        session.commit()
+        return row is not None
+    except Exception as exc:
+        session.rollback()
+        logger.warning("withdraw_frontier_interest failed: %s", exc)
+        return False
+    finally:
+        session.close()
+
+
+def aggregate_frontier_interest(domain_key: str | None = None) -> list[dict]:
+    """端への関心の教員向け k-匿名集約（§7。個人・時系列・順位を出さない）。
+
+    集計単位は ``domain_key × region_id × ring``。閾値・レンジは
+    ``core/privacy.py`` の共通ゲート（k=3 / 3-5 / 6-10 / 11+）に委譲し、
+    ``n < k`` の行は**返さない**。取り消し済み（``status='dismissed'``）は数えない。
+    生の件数・user_id・時刻は一切返さない（CR3 / CR6）。
+    """
+    from core.privacy import bucket_count_range, meets_k_anonymity
+
+    clauses = ["kind = 'frontier_interest'", "status = 'open'"]
+    params: dict = {}
+    key = (domain_key or "").strip()
+    if key:
+        clauses.append("payload->>'domain_key' = :domain_key")
+        params["domain_key"] = key
+
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(f"""
+                SELECT COALESCE(payload->>'domain_key', '') AS domain_key,
+                       COALESCE(payload->>'region_id', '')  AS region_id,
+                       COALESCE(payload->>'ring', '')       AS ring,
+                       COUNT(DISTINCT user_id)              AS learners
+                  FROM interest_traces
+                 WHERE {" AND ".join(clauses)}
+                 GROUP BY 1, 2, 3
+                 ORDER BY 1, 2, 3
+            """),
+            params,
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("aggregate_frontier_interest failed: %s", exc)
+        rows = []
+    finally:
+        session.close()
+
+    out: list[dict] = []
+    for row in rows:
+        learners = int(row[3] or 0)
+        if not meets_k_anonymity(learners):
+            continue
+        out.append({
+            "domain_key": str(row[0] or ""),
+            "region_id": str(row[1] or ""),
+            "ring": str(row[2] or ""),
+            "range_label": bucket_count_range(learners),
+        })
+    return out
+
+
 def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool:
     """connect 先の component が本人にとって閲覧可能な document に属するかを検証する。
 
@@ -3352,7 +3782,7 @@ def _tension_connect_component_viewable(user_id: str, component_id: str) -> bool
         try:
             row = session.execute(
                 sa_text(
-                    "SELECT source_scope->>'document_id' FROM theory_components "
+                    "SELECT source_scope->>'document_id' FROM theory_components_live "
                     "WHERE id = CAST(:id AS uuid)"
                 ),
                 {"id": component_id},
@@ -4149,23 +4579,18 @@ def build_knowledge_graph(text: str, title: str) -> dict:
   ]
 }}"""
 
-    try:
-        raw = generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-        )
-        raw = raw.strip()
-        if raw.startswith("```"):
-            raw = raw.split("\n", 1)[1] if "\n" in raw else raw[3:]
-        if raw.endswith("```"):
-            raw = raw[:-3]
-        raw = raw.strip()
-        if raw.startswith("json"):
-            raw = raw[4:].strip()
-        return json.loads(raw)
-    except Exception as exc:
-        logger.warning("Knowledge graph extraction failed: %s", exc)
+    # 取り出しは共通実装へ委譲（フェンス・前後プロース・最外ブレース）。失敗時は
+    # 従来どおり空グラフへ縮退する（教材登録そのものは止めない）。
+    parsed = json_call(
+        prompt,
+        call=generate_text,
+        temperature=0.2,
+        degraded=None,
+        log_label="knowledge graph extraction",
+    )
+    if parsed is None:
         return {"title": title, "concepts": [], "relationships": [], "chapters": []}
+    return parsed
 
 
 # ---------------------------------------------------------------------------
@@ -4628,6 +5053,11 @@ def process_material_background(
     ``options``（画像パイプライン §3-2）はアップロード時オプションのスナップ
     ショット（例: ``{"analyze_images": True}``）。``run_document_pipeline`` へ
     そのまま受け渡し、``document_analysis_runs.options`` に保存される。
+
+    ``cartridge_id``（分野・提案 C1）も ``run_document_pipeline`` へそのまま渡す。
+    ``None`` は未指定（env → 分野中立）、``""`` は「指定しない」の明示選択
+    （env へフォールバックしない）。値は既存列
+    ``document_analysis_runs.cartridge_id`` に入る。
     """
     from core.document_pipeline import PipelineStageError, run_document_pipeline
 
@@ -4955,75 +5385,3 @@ def save_cb_session(
     except Exception:
         logger.exception("Failed to save course builder session %s", session_id)
         return False
-
-
-# ---------------------------------------------------------------------------
-# Missing Link Suggestion（分野横断パターン検索クエリ生成）
-# ---------------------------------------------------------------------------
-
-
-def generate_missing_link_suggestions(
-    pattern_name: str,
-    pattern_description: str,
-    structural_rules: list[str],
-    variables_template: list[str],
-    existing_fields: list[str] | None = None,
-) -> dict:
-    """パターンメタデータを受け取り、構造的空白を検知して分野横断の検索クエリを生成する。
-
-    Returns a dict matching the MissingLinkSuggestion schema (without pattern_id).
-    """
-    rules_text = "\n".join(f"  - {r}" for r in structural_rules) if structural_rules else "  (none)"
-    vars_text = ", ".join(variables_template) if variables_template else "(none)"
-    existing_text = ", ".join(existing_fields) if existing_fields else "none known"
-
-    prompt = f"""You are a cross-domain research advisor for the Episteme Graph system.
-
-Given the following abstraction pattern, suggest academic fields where this structural pattern
-likely occurs but is NOT yet represented in our pattern library.
-
-## Pattern Information
-- **Name**: {pattern_name}
-- **Description**: {pattern_description}
-- **Abstract Variables**: {vars_text}
-- **Structural Rules**:
-{rules_text}
-- **Fields already covered**: {existing_text}
-
-## Your Task
-1. Identify 3-5 academic fields/domains where this same structural pattern likely manifests,
-   but which are NOT in the "already covered" list.
-2. For each field, explain WHY this pattern would appear there (concrete reasoning, not generic).
-3. For each field, provide 2-4 arXiv search keywords that combine the pattern's structural
-   concepts with field-specific terminology. Keywords should be specific enough to find relevant
-   papers, mixing both generic structural terms and specialized domain terms.
-
-## Output Format (strict JSON)
-Return ONLY a JSON object with this structure:
-{{
-  "suggestions": [
-    {{
-      "field": "<academic field name>",
-      "reasoning": "<1-2 sentences explaining why this pattern appears in this field>",
-      "keywords": ["<keyword1>", "<keyword2>", "<keyword3>"]
-    }}
-  ]
-}}
-
-Important:
-- Do NOT include fields already covered.
-- Keywords must be suitable for arXiv search (English, technical terms).
-- Balance generic structural terms with field-specific jargon to mitigate hallucination."""
-
-    raw = generate_text(
-        messages=[{"role": "user", "content": prompt}],
-    )
-
-    # Strip markdown code fences if present
-    cleaned = raw.strip()
-    if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        lines = [l for l in lines if not l.strip().startswith("```")]
-        cleaned = "\n".join(lines)
-
-    return json.loads(cleaned)

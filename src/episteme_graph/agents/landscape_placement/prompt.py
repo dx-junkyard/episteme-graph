@@ -115,6 +115,18 @@ _GAP_BODY_DISABLED = """\
 今回は候補を申告しません。`category_gaps` は**空配列**にしてください。
 """
 
+# 前段絞り込み（``docs/features/atlas_vector_anchoring_design.md`` §6）が働いた
+# ドメインについてだけ、閉世界の言明を正直に緩める（VA7 / VA8）。注記の文言そのものは
+# ``input_builder.PREFILTER_NOTE`` が正本で、ここでは読み方だけを説明する。
+_PREFILTER_NOTICE = """\
+
+## 絞り込み提示について
+`note` の付いたドメインは、**関連の高いものから選んだ一部の概念だけ**を並べています
+（その領域の概念がこれで全部だとは限りません）。そのドメインでは、提示されていない概念が
+別にある可能性を踏まえ、`category_gaps` の申告をより慎重に行ってください。
+`note` の無いドメインは従来どおり、並んでいる概念がその領域の全てです。
+"""
+
 
 def _output_schema(*, include_gaps: bool = True) -> dict:
     schema = {
@@ -165,17 +177,16 @@ class LandscapePlacementPromptFactory:
         cartridge=None,
     ) -> str:
         """LLM に渡す user メッセージ1本分の文字列を組み立てる。"""
+        prepared = self._input_builder.prepare_for_prompt(item)
         parts: list[str] = [self._instruction(item)]
+        if any(d.get("note") for d in prepared.get("domains") or []):
+            # 絞り込みが1ドメインでも起きたときだけ読み方を添える（起きていない run の
+            # プロンプトは従来と1文字も変えない）。
+            parts.append(_PREFILTER_NOTICE)
         parts.append(
             "\n## 素材と配置先（`evidence_quote` は paper / claims の文字列だけから引用してよい）"
         )
-        parts.append(
-            json.dumps(
-                self._input_builder.prepare_for_prompt(item),
-                ensure_ascii=False,
-                indent=2,
-            )
-        )
+        parts.append(json.dumps(prepared, ensure_ascii=False, indent=2))
         if cartridge is not None and getattr(cartridge, "aliases", None):
             parts.append("\n## 分野語彙（任意の補助。無理に使わない）")
             for canonical, aliases in list(cartridge.aliases.items())[:20]:

@@ -72,14 +72,16 @@ class TestVocabularySingleSource:
         assert KIND_INTENTION in TRACE_KINDS
         assert KIND_ANCHOR_MARK in TRACE_KINDS
 
-    def test_all_nine_kinds_are_registered(self):
+    def test_all_registered_kinds(self):
         assert ALL_TRACE_KINDS == frozenset({
             "raw", "question", "detour", "misconception", "tension",
             "help_usage", "intention", "anchor_mark", "backstage_question",
+            # コーパス回遊層 Phase D（corpus_roaming_design.md §7）
+            "frontier_interest",
         })
         # 露出3宣言は dataclass 必須フィールドで構文的にも強制されるが、
-        # dead 語彙（detour）も含めて9件存在することをここで固定する（TR3）。
-        assert len(TRACE_KINDS) == 9
+        # dead 語彙（detour）も含めて10件存在することをここで固定する（TR3）。
+        assert len(TRACE_KINDS) == 10
 
     def test_only_detour_is_dead(self):
         dead = {kind for kind, spec in TRACE_KINDS.items() if spec.dead}

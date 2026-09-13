@@ -98,7 +98,7 @@ def _fetch_health_rows(
     if document_ids is not None:
         if not document_ids:
             return []
-        sql = _HEALTH_SELECT + " WHERE i.document_id = ANY(:docs)"
+        sql = _HEALTH_SELECT + " WHERE i.document_id = ANY(CAST(:docs AS uuid[]))"
         params: dict[str, Any] = {"docs": list(document_ids)}
     elif document_id:
         sql = _HEALTH_SELECT + " WHERE i.document_id = :doc"

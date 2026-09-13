@@ -11,6 +11,18 @@ version: "3.9"
 
 services:
   # ── 開発用ポート公開 ─────────────────────────────────────────────
+  grobid:
+    ports:
+      - "8070:8070"   # GROBID（開発時のみホストへ公開）
+
+  api-server:
+    # ローカルでは同梱 postgres の healthcheck 通過を待つ（ベースはマネージド DB 前提）
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+
   minio:
     ports:
       - "9000:9000"   # MinIO S3 API

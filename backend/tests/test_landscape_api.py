@@ -119,6 +119,11 @@ class FakeSession:
             if self.last_run_at is None:
                 return _Result([])
             return _Result([(self.last_run_at,)])
+        if "FROM atlas_skeletons" in sql:
+            # ノード版間対応（NC8）の `atlas_store.load_frozen_history`。
+            # 骨格そのものは monkeypatch した `load_learner_skeleton` が供給するので、
+            # 履歴は空＝読み替えなし（生 node_id を引く従来動作）で十分。
+            return _Result([])
         if "FROM landscape_gap_signals" in sql:
             # category_gap_candidates_design.md §4.1: 教材管理の unplaced 行に出す
             # 案内一行の材料（真偽値だけ）。既定は「記録なし」。
@@ -740,6 +745,8 @@ class TestAdminOverview:
                 "perspective_label": "対象から",
                 "weight_label": "強い関連",
                 "status": "inferred",
+                # ノード版間対応（§6）: 読み替えた配置かを事実として添える。
+                "node_status": "current",
             }
         ]
         assert body["nodes"][1]["documents"][0]["weight_label"] == "弱い関連"
@@ -865,6 +872,8 @@ class TestLearnerLandscape:
                 "domain_name": "宇宙物理",
                 "frozen_version": "2026.1",
                 "is_course_map": True,
+                # ノード版間対応（§6）: 読み替えできなかった配置の事実文。ここでは無い。
+                "facts": [],
             }
         ]
         # コースの sources 順（mat-1 → mat-2）を保つ。
@@ -955,6 +964,7 @@ class TestLearnerLandscape:
                 "domain_name": "宇宙物理",
                 "frozen_version": "2026.1",
                 "is_course_map": True,
+                "facts": [],
             }
         ]
         assert body["documents"] == []

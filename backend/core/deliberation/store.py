@@ -33,7 +33,7 @@ def _dump(value: Any) -> str:
 # ---------------------------------------------------------------------------
 
 _SESSION_COLUMNS_SQL = """
-    id::text, scope, element_type, element_id, document_id, domain_key,
+    id::text, scope, element_type, element_id, document_id::text AS document_id, domain_key,
     title, messages, created_by::text, created_at, updated_at
 """
 
@@ -64,7 +64,8 @@ def create_session(ref: ElementRef, *, title: str = "", created_by: str | None =
                 INSERT INTO deliberation_sessions
                     (scope, element_type, element_id, document_id, domain_key, title, created_by)
                 VALUES
-                    (:scope, :element_type, :element_id, :document_id, :domain_key,
+                    (:scope, :element_type, :element_id,
+                     CAST(NULLIF(:document_id, '') AS uuid), :domain_key,
                      :title, CAST(:created_by AS uuid))
                 RETURNING {_SESSION_COLUMNS_SQL}
                 """
@@ -135,7 +136,7 @@ def append_messages(session_id: str, new_messages: list[dict]) -> dict | None:
 # ---------------------------------------------------------------------------
 
 _ANNOTATION_COLUMNS_SQL = """
-    id::text, scope, element_type, element_id, document_id, domain_key, session_id::text,
+    id::text, scope, element_type, element_id, document_id::text AS document_id, domain_key, session_id::text,
     kind, body, evidence, reason, confidence, status, committed_target,
     created_by::text, updated_by::text, created_at, updated_at
 """
@@ -185,7 +186,8 @@ def create_annotation(
                     (scope, element_type, element_id, document_id, domain_key, session_id,
                      kind, body, evidence, reason, confidence, status, created_by)
                 VALUES
-                    (:scope, :element_type, :element_id, :document_id, :domain_key,
+                    (:scope, :element_type, :element_id,
+                     CAST(NULLIF(:document_id, '') AS uuid), :domain_key,
                      CAST(:session_id AS uuid), :kind, CAST(:body AS jsonb),
                      CAST(:evidence AS jsonb), :reason, :confidence, :status,
                      CAST(:created_by AS uuid))
@@ -251,7 +253,7 @@ def list_annotations_for_element(
                     f"""
                     SELECT {_ANNOTATION_COLUMNS_SQL} FROM element_annotations
                     WHERE element_type = :element_type AND element_id = :element_id
-                      AND document_id = :document_id
+                      AND document_id = CAST(NULLIF(:document_id, '') AS uuid)
                     ORDER BY created_at ASC
                     """
                 ),

@@ -5,6 +5,19 @@
 > 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
 > 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
 
+> **実装状況 (2026-09-03 時点・コード照合):** 本書は Issue A 当時の運用ガイドで、実装済み。
+> ただし**骨格の正本はその後 DB へ移った**（migration 027 `atlas_skeletons`。
+> `field_atlas_db_managed_skeleton.md` が正本）。以下の本文が前提にしている
+> 「カートリッジ同梱の YAML が配布物」というモデルは、現在は
+> **起動時に一度だけ DB へ取り込むシード兼フォールバック**の位置づけに変わっている。
+> 骨格の読みは必ず `core/atlas_store.py::load_learner_skeleton()` を使う
+> （`cartridge.learner_atlas_skeleton` の直読み禁止）。
+> あわせて、カートリッジ一式を持たない**骨格専用ドメイン**の同梱経路
+> `backend/atlas_domains/<domain_key>/skeleton.yaml`（+ `domain.json`）が追加され、
+> 宇宙物理 `astrophysics` が同梱されている（`knowledge_landscape_design.md`）。
+> ドメインの retire / restore（migration 057）とベクトル係留（migration 074）・
+> 辺候補（migration 076）はそれぞれ専用設計書が正本。
+
 ## 概要
 
 骨格は、モデル知識からカートリッジ単位で一度だけバッチ生成し、教員レビューを経て

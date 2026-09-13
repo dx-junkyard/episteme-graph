@@ -57,10 +57,15 @@ from routes import auth, learning, admin, lecture, groups, error_logs, export as
 from routes import figure_presentation as figure_presentation_routes
 from routes import element_explanations as element_explanations_routes
 from routes import atlas as atlas_routes
+from routes import atlas_edges as atlas_edges_routes
 from routes import atlas_gaps as atlas_gaps_routes
+from routes import atlas_vectors as atlas_vectors_routes
 from routes import atlas_view as atlas_view_routes
 from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
+from routes import course_prerequisites as course_prerequisites_routes
+from routes import cartridge_shape as cartridge_shape_routes
+from routes import reference_health as reference_health_routes
 from routes import seminar_brief as seminar_brief_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
@@ -71,6 +76,10 @@ from routes import llm_models as llm_models_routes
 from routes import personal_map as personal_map_routes
 from routes import my_records as my_records_routes
 from routes import landscape as landscape_routes
+from routes import paper_discovery as paper_discovery_routes
+from routes import corpus as corpus_routes
+from routes import indicators as indicators_routes
+from routes import disclosure as disclosure_routes
 # Tier 3-17c: 旧 routes/admin.py 末尾で `router.include_router(...)` されていた
 # 子ルーター群を、admin.py 経由の二段ネストではなく main.py から直接
 # `/api/admin` prefix でフラットにマウントする（下記「ルーターのマウント」参照）。
@@ -171,6 +180,28 @@ async def _lifespan(application: FastAPI):
             except Exception:  # noqa: BLE001
                 logger.warning("bundled library seed import skipped", exc_info=True)
 
+            # 知識オブジェクト層（migration 078）: live 行の stable_key バックフィル。
+            # fail-open — 失敗しても起動は続ける（旧行は stable_key NULL のまま残り、
+            # 次回起動か次の再解析で付く）。対象ゼロなら何もしない（冪等）。
+            try:
+                from core.knowledge_objects.backfill import backfill_stable_keys
+
+                ko_session = _pg_session()
+                try:
+                    counts = backfill_stable_keys(ko_session)
+                    ko_session.commit()
+                    if counts.get("claims") or counts.get("components"):
+                        logger.info(
+                            "knowledge_objects: stable_key backfill %s", counts
+                        )
+                except Exception:  # noqa: BLE001
+                    ko_session.rollback()
+                    logger.warning("knowledge_objects: stable_key backfill skipped", exc_info=True)
+                finally:
+                    ko_session.close()
+            except Exception:  # noqa: BLE001
+                logger.warning("knowledge_objects: stable_key backfill unavailable", exc_info=True)
+
             # M層（LLM モデル選択, migration 061）: 起動時冪等 env → DB シード取込
             # （設計書 §3 手順⑤→④）+ PolicyBackend を DB 実装へ差し替え。
             # fail-open — シード・差し替えのいずれが失敗しても NullPolicyBackend の
@@ -211,6 +242,15 @@ async def _lifespan(application: FastAPI):
     except Exception:  # noqa: BLE001
         logger.warning("versioning sweeper startup skipped", exc_info=True)
 
+    # 論文ディスカバリー層 Phase 2（migration 072）: 取り込みキューの worker を起動
+    # （best-effort。教員がキューに積んだ行だけを処理する — PD1）
+    try:
+        import ingest_worker as _ingest_worker
+
+        _ingest_worker.start_background_worker()
+    except Exception:  # noqa: BLE001
+        logger.warning("paper discovery ingest worker startup skipped", exc_info=True)
+
     # 状態管理・通知基盤（migration 038）: 遷移検知 watcher を起動（best-effort）
     try:
         from core.status import watcher as _status_watcher
@@ -250,6 +290,17 @@ async def _lifespan(application: FastAPI):
             logger.warning("help_kb admin_ui_anchors validation: %s", violation)
     except Exception:  # noqa: BLE001
         logger.warning("help_kb admin_ui_anchors validation skipped", exc_info=True)
+
+    # カートリッジの形の宣言（concept_registry_design.md §8 / P3-7）の起動時検証
+    # （fail-open）。expects.* が語彙表（core/schema.py）とずれていることを運用上の
+    # 警告として出すだけで、解析の入口は止めない。
+    try:
+        from core.cartridge_shape import validate_all_shapes
+
+        for violation in validate_all_shapes():
+            logger.warning("cartridge shape validation: %s", violation)
+    except Exception:  # noqa: BLE001
+        logger.warning("cartridge shape validation skipped", exc_info=True)
 
     # ヘルプKB Phase 3: content-hash 監査記帳（変化時のみ・冪等、§2-3）と
     # ベクトル補助層の同期（全置換スナップショット、§5 Phase 3 ①）。
@@ -334,6 +385,22 @@ app.include_router(my_records_routes.me_router)
 # 知識ランドスケープ（knowledge_landscape_design.md §9.2）の学習者向け読み取り。
 # ルーター自身が /api/learning プレフィックスを持つため追加 prefix は付けない。
 app.include_router(landscape_routes.learning_router)
+# 論文ディスカバリー層（paper_discovery_design.md §4.3、migration 071）。
+# ルーター自身が /api/admin/discovery プレフィックスを持つため追加 prefix は付けない
+# （landscape と同じ「直接登録」の扱い。admin.router には include しない）。
+app.include_router(paper_discovery_routes.router)
+# コーパス回遊層の学習者向け読み取り（corpus_roaming_design.md §4 / §6 / §7、
+# migration 073）。ルーター自身が /api/learning プレフィックスを持つため追加
+# prefix は付けない（コース非依存 — 可視性ゲートは CR1 の document 可視集合）。
+app.include_router(corpus_routes.learning_router)
+# 制度指標カタログ（indicator_governance_design.md、IG1）。**定義だけ**を返す
+# 読み取り専用ルーターで、値は一切持たない。教員・管理者ゲートを掛けない
+# （観察される側の学習者も定義を読めなければ「全当事者に公開」にならない）。
+app.include_router(indicators_routes.router)
+# 可視性6軸カタログ（disclosure_axes_design.md、DA3）。**宣言だけ**を返す読み取り専用
+# ルーターで、値は一切持たない。外部 AI に何が送られるかを送っている当事者
+# （学習者を含む）が読めなければ告知にならないため、ロールゲートを掛けない。
+app.include_router(disclosure_routes.router)
 
 # Tier 3-17c: 旧 routes/admin.py の `router.include_router(...)` 二段ネストを
 # フラット化。以下の各ルーターは admin.router と同じ "/api/admin" prefix で
@@ -350,6 +417,12 @@ app.include_router(atlas_routes.binding_router, prefix="/api/admin")
 # カテゴリギャップ候補のレビュー（category_gap_candidates_design.md §5.4）。
 # atlas_routes.router と同じ "/cartridges" 配下だがパスが衝突しないためフラット登録で足りる。
 app.include_router(atlas_gaps_routes.router, prefix="/api/admin")
+# 分野マップのベクトル係留（atlas_vector_anchoring_design.md §5 索引の状態・再構築 /
+# §7 別名レジストリ。migration 074）。atlas_routes.router と同じ "/cartridges" 配下。
+app.include_router(atlas_vectors_routes.router, prefix="/api/admin")
+# 分野マップの関係表示（atlas_relation_edges_design.md §5 辺候補のレビュー・判断・
+# 次版下書きへの反映。migration 076）。atlas_routes.router と同じ "/cartridges" 配下。
+app.include_router(atlas_edges_routes.router, prefix="/api/admin")
 app.include_router(doubt_routes.admin_router, prefix="/api/admin")
 app.include_router(_admin_assistant_router, prefix="/api/admin")
 app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
@@ -357,6 +430,18 @@ app.include_router(reconstruction_routes.admin_router, prefix="/api/admin")
 # （GET /api/admin/documents/{ref}/seminar-brief）。reconstruction.admin_router と同型。
 app.include_router(seminar_brief_routes.admin_router, prefix="/api/admin")
 app.include_router(discuss_observation_routes.admin_router, prefix="/api/admin")
+# コースビルダーの前提知識 半順序チェック（learning_units_design.md §6.4 / P2-4）。
+# 下書きだけを入力に取る読み取り専用 API 1本（POST /api/admin/course-builder/prerequisite-check）。
+# routes/admin.py の /course-builder/* とはパスが衝突しないためフラット登録で足りる。
+app.include_router(course_prerequisites_routes.router, prefix="/api/admin")
+# カートリッジの形の宣言と適合事実（concept_registry_design.md §8 / P3-7）。
+# 読み取り専用 API 1本（GET /api/admin/cartridges/{id}/fit）。既存 admin ルーターと
+# パスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
+app.include_router(cartridge_shape_routes.router, prefix="/api/admin")
+# 参照の健全性（knowledge_transfer_design.md §6 / P4-3）。読み取り専用 API 1本
+# （GET /api/admin/documents/{id}/reference-health）。routes/admin.py の /documents/* とは
+# サフィックスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
+app.include_router(reference_health_routes.router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")

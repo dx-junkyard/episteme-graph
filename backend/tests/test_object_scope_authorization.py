@@ -667,3 +667,361 @@ class TestSourceChunkCourseScope:
 
         assert no_course.value.status_code == no_chunk.value.status_code == 404
         assert no_course.value.detail == no_chunk.value.detail
+
+
+# ---------------------------------------------------------------------------
+# F. GET /api/admin/interest-dashboard?course_id=  （2026-09-05 ビジョン監査 C3）
+# ---------------------------------------------------------------------------
+
+
+class TestInterestDashboardAuthorization:
+    """関心集約ダッシュボードも他の教員向け集約（anchor / bridge）と同じ course
+    owner / editor ゲートを、集約処理より先に通す（原則11 オブジェクトスコープ）。"""
+
+    @pytest.mark.parametrize(
+        "user", [_user(OWNER), _user(EDITOR), _user(ADMIN, role="SYSTEM_ADMIN")],
+    )
+    def test_allowed_users_receive_the_aggregate(self, monkeypatch, user):
+        import services as services_module
+
+        calls: list[str] = []
+
+        def _aggregate(course_id, title_map=None, top_n=10):
+            calls.append(course_id)
+            return {"course_id": course_id, "cohort_size": 5, "hotspots": []}
+
+        monkeypatch.setattr(services_module, "aggregate_interest_dashboard", _aggregate)
+
+        result = admin_module.get_interest_dashboard(COURSE_ID, current_user=user)
+
+        assert calls == [COURSE_ID]
+        assert result["indicator_id"] == "interest-dashboard"
+
+    @pytest.mark.parametrize(
+        "user_id,course_id",
+        [
+            (OTHER_TEACHER, COURSE_ID),
+            (VIEWER, COURSE_ID),
+            (OWNER, UNKNOWN_COURSE_ID),
+        ],
+    )
+    def test_denied_users_get_404_and_the_aggregate_is_never_called(
+        self, monkeypatch, user_id, course_id,
+    ):
+        import services as services_module
+
+        def _aggregate(*_a, **_k):
+            raise AssertionError("認可失敗時に集約処理を呼んではならない")
+
+        monkeypatch.setattr(services_module, "aggregate_interest_dashboard", _aggregate)
+
+        with pytest.raises(HTTPException) as exc:
+            admin_module.get_interest_dashboard(course_id, current_user=_user(user_id))
+        assert exc.value.status_code == 404
+
+    def test_detail_identical_for_missing_and_forbidden(self):
+        with pytest.raises(HTTPException) as missing:
+            admin_module.get_interest_dashboard(UNKNOWN_COURSE_ID, current_user=_user(OWNER))
+        with pytest.raises(HTTPException) as forbidden:
+            admin_module.get_interest_dashboard(COURSE_ID, current_user=_user(OTHER_TEACHER))
+        assert missing.value.detail == forbidden.value.detail
+
+    def test_gate_precedes_the_aggregate_call(self):
+        src = extract_function_source(_ADMIN_SRC, "get_interest_dashboard")
+        assert src.index("_require_editable_course_or_404") < src.index("aggregate_interest_dashboard(course_id")
+
+
+# ---------------------------------------------------------------------------
+# G. GET /api/admin/doubt/courses/{cid}/naive-signals
+#    GET /api/admin/doubt/courses/{cid}/observation-targets
+#    （2026-09-05 ビジョン監査: course_id 直指定なのにゲートが無かった2経路）
+# ---------------------------------------------------------------------------
+
+# doubt.py / reconstruction.py は裸 import（`from routes.admin import ...`）で
+# ゲートを束ねるため、テストからも同じモジュール実体（`routes.*`）で触る。
+# `api.routes.*` と `routes.*` は別オブジェクトになり、monkeypatch が効かない。
+import routes.admin as _routes_admin  # noqa: E402
+from routes import doubt as doubt_module  # noqa: E402
+from routes import reconstruction as reconstruction_module  # noqa: E402
+
+_DOUBT_SRC = (_BACKEND / "api" / "routes" / "doubt.py").read_text(encoding="utf-8")
+_RECON_SRC = (_BACKEND / "api" / "routes" / "reconstruction.py").read_text(encoding="utf-8")
+
+
+class TestDoubtCourseScopedRoutes:
+    """D層の course 直指定2経路（学習痕跡の k-匿名集約 / 観測系 claim 一覧）にも、
+    集約より前に course owner / editor ゲートを通す（`_require_teacher` だけでは
+    「TEACHER 以上」しか保証されない）。"""
+
+    @pytest.fixture(autouse=True)
+    def _patch_gate_sources(self, monkeypatch):
+        monkeypatch.setattr(
+            _routes_admin, "get_editable_course_data", _fake_get_editable_course_data,
+        )
+        monkeypatch.setattr(
+            _routes_admin, "_fetch_course_data_row", _fake_fetch_course_data_row,
+        )
+
+    @pytest.mark.parametrize(
+        "user", [_user(OWNER), _user(EDITOR), _user(ADMIN, role="SYSTEM_ADMIN")],
+    )
+    def test_naive_signals_allowed_users_receive_the_aggregate(self, monkeypatch, user):
+        calls: list[str] = []
+
+        def _aggregate(course_id):
+            calls.append(course_id)
+            return {"course_id": course_id, "signals": []}
+
+        monkeypatch.setattr(doubt_module, "aggregate_naive_signals", _aggregate)
+
+        result = doubt_module.get_naive_signals(COURSE_ID, current_user=user)
+
+        assert calls == [COURSE_ID]
+        assert result["course_id"] == COURSE_ID
+
+    @pytest.mark.parametrize(
+        "user_id,course_id",
+        [
+            (OTHER_TEACHER, COURSE_ID),
+            (VIEWER, COURSE_ID),
+            (OWNER, UNKNOWN_COURSE_ID),
+        ],
+    )
+    def test_naive_signals_denied_users_get_404_without_aggregating(
+        self, monkeypatch, user_id, course_id,
+    ):
+        def _aggregate(*_a, **_k):
+            raise AssertionError("認可失敗時に学習痕跡の集約を呼んではならない")
+
+        monkeypatch.setattr(doubt_module, "aggregate_naive_signals", _aggregate)
+
+        with pytest.raises(HTTPException) as exc:
+            doubt_module.get_naive_signals(course_id, current_user=_user(user_id))
+        assert exc.value.status_code == 404
+
+    def test_naive_signals_detail_identical_for_missing_and_forbidden(self, monkeypatch):
+        monkeypatch.setattr(
+            doubt_module, "aggregate_naive_signals",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("呼んではならない")),
+        )
+        with pytest.raises(HTTPException) as missing:
+            doubt_module.get_naive_signals(UNKNOWN_COURSE_ID, current_user=_user(OWNER))
+        with pytest.raises(HTTPException) as forbidden:
+            doubt_module.get_naive_signals(COURSE_ID, current_user=_user(OTHER_TEACHER))
+        assert missing.value.status_code == forbidden.value.status_code == 404
+        assert missing.value.detail == forbidden.value.detail
+
+    @pytest.mark.parametrize(
+        "user", [_user(OWNER), _user(EDITOR), _user(ADMIN, role="SYSTEM_ADMIN")],
+    )
+    def test_observation_targets_allowed_users_receive_targets(self, monkeypatch, user):
+        session = _FakeSession(rows=[])
+        monkeypatch.setattr(doubt_module, "_pg_session", lambda: session)
+        monkeypatch.setattr(
+            doubt_module, "observation_claim_targets",
+            lambda _s, course_id=None: [{"claim_id": "c1", "identified_via": "dsl"}],
+        )
+
+        result = doubt_module.get_observation_targets(COURSE_ID, current_user=user)
+
+        assert result["targets"][0]["claim_id"] == "c1"
+
+    @pytest.mark.parametrize(
+        "user_id,course_id",
+        [
+            (OTHER_TEACHER, COURSE_ID),
+            (VIEWER, COURSE_ID),
+            (OWNER, UNKNOWN_COURSE_ID),
+        ],
+    )
+    def test_observation_targets_denied_users_get_404_without_touching_the_db(
+        self, monkeypatch, user_id, course_id,
+    ):
+        monkeypatch.setattr(doubt_module, "_pg_session", _boom_session)
+        monkeypatch.setattr(
+            doubt_module, "observation_claim_targets",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("呼んではならない")),
+        )
+
+        with pytest.raises(HTTPException) as exc:
+            doubt_module.get_observation_targets(course_id, current_user=_user(user_id))
+        assert exc.value.status_code == 404
+
+    def test_observation_targets_detail_identical_for_missing_and_forbidden(self, monkeypatch):
+        monkeypatch.setattr(doubt_module, "_pg_session", _boom_session)
+        with pytest.raises(HTTPException) as missing:
+            doubt_module.get_observation_targets(UNKNOWN_COURSE_ID, current_user=_user(OWNER))
+        with pytest.raises(HTTPException) as forbidden:
+            doubt_module.get_observation_targets(COURSE_ID, current_user=_user(OTHER_TEACHER))
+        assert missing.value.detail == forbidden.value.detail
+
+    def test_gates_precede_the_aggregate_and_the_session(self):
+        signals = extract_function_source(_DOUBT_SRC, "get_naive_signals")
+        assert signals.index("_require_editable_course_or_404") < signals.index(
+            "aggregate_naive_signals(course_id)"
+        )
+        targets = extract_function_source(_DOUBT_SRC, "get_observation_targets")
+        assert targets.index("_require_editable_course_or_404") < targets.index("_pg_session()")
+
+    def test_gate_is_the_shared_helper_not_a_viewer_gate(self):
+        """閲覧ゲート（get_accessible_course_data 等）を認可に流用しない。"""
+        for fn in ("get_naive_signals", "get_observation_targets"):
+            src = extract_function_source(_DOUBT_SRC, fn)
+            assert "get_accessible_course_data" not in src
+            assert "user_can_view_course" not in src
+
+
+# ---------------------------------------------------------------------------
+# H. GET /api/admin/reconstruction/items/review-queue?document_id=
+#    （course_id 経由だけゲートされ、document_id 直指定は無ゲートだった）
+# ---------------------------------------------------------------------------
+
+
+class TestReconstructionReviewQueueDocumentScope:
+    @pytest.fixture(autouse=True)
+    def _patch_document_gate_sources(self, monkeypatch):
+        """theory_components の編集ゲートを、実 SQL なしで同じ判定に落とす。"""
+        import routes.theory_components as tc
+
+        def _chunks(document_id):
+            entry = _DOCUMENTS.get(document_id)
+            if entry is None:
+                return []
+            return [{"id": "chunk-1", "material_id": entry[1]}]
+
+        monkeypatch.setattr(tc, "_chunks_for_document", _chunks)
+        monkeypatch.setattr(
+            tc, "user_can_edit_document",
+            lambda uid, did: _fake_resolve_document_access(uid, did).can_edit,
+        )
+        monkeypatch.setattr(tc, "resolve_document_access", _fake_resolve_document_access)
+        monkeypatch.setattr(tc, "_find_course_for_chunk", lambda _chunk, _user: None)
+
+    @pytest.mark.parametrize(
+        "user", [_user(OWNER), _user(EDITOR), _user(ADMIN, role="SYSTEM_ADMIN")],
+    )
+    def test_allowed_users_receive_the_queue(self, monkeypatch, user):
+        calls: list = []
+
+        def _queue(document_id=None, document_ids=None):
+            calls.append((document_id, document_ids))
+            return {"items": [{"item_id": "i1"}]}
+
+        monkeypatch.setattr(reconstruction_module, "get_review_queue", _queue)
+
+        result = reconstruction_module.review_queue(
+            document_id=DOC_ID, sort="default", current_user=user,
+        )
+
+        assert calls == [(DOC_ID, None)]
+        assert result["items"][0]["item_id"] == "i1"
+
+    @pytest.mark.parametrize(
+        "user_id,document_id",
+        [
+            (OTHER_TEACHER, DOC_ID),        # 他教員
+            (VIEWER, DOC_ID),               # viewer のみ
+            (VIEWER, PUBLIC_DOC_ID),        # public 文書 ID 直指定（閲覧根拠 ≠ 編集根拠）
+            (OWNER, UNKNOWN_DOC_ID),        # 不明 ID
+        ],
+    )
+    def test_denied_users_get_404_without_reading_the_queue(
+        self, monkeypatch, user_id, document_id,
+    ):
+        def _queue(*_a, **_k):
+            raise AssertionError("認可失敗時に review queue を読んではならない")
+
+        monkeypatch.setattr(reconstruction_module, "get_review_queue", _queue)
+
+        with pytest.raises(HTTPException) as exc:
+            reconstruction_module.review_queue(
+                document_id=document_id, sort="default", current_user=_user(user_id),
+            )
+        assert exc.value.status_code == 404
+
+    def test_detail_identical_for_missing_and_forbidden(self, monkeypatch):
+        monkeypatch.setattr(
+            reconstruction_module, "get_review_queue",
+            lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("呼んではならない")),
+        )
+        with pytest.raises(HTTPException) as missing:
+            reconstruction_module.review_queue(
+                document_id=UNKNOWN_DOC_ID, sort="default", current_user=_user(OWNER),
+            )
+        with pytest.raises(HTTPException) as forbidden:
+            reconstruction_module.review_queue(
+                document_id=DOC_ID, sort="default", current_user=_user(OTHER_TEACHER),
+            )
+        assert missing.value.status_code == forbidden.value.status_code == 404
+        assert missing.value.detail == forbidden.value.detail
+
+    def test_gate_precedes_the_queue_read(self):
+        src = extract_function_source(_RECON_SRC, "review_queue")
+        assert src.index("_ensure_document_editable") < src.index("get_review_queue(document_id)")
+
+
+# ---------------------------------------------------------------------------
+# I. POST /api/admin/schema-proposals/analyze
+#    （ID 直指定ではないが同じ家族の欠落: 全コース横断で学習者の質問原文を読んでいた）
+# ---------------------------------------------------------------------------
+
+
+class TestSchemaAnalysisScope:
+    """目的外利用の禁止: メタ分析が読むのは本人が編集できるコースの質問だけ。"""
+
+    def test_teacher_scope_is_resolved_and_passed_to_the_analyzer(self, monkeypatch):
+        captured: dict = {}
+
+        monkeypatch.setattr(admin_module, "_editable_course_ids", lambda uid: [COURSE_ID])
+
+        def _analyze(course_ids=None, **_k):
+            captured["course_ids"] = course_ids
+            return None
+
+        monkeypatch.setattr(admin_module, "analyze_unanswered_queries", _analyze)
+
+        admin_module.trigger_schema_analysis(current_user=_user(OWNER))
+
+        assert captured["course_ids"] == [COURSE_ID]
+
+    def test_teacher_without_courses_never_calls_the_analyzer(self, monkeypatch):
+        monkeypatch.setattr(admin_module, "_editable_course_ids", lambda uid: [])
+
+        def _analyze(*_a, **_k):
+            raise AssertionError("編集できるコースがゼロなら分析を呼んではならない")
+
+        monkeypatch.setattr(admin_module, "analyze_unanswered_queries", _analyze)
+
+        result = admin_module.trigger_schema_analysis(current_user=_user(OTHER_TEACHER))
+
+        assert "分析対象がありません" in result["message"]
+
+    def test_system_admin_keeps_the_cross_course_scope(self, monkeypatch):
+        captured: dict = {}
+
+        def _boom(_uid):
+            raise AssertionError("SYSTEM_ADMIN は絞り込みを解決しない（全件が対象）")
+
+        monkeypatch.setattr(admin_module, "_editable_course_ids", _boom)
+
+        def _analyze(course_ids=None, **_k):
+            captured["course_ids"] = course_ids
+            return None
+
+        monkeypatch.setattr(admin_module, "analyze_unanswered_queries", _analyze)
+
+        admin_module.trigger_schema_analysis(current_user=_user(ADMIN, role="SYSTEM_ADMIN"))
+
+        assert captured["course_ids"] is None
+
+    def test_scope_query_uses_the_editor_predicate_not_viewer(self):
+        """viewer 権限は学習者の質問原文を読む根拠にしない。"""
+        src = extract_function_source(_ADMIN_SRC, "_editable_course_ids")
+        assert "cgp.permission = 'editor'" in src
+        assert "'viewer'" not in src
+        assert "permission IN" not in src
+
+    def test_route_scopes_before_analyzing(self):
+        src = extract_function_source(_ADMIN_SRC, "trigger_schema_analysis")
+        assert src.index("_editable_course_ids") < src.index("analyze_unanswered_queries(")
+        assert "course_ids=scope" in src

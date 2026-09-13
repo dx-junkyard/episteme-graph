@@ -1,6 +1,8 @@
 """Validation for RhetoricalRoleAgent outputs."""
 from __future__ import annotations
 
+from episteme_graph.agents.alias_matching import mentioned_canonicals
+
 from .schema import (
     CORE_CLAIM_ROLES,
     EXCLUSION_ROLES,
@@ -187,13 +189,10 @@ class RhetoricalRoleValidator:
         issues = []
         for annotation in result.role_annotations:
             block_text = block_text_by_id.get(annotation.block_id, "")
-            lowered = block_text.lower()
-            matched = [
-                canonical
-                for canonical, aliases in cartridge.aliases.items()
-                if canonical.lower() in lowered
-                or any(str(alias).lower() in lowered for alias in aliases)
-            ]
+            # P0-2 / F-7: 部分文字列一致（``str(alias).lower() in lowered``）は alias "SM" を
+            # "cosmological" に当て、原本に 0 回の概念を成果へ注入していた。照合の正本は
+            # agents/alias_matching.py（語境界付き・短い alias は大文字小文字を区別）。
+            matched = mentioned_canonicals(block_text, cartridge.aliases)
             if matched:
                 has_content_span = any(
                     set(span.role_labels) & CORE_CLAIM_ROLES

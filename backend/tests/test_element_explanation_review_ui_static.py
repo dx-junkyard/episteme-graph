@@ -102,6 +102,22 @@ class TestExplanationReviewQueueContract:
         block = _function_block(src, "_bulkReviewExplanations")
         assert "explanation_ids: ids" in block
 
+    def test_bulk_review_reports_which_rows_actually_rendered_evidence(self):
+        """是正 F7b（2026-09-10・六つのレンズ §4 第1波 #5）。
+
+        以前はサーバが「根拠が出ていた」を断言していた。クライアントは DOM の実測
+        （カードに逐語引用の要素があるか）だけを申告する（数値は送らない）。
+        """
+        src = _read(DELIBERATION_JS)
+        block = _function_block(src, "_bulkReviewExplanations")
+        assert "evidence_rendered_ids: _explanationReviewEvidenceRenderedIds(ids)" in block
+        measured = _function_block(src, "_explanationReviewEvidenceRenderedIds")
+        assert "deliberation-explanation-review-card" in measured
+        assert "deliberation-annotation-reason" in measured
+        # 滞在時間・回数は測らない（原則5: 監視しない）。
+        for banned in ("Date.now()", "setInterval(", "dwell"):
+            assert banned not in measured
+
     def test_single_card_decide_reuses_existing_element_explanations_endpoint(self):
         """キュー内の単件承認/却下も既存の element-explanations 承認 API を使う
         （C層・E2 の唯一の承認台帳を分裂させない）。"""

@@ -109,3 +109,63 @@ def test_cartridge_alias_without_content_role_is_warning():
     )
     issues = VALIDATOR.validate(_result(span), {"b1": "RΛc is shown in figure 1."}, cartridge)
     assert any(i.rule_id == "cartridge_alias_without_content_role" for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# P0-2: cartridge alias の照合は語境界付き（部分文字列一致の廃止, F-7）
+# ---------------------------------------------------------------------------
+
+def _sm_cartridge():
+    return CartridgeContext(
+        cartridge_id="test",
+        ontology={},
+        validation_rules={},
+        aliases={"Standard Model": ["SM"]},
+    )
+
+
+def _reject_result_for(text: str):
+    span = _span(
+        text=text,
+        char_start=0,
+        char_end=len(text),
+        role_labels=["figure_narration"],
+        is_claim_candidate=False,
+        is_reject_candidate=True,
+    )
+    return _result(span)
+
+
+def test_short_alias_does_not_match_inside_word():
+    """alias "SM" が "cosmological" に部分一致して誤注入していた回帰。"""
+    text = "The cosmological constant is small."
+    issues = VALIDATOR.validate(
+        _reject_result_for(text), {"b1": text}, _sm_cartridge()
+    )
+    assert not [i for i in issues if i.rule_id == "cartridge_alias_without_content_role"]
+
+
+def test_short_alias_matches_whole_word_case_sensitively():
+    text = "The SM prediction is shown in figure 1."
+    issues = VALIDATOR.validate(
+        _reject_result_for(text), {"b1": text}, _sm_cartridge()
+    )
+    matched = [i for i in issues if i.rule_id == "cartridge_alias_without_content_role"]
+    assert matched
+    assert "Standard Model" in matched[0].message
+
+
+def test_canonical_name_matches_case_insensitively_at_word_boundary():
+    text = "The standard model prediction is shown in figure 1."
+    issues = VALIDATOR.validate(
+        _reject_result_for(text), {"b1": text}, _sm_cartridge()
+    )
+    assert [i for i in issues if i.rule_id == "cartridge_alias_without_content_role"]
+
+
+def test_canonical_name_does_not_match_partial_word():
+    text = "The standard modeling workflow is shown in figure 1."
+    issues = VALIDATOR.validate(
+        _reject_result_for(text), {"b1": text}, _sm_cartridge()
+    )
+    assert not [i for i in issues if i.rule_id == "cartridge_alias_without_content_role"]

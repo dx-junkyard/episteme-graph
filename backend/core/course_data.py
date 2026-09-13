@@ -35,6 +35,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# 記号判定の正本は A層の P0-3（``knowledge_structure_review_2026-09-12`` §4 Phase 0）。
+# ここで第2の正規表現・第2の閾値を書かない（``claim_concept_grounding_design.md`` CG6）。
+from episteme_graph.agents.component_assembly.schema import is_symbol_like_concept_name
+
 
 # ---------------------------------------------------------------------------
 # Pydantic モデル群（スキーマの正本・カタログ文書化）
@@ -50,6 +54,60 @@ class CoursePrerequisite(BaseModel):
 
     name: str | None = None
     status: str | None = "not_started"  # mastered | partial | not_started
+    # learning_units_design.md §6.4 (P2-4): 前提を「名前」ではなく同コース topic の
+    # ``id`` で参照する additive 列。解決（正規化題名の完全一致）は
+    # ``core/course_prerequisites.py`` が担い、一致しなければ **None のまま**
+    # （推測しない）。``name`` は表示用として常に残す（情報を落とさない）。
+    topic_id: str | None = None
+
+
+def is_symbol_concept_name(name: object) -> bool:
+    """概念名が記号層に属するか（学習者の概念マップから外す判定）。
+
+    正本: ``docs/features/claim_concept_grounding_design.md`` §8 / CG6。判定は A層
+    :func:`is_symbol_like_concept_name`（P0-3）に委譲し、加えて 1 文字の名前を落とす
+    （設計書 §8 の「+ 1 文字」。``λ`` のような 1 文字は A層の規則でも落ちるが、
+    ``x`` のような 1 文字 ASCII も概念にしない意図をここで明示する）。
+
+    **記号を消す規律ではない**（P0-3 と同じ姿勢）: 概念マップに出さないだけで、
+    除いた名前は ``data.excluded_symbol_concepts`` に残り（CG5）、記号そのものは
+    ``knowledge_symbols`` / symbol_registry が正本として保持する。
+    """
+    token = str(name or "").strip()
+    if len(token) <= 1:
+        return True
+    return is_symbol_like_concept_name(token)
+
+
+#: ``topic.units[].source`` の語彙（learning_units_design.md §6.1）。
+#: - teacher_selected: コースビルダーで教員が選んだ（候補 handle 経由）
+#: - title_match: freeze の救済（文字列一致）で後付けした = 教員は選んでいない
+UNIT_SOURCE_TEACHER_SELECTED = "teacher_selected"
+UNIT_SOURCE_TITLE_MATCH = "title_match"
+COURSE_TOPIC_UNIT_SOURCES: tuple[str, ...] = (
+    UNIT_SOURCE_TEACHER_SELECTED,
+    UNIT_SOURCE_TITLE_MATCH,
+)
+
+
+class CourseTopicUnit(BaseModel):
+    """``topics[].units[]`` の要素（learning_units_design.md §6.1・additive）。
+
+    topic が束ねた「学ぶ単位」への参照。``stable_key`` が正本の参照キーで、
+    再解析（supersede）後も同じ単位を指す。``unit_id`` は保存時点の live 行の
+    UUID（表示・照合の補助）で、参照の同一性には使わない。
+
+    **学習者向け DTO には ``stable_key`` / ``unit_id`` を出さない**（KO10 と同じ規律。
+    射影は ``learner_topic_units_projection()`` が正本）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    kind: str | None = None  # core/schema.py::LEARNING_UNIT_KINDS
+    stable_key: str | None = None
+    unit_id: str | None = None
+    label: str | None = ""
+    source: str | None = None  # COURSE_TOPIC_UNIT_SOURCES
 
 
 class CourseMisconception(BaseModel):
@@ -80,6 +138,9 @@ class CourseTopic(BaseModel):
 
     prerequisites: list[CoursePrerequisite | str] = Field(default_factory=list)
     misconceptions: list[CourseMisconception] = Field(default_factory=list)
+    # learning_units_design.md §6.1 (P2-3): このトピックが束ねた「学ぶ単位」。
+    # 空のトピックは従来どおり文字列一致（救済）で成果と結ばれる（LU1）。
+    units: list[CourseTopicUnit] = Field(default_factory=list)
 
     summary: str | None = ""
     content: str | None = ""
@@ -225,6 +286,9 @@ class CourseData(BaseModel):
     # PUT .../atlas-binding/pending のみ。バインド保存（PUT .../atlas-binding）成功時に
     # 自動クリアされる（意思決定がなされたため）。
     atlas_binding_pending: str | None = None
+    # claim_concept_grounding_design.md §8 / CG5・CG6: 概念マップから外した記号名。
+    # 書き手は routes/learning.py::create_course のみ（学習者向け DTO には出ない）。
+    excluded_symbol_concepts: list[str] = Field(default_factory=list)
 
     # --- 読み取り専用（書き手不在）。LLM プロンプト補助情報として読まれるのみ ---
     domain: str | None = None
@@ -244,11 +308,21 @@ def course_topics(data: dict | None) -> list[dict]:
 
     章ネスト形 (``chapters[].topics[]``) は含まない。両方見る必要がある場合は
     ``iter_all_topics()`` を使うこと。
+
+    ``course_sources()`` と ``iter_all_topics()`` の章ネスト側と同じく、**非 dict 要素は
+    除外する**（``course_chapters()`` の docstring が「``course_topics()`` とは異なり
+    位置保存を優先する」と述べている側の挙動）。トピックは位置ではなく ``topic_id`` /
+    ``title`` で参照されるため、位置を保つ必要が無い。除外しないと ``None`` や文字列が
+    そのまま呼び出し側へ流れ、``topic.get(...)`` を呼ぶ各層（``lecture`` /
+    ``status.projector`` / ``next_steps`` ほか）で AttributeError になる — この
+    モジュールが素の dict アクセスを引き受けている意味が失われる。
     """
     if not isinstance(data, dict):
         return []
     topics = data.get("topics")
-    return topics if isinstance(topics, list) else []
+    if not isinstance(topics, list):
+        return []
+    return [t for t in topics if isinstance(t, dict)]
 
 
 def iter_all_topics(data: dict | None) -> list[dict]:
@@ -268,6 +342,46 @@ def iter_all_topics(data: dict | None) -> list[dict]:
                 result.append(topic)
     result.extend(course_topics(data))
     return result
+
+
+def topic_units(topic: dict | None) -> list[dict]:
+    """``topic.units`` を dict のリストで返す（learning_units_design.md §6.1）。
+
+    非 dict 要素・``stable_key`` が空の要素は落とす（参照キーの無い unit は
+    freeze 側で何も束ねられないため、持ち回っても意味が無い）。順序は保存順。
+    """
+    if not isinstance(topic, dict):
+        return []
+    units = topic.get("units")
+    if not isinstance(units, list):
+        return []
+    return [u for u in units if isinstance(u, dict) and str(u.get("stable_key") or "").strip()]
+
+
+def topic_unit_keys(topic: dict | None) -> list[str]:
+    """``topic.units[].stable_key`` を順序保持・重複除去で返す。
+
+    freeze（``course_content_builder``）が ``learning_units_live`` を読むときの
+    キー集合。``topic_units()`` と同じ防御（非 dict / 空キーの除外）を通る。
+    """
+    return list(dict.fromkeys(str(u["stable_key"]).strip() for u in topic_units(topic)))
+
+
+def learner_topic_units_projection(topic: dict | None) -> list[dict]:
+    """学習者向け DTO 用の ``topic.units`` 射影（``kind`` / ``label`` だけ）。
+
+    learning_units_design.md §6.1 / KO10: ``stable_key`` / ``unit_id`` / 内部の
+    出所 ID を学習者へ出さない。``source``（teacher_selected / title_match）も
+    教員側の確定の来歴なので学習者へは出さない。``label`` が空の unit は落とす
+    （内部 ID を表示名に昇格させない）。
+    """
+    projected: list[dict] = []
+    for unit in topic_units(topic):
+        label = str(unit.get("label") or "").strip()
+        if not label:
+            continue
+        projected.append({"kind": str(unit.get("kind") or ""), "label": label})
+    return projected
 
 
 def course_chapters(data: dict | None) -> list:
@@ -357,6 +471,23 @@ def course_focus(data: dict | None) -> str:
     if not isinstance(data, dict):
         return ""
     return str(data.get("course_focus") or "").strip()
+
+
+def excluded_symbol_concepts(data: dict | None) -> list[str]:
+    """``data.excluded_symbol_concepts`` を list[str] で返す（無ければ ``[]``）。
+
+    コース登録時に概念マップから外した記号名（``claim_concept_grounding_design.md``
+    §8 / CG5「情報を落とさない」）。**学習者向け DTO には出さない**
+    （``api/schemas.py::LearningCourseDetail`` はホワイトリストなので、キーを足しても
+    学習者には届かない）。教員が「何が概念として扱われなかったか」を後から辿るための
+    記録で、件数・割合を UI に出す用途では使わない（CG7）。
+    """
+    if not isinstance(data, dict):
+        return []
+    values = data.get("excluded_symbol_concepts")
+    if not isinstance(values, list):
+        return []
+    return [str(v).strip() for v in values if str(v or "").strip()]
 
 
 def course_llm_models(data: dict | None) -> dict:

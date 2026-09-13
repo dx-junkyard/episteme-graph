@@ -9,9 +9,17 @@ SQL インジェクションを構造的に防ぐ。
 （``user_id`` → ``display_name``・「未帰属」「不明ユーザー」）は呼び出し側
 （``routes/llm_usage.py``）の責務— この関数は集計値のみを返し、users テーブルを
 JOIN しない（U5 の権限判定を呼び出し側に閉じ込めるため）。
+
+``recent_document_run_estimate()``（設計書 §7-2 の姉妹関数）は、``llm_usage_events`` に
+既に溜まった**実績**を document 単位に合算し、「1論文あたりの目安レンジ」を導出する
+（論文ディスカバリー層 Phase 2 のバッチ取り込み事前見積り用）。U1 に従い reported と
+estimated は分離したまま返し、U5 に従いレンジのみ・金額を含めない。実績が無ければ
+``available: False`` を返す（捏造しない）。
 """
 
 from __future__ import annotations
+
+import math
 
 from sqlalchemy import text as sa_text
 
@@ -171,4 +179,143 @@ def collect_metrics(
         "rows": rows_out,
         "dropped_events": dropped_count(),
         "price_table_loaded": price_table is not None,
+    }
+
+
+# ===========================================================================
+# 直近の解析実績にもとづく「1論文あたりの目安」（論文ディスカバリー層 Phase 2）
+# ===========================================================================
+
+#: 目安の母数にする直近 document 数（多すぎると古い運用条件を引きずる）。
+DEFAULT_SAMPLE_DOCUMENTS = 20
+
+#: パイプライン（解析）由来の feature 接頭辞。学習チャット等の実績を混ぜない。
+PIPELINE_FEATURE_PREFIX = "pipeline:"
+
+#: 目安レンジの幅（観測の最小〜最大ではなく、中央値の上下に取る保守的な幅）。
+#: 点推定を見せないための係数で、``document_estimate`` の ±40% と同じ思想
+#: （こちらは実績分布なので少し狭い ±25%）。
+ESTIMATE_SPREAD = 0.25
+
+#: 目安の出所を必ず添える事実文（何にもとづく数字かを隠さない）。
+BASIS_NOTE = (
+    "直近の解析実績にもとづく目安です。"
+    "実測（reported）と推計（estimated）は合算していません。"
+)
+
+#: 実績が1件も無いときの事実文（架空の目安を出さない）。
+NO_BASIS_NOTE = "解析の実績がまだないため、目安を示せません。"
+
+
+def _median(values: list[int]) -> float:
+    ordered = sorted(values)
+    n = len(ordered)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2 == 1:
+        return float(ordered[mid])
+    return (ordered[mid - 1] + ordered[mid]) / 2.0
+
+
+def _spread_range(point: float) -> list[int]:
+    """点推定をレンジ化する（点推定そのものは返さない — U5）。"""
+    point = max(0.0, float(point))
+    low = math.floor(point * (1 - ESTIMATE_SPREAD))
+    high = math.ceil(point * (1 + ESTIMATE_SPREAD))
+    return [max(0, low), max(0, max(low, high))]
+
+
+def _bucket_estimate(per_document_totals: list[int], item_count: int) -> dict | None:
+    """1バケット（reported or estimated）分の目安を組む。実績ゼロなら ``None``。"""
+    if not per_document_totals:
+        return None
+    point = _median(per_document_totals)
+    return {
+        "per_document": {
+            "total_tokens_range": _spread_range(point),
+            "documents": len(per_document_totals),
+        },
+        "batch": {"total_tokens_range": _spread_range(point * max(0, int(item_count)))},
+    }
+
+
+def recent_document_run_estimate(
+    session, *, item_count: int = 1, sample_documents: int = DEFAULT_SAMPLE_DOCUMENTS
+) -> dict:
+    """直近の解析実績から「1論文あたり / N件ぶん」のトークン目安を返す。
+
+    ``llm_usage_events`` のうち ``feature LIKE 'pipeline:%'`` の行を **document 単位**
+    （``document_id``。無い行は ``run_id``）で合算し、その分布の中央値を目安の中心に
+    使う。usage_source は U1 に従い reported / estimated を**分離したまま**返す
+    （合算した単一数値を作らない）。
+
+    Returns:
+        実績があれば::
+
+            {"available": True, "item_count": N,
+             "per_document": {"reported": {...} | None, "estimated": {...} | None},
+             "batch":        {"reported": {...} | None, "estimated": {...} | None},
+             "sample_documents": M, "basis_note": "..."}
+
+        いずれのバケットにも実績が無ければ
+        ``{"available": False, "item_count": N, "note": NO_BASIS_NOTE}``。
+
+        **点推定・金額のキーは一切含めない**（U5）。
+    """
+    count = max(0, int(item_count or 0))
+    sample = max(1, min(200, int(sample_documents or DEFAULT_SAMPLE_DOCUMENTS)))
+
+    rows = session.execute(
+        sa_text(
+            """
+            SELECT usage_source, doc_key, doc_total
+              FROM (
+                SELECT usage_source,
+                       COALESCE(document_id::text, run_id::text) AS doc_key,
+                       COALESCE(SUM(total_tokens), 0) AS doc_total,
+                       MAX(occurred_at) AS last_seen
+                  FROM llm_usage_events
+                 WHERE feature LIKE :prefix
+                   AND COALESCE(document_id::text, run_id::text) IS NOT NULL
+                 GROUP BY usage_source, COALESCE(document_id::text, run_id::text)
+              ) AS per_doc
+             ORDER BY last_seen DESC
+             LIMIT :limit
+            """
+        ),
+        {"prefix": PIPELINE_FEATURE_PREFIX + "%", "limit": sample * 2},
+    ).fetchall()
+
+    totals_by_bucket: dict[str, list[int]] = {"reported": [], "estimated": []}
+    seen_keys: dict[str, set] = {"reported": set(), "estimated": set()}
+    for row in rows:
+        bucket = _bucket_name(str(row[0] or ""))
+        key = row[1]
+        if key is None or key in seen_keys[bucket]:
+            continue
+        if len(seen_keys[bucket]) >= sample:
+            continue
+        seen_keys[bucket].add(key)
+        totals_by_bucket[bucket].append(int(row[2] or 0))
+
+    reported = _bucket_estimate(totals_by_bucket["reported"], count)
+    estimated = _bucket_estimate(totals_by_bucket["estimated"], count)
+
+    if reported is None and estimated is None:
+        return {"available": False, "item_count": count, "note": NO_BASIS_NOTE}
+
+    return {
+        "available": True,
+        "item_count": count,
+        "per_document": {
+            "reported": reported["per_document"] if reported else None,
+            "estimated": estimated["per_document"] if estimated else None,
+        },
+        "batch": {
+            "reported": reported["batch"] if reported else None,
+            "estimated": estimated["batch"] if estimated else None,
+        },
+        "sample_documents": len(seen_keys["reported"]) + len(seen_keys["estimated"]),
+        "basis_note": BASIS_NOTE,
     }

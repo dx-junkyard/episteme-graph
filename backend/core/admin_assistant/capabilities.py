@@ -87,6 +87,13 @@ _REGISTRY: list[Capability] = [
         revert={"strategy": "restore_visibility"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
+            # 2026-09-03 是正: 行操作は「⋯」メニューに畳まれており、開くまでメニュー項目は
+            # DOM に存在しない（admin.js の materialPipelineMenuHtml / material-more-panel）。
+            # materials.paper_radar と同じく、まずメニューのトリガーを点灯する（P8: 誘導まで）。
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "material_share_button", "「共有設定…」を押します",
+                  precondition="material_menu_open"),
             _step("materials", "material_visibility_control", "開示範囲を選びます", precondition="material_selected"),
         ),
     ),
@@ -105,6 +112,128 @@ _REGISTRY: list[Capability] = [
         api={"method": "DELETE", "path": "/api/admin/materials/{material_id}"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "削除したい教材を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "material_delete_button", "メニュー末尾の「削除…」を押します",
+                  precondition="material_menu_open"),
+        ),
+    ),
+    # URL 指定による教材取得（url_material_upload_design.md UF1〜UF6）: 取得先は
+    # システム管理者が許可リストに登録したドメインのみ（初期状態は空 = 機能無効）。
+    # 取得後は既存アップロードとまったく同じ経路に合流するため、代行は登録せず道案内に留める。
+    Capability(
+        id="materials.url_upload",
+        screen="materials",
+        title="URL を指定して教材を取得する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#url-upload",
+        description="論文の URL（PDF または TeX の .tar.gz）を指定してサーバに取得させ、"
+                    "ファイルをアップロードした場合と同じ解析パイプラインに乗せる。"
+                    "取得できるのは管理者が許可リストに登録したドメインのみ。",
+        api={"method": "POST", "path": "/api/admin/materials/upload-from-url"},
+        locate_steps=(
+            _step("materials", "url_upload_button",
+                  "アップロード領域の中にある「URLから取得（arXiv など）」を押します"),
+        ),
+    ),
+    # 教材行の「⋯」メニュー自体の説明（admin_ux_issues_2026-08-01.md §2.3 の2層化）。
+    # 行に常時出ているのは「パイプラインを実行 ▼」と「⋯」だけなので、
+    # 「行にボタンが見当たらない」という問い合わせの受け皿として登録する。
+    Capability(
+        id="materials.row_actions_menu",
+        screen="materials",
+        title="教材行の「⋯」メニューから操作を探す",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#row-menu",
+        description="教材一覧の行に常に出ているのは「パイプラインを実行 ▼」と「⋯」の 2 つだけ。"
+                    "図・画像 / 検出要素 / グラフレビュー / 共有設定 / 版の管理 / 位置づけ / "
+                    "近い論文を探す / 解析コスト見積り / 削除 などは「⋯」メニューの中にある。",
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」を押すと操作の一覧が開きます",
+                  precondition="material_selected"),
+        ),
+    ),
+    # グラフ対話レビュー（graph_dialogue_review_design.md GR1）: 承認・却下は常に人間で、
+    # AI との対話から承認 API を呼ぶ経路は存在しない。代行は登録せず道案内に留める。
+    Capability(
+        id="materials.graph_review",
+        screen="materials",
+        title="グラフを見ながら論理要素・主張を確認・承認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#graph-review",
+        description="理論操作グラフを見取り図に、未レビューのノードをたどりながら AI と対話し、"
+                    "論理要素（component）と根拠の主張（claim）を承認・却下する。"
+                    "閲覧権限だけの場合は表示と対話まで（承認・却下には編集権限が必要）。",
+        api={"method": "POST", "path": "/api/admin/deliberation/documents/{document_id}/graph-sessions"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_graph_review_button",
+                  "行のグラフのアイコン（グラフレビュー）を押します",
+                  precondition="material_selected"),
+        ),
+    ),
+    # 知識ランドスケープ（knowledge_landscape_design.md LS2）: AI 配置は inferred 止まりで、
+    # 確定は教員の操作だけ。代行は登録せず道案内に留める。
+    Capability(
+        id="materials.review_landscape",
+        screen="materials",
+        title="論文の位置づけ（分野マップ）を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#landscape",
+        description="この論文が分野マップのどのアンカーに位置づくかの AI 候補を分野ごとに確認し、"
+                    "[確認][却下][再検討] で状態を変える。AI が出したものは「AIによる推定（未確認）」の"
+                    "ままで、確定は教員の操作だけ。どこにも置けなかった分野は理由付きで表示される。",
+        api={"method": "GET", "path": "/api/admin/landscape/documents/{document_ref}/placements"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "material_landscape_button", "「位置づけ（分野マップ）…」を押します",
+                  precondition="material_menu_open"),
+        ),
+    ),
+    # 論文ディスカバリー（paper_discovery_design.md §4.4）: 「arXivから探す」の道案内。
+    # 取り込み実行（POST /api/admin/discovery/ingest）の代行 capability は登録しない —
+    # LLM コストを伴う操作を Copilot の代行に載せない判断（PD1: 承認は教員の明示操作）。
+    Capability(
+        id="materials.arxiv_discovery",
+        screen="materials",
+        title="arXiv から論文を探して取り込む",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#arxiv-discovery",
+        description="分野の条件（arXiv カテゴリ・キーフレーズ）で arXiv を検索し、"
+                    "候補の一覧から選んだ論文だけを教材として取り込む。"
+                    "候補を並べるところまでが自動で、取り込みは教員の明示操作のみ。",
+        api={"method": "POST", "path": "/api/admin/discovery/search"},
+        locate_steps=(
+            _step("materials", "paper_discovery_button",
+                  "アップロード領域の中にある「arXivから探す」を押します"),
+        ),
+    ),
+    # 論文レーダー（paper_radar_design.md §4.2）: 教材1件を起点にした類似論文探索の道案内。
+    # 比較分析（POST /api/admin/discovery/radar/compare）・取り込みの代行 capability は
+    # 登録しない — arxiv_discovery と同じ判断（LLM コストを伴う操作を Copilot 代行に
+    # 載せない / 取り込みの弁は教員の明示操作のまま。PR3/PR5）。
+    Capability(
+        id="materials.paper_radar",
+        screen="materials",
+        title="この論文に近い論文を探す（論文レーダー）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#paper-radar",
+        description="教材（論文）を起点に、距離（近い / 中間 / 同じ分野の別テーマ）を選んで "
+                    "arXiv から類似論文の候補を並べる。必要なら候補との違いを AI に分析させ、"
+                    "取り込みは既存の取り込み操作（教員の明示操作）で行う。",
+        api={"method": "POST", "path": "/api/admin/discovery/radar/search"},
+        locate_steps=(
+            _step("materials", "paper_radar_row_button",
+                  "起点にしたい教材の行の 📡 アイコン（近い論文を探す）を押します"),
         ),
     ),
     # --- コース構築 (course-builder) ---
@@ -204,19 +333,54 @@ _REGISTRY: list[Capability] = [
     ),
     Capability(
         id="course.delete",
-        screen="course-management",
+        # 2026-09-03 是正: コース管理タブにコース削除の UI は無い。削除ボタンは
+        # 「コース構築」タブの「既存コースを読込」モーダル内の行にしかないため、
+        # screen / locate_steps とも到達可能な経路（course-builder）に合わせる。
+        screen="course-builder",
         title="コースを削除する",
         required_role=ROLE_TEACHER,
         kind=KIND_ACTION,
-        scope="own_course",
+        # 2026-09-03 是正: 実 API（routes/admin.py::delete_course）のゲートは
+        # `user_can_edit_course` = 所有者 **または** editor 権限グループのメンバー。
+        # scope="own_course" は実際より狭い宣言だった。
+        # 注: routes/admin_assistant.py が実際に enforce するのは "own_course" のみで、
+        # この capability には action handler が無い（代行は 501）。宣言が緩む分を
+        # 埋めるため、ガードレール（test_admin_assistant.py）で
+        # 「未 enforce の scope を持つ action capability に handler が無いこと」を固定する。
+        scope="editable_course",
         reversible=False,
         confirm=True,
         target_type="course",
         howto_doc="admin_operations/course.md#delete",
-        description="コースを削除する（取り消し不可）。",
+        description="コースを削除する（取り消し不可）。削除ボタンはコース管理タブではなく"
+                    "「コース構築」タブの「既存コースを読込」モーダルの中にある。",
         api={"method": "DELETE", "path": "/api/admin/courses/{course_id}"},
         locate_steps=(
-            _step("course-management", "course_row:{course_id}", "削除したいコースを選びます"),
+            _step("course-builder", "import_course_button",
+                  "チャット欄の上にある「既存コースを読込」を押します"),
+            _step("course-builder", "course_delete_button",
+                  "一覧から対象のコースの行の「削除」を押します（確認でコース名の入力が必要です）",
+                  precondition="import_course_modal_open"),
+        ),
+    ),
+    # リリース前の確認（release_review_flow_design.md RR1〜RR7）: 学習マップの割り当て →
+    # 論文の位置づけ → 公開 の 3 ステップウィザード。各ステップに「あとで」があり、
+    # 飛ばしても学習者側の表示は変わらない（リリースを止めない, RR7）。
+    Capability(
+        id="course.release_review",
+        screen="course-management",
+        title="リリース前に確認して公開する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/course.md#release-review",
+        description="コースの「確認して公開」から、学習マップの割り当て・論文の位置づけ・公開を"
+                    "3 ステップで確認する。「次へ」を押すと、表示されている内容を確認したものとして"
+                    "記録される。各ステップは「あとで」で飛ばせる。",
+        api={"method": "POST", "path": "/api/admin/landscape/courses/{course_id}/placements/accept"},
+        locate_steps=(
+            _step("course-management", "course_row:{course_id}", "対象のコースを選びます"),
+            _step("course-management", "release_review_button", "「確認して公開」を押します",
+                  precondition="course_selected"),
         ),
     ),
     # --- ガイダンス層（G層）Next Steps が参照する道案内専用 capability（設計 §3.2）---
@@ -244,7 +408,9 @@ _REGISTRY: list[Capability] = [
         target_type="cartridge",
         howto_doc="admin_operations/atlas.md#generate",
         description="カートリッジの骨格 draft を LLM で生成する（凍結前は再生成可）。",
-        api={"method": "POST", "path": "/api/admin/{cartridge_id}/atlas/skeleton/generate"},
+        # 2026-09-03 是正: 実パスは `/api/admin/cartridges/{cartridge_id}/...`
+        # （routes/atlas.py の APIRouter(prefix="/cartridges") + main.py の "/api/admin"）。
+        api={"method": "POST", "path": "/api/admin/cartridges/{cartridge_id}/atlas/skeleton/generate"},
         locate_steps=(
             _step("atlas", "atlas_generate_button", "骨格を生成するボタンを押します"),
         ),
@@ -260,7 +426,43 @@ _REGISTRY: list[Capability] = [
         target_type="cartridge",
         howto_doc="admin_operations/atlas.md#freeze",
         description="骨格 draft を凍結して版として確定する（取り消し不可）。",
-        api={"method": "POST", "path": "/api/admin/{cartridge_id}/atlas/skeleton/freeze"},
+        # 2026-09-03 是正: generate と同じく `cartridges/` プレフィックスが必要。
+        api={"method": "POST", "path": "/api/admin/cartridges/{cartridge_id}/atlas/skeleton/freeze"},
+    ),
+    # 分野の地図のレビューキュー（修正報告 / 論文の解析から見つかった候補 / 関係（辺）の候補）。
+    # いずれも教員の採用操作までは骨格に反映されない（KN-3/AB4: AI・サーバは draft を書かない）。
+    Capability(
+        id="atlas.review_reports",
+        screen="atlas",
+        title="修正報告と候補をレビューする",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/atlas.md#review-queue",
+        description="分野の地図の「修正報告のレビュー」区画で、修正報告・論文の解析から見つかった候補・"
+                    "関係（辺）の候補を採用/見送りする。採用したものは「下書きへ反映」で次版に取り込む。"
+                    "行を消す操作は無く、見送りも記録として残る。",
+        api={"method": "GET", "path": "/api/admin/cartridges/{cartridge_id}/atlas/reports"},
+        locate_steps=(
+            _step("atlas", "atlas_reports_section", "「修正報告のレビュー」区画を確認します"),
+        ),
+    ),
+    # VA層（atlas_vector_anchoring_design.md）: ベクトル索引と別名レジストリ。
+    # 別名は status 遷移のみで削除 API を持たない（VA6）。
+    Capability(
+        id="atlas.vector_index_aliases",
+        screen="atlas",
+        title="ベクトル索引を再構築し、別名を登録する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/atlas.md#vector-aliases",
+        description="公開中の骨格の各項目に論文と同じ空間での索引を作り（「索引を再構築」）、"
+                    "同じものを指す別の表記を別名として登録する。別名は索引と論文検索の"
+                    "キーフレーズに使われる。「見送り」は行を消す操作ではない。",
+        api={"method": "POST", "path": "/api/admin/cartridges/{cartridge_id}/atlas/vectors/refresh"},
+        locate_steps=(
+            _step("atlas", "atlas_vectors_refresh_button", "「索引を再構築」を押します"),
+            _step("atlas", "atlas_aliases_section", "「登録済みの別名」区画で別名を登録・確認します"),
+        ),
     ),
     # --- ユーザー管理 (students / teachers) ---
     # 2026-07-29 是正: 学生・教員アカウント作成フォームは #tab-groups ではなく
@@ -506,6 +708,29 @@ _REGISTRY: list[Capability] = [
                   "台帳ノードの詳細ペインで「検証状態を記帳する」ボタンを押します"),
         ),
     ),
+    # SL層（stakes_ledger_design.md SL2/SL3）: 「何が起これば覆るのか」の記帳。
+    # 到達可能性は人間専用語彙で worker が書かない。AI 候補は候補のままで、
+    # 教員が「確認して記帳」を押すまで確定しない。
+    Capability(
+        id="doubt.record_falsification_conditions",
+        screen="doubt-atlas",
+        title="覆る条件を記帳する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/doubt.md#falsification-conditions",
+        description="台帳ノードの「覆る条件」区画で、この主張が何が起これば覆るのかを記帳する。"
+                    "手で記帳するほか、AI に候補を出させて確認・記帳もできる。"
+                    "到達可能性は人が判断して記帳する項目で、AI は書き込まない。"
+                    "まだ何も記帳されていない状態はエラーではなく、そのままの事実。",
+        api={"method": "POST",
+             "path": "/api/admin/doubt/ledger/{target_type}/{target_id}/falsification-conditions"},
+        locate_steps=(
+            _step("doubt-atlas", "doubt_falsification_form_button",
+                  "台帳ノードの詳細ペインで「覆る条件を記帳する」を押します"),
+            _step("doubt-atlas", "doubt_falsification_refresh_button",
+                  "AI の候補から選びたいときは「AIに候補を出してもらう」を押します"),
+        ),
+    ),
     Capability(
         id="doubt.manage_challenge",
         screen="doubt-atlas",
@@ -580,11 +805,15 @@ _REGISTRY: list[Capability] = [
         kind=KIND_GUIDANCE_ONLY,
         howto_doc="admin_operations/materials.md#manage-shared-version",
         description="教材の解析成果を共有版として発行し、削除猶予を予約・取消する。",
+        # 実ルートは `/api/admin/shared/{object_type}/{object_id}/releases`。
+        # ここは object_type を "document" に固定した具体パスとして宣言する。
         api={"method": "POST", "path": "/api/admin/shared/document/{object_id}/releases"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
-            _step("materials", "shared_version_button", "「版の管理」を押します",
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
                   precondition="material_selected"),
+            _step("materials", "shared_version_button", "「版の管理…」を押します",
+                  precondition="material_menu_open"),
         ),
     ),
     Capability(
@@ -595,6 +824,7 @@ _REGISTRY: list[Capability] = [
         kind=KIND_GUIDANCE_ONLY,
         howto_doc="admin_operations/course.md#manage-shared-version",
         description="コースを共有版として発行し、削除猶予を予約・取消する。",
+        # 実ルートは `/api/admin/shared/{object_type}/{object_id}/releases`（object_type="course"）。
         api={"method": "POST", "path": "/api/admin/shared/course/{object_id}/releases"},
         locate_steps=(
             _step("course-management", "course_row:{course_id}", "対象のコースを選びます"),
@@ -627,8 +857,10 @@ _REGISTRY: list[Capability] = [
         api={"method": "GET", "path": "/api/admin/llm-usage/estimate/documents/{document_id}"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
-            _step("materials", "material_estimate_button", "「解析コスト見積り」を押します",
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
                   precondition="material_selected"),
+            _step("materials", "material_estimate_button", "「解析コスト見積り…」を押します",
+                  precondition="material_menu_open"),
         ),
     ),
     # --- 個人知識ネットワーク Phase B / C層（承認・共有レイヤー） ---
@@ -680,8 +912,10 @@ _REGISTRY: list[Capability] = [
         api={"method": "GET", "path": "/api/admin/documents/{document_id}/figures"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材を選びます"),
-            _step("materials", "material_figures_button", "「図・画像」を押してモーダルを開きます",
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
                   precondition="material_selected"),
+            _step("materials", "material_figures_button", "「図・画像」を押してモーダルを開きます",
+                  precondition="material_menu_open"),
         ),
     ),
     # discuss_opening_authoring_design.md §6.2: 開幕素材（議論のきっかけ）のレビュー。
@@ -693,14 +927,19 @@ _REGISTRY: list[Capability] = [
         title="論文の議論のきっかけ（AI候補）を確認する",
         required_role=ROLE_TEACHER,
         kind=KIND_GUIDANCE_ONLY,
+        # 2026-09-03: 節を新設したので結線する（従来は howto_doc 未設定で
+        # assistant_kb.undocumented に載っていた）。
+        howto_doc="admin_operations/materials.md#discuss-opening-review",
         description="discuss の開幕画面で使う「議論のきっかけ」の AI 候補を確認・編集・承認する。"
                     "承認するまで学習者には表示されない（候補のまま）。",
         api={"method": "GET", "path": "/api/admin/documents/{document_id}/element-explanations"},
         locate_steps=(
             _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
             _step("materials", "material_inventory_button",
                   "「検出要素」を押して要素の一覧を開きます",
-                  precondition="material_selected"),
+                  precondition="material_menu_open"),
             _step("materials", "explanation_review_button",
                   "「説明レビュー」を押して候補を確認します",
                   precondition="inventory_modal_open"),
@@ -713,8 +952,14 @@ _REGISTRY: list[Capability] = [
         title="学生のつまづきデータを確認する",
         required_role=ROLE_TEACHER,
         kind=KIND_GUIDANCE_ONLY,
+        # 2026-09-03 是正: 実 API（routes/admin.py::list_unanswered_queries）は
+        # `_require_editable_course_or_404` を通すため、ロールだけでは足りず
+        # course owner / editor が必要（それ以外は 404）。宣言を実 API に合わせる。
+        scope="editable_course",
         howto_doc="admin_operations/stumbles.md#view",
         description="RAG 検索で教材から回答できなかった質問の一覧を確認し、教材補強に活用する。"
+                    "学生名と質問本文を返すため、対象コースの所有者または editor 権限が必要"
+                    "（権限が無いコースは 404 で、件数も返らない）。"
                     "claim 単位のつまづきサマリーは k-匿名集約（評価利用禁止）。",
         api={"method": "GET", "path": "/api/admin/courses/{course_id}/unanswered-queries"},
         locate_steps=(
@@ -834,6 +1079,116 @@ _REGISTRY: list[Capability] = [
         api={"method": "PUT", "path": "/api/admin/llm-models/policies/{scene_key}"},
         locate_steps=(
             _step("llm-models", "llm_models_ops_table", "変更したい場面の「変更」ボタンを押します"),
+        ),
+    ),
+    # URL指定による教材取得の許可リスト（url_material_upload_design.md UF1）。
+    # 参照は TEACHER 以上だが **追加・削除は SYSTEM_ADMIN のみ**（routes/admin.py::
+    # add_url_fetch_domain / remove_url_fetch_domain）。この capability は管理操作を
+    # 説明・案内するものなので required_role は SYSTEM_ADMIN に fail-closed で寄せる。
+    Capability(
+        id="llm_models.manage_url_fetch_domains",
+        screen="llm-models",
+        title="URL取得の許可ドメインを管理する",
+        required_role=ROLE_SYSTEM_ADMIN,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/llm_models.md#url-fetch-domains",
+        description="教員が URL を指定して教材を取得できるドメインの許可リストを追加・削除する。"
+                    "登録したドメインからのみ取得でき、初期状態は空（URL 指定の取得と arXiv からの"
+                    "取り込みは無効）。照合はサーバ側で行われる。",
+        api={"method": "POST", "path": "/api/admin/url-fetch-domains"},
+        locate_steps=(
+            _step("llm-models", "url_fetch_domains_section",
+                  "タブ末尾の「URL取得の許可ドメイン」区画でドメインを入力して「追加」を押します"),
+        ),
+    ),
+    # -------------------------------------------------------------------
+    # 2026-09-05 是正: 実装済みなのに registry 未登録で「構造的に案内不能」だった
+    # 4画面を段階登録する（P1: registry が単一の真実源。載っていない機能は Copilot が
+    # 説明も道案内もできない）。いずれも guidance_only — 読み取り中心か、確定が人間の
+    # 明示操作である機能なので、代行 capability は登録しない。
+    # -------------------------------------------------------------------
+    # グラフの論文層（graph_paper_layer_design.md PL1〜PL8）: フレームを触らない読み時
+    # 射影で、グラフレビュー画面のツールバーから表示を切り替える。単独の入口を持たない
+    # ので、道案内はグラフレビューの入口までで止める（P8: 誘導まで）。
+    Capability(
+        id="materials.paper_layer",
+        screen="materials",
+        title="グラフを論文の並び（章・式番号・図番号）で確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#paper-layer",
+        description="グラフレビュー画面で「表示: 論文の順」に切り替えると、理論操作グラフの"
+                    "各ノードが論文のどの章・どの式・どの図表に対応するかを、論文の並びで"
+                    "確認できる。対応が付かないところは「掛かっていません」とそのまま出る"
+                    "（推測で埋めない）。表示だけの機能で、承認・却下は従来どおりグラフ表示側の操作。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_id}/paper-layer"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_graph_review_button",
+                  "行のグラフのアイコン（グラフレビュー）を押し、ツールバーの「表示:」で「論文の順」に切り替えます",
+                  precondition="material_selected"),
+        ),
+    ),
+    # ゼミ前ブリーフ（seminar_brief_mirroring_design.md）: 読み取り専用のビューで、
+    # この画面からの確定操作は無い（記帳は D層の各画面のまま）。
+    Capability(
+        id="materials.seminar_brief",
+        screen="materials",
+        title="ゼミ前ブリーフを確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/materials.md#seminar-brief",
+        description="輪講の前に、この論文の脆い前提・支持のしかた（一点吊りになっている箇所）・"
+                    "このコーパスの中では検証記録が無いところ・学習者から引き継いだ問いを"
+                    "1画面で確認する。読み取り専用で、この画面から確定操作はできない。",
+        api={"method": "GET", "path": "/api/admin/documents/{document_ref}/seminar-brief"},
+        locate_steps=(
+            _step("materials", "material_row:{material_id}", "対象の教材の行を選びます"),
+            _step("materials", "material_row_menu", "行の「⋯」メニューを開きます",
+                  precondition="material_selected"),
+            _step("materials", "seminar_brief_button", "「ゼミ前ブリーフ…」を押します",
+                  precondition="material_menu_open"),
+        ),
+    ),
+    # 制度指標カタログ（indicator_governance_design.md IG1）: 計器の**定義だけ**を全当事者に
+    # 開く読み取り専用 API。値は返さないので、この capability も定義の在り処を案内するだけ。
+    Capability(
+        id="indicators.view_catalog",
+        screen="interest-dashboard",
+        title="制度指標カタログ（この計器は何のためのものか）を確認する",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/interest_dashboard.md#indicator-catalog",
+        description="集約された計器（関心集約・橋の候補・LLM使用量・discuss観測など）の"
+                    "定義・用途・**使わない用途**を確認する。カタログが返すのは定義だけで"
+                    "値は含まれない。個人の比較・成績・自動判定に使わないことが計器ごとに"
+                    "明記されている。学習者も同じ定義を読める。",
+        api={"method": "GET", "path": "/api/indicators"},
+        locate_steps=(
+            _step("interest-dashboard", "indicator_catalog_fact",
+                  "計器のすぐ上に「計器: … — …」の1行で、その計器の用途と非利用が出ます"),
+        ),
+    ),
+    # 教材図スタジオ（teaching_figure_studio_design.md FG1〜FG9）: AI と対話して説明図を
+    # 作る機能。採用（本文への挿入）は教員の明示操作なので、代行は登録しない。
+    Capability(
+        id="lecture_studio.figure_studio",
+        screen="lecture-studio",
+        title="AI と対話して説明図を作り、教材に挿入する（教材図スタジオ）",
+        required_role=ROLE_TEACHER,
+        kind=KIND_GUIDANCE_ONLY,
+        howto_doc="admin_operations/lecture_studio.md#figure-studio",
+        description="教材のわかりづらい箇所に、AI と対話して説明図（SVG）を作り、"
+                    "`![[figure:id]]` として本文に挿入する。既存の図から選ぶこともできる。"
+                    "挿入・採用は教員の操作で、AI が本文を書き換えることはない。"
+                    "読み上げ原稿には挿入できない（図は読み上げから除かれる）。",
+        api={"method": "POST", "path": "/api/admin/courses/{course_id}/figure-studio/turn"},
+        locate_steps=(
+            _step("lecture-studio", "ls_course_select", "対象のコースを選びます"),
+            _step("lecture-studio", "figure_studio_button",
+                  "教材欄の上の「🖼 図を挿入」を押します（読み上げ原稿にフォーカスしていると"
+                  "無効になります）",
+                  precondition="course_selected"),
         ),
     ),
 ]

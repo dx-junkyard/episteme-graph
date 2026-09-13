@@ -140,6 +140,7 @@ knowledge_landscape との完成度評価差・category_gap §10-4 の3件のみ
 - `classify_operation()` が component_graph/schema.py と theory_operations.py に同名別実装（ドキュメントは無修飾参照）
 - admin_assistant_design.md のコスト上限既定値（10）が実運用値（20）と不一致
 - CLAUDE.md が backend/core/chat.py を現役と説明（呼び出し元の無いデッドコードの可能性）
+  → 2026-09-10 解消（`core/chat.py` 削除・CLAUDE.md 行撤去。実装先: agent_inventory_and_refactoring_2026-09-10.md §6）
 - exposition_layer_design.md 本文に旧 migration 番号（034）の DDL が残存（冒頭注記との混在）
 - lecture_slide_sync_design.md §1 不変条項6 が撤去済み関数 `_topic_has_linkable_material` の維持を要求したまま
 - MOCKS.md の EPISTEME_MOCK 規約は現在使用 0 件（candidate/status パターンに発展的統合済み — 位置づけの明記推奨）

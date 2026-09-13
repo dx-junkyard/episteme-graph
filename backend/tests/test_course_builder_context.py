@@ -130,9 +130,23 @@ def _make_chunk_rows(seed=NEUTRALINO_SEED):
 
 
 def _make_analysis_rows(seed=NEUTRALINO_SEED):
-    """analysis_runs を DB 行形式 (document_id, status, stage_outputs) に変換。"""
+    """analysis_runs を DB 行形式に変換。
+
+    知識構造の見直し 2026-09-12 C-8（P0-8）で ``_build_material_context`` の6本目の
+    クエリを自前 SQL（``SELECT document_id, status, stage_outputs ... ORDER BY
+    updated_at DESC``）から成果物参照の正本 ``resolve_artifact_runs``（採用 run）へ
+    差し替えたため、行の形もそちらに合わせる:
+    ``(document_id, run_id, stage_outputs, status, cartridge_id)``。
+    発行されるクエリ本数（6本）とモックの側道は変わらない。
+    """
     return [
-        (r["document_id"], r["status"], r["stage_outputs"])
+        (
+            r["document_id"],
+            r.get("run_id") or f"run-{r['document_id']}",
+            r["stage_outputs"],
+            r["status"],
+            r.get("cartridge_id") or "",
+        )
         for r in seed["analysis_runs"]
     ]
 
@@ -325,7 +339,9 @@ class TestBuildMaterialContext:
             [],  # no graphs
             [],  # no claims
             [],  # no chunks
-            [("uuid-pending-001", "running", {})],  # analysis running
+            # resolve_artifact_runs の行形（C-8 で自前 SQL から差し替え）:
+            # (document_id, run_id, stage_outputs, status, cartridge_id)
+            [("uuid-pending-001", "run-pending", {}, "running", "")],
         ]
         mock_pg.return_value = mock_session
 

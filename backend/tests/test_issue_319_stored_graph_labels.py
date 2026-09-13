@@ -43,7 +43,19 @@ def _load_normalize_stored_component_graph():
         re.MULTILINE | re.DOTALL,
     )
     assert match, "_normalize_stored_component_graph not found"
-    code = "from __future__ import annotations\n" + match.group(1)
+    # 是正 F6（2026-09-10）: 解析時の警告のノード射影は純関数
+    # `_node_validation_warnings`（依存なし）なので実物を同じ名前空間へ載せる。
+    warnings_match = re.search(
+        r"(^def _node_validation_warnings\(.*?)(?=^def )",
+        source,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert warnings_match, "_node_validation_warnings not found"
+    code = (
+        "from __future__ import annotations\n"
+        + warnings_match.group(1)
+        + match.group(1)
+    )
     ns = {
         "__builtins__": __builtins__,
         "split_main_label": split_main_label,
@@ -52,6 +64,13 @@ def _load_normalize_stored_component_graph():
             "RELATED_TO", "REQUIRES", "ENABLES", "defines", "derives",
             "constrains", "solves", "eliminates",
         },
+        # review_status 語彙のスタブ（正本は core/deliberation/graph_dialogue.py と
+        # routes 側の `_HUMAN_REVIEW_DECISION_STATUSES`。ここで実物を import すると
+        # sqlalchemy 連鎖を引くため、値の一致は test_graph_review_api.py 側で固定する）。
+        "APPROVED_REVIEW_STATUSES": ("teacher_approved", "teacher_reviewed", "endorsed"),
+        "_HUMAN_REVIEW_DECISION_STATUSES": (
+            "teacher_approved", "teacher_reviewed", "endorsed", "rejected", "needs_revision",
+        ),
     }
     exec(code, ns)  # noqa: S102
     return ns["_normalize_stored_component_graph"]

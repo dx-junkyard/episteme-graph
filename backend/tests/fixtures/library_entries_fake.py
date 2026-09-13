@@ -49,6 +49,14 @@ _ENTRY_COLUMN_ORDER = (
     "updated_by",
     "created_at",
     "updated_at",
+    # 概念レジストリのガバナンス列（migration 082）。UPDATABLE_FIELDS には含まれず、
+    # 遷移は core/library/registry.py::decide_entry_review（専用 UPDATE 文）だけが行う。
+    "review_status",
+    "review_note",
+    "mapping_justification",
+    "candidate_key",
+    "decided_by",
+    "decided_at",
 )
 
 
@@ -73,6 +81,8 @@ class LibraryEntryTableFake:
     def __init__(self):
         self.entries: dict[str, dict] = {}
         self.versions: list[dict] = []
+        #: aliases → library_entry_labels のミラー（migration 082 §4.3）で入った行。
+        self.labels: list[dict] = []
         self._seq = 0
         self.calls: list[tuple[str, dict]] = []
 
@@ -104,6 +114,11 @@ class LibraryEntryTableFake:
     def _dispatch(self, sql: str, p: dict) -> FakeResult:  # noqa: C901
         if sql.startswith("INSERT INTO library_entries"):
             return self._insert_entry(p)
+        if sql.startswith("INSERT INTO library_entry_labels"):
+            # aliases → labels の片方向ミラー（migration 082 §4.3）。ラベル表そのものの
+            # 検証は tests/test_concept_registry_store.py が別の fake で行うので、ここは
+            # 「同一トランザクションで発行された」ことを calls に残すだけでよい。
+            return self._insert_label(p)
         if sql.startswith("INSERT INTO library_entry_versions"):
             return self._insert_version(p)
         if sql.startswith("SELECT 1 FROM library_entries"):
@@ -121,6 +136,8 @@ class LibraryEntryTableFake:
                 return self._set_status(p)
             if "SET latest_version_no" in sql:
                 return self._update_latest_version_no(p)
+            if "SET review_status" in sql:
+                return self._set_review_status(p)
             raise AssertionError(f"unhandled UPDATE library_entries SQL: {sql}")
         if sql.startswith("SELECT domain_key,") and "count(*)" in sql:
             return self._domain_summary()
@@ -148,18 +165,34 @@ class LibraryEntryTableFake:
             "updated_by": p.get("created_by"),
             "created_at": now,
             "updated_at": now,
+            "review_status": p.get("review_status") or "confirmed",
+            "review_note": "",
+            "mapping_justification": p.get("mapping_justification"),
+            "candidate_key": p.get("candidate_key"),
+            "decided_by": None,
+            "decided_at": None,
         }
         self.entries[entry_id] = entry
         return FakeResult([self._row_tuple(entry)], rowcount=1)
+
+    def _insert_label(self, p: dict) -> FakeResult:
+        self.labels.append(dict(p))
+        return FakeResult()
 
     def _select_entries(self, sql: str, p: dict) -> FakeResult:
         if "WHERE id = CAST(:id AS uuid) LIMIT 1" in sql:
             entry = self.entries.get(str(p.get("id") or ""))
             return FakeResult([self._row_tuple(entry)] if entry else [])
+        if "WHERE candidate_key = :candidate_key" in sql:
+            key = str(p.get("candidate_key") or "")
+            hits = [e for e in self.entries.values() if e.get("candidate_key") == key]
+            return FakeResult([self._row_tuple(hits[0])] if hits else [])
 
         rows = list(self.entries.values())
         if "status = 'active'" in sql:
             rows = [r for r in rows if r["status"] == "active"]
+        if "review_status = :confirmed_review" in sql:
+            rows = [r for r in rows if r["review_status"] == p.get("confirmed_review")]
         if "domain_key = :domain_key" in sql:
             rows = [r for r in rows if r["domain_key"] == p.get("domain_key")]
         if "entry_type = :entry_type" in sql:
@@ -207,6 +240,20 @@ class LibraryEntryTableFake:
             return FakeResult()
         entry["status"] = p.get("status")
         entry["updated_by"] = p.get("updated_by")
+        entry["updated_at"] = datetime.now(timezone.utc)
+        return FakeResult([self._row_tuple(entry)], rowcount=1)
+
+    def _set_review_status(self, p: dict) -> FakeResult:
+        """概念レジストリの確定遷移（migration 082 §4.2）。楽観ロックではなく
+        「現在の review_status が一致する行だけ」を更新する（二重遷移の防止）。"""
+        entry = self.entries.get(str(p.get("id") or ""))
+        if entry is None or entry["review_status"] != p.get("old_status"):
+            return FakeResult(rowcount=0)
+        entry["review_status"] = p.get("new_status")
+        if str(p.get("review_note") or ""):
+            entry["review_note"] = p.get("review_note")
+        entry["decided_by"] = p.get("actor_id") or None
+        entry["decided_at"] = datetime.now(timezone.utc)
         entry["updated_at"] = datetime.now(timezone.utc)
         return FakeResult([self._row_tuple(entry)], rowcount=1)
 

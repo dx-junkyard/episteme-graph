@@ -224,3 +224,18 @@ store.insert_candidates(new_candidates)
 - CLAUDE.md「横断基盤」節・`layer_registry.md` 横断基盤行・`docs/README.md` 索引への
   追記は同日（2026-08-14）の並行作業で実施済み（提案 §2-1 の「CLAUDE.md 横断基盤ルール
   への追記が本体」に対応）。
+
+### 追記（2026-09-04）— 姉妹プリミティブ `core/decision_context.py`
+
+[確定文脈の記帳](decision_context_design.md)（DC1〜DC4）を横断基盤の4本目として新設した。
+CandidateFlow が「**誰がどの遷移を行ってよいか**」（遷移可否・却下理由の要否・actor 必須性・
+supersede の選別・監査記帳の順序）を担うのに対し、decision_context は「**その確定が後から
+再構成できるか**」（提示された対象・選べた代替・断れた事実・再審の経路）を担う。両者は
+記帳の別々の面であり、**CandidateFlow 自体は非改変**（本書 §3 の API・語彙・例外はすべて
+そのまま）。
+
+一括確定の経路（v1 はリリース前の確認の配置確認と、説明レビューキューの一括承認・却下）は
+監査 metadata に `decision_context` を必ず含める（DC1）。将来 §4 の8系統を CandidateFlow へ
+巻き取るときは、単発の確定にも同じブロックを添えるかを併せて判断する
+（[vision.md](../vision.md) §9「確定文脈の記帳の全面適用」）。
+

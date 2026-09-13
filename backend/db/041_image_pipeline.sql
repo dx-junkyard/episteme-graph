@@ -60,10 +60,14 @@ BEGIN
     END IF;
 END $$;
 
+-- migration 078（知識オブジェクト層）が CHECK を語彙表 knowledge_component_types への
+-- FK に置き換えたあとは、この CHECK を作り直さない（013 の claim_type 側と同じ理由）。
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint WHERE conname = 'theory_components_component_type_check'
+    ) AND NOT EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'theory_components_component_type_fk'
     ) THEN
         ALTER TABLE theory_components
             ADD CONSTRAINT theory_components_component_type_check

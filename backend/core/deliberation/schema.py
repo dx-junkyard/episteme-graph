@@ -32,6 +32,10 @@ ELEMENT_SHARED_PART = "shared_part"
 # 存在確認する document-scoped 要素。
 ELEMENT_EVIDENCE = "evidence"
 ELEMENT_DERIVATION = "derivation"
+# 概念レジストリ（Phase 3 / concept_registry_design.md §4.7）。記号（symbol_registry →
+# knowledge_symbols）を共通部品（概念）へ結ぶための instance 型。v1 では
+# **同一性リンクの source としてだけ**使う（W層モーダルの対象化は非スコープ）。
+ELEMENT_SYMBOL = "symbol"
 
 DOCUMENT_ELEMENT_TYPES = (
     ELEMENT_FIGURE,
@@ -40,6 +44,7 @@ DOCUMENT_ELEMENT_TYPES = (
     ELEMENT_EQUATION,
     ELEMENT_EVIDENCE,
     ELEMENT_DERIVATION,
+    ELEMENT_SYMBOL,
 )
 DOMAIN_ELEMENT_TYPES = (ELEMENT_SHARED_PART,)
 ELEMENT_TYPES = DOCUMENT_ELEMENT_TYPES + DOMAIN_ELEMENT_TYPES
@@ -51,6 +56,21 @@ DOCUMENT_ID_REQUIRED_ELEMENT_TYPES = (
     ELEMENT_EQUATION,
     ELEMENT_EVIDENCE,
     ELEMENT_DERIVATION,
+    ELEMENT_SYMBOL,
+)
+
+# W層の対話セッション（``deliberation_sessions.element_type`` の CHECK。migration
+# 049 / 064 / 075）が受け入れる要素型。``symbol`` は概念レジストリが同一性リンクの
+# source として足した型で、**W層モーダルの対象ではない**（concept_registry_design.md
+# §4.7 の非スコープ）。DB の CHECK で 500 になる前に route 層が 422 に倒すための集合。
+DIALOGUE_SESSION_ELEMENT_TYPES = (
+    ELEMENT_FIGURE,
+    ELEMENT_THEORY_COMPONENT,
+    ELEMENT_THEORY_CLAIM,
+    ELEMENT_EQUATION,
+    ELEMENT_EVIDENCE,
+    ELEMENT_DERIVATION,
+    ELEMENT_SHARED_PART,
 )
 
 # ── 共通部品化（同一性リンク / 標準化判定）の対象要素型（設計書 §5.5 / §16）─────────
@@ -64,6 +84,9 @@ IDENTITY_LINKABLE_ELEMENT_TYPES = (
     ELEMENT_THEORY_COMPONENT,
     ELEMENT_THEORY_CLAIM,
     ELEMENT_EQUATION,
+    # 概念レジストリ Phase 3（migration 082 が CHECK に 'symbol' を足す）。記号 →
+    # 概念の参照は確定済みの同一性リンクとして持ち、``SymbolRecord`` 自体は不変（KR1）。
+    ELEMENT_SYMBOL,
 )
 
 # ── 同一性リンク状態語彙（Phase W-β。知識ネットワークビジョン §4 KN-3 / W層設計 §5.5）───────

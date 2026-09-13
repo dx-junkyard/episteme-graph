@@ -5,9 +5,68 @@ main.py から分離した API 固有のスキーマを集約する。
 
 from __future__ import annotations
 
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
+
+# 画面文脈アダプター（assistant_screen_adapter_design.md §4.2 / §11.2）: 上限の正本は
+# core 側の定数（SA7: 予算はコード定数・env で緩めない）。leaf モジュールを直接 import
+# して、解決器の登録副作用（core.assistant_context.__init__）をスキーマ層に持ち込まない。
+from core.assistant_context.schema import (
+    MAX_ID_CHARS as _SCREEN_CONTEXT_MAX_ID_CHARS,
+    MAX_TITLE_CHARS as _SCREEN_CONTEXT_MAX_TITLE_CHARS,
+    MAX_VISIBLE_ENTITIES as _SCREEN_CONTEXT_MAX_VISIBLE_ENTITIES,
+)
+
+#: 画面 ID の上限（登録語彙は数文字。壊れた画面提供の長文を持ち回らないための足切り）。
+_MAX_SCREEN_CHARS = 40
+
+
+class ScreenContextPayload(BaseModel):
+    """画面がいま表示している対象の**参照だけ**（``assistant_screen_adapter_design.md`` §4.1/§4.2）。
+
+    描画テキスト・DTO 本体・数値は受け取らない（SA1）。**未知の ``screen`` や上限超過で
+    422 にしない**（画面の提供が壊れても対話を止めない = §4.2）: 長すぎる値は
+    切り詰め、解決できない参照は core の正規化が ``None`` に落として無視する。
+
+    Phase 1（W層・グラフレビュー）と Phase 4（学習チャット）の**共通の受け口**なので、
+    ここ（``api/schemas.py``）に置く。``routes/deliberation.py`` は後方互換のため
+    再エクスポートする。
+    """
+
+    model_config = {"extra": "forbid"}
+
+    screen: str = ""
+    selection: dict[str, Any] = Field(default_factory=dict)
+    view: dict[str, Any] = Field(default_factory=dict)
+    visible_entities: list[dict[str, Any]] = Field(default_factory=list)
+
+    @field_validator("screen")
+    @classmethod
+    def _clip_screen(cls, value: str) -> str:
+        return str(value or "")[:_MAX_SCREEN_CHARS]
+
+    @field_validator("visible_entities")
+    @classmethod
+    def _clip_entities(cls, value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """件数・``id``/``title`` の長さを**切り詰める**（拒否しない）。"""
+        clipped: list[dict[str, Any]] = []
+        for item in (value or [])[:_SCREEN_CONTEXT_MAX_VISIBLE_ENTITIES]:
+            if not isinstance(item, dict):
+                continue
+            entity: dict[str, Any] = {}
+            for key, raw in item.items():
+                if isinstance(raw, str):
+                    limit = (
+                        _SCREEN_CONTEXT_MAX_TITLE_CHARS
+                        if key == "title"
+                        else _SCREEN_CONTEXT_MAX_ID_CHARS
+                    )
+                    entity[key] = raw[:limit]
+                else:
+                    entity[key] = raw
+            clipped.append(entity)
+        return clipped
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +122,15 @@ class MaterialOut(BaseModel):
     # run が無ければ None。フロントが再解析モーダルで前回選択を復元するための契約
     # フィールド（フィールド名 analysis_options は admin.js との確定契約）。
     analysis_options: dict | None = None
+    # 最新 document_analysis_runs.cartridge_id（分野・提案 C1）。run が無ければ None、
+    # run はあるが分野を指定せずに解析した場合は ""（= 分野中立で走った事実）。
+    # フロントは再解析モーダルで前回の分野を事実文として提示する。
+    analysis_cartridge_id: str | None = None
+    # 参照の健全性（knowledge_transfer_design.md §6 / P4-3）。最新 run の
+    # ``stage_outputs.reference_health`` から ``{status, checked_at}`` **だけ**を投影する
+    # （切れている参照の列挙は詳細 API 側。行に件数バッジを作らない = T-3）。
+    # run が無い / 検査の事実が無い教材は ``{"status": "unchecked"}``。
+    reference_health: dict | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None
@@ -89,6 +157,9 @@ class VisibilityUpdateRequest(BaseModel):
 class LearningPrerequisite(BaseModel):
     name: str
     status: str = "not_started"  # mastered | partial | not_started
+    # learning_units_design.md §6.4 (P2-4): 同コース topic への ID 参照（additive）。
+    # 解決できなければ None のまま（推測しない）。表示名は常に ``name`` 側に残る。
+    topic_id: str | None = None
 
 
 class LearningMisconception(BaseModel):
@@ -104,6 +175,12 @@ class LearningTopic(BaseModel):
     status: str = "locked"  # completed | in_progress | locked
     prerequisites: list[LearningPrerequisite] = Field(default_factory=list)
     misconceptions: list[LearningMisconception] = Field(default_factory=list)
+    # learning_units_design.md §6.1 (P2-3): このトピックが束ねた「学ぶ単位」。
+    # **リクエスト**（コースビルダーの登録）では候補 handle（``["U3"]`` の文字列配列）
+    # または解決済み dict が来る。**学習者向けレスポンス**へ載せるときは
+    # ``core.course_data.learner_topic_units_projection`` を通し、``kind`` / ``label``
+    # だけに射影する（``stable_key`` / ``unit_id`` を出さない = KO10）。
+    units: list[dict | str] = Field(default_factory=list)
     summary: str = ""
     content: str = ""
     content_blocks: list[dict] = Field(default_factory=list)
@@ -270,7 +347,8 @@ class LearningSession(BaseModel):
 class LearningProgress(BaseModel):
     learning_concepts: int = 0
     misconceptions: int = 0
-    streak_days: int = 0
+    # 2026-09-05: `streak_days`（連続学習日数）を撤去（理解サイクル UC4: 連続日数・
+    # 督促・未消化バッジを作らない）。services.calculate_streak ごと削除済み。
     sessions: list[LearningSession] = []
     # コース完了判定のサーバー正本化: 保存済みの合格トピックと、それから毎回導出する完了状態
     # (services.get_course_completion / calculate_progress)。
@@ -325,8 +403,14 @@ class LearningChatRequest(BaseModel):
     element_label: str | None = None
     # 構造帰属（方法A）: 教材区画のテキスト選択→「ここについて質問」の明示アンカー。
     # 選択テキストの逐語と、選択があったセグメント番号（position_anchor とは独立に保持）。
+    # 画面文脈アダプター Phase 4（§11.2）: この2つは**参照ではなく逐語テキスト**なので
+    # screen_context には混ぜず、現在位置に残す（痕跡側 _learner_selected_anchor の互換も保つ）。
     selection_text: str | None = None
     selection_segment_id: int | None = None
+    # 画面文脈アダプター Phase 4（assistant_screen_adapter_design.md §11.2）:
+    # 学習者がいま画面で見ている対象の**参照だけ**（ID・種別・表示モード・40字の題名）。
+    # 未指定・未知の screen は従来動作（プロンプトが1バイトも変わらない）。
+    screen_context: ScreenContextPayload | None = None
     # UI内コンテキストヘルプ（設計 §4-3）: 「？」ボタン押下時の画面文脈。
     # "lecture" | "chat" | "voice"。HELP ルートの search_manual に screen ヒントとして渡し、
     # front-matter screen: 一致節を検索の第一候補にする。未指定は従来挙動（screen=None）。
@@ -405,6 +489,15 @@ class LearningChatResponse(BaseModel):
     # チャット型AI支援の共通基盤整理 §4: LLM 例外時に固定文へ縮退したターンかどうか
     # （I3 会話は死なせない。degraded=true でも 200 を返し、履歴には保存済み）。
     degraded: bool = False
+    # 入口統合 Phase 1（docs/features/learning_chat_entry_unification_design.md §5、
+    # LC6 推定を隠さない / LC7 数値を見せない）: この往復をどの様相（会話の調子）で
+    # 答えたかの事実。**RAG 応答でのみ設定**し、HELP / 学習相談 / 地図 / 要素説明の
+    # 早期 return では None のまま。
+    #   {"stance": "tutor"|"casual_light"|"discuss"|"cycle_elicit"|"cycle_diff",
+    #    "source": "explicit"|"inferred",
+    #    "label": "<core/label_vocab.py の LEARNING_STANCE_LABELS>"}
+    # confidence・一致度・スコアのような数値キーは絶対に入れない。
+    stance: dict | None = None
 
 
 class LearningChatHistoryResponse(BaseModel):
@@ -418,14 +511,58 @@ class LearningCheckQuestionRequest(BaseModel):
     check_question: dict | None = None
 
 
+class LearningCheckObservation(BaseModel):
+    """確認問題の要件1つについての観点（AI の読み・判定ではない）。
+
+    語彙の正本は ``core/check_review.py``（status ∈ covered / not_mentioned / unclear）。
+    confidence・点数のような数値は持たない。
+    """
+    requirement: str = ""
+    status: str = "unclear"
+    statement: str = ""
+
+
 class LearningCheckQuestionResponse(BaseModel):
-    passed: bool
-    feedback: str
+    """確認問題の並置（DIFF）応答。**合否は返さない**（是正 F1）。
+
+    AI は要件との対応を並置するだけで、トピック完了の確定は本人の 1 タップ
+    （``POST .../check/self-check``）に移っている。``topic_completed`` /
+    ``course_completed`` はここでは**現況**（services.get_course_completion の導出）で、
+    この応答が完了を作ることはない。
+    """
+    #: この応答は判定ではなく並置であることの明示（常に True）。
+    advisory: bool = True
+    #: AI の観点提示が得られなかった（縮退・判定を生まない）。
+    degraded: bool = False
+    #: 並置の事実文（core/check_review.build_statements）。
+    statements: list[str] = Field(default_factory=list)
+    observations: list[LearningCheckObservation] = Field(default_factory=list)
+    #: 要件のうち、回答で触れられているようだ / 見当たらないようだ、と読まれたもの。
+    covered: list[str] = Field(default_factory=list)
+    not_mentioned: list[str] = Field(default_factory=list)
     model_answer: str = ""
     answer_requirements: list[str] = Field(default_factory=list)
     explanation: str = ""
-    # コース完了判定のサーバー正本化: 合格時は services.record_topic_check_pass の永続化結果、
-    # 不合格時は services.get_course_completion の現況（topic_completed=False のまま）。
+    #: 先へ進むかどうかは本人の自己確認で決まる（フロントが3択を出す契約）。
+    self_check_required: bool = True
+    # コース完了判定のサーバー正本化: /check は現況（services.get_course_completion）を返し、
+    # 完了の書き込みは self-check 経路だけが行う。
+    topic_completed: bool = False
+    course_completed: bool = False
+    completed_topic_ids: list[str] = Field(default_factory=list)
+
+
+class LearningCheckSelfCheckRequest(BaseModel):
+    """確認問題の並置を見たあとの自己確認（本人の 1 タップ）。
+
+    語彙は R層と共有（``core/reconstruction/schema.py::SELF_CHECK_VALUES``）。
+    """
+    self_check: str
+
+
+class LearningCheckSelfCheckResponse(BaseModel):
+    self_check: str
+    #: agreed / disagreed のときだけトピック完了を記録する（verdict_wrong は記録のみ）。
     topic_completed: bool = False
     course_completed: bool = False
     completed_topic_ids: list[str] = Field(default_factory=list)
@@ -659,20 +796,29 @@ class LectureSegment(BaseModel):
     figures: list[LectureFigureItem] = []
     has_audio: bool = False
     duration_ms: int = 0
-    segment_mode: str = "full"  # full | summary | skip
+    # 語彙は互換のため full | summary | skip のまま残すが、full 以外は発生しない
+    # （是正 F3 / core/lecture.py::build_lecture_sequence）。
+    segment_mode: str = "full"
     slides: list[LectureSlide] = []
     language: str = "ja"  # このセグメントの spoken_language（無指定は "ja"）
+    # 注記フラグ（是正 F3）: この区画が「以前に触れた前提概念だけを扱う短い区画」と
+    # 判定された事実。提示内容は変わらない。画面側の「短く聴く」トグル（既定 OFF）が
+    # ON のときだけ、本人の操作でこの区画を畳める（消さずに畳む）。
+    previously_touched: bool = False
 
 
 class LectureSequenceResponse(BaseModel):
-    """レクチャーシーケンス API レスポンス。"""
+    """レクチャーシーケンス API レスポンス。
+
+    是正 F3（2026-09-10）で ``skipped_segments`` / ``summary_segments``（省略件数）を
+    撤去した。サーバは省略しないので数えるものが無く、件数を返せば「何かが省かれた」と
+    いう誤った印象だけが残る。畳むかどうかは学習者本人のトグルの側にある。
+    """
     course_id: str
     topic_id: str
     segments: list[LectureSegment] = []
     total_segments: int = 0
     total_duration_ms: int = 0
-    skipped_segments: int = 0  # 習得済みスキップ数
-    summary_segments: int = 0  # 簡易版変換数
     total_slides: int = 0  # 全セグメントのスライド数合計
 
 
@@ -1087,6 +1233,20 @@ class ComponentGraphNode(BaseModel):
     linked_evidence_ids: list[str] = Field(default_factory=list)
     source_backing_status: str = ""
     review_reasons: list[str] = Field(default_factory=list)
+    # review_reasons は解析時点の焼き込み値。レビューを待っていないノードで「要確認の
+    # 理由」として提示すると確定済みの構造まで欠陥に見えるため、読み時射影
+    # (`_normalize_stored_component_graph`) が次の2つを添える:
+    #   review_reasons_at_analysis … 教員が承認したノードの理由（review_reasons から
+    #     移す。レビュー要求としては出さないが破棄もしない）
+    #   review_reasons_advisory … 参考情報として読むべき理由か（承認済み、または
+    #     source_backed で確定したノード。例: #306 の missing_atomic_claim warning）
+    review_reasons_at_analysis: list[str] = Field(default_factory=list)
+    review_reasons_advisory: bool = False
+    # 是正 F6（2026-09-10）: 解析時の警告（``theory_components.validation_warnings``
+    # の読み時射影 = {"field", "message"}）。承認時に消さず退避し、承認画面が
+    # 「解析時点のメモ」として承認ボタンの隣に並置する（vision §4 改訂原則1 —
+    # 何を見て確定したかを後から再構成できるように）。数値は載せない。
+    validation_warnings: list[dict] = Field(default_factory=list)
     # Layer linkage between main TheoryOperationNode and equation_detail nodes (issue #306).
     parent_component_id: str = ""
     member_component_ids: list[str] = Field(default_factory=list)
@@ -1120,6 +1280,9 @@ class ComponentGraphEdge(BaseModel):
     # Issue #451: relation polarity ("+" / "-" / "" non-polar). Mirrors
     # DSLEdge.polarity; the UI visualises polarity from this field, not the label.
     polarity: str = ""
+    # NarrativeAnnotator の edge_narratives と突合するための辺 ID（論文層が使う。
+    # 旧 graph_json では空文字）。
+    edge_id: str = ""
 
 
 class ComponentGraphResponse(BaseModel):
@@ -1142,6 +1305,11 @@ class ComponentGraphResponse(BaseModel):
     # {"claims": {id: {"claim_id", "text"}}, "evidence": {id: {"text",
     # "block_id"}}, "derivations": {id: {"label", "kind", "operation"}}}.
     reference_index: dict = Field(default_factory=dict)
+    # 保存済みグラフが構築された時点（ISO8601。読み時組み立て経路では空）。
+    # review_reasons / source_backing_status は構築時の焼き込み値なので、
+    # パイプライン修正は再解析まで既存グラフに反映されない — その古さを教員が
+    # 判断できるようにする事実（表示・注意文は UI 側）。
+    graph_updated_at: str = ""
 
 
 class LectureStudioSettings(BaseModel):

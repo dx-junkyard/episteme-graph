@@ -11,6 +11,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 from typing import Any
 
 from core.llm import generate_text, get_llm_params
+from core.llm_worker.single_shot import extract_json
 
 logger = logging.getLogger(__name__)
 
@@ -35,70 +36,11 @@ _MAX_SOURCE_CHARS = 6000
 _MAX_CONTEXT_CHARS = 3000
 
 
-_PROMPT = """あなたは素粒子物理学の教材から、理論コンポーネント候補を抽出するアシスタントです。
-
-重要な制約:
-- 以下のソース本文に明示されている内容だけを使ってください。
-- 一般的な物理学知識で補完しないでください。
-- 明示的な根拠がない項目には needs_source: true を付けてください。
-- 各 input/output/precondition/constraint/invalid_condition には、可能な限り source_refs を付けてください。
-- quote はソース本文からの短い引用だけにしてください。
-- JSONのみを出力してください。
-
-ソース本文:
-{source_text}
-
-既存の構造情報:
-smiles_dsl:
-{smiles_dsl}
-
-variables:
-{variables}
-
-ancestors:
-{ancestors}
-
-graph_elements:
-{graph_elements}
-
-出力JSON:
-{{
-  "components": [
-    {{
-      "name": "",
-      "component_type": "theory | concept | law | mechanism | operator | observation",
-      "summary": "",
-      "inputs": [
-        {{
-          "label": "",
-          "type": "Concept | Condition | Equation | Field | Symmetry | Observation",
-          "required": true,
-          "description": "",
-          "needs_source": false,
-          "source_refs": [
-            {{"quote": ""}}
-          ]
-        }}
-      ],
-      "outputs": [],
-      "preconditions": [],
-      "constraints": [],
-      "invalid_conditions": [],
-      "dependencies": [],
-      "blackbox_policy": {{
-        "default_level": "summary",
-        "expand_if_unlearned": true
-      }}
-    }}
-  ]
-}}
-"""
-
-_ENRICH_PROMPT = """あなたは素粒子物理学教材の理論コンポーネント候補を補完するアシスタントです。
+_ENRICH_PROMPT = """あなたは学術教材の理論コンポーネント候補を補完するアシスタントです。
 
 重要な制約:
 - まずソース本文と既存DSLに明示されている内容を優先してください。
-- ソース本文だけで不足する場合は、一般的な素粒子物理学・場の理論・有効理論の知識で補ってください。
+- ソース本文だけで不足する場合は、ソース本文が扱っている分野で一般的とされる知識で補ってください（分野は本文から判断し、書かれていない分野の話に広げないでください）。
 - 一般知識で補った項目は needs_source: true とし、source_refs は空配列にしてください。
 - 既存DSLの REQUIRES / CAUSES / DEFINES / EQUIVALENT などの関係は、ソース本文と同じく根拠として扱ってください。
 - summary は教材・理論の意味を説明してください。「DSLから生成した候補」のような実装説明は禁止です。
@@ -450,6 +392,10 @@ def enrich_theory_components_with_llm(
     if not source_text:
         return [_component_with_missing_markers(component) for component in components]
 
+    # M層: model は渡さず（M1）、core/llm.py 入口の resolve_scene_model に委ねる。
+    # feature は呼び出し元（routes/theory_components.py）が張る usage_context
+    # （admin:component_extract）。ポリシー行も env も無い環境では
+    # llm_policy._FEATURE_TIER_ONLY により従来と同じ fast tier に解決される。
     params = get_llm_params("fast")
     prompt = _ENRICH_PROMPT.format(
         source_text=_clip(source_text, _MAX_SOURCE_CHARS),
@@ -463,7 +409,6 @@ def enrich_theory_components_with_llm(
     def _call_llm() -> str:
         return generate_text(
             messages=[{"role": "user", "content": prompt}],
-            model=params.get("model"),
             reasoning_effort=params.get("reasoning_effort"),
             temperature=0.0,
             max_tokens=1600,
@@ -524,65 +469,13 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
-    cleaned = raw.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    try:
-        parsed = json.loads(cleaned, strict=False)
-        return parsed if isinstance(parsed, dict) else {}
-    except Exception:
-        match = re.search(r"\{[\s\S]*\}", cleaned)
-        if not match:
-            return {}
-        try:
-            parsed = json.loads(match.group(), strict=False)
-            return parsed if isinstance(parsed, dict) else {}
-        except Exception:
-            return {}
+    """LLM 応答から JSON オブジェクトを取り出す。取り出せなければ ``{}``。
 
-
-def extract_theory_components_from_chunk(chunk: dict[str, Any]) -> list[dict[str, Any]]:
-    """Extract theory component candidates using only the selected chunk context.
-
-    The caller is responsible for adding course_id, primary_chunk_id, and status before
-    persistence. On provider errors or malformed JSON this returns an empty list so the
-    existing editor flow remains usable.
+    取り出しは共通実装（``core/llm_worker/single_shot.py::extract_json``）へ委譲し、
+    「失敗は例外にせず空 dict へ縮退する」という補完処理側の約束だけをここに残す
+    （呼び出し元は空 dict を「補完なし＝needs_source マーカー」として扱う）。
     """
-    source_text = (chunk.get("raw_text") or chunk.get("display_text") or chunk.get("text") or "").strip()
-    if not source_text:
-        return []
-
-    params = get_llm_params("fast")
-    prompt = _PROMPT.format(
-        source_text=_clip(source_text, _MAX_SOURCE_CHARS),
-        smiles_dsl=chunk.get("smiles_dsl") or "",
-        variables=_clip(_json_text(chunk.get("variables")), _MAX_CONTEXT_CHARS),
-        ancestors=_clip(_json_text(chunk.get("ancestors")), _MAX_CONTEXT_CHARS),
-        graph_elements=_clip(_json_text(chunk.get("graph_elements")), _MAX_CONTEXT_CHARS),
-    )
-
-    timeout_seconds = int(os.getenv("THEORY_EXTRACTION_TIMEOUT_SECONDS", str(_DEFAULT_TIMEOUT_SECONDS)))
-
-    def _call_llm() -> str:
-        return generate_text(
-            messages=[{"role": "user", "content": prompt}],
-            model=params.get("model"),
-            reasoning_effort=params.get("reasoning_effort"),
-            temperature=0.0,
-            max_tokens=1800,
-        )
-
     try:
-        future = _submit_with_context(_call_llm)
-        raw = future.result(timeout=timeout_seconds)
-    except TimeoutError:
-        future.cancel()
-        logger.warning("Theory component extraction timed out after %ss", timeout_seconds)
-        return []
-    except Exception:
-        logger.warning("Theory component extraction failed", exc_info=True)
-        return []
-
-    parsed = _parse_json_object(raw)
-    components = parsed.get("components")
-    if not isinstance(components, list):
-        return []
-    return [c for c in components if isinstance(c, dict) and str(c.get("name") or "").strip()]
+        return extract_json(raw)
+    except ValueError:
+        return {}

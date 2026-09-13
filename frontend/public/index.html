@@ -25,9 +25,9 @@
           <option value="">読み込み中...</option>
         </select>
       </div>
+      <!-- 2026-09-05: 「◯日連続学習中」を撤去（理解サイクル UC4: 連続日数・督促・
+           未消化バッジを作らない）。セッション間に何も置かないこと自体が設計。 -->
       <div class="topbar-r">
-        <span id="streak" style="color:var(--color-text-success)"></span>
-        <span style="opacity:.3">|</span>
         <button id="groups-btn" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="グループ管理">グループ <span id="groups-badge" style="display:none;background:var(--color-text-danger,#e53935);color:#fff;border-radius:8px;padding:1px 6px;margin-left:2px;font-size:10px">0</span></button>
         <span style="opacity:.3">|</span>
         <button id="atlas-btn" data-ui-anchor="topbar.atlas" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:12px;font-family:inherit" title="分野の地図を開く">地図</button>
@@ -108,6 +108,11 @@
           </div>
           <button class="next-topic-btn" id="next-topic-btn" data-ui-anchor="material.next-topic" style="display:none" title="次のトピックへ進む">確認して次へ</button>
         </div>
+        <!-- 記号の「直前の定義」（概念レジストリ P3-5,
+             docs/features/concept_registry_design.md §7）: 教材の数式の中の記号を
+             タップしたときだけ出るポップオーバー。自動では出さない・数値は出さない。
+             中身は app.js の renderSymbolLookupPopover が描く。 -->
+        <div class="symbol-lookup-popover" id="symbol-lookup-popover" data-ui-anchor="material.symbol-lookup" hidden></div>
         <!-- 再構成ループ (R層): 「再構成に挑戦」導線。自動では開かない（本人が開く） -->
         <div class="reconstruction-region" id="reconstruction-region" hidden></div>
       </div>
@@ -139,6 +144,11 @@
           </div>
           <span class="lecture-time" id="lecture-time">0:00</span>
           <button class="lecture-next-btn" id="lecture-next" title="次のセグメント">&#9654;</button>
+          <!-- 是正 F3（六つのレンズ 提案1）: 「短く聴く」は本人が押すトグル（既定 OFF）。
+               サーバは省略しない。ON のときだけ「以前に触れた箇所」を畳み、畳んだ位置には
+               「前に触れた箇所（開く）」の1行を残す（消さずに畳む）。状態は
+               localStorage `eg_lecture_condensed:<courseId>` のみ（学習者設定テーブルを作らない）。 -->
+          <button type="button" class="lecture-condensed-btn" id="lecture-condensed" aria-pressed="false" data-ui-anchor="material.lecture-condensed" title="以前に触れた箇所を畳んで短く聴きます（畳んだ箇所は「開く」でいつでも開けます。もう一度押すと全部聴きます）">短く聴く</button>
           <button class="lecture-question-btn" id="lecture-question" title="質問する">&#10067; 質問</button>
         </div>
       </div>
@@ -162,6 +172,11 @@
              振り返る軽量モーダルを提示する（スキップ可・既定オン）。 -->
         <button type="button" class="discuss-end-btn" id="discuss-end-btn" data-ui-anchor="discuss.end" title="今日の議論を振り返って終える">議論を終える</button>
       </div>
+      <!-- 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2/DA5）:
+           入力欄の直上に1行。文言は GET /api/disclosure が正本（provider はサーバが
+           実行時の設定から差し込む）。同意ボタン・閉じるボタンを持たない常設の段落で、
+           取得できないときは何も描かない（disclosure-note.js の fail-soft）。 -->
+      <div class="disclosure-note-slot" data-disclosure-note="learning_chat"></div>
       <div class="ia">
         <input type="text" id="chat-input" data-ui-anchor="composer.input" placeholder="質問や考えを入力…（Enterで送信）">
         <button id="send-btn" class="primary" data-ui-anchor="composer.send" title="送信（回答が教材由来か自動で判定し、出典タブと回答欄に表示します）">送信</button>
@@ -175,6 +190,9 @@
           <span class="voice-status" id="voice-status">準備中…</span>
           <button class="voice-close" id="voice-close" title="音声会話を終了">&times;</button>
         </div>
+        <!-- 外部 AI 転送の常設事実文（DA2）: 音声も同じデータ種別（録音した音声と
+             読み上げる回答文が送られる）。文言はサーバが正本。 -->
+        <div class="disclosure-note-slot" data-disclosure-note="learning_chat"></div>
         <div class="voice-transcript" id="voice-transcript"></div>
         <div class="voice-material" id="voice-material"></div>
       </div>
@@ -207,6 +225,10 @@
   <!-- ↑ 要素種別の表示名の正本（admin_ux_issues_2026-08-01.md §3.3 Phase 0）。app.js より前に読み込む。 -->
   <script src="/js/element-card.js?v=element-card-20260801-1"></script>
   <!-- ↑ 統一パーツカード（§3.2）の編集不可バリアント。element-vocab.js の後・app.js より前。 -->
+  <!-- 外部 AI 転送の常設事実文（docs/features/disclosure_axes_design.md, DA2）:
+       入力欄のそばに1行だけ置く。文言はサーバ（GET /api/disclosure）が正本で、
+       取得できないときは何も描かない。app.js が init() で注入するため先に読み込む。 -->
+  <script src="/js/disclosure-note.js?v=disclosure-20260910-1"></script>
   <script src="/js/app.js"></script>
   <script src="/js/atlas-fixture.js"></script>
   <script src="/js/atlas-data.js"></script>
@@ -222,7 +244,15 @@
        地図オーバーレイの「論文の位置」レイヤー + 出典タブへのデータ供給。
        atlas-overlay.js のフックから呼ばれるので personal-map.js の後に読み込む。 -->
   <script src="/js/landscape-layer.js?v=knowledge-landscape-20260804"></script>
+  <!-- 推定の糸（docs/features/atlas_relation_edges_design.md §6）:
+       地図オーバーレイ L2 の「推定の糸」レイヤー（確定前の関係を点線で重ねる・既定オフ）。
+       atlas-overlay.js のフックから呼ばれるので landscape-layer.js の後に読み込む。 -->
+  <script src="/js/atlas-threads-layer.js?v=relation-threads-20260829"></script>
   <script src="/js/reconstruction.js"></script>
   <script src="/js/discuss.js"></script>
+  <!-- コーパス回遊層（docs/features/corpus_roaming_design.md §4.2）:
+       コース非依存の「論文の海」（コーパス地図・論文リスト・地図の端・コース無し論文議論）。
+       開幕画面は discuss.js を document 文脈で再利用するため、その後に読み込む。 -->
+  <script src="/js/corpus-sea.js?v=corpus-roaming-20260827"></script>
 </body>
 </html>

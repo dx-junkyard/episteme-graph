@@ -14,12 +14,14 @@ from fastapi import HTTPException
 from sqlalchemy import text as sa_text
 
 from dependencies import ROLE_SYSTEM_ADMIN
+from quota import consume_daily_quota
 from services import get_editable_course_data, resolve_document_access
 from core.config import get_settings
 from core.course_data import course_source_material_ids
+from core.document_pipeline.persistence import resolve_artifact_runs
 from core.document_sections import enrich_chunks_with_sections
 from core.lecture import normalize_to_placeholder_format
-from core.llm_worker.cost_gate import CostGate, today_str
+from core.llm_worker.cost_gate import CostGate
 from core.postgres import get_session as _pg_session
 
 
@@ -149,15 +151,12 @@ def consume_lecture_rewrite_quota(user_id: str) -> None:
     （拒否されたリクエストを数えない）。
     """
     settings = get_settings()
-    cap = int(getattr(settings, "lecture_rewrite_max_calls_per_day", 100) or 0)
-    ok = _lecture_rewrite_cost_gate.check_and_count(
-        daily_limit=cap, daily_key=(today_str(), user_id)
+    consume_daily_quota(
+        _lecture_rewrite_cost_gate,
+        user_id=user_id,
+        limit=int(getattr(settings, "lecture_rewrite_max_calls_per_day", 100) or 0),
+        message="本日の原稿書き換え回数の上限に達しました。明日以降に再度お試しください。",
     )
-    if not ok:
-        raise HTTPException(
-            status_code=429,
-            detail="本日の原稿書き換え回数の上限に達しました。明日以降に再度お試しください。",
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -266,25 +265,19 @@ def _get_course_chunks(course_data: dict) -> list[dict]:
 
 
 def _load_equation_formula_previews(session, document_ids: list[str]) -> dict[str, list[dict]]:
-    """Load EquationSemanticAgent crop previews from the latest artifacts."""
+    """Load EquationSemanticAgent crop previews from the adopted run's artifacts.
+
+    run の選び方は成果物参照の正本 ``resolve_artifact_runs``（adopted）に一本化した
+    （知識構造の見直し 2026-09-12 C-8。以前はここだけ status を問わない
+    ``DISTINCT ON (document_id) ... ORDER BY created_at DESC`` を自前で書いていたため、
+    原稿スタジオのプレビューだけ別 run の式を表示し得た）。
+    """
     if not document_ids:
         return {}
-    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
-    params = {f"doc_{i}": doc_id for i, doc_id in enumerate(document_ids)}
-    rows = session.execute(
-        sa_text(f"""
-            SELECT DISTINCT ON (document_id)
-                   document_id, stage_outputs
-            FROM document_analysis_runs
-            WHERE document_id IN ({placeholders})
-            ORDER BY document_id, created_at DESC
-        """),
-        params,
-    ).fetchall()
+    resolved = resolve_artifact_runs(session, document_ids)
     out: dict[str, list[dict]] = {}
-    for row in rows:
-        doc_id = str(row[0]) if row[0] else ""
-        stage_outputs = _json_obj(row[1])
+    for doc_id, entry in resolved.items():
+        stage_outputs = entry.get("stage_outputs") or {}
         artifacts = stage_outputs.get("_artifacts") if isinstance(stage_outputs.get("_artifacts"), dict) else {}
         eq_artifact = artifacts.get("equation_semantics") if isinstance(artifacts, dict) else None
         if not isinstance(eq_artifact, dict):

@@ -1,5 +1,12 @@
 # 原稿スタジオ — 音声生成の準備確認フロー（Issue #491）
 
+> **実装状況（2026-09-03 コード照合）: 実装済み。** フロントの
+> `lsCanGenerateAudio()` / `lsAudioReadinessState()`（`admin-lecture-studio.js`）、
+> サーバ側の前提強制（`backend/api/routes/lecture_studio/scripts.py` の音声生成 422）、
+> readiness 判定の正本 `core/lecture.py::compute_material_audio_readiness()`
+> （`core/status/projector.py` と `routes/lecture.py::get_topic_audio_status` が共に呼ぶ）は
+> いずれも現存する。以下は起票時の設計記述。
+
 既存の [`lecture_slide_sync_design.md`](lecture_slide_sync_design.md) §3-3 / §4-4 を補う。
 音声の言語選択を、コースと読み上げ原稿が確定する前に見せない。音声生成を
 「コースを選ぶ → 読み上げ可能であることを確認する → 言語を選ぶ → 生成する」という

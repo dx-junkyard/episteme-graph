@@ -395,7 +395,12 @@ class ComponentAssemblyValidator:
         component: ComponentRecord,
         available: dict,
     ) -> list[ValidationIssue]:
-        """Validate concept tags required for graph / course mapping (issue #8)."""
+        """Validate concept tags required for graph / course mapping (issue #8).
+
+        導出コンポーネントの「数学的である」根拠は、手続的な概念名 **または**
+        式へのリンク（P0-3 で記号が概念層から外れたため）。式も手続的概念も
+        持たない導出コンポーネントだけが warning に残る。
+        """
         issues: list[ValidationIssue] = []
         concepts = list(component.concepts or [])
         if len(concepts) < 2:
@@ -418,12 +423,18 @@ class ComponentAssemblyValidator:
                 "derive", "eliminate", "solve", "substitute", "linearize"
             ))
         )
-        if is_derivation and not _has_math_or_procedural_concept(concepts):
+        # P0-3: 数学性の根拠は「手続的な概念名」または「式への参照」。記号が
+        # 概念層から外れた後は式リンクがそれを担う（gate と同一規則）。
+        if (
+            is_derivation
+            and not _has_math_or_procedural_concept(concepts)
+            and not _component_references_equation(component)
+        ):
             issues.append(ValidationIssue(
                 "derivation_component_missing_math_concept",
                 "warning",
                 f"{component.component_id} is a derivation component but has no "
-                "mathematical or procedural concept",
+                "mathematical or procedural concept and references no equation",
                 f"components[{component.component_id}].concepts",
             ))
 
@@ -1017,10 +1028,49 @@ def _looks_like_symbol(name: str) -> bool:
 
 
 def _has_math_or_procedural_concept(concepts: list) -> bool:
+    """概念層が数学的・手続的な操作を名指しているか。
+
+    P0-3（knowledge_structure_review_2026-09-12 §4 / F-6 / K-2）: 以前は
+    ``_looks_like_symbol`` も合格条件だったため、``b_1`` のような記号ジャンクが
+    「数学的である」ことの根拠になっていた。記号は concepts から外れて
+    symbol_registry に閉じたので、ここでは**手続的な概念名**だけを見る。
+    数学性のもう一方の根拠（式リンク）は
+    :func:`_component_references_equation` が担う（export_validation_gate と
+    同一規則）。
+    """
     for concept in concepts or []:
-        text = str(concept or "")
-        if text.lower() in _PROCEDURAL_TERMS or _looks_like_symbol(text):
+        if str(concept or "").lower() in _PROCEDURAL_TERMS:
             return True
+    return False
+
+
+# component が式を参照していることを示すフィールド（P0-3）。
+# backend/core/document_pipeline/export_validation_gate.py と同一規則。
+_EQUATION_REFERENCE_FIELDS = (
+    "linked_equation_ids",
+    "input_equation_ids",
+    "intermediate_equation_ids",
+    "output_equation_ids",
+    "definition_equation_ids",
+    "constraint_equation_ids",
+    "review_required_equation_ids",
+)
+
+
+def _component_references_equation(component) -> bool:
+    """component が式を 1 つ以上参照しているか（参照の有無だけを見る）。"""
+    refs = getattr(component, "evidence_refs", None) or {}
+    if isinstance(refs, dict) and (refs.get("equation_ids") or refs.get("equations")):
+        return True
+    for field_name in _EQUATION_REFERENCE_FIELDS:
+        if getattr(component, field_name, None):
+            return True
+    for field_name in ("inputs", "outputs", "preconditions", "cautions"):
+        for item in getattr(component, field_name, None) or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("equation_ids") or item.get("equations"):
+                return True
     return False
 
 

@@ -3,6 +3,11 @@ from __future__ import annotations
 
 import logging
 
+from episteme_graph.agents.llm_step import (
+    MAX_REPAIR_ATTEMPTS,
+    attach_issues,
+    run_repair_loop,
+)
 from episteme_graph.agents.id_canonicalization import (
     canonicalize_claim_refs,
     claim_aliases_from_accepted_claims,
@@ -22,7 +27,7 @@ from .schema import (
 )
 
 logger = logging.getLogger(__name__)
-_MAX_REPAIR_ATTEMPTS = 2
+_MAX_REPAIR_ATTEMPTS = MAX_REPAIR_ATTEMPTS
 
 # Atomicity values that disqualify a claim from being a component's primary
 # support. Mirrors export_validation_gate._claim_is_non_atomic / input_builder
@@ -70,64 +75,83 @@ class ComponentAssemblyRepairer:
         # before the deterministic fallback kicks in.
         had_no_components = _has_no_components_error(validation_issues)
 
-        for attempt in range(1, _MAX_REPAIR_ATTEMPTS + 1):
-            logger.info("Component assembly repair attempt %d/%d", attempt, _MAX_REPAIR_ATTEMPTS)
-            messages = prompt_factory.build_repair_messages(
-                llm_input, raw_output, validation_issues
-            )
-            try:
-                raw_output = llm_client.generate(messages)
-            except Exception as exc:
-                logger.warning("Repair LLM call failed: %s", exc)
-                if diagnostics is not None:
-                    diagnostics[f"repair_attempt_{attempt}_exception"] = str(exc)
-                break
+        # The raw output carried into the *next* repair prompt is the
+        # id-canonicalized one produced inside ``_parse`` below, so the prompt
+        # sees the same claim ids the validator judged.
+        current_raw = raw_output
+
+        def _on_attempt_llm_error(attempt: int, exc: BaseException) -> None:
             if diagnostics is not None:
-                attempt_component_count = (
-                    len(raw_output.get("components", []))
-                    if isinstance(raw_output.get("components"), list)
-                    else 0
-                )
-                diagnostics[f"repair_attempt_{attempt}_output"] = {
-                    "parsed": raw_output,
-                    "component_count": attempt_component_count,
-                    "raw_text": getattr(llm_client, "last_raw_text", None),
-                    "parse_error": getattr(llm_client, "last_parse_error", None),
-                }
-                diagnostics[f"repair_attempt_{attempt}_component_count"] = attempt_component_count
-            raw_output = canonicalize_claim_refs(
-                raw_output,
+                diagnostics[f"repair_attempt_{attempt}_exception"] = str(exc)
+
+        def _on_attempt_parsed(attempt: int, raw: dict) -> None:
+            # Recorded before canonicalization, as the raw model output.
+            if diagnostics is None:
+                return
+            attempt_component_count = (
+                len(raw.get("components", []))
+                if isinstance(raw.get("components"), list)
+                else 0
+            )
+            diagnostics[f"repair_attempt_{attempt}_output"] = {
+                "parsed": raw,
+                "component_count": attempt_component_count,
+                "raw_text": getattr(llm_client, "last_raw_text", None),
+                "parse_error": getattr(llm_client, "last_parse_error", None),
+            }
+            diagnostics[f"repair_attempt_{attempt}_component_count"] = attempt_component_count
+
+        def _on_attempt_validated(attempt: int, remaining: list[ValidationIssue]) -> None:
+            if diagnostics is None:
+                return
+            diagnostics[f"repair_attempt_{attempt}_issues"] = [
+                _issue_dict(issue, llm_input) for issue in remaining
+            ]
+            diagnostics[f"repair_attempt_{attempt}_error_codes"] = [
+                issue.rule_id for issue in remaining if issue.severity == "error"
+            ]
+
+        def _parse(raw: dict) -> ComponentAssemblyResult:
+            nonlocal current_raw
+            current_raw = canonicalize_claim_refs(
+                raw,
                 None,
                 claim_aliases_from_accepted_claims(llm_input.accepted_claims),
             )
-            result = self._cleanup.cleanup(_parse_raw(raw_output, llm_input.document_id, llm_input.cartridge_id))
-            result = enrich_component_assembly(result, llm_input)
-            remaining = validator.validate(result, cartridge, llm_input=llm_input)  # type: ignore[attr-defined]
+            result = self._cleanup.cleanup(
+                _parse_raw(current_raw, llm_input.document_id, llm_input.cartridge_id)
+            )
+            return enrich_component_assembly(result, llm_input)
+
+        def _on_exhausted(issues: list[ValidationIssue]) -> ComponentAssemblyResult:
+            reason = (
+                "LLM component assembly returned no components"
+                if had_no_components and _has_no_components_error(issues)
+                else "Repair failed after max attempts"
+            )
             if diagnostics is not None:
-                diagnostics[f"repair_attempt_{attempt}_issues"] = [
-                    _issue_dict(issue, llm_input) for issue in remaining
-                ]
-                diagnostics[f"repair_attempt_{attempt}_error_codes"] = [
-                    issue.rule_id for issue in remaining if issue.severity == "error"
-                ]
-            if not [i for i in remaining if i.severity == "error"]:
-                result.validation_issues = remaining
-                return result
-            validation_issues = remaining
-        reason = (
-            "LLM component assembly returned no components"
-            if had_no_components and _has_no_components_error(validation_issues)
-            else "Repair failed after max attempts"
+                diagnostics["fallback_reason"] = reason
+                diagnostics["original_failure_codes"] = _issue_codes(issues)
+            return make_deterministic_fallback(llm_input, reason, issues)
+
+        return run_repair_loop(
+            build_messages=lambda _raw, issues: prompt_factory.build_repair_messages(
+                llm_input, current_raw, issues
+            ),
+            generate=lambda messages: llm_client.generate(messages),
+            parse=_parse,
+            validate=lambda result: validator.validate(  # type: ignore[attr-defined]
+                result, cartridge, llm_input=llm_input
+            ),
+            on_success=attach_issues,
+            on_exhausted=_on_exhausted,
+            raw_output=raw_output,
+            validation_issues=validation_issues,
+            log_label="Component assembly",
+            on_attempt_llm_error=_on_attempt_llm_error,
+            on_attempt_parsed=_on_attempt_parsed,
+            on_attempt_validated=_on_attempt_validated,
         )
-        if diagnostics is not None:
-            diagnostics["fallback_reason"] = reason
-            diagnostics["original_failure_codes"] = _issue_codes(validation_issues)
-        fallback = make_deterministic_fallback(
-            llm_input,
-            reason,
-            validation_issues,
-        )
-        return fallback
 
 
 def _has_no_components_error(validation_issues: list[ValidationIssue]) -> bool:

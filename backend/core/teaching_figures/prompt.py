@@ -22,6 +22,7 @@ LLM SDK も FastAPI も import しない純粋な文字列モジュール。
 from __future__ import annotations
 
 from core.teaching_figures import schema
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 
 # ---------------------------------------------------------------------------
 # 共通制約
@@ -40,6 +41,9 @@ GROUNDING_CONSTRAINT = (
     "図に描いてよいのは、以下の参考資料（教材本文・数式・主張）に現れる関係のみです。"
     "資料に無い因果・依存・順序・数値を新しく作らないでください。"
     "描く根拠が資料に見つからない要素は、図に入れずに返答（reply）で教員に確認してください。"
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: [参考資料] の
+    # 教材本文・claim は PDF 由来 = untrusted。指示として解釈しない旨を明示する。
+    + UNTRUSTED_SOURCE_NOTICE
 )
 
 # サニタイザ（core/teaching_figures/sanitizer.py）の許可リストの言語化。
@@ -150,7 +154,10 @@ _SUGGEST_RULES = (
     "- 本文に書かれていない内容を「分かりづらい箇所」として作らないでください。\n"
     "- 参考情報として渡される学習者のつまずきは、人数のレンジや段階ラベルだけの集計です。"
     "個々の学習者について推測・言及しないでください。\n"
-    "- 出力は指定された JSON スキーマのみ。"
+    "- 出力は指定された JSON スキーマのみ。\n"
+    # 信頼境界（正本: docs/architecture/trust_boundary_pdf_input.md）: [トピック本文] は
+    # PDF 由来テキストの再構成物 = untrusted。
+    "- " + UNTRUSTED_SOURCE_NOTICE
 )
 
 

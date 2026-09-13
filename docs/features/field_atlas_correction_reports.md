@@ -8,6 +8,14 @@
 > 注記 (2026-08-14): `field_atlas_overlay_spec.md` の原本は消失している。現存するのは
 > 2026-08-14 の**再構成版**で、**旧§番号との対応は保証されない**。
 
+> **実装状況 (2026-09-03 時点・コード照合):** Issue D は実装済み（migration 023、
+> `backend/core/atlas_reports.py` / `routes/atlas.py` の report 系ルータ /
+> `frontend/public/js/atlas-report.js`）。本文の記述は現行実装と一致する。
+> なお管理画面「分野の地図」タブのレビュー区画（`atlas-reports-section`）には、その後
+> **論文の解析から見つかった候補**（カテゴリギャップ、migration 066。
+> `category_gap_candidates_design.md`）と**関係（辺）の候補**（migration 076。
+> `atlas_relation_edges_design.md`）のグループが並置された。本書の対象は修正報告のみ。
+
 ## D-1: 報告フォームと送信
 
 - `frontend/public/js/atlas-report.js`(新規): atlas-panel.js (Issue C) の接続点イベント
@@ -72,7 +80,8 @@ merged_into, applied_version(''=未反映), notified_at(NULL=未読), created_at
 ```
 
 正本リファレンス: `backend/db/023_atlas_correction_reports.sql`
-(適用は `backend/api/main.py` の `_run_migrations()`)。
+(適用は `backend/core/migrations.py` のランナー。毎起動・番号順に冪等再実行する。
+※ 当初本文の `main.py::_run_migrations()` はアーキテクチャ整理 Tier 3-13 で撤去済み)。
 
 ## 未決事項の決定
 

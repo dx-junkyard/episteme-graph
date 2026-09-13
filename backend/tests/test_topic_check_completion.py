@@ -25,7 +25,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "api"))
 #
 # ``learning_states.progress_data`` の状態を保持し、SQL 文の部分一致で
 # SELECT/UPDATE を素朴にエミュレートする。その他の SQL（INSERT ... ON CONFLICT /
-# personal_graph / learning_chat_history / streak 用の日付集計等）は無害な
+# personal_graph / learning_chat_history の日付集計等）は無害な
 # 空結果を返す。
 # ---------------------------------------------------------------------------
 
@@ -70,7 +70,7 @@ class _FakeSession:
             return _Result(None)
 
         # INSERT ... ON CONFLICT DO NOTHING / personal_graph / chat history /
-        # streak 集計など、本テストの関心外の SQL は無害な空結果でよい。
+        # 本テストの関心外の SQL は無害な空結果でよい。
         return _Result(None)
 
     def commit(self):
@@ -290,7 +290,6 @@ class TestCalculateProgressIncludesCompletion:
             services, "get_personal_layer",
             lambda user_id, course_id: {"misconceptions_by_topic": {}, "chat_anchors": {}},
         )
-        monkeypatch.setattr(services, "calculate_streak", lambda user_id, course_id: 0)
 
         progress = services.calculate_progress(
             "user-1", "course-1", _course_data(["t1", "t2"]),
@@ -310,7 +309,6 @@ class TestCalculateProgressIncludesCompletion:
             services, "get_personal_layer",
             lambda user_id, course_id: {"misconceptions_by_topic": {}, "chat_anchors": {}},
         )
-        monkeypatch.setattr(services, "calculate_streak", lambda user_id, course_id: 0)
 
         progress = services.calculate_progress(
             "user-1", "course-1", _course_data(["t1", "t2"]),
@@ -329,7 +327,10 @@ class TestSchemaFields:
     def test_check_question_response_defaults(self):
         from schemas import LearningCheckQuestionResponse
 
-        resp = LearningCheckQuestionResponse(passed=True, feedback="ok")
+        resp = LearningCheckQuestionResponse(statements=["…"])
+        assert resp.advisory is True
+        assert resp.degraded is False
+        assert resp.self_check_required is True
         assert resp.topic_completed is False
         assert resp.course_completed is False
         assert resp.completed_topic_ids == []
@@ -338,8 +339,7 @@ class TestSchemaFields:
         from schemas import LearningCheckQuestionResponse
 
         resp = LearningCheckQuestionResponse(
-            passed=True,
-            feedback="ok",
+            statements=["…"],
             topic_completed=True,
             course_completed=True,
             completed_topic_ids=["t1", "t2"],
@@ -347,6 +347,14 @@ class TestSchemaFields:
         assert resp.topic_completed is True
         assert resp.course_completed is True
         assert resp.completed_topic_ids == ["t1", "t2"]
+
+    def test_self_check_response_defaults(self):
+        from schemas import LearningCheckSelfCheckResponse
+
+        resp = LearningCheckSelfCheckResponse(self_check="agreed")
+        assert resp.topic_completed is False
+        assert resp.course_completed is False
+        assert resp.completed_topic_ids == []
 
     def test_learning_progress_defaults(self):
         from schemas import LearningProgress
@@ -363,7 +371,6 @@ class TestSchemaFields:
         progress_dict = {
             "learning_concepts": 1,
             "misconceptions": 0,
-            "streak_days": 2,
             "sessions": [],
             "completed_topic_ids": ["t1"],
             "course_completed": False,
@@ -381,28 +388,36 @@ class TestSchemaFields:
 class TestCheckTopicUnderstandingRouteWiring:
     """backend/api/routes/learning.py::check_topic_understanding のソース検証。
 
-    永続化の失敗で採点レスポンス自体を落とさない（fail-open）ことと、
-    合格/不合格それぞれで正しいサービス関数を呼ぶことを検証する。
+    是正 F1 以降、``/check`` は**完了を書かない**（現況を読むだけ）。完了の書き込みは
+    自己確認 ``/check/self-check`` に移っている。現況取得の失敗で並置レスポンス自体を
+    落とさない（fail-open）ことも従来どおり検証する。
     """
 
     @staticmethod
-    def _route_source():
+    def _route_source(fn_name: str = "check_topic_understanding"):
         from pathlib import Path
 
         path = Path(__file__).resolve().parents[1] / "api" / "routes" / "learning.py"
         src = path.read_text(encoding="utf-8")
-        start = src.index("def check_topic_understanding")
+        start = src.index(f"def {fn_name}")
         tail = src[start + 1:]
         rel_end = tail.find("\n@router")
         end = start + 1 + rel_end if rel_end != -1 else len(src)
         return src[start:end]
 
-    def test_calls_record_on_pass(self):
+    def test_check_route_never_records_completion(self):
         body = self._route_source()
-        assert "record_topic_check_pass(" in body
+        assert "record_topic_check_pass(" not in body
 
-    def test_calls_get_course_completion_on_fail(self):
+    def test_check_route_reads_current_completion(self):
         body = self._route_source()
+        assert "get_course_completion(" in body
+
+    def test_self_check_route_is_the_only_writer(self):
+        body = self._route_source("self_check_topic_understanding")
+        assert "record_topic_check_pass(" in body
+        # 完了を書くのは本人が先へ進むと決めた2値のときだけ（verdict_wrong は書かない）。
+        assert "check_review.SELF_CHECK_ADVANCING" in body
         assert "get_course_completion(" in body
 
     def test_persistence_wrapped_in_try_except(self):
@@ -416,7 +431,10 @@ class TestCheckTopicUnderstandingRouteWiring:
         永続化例外がレスポンス自体を落とさないこと（return は最後の except の後）。"""
         body = self._route_source()
         response_idx = body.index("return LearningCheckQuestionResponse(")
-        # 採点用 LLM 呼び出しの try/except と、永続化用の try/except の最低2ブロックがある。
-        assert body.count("try:") >= 2
+        # LLM 呼び出しの try/except は共通実装（core/llm_worker/single_shot.py::json_call
+        # の ``degraded=None``）へ移り、ルートに残るのは現況取得（永続化読み）の
+        # fail-open ブロック。degraded 縮退の配線が残っていることも併せて確認する。
+        assert body.count("try:") >= 1
+        assert "degraded=None" in body
         last_except_idx = body.rindex("except Exception:")
         assert response_idx > last_except_idx
