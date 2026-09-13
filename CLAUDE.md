@@ -3145,6 +3145,48 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - 非スコープ（v1）: split / 凍結後の対応の追加・訂正 UI / cosine 候補 / コース binding の自動読み替え / ベクトルの版間継承 /
   対応表の学習者向け表示。
 
+### 知識の転用層（知識構造の見直し Phase 4, migration 083, 2026-09-13）
+
+構造化成果を「外」と「対話」へ運ぶ層。正本は `docs/features/knowledge_transfer_design.md`（KT1〜KT8・T-1〜T-3・§14 実装記録。
+親は `knowledge_structure_review_2026-09-12.md` §4 Phase 4）。新しい格納庫は作らず、既存の束・SA層の解決器登録・run 記録・
+既存 3 表への列追加で済ませる。**A層非改変・LLM 0 回・確定は人間・数値非表示**。
+
+- **P4-1 束の往復**（`routes/export.py` 同居 + `core/knowledge_import/`）: export bundle に `ro-crate-metadata.json`（RO-Crate 1.1 + PROV 語彙・
+  人名なし）と各項目の `stable_key` / `knowledge_object_id`（live 行との join。無ければキー自体を付けない）、manifest
+  `export_schema_version` **0.3.0**。import は `POST /api/documents/{id}/import-bundle`（multipart `bundle`・query `dry_run` 既定 true /
+  `replace` 既定 false・権限は document **編集**・不在と権限なしは 404）。検証は束の `_validate_export_references`（errors 非空は 422）。
+  **T-1 承認は継承しない**（取り込み行は常に `teacher_review_required` / `candidate`、束の値は `agent_payload.import.source_review_status`）/
+  **T-2 live 行がある document へは 409**（`replace=true` の明示で Phase 1 と同じ supersede 同期）/ **KT4 stable_key は取り込み先 document_id で
+  再計算**（束の値は `agent_payload.import.source_stable_key`）。書き込みは `sync_live_rows` 経由のみ・DELETE なし・run は採用しない・
+  監査 `AUDIT_ENTITY_IMPORT` + `record_knowledge_audit`。UI は `admin-knowledge-import.js`（dry-run の事実 → 確定の 2 段）。
+- **P4-2 RAG の構造 1 hop**（SA層 kind `retrieved_structure`・`resolvers/learning.py`）: 採用 chunk（score ≥ 0.30・当該ターンの
+  `allowed_document_ids` を `ANY(:doc_ids)` で強制）→ `theory_claims_live(chunk_id)` → 理論操作グラフ **main 層**ノードを決定論で解決し、
+  画面文脈ブロックの直後に事実文ブロック（`BLOCK_HEADER_RETRIEVED`・出典ごと 2 主張・全体 8 行）を足す。`screen_context` が無くても働く。
+  casual / `cycle_mode=elicit` では出さない。**LLM 呼び出し箇所は増えない**（ガードレールで固定）。登録 kind は 5 つ
+  （element / verification / placement / view / retrieved_structure。`resolve_topic` / `resolve_visible` は引き続き作らない）。
+  ノード事実文は stage の日本語ラベル（`element_vocab`）+ `display_label` の理論対象で、英語の stage 名（内部表示名）は学習者に出さない。
+  観測は既存 `structured_grounding_present` に相乗り。docs は SA層設計書 §11.16 / `rag-chat.md` ④-b' / `learning.md`。
+- **P4-3 参照の健全性**（`core/reference_health.py`・FastAPI 非 import・live ビューのみ）: グラフノード → 主張 / component → 主張・式 /
+  主張 → 出典チャンク / 学ぶ単位 → 各表 の参照切れを検査し `{status: ok|broken|unchecked, checked_at, facts[], details{}}` を返す
+  （facts に数字を書かない = T-3・`debug` 層は対象外）。解析完了時に `stage_outputs.reference_health` へ検査時点の事実を残し
+  （「解決済み」フラグではない = KT5）、`MaterialOut.reference_health {status, checked_at}` が教材行の事実文チップに、
+  `GET /api/admin/documents/{id}/reference-health`（`routes/reference_health.py`・閲覧・読み取り専用）が詳細モーダルに出る。
+  束の `check_refs`（artifact 側）とは別軸で両方残す。
+- **P4-4 版の語彙**（コード変更 0）: `docs/architecture/layer_registry.md` §4 が「版」を持つ全構造に PROV-O の 2 語
+  （revision = `prov:wasRevisionOf` / alternate = `prov:alternateOf`）を宣言する。同一性リンク系（identity_links / entry_relations /
+  atlas_node_links / anchor_aliases）は alternate で統合しない。**版・同一性を持つ構造を足すときは §4 に 1 行足す**
+  （`test_version_semantics_docs.py` が網羅を固定）。export の JSON-LD も同じ語を使う。
+- **P4-5 D層・C層の表現語彙**（migration 083・列追加のみ）: `challenges.challenge_mode`（`direct` / `undercut`・既定 direct）+
+  `target_element_ref JSONB`、`epistemic_ledger.evidence_lines JSONB`（SEPIO 型の根拠の線。**人間の記帳専用**・worker / ledger_builder は
+  書かない・support_paths の結果は記帳しない・`POST|PATCH /api/admin/doubt/ledger/{t}/{id}/evidence-lines[/{line_id}]`・削除なし・
+  学習者向けは事実文 1 行 `evidence_lines_fact` のみ）、`component_citations.citation_intent`（CiTO 最小 5 語彙・正本
+  `core/schema.py::CITATION_INTENTS`・NULL = 記録なし・`/cite` の optional body）。ラベルは `label_vocab` の 3 表（JS は逐語ミラー）。
+- **ガードレール**: `test_knowledge_import_{core,api,guardrails}.py` / `test_export_jsonld.py` / `test_retrieved_structure_{core,route,guardrails}.py` /
+  `test_reference_health_{core,api,guardrails}.py` / `test_version_semantics_docs.py` / `test_doubt_citation_vocab_{migration,api,guardrails}.py` /
+  `test_knowledge_transfer_{vocab_mirror,ui_static}.py`。
+- **非スコープ（v1）**: コース・chunks・embedding・図・learning_units・同一性リンクの取り込み / 他インスタンスの承認の継承 / import の差分プレビュー・
+  取り消し / P4-2 の detail 層・derivation・symbol / 健全性の自動修復・G層 To-Do / `prov:alternateOf` の束への書き出し / evidence_lines の LLM 候補。
+
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
 同型実装のコピペ増殖を止めるための正本モジュール群。**新機能で同種の処理を書くときは

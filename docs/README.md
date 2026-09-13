@@ -216,6 +216,7 @@ PDF アップロード（ファイル / URL 指定 / arXiv ディスカバリー
   ／[学ぶ単位の一級化（論文の「教える単位」を `learning_units` の行にし、コース topic をその並びにする層。知識構造の見直し Phase 2）](features/learning_units_design.md)
   ／[概念レジストリ（`library_entries` を軸に、概念を SKOS 語彙でリンクする層。同一性候補・別名・関係・地図との対応。知識構造の見直し Phase 3）](features/concept_registry_design.md)
   ／[主張の概念接地（主張の `concepts` 欄に分野の言葉を供給する。Phase 3 の追補 K-2。記号は概念マップに出さない）](features/claim_concept_grounding_design.md)
+  ／[知識の転用層（束の往復 export JSON-LD + import・RAG への構造 1 hop・参照の健全性・版の語彙・D/C層の表現語彙。知識構造の見直し Phase 4）](features/knowledge_transfer_design.md)
   ／[画面文脈アダプター（AI 対話に「いま見ている画面」を渡す層）](features/assistant_screen_adapter_design.md)
   ／[学習チャットの入口統合（様相はサーバが推定・casual のテキスト入口。**実装済み**）](features/learning_chat_entry_unification_design.md)
   ／[LLM 応答ストリーミング（学習チャットの逐次配信と停止。**Phase 3-a 実装済み**・既定 off）](features/llm_response_streaming_design.md)

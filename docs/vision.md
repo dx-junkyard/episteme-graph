@@ -517,7 +517,7 @@ verification_proposals に一本化）・**ゼミ前ブリーフと鏡面化**�
 **グラフ対話レビュー**（教材起点でグラフを見ながら承認・却下する。AI 応答から承認 API を
 呼ぶ経路は作らない）と**グラフの論文層**（フレームに論文の章・式・図表を肉付けする読み時射影）・
 **教員の弁と計器**（負荷順トリアージ・静かな計器）・要素インベントリ・
-**確定文脈の記帳**（一括確認に「何が提示され・何が選べ・どこから再審できるか」を記帳。§4 改訂原則1 の実装）。
+**確定文脈の記帳**（一括確認に「何が提示され・何が選べ・どこから再審できるか」を記帳。§4 改訂原則1 の実装）・**知識の転用層**（束の往復 = export の JSON-LD 化と import、RAG への構造 1 hop、参照の健全性、版の語彙。取り込みは候補で着地し承認は継承しない）。
 
 → [endorsement-sharing.md](features/endorsement-sharing.md) /
 [element_deliberation_workspace_design.md](features/element_deliberation_workspace_design.md) /
@@ -526,7 +526,8 @@ verification_proposals に一本化）・**ゼミ前ブリーフと鏡面化**�
 [graph_dialogue_review_design.md](features/graph_dialogue_review_design.md) /
 [graph_paper_layer_design.md](features/graph_paper_layer_design.md) /
 [teacher_triage_instruments_design.md](features/teacher_triage_instruments_design.md) /
-[decision_context_design.md](features/decision_context_design.md)
+[decision_context_design.md](features/decision_context_design.md) /
+[knowledge_transfer_design.md](features/knowledge_transfer_design.md)
 
 ### 群7: 運営基盤 — 弁と観測装置のインフラ（§4/§6）
 

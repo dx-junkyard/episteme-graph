@@ -175,6 +175,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 `_fallback_chunk_for_topic`（`:1629`）は `chunks[topic_index]`。原則8（出所の正直さ）に反し、さらに `has_topic_material`（`learning.py:3598`）がこの本文を「実根拠あり」として **tier を source まで底上げ**する。**改善方向**: 接続できなかった topic は `material_chunk_ids` を空にし事実で書く。
 
 ### C-5. RAG は chunks しか読まない — 構造化の投資が対話に還っていない
+→ **2026-09-13 解消**（本文 §4 Phase 4 実装記録: P4-2 — SA層 kind `retrieved_structure`。採用 chunk → `theory_claims_live` → 理論操作グラフ main ノードの 1 hop を決定論で当該ターンの入力に足す。LLM 回数不変。[知識の転用層](../../features/knowledge_transfer_design.md) §5）
 `api/services.py:1639` の SQL は `FROM chunks c LEFT JOIN documents d`。最大の資産（`CorePredicate` グラフ、導出鎖、記号レジストリ）が**学習者の対話に一度も現れない**。**改善方向**: 検索を「chunk 近傍 → その chunk を出典に持つ claim → その claim を backing に持つ graph ノード」へ 1 hop 拡張し決定論的に grounding へ足す。SA層に `kind="retrieved_structure"` 解決器を1本足すのが最小形。
 
 ### C-6. 承認ゲートの下流が全部空回りしている
@@ -209,6 +210,7 @@ t1 の `student_material` は **LLM が書いた教育的散文**で、原本の
 component:topic が 1:1。**改善方向**: topic を「component の並び」として定義し直す（`topic.units: [{kind, id}]`）。大きな構造変更で不変条項との衝突を要検討。
 
 ### C-14. export は良いが片道
+→ **2026-09-13 解消**（本文 §4 Phase 4 実装記録: P4-1 import + P4-3 `core/reference_health.py` — DB live 行の参照整合を解析完了時に run へ事実として残し、教材行の事実文と `GET .../reference-health` で常時読める。[知識の転用層](../../features/knowledge_transfer_design.md) §4 / §6）
 `check_refs` は本調査で見つけた ID 破断を**検出できる唯一の仕組み**だが import が無く CI にも組み込まれていない。
 
 ## ⑥ 触れてはいけない不変条項

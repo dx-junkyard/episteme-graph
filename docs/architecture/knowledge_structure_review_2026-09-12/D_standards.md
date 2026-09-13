@@ -115,12 +115,15 @@
 - **改訂原則1（確定は再構成可能な手続にのみ）の直接の補強**。confidence は DB のみ。
 
 ### X-5【高】SEPIO 型の evidence line を台帳に
+→ **2026-09-13 解消**（P4-5 migration 083 `epistemic_ledger.evidence_lines`。人間の記帳専用・worker は書かない・support_paths の結果は記帳しない。[知識の転用層](../../features/knowledge_transfer_design.md) §8）
 - `epistemic_ledger` に `evidence_lines` JSONB 配列（`{line_id, line_kind, evidence_ids[], claim_ids[], equation_ids[], recorded_by, reason, recorded_at}`）。`support_paths` の計算結果は記帳しない（PN-2）。worker は書かない（SL3 同型）。
 
 ### X-6【高】support/challenge を DAG として明示し undercut を型に
+→ **2026-09-13 解消**（P4-5 migration 083 `challenges.challenge_mode ∈ {direct, undercut}` + `target_element_ref`。[知識の転用層](../../features/knowledge_transfer_design.md) §8）
 - `challenges` に `challenge_mode ∈ {direct, undercut}`、疑義の対象を `target_element_ref`（グラフ上の位置）に。記帳は人間のみ不変。
 
 ### X-7【中】引用意図の最小語彙
+→ **2026-09-13 解消**（P4-5 migration 083 `component_citations.citation_intent`（5 語彙・NULL = 記録なし）。正本 `core/schema.py::CITATION_INTENTS`。[知識の転用層](../../features/knowledge_transfer_design.md) §8）
 - `component_citations` に `citation_intent ∈ {uses_as_evidence, extends, qualifies, contrasts_with, cites_for_background}`（教員が選ぶ）。
 
 ### X-8【中】OMDoc の view = 記号対応表つきの同一性リンク
@@ -136,9 +139,11 @@
 - 循環検出・推移的冗長・最小前提集合の非LLM 純関数。学習者には出さない。adaptive assessment は恒久排除。
 
 ### X-12【中】PROV-O の版2系統（revision と alternate を混ぜない）
+→ **2026-09-13 解消**（P4-4 — `docs/architecture/layer_registry.md` §4「版の語彙」に revision / alternate を全「版」構造へ宣言。コード変更 0・`test_version_semantics_docs.py` が網羅を固定。[知識の転用層](../../features/knowledge_transfer_design.md) §7）
 - V層 / landscape / library の3つの「版」が担う意味を語彙として区別。コード変更ゼロで始められる。
 
 ### X-13【中〜高】RO-Crate 型の可搬スナップショット
+→ **2026-09-13 解消（束側で）**（P4-1 — export bundle に `ro-crate-metadata.json`（RO-Crate 1.1 + PROV 語彙）と各項目の `stable_key` / `knowledge_object_id`。`shared_versions.snapshot` 自体は非改変で、JSON-LD 化は束の出口に置いた。[知識の転用層](../../features/knowledge_transfer_design.md) §4.1）
 - `shared_versions.snapshot` に `@context` を被せ JSON-LD として出せる export。DB 変更なし。「転用のしやすさ」への**最大の単発リターン**。
 
 ### X-14【低〜中】外部語彙への写像表（DoCO/DEO / CoreSC / AZ）
@@ -148,6 +153,7 @@
 - 部品に「何を学ばせるか」、cartridge に「この分野の component はこの述語を埋める」形の宣言。`educationalLevel`・Bloom 階層は入れない。
 
 ### X-16【低】assertion / provenance / pubinfo の三分離
+→ **2026-09-13 一部解消**（P4-1 の `ro-crate-metadata.json` が ①主張本文 = 各 JSON ファイル ②どう得たか = `prov:Activity`（解析 run）③いつ公開したか = ルート `Dataset` の `datePublished` に分ける。誰が = 監査台帳のみ（束には書かない）。[知識の転用層](../../features/knowledge_transfer_design.md) §4.1）
 - 新たに作る公開単位（X-13 の export）で①主張本文②どう得たか③誰がいつ公開したか を3ブロックに。既存テーブルは再設計しない。
 
 ## ④ 借りるべきでないもの（理由つき）

@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-13 時点で **083 以降**。044〜082 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-09-13 時点で **084 以降**。044〜083 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -95,6 +95,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 知識オブジェクト層 | Knowledge Objects（claim 親子 / component / equation / evidence / derivation step / symbol を内容由来の版非依存キー `stable_key` を持つ一級の行にし、再解析を DELETE ではなく supersede 遷移にする。artifact は 1 run × 1 stage 1 行の生成ログへ降格、`document_id` は UUID + FK、型語彙は `core/schema.py` 正本 + 語彙表 FK） | `docs/features/knowledge_objects_design.md`（KO1〜KO10・§12 実装記録。親: [知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) Phase 1） | `backend/core/knowledge_objects/`（stable_key / sync / remap / backfill）+ `core/document_pipeline/persistence.py` + `routes/admin.py::delete_material` → `core/versioning/deletion.py::_purge_document` | 078, 079, 080 | 実装済み（Phase 1 v1。読み手は `theory_claims_live` / `theory_components_live` を読む） |
 | 学ぶ単位層 | Learning Units（skeleton の論理ブロック / thesis の支持構造 / component の LLM 原案 / DSL ノード / 図を `stable_key` 付きの `learning_units` 行にし、コース topic を `topic.units` でその並びとして定義する。前提は同コース topic の ID 参照 + 非LLM の半順序検査、コース登録は `decision_context` 付きの一括確定、承認ゼロ配信は G層の事実文、blueprint の語りの弧を topic へ、学習者の選択要素は `learner_selected` アンカーに着地） | `docs/features/learning_units_design.md`（LU1〜LU9・§12 実装記録。親: [知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) Phase 2） | `backend/core/knowledge_objects/learning_units.py` + `core/course_units.py` + `core/course_prerequisites.py` + `routes/course_prerequisites.py` + `core/structure_anchor/selection_segment.py` + `course_content_builder.py` / `routes/learning.py::create_course` | 081 | 実装済み（Phase 2 v1。unit の教員確定 UI は非スコープ） |
 | 概念レジストリ層 | Concept Registry（`library_entries` を概念レジストリに拡張し、SKOS 相当の label 3 種 / 関係 4 種 / `mapping_justification` / レジストリ ↔ atlas node の版非依存リンク / 記号 → 概念の参照と学習者向け「直前の定義」/ 決定論の同一性候補 / cartridge の形の宣言と適合事実を積む。リンクであってマージではない — 行の統合・削除はしない） | `docs/features/concept_registry_design.md`（KR1〜KR10・§13 実装記録。親: [知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) Phase 3）+ 追補 [主張の概念接地](../features/claim_concept_grounding_design.md)（CG1〜CG7・§10 実装記録。K-2: 主張の `concepts` へ分野の言葉を供給し、学習者の概念マップから記号を除く。migration 不要） | `backend/core/library/`（`schema` / `store` / `registry` / `atlas_links` / `identity_candidates`）+ `core/symbol_lookup.py` + `core/cartridge_shape.py` + `routes/library.py` / `routes/cartridge_shape.py` + `admin.js`（ナレッジライブラリタブの区画）/ `app.js`（記号ポップオーバー） | 082 | 実装済み（v1。確定は常に教員・LLM 0 回・embedding 呼び出しゼロ） |
+| 知識の転用層 | Knowledge Transfer（束の往復 = export の RO-Crate 型 JSON-LD 化 + 各項目の `stable_key` と import（dry-run → 教員確定・承認は継承しない・取り込み先で stable_key 再計算）/ RAG への構造 1 hop（SA層 kind `retrieved_structure`・LLM 回数不変）/ DB live 行の参照の健全性（解析完了時の事実 + 教材行 + 詳細 API）/ 版の語彙（§4・PROV-O 2 語）/ D層・C層の表現語彙（疑義の向き・根拠の線・引用の意図）） | `docs/features/knowledge_transfer_design.md`（KT1〜KT8・T-1〜T-3・§14 実装記録。親: [知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) Phase 4） | `backend/core/knowledge_import/` + `core/reference_health.py` + `core/assistant_context/resolvers/learning.py`（retrieved_structure）+ `routes/export.py`（import）/ `routes/reference_health.py` / `routes/doubt.py`（evidence-lines）+ `admin-knowledge-import.js` | 083（P4-5 の列追加のみ。P4-1〜P4-4 は不要） | 実装済み（v1。取り込み対象は claim / component / equation / evidence / derivation step / graph） |
 | 教材図スタジオ | Teaching Figure Studio（AI対話 SVG 生成） | `docs/features/teaching_figure_studio_design.md`（FG1〜FG9・§13 実装記録） | `backend/core/teaching_figures/` + `routes/teaching_figures.py` + `admin-figure-studio.js` | 063 | 実装済み（v1） |
 | リリース前の確認 | Release Review Flow（3ステップウィザード） | `docs/features/release_review_flow_design.md`（RR1〜RR7） | `routes/landscape.py`（course-scoped）+ `admin-release-review.js` | 不要（既存 API の束ね） | 実装済み（v1） |
 | 教員の弁と計器 | 負荷順トリアージ + 静かな計器（コスト見通し・WMレンズ） | `docs/features/teacher_triage_instruments_design.md`（TT1〜TT6・§6 実装記録） | `backend/core/teacher_triage.py` + `core/llm_usage/forecast.py` + `core/lecture_wm.py` + 既存キュー2ルートの sort 拡張 | 不要（読み時導出とソートのみ） | 実装済み（Phase 4 v1） |
@@ -120,7 +121,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜082、2026-09-13 時点）
+## 3. migration 帰属一覧（init〜083、2026-09-13 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -190,7 +191,37 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 080 | `080_document_id_uuid` | **知識オブジェクト層 M3**（`document_id` の TEXT → UUID 統一 + `documents(id)` への FK CASCADE。適用時に到達不能な孤児行を1回掃除） |
 | 081 | `081_learning_units` | **学ぶ単位層**（語彙表 `knowledge_unit_kinds` + 新表 `learning_units` + `learning_units_live`、`theory_components` の親参照列 `parent_component_id` / `parent_agent_component_id`。末尾で live ビュー2文を再作成） |
 | 082 | `082_concept_registry` | **概念レジストリ層**（語彙表4表 `knowledge_entry_types` / `knowledge_label_kinds` / `knowledge_relation_kinds` / `knowledge_mapping_justifications` + `library_entries` のレビュー列群、新表 `library_entry_labels` / `library_entry_relations` / `library_atlas_node_links`、既存5表への `mapping_justification` の additive 追加、`element_identity_links` の instance 型に `symbol`、`knowledge_symbols_live` ビュー） |
+| 083 | `083_doubt_citation_vocab` | **知識の転用層（P4-5）**（`challenges.challenge_mode` / `target_element_ref`・`epistemic_ledger.evidence_lines`・`component_citations.citation_intent` の列追加のみ。新テーブルなし） |
 
-次の空き番号は **083**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **084**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
+
+## 4. 版の語彙（PROV-O の 2 系統 — revision と alternate を混ぜない）
+
+「版」を担う構造が V層 / atlas 骨格 / L層凍結版 / 知識行の supersede / 同一性リンクに散っている
+（[知識構造の見直し提案](knowledge_structure_review_2026-09-12.md) X-12）。それぞれが**どの意味の「版」か**を
+PROV-O の 2 語で宣言する。**コード変更はゼロ**（宣言だけ）。export bundle の `ro-crate-metadata.json`
+（[知識の転用層](../features/knowledge_transfer_design.md) §4.1 / §7）は同じ語を使う。
+表の網羅は `backend/tests/test_version_semantics_docs.py` が固定する（版を持つ構造を足したらここに 1 行足す）。
+
+- **revision（`prov:wasRevisionOf`）** = 同じものの**新しい状態**。旧版は残り、新版がそれを置き換える。
+- **alternate（`prov:alternateOf`）** = 同じものの**別表現・別 ID**。どちらも生きていて、統合しない（KN-2 / 原則7）。
+
+| 構造（表・列） | 語彙 | 意味 | 正本 |
+|---|---|---|---|
+| `shared_versions.version_no`（V層の発行版） | revision | 発行版の連鎖。`shared_version_subscriptions.pinned_release_id` と `component_citations.source_release_id` はその 1 点への pin（`prov:hadPrimarySource`）であって版ではない | `shared_versioning_design.md` |
+| `atlas_skeletons`（`domain_key`, `version`）の凍結版 + `id_migrations` | revision | 分野の地図（骨格）の凍結版。`id_migrations` は revision 間の node 対応（K-6。`atlas_node_correspondence_design.md`）。`atlas_overlay_cache` / `atlas_anchor_embeddings.skeleton_version` はその版への刻印 | `field_atlas_overlay_spec.md` |
+| `library_entry_versions`（L層の凍結版） | revision | ナレッジライブラリ エントリの凍結版。パイプラインが読むのは凍結版だけ | `image_pipeline_knowledge_library_design.md` §6 |
+| 知識行の `produced_by_run_id` / `superseded_at` / `superseded_by_run_id`（`theory_claims` / `theory_components` / `knowledge_*` / `learning_units`） | revision | 解析 run による改訂。**同一性は `stable_key`、版は run**。live ビューは「現在の版」の射影 | `knowledge_objects_design.md`（KO3） |
+| `element_explanations` / `landscape_placements` / `landscape_gap_signals` / `element_annotations` の `superseded` 遷移 | revision | 候補の改訂（再解析で inferred / candidate だけが倒れ、確定は残る） | 各層の設計書（LS3 / OA 系） |
+| `document_analysis_runs`（同一 document の run 列・`documents.active_analysis_run_id`） | revision | 解析そのものの改訂。採用 run が「現在の版」。artifact は 1 run × 1 stage の生成ログ | `knowledge_objects_design.md`（KO6） |
+| `element_id_remap` | revision 間の対応表 | 旧 ID → 新 ID（同一 stable_key の別 run）。「解決済み」フラグではなく事実の記録 | `knowledge_objects_design.md`（KO8） |
+| `element_identity_links`（instance ↔ shared_part / symbol） | **alternate** | 同じ概念の別表現（論文側の局所表現と共通部品）。統合・書き換えなし | `knowledge_network_vision.md`（KN-2） |
+| `library_entry_relations`（`exact_match` / `close_match`） | **alternate** | 2 つのレジストリ行を並存させたまま「同じ / 近いが別」を記録する SKOS の関係語彙（`broader` / `related` は版でも同一性でもない構造語） | `concept_registry_design.md`（KR3） |
+| `library_atlas_node_links` | **alternate** | レジストリ行と骨格 node の同一概念関係。版非依存キー（`skeleton_version` を持たない） | `concept_registry_design.md`（KR9） |
+| `atlas_anchor_aliases` | **alternate** | 骨格 node の教員確定別名（版非依存） | `atlas_vector_anchoring_design.md`（VA6） |
+| `help_kb` の draft / freeze（`manual_sections` の凍結版） | revision | マニュアル KB の配信版 | `manual_help_kb_design.md` |
+
+注記: `revision` の構造は「旧版を残す」ことが規約（行削除なし）。`alternate` の構造は「どちらも正」であることが規約
+（片方を消して寄せない）。新しい層が「版」または「同一性」を持つときは、この表に 1 行足してからコードを書く。

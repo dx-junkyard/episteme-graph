@@ -370,6 +370,23 @@ LLM 抽出ステージ = 実測後に判断）を受けて [claim_concept_ground
 | P4-4 | 版の 2 系統（PROV-O `wasRevisionOf` / `alternateOf`）を語彙として layer_registry に宣言（コード変更 0） | V層 / landscape / library の「版」の意味分離 | X-12 |
 | P4-5 | `challenges` に `challenge_mode ∈ {direct, undercut}`、台帳に `evidence_lines`（SEPIO）、`component_citations` に `citation_intent`（CiTO 3〜5 語） | D層・C層の表現力。記帳は人間のみ不変 | X-5 / X-6 / X-7 |
 
+#### Phase 4 実装記録（2026-09-13）
+
+専用設計書 [knowledge_transfer_design.md](../features/knowledge_transfer_design.md)（KT1〜KT8・T-1〜T-3・§14）に従い、Fable 5.1 指揮 + Opus 5 の
+5 担当（第1波 A〜D = P4-1 / P4-2 / P4-3 / P4-5 のバックエンド、第2波 E = UI・アンカー・マニュアル）で同日実装。P4-4 と索引系文書は指揮者。
+migration は **083** に採番（P4-5 の列追加のみ）。オーナー判断を要する項目は無し（取り込み行の承認非継承 = T-1 / live 行がある document への
+取り込みは明示 `replace` = T-2 / 健全性は事実文 1 行 + 列挙 = T-3 を推奨で固定・撤回可）。
+
+| # | 解消 | 実装先 |
+|---|---|---|
+| P4-1 | export bundle に `ro-crate-metadata.json`（RO-Crate 1.1 + PROV・人名なし）と各項目の `stable_key` / `knowledge_object_id`、manifest 0.3.0。import `POST /api/documents/{id}/import-bundle`（dry-run → 教員確定・`sync_live_rows` へ行として・stable_key は取り込み先で再計算・承認は継承しない・DELETE なし・`AUDIT_ENTITY_IMPORT`） | `routes/export.py`・`core/knowledge_import/` |
+| P4-2 | SA層 kind `retrieved_structure`（採用 chunk → `theory_claims_live` → 理論操作グラフ main ノードの決定論 1 hop を当該ターンの入力に。LLM 回数不変・casual / elicit では出さない・登録 kind は 5 つ） | `core/assistant_context/resolvers/learning.py`・`routes/learning.py` |
+| P4-3 | `core/reference_health.py`（live 行の参照切れ 4 検査・数字を書かない）→ 解析完了時の `stage_outputs.reference_health` + 教材行の事実文チップ + `GET /api/admin/documents/{id}/reference-health` | `core/reference_health.py`・`routes/reference_health.py`・orchestrator・`MaterialOut` |
+| P4-4 | `layer_registry.md` §4「版の語彙」で revision（`prov:wasRevisionOf`）/ alternate（`prov:alternateOf`）を全「版」構造へ宣言。コード変更 0・`test_version_semantics_docs.py` が網羅を固定 | docs |
+| P4-5 | 083: `challenges.challenge_mode` / `target_element_ref`、`epistemic_ledger.evidence_lines`（人間専用）、`component_citations.citation_intent`（`core/schema.py::CITATION_INTENTS`）。API は additive・削除なし・学習者向けは事実文 1 行 | `backend/db/083_*.sql`・`core/doubt/schema.py`・`core/label_vocab.py`・`routes/doubt.py`・`routes/theory_components.py` |
+
+検証: backend フルスイート 15,863 pass / src 1,924 pass（2026-09-13）。実 DB での 083 適用・往復 E2E は docker 復帰後。
+
 ---
 
 ## 5. 借りないこと・やらないこと

@@ -281,6 +281,7 @@ comp_004 (fujimoto) ["e","x","t","l","c","r","a","sideband","n","i","cavity"]
 **改善方向**: S-6 の版化後は run 単位でなく「オブジェクトの版」でピンできる（粒度が合う）。
 
 ### S-16 export はあるが import が無い（転用は一方通行）
+→ **2026-09-13 解消**（本文 §4 Phase 4 実装記録: P4-1 — `POST /api/documents/{id}/import-bundle`（dry-run → 教員確定・`sync_live_rows` へ行として流す・stable_key は取り込み先で再計算・承認は継承しない）。[知識の転用層](../../features/knowledge_transfer_design.md) §4）
 **[確認]** `POST /api/courses/{id}/export-bundle`(`export.py:3006`) と `POST /api/documents/{id}/export-bundle`(:3194) が zip を返す。中身は `claims/claims.json`/`components/components.json`/`equations/equations.json`/`equation_candidates.json`/`derivations/derivation_chains.json`/`evidence/evidence_snippets.json`/`thesis/thesis_reconstruction.json`/`manifest.json`/`export_validation.json` ほか(:2922-2995)。**`import` に相当するルート・関数はリポジトリに存在しない**（grep 0 件）。
 **困りごと**: 他インスタンスへの転用・研究室間共有・バックアップ復元ができない。カートリッジはファイルでデプロイできるのに、知識そのものは持ち出せても戻せない。
 **改善方向**: export 側が既に ID 正規化(`_normalize_export_references`)と検証(`_validate_export_references`)を持つので逆写像の余地はある。ただし S-4 の ID 安定化が前提。

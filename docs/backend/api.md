@@ -66,7 +66,7 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   `landscape.learning_router`（/api/learning）/ `paper_discovery`（/api/admin/discovery）/
   `corpus.learning_router`（/api/learning）/ `indicators`（/api/indicators）/
   `disclosure`（/api/disclosure）
-- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（26本、2026-09-13 時点。正本はコードで `main.py` の登録行を数える）**:
+- **`prefix="/api/admin"` を付けて登録される admin 系子ルーター（27本、2026-09-13 時点。正本はコードで `main.py` の登録行を数える）**:
   `lecture_studio`（パッケージ。`_shared`/`scripts`/`pipeline`/`topics` に分割、Tier 3-17a）/
   `theory_components` / `cartridges`（/cartridges）/ `revisions` / `atlas.router`（/cartridges 配下）/
   `atlas.admin_atlas_router`（/atlas）/ `atlas.binding_router`（/courses）/ `atlas_gaps`
@@ -74,7 +74,7 @@ purge も同スイーパに相乗り、migration 068/069）→ ⑧論文ディ�
   `doubt.admin_router`（/doubt）/ `admin_assistant.admin_router`（/assistant）/
   `reconstruction.admin_router` / `seminar_brief.admin_router`（/documents 配下）/
   `discuss_observation.admin_router` / `course_prerequisites`（/course-builder/prerequisite-check）/
-  `cartridge_shape`（/cartridges/{id}/fit。cartridge の形の宣言に対する適合事実の読み取り専用1本）/ `versioning` / `status`
+  `cartridge_shape`（/cartridges/{id}/fit。cartridge の形の宣言に対する適合事実の読み取り専用1本）/ `reference_health`（/documents/{id}/reference-health。DB live 行の参照整合の読み取り専用1本）/ `versioning` / `status`
   （/status）/ `notifications`（/notifications）/ `deliberation`（/deliberation）/ `teaching_figures` /
   `landscape.router`（/landscape）/ `admin_assistant.help_kb_router`（/help-kb）
 - **例外（#496）**: `GET /api/admin/documents/{id}/figures` は admin.py にも定義が残るが、main.py が
@@ -674,7 +674,7 @@ TEACHER で、**書き込み系はコース所有者 / SYSTEM_ADMIN のみ**（`
 | POST | `/api/admin/explanations/{eid}/endorse` | TEACHER + コース閲覧 | 承認を upsert（level=provisional/endorsed/strong。再承認で revoked 解除） |
 | DELETE | `/api/admin/explanations/{eid}/endorse` | TEACHER（自分の承認行のみ） | 承認取り消し（`revoked=TRUE`。行削除せず履歴保持） |
 | GET | `/api/admin/explanations/{eid}/endorsements` | TEACHER + コース閲覧 | 有効な承認一覧 + 集計 + 段階ラベル |
-| POST | `/api/admin/explanations/{eid}/cite` | TEACHER + shared or 自分の説明 + 引用先コース編集権 | 説明を自コースへ帰属付き引用（V層の版固定 + auto-pin を best-effort 実行） |
+| POST | `/api/admin/explanations/{eid}/cite` | TEACHER + shared or 自分の説明 + 引用先コース編集権 | 説明を自コースへ帰属付き引用（V層の版固定 + auto-pin を best-effort 実行）。optional `citation_intent`（`core/schema.py::CITATION_INTENTS` の 5 語彙・語彙外 422・省略は NULL = 記録なし。migration 083） |
 | GET | `/api/admin/courses/{cid}/sharing-dashboard` | TEACHER + コース閲覧 | 承認・共有・引用の集団集計（個人追跡ではない） |
 | POST | `/api/admin/theory-components/candidates/from-query` | TEACHER + コース編集 | 質問 + AI 回答からコンポーネント候補を生成（candidate + `confirmed=False` の backing_claims。確定は教員のみ） |
 
@@ -913,6 +913,8 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 |---|---|---|---|
 | POST | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-conditions` | TEACHER | 反証条件の手動記帳（人間専用の記帳先。statement / kind / reason / 根拠 / reachability を必須検証） |
 | PATCH | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-conditions/{cond_id}` | TEACHER | 反証条件の訂正（訂正後も必須項目を再検証） |
+| POST | `/api/admin/doubt/ledger/{ttype}/{tid}/evidence-lines` | TEACHER | 根拠の線（SEPIO 型 evidence line）の手動記帳（migration 083）。`line_kind`（observation / derivation / external_reference / consistency）・`reason` 非空・evidence_ids ∪ claim_ids ∪ equation_ids 非空。帰属は認証ユーザー・worker は書かない・削除 API なし |
+| PATCH | `/api/admin/doubt/ledger/{ttype}/{tid}/evidence-lines/{line_id}` | TEACHER | 根拠の線の訂正（訂正後も必須項目を再検証）。学習者向け台帳 GET には事実文 1 行（`evidence_lines_fact`）だけ射影し `recorded_by` / ID を出さない |
 | POST | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-candidates/{cid}/confirm` | TEACHER | LLM 候補の確定（候補行は `confirmed` で保持し、教員の帰属で新規 FalsificationCondition を発行。候補が本体へ直接入らない） |
 | POST | `/api/admin/doubt/ledger/{ttype}/{tid}/falsification-candidates/{cid}/dismiss` | TEACHER | LLM 候補の却下（`dismissed` で保持） |
 | POST | `/api/admin/doubt/courses/{cid}/falsification-candidates/refresh` | TEACHER | 反証条件候補生成の非同期スケジュール（同期パスに LLM を入れない） |
@@ -936,7 +938,7 @@ course_id / target_id への所有・共有チェックは行わない（ロー�
 
 | メソッド | パス | 権限 | 説明 |
 |---|---|---|---|
-| POST | `/api/admin/doubt/targets/{ttype}/{tid}/challenges` | TEACHER | 疑義の作成（assumption/claim のみ。challenge_type + reason 必須・匿名不可・監査記録） |
+| POST | `/api/admin/doubt/targets/{ttype}/{tid}/challenges` | TEACHER | 疑義の作成（assumption/claim のみ。challenge_type + reason 必須・匿名不可・監査記録）。optional `challenge_mode`（direct = 主張そのものへ / undercut = 主張と根拠のつながりへ・既定 direct）/ `target_element_ref`（グラフ上の位置。migration 083） |
 | GET | `/api/admin/doubt/targets/{ttype}/{tid}/challenges` | TEACHER | 対象への疑義一覧（数値スコア化しない） |
 | POST | `/api/admin/doubt/challenges/{chid}/withdraw` | 疑義者本人のみ | 疑義の取り下げ（`withdrawn` 遷移で履歴保持） |
 | POST | `/api/admin/doubt/challenges/{chid}/proposals` | TEACHER | 疑義 → 検証提案への昇格（元 challenge を `led_to_verification` に遷移） |
@@ -1190,6 +1192,15 @@ discuss モードの Phase 3 着手判断を実測ゲートで行うための観
 |---|---|---|---|
 | POST | `/api/courses/{course_id}/export-bundle` | TEACHER | コース一式のエクスポート ZIP 生成・ダウンロード |
 | POST | `/api/documents/{document_id}/export-bundle` | TEACHER | ドキュメント一式のエクスポート ZIP 生成・ダウンロード |
+| POST | `/api/documents/{document_id}/import-bundle` | TEACHER + document 編集権限（不在・権限なしは 404） | export bundle（zip・schema 0.3.0 以上）の取り込み。query `dry_run`（既定 true・書き込み 0・検証結果と件数の事実を返す）/ `replace`（既定 false。live 行がある document へは 409）。取り込み行は常に `teacher_review_required` / `candidate` 始まり（承認は継承しない）。stable_key は取り込み先で再計算。監査 `entity_type='import'`。正本 `docs/features/knowledge_transfer_design.md` §4 |
+
+束の JSON-LD 化（`ro-crate-metadata.json`・各項目の `stable_key` / `knowledge_object_id`・manifest `export_schema_version` 0.3.0）も同設計書 §4.1。
+
+### 参照の健全性 `/api/admin/documents/{document_id}/reference-health`（`routes/reference_health.py`）
+
+| メソッド | パス | 権限 | 説明 |
+|---|---|---|---|
+| GET | `/api/admin/documents/{document_id}/reference-health` | TEACHER + `_ensure_document_viewable` | DB live 行の参照整合（グラフノード→主張 / component→主張・式 / 主張→出典チャンク / 学ぶ単位→各表）をその場で検査して返す。`{status: ok|broken|unchecked, checked_at, facts[], details{kind: [{ref, from_label}]}}`。読み取り専用・保存しない・数字を書かない。解析完了時の同じ検査結果は run の `stage_outputs.reference_health` に残り、`GET /api/admin/materials` の `reference_health {status, checked_at}` に投影される。正本 `docs/features/knowledge_transfer_design.md` §6 |
 
 ---
 
