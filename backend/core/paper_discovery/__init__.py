@@ -55,7 +55,11 @@ from core.paper_discovery import (
     store,
     vocab,
 )
-from core.paper_discovery.arxiv_client import ArxivApiError, parse_atom
+from core.paper_discovery.arxiv_client import (
+    ArxivApiError,
+    ArxivRateLimitedError,
+    parse_atom,
+)
 from core.paper_discovery.citation_client import CitationApiError
 from core.paper_discovery.citation_search import run_citation_search
 
@@ -104,6 +108,7 @@ __all__ = [
     "SEMANTIC_SCHOLAR_API_HOST",
     "ArxivApiError",
     "ArxivEntry",
+    "ArxivRateLimitedError",
     "CitationApiError",
     "CitationEntry",
     "abs_url_for",

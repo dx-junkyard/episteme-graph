@@ -454,6 +454,25 @@ class TestRadarSearch:
         assert res.status_code == 502
         assert res.json()["detail"] == env["routes"]._DETAIL_ARXIV_UNAVAILABLE
 
+    def test_arxiv_rate_limit_says_it_is_congestion(self, env):
+        """PR7: 混雑（429）を「接続できません」と同じ文言にしない。
+
+        教員の次の一手が違う（設定・回線を疑うのか、待てばよいのか）。上流の 429 を
+        本アプリのコスト上限と同じ 429 で返さないことも併せて固定する。
+        """
+        from core.paper_discovery import arxiv_client
+
+        env["search_error"] = arxiv_client.ArxivRateLimitedError("arXiv 側が混雑しています")
+        res = env["client"].post(
+            _SEARCH_PATH,
+            json={"document_ref": "doc-1", "distance": "near"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 502
+        detail = res.json()["detail"]
+        assert detail == env["routes"]._DETAIL_ARXIV_RATE_LIMITED
+        assert detail != env["routes"]._DETAIL_ARXIV_UNAVAILABLE
+
     def test_no_audit_and_no_subscription_write(self, env):
         env["client"].post(
             _SEARCH_PATH,

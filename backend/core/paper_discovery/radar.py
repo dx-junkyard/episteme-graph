@@ -85,6 +85,23 @@ NOTE_ARXIV_METADATA_UNAVAILABLE = (
     "arXiv から論文情報を取得できなかったため、別の供給元から検索条件を組み立てました。"
 )
 
+#: arXiv 側の混雑（HTTP 429）で引けなかったときの事実文。到達失敗と同じ文言にしない
+#: （「繋がらない」なら設定や回線を疑い、「混んでいる」なら待てばよい — 教員の次の
+#: 一手が違う。PR7）。
+#: 指す操作は「検索」ではなく「開き直す」— seed のメタデータを取り直すのは
+#: ``GET /radar/seed``（モーダルを開いたとき）だけで、検索ボタンの再押下では
+#: 取り直さない（§13.5）。効かない操作を案内しない。
+NOTE_ARXIV_RATE_LIMITED = (
+    "arXiv 側が混雑しているため、論文情報を取得できませんでした。"
+    "カテゴリを直接指定するか、少し時間をおいてからこの画面を開き直してください。"
+)
+
+#: arXiv には届いたが、その ID の論文情報が返らなかったときの事実文。
+#: 到達失敗と混ぜると「繋がらなかった」と誤読させる（PR7）。
+NOTE_ARXIV_METADATA_NOT_FOUND = (
+    "arXiv からこの論文の情報が返らなかったため、別の供給元から検索条件を組み立てました。"
+)
+
 
 def _clean(value: Any) -> str:
     return " ".join(str(value or "").split())
@@ -179,6 +196,38 @@ def seed_keyphrase_candidates(session, document_row: dict[str, str]) -> list[dic
     return out
 
 
+def _fetch_seed_entry(seed: dict, arxiv_id: str):
+    """seed のメタデータを arXiv から1件だけ引く（引けなければ ``None``）。
+
+    PR7 の要（かなめ）: **引けなかったことを黙って空カテゴリにしない**。取得できない
+    理由は3つあり、教員の次の一手がそれぞれ違うので事実文も分ける。
+
+    - 混雑（HTTP 429）→ :data:`NOTE_ARXIV_RATE_LIMITED`（待てば通る）
+    - その他の到達・解釈の失敗 → :data:`NOTE_ARXIV_METADATA_UNAVAILABLE`
+    - 200 で返ったが該当 ID の項目が無い → :data:`NOTE_ARXIV_METADATA_NOT_FOUND`
+      （撤回・ID 誤りなど。**到達失敗と混ぜない**）
+
+    いずれも例外にせず ``None`` を返す（検索そのものは成立させ、購読フォールバックへ
+    続ける）。note は ``seed`` に載せるので、呼び出し側は分岐を持たない。
+    """
+    try:
+        entries = arxiv_client.fetch_by_ids([arxiv_id])
+    except arxiv_client.ArxivRateLimitedError:
+        logger.info("radar seed metadata rate-limited for %s", arxiv_id)
+        seed["note"] = NOTE_ARXIV_RATE_LIMITED
+        return None
+    except arxiv_client.ArxivApiError:
+        # seed のメタデータが引けなくても検索そのものは成立させる（PR7）。
+        logger.info("radar seed metadata unavailable for %s", arxiv_id)
+        seed["note"] = NOTE_ARXIV_METADATA_UNAVAILABLE
+        return None
+    if not entries:
+        logger.info("radar seed metadata not found for %s", arxiv_id)
+        seed["note"] = NOTE_ARXIV_METADATA_NOT_FOUND
+        return None
+    return entries[0]
+
+
 def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict:
     """seed 教材のメタデータ・検索条件の供給元を解決する（PR1 — 保存しない）。
 
@@ -186,8 +235,9 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
 
     1. ``documents.source_url`` から arXiv ID が取れ、``fetch_arxiv=True`` なら
        :func:`arxiv_client.fetch_by_ids` のメタデータ（``categories_source="arxiv"``。
-       要旨も同時に得る）。**arXiv 到達の失敗は fail-soft** で 3. へ縮退し、
-       ``note`` に事実文を残す（黙って条件をすり替えない — PR7）。
+       要旨も同時に得る）。**arXiv 到達の失敗・該当なしは fail-soft** で 3. へ縮退し、
+       :func:`_fetch_seed_entry` が理由ごとに別の ``note`` を残す（黙って条件を
+       すり替えない — PR7）。
     2. ``source_url`` が空でも、ファイル名（次点でタイトル）から arXiv ID を
        **推定**できて ``fetch_arxiv=True`` なら、そのメタデータ
        （``categories_source="arxiv_inferred"``）。推定であることは供給元語彙と
@@ -257,15 +307,8 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
     }
 
     if arxiv_id and fetch_arxiv:
-        try:
-            entries = arxiv_client.fetch_by_ids([arxiv_id])
-        except arxiv_client.ArxivApiError:
-            # seed のメタデータが引けなくても検索そのものは成立させる（PR7）。
-            logger.info("radar seed metadata unavailable for %s", arxiv_id)
-            entries = []
-            seed["note"] = NOTE_ARXIV_METADATA_UNAVAILABLE
-        if entries:
-            entry = entries[0]
+        entry = _fetch_seed_entry(seed, arxiv_id)
+        if entry is not None:
             categories = normalize_categories(
                 list(entry.categories) + ([entry.primary_category] if entry.primary_category else [])
             )
@@ -276,15 +319,9 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
                 seed["categories"] = categories
                 seed["categories_source"] = CATEGORIES_SOURCE_ARXIV
     elif inferred_id and fetch_arxiv:
-        try:
-            entries = arxiv_client.fetch_by_ids([inferred_id])
-        except arxiv_client.ArxivApiError:
-            # 推定 ID でも到達失敗は黙らせず、購読フォールバックへ続ける（PR7）。
-            logger.info("radar seed metadata unavailable for inferred %s", inferred_id)
-            entries = []
-            seed["note"] = NOTE_ARXIV_METADATA_UNAVAILABLE
-        if entries:
-            entry = entries[0]
+        # 推定 ID でも取得の失敗は黙らせず、購読フォールバックへ続ける（PR7）。
+        entry = _fetch_seed_entry(seed, inferred_id)
+        if entry is not None:
             provenance["fetched"] = True
             provenance["arxiv_title"] = entry.title or ""
             provenance["arxiv_abs_url"] = entry.abs_url or abs_url_for(inferred_id)
@@ -714,7 +751,9 @@ __all__ = [
     "CATEGORIES_SOURCE_SUBSCRIPTION",
     "MAX_SEED_KEYPHRASES",
     "MIN_OVERLAP_LABEL_CHARS",
+    "NOTE_ARXIV_METADATA_NOT_FOUND",
     "NOTE_ARXIV_METADATA_UNAVAILABLE",
+    "NOTE_ARXIV_RATE_LIMITED",
     "PROVENANCE_STATUS_INFERRED",
     "PROVENANCE_STATUS_NONE",
     "PROVENANCE_STATUS_REGISTERED",

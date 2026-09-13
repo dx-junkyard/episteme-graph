@@ -13,7 +13,10 @@
   リクエスト時刻をモジュール変数で保持し、間隔が足りなければ不足分だけ待つ。
   プロセス内の全呼び出しに効かせるため、関数引数やインスタンス状態にしない。
 - タイムアウトと件数上限を持ち、失敗は :class:`ArxivApiError` で諦める（リトライ
-  ループを持たない — 呼び出し側が事実文で degrade する、PD6）。
+  ループを持たない — 呼び出し側が事実文で degrade する、PD6）。arXiv 側の混雑
+  （HTTP 429）だけは部分型 :class:`ArxivRateLimitedError` で区別する（「繋がらない」と
+  「混んでいる」では教員の次の一手が違うため。区別しない呼び出し側は基底型の
+  except 節のまま動く）。
 - FastAPI 非 import・``core.llm`` 非 import（発見層は LLM 0回）。
 - Atom のパースは stdlib の ``xml.etree`` のみ（外部依存を足さない）。
 
@@ -55,6 +58,9 @@ MAX_RESULTS_LIMIT = 200
 #: RADAR_COMPARE_MAX_CANDIDATES` 件なので、控えめな定数で足りる）。
 MAX_ID_LIST = 20
 
+#: arXiv がレート制限で応答を拒むときの HTTP ステータス。
+RATE_LIMITED_STATUS = 429
+
 #: 並び順の語彙（arXiv API の ``sortBy`` / ``sortOrder``）。
 #: v1 は日付順のみ（並び順は新着順 = 機械の点数を持ち込まない、PD4）。
 SORT_BY_VALUES = ("submittedDate", "lastUpdatedDate")
@@ -73,6 +79,16 @@ _last_request_at: Optional[float] = None
 
 class ArxivApiError(Exception):
     """arXiv API への到達・応答・パースの失敗。"""
+
+
+class ArxivRateLimitedError(ArxivApiError):
+    """arXiv 側のレート制限（HTTP 429）で応答を得られなかった。
+
+    :class:`ArxivApiError` の部分型なので、区別しない既存の ``except`` 節は
+    そのまま動く（呼び出し側を一斉に直さなくてよい）。区別したい側だけが先に
+    捕まえて別の事実文へ分岐する。**ここでも待ち直さない** — リトライを持たない
+    のは基底型と同じ規律で、待つかどうかは人間が決める（PD7）。
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -118,6 +134,9 @@ def _http_get(params: dict, timeout: float) -> str:
     except requests.RequestException as exc:
         raise ArxivApiError("arXiv への接続に失敗しました") from exc
 
+    if response.status_code == RATE_LIMITED_STATUS:
+        # 混雑は「接続できない」と別の事実にする（時間をおけば通る — PD7）。
+        raise ArxivRateLimitedError("arXiv 側が混雑しています")
     if response.status_code != 200:
         raise ArxivApiError("arXiv からの応答を取得できませんでした")
 
@@ -240,7 +259,8 @@ def search(
         timeout: HTTP タイムアウト（秒）。
 
     Raises:
-        ArxivApiError: 空クエリ・接続失敗・非200・パース不能。
+        ArxivApiError: 空クエリ・接続失敗・非200・パース不能
+            （混雑 = HTTP 429 は部分型 :class:`ArxivRateLimitedError`）。
     """
     search_query = " ".join(str(query or "").split())
     if not search_query:
@@ -293,7 +313,8 @@ def fetch_by_ids(
         正規化できる ID が1件も無ければ **API を呼ばず** 空リスト。
 
     Raises:
-        ArxivApiError: 接続失敗・非200・パース不能。
+        ArxivApiError: 接続失敗・非200・パース不能
+            （混雑 = HTTP 429 は部分型 :class:`ArxivRateLimitedError`）。
     """
     normalized: list[str] = []
     for ref in ids or ():

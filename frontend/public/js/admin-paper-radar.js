@@ -566,6 +566,16 @@
         '<div style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:3px">起点の論文を読み込んでいます...</div>';
     }
 
+    // PR7: 「なぜ条件が空なのか」を落とさない。サーバの事実文（到達失敗 / 混雑 /
+    // 該当なしの区別はサーバ側の文言が持っている）をそのまま出す。クライアントで
+    // 理由を推測しない。
+    if (seed && seed.note) {
+      html +=
+        '<div id="pr-seed-note" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc(seed.note) +
+        "</div>";
+    }
+
     html += provenanceHtml();
     node.innerHTML = html;
     // 動的描画のたびにイベントを付け直す（このモジュールの既存の流儀）。
@@ -904,7 +914,12 @@
   // 手元が空のときだけ差し替える。
   function applySeedMeta(seed) {
     if (!seed) return;
+    // 検索経路は arXiv を取り直さない（サーバは条件が明示されていれば fetch を省く）。
+    // note が付いていないのは「解消した」ではなく「確かめ直していない」なので、
+    // 手元の事実文を消さない（provenance と同じ「減る方向の上書きをしない」規律）。
+    var previousNote = state.seed && state.seed.note;
     state.seed = seed;
+    if (!seed.note && previousNote) state.seed.note = previousNote;
     var incoming = seed.provenance;
     if (incoming && (incoming.status === "registered" || !state.provenance)) {
       state.provenance = incoming;

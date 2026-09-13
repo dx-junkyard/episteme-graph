@@ -398,7 +398,12 @@ API ルーター / 管理UI 3点セット）で実装。backend フルスイー�
    返し、`NoDomainsConfiguredError` のみ全体 422（1件も成功し得ないため）。per-item の
    取得エラーは url_fetch の事実文を素通し、search の arXiv 失敗は固定事実文
    「arXiv に接続できませんでした。…」（`ArxivApiError` の文言はホスト名等を含むため
-   素通ししない — UF6 継承）。
+   素通ししない — UF6 継承）。**追補（2026-09-13）**: arXiv の混雑（HTTP 429）だけは
+   部分型 `ArxivRateLimitedError` で区別し、固定事実文
+   「arXiv 側が混雑しています。少し時間をおいて再度お試しください。」を返す
+   （`_arxiv_unavailable_detail(exc)`。ステータスは 502 のまま = 上流の混雑を本アプリの
+   コスト上限 429 と同じ形にしない。クライアントはリトライしない — 待つかは人間が
+   決める）。詳細は `paper_radar_design.md` §13。
 2. **`MAX_INGEST_PER_REQUEST = 5`**（v1 同期取得の上限。超過 422
    「一度に取り込めるのは5件までです。件数を減らして実行してください。」）。
 3. **`run_search` は条件ゼロなら arXiv を呼ばない**（`query=""` / 空 candidates）。フロントは

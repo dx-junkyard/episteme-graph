@@ -147,6 +147,11 @@ _DETAIL_INVALID_ARXIV_ID = "arXiv ID として解釈できませんでした。"
 _DETAIL_ARXIV_UNAVAILABLE = (
     "arXiv に接続できませんでした。時間をおいて再度お試しください。"
 )
+#: arXiv 側の混雑（HTTP 429）。接続不能と同じ文言にしない — 設定・回線を疑わせずに
+#: 「待てばよい」と伝えるため（PR7 / PD6 の事実文の流儀）。
+_DETAIL_ARXIV_RATE_LIMITED = (
+    "arXiv 側が混雑しています。少し時間をおいて再度お試しください。"
+)
 _DETAIL_DISMISSAL_NOT_FOUND = "この見送り記録は見つかりません。"
 _DETAIL_BATCH_TOO_MANY = (
     f"一度にキューへ登録できるのは{MAX_INGEST_BATCH}件までです。"
@@ -332,6 +337,24 @@ class RadarCompareRequest(BaseModel):
 
     document_ref: str = ""
     arxiv_ids: list[str] = []
+
+
+# ---------------------------------------------------------------------------
+# 共通ヘルパー
+# ---------------------------------------------------------------------------
+
+
+def _arxiv_unavailable_detail(exc: Exception) -> str:
+    """arXiv 到達失敗の事実文（混雑だけ別の文にする — PR7）。
+
+    ``ArxivRateLimitedError`` は ``ArxivApiError`` の部分型なので、捕捉側は
+    ``except arxiv_client.ArxivApiError`` のまま1本で受けて、文言だけをここで
+    分ける（except 節を4箇所に増やさない）。ステータスは 502 のまま揃える —
+    上流の混雑を本アプリ自身のコスト上限（429）と同じ形にしない。
+    """
+    if isinstance(exc, arxiv_client.ArxivRateLimitedError):
+        return _DETAIL_ARXIV_RATE_LIMITED
+    return _DETAIL_ARXIV_UNAVAILABLE
 
 
 # ---------------------------------------------------------------------------
@@ -525,7 +548,7 @@ def search_candidates(
         except arxiv_client.ArxivApiError as exc:
             session.rollback()
             logger.info("arXiv search failed for user=%s: %s", current_user["id"], exc)
-            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+            raise HTTPException(status_code=502, detail=_arxiv_unavailable_detail(exc)) from exc
         session.commit()
         if order == ORDER_RELEVANCE:
             result = _apply_relevance_order(session, body.domain_key, result)
@@ -1093,7 +1116,7 @@ def radar_search(
             raise HTTPException(status_code=422, detail=_DETAIL_INVALID_DISTANCE) from exc
         except arxiv_client.ArxivApiError as exc:
             logger.info("radar search failed for user=%s: %s", current_user["id"], exc)
-            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+            raise HTTPException(status_code=502, detail=_arxiv_unavailable_detail(exc)) from exc
     finally:
         session.close()
     # seed を返す全ルートで can_register の注入を揃える（検索後の再描画で
@@ -1150,7 +1173,7 @@ def radar_compare(
             ) from exc
         except arxiv_client.ArxivApiError as exc:
             logger.info("radar compare arXiv failed for user=%s: %s", current_user["id"], exc)
-            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+            raise HTTPException(status_code=502, detail=_arxiv_unavailable_detail(exc)) from exc
     finally:
         session.close()
 
@@ -1422,7 +1445,7 @@ def complement_search_candidates(
             logger.info(
                 "arXiv complement search failed for user=%s: %s", current_user["id"], exc
             )
-            raise HTTPException(status_code=502, detail=_DETAIL_ARXIV_UNAVAILABLE) from exc
+            raise HTTPException(status_code=502, detail=_arxiv_unavailable_detail(exc)) from exc
         session.commit()
         result = _apply_complement_order(session, body.domain_key, result)
     except HTTPException:

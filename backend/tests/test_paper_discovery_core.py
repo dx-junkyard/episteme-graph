@@ -400,6 +400,44 @@ class TestThrottle:
             arxiv_client._http_get({"search_query": "x"}, 5.0)
         assert "10.0.0.5" not in str(excinfo.value)
 
+    def test_rate_limit_is_a_distinct_subtype(self, monkeypatch):
+        """PD7 / PR7: 混雑（429）は到達失敗と別の型にする。
+
+        部分型なので、区別しない既存の ``except ArxivApiError`` はそのまま効く。
+        """
+        monkeypatch.setattr(arxiv_client, "_throttle", lambda: None)
+
+        class _Resp:
+            status_code = arxiv_client.RATE_LIMITED_STATUS
+            text = "Rate exceeded."
+
+        monkeypatch.setattr(
+            arxiv_client.requests, "get", lambda url, params=None, timeout=None: _Resp()
+        )
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client._http_get({"search_query": "x"}, 5.0)
+        assert issubclass(
+            arxiv_client.ArxivRateLimitedError, arxiv_client.ArxivApiError
+        )
+
+    def test_rate_limit_does_not_retry(self, monkeypatch):
+        """待つかどうかは人間が決める（クライアントはリトライループを持たない）。"""
+        monkeypatch.setattr(arxiv_client, "_throttle", lambda: None)
+        calls: list[int] = []
+
+        class _Resp:
+            status_code = arxiv_client.RATE_LIMITED_STATUS
+            text = "Rate exceeded."
+
+        def _get(url, params=None, timeout=None):
+            calls.append(1)
+            return _Resp()
+
+        monkeypatch.setattr(arxiv_client.requests, "get", _get)
+        with pytest.raises(arxiv_client.ArxivApiError):
+            arxiv_client._http_get({"search_query": "x"}, 5.0)
+        assert len(calls) == 1
+
 
 # ---------------------------------------------------------------------------
 # 4. store（フェイクセッション）

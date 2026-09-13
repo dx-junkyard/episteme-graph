@@ -507,6 +507,12 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   で項目 drop + component_label のリスト実在検査でリスト外は空文字化して statement は
   保持）。`common_ground` は後方互換で維持・非保存・日次20・caveat 不変。UI は凡例1行 +
   着地1行 + 〈推定〉タグ付きチップ（重なり最大3表示 + ほか）+ 2区画比較。
+  **縮退の事実文（2026-09-13 追補・§13）**: seed のメタデータを引けなかった理由は
+  3つ（混雑 = HTTP 429 / その他の到達失敗 / 200 だが該当なし）に分け、`radar.py` の
+  `NOTE_ARXIV_*` 3定数と `arxiv_client.ArxivRateLimitedError`（`ArxivApiError` の
+  部分型・リトライしない）で区別する。**フロントは `seed.note` を必ず描く**
+  （`#pr-seed-note`。ここを落とすと条件ゼロの 0 件が「近い論文が無い」と読める）。
+  seed の再取得は `GET /radar/seed` だけで、検索ボタンの再押下では走らない。
   ガードレールは `test_paper_radar_{core,api,guardrails,ui_static}.py`。
 - **コーパスを補う論文（近さではなく「何が足されるか」で選ぶ第3の探し方, migration 077,
   2026-09-09）**: 正本は `docs/features/corpus_complement_design.md`（CC1〜CC8・§11 実装記録。

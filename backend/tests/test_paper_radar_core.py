@@ -505,6 +505,43 @@ class TestResolveSeed:
         assert seed["note"] == radar.NOTE_ARXIV_METADATA_UNAVAILABLE
         assert seed["categories_source"] == radar.CATEGORIES_SOURCE_SUBSCRIPTION
 
+    def test_arxiv_rate_limit_has_its_own_note(self, monkeypatch):
+        """PR7: 混雑（429）は「取得できなかった」と別の事実文で言う。
+
+        教員の次の一手が違う（条件を手で入れるのか、待ってもう一度押すのか）。
+        """
+        _stub_fetch_by_ids(
+            monkeypatch, arxiv_client.ArxivRateLimitedError("arXiv 側が混雑しています")
+        )
+        monkeypatch.setattr(radar.store, "get_subscription", lambda session, key: None)
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert seed["note"] == radar.NOTE_ARXIV_RATE_LIMITED
+        assert seed["note"] != radar.NOTE_ARXIV_METADATA_UNAVAILABLE
+        assert seed["categories"] == []
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_MANUAL
+
+    def test_empty_arxiv_response_is_stated_not_silent(self, monkeypatch):
+        """200 だが該当なし（撤回・ID 誤り）を黙って空カテゴリにしない（PR7）。
+
+        ここを黙ると、画面には「カテゴリが未指定です」だけが残り、条件ゼロで検索が
+        成立しなかったことが「近い論文が無い」と読めてしまう。
+        """
+        _stub_fetch_by_ids(monkeypatch, [])
+        monkeypatch.setattr(radar.store, "get_subscription", lambda session, key: None)
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert seed["note"] == radar.NOTE_ARXIV_METADATA_NOT_FOUND
+        assert seed["note"] != radar.NOTE_ARXIV_METADATA_UNAVAILABLE
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_MANUAL
+
+    def test_successful_fetch_leaves_no_note(self, monkeypatch):
+        """引けたときに注記を出さない（毎回出ると事実文が景色になる）。"""
+        _stub_fetch_by_ids(
+            monkeypatch,
+            [_entry("2608.20293", categories=["astro-ph.CO"])],
+        )
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert "note" not in seed
+
     def test_non_arxiv_material_reports_unknown_id(self, no_arxiv):
         session = _seed_session(
             documents=[{"id": "doc-1", "source_path": "mat-1", "title": "手動", "source_url": ""}]

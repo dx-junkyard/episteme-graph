@@ -246,6 +246,33 @@ class TestSeedScoping:
         for label in ("arXiv のカテゴリから取得", "分野購読の条件から取得", "カテゴリを入力してください"):
             assert label in self.src, f"カテゴリ供給元ラベルが無い: {label}"
 
+    def test_seed_note_is_rendered(self):
+        """PR7: サーバが返した縮退の事実文（`seed.note`）を落とさない。
+
+        ここを落とすと、arXiv からカテゴリを引けなかった回に画面へ残るのは
+        「カテゴリが未指定です」と「候補が見つかりませんでした」だけになり、
+        条件ゼロで検索が成立しなかったことが「近い論文が無い」と読めてしまう。
+        """
+        body = _extract_function(self.src, "renderSeed")
+        assert "seed.note" in body, "seed.note を描画していない"
+        assert 'id="pr-seed-note"' in body
+
+    def test_seed_note_survives_a_search(self):
+        """検索レスポンスで事実文を消さない。
+
+        検索経路は seed の arXiv 取得を省くため `note` が付かない。ここで上書きすると
+        「検索を押したら理由の説明だけ消えて 0 件が残る」画面になる。
+        """
+        body = _extract_function(self.src, "applySeedMeta")
+        assert "previousNote" in body
+        assert "state.seed.note = previousNote" in body
+
+    def test_seed_note_text_comes_from_the_server(self):
+        """縮退の理由をクライアントで発明しない（文言はサーバの事実文のみ）。"""
+        code = _strip_comments(self.src)
+        for invented in ("混雑", "レート", "取得できな"):
+            assert invented not in code, f"縮退理由の文言をフロントに持っている: {invented}"
+
 
 # ---------------------------------------------------------------------------
 # ⑤ PR2: 距離帯は素通し・閾値表を持たない
