@@ -549,6 +549,12 @@ AUDIT_ENTITY_EXPORT = "export"
 # 再係留 / 語彙外型の丸めを記帳する。entity_id は document_id（run 単位の要約1行）。
 AUDIT_ENTITY_KNOWLEDGE_OBJECT = "knowledge_object"
 
+# 知識の転用層（knowledge_transfer_design.md KT8 / P4-1）: export bundle の取り込み。
+# entity_id は取り込み先 document_id、new_status="imported"、metadata に export_id /
+# 出所 document_ids / 束の sha256 / 件数（sync 統計）を入れる。束の本文・逐語引用は
+# 監査に載せない。取り込んだ人は束の中には書かず、この行の changed_by だけに残る。
+AUDIT_ENTITY_IMPORT = "import"
+
 # カタログ本体（新規 entity_type はここへの追記が必須。ガードレールテスト対象）。
 AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COMPONENT,
@@ -597,6 +603,7 @@ AUDIT_ENTITY_TYPES = (
     AUDIT_ENTITY_COURSE_TOPIC,
     AUDIT_ENTITY_EXPORT,
     AUDIT_ENTITY_KNOWLEDGE_OBJECT,
+    AUDIT_ENTITY_IMPORT,
 )
 
 
@@ -712,6 +719,22 @@ CONCEPT_RELATION_KINDS: tuple[str, ...] = (
 MAPPING_JUSTIFICATIONS: tuple[str, ...] = (
     "manual_curation", "lexical_match", "vector_similarity",
     "cartridge_declared", "corpus_cooccurrence", "llm_candidate",
+)
+
+
+# ---------------------------------------------------------------------------
+# 引用の意図（knowledge_transfer_design.md §8 / X-7・CiTO の最小語彙）
+#
+# `component_citations.citation_intent`（migration 083）の許可語彙。教員が引用時に
+# 任意で選ぶ。NULL = 記録なし（既存行は推測で埋めない）。日本語ラベルは
+# `core/label_vocab.py::CITATION_INTENT_LABELS`。
+# ---------------------------------------------------------------------------
+CITATION_INTENTS: tuple[str, ...] = (
+    "uses_as_evidence",      # 根拠として使う
+    "extends",               # 発展させる
+    "qualifies",             # 条件を付ける・限定する
+    "contrasts_with",        # 対比する
+    "cites_for_background",  # 背景として引く
 )
 
 #: library_entries.review_status（候補 → 教員の確定。status='retired' とは別軸）。

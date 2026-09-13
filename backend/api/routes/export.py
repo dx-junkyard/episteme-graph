@@ -9,7 +9,7 @@ import zipfile
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
@@ -22,7 +22,7 @@ from core.course_data import (
     course_topics,
 )
 from core.postgres import get_session as _pg_session
-from core.document_pipeline.persistence import resolve_artifact_runs
+from core.document_pipeline.persistence import record_knowledge_audit, resolve_artifact_runs
 from routes.export_artifacts import (
     build_claims_export,
     build_component_graph_export,
@@ -402,6 +402,128 @@ def _load_latest_run_ids(session: Any, document_ids: list[str]) -> dict[str, str
     except Exception:
         return {}
     return {doc_id: info["run_id"] for doc_id, info in resolved.items() if info.get("run_id")}
+
+
+# ---------------------------------------------------------------------------
+# 知識オブジェクトの同一性（knowledge_transfer_design.md §4.1 / P4-1）
+#
+# 束の各項目に `stable_key`（内容由来・版非依存の同一性キー）と
+# `knowledge_object_id`（live 行の UUID）を付ける。live ビューを agent 側 ID
+# （`agent_claim_id` 等）と `source_scope.legacy_ids` で join し、**行が無ければ
+# キーを付けない**（「対応する行がある」という事実だけを載せる）。DB を読めない
+# 環境（テスト・fallback）でも export を落とさない。
+# ---------------------------------------------------------------------------
+
+#: 種別 → (live ビュー / 基表, agent ID 列, `legacy_ids` を持つ JSONB 列名 or "")。
+#: claim / component は live ビュー、他 3 種は基表 + `superseded_at IS NULL`。
+_KNOWLEDGE_KEY_SOURCES: tuple[tuple[str, str, str, str], ...] = (
+    ("claims", "theory_claims_live", "agent_claim_id", "source_scope"),
+    ("components", "theory_components_live", "agent_component_id", "source_scope"),
+    ("equations", "knowledge_equations", "agent_equation_id", ""),
+    ("evidence", "knowledge_evidence", "agent_evidence_id", ""),
+    ("derivation_steps", "knowledge_derivation_steps", "agent_step_id", ""),
+)
+
+#: 束の項目 → その項目の「名乗る ID」を持つキー（種別ごと）。
+_KNOWLEDGE_ITEM_ID_KEYS = {
+    "claims": ("claim_id",),
+    "components": ("component_id",),
+    "equations": ("equation_id",),
+    "evidence": ("evidence_id",),
+    "derivation_steps": ("step_id",),
+}
+
+
+def _load_knowledge_object_keys(session: Any, document_ids: list[str]) -> dict[str, dict[str, dict]]:
+    """``{種別: {agent ID or legacy ID: {"stable_key", "knowledge_object_id"}}}``。
+
+    失敗（DB 不達・表が無い・列が無い）は握って ``{}`` を返す — 同一性キーは
+    additive な事実であって、書き出しを止める条件ではない。
+    """
+    out: dict[str, dict[str, dict]] = {}
+    if not document_ids or session is None:
+        return out
+    placeholders = ", ".join(f":doc_{i}" for i in range(len(document_ids)))
+    params = {f"doc_{i}": did for i, did in enumerate(document_ids)}
+    for kind, table, agent_column, legacy_column in _KNOWLEDGE_KEY_SOURCES:
+        select_legacy = f", {legacy_column}" if legacy_column else ""
+        where_live = "" if table.endswith("_live") else " AND superseded_at IS NULL"
+        try:
+            rows = session.execute(
+                sa_text(
+                    f"""
+                    SELECT id::text, {agent_column}, stable_key{select_legacy}
+                    FROM {table}
+                    WHERE document_id::text IN ({placeholders}){where_live}
+                    """
+                ),
+                params,
+            ).fetchall()
+        except Exception:  # noqa: BLE001 — 同一性キーの欠落は書き出しを止めない
+            continue
+        index: dict[str, dict] = {}
+        for row in rows or []:
+            object_id = str(row[0]) if row[0] else ""
+            stable_key = str(row[2]) if len(row) > 2 and row[2] else ""
+            if not object_id and not stable_key:
+                continue
+            entry = {"stable_key": stable_key, "knowledge_object_id": object_id}
+            aliases = [str(row[1] or "").strip()]
+            if legacy_column and len(row) > 3:
+                scope = _load_json_field(row[3], {})
+                if isinstance(scope, dict):
+                    aliases += [str(v).strip() for v in (scope.get("legacy_ids") or [])]
+            for alias in aliases:
+                if alias:
+                    index.setdefault(alias, entry)
+        if index:
+            out[kind] = index
+    return out
+
+
+def _attach_knowledge_keys(items: list[dict], index: dict[str, dict], id_keys: tuple[str, ...]) -> None:
+    """束の項目へ ``stable_key`` / ``knowledge_object_id`` を additive に付ける。"""
+    if not index:
+        return
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        candidates = [str(item.get(key) or "").strip() for key in id_keys]
+        candidates += [str(v).strip() for v in (item.get("legacy_ids") or []) if v]
+        entry = next((index[c] for c in candidates if c and c in index), None)
+        if not entry:
+            continue
+        if entry.get("stable_key"):
+            item["stable_key"] = entry["stable_key"]
+        if entry.get("knowledge_object_id"):
+            item["knowledge_object_id"] = entry["knowledge_object_id"]
+
+
+def _attach_knowledge_object_keys(
+    session: Any,
+    document_ids: list[str],
+    *,
+    claims: list[dict],
+    components: list[dict],
+    equations: list[dict],
+    evidence_snippets: list[dict],
+    derivation_chains: list[dict],
+) -> dict:
+    """束の全項目に同一性キーを付け、付いた種別を manifest 用に返す。"""
+    keys = _load_knowledge_object_keys(session, document_ids)
+    _attach_knowledge_keys(claims, keys.get("claims", {}), _KNOWLEDGE_ITEM_ID_KEYS["claims"])
+    _attach_knowledge_keys(components, keys.get("components", {}), _KNOWLEDGE_ITEM_ID_KEYS["components"])
+    _attach_knowledge_keys(equations, keys.get("equations", {}), _KNOWLEDGE_ITEM_ID_KEYS["equations"])
+    _attach_knowledge_keys(evidence_snippets, keys.get("evidence", {}), _KNOWLEDGE_ITEM_ID_KEYS["evidence"])
+    steps = [
+        step
+        for chain in (derivation_chains or [])
+        if isinstance(chain, dict)
+        for step in (chain.get("steps") or [])
+        if isinstance(step, dict)
+    ]
+    _attach_knowledge_keys(steps, keys.get("derivation_steps", {}), _KNOWLEDGE_ITEM_ID_KEYS["derivation_steps"])
+    return {"kinds": sorted(keys.keys())}
 
 
 # Artifact-first stage → fallback DB source mapping (issue #383). When a stage
@@ -2707,6 +2829,129 @@ def _validate_export_references(
     }
 
 
+# ---------------------------------------------------------------------------
+# JSON-LD（RO-Crate 1.1 + PROV-O）— knowledge_transfer_design.md §4.1 / X-13・X-16
+#
+# 束を外部ツールが語彙付きで読めるようにする記述子。**人（生成者・取り込んだ人）は
+# 書かない**（帰属は監査台帳。`provenance.exported_by.disclosed = false` と同じ規律）。
+# confidence / weight / 件数などの**数値は 1 つも載せない**（原則4）。
+# ---------------------------------------------------------------------------
+
+EXPORT_SCHEMA_VERSION = "0.3.0"
+
+RO_CRATE_METADATA_NAME = "ro-crate-metadata.json"
+RO_CRATE_PROFILE = "https://w3id.org/ro/crate/1.1"
+EPISTEME_VOCAB = "https://episteme-graph.local/vocab#"
+PROV_VOCAB = "http://www.w3.org/ns/prov#"
+RO_CRATE_CONTEXT: tuple[Any, ...] = (
+    "https://w3id.org/ro/crate/1.1/context",
+    {"episteme": EPISTEME_VOCAB, "prov": PROV_VOCAB},
+)
+
+#: 束のファイル名 → 内容の説明（RO-Crate の `File` エンティティに載せる）。
+_RO_CRATE_FILE_DESCRIPTIONS = {
+    "manifest.json": "束の索引（スキーマ版・件数・出所）",
+    "README.md": "束の読み方（人間向け）",
+    "export_validation.json": "束の内部参照の決定論的な検証結果",
+    "course_info.json": "コース（または教材）のメタデータとトピック",
+    "claims/claims.json": "教材から抽出した主張",
+    "dsl/dsl_graph.json": "論理関係の軽量グラフ（DSL）",
+    "thesis/thesis_reconstruction.json": "中心命題の再構成",
+    "components/components.json": "再利用可能な理論コンポーネント",
+    "graph/component_graph.json": "コンポーネント間の依存グラフ",
+    "graph/operation_graph.json": "式・操作レベルのグラフ",
+    "graph/component_operation_links.json": "コンポーネントと操作の対応",
+    "graph/system_operations.json": "システムレベルの操作",
+    "evidence/evidence_snippets.json": "原文由来の逐語根拠",
+    "equations/equations.json": "式のレジストリ",
+    "equations/equation_candidates.json": "式候補の検出監査",
+    "derivations/derivation_chains.json": "式間の導出チェーン",
+    "document_boundary.json": "教材ごとの記事境界",
+}
+
+
+def _build_ro_crate(manifest: dict, *, run_ids: dict[str, str] | None = None) -> dict:
+    """``ro-crate-metadata.json``（JSON-LD）を manifest から決定論的に組み立てる。
+
+    ``@graph`` は ①メタデータ記述子 ②ルート Dataset ③束の各ファイル（File）
+    ④解析 run（``prov:Activity``）と対象教材（``prov:Entity``）。
+    """
+    scope = manifest.get("scope") if isinstance(manifest.get("scope"), dict) else {}
+    scope_type = str(scope.get("type") or "")
+    document_ids = [str(v) for v in (scope.get("document_ids") or []) if v]
+    files = manifest.get("files") if isinstance(manifest.get("files"), dict) else {}
+    file_names = ["README.md", "manifest.json"] + [
+        str(v) for v in files.values() if v
+    ]
+    # メタデータ記述子自身は hasPart に入れない（RO-Crate 1.1 の形）。
+    file_names = [n for n in dict.fromkeys(file_names) if n != RO_CRATE_METADATA_NAME]
+
+    graph: list[dict] = [
+        {
+            "@id": RO_CRATE_METADATA_NAME,
+            "@type": "CreativeWork",
+            "conformsTo": {"@id": RO_CRATE_PROFILE},
+            "about": {"@id": "./"},
+        },
+        {
+            "@id": "./",
+            "@type": "Dataset",
+            "name": "episteme-graph export bundle",
+            "description": (
+                "episteme-graph が書き出した知識オブジェクトの束"
+                "（書き出し時点の作業コピーの写し）。"
+            ),
+            "datePublished": str(manifest.get("exported_at") or ""),
+            "conformsTo": [
+                {"@id": RO_CRATE_PROFILE},
+                {"@id": f"{EPISTEME_VOCAB}export-bundle/{EXPORT_SCHEMA_VERSION}"},
+            ],
+            "hasPart": [{"@id": name} for name in file_names],
+            "episteme:exportId": str(manifest.get("export_id") or ""),
+            "episteme:schemaVersion": str(manifest.get("export_schema_version") or ""),
+            "episteme:scopeType": scope_type,
+            "episteme:scopeId": str(scope.get(f"{scope_type}_id") or "") if scope_type else "",
+            "episteme:contentSource": str(
+                (manifest.get("provenance") or {}).get("content_source") or ""
+            ),
+        },
+    ]
+
+    for name in file_names:
+        graph.append({
+            "@id": name,
+            "@type": "File",
+            "name": name,
+            "description": _RO_CRATE_FILE_DESCRIPTIONS.get(name, ""),
+            "encodingFormat": "text/markdown" if name.endswith(".md") else "application/json",
+            "episteme:artifact": name.rsplit("/", 1)[-1].rsplit(".", 1)[0],
+            "episteme:schemaVersion": str(manifest.get("export_schema_version") or ""),
+        })
+
+    run_ids = dict(run_ids or {})
+    for document_id in document_ids:
+        document_node = f"#document-{document_id}"
+        graph.append({
+            "@id": document_node,
+            "@type": ["prov:Entity", "CreativeWork"],
+            "name": "source document",
+            "episteme:documentId": document_id,
+        })
+        run_id = str(run_ids.get(document_id) or "")
+        if not run_id:
+            continue
+        graph.append({
+            "@id": f"#analysis-run-{run_id}",
+            "@type": "prov:Activity",
+            "name": "analysis run",
+            "prov:used": {"@id": document_node},
+            "prov:generated": {"@id": "./"},
+            "episteme:analysisRunId": run_id,
+        })
+
+    return {"@context": list(RO_CRATE_CONTEXT), "@graph": graph}
+
+
 def _build_manifest(
     export_id: str,
     scope_type: str,
@@ -2729,6 +2974,7 @@ def _build_manifest(
     theses: list[dict] | None = None,
     export_source: dict | None = None,
     provenance: dict | None = None,
+    knowledge_keys: dict | None = None,
 ) -> dict:
     equations = equations or []
     equation_candidates = equation_candidates or []
@@ -2739,10 +2985,28 @@ def _build_manifest(
     system_operations = system_operations or []
     theses = theses or []
     return {
-        "export_schema_version": "0.2.0",
+        # 0.2.0 → 0.3.0（knowledge_transfer_design.md §4.1）: additive だが
+        # 取り込み（import）が前提にするキー（ro-crate-metadata.json /
+        # 各項目の stable_key）が増えたので minor を上げる。
+        "export_schema_version": EXPORT_SCHEMA_VERSION,
         "exported_at": _now_iso(),
         "export_id": export_id,
         "app": {"name": "episteme-graph", "version": "unknown", "git_commit": "unknown"},
+        # JSON-LD（RO-Crate 1.1）の入口。外部ツールが束の中身を語彙付きで読めるようにする。
+        "jsonld": {
+            "metadata_file": RO_CRATE_METADATA_NAME,
+            "context": list(RO_CRATE_CONTEXT),
+            "conforms_to": RO_CRATE_PROFILE,
+        },
+        # 取り込み側の前提（§4.2）。stable_key は取り込み先の document で
+        # 再計算されるので、束の値をそのまま同一性に使ってはならない（KT4）。
+        "import_support": {
+            "min_schema_version": EXPORT_SCHEMA_VERSION,
+            "stable_key_recomputed_on_import": True,
+            "endpoint": "POST /api/documents/{document_id}/import-bundle",
+        },
+        # 束の項目に live 行の同一性キーを付けられた種別（付かない種別は載らない）。
+        "knowledge_object_keys": dict(knowledge_keys or {}),
         # Artifact-first export provenance (issue #383). ``fallback_used`` /
         # ``fallback_sources`` make it explicit which artifacts were missing and
         # what DB object the dump fell back to.
@@ -2761,6 +3025,7 @@ def _build_manifest(
             "document_ids": document_ids,
         },
         "files": {
+            "ro_crate": RO_CRATE_METADATA_NAME,
             "course_info": "course_info.json",
             "export_validation": "export_validation.json",
             "claims": "claims/claims.json",
@@ -2806,6 +3071,7 @@ This ZIP contains machine-readable outputs generated by episteme-graph.
 ## Contents
 
 - `manifest.json`: index of this export bundle
+- `ro-crate-metadata.json`: JSON-LD description of this bundle (RO-Crate 1.1 + PROV-O). Lists every file as a `File` entity and the analysis run as a `prov:Activity`. People are never named here (attribution lives in the system audit log); no numeric scores are written.
 - `course_info.json`: course metadata, topics (with learning_objectives, prerequisite_concepts, blackbox_policy, expected_misconceptions, assessment_prompts, visualization_plan), chapters, and source materials
 - `claims/claims.json`: extracted claims from source documents
 - `dsl/dsl_graph.json`: lightweight logical graph representation (DSL). Edges carry a controlled `edge_type` plus the raw `domain_verb` subtype and `evidence_refs`; nodes corresponding to the thesis carry `is_thesis_anchor` (issue #441/#442).
@@ -2883,6 +3149,24 @@ Return your review as JSON with:
 参照してください（`teacher_approved` 等が人間の確定、`teacher_review_required` は未確定）。
 `provenance` には confidence などの数値スコアを載せません。
 
+## 取り込み（この束を別のインスタンスへ運ぶ）
+
+この束は `POST /api/documents/{document_id}/import-bundle`（教員以上・対象教材の編集権限が必要）
+で別のインスタンスの教材へ取り込めます。`dry_run=true`（既定）では何も書き込まず、取り込む件数と
+事実だけを返します。取り込みには次の 2 つの規則があります。
+
+- **取り込んだ項目は未確認の候補として着地します。** 束の中の `review_status`（他の
+  インスタンスでの承認状態）は `import.source_review_status` に事実として残しますが、
+  取り込み先の承認としては扱いません。承認は、誰がどの権限でどの手続で行ったかという
+  制度に属するためです。
+- **同一性キー（`stable_key`）は取り込み先の教材で計算し直します。** `stable_key` は
+  材料に教材の ID を含むので、束の値をそのまま使うと別教材では一致しません。束の値は
+  `import.source_stable_key` に残ります。
+
+取り込み先に既に解析結果がある場合、既定では取り込みを行いません（`replace=true` を明示すると
+再解析と同じ規則で置き換わり、教員が確定した状態は保たれます）。教材本文・埋め込み・図画像・
+コース・学ぶ単位・同一性リンクは束に含まれないため、取り込みの対象外です。
+
 ## Notes
 
 - LLM-generated review fields should be treated as provisional.
@@ -2912,6 +3196,7 @@ def _build_zip(
     component_operation_links: list[dict] | None = None,
     system_operations: list[dict] | None = None,
     theses: list[dict] | None = None,
+    ro_crate: dict | None = None,
 ) -> bytes:
     equations = equations or []
     equation_candidates = equation_candidates or []
@@ -2925,6 +3210,11 @@ def _build_zip(
     with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         zf.writestr("README.md", _README_TEMPLATE)
         zf.writestr("manifest.json", _json_bytes(manifest))
+        # JSON-LD 記述子（§4.1）。呼び出し側が渡さなければ manifest から組み立てる。
+        zf.writestr(
+            RO_CRATE_METADATA_NAME,
+            _json_bytes(ro_crate if ro_crate is not None else _build_ro_crate(manifest)),
+        )
         zf.writestr("export_validation.json", _json_bytes(export_validation if export_validation is not None else {}))
         zf.writestr("course_info.json", _json_bytes(course_info if course_info is not None else {}))
         zf.writestr("claims/claims.json", _json_bytes({"claims": claims}))
@@ -3092,6 +3382,17 @@ def export_course_bundle(
             equations=equations,
         )
         system_operations = build_system_operations_export(derivation_chains)
+        # 知識オブジェクトの同一性（§4.1）: ID 正規化が終わったあとに live 行と
+        # join して stable_key / knowledge_object_id を additive に付ける。
+        knowledge_keys = _attach_knowledge_object_keys(
+            session,
+            document_ids,
+            claims=claims,
+            components=components,
+            equations=equations,
+            evidence_snippets=evidence_snippets,
+            derivation_chains=derivation_chains,
+        )
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -3145,11 +3446,13 @@ def export_course_bundle(
                 run_ids=run_ids,
                 options=options,
             ),
+            knowledge_keys=knowledge_keys,
             options=options,
         )
 
         zip_bytes = _build_zip(
             manifest=manifest,
+            ro_crate=_build_ro_crate(manifest, run_ids=run_ids),
             course_info=course,
             claims=claims,
             dsl_graph=dsl_graph,
@@ -3279,6 +3582,17 @@ def export_document_bundle(
             equations=equations,
         )
         system_operations = build_system_operations_export(derivation_chains)
+        # 知識オブジェクトの同一性（§4.1）: ID 正規化が終わったあとに live 行と
+        # join して stable_key / knowledge_object_id を additive に付ける。
+        knowledge_keys = _attach_knowledge_object_keys(
+            session,
+            document_ids,
+            claims=claims,
+            components=components,
+            equations=equations,
+            evidence_snippets=evidence_snippets,
+            derivation_chains=derivation_chains,
+        )
         export_validation = _validate_export_references(
             claims=claims,
             equations=equations,
@@ -3330,11 +3644,13 @@ def export_document_bundle(
                 run_ids=run_ids,
                 options=options,
             ),
+            knowledge_keys=knowledge_keys,
             options=options,
         )
 
         zip_bytes = _build_zip(
             manifest=manifest,
+            ro_crate=_build_ro_crate(manifest, run_ids=run_ids),
             course_info=document,
             claims=claims,
             dsl_graph=dsl_graph,
@@ -3378,3 +3694,228 @@ def export_document_bundle(
         )
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# 束の取り込み（knowledge_transfer_design.md §4.2 / P4-1）
+#
+# export の逆向き。**新しい知識を作らず**、束の項目を Phase 1 の
+# `sync_live_rows` に行として流す。確定は人間（T-1 / KT2）・stable_key は
+# 取り込み先で再計算（KT4）・DELETE を書かない（KT5）・権限は編集（KT6）。
+# ---------------------------------------------------------------------------
+
+
+_IMPORT_NOT_FOUND_DETAIL = _DOCUMENT_NOT_FOUND_DETAIL
+
+
+def _require_editable_document_or_404(document_ref: str, current_user: dict) -> str:
+    """document への **編集**権限を要求し、canonical な document_id を返す。
+
+    取り込みは知識行を書き換えるので、境界は閲覧ではなく編集（KT6）。不在・権限なしは
+    どちらも同じ 404（同じ detail）に畳む — 存在の有無を漏らさない。
+    """
+    from dependencies import ROLE_SYSTEM_ADMIN
+    from services import resolve_document_access
+
+    access = resolve_document_access(current_user["id"], document_ref)
+    canonical = access.document_id or document_ref
+    if access.found and (access.can_edit or current_user.get("role") == ROLE_SYSTEM_ADMIN):
+        return canonical
+    raise HTTPException(status_code=404, detail=_IMPORT_NOT_FOUND_DETAIL)
+
+
+def _import_validation_error(message: str, *, facts: list[str], report: dict | None = None) -> HTTPException:
+    return HTTPException(
+        status_code=422,
+        detail={"message": message, "facts": list(facts), "report": dict(report or {})},
+    )
+
+
+def _validate_bundle_internal_references(bundle) -> dict:
+    """束の内部参照を既存の `check_refs` で検査する（core へ移さない = §4.2）。"""
+    return _validate_export_references(
+        claims=bundle.claims,
+        equations=bundle.equations,
+        components=bundle.components,
+        component_graph=bundle.component_graph,
+        course_info=None,
+        evidence_snippets=bundle.evidence,
+        derivation_chains=bundle.derivation_chains,
+    )
+
+
+def _read_upload(bundle_file) -> bytes:
+    """アップロードされた束を上限つきで読む（ディスクへ展開しない）。"""
+    from core.knowledge_import.bundle import MAX_BUNDLE_BYTES
+
+    source = getattr(bundle_file, "file", None)
+    if source is None:
+        raise _import_validation_error(
+            "束を読めませんでした。", facts=["束を読めませんでした。"]
+        )
+    data = source.read(MAX_BUNDLE_BYTES + 1)
+    if data is None:
+        data = b""
+    if len(data) > MAX_BUNDLE_BYTES:
+        raise _import_validation_error(
+            "束のサイズが上限を超えています。",
+            facts=["束のサイズが上限を超えています。"],
+        )
+    return data
+
+
+@router.post("/api/documents/{document_id}/import-bundle")
+def import_document_bundle(
+    document_id: str,
+    bundle: UploadFile = File(...),
+    dry_run: bool = Query(True, description="true なら書き込まずに事実だけ返す（既定）"),
+    replace: bool = Query(False, description="live 行がある教材を置き換えることの明示"),
+    current_user: dict = Depends(_require_teacher),
+) -> dict:
+    """export bundle を 1 教材へ取り込む（§4.2）。
+
+    既定は `dry_run=true` で**書き込み 0**。実行時に live 行があって `replace` が
+    明示されていなければ 409（T-2: 無言で上書きしない）。
+    """
+    from core.knowledge_import import apply as import_apply
+    from core.knowledge_import.bundle import BundleError, parse_bundle
+
+    document_id = _require_editable_document_or_404(document_id, current_user)
+    data = _read_upload(bundle)
+
+    try:
+        parsed = parse_bundle(data)
+    except BundleError as exc:
+        raise _import_validation_error(exc.message, facts=exc.facts, report=exc.report) from None
+
+    validation = _validate_bundle_internal_references(parsed)
+    if validation.get("errors"):
+        raise _import_validation_error(
+            "束の中の参照が切れているため取り込めません。",
+            facts=["束の中の参照が切れているため取り込めません。"],
+            report={
+                "errors": validation.get("errors", []),
+                "warnings": validation.get("warnings", []),
+            },
+        )
+
+    session = _pg_session()
+    try:
+        live_counts = import_apply.live_row_counts(session, document_id)
+        has_live = any(int(v) > 0 for v in live_counts.values())
+        facts = import_apply.plan_facts(parsed, has_live=has_live, replace=replace)
+        source = parsed.source()
+
+        if dry_run:
+            return {
+                "dry_run": True,
+                "source": {
+                    "export_id": parsed.export_id,
+                    "object_type": parsed.source_object_type,
+                    "object_id": parsed.source_object_id,
+                    "document_ids": parsed.source_document_ids,
+                    "exported_at": parsed.exported_at,
+                    "app": parsed.app,
+                },
+                "counts": parsed.counts(),
+                "target": {"document_id": document_id, "has_live_rows": has_live},
+                "would_supersede": has_live,
+                "warnings": validation.get("warnings", []),
+                "facts": facts,
+            }
+
+        if has_live and not replace:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "この教材には既に解析結果があります。",
+                    "facts": [
+                        "この教材には既に解析結果があります。"
+                        "取り込むと再解析と同じ規則で置き換わります"
+                        "（教員が確定した状態は保たれます）。"
+                        "置き換える場合は replace を指定してください。",
+                    ],
+                },
+            )
+
+        # 取り込み run は status='completed' で入るため、採用先が未設定のままだと
+        # 「最新の completed run」の後方互換 fallback に引っかかって採用 run を
+        # 横取りしてしまう。取り込みは採用操作ではないので、先に現在の採用先を固定する。
+        preserved_run_id = import_apply.preserve_adopted_run(session, document_id)
+        run_id = import_apply.create_import_run(
+            session,
+            document_id=document_id,
+            options={
+                "export_id": parsed.export_id,
+                "source_document_id": (parsed.source_document_ids or [""])[0],
+                "bundle_sha256": parsed.sha256,
+                "imported_by_role": str(current_user.get("role") or ""),
+                "replace": bool(replace),
+            },
+        )
+        stats = import_apply.apply_import(
+            session, bundle=parsed, document_id=document_id, run_id=run_id,
+        )
+        stats["source"] = source
+        stats["preserved_adopted_run_id"] = preserved_run_id
+        import_apply.record_run_outputs(session, run_id=run_id, stats=stats)
+        record_knowledge_audit(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            stats={"import": stats},
+        )
+        session.commit()
+    except HTTPException:
+        session.rollback()
+        raise
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+    _record_import_audit(
+        document_id=document_id,
+        run_id=run_id,
+        bundle=parsed,
+        stats=stats,
+        replace=replace,
+        user_id=current_user.get("id"),
+    )
+    return {"imported": True, "run_id": run_id, "stats": stats, "facts": facts}
+
+
+def _record_import_audit(
+    *,
+    document_id: str,
+    run_id: str,
+    bundle,
+    stats: dict,
+    replace: bool,
+    user_id: str | None,
+) -> None:
+    """取り込みを監査台帳に記帳する（KT8。資料本文は載せない）。"""
+    from core.schema import AUDIT_ENTITY_IMPORT
+    from services import record_review_event
+
+    record_review_event(
+        AUDIT_ENTITY_IMPORT,
+        document_id,
+        "",
+        "imported",
+        user_id,
+        {
+            "action": "imported",
+            "run_id": run_id,
+            "export_id": bundle.export_id,
+            "source_object_type": bundle.source_object_type,
+            "source_object_id": bundle.source_object_id,
+            "source_document_ids": bundle.source_document_ids,
+            "bundle_sha256": bundle.sha256,
+            "schema_version": bundle.schema_version,
+            "counts": bundle.counts(),
+            "replace": bool(replace),
+            "stats": {k: v for k, v in (stats or {}).items() if k != "source"},
+        },
+    )
