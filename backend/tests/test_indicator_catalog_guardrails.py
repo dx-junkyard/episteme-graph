@@ -257,6 +257,10 @@ _NON_INDICATOR_ROUTES: dict[str, str] = {
     "/api/admin/documents/{document_id}/figures/{figure_id}/image": _R_ASSET,
     "/api/admin/documents/{document_id}/groups": _R_OBJECT,
     "/api/admin/documents/{document_id}/paper-layer": _R_OBJECT,
+    # 1 論文の参照（ID）が着地しているかという運用上の事実。返すのは状態語（ok /
+    # broken / unchecked）と事実文、切れている参照の列挙だけで、件数・比率を数えない
+    # （知識の転用層 P4-3 / knowledge_transfer_design.md §6・T-3）。
+    "/api/admin/documents/{document_id}/reference-health": _R_STATE,
     "/api/admin/documents/{document_id}/revisions": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}": _R_OBJECT,
     "/api/admin/documents/{document_id}/revisions/{revision_id}/report": _R_OBJECT,

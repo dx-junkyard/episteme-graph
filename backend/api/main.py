@@ -65,6 +65,7 @@ from routes import doubt as doubt_routes
 from routes import reconstruction as reconstruction_routes
 from routes import course_prerequisites as course_prerequisites_routes
 from routes import cartridge_shape as cartridge_shape_routes
+from routes import reference_health as reference_health_routes
 from routes import seminar_brief as seminar_brief_routes
 from routes import discuss_observation as discuss_observation_routes
 from routes import cycle as cycle_routes
@@ -437,6 +438,10 @@ app.include_router(course_prerequisites_routes.router, prefix="/api/admin")
 # 読み取り専用 API 1本（GET /api/admin/cartridges/{id}/fit）。既存 admin ルーターと
 # パスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
 app.include_router(cartridge_shape_routes.router, prefix="/api/admin")
+# 参照の健全性（knowledge_transfer_design.md §6 / P4-3）。読み取り専用 API 1本
+# （GET /api/admin/documents/{id}/reference-health）。routes/admin.py の /documents/* とは
+# サフィックスが衝突しないためフラット登録で足りる（Tier 3-17c と同型）。
+app.include_router(reference_health_routes.router, prefix="/api/admin")
 app.include_router(_versioning_router, prefix="/api/admin")
 app.include_router(_status_router, prefix="/api/admin")
 app.include_router(_notifications_router, prefix="/api/admin")

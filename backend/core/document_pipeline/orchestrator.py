@@ -2540,6 +2540,36 @@ def _stage_identity_candidates(ctx: PipelineContext) -> bool:
     return ctx.finish_target_stage("identity_candidates", dict(identity_payload))
 
 
+def _reference_health_snapshot(document_id: str) -> dict:
+    """参照の健全性の検査時点の事実（知識の転用層 P4-3 / §6）。
+
+    **新しいステージにはしない**（``_PIPELINE_STEPS`` を増やさない）。完了記録の
+    直前に走る best-effort の後処理で、失敗しても「未確認」という事実を残すだけ
+    （KT5: 解決済みフラグではない）。
+    """
+    from core.postgres import get_session as _pg_session
+    from core.reference_health import check_document_references, unchecked_result
+
+    session = None
+    try:
+        session = _pg_session()
+        return check_document_references(session, document_id)
+    except Exception:  # noqa: BLE001 — 検査は pipeline を止めない
+        logger.warning(
+            "reference health check skipped for document=%s", document_id, exc_info=True
+        )
+        try:
+            return unchecked_result()
+        except Exception:  # noqa: BLE001
+            return {"status": "unchecked", "facts": [], "details": {}}
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
 def _stage_completed(ctx: PipelineContext) -> None:
     # ── Stage 14: completed ────────────────────────────────────────────
     upsert_analysis_run(
@@ -2549,13 +2579,18 @@ def _stage_completed(ctx: PipelineContext) -> None:
         cartridge_id=ctx.cartridge_id,
         status="completed",
         current_stage="completed",
-        stage_outputs={"completed": {
-            "chunks": ctx.result.chunk_count,
-            "claims": ctx.result.claim_count,
-            "components": ctx.result.component_count,
-            "dsl_nodes": ctx.result.dsl_node_count,
-            "dsl_edges": ctx.result.dsl_edge_count,
-        }},
+        stage_outputs={
+            "completed": {
+                "chunks": ctx.result.chunk_count,
+                "claims": ctx.result.claim_count,
+                "components": ctx.result.component_count,
+                "dsl_nodes": ctx.result.dsl_node_count,
+                "dsl_edges": ctx.result.dsl_edge_count,
+            },
+            # 参照の健全性（P4-3）。stage_outputs は top-level shallow merge なので
+            # 既存キーは壊さない。
+            "reference_health": _reference_health_snapshot(ctx.document_id),
+        },
     )
     # 初回 (initial) pipeline 完了時は、この Run を採用 (active) Run とする。
     # 再解析でも最新の completed initial run を active に進める（従来の

@@ -126,6 +126,11 @@ class MaterialOut(BaseModel):
     # run はあるが分野を指定せずに解析した場合は ""（= 分野中立で走った事実）。
     # フロントは再解析モーダルで前回の分野を事実文として提示する。
     analysis_cartridge_id: str | None = None
+    # 参照の健全性（knowledge_transfer_design.md §6 / P4-3）。最新 run の
+    # ``stage_outputs.reference_health`` から ``{status, checked_at}`` **だけ**を投影する
+    # （切れている参照の列挙は詳細 API 側。行に件数バッジを作らない = T-3）。
+    # run が無い / 検査の事実が無い教材は ``{"status": "unchecked"}``。
+    reference_health: dict | None = None
     # --- メタデータ（教材選択UIの情報提示用。documents 列から常時付与）---
     authors: list[str] = Field(default_factory=list)
     year: int | None = None

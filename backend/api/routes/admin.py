@@ -129,6 +129,7 @@ from core.meta_analyzer import (
     reject_proposal,
 )
 from core.postgres import get_session as _pg_session
+from core import reference_health as reference_health_core
 from core.reextractor import enqueue_reextraction, get_jobs as get_reextraction_jobs
 from core.schema import (
     AUDIT_ENTITY_DOCUMENT_SHARE,
@@ -1103,6 +1104,30 @@ def _legacy_material_status(mstatus: status_schema.MaterialStatus) -> str | None
     return _LEGACY_MATERIAL_STATUS_OVERRIDE.get(mstatus.state)
 
 
+def _material_reference_health(stage_outputs: dict | None) -> dict:
+    """run の ``stage_outputs.reference_health`` から教材行用の投影を作る（P4-3 / T-3）。
+
+    行に出すのは ``status`` と ``checked_at`` **だけ**。事実文の一覧・切れている参照の
+    列挙・件数は詳細 API（``GET /api/admin/documents/{id}/reference-health``）の責務で、
+    一覧行には出さない。事実が無ければ「未確認」（検査していないことを偽装しない）。
+    """
+    snapshot = (stage_outputs or {}).get("reference_health")
+    if not isinstance(snapshot, dict):
+        return {"status": reference_health_core.STATUS_UNCHECKED}
+    status = str(snapshot.get("status") or "").strip()
+    if status not in (
+        reference_health_core.STATUS_OK,
+        reference_health_core.STATUS_BROKEN,
+        reference_health_core.STATUS_UNCHECKED,
+    ):
+        status = reference_health_core.STATUS_UNCHECKED
+    projected: dict = {"status": status}
+    checked_at = str(snapshot.get("checked_at") or "").strip()
+    if checked_at:
+        projected["checked_at"] = checked_at
+    return projected
+
+
 @router.get("/materials", response_model=list[MaterialOut])
 def list_materials(
     include: str | None = None,
@@ -1310,6 +1335,11 @@ def list_materials(
         if not isinstance(stage_info, dict):
             stage_info = {}
 
+        # 参照の健全性（knowledge_transfer_design.md §6 / P4-3）。
+        # 最新 run に残った**検査時点の事実**から状態と時刻だけを投影する（facts /
+        # details は行に出さない = T-3）。run が無い / 事実が無い教材は「未確認」。
+        reference_health = _material_reference_health(stage_outputs)
+
         # Tier3-16: run の有無・状態からの status 合成は projector に一本化する
         # （get_material と同一ロジック。一覧と詳細の status を一致させる）。
         mstatus = status_projector.derive_material_status(
@@ -1389,6 +1419,7 @@ def list_materials(
             analysis_cartridge_id=(
                 str(run_data.get("cartridge_id") or "") if run else None
             ),
+            reference_health=reference_health,
             authors=authors,
             year=year,
             doc_type=doc_type,
