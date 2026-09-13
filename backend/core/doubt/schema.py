@@ -91,6 +91,14 @@ class ChallengeType(str, Enum):
     HIDDEN_LEMMA = "hidden_lemma"                  # 暗黙の補題に依存
 
 
+# 疑義の**向き**（X-6 / Pollock の undercut。migration 083・
+# knowledge_transfer_design.md §8）。型（ChallengeType）が「何を疑うか」なのに対し、
+# mode は「主張そのものへ向けるのか、主張と根拠のつながりへ向けるのか」を表す。
+# 既定は direct（既存行の意味 = DB の DEFAULT と一致）。日本語ラベルの正本は
+# core/label_vocab.py::CHALLENGE_MODE_LABELS。
+CHALLENGE_MODES = ("direct", "undercut")
+
+
 class ChallengeStatus(str, Enum):
     OPEN = "open"
     ANSWERED = "answered"
@@ -460,3 +468,60 @@ class FalsificationCandidate(BaseModel):
     status: str = "candidate"  # candidate | confirmed | dismissed（P4: 保持）
     detector_version: str = SCHEMA_VERSION
     created_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# 知識の転用層 Phase 4 — 根拠の線（Evidence Lines, migration 083）
+#
+# 正本ドキュメント: docs/features/knowledge_transfer_design.md §8（X-5 / SEPIO の
+# 最小語彙）。不変条項は同 §2（KT2 確定は人間 / KT5 情報を落とさない /
+# KT7 数値を見せない）。
+#
+# verification_scopes（どの条件・領域・精度・系で確かめられたか）と
+# falsification_conditions（何が起これば覆るか）に続く**第3の軸**として、
+# 「どの経路で支えられているか」を 1 件ずつ記帳する。
+#
+#   - **人間の記帳専用**（SL3 と同型の分離）。ledger_builder（非LLM バックフィル）・
+#     falsification / scope の LLM worker からは絶対に書き込まない。
+#     ガードレール（test_doubt_citation_vocab_guardrails.py）がソース検査で固定する。
+#   - ``core/doubt/support_paths.py`` が計算する独立支持経路（導出物）は**記帳しない**
+#     （PN-2: 導出できるものを保存物に混ぜない。支持線は読み時に導出し続ける）。
+#   - 学習者向けの台帳投影は事実文 1 行に畳み、``recorded_by`` と ID 群を出さない
+#     （KT7・``api/routes/doubt.py::learner_ledger_line``）。
+# ---------------------------------------------------------------------------
+
+#: 根拠の線の種別。日本語ラベルの正本は core/label_vocab.py::EVIDENCE_LINE_KIND_LABELS。
+EVIDENCE_LINE_KINDS = (
+    "observation",          # 観測・測定に支えられている
+    "derivation",           # 理論の導出に支えられている
+    "external_reference",   # このコーパスの外の文献に支えられている
+    "consistency",          # 他の確立した結果との整合に支えられている
+)
+
+#: 人間の記帳でのみ書き換えてよい台帳フィールド（HUMAN_ONLY_VERIFICATION_STATUSES /
+#: HUMAN_ONLY_FALSIFICATION_FIELDS と同じ立場の宣言）。
+HUMAN_ONLY_LEDGER_FIELDS = ("evidence_lines",)
+
+
+class EvidenceLine(BaseModel):
+    """根拠の線 1 件 = 「この主張はどの経路で支えられているか」の記帳（P4-5）。
+
+    ``line_kind`` は :data:`EVIDENCE_LINE_KINDS` の語彙、``reason`` は非空、
+    ``evidence_ids`` / ``claim_ids`` / ``equation_ids`` の**いずれか 1 つ以上**が
+    非空であることを API 層が強制する（帰属 ``recorded_by`` も必須）。
+    行削除はせず、訂正は PATCH（SL-1 の反証条件と同じ作法）。
+    実 JSONB と完全一致させる（confidence を持たない = 数値を出す口を作らない）。
+    """
+
+    line_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    line_kind: str = ""  # observation | derivation | external_reference | consistency
+    evidence_ids: list[str] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory=list)
+    equation_ids: list[str] = Field(default_factory=list)
+    recorded_by: str = ""  # user_id（帰属必須・匿名記帳なし）
+    reason: str = ""
+    recorded_at: str = ""
+
+    def has_support(self) -> bool:
+        """根拠 ID が 1 つ以上あるか（3 系統のいずれか）。"""
+        return bool(self.evidence_ids or self.claim_ids or self.equation_ids)

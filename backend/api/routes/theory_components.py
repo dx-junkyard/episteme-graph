@@ -48,7 +48,9 @@ from core.schema import (
     AUDIT_ENTITY_COMPONENT,
     AUDIT_ENTITY_ENDORSEMENT,
     AUDIT_ENTITY_EXPLANATION,
+    CITATION_INTENTS,
 )
+from core.label_vocab import CITATION_INTENT_LABELS
 from core.atlas_vectors import builder as atlas_vectors_builder
 from core.concept_normalizer import normalize_concept, normalize_concepts, normalize_key
 from core import decision_context
@@ -4447,8 +4449,14 @@ def list_endorsements(
 def cite_explanation(
     explanation_id: str,
     citing_course_id: str = Body(..., embed=True),
+    # P4-5（knowledge_transfer_design.md §8 / X-7・CiTO の最小語彙）: 引用の意図。
+    # 任意（未指定 = NULL = 記録なし）。既存の body（citing_course_id のみ）は不変で動く。
+    citation_intent: str | None = Body(default=None, embed=True),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
+    intent = (citation_intent or "").strip() or None
+    if intent is not None and intent not in CITATION_INTENTS:
+        raise HTTPException(status_code=422, detail=f"invalid citation_intent: {intent}")
     ctx = _explanation_context(explanation_id)
     if not ctx:
         raise HTTPException(status_code=404, detail="Explanation not found")
@@ -4461,11 +4469,17 @@ def cite_explanation(
     try:
         row = session.execute(
             sa_text("""
-                INSERT INTO component_citations (explanation_id, citing_course_id, citing_user_id)
-                VALUES (CAST(:eid AS uuid), :course_id, CAST(:uid AS uuid))
+                INSERT INTO component_citations
+                    (explanation_id, citing_course_id, citing_user_id, citation_intent)
+                VALUES (CAST(:eid AS uuid), :course_id, CAST(:uid AS uuid), :intent)
                 RETURNING id
             """),
-            {"eid": explanation_id, "course_id": citing_course_id, "uid": current_user["id"]},
+            {
+                "eid": explanation_id,
+                "course_id": citing_course_id,
+                "uid": current_user["id"],
+                "intent": intent,
+            },
         ).fetchone()
         session.commit()
     except Exception:
@@ -4482,9 +4496,16 @@ def cite_explanation(
         logger.debug("citation source-version stamping skipped for %s", explanation_id, exc_info=True)
     _record_review_event(
         AUDIT_ENTITY_CITATION, explanation_id, "", "cited", current_user.get("id"),
-        {"action": "cite", "citing_course_id": citing_course_id},
+        {"action": "cite", "citing_course_id": citing_course_id,
+         **({"citation_intent": intent} if intent else {})},
     )
-    return {"citation_id": str(row[0]), "explanation_id": explanation_id, "citing_course_id": citing_course_id}
+    return {
+        "citation_id": str(row[0]),
+        "explanation_id": explanation_id,
+        "citing_course_id": citing_course_id,
+        "citation_intent": intent,
+        "citation_intent_label": CITATION_INTENT_LABELS.get(intent, "") if intent else "",
+    }
 
 
 def _stamp_citation_source_version(citation_id: str, component_id: str | None, user_id: str | None) -> None:

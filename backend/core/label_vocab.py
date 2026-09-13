@@ -51,6 +51,8 @@ __all__ = [
     "ANCHOR_NEARNESS_SCALE",
     "ANCHOR_NEARNESS_THRESHOLD_MID",
     "ANCHOR_NEARNESS_THRESHOLD_NEAR",
+    "CHALLENGE_MODE_LABELS",
+    "CITATION_INTENT_LABELS",
     "COMPLEMENT_SKY_THRESHOLD",
     "AUDIO_STATUS_LABELS",
     "CONFIDENCE_LABELS_LOW_MED_HIGH",
@@ -71,6 +73,7 @@ __all__ = [
     "DISCOVERY_RELEVANCE_THRESHOLD_HIGH",
     "DISCOVERY_RELEVANCE_THRESHOLD_MEDIUM",
     "EDGE_KIND_LABELS",
+    "EVIDENCE_LINE_KIND_LABELS",
     "GradedScale",
     "LEARNING_STANCE_LABELS",
     "MATERIAL_STATE_LABELS",
@@ -492,4 +495,43 @@ LEARNING_UNIT_KIND_LABELS = MappingProxyType({
     "parent_component": "理論の部品（原案）",
     "dsl_node": "概念ノード",
     "figure": "図",
+})
+
+
+# ---------------------------------------------------------------------------
+# D層・C層の表現語彙（知識の転用層 Phase 4 / migration 083）
+# ---------------------------------------------------------------------------
+#
+# 語彙（enum）の正本は
+#   - ``core/doubt/schema.py::CHALLENGE_MODES``（疑義の向き・X-6）
+#   - ``core/doubt/schema.py::EVIDENCE_LINE_KINDS``（根拠の線・X-5）
+#   - ``core/schema.py::CITATION_INTENTS``（引用の意図・X-7）
+# **表示ラベルの正本はここ**（正本設計書
+# ``docs/features/knowledge_transfer_design.md`` §8）。migration 083 の CHECK も
+# 同じ文字列で書く（一致は ``backend/tests/test_doubt_citation_vocab_*.py`` が固定）。
+# 数値・confidence は持たない（KT7）。フロント（doubt-atlas.js /
+# admin-lecture-studio.js）は逐語ミラー + mirror テストで固定する（第2波）。
+
+#: 疑義の向き（direct = 主張そのもの / undercut = 主張と根拠のつながり）。
+#: 主語は常に「どこへ向けた疑義か」であって人ではない（D層 §8-3 を継承）。
+CHALLENGE_MODE_LABELS = MappingProxyType({
+    "direct": "主張そのものへ",
+    "undercut": "主張と根拠のつながりへ",
+})
+
+#: 根拠の線の種別（どの経路で支えられているか）。
+EVIDENCE_LINE_KIND_LABELS = MappingProxyType({
+    "observation": "観測",
+    "derivation": "導出",
+    "external_reference": "外部文献",
+    "consistency": "整合性",
+})
+
+#: 引用の意図（CiTO の最小語彙）。NULL = 記録なし（ラベルを持たない）。
+CITATION_INTENT_LABELS = MappingProxyType({
+    "uses_as_evidence": "根拠として使う",
+    "extends": "発展させる",
+    "qualifies": "条件を付ける",
+    "contrasts_with": "対比する",
+    "cites_for_background": "背景として引く",
 })
