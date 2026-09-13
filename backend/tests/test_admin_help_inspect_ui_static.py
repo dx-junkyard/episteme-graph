@@ -216,6 +216,8 @@ _ADMIN_FRONTEND_SOURCES = [
     ROOT / "frontend" / "public" / "js" / "admin-release-review.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-discovery.js",
     ROOT / "frontend" / "public" / "js" / "admin-paper-radar.js",
+    # 束の取り込み（知識の転用層 P4-1）。モーダル本体とアンカー担体を持つ。
+    ROOT / "frontend" / "public" / "js" / "admin-knowledge-import.js",
     ROOT / "frontend" / "public" / "js" / "admin-graph-review.js",
     # DOM 非依存の音声エンジン（アンカー担体は admin-graph-review.js 側）。
     # 将来ここに UI が生えたときの登録漏れを検出するため対象に入れる。

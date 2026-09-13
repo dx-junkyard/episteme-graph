@@ -420,6 +420,10 @@
       if (failedLinks) {
         html += '<div class="admin-failed-hint">' + failedLinks + '</div>';
       }
+      // 参照の健全性（knowledge_transfer_design.md P4-3 / T-3）: 状態の事実文 1 行だけ。
+      // 件数バッジ・比率は作らない。「切れがあります」も運用上の事実であって失敗ではない
+      // ので警告色にしない（未確認は薄色で「まだ確認されていない」ことだけを言う）。
+      html += materialReferenceHealthChipHtml(m);
       html += "</td>";
       html += "<td>" + escHtml(uploadedAt) + "</td>";
       var resumeBtn = canResume
@@ -450,6 +454,17 @@
       // 合成ビュー（新テーブル・新LLMゼロ、SB1。document_id が必要）
       var seminarBriefBtn = m.document_id
         ? '<button class="ls-menu-item admin-seminar-brief-btn" type="button" data-ui-anchor="materials.row-seminar-brief" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="輪講の前に、この論文の脆い前提・一点吊りの支持線・晴れ間を確認します（読み取り専用）">ゼミ前ブリーフ…</button>'
+        : "";
+      // 束の取り込み（knowledge_transfer_design.md P4-1 / §4.3）: 別インスタンスで
+      // 書き出した束（zip）をこの教材の知識として取り込む。取り込みは編集権限が要る操作で、
+      // 実行前に必ず dry-run（確認）を挟む（document_id が必要）。
+      var importBtn = m.document_id
+        ? '<button class="ls-menu-item admin-import-bundle-btn" type="button" data-ui-anchor="materials.row-import" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="別のインスタンスで書き出した束（zip）を、この教材の知識として取り込みます（先に内容を確認できます）">束を取り込む…</button>'
+        : "";
+      // 参照の健全性（knowledge_transfer_design.md P4-3 / §6）: live 行どうしの参照が
+      // 解決できるかをその場で検査して事実として見る（読み取り専用。document_id が必要）。
+      var referenceHealthBtn = m.document_id
+        ? '<button class="ls-menu-item admin-reference-health-btn" type="button" data-ui-anchor="materials.row-reference-health" data-document-id="' + escHtml(m.document_id) + '" data-title="' + escHtml(m.title || m.filename || "教材") + '" title="この教材の解析結果どうしの参照（グラフ→主張・部品→主張/式など）が解決できるかを確認します（読み取り専用）">参照の整合を確認…</button>'
         : "";
       // 画像読み取りパイプライン（migration 041）: 抽出された図・画像を表示（document_id が必要）
       var figuresBtn = m.document_id
@@ -492,6 +507,8 @@
             versionBtn +
             landscapeBtn +
             seminarBriefBtn +
+            referenceHealthBtn +
+            importBtn +
             estimateBtn +
             pdfBtn +
             resumeBtn +
@@ -582,6 +599,25 @@
     tbody.querySelectorAll(".admin-seminar-brief-btn").forEach(function (btn) {
       btn.addEventListener("click", function () {
         openSeminarBriefModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 参照の健全性（knowledge_transfer_design.md P4-3）: その場で再検査する読み取り専用モーダル
+    tbody.querySelectorAll(".admin-reference-health-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        openReferenceHealthModal(this.getAttribute("data-document-id"), this.getAttribute("data-title"));
+      });
+    });
+
+    // 束の取り込み（knowledge_transfer_design.md P4-1）: dry-run → 確定の 2 段モーダル
+    tbody.querySelectorAll(".admin-import-bundle-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        if (window.KnowledgeImport) {
+          window.KnowledgeImport.openModal(
+            this.getAttribute("data-document-id"),
+            this.getAttribute("data-title")
+          );
+        }
       });
     });
 
@@ -3568,6 +3604,142 @@
         _landscapeResetProposeButton();
         _landscapeNotice((err && err.message) || LANDSCAPE_SKIP_TEXT.llm_call_failed, true);
       });
+  }
+
+  // ── 参照の健全性（knowledge_transfer_design.md P4-3 / §6・判断 T-3）───────────
+  // 教材行には**状態の事実文 1 行だけ**を出し、切れている参照の列挙は詳細モーダルに置く。
+  // 件数バッジ・比率は作らない（T-3）。状態の語彙はサーバ（core/reference_health.py）の
+  // ok / broken / unchecked のみ。未知の値は「未確認」に倒す（推測で言い換えない）。
+  var REFERENCE_HEALTH_CHIP_LABELS = {
+    ok: "参照: 問題なし",
+    broken: "参照: 切れがあります",
+    unchecked: "参照: 未確認"
+  };
+  // 破断の種別（details のキー）→ 教員向けの見出し。事実文自体は facts をそのまま描く。
+  var REFERENCE_HEALTH_KIND_LABELS = {
+    graph_node_claim: "グラフのノード → 主張",
+    component_claim: "部品 → 主張",
+    component_equation: "部品 → 式",
+    claim_without_chunk: "主張 → 出典チャンク",
+    unit_claim: "学ぶ単位 → 主張",
+    unit_component: "学ぶ単位 → 部品"
+  };
+
+  function materialReferenceHealthChipHtml(m) {
+    var health = m && m.reference_health;
+    if (!health) return "";
+    var status = String(health.status || "unchecked");
+    var label = REFERENCE_HEALTH_CHIP_LABELS[status] || REFERENCE_HEALTH_CHIP_LABELS.unchecked;
+    // 「切れがある」は運用上の事実であって失敗ではないので警告色にしない（中立色）。
+    // 未確認だけは「まだ何も分かっていない」ことが伝わるよう薄色にする。
+    var color = status === "unchecked"
+      ? "var(--color-text-tertiary)"
+      : "var(--color-text-secondary)";
+    return '<div class="admin-reference-health-chip" style="font-size:11px;color:' + color +
+      ';margin-top:2px;">' + escHtml(label) + "</div>";
+  }
+
+  function openReferenceHealthModal(documentId, title) {
+    var existing = document.getElementById("reference-health-modal");
+    if (existing) existing.remove();
+
+    var overlay = document.createElement("div");
+    overlay.id = "reference-health-modal";
+    overlay.setAttribute("data-ui-anchor", "materials.reference-health-modal");
+    overlay.style.cssText = "position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.5);display:flex;align-items:center;justify-content:center;z-index:9999";
+    overlay.innerHTML =
+      '<div style="background:var(--color-background-primary);border:1px solid var(--color-border);border-radius:8px;padding:22px;min-width:560px;max-width:760px;max-height:84vh;display:flex;flex-direction:column">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">' +
+          '<h3 id="reference-health-modal-title" style="margin:0;font-size:16px;color:var(--color-text-primary)"></h3>' +
+          '<button id="reference-health-modal-close" style="background:none;border:none;color:var(--color-text-secondary);cursor:pointer;font-size:18px;padding:4px">&times;</button>' +
+        '</div>' +
+        '<p style="font-size:12px;color:var(--color-text-tertiary);margin:0 0 8px">' +
+          'この教材の解析結果どうしの参照が、いま解決できるかをその場で検査した結果です。' +
+          '検査結果は保存されません（「解決済み」の印ではなく、検査した時点の事実です）。' +
+        '</p>' +
+        '<div id="reference-health-modal-body" style="overflow-y:auto;flex:1">' +
+          '<div style="padding:16px;color:var(--color-text-tertiary);font-size:13px">読み込み中...</div>' +
+        '</div>' +
+        '<div style="border-top:1px solid var(--color-border-tertiary);margin-top:10px;padding-top:10px;display:flex;gap:8px;align-items:center">' +
+          '<button type="button" id="reference-health-recheck" data-ui-anchor="materials.reference-health-recheck" class="admin-action-btn">再確認</button>' +
+          '<span style="flex:1"></span>' +
+          '<button type="button" id="reference-health-modal-cancel" class="admin-action-btn" style="background:var(--color-bg-tertiary);color:var(--color-text)">閉じる</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById("reference-health-modal-title").textContent =
+      "参照の整合: " + (title || "");
+
+    overlay.addEventListener("click", function (e) { if (e.target === overlay) overlay.remove(); });
+    document.getElementById("reference-health-modal-close").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("reference-health-modal-cancel").addEventListener("click", function () { overlay.remove(); });
+    document.getElementById("reference-health-recheck").addEventListener("click", function () {
+      loadReferenceHealth(documentId);
+    });
+
+    loadReferenceHealth(documentId);
+  }
+
+  function loadReferenceHealth(documentId) {
+    var btn = document.getElementById("reference-health-recheck");
+    if (btn) btn.disabled = true;
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/reference-health")
+      .then(function (res) {
+        if (!res.ok) throw new Error("status " + res.status);
+        return res.json();
+      })
+      .then(function (data) { renderReferenceHealth(data || {}); })
+      .catch(function () {
+        var body = document.getElementById("reference-health-modal-body");
+        if (!body) return;
+        body.textContent = "";
+        body.appendChild(_sbEl("div", "padding:16px;color:var(--color-text-danger);font-size:13px", "参照の整合を確認できませんでした"));
+      })
+      .then(function () {
+        var again = document.getElementById("reference-health-recheck");
+        if (again) again.disabled = false;
+      });
+  }
+
+  function renderReferenceHealth(data) {
+    var body = document.getElementById("reference-health-modal-body");
+    if (!body) return;
+    body.textContent = "";
+
+    var status = String(data.status || "unchecked");
+    var head = _sbEl("div", "font-size:13px;font-weight:600;color:var(--color-text-primary);margin-bottom:6px",
+      REFERENCE_HEALTH_CHIP_LABELS[status] || REFERENCE_HEALTH_CHIP_LABELS.unchecked);
+    body.appendChild(head);
+
+    if (data.checked_at) {
+      body.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-tertiary);margin-bottom:8px",
+        "確認した時刻: " + data.checked_at));
+    }
+
+    var facts = data.facts || [];
+    for (var i = 0; i < facts.length; i++) {
+      body.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-secondary);margin-bottom:3px",
+        String(facts[i])));
+    }
+
+    // 切れている参照の列挙（T-3: 再構成に必要な運用情報。件数バッジにはしない）。
+    var details = data.details || {};
+    var kinds = Object.keys(details);
+    for (var k = 0; k < kinds.length; k++) {
+      var kind = kinds[k];
+      var rows = details[kind] || [];
+      if (!rows.length) continue;
+      var section = _sbEl("div", "margin-top:12px");
+      section.appendChild(_sbEl("div", "font-size:12px;font-weight:600;color:var(--color-text-primary);margin-bottom:4px",
+        REFERENCE_HEALTH_KIND_LABELS[kind] || kind));
+      for (var r = 0; r < rows.length; r++) {
+        var row = rows[r] || {};
+        var line = String(row.ref || "");
+        if (row.from_label) line += " ← " + String(row.from_label);
+        section.appendChild(_sbEl("div", "font-size:12px;color:var(--color-text-secondary);margin-bottom:2px", line));
+      }
+      body.appendChild(section);
+    }
   }
 
   // ── ゼミ前ブリーフ（seminar_brief_mirroring_design.md §1） ─────────────────
@@ -12367,6 +12539,16 @@
           apiFetch: apiFetch,
           escHtml: escHtml,
           onUploadAccepted: handleUploadAccepted,
+        });
+      }
+      // 束の取り込み（knowledge_transfer_design.md P4-1 / §4.3）— 教材行の
+      // 「束を取り込む…」モーダル。zip は multipart で送るので apiFetchRaw を注入する
+      // （apiFetch は Content-Type: application/json を強制するため使えない）。
+      if (window.KnowledgeImport) {
+        window.KnowledgeImport.init({
+          apiFetchRaw: apiFetchRaw,
+          escHtml: escHtml,
+          onImported: loadMaterials,
         });
       }
       if (window.LectureStudio) {

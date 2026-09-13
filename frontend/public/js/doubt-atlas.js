@@ -65,6 +65,21 @@
     open: "未対応", answered: "対応済み", withdrawn: "取り下げ済み",
     led_to_verification: "検証提案へ昇格済み",
   };
+  // ── 知識の転用層 P4-5（knowledge_transfer_design.md §8 / X-5・X-6）─────────
+  // 疑義の向き（direct = 主張そのものへ / undercut = 主張と根拠のつながりへ）。
+  // 正本は backend/core/label_vocab.py::CHALLENGE_MODE_LABELS（逐語ミラー）。
+  var CHALLENGE_MODE_LABELS = {
+    direct: "主張そのものへ",
+    undercut: "主張と根拠のつながりへ",
+  };
+  // 根拠の線の種別（どの経路で支えられているか）。
+  // 正本は backend/core/label_vocab.py::EVIDENCE_LINE_KIND_LABELS（逐語ミラー）。
+  var EVIDENCE_LINE_KIND_LABELS = {
+    observation: "観測",
+    derivation: "導出",
+    external_reference: "外部文献",
+    consistency: "整合性",
+  };
   // 疑いの様相（doubt_type）の表はこのファイルに持たない。教員画面で使う場面が
   // 無く（参照ゼロ）、学習者画面は API の doubt_type_label をそのまま描くため、
   // 表を置くと分裂の種にしかならない（正本は core/structure_anchor/schema.py）。
@@ -242,10 +257,13 @@
       html += '<div data-doubt-vstatus-slot="1"></div>';
       // SL-1: 台帳行が無くても「覆る条件」の記帳自体は可能（スコープ記帳と同型）。
       html += falsificationSectionHtml(null);
+      // P4-5: 根拠の線も台帳行の有無に関わらず記帳できる（サーバが行を用意する）。
+      html += evidenceLinesSectionHtml(null);
       container.innerHTML = html;
       bindScopeForm(container, targetType, targetId);
       bindVerificationStatusForm(container, targetType, targetId, 0);
       bindFalsificationSection(container, targetType, targetId);
+      bindEvidenceLineForm(container, targetType, targetId);
       return;
     }
 
@@ -319,6 +337,11 @@
       openChallenges.forEach(function (c) {
         html += '<div class="doubt-scope" data-doubt-challenge-item="' + escHtml(c.id) + '">' +
           escHtml(CHALLENGE_TYPE_LABELS[c.challenge_type] || c.challenge_type) +
+          // P4-5: 疑義の向き（direct / undercut）を型と並べて出す。サーバが
+          // challenge_mode_label を返す場合はそれを優先し、無ければミラー表で引く。
+          '<div class="doubt-scope-meta">向き: ' +
+          escHtml(c.challenge_mode_label || CHALLENGE_MODE_LABELS[c.challenge_mode] ||
+            CHALLENGE_MODE_LABELS.direct) + '</div>' +
           '<div class="doubt-scope-meta">' + escHtml(c.challenger_name || "") +
           (c.reason ? ' — ' + escHtml(c.reason) : '') + '</div>' +
           '<div class="doubt-scope-meta">状態: ' + escHtml(CHALLENGE_STATUS_LABELS[c.status] || c.status) + '</div>';
@@ -345,6 +368,8 @@
     // SL-1: 覆る条件（反証条件レジストリ）。SL-3: 支持線の事実文（optional キー）。
     html += falsificationSectionHtml(entry);
     html += supportLinesFactHtml(entry);
+    // P4-5: 根拠の線（どの経路で支えられているか）。人間の記帳専用。
+    html += evidenceLinesSectionHtml(entry);
 
     container.innerHTML = html;
     bindScopeForm(container, targetType, targetId);
@@ -353,6 +378,102 @@
     bindChallengeForm(container, targetType, targetId);
     bindChallengeActions(container, targetType, targetId);
     bindFalsificationSection(container, targetType, targetId);
+    bindEvidenceLineForm(container, targetType, targetId);
+  }
+
+  // ── P4-5: 根拠の線（knowledge_transfer_design.md §8 / X-5）─────────────────
+  // verification_scopes（どこで確かめられたか）・falsification_conditions（何が起これば
+  // 覆るか）に続く第3の軸。**人間の記帳専用**なので、AI 候補の区画を作らない。
+  // 記帳ゼロは事実文 1 行で言う（空欄は発見であって欠陥ではない — 警告色にしない）。
+  function evidenceLineIdsFact(line) {
+    var parts = [];
+    var groups = [
+      ["根拠", line.evidence_ids],
+      ["主張", line.claim_ids],
+      ["式", line.equation_ids],
+    ];
+    for (var i = 0; i < groups.length; i++) {
+      var ids = groups[i][1] || [];
+      if (ids.length) parts.push(groups[i][0] + ": " + ids.join(", "));
+    }
+    return parts.join(" / ");
+  }
+
+  function evidenceLinesSectionHtml(entry) {
+    var lines = (entry && entry.evidence_lines) || [];
+    var html = '<div class="doubt-section" data-ui-anchor="doubt-atlas.evidence-lines"><b>根拠の線</b>';
+    if (lines.length) {
+      lines.forEach(function (line) {
+        var kind = line.line_kind_label || EVIDENCE_LINE_KIND_LABELS[line.line_kind] || line.line_kind;
+        html += '<div class="doubt-scope"><span class="doubt-scope-axis">' + escHtml(kind) + '</span>';
+        if (line.reason) {
+          html += '<div class="doubt-scope-meta">' + escHtml(line.reason) + '</div>';
+        }
+        var ids = evidenceLineIdsFact(line);
+        if (ids) html += '<div class="doubt-scope-meta">' + escHtml(ids) + '</div>';
+        html += '<div class="doubt-scope-meta">出所: 教員の記帳</div></div>';
+      });
+    } else {
+      html += '<p class="doubt-muted">根拠の線はまだ記帳されていません。</p>';
+    }
+    html += '<button type="button" class="doubt-chip-btn" data-doubt-evidence-line-form="1" ' +
+      'data-ui-anchor="doubt-atlas.evidence-line-add">根拠の線を追加</button>';
+    html += '<div data-doubt-evidence-line-slot="1"></div>';
+    html += '</div>';
+    return html;
+  }
+
+  function splitIdList(value) {
+    return (value || "").split(",").map(function (s) { return s.trim(); })
+      .filter(function (s) { return !!s; });
+  }
+
+  function bindEvidenceLineForm(container, targetType, targetId) {
+    var btn = container.querySelector("[data-doubt-evidence-line-form]");
+    var slot = container.querySelector("[data-doubt-evidence-line-slot]");
+    if (!btn || !slot) return;
+    btn.addEventListener("click", function () {
+      if (slot.firstChild) { slot.innerHTML = ""; return; }
+      var kindOptions = Object.keys(EVIDENCE_LINE_KIND_LABELS).map(function (k) {
+        return '<option value="' + escHtml(k) + '">' + escHtml(EVIDENCE_LINE_KIND_LABELS[k]) + '</option>';
+      }).join("");
+      slot.innerHTML =
+        '<div class="doubt-form">' +
+        '<label>種類</label><select data-f="line_kind">' + kindOptions + '</select>' +
+        '<label>理由（必須）</label><textarea data-f="reason" rows="2" placeholder="この経路で支えられていると言える理由"></textarea>' +
+        '<label>根拠のID（カンマ区切り）</label><input data-f="evidence_ids">' +
+        '<label>主張のID（カンマ区切り）</label><input data-f="claim_ids">' +
+        '<label>式のID（カンマ区切り）</label><input data-f="equation_ids">' +
+        '<p class="doubt-muted">ID は3つのうちどれか1つ以上を入れてください。</p>' +
+        '<button type="button" class="doubt-chip-btn" data-doubt-evidence-line-submit="1" data-ui-anchor="doubt-atlas.evidence-line-add">記帳する</button>' +
+        '<span class="doubt-muted" data-doubt-evidence-line-msg=""></span>' +
+        '</div>';
+      var msg = slot.querySelector("[data-doubt-evidence-line-msg]");
+      slot.querySelector("[data-doubt-evidence-line-submit]").addEventListener("click", function () {
+        var body = {
+          line_kind: slot.querySelector('[data-f="line_kind"]').value,
+          reason: (slot.querySelector('[data-f="reason"]').value || "").trim(),
+          evidence_ids: splitIdList(slot.querySelector('[data-f="evidence_ids"]').value),
+          claim_ids: splitIdList(slot.querySelector('[data-f="claim_ids"]').value),
+          equation_ids: splitIdList(slot.querySelector('[data-f="equation_ids"]').value),
+        };
+        apiFetch("/admin/doubt/ledger/" + encodeURIComponent(targetType) + "/" +
+          encodeURIComponent(targetId) + "/evidence-lines",
+          { method: "POST", body: JSON.stringify(body) })
+          .then(function (res) {
+            if (res.status === 422) {
+              return res.json().then(function (data) {
+                msg.textContent = (data && data.detail) || "種類・理由と、いずれかのIDが必要です";
+                throw new Error("validation");
+              });
+            }
+            if (!res.ok) throw new Error("failed");
+            return res.json();
+          })
+          .then(function () { refreshLedgerSection(container, targetType, targetId); })
+          .catch(function () { /* message already shown */ });
+      });
+    });
   }
 
   function refreshLedgerSection(container, targetType, targetId) {
@@ -671,9 +792,14 @@
       var options = Object.keys(CHALLENGE_TYPE_LABELS).map(function (k) {
         return '<option value="' + k + '">' + escHtml(CHALLENGE_TYPE_LABELS[k]) + '</option>';
       }).join("");
+      // P4-5: 疑義の向き（direct 既定）。型が「何を疑うか」、向きが「どこへ向けるか」。
+      var modeOptions = Object.keys(CHALLENGE_MODE_LABELS).map(function (k) {
+        return '<option value="' + escHtml(k) + '">' + escHtml(CHALLENGE_MODE_LABELS[k]) + '</option>';
+      }).join("");
       slot.innerHTML =
         '<div class="doubt-form">' +
         '<label>疑義の型</label><select data-f="challenge_type">' + options + '</select>' +
+        '<label>疑義の向き</label><select data-f="challenge_mode" data-ui-anchor="doubt-atlas.challenge-mode">' + modeOptions + '</select>' +
         '<label>理由（本人の言葉・必須）</label><textarea data-f="reason" rows="2"></textarea>' +
         '<button type="button" class="doubt-chip-btn" data-doubt-challenge-submit="1" data-ui-anchor="doubt-atlas.record-challenge">疑義を残す</button>' +
         '<span class="doubt-muted" data-doubt-challenge-msg=""></span>' +
@@ -681,6 +807,7 @@
       slot.querySelector("[data-doubt-challenge-submit]").addEventListener("click", function () {
         var body = {
           challenge_type: slot.querySelector('[data-f="challenge_type"]').value,
+          challenge_mode: slot.querySelector('[data-f="challenge_mode"]').value,
           reason: (slot.querySelector('[data-f="reason"]').value || "").trim(),
         };
         apiFetch("/admin/doubt/targets/" + encodeURIComponent(targetType) + "/" +

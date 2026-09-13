@@ -123,8 +123,13 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "doubt-atlas.assumption-dismiss",
         "doubt-atlas.assumption-filter",
         "doubt-atlas.audit-run",
+        # 知識の転用層 P4-5（knowledge_transfer_design.md §8）: 疑義の向き（direct /
+        # undercut）と、根拠の線（人間の記帳専用）の一覧・追加フォーム。
+        "doubt-atlas.challenge-mode",
         "doubt-atlas.counterfactual-observation-toggle",
         "doubt-atlas.course-select",
+        "doubt-atlas.evidence-line-add",
+        "doubt-atlas.evidence-lines",
         "doubt-atlas.falsification-candidate-decide",
         "doubt-atlas.falsification-record",
         "doubt-atlas.falsification-refresh",
@@ -211,6 +216,9 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "lecture-studio.component-insert",
         "lecture-studio.component-open",
         "lecture-studio.component-reject",
+        # 知識の転用層 P4-5（knowledge_transfer_design.md §8）: 別コースで引用するときの
+        # 「引用の意図」（任意・未選択は記録なし）。
+        "lecture-studio.cite-intent",
         "lecture-studio.course-content-btn",
         "lecture-studio.course-draft",
         "lecture-studio.course-reset",
@@ -290,6 +298,10 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery-subscribe",
         "materials.cost-forecast-note",
         "materials.export-modal",
+        # 知識の転用層 P4-1（knowledge_transfer_design.md §4.3）: 束の取り込み
+        # （確認 = dry-run → 取り込む の 2 段）。
+        "materials.import-modal",
+        "materials.import-submit",
         "materials.figure-deliberate",
         "materials.figure-overlay",
         "materials.figure-promote",
@@ -310,6 +322,10 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         # 「分野の適合」区画（形の宣言 shape.json とこの論文の解析結果の事実文）。
         "materials.reanalyze-domain-fit",
         "materials.reanalyze-modal",
+        # 知識の転用層 P4-3（knowledge_transfer_design.md §6）: 参照の健全性の詳細
+        # モーダルと、その場で引き直す再確認ボタン（読み取り専用・保存しない）。
+        "materials.reference-health-modal",
+        "materials.reference-health-recheck",
         "materials.refresh",
         "materials.revision-decision",
         "materials.revision-modal",
@@ -317,6 +333,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-delete",
         "materials.row-estimate",
         "materials.row-figures",
+        # 知識の転用層 P4-1 / P4-3: 「⋯」メニューの束の取り込み・参照の整合の確認。
+        "materials.row-import",
         "materials.row-inventory",
         "materials.row-landscape",
         "materials.row-graph-review",
@@ -324,6 +342,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.row-pdf-reupload",
         "materials.row-pipeline-run",
         "materials.row-radar",
+        "materials.row-reference-health",
         "materials.row-resume-analysis",
         "materials.row-retry-stage",
         "materials.row-seminar-brief",
@@ -570,10 +589,16 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "doubt-atlas.assumption-filter": "teacher/18-admin-doubt-atlas.md#assumption-filter",
     # コーパス監査実行
     "doubt-atlas.audit-run": "teacher/18-admin-doubt-atlas.md#audit-run",
+    # 疑義の向き（direct = 主張そのものへ / undercut = 主張と根拠のつながりへ。P4-5）
+    "doubt-atlas.challenge-mode": "teacher/18-admin-doubt-atlas.md#challenge-mode",
     # 観測を仮に倒す
     "doubt-atlas.counterfactual-observation-toggle": "teacher/18-admin-doubt-atlas.md#counterfactual-observation-toggle",
     # コースを選択...
     "doubt-atlas.course-select": "teacher/18-admin-doubt-atlas.md#course-select",
+    # 根拠の線を追加（人間の記帳専用。AI 候補は無い。P4-5）
+    "doubt-atlas.evidence-line-add": "teacher/18-admin-doubt-atlas.md#evidence-line-add",
+    # 根拠の線（どの経路で支えられているかの一覧。P4-5）
+    "doubt-atlas.evidence-lines": "teacher/18-admin-doubt-atlas.md#evidence-lines",
     # 確認して記帳／見送る（覆る条件の候補）
     "doubt-atlas.falsification-candidate-decide": "teacher/18-admin-doubt-atlas.md#falsification-candidate-decide",
     # 覆る条件を記帳する
@@ -747,6 +772,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "lecture-studio.component-open": "teacher/14-admin-lecture-studio.md#component-open",
     # 却下
     "lecture-studio.component-reject": "teacher/14-admin-lecture-studio.md#component-reject",
+    # 引用の意図（任意。未選択なら記録なし。P4-5）
+    "lecture-studio.cite-intent": "teacher/14-admin-lecture-studio.md#cite-intent",
     # コース内容生成
     "lecture-studio.course-content-btn": "teacher/14-admin-lecture-studio.md#course-content-btn",
     # 授業用ドラフト編集欄
@@ -913,6 +940,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.cost-forecast-note": "teacher/11-admin-materials.md#cost-forecast-note",
     # 外部レビュー用に書き出しモーダル
     "materials.export-modal": "teacher/11-admin-materials.md#export-modal",
+    # 束を取り込むモーダル（確認 = dry-run → 取り込む の 2 段。P4-1）
+    "materials.import-modal": "teacher/11-admin-materials.md#import-modal",
+    # 取り込む（確認を通していないと押せない。P4-1 / T-2）
+    "materials.import-submit": "teacher/11-admin-materials.md#import-submit",
     # 深く検討（図）
     "materials.figure-deliberate": "teacher/11-admin-materials.md#figure-deliberate",
     # 図で確認
@@ -950,6 +981,10 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.reanalyze-domain-fit": "teacher/11-admin-materials.md#reanalyze-domain-fit",
     # 解析を再開（オプション）モーダル
     "materials.reanalyze-modal": "teacher/11-admin-materials.md#reanalyze-modal",
+    # 参照の整合モーダル（検査時点の事実と、切れている参照の列挙。P4-3 / T-3）
+    "materials.reference-health-modal": "teacher/11-admin-materials.md#reference-health-modal",
+    # 再確認（その場で検査し直す。保存しない）
+    "materials.reference-health-recheck": "teacher/11-admin-materials.md#reference-health-recheck",
     # 更新（教材一覧の再取得）
     "materials.refresh": "teacher/11-admin-materials.md#refresh-materials",
     # 監査＋候補生成 / 採用 / 却下 / 再修正
@@ -964,6 +999,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.row-estimate": "teacher/11-admin-materials.md#row-estimate",
     # 図・画像
     "materials.row-figures": "teacher/11-admin-materials.md#row-figures",
+    # 束を取り込む…（別インスタンスの束をこの教材の知識として取り込む。P4-1）
+    "materials.row-import": "teacher/11-admin-materials.md#import-open",
     # 検出要素
     "materials.row-inventory": "teacher/11-admin-materials.md#row-inventory",
     # 位置づけ（分野マップ）…
@@ -980,6 +1017,8 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     # 📡 近い論文を探す（paper_radar_design.md §4.1: 教材起点の類似論文探索の入口。
     # 2026-09-06 から ⋯ メニューではなく行のアイコンボタン）
     "materials.row-radar": "teacher/11-admin-materials.md#radar-open",
+    # 参照の整合を確認…（live 行どうしの参照が解決できるかの読み取り専用の検査。P4-3）
+    "materials.row-reference-health": "teacher/11-admin-materials.md#reference-health-open",
     # 解析再開
     "materials.row-resume-analysis": "teacher/11-admin-materials.md#resume-analysis",
     # ステージ再実行（縮退時のみ表示されるリンク）

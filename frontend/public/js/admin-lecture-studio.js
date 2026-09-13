@@ -3044,6 +3044,20 @@
     equation_quote: "数式引用",
     figure: "図",
   };
+  // 引用の意図（CiTO の最小語彙。knowledge_transfer_design.md §8 / X-7）。
+  // 正本は backend/core/label_vocab.py::CITATION_INTENT_LABELS（逐語ミラー）。
+  // NULL（未選択）= 記録なしなので、この表に「記録しない」は入れない。
+  var LS_CITATION_INTENT_LABELS = {
+    uses_as_evidence: "根拠として使う",
+    extends: "発展させる",
+    qualifies: "条件を付ける",
+    contrasts_with: "対比する",
+    cites_for_background: "背景として引く",
+  };
+  //: select の並び順（Object.keys の順序に依存しない明示の順序）。
+  var LS_CITATION_INTENT_ORDER = [
+    "uses_as_evidence", "extends", "qualifies", "contrasts_with", "cites_for_background",
+  ];
   // トピック↔CourseMapping の**照合来歴**（course_content_builder._best_mapping）。
   // CP9（element_context_presentation_redesign.md §3.2）: これは要素の性質ではなく
   // トピックの属性なので、各根拠カードのメタ行には出さず（誤読の原因）、
@@ -7037,17 +7051,29 @@
           area.innerHTML = '<span class="ls-theory-muted">引用先にできる編集可能な別コースがありません。</span>';
           return;
         }
+        // P4-5（knowledge_transfer_design.md §8 / X-7）: 引用の意図（任意）。
+        // 既定は「記録しない」— 選ばなければ citation_intent を送らない（NULL = 記録なし）。
+        var intentOptions = '<option value="">記録しない</option>' +
+          LS_CITATION_INTENT_ORDER.map(function (k) {
+            return '<option value="' + escHtml(k) + '">' + escHtml(LS_CITATION_INTENT_LABELS[k]) + '</option>';
+          }).join("");
         area.innerHTML = '<span>引用先コース:</span>' +
           '<select data-cite-select>' + options.map(function (c) {
             return '<option value="' + escHtml(c.id) + '">' + escHtml(c.title || c.id) + '</option>';
           }).join("") + '</select>' +
+          '<span>引用の意図（任意）:</span>' +
+          '<select data-cite-intent data-ui-anchor="lecture-studio.cite-intent">' + intentOptions + '</select>' +
           '<button class="admin-action-btn" data-cite-run>引用する</button>' +
           '<button class="admin-action-btn" data-cite-cancel>キャンセル</button>';
         area.querySelector("[data-cite-run]").addEventListener("click", function () {
           var sel = area.querySelector("[data-cite-select]");
           var target = sel ? sel.value : "";
           if (!target) return;
-          lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", { citing_course_id: target }, "引用しました");
+          var intentSel = area.querySelector("[data-cite-intent]");
+          var intent = intentSel ? intentSel.value : "";
+          var body = { citing_course_id: target };
+          if (intent) body.citation_intent = intent;
+          lsCallExplanation(component, "/admin/explanations/" + expId + "/cite", "POST", body, "引用しました");
         });
         area.querySelector("[data-cite-cancel]").addEventListener("click", function () {
           area.hidden = true;

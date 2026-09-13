@@ -212,7 +212,17 @@ class TestAdminUiAnchorsModule:
         #   atlas.freeze-correspondence-manual（候補が見つからなかった項目に手で
         #    対応づける select）。
         #   docs/features/atlas_node_correspondence_design.md §7。
-        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 340
+        # + 2026-09-13: 知識の転用層（Phase 4）の10件 —
+        #   P4-1 束の取り込み: materials.row-import / materials.import-modal /
+        #    materials.import-submit（確認 = dry-run → 取り込む の 2 段）。
+        #   P4-3 参照の健全性: materials.row-reference-health /
+        #    materials.reference-health-modal / materials.reference-health-recheck
+        #    （読み取り専用・件数バッジを作らない = T-3）。
+        #   P4-5 D層 / C層の表現語彙: doubt-atlas.challenge-mode /
+        #    doubt-atlas.evidence-lines / doubt-atlas.evidence-line-add /
+        #    lecture-studio.cite-intent。
+        #   docs/features/knowledge_transfer_design.md §4.3 / §6 / §8。
+        assert len(admin_anchors_mod.ADMIN_UI_ANCHORS) == len(admin_anchors_mod.KNOWN_ADMIN_UI_ANCHOR_IDS) == 350
 
     def test_resolve_against_real_docs_has_no_broken_mapping_for_system_admin(self):
         """docs/manual/{teacher,system_admin}/ の実データに対し、マップした全アンカーが解決できる。"""
