@@ -1,7 +1,8 @@
 # 画面文脈アダプター（Assistant Screen Adapter — AI 対話に「いま見ている画面」を渡す層）
 
 > **状態: 実装済み（正本・凍結）**（Phase 1 = グラフレビュー。Phase 2〜3 は §6 予約。
-> **Phase 4 = 学習チャットは §11 で実装済み（2026-09-12・4-a/4-b/4-d。4-c は保留）**）
+> **Phase 4 = 学習チャットは §11 で実装済み（2026-09-12・4-a/4-b/4-d。4-c は保留）**。
+> 学習側の5つ目の解決器 `retrieved_structure`（知識の転用層 P4-2）は §11.16）
 > （2026-09-06 起票・同日実装。migration なし・新テーブルなし・LLM 呼び出し回数不変の
 > 読み時解決。実装記録は §10 = Phase 1 / §11.15 = Phase 4）
 
@@ -832,3 +833,72 @@ body.message（発話）
   （[llm_response_streaming_design.md](llm_response_streaming_design.md)）が次
   → **2026-09-12 に 3-a を実装済み**（同書 §12。SA層 Phase 4 の注入位置は継ぎ目の**前**の
   ままで、本書の実装は非改変）。
+
+### 11.16 retrieved_structure（知識の転用層 P4-2）— 2026-09-13
+
+**何を**: 学習チャットの5つ目の解決器 `retrieved_structure` を登録した。設計の正本は
+[知識の転用層](knowledge_transfer_design.md) §5（KT1〜KT8）で、本節は**SA層側の契約**
+（語彙・登録・合流点・予算・ガードレール）を記録する。migration なし・新エンドポイントなし・
+**LLM 呼び出し回数不変**（1ターン1コール・CostGate 消費位置も不変）。
+
+**なぜ SA層に乗せたか**: 「回答プロンプトに構造の事実文を独立ブロックで渡す」という形は
+Phase 4 とまったく同じで、違うのは**入口が画面の申告ではなく回答に採用した出典**
+（`cited_sources`）である点だけ。ここで別の注入機構を作ると、プロンプトに事実文を足す経路が
+2つになり、予算・遮断・観測がそれぞれ分裂する。解決器を1本足し、**別ヘッダ・別ブロック**で
+描画するのが最も小さい差分だった。
+
+**どこに**:
+
+| 層 | ファイル | 内容 |
+|---|---|---|
+| core | `core/assistant_context/schema.py` | `BLOCK_HEADER_RETRIEVED` / `MAX_LEARNING_RETRIEVED_FACTS` / `MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE` / `MAX_LEARNING_RETRIEVED_CLAIM_CHARS`（すべてコード定数 = SA7） |
+| core | `core/assistant_context/resolvers/learning.py` | `resolve_retrieved_structure` + `register(SCREEN_LEARNING, "retrieved_structure", ...)`。訳語は `core/element_vocab.py`（`claim_type_label` / `theory_stage_key` / `theory_stage_label`）からだけ引く — **新しい語彙表を作らない** |
+| route | `api/routes/learning.py` | `_retrieved_structure_claims`（DB 読み1本目）/ `_retrieved_structure_node_index`（同2本目）/ `_retrieved_structure_sources`（射影）/ `_learning_retrieved_structure_block`（描画）+ 合流点1箇所 |
+| core | `core/discuss/observation.py` | 既存 `structured_grounding_present` に**相乗り**（新しい event 語彙を作らない） |
+
+**`sources` の契約**（route が組み、解決器は渡された DTO しか見ない = SA3）:
+
+```jsonc
+{"retrieved_structure": {"sources": [
+  {"index": "1", "claims": [
+     {"text": "…", "claim_type": "definition",
+      "node": {"label": "Theory basis", "display_label": "Theory basis: 重力ポテンシャルの定義"}}
+  ]}
+]}}
+```
+
+**合流点と順序**: 画面文脈ブロックの**直後**。当該ターンの `messages[-1]` は
+**画面文脈 → 検索で当たった箇所の構造 → 選択箇所 → 発話**（`UNTRUSTED_SOURCE_NOTICE` の
+条件は既存に相乗り — claim 本文は PDF 由来の untrusted 入力）。`screen_context` が
+無いターンでも働く（入口が出典なので画面の申告に依存しない）。保存 message・痕跡 payload は
+**不変**（SA6）。
+
+**モード別**（§11.5 の表と同じ考え方）: `casual` = なし（短い会話調と衝突する）/
+`cycle_mode="elicit"` = なし（主張本文は問いの答えの手渡しになる = UC2）/ それ以外
+（tutor / discuss / diff / 楽屋 / 確認問題の壁打ち）= あり。**どちらのモードでも
+DB を1本も引かない**（ブロックを作らないと決めた時点で早期 return する）。
+
+**スコープ**: 当該ターンの `allowed_document_ids` を**そのまま** `ANY(:doc_ids)` で SQL に
+渡す。discuss の `all_visible` でも構造側で広げない（範囲は検索と同一 = KT6 / DM1）。
+`chunk_id` 側も `ANY(:chunk_ids)` で縛るので、採用しなかったチャンクの構造は載らない。
+
+**設計本文（P4-2）との差分**:
+
+1. **ノードの事実文の括弧は「理論対象」にした**。§5 のテンプレは
+   「『{stage label}』の段階（{node.label}）」だが、main ノードの `label` は #308 の規約で
+   **theory stage の英語表示名そのもの**なので、そのまま入れると
+   「『理論の土台』の段階（Theory basis）」という同語反復になる。`display_label`
+   （`"<Stage>: <理論対象>"`）の「: 」以降を括弧に入れ、引けない・内部 ID 形なら
+   **段階名だけで止める**。stage を引けないノードは事実文ごと出さない（英語の内部表示名を
+   学習者へ渡さない = SA4 / PL7）。
+2. **観測は既存の1ビットへ相乗りした**。§5 は「`structured_grounding_present` に kind
+   `retrieved_structure` を additive」と書くが、DO1 により payload は常に空なので、
+   画面由来か検索由来かを payload に持たせることはできない。**出したか出さなかったかの
+   1ビット**という既存の意味論を保ち、条件を `_screen_block or _retrieved_block` に広げた。
+
+**ガードレール**: `test_retrieved_structure_{core,route,guardrails}.py`
+（事実文の文言・上限・内部 ID 遮断・数値非漏洩・スコープ強制 SQL の字面・live ビューのみ・
+main 層のみ・LLM 呼び出し箇所不変・CostGate より後・継ぎ目より前・core の推移的純粋性・
+訳語表の非重複）。既存 `test_assistant_context_learning_{core,guardrails}.py` の
+**「登録 kind は4つ」を5つへ更新**し、`resolve_topic` / `resolve_visible` 不在（4-c 保留）の
+検査は維持した。

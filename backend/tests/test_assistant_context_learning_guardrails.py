@@ -6,7 +6,8 @@
   ``sqlalchemy`` / ``fastapi`` / ``core.llm`` / ``core.postgres`` を**推移的にも**
   import しない。成果テーブル名を文字列としても持たない。
 - **4-c は実装しない**（§11.13-3 のオーナー判断）。``topic`` / ``visible`` の解決器が
-  登録されていないことを固定し、後から黙って生えないようにする。
+  登録されていないことを固定し、後から黙って生えないようにする（``retrieved_structure``
+  = 知識の転用層 P4-2 は検索由来の別ブロックで、4-c とは別の段）。
 - **SL1 の閉世界語彙**（``test_stakes_ledger_guardrails`` の denylist を再利用）が
   事実文・固定文・テンプレートのどこにも現れない。出力側の拘束文は原文で存在する。
 - **出所ラベルを剥がさない**（§11.13-1）。AI 推定の配置は「AIによる推定（未確認）」を
@@ -145,12 +146,19 @@ class TestLearningResolverReadsProjectionsOnly:
 
 
 class TestStagedScope:
-    def test_registered_kinds_are_exactly_the_four_shipped_ones(self):
+    def test_registered_kinds_are_exactly_the_shipped_ones(self):
+        """Phase 4（4-a/4-b/4-d）の4つ + 知識の転用層 P4-2 の ``retrieved_structure``。
+
+        P4-2 は**別ブロック**（``BLOCK_HEADER_RETRIEVED`` / 検索由来）として描画される
+        ため末尾に登録する。件数を増やすときは設計書（P4-2 は
+        ``knowledge_transfer_design.md`` §5）に沿って本テストも更新する。
+        """
         assert registered_kinds(SCREEN_LEARNING) == (
             "element",
             "verification",
             "placement",
             "view",
+            "retrieved_structure",
         )
 
     def test_topic_and_visible_resolvers_are_not_registered(self):

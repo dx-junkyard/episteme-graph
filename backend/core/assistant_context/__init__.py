@@ -18,6 +18,7 @@ from .registry import Resolver, register, registered_kinds, render_block, resolv
 from .schema import (
     BLOCK_HEADER,
     BLOCK_HEADER_LEARNING,
+    BLOCK_HEADER_RETRIEVED,
     KNOWN_SCREENS,
     LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
     MAX_BLOCK_CHARS,
@@ -35,6 +36,7 @@ from . import resolvers  # noqa: E402,F401  # import 副作用で解決器を登
 __all__ = [
     "BLOCK_HEADER",
     "BLOCK_HEADER_LEARNING",
+    "BLOCK_HEADER_RETRIEVED",
     "KNOWN_SCREENS",
     "LEARNING_VERIFICATION_OUTPUT_CONSTRAINT",
     "MAX_BLOCK_CHARS",

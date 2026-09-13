@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping
 
+from core.element_vocab import claim_type_label, theory_stage_key, theory_stage_label
 from core.learner_context_common import contains_internal_id, is_internal_id_label
 
 from ..registry import register
@@ -41,6 +42,9 @@ from ..schema import (
     MAX_LEARNING_CLAIM_EXCERPT_CHARS,
     MAX_LEARNING_ELEMENT_FACTS,
     MAX_LEARNING_PLACEMENT_FACTS,
+    MAX_LEARNING_RETRIEVED_CLAIM_CHARS,
+    MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE,
+    MAX_LEARNING_RETRIEVED_FACTS,
     MAX_LEARNING_SUPPORT_ITEMS,
     MAX_LEARNING_VERIFICATION_FACTS,
     MAX_TEXT_CHARS,
@@ -398,9 +402,99 @@ def resolve_view(ctx: ScreenContext, sources: Mapping[str, Any]) -> list[str]:
     return ["。".join(parts) + "。"] if parts else []
 
 
+# ---------------------------------------------------------------------------
+# kind "retrieved_structure" — 検索で当たった箇所の構造 1 hop（P4-2）
+#
+# 正本: ``docs/features/knowledge_transfer_design.md`` §5。入口は画面の申告ではなく
+# **回答に採用した出典**（``cited_sources``）なので、``screen_context`` が無いターンでも
+# 働く。route が「chunk → 主張 → 理論の骨格の main ノード」を権限ゲート内で解決し、
+# ここへ DTO として渡す（本モジュールは DB を引かない = KT3 / SA3）。
+# ---------------------------------------------------------------------------
+
+
+def _retrieved_claim_fact(index: str, claim: Mapping[str, Any]) -> str:
+    """1つの主張の事実文（出典番号に結ぶ）。出せないものは空文字。"""
+    row = _dict(claim)
+    excerpt = _safe(row.get("text"), MAX_LEARNING_RETRIEVED_CLAIM_CHARS)
+    if not excerpt:
+        return ""
+    fact = f"[出典{index}] の箇所には次の主張が構造化されています: 「{excerpt}」"
+    type_label = claim_type_label(row.get("claim_type"))
+    if type_label:
+        fact += f"（主張の種類: {type_label}）"
+    return fact
+
+
+def _retrieved_node_fact(claim: Mapping[str, Any]) -> str:
+    """主張が理論の骨格（main 層）のどの段階に置かれているかの事実文。
+
+    main ノードの ``label`` は #308 の規約で **theory stage の英語表示名**そのもの
+    （``display_label`` は ``"<Stage>: <理論対象>"`` 形）。段階名は訳語表
+    （``element_vocab.THEORY_STAGE_LABELS``）で日本語にし、stage を引けないノードは
+    **何も出さない**（英語の内部表示名をそのまま学習者へ渡さない = SA4 / PL7）。
+    """
+    row = _dict(claim)
+    node = _dict(row.get("node"))
+    if not node:
+        return ""
+    raw_label = _text(node.get("label"), MAX_TEXT_CHARS)
+    stage = theory_stage_label(theory_stage_key(raw_label))
+    if not stage:
+        return ""
+    fact = f"この主張は、理論の骨格では『{stage}』の段階に置かれています"
+    # ``display_label`` の「: 」以降（理論対象）が引ければ括弧で添える。引けない・
+    # 内部 ID 形なら段階名だけで止める（推測で埋めない）。
+    detail_source = _text(node.get("display_label"), MAX_TEXT_CHARS) or raw_label
+    detail = detail_source.split(":", 1)[1].strip() if ":" in detail_source else ""
+    detail = _safe(detail, MAX_TEXT_CHARS)
+    if detail and detail.lower() != raw_label.lower():
+        fact += f"（{detail}）"
+    return fact
+
+
+def resolve_retrieved_structure(
+    ctx: ScreenContext, sources: Mapping[str, Any]
+) -> list[str]:
+    """採用した出典の箇所に結ばれた主張と理論の骨格上の位置を事実文にする（P4-2）。
+
+    ``sources["retrieved_structure"]["sources"]`` は route が組んだ
+    ``[{"index": 1, "claims": [{"text", "claim_type", "node": {...}}]}]``。
+    数値（一致度・件数）は載せない（KT7）。
+    """
+    payload = _dict(sources.get("retrieved_structure"))
+    entries = _list(payload.get("sources"))
+    if not entries:
+        return []
+
+    facts: list[str] = []
+    for entry in entries:
+        row = _dict(entry)
+        index = _text(row.get("index"))
+        if not index:
+            continue
+        claims = _list(row.get("claims"))[:MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE]
+        for claim in claims:
+            if len(facts) >= MAX_LEARNING_RETRIEVED_FACTS:
+                return facts
+            claim_fact = _retrieved_claim_fact(index, claim)
+            if not claim_fact:
+                continue
+            facts.append(claim_fact)
+            if len(facts) >= MAX_LEARNING_RETRIEVED_FACTS:
+                return facts
+            node_fact = _retrieved_node_fact(claim)
+            if node_fact:
+                facts.append(node_fact)
+    return facts[:MAX_LEARNING_RETRIEVED_FACTS]
+
+
 # 登録順がそのまま予算の優先順位（``render_block`` は行境界で末尾から落とす）。
 # 具体的なもの（学習者が明示的に選んだ要素）から順に登録する。
+# ``retrieved_structure`` は**別ブロック**（別ヘッダ・別予算）として描画されるため
+# 末尾に置く — 画面文脈ブロックの解決（``kinds=None``）では
+# ``sources["retrieved_structure"]`` が渡らないので何も出さない。
 register(SCREEN_LEARNING, "element", resolve_element)
 register(SCREEN_LEARNING, "verification", resolve_verification)
 register(SCREEN_LEARNING, "placement", resolve_placement)
 register(SCREEN_LEARNING, "view", resolve_view)
+register(SCREEN_LEARNING, "retrieved_structure", resolve_retrieved_structure)

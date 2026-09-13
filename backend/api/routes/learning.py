@@ -144,6 +144,7 @@ from core.learning_stance.schema import build_stance_dto, resolve_stance
 # 解決器は core 側（決定論・非LLM・読み取り専用）。
 from core.assistant_context import (
     BLOCK_HEADER_LEARNING,
+    BLOCK_HEADER_RETRIEVED,
     MAX_BLOCK_CHARS_LEARNING,
     SCREEN_LEARNING,
     normalize_screen_context,
@@ -154,6 +155,7 @@ from core.assistant_context import (
 from core.assistant_context.schema import (
     LEARNING_ELEMENT_TYPES,
     LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
+    MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE,
 )
 from core.learning_support_agent import (
     LearningSupportAgent,
@@ -163,6 +165,9 @@ from core.learning_support_agent import (
 from core.personas import course_persona_settings, persona_prompt
 from core.postgres import get_session as _pg_session
 from core.component_context import build_component_context
+# 知識の転用層 P4-2: 理論操作グラフの読み出しは W層の既存関数を再利用する
+# （main 層ノードの review_status 合成も含め、二重実装しない）。
+from core.deliberation.graph_dialogue import load_latest_graph
 from core.element_context import (
     SUPPORTED_ELEMENT_TYPES as CONTEXT_ELEMENT_TYPES,
     build_element_context,
@@ -2209,6 +2214,194 @@ def _learning_screen_context_block(
     return block, has_ledger
 
 
+# ---------------------------------------------------------------------------
+# 知識の転用層 P4-2（knowledge_transfer_design.md §5）— RAG の構造 1 hop
+#
+# 「chunk 近傍 → その chunk に結ばれた主張 → 理論の骨格（main 層）のノード」を
+# **決定論・LLM 0 回・embedding 0 回**（KT3）で解決し、SA層の kind
+# ``retrieved_structure`` として当該ターンへ渡す。入口は画面の申告ではなく**回答に
+# 採用した出典**（``cited_sources``）なので、``screen_context`` が無いターンでも働く。
+#
+# 権限（KT6）: 当該ターンの ``allowed_document_ids`` を ``ANY(:doc_ids)`` で SQL に
+# 直接強制する（discuss の ``all_visible`` でも**検索範囲と同一**で、構造側で広げない）。
+# 取得の失敗はすべて握って空へ縮退する（対話を止めない = SA2）。
+# ---------------------------------------------------------------------------
+
+#: 1回の解決で読む主張行の上限（出典は最大8件・出典あたり2主張なので十分な余裕）。
+_RETRIEVED_STRUCTURE_ROW_LIMIT = 200
+
+#: 1回の解決で読む理論操作グラフの document 数の上限（出典が散っても有界にする）。
+_RETRIEVED_STRUCTURE_MAX_DOCUMENTS = 4
+
+
+def _retrieved_structure_claims(
+    chunk_ids: list[str], document_ids: list[str]
+) -> list[dict]:
+    """採用チャンクに結ばれた live の主張行を読む（DB 読み 1 本目）。
+
+    ``origin='equation_synthesis'`` は本文が式そのもの（§5 で v1 対象外）なので除く。
+    superseded の除外は live ビューが担う（KO5）。
+    """
+    if not chunk_ids or not document_ids:
+        return []
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT id::text AS id,
+                       chunk_id::text AS chunk_id,
+                       document_id::text AS document_id,
+                       text,
+                       claim_type,
+                       COALESCE(agent_claim_id, '') AS agent_claim_id,
+                       source_scope
+                FROM theory_claims_live
+                WHERE chunk_id = ANY(CAST(:chunk_ids AS uuid[]))
+                  AND document_id = ANY(CAST(:doc_ids AS uuid[]))
+                  AND COALESCE(origin, '') <> 'equation_synthesis'
+                ORDER BY chunk_id, created_at, id
+                LIMIT {_RETRIEVED_STRUCTURE_ROW_LIMIT}
+                """
+            ),
+            {"chunk_ids": chunk_ids, "doc_ids": document_ids},
+        ).mappings().fetchall()
+    finally:
+        session.close()
+    return [dict(row) for row in (rows or [])]
+
+
+def _retrieved_structure_node_index(document_id: str) -> dict[str, dict]:
+    """``claim 参照 ID → main 層ノード``（DB 読み 2 本目・detail / debug は使わない）。
+
+    グラフ側の ``linked_claim_ids`` は DB UUID / agent 側 claim ID のどちらでも
+    入りうるので、キーは正規化せずそのまま引けるようにする。
+    """
+    graph = load_latest_graph(document_id) or {}
+    index: dict[str, dict] = {}
+    for node in (graph.get("nodes") or []):
+        if not isinstance(node, dict):
+            continue
+        if str(node.get("graph_layer") or "main") != "main":
+            continue
+        entry = {
+            "label": str(node.get("label") or ""),
+            "display_label": str(node.get("display_label") or ""),
+        }
+        for claim_id in (node.get("linked_claim_ids") or []):
+            key = str(claim_id or "").strip()
+            if key:
+                index.setdefault(key, entry)
+    return index
+
+
+def _retrieved_structure_sources(
+    cited_sources: list[dict], allowed_document_ids
+) -> dict:
+    """SA層 kind ``retrieved_structure`` の ``sources`` を組む（§5 の射影）。
+
+    戻り値は ``{"sources": [{"index": "1", "claims": [{text, claim_type, node}]}]}``。
+    数値（一致度・件数）は持たせない（KT7）。解決できなければ ``{}``。
+    """
+    document_ids = [str(d) for d in (allowed_document_ids or []) if str(d or "").strip()]
+    if not cited_sources or not document_ids:
+        return {}
+    # 出典番号は cited_sources と 1 対 1（同じ chunk が複数回出ることはない）。
+    index_by_chunk: dict[str, str] = {}
+    for source in cited_sources:
+        chunk_id = str((source or {}).get("chunk_id") or "").strip()
+        index = str((source or {}).get("index") or "").strip()
+        if chunk_id and index and _is_db_uuid(chunk_id):
+            index_by_chunk.setdefault(chunk_id, index)
+    if not index_by_chunk:
+        return {}
+
+    try:
+        rows = _retrieved_structure_claims(list(index_by_chunk), document_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("retrieved_structure: claim projection failed", exc_info=True)
+        return {}
+    if not rows:
+        return {}
+
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        index = index_by_chunk.get(str(row.get("chunk_id") or ""))
+        if not index:
+            continue
+        bucket = grouped.setdefault(index, [])
+        if len(bucket) >= MAX_LEARNING_RETRIEVED_CLAIMS_PER_SOURCE:
+            continue
+        bucket.append(row)
+    if not grouped:
+        return {}
+
+    # 理論の骨格は document ごとに1回だけ読む（有界）。失敗した document は node なし。
+    node_indexes: dict[str, dict[str, dict]] = {}
+    for row in (claim for bucket in grouped.values() for claim in bucket):
+        document_id = str(row.get("document_id") or "")
+        if not document_id or document_id in node_indexes:
+            continue
+        if len(node_indexes) >= _RETRIEVED_STRUCTURE_MAX_DOCUMENTS:
+            continue
+        try:
+            node_indexes[document_id] = _retrieved_structure_node_index(document_id)
+        except Exception:  # noqa: BLE001
+            logger.debug("retrieved_structure: graph projection failed", exc_info=True)
+            node_indexes[document_id] = {}
+
+    entries: list[dict] = []
+    for index in sorted(grouped, key=lambda value: (len(value), value)):
+        claims: list[dict] = []
+        for row in grouped[index]:
+            node_index = node_indexes.get(str(row.get("document_id") or ""), {})
+            keys = [str(row.get("id") or ""), str(row.get("agent_claim_id") or "")]
+            scope = row.get("source_scope")
+            if isinstance(scope, dict):
+                keys.extend(str(v or "") for v in (scope.get("legacy_ids") or []))
+            node = None
+            for key in keys:
+                if key and key in node_index:
+                    node = node_index[key]
+                    break
+            claims.append(
+                {
+                    "text": str(row.get("text") or ""),
+                    "claim_type": str(row.get("claim_type") or ""),
+                    "node": node,
+                }
+            )
+        if claims:
+            entries.append({"index": index, "claims": claims})
+    return {"sources": entries} if entries else {}
+
+
+def _learning_retrieved_structure_block(
+    cited_sources: list[dict], allowed_document_ids
+) -> str:
+    """検索由来の構造ブロック（§5）。解決できなければ ``""``（従来と同一のプロンプト）。"""
+    try:
+        sources = _retrieved_structure_sources(cited_sources, allowed_document_ids)
+    except Exception:  # noqa: BLE001
+        logger.debug("retrieved_structure: sources assembly failed", exc_info=True)
+        return ""
+    if not sources:
+        return ""
+    ctx = normalize_screen_context({"screen": SCREEN_LEARNING})
+    try:
+        facts = resolve_screen_context(
+            ctx, {"retrieved_structure": sources}, kinds=("retrieved_structure",)
+        )
+        return render_block(
+            facts,
+            header=BLOCK_HEADER_RETRIEVED,
+            max_chars=MAX_BLOCK_CHARS_LEARNING,
+        )
+    except Exception:  # pragma: no cover - resolve/render は例外を出さない契約
+        logger.debug("retrieved_structure: resolution failed", exc_info=True)
+        return ""
+
+
 # 方法C の1タップ選択肢（unclassified は「その他」として提示しない — 未選択のまま
 # 閉じれば unclassified が保たれる）
 _ANCHOR_CONFIRM_DOUBT_OPTIONS = [
@@ -4117,16 +4310,30 @@ def _learning_chat_core(
             grounding_document_ids=_screen_grounding_document_ids,
             kinds=("view",) if _cycle_mode == "elicit" else None,
         )
+    # -----------------------------------------------------------------------
+    # 知識の転用層 P4-2（knowledge_transfer_design.md §5）— RAG の構造 1 hop
+    #
+    # 入口は**回答に採用した出典**なので ``screen_context`` が無いターンでも働く。
+    # モード別は画面文脈ブロックと同じ考え方（casual は短い会話調と衝突する /
+    # elicit は主張本文が問いの答えの手渡しになる）。スコープは当該ターンの
+    # ``allowed_document_ids`` そのままで、構造側で広げない（KT6）。
+    # -----------------------------------------------------------------------
+    _retrieved_block = ""
+    if not _is_casual and _cycle_mode != "elicit":
+        _retrieved_block = _learning_retrieved_structure_block(
+            cited_sources, allowed_document_ids
+        )
     _selection_block = render_selection_block(
         body.selection_text,
         _topic_student_material(topic_info) if topic_info else "",
     )
-    if _screen_block or _selection_block:
-        # 信頼境界（TB1〜TB4）: 画面文脈ブロック（claim 抜粋・逐語引用を含む）と選択箇所
-        # ブロックは PDF 由来の untrusted 入力を運ぶので、``UNTRUSTED_SOURCE_NOTICE`` を
-        # 添える。足場ターン（messages[1]）に既に同じ文があるときは重複させない
-        # （cited_chunks が空のターンでは足場に注意書きが無い — そのときだけここで補う）。
-        _turn_parts = [_screen_block, _selection_block, body.message]
+    if _screen_block or _retrieved_block or _selection_block:
+        # 信頼境界（TB1〜TB4）: 画面文脈ブロック（claim 抜粋・逐語引用を含む）・検索由来の
+        # 構造ブロック（claim 本文）・選択箇所ブロックは PDF 由来の untrusted 入力を運ぶので、
+        # ``UNTRUSTED_SOURCE_NOTICE`` を添える。足場ターン（messages[1]）に既に同じ文が
+        # あるときは重複させない（cited_chunks が空のターンでは足場に注意書きが無い —
+        # そのときだけここで補う）。
+        _turn_parts = [_screen_block, _retrieved_block, _selection_block, body.message]
         if UNTRUSTED_SOURCE_NOTICE not in str(messages[1].get("content") or ""):
             _turn_parts.insert(0, UNTRUSTED_SOURCE_NOTICE)
         messages[-1] = {
@@ -4140,9 +4347,11 @@ def _learning_chat_core(
             "role": "system",
             "content": messages[0]["content"] + "\n\n" + LEARNING_VERIFICATION_OUTPUT_CONSTRAINT,
         }
-    if _screen_block:
+    if _screen_block or _retrieved_block:
         # §11.7: 構造 grounding が載ったターンの**種別だけ**を1ビット記録する
         # （payload は常に空・痕跡には焼き込まない・学習者には見せない）。
+        # P4-2（knowledge_transfer_design.md §5）で検索由来の構造ブロックも同じ1ビットに
+        # 相乗りする — **どちらの由来かは payload に入れない**（出したか出さなかったかだけ）。
         _record_document_discuss_event(
             "structured_grounding_present", current_user["id"], course_id
         )

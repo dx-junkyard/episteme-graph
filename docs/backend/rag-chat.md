@@ -42,6 +42,7 @@
   │
   ④-b 画面文脈ブロック・選択箇所ブロック  … core/assistant_context/（SA層 Phase 4・決定論・非LLM）
   │   画面が送った参照をサーバが学習者射影で解決し、当該ターンの発話の前にだけ置く（§④-b）
+  │   採用した出典の chunk から主張・理論の骨格へ 1 hop する構造ブロックも同じ位置（§④-b'）
   │
   ⑤ LLM 生成（temperature=0.3）          … llm.py: generate_text() / generate_text_stream()
   │   末尾にドリルダウンリンクを Markdown で提示
@@ -154,6 +155,35 @@ user メッセージだけを **「画面文脈ブロック → 選択箇所ブ�
 プロンプトが1バイトも変わりません。**保存（`learning_chat_history`）と痕跡には
 `screen_context` を焼き込みません**（SA6）。ブロックが非空の往復は、種別だけの観測イベント
 `structured_grounding_present` をサーバが記録します（学習者には何も表示しません）。
+
+#### ④-b' 検索で当たった箇所の構造（知識の転用層 P4-2）
+
+RAG は長らく `chunks` の本文しか読まず、パイプラインが作った claim / 理論操作グラフは
+**学習者の対話に一度も現れていませんでした**。P4-2 はこの穴を、④-b と**同じ注入機構**の
+5つ目の解決器（SA層 kind `retrieved_structure`）で塞ぎます（正本:
+[knowledge_transfer_design.md](../features/knowledge_transfer_design.md) §5 /
+SA層側の契約は [assistant_screen_adapter_design.md](../features/assistant_screen_adapter_design.md)
+§11.16）。入口は画面の申告ではなく**②③で採用した出典**（`cited_sources`）なので、
+`screen_context` を送らない往復でも働きます。
+
+- **射影（決定論・LLM 0 回・embedding 0 回）**: ①採用チャンクの `chunk_id` で
+  `theory_claims_live` を引く（`document_id = ANY(:doc_ids)` も SQL の中で同時に縛る。
+  本文が式そのものになる `origin='equation_synthesis'` は対象外）→ ②その document の最新
+  `theory_component_graphs` の **main 層ノード**で `linked_claim_ids` が claim の
+  DB UUID / agent 側 ID / `source_scope.legacy_ids` のいずれかに当たるものを探す
+  （`core/deliberation/graph_dialogue.py::load_latest_graph` を再利用。detail / debug 層は使いません）。
+- **事実文**: 出典番号ごとに「[出典N] の箇所には次の主張が構造化されています: 「…」（主張の種類: 定義）」を
+  最大2主張、main ノードに掛かるときは「この主張は、理論の骨格では『理論の土台』の段階に
+  置かれています（…）」を1行。全体8行・主張本文120字・数値なし（`contains_internal_id` に
+  当たる文は捨てます）。段階名が引けないノードは**事実文ごと出しません**。
+- **スコープ**: 当該ターンの `allowed_document_ids` を**そのまま**使います。discuss の
+  `all_visible` でも構造側で範囲を広げません（範囲は検索と同一）。
+- **モード別**: `casual` = なし / `cycle_mode="elicit"` = なし（主張本文は問いの答えの
+  手渡しになる）/ それ以外 = あり。出さないと決めた往復では **DB を1本も引きません**。
+- **順序**: `messages[-1]` は **画面文脈 → 検索で当たった箇所の構造 → 選択箇所 → 発話**。
+  claim 本文も PDF 由来の untrusted 入力なので `UNTRUSTED_SOURCE_NOTICE` の条件は
+  ④-b と共通です。**LLM 呼び出し回数は不変**、保存・痕跡も不変、観測は
+  `structured_grounding_present` の同じ1ビットに相乗りします（由来は区別しません）。
 
 #### ④-c 転送方式の分岐（ストリーミング Phase 3-a）
 

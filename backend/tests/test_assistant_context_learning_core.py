@@ -216,13 +216,23 @@ def _sources(**overrides) -> dict:
 
 class TestRegistration:
     def test_learning_resolvers_are_registered_in_budget_order(self):
-        """登録順 = 予算の優先順位（具体的なものから先に載る）。"""
+        """登録順 = 予算の優先順位（具体的なものから先に載る）。
+
+        末尾の ``retrieved_structure``（知識の転用層 P4-2）は**別ブロック**として
+        描画されるので、画面文脈ブロックの解決（``kinds=None``）では
+        ``sources["retrieved_structure"]`` が渡らず何も出さない。
+        """
         assert registered_kinds(SCREEN_LEARNING) == (
             "element",
             "verification",
             "placement",
             "view",
+            "retrieved_structure",
         )
+
+    def test_retrieved_structure_stays_out_of_the_screen_context_block(self):
+        """P4-2 の解決器は画面文脈の ``sources`` では黙って空を返す（混ざらない）。"""
+        assert resolve(_ctx(), _sources(), kinds=("retrieved_structure",)) == []
 
     def test_kinds_filter_keeps_only_the_named_resolvers(self):
         """§11.5: ``cycle_mode="elicit"`` は表示モードの事実1行しか許さない。"""

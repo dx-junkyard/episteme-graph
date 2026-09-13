@@ -361,6 +361,9 @@ METRIC_EVENT_VOCAB: frozenset[str] = frozenset(
         # ターンの**種別だけ**。どの解決器が事実を出したかは入れない — 出したか出さなかった
         # かの1ビットに留める（DO1〜DO6 継承 — 本文非含有・学習者に数値非表示・削除 API なし）。
         # **記録はサーバ側**（_learning_chat_core）が best-effort で行う（フロントから送らない）。
+        # 知識の転用層 P4-2（knowledge_transfer_design.md §5）の kind
+        # ``retrieved_structure``（検索で当たった箇所の構造）も**この1ビットへ相乗り**する。
+        # 画面由来か検索由来かを payload で区別しない（新しい event 語彙も作らない）。
         "structured_grounding_present",
     }
 )
