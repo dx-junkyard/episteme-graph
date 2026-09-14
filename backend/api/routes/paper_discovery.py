@@ -147,11 +147,12 @@ _DETAIL_INVALID_ARXIV_ID = "arXiv ID として解釈できませんでした。"
 _DETAIL_ARXIV_UNAVAILABLE = (
     "arXiv に接続できませんでした。時間をおいて再度お試しください。"
 )
-#: arXiv 側の混雑（HTTP 429）。接続不能と同じ文言にしない — 設定・回線を疑わせずに
-#: 「待てばよい」と伝えるため（PR7 / PD6 の事実文の流儀）。
-_DETAIL_ARXIV_RATE_LIMITED = (
-    "arXiv 側が混雑しています。少し時間をおいて再度お試しください。"
-)
+#: arXiv からアクセスを制限された（HTTP 429）。接続不能と同じ文言にしない — 設定・
+#: 回線を疑わせずに「制限されている」という事実を言うため（PR7 / PD6 の事実文の流儀）。
+#: **文言の正本は core 側**（``radar.NOTE_ARXIV_BLOCKED``）— 同じ事実を route で
+#: 言い換えない（2026-09-15 / 設計書 §14.7）。この応答を返した時点でクールダウンが
+#: 立っているので、「しばらく問い合わせを止めている」は事実として正しい。
+_DETAIL_ARXIV_RATE_LIMITED = pd_radar.NOTE_ARXIV_BLOCKED
 _DETAIL_DISMISSAL_NOT_FOUND = "この見送り記録は見つかりません。"
 _DETAIL_BATCH_TOO_MANY = (
     f"一度にキューへ登録できるのは{MAX_INGEST_BATCH}件までです。"
@@ -345,16 +346,27 @@ class RadarCompareRequest(BaseModel):
 
 
 def _arxiv_unavailable_detail(exc: Exception) -> str:
-    """arXiv 到達失敗の事実文（混雑だけ別の文にする — PR7）。
+    """arXiv 到達失敗の事実文（アクセスの制限だけ別の文にする — PR7）。
 
     ``ArxivRateLimitedError`` は ``ArxivApiError`` の部分型なので、捕捉側は
     ``except arxiv_client.ArxivApiError`` のまま1本で受けて、文言だけをここで
     分ける（except 節を4箇所に増やさない）。ステータスは 502 のまま揃える —
-    上流の混雑を本アプリ自身のコスト上限（429）と同じ形にしない。
+    上流の制限を本アプリ自身のコスト上限（429）と同じ形にしない。
     """
     if isinstance(exc, arxiv_client.ArxivRateLimitedError):
         return _DETAIL_ARXIV_RATE_LIMITED
     return _DETAIL_ARXIV_UNAVAILABLE
+
+
+def _arxiv_blocked() -> bool:
+    """いま arXiv からアクセスを制限されている最中か（判定の正本は core — §14.7）。
+
+    真なら検索・比較・購読検索は **arXiv を呼ばずに** 200 + ``arxiv_blocked: true`` +
+    空候補 + 事実文で返す（呼んでも同じ結果で、ブロックの窓を人の操作で延ばすだけ）。
+    ここで見るのは真偽だけ — 残り時間を返す関数は route から参照しない
+    （数値を人に見せないため。PR2。ガードレールが識別子の不在で固定する）。
+    """
+    return pd_radar.arxiv_blocked()
 
 
 # ---------------------------------------------------------------------------
@@ -522,6 +534,11 @@ def search_candidates(
     — PD4）。並べ替えができないとき（コーパス無し・埋め込み失敗・日次上限）は
     ``ranking.available=false`` + 事実文で**新着順のまま**返す（検索は必ず成立させる）。
     既定の ``order="date"`` では ``ranking`` キー自体を付けない（後方互換）。
+
+    arXiv からアクセスを制限されている（クールダウン中）と**呼ぶ前から分かっている**
+    ときは、arXiv を呼ばずに 200 + ``arxiv_blocked=true`` + 空候補 + 事実文で返す
+    （``last_checked_at`` / ``last_search_found_new`` も更新しない — 探していないので
+    「確かめた」と記録しない。設計書 §14.7）。live の 429 は従来どおり 502。
     """
     requested = body.max_results if body.max_results is not None else DEFAULT_SEARCH_RESULTS
     max_results = max(1, min(MAX_SEARCH_RESULTS, int(requested)))
@@ -529,6 +546,8 @@ def search_candidates(
     order = str(body.order or ORDER_DATE).strip()
     if order not in SEARCH_ORDERS:
         raise HTTPException(status_code=422, detail=_DETAIL_INVALID_ORDER)
+
+    blocked_note = pd_radar.NOTE_ARXIV_BLOCKED if _arxiv_blocked() else ""
 
     session = _pg_session()
     try:
@@ -541,6 +560,7 @@ def search_candidates(
                 followed_authors=body.followed_authors,
                 start=start,
                 max_results=max_results,
+                arxiv_blocked_note=blocked_note,
             )
         except ValueError as exc:
             session.rollback()
@@ -550,7 +570,9 @@ def search_candidates(
             logger.info("arXiv search failed for user=%s: %s", current_user["id"], exc)
             raise HTTPException(status_code=502, detail=_arxiv_unavailable_detail(exc)) from exc
         session.commit()
-        if order == ORDER_RELEVANCE:
+        if order == ORDER_RELEVANCE and not blocked_note:
+            # 候補ゼロを並べ替えるために embedding を焚かない（制限中は関連度の
+            # 材料そのものが無い）。並び順の指定は受理したまま黙って無視する。
             result = _apply_relevance_order(session, body.domain_key, result)
     except HTTPException:
         raise
@@ -560,6 +582,8 @@ def search_candidates(
     finally:
         session.close()
 
+    # ``arxiv_blocked`` は core の DTO に**常に**入っている（§14.7）。route では足さない
+    # — この経路は core の DTO を素通しするのが約束（PD4 / test_paper_discovery_ranking）。
     return result
 
 
@@ -1031,6 +1055,54 @@ def _with_can_register(seed: dict, access, current_user: dict) -> dict:
     return payload
 
 
+def _merge_fetched_metadata(seed: dict, fetched: dict) -> dict:
+    """記帳後に導出し直した seed へ、**同じ操作の中で1度だけ引いた** arXiv 由来の
+    メタデータ（要旨・カテゴリ）を移す。
+
+    出所を記帳したあとの seed は ``provenance.status="registered"`` になるが、
+    2度目の導出は arXiv を呼ばない（``fetch_arxiv=False``）ので要旨・カテゴリが
+    空になる。ここで1度目の結果を移すことで、教員の1操作あたりの arXiv 呼び出しを
+    1回に保ったまま、応答の中身は従来（2回引いていた頃）と同じにする（設計書 §14）。
+
+    移すのは arXiv 由来と分かっているときだけで（``categories_source`` が
+    ``arxiv`` / ``arxiv_inferred``）、購読・手入力由来の条件は上書きしない。
+    記帳済みなので供給元は ``arxiv``（推定ではなくなった）に揃える。
+    """
+    payload = dict(seed or {})
+    source = str((fetched or {}).get("categories_source") or "")
+    if source not in (
+        pd_radar.CATEGORIES_SOURCE_ARXIV,
+        pd_radar.CATEGORIES_SOURCE_ARXIV_INFERRED,
+    ):
+        return payload
+    if not payload.get("summary") and fetched.get("summary"):
+        payload["summary"] = fetched["summary"]
+    if fetched.get("categories"):
+        payload["categories"] = list(fetched["categories"])
+        payload["categories_source"] = pd_radar.CATEGORIES_SOURCE_ARXIV
+    if fetched.get("metadata_source"):
+        payload["metadata_source"] = fetched["metadata_source"]
+    return payload
+
+
+def _persist_arxiv_metadata_cache(session) -> None:
+    """arXiv メタデータの写し（migration 085）だけを確定させる。
+
+    レーダーの探索経路は読み取り専用だが、``core`` が read-through で残した**外部
+    事実の写し**（候補でも教員の判断でもない — 設計書 §14 / CC3 同型）はここで
+    ``commit`` しないと閉じたセッションと一緒に捨てられ、画面を開き直すたびに
+    arXiv を呼ぶことになる。確定できなくても探索の結果は返す（fail-soft）。
+    """
+    try:
+        session.commit()
+    except Exception:  # noqa: BLE001 — キャッシュの確定失敗で応答を落とさない
+        logger.warning("arXiv metadata cache commit failed", exc_info=True)
+        try:
+            session.rollback()
+        except Exception:  # noqa: BLE001
+            logger.debug("rollback after cache commit failure failed", exc_info=True)
+
+
 def _consume_radar_compare_quota(user_id: str) -> None:
     """比較分析の日次上限を1消費する。超過は 429 + 事実文（数値を返さない）。"""
     cap = int(getattr(get_settings(), "discovery_compare_max_calls_per_day", 20) or 0)
@@ -1066,6 +1138,8 @@ def get_radar_seed(
             raise HTTPException(
                 status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND
             ) from exc
+        # arXiv から引けた分の写しを残す（次に開いたときは呼ばない — 設計書 §14）。
+        _persist_arxiv_metadata_cache(session)
     finally:
         session.close()
     return {"seed": _with_can_register(seed, access, current_user)}
@@ -1080,6 +1154,11 @@ def radar_search(
 
     副作用ゼロ（購読の ``last_checked_at`` も更新しない — PR5）。arXiv API の失敗は
     **502 + 事実文**で、空一覧を「該当なし」と偽らない（PD6 / PR7）。
+
+    arXiv からアクセスを制限されている（クールダウン中）と**呼ぶ前から分かっている**
+    ときだけは、例外にせず 200 + ``arxiv_blocked=true`` + 空候補 + 事実文を返す
+    （:func:`pd_radar.blocked_radar_result`。live の 429 は従来どおり 502 —
+    「探して断られた」と「呼ぶ前から止めている」を同じ形にしない。設計書 §14.7）。
     """
     distance = str(body.distance or "").strip()
     if distance not in pd_schema.RADAR_DISTANCES:
@@ -1094,6 +1173,21 @@ def radar_search(
     session = _pg_session()
     try:
         try:
+            if _arxiv_blocked():
+                # 呼ばずに「探していない」と返す（CostGate も日次カウンタも消費しない）。
+                result = pd_radar.blocked_radar_result(
+                    session,
+                    str(access.document_id or ""),
+                    distance=distance,
+                    categories=body.categories,
+                    keyphrases=body.keyphrases,
+                    start=start,
+                )
+                if isinstance(result.get("seed"), dict):
+                    result["seed"] = _with_can_register(
+                        result["seed"], access, current_user
+                    )
+                return result
             result = pd_radar.run_radar_search(
                 session,
                 str(access.document_id or ""),
@@ -1117,6 +1211,7 @@ def radar_search(
         except arxiv_client.ArxivApiError as exc:
             logger.info("radar search failed for user=%s: %s", current_user["id"], exc)
             raise HTTPException(status_code=502, detail=_arxiv_unavailable_detail(exc)) from exc
+        _persist_arxiv_metadata_cache(session)
     finally:
         session.close()
     # seed を返す全ルートで can_register の注入を揃える（検索後の再描画で
@@ -1126,6 +1221,13 @@ def radar_search(
     # 地図と突き合わせられたかどうかは必ず返す（キーの不在で黙らせない — VA8）。
     if isinstance(result, dict):
         result.setdefault("relation_context", {"available": False})
+        # 制限されているかどうかも同様。**seed 側と同じ値**に揃える（フロントは
+        # seed.arxiv_blocked と top-level の両方を読むので、食い違うと表示が揺れる）。
+        seed = result.get("seed")
+        result.setdefault(
+            "arxiv_blocked",
+            bool(seed.get("arxiv_blocked")) if isinstance(seed, dict) else False,
+        )
     return result
 
 
@@ -1139,6 +1241,11 @@ def radar_compare(
     結果は保存しない（レスポンス限りの注釈）。各項目には**サーバ側固定文**の
     ``caveat`` が付く（LLM 出力に依存しない）。素材なしは 422・日次上限は 429・
     候補メタデータ全滅と LLM 失敗は 502（いずれも数値を含まない事実文）。
+
+    arXiv からアクセスを制限されている間は、**要旨が保存済みの写しで揃っていない
+    ときだけ** 200 + ``arxiv_blocked=true`` + 空 ``items`` を返す（LLM の日次上限を
+    消費しない — 呼べない理由がこちら側の都合ではないため。設計書 §14.7）。写しだけで
+    比較できるなら arXiv を呼ばずに通常どおり実行する（§14.3 の予算 0 コール）。
     """
     arxiv_ids = [str(value or "").strip() for value in (body.arxiv_ids or [])]
     arxiv_ids = [value for value in arxiv_ids if value]
@@ -1148,17 +1255,36 @@ def radar_compare(
         raise HTTPException(status_code=422, detail=_DETAIL_COMPARE_TOO_MANY)
 
     access = _radar_document_or_404(body.document_ref, current_user)
-    _consume_radar_compare_quota(current_user["id"])
 
     session = _pg_session()
     try:
         try:
-            return pd_compare.run_compare(
+            if _arxiv_blocked() and pd_radar.compare_requires_arxiv(
+                session, str(access.document_id or ""), arxiv_ids
+            ):
+                # 写しに無い要旨を取りに行けない。比較文を作れないので LLM も呼ばず、
+                # **日次上限も消費しない**（教員の持ち分を上流の制限で削らない）。
+                return {
+                    "items": [],
+                    "skipped": [
+                        {"arxiv_id": value, "detail": pd_radar.NOTE_ARXIV_BLOCKED}
+                        for value in arxiv_ids
+                    ],
+                    "notes": [pd_radar.NOTE_ARXIV_BLOCKED],
+                    "arxiv_blocked": True,
+                }
+            _consume_radar_compare_quota(current_user["id"])
+            result = pd_compare.run_compare(
                 session,
                 str(access.document_id or ""),
                 arxiv_ids,
                 user_id=current_user["id"],
             )
+            _persist_arxiv_metadata_cache(session)
+            if isinstance(result, dict):
+                # 制限されていないことも明示する（キーの不在で黙らせない — §14.7）。
+                result["arxiv_blocked"] = _arxiv_blocked()
+            return result
         except LookupError as exc:
             raise HTTPException(
                 status_code=404, detail=_DETAIL_DOCUMENT_NOT_FOUND
@@ -1250,7 +1376,12 @@ def register_radar_provenance(
 
         # 記帳後の状態（``provenance.status="registered"``・``categories_source="arxiv"``）
         # をそのまま返し、フロントが再取得しなくても表示を切り替えられるようにする。
-        registered_seed = pd_radar.resolve_seed(session, document_id, fetch_arxiv=True)
+        # **arXiv には行かない**（この操作で引いたのは上の1回だけ — 設計書 §14）。
+        # 要旨・カテゴリは1回目の結果から移す。なお上の commit は、1回目の導出が
+        # 残した arXiv メタデータの写し（migration 085）も併せて確定させている。
+        registered_seed = _merge_fetched_metadata(
+            pd_radar.resolve_seed(session, document_id, fetch_arxiv=False), seed
+        )
     except HTTPException:
         raise
     except Exception:

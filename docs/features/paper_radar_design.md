@@ -710,11 +710,12 @@ VA層 §8 の着地予測（`atlas_vectors.query.landing_for_vector`）を radar
 | 3 | `core/paper_discovery/arxiv_client.py` + `routes/paper_discovery.py` | HTTP 429 を部分型 `ArxivRateLimitedError` で区別し、検索系 4 経路の 502 detail を `_arxiv_unavailable_detail(exc)` で出し分ける |
 
 **なぜ理由ごとに文を分けるか** — 教員の次の一手が違う。「繋がらない」なら設定・回線を
-疑い、「混んでいる」なら待って押し直し、「該当なし」なら ID・出所を疑う。
+疑い、「制限されている」なら時間をおき、「該当なし」なら ID・出所を疑う（2026-09-15 の
+§14.7 で、この行の「混んでいる」＝推測の言い方を「制限されている」＝観測できた事実に改めた）。
 
 | 定数（`radar.py`） | 状況 |
 |---|---|
-| `NOTE_ARXIV_RATE_LIMITED` | HTTP 429（混雑）。「少し時間をおいてから、もう一度お試しください。」 |
+| `NOTE_ARXIV_RATE_LIMITED` | HTTP 429（アクセスの制限）。**2026-09-15（§14.7）に「混雑」から「arXiv からアクセスを制限されているため…」へ改訂**し、問い合わせを止めていることを併記する |
 | `NOTE_ARXIV_METADATA_UNAVAILABLE` | その他の到達・解釈の失敗（既存文言のまま） |
 | `NOTE_ARXIV_METADATA_NOT_FOUND` | 200 で返ったが該当 ID の項目が無い（撤回・ID 誤り） |
 
@@ -739,7 +740,7 @@ VA層 §8 の着地予測（`atlas_vectors.query.landing_for_vector`）を radar
   描くこと / 縮退理由の文言をフロントに持たないこと。
 - `test_paper_radar_core.py::TestResolveSeed` — 429・該当なし・成功の3系統で note が
   それぞれ立つ／立たないこと。
-- `test_paper_radar_api.py` — 429 が 502 + 混雑の事実文になること。
+- `test_paper_radar_api.py` — 429 が 502 + 制限の事実文になること（文言は §14.7 で改訂）。
 - `test_paper_discovery_core.py::TestThrottle` — 429 が部分型で上がること・
   リトライしないこと。
 
@@ -755,3 +756,221 @@ VA層 §8 の着地予測（`atlas_vectors.query.landing_for_vector`）を radar
   `fetch_arxiv=False`）。そのため `NOTE_ARXIV_RATE_LIMITED` は「検索し直す」ではなく
   「カテゴリを直接指定する / 画面を開き直す」と書く — **効かない操作を案内しない**。
   検索押下での seed 再解決は外部コールを増やすため v1 では行わない。
+
+---
+
+## 14. 追補 — arXiv 呼び出しの上限（2026-09-14・migration 085）
+
+**状態: 実装済み**（`backend/core/paper_discovery/metadata_cache.py` +
+`backend/db/085_paper_discovery_arxiv_metadata_cache.sql`）。
+
+### 14.1 オーナー指示（2026-09-14）
+
+> 教員の一連のレーダー操作で arXiv API に出ていくのは**最大1〜2回**（seed のメタ
+> データ1回・検索1回）。**モーダルを開き直すたびに取り直さない**。
+
+§13 の追補（混雑の事実文）で「429 のとき人が操作するたびにブロック窓が延びる」
+循環が見えたのを受けた指示で、対処は2系統に分かれる。
+
+1. **呼ばずに済ませる**（本節）: 外部事実の写しを持ち、新鮮なら再取得しない。
+2. **429 のあとは呼ばない**（`arxiv_client` 側・別担当）: 429 を受けたあと一定時間は
+   本アプリから arXiv API を**呼ばずに**混雑の事実文で返す抑制（リトライではない）。
+   env は `ARXIV_RATE_LIMIT_COOLDOWN_SECONDS`（既定 600）。抑制中の `_http_get` は
+   外に出ずに `ArxivRateLimitedError` を送出するので、事実文（`NOTE_ARXIV_RATE_LIMITED`）
+   と 502 の写像は §13 のまま変わらない。
+
+### 14.2 写しは CC3 と同型の設計明示例外
+
+発見層は候補を保存しない（PD5）。本節が保存するのは**候補ではなく、arXiv API が
+公開している論文メタデータそのものの写し**で、コーパスを補う論文の参照リスト
+キャッシュ（CC3 / migration 077）と同じ位置づけ — 教員の判断でも候補一覧の
+スナップショットでもなく、`documents.source_url` と同じ「事実の記帳」側にある。
+
+保存するもの・しないもの:
+
+| | 内容 |
+|---|---|
+| 保存する | 正規化 arXiv ID（version 抜き・主キー）、タイトル、要旨、カテゴリ、`primary_category`、著者、公開日・更新日、abs / pdf の URL、取得時刻 |
+| **保存しない** | 候補の状態（`new` / `ingested` / `dismissed`）、距離帯・着地・重なり、教員・教材への従属（`user_id` / `document_id` / FK）、**取得の失敗**、版番号 |
+
+失敗を保存しないのは、「読めなかった記録」を「読んだ結果」と取り違えないため
+（077 は `fetch_status='failed'` を持つが、あちらは1シードあたり数十〜百件の参照を
+引く重い呼び出しで、再取得の抑制自体に価値がある。本節の再取得抑制は 14.1 の②が担う）。
+
+陳腐化は TTL で抑える: `DISCOVERY_ARXIV_METADATA_TTL_DAYS`（既定 30 日）。
+**この日数も取得時刻も UI には出さない**（数値を見せない — PR2 / PD4）。出るのは
+`seed.metadata_source` の事実ラベル（`arxiv` = 今引いた / `cache` = 写しを読んだ）だけで、
+引けなかったときはキー自体を付けない（無い事実を捏造しない）。
+
+### 14.3 呼び出し予算（教員1人の一続きの操作）
+
+| 操作 | arXiv 呼び出し | 内訳 |
+|---|---|---|
+| モーダルを開く（`GET /radar/seed`） | **0〜1回** | 写しが新鮮なら 0 回。初回・TTL 切れのみ 1 回。**開き直しは 0 回** |
+| 距離を選んで検索（`POST /radar/search`） | **1回** | `arxiv_client.search`。seed のカテゴリが明示されていれば seed 解決は `fetch_arxiv=False` のまま（従来どおり） |
+| 候補を比較（`POST /radar/compare`） | **0〜1回** | 検索直後なら候補の要旨は写しに在るので 0 回。不足 ID があるときだけ 1 回 |
+| 出所の後付け登録（`POST /radar/provenance`） | **0〜1回**（追加 0 回） | 記帳前の検証で 1 回（写しが在れば 0 回）。**記帳後の再導出は `fetch_arxiv=False`** で、要旨・カテゴリは1回目の結果から移す（従来は 2 回引いていた） |
+
+分野購読の検索（`POST /search`）も、返ってきたメタデータを同じ写しへ書く
+（レーダー・比較がそれを読める）。**写しを読むだけの経路は arXiv を呼ばない。**
+
+### 14.4 実装
+
+- **core `metadata_cache.py`**（FastAPI / `core.llm` 非 import）: `get_fresh` /
+  `upsert_entries`（`ON CONFLICT DO UPDATE`・行削除の SQL を持たない）と、
+  呼び出し側が使う fail-soft ラッパ `read_fresh` / `remember` / `ttl_days`。
+  空入力では SQL を撃たない。`commit` は呼び出し側（route）の責務。
+- **`radar.py`**: `_fetch_seed_entry(session, seed, arxiv_id)` が写し → arXiv の
+  read-through。成功時のみ写しへ書き、`seed["metadata_source"]` を立てる。
+  縮退の事実文（`NOTE_ARXIV_*`）の意味論は §13 のまま**不変**。
+  `run_radar_search` は検索結果も写しへ書く。`fetch_arxiv=False` の挙動は不変
+  （写しも読まない — 条件が明示されている経路の外部依存を増やさない）。
+- **`compare.py`**: `fetch_ids` をまず写しから解決し、**足りない ID だけ**
+  `arxiv_client.fetch_by_ids` に渡す。写しの要旨はライブ取得と同一本文なので、
+  `evidence_quote` の verbatim 検査の土台（サーバが持つ要旨）は変わらない。
+- **`search.py`**: 検索成功後に写しへ書く（失敗はログに残して検索は成立させる）。
+- **route**: 探索経路は読み取り専用のためセッションを `commit` せずに閉じていた。
+  写しだけを確定させる `_persist_arxiv_metadata_cache(session)` を
+  `/radar/seed` `/radar/search` `/radar/compare` に置く（確定できなくても応答は返す）。
+  `/radar/provenance` は記帳の `commit` に相乗りする。
+
+### 14.5 ガードレール
+
+- `test_paper_discovery_metadata_cache.py` — store の振る舞い（正規化・空入力で SQL を
+  撃たない・upsert の形・外部事実だけを束縛する・fail-soft）と migration 085 の形
+  （冪等・シードしない・`DELETE` なし・FK なし）。
+- `test_paper_radar_core.py::TestSeedMetadataCache` — 写しが新鮮なら `fetch_by_ids` を
+  呼ばない / `metadata_source` の2値 / **失敗を写しに書かない** / 検索結果を写す /
+  読み書きの失敗で探索を止めない。`TestRunCompare` に写しからの解決 0 コールも追加。
+- `test_paper_radar_api.py::...test_registration_resolves_the_seed_with_arxiv_once` —
+  出所登録で arXiv へ出ていく解決が1回だけであること。
+- `test_paper_radar_guardrails.py` — 写しモジュールの隔離（FastAPI / LLM 非 import・
+  `DELETE` 不在）/ 失敗をキャッシュしない構造 / 探索経路の書き込み先が写しだけで
+  あること / DDL が候補・判断を持たないこと（`test_no_migration_stores_radar_
+  candidates_or_judgements` は旧 `test_no_migration_is_added_for_the_radar` の後継）。
+
+### 14.6 非スコープ
+
+- 写しの TTL・取得時刻・件数の UI 表示（数値を見せない）。
+- 写しの明示的な無効化 UI・管理者による一括削除（行削除の口を作らない）。
+- 図・PDF 本文のキャッシュ（取り込みの弁は既存経路のまま — PR3 / PD2）。
+- 分野購読モーダルでの `metadata_source` 表示（seed の概念が無い）。
+- 429 のクールダウンそのもの（`arxiv_client` 側・14.1 の②）。
+
+### 14.7 ブロックの目印（2026-09-15・migration / env / アンカーなし）
+
+**オーナー指示（2026-09-15）**: 「429 を受けたかどうか目印をつけられるか？ その場合は
+明確にブロックされているという表示にするべきではないか。」
+
+§14 の②で 429 のあとは arXiv を呼ばない窓（クールダウン）を入れたが、その事実が
+**文章の中にしか無かった**。画面は「候補が見つかりません」と「seed の note」しか持たず、
+制限されているのか条件が悪いのかが読めない。ここでは①状態を**機械可読の目印**にし、
+②文言を「混雑」から「**制限されている**」に改め、③**呼ぶ前から分かっている**操作は
+arXiv を呼ばずに 200 の事実として返す。
+
+#### 何を返すか（API 契約）
+
+| 場所 | キー | 値 |
+|---|---|---|
+| `resolve_seed()` の seed DTO | `arxiv_blocked` | **常在**。`arxiv_client.cooldown_active()` を**取得の後**に評価（この操作で 429 を受けた回も真） |
+| 同上 | `arxiv_blocked_note` | 真のときだけ。`radar.NOTE_ARXIV_BLOCKED` |
+| 同上 | `metadata_failure` | 取得に失敗したときだけ。`rate_limited` / `unavailable` / `not_found`（`note` の3文と1対1） |
+| `POST /radar/search` | `arxiv_blocked` / `note` / `banding.note` | 制限中は `blocked_radar_result()` が通常と同じ形 + 空候補 + 事実文。seed 側と top-level は**常に同じ値**（フロントが両方読むため） |
+| `POST /radar/compare` | `arxiv_blocked` / `skipped[]` / `notes[]` | 写しに要旨が揃わないときだけ空 `items` で返す。揃っていれば通常実行（arXiv 0 コール） |
+| `POST /search`（購読） | `arxiv_blocked` / `note` / `closed_world_note` | 制限中は候補を空にし、閉世界の注記の**前**に事実文を置く |
+
+定数はすべて `core/paper_discovery/radar.py`（`__all__` に載せる）:
+
+| 定数 | 意味 |
+|---|---|
+| `NOTE_ARXIV_BLOCKED` | **状態**「いま制限されている / 条件を変えても解けない」 |
+| `NOTE_ARXIV_RATE_LIMITED` | **出来事**「この取得が制限で失敗した」（§13 の文言を制限の言い方へ改訂） |
+| `METADATA_FAILURE_{RATE_LIMITED,UNAVAILABLE,NOT_FOUND}` | `metadata_failure` の語彙 |
+
+#### 200 と 502 の切り分け（ここが判断の要）
+
+- **呼ぶ前から分かっている**（クールダウン中）→ **200** + `arxiv_blocked: true` + 空候補 +
+  事実文。**arXiv を呼ばない・CostGate も日次カウンタも消費しない・`last_checked_at` /
+  `last_search_found_new` も更新しない**（探していないのに「確かめた」と記録しない）。
+- **探して断られた**（live の 429）→ **502**（§13.3 の判断を維持）。detail は
+  `NOTE_ARXIV_BLOCKED`（その時点で窓が立っているので「止めています」は事実）。
+
+0 件を返す経路が増えるのに事実文を足さなければ、「近い論文が無い」という誤読が増えるだけ
+なので、**空一覧には必ず理由が伴う**（PR7）。比較で日次上限を消費しないのは、呼べない
+理由がこちら側の都合ではないから（教員の持ち分を上流の制限で削らない）。
+
+#### 文言 — 「混雑」と言わない
+
+観測できたのは「**制限された**」という事実だけで、向こうが混んでいるかどうかは分からない。
+「混雑」は待てば直る印象を与え、教員に条件をいじらせ続ける（=窓を延ばす操作を誘う）。
+新しい文は①制限されている事実 ②こちらから問い合わせを止めていること ③条件を変えても
+解けないこと ④時間をおいて開き直すこと、の4点だけを言う。**残り時間・回数・ステータス
+コードなどの数値は書かない**（PR2）。窓の残り秒数を返す関数は `arxiv_client` の内側の
+判定材料で、`radar.py` / `routes/paper_discovery.py` からは参照しない（ガードレールが
+識別子の不在で固定する）。
+
+#### ガードレール
+
+- `test_paper_radar_core.py::TestArxivBlockedMarker` / `TestBlockedRadarResult` /
+  `TestCompareRequiresArxiv` — 目印が立つ/立たない3系統・`metadata_failure` の写像・
+  事実文に数字が無いこと・制限中の結果が通常と同じ形であること・写しだけで足りる比較。
+- `test_paper_radar_api.py::TestArxivBlocked` — 3ルートが 200 + `arxiv_blocked: true` +
+  空候補で返り、arXiv も LLM も呼ばれず日次上限も減らないこと。live の 429 は 502 のまま。
+- `test_paper_discovery_api.py::TestSearchWhileArxivBlocked` — 購読検索が
+  `touch_last_checked` を呼ばないこと・関連度並べ替えの埋め込みを焚かないこと。
+- `test_paper_radar_guardrails.py::TestArxivBlockedMarker` — 残り秒数の識別子の不在・
+  route が文言を言い換えないこと・ゲート消費が縮退判定より後ろにあること。
+
+#### 非スコープ
+
+- 制限の残り時間・解除予定時刻の表示（数値を見せない）。
+- 自動再試行・バックオフ（PD7 — 待つかどうかは人間が決める）。
+- 引用グラフ（Semantic Scholar）側の独立したクールダウン・目印。
+- 制限中に検索ボタンをサーバ都合で無効化すること（UI 側の判断 — §14.8）。
+
+### 14.8 ブロックの表示（UI）— 2026-09-15
+
+§14.7 でサーバが返すようになった「arXiv がこの環境からの問い合わせを制限している」と
+いう事実を、画面の一等地で**制限されていると読める形**にする。実装は
+`frontend/public/js/admin-paper-radar.js` と `frontend/public/js/admin-paper-discovery.js`
+のみ（migration / env / `data-ui-anchor` / API いずれも増やさない）。
+
+**症状**: 制限中は候補ゼロの 200 が返るため、画面には灰色の事実行と
+「この検索条件では候補が見つかりませんでした」だけが残る。§13.1 と同じ誤読
+（「向こうが止めている」が「近い論文が無い」に読める）が、別の入口から再発する。
+
+**是正（4点）**
+
+1. **専用バナー**: 条件欄の先頭（レーダーは距離ラジオの上、分野購読は分野入力の上）に
+   `#pr-arxiv-blocked` / `#pd-arxiv-blocked` を置く。枠（`--color-text-danger`）と淡い
+   地色を付け、灰色の事実行と見分けられるようにする。`state.arxivBlocked` が真のとき
+   だけ表示し、それ以外は領域ごと出さない。
+2. **見出しは静的・本文はサーバ**: フロントが持つのは見出し2つだけ —
+   制限中は「arXiv からのアクセス制限中」、届かなかった回は
+   「arXiv に問い合わせできませんでした」。**見出しに数字を書かない**（待ち時間・
+   回数・カウントダウンを出さない・自動再試行もしない — PR5 / PD8）。理由の本文は
+   `seed.arxiv_blocked_note` / `note` / `notes[0]` / `closed_world_note` / 502 の
+   `detail` をそのまま描く（言い換えない）。
+3. **状態は増える方向にだけ動く**: `arxiv_blocked` が明示的に `false` のときだけ解除し、
+   キーの無いレスポンスでは解除しない（§13.2 の `seed.note` と同じ規律）。502 は
+   **状態コードだけで**「届かなかった」と判定する（日本語 `detail` を照合しない）。
+4. **空一覧の文言を差し替える**: 制限中は「候補が見つかりませんでした」を出さず、
+   サーバの事実文を一覧の位置に出す。検索ボタンは**押せるまま**にし（サーバは 200 の
+   事実文を返すだけで arXiv へは出ない＝費用ゼロ）、隣の補助文だけを
+   「制限中は arXiv へ問い合わせません。」に差し替える。
+
+**マニュアル**: `docs/manual/teacher/11-admin-materials.md` の
+[モーダル: 論文レーダー](../manual/teacher/11-admin-materials.md#radar-modal) と
+[この条件で検索](../manual/teacher/11-admin-materials.md#arxiv-discovery-search) に各1段落。
+バナーは操作要素ではない事実の区画なので `data-ui-anchor` は付けない。
+
+**ガードレール**: `test_paper_radar_ui_static.py::TestArxivBlockedBanner` /
+`test_paper_discovery_ui_static.py::TestArxivBlockedBanner`（バナーの存在位置・既定非表示・
+枠と地色・見出しに数字が無いこと・本文がサーバ由来であること・`false` のときだけ解除・
+502 を状態コードで拾うこと・制限中の空一覧文言の抑止・自動再試行の不在）+ 両ファイルの
+`TestCacheBuster`（`?v=` を `...-20260915-1` へ更新。**JS を直して `?v=` を上げ忘れると
+教員のブラウザは古い JS のまま**という 2026-09-15 の実地の失敗を固定する）。
+
+**非スコープ**: 制限の残り時間・再開予定の表示 / 自動再試行・再試行ボタン /
+制限中に検索ボタンを無効化すること（サーバの事実文を読む機会を奪う）/
+引用グラフ・コーパス補完・基盤論文（Semantic Scholar 経路）への同じバナーの適用。

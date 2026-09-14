@@ -29,6 +29,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -95,19 +96,43 @@ class FakeSession:
     """``documents`` / ``learning_courses`` / ``theory_components`` / ``chunks`` の最小フェイク。"""
 
     def __init__(self, *, documents=(), courses=(), components=(), chunks=(),
-                 placements=()):
+                 placements=(), arxiv_metadata=()):
         self.documents = list(documents)
         self.courses = list(courses)
         self.components = list(components)
         self.chunks = list(chunks)
         # landscape_placements（``{document_id, domain_key, node_id, status}``）
         self.placements = list(placements)
+        # paper_discovery_arxiv_metadata_cache（migration 085 / 設計書 §14）。
+        # 在る行はすべて「TTL 内」として返す（TTL の境界は store 側のテストの責務）。
+        self.arxiv_metadata = {
+            entry.arxiv_id: entry for entry in arxiv_metadata
+        }
+        self.metadata_writes: list[str] = []
         self.calls: list[tuple[str, dict]] = []
 
     def execute(self, stmt, params=None):
         sql = " ".join(str(stmt).split())
         p = dict(params or {})
         self.calls.append((sql, p))
+
+        if "paper_discovery_arxiv_metadata_cache" in sql:
+            if sql.startswith("INSERT"):
+                self.metadata_writes.append(p.get("arxiv_id") or "")
+                return _Result()
+            wanted = list(p.get("arxiv_ids") or [])
+            return _Result(
+                [
+                    (
+                        e.arxiv_id, e.title, e.summary, list(e.categories),
+                        e.primary_category or "", list(e.authors),
+                        None, None, e.abs_url or "", e.pdf_url or "",
+                    )
+                    for key in wanted
+                    for e in [self.arxiv_metadata.get(key)]
+                    if e is not None
+                ]
+            )
 
         if sql.startswith("UPDATE documents"):
             # radar.register_arxiv_provenance（source_url が空のときだけ書き換える）
@@ -569,6 +594,143 @@ class TestResolveSeed:
 
 
 # ---------------------------------------------------------------------------
+# 4a. arXiv メタデータの写し（migration 085 / 設計書 §14）
+# ---------------------------------------------------------------------------
+
+
+class TestSeedMetadataCache:
+    """教員の一連の操作で arXiv を叩くのは最大2回（開く1回 + 検索1回）。
+
+    写しは**外部事実**だけを持ち、候補・教員の判断は保存しない（PD5 / CC3 同型）。
+    """
+
+    def _cached_session(self, **kwargs):
+        return _seed_session(
+            arxiv_metadata=[
+                _entry(
+                    "2608.20293",
+                    title="Seed",
+                    summary="A cached abstract.",
+                    categories=["astro-ph.CO"],
+                    primary_category="astro-ph.CO",
+                    abs_url="https://arxiv.org/abs/2608.20293",
+                )
+            ],
+            **kwargs,
+        )
+
+    def test_fresh_cache_hit_does_not_call_arxiv(self, no_arxiv, monkeypatch):
+        calls: list[list[str]] = []
+        _stub_fetch_by_ids(monkeypatch, [], recorder=calls)
+        seed = radar.resolve_seed(self._cached_session(), "doc-1")
+        assert calls == [], "写しが新鮮なら arXiv を呼ばない（開き直しで再取得しない）"
+        assert seed["metadata_source"] == radar.METADATA_SOURCE_CACHE
+        assert seed["summary"] == "A cached abstract."
+        assert seed["categories"] == ["astro-ph.CO"]
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_ARXIV
+        assert "note" not in seed, "写しから読めたのは縮退ではない"
+
+    def test_cache_miss_fetches_and_remembers(self, monkeypatch):
+        calls: list[list[str]] = []
+        _stub_fetch_by_ids(
+            monkeypatch,
+            [_entry("2608.20293", summary="A live abstract.", categories=["astro-ph.CO"])],
+            recorder=calls,
+        )
+        session = _seed_session()
+        seed = radar.resolve_seed(session, "doc-1")
+        assert calls == [["2608.20293"]]
+        assert seed["metadata_source"] == radar.METADATA_SOURCE_ARXIV
+        assert session.metadata_writes == ["2608.20293"], "引けた事実だけを写しに残す"
+
+    @pytest.mark.parametrize(
+        "outcome",
+        [
+            arxiv_client.ArxivRateLimitedError("混雑"),
+            arxiv_client.ArxivApiError("接続に失敗しました"),
+            [],
+        ],
+    )
+    def test_failures_are_not_cached(self, monkeypatch, outcome):
+        _stub_fetch_by_ids(monkeypatch, outcome)
+        session = _seed_session()
+        seed = radar.resolve_seed(session, "doc-1")
+        assert session.metadata_writes == [], "読めなかった記録を写しにしない"
+        assert "metadata_source" not in seed, "引けていないのに出所を騙らない"
+        assert seed["note"], "縮退の事実文は従来どおり立てる（PR7）"
+
+    def test_inferred_seed_also_reads_the_cache(self, no_arxiv, monkeypatch):
+        calls: list[list[str]] = []
+        _stub_fetch_by_ids(monkeypatch, [], recorder=calls)
+        session = _manual_session()
+        session.arxiv_metadata = {
+            "2407.01221": _entry(
+                "2407.01221",
+                title="Dark Energy: A Review",
+                summary="A cached abstract.",
+                categories=["astro-ph.CO"],
+                abs_url="https://arxiv.org/abs/2407.01221",
+            )
+        }
+        seed = radar.resolve_seed(session, "doc-1")
+        assert calls == []
+        assert seed["metadata_source"] == radar.METADATA_SOURCE_CACHE
+        provenance = seed["provenance"]
+        assert provenance["fetched"] is True
+        assert provenance["title_match"] is True
+        assert seed["categories_source"] == radar.CATEGORIES_SOURCE_ARXIV_INFERRED
+
+    def test_fetch_arxiv_false_does_not_read_the_cache(self, no_arxiv):
+        """条件が明示されている経路は写しも読まない（従来の挙動を変えない）。"""
+        session = self._cached_session()
+        seed = radar.resolve_seed(session, "doc-1", fetch_arxiv=False)
+        assert seed["summary"] == ""
+        assert "metadata_source" not in seed
+        assert "paper_discovery_arxiv_metadata_cache" not in session.sql_log
+
+    def test_search_results_are_remembered(self, monkeypatch):
+        """検索で返った候補の要旨も写しに残す（比較分析が取り直さずに済む）。"""
+        _stub_fetch_by_ids(monkeypatch, [_entry("2608.20293", categories=["astro-ph.CO"])])
+        _stub_search(
+            monkeypatch,
+            [_entry("2608.00002", title="A", summary="x"),
+             _entry("2608.00003", title="B", summary="y")],
+        )
+        _stub_band(monkeypatch)
+        session = _seed_session()
+        radar.run_radar_search(session, "doc-1", distance="near")
+        assert session.metadata_writes == ["2608.20293", "2608.00002", "2608.00003"]
+
+    def test_a_cache_write_failure_does_not_break_the_search(self, monkeypatch):
+        """写しに書けないことは探索の失敗ではない（fail-soft）。"""
+        _stub_fetch_by_ids(monkeypatch, [_entry("2608.20293", categories=["astro-ph.CO"])])
+        monkeypatch.setattr(
+            radar.metadata_cache,
+            "upsert_entries",
+            lambda session, entries: (_ for _ in ()).throw(RuntimeError("no table")),
+        )
+        session = _seed_session()
+        session.rollback = lambda: None
+        seed = radar.resolve_seed(session, "doc-1")
+        assert seed["categories"] == ["astro-ph.CO"]
+        assert seed["metadata_source"] == radar.METADATA_SOURCE_ARXIV
+
+    def test_a_cache_read_failure_falls_back_to_arxiv(self, monkeypatch):
+        calls: list[list[str]] = []
+        _stub_fetch_by_ids(
+            monkeypatch, [_entry("2608.20293", categories=["astro-ph.CO"])], recorder=calls
+        )
+        monkeypatch.setattr(
+            radar.metadata_cache,
+            "get_fresh",
+            lambda session, ids, **kwargs: (_ for _ in ()).throw(RuntimeError("no table")),
+        )
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert calls == [["2608.20293"]]
+        assert seed["metadata_source"] == radar.METADATA_SOURCE_ARXIV
+
+
+# ---------------------------------------------------------------------------
 # 4b. arXiv 出所の後付け（推定 seed + 記帳）
 # ---------------------------------------------------------------------------
 
@@ -680,13 +842,18 @@ class TestResolveSeedProvenance:
         assert seed["provenance"]["fetched"] is False
         assert seed["categories_source"] == radar.CATEGORIES_SOURCE_MANUAL
 
-    def test_resolve_seed_never_writes(self, monkeypatch):
-        """PR1: 推定を seed 解決の副作用で記帳しない。"""
+    def test_resolve_seed_writes_only_the_external_fact_cache(self, monkeypatch):
+        """PR1: 推定を seed 解決の副作用で記帳しない。
+
+        2026-09-14 以降、探索経路が書くのは **arXiv が返したメタデータの写し**
+        （migration 085 / 設計書 §14）だけ。``documents`` には触れない。
+        """
         _stub_fetch_by_ids(monkeypatch, [_entry("2407.01221", title="Dark Energy: A Review")])
         session = _manual_session()
         radar.resolve_seed(session, "doc-1")
-        assert "UPDATE" not in session.sql_log
-        assert "INSERT" not in session.sql_log
+        assert "UPDATE documents" not in session.sql_log
+        written = set(re.findall(r"INSERT INTO (\w+)", session.sql_log))
+        assert written <= {"paper_discovery_arxiv_metadata_cache"}
         assert session.documents[0]["source_url"] == ""
 
 
@@ -1763,6 +1930,63 @@ class TestCompareMaterialGate:
         assert result["items"][0]["caveat"] == compare_mod.CAVEAT
         assert result["skipped"] == []
 
+    def test_cached_abstracts_skip_the_arxiv_call(self, monkeypatch):
+        """設計書 §14: 直前の検索で写しが在れば比較の arXiv 呼び出しは 0 回。"""
+        seen: list[list[str]] = []
+
+        def _fetch(ids, **kwargs):  # pragma: no cover — 呼ばれないことを検査する
+            seen.append(list(ids))
+            return []
+
+        monkeypatch.setattr(compare_mod.arxiv_client, "fetch_by_ids", _fetch)
+        monkeypatch.setattr(
+            "core.deliberation.refs.document_run_artifacts", lambda document_id: {}
+        )
+        monkeypatch.setattr(
+            compare_mod,
+            "_call_llm",
+            lambda content, model: _parsed(
+                [{"arxiv_id": "2608.00002", "common_ground": "a", "differences": []}]
+            ),
+        )
+        session = _seed_session(
+            arxiv_metadata=[
+                _entry("2608.20293", summary="seed abstract"),
+                _entry("2608.00002", title="候補", summary="the equation of state"),
+            ]
+        )
+        result = compare_mod.run_compare(session, "doc-1", ["2608.00002"])
+        assert seen == [], "写しで足りるなら arXiv を呼ばない"
+        assert session.metadata_writes == [], "読んだだけで書き戻さない"
+        assert result["skipped"] == []
+        assert result["items"][0]["arxiv_id"] == "2608.00002"
+
+    def test_missing_ids_are_fetched_and_remembered(self, monkeypatch):
+        """写しに無い分だけを取りに行き、引けた分を写しに残す（read-through）。"""
+        seen: list[list[str]] = []
+
+        def _fetch(ids, **kwargs):
+            seen.append(list(ids))
+            return [_candidate_entry()]
+
+        monkeypatch.setattr(compare_mod.arxiv_client, "fetch_by_ids", _fetch)
+        monkeypatch.setattr(
+            "core.deliberation.refs.document_run_artifacts", lambda document_id: {}
+        )
+        monkeypatch.setattr(
+            compare_mod,
+            "_call_llm",
+            lambda content, model: _parsed(
+                [{"arxiv_id": "2608.00002", "common_ground": "a", "differences": []}]
+            ),
+        )
+        session = _seed_session(
+            arxiv_metadata=[_entry("2608.20293", summary="seed abstract")]
+        )
+        compare_mod.run_compare(session, "doc-1", ["2608.00002"])
+        assert seen == [["2608.00002"]], "写しに在る seed は取り直さない"
+        assert session.metadata_writes == ["2608.00002"]
+
     def test_unfetchable_candidates_are_reported_as_skipped(self, monkeypatch):
         monkeypatch.setattr(
             compare_mod.arxiv_client,
@@ -1855,3 +2079,165 @@ class TestCompareMaterialGate:
         assert "断定せず推量形で書く" in content
         assert "数値スコア・優劣の評価を書かない" in content
         assert "2608.00002" in content
+
+
+# ---------------------------------------------------------------------------
+# 8. ブロックの目印（2026-09-15 / 設計書 §14.7）
+# ---------------------------------------------------------------------------
+
+
+def _stub_cooldown(monkeypatch, active: bool) -> None:
+    """``arxiv_client.cooldown_active`` だけを差し替える（窓の実装には触らない）。"""
+    monkeypatch.setattr(arxiv_client, "cooldown_active", lambda: active)
+
+
+class TestArxivBlockedMarker:
+    """429 の事実を文章にだけ残さず、機械可読の目印にする（オーナー指示 2026-09-15）。
+
+    「制限されている」は seed DTO の ``arxiv_blocked`` / ``metadata_failure`` で読める。
+    フロントが事実文の部分一致で理由を当てにいかなくて済むようにするのが主眼。
+    """
+
+    def test_constants_carry_no_numbers(self):
+        """PR2: 残り時間・回数を文面に埋め込まない（数値を人に見せない）。"""
+        for text in (
+            radar.NOTE_ARXIV_BLOCKED,
+            radar.NOTE_ARXIV_RATE_LIMITED,
+            radar.NOTE_ARXIV_METADATA_UNAVAILABLE,
+            radar.NOTE_ARXIV_METADATA_NOT_FOUND,
+        ):
+            assert not re.search(r"[0-9０-９]", text), f"数値を含む事実文: {text}"
+
+    def test_blocked_wording_states_the_restriction(self):
+        """「混雑」ではなく「制限されている」と、観測できた事実で書く（§14.7）。"""
+        assert "arXiv からアクセスを制限されています" in radar.NOTE_ARXIV_BLOCKED
+        assert "条件を変えても検索・比較はできません" in radar.NOTE_ARXIV_BLOCKED
+        assert "混雑" not in radar.NOTE_ARXIV_BLOCKED
+        assert "混雑" not in radar.NOTE_ARXIV_RATE_LIMITED
+
+    def test_rate_limited_fetch_marks_the_seed_blocked(self, monkeypatch):
+        """この操作で 429 を受けたら、その応答から目印が立つ（窓の有無より先に）。"""
+        _stub_cooldown(monkeypatch, False)
+        _stub_fetch_by_ids(
+            monkeypatch, arxiv_client.ArxivRateLimitedError("refused")
+        )
+        monkeypatch.setattr(radar.store, "get_subscription", lambda session, key: None)
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert seed["arxiv_blocked"] is True
+        assert seed["arxiv_blocked_note"] == radar.NOTE_ARXIV_BLOCKED
+        assert seed["metadata_failure"] == radar.METADATA_FAILURE_RATE_LIMITED
+        assert seed["note"] == radar.NOTE_ARXIV_RATE_LIMITED
+
+    def test_cooldown_marks_the_seed_blocked_even_on_a_cache_hit(
+        self, no_arxiv, monkeypatch
+    ):
+        """写しから読めた回でも「いまは問い合わせを止めている」は立つ。"""
+        _stub_cooldown(monkeypatch, True)
+        calls: list[list[str]] = []
+        _stub_fetch_by_ids(monkeypatch, [], recorder=calls)
+        session = _seed_session(
+            arxiv_metadata=[
+                _entry("2608.20293", summary="A cached abstract.", categories=["astro-ph.CO"])
+            ]
+        )
+        seed = radar.resolve_seed(session, "doc-1")
+        assert calls == [], "写しがあるなら制限の有無に関わらず arXiv を呼ばない"
+        assert seed["metadata_source"] == radar.METADATA_SOURCE_CACHE
+        assert seed["arxiv_blocked"] is True
+        assert seed["arxiv_blocked_note"] == radar.NOTE_ARXIV_BLOCKED
+        assert "metadata_failure" not in seed, "読めた回を失敗として記録しない"
+
+    def test_normal_fetch_is_not_marked_blocked(self, monkeypatch):
+        _stub_cooldown(monkeypatch, False)
+        _stub_fetch_by_ids(
+            monkeypatch, [_entry("2608.20293", summary="x", categories=["astro-ph.CO"])]
+        )
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert seed["arxiv_blocked"] is False
+        assert "arxiv_blocked_note" not in seed, "止めていないのに事実文を出さない"
+        assert "metadata_failure" not in seed
+
+    @pytest.mark.parametrize(
+        "outcome,expected",
+        [
+            (
+                arxiv_client.ArxivRateLimitedError("refused"),
+                radar.METADATA_FAILURE_RATE_LIMITED,
+            ),
+            (arxiv_client.ArxivApiError("接続に失敗しました"), radar.METADATA_FAILURE_UNAVAILABLE),
+            ([], radar.METADATA_FAILURE_NOT_FOUND),
+        ],
+    )
+    def test_metadata_failure_names_the_reason(self, monkeypatch, outcome, expected):
+        """3つの理由が ``note`` と1対1で機械可読になる（文面を当てにいかせない）。"""
+        _stub_cooldown(monkeypatch, False)
+        _stub_fetch_by_ids(monkeypatch, outcome)
+        monkeypatch.setattr(radar.store, "get_subscription", lambda session, key: None)
+        seed = radar.resolve_seed(_seed_session(), "doc-1")
+        assert seed["metadata_failure"] == expected
+        assert seed["note"], "機械可読の目印は事実文の置き換えではない（両方出す）"
+
+    def test_run_radar_search_states_that_it_is_not_blocked(self, monkeypatch):
+        _stub_cooldown(monkeypatch, False)
+        _stub_fetch_by_ids(monkeypatch, [_entry("2608.20293", categories=["astro-ph.CO"])])
+        _stub_search(monkeypatch, [_entry("2608.00002", title="A", summary="x")])
+        _stub_band(monkeypatch)
+        result = radar.run_radar_search(_seed_session(), "doc-1", distance="near")
+        assert result["arxiv_blocked"] is False
+
+
+class TestBlockedRadarResult:
+    """制限中の「探していない」結果が、通常経路と**同じ形**で返ること（§14.7）。"""
+
+    def test_mirrors_the_normal_shape_without_calling_arxiv(self, no_arxiv, monkeypatch):
+        _stub_cooldown(monkeypatch, True)
+
+        def _boom(*args, **kwargs):  # pragma: no cover — 呼ばれたら失敗させる
+            raise AssertionError("arXiv must not be called while blocked")
+
+        monkeypatch.setattr(radar.arxiv_client, "search", _boom)
+        monkeypatch.setattr(radar.arxiv_client, "fetch_by_ids", _boom)
+
+        result = radar.blocked_radar_result(
+            _seed_session(), "doc-1", distance="near", categories=["astro-ph.CO"]
+        )
+        assert result["arxiv_blocked"] is True
+        assert result["note"] == radar.NOTE_ARXIV_BLOCKED
+        assert result["candidates"] == []
+        assert result["total"] == 0
+        assert result["banding"] == {"available": False, "note": radar.NOTE_ARXIV_BLOCKED}
+        assert result["relation_context"] == {"available": False}
+        assert result["closed_world_note"] == radar.search.CLOSED_WORLD_NOTE
+        assert result["distance"] == "near"
+        assert result["seed"]["arxiv_blocked"] is True
+        # 何を探そうとしていたかは、探せなかったときこそ画面に要る（PR7）。
+        assert "cat:astro-ph.CO" in result["query"]
+
+    def test_rejects_an_unknown_distance(self, no_arxiv):
+        with pytest.raises(ValueError):
+            radar.blocked_radar_result(_seed_session(), "doc-1", distance="everywhere")
+
+    def test_missing_document_raises_lookup_error(self, no_arxiv):
+        with pytest.raises(LookupError):
+            radar.blocked_radar_result(FakeSession(), "doc-missing")
+
+
+class TestCompareRequiresArxiv:
+    """写しだけで比較できるなら、制限中でも比較は成立させる（§14.3 の予算 0 コール）。"""
+
+    def test_true_when_an_abstract_is_missing(self, no_arxiv):
+        session = _seed_session()
+        assert radar.compare_requires_arxiv(session, "doc-1", ["2608.00002"]) is True
+
+    def test_false_when_every_abstract_is_cached(self, no_arxiv):
+        session = _seed_session(
+            arxiv_metadata=[
+                _entry("2608.20293", summary="seed"),
+                _entry("2608.00002", summary="candidate"),
+            ]
+        )
+        assert radar.compare_requires_arxiv(session, "doc-1", ["2608.00002"]) is False
+
+    def test_unparsable_ids_do_not_require_a_call(self, no_arxiv):
+        session = _seed_session(arxiv_metadata=[_entry("2608.20293", summary="seed")])
+        assert radar.compare_requires_arxiv(session, "doc-1", ["  ", "not-an-id"]) is False

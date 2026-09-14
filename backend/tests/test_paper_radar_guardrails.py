@@ -26,6 +26,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -61,6 +62,50 @@ class TestCoreIsolation:
     def test_files_exist(self):
         assert (CORE_DIR / "radar.py").is_file()
         assert (CORE_DIR / "compare.py").is_file()
+        assert (CORE_DIR / "metadata_cache.py").is_file()
+
+    def test_metadata_cache_is_isolated_and_never_deletes(self):
+        """外部事実の写し（migration 085 / 設計書 §14）も core の規律の内側。"""
+        src = (CORE_DIR / "metadata_cache.py").read_text(encoding="utf-8")
+        assert_source_does_not_import(
+            src,
+            ["fastapi", "core.llm", "openai"],
+            context="core/paper_discovery/metadata_cache.py",
+        )
+        assert_source_forbids(
+            src,
+            ["DELETE FROM", "delete from", "generate_text", "generate_embeddings"],
+            context="core/paper_discovery/metadata_cache.py",
+        )
+        # 更新は upsert のみ（行削除も truncate もしない）。
+        assert "ON CONFLICT (arxiv_id) DO UPDATE" in src
+
+    def test_metadata_cache_stores_external_facts_only(self):
+        """写しに教員の判断・候補の状態・帰属を持ち込まない（PD5 / CC3 同型）。"""
+        src = (CORE_DIR / "metadata_cache.py").read_text(encoding="utf-8")
+        insert = src[src.index("INSERT INTO paper_discovery_arxiv_metadata_cache"):]
+        insert = insert[: insert.index('"""')]
+        for forbidden in ("user_id", "document_id", "status", "dismiss", "score"):
+            assert forbidden not in insert, (
+                f"外部事実の写しに {forbidden} を書かない（候補・判断の保存になる）"
+            )
+
+    def test_failures_are_not_cached(self):
+        """読めなかった記録を「読んだ結果」と取り違えない（429 の抑制は client の責務）。"""
+        src = (CORE_DIR / "metadata_cache.py").read_text(encoding="utf-8")
+        assert_source_forbids(
+            src,
+            ["fetch_status", "ArxivApiError", "ArxivRateLimitedError"],
+            context="core/paper_discovery/metadata_cache.py",
+        )
+        # 失敗経路（例外・該当なし）から写しを書かないことは radar 側で固定する。
+        fetch = extract_function_source(_RADAR_SRC, "_fetch_seed_entry")
+        remember_at = fetch.index("metadata_cache.remember(")
+        for marker in ("NOTE_ARXIV_RATE_LIMITED", "NOTE_ARXIV_METADATA_UNAVAILABLE",
+                       "NOTE_ARXIV_METADATA_NOT_FOUND"):
+            assert fetch.index(marker) < remember_at, (
+                "事実文を立てる縮退経路より後ろでだけ写しを書く（失敗をキャッシュしない）"
+            )
 
     def test_radar_does_not_import_fastapi(self):
         assert_source_does_not_import(
@@ -224,10 +269,13 @@ class TestNoSideEffects:
         )
 
     def test_the_only_write_is_the_provenance_registration(self):
-        """PR1: 探索は読むだけ。書き込みは出所の後付け記帳1箇所に閉じる。
+        """PR1: 教員の判断の書き込みは出所の後付け記帳1箇所に閉じる。
 
         推定（ファイル名からの arXiv ID）を seed 解決の副作用で保存しない
         （「推定」を勝手に「登録済み」へ昇格させない）ことを構造で固定する。
+        探索経路が触れてよいのは **arXiv が返したメタデータの写し**
+        （``metadata_cache`` / migration 085 / 設計書 §14）だけで、SQL は
+        そのモジュールの中にしか無い。
         """
         for fn_name in ("_document_row", "seed_keyphrase_candidates", "resolve_seed",
                         "run_radar_search"):
@@ -245,6 +293,22 @@ class TestNoSideEffects:
         assert_source_forbids(
             registration, ["commit("], context="register_arxiv_provenance"
         )
+
+    def test_search_path_only_writes_the_external_fact_cache(self):
+        """探索経路の書き込み先は写しだけ（候補・購読・見送りへは書かない）。"""
+        for fn_name in ("_fetch_seed_entry", "run_radar_search"):
+            src = extract_function_source(_RADAR_SRC, fn_name)
+            written = [
+                line.strip()
+                for line in src.splitlines()
+                if "metadata_cache." in line and "read_fresh" not in line
+            ]
+            for line in written:
+                assert "metadata_cache.remember(" in line, line
+        # 比較分析も同じ（写しを読み、足りない分だけ arXiv へ）。
+        run_compare = extract_function_source(_COMPARE_SRC, "run_compare")
+        assert "metadata_cache.read_fresh(" in run_compare
+        assert "metadata_cache.remember(" in run_compare
 
     def test_radar_routes_do_not_write_or_audit(self):
         for fn_name in ("get_radar_seed", "radar_search", "radar_compare"):
@@ -335,16 +399,46 @@ class TestScope:
                 context=str(path),
             )
 
-    def test_no_migration_is_added_for_the_radar(self):
-        """PR1: 新テーブル・新列ゼロ（構造的な確認）。"""
+    #: レーダーの語が現れてよい唯一の DDL（2026-09-14 / 設計書 §14）。
+    #: arXiv メタデータの**外部事実の写し**を置く発見層の表で、レーダー専用でも
+    #: なければ候補・教員の判断のスナップショットでもない（CC3 = 077 と同型の
+    #: 設計明示例外）。読み手はレーダー・分野購読の検索・比較分析の3つ。
+    _EXTERNAL_FACT_CACHE_SQL = "085_paper_discovery_arxiv_metadata_cache.sql"
+
+    def test_no_migration_stores_radar_candidates_or_judgements(self):
+        """PR1: レーダーは候補も教員の判断も保存しない（構造的な確認）。
+
+        唯一の例外は外部事実の写し（:data:`_EXTERNAL_FACT_CACHE_SQL`）で、そこにも
+        候補の状態・教員・教材への従属を入れないことを併せて固定する。
+        """
         sql_files = sorted((BACKEND / "db").glob("*.sql"))
         offending = [
             path.name
             for path in sql_files
-            if "radar" in path.name.lower()
-            or "radar" in path.read_text(encoding="utf-8").lower()
+            if path.name != self._EXTERNAL_FACT_CACHE_SQL
+            and (
+                "radar" in path.name.lower()
+                or "radar" in path.read_text(encoding="utf-8").lower()
+            )
         ]
         assert offending == [], f"radar must not add DDL: {offending}"
+
+        cache_sql = (BACKEND / "db" / self._EXTERNAL_FACT_CACHE_SQL).read_text(
+            encoding="utf-8"
+        )
+        statements = re.sub(r"--[^\n]*", "", cache_sql)
+        tables = set(
+            re.findall(r"CREATE TABLE IF NOT EXISTS\s+(\w+)", statements, re.IGNORECASE)
+        )
+        assert tables == {"paper_discovery_arxiv_metadata_cache"}
+        # 教員・教材・候補の状態を持たない（外部事実の写しに留める）。
+        for forbidden in ("user_id", "document_id", "REFERENCES", "status", "dismiss"):
+            assert forbidden not in statements, (
+                f"外部事実の写しに {forbidden} を持たせない（候補・判断の保存になる）"
+            )
+        # シードしない・行削除しない（070 / 077 と同じ判断）。
+        assert "INSERT" not in statements
+        assert "DELETE" not in statements
 
 
 # ---------------------------------------------------------------------------
@@ -387,3 +481,77 @@ class TestDistanceLabelCanon:
         forbidden = ('"score"', '"similarity"', '"confidence"', '"relevance"', '"rank"')
         assert_source_forbids(_RADAR_SRC, forbidden, context="radar.py")
         assert_source_forbids(_COMPARE_SRC, forbidden, context="compare.py")
+
+
+# ---------------------------------------------------------------------------
+# 7. ブロックの目印（2026-09-15 / 設計書 §14.7）
+# ---------------------------------------------------------------------------
+
+
+class TestArxivBlockedMarker:
+    """429 の事実を構造で残す層が、数値を持ち出さないことを固定する。"""
+
+    def test_remaining_seconds_never_leaves_the_client(self):
+        """PR2: 残り秒数は ``arxiv_client`` の内側の判定材料で、人に見せない。
+
+        route / radar が読めるのは真偽（``cooldown_active``）だけ。ここを緩めると
+        「あと N 秒」が事実文に混ざり、数値非表示の規律が崩れる。
+        """
+        for src, context in (
+            (_RADAR_SRC, "core/paper_discovery/radar.py"),
+            (_ROUTE_SRC, "api/routes/paper_discovery.py"),
+        ):
+            assert_source_forbids(
+                src, ["cooldown_remaining_seconds"], context=context
+            )
+
+    def test_blocked_notes_carry_no_numbers(self):
+        """事実文に数字を書かない（秒・回数・ステータスコードのいずれも）。"""
+        from core.paper_discovery import radar as radar_mod
+
+        for name in (
+            "NOTE_ARXIV_BLOCKED",
+            "NOTE_ARXIV_RATE_LIMITED",
+            "NOTE_ARXIV_METADATA_UNAVAILABLE",
+            "NOTE_ARXIV_METADATA_NOT_FOUND",
+        ):
+            text = getattr(radar_mod, name)
+            assert not re.search(r"[0-9０-９]", text), f"{name}: {text}"
+
+    def test_the_route_does_not_reword_the_blocked_fact(self):
+        """文言の正本は core（``radar.NOTE_ARXIV_BLOCKED``）— route で言い換えない。"""
+        assert "_DETAIL_ARXIV_RATE_LIMITED = pd_radar.NOTE_ARXIV_BLOCKED" in _ROUTE_SRC
+        # 「制限されている」という観測できた事実で書く（「混雑している」は向こう側の
+        # 事情の推測で、こちらには分からない — §14.7）。
+        assert "混雑" not in _ROUTE_SRC
+        from core.paper_discovery import radar as radar_mod
+
+        for name in ("NOTE_ARXIV_BLOCKED", "NOTE_ARXIV_RATE_LIMITED"):
+            assert "混雑" not in getattr(radar_mod, name)
+
+    def test_blocked_paths_do_not_call_arxiv(self):
+        """制限中の縮退経路は arXiv クライアントの検索関数に触れない。"""
+        fn = extract_function_source(_RADAR_SRC, "blocked_radar_result")
+        assert_source_forbids(
+            fn,
+            ["arxiv_client.search", "arxiv_client.fetch_by_ids", "fetch_arxiv=True"],
+            context="radar.blocked_radar_result",
+        )
+        assert "fetch_arxiv=False" in fn
+
+    def test_blocked_compare_does_not_spend_the_llm_quota(self):
+        """上流の制限で教員の日次持ち分を削らない（ゲート消費は縮退判定の後）。"""
+        fn = extract_function_source(_ROUTE_SRC, "radar_compare")
+        blocked_at = fn.index("compare_requires_arxiv")
+        quota_at = fn.index("_consume_radar_compare_quota(")
+        assert blocked_at < quota_at, (
+            "制限中の判定より先に日次上限を消費しない（呼べなかった回を数えない）"
+        )
+
+    def test_blocked_subscription_search_does_not_touch_last_checked(self):
+        """探していないのに「確かめた」と記録しない（地図の端の1ビットを汚さない）。"""
+        fn = extract_function_source(
+            (CORE_DIR / "search.py").read_text(encoding="utf-8"), "run_search"
+        )
+        blocked_return = fn.index("result[\"closed_world_note\"] = blocked_note")
+        assert fn.index("touch_last_checked") > blocked_return

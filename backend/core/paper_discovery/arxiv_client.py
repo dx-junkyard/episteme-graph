@@ -17,6 +17,13 @@
   （HTTP 429）だけは部分型 :class:`ArxivRateLimitedError` で区別する（「繋がらない」と
   「混んでいる」では教員の次の一手が違うため。区別しない呼び出し側は基底型の
   except 節のまま動く）。
+- **429 を受けたら一定時間 arXiv を呼ばない（混雑クールダウン、2026-09-14）**。
+  混雑中も画面操作のたびにリクエストが出ると、ブロックの窓が人の操作で延び続ける。
+  429 を受けた時刻から :func:`_cooldown_seconds` 秒のあいだは **HTTP を出さずに**
+  :class:`ArxivRateLimitedError` を投げる。これは自動リトライ（PD7 が禁じるもの）の
+  逆で、**抑制**である — 待ち直しも再送もせず、呼ぶこと自体をやめる。窓が明ければ
+  次の呼び出しは普通に出る（人の操作を起点に、というPD1/PR5の規律は変わらない）。
+  秒数の正本は env ``ARXIV_RATE_LIMIT_COOLDOWN_SECONDS``（既定 600・0 で抑制なし）。
 - FastAPI 非 import・``core.llm`` 非 import（発見層は LLM 0回）。
 - Atom のパースは stdlib の ``xml.etree`` のみ（外部依存を足さない）。
 
@@ -61,6 +68,14 @@ MAX_ID_LIST = 20
 #: arXiv がレート制限で応答を拒むときの HTTP ステータス。
 RATE_LIMITED_STATUS = 429
 
+#: 混雑クールダウンの既定秒数（設定を読めないときのフォールバック。config の既定と同値）。
+DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS = 600.0
+
+#: クールダウン中に投げる事実文（数値を書かない — 残り秒数を人に見せない）。
+RATE_LIMIT_COOLDOWN_MESSAGE = (
+    "arXiv 側の混雑を受けて、しばらく arXiv への問い合わせを止めています"
+)
+
 #: 並び順の語彙（arXiv API の ``sortBy`` / ``sortOrder``）。
 #: v1 は日付順のみ（並び順は新着順 = 機械の点数を持ち込まない、PD4）。
 SORT_BY_VALUES = ("submittedDate", "lastUpdatedDate")
@@ -75,6 +90,10 @@ _NS = {"atom": _ATOM_NS, "arxiv": _ARXIV_NS, "opensearch": _OPENSEARCH_NS}
 #: スロットル状態（モジュールレベル。プロセス内の全呼び出しで共有する）。
 _throttle_lock = threading.Lock()
 _last_request_at: Optional[float] = None
+
+#: 混雑クールダウンの期限（``time.monotonic()`` 基準。None = クールダウンなし）。
+#: スロットルと同じ ``_throttle_lock`` で守る（状態が2つに割れないように）。
+_cooldown_until: Optional[float] = None
 
 
 class ArxivApiError(Exception):
@@ -110,10 +129,65 @@ def _throttle() -> None:
 
 
 def reset_throttle() -> None:
-    """スロットル状態を初期化する（テスト用。本番コードから呼ばない）。"""
-    global _last_request_at
+    """スロットル状態と混雑クールダウンを初期化する（テスト用。本番コードから呼ばない）。"""
+    global _last_request_at, _cooldown_until
     with _throttle_lock:
         _last_request_at = None
+        _cooldown_until = None
+
+
+# ---------------------------------------------------------------------------
+# 混雑クールダウン（429 のあと arXiv を呼ばない窓）
+# ---------------------------------------------------------------------------
+
+
+def _cooldown_seconds() -> float:
+    """クールダウンの長さ（秒）。0 以下ならクールダウンなし。
+
+    正本は env ``ARXIV_RATE_LIMIT_COOLDOWN_SECONDS``（``core.config``）。
+    設定を読めない場合は :data:`DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS` に倒す
+    （抑制を外して混雑中に呼び続けるより、抑制側で誤る方が安全側）。
+    """
+    try:
+        from core.config import get_settings  # 遅延 import（core の純粋性を保つ）
+
+        value = float(get_settings().arxiv_rate_limit_cooldown_seconds)
+    except Exception:  # pragma: no cover - 設定読み込みの異常系
+        logger.debug("falling back to the default arXiv cooldown", exc_info=True)
+        return DEFAULT_RATE_LIMIT_COOLDOWN_SECONDS
+    if value <= 0:
+        return 0.0
+    return value
+
+
+def _begin_cooldown() -> None:
+    """429 を受けた事実を記録し、以後しばらく arXiv を呼ばないようにする。"""
+    global _cooldown_until
+    seconds = _cooldown_seconds()
+    if seconds <= 0:
+        # 0 = 抑制なし（運用で明示的に切った場合）。窓を作らない。
+        return
+    with _throttle_lock:
+        _cooldown_until = time.monotonic() + seconds
+
+
+def cooldown_remaining_seconds() -> float:
+    """クールダウンの残り秒数（窓が無ければ 0.0）。
+
+    **API レスポンス・UI に載せない**（数値は出さない — PD4 / PR2 の規律）。
+    運用ログと本モジュール内の判定のためだけの読み取り。
+    """
+    with _throttle_lock:
+        until = _cooldown_until
+    if until is None:
+        return 0.0
+    remaining = until - time.monotonic()
+    return remaining if remaining > 0 else 0.0
+
+
+def cooldown_active() -> bool:
+    """いま arXiv への問い合わせを止めている最中か。"""
+    return cooldown_remaining_seconds() > 0
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +201,14 @@ def _api_url() -> str:
 
 
 def _http_get(params: dict, timeout: float) -> str:
-    """arXiv API へ1回だけ GET する（スロットル込み）。本文文字列を返す。"""
+    """arXiv API へ1回だけ GET する（クールダウン検査 + スロットル込み）。本文文字列を返す。
+
+    直前に 429 を受けている間は **HTTP を出さずに** :class:`ArxivRateLimitedError`
+    を投げる（リトライではなく抑制 — モジュール docstring 参照）。
+    """
+    if cooldown_active():
+        raise ArxivRateLimitedError(RATE_LIMIT_COOLDOWN_MESSAGE)
+
     _throttle()
     try:
         response = requests.get(_api_url(), params=params, timeout=timeout)
@@ -136,6 +217,8 @@ def _http_get(params: dict, timeout: float) -> str:
 
     if response.status_code == RATE_LIMITED_STATUS:
         # 混雑は「接続できない」と別の事実にする（時間をおけば通る — PD7）。
+        # ここで窓を立て、以後しばらくは呼ばない（人の操作でブロックを延ばさない）。
+        _begin_cooldown()
         raise ArxivRateLimitedError("arXiv 側が混雑しています")
     if response.status_code != 200:
         raise ArxivApiError("arXiv からの応答を取得できませんでした")
@@ -260,7 +343,8 @@ def search(
 
     Raises:
         ArxivApiError: 空クエリ・接続失敗・非200・パース不能
-            （混雑 = HTTP 429 は部分型 :class:`ArxivRateLimitedError`）。
+            （混雑 = HTTP 429 は部分型 :class:`ArxivRateLimitedError`。直前の 429 で
+            クールダウン中は HTTP を出さずに同じ型で諦める）。
     """
     search_query = " ".join(str(query or "").split())
     if not search_query:
@@ -314,7 +398,8 @@ def fetch_by_ids(
 
     Raises:
         ArxivApiError: 接続失敗・非200・パース不能
-            （混雑 = HTTP 429 は部分型 :class:`ArxivRateLimitedError`）。
+            （混雑 = HTTP 429 は部分型 :class:`ArxivRateLimitedError`。直前の 429 で
+            クールダウン中は HTTP を出さずに同じ型で諦める）。
     """
     normalized: list[str] = []
     for ref in ids or ():

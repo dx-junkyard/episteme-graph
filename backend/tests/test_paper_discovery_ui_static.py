@@ -40,6 +40,9 @@ Phase 3（関連度順の並べ替え + 引用グラフからの候補、§6）�
 - 引用グラフ一覧は出所（`derived_from` / `seeds` / `closed_world_note`）を常時明示し、
   通常検索の一覧と混ざらないこと（PD6）。
 
+- arXiv 側のアクセス制限（HTTP 429）: 検索パネルの先頭に枠付きバナーを出し、制限中は
+  「候補が見つかりませんでした」を出さない（レーダーと同型・見出しは静的文）。
+
 すべて静的解析（部分文字列・正規表現）。外部 API / 実 DOM は使わない。
 """
 
@@ -1014,3 +1017,113 @@ class TestFrontierInterestPane:
         assert "個人・時期・順位は表示しません。" in self.src
         assert "購読条件・取り込み・分野の地図を自動で変えません。" in self.src
         assert "INTEREST_NOTE" in _extract_function(self.code, "renderFrontierInterest")
+
+
+# ---------------------------------------------------------------------------
+# ⑯ arXiv 側のアクセス制限（HTTP 429）の表示
+# ---------------------------------------------------------------------------
+
+
+class TestArxivBlockedBanner:
+    """「向こうが止めている」ことを画面の一等地で言う（論文レーダーと同型）。
+
+    ここを落とすと、arXiv がこの環境からの問い合わせを制限している回に残るのは
+    「この検索条件では候補が見つかりませんでした」だけになり、**制限されている**
+    ことが「該当なし」と読めてしまう（PD6 の閉世界の正直さを裏側から破る）。
+    """
+
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+        self.code = _strip_comments(self.src)
+
+    def test_banner_element_exists_at_the_top_of_the_search_panel(self):
+        body = _extract_function(self.src, "modalHtml")
+        assert 'id="pd-arxiv-blocked"' in body
+        # 分野入力より前（検索・購読パネルの先頭）に置く。
+        assert body.index('id="pd-arxiv-blocked"') < body.index('id="pd-domain"')
+
+    def test_banner_is_hidden_until_the_server_says_so(self):
+        body = _extract_function(self.src, "modalHtml")
+        assert "display:none" in body.split('id="pd-arxiv-blocked"')[1][:400]
+        render = _extract_function(self.src, "renderArxivBlocked")
+        assert "if (!state.arxivBlocked)" in render
+        assert 'node.style.display = "none";' in render
+
+    def test_banner_is_visually_distinct_from_grey_fact_lines(self):
+        body = _extract_function(self.src, "modalHtml")
+        block = body.split('id="pd-arxiv-blocked"')[1][:400]
+        assert "border:1px solid var(--color-text-danger" in block
+        assert "background:" in block
+
+    def test_static_headings_are_fixed_and_carry_no_numbers(self):
+        for head in ("arXiv からのアクセス制限中", "arXiv に問い合わせできませんでした"):
+            assert head in self.src, f"見出しが無い: {head}"
+            assert not re.search(r"\d", head), f"見出しに数字がある: {head}"
+
+    def test_blocked_and_unreachable_headings_are_distinct(self):
+        render = _extract_function(self.src, "renderArxivBlocked")
+        assert "ARXIV_UNREACHABLE_HEAD" in render
+        assert "ARXIV_BLOCKED_HEAD" in render
+        assert '=== "unreachable"' in render
+
+    def test_body_text_comes_from_the_server_only(self):
+        render = _extract_function(self.src, "renderArxivBlocked")
+        assert "state.arxivBlockedNote" in render
+        picker = _extract_function(self.src, "blockedNoteFrom")
+        assert "data.closed_world_note" in picker
+        for invented in ("分後", "秒後", "回まで", "しばらくすると復旧", "自動的に再試行"):
+            assert invented not in self.code, f"縮退理由の文言を持っている: {invented}"
+
+    def test_search_response_applies_the_flag(self):
+        body = _extract_function(self.src, "runSearch")
+        assert "arxiv_blocked" in body
+        assert "applyArxivBlocked(" in body
+
+    def test_only_an_explicit_false_clears_the_flag(self):
+        body = _extract_function(self.src, "applyArxivBlocked")
+        assert "flag === true" in body
+        assert "flag === false" in body
+        assert "state.arxivBlocked = false;" in body
+        assert "} else {" not in body
+
+    def test_bad_gateway_is_detected_by_status_not_by_japanese_text(self):
+        body = _extract_function(self.src, "applyRequestFailure")
+        assert "err.http_status !== 502" in body
+        assert '"unreachable"' in body
+        reject = _extract_function(self.src, "rejectWithBody")
+        assert "payload.http_status = res.status;" in reject
+
+    def test_search_failure_routes_through_it(self):
+        body = _extract_function(self.src, "runSearch")
+        assert "applyRequestFailure(err);" in body
+
+    def test_empty_result_line_is_suppressed_while_blocked(self):
+        body = _extract_function(self.src, "renderCandidates")
+        assert "state.arxivBlocked" in body
+        assert body.index("state.arxivBlocked") < body.index("EMPTY_RESULT_NOTICE")
+        assert "state.arxivBlockedNote" in body
+
+    def test_search_button_is_not_disabled_by_the_block(self):
+        """制限中もボタンは押せる（サーバは 200 の事実文を返すだけ・費用ゼロ）。"""
+        assert "制限中は arXiv へ問い合わせません。" in self.src
+        hint = _extract_function(self.src, "renderSearchHint")
+        assert "state.arxivBlocked" in hint
+        run = _extract_function(self.src, "runSearch")
+        assert "state.arxivBlocked" not in run.split("api(")[0]
+
+    def test_no_countdown_or_auto_retry(self):
+        for banned in ("setTimeout", "setInterval", "retryAfter", "retry_after"):
+            assert banned not in self.code, f"自動再試行・カウントダウンの痕跡: {banned}"
+
+
+# ---------------------------------------------------------------------------
+# ⑰ キャッシュバスター（配信更新の取りこぼし防止）
+# ---------------------------------------------------------------------------
+
+
+class TestCacheBuster:
+    def test_admin_html_bumps_both_arxiv_script_cache_busters(self):
+        """JS を直しても `?v=` を上げ忘れると、教員のブラウザは古い JS のまま。"""
+        src = _read(ADMIN_HTML)
+        assert "js/admin-paper-discovery.js?v=paper-discovery-20260915-1" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20260915-1" in src

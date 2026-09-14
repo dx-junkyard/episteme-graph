@@ -8,9 +8,12 @@
 
 - **PR1 起点は教材1件・候補は読み時導出**: seed の解決も候補一覧も毎回導出し、
   保存しない。レーダー専用のテーブル・列を持たない（migration 0）。
-  唯一の書き込みは :func:`register_arxiv_provenance`（既存列 ``documents.source_url``
-  への arXiv 出所の後付け記帳）で、これは教員の明示操作を受けた route 層だけが
-  呼ぶ。探索経路（:func:`resolve_seed` / :func:`run_radar_search`）は書き込まない。
+  唯一の「教員の判断」の書き込みは :func:`register_arxiv_provenance`（既存列
+  ``documents.source_url`` への arXiv 出所の後付け記帳）で、これは教員の明示操作を
+  受けた route 層だけが呼ぶ。探索経路（:func:`resolve_seed` /
+  :func:`run_radar_search`）が触れるのは **arXiv が返したメタデータの写し**
+  （migration 085 の外部事実キャッシュ）だけで、候補・帯・教員の選択は保存しない
+  （CC3 と同型の設計明示例外 — 設計書 §14）。
 - **PR2 距離は段階ラベルのみ**: 帯分けは ``ranking.band_candidates`` に委ね、
   cosine の生値はここへ出てこない。測れなかった候補にはラベルが付かない。
 - **PR5 教員の明示操作のみ**: worker / cron からこのモジュールを呼ぶ経路を作らない
@@ -42,7 +45,7 @@ from core.label_vocab import (
     RADAR_DISTANCE_LABEL_MID,
     RADAR_DISTANCE_LABEL_NEAR,
 )
-from core.paper_discovery import arxiv_client, corpus, search, store
+from core.paper_discovery import arxiv_client, corpus, metadata_cache, search, store
 from core.paper_discovery import ranking as pd_ranking
 from core.paper_discovery.schema import (
     RADAR_DISTANCES,
@@ -85,22 +88,53 @@ NOTE_ARXIV_METADATA_UNAVAILABLE = (
     "arXiv から論文情報を取得できなかったため、別の供給元から検索条件を組み立てました。"
 )
 
-#: arXiv 側の混雑（HTTP 429）で引けなかったときの事実文。到達失敗と同じ文言にしない
-#: （「繋がらない」なら設定や回線を疑い、「混んでいる」なら待てばよい — 教員の次の
-#: 一手が違う。PR7）。
+#: arXiv からアクセスを制限された（HTTP 429）ために引けなかったときの事実文。
+#: 到達失敗と同じ文言にしない（「繋がらない」なら設定や回線を疑い、「制限されている」
+#: なら時間をおくしかない — 教員の次の一手が違う。PR7）。
+#: **「混雑」とは言わない**（2026-09-15 オーナー指示 §14.7）— 制限されているのは
+#: 観測できた事実で、向こうが混んでいるかどうかはこちらには分からない。条件を変えれば
+#: 通るかのように読ませないため、問い合わせを止めていることも併せて言う。
 #: 指す操作は「検索」ではなく「開き直す」— seed のメタデータを取り直すのは
 #: ``GET /radar/seed``（モーダルを開いたとき）だけで、検索ボタンの再押下では
 #: 取り直さない（§13.5）。効かない操作を案内しない。
 NOTE_ARXIV_RATE_LIMITED = (
-    "arXiv 側が混雑しているため、論文情報を取得できませんでした。"
-    "カテゴリを直接指定するか、少し時間をおいてからこの画面を開き直してください。"
+    "arXiv からアクセスを制限されているため、論文情報を取得できませんでした。"
+    "この画面からの arXiv への問い合わせは、しばらくの間止めています。"
+    "時間をおいてから、もう一度この画面を開いてください。"
 )
+
+#: いま arXiv からアクセスを制限されている（クールダウン中）という**状態**の事実文
+#: （§14.7）。上の :data:`NOTE_ARXIV_RATE_LIMITED` が「この取得が失敗した」を言うのに対し、
+#: こちらは「いまは何を押しても arXiv へは出ていかない」を言う。**残り時間・回数などの
+#: 数値は書かない**（PR2 — 窓の残り時間を読む関数は ``arxiv_client`` の内側の判定材料
+#: であって、API / UI には出さない）。条件を変えても解けないことを明示するのは、教員が
+#: 条件をいじって同じ結果を何度も踏むのを防ぐため。
+NOTE_ARXIV_BLOCKED = (
+    "arXiv からアクセスを制限されています。"
+    "この画面からの arXiv への問い合わせは、しばらくの間止めています。"
+    "制限が解けるまでは、条件を変えても検索・比較はできません。"
+    "時間をおいてから、もう一度この画面を開いてください。"
+)
+
+#: seed のメタデータを引けなかった理由（``seed["metadata_failure"]``。**引けたときは
+#: キー自体を付けない**）。上の ``NOTE_ARXIV_*`` 3文と1対1に対応する機械可読の目印で、
+#: フロントが文面の部分一致で理由を当てにいかなくて済むようにする（§14.7）。
+METADATA_FAILURE_RATE_LIMITED = "rate_limited"
+METADATA_FAILURE_UNAVAILABLE = "unavailable"
+METADATA_FAILURE_NOT_FOUND = "not_found"
 
 #: arXiv には届いたが、その ID の論文情報が返らなかったときの事実文。
 #: 到達失敗と混ぜると「繋がらなかった」と誤読させる（PR7）。
 NOTE_ARXIV_METADATA_NOT_FOUND = (
     "arXiv からこの論文の情報が返らなかったため、別の供給元から検索条件を組み立てました。"
 )
+
+#: seed のメタデータの出所（``seed["metadata_source"]``。事実ラベルであって数値ではない）。
+#: ``arxiv`` = 今この操作で arXiv から引いた / ``cache`` = 保存済みの写しを読んだ
+#: （migration 085 の外部事実キャッシュ）。**引けなかったときはキー自体を付けない**
+#: （引けたのか読んだのかを黙らせない一方で、無い事実を捏造もしない — PR7）。
+METADATA_SOURCE_ARXIV = "arxiv"
+METADATA_SOURCE_CACHE = "cache"
 
 
 def _clean(value: Any) -> str:
@@ -196,13 +230,53 @@ def seed_keyphrase_candidates(session, document_row: dict[str, str]) -> list[dic
     return out
 
 
-def _fetch_seed_entry(seed: dict, arxiv_id: str):
-    """seed のメタデータを arXiv から1件だけ引く（引けなければ ``None``）。
+def arxiv_blocked() -> bool:
+    """いま arXiv への問い合わせを止めている最中か（読み取りのみ・fail-soft）。
+
+    正本は :func:`arxiv_client.cooldown_active`。**残り時間は読まない**（窓の秒数を
+    返す関数は、このモジュールからも route からも参照しない — 数値を人に見せないため。
+    PR2 / §14.7。ガードレールが識別子の不在で固定する）。状態を読めない異常時は
+    「止めていない」に倒す（余計なブロック表示で操作を塞がない）。
+    """
+    try:
+        return bool(arxiv_client.cooldown_active())
+    except Exception:  # noqa: BLE001 — 状態が読めないだけで探索は成立させる
+        logger.debug("arXiv cooldown state unavailable", exc_info=True)
+        return False
+
+
+def _mark_arxiv_blocked(seed: dict) -> None:
+    """seed に「制限されているか」の目印を付ける（常在キー — §14.7）。
+
+    **キーは常に付ける**（不在で黙らせない）。真のときだけ事実文
+    :data:`NOTE_ARXIV_BLOCKED` を併記する。
+
+    判定は「クールダウン中」**または**「この取得がまさに 429 で失敗した」。後者を
+    足すのは、429 を受けた瞬間（クールダウンを立てた直後）のこの応答でも目印が真に
+    なるようにするため — 制限されている事実は、窓が立ったかどうかより先に観測できる。
+    """
+    blocked = (
+        arxiv_blocked()
+        or seed.get("metadata_failure") == METADATA_FAILURE_RATE_LIMITED
+    )
+    seed["arxiv_blocked"] = blocked
+    if blocked:
+        seed["arxiv_blocked_note"] = NOTE_ARXIV_BLOCKED
+
+
+def _fetch_seed_entry(session, seed: dict, arxiv_id: str):
+    """seed のメタデータを1件だけ解決する（引けなければ ``None``）。
+
+    **保存済みの写し（migration 085）を先に読む**（設計書 §14 — 教員の一連の操作で
+    arXiv API を叩くのは最大2回）。新鮮な写しがあれば arXiv を呼ばず、
+    ``seed["metadata_source"]`` に出所（``cache`` / ``arxiv``）を残す。画面を開き
+    直すたびに同じ論文のメタデータを引き直さないための読み時キャッシュで、
+    保存するのは外部事実だけ（候補も教員の判断も残さない — PD5 / CC3 同型）。
 
     PR7 の要（かなめ）: **引けなかったことを黙って空カテゴリにしない**。取得できない
     理由は3つあり、教員の次の一手がそれぞれ違うので事実文も分ける。
 
-    - 混雑（HTTP 429）→ :data:`NOTE_ARXIV_RATE_LIMITED`（待てば通る）
+    - アクセスの制限（HTTP 429）→ :data:`NOTE_ARXIV_RATE_LIMITED`（時間をおくしかない）
     - その他の到達・解釈の失敗 → :data:`NOTE_ARXIV_METADATA_UNAVAILABLE`
     - 200 で返ったが該当 ID の項目が無い → :data:`NOTE_ARXIV_METADATA_NOT_FOUND`
       （撤回・ID 誤りなど。**到達失敗と混ぜない**）
@@ -210,21 +284,34 @@ def _fetch_seed_entry(seed: dict, arxiv_id: str):
     いずれも例外にせず ``None`` を返す（検索そのものは成立させ、購読フォールバックへ
     続ける）。note は ``seed`` に載せるので、呼び出し側は分岐を持たない。
     """
+    cached = metadata_cache.read_fresh(session, [arxiv_id]).get(
+        normalize_arxiv_id(arxiv_id) or arxiv_id
+    )
+    if cached is not None:
+        seed["metadata_source"] = METADATA_SOURCE_CACHE
+        return cached
+
     try:
         entries = arxiv_client.fetch_by_ids([arxiv_id])
     except arxiv_client.ArxivRateLimitedError:
         logger.info("radar seed metadata rate-limited for %s", arxiv_id)
         seed["note"] = NOTE_ARXIV_RATE_LIMITED
+        seed["metadata_failure"] = METADATA_FAILURE_RATE_LIMITED
         return None
     except arxiv_client.ArxivApiError:
         # seed のメタデータが引けなくても検索そのものは成立させる（PR7）。
         logger.info("radar seed metadata unavailable for %s", arxiv_id)
         seed["note"] = NOTE_ARXIV_METADATA_UNAVAILABLE
+        seed["metadata_failure"] = METADATA_FAILURE_UNAVAILABLE
         return None
     if not entries:
         logger.info("radar seed metadata not found for %s", arxiv_id)
         seed["note"] = NOTE_ARXIV_METADATA_NOT_FOUND
+        seed["metadata_failure"] = METADATA_FAILURE_NOT_FOUND
         return None
+    # 引けたものだけを写しとして残す（失敗はキャッシュしない）。
+    metadata_cache.remember(session, entries[:1])
+    seed["metadata_source"] = METADATA_SOURCE_ARXIV
     return entries[0]
 
 
@@ -250,7 +337,14 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
 
     Returns:
         ``{document_id, title, arxiv_id, abs_url, summary, categories,
-        categories_source, keyphrase_candidates, domain_key, provenance, note?}``。
+        categories_source, keyphrase_candidates, domain_key, provenance,
+        arxiv_blocked, arxiv_blocked_note?, note?, metadata_source?,
+        metadata_failure?}``。``metadata_source`` はメタデータを引けたときだけ付く
+        事実ラベル（``arxiv`` = 今引いた / ``cache`` = 保存済みの写しを読んだ）。
+        ``arxiv_blocked`` は**常に付く**（arXiv からアクセスを制限されている最中か。
+        真のときだけ ``arxiv_blocked_note`` を併記 — §14.7）。``metadata_failure``
+        （``rate_limited`` / ``unavailable`` / ``not_found``）は**引けなかったときだけ**
+        付く機械可読の理由で、``note`` の文面と1対1に対応する。
         ``arxiv_id`` / ``abs_url`` は **``source_url`` に登録済みの場合だけ**入る
         （推定 ID をここへ混ぜない — 判定不能・未記帳を偽装しない）。推定の結果は
         ``provenance``（``{status, arxiv_id, arxiv_title, arxiv_abs_url,
@@ -307,7 +401,7 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
     }
 
     if arxiv_id and fetch_arxiv:
-        entry = _fetch_seed_entry(seed, arxiv_id)
+        entry = _fetch_seed_entry(session, seed, arxiv_id)
         if entry is not None:
             categories = normalize_categories(
                 list(entry.categories) + ([entry.primary_category] if entry.primary_category else [])
@@ -320,7 +414,7 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
                 seed["categories_source"] = CATEGORIES_SOURCE_ARXIV
     elif inferred_id and fetch_arxiv:
         # 推定 ID でも取得の失敗は黙らせず、購読フォールバックへ続ける（PR7）。
-        entry = _fetch_seed_entry(seed, inferred_id)
+        entry = _fetch_seed_entry(session, seed, inferred_id)
         if entry is not None:
             provenance["fetched"] = True
             provenance["arxiv_title"] = entry.title or ""
@@ -343,6 +437,8 @@ def resolve_seed(session, document_id: str, *, fetch_arxiv: bool = True) -> dict
             seed["categories"] = categories
             seed["categories_source"] = CATEGORIES_SOURCE_SUBSCRIPTION
 
+    # 取得を試みた**後**に見る（この操作で 429 を受けた場合もここで真になる — §14.7）。
+    _mark_arxiv_blocked(seed)
     return seed
 
 
@@ -641,6 +737,11 @@ def run_radar_search(
         "banding": {"available": False},
         "relation_context": _relation_context(anchor_context),
         "closed_world_note": search.CLOSED_WORLD_NOTE,
+        # 制限されていないことも**明示**する（キーの不在で黙らせない — §14.7）。
+        # ここで真になるのは「seed の取得でいま 429 を受けた」場合だけで、その
+        # 直後の :func:`arxiv_client.search` はクールダウンで例外になる（呼び出し側が
+        # 502 の事実文にする）。
+        "arxiv_blocked": bool(seed.get("arxiv_blocked")),
     }
     if not query:
         # 条件ゼロで arXiv を呼ばない（無関係な全件が返るため — PD6）。
@@ -649,6 +750,9 @@ def run_radar_search(
     total, entries = arxiv_client.search(
         query, start=result["start"], max_results=max_results
     )
+    # 返ってきたメタデータ（外部事実）を写しとして残す。比較分析（compare）が同じ
+    # 論文の要旨を取り直さずに済む（設計書 §14 — 一連の操作で arXiv は最大2回）。
+    metadata_cache.remember(session, entries)
 
     ingested = search.ingested_arxiv_ids(session)
     seed_arxiv_id = seed.get("arxiv_id") or ""
@@ -694,8 +798,90 @@ def run_radar_search(
     return result
 
 
+def blocked_radar_result(
+    session,
+    document_id: str,
+    *,
+    distance: str = "near",
+    categories: Any = None,
+    keyphrases: Any = None,
+    start: int = 0,
+) -> dict:
+    """arXiv からアクセスを制限されている間の「探していない」結果（§14.7）。
+
+    :func:`run_radar_search` と**同じ形**を返し、``candidates`` を空・
+    ``arxiv_blocked`` を真・事実文 :data:`NOTE_ARXIV_BLOCKED` を添える。呼ぶのは
+    「クールダウン中だと分かっている」ときだけで、arXiv へは一切出ていかない
+    （``seed`` も ``fetch_arxiv=False`` で解決する）。
+
+    **0件を「該当なし」と偽らないための道具**である（PR7）。live の 429 は従来どおり
+    例外 → 502 のまま（§13.3）で、こちらは「呼ぶ前から分かっている」状態だけを
+    200 の事実として返す。検索条件（``query``）は通常経路と同じ規則で組み立てて返す —
+    何を探そうとしていたかは、探せなかったときこそ画面に要る。
+
+    Raises:
+        LookupError: document が存在しない。
+        ValueError: ``distance`` が語彙外。
+    """
+    if distance not in RADAR_DISTANCES:
+        raise ValueError(f"unknown radar distance: {distance!r}")
+
+    seed = resolve_seed(session, document_id, fetch_arxiv=False)
+    # seed 側と top-level を**同じ値**にする（フロントは両方を読むので、食い違うと
+    # バナーの出し入れが揺れる）。この関数は制限中だと分かっているときしか呼ばない。
+    seed["arxiv_blocked"] = True
+    seed["arxiv_blocked_note"] = NOTE_ARXIV_BLOCKED
+
+    effective_categories = normalize_categories(
+        categories if categories is not None else seed.get("categories")
+    )
+    effective_keyphrases = normalize_keyphrases(
+        keyphrases if keyphrases is not None else seed.get("keyphrase_candidates")
+    )
+    return {
+        "seed": seed,
+        "query": build_radar_query(distance, effective_categories, effective_keyphrases),
+        "distance": distance,
+        "total": 0,
+        "start": max(0, int(start or 0)),
+        "candidates": [],
+        # 帯も作っていない（作れなかったのではなく、候補が無い）。理由を事実文で残す。
+        "banding": {"available": False, "note": NOTE_ARXIV_BLOCKED},
+        "relation_context": {"available": False},
+        "closed_world_note": search.CLOSED_WORLD_NOTE,
+        "arxiv_blocked": True,
+        "note": NOTE_ARXIV_BLOCKED,
+    }
+
+
+def compare_requires_arxiv(session, document_id: str, arxiv_ids: Any) -> bool:
+    """比較分析が arXiv への問い合わせを要するか（保存済みの写しだけで足りないか）。
+
+    ``compare.run_compare`` が組み立てるのと同じ ID 集合（起点論文 + 候補）について、
+    新鮮な写し（migration 085）が揃っているかだけを見る純粋な読み取り。制限中でも
+    写しだけで比較できるなら、**比較は普通に成立させる**（arXiv 0 コール — §14.3）。
+
+    Raises:
+        LookupError: document が存在しない。
+    """
+    seed = resolve_seed(session, document_id, fetch_arxiv=False)
+    seed_arxiv_id = seed.get("arxiv_id") or ""
+
+    requested: list[str] = []
+    for raw in arxiv_ids or ():
+        normalized = normalize_arxiv_id(raw)
+        if normalized and normalized != seed_arxiv_id and normalized not in requested:
+            requested.append(normalized)
+
+    needed = ([seed_arxiv_id] if seed_arxiv_id else []) + requested
+    if not needed:
+        return False
+    cached = metadata_cache.read_fresh(session, needed)
+    return any(arxiv_id not in cached for arxiv_id in needed)
+
+
 # ---------------------------------------------------------------------------
-# arXiv 出所の後付け記帳（このモジュールで唯一の書き込み）
+# arXiv 出所の後付け記帳（このモジュールで唯一の「教員の判断」の書き込み）
 # ---------------------------------------------------------------------------
 
 
@@ -750,14 +936,23 @@ __all__ = [
     "CATEGORIES_SOURCE_MANUAL",
     "CATEGORIES_SOURCE_SUBSCRIPTION",
     "MAX_SEED_KEYPHRASES",
+    "METADATA_FAILURE_NOT_FOUND",
+    "METADATA_FAILURE_RATE_LIMITED",
+    "METADATA_FAILURE_UNAVAILABLE",
+    "METADATA_SOURCE_ARXIV",
+    "METADATA_SOURCE_CACHE",
     "MIN_OVERLAP_LABEL_CHARS",
+    "NOTE_ARXIV_BLOCKED",
     "NOTE_ARXIV_METADATA_NOT_FOUND",
     "NOTE_ARXIV_METADATA_UNAVAILABLE",
     "NOTE_ARXIV_RATE_LIMITED",
     "PROVENANCE_STATUS_INFERRED",
     "PROVENANCE_STATUS_NONE",
     "PROVENANCE_STATUS_REGISTERED",
+    "arxiv_blocked",
+    "blocked_radar_result",
     "build_radar_query",
+    "compare_requires_arxiv",
     "overlap_component_labels",
     "register_arxiv_provenance",
     "resolve_seed",

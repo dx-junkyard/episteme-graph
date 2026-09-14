@@ -22,7 +22,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   序数を主張する文言は今後の設計書では避け、migration 番号ベースの参照に置き換えること。
 - **E層の migration 番号は衝突している**: `exposition_layer_design.md` §5 は「migration 034」を
   提案しているが、034 は Admin Copilot が使用済み。E層は未実装のため実害はまだ無いが、
-  着手時は次の空き番号（2026-09-13 時点で **084 以降**。044〜083 は使用済み — §3 参照。
+  着手時は次の空き番号（2026-09-14 時点で **086 以降**。044〜085 は使用済み — §3 参照。
   採番前に必ず `ls backend/db/` で確認する）へ採番し直すこと。
   また設計書は「設計時に migration 番号を書かない」運用を推奨する（下記のずれの再発防止）。
 - **設計時想定と実装後の migration 番号がずれている組が複数ある**: 状態管理・通知基盤
@@ -121,7 +121,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
   `backend/tests/test_admin_help_ui_anchors.py`（管理側の網羅・双方向整合は同テストと
   `test_admin_help_inspect_ui_static.py` が構造的に守る）。
 
-## 3. migration 帰属一覧（init〜083、2026-09-13 時点）
+## 3. migration 帰属一覧（init〜085、2026-09-14 時点）
 
 `backend/db/` の実ファイルを正とした全 migration の帰属。
 
@@ -192,8 +192,9 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 081 | `081_learning_units` | **学ぶ単位層**（語彙表 `knowledge_unit_kinds` + 新表 `learning_units` + `learning_units_live`、`theory_components` の親参照列 `parent_component_id` / `parent_agent_component_id`。末尾で live ビュー2文を再作成） |
 | 082 | `082_concept_registry` | **概念レジストリ層**（語彙表4表 `knowledge_entry_types` / `knowledge_label_kinds` / `knowledge_relation_kinds` / `knowledge_mapping_justifications` + `library_entries` のレビュー列群、新表 `library_entry_labels` / `library_entry_relations` / `library_atlas_node_links`、既存5表への `mapping_justification` の additive 追加、`element_identity_links` の instance 型に `symbol`、`knowledge_symbols_live` ビュー） |
 | 083 | `083_doubt_citation_vocab` | **知識の転用層（P4-5）**（`challenges.challenge_mode` / `target_element_ref`・`epistemic_ledger.evidence_lines`・`component_citations.citation_intent` の列追加のみ。新テーブルなし） |
+| 085 | `085_paper_discovery_arxiv_metadata_cache` | **論文ディスカバリー層 / 論文レーダー**（arXiv メタデータの外部事実キャッシュ1表。候補・教員の判断は保存しない。正本は `docs/features/paper_radar_design.md` §14） |
 
-次の空き番号は **084**（E層など新規レイヤーはここから採番する）。
+次の空き番号は **086**（E層など新規レイヤーはここから採番する）。
 番号の手書き案内は陳腐化しやすいため、採番前に必ず `ls backend/db/` で確認すること
 （機械固定の提案は [機能整備提案](feature_consolidation_proposals_2026-08-13.md) §3）。
 

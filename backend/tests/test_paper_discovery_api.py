@@ -49,6 +49,11 @@ for _path in (str(BACKEND), str(BACKEND / "api"), str(ROOT / "src")):
     if _path not in sys.path:
         sys.path.insert(0, str(_path))
 
+#: 購読検索の**本物**の実装（``env`` フィクスチャがモジュール属性を差し替える前に
+#: 束縛しておく）。arXiv からアクセスを制限されている間の縮退（設計書 §14.7）は
+#: route と core の合わせ技なので、その1本だけは本物を通して検査する。
+from core.paper_discovery.search import run_search as _REAL_RUN_SEARCH  # noqa: E402
+
 ROUTE_SOURCE = BACKEND / "api" / "routes" / "paper_discovery.py"
 MAIN_SOURCE = BACKEND / "api" / "main.py"
 ADMIN_SOURCE = BACKEND / "api" / "routes" / "admin.py"
@@ -1293,3 +1298,106 @@ class TestPhase2RouteRegistration:
     def test_ingest_batch_returns_202(self):
         src = ROUTE_SOURCE.read_text(encoding="utf-8")
         assert re.search(r'@router\.post\("/ingest-batch", status_code=202\)', src)
+
+
+# ---------------------------------------------------------------------------
+# 12. arXiv からアクセスを制限されている間の購読検索（設計書 §14.7）
+# ---------------------------------------------------------------------------
+
+
+class TestSearchWhileArxivBlocked:
+    """制限中と**呼ぶ前から分かっている**検索は、arXiv を呼ばずに 200 で事実を返す。
+
+    live の 429（探して断られた）は従来どおり 502 のまま（§13.3）。ここで扱うのは
+    「押しても出ていかない」と分かっている状態だけで、0 件を「該当なし」と偽らない。
+    """
+
+    PATH = "/api/admin/discovery/search"
+
+    def _blocked(self, env, monkeypatch):
+        monkeypatch.setattr(
+            env["routes"].arxiv_client, "cooldown_active", lambda: True
+        )
+        # 縮退は route + core の合わせ技なので、この経路だけ本物の run_search を通す。
+        monkeypatch.setattr(env["routes"].pd_search, "run_search", _REAL_RUN_SEARCH)
+
+        def _boom(*args, **kwargs):  # pragma: no cover — 呼ばれたら失敗させる
+            raise AssertionError("arXiv must not be called while blocked")
+
+        monkeypatch.setattr(env["routes"].arxiv_client, "search", _boom)
+        monkeypatch.setattr(env["routes"].pd_store, "touch_last_checked", _boom)
+
+    def _post(self, env, **extra):
+        body = {"domain_key": "astrophysics", "categories": ["astro-ph.CO"]}
+        body.update(extra)
+        return env["client"].post(self.PATH, json=body, headers=_auth(env, "teacher"))
+
+    def test_blocked_search_is_200_with_the_fact(self, env, monkeypatch):
+        self._blocked(env, monkeypatch)
+        res = self._post(env)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["arxiv_blocked"] is True
+        assert body["candidates"] == []
+        assert body["note"] == env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+        # 閉世界の注記の前に「探していない」ことを置く（0 件の読み違いを防ぐ）。
+        assert body["closed_world_note"].startswith(
+            env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+        )
+        assert body["closed_world_note"].endswith(
+            env["routes"].pd_search.CLOSED_WORLD_NOTE
+        )
+
+    def test_blocked_search_does_not_touch_last_checked(self, env, monkeypatch):
+        """探していないのに「確かめた」と記録しない（地図の端の1ビットを汚さない）。"""
+        self._blocked(env, monkeypatch)
+        res = self._post(env)
+        assert res.status_code == 200
+        # ``touch_last_checked`` は呼ばれたら AssertionError（＝500）になる差し替え。
+        assert env["audits"] == []
+
+    def test_blocked_search_does_not_leak_numbers(self, env, monkeypatch):
+        """PR2: 残り時間・回数を返さない（人に数値を見せない）。"""
+        import json
+
+        self._blocked(env, monkeypatch)
+        body = self._post(env).json()
+        for sentence in (body["note"], body["closed_world_note"]):
+            assert not re.search(r"[0-9０-９]", sentence), sentence
+        assert "cooldown" not in json.dumps(body, ensure_ascii=False)
+
+    def test_relevance_order_does_not_embed_while_blocked(self, env, monkeypatch):
+        """候補ゼロを並べ替えるために embedding を焚かない。"""
+        self._blocked(env, monkeypatch)
+
+        def _boom(*args, **kwargs):  # pragma: no cover
+            raise AssertionError("ranking must not run while blocked")
+
+        monkeypatch.setattr(env["routes"], "_apply_relevance_order", _boom)
+        res = self._post(env, order="relevance")
+        assert res.status_code == 200
+        assert res.json()["arxiv_blocked"] is True
+
+    def test_normal_search_states_that_it_is_not_blocked(self, env, monkeypatch):
+        """制限されていないことも明示する（キーの不在で黙らせない）。"""
+        monkeypatch.setattr(
+            env["routes"].arxiv_client, "cooldown_active", lambda: False
+        )
+        monkeypatch.setattr(env["routes"].pd_search, "run_search", _REAL_RUN_SEARCH)
+        monkeypatch.setattr(
+            env["routes"].arxiv_client, "search", lambda query, **kwargs: (0, [])
+        )
+        res = self._post(env)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["arxiv_blocked"] is False
+        assert "note" not in body, "止めていないのに事実文を出さない"
+        assert body["closed_world_note"] == env["routes"].pd_search.CLOSED_WORLD_NOTE
+
+    def test_the_route_passes_the_blocked_note_to_core(self, env, monkeypatch):
+        """判定は route・縮退は core（文言の正本を1箇所にする）。"""
+        monkeypatch.setattr(
+            env["routes"].arxiv_client, "cooldown_active", lambda: False
+        )
+        self._post(env)
+        assert env["search_calls"][0][1]["arxiv_blocked_note"] == ""

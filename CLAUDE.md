@@ -514,6 +514,35 @@ arXiv API を検索し、教員が選んだ候補だけを既存の URL 取得�
   （`#pr-seed-note`。ここを落とすと条件ゼロの 0 件が「近い論文が無い」と読める）。
   seed の再取得は `GET /radar/seed` だけで、検索ボタンの再押下では走らない。
   ガードレールは `test_paper_radar_{core,api,guardrails,ui_static}.py`。
+  **arXiv 呼び出しの上限（2026-09-14 追補・§14・migration 085）**: オーナー指示「教員の
+  一連の操作で arXiv API は一回、せいぜい二回」。①arXiv メタデータ（タイトル・要旨・
+  カテゴリ）を `paper_discovery_arxiv_metadata_cache`（`core/paper_discovery/metadata_cache.py`、
+  upsert のみ・`DELETE FROM` なし・TTL `DISCOVERY_ARXIV_METADATA_TTL_DAYS` 既定30）に**外部事実の
+  写し**として残す（`reference_cache` と同じ CC3 型の PD5 明示例外。候補・帯・教員の判断は
+  保存しない・失敗は書かない）。`resolve_seed` / `run_compare` は read-through、
+  `run_radar_search` / 購読 `search` は結果を remember。route 層が
+  `_persist_arxiv_metadata_cache` で写しだけ commit（fail-soft）。予算: モーダルを開く ≤1
+  （写しがあれば 0）/ 検索 1 / 比較 0〜1 / 出所登録 ≤1（`resolve_seed(fetch_arxiv=True)` 2回
+  → 1回）。seed DTO に事実ラベル `metadata_source`（`arxiv` / `cache`）。②`arxiv_client` は
+  HTTP 429 を受けたら `ARXIV_RATE_LIMIT_COOLDOWN_SECONDS`（既定600・0で無効）の間 **HTTP を
+  出さずに** `ArxivRateLimitedError` を投げる（リトライではなく抑制 — PD7 と衝突しない。
+  429 中に人が操作するたびにブロック窓が延びる循環を断つ）。`cooldown_active()` は読み取り
+  専用で、残り秒数は API / UI に出さない。**調査・デバッグでも arXiv API を叩く回数は最小に**
+  （到達性の切り分けは1回。開発機とコンテナは同じ公衆 IP）。ガードレールに
+  `test_paper_discovery_metadata_cache.py` と `test_paper_discovery_core.py::TestRateLimitCooldown`。
+  **ブロックの目印（2026-09-15 追補・§14.7/§14.8・migration なし）**: 429 の事実を文章にだけ
+  残さず構造化する。seed DTO に `arxiv_blocked`（常在・`arxiv_client.cooldown_active()`）+
+  `arxiv_blocked_note`（ブロック中のみ・正本 `radar.NOTE_ARXIV_BLOCKED`）+ `metadata_failure`
+  （`rate_limited` / `unavailable` / `not_found`・失敗時のみ）。**ブロック中と分かっている検索・
+  比較・購読検索は arXiv を呼ばず 200 で `arxiv_blocked: true` + 空候補 + 事実文を返す**
+  （CostGate 非消費・`last_checked_at` 非更新。live の 429 は §13 どおり 502 のまま）。文言は
+  「混雑」ではなく「arXiv からアクセスを制限されています」と事実を言い、条件を変えても解けるまで
+  検索できないことを明示する（残り秒数など数値は出さない — `cooldown_remaining_seconds` を
+  route / radar から参照しないことをガードレールで固定）。UI は両モーダルに専用バナー
+  （`#pr-arxiv-blocked` / discovery 側同型・見出しは静的・本文はサーバ文言の素通し・
+  `arxiv_blocked: false` 明示以外で消さない）を出し、ブロック中は「候補が見つかりません」を
+  出さない。事実表示なので `data-ui-anchor` は付けない。JS 変更時は `admin.html` の `?v=` を
+  **必ず上げる**（896468f の教訓）。
 - **コーパスを補う論文（近さではなく「何が足されるか」で選ぶ第3の探し方, migration 077,
   2026-09-09）**: 正本は `docs/features/corpus_complement_design.md`（CC1〜CC8・§11 実装記録。
   PD1〜PD8 を全継承）。**3レンズはすべて既存構造からの決定論導出**で、A 地図の薄い領域

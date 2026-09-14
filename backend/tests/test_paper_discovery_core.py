@@ -10,7 +10,8 @@
   2. ``build_search_query`` の組み立て（カテゴリのみ / フレーズのみ / 両方 /
      enabled=False の除外 / 著者 / 条件ゼロ）
   3. ``arxiv_client`` の Atom パース（実 HTTP を呼ばず ``_http_get`` を差し替える）
-     と 3 秒スロットル（``time`` を差し替えて sleep 量を検証）
+     と 3 秒スロットル（``time`` を差し替えて sleep 量を検証）、および 429 のあとの
+     混雑クールダウン（窓の間は HTTP を出さない）
   4. ``store`` の SQL 面（フェイクセッションで upsert / revoked 遷移 / 行削除しない）
   5. ``search.run_search`` の注釈（取り込み済み / 見送り済み / 一致フレーズ）
   6. ``vocab`` の fail-soft（1供給元が落ちても他の供給元の結果が返る）
@@ -20,6 +21,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -437,6 +439,158 @@ class TestThrottle:
         with pytest.raises(arxiv_client.ArxivApiError):
             arxiv_client._http_get({"search_query": "x"}, 5.0)
         assert len(calls) == 1
+
+
+class TestRateLimitCooldown:
+    """429 を受けたあとは arXiv を呼ばない（混雑クールダウン、2026-09-14）。
+
+    これはリトライの追加ではなく **抑制** である（PD7 が禁じるのは自動リトライ）。
+    混雑中も画面操作のたびにリクエストが出ると、ブロックの窓が人の操作で延び続ける。
+    """
+
+    @pytest.fixture(autouse=True)
+    def _reset(self):
+        arxiv_client.reset_throttle()
+        yield
+        arxiv_client.reset_throttle()
+
+    @staticmethod
+    def _install(monkeypatch, *, cooldown: float):
+        """時計・スロットル・クールダウン秒数・``requests.get`` を差し替える。
+
+        Returns:
+            ``(fake_time, calls, state)`` — ``calls`` は実際に出た HTTP の記録、
+            ``state["status"]`` を書き換えると次の応答のステータスが変わる。
+        """
+        fake = _FakeTime()
+        monkeypatch.setattr(arxiv_client, "time", fake)
+        monkeypatch.setattr(arxiv_client, "_throttle", lambda: None)
+        monkeypatch.setattr(arxiv_client, "_cooldown_seconds", lambda: cooldown)
+
+        state = {"status": arxiv_client.RATE_LIMITED_STATUS}
+        calls: list[dict] = []
+
+        class _Resp:
+            def __init__(self, status_code: int):
+                self.status_code = status_code
+                self.text = ATOM_FIXTURE
+
+        def _get(url, params=None, timeout=None):
+            calls.append(dict(params or {}))
+            return _Resp(state["status"])
+
+        monkeypatch.setattr(arxiv_client.requests, "get", _get)
+        return fake, calls, state
+
+    def test_rate_limited_response_starts_the_cooldown(self, monkeypatch):
+        _fake, calls, _state = self._install(monkeypatch, cooldown=600.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+
+        assert len(calls) == 1
+        assert arxiv_client.cooldown_active() is True
+
+    def test_search_during_the_cooldown_makes_no_request(self, monkeypatch):
+        _fake, calls, _state = self._install(monkeypatch, cooldown=600.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+        assert len(calls) == 1
+
+        # 教員が何度検索しても、窓の間は arXiv を呼ばない（ブロックを延ばさない）。
+        for _ in range(3):
+            with pytest.raises(arxiv_client.ArxivRateLimitedError):
+                arxiv_client.search("cat:astro-ph.CO")
+        assert len(calls) == 1, "クールダウン中に HTTP が出た"
+
+    def test_fetch_by_ids_during_the_cooldown_makes_no_request(self, monkeypatch):
+        _fake, calls, _state = self._install(monkeypatch, cooldown=600.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.fetch_by_ids(["2401.00001"])
+        assert len(calls) == 1
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.fetch_by_ids(["2401.00001"])
+        assert len(calls) == 1, "クールダウン中に HTTP が出た"
+
+    def test_requests_resume_after_the_window_expires(self, monkeypatch):
+        fake, calls, state = self._install(monkeypatch, cooldown=600.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+
+        fake.now += 599.0
+        assert arxiv_client.cooldown_active() is True
+
+        fake.now += 2.0  # 窓が明ける（合計 601 秒）
+        assert arxiv_client.cooldown_active() is False
+
+        state["status"] = 200
+        total, entries = arxiv_client.search("cat:astro-ph.CO")
+        assert len(calls) == 2
+        assert entries and total >= 1
+
+    def test_zero_disables_the_suppression(self, monkeypatch):
+        """0 = 抑制なし（運用で明示的に切る）。429 は従来どおり投げるが窓を作らない。"""
+        _fake, calls, _state = self._install(monkeypatch, cooldown=0.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+        assert arxiv_client.cooldown_active() is False
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+        assert len(calls) == 2, "抑制なしなら次の呼び出しは出る"
+
+    def test_reset_throttle_clears_the_cooldown(self, monkeypatch):
+        _fake, calls, state = self._install(monkeypatch, cooldown=600.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+        assert arxiv_client.cooldown_active() is True
+
+        arxiv_client.reset_throttle()
+        assert arxiv_client.cooldown_active() is False
+
+        state["status"] = 200
+        arxiv_client.search("cat:astro-ph.CO")
+        assert len(calls) == 2
+
+    def test_cooldown_message_is_a_fact_sentence_without_numbers(self, monkeypatch):
+        """PD4 / PR2: 残り時間の数値を人に見せない。"""
+        _fake, _calls, _state = self._install(monkeypatch, cooldown=600.0)
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError):
+            arxiv_client.search("cat:astro-ph.CO")
+
+        with pytest.raises(arxiv_client.ArxivRateLimitedError) as excinfo:
+            arxiv_client.search("cat:astro-ph.CO")
+        message = str(excinfo.value)
+        assert message == arxiv_client.RATE_LIMIT_COOLDOWN_MESSAGE
+        assert re.search(r"\d", message) is None, f"数値を出さない: {message!r}"
+        assert "arXiv" in message
+
+    def test_cooldown_seconds_comes_from_the_setting(self, monkeypatch):
+        from core import config as config_mod
+
+        class _Settings:
+            arxiv_rate_limit_cooldown_seconds = 42
+
+        monkeypatch.setattr(config_mod, "get_settings", lambda: _Settings())
+        assert arxiv_client._cooldown_seconds() == pytest.approx(42.0)
+
+        class _Off:
+            arxiv_rate_limit_cooldown_seconds = 0
+
+        monkeypatch.setattr(config_mod, "get_settings", lambda: _Off())
+        assert arxiv_client._cooldown_seconds() == 0.0
+
+    def test_setting_default_is_a_conservative_window(self):
+        from core.config import Settings
+
+        assert Settings().arxiv_rate_limit_cooldown_seconds == 600
 
 
 # ---------------------------------------------------------------------------

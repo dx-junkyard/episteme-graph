@@ -16,9 +16,11 @@ seed 論文の要旨・中心命題と、選ばれた候補のアブストラク
   重なりの ``component_label`` も**供給した部品リストの閉世界**で照合し、リスト外の
   名前は**空文字へ落として statement は残す**（P4 情報を落とさない — 項目ごと捨てない）。
   注意書き :data:`CAVEAT` は**サーバ側の固定文**で、LLM 出力に依存しない。
-- **PR6 候補の素材はサーバが取り直す**: 要旨はクライアントから受け取らず
-  :func:`arxiv_client.fetch_by_ids` で取得する（verbatim 検査の土台を本物にする）。
-  seed の要旨も同じ1コールに相乗りさせる（arXiv への呼び出しは1回）。
+- **PR6 候補の素材はサーバが取り直す**: 要旨はクライアントから受け取らず、
+  保存済みの写し（``metadata_cache`` / migration 085）か
+  :func:`arxiv_client.fetch_by_ids` から取得する（verbatim 検査の土台を本物にする。
+  写しはライブ取得と同一の本文）。seed の要旨も同じ1コールに相乗りさせるので、
+  arXiv への呼び出しは**足りない分がある場合だけ1回**（設計書 §14）。
 - **PR7 閉世界の正直さ**: 比較はアブストラクトの範囲で言えることに限る
   （本文は取得しない — 取り込みの弁を迂回しない）。引けなかった候補は ``skipped`` に
   事実文つきで返し、黙って落とさない。
@@ -37,7 +39,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from core.paper_discovery import arxiv_client, radar
+from core.paper_discovery import arxiv_client, metadata_cache, radar
 from core.paper_discovery.schema import ArxivEntry, normalize_arxiv_id
 from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
 
@@ -411,7 +413,11 @@ def run_compare(
     user_id: str = "",
     model: Optional[str] = None,
 ) -> dict:
-    """起点論文と候補論文の比較分析を実行する（1 arXiv コール + 1 LLM コール）。
+    """起点論文と候補論文の比較分析を実行する（arXiv 0〜1 コール + 1 LLM コール）。
+
+    要旨は**保存済みの写し（migration 085）を先に読み**、足りない分だけを arXiv から
+    取る（設計書 §14 — 直前に検索していれば arXiv コールは 0 回）。写しはライブ取得と
+    同一の本文なので、``evidence_quote`` の verbatim 検査の土台は変わらない。
 
     Args:
         session: SQLAlchemy セッション（seed の解決に使う。commit しない）。
@@ -454,8 +460,18 @@ def run_compare(
     fetch_ids = ([seed_arxiv_id] if seed_arxiv_id else []) + [
         i for i in requested if i != seed_arxiv_id
     ]
-    entries = arxiv_client.fetch_by_ids(fetch_ids) if fetch_ids else []
-    by_id = {entry.arxiv_id: entry for entry in entries}
+    # 保存済みの写し（migration 085 / 設計書 §14）を先に読み、足りない分だけを
+    # arXiv に取りに行く。レーダーで検索した直後の比較なら、候補の要旨は既に
+    # 写しとして在るので arXiv は 0 回で済む。写しはライブ取得と同一の本文なので、
+    # evidence_quote の verbatim 検査の土台（サーバが持つ要旨）も変わらない。
+    by_id: dict[str, ArxivEntry] = (
+        metadata_cache.read_fresh(session, fetch_ids) if fetch_ids else {}
+    )
+    missing = [i for i in fetch_ids if i not in by_id]
+    entries = arxiv_client.fetch_by_ids(missing) if missing else []
+    if entries:
+        metadata_cache.remember(session, entries)
+    by_id.update({entry.arxiv_id: entry for entry in entries})
 
     if seed_arxiv_id and seed_arxiv_id in by_id:
         seed["summary"] = by_id[seed_arxiv_id].summary or seed.get("summary") or ""

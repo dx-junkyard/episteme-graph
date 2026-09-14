@@ -37,6 +37,14 @@
     "取得先ドメインが許可されていません。システム管理者が「AIモデル」タブで設定できます。";
   var DOMAIN_UNKNOWN_NOTICE =
     "許可ドメインを確認できませんでした。取り込みはサーバ側で拒否される場合があります。";
+  // ── arXiv 側のアクセス制限（HTTP 429）────────────────────────────────
+  // 論文レーダー（admin-paper-radar.js）と同型。見出しだけがフロントの静的文で、
+  // 理由の本文はサーバの事実文（closed_world_note / detail）をそのまま描く。
+  // 数字・待ち時間・カウントダウンを出さない。自動再試行もしない（PD8）。
+  var ARXIV_BLOCKED_HEAD = "arXiv からのアクセス制限中";
+  var ARXIV_UNREACHABLE_HEAD = "arXiv に問い合わせできませんでした";
+  var ARXIV_BLOCKED_SEARCH_HINT = "制限中は arXiv へ問い合わせません。";
+
   // PD6: 空一覧を「この分野に論文が無い」と読ませない。
   var EMPTY_RESULT_NOTICE =
     "この検索条件では候補が見つかりませんでした。条件を変えると別の論文が見つかることがあります。";
@@ -146,6 +154,11 @@
     showDismissed: false,
     searching: false,
     saving: false,
+    // arXiv 側がこの環境からの問い合わせを制限しているか（サーバの arxiv_blocked）。
+    // 解除はサーバが明示的に false を返したときだけ（減る方向の上書きをしない）。
+    arxivBlocked: false,
+    arxivBlockedNote: "",
+    arxivBlockedKind: "",
     ingesting: false,
     domainAllowed: null,
     // Phase 2: 取り込みキューは手動更新のみ（PD8。ポーリングしない）。
@@ -217,7 +230,11 @@
         return {};
       })
       .then(function (body) {
-        throw body || {};
+        var payload = body && typeof body === "object" ? body : {};
+        // arXiv へ届かなかった回（502）を 4xx と区別するために状態コードだけ添える。
+        // 文言の判定には使わない（日本語の detail を照合しない）。
+        payload.http_status = res.status;
+        throw payload;
       });
   }
 
@@ -281,6 +298,10 @@
 
         // ① 検索・購読パネル
         '<div style="border:1px solid var(--color-border-tertiary);border-radius:6px;padding:10px;margin-bottom:10px">' +
+          // arXiv 側のアクセス制限は条件欄の先頭に出す（灰色の事実行に紛れさせない）。
+          // 中身は renderArxivBlocked が描く。制限が無いときは領域ごと出さない。
+          '<div id="pd-arxiv-blocked" style="display:none;border:1px solid var(--color-text-danger, #e24b4a);' +
+            'background:rgba(226,75,74,0.08);border-radius:6px;padding:8px 10px;margin-bottom:8px"></div>' +
           '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">' +
             '<label for="pd-domain" style="font-size:12px;color:var(--color-text-secondary)">分野</label>' +
             '<input type="text" id="pd-domain" list="pd-domain-options" placeholder="astrophysics" ' +
@@ -339,6 +360,7 @@
             '<button type="button" id="pd-foundation-btn" data-ui-anchor="materials.arxiv-discovery-foundation" class="admin-action-btn" disabled>基盤論文を探す</button>' +
             '<button type="button" id="pd-subscribe-btn" data-ui-anchor="materials.arxiv-discovery-subscribe" class="admin-action-btn">この条件を保存</button>' +
             '<span id="pd-subscribe-note" style="font-size:11.5px;color:var(--color-text-tertiary)"></span>' +
+            '<span id="pd-search-hint" style="font-size:11.5px;color:var(--color-text-tertiary)"></span>' +
           "</div>" +
           '<div id="pd-citation-note" style="font-size:11.5px;color:var(--color-text-tertiary);margin-top:4px"></div>' +
         "</div>" +
@@ -400,6 +422,9 @@
     state.showDismissed = false;
     state.searching = false;
     state.saving = false;
+    state.arxivBlocked = false;
+    state.arxivBlockedNote = "";
+    state.arxivBlockedKind = "";
     state.ingesting = false;
     state.domainAllowed = null;
     state.queue = [];
@@ -465,6 +490,8 @@
     });
 
     renderChips();
+    renderArxivBlocked();
+    renderSearchHint();
     renderQueryNote();
     renderRankingNote();
     renderComplementNote();
@@ -907,6 +934,69 @@
       });
   }
 
+  // ── arXiv 側のアクセス制限（HTTP 429）の表示 ──────────────────────────
+  // 論文レーダーと同型（文言の正本はサーバ、見出しだけがフロントの静的文）。
+  // 解除は **サーバが明示的に arxiv_blocked: false を返したとき** だけで、キーの
+  // 無いレスポンスでは黙って通常表示へ戻さない（減る方向の上書きをしない）。
+  function applyArxivBlocked(flag, note, kind) {
+    if (flag === true) {
+      state.arxivBlocked = true;
+      state.arxivBlockedKind = kind === "unreachable" ? "unreachable" : "blocked";
+      if (note) state.arxivBlockedNote = String(note);
+    } else if (flag === false) {
+      state.arxivBlocked = false;
+      state.arxivBlockedKind = "";
+      state.arxivBlockedNote = "";
+    }
+    renderArxivBlocked();
+    renderSearchHint();
+  }
+
+  // ブロックの本文はサーバの文字列だけから採る（フロントで理由を発明しない）。
+  function blockedNoteFrom(data) {
+    if (!data) return "";
+    if (data.closed_world_note) return String(data.closed_world_note);
+    if (data.note) return String(data.note);
+    return "";
+  }
+
+  // 502 は「arXiv へ届かなかった」回。detail の日本語を照合せず状態コードで扱う。
+  function applyRequestFailure(err) {
+    if (!err || err.http_status !== 502) return;
+    applyArxivBlocked(true, detailText(err, ""), "unreachable");
+  }
+
+  function renderArxivBlocked() {
+    var node = el("pd-arxiv-blocked");
+    if (!node) return;
+    if (!state.arxivBlocked) {
+      node.style.display = "none";
+      node.innerHTML = "";
+      return;
+    }
+    var head =
+      state.arxivBlockedKind === "unreachable"
+        ? ARXIV_UNREACHABLE_HEAD
+        : ARXIV_BLOCKED_HEAD;
+    node.style.display = "block";
+    node.innerHTML =
+      '<div id="pd-arxiv-blocked-head" style="font-size:12.5px;font-weight:600;color:var(--color-text-danger, #e24b4a)">' +
+      esc(head) +
+      "</div>" +
+      (state.arxivBlockedNote
+        ? '<div id="pd-arxiv-blocked-note" style="font-size:12px;color:var(--color-text-primary);margin-top:3px">' +
+          esc(state.arxivBlockedNote) +
+          "</div>"
+        : "");
+  }
+
+  // 制限中もボタンは押せる（サーバは 200 で事実文を返すだけ・arXiv へは出ない）。
+  function renderSearchHint() {
+    var node = el("pd-search-hint");
+    if (!node) return;
+    node.textContent = state.arxivBlocked ? ARXIV_BLOCKED_SEARCH_HINT : "";
+  }
+
   // ── 検索 ──────────────────────────────────────────────────────────────
   function runSearch() {
     if (state.searching) return;
@@ -954,6 +1044,12 @@
           data && data.order === "relevance" ? "relevance" : "date";
         state.ranking = (data && data.ranking) || null;
         state.searched = true;
+        // 制限中の 200 応答（候補ゼロ + arxiv_blocked）は「該当なし」ではない。
+        applyArxivBlocked(
+          data ? data.arxiv_blocked : undefined,
+          blockedNoteFrom(data),
+          "blocked"
+        );
         state.selected = {};
         setNotice("");
         renderQueryNote();
@@ -965,7 +1061,9 @@
       .catch(function (err) {
         state.searching = false;
         if (button) button.disabled = false;
+        applyRequestFailure(err);
         setNotice(detailText(err, "検索に失敗しました。"), true);
+        renderCandidates();
       });
   }
 
@@ -1571,6 +1669,10 @@
       } else if (state.mode === "foundation") {
         // 参照リスト経路も同じく「読めた範囲では見つからない」と「使えない」を分ける。
         emptyText = state.foundationNote || FOUNDATION_EMPTY_NOTICE;
+      } else if (state.arxivBlocked && state.mode === "search") {
+        // 制限中の空一覧に「候補が見つかりませんでした」を出さない（arXiv へ問い合わせて
+        // いないのだから「該当なし」ではない）。理由はサーバの事実文で言う。
+        emptyText = state.arxivBlockedNote || ARXIV_BLOCKED_HEAD;
       } else if (state.searched) {
         emptyText = EMPTY_RESULT_NOTICE;
       } else {

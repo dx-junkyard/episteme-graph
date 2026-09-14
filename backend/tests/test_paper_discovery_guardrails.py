@@ -10,6 +10,7 @@
   発見層は LLM 0回）
 - ``store.py`` に ``DELETE FROM`` が無い（見送りは ``revoked`` 遷移 — P4 / PD5）
 - ``arxiv_client.py`` にスロットル実装が存在し、宛先が ``export.arxiv.org`` 定数である（PD7）
+  / 429 のあとの混雑クールダウンが HTTP より前で効き、リトライループを持たない
 - ``run_search`` の DTO に数値スコア・類似度のキーが現れない（PD4）
 - migration 071 が ``INSERT`` を含まず、冪等ガードを持つ（UF2 継承）
 - **全自動取り込み経路の不在**（PD1）: core が ``url_fetch`` / ``_accept_material_source``
@@ -34,6 +35,7 @@ from tests.guardrail_helpers import (  # noqa: E402
     assert_module_tree_does_not_import,
     assert_module_tree_forbids,
     assert_paths_forbid,
+    assert_source_does_not_import,
     assert_source_forbids,
     extract_function_source,
     read_migration_sql,
@@ -95,8 +97,42 @@ class TestCoreIsolation:
             "ranking.py",
             "citation_client.py",
             "citation_search.py",
+            # 外部事実の写し（migration 077 / 085。PD5 の設計明示例外 = CC3 同型）
+            "reference_cache.py",
+            "metadata_cache.py",
         ):
             assert (CORE_DIR / name).is_file(), f"missing {name}"
+
+    def test_metadata_cache_is_isolated(self):
+        """arXiv メタデータの写し（migration 085）も core の規律の内側。
+
+        正本は ``docs/features/paper_radar_design.md`` §14（教員の一連の操作あたりの
+        arXiv 呼び出しを最大2回に抑えるための read-through キャッシュ）。保存するのは
+        外部 API が公開している事実だけで、候補・教員の判断は保存しない（PD5 /
+        CC3 と同型の設計明示例外）。
+        """
+        src = _read("metadata_cache.py")
+        assert_source_does_not_import(
+            src,
+            ["fastapi", "core.llm", "openai"],
+            context="core/paper_discovery/metadata_cache.py",
+        )
+        assert_source_forbids(
+            src,
+            ["DELETE FROM", "delete from"],
+            context="core/paper_discovery/metadata_cache.py",
+        )
+        assert "ON CONFLICT (arxiv_id) DO UPDATE" in src
+
+    def test_search_writes_only_the_metadata_cache_and_last_checked(self):
+        """検索経路が書くのは購読の1ビットと外部事実の写しだけ（候補は保存しない）。"""
+        src = extract_function_source(_read("search.py"), "run_search")
+        assert_source_forbids(
+            src,
+            ["INSERT", "DELETE", "commit("],
+            context="core/paper_discovery/search.run_search",
+        )
+        assert "metadata_cache.remember(" in src
 
     def test_does_not_import_fastapi(self):
         assert_module_tree_does_not_import(CORE_DIR, ["fastapi"])
@@ -234,6 +270,34 @@ class TestArxivClientManners:
         src = extract_function_source(_read("arxiv_client.py"), "_http_get")
         assert "_throttle()" in src
         assert "timeout=timeout" in src, "タイムアウトなしのリクエストを作らない"
+
+    def test_cooldown_is_checked_before_any_request(self):
+        """429 のあとは呼ばない（混雑クールダウン、2026-09-14 オーナー指示）。
+
+        判定はスロットルより前・``requests.get`` より前に置く（窓の中では
+        待つのではなく **出さない**）。
+        """
+        src = extract_function_source(_read("arxiv_client.py"), "_http_get")
+        assert "cooldown_active()" in src, "クールダウンを検査せずに HTTP を出さない"
+        assert src.index("cooldown_active()") < src.index("_throttle()")
+        assert src.index("cooldown_active()") < src.index("requests.get")
+
+    def test_cooldown_is_suppression_not_retry(self):
+        """PD7: リトライループを持たない（窓は「呼ぶのをやめる」ためのもの）。"""
+        src = _read("arxiv_client.py")
+        assert "_begin_cooldown()" in src, "429 を受けた事実を窓として記録する"
+        assert "while " not in src, "リトライループを足さない（PD7）"
+        # 窓の長さは env（core.config）が正本。モジュール内にリテラル秒数を増やさない。
+        assert "arxiv_rate_limit_cooldown_seconds" in src
+        assert "from core.config import get_settings" in src, (
+            "config は遅延 import（core の純粋性を保つ）"
+        )
+
+    def test_cooldown_message_has_no_numbers(self):
+        """PD4 / PR2: 残り時間の数値を人に見せない。"""
+        from core.paper_discovery import arxiv_client
+
+        assert re.search(r"\d", arxiv_client.RATE_LIMIT_COOLDOWN_MESSAGE) is None
 
     def test_destination_is_the_fixed_constant(self):
         from core.paper_discovery import arxiv_client, schema

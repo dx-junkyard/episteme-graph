@@ -24,6 +24,10 @@
 - PR7: 検索条件と `closed_world_note` を候補一覧の上に常時表示し、他の帯の候補を
   折りたたみで保持する（候補を捨てない）。空一覧を「近い論文が無い」と偽らない。
 
+- arXiv 側のアクセス制限（HTTP 429）: 条件欄の先頭に枠付きバナーを出し、見出しは静的文
+  （数字なし）・理由の本文はサーバの事実文のみ。解除はサーバが明示的に false を返した
+  ときだけで、制限中は「候補が見つかりませんでした」を出さない（§14.8）。
+
 すべて静的解析（部分文字列・正規表現）。外部 API / 実 DOM は使わない。
 """
 
@@ -879,4 +883,130 @@ class TestArxivProvenanceRegistration:
 class TestCacheBuster:
     def test_admin_html_bumps_the_radar_cache_buster(self):
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-radar.js?v=paper-radar-20260829-2" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20260915-1" in src
+
+
+# ---------------------------------------------------------------------------
+# ⑭ arXiv 側のアクセス制限（HTTP 429）の表示
+# ---------------------------------------------------------------------------
+
+
+class TestArxivBlockedBanner:
+    """§14.8: 「制限されている」ことを画面の一等地で言う。
+
+    ここを落とすと、arXiv がこの環境からの問い合わせを止めている回に画面へ残るのは
+    灰色の事実行と「候補が見つかりませんでした」だけになり、**向こうが止めている**
+    ことが「近い論文が無い」と読めてしまう（§13.1 と同じ誤読の、別の入口）。
+    """
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+        self.code = _strip_comments(self.src)
+
+    def test_banner_element_exists_in_the_conditions_block(self):
+        body = _extract_function(self.src, "modalHtml")
+        assert 'id="pr-arxiv-blocked"' in body
+        # 距離ラジオより前（条件欄の先頭）に置く。
+        assert body.index('id="pr-arxiv-blocked"') < body.index('id="pr-distance"')
+
+    def test_banner_is_hidden_until_the_server_says_so(self):
+        body = _extract_function(self.src, "modalHtml")
+        assert "display:none" in body.split('id="pr-arxiv-blocked"')[1][:400]
+        render = _extract_function(self.src, "renderArxivBlocked")
+        assert "if (!state.arxivBlocked)" in render
+        assert 'node.style.display = "none";' in render
+
+    def test_banner_is_visually_distinct_from_grey_fact_lines(self):
+        """灰色の事実行に紛れさせない（枠 + 注意色 + 地色）。"""
+        body = _extract_function(self.src, "modalHtml")
+        block = body.split('id="pr-arxiv-blocked"')[1][:400]
+        assert "border:1px solid var(--color-text-danger" in block
+        assert "background:" in block
+
+    def test_static_headings_are_fixed_and_carry_no_numbers(self):
+        for head in ("arXiv からのアクセス制限中", "arXiv に問い合わせできませんでした"):
+            assert head in self.src, f"見出しが無い: {head}"
+            assert not re.search(r"\d", head), f"見出しに数字がある: {head}"
+
+    def test_blocked_and_unreachable_headings_are_distinct(self):
+        render = _extract_function(self.src, "renderArxivBlocked")
+        assert "ARXIV_UNREACHABLE_HEAD" in render
+        assert "ARXIV_BLOCKED_HEAD" in render
+        assert '=== "unreachable"' in render
+
+    def test_body_text_comes_from_the_server_only(self):
+        """理由の本文はサーバの事実文だけ（フロントで言い換えない）。"""
+        render = _extract_function(self.src, "renderArxivBlocked")
+        assert "state.arxivBlockedNote" in render
+        picker = _extract_function(self.src, "blockedNoteFrom")
+        assert "data.seed.arxiv_blocked_note" in picker
+        assert "data.note" in picker
+        # 待ち時間・回数・再試行の案内をフロントが発明しない。
+        for invented in ("分後", "秒後", "回まで", "しばらくすると復旧", "自動的に再試行"):
+            assert invented not in self.code, f"縮退理由の文言を持っている: {invented}"
+
+    def test_seed_flag_is_applied_when_the_seed_loads(self):
+        body = _extract_function(self.src, "applySeed")
+        assert "seed.arxiv_blocked" in body
+        assert "applyArxivBlocked(" in body
+
+    def test_search_and_compare_responses_apply_the_flag(self):
+        for name in ("runSearch", "applyCompareResult"):
+            body = _extract_function(self.src, name)
+            assert "arxiv_blocked" in body, f"{name} が arxiv_blocked を読んでいない"
+
+    def test_only_an_explicit_false_clears_the_flag(self):
+        """キーの無いレスポンスで黙って通常表示へ戻さない（減る方向の上書き禁止）。"""
+        body = _extract_function(self.src, "applyArxivBlocked")
+        assert "flag === true" in body
+        assert "flag === false" in body
+        assert "state.arxivBlocked = false;" in body
+        # else（キーなし）で解除する分岐を作らない。
+        assert "} else {" not in body
+
+    def test_bad_gateway_is_detected_by_status_not_by_japanese_text(self):
+        body = _extract_function(self.src, "applyRequestFailure")
+        assert "err.http_status !== 502" in body
+        assert '"unreachable"' in body
+        reject = _extract_function(self.src, "rejectWithBody")
+        assert "payload.http_status = res.status;" in reject
+
+    def test_provenance_registration_keeps_seed_note_and_blocked_marker(self):
+        # registerProvenance も applySeedMeta と同じ規律: 記帳後の seed で
+        # 手元の note を消さず、arxiv_blocked は明示値だけを受ける。
+        body = _extract_function(self.src, "registerProvenance")
+        assert "var previousNote = state.seed && state.seed.note;" in body
+        assert "if (!data.seed.note && previousNote) state.seed.note = previousNote;" in body
+        assert "applyArxivBlocked(" in body
+
+    def test_search_failure_routes_through_it_but_compare_does_not(self):
+        # 検索の 502 は arXiv 到達失敗だけなのでバナーに拾う。
+        body = _extract_function(self.src, "runSearch")
+        assert "applyRequestFailure(err);" in body, "runSearch で 502 を拾っていない"
+        # 比較の 502 は LLM 失敗（_DETAIL_COMPARE_UNAVAILABLE）でも返るため、
+        # 「arXiv に問い合わせできませんでした」の見出しを付けない（原因の取り違え防止）。
+        compare = _extract_function(self.src, "runCompare")
+        assert "applyRequestFailure(err);" not in compare
+        assert "applyArxivBlocked(true" not in compare
+
+    def test_empty_result_line_is_suppressed_while_blocked(self):
+        body = _extract_function(self.src, "renderCandidates")
+        assert "state.arxivBlocked" in body
+        blocked_at = body.index("state.arxivBlocked")
+        empty_at = body.index("EMPTY_RESULT_NOTICE")
+        assert blocked_at < empty_at, "ブロック判定が空一覧の文言より後になっている"
+        assert "state.arxivBlockedNote" in body
+
+    def test_search_button_stays_enabled_and_the_hint_changes(self):
+        """制限中もボタンは押せる（サーバは 200 の事実文を返すだけ・費用ゼロ）。"""
+        assert "制限中は arXiv へ問い合わせません。" in self.src
+        hint = _extract_function(self.src, "renderSearchHint")
+        assert "state.arxivBlocked" in hint
+        assert "ARXIV_BLOCKED_SEARCH_HINT" in hint
+        # ボタンを無効化しない。
+        run = _extract_function(self.src, "runSearch")
+        assert "state.arxivBlocked" not in run.split("api(")[0]
+
+    def test_no_countdown_or_auto_retry(self):
+        for banned in ("setTimeout", "setInterval", "retryAfter", "retry_after"):
+            assert banned not in self.code, f"自動再試行・カウントダウンの痕跡: {banned}"

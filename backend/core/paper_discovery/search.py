@@ -28,7 +28,7 @@ from typing import Any, Optional
 
 from sqlalchemy import text as sa_text
 
-from core.paper_discovery import arxiv_client, store
+from core.paper_discovery import arxiv_client, metadata_cache, store
 from core.paper_discovery.schema import (
     normalize_arxiv_id,
     normalize_authors,
@@ -161,18 +161,30 @@ def run_search(
     followed_authors: Any = None,
     start: int = 0,
     max_results: int = DEFAULT_MAX_RESULTS,
+    arxiv_blocked_note: str = "",
 ) -> dict:
     """購読条件で arXiv を検索し、注釈付きの候補一覧を返す。
 
     ``categories`` / ``keyphrases`` / ``followed_authors`` を渡した場合は保存済みの
     購読条件より優先する（保存せずに条件を試せる — 購読の書き換えは教員の明示
-    保存だけ、PD3）。副作用は ``last_checked_at`` の更新のみで、候補は保存しない（PD5）。
+    保存だけ、PD3）。副作用は ``last_checked_at`` の更新と、arXiv が返した
+    メタデータ（外部事実）の写しの記録（migration 085）だけで、**候補は保存しない**
+    （PD5。写しが CC3 と同型の明示例外である理由は ``paper_radar_design.md`` §14）。
+
+    Args:
+        arxiv_blocked_note: arXiv からアクセスを制限されていると**呼ぶ前から分かって
+            いる**ときの事実文（正本は ``radar.NOTE_ARXIV_BLOCKED``。文言を受け取るのは
+            ``search`` が ``radar`` を import しないため）。非空なら arXiv を呼ばず、
+            ``candidates=[]`` / ``arxiv_blocked=True`` / この文を前置した
+            ``closed_world_note`` を返し、``last_checked_at`` も更新しない
+            （**探していないのに「確かめた」と記録しない** — 設計書 §14.7）。
 
     Returns:
-        ``{"domain_key", "query", "total", "start", "candidates", "closed_world_note"}``。
-        ``candidates`` の各要素は :meth:`ArxivEntry.to_dict` に ``status``
-        （``new`` / ``ingested`` / ``dismissed``）と ``matched_keyphrases`` を足したもの。
-        条件が空なら arXiv を呼ばず ``query=""`` / ``candidates=[]`` を返す（PD6）。
+        ``{"domain_key", "query", "total", "start", "candidates", "closed_world_note",
+        "arxiv_blocked"}``。``candidates`` の各要素は :meth:`ArxivEntry.to_dict` に
+        ``status``（``new`` / ``ingested`` / ``dismissed``）と ``matched_keyphrases``
+        を足したもの。条件が空なら arXiv を呼ばず ``query=""`` / ``candidates=[]``
+        を返す（PD6）。``arxiv_blocked`` は**常に付く**（制限されていないことも明示する）。
 
     Raises:
         arxiv_client.ArxivApiError: arXiv API への到達・応答・パースの失敗。
@@ -197,6 +209,7 @@ def run_search(
         effective_categories, effective_keyphrases, effective_authors
     )
 
+    blocked_note = " ".join(str(arxiv_blocked_note or "").split())
     result: dict = {
         "domain_key": key,
         "query": query,
@@ -204,7 +217,15 @@ def run_search(
         "start": max(0, int(start or 0)),
         "candidates": [],
         "closed_world_note": CLOSED_WORLD_NOTE,
+        "arxiv_blocked": bool(blocked_note),
     }
+    if blocked_note:
+        # 制限されていると分かっている間は arXiv を呼ばない（呼んでも同じ結果で、
+        # ブロックの窓を人の操作で延ばすだけ — §14.7）。空一覧は「該当なし」ではなく
+        # 「探していない」なので、その事実を候補一覧の上に必ず出す。
+        result["note"] = blocked_note
+        result["closed_world_note"] = blocked_note + CLOSED_WORLD_NOTE
+        return result
     if not query:
         # 条件ゼロで arXiv を呼ばない（分野と無関係な全件が返るため — PD6）。
         return result
@@ -212,6 +233,8 @@ def run_search(
     total, entries = arxiv_client.search(
         query, start=result["start"], max_results=max_results
     )
+    # 引けたメタデータ（外部事実）の写しを残す（migration 085 / 設計書 §14）。
+    metadata_cache.remember(session, entries)
 
     ingested = ingested_arxiv_ids(session)
     dismissed = store.dismissed_ids(session, key) if key else set()

@@ -645,6 +645,20 @@ class Settings(BaseSettings):
         default=30,
         validation_alias=AliasChoices("DISCOVERY_REFERENCE_CACHE_TTL_DAYS"),
     )
+    # 論文レーダー / 発見層: arXiv メタデータ（タイトル・要旨・カテゴリ）のキャッシュ
+    # （paper_discovery_arxiv_metadata_cache）を新鮮とみなす日数。外部事実の写しで、
+    # 教員の一連の操作あたりの arXiv API 呼び出しを最大2回に抑える（2026-09-14 オーナー指示）。
+    discovery_arxiv_metadata_ttl_days: int = Field(
+        default=30,
+        validation_alias=AliasChoices("DISCOVERY_ARXIV_METADATA_TTL_DAYS"),
+    )
+    # arXiv API が HTTP 429 を返したあと、この秒数の間は本アプリから arXiv API を
+    # **呼ばずに** 混雑の事実文で返す（リトライではなく抑制。PD7 と衝突しない）。
+    # 429 中に人が操作するたびにブロック窓が延びる循環を断つための値。0 = 抑制なし。
+    arxiv_rate_limit_cooldown_seconds: int = Field(
+        default=600,
+        validation_alias=AliasChoices("ARXIV_RATE_LIMIT_COOLDOWN_SECONDS"),
+    )
 
     # --- A層パイプライン: rhetorical_role の入力上限（P0-1） ---
     # 役割判定にかける body_paragraph ブロック数の上限。**0 = 上限なし（既定）**。

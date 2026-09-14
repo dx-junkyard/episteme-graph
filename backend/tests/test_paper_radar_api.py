@@ -130,6 +130,7 @@ def env(monkeypatch):
         ),
         "seed": dict(_SEED),
         "seed_error": None,
+        "seed_calls": [],
         "search_calls": [],
         "search_result": None,
         "search_error": None,
@@ -180,6 +181,7 @@ def env(monkeypatch):
     )
 
     def _resolve_seed(session, document_id, **kwargs):
+        state["seed_calls"].append(kwargs)
         if state["seed_error"] is not None:
             raise state["seed_error"]
         return dict(state["seed"])
@@ -720,6 +722,23 @@ class TestRadarProvenance:
         assert payload["seed"]["provenance"]["status"] == "registered"
         assert payload["seed"]["provenance"]["can_register"] is True
 
+    def test_registration_resolves_the_seed_with_arxiv_once(self, env):
+        """設計書 §14: 1操作あたり arXiv へ出ていく解決は最大1回。
+
+        記帳後の seed は ``fetch_arxiv=False`` で導出し直し、arXiv 由来の要旨・
+        カテゴリは1回目の結果から移す（応答の中身は従来と同じ）。
+        """
+        env["seed"] = _inferred_seed(title_match=True)
+        res = self._post(env, self._body())
+        assert res.status_code == 200
+        fetching = [k for k in env["seed_calls"] if k.get("fetch_arxiv") is not False]
+        assert len(fetching) == 1, env["seed_calls"]
+        assert len(env["seed_calls"]) == 2, "記帳後の導出そのものは従来どおり行う"
+        payload = res.json()["seed"]
+        assert payload["categories"] == ["astro-ph.CO"]
+        assert payload["categories_source"] == "arxiv"
+        assert payload["summary"] == "An abstract."
+
     def test_registration_is_audited_with_the_method(self, env):
         env["seed"] = _inferred_seed(title_match=True)
         self._post(env, self._body())
@@ -817,3 +836,130 @@ class TestRadarProvenance:
         for detail in details:
             assert not any(ch.isdigit() for ch in detail), detail
             assert "http" not in detail
+
+
+# ---------------------------------------------------------------------------
+# 7. arXiv からアクセスを制限されている間（設計書 §14.7）
+# ---------------------------------------------------------------------------
+
+
+class TestArxivBlocked:
+    """制限中と**呼ぶ前から分かっている**操作は、arXiv を呼ばずに 200 で事実を返す。
+
+    live の 429（探して断られた）は従来どおり 502（§13.3）。ここで扱うのは「押しても
+    出ていかない」と分かっている状態だけで、0 件を「近い論文が無い」と読ませない。
+    """
+
+    def _block(self, env, monkeypatch, active=True):
+        monkeypatch.setattr(
+            env["routes"].arxiv_client, "cooldown_active", lambda: active
+        )
+
+    def _search(self, env, **extra):
+        body = {"document_ref": "doc-1", "distance": "near"}
+        body.update(extra)
+        return env["client"].post(_SEARCH_PATH, json=body, headers=_auth(env, "teacher"))
+
+    def _compare(self, env, ids=("2608.00002",)):
+        return env["client"].post(
+            _COMPARE_PATH,
+            json={"document_ref": "doc-1", "arxiv_ids": list(ids)},
+            headers=_auth(env, "teacher"),
+        )
+
+    # ── /radar/search ────────────────────────────────────────────────────
+    def test_blocked_search_is_200_and_does_not_search(self, env, monkeypatch):
+        self._block(env, monkeypatch)
+        res = self._search(env)
+        assert res.status_code == 200
+        body = res.json()
+        assert body["arxiv_blocked"] is True
+        assert body["candidates"] == []
+        assert body["note"] == env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+        assert body["banding"] == {
+            "available": False,
+            "note": env["routes"].pd_radar.NOTE_ARXIV_BLOCKED,
+        }
+        assert body["relation_context"] == {"available": False}
+        assert env["search_calls"] == [], "制限中は arXiv 検索そのものを呼ばない"
+
+    def test_blocked_search_keeps_the_normal_shape(self, env, monkeypatch):
+        """フロントが「キーが無い」分岐を持たなくて済むように形を揃える。"""
+        self._block(env, monkeypatch)
+        body = self._search(env).json()
+        for key in (
+            "seed", "query", "distance", "total", "start", "candidates",
+            "banding", "relation_context", "closed_world_note",
+        ):
+            assert key in body, key
+        assert body["closed_world_note"] == env["routes"].pd_search.CLOSED_WORLD_NOTE
+        assert body["seed"]["provenance"]["can_register"] is True
+
+    def test_blocked_search_marks_the_seed_too(self, env, monkeypatch):
+        """seed 側と top-level を**同じ値**にする（表示が揺れないように）。"""
+        self._block(env, monkeypatch)
+        body = self._search(env).json()
+        assert body["seed"]["arxiv_blocked"] is True
+        assert body["seed"]["arxiv_blocked"] == body["arxiv_blocked"]
+        assert (
+            body["seed"]["arxiv_blocked_note"]
+            == env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+        )
+
+    def test_blocked_search_states_no_numbers(self, env, monkeypatch):
+        self._block(env, monkeypatch)
+        body = self._search(env).json()
+        assert not any(ch.isdigit() for ch in body["note"])
+        assert "cooldown" not in str(body)
+
+    def test_normal_search_states_that_it_is_not_blocked(self, env, monkeypatch):
+        self._block(env, monkeypatch, active=False)
+        body = self._search(env).json()
+        assert body["arxiv_blocked"] is False
+        assert len(env["search_calls"]) == 1
+
+    def test_live_rate_limit_is_still_502(self, env, monkeypatch):
+        """「探して断られた」は 200 の事実にしない（§13.3 の切り分けを維持）。"""
+        from core.paper_discovery import arxiv_client
+
+        self._block(env, monkeypatch, active=False)
+        env["search_error"] = arxiv_client.ArxivRateLimitedError("refused")
+        res = self._search(env)
+        assert res.status_code == 502
+        assert res.json()["detail"] == env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+
+    # ── /radar/compare ───────────────────────────────────────────────────
+    def test_blocked_compare_is_200_without_spending_the_quota(self, env, monkeypatch):
+        self._block(env, monkeypatch)
+        _cap(env, monkeypatch, 20)
+        res = self._compare(env, ids=["2608.00002", "2608.00003"])
+        assert res.status_code == 200
+        body = res.json()
+        assert body["arxiv_blocked"] is True
+        assert body["items"] == []
+        assert [s["arxiv_id"] for s in body["skipped"]] == ["2608.00002", "2608.00003"]
+        assert body["notes"] == [env["routes"].pd_radar.NOTE_ARXIV_BLOCKED]
+        assert env["compare_calls"] == [], "比較の LLM 経路そのものを呼ばない"
+        # 日次上限は消費しない（呼べない理由がこちら側の都合ではない）。
+        assert env["routes"]._radar_compare_gate.daily_counts == {}
+
+    def test_normal_compare_states_that_it_is_not_blocked(self, env, monkeypatch):
+        self._block(env, monkeypatch, active=False)
+        body = self._compare(env).json()
+        assert body["arxiv_blocked"] is False
+        assert len(env["compare_calls"]) == 1
+
+    # ── /radar/seed ──────────────────────────────────────────────────────
+    def test_seed_passes_the_marker_through(self, env, monkeypatch):
+        """route の dict コピーで目印を落とさない（``_with_can_register``）。"""
+        self._block(env, monkeypatch)
+        seed = dict(_SEED)
+        seed["arxiv_blocked"] = True
+        seed["arxiv_blocked_note"] = env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+        seed["metadata_failure"] = env["routes"].pd_radar.METADATA_FAILURE_RATE_LIMITED
+        env["seed"] = seed
+        body = env["client"].get(_SEED_PATH, headers=_auth(env, "teacher")).json()
+        assert body["seed"]["arxiv_blocked"] is True
+        assert body["seed"]["arxiv_blocked_note"] == env["routes"].pd_radar.NOTE_ARXIV_BLOCKED
+        assert body["seed"]["metadata_failure"] == "rate_limited"
+        assert body["seed"]["provenance"]["can_register"] is True
