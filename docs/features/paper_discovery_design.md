@@ -521,3 +521,30 @@ backend フルスイート 11,188 pass。
 - **非スコープ（Phase 3 backend v1）**: 引用グラフ候補の関連度ランキング（`/search` の
   order のみ）/ OpenAlex 等の第3の供給源 / 引用グラフの許可ドメイン管理 UI
   （env オプトインのまま）/ 重心のキャッシュ（毎回導出 — PD5 の同族）。
+
+---
+
+## 11. 追補 — 取得する形式（TeX ソース / PDF）（2026-09-16・migration / env なし）
+
+> **状態: 実装済み**（設計の正本は
+> [論文レーダー](paper_radar_design.md) §15。本節は分野購読側の差分だけを記す）
+
+取り込み（`POST /ingest` / `POST /ingest-batch`）は optional な `source_format`
+（`tex` / `pdf`、語彙の正本は `core/paper_discovery/schema.py::SOURCE_FORMATS`）を受ける。
+取得先 URL の分岐は `schema.source_url_for` の1箇所だけで、`tex` は arXiv の
+「Access Paper → TeX Source」（`/src/<id>`）を取りに行く。
+
+- **API の既定は `pdf`**（= 形式を送らない古い経路の挙動は不変）。**画面の既定は TeX**で、
+  両モーダル（`arXivから探す` / 論文レーダー）が明示的に送る。
+- **語彙外は 422**（`_DETAIL_INVALID_SOURCE_FORMAT`）で、取得を1件も試みない。
+- **キュー経路も同じ**。`ingest_queue.enqueue_items(..., source_format=)` は形式を
+  `source_url` 列に畳んで保存し、**列を増やさない**（worker が知る必要があるのは
+  「どの URL を取りに行くか」だけ。形式の判定は取得したバイト列のマジックで行う）。
+- **PD5 の「取り込み済み」判定は不変**。`normalize_arxiv_id` の `_PATH_PREFIXES` は
+  `src` を含むので、`/src/<id>` も `/pdf/<id>` と同じ ID へ畳まれる。
+- **PD7 の呼び出し予算は不変**（arXiv API の検索回数は変わらない。変わるのは取り込み時に
+  取得するファイルの URL だけ）。
+- UI は取り込み確認欄の先頭に2択のラジオ（アンカー `materials.arxiv-discovery-format`、
+  マニュアル節 [取得する形式](../manual/teacher/11-admin-materials.md#arxiv-discovery-format)）。
+  既定・事実文はレーダー側と**逐語一致**で、`test_paper_discovery_ui_static.py::
+  TestSourceFormatSwitch` が固定する。

@@ -2,7 +2,9 @@
 
 > **状態: 実装済み（正本）**（2026-08-28 起票・同日実装。migration **なし** —
 > 新テーブル・新列ゼロ。実装記録は §10、出所の後付け登録の追補は §11、
-> 重なり・差分提示の追補（2026-08-29）は §12、縮退の事実文の是正（2026-09-13）は §13）
+> 重なり・差分提示の追補（2026-08-29）は §12、縮退の事実文の是正（2026-09-13）は §13、
+> arXiv 呼び出しの上限（2026-09-14）は §14、取得する形式（TeX / PDF）と取り込み済み
+> ラベル（2026-09-16）は §15）
 
 **正本**: 本ドキュメント。
 **関連**: [論文ディスカバリー層](paper_discovery_design.md)（PD1〜PD8 — 本層はその
@@ -974,3 +976,149 @@ arXiv を呼ばずに 200 の事実として返す。
 **非スコープ**: 制限の残り時間・再開予定の表示 / 自動再試行・再試行ボタン /
 制限中に検索ボタンを無効化すること（サーバの事実文を読む機会を奪う）/
 引用グラフ・コーパス補完・基盤論文（Semantic Scholar 経路）への同じバナーの適用。
+
+---
+
+## 15. 追補 — 取得する形式（TeX ソース / PDF）と取り込み済みラベル（2026-09-16・migration / env なし）
+
+> **状態: 実装済み**（2026-09-16。新テーブル・新列ゼロ、新しい外部呼び出しゼロ、
+> LLM 呼び出しの増加ゼロ。追加は UI アンカー1件（`materials.radar-format`）のみ）
+
+### 15.1 教員からの指摘（2026-09-16）
+
+1. 候補一覧で**すでに取り込んだ論文が見分けにくい**（「取り込み済み」はカードの
+   末尾の灰色1行にしか出ておらず、流し読みでは新着と区別が付かない）。
+2. 「選択した論文を取り込む」が**常に PDF を取ってくる**。arXiv の論文ページの
+   「Access Paper」には `View PDF` のほかに `HTML` と `TeX Source` があり、
+   **TeX ソースを取り込みたい**。どちらを取るかはレーダーの画面で切り替えたい。
+   既定は TeX。
+
+### 15.2 なぜ TeX を既定にするのが妥当か
+
+解析パイプラインは以前から `source_kind="tex_archive"` を第一級の入力として持つ
+（`core/document_pipeline/tex_archive.py` が節・数式・図表番号・参考文献を
+**原稿の記述そのもの**から組み立てる）。PDF 経路が GROBID / PyMuPDF で組版結果から
+構造を復元するのに対し、TeX 経路には復元の損失が無い。数式が主題の分野では差が大きい。
+`url_fetch` も当初から gzip を受理する形（`FetchedSource.source_kind`）で作ってあり、
+**不足していたのは「その URL を組み立てて渡す」1本だけ**だった。
+
+`HTML` は語彙に入れない。解析パイプラインの入力形式ではないので、選べるようにすると
+「選べるのに取り込めない形式」が生まれる。
+
+### 15.3 形式の分岐点は1箇所（`schema.source_url_for`）
+
+```
+教員の選択（tex / pdf）
+   → route: _resolved_source_format()   ← 語彙外はここで 422（取得を1件も試みない）
+   → pd_schema.source_url_for(arxiv_id, fmt)   ← 唯一の分岐点
+        tex → https://arxiv.org/src/<id>      （= Access Paper の "TeX Source"）
+        pdf → https://arxiv.org/pdf/<id>      （= "View PDF"）
+   → url_fetch.fetch_source_from_url(...)      ← 形式の**判定**は実バイトのマジック
+   → _accept_material_source(source_url=...)   ← documents.source_url に出所として記帳
+```
+
+- **語彙の正本**は `core/paper_discovery/schema.py::SOURCE_FORMATS = ("tex", "pdf")`。
+  `DEFAULT_SOURCE_FORMAT = "pdf"` は**この API の既定**（＝形式を送らない古い
+  クライアントの挙動）で、「画面の既定」ではない。画面の既定 = TeX は**フロントが
+  明示的に送る**。両モーダル（レーダー / `arXivから探す`）とも既定 TeX で、
+  同じ語彙・同じ事実文を使う（§15.5b）。API の既定まで TeX にしないのは、
+  形式を送らない経路が黙って変わるのを避けるため。
+- **語彙外は 422**（`_DETAIL_INVALID_SOURCE_FORMAT`）。既定へ黙って落とすと、教員が
+  選んだつもりの形式と実際に取りに行く形式が食い違ったまま解析まで進む。
+- **TeX を選んでも TeX が返るとは限らない**（著者が PDF だけを投稿した論文）。URL では
+  なく**取得したバイト列のマジック**で形式を決める既存の規律（`detect_source_kind`）を
+  そのまま使い、PDF が返ればそのまま PDF として解析する。この可能性は選ぶ**前に**
+  事実文で言う（PD6 — 起きうることを黙らせない）。
+- **キュー経路も同じ URL を通る**。`ingest_queue.enqueue_items(..., source_format=)` は
+  形式を**`source_url` 列に畳んで**保存し、列を増やさない（worker が知る必要があるのは
+  「どの URL を取りに行くか」だけで、形式の語彙ではない）。
+- **「取り込み済み」判定は壊れない**。`normalize_arxiv_id` の `_PATH_PREFIXES` は
+  `src` / `e-print` を既に含むので、`/src/<id>` も `/pdf/<id>` と同じ ID へ畳まれる
+  （PD5 の読み時導出）。ガードレールで固定した。
+
+### 15.4 単一ファイル投稿の TeX ソース（`tex_archive.py` の取りこぼし是正）
+
+arXiv の TeX Source は、**複数ファイルの投稿なら `.tar.gz`、単一ファイルの投稿なら
+`.tex` を gzip しただけのバイト列**を返す。後者は `tarfile.open` で開けないため、
+従来は `invalid .tar.gz TeX archive` で解析に失敗していた（取得は成功しているので、
+教員には理由の分からない失敗に見える）。`_read_archive_members` に tar 失敗時の
+フォールバックを足し、gzip を解いた中身に LaTeX の骨格
+（`\documentclass` / `\begin{document}` / `\documentstyle`）があるときだけ
+`main.tex` 1本として読む。**gzip でありさえすれば通る、にはしない**（PDF や画像を
+`.tex` 扱いしないための fail-closed）。
+
+### 15.5 取り込み済みラベル（PD5 の判定はそのまま・出し方だけ変える）
+
+判定（`search.ingested_arxiv_ids`）もスコープの但し書き（`SOURCE_URL_NOTICE`）も
+**非改変**。変えたのは出し方だけ:
+
+- タイトルの右に緑系のバッジ「取り込み済み」（`pr-ingested-badge`）。一覧を流し読み
+  しても新着と見分けられる位置に置く。チェックボックスが外れて選べないのは従来どおり。
+- カード下部の1行は「この論文はすでに教材として取り込まれています。」に変え、バッジと
+  同じ語を繰り返さない。
+- **取り込み済みでも「arXiv で開く」リンクを出す**（従来は else 分岐で消えていた）。
+  もとの論文を確認する導線を、取り込んだことを理由に塞がない。
+
+### 15.5b 分野購読モーダル（`arXivから探す`）にも同じスイッチ
+
+同じ `/ingest` `/ingest-batch` に合流する以上、入口によって取り込まれる形式が違うと
+「同じ論文なのに解析結果の質が違う」が起き、しかも画面からは区別が付かない。そこで
+`admin-paper-discovery.js` にも**同型**のスイッチを置いた（既定 TeX・保存しない・
+形式変更で検索し直さない・取り込み確認欄の先頭）。
+
+同型を**言葉のうえでも**保つため、ガードレール
+`test_paper_discovery_ui_static.py::TestSourceFormatSwitch` が2ファイルの
+`DEFAULT_SOURCE_FORMAT` と `FORMAT_NOTICE` の**逐語一致**を固定する
+（同じ事実を2画面で言い換えると、教員は別の挙動だと読む）。JS の相互 import は
+しない流儀なので、定数はそれぞれのファイルに持ち、一致をテストで縛る
+（`SYNC_INGEST_MAX` / `BATCH_INGEST_MAX` と同じやり方）。
+
+アンカーは `materials.arxiv-discovery-format`、マニュアル節は
+[取得する形式](../manual/teacher/11-admin-materials.md#arxiv-discovery-format)
+（意味はレーダー側の節を参照する形にして、説明を二重管理しない）。
+
+### 15.6 不変条項との整合
+
+| 条項 | 本追補での扱い |
+|---|---|
+| PR1 候補は読み時導出・保存しない | 形式の選択も**保存しない**（モーダルを開き直すと TeX に戻る。localStorage も使わない） |
+| PR2 数値非表示 | 追加した表示はラベルと事実文のみ |
+| PR3 取り込みは既存の弁のみ | エンドポイントは増やさない（`/ingest` / `/ingest-batch` に optional な `source_format` を足しただけ） |
+| PR5 明示操作のみ | 形式を変えても検索し直さない（取り込みのときにだけ効く） |
+| PR6 外部 API は既存クライアント経由 | arXiv への**呼び出し回数は不変**（形式は取り込み時の取得 URL が変わるだけで、§14 の予算に影響しない） |
+| PR7 閉世界の正直さ | TeX が無い論文で PDF になることを、選ぶ前に事実文で言う |
+| UF1〜UF6（URL 取得） | 許可リスト照合・SSRF ガード・マジックによる形式判定は**非改変**。`arxiv.org` の許可が要るのも従来どおり |
+
+### 15.7 ガードレール
+
+- `test_paper_discovery_core.py::TestSourceFormat` — 語彙（HTML を含めない）・
+  正規化・URL の分岐・既定への fail-safe・**両形式が同じ arXiv ID へ畳まれること**。
+- `test_paper_discovery_api.py::TestIngestSourceFormat` — 既定が PDF であること・
+  TeX が `/src/` を取りに行き `documents.source_url` に記帳されること・語彙外は 422 で
+  取得を1件も試みないこと・監査に形式が残ること・バッチがキューへ形式を渡すこと。
+- `test_paper_discovery_worker.py::TestEnqueueItems` — キュー行の `source_url` が
+  形式で切り替わること・TeX で取り込んだ論文が「取り込み済み」と判定されること。
+- `test_paper_radar_ui_static.py::TestSourceFormatSwitch` — 既定 TeX・モーダルを開く
+  たびに既定へ戻すこと・`source_format` を送ること・形式変更で検索しないこと・
+  アンカーの担体・**クライアントで arXiv の URL を組み立てないこと**。
+- `test_paper_radar_ui_static.py::TestCandidateStates` — バッジがタイトル行にあること・
+  取り込み済みでも arXiv リンクが残ること。
+- `test_paper_discovery_ui_static.py::TestSourceFormatSwitch` — 分野購読モーダル側の
+  同型（既定 TeX・リセット・送信・アンカー・**レーダーとの既定と事実文の逐語一致**）。
+- `test_document_pipeline.py` — 単一ファイル gzip が1本の `.tex` として読めること・
+  LaTeX の骨格が無い gzip は従来どおり拒否されること。
+- 管理UI 3点セット: マニュアル節
+  [取得する形式](../manual/teacher/11-admin-materials.md#radar-format) +
+  `ADMIN_UI_ANCHORS` の `materials.radar-format` + `data-ui-anchor` の担体
+  （件数の正本は `test_admin_help_ui_anchors.py`）。`admin.html` の `?v=` も更新
+  （§14.8 と同じ理由）。
+
+### 15.8 非スコープ
+
+- **形式スイッチを持たない第3の取り込み入口** — 新しく作るなら本節と同型に揃える
+  （既定 TeX・保存しない・3点セット・`FORMAT_NOTICE` の逐語一致）。`source_format` を
+  送らない経路はサーバ既定の PDF になる。
+- 形式の教員ごとの既定値の保存（PR1 の「保存しない」に反する）。
+- 同じ論文を形式違いで取り直す導線（現状は古い教材を削除してから取り直す）。
+- `e-print` / `format` など `/src/` 以外の arXiv 配信 URL の使い分け。
+- HTML 配信（arXiv の `Access Paper → HTML`）の取り込み。
