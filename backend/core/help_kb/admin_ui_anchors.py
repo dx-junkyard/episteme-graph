@@ -292,6 +292,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.arxiv-discovery-interest",
         "materials.arxiv-discovery-modal",
         "materials.arxiv-discovery-order",
+        # 取得する形式（TeX ソース / PDF）— レーダー側の materials.radar-format と同型。
+        "materials.arxiv-discovery-format",
         "materials.arxiv-discovery-queue",
         "materials.arxiv-discovery-queue-refresh",
         "materials.arxiv-discovery-search",
@@ -310,6 +312,8 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "materials.landscape-propose",
         "materials.radar-compare",
         "materials.radar-distance",
+        # 取得する形式（TeX ソース / PDF）— arXiv の「Access Paper」の選択肢に対応。
+        "materials.radar-format",
         "materials.radar-ingest",
         "materials.radar-modal",
         "materials.radar-provenance",
@@ -920,6 +924,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.arxiv-discovery-complement": "teacher/11-admin-materials.md#arxiv-discovery-complement",
     # 基盤論文を探す（取り込み済み論文の参照リストから導出。引用グラフ供給と同じオプトイン）
     "materials.arxiv-discovery-foundation": "teacher/11-admin-materials.md#arxiv-discovery-foundation",
+    # 取得する形式（TeX ソース / PDF）— 既定は TeX ソース。TeX を公開していない
+    # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
+    "materials.arxiv-discovery-format": "teacher/11-admin-materials.md#arxiv-discovery-format",
     # 選択した論文を取り込む（許可ドメイン未設定・未選択のときは無効）
     "materials.arxiv-discovery-ingest": "teacher/11-admin-materials.md#arxiv-discovery-ingest",
     # 学習者の関心（コーパス回遊 Phase D。k-匿名レンジの事実行だけ・行が無ければ区画ごと非表示）
@@ -960,6 +967,9 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "materials.radar-compare": "teacher/11-admin-materials.md#radar-compare",
     # 距離（近い / 中間 / 同じ分野の別テーマ。段階ラベルのみ・数値は出さない）
     "materials.radar-distance": "teacher/11-admin-materials.md#radar-distance",
+    # 取得する形式（TeX ソース / PDF）— 既定は TeX ソース。TeX を公開していない
+    # 論文では arXiv が返した PDF をそのまま取り込む（形式の判定はサーバ側）
+    "materials.radar-format": "teacher/11-admin-materials.md#radar-format",
     # 選択した論文を取り込む（レーダー）— 取り込みの弁は既存 ingest と同一
     "materials.radar-ingest": "teacher/11-admin-materials.md#radar-ingest",
     # 論文レーダーモーダル（起点の教材 / 距離と検索条件 / 候補一覧 / 取り込み）

@@ -67,6 +67,22 @@
   var PROV_CONFIRM_TAIL =
     "この教材の出所として登録しますか？（タイトルは一致していません）";
 
+  // ── 取得する形式（TeX ソース / PDF）──────────────────────────────────
+  // arXiv の論文ページ「Access Paper」の選択肢に対応する。既定は TeX ソースで、
+  // 数式・節構造が原稿のまま読めるぶん解析の素材として PDF より欠落が少ない。
+  // 語彙の正本はサーバ（core/paper_discovery/schema.py の SOURCE_FORMATS）で、
+  // ここはその値をそのまま送る担体（クライアントで形式を判定・変換しない）。
+  var FORMAT_OPTIONS = [
+    { value: "tex", label: "TeX ソース" },
+    { value: "pdf", label: "PDF" }
+  ];
+  var DEFAULT_SOURCE_FORMAT = "tex";
+  // PD6 の流儀: 選んだ形式が必ず得られるとは限らない事実を、選ぶ前に言っておく
+  // （TeX ソースを投稿していない論文では arXiv が PDF を返す。判定はサーバが
+  // 取得したバイト列で行うので、ここで先回りして「TeX です」と名乗らせない）。
+  var FORMAT_NOTICE =
+    "TeX ソースが公開されていない論文では、arXiv が返した PDF をそのまま取り込みます。";
+
   // PD1: 取り込み前に必ず出す事実文（何が起きるかを省略しない）。
   // 分野購読モーダルと同一の文言・同一の境界（相互 import できないので同型に書く）。
   var INGEST_NOTICE_TAIL =
@@ -106,6 +122,12 @@
     "距離と条件を確認して「この条件で検索」を押してください。";
   var SOURCE_URL_NOTICE =
     "「取り込み済み」はURL経由で取り込まれた論文のみ判定できます。";
+  // 取り込み済みであることは一等地（タイトル行）で言う。灰色の小さな行に混ぜると
+  // 一覧を流し読みしたときに新着と区別できない。
+  var INGESTED_BADGE_LABEL = "取り込み済み";
+  var INGESTED_STATUS_LINE = "この論文はすでに教材として取り込まれています。";
+  var INGESTED_BADGE_STYLE =
+    "color:#1b6b5a;background:rgba(27,107,90,0.12);border:1px solid rgba(27,107,90,0.28)";
 
   // PR2: 帯の見出し。帯ラベルそのものはサーバの文字列を差し込むだけ。
   var DISTANCE_CHIP_HEAD = "距離: ";
@@ -191,6 +213,9 @@
     // 教員が開いた帯は開いたまま保つ（比較結果の描き直しで畳まない）。
     openBands: {},
     selected: {},
+    // 取得する形式（tex / pdf）。既定は TeX ソース。モーダルを開くたびに既定へ戻す
+    // （前回の選択をサーバにもブラウザにも保存しない — PR1 の「保存しない」に揃える）。
+    sourceFormat: DEFAULT_SOURCE_FORMAT,
     ingesting: false,
     domainAllowed: null,
     // arXiv 側がこの環境からの問い合わせを制限しているか（サーバの arxiv_blocked）。
@@ -338,6 +363,23 @@
     return html;
   }
 
+  function formatRadiosHtml() {
+    var html = "";
+    for (var i = 0; i < FORMAT_OPTIONS.length; i++) {
+      var option = FORMAT_OPTIONS[i];
+      html +=
+        '<label style="font-size:12px;color:var(--color-text-primary);display:inline-flex;align-items:center;gap:4px">' +
+        '<input type="radio" name="pr-format-choice" class="pr-format-choice" value="' +
+        esc(option.value) +
+        '"' +
+        (option.value === state.sourceFormat ? " checked" : "") +
+        ">" +
+        esc(option.label) +
+        "</label>";
+    }
+    return html;
+  }
+
   function modalHtml() {
     return (
       // overflow-y:auto は固定区画（seed・検索条件・フッター）の合計が 88vh を超える
@@ -404,6 +446,14 @@
         // ⑤ 分析・取り込みのフッター行（承認済みモックの foot-row。比較と取り込みは
         //    どちらも「選択した候補への操作」なので一覧の下に並べる）
         '<div style="border-top:1px solid var(--color-border-tertiary);margin-top:10px;padding-top:10px">' +
+          // 取得する形式は「選択した論文をどう取り込むか」なので取り込みの区画に置く。
+          '<div id="pr-format" data-ui-anchor="materials.radar-format" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+            '<span style="font-size:12px;color:var(--color-text-secondary)">取得する形式</span>' +
+            formatRadiosHtml() +
+            '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+              esc(FORMAT_NOTICE) +
+            "</span>" +
+          "</div>" +
           '<div id="pr-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div id="pr-ingest-result" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">' +
@@ -444,6 +494,7 @@
     state.searching = false;
     state.openBands = {};
     state.selected = {};
+    state.sourceFormat = DEFAULT_SOURCE_FORMAT;
     state.ingesting = false;
     state.domainAllowed = null;
     state.arxivBlocked = false;
@@ -474,6 +525,7 @@
     bindEnter("pr-category-input", addCategoryFromInput);
     bindEnter("pr-keyphrase-input", addKeyphraseFromInput);
     bindDistanceChoices();
+    bindFormatChoices();
 
     renderSeed();
     renderArxivBlocked();
@@ -502,6 +554,19 @@
         if (!this.checked) return;
         state.distance = this.value;
         renderKeyphraseSection();
+      });
+    }
+  }
+
+  // 形式の切り替えは取り込み時にだけ効く（検索し直さない — PR5: 明示操作のみ）。
+  function bindFormatChoices() {
+    var container = el("pr-format");
+    if (!container) return;
+    var nodes = container.querySelectorAll(".pr-format-choice");
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].addEventListener("change", function () {
+        if (!this.checked) return;
+        state.sourceFormat = this.value;
       });
     }
   }
@@ -1216,8 +1281,18 @@
     html +=
       '<div style="flex:1;min-width:0">' +
       '<div style="font-size:13px;color:var(--color-text-primary)">' +
-      esc((candidate && candidate.title) || arxivId) +
-      "</div>";
+      esc((candidate && candidate.title) || arxivId);
+    // 取り込み済みはタイトル行にバッジで出す（一覧を流し読みしても新着と見分けられる）。
+    if (status === "ingested") {
+      html +=
+        '<span class="pr-ingested-badge" style="display:inline-block;margin-left:6px;vertical-align:1px;' +
+        'border-radius:10px;padding:0 7px;font-size:11px;white-space:nowrap;' +
+        INGESTED_BADGE_STYLE +
+        '">' +
+        esc(INGESTED_BADGE_LABEL) +
+        "</span>";
+    }
+    html += "</div>";
 
     // PR2: サーバが確定した帯ラベルをそのまま出す（閾値判定・数値描画をしない）。
     if (candidate && candidate.distance_label) {
@@ -1246,9 +1321,14 @@
     }
 
     if (status === "ingested") {
+      // 取り込み済みでも arXiv へは開ける（元論文の確認を塞がない）。バッジと
+      // 同じ文言をここでも繰り返さず、すでに教材になっている事実だけを言う。
       html +=
-        '<div class="pr-status-label" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">取り込み済み</div>';
-    } else if (candidate && candidate.abs_url) {
+        '<div class="pr-status-label" style="font-size:11.5px;color:var(--color-text-secondary);margin-top:3px">' +
+        esc(INGESTED_STATUS_LINE) +
+        "</div>";
+    }
+    if (candidate && candidate.abs_url) {
       html +=
         '<div style="margin-top:4px">' +
         '<a href="' +
@@ -1690,6 +1770,8 @@
     }
     var payload = uploadOptions();
     payload.items = items;
+    // 取得する形式は教員が選んだ値をそのまま送る（サーバが語彙を検証する）。
+    payload.source_format = state.sourceFormat;
     // 監査の帰属は seed の分野（引けなければサーバ側の既定に落ちる）。
     if (seedDomainKey()) payload.domain_key = seedDomainKey();
 

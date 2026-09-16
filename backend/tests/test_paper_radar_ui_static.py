@@ -46,6 +46,7 @@ RADAR_JS = FRONTEND_DIR / "js" / "admin-paper-radar.js"
 MODAL_ANCHORS = (
     "materials.radar-modal",
     "materials.radar-distance",
+    "materials.radar-format",
     "materials.radar-search",
     "materials.radar-compare",
     "materials.radar-ingest",
@@ -736,8 +737,29 @@ class TestCandidateStates:
 
     def test_ingested_is_labelled_and_not_selectable(self):
         body = _extract_function(self.src, "candidateCardHtml")
-        assert "取り込み済み" in body
+        assert "INGESTED_BADGE_LABEL" in body
         assert 'status === "new"' in body
+
+    def test_ingested_badge_sits_on_the_title_row(self):
+        """取り込み済みは一覧を流し読みしても分かる位置（タイトル行）に出す。
+
+        灰色の小さな行だけに書いていると、候補一覧をざっと見たときに新着と見分けが
+        つかない（教員は「取り込んだはずの論文がまた出てきた」と読む）。
+        """
+        body = _extract_function(self.src, "candidateCardHtml")
+        title_row, _, rest = body.partition("INGESTED_BADGE_LABEL")
+        # タイトルの描画とバッジの間に、他の行（帯ラベル・メタ情報）が挟まらない。
+        assert "candidate.title" in title_row
+        assert "distance_label" not in title_row
+        assert "pr-ingested-badge" in title_row
+        assert rest  # バッジの後にも本文が続く（カードを打ち切っていない）
+
+    def test_ingested_rows_keep_the_arxiv_link(self):
+        """取り込み済みでも元論文は開ける（確認の導線を塞がない）。"""
+        body = _extract_function(self.src, "candidateCardHtml")
+        after_status = body.split("INGESTED_STATUS_LINE", 1)[1]
+        assert "abs_url" in after_status
+        assert "arXiv で開く" in after_status
 
     def test_summary_is_collapsible(self):
         body = _extract_function(self.src, "candidateCardHtml")
@@ -883,7 +905,73 @@ class TestArxivProvenanceRegistration:
 class TestCacheBuster:
     def test_admin_html_bumps_the_radar_cache_buster(self):
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-radar.js?v=paper-radar-20260915-1" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20260916-1" in src
+
+
+# ---------------------------------------------------------------------------
+# ⑮ 取得する形式（TeX ソース / PDF）
+# ---------------------------------------------------------------------------
+
+
+class TestSourceFormatSwitch:
+    """既定は TeX ソース。形式はサーバの語彙をそのまま送る。
+
+    ここを落とすと「TeX を選んだのに PDF が取り込まれた（あるいはその逆）」が
+    起こり、しかも画面上は区別が付かない（解析結果を開くまで分からない）。
+    """
+
+    def setup_method(self):
+        self.src = _read(RADAR_JS)
+        self.code = _strip_comments(self.src)
+
+    def test_switch_exists_with_both_formats(self):
+        body = _extract_function(self.src, "formatRadiosHtml")
+        assert "FORMAT_OPTIONS" in body
+        assert 'name="pr-format-choice"' in body
+        assert "FORMAT_OPTIONS = [" in self.src
+        assert '{ value: "tex", label: "TeX ソース" }' in self.src
+        assert '{ value: "pdf", label: "PDF" }' in self.src
+
+    def test_html_is_not_offered(self):
+        # arXiv の Access Paper には HTML もあるが、解析パイプラインの入力ではない。
+        options = self.src.split("FORMAT_OPTIONS = [", 1)[1].split("]", 1)[0]
+        assert "html" not in options.lower()
+
+    def test_default_is_tex(self):
+        assert 'DEFAULT_SOURCE_FORMAT = "tex"' in self.code
+        assert "sourceFormat: DEFAULT_SOURCE_FORMAT" in self.code
+
+    def test_opening_the_modal_resets_the_format(self):
+        body = _extract_function(self.src, "openModal")
+        assert "state.sourceFormat = DEFAULT_SOURCE_FORMAT" in body
+
+    def test_format_is_sent_with_the_ingest_request(self):
+        body = _extract_function(self.src, "runIngest")
+        assert "payload.source_format = state.sourceFormat" in body
+
+    def test_changing_the_format_does_not_search(self):
+        body = _extract_function(self.src, "bindFormatChoices")
+        assert "state.sourceFormat = this.value" in body
+        assert "runSearch" not in body
+
+    def test_switch_carries_the_anchor_and_sits_with_the_ingest_controls(self):
+        body = _extract_function(self.src, "modalHtml")
+        assert 'data-ui-anchor="materials.radar-format"' in body
+        format_block, _, rest = body.partition('id="pr-format"')
+        # 取り込みの区画（フッター）にあり、検索条件の区画より後ろにある。
+        assert 'id="pr-search-btn"' in format_block
+        assert 'id="pr-ingest-btn"' in rest
+
+    def test_fallback_to_pdf_is_stated_before_choosing(self):
+        # PD6: TeX を投稿していない論文があることを、選ぶ前に事実として言っておく。
+        assert "FORMAT_NOTICE" in _extract_function(self.src, "modalHtml")
+        notice = self.src.split("FORMAT_NOTICE =", 1)[1].split(";", 1)[0]
+        assert "TeX" in notice and "PDF" in notice
+
+    def test_no_client_side_url_building(self):
+        # 取得先 URL の組み立てはサーバ（core/paper_discovery/schema.py）の責務。
+        assert "arxiv.org/src" not in self.code
+        assert "arxiv.org/pdf" not in self.code
 
 
 # ---------------------------------------------------------------------------

@@ -69,6 +69,8 @@ ANCHORS = (
     # Phase 3（並び順トグル / 引用グラフからの候補）
     "materials.arxiv-discovery-order",
     "materials.arxiv-discovery-citation-search",
+    # 取得する形式（TeX ソース / PDF。paper_radar_design.md §15 と同型）
+    "materials.arxiv-discovery-format",
 )
 
 # 属性直書き（`data-ui-anchor="X"`）と setAttribute（`"data-ui-anchor", "X"`）の両形。
@@ -1125,5 +1127,70 @@ class TestCacheBuster:
     def test_admin_html_bumps_both_arxiv_script_cache_busters(self):
         """JS を直しても `?v=` を上げ忘れると、教員のブラウザは古い JS のまま。"""
         src = _read(ADMIN_HTML)
-        assert "js/admin-paper-discovery.js?v=paper-discovery-20260915-1" in src
-        assert "js/admin-paper-radar.js?v=paper-radar-20260915-1" in src
+        assert "js/admin-paper-discovery.js?v=paper-discovery-20260916-1" in src
+        assert "js/admin-paper-radar.js?v=paper-radar-20260916-1" in src
+
+
+# ---------------------------------------------------------------------------
+# 取得する形式（TeX ソース / PDF）— paper_radar_design.md §15
+# ---------------------------------------------------------------------------
+
+
+class TestSourceFormatSwitch:
+    """レーダー側（`admin-paper-radar.js`）と**同じ既定・同じ語彙**であること。
+
+    ここが割れると、同じ arXiv の論文が入口（分野購読 / レーダー）によって違う形式で
+    取り込まれ、しかも画面上は区別が付かない（解析結果を開くまで分からない）。
+    """
+
+    def setup_method(self):
+        self.src = _read(DISCOVERY_JS)
+        self.code = _strip_comments(self.src)
+        self.radar = _read(FRONTEND_DIR / "js" / "admin-paper-radar.js")
+
+    def test_switch_exists_with_both_formats(self):
+        body = _extract_function(self.src, "formatRadiosHtml")
+        assert "FORMAT_OPTIONS" in body
+        assert 'name="pd-format-choice"' in body
+        assert '{ value: "tex", label: "TeX ソース" }' in self.src
+        assert '{ value: "pdf", label: "PDF" }' in self.src
+
+    def test_html_is_not_offered(self):
+        options = self.src.split("FORMAT_OPTIONS = [", 1)[1].split("]", 1)[0]
+        assert "html" not in options.lower()
+
+    def test_default_is_tex_and_matches_the_radar(self):
+        assert 'DEFAULT_SOURCE_FORMAT = "tex"' in self.code
+        assert 'DEFAULT_SOURCE_FORMAT = "tex"' in _strip_comments(self.radar)
+        assert "sourceFormat: DEFAULT_SOURCE_FORMAT" in self.code
+
+    def test_notice_matches_the_radar_verbatim(self):
+        # 同じ事実を2画面で言い換えない（教員が別の挙動だと読む）。
+        def notice(src: str) -> str:
+            return src.split("FORMAT_NOTICE =", 1)[1].split(";", 1)[0].strip()
+
+        assert notice(self.src) == notice(self.radar)
+
+    def test_opening_the_modal_resets_the_format(self):
+        body = _extract_function(self.src, "openModal")
+        assert "state.sourceFormat = DEFAULT_SOURCE_FORMAT" in body
+
+    def test_format_is_sent_with_the_ingest_request(self):
+        body = _extract_function(self.src, "runIngest")
+        assert "payload.source_format = state.sourceFormat" in body
+
+    def test_changing_the_format_does_not_search(self):
+        body = _extract_function(self.src, "bindFormatChoices")
+        assert "state.sourceFormat = this.value" in body
+        assert "runSearch" not in body
+
+    def test_switch_sits_with_the_ingest_controls(self):
+        body = _extract_function(self.src, "modalHtml")
+        assert 'data-ui-anchor="materials.arxiv-discovery-format"' in body
+        before, _, rest = body.partition('id="pd-format"')
+        assert 'id="pd-ingest-btn"' in rest
+        assert 'id="pd-ingest-summary"' in rest
+
+    def test_no_client_side_url_building(self):
+        assert "arxiv.org/src" not in self.code
+        assert "arxiv.org/pdf" not in self.code

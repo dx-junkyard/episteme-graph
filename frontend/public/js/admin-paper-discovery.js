@@ -28,6 +28,20 @@
     manual: "手動"
   };
 
+  // ── 取得する形式（TeX ソース / PDF）──────────────────────────────────
+  // 論文レーダー（admin-paper-radar.js）と同型。arXiv の論文ページ「Access Paper」の
+  // 選択肢に対応し、既定は TeX ソース（数式・節構造が原稿のまま読める）。
+  // 語彙の正本はサーバ（core/paper_discovery/schema.py の SOURCE_FORMATS）で、
+  // ここはその値をそのまま送る担体（クライアントで形式を判定・変換しない）。
+  var FORMAT_OPTIONS = [
+    { value: "tex", label: "TeX ソース" },
+    { value: "pdf", label: "PDF" }
+  ];
+  var DEFAULT_SOURCE_FORMAT = "tex";
+  // PD6: 選んだ形式が必ず得られるとは限らない事実を、選ぶ前に言っておく。
+  var FORMAT_NOTICE =
+    "TeX ソースが公開されていない論文では、arXiv が返した PDF をそのまま取り込みます。";
+
   // PD1: 取り込み前に必ず出す事実文（何が起きるかを省略しない）。
   var INGEST_NOTICE_TAIL =
     "件の論文を取得し、解析パイプラインを実行します。解析には LLM を使用します。" +
@@ -159,6 +173,9 @@
     arxivBlocked: false,
     arxivBlockedNote: "",
     arxivBlockedKind: "",
+    // 取得する形式（tex / pdf）。既定は TeX ソース。モーダルを開くたびに既定へ戻す
+    // （前回の選択をサーバにもブラウザにも保存しない — 候補と同じ「保存しない」規律）。
+    sourceFormat: DEFAULT_SOURCE_FORMAT,
     ingesting: false,
     domainAllowed: null,
     // Phase 2: 取り込みキューは手動更新のみ（PD8。ポーリングしない）。
@@ -285,6 +302,23 @@
     state.open = false;
   }
 
+  function formatRadiosHtml() {
+    var html = "";
+    for (var i = 0; i < FORMAT_OPTIONS.length; i++) {
+      var option = FORMAT_OPTIONS[i];
+      html +=
+        '<label style="font-size:12px;color:var(--color-text-primary);display:inline-flex;align-items:center;gap:4px">' +
+        '<input type="radio" name="pd-format-choice" class="pd-format-choice" value="' +
+        esc(option.value) +
+        '"' +
+        (option.value === state.sourceFormat ? " checked" : "") +
+        ">" +
+        esc(option.label) +
+        "</label>";
+    }
+    return html;
+  }
+
   function modalHtml() {
     return (
       // overflow-y:auto は固定区画の合計が 88vh を超える低い画面でのフォールバック
@@ -396,6 +430,14 @@
 
         // ③ 取り込み確認
         '<div style="border-top:1px solid var(--color-border-tertiary);margin-top:10px;padding-top:10px">' +
+          // 取得する形式は「選択した論文をどう取り込むか」なので取り込みの区画に置く。
+          '<div id="pd-format" data-ui-anchor="materials.arxiv-discovery-format" style="display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:6px">' +
+            '<span style="font-size:12px;color:var(--color-text-secondary)">取得する形式</span>' +
+            formatRadiosHtml() +
+            '<span style="font-size:11.5px;color:var(--color-text-tertiary)">' +
+              esc(FORMAT_NOTICE) +
+            "</span>" +
+          "</div>" +
           '<div id="pd-ingest-summary" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
           '<div id="pd-ingest-estimate" style="font-size:11.5px;color:var(--color-text-tertiary);margin-bottom:6px"></div>' +
           '<div id="pd-ingest-result" style="font-size:12px;color:var(--color-text-secondary);margin-bottom:6px"></div>' +
@@ -425,6 +467,7 @@
     state.arxivBlocked = false;
     state.arxivBlockedNote = "";
     state.arxivBlockedKind = "";
+    state.sourceFormat = DEFAULT_SOURCE_FORMAT;
     state.ingesting = false;
     state.domainAllowed = null;
     state.queue = [];
@@ -472,6 +515,7 @@
       state.order = this.value === "relevance" ? "relevance" : "date";
     });
     el("pd-ingest-btn").addEventListener("click", runIngest);
+    bindFormatChoices();
     el("pd-category-add").addEventListener("click", addCategoryFromInput);
     el("pd-keyphrase-add").addEventListener("click", addKeyphraseFromInput);
     el("pd-author-add").addEventListener("click", addAuthorFromInput);
@@ -1914,6 +1958,19 @@
     node.textContent = line;
   }
 
+  // 形式の切り替えは取り込み時にだけ効く（検索し直さない — PD8: 押し付けない）。
+  function bindFormatChoices() {
+    var container = el("pd-format");
+    if (!container) return;
+    var nodes = container.querySelectorAll(".pd-format-choice");
+    for (var i = 0; i < nodes.length; i++) {
+      nodes[i].addEventListener("change", function () {
+        if (!this.checked) return;
+        state.sourceFormat = this.value;
+      });
+    }
+  }
+
   function runIngest() {
     if (state.ingesting) return;
     var button = el("pd-ingest-btn");
@@ -1940,6 +1997,8 @@
     }
     var payload = uploadOptions();
     payload.items = items;
+    // 取得する形式は教員が選んだ値をそのまま送る（サーバが語彙を検証する）。
+    payload.source_format = state.sourceFormat;
     if (batch && state.domainKey) payload.domain_key = state.domainKey;
 
     state.ingesting = true;
