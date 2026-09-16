@@ -363,6 +363,53 @@ class TestCheckPrerequisitesUsesTopicId:
         response = self._check(monkeypatch, "波動関数")
         assert response["unlearned"] == ["波動関数"]
 
+    # --- P2-R12: 表示名は要素単位（名前 -> 表示名 の dict にしない）-------------
+
+    @staticmethod
+    def _course_data_multi(prereqs):
+        return {
+            "topics": [
+                {"id": "t0", "title": "期待値", "prerequisites": list(prereqs)},
+                {"id": "t1", "title": "波動関数（前編）", "prerequisites": []},
+                {"id": "t2", "title": "波動関数（後編）", "prerequisites": []},
+            ]
+        }
+
+    def test_same_name_pointing_at_two_topics_keeps_both_titles(self, monkeypatch):
+        """同じ名前で別 topic を指す前提が2つあっても、片方の題名が消えない。"""
+        from api import services
+
+        monkeypatch.setattr(services, "_pg_session", lambda: self._Session([]))
+        response = services.check_prerequisites(
+            "user-1",
+            "course-1",
+            self._course_data_multi([
+                {"name": "波動関数", "topic_id": "t1"},
+                {"name": "波動関数", "topic_id": "t2"},
+            ]),
+            "期待値",
+            "このトピックを始めたい",
+        )
+        assert response is not None
+        assert response["unlearned"] == ["波動関数（前編）", "波動関数（後編）"]
+        assert response["first_prerequisite"] == "波動関数（前編）"
+
+    def test_duplicate_display_names_are_not_listed_twice(self, monkeypatch):
+        from api import services
+
+        monkeypatch.setattr(services, "_pg_session", lambda: self._Session([]))
+        response = services.check_prerequisites(
+            "user-1",
+            "course-1",
+            self._course_data_multi([
+                {"name": "波動関数", "topic_id": "t1"},
+                {"name": "wavefunction", "topic_id": "t1"},
+            ]),
+            "期待値",
+            "このトピックを始めたい",
+        )
+        assert response["unlearned"] == ["波動関数（前編）"]
+
 
 class TestGuardrails:
     def test_module_is_pure(self):

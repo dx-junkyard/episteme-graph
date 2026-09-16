@@ -24,6 +24,7 @@ from core.course_data import (
 )
 from core.deliberation import labels as labels_mod
 from core.document_pipeline.figure_images import normalize_figure_join_key
+from core.knowledge_objects import learning_units as ko_learning_units
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
 from core.llm_usage.context import usage_context
 from core.llm_worker.single_shot import structured_call
@@ -123,8 +124,10 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         figures_index = _load_document_figures_index(session, document_ids)
         course_topic_list = course_topics(course)
         units_by_key = _load_learning_units(session, document_ids)
+        unit_notes: dict = {}
         enriched_topics = _enrich_topics(
-            course_topic_list, bundle, chunks_by_material, figures_index, units_by_key
+            course_topic_list, bundle, chunks_by_material, figures_index, units_by_key,
+            notes=unit_notes,
         )
         draft_result = _generate_course_topic_drafts(
             course, enriched_topics, user_id=str(user_id), course_id=str(course_id)
@@ -135,20 +138,26 @@ def build_course_content(user_id: str, course_id: str) -> dict:
         # 並ぶ「学習者に何も伝えない」表示になっていた。根拠となる論理要素は教材本文の
         # ⚓ チップ（evidence_items + component context API）が正本で、こちらは重複かつ劣化。
         # 既存コースの保存済み `referenced_sections` は消さない（P4。UI が読まなくなるだけ）。
-        _set_content_status(
-            course,
-            "completed",
-            "",
-            {
-                "document_ids": document_ids,
-                "updated_topics": len(enriched_topics),
-                "mapping_topics": len(bundle["mapping_topics"]),
-                "components": len(bundle["components"]),
-                "equations": len(bundle["equations"]),
-                "drafted_topics": draft_result["drafted_topics"],
-                "draft_errors": draft_result["draft_errors"],
-            },
-        )
+        status_extra: dict = {
+            "document_ids": document_ids,
+            "updated_topics": len(enriched_topics),
+            "mapping_topics": len(bundle["mapping_topics"]),
+            "components": len(bundle["components"]),
+            "equations": len(bundle["equations"]),
+            "drafted_topics": draft_result["drafted_topics"],
+            "draft_errors": draft_result["draft_errors"],
+        }
+        # 教員が選んだ単位のうち、いまの解析結果で解決できなかったものがある事実
+        # （P2-R1）。**件数は載せない**（LU5）。該当が無ければキー自体を足さない。
+        if unit_notes.get("unresolved_units"):
+            status_extra["units_note"] = UNRESOLVED_UNITS_NOTE
+        # 解析で「学ぶ単位」が立たなかった章（P2-R11）。題名の列挙だけで、件数も
+        # 「なぜ立たなかったか」の推定も書かない（PL3）。
+        uncovered = _uncovered_section_titles(artifacts_by_doc)
+        if uncovered:
+            status_extra["uncovered_sections_note"] = UNCOVERED_SECTIONS_NOTE
+            status_extra["uncovered_sections"] = uncovered
+        _set_content_status(course, "completed", "", status_extra)
         _invalidate_topic_lecture_audio_cache(session, course_id)
         _save_course(session, course_id, course)
         return {
@@ -1019,8 +1028,136 @@ def _resolve_figure_ref(
 #: 単位で束ねたことを区別できるようにする（learning_units_design.md §6.3）。
 UNIT_SELECTION_CONFIDENCE = "unit_selection"
 
+#: units で束ねたうえで、散文（learning_objectives 等）が CourseMapping の
+#: **題名完全一致**由来でもあるトピックの ``content_confidence``（P2-R2）。
+#: 類似一致（title_similarity）由来の散文は units があるトピックには採らない。
+UNIT_SELECTION_WITH_TITLE_MAPPING_CONFIDENCE = "unit_selection_with_title_mapping"
+
 #: ``topic.content_source`` の値（units 経由）。
 UNIT_SELECTION_CONTENT_SOURCE = "learning_units"
+
+#: 教員が選んだ unit のうち、いまの解析結果に見つからないものがあるときの事実文
+#: （``course_content_status.extra``）。**件数を書かない**（LU5 / 原則4）。
+UNRESOLVED_UNITS_NOTE = (
+    "選んだ単位のうち、いまの解析結果に見つからないものがあります。"
+)
+
+#: 解析で「学ぶ単位」が立たなかった章があるときの事実文（P2-R11）。章の題名は
+#: 列挙するが件数は書かない。推定はしない（PL3）。
+UNCOVERED_SECTIONS_NOTE = (
+    "解析では、次の章に「学ぶ単位」が立っていません。"
+)
+
+
+def _uncovered_section_titles(artifacts_by_doc: dict[str, dict]) -> list[str]:
+    """「学ぶ単位」が立たなかった章の題名（document 横断・順序保持・重複除去。P2-R11）。
+
+    判定の正本は ``core/knowledge_objects/learning_units.py::uncovered_sections``
+    （決定論・非LLM）。ここは artifact の取り出しと題名の平坦化だけを行い、
+    読めない document は静かに飛ばす（freeze を止めない = LU8）。
+    """
+    titles: list[str] = []
+    for artifacts in (artifacts_by_doc or {}).values():
+        if not isinstance(artifacts, dict):
+            continue
+        try:
+            rows = ko_learning_units.uncovered_sections(
+                artifacts.get("document_structure"), artifacts.get("paper_skeleton")
+            )
+        except Exception:  # noqa: BLE001 — 事実文が出ないだけ（freeze は止めない）
+            logger.warning("uncovered section listing failed", exc_info=True)
+            continue
+        for row in rows:
+            title = str((row or {}).get("title") or "").strip()
+            if title and title not in titles:
+                titles.append(title)
+    return titles
+
+
+def _mapping_prose_allowed(unit_rows: list[dict], mapping_confidence: str) -> bool:
+    """散文フィールドに ``_best_mapping`` 由来を採ってよいか（P2-R2）。
+
+    units を束ねていないトピックは従来どおり（類似一致でも採る）。units を束ねた
+    トピックは **題名完全一致のときだけ**採る — 類似一致は「タイトルの語が重なった
+    別トピックの説明」であり、教員が選んだ単位の説明として出す根拠にならない。
+    """
+    if not unit_rows:
+        return True
+    return mapping_confidence == "exact_title"
+
+
+def _units_summary(unit_rows: list[dict]) -> str:
+    """束ねた unit の summary からトピック概要を組む（mapping を使えないときの出所）。
+
+    先頭の非空 summary をそのまま使う（合成・要約はしない = LLM を呼ばない）。
+    どの unit にも summary が無ければ空文字（空欄は「説明が無い」という事実）。
+    """
+    for row in unit_rows:
+        summary = str((row or {}).get("summary") or "").strip()
+        if summary:
+            return summary
+    return ""
+
+
+def _merge_topic_units(
+    topic: dict,
+    selected_units: list[tuple[dict, dict]],
+    unit_parent_index: dict[str, dict] | None,
+    components: list[dict],
+) -> tuple[list[dict], bool]:
+    """``topic.units`` を「保存分を保持したうえで救済を追記」した形に組み直す（P2-R1）。
+
+    旧実装は ①解決できた unit だけで配列を作り直す ②解決がゼロなら救済
+    （``title_match``）で**丸ごと上書き**する、の2点で教員の選択を失っていた。
+    ここでは:
+
+    - 保存されている ``topic.units`` を**保存順のまま全部残す**。live に居ないものは
+      ``source`` を書き換えず ``resolved=False`` を付けるだけ（LU2・LU4）。
+    - 救済は既存キーに無いものだけを**末尾に追記**する（``source="title_match"``）。
+      救済を走らせるのは ``unit_parent_index`` が渡されたとき（＝解決できた unit が
+      1つも無いとき）だけ。
+
+    Returns:
+        ``(units, 解決できなかった teacher_selected が居たか)``。
+    """
+    resolved_keys = {
+        str(entry.get("stable_key") or "").strip()
+        for entry, _row in selected_units
+    }
+    merged: list[dict] = []
+    seen_keys: set[str] = set()
+    unresolved_selected = False
+    for entry in topic_units(topic):
+        key = str(entry.get("stable_key") or "").strip()
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        item = dict(entry)
+        if key not in resolved_keys:
+            item["resolved"] = False
+            if str(item.get("source") or "") != UNIT_SOURCE_TITLE_MATCH:
+                unresolved_selected = True
+        else:
+            item.pop("resolved", None)
+        merged.append(item)
+
+    if unit_parent_index:
+        for component in components:
+            row = unit_parent_index.get(str(component.get("component_id") or ""))
+            if not isinstance(row, dict):
+                continue
+            key = str(row.get("stable_key") or "")
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            merged.append({
+                "kind": row.get("unit_kind") or "",
+                "stable_key": key,
+                "unit_id": row.get("unit_id") or "",
+                "label": row.get("label") or "",
+                "source": UNIT_SOURCE_TITLE_MATCH,
+            })
+    return merged, unresolved_selected
 
 
 def _units_for_topic(topic: dict, units_by_key: dict[str, dict]) -> list[tuple[dict, dict]]:
@@ -1144,8 +1281,16 @@ def _enrich_topics(
     chunks_by_material: dict[str, list[dict]],
     figures_index: dict[str, dict] | None = None,
     units_by_key: dict[str, dict] | None = None,
+    notes: dict | None = None,
 ) -> list[dict]:
+    """トピックを成果物で肉付けする。
+
+    ``notes`` は呼び出し側が用意する出力用の dict（省略可）。事実として報告すべき
+    ことだけを書き込む（現在は ``unresolved_units``: 教員が選んだ unit のうち live に
+    見つからないものがあったか）。戻り値の形は変えない（既存の呼び出し面を保つ）。
+    """
     enriched: list[dict] = []
+    unresolved_unit_topics = False
     all_chunks = [chunk for chunks in chunks_by_material.values() for chunk in chunks]
     # 出典解決の索引はコース単位で1回だけ組む（トピックごとに作り直さない）。
     block_index = _chunk_block_index(all_chunks)
@@ -1179,35 +1324,31 @@ def _enrich_topics(
                 if eq_id not in known_equation_ids:
                     known_equation_ids.add(eq_id)
                     equations.append(bundle["equations"][eq_id])
-        if unit_rows:
-            topic["units"] = [entry for entry, _row in selected_units]
-        elif components:
-            # 救済（文字列一致）で当たった component が何かの unit の子なら、その
-            # unit を後付けする。**教員が選んでいない**ことを source で区別する（§6.3）。
-            rescued: list[dict] = []
-            seen_keys: set[str] = set()
-            for component in components:
-                row = unit_parent_index.get(str(component.get("component_id") or ""))
-                if not isinstance(row, dict):
-                    continue
-                key = str(row.get("stable_key") or "")
-                if not key or key in seen_keys:
-                    continue
-                seen_keys.add(key)
-                rescued.append({
-                    "kind": row.get("unit_kind") or "",
-                    "stable_key": key,
-                    "unit_id": row.get("unit_id") or "",
-                    "label": row.get("label") or "",
-                    "source": UNIT_SOURCE_TITLE_MATCH,
-                })
-            if rescued:
-                topic["units"] = rescued
+        # 教員が選んだが live に居ない unit（再解析で supersede された等）は**落とさない**
+        # （P2-R1 / LU2「情報を落とさない」）。保存順を保ったまま resolved=False を付けて
+        # 残し、救済（title_match）は上書きではなく**追記**にする。
+        kept_units, unresolved_selected = _merge_topic_units(
+            topic, selected_units, unit_parent_index if not unit_rows else None, components
+        )
+        if kept_units:
+            topic["units"] = kept_units
+        if unresolved_selected:
+            unresolved_unit_topics = True
 
-        summary = _topic_summary(mapping, components)
-        learning_objectives = _as_str_list(mapping.get("learning_objectives") if mapping else [])
-        assessment_prompts = _as_str_list(mapping.get("assessment_prompts") if mapping else [])
-        prerequisite_concepts = _as_str_list(mapping.get("prerequisite_concepts") if mapping else [])
+        # --- 散文フィールドの出所（P2-R2）------------------------------------
+        # units で束ねたトピックに ``_best_mapping`` の**類似一致**由来の散文
+        # （learning_objectives / expected_misconceptions / assessment_prompts …）が
+        # 混ざると、教員が選んだ単位とは別のトピックの説明が「この単位の説明」として
+        # 出る。units があるときは **exact_title 一致のときだけ** mapping 由来を採り、
+        # それ以外は unit / component 側の材料だけで組む（出所の正直さ）。
+        mapping_for_prose = mapping if _mapping_prose_allowed(unit_rows, mapping_confidence) else {}
+        summary = (
+            _topic_summary(mapping_for_prose, components)
+            or (_units_summary(unit_rows) if unit_rows else "")
+        )
+        learning_objectives = _as_str_list(mapping_for_prose.get("learning_objectives") if mapping_for_prose else [])
+        assessment_prompts = _as_str_list(mapping_for_prose.get("assessment_prompts") if mapping_for_prose else [])
+        prerequisite_concepts = _as_str_list(mapping_for_prose.get("prerequisite_concepts") if mapping_for_prose else [])
         teaching_takeaways = _as_str_list([c.get("teaching_takeaway") for c in components if c.get("teaching_takeaway")])
         evidence_ids = _linked_ids(components, "linked_evidence_ids")
         evidence_links = _topic_evidence_links(
@@ -1278,9 +1419,11 @@ def _enrich_topics(
             ),
             "learning_objectives": learning_objectives,
             "prerequisite_concepts": prerequisite_concepts,
-            "blackbox_policy": mapping.get("blackbox_policy") if isinstance(mapping, dict) else {},
+            "blackbox_policy": mapping_for_prose.get("blackbox_policy") if isinstance(mapping_for_prose, dict) else {},
             "assessment_prompts": assessment_prompts,
-            "expected_misconceptions": _as_str_list(mapping.get("expected_misconceptions") if mapping else []),
+            "expected_misconceptions": _as_str_list(
+                mapping_for_prose.get("expected_misconceptions") if mapping_for_prose else []
+            ),
             "linked_component_ids": component_ids,
             "linked_equation_ids": [str(e.get("equation_id") or e.get("id")) for e in equations if e.get("equation_id") or e.get("id")],
             "linked_claim_ids": list(dict.fromkeys(
@@ -1295,7 +1438,14 @@ def _enrich_topics(
             else _short_excerpt(source_chunks[0].get("text", "")),
             "content_source": UNIT_SELECTION_CONTENT_SOURCE if unit_rows
             else ("unlinked" if unlinked else "agent_mapping"),
-            "content_confidence": UNIT_SELECTION_CONFIDENCE if unit_rows else mapping_confidence,
+            # units 経由でも、散文が mapping 由来（exact_title 一致）なら実態を区別して
+            # 出す（P2-R2。「unit で束ねた」と「unit で束ね、題名一致の説明も使った」は
+            # 別の状態で、教員が出所を追えるように語彙を分ける）。
+            "content_confidence": (
+                (UNIT_SELECTION_WITH_TITLE_MAPPING_CONFIDENCE if mapping_for_prose
+                 else UNIT_SELECTION_CONFIDENCE)
+                if unit_rows else mapping_confidence
+            ),
         })
         narrative = _topic_narrative(components, narrative_by_component)
         if narrative:
@@ -1313,6 +1463,8 @@ def _enrich_topics(
                 "message": UNLINKED_TOPIC_GROUNDING_NOTE,
             }
         enriched.append(topic)
+    if isinstance(notes, dict) and unresolved_unit_topics:
+        notes["unresolved_units"] = True
     return enriched
 
 

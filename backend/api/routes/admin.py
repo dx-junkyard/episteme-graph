@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import text as sa_text
 
 from dependencies import (
@@ -76,6 +76,7 @@ from services import (
     get_course_group_permissions,
     get_document_group_permissions,
     get_user_group_ids,
+    list_visible_document_ids,
     process_material_background,
     record_review_event,
     resolve_document_access,
@@ -106,8 +107,10 @@ from core.course_units import (
     list_unit_candidates,
     render_unit_candidates_block,
     unit_concept_terms_by_document,
+    unit_kind_label,
 )
 from core.document_pipeline.figure_images import load_document_figures
+from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE, strip_control_sequences
 from core.document_pipeline.orchestrator import PIPELINE_STAGES, VISION_STAGE_NAMES
 from core.document_pipeline.persistence import (
     document_run_artifacts,
@@ -2153,12 +2156,24 @@ _MAX_CONCEPT_TERMS_PER_MATERIAL = 12
 def _build_material_context(
     material_ids: list[str],
     pg_session_factory=None,
+    *,
+    user_id: str | None = None,
+    unit_candidates_out: list | None = None,
 ) -> str | None:
     """選択された教材のAgent解析済み理論コンポーネントを主入力としてコンテキスト文字列を構築する。
 
     主入力: theory_components / theory_component_graphs / theory_claims
     補助入力: chunks (原文抜粋) / document_analysis_runs._artifacts.document_structure
     fallback: documents.knowledge_graph (Agent未実行の旧教材のみ)
+
+    ``user_id`` を渡すと **可視性ゲート**（P2-R5）を掛ける: その利用者にとって
+    見えない document は文脈にもユニット候補にも出さない（fail-closed。可視集合が
+    空なら ``None``）。``None`` のままなら従来どおりゲートを掛けない（既存テスト・
+    内部呼び出しの後方互換。ルート層は必ず渡すこと）。
+
+    ``unit_candidates_out`` を渡すと、そこに「学ぶ単位」の候補
+    （``{"handle", "kind", "kind_label", "label"}``）を追記する。戻り値の型は
+    変えない（呼び出し面・パッチ面を保つ）。
 
     Returns None if no usable context could be built.
     """
@@ -2184,6 +2199,20 @@ def _build_material_context(
 
         if not doc_rows:
             return None
+
+        # 可視性ゲート（P2-R5・fail-closed）: 選択された material_id がそのまま
+        # 「読んでよい」証拠にはならない。``user_id`` が指定されたときは、本人が
+        # 見られる document だけを残す（見えないものは静かに落とす）。
+        if user_id is not None:
+            visible = set(list_visible_document_ids(str(user_id)) or [])
+            doc_rows = [row for row in doc_rows if str(row[3]) in visible]
+            if not doc_rows:
+                return None
+            allowed_mids = {row[0] for row in doc_rows}
+            material_ids = [mid for mid in material_ids if mid in allowed_mids]
+            # 以降の SELECT（原文抜粋など）も絞り込み後の集合で撃つ。
+            placeholders = ", ".join(f":mid_{i}" for i in range(len(material_ids)))
+            params = {f"mid_{i}": mid for i, mid in enumerate(material_ids)}
 
         # doc_uuid → source_path マッピング
         uuid_to_mid: dict[str, str] = {row[3]: row[0] for row in doc_rows}
@@ -2289,6 +2318,10 @@ def _build_material_context(
 
     # --- 7) コンテキスト文字列を組み立て ---
     sections: list[str] = []
+    # 資料本文（PDF / URL 取得 / arXiv 由来）は第三者が書いた untrusted 入力なので、
+    # 指示側に固定文を添える（開発ルール4「信頼境界」・正本 core/text_hygiene.py）。
+    # **経路ごとに言い換えない**（ガードレールが原文で固定する）。
+    sections.append(UNTRUSTED_SOURCE_NOTICE)
     sections.append(
         "## Agent解析済み教材コンテキスト\n"
         "以下は選択された教材からAgentパイプラインが生成した理論コンポーネント情報です。"
@@ -2488,6 +2521,18 @@ def _build_material_context(
         sections.append(units_block)
         sections.append("")
 
+    # 候補表（handle → 種別・名前）を呼び出し側へ返す。プレビューで ``U3`` ではなく
+    # 単位の名前を出すための材料（P2-R10）。数値（件数・order_index・confidence）は
+    # 載せない（LU5）。表示テキストは untrusted 由来なので制御シーケンスを落とす。
+    if unit_candidates_out is not None:
+        for candidate in unit_candidates:
+            unit_candidates_out.append({
+                "handle": candidate.handle,
+                "kind": candidate.unit_kind,
+                "kind_label": unit_kind_label(candidate.unit_kind),
+                "label": strip_control_sequences(candidate.label),
+            })
+
     return "\n".join(sections)
 
 
@@ -2501,6 +2546,10 @@ class _CourseBuilderChatResponseOut(CourseBuilderChatResponse):
 
     degraded: bool = False
     session_saved: bool = True
+    # 「学ぶ単位」の候補表（handle → 種別・名前）。プレビューが ``U3`` ではなく
+    # 単位の名前を出すための材料（P2-R10・learning_units_design.md §6.2）。
+    # 数値は載せない（LU5）。候補が無ければ空配列。
+    unit_candidates: list[dict] = Field(default_factory=list)
 
 
 # コースビルダーチャットの日次 LLM コール上限（正本: core/llm_worker/cost_gate.py の
@@ -2547,9 +2596,14 @@ def course_builder_chat(
     ]
 
     # 選択教材のナレッジグラフ・チャンクテキストを含む詳細コンテキストを注入
+    unit_candidates_out: list[dict] = []
     if body.selected_material_ids:
         try:
-            material_context = _build_material_context(body.selected_material_ids)
+            material_context = _build_material_context(
+                body.selected_material_ids,
+                user_id=current_user["id"],
+                unit_candidates_out=unit_candidates_out,
+            )
             if material_context:
                 messages.append({
                     "role": "user",
@@ -2642,6 +2696,7 @@ def course_builder_chat(
         course_draft=course_draft,
         degraded=degraded,
         session_saved=session_saved,
+        unit_candidates=unit_candidates_out,
     )
 
 

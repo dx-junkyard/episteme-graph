@@ -44,6 +44,8 @@ NOTICE_APPLIED_PATHS: list[tuple[Path, str]] = [
     (CORE_DIR / "paper_discovery" / "compare.py", "build_prompt"),
     (CORE_DIR / "teaching_figures" / "prompt.py", "GROUNDING_CONSTRAINT"),
     (CORE_DIR / "course_content_builder.py", "_COURSE_CONTENT_DRAFT_PROMPT"),
+    # コースビルダー（教材コンテキスト = 解析成果 + 原文抜粋 + 学ぶ単位の候補）。
+    (API_DIR / "routes" / "admin.py", "_build_material_context"),
     (CORE_DIR / "doubt" / "scope_candidates" / "prompt.py", "build_content"),
     (CORE_DIR / "doubt" / "falsification_conditions" / "prompt.py", "build_content"),
     (CORE_DIR / "deliberation" / "standardization" / "prompt.py", "build_content"),

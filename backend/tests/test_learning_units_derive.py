@@ -417,3 +417,73 @@ class TestInternalIdLabels:
     def test_no_unit_label_is_an_internal_id(self):
         for unit in _build():
             assert not lu.is_internal_id_label(unit["values"]["label"])
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 単位が立たなかった章を落とさない（P2-R11）
+# ---------------------------------------------------------------------------
+
+
+class TestUncoveredSections:
+    @staticmethod
+    def _structure(*sections) -> dict:
+        return {
+            "sections": [
+                {"section_id": sid, "title": title, "order": order}
+                for order, (sid, title) in enumerate(sections)
+            ]
+        }
+
+    @staticmethod
+    def _skeleton(*groups) -> dict:
+        return {
+            "logical_blocks": [
+                {"block_id": f"b{i}", "section_ids": list(g)} for i, g in enumerate(groups)
+            ]
+        }
+
+    def test_lists_sections_with_no_logical_block_in_document_order(self):
+        out = lu.uncovered_sections(
+            self._structure(("s1", "序論"), ("s2", "装置"), ("s3", "解析"), ("s4", "結論")),
+            self._skeleton(["s1"], ["s3", "s4"]),
+        )
+        assert out == [{"section_id": "s2", "title": "装置"}]
+
+    def test_returns_nothing_when_every_section_is_covered(self):
+        out = lu.uncovered_sections(
+            self._structure(("s1", "序論")), self._skeleton(["s1"])
+        )
+        assert out == []
+
+    def test_missing_material_is_not_read_as_zero_units(self):
+        assert lu.uncovered_sections(None, self._skeleton(["s1"])) == []
+        assert lu.uncovered_sections(self._structure(("s1", "序論")), None) == []
+        assert lu.uncovered_sections({}, {}) == []
+
+    def test_sections_without_a_title_are_dropped(self):
+        """内部 ID を章の名前として表示させない（LU5 / PL7）。"""
+        structure = {"sections": [{"section_id": "s9", "title": "  ", "order": 0}]}
+        assert lu.uncovered_sections(structure, self._skeleton()) == []
+
+    def test_accepts_dataclass_shaped_skeletons_too(self):
+        @dataclass
+        class _Block:
+            block_id: str
+            section_ids: list
+
+        @dataclass
+        class _Skeleton:
+            logical_blocks: list
+
+        out = lu.uncovered_sections(
+            self._structure(("s1", "序論"), ("s2", "装置")),
+            _Skeleton(logical_blocks=[_Block("b0", ["s1"])]),
+        )
+        assert out == [{"section_id": "s2", "title": "装置"}]
+
+    def test_does_not_mutate_its_inputs(self):
+        structure = self._structure(("s2", "装置"), ("s1", "序論"))
+        skeleton = self._skeleton(["s1"])
+        before = copy.deepcopy((structure, skeleton))
+        lu.uncovered_sections(structure, skeleton)
+        assert (structure, skeleton) == before

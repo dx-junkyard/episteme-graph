@@ -28,9 +28,19 @@ from core.text_hygiene import strip_control_sequences
 #: 決まらない」というちぐはぐが起きる）。
 _WHITESPACE_RE = re.compile(r"[\s　]+")
 
+#: 埋め込み・プレースホルダーの綴り（``![[figure:xxx]]`` / ``[[FIGURE_1]]`` /
+#: ``[[FORMULA_3]]`` / ``![[component:id]]``）。区画本文は、供給元によって
+#: **解決済み**（``[[FIGURE_1]]``）と**未解決**（``![[figure:xxx]]``）のどちらの綴りにも
+#: なり得る（配信は ``resolve_figure_embeds`` を通し、痕跡帰属は同期パスに DB クエリを
+#: 足さないため通さない）。学習者の選択逐語にはどちらの綴りも現れない（画面では画像・
+#: 数式として描かれている）ので、**両側から落として比較する** = 供給元の違いで
+#: 「一致しない」にならないようにする（P2-R13）。
+_EMBED_TOKEN_RE = re.compile(r"!?\[\[[^\]\n]{0,200}\]\]")
+
 
 def _match_key(text: str) -> str:
-    return _WHITESPACE_RE.sub("", strip_control_sequences(str(text or "")))
+    cleaned = _EMBED_TOKEN_RE.sub("", strip_control_sequences(str(text or "")))
+    return _WHITESPACE_RE.sub("", cleaned)
 
 
 def resolve_selection_segment(

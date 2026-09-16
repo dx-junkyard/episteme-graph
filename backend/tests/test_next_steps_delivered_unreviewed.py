@@ -175,7 +175,14 @@ class TestRefResolution:
         src = extract_function_source(_SRC, "_approved_refs")
         assert "t.id::text = ANY(:refs)" in src
         assert "source_scope->'legacy_ids'" in src
-        assert "review_status = 'teacher_approved'" in src
+        assert "review_status = ANY(:approved)" in src
+
+    def test_approved_vocabulary_covers_every_teacher_confirmation(self):
+        """P2-R8: `teacher_approved` だけを見ると、グラフ対話レビュー等で実際に確認済みの
+        `teacher_reviewed` / `endorsed` のコースが「未確認」として恒久点灯する。"""
+        assert set(ns.APPROVED_REVIEW_STATUSES) == {
+            "teacher_approved", "teacher_reviewed", "endorsed",
+        }
 
     def test_reads_live_views_only(self):
         src = extract_function_source(_SRC, "_eval_course_delivered_unreviewed")

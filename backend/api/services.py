@@ -2290,8 +2290,10 @@ def check_prerequisites(
         topics_by_id = {
             str(t.get("id")): t for t in course_topics(course_data) if t.get("id")
         }
-        prereq_names: list[str] = []          # 記帳・突合キー（従来どおり名前）
-        prereq_display: dict[str, str] = {}   # 記帳キー → 表示名（現在の題名を優先）
+        # P2-R12: 表示名は**要素単位**で持つ（``名前 -> 表示名`` の dict だと、同じ
+        # 名前で別の topic_id を指す前提が2つあるとき後勝ちで片方の題名が消える。
+        # 記帳キー（名前）が重複していても、要素ごとの対応は失わない）。
+        prereq_entries: list[tuple[str, str]] = []  # (記帳・突合キー, 表示名)
         for prereq in prereqs:
             if isinstance(prereq, dict):
                 prereq_name = str(prereq.get("name") or "").strip()
@@ -2309,15 +2311,16 @@ def check_prerequisites(
                 prereq_name = display  # topic_id だけの要素も記帳キーを持てるようにする
             if not prereq_name:
                 continue
-            prereq_names.append(prereq_name)
-            prereq_display[prereq_name] = display or prereq_name
+            prereq_entries.append((prereq_name, display or prereq_name))
 
-        if not prereq_names:
+        if not prereq_entries:
             return None
+
+        prereq_names = [name for name, _display in prereq_entries]
 
         # 発話中の言及判定は「元の名前」と「現在の題名」の両方で見る（表示を変えた
         # だけで説明要求が拾えなくなるのを防ぐ）。
-        mention_names = set(prereq_names) | set(prereq_display.values())
+        mention_names = set(prereq_names) | {display for _name, display in prereq_entries}
 
         # 本人の明示的な肯定は「この前提は理解している」の確定として記帳し、以後
         # 同じ前提では問い返さない（同一セッション内のループ抑止も、督促でも推定でも
@@ -2340,11 +2343,12 @@ def check_prerequisites(
 
         acknowledged = get_acknowledged_prerequisites(user_id, course_id)
 
-        unlearned: list[str] = [
-            prereq_display.get(prereq_name, prereq_name)
-            for prereq_name in prereq_names
-            if normalize_prerequisite_name(prereq_name) not in acknowledged
-        ]
+        unlearned: list[str] = []
+        for prereq_name, display in prereq_entries:
+            if normalize_prerequisite_name(prereq_name) in acknowledged:
+                continue
+            if display not in unlearned:  # 表示の重複は並べない（順序は保存順）
+                unlearned.append(display)
 
         if not unlearned:
             return None

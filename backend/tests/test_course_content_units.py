@@ -154,7 +154,77 @@ def test_units_win_over_title_similarity():
     )[0]
 
     assert topic["linked_component_ids"] == ["comp_unit"]
-    assert topic["content_confidence"] == "unit_selection"
+    # 題名が完全一致なので mapping 由来の散文も採る（実態を語彙で区別する = P2-R2）。
+    assert topic["content_confidence"] == ccb.UNIT_SELECTION_WITH_TITLE_MAPPING_CONFIDENCE
+
+
+# ---------------------------------------------------------------------------
+# 1-b. 散文の出所（P2-R2）
+# ---------------------------------------------------------------------------
+
+def _prose_mapping(title: str) -> dict:
+    return {
+        "title": title,
+        "description": "mapping の概要",
+        "learning_objectives": ["mapping の到達目標"],
+        "assessment_prompts": ["mapping の設問"],
+        "prerequisite_concepts": ["mapping の前提"],
+        "expected_misconceptions": ["mapping の誤解"],
+        "blackbox_policy": {"policy": "mapping"},
+    }
+
+
+def test_units_topic_rejects_prose_from_a_merely_similar_mapping():
+    """units があるトピックには**類似一致**の mapping 由来の散文を入れない（P2-R2）。"""
+    bundle = _bundle(
+        components={"comp_unit": _component("comp_unit", "単位の子")},
+        mapping_topics=[_prose_mapping("共振条件の導出 の詳細")],
+    )
+    units = {"k1:u": _unit_row("k1:u", "教員が選んだ単位", component_agent_ids=["comp_unit"])}
+    units["k1:u"]["summary"] = "単位そのものの概要"
+
+    topic = ccb._enrich_topics(
+        [_topic_with_units("k1:u", title="共振条件の導出")], bundle, {}, None, units
+    )[0]
+
+    assert topic["content_confidence"] == ccb.UNIT_SELECTION_CONFIDENCE
+    assert topic["learning_objectives"] == []
+    assert topic["assessment_prompts"] == []
+    assert topic["prerequisite_concepts"] == []
+    assert topic["expected_misconceptions"] == []
+    assert topic["blackbox_policy"] in ({}, None)
+    # 概要は mapping ではなく unit / component 側の材料から組む。
+    assert topic["summary"] != "mapping の概要"
+    assert topic["summary"] == "単位の子 の要約"
+
+
+def test_units_topic_keeps_prose_from_an_exact_title_mapping():
+    """題名が完全一致する mapping の散文は採る（出所を語彙で区別する）。"""
+    bundle = _bundle(
+        components={"comp_unit": _component("comp_unit", "単位の子")},
+        mapping_topics=[_prose_mapping("共振条件の導出")],
+    )
+    units = {"k1:u": _unit_row("k1:u", "教員が選んだ単位", component_agent_ids=["comp_unit"])}
+
+    topic = ccb._enrich_topics(
+        [_topic_with_units("k1:u", title="共振条件の導出")], bundle, {}, None, units
+    )[0]
+
+    assert topic["content_confidence"] == ccb.UNIT_SELECTION_WITH_TITLE_MAPPING_CONFIDENCE
+    assert topic["learning_objectives"] == ["mapping の到達目標"]
+    assert topic["expected_misconceptions"] == ["mapping の誤解"]
+
+
+def test_topics_without_units_keep_the_similarity_prose():
+    """units を束ねていないトピックの挙動は変えない（LU1・後方互換）。"""
+    bundle = _bundle(
+        components={"comp_title": _component("comp_title", "共振条件の導出")},
+        mapping_topics=[_prose_mapping("共振条件の導出 の詳細")],
+    )
+    topic = ccb._enrich_topics([{"id": "t1", "title": "共振条件の導出"}], bundle, {}, None, {})[0]
+
+    assert topic["content_confidence"] == "title_similarity"
+    assert topic["learning_objectives"] == ["mapping の到達目標"]
 
 
 def test_units_add_equations_the_components_do_not_reach():
@@ -413,3 +483,113 @@ def test_load_learning_units_reads_the_live_view():
     session.execute.return_value.fetchall.return_value = []
     ccb._load_learning_units(session, [DOC])
     assert "learning_units_live" in str(session.execute.call_args.args[0])
+
+
+# ---------------------------------------------------------------------------
+# 7. 解決できなかった teacher_selected を落とさない（P2-R1）
+# ---------------------------------------------------------------------------
+
+def test_unresolved_teacher_selected_units_are_kept_not_overwritten():
+    """live に居ない unit があっても、教員の選択は ``resolved: False`` で残る。"""
+    bundle = _bundle(
+        components={
+            "comp_unit": _component("comp_unit", "生きている単位の子"),
+            "comp_title": _component("comp_title", "共振条件の導出"),
+        },
+        mapping_topics=[{
+            "title": "共振条件の導出", "description": "d", "linked_component_ids": ["comp_title"],
+        }],
+    )
+    units = {"k1:alive": _unit_row("k1:alive", "生きている単位", component_agent_ids=["comp_unit"])}
+
+    topic = ccb._enrich_topics(
+        [_topic_with_units("k1:alive", "k1:gone", title="共振条件の導出")],
+        bundle, {}, None, units,
+    )[0]
+
+    entries = topic_units(topic)
+    assert [u["stable_key"] for u in entries] == ["k1:alive", "k1:gone"]
+    # 解決できた方には resolved フラグを足さない（従来の形のまま）。
+    assert "resolved" not in entries[0]
+    # 解決できなかった方は source を書き換えず（教員の選択のまま）resolved=False。
+    assert entries[1]["source"] == UNIT_SOURCE_TEACHER_SELECTED
+    assert entries[1]["resolved"] is False
+
+
+def test_rescue_is_appended_not_substituted_when_nothing_resolves():
+    """解決ゼロでも救済で**上書きしない**（追記する）。"""
+    bundle = _bundle(
+        components={"comp_title": _component("comp_title", "共振条件の導出")},
+        mapping_topics=[{
+            "title": "共振条件の導出", "description": "d", "linked_component_ids": ["comp_title"],
+        }],
+    )
+    units = {"k1:parent": _unit_row("k1:parent", "共振の理論", component_agent_ids=["comp_title"])}
+
+    topic = ccb._enrich_topics(
+        [_topic_with_units("k1:gone", title="共振条件の導出")], bundle, {}, None, units
+    )[0]
+
+    entries = topic_units(topic)
+    assert [u["stable_key"] for u in entries] == ["k1:gone", "k1:parent"]
+    assert entries[0]["source"] == UNIT_SOURCE_TEACHER_SELECTED and entries[0]["resolved"] is False
+    assert entries[1]["source"] == UNIT_SOURCE_TITLE_MATCH
+
+
+def test_unresolved_units_are_reported_as_a_fact_without_counts():
+    bundle = _bundle(components={"comp_unit": _component("comp_unit", "子")})
+    notes: dict = {}
+    ccb._enrich_topics(
+        [_topic_with_units("k1:gone")], bundle, {}, None, {}, notes=notes
+    )
+    assert notes["unresolved_units"] is True
+    # 事実文に数値を入れない（LU5 / 原則4）。
+    assert not any(ch.isdigit() for ch in ccb.UNRESOLVED_UNITS_NOTE)
+
+
+def test_notes_stay_empty_when_every_selected_unit_resolves():
+    bundle = _bundle(components={"comp_unit": _component("comp_unit", "子")})
+    units = {"k1:u": _unit_row("k1:u", "単位", component_agent_ids=["comp_unit"])}
+    notes: dict = {}
+    ccb._enrich_topics([_topic_with_units("k1:u")], bundle, {}, None, units, notes=notes)
+    assert notes == {}
+
+
+# ---------------------------------------------------------------------------
+# 8. 単位が立たなかった章の事実（P2-R11）
+# ---------------------------------------------------------------------------
+
+def _structure(*sections) -> dict:
+    return {
+        "sections": [
+            {"section_id": sid, "title": title, "order": order}
+            for order, (sid, title) in enumerate(sections)
+        ]
+    }
+
+
+def _skeleton(*section_id_groups) -> dict:
+    return {
+        "logical_blocks": [
+            {"block_id": f"b{i}", "section_ids": list(group)}
+            for i, group in enumerate(section_id_groups)
+        ]
+    }
+
+
+def test_uncovered_section_titles_lists_names_without_counts():
+    artifacts = {
+        DOC: {
+            "document_structure": _structure(("s1", "序論"), ("s2", "装置"), ("s3", "結論")),
+            "paper_skeleton": _skeleton(["s1"], ["s3"]),
+        }
+    }
+    assert ccb._uncovered_section_titles(artifacts) == ["装置"]
+    assert not any(ch.isdigit() for ch in ccb.UNCOVERED_SECTIONS_NOTE)
+
+
+def test_uncovered_section_titles_is_empty_without_material():
+    """素材が無いことを「単位が立たなかった」と解釈しない。"""
+    assert ccb._uncovered_section_titles({DOC: {}}) == []
+    assert ccb._uncovered_section_titles({DOC: {"document_structure": _structure(("s1", "序"))}}) == []
+    assert ccb._uncovered_section_titles({}) == []

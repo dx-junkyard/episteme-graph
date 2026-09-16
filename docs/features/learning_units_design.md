@@ -159,10 +159,30 @@ components item と `build_topic_evidence_items`）で、unit 経由で束ねた
 
 `_enrich_topics`: topic に `units` があれば **units 優先** — `learning_units_live` を document 集合で読み（`_load_learning_units`）、
 `agent_payload.linked_component_agent_ids` で bundle の components を、`linked_claim_ids` / `linked_equation_ids` で claims /
-equations を束ねる。`content_source="learning_units"` / `content_confidence="unit_selection"`。units が空のときだけ従来の
+equations を束ねる。`content_source="learning_units"`。units が空のときだけ従来の
 `_best_mapping`（文字列一致）を救済として使い、一致した mapping の component が unit の子なら `topic.units` に
 `source:"title_match"` で後付けする（教員が選んでいないことを `source` で区別）。unit 経由の component item には
 `display_label`（親 unit label）を付ける（§5.1）。
+
+**保存済みの選択は上書きしない（P2-R1）**: `topic.units` は保存順のまま全要素を残し、live に居ない
+（再解析で supersede された等）要素は `source` を書き換えず `resolved: false` を足すだけ（LU2 / LU4）。
+救済（`title_match`）は既存キーに無いものを**末尾へ追記**するだけで、解決がゼロのときも教員の選択を
+置き換えない。解決できない `teacher_selected` があった run は `course_content_status.extra.units_note` に
+事実文（件数なし）「選んだ単位のうち、いまの解析結果に見つからないものがあります。」を載せる。
+
+**散文の出所を混ぜない（P2-R2）**: units があるトピックは、`_best_mapping` 由来の散文
+（`summary` / `learning_objectives` / `assessment_prompts` / `prerequisite_concepts` /
+`expected_misconceptions` / `blackbox_policy`）を**題名完全一致（`exact_title`）のときだけ**採る。
+類似一致（`title_similarity`）は「タイトルの語が重なった別トピックの説明」であり、教員が選んだ単位の
+説明として出す根拠にならない。採らない場合は unit / component 側の材料だけで組む（無ければ空欄 = 事実）。
+`content_confidence` は実態に合わせて `unit_selection`（unit だけ）/
+`unit_selection_with_title_mapping`（unit + 題名一致 mapping の散文）に分ける。
+
+**単位が立たなかった章（P2-R11）**: `core/knowledge_objects/learning_units.py::uncovered_sections(structure, skeleton)`
+（決定論・非LLM・推定しない）が、`paper_skeleton` の `logical_blocks` がどの `section_ids` にも張っていない章を
+文書順で返す。freeze は題名だけを `course_content_status.extra.uncovered_sections` に列挙し、
+`uncovered_sections_note` に事実文（件数なし）を添える。素材が無い（構造 / skeleton が読めない）ときは
+空 — 「単位が立たなかった」と「素材が無い」を混同しない。
 
 ### 6.4 P2-4 前提の ID 参照
 
@@ -194,7 +214,8 @@ equations を束ねる。`content_source="learning_units"` / `content_confidence
   "draft", "registered", user_id, attach_decision_context({...}, ctx))` で 1 行記帳する（新 entity_type は作らない）。
 - G層ルール `course.delivered_unreviewed`（`RULE_COURSE_DELIVERED_UNREVIEWED`・recommended・capability は既存
   `materials.graph_review` を再利用・target は最初の source material）: 本人所有・`is_published` のコースで、source document の
-  live component / claim のうち topic が束ねているもの（`linked_component_ids` / `units` 経由）に `review_status='teacher_approved'`
+  live component / claim のうち topic が束ねているもの（`linked_component_ids` / `units` 経由）に教員の確認
+  （`next_steps.APPROVED_REVIEW_STATUSES` = `teacher_approved` / `teacher_reviewed` / `endorsed`。P2-R8）
   が 1 件も無い。事実文「コース『X』は、解析結果の確認（承認）を経ずに配信されています。」（件数なし・督促なし）。
   束ねが 0 件のコースには出さない（承認対象が無いのは別の事実）。
 
@@ -207,11 +228,28 @@ equations を束ねる。`content_source="learning_units"` / `content_confidence
 - `seg_0` の是正: ①フロント `app.js` — 「ここについて質問」は `Session.currentAnchor()` ではなく**選択範囲を含む教材区画**
   （`data-segment-index` を持つ最も近い祖先。無ければ chunk 順）から `segment_id` を取る。②サーバ — `selection_segment_id` が
   無く `selection_text` があるときは、`core/structure_anchor/selection_segment.py::resolve_selection_segment(chunks, selection_text)`
-  （非LLM・空白正規化の部分文字列一致・一意に決まるときだけ）で埋め、決まらなければ `anchor_id=""`（推測しない）。
+  （非LLM・空白正規化の部分文字列一致・一意に決まるときだけ）で埋め、決まらなければ `anchor_id=""`（推測しない）。 ③**区画の粒度（P2-R3）**: 配信（`get_topic_material`）と照合（`_anchor_segment_texts`）はどちらも
+  `core/lecture.py::build_topic_slides` のページ境界（`===` マーカー優先・無く長ければ段落境界の自動ページ分割。
+  表示・音声・readiness と同じ決定論分割）で割る。長いトピックは複数区画で配信され、フロントの
+  `data-segment-index` が 0..N-1 を取るので区画番号が意味を持つ（短いトピックは 1 区画 = `seg_0` が唯一の正解）。
+  `formulas` / `figures` / `evidence_items` は**区画ごとに間引かない**（`[[FORMULA_N]]` / `[[FIGURE_N]]` の
+  位置依存解決を壊さないため）。章題は先頭区画にだけ載せる。④**照合キー（P2-R13）**: `resolve_selection_segment`
+  の `_match_key` は `![[figure:id]]` / `[[FIGURE_N]]` / `[[FORMULA_N]]` のような埋め込み・プレースホルダーを
+  両側から落としてから比較する（配信は `resolve_figure_embeds` を通し、痕跡帰属は同期パスに DB クエリを
+  足さないため通さない — 供給元の違いで「一致しない」にならないようにする）。
 
 ## 9. 権限・監査・数値
 
-- unit の読みは document viewable（コースビルダーは選択教材 = 本人可視）。書き込みは persistence のみ。
+- unit の読みは document viewable。**選択された `material_id` は「読んでよい」証拠ではない**ので、
+  候補表を組む経路は必ず可視集合と積を取る（P2-R5・fail-closed。可視集合が空なら SQL を発行せず空）:
+  コースビルダーの `routes/admin.py::_build_material_context(..., user_id=)` と、コース登録の
+  `routes/learning.py::_ordered_source_document_ids(session, material_ids, *, user_id)`。書き込みは persistence のみ。
+- 教材コンテキスト（解析成果 + 原文抜粋 + 学ぶ単位の候補）は PDF 由来 = 第三者が書いた untrusted 入力なので、
+  プロンプト先頭に `core/text_hygiene.py::UNTRUSTED_SOURCE_NOTICE` を置き（言い換え禁止・適用パス台帳は
+  `test_pdf_trust_boundary_guardrails.py`）、候補区画の label / summary は `strip_control_sequences` を通す（P2-R6）。
+- `PUT /api/learning/courses/{id}` の topics 反映は、GET 射影で参照キーが落ちた units で上書きしない
+  （`_preserve_topic_units`・topic id キーで温存。P2-R4）。`concepts` は登録時と同じ記号除去の弁
+  （`_split_symbol_concepts`）を通す（P3-R8）。
 - 監査: unit 保存は `AUDIT_ENTITY_KNOWLEDGE_OBJECT`（run 単位要約に `learning_units` の件数）。登録は `AUDIT_ENTITY_COURSE_TOPIC`
   + `decision_context`。
 - 数値非表示: `confidence` / `order_index` / 一致率 / 件数を学習者・教員の UI に出さない（DTO は label / kind / 事実文のみ）。
@@ -263,6 +301,49 @@ docs 一式は指揮者。検証: backend 14,905 pass / src 1,924 pass。空 DB 
 | §8 | 区画の粒度は「配信された教材区画」（`.material-chunk`）で段落ではない。`anchor_type_for_element` が claim を concept に丸める点は `ANCHOR_TYPES` に同名があればそれを使う 1 段で補う |
 
 **残課題（v1 非スコープに追加）**: unit 経由の `display_label` を⚓チップ / 原稿スタジオで優先描画する配線（DTO には載っている）/
-`PUT /api/learning/courses/{id}` で topics を差し替えたときの handle 再解決 / 承認語彙の実態合わせ（C-6 の③）。
+`PUT /api/learning/courses/{id}` で topics を差し替えたときの handle 再解決（P2-R4 で**参照キーの温存**は入ったが、
+射影された units から handle を引き直す経路は無いまま）。
+
+### 12.2 2026-09-13 — 敵対的レビューの是正（F2 班）
+
+Phase 2 の敵対的レビューで確定した 13 件（P2-R1〜R6 / R8〜R13 / P3-R8）の修正。**migration なし・新エンドポイントなし・
+LLM 呼び出し回数は不変**。
+
+| 発見 | 是正 |
+|---|---|
+| P2-R1 再解析後の freeze が `teacher_selected` を `title_match` で上書き | `_merge_topic_units`: 保存順を保って全要素を残し、未解決は `resolved:false`（`source` は不変）。救済は追記のみ。`course_content_status.extra.units_note` に事実文（件数なし） |
+| P2-R2 units があるトピックに類似一致 mapping の散文が入る | `_mapping_prose_allowed`: units があるときは `exact_title` のときだけ mapping 由来を採る。`content_confidence` を `unit_selection` / `unit_selection_with_title_mapping` に分ける |
+| P2-R3 `seg_0` 固定（配信 chunks が常に 1 件） | 配信・照合の両方を `build_topic_slides` のページ境界に揃える（`_topic_material_segment_texts` が共通正本）。索引（formulas / figures / evidence_items）は区画ごとに間引かない。章題は先頭区画のみ |
+| P2-R4 `PUT /courses/{id}` の topics 素通しで units が往復消失 | `_preserve_topic_units`: 参照キーを持たない incoming は既存 units を topic id キーで温存 |
+| P2-R5 候補表の可視性ゲート無し | `_ordered_source_document_ids(..., user_id=)` / `_build_material_context(..., user_id=)` が `list_visible_document_ids` と積を取る（fail-closed・空なら SQL 非発行） |
+| P2-R6 untrusted 入力の明示が無い | `_build_material_context` 先頭に `UNTRUSTED_SOURCE_NOTICE`（適用パス台帳に登録）。候補区画の label / summary を `strip_control_sequences` に通す |
+| P2-R8 承認語彙が `teacher_approved` だけ | `next_steps.APPROVED_REVIEW_STATUSES`（3 語彙）に。SQL は `= ANY(:approved)` |
+| P2-R9 `BASIS_COURSE_REGISTER_UNITS` の call site 検査が無い | `test_course_register_units.py` に逐語検査 2 件（learning.py 1 箇所・他モジュールゼロ） |
+| P2-R10 プレビューが handle（`U3`）を表示名にしていた | `course-builder/chat` レスポンスに `unit_candidates`（handle / kind / kind_label / label）を足し、`cbUnitDisplayName` が名前に直す（候補表に無い handle は handle のまま = 捏造しない） |
+| P2-R11 単位が立たなかった章が黙って消える | `learning_units.uncovered_sections`（決定論・推定しない）+ freeze の `extra.uncovered_sections{,_note}` |
+| P2-R12 `prereq_display` が名前キーの dict で後勝ち | 要素単位の `prereq_entries: list[tuple[記帳キー, 表示名]]` に |
+| P2-R13 照合本文と表示本文のずれ | `selection_segment._match_key` が埋め込み・プレースホルダーを両側から落とす |
+| P3-R8 `PUT /courses/{id}` の `concepts` に記号除去が掛からない | `update_course` も `_split_symbol_concepts` を通す（除いた名前は `excluded_symbol_concepts` に残す） |
+
+**判断（実装で確定した仕様）**
+
+- **P2-R3 は「完全分割」を採った**（縮退案は不採用）。フロント（`app.js`）は既に
+  `state.topicMaterial.forEach(function (chunk, segmentIndex) {...})` で配信配列の位置を `data-segment-index` に
+  書いているため、配信を割るだけで区画番号が自然に 0..N-1 になる。UI 契約テスト
+  （`test_learning_ui_phase3_static.py` / `test_learning_layout_static.py`）は無改変で通る。
+  各区画の `id` は `topic:{topic_id}` のまま（`chunk` アンカーの意味を変えないため。重複は許容）。
+- **P2-R13 は `figures_by_id` を痕跡帰属経路に持ち込まなかった**。`build_topic_slides` は解決済み `[[FIGURE_N]]` と
+  未解決 `![[figure:id]]` を同じ 200 字に換算するので**ページ境界は一致**し、残る差はプレースホルダーの綴りだけ。
+  それを `_match_key` から落とすことで、同期パスに DB クエリを増やさずに照合を揃えた。
+- **P2-R10 は新 API を作らず** `_build_material_context` の出力パラメータ（`unit_candidates_out`）+ chat レスポンスの
+  additive フィールドにした（戻り値の型を変えないので既存のパッチ面・テストが壊れない）。
+- **P2-R11 の出力先は freeze の `course_content_status.extra`**（`persist_learning_units` は F1 所有のため触っていない）。
+  判定そのものは `core/knowledge_objects/learning_units.py` の純関数で、保存側から呼び直すこともできる。
+- **P2-R1 の `resolved` は未解決要素にだけ足す**（解決できた要素の形は従来どおり）。学習者向け射影
+  （`learner_topic_units_projection`）は `kind` / `label` だけなので `resolved` は漏れない。
+
+検証: 新規 `test_learning_units_segments.py`（8 件）+ `test_course_content_units.py` / `test_course_units.py` /
+`test_course_register_units.py` / `test_learning_units_derive.py` / `test_course_prerequisites.py` /
+`test_next_steps_delivered_unreviewed.py` / `test_pdf_trust_boundary_guardrails.py` への追加。
 
 ---

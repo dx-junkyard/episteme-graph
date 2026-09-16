@@ -915,8 +915,19 @@ def _course_bundled_refs(data: dict) -> tuple[list[str], list[str], list[str]]:
     return component_refs, claim_refs, unit_ids
 
 
+#: 「教員が確認した」とみなす review_status（P2-R8）。`teacher_approved` だけを見ると、
+#: グラフ対話レビューや説明レビューで実際に確認済みの `teacher_reviewed` / `endorsed` の
+#: コースが「未確認」として恒久点灯し、To-Do が事実と食い違う。承認語彙の増減は
+#: ここ1箇所で扱う（各評価器に散らさない）。
+APPROVED_REVIEW_STATUSES: tuple[str, ...] = (
+    "teacher_approved",
+    "teacher_reviewed",
+    "endorsed",
+)
+
+
 def _approved_refs(session, table: str, refs: list[str]) -> set[str]:
-    """`refs` のうち `review_status='teacher_approved'` の行に到達するものだけを返す。
+    """`refs` のうち教員が確認した（:data:`APPROVED_REVIEW_STATUSES`）行に到達するものだけを返す。
 
     突合は DB UUID（`id::text`）と agent ID（`source_scope.legacy_ids` の要素）の両方。
     読むのは live ビュー（KO5: 基表を SELECT してよいのは persistence / deletion のみ）。
@@ -927,16 +938,16 @@ def _approved_refs(session, table: str, refs: list[str]) -> set[str]:
         sa_text(
             "SELECT DISTINCT ref FROM ("
             f"  SELECT t.id::text AS ref FROM {table} t"
-            "   WHERE t.review_status = 'teacher_approved' AND t.id::text = ANY(:refs)"
+            "   WHERE t.review_status = ANY(:approved) AND t.id::text = ANY(:refs)"
             "  UNION"
             f"  SELECT lid AS ref FROM {table} t,"
             "   LATERAL jsonb_array_elements_text("
             "     CASE WHEN jsonb_typeof(t.source_scope->'legacy_ids') = 'array'"
             "          THEN t.source_scope->'legacy_ids' ELSE '[]'::jsonb END) AS lid"
-            "   WHERE t.review_status = 'teacher_approved' AND lid = ANY(:refs)"
+            "   WHERE t.review_status = ANY(:approved) AND lid = ANY(:refs)"
             ") m"
         ),
-        {"refs": sorted(set(refs))},
+        {"refs": sorted(set(refs)), "approved": list(APPROVED_REVIEW_STATUSES)},
     ).mappings().fetchall()
     return {str(row["ref"]) for row in rows if row["ref"]}
 

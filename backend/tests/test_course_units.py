@@ -380,3 +380,128 @@ def test_course_builder_prompt_declares_the_units_rule():
     assert "候補に無い handle を書いてはならない" in prompt
     # 候補が無ければ空配列（発明させない）。
     assert "空配列 []" in prompt
+
+
+# ---------------------------------------------------------------------------
+# 8. 可視性ゲートと信頼境界（P2-R5 / P2-R6）
+# ---------------------------------------------------------------------------
+
+def _material_context_session(rows):
+    session = MagicMock()
+    session.execute.return_value.fetchall.side_effect = [rows, [], [], [], []]
+    return session
+
+
+def test_material_context_drops_documents_the_user_cannot_see(monkeypatch):
+    """sources に material_id が書いてあるだけでは読んでよい根拠にならない（P2-R5）。"""
+    import routes.admin as routes_admin
+
+    session = _material_context_session([
+        ("mat-1", "見える論文", "a.pdf", DOC_A, "completed", {}),
+        ("mat-2", "見えない論文", "b.pdf", DOC_B, "completed", {}),
+    ])
+    monkeypatch.setattr(routes_admin, "_pg_session", lambda: session)
+    monkeypatch.setattr(routes_admin, "resolve_artifact_runs", lambda *a, **k: {})
+    monkeypatch.setattr(routes_admin, "list_unit_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(routes_admin, "list_visible_document_ids", lambda _u: [DOC_A])
+
+    ctx = routes_admin._build_material_context(["mat-1", "mat-2"], user_id="u1")
+    assert ctx is not None
+    assert "見える論文" in ctx
+    assert "見えない論文" not in ctx
+
+
+def test_material_context_is_none_when_nothing_is_visible(monkeypatch):
+    import routes.admin as routes_admin
+
+    session = _material_context_session([("mat-1", "論文A", "a.pdf", DOC_A, "completed", {})])
+    monkeypatch.setattr(routes_admin, "_pg_session", lambda: session)
+    monkeypatch.setattr(routes_admin, "resolve_artifact_runs", lambda *a, **k: {})
+    monkeypatch.setattr(routes_admin, "list_unit_candidates", lambda *a, **k: [])
+    monkeypatch.setattr(routes_admin, "list_visible_document_ids", lambda _u: [])
+
+    assert routes_admin._build_material_context(["mat-1"], user_id="u1") is None
+
+
+def test_material_context_opens_with_the_untrusted_source_notice(monkeypatch):
+    """資料本文は第三者が書いた untrusted 入力（開発ルール4・TB2）。"""
+    import routes.admin as routes_admin
+    from core.text_hygiene import UNTRUSTED_SOURCE_NOTICE
+
+    session = _material_context_session([("mat-1", "論文A", "a.pdf", DOC_A, "completed", {})])
+    monkeypatch.setattr(routes_admin, "_pg_session", lambda: session)
+    monkeypatch.setattr(routes_admin, "resolve_artifact_runs", lambda *a, **k: {})
+    monkeypatch.setattr(routes_admin, "list_unit_candidates", lambda *a, **k: [])
+
+    ctx = routes_admin._build_material_context(["mat-1"])
+    assert ctx is not None
+    assert ctx.startswith(UNTRUSTED_SOURCE_NOTICE)
+
+
+def test_candidate_block_strips_control_sequences_from_pdf_text():
+    """PDF 由来の label / summary に混ざった ANSI 残骸をプロンプトへ流さない。"""
+    candidate = course_units.UnitCandidate(
+        handle="U1",
+        unit_id="u-1",
+        stable_key="k1:a",
+        unit_kind="section_block",
+        label="\x1b[0m観測量の構成[0m",
+        summary="[1;32m要約\x1b[0m",
+        document_id=DOC_A,
+    )
+    block = course_units.render_unit_candidates_block([candidate])
+    assert "観測量の構成" in block and "要約" in block
+    assert "\x1b" not in block and "[0m" not in block and "[1;32m" not in block
+
+
+def test_material_context_reports_the_candidate_table_to_the_caller(monkeypatch):
+    """P2-R10: プレビューが handle ではなく単位の名前を出せる材料を返す。"""
+    import routes.admin as routes_admin
+
+    session = _material_context_session([("mat-1", "論文A", "a.pdf", DOC_A, "completed", {})])
+    monkeypatch.setattr(routes_admin, "_pg_session", lambda: session)
+    monkeypatch.setattr(routes_admin, "resolve_artifact_runs", lambda *a, **k: {})
+    monkeypatch.setattr(
+        routes_admin,
+        "list_unit_candidates",
+        lambda *a, **k: course_units.list_unit_candidates(
+            _session_returning([
+                _candidate_row("u-1", DOC_A, "k1:a", "section_block", "観測量の構成"),
+            ]),
+            [DOC_A],
+        ),
+    )
+
+    out: list[dict] = []
+    routes_admin._build_material_context(["mat-1"], unit_candidates_out=out)
+    assert out and out[0]["handle"] == "U1" and out[0]["label"] == "観測量の構成"
+    # 参照キー・件数などの内部情報は載せない（LU5 / KO10）。
+    assert set(out[0]) == {"handle", "kind", "kind_label", "label"}
+
+
+# ---------------------------------------------------------------------------
+# 9. コースビルダーのプレビュー表示（P2-R10・静的契約）
+# ---------------------------------------------------------------------------
+
+_ADMIN_JS = (
+    Path(__file__).resolve().parents[2] / "frontend" / "public" / "js" / "admin.js"
+).read_text(encoding="utf-8")
+
+
+def test_preview_shows_unit_names_not_internal_handles():
+    """``U3`` のような内部 handle をそのまま学ぶ単位の表示名にしない。"""
+    assert "function cbUnitDisplayName(" in _ADMIN_JS
+    assert 'unitHandles.map(cbUnitDisplayName).map(escHtml).join(", ")' in _ADMIN_JS
+    # 旧実装（handle をそのまま並べる）が残っていないこと。
+    assert 'unitHandles.map(escHtml).join(", ")' not in _ADMIN_JS
+
+
+def test_preview_falls_back_to_the_handle_instead_of_inventing_a_name():
+    """候補表に無い handle は handle のまま出す（存在しない名前を作らない）。"""
+    block = _ADMIN_JS.split("function cbUnitDisplayName(")[1].split("\n  }")[0]
+    assert "if (!found || !found.label) return String(handle || \"\");" in block
+
+
+def test_candidate_table_comes_from_the_server_response():
+    assert "state.unitCandidatesByHandle" in _ADMIN_JS
+    assert "data.unit_candidates" in _ADMIN_JS

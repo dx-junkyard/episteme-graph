@@ -32,6 +32,7 @@ from sqlalchemy import text as sa_text
 from core import label_vocab
 from core.course_data import UNIT_SOURCE_TEACHER_SELECTED, is_symbol_concept_name
 from core.schema import LEARNING_UNIT_KINDS, LEARNING_UNIT_KINDS_FOR_COURSE
+from core.text_hygiene import strip_control_sequences
 
 logger = logging.getLogger(__name__)
 
@@ -205,8 +206,11 @@ def render_unit_candidates_block(candidates: list[UnitCandidate]) -> str:
         "",
     ]
     for candidate in candidates:
-        line = f"- {candidate.handle} [{unit_kind_label(candidate.unit_kind)}] {candidate.label}"
-        summary = _short(candidate.summary)
+        # label / summary は PDF 由来（＝第三者が書いた untrusted テキスト）なので、
+        # プロンプトへ載せる前に制御シーケンスを落とす（開発ルール4・TB2）。
+        label = strip_control_sequences(candidate.label)
+        line = f"- {candidate.handle} [{unit_kind_label(candidate.unit_kind)}] {label}"
+        summary = _short(strip_control_sequences(candidate.summary))
         if summary:
             line += f" — {summary}"
         lines.append(line)

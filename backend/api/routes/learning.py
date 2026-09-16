@@ -110,7 +110,7 @@ from core.course_units import candidate_keys, list_unit_candidates, resolve_unit
 from core.schema import AUDIT_ENTITY_COURSE_TOPIC
 from core.cartridges import load_cartridge
 from core.config import get_settings
-from core.lecture import find_figure_embed_ids, resolve_figure_embeds
+from core.lecture import build_topic_slides, find_figure_embed_ids, resolve_figure_embeds
 from core import check_review
 from core import element_explanations
 from core import llm_policy
@@ -343,15 +343,25 @@ def _validate_visibility(visibility: str, group_id: str | None, user_id: str) ->
 _COURSE_TOPIC_REOPEN_PATH = "PUT /api/admin/courses/{course_id}/lecture-studio/course-topics/{topic_id}"
 
 
-def _ordered_source_document_ids(session, material_ids: list[str]) -> list[str]:
+def _ordered_source_document_ids(
+    session, material_ids: list[str], *, user_id: str
+) -> list[str]:
     """sources の material_id 順に document.id（テキスト）を返す。
 
     handle（U1..Un）は document 順に依存するため、コースビルダーの
     ``_build_material_context`` と同じ **material_ids の順**で並べる（設計書 §6.2）。
     解決できない material は落とす（推測しない）。
+
+    **可視性ゲートは必須**（P2-R5・fail-closed）: ``user_id`` にとって見えない
+    document は、たとえ sources に material_id が書かれていても候補表に出さない。
+    ``user_id`` が空、または可視集合が空なら **SQL を発行せず空**を返す
+    （``search_chunks_with_metadata`` の ``allowed_document_ids`` と同じ姿勢）。
     """
     ordered = [str(m).strip() for m in (material_ids or []) if str(m or "").strip()]
-    if not ordered:
+    if not ordered or not str(user_id or "").strip():
+        return []
+    visible = set(list_visible_document_ids(user_id) or [])
+    if not visible:
         return []
     placeholders = ", ".join(f":mid_{i}" for i in range(len(ordered)))
     rows = session.execute(
@@ -361,11 +371,58 @@ def _ordered_source_document_ids(session, material_ids: list[str]) -> list[str]:
         ),
         {f"mid_{i}": mid for i, mid in enumerate(ordered)},
     ).fetchall()
-    by_material = {str(r[0]): str(r[1]) for r in rows if r and r[0] and r[1]}
+    by_material = {
+        str(r[0]): str(r[1])
+        for r in rows
+        if r and r[0] and r[1] and str(r[1]) in visible
+    }
     return list(dict.fromkeys(by_material[m] for m in ordered if m in by_material))
 
 
-def _bind_topic_units(session, data: dict) -> tuple[list[dict], dict]:
+def _preserve_topic_units(incoming_topics: list[dict], existing_topics: object) -> list[dict]:
+    """``PUT /courses/{id}`` の topics 反映で ``units`` の参照キーを失わせない（P2-R4）。
+
+    学習者・教員向け GET は ``units`` を ``kind`` / ``label`` だけへ射影する
+    （``learner_topic_units_projection``）ので、GET した下書きをそのまま PUT すると
+    参照キーの無い units で上書きされ、freeze が何も束ねられなくなる。
+
+    規則（topic id キーの温存）:
+
+    - incoming の units が**参照キーを持っていれば**（``topic_unit_keys`` が非空）
+      incoming を優先する（明示的な束ね直しはそのまま通す）。
+    - そうでなければ、同じ topic id の既存 units を**そのまま温存**する。
+    - 既存に対応が無ければ incoming のまま（新規トピック）。
+
+    参照キーの綴りは ``core.course_data`` の述語だけで扱う（KO10: 学習者向け経路の
+    ソースに内部列名を書かない）。入力は mutate しない。
+    """
+    existing_units: dict[str, list] = {}
+    if isinstance(existing_topics, list):
+        for topic in existing_topics:
+            if not isinstance(topic, dict):
+                continue
+            topic_id = str(topic.get("id") or "").strip()
+            units = topic.get("units")
+            if topic_id and isinstance(units, list) and units:
+                existing_units[topic_id] = units
+
+    out: list[dict] = []
+    for topic in incoming_topics:
+        if not isinstance(topic, dict):
+            out.append(topic)
+            continue
+        topic_id = str(topic.get("id") or "").strip()
+        has_keys = bool(topic_unit_keys(topic))
+        if has_keys or topic_id not in existing_units:
+            out.append(topic)
+            continue
+        merged = dict(topic)
+        merged["units"] = existing_units[topic_id]
+        out.append(merged)
+    return out
+
+
+def _bind_topic_units(session, data: dict, *, user_id: str) -> tuple[list[dict], dict]:
     """``topics[].units``（handle の配列）を候補表で解決し、決定文脈の材料を返す。
 
     戻り値の第2要素は ``{"presented": [参照キー...], "applied": [参照キー...],
@@ -373,7 +430,9 @@ def _bind_topic_units(session, data: dict) -> tuple[list[dict], dict]:
     unit が無い）なら units は空のまま・presented も空で、呼び出し側は記帳しない（LU7 / DC3）。
     """
     topics = [dict(t) for t in (data.get("topics") or []) if isinstance(t, dict)]
-    document_ids = _ordered_source_document_ids(session, course_source_material_ids(data))
+    document_ids = _ordered_source_document_ids(
+        session, course_source_material_ids(data), user_id=user_id
+    )
     candidates = list_unit_candidates(session, document_ids) if document_ids else []
     applied: list[str] = []
     unresolved = False
@@ -552,7 +611,9 @@ def create_course(
     units_info: dict | None = None
     session = _pg_session()
     try:
-        data["topics"], units_info = _bind_topic_units(session, data)
+        data["topics"], units_info = _bind_topic_units(
+            session, data, user_id=current_user["id"]
+        )
     except Exception:  # noqa: BLE001 — 候補表が読めなくても登録は止めない（LU8）
         logger.warning("unit handle resolution failed: course=%s", course_id, exc_info=True)
         for topic in data["topics"]:
@@ -876,9 +937,20 @@ def update_course(
     if body.chapters is not None:
         data["chapters"] = [ch.model_dump() for ch in body.chapters]
     if body.topics is not None:
-        data["topics"] = [t.model_dump() for t in body.topics]
+        # P2-R4: GET 射影で参照キーが落ちた units を素通しすると、往復1回で
+        # 「学ぶ単位」の参照が消える。topic id キーで既存の units を温存する。
+        data["topics"] = _preserve_topic_units(
+            [t.model_dump() for t in body.topics], data.get("topics")
+        )
     if body.concepts is not None:
-        data["concepts"] = [c.model_dump() for c in body.concepts]
+        # P3-R8: 概念マップの記号除去は登録時（register_course）と同じ弁を通す
+        # （案 E / CG6。PUT 経由でだけ記号が復活するのを防ぐ）。除いた名前は残す（CG5）。
+        _kept_concepts, _excluded_symbols = _split_symbol_concepts(
+            [c.model_dump() for c in body.concepts]
+        )
+        data["concepts"] = _kept_concepts
+        if _excluded_symbols:
+            data["excluded_symbol_concepts"] = _excluded_symbols
     if body.sources is not None:
         data["sources"] = [s.model_dump() for s in body.sources]
     if body.course_focus is not None:
@@ -1806,16 +1878,48 @@ def _screen_selection_for_anchor(
     return dict(ctx.selection)
 
 
+def _topic_material_segment_texts(
+    topic: dict | None, figures_by_id: dict[str, dict] | None = None
+) -> list[str]:
+    """教材区画の本文を**表示順**で返す（P2-R3。配信と痕跡帰属の共通正本）。
+
+    粒度の正本は ``core/lecture.py::build_topic_slides``（``===`` マーカーがあれば
+    教員の明示分割、無く長ければ段落境界の自動ページ分割。決定論・非LLM）。
+    受講表示・レクチャー・音声・readiness と同じ関数を通ることで、学習者が見る区画の
+    並びと ``data-segment-index`` / :func:`resolve_selection_segment` の番号が一致する。
+
+    ``figures_by_id`` を省略すると ``![[figure:id]]`` は原文のまま残るが、
+    ``_display_length`` が未解決の図埋め込みも解決済み ``[[FIGURE_N]]`` と同じ長さに
+    換算するため**ページ境界は変わらない**（``build_topic_slides`` の契約）。
+    教材が無ければ空リスト。
+    """
+    if not isinstance(topic, dict) or not _topic_student_material(topic).strip():
+        return []
+    try:
+        slides, _display, _spoken, _formulas = build_topic_slides(topic, figures_by_id)
+    except Exception:  # noqa: BLE001 - 区画が決まらないだけ（配信・帰属は止めない）
+        logger.warning("topic material segmentation failed", exc_info=True)
+        return []
+    return [str((slide or {}).get("display_text") or "") for slide in slides]
+
+
 def _anchor_segment_texts(topic_info: dict | None) -> list[str] | None:
     """区画番号の解決材料（教材区画の本文・表示順）。無ければ None。
 
-    ``get_topic_material`` が学習者へ配信する chunks と**同じ材料**を使う（フロントの
-    ``data-segment-index`` と同じ単位でなければ番号の意味が食い違う）。トピック本文が
-    無い後方互換経路（PDF 復元チャンク）のために DB を引き直すことはしない — 材料が
-    無ければ解決しない（推測しない・同期パスにクエリを増やさない）。
+    ``get_topic_material`` が学習者へ配信する chunks と**同じ材料**（＝
+    :func:`_topic_material_segment_texts` = ``build_topic_slides`` のページ）を使う
+    （フロントの ``data-segment-index`` と同じ単位でなければ番号の意味が食い違う）。
+
+    図埋め込みの解決（``figures_by_id``）はしない — ページ境界は解決の有無で
+    変わらず、``[[FIGURE_N]]`` / ``![[figure:id]]`` のようなプレースホルダーは
+    :func:`resolve_selection_segment` の照合キーから落ちるため、配信本文と同じ
+    キーになる（P2-R13。同期パスにクエリを増やさない）。
+
+    トピック本文が無い後方互換経路（PDF 復元チャンク）のために DB を引き直すことは
+    しない — 材料が無ければ解決しない（推測しない）。
     """
-    text = _topic_student_material(topic_info or {})
-    return [text] if text.strip() else None
+    segments = _topic_material_segment_texts(topic_info or {})
+    return segments or None
 
 
 def _learner_selected_anchor(
@@ -2781,18 +2885,34 @@ def get_topic_material(
         # 解決できるよう、トピックに公開済みの参照だけから読み取り専用 DTO を渡す
         # （管理画面 lsTopicEvidenceItems と同一規則。DB 上の任意 ID は解決しない）。
         evidence_items = build_topic_evidence_items(topic or {})
-        chunks = [ChunkContent(
-            id=f"topic:{topic_id}",
-            text=resolved_text,
-            chunk_index=topic_index,
-            formulas=formulas,
-            figures=figures,
-            evidence_items=evidence_items,
-            chapter=None,
-            section=(topic or {}).get("title"),
-            material_id=None,
-            graph_mentions=[],
-        )]
+        # 教材区画の粒度は ``core/lecture.py::build_topic_slides`` のページ境界に揃える
+        # （P2-R3）。表示・音声・readiness と**同じ決定論分割**なので、学習者が見る
+        # 区画の並びとレクチャーのスライドの並びが一致し、テキスト選択の区画番号
+        # （``data-segment-index`` / ``resolve_selection_segment``）が意味を持つ。
+        # 分割できない（短い）教材は従来どおり1区画。
+        segment_texts = _topic_material_segment_texts(topic or {}, figures_by_id)
+        if len(segment_texts) < 2:
+            segment_texts = [resolved_text]
+        chunks = [
+            ChunkContent(
+                id=f"topic:{topic_id}",
+                text=segment_text,
+                chunk_index=topic_index,
+                # formulas / figures / evidence_items は**区画ごとに間引かない**:
+                # フロントの ``[[FORMULA_N]]`` / ``[[FIGURE_N]]`` 解決は配列の位置に
+                # 依存するため、部分集合を渡すと番号がずれる（区画をまたぐ埋め込みも
+                # 解決できなくなる）。同じ索引を各区画に渡す。
+                formulas=formulas,
+                figures=figures,
+                evidence_items=evidence_items,
+                chapter=None,
+                # 章題は先頭区画にだけ出す（同じ題名を区画の数だけ繰り返さない）。
+                section=(topic or {}).get("title") if seg_index == 0 else None,
+                material_id=None,
+                graph_mentions=[],
+            )
+            for seg_index, segment_text in enumerate(segment_texts)
+        ]
         return TopicMaterialResponse(topic_id=topic_id, chunks=chunks)
 
     all_chunks = get_course_chunks_ordered(course_data)

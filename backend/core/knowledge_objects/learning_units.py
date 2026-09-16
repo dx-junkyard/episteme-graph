@@ -273,6 +273,64 @@ def _section_block_units(
     return items
 
 
+def uncovered_sections(structure: Any, skeleton: Any) -> list[dict]:
+    """``section_block`` の単位が1つも立たなかった章を列挙する（P2-R11）。
+
+    ``_section_block_units`` は ``PaperSkeletonResult.logical_blocks`` を材料にするので、
+    skeleton が論理ブロックを出さなかった章はどの単位にも現れない。**その事実を黙って
+    落とさない**ために、文書構造の章一覧と論理ブロックが張っている ``section_ids`` の
+    差を返す（LU3「情報を落とさない」）。
+
+    - **推定しない**（PL3）: 章の中身から単位を作り直したりはせず、名前を並べるだけ。
+    - **件数を持たせない**（LU5）: 呼び出し側が事実文に添えるのは章の題名の列挙。
+    - 材料が無い（構造が読めない・skeleton が無い）ときは空リスト —
+      「単位が立たなかった」と「素材が無い」を混同しない。
+
+    Args:
+        structure: DocumentStructureResult 相当（dataclass でも素の dict でも良い）。
+        skeleton: PaperSkeletonResult 相当。
+
+    Returns:
+        ``[{"section_id": str, "title": str}, ...]``（文書構造の ``order`` 順）。
+        題名が無い章は落とす（内部 ID を章の名前として表示させない）。
+    """
+    if structure is None or skeleton is None:
+        return []
+    data = _plain(structure)
+    if not isinstance(data, dict):
+        return []
+    sections = data.get("sections")
+    if not isinstance(sections, list) or not sections:
+        return []
+
+    skeleton_data = _plain(skeleton)
+    blocks = (
+        skeleton_data.get("logical_blocks")
+        if isinstance(skeleton_data, dict)
+        else getattr(skeleton, "logical_blocks", None)
+    )
+    covered: set[str] = set()
+    for block in (blocks or []):
+        block_data = _plain(block)
+        if not isinstance(block_data, dict):
+            continue
+        covered.update(_id_list(block_data.get("section_ids")))
+
+    ordered = [s for s in sections if isinstance(s, dict)]
+    ordered.sort(key=lambda s: s.get("order") if isinstance(s.get("order"), int) else 0)
+
+    out: list[dict] = []
+    seen: set[str] = set()
+    for section in ordered:
+        section_id = _text(section.get("section_id"))
+        title = _text(section.get("title"))
+        if not section_id or section_id in covered or section_id in seen or not title:
+            continue
+        seen.add(section_id)
+        out.append({"section_id": section_id, "title": title})
+    return out
+
+
 def _thesis_nodes(thesis: Any) -> list[dict]:
     """``central_thesis`` + ``support_structure`` を ref ノードへ平坦化する。
 
