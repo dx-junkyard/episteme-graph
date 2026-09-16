@@ -14,6 +14,7 @@ from typing import Any
 
 from sqlalchemy import text as sa_text
 
+from core.knowledge_objects.schema import VIEW_CLAIMS_LIVE, VIEW_COMPONENTS_LIVE
 from core.postgres import get_session
 from core.deliberation.schema import (
     ELEMENT_DERIVATION,
@@ -362,9 +363,11 @@ def _resolve_shared_part(element_id: str) -> ElementRef:
 # 後付けの Python フィルタではなく SQL の WHERE 句で絞り、コース外・別論文の同名要素へ
 # 誤って一致する余地を断つ）。document_id が無い agent 側 ID は解決しない。
 
+# 読み手なので live ビューを読む（KO5）。基表を索くと、再解析で supersede された
+# 旧世代の行に legacy_ids が残っているため、既に置き換わった要素へ解決してしまう。
 _LEGACY_ID_TABLES = {
-    ELEMENT_THEORY_COMPONENT: "theory_components",
-    ELEMENT_THEORY_CLAIM: "theory_claims",
+    ELEMENT_THEORY_COMPONENT: VIEW_COMPONENTS_LIVE,
+    ELEMENT_THEORY_CLAIM: VIEW_CLAIMS_LIVE,
 }
 
 

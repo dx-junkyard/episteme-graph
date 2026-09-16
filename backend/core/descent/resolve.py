@@ -27,6 +27,7 @@ from sqlalchemy import text as sa_text
 
 from core.course_data import course_source_material_ids, course_sources
 from core.deliberation.refs import document_run_artifacts, equation_records
+from core.knowledge_objects.schema import VIEW_CLAIMS_LIVE, VIEW_COMPONENTS_LIVE
 from core.learner_context_common import normalized_document_ids, scoped_id_match_sql
 from core.postgres import get_session as _pg_session
 
@@ -124,7 +125,7 @@ def _resolve_equation(element_id: str, document_ids: list[str]) -> ResolvedEleme
 def _resolve_row(
     table: str, element_id: str, document_ids: list[str]
 ) -> tuple[str, str, dict] | None:
-    """theory_components / theory_claims を1行解決する（DB UUID / legacy_ids 両対応）。
+    """live ビュー（component / claim）を1行解決する（DB UUID / legacy_ids 両対応）。
 
     ``core/component_context.py::_resolve_component_row`` と同じ
     「``ORDER BY (id::text = :raw_id) DESC`` + ``LIMIT 1``」規約（UUID 完全一致を優先）。
@@ -177,7 +178,9 @@ def resolve_element(
         return None
     if element_type == ELEMENT_TYPE_EQUATION:
         return _resolve_equation(element_id, document_ids)
-    table = "theory_components" if element_type == ELEMENT_TYPE_COMPONENT else "theory_claims"
+    # 読み手なので live ビューを読む（KO5）。supersede 済みの旧行に解決すると、
+    # 既に置き換わった要素の説明を「いまの教材の要素」として見せてしまう。
+    table = VIEW_COMPONENTS_LIVE if element_type == ELEMENT_TYPE_COMPONENT else VIEW_CLAIMS_LIVE
     resolved = _resolve_row(table, element_id, document_ids)
     if resolved is None:
         return None

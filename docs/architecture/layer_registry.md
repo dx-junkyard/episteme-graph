@@ -192,6 +192,7 @@ CLAUDE.md・`docs/features/*_design.md`・実装コードを横断して積層�
 | 081 | `081_learning_units` | **学ぶ単位層**（語彙表 `knowledge_unit_kinds` + 新表 `learning_units` + `learning_units_live`、`theory_components` の親参照列 `parent_component_id` / `parent_agent_component_id`。末尾で live ビュー2文を再作成） |
 | 082 | `082_concept_registry` | **概念レジストリ層**（語彙表4表 `knowledge_entry_types` / `knowledge_label_kinds` / `knowledge_relation_kinds` / `knowledge_mapping_justifications` + `library_entries` のレビュー列群、新表 `library_entry_labels` / `library_entry_relations` / `library_atlas_node_links`、既存5表への `mapping_justification` の additive 追加、`element_identity_links` の instance 型に `symbol`、`knowledge_symbols_live` ビュー） |
 | 083 | `083_doubt_citation_vocab` | **知識の転用層（P4-5）**（`challenges.challenge_mode` / `target_element_ref`・`epistemic_ledger.evidence_lines`・`component_citations.citation_intent` の列追加のみ。新テーブルなし） |
+| 084 | `084_claim_chunk_fk_set_null` | **知識オブジェクト層の是正**（`theory_claims.chunk_id` の FK を `ON DELETE SET NULL` に張り替え = 再解析の chunks 掃除で claim 行が消えていた穴を塞ぐ。`chunks(document_id, chunk_index)` の一意索引つき） |
 | 085 | `085_paper_discovery_arxiv_metadata_cache` | **論文ディスカバリー層 / 論文レーダー**（arXiv メタデータの外部事実キャッシュ1表。候補・教員の判断は保存しない。正本は `docs/features/paper_radar_design.md` §14） |
 
 次の空き番号は **086**（E層など新規レイヤーはここから採番する）。

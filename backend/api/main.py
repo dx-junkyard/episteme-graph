@@ -183,11 +183,23 @@ async def _lifespan(application: FastAPI):
             # 知識オブジェクト層（migration 078）: live 行の stable_key バックフィル。
             # fail-open — 失敗しても起動は続ける（旧行は stable_key NULL のまま残り、
             # 次回起動か次の再解析で付く）。対象ゼロなら何もしない（冪等）。
+            #
+            # migration と同じく **pg_advisory_lock（専用キー）配下**で走らせる（P1-R7）:
+            # 複数レプリカ（uvicorn worker / 複数コンテナ）が同時起動すると、同じ NULL 行に
+            # 対して両方がキーを計算し、同じ ``#n`` を取り合って部分一意索引
+            # （uq_*_stable_key_live）で片方が落ちる。ロックを取れなかった側は待つ
+            # （他プロセスが終われば対象ゼロになり、即座に抜ける）。
             try:
-                from core.knowledge_objects.backfill import backfill_stable_keys
+                from core.knowledge_objects.backfill import (
+                    BACKFILL_LOCK_KEY,
+                    backfill_stable_keys,
+                )
 
                 ko_session = _pg_session()
                 try:
+                    ko_session.execute(
+                        sa_text("SELECT pg_advisory_lock(:key)"), {"key": BACKFILL_LOCK_KEY}
+                    )
                     counts = backfill_stable_keys(ko_session)
                     ko_session.commit()
                     if counts.get("claims") or counts.get("components"):
@@ -198,6 +210,14 @@ async def _lifespan(application: FastAPI):
                     ko_session.rollback()
                     logger.warning("knowledge_objects: stable_key backfill skipped", exc_info=True)
                 finally:
+                    # advisory lock はセッションに紐づくので、close の前に必ず外す。
+                    try:
+                        ko_session.execute(
+                            sa_text("SELECT pg_advisory_unlock(:key)"), {"key": BACKFILL_LOCK_KEY}
+                        )
+                        ko_session.commit()
+                    except Exception:  # noqa: BLE001
+                        logger.debug("knowledge_objects: backfill advisory unlock failed", exc_info=True)
                     ko_session.close()
             except Exception:  # noqa: BLE001
                 logger.warning("knowledge_objects: stable_key backfill unavailable", exc_info=True)

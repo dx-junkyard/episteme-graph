@@ -30,11 +30,17 @@ class SyncResult:
         id_map: ``{agent_id: DB UUID}``。更新・新規の両方を含む。
         remaps: ``[(old_agent_id, new_agent_id, stable_key)]``。stable_key が一致した
             live 行で agent 側 ID だけが変わった組（KO8 の再係留の材料）。
-        stats: ``{"updated", "inserted", "superseded"}`` の件数。
+        key_remaps: ``[(old_stable_key, new_stable_key, agent_id)]``。第2段突合
+            （``fallback_match_column``）で結んだ組。バックフィルの**近似キー**が
+            agent 側の計算結果と食い違ったときに、行を supersede せず引き継いだ事実。
+        stats: ``{"updated", "inserted", "superseded"}`` の件数。第2段突合が起きた
+            ときだけ ``"rekeyed"``（``updated`` の内数）が増える（起きなければキー自体を
+            足さない — 既存の監査記録の形を変えないため）。
     """
 
     id_map: dict[str, str] = field(default_factory=dict)
     remaps: list[tuple[str, str, str]] = field(default_factory=list)
+    key_remaps: list[tuple[str, str, str]] = field(default_factory=list)
     stats: dict[str, int] = field(default_factory=lambda: {"updated": 0, "inserted": 0, "superseded": 0})
 
 
@@ -83,6 +89,99 @@ class _Binder:
         return f":{name}"
 
 
+def _dedupe_incoming_keys(incoming: Sequence[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
+    """incoming 内で重複する ``stable_key`` に ``#2`` … を振り直す（P1-R9）。
+
+    同じキーの2件目以降をそのまま INSERT すると
+    ``uq_<table>_stable_key_live``（``(document_id, stable_key)`` の部分一意索引）に
+    当たって同期全体が落ちる。呼び出し側（``persistence`` の claim / component 経路）は
+    既に :func:`~.stable_key.dedupe_stable_keys` を通しているが、``learning_units`` の
+    ように通していない経路があるため、**最後の砦としてここでも通す**（衝突が無ければ
+    何も起きない）。
+
+    順位付けは agent ID 昇順（``dedupe_stable_keys`` と同じ決定論）。agent ID が空の
+    項目は入力順の最後に回し、名乗る ID を持つ項目から素のキーを取る。
+    """
+    from .stable_key import dedupe_stable_keys
+
+    if not incoming:
+        return []
+    items = list(incoming)
+    # agent ID が空の項目にも一意な並び順トークンを与える（空 ID 同士が1件に潰れないように）。
+    ordering: list[str] = []
+    for index, item in enumerate(items):
+        agent_id = _clean(item.get("agent_id"))
+        ordering.append(agent_id or f"￿#{index:06d}")
+    final = dedupe_stable_keys(
+        list(zip(ordering, items)),
+        key_of=lambda pair: _clean(pair[1].get("stable_key")),
+        agent_id_of=lambda pair: pair[0],
+    )
+    out: list[Mapping[str, Any]] = []
+    for token, item in zip(ordering, items):
+        stable_key = _clean(item.get("stable_key"))
+        assigned = final.get(token, stable_key)
+        if assigned == stable_key:
+            out.append(item)
+            continue
+        updated = dict(item)
+        updated["stable_key"] = assigned
+        out.append(updated)
+    return out
+
+
+def _match_by_fallback_column(
+    pending: Sequence[Mapping[str, Any]],
+    *,
+    live_rows: Sequence[Mapping[str, Any]],
+    matched_ids: set[str],
+    column: str,
+    on_match: Callable[[Mapping[str, Any], Mapping[str, Any]], None],
+) -> list[Mapping[str, Any]]:
+    """stable_key で結べなかった組を ``column`` の完全一致で結び直す（P1-R3）。
+
+    結ぶのは **1対1に決まる組だけ**。同じ値の live 行が2件以上、または同じ値の incoming が
+    2件以上あるときは結ばない（推測で寄せず、旧行は supersede・新行は INSERT になる）。
+
+    Returns:
+        結べずに残った incoming（呼び出し側が INSERT する）。
+    """
+    remaining_live: dict[str, Any] = {}
+    ambiguous_live: set[str] = set()
+    for row in live_rows:
+        if _clean(row.get("id")) in matched_ids:
+            continue
+        value = _clean(row.get(column))
+        if not value:
+            continue
+        if value in remaining_live:
+            ambiguous_live.add(value)
+            continue
+        remaining_live[value] = row
+
+    incoming_counts: dict[str, int] = {}
+    for item in pending:
+        value = _clean((item.get("values") or {}).get(column))
+        if value:
+            incoming_counts[value] = incoming_counts.get(value, 0) + 1
+
+    still_pending: list[Mapping[str, Any]] = []
+    for item in pending:
+        value = _clean((item.get("values") or {}).get(column))
+        live = remaining_live.get(value) if value else None
+        if (
+            not value
+            or live is None
+            or value in ambiguous_live
+            or incoming_counts.get(value, 0) != 1
+            or _clean(live.get("id")) in matched_ids
+        ):
+            still_pending.append(item)
+            continue
+        on_match(live, item)
+    return still_pending
+
+
 def sync_live_rows(
     session,
     *,
@@ -97,6 +196,7 @@ def sync_live_rows(
     protected_when_touched: Sequence[str] = (),
     column_casts: Mapping[str, str] | None = None,
     touch_columns: Sequence[str] = (),
+    fallback_match_column: str | None = None,
 ) -> SyncResult:
     """1 document 分の live 行を incoming に同期する。
 
@@ -115,6 +215,13 @@ def sync_live_rows(
             （自動で jsonb になる）。
         touch_columns: ``human_touched`` の判定に必要で ``preserved_columns`` に
             含まれない列（SELECT に足すだけ）。
+        fallback_match_column: **第2段突合**の列（claim は ``normalized_text``、
+            component は ``name``）。``backfill.py`` が旧行に付けるのは材料の揃わない
+            **近似キー**なので、agent 側の計算結果と一致せず「同じものが supersede +
+            新規 INSERT」に割れることがある（2026-09-13 のレビュー P1-R3）。stable_key で
+            一致しなかった組だけを、この列の**完全一致**で結び直し、UUID と人間の確定列を
+            引き継いで stable_key を新しい値へ更新する。曖昧（新旧どちらかで同じ値が2件
+            以上）なときは結ばない（推測で寄せない）。``None`` なら第2段は行わない。
 
     Returns:
         :class:`SyncResult`。
@@ -122,7 +229,10 @@ def sync_live_rows(
     content_columns = tuple(dict.fromkeys(content_columns))
     preserved_columns = tuple(dict.fromkeys(preserved_columns))
     protected_when_touched = tuple(dict.fromkeys(protected_when_touched))
-    select_extra = tuple(dict.fromkeys(tuple(preserved_columns) + tuple(touch_columns)))
+    extra = tuple(preserved_columns) + tuple(touch_columns)
+    if fallback_match_column:
+        extra += (fallback_match_column,)
+    select_extra = tuple(dict.fromkeys(extra))
 
     select_columns = ["id::text AS id", "stable_key", f"{agent_id_column} AS agent_id"]
     select_columns += [c for c in select_extra if c not in ("id", "stable_key", agent_id_column)]
@@ -150,54 +260,88 @@ def sync_live_rows(
     result = SyncResult()
     matched_ids: set[str] = set()
 
-    for item in incoming:
+    def _update_matched(live: Mapping[str, Any], item: Mapping[str, Any], *, rekey: bool) -> None:
+        """一致した live 行を incoming の内容で更新する（pass 1 / pass 2 共通）。"""
         stable_key = _clean(item.get("stable_key"))
         agent_id = _clean(item.get("agent_id"))
         values = dict(item.get("values") or {})
+        row_id = _clean(live.get("id"))
+        matched_ids.add(row_id)
+        protected = set(preserved_columns)
+        if human_touched is not None:
+            try:
+                touched = bool(human_touched(live))
+            except Exception:  # pragma: no cover - 述語は純粋な想定だが落とさない
+                logger.warning("human_touched predicate failed for %s id=%s", table, row_id, exc_info=True)
+                touched = True
+            if touched:
+                protected |= set(protected_when_touched)
+        binder = _Binder(column_casts)
+        assignments = [
+            f"{column} = {binder.bind(column, values[column])}"
+            for column in content_columns
+            if column in values and column not in protected
+        ]
+        assignments.append(f"{agent_id_column} = {binder.bind(agent_id_column, agent_id)}")
+        old_stable_key = _clean(live.get("stable_key"))
+        if rekey and stable_key and stable_key != old_stable_key:
+            # 第2段突合でだけ stable_key を書き換える（pass 1 は定義上一致している）。
+            assignments.append(f"stable_key = {binder.bind('stable_key', stable_key)}")
+        if run_id:
+            assignments.append(f"produced_by_run_id = {binder.bind('produced_by_run_id', run_id)}")
+        assignments.append("updated_at = now()")
+        params = dict(binder.params)
+        params["row_id"] = row_id
+        session.execute(
+            sa_text(
+                f"""
+                UPDATE {table}
+                SET {", ".join(assignments)}
+                WHERE id = CAST(:row_id AS uuid)
+                """
+            ),
+            params,
+        )
+        result.stats["updated"] += 1
+        if rekey:
+            result.stats["rekeyed"] = result.stats.get("rekeyed", 0) + 1
+            if stable_key and old_stable_key and stable_key != old_stable_key:
+                result.key_remaps.append((old_stable_key, stable_key, agent_id))
+        old_agent_id = _clean(live.get("agent_id"))
+        if agent_id and old_agent_id and old_agent_id != agent_id:
+            result.remaps.append((old_agent_id, agent_id, stable_key))
+        if agent_id:
+            result.id_map[agent_id] = row_id
+
+    # 同一 run 内で stable_key が衝突する incoming は決定論的に ``#2`` … へずらす
+    # （部分一意索引に当たって INSERT が落ちるのを防ぐ。P1-R9）。
+    items = _dedupe_incoming_keys(incoming)
+
+    # ── pass 1: stable_key の一致 ───────────────────────────────────────
+    pending: list[Mapping[str, Any]] = []
+    for item in items:
+        stable_key = _clean(item.get("stable_key"))
         live = by_key.get(stable_key) if stable_key else None
-
         if live is not None and _clean(live.get("id")) not in matched_ids:
-            row_id = _clean(live.get("id"))
-            matched_ids.add(row_id)
-            protected = set(preserved_columns)
-            if human_touched is not None:
-                try:
-                    touched = bool(human_touched(live))
-                except Exception:  # pragma: no cover - 述語は純粋な想定だが落とさない
-                    logger.warning("human_touched predicate failed for %s id=%s", table, row_id, exc_info=True)
-                    touched = True
-                if touched:
-                    protected |= set(protected_when_touched)
-            binder = _Binder(column_casts)
-            assignments = [
-                f"{column} = {binder.bind(column, values[column])}"
-                for column in content_columns
-                if column in values and column not in protected
-            ]
-            assignments.append(f"{agent_id_column} = {binder.bind(agent_id_column, agent_id)}")
-            if run_id:
-                assignments.append(f"produced_by_run_id = {binder.bind('produced_by_run_id', run_id)}")
-            assignments.append("updated_at = now()")
-            params = dict(binder.params)
-            params["row_id"] = row_id
-            session.execute(
-                sa_text(
-                    f"""
-                    UPDATE {table}
-                    SET {", ".join(assignments)}
-                    WHERE id = CAST(:row_id AS uuid)
-                    """
-                ),
-                params,
-            )
-            result.stats["updated"] += 1
-            old_agent_id = _clean(live.get("agent_id"))
-            if agent_id and old_agent_id and old_agent_id != agent_id:
-                result.remaps.append((old_agent_id, agent_id, stable_key))
-            if agent_id:
-                result.id_map[agent_id] = row_id
-            continue
+            _update_matched(live, item, rekey=False)
+        else:
+            pending.append(item)
 
+    # ── pass 2: 近似キーの取りこぼしを本文/名前の完全一致で結び直す（P1-R3）──
+    if fallback_match_column and pending:
+        pending = _match_by_fallback_column(
+            pending,
+            live_rows=live_rows,
+            matched_ids=matched_ids,
+            column=fallback_match_column,
+            on_match=lambda live, item: _update_matched(live, item, rekey=True),
+        )
+
+    # ── pass 3: 残りは新規 INSERT ───────────────────────────────────────
+    for item in pending:
+        stable_key = _clean(item.get("stable_key"))
+        agent_id = _clean(item.get("agent_id"))
+        values = dict(item.get("values") or {})
         binder = _Binder(column_casts)
         columns: list[str] = ["document_id", "stable_key", agent_id_column]
         expressions: list[str] = [

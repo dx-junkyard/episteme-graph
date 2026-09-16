@@ -334,6 +334,67 @@ def _reanchor_one(
     return {"reanchored": reanchored, "skipped": skipped}
 
 
+def record_key_remaps(
+    session,
+    *,
+    document_id: str,
+    run_id: str | None,
+    kind: str,
+    key_remaps: Sequence[tuple[str, str, str]],
+) -> int:
+    """``stable_key`` の付け替えを ``element_id_remap`` に**記録だけ**する（P1-R3）。
+
+    :func:`~.sync.sync_live_rows` の第2段突合（本文 / 名前の完全一致）で、
+    バックフィルの近似キーを agent 側の計算結果へ引き継いだ事実を残す。
+
+    ``old_id`` / ``new_id`` には **stable_key**（``k1:`` 接頭辞つき）が入る。agent 側 ID を
+    持つ参照の再係留は行わない（参照が持っているのは agent ID であって stable_key では
+    ないため。agent ID が同時に変わっていれば、その分は ``remaps`` 側の
+    :func:`record_and_reanchor` が扱う）。区別のため ``reanchored`` に
+    ``{"remap_kind": "stable_key"}`` を刻む。
+
+    Returns:
+        記録した行数。
+    """
+    pairs = [
+        (_clean(old_key), _clean(new_key), _clean(agent_id))
+        for old_key, new_key, agent_id in (key_remaps or [])
+    ]
+    pairs = [p for p in pairs if p[0] and p[1] and p[0] != p[1]]
+    if not pairs:
+        return 0
+
+    recorded = 0
+    for old_key, new_key, agent_id in pairs:
+        session.execute(
+            sa_text(
+                f"""
+                INSERT INTO {TABLE_REMAP} (
+                    document_id, run_id, object_kind, old_id, new_id, stable_key, reanchored
+                )
+                VALUES (
+                    :document_id, CAST(:run_id AS uuid), :object_kind,
+                    :old_id, :new_id, :stable_key, CAST(:reanchored AS jsonb)
+                )
+                """
+            ),
+            {
+                "document_id": document_id,
+                "run_id": run_id,
+                "object_kind": kind,
+                "old_id": old_key,
+                "new_id": new_key,
+                "stable_key": new_key,
+                "reanchored": json.dumps(
+                    {"remap_kind": "stable_key", "agent_id": agent_id},
+                    ensure_ascii=False,
+                ),
+            },
+        )
+        recorded += 1
+    return recorded
+
+
 def summarize(results: Mapping[str, Any] | None) -> int:
     """再係留サマリの総件数（監査 metadata 用の小さなヘルパ）。"""
     if not results:

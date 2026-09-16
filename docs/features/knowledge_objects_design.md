@@ -48,14 +48,14 @@
 |---|---|---|
 | KO1 | **A層非改変**。stable_key の計算・行の同期・再係留はすべて `backend/core/knowledge_objects/` と `persistence.py` に置く。agent の出力スキーマ・ID 採番は触らない | W1 / 原則 13 |
 | KO2 | **stable_key は内容由来・版非依存・決定論・非LLM**。材料は `document_id` + 正規化テキスト + 出典 block_id 集合（+ 種別固有の少数の構造項）。run_id・出現順・agent ID・confidence を材料にしない。同一 run 内で衝突したら決定論順（agent ID 昇順）で `#2` `#3` を付ける | 原則 2 / 9 |
-| KO3 | **再解析は DELETE しない**。stable_key が一致する live 行は **同じ UUID のまま**内容列を更新し、人間の確定列（§5.3）は触らない。一致しない旧 live 行は `superseded_at` / `superseded_by_run_id` を刻んで残す。一致しない新オブジェクトは新行として INSERT する | 原則 1 改訂 / 3 / 六つのレンズ F2・D1 |
+| KO3 | **再解析は DELETE しない**。stable_key が一致する live 行は **同じ UUID のまま**内容列を更新し、人間の確定列（§5.3）は触らない。一致しない旧 live 行は `superseded_at` / `superseded_by_run_id` を刻んで残す。一致しない新オブジェクトは新行として INSERT する。**他表への FK 経由の CASCADE も「DELETE しない」に含まれる**（`theory_claims.chunk_id` の `ON DELETE CASCADE` は、再解析の `DELETE FROM chunks` で claim の live 行ごと消していた。migration 084 で `ON DELETE SET NULL` に是正・§8.3） | 原則 1 改訂 / 3 / 六つのレンズ F2・D1 |
 | KO4 | **全知識オブジェクトが行になる**。claim は親 span / claim object / atomic 子 / 式由来合成の全部を `origin` 付きで、equation / evidence / derivation step / symbol は専用テーブルへ。artifact にしか無い知識を残さない（DB 化率 100%） | 原則 3 |
 | KO5 | **読み手は live ビューを読む**（`theory_claims_live` / `theory_components_live`）。基表を直接 SELECT してよいのは書き手（persistence / 削除経路 / 監査・履歴の明示読み）だけで、ガードレールが固定する | 原則 10 / 11 |
-| KO6 | **artifact は不変の生成ログ**。1 run × 1 ステージ = 1 行（`document_analysis_artifacts`）。stage_outputs にはもう `_artifacts` を書かない。読み手の契約（`document_run_artifacts()` が `{stage: payload}` を返す）は不変で、persistence の getter が表から組み立てる。知識行は `produced_by_run_id` で自分を出した run を指す | 原則 8 / 14 |
+| KO6 | **artifact は生成ログ**（1 run × 1 ステージ = 1 行 = `document_analysis_artifacts`。同じ (run, stage) への再書き込みは resume / revision 昇格のために許し、**最後の書き込みが勝つ**。「不変」の意味は「**後段のステージ・フックが他ステージの行を書き換えない**」）。stage_outputs にはもう `_artifacts` を書かない。読み手の契約（`document_run_artifacts()` が `{stage: payload}` を返す）は不変で、persistence の getter が表から組み立てる。知識行は `produced_by_run_id` で自分を出した run を指す | 原則 8 / 14 |
 | KO7 | **型語彙の正本は `core/schema.py`**（`CLAIM_TYPES` / `CLAIM_TIERS` / `COMPONENT_TYPES` / `CLAIM_ORIGINS` / `CorePredicate` に `PRODUCES`）。DB は CHECK ではなく語彙表への FK で守り、語彙表の中身は migration が **同じ列挙を `ON CONFLICT DO NOTHING` でシード**する（コード ⇄ SQL の一致はテストで固定）。LLM の自称は `claim_type_text` / `component_type_text` に落とさず保持する | 原則 3 / label_vocab 設計 |
 | KO8 | **参照の再係留は決定論・stable_key 一致でのみ**。`element_id_remap` に (old_id → new_id) を残し、`element_explanations` / `epistemic_ledger` / `challenges` / `element_annotations` / `deliberation_sessions` / `element_identity_links` の agent-ID 参照を書き換える。一意制約に当たる行は書き換えず `reanchored` にスキップを記録する（推測で結び直さない）。UUID 参照は KO3 により書き換え不要 | 原則 3 / 14 |
 | KO9 | **`document_id` は UUID + `REFERENCES documents(id) ON DELETE CASCADE`**。教材の物理削除経路は `_purge_document` 1 本（`delete_material` は委譲）。到達不能な孤児行の掃除は migration で **1 回だけ**行う（本 Phase 唯一の破壊的ステップ。§8.3 に理由と範囲） | 原則 11 / S-8 |
-| KO10 | **数値非表示・監査**。supersede / 再係留 / 語彙外型の丸めは `theory_review_events` に `AUDIT_ENTITY_KNOWLEDGE_OBJECT`（新設）で記帳する（`changed_by` は run 実行者、無ければ NULL）。学習者向け DTO に stable_key・produced_by_run_id・superseded_at を出さない（教員 UI には出してよい） | 原則 4 / 14 |
+| KO10 | **数値非表示・監査**。supersede / 再係留 / 語彙外型の丸めは `theory_review_events` に `AUDIT_ENTITY_KNOWLEDGE_OBJECT`（新設）で記帳する（`changed_by` は run 実行者、無ければ NULL）。**migration 内で起きる語彙の丸め（078 の `unknown` / `theory` への自己収束 UPDATE）は記帳対象外**で、`RAISE NOTICE` の件数報告に留める（DDL ランナーはアプリのセッション・実行者を持たないため、取れない帰属を偽装記帳しない。help_kb の content-hash 記帳と同じ判断）。学習者向け DTO に stable_key・produced_by_run_id・superseded_at を出さない（教員 UI には出してよい） | 原則 4 / 14 |
 
 ---
 
@@ -192,10 +192,24 @@ DELETE（§8.3）③DO ガードで `ALTER COLUMN document_id TYPE uuid USING NU
 | component | `["component", document_id, norm_text(label), operation or primary_operation, ",".join(sorted(block_ids))]`。block_ids = linked claim / evidence の block_id 集合 |
 | equation | `["equation", document_id, norm_equation(latex, plain_text or raw_text), block_id or label or ""]` |
 | evidence | `["evidence", document_id, block_id, norm_text(evidence_text)]` |
-| derivation_step | `["derivation_step", document_id, operation, ",".join(sorted(input_eq_keys)), ",".join(sorted(output_eq_keys))]`。eq_keys は equation の stable_key（解決不能なら agent ID） |
+| derivation_step | `["derivation_step", document_id, operation, ",".join(sorted(input_eq_keys)), ",".join(sorted(output_eq_keys)), derivation_id, str(step_index)]`。eq_keys は equation の stable_key（解決不能なら agent ID）。**末尾 2 項は KO2 の明示例外**（下記） |
 | symbol | `["symbol", document_id, canonical_symbol, scope, ",".join(sorted(defining_eq_keys))]` |
 
-同一 run 内の衝突は `dedupe_stable_keys(items, key=agent_id)` が agent ID 昇順で `#2` … を付ける。
+derivation_step の `derivation_id` / `step_index` は **KO2「出現順・agent ID を材料にしない」の
+明示例外**（2026-09-13 の実データ検証 V-5）。実論文では 1 チェーンに同じ operation の step が
+何十個も並び、式参照が解決できないと素キーが数種類に潰れて大半が `#n` になる。`#n` は
+**文書全体の項目順**で振られるため、別チェーンの step が 1 つ増減しただけで付け替わり、内容が
+変わっていない step まで supersede が連鎖した。チェーン ID と序数を材料に含めれば、他チェーンの
+変化はこのチェーンのキーに波及しない（同一チェーン内での挿入で以降がずれる限界は `#n` と同じ）。
+
+derivation_step の **agent ID は `{derivation_id}:{step_id}`**（正本は
+`stable_key.derivation_step_agent_id`）。agent 側の `step_001` はチェーン内でしか一意でなく、
+`dedupe_stable_keys` は `{agent_id: key}` で引くため、別チェーンの同名 step が 1 件に潰れて
+部分一意索引違反になっていた（V-2）。書き手（`persistence._derivation_items`）と取り込み
+（`core/knowledge_import/rows.py`）が同じ関数を使う。
+
+同一 run 内の衝突は `dedupe_stable_keys(items, key=agent_id)` が agent ID 昇順で `#2` … を付ける
+（`sync_live_rows` の冒頭でも同じ処理を通す = 最後の砦。P1-R9）。
 `content_hash`（agent 側）は別列に保存するだけで、同一性判定には使わない（synth claim で空・
 equation で衝突があるため — S-5）。
 
@@ -218,9 +232,10 @@ equation で衝突があるため — S-5）。
 
 | 表 | 保護する列 | 判定 |
 |---|---|---|
-| `theory_claims` | `review_status`（既定 `teacher_review_required` 以外のとき）/ `created_by` | 常に保護（AI は review_status を下げない） |
+| `theory_claims` | `review_status`（既定 `teacher_review_required` 以外のとき）/ `created_by` / **人間が触った行では `text` / `normalized_text` も保護** | 常に保護（AI は review_status を下げない）。「触った」= `review_status <> 'teacher_review_required'` or `created_by` 非 NULL |
 | `theory_components` | `review_status` / `status` / `teacher_notes` / `created_by` / `maturity_source`（`teacher_reviewed` のとき）/ **人間が触った行では `name` / `summary` も保護** | 「触った」= `status <> 'candidate'` or `review_status <> 'teacher_review_required'` or `teacher_notes <> ''` |
-| 新 4 表 | `review_status`（既定以外） | 同上 |
+| `knowledge_equations` / `knowledge_derivation_steps` | `review_status`（既定以外） | 同上 |
+| `knowledge_evidence` / `knowledge_symbols` | **無し**（逐語の写し・記号の索引で、人間が確定する列を持たない。078 にも `review_status` 列は無い） | — |
 
 ### 5.4 claim の 4 origin と親子
 
@@ -259,6 +274,20 @@ fail-open で呼ぶ（`stable_key IS NULL` の live 行だけ・冪等）。clai
 `source_scope.block_id`、component は `name` + `''` + `evidence_claims` から引いた block_id 集合。
 agent 側と同じ材料が揃わない旧行では近似キーになる（label / 本文が変わらなければ次の再解析で一致する）。
 `agent_component_id` は `source_scope.legacy_ids[0]` から補う。
+
+バックフィルは migration と同じく **`pg_advisory_lock`（専用キー `BACKFILL_LOCK_KEY`）配下**で
+走らせる。複数レプリカが同時起動すると、同じ NULL 行に同じ `#n` を割り当てて部分一意索引
+`uq_*_stable_key_live` で片方が落ちるため。
+
+**第2段突合（近似キーの取りこぼし）**: 近似キーは agent 側の計算結果と一致しないことがあり、
+そのままだと「同じ主張が supersede + 新規 INSERT に割れる」（教員の `review_status` が
+superseded 側に取り残される）。そこで `sync_live_rows(..., fallback_match_column=...)` が、
+stable_key で結べなかった組だけを **claim は `normalized_text`・component は `name` の完全一致**で
+結び直し、UUID と人間の確定列を引き継いで stable_key を新しい値へ更新する。曖昧なとき
+（同じ値の live 行が 2 件以上、または同じ値の incoming が 2 件以上）は結ばない — 推測で寄せず、
+従来どおり supersede + INSERT にする。結んだ事実は `element_id_remap` に
+`old_id` / `new_id` = 旧/新 **stable_key**、`reanchored = {"remap_kind": "stable_key"}` で記録する
+（参照が持っているのは agent ID なので、この行では再係留を行わない）。
 
 ---
 
@@ -312,9 +341,17 @@ MinIO を best-effort で消す（現状はどの経路も図画像を消して�
 `CAST(:x AS uuid)::text` 比較は全て UUID 同士の比較に直す。material_id を受け取る API は
 `_resolve_document(ref)` で UUID に解決してから知識表を引く（既に大半がそうなっている）。
 
-### 8.3 孤児の掃除（唯一の破壊的ステップ）
+### 8.3 破壊的ステップの一覧
 
-M3 は `documents` に対応行の無い行を各表から DELETE する。これらは①全読み取り経路が
+本 Phase で**行や値を失わせ得る**処理はこの 3 つだけで、他はすべて状態遷移（supersede）である。
+
+| # | 何が消えるか | 扱い |
+|---|---|---|
+| ① M3（080）の孤児掃除 | `documents` に対応行の無い行 | 下記のとおり実施（到達不能・export 対象外） |
+| ② M2（079）の `_artifacts` 剥がし | `stage_outputs._artifacts` の blob | **表へ移せた object 形だけ**剥がす。object でない壊れた値は run 行に残す（移送先が無いのに消さない）。 |
+| ③ 再解析の `DELETE FROM chunks` → **FK CASCADE で `theory_claims` の live 行**（〜2026-09-13） | 教員がレビュー済みの claim 行ごと | **是正済み**。migration 084 が `theory_claims.chunk_id` を `ON DELETE SET NULL` に張り替え、`persist_source_chunks` は `chunk_index` キーの upsert（余剰行だけ DELETE）にした。claim は残り、失われた参照は `chunk_id = NULL` として正直に現れる。 |
+
+①の詳細: M3 は `documents` に対応行の無い行を各表から DELETE する。これらは①全読み取り経路が
 `documents` 行の存在を前提にする権限ゲート（`_ensure_document_viewable` 等）の内側にあり到達
 不能 ②export にも載らない ③開発 DB 実測で `document_analysis_runs` の 17MB / 18MB を占める
 （S-8）。掃除件数は migration が `RAISE NOTICE` で出す。material_id 形で書かれた行は削除ではなく
@@ -400,4 +437,69 @@ UUID へ正規化する（§4.3 ①）。
 - material_id を document_id 引数に渡している呼び出しが残っていれば、従来の「0 件で静かに返る」から uuid 型エラーに変わる。`_resolve_document` / `resolve_document_access` を通す（教材管理・D層・W層の実機スモークは docker 復帰後）。
 - backfill の近似キー: 開発 DB で component 131 件中 11 件が `#n` 付き（同名で block が解けない component）。次の再解析で agent 側の材料が入ると別キーになり旧行は superseded になる（§5.6 の想定どおり）。
 - 非スコープ（§11）は不変。superseded 行の教員向け履歴 UI・`chunks.formulas` の ID 参照化・W層 meaning commit の旧本文退避は別件。
+
+
+### 12.2 2026-09-13 — 敵対的レビュー + scratch DB 実データ検証の是正（migration **084**）
+
+同日の敵対的レビューと、実論文 2 本を scratch DB に通した検証で見つかった欠陥の修正。
+**本文（§2 / §5 / §8）を書き換えた箇所はその節に直接反映済み**で、ここには経緯と判断を残す。
+
+**実データ検証（V-x）— HEAD の永続化経路が実論文で必ず落ちていた**
+
+| # | 症状 | 是正 |
+|---|---|---|
+| V-1 | `_KNOWLEDGE_PRESERVED_COLUMNS = ("review_status",)` を新 4 表すべてに渡していたが、078 が `review_status` を作るのは equation / derivation_step の 2 表だけ。evidence の同期が `UndefinedColumn` → `PipelineStageError` → **run 全体が failed**（equations もロールバック） | preserved 列を**表ごとの dict** にし、evidence / symbol は `()`。両表の `values` から死んだ `review_status` も落とした（§5.3 の表を分割） |
+| V-2 | derivation step の agent ID（`step_001`）はチェーン内でしか一意でなく、`dedupe_stable_keys` が `{agent_id: key}` で引くため別チェーンの同名 step が 1 件に潰れ、`uq_knowledge_derivation_steps_stable_key_live` 違反（論文 A/B とも再現） | agent ID を `{derivation_id}:{step_id}` に。規則の正本は `stable_key.derivation_step_agent_id`（取り込み側 `knowledge_import/rows.py` が同じ関数を import できるよう共通箇所に置いた） |
+| V-3 | `qualification.get("tier")` を読んでいたが実 artifact のキーは `claim_tier`。**239 claim 全件が `claim_tier=''`** | `_claim_tier_from_qualification()` が `claim_tier` → `tier` の順に見る（旧 fixture 互換） |
+| V-4 | `equation_claim_synthesis` の 4 型（`definition_claim` / `dependency_claim` / `equation_system_claim` / `result_claim`）が `CLAIM_TYPES` に無く、**式由来 claim 84 件が全件 `unknown`** | `core/schema.py::CLAIM_TYPES` と 078 の seed に 4 語を追加（additive）。`test_knowledge_objects_vocab.py` に subset 検査を追加 |
+| V-5 | derivation step の stable_key 材料が `(document_id, operation, 入出力式キー)` だけで、論文 B は 72 step が素キー 9 種・**65 行が `#n`**。`#n` は文書全体の項目順で振られるため、他チェーンの step 増減で付け替わり内容不変の step まで supersede が連鎖 | 材料に `derivation_id` と `step_index` を追加（**KO2 の明示例外**。§5.1 に理由と限界を明記） |
+
+**敵対的レビュー（P1-Rx）**
+
+| # | 発見 | 是正 |
+|---|---|---|
+| P1-R1 | 再解析の `DELETE FROM chunks` が `theory_claims.chunk_id` の FK CASCADE で **claim の live 行を物理削除**していた（KO3 の穴。教員の `review_status` ごと消える） | migration **084**: FK を `ON DELETE SET NULL` へ（pg_constraint から動的に名前を引き、CASCADE のときだけ張り替え）+ `chunks(document_id, chunk_index)` の一意索引（重複が在れば作らず NOTICE）。`persist_source_chunks` を **chunk_index キーの upsert** にし、余剰行だけを `id <> ALL(...)` で削除。chunk UUID が保たれるので `interest_traces` のチャンクアンカーも切れない |
+| P1-R2 | live ビュー読み漏れ 3 箇所（`deliberation/refs.py::_LEGACY_ID_TABLES` / `descent/resolve.py` / `persistence.py::load_revision_projection_overlay`） | 3 箇所とも live ビューへ。前 2 者はテーブル名を f-string で受けるため regex が素通りしていた |
+| P1-R11 | ガードレールが**行単位の regex** で、動的なテーブル名補間（`FROM {table}`）を見逃していた。allowlist もファイル粒度で、`persistence.py` に後から足した読み手が素通りする | 全文走査 + **動的補間の検出**（`{X}` を `knowledge_objects.schema` の定数として解決し、解決できないものは明示 allowlist を要求）+ allowlist を **`ファイル:シンボル` 粒度**へ。検出器自身の退行検査（合成ソース 4 本）も追加 |
+| P1-R3 | バックフィルの**近似キー**が agent 側の計算結果と食い違うと「同じ主張が supersede + 新規 INSERT」に割れ、教員の確定が superseded 側に取り残される | `sync_live_rows(..., fallback_match_column=)` の**第2段突合**（claim=`normalized_text` / component=`name` の完全一致・1 対 1 に決まるときだけ）。引き継ぎは `element_id_remap` に `remap_kind="stable_key"` で記録（§5.6） |
+| P1-R4 | claim の保護列が `review_status` / `created_by` だけで、**教員がレビュー済みの claim 本文を再解析が上書き**できた（component は保護済み） | `_claim_human_touched` + `protected_when_touched=("text", "normalized_text")`（component と同型。§5.3） |
+| P1-R5 | `load_run_artifacts` の except が `rollback()` せず、同じセッションの後続 SELECT が "current transaction is aborted" で全滅し得た | except 内で `session.rollback()`（それ自体も握って fail-open） |
+| P1-R6 | 079 の `_artifacts` 剥がしが、表へ移せなかった**非 object の blob も消していた** | UPDATE に `jsonb_typeof(...) = 'object'` を追加（§8.3 の破壊ステップ表②） |
+| P1-R7 | 起動時バックフィルが advisory lock の外にあり、複数レプリカ同時起動で同じ `#n` を取り合って部分一意索引に当たり得た | migration とは**別キー**の `pg_advisory_lock(BACKFILL_LOCK_KEY)` 配下へ（unlock は finally） |
+| P1-R9 | `sync_live_rows` が incoming の stable_key 重複を前提にせず、`learning_units` 経路は dedupe を通っていなかった | `sync_live_rows` の冒頭で `dedupe_stable_keys` を通す（**最後の砦**。呼び出し側の dedupe は残す） |
+| Phase 3 A層⚠ | `_hook_claim_concept_grounding` が接地結果で `claim_object_builder` artifact を**上書き**していた（KO6 の「生成ログ」を後段が書き換える） | 上書きを撤去。接地結果は専用 artifact `claim_concept_grounding` にだけ残し、知識行への反映は persist 側の join（CG §6 = 既存経路）。フックは resume でも毎回走るので、後段ステージが見る in-memory の値は新規実行と resume で一致する |
+| P2-R7 | `persist_learning_units` の失敗が run 全体を failed にしていた（claims / components は commit 済みなのに「解析失敗」に見え、教員が再解析を回す） | 派生表の同期を try/except で包み、`stage_outputs` の `knowledge_objects.learning_units` に `{"failed": true, "error": ...}` を正直に残して completed を維持 |
+
+**新規テスト**: `test_knowledge_objects_chunk_upsert.py`（chunk upsert 5 本 + 084 の内容検査 2 本）、
+`test_knowledge_objects_sync.py` に dedupe 3 本・第2段突合 6 本、`test_knowledge_objects_persist.py` に
+claim 本文保護 2 本・第2段突合 1 本・V-1 / V-3 / V-2 の回帰 3 本、`test_knowledge_objects_guardrails.py` に
+検出器の退行検査 4 本、`test_knowledge_objects_vocab.py` に V-4 の subset 検査 1 本。
+
+**後続課題（本 Phase では直さない）**
+
+- P1-R8: `persist_qualified_claims` → `persist_components` → `persist_knowledge_objects` /
+  `persist_learning_units` が**別トランザクション**で、claim だけ commit された状態で component が
+  落ちると中途半端な世代が残る。`sync_live_rows` の live 行 SELECT も種別ごとに 1 往復（N+1 ではないが
+  トランザクション境界は 3〜4 本）。1 トランザクションへの統合は persist ステージ全体の再設計になるため別 issue。
+- バックフィルの行更新は 1 行 1 UPDATE のまま（`UPDATE ... FROM (VALUES ...)` の一括化は未実施。
+  起動時 1 回・上限 20,000 行なので実測を待つ）。
+- `theory_claims.chunk_id` が NULL になった claim を教員 UI でどう見せるかは未定（現状は従来どおり
+  chunk 参照の無い claim として振る舞う）。
+
+### 12.3 scratch DB 再検証（2026-09-13・是正後）
+
+- 実論文 A/B の artifact を迂回パッチ無しで永続化し、行数は A: claims 132 / equations 53 / evidence 101 / derivation_steps 23 /
+  symbols 238、B: 107 / 64 / 207 / 72 / 119 で親文書 §7 と一致。derivation step の `#n` サフィックスは 65 → 0。
+  `persist_source_chunks` 込みの再解析で claims 132/132 同 UUID・承認 5/5 保持・教員編集本文 2/2 保持・chunks 19/19 同 UUID
+  （upsert）。chunk を実 DELETE しても claim は消えず `chunk_id` が NULL 化し、次回同期で再係留される（084 の主張どおり）。
+  第 2 段突合（`fallback_match_column`）は evidence block 変更で stable_key が変わっても UUID と承認を引き継ぎ、
+  `element_id_remap` に `reanchored.remap_kind="stable_key"` で記録される。
+- **W-1（是正済み）**: 084 初版の `format('... %I', fk_name)` は `%` が 1 個で、ランナー（`exec_driver_sql`）経由では全環境で
+  `TypeError: immutabledict is not a sequence` → 起動失敗。`%%I` に修正し、`test_migrations_runner.py::TestPercentEscapeLint`
+  が「コメント外に奇数個の `%` 連が無い」ことを全 migration で固定した。
+- **W-3（仕様として明記）**: `claim_tier` が空なのは `origin='equation_synthesis'` の claim のみ（A 49/49・B 35/35）。式由来合成
+  claim は qualification span を持たず tier の供給源が無いため**空は正常**。継承が必要なら親 equation 側の claim から（後続）。
+- **W-5（仕様として明記）**: 内容を変えて supersede された行は、本文を元に戻しても復活しない（新 live 行が増える。**revert は
+  resurrect ではない**）。KO3 とは整合するが往復で行が単調増加する。un-supersede の分岐は後続判断。
+- **W-4（対応不要）**: 残る `claim_type='unknown'`（A 13 / B 18）は artifact 側の値で、永続化の取りこぼしではない。
 

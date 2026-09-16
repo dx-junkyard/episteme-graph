@@ -1742,6 +1742,14 @@ def _hook_claim_concept_grounding(ctx: PipelineContext) -> bool:
     ``source_refs.claim_ids`` の直接参照からも概念を付ける（①'）ため。決定論・
     LLM 0 回・embedding 0 回（CG2）。``concept_assignment_status`` は触らない（CG3）。
 
+    **生成ログ（artifact）は書き換えない（KO6）**: 接地の結果は専用キー
+    ``claim_concept_grounding`` にだけ保存し、``claim_object_builder`` artifact は
+    ``claim_object_builder`` ステージが書いたまま残す（「どの agent が何を出したか」の
+    記録に後段の加工を混ぜない）。知識行への反映は persist 側が同 artifact を join して
+    ``theory_claims.concepts`` に additive マージする（CG §6 = 既存経路）。in-memory の
+    ``ctx.claim_objects`` は従来どおり接地済みの値を持つ（本フックは resume でも毎回走る
+    ため、新規実行と resume で後段ステージが見る値は一致する）。
+
     非致命: 失敗しても以降のステージはそのまま進む（概念が増えないだけ）。
     """
     try:
@@ -1752,8 +1760,6 @@ def _hook_claim_concept_grounding(ctx: PipelineContext) -> bool:
             cartridge_id=ctx.cartridge_id, dsl=ctx.dsl,
         )
         result = _grounding.ground_claims(ctx.claim_objects, ctx.dsl, dictionary)
-        if result.claims_changed:
-            ctx.save_artifact("claim_object_builder", ctx.claim_objects)
         payload = result.to_dict()
         _attach_coverage(
             payload,
@@ -2442,18 +2448,34 @@ def _stage_persist_claims_components_graph(ctx: PipelineContext) -> bool:
             # 学ぶ単位（P2-1）。component の id_map が要るので components の**後**に呼ぶ。
             # components をスキップした run でも単位そのものは保存する（原案・章立て・
             # 中心命題・図は component の成否と独立に読める）。
-            knowledge_stats["learning_units"] = persist_learning_units(
-                document_id=ctx.document_id,
-                run_id=ctx.run_id,
-                skeleton=ctx.skeleton,
-                thesis=ctx.thesis,
-                component_result=ctx.component_result,
-                dsl=ctx.dsl,
-                figures=ctx.fig_tbl,
-                claim_id_map=claim_id_map,
-                component_id_map=id_map,
-                evidence_registry=ctx.evidence,
-            )
+            #
+            # 派生表なので失敗しても run 全体を failed にしない（P2-R7）: claims /
+            # components は既に別トランザクションで commit 済みで、それを「解析失敗」に
+            # 見せると教員が再解析を回し、直前に確定した review_status まで巻き込む。
+            # 失敗は ``skipped_kinds`` と同じ作法で artifact に正直に残す。
+            try:
+                knowledge_stats["learning_units"] = persist_learning_units(
+                    document_id=ctx.document_id,
+                    run_id=ctx.run_id,
+                    skeleton=ctx.skeleton,
+                    thesis=ctx.thesis,
+                    component_result=ctx.component_result,
+                    dsl=ctx.dsl,
+                    figures=ctx.fig_tbl,
+                    claim_id_map=claim_id_map,
+                    component_id_map=id_map,
+                    evidence_registry=ctx.evidence,
+                )
+            except Exception as exc:  # noqa: BLE001 - 派生表の失敗で run を落とさない
+                logger.warning(
+                    "learning_units persist failed (non-fatal): document=%s error=%s",
+                    ctx.document_id, exc, exc_info=True,
+                )
+                knowledge_stats["learning_units"] = {
+                    "units": 0,
+                    "failed": True,
+                    "error": str(exc),
+                }
 
             if ctx.skip_graph_persist or ctx.skip_component_persist:
                 logger.warning(

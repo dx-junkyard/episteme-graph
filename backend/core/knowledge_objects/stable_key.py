@@ -78,16 +78,47 @@ def evidence_stable_key(document_id: str, block_id: str, evidence_text: str) -> 
     return digest(["evidence", _clean(document_id), _clean(block_id), normalize_text_for_hash(evidence_text)])
 
 
+def derivation_step_agent_id(derivation_id: str, step_id: str) -> str:
+    """derivation step の **文書内一意な agent ID**（``"{derivation_id}:{step_id}"``）。
+
+    agent 側の ``step_id``（``step_001`` 等）はチェーン内でしか一意でなく、別チェーンの
+    同名 step が同じ ID を名乗る。``dedupe_stable_keys`` は ``{agent_id: key}`` で引くため、
+    そのままだと 2 件が 1 件に潰れて ``uq_knowledge_derivation_steps_stable_key_live``
+    違反になる（2026-09-13 の実データ検証 V-2）。書き手（パイプライン）と取り込み
+    （``core/knowledge_import/rows.py``）が**同じ規則**を使うため、ここを正本にする。
+    """
+    chain = _clean(derivation_id)
+    step = _clean(step_id)
+    if not chain:
+        return step
+    return f"{chain}:{step}" if step else chain
+
+
 def derivation_step_stable_key(
     document_id: str,
     operation: str,
     input_equation_keys: Iterable[str],
     output_equation_keys: Iterable[str],
+    *,
+    derivation_id: str = "",
+    step_index: int | None = None,
 ) -> str:
-    """derivation step。operation + 入力式キー集合 + 出力式キー集合（式は stable_key、解決不能なら agent ID）。"""
+    """derivation step。operation + 入力式キー集合 + 出力式キー集合（式は stable_key、解決不能なら agent ID）。
+
+    ``derivation_id`` / ``step_index`` は **チェーン内の位置**を材料に加える
+    （KO2「出現順・agent ID を材料にしない」の明示例外。2026-09-13 の実データ検証 V-5）。
+    実論文では 1 チェーンに同じ operation の step が何十個も並び、式参照が解決できないと
+    素キーが数種類に潰れて大半が ``#n`` サフィックスになる。``#n`` は**文書全体の項目順**で
+    振られるため、別チェーンの step が 1 つ増減しただけで付け替わり、内容が変わっていない
+    step まで supersede が連鎖した。チェーン ID と序数を材料に含めると、他チェーンの変化が
+    このチェーンのキーに波及しない。**同一チェーン内で step を挿入すると以降の序数がずれる**
+    という限界は残る（`#n` と同じで悪化はしない）。
+    """
     return digest([
         "derivation_step", _clean(document_id), _clean(operation),
         _join_sorted(input_equation_keys), _join_sorted(output_equation_keys),
+        _clean(derivation_id),
+        "" if step_index is None else str(int(step_index)),
     ])
 
 

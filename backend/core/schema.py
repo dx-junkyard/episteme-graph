@@ -616,7 +616,8 @@ AUDIT_ENTITY_TYPES = (
 # migration の seed にも足す。LLM の自称は claim_type_text / component_type_text に残す。
 # ---------------------------------------------------------------------------
 
-#: theory_claims.claim_type の語彙（旧 CHECK 17 ∪ claim_object_builder の CLAIM_TYPE_ONTOLOGY ∪ unknown）。
+#: theory_claims.claim_type の語彙（旧 CHECK 17 ∪ claim_object_builder の CLAIM_TYPE_ONTOLOGY
+#: ∪ equation_claim_synthesis の 4 型 ∪ unknown）。
 CLAIM_TYPES: tuple[str, ...] = (
     "definition", "assumption", "approximation", "equation", "relation",
     "derivation_step", "observable_definition", "correction", "uncertainty",
@@ -627,7 +628,12 @@ CLAIM_TYPES: tuple[str, ...] = (
     "incompatibility_or_constraint", "comparison", "conclusion", "method_choice",
     "background", "prior_work", "meta", "problem_statement", "method_motivation",
     "theory_encoding", "method", "structural_property", "derivation_result",
-    "main_result", "interpretation", "unknown",
+    "main_result", "interpretation",
+    # 式由来の合成 claim（src/episteme_graph/agents/claim_object_builder/
+    # equation_claim_synthesis.py が出す 4 型）。語彙に無かったため実データで 84 件が
+    # 全部 unknown に丸められていた（2026-09-13 の実データ検証 V-4）。
+    "definition_claim", "dependency_claim", "equation_system_claim", "result_claim",
+    "unknown",
 )
 
 #: claim の階層（claim_qualification.schema.CLAIM_TIERS と同じ列挙・src 側非改変）。

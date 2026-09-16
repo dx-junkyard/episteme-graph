@@ -134,11 +134,38 @@ class TestVersionIndependence:
 
     _FORBIDDEN = ("run", "agent", "confidence", "order", "index", "created", "version")
 
+    #: KO2 の**明示例外**（設計書 §5.1 に理由と限界を記すこと）。
+    #: `{関数名: {引数名: 理由}}`。ここに足すのは設計判断なので、黙って増やさない。
+    _DECLARED_EXCEPTIONS: dict[str, dict[str, str]] = {
+        "derivation_step_stable_key": {
+            "step_index": (
+                "チェーン内の序数。実論文では 1 チェーンに同じ operation の step が数十並び、"
+                "式参照が解決できないと素キーが数種類に潰れて大半が #n になる。#n は"
+                "**文書全体の項目順**で振られるため他チェーンの増減で付け替わり、内容不変の"
+                "step まで supersede が連鎖した（2026-09-13 の実データ検証 V-5）。"
+            ),
+        },
+    }
+
     @pytest.mark.parametrize("func", _ALL_KEY_FUNCS)
     def test_signature_has_no_version_dependent_material(self, func):
+        allowed = self._DECLARED_EXCEPTIONS.get(func.__name__, {})
         names = list(inspect.signature(func).parameters)
-        bad = [n for n in names if any(token in n for token in self._FORBIDDEN)]
+        bad = [
+            n for n in names
+            if any(token in n for token in self._FORBIDDEN) and n not in allowed
+        ]
         assert bad == [], f"{func.__name__} が版依存の材料を受け取っています: {bad}"
+
+    def test_declared_exceptions_are_real_and_reasoned(self):
+        """例外表が形骸化しないこと（実在引数 + 非空の理由）。"""
+        by_name = {f.__name__: f for f in _ALL_KEY_FUNCS}
+        for func_name, params in self._DECLARED_EXCEPTIONS.items():
+            assert func_name in by_name, f"存在しない関数の例外: {func_name}"
+            signature = inspect.signature(by_name[func_name]).parameters
+            for param, reason in params.items():
+                assert param in signature, f"{func_name} に無い引数の例外: {param}"
+                assert reason.strip(), f"{func_name}.{param} の理由が空"
 
 
 # ---------------------------------------------------------------------------

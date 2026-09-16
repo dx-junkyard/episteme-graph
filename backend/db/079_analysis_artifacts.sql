@@ -51,9 +51,13 @@ BEGIN
     ON CONFLICT (run_id, stage) DO NOTHING;
     GET DIAGNOSTICS moved = ROW_COUNT;
 
+    -- 剥がすのは**表へ移せた object 形の blob だけ**。``_artifacts`` が object でない
+    -- （配列・文字列・null 等の壊れた値）run は INSERT の対象外なので、ここで剥がすと
+    -- 中身がどこにも残らず消える。形が想定外の blob は run 行に置いたまま残す。
     UPDATE document_analysis_runs
        SET stage_outputs = stage_outputs - '_artifacts'
-     WHERE stage_outputs ? '_artifacts';
+     WHERE stage_outputs ? '_artifacts'
+       AND jsonb_typeof(stage_outputs -> '_artifacts') = 'object';
     GET DIAGNOSTICS cleared = ROW_COUNT;
 
     IF moved > 0 OR cleared > 0 THEN

@@ -202,17 +202,34 @@ def _apply_remaps(
     run_id: str | None,
     kind: str,
     remaps: list[tuple[str, str, str]],
+    key_remaps: list[tuple[str, str, str]] | None = None,
 ) -> dict:
-    """:func:`core.knowledge_objects.remap.record_and_reanchor` の薄いラッパ。"""
-    if not remaps:
-        return {"recorded": 0, "reanchored": {}, "skipped": {}}
-    return ko_remap.record_and_reanchor(
-        session,
-        document_id=document_id,
-        run_id=run_id,
-        kind=kind,
-        remaps=remaps,
-    )
+    """:func:`core.knowledge_objects.remap.record_and_reanchor` の薄いラッパ。
+
+    ``key_remaps``（第2段突合で引き継いだ stable_key の組）は**記録だけ**行う
+    （参照が持つのは agent ID なので再係留の対象ではない。§5.6 / P1-R3）。
+    """
+    summary: dict = {"recorded": 0, "reanchored": {}, "skipped": {}}
+    if remaps:
+        summary = ko_remap.record_and_reanchor(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            kind=kind,
+            remaps=remaps,
+        )
+    if key_remaps:
+        rekeyed = ko_remap.record_key_remaps(
+            session,
+            document_id=document_id,
+            run_id=run_id,
+            kind=kind,
+            key_remaps=key_remaps,
+        )
+        if rekeyed:
+            summary = dict(summary)
+            summary["rekeyed"] = rekeyed
+    return summary
 
 
 # ---------------------------------------------------------------------------
@@ -339,6 +356,13 @@ def load_run_artifacts(session, run_ids: list[str]) -> dict[str, dict]:
         ).fetchall()
     except Exception:
         # 生成ログ表が無い環境（migration 未適用・fake session）でも読み取りを止めない。
+        # ただし失敗したステートメントはトランザクションを aborted にするため、
+        # **必ず rollback してから**返す（呼び出し側のセッションを使い回す経路で
+        # 後続の SELECT が "current transaction is aborted" で全滅しないように）。
+        try:
+            session.rollback()
+        except Exception:  # pragma: no cover - fake session 防御
+            logger.debug("load_run_artifacts rollback failed", exc_info=True)
         logger.debug("load_run_artifacts failed; falling back to stage_outputs blob", exc_info=True)
         return {}
     out: dict[str, dict] = {}
@@ -581,6 +605,14 @@ def _remap_nested_claim_refs(value: Any, id_map: dict[str, str]) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def _chunk_index_key(value: Any) -> int:
+    """``chunk_index`` の突合キー（int 化できなければ -1 = 既存行と一致しない）。"""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return -1
+
+
 def persist_source_chunks(
     *,
     document_id: str,
@@ -592,6 +624,14 @@ def persist_source_chunks(
     旧実装と同じカラム (text/embedding/material_id/document_id/page_start/page_end)
     に加え、issue #226 で追加された section_id / block_ids / source_metadata を
     埋める。
+
+    **chunk_index キーの upsert**（migration 084）: かつては
+    ``DELETE FROM chunks WHERE document_id = …`` → 全件 INSERT だったため、再解析の
+    たびに chunk UUID が変わり、①``theory_claims.chunk_id`` の FK CASCADE で claim 行が
+    物理削除され（KO3 違反。084 で SET NULL に是正）②``interest_traces`` のチャンク
+    アンカー・音声キャッシュの chunk 参照が切れていた。現在は同じ ``chunk_index`` の
+    既存行を **同じ UUID のまま UPDATE** し、今回の解析に無くなった余剰行だけを削除する
+    （chunks は知識オブジェクトではなく RAG 素材なので、余剰の削除は維持する）。
 
     Returns:
         各 chunk について {chunk_id, chunk_index, section_id, block_ids,
@@ -609,54 +649,101 @@ def persist_source_chunks(
     saved: list[dict] = []
     session = _pg_session()
     try:
-        # 同じ document の既存 chunk を消してから入れ直す（再実行時の整合のため）
-        session.execute(
-            sa_text("DELETE FROM chunks WHERE document_id = CAST(:doc_id AS uuid)"),
-            {"doc_id": document_id},
-        )
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
-            chunk_id = uuid.uuid4()
-            session.execute(
+        # 既存行の (chunk_index -> id)。重複 index があれば id 昇順の先頭を採り、
+        # 残りは下の余剰削除で掃除される（索引 uq_chunks_document_chunk_index が
+        # 在る DB では重複は生じない）。
+        existing_by_index: dict[int, str] = {}
+        try:
+            rows = session.execute(
                 sa_text(
                     """
-                    INSERT INTO chunks (
-                        id, document_id, chunk_index, text, embedding,
-                        display_text, spoken_text, formulas, latex_formulas,
-                        material_id, page_start, page_end,
-                        section_id, block_ids, source_metadata
-                    )
-                    VALUES (
-                        :id, CAST(:doc_id AS uuid), :idx, :text, :embedding,
-                        :display_text, :spoken_text, CAST(:formulas AS jsonb),
-                        :latex_formulas,
-                        :material_id, :page_start, :page_end,
-                        :section_id, CAST(:block_ids AS jsonb),
-                        CAST(:metadata AS jsonb)
-                    )
+                    SELECT chunk_index, id::text
+                    FROM chunks
+                    WHERE document_id = CAST(:doc_id AS uuid)
+                    ORDER BY chunk_index ASC, id::text ASC
                     """
                 ),
-                {
-                    "id": chunk_id,
-                    "doc_id": document_id,
-                    "idx": chunk.chunk_index,
-                    "text": _strip_nuls(chunk.text or ""),
-                    "embedding": str(list(embedding)),
-                    "display_text": _strip_nuls(chunk.text or ""),
-                    "spoken_text": _strip_nuls(_spoken_text_from_formulas(chunk.text or "", getattr(chunk, "formulas", []) or [])),
-                    "formulas": _json_dumps(getattr(chunk, "formulas", []) or []),
-                    "latex_formulas": [
-                        _strip_nuls(str(f.get("latex") or ""))
-                        for f in (getattr(chunk, "formulas", []) or [])
-                        if isinstance(f, dict) and f.get("latex")
-                    ],
-                    "material_id": material_id,
-                    "page_start": chunk.page_start,
-                    "page_end": chunk.page_end,
-                    "section_id": chunk.section_id,
-                    "block_ids": _json_dumps(chunk.block_ids),
-                    "metadata": _json_dumps(chunk.metadata),
-                },
-            )
+                {"doc_id": document_id},
+            ).fetchall()
+        except Exception:  # pragma: no cover - fake session 防御（upsert を諦めて INSERT）
+            rows = []
+        for row in rows or []:
+            try:
+                index = int(row[0])
+            except (TypeError, ValueError):
+                continue
+            existing_by_index.setdefault(index, str(row[1]))
+
+        kept_ids: list[str] = []
+        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+            params = {
+                "doc_id": document_id,
+                "idx": chunk.chunk_index,
+                "text": _strip_nuls(chunk.text or ""),
+                "embedding": str(list(embedding)),
+                "display_text": _strip_nuls(chunk.text or ""),
+                "spoken_text": _strip_nuls(_spoken_text_from_formulas(chunk.text or "", getattr(chunk, "formulas", []) or [])),
+                "formulas": _json_dumps(getattr(chunk, "formulas", []) or []),
+                "latex_formulas": [
+                    _strip_nuls(str(f.get("latex") or ""))
+                    for f in (getattr(chunk, "formulas", []) or [])
+                    if isinstance(f, dict) and f.get("latex")
+                ],
+                "material_id": material_id,
+                "page_start": chunk.page_start,
+                "page_end": chunk.page_end,
+                "section_id": chunk.section_id,
+                "block_ids": _json_dumps(chunk.block_ids),
+                "metadata": _json_dumps(chunk.metadata),
+            }
+            existing_id = existing_by_index.get(_chunk_index_key(chunk.chunk_index))
+            if existing_id:
+                chunk_id = existing_id
+                session.execute(
+                    sa_text(
+                        """
+                        UPDATE chunks SET
+                            text = :text,
+                            embedding = :embedding,
+                            display_text = :display_text,
+                            spoken_text = :spoken_text,
+                            formulas = CAST(:formulas AS jsonb),
+                            latex_formulas = :latex_formulas,
+                            material_id = :material_id,
+                            page_start = :page_start,
+                            page_end = :page_end,
+                            section_id = :section_id,
+                            block_ids = CAST(:block_ids AS jsonb),
+                            source_metadata = CAST(:metadata AS jsonb)
+                        WHERE id = CAST(:id AS uuid)
+                        """
+                    ),
+                    {**params, "id": chunk_id},
+                )
+            else:
+                chunk_id = str(uuid.uuid4())
+                session.execute(
+                    sa_text(
+                        """
+                        INSERT INTO chunks (
+                            id, document_id, chunk_index, text, embedding,
+                            display_text, spoken_text, formulas, latex_formulas,
+                            material_id, page_start, page_end,
+                            section_id, block_ids, source_metadata
+                        )
+                        VALUES (
+                            CAST(:id AS uuid), CAST(:doc_id AS uuid), :idx, :text, :embedding,
+                            :display_text, :spoken_text, CAST(:formulas AS jsonb),
+                            :latex_formulas,
+                            :material_id, :page_start, :page_end,
+                            :section_id, CAST(:block_ids AS jsonb),
+                            CAST(:metadata AS jsonb)
+                        )
+                        """
+                    ),
+                    {**params, "id": chunk_id},
+                )
+            kept_ids.append(str(chunk_id))
             saved.append({
                 "chunk_id": str(chunk_id),
                 "chunk_index": chunk.chunk_index,
@@ -667,6 +754,21 @@ def persist_source_chunks(
                 "text": chunk.text,
                 "formulas": list(getattr(chunk, "formulas", []) or []),
             })
+
+        # 今回の解析に無くなった余剰 chunk（旧 run の末尾・重複 index）だけを掃除する。
+        # 残す行は UUID ごと据え置くので、生きているチャンクへの参照は切れない。
+        if kept_ids:
+            session.execute(
+                sa_text(
+                    """
+                    DELETE FROM chunks
+                    WHERE document_id = CAST(:doc_id AS uuid)
+                      AND id <> ALL(CAST(:kept AS uuid[]))
+                    """
+                ),
+                {"doc_id": document_id, "kept": kept_ids},
+            )
+
         session.commit()
         logger.info(
             "Persisted %d source chunks for document %s", len(saved), document_id
@@ -1015,7 +1117,47 @@ _CLAIM_CONTENT_COLUMNS = (
 #: 人間の確定列（一致時に触らない。§5.3）。
 _CLAIM_PRESERVED_COLUMNS = ("review_status", "created_by")
 
+#: 「人間が触った行」でのみ追加で保護する内容列（§5.3。component と同型）。
+#: 教員が承認・却下した主張の本文を、次の再解析が黙って書き換えないための保護。
+#: 本文が実際に変わったのなら、それは別の主張 = 別の stable_key なので、ここには来ない
+#: （来るのは「同じキーのまま agent 側の表記だけ揺れた」場合）。
+_CLAIM_PROTECTED_WHEN_TOUCHED = ("text", "normalized_text")
+
+#: 第2段突合の列（§5.6）。バックフィルの近似キーと agent 側の計算結果が食い違ったとき、
+#: 本文の完全一致で旧 live 行を引き継ぐ（一致が1対1に決まるときだけ）。
+_CLAIM_FALLBACK_MATCH_COLUMN = "normalized_text"
+
 _CLAIM_COLUMN_CASTS = {"chunk_id": "uuid"}
+
+
+def _claim_tier_from_qualification(qualification: Any) -> str:
+    """``qualified_spans[].qualification`` から claim tier を読む（語彙外は空）。
+
+    実 artifact のキーは ``claim_tier`` で、``tier`` は旧世代・一部 fixture の綴り
+    （2026-09-13 の実データ検証 V-3: ``tier`` しか見ておらず 239 claim 全件が空だった）。
+    **両方を見る**（``claim_tier`` を第一候補・``tier`` をフォールバック）。
+    """
+    if not isinstance(qualification, dict):
+        return ""
+    for key in ("claim_tier", "tier"):
+        value = _text(qualification.get(key))
+        if value in CLAIM_TIERS:
+            return value
+    return ""
+
+
+def _claim_human_touched(row: Any) -> bool:
+    """live claim 行を人間が触ったか（§5.3 の判定。component 版と同型）。
+
+    claim には ``teacher_notes`` / ``status`` が無いので、材料は教員のレビュー結果
+    （``review_status``）と手で作られた行（``created_by``）の2つ。
+    """
+    review_status = _text(row.get("review_status") if hasattr(row, "get") else "")
+    created_by = _text(row.get("created_by") if hasattr(row, "get") else "")
+    return bool(
+        (review_status and review_status != DEFAULT_REVIEW_STATUS)
+        or created_by
+    )
 
 
 def _claim_span_index(spans: list) -> tuple[dict, dict]:
@@ -1151,8 +1293,7 @@ def _build_claim_items(
             origin = CLAIM_ORIGIN_CLAIM_OBJECT
 
         qualification = getattr(span, "qualification", None) if span is not None else None
-        tier = qualification.get("tier") if isinstance(qualification, dict) else ""
-        claim_tier = _text(tier) if _text(tier) in CLAIM_TIERS else ""
+        claim_tier = _claim_tier_from_qualification(qualification)
 
         equation_ids = _id_list(data.get("equation_ids"))
         equation_payload = (
@@ -1268,11 +1409,7 @@ def _build_claim_items(
                 "evidence_text": "",
                 "thesis_refs": thesis_refs or None,
                 "origin": CLAIM_ORIGIN_SPAN,
-                "claim_tier": (
-                    _text(qualification.get("tier"))
-                    if isinstance(qualification, dict)
-                    and _text(qualification.get("tier")) in CLAIM_TIERS else ""
-                ),
+                "claim_tier": _claim_tier_from_qualification(qualification),
                 "content_hash": "",
                 "review_status": DEFAULT_REVIEW_STATUS,
             },
@@ -1372,6 +1509,9 @@ def persist_qualified_claims(
             preserved_columns=_CLAIM_PRESERVED_COLUMNS,
             agent_id_column="agent_claim_id",
             column_casts=_CLAIM_COLUMN_CASTS,
+            human_touched=_claim_human_touched,
+            protected_when_touched=_CLAIM_PROTECTED_WHEN_TOUCHED,
+            fallback_match_column=_CLAIM_FALLBACK_MATCH_COLUMN,
         )
 
         # 親子（atomic rewrite）は2パス: 全行を同期したあとに parent_claim_id を解く。
@@ -1397,6 +1537,7 @@ def persist_qualified_claims(
             run_id=run_id,
             kind="claim",
             remaps=sync.remaps,
+            key_remaps=sync.key_remaps,
         )
         _record_knowledge_audit(
             session,
@@ -1460,6 +1601,9 @@ _COMPONENT_PRESERVED_COLUMNS = ("review_status", "status", "teacher_notes", "cre
 
 #: 「人間が触った行」でのみ追加で保護する内容列（§5.3）。
 _COMPONENT_PROTECTED_WHEN_TOUCHED = ("name", "summary", "maturity_source")
+
+#: 第2段突合の列（§5.6。claim の ``normalized_text`` と同じ役割）。
+_COMPONENT_FALLBACK_MATCH_COLUMN = "name"
 
 #: 列に昇格させた agent フィールド（``agent_payload`` からは除く。confidence 等の
 #: 数値は列にせず payload の中にだけ残す — 原則4）。
@@ -1732,6 +1876,7 @@ def persist_components(
             human_touched=_component_human_touched,
             protected_when_touched=_COMPONENT_PROTECTED_WHEN_TOUCHED,
             touch_columns=("maturity_source",),
+            fallback_match_column=_COMPONENT_FALLBACK_MATCH_COLUMN,
         )
         id_map = dict(sync.id_map)
 
@@ -1795,6 +1940,7 @@ def persist_components(
             run_id=run_id,
             kind="component",
             remaps=sync.remaps,
+            key_remaps=sync.key_remaps,
         )
         _record_knowledge_audit(
             session,
@@ -1846,8 +1992,17 @@ _SYMBOL_CONTENT_COLUMNS = (
     "source_evidence_ids", "definition_evidence_texts", "agent_payload",
 )
 
-#: 新 4 表の人間の確定列（§5.3）。
-_KNOWLEDGE_PRESERVED_COLUMNS = ("review_status",)
+#: 新 4 表の人間の確定列（§5.3）。**表ごとに違う** — 078 が ``review_status`` を作るのは
+#: ``knowledge_equations`` / ``knowledge_derivation_steps`` の 2 表だけで、evidence
+#: （逐語の写し）と symbol（記号の索引）には人間の確定列が無い。全表に同じ列を渡すと
+#: evidence の同期が ``UndefinedColumn`` で落ち、run 全体が failed になっていた
+#: （2026-09-13 の実データ検証 V-1）。
+_KNOWLEDGE_PRESERVED_COLUMNS: dict[str, tuple[str, ...]] = {
+    "equations": ("review_status",),
+    "derivation_steps": ("review_status",),
+    "evidence": (),
+    "symbols": (),
+}
 
 
 def _equation_items(document_id: str, equations: Any, equation_keys: dict[str, str]) -> list[dict]:
@@ -1911,7 +2066,7 @@ def _evidence_items(document_id: str, evidence_registry: Any) -> list[dict]:
                 "parent_evidence_id": _text(data.get("parent_evidence_id")),
                 "public_export_policy": _text(data.get("public_export_policy")) or "location_only",
                 "agent_payload": data,
-                "review_status": DEFAULT_REVIEW_STATUS,
+                # evidence は逐語の写しなので人間の確定列を持たない（078 に review_status 列は無い・V-1）。
             },
         })
     return items
@@ -1952,9 +2107,13 @@ def _derivation_items(
             input_keys = _resolved_equation_keys(step.get("input_equation_ids"), equation_keys)
             output_keys = _resolved_equation_keys(step.get("output_equation_ids"), equation_keys)
             items.append({
-                "agent_id": agent_step_id,
+                # 文書内一意な agent ID（``{derivation_id}:{step_id}``。V-2）。
+                # ``step_001`` はチェーン内でしか一意でなく、別チェーンの同名 step と
+                # 衝突して dedupe が 1 件に潰す → 部分一意索引違反になっていた。
+                "agent_id": ko_keys.derivation_step_agent_id(derivation_id, agent_step_id),
                 "stable_key": ko_keys.derivation_step_stable_key(
-                    document_id, operation, input_keys, output_keys
+                    document_id, operation, input_keys, output_keys,
+                    derivation_id=derivation_id, step_index=index,
                 ),
                 "values": {
                     "agent_derivation_id": derivation_id,
@@ -2009,7 +2168,7 @@ def _symbol_items(
                 "source_evidence_ids": _id_list(data.get("source_evidence_ids")),
                 "definition_evidence_texts": list(data.get("definition_evidence_texts") or []),
                 "agent_payload": data,
-                "review_status": DEFAULT_REVIEW_STATUS,
+                # symbol も同様に review_status 列を持たない（V-1）。
             },
         })
     return items
@@ -2092,7 +2251,7 @@ def persist_knowledge_objects(
                 run_id=run_id,
                 incoming=items,
                 content_columns=content_columns,
-                preserved_columns=_KNOWLEDGE_PRESERVED_COLUMNS,
+                preserved_columns=_KNOWLEDGE_PRESERVED_COLUMNS.get(kind, ()),
                 agent_id_column=agent_id_column,
             )
             summary[kind] = dict(sync.stats)
@@ -2103,6 +2262,7 @@ def persist_knowledge_objects(
                 run_id=run_id,
                 kind=remap_kind,
                 remaps=sync.remaps,
+                key_remaps=sync.key_remaps,
             )
             summary[f"{kind}_remap"] = remap_summary.get("recorded", 0)
         _record_knowledge_audit(
@@ -3398,6 +3558,10 @@ def load_revision_projection_overlay(*, document_id: str) -> dict:
 
     Revision inventory starts from immutable run artifacts, then overlays these
     rows so post-pipeline manual edits and teacher decisions are not lost.
+
+    読み手なので live ビュー（``theory_claims_live`` / ``theory_components_live``）を
+    読む（KO5）。基表を読むと、再解析で supersede された旧世代の行まで overlay に
+    混ざり、同じ主張が新旧2件として現れる。
     """
     session = _pg_session()
     try:
@@ -3407,7 +3571,7 @@ def load_revision_projection_overlay(*, document_id: str) -> dict:
                 SELECT id::text, source_scope, claim_type, text, normalized_text,
                        concepts, equation, support_status, evidence_text,
                        review_status, updated_at
-                FROM theory_claims
+                FROM theory_claims_live
                 WHERE document_id = :doc
                 """
             ),
@@ -3420,7 +3584,7 @@ def load_revision_projection_overlay(*, document_id: str) -> dict:
                        source_scope, evidence_claims, review_status, inputs,
                        outputs, preconditions, constraints, invalid_conditions,
                        dependencies, updated_at
-                FROM theory_components
+                FROM theory_components_live
                 WHERE document_id = :doc
                 """
             ),
@@ -3544,6 +3708,9 @@ def _rebuild_theory_claims_in_session(
         preserved_columns=_CLAIM_PRESERVED_COLUMNS,
         agent_id_column="agent_claim_id",
         column_casts=_CLAIM_COLUMN_CASTS,
+        human_touched=_claim_human_touched,
+        protected_when_touched=_CLAIM_PROTECTED_WHEN_TOUCHED,
+        fallback_match_column=_CLAIM_FALLBACK_MATCH_COLUMN,
     )
     for item in items:
         parent_agent_id = item.get("parent_agent_id") or ""
@@ -3561,7 +3728,8 @@ def _rebuild_theory_claims_in_session(
                 {"parent_id": parent_id, "child_id": child_id},
             )
     _apply_remaps(
-        session, document_id=document_id, run_id=run_id, kind="claim", remaps=sync.remaps,
+        session, document_id=document_id, run_id=run_id, kind="claim",
+        remaps=sync.remaps, key_remaps=sync.key_remaps,
     )
     return dict(sync.id_map)
 
@@ -3662,6 +3830,7 @@ def _rebuild_theory_components_in_session(
         human_touched=_component_human_touched,
         protected_when_touched=_COMPONENT_PROTECTED_WHEN_TOUCHED,
         touch_columns=("maturity_source",),
+        fallback_match_column=_COMPONENT_FALLBACK_MATCH_COLUMN,
     )
     id_map = dict(sync.id_map)
 
@@ -3708,7 +3877,8 @@ def _rebuild_theory_components_in_session(
                     },
                 )
     _apply_remaps(
-        session, document_id=document_id, run_id=run_id, kind="component", remaps=sync.remaps,
+        session, document_id=document_id, run_id=run_id, kind="component",
+        remaps=sync.remaps, key_remaps=sync.key_remaps,
     )
     return id_map
 

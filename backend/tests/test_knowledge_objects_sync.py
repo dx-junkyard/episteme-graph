@@ -213,3 +213,135 @@ def test_duplicate_stable_keys_in_one_run_do_not_reuse_the_same_row():
     assert result.stats["inserted"] == 1
     assert result.id_map["a1"] == "uuid-1"
     assert result.id_map["a2"] != "uuid-1"
+
+
+# ---------------------------------------------------------------------------
+# ⑥ 同一 run 内の stable_key 重複は ``#n`` にずらす（P1-R9）
+# ---------------------------------------------------------------------------
+
+
+def test_duplicate_incoming_keys_are_renumbered_before_insert():
+    """部分一意索引（document_id, stable_key）に当たる INSERT を作らない。"""
+    session = FakeKnowledgeSession()
+    result = _sync(session, [_item("a1", "k1:a"), _item("a2", "k1:a")])
+    keys = [row["stable_key"] for row in session.inserted_into(TABLE)]
+    assert keys == ["k1:a", "k1:a#2"]
+    assert result.stats["inserted"] == 2
+
+
+def test_duplicate_incoming_keys_without_agent_ids_are_not_collapsed():
+    """agent ID が空でも 2 件のまま（位置で一意なトークンを与える）。"""
+    session = FakeKnowledgeSession()
+    _sync(session, [_item("", "k1:a"), _item("", "k1:a")])
+    keys = [row["stable_key"] for row in session.inserted_into(TABLE)]
+    assert keys == ["k1:a", "k1:a#2"]
+
+
+def test_unique_keys_are_left_alone():
+    session = FakeKnowledgeSession()
+    _sync(session, [_item("a1", "k1:a"), _item("a2", "k1:b")])
+    keys = [row["stable_key"] for row in session.inserted_into(TABLE)]
+    assert keys == ["k1:a", "k1:b"]
+
+
+# ---------------------------------------------------------------------------
+# ⑦ 第2段突合（近似キーの取りこぼしを本文一致で結び直す。P1-R3）
+# ---------------------------------------------------------------------------
+
+
+def test_fallback_column_match_keeps_the_uuid_and_rekeys_the_row():
+    session = FakeKnowledgeSession(live_rows=[
+        _live("uuid-1", "k1:approx", agent_id="claim_old", normalized_text="同じ本文"),
+    ])
+    result = _sync(
+        session,
+        [_item("claim_new", "k1:exact", normalized_text="同じ本文", text="本文")],
+        content_columns=("text", "normalized_text"),
+        fallback_match_column="normalized_text",
+    )
+
+    assert result.id_map == {"claim_new": "uuid-1"}
+    assert result.stats["updated"] == 1
+    assert result.stats["inserted"] == 0
+    assert result.stats["superseded"] == 0
+    assert result.stats["rekeyed"] == 1
+    assert session.inserted_into(TABLE) == []
+    values = session.updated_in(TABLE)[0]
+    assert values["stable_key"] == "k1:exact"
+    assert result.key_remaps == [("k1:approx", "k1:exact", "claim_new")]
+    # agent ID も変わっていれば再係留の材料にも載る。
+    assert result.remaps == [("claim_old", "claim_new", "k1:exact")]
+
+
+def test_fallback_match_still_protects_human_columns():
+    session = FakeKnowledgeSession(live_rows=[
+        _live("uuid-1", "k1:approx", review_status="teacher_approved", normalized_text="同じ本文"),
+    ])
+    _sync(
+        session,
+        [_item("a", "k1:exact", normalized_text="同じ本文", review_status="teacher_review_required")],
+        content_columns=("text", "normalized_text"),
+        human_touched=lambda row: row.get("review_status") == "teacher_approved",
+        protected_when_touched=("text", "normalized_text"),
+        fallback_match_column="normalized_text",
+    )
+    values = session.updated_in(TABLE)[0]
+    assert "review_status" not in values
+    assert "text" not in values and "normalized_text" not in values
+    assert values["stable_key"] == "k1:exact"
+
+
+def test_ambiguous_fallback_matches_are_not_linked():
+    """同じ本文の live 行が2件あるときは結ばない（推測で寄せない）。"""
+    session = FakeKnowledgeSession(live_rows=[
+        _live("uuid-1", "k1:x", normalized_text="同じ本文"),
+        _live("uuid-2", "k1:y", normalized_text="同じ本文"),
+    ])
+    result = _sync(
+        session,
+        [_item("a", "k1:new", normalized_text="同じ本文")],
+        content_columns=("text", "normalized_text"),
+        fallback_match_column="normalized_text",
+    )
+    assert result.stats["inserted"] == 1
+    assert result.stats["superseded"] == 2
+    assert result.key_remaps == []
+
+
+def test_ambiguous_incoming_values_are_not_linked():
+    session = FakeKnowledgeSession(live_rows=[_live("uuid-1", "k1:x", normalized_text="同じ本文")])
+    result = _sync(
+        session,
+        [
+            _item("a", "k1:new1", normalized_text="同じ本文"),
+            _item("b", "k1:new2", normalized_text="同じ本文"),
+        ],
+        content_columns=("text", "normalized_text"),
+        fallback_match_column="normalized_text",
+    )
+    assert result.stats["inserted"] == 2
+    assert result.stats["superseded"] == 1
+
+
+def test_without_fallback_column_the_behaviour_is_unchanged():
+    session = FakeKnowledgeSession(live_rows=[_live("uuid-1", "k1:approx", normalized_text="同じ本文")])
+    result = _sync(
+        session,
+        [_item("a", "k1:exact", normalized_text="同じ本文")],
+        content_columns=("text", "normalized_text"),
+    )
+    assert result.stats["inserted"] == 1
+    assert result.stats["superseded"] == 1
+    assert "rekeyed" not in result.stats
+
+
+def test_empty_fallback_values_do_not_match():
+    session = FakeKnowledgeSession(live_rows=[_live("uuid-1", "k1:approx", normalized_text="")])
+    result = _sync(
+        session,
+        [_item("a", "k1:exact", normalized_text="")],
+        content_columns=("text", "normalized_text"),
+        fallback_match_column="normalized_text",
+    )
+    assert result.stats["inserted"] == 1
+    assert result.stats["superseded"] == 1

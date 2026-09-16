@@ -54,7 +54,10 @@ INSERT INTO knowledge_claim_types (value) VALUES
     ('incompatibility_or_constraint'), ('comparison'), ('conclusion'), ('method_choice'),
     ('background'), ('prior_work'), ('meta'), ('problem_statement'), ('method_motivation'),
     ('theory_encoding'), ('method'), ('structural_property'), ('derivation_result'),
-    ('main_result'), ('interpretation'), ('unknown')
+    ('main_result'), ('interpretation'),
+    -- 式由来の合成 claim（equation_claim_synthesis の 4 型。2026-09-13 追加）。
+    ('definition_claim'), ('dependency_claim'), ('equation_system_claim'), ('result_claim'),
+    ('unknown')
 ON CONFLICT (value) DO NOTHING;
 
 -- core/schema.py::COMPONENT_TYPES と同じ列挙。

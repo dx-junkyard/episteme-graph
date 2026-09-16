@@ -127,6 +127,49 @@ def test_review_status_is_not_overwritten_on_match():
     assert updated and all("review_status" not in values for values in updated)
 
 
+def test_touched_claim_text_is_not_overwritten_on_match():
+    """教員がレビューした claim の本文は、同じキーの再解析で書き換えない（§5.3 / P1-R4）。"""
+    span = _span()
+    key = ko_keys.claim_stable_key("doc-1", span.text, ["b1"])
+    session = FakeKnowledgeSession(live_rows=[
+        {"id": "kept-uuid", "stable_key": key, "agent_id": "b1:span_001",
+         "review_status": "teacher_approved", "created_by": None},
+    ])
+    _saved, session = _run_claims([span], session=session)
+    updated = [v for table, _w, v in session.updates if table == "theory_claims"]
+    assert updated
+    assert all("text" not in values for values in updated)
+    assert all("normalized_text" not in values for values in updated)
+
+
+def test_untouched_claim_text_is_updated_on_match():
+    span = _span()
+    key = ko_keys.claim_stable_key("doc-1", span.text, ["b1"])
+    session = FakeKnowledgeSession(live_rows=[
+        {"id": "kept-uuid", "stable_key": key, "agent_id": "b1:span_001",
+         "review_status": "teacher_review_required", "created_by": None},
+    ])
+    _saved, session = _run_claims([span], session=session)
+    updated = [v for table, _w, v in session.updates if table == "theory_claims"]
+    assert any("text" in values for values in updated)
+
+
+def test_approximate_backfill_key_is_reconciled_by_the_claim_text():
+    """近似キーの旧行を supersede + 新規 INSERT に割らない（§5.6 / P1-R3）。"""
+    span = _span()
+    session = FakeKnowledgeSession(live_rows=[
+        {"id": "kept-uuid", "stable_key": "k1:approximate", "agent_id": "b1:span_old",
+         "review_status": "teacher_approved", "created_by": None,
+         "normalized_text": span.text},
+    ])
+    saved, session = _run_claims([span], session=session, run_id="run-9")
+    assert saved[0]["claim_id"] == "kept-uuid"
+    assert _claim_rows(session) == []
+    assert session.superseded == []
+    remap_rows = session.inserted_into("element_id_remap")
+    assert any(row.get("old_id") == "k1:approximate" for row in remap_rows)
+
+
 # ---------------------------------------------------------------------------
 # ② claim object も1行ずつ / origin 付き
 # ---------------------------------------------------------------------------
@@ -239,6 +282,17 @@ def test_unknown_claim_tier_is_dropped_not_invented():
     assert _claim_rows(session)[0]["claim_tier"] == ""
 
 
+def test_claim_tier_reads_the_artifact_key_claim_tier():
+    """実 artifact のキーは ``claim_tier``（``tier`` だけを見て全件空だった = V-3）。"""
+    span = _span()
+    span.qualification = {
+        "decision": "accepted", "claim_type_candidate": "result",
+        "claim_tier": "paper_core",
+    }
+    _saved, session = _run_claims([span])
+    assert _claim_rows(session)[0]["claim_tier"] == "paper_core"
+
+
 def test_equation_stable_keys_are_recorded_next_to_the_agent_ids():
     equations = types.SimpleNamespace(equations=[
         types.SimpleNamespace(
@@ -334,13 +388,39 @@ def test_derivation_steps_use_equation_stable_keys_as_key_material():
     ])
     _summary, session = _knowledge_session(equations=equations, derivations=derivations)
     step = session.inserted_into("knowledge_derivation_steps")[0]
-    assert step["agent_step_id"] == "step_1"
+    # agent ID はチェーン ID で文書内一意にする（V-2）。
+    assert step["agent_step_id"] == "der_1:step_1"
     assert step["agent_derivation_id"] == "der_1"
     assert step["operation"] == "linearize_field"
     equation_key = session.inserted_into("knowledge_equations")[0]["stable_key"]
     assert step["stable_key"] == ko_keys.derivation_step_stable_key(
-        "doc-1", "linearize_field", [equation_key], []
+        "doc-1", "linearize_field", [equation_key], [],
+        derivation_id="der_1", step_index=0,
     )
+
+
+def test_same_step_id_in_two_chains_does_not_collide():
+    """``step_001`` はチェーン内でしか一意でない（V-2 の回帰）。"""
+    def _chain(derivation_id):
+        return types.SimpleNamespace(
+            derivation_id=derivation_id, document_id="doc-1", chain_type="equation_chain",
+            teaching_takeaway="", source_section_ids=[],
+            steps=[types.SimpleNamespace(
+                step_id="step_001", operation="linearize_field",
+                operation_subtype=None, input_equation_ids=[],
+                output_equation_ids=[], input_claim_ids=[], output_claim_ids=[],
+                required_claim_ids=[], assumption_ids=[], source_evidence_ids=[],
+            )],
+        )
+
+    derivations = types.SimpleNamespace(chains=[_chain("der_1"), _chain("der_2")])
+    _summary, session = _knowledge_session(derivations=derivations)
+    rows = session.inserted_into("knowledge_derivation_steps")
+    assert len(rows) == 2
+    assert {row["agent_step_id"] for row in rows} == {"der_1:step_001", "der_2:step_001"}
+    keys = [row["stable_key"] for row in rows]
+    assert len(set(keys)) == 2, "別チェーンの同名 step が同じ stable_key に潰れない"
+    assert not any("#" in key for key in keys), "素キーで分かれる（#n に頼らない）"
 
 
 def test_system_level_chain_without_steps_still_gets_a_row():
@@ -357,8 +437,19 @@ def test_system_level_chain_without_steps_still_gets_a_row():
     _summary, session = _knowledge_session(derivations=derivations)
     rows = session.inserted_into("knowledge_derivation_steps")
     assert len(rows) == 1
-    assert rows[0]["agent_step_id"] == "sys_1"
+    assert rows[0]["agent_step_id"] == "der_sys:sys_1"
     assert rows[0]["chain_type"] == "system_level"
+
+
+def test_evidence_and_symbol_rows_do_not_write_review_status():
+    """078 は evidence / symbol に review_status 列を作らない（V-1 の回帰）。"""
+    _summary, session = _knowledge_session(
+        evidence_registry=_evidence_registry(("ev_1", "b1")),
+    )
+    for row in session.inserted_into("knowledge_evidence"):
+        assert "review_status" not in row
+    for _table, _where, values in session.updates:
+        assert "review_status" not in values
 
 
 def test_symbols_are_keyed_by_canonical_symbol_and_scope():

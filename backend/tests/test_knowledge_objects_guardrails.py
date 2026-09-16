@@ -38,31 +38,143 @@ DB_DIR = BACKEND / "db"
 # KO5: 読み手は live ビューを読む
 # ===========================================================================
 
-#: 基表（``theory_claims`` / ``theory_components``）を直接 SELECT / JOIN してよい
-#: ファイルと、その理由。ここに無いファイルが基表を読んだらガードレールが落ちる。
+#: 基表（``theory_claims`` / ``theory_components``）に触ってよい **シンボル** と、その理由。
+#: キーは ``"<リポジトリ相対パス>:<関数名>"``（モジュール直下は ``:<module>``）。
+#:
+#: 粒度がファイルではなくシンボルなのは、``persistence.py`` のような「書き手と読み手が
+#: 同居するファイル」を丸ごと免除すると、そのファイルに後から足した**読み手**が
+#: 素通りしてしまうため（2026-09-13 の敵対的レビュー P1-R11）。
 #:
 #: **追加するときは理由を書くこと。** 監査・履歴目的で superseded 行を見せる読み手を
 #: 足す場合は、返す DTO に ``superseded_at`` を含めること（設計書 §9。学習者向け DTO は
 #: KO10 でそもそも出せないので、教員向けに限る）。
 BASE_TABLE_ALLOWLIST: dict[str, str] = {
-    "backend/core/document_pipeline/persistence.py": (
-        "書き手。知識行の同期（stable_key 一致で UPDATE / 不一致で supersede・INSERT）と"
-        "旧経路の DELETE を発行する本体（KO3 / KO5）。"
-    ),
-    "backend/core/versioning/deletion.py": (
+    # ---- 削除経路 ---------------------------------------------------------
+    "backend/core/versioning/deletion.py:_purge_document": (
         "削除経路。物理削除の対象 id を集めるため superseded 行も含めて走査する必要がある"
         "（live だけ消すと superseded 行が孤児として残る）。"
     ),
+    # ---- 動的なテーブル名（静的に解決できない補間）------------------------
+    # ここに載っているのは「テーブル名を f-string で受ける関数」で、**何が流れ込むかを
+    # 呼び出し側が固定していること**が登録の条件。新しく足すときは、渡し元の定数を
+    # 理由に明記すること（そうでないと基表が黙って流れ込む余地が残る）。
+    "backend/core/deliberation/refs.py:_resolve_by_legacy_id": (
+        "``_LEGACY_ID_TABLES`` の値だけを受ける（現在は live ビュー2つ）。element_type から"
+        "引いた定数以外は流れ込まない。"
+    ),
+    "backend/core/descent/resolve.py:_resolve_row": (
+        "呼び出し側（``resolve_element``）が live ビュー定数（``VIEW_COMPONENTS_LIVE`` / "
+        "``VIEW_CLAIMS_LIVE``）のみを渡す。"
+    ),
+    "backend/core/admin_assistant/next_steps.py:_approved_refs": (
+        "``table`` は live ビュー定数のみ（承認済みかの判定に基表を使わない）。"
+    ),
+    "backend/core/knowledge_import/apply.py:live_row_counts": (
+        "``view`` は ``VIEW_CLAIMS_LIVE`` / ``VIEW_COMPONENTS_LIVE`` の2定数のみ。"
+    ),
+    "backend/core/knowledge_import/apply.py:select_sql": (
+        "``self.source`` は種別宣言の表名リテラルのみ。claim / component は live ビュー、"
+        "新4表は ``live_view=False`` のとき ``superseded_at IS NULL`` を自分で足す。"
+    ),
+    "backend/api/routes/export.py:_load_knowledge_object_keys": (
+        "``_KNOWLEDGE_KEY_SOURCES`` の表名リテラルのみ（claim / component は live ビュー、"
+        "新4表は ``superseded_at IS NULL`` を明示的に足す）。"
+    ),
+    "backend/core/account_lifecycle.py:_delete_sql": (
+        "アカウント purge。``PURGE_TABLES`` の宣言に並ぶ表名のみを受ける（AL1 の網羅性検査が"
+        "別テストで固定）。``theory_claims`` / ``theory_components`` は RETAIN 側なので"
+        "ここには流れ込まない。"
+    ),
+    "backend/core/account_lifecycle.py:_leftover_counts": (
+        "アカウント purge の残存確認。``PURGE_TABLES`` / ``RETAIN_TABLES`` の表名のみを受ける"
+        "（行を消さない COUNT）。"
+    ),
 }
 
+#: 走査で見張る SQL の書き方（読み手の経路 = ``FROM`` / ``JOIN``）。``DELETE FROM`` も
+#: ``FROM`` として引っかかる（基表からの行削除は KO3 違反なので、むしろ見たい）。
+#: ``UPDATE`` / ``INSERT INTO`` は書き手の正規の経路なので対象外
+#: （KO5 が言うのは「**読み手**は live ビューを読む」）。
+_SQL_VERBS = r"(?:FROM|JOIN)"
 
-def _base_table_hits(path: Path) -> list[str]:
-    """``FROM|JOIN theory_claims|theory_components``（``_live`` 付きを除く）の行を返す。"""
-    pattern = re.compile(r"\b(?:FROM|JOIN)\s+theory_(?:claims|components)\b(?!_live)")
-    hits: list[str] = []
-    for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
-        if pattern.search(line):
-            hits.append(f"{lineno}: {line.strip()}")
+#: ①素の基表名（``FROM theory_claims`` — 改行をまたぐ整形も拾うため全文走査する）。
+_STATIC_BASE_TABLE_RE = re.compile(
+    rf"\b{_SQL_VERBS}\s+theory_(?:claims|components)\b(?!_live)", re.IGNORECASE
+)
+
+#: ②動的なテーブル名（``FROM {table}`` / ``UPDATE {TABLE_CLAIMS}``）。
+#: f-string 補間はテーブル名を隠すので、regex だけの検査は素通りする（P1-R11）。
+_DYNAMIC_TABLE_RE = re.compile(
+    rf"\b{_SQL_VERBS}\s*\{{\s*([A-Za-z_][A-Za-z0-9_.]*)\s*\}}", re.IGNORECASE
+)
+
+#: 基表そのものを指す値（``core.knowledge_objects.schema`` の定数はここで解決する）。
+_BASE_TABLE_VALUES = {"theory_claims", "theory_components"}
+
+
+def _resolve_table_expression(name: str) -> str | None:
+    """``{name}`` が静的に解決できるなら実テーブル名を返す（できなければ ``None``）。"""
+    from core.knowledge_objects import schema as ko_schema
+
+    if "." in name:
+        return None
+    value = getattr(ko_schema, name, None)
+    return value if isinstance(value, str) else None
+
+
+def _symbol_ranges(source: str) -> list[tuple[int, int, str]]:
+    """``(開始行, 終了行, 関数/クラス名)`` の一覧（内側ほどリストの後ろ）。"""
+    import ast
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:  # pragma: no cover - 構文エラーは他のテストが拾う
+        return []
+    ranges: list[tuple[int, int, str]] = []
+
+    def _walk(node) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                end = getattr(child, "end_lineno", None) or child.lineno
+                ranges.append((child.lineno, end, child.name))
+            _walk(child)
+
+    _walk(tree)
+    return ranges
+
+
+def _symbol_for_line(ranges: list[tuple[int, int, str]], lineno: int) -> str:
+    """その行を含む**最も内側の**シンボル名（無ければ ``<module>``）。"""
+    best: tuple[int, str] | None = None
+    for start, end, name in ranges:
+        if start <= lineno <= end:
+            span = end - start
+            if best is None or span <= best[0]:
+                best = (span, name)
+    return best[1] if best else "<module>"
+
+
+def _base_table_hits(path: Path) -> list[tuple[str, str]]:
+    """``[(シンボル名, "行番号: 抜粋")]``。基表への静的/動的アクセスを全文走査で集める。"""
+    source = path.read_text(encoding="utf-8")
+    ranges = _symbol_ranges(source)
+    lines = source.splitlines()
+    hits: list[tuple[str, str]] = []
+
+    def _record(match: re.Match, note: str) -> None:
+        lineno = source.count("\n", 0, match.start()) + 1
+        excerpt = lines[lineno - 1].strip() if 0 < lineno <= len(lines) else ""
+        hits.append((_symbol_for_line(ranges, lineno), f"{lineno}: {note}{excerpt}"))
+
+    for match in _STATIC_BASE_TABLE_RE.finditer(source):
+        _record(match, "")
+    for match in _DYNAMIC_TABLE_RE.finditer(source):
+        resolved = _resolve_table_expression(match.group(1))
+        if resolved is None:
+            # 静的に解決できない補間 = 基表が流れ込み得る。明示 allowlist を要求する。
+            _record(match, "[dynamic] ")
+        elif resolved in _BASE_TABLE_VALUES:
+            _record(match, "[dynamic->base] ")
     return hits
 
 
@@ -72,35 +184,91 @@ def _scanned_sources() -> list[Path]:
     return [p for p in paths if KO_DIR not in p.parents and p.parent != KO_DIR]
 
 
+def _all_hits() -> dict[str, list[str]]:
+    """``{"<rel>:<symbol>": ["行番号: 抜粋", ...]}``（走査対象の全ファイル分）。"""
+    found: dict[str, list[str]] = {}
+    for path in _scanned_sources():
+        rel = path.relative_to(ROOT).as_posix()
+        for symbol, excerpt in _base_table_hits(path):
+            found.setdefault(f"{rel}:{symbol}", []).append(excerpt)
+    return found
+
+
 class TestReadersUseLiveViews:
-    def test_only_allowlisted_files_read_the_base_tables(self):
-        """KO5: 基表 SELECT / JOIN は allowlist のファイルだけ。"""
-        offending: dict[str, list[str]] = {}
-        for path in _scanned_sources():
-            rel = path.relative_to(ROOT).as_posix()
-            if rel in BASE_TABLE_ALLOWLIST:
-                continue
-            hits = _base_table_hits(path)
-            if hits:
-                offending[rel] = hits
+    def test_only_allowlisted_symbols_touch_the_base_tables(self):
+        """KO5: 基表アクセス（静的名・動的補間とも）は allowlist のシンボルだけ。"""
+        offending = {
+            key: excerpts
+            for key, excerpts in _all_hits().items()
+            if key not in BASE_TABLE_ALLOWLIST
+        }
         assert offending == {}, (
-            "読み手は live ビューを読むこと（KO5）。基表を読む必要があるなら "
-            "BASE_TABLE_ALLOWLIST に理由付きで登録する: "
+            "読み手は live ビューを読むこと（KO5）。基表に触る必要があるなら "
+            "BASE_TABLE_ALLOWLIST に `ファイル:シンボル` 粒度で理由付き登録する: "
             f"{ {k: v[:2] for k, v in offending.items()} }"
         )
 
     def test_allowlist_entries_exist_and_have_reasons(self):
         """allowlist は実在ファイル + 非空の理由でなければならない（形骸化の防止）。"""
-        for rel, reason in BASE_TABLE_ALLOWLIST.items():
+        for key, reason in BASE_TABLE_ALLOWLIST.items():
+            rel, _, symbol = key.rpartition(":")
+            assert rel and symbol, f"allowlist のキーが `ファイル:シンボル` 形でない: {key}"
             assert (ROOT / rel).exists(), f"allowlist に存在しないファイル: {rel}"
-            assert reason.strip(), f"allowlist の理由が空: {rel}"
+            assert reason.strip(), f"allowlist の理由が空: {key}"
 
-    def test_allowlist_entries_actually_read_the_base_tables(self):
-        """理由が残っているのに基表を読まなくなったら allowlist から外す。"""
-        stale = [
-            rel for rel in BASE_TABLE_ALLOWLIST if not _base_table_hits(ROOT / rel)
-        ]
-        assert stale == [], f"基表を読まなくなった allowlist エントリ: {stale}"
+    def test_allowlist_entries_actually_touch_the_base_tables(self):
+        """理由が残っているのに基表を触らなくなったら allowlist から外す。"""
+        found = _all_hits()
+        stale = [key for key in BASE_TABLE_ALLOWLIST if key not in found]
+        assert stale == [], f"基表を触らなくなった allowlist エントリ: {stale}"
+
+    def test_detector_catches_dynamic_table_interpolation(self, tmp_path: Path):
+        """検出器そのものの退行検査（f-string 補間を見逃さないこと）。"""
+        probe = tmp_path / "probe.py"
+        probe.write_text(
+            "def reader(table):\n"
+            '    return sa_text(f"SELECT * FROM {table} WHERE id = :id")\n',
+            encoding="utf-8",
+        )
+        hits = _base_table_hits(probe)
+        assert [symbol for symbol, _ in hits] == ["reader"], hits
+        assert "[dynamic]" in hits[0][1]
+
+    def test_detector_accepts_live_view_constants(self, tmp_path: Path):
+        """``{VIEW_CLAIMS_LIVE}`` のように静的に live へ解決できる補間は通す。"""
+        probe = tmp_path / "probe_live.py"
+        probe.write_text(
+            "def reader():\n"
+            '    return sa_text(f"SELECT * FROM {VIEW_CLAIMS_LIVE}")\n',
+            encoding="utf-8",
+        )
+        assert _base_table_hits(probe) == []
+
+    def test_detector_catches_base_table_constants(self, tmp_path: Path):
+        """``{TABLE_CLAIMS}`` は基表なので検出する。"""
+        probe = tmp_path / "probe_base.py"
+        probe.write_text(
+            "def reader():\n"
+            '    return sa_text(f"SELECT id FROM {TABLE_CLAIMS}")\n',
+            encoding="utf-8",
+        )
+        hits = _base_table_hits(probe)
+        assert [symbol for symbol, _ in hits] == ["reader"], hits
+        assert "[dynamic->base]" in hits[0][1]
+
+    def test_detector_catches_multiline_sql(self, tmp_path: Path):
+        """整形で改行をまたいだ ``FROM\\n theory_claims`` も拾う（全文走査）。"""
+        probe = tmp_path / "probe_multiline.py"
+        probe.write_text(
+            "def reader():\n"
+            '    return """\n'
+            "        SELECT id\n"
+            "        FROM\n"
+            "            theory_claims\n"
+            '    """\n',
+            encoding="utf-8",
+        )
+        assert [symbol for symbol, _ in _base_table_hits(probe)] == ["reader"]
 
     def test_live_views_are_actually_referenced(self):
         """置換が実際に行われていること（0 件なら regex か作業の取りこぼし）。"""

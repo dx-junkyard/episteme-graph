@@ -117,6 +117,17 @@ class TestAgentVocabularyIsCovered:
         missing = [c for c in CLAIM_TYPE_ONTOLOGY if c not in CLAIM_TYPES]
         assert missing == [], f"claim_object_builder の型が CLAIM_TYPES に無い: {missing}"
 
+    def test_equation_synthesis_claim_types_subset(self):
+        """式由来の合成 claim の型が語彙に在る（V-4: 84 件が unknown に丸められていた）。"""
+        from episteme_graph.agents.claim_object_builder import equation_claim_synthesis as syn
+
+        synthesized = [
+            syn.DEFINITION_CLAIM, syn.DEPENDENCY_CLAIM,
+            syn.EQUATION_SYSTEM_CLAIM, syn.RESULT_CLAIM,
+        ]
+        missing = [c for c in synthesized if c not in CLAIM_TYPES]
+        assert missing == [], f"equation_claim_synthesis の型が CLAIM_TYPES に無い: {missing}"
+
     def test_cartridge_component_types_subset(self):
         cartridge_files = sorted((BACKEND / "cartridges").glob("*/component_types.json"))
         assert cartridge_files, "expected at least one cartridge component_types.json"
