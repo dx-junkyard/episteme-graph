@@ -632,3 +632,127 @@ class TestMainPyHasNoInlineDdl:
         src = self._main_py_source()
         lifespan_src = extract_function_source(src, "_lifespan")
         assert "run_migrations()" in lifespan_src
+
+
+# ---------------------------------------------------------------------------
+# `%` エスケープ lint（2026-09-13 追加）
+#
+# ランナーは各ファイルを `conn.exec_driver_sql(sql_text)` で流す。psycopg2 はこのとき
+# `%` をパラメータ補間の記号とみなすので、SQL 本文の `%` は必ず `%%` と書く
+# （080 / 084 のヘッダコメントが明記する規約）。084 の初版は `format('... %I', ...)` の
+# `%` が 1 個で、全環境で `TypeError: immutabledict is not a sequence` → 起動失敗
+# （scratch DB 検証 W-1）。実行型 CI より安くこれを捕まえるため、コメント行を除いた本文に
+# **奇数個の `%` 連**が無いことを固定する。
+# ---------------------------------------------------------------------------
+
+_PERCENT_RUN_RE = re.compile(r"%+")
+
+
+def _strip_line_comments(sql: str) -> str:
+    return "\n".join(line.split("--", 1)[0] for line in sql.splitlines())
+
+
+def _collect_odd_percent_runs(directory: Path) -> list[str]:
+    violations: list[str] = []
+    for path in discover_migration_files(directory):
+        body = _strip_line_comments(path.read_text(encoding="utf-8"))
+        for match in _PERCENT_RUN_RE.finditer(body):
+            if len(match.group(0)) % 2 == 1:
+                violations.append(f"{path.name}:{_line_of(body, match.start())}: {match.group(0)!r}")
+    return violations
+
+
+class TestPercentEscapeLint:
+    """SQL 本文の `%` は `%%` で書く（psycopg2 の補間規約）。"""
+
+    def test_no_odd_percent_runs_in_real_files(self):
+        violations = _collect_odd_percent_runs(MIGRATIONS_DIR)
+        assert violations == [], (
+            "migration SQL に奇数個の `%` があります（psycopg2 が補間記号と誤認し起動時に失敗する）。"
+            "`%%` と書くか quote_ident() + || で組み直すこと: " + "; ".join(violations)
+        )
+
+    def test_lint_detects_single_percent_in_format(self, tmp_path: Path):
+        (tmp_path / "init.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        (tmp_path / "001_bad.sql").write_text(
+            "-- comment with % is fine\nDO $$ BEGIN EXECUTE format('DROP CONSTRAINT %I', 'x'); END $$;\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "002_good.sql").write_text(
+            "DO $$ BEGIN EXECUTE format('DROP CONSTRAINT %%I', 'x'); RAISE NOTICE 'n=%%', 1; END $$;\n",
+            encoding="utf-8",
+        )
+        violations = _collect_odd_percent_runs(tmp_path)
+        assert len(violations) == 1 and violations[0].startswith("001_bad.sql:2")
+
+
+# ---------------------------------------------------------------------------
+# 型ドリフト lint（2026-09-17）
+#
+# migration 080 が `document_id` / `instance_document_id` を TEXT → UUID に変える
+# （KO9）。ランナーは毎起動・番号順に**全ファイル**を再実行するので、080 より前の
+# ファイルに片側だけ `::text` を付けた比較が残っていると、080 適用済みの DB では
+# `operator does not exist: text = uuid` で落ち、API が起動しなくなる
+# （019 の backfill で実際に発生した）。両辺を `::text` にすれば TEXT / UUID の
+# どちらの DB でも同じ意味で動くので、片側キャストの比較を構造的に禁止する。
+# ---------------------------------------------------------------------------
+
+_DOC_ID_COLUMNS = r"(?:document_id|instance_document_id)"
+# `... ::text = <何か>.document_id`（右辺にキャストが無い）
+_HALF_CAST_RE_RIGHT = re.compile(
+    r"::text\s*=\s*[\w.]*\b" + _DOC_ID_COLUMNS + r"\b(?!\s*::)"
+)
+# `<何か>.document_id = ...::text`（左辺にキャストが無い）
+_HALF_CAST_RE_LEFT = re.compile(
+    r"\b" + _DOC_ID_COLUMNS + r"\b\s*=\s*[\w.]+::text"
+)
+
+
+def _collect_half_cast_document_id_comparisons(directory: Path) -> list[str]:
+    violations: list[str] = []
+    for path in discover_migration_files(directory):
+        body = _strip_line_comments(path.read_text(encoding="utf-8"))
+        for pattern in (_HALF_CAST_RE_RIGHT, _HALF_CAST_RE_LEFT):
+            for match in pattern.finditer(body):
+                violations.append(
+                    f"{path.name}:{_line_of(body, match.start())}: {match.group(0).strip()!r}"
+                )
+    return violations
+
+
+class TestDocumentIdTypeDriftLint:
+    """document_id を `::text` と比べるなら**両辺**に `::text` を付ける。"""
+
+    def test_no_half_cast_document_id_comparisons_in_real_files(self):
+        violations = _collect_half_cast_document_id_comparisons(MIGRATIONS_DIR)
+        assert violations == [], (
+            "document_id の比較で片側だけ `::text` になっています。migration 080 で "
+            "TEXT → UUID になるため、080 適用済みの DB では再実行時に "
+            "`operator does not exist: text = uuid` で起動が止まります。"
+            "両辺を `::text` にすること: " + "; ".join(violations)
+        )
+
+    def test_lint_detects_half_cast(self, tmp_path: Path):
+        (tmp_path / "init.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        (tmp_path / "001_bad_right.sql").write_text(
+            "UPDATE documents d SET x = 1 FROM sub WHERE d.id::text = sub.document_id;\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "002_bad_left.sql").write_text(
+            "SELECT 1 FROM t WHERE t.instance_document_id = d.id::text;\n",
+            encoding="utf-8",
+        )
+        violations = _collect_half_cast_document_id_comparisons(tmp_path)
+        assert len(violations) == 2
+        assert violations[0].startswith("001_bad_right.sql:1")
+        assert violations[1].startswith("002_bad_left.sql:1")
+
+    def test_lint_accepts_both_sides_cast(self, tmp_path: Path):
+        (tmp_path / "init.sql").write_text("SELECT 1;\n", encoding="utf-8")
+        (tmp_path / "001_good.sql").write_text(
+            "UPDATE documents d SET x = 1 FROM sub\n"
+            " WHERE d.id::text = sub.document_id::text;\n"
+            "-- d.id::text = sub.document_id  （コメントは対象外）\n",
+            encoding="utf-8",
+        )
+        assert _collect_half_cast_document_id_comparisons(tmp_path) == []
