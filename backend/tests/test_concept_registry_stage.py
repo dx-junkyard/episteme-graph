@@ -131,6 +131,18 @@ class TestStageExecution:
 
 class TestUsageFeature:
     def test_pipeline_feature_is_registered(self):
+        """``KNOWN_FEATURES`` は**全ステージ**を載せる（LLM を呼ぶ場面の一覧ではない）。
+
+        P3-R12（「LLM を呼ばないステージなので削れ」）は前提が成り立たないため見送った:
+        ``orchestrator.report_start(stage)`` はステージ種別を問わず
+        ``set_current_feature("pipeline:{stage}")`` を呼ぶので、本ステージの feature は
+        実行時に必ず立つ。``KNOWN_FEATURES`` はその**参照用の語彙表**（U3 の帰属先
+        カタログ）で、非LLM ステージも既に10件載っている（``source_chunking`` /
+        ``evidence_registry`` / ``symbol_registry`` / ``derivation_chain`` /
+        ``persist_claims_components_graph`` 等）。削ると
+        ``test_llm_usage_attribution.py::test_pipeline_stage_features_all_registered``
+        が守っている「全ステージ網羅」の規約が破れる。
+        """
         from core.llm_usage.schema import KNOWN_FEATURES
 
         assert f"pipeline:{STAGE}" in KNOWN_FEATURES

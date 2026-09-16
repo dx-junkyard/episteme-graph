@@ -134,13 +134,26 @@ CREATE INDEX IF NOT EXISTS idx_library_entries_review
 -- entry_type の CHECK（migration 042 のカラム直付け無名 CHECK = 自動命名
 -- library_entries_entry_type_check）を落とし、語彙表への FK に置き換える（KO7 と同じ思想）。
 -- 無名 CHECK の名前が環境によって違う可能性に備え、conkey が entry_type 1 列だけの
--- CHECK 制約も総なめで落とす（冪等。FK は contype='f' なので巻き込まない）。
-ALTER TABLE library_entries DROP CONSTRAINT IF EXISTS library_entries_entry_type_check;
-
+-- CHECK 制約も総なめで落とす。
+--
+-- P3-R14: この「総なめ DROP」は **FK 未作成のとき（= まだ置き換えが済んでいないとき）
+-- だけ**走らせる。毎起動・番号順に全ファイルを再実行する方式（CLAUDE.md §マイグレーションの
+-- 正本一本化）なので、無条件に置くと後続のマイグレーションが entry_type に正当な CHECK を
+-- 足しても毎起動で黙って落ちてしまう（冪等ではなく「毎回壊す」）。置き換え済みの環境では
+-- この DO ブロックは丸ごと no-op になる。
 DO $$
 DECLARE
     stale_conname text;
+    rounded INTEGER;
 BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint WHERE conname = 'library_entries_entry_type_fk'
+    ) THEN
+        RETURN;  -- 置き換え済み。以降は何もしない（他所が張った CHECK を巻き込まない）。
+    END IF;
+
+    -- 042 の自動命名 CHECK と、conkey が entry_type 1 列だけの CHECK 制約を落とす
+    -- （FK は contype='f' なので巻き込まない）。
     FOR stale_conname IN
         SELECT c.conname
         FROM pg_constraint c
@@ -154,29 +167,20 @@ BEGIN
     LOOP
         EXECUTE 'ALTER TABLE library_entries DROP CONSTRAINT ' || quote_ident(stale_conname);
     END LOOP;
-END $$;
 
-DO $$
-DECLARE
-    rounded INTEGER;
-BEGIN
-    IF NOT EXISTS (
-        SELECT 1 FROM pg_constraint WHERE conname = 'library_entries_entry_type_fk'
-    ) THEN
-        -- FK を張る前に語彙表に無い値を concept へ丸める（042 の CHECK 語彙は新語彙の
-        -- 部分集合なので通常は 0 行）。丸めた事実は NOTICE に出すだけで行は消さない。
-        UPDATE library_entries
-           SET entry_type = 'concept'
-         WHERE entry_type NOT IN (SELECT entry_type FROM knowledge_entry_types);
-        GET DIAGNOSTICS rounded = ROW_COUNT;
-        IF rounded > 0 THEN
-            RAISE NOTICE 'migration 082: rounded %% library_entries row(s) to entry_type=concept', rounded;
-        END IF;
-
-        ALTER TABLE library_entries
-            ADD CONSTRAINT library_entries_entry_type_fk
-            FOREIGN KEY (entry_type) REFERENCES knowledge_entry_types(entry_type);
+    -- FK を張る前に語彙表に無い値を concept へ丸める（042 の CHECK 語彙は新語彙の
+    -- 部分集合なので通常は 0 行）。丸めた事実は NOTICE に出すだけで行は消さない。
+    UPDATE library_entries
+       SET entry_type = 'concept'
+     WHERE entry_type NOT IN (SELECT entry_type FROM knowledge_entry_types);
+    GET DIAGNOSTICS rounded = ROW_COUNT;
+    IF rounded > 0 THEN
+        RAISE NOTICE 'migration 082: rounded %% library_entries row(s) to entry_type=concept', rounded;
     END IF;
+
+    ALTER TABLE library_entries
+        ADD CONSTRAINT library_entries_entry_type_fk
+        FOREIGN KEY (entry_type) REFERENCES knowledge_entry_types(entry_type);
 END $$;
 
 -- ============================================================================

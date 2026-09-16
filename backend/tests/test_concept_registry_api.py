@@ -158,6 +158,85 @@ class TestListEntries:
         assert client.get(_ENTRIES, headers=_auth(student)).status_code == 403
 
 
+class TestCandidateVisibility:
+    """P3-R2: AI が立てた候補だけに document 可視性を掛ける。
+
+    候補はパイプラインが論文から起こすので、``source_document_ids`` に閲覧できない
+    論文が混じり得る。確定済みは教員が分野の共同財として確定したものなので従来どおり。
+    """
+
+    _OK = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    _HIDDEN = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+
+    @pytest.fixture
+    def visibility(self, routes, monkeypatch):
+        route_mod, _calls = routes
+
+        class _Access:
+            def __init__(self, can_view):
+                self.can_view = can_view
+
+        monkeypatch.setattr(
+            route_mod.services,
+            "resolve_document_access",
+            lambda uid, document_id: _Access(document_id == self._OK),
+        )
+        return route_mod, monkeypatch
+
+    def _serve(self, route_mod, monkeypatch, entries):
+        monkeypatch.setattr(route_mod.library_store, "list_entries", lambda **kw: entries)
+
+    def test_invisible_sources_are_stripped_from_candidates(
+        self, client_and_tokens, visibility
+    ):
+        route_mod, monkeypatch = visibility
+        entry = _entry(review_status="candidate")
+        entry["source_document_ids"] = [self._OK, self._HIDDEN]
+        self._serve(route_mod, monkeypatch, [entry])
+        client, _student, teacher = client_and_tokens
+        body = client.get(_ENTRIES + "?include_candidates=true", headers=_auth(teacher)).json()
+        assert body["entries"][0]["source_document_ids"] == [self._OK]
+        assert body["hidden_count"] == 0
+
+    def test_candidate_with_no_visible_source_is_dropped_and_counted(
+        self, client_and_tokens, visibility
+    ):
+        route_mod, monkeypatch = visibility
+        entry = _entry(review_status="candidate")
+        entry["source_document_ids"] = [self._HIDDEN]
+        self._serve(route_mod, monkeypatch, [entry])
+        client, _student, teacher = client_and_tokens
+        body = client.get(_ENTRIES + "?include_candidates=true", headers=_auth(teacher)).json()
+        assert body["entries"] == []
+        assert body["hidden_count"] == 1
+
+    def test_confirmed_entries_keep_their_sources(self, client_and_tokens, visibility):
+        route_mod, monkeypatch = visibility
+        entry = _entry(review_status="confirmed")
+        entry["source_document_ids"] = [self._OK, self._HIDDEN]
+        self._serve(route_mod, monkeypatch, [entry])
+        client, _student, teacher = client_and_tokens
+        body = client.get(_ENTRIES, headers=_auth(teacher)).json()
+        assert body["entries"][0]["source_document_ids"] == [self._OK, self._HIDDEN]
+        assert body["hidden_count"] == 0
+
+    def test_access_check_failure_hides_the_source(self, client_and_tokens, routes, monkeypatch):
+        """判定できないものは見せない（fail-closed）。"""
+        route_mod, _calls = routes
+
+        def _boom(uid, document_id):
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(route_mod.services, "resolve_document_access", _boom)
+        entry = _entry(review_status="candidate")
+        entry["source_document_ids"] = [self._OK]
+        monkeypatch.setattr(route_mod.library_store, "list_entries", lambda **kw: [entry])
+        client, _student, teacher = client_and_tokens
+        body = client.get(_ENTRIES + "?include_candidates=true", headers=_auth(teacher)).json()
+        assert body["entries"] == []
+        assert body["hidden_count"] == 1
+
+
 # ---------------------------------------------------------------------------
 # 2. 概念の確定（KR2 / KR7）
 # ---------------------------------------------------------------------------

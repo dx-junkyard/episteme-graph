@@ -324,12 +324,11 @@ def _load_concept_ref(session: Any, *, document_id: str, agent_symbol_id: str) -
     name = _clean(row.get("name"))
     if not name:
         return None
-    ref: dict[str, Any] = {
-        "entry_id": str(row.get("entry_id") or ""),
-        "name": name,
-        "entry_type": str(row.get("entry_type") or ""),
-    }
-    label = _entry_type_label(ref["entry_type"])
+    # P3-R4: 学習者 DTO には表示に要るものだけ載せる。``entry_id``（内部 ID）と
+    # 生の ``entry_type``（語彙キー）は学習者向けの表示に使わないので出さない
+    # （内部 ID 非漏洩 / 新しい語彙を学習者に見せない）。
+    ref: dict[str, Any] = {"name": name}
+    label = _entry_type_label(str(row.get("entry_type") or ""))
     if label:
         ref["entry_type_label"] = label
     return ref

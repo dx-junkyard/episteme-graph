@@ -133,9 +133,11 @@ def ground_claims(
 ) -> GroundingResult:
     """主張の ``concepts`` に概念層の mention を追加する（``claim_objects`` を**その場で**変更）。
 
-    呼び出し側（フック）は変更後の ``claim_objects`` をそのまま
-    ``claim_object_builder`` artifact として保存し直す。戻り値は出所の記録
-    （``theory_claims.concepts`` へのマージ材料）と取りこぼし報告の素。
+    変更するのは呼び出し側が持つ **in-memory の値**だけで、``claim_object_builder``
+    artifact（生成ログ）は書き換えない（KO6。2026-09-13 のレビュー Phase 3 A層⚠）。
+    永続化への反映は、戻り値を専用 artifact ``claim_concept_grounding`` に残し、
+    ``persist_qualified_claims`` がそれを join して ``theory_claims.concepts`` へ
+    additive マージする経路で行う（CG §6）。戻り値は出所の記録と取りこぼし報告の素。
 
     Args:
         claim_objects: ``ClaimObjectBuildResult``（``claims`` を持つもの）。

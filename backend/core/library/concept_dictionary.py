@@ -188,19 +188,45 @@ class ConceptDictionary:
             "mapping_justification": justification_for_source(item["source"]),
         }
 
+    def distinct_surfaces(self) -> list[str]:
+        """辞書に載っている**相異なる**表記（登録順・P3-R10 の逆引き索引の材料）。
+
+        同じ表記が複数のエントリに現れる（``registry_label`` と ``cartridge_alias`` が
+        同じ別名を持つ等）ので、照合は表記ごとに 1 回で足りる。
+        """
+        surfaces: list[str] = []
+        seen: set[str] = set()
+        for item in self.entries.values():
+            for surface in item["names"]:
+                if surface not in seen:
+                    seen.add(surface)
+                    surfaces.append(surface)
+        return surfaces
+
     def match(self, text: str) -> list[tuple[str, str]]:
         """本文に**語として**現れる概念を ``[(正規化キー, 一致した表記)]`` で返す。
 
         辞書の登録順（registry → cartridge → dsl）で決定論的。部分文字列一致は
         使わない（CG2 / P0-2）。
+
+        P3-R10: 走査は**相異なる表記の数**だけ行う（エントリ数 × 表記数ではない）。
+        同じ表記を複数のエントリが共有していても本文検索は 1 回で、その後は集合参照
+        だけで各エントリの最初の一致表記を選ぶ。出力の順序・内容は従来と同じ。
         """
         body = str(text or "")
         if not body:
             return []
+        hits = {
+            surface
+            for surface in self.distinct_surfaces()
+            if text_mentions_alias(body, surface)
+        }
+        if not hits:
+            return []
         found: list[tuple[str, str]] = []
         for key, item in self.entries.items():
             for surface in item["names"]:
-                if text_mentions_alias(body, surface):
+                if surface in hits:
                     found.append((key, surface))
                     break
         return found
@@ -218,10 +244,34 @@ def _priority(source: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _add_registry_entries(dictionary: ConceptDictionary, session: Any) -> int:
+def _list_registry_entries(domain_key: str | None) -> list[dict]:
+    """辞書の材料にする確定済みエントリ（P3-R10: 分野が引けるときは当該分野に絞る）。
+
+    ``domain_key`` が引ければ「その分野 + ``unassigned``（分野が引けなかった候補の
+    置き場）」だけを読む。引けなければ従来どおり全件（分野を推測で埋めない）。
+    絞るのは照合の精度と速度のためで、落とすのは**別分野の語彙**だけ。
+    """
+    domain = str(domain_key or "").strip()
+    if not domain:
+        return library_store.list_entries(include_candidates=False)
+    entries: list[dict] = []
+    seen: set[str] = set()
+    for key in (domain, schema.DOMAIN_KEY_UNASSIGNED):
+        for entry in library_store.list_entries(domain_key=key, include_candidates=False):
+            entry_id = str(entry.get("id") or "")
+            if entry_id and entry_id in seen:
+                continue
+            seen.add(entry_id)
+            entries.append(entry)
+    return entries
+
+
+def _add_registry_entries(
+    dictionary: ConceptDictionary, session: Any, domain_key: str | None = None
+) -> int:
     """② 確定済みエントリの名前 + alternate / hidden ラベル（``registry_label``）。"""
     try:
-        entries = library_store.list_entries(include_candidates=False)
+        entries = _list_registry_entries(domain_key)
     except Exception:  # noqa: BLE001 — DB 不達は空辞書（fail-soft・従来動作）
         logger.warning("concept dictionary: registry lookup failed (non-fatal)", exc_info=True)
         return 0
@@ -344,6 +394,7 @@ def build_concept_dictionary(
     *,
     cartridge_id: str | None,
     dsl: Any = None,
+    domain_key: str | None = None,
 ) -> ConceptDictionary:
     """§4 の辞書を組み立てる（決定論・LLM 0 回・embedding 0 回）。
 
@@ -352,13 +403,16 @@ def build_concept_dictionary(
             :func:`core.library.registry.labels_for_entries` が自前で開閉する。
         cartridge_id: 解析 run の分野。**空なら cartridge を読まない**。
         dsl: ``DSLLinkingResult``（省略可）。渡されたときだけ ①（DSL ノード名）を足す。
+        domain_key: レジストリを絞る分野（P3-R10）。``None`` / 空なら全分野を読む
+            （分野を推測で埋めない）。``cartridge_id`` と同じ名前空間なので、解析 run の
+            ``cartridge_id`` か ``corpus.document_domain_keys`` の値をそのまま渡す。
 
     Returns:
         :class:`ConceptDictionary`。材料が 1 つも無ければ空（呼び出し側は
         「空なら resolver を渡さない」= 従来動作に縮退する）。
     """
     dictionary = ConceptDictionary()
-    _add_registry_entries(dictionary, session)
+    _add_registry_entries(dictionary, session, domain_key or cartridge_id)
     try:
         _add_cartridge_aliases(dictionary, cartridge_ontology_for(cartridge_id))
     except Exception:  # noqa: BLE001 — カートリッジが読めなくても辞書は作れる

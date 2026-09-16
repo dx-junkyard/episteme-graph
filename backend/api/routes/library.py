@@ -31,6 +31,7 @@ from dependencies import _require_teacher
 
 from core.schema import AUDIT_ENTITY_LIBRARY_ENTRY
 from core.deliberation import identity_links as _identity_links
+from core.deliberation.schema import ELEMENT_THEORY_COMPONENT as _ELEMENT_THEORY_COMPONENT
 from core import atlas_correspondence
 from core import atlas_store
 from core.library import atlas_links as library_atlas_links
@@ -200,6 +201,56 @@ def _authorize_exemplar_images(images: list[ExemplarImageIn] | None, user_id: st
     return authorized
 
 
+def _document_access_checker(user_id: str):
+    """``document_id -> bool``（閲覧可否）を返すメモ化クロージャ。
+
+    判定できないもの（例外・空 ID）は**見せない**（fail-closed）。core 側は FastAPI も
+    ``services`` も import しないので、可視性は必ずこの route 層で掛ける。
+    """
+    cache: dict[str, bool] = {}
+
+    def _can_view(document_id: Any) -> bool:
+        key = str(document_id or "")
+        if not key:
+            return False
+        if key not in cache:
+            try:
+                cache[key] = bool(services.resolve_document_access(user_id, key).can_view)
+            except Exception:  # noqa: BLE001 — 判定できないものは見せない（fail-closed）
+                logger.debug("document access check failed", exc_info=True)
+                cache[key] = False
+        return cache[key]
+
+    return _can_view
+
+
+def _apply_candidate_visibility(entries: list[dict], user_id: str) -> tuple[list[dict], int]:
+    """AI が立てた候補（``review_status='candidate'``）だけに可視性を掛ける（P3-R2）。
+
+    候補エントリは**パイプラインが**論文から起こすので ``source_document_ids`` に
+    「その教員が閲覧できない論文」が入り得る。確定済み（``confirmed``）のエントリは
+    教員が分野の共同財として確定したもので、従来どおり全教員に見える（後方互換）。
+
+    候補については、閲覧できない出所を落としたうえで、**出所が 1 件も残らない候補は
+    一覧から外し**、外した件数を ``hidden_count`` として正直に返す
+    （``identity-candidates`` と同じ規律 = KR10）。
+    """
+    can_view = _document_access_checker(user_id)
+    visible: list[dict] = []
+    hidden = 0
+    for entry in entries:
+        if entry.get("review_status") != library_schema.REVIEW_STATUS_CANDIDATE:
+            visible.append(entry)
+            continue
+        sources = [str(d or "") for d in (entry.get("source_document_ids") or []) if d]
+        allowed = [d for d in sources if can_view(d)]
+        if sources and not allowed:
+            hidden += 1
+            continue
+        visible.append({**entry, "source_document_ids": allowed})
+    return visible, hidden
+
+
 def _get_entry_or_404(entry_id: str) -> dict:
     entry = library_store.get_entry(entry_id)
     if not entry:
@@ -225,6 +276,10 @@ def list_entries(
 
     既定は確定済み（``review_status='confirmed'``）のみで後方互換。
     ``include_candidates=true`` で AI が立てた候補・見送り済みも返す（§4.2）。
+
+    P3-R2: 候補行はパイプラインが論文から起こすので、出所に閲覧できない論文が
+    混じり得る。候補**だけ**に document 可視性を掛け、出所が 1 件も残らない候補は
+    落として ``hidden_count`` で正直に報告する。
     """
     try:
         entries = library_store.list_entries(
@@ -236,7 +291,8 @@ def list_entries(
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    return {"entries": entries}
+    entries, hidden_count = _apply_candidate_visibility(entries, str(_uid(current_user) or ""))
+    return {"entries": entries, "hidden_count": hidden_count}
 
 
 @router.post("/entries", status_code=201)
@@ -548,6 +604,9 @@ def review_entry(
             review_note=payload.review_note,
             record_audit=_registry_audit,
         )
+    except LibraryRetiredError as exc:
+        # P3-R6: retired は読み取り専用（update_entry / freeze_entry と同型）。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if entry is None:
@@ -596,6 +655,9 @@ def add_entry_label(
         )
     except library_registry.RegistryNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except LibraryRetiredError as exc:
+        # P3-R6: retired は読み取り専用（update_entry / freeze_entry と同型）。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"label": label}
@@ -681,6 +743,9 @@ def create_relation(
             actor_id=str(uid or ""),
             record_audit=_registry_audit,
         )
+    except LibraryRetiredError as exc:
+        # P3-R6: retired は読み取り専用（update_entry / freeze_entry と同型）。
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"relation": relation}
@@ -881,6 +946,46 @@ def _document_titles(document_ids: list[str]) -> dict[str, str]:
     return {str(row[0]): str(row[1] or "") for row in rows}
 
 
+def _live_component_ids(links_by_entry: dict[str, list[dict]]) -> set[str]:
+    """候補リンクが指す component のうち、いま ``theory_components_live`` にある id（P3-R9）。
+
+    解析のやり直し（supersede）で live から外れた component へのリンクは、教員が
+    「どちらの記述か」を確かめられない。判定できない（DB 不達）ときは**全部あるもの
+    として扱う**（候補一覧が丸ごと空になるより、従来どおり出すほうが害が小さい）。
+    """
+    ids = {
+        str(link.get("instance_element_id") or "")
+        for links in links_by_entry.values()
+        for link in links
+        if str(link.get("instance_element_type") or "") == _ELEMENT_THEORY_COMPONENT
+        and str(link.get("instance_element_id") or "")
+    }
+    if not ids:
+        return set()
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT id::text FROM theory_components_live "
+                "WHERE id = ANY(CAST(:ids AS uuid[]))"
+            ),
+            {"ids": sorted(ids)},
+        ).fetchall()
+    except Exception:  # noqa: BLE001 — 判定できないときは落とさない（fail-open）
+        logger.debug("live component lookup failed", exc_info=True)
+        return ids
+    finally:
+        session.close()
+    return {str(row[0]) for row in rows}
+
+
+def _link_resolves_to_live_component(link: dict, live_component_ids: set[str]) -> bool:
+    """component へのリンクだけを live 実在で絞る（他の要素型はそのまま通す）。"""
+    if str(link.get("instance_element_type") or "") != _ELEMENT_THEORY_COMPONENT:
+        return True
+    return str(link.get("instance_element_id") or "") in live_component_ids
+
+
 @router.get("/identity-candidates")
 def list_identity_candidates(
     domain_key: str | None = None,
@@ -911,32 +1016,32 @@ def list_identity_candidates(
         if entry.get("review_status") in statuses
     ]
 
-    access_cache: dict[str, bool] = {}
+    _can_view = _document_access_checker(uid)
 
-    def _can_view(document_id: str) -> bool:
-        if not document_id:
-            return False
-        if document_id not in access_cache:
-            try:
-                access_cache[document_id] = bool(
-                    services.resolve_document_access(uid, document_id).can_view
-                )
-            except Exception:  # noqa: BLE001 — 判定できないものは見せない（fail-closed）
-                logger.debug("document access check failed", exc_info=True)
-                access_cache[document_id] = False
-        return access_cache[document_id]
+    # P3-R11: エントリ 1 件ごとに 1 クエリ（N+1）を投げず、まとめて 1 回で引く。
+    links_by_entry = _identity_links.list_for_shared_parts([entry["id"] for entry in entries])
+    live_components = _live_component_ids(links_by_entry)
 
     candidates: list[dict] = []
+    hidden_unresolved_any = False
     for entry in entries:
-        links = _identity_links.list_for_shared_part(entry["id"])
+        links = links_by_entry.get(entry["id"], [])
         visible: list[dict] = []
         hidden = 0
+        hidden_unresolved = False
         for link in links:
             document_id = str(link.get("instance_document_id") or "")
             if not _can_view(document_id):
                 hidden += 1
                 continue
+            if not _link_resolves_to_live_component(link, live_components):
+                # P3-R9: live に解決できない component へのリンクは教員が判断できない
+                # （消えた要素の名前だけが残る）。落として事実文で報告する。
+                hidden_unresolved = True
+                continue
             visible.append(link)
+        if hidden_unresolved:
+            hidden_unresolved_any = True
         titles = _document_titles([l.get("instance_document_id") for l in visible])
         supporting_titles: list[str] = []
         items: list[dict] = []
@@ -959,7 +1064,7 @@ def list_identity_candidates(
                     "mapping_justification": link.get("mapping_justification"),
                 }
             )
-        if not items and hidden == 0 and not include_dismissed:
+        if not items and hidden == 0 and not hidden_unresolved and not include_dismissed:
             # リンクがまだ 1 本も無い候補（entry だけ先にできた状態）は出さない
             # （教員が判断する材料が無いため）。
             continue
@@ -976,10 +1081,16 @@ def list_identity_candidates(
                 "links": items,
                 "supporting_titles": supporting_titles,
                 "hidden_count": hidden,
+                "hidden_unresolved": hidden_unresolved,
             }
         )
 
     facts: list[str] = []
     if not candidates:
         facts.append("確認をお待ちしている同一性の候補はありません。")
+    if hidden_unresolved_any:
+        # P3-R9: 件数は出さない（KR6）。「何が起きたか」だけを事実文で書く。
+        facts.append(
+            "解析がやり直されたなどの理由で、いま参照できない要素への候補は表示していません。"
+        )
     return {"candidates": candidates, "facts": facts}

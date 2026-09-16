@@ -51,6 +51,36 @@ class RegistryNotFoundError(RegistryError):
     """対象の行（entry / label / relation / node link）が存在しない。"""
 
 
+def _retired_error() -> Exception:
+    """``core.library.store.LibraryRetiredError`` を遅延解決して返す（循環 import 回避）。
+
+    P3-R6: retired（公開を止めた）エントリは読み取り専用 — ``update_entry`` /
+    ``freeze_entry`` と同じ扱い。route は 409 に写す。
+    """
+    from .store import LibraryRetiredError  # 循環 import を避けるため関数内で読む
+
+    return LibraryRetiredError(
+        "retired のエントリは編集できません。復元してから編集してください"
+    )
+
+
+def _require_not_retired(sess: Any, entry_key: str) -> None:
+    """エントリの存在と「retired でないこと」を確かめる（P3-R6）。
+
+    Raises:
+        RegistryNotFoundError: 行が無い。
+        core.library.store.LibraryRetiredError: ``status='retired'``。
+    """
+    row = sess.execute(
+        sa_text("SELECT status FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1"),
+        {"id": entry_key},
+    ).fetchone()
+    if row is None:
+        raise RegistryNotFoundError(f"library entry not found: {entry_key}")
+    if str(row[0] or "") == schema.STATUS_RETIRED:
+        raise _retired_error()
+
+
 # ---------------------------------------------------------------------------
 # 候補→確定の共通制御（core/candidate_flow.py）に渡す語彙
 # ---------------------------------------------------------------------------
@@ -230,6 +260,8 @@ def add_label(
         ValueError: ``kind`` が行にできる種別でない / ``label`` の正規化が空 /
             帰属・正当化の欠落。
         RegistryNotFoundError: ``entry_id`` が存在しない。
+        core.library.store.LibraryRetiredError: エントリが retired（P3-R6。読み取り
+            専用なので route は 409）。
     """
     actor = _require_actor(actor_id)
     justification = _require_justification(mapping_justification)
@@ -246,12 +278,7 @@ def add_label(
         raise RegistryNotFoundError(f"library entry not found: {entry_id}")
 
     with _session_scope(session) as sess:
-        exists = sess.execute(
-            sa_text("SELECT 1 FROM library_entries WHERE id = CAST(:id AS uuid) LIMIT 1"),
-            {"id": key},
-        ).fetchone()
-        if exists is None:
-            raise RegistryNotFoundError(f"library entry not found: {entry_id}")
+        _require_not_retired(sess, key)
         row = sess.execute(
             sa_text(
                 f"""
@@ -514,6 +541,9 @@ def create_relation(
     **上書きせず**そのまま返す（教員の判断を再提案で消さない）。
 
     ``confidence`` は DB にだけ保存し、戻り値には載せない（KR6）。
+
+    retired のエントリは端点にできない（P3-R6 →
+    :class:`core.library.store.LibraryRetiredError` / route は 409）。
     """
     justification = _require_justification(mapping_justification)
     if kind not in schema.RELATION_KINDS:
@@ -534,6 +564,9 @@ def create_relation(
 
     relation_key = schema.build_relation_key(kind, subject, obj)
     with _session_scope(session) as sess:
+        # P3-R6: 両端が retired なら関係を足さない（retired は読み取り専用）。
+        _require_not_retired(sess, subject)
+        _require_not_retired(sess, obj)
         row = sess.execute(
             sa_text(
                 f"""
@@ -784,7 +817,8 @@ def create_node_link(
     ``kind`` は ``exact_match`` / ``close_match`` のみ（``broader`` / ``related`` は
     座標系との対応としては意味を持たないので作らせない — §4.5）。
     ``atlas_skeletons`` へは**一切書かない**（KR2 / LS7 / AB4）。既存行は上書きせず
-    そのまま返す（``link_key`` は版非依存 = KR9）。
+    そのまま返す（``link_key`` は版非依存 = KR9）。retired のエントリには張らない
+    （P3-R6 → :class:`core.library.store.LibraryRetiredError`）。
     """
     justification = _require_justification(mapping_justification)
     if not schema.is_valid_node_link_kind(kind):
@@ -806,6 +840,7 @@ def create_node_link(
 
     link_key = schema.build_node_link_key(key, domain, node)
     with _session_scope(session) as sess:
+        _require_not_retired(sess, key)  # P3-R6
         row = sess.execute(
             sa_text(
                 f"""
@@ -1061,8 +1096,10 @@ def decide_entry_review(
     この関数（= :class:`CandidateFlow`）だけが行う（§4.2）。``confirmed`` になって
     初めて凍結でき、凍結して初めてパイプライン retrieval と学習者に届く（KR2）。
 
-    ``status='retired'``（公開を止める）とは**別軸**なので、本関数は ``status`` 列に
-    触れない。対象が無ければ ``None``（呼び出し側は 404）。
+    ``status='retired'``（公開を止める）とは**別軸**だが、retired は読み取り専用なので
+    遷移そのものを断る（P3-R6 → :class:`core.library.store.LibraryRetiredError` /
+    route は 409）。本関数は ``status`` 列には触れない。対象が無ければ ``None``
+    （呼び出し側は 404）。
     """
     action = action_for_status(status)
     actor = _require_actor(actor_id)
@@ -1072,6 +1109,9 @@ def decide_entry_review(
     current = library_store.get_entry(entry_id)
     if current is None:
         return None
+    if str(current.get("status") or "") == schema.STATUS_RETIRED:
+        # P3-R6: retired は読み取り専用（update_entry / freeze_entry と同型）。
+        raise _retired_error()
 
     with _session_scope(session) as sess:
         def _apply(**kwargs: Any) -> dict | None:

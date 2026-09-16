@@ -116,9 +116,24 @@ class TestSeedMatchesCodeVocabulary:
 class TestMigrationStructure:
     def test_entry_type_check_is_replaced_by_a_foreign_key(self):
         sql = _sql()
-        assert "DROP CONSTRAINT IF EXISTS library_entries_entry_type_check" in sql
+        assert "DROP CONSTRAINT" in sql
         assert "library_entries_entry_type_fk" in sql
         assert "REFERENCES knowledge_entry_types(entry_type)" in sql
+
+    def test_entry_type_check_is_only_dropped_before_the_fk_exists(self):
+        """P3-R14: entry_type の CHECK 総なめ DROP は「FK 未作成のとき」だけ。
+
+        毎起動・番号順に全ファイルを再実行する方式なので、無条件に置くと後続の
+        マイグレーションが entry_type に正当な CHECK を足しても毎起動で黙って落ちる。
+        置き換え済みの環境では丸ごと no-op になること（早期 RETURN）を字面で固定する。
+        """
+        sql = _sql()
+        # 総なめ DROP はガードの内側にしか無い（ガード外の裸の DROP を禁じる）。
+        assert "ALTER TABLE library_entries DROP CONSTRAINT IF EXISTS" not in sql
+        guard_at = sql.index("library_entries_entry_type_fk")
+        drop_at = sql.index("DROP CONSTRAINT ' || quote_ident(stale_conname)")
+        assert guard_at < drop_at, "FK 存在チェックが総なめ DROP より前にない"
+        assert "RETURN;" in sql
 
     @pytest.mark.parametrize(
         "column",

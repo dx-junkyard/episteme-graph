@@ -762,9 +762,16 @@ def _chunk_proxy_twin(
 
 
 def _twin_reason(justification: str, component: dict, twin: dict) -> str:
+    """候補に添える事実文（数値なし・**相手の名前を含めない**）。
+
+    P3-R3: この文はエントリ行（``mapping_justification`` / reason）に残り、
+    可視性ゲートを通らずに読み手へ届く。相手 component の名前をここに焼き込むと、
+    閲覧できない論文の記述が文面だけ漏れる。相手の素性は可視性を通った
+    ``links[]`` / ``supporting_titles`` 側でのみ示す（KR10 / §9.1 と同じ規律）。
+    """
     if justification == schema.JUSTIFICATION_LEXICAL:
-        return f"別の論文の「{twin['name']}」と表記が一致しました。"
-    return f"別の論文の「{twin['name']}」と本文の意味が近いと測定されました。"
+        return "別の論文の記述と表記が一致しました。"
+    return "別の論文の記述と本文の意味が近いと測定されました。"
 
 
 def _result(

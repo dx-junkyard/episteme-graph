@@ -342,6 +342,71 @@ def safe_text(value: Any, *, allow_tex: bool = False) -> str:
     return text
 
 
+def is_symbol_like_concept(value: Any) -> bool:
+    """概念名が「記号層」のものか（学習者へ出さない側か）。V-6 の読み時ゲート。
+
+    判定規則は**新しく作らない** — 既存の 2 つの正本を OR で重ねるだけ:
+
+    1. :func:`episteme_graph.agents.component_assembly.schema.is_symbol_like_concept_name`
+       （P0-3 の正本。LaTeX 制御記法・添字記法・短すぎる名前）
+    2. :func:`core.text_excerpt.looks_like_tex_math`
+       （散文中に埋もれた TeX コマンド。``0.62 \\lesssim ? \\lesssim 1.41`` のように
+       先頭が ``\\`` でも ``{}$`` を含みもしない式片は 1 では落ちない）
+
+    なぜ読み時に要るか: `claim_concept_grounding`（CG）より**前**に走った解析 run の
+    ``theory_claims.concepts`` には生の数式記号がそのまま残っている（V-6 の実測で
+    261 種中 244 種）。既存行の接地バックフィルは別途行うとしても、学習者の画面に
+    式片が「概念」として並ぶのはその前に止める。**行は消さない**（P4）— 読み時に
+    出さないだけで、DB の値も symbol_registry からの辿りも失われない。
+
+    A層の正本は**関数内で読む** — 本モジュールは SA層の解決器から推移的に import され、
+    その純粋性検査は ``backend`` だけを sys.path に置いた別プロセスで走る
+    （``episteme_graph`` は import できない）。判定できない環境では
+    ``looks_like_tex_math`` だけで倒す（**慎重側 = 落とす側**には倒さない —
+    実在の概念名を黙って消さないため）。
+    """
+    name = str(value or "").strip()
+    if not name:
+        return True
+    if _symbol_like_concept_name(name):
+        return True
+    return looks_like_tex_math(name)
+
+
+def _symbol_like_concept_name(name: str) -> bool:
+    """P0-3 の正本（``component_assembly.schema``）へ委譲する（判定表を複製しない）。"""
+    try:
+        from episteme_graph.agents.component_assembly.schema import (
+            is_symbol_like_concept_name,
+        )
+    except Exception:  # noqa: BLE001 — A層が読めない環境では TeX 判定だけで倒す
+        return False
+    return bool(is_symbol_like_concept_name(name))
+
+
+def visible_concept_names(concepts: Any) -> list[str]:
+    """``claim.concepts`` を学習者向けに射影する（記号様と重複を落とす・順序は保つ）。
+
+    要素は文字列でも ``{"name": ...}`` 形でもよい（``ClaimConcept`` の dict 化と
+    生 JSONB の両方が来るため）。内部 ID を含む名前も落とす（``safe_text`` と同じ遮断）。
+    """
+    names: list[str] = []
+    seen: set[str] = set()
+    for item in json_list(concepts):
+        if isinstance(item, dict):
+            raw = item.get("name") or item.get("canonical") or item.get("normalized")
+        else:
+            raw = item
+        name = safe_text(raw)
+        if not name or is_symbol_like_concept(name):
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
+
+
 def normalized_group(value: Any) -> str:
     """ITEM の区画キー。未知値・空は「関連」区画へ寄せる（§4.1 / P4）。"""
     group = str(value or "").strip()

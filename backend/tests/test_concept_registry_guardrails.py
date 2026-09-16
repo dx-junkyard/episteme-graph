@@ -415,3 +415,77 @@ class TestCandidateDerivationPurity:
         body = extract_function_source(ROUTE_SRC, "derive_atlas_links")
         assert '"candidates"' in body and '"facts"' in body
         assert '"coverage"' not in body
+
+
+# ---------------------------------------------------------------------------
+# 10. 可視性ゲートと閉世界の言い方（P3-R2 / R3 / R4 / R9）
+# ---------------------------------------------------------------------------
+
+
+class TestVisibilityAndDisclosure:
+    def test_candidate_reason_does_not_name_the_other_paper(self):
+        """P3-R3: 候補の事実文に相手 component の名前を焼き込まない。
+
+        この文はエントリ行に残り、可視性ゲートを通らずに読み手へ届く。相手の素性は
+        可視性を通った ``links[]`` / ``supporting_titles`` 側でのみ示す（KR10）。
+        """
+        body = extract_function_source(IDENTITY_CANDIDATES_SRC, "_twin_reason")
+        assert "twin['name']" not in body and 'twin["name"]' not in body
+        assert "別の論文の記述" in body
+
+    def test_entry_listing_applies_document_visibility_to_candidates(self):
+        """P3-R2: 候補行だけに document 可視性を掛け、隠した件数を正直に返す。"""
+        body = extract_function_source(ROUTE_SRC, "list_entries")
+        assert "_apply_candidate_visibility" in body
+        assert '"hidden_count"' in body
+        filt = extract_function_source(ROUTE_SRC, "_apply_candidate_visibility")
+        assert "REVIEW_STATUS_CANDIDATE" in filt
+        assert "source_document_ids" in filt
+
+    def test_document_access_check_is_fail_closed(self):
+        """判定できないものは見せない（KR10）。"""
+        body = extract_function_source(ROUTE_SRC, "_document_access_checker")
+        assert "resolve_document_access" in body
+        assert "except Exception" in body
+        assert "= False" in body
+
+    def test_identity_candidates_fetches_links_in_one_query(self):
+        """P3-R11: エントリごとの N+1 クエリを残さない。"""
+        body = extract_function_source(ROUTE_SRC, "list_identity_candidates")
+        assert "list_for_shared_parts(" in body
+        assert "list_for_shared_part(" not in body.replace("list_for_shared_parts(", "")
+
+    def test_unresolved_links_are_reported_without_counts(self):
+        """P3-R9: live に解決できない候補は落とし、件数ではなく事実文で報告する。"""
+        body = extract_function_source(ROUTE_SRC, "list_identity_candidates")
+        assert "_link_resolves_to_live_component" in body
+        assert "hidden_unresolved" in body
+        # 事実文に数値を混ぜない（KR6）。
+        fact = [line for line in body.splitlines() if "参照できない要素" in line]
+        assert fact and not any(ch.isdigit() for ch in fact[0])
+
+    def test_learner_concept_ref_carries_no_internal_ids(self):
+        """P3-R4: 学習者 DTO に ``entry_id`` / 生の ``entry_type`` を載せない。"""
+        symbol_src = (BACKEND / "core" / "symbol_lookup.py").read_text(encoding="utf-8")
+        body = extract_function_source(symbol_src, "_load_concept_ref")
+        assert '"entry_id"' not in body
+        assert 'ref["entry_type"]' not in body
+        assert '"entry_type_label"' in body
+
+
+class TestRetiredIsReadOnly:
+    """P3-R6: retired エントリはレジストリ側の書き込みからも締め出す。"""
+
+    @pytest.mark.parametrize(
+        "func", ["add_label", "create_relation", "create_node_link", "decide_entry_review"]
+    )
+    def test_write_paths_check_the_retired_status(self, func):
+        body = extract_function_source(REGISTRY_SRC, func)
+        assert "_require_not_retired" in body or "_retired_error()" in body, func
+
+    def test_route_maps_retired_to_409(self):
+        """既存 ``update_entry`` / ``freeze_entry`` と同型（409 + 事実文）。"""
+        for name in ("review_entry", "add_entry_label", "create_relation"):
+            body = extract_function_source(ROUTE_SRC, name)
+            assert "LibraryRetiredError" in body, name
+            assert "status_code=409" in body, name

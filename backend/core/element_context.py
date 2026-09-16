@@ -76,6 +76,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     equation_focus_label as _equation_focus_label,
     generic_item_label as _generic_item_label,
     is_internal_id_label as _is_internal_id_label,
+    is_symbol_like_concept as _is_symbol_like_concept,
     is_uuid as _is_uuid,
     json_list as _json_list,
     learner_navigable as _learner_navigable,
@@ -85,6 +86,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     safe_text as _safe_text,
     scoped_id_match_sql,
     strip_confidence,
+    visible_concept_names,
 )
 from core.text_excerpt import excerpt, looks_like_tex_math
 from core.deliberation import context_lens as context_lens_mod

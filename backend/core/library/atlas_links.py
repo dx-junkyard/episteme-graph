@@ -38,7 +38,8 @@
 from __future__ import annotations
 
 import logging
-from typing import Any, Iterable, Optional
+from contextlib import contextmanager
+from typing import Any, Iterable, Iterator, Optional
 
 from sqlalchemy import text as sa_text
 
@@ -391,6 +392,32 @@ def derive_node_link_candidates(session: Any, *, domain_key: str) -> dict:
     }
 
 
+@contextmanager
+def _savepoint(session: Any) -> Iterator[None]:
+    """``session`` が対応していれば SAVEPOINT で包む（P3-R5・非対応なら素通し）。
+
+    PostgreSQL では 1 文の失敗でトランザクション全体が abort 状態になるため、
+    「1 件の候補が書けなくても導出は続ける」という fail-soft は SAVEPOINT を伴って
+    初めて成立する。fake session（テスト）や begin_nested を持たない実装では
+    素通しにする — 包めないことを理由に導出そのものを止めない。
+    """
+    begin_nested = getattr(session, "begin_nested", None)
+    if not callable(begin_nested):
+        yield
+        return
+    nested = begin_nested()
+    try:
+        yield
+    except Exception:
+        try:
+            nested.rollback()
+        except Exception:  # noqa: BLE001 — 巻き戻しに失敗しても元の例外を優先する
+            logger.warning("savepoint rollback failed (non-fatal)", exc_info=True)
+        raise
+    else:
+        nested.commit()
+
+
 def _link_reason(kind: str, node: dict, entry: dict) -> str:
     """候補に添える事実文（数値なし・推測を書かない）。"""
     if kind == schema.RELATION_KIND_EXACT_MATCH:
@@ -410,22 +437,30 @@ def _record_link(
     confidence: Optional[float],
     link_status_by_key: dict[str, str],
 ) -> Optional[dict]:
-    """候補リンクを 1 行 upsert する（``dismissed`` は再提案しない = LS3）。"""
+    """候補リンクを 1 行 upsert する（``dismissed`` は再提案しない = LS3）。
+
+    P3-R5: 書き込みは **SAVEPOINT の中**で行う。呼び出し側のセッションを共有しているため、
+    1 件の INSERT が失敗すると（制約違反など）PostgreSQL ではトランザクション全体が
+    abort 状態になり、``except`` で握りつぶしても以降の SELECT まで落ちて導出ごと 500 に
+    なる。SAVEPOINT に閉じ込めれば、失敗した 1 件だけを巻き戻して残りの候補は出せる
+    （fail-soft）。
+    """
     link_key = schema.build_node_link_key(entry_id, domain_key, node_id)
     if link_status_by_key.get(link_key) == schema.CANDIDATE_STATUS_DISMISSED:
         return None
     try:
-        link = registry.create_node_link(
-            entry_id=entry_id,
-            domain_key=domain_key,
-            node_id=node_id,
-            kind=kind,
-            mapping_justification=justification,
-            node_kind=schema.NODE_KIND_CONCEPT,
-            reason=reason,
-            confidence=confidence,
-            session=session,
-        )
+        with _savepoint(session):
+            link = registry.create_node_link(
+                entry_id=entry_id,
+                domain_key=domain_key,
+                node_id=node_id,
+                kind=kind,
+                mapping_justification=justification,
+                node_kind=schema.NODE_KIND_CONCEPT,
+                reason=reason,
+                confidence=confidence,
+                session=session,
+            )
     except Exception:  # noqa: BLE001 — 1 件書けなくても他の候補は出す
         logger.warning(
             "failed to record atlas node link candidate (non-fatal): %s", link_key, exc_info=True
@@ -542,7 +577,12 @@ def _derive_cross_domain_twins(
 def _ensure_candidate_entry(
     library_store: Any, *, domain_key: str, name: str, justification: str
 ) -> Optional[dict]:
-    """候補エントリを 1 行確保する（``dismissed`` は再提案しない = LS3）。"""
+    """候補エントリを 1 行確保する（``dismissed`` は再提案しない = LS3）。
+
+    P3-R5: ここは ``library_store`` 側が**自前のセッション**を開閉する（失敗時は
+    そのセッションで rollback される）ため、呼び出し側の共有セッションは汚れない。
+    したがって :func:`_savepoint` は不要で、``except`` による fail-soft がそのまま効く。
+    """
     candidate_key = schema.build_candidate_key(domain_key, name)
     try:
         existing = library_store.get_entry_by_candidate_key(candidate_key)

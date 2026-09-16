@@ -4,8 +4,8 @@
 
 - フック ``_hook_claim_concept_grounding`` が ``_PIPELINE_STEPS`` の **``dsl_linking``
   の直後・``dsl_embedding`` の前**にあり、``name=None``（PIPELINE_STAGES に出ない）
-- フックが ``claim_object_builder`` を保存し直し、``claim_concept_grounding`` artifact に
-  出所と ``coverage``（P0-10 共通形式）を残す
+- フックは ``claim_object_builder`` artifact（生成ログ）を**書き換えず**、
+  ``claim_concept_grounding`` artifact に出所と ``coverage``（P0-10 共通形式）を残す（KO6）
 - 前段（``_stage_claim_object_builder``）が辞書から resolver を作って builder へ渡し、
   辞書が空なら **None のまま**（従来動作）
 - 例外はステージを落とさない（非致命）
@@ -116,13 +116,18 @@ class TestHookPosition:
 
 
 class TestHookBehaviour:
-    def test_saves_both_artifacts_with_coverage(self, monkeypatch, empty_registry):
+    def test_saves_only_the_grounding_artifact_with_coverage(self, monkeypatch, empty_registry):
+        """接地結果は専用キーにだけ残し、生成ログ（claim_object_builder）は触らない（KO6）。"""
         dsl = _Dsl(nodes=[_Node("n1", "zero recoil limit", source_refs={"claim_ids": ["c1"]})])
         claims = _ClaimObjects(claims=[_Claim("c1", "A bound is derived."), _Claim("c2", "None.")])
         saved: dict = {}
         orch._hook_claim_concept_grounding(_ctx(claims, dsl, saved))
 
-        assert "claim_object_builder" in saved
+        assert "claim_object_builder" not in saved, (
+            "artifact は1 run × 1 stage の生成ログ。後段のフックが上書きしない（KO6）"
+        )
+        # in-memory の値は接地済み（後段ステージが見るのはこちら）。
+        assert [c.normalized for c in claims.claims[0].concepts]
         payload = saved["claim_concept_grounding"]
         assert payload["claims"]["c1"][0]["source"] == cd.SOURCE_DSL_REFERENCE
         report = payload["coverage"]
@@ -134,7 +139,7 @@ class TestHookBehaviour:
         claims = _ClaimObjects(claims=[_Claim("c1", "Nothing matches.")])
         saved: dict = {}
         orch._hook_claim_concept_grounding(_ctx(claims, _Dsl(), saved))
-        assert "claim_object_builder" not in saved, "変化が無ければ保存し直さない"
+        assert "claim_object_builder" not in saved, "生成ログは後段フックが触らない（KO6）"
         assert saved["claim_concept_grounding"]["coverage"]["processed"] == 0
 
     def test_failures_are_non_fatal(self, monkeypatch):

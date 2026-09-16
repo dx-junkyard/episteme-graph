@@ -13,6 +13,7 @@
 | O-4 | 概念レジストリの軸 | **(b) `library_entries` を拡張**（atlas 骨格は「座標系」として残し、レジストリ ↔ node は版非依存のリンク表で結ぶ） | 親文書 §6 の推奨。atlas は座標系で語彙ではなく AI が書けない（LS7 / AB4）。(c) 新設は 11 系統目で診断（分裂）を悪化させる。(b) は SKOS と一対一で「確定は人間・行削除なし・candidate 始まり」を既に実装済み（E ⑦）。オーナーの着手指示（2026-09-13「Phase 3 を実施せよ」）を推奨案の採用と解し、冒頭に固定する |
 | — | 「概念の統合」の意味 | **リンクであってマージではない**（KN-2 / 原則7） | `exact_match` は 2 つの行を並存させたまま「同じと言える」を記録する。`owl:sameAs` 的な統合・`name` の書き換え・行削除は作らない |
 | — | AI が概念を「作る」か | **candidate 行までは作る・確定は教員**（KN-3 / 原則1） | 候補は `library_entries.review_status='candidate'` の行として置く。凍結（= パイプラインから可視）は `confirmed` のみ可（409）。したがって AI 由来の概念が学習者・パイプラインに届く経路は教員確定を必ず通る |
+| **O-6** | L層の不変条項「**昇格は人間の操作のみ**」（`image_pipeline_knowledge_library_design.md` §6 の条項 2）の読み替え | **オーナー裁定待ち。裁定まで実装は現状を維持** | 本層は同条項を「**candidate 行はパイプラインが作る・可視化（凍結）は人間のみ**」と読み替えて実装している（P3-R1）。L層の原文は「LLM がライブラリへ直接書き込む経路を作らない」で、行の作成そのものを禁じているようにも読める。**可視化の弁は凍結の 409 ゲート**（`review_status='confirmed'` でなければ凍結できず、候補行はパイプライン retrieval にも学習者にも届かない）。裁定で読み替えが否とされた場合は、候補を `library_entries` の行にせず別表に置く設計へ差し替える（影響は `atlas_links` / `identity_candidates` の保存先のみ） |
 
 **正本**: 本ドキュメント。**関連**: [画像パイプライン + ナレッジライブラリ（L層）](image_pipeline_knowledge_library_design.md) §6 /
 [知識ネットワークビジョン](knowledge_network_vision.md)（KN-1〜4）/ [要素検討ワークスペース（W層）](element_deliberation_workspace_design.md) §5.5 /
@@ -433,3 +434,54 @@ A層非改変の範囲内 / CG-O2: LLM 抽出は実測後）を受け、専用�
 （CG1〜CG7・migration なし）で同日実装した。本層との接点: 辞書②はレジストリの confirmed entry の name + alternate / hidden ラベル、
 `identity_candidates` に規則 ④（`entry_id` 付き主張 → `theory_claim` の identity link candidate）を追加、`mapping_justification` の
 語彙をそのまま使う。
+
+### 13.3 追補 — 敵対的レビュー是正（F3 班）— 2026-09-13
+
+Phase 3 の敵対的レビューで挙がった P3-R1〜R14 のうち、本層が所有する 13 件を同日是正した
+（`claim_concept_grounding.py` の A層 hook = F1 / `orchestrator.py` の resume 語彙 = F2 は別班）。
+
+| # | 是正 | 要点 |
+|---|---|---|
+| P3-R1 | L層の不変条項「昇格は人間の操作のみ」の読み替えを**裁定待ちとして明記** | 冒頭のオーナー判断表に **O-6** を追加し、`image_pipeline_knowledge_library_design.md` §6 の条項 2 にも注記。裁定まで実装は現状維持（可視化の弁は凍結の 409 ゲート） |
+| P3-R2 | `GET /entries` に**候補限定の document 可視性**（KR10） | `_apply_candidate_visibility`（route 層）が `review_status='candidate'` の行だけ `source_document_ids` を `services.resolve_document_access(...).can_view` で絞り、出所が 1 件も残らない候補を落として `hidden_count` を返す。確定済みは従来どおり全教員に見える（分野の共同財）。判定失敗は fail-closed。core は FastAPI 非 import のまま |
+| P3-R3 | 候補の事実文から**相手 component 名を外す** | `identity_candidates._twin_reason` は「別の論文の記述と表記が一致しました。」。相手の素性は可視性を通った `links[]` / `supporting_titles` でのみ示す |
+| P3-R4 | 学習者 DTO `concept_ref` から内部 ID と生の語彙キーを落とす | `symbol_lookup._load_concept_ref` は `name` / `entry_type_label` のみ（フロントも `name` しか読んでいない） |
+| P3-R5 | 候補リンク書き込みを **SAVEPOINT** で包む | `atlas_links._savepoint`（`begin_nested` が無いセッションでは素通し）。PostgreSQL は 1 文の失敗でトランザクションが abort するので、`except` だけでは「1 件失敗 → 導出ごと 500」になっていた。`_ensure_candidate_entry` は store 側が自前セッションを持つので対象外（docstring に明記） |
+| P3-R6 | **retired は読み取り専用**をレジストリ側にも適用 | `registry._require_not_retired` を `add_label` / `create_relation`（両端）/ `create_node_link` / `decide_entry_review` に置き、`LibraryRetiredError` → route で 409（既存 `update_entry` / `freeze_entry` と同型） |
+| P3-R7 | `q` 検索が**ラベル表**にも当たる | `store.list_entries` の条件に `EXISTS (... library_entry_labels ...)` を OR で追加。ラベル側は**正規化の完全一致**のみ（部分一致は `SM` が `cosmological` に当たる F-7 の再発源）。`hidden` ラベルは検索に当たるが、返るのはエントリ行なので表示テキストには現れない（SKOS hiddenLabel） |
+| P3-R9 | live に解決できない候補リンクを落とす | `_live_component_ids` / `_link_resolves_to_live_component`（`theory_components_live` 実在で絞る。DB 不達は fail-open）。落としたことは `hidden_unresolved`（真偽）+ 事実文で報告し、**件数は書かない**（KR6） |
+| P3-R10 | 概念辞書の**分野スコープ**と照合コスト | `build_concept_dictionary(..., domain_key=)` を追加し、既定は `domain_key or cartridge_id`（`cartridge_id` と `domain_key` は同一名前空間なので、現行の orchestrator 呼び出しは無改変でそのまま絞られる）。絞りは「当該分野 + `unassigned`」で、引けなければ従来どおり全件。`ConceptDictionary.match()` は `distinct_surfaces()` を 1 回作って**相異なる表記の数**だけ本文を走査する（出力の順序・内容は不変） |
+| P3-R11 | 同一性候補一覧の N+1 解消 | `identity_links.list_for_shared_parts(ids)`（`shared_part_id = ANY(...)` の 1 クエリ・`{id: [link]}`）を追加し route が使う。既存 `list_for_shared_part` は非改変 |
+| P3-R12 | **見送り**（`pipeline:identity_candidates` は `KNOWN_FEATURES` に残す） | 指摘の前提「LLM を呼ばないステージは載せない」が成り立たない。`orchestrator.report_start(stage)` はステージ種別を問わず `set_current_feature("pipeline:{stage}")` を呼ぶので feature は実行時に必ず立ち、`KNOWN_FEATURES` はその**参照用の語彙表**（U3 の帰属先カタログ）である。非LLM ステージは既に10件載っており（`source_chunking` / `evidence_registry` / `symbol_registry` / `derivation_chain` / `persist_claims_components_graph` 等）、削ると `test_llm_usage_attribution.py::test_pipeline_stage_features_all_registered` が守る「全ステージ網羅」の規約が破れる |
+| P3-R13 | 骨格非書き込み検査を **glob 化** | `test_atlas_node_correspondence_guardrails.py` の `_LAYER_PATHS` ハードコードを廃し、`backend/core` + `backend/api` の全 `.py`（`atlas_store.py` を除く）を走査。後から増えた層（`core/library/`）が検査から漏れない |
+| P3-R14 | migration 082 の entry_type CHECK **総なめ DROP を FK 未作成時だけに限定** | 毎起動・番号順に全ファイルを再実行する方式なので、無条件 DROP は「冪等」ではなく「毎回壊す」（後続 migration が正当な CHECK を足しても黙って落ちる）。FK 存在チェックで早期 `RETURN` し、置き換え済み環境では丸ごと no-op |
+
+**テスト**: `test_concept_registry_dictionary.py`（新設・P3-R10）+
+`test_concept_registry_{store,api,candidates_api,guardrails,vocab,stage}.py` /
+`test_symbol_lookup_core.py` / `test_atlas_node_correspondence_guardrails.py` への追随。
+ガードレールは `test_concept_registry_guardrails.py` の
+`TestVisibilityAndDisclosure` / `TestRetiredIsReadOnly` に集約した。
+
+**所有外への申し送り**: `build_concept_dictionary` の `domain_key` は
+`cartridge_id` を既定にするので orchestrator は無改変で効く。`cartridge_id` が空の run でも
+分野で絞りたい場合（`corpus.document_domain_keys` から解決）は、orchestrator 側で
+`domain_key=` を明示的に渡す 1 行の追加が要る（本班の所有外）。
+
+**追加是正（V-6 — scratch DB 実データ検証, 2026-09-13）**: 既存 run から永続化した
+`theory_claims.concepts` は概念名 261 種のうち 244 種が生の数式記号
+（`E_{L/R}(z,t)` / `F_3(t,{\bm{k}}_1,…)` / `0.62 \lesssim ? \lesssim 1.41`）。
+`claim_concept_grounding` のフックは当該 run では未実行で、DB には生のまま残る。
+**読み時の遮断**を `core/learner_context_common.py` に 1 箇所だけ置いた:
+
+- `is_symbol_like_concept(name)` — **判定表を新設せず**既存 2 正本の OR。
+  ①`component_assembly.schema.is_symbol_like_concept_name`（P0-3。LaTeX 制御記法・
+  添字記法・短すぎる名前）②`text_excerpt.looks_like_tex_math`（散文に埋もれた TeX。
+  `0.62 \lesssim …` のように先頭が `\` でも `{}$` も含まない式片は ① では落ちない）。
+- `visible_concept_names(concepts)` — `claim.concepts`（文字列 / `{"name": ...}` の
+  両形）の射影。記号様・内部 ID（`safe_text` と同じ遮断）・重複を落とし順序は保つ。
+- `core/component_context.py` / `core/element_context.py` の**双方**から再エクスポート
+  （片方だけに実装しない = 本モジュール新設の趣旨）。
+
+**行は消さない**（P4）— 出さないだけで DB の値も symbol_registry からの辿りも失われない。
+既存行の接地バックフィルは orchestrator / grounding hook 側の担当（本班の所有外）。
+ガードレールは `test_concept_registry_dictionary.py::TestLearnerConceptGate`。

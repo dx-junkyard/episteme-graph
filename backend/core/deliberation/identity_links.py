@@ -319,6 +319,36 @@ def list_for_shared_part(shared_part_id: str) -> list[dict]:
     return [_row_to_dict(r) for r in rows]
 
 
+def list_for_shared_parts(shared_part_ids: list[str]) -> dict[str, list[dict]]:
+    """複数の共通部品の同一性リンクをまとめて 1 クエリで引く（P3-R11: N+1 の解消）。
+
+    戻り値は ``{shared_part_id: [link, ...]}``。リンクの無い id はキー自体を持たない
+    （呼び出し側は ``.get(id, [])``）。``list_for_shared_part`` と同じ内容・同じ順序。
+    """
+    keys = [str(i or "") for i in shared_part_ids if str(i or "")]
+    if not keys:
+        return {}
+    session = get_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                f"""
+                SELECT {_COLUMNS_SQL} FROM element_identity_links
+                WHERE shared_part_id = ANY(CAST(:shared_part_ids AS uuid[]))
+                ORDER BY created_at ASC
+                """
+            ),
+            {"shared_part_ids": keys},
+        ).fetchall()
+    finally:
+        session.close()
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        link = _row_to_dict(row)
+        grouped.setdefault(str(link.get("shared_part_id") or ""), []).append(link)
+    return grouped
+
+
 def confirmed_links_for_document(document_id: str) -> list[dict]:
     """document 内で確定済みの同一性リンクのみを返す。
 

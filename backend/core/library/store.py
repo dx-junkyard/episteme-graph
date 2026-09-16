@@ -368,8 +368,20 @@ def list_entries(
         conditions.append("entry_type = :entry_type")
         params["entry_type"] = entry_type
     if q:
-        conditions.append("(name ILIKE :q OR aliases::text ILIKE :q OR summary ILIKE :q)")
+        # P3-R7: ラベル表（別名・隠しラベル）も検索対象にする。ラベル側は
+        # **正規化の完全一致**だけを使う（部分一致は `SM` が `cosmological` に当たる
+        # F-7 の再発源）。`hidden` ラベル（OCR ノイズ・旧表記）は検索には当たるが、
+        # 一覧に出るのはエントリ行なので表示テキストには現れない = SKOS hiddenLabel。
+        conditions.append(
+            "(name ILIKE :q OR aliases::text ILIKE :q OR summary ILIKE :q"
+            " OR EXISTS (SELECT 1 FROM library_entry_labels lbl"
+            "             WHERE lbl.entry_id = library_entries.id"
+            "               AND lbl.status = :label_confirmed"
+            "               AND lbl.normalized_label = :q_normalized))"
+        )
         params["q"] = f"%{q}%"
+        params["label_confirmed"] = schema.LABEL_STATUS_CONFIRMED
+        params["q_normalized"] = schema.normalize_label(q)
     where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
     session = get_session()

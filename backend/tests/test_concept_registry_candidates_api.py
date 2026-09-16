@@ -218,6 +218,15 @@ def candidates_env(monkeypatch, routes):
         route_mod, "_document_titles",
         lambda ids: {_DOC_OK: "A paper on zero recoil"},
     )
+    # 既定は「参照先の component はすべて live」（P3-R9 の絞り込みは専用テストで見る）。
+    monkeypatch.setattr(
+        route_mod, "_live_component_ids",
+        lambda links_by_entry: {
+            str(link.get("instance_element_id") or "")
+            for links in links_by_entry.values()
+            for link in links
+        },
+    )
     return route_mod
 
 
@@ -233,8 +242,8 @@ class TestIdentityCandidates:
             candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
         )
         monkeypatch.setattr(
-            candidates_env._identity_links, "list_for_shared_part",
-            lambda entry_id: [_link("l1", _DOC_OK), _link("l2", _DOC_HIDDEN)],
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK), _link("l2", _DOC_HIDDEN)]},
         )
         client, _student, teacher = client_and_tokens
         response = client.get(_CANDIDATES, headers=_auth(teacher))
@@ -251,8 +260,8 @@ class TestIdentityCandidates:
             candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
         )
         monkeypatch.setattr(
-            candidates_env._identity_links, "list_for_shared_part",
-            lambda entry_id: [_link("l1", _DOC_OK)],
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK)]},
         )
         client, _student, teacher = client_and_tokens
         body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
@@ -271,8 +280,8 @@ class TestIdentityCandidates:
             lambda **kwargs: [_entry(review_status="confirmed")],
         )
         monkeypatch.setattr(
-            candidates_env._identity_links, "list_for_shared_part",
-            lambda entry_id: [_link("l1", _DOC_OK)],
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK)]},
         )
         client, _student, teacher = client_and_tokens
         body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
@@ -287,8 +296,8 @@ class TestIdentityCandidates:
             lambda **kwargs: [_entry(review_status="dismissed")],
         )
         monkeypatch.setattr(
-            candidates_env._identity_links, "list_for_shared_part",
-            lambda entry_id: [_link("l1", _DOC_OK)],
+            candidates_env._identity_links, "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [_link("l1", _DOC_OK)]},
         )
         client, _student, teacher = client_and_tokens
         assert client.get(_CANDIDATES, headers=_auth(teacher)).json()["candidates"] == []
@@ -305,7 +314,62 @@ class TestIdentityCandidates:
             candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
         )
         monkeypatch.setattr(
-            candidates_env._identity_links, "list_for_shared_part", lambda entry_id: []
+            candidates_env._identity_links, "list_for_shared_parts", lambda entry_ids: {}
         )
         client, _student, teacher = client_and_tokens
         assert client.get(_CANDIDATES, headers=_auth(teacher)).json()["candidates"] == []
+
+    def test_links_are_fetched_in_one_query(
+        self, client_and_tokens, candidates_env, monkeypatch
+    ):
+        """P3-R11: エントリ数ぶんクエリを投げない（N+1 の解消）。
+
+        ``list_for_shared_parts`` が **1 回**だけ、全エントリの id をまとめて受ける。
+        """
+        second = "99999999-9999-4999-8999-999999999999"
+        monkeypatch.setattr(
+            candidates_env.library_store,
+            "list_entries",
+            lambda **kwargs: [_entry(), {**_entry(), "id": second}],
+        )
+        calls: list[list[str]] = []
+
+        def _batched(entry_ids):
+            calls.append(list(entry_ids))
+            return {_ENTRY_ID: [_link("l1", _DOC_OK)], second: [_link("l2", _DOC_OK)]}
+
+        monkeypatch.setattr(
+            candidates_env._identity_links, "list_for_shared_parts", _batched
+        )
+        client, _student, teacher = client_and_tokens
+        body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
+        assert len(calls) == 1
+        assert sorted(calls[0]) == sorted([_ENTRY_ID, second])
+        assert len(body["candidates"]) == 2
+
+    def test_links_to_dead_components_are_dropped_with_a_fact(
+        self, client_and_tokens, candidates_env, monkeypatch
+    ):
+        """P3-R9: live に解決できない component へのリンクは出さない（件数は書かない）。"""
+        monkeypatch.setattr(
+            candidates_env.library_store, "list_entries", lambda **kwargs: [_entry()]
+        )
+        alive = _link("l1", _DOC_OK)
+        dead = {**_link("l2", _DOC_OK), "instance_element_id": "comp-gone"}
+        monkeypatch.setattr(
+            candidates_env._identity_links,
+            "list_for_shared_parts",
+            lambda entry_ids: {_ENTRY_ID: [alive, dead]},
+        )
+        monkeypatch.setattr(
+            candidates_env, "_live_component_ids", lambda links_by_entry: {"comp-1"}
+        )
+        client, _student, teacher = client_and_tokens
+        body = client.get(_CANDIDATES, headers=_auth(teacher)).json()
+        candidate = body["candidates"][0]
+        assert [item["link_id"] for item in candidate["links"]] == ["l1"]
+        assert candidate["hidden_unresolved"] is True
+        fact = [f for f in body["facts"] if "参照できない要素" in f]
+        assert fact, body["facts"]
+        # KR6: 件数を書かない。
+        assert not any(char.isdigit() for char in fact[0])

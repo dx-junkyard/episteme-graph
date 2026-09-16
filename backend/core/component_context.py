@@ -45,6 +45,7 @@ from core.postgres import get_session
 from core import learner_context_common
 from core.learner_context_common import (  # noqa: F401  (旧名の再エクスポート)
     PROVENANCE_COURSE_FREEZE,
+    is_symbol_like_concept as _is_symbol_like_concept,
     is_uuid as _is_uuid,
     json_dict as _json_dict,
     json_list as _json_list,
@@ -52,6 +53,7 @@ from core.learner_context_common import (  # noqa: F401  (旧名の再エクス�
     project_item,
     scoped_id_match_sql,
     strip_confidence,
+    visible_concept_names,
 )
 from core.deliberation import context_lens as context_lens_mod
 from core.deliberation import identity_links as identity_links_mod

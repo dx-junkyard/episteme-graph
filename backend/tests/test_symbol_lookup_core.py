@@ -439,7 +439,10 @@ class TestScopeAndConceptRef:
         )
         result = lookup_symbol_definition(session, symbol="F", document_ids=[DOC])
         assert result["concept_ref"]["name"] == "形状因子"
-        assert result["concept_ref"]["entry_type"] == "concept"
+        # P3-R4: 学習者 DTO には内部 ID も生の語彙キーも載せない（表示ラベルのみ）。
+        assert "entry_id" not in result["concept_ref"]
+        assert "entry_type" not in result["concept_ref"]
+        assert set(result["concept_ref"]) <= {"name", "entry_type_label"}
 
     def test_concept_ref_query_is_restricted_to_confirmed_links(self):
         """SQL が ``status='confirmed'`` と ``instance_element_type='symbol'`` を含む。"""

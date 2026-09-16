@@ -51,11 +51,13 @@ _ROUTE_LANDSCAPE = _BACKEND / "api" / "routes" / "landscape.py"
 _PROJECTION = _BACKEND / "core" / "landscape" / "projection.py"
 _CORPUS_VIEW = _BACKEND / "core" / "corpus_view.py"
 
-#: 本層が触るファイル一式（読み手の読み替えを含む）。
-_LAYER_PATHS = (
-    _CORE, _ROUTE_ATLAS, _ROUTE_LANDSCAPE, _PROJECTION, _CORPUS_VIEW,
-    _BACKEND / "core" / "library" / "registry.py",
-)
+def _backend_sources() -> list[Path]:
+    """``backend/core`` と ``backend/api`` の全 .py（P3-R13: 列挙をハードコードしない）。
+
+    層のファイル一式を手で並べると、新しい読み手（概念レジストリの ``core/library/`` のように
+    後から増える層）が検査から漏れる。走査根を固定して全件を見る。
+    """
+    return sorted((_BACKEND / "core").rglob("*.py")) + sorted((_BACKEND / "api").rglob("*.py"))
 
 
 # ---------------------------------------------------------------------------
@@ -130,7 +132,9 @@ _SKELETON_WRITE = re.compile(
 class TestNoWrites:
     def test_only_atlas_store_writes_atlas_skeletons(self):
         """骨格へ書けるのは ``core/atlas_store.py`` だけ（NC1 / KN-3 / AB4）。"""
-        for path in _LAYER_PATHS:
+        for path in _backend_sources():
+            if path == _STORE:
+                continue
             src = path.read_text(encoding="utf-8")
             assert _SKELETON_WRITE.search(src) is None, path
         # 正本側には書き込みがある（この検査が空振りでないことの確認）。

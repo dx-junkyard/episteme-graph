@@ -16,6 +16,7 @@ from __future__ import annotations
 import pytest
 
 from core.library import registry, schema, store
+from core.library.store import LibraryRetiredError
 
 
 # ---------------------------------------------------------------------------
@@ -37,8 +38,13 @@ class _FakeResult:
 class _FakeSession:
     """``execute`` を記録するだけの duck-typed セッション（実 DB なし）。"""
 
+    #: P3-R6 の在籍確認（``_require_not_retired``）が引く行。既定は active で、
+    #: retired の挙動を見たいテストだけ ``rows_by_marker`` で上書きする。
+    STATUS_MARKER = "SELECT status FROM library_entries"
+
     def __init__(self, rows_by_marker=None):
-        self.rows_by_marker = dict(rows_by_marker or {})
+        self.rows_by_marker = {self.STATUS_MARKER: [("active",)]}
+        self.rows_by_marker.update(dict(rows_by_marker or {}))
         self.statements: list[tuple[str, dict]] = []
         self.commits = 0
         self.rollbacks = 0
@@ -304,6 +310,36 @@ class TestFreezeAndList:
         sql, _params = session.statements[0]
         assert "review_status = :confirmed_review" not in sql
 
+    def test_search_also_looks_at_the_label_table(self, fake_session):
+        """P3-R7: 別名・隠しラベルでも引ける（ラベル側は**正規化の完全一致**）。"""
+        session = fake_session(_FakeSession())
+        store.list_entries(q="Cosmic WEB")
+        sql, params = session.statements[0]
+        assert "library_entry_labels" in sql
+        assert "lbl.normalized_label = :q_normalized" in sql
+        # 部分一致は使わない（`SM` が `cosmological` に当たる F-7 の再発源）。
+        assert "lbl.normalized_label ILIKE" not in sql
+        assert "lbl.label ILIKE" not in sql
+        from core.atlas_gaps.schema import normalize_label
+
+        assert params["q_normalized"] == normalize_label("Cosmic WEB")
+        # 見送り済みラベルでは引けない（教員の判断を検索が黙って戻さない）。
+        assert params["label_confirmed"] == "confirmed"
+
+    def test_hidden_labels_are_searchable_but_never_displayed(self, fake_session):
+        """SKOS hiddenLabel: 検索には当たり、表示テキストには現れない（KR7）。
+
+        ラベル表の条件は ``kind`` を絞らない（``hidden`` も当たる）。一方で一覧が返す
+        のはエントリ行（``name`` / ``aliases``）だけで、``library_entry_labels`` の
+        表示テキストを SELECT していないので hidden が画面に出ることはない。
+        """
+        session = fake_session(_FakeSession())
+        store.list_entries(q="cosmic web")
+        sql, _params = session.statements[0]
+        assert "lbl.kind" not in sql  # hidden を検索から外さない
+        assert "lbl.label" not in sql.split("EXISTS")[0]  # 表示は取らない
+        assert "SELECT 1 FROM library_entry_labels" in sql
+
 
 # ---------------------------------------------------------------------------
 # 4. registry — ラベル
@@ -383,7 +419,11 @@ class TestRelations:
             actor_id=_ACTOR,
         )
         assert relation["status"] == "candidate"
-        insert = session.statements[0][1]
+        insert = next(
+            params
+            for sql, params in session.statements
+            if "INSERT INTO library_entry_relations" in sql
+        )
         assert insert["status"] == "candidate"
 
     def test_confirmed_relations_cannot_be_created_directly(self, fake_session):
@@ -518,6 +558,71 @@ class _FakeConcept:
     def __init__(self, node_id, label):
         self.id = node_id
         self.label = label
+
+
+class TestRetiredIsReadOnly:
+    """P3-R6: retired（公開を止めた）エントリは読み取り専用。
+
+    ``store.update_entry`` / ``store.freeze_entry`` が既に ``LibraryRetiredError``
+    （route は 409）を出すのに、レジストリ側の書き込み（ラベル追加・関係作成・
+    node リンク作成・エントリ確定）だけが素通りしていた。retired を「編集できない」
+    ではなく「編集できるが見えない」にすると、公開を止めた概念が裏で育ち続ける。
+    """
+
+    def _retired(self, rows_by_marker=None):
+        session = _FakeSession(rows_by_marker)
+        session.rows_by_marker[_FakeSession.STATUS_MARKER] = [("retired",)]
+        return session
+
+    def test_add_label_on_a_retired_entry_is_refused(self, fake_session):
+        session = fake_session(self._retired())
+        with pytest.raises(LibraryRetiredError):
+            registry.add_label(
+                _ENTRY_ID, kind="alternate", label="cosmic web", actor_id=_ACTOR
+            )
+        assert not any("INSERT INTO library_entry_labels" in sql for sql, _ in session.statements)
+
+    def test_create_relation_on_a_retired_entry_is_refused(self, fake_session):
+        session = fake_session(self._retired())
+        with pytest.raises(LibraryRetiredError):
+            registry.create_relation(
+                subject_entry_id=_ENTRY_ID,
+                object_entry_id=_OTHER_ID,
+                kind="exact_match",
+                mapping_justification="manual_curation",
+                actor_id=_ACTOR,
+            )
+        assert not any(
+            "INSERT INTO library_entry_relations" in sql for sql, _ in session.statements
+        )
+
+    def test_create_node_link_on_a_retired_entry_is_refused(self, fake_session):
+        session = fake_session(self._retired())
+        with pytest.raises(LibraryRetiredError):
+            registry.create_node_link(
+                entry_id=_ENTRY_ID,
+                domain_key="astro",
+                node_id="cosmic_web",
+                kind="exact_match",
+                mapping_justification="lexical_match",
+            )
+        assert not any(
+            "INSERT INTO library_atlas_node_links" in sql for sql, _ in session.statements
+        )
+
+    def test_decide_entry_review_on_a_retired_entry_is_refused(self, fake_session, monkeypatch):
+        session = fake_session(_FakeSession())
+        monkeypatch.setattr(
+            store, "get_entry", lambda entry_id: store._row_to_entry(_entry_row()) | {"status": "retired"}
+        )
+        with pytest.raises(LibraryRetiredError):
+            registry.decide_entry_review(
+                _ENTRY_ID,
+                status="confirmed",
+                actor_id=_ACTOR,
+                record_audit=lambda **kwargs: None,
+            )
+        assert not any("UPDATE library_entries" in sql for sql, _ in session.statements)
 
 
 class _FakeRegion:
