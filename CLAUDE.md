@@ -1629,7 +1629,13 @@ PDF 内の画像（装置図・設計図等）を解析パイプラインに取�
   （draft 正本 + `revision` 楽観ロック（衝突 409）+ 凍結版履歴 + カートリッジ同梱
   `library/*.json` シードの冪等取込）。**パイプラインが読むのは凍結版のみ**（draft 不使用）。
   削除 API は無く `status='retired'` 遷移のみ（P4）。retired は retrieval に出ない。
-- **昇格は人間の操作のみ**（LLM がライブラリへ書き込む経路を作らない）: 装置候補 /
+- **昇格は人間の操作のみ**（LLM がライブラリへ書き込む経路を作らない）:
+  — ただし**概念レジストリ（Phase 3, migration 082）はこの条項を「candidate 行はパイプラインが作る・可視化（凍結）は
+  人間のみ」と読み替えて実装している**（`library_entries.review_status='candidate'` の行を `atlas_links` /
+  `identity_candidates` が起こす）。**可視化の弁は `freeze_entry` の 409 ゲート**で、候補行はパイプライン retrieval にも
+  学習者にも届かない。この読み替えの可否は**オーナー判断 O-6 として裁定待ち**（正本は
+  `docs/features/concept_registry_design.md` 冒頭の判断表・§13.3）。裁定まで実装は現状維持。
+  以下は装置候補経由の昇格（従来どおり人間の操作のみ）: 装置候補 /
   theory_components / 白紙の 3 経路 → 昇格モーダル（類似エントリ提示・統合可）。
   **例示画像は既定で含めない** — 含有は元 document 所有者のみが明示確認を経て実行
   （所有者以外は 403、fail-closed）。エントリ本文（テキスト）は教員全体に開示、
@@ -2986,7 +2992,7 @@ Phase 0 の 10 項目は設計書を切らず同日に実装し、レビュー�
   （`test_pipeline_coverage_report.py`）、8 ステージに付与。新ステージで打ち切りがあるなら同じ形式で
   報告する（`docs/pipeline/overview.md` §4）。
 
-### 知識オブジェクト層（知識構造の見直し Phase 1, migration 078/079/080, 2026-09-13）
+### 知識オブジェクト層（知識構造の見直し Phase 1, migration 078/079/080/084, 2026-09-13）
 
 論文の構造化成果を **stable_key（内容由来・版非依存キー）を持つ一級の行**にし、再解析を DELETE ではなく
 supersede 遷移にする層。正本は `docs/features/knowledge_objects_design.md`（KO1〜KO10・§12 実装記録。
@@ -3041,6 +3047,30 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - **ガードレール**: `test_knowledge_objects_{guardrails,vocab,stable_key,backfill,sync,remap,persist,document_id}.py`。
 - **非スコープ（v1）**: 学ぶ単位 / 概念レジストリ / import・JSON-LD（Phase 2〜4）/ superseded 行の教員向け履歴 UI /
   `chunks.formulas` の ID 参照化 / W層 meaning commit の旧本文退避。
+- **レビュー是正（2026-09-13・敵対的レビュー + scratch DB 実測。正本は設計書 §12.2）**:
+  ①**再解析は chunks を DELETE せず `chunk_index` キーで upsert する**（余剰行だけ削除）。migration **084** が
+  `theory_claims.chunk_id` の FK を `ON DELETE CASCADE → SET NULL` に張り替え、`chunks(document_id, chunk_index)`
+  の一意索引を足す（重複があれば作らず NOTICE）。chunks 経由の CASCADE で claim を消す経路は塞いだ（KO3 の穴）。
+  ②`persist_knowledge_objects` の preserved 列は**表ごと**（equations / derivation_steps = `review_status`、
+  evidence / symbols = なし — 078 の列構成と一致させる。旧実装は evidence で `UndefinedColumn` を出し run を落としていた）。
+  ③derivation step の **agent ID / stable_key の正本は `stable_key.derivation_step_agent_id`（`{derivation_id}:{step_id}`）
+  / `derivation_step_stable_key(..., derivation_id=, step_index=)`**（KO2 の明示例外。step ID はチェーン内でしか
+  一意でなく、operation + 式キーだけでは論文 B の 72 step が素キー 9 種に潰れた）。パイプラインと `knowledge_import`
+  は同じ関数を使う。④`claim_tier` は `qualification.claim_tier`（`tier` はフォールバック）。`CLAIM_TYPES` に式由来 claim
+  の 4 語（`dependency_claim` / `definition_claim` / `result_claim` / `equation_system_claim`）を追加。
+  ⑤**KO5 のガードレールは全文走査 + `ファイル:シンボル` 粒度**。`FROM {table}` のように動的補間で表名を受ける関数を
+  新設したら、渡し元の定数を理由に書いて `BASE_TABLE_ALLOWLIST` に登録する（旧行単位の正規表現は
+  `deliberation/refs.py` / `descent/resolve.py` / `load_revision_projection_overlay` の 3 箇所の漏れを通していた）。
+  ⑥`sync_live_rows(..., fallback_match_column=)`: stable_key 不一致でも claim=`normalized_text` / component=`name` の
+  1 対 1 完全一致なら UUID と確定列を引き継ぎ、`element_id_remap` に `remap_kind="stable_key"` で記録のみ
+  （backfill の近似キーと agent 側キーの構造差を吸収）。⑦claim にも `human_touched` +
+  `protected_when_touched=("text","normalized_text")`（教員が直した本文を AI 出力で上書きしない）。
+  ⑧**KO6 の読み替え**: artifact は「1 run × 1 stage・最後の書き込みが勝つ」生成ログ。**後段のステージ・フックは
+  他ステージの artifact を書き換えない**（概念接地フックの `claim_object_builder` 上書きは撤去）。
+  ⑨起動時 backfill は `BACKFILL_LOCK_KEY` の advisory lock 配下、`load_run_artifacts` の except は rollback、
+  079 の blob 剥がしは `jsonb_typeof = 'object'` の行のみ。⑩`persist_learning_units` の失敗は
+  `stage_outputs.knowledge_objects.learning_units.failed` に記録し run は completed を維持。
+  後続課題: sync の N+1・3 系統の別トランザクション（設計書 §12.2）。
 
 ### 学ぶ単位層（知識構造の見直し Phase 2, migration 081, 2026-09-13）
 
@@ -3082,6 +3112,20 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `test_course_prerequisites{,_api}.py` / `test_next_steps_delivered_unreviewed.py` / `test_structure_anchor_selection{,_ui_static}.py`。
 - **非スコープ（v1）**: unit の教員確定 UI / `display_label` のチップ描画配線（app.js・原稿スタジオ）/ `PUT /courses/{id}` での
   handle 再解決 / freeze から component 投影を外すこと / `dsl_node` のコース提示 / 学習者向け `narrative` 表示。
+- **レビュー是正（2026-09-13・正本は設計書 §12.2）**: ①**教材区画の粒度の正本は `core/lecture.py::build_topic_slides`**。
+  配信（`get_topic_material`）・痕跡帰属（`_anchor_segment_texts`）・レクチャー・音声・readiness が同じページ境界を通る
+  （`seg_0` 固定の解消）。区画ごとに `formulas` / `figures` / `evidence_items` を間引かない（プレースホルダーの位置依存解決を
+  壊す）。②**freeze は教員が選んだ unit を上書きしない**。live に無い unit は `resolved: false` で保持し、救済
+  （`title_match`）は追記のみ。事実文は `course_content_status.extra.units_note` / `uncovered_sections_note`（件数なし）。
+  ③units があるトピックの散文は `exact_title` 一致の mapping からのみ採り、`content_confidence` は `unit_selection` /
+  `unit_selection_with_title_mapping` で正直に。④`update_course` は参照キーの無い incoming units を topic id で温存し、
+  `concepts` にも `_split_symbol_concepts` を通す。⑤**候補表を組む経路は必ず可視性ゲートを通す**
+  （`_ordered_source_document_ids(..., user_id=)` / `_build_material_context(..., user_id=)` は
+  `list_visible_document_ids` との積・fail-closed）。`material_id` が sources にあることは読んでよい根拠ではない。
+  ⑥教材コンテキストは untrusted 入力（`UNTRUSTED_SOURCE_NOTICE` + `strip_control_sequences`、
+  `test_pdf_trust_boundary_guardrails.py` の適用パスに `api/routes/admin.py`）。⑦`next_steps.APPROVED_REVIEW_STATUSES`
+  （`teacher_approved` / `teacher_reviewed` / `endorsed`）が「教員が確認した」の単一正本。⑧コースビルダーの学ぶ単位表示は
+  handle（`U3`）ではなく候補表の label（レスポンス `unit_candidates`）。
 
 ### 概念レジストリ層（知識構造の見直し Phase 3, migration 082, 2026-09-13）
 
@@ -3179,6 +3223,17 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - ガードレール: `test_atlas_node_correspondence_{core,api,readthrough,guardrails,ui_static}.py`。
 - 非スコープ（v1）: split / 凍結後の対応の追加・訂正 UI / cosine 候補 / コース binding の自動読み替え / ベクトルの版間継承 /
   対応表の学習者向け表示。
+- **レビュー是正（2026-09-13・正本は設計書 §13.3）**: ①候補エントリ（`review_status='candidate'`）の一覧は route 層で
+  `source_document_ids` の可視性を判定し、不可視由来は落として `hidden_count` を返す（fail-closed）。②同一性リンクの
+  `reason` に相手 document の component 名を入れない（相手名は可視性を通る `links[]` / `supporting_titles` のみ）。
+  ③学習者向け `concept_ref` は `name` / `entry_type_label` のみ（`entry_id` は出さない = PL7）。④retired エントリへの
+  label / relation / node link / review 判断は `LibraryRetiredError` → 409（L層の読み取り専用規律を新編集面にも）。
+  ⑤`q` 検索は `library_entry_labels.normalized_label` の**正規化完全一致**を OR（部分一致は F-7 再発源なので禁止）。
+  `hidden` は検索に当たり表示に出ない。⑥identity 候補一覧は live component に解決できない候補を落とし
+  `hidden_unresolved` + 事実文。⑦`build_concept_dictionary(..., domain_key=)` は既定 `cartridge_id` で当該分野 +
+  `unassigned` に絞り、逆引き索引で `match()` を表記数走査に。⑧082 の entry_type CHECK 総なめ DROP は FK 未作成時のみ。
+  ⑨`pipeline:identity_candidates` の `KNOWN_FEATURES` 削除は**見送り**（U層の feature は帰属語彙表で、
+  `report_start` が全ステージに `pipeline:{stage}` を立てる。非LLM ステージも登録するのが正）。
 
 ### 知識の転用層（知識構造の見直し Phase 4, migration 083, 2026-09-13）
 
@@ -3221,6 +3276,24 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   `test_knowledge_transfer_{vocab_mirror,ui_static}.py`。
 - **非スコープ（v1）**: コース・chunks・embedding・図・learning_units・同一性リンクの取り込み / 他インスタンスの承認の継承 / import の差分プレビュー・
   取り消し / P4-2 の detail 層・derivation・symbol / 健全性の自動修復・G層 To-Do / `prov:alternateOf` の束への書き出し / evidence_lines の LLM 候補。
+- **レビュー是正（2026-09-13・セキュリティレビュー + scratch DB 実測。正本は設計書 §14.1）**: ①束の上限は
+  **圧縮 50MB / 展開後 200MB（1 ファイル 64MB）/ 1 種別 5,000 項目**で、検査は `parse_bundle` 内 = dry-run でも効く。
+  zip は `zf.open() + read(limit+1)` の実測打ち切りでのみ読む（`extractall` / 素の `open(` はガードレールで禁止。
+  旧実装は圧縮サイズしか見ず 654KB の zip で RSS 1.1GB を実測 → 29.5MB）。`RecursionError` は 422 の `BundleError`。
+  ②**`replace=true` でも人間が確定した行（承認・却下・要修正）は supersede しない**。保護は import 側が incoming に
+  既存行を合流させて実現し `sync_live_rows` は非改変。dry-run は `would_supersede_counts`（superseded /
+  kept_human_decided / 対象ラベル列挙）を返し、事実文は「束に無い既存の項目は表示対象から外れます」+「教員が確定した
+  項目は外しません」の 2 文。③**確定（dry_run=false）は dry-run が返した `bundle_sha256` が必須**（欠落 422・不一致
+  409・書き込み 0）。監査 metadata に `decision_context`（`BASIS_KNOWLEDGE_IMPORT_BUNDLE`・presented = 種別:件数・
+  applied = 着地件数・`client_reported` に replace / dry_run 申告）。④`manifest.app` は `{name, version, git_commit}`
+  各 200 字、ids も上限で切ってから `stage_outputs` / 監査へ。取り込み claim の `support_status` 既定は
+  `review_required`（`source_backed` を作らない）。⑤export は claim の `origin` / `parent_claim_id` を載せ、import は
+  語彙内 origin のみ復元・不明なら上書きしない（親子は `link_claim_parents` で id 写像を張り直す）。
+  ⑥`GET .../reference-health` は**既定が run 保存済みスナップショット**、`?recheck=true`（UI の「再確認」）で再計算。
+  取り込み run も `stage_outputs.reference_health` を持つ。`origin='equation_synthesis'` の claim（chunk を持たない）は
+  `claim_without_chunk` の対象外（常時 broken の解消）。⑦D層 evidence-lines の POST/PATCH は**対象教材の編集権限**
+  （`_require_editable_ledger_target`）が必要 — `_require_teacher` だけでは足りない。⑧SA層 `retrieved_structure` の
+  事実文は `learner_context_common.safe_text` を通し生 TeX を出さない。nginx の `client_max_body_size` は 55m。
 
 ### 横断基盤（共有ユーティリティ、2026-07 整理で新設）
 
@@ -3348,6 +3421,11 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   知識オブジェクトの同一性（`stable_key`）・live 行の同期（`sync_live_rows`）・参照の再係留
   （`record_and_reanchor`）の正本。**構造化成果を DB に書く経路を新設するときは DELETE → 再 INSERT を書かず
   `sync_live_rows` に接続し、読み手は `_live` ビューを読む**。
+  **V-6（2026-09-13）**: 学習者向けの記号除外は `core/learner_context_common.py` の
+  `is_symbol_like_concept` / `visible_concept_names`（`component_context` / `element_context` が委譲）。判定表を新設せず P0-3 の
+  `component_assembly.schema.is_symbol_like_concept_name` と `text_excerpt.looks_like_tex_math` の OR で、
+  **記号様の概念名を学習者に出さない**（行は消さない = P4）。学習者向けに `concepts` を出す新しい射影はこれを通す。
+  A層正本は SA層解決器の推移的純粋性検査（`backend` だけを sys.path に置く別プロセス）を壊さないよう関数内 import。
 - **`backend/core/trace_registry.py`**（2026-08-15 新設、正本設計書
   `docs/features/trace_registry_sovereignty_ledger_design.md`） — `interest_traces` の
   **kind 登録簿の正本**（全 kind の露出3宣言 = 問いの軌跡 / 教員向け k-匿名集約 / わたしの地図、

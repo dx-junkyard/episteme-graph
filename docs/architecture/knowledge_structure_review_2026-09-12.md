@@ -448,3 +448,49 @@ migration は **083** に採番（P4-5 の列追加のみ）。オーナー判�
 - 関連する既存記録: [六つのレンズ調査](vision_ux_gap_six_lenses_2026-09-10.md)（F2 再解析 DELETE の判断 D1）/ [知識ネットワークビジョン](../features/knowledge_network_vision.md)（KN-1〜4）/ [E層設計](../features/exposition_layer_design.md)（本提案の learning_unit は E層の「足場」ではなく A層側の「単位」。E層とは別物で、E層着手時は learning_unit を翻訳の入力にできる）/ [candidate_flow](../features/candidate_flow_design.md) / [label_vocab](../features/label_vocab_design.md)。
 - 着手の型は「討論 → 設計書 → 実装 → 実装記録」（vision §9）。Phase 0 は設計書不要で個別 PR 可。Phase 1 以降は Phase ごとに `docs/features/*_design.md` を切り、本書 §6 の判断結果を冒頭に記す。
 - 本書の数値は 2026-09-12 の開発 DB（実論文 2 本 + テスト 9 本）の実測。本番コーパスでは比率が変わり得るが、構造的原因（64 打ち切り・非永続化・位置依存 ID・FK 不在・文字列一致）は運用データ量に依存しない。
+
+---
+
+## 9. 実装レビューと是正の記録（2026-09-13）
+
+Phase 1〜4 の実装完了後、Fable 5.1 指揮 + Opus 5 で **敵対的コードレビュー 4 本（Phase 別）+ scratch DB での実データ検証**を
+行い、同日に是正した。各 Phase の詳細は専用設計書の実装記録（KO §12.2 / LU §12.2 / KR §13.3 / KT §14）が正本。
+
+### 9.1 検証方法
+- 稼働中の開発 DB は一切変更せず、同一 Postgres 上に新規 DB を作って ①`init.sql` + 077 以下 → 全データ複写 → 078〜083 を
+  3 回適用（アップグレード経路・冪等性・孤児掃除件数）②空 DB に全 migration → 実論文 A/B の artifact を LLM 0 回で永続化 →
+  同一 artifact 再実行・内容変更・承認引き継ぎ（再解析の supersede）を実測。
+- 結果: **アップグレード経路は GO**（孤児掃除 components 94 / links 92 / graphs 9 / runs 19 / figures 560 / ledger 323 =
+  設計書 §8.3 の明記どおり、backfill 冪等）。**永続化経路は HEAD で NO-GO**（下記 V-1 / V-2 / V-10）→ 是正後に再検証。
+
+### 9.2 致命（🔴）と是正
+| # | 事実 | 是正 |
+|---|---|---|
+| P1-R1 / V-10 | `DELETE FROM chunks` → `theory_claims.chunk_id` の CASCADE で再解析が claim 行を物理削除（承認込み） | migration 084 で FK を `SET NULL`、chunks を `chunk_index` キーの upsert に |
+| V-1 | `persist_knowledge_objects` が evidence / symbols に無い `review_status` を preserved 指定し `UndefinedColumn` で run 全体が failed | preserved 列を表ごとに |
+| V-2 | derivation step の agent_id がチェーン内でしか一意でなく stable_key 衝突で一意制約違反（import も同型） | `derivation_step_agent_id` / `derivation_step_stable_key(derivation_id, step_index)` を正本化 |
+| P1-R2 / R11 | live ビュー読み漏れ 3 箇所（superseded 行を優先して返す）+ 動的表名を見逃すガードレール | 3 箇所を live へ、ガードレールを全文走査 + `ファイル:シンボル` 粒度に |
+| P4-R1 | import-bundle に展開後サイズ上限が無く zip bomb で OOM（654KB → RSS 1.1GB を実測） | 展開後サイズ・項目数の上限、`RecursionError` の 422 化 |
+| P4-R2 | `replace=true` が承認済み live 行を回復不能に supersede し dry-run が範囲を開示しない | 人間確定行を supersede 対象から除外、dry-run に内訳と対象列挙、事実文の是正 |
+
+### 9.3 要修正（🟠）の主なもの
+教員選択 unit の上書き（P2-R1）/ 散文の title 一致混入と `content_confidence` の偽装（P2-R2）/ `seg_0` 固定（P2-R3 →
+`build_topic_slides` のページ境界に統一）/ unit 候補・教材コンテキストの可視性ゲート欠落（P2-R5）/ 候補エントリ名の全教員露出
+（P3-R2 / R3）/ 学習者 DTO の内部 ID（P3-R4）/ dry-run↔確定の TOCTOU と `decision_context` 欠落（P4-R4）/
+claim 本文の教員編集が上書きされる（P1-R4）/ backfill 近似キーの構造不一致（P1-R3）/ `claim_tier` 常に空（V-3）/
+式由来 claim が全件 `unknown`（V-4）/ 生 LaTeX の学習者露出（V-6 / V-8）/ `reference_health` が常時 broken（V-9）。
+
+### 9.4 新たに生じたオーナー判断
+| # | 判断 | 推奨 |
+|---|---|---|
+| O-6 | L層の不変条項「昇格は人間の操作のみ」を Phase 3 が「candidate 行はパイプラインが作る・可視化（凍結）は人間のみ」と読み替えた点の可否 | **(a) 認める**（凍結 409 ゲートで構造的に守られ、tension / landscape と同じ candidate 始まりの型。否決時は候補の保存先を `library_entries` から専用表へ移す差し替えのみ） |
+
+### 9.4b 是正後の再検証（scratch DB）
+永続化経路は迂回なしで完走し、行数は §7 と完全一致。再解析 132/132 同 UUID・承認保持・chunks upsert・第 2 段突合の UUID 引き継ぎを実測。
+是正の途中で **migration 084 の `%I`（`%%I` であるべき 1 文字）が起動失敗を招く**ことが見つかり修正、`TestPercentEscapeLint` で再発を固定
+（KO §12.3）。
+
+### 9.5 見送り・後続
+`pipeline:identity_candidates` の `KNOWN_FEATURES` 削除（P3-R12）は前提誤りで見送り（U層 feature は帰属語彙表・全ステージ網羅がテストで強制）。
+sync の N+1・3 系統の別トランザクション（P1-R8）/ P4-2 の同期パス追加セッション（P4-R12）は実測後の後続課題。
+K-6 版間対応は開発 DB の 2 版が別主題（ラベル一致 0）のため**有効性未検証**（同一主題の改訂版で測り直す）。
