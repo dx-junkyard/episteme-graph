@@ -55,6 +55,19 @@ ARXIV_API_HOST = "export.arxiv.org"
 #: 論文ページ / PDF の配信ホスト（``documents.source_url`` に保存する URL の組み立て）。
 ARXIV_SITE_HOST = "arxiv.org"
 
+#: 取り込み時に arXiv から取得する配信形式（論文ページ「Access Paper」の選択肢に対応）。
+#: ``tex`` = TeX Source（``/src/<id>``。数式・節構造がそのまま読める） /
+#: ``pdf`` = View PDF（``/pdf/<id>``）。**HTML 配信は解析パイプラインの入力形式ではない**
+#: ので語彙に入れない。実際にどちらのバイト列が返ったかは URL ではなくマジックバイトで
+#: 判定する（``url_fetch.detect_source_kind`` が正本）。
+SOURCE_FORMAT_TEX = "tex"
+SOURCE_FORMAT_PDF = "pdf"
+SOURCE_FORMATS = (SOURCE_FORMAT_TEX, SOURCE_FORMAT_PDF)
+
+#: 形式が指定されなかったときの落とし所。**既存の呼び出し側の挙動を変えないための値**で、
+#: 「この画面の既定」ではない（レーダー画面の既定は TeX で、フロントが明示的に送る）。
+DEFAULT_SOURCE_FORMAT = SOURCE_FORMAT_PDF
+
 #: 引用グラフ API の宛先ホスト（Phase 3 / 設計書 §6。PD7 — arXiv と同じ規律で固定値。
 #: スロットルは**ホストごとに独立**なので arxiv_client とは共有しない）。
 SEMANTIC_SCHOLAR_API_HOST = "api.semanticscholar.org"
@@ -247,6 +260,34 @@ def pdf_url_for(arxiv_id: str) -> str:
     return f"https://{ARXIV_SITE_HOST}/pdf/{str(arxiv_id or '').strip()}"
 
 
+def src_url_for(arxiv_id: str) -> str:
+    """正規化 ID から **TeX ソース**（arXiv の "TeX Source"）の取得 URL を組み立てる。
+
+    arXiv の論文ページ「Access Paper」が示す3つの配信形式のうち、``View PDF`` が
+    :func:`pdf_url_for`、``TeX Source`` がこの ``/src/<id>`` に対応する（``HTML`` は
+    解析パイプラインの入力形式ではないので組み立てない）。
+
+    返るのは URL 文字列だけで、**実体が TeX である保証はここには無い**（投稿者が
+    PDF のみを提出した論文では arXiv がこの URL で PDF を返す）。形式の判定は
+    ``url_fetch.detect_source_kind`` が**実バイトのマジック**で行うので、
+    ここで拡張子や Content-Type を名乗らせない。
+    """
+    return f"https://{ARXIV_SITE_HOST}/src/{str(arxiv_id or '').strip()}"
+
+
+def source_url_for(arxiv_id: str, source_format: Any = None) -> str:
+    """取り込み時に取得する URL を配信形式から組み立てる（形式語彙の唯一の分岐点）。
+
+    ``source_format`` が語彙外・未指定なら :data:`DEFAULT_SOURCE_FORMAT` に落とす
+    （fail-safe。取り込み経路を止めない）。**語彙の妥当性を教員に返したい入口**
+    （API 層）は :func:`normalize_source_format` で先に検証すること。
+    """
+    fmt = normalize_source_format(source_format) or DEFAULT_SOURCE_FORMAT
+    if fmt == SOURCE_FORMAT_TEX:
+        return src_url_for(arxiv_id)
+    return pdf_url_for(arxiv_id)
+
+
 def abs_url_for(arxiv_id: str) -> str:
     """正規化 ID から論文ページ（abs）の URL を組み立てる。"""
     return f"https://{ARXIV_SITE_HOST}/abs/{str(arxiv_id or '').strip()}"
@@ -398,6 +439,20 @@ def normalize_authors(raw: Any) -> list[str]:
         seen.add(key)
         out.append(name)
     return out
+
+
+def normalize_source_format(raw: Any) -> Optional[str]:
+    """配信形式の入力を :data:`SOURCE_FORMATS` の語へ畳む（語彙外・空は ``None``）。
+
+    ``None`` は「指定なし」と「語彙外」の両方を表す。両者を区別したい呼び出し側
+    （API 層の 422 判定）は、呼ぶ前に「空かどうか」を自分で見ること。
+    """
+    if raw is None:
+        return None
+    text = str(raw).strip().lower()
+    if text in SOURCE_FORMATS:
+        return text
+    return None
 
 
 def normalize_categories(raw: Any) -> list[str]:

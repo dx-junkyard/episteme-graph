@@ -936,6 +936,111 @@ class TestSourceUrlPersistence:
 # ---------------------------------------------------------------------------
 
 
+class TestIngestSourceFormat:
+    """取得する配信形式（TeX ソース / PDF）の選択。
+
+    形式の分岐点は ``pd_schema.source_url_for`` の1箇所だけで、route が組み立てた
+    URL がそのまま ``url_fetch`` と ``documents.source_url`` へ渡る。ここで固定するのは:
+
+    - 既定（未指定）は **PDF**。この API の既定を変えると、形式スイッチを持たない
+      分野購読モーダルの取り込みまで黙って変わる（画面の既定 = TeX はフロントが送る）。
+    - 語彙外は 422 で、取得を1件も試みない（選んだ形式と実際に取る形式を食い違わせない）。
+    - TeX を選んだときの ``documents.source_url`` は ``/src/<id>``。この URL も
+      ``normalize_arxiv_id`` で同じ ID へ畳まれるので「取り込み済み」判定は効き続ける。
+    """
+
+    PATH = "/api/admin/discovery/ingest"
+
+    def test_default_is_pdf(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH, json={"items": _items("2608.20293")}, headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        assert env["fetches"] == [("https://arxiv.org/pdf/2608.20293", ["arxiv.org"])]
+
+    def test_tex_fetches_the_source_url(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH,
+            json={"items": _items("arXiv:2608.20293v2"), "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        assert env["fetches"] == [("https://arxiv.org/src/2608.20293", ["arxiv.org"])]
+        assert env["accepted"][0]["source_url"] == "https://arxiv.org/src/2608.20293"
+
+    def test_tex_source_url_still_resolves_to_the_same_arxiv_id(self, env):
+        from routes.paper_discovery import pd_schema
+
+        assert (
+            pd_schema.normalize_arxiv_id("https://arxiv.org/src/2608.20293")
+            == pd_schema.normalize_arxiv_id("https://arxiv.org/pdf/2608.20293")
+            == "2608.20293"
+        )
+
+    def test_explicit_pdf_is_honoured(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["client"].post(
+            self.PATH,
+            json={"items": _items("2608.20293"), "source_format": "pdf"},
+            headers=_auth(env, "teacher"),
+        )
+        assert env["fetches"] == [("https://arxiv.org/pdf/2608.20293", ["arxiv.org"])]
+
+    def test_unknown_format_is_422_and_fetches_nothing(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            self.PATH,
+            json={"items": _items("2608.20293"), "source_format": "html"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 422
+        assert "形式" in res.json()["detail"]
+        assert env["fetches"] == []
+        assert env["accepted"] == []
+
+    def test_format_is_recorded_in_the_audit(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["client"].post(
+            self.PATH,
+            json={"items": _items("2608.20293"), "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        metadata = env["audits"][0][-1]
+        assert metadata["source_format"] == "tex"
+
+    def test_batch_passes_the_format_to_the_queue(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.20293"}], "source_format": "tex"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 202
+        assert env["enqueue_calls"][0][1]["source_format"] == "tex"
+
+    def test_batch_default_is_pdf(self, env):
+        env["session"].domains = ["arxiv.org"]
+        env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.20293"}]},
+            headers=_auth(env, "teacher"),
+        )
+        assert env["enqueue_calls"][0][1]["source_format"] == "pdf"
+
+    def test_batch_unknown_format_is_422_and_queues_nothing(self, env):
+        env["session"].domains = ["arxiv.org"]
+        res = env["client"].post(
+            "/api/admin/discovery/ingest-batch",
+            json={"items": [{"arxiv_id": "2608.20293"}], "source_format": "TeX Source"},
+            headers=_auth(env, "teacher"),
+        )
+        assert res.status_code == 422
+        assert env["enqueue_calls"] == []
+        assert env["audits"] == []
+
+
 class TestIngestBatch:
     """``POST /ingest-batch`` — 積むのは教員の明示操作だけ（PD1）。"""
 

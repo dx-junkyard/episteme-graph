@@ -116,6 +116,47 @@ class TestNormalizeArxivId:
     def test_url_builders_use_normalized_id(self):
         assert schema.pdf_url_for("2608.20293") == "https://arxiv.org/pdf/2608.20293"
         assert schema.abs_url_for("2608.20293") == "https://arxiv.org/abs/2608.20293"
+        assert schema.src_url_for("2608.20293") == "https://arxiv.org/src/2608.20293"
+
+
+class TestSourceFormat:
+    """取得する配信形式（TeX ソース / PDF）の語彙と URL の組み立て。
+
+    ここが守るのは「形式の分岐点を1箇所に閉じ込める」こと。取り込み経路（同期・
+    キュー）がどちらも :func:`schema.source_url_for` だけを通ることで、
+    「PDF を取りに行ったのに TeX として記帳した」のような食い違いが起きない。
+    """
+
+    def test_vocabulary_is_two_formats_without_html(self):
+        # arXiv の「Access Paper」には HTML もあるが、解析パイプラインの入力形式では
+        # ないので語彙に入れない（入れると取り込めない形式を選べてしまう）。
+        assert schema.SOURCE_FORMATS == ("tex", "pdf")
+        assert "html" not in schema.SOURCE_FORMATS
+
+    def test_normalize_accepts_the_vocabulary_case_insensitively(self):
+        assert schema.normalize_source_format("tex") == "tex"
+        assert schema.normalize_source_format(" PDF ") == "pdf"
+
+    def test_normalize_rejects_everything_else(self):
+        for raw in ("html", "", "  ", None, "tex source", 3):
+            assert schema.normalize_source_format(raw) is None
+
+    def test_source_url_branches_on_the_format(self):
+        assert schema.source_url_for("2608.20293", "tex") == "https://arxiv.org/src/2608.20293"
+        assert schema.source_url_for("2608.20293", "pdf") == "https://arxiv.org/pdf/2608.20293"
+
+    def test_unspecified_and_unknown_fall_back_to_the_default(self):
+        # 取り込みを止めないための fail-safe（語彙の妥当性は API 層が 422 で返す）。
+        assert schema.DEFAULT_SOURCE_FORMAT == "pdf"
+        assert schema.source_url_for("2608.20293") == "https://arxiv.org/pdf/2608.20293"
+        assert schema.source_url_for("2608.20293", "html") == "https://arxiv.org/pdf/2608.20293"
+
+    def test_both_formats_normalize_back_to_the_same_id(self):
+        # PD5: 「取り込み済み」は documents.source_url からの読み時導出。TeX で
+        # 取り込んだ論文が新着として再提示されないことをここで固定する。
+        for fmt in schema.SOURCE_FORMATS:
+            url = schema.source_url_for("2608.20293", fmt)
+            assert schema.normalize_arxiv_id(url) == "2608.20293"
 
 
 # ---------------------------------------------------------------------------

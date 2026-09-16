@@ -165,6 +165,34 @@ class TestEnqueueItems:
         assert insert["source_url"] == "https://arxiv.org/pdf/2608.20293"
         assert insert["domain_key"] == "astrophysics"
 
+    def test_source_format_selects_the_stored_url(self):
+        """形式はキュー行の ``source_url`` に畳んで保存する（列を増やさない）。
+
+        worker はこの URL をそのまま取りに行き、返ってきたバイト列のマジックで形式を
+        決める。ここで TeX の URL が保存されないと、キュー経由の取り込みだけ PDF に
+        なる（同期の取り込みと挙動が食い違う）。
+        """
+        q = self._queue()
+        session = FakeSession()
+        q.enqueue_items(session, [{"arxiv_id": "2608.20293"}], source_format="tex")
+        insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
+        assert insert["source_url"] == "https://arxiv.org/src/2608.20293"
+
+    def test_unspecified_source_format_stays_on_pdf(self):
+        q = self._queue()
+        session = FakeSession()
+        q.enqueue_items(session, [{"arxiv_id": "2608.20293"}])
+        insert = next(params for sql, params in session.calls if "INSERT INTO" in sql)
+        assert insert["source_url"] == "https://arxiv.org/pdf/2608.20293"
+
+    def test_tex_queued_item_is_still_detected_as_ingested_later(self):
+        """TeX で取り込んだ論文の ``source_url`` も同じ arXiv ID へ畳まれる（PD5）。"""
+        q = self._queue()
+        session = FakeSession(source_urls=["https://arxiv.org/src/2608.20293"])
+        result = q.enqueue_items(session, [{"arxiv_id": "2608.20293"}], source_format="tex")
+        assert result["queued"] == []
+        assert result["skipped"][0]["detail"] == q.SKIP_ALREADY_INGESTED
+
     def test_skip_invalid_id(self):
         q = self._queue()
         result = q.enqueue_items(FakeSession(), [{"arxiv_id": "not-an-id"}])

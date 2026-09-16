@@ -144,6 +144,13 @@ _DETAIL_INGEST_TOO_MANY = (
     "件数を減らして実行してください。"
 )
 _DETAIL_INVALID_ARXIV_ID = "arXiv ID として解釈できませんでした。"
+#: 配信形式（TeX / PDF）の指定が語彙外だった（語彙の正本は
+#: ``core.paper_discovery.schema.SOURCE_FORMATS``）。入口で fail-closed に弾く —
+#: 語彙外を黙って既定へ落とすと、教員が選んだつもりの形式と実際に取りに行く形式が
+#: 食い違ったまま解析まで進む。
+_DETAIL_INVALID_SOURCE_FORMAT = (
+    "取得する形式の指定が正しくありません。TeX ソースか PDF を選んでください。"
+)
 _DETAIL_ARXIV_UNAVAILABLE = (
     "arXiv に接続できませんでした。時間をおいて再度お試しください。"
 )
@@ -275,6 +282,10 @@ class IngestRequest(BaseModel):
     analyze_images: bool = False
     models: Optional[dict] = None
     domain_key: str = ""
+    #: 取得する配信形式（``tex`` / ``pdf``）。**空は「指定なし」**で
+    #: ``pd_schema.DEFAULT_SOURCE_FORMAT`` に落ちる（既存の呼び出し側の挙動は不変）。
+    #: 語彙外は 422（:data:`_DETAIL_INVALID_SOURCE_FORMAT`）。
+    source_format: str = ""
 
 
 class IngestBatchItem(BaseModel):
@@ -291,6 +302,8 @@ class IngestBatchRequest(BaseModel):
     domain_key: str = ""
     analyze_images: bool = False
     models: Optional[dict] = None
+    #: ``IngestRequest.source_format`` と同じ意味（同期・バッチで語彙を分けない）。
+    source_format: str = ""
 
 
 class CitationSearchRequest(BaseModel):
@@ -356,6 +369,22 @@ def _arxiv_unavailable_detail(exc: Exception) -> str:
     if isinstance(exc, arxiv_client.ArxivRateLimitedError):
         return _DETAIL_ARXIV_RATE_LIMITED
     return _DETAIL_ARXIV_UNAVAILABLE
+
+
+def _resolved_source_format(raw: Any) -> str:
+    """リクエストの配信形式を語彙へ解決する（語彙外は 422）。
+
+    空・未指定は「指定なし」として :data:`pd_schema.DEFAULT_SOURCE_FORMAT` に落とす
+    （既存クライアントの挙動を変えないため）。語彙外だけを弾くことで、「選んだ形式と
+    違うものが取り込まれる」を構造的に防ぐ（UF6 と同じ流儀の事実文）。
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return pd_schema.DEFAULT_SOURCE_FORMAT
+    resolved = pd_schema.normalize_source_format(text)
+    if resolved is None:
+        raise HTTPException(status_code=422, detail=_DETAIL_INVALID_SOURCE_FORMAT)
+    return resolved
 
 
 def _arxiv_blocked() -> bool:
@@ -643,6 +672,8 @@ def ingest_candidates(
     if len(items) > MAX_INGEST_PER_REQUEST:
         raise HTTPException(status_code=422, detail=_DETAIL_INGEST_TOO_MANY)
 
+    source_format = _resolved_source_format(body.source_format)
+
     models_option: dict | None = None
     if body.models:
         models_option = _validate_models_option(body.models)
@@ -663,7 +694,7 @@ def ingest_candidates(
             failed.append({"arxiv_id": raw_id, "detail": _DETAIL_INVALID_ARXIV_ID})
             continue
 
-        source_url = pd_schema.pdf_url_for(arxiv_id)
+        source_url = pd_schema.source_url_for(arxiv_id, source_format)
         try:
             fetched = url_fetch.fetch_source_from_url(source_url, allowed)
         except url_fetch.NoDomainsConfiguredError as exc:
@@ -716,6 +747,7 @@ def ingest_candidates(
         current_user["id"],
         {
             "action": "ingest",
+            "source_format": source_format,
             "arxiv_ids": [entry.get("arxiv_id", "") for entry in accepted],
             "failed_arxiv_ids": [entry.get("arxiv_id", "") for entry in failed],
             "accepted": len(accepted),
@@ -767,6 +799,8 @@ def ingest_batch(
     if len(items) > MAX_INGEST_BATCH:
         raise HTTPException(status_code=422, detail=_DETAIL_BATCH_TOO_MANY)
 
+    source_format = _resolved_source_format(body.source_format)
+
     models_option: dict | None = None
     if body.models:
         models_option = _validate_models_option(body.models)
@@ -781,6 +815,7 @@ def ingest_batch(
                 requested_by=current_user["id"],
                 analyze_images=body.analyze_images,
                 models=models_option,
+                source_format=source_format,
             )
         except ValueError as exc:
             session.rollback()
@@ -827,6 +862,7 @@ def ingest_batch(
         decision_context.attach_decision_context(
             {
                 "action": "ingest_batch",
+                "source_format": source_format,
                 "arxiv_ids": [entry["arxiv_id"] for entry in result["queued"]],
                 "skipped_arxiv_ids": [entry["arxiv_id"] for entry in result["skipped"]],
                 "queued": len(result["queued"]),

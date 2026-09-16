@@ -28,7 +28,11 @@ from typing import Any, Iterable, Optional
 
 from sqlalchemy import text as sa_text
 
-from core.paper_discovery.schema import normalize_arxiv_id, pdf_url_for
+from core.paper_discovery.schema import (
+    DEFAULT_SOURCE_FORMAT,
+    normalize_arxiv_id,
+    source_url_for,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +167,7 @@ def enqueue_items(
     requested_by: Any = None,
     analyze_images: bool = False,
     models: Optional[dict] = None,
+    source_format: Any = DEFAULT_SOURCE_FORMAT,
 ) -> dict:
     """取り込み対象をまとめてキューへ積む。
 
@@ -183,6 +188,11 @@ def enqueue_items(
 
     ``models`` の妥当性検証は呼び出し側（API 層）の責務。ここでは JSON として
     保存するだけで、worker は再検証しない。
+
+    ``source_format``（``tex`` / ``pdf``）は **``source_url`` 列に畳んで**保存する。
+    列を増やさないのは、worker が読むのは「どの URL を取りに行くか」だけで、形式の
+    語彙そのものを知る必要が無いため（worker は取得したバイト列のマジックで形式を
+    決める）。語彙外の値は :func:`source_url_for` が既定形式へ落とす。
     """
     key = str(domain_key or "").strip() or DEFAULT_DOMAIN_KEY
     payload = json.dumps(models, ensure_ascii=False) if models else None
@@ -230,7 +240,7 @@ def enqueue_items(
             {
                 "domain_key": key,
                 "arxiv_id": arxiv_id,
-                "source_url": pdf_url_for(arxiv_id),
+                "source_url": source_url_for(arxiv_id, source_format),
                 "title": title or None,
                 "requested_by": str(requested_by) if requested_by else None,
                 "analyze_images": bool(analyze_images),

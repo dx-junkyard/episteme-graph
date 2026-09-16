@@ -201,6 +201,51 @@ def _make_tex_archive(files: dict[str, str]) -> bytes:
     return buf.getvalue()
 
 
+def test_single_file_gzip_source_is_read_as_one_tex_member():
+    """arXiv の TeX Source は単一ファイル投稿だと **tar ではなく素の gzip** で返る。
+
+    ここを畳んでおかないと、レーダー・分野購読の「TeX ソース」取り込みで、単一ファイルの
+    論文だけが「invalid .tar.gz TeX archive」で解析に失敗する（取得は成功しているので、
+    教員には理由の分からない失敗に見える）。
+    """
+    import gzip
+
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    tex = r"""
+        \documentclass{article}
+        \title{Single File Submission}
+        \author{Ada Lovelace}
+        \begin{document}
+        \section{Introduction}
+        A one-file paper.
+        \begin{equation}\label{eq:one} E = mc^2 \end{equation}
+        \end{document}
+    """
+    structure = build_structure_from_tex_archive(
+        gzip.compress(tex.encode("utf-8")),
+        document_id="doc-single",
+        source_file="2608.20293.tar.gz",
+    )
+    assert structure.metadata.title == "Single File Submission"
+    assert [section.title for section in structure.sections] == ["Introduction"]
+    assert structure.source_file.endswith(":main.tex")
+
+
+def test_gzip_payload_without_latex_markers_is_still_rejected():
+    """gzip でありさえすれば通る、にはしない（PDF や画像を .tex 扱いしない）。"""
+    import gzip
+
+    from core.document_pipeline.tex_archive import build_structure_from_tex_archive
+
+    with pytest.raises(ValueError):
+        build_structure_from_tex_archive(
+            gzip.compress(b"%PDF-1.7 this is not a TeX source"),
+            document_id="doc-single",
+            source_file="x.tar.gz",
+        )
+
+
 def test_tex_archive_builds_document_structure_with_sections_and_equations():
     from core.document_pipeline.tex_archive import build_structure_from_tex_archive
 
