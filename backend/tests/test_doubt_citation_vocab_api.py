@@ -231,6 +231,15 @@ class TestChallengeMode:
 # ===========================================================================
 
 
+def _allow_ledger_target(monkeypatch):
+    """P4-R8 の編集権限ゲートを通す（本テストは語彙・検証の単体で、権限は
+    ``test_stakes_ledger_api.py`` が検査する）。"""
+    monkeypatch.setattr(
+        doubt, "_require_editable_ledger_target",
+        lambda target_type, target_id, current_user: "doc-1",
+    )
+
+
 class TestAddEvidenceLine:
     def test_invalid_kind_is_422_without_opening_a_session(self, monkeypatch):
         monkeypatch.setattr(doubt, "_pg_session", _no_session)
@@ -263,6 +272,7 @@ class TestAddEvidenceLine:
     def test_any_one_of_the_three_id_families_is_enough(self, monkeypatch, field):
         session = _FakeSession([(_is_ledger_select, [_ledger_row()])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         _capture_audit(monkeypatch)
         body = doubt.EvidenceLineCreateRequest(
             line_kind="consistency", reason="r", **{field: ["x-1"]},
@@ -283,6 +293,7 @@ class TestAddEvidenceLine:
     def test_attribution_comes_from_the_authenticated_user(self, monkeypatch):
         session = _FakeSession([(_is_ledger_select, [_ledger_row()])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         _capture_audit(monkeypatch)
         body = doubt.EvidenceLineCreateRequest(
             line_kind="observation", reason="r", evidence_ids=["ev-1"],
@@ -295,6 +306,7 @@ class TestAddEvidenceLine:
     def test_appends_only_and_never_replaces_the_column(self, monkeypatch):
         session = _FakeSession([(_is_ledger_select, [_ledger_row()])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         _capture_audit(monkeypatch)
         body = doubt.EvidenceLineCreateRequest(
             line_kind="derivation", reason="r", claim_ids=["cl-1"],
@@ -310,6 +322,7 @@ class TestAddEvidenceLine:
     def test_response_carries_the_kind_label(self, monkeypatch):
         session = _FakeSession([(_is_ledger_select, [_ledger_row()])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         _capture_audit(monkeypatch)
         body = doubt.EvidenceLineCreateRequest(
             line_kind="external_reference", reason="r", evidence_ids=["ev-1"],
@@ -320,6 +333,7 @@ class TestAddEvidenceLine:
     def test_audit_uses_the_existing_ledger_entity_type(self, monkeypatch):
         session = _FakeSession([(_is_ledger_select, [_ledger_row()])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         audit = _capture_audit(monkeypatch)
         body = doubt.EvidenceLineCreateRequest(
             line_kind="observation", reason="r", evidence_ids=["ev-1"],
@@ -335,6 +349,7 @@ class TestPatchEvidenceLine:
     def test_missing_ledger_row_is_404(self, monkeypatch):
         session = _FakeSession([(_is_ledger_select, [])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         with pytest.raises(HTTPException) as exc:
             doubt.patch_evidence_line(
                 "claim", "c1", "line-1",
@@ -347,6 +362,7 @@ class TestPatchEvidenceLine:
         row = _ledger_row(evidence_lines=[_evidence_line()])
         session = _FakeSession([(_is_ledger_select, [row])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         with pytest.raises(HTTPException) as exc:
             doubt.patch_evidence_line(
                 "claim", "c1", "nope",
@@ -363,6 +379,7 @@ class TestPatchEvidenceLine:
         ])
         session = _FakeSession([(_is_ledger_select, [row])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         _capture_audit(monkeypatch)
         result = doubt.patch_evidence_line(
             "claim", "c1", "line-2",
@@ -380,6 +397,7 @@ class TestPatchEvidenceLine:
         row = _ledger_row(evidence_lines=[_evidence_line()])
         session = _FakeSession([(_is_ledger_select, [row])])
         monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _allow_ledger_target(monkeypatch)
         _capture_audit(monkeypatch)
         with pytest.raises(HTTPException) as exc:
             doubt.patch_evidence_line(

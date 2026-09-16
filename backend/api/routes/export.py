@@ -964,7 +964,7 @@ def _load_claims_for_course(session: Any, course_id: str, document_ids: list[str
             SELECT DISTINCT tc.id, tc.document_id::text, tc.source_scope, tc.claim_type,
                    tc.text, tc.normalized_text, tc.concepts, tc.equation,
                    tc.support_status, tc.evidence_text, tc.review_status,
-                   tc.created_at
+                   tc.created_at, tc.origin, tc.parent_claim_id::text
             FROM theory_claims_live tc
             JOIN chunks c ON c.id = tc.chunk_id
             JOIN theory_components_live tcomp ON tcomp.primary_chunk_id = c.id
@@ -985,7 +985,7 @@ def _load_claims_for_course(session: Any, course_id: str, document_ids: list[str
                 SELECT DISTINCT tc.id, tc.document_id::text, tc.source_scope, tc.claim_type,
                        tc.text, tc.normalized_text, tc.concepts, tc.equation,
                        tc.support_status, tc.evidence_text, tc.review_status,
-                       tc.created_at
+                       tc.created_at, tc.origin, tc.parent_claim_id::text
                 FROM theory_claims_live tc
                 WHERE tc.document_id IN ({uuid_ph})
                    OR tc.chunk_id IN (
@@ -1004,7 +1004,7 @@ def _load_claims_for_document(session: Any, document_id: str) -> list[dict]:
             SELECT tc.id, tc.document_id::text, tc.source_scope, tc.claim_type,
                    tc.text, tc.normalized_text, tc.concepts, tc.equation,
                    tc.support_status, tc.evidence_text, tc.review_status,
-                   tc.created_at
+                   tc.created_at, tc.origin, tc.parent_claim_id::text
             FROM theory_claims_live tc
             WHERE tc.document_id = CAST(:document_id AS uuid)
                OR tc.chunk_id IN (SELECT id FROM chunks WHERE document_id::text = :document_id)
@@ -1036,6 +1036,16 @@ def _rows_to_claims(rows: list) -> list[dict]:
             "evidence_text": r[9] or "",
             "review_status": r[10] or "teacher_review_required",
         })
+        # V-11: 親子（atomic rewrite の子 claim）と由来は**内容列**なので、束に載せて
+        # おかないと往復のたびに失われる（再取り込みで origin が claim_object に、
+        # parent_claim_id が NULL に潰れる）。親は束の中の claim_id 空間で書く
+        # （取り込み側が id 写像で張り直す）。
+        origin = str(r[12] or "") if len(r) > 12 else ""
+        parent_id = str(r[13] or "") if len(r) > 13 else ""
+        if origin:
+            claims[-1]["origin"] = origin
+        if parent_id:
+            claims[-1]["parent_claim_id"] = parent_id
     return claims
 
 
@@ -3764,18 +3774,68 @@ def _read_upload(bundle_file) -> bytes:
     return data
 
 
+#: 取り込みを覆す経路（DC2 の再審。取り込んだ主張は候補として着地するので、
+#: 個別のレビュー遷移で却下・要修正に落とせる）。
+_IMPORT_REOPEN_PATH = "POST /api/admin/claims/{claim_id}/review"
+
+
+def _import_decision_context(
+    *, parsed, stats: dict, replace: bool, dry_run_confirmed: bool
+) -> dict:
+    """束の取り込みの確定文脈（DC1〜DC4）。
+
+    提示集合 = dry-run が画面に出した「種別: 件数」、適用集合 = 実際に live 行へ
+    着地した「種別: 件数」。両者の食い違いは
+    ``presented_matches_applied`` に出る（呼び出し側が「一致した」と申告しない = DC2）。
+    """
+    from core import decision_context
+
+    def pairs(counts: dict) -> list[str]:
+        return [f"{key}:{int(value)}" for key, value in sorted(counts.items())]
+
+    applied: dict[str, int] = {}
+    for key in ("claims", "components", "equations", "evidence", "derivation_steps"):
+        entry = (stats or {}).get(key) or {}
+        applied[key] = int(entry.get("updated") or 0) + int(entry.get("inserted") or 0)
+    applied["graph_nodes"] = int(((stats or {}).get("graph") or {}).get("nodes") or 0)
+
+    return decision_context.build_decision_context(
+        basis=decision_context.BASIS_KNOWLEDGE_IMPORT_BUNDLE,
+        presented_ids=pairs(parsed.counts()),
+        applied_ids=pairs(applied),
+        # その場で選べた代替: 取り込まずに見送る / 確認（dry-run）だけで止める。
+        alternatives=(decision_context.ALT_DISMISS, decision_context.ALT_SKIP_STEP),
+        reopen_path=_IMPORT_REOPEN_PATH,
+        reopen_statuses=("rejected", "needs_revision"),
+        # 確認画面が出すのは件数と事実文で、逐語の根拠は出していない。
+        evidence_shown=False,
+        # 「置き換えを確認した」「確認画面を通した」はクライアントの申告（DC4）。
+        client_reported={
+            "replace_requested": bool(replace),
+            "dry_run_confirmed": bool(dry_run_confirmed),
+        },
+    )
+
+
 @router.post("/api/documents/{document_id}/import-bundle")
 def import_document_bundle(
     document_id: str,
     bundle: UploadFile = File(...),
     dry_run: bool = Query(True, description="true なら書き込まずに事実だけ返す（既定）"),
     replace: bool = Query(False, description="live 行がある教材を置き換えることの明示"),
+    bundle_sha256: str = Query(
+        "",
+        description="確認（dry_run=true）で返された束のハッシュ。確定時は必須",
+    ),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
     """export bundle を 1 教材へ取り込む（§4.2）。
 
     既定は `dry_run=true` で**書き込み 0**。実行時に live 行があって `replace` が
     明示されていなければ 409（T-2: 無言で上書きしない）。
+
+    確定（`dry_run=false`）は、確認で返した `bundle_sha256` を必須で受け、サーバ側で
+    再計算した値と照合する（確認したものと違う束が確定されない = TOCTOU の封じ）。
     """
     from core.knowledge_import import apply as import_apply
     from core.knowledge_import.bundle import BundleError, parse_bundle
@@ -3799,6 +3859,30 @@ def import_document_bundle(
             },
         )
 
+    # 確定は「確認した束」に対してだけ効く（TOCTOU: 確認と確定の間に差し替えられた
+    # 束をそのまま書き込まない）。照合はサーバが再計算した値で行う。
+    expected_sha = str(bundle_sha256 or "").strip().lower()
+    if not dry_run:
+        if not expected_sha:
+            raise _import_validation_error(
+                "確認していない束は取り込めません。",
+                facts=[
+                    "確認していない束は取り込めません。"
+                    "先に［確認］を実行し、その束のまま取り込んでください。"
+                ],
+            )
+        if expected_sha != parsed.sha256:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "message": "確認した束と、いま送られた束が違います。",
+                    "facts": [
+                        "確認した束と、いま送られた束が違います。"
+                        "もう一度［確認］からやり直してください。",
+                    ],
+                },
+            )
+
     session = _pg_session()
     try:
         live_counts = import_apply.live_row_counts(session, document_id)
@@ -3807,6 +3891,17 @@ def import_document_bundle(
         source = parsed.source()
 
         if dry_run:
+            # 置き換えで何が表示対象から外れ、何が残るか（P4-R2）。件数とラベルの列挙は
+            # 教員向けの運用情報で、学習者には出ない経路。
+            supersede_counts = (
+                import_apply.supersede_preview(
+                    session,
+                    document_id=document_id,
+                    incoming_keys=import_apply.incoming_stable_keys(parsed, document_id),
+                )
+                if has_live
+                else {}
+            )
             return {
                 "dry_run": True,
                 "source": {
@@ -3816,10 +3911,14 @@ def import_document_bundle(
                     "document_ids": parsed.source_document_ids,
                     "exported_at": parsed.exported_at,
                     "app": parsed.app,
+                    "app_label": parsed.app_label,
                 },
                 "counts": parsed.counts(),
                 "target": {"document_id": document_id, "has_live_rows": has_live},
                 "would_supersede": has_live,
+                "would_supersede_counts": supersede_counts,
+                # 確定はこのハッシュを必須で送り返す（確認した束と同じことの照合）。
+                "bundle_sha256": parsed.sha256,
                 "warnings": validation.get("warnings", []),
                 "facts": facts,
             }
@@ -3831,8 +3930,8 @@ def import_document_bundle(
                     "message": "この教材には既に解析結果があります。",
                     "facts": [
                         "この教材には既に解析結果があります。"
-                        "取り込むと再解析と同じ規則で置き換わります"
-                        "（教員が確定した状態は保たれます）。"
+                        "取り込むと、束に無い既存の項目はこの教材の表示対象から外れます"
+                        "（教員が確定した項目は外しません）。"
                         "置き換える場合は replace を指定してください。",
                     ],
                 },
@@ -3882,6 +3981,9 @@ def import_document_bundle(
         stats=stats,
         replace=replace,
         user_id=current_user.get("id"),
+        decision_ctx=_import_decision_context(
+            parsed=parsed, stats=stats, replace=replace, dry_run_confirmed=True,
+        ),
     )
     return {"imported": True, "run_id": run_id, "stats": stats, "facts": facts}
 
@@ -3894,10 +3996,37 @@ def _record_import_audit(
     stats: dict,
     replace: bool,
     user_id: str | None,
+    decision_ctx: dict | None = None,
 ) -> None:
-    """取り込みを監査台帳に記帳する（KT8。資料本文は載せない）。"""
+    """取り込みを監査台帳に記帳する（KT8。資料本文は載せない）。
+
+    確定文脈（DC1）は :func:`_import_decision_context` が組み立て、ここで
+    ``attach_decision_context`` が metadata に足す。
+    """
+    from core import decision_context
     from core.schema import AUDIT_ENTITY_IMPORT
     from services import record_review_event
+
+    metadata = {
+        "action": "imported",
+        "run_id": run_id,
+        "export_id": bundle.export_id,
+        "source_object_type": bundle.source_object_type,
+        "source_object_id": bundle.source_object_id,
+        "source_document_ids": bundle.source_document_ids,
+        "bundle_sha256": bundle.sha256,
+        "schema_version": bundle.schema_version,
+        "counts": bundle.counts(),
+        "replace": bool(replace),
+        # reference_health は run の stage_outputs に残る検査結果のスナップショット。
+        # 監査行には載せない（同じ事実を 2 箇所に増やさない）。
+        "stats": {
+            k: v for k, v in (stats or {}).items()
+            if k not in ("source", "reference_health")
+        },
+    }
+    if decision_ctx:
+        metadata = decision_context.attach_decision_context(metadata, decision_ctx)
 
     record_review_event(
         AUDIT_ENTITY_IMPORT,
@@ -3905,17 +4034,5 @@ def _record_import_audit(
         "",
         "imported",
         user_id,
-        {
-            "action": "imported",
-            "run_id": run_id,
-            "export_id": bundle.export_id,
-            "source_object_type": bundle.source_object_type,
-            "source_object_id": bundle.source_object_id,
-            "source_document_ids": bundle.source_document_ids,
-            "bundle_sha256": bundle.sha256,
-            "schema_version": bundle.schema_version,
-            "counts": bundle.counts(),
-            "replace": bool(replace),
-            "stats": {k: v for k, v in (stats or {}).items() if k != "source"},
-        },
+        metadata,
     )

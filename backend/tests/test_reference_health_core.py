@@ -301,3 +301,35 @@ class TestDbLayer:
         check_document_references(session, "doc-uuid")
         for sql in session.statements:
             assert "CAST(:document_id AS uuid)" in sql
+
+
+class TestSynthesizedClaimsAreNotBroken:
+    """V-9: 式から合成された主張は chunk を持たないのが正常（常時赤にしない）。"""
+
+    def test_equation_synthesis_claims_are_not_counted_as_broken(self):
+        from core.reference_health import STATUS_OK, build_reference_health
+
+        result = build_reference_health(claims=[
+            {"id": "c1", "chunk_id": "", "text": "eq_1 relates A and B",
+             "origin": "equation_synthesis"},
+        ])
+        assert result["status"] == STATUS_OK
+        assert "claim_without_chunk" not in result["details"]
+
+    def test_a_span_claim_without_a_chunk_is_still_broken(self):
+        from core.reference_health import STATUS_BROKEN, build_reference_health
+
+        result = build_reference_health(claims=[
+            {"id": "c1", "chunk_id": "", "text": "本文から切り出した主張", "origin": "span"},
+        ])
+        assert result["status"] == STATUS_BROKEN
+        assert result["details"]["claim_without_chunk"]
+
+    def test_an_unknown_origin_without_a_chunk_is_still_broken(self):
+        """由来が分からない主張は従来どおり事実として挙げる（黙って消さない）。"""
+        from core.reference_health import STATUS_BROKEN, build_reference_health
+
+        result = build_reference_health(claims=[
+            {"id": "c1", "chunk_id": "", "text": "由来不明の主張"},
+        ])
+        assert result["status"] == STATUS_BROKEN

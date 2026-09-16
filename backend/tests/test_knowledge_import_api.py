@@ -14,6 +14,7 @@ DB は monkeypatch で差し替える（``test_graph_paper_layer_api.py`` と同
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import sys
@@ -200,12 +201,21 @@ def env(monkeypatch):
     return state
 
 
-def _call(bundle_bytes, *, dry_run=True, replace=False, user=None):
+def _call(bundle_bytes, *, dry_run=True, replace=False, user=None, bundle_sha256=None):
+    """取り込み API の直接呼び出し。
+
+    確定（``dry_run=False``）は確認で返されたハッシュを必須で受ける（P4-R4）。
+    既定では「確認した束をそのまま確定した」= 実際のハッシュを送る。TOCTOU の
+    検査は ``bundle_sha256`` を明示して行う。
+    """
+    if bundle_sha256 is None:
+        bundle_sha256 = "" if dry_run else hashlib.sha256(bundle_bytes).hexdigest()
     return export.import_document_bundle(
         _DOC,
         bundle=_Upload(bundle_bytes),
         dry_run=dry_run,
         replace=replace,
+        bundle_sha256=bundle_sha256,
         current_user=user or _TEACHER,
     )
 
@@ -516,3 +526,122 @@ class TestRoundTrip:
         assert out["imported"] is True
         assert env["session"].committed == 1
         assert not any(s.upper().startswith("DELETE") for s in env["session"].statements)
+
+
+# ---------------------------------------------------------------------------
+# P4-R4: 確認した束と、確定される束が同じであること（TOCTOU）
+# ---------------------------------------------------------------------------
+
+
+class TestBundleHashHandshake:
+    def test_dry_run_returns_the_hash(self, env):
+        out = _call(_bundle_bytes(), dry_run=True)
+        assert out["bundle_sha256"] == hashlib.sha256(_bundle_bytes()).hexdigest()
+
+    def test_execution_without_the_hash_is_422_and_writes_nothing(self, env):
+        with pytest.raises(HTTPException) as exc:
+            _call(_bundle_bytes(), dry_run=False, bundle_sha256="")
+        assert exc.value.status_code == 422
+        assert "確認していない束は取り込めません。" in exc.value.detail["facts"][0]
+        assert env["session"].writes() == []
+        assert env["session"].committed == 0
+
+    def test_a_different_bundle_than_the_confirmed_one_is_409(self, env):
+        """確認と確定の間で束が差し替えられたら書き込まない。"""
+        confirmed = hashlib.sha256(_bundle_bytes()).hexdigest()
+        swapped = _bundle_bytes(schema_version="0.3.1")  # 別の中身（検証は通る）
+        with pytest.raises(HTTPException) as exc:
+            _call(swapped, dry_run=False, bundle_sha256=confirmed)
+        assert exc.value.status_code == 409
+        assert "確認した束と、いま送られた束が違います。" in exc.value.detail["message"]
+        assert env["session"].writes() == []
+        assert env["session"].committed == 0
+
+    def test_the_hash_is_compared_case_insensitively(self, env):
+        sha = hashlib.sha256(_bundle_bytes()).hexdigest().upper()
+        out = _call(_bundle_bytes(), dry_run=False, bundle_sha256=sha)
+        assert out["imported"] is True
+
+
+# ---------------------------------------------------------------------------
+# P4-R2: 人間が確定した行は replace でも表示対象から外さない
+# ---------------------------------------------------------------------------
+
+
+class _LiveRowSession(_FakeSession):
+    """live 行を持つ教材を模擬する（保護スキャンと sync の SELECT に同じ行を返す）。"""
+
+    def __init__(self, rows):
+        super().__init__(live_claims=len(rows), live_components=0)
+        self._rows = rows
+        self.supersede_params: list[dict] = []
+
+    def execute(self, stmt, params=None):
+        sql = " ".join(str(stmt).split())
+        upper = sql.upper()
+        if "SELECT COUNT(*)" in upper:
+            return super().execute(stmt, params)
+        if "SUPERSEDED_AT = NOW()" in upper:
+            self.statements.append(sql)
+            self.supersede_params.append(dict(params or {}))
+            return _Result([])
+        if upper.startswith("SELECT") and (
+            "THEORY_CLAIMS_LIVE" in upper or "FROM THEORY_CLAIMS " in upper
+        ):
+            self.statements.append(sql)
+            return _Result(self._rows)
+        return super().execute(stmt, params)
+
+    def updates_for(self, row_id: str) -> list[str]:
+        return [s for s in self.statements if row_id in str(s) or row_id in ""]
+
+
+def _approved_row(stable_key="k1:approved-locally"):
+    return {
+        "id": "aaaaaaaa-0000-0000-0000-000000000001",
+        "stable_key": stable_key,
+        "agent_id": "claim_local",
+        "review_status": "teacher_approved",
+        "label": "承認済みの主張",
+        "created_by": "u-teacher",
+    }
+
+
+class TestApprovedRowsSurviveReplace:
+    def test_an_approved_row_absent_from_the_bundle_is_not_superseded(self, monkeypatch, env):
+        row = _approved_row()
+        session = _LiveRowSession([row])
+        monkeypatch.setattr(export, "_pg_session", lambda: session)
+
+        _call(_bundle_bytes(), dry_run=False, replace=True)
+
+        superseded_ids = {
+            value for params in session.supersede_params for value in params.values()
+        }
+        assert row["id"] not in superseded_ids, "承認済みの行が supersede された"
+
+    def test_a_candidate_row_absent_from_the_bundle_is_superseded(self, monkeypatch, env):
+        row = _approved_row()
+        row["review_status"] = "teacher_review_required"  # 人間が触っていない
+        session = _LiveRowSession([row])
+        monkeypatch.setattr(export, "_pg_session", lambda: session)
+
+        _call(_bundle_bytes(), dry_run=False, replace=True)
+
+        superseded_ids = {
+            value for params in session.supersede_params for value in params.values()
+        }
+        assert row["id"] in superseded_ids
+
+    def test_the_dry_run_says_what_drops_out_and_what_stays(self, monkeypatch, env):
+        session = _LiveRowSession([_approved_row()])
+        monkeypatch.setattr(export, "_pg_session", lambda: session)
+
+        out = _call(_bundle_bytes(), dry_run=True)
+
+        counts = out["would_supersede_counts"]["claims"]
+        assert counts["kept_human_decided"] == 1
+        assert counts["superseded"] == 0
+        assert counts["kept_labels"] == ["承認済みの主張"]
+        assert session.committed == 0
+        assert session.writes() == []

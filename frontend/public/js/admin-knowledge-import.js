@@ -34,9 +34,11 @@
   ];
 
   // 置き換えの確認文（T-2）。サーバの 409 と同じ事実を、押す前に見せる。
+  // P4-R2: 「保たれます」とだけ言わない。束に無い既存の項目が表示対象から外れることを
+  // 先に言い、そのうえで教員が確定した項目は外さないと分けて言う。
   var REPLACE_CONFIRM_TEXT =
-    "この教材には解析結果があります。取り込むと再解析と同じ規則で置き換わります" +
-    "（教員が確定した状態は保たれます）。";
+    "この教材には解析結果があります。取り込むと、束に無い既存の項目は" +
+    "この教材の表示対象から外れます（教員が確定した項目は外しません）。";
 
   var FILE_REQUIRED_TEXT = "取り込む束（zip）を選んでください。";
   var DRY_RUN_REQUIRED_TEXT = "先に［確認］で束の中身を確かめてください。";
@@ -241,8 +243,11 @@
     var html = '<div style="border:1px solid var(--color-border-tertiary);border-radius:6px;padding:10px">';
 
     html += '<div style="font-size:12px;color:var(--color-text-primary);font-weight:600;margin-bottom:4px">束の出所</div>';
+    // 書き出し元はサーバが組み立てた 1 行（app は {name, version, git_commit} の dict なので
+    // そのまま連結すると [object Object] になる）。
+    var appLabel = source.app_label || (source.app && source.app.name) || "";
     html += '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">' +
-      esc("書き出し元: " + (source.app || "不明")) + "</div>";
+      esc("書き出し元: " + (appLabel || "不明")) + "</div>";
     if (source.exported_at) {
       html += '<div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:2px">' +
         esc("書き出し日時: " + source.exported_at) + "</div>";
@@ -262,6 +267,34 @@
       html += "<li>" + esc(label + ": " + value) + "</li>";
     }
     html += "</ul>";
+
+    // P4-R2: 置き換えで「何が表示対象から外れ、何が残るか」をラベルで見せる
+    // （件数だけの数値バッジにしない。サーバが返した種別ごとの事実をそのまま描く）。
+    var supersede = plan.would_supersede_counts || {};
+    var supersedeRows = "";
+    for (var s = 0; s < COUNT_LABELS.length; s++) {
+      var sKey = COUNT_LABELS[s][0];
+      var entry = supersede[sKey];
+      if (!entry) continue;
+      var dropped = entry.superseded || 0;
+      var kept = entry.kept_human_decided || 0;
+      if (!dropped && !kept) continue;
+      var line = (entry.label || COUNT_LABELS[s][1]) + ": ";
+      line += "表示対象から外れる " + dropped + " 件";
+      if (kept) line += " / 教員が確定しているため残る " + kept + " 件";
+      supersedeRows += "<li>" + esc(line);
+      var labels = (entry.labels || []).concat([]);
+      if (labels.length) {
+        supersedeRows += '<div style="color:var(--color-text-tertiary);margin:2px 0 0 0">' +
+          esc(labels.join(" / ") + (entry.labels_truncated ? " ほか" : "")) + "</div>";
+      }
+      supersedeRows += "</li>";
+    }
+    if (supersedeRows) {
+      html += '<div style="font-size:12px;color:var(--color-text-primary);font-weight:600;margin:8px 0 4px">取り込むと表示対象から外れるもの</div>';
+      html += '<ul style="margin:0 0 4px;padding-left:18px;font-size:12px;color:var(--color-text-secondary)">' +
+        supersedeRows + "</ul>";
+    }
 
     var facts = plan.facts || [];
     if (facts.length) {
@@ -322,10 +355,20 @@
   }
 
   function importPath(dryRun) {
+    if (dryRun) {
+      return (
+        "/documents/" + encodeURIComponent(state.documentId) +
+        "/import-bundle?dry_run=true"
+      );
+    }
+    // 確定は「確認した束」に対してだけ効く。確認で受け取ったハッシュを送り返し、
+    // サーバが再計算した値と照合する（違えば 409・事実文）。
+    var sha = (state.plan && state.plan.bundle_sha256) || "";
     return (
       "/documents/" + encodeURIComponent(state.documentId) +
-      "/import-bundle?dry_run=" + (dryRun ? "true" : "false") +
-      (dryRun ? "" : "&replace=" + (state.replace ? "true" : "false"))
+      "/import-bundle?dry_run=false" +
+      "&replace=" + (state.replace ? "true" : "false") +
+      "&bundle_sha256=" + encodeURIComponent(sha)
     );
   }
 

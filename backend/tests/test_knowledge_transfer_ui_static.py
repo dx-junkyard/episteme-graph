@@ -93,7 +93,15 @@ class TestImportTwoStepFlow:
 
     def test_dry_run_sends_true_and_execute_sends_false(self):
         block = _function_block(_read(IMPORT_JS), "importPath")
-        assert 'dry_run=" + (dryRun ? "true" : "false")' in block
+        assert "dry_run=true" in block
+        assert "dry_run=false" in block
+
+    def test_execute_sends_back_the_hash_from_the_dry_run(self):
+        """P4-R4: 確認した束と違う束が確定されない（TOCTOU）。"""
+        block = _function_block(_read(IMPORT_JS), "importPath")
+        assert "state.plan.bundle_sha256" in block
+        assert "bundle_sha256=" in block
+        assert "encodeURIComponent(sha)" in block
 
     def test_execute_requires_a_completed_dry_run(self):
         src = _read(IMPORT_JS)
@@ -124,16 +132,21 @@ class TestReplaceIsExplicit:
         assert "target.has_live_rows && !state.replace" in block
 
     def test_replace_confirmation_states_the_consequence(self):
+        """P4-R2: 押す前の確認文が、何が外れて何が残るかを言う。"""
         src = _read(IMPORT_JS)
         assert "この教材には解析結果があります。" in src
-        assert "再解析と同じ規則で置き換わります" in src
-        assert "教員が確定した状態は保たれます" in src
+        assert "束に無い既存の項目" in src
+        assert "表示対象から外れます" in src
+        assert "教員が確定した項目は外しません" in src
+        # 何が外れるかを言わずに「保たれます」とだけ言う旧文言は復活させない。
+        assert "教員が確定した状態は保たれます" not in src
 
     def test_replace_flag_is_sent_only_on_execution(self):
         block = _function_block(_read(IMPORT_JS), "importPath")
         assert 'replace=" + (state.replace ? "true" : "false")' in block
         # dry-run では replace を送らない（確認は常に書き込み 0）。
-        assert '(dryRun ? "" :' in block
+        dry_branch = block.split("if (dryRun)")[1].split("}")[0]
+        assert "replace" not in dry_branch
 
 
 class TestImportHonestyAndNumbers:
@@ -326,3 +339,22 @@ class TestLearningSideUntouched:
             "challenge_mode",
         ):
             assert token not in src, token
+
+
+class TestSupersedePreviewIsShown:
+    """P4-R2: 押す前に「何が外れて何が残るか」を見せる（確認画面の役目）。"""
+
+    def test_the_plan_renders_the_supersede_breakdown(self):
+        block = _function_block(_read(IMPORT_JS), "renderPlan")
+        assert "would_supersede_counts" in block
+        assert "表示対象から外れるもの" in block
+        assert "kept_human_decided" in block
+        # ラベルの列挙（どの項目かを教員が見られる）。
+        assert "entry.labels" in block
+        assert "labels_truncated" in block
+
+    def test_the_source_app_is_rendered_as_a_line_not_an_object(self):
+        """P4-R9: 「書き出し元: [object Object]」を出さない。"""
+        block = _function_block(_read(IMPORT_JS), "renderPlan")
+        assert "source.app_label" in block
+        assert 'esc("書き出し元: " + (source.app || "不明"))' not in block

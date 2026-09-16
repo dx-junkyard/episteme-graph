@@ -13,6 +13,9 @@
     chatHistory: [],
     chatMessages: [],
     courseDraft: null,
+    // 学ぶ単位の候補表（handle -> {handle, kind, kind_label, label}）。
+    // course-builder/chat のレスポンス由来で、プレビューの表示名解決だけに使う（P2-R10）。
+    unitCandidatesByHandle: {},
     sending: false,
     currentSessionId: null,
     currentSessionStatus: "draft",
@@ -3674,16 +3677,17 @@
     document.getElementById("reference-health-modal-close").addEventListener("click", function () { overlay.remove(); });
     document.getElementById("reference-health-modal-cancel").addEventListener("click", function () { overlay.remove(); });
     document.getElementById("reference-health-recheck").addEventListener("click", function () {
-      loadReferenceHealth(documentId);
+      // 「再確認」だけがその場で再計算する（既定は run 保存済みのスナップショット。P4-R10）
+      loadReferenceHealth(documentId, true);
     });
 
     loadReferenceHealth(documentId);
   }
 
-  function loadReferenceHealth(documentId) {
+  function loadReferenceHealth(documentId, recheck) {
     var btn = document.getElementById("reference-health-recheck");
     if (btn) btn.disabled = true;
-    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/reference-health")
+    apiFetch("/admin/documents/" + encodeURIComponent(documentId) + "/reference-health" + (recheck ? "?recheck=true" : ""))
       .then(function (res) {
         if (!res.ok) throw new Error("status " + res.status);
         return res.json();
@@ -5131,6 +5135,16 @@
         var assistantAnswer = parsed.answer;
         var courseDraft = data.course_draft || parsed.courseDraft;
 
+        // 学ぶ単位の候補表（handle -> 種別・名前）。プレビューで U3 のような内部
+        // handle ではなく単位の名前を出すための材料（P2-R10）。返って来なければ
+        // 前回の表を保つ（消さない）。数値は入っていない（LU5）。
+        if (data.unit_candidates && data.unit_candidates.length) {
+          state.unitCandidatesByHandle = {};
+          data.unit_candidates.forEach(function (c) {
+            if (c && c.handle) state.unitCandidatesByHandle[String(c.handle).toUpperCase()] = c;
+          });
+        }
+
         state.chatMessages.push({ role: "assistant", content: assistantAnswer });
         state.chatHistory.push({ role: "user", content: text });
         state.chatHistory.push({ role: "assistant", content: assistantAnswer });
@@ -5245,6 +5259,16 @@
     return handles;
   }
 
+  // handle（U3）を候補表の名前に直す。候補表が無い / 載っていない handle は
+  // **handle のまま**返す（存在しない名前を作らない = 捏造ガード）。
+  function cbUnitDisplayName(handle) {
+    var key = String(handle || "").trim().toUpperCase();
+    var table = state.unitCandidatesByHandle || {};
+    var found = table[key];
+    if (!found || !found.label) return String(handle || "");
+    return found.kind_label ? ("[" + found.kind_label + "] " + found.label) : found.label;
+  }
+
   // 下書きの前提知識の並び（循環・冗長・未解決・前方参照）をサーバ側の非LLM検査に
   // 問い合わせ、事実の段落として描く。失敗・available=false は何も描かない
   // （fail-soft）。ポーリングはしない（プレビュー描画時の1回だけ）。
@@ -5341,7 +5365,7 @@
             var unitHandles = cbDraftUnitHandles(t);
             if (unitHandles.length) {
               html += '<div class="cb-draft-meta"><span class="cb-meta-label">学ぶ単位:</span> '
-                + unitHandles.map(escHtml).join(", ") + "</div>";
+                + unitHandles.map(cbUnitDisplayName).map(escHtml).join(", ") + "</div>";
             }
             html += "</div>";
           });

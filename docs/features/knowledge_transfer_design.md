@@ -106,7 +106,8 @@ FastAPI / LLM 非 import。`_validate_export_references` は routes 側の既存
 ### 4.3 UI（第2波）
 
 教材行 `⋯` メニュー「束を取り込む…」→ モーダル（ファイル選択 → dry-run の事実表示 → 「取り込む」）。live 行があれば
-「この教材には解析結果があります。取り込むと再解析と同じ規則で置き換わります（教員が確定した状態は保たれます）」の確認 + `replace=true`。
+「この教材には解析結果があります。取り込むと、束に無い既存の項目はこの教材の表示対象から外れます（教員が確定した項目は外しません）」の確認 + `replace=true`
+（文言は 2026-09-13 のレビュー是正 P4-R2。旧文言「教員が確定した状態は保たれます」は、束に無い行が supersede される事実を隠していた）。
 アンカー `materials.row-import` / `materials.import-modal` / `materials.import-submit` + マニュアル節（`11-admin-materials.md`）。
 
 ## 5. P4-2 RAG の構造 1 hop（SA層 kind `retrieved_structure`）
@@ -252,3 +253,38 @@ dry-run の `warnings`（束内部参照の警告）は UI で「束の中で解
 
 検証: backend フルスイート 15,863 pass / 27 skipped（E 報告時。ベースライン 15,515 → +348）。src 1,924 pass（A層非改変）。
 実 DB での 083 適用・取り込みの往復 E2E は docker 復帰後。
+
+### 14.1 2026-09-13 — 敵対的レビュー + 実データ検証の是正（班 F4）
+
+第1波の実装に対する敵対的セキュリティレビュー（P4-R1〜R12）と scratch DB での実データ検証（V-2 / V-8 / V-9 / V-11）の是正。
+migration なし・新エンドポイントなし・LLM 回数不変。
+
+| # | 何が問題だったか | 是正 |
+|---|---|---|
+| P4-R1 | 束の検査が**圧縮サイズ**（50MB）しか見ず、`zf.read()` が無制限に伸長した（PoC: 654KB の zip で RSS 1.1GB） | `bundle.py` に `MAX_UNCOMPRESSED_BYTES`(200MB) / `MAX_ENTRY_UNCOMPRESSED_BYTES`(64MB)。読む前に**宣言サイズの合計**を検査し、読むときも `zf.open()` + `read(limit+1)` で**実測**打ち切り（宣言が嘘でも伸ばさない）。`json.loads` の `RecursionError`（深い入れ子）も `BundleError` に畳む = 500 を出さない（P4-R12）。門は `parse_bundle` の中なので `dry_run=true` でも同じく効く。是正後の同 PoC で RSS 29.5MB |
+| P4-R2 | `replace=true` が、束に無い live 行を**教員が承認・却下した行ごと** supersede した（回復は手作業） | `apply.py` が sync に渡す**前**に、人間が確定した行（`review_status ∈ teacher_approved / teacher_reviewed / endorsed / rejected / needs_revision`、component は `_component_human_touched` も）を incoming へ「そのまま」合流させる（`merge_protected_rows`。`values` は空なので内容列は 1 つも UPDATE されない）。`sync_live_rows` は非改変。dry-run は `would_supersede_counts`（種別ごとの `superseded` / `kept_human_decided` / ラベル列挙）を返し、事実文を「束に無い既存の項目は表示対象から外れます」+「教員が確定した項目は外しません」の 2 文に改訂（旧「教員が確定した状態は保たれます」は削除）。**stable_key を持たない live 行は合流できない**ので `unmatchable` として正直に数える |
+| P4-R3 | 1 つの束で作れる行数に天井が無かった | `MAX_IMPORT_ITEMS_PER_KIND`(5000)。超過は 422 の事実文（数値は書かない） |
+| P4-R4 | 確認（dry-run）と確定の間に別の束へ差し替えられた（TOCTOU）。一括確定なのに `decision_context` が無かった | dry-run が `bundle_sha256` を返し、確定は**必須**引数として受けてサーバの再計算値と照合（欠落 422 / 不一致 409・どちらも書き込み 0）。`decision_context.BASIS_KNOWLEDGE_IMPORT_BUNDLE` を新設し、`presented` = dry-run が見せた「種別:件数」/ `applied` = 実際に着地した「種別:件数」/ `alternatives` = `dismiss`(取り込まない) + `skip_step`(確認だけで止める) / `reopen_path` = `POST /api/admin/claims/{claim_id}/review` / `evidence_shown=False` / `client_reported` に `replace_requested`・`dry_run_confirmed` を隔離（DC4） |
+| P4-R5 | manifest の `app` が入れ子 dict のまま run options / 監査 / 画面へ素通しした（画面は `[object Object]`） | `app` は `{name, version, git_commit}` の**スカラー 3 つ**に絞り各 200 字で切る。`export_id` / `exported_at` / `source_object_id` も 200 字、`source_document_ids` は 50 件。画面用に `app_label`（`name（version）`）を dry-run が返す |
+| P4-R6 | `support_status` の既定が `source_backed`（= この教材で出典に当たったという主張） | 既定を廃止。束が明示した値のみ採り、無ければ `review_required`（`IMPORT_SUPPORT_STATUS_FALLBACK`） |
+| P4-R7 | 取り込み直後の参照の整合がどこにも残らなかった | `apply_import` 末尾で `check_document_references` を best-effort 実行し、取り込み run の `stage_outputs.reference_health` に残す（パイプラインと同じ位置・同じ形。失敗は `unchecked`） |
+| P4-R8 | `POST|PATCH .../ledger/{type}/{id}/evidence-lines` が `_require_teacher` だけで、**他人の教材の台帳**へ記帳できた | `_require_editable_ledger_target()` が target → document（claim / component / equation は live 行、assumption は `document_ids`、加えて台帳行の `document_id`）を解決し `_require_editable_document_or_404` を通す。解決できない・編集できないはどちらも同一の 404。本文の形の検証は DB を開く前のまま（不正な本文は対象の有無に関わらず 422） |
+| P4-R9 | 画面の「書き出し元: [object Object]」 | `source.app_label` を描く（サーバが組んだ 1 行。JS 側で辞書を組み立てない） |
+| P4-R10 | 参照の整合 API が**開くたびに**グラフ・主張・部品・単位を全走査した。nginx の `client_max_body_size 60m` が API 上限より過大 | 既定は run に保存済みの事実（`load_recorded_reference_health`。採用 run 優先 → 最新 run）を返し、`?recheck=true` のときだけ再計算。**保存が無い教材（本層より前に解析した教材）は空の画面を返さずその場で検査する**（設計からの意図的差分）。返す `source` は `recorded` / `rechecked`。nginx は 55m（50MB + multipart の包み） |
+| P4-R11 | 「スキーマ版が対応していません」で次の一手が無かった | 422 の事実文に「書き出し元のインスタンスで書き出し直してください」を明記。0.2.x を stable_key 再計算で受けることは技術的には可能だが v1 では**やらない**（束の形が違えば取り込みの前提も違う。受けるなら版ごとの読み分けを設計してから） |
+| V-2 | derivation step の `step_id`（`step_001`）はチェーン内でしか一意でなく、別チェーンの同名 step と stable_key が衝突して取り込みが `uq_knowledge_derivation_steps_stable_key_live` 違反で落ちた | `rows.py` が `ko_keys.derivation_step_agent_id(derivation_id, step_id)` と `derivation_step_stable_key(..., derivation_id=, step_index=)`（`core/knowledge_objects/stable_key.py` = 書き手と共有の正本）を使う。**書き手（`persistence._derivation_items`）と同じ結果を出すこと**をテストで固定 |
+| V-8 | `resolve_retrieved_structure` の学習者向け事実文に生 TeX がそのまま出た（`Equation (3.55) defines \delta P_{\mathrm{shot}}.`） | 解決器の `_safe()` を `core/learner_context_common.py::safe_text`（内部 ID + 生 TeX の正本述語）に委譲。**この層で TeX 判定を再実装しない**（テストが `looks_like_tex_math` の不在を固定） |
+| V-9 | `reference_health` が式由来の合成 claim（`origin='equation_synthesis'`・`chunk_id` を持たないのが正常）を `claim_without_chunk` に数え、計器が常時赤になった | `_CHUNKLESS_CLAIM_ORIGINS` で対象外に。由来不明の `chunk_id` 無し claim は従来どおり事実として挙げる（黙って消さない） |
+| V-1（余波） | 取り込みが `knowledge_evidence` に `review_status` を積んでいた（078 にその列は無い = 実 DB では INSERT が落ちる） | `evidence_rows` は値を積まず、evidence の `preserved_columns` も空にした（書き手 `persistence._evidence_items` と同じ扱い）。保護スキャンも evidence では `review_status` を読まない |
+| V-11 | export→import の往復で claim の `origin` / `parent_claim_id` が失われた（`atomic_rewrite` 74 → 0 / 親 74 → 73） | export が claims に `origin` / `parent_claim_id`（**束の中の claim_id 空間**）を載せる（値が無ければキーごと出さない）。import は語彙内の `origin` のみ復元し、**分からないときは `values` にキーを入れない**（= 既存行の内容列を上書きしない）。親子は sync 後に `link_claim_parents` が id 写像で張り直し、解決できない親は触らない（NULL で潰さない） |
+
+不変条項との関係: KT2（承認非継承）・KT4（stable_key 再計算）・KT5（行を消さない）・KT6（権限 fail-closed）は崩していない。
+P4-R2 は KT5 の**強化**（supersede も「人間の確定を倒す」なら情報の喪失とみなす）。
+
+ガードレール: `test_knowledge_import_guardrails.py::TestAdversarialBundles`（zip bomb / 実測打ち切り / 深い入れ子 / 項目数 / `../` エントリ / manifest の縮約 / 版の案内）、
+`test_knowledge_import_api.py::TestBundleHashHandshake`・`TestApprovedRowsSurviveReplace`、`test_knowledge_import_core.py::TestWriterAndImporterAgreeOnKeys`、
+`test_stakes_ledger_api.py::TestEvidenceLineRequiresDocumentEdit`、`test_decision_context_guardrails.py`（新 basis の call site）、
+`test_reference_health_{core,api}.py`（V-9 / スナップショット既定）、`test_knowledge_transfer_retrieved_structure.py`（V-8）。
+`zf.open` は**メモリ上のストリーム**なので、「ディスクへ展開しない」ガードレールは `extractall` / `.extract(` / `tempfile` と**素の** `open(`（`zf.` が前に付かない）を禁止する形に精密化した。
+
+検証: backend フルスイート 16,014 pass / 27 skipped。実 DB での往復 E2E は docker 復帰後。

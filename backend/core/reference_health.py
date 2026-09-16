@@ -10,6 +10,8 @@
 2. ``theory_components_live`` の ``evidence_claims`` / ``linked_claim_ids`` が claims に、
    ``linked_equation_ids`` が ``knowledge_equations``（live 行）に着地しているか。
 3. ``theory_claims_live.chunk_id IS NULL``（出典チャンクに着地していない主張）。
+   ただし ``origin='equation_synthesis'``（式から合成された主張）は本文のチャンクから
+   切り出されたものではないので対象外（V-9: 常時赤の計器を作らない）。
 4. ``learning_units_live`` の ``linked_claim_ids`` / ``linked_component_ids`` が
    各表に着地しているか。
 
@@ -32,11 +34,16 @@
 
 - パイプライン ``_stage_completed``（best-effort・失敗は握る）→ run の
   ``stage_outputs.reference_health`` に検査時点の事実を残す（生成ログの一部）。
-- ``GET /api/admin/documents/{id}/reference-health``（読み取り専用・その場で再検査・保存しない）。
+- ``GET /api/admin/documents/{id}/reference-health``（読み取り専用。既定は run に保存済みの
+  事実を :func:`load_recorded_reference_health` で読み、``?recheck=true`` のときだけ
+  その場で検査し直す。**再検査の結果も保存しない**）。
+- 束の取り込み（``core/knowledge_import/apply.py``）→ 取り込み run の
+  ``stage_outputs.reference_health``（P4-R7）。
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from datetime import datetime, timezone
@@ -52,13 +59,20 @@ __all__ = [
     "FACT_NO_MATERIAL",
     "FACT_OK",
     "KIND_FACTS",
+    "SOURCE_RECHECKED",
+    "SOURCE_RECORDED",
     "STATUS_BROKEN",
     "STATUS_OK",
     "STATUS_UNCHECKED",
     "build_reference_health",
     "check_document_references",
+    "load_recorded_reference_health",
     "unchecked_result",
 ]
+
+#: 結果の出所（``source``）。保存済みの検査結果か、その場で検査し直したか。
+SOURCE_RECORDED = "recorded"
+SOURCE_RECHECKED = "rechecked"
 
 STATUS_OK = "ok"
 STATUS_BROKEN = "broken"
@@ -87,6 +101,10 @@ KIND_FACTS: dict[str, str] = {
     "unit_claim": "学ぶ単位が参照している主張のうち、見つからないものがあります。",
     "unit_component": "学ぶ単位が参照しているコンポーネントのうち、見つからないものがあります。",
 }
+
+#: ``chunk_id`` を持たないのが**正常**な claim の由来（V-9）。式から合成された claim は
+#: 本文のチャンクから切り出されていないので、出典チャンク未着地を破断に数えない。
+_CHUNKLESS_CLAIM_ORIGINS: frozenset[str] = frozenset({"equation_synthesis"})
 
 #: グラフのどの層を検査するか（``debug`` 層は fallback / inferred の置き場なので対象外）。
 CHECKED_GRAPH_LAYERS = ("main", "equation_detail")
@@ -284,8 +302,15 @@ def build_reference_health(
                 _add("component_equation", ref, label)
 
     # ③ claim → chunk（出典チャンクに着地していない主張）
+    #
+    # V-9: 式から合成された claim（``origin='equation_synthesis'``）は、そもそも本文の
+    # チャンクから切り出されたものではないので chunk_id を持たない。これを破断に数えると
+    # 計器が**常時赤**になり、本当の破断が読めなくなる（常時赤の計器は無視される）。
+    # 由来が合成である限り「切れ」ではないので対象から外す。
     for claim in claims or []:
         if _text(_row_get(claim, "chunk_id")):
+            continue
+        if _text(_row_get(claim, "origin")) in _CHUNKLESS_CLAIM_ORIGINS:
             continue
         _add(
             "claim_without_chunk",
@@ -322,7 +347,8 @@ def build_reference_health(
 # ---------------------------------------------------------------------------
 
 _CLAIMS_SQL = """
-    SELECT id::text AS id, agent_claim_id, source_scope, chunk_id::text AS chunk_id, text
+    SELECT id::text AS id, agent_claim_id, source_scope, chunk_id::text AS chunk_id,
+           text, origin
     FROM theory_claims_live
     WHERE document_id = CAST(:document_id AS uuid)
 """
@@ -400,3 +426,57 @@ def check_document_references(session: Any, document_id: str) -> dict:
             "reference_health: check failed for document %s", doc_id, exc_info=True
         )
         return unchecked_result()
+
+
+def load_recorded_reference_health(session: Any, document_id: str) -> dict | None:
+    """run に**保存済み**の検査結果を読む（``stage_outputs.reference_health``）。
+
+    照会 API の既定の読み口（P4-R10）。毎回の再検査はグラフ・主張・部品・単位を
+    全走査するため、教材を開くたびに同じ全走査を走らせない。採用 run があればそれを、
+    無ければ「この教材の最新の run で ``reference_health`` を持つもの」を読む。
+
+    Returns:
+        保存済みの検査結果（``SOURCE_RECORDED`` を付けた dict）。保存が無い・読めない
+        ときは ``None``（呼び出し側が「まだ確認されていません」を返すか再検査する）。
+    """
+    doc_id = _text(document_id)
+    if not doc_id:
+        return None
+    try:
+        row = session.execute(
+            sa_text(
+                """
+                SELECT r.stage_outputs -> 'reference_health' AS health,
+                       r.id::text AS run_id
+                FROM document_analysis_runs r
+                LEFT JOIN documents d ON d.id = r.document_id
+                WHERE r.document_id = CAST(:doc AS uuid)
+                  AND r.stage_outputs -> 'reference_health' IS NOT NULL
+                ORDER BY (d.active_analysis_run_id = r.id) DESC NULLS LAST,
+                         r.completed_at DESC NULLS LAST,
+                         r.created_at DESC,
+                         r.id DESC
+                LIMIT 1
+                """
+            ),
+            {"doc": doc_id},
+        ).fetchone()
+    except Exception:  # noqa: BLE001 — 読めなければ「保存が無い」と同じ扱い（fail-soft）
+        logger.warning(
+            "reference_health: recorded lookup failed for document %s", doc_id, exc_info=True
+        )
+        return None
+    if not row or not row[0]:
+        return None
+    health = row[0]
+    if isinstance(health, str):
+        try:
+            health = json.loads(health)
+        except ValueError:
+            return None
+    if not isinstance(health, dict) or not health.get("status"):
+        return None
+    out = dict(health)
+    out["source"] = SOURCE_RECORDED
+    out["run_id"] = _text(row[1])
+    return out

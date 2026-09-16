@@ -29,7 +29,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from core.element_vocab import claim_type_label, theory_stage_key, theory_stage_label
-from core.learner_context_common import contains_internal_id, is_internal_id_label
+from core.learner_context_common import is_internal_id_label, safe_text
 
 from ..registry import register
 from ..schema import (
@@ -75,11 +75,17 @@ def _text(value: Any, limit: int | None = None) -> str:
 
 
 def _safe(value: Any, limit: int | None = None) -> str:
-    """内部 ID が混ざった自由文はその欄ごと落とす（学習者射影の最後の砦の再掲）。"""
+    """内部 ID / 生 TeX が混ざった自由文はその欄ごと落とす（学習者射影の最後の砦）。
+
+    遮断の述語は :func:`core.learner_context_common.safe_text` が正本
+    （内部 ID + 生 TeX 判定）。ここで**新しい判定を作らない**。V-8 の実測では
+    ``Equation (3.55) defines \delta P_{...}.`` のような claim 本文がそのまま
+    学習者向けの事実文に出ていた（内部 ID の遮断はあったが TeX の遮断が無かった）。
+    """
     text = _text(value, limit)
-    if not text or contains_internal_id(text):
+    if not text:
         return ""
-    return text
+    return safe_text(text)
 
 
 def _join(items: list[str], *, truncated: bool = False) -> str:

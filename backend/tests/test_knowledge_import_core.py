@@ -286,8 +286,40 @@ class TestStableKeyRecomputation:
         from core.knowledge_objects import stable_key as ko_keys
 
         assert step["stable_key"] == ko_keys.derivation_step_stable_key(
-            DOC_A, "derive_result", [keys["eq_1"]], []
+            DOC_A, "derive_result", [keys["eq_1"]], [],
+            derivation_id="d_1", step_index=0,
         )
+
+    def test_step_ids_are_made_unique_across_chains(self):
+        """V-2: agent の ``step_id`` はチェーン内でしか一意でない。
+
+        同名 step を持つ 2 チェーンが 1 件に潰れると、live の一意制約
+        （``uq_knowledge_derivation_steps_stable_key_live``）で取り込みが落ちる。
+        文書内一意な ID の作り方は ``knowledge_objects`` 側が正本。
+        """
+        from core.knowledge_objects import stable_key as ko_keys
+
+        chains = [
+            {"derivation_id": "d_1", "steps": [
+                {"step_id": "step_001", "operation": "derive_result"},
+            ]},
+            {"derivation_id": "d_2", "steps": [
+                {"step_id": "step_001", "operation": "derive_result"},
+            ]},
+        ]
+        items = import_rows.dedupe(
+            import_rows.derivation_step_rows(DOC_A, chains, source=SOURCE)
+        )
+        assert [i["agent_id"] for i in items] == [
+            ko_keys.derivation_step_agent_id("d_1", "step_001"),
+            ko_keys.derivation_step_agent_id("d_2", "step_001"),
+        ]
+        # 同じ operation でもチェーンが違えば別の行として残る（潰れない）。
+        assert len({i["stable_key"] for i in items}) == 2
+        # 束の中の元の ID は出所として残る。
+        provenance = items[0]["values"]["agent_payload"]["import"]
+        assert provenance["source_id"] == "step_001"
+        assert provenance["source_derivation_id"] == "d_1"
 
     def test_colliding_keys_are_deduped_deterministically(self):
         twins = [
@@ -334,10 +366,18 @@ class TestImportLandsAsCandidate:
     def test_knowledge_objects_also_land_as_candidates(self):
         for item in (
             import_rows.equation_rows(DOC_A, EQUATIONS, source=SOURCE)
-            + import_rows.evidence_rows(DOC_A, EVIDENCE, source=SOURCE)
             + import_rows.derivation_step_rows(DOC_A, CHAINS, equations=EQUATIONS, source=SOURCE)
         ):
             assert item["values"]["review_status"] == "teacher_review_required"
+
+    def test_evidence_rows_do_not_write_a_review_status(self):
+        """V-1: ``knowledge_evidence`` に ``review_status`` 列は無い（逐語の写し）。
+
+        書き手（``persistence._evidence_items``）と同じ扱い。ここに値を積むと
+        実 DB では INSERT が落ちる。
+        """
+        for item in import_rows.evidence_rows(DOC_A, EVIDENCE, source=SOURCE):
+            assert "review_status" not in item["values"]
 
     def test_maturity_source_is_imported_not_teacher_reviewed(self):
         comp = import_rows.component_rows(DOC_A, COMPONENTS, source=SOURCE)[0]
@@ -371,13 +411,43 @@ class TestVocabularyRounding:
         )[0]
         assert comp["values"]["component_type"] == "apparatus"
 
-    def test_claim_origin_is_derived_without_inventing_a_parent(self):
+    def test_claim_origin_is_taken_from_the_bundle_or_left_alone(self):
+        """V-11: origin は内容列。束が黙っているなら**書かない**（上書きしない）。"""
         items = import_rows.claim_rows(DOC_A, CLAIMS, evidence=EVIDENCE, source=SOURCE)
-        origins = {i["agent_id"]: i["values"]["origin"] for i in items}
-        assert origins["claim_1"] == "claim_object"
-        assert origins["synth_claim_2"] == "equation_synthesis"
-        # 親子リンクは束に無いので atomic_rewrite を名乗らない。
-        assert "atomic_rewrite" not in set(origins.values())
+        by_id = {i["agent_id"]: i["values"] for i in items}
+        # 束が origin を持たない claim_1 は origin を含まない（既存行を触らない）。
+        assert "origin" not in by_id["claim_1"]
+        # 合成 claim は決定論で判定できるので書く。
+        assert by_id["synth_claim_2"]["origin"] == "equation_synthesis"
+
+    def test_a_declared_origin_is_restored(self):
+        """V-11: 束が載せた由来はそのまま復元する（atomic_rewrite を含む）。"""
+        claims = [
+            {"claim_id": "c_parent", "text": "parent", "origin": "span"},
+            {
+                "claim_id": "c_child", "text": "child",
+                "origin": "atomic_rewrite", "parent_claim_id": "c_parent",
+            },
+            {"claim_id": "c_bogus", "text": "x", "origin": "not_in_the_vocabulary"},
+        ]
+        by_id = {
+            i["agent_id"]: i["values"]
+            for i in import_rows.claim_rows(DOC_A, claims, source=SOURCE)
+        }
+        assert by_id["c_child"]["origin"] == "atomic_rewrite"
+        assert by_id["c_parent"]["origin"] == "span"
+        # 語彙外は名乗らせない（= 書かない）。
+        assert "origin" not in by_id["c_bogus"]
+
+    def test_parent_links_are_read_from_the_bundle_id_space(self):
+        """V-11: 親は束の claim_id 空間。束に無い親・自己参照は結ばない。"""
+        claims = [
+            {"claim_id": "c_parent", "text": "p"},
+            {"claim_id": "c_child", "text": "c", "parent_claim_id": "c_parent"},
+            {"claim_id": "c_self", "text": "s", "parent_claim_id": "c_self"},
+            {"claim_id": "c_orphan", "text": "o", "parent_claim_id": "not-in-the-bundle"},
+        ]
+        assert import_rows.claim_parent_links(claims) == [("c_child", "c_parent")]
 
 
 # ---------------------------------------------------------------------------
@@ -483,10 +553,20 @@ class TestPlanFacts:
         joined = "".join(import_apply.plan_facts(bundle, has_live=True, replace=False))
         assert "置き換えを明示しない限り" in joined
 
-    def test_live_rows_with_replace_say_confirmed_state_is_kept(self):
+    def test_live_rows_with_replace_say_what_drops_out_and_what_stays(self):
+        """P4-R2: 「確定した状態は保たれます」とだけ言わない。
+
+        束に無い既存の項目は表示対象から外れる（= 事実として先に言う）。そのうえで
+        教員が確定した項目は外さない、と分けて言う。
+        """
         bundle = parse_bundle(_bundle_zip())
-        joined = "".join(import_apply.plan_facts(bundle, has_live=True, replace=True))
-        assert "教員が確定した状態は保たれます" in joined
+        facts = import_apply.plan_facts(bundle, has_live=True, replace=True)
+        joined = "".join(facts)
+        assert "束に無い既存の項目" in joined
+        assert "表示対象から外れます" in joined
+        assert "教員が確定した項目（承認・却下・要修正）は、束に無くても表示対象から外しません。" in facts
+        # 旧文言（何が外れるかを言わずに「保たれます」とだけ言う）は復活させない。
+        assert "教員が確定した状態は保たれます" not in joined
 
     def test_missing_sections_are_reported_as_facts(self):
         bundle = parse_bundle(_bundle_zip(drop=("evidence/evidence_snippets.json",)))
@@ -497,3 +577,57 @@ class TestPlanFacts:
         bundle = parse_bundle(_bundle_zip())
         for fact in import_apply.plan_facts(bundle, has_live=True, replace=True):
             assert not any(ch.isdigit() for ch in fact), fact
+
+
+class TestWriterAndImporterAgreeOnKeys:
+    """V-2 / V-5: 書き手（パイプライン）と取り込みが**同じ**キーを出す。
+
+    ここがずれると、同じ内容の step が再解析と取り込みで別行になり（あるいは
+    live の部分一意索引に当たって取り込みが落ち）、同一性が壊れる。
+    """
+
+    CHAINS = [
+        {
+            "derivation_id": "deriv_a",
+            "chain_type": "equation_chain",
+            "steps": [
+                {"step_id": "step_001", "operation": "linearize_field",
+                 "input_equation_ids": ["eq_1"], "output_equation_ids": ["eq_2"]},
+                {"step_id": "step_002", "operation": "solve_for_amplitude",
+                 "input_equation_ids": ["eq_2"], "output_equation_ids": []},
+            ],
+        },
+        {
+            "derivation_id": "deriv_b",
+            "chain_type": "equation_chain",
+            # 別チェーンの同名 step（V-2 の衝突源）。
+            "steps": [
+                {"step_id": "step_001", "operation": "linearize_field",
+                 "input_equation_ids": ["eq_1"], "output_equation_ids": ["eq_2"]},
+            ],
+        },
+    ]
+
+    def _writer_items(self):
+        from types import SimpleNamespace
+
+        from core.document_pipeline import persistence
+
+        return persistence._derivation_items(
+            DOC_A, SimpleNamespace(chains=self.CHAINS), {}
+        )
+
+    def _import_items(self):
+        return import_rows.derivation_step_rows(DOC_A, self.CHAINS, source=SOURCE)
+
+    def test_agent_ids_and_stable_keys_match_the_writer(self):
+        writer = [(i["agent_id"], i["stable_key"]) for i in self._writer_items()]
+        imported = [(i["agent_id"], i["stable_key"]) for i in self._import_items()]
+        assert imported == writer
+
+    def test_same_named_steps_in_different_chains_stay_distinct(self):
+        items = import_rows.dedupe(self._import_items())
+        assert len({i["agent_id"] for i in items}) == 3
+        assert len({i["stable_key"] for i in items}) == 3
+        # ``#n`` サフィックスで無理やり分けているのではなく、素キーが別（V-5）。
+        assert not any(i["stable_key"].endswith("#2") for i in items)

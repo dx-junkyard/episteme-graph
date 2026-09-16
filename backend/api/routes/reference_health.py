@@ -10,18 +10,26 @@
 - 権限は TEACHER 以上 + ``_ensure_document_viewable``（KT6 fail-closed。閲覧できない教材と
   存在しない教材は同一の 404）。
 - 返すのは事実文と、切れている参照の**列挙**だけ（件数バッジ・比率を作らない = T-3）。
-- パイプライン完了時に run へ保存された事実（``stage_outputs.reference_health``）とは別に、
-  **その場で再検査**する（保存はしない = KT5「解決済みフラグではない」）。
+- **既定は保存済みの事実**（``stage_outputs.reference_health``。パイプライン完了時と
+  束の取り込み時に run へ残る）を読む。``?recheck=true`` のときだけその場で検査し直す
+  （検査はグラフ・主張・部品・単位の全走査なので、画面を開くたびには走らせない）。
+  保存が無い教材（本層より前に解析した教材）は、空の画面を返さずその場で検査する。
+  再検査の結果は**保存しない**（KT5「解決済みフラグではない」）。
+- どちらを返したかは ``source``（``recorded`` / ``rechecked``）で正直に出す。
 """
 
 from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from core.postgres import get_session
-from core.reference_health import check_document_references
+from core.reference_health import (
+    SOURCE_RECHECKED,
+    check_document_references,
+    load_recorded_reference_health,
+)
 from dependencies import _require_teacher
 from routes.theory_components import _ensure_document_viewable
 from services import resolve_document_access
@@ -35,9 +43,13 @@ router = APIRouter(tags=["ReferenceHealth"])
 @router.get("/documents/{document_id}/reference-health")
 def get_reference_health(
     document_id: str,
+    recheck: bool = Query(False, description="true ならその場で検査し直す（保存はしない）"),
     current_user: dict = Depends(_require_teacher),
 ) -> dict:
-    """1 論文の参照の健全性を、その場で検査して事実として返す（§6）。"""
+    """1 論文の参照の健全性を事実として返す（§6）。
+
+    既定は run に保存済みの検査結果。``recheck=true`` でその場の再検査。
+    """
     doc_ref = str(document_id or "").strip()
     if not doc_ref:
         raise HTTPException(status_code=422, detail="教材が指定されていません。")
@@ -54,9 +66,21 @@ def get_reference_health(
     except Exception:  # noqa: BLE001 — 解決できなければ元の参照のまま（core 側が fail-soft）
         logger.warning("reference health: document id resolution failed", exc_info=True)
 
+    # ``recheck`` は HTTP 経由では bool に解決されるが、直接呼び出しでは Query の
+    # 既定オブジェクト（truthy）が入る。**True のときだけ**再検査する。
+    recheck_now = recheck is True
+
     session = get_session()
     try:
-        result = check_document_references(session, canonical_id)
+        recorded = None if recheck_now else load_recorded_reference_health(session, canonical_id)
+        if recorded is not None:
+            result = recorded
+        else:
+            # 再検査の明示か、保存済みの事実が無い教材（本層より前に解析した教材）。
+            # 後者で「未確認」とだけ返すと画面が空になるので、その場で検査して返す
+            # （保存はしない = KT5）。保存がある教材では全走査しないので、開くたびに
+            # グラフ・主張・部品・単位を舐める負荷は消える。
+            result = {**check_document_references(session, canonical_id), "source": SOURCE_RECHECKED}
     finally:
         session.close()
     return {"document_id": canonical_id, **result}

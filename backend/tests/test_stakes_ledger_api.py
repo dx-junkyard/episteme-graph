@@ -895,3 +895,130 @@ class TestAssumptionFactLineFalsificationBranches:
 
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+# ===========================================================================
+# P4-R8: 根拠の線の書き込みは「対象教材の編集権限」を要求する
+#
+# `_require_teacher` は「TEACHER 以上」しか保証しない。教材の編集権限を持たない
+# 教員が、他人の教材の台帳へ根拠の線を記帳・訂正できてはいけない。不在と権限なしは
+# 同じ 404（対象の存在を漏らさない = KT6 / doubt.py 冒頭の規律）。
+# ===========================================================================
+
+
+def _evidence_line_body():
+    return doubt.EvidenceLineCreateRequest(
+        line_kind="observation", reason="観測から支えられる", evidence_ids=["ev-1"],
+    )
+
+
+class TestEvidenceLineRequiresDocumentEdit:
+    def test_add_is_404_when_the_target_has_no_document(self, monkeypatch):
+        """対象 → document が解決できない = 権限を確かめられない → 書かない。"""
+        session = _FakeSession()
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        _capture_audit(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            doubt.add_evidence_line(
+                "claim", "c1", _evidence_line_body(), current_user={"id": "u1"},
+            )
+        assert exc.value.status_code == 404
+        assert session.committed == 0
+
+    def test_add_is_404_when_the_document_is_not_editable(self, monkeypatch):
+        session = _FakeSession([
+            (lambda sql: "FROM theory_claims_live" in sql, [("doc-1",)]),
+        ])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        monkeypatch.setattr(
+            doubt, "_require_editable_document_or_404",
+            lambda document_id, current_user: (_ for _ in ()).throw(
+                HTTPException(status_code=404, detail="Document not found")
+            ),
+        )
+        _capture_audit(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            doubt.add_evidence_line(
+                "claim", "c1", _evidence_line_body(), current_user={"id": "u1"},
+            )
+        assert exc.value.status_code == 404
+        assert session.committed == 0
+        # 台帳行の作成（_get_or_create_ledger_row）まで到達していない。
+        assert not any("INSERT INTO epistemic_ledger" in sql for sql, _ in session.calls)
+
+    def test_add_passes_when_the_document_is_editable(self, monkeypatch):
+        session = _FakeSession([
+            (lambda sql: "FROM theory_claims_live" in sql, [("doc-1",)]),
+            (_is_ledger_select, [_ledger_row()]),
+        ])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        seen: list[str] = []
+        monkeypatch.setattr(
+            doubt, "_require_editable_document_or_404",
+            lambda document_id, current_user: seen.append(document_id),
+        )
+        _capture_audit(monkeypatch)
+
+        out = doubt.add_evidence_line(
+            "claim", "c1", _evidence_line_body(), current_user={"id": "u1"},
+        )
+        assert out["ok"] is True
+        assert seen == ["doc-1"]
+
+    def test_patch_is_gated_too(self, monkeypatch):
+        session = _FakeSession([
+            (lambda sql: "FROM theory_claims_live" in sql, [("doc-1",)]),
+        ])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        monkeypatch.setattr(
+            doubt, "_require_editable_document_or_404",
+            lambda document_id, current_user: (_ for _ in ()).throw(
+                HTTPException(status_code=404, detail="Document not found")
+            ),
+        )
+        _capture_audit(monkeypatch)
+
+        with pytest.raises(HTTPException) as exc:
+            doubt.patch_evidence_line(
+                "claim", "c1", "line-1",
+                doubt.EvidenceLinePatchRequest(reason="別の理由"),
+                current_user={"id": "u1"},
+            )
+        assert exc.value.status_code == 404
+        assert session.committed == 0
+        assert not any("UPDATE epistemic_ledger" in sql for sql, _ in session.calls)
+
+    def test_an_invalid_body_is_still_422_before_the_db(self, monkeypatch):
+        """形の検証は DB を開く前（対象の有無を漏らさない）。"""
+        monkeypatch.setattr(doubt, "_pg_session", _no_session)
+        with pytest.raises(HTTPException) as exc:
+            doubt.add_evidence_line(
+                "claim", "c1",
+                doubt.EvidenceLineCreateRequest(line_kind="bogus", reason="r"),
+                current_user={"id": "u1"},
+            )
+        assert exc.value.status_code == 422
+
+    def test_assumption_targets_resolve_through_their_documents(self, monkeypatch):
+        session = _FakeSession([
+            (lambda sql: "FROM assumption_nodes" in sql, [(["doc-a", "doc-b"],)]),
+            (_is_ledger_select, [_ledger_row(target_type="assumption")]),
+        ])
+        monkeypatch.setattr(doubt, "_pg_session", lambda: session)
+        tried: list[str] = []
+
+        def _gate(document_id, current_user):
+            tried.append(document_id)
+            if document_id != "doc-b":
+                raise HTTPException(status_code=404, detail="Document not found")
+
+        monkeypatch.setattr(doubt, "_require_editable_document_or_404", _gate)
+        _capture_audit(monkeypatch)
+
+        doubt.add_evidence_line(
+            "assumption", "a1", _evidence_line_body(), current_user={"id": "u1"},
+        )
+        # 編集できる document が1つでもあれば通る（全滅なら 404）。
+        assert tried == ["doc-a", "doc-b"]

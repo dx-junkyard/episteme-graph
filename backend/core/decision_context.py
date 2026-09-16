@@ -56,6 +56,7 @@ __all__ = [
     "BASIS_COURSE_VISIBILITY_PUBLISH",
     "BASIS_DISCOVERY_INGEST_BATCH",
     "BASIS_EXPLANATION_REVIEW_BULK",
+    "BASIS_KNOWLEDGE_IMPORT_BUNDLE",
     "BASIS_RELEASE_REVIEW_PLACEMENTS",
     "BASIS_VALUES",
     "DECISION_CONTEXT_KEY",
@@ -95,6 +96,10 @@ BASIS_COURSE_REGISTER_UNITS = "course_register.units"
 BASIS_COMPONENT_REVIEW_SINGLE = "component_review.single"
 #: claim の単発のレビュー遷移（グラフ対話レビューの根拠 claim 承認・却下）。
 BASIS_CLAIM_REVIEW_SINGLE = "claim_review.single"
+#: 束の取り込みの確定（`POST /api/documents/{id}/import-bundle` の `dry_run=false`。
+#: 1 操作で外部インスタンスの主張・部品・式・根拠・導出がこの教材に着地する
+#: 一括確定で、dry-run で提示した種別×件数がそのまま提示集合になる）。
+BASIS_KNOWLEDGE_IMPORT_BUNDLE = "knowledge_import.bundle"
 
 #: basis 語彙のカタログ（「画面.操作」規約の検査用。**検証はしない** —
 #: :func:`build_decision_context` は任意の basis を受ける。経路が定数を使うことは
@@ -109,6 +114,7 @@ BASIS_VALUES = (
     BASIS_COURSE_VISIBILITY_PUBLISH,
     BASIS_DISCOVERY_INGEST_BATCH,
     BASIS_EXPLANATION_REVIEW_BULK,
+    BASIS_KNOWLEDGE_IMPORT_BUNDLE,
     BASIS_RELEASE_REVIEW_PLACEMENTS,
 )
 

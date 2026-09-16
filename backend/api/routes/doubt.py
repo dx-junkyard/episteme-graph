@@ -33,7 +33,7 @@ from dependencies import _get_current_user, _require_system_admin, _require_teac
 # オブジェクトスコープ権限（P0）の正本ゲート。`_require_teacher` は「TEACHER 以上」しか
 # 保証しないため、course_id 直指定の経路は編集権限ゲートを必ず通す
 # （不在・権限なしはどちらも 404・detail 同一。admin.py の既存5経路と同型）。
-from routes.admin import _require_editable_course_or_404
+from routes.admin import _require_editable_course_or_404, _require_editable_document_or_404
 from core.doubt.assumption_mining.corpus_audit import run_corpus_audit
 from core.doubt.assumption_mining.worker import maybe_schedule_assumption_mining
 from core.doubt.counterfactual import compute_counterfactual, snapshot_subgraphs
@@ -1644,6 +1644,79 @@ def get_assumption_atlas(
 # ---------------------------------------------------------------------------
 
 
+#: 台帳対象 → その対象が属する document を引く SQL（live 行のみ）。
+#: assumption は複数 document にまたがり得るので配列列を読む（下の解決関数を参照）。
+_TARGET_DOCUMENT_SQL: dict[str, str] = {
+    "claim": "SELECT document_id::text FROM theory_claims_live WHERE id::text = :tid",
+    "component": "SELECT document_id::text FROM theory_components_live WHERE id::text = :tid",
+    "equation": (
+        "SELECT document_id::text FROM knowledge_equations "
+        "WHERE id::text = :tid AND superseded_at IS NULL"
+    ),
+}
+
+#: 権限が確かめられない書き込みは、不在と同じ 404 に畳む（detail も同一）。
+_LEDGER_TARGET_NOT_FOUND = "Ledger target not found"
+
+
+def _target_document_ids(session, target_type: str, target_id: str) -> list[str]:
+    """台帳対象が属する document の id を引く（解決できなければ空）。"""
+    ids: list[str] = []
+    sql = _TARGET_DOCUMENT_SQL.get(target_type)
+    if sql:
+        try:
+            row = session.execute(sa_text(sql), {"tid": target_id}).fetchone()
+        except Exception:  # noqa: BLE001 — id 形が UUID でない等。解決できない = 空。
+            logger.debug("ledger target document lookup failed", exc_info=True)
+            row = None
+        if row and row[0]:
+            ids.append(str(row[0]))
+    elif target_type == "assumption":
+        try:
+            row = session.execute(
+                sa_text("SELECT document_ids FROM assumption_nodes WHERE id::text = :tid"),
+                {"tid": target_id},
+            ).fetchone()
+        except Exception:  # noqa: BLE001
+            logger.debug("assumption document lookup failed", exc_info=True)
+            row = None
+        if row and row[0]:
+            ids.extend(str(v) for v in _jsonb_list(row[0]) if str(v or "").strip())
+    # 台帳行に document_id が刻まれていればそれも候補にする（後付けの対象で使う）。
+    ledger = _fetch_ledger_row(session, target_type, target_id)
+    if ledger is not None and ledger[3]:
+        ids.append(str(ledger[3]))
+    seen: set[str] = set()
+    return [i for i in ids if i and not (i in seen or seen.add(i))]
+
+
+def _require_editable_ledger_target(target_type: str, target_id: str, current_user: dict) -> str:
+    """根拠の線の書き込み権限（P4-R8）。
+
+    `_require_teacher` は「TEACHER 以上」しか保証しない。台帳への記帳は対象の
+    **教材単位の編集権限**を要求する（doubt.py 冒頭の規律。course 直指定の経路が
+    `_require_editable_course_or_404` を通すのと同型）。対象が解決できない・
+    編集できないはどちらも同一の 404（存在の有無を漏らさない = fail-closed）。
+
+    Returns:
+        権限を確かめた document_id（監査には使わない。ログ用）。
+    """
+    session = _pg_session()
+    try:
+        document_ids = _target_document_ids(session, target_type, target_id)
+    finally:
+        session.close()
+    if not document_ids:
+        raise HTTPException(status_code=404, detail=_LEDGER_TARGET_NOT_FOUND)
+    for document_id in document_ids:
+        try:
+            _require_editable_document_or_404(document_id, current_user)
+        except HTTPException:
+            continue
+        return document_id
+    raise HTTPException(status_code=404, detail=_LEDGER_TARGET_NOT_FOUND)
+
+
 class EvidenceLineCreateRequest(BaseModel):
     line_kind: str = ""
     reason: str = ""
@@ -1669,9 +1742,12 @@ def add_evidence_line(
 ) -> dict:
     """根拠の線の手動記帳（人間専用の記帳先, P4-5）。帰属は認証ユーザー。"""
     _require_ledger_target_type(target_type)
+    # 形の検証は DB を開く前（不正な本文は対象の有無に関わらず 422）。
     _validate_evidence_line_fields(
         body.line_kind, body.reason, body.evidence_ids, body.claim_ids, body.equation_ids,
     )
+    # P4-R8: TEACHER であることだけでは足りない（対象教材の編集権限を要求する）。
+    _require_editable_ledger_target(target_type, target_id, current_user)
     line = {
         "line_id": str(uuid.uuid4()),
         "line_kind": body.line_kind,
@@ -1725,6 +1801,8 @@ def patch_evidence_line(
 ) -> dict:
     """根拠の線の訂正（訂正後も必須項目を再検証する。削除はしない, KT5）。"""
     _require_ledger_target_type(target_type)
+    # P4-R8: 記帳と同じ編集権限ゲート（訂正も書き込み）。
+    _require_editable_ledger_target(target_type, target_id, current_user)
     session = _pg_session()
     try:
         row = _fetch_ledger_row(session, target_type, target_id)

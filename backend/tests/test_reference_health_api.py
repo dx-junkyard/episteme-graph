@@ -78,7 +78,7 @@ class TestSuccessPath:
         mock_session.return_value = session
         mock_check.return_value = {"status": "ok", "checked_at": "t", "facts": ["x"], "details": {}}
 
-        result = get_reference_health("material-123", current_user=_user())
+        result = get_reference_health("material-123", recheck=True, current_user=_user())
 
         assert mock_check.call_args[0][1] == "doc-uuid"
         assert result["document_id"] == "doc-uuid"
@@ -98,7 +98,7 @@ class TestSuccessPath:
         mock_session.return_value = MagicMock()
         mock_check.return_value = {"status": "unchecked", "checked_at": "t", "facts": [], "details": {}}
 
-        result = get_reference_health("d1", current_user=_user())
+        result = get_reference_health("d1", recheck=True, current_user=_user())
         assert mock_check.call_args[0][1] == "d1"
         assert result["status"] == "unchecked"
 
@@ -164,3 +164,75 @@ class TestMaterialProjection:
         body = extract_function_source(src, "list_materials")
         assert "_material_reference_health(stage_outputs)" in body
         assert "reference_health=reference_health," in body
+
+
+class TestRecordedSnapshotIsTheDefault:
+    """P4-R10: 開くたびに全走査しない（保存済みの事実を既定で返す）。"""
+
+    @patch("api.routes.reference_health.check_document_references")
+    @patch("api.routes.reference_health.load_recorded_reference_health")
+    @patch("api.routes.reference_health.get_session")
+    @patch("api.routes.reference_health.resolve_document_access")
+    @patch("api.routes.reference_health._ensure_document_viewable")
+    def test_the_saved_result_is_returned_without_rechecking(
+        self, _gate, mock_access, mock_session, mock_recorded, mock_check
+    ):
+        from api.routes.reference_health import get_reference_health
+
+        mock_access.return_value = MagicMock(document_id="doc-uuid")
+        mock_session.return_value = MagicMock()
+        mock_recorded.return_value = {
+            "status": "ok", "checked_at": "t", "facts": [], "details": {},
+            "source": "recorded", "run_id": "run-1",
+        }
+
+        result = get_reference_health("doc-uuid", recheck=False, current_user=_user())
+
+        assert result["source"] == "recorded"
+        assert result["run_id"] == "run-1"
+        mock_check.assert_not_called()
+
+    @patch("api.routes.reference_health.check_document_references")
+    @patch("api.routes.reference_health.load_recorded_reference_health", return_value=None)
+    @patch("api.routes.reference_health.get_session")
+    @patch("api.routes.reference_health.resolve_document_access")
+    @patch("api.routes.reference_health._ensure_document_viewable")
+    def test_without_a_saved_result_it_checks_on_the_spot(
+        self, _gate, mock_access, mock_session, _recorded, mock_check
+    ):
+        """本層より前に解析した教材で画面を空にしない（その場で検査する）。"""
+        from api.routes.reference_health import get_reference_health
+
+        mock_access.return_value = MagicMock(document_id="doc-uuid")
+        mock_session.return_value = MagicMock()
+        mock_check.return_value = {"status": "ok", "checked_at": "t", "facts": [], "details": {}}
+
+        result = get_reference_health("doc-uuid", recheck=False, current_user=_user())
+
+        assert result["source"] == "rechecked"
+        mock_check.assert_called_once()
+
+    @patch("api.routes.reference_health.check_document_references")
+    @patch("api.routes.reference_health.load_recorded_reference_health")
+    @patch("api.routes.reference_health.get_session")
+    @patch("api.routes.reference_health.resolve_document_access")
+    @patch("api.routes.reference_health._ensure_document_viewable")
+    def test_recheck_true_never_reads_the_snapshot(
+        self, _gate, mock_access, mock_session, mock_recorded, mock_check
+    ):
+        from api.routes.reference_health import get_reference_health
+
+        mock_access.return_value = MagicMock(document_id="doc-uuid")
+        mock_session.return_value = MagicMock()
+        mock_check.return_value = {"status": "broken", "checked_at": "t", "facts": [], "details": {}}
+
+        result = get_reference_health("doc-uuid", recheck=True, current_user=_user())
+
+        assert result["source"] == "rechecked"
+        mock_recorded.assert_not_called()
+
+    def test_the_recheck_result_is_never_saved(self):
+        """再検査でも DB に書かない（解決済みフラグにしない = KT5）。"""
+        src = (BACKEND / "api" / "routes" / "reference_health.py").read_text(encoding="utf-8")
+        for term in ("INSERT", "UPDATE ", "DELETE"):
+            assert term not in src

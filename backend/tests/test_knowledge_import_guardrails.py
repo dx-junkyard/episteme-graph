@@ -18,8 +18,14 @@
 from __future__ import annotations
 
 import ast
+import io
+import json
+import re
 import sys
+import zipfile
 from pathlib import Path
+
+import pytest
 
 from tests.guardrail_helpers import (
     assert_module_tree_does_not_import,
@@ -290,8 +296,18 @@ class TestReadersAndValidation:
         assert "MAX_BUNDLE_BYTES" in src
 
     def test_the_bundle_is_never_extracted_to_disk(self):
-        """zip はメモリ上で名前決め打ちで読む（path traversal を作らない）。"""
-        assert_module_tree_forbids(IMPORT_DIR, ["extractall", ".extract(", "open("])
+        """zip はメモリ上で名前決め打ちで読む（path traversal を作らない）。
+
+        ``zf.open(name)`` は**メモリ上のストリーム**（伸長を read で打ち切るために使う）で、
+        ディスクへの展開ではない。禁止するのは展開 API と**素の** ``open(``。
+        """
+        assert_module_tree_forbids(
+            IMPORT_DIR, ["extractall", ".extract(", "tempfile", "NamedTemporary"]
+        )
+        bare_open = re.compile(r"(?<![\w.])open\(")
+        for path in sorted(IMPORT_DIR.rglob("*.py")):
+            text = path.read_text(encoding="utf-8")
+            assert not bare_open.search(text), f"ファイルを開いている: {path}"
 
 
 # ---------------------------------------------------------------------------
@@ -305,3 +321,177 @@ class TestDesignDoc:
         assert "/api/documents/{document_id}/import-bundle" in text
         assert "ro-crate-metadata.json" in text
         assert "0.3.0" in text
+
+
+# ---------------------------------------------------------------------------
+# 敵対的な束（P4 ⑤-11。敵対的セキュリティレビュー P4-R1 / R3 / R5 / R12）
+#
+# 「壊れた束」ではなく「**壊しに来た束**」を固定する。いずれも
+# ``parse_bundle`` の中で落ちる = dry_run でも同じ門を通る（確認だけのつもりの
+# 操作でメモリやプロセスを持って行かれない）。
+# ---------------------------------------------------------------------------
+
+
+def _zip(entries: dict, *, compress=zipfile.ZIP_DEFLATED) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compress) as zf:
+        for name, payload in entries.items():
+            zf.writestr(name, payload if isinstance(payload, (bytes, str)) else json.dumps(payload))
+    return buffer.getvalue()
+
+
+def _minimal(**overrides) -> dict:
+    entries = {
+        "manifest.json": {
+            "export_schema_version": "0.3.0",
+            "export_id": "export_x",
+            "scope": {"type": "document", "document_id": "doc-source"},
+        },
+        "claims/claims.json": {"claims": []},
+        "components/components.json": {"components": []},
+    }
+    entries.update(overrides)
+    return entries
+
+
+class TestAdversarialBundles:
+    def test_a_zip_bomb_is_rejected_before_it_is_expanded(self):
+        """P4-R1: 圧縮サイズは小さく、展開すると巨大な束を受け付けない。"""
+        from core.knowledge_import.bundle import (
+            MAX_UNCOMPRESSED_BYTES,
+            BundleError,
+            parse_bundle,
+        )
+
+        data = _zip(_minimal(**{"claims/claims.json": b"0" * (MAX_UNCOMPRESSED_BYTES + 1024)}))
+        # 圧縮後は上限（50MB）を軽く通り抜ける大きさ。
+        assert len(data) < 50 * 1024 * 1024
+        with pytest.raises(BundleError) as exc:
+            parse_bundle(data)
+        assert "上限を超えています" in " ".join(exc.value.facts)
+        # 事実文に数値（上限の実数）を書かない。
+        assert not any(ch.isdigit() for ch in " ".join(exc.value.facts))
+
+    def test_a_lying_file_size_is_cut_off_by_the_measured_read(self):
+        """P4-R1: 宣言サイズ（file_size）が嘘でも、read で打ち切る。"""
+        from unittest.mock import patch
+
+        from core.knowledge_import.bundle import (
+            MAX_ENTRY_UNCOMPRESSED_BYTES,
+            BundleError,
+            parse_bundle,
+        )
+
+        data = _zip(_minimal(**{
+            "claims/claims.json": b"0" * (MAX_ENTRY_UNCOMPRESSED_BYTES + 1024),
+        }))
+        real_getinfo = zipfile.ZipFile.getinfo
+
+        def _lying_getinfo(self, name):
+            info = real_getinfo(self, name)
+            if name == "claims/claims.json":
+                info.file_size = 1  # 「1 バイトです」と名乗る
+            return info
+
+        with patch.object(zipfile.ZipFile, "getinfo", _lying_getinfo):
+            with pytest.raises(BundleError):
+                # 宣言が嘘でも束は通らない（読み取りは limit + 1 で打ち切られ、
+                # 展開されたバイト列が上限を超えたままメモリに載ることはない）。
+                parse_bundle(data)
+
+    def test_the_read_is_cut_off_at_the_budget(self):
+        """P4-R1: 実測の打ち切り（宣言ではなく読んだ量で落とす）。"""
+        from core.knowledge_import import bundle as bundle_mod
+
+        budget = bundle_mod._ReadBudget(total=10, per_entry=10)
+        data = _zip({"manifest.json": b"0" * 64})
+        with zipfile.ZipFile(io.BytesIO(data)) as zf:
+            with pytest.raises(bundle_mod.BundleError) as exc:
+                bundle_mod._read_json(zf, "manifest.json", {"manifest.json"}, budget)
+        assert "上限を超えています" in " ".join(exc.value.facts)
+
+    def test_deeply_nested_json_is_a_422_not_a_500(self):
+        """P4-R12: RecursionError を束の事実文に畳む（500 を出さない）。"""
+        from core.knowledge_import.bundle import BundleError, parse_bundle
+
+        deep = "[" * 120000 + "]" * 120000
+        data = _zip(_minimal(**{"claims/claims.json": deep}))
+        with pytest.raises(BundleError) as exc:
+            parse_bundle(data)
+        assert "読めません" in " ".join(exc.value.facts)
+
+    def test_too_many_items_in_one_kind_is_rejected(self):
+        """P4-R3: 1 つの束で作れる行数に天井がある。"""
+        from core.knowledge_import.bundle import (
+            MAX_IMPORT_ITEMS_PER_KIND,
+            BundleError,
+            parse_bundle,
+        )
+
+        claims = [{"claim_id": f"c{i}", "text": "x"} for i in range(MAX_IMPORT_ITEMS_PER_KIND + 1)]
+        data = _zip(_minimal(**{"claims/claims.json": {"claims": claims}}))
+        with pytest.raises(BundleError) as exc:
+            parse_bundle(data)
+        assert "項目数が上限を超えています" in " ".join(exc.value.facts)
+
+    def test_path_traversal_entries_are_never_read(self):
+        """束の中に ``../`` の名前があっても、読むのは決め打ちの名前だけ。"""
+        from core.knowledge_import.bundle import parse_bundle
+
+        data = _zip(_minimal(**{
+            "../../etc/passwd": "root:x:0:0",
+            "/absolute/evil.json": "{}",
+            "claims/../../../escape.json": "{}",
+        }))
+        bundle = parse_bundle(data)
+        # 名前は「束に入っていた事実」として残るが、読まれてはいない。
+        assert bundle.counts()["claims"] == 0
+        assert bundle.manifest.get("export_id") == "export_x"
+
+    def test_manifest_strings_are_clipped_and_the_app_is_three_scalars(self):
+        """P4-R5: manifest は untrusted。run options / 監査へ素通ししない。"""
+        from core.knowledge_import.bundle import (
+            MAX_SOURCE_DOCUMENT_IDS,
+            MAX_SOURCE_TEXT_CHARS,
+            parse_bundle,
+        )
+
+        data = _zip(_minimal(**{
+            "manifest.json": {
+                "export_schema_version": "0.3.0",
+                "export_id": "E" * 5000,
+                "exported_at": "T" * 5000,
+                "app": {
+                    "name": "N" * 5000,
+                    "version": "1.0",
+                    "git_commit": "abc",
+                    "nested": {"deep": ["payload"] * 100},
+                    "extra": "x" * 5000,
+                },
+                "scope": {
+                    "type": "document",
+                    "document_id": "D" * 5000,
+                    "document_ids": [f"doc-{i}" for i in range(500)],
+                },
+            },
+        }))
+        bundle = parse_bundle(data)
+        assert set(bundle.app) <= {"name", "version", "git_commit"}
+        assert len(bundle.app["name"]) == MAX_SOURCE_TEXT_CHARS
+        assert len(bundle.export_id) == MAX_SOURCE_TEXT_CHARS
+        assert len(bundle.exported_at) == MAX_SOURCE_TEXT_CHARS
+        assert len(bundle.source_object_id) == MAX_SOURCE_TEXT_CHARS
+        assert len(bundle.source_document_ids) == MAX_SOURCE_DOCUMENT_IDS
+        # source() は run options / 監査に載る。ここに入れ子は残らない。
+        assert set(bundle.source()["app"]) <= {"name", "version", "git_commit"}
+
+    def test_the_minimum_schema_version_message_says_to_export_again(self):
+        """P4-R11: 「対応していない」で終わらせず、次の一手を書く。"""
+        from core.knowledge_import.bundle import BundleError, parse_bundle
+
+        data = _zip(_minimal(**{
+            "manifest.json": {"export_schema_version": "0.2.0", "export_id": "e"},
+        }))
+        with pytest.raises(BundleError) as exc:
+            parse_bundle(data)
+        assert "書き出し直して" in " ".join(exc.value.facts)

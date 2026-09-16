@@ -40,6 +40,7 @@ DISCOVERY_SRC = (
 COMPONENTS_SRC = (
     BACKEND / "api" / "routes" / "theory_components.py"
 ).read_text(encoding="utf-8")
+EXPORT_SRC = (BACKEND / "api" / "routes" / "export.py").read_text(encoding="utf-8")
 TOPICS_SRC = (
     BACKEND / "api" / "routes" / "lecture_studio" / "topics.py"
 ).read_text(encoding="utf-8")
@@ -85,6 +86,7 @@ class TestVocabulary:
         assert dc.BASIS_COURSE_VISIBILITY_PUBLISH == "course_visibility.publish"
         assert dc.BASIS_COMPONENT_REVIEW_SINGLE == "component_review.single"
         assert dc.BASIS_CLAIM_REVIEW_SINGLE == "claim_review.single"
+        assert dc.BASIS_KNOWLEDGE_IMPORT_BUNDLE == "knowledge_import.bundle"
 
     def test_basis_catalog_is_complete_and_follows_the_naming_convention(self):
         """basis の正本はカタログ（件数を文書に書き写さない — 開発規約 §5）。"""
@@ -344,6 +346,37 @@ class TestStagedRoutesRecordContext:
         # 承認画面が並置する面（根拠 claim・退避した警告）を id で残す。
         assert "backing_claim_ids" in src
         assert "retained_validation_warning_fields" in src
+
+    def test_bundle_import_builds_and_attaches_context(self):
+        """P4-R4: 束の取り込みの確定も一括確定（DC1）。"""
+        builder = extract_function_source(EXPORT_SRC, "_import_decision_context")
+        assert "decision_context.build_decision_context(" in builder
+        assert "decision_context.BASIS_KNOWLEDGE_IMPORT_BUNDLE" in builder
+        # 提示 = 確認画面が出した種別×件数 / 適用 = 実際に着地した種別×件数。
+        assert "pairs(parsed.counts())" in builder
+        assert "pairs(applied)" in builder
+        # 覆す経路は個別のレビュー遷移（取り込み行は候補として着地する）。
+        assert "reopen_path=_IMPORT_REOPEN_PATH" in builder
+        # 確定側で組み立て、記帳側で attach する。
+        route = extract_function_source(EXPORT_SRC, "import_document_bundle")
+        assert "_import_decision_context(" in route
+        audit = extract_function_source(EXPORT_SRC, "_record_import_audit")
+        assert "decision_context.attach_decision_context(" in audit
+
+    def test_bundle_import_isolates_the_client_claims(self):
+        """DC4: 置き換えの明示・確認を通したことはクライアントの申告。"""
+        builder = extract_function_source(EXPORT_SRC, "_import_decision_context")
+        assert "client_reported={" in builder
+        assert "replace_requested" in builder
+        assert "dry_run_confirmed" in builder
+        # サーバが確かめられない値を evidence_shown=True にしない。
+        assert "evidence_shown=False" in builder
+
+    def test_bundle_import_confirms_the_hash_before_writing(self):
+        """P4-R4: 確認した束と違う束は 409（確定文脈の「提示」が嘘にならない）。"""
+        route = extract_function_source(EXPORT_SRC, "import_document_bundle")
+        assert "expected_sha != parsed.sha256" in route
+        assert "status_code=409" in route
 
     def test_single_claim_review_builds_context(self):
         src = extract_function_source(COMPONENTS_SRC, "review_claim")

@@ -24,8 +24,8 @@ from typing import Any
 
 from core.knowledge_objects import stable_key as ko_keys
 from core.knowledge_objects.schema import (
-    CLAIM_ORIGIN_CLAIM_OBJECT,
     CLAIM_ORIGIN_EQUATION_SYNTHESIS,
+    CLAIM_ORIGINS,
     CLAIM_TIERS,
     DEFAULT_REVIEW_STATUS,
     normalize_claim_type,
@@ -35,6 +35,13 @@ from core.knowledge_objects.schema import (
 #: 取り込み行の確定状態（T-1。束の値は引き継がない）。
 IMPORT_REVIEW_STATUS = DEFAULT_REVIEW_STATUS
 IMPORT_COMPONENT_STATUS = "candidate"
+
+#: ``support_status`` が束に書かれていないときの値（P4-R6）。
+#: かつては ``source_backed`` を既定にしていたが、それは**この教材で出典に当たった**
+#: という主張であり、外から来た束について既定で名乗ってよい状態ではない
+#: （``source_backed`` の claim は R層の出題対象・グラフの強い backing に使われる）。
+#: 書いていないものは「確認が要る」に落とす。
+IMPORT_SUPPORT_STATUS_FALLBACK = "review_required"
 
 #: 出所ブロックのキー（``source_scope`` / ``agent_payload`` の中）。
 IMPORT_PROVENANCE_KEY = "import"
@@ -167,11 +174,37 @@ def _resolved_equation_keys(agent_ids: Any, key_map: dict[str, str]) -> list[str
 
 
 def _claim_origin(claim: dict) -> str:
-    """束の claim の ``origin``（親子リンクは束に無いので atomic_rewrite は名乗らない）。"""
+    """束の claim の ``origin``。**分からないときは空**（V-11）。
+
+    かつては不明を ``claim_object`` で埋めていたが、``origin`` は内容列なので、
+    束が黙っている値で既存行を上書きすると ``atomic_rewrite`` のような由来が
+    往復のたびに消える。束が明示した語彙 → 合成 claim の決定論判定 → 空、の順に落とす
+    （空のときは呼び出し側が ``values`` にキー自体を入れない = 既存行を触らない）。
+    """
+    declared = _text(claim.get("origin"))
+    if declared in CLAIM_ORIGINS:
+        return declared
     claim_id = _text(claim.get("claim_id"))
     if _text(claim.get("synthesis_method")) or claim_id.startswith("synth_claim_"):
         return CLAIM_ORIGIN_EQUATION_SYNTHESIS
-    return CLAIM_ORIGIN_CLAIM_OBJECT
+    return ""
+
+
+def claim_parent_links(claims: list[dict]) -> list[tuple[str, str]]:
+    """束の claim の親子（``[(子の agent ID, 親の agent ID)]``）。
+
+    束の ``parent_claim_id`` は**束の中の claim_id 空間**で書かれている。取り込み側は
+    sync 後の id 写像で DB UUID に張り直す（:func:`core.knowledge_import.apply.link_claim_parents`）。
+    自分自身を親にする行・束に無い親は落とす（推測で結ばない）。
+    """
+    known = {_text(c.get("claim_id")) for c in claims or []} - {""}
+    links: list[tuple[str, str]] = []
+    for claim in claims or []:
+        child = _text(claim.get("claim_id"))
+        parent = _text(claim.get("parent_claim_id"))
+        if child and parent and parent != child and parent in known:
+            links.append((child, parent))
+    return links
 
 
 # ---------------------------------------------------------------------------
@@ -246,14 +279,19 @@ def claim_rows(
                     }
                     if equation_ids else {}
                 ),
-                "support_status": _text(claim.get("support_status")) or "source_backed",
+                "support_status": (
+                    _text(claim.get("support_status")) or IMPORT_SUPPORT_STATUS_FALLBACK
+                ),
                 "evidence_text": str(claim.get("evidence_text") or ""),
-                "origin": _claim_origin(claim),
                 "claim_tier": tier if tier in CLAIM_TIERS else "",
                 # T-1: 束の review_status は引き継がない。
                 "review_status": IMPORT_REVIEW_STATUS,
             },
         })
+        # V-11: origin は分かるときだけ書く（空なら既存行の値を触らない）。
+        origin = _claim_origin(claim)
+        if origin:
+            items[-1]["values"]["origin"] = origin
     return items
 
 
@@ -466,7 +504,9 @@ def evidence_rows(
                         source_stable_key=_text(record.get("stable_key")),
                     ),
                 },
-                "review_status": IMPORT_REVIEW_STATUS,
+                # evidence は逐語の写しなので人間の確定列を持たない
+                # （migration 078 の ``knowledge_evidence`` に ``review_status`` 列は無い。
+                # 書き手 ``persistence._evidence_items`` と同じ扱い = V-1）。
             },
         })
     return items
@@ -495,9 +535,13 @@ def derivation_step_rows(
             input_keys = _resolved_equation_keys(step.get("input_equation_ids"), equation_keys)
             output_keys = _resolved_equation_keys(step.get("output_equation_ids"), equation_keys)
             items.append({
-                "agent_id": agent_step_id,
+                # V-2: agent 側の step_id（``step_001``）はチェーン内でしか一意でない。
+                # 文書内で一意な ID の作り方は knowledge_objects 側が正本（書き手＝
+                # パイプラインと同じ規則を使う）。
+                "agent_id": ko_keys.derivation_step_agent_id(derivation_id, agent_step_id),
                 "stable_key": ko_keys.derivation_step_stable_key(
-                    document_id, operation, input_keys, output_keys
+                    document_id, operation, input_keys, output_keys,
+                    derivation_id=derivation_id, step_index=index,
                 ),
                 "source_stable_key": _text(step.get("stable_key")),
                 "values": {

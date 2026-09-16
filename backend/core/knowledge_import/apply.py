@@ -41,6 +41,22 @@ logger = logging.getLogger(__name__)
 #: 取り込み run の ``current_stage``（パイプラインのステージ名ではない印）。
 IMPORT_STAGE = "import"
 
+#: 取り込み run の ``stage_outputs`` に残す参照の健全性のキー（パイプラインと同じ綴り）。
+REFERENCE_HEALTH_KEY = "reference_health"
+
+#: **人間が確定した** review_status（束に無くても supersede しない = P4-R2）。
+#: 承認だけでなく却下・要修正も人間の判断で、外から来た束が倒してよいものではない。
+HUMAN_DECIDED_REVIEW_STATUSES: tuple[str, ...] = (
+    "teacher_approved",
+    "teacher_reviewed",
+    "endorsed",
+    "rejected",
+    "needs_revision",
+)
+
+#: 保護対象を列挙するときのラベルの上限（dry-run の表示。件数は別に返す）。
+SUPERSEDE_LABEL_MAX = 20
+
 #: 同期の対象（表名・agent ID 列・内容列）。列集合は Phase 1 の persistence と揃える。
 _CLAIM_CONTENT_COLUMNS = (
     "chunk_id", "source_scope", "claim_type", "claim_type_text", "text",
@@ -133,6 +149,227 @@ def has_live_rows(session, document_id: str) -> bool:
     return any(int(value) > 0 for value in counts.values())
 
 
+# ---------------------------------------------------------------------------
+# P4-R2: 人間が確定した live 行を supersede から守る
+#
+# `replace=true` は「再解析と同じ規則で置き換える」だが、束は**別インスタンスが
+# 書き出した外部入力**であって、この教材を再解析した結果ではない。stable_key が
+# 一致しない（＝束に無い）live 行を一律に supersede すると、この教材で教員が
+# 承認・却下した行が 1 回の取り込みで表示対象から落ちる。回復には手作業が要る。
+#
+# そこで人間が確定した行は、束に無くても **incoming に「そのまま」合流させて**
+# sync の一致経路に載せる（sync 側は非改変 = F1 所有）。内容列を渡さないので
+# UPDATE は agent ID と produced_by_run_id だけに当たり、本文・確定列は動かない。
+# ---------------------------------------------------------------------------
+
+
+class _KindSpec:
+    """保護・プレビューのための種別ごとの読み口（表・ラベル・触った判定）。"""
+
+    def __init__(
+        self,
+        key: str,
+        label: str,
+        source: str,
+        agent_id_column: str,
+        label_sql: str,
+        *,
+        live_view: bool = False,
+        extra_columns: tuple[str, ...] = (),
+        touched=None,
+        has_review_status: bool = True,
+    ):
+        self.key = key
+        self.label = label
+        self.source = source
+        self.agent_id_column = agent_id_column
+        self.label_sql = label_sql
+        self.live_view = live_view
+        self.extra_columns = extra_columns
+        self.touched = touched
+        self.has_review_status = has_review_status
+
+    def select_sql(self) -> str:
+        columns = [
+            "id::text AS id",
+            "stable_key",
+            f"{self.agent_id_column} AS agent_id",
+            (
+                "COALESCE(review_status, '') AS review_status"
+                if self.has_review_status
+                else "'' AS review_status"
+            ),
+            f"{self.label_sql} AS label",
+        ]
+        columns += [c for c in self.extra_columns]
+        where = "document_id = CAST(:doc AS uuid)"
+        if not self.live_view:
+            where += " AND superseded_at IS NULL"
+        return f"SELECT {', '.join(columns)} FROM {self.source} WHERE {where}"
+
+
+def _row_human_decided(row: Any) -> bool:
+    """人間の判断が乗った live 行か（review_status の語彙 + 種別ごとの追加判定）。"""
+    review_status = _text(row.get("review_status") if hasattr(row, "get") else None)
+    return review_status in HUMAN_DECIDED_REVIEW_STATUSES
+
+
+def _component_protected(row: Any) -> bool:
+    return _row_human_decided(row) or _component_human_touched(row)
+
+
+KIND_SPECS: tuple[_KindSpec, ...] = (
+    _KindSpec(
+        "claims", "主張", VIEW_CLAIMS_LIVE, "agent_claim_id",
+        "COALESCE(NULLIF(normalized_text, ''), text)", live_view=True,
+    ),
+    _KindSpec(
+        "components", "部品", VIEW_COMPONENTS_LIVE, "agent_component_id",
+        "name", live_view=True,
+        extra_columns=("COALESCE(status, '') AS status",
+                       "COALESCE(teacher_notes, '') AS teacher_notes",
+                       "COALESCE(maturity_source, '') AS maturity_source"),
+        touched=_component_protected,
+    ),
+    _KindSpec(
+        "equations", "式", TABLE_EQUATIONS, "agent_equation_id",
+        "COALESCE(NULLIF(label, ''), plain_text)",
+    ),
+    # evidence は人間の確定列を持たない（078 に review_status 列が無い = V-1）ので、
+    # 守る対象が無い。SELECT も review_status を読まない。
+    _KindSpec(
+        "evidence", "根拠", TABLE_EVIDENCE, "agent_evidence_id", "evidence_text",
+        has_review_status=False,
+    ),
+    _KindSpec(
+        "derivation_steps", "導出", TABLE_DERIVATION_STEPS, "agent_step_id",
+        "COALESCE(NULLIF(operation, ''), agent_derivation_id)",
+    ),
+)
+
+_SPECS_BY_KEY = {spec.key: spec for spec in KIND_SPECS}
+
+
+def _live_rows(session, spec: _KindSpec, document_id: str) -> list[dict]:
+    try:
+        return [
+            dict(row)
+            for row in session.execute(
+                sa_text(spec.select_sql()), {"doc": document_id}
+            ).mappings().all()
+        ]
+    except Exception:  # noqa: BLE001 — 読めなければ保護もプレビューも諦める（書き込みは止めない）
+        logger.warning("import: live row scan failed for %s", spec.key, exc_info=True)
+        return []
+
+
+def _protected(spec: _KindSpec, row: dict) -> bool:
+    predicate = spec.touched or _row_human_decided
+    try:
+        return bool(predicate(row))
+    except Exception:  # pragma: no cover - 述語は純粋な想定
+        logger.warning("import: protection predicate failed for %s", spec.key, exc_info=True)
+        return True
+
+
+def merge_protected_rows(live_rows: list[dict], incoming: list[dict], spec: _KindSpec) -> list[dict]:
+    """束に無い「人間が確定した行」を incoming の先頭へそのまま合流させる（純関数）。
+
+    ``values`` は空 dict。sync は一致経路に入り、内容列を 1 つも UPDATE しない
+    （``produced_by_run_id`` と ``updated_at`` だけが動く）。stable_key の無い行は
+    sync が一致させられないので合流できない（:func:`supersede_preview` が事実として
+    列挙する）。
+    """
+    incoming_keys = {_text(item.get("stable_key")) for item in incoming}
+    incoming_keys.discard("")
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for row in live_rows:
+        stable_key = _text(row.get("stable_key"))
+        if not stable_key or stable_key in incoming_keys or stable_key in seen:
+            continue
+        if not _protected(spec, row):
+            continue
+        seen.add(stable_key)
+        merged.append({
+            "stable_key": stable_key,
+            "agent_id": _text(row.get("agent_id")),
+            "values": {},
+        })
+    return merged + list(incoming)
+
+
+def supersede_preview(session, *, document_id: str, incoming_keys: dict[str, set[str]]) -> dict:
+    """`replace=true` で何が表示対象から外れるか（dry-run の事実。書き込みなし）。
+
+    返すのは種別ごとの ``{"superseded": n, "kept_human_decided": m, "labels": [...],
+    "unmatchable": k}``。件数は教員向けの運用情報で、学習者には出ない（KT7）。
+    """
+    out: dict[str, Any] = {}
+    for spec in KIND_SPECS:
+        keys = {k for k in (incoming_keys.get(spec.key) or set()) if k}
+        rows = _live_rows(session, spec, document_id)
+        superseded: list[dict] = []
+        kept: list[dict] = []
+        unmatchable = 0
+        for row in rows:
+            stable_key = _text(row.get("stable_key"))
+            if stable_key and stable_key in keys:
+                continue
+            if not stable_key:
+                # 同一性キーが無い行は合流させられない（保護の対象にできない）。
+                unmatchable += 1
+                superseded.append(row)
+                continue
+            (kept if _protected(spec, row) else superseded).append(row)
+        entry = {
+            "label": spec.label,
+            "superseded": len(superseded),
+            "kept_human_decided": len(kept),
+            "unmatchable": unmatchable,
+            "labels": [
+                _label_snippet(row.get("label")) for row in superseded[:SUPERSEDE_LABEL_MAX]
+            ],
+            "kept_labels": [
+                _label_snippet(row.get("label")) for row in kept[:SUPERSEDE_LABEL_MAX]
+            ],
+            "labels_truncated": len(superseded) > SUPERSEDE_LABEL_MAX,
+        }
+        out[spec.key] = entry
+    return out
+
+
+def _label_snippet(value: Any) -> str:
+    text = _text(value)
+    return text[:80] if text else ""
+
+
+def incoming_stable_keys(bundle: ImportBundle, document_id: str) -> dict[str, set[str]]:
+    """束から作られる incoming 行の stable_key（dry-run のプレビュー用・書き込みなし）。
+
+    実行時と**同じ行ビルダー**を通す（プレビューと実行が食い違わない）。
+    """
+    def keys(items: list[dict]) -> set[str]:
+        return {_text(item.get("stable_key")) for item in items} - {""}
+
+    source = bundle.source()
+    return {
+        "claims": keys(import_rows.claim_rows(
+            document_id, bundle.claims, evidence=bundle.evidence,
+            equations=bundle.equations, source=source,
+        )),
+        "components": keys(import_rows.component_rows(
+            document_id, bundle.components, claims=bundle.claims,
+            evidence=bundle.evidence, source=source,
+        )),
+        "equations": keys(import_rows.equation_rows(document_id, bundle.equations, source=source)),
+        "evidence": keys(import_rows.evidence_rows(document_id, bundle.evidence, source=source)),
+        "derivation_steps": keys(import_rows.derivation_step_rows(
+            document_id, bundle.derivation_chains, equations=bundle.equations, source=source,
+        )),
+    }
+
+
 def preserve_adopted_run(session, document_id: str) -> str:
     """取り込み run が採用 run を横取りしないように、現在の採用先を固定する。
 
@@ -201,6 +438,16 @@ def create_import_run(session, *, document_id: str, options: dict) -> str:
 
 
 def record_run_outputs(session, *, run_id: str, stats: dict) -> None:
+    """取り込み run の ``stage_outputs`` を書く。
+
+    参照の健全性（P4-R7）は ``stage_outputs.reference_health`` に**パイプラインと同じ
+    位置**で置く（読み手が取り込み run とパイプライン run を同じ形で読める）。
+    """
+    stats = dict(stats or {})
+    health = stats.pop(REFERENCE_HEALTH_KEY, None)
+    outputs: dict[str, Any] = {IMPORT_STAGE: stats}
+    if health:
+        outputs[REFERENCE_HEALTH_KEY] = health
     session.execute(
         sa_text(
             """
@@ -209,7 +456,7 @@ def record_run_outputs(session, *, run_id: str, stats: dict) -> None:
             WHERE id = CAST(:run_id AS uuid)
             """
         ),
-        {"run_id": run_id, "outputs": _json_dumps({IMPORT_STAGE: stats})},
+        {"run_id": run_id, "outputs": _json_dumps(outputs)},
     )
 
 
@@ -319,13 +566,21 @@ def _upsert_graph(session, *, document_id: str, run_id: str, graph: dict) -> Non
 # ---------------------------------------------------------------------------
 
 
-def _sync(session, *, table, document_id, run_id, items, content_columns, agent_id_column, **kwargs):
+def _sync(
+    session, *, table, document_id, run_id, items, content_columns, agent_id_column,
+    kind: str = "", **kwargs,
+):
+    """1 種別を同期する（人間が確定した行を守ってから sync へ渡す = P4-R2）。"""
+    incoming = import_rows.dedupe(items)
+    spec = _SPECS_BY_KEY.get(kind)
+    if spec is not None:
+        incoming = merge_protected_rows(_live_rows(session, spec, document_id), incoming, spec)
     return sync_live_rows(
         session,
         table=table,
         document_id=document_id,
         run_id=run_id,
-        incoming=import_rows.dedupe(items),
+        incoming=incoming,
         content_columns=content_columns,
         agent_id_column=agent_id_column,
         **kwargs,
@@ -349,9 +604,14 @@ def plan_facts(bundle: ImportBundle, *, has_live: bool, replace: bool) -> list[s
         facts.append("束に部品のグラフが入っていないため、グラフは更新されません。")
     if has_live:
         if replace:
+            # P4-R2: 「保たれます」とだけ言うのは嘘だった（束に無い行は表示対象から
+            # 外れる）。何が外れて何が残るかを 2 文に分けて言う。
             facts.append(
-                "この教材には既に解析結果があります。再解析と同じ規則で置き換えます"
-                "（教員が確定した状態は保たれます）。"
+                "この教材には既に解析結果があります。束に無い既存の項目は、"
+                "この教材の表示対象から外れます（行は残り、履歴として参照できます）。"
+            )
+            facts.append(
+                "教員が確定した項目（承認・却下・要修正）は、束に無くても表示対象から外しません。"
             )
         else:
             facts.append(
@@ -385,11 +645,15 @@ def apply_import(
     claim_sync = _sync(
         session, table=TABLE_CLAIMS, document_id=document_id, run_id=run_id,
         items=claim_items, content_columns=_CLAIM_CONTENT_COLUMNS,
-        agent_id_column="agent_claim_id",
+        agent_id_column="agent_claim_id", kind="claims",
         preserved_columns=_CLAIM_PRESERVED_COLUMNS,
         column_casts=_CLAIM_COLUMN_CASTS,
     )
     stats["claims"] = dict(claim_sync.stats)
+    # V-11: 親子（atomic rewrite の子 claim）は sync が id を確定させたあとに張る。
+    parent_links = link_claim_parents(session, claims=bundle.claims, id_map=claim_sync.id_map)
+    if parent_links:
+        stats["claims"]["parent_links"] = parent_links
 
     component_items = import_rows.component_rows(
         document_id, bundle.components, claims=bundle.claims, evidence=bundle.evidence,
@@ -398,7 +662,7 @@ def apply_import(
     component_sync = _sync(
         session, table=TABLE_COMPONENTS, document_id=document_id, run_id=run_id,
         items=component_items, content_columns=_COMPONENT_CONTENT_COLUMNS,
-        agent_id_column="agent_component_id",
+        agent_id_column="agent_component_id", kind="components",
         preserved_columns=_COMPONENT_PRESERVED_COLUMNS,
         human_touched=_component_human_touched,
         protected_when_touched=_COMPONENT_PROTECTED_WHEN_TOUCHED,
@@ -410,7 +674,7 @@ def apply_import(
         session, table=TABLE_EQUATIONS, document_id=document_id, run_id=run_id,
         items=import_rows.equation_rows(document_id, bundle.equations, source=source),
         content_columns=_EQUATION_CONTENT_COLUMNS,
-        agent_id_column="agent_equation_id",
+        agent_id_column="agent_equation_id", kind="equations",
         preserved_columns=_KNOWLEDGE_PRESERVED_COLUMNS,
     )
     stats["equations"] = dict(equation_sync.stats)
@@ -419,8 +683,9 @@ def apply_import(
         session, table=TABLE_EVIDENCE, document_id=document_id, run_id=run_id,
         items=import_rows.evidence_rows(document_id, bundle.evidence, source=source),
         content_columns=_EVIDENCE_CONTENT_COLUMNS,
-        agent_id_column="agent_evidence_id",
-        preserved_columns=_KNOWLEDGE_PRESERVED_COLUMNS,
+        agent_id_column="agent_evidence_id", kind="evidence",
+        # evidence に人間の確定列は無い（078 に review_status 列が無い = V-1）。
+        preserved_columns=(),
     )
     stats["evidence"] = dict(evidence_sync.stats)
 
@@ -430,7 +695,7 @@ def apply_import(
             document_id, bundle.derivation_chains, equations=bundle.equations, source=source,
         ),
         content_columns=_DERIVATION_CONTENT_COLUMNS,
-        agent_id_column="agent_step_id",
+        agent_id_column="agent_step_id", kind="derivation_steps",
         preserved_columns=_KNOWLEDGE_PRESERVED_COLUMNS,
     )
     stats["derivation_steps"] = dict(derivation_sync.stats)
@@ -470,4 +735,53 @@ def apply_import(
     else:
         stats["graph"] = {"nodes": 0, "edges": 0, "stored": False}
 
+    # P4-R7: 取り込み直後の参照の整合を、この取り込み run の事実として残す
+    # （best-effort。検査に失敗しても取り込みは止めない）。同じトランザクションで
+    # 読むので「いま書いた行」を含んだ検査になる。
+    stats[REFERENCE_HEALTH_KEY] = _reference_health(session, document_id)
+
     return stats
+
+
+def link_claim_parents(session, *, claims: list[dict], id_map: dict[str, str]) -> int:
+    """束の claim の親子を取り込み先の UUID で張り直す（V-11）。
+
+    ``theory_claims.parent_claim_id`` は内容列ではなく**同一バッチ内の行を指す FK**
+    なので、sync が id を確定させたあとでしか書けない。解決できた組だけを書き、
+    解決できない親は**触らない**（NULL で潰さない = 情報を落とさない）。
+
+    Returns:
+        張り直した件数。
+    """
+    links = import_rows.claim_parent_links(claims or [])
+    if not links or not id_map:
+        return 0
+    written = 0
+    for child_agent_id, parent_agent_id in links:
+        child_id = _text(id_map.get(child_agent_id))
+        parent_id = _text(id_map.get(parent_agent_id))
+        if not child_id or not parent_id or child_id == parent_id:
+            continue
+        session.execute(
+            sa_text(
+                f"""
+                UPDATE {TABLE_CLAIMS}
+                SET parent_claim_id = CAST(:parent AS uuid), updated_at = now()
+                WHERE id = CAST(:child AS uuid)
+                """
+            ),
+            {"parent": parent_id, "child": child_id},
+        )
+        written += 1
+    return written
+
+
+def _reference_health(session, document_id: str) -> dict:
+    """取り込み直後の参照の健全性（失敗は「確認できなかった」という事実に畳む）。"""
+    from core.reference_health import check_document_references, unchecked_result
+
+    try:
+        return check_document_references(session, document_id)
+    except Exception:  # noqa: BLE001 — 検査は運用情報。取り込みの成否を左右させない。
+        logger.warning("import: reference health check failed", exc_info=True)
+        return unchecked_result()
