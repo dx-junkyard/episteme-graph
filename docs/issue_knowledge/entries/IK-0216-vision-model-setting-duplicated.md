@@ -15,14 +15,23 @@ classification:
     structure: [aggregation, representation]
     connection: [none]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    どちらの入口も単体では正しく保存・適用され、解決の順序も実装どおりに動く。原因は、
-    同じひとつの設定に対する入口が二つ存在し、どちらが勝つか・どちらが永続かを表せない
-    こと。説明を足しても入口を一つに畳まない限り誤解は残るため構造とする。
+    処理: どちらの入口も単体では正しく保存・適用され、解決の順序も実装どおり動く。
+    構造: 実体が一つの段に対して設定の入口が二系統あり正本が定まらず、どちらが勝つか・どちらが
+    永続かを表せる場所も無い。
+    接続: その段を走らせない設定でも入口が選べる点を条件の不伝達と読む余地はあるが、入口が二つ
+    あることの帰結なので要素は無いと判断した。
+    統制: 担当・順序・予算・レビュー・完了判定のいずれにも崩れは無い。
 generalization:
   level: general
   general_form: >-

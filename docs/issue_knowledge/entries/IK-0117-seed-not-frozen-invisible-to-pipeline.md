@@ -17,15 +17,20 @@ classification:
     structure: [none]
     connection: [contract, version]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    供給側（同梱シードの取り込み）は下書きを作るだけ、消費側（パイプラインの検索）は凍結版だけを
-    読む、という両立しない契約が原因。どちらの段も単体では設計どおりで、間の版の扱いが噛み合って
-    いない。実データでエントリ 3 件に対し凍結版 0 件を確認し、それゆえ同一性リンクも標準化判定も
-    起動しないことが分かった。
+    処理: 取り込みも検索もそれぞれ書かれたとおり動く。構造: 下書きと凍結版という表現は既にあり、変えずに直せた。接続:
+    供給側は下書きを作るだけ、消費側は凍結版だけを読むという両立しない約束（契約）で、噛み合わないのは版の扱い（版）。実データでエントリ 3 件に対し凍結版 0 件を確認した。統制:
+    誰がいつ凍結するかの割り当てと読む余地はあるが、供給側が既存の契約を満たす形に直せたため要素を置かない。
 generalization:
   level: general
   general_form: >-

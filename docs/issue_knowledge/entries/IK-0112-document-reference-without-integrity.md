@@ -18,15 +18,20 @@ classification:
     structure: [responsibility, representation]
     connection: [none]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    「この教材に属する行の集合」という同じ事実の定義が 2 つの削除経路に別々に書かれ、片方が
-    成果物・図・解析実行を掃除しなかった。参照列の型も揃わず外部キーも無いため、DB 側では
-    何も保証されない。実測で成果物の 71.8%・図の 82.8% が存在しない教材を指し、孤児の解析実行が
-    保存領域の 94% を占めていた。どちらの経路が正しいかを決めないと直せない点が構造の定義に当たる。
+    処理: 個々の削除処理は書かれたとおり動く（残った孤児を後始末の不良と読む余地は残る）。構造: 「この教材に属する行の集合」という同じ事実の定義が 2 つの削除経路に別々に書かれ（責務）、参照列の型も揃わず外部キーも無いため
+    DB 側では何も保証されない（表現）。接続: 所属の範囲は段をまたいで受け渡される情報ではなく、各経路が独自に定義していた。統制:
+    掃除の完了判定や担当の割り当てではなく、どちらの経路が正しい範囲かが決まっていないことが原因（「済み」の定義と読む余地は残る）。実測で成果物の 71.8%・図の 82.8% が存在しない教材を指していた。
 generalization:
   level: general
   general_form: >-

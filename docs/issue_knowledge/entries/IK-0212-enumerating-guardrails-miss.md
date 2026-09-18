@@ -17,15 +17,23 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    検査対象の集合を人が列挙し、その名前や文字列が存在するかだけを見る確認手続きのため、
-    後から増えた実装と、実行時にしか現れない不整合が確認の網から外れる。処理も表現も正しい
-    のに「確かめたことになる範囲」の決め方が崩れているので統制とする。集合を導出できる形で
-    持っていない点は副次の表現の問題。
+    処理: 検査そのものは書かれたとおりに動く。呼ばれないまま残る復元の分岐は症状の例だが、
+    単一処理の不良と読む余地は残る。
+    構造: 検査の対象となる集合を宣言から導ける形で持たず、人の列挙として持っている。
+    接続: 段階の間で情報や条件が落ちる場面は無い。後から足した経路が検査に現れないことを接続と
+    読む余地は残る。
+    統制: 「確かめたことになる範囲」の決め方が対象の増加に追随せず、検査が緑のまま規律が破れる。
 generalization:
   level: repo_pattern
   general_form: >-

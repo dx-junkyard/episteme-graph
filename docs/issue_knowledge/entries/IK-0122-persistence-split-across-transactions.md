@@ -16,15 +16,19 @@ classification:
     structure: [decomposition]
     connection: [none]
     governance: [resume]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    主張・部品・派生オブジェクト・学ぶ単位の保存が 3〜4 のトランザクション境界に分かれているため、
-    途中で失敗すると「主張だけ新しく、部品は前の世代」という一貫しない状態が残る。個々の保存は
-    正しく、境界の引き方（何を 1 つの単位として確定させるか）という分割の設計だけが原因。
-    境界を 1 つにするには永続化の段全体の再設計が要るため、別課題として残している。
+    処理: 個々の保存処理は書かれたとおり動く（途中失敗の後始末と読む余地は残る）。構造: 主張・部品・派生オブジェクト・学ぶ単位の保存が 3〜4 の確定単位に分かれ、何を 1
+    つの単位として確定させるかという分割が決まっていない。接続: 段をまたいで情報・意味・条件・対象・版が失われてはいない。統制: 途中で失敗したときに一貫しない世代が残り、再実行で揃う保証も無い。
 generalization:
   level: general
   general_form: >-

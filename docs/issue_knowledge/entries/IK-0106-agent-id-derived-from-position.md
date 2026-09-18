@@ -18,15 +18,20 @@ classification:
     structure: [representation]
     connection: [version]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    識別子が内容ではなく出現順（連番・分割順）から作られるため、入力が少し変わるだけで同じ ID が
-    別の対象に付く。凍結済みコースが参照する部品 ID が現在の集合に存在しないことを実測で確認した。
-    内容由来の同一性という表現を持たない限り、参照する側をいくら直しても版をまたいだ追跡は
-    できない点が構造の定義に当たる。内容ハッシュは生成側に既にありながら保存されていなかった。
+    処理: 識別子を作る処理は書かれたとおり動く。構造: 識別子が内容ではなく出現順から作られ、内容由来の同一性という表現を持たない。内容から導ける値は生成側にありながら保存先が無かった。接続:
+    凍結済みコースが参照する部品の識別子が現在の集合に存在せず、版をまたいで対象の対応が失われる（表現の問題と同じ事実の別面という読み方もでき、そこが確信を下げている）。統制:
+    再実行の規律そのもの（削除か遷移か）は別の課題で扱っており、本件は同一性の持ち方だけが原因。
 generalization:
   level: general
   general_form: >-

@@ -15,19 +15,24 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [representation]
+    structure: [none]
     connection: [none]
     governance: [assignment]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    同一性を確定する権限は人間に置かれている（それ自体は守られている）のに、候補を作る担当が
-    どこにも割り当てられていないため、教員に見せるものが 1 件も生まれない。受け皿の列は存在し、
-    永続化が常に空配列を書いていた。確定の手順を改善しても、候補を出す担当を決めなければ
-    受け皿は空のまま、という点が統制の定義に当たる。実データで同一性リンク・別名・共通部品の
-    凍結版がいずれもゼロ件であることを確認。
+    処理: 永続化が常に空を書くこと自体は、候補が供給されない結果であって単一処理の不良ではない。構造:
+    候補を受ける列と表は最初から存在し、表現を変えずに供給の担当を足すだけで動いた（候補生成の置き場所を責務と読む余地は残り、そこが確信を下げている）。接続:
+    供給する段が存在しないため、段どうしで情報・条件・対象・版が噛み合わないという形にはなっていない。統制:
+    同一性を確定する権限は人間に置かれている一方、候補を作る担当がどこにも割り当てられておらず、人間は見るものが無かった。実データで同一性リンク・別名・共通部品の凍結版がいずれもゼロ件。
 generalization:
   level: repo_pattern
   general_form: >-
@@ -56,6 +61,12 @@ history:
     from: primary=governance facets=[governance.assignment, structure.representation]
     to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[assignment]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: structure=[representation]
+    to: structure=[none]
+    reason: >-
+      軸ごとの再判定で、候補を受ける表現は最初から存在していたため構造の要素を外した（責務と担当の境界は統制側に置く）
 ---
 
 ## 課題
@@ -65,6 +76,9 @@ history:
 
 **原因**: 確定の権限は人間に置かれているが、候補を作る担当が誰にも割り当てられていなかった。
 候補を受ける列は最初から存在し、永続化は常に空を書いていた。人間は確定しようにも、見るものが無い。
+
+**軸ごとの判断（2026-09-19）**: 構造は、候補を受ける列と表が最初から存在していたため要素を外した（候補生成の置き場所を責務と読む余地は残る）。
+統制は候補を作る担当が誰にも割り当てられていない点。処理と接続は要素なし。
 
 ## 発見の観点
 

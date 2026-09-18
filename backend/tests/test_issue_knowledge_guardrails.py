@@ -80,6 +80,8 @@ class TestVocabularyMirrorsTaxonomy:
             ik.AXES,
             ik.FACETS,
             ik.AXIS_EMPTY,
+            ik.CONFIDENCE_LEVELS,
+            ik.PROPOSAL_KINDS,
             ik.CAUSE_STATUSES,
             ik.REVIEW_STATES,
             ik.STATUSES,
@@ -196,6 +198,32 @@ class TestEntries:
             assert key and key in registry, f"layers.md `{m.group(1)}` の対応「{desc}」がレイヤー索引表に見当たらない"
 
 
+class TestNeighbors:
+    def test_neighbors_are_symmetric_and_valid(self):
+        for tok, nbs in ik.NEIGHBORS.items():
+            assert tok in ik.FACETS
+            for nb in nbs:
+                assert nb in ik.FACETS, f"{tok} の相手 {nb} が語彙外"
+                assert tok in ik.NEIGHBORS[nb], f"相手が非対称: {tok} → {nb}"
+                assert nb != tok
+
+    def test_taxonomy_neighbor_column_mirrors_module(self, taxonomy_text):
+        """taxonomy §2 の「境界が曖昧になりやすい相手」列はモジュールの NEIGHBORS と逐語一致する。"""
+        section = ik_section(taxonomy_text, "## 2.")
+        doc: dict[str, set[str]] = {}
+        for line in section.splitlines():
+            m = re.match(r"^\| [^|]+ \| `((?:processing|structure|connection|governance)\.[a-z_]+)` \| [^|]* \| ([^|]*) \|$", line)
+            if m:
+                doc[m.group(1)] = set(re.findall(r"`([a-z_]+\.[a-z_]+)`", m.group(2)))
+        assert set(doc) == set(ik.FACETS), f"相手の列が無い値: {set(ik.FACETS) - set(doc)} / 余分: {set(doc) - set(ik.FACETS)}"
+        for tok in ik.FACETS:
+            assert doc[tok] == set(ik.NEIGHBORS[tok]), f"{tok} の相手が taxonomy とモジュールで食い違う: doc={doc[tok]} module={set(ik.NEIGHBORS[tok])}"
+
+    def test_provisional_values_declare_neighbors_and_exist(self):
+        for tok in ik.PROVISIONAL_VALUES:
+            assert tok in ik.FACETS and ik.NEIGHBORS.get(tok), f"暫定の値 {tok} は語彙にあり相手を宣言する"
+
+
 class TestAxes:
     def test_group_is_derived_from_coordinates(self):
         cl = {"axes": {"processing": ["logic"], "structure": ["none"], "connection": ["none"], "governance": ["none"]}}
@@ -213,6 +241,11 @@ class TestAxes:
         # 直接 validate_entry を呼ぶと他キー不足で早期 return するので、規則だけを関数で確認
         assert not ik.axis_is_empty(["none", "logic"])
         assert ik.axis_is_empty(["none"]) and ik.axis_is_empty(["unknown"])
+
+    def test_unknown_axes_imply_hypothesis(self, entries):
+        bad = [e.id for e in entries if any(ik.axis_values(e.meta["classification"], a) == ["unknown"] for a in ik.AXES)
+               and e.meta["classification"].get("cause_status") != "hypothesis"]
+        assert bad == [], f"unknown の軸があるのに hypothesis でないエントリ: {bad}"
 
     def test_no_entry_declares_primary_or_facets(self, entries):
         """排他の主分類（primary / facets）は廃止。残っていれば座標化漏れ。"""

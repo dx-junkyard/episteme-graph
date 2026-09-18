@@ -18,15 +18,20 @@ classification:
     structure: [representation]
     connection: [contract]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    上流が概念一覧を文字列で返すことがあるのに、下流がそれを列として反復するため、1 文字ずつが
-    概念として展開される。各段は単体では正しく見え、前後の契約が両立しないことだけが原因で、
-    しかも値が JSONB の中にあるため型も制約も検査されない。実測で凍結コースの前提知識が
-    1 文字トークンの列になっていることを確認。壊れた値は誰にも止められず学習者向け DTO まで貫通した。
+    処理: 反復する側の取り扱いを直せばこの箇所は止まるが、形の約束がどこにも書かれていないため別の経路で同じことが起きる（入力の取り扱いと読む余地は残る）。構造:
+    値が自由形式の入れ物の中を流れるため型も制約も検査されず、学習に使う属性を検証の効く列として持っていなかった。接続: 上流が単一値も列も返すのに、下流は列だけを前提に反復しており、前後の契約が両立していない。統制:
+    順序・予算・再開・担当・完了の扱いに崩れは無い（出力ゲートが列に無い属性を見ないという網羅の論点は残る）。
 generalization:
   level: general
   general_form: >-

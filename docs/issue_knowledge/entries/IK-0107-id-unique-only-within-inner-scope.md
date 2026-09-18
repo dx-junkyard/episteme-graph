@@ -18,16 +18,20 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    識別子の一意性の範囲が、それを使うキーの範囲より狭いことが原因。区画ごとに振り直される
-    span 番号、導出鎖の中でだけ一意なステップ番号、印字された式番号から作る式 ID が、いずれも
-    文書全体のキーに使われていた。実測では 9 行すべてが同じ逆引きキーを持ち、72 ステップが
-    9 種のキーに潰れ、同じ式番号が別ブロックにも印字された文書で一意制約違反により解析が失敗した。
-    識別子の範囲という表現を直さない限り、衝突処理をいくら足しても別の場所で再発する。
+    処理: キーを「識別子から引く写像」で配ったため、同じ識別子を持つ 2 行が同じキーを受け取り、衝突が解消されないまま書き込まれた（配り方も表現の一部という読み方が残る）。構造:
+    識別子の一意性の範囲が、それを使うキーの範囲より狭い。区画ごとに振り直される番号、鎖の中でだけ一意なステップ番号、印字された式番号が、いずれも文書全体のキーに使われていた。接続:
+    段をまたいで情報・意味・条件・対象・版が失われてはいない（外側のスコープへ持ち出す場面で露見するため、境界の読み方は残る）。統制: 順序・予算・再開・担当・レビュー・完了の扱いに崩れは無い。
 generalization:
   level: general
   general_form: >-

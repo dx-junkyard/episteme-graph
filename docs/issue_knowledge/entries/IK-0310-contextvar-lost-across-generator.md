@@ -16,16 +16,24 @@ classification:
     structure: [responsibility]
     connection: [condition]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「帰属とモデル上書きを実行文脈（contextvar）で運んでいるのに、配信の仕組みが
-    ジェネレータを別スレッドで再開しうること」。前段（文脈を張る側）も後段（値を読む側）も
-    単体では正しく、境界をまたいだときだけ条件が伝わらない（かつ復元時に例外にもなる）
-    ため接続。設計書 §3.2 が、帰属が未帰属に落ちコース単位の上書きが効かなくなることを
-    明記している。
+    処理: 同じ書き方が同期経路では正しく動いており、処理そのものの誤りではない。
+
+    構造: 条件と帰属を暗黙の実行文脈で運ぶという設計の置き場所が責務に当たる。運び方という表現の問題とも読めるため中。
+
+    接続: 帰属とモデル指定という条件が、境界をまたいだときにだけ後段へ伝わらない点が条件に当たる。
+
+    統制: 帰属が落ちること自体は結果で、順序・予算・停止再開の設計は崩れていない。
 generalization:
   level: general
   general_form: 暗黙の実行文脈で運んでいる条件が、スレッド・ジェネレータ・プロセスの境界で失われる

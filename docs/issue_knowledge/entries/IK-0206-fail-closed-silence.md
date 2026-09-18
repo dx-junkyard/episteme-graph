@@ -16,15 +16,25 @@ classification:
     structure: [representation]
     connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    個々の判定も段階間の受け渡しも設計どおりに動く。原因は、意味の異なる四つの状態
-    （候補が無い・まだ処理していない・権限が無い・取得に失敗した）を「表示しない」という
-    単一の表現へ写しており、必要な区別が表現上どこにも存在しないこと。表現を変えない限り
-    新しい層でも同じ副作用が出るため構造とする。
+    処理: 個々の判定は設計どおりに動く。ただし取得の失敗と例外を同じ経路で握りつぶす点は、
+    後始末の不良と読む余地が残るため確信は中。
+    構造: 候補が無い・まだ処理していない・権限が無い・取得に失敗した、という意味の異なる四つの
+    状態が「表示しない」という単一の表現へ写され、必要な区別が表現上どこにも存在しない。
+    接続: 状態が段階の間で落ちているとも読めるが、落ちる場所は表現への写像であって前後の
+    受け渡しではない。
+    統制: 隠すか見せるかの線引きが決まっていないのは設計判断の不在であり、担当・順序・予算・
+    レビュー・完了判定のいずれにも当たらない。
 generalization:
   level: general
   general_form: >-

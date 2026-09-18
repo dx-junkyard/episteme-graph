@@ -17,14 +17,22 @@ classification:
     structure: [aggregation]
     connection: [version]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    個別編集の経路も一括生成の経路も、それぞれ単体では正しく動く。原因は、一括の経路で
-    本文を作り直したあとに派生物である音声の世代が更新されず、段階の間で版がずれること。
-    無効化の呼び出しが更新の入口ごとに散っているため、片方だけ直しても次の入口で再発する。
+    処理: 個別に編集する経路も一括で作り直す経路も、それぞれ単体では正しく動く。一括の経路に
+    無効化の呼び出しが無いことを単一処理の欠落と読む余地は残る。
+    構造: 派生物を無効化する責務が更新の入口ごとに散り、正本が無い。入口が増えるたび漏れる。
+    接続: 本文を作り直したあとに派生物の世代が更新されず、段階の間で版がずれる。
+    統制: 順序・予算・再実行の統制そのものは崩れていない。
 generalization:
   level: general
   general_form: >-

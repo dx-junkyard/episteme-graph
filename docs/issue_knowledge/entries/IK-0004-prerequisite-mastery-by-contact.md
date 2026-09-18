@@ -17,15 +17,22 @@ classification:
     structure: [none]
     connection: [information]
     governance: [completion]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「習得という完了の判定が、直接の確認ではなく接触の痕跡という代理で定義されて
-    いる」こと。判定処理は定義どおりに動いており、権限も版も欠けていない。完了の定義を
-    変えないかぎり、痕跡の集め方を変えても同じ結論になる。確認手段は F4 行が引く判定箇所と、
-    前提の説明を返す分岐が検索を通らず出所ラベルを持たないこと。
+    処理: 判定も説明の生成も定義どおり動く。出所の欠落は分岐の書き落としとも読めるが、
+    他の分岐が満たしている出力の約束をこの分岐だけが満たしていない形なので接続側に数えた。
+    構造: 本人の明示的な答えを置く場所が無かったが、完了の定義を書き直せば同時に用意される。
+    接続: 回答に出所のラベルが埋まらないまま後段へ返る。
+    統制: 習得という完了が、直接の確認ではなく接触の痕跡で代理定義されている。
 generalization:
   level: general
   general_form: 達成したかどうかを、直接の確認ではなく接触の痕跡で代理判定する

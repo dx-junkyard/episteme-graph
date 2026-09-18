@@ -12,19 +12,30 @@ feature_context:
   layers: [auth_visibility, frontend_admin_ui, guidance_g]
 classification:
   axes:
-    processing: [none]
-    structure: [none]
+    processing: [logic]
+    structure: [aggregation]
     connection: [contract]
     governance: [completion]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    撤去された公開 API の後継となる開示範囲 API はサーバに実在し、単体では設計どおり動く。
-    壊れているのは、前段（呼び出し側の画面と案内機構）が旧い契約を前提にしたまま残り、
-    新旧いずれの契約でも一本の経路が成立しないこと。受け側の処理を直しても契約を揃えなければ
-    別の呼び出し側で再発するため、段階間の契約の不一致を主因とする。
+    処理: グループ経由の招待承諾は、同名の関数が二重に定義され後の定義が前を潰したことで到達
+    不能になっていた。この一点を消さなければ承諾は動かないので値を置く。変更で過去の処理を
+    壊した退行と読む余地も残るため確信は中。
+    構造: 公開という同じ事実が開示範囲と公開フラグの二つの値で表され、正本が一本化されて
+    いない。片方を直しても両者が独立に動く余地は残る。表現そのものの不足との境界で迷った。
+    接続: 撤去された入口の後継はサーバに実在して単体では動くのに、呼び出し側と案内が旧い契約の
+    ままで、新旧いずれの契約でも一本の経路が成立しない。
+    統制: 撤去されたことは検査で固定されたが、後継へ移し終えたことを「済み」とみなす基準が無い。
+    更新を確かめる手続の不足と読む余地も残る。
 generalization:
   level: general
   general_form: >-
@@ -55,6 +66,12 @@ history:
     from: primary=connection facets=[connection.contract, governance.completion]
     to: axes=processing=[none]; structure=[none]; connection=[contract]; governance=[completion]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[none]; connection=[contract]; governance=[completion]
+    to: processing=[logic]; structure=[aggregation]; connection=[contract]; governance=[completion]
+    reason: 軸ごとの再判定で、招待の承諾を塞いでいた同名関数の二重定義を処理軸に、公開の事実が
+      二つの値に分かれていた点を構造軸に置いた
 ---
 
 ## 課題
@@ -69,6 +86,11 @@ capability 宣言・次にやること）は撤去済みの旧 API を指し続�
 
 副次の発見として、開示範囲を public 以外へ戻しても公開フラグが真のまま残り、公開状態の判定が
 二つの独立した値に分裂していた。
+
+**軸ごとの再判定（2026-09-19）**: 処理軸には、招待の承諾を塞いでいた同名関数の二重定義を置く
+（契約を揃えてもこの一点は残るため）。構造軸には、公開という同じ事実が開示範囲と公開フラグの
+二つの値で表されていた点を置く。接続軸の契約の不一致は変えていない。統制軸は、撤去は検査で
+固定されたのに「後継へ移し終えた」とみなす基準が無いことに当たる。
 
 ## 発見の観点
 

@@ -15,18 +15,30 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [decomposition]
     connection: [version, condition]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: high
+  proposals:
+    - kind: value
+      target_axis: structure
+      neighbor_of: [structure.decomposition, connection.version]
+      statement: 保護や固定の単位が、その対象が成り立つために必要としている依存の範囲を覆わない
+      confidence: low
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「どの版を読むかという条件が、コース側の読み取り経路には通っているのに、教材側の
-    成果物を読む経路へは通っていない」こと。各経路は単体では正しく読めており、表現にも
-    欠けが無い。条件を後段まで運ばないかぎり、版を増やしても読み手には最新が出る。確認手段は
-    四つの既知課題が指す読み取り経路で、いずれも最新を読む実装であること。
+    処理: 各読み取り経路は単体では正しく読める。
+    構造: 固定の単位がコース側の資産に限られ、表示に必要な依存の範囲を覆えない粒度になっている。
+    経路を一つずつ直しても、単位を決め直さないかぎり抜けが残る。
+    接続: どの版を読むかという条件が教材側の成果物を読む経路へ通らず、読み手には最新が出る。
+    統制: 誰がいつ固定するかには要素が無い。
 generalization:
   level: repo_pattern
   general_form: 固定したはずの版が一部の読み取り経路にだけ効き、他の経路は最新を読む
@@ -52,6 +64,11 @@ history:
     from: primary=connection facets=[connection.version, connection.condition]
     to: axes=processing=[none]; structure=[none]; connection=[version, condition]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[none]; connection=[version, condition]; governance=[none]
+    to: processing=[none]; structure=[decomposition]; connection=[version, condition]; governance=[none]
+    reason: 軸ごとの再判定で、固定の単位が依存の範囲より狭いという粒度の要素を構造に追加した（条件を通すだけでは単位が変わらない）
 ---
 
 ## 課題
@@ -62,6 +79,9 @@ history:
 
 原因は、どの版を読むかという条件が一部の読み取り経路にしか通っていないことにある。それぞれの
 経路は単体では正しく読む。版を固定するという保護が、依存している範囲を覆っていないだけである。
+
+軸ごとに読み直すと、接続のほかに構造の要素がある。固定の単位が、表示に必要な依存の範囲より狭い。
+条件を後段へ通す直し方を採るにせよ、どこまでを一つの版とみなすかの粒度を決めないと抜けが残る。
 
 ## 発見の観点
 

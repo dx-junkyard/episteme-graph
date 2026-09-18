@@ -2,7 +2,7 @@
 
 [← 課題ナレッジの入口](README.md) ｜ [記入様式](TEMPLATE.md) ｜ [辞書](dictionary.md) ｜ [索引](index.md)
 
-> **状態:** 生きたリファレンス（2026-09-18 新設・同日改訂 = 分類の確定状態・族/型の2段・解決観点の分割・層語彙。2026-09-19 排他の主分類を廃止し 4 軸の座標に）。語彙を増やす・意味を変えるときは本書を先に直し、
+> **状態:** 生きたリファレンス（2026-09-18 新設・同日改訂 = 分類の確定状態・族/型の2段・解決観点の分割・層語彙。2026-09-19 排他の主分類を廃止し 4 軸の座標に。同日 §2.1〜2.4 = 軸ごとの確信度・境界の相手・新設の提案・値のライフサイクル・再評価）。語彙を増やす・意味を変えるときは本書を先に直し、
 > `backend/tests/test_issue_knowledge_guardrails.py` の語彙表を同じ変更で追随させる。
 
 本書は、`docs/` 配下で管理してきた課題（調査記録・レビュー文書・是正リスト・設計書の残課題）を
@@ -71,34 +71,87 @@
 （`structure: [representation, aggregation]`）。統制軸の値は**制御系（実行時）**と**手続系（人）**に
 分けて読む（軸は分けない — 実データで分けるべきかは確定レビュー後に判断）。
 
-| 軸 | 値 | 意味 |
-|---|---|---|
-| processing | `processing.input_handling` | 入力の取り扱い（正規化・境界値・空・重複）の不良 |
-| processing | `processing.logic` | 条件式・分岐・計算の誤り |
-| processing | `processing.resource` | 接続・ファイル・メモリ・例外処理の後始末不良 |
-| processing | `processing.wording` | 表示文言・ラベル・翻訳の不良（挙動は正しい） |
-| processing | `processing.regression` | 過去に正しかった単一処理が変更で壊れた |
-| structure | `structure.representation` | 情報表現（ID・キー・列・語彙・型）が必要な区別や同一性を表せない |
-| structure | `structure.responsibility` | 責務の置き場所（どの層・どの関数が判断するか）が不適切・二重 |
-| structure | `structure.decomposition` | 分割の粒度（大きすぎる／細かすぎる・混在） |
-| structure | `structure.aggregation` | 集約・正本の一本化が無く、同型実装・語彙表・状態が分散 |
-| connection | `connection.information` | 段階間で**情報**（値・行・フィールド）が落ちる |
-| connection | `connection.meaning` | 段階間で**意味**（ラベルの解釈・座標系・単位・語彙）がずれる |
-| connection | `connection.condition` | 段階間で**条件**（権限・可視性・オプション・前提）が伝わらない |
-| connection | `connection.target` | 段階間で**対象**（どの document／run／ユーザー／コースか）がずれる |
-| connection | `connection.version` | 段階間で**版**（run・凍結版・revision・キャッシュ世代）がずれる |
-| connection | `connection.contract` | 前段の出力契約と後段の入力契約が両立しない（片方だけ変えた） |
-| governance（制御系） | `governance.ordering` | 実行・判定・記帳の順序 |
-| governance（制御系） | `governance.budget` | 回数・コスト・上限・スロットル |
-| governance（制御系） | `governance.resume` | 停止・再開・再実行・冪等性 |
-| governance（手続系） | `governance.assignment` | 誰が（人／AI／どの層が）判断・実行するかの割り当て |
-| governance（手続系） | `governance.review` | レビュー・確認・承認の手続と記録 |
-| governance（手続系） | `governance.completion` | 完了判定・状態の正本・「済み」の定義 |
+| 軸 | 値 | 意味 | 境界が曖昧になりやすい相手 |
+|---|---|---|---|
+| processing | `processing.input_handling` | 入力の取り扱い（正規化・境界値・空・重複）の不良 | `processing.logic` |
+| processing | `processing.logic` | 条件式・分岐・計算の誤り | `connection.contract`, `processing.input_handling`, `processing.regression` |
+| processing | `processing.resource` | 接続・ファイル・メモリ・例外処理の後始末不良 | `governance.completion` |
+| processing | `processing.wording` | 表示文言・ラベル・翻訳の不良（挙動は正しい） | `connection.meaning` |
+| processing | `processing.regression` | 過去に正しかった単一処理が変更で壊れた | `processing.logic` |
+| structure | `structure.representation` | 情報表現（ID・キー・列・語彙・型）が必要な区別や同一性を表せない | `connection.information`, `connection.version`, `governance.resume`, `structure.aggregation` |
+| structure | `structure.responsibility` | 責務の置き場所（どの層・どの関数が判断するか）が不適切・二重 | `connection.condition`, `governance.assignment`, `structure.aggregation`, `structure.decomposition` |
+| structure | `structure.decomposition` | 分割の粒度（大きすぎる／細かすぎる・混在） | `connection.target`, `structure.responsibility` |
+| structure | `structure.aggregation` | 集約・正本の一本化が無く、同型実装・語彙表・状態が分散 | `governance.review`, `structure.representation`, `structure.responsibility` |
+| connection | `connection.information` | 段階間で**情報**（値・行・フィールド）が落ちる | `connection.contract`, `structure.representation` |
+| connection | `connection.meaning` | 段階間で**意味**（ラベルの解釈・座標系・単位・語彙）がずれる | `connection.contract`, `processing.wording` |
+| connection | `connection.condition` | 段階間で**条件**（権限・可視性・オプション・前提）が伝わらない | `connection.target`, `governance.assignment`, `structure.responsibility` |
+| connection | `connection.target` | 段階間で**対象**（どの document／run／ユーザー／コースか）がずれる | `connection.condition`, `structure.decomposition` |
+| connection | `connection.version` | 段階間で**版**（run・凍結版・revision・キャッシュ世代）がずれる | `governance.resume`, `structure.representation` |
+| connection | `connection.contract` | 前段の出力契約と後段の入力契約が両立しない（片方だけ変えた） | `connection.information`, `connection.meaning`, `processing.logic` |
+| governance（制御系） | `governance.ordering` | 実行・判定・記帳の順序 | `governance.budget`, `governance.resume` |
+| governance（制御系） | `governance.budget` | 回数・コスト・上限・スロットル | `governance.ordering` |
+| governance（制御系） | `governance.resume` | 停止・再開・再実行・冪等性 | `connection.version`, `governance.ordering`, `structure.representation` |
+| governance（手続系） | `governance.assignment` | 誰が（人／AI／どの層が）判断・実行するかの割り当て | `connection.condition`, `governance.completion`, `structure.responsibility` |
+| governance（手続系） | `governance.review` | レビュー・確認・承認の手続と記録 | `governance.completion`, `structure.aggregation` |
+| governance（手続系） | `governance.completion` | 完了判定・状態の正本・「済み」の定義 | `governance.assignment`, `governance.review`, `processing.resource` |
 
 | 空の値 | 意味 |
 |---|---|
 | `none` | この軸を見て、要素が無いと判断した |
 | `unknown` | まだ見ていない。`cause_status: confirmed` と同居できない |
+
+「境界が曖昧になりやすい相手」は対称で、モジュール側 `NEIGHBORS` と逐語一致する（機械検査）。
+分類者が 2 つの値で迷った記録（`history` の変更前後）が積もれば、この列を更新する。
+
+### 2.1 軸ごとの確信度（`classification.axis_confidence`）
+
+4 軸それぞれに、置いた値（`none` を含む）への確信度を 3 段で付ける。数値は使わない。
+
+| 値 | 意味 |
+|---|---|
+| `high` | 定義に当たる／当たらないことを根拠から直接言える |
+| `medium` | 当たると読めるが、相手の値との境界で迷った |
+| `low` | 判断材料が薄い。`none` なら「見たが無いと言い切れない」、値なら「置いたが相手の方かもしれない」 |
+
+`unknown` の軸に `high` は置けない。AI が起こした確信度は AI の自己申告で、人が座標を確定するとき
+（§3.1）に確信度も確定する。
+
+### 2.2 新設の問い（`classification.proposals`）
+
+確信度が `low` か `medium` の軸には、**「この軸に新しい値、または新しい軸が要るか」**を問う。
+要ると考えたら提案を 1 件書く（要らなければ書かない。`proposals: []`）。
+
+```yaml
+proposals:
+  - kind: value              # value = 既存の軸に値を足す / axis = 新しい軸
+    target_axis: connection  # kind=value のとき必須。kind=axis のとき null
+    neighbor_of: [connection.version, structure.representation]  # 境界が曖昧になる相手（既存の 軸.値）
+    statement: 機能名を含まない一文で、足したい値（軸）が何を区別するか
+    confidence: medium       # high | medium | low
+```
+
+- `kind` は `value`（既存の軸に値を足す）か `axis`（新しい軸）。
+- 提案は**同じ種別・同じ軸・同じ相手**で束ねる（statement の字面では束ねない）。
+- 束の中で確信度 `high` が **3 件以上**あれば「設定候補」として索引に浮上する。人が §2 の表に
+  **暫定の値**として足すまで体系は変わらない。3 件に至らない束も消さない（次の 1 件を待つ）。
+- 新しい**軸**の提案は、既存 4 軸のどの定義にも当たらないことを 3 件が独立に述べることを条件に
+  する（値より一段重い変更）。
+
+### 2.3 値のライフサイクル（暫定 → 成立 / 見送り）
+
+| 状態 | 条件 | 索引 |
+|---|---|---|
+| 暫定 | 設定候補から人が足した直後。モジュール `PROVISIONAL_VALUES` に載せ、相手（§2 の列）を必ず宣言 | §13 に使うエントリと再評価キューを表示 |
+| 成立 | `classification.review: confirmed` のエントリが 2 件以上使う | `PROVISIONAL_VALUES` から外す |
+| 見送り | 使われないまま残る。値は表から外してよいが、下の記録に残す | — |
+
+見送りの記録（値・日付・理由）: なし（2026-09-19 時点）。
+
+### 2.4 再評価（新設のたびに全件を見直さない）
+
+暫定の値を足したら、**その値の相手（§2 の列）に当たる軸で確信度が `low` か `medium` のエントリ**だけを
+再評価キュー（索引 §13）に出す。再評価では新設値を含めて軸の値を置き直し、座標が変われば `history` に
+追記する。再評価の連鎖は 1 段で止め、そこから出た新しい提案は次の巡回で扱う。
 
 ---
 

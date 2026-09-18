@@ -15,16 +15,23 @@ classification:
     processing: [none]
     structure: [representation]
     connection: [none]
-    governance: [review]
+    governance: [review, completion]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「匿名であることを、母集団の規模と無関係な件数の閾値だけで表している」こと。
-    集計処理は閾値どおりに動いており、条件も版も落ちていない。判定の表現に母集団の文脈を
-    入れないかぎり、閾値の数を上げ下げしても小さな集団では同じ結果になる。確認手段は、
-    同学年が二人の研究室では閾値を満たすセル自体がその二人を指すという構成上の事実。
+    処理: 集計は閾値どおりに動く。
+    構造: 母集団の規模という、代理指標が成立する前提が判定の表現のどこにも現れない。
+    接続: 段階間で落ちているものは無い。
+    統制: 何をもって匿名とするかという安全の定義が件数の代理で書かれ、
+    その代理のまま開示してよいとする手続が残っている。二つの値の切り分けで迷った。
 generalization:
   level: general
   general_form: 安全であることを、文脈と無関係な固定の代理指標だけで判定する
@@ -50,6 +57,11 @@ history:
     from: primary=structure facets=[structure.representation, governance.review]
     to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[representation]; connection=[none]; governance=[review]
+    to: processing=[none]; structure=[representation]; connection=[none]; governance=[review, completion]
+    reason: 軸ごとの再判定で、「匿名である」という安全の定義が件数の代理で書かれている点を完了判定の要素として追加した
 ---
 
 ## 課題
@@ -61,6 +73,9 @@ history:
 原因は、匿名であることを母集団の規模と無関係な件数の閾値だけで表していることにある。集計処理は
 閾値どおりに正しく動く。閾値が保護の代理として働くのは、母集団が閾値より十分大きいときだけで、
 その前提が表現のどこにも書かれていない。
+
+軸ごとに読み直すと、統制には開示の手続だけでなく「匿名である」という定義そのものの要素がある。
+件数という代理で安全を定義しているため、開示の手続を厳しくしても定義の側は変わらない。
 
 ## 発見の観点
 

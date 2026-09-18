@@ -12,19 +12,33 @@ feature_context:
   layers: [pipeline_a, rag_chat, deliberation_w]
 classification:
   axes:
-    processing: [none]
+    processing: [input_handling]
     structure: [representation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: low
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.contract, connection.meaning]
+      statement: 後段へ渡したデータの内容が、前段の定めた区切りそのものを再現して枠を越える
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「指示側とデータ側を区別する表現（区切りと、資料本文中の指示に従わないという
-    明示）が規約として存在しなかったこと」。個々のプロンプトを直しても、新しい経路が
-    増えるたびに同じ状態へ戻るため構造。調査表が、資料本文を渡す経路と区切りの強さを
-    全件で確認しており、明示は着手前に 0 本だった。
+    処理: 資料由来のテキストを表示・読み上げの前に正規化する取り扱いが無く、着色用の制御文字がそのまま転写される点が入力の取り扱いに当たる。境界の規約の不在と表裏なので中。
+
+    構造: 指示側とデータ側を区別する表現（区切りと、データ中の指示に従わないという明示）が規約として存在しない点が表現に当たる。
+
+    接続: 段階間で情報や条件が落ちているのではなく、境界そのものが定義されていないと判断した。弱い区切りを契約の不備と読む余地は残る。
+
+    統制: 新しい経路を足すときの受け入れ条件として境界の点検が置かれていなかった点が確認の手続に当たる。
 generalization:
   level: general
   general_form: 第三者由来のテキストが指示と同じ文脈へ混ざり、データと命令の境界が溶ける
@@ -54,6 +68,11 @@ history:
     from: primary=structure facets=[structure.representation, governance.review]
     to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
+    to: axes=processing=[input_handling]; structure=[representation]; connection=[none]; governance=[review]
+    reason: 軸ごとの再判定で、資料由来テキストの正規化が無く制御文字が転写された点を処理軸の要素として認めた
 ---
 
 ## 課題
@@ -65,6 +84,8 @@ LLM へ渡っていた。区切りの弱い経路では、資料本文が区切�
 
 原因は、その境界を表す規約が存在しなかったこと。個々のプロンプトは目的に対して妥当で、
 欠けていたのは「どこからがデータか」「データ中の指示には従わない」という共通の表現である。
+
+4 軸で見直すと、処理軸にも要素がある。資料由来のテキストを表示・読み上げの前に正規化する取り扱いが無く、着色用の制御文字がそのまま応答へ転写された。境界の規約とは別に、この取り扱いを置かなければ転写は残る。
 
 ## 発見の観点
 

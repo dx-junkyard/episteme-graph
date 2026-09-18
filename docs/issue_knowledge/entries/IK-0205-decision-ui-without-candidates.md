@@ -16,15 +16,29 @@ classification:
     structure: [responsibility]
     connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.information, connection.contract]
+      statement: 前段と後段をつなぐ経路そのものが用意されず、後段が前段の成果を一度も受け取らない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    確定側の処理も、候補を作る側の処理も、単体では設計どおりに動く。壊れているのは、候補を
-    作る側へ材料（実在する識別子の一覧）が渡らず、確定側へ候補が到達しないこと。各段が
-    単体では正しく見えるという接続の定義に当たる。確定という責務だけが実装され生成側が
-    未実装という責務の偏りは副次。
+    処理: 確定する側も候補を作る側も、単体では設計どおりに動く。
+    構造: 確定するという責務だけが実装され、候補を生む責務の置き場所が決まっていない。確定側を
+    作り込んでも手前は埋まらない。分割の粒度との境界で迷った。
+    接続: 候補を作る側へ材料（実在する識別子の一覧）が渡らず、確定側へ候補が到達しない。落ちて
+    いるのは値というより経路そのもので、既存の値との当たりは完全ではない。
+    統制: 担当・順序・予算・完了判定のいずれにも崩れは無い。確定の装置を先に置く実装の順番を
+    完了判定の問題と読む余地はあるが、実行時の統制ではないため要素は無いと判断した。
 generalization:
   level: repo_pattern
   general_form: >-
@@ -67,6 +81,11 @@ history:
 **原因**: 候補を作る側へ材料が渡っていない。対話の指示文は実在する識別子を要求するのに、
 材料を組み立てる側がその一覧を供給しないため、AI は候補を出せないか、存在しない識別子を
 作って確定時に失敗するかの二択になっていた。手で候補を作る入口も無かった。
+
+**軸ごとの再判定（2026-09-19）**: 座標は変えていない。ただし接続軸は「材料が落ちる」より
+「候補を運ぶ経路が用意されていない」に近く、既存の値との当たりが完全ではないため確信を中とし、
+新しい値の提案を 1 件出した。統制軸は、確定の装置を先に置く実装の順番を完了判定の問題と読む
+余地はあるが、実行時の統制ではないので要素は無いと判断した。
 
 ## 発見の観点
 

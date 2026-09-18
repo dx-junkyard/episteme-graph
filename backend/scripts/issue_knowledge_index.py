@@ -68,6 +68,50 @@ GROUP_UNDETERMINED = "（未判定）"
 # taxonomy §2 の定義表のトークン（`axis.value`）。ミラー検査用。
 FACETS: tuple[str, ...] = tuple(f"{a}.{v}" for a in AXES for v in AXIS_VALUES[a])
 
+# 軸ごとの確信度（値にも none にも付く。数値は使わない）
+CONFIDENCE_LEVELS: tuple[str, ...] = ("high", "medium", "low")
+CONFIDENCE_LABELS = {"high": "高", "medium": "中", "low": "低"}
+
+# 新設の提案（確信度が低い軸から出る問い「新しい軸か値が要るか」への答え）
+PROPOSAL_KINDS: tuple[str, ...] = ("axis", "value")
+PROPOSAL_MIN_HIGH = 3  # 同じ軸・同じ相手の提案が確信度 high で 3 件以上 → 設定候補
+
+# 暫定の値（新設直後）。確定エントリ VALUE_ESTABLISHED_MIN_CONFIRMED 件以上で成立。
+# 成立したら taxonomy §2.3 とここから外す。見送りは taxonomy §2.3 に記録して残す。
+PROVISIONAL_VALUES: tuple[str, ...] = ()
+VALUE_ESTABLISHED_MIN_CONFIRMED = 2
+
+# 境界が曖昧になりやすい相手（対称）。正本は taxonomy §2 の列。新設値は必ず相手を宣言する。
+_NEIGHBOR_SEED: dict[str, tuple[str, ...]] = {
+    "processing.input_handling": ("processing.logic",),
+    "processing.logic": ("connection.contract", "processing.regression"),
+    "processing.resource": ("governance.completion",),
+    "processing.wording": ("connection.meaning",),
+    "structure.representation": ("connection.version", "connection.information", "governance.resume", "structure.aggregation"),
+    "structure.responsibility": ("governance.assignment", "structure.decomposition", "structure.aggregation", "connection.condition"),
+    "structure.decomposition": ("connection.target",),
+    "structure.aggregation": ("governance.review",),
+    "connection.information": ("connection.contract",),
+    "connection.meaning": ("connection.contract",),
+    "connection.condition": ("governance.assignment", "connection.target"),
+    "connection.version": ("governance.resume",),
+    "governance.assignment": ("governance.completion",),
+    "governance.ordering": ("governance.budget", "governance.resume"),
+    "governance.review": ("governance.completion",),
+}
+
+
+def _symmetrize(seed: dict[str, tuple[str, ...]]) -> dict[str, tuple[str, ...]]:
+    out: dict[str, set[str]] = {tok: set() for tok in FACETS}
+    for a, bs in seed.items():
+        for b in bs:
+            out[a].add(b)
+            out[b].add(a)
+    return {tok: tuple(sorted(v)) for tok, v in out.items()}
+
+
+NEIGHBORS: dict[str, tuple[str, ...]] = _symmetrize(_NEIGHBOR_SEED)
+
 CAUSE_STATUSES: tuple[str, ...] = ("confirmed", "hypothesis")
 REVIEW_STATES: tuple[str, ...] = ("candidate", "confirmed")
 MAX_PERSPECTIVES = 2            # 観点は最大 2・先頭が主（taxonomy §5）
@@ -130,7 +174,7 @@ REQUIRED_TOP_KEYS = (
     "view_of",
     "history",
 )
-REQUIRED_CLASSIFICATION_KEYS = ("axes", "cause_status", "review", "reviewed_by", "reviewed_at", "basis")
+REQUIRED_CLASSIFICATION_KEYS = ("axes", "axis_confidence", "proposals", "cause_status", "review", "reviewed_by", "reviewed_at", "basis")
 REQUIRED_BODY_HEADINGS = ("## 課題", "## 発見の観点", "## 解決の観点", "## 一般化")
 
 ENTRY_FILE_RE = re.compile(r"^(IK-\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
@@ -426,6 +470,52 @@ def validate_entry(
                 errs.append("全軸が none / unknown（原因の性質がどこにも無い課題は記帳できない）")
             if cl.get("cause_status") == "confirmed" and any(axis_values(cl, a) == ["unknown"] for a in AXES):
                 errs.append("cause_status=confirmed なのに unknown の軸がある（見て無いなら none）")
+        conf = cl.get("axis_confidence")
+        if not isinstance(conf, dict):
+            errs.append("classification.axis_confidence が mapping ではない（軸ごとに high / medium / low）")
+        else:
+            for axis in AXES:
+                if conf.get(axis) not in CONFIDENCE_LEVELS:
+                    errs.append(f"classification.axis_confidence.{axis} `{conf.get(axis)}` は語彙外 {CONFIDENCE_LEVELS}")
+            for extra in set(conf) - set(AXES):
+                errs.append(f"classification.axis_confidence に未知の軸 `{extra}`")
+            for axis in AXES:
+                if axis_values(cl, axis) == ["unknown"] and conf.get(axis) == "high":
+                    errs.append(f"axes.{axis} が unknown なのに確信度 high（見ていない軸に高い確信は置けない）")
+        props = cl.get("proposals")
+        if not isinstance(props, list):
+            errs.append("classification.proposals がリストではない（無ければ []）")
+        else:
+            for i, pr in enumerate(props):
+                tag = f"proposals[{i}]"
+                if not isinstance(pr, dict):
+                    errs.append(f"{tag} が mapping ではない")
+                    continue
+                kind = pr.get("kind")
+                if kind not in PROPOSAL_KINDS:
+                    errs.append(f"{tag}.kind `{kind}` は語彙外 {PROPOSAL_KINDS}")
+                ta = pr.get("target_axis")
+                if kind == "value" and ta not in AXES:
+                    errs.append(f"{tag}.target_axis `{ta}` は軸ではない（kind=value は既存の軸に値を足す提案）")
+                if kind == "axis" and ta is not None:
+                    errs.append(f"{tag}.target_axis は kind=axis では null")
+                nb = _as_list(pr.get("neighbor_of"))
+                if not nb:
+                    errs.append(f"{tag}.neighbor_of が空（境界が曖昧になる相手 `軸.値` を最低 1 つ）")
+                for x in nb:
+                    if x not in FACETS:
+                        errs.append(f"{tag}.neighbor_of `{x}` は既存の `軸.値` ではない")
+                st = pr.get("statement")
+                if not isinstance(st, str) or not st.strip():
+                    errs.append(f"{tag}.statement が空（機能名を含まない一文）")
+                else:
+                    for pat in FORBIDDEN_GENERAL_FORM_PATTERNS:
+                        if pat.search(st):
+                            errs.append(f"{tag}.statement にファイル名・パス・コード片が含まれる")
+                if pr.get("confidence") not in CONFIDENCE_LEVELS:
+                    errs.append(f"{tag}.confidence `{pr.get('confidence')}` は語彙外 {CONFIDENCE_LEVELS}")
+                if isinstance(conf, dict) and kind == "value" and ta in AXES and conf.get(ta) == "high":
+                    errs.append(f"{tag}: 確信度 high の軸 `{ta}` への新設提案（提案は確信度が低い軸から出す）")
         for key in REQUIRED_CLASSIFICATION_KEYS:
             if key not in cl:
                 errs.append(f"classification.{key} が無い")
@@ -865,6 +955,78 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
         lines.append("（該当なし）")
     lines.append("")
 
+    lines.append("## 11. 確信度が低い軸（分類レビュー・再評価の入口）")
+    lines.append("")
+    for a in AXES:
+        low = [e for e in entries if ((e.meta.get("classification") or {}).get("axis_confidence") or {}).get(a) == "low"]
+        med = [e for e in entries if ((e.meta.get("classification") or {}).get("axis_confidence") or {}).get(a) == "medium"]
+        lines.append(f"- {AXIS_LABELS[a]}軸 低: " + (", ".join(_link(e) for e in low) if low else "（該当なし）") + f" ／ 中: {len(med)} 件")
+    lines.append("")
+
+    lines.append("## 12. 新設の提案（確信度の低い軸から出た「新しい軸か値が要るか」への答え）")
+    lines.append("")
+    lines.append(
+        f"同じ種別・同じ軸・同じ相手の提案を束ねる。確信度 high が {PROPOSAL_MIN_HIGH} 件以上の束は**設定候補**。"
+        "人が taxonomy §2 に暫定の値（または軸）として足すまで体系は変わらない。至らない束も消さない。"
+    )
+    lines.append("")
+    bundles_p: dict[tuple, list[tuple[Entry, dict]]] = defaultdict(list)
+    for e in entries:
+        for pr in _as_list((e.meta.get("classification") or {}).get("proposals")):
+            if isinstance(pr, dict):
+                key = (str(pr.get("kind")), str(pr.get("target_axis")), tuple(sorted(str(x) for x in _as_list(pr.get("neighbor_of")))))
+                bundles_p[key].append((e, pr))
+    if bundles_p:
+        for key, items in sorted(bundles_p.items(), key=lambda kv: -len(kv[1])):
+            kind, ta, nb = key
+            n_high = sum(1 for _, pr in items if pr.get("confidence") == "high")
+            flag = "**設定候補**" if n_high >= PROPOSAL_MIN_HIGH else "束"
+            where = f"軸 `{ta}` に値" if kind == "value" else "新しい軸"
+            lines.append(f"### {flag}: {where} ／ 相手 " + ", ".join(f"`{x}`" for x in nb))
+            lines.append("")
+            lines.append(f"提案 {len(items)} 件（high {n_high}）")
+            lines.append("")
+            for e, pr in items:
+                lines.append(f"- {_link(e)}（{CONFIDENCE_LABELS.get(pr.get('confidence'), '')}）: {_cell(pr.get('statement'))}")
+            lines.append("")
+    else:
+        lines.append("（提案なし）")
+        lines.append("")
+
+    lines.append("## 13. 暫定の値と再評価キュー")
+    lines.append("")
+    if PROVISIONAL_VALUES:
+        for tok in PROVISIONAL_VALUES:
+            a, v = tok.split(".", 1)
+            users = by_axis_value.get((a, v), [])
+            n_conf = sum(1 for e in users if (e.meta.get("classification") or {}).get("review") == "confirmed")
+            state = "成立" if n_conf >= VALUE_ESTABLISHED_MIN_CONFIRMED else "暫定"
+            lines.append(f"### `{tok}`（{state}）")
+            lines.append("")
+            lines.append("使うエントリ: " + (", ".join(_link(e) for e in users) if users else "（なし）"))
+            lines.append("")
+            nbs = NEIGHBORS.get(tok, ())
+            queue: list[tuple[Entry, str]] = []
+            for e in entries:
+                cl = e.meta.get("classification") or {}
+                conf = cl.get("axis_confidence") or {}
+                for nb in nbs:
+                    na = nb.split(".", 1)[0]
+                    if conf.get(na) in ("low", "medium") and e not in users:
+                        queue.append((e, na))
+                        break
+            lines.append("再評価キュー（相手 " + ", ".join(f"`{x}`" for x in nbs) + " に当たる軸で確信度が低いエントリ）:")
+            lines.append("")
+            if queue:
+                for e, na in queue:
+                    lines.append(f"- {_link(e)}: {AXIS_LABELS[na]}軸を、`{tok}` を含めて再評価")
+            else:
+                lines.append("（該当なし）")
+            lines.append("")
+    else:
+        lines.append("暫定の値はない（新設候補は §12）。")
+        lines.append("")
+
     lines.append("## 10. 出典文書の被覆（調査・レビュー系文書ごとのエントリ有無）")
     lines.append("")
     src_count: Counter = Counter()
@@ -948,6 +1110,9 @@ def _print_stats(entries: list[Entry]) -> int:
         show(f"{AXIS_LABELS[a]}軸", Counter(v for e in entries for v in axis_values(e.meta.get("classification") or {}, a)))
     show("分類の確定状態", Counter((e.meta.get("classification") or {}).get("review") for e in entries))
     show("状態", Counter(e.meta.get("status") for e in entries))
+    for a in AXES:
+        show(f"{AXIS_LABELS[a]}軸の確信度", Counter(((e.meta.get("classification") or {}).get("axis_confidence") or {}).get(a) for e in entries))
+    show("提案（kind/target_axis）", Counter(f"{pr.get('kind')}/{pr.get('target_axis')}" for e in entries for pr in _as_list((e.meta.get("classification") or {}).get("proposals")) if isinstance(pr, dict)))
     show("型", Counter(str(e.meta.get("pattern")) for e in entries))
     show("発見観点（主）", Counter((_as_list((e.meta.get("discovery") or {}).get("perspective")) or [None])[0] for e in entries))
     show("解決観点（主）", Counter((_as_list((e.meta.get("resolution") or {}).get("perspective")) or [None])[0] for e in entries))

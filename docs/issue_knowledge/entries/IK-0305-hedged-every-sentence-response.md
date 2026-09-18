@@ -13,17 +13,26 @@ classification:
   axes:
     processing: [wording]
     structure: [representation]
-    connection: [none]
+    connection: [condition]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「不確かさを『どこに付けるか』の設計が、文ごとの言い回しに置かれていたこと」。
-    文言を個別に直しても、契約が文ごとの留保を要求する限り同じ応答が再生産されるため
-    構造。設計書 §15 が、全文が「〜の可能性があります」で終わる症状と、その出所
-    （プロンプト契約の該当文）を対応づけている。
+    処理: 生の数式記法と制御文字の残骸、書き言葉のままの読み上げは、挙動は正しいまま表示文言の水準が損なわれており文言に当たる。
+
+    構造: 不確かさをどこに付けるかという置き場所が、文ごとの言い回しに置かれている点が表現に当たる。
+
+    接続: 読むのか聞くのかという伝達形式が生成の段へ渡っていない点が条件に当たる。語彙のずれとも読めるため中。
+
+    統制: 不変条項の解釈を誤ったのであって、承認・順序・予算の手続は崩れていない。
 generalization:
   level: general
   general_form: 断定を避けるという要請を文ごとの言い回しで満たし、内容が読み取れなくなる
@@ -53,6 +62,11 @@ history:
     from: primary=structure facets=[structure.representation, local.wording]
     to: axes=processing=[wording]; structure=[representation]; connection=[none]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[wording]; structure=[representation]; connection=[none]; governance=[none]
+    to: axes=processing=[wording]; structure=[representation]; connection=[condition]; governance=[none]
+    reason: 軸ごとの再判定で、伝達形式という条件が生成の段へ渡っていない点を接続軸の要素として認めた
 ---
 
 ## 課題
@@ -64,6 +78,8 @@ history:
 ③の原因は、プロンプト契約が**文ごとの留保**を要求していたこと。「AI に確定させない」と
 いう不変条項を、文体の水準で満たそうとした結果だった。①は数式の区切りを契約に書いて
 いなかったこと、②は伝達形式（読む／聞く）が応答の表現に反映されていなかったことによる。
+
+4 軸で見直すと、接続軸にも要素がある。読むのか聞くのかという伝達形式が生成の段へ渡っていなかったので、②の症状は文体の問題ではなく条件の受け渡しの欠落として読める。
 
 ## 発見の観点
 

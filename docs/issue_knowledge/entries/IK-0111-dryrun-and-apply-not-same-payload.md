@@ -15,16 +15,22 @@ classification:
   axes:
     processing: [none]
     structure: [none]
-    connection: [none]
+    connection: [target]
     governance: [ordering, review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    検査（事前確認）と適用（確定）が別々の要求で、その間に別の束へ差し替えられても検出できない
-    順序設計だったことが原因。処理も表現も正しく、いつ検査していつ適用するかという順序と、
-    一括の確定を再構成できる形で記帳する手続だけが崩れている。
+    処理: 検査も適用もそれぞれ書かれたとおり動く。構造: 束の同一性を表す値は是正で導入したが、順序や状態で担保する設計も取り得たため、表現の不在が原因だとは言い切れない。接続:
+    事前確認の段と確定の段の間で、対象（どの束か）が同じである保証が無い。別々の要求どうしを段と読むかどうかで判断が割れるため確信は中。統制:
+    検査と適用をいつ行うかという順序が崩れており（順序）、実質の一括確定なのに提示と適用を後から再構成できる記帳が無かった（レビュー）。
 generalization:
   level: general
   general_form: >-
@@ -56,6 +62,12 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[ordering,
       review]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: connection=[none]
+    to: connection=[target]
+    reason: >-
+      軸ごとの再判定で、事前確認と確定の間で対象が同じである保証が無い点を接続の要素として置いた
 ---
 
 ## 課題
@@ -65,6 +77,9 @@ history:
 
 **原因**: 検査と適用が別々の要求で、その間に対象が入れ替わっても気づけない順序になっていた。
 また一括の確定は記帳の対象に入っていなかった。
+
+**軸ごとの判断（2026-09-19）**: 接続は、確認の段と確定の段の間で対象が同じである保証が無い点を要素として置いた（別々の要求を段と読むかで割れるため確信は中）。
+統制は順序と一括確定の記帳。処理と構造は要素なし。
 
 ## 発見の観点
 

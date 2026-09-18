@@ -15,16 +15,25 @@ classification:
     processing: [none]
     structure: [representation]
     connection: [contract]
-    governance: [none]
+    governance: [completion]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「受け口が対象の種別ごとに許容する注釈の種別を絞っているのに、その制約が
-    生成側の指示にも利用者への表示にも現れないこと」。生成側は妥当な候補を作り、
-    受け口は妥当に弾いているので、両者の契約が両立していない。調査記録 §8 が
-    「黙って破棄される・LLM にも教員にも制約が伝わらない」と実装位置つきで確認している。
+    処理: 生成も破棄も、それぞれの仕様どおりに動いている。
+
+    構造: 対象の種別ごとに許容する注釈の種別という制約が、生成側の指示にも表示にも現れない表現になっている点が表現に当たる。契約の不一致と表裏なので中。
+
+    接続: 前段の出力契約と後段の入力契約が両立しない点が契約に当たる。
+
+    統制: 保存されなかったのに保存されたように見えるため、この操作の「済み」の定義が実態と合っていない点が完了に当たる。契約不一致の結果とも読めるため中。
 generalization:
   level: repo_pattern
   general_form: 後段が受け取れない種別の出力を前段が作り続け、捨てられた事実が誰にも伝わらない
@@ -50,6 +59,11 @@ history:
     from: primary=connection facets=[connection.contract, structure.representation]
     to: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[none]
+    to: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[completion]
+    reason: 軸ごとの再判定で、無言の破棄が「済み」の定義を実態から外している点を統制軸の要素として認めた
 ---
 
 ## 課題
@@ -60,6 +74,8 @@ history:
 
 原因は、前段の出力契約（何を作ってよいか）と後段の入力契約（何を受け取るか）が両立して
 いないこと。どちらも単体では筋が通っており、間の不一致だけが問題である。
+
+4 軸で見直すと、統制軸にも要素がある。保存されなかったにもかかわらず保存されたように見えるので、この操作の「済み」の定義が実態と合っていない。
 
 ## 発見の観点
 

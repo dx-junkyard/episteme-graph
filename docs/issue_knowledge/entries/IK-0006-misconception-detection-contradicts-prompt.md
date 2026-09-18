@@ -12,19 +12,26 @@ feature_context:
   layers: [rag_chat]
 classification:
   axes:
-    processing: [logic]
-    structure: [none]
+    processing: [none]
+    structure: [aggregation]
     connection: [contract]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「生成側への指示と検出側の前提が別々に決まっていて両立しない」こと。検出処理も
-    生成指示もそれぞれ単体では意図どおりであり、権限も版も落ちていない。両者が同じ語彙を
-    共有する形に変えないかぎり、検出語を足しても指示の側が変わればまた外れる。確認手段は
-    G-07 行が引く検出語の一覧と、生成側の指示文が同じ語を避けるよう書いていること。
+    処理: 検出処理も生成の指示もそれぞれ単体では意図どおりで、前提が妥当という条件を満たさない。
+    表層の語を足す直しでは解けないため、単一処理の不良としては数えない。
+    構造: 出力の形式についての取り決めが、生成する側と読み取る側に分かれて置かれている。
+    接続: 生成側の指示と検出側の前提が両立しない。
+    統制: 誰が判断するか・順序・予算のいずれにも要素は見当たらない。
 generalization:
   level: general
   general_form: 生成する側と読み取る側の取り決めが別々に変更され、互いの前提が食い違う
@@ -50,6 +57,11 @@ history:
     from: primary=connection facets=[connection.contract, local.logic]
     to: axes=processing=[logic]; structure=[none]; connection=[contract]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[logic]; structure=[none]; connection=[contract]; governance=[none]
+    to: processing=[none]; structure=[aggregation]; connection=[contract]; governance=[none]
+    reason: 軸ごとの再判定で、前提が両立しない以上「入力・契約・前提が妥当」という処理軸の条件を満たさないと見て処理の値を外し、取り決めが二箇所に分かれて置かれている点を構造に置いた
 ---
 
 ## 課題
@@ -60,6 +72,10 @@ history:
 
 原因は、生成側の取り決めと検出側の前提が別々に決まっていて両立しないことにある。どちらの処理も
 単体では意図どおり動く。互いの前提が噛み合っていないだけである。
+
+軸ごとに読み直すと、処理軸は「入力・契約・前提がすべて妥当」であることを前提にした軸なので、
+前提そのものが両立していないこの課題には当たらない。代わりに、出力の形式についての取り決めが
+生成側と読み取り側の二箇所に分かれて置かれている点を構造軸に置いた。
 
 ## 発見の観点
 

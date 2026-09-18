@@ -17,14 +17,23 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    各文書の記述はそれぞれ書かれた時点では正しかった。原因は、同じ事実の正本が定まらないまま
-    複数箇所へ書き写され、更新のたびに分裂すること。テストで固定された値だけが分裂していない
-    という対照が、原因が集約の不在であることを示す。書き写しを許す限り、個別に直しても再発する。
+    処理: 各文書の記述は、それぞれ書かれた時点では正しかった。
+    構造: 同じ事実の正本が定まらないまま複数箇所へ書き写され、更新のたびに分裂する。等値で
+    固定された件数だけが分裂していないという対照が、集約の不在を示す。
+    接続: 段階の間で情報・条件・対象・版が失われる場面は無い。
+    統制: 人の手で写した値を更新のたびに確かめる手続が無い。集約を一本化すれば残らないとも
+    読めるため確信は中。
 generalization:
   level: general
   general_form: >-

@@ -17,15 +17,23 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    参照している各文書の記述は一貫しており、参照の書き方にも誤りは無い。原因は、正本と
-    呼ぶための条件（版として残っていること）が取り決められておらず、参照先が実在するかを
-    確かめる手続も無いこと。処理も表現も正しいのに、何をもって正本とするかの決めごとが
-    欠けているので統制とする。
+    処理: 参照している各文書の記述も、参照の書き方も正しい。
+    構造: 正本として名指しされた対象が版に存在せず、根拠を集める先が無い。集約の不在と手続の
+    不在の切り分けで迷った。
+    接続: 段階の間で情報・条件・対象・版が失われる場面は無い。
+    統制: 何をもって正本と呼ぶか（版に入っていること）の取り決めも、参照先が実在するかを確かめる
+    手続も無い。
 generalization:
   level: general
   general_form: >-

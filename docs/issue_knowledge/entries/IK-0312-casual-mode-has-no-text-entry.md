@@ -15,18 +15,25 @@ classification:
     processing: [none]
     structure: [responsibility]
     connection: [condition]
-    governance: [none]
+    governance: [assignment]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「会話の調子という判断を利用者側に置き、その選択肢を UI の語彙として並べる
-    設計にしたこと」。サーバは調子を受け取って完全に処理できるのに、テキストからは
-    渡せず、選べない学習者の発話は拒否文に落ちる。入口を 1 つ足すだけでは、次に調子が
-    増えるたび同じ分岐が UI に現れるため構造（判断の置き場所）。設計書 §1 が
-    「サーバは 4 値の意図分類器を既に持つのに、casual と discuss はそれを丸ごと
-    バイパスする明示スイッチとして上に積まれている」と確認している。
+    処理: サーバは調子を受け取れば正しく処理でき、単一処理の不良は無い。
+
+    構造: 内部の分岐をそのまま利用者の選択肢として置いたという判断の置き場所が責務に当たる。
+
+    接続: 調子という条件がテキストの経路からサーバへ渡らない点が条件に当たる。入口の欠落そのものとも読めるため中。
+
+    統制: 会話の調子を人が選ぶのかシステムが読むのかという割り当てが決まっていない点が割り当てに当たる。責務との境界で迷うため中。
 generalization:
   level: repo_pattern
   general_form: 内部の分岐が利用者の選択肢として並び、選べない経路の利用者には機能が存在しないのと同じになる
@@ -55,6 +62,11 @@ history:
     from: primary=structure facets=[structure.responsibility, connection.condition]
     to: axes=processing=[none]; structure=[responsibility]; connection=[condition]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[responsibility]; connection=[condition]; governance=[none]
+    to: axes=processing=[none]; structure=[responsibility]; connection=[condition]; governance=[assignment]
+    reason: 軸ごとの再判定で、調子を人が選ぶのかシステムが読むのかという割り当てを統制軸の要素として認めた
 ---
 
 ## 課題
@@ -65,6 +77,8 @@ history:
 しか用意しなかったこと。サーバ側は調子を受け取って完全に処理できるにもかかわらず、
 テキストからは渡す手段が無い。加えて、調子を選べない利用者の雑談めいた発話は、意図分類が
 雑談と判定して拒否文へ落ちていた。
+
+4 軸で見直すと、統制軸にも要素がある。会話の調子を人が選ぶのかシステムが読むのかという割り当てが決まっていなかった。判断の置き場所（構造）と表裏だが、割り当ての側からも読める。
 
 ## 発見の観点
 

@@ -17,15 +17,24 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    宣言・ルール・手順書のいずれも書式として正しく、参照する仕組みも設計どおり動く。崩れて
-    いるのは、機能を足したときに案内を同じ変更で更新するという手続と、その追随を確かめる
-    担当が置かれていないこと。処理も表現も正しいのに「いつ・誰が更新するか」が決まっていない
-    ため統制とする。
+    処理: 宣言・ルール・手順書はいずれも書式として正しく、参照する仕組みも設計どおり動くため
+    要素は無い。
+    構造: 案内の内容が宣言・ルール・手順書の三系統に分かれて持たれ、どれが正本かが決まって
+    いない。一つを直しても他が古いまま残る。集約の不在と更新手続の不在の切り分けで迷った。
+    接続: 実装と案内の間に段階の受け渡しは無く、値が途中で落ちているわけではないので要素は無いと
+    判断した。後から積んだ層の成果が案内へ現れない点を接続と読む余地は残る。
+    統制: 機能を足したときに案内を同じ変更で更新する手続も、追随を確かめる担当も置かれていない。
 generalization:
   level: repo_pattern
   general_form: >-

@@ -16,16 +16,22 @@ classification:
     processing: [none]
     structure: [none]
     connection: [none]
-    governance: [review, ordering]
+    governance: [review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「状態を変える経路のうち、記帳を通す決まりから漏れた経路がある」こと。各処理は
-    意図どおりに状態を変えており、表現にも段階間の欠落にも問題はない。記帳を経路の要件として
-    立てないかぎり、新しい経路ができるたびに同じ漏れが出る。確認手段は F11 行が引く三つの
-    経路で、いずれも記帳の呼び出しを持たないこと。
+    処理: 各処理は意図どおりに状態を変えている。
+    構造: 記帳の語彙はカタログに正本があり、分かれているのは呼び出しの有無だけである。
+    接続: 段階間で落ちているものは無い。
+    統制: 記帳が経路の要件ではなく書き手の心がけとして扱われ、漏れたことを知らせるものも無い。
 generalization:
   level: general
   general_form: 状態を変える経路の一部が記録の決まりから漏れ、後から何が起きたか辿れない
@@ -57,6 +63,11 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[review,
       ordering]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[none]; connection=[none]; governance=[review, ordering]
+    to: processing=[none]; structure=[none]; connection=[none]; governance=[review]
+    reason: 軸ごとの再判定で、記帳の欠落は実行や判定の順序の問題ではないと見て順序の値を外した
 ---
 
 ## 課題
@@ -67,6 +78,9 @@ history:
 原因は、記帳が経路の要件としてではなく、書き手の心がけとして扱われていたことにある。処理は
 どれも正しく状態を変えている。記録の決まりから漏れているだけで、漏れたことを知らせる仕組みも
 無かった。
+
+軸ごとに読み直すと、統制のうち順序の要素は見当たらない。記帳が呼ばれる位置が遅いのではなく、
+そもそも呼ばれていない。手続と記録の問題として一つの値に絞った。
 
 ## 発見の観点
 

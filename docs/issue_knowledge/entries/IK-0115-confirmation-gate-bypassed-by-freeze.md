@@ -15,20 +15,31 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [unknown]
     connection: [none]
     governance: [review, completion]
+  axis_confidence:
+    processing: medium
+    structure: low
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.completion, connection.information]
+      statement: >-
+        機械が何を処理し何を処理しなかったか、またその操作で何が失われるかを、判断する人へ開示する義務が置かれているかを区別する値
+      confidence: medium
   cause_status: hypothesis
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    仮説: 承認・疑義・承認済み説明が実データでいずれもゼロなのに、教材化の経路（コース登録）は
-    承認を経由せず生成物から直接作って配信している、という事実は確認済み。ただし「承認が
-    使われない」原因が、承認の語彙・粒度が実態（段落単位の主張・機械生成の部品名）に合っていない
-    ためなのか、単に運用がまだ立ち上がっていないためなのかは未確定。確認するには、単位と名前が
-    整った状態で一定期間の承認操作の有無を観測すればよい。原因が前者なら承認対象の粒度という
-    表現の問題（structure）に分類が移る可能性がある。
+    仮説: 承認・疑義・承認済み説明が実データでいずれもゼロなのに、教材化の経路は承認を経由せず生成物から直接作って配信している、という事実は確認済み。処理: 単一処理の不良は見当たらない。構造:
+    承認の対象の粒度と名前（段落単位の主張・機械生成の部品名）が実態に合わないために弁が使われないのか、運用がまだ立ち上がっていないだけなのかを見ていないため unknown
+    とする。単位と名前が整った状態で一定期間の承認操作の有無を観測すれば確定する。接続:
+    承認済みかどうかという条件が配信の経路に渡っていないと読む余地はあるが、そもそも弁の外に経路がある設計なので条件の伝達の問題ではないと判断した。統制: 確認を求める弁を通らない経路が唯一の実用経路になっており（レビュー）、1
+    操作が実質の一括確定として「済み」を作っている（完了判定）。弁が空であること自体が誰にも見えない点はどの値にも当たらないため新設を提案する。
 generalization:
   level: repo_pattern
   general_form: >-
@@ -58,6 +69,12 @@ history:
       completion]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持。軸あたり最大 2 のため governance.assignment
       は座標から外し、ここに残す
+  - date: '2026-09-19'
+    field: classification.axes
+    from: structure=[none]
+    to: structure=[unknown]
+    reason: >-
+      軸ごとの再判定で、承認の粒度が実態に合わないのか運用が未成立なのかを見ていないため unknown に倒した（仮説の課題として整合）
 ---
 
 ## 課題
@@ -69,6 +86,9 @@ history:
 実質の一括確定になっている。一方、承認の弁はその経路の外にあり、通らなくても配信できる。
 なぜ弁が使われないのか（語彙と粒度が実態に合っていないのか、運用がまだなのか）は未確定。
 原因は**仮説**の段階で、分類（統制）も仮説としての分類である。
+
+**軸ごとの判断（2026-09-19）**: 構造は、承認の粒度と名前が実態に合わないのか運用が未成立なだけなのかを見ていないため unknown とした（前者なら構造に値が立つ）。
+統制は弁を通らない経路と実質の一括確定。弁が空であること自体が見えない点は新設の提案として残した。
 
 ## 発見の観点
 

@@ -16,16 +16,24 @@ classification:
     structure: [representation]
     connection: [meaning]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「近さの段階ラベルを 1 つの閾値表で表し、比較の条件が異なる二つの用途に
-    同じ表を当てたこと」。短い日本語どうしの比較と、英語の長文と日本語ラベルの比較では
-    同じ指標でも値の水準が違う。閾値を 1 つ動かすだけでは、もう一方の用途が壊れるため
-    構造（表現が用途の違いを表せない）。設計書 §9 が、実測で主題の合う候補が旧閾値に
-    一度も届かなかったことを記録している。
+    処理: 類似度の計算と閾値の比較そのものは正しく動いている。
+
+    構造: 成立条件の異なる二つの用途を一つの閾値表で表し、用途の違いを表せない点が表現に当たる。
+
+    接続: 同じ指標でも、比較する対象の言語・長さ・粒度が変われば値の水準が変わる点が意味に当たる。
+
+    統制: 実測での見直しを前提として残したのは解決側の措置で、原因に順序・予算・完了の要素は無い。
 generalization:
   level: general
   general_form: 尺度の成立条件が異なる対象に同じ閾値・同じ段階表を当て、常に同じ側の判定になる

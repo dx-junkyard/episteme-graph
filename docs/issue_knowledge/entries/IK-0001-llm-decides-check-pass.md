@@ -17,16 +17,29 @@ classification:
     structure: [none]
     connection: [none]
     governance: [assignment, completion]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.meaning, governance.assignment]
+      statement: 前段が候補・推定・申告として出した値が、後段では確定した事実として扱われ、確からしさの身分が段階をまたいで格上げされる
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「生成の出力が、そのまま人の状態を確定させる権限まで持っている」こと。
-    判定処理そのものは動いており、表現にも段階間の欠落にも問題はない。誰が確定者かの
-    割り当てを変えないかぎり、判定精度をいくら上げても同じ構造が残る。確認手段は
-    05_ai.md 所見E が引く合否生成から完了永続化までの一続きの経路と、例外時の
-    文字数フォールバック。
+    処理: 合否の生成も完了の書き込みも所定どおり動き、入力の取り扱いにも計算にも不良は無い。
+    例外時の文字数フォールバックは、完了を代理で定義したことの帰結として統制側に数えた。
+    構造: 候補と確定を分ける置き場所が無いとも読めるが、確定の口を本人へ移せば同じ表現のまま解ける。
+    接続: 段階間で情報も条件も落ちていない。生成の出力が後段で確定した事実として扱われる点だけが残り、
+    意味のずれとの境界で迷った。
+    統制: 候補を出す側が人の状態を確定させる割り当てを持ち、完了が合否という代理で定義されている。
+    この二つを動かさないかぎり、判定の精度を上げても同じ構造が残る。
 generalization:
   level: general
   general_form: 候補を出すための仕組みが、そのまま人の状態を確定させる権限まで併せ持つ

@@ -16,17 +16,24 @@ classification:
     structure: [aggregation]
     connection: [version]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「同じ事実（スキーマ定義・教材の状態・スライドの分割・k-匿名の基準・監査の
-    記帳規則）に対して正本が複数あり、どれが正かを決めていないこと」。個々の実装は
-    それぞれ妥当で、片方だけを直しても分裂そのものは残り再発するため構造。調査記録が
-    「同じものが N 回」の一覧として、二重管理・同名別実装・並行実装を実測で列挙している。
-    最も影響が大きい例は、全マイグレーションがファイルと起動時コードの二重管理で、
-    新しい 1 本が片方に欠落していた（該当層が本番で機能しない可能性）。
+    処理: 個々の実装はそれぞれ妥当に動いており、単一処理の不良ではない。
+
+    構造: 同じ事実の正本が複数あり一本化されていない点が集約に当たる。
+
+    接続: 片方だけが更新されて食い違う点が版に当たる。段階間というより並行する実装どうしのずれなので中。
+
+    統制: どれを正本とするかを決める手続の不在とも読めるが、正本を一つ決めれば解けるので統制の要素は無いと判断した。
 generalization:
   level: repo_pattern
   general_form: 同じ事実の定義が複数箇所にあり、片方だけが更新されて挙動が食い違う

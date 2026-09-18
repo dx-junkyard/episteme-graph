@@ -16,15 +16,24 @@ classification:
     structure: [none]
     connection: [none]
     governance: [completion]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「保存の例外を握りつぶし、呼び出し元へ成功として返していること」。入力も契約も
-    妥当で、その一箇所の例外処理を直せば周囲に波及しないため局所。調査記録 §8 が
-    「書き込み失敗でもチャット API は 200、再読込で履歴消失に見える」と実装位置つきで
-    確認している。
+    処理: 例外を握りつぶして呼び出し元へ成功として返す後始末の不良が、例外処理の定義に当たる。
+
+    構造: 失敗を伝える表現が無いとも読めるが、握りつぶしを外せば既存の戻り値で事実は伝わるため無いと判断した。
+
+    接続: 失敗という情報が呼び出し元に届かないのは握りつぶしの結果であって、段どうしの契約が壊れているわけではないと判断した。
+
+    統制: 書き込みが失敗しても全体を成功として扱う点が「済み」の定義に当たる。例外処理の不良と表裏なので中。
 generalization:
   level: general
   general_form: 失敗を握りつぶして成功を返すため、利用者は別の症状（消えた・保存されていない）として経験する

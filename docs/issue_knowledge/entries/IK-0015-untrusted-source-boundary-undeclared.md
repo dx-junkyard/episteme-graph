@@ -17,15 +17,22 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「第三者が書いたテキストをどこから信頼しないかの規約に正本が無く、経路ごとに
-    別々の扱いになっている」こと。各経路の処理は動作しており、条件も情報も落ちていない。
-    規約が一箇所に集まっていないかぎり、経路が増えるたびに扱いが分かれ続ける。確認手段は
-    B-01 行が引く語の不在と、既存の注入検査が別の話題しか覆っていなかったこと。
+    処理: 各経路の処理は動作しており不良は無い。
+    構造: どこから信頼しないかの規約に正本が無く、扱いが経路ごとに分かれている。
+    接続: 資料の本文が指示と同じ面に載る点を段階間の意味のずれと読む道もあるが、
+    症状は出ておらず、規約の不在が原因である。
+    統制: 経路の一覧と検査の一覧を突き合わせる手続が無く、覆っていないことを知らせるものも無い。
 generalization:
   level: general
   general_form: 外部由来の入力をどこで信頼しないかの規約が分散し、新しい経路が検査の外に出る

@@ -17,16 +17,24 @@ classification:
     structure: [responsibility]
     connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「画面が描いている構造成果（章・式・逐語引用・図表・検証事実・選択テキスト）を
-    対話の入力へ渡す経路が無く、対話側は対象の識別子から作る固定の材料しか持たないこと」。
-    構造の生成も表示も正しく、対話も単体では動くので、欠けているのは段階間の受け渡し。
-    設計書 §11.1 が、回答プロンプトに入る 5 要素を行番号つきで列挙して「これ以外に
-    構造は入らない」ことを確認している。
+    処理: 構造の生成も表示も対話も、単体では正しく動いている。
+
+    構造: 同じ対象を扱う二つの機能のうち、どちらが構造を解決して渡すかが決まっていない点が責務に当たる。集約の不足とも読めるため中。
+
+    接続: 画面が描いている構造が対話の入力へ一度も渡らない点が情報に当たる。
+
+    統制: 取得の道具を持たせる案を退けた理由は統制だが、原因側に順序・予算・割り当ての崩れは無い。
 generalization:
   level: repo_pattern
   general_form: 生成済みの成果が別の画面からしか使われず、同じ対象を扱う機能に配線されていない

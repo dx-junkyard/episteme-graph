@@ -17,16 +17,24 @@ classification:
     structure: [representation]
     connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「縮退の理由という情報が、サーバの応答には載っているのに最後の描画段で
-    読まれないこと」。各段は単体では正しく（core は事実文を返し、画面は候補を描く）、
-    段をまたいだところで情報が落ちているため接続。設計書 §13.1 が
-    「閉世界の正直さがサーバ側でだけ守られ、最後の1段で落ちていた」と確認している。
-    §14.7 は同じ誤読が別経路で再発する構造（状態が文章の中にしか無い）を扱う。
+    処理: 事実文を返す側も候補を描く側も、単体では正しく動いている。
+
+    構造: 「いま制限されている」という状態が文章の中にしか無く、空の結果と区別できる機械可読の目印を持たない点が表現に当たる。情報の受け渡しの欠落と表裏なので中。
+
+    接続: 応答に載っている縮退の理由が最後の描画段で読まれない点が情報に当たる。
+
+    統制: 呼び出し回数の予算と抑制は同じ制約から出た別の課題が扱っており、本件の原因には含まれない。
 generalization:
   level: repo_pattern
   general_form: 縮退や失敗の理由が応答には在るのに表示側と繋がっておらず、空の結果が「該当なし」と読める

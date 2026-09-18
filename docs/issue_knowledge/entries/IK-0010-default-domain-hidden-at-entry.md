@@ -17,15 +17,22 @@ classification:
     structure: [none]
     connection: [condition]
     governance: [assignment]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「分野を決める判断が、入口の人の操作ではなく環境の既定値に割り当てられている」
-    こと。解析処理は与えられた分野で正しく動いており、表現にも欠けが無い。誰がいつ分野を
-    決めるかの割り当てを変えないかぎり、既定値を差し替えても別の分野が黙って当たる。確認
-    手段は F9 行が引く既定値と、取り込みの受け口に分野の引数が無かったこと。
+    処理: 解析は与えられた分野で正しく動く。
+    構造: 「指定しない」を表せる値が無かったとも読めるが、受け口に引数そのものが無かったので
+    表現の欠落としては数えない。
+    接続: 分野という条件が入口から後段へ入る道が無い。
+    統制: 分野を決める判断が入口の人ではなく環境の既定値に割り当てられている。
 generalization:
   level: general
   general_form: 選ぶべき前提が入口に現れず、環境の既定値が全ての処理に黙って当たる

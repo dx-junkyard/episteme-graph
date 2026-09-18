@@ -13,20 +13,27 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [aggregation]
     connection: [none]
     governance: [completion, ordering]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「生成の可否を代理の指標（コース内容が生成済みか・チャンクがあるか）で判定し、
-    実際に必要な前提（対象それぞれに読み上げ原稿があるか）を見ていないこと」。処理も
-    表現も正しいが、開始条件と完了の定義が崩れているため統制。設計書 §1 が
-    「ワーカーがスキップするため、タスクが完了しても一部に音声がない状態を成功として
-    扱い得る」と記録している。開始前にモーダルが開く（対象が決まる前に言語を選ばせる）
-    順序の乱れも同じ節の症状である。
+    処理: 各対象の生成処理は正しく、前提の無い対象を飛ばす振る舞いも仕様どおりである。代理の指標での判定を条件式の誤りと読む余地は残るため中。
+
+    構造: 準備完了の判定が画面とサーバに分かれ、正本が無い点が集約に当たる。条件の受け渡しとも読めるため中。
+
+    接続: 画面とサーバの判定がずれるのは正本が分散していることの結果で、段の間で条件が落ちているわけではないと判断した。
+
+    統制: 開始条件を代理の指標で判定する点が順序に、飛ばした対象があっても全体を成功と扱う点が「済み」の定義に当たる。
 generalization:
   level: general
   general_form: 開始条件を代理指標で判定し、飛ばされた対象があっても処理全体を成功として扱う
@@ -58,6 +65,11 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[completion,
       ordering]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[none]; connection=[none]; governance=[completion, ordering]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[completion, ordering]
+    reason: 軸ごとの再判定で、準備完了の判定に正本が無く画面とサーバに分散していた点を構造軸の要素として認めた
 ---
 
 ## 課題
@@ -69,6 +81,8 @@ history:
 原因は、生成の可否を代理の指標（コース内容が生成済みか・チャンクがあるか）で判定し、実際に
 必要な前提（対象それぞれに読み上げ原稿があるか）を見ていないこと。飛ばした事実も完了の
 判定に反映されない。
+
+4 軸で見直すと、構造軸にも要素がある。準備完了の判定が画面とサーバに分かれて正本が無かったため、案内とボタンの活性と実行の可否が別々の根拠を見ていた。
 
 ## 発見の観点
 

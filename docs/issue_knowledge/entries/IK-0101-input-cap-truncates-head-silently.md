@@ -14,20 +14,31 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [representation]
     connection: [meaning]
     governance: [budget, completion]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.completion, connection.information]
+      statement: >-
+        機械が何を処理し何を処理しなかったか、またその操作で何が失われるかを、判断する人へ開示する義務が置かれているかを区別する値
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    処理も入力形式も妥当だが、費用の上限を「先頭から順に取り、超えた分は捨てる」という配分規律で
-    使い、捨てた量を残さないため、190 頁の論文で母集合の 6.8% しか役割判定されず、成果が全部
-    1 つの章に偏った。上限の使い方（どれを選ぶか・残りをどう報告するか）を直さなければ処理を
-    いくら直しても再発する点が統制の定義に当たる。選抜順が前段パーサの壊れた頁番号に依存して
-    いた点（同じ値が 212 ブロックに付く）は副分類の「段階間で意味がずれる」。実測は
-    role_annotations がちょうど 64 件で、ソート順の先頭 64 件と集合が完全一致することで確認。
+    処理: 入力を組む処理そのものは書かれたとおり動き、選抜の規則を差し替えれば同じ処理で正しく動くため要素を置かない（上限内での入力の取り扱いと読む余地は残る）。構造:
+    何を処理し何を捨てたかを書ける場所がどこにも無く、打ち切りの事実を表せる表現を持たないため、規則を直しても次の上限で同じことが起きる。接続:
+    選抜順が前段パーサの頁番号に依存し、その値が多数のブロックで同一に潰れていたため、順序という意味が段をまたいで壊れていた。統制:
+    費用の上限を「先頭から順に取り、超えた分は捨てる」配分で使い（予算）、捨てた範囲を残さないまま「これで全部」と読める状態にした（完了判定）。実測は注釈がちょうど上限値で、ソート順の先頭と集合が完全に一致することで確認した。開示の欠落がどの値にも当たらないため統制の確信は中とし、新設を
+    1 件提案する。
 generalization:
   level: general
   general_form: >-
@@ -58,6 +69,12 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[meaning]; governance=[budget,
       completion]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: structure=[none]
+    to: structure=[representation]
+    reason: >-
+      軸ごとの再判定で、捨てた範囲を書ける場所が無いことを構造の要素として置いた（旧座標の他の軸は不変）
 ---
 
 ## 課題
@@ -70,6 +87,10 @@ history:
 捨てる」形で使っていた。捨てたことはどの成果物にも現れず、下流は「この論文にはこれしか
 無い」と読む。さらにソートキーが前段パーサの頁番号で、その値が多数のブロックで同一に
 潰れていたため、「どの 64 件か」が内容と無関係に決まっていた。
+
+**軸ごとの判断（2026-09-19）**: 処理は、選抜規則を差し替えれば同じ処理で正しく動くため要素を置かない。
+構造は、打ち切りの事実を書ける場所が無いことを要素として置いた（規則を直しても次の上限で再発する）。
+接続は壊れた頁番号に順序の意味が依存していた点。統制は上限の配分と「これで全部」と読める完了判定の両方。
 
 ## 発見の観点
 

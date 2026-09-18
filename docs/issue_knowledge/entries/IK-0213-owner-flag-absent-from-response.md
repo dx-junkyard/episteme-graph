@@ -16,15 +16,23 @@ classification:
     structure: [none]
     connection: [condition]
     governance: [assignment]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    サーバ側の権限判定は正しく、画面側の描画も与えられた情報に対しては妥当。原因は、判定の
-    結果が応答に含まれず後段の画面へ渡らないため、画面が手元の情報から推測して分岐すること。
-    条件が段階間で伝わらないという接続の定義に当たる。判断の主体が画面側へ滑っている点は
-    副次の統制の問題。
+    処理: サーバ側の権限判定も、与えられた情報に対する描画も正しい。
+    構造: 判定の責務が画面側へ散っているとも読めるが、責務の置き場所ではなく判定結果が渡らない
+    ことが起点なので要素は無いと判断した。
+    接続: 権限の判定結果が応答に含まれず後段へ渡らないため、表示側は手元の情報から推測して
+    分岐するしかない。
+    統制: 何を根拠に見せるかの判断が画面側へ滑っている。責務の置き場所との境界で迷った。
 generalization:
   level: general
   general_form: >-

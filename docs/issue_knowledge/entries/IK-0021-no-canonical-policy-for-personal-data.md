@@ -17,16 +17,27 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [assignment]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.review, governance.assignment]
+      statement: 記録された当人が、その記録の扱いを後から変える手続が用意されていない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「人に関するデータの保持・消去・開示の規約が機能ごとに別々に決まっていて、
-    横断の正本が無い」こと。各機能の実装はそれぞれの規約に従って正しく動いており、条件や
-    版が落ちているわけでもない。正本を一本にしないかぎり、機能が増えるたびに別の規約が
-    増え、既存の規律と衝突する。確認手段は、行を消さない規律が多くのモジュールで敷かれて
-    いる一方で、本人による消去の経路が一つも無いこと。
+    処理: 各機能の実装はそれぞれの規約に従って正しく動く。
+    構造: 保持・消去・開示の規約が機能ごとに別々に決まり、横断の正本が無い。
+    接続: 段階間で落ちているものは無い。
+    統制: 規約を決める主体が定まらず、記録された当人が扱いを後から変える手続も無い。
+    後者を割り当ての値で受けてよいかで迷った。
 generalization:
   level: general
   general_form: 同じ対象についての規約が機能ごとに別々に決まり、横断で矛盾したまま並ぶ

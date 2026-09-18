@@ -16,15 +16,28 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [assignment, review]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: high
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.meaning, governance.assignment]
+      statement: 前段が候補・推定・申告として出した値が、後段では確定した事実として扱われ、確からしさの身分が段階をまたいで格上げされる
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「本人についての記述を、本人の確認を経ずに確定として書く割り当てになっている」
-    こと。検出処理も保存処理も定義どおり動いており、条件も版も落ちていない。確定者の
-    割り当てと、候補という状態の置き場所を作らないかぎり、検出方式を変えても判決文が
-    書かれ続ける。確認手段は F5 行が引く検出と保存の箇所、および上限による切り詰め。
+    処理: 検出も保存も定義どおり動き、件数上限による切り詰めも所定の挙動である。
+    構造: 候補と撤回という状態の置き場所が無く、書くか書かないかの二値しか表せない。
+    接続: 段階間で情報も条件も落ちていない。検出の出力が保存の時点で確定として扱われる点だけが残り、
+    意味のずれとの境界で迷った。
+    統制: 本人についての記述を本人の確認なしに確定させる割り当てになっており、
+    引き受けと取り下げの手続も無い。
 generalization:
   level: repo_pattern
   general_form: 本人についての記述を本人の確認なしに確定として書き、取り下げる口を用意しない

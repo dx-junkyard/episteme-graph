@@ -15,15 +15,22 @@ classification:
     structure: [representation]
     connection: [meaning]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「段階の名前が設計書という文脈の中でしか一意でないのに、文脈を外して引用される」
-    こと。各設計書の中では番号は正しく一意であり、情報も条件も落ちていない。名前の付け方
-    そのものを変えないかぎり、注意を促しても取り違えは起き続ける。確認手段は §10 が挙げる
-    同名の段階が四つの別物を指す事実。
+    処理: 個々の採番も引用も所定どおりである。
+    構造: 名前が文脈の中でしか一意でなく、持ち出されたときに必要な区別を表せない。
+    接続: 文脈を外して引用されたときに別のものを指す。段階間というより文書間のずれなので、
+    この軸で受けてよいかで迷った。
+    統制: 命名の規約を誰がいつ置くかという問題も見えるが、名前の付け方を変えれば消えるので数えない。
 generalization:
   level: general
   general_form: 文脈の中でだけ一意な名前が、文脈を外して引用され、別のものを指す

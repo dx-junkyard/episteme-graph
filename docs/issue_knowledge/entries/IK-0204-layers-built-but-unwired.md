@@ -13,17 +13,32 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [responsibility]
     connection: [information]
     governance: [completion]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.information, connection.contract]
+      statement: 前段と後段をつなぐ経路そのものが用意されず、後段が前段の成果を一度も受け取らない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    提供側の処理は単体で正しく動き、表現にも責務にも問題は無い。壊れているのは、提供された
-    処理が呼び出し側へ配線されず、段階の間で成果が渡らないこと。各段は単体では正しく見える
-    という接続の定義に当たる。完了の宣言が層の内側で行われている点は副次の統制の問題。
+    処理: 提供側の各処理は単体で正しく動き、入力の扱いにも計算にも不良は無い。
+    構造: 層を横断する導線を誰が持つかが決まっておらず、各層が既存の画面へ間借りで足していく。
+    この置き場所を決めない限り次の層でも配線が漏れる。分割の粒度との境界で迷った。
+    接続: 提供された成果が呼び出し側へ渡らず、各段は単体では正しく見える。ただし値が途中で
+    落ちるのではなく経路そのものが無いため、既存の値との当たりは完全ではない。
+    統制: 完成の宣言が層の内側で行われ、外から到達できるかを見ないまま済みになる。担当の割り当ての
+    不在とも読める。
 generalization:
   level: repo_pattern
   general_form: >-
@@ -54,6 +69,11 @@ history:
     from: primary=connection facets=[connection.information, governance.completion]
     to: axes=processing=[none]; structure=[none]; connection=[information]; governance=[completion]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[none]; connection=[information]; governance=[completion]
+    to: processing=[none]; structure=[responsibility]; connection=[information]; governance=[completion]
+    reason: 軸ごとの再判定で、層を横断する導線を誰が持つかが決まっていない点を構造軸に置いた
 ---
 
 ## 課題
@@ -66,6 +86,11 @@ history:
 導線を「間借り」して増築されてきた。その結果、接続されないまま残る層・埋もれる層・巡回先が
 増え続ける層に分化した。個々の層は自分の中では完成しており、配線されていないことに層の内側
 からは気づけない。
+
+**軸ごとの再判定（2026-09-19）**: 構造軸を none から責務へ改めた。層を横断する導線を誰が持つかが
+決まっておらず、各層が既存の画面へ間借りで足すという置き場所の設計が原因の一部にあるため。
+接続軸は残すが、落ちているのは値ではなく経路そのものなので、既存の値との当たりは完全ではない
+（新しい値の提案を 1 件出した）。
 
 ## 発見の観点
 

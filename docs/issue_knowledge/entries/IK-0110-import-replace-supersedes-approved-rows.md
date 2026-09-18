@@ -14,17 +14,28 @@ classification:
   axes:
     processing: [none]
     structure: [none]
-    connection: [information]
+    connection: [none]
     governance: [review, resume]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.completion, connection.information]
+      statement: >-
+        機械が何を処理し何を処理しなかったか、またその操作で何が失われるかを、判断する人へ開示する義務が置かれているかを区別する値
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    取り込みの置き換え指定が「束に無い既存の行を superseded にする」規律で、承認・却下という
-    人間の判断を経た行も対象に含めていた。しかも事前確認の画面がその範囲を開示しなかったため、
-    教員は何を失うか知らずに確定できた。削除ではなく遷移であっても、人の判断を倒すなら情報の
-    喪失であるという扱い方を決め直さなければ再発する点が統制の定義に当たる。
+    処理: 同期の規則そのものは書かれたとおり動く。構造: 人が確定した行という区別は既に列として存在しており、新しい表現を足さずに入力を整えるだけで守れた（確定を表す表現の粒度という読み方は残る）。接続:
+    束の作り手と取り込み側の約束（束に無いものは外す）は宣言どおりで、段をまたいで情報・意味・条件・対象・版は失われていない。確定の前に失う範囲が示されない点は、段の間の情報ではなく人への開示の欠落として別に扱うべきと判断した。統制:
+    置き換えの差分が人間の判断を経た行を区別せず一律に倒し（レビュー）、再取り込みという再実行の規律の中で起きている（再開）。失う範囲を確定の前に示す義務がどの値にも当たらないため新設を 1 件提案する。
 generalization:
   level: general
   general_form: >-
@@ -54,6 +65,12 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[information]; governance=[review,
       resume]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: connection=[information]
+    to: connection=[none]
+    reason: >-
+      軸ごとの再判定で、束と取り込みの約束は宣言どおり成立しており段の間で情報は落ちていないと判断した。示されない範囲の開示は提案へ回した
 ---
 
 ## 課題
@@ -65,6 +82,10 @@ history:
 **原因**: 置き換えの規律が「束に無いものは古い」という単純な差分で、人間の判断を経た行を
 区別していなかった。加えて、事前確認が件数も対象も示さないため、確定の時点で失うものが
 分からなかった。
+
+**軸ごとの判断（2026-09-19）**: 接続は、置き換えの約束が宣言どおりで段の間の情報の落ちではないため要素を外した。
+統制は人の判断を一律に倒す差分（レビュー）と再取り込みの規律（再開）。
+確定の前に失う範囲が示されない点は、既存のどの値にも当たらないため新設の提案として残した。
 
 ## 発見の観点
 

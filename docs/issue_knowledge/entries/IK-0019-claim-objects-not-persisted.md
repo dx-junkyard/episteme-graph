@@ -17,15 +17,22 @@ classification:
     structure: [representation]
     connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「生成された主張のうち一部だけが行として表現され、残りは生成ログの中にしか
-    居場所が無い」こと。永続化処理は対象としたものを正しく書いており、権限も版も落ちて
-    いない。表現の対象を広げないかぎり、読み側でいくら補っても参照先が行として存在しない。
-    確認手段は A-22 行が引く永続化の範囲と、分解の粒度に対応する列が無いこと。
+    処理: 永続化処理は対象としたものを正しく書いている。
+    構造: 生成された主張のうち一部だけが行として表現され、残りは生成ログの中にしか居場所が無い。
+    接続: 生成の段から永続化の段へ渡るときに一部の種類が落ちる。
+    表現の対象の狭さと同じことを別方向から見ている面があり、どちらに置くかで迷った。
+    統制: 承認の母集団から外れるのは表現の欠落の帰結で、手続そのものには要素が無い。
 generalization:
   level: general
   general_form: 生成物の一部だけが一級の記録になり、残りは後から参照できない場所に留まる

@@ -12,19 +12,32 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [representation]
+    structure: [representation, decomposition]
     connection: [contract]
-    governance: [none]
+    governance: [review]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: structure
+      neighbor_of: [structure.decomposition, structure.representation]
+      statement: 操作の意味が及ぶ範囲と、実際に書き換える範囲が対応していない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「状態遷移を、表示用モデルへの読み出しと書き戻しの往復で実装したこと」。
-    読み出し側のモデルは自由語彙の型名を投影し、スコープ情報の追加キーを落とす表現に
-    なっており、その値をそのまま書き戻すと CHECK 制約違反と出所情報の消失を起こす。
-    処理の一箇所を直しても、読み出しモデルと永続モデルが同一だという前提のままでは
-    別の遷移でも再発するため構造。設計書 §11.1 が両欠陥を file 単位で確認している。
+    処理: 投影も書き戻しも書かれたとおりに動いており、単一処理の不良は見当たらない。値が制約に触れるのは前段の兼用が原因で、処理の誤りではない。
+
+    構造: 読み出し用の緩い表現と永続用の厳しい制約を同じモデルで兼ねている点が表現に当たる。加えて、部分的な意味しか持たない操作を全列の書き込みとして実装している点が粒度に当たる（責務の二重とも読めるため中）。
+
+    接続: 読み出しの出力が書き込みの入力制約を満たさない点が契約に当たる。同一の往復の中なので、段階間と呼べるかで迷い中とした。
+
+    統制: 承認という手続の記帳に実行者が載らず、誰が確定したかが残らなかった点が確認の手続と記録に当たる。
 generalization:
   level: general
   general_form: 部分的な状態変更を、全体の読み出しと書き戻しの往復で実装したために無関係な属性が壊れる
@@ -52,6 +65,11 @@ history:
     from: primary=structure facets=[structure.representation, connection.contract]
     to: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[none]
+    to: axes=processing=[none]; structure=[representation, decomposition]; connection=[contract]; governance=[review]
+    reason: 軸ごとの再判定で、統制軸に承認の記帳（実行者の欠落）という要素を認め、構造軸に書き込み範囲の粒度を第2の値として足した
 ---
 
 ## 課題
@@ -64,6 +82,9 @@ history:
 自由記述の値を投影するため書き戻しで制約違反になり、追加キーを保持しない設計のため
 スコープ情報が欠落したまま上書きされる。さらにこの経路の監査記帳は実行者を持たず、
 誰が承認したかも残らなかった。
+
+4 軸で見直すと、統制軸にも要素がある。承認という手続の記帳に実行者が載らず、誰が確定したかが残らなかったからである。
+構造軸も、読み書きで同じモデルを兼ねるという表現の問題に加えて、操作の意味が及ぶ範囲より広い範囲を書き換えるという粒度の問題を併せ持つ。
 
 ## 発見の観点
 

@@ -15,15 +15,24 @@ classification:
     structure: [responsibility]
     connection: [none]
     governance: [budget]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: hypothesis
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    仮説: 上限の数え上げが実行プロセスの中に閉じているため、同じ上限が並走するプロセスの
-    数だけ重複して許され、予算の統制が崩れる。確定するには、多重ワーカー構成で同一利用者の
-    日次上限を超える呼び出しが通るかを再現で確かめる。単一プロセスで運用している限り
-    現象は現れないため、現時点では原因を仮説として記録する。
+    仮説: 統制は、上限の数え上げが実行プロセスの中に閉じているため、同じ上限が並走するプロセスの
+    数だけ重複して許される点に当たる。構造は、利用者あたり・一日あたりという意味を持つ予算を
+    実行単位が抱えており、数える主体の置き場所が意味の単位と合っていない点に当たる（どこが持つか
+    ではなく何で表すかの問題と読む余地は残る）。処理は、数え上げそのものが書かれたとおりに動く
+    ため要素は無いと判断した。接続は、段階の間で情報・条件・対象・版が失われる場面が無いため
+    要素は無いと判断した。いずれも、多重の実行単位で同一利用者の日次上限を超える呼び出しが通る
+    ことを再現していないため確信は中に留める。
 generalization:
   level: general
   general_form: >-

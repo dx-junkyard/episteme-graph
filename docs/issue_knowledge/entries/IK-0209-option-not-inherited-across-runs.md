@@ -17,14 +17,24 @@ classification:
     structure: [none]
     connection: [condition, version]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    受け側には「前回の実行の条件を継ぐ」分岐が実装されており、単体では正しい。原因は、
-    呼び出し側が毎回オプションを明示して送るため、その分岐が一度も成立しないこと。条件が
-    実行の間で伝わらないことが原因で、分岐そのものを直しても呼び出し側が変わらなければ再発する。
+    処理: 受け側の継承の分岐は書かれたとおりに正しい。
+    構造: 「指定しない」を表す手段が呼び出し側に無いとも読めるが、表現は足りていて送らない選択が
+    できるだけなので要素は無いと判断した。
+    接続: 呼び出し側が毎回オプションを明示するため受け側の継承が一度も成立せず、実行の条件が
+    前後の実行の間で伝わらない。前回の実行が残した成果に対して版がずれる面もあるので二つ置く。
+    統制: 再実行の統制そのものは崩れていない。失われるものを事前に告げる確認は解決側で足した
+    もので原因ではない。再実行と冪等性の問題と読む余地は残る。
 generalization:
   level: general
   general_form: >-

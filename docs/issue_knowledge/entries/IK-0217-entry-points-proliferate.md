@@ -17,14 +17,28 @@ classification:
     structure: [decomposition]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.review, structure.decomposition]
+      statement: 一つひとつの追加はどれも妥当でも、積み上がった総量を見る基準と担い手が無く、全体が単調に悪化する
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    個々の入口はそれぞれ正しく動き、必要でもある。原因は、入口を置く粒度と優先度の設計が
-    無いまま並列に足し続ける構造で、既存の入口を直しても次の機能追加で同じ密度へ戻ること。
-    追加時に総量を見る担当が置かれていない点は副次の統制の問題。
+    処理: 個々の入口はそれぞれ正しく動き、必要でもある。
+    構造: 入口を置く粒度と優先度の設計が無く、機能を足すたび同じ場所へ並列に積まれる。既存の
+    入口を整えても次の追加で同じ密度へ戻る。
+    接続: 段階の間で情報・条件・対象・版が失われる場面は無い。
+    統制: 追加のたびに全体の総量を見る手続が無い。誰が見るかの割り当ての不在とも読めるうえ、
+    「一つひとつは妥当でも累積が悪化する」形にちょうど当たる値が見当たらないため確信は中。
 generalization:
   level: repo_pattern
   general_form: >-
@@ -64,6 +78,10 @@ history:
 
 **原因**: 機能を足すときの置き場所が「既存の並びの隣」であり、頻度や重大度による階層化も、
 入口の総量を見る担当も無い。個々の追加はどれも妥当なので、誰も止めない。
+
+**軸ごとの再判定（2026-09-19）**: 座標は変えていない。統制軸は「追加のたびに総量を見る手続が
+無い」に当たるが、レビューの手続とも担当の割り当てとも読め、かつ「一つひとつは妥当でも累積が
+悪化する」形にちょうど当たる値が見当たらない。確信を中とし、新しい値の提案を 1 件出した。
 
 ## 発見の観点
 

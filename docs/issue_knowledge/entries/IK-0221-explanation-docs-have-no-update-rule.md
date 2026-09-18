@@ -19,15 +19,23 @@ classification:
     structure: [none]
     connection: [none]
     governance: [review, completion]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    設計書側の運用は機能しており、記述の内容にも誤りは無い。原因は、実装が終わったときに
-    どの文書を誰が更新するかという手続が一方の系統にだけ存在し、他方には無いこと。さらに
-    完了・解消を文書へ反映する取り決めも無い。処理も表現も正しいのに、いつ誰が更新するかが
-    決まっていないので統制とする。
+    処理: 記述の内容にも、参照する仕組みにも誤りは無い。
+    構造: 歴史記録と現行の姿を別の系統で持つ二層構造そのものは妥当で、表現にも責務の置き場所にも
+    不足は無いと判断した。どこに何を書くかの正本が無いと読む余地は残る。
+    接続: 段階の間で情報・条件・対象・版が失われる場面は無い。
+    統制: 実装が終わったときにどの文書を誰が更新するかの手続が一方の系統にしか無く、完了や解消を
+    文書へ反映する取り決めも無い。
 generalization:
   level: general
   general_form: >-

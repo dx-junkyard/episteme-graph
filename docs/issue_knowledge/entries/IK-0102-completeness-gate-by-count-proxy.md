@@ -16,15 +16,20 @@ classification:
     structure: [none]
     connection: [information]
     governance: [completion]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    抽出も保存も設計どおり動いており、壊れているのは「完全とは何か」の定義。件数が揃えば
-    complete と判定するため、ラベル 29 件中 17 件が欠けていても、原本の 22 頁分が取り込まれて
-    いなくても「完全」を返した。完了判定の定義を直さなければ、個々の抽出をいくら改善しても
-    誤報は続く点が統制の定義に当たる。
+    処理: 判定の実装は書かれたとおり動き、比較そのものに誤りは無い（判定条件の誤りと読む余地は残る）。構造:
+    判定に必要な原本のラベル一覧は前段に存在しており、表現・責務・分割・集約のいずれも変えずに判定条件だけで直せた。接続: 原本のラベル一覧という情報が判定の段まで運ばれず、期待件数という数だけが渡っていた。統制:
+    「完全」の定義が件数の一致であり、何が欠けたかを突き合わせないまま完了を宣言していた。実測でラベル 29 件中 17 件が欠けたまま完全と返っていた。
 generalization:
   level: general
   general_form: >-

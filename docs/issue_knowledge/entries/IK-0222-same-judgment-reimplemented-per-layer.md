@@ -18,15 +18,24 @@ classification:
     structure: [aggregation]
     connection: [meaning]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    各層の実装はそれぞれ単体で正しく、テストも通る。原因は、同じ関心（候補から確定への流れ・
-    数値から段階ラベルへの変換・あるステージが外部を呼ぶかどうか）の正本が無く、層ごとに
-    書き写されていること。個別に直しても次の層が同じものを書き写すため再発する。同じ語が
-    場所によって別の意味になる分裂は副次の接続の問題。
+    処理: 各層の実装はそれぞれ単体で正しく、検査も通る。
+    構造: 候補から確定への流れ・数値から段階ラベルへの変換・ある段が外部を呼ぶかどうかという
+    同じ関心に正本が無く、層ごとに書き写されている。
+    接続: 同じ語が場所によって別の意味になり、ある段の性質の判定がその集合に依存する機能まで
+    巻き込む。ずれが段階の前後で起きているか並ぶ層の間で起きているかの切り分けで迷った。
+    統制: 新しい層が正本へ接続するかを確かめる手続の不在とも読めるが、接続先の正本を作れば
+    書き写し自体が残らないため要素は無いと判断した。
 generalization:
   level: repo_pattern
   general_form: >-

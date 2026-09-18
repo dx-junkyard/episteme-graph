@@ -14,18 +14,24 @@ feature_context:
 classification:
   axes:
     processing: [logic]
-    structure: [none]
+    structure: [representation]
     connection: [meaning]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    接続に失敗したときの代替として「見出しの順番と同じ位置の区画」を出典に据えたため、根拠として
-    無関係な本文が添えられ、さらに後段が「実根拠あり」と読んで信頼度の段階を最上位まで上げていた。
-    各段は単体では筋が通っており、前段の「これは代替である」という意味が後段に伝わらないことだけが
-    原因なので接続の定義に当たる。実データで、見出しと無関係な章の抜粋が出典として出ていることを確認。
+    処理: 対応が取れないときに「同じ順番の位置にある区画」を出典に据える代替規則そのものの誤り（意味が伝わらないことと同じ事実の別面という読み方も残る）。構造:
+    「接続できなかった」「これは代替である」という区別を持てる場所が無く、空の出典を表現できなかった。接続:
+    前段の「これは代替である」という意味が後段に伝わらず、後段は本文があることをもって根拠ありと読み、信頼度の段階を最上位まで上げた。統制:
+    誰がいつ確定するかの割り当てや順序ではなく、代替の扱いだけが原因（学習者へ届く前の確認という論点は残る）。
 generalization:
   level: general
   general_form: >-
@@ -53,6 +59,12 @@ history:
     from: primary=connection facets=[connection.meaning, local.logic]
     to: axes=processing=[logic]; structure=[none]; connection=[meaning]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: structure=[none]
+    to: structure=[representation]
+    reason: >-
+      軸ごとの再判定で、代替であること・接続できなかったことを書ける場所が無い点を構造の要素として置いた
 ---
 
 ## 課題
@@ -64,6 +76,9 @@ history:
 **原因**: 見出しと成果の接続に失敗したとき、代替として「同じ順番の位置にある区画」を出典に
 据えていた。代替であることを示す印は残らないため、後段は本文があることをもって「実根拠あり」と
 判定し、表示上の信頼度を底上げした。
+
+**軸ごとの判断（2026-09-19）**: 構造は、代替であること・接続できなかったことを書ける場所が無い点を要素として置いた（印を残せれば後段の底上げは起きない）。
+処理は位置代入という規則そのもの、接続は代替であるという意味が伝わらない点。統制は要素なし。
 
 ## 発見の観点
 

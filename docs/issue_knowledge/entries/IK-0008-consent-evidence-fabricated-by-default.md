@@ -14,18 +14,29 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [representation]
     connection: [none]
     governance: [review, assignment]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.meaning, governance.assignment]
+      statement: 前段が候補・推定・申告として出した値が、後段では確定した事実として扱われ、確からしさの身分が段階をまたいで格上げされる
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「確認したという事実を、確定者の行為ではなく既定値と定数が作っている」こと。
-    記帳処理は所定の値を書いているだけで、情報も条件も落ちていない。何をもって確認と
-    みなすかの手続を変えないかぎり、文面を変えても同じ記録が積まれる。確認手段は F7 行が
-    引く理由欄の初期値、サーバ側の固定値、およびクライアント自己申告の扱い。
+    処理: 記帳は所定の値を書いているだけで不良は無い。
+    構造: 人の行為・既定値・クライアントの自己申告が同じ欄に入り、三つを区別して置く場所が無い。
+    接続: 申告がそのまま事実として記帳される点で身分が変わるが、段階間で情報や条件が落ちてはいない。
+    統制: 何をもって確認とみなすかの手続が定まらず、確認の事実を作る主体が人から既定値へ移っている。
 generalization:
   level: general
   general_form: 人が確認した事実を、既定値や定数が代わりに作り、記録上は本人がしたことになる
@@ -57,6 +68,11 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[review,
       assignment]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[none]; connection=[none]; governance=[review, assignment]
+    to: processing=[none]; structure=[representation]; connection=[none]; governance=[review, assignment]
+    reason: 軸ごとの再判定で、人の行為と既定値と自己申告を区別して置く場所が無いことを構造の要素として追加した（旧 facets には現れていなかった）
 ---
 
 ## 課題
@@ -68,6 +84,10 @@ history:
 
 原因は、**確認という事実を人の行為ではなく既定値と定数が作っていた**ことにある。処理は所定の
 値を書いているだけなので、単体では何も壊れていない。手続として見たときにだけ崩れている。
+
+軸ごとに読み直すと、統制のほかに構造の要素がある。人が書いた理由・あらかじめ入っていた文・
+クライアントの自己申告の三つが同じ欄に入る形になっていて、区別して置く場所が無い。
+手続を直すだけでは、どれが人の行為かを後から言えないままになる。
 
 ## 発見の観点
 

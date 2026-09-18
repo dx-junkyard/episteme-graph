@@ -16,15 +16,22 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「解析時点の警告と、承認後の現在の警告を区別して置く場所が無い」こと。承認処理は
-    行を書き戻しているだけで、権限も版も落ちていない。二つを別の場所に持たないかぎり、
-    上書きの書き方を変えても片方が消える。確認手段は F6 行が引く承認時の代入と、承認画面の
-    どこにも警告が並んでいないこと。
+    処理: 承認処理は行を書き戻しているだけで、計算にも入力の扱いにも不良は無い。
+    構造: 解析時点の警告と現在の警告を別々に置く場所が無く、状態を進めると判断の材料が消える。
+    接続: 置き場所を用意すれば材料はそのまま後段へ残るので、段階間の欠落としては数えない。
+    表現の欠落との境界で迷った。
+    統制: 承認という弁の手前に否定側の材料が並ばず、見て承認したかを後から区別できない。
 generalization:
   level: general
   general_form: 状態を進める操作が、その判断の材料になった記録を同じ場所ごと上書きする

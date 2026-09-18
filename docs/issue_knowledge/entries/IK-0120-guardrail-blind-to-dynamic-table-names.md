@@ -13,19 +13,24 @@ feature_context:
   layers: [tests_guardrails, knowledge_objects, field_atlas_s]
 classification:
   axes:
-    processing: [none]
+    processing: [logic]
     structure: [aggregation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    規律そのものと実装は正しいが、規律を守るための検査が行単位の正規表現で、表名を変数で受ける
-    呼び出しを素通りさせ、除外リストもファイル単位だったため後から足した読み手が検査に入らなかった。
-    検査の網の張り方（何を対象に、どの粒度で許すか）という手続を直さなければ、同じ規律違反が
-    緑のまま入り続ける点が統制の定義に当たる。実際に 3 箇所の読み漏れが緑のまま残っていた。
+    処理: 検査が行単位の正規表現で、表名を変数で受ける呼び出しを素通りさせる（網の張り方という手続と同じ事実の別面という読み方も残る）。構造: 許可の与え方がファイル単位の除外と対象ディレクトリの列挙に分散し、理由付きの許可を
+    1 つの正本に集約していなかった。接続: 段をまたいで情報・意味・条件・対象・版が失われてはいない。統制: 規律を守るための検査をどこまで張るかという手続が崩れており、後から足した経路が検査に入らないまま緑で通った。実際に
+    3 箇所の読み漏れが緑のまま残っていた。
 generalization:
   level: general
   general_form: >-
@@ -54,6 +59,12 @@ history:
     from: primary=governance facets=[governance.review, structure.aggregation]
     to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[review]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]
+    to: processing=[logic]
+    reason: >-
+      軸ごとの再判定で、検査の照合が変数で受ける表名を素通りさせる点を処理の要素として置いた
 ---
 
 ## 課題
@@ -64,6 +75,9 @@ history:
 **原因**: 検査が行単位の正規表現で、表名を文字列補間で受ける呼び出しを見逃していた。除外リストも
 ファイル単位なので、同じファイルに後から足した読み手は自動的に除外に入った。別の規律の検査では、
 対象ディレクトリをハードコードしていたため後から増えた層が走査対象外になっていた。
+
+**軸ごとの判断（2026-09-19）**: 処理は、検査の照合そのものが変数で受ける表名を素通りさせる点を要素として置いた。
+構造は許可の与え方の分散、統制は網をどこまで張るかという手続。接続は要素なし。
 
 ## 発見の観点
 

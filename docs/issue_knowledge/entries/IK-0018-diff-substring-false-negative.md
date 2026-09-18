@@ -12,19 +12,26 @@ feature_context:
   layers: [reconstruction_r]
 classification:
   axes:
-    processing: [logic]
+    processing: [logic, wording]
     structure: [none]
     connection: [meaning]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「同じ意味を別の表記で書いたときに一致とみなせない照合規則」という単一処理の
-    不良である。入力も契約も前提も妥当で、照合を直せば周囲に波及しない。確認手段は
-    所見D が引く照合箇所が概念名の部分文字列一致であること、および不一致がそのまま断定的な
-    事実文になること。
+    処理: 同じ意味を別の表記で書いたときに一致とみなせない照合規則と、
+    外れた結果を断定の形で返す文面の二つがある。照合を良くしても、外れたときの断定の言い方は残る。
+    構造: 別名や記号の語彙の供給源が無いとも読めるが、照合規則を直す範囲に収まる。
+    接続: 出典側の語彙と学習者側の語彙の間で意味の対応が取れていない。
+    統制: 誰がいつ判断するかには要素が無い。
 generalization:
   level: general
   general_form: 表層の文字列一致で同一性を判定し、言い換えや表記ゆれを不一致と断定する
@@ -50,6 +57,11 @@ history:
     from: primary=local facets=[local.logic, connection.meaning]
     to: axes=processing=[logic]; structure=[none]; connection=[meaning]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[logic]; structure=[none]; connection=[meaning]; governance=[none]
+    to: processing=[logic, wording]; structure=[none]; connection=[meaning]; governance=[none]
+    reason: 軸ごとの再判定で、照合規則を直しても残る「外れた結果を断定形で返す文面」を処理軸の二つ目として追加した
 ---
 
 ## 課題
@@ -60,6 +72,9 @@ history:
 
 原因は照合規則そのものにある。入力も契約も前提も妥当で、照合を直せば周囲には波及しない。
 ただし出力の文面が断定形なので、外れた結果が「事実」として提示される点が害を増幅している。
+
+軸ごとに読み直すと、処理軸には二つの要素がある。照合規則の弱さと、外れた結果を断定形で返す文面である。
+照合を良くしても断定の言い方は残り、逆に文面を弱めれば照合の弱さは害ではなく情報になる。
 
 ## 発見の観点
 

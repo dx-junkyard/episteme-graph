@@ -17,15 +17,21 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    入力（カートリッジの別名表と本文）も前後の契約も妥当で、照合規則が `alias in text` の
-    部分文字列一致であることだけが原因。2 文字の別名が無関係な単語の内側に当たり、原本に
-    0 回しか現れない概念が 28 ノード中 25 ノードの前提知識に入った。規則を直せば周囲に波及
-    しない一方、同じ規則が 4 箇所に複製されていた点は副分類（集約）。
+    処理: 照合規則が部分文字列の包含で、短い別名が無関係な語の内側に当たる。規則を直せば周囲に波及しない。構造: 同じ照合規則が検証・補完・精製・主張組み立ての 4 箇所に写されており、1
+    箇所を直しても残りが同じ偽陽性を作り続ける（増幅の要因であって発生の要因ではない、という読み方も残る）。接続:
+    誤って付いた概念は段をまたいでそのまま忠実に運ばれており、情報・意味・条件・対象・版のいずれも失われていない。統制:
+    上限・順序・完了・担当の扱いはいずれも成立している（学習者へ届く前の確認という論点は残るが、本件の原因ではない）。
 generalization:
   level: general
   general_form: >-

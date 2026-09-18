@@ -17,15 +17,22 @@ classification:
     structure: [aggregation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    各画面の確認処理はそれぞれ動き、実行される操作自体も正しい。原因は、確認の正本が
-    ひとつの画面モジュールの内側に閉じていて他モジュールから使えず、同じ重大度の操作に
-    別々の確認水準が付くこと。共通部品の置き場所を変えない限り、新しい画面で再発する。
-    重大度と確認水準を対応づける手続が無い点は副次の統制の問題。
+    処理: 各画面の確認処理も、実行される操作そのものも正しく動く。
+    構造: 確認の正本が一つの画面モジュールの内側に閉じ、他のモジュールから使えない。置き場所を
+    外へ出さない限り新しい画面で同じ非対称が出る。
+    接続: 段階の間で情報・意味・条件・対象・版が失われる場面は無い。
+    統制: 操作の重大度と確認の水準を対応づける手続が無く、同じ重さの操作に別々の水準が付く。
 generalization:
   level: repo_pattern
   general_form: >-

@@ -16,16 +16,24 @@ classification:
     structure: [responsibility]
     connection: [version]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「解析時点のスナップショット（グラフ本体に焼き込まれた審査状態）と、
-    現在の行が持つ審査状態という二つの世代が同じ画面に流れ込み、後段が常に古い方を
-    採っていたこと」。各段は単体では正しく（グラフは解析結果の記録、行は現在の判断）、
-    版の合流規則が無いことが原因なので接続。設計書 §11.1 が [critical] として
-    「承認しても再取得に反映されない」ことを確認している。
+    処理: 焼き込み値を採る読み出しは規則どおりで、条件式や計算の誤りではない。
+
+    構造: どちらの世代を採るかという判断の置き場所が決まっていない点が責務に当たる。同じ意味の状態を二か所に持つ表現とも読めるため中。
+
+    接続: 解析時点のスナップショットと現在の行という二つの世代が同じ画面で合流する点が、版の定義に直接当たる。
+
+    統制: 承認の手続・順序・完了の定義そのものは崩れておらず、合流規則を置けば手続は成立するため無いと判断した。
 generalization:
   level: repo_pattern
   general_form: 生成時に焼き込まれた状態が、その後の人間の判断より優先されて配信される

@@ -13,19 +13,27 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [aggregation]
     connection: [condition]
     governance: [assignment]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「対象（どの教材・どのコースに属するか）という条件が、識別子を直接受け取る
-    書き込み経路に伝わっていないこと」。役割の確認は行われ、識別子の解決も行われるが、
-    その二つを結ぶ所有の条件が段の間で落ちている。同じファイルの設定系は所有を確認して
-    おり、経路ごとに権限モデルが食い違っていた。調査記録 §8 が、識別子の直接指定で
-    他教員のものを書き換えられる旨を実装位置つきで確認している。
+    処理: 役割の確認も識別子の解決も、それぞれは正しく動いている。
+
+    構造: 対象の編集権限を確かめる正本が無く、同じ範囲の中で経路ごとに権限の判定が分散している点が集約に当たる。条件の受け渡しと表裏なので中。
+
+    接続: 対象の所有・可視性という条件が書き込みの経路へ運ばれない点が条件に当たる。
+
+    統制: 誰がどの対象を編集してよいかの割り当てが決まっていない点が割り当てに当たる。条件との境界で迷うため中。
 generalization:
   level: general
   general_form: 役割の確認だけで書き込みを通し、対象の所有・可視性という条件を後段へ運ばない
@@ -52,6 +60,11 @@ history:
     from: primary=connection facets=[connection.condition, governance.assignment]
     to: axes=processing=[none]; structure=[none]; connection=[condition]; governance=[assignment]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[none]; connection=[condition]; governance=[assignment]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[condition]; governance=[assignment]
+    reason: 軸ごとの再判定で、権限判定の正本が無く経路ごとに分散していた点を構造軸の要素として認めた
 ---
 
 ## 課題
@@ -62,6 +75,8 @@ history:
 原因は、対象の所有・可視性という条件が書き込み経路へ伝わっていないこと。役割の確認は
 行われ、識別子から対象を引くこともできるが、両者を結ぶ「この人がこの対象を編集してよいか」
 が抜けていた。同じファイルの設定系は所有を確認しており、経路ごとに権限モデルが違っていた。
+
+4 軸で見直すと、構造軸にも要素がある。対象の編集権限を確かめる正本が無く、同じ範囲の中で経路ごとに判定が分散していた。条件を運ぶだけでは、識別子を受ける入口が増えるたびに同じ欠如が生まれる。
 
 ## 発見の観点
 

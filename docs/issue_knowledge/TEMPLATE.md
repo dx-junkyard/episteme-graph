@@ -25,6 +25,12 @@ classification:
     structure: [representation]   # 構造軸: representation | responsibility | decomposition | aggregation
     connection: [version]   # 接続軸: information | meaning | condition | target | version | contract
     governance: [review]    # 統制軸: ordering | budget | resume（制御系）/ assignment | review | completion（手続系）
+  axis_confidence:          # 軸ごとの確信度 high | medium | low（taxonomy §2.1。none にも付ける）
+    processing: high
+    structure: high
+    connection: medium
+    governance: low
+  proposals: []             # 確信度 low / medium の軸から出た新設の提案（taxonomy §2.2）。無ければ []
   cause_status: confirmed   # confirmed | hypothesis（taxonomy §3。unknown の軸があれば hypothesis）
   review: candidate         # candidate | confirmed（分類を人が確定したか。taxonomy §3.1）
   reviewed_by: null         # confirmed のとき必須（確定者の識別子）
@@ -76,6 +82,7 @@ history: []             # 分類・確度・状態を変えたときの記録 [{
 - **AI が起こした分類は `review: candidate`**。人が読んで確定するまで型の成立に数えない。
 - **座標は記述、解決観点は決定**。「主に直した軸」を座標に書かない。
 - **none と unknown を混ぜない**。見て無いなら none、見ていないなら unknown（+ hypothesis）。
+- **確信度は軸ごと**。低い軸には「新しい値か軸が要るか」を問い、要るなら `proposals` に 1 件。要らなければ空。
 - **未確定は隠さない**。原因が仮説なら `cause_status: hypothesis` とし、本文でも「仮説」と書く。
 - **数値で分類しない**。行数・件数・規模は分類の根拠にならない（taxonomy §1.2）。
 - **解決したら書き換えではなく追記**。分類が変わったら `history` に残す。

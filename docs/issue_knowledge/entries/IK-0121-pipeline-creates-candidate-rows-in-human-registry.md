@@ -17,16 +17,20 @@ classification:
     structure: [none]
     connection: [none]
     governance: [assignment, review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    事実は確認済み — 共通部品ライブラリの条項は「昇格は人間の操作のみ」で、AI が書き込む経路を
-    作らないと定めているが、候補生成の実装はそのライブラリの表に候補状態の行を作る。可視化の弁
-    （凍結）は人間のままで、候補行はパイプラインの検索にも学習者にも届かない。争点は誰が何を
-    書いてよいかという担当の割り当ての解釈であり、処理も表現も正しい。裁定が (b) なら候補の
-    保存先を専用表へ移す差し替えになる。
+    処理: 候補を作る処理も、凍結を拒否する処理も書かれたとおり動く。構造: 候補と確定を同じ表に置く表現が争点の一部という読み方はできるが、表現を変えるかどうかは裁定の内容で決まるため原因として置かない。接続:
+    段をまたいで情報・意味・条件・対象・版が失われてはいない。統制:
+    「昇格は人間の操作のみ」という条項に対し、機械が候補状態の行を置いてよいかという担当の割り当て（割り当て）と、可視化の弁をどこに置くかという確認の手続（レビュー）の解釈が未確定のまま実装が先行している。
 generalization:
   level: repo_pattern
   general_form: >-

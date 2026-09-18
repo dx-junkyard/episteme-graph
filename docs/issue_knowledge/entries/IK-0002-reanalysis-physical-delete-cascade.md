@@ -18,16 +18,22 @@ classification:
     structure: [representation]
     connection: [version]
     governance: [resume]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「知識オブジェクトが版をまたいで同じものと言える識別子を持たず、実行のたびに
-    新しい行として作り直される」こと。処理は仕様どおりに動いており、権限も条件も欠けて
-    いない。同一性の表現を変えないかぎり、削除の書き方を変えても「前回のあれ」と結べない
-    ので再発する。確認手段は F2 行が引く削除箇所と、外部キーの連鎖経路、および外部キーを
-    持たない台帳・疑義・同一性リンク・配置が孤児化する事実。
+    処理: 削除も外部キーの連鎖も設計どおりに動き、後始末の不良ではない。
+    構造: 版をまたいで同じものと言える識別子が無く、差し替えを表す方法が全消去と再作成しかない。
+    接続: 再実行の前後で対象を結べず版が切れる。同一性の表現の欠落と同じことを別方向から見ている面があり、
+    どちらに置くかで迷った。
+    統制: 再実行が冪等でなく、やり直しのたびに下流の記録が失われる。
 generalization:
   level: general
   general_form: 再実行が対象を作り直すとき、その対象にぶら下がる人の記録まで連鎖して失われる

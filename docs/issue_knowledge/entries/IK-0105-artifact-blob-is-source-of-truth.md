@@ -16,18 +16,22 @@ classification:
   axes:
     processing: [none]
     structure: [representation, decomposition]
-    connection: [none]
+    connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    知識の実体が解析実行ごとの 1 行の JSONB に入り、関係テーブルは一部の投影にすぎないため、
-    検索・結合・制約・部分更新が知識本体に効かない。主張は生成 132 件に対し保存 9 件、式・根拠・
-    導出・記号には表そのものが無い。処理を直しても「何が正本でどの粒度で持つか」という表現と
-    責務を変えなければ再発する点が構造の定義に当たる。書き出し API 自身が正本を生成ログ側と
-    宣言していたこと、1 行が最大 10MB まで単調増加していたことを実測で確認。
+    処理: 個々の読み書きは仕様どおりで、単一処理を直しても正本の位置は変わらない。構造: 知識の実体が解析実行ごとの 1 行の入れ物に入り索引も制約も無い（表現）、粒度が「実行ごとに 1
+    行」で部分更新も差分監査もできない（分割）。責務の置き場所（どの層が正本を持つか）も同じ根にあるが、軸あたり 2 値までのためここに記す。接続: 生成 132 件に対し保存 9
+    件で、生成の段から永続化の段へ渡る途中で大半の知識が落ちている。正本の位置という表現の問題と同じ事実の別面という読み方もでき、そこが確信を下げている。統制: 順序・予算・再開・レビュー・完了の扱いに崩れは無い。
 generalization:
   level: general
   general_form: >-
@@ -62,6 +66,12 @@ history:
       governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持。軸あたり最大 2 のため structure.responsibility
       は座標から外し、ここに残す
+  - date: '2026-09-19'
+    field: classification.axes
+    from: connection=[none]
+    to: connection=[information]
+    reason: >-
+      軸ごとの再判定で、生成から永続化へ渡る途中の情報の落ちを接続の要素として置いた
 ---
 
 ## 課題
@@ -72,6 +82,10 @@ history:
 **原因**: 知識の正本が解析実行の生成ログ（1 行の JSONB）で、関係テーブルは採択された一部の
 投影だった。正本の側には索引も外部キーも制約も無く、粒度も「実行ごとに 1 行」なので部分更新も
 差分監査もできない。読み手はそれぞれ生成ログを開き直す運用になっていた。
+
+**軸ごとの判断（2026-09-19）**: 構造は正本の位置（表現）と実行ごと 1 行という粒度（分割）の 2 点。
+接続は、生成された知識の大半が永続化の段へ渡らない点を要素として置いた（正本の位置と同じ事実の別面という読み方も残る）。
+処理と統制は要素なし。
 
 ## 発見の観点
 

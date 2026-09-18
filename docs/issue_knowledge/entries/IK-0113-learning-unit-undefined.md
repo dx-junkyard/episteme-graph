@@ -18,15 +18,20 @@ classification:
     structure: [representation, decomposition]
     connection: [target]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    学習の単位を表す一級の対象が無く、コースの見出しと抽出部品を題名の重なり率で結んでいたため、
-    26 見出し中 18 が無接続になり、教員が自分の言葉で章立てするほど接続が切れる逆向きの誘因が
-    生まれていた。同じ規則が「1 操作 = 1 単位」と「1 章だけ 14 件」という両極端を生んでいるのは、
-    粒度の定義が無いことの帰結。結合の実装を改善しても、単位という表現を持たない限り再発する。
+    処理: 題名の重なりを計算する処理は書かれたとおり動く（結合規則そのものの不良と読む余地は残る）。構造: 学習の単位を表す一級の対象が無く（表現）、同じ規則が「1 操作 = 1 単位」と「1 章だけ 14
+    件」という両極端を生んだ（分割）。接続: 見出しと成果が別の目的で作られた名前で結ばれ、内容と無関係に対象が切れる（単位の不在と同じ事実の別面という読み方もでき、そこが確信を下げている）。統制:
+    誰がいつ結び付けるかの割り当て・順序・完了の扱いに崩れは無い。
 generalization:
   level: general
   general_form: >-

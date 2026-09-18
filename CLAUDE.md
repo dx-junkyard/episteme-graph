@@ -3527,7 +3527,9 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
   に 1 課題 = 1 エントリで記帳する（正本は `docs/issue_knowledge/README.md`・分類体系は `taxonomy.md`）
 - 分類は **4 軸の座標**（処理 `processing` / 構造 `structure` / 接続 `connection` / 統制 `governance`。各軸 1〜2 値か
   単独の `none` / `unknown`。排他の主分類は無く、群「局所 / 構造・接続・統制」は座標から導出）。**原因の性質で決め、
-  症状の場所・修正行数・修正手段で決めない**。原因未確定は `cause_status: hypothesis`（unknown の軸を伴う）を明示する
+  症状の場所・修正行数・修正手段で決めない**。原因未確定は `cause_status: hypothesis`（unknown の軸を伴う）を明示する。
+  軸ごとに確信度（high/medium/low）を付け、低い軸から「新しい値か軸が要るか」の提案を出す。同じ軸・同じ相手の提案が
+  high 3 件以上で設定候補 → 人が暫定の値として足し、相手の軸だけ再評価（taxonomy §2.1〜2.4）
 - 発見観点（何と何を突き合わせて見えたか）・解決観点（どの見立てで解いたか）はそれぞれ**最大 2・先頭が主**。
   「どの機能を実現するときに出るか」・機能名を剥がした一般形（`general_form`）と型（`pattern` →
   `dictionary.md` の `####` 見出し。辞書は族 `###` → 型 `####` の 2 段）を必ず書く。層は `layers.md` の語彙のみ

@@ -16,16 +16,24 @@ classification:
     structure: [representation]
     connection: [target]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「グラフの正規化器が付ける集約ノード・式ノードの識別子と、永続化された行の
-    識別子が別の名前空間なのに、同じ『要素 ID』として同じ引数に載せていたこと」。
-    型変換の失敗（500）や厳格な解決の拒否（422）は症状で、名前空間を区別する表現が
-    無いことが原因。呼び出し側を個別に直しても、別経路で同じ取り違えが起きるため構造。
-    設計書 §13 が「main / equation_detail の全ノードは行を持たない」ことを確認している。
+    処理: 型変換の例外も厳格な解決の拒否も、混同した値を受けた結果であり、処理そのものは正しく振る舞っている。
+
+    構造: 由来の異なる採番系を同じ型・同じ引数で運ぶ表現が、名前空間の区別を持てない点が表現に当たる。
+
+    接続: 渡された識別子が実体の行を指せない点が対象に当たる。名前空間の表現不足と表裏なので、どちらの定義に当てるかで迷い中とした。
+
+    統制: 誰がいつ承認・検討するかという割り当てや順序に崩れは見当たらない。
 generalization:
   level: general
   general_form: 由来の異なる名前空間の識別子を同じ型・同じ引数で扱い、解決できない参照が下流で例外になる

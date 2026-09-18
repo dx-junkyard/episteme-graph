@@ -16,15 +16,24 @@ classification:
     structure: [aggregation, responsibility]
     connection: [none]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    取得する側は単一の正規化された応答へ既に共通化されており、各画面の描画もそれ自体は動く。
-    原因は、要素の呼び名と組み立ての正本が描画側に無く系統ごとに持たれていること。画面を
-    個別に直しても次の画面で分裂が再発するため構造とする。劣化した側の実装が表に出ている
-    のは責務の置き場所の問題。
+    処理: 取得する側は単一の正規化された応答へ共通化済みで、各画面の描画もそれ自体は動く。
+    内部語彙や生の識別子がそのまま出る点を表示の不良と読む余地は残る。
+    構造: 呼び名と組み立ての正本が描画側に無く系統ごとに持たれ、正規化された応答を使わない側が
+    表に出ている。
+    接続: 同じ種別が画面ごとに別の訳語になるのを意味のずれと読む余地はあるが、ずれは段階の前後
+    ではなく並ぶ画面の間で起きているため要素は無いと判断した。
+    統制: 担当・順序・予算・レビュー・完了判定のいずれにも崩れは無い。
 generalization:
   level: general
   general_form: >-

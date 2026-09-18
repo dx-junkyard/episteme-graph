@@ -16,15 +16,26 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [resume]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: high
+  proposals:
+    - kind: value
+      target_axis: connection
+      neighbor_of: [connection.target, structure.representation]
+      statement: >-
+        ある操作の影響が、呼び出した側が宣言した対象の外へ、参照の連鎖によって自動的に広がることを区別する値
+      confidence: low
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    再解析を状態遷移に直したあとも、本文区画の作り直しが削除で行われ、主張から区画への外部キーが
-    連鎖削除だったため、承認済みの主張の行が物理的に消えた。削除しない規律を上の層に置いても、
-    参照の張り方（連鎖削除）という表現を変えなければ迂回される点が構造の定義に当たる。実データで
-    再解析後に主張が消えることを再現した。
+    処理: 区画を作り直す処理も主張を書く処理も、それぞれは設計どおり動く。構造: 主張から区画への参照が連鎖削除に設定されており、削除しない規律を上の層に置いても参照の張り方が削除を伝播させる。接続:
+    段をまたいで情報・意味・条件・版が失われてはいない。ただし呼び出し側が意図した対象（区画）より広い範囲が消える点は対象のずれとして読む余地があり、そこが確信を下げている。この波及の広がりを表す値が無いため新設を 1
+    件提案する。統制: 再解析という再実行の規律の中で起きており、作り直しの手順が削除を前提にしていた。
 generalization:
   level: general
   general_form: >-

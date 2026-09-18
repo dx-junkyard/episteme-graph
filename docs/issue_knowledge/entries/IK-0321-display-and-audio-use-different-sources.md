@@ -13,20 +13,27 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [representation]
+    structure: [representation, aggregation]
     connection: [meaning]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「同じ講義の内容に、表示用（トピックの教材）と読み上げ用（取り込み由来の
-    チャンク）という二つのソースがあり、分割の単位も違うこと」。同期の精度を上げても
-    位置の対応が定義できないため、処理の改善では解けない（設計書 §0-1 が
-    「タイムスタンプ精度を上げても解決しない」と明記）。さらに、どちらのソースを使うかが
-    音声キャッシュの都合で決まる時期があり、同じ教材が画面のモードによって別物として
-    出ていた。
+    処理: 表示も音声生成もそれぞれ正しく動いており、同期の精度を上げても解けない。
+
+    構造: 対応づけられる単位が存在しない点が表現に、同じ内容の正本が二つある点が集約に当たる。単位を作っても表示ソースの選択が分散したままなら残るため二値を置いた。
+
+    接続: 内容も粒度も違うソースの間で位置の対応が定義できない点が意味に当たる。
+
+    統制: 表示ソースの選択が音声の都合に従属していた時期はあるが、順序・予算・完了の設計そのものは崩れていない。
 generalization:
   level: repo_pattern
   general_form: 同じ内容に複数のソースと粒度があり、対応づけが近似でしか定義できない
@@ -57,6 +64,11 @@ history:
     from: primary=structure facets=[structure.representation, connection.meaning]
     to: axes=processing=[none]; structure=[representation]; connection=[meaning]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[representation]; connection=[meaning]; governance=[none]
+    to: axes=processing=[none]; structure=[representation, aggregation]; connection=[meaning]; governance=[none]
+    reason: 軸ごとの再判定で、同じ内容の正本が二つあるという集約の要素を構造軸の第2の値として足した
 ---
 
 ## 課題
@@ -68,6 +80,8 @@ history:
 同じ教材が受講モードによって別物（整形前の原文）として出るようになった。
 
 原因は、同じ内容に対する正本が二つあり、対応づけの定義が存在しないこと。
+
+4 軸で見直すと、構造軸には二つの要素がある。対応づけられる単位が無いという表現の問題と、同じ内容の正本が二つあるという集約の問題である。単位を作っても、表示ソースの選択が別の都合で決まる限り分散は残る。
 
 ## 発見の観点
 

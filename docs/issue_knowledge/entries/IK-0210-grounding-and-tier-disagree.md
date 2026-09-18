@@ -17,14 +17,23 @@ classification:
     structure: [none]
     connection: [condition, information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    二つの表示はそれぞれの入力に対して正しく計算される。原因は、トピックの教材本文を回答に
-    注入したという前提が一方の集約へ渡らず、その集約が注入を知らないまま検索結果だけで
-    動くこと。各段は単体では正しく見えるという接続の定義に当たる。
+    処理: 二つの表示はそれぞれの入力に対して正しく計算される。
+    構造: 同じ回答について二つの指標を別経路で出すこと自体は設計どおりで、正本の分裂ではないため
+    要素は無いと判断した。二つの入力が別であることを集約の不在と読む余地は残る。
+    接続: 教材本文を注入したという前提が一方の集約へ渡らない。注入された本文が集約の計算に一切
+    参加しない面もあるので二つ置く。
+    統制: 担当・順序・予算・レビュー・完了判定のいずれにも崩れは無い。
 generalization:
   level: general
   general_form: >-

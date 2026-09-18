@@ -15,15 +15,29 @@ classification:
     structure: [responsibility]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.review, structure.responsibility]
+      statement: 自動化された確認の手続が、守りたい性質ではなく実装の形に結び付いている
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「不変条項の検査を、関数本体のソース文字列を切り出して行っていること」。
-    検査対象が実装の形そのものなので、意味を変えない再分割でも落ちる。個々のテストを
-    直すのではなく、検査が何に依存するかという責務の置き方を変えない限り再発するため構造。
-    設計書 §3.3 が、本体を切り出す検査 7 本と逐語で固定された 3 点を列挙している。
+    処理: 検査も実装も、それぞれ単体では正しく動く。
+
+    構造: 守りたい性質の検査を実装の字面に結び付けている点が責務に当たる。検査の粒度の問題とも読めるため中。
+
+    接続: 段階間で情報・意味・条件が失われる要素は見当たらない。
+
+    統制: 不変条項の確認という手続が自動検査として置かれ、その手続自体が意味を変えない再構成を拒む点が確認の手続に当たる。
 generalization:
   level: repo_pattern
   general_form: 不変条項の検査が実装の字面に依存し、意味を変えない再構成を妨げる

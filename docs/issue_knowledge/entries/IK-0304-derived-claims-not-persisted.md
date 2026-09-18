@@ -15,15 +15,24 @@ classification:
     structure: [representation]
     connection: [information]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「永続化の対象が前段の出力の一部（判定済みスパン）に限られ、同じ前段が作る
-    派生主張（原子化された子・式から合成したもの）には保存先が用意されていないこと」。
-    参照する側はそれらの識別子を持っているので、段階間で本文という情報が落ちている。
-    設計書 §14 が「永続化するのは判定済みスパンだけ」と実装位置つきで確認している。
+    処理: 永続化は対象として決められた範囲を正しく保存しており、単一処理の不良は無い。
+
+    構造: 派生した主張を保持する行が用意されていない点が表現に当たる。
+
+    接続: 後段が識別子を持っているのに本文という情報が段の間で解決できない点が情報に当たる。
+
+    統制: 保存対象を誰が決めるかは解決側の論点で、原因側に割り当て・順序・完了の崩れは見当たらない。
 generalization:
   level: repo_pattern
   general_form: 前段が作った派生物の一部だけが保存され、その識別子を持つ後段が本文を解決できない

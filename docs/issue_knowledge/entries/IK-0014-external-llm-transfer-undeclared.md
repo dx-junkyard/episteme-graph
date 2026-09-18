@@ -18,15 +18,27 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.review, structure.representation]
+      statement: 実際に起きていることを、影響を受ける当事者へ宣言する手続が定まっていない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「開示の範囲が一つの軸に畳まれていて、外部へ渡るという開示を表せる場所が無い」
-    こと。転送そのものは仕様どおりで、条件も情報も落ちていない。軸を分けないかぎり、文章を
-    足しても宣言の置き場所が定まらない。確認手段は F10 行が引く学習者向け記述の不在と、
-    可視性の語彙が三値一軸であること。
+    処理: 転送そのものは仕様どおりで不良は無い。
+    構造: 開示の範囲が一つの軸に畳まれており、外部へ渡るという開示を表せる場所が無い。
+    接続: 段階間で情報や条件が落ちてはいない。宣言の不在を情報の欠落と読んでよいかで迷った。
+    統制: 実際に起きていることを当事者へ宣言する手続が定まっておらず、
+    承認の手続を扱う値で受けてよいかで迷った。
 generalization:
   level: general
   general_form: 実際に起きている開示を表す軸が無く、当事者に宣言されないまま運用される

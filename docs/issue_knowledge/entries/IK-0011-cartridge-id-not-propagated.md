@@ -14,18 +14,25 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [representation]
     connection: [condition, meaning]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「どの分野の語彙で正規化するかという条件が、呼び出し先まで渡らず既定へ落ちる」
-    こと。正規化処理も語彙の読み込みも単体では正しく、表現にも欠けが無い。条件を後段まで
-    運ばないかぎり、既定の語彙が別分野の概念名を書き換え続ける。確認手段は F9 行が引く
-    正規化の呼び出し箇所で、分野の指定を渡さずに呼ばれていること。
+    処理: 正規化も語彙の読み込みも単体では正しく、既定へ落ちる分岐も所定の挙動である。
+    構造: 元の表記と正規形を併記できず、上書きという不可逆な形しか表せない。
+    条件が渡っていても、この上書きは表記を落とし続ける。
+    接続: 分野という条件が呼び出し先へ渡らず、渡らないまま既定の語彙で概念名の意味が置き換わる。
+    統制: 誰がいつ分野を決めるかは入口の課題として別に立てており、この経路には要素が無い。
 generalization:
   level: general
   general_form: 上流で決めた条件が下流の呼び出しに渡らず、下流が黙って既定にフォールバックする
@@ -54,6 +61,11 @@ history:
     from: primary=connection facets=[connection.condition, connection.meaning]
     to: axes=processing=[none]; structure=[none]; connection=[condition, meaning]; governance=[none]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]; structure=[none]; connection=[condition, meaning]; governance=[none]
+    to: processing=[none]; structure=[representation]; connection=[condition, meaning]; governance=[none]
+    reason: 軸ごとの再判定で、正規化が上書きしか表せず元の表記を残せない点を構造の要素として追加した（条件が渡っても残る）
 ---
 
 ## 課題
@@ -65,6 +77,9 @@ history:
 原因は、上流で決めた分野という条件が下流まで運ばれず、下流が黙って既定へ落ちることにある。
 各段は単体では正しい。落ちたことを知らせる仕組みが無いので、結果だけを見ると正しい正規化に
 見える。
+
+軸ごとに読み直すと、接続のほかに構造の要素がある。正規化が元の名前を上書きする形しか持たず、
+正規形と元の表記を併記できない。分野の条件が正しく渡ったとしても、この不可逆さは残る。
 
 ## 発見の観点
 

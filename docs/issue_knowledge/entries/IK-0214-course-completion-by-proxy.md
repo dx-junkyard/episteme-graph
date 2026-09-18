@@ -16,14 +16,22 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [completion]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    表示の処理も判定式も書かれたとおりに動く。原因は「完了」の定義を、到達した位置に次が
-    無いことという代理指標で置き、実際に学んだかどうかを見ていないこと。さらに判定結果を
-    残さないため、完了の正本がどこにも存在しない。完了判定の決め方が崩れているので統制とする。
+    処理: 表示の処理も判定式も書かれたとおりに動く。判定式が代理指標だけを見る点を条件の誤りと
+    読む余地は残る。
+    構造: 完了したという事実を保持する場所が無く、正本がどこにも存在しない。
+    接続: 段階の間で情報・条件・対象・版が失われる場面は無い。
+    統制: 完了を「到達した位置に次が無いこと」で定義し、実際に学んだかを見ていない。
 generalization:
   level: general
   general_form: >-

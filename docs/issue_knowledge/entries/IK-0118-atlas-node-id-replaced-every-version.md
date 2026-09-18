@@ -17,15 +17,20 @@ classification:
     structure: [representation]
     connection: [version]
     governance: [none]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    節点の識別子が版ごとに作り直され、配置とベクトルだけが版に紐づくため、地図を改訂すると
-    前の版で教員が確定した配置が現行版から見えなくなる。別名・候補・辺の判断は版非依存の
-    キーで設計されているのに、配置だけ版スコープという非対称で、段階（版）をまたいだ対応が
-    失われる点が接続の定義に当たる。実測で 2 版間の節点識別子の重なりが 0 であることを確認。
+    処理: 骨格を作り直す処理は書かれたとおり動く。構造: 節点の識別子が版ごとに作り直され、版をまたいだ対応を持てる表現がどこにも無かった。接続:
+    配置とベクトルだけが版に紐づくため、地図を改訂すると前の版で確定した位置づけが現行版から参照できない。実測で 2 版間の節点識別子の重なりが 0 であることを確認した。統制:
+    凍結という手続の中に対応付けの段が無かったと読む余地はあるが、原因は識別子と対応表の持ち方にある。
 generalization:
   level: general
   general_form: >-

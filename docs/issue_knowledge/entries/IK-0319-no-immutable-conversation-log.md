@@ -15,15 +15,29 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [completion]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: low
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.review, governance.completion]
+      statement: 後から経緯を示す義務が要件として置かれておらず、記録の有無が設計の判断に現れない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「対話本文の保存が現在の状態のみを持ち、変更・削除の記録を残さないこと」。
-    各処理は仕様どおりに動いており、欠けているのは『何が起きたかを後から示せること』の
-    設計であるため統制。調査記録 §8 が、履歴は上書き・削除で正本が消え、痕跡は質問側
-    しか残らないことを確認している。
+    処理: 各処理は仕様どおりに動いており、単一処理の不良は無い。
+
+    構造: 対話本文の保存が現在の状態のみを持ち、変更・削除の記録を残さない表現になっている点が表現に当たる。
+
+    接続: 痕跡が質問側しか持たないのは記録の設計であって段どうしの受け渡しではないため、要素は無いと判断した。情報の落ちと読む余地は残る。
+
+    統制: 何が提示され何が確定されたかを後から示せることが要件として置かれていない点が、状態の正本と「済み」の定義に当たる。確認の手続とも読めるため中。
 generalization:
   level: general
   general_form: 状態変更の記録を持たない書き込み経路があり、後から経緯を再構成できない

@@ -16,15 +16,22 @@ classification:
     structure: [none]
     connection: [information]
     governance: [assignment]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「何を読むかの決定が、本人ではなく推定に割り当てられている」こと。推定の実装は
-    仕様どおり動いており、条件も伝わっている。割り当てを本人へ戻さないかぎり、推定の材料を
-    差し替えても同じ構造が残る。確認手段は提案1 が引く省略・要約置換の分岐と、習得済みの
-    第三の供給源が接触の痕跡であること、および学習者側に告知が無いこと。
+    処理: 推定も表示も所定どおり動く。判定材料に接触の痕跡を使っている点は、
+    何を材料にしてよいかという割り当ての問題として統制側に数えた。
+    構造: 畳んだ位置を表す状態が無いとも読めるが、決定を本人へ戻せば同じ表現で解ける。
+    接続: 取捨が起きた事実が本人の画面まで運ばれない。告知の不在を段階間の情報の欠落と読んでよいかで迷った。
+    統制: 何を読むかの決定が本人ではなく推定に割り当てられている。
 generalization:
   level: general
   general_form: 提示する内容の取捨を推定に任せ、取捨が起きた事実を本人に告げない

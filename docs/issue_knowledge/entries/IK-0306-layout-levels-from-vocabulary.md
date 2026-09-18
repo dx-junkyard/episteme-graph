@@ -15,16 +15,24 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: high
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「ノードの段（縦位置）を、構造である辺ではなくラベルの語彙から導いていたこと」。
-    上位構成のラベルはほぼ全てが同じ語彙に落ちるため全ノードが同じ段から始まり、さらに
-    深さに固定上限があるため段が潰れる。定数を変えるだけでは、語彙が変われば同じ症状に
-    戻るので構造。設計書 §17 が、式の詳細層で 30 ノード中 28 個が同じ段に入る実測を記録
-    している。
+    処理: 段の伝播に固定の深さ上限を掛けた条件式が、深い依存を頭打ちにしている点が計算の誤りに当たる。上限だけを直しても語彙由来の初期段が残るため中。
+
+    構造: 配置の根拠を構造である辺ではなくラベルの語彙で表している点が表現に当たる。
+
+    接続: 段の導出は一箇所で完結しており、段階間で失われる情報・意味・条件は無い。
+
+    統制: 既存の設計原則に反した状態が残っていたが、課題の原因は導出規則そのもので、順序・予算・完了の統制は崩れていない。
 generalization:
   level: repo_pattern
   general_form: 構造から導けるはずの配置や分類を、対象領域の語彙に依存した規則で決める

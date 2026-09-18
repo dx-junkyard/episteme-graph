@@ -176,6 +176,7 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
       [taxonomy.md §1.2](issue_knowledge/taxonomy.md) の手順（**原因の性質**。無い軸は none、
       見ていない軸は unknown）で決めたか。症状の場所・修正行数・修正手段で決めていないか
 - [ ] 原因が未確定なら `cause_status: hypothesis` + 「仮説:」で始まる basis にしたか
+- [ ] 4 軸それぞれに確信度を付け、低い軸には「新しい値か軸が要るか」を問って `proposals` に答えたか（要らなければ空）
 - [ ] `discovery.perspective`（どの見方で見えたか）と `feature_context.realizing`（どの機能を
       実現するときに出るか）・`general_form`（機能名を剥がした型）を書いたか
 - [ ] 解消時に `status: resolved` / `resolution.perspective`（最大 2・先頭が主）/ `landed_in`（実在する

@@ -18,15 +18,27 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: high
+    connection: medium
+    governance: medium
+  proposals:
+    - kind: value
+      target_axis: governance
+      neighbor_of: [governance.review, governance.assignment]
+      statement: 記録された当人が、その記録の扱いを後から変える手続が用意されていない
+      confidence: medium
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「否定側の判断を、理由と対象範囲つきで表せる形が用意されていない」こと。却下の
-    処理自体は状態を動かせており、権限も版も落ちていない。表現に理由と範囲の居場所を作らない
-    かぎり、画面に理由欄を足しても保存先が無い。確認手段は F8 行が引く却下の受け口の一覧で、
-    理由を必須にしているのは地図系の一部だけであること。
+    処理: 却下の処理は状態を動かせており不良は無い。
+    構造: 否定の判断を理由と範囲つきで表せる形が無く、画面に理由欄を足しても保存先が無い。
+    接続: 段階間で落ちているものは無い。却下がどこまで効くかという範囲を、対象のずれと読むかで迷った。
+    統制: 肯定の手続には帰属も段階も残るのに、否定と取り下げには手続も記録も用意されていない。
+    承認の手続を扱う値で当人の取り下げまで受けてよいかで迷った。
 generalization:
   level: repo_pattern
   general_form: 肯定の判断は理由と帰属を伴って残るのに、否定の判断は痕跡がほとんど残らない

@@ -14,20 +14,25 @@ feature_context:
   layers: [knowledge_objects, pipeline_a]
 classification:
   axes:
-    processing: [none]
+    processing: [input_handling]
     structure: [representation]
     connection: [none]
     governance: [resume, review]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    再実行の規律が「対象を全部消して入れ直す」であり、しかも書き戻しが審査状態を固定値で
-    上書きするため、承認・却下・教員の訂正が毎回失われる。実データでも全行が初期状態に
-    戻っていた。抽出の精度や表現をいくら改善しても、再実行の扱い方を状態遷移に変えない限り
-    同じことが起きる点が統制の定義に当たる。抽出結果が空のときは削除も走らず古い行が残るため、
-    「消える」か「古いまま残る」かが結果次第で決まっていた。
+    処理: 抽出結果が空のときに早期に戻って同期が走らず、「消える」か「古いまま残る」かが結果次第で決まっていた。空入力でも同期を走らせることが是正の一部だった（冪等性の統制と読む余地は残る）。構造:
+    前回の判断を引き継ぐ手掛かり（安定した同一性）と、人が触れた列を保護するという表現を持たなかった（同一性そのものは別の課題と重なる）。接続:
+    段をまたいで情報・意味・条件・対象が失われてはいない（版の扱いと読む余地は残る）。統制:
+    再実行の規律が「対象を全部消して入れ直す」であり（再開）、書き戻しが審査状態を固定値で上書きするため承認・却下が毎回失われた（レビュー）。実データでも全行が初期状態に戻っていた。
 generalization:
   level: general
   general_form: >-
@@ -57,6 +62,12 @@ history:
     to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[resume,
       review]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: processing=[none]
+    to: processing=[input_handling]
+    reason: >-
+      軸ごとの再判定で、空入力のときに同期が走らず結果次第で挙動が二通りに分かれた点を処理の要素として置いた
 ---
 
 ## 課題
@@ -67,6 +78,9 @@ history:
 **原因**: 永続化が「この文書の行を全部削除 → 新しい行を挿入」で、挿入時に審査状態を固定値で
 書いていた。前回の判断を引き継ぐ手掛かり（安定した同一性）も無かった。さらに抽出結果が空の
 ときは早期に戻って削除すら走らないため、状態が結果次第で二通りに分かれた。
+
+**軸ごとの判断（2026-09-19）**: 処理は、抽出結果が空のときの早期復帰で「消える」か「古いまま残る」かが分かれた点を要素として置いた（再実行の規律を直すだけでは残る）。
+構造は同一性と保護列という表現の不在、統制は削除して入れ直す再開の規律と確定の上書き。接続は要素なし。
 
 ## 発見の観点
 

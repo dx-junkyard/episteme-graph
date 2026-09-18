@@ -15,16 +15,24 @@ classification:
     structure: [representation]
     connection: [none]
     governance: [resume]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: medium
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「適用済みを記録せず毎起動で全件を番号順に再実行する方式を選んだ結果、
-    過去の変更を『履歴としての記録』としても『毎回実行される手続』としても扱わねば
-    ならなくなったこと」。各ファイルは正しく、表現（SQL）も正しいが、再実行の統制と
-    履歴の意味が両立しない。統合系の変更で、旧ファイルを残すと作って壊すの往復、
-    消すと過去の意味の改変、という二択として現れた。調査記録の訂正 8 が実測として記録。
+    処理: 各ファイルの内容はそれ自体として正しい。
+
+    構造: 同じファイル群が「履歴としての記録」と「毎回実行される手続」を兼ねる点が表現に当たる。再実行の統制と表裏なので中。
+
+    接続: 段階間で情報・意味・条件・版が失われる要素は見当たらない。
+
+    統制: 適用済みを記録せず全件を番号順に再実行する方式が、過去の変更の取り消し方を決められなくしている点が停止再開に当たる。
 generalization:
   level: general
   general_form: 全件を再実行する運用のもとで、過去の手続が履歴でもあるため、変更の取り消し方が決まらない

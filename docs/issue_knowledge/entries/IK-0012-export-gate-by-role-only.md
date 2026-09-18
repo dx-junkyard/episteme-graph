@@ -17,16 +17,22 @@ classification:
     structure: [none]
     connection: [condition]
     governance: [review]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: high
+    governance: medium
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「役割という粗い条件だけが受け口に渡り、対象ごとの可視性という条件がそこに
-    伝わっていない」こと。持ち出し処理も一覧処理も意図どおりに動いており、表現にも欠けが
-    無い。対象単位の条件を受け口まで運ばないかぎり、役割の判定をどう厳しくしても射程は
-    狭まらない。確認手段は F10 行が引く二つの受け口と、メンバー一覧が連絡先を全員へ
-    返していたこと。
+    処理: 持ち出しも一覧も意図どおり動く。
+    構造: 可視性を判定する仕組みは既にあり、受け口がそれを呼んでいないだけである。
+    判定の置き場所の問題と読むかで迷った。
+    接続: 対象ごとの可視性という条件が外向きの受け口まで伝わらない。
+    統制: 境界を越える読み出しが記帳の対象になっていない。承認の手続を扱う値で受けてよいかで迷った。
 generalization:
   level: general
   general_form: 役割だけで通す受け口が、対象ごとの可視性を見ないまま広い範囲を出してしまう

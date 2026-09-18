@@ -16,15 +16,23 @@ classification:
     structure: [aggregation]
     connection: [target]
     governance: [none]
+  axis_confidence:
+    processing: medium
+    structure: medium
+    connection: high
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    取得の処理も描画の処理も、与えられた対象については正しく動く。原因は、入口が示す対象
-    （コース全体）と問い合わせが使う対象（先頭の一件）が段階の間でずれていること。対象の
-    受け渡しを直さない限り教材が増えるほど漏れる。件数と一覧で母数の定義が別々に置かれて
-    いる点は副次の集約の問題。
+    処理: 取得も描画も、与えられた対象については正しく動く。件数と一覧が別々の条件で数える点を
+    条件の誤りと読む余地は残る。
+    構造: 母数の定義が件数側と一覧側に別々に置かれ、正本が無い。集約の不在と表現の不足の境界で
+    迷った。
+    接続: 入口が示す対象と、問い合わせが実際に使う対象が段階の間でずれる。
+    統制: 担当・順序・予算・レビュー・完了判定のいずれにも崩れは無い。
 generalization:
   level: general
   general_form: >-

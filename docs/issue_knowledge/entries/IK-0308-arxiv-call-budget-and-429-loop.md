@@ -13,18 +13,27 @@ feature_context:
 classification:
   axes:
     processing: [none]
-    structure: [none]
+    structure: [representation]
     connection: [none]
     governance: [budget, resume]
+  axis_confidence:
+    processing: high
+    structure: medium
+    connection: low
+    governance: high
+  proposals: []
   cause_status: confirmed
   review: candidate
   reviewed_by: null
   reviewed_at: null
   basis: >-
-    原因は「外部への問い合わせ回数に予算の設計が無く、画面を開き直すたび・操作するたびに
-    取り直していたこと」。処理も表現も正しいが、いつ・何回呼ぶかの統制が無いため統制。
-    設計書 §14.3 が操作ごとの呼び出し予算を表として定め、§14.1 が制限中に人が操作する
-    たびにブロック窓が延びる循環を記録している。
+    処理: 個々の問い合わせは正しく組み立てられ、単一処理の不良は無い。
+
+    構造: 外部が公開している事実の写しを持つ表現が無く、呼ばずに済ませる選択肢そのものが存在しなかった点が表現に当たる。予算のための手段とも読めるため中。
+
+    接続: 同じ解決を二度引く重複はあるが、段階間で情報・条件・版が失われているわけではないため無いと判断した。重複を情報の落ちと読む余地は残る。
+
+    統制: 一操作あたり何回呼ぶかの予算が無い点が予算に、制限を受けたあとも呼び続けて窓が延びる点が停止再開に当たる。
 generalization:
   level: general
   general_form: 外部資源への問い合わせに予算と抑制の設計が無く、失敗のたびの再試行が制限を長引かせる
@@ -55,6 +64,11 @@ history:
     to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[budget,
       resume]
     reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
+  - date: '2026-09-19'
+    field: classification.axes
+    from: axes=processing=[none]; structure=[none]; connection=[none]; governance=[budget, resume]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[budget, resume]
+    reason: 軸ごとの再判定で、外部事実の写しを持つ表現が無かった点を構造軸の要素として認めた
 ---
 
 ## 課題
@@ -65,6 +79,8 @@ history:
 メタデータを引き、出所の登録では同じ解決を二度引き、比較では候補の要旨を引き直していた。
 さらに制限を受けたあとも呼び続けるため、人が操作するほど制限の窓が延びるという循環が
 できていた。
+
+4 軸で見直すと、構造軸にも要素がある。外部が公開している事実の写しを持つ表現が無かったため、呼ばずに済ませるという選択肢が最初から存在しなかった。予算の表を決めるだけでは同じ回数に戻る。
 
 ## 発見の観点
 
