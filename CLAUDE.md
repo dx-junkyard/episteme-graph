@@ -3522,6 +3522,21 @@ O-1(a) artifact は生成ログ / O-2(a) `theory_claims` は nullable 列追加�
 - cartridgeがない場合でもagentが単独動作できるよう、すべてのcartridge参照は `Optional` とする
 - domain-specific なロジックをagent内にハードコードしない（cartridgeから読む）
 
+### 8. 課題の記録（課題ナレッジ, `docs/issue_knowledge/`, 2026-09-18）
+- 調査記録・レビュー文書・是正リストに課題を載せたとき／解消したときは、`docs/issue_knowledge/entries/`
+  に 1 課題 = 1 エントリで記帳する（正本は `docs/issue_knowledge/README.md`・分類体系は `taxonomy.md`）
+- 分類は **2 群 4 主分類**（局所 `local` / 構造 `structure` / 接続 `connection` / 統制 `governance`）+
+  副分類 facets。**原因の性質で決め、症状の場所・修正行数・修正手段で決めない**。原因未確定は
+  `cause_status: hypothesis` を明示する
+- 発見観点（何と何を突き合わせて見えたか）・解決観点（どの見立てで解いたか）はそれぞれ**最大 2・先頭が主**。
+  「どの機能を実現するときに出るか」・機能名を剥がした一般形（`general_form`）と型（`pattern` →
+  `dictionary.md` の `####` 見出し。辞書は族 `###` → 型 `####` の 2 段）を必ず書く。層は `layers.md` の語彙のみ
+- **AI が起こした分類は `classification.review: candidate`**。人が読んで `confirmed` + `reviewed_by/at` を書くまで
+  型の成立（確定 2 件以上）に数えない。解決済みの `landed_in` には実在するコードのパスかコミットを最低 1 つ
+- `index.md` は `backend/scripts/issue_knowledge_index.py` の機械生成（手編集しない）。ガードレールは
+  `backend/tests/test_issue_knowledge_guardrails.py`（語彙の taxonomy ⇄ モジュール一致・索引同期・
+  辞書の型実在・sources のリンク実在）
+
 ## 優先タスク（Priority A）— 実装完了 (2026-03-26)
 
 以下の3課題は `feature/a1-a2-a3-priority-fixes` ブランチで実装済み。

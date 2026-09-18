@@ -162,6 +162,30 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
       **(b) 時点付き表記**（「2026-08-14 時点 N」）のどちらかになっているか
 - [ ] 裸の数値（時点もテスト参照も無い「260件」）を新規に書いていないか
 
+## 6. 課題ナレッジへの記帳（2026-09-18 追加）
+
+調査記録・レビュー文書・是正リストに課題を**新しく載せたとき**、および**解消したとき**は、
+[課題ナレッジ](issue_knowledge/README.md) に 1 課題 = 1 エントリで記帳する（正本は起票元の文書の
+まま。エントリは「原因の性質による分類・発見観点・解決観点・型」を引くための索引層）。
+
+- [ ] **設計時（pre-mortem）**: 変更に「再実行・削除・既定値・AI の判定・段階間の受け渡し・
+      派生物・ID や版・語彙表の新設・外部呼び出し」が含まれるなら、
+      [課題ナレッジ README §3.3b](issue_knowledge/README.md) の表で該当する族の型の「見分け方」を
+      先に当て、該当しないなら「該当なし」と PR に書く
+- [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、主分類を
+      [taxonomy.md §1.1](issue_knowledge/taxonomy.md) の手順（**原因の性質**）で決めたか。
+      症状の場所・修正行数・修正手段で決めていないか
+- [ ] 原因が未確定なら `cause_status: hypothesis` + 「仮説:」で始まる basis にしたか
+- [ ] `discovery.perspective`（どの見方で見えたか）と `feature_context.realizing`（どの機能を
+      実現するときに出るか）・`general_form`（機能名を剥がした型）を書いたか
+- [ ] 解消時に `status: resolved` / `resolution.perspective`（最大 2・先頭が主）/ `landed_in`（実在する
+      コードのパスかコミットを最低 1 つ）を書き、分類が変わったなら `history` に残したか
+      （起票元への解消注記 §5-3 とは別に）
+- [ ] AI が起こしたエントリは `classification.review: candidate` のままか。人が確定したなら
+      `confirmed` + `reviewed_by` + `reviewed_at` を書いたか
+- [ ] `backend/scripts/issue_knowledge_index.py` で index.md を再生成し、
+      `backend/tests/test_issue_knowledge_guardrails.py` が green か
+
 ---
 
 ## 付記: このチェックリスト自体の位置づけ
