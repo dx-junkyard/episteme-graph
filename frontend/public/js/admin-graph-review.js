@@ -45,7 +45,114 @@
     focusNodeOnce: "",  // 次の描画で視点を合わせるノード（論文の順 → グラフの双方向）
     voiceLoop: null,    // AdminVoiceChat のコントローラ（起動中のみ）
     voicePlayer: null,  // 読み上げ中の Audio（停止時に止める）
+    nodePositions: {},  // 教員が動かしたノードの位置 {node_id: {x, y}}（端末に保存）
   };
+
+  // -------------------------------------------------------------------------
+  // ノード配置の保存（教員が動かした位置を覚えておく）
+  //
+  // 自動レイアウト（graphView.layoutPositions）は毎回同じ配置を返すため、教員が
+  // ドラッグで動かしても層の切替・承認後の再読み込みで元に戻ってしまっていた。
+  // 動かした位置は「その端末で見るときの都合」なのでサーバへは持たせず、
+  // localStorage に教材単位で置く（node_id は層をまたいで一意なので層では分けない）。
+  // 保存できない環境（プライベートウィンドウ等）では黙って自動配置のまま動く。
+  // -------------------------------------------------------------------------
+  var POSITION_STORAGE_PREFIX = "eg_graph_review_layout:";
+  var POSITION_STORAGE_MAX_NODES = 600; // 際限なく膨らませない
+
+  function positionStorageKey(documentId) {
+    return POSITION_STORAGE_PREFIX + String(documentId || "");
+  }
+
+  function loadNodePositions(documentId) {
+    try {
+      var raw = window.localStorage.getItem(positionStorageKey(documentId));
+      if (!raw) return {};
+      var parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== "object") return {};
+      var clean = {};
+      Object.keys(parsed).forEach(function (id) {
+        var pos = parsed[id];
+        if (!pos || typeof pos.x !== "number" || typeof pos.y !== "number") return;
+        if (!isFinite(pos.x) || !isFinite(pos.y)) return;
+        clean[id] = { x: pos.x, y: pos.y };
+      });
+      return clean;
+    } catch (e) {
+      return {};
+    }
+  }
+
+  function persistNodePositions() {
+    var documentId = state.documentId;
+    if (!documentId) return;
+    try {
+      var ids = Object.keys(state.nodePositions);
+      if (!ids.length) {
+        window.localStorage.removeItem(positionStorageKey(documentId));
+        return;
+      }
+      if (ids.length > POSITION_STORAGE_MAX_NODES) {
+        // 上限を超えたら古いものから落とす（保存自体を諦めない）。
+        ids.slice(0, ids.length - POSITION_STORAGE_MAX_NODES).forEach(function (id) {
+          delete state.nodePositions[id];
+        });
+      }
+      window.localStorage.setItem(
+        positionStorageKey(documentId), JSON.stringify(state.nodePositions)
+      );
+    } catch (e) { /* 保存できない環境では自動配置のまま続ける */ }
+  }
+
+  function hasSavedNodePositions() {
+    return Object.keys(state.nodePositions || {}).length > 0;
+  }
+
+  // 自動レイアウトの上に、教員が動かした位置だけを重ねる（表示中のノードのみ）。
+  function withSavedPositions(positions, nodes) {
+    var g = gv();
+    (nodes || []).forEach(function (node) {
+      var id = g.nodeId(node);
+      var saved = id && state.nodePositions[id];
+      if (saved) positions[id] = { x: saved.x, y: saved.y };
+    });
+    return positions;
+  }
+
+  // ドラッグ終了時に、動かしたノードの位置だけを控える。
+  function rememberDraggedNodes(network, nodeIds) {
+    if (!network || !nodeIds || !nodeIds.length) return;
+    var moved = false;
+    try {
+      var current = network.getPositions(nodeIds);
+      nodeIds.forEach(function (id) {
+        var pos = current[id];
+        if (!pos || !isFinite(pos.x) || !isFinite(pos.y)) return;
+        state.nodePositions[id] = { x: Math.round(pos.x), y: Math.round(pos.y) };
+        moved = true;
+      });
+    } catch (e) { return; }
+    if (!moved) return;
+    persistNodePositions();
+    renderResetLayoutButton();
+  }
+
+  function resetNodePositions() {
+    state.nodePositions = {};
+    persistNodePositions();
+    renderResetLayoutButton();
+    renderNetwork(); // 自動レイアウトで組み直す（視点は fit に戻す）
+    setStatus("graph-review-graph-status", "ノードの配置を自動の並びに戻しました。", "info");
+  }
+
+  function renderResetLayoutButton() {
+    var btn = document.getElementById("graph-review-reset-layout");
+    if (!btn) return;
+    btn.disabled = !hasSavedNodePositions();
+    btn.title = btn.disabled
+      ? "ノードをドラッグで動かすと、その配置がこの端末に保存されます。"
+      : "動かしたノードの配置を捨てて、自動の並びに戻します。";
+  }
 
   // component / claim の review_status → 表示ラベル（graphView と同じ語彙世界。
   // graphView.sourceBackingLabel は backing 用なので、承認状態はここで持つ）。
@@ -236,6 +343,8 @@
             '</label>' +
             '<span id="graph-review-unreviewed-count" class="graph-review-count"></span>' +
             '<button type="button" id="graph-review-next-unreviewed" class="admin-action-btn" data-ui-anchor="graph-review.next-unreviewed">次の未レビューへ</button>' +
+            '<button type="button" id="graph-review-reset-layout" class="admin-action-btn" data-ui-anchor="graph-review.reset-layout">配置を元に戻す</button>' +
+            '<span class="graph-review-layout-hint">ノードはドラッグで動かせます（位置はこの端末に保存されます）</span>' +
             '<button type="button" id="graph-review-close" class="admin-action-btn">閉じる</button>' +
           '</div>' +
         '</div>' +
@@ -288,6 +397,7 @@
     modal.addEventListener("click", function (e) {
       if (e.target === modal) close();
     });
+    modal.querySelector("#graph-review-reset-layout").addEventListener("click", resetNodePositions);
     modal.querySelector("#graph-review-unreviewed-toggle").addEventListener("change", function () {
       state.unreviewedOnly = !!this.checked;
       // 強調の切替は見ている範囲を変えない（ズーム・パンを保つ）。
@@ -335,6 +445,7 @@
       return;
     }
     state.documentId = documentId;
+    state.nodePositions = loadNodePositions(documentId);
     state.title = title || "教材";
     state.graph = null;
     state.layer = "main";
@@ -357,6 +468,7 @@
     document.getElementById("graph-review-title-text").textContent = state.title;
     document.getElementById("graph-review-graph-updated").textContent = "";
     document.getElementById("graph-review-unreviewed-toggle").checked = false;
+    renderResetLayoutButton();
     setStatus("graph-review-graph-status", "グラフを読み込み中...", "info");
     renderViewToggle();
     renderPaperOutline();
@@ -581,7 +693,7 @@
     var view = gv().filterByLayer(state.graph, state.layer);
     var nodes = view.nodes || [];
     var displayEdges = gv().displayEdges(view.edges || []);
-    var positions = gv().layoutPositions(nodes, displayEdges);
+    var positions = withSavedPositions(gv().layoutPositions(nodes, displayEdges), nodes);
     var g = gv();
 
     var nodeSpecs = nodes.map(function (node, index) {
@@ -637,6 +749,10 @@
         } catch (e) { /* 失敗時は fit へ落とす */ }
       }
       network.fit({ animation: false });
+    });
+    // 教員が動かした位置を覚える（層の切替・承認後の再読み込みで元に戻さない）。
+    network.on("dragEnd", function (params) {
+      rememberDraggedNodes(network, (params && params.nodes) || []);
     });
     network.on("click", function (params) {
       if (params.nodes && params.nodes.length && byId[params.nodes[0]]) {

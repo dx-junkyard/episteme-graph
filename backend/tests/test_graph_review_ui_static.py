@@ -1066,3 +1066,87 @@ class TestPaperLayer:
         rel_css = CSS_SRC[CSS_SRC.index(".graph-review-paper-rel"):]
         rel_css = rel_css[: rel_css.index("}")]
         assert "red" not in rel_css and "#ef4444" not in rel_css
+
+
+class TestGraphLayout:
+    """層状レイアウト（graphView.layoutPositions）— 一段に潰して一直線にしない。
+
+    旧実装は語彙から初期段を決め、辺の伝播に ``Math.min(4, …)`` の上限を掛けていた。
+    上位理論構成のラベルは語彙上ほとんどが relation に落ちるため全ノードが同じ段から
+    始まり、深さが 4 で頭打ちになって数十個のノードが一段に横並びになっていた。
+    """
+
+    def _layout_source(self) -> str:
+        start = STUDIO_SRC.index("  function lsGraphLayoutPositions(nodes, edges) {")
+        end = STUDIO_SRC.index("  function lsGraphRelationPriority(edge) {")
+        return STUDIO_SRC[start:end]
+
+    def test_no_depth_cap(self):
+        # 段の深さに上限を置かない（置くと深いチェーンが一段に潰れる）。
+        layout = self._layout_source()
+        assert "Math.min(4," not in layout
+        assert "Math.min(3, Math.max(0," not in STUDIO_SRC
+
+    def test_rank_from_structure_not_vocabulary(self):
+        # 段は辺（構造）から決める。語彙で初期段を決める関数は残さない。
+        assert "function lsGraphNodeLevel" not in STUDIO_SRC
+        assert "function lsGraphRankNodes" in STUDIO_SRC
+
+    def test_no_paper_specific_ordering(self):
+        # 段内の並びは交差を減らすバリセンタ法で決める。特定論文の語彙で並べない
+        # （domain-independent）。
+        assert "function lsGraphNodeSortKey" not in STUDIO_SRC
+        assert "function lsGraphSweepLayers" in STUDIO_SRC
+        for token in ("reality criterion", "no-disturbance", "incompleteness"):
+            assert token not in self._layout_source().lower(), token
+
+    def test_components_separated(self):
+        # つながっていない塊は重ねず横に並べ、辺を持たないノードは格子に畳む。
+        layout = self._layout_source()
+        assert "lsGraphConnectedComponents" in layout
+        assert "componentGap" in layout
+        assert "Math.ceil(Math.sqrt(isolated.length))" in layout
+
+    def test_weak_relations_do_not_rank(self):
+        # 向きが前後関係を表さない辺は段の決定に使わない。
+        assert "function lsGraphWeakRelation" in STUDIO_SRC
+        assert "UNCERTAIN_DUE_TO" in STUDIO_SRC
+
+
+class TestNodePositionPersistence:
+    """教員が動かしたノードの位置を覚える（層の切替・再読み込みで戻さない）。"""
+
+    def test_positions_saved_per_document(self):
+        assert 'POSITION_STORAGE_PREFIX = "eg_graph_review_layout:"' in JS_SRC
+        assert "function loadNodePositions" in JS_SRC
+        assert "function persistNodePositions" in JS_SRC
+
+    def test_drag_end_remembers_positions(self):
+        assert 'network.on("dragEnd"' in JS_SRC
+        assert "rememberDraggedNodes(network" in JS_SRC
+        assert "network.getPositions(" in JS_SRC
+
+    def test_saved_positions_override_auto_layout(self):
+        # 自動レイアウトの上に、保存済みの位置だけを重ねる。
+        assert "withSavedPositions(gv().layoutPositions(nodes, displayEdges), nodes)" in JS_SRC
+
+    def test_loaded_on_open(self):
+        assert "state.nodePositions = loadNodePositions(documentId)" in JS_SRC
+
+    def test_reset_available(self):
+        # 動かした配置を捨てて自動の並びへ戻す出口を必ず用意する。
+        assert 'id="graph-review-reset-layout"' in JS_SRC
+        assert 'data-ui-anchor="graph-review.reset-layout"' in JS_SRC
+        assert "function resetNodePositions" in JS_SRC
+
+    def test_storage_failures_are_silent(self):
+        # localStorage が使えない環境でも画面を止めない（自動配置のまま動く）。
+        for fn in ("function loadNodePositions", "function persistNodePositions"):
+            idx = JS_SRC.index(fn)
+            body = JS_SRC[idx: JS_SRC.index("\n  }", idx)]
+            assert "catch (e)" in body, fn
+
+    def test_positions_are_local_and_not_sent(self):
+        # 位置は端末の都合。サーバへ送らない（保存 API も新しい列も作らない）。
+        assert "/positions" not in JS_SRC
+        assert not re.search(r"apiFetch\([^)]*position", JS_SRC, re.IGNORECASE)

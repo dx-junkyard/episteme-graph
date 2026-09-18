@@ -2672,6 +2672,18 @@ W9 U層計測（`deliberation:chat` / `deliberation:vision` / `deliberation:cros
   LLM 回数・CostGate 不変。③数式は `$…$` に統一し、吹き出しは `richText` で描く。
   ④制御文字の衛生: `core/text_hygiene.py::strip_control_sequences`（ANSI・`[0m` 残骸・C0）を
   LLM 応答・画面文脈の事実文・論文層 snippet に適用し、`strip_text_for_speech` は `\(…\)` も除去。
+- **読みやすさ — 層状レイアウトと配置の記憶（§17 追補・2026-09-17・migration / API / LLM
+  いずれも増やさない）**: ①`lsGraphLayoutPositions`（graphView の正本 = 原稿スタジオと共有）を
+  **層状レイアウト**に書き換え。段は構造（辺）だけから決める — 弱い辺（`UNCERTAIN_DUE_TO` /
+  `RELATED_TO`）は段の決定に使わない / 後退辺を落とした DAG の最長路で段を決め**深さに上限を
+  置かない**（旧実装の `Math.min(4, …)` が式の詳細層の 30 ノード中 28 個を一段に潰していた）/
+  段内はバリセンタ法で交差を減らす（初期順は `display_order`。特定論文の語彙で並べる
+  `lsGraphNodeSortKey` と語彙から段を決める `lsGraphNodeLevel` は撤去 — domain-independent）/
+  連結成分は横に並べ、辺を持たないノードは格子に畳む。②教員がドラッグで動かしたノードの位置を
+  `localStorage`（`eg_graph_review_layout:{document_id}`・教材単位・node_id は層をまたいで
+  一意なので層で分けない・上限600）に控え、描画時に自動レイアウトへ重ねる。**サーバへ送らない**
+  （端末で見るときの都合であって共有物ではない — 保存 API も列も作らない）。出口は
+  「配置を元に戻す」（アンカー `graph-review.reset-layout`）。保存できない環境では黙って自動配置。
 - **ガードレール**: `test_graph_review_{core,api,guardrails,ui_static}.py` +
   `test_graph_review_voice_api.py`。
 - **非スコープ（v1）**: 一括承認 / edge の承認 / equation・evidence ノードの承認 /

@@ -6074,17 +6074,6 @@
     return "relation";
   }
 
-  function lsGraphNodeLevel(node, fallbackIndex) {
-    var group = lsGraphNodeGroup(node);
-    var label = String((node && (node.label || node.name)) || "").toLowerCase();
-    if (/uniform-coordinate|単一粒子/.test(label)) return 0;
-    if (group === "assumption") return 0;
-    if (group === "method" || group === "uncertainty") return 1;
-    if (group === "relation" || group === "diagnostic") return 2;
-    if (group === "conclusion") return 3;
-    return Math.min(3, Math.max(0, Number(fallbackIndex || 0)));
-  }
-
   function lsGraphNodeDashed(node, group) {
     var label = String((node && (node.label || node.name)) || "").toLowerCase();
     var layer = String((node && node.graph_layer) || "").toLowerCase();
@@ -6440,78 +6429,266 @@
     return Object.keys(byPair).map(function (key) { return byPair[key]; });
   }
 
-  function lsGraphLayoutPositions(nodes, edges) {
-    var nodeById = {};
-    var levels = {};
-    (nodes || []).forEach(function (node, index) {
-      var id = lsGraphNodeId(node) || ("node-" + index);
-      nodeById[id] = node;
-      levels[id] = lsGraphNodeLevel(node, index);
-    });
+  // ---------------------------------------------------------------------------
+  // 層状レイアウト（graph_dialogue_review_design.md GR8 — グラフレビューと共有）
+  //
+  // 旧実装は「ラベルの語彙から初期段を決め、辺で伝播させる段に Math.min(4, …) の
+  // 上限を掛ける」方式だった。上位理論構成のラベルは語彙上ほとんどが relation に
+  // 落ちて全ノードが同じ段から始まり、さらに深さが 4 で頭打ちになるため、数十個の
+  // ノードが一段に横並びになって構造が読めなくなっていた（= 一直線に並ぶ）。
+  //
+  // 現実装は構造（辺）だけから段を決める:
+  //   1. 弱い辺（UNCERTAIN_DUE_TO / RELATED_TO）は段の決定に使わず、並び順にだけ使う
+  //   2. 後退辺を落として DAG にし、最長路で段を決める（深さに上限を置かない）
+  //   3. 段内の並びはバリセンタ法で辺の交差を減らす（初期順は display_order / 出現順）
+  //   4. 連結成分ごとにまとめ、成分は横に並べる（別々の導出チェーンを重ねない）
+  //   5. 辺を持たないノードは格子状にまとめる（横一列に伸ばさない）
+  // 特定分野・特定論文の語彙は使わない（domain-independent）。
+  // ---------------------------------------------------------------------------
+  var LS_GRAPH_LAYOUT = {
+    rowGap: 190,       // 段の間隔（ノード高 + 辺ラベルの余白）
+    nodeGap: 48,       // 同じ段のノード間の余白
+    componentGap: 150, // 連結成分の間の余白
+    charWidth: 8.4,    // ラベル1文字あたりの概算幅（幅の見積りにだけ使う）
+    minWidth: 120,
+    maxWidth: 260,
+    sweeps: 4,         // バリセンタ法の往復回数
+  };
 
-    for (var pass = 0; pass < 12; pass += 1) {
-      var changed = false;
-      (edges || []).forEach(function (edge) {
-        var relation = String(edge.relation || edge.edge_type || edge.type || "").toUpperCase();
-        if (relation === "UNCERTAIN_DUE_TO" || relation === "RELATED_TO") return;
-        var source = edge.source_component_id || edge.source || edge.from;
-        var target = edge.target_component_id || edge.target || edge.to;
-        if (!nodeById[source] || !nodeById[target]) return;
-        var nextLevel = Math.min(4, (levels[source] || 0) + 1);
-        if ((levels[target] || 0) < nextLevel) {
-          levels[target] = nextLevel;
-          changed = true;
+  // 段の決定に使わない辺（向きが構造の前後関係を表さない関係）。
+  function lsGraphWeakRelation(edge) {
+    var relation = String((edge && (edge.relation || edge.edge_type || edge.type)) || "").toUpperCase();
+    return relation === "UNCERTAIN_DUE_TO" || relation === "RELATED_TO";
+  }
+
+  // ノード幅の概算（vis の box はラベルに合わせて伸びる）。重なりを避けるためだけの
+  // 見積りで、描画そのものには使わない。
+  function lsGraphNodeWidthHint(node, id) {
+    var label = String(lsGraphNodeDisplayLabel(node, id) || id || "");
+    var longest = label.split("\n").reduce(function (max, line) {
+      return Math.max(max, line.length);
+    }, 0);
+    return Math.min(
+      LS_GRAPH_LAYOUT.maxWidth,
+      Math.max(LS_GRAPH_LAYOUT.minWidth, (longest * LS_GRAPH_LAYOUT.charWidth) + 40)
+    );
+  }
+
+  // 後退辺を落として DAG にし、最長路で段を決める。循環があっても止まらない。
+  // 返り値: { ranks: {id: 段}, edges: [{from, to}] }（edges は後退辺を除いたもの）
+  function lsGraphRankNodes(ids, strongEdges) {
+    var outgoing = {};
+    ids.forEach(function (id) { outgoing[id] = []; });
+    strongEdges.forEach(function (edge) { outgoing[edge.from].push(edge.to); });
+
+    // 反復 DFS（再帰しない = 深いチェーンでもスタックを溢れさせない）。
+    // 探索中（state=1）のノードへ戻る辺が後退辺で、これだけを落とす。
+    var visitState = {};  // 未訪問 = undefined / 1 = 探索中 / 2 = 完了
+    var acyclic = [];
+    ids.forEach(function (root) {
+      if (visitState[root]) return;
+      visitState[root] = 1;
+      var stack = [{ id: root, next: 0 }];
+      while (stack.length) {
+        var frame = stack[stack.length - 1];
+        var children = outgoing[frame.id];
+        if (frame.next >= children.length) {
+          visitState[frame.id] = 2;
+          stack.pop();
+          continue;
         }
-      });
-      if (!changed) break;
-    }
-
-    (nodes || []).forEach(function (node, index) {
-      var id = lsGraphNodeId(node) || ("node-" + index);
-      var group = lsGraphNodeGroup(node);
-      if (group === "uncertainty") levels[id] = Math.min(2, Math.max(1, levels[id] || 1));
-      if (group === "conclusion") levels[id] = Math.max(4, levels[id] || 4);
-      if (lsGraphNodeDashed(node, group)) levels[id] = 0;
+        var child = children[frame.next];
+        frame.next += 1;
+        if (visitState[child] === 1) continue; // 後退辺
+        acyclic.push({ from: frame.id, to: child });
+        if (!visitState[child]) {
+          visitState[child] = 1;
+          stack.push({ id: child, next: 0 });
+        }
+      }
     });
 
-    var buckets = {};
+    var indegree = {};
+    var dag = {};
+    ids.forEach(function (id) { indegree[id] = 0; dag[id] = []; });
+    acyclic.forEach(function (edge) {
+      dag[edge.from].push(edge.to);
+      indegree[edge.to] += 1;
+    });
+
+    var ranks = {};
+    var queue = [];
+    ids.forEach(function (id) {
+      ranks[id] = 0;
+      if (!indegree[id]) queue.push(id);
+    });
+    for (var head = 0; head < queue.length; head += 1) {
+      var id = queue[head];
+      dag[id].forEach(function (child) {
+        if (ranks[child] < ranks[id] + 1) ranks[child] = ranks[id] + 1;
+        indegree[child] -= 1;
+        if (!indegree[child]) queue.push(child);
+      });
+    }
+    return { ranks: ranks, edges: acyclic };
+  }
+
+  // 連結成分（弱い辺も含めた無向の連結）。成分ごとに離して置く。
+  function lsGraphConnectedComponents(ids, adjacency) {
+    var seen = {};
+    var components = [];
+    ids.forEach(function (root) {
+      if (seen[root]) return;
+      seen[root] = true;
+      var queue = [root];
+      var members = [];
+      for (var head = 0; head < queue.length; head += 1) {
+        var id = queue[head];
+        members.push(id);
+        (adjacency[id] || []).forEach(function (next) {
+          if (seen[next]) return;
+          seen[next] = true;
+          queue.push(next);
+        });
+      }
+      components.push(members);
+    });
+    return components;
+  }
+
+  // バリセンタ法の1掃き。隣接段の相手の平均位置で並べ替える（相手がいないノードは
+  // 現在の位置を保つ = 並びを壊さない）。
+  function lsGraphSweepLayers(layers, neighbors, downward) {
+    var indexOf = {};
+    layers.forEach(function (layer) {
+      layer.forEach(function (id, i) { indexOf[id] = i; });
+    });
+    var order = [];
+    for (var i = 0; i < layers.length; i += 1) order.push(i);
+    if (!downward) order.reverse();
+    order.forEach(function (li) {
+      var decorated = layers[li].map(function (id, i) {
+        var linked = (neighbors[id] || []).filter(function (other) {
+          return indexOf[other] !== undefined;
+        });
+        var key = i;
+        if (linked.length) {
+          key = linked.reduce(function (sum, other) { return sum + indexOf[other]; }, 0) / linked.length;
+        }
+        return { id: id, key: key, seq: i };
+      });
+      decorated.sort(function (a, b) { return (a.key - b.key) || (a.seq - b.seq); });
+      layers[li] = decorated.map(function (d) { return d.id; });
+      layers[li].forEach(function (id, i) { indexOf[id] = i; });
+    });
+  }
+
+  function lsGraphLayoutPositions(nodes, edges) {
+    var ids = [];
+    var nodeById = {};
+    var orderIndex = {};
     (nodes || []).forEach(function (node, index) {
       var id = lsGraphNodeId(node) || ("node-" + index);
-      var level = levels[id] || 0;
-      if (!buckets[level]) buckets[level] = [];
-      buckets[level].push(node);
+      if (nodeById[id]) return; // 同じ id は先勝ち（重複で段が壊れない）
+      ids.push(id);
+      nodeById[id] = node;
+      var declared = Number(node && node.display_order);
+      orderIndex[id] = isFinite(declared) ? declared : index;
+    });
+    if (!ids.length) return {};
+
+    var strongEdges = [];
+    var adjacency = {};
+    var linked = {};
+    ids.forEach(function (id) { adjacency[id] = []; });
+    (edges || []).forEach(function (edge) {
+      var source = edge.source_component_id || edge.source || edge.from;
+      var target = edge.target_component_id || edge.target || edge.to;
+      if (!nodeById[source] || !nodeById[target] || source === target) return;
+      adjacency[source].push(target);
+      adjacency[target].push(source);
+      linked[source] = true;
+      linked[target] = true;
+      if (!lsGraphWeakRelation(edge)) strongEdges.push({ from: source, to: target });
+    });
+
+    var ranked = lsGraphRankNodes(ids, strongEdges);
+    var ranks = ranked.ranks;
+    var predecessors = {};
+    var successors = {};
+    ids.forEach(function (id) { predecessors[id] = []; successors[id] = []; });
+    ranked.edges.forEach(function (edge) {
+      successors[edge.from].push(edge.to);
+      predecessors[edge.to].push(edge.from);
     });
 
     var positions = {};
-    Object.keys(buckets).forEach(function (levelKey) {
-      var level = Number(levelKey);
-      var bucket = buckets[levelKey].sort(function (a, b) {
-        return lsGraphNodeSortKey(a) - lsGraphNodeSortKey(b);
+    var components = lsGraphConnectedComponents(ids, adjacency).filter(function (members) {
+      return members.length > 1 || linked[members[0]];
+    });
+    var isolated = ids.filter(function (id) { return !linked[id]; });
+    // 成分は「最初に現れたノード」の順に左から並べる（決定論的）。
+    var firstIndexOf = function (members) {
+      return members.reduce(function (min, id) { return Math.min(min, orderIndex[id]); }, Infinity);
+    };
+    components.sort(function (a, b) { return firstIndexOf(a) - firstIndexOf(b); });
+
+    var offsetX = 0;
+    components.forEach(function (members) {
+      var layers = [];
+      var depth = 0;
+      members.forEach(function (id) { depth = Math.max(depth, ranks[id] || 0); });
+      for (var r = 0; r <= depth; r += 1) layers.push([]);
+      members.forEach(function (id) { layers[ranks[id] || 0].push(id); });
+      layers.forEach(function (layer) {
+        layer.sort(function (a, b) { return orderIndex[a] - orderIndex[b]; });
       });
-      var spacing = bucket.length > 3 ? 280 : 340;
-      var totalWidth = (bucket.length - 1) * spacing;
-      bucket.forEach(function (node, index) {
-        var id = lsGraphNodeId(node);
+      for (var pass = 0; pass < LS_GRAPH_LAYOUT.sweeps; pass += 1) {
+        lsGraphSweepLayers(layers, predecessors, true);
+        lsGraphSweepLayers(layers, successors, false);
+      }
+      var widths = layers.map(function (layer) {
+        return layer.reduce(function (sum, id, i) {
+          return sum + lsGraphNodeWidthHint(nodeById[id], id) + (i ? LS_GRAPH_LAYOUT.nodeGap : 0);
+        }, 0);
+      });
+      var componentWidth = widths.reduce(function (max, w) { return Math.max(max, w); }, 0);
+      layers.forEach(function (layer, r) {
+        var cursor = offsetX + ((componentWidth - widths[r]) / 2);
+        layer.forEach(function (id) {
+          var width = lsGraphNodeWidthHint(nodeById[id], id);
+          positions[id] = {
+            x: Math.round(cursor + (width / 2)),
+            y: r * LS_GRAPH_LAYOUT.rowGap,
+          };
+          cursor += width + LS_GRAPH_LAYOUT.nodeGap;
+        });
+      });
+      offsetX += componentWidth + LS_GRAPH_LAYOUT.componentGap;
+    });
+
+    // 辺を持たないノードは格子に畳む（横一列に伸ばして「一直線」に戻さない）。
+    if (isolated.length) {
+      isolated.sort(function (a, b) { return orderIndex[a] - orderIndex[b]; });
+      var columns = Math.max(1, Math.ceil(Math.sqrt(isolated.length)));
+      var cellWidth = isolated.reduce(function (max, id) {
+        return Math.max(max, lsGraphNodeWidthHint(nodeById[id], id));
+      }, 0) + LS_GRAPH_LAYOUT.nodeGap;
+      isolated.forEach(function (id, i) {
         positions[id] = {
-          x: (index * spacing) - (totalWidth / 2),
-          y: level * 185,
+          x: Math.round(offsetX + ((i % columns) * cellWidth) + (cellWidth / 2)),
+          y: Math.floor(i / columns) * LS_GRAPH_LAYOUT.rowGap,
         };
       });
+      offsetX += (columns * cellWidth) + LS_GRAPH_LAYOUT.componentGap;
+    }
+
+    // 全体を原点まわりへ寄せる（初期の fit が偏らない）。
+    var shift = Math.round((offsetX - LS_GRAPH_LAYOUT.componentGap) / 2);
+    ids.forEach(function (id) {
+      if (positions[id]) positions[id].x -= shift;
     });
     return positions;
-  }
-
-  function lsGraphNodeSortKey(node) {
-    var label = String((node && (node.label || node.name)) || "").toLowerCase();
-    if (/completeness|完全性/.test(label)) return 10;
-    if (/reality criterion|実在.*基準/.test(label)) return 20;
-    if (/no-disturbance|no-real-change|分離/.test(label)) return 30;
-    if (/uniform|coordinate|単一粒子|座標/.test(label)) return 40;
-    if (/remote|遠隔/.test(label)) return 50;
-    if (/criterion-of-reality|scope|limitation|uncertain|射程|不確実/.test(label)) return 60;
-    if (/wave function|diagnos|診断/.test(label)) return 70;
-    if (/disjunctive|incompleteness|結論/.test(label)) return 80;
-    return Number(node && node.display_order) || 99;
   }
 
   function lsGraphRelationPriority(edge) {

@@ -166,6 +166,7 @@ KNOWN_ADMIN_UI_ANCHOR_IDS: frozenset[str] = frozenset(
         "graph-review.paper-facing",
         "graph-review.paper-view",
         "graph-review.reject",
+        "graph-review.reset-layout",
         "graph-review.voice",
         "groups.create-form",
         "groups.delete-btn",
@@ -667,6 +668,7 @@ ADMIN_UI_ANCHORS: dict[str, str] = {
     "graph-review.paper-facing": "teacher/26-admin-graph-review.md#paper-facing",
     "graph-review.paper-view": "teacher/26-admin-graph-review.md#paper-view",
     "graph-review.reject": "teacher/26-admin-graph-review.md#node-reject",
+    "graph-review.reset-layout": "teacher/26-admin-graph-review.md#reset-layout",
     "graph-review.voice": "teacher/26-admin-graph-review.md#voice-chat",
 
     # --- groups.* — グループタブ --------------------------------------------------------

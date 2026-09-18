@@ -11837,6 +11837,11 @@ button.element-card-item:focus-visible .element-card-item-label {
 .graph-review-layer-count { opacity: 0.65; margin-left: 2px; }
 .graph-review-filter { display: inline-flex; align-items: center; gap: 4px; cursor: pointer; }
 .graph-review-count { color: var(--color-text-secondary, #475569); }
+/* ノードをドラッグで動かせること・位置がこの端末に残ることの事実文（操作要素ではない） */
+.graph-review-layout-hint {
+  color: var(--color-text-secondary, #64748b);
+  font-size: 11.5px;
+}
 .graph-review-body {
   flex: 1 1 auto;
   display: flex;
