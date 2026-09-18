@@ -10,8 +10,11 @@ feature_context:
   realizing: AI との対話を後から検証・説明できる形で残す
   layers: [rag_chat, deliberation_w, admin_copilot]
 classification:
-  primary: governance
-  facets: [governance.completion, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -39,7 +42,12 @@ resolution:
   landed_in: []
 related: [IK-0317]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.completion, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

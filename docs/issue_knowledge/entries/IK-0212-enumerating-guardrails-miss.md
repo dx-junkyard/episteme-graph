@@ -12,8 +12,11 @@ feature_context:
   realizing: 一度直した規律を、後からの変更でも壊れないよう仕組みで守る
   layers: [tests_guardrails, admin_copilot, frontend_learning_ui]
 classification:
-  primary: governance
-  facets: [governance.review, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,12 @@ resolution:
 related: [IK-0211, IK-0203]
 view_of: []
 pattern: guardrail-does-not-cover-new-path
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

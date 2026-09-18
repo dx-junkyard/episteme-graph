@@ -12,8 +12,11 @@ feature_context:
   realizing: コース本文を作り直したうえで、本文に対応した読み上げ音声を配信する
   layers: [lecture_studio, lecture_player, course_builder]
 classification:
-  primary: connection
-  facets: [connection.version, structure.aggregation]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [version]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
 related: [IK-0207, IK-0209]
 view_of: []
 pattern: stale-derivative-served
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.version, structure.aggregation]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[version]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

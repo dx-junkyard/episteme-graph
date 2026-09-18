@@ -11,8 +11,11 @@ feature_context:
   realizing: 想定外や未成立のときに黙って隠すという安全側の原則を守りながら、利用者に現状を伝える
   layers: [frontend_learning_ui, personal_network, reconstruction_r]
 classification:
-  primary: structure
-  facets: [structure.representation, connection.information]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [information]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,13 @@ resolution:
 related: [IK-0204]
 view_of: []
 pattern: information-dropped-as-unrepresentable
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, connection.information]
+    to: axes=processing=[none]; structure=[representation]; connection=[information];
+      governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

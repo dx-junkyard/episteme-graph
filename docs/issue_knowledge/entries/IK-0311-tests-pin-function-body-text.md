@@ -10,8 +10,11 @@ feature_context:
   realizing: 前処理と後処理を二重に持たずに、同期応答と逐次配信の両方を通す
   layers: [llm_streaming, tests_guardrails, rag_chat]
 classification:
-  primary: structure
-  facets: [structure.responsibility, governance.review]
+  axes:
+    processing: [none]
+    structure: [responsibility]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -43,7 +46,12 @@ resolution:
     - docs/features/llm_response_streaming_design.md §3.3
 related: [IK-0310]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.responsibility, governance.review]
+    to: axes=processing=[none]; structure=[responsibility]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

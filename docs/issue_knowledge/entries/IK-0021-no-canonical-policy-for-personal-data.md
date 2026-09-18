@@ -12,8 +12,11 @@ feature_context:
   realizing: 学習者と教員の記録を保持しながら、本人の権利と保護の要請を両立させる
   layers: [learner_experience_b, account_lifecycle, trace_registry]
 classification:
-  primary: structure
-  facets: [structure.aggregation, governance.assignment]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [assignment]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -43,7 +46,12 @@ resolution:
   landed_in: []
 related: [IK-0014, IK-0022]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.aggregation, governance.assignment]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[assignment]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

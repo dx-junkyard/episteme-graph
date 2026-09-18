@@ -12,8 +12,11 @@ feature_context:
   realizing: 設計判断の根拠を、後から誰でも辿れる形で残す
   layers: [docs]
 classification:
-  primary: governance
-  facets: [governance.review, structure.aggregation]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,12 @@ resolution:
 related: [IK-0221]
 view_of: []
 pattern: referenced-source-does-not-exist
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, structure.aggregation]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

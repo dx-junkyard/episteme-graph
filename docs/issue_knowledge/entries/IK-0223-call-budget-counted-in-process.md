@@ -10,8 +10,11 @@ feature_context:
   realizing: 外部モデルの呼び出し回数を機能ごとの上限で抑え、費用と負荷を統制する
   layers: [shared_infra]
 classification:
-  primary: governance
-  facets: [governance.budget, structure.responsibility]
+  axes:
+    processing: [none]
+    structure: [responsibility]
+    connection: [none]
+    governance: [budget]
   cause_status: hypothesis
   review: candidate
   reviewed_by: null
@@ -43,7 +46,12 @@ resolution:
 related: [IK-0222]
 view_of: []
 pattern: external-budget-exceeded
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.budget, structure.responsibility]
+    to: axes=processing=[none]; structure=[responsibility]; connection=[none]; governance=[budget]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -11,8 +11,11 @@ feature_context:
   realizing: 教員が作った教材・コースを学習者へ開示する（公開とグループ共有の2経路）
   layers: [auth_visibility, frontend_admin_ui, guidance_g]
 classification:
-  primary: connection
-  facets: [connection.contract, governance.completion]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [contract]
+    governance: [completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
     - docs/development_checklist.md §2
 related: [IK-0203, IK-0204]
 view_of: [IK-0203]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.contract, governance.completion]
+    to: axes=processing=[none]; structure=[none]; connection=[contract]; governance=[completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

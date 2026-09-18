@@ -11,8 +11,11 @@ feature_context:
   realizing: 解析が出した構造を教員が確かめて承認し、学習者に届く状態にする
   layers: [graph_review, deliberation_w]
 classification:
-  primary: structure
-  facets: [structure.representation, governance.review]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,12 @@ resolution:
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 5
 related: [IK-0008, IK-0010]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, governance.review]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

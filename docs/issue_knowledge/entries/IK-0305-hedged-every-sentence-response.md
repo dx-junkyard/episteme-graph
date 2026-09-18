@@ -10,8 +10,11 @@ feature_context:
   realizing: AI の読みであることを明示したまま、グラフや要素について対話する
   layers: [tts_voice]
 classification:
-  primary: structure
-  facets: [structure.representation, local.wording]
+  axes:
+    processing: [wording]
+    structure: [representation]
+    connection: [none]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,12 @@ resolution:
     - docs/features/graph_dialogue_review_design.md §15
 related: [IK-0302]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, local.wording]
+    to: axes=processing=[wording]; structure=[representation]; connection=[none]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

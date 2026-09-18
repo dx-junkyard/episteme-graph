@@ -172,9 +172,9 @@ CLAUDE.md 内でアンカー件数の 4 値（228/244/248/255）が併存した�
       派生物・ID や版・語彙表の新設・外部呼び出し」が含まれるなら、
       [課題ナレッジ README §3.3b](issue_knowledge/README.md) の表で該当する族の型の「見分け方」を
       先に当て、該当しないなら「該当なし」と PR に書く
-- [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、主分類を
-      [taxonomy.md §1.1](issue_knowledge/taxonomy.md) の手順（**原因の性質**）で決めたか。
-      症状の場所・修正行数・修正手段で決めていないか
+- [ ] 新しい課題に `docs/issue_knowledge/entries/IK-NNNN-*.md` を作り、4 軸の座標を
+      [taxonomy.md §1.2](issue_knowledge/taxonomy.md) の手順（**原因の性質**。無い軸は none、
+      見ていない軸は unknown）で決めたか。症状の場所・修正行数・修正手段で決めていないか
 - [ ] 原因が未確定なら `cause_status: hypothesis` + 「仮説:」で始まる basis にしたか
 - [ ] `discovery.perspective`（どの見方で見えたか）と `feature_context.realizing`（どの機能を
       実現するときに出るか）・`general_form`（機能名を剥がした型）を書いたか

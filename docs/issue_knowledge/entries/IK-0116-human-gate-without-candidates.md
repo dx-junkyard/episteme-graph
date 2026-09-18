@@ -13,8 +13,11 @@ feature_context:
   realizing: 論文をまたいで同じ部品・概念であることを教員が確定できるようにする
   layers: [concept_registry, pipeline_a, deliberation_w]
 classification:
-  primary: governance
-  facets: [governance.assignment, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [assignment]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,12 @@ resolution:
     - docs/features/concept_registry_design.md §6.2
 related: [IK-0115, IK-0117, IK-0121]
 view_of: [IK-0121]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.assignment, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[assignment]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

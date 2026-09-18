@@ -12,8 +12,11 @@ feature_context:
   realizing: 分野カートリッジの語彙で抽出結果に概念名を補う
   layers: [pipeline_a, cartridges]
 classification:
-  primary: local
-  facets: [local.logic, structure.aggregation]
+  axes:
+    processing: [logic]
+    structure: [aggregation]
+    connection: [none]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,12 @@ resolution:
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
 related: [IK-0104, IK-0116]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=local facets=[local.logic, structure.aggregation]
+    to: axes=processing=[logic]; structure=[aggregation]; connection=[none]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

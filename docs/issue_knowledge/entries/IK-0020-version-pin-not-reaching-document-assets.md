@@ -13,8 +13,11 @@ feature_context:
   realizing: 共有した成果を発行版として固定し、受け取った側が所有者の更新に巻き込まれないようにする
   layers: [versioning_v, discuss, teaching_figures]
 classification:
-  primary: connection
-  facets: [connection.version, connection.condition]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [version, condition]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -43,7 +46,12 @@ resolution:
   landed_in: []
 related: [IK-0002, IK-0011]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.version, connection.condition]
+    to: axes=processing=[none]; structure=[none]; connection=[version, condition]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

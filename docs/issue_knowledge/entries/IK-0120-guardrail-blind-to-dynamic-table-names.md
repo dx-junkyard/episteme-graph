@@ -12,8 +12,11 @@ feature_context:
   realizing: 読み手は live ビューだけを読む・AI は骨格に書かないといった規律を構造的に守る
   layers: [tests_guardrails, knowledge_objects, field_atlas_s]
 classification:
-  primary: governance
-  facets: [governance.review, structure.aggregation]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - docs/features/knowledge_objects_design.md §12.2
 related: [IK-0105]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, structure.aggregation]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

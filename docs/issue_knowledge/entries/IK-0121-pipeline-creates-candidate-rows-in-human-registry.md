@@ -12,8 +12,11 @@ feature_context:
   realizing: 共通部品レジストリに、論文横断の同一性候補を教員のレビュー用として積む
   layers: [concept_registry, pipeline_a]
 classification:
-  primary: governance
-  facets: [governance.assignment, governance.review]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [assignment, review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,13 @@ resolution:
   landed_in: []
 related: [IK-0116]
 view_of: [IK-0116]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.assignment, governance.review]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[assignment,
+      review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -12,8 +12,11 @@ feature_context:
   realizing: 新しい研究室が最初の教材を取り込み、その分野として解析が走るようにする
   layers: [pipeline_a, cartridges, frontend_admin_ui]
 classification:
-  primary: governance
-  facets: [governance.assignment, connection.condition]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [condition]
+    governance: [assignment]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 7
 related: [IK-0011]
 view_of: [IK-0011]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.assignment, connection.condition]
+    to: axes=processing=[none]; structure=[none]; connection=[condition]; governance=[assignment]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

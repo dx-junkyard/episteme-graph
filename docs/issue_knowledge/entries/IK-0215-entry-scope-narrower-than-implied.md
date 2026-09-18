@@ -11,8 +11,11 @@ feature_context:
   realizing: コースに含まれる全教材の要レビュー項目を、教員がひとつの入口から片付ける
   layers: [reconstruction_r, lecture_studio, frontend_admin_ui]
 classification:
-  primary: connection
-  facets: [connection.target, structure.aggregation]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [target]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,12 @@ resolution:
 related: [IK-0214]
 view_of: []
 pattern: entry-scope-mismatch
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.target, structure.aggregation]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[target]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

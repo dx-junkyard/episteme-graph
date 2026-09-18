@@ -12,8 +12,11 @@ feature_context:
   realizing: 実装の全体像（ステージ数・ルーター数・目印の件数・採番の範囲）を文書から把握できるようにする
   layers: [docs, tests_guardrails]
 classification:
-  primary: structure
-  facets: [structure.aggregation, governance.review]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
 related: [IK-0221, IK-0219]
 view_of: []
 pattern: duplicate-canonical-sources
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.aggregation, governance.review]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -11,8 +11,11 @@ feature_context:
   realizing: 他インスタンスで作られた知識の束を取り込み、こちらの教員の確定を保つ
   layers: [knowledge_transfer, knowledge_objects]
 classification:
-  primary: governance
-  facets: [governance.review, governance.resume, connection.information]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [information]
+    governance: [review, resume]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,13 @@ resolution:
     - docs/features/knowledge_transfer_design.md §14.1
 related: [IK-0108, IK-0111]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, governance.resume, connection.information]
+    to: axes=processing=[none]; structure=[none]; connection=[information]; governance=[review,
+      resume]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

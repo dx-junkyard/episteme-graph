@@ -11,8 +11,11 @@ feature_context:
   realizing: 対話の中で訂正が起きたことを検出し、後で振り返れる記録にする
   layers: [rag_chat]
 classification:
-  primary: connection
-  facets: [connection.contract, local.logic]
+  axes:
+    processing: [logic]
+    structure: [none]
+    connection: [contract]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -41,7 +44,12 @@ resolution:
   landed_in: []
 related: [IK-0005, IK-0019]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.contract, local.logic]
+    to: axes=processing=[logic]; structure=[none]; connection=[contract]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

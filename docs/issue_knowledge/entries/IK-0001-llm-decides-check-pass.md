@@ -12,8 +12,11 @@ feature_context:
   realizing: 学習者が自分の言葉で理解を書き、次の単元へ進めるようにする
   layers: [rag_chat, reconstruction_r]
 classification:
-  primary: governance
-  facets: [governance.assignment, governance.completion]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [assignment, completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,13 @@ resolution:
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 1
 related: [IK-0003, IK-0004, IK-0005]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.assignment, governance.completion]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[assignment,
+      completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

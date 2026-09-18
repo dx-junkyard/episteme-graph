@@ -12,8 +12,11 @@ feature_context:
   realizing: 学習者の質問への回答が何に基づいているかを、出所と教員の承認状況の二軸で正直に示す
   layers: [rag_chat, frontend_learning_ui]
 classification:
-  primary: connection
-  facets: [connection.condition, connection.information]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [condition, information]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,13 @@ resolution:
 related: [IK-0209]
 view_of: []
 pattern: condition-not-propagated
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.condition, connection.information]
+    to: axes=processing=[none]; structure=[none]; connection=[condition, information];
+      governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -12,8 +12,11 @@ feature_context:
   realizing: 増え続ける機能を、既存の画面に足しながら教員が使える形で提供する
   layers: [frontend_admin_ui, guidance_g, admin_copilot]
 classification:
-  primary: structure
-  facets: [structure.decomposition, governance.review]
+  axes:
+    processing: [none]
+    structure: [decomposition]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
 related: [IK-0218, IK-0203]
 view_of: []
 pattern: entry-point-proliferation
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.decomposition, governance.review]
+    to: axes=processing=[none]; structure=[decomposition]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -10,8 +10,11 @@ feature_context:
   realizing: 理論操作グラフの依存の向きを見取り図として読ませる
   layers: [graph_review, frontend_admin_ui, lecture_studio]
 classification:
-  primary: structure
-  facets: [structure.representation, local.logic]
+  axes:
+    processing: [logic]
+    structure: [representation]
+    connection: [none]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,12 @@ resolution:
     - docs/features/graph_dialogue_review_design.md §17
 related: [IK-0303]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, local.logic]
+    to: axes=processing=[logic]; structure=[representation]; connection=[none]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -12,8 +12,11 @@ feature_context:
   realizing: 教員に候補・文脈・記帳の入口を提供しつつ、閲覧・編集できる対象だけに限る
   layers: [auth_visibility, learning_units, concept_registry]
 classification:
-  primary: connection
-  facets: [connection.condition, governance.review]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [condition]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - backend/api/routes/doubt.py
 related: [IK-0116]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.condition, governance.review]
+    to: axes=processing=[none]; structure=[none]; connection=[condition]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

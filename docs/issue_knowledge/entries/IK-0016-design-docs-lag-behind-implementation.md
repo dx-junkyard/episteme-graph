@@ -11,8 +11,11 @@ feature_context:
   realizing: 設計書と索引を読んで、何が実装済みで何がまだかを判断できるようにする
   layers: [docs]
 classification:
-  primary: governance
-  facets: [governance.completion, structure.aggregation]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - docs/development_checklist.md §5
 related: [IK-0017]
 view_of: [IK-0221]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.completion, structure.aggregation]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

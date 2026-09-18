@@ -11,8 +11,11 @@ feature_context:
   realizing: 同じ判定・同じ定義を、複数の画面と経路で一致させたまま提供する
   layers: [shared_infra, migrations_db, status_notification]
 classification:
-  primary: structure
-  facets: [structure.aggregation, connection.version]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [version]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,12 @@ resolution:
     - docs/architecture/consolidation_survey_2026-07.md
 related: [IK-0315, IK-0321]
 view_of: [IK-0222]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.aggregation, connection.version]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[version]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

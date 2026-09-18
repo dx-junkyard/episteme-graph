@@ -11,8 +11,11 @@ feature_context:
   realizing: 層を積み上げて機能を増やしつつ、各層の成果を利用者へ届ける
   layers: [frontend_admin_ui, usage_metering_u, deliberation_w]
 classification:
-  primary: connection
-  facets: [connection.information, governance.completion]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [information]
+    governance: [completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
 related: [IK-0205, IK-0203]
 view_of: []
 pattern: available-but-unwired
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.information, governance.completion]
+    to: axes=processing=[none]; structure=[none]; connection=[information]; governance=[completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

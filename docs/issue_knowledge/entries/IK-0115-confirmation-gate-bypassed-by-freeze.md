@@ -13,8 +13,11 @@ feature_context:
   realizing: 教員の確認を経た知識だけを教材として学習者に届ける
   layers: [course_builder, decision_context, guidance_g]
 classification:
-  primary: governance
-  facets: [governance.review, governance.completion, governance.assignment]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [review, completion]
   cause_status: hypothesis
   review: candidate
   reviewed_by: null
@@ -47,7 +50,14 @@ resolution:
     - docs/features/learning_units_design.md §12.1
 related: [IK-0113, IK-0116, IK-0111]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, governance.completion, governance.assignment]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[review,
+      completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持。軸あたり最大 2 のため governance.assignment
+      は座標から外し、ここに残す
 ---
 
 ## 課題

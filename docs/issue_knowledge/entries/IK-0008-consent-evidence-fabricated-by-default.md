@@ -12,8 +12,11 @@ feature_context:
   realizing: 一括の確定を、あとから再構成できる手続として記帳する
   layers: [decision_context, release_review, doubt_d]
 classification:
-  primary: governance
-  facets: [governance.review, governance.assignment]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [review, assignment]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,13 @@ resolution:
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 5
 related: [IK-0007, IK-0014]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, governance.assignment]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[review,
+      assignment]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -4,7 +4,8 @@
 
 > **状態:** 生きたリファレンス（2026-09-18 新設・同日改訂）。`docs/` で管理している課題（調査記録・レビュー
 > 文書・是正リスト・設計書の残課題）から、**原因の性質による分類**・**発見の観点**・**解決の観点**
-> を取り出して蓄え、あとで辞書として引ける形にする仕組み。機械検証は
+> を取り出して蓄え、あとで辞書として引ける形にする仕組み。分類は排他の箱ではなく
+> **4 軸（処理・構造・接続・統制）の座標**で、群（局所 / 構造・接続・統制）は座標から導出する。機械検証は
 > `backend/tests/test_issue_knowledge_guardrails.py`、索引の生成は
 > `backend/scripts/issue_knowledge_index.py`。
 
@@ -17,7 +18,7 @@
 `CLAUDE.md` の各層節の追補、に**場所ごとの形式**で残っていた。どれも「何が壊れて、どう直したか」
 は読めるが、次の 3 つが引けない。
 
-1. **原因の性質**で同型の課題を集めること（症状の場所や層で分かれてしまう）。
+1. **原因の性質**（4 軸の座標）で同型の課題を集めること（症状の場所や層で分かれてしまう）。
 2. **どの見方をしたときに見つかったか**（発見観点）と**どの見立てで解けたか**（解決観点）。
 3. 機能名を剥がした**課題の型**（辞書）と、その型が「どの機能を実現するときに出るか」。
 
@@ -35,12 +36,12 @@
 
 | ファイル | 役割 | 編集 |
 |---|---|---|
-| [taxonomy.md](taxonomy.md) | 分類体系の正本。2 群 4 主分類・副分類（facets）・原因の確度・発見観点・解決観点・一般化レベル・課題の状態 | 語彙を足す・変えるときだけ。モジュール側 `backend/scripts/issue_knowledge_index.py` の定数を同じ変更で追随（テストが一致を固定） |
+| [taxonomy.md](taxonomy.md) | 分類体系の正本。4 軸の座標（各軸の値 + none / unknown）・群の導出・原因の確度・発見観点・解決観点・一般化レベル・課題の状態 | 語彙を足す・変えるときだけ。モジュール側 `backend/scripts/issue_knowledge_index.py` の定数を同じ変更で追随（テストが一致を固定） |
 | [TEMPLATE.md](TEMPLATE.md) | エントリの記入様式（front-matter + 本文 4 見出し） | 様式を変えるときだけ |
 | [layers.md](layers.md) | `feature_context.layers` に書ける層の語彙（レイヤー索引表 §1 の行 + 索引表外の横断領域） | 層を足すときだけ |
 | `entries/IK-NNNN-*.md` | 課題エントリ（1 課題 = 1 ファイル） | 課題の追加・解決・分類変更のたび |
 | [dictionary.md](dictionary.md) | 課題の**族**（`###`）と**型**（`####`）。機能名を含まない一般形と、典型的な発見・解決観点 | 既存の型に畳めない課題が出たときだけ型を足す。エントリの無い型は置かない。型は確定エントリ 2 件以上で成立、それ未満は暫定 |
-| [index.md](index.md) | 索引（機械生成）。候補/確定・群・主分類・族と型（成立/暫定）・傾向との食い違い・発見観点・解決観点・層・同一原因の束・出典文書の被覆・仮説・未解決 | **手で編集しない**。生成コマンドで再生成 |
+| [index.md](index.md) | 索引（機械生成）。候補/確定・群（導出）・軸別と軸の対・unknown の軸・族と型（成立/暫定・実際の座標）・発見観点・解決観点・層・同一原因の束・出典文書の被覆・仮説・未解決 | **手で編集しない**。生成コマンドで再生成 |
 
 ## 3. 運用手順
 
@@ -50,8 +51,10 @@
    ことを確認する。無ければ先にそちらを書く（本仕組みは索引層で、正本の代わりにはならない）。
 2. `entries/` に次の番号で `IK-NNNN-*.md` を作り、[TEMPLATE.md](TEMPLATE.md) を埋める。
    - **原因を一文で書く**。症状ではなく原因を主語にする。
-   - `classification.primary` を [taxonomy.md §1.1](taxonomy.md) の手順で決める。原因が未確定なら
-     `cause_status: hypothesis` とし、`basis` を「仮説:」で始めて**何を確認すれば確定するか**を書く。
+   - `classification.axes` を [taxonomy.md §1.2](taxonomy.md) の手順で決める（4 軸それぞれに
+     「この軸の何かを変えなければ再発するか」を問い、無ければ `none`、見ていなければ `unknown`）。
+     原因が未確定なら `cause_status: hypothesis` とし、`basis` を「仮説:」で始めて**何を確認すれば
+     確定するか**を書く。
    - `discovery.perspective` に**どの見方で見えたか**を語彙で書く（誰が言ったかではなく、何と何を
      突き合わせたか）。
    - `feature_context.realizing` に**どの機能を実現しているときに出るか**を動詞の一文で書き、
@@ -71,10 +74,11 @@ cd backend && .venv/bin/python -m pytest tests/test_issue_knowledge_guardrails.p
 
 ### 3.1b 分類を確定するとき（人のレビュー）
 
-1. エントリの主分類・facets・型・根拠文を読み、taxonomy §1.1 の手順で妥当なら
+1. エントリの 4 軸の値・型・根拠文を読み、taxonomy §1.2 の手順で妥当なら
    `classification.review: confirmed` + `reviewed_by` + `reviewed_at` を書く。
 2. 直すなら書き換えではなく `history` に旧値と理由を残してから変える。
-3. 型の成立は確定エントリだけで数える。索引 §3 の「暫定」と「傾向との食い違い」がレビューの入口。
+3. 型の成立は確定エントリだけで数える。索引 §2 の「unknown の軸」と §3 の「暫定」「典型と実際の座標のずれ」が
+   レビューの入口。
 
 ### 3.2 解決したとき
 
@@ -89,12 +93,13 @@ cd backend && .venv/bin/python -m pytest tests/test_issue_knowledge_guardrails.p
 
 ### 3.3 分類で迷ったとき
 
-- 複数の主分類に当たる → **直さなければ再発するもの**を主分類、残りを別接頭辞の facet に
-  （[taxonomy.md §1.1](taxonomy.md) 手順 3）。
-- 「文書の不具合」→ 安易に `governance` にしない。正本が複数ある（`structure.aggregation`）のか、
-  更新手続が無い（`governance.review`）のか、原因で分ける。
-- 「権限漏れ」→ 判定が無い（`local.logic`）のか、判定結果が後段に伝わらない（`connection.condition`）
-  のか、判定の置き場所が二重（`structure.responsibility`）なのか、原因で分ける。
+- 複数の軸に当たる → **両方に値を置く**（排他ではない）。ただし各軸 2 値まで。「主に直した軸」は
+  座標ではなく `resolution.perspective` に出る。
+- 「文書の不具合」→ 安易に統制軸だけにしない。正本が複数ある（`structure: [aggregation]`）のか、
+  更新手続が無い（`governance: [review]`）のか、両方か、原因で分ける。
+- 「権限漏れ」→ 判定が無い（`processing: [logic]`）のか、判定結果が後段に伝わらない
+  （`connection: [condition]`）のか、判定の置き場所が二重（`structure: [responsibility]`）なのか。
+- 軸を見ていないなら `unknown` にして `hypothesis` に落とす。`none` は「見て無い」の記録。
 - 場所（フロント／DB／層名）・行数・修正手段・発見経路で決めない（[taxonomy.md §1.2](taxonomy.md)。
   `basis` にそれらを書くと機械検査が弾く）。
 
@@ -129,8 +134,8 @@ cd backend && .venv/bin/python -m pytest tests/test_issue_knowledge_guardrails.p
 | いま直そうとしている課題と同型の課題が過去にあったか | [index.md §3 型別](index.md) → 辞書の一般形で照合 → エントリの「解決の観点」 |
 | ある見方（例: 2 機能の境界を歩く）で過去に何が見つかったか | [index.md §4 発見観点別](index.md) |
 | ある解き方（例: 削除を状態遷移にする）が過去にどこで効いたか | [index.md §5 解決観点別](index.md) |
-| 構造・接続・統制のどこに課題が偏っているか | [index.md §0 概況・§2 群・主分類別](index.md) |
-| 分類がまだ候補のもの・型が暫定のもの・傾向と食い違うもの（レビューの入口） | [index.md §0 / §3](index.md) |
+| 4 軸のどこに課題が偏っているか・どの軸の組が多いか | [index.md §0 概況・§2 軸別と軸の対](index.md) |
+| 分類がまだ候補のもの・unknown の軸・型が暫定のもの・典型と実際の座標のずれ（レビューの入口） | [index.md §0 / §2 / §3](index.md) |
 | 同じ原因の別視点（恒久解と暫定解）を束で見る | [index.md §9](index.md) |
 | どの調査・レビュー文書から拾えていないか | [index.md §10](index.md) |
 | 原因が仮説のままの課題 | [index.md §7](index.md) |
@@ -139,6 +144,7 @@ cd backend && .venv/bin/python -m pytest tests/test_issue_knowledge_guardrails.p
 ## 5. 規律（不変）
 
 - **原因の性質で分類する**。症状の場所・修正行数・修正手段・発見経路で分類しない。
+- **座標は記述、決定は解決観点**。排他の主分類を作らず、none と unknown を混ぜない。
 - **未確定は仮説と明示する**。`cause_status: hypothesis` は隠さず、索引でも仮説として区別される。
 - **情報を落とさない**。エントリは削除せず `rejected` / `history` で残す。分類の変更は追記。
 - **正本は起票元**。エントリは調査記録・レビュー文書・設計書の代わりにならない。`sources` は

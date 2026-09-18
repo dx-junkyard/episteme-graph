@@ -13,8 +13,11 @@ feature_context:
   realizing: 論文から抽出した主張・式・根拠・導出・記号を、検索・承認・参照できる知識として保つ
   layers: [knowledge_objects, pipeline_a]
 classification:
-  primary: structure
-  facets: [structure.representation, structure.decomposition, structure.responsibility]
+  axes:
+    processing: [none]
+    structure: [representation, decomposition]
+    connection: [none]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -50,7 +53,15 @@ resolution:
     - docs/features/knowledge_objects_design.md §12.1
 related: [IK-0106, IK-0107, IK-0122]
 view_of: [IK-0019, IK-0304]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, structure.decomposition,
+      structure.responsibility]
+    to: axes=processing=[none]; structure=[representation, decomposition]; connection=[none];
+      governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持。軸あたり最大 2 のため structure.responsibility
+      は座標から外し、ここに残す
 ---
 
 ## 課題

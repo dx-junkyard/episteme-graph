@@ -12,8 +12,11 @@ feature_context:
   realizing: 論文から取り出した主張を、承認や参照の対象になる一級の記録として扱う
   layers: [pipeline_a, knowledge_objects, graph_review]
 classification:
-  primary: structure
-  facets: [structure.representation, connection.information]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [information]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,13 @@ resolution:
     - docs/features/knowledge_objects_design.md §12
 related: [IK-0002, IK-0020]
 view_of: [IK-0105, IK-0304]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, connection.information]
+    to: axes=processing=[none]; structure=[representation]; connection=[information];
+      governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

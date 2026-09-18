@@ -13,8 +13,11 @@ feature_context:
   realizing: 抽出した部品に前提概念の一覧を付け、コースの前提知識として学習者に示す
   layers: [pipeline_a, course_builder]
 classification:
-  primary: connection
-  facets: [connection.contract, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [contract]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,12 @@ resolution:
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
 related: [IK-0103, IK-0105]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.contract, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

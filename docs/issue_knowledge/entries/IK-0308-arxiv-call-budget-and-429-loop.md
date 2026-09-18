@@ -11,8 +11,11 @@ feature_context:
   realizing: 外部の論文検索 API を使って候補を探しつつ、相手への問い合わせを最小に保つ
   layers: [paper_radar, paper_discovery]
 classification:
-  primary: governance
-  facets: [governance.budget, governance.resume]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [budget, resume]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,13 @@ resolution:
     - docs/features/paper_radar_design.md §14.4
 related: [IK-0307, IK-0318]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.budget, governance.resume]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[budget,
+      resume]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

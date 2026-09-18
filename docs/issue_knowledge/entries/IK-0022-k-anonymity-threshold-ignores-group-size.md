@@ -11,8 +11,11 @@ feature_context:
   realizing: 学習者の痕跡を教員に集約で見せつつ、個人が特定されないようにする
   layers: [learner_experience_b, shared_infra, indicator_catalog]
 classification:
-  primary: structure
-  facets: [structure.representation, governance.review]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -41,7 +44,12 @@ resolution:
   landed_in: []
 related: [IK-0021, IK-0004]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, governance.review]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

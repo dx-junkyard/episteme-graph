@@ -13,8 +13,11 @@ feature_context:
   realizing: 論文の解析をやり直して成果を差し替えつつ、その成果に人が付けた判断を保つ
   layers: [pipeline_a, knowledge_objects, endorsement_c]
 classification:
-  primary: structure
-  facets: [structure.representation, governance.resume, connection.version]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [version]
+    governance: [resume]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -48,7 +51,12 @@ resolution:
     - docs/features/knowledge_objects_design.md §12
 related: [IK-0020, IK-0021]
 view_of: [IK-0108, IK-0109]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, governance.resume, connection.version]
+    to: axes=processing=[none]; structure=[representation]; connection=[version]; governance=[resume]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

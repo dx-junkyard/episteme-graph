@@ -12,8 +12,11 @@ feature_context:
   realizing: 分野の共通部品ライブラリを、解析パイプラインの参照先として使えるようにする
   layers: [image_library_l, pipeline_a]
 classification:
-  primary: connection
-  facets: [connection.contract, connection.version]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [contract, version]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
 related: [IK-0116]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.contract, connection.version]
+    to: axes=processing=[none]; structure=[none]; connection=[contract, version]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -12,8 +12,11 @@ feature_context:
   realizing: 抽出した概念の表記を揺れの無い形に整え、教員が決めた別名も解析に効かせる
   layers: [pipeline_a, cartridges]
 classification:
-  primary: connection
-  facets: [connection.condition, connection.meaning]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [condition, meaning]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 7
 related: [IK-0010, IK-0021]
 view_of: [IK-0010]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.condition, connection.meaning]
+    to: axes=processing=[none]; structure=[none]; connection=[condition, meaning]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

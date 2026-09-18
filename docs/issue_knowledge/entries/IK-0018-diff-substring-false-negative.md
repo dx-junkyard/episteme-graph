@@ -11,8 +11,11 @@ feature_context:
   realizing: 学習者が自分の言葉で言い直したものと出典を並べ、差を事実として返す
   layers: [reconstruction_r]
 classification:
-  primary: local
-  facets: [local.logic, connection.meaning]
+  axes:
+    processing: [logic]
+    structure: [none]
+    connection: [meaning]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -41,7 +44,12 @@ resolution:
   landed_in: []
 related: [IK-0006, IK-0001]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=local facets=[local.logic, connection.meaning]
+    to: axes=processing=[logic]; structure=[none]; connection=[meaning]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

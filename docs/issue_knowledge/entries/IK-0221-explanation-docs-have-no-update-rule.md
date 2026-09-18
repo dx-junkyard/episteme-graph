@@ -14,8 +14,11 @@ feature_context:
   realizing: 実装の現行の姿を、設計の歴史記録とは別に読める形で保つ
   layers: [docs]
 classification:
-  primary: governance
-  facets: [governance.review, governance.completion]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [review, completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -51,7 +54,13 @@ resolution:
 related: [IK-0220, IK-0219, IK-0203]
 view_of: [IK-0016]
 pattern: doc-drifts-from-code
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, governance.completion]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[review,
+      completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

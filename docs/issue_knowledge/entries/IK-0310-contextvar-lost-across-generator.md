@@ -11,8 +11,11 @@ feature_context:
   realizing: 生成中の応答を逐次配信しつつ、使用量の帰属とコース単位のモデル指定を保つ
   layers: [llm_streaming, usage_metering_u, model_selection_m]
 classification:
-  primary: connection
-  facets: [connection.condition, structure.responsibility]
+  axes:
+    processing: [none]
+    structure: [responsibility]
+    connection: [condition]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
     - docs/features/llm_response_streaming_design.md §3.2
 related: [IK-0311]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.condition, structure.responsibility]
+    to: axes=processing=[none]; structure=[responsibility]; connection=[condition]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

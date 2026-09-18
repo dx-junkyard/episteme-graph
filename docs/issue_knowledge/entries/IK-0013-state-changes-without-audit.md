@@ -12,8 +12,11 @@ feature_context:
   realizing: 誰がいつ何を変えたかを、あとから一つの台帳で辿れるようにする
   layers: [versioning_v, lecture_studio, decision_context]
 classification:
-  primary: governance
-  facets: [governance.review, governance.ordering]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [review, ordering]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,13 @@ resolution:
     - docs/architecture/vision_ux_gap_six_lenses_2026-09-10.md §4 第1波 6
 related: [IK-0008, IK-0012]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, governance.ordering]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[review,
+      ordering]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

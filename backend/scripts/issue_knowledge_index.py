@@ -38,43 +38,35 @@ INDEX_DOC = IK_DIR / "index.md"
 # 語彙（正本は taxonomy.md。ここはミラー）
 # ---------------------------------------------------------------------------
 
-PRIMARIES: tuple[str, ...] = ("local", "structure", "connection", "governance")
-GROUP_OF: dict[str, str] = {
-    "local": "局所",
-    "structure": "構造・接続・統制",
-    "connection": "構造・接続・統制",
-    "governance": "構造・接続・統制",
-}
-PRIMARY_LABELS: dict[str, str] = {
-    "local": "局所",
+# 4 軸。各軸の値は AXIS_VALUES[axis] のいずれか（1〜2 個）か、単独の none / unknown。
+AXES: tuple[str, ...] = ("processing", "structure", "connection", "governance")
+AXIS_LABELS: dict[str, str] = {
+    "processing": "処理",
     "structure": "構造",
     "connection": "接続",
     "governance": "統制",
 }
+AXIS_VALUES: dict[str, tuple[str, ...]] = {
+    "processing": ("input_handling", "logic", "resource", "wording", "regression"),
+    "structure": ("representation", "responsibility", "decomposition", "aggregation"),
+    "connection": ("information", "meaning", "condition", "target", "version", "contract"),
+    "governance": ("assignment", "ordering", "budget", "review", "resume", "completion"),
+}
+# 統制軸の値の内訳（表示上の区分。軸は分けない）
+GOVERNANCE_SUBGROUPS: dict[str, tuple[str, ...]] = {
+    "制御系（実行時）": ("ordering", "budget", "resume"),
+    "手続系（人）": ("assignment", "review", "completion"),
+}
+AXIS_EMPTY: tuple[str, ...] = ("none", "unknown")  # none = 見て無いと判断 / unknown = まだ見ていない
+MAX_AXIS_VALUES = 2
+# 座標から導く 2 群: 構造・接続・統制の 3 軸がすべて none なら局所
+DESIGN_AXES: tuple[str, ...] = ("structure", "connection", "governance")
+GROUP_LOCAL = "局所"
+GROUP_DESIGN = "構造・接続・統制"
+GROUP_UNDETERMINED = "（未判定）"
 
-FACETS: tuple[str, ...] = (
-    "local.input_handling",
-    "local.logic",
-    "local.resource",
-    "local.wording",
-    "local.regression",
-    "structure.representation",
-    "structure.responsibility",
-    "structure.decomposition",
-    "structure.aggregation",
-    "connection.information",
-    "connection.meaning",
-    "connection.condition",
-    "connection.target",
-    "connection.version",
-    "connection.contract",
-    "governance.assignment",
-    "governance.ordering",
-    "governance.budget",
-    "governance.review",
-    "governance.resume",
-    "governance.completion",
-)
+# taxonomy §2 の定義表のトークン（`axis.value`）。ミラー検査用。
+FACETS: tuple[str, ...] = tuple(f"{a}.{v}" for a in AXES for v in AXIS_VALUES[a])
 
 CAUSE_STATUSES: tuple[str, ...] = ("confirmed", "hypothesis")
 REVIEW_STATES: tuple[str, ...] = ("candidate", "confirmed")
@@ -138,7 +130,7 @@ REQUIRED_TOP_KEYS = (
     "view_of",
     "history",
 )
-REQUIRED_CLASSIFICATION_KEYS = ("primary", "facets", "cause_status", "review", "reviewed_by", "reviewed_at", "basis")
+REQUIRED_CLASSIFICATION_KEYS = ("axes", "cause_status", "review", "reviewed_by", "reviewed_at", "basis")
 REQUIRED_BODY_HEADINGS = ("## 課題", "## 発見の観点", "## 解決の観点", "## 一般化")
 
 ENTRY_FILE_RE = re.compile(r"^(IK-\d{4})-[a-z0-9]+(?:-[a-z0-9]+)*\.md$")
@@ -149,7 +141,7 @@ PATTERN_HEADING_RE = re.compile(r"(?m)^#### ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$")
 FAMILY_HEADING_RE = re.compile(r"(?m)^### ([a-z0-9]+(?:-[a-z0-9]+)*)\s*$")
 LAYER_ROW_RE = re.compile(r"(?m)^\| `([a-z0-9_]+)` \|")
 COMMIT_HASH_RE = re.compile(r"^[0-9a-f]{7,40}$")
-TENDENCY_RE = re.compile(r"\| 主分類の傾向 \| `(local|structure|connection|governance)`")
+TYPICAL_COORD_RE = re.compile(r"\| 典型的な座標 \| (.+?) \|")
 
 # 分類の根拠に使ってはならない書き方（taxonomy §1.2）。症状の場所・修正量・修正手段。
 FORBIDDEN_BASIS_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -243,11 +235,11 @@ def dictionary_families(dictionary_text: str) -> dict[str, list[str]]:
     return families
 
 
-def dictionary_tendencies(dictionary_text: str) -> dict[str, str]:
-    """{型 slug: 辞書が書く主分類の傾向}。書いていない型は含めない。"""
+def dictionary_typical_coordinates(dictionary_text: str) -> dict[str, str]:
+    """{型 slug: 辞書が書く典型的な座標}。書いていない型は含めない。"""
     out: dict[str, str] = {}
     for m in re.finditer(r"(?ms)^#### ([a-z0-9-]+)\s*$(.*?)(?=^#### |^### |^## |\Z)", dictionary_text):
-        tm = TENDENCY_RE.search(m.group(2))
+        tm = TYPICAL_COORD_RE.search(m.group(2))
         if tm:
             out[m.group(1)] = tm.group(1)
     return out
@@ -278,6 +270,44 @@ def _as_list(value) -> list:
     if isinstance(value, list):
         return value
     return [value]
+
+
+def axis_values(cl: dict, axis: str) -> list[str]:
+    axes = cl.get("axes") if isinstance(cl, dict) else None
+    if not isinstance(axes, dict):
+        return []
+    return [str(v) for v in _as_list(axes.get(axis))]
+
+
+def axis_is_empty(values: list[str]) -> bool:
+    return not values or values == ["none"] or values == ["unknown"]
+
+
+def group_of(cl: dict) -> str:
+    """座標から 2 群を導く。設計 3 軸に unknown が残れば未判定。"""
+    design = [axis_values(cl, a) for a in DESIGN_AXES]
+    if any(v == ["unknown"] or not v for v in design):
+        if all(v == ["none"] or v == ["unknown"] or not v for v in design):
+            return GROUP_UNDETERMINED
+    if all(v == ["none"] for v in design):
+        return GROUP_LOCAL
+    if any(not axis_is_empty(v) for v in design):
+        return GROUP_DESIGN
+    return GROUP_UNDETERMINED
+
+
+def coordinate_text(cl: dict) -> str:
+    """索引・辞書向けの短い座標表記。none は省き、unknown は「?」。"""
+    parts = []
+    for a in AXES:
+        vals = axis_values(cl, a)
+        if vals == ["none"] or not vals:
+            continue
+        if vals == ["unknown"]:
+            parts.append(f"{AXIS_LABELS[a]}=?")
+        else:
+            parts.append(f"{AXIS_LABELS[a]}=" + "+".join(vals))
+    return " / ".join(parts) if parts else "（全軸 none）"
 
 
 def _resolve_source(root: Path, source: str) -> Path:
@@ -369,19 +399,33 @@ def validate_entry(
     if not isinstance(cl, dict):
         errs.append("classification が mapping ではない")
     else:
-        primary = cl.get("primary")
-        if primary not in PRIMARIES:
-            errs.append(f"classification.primary `{primary}` は語彙外 {PRIMARIES}")
-        facets = _as_list(cl.get("facets"))
-        if not facets:
-            errs.append("classification.facets が空（<primary>.<sub> を最低 1 つ）")
-        for f in facets:
-            if f not in FACETS:
-                errs.append(f"facet `{f}` は語彙外（taxonomy §2）")
-        if primary in PRIMARIES and facets and not any(
-            isinstance(f, str) and f.startswith(f"{primary}.") for f in facets
-        ):
-            errs.append(f"facets に主分類 `{primary}` の接頭辞を持つものが無い")
+        axes = cl.get("axes")
+        if not isinstance(axes, dict):
+            errs.append("classification.axes が mapping ではない（processing / structure / connection / governance）")
+        else:
+            for axis in AXES:
+                if axis not in axes:
+                    errs.append(f"classification.axes.{axis} が無い（要素が無いなら [none]、未確認なら [unknown]）")
+                    continue
+                vals = [str(v) for v in _as_list(axes.get(axis))]
+                if not vals:
+                    errs.append(f"classification.axes.{axis} が空（none か unknown を明示する）")
+                    continue
+                if any(v in AXIS_EMPTY for v in vals) and len(vals) > 1:
+                    errs.append(f"classification.axes.{axis} の none / unknown は単独で置く: {vals}")
+                for v in vals:
+                    if v not in AXIS_VALUES[axis] and v not in AXIS_EMPTY:
+                        errs.append(f"classification.axes.{axis} の値 `{v}` は語彙外（taxonomy §2）")
+                if len(vals) > MAX_AXIS_VALUES:
+                    errs.append(f"classification.axes.{axis} の値は最大 {MAX_AXIS_VALUES}: {vals}")
+                if len(set(vals)) != len(vals):
+                    errs.append(f"classification.axes.{axis} に重複: {vals}")
+            for extra in set(axes) - set(AXES):
+                errs.append(f"classification.axes に未知の軸 `{extra}`")
+            if all(axis_is_empty(axis_values(cl, a)) for a in AXES):
+                errs.append("全軸が none / unknown（原因の性質がどこにも無い課題は記帳できない）")
+            if cl.get("cause_status") == "confirmed" and any(axis_values(cl, a) == ["unknown"] for a in AXES):
+                errs.append("cause_status=confirmed なのに unknown の軸がある（見て無いなら none）")
         for key in REQUIRED_CLASSIFICATION_KEYS:
             if key not in cl:
                 errs.append(f"classification.{key} が無い")
@@ -567,11 +611,13 @@ def _row(e: Entry) -> str:
     cl = m.get("classification", {}) or {}
     disc = m.get("discovery", {}) or {}
     res = m.get("resolution", {}) or {}
-    primary = cl.get("primary", "")
-    facets = ", ".join(_as_list(cl.get("facets")))
+    def ax(a: str) -> str:
+        vals = axis_values(cl, a)
+        return "?" if vals == ["unknown"] else ("—" if vals == ["none"] or not vals else "+".join(vals))
+
     return (
-        f"| {_link(e)} | {_cell(m.get('title'))} | {GROUP_OF.get(primary, '')} | "
-        f"{PRIMARY_LABELS.get(primary, primary)} | {_cell(facets)} | "
+        f"| {_link(e)} | {_cell(m.get('title'))} | {group_of(cl)} | "
+        f"{ax('processing')} | {ax('structure')} | {ax('connection')} | {ax('governance')} | "
         f"{CAUSE_LABELS.get(cl.get('cause_status'), '')} | {REVIEW_LABELS.get(cl.get('review'), '')} | "
         f"{STATUS_LABELS.get(m.get('status'), '')} | "
         f"`{_cell(m.get('pattern'))}` | {_cell(', '.join(_as_list(disc.get('perspective'))))} | "
@@ -580,8 +626,8 @@ def _row(e: Entry) -> str:
 
 
 _TABLE_HEADER = (
-    "| ID | 題名 | 群 | 主分類 | 副分類（facets） | 原因の確度 | 分類 | 状態 | 型 | 発見観点 | 解決観点 |\n"
-    "|---|---|---|---|---|---|---|---|---|---|---|"
+    "| ID | 題名 | 群 | 処理 | 構造 | 接続 | 統制 | 原因の確度 | 分類 | 状態 | 型 | 発見観点 | 解決観点 |\n"
+    "|---|---|---|---|---|---|---|---|---|---|---|---|---|"
 )
 
 
@@ -609,7 +655,10 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
     lines.append("")
 
     by_group: dict[str, list[Entry]] = defaultdict(list)
-    by_primary: dict[str, list[Entry]] = defaultdict(list)
+    by_axis_value: dict[tuple[str, str], list[Entry]] = defaultdict(list)
+    axis_count_dist: Counter = Counter()
+    pair_count: Counter = Counter()
+    unknown_axes: list[tuple[Entry, list[str]]] = []
     by_pattern: dict[str, list[Entry]] = defaultdict(list)
     by_disc: dict[str, list[Entry]] = defaultdict(list)
     by_res: dict[str, list[Entry]] = defaultdict(list)
@@ -620,9 +669,19 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
     confirmed_by_pattern: Counter = Counter()
     for e in entries:
         cl = e.meta.get("classification", {}) or {}
-        primary = cl.get("primary", "")
-        by_group[GROUP_OF.get(primary, "")].append(e)
-        by_primary[primary].append(e)
+        by_group[group_of(cl)].append(e)
+        active = [a for a in AXES if not axis_is_empty(axis_values(cl, a))]
+        axis_count_dist[len(active)] += 1
+        for i in range(len(active)):
+            for j in range(i + 1, len(active)):
+                pair_count[(active[i], active[j])] += 1
+        for a in AXES:
+            vals = axis_values(cl, a)
+            for v in vals:
+                by_axis_value[(a, v)].append(e)
+        unk = [a for a in AXES if axis_values(cl, a) == ["unknown"]]
+        if unk:
+            unknown_axes.append((e, unk))
         by_pattern[str(e.meta.get("pattern"))].append(e)
         for p in _as_list((e.meta.get("discovery") or {}).get("perspective")):
             by_disc[str(p)].append(e)
@@ -644,15 +703,18 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
     lines.append("| 軸 | 内訳 |")
     lines.append("|---|---|")
     lines.append(
-        "| 群 | "
-        + " / ".join(f"{g or '（未分類）'} {len(v)}" for g, v in sorted(by_group.items()))
+        "| 群（座標から導出） | "
+        + " / ".join(f"{g} {len(by_group.get(g, []))}" for g in (GROUP_LOCAL, GROUP_DESIGN, GROUP_UNDETERMINED))
         + " |"
     )
+    for a in AXES:
+        n_set = sum(len(by_axis_value.get((a, v), [])) for v in AXIS_VALUES[a])
+        n_none = len(by_axis_value.get((a, "none"), []))
+        n_unk = len(by_axis_value.get((a, "unknown"), []))
+        lines.append(f"| {AXIS_LABELS[a]}軸 | 値あり {n_set}（延べ）/ none {n_none} / unknown {n_unk} |")
     lines.append(
-        "| 主分類 | "
-        + " / ".join(
-            f"{PRIMARY_LABELS.get(p, p or '（未分類）')} {len(by_primary.get(p, []))}" for p in PRIMARIES
-        )
+        "| 値を持つ軸の数 | "
+        + " / ".join(f"{k}軸 {axis_count_dist.get(k, 0)}" for k in range(0, len(AXES) + 1))
         + " |"
     )
     lines.append(
@@ -676,13 +738,45 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
     lines.append(_table(entries))
     lines.append("")
 
-    lines.append("## 2. 群・主分類別")
+    lines.append("## 2. 軸別（座標の各軸の値ごと）")
     lines.append("")
-    for p in PRIMARIES:
-        lines.append(f"### {GROUP_OF[p]} › {PRIMARY_LABELS[p]}（`{p}`）")
+    lines.append("各軸は独立に読む。1 つの課題は複数の軸に値を持ち得る（排他ではない）。")
+    lines.append("")
+    for a in AXES:
+        lines.append(f"### {AXIS_LABELS[a]}軸（`{a}`）")
         lines.append("")
-        lines.append(_table(by_primary.get(p, [])))
+        groups: list[tuple[str, tuple[str, ...]]] = (
+            list(GOVERNANCE_SUBGROUPS.items()) if a == "governance" else [("", AXIS_VALUES[a])]
+        )
+        for sub, values in groups:
+            if sub:
+                lines.append(f"**{sub}**")
+                lines.append("")
+            for v in values:
+                items = by_axis_value.get((a, v), [])
+                lines.append(f"- `{a}.{v}`: " + (", ".join(_link(e) for e in items) if items else "（該当なし）"))
+            lines.append("")
+        for v in AXIS_EMPTY:
+            items = by_axis_value.get((a, v), [])
+            lines.append(f"- `{v}`: {len(items)} 件")
         lines.append("")
+    lines.append("### 軸の対の頻度（同じ課題が 2 軸に値を持つ組）")
+    lines.append("")
+    lines.append("| 軸 A | 軸 B | 件数 |")
+    lines.append("|---|---|---|")
+    for (a, b), n in sorted(pair_count.items(), key=lambda kv: -kv[1]):
+        lines.append(f"| {AXIS_LABELS[a]} | {AXIS_LABELS[b]} | {n} |")
+    if not pair_count:
+        lines.append("| （該当なし） | | |")
+    lines.append("")
+    lines.append("### unknown の軸を持つエントリ（まだ見ていない軸。確定レビューで none か値に倒す）")
+    lines.append("")
+    if unknown_axes:
+        for e, unk in unknown_axes:
+            lines.append(f"- {_link(e)}: " + ", ".join(AXIS_LABELS[a] for a in unk))
+    else:
+        lines.append("（該当なし）")
+    lines.append("")
 
     lines.append("## 3. 族・型別（dictionary.md の見出し）")
     lines.append("")
@@ -691,8 +785,6 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
         "それ未満は**暫定**（族への畳み込み候補）。"
     )
     lines.append("")
-    tendencies = dictionary_tendencies(dictionary_text)
-    mismatches: list[tuple[Entry, str, str]] = []
     for fam, types in dictionary_families(dictionary_text).items():
         lines.append(f"### 族 `{fam or '（族なし）'}`" + (f" → [辞書](dictionary.md#{fam})" if fam else ""))
         lines.append("")
@@ -703,28 +795,12 @@ def render_index(entries: list[Entry], dictionary_text: str) -> str:
             lines.append("")
             lines.append(f"→ [辞書の定義](dictionary.md#{slug})")
             lines.append("")
+            if items:
+                coords = Counter(coordinate_text(e.meta.get("classification") or {}) for e in items)
+                lines.append("実際の座標: " + " ／ ".join(f"{c}（{n}）" for c, n in coords.most_common(3)))
+                lines.append("")
             lines.append(_table(items))
             lines.append("")
-            tend = tendencies.get(slug)
-            if tend:
-                for e in items:
-                    prim = (e.meta.get("classification") or {}).get("primary")
-                    if prim and prim != tend:
-                        mismatches.append((e, slug, tend))
-    lines.append("### 型の「主分類の傾向」とエントリの主分類が食い違うもの（分類レビューの入口）")
-    lines.append("")
-    if mismatches:
-        lines.append("| ID | 型 | 辞書の傾向 | エントリの主分類 | 分類 |")
-        lines.append("|---|---|---|---|---|")
-        for e, slug, tend in mismatches:
-            cl = e.meta.get("classification") or {}
-            lines.append(
-                f"| {_link(e)} | `{slug}` | {PRIMARY_LABELS[tend]} | {PRIMARY_LABELS.get(cl.get('primary'), '')} | "
-                f"{REVIEW_LABELS.get(cl.get('review'), '')} |"
-            )
-    else:
-        lines.append("（該当なし）")
-    lines.append("")
     stray = sorted(set(by_pattern) - set(dictionary_patterns(dictionary_text)))
     if stray:
         lines.append("### （辞書に無い型 — ガードレール違反）")
@@ -867,7 +943,9 @@ def _print_stats(entries: list[Entry]) -> int:
         for key, n in counter.most_common():
             print(f"  {key}: {n}")
 
-    show("主分類", Counter((e.meta.get("classification") or {}).get("primary") for e in entries))
+    show("群（導出）", Counter(group_of(e.meta.get("classification") or {}) for e in entries))
+    for a in AXES:
+        show(f"{AXIS_LABELS[a]}軸", Counter(v for e in entries for v in axis_values(e.meta.get("classification") or {}, a)))
     show("分類の確定状態", Counter((e.meta.get("classification") or {}).get("review") for e in entries))
     show("状態", Counter(e.meta.get("status") for e in entries))
     show("型", Counter(str(e.meta.get("pattern")) for e in entries))

@@ -11,8 +11,11 @@ feature_context:
   realizing: 共有された教材・コースについて、見られる人と操作できる人を画面に正しく反映する
   layers: [versioning_v, frontend_admin_ui, image_library_l]
 classification:
-  primary: connection
-  facets: [connection.condition, governance.assignment]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [condition]
+    governance: [assignment]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
 related: [IK-0206]
 view_of: []
 pattern: permission-and-affordance-asymmetric
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.condition, governance.assignment]
+    to: axes=processing=[none]; structure=[none]; connection=[condition]; governance=[assignment]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

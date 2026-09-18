@@ -12,8 +12,11 @@ feature_context:
   realizing: 論文本文のブロックに論理役割を付け、どこまで処理したかを正直に残す
   layers: [pipeline_a]
 classification:
-  primary: governance
-  facets: [governance.budget, governance.completion, connection.meaning]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [meaning]
+    governance: [budget, completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -48,7 +51,13 @@ resolution:
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
 related: [IK-0102, IK-0113]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.budget, governance.completion, connection.meaning]
+    to: axes=processing=[none]; structure=[none]; connection=[meaning]; governance=[budget,
+      completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

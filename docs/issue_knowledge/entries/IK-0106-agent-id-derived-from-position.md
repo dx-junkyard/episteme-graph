@@ -13,8 +13,11 @@ feature_context:
   realizing: 再解析で成果を作り直しても、同じ主張・部品を同じものとして指し続ける
   layers: [knowledge_objects, pipeline_a]
 classification:
-  primary: structure
-  facets: [structure.representation, connection.version]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [version]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - backend/core/knowledge_objects/remap.py
 related: [IK-0105, IK-0107, IK-0108, IK-0118]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, connection.version]
+    to: axes=processing=[none]; structure=[representation]; connection=[version]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

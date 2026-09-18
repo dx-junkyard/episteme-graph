@@ -13,8 +13,11 @@ feature_context:
   realizing: 層を積み増しながら、候補から確定までの流れ・段階ラベル・ステージの性質を各層で扱う
   layers: [shared_infra, pipeline_a, doubt_d]
 classification:
-  primary: structure
-  facets: [structure.aggregation, connection.meaning]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [meaning]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -51,7 +54,12 @@ resolution:
 related: [IK-0218, IK-0220]
 view_of: [IK-0314]
 pattern: duplicate-canonical-sources
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.aggregation, connection.meaning]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[meaning]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -11,8 +11,11 @@ feature_context:
   realizing: 取り込んだ論文の本文を材料に、構造化と対話を行う
   layers: [pipeline_a, rag_chat, deliberation_w]
 classification:
-  primary: structure
-  facets: [structure.representation, governance.review]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - docs/architecture/trust_boundary_pdf_input.md §2
 related: [IK-0305, IK-0015]
 view_of: [IK-0015]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, governance.review]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

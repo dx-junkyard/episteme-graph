@@ -11,8 +11,11 @@ feature_context:
   realizing: 学習者がコースを学び終えたことを見届け、修了として伝える
   layers: [learner_experience_b, frontend_learning_ui]
 classification:
-  primary: governance
-  facets: [governance.completion, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [completion]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -43,7 +46,12 @@ resolution:
 related: [IK-0215]
 view_of: []
 pattern: completion-defined-by-proxy
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.completion, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[completion]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

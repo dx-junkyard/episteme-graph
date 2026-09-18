@@ -12,8 +12,11 @@ feature_context:
   realizing: 増え続ける管理機能を、説明・道案内・次の一歩として利用者へ案内する
   layers: [guidance_g, admin_copilot, help_kb]
 classification:
-  primary: governance
-  facets: [governance.review, structure.aggregation]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -49,7 +52,12 @@ resolution:
 related: [IK-0201, IK-0221]
 view_of: [IK-0201]
 pattern: doc-drifts-from-code
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.review, structure.aggregation]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

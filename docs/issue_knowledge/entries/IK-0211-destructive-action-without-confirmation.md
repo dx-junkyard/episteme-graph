@@ -12,8 +12,11 @@ feature_context:
   realizing: 取り消せない操作の前に、何が起きるかを人へ示して合意を取る
   layers: [frontend_admin_ui, versioning_v, field_atlas_s]
 classification:
-  primary: structure
-  facets: [structure.aggregation, governance.review]
+  axes:
+    processing: [none]
+    structure: [aggregation]
+    connection: [none]
+    governance: [review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
 related: [IK-0209, IK-0212]
 view_of: []
 pattern: destructive-action-without-confirmation
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.aggregation, governance.review]
+    to: axes=processing=[none]; structure=[aggregation]; connection=[none]; governance=[review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

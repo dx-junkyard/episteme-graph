@@ -11,8 +11,11 @@ feature_context:
   realizing: 読み上げ原稿が揃っているコースに対して、音声をまとめて生成する
   layers: [lecture_studio, lecture_player, frontend_admin_ui]
 classification:
-  primary: governance
-  facets: [governance.completion, governance.ordering]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [none]
+    governance: [completion, ordering]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -48,7 +51,13 @@ resolution:
     - docs/features/lecture_audio_generation_readiness.md
 related: [IK-0321, IK-0317]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.completion, governance.ordering]
+    to: axes=processing=[none]; structure=[none]; connection=[none]; governance=[completion,
+      ordering]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

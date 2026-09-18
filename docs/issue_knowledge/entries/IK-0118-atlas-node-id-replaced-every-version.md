@@ -12,8 +12,11 @@ feature_context:
   realizing: 分野の地図を改訂しながら、教員が確定した論文の位置づけを保つ
   layers: [field_atlas_s, knowledge_landscape, concept_registry]
 classification:
-  primary: connection
-  facets: [connection.version, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [version]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
     - docs/features/atlas_node_correspondence_design.md §11.1
 related: [IK-0106]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.version, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[version]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

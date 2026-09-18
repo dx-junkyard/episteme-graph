@@ -12,8 +12,11 @@ feature_context:
   realizing: 解析をやり直しつつ、前回の実行条件と、まだ人がレビューしていない成果を保つ
   layers: [pipeline_a, frontend_admin_ui]
 classification:
-  primary: connection
-  facets: [connection.condition, connection.version]
+  axes:
+    processing: [none]
+    structure: [none]
+    connection: [condition, version]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -46,7 +49,12 @@ resolution:
 related: [IK-0207, IK-0208]
 view_of: []
 pattern: condition-not-propagated
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.condition, connection.version]
+    to: axes=processing=[none]; structure=[none]; connection=[condition, version]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

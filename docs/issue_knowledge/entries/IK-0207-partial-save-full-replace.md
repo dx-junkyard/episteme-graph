@@ -12,8 +12,11 @@ feature_context:
   realizing: 原稿の口調や読み上げ言語などコース単位の設定を教員が部分的に編集して保存する
   layers: [lecture_studio, frontend_admin_ui]
 classification:
-  primary: structure
-  facets: [structure.responsibility, connection.contract]
+  axes:
+    processing: [none]
+    structure: [responsibility]
+    connection: [contract]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -45,7 +48,12 @@ resolution:
 related: [IK-0208, IK-0209]
 view_of: []
 pattern: full-update-clobbers-unrelated-fields
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.responsibility, connection.contract]
+    to: axes=processing=[none]; structure=[responsibility]; connection=[contract]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

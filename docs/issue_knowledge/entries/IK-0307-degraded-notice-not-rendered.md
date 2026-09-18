@@ -12,8 +12,11 @@ feature_context:
   realizing: 教材を起点に近い論文を探し、探せなかったときはその理由を正直に示す
   layers: [paper_radar, paper_discovery, frontend_admin_ui]
 classification:
-  primary: connection
-  facets: [connection.information, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [information]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -48,7 +51,13 @@ resolution:
     - docs/features/paper_radar_design.md §14.8
 related: [IK-0308]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=connection facets=[connection.information, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[information];
+      governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

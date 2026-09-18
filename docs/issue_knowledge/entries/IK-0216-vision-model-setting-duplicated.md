@@ -10,8 +10,11 @@ feature_context:
   realizing: 解析の各段で使うモデルを教員が選び、その選択を次の解析にも効かせる
   layers: [model_selection_m, pipeline_a, frontend_admin_ui]
 classification:
-  primary: structure
-  facets: [structure.aggregation, structure.representation]
+  axes:
+    processing: [none]
+    structure: [aggregation, representation]
+    connection: [none]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -42,7 +45,13 @@ resolution:
 related: [IK-0218]
 view_of: []
 pattern: duplicate-canonical-sources
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.aggregation, structure.representation]
+    to: axes=processing=[none]; structure=[aggregation, representation]; connection=[none];
+      governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

@@ -11,8 +11,11 @@ feature_context:
   realizing: 解析をやり直して本文の区画を作り直しつつ、区画を出典とする主張と教員の確定を保つ
   layers: [knowledge_objects, migrations_db]
 classification:
-  primary: structure
-  facets: [structure.representation, governance.resume]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [resume]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -42,7 +45,12 @@ resolution:
     - backend/core/document_pipeline/persistence.py
 related: [IK-0108, IK-0112]
 view_of: [IK-0002, IK-0108]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, governance.resume]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[resume]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

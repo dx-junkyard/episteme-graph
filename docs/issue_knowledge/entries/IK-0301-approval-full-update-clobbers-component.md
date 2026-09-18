@@ -10,8 +10,11 @@ feature_context:
   realizing: グラフを見ながらコンポーネントの承認・却下という状態遷移だけを確定する
   layers: [theory_artifacts]
 classification:
-  primary: structure
-  facets: [structure.representation, connection.contract]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [contract]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -43,7 +46,12 @@ resolution:
     - docs/features/graph_dialogue_review_design.md §11.1
 related: [IK-0302, IK-0303]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, connection.contract]
+    to: axes=processing=[none]; structure=[representation]; connection=[contract]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

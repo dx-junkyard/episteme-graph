@@ -10,8 +10,11 @@ feature_context:
   realizing: スキーマ変更の履歴を保ちながら、どの環境でも同じ最終状態へ収束させる
   layers: [migrations_db]
 classification:
-  primary: governance
-  facets: [governance.resume, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [resume]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -44,7 +47,12 @@ resolution:
     - docs/architecture/consolidation_survey_2026-07.md
 related: [IK-0314]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.resume, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[resume]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

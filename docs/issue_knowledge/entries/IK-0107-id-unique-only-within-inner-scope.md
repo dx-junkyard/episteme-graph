@@ -13,8 +13,11 @@ feature_context:
   realizing: 抽出した主張・式・導出ステップを文書全体で一意に指し、逆引きできるようにする
   layers: [knowledge_objects, pipeline_a, knowledge_transfer]
 classification:
-  primary: structure
-  facets: [structure.representation, local.logic]
+  axes:
+    processing: [logic]
+    structure: [representation]
+    connection: [none]
+    governance: [none]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -48,7 +51,12 @@ resolution:
     - backend/core/document_pipeline/persistence.py
 related: [IK-0106]
 view_of: []
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=structure facets=[structure.representation, local.logic]
+    to: axes=processing=[logic]; structure=[representation]; connection=[none]; governance=[none]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

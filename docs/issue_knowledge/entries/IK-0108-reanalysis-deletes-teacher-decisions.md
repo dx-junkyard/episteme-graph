@@ -13,8 +13,11 @@ feature_context:
   realizing: 解析をやり直して成果を差し替えつつ、教員が確定した承認・訂正を保つ
   layers: [knowledge_objects, pipeline_a]
 classification:
-  primary: governance
-  facets: [governance.resume, governance.review, structure.representation]
+  axes:
+    processing: [none]
+    structure: [representation]
+    connection: [none]
+    governance: [resume, review]
   cause_status: confirmed
   review: candidate
   reviewed_by: null
@@ -47,7 +50,13 @@ resolution:
     - docs/features/knowledge_objects_design.md §12.1
 related: [IK-0106, IK-0109, IK-0110]
 view_of: [IK-0002, IK-0109]
-history: []
+history:
+  - date: '2026-09-19'
+    field: classification
+    from: primary=governance facets=[governance.resume, governance.review, structure.representation]
+    to: axes=processing=[none]; structure=[representation]; connection=[none]; governance=[resume,
+      review]
+    reason: 排他の主分類を廃し、副分類を 4 軸の座標に写す（2026-09-19 座標化）。旧 facets を全て保持
 ---
 
 ## 課題

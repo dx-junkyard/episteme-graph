@@ -4,8 +4,8 @@
       docs/issue_knowledge/README.md（運用）。
 
 守るもの:
-- 各エントリの front-matter が語彙（主分類・facets・確度・観点・一般化レベル）の範囲内で、
-  主分類の接頭辞を持つ facet を含む。
+- 各エントリの front-matter が語彙（4 軸の値・確度・観点・一般化レベル）の範囲内で、
+  各軸が 1〜2 値か単独の none / unknown を持つ（排他の主分類は無い。群は座標から導出）。
 - 原因未確定は ``cause_status: hypothesis`` + 「仮説:」で始まる basis として明示される。
 - 分類の根拠（basis）に症状の場所・修正量を書かない（taxonomy §1.2）。
 - ``pattern`` は dictionary.md の型に実在し、辞書の型はエントリを最低 1 つ持つ。
@@ -77,8 +77,9 @@ class TestVocabularyMirrorsTaxonomy:
     def test_every_module_token_is_defined_in_taxonomy(self, taxonomy_text):
         defined = self._backticked(taxonomy_text)
         for group in (
-            ik.PRIMARIES,
+            ik.AXES,
             ik.FACETS,
+            ik.AXIS_EMPTY,
             ik.CAUSE_STATUSES,
             ik.REVIEW_STATES,
             ik.STATUSES,
@@ -89,13 +90,16 @@ class TestVocabularyMirrorsTaxonomy:
             missing = [t for t in group if t not in defined]
             assert missing == [], f"taxonomy.md に定義の無い語彙（モジュール側だけにある）: {missing}"
 
-    def test_every_taxonomy_facet_is_known_to_module(self, taxonomy_text):
+    def test_every_taxonomy_axis_value_is_known_to_module(self, taxonomy_text):
         section = ik_section(taxonomy_text, "## 2.")
-        facets_in_doc = set(re.findall(r"`((?:local|structure|connection|governance)\.[a-z_]+)`", section))
-        assert facets_in_doc == set(ik.FACETS), (
-            f"facet 語彙が taxonomy §2 とモジュールで食い違う: doc-only={facets_in_doc - set(ik.FACETS)} "
-            f"module-only={set(ik.FACETS) - facets_in_doc}"
+        in_doc = set(re.findall(r"`((?:processing|structure|connection|governance)\.[a-z_]+)`", section))
+        assert in_doc == set(ik.FACETS), (
+            f"軸の値の語彙が taxonomy §2 とモジュールで食い違う: doc-only={in_doc - set(ik.FACETS)} "
+            f"module-only={set(ik.FACETS) - in_doc}"
         )
+        assert set(ik.GOVERNANCE_SUBGROUPS["制御系（実行時）"]) | set(ik.GOVERNANCE_SUBGROUPS["手続系（人）"]) == set(
+            ik.AXIS_VALUES["governance"]
+        ), "統制軸の区分（制御系 / 手続系）が値の全体を覆っていない"
 
     def test_every_taxonomy_perspective_is_known_to_module(self, taxonomy_text):
         disc = set(re.findall(r"(?m)^\| `([a-z_]+)` \|", ik_section(taxonomy_text, "## 4.")))
@@ -148,9 +152,9 @@ class TestEntries:
                     continue
                 assert not pat.search(table), f"dictionary.md の型 `{slug}` にファイル名・拡張子が含まれる"
 
-    def test_dictionary_families_are_listed_under_primary_sections(self, dictionary_text):
-        """各族（###）は 4 主分類の節（## 局所 / ## 構造 / ## 接続 / ## 統制）の下、各型（####）は族の下に置く。"""
-        allowed = {"局所", "構造", "接続", "統制"}
+    def test_dictionary_families_are_listed_under_axis_sections(self, dictionary_text):
+        """各族（###）は 4 軸の節（## 処理 / ## 構造 / ## 接続 / ## 統制）の下、各型（####）は族の下に置く。"""
+        allowed = {"処理", "構造", "接続", "統制"}
         current = None
         family = None
         for line in dictionary_text.splitlines():
@@ -158,7 +162,7 @@ class TestEntries:
                 current = line[3:].strip()
                 family = None
             elif line.startswith("### "):
-                assert current in allowed, f"族 `{line[4:].strip()}` が主分類の節の外にある（節: {current}）"
+                assert current in allowed, f"族 `{line[4:].strip()}` が軸の節の外にある（節: {current}）"
                 family = line[4:].strip()
             elif line.startswith("#### "):
                 assert family is not None, f"型 `{line[5:].strip()}` が族の下にない"
@@ -190,6 +194,30 @@ class TestEntries:
             name = re.sub(r"^\S+層\S*\s+|^運営基盤\s+|^[A-Z]{1,2}層\s+|^[A-Z]{1,2}追補\s+", "", desc)
             key = re.split(r"[（(]", name)[0].strip()[:6]
             assert key and key in registry, f"layers.md `{m.group(1)}` の対応「{desc}」がレイヤー索引表に見当たらない"
+
+
+class TestAxes:
+    def test_group_is_derived_from_coordinates(self):
+        cl = {"axes": {"processing": ["logic"], "structure": ["none"], "connection": ["none"], "governance": ["none"]}}
+        assert ik.group_of(cl) == ik.GROUP_LOCAL
+        cl["axes"]["connection"] = ["version"]
+        assert ik.group_of(cl) == ik.GROUP_DESIGN
+        cl["axes"] = {"processing": ["none"], "structure": ["unknown"], "connection": ["none"], "governance": ["none"]}
+        assert ik.group_of(cl) == ik.GROUP_UNDETERMINED
+
+    def test_none_and_unknown_are_distinct_and_solitary(self, entries, dictionary_text):
+        """none（見て無いと判断）と unknown（まだ見ていない）は別の値で、他の値と併記できない。"""
+        assert set(ik.AXIS_EMPTY) == {"none", "unknown"}
+        bad = ik.Entry(path=ik.ENTRIES_DIR / "IK-9999-x.md", meta={}, body="")
+        cl = {"axes": {"processing": ["none", "logic"], "structure": ["none"], "connection": ["none"], "governance": ["none"]}}
+        # 直接 validate_entry を呼ぶと他キー不足で早期 return するので、規則だけを関数で確認
+        assert not ik.axis_is_empty(["none", "logic"])
+        assert ik.axis_is_empty(["none"]) and ik.axis_is_empty(["unknown"])
+
+    def test_no_entry_declares_primary_or_facets(self, entries):
+        """排他の主分類（primary / facets）は廃止。残っていれば座標化漏れ。"""
+        leftovers = [e.id for e in entries if "primary" in (e.meta.get("classification") or {}) or "facets" in (e.meta.get("classification") or {})]
+        assert leftovers == [], f"旧形式（primary / facets）が残るエントリ: {leftovers}"
 
 
 class TestIndexIsGenerated:
