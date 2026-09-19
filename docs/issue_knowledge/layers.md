@@ -73,3 +73,10 @@
 | `deployment` | （索引表外）nginx・compose・Dockerfile・環境変数 |
 | `theory_artifacts` | （索引表外）A層の成果テーブル（component / claim / 理論操作グラフの行）と、その承認・読み出し |
 | `tts_voice` | （索引表外）読み上げ・音声入出力（`core/tts.py`・学習側 voice API・管理側の音声対話） |
+| `cycle_discovery` | （索引表外）改善サイクルの発見段（観点調査・レビュー・実測。[改善サイクル](../architecture/improvement_cycle.md) §1） |
+| `cycle_triage` | （索引表外）改善サイクルの選別・裁定段（着手の地図・オーナー判断の束） |
+| `cycle_design` | （索引表外）改善サイクルの設計段（設計書・状態ヘッダ・pre-mortem） |
+| `cycle_implementation` | （索引表外）改善サイクルの実装段（並列の波・分割コミット・サブエージェントへの指示） |
+| `cycle_verification` | （索引表外）改善サイクルの検証段（ガードレール・CI 経路・実 DB 実測・E2E） |
+| `cycle_remediation` | （索引表外）改善サイクルの是正段（敵対的レビュー・レビュー是正節・解消注記） |
+| `cycle_recording` | （索引表外）改善サイクルの記録段（機能解説・CLAUDE.md 追補・課題エントリ・振り返り） |
