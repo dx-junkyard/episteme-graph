@@ -1080,6 +1080,12 @@ class TheoryIOItem(BaseModel):
     evidence_claims: list[str] = Field(default_factory=list)
     source_refs: list[TheorySourceRef] = Field(default_factory=list)
     needs_source: bool = False
+    # パイプラインが書く項目単位の出典参照。ComponentAssemblyAgent は各項目の根拠を
+    # ``claim_ids``（claim の DB UUID）/ ``equation_ids``（agent 側 equation_id）で持つ
+    # のに、モデルがこの2キーを持たず読み出しで落としていたため、承認可能性の判定は
+    # 「出典の無い項目」と読んでいた。落とさずに通す（情報を落とさない）。
+    claim_ids: list[str] = Field(default_factory=list)
+    equation_ids: list[str] = Field(default_factory=list)
 
 
 class TheoryConditionItem(BaseModel):
@@ -1090,6 +1096,10 @@ class TheoryConditionItem(BaseModel):
     evidence_claims: list[str] = Field(default_factory=list)
     source_refs: list[TheorySourceRef] = Field(default_factory=list)
     needs_source: bool = False
+    # TheoryIOItem と同じ理由（preconditions / constraints も ``claim_ids`` /
+    # ``equation_ids`` を持つ）。
+    claim_ids: list[str] = Field(default_factory=list)
+    equation_ids: list[str] = Field(default_factory=list)
 
 
 class TheoryBlackboxPolicy(BaseModel):

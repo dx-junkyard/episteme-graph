@@ -71,7 +71,12 @@ _FIGURE_ROW = _Row(
     page=5,
     caption_text="装置の模式図",
 )
-_EXPLANATION_ROW = _Row(element_id="comp_0001", body="この論文では…", status="approved")
+_EXPLANATION_ROW = _Row(
+    element_id="comp_0001",
+    element_type="theory_component",
+    body="この論文では…",
+    status="approved",
+)
 
 
 def _install_common(monkeypatch, *, artifacts=None, sessions=None, graph=None, builder=None):
@@ -197,7 +202,13 @@ class TestBuilderInputs:
             }
         ]
         assert captured["explanation_rows"] == [
-            {"element_id": "comp_0001", "body": "この論文では…", "status": "approved"}
+            {
+                "element_id": "comp_0001",
+                # claim / 式の説明も同じ経路で渡すので、どの要素の説明かを添える。
+                "element_type": "theory_component",
+                "body": "この論文では…",
+                "status": "approved",
+            }
         ]
 
     def test_artifacts_loaded_once(self, monkeypatch):

@@ -28,6 +28,10 @@ from core.graph_paper_layer.schema import (
     DSL_POLARITY_LABELS,
     EQUATION_ROLE_LINKED,
     EQUATION_ROLE_NODE_KEYS,
+    EXPLANATION_ELEMENT_CLAIM,
+    EXPLANATION_ELEMENT_COMPONENT,
+    EXPLANATION_ELEMENT_EQUATION,
+    EXPLANATION_ELEMENT_TYPES,
     EXPLANATION_STATUS_PRIORITY,
     MISSING_ARTIFACT_FACTS,
     NODE_CLAIM_ID_KEYS,
@@ -195,6 +199,14 @@ class _PaperIndex:
                 step_id = str(step.get("step_id") or "").strip()
                 if step_id:
                     self.step_to_derivation.setdefault(step_id, derivation_id)
+                    # ``step_001`` はチェーン内でしか一意でないので、グラフと
+                    # ``knowledge_derivation_steps.agent_step_id`` は
+                    # ``{derivation_id}:{step_id}`` の合成 ID でも指す。両方を索引する
+                    # （規則の正本は
+                    # core/knowledge_objects/stable_key.py::derivation_step_agent_id）。
+                    self.step_to_derivation.setdefault(
+                        f"{derivation_id}:{step_id}", derivation_id
+                    )
 
         figure_stage = _mapping(self.artifacts.get("figure_table_semantics"))
         self.figures = [r for r in _dicts(figure_stage.get("figures")) if str(r.get("figure_id") or "").strip()]
@@ -219,17 +231,31 @@ class _PaperIndex:
             if component_id:
                 self.components.setdefault(component_id, record)
 
-        # contextual 説明（approved 優先）。
+        # contextual 説明（approved 優先）。element_type ごとに分けて索引する
+        # （component の説明が無い論文でも、claim / 式の説明でノードの「論文側の顔」を
+        # 埋められるようにするため。行に element_type が無い古い呼び出しは
+        # theory_component として扱う = 後方互換）。
         self.explanations: dict[str, dict] = {}
+        self.claim_explanations: dict[str, dict] = {}
+        self.equation_explanations: dict[str, dict] = {}
+        buckets = {
+            EXPLANATION_ELEMENT_COMPONENT: self.explanations,
+            EXPLANATION_ELEMENT_CLAIM: self.claim_explanations,
+            EXPLANATION_ELEMENT_EQUATION: self.equation_explanations,
+        }
         for row in _dicts(explanation_rows):
             element_id = str(row.get("element_id") or "").strip()
             body = str(row.get("body") or "")
             status = str(row.get("status") or "")
-            if not element_id or not body:
+            element_type = str(
+                row.get("element_type") or EXPLANATION_ELEMENT_COMPONENT
+            ).strip()
+            bucket = buckets.get(element_type)
+            if bucket is None or not element_id or not body:
                 continue
-            current = self.explanations.get(element_id)
+            current = bucket.get(element_id)
             if current is None or _explanation_rank(status) < _explanation_rank(current["status"]):
-                self.explanations[element_id] = {"body": body, "status": status}
+                bucket[element_id] = {"body": body, "status": status}
 
         # thesis 上の役割: claim agent ID → [{thesis_ref, section_label, text}]
         self.thesis_roles: dict[str, list[dict]] = {}
@@ -421,6 +447,8 @@ def _equation_items(index: _PaperIndex, refs: dict) -> list[dict]:
             "section_id": section_id,
             "page": body["page"],
             "needs_math_review": body["needs_math_review"],
+            # 二層説明（contextual）。式に付いた説明行があれば添える（additive）。
+            "explanation": _copy_explanation(index.equation_explanations.get(equation_id)),
         })
     items.sort(key=lambda item: (
         index.section_sort_key(item["section_id"]),
@@ -454,8 +482,38 @@ def _claim_items(index: _PaperIndex, reference_claims: dict, refs: dict) -> list
             "resolution": str(entry.get("resolution") or ""),
             "section_id": index.claim_section(agent_id),
             "is_atomic": bool(is_atomic),
+            # 二層説明（contextual）。claim に付いた説明行があれば添える（additive）。
+            "explanation": _copy_explanation(index.claim_explanations.get(agent_id)),
         })
     return items
+
+
+def _copy_explanation(entry: dict | None) -> dict | None:
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def _fallback_element_explanation(
+    index: _PaperIndex, refs: dict
+) -> tuple[dict | None, dict | None]:
+    """component に説明が無いノードの「この論文での説明」を claim / 式から採る。
+
+    順序は claim（refs の並び）→ 式（同）で決定論。見つからなければ ``(None, None)``。
+    """
+    for agent_id in refs["claims"]:
+        entry = index.claim_explanations.get(agent_id)
+        if entry:
+            return dict(entry), {
+                "element_type": EXPLANATION_ELEMENT_CLAIM,
+                "element_id": agent_id,
+            }
+    for equation_id, _role in refs["equations"]:
+        entry = index.equation_explanations.get(equation_id)
+        if entry:
+            return dict(entry), {
+                "element_type": EXPLANATION_ELEMENT_EQUATION,
+                "element_id": equation_id,
+            }
+    return None, None
 
 
 def _evidence_items(index: _PaperIndex, reference_evidence: dict, refs: dict) -> list[dict]:
@@ -699,6 +757,7 @@ def build_paper_layer(
 
         component = None
         explanation = None
+        explanation_element: dict | None = None
         candidates = _component_ref_candidates(node)
         for member_id in member_ids:
             candidates.extend(_component_ref_candidates(nodes_by_id[member_id]))
@@ -712,8 +771,18 @@ def build_paper_layer(
                 }
             if explanation is None and candidate in index.explanations:
                 explanation = dict(index.explanations[candidate])
+                explanation_element = {
+                    "element_type": EXPLANATION_ELEMENT_COMPONENT,
+                    "element_id": candidate,
+                }
             if component is not None and explanation is not None:
                 break
+        if explanation is None:
+            # component に説明が無い論文でも、このノードが指す claim / 式に説明が
+            # 付いていれば「この論文での説明」は成立する（実データでは説明行の多くが
+            # claim / 式に付く）。どの要素の説明かは ``explanation_element`` で明示し、
+            # 出所を隠さない。
+            explanation, explanation_element = _fallback_element_explanation(index, refs)
 
         node_dtos[node_id] = {
             "node_id": node_id,
@@ -722,6 +791,7 @@ def build_paper_layer(
             "narrative_role": str(_mapping(node_narratives.get(node_id)).get("narrative_role") or ""),
             "component": component,
             "explanation": explanation,
+            "explanation_element": explanation_element,
             "thesis_roles": thesis_roles,
             "sections": [index.section_entry(section_id) for section_id in section_ids],
             "equations": equations,

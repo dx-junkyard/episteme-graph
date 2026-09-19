@@ -107,6 +107,41 @@ def _document_placeholders(document_ids: list[str], prefix: str) -> tuple[str, d
     return placeholders, params
 
 
+#: 章が引けない unit の並び順（章のある unit の後ろ = 末尾）。
+_NO_SECTION_RANK = 1 << 30
+
+#: 章の並びを決める種別（論文の章立てをそのまま持つのは ``section_block`` だけ）。
+_SECTION_ORDER_KIND = "section_block"
+
+
+def _section_rank_by_document(items: list[dict]) -> dict[tuple[str, str], int]:
+    """``(document_id, section_id) -> 章の並び順``。
+
+    章の順序を持っているのは ``section_block`` の unit（``PaperSkeletonResult`` の
+    論理ブロック順 = 論文の並び）だけなので、そこから決定論的に導く。章の順序表を
+    別に作らない（``learning_units_live`` の行だけで決まる）。
+    """
+    rank: dict[tuple[str, str], int] = {}
+    ordered = sorted(
+        (item for item in items if item["unit_kind"] == _SECTION_ORDER_KIND),
+        key=lambda item: (item["order_index"], item["label"], item["stable_key"]),
+    )
+    for position, item in enumerate(ordered):
+        for section_id in item.get("section_ids") or []:
+            rank.setdefault((item["document_id"], section_id), position)
+    return rank
+
+
+def _item_section_rank(item: dict, rank: dict[tuple[str, str], int]) -> int:
+    """unit の章の並び順（複数章にまたがるなら最も前の章。引けなければ末尾）。"""
+    ranks = [
+        rank[(item["document_id"], section_id)]
+        for section_id in (item.get("section_ids") or [])
+        if (item["document_id"], section_id) in rank
+    ]
+    return min(ranks) if ranks else _NO_SECTION_RANK
+
+
 def list_unit_candidates(
     session,
     document_ids: list[str],
@@ -115,8 +150,11 @@ def list_unit_candidates(
 ) -> list[UnitCandidate]:
     """``learning_units_live`` からコースビルダー向けの候補を決定論的に読む。
 
-    並びは **(document_ids の順, kind の LEARNING_UNIT_KINDS 順, order_index, label)**
-    で、同じ入力なら常に同じ handle が振られる（DB の返す行順に依存しない）。
+    並びは **(document_ids の順, 章の順, kind の LEARNING_UNIT_KINDS 順, order_index,
+    label)** で、同じ入力なら常に同じ handle が振られる（DB の返す行順に依存しない）。
+    章の順は ``section_block`` の unit の並びから導く（``_section_rank_by_document``）。
+    章が引けない unit は末尾に回る — 種別ごとにまとめて並べると、同じ章の話が
+    種別の境目で分断されて候補表が読めなくなるため。
     ``review_status = 'dismissed'`` の unit は候補から外す（教員が見送った単位を
     AI が再提示しない）。行削除はしない（LU2）。
 
@@ -133,7 +171,8 @@ def list_unit_candidates(
     params.update({f"kind_{index}": kind for index, kind in enumerate(kinds)})
     rows = session.execute(
         sa_text(f"""
-            SELECT id::text, document_id::text, stable_key, unit_kind, label, summary, order_index
+            SELECT id::text, document_id::text, stable_key, unit_kind, label, summary,
+                   order_index, section_ids
             FROM learning_units_live
             WHERE document_id IN ({placeholders})
               AND unit_kind IN ({kind_placeholders})
@@ -160,10 +199,13 @@ def list_unit_candidates(
             "label": str(row[4] or "").strip(),
             "summary": str(row[5] or "").strip(),
             "order_index": int(row[6]) if isinstance(row[6], int) else 0,
+            "section_ids": _as_str_list(row[7]),
         })
 
+    section_rank = _section_rank_by_document(items)
     items.sort(key=lambda item: (
         doc_order.get(item["document_id"], len(doc_order)),
+        _item_section_rank(item, section_rank),
         _KIND_ORDER.get(item["unit_kind"], len(_KIND_ORDER)),
         item["order_index"],
         item["label"],

@@ -110,6 +110,19 @@ UNBOUND_CLAIM_SUPPORT_STATUS = "source_backed"
 #: 呼び出し側が問い合わせの時点で除外する）。
 EXPLANATION_STATUS_PRIORITY: tuple[str, ...] = ("approved", "candidate")
 
+#: 論文層が読む contextual 説明の ``element_type``。語彙の正本は
+#: ``core/element_explanations.py``（本表はそのうち論文層が扱う3種の部分集合）。
+#: component だけを読んでいたため、component の説明が無い論文ではノードの
+#: 「論文での対応」が空になっていた — 実データでは説明行の多数が claim / 式に付く。
+EXPLANATION_ELEMENT_COMPONENT = "theory_component"
+EXPLANATION_ELEMENT_CLAIM = "theory_claim"
+EXPLANATION_ELEMENT_EQUATION = "equation"
+EXPLANATION_ELEMENT_TYPES: tuple[str, ...] = (
+    EXPLANATION_ELEMENT_COMPONENT,
+    EXPLANATION_ELEMENT_CLAIM,
+    EXPLANATION_ELEMENT_EQUATION,
+)
+
 #: DSL エッジの極性（P0-9）。語彙の正本は
 #: ``src/episteme_graph/agents/dsl_linking/schema.py::POLARITIES``（``+`` / ``-`` /
 #: ``+/-`` / ``?``）で、ここに置くのはその**表示語**だけである。記号のまま画面に出すと

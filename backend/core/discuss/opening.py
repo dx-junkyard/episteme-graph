@@ -42,6 +42,7 @@ from core.element_explanations import (
     list_for_document,
 )
 from core import element_vocab
+from core.knowledge_objects.references import claim_ref_variants, normalize_claim_ref
 from core.label_vocab import SUPPORT_SECTION_LABELS
 
 logger = logging.getLogger(__name__)
@@ -160,6 +161,9 @@ _REVIEW_REASON_FACT_PHRASES = {
     "generic_operation": "どんな操作なのかをまだ具体的に特定できていません",
     "orphan_detail_node": "全体像のどこに位置づくかをまだ対応づけできていません",
     "empty_main_node": "この段階にあたる式の手順をまだ取れていません",
+    # 復元由来の式しか根拠が無い箇所（式が論文から取り出せず、前後の文脈から
+    # 組み立て直されている）。コードのまま学習者に出さない。
+    "reconstructed_equation_backing": "関係する式を論文から取り出せず、前後の文脈から組み立て直しています",
 }
 
 # 「まだ確認できていないところ」の前置き。主語がシステム（解析）であることを文面で明示する
@@ -189,9 +193,18 @@ def _dedupe_ids(raw_ids: Any) -> list[str]:
 def _claim_ref_item(claim_id: str, claim_label_index: dict[str, str]) -> dict[str, str]:
     """claim_id → {"id","label"}。解決できない id は id 文字列そのものを label にする
     （設計書: 情報を落とさない）。
+
+    thesis_reconstruction の claim 参照は ``claim:{block_id}:{span_id}`` と接頭辞付きで、
+    ``theory_claims.source_scope.legacy_ids`` は接頭辞なしで持つ。素の文字列で引くと
+    同じ claim を指しているのに解決できず、内部 ID が学習者の画面へ出てしまうので、
+    綴りの異形（正本 ``core/knowledge_objects/references.py``）でも引く。
     """
-    label = str(claim_label_index.get(claim_id) or "").strip() or claim_id
-    return {"id": claim_id, "label": label}
+    label = ""
+    for key in claim_ref_variants(claim_id):
+        label = str(claim_label_index.get(key) or "").strip()
+        if label:
+            break
+    return {"id": claim_id, "label": label or claim_id}
 
 
 def _equation_label(record: dict[str, Any] | None) -> str:
@@ -863,6 +876,9 @@ def _claim_label_index(document_id: str, artifacts: dict[str, Any]) -> dict[str,
             key = str(legacy_id or "").strip()
             if key:
                 index.setdefault(key, label)
+                # 索引側に接頭辞付きの綴りが混ざっていても引けるようにする
+                # （引く側の `_claim_ref_item` と両方向で吸収する）。
+                index.setdefault(normalize_claim_ref(key), label)
         span_id = scope.get("span_id")
         if span_id:
             index.setdefault(str(span_id), label)

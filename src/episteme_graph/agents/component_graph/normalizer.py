@@ -44,12 +44,14 @@ from .schema import (
     GRAPH_LAYER_DEBUG,
     GRAPH_LAYER_EQUATION_DETAIL,
     GRAPH_LAYER_MAIN,
+    RECONSTRUCTION_BACKED_STEP_REASON,
     THEORY_OPERATION_NODE,
     THEORY_STAGES,
     ComponentGraphEdge,
     ComponentGraphNode,
     ComponentGraphResult,
     classify_operation,
+    derivation_step_ref,
     review_status_for_backing,
     stage_for_edge_type,
     theory_stage_label,
@@ -168,6 +170,10 @@ class ComponentGraphNormalizer:
                     "order": counter,
                     "step": step,
                     "step_id": step_id,
+                    # Document-unique reference for the same step: the bare step_id
+                    # repeats across chains, so on its own it does not identify one
+                    # step of the document.
+                    "step_ref": derivation_step_ref(derivation_id, step_id),
                     "derivation_id": derivation_id,
                     "linked_component_ids": _linked_components_for_step(
                         step=step,
@@ -264,6 +270,17 @@ class ComponentGraphNormalizer:
                 source_backing_status=source_backing_status,
                 review_status=review_status,
                 review_reasons=review_reasons,
+                # The component-view fallback has no layered structure; an edge
+                # takes the weaker of its endpoints' layers so a debug node never
+                # pulls an edge into the published graph.
+                graph_layer=(
+                    GRAPH_LAYER_DEBUG
+                    if GRAPH_LAYER_DEBUG in (
+                        node_by_id[edge.source].graph_layer,
+                        node_by_id[edge.target].graph_layer,
+                    )
+                    else node_by_id[edge.target].graph_layer or GRAPH_LAYER_MAIN
+                ),
             ))
         return result
 
@@ -342,7 +359,8 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
     outputs = _ordered_unique([eq for rec in records for eq in rec["outputs"]])
     linked_equation_ids = _ordered_unique(inputs + outputs)
     linked_derivation_ids = _ordered_unique(
-        [rec["derivation_id"] for rec in records] + [rec["step_id"] for rec in records]
+        [rec["derivation_id"] for rec in records]
+        + [ref for rec in records for ref in _step_refs(rec)]
     )
     linked_claim_ids = _ordered_unique(
         [cid for rec in records for cid in _step_claim_ids(rec["step"])]
@@ -372,6 +390,7 @@ def _main_node_from_group(group: dict, claim_index: dict[str, dict]) -> Componen
         linked_claim_ids=linked_claim_ids,
         linked_evidence_ids=linked_evidence_ids,
         is_generic=False,
+        reconstruction_backed=_records_are_reconstruction_backed(records),
     )
 
     # Claim I/O: aggregate from group records (issue #337).
@@ -462,7 +481,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
         output_claims = {cid for rec in group["records"] for cid in rec.get("output_claims", [])}
         input_claims = {cid for rec in group["records"] for cid in rec.get("input_claims", [])}
         input_claims.update(cid for rec in group["records"] for cid in rec.get("required_claims", []))
-        step_ids = [rec["step_id"] for rec in group["records"]]
+        step_ids = [ref for rec in group["records"] for ref in _step_refs(rec)]
         claim_ids = _ordered_unique(
             [cid for rec in group["records"] for cid in _step_claim_ids(rec["step"])]
         )
@@ -479,6 +498,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
             "step_ids": step_ids,
             "claim_ids": claim_ids,
             "evidence_ids": evidence_ids,
+            "reconstruction_backed": _records_are_reconstruction_backed(group["records"]),
         })
 
     edges: list[ComponentGraphEdge] = []
@@ -506,6 +526,9 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 is_generic=False,
                 evidence_claims=tgt["claim_ids"],
                 evidence_derivation_ids=evidence_derivation_ids,
+                reconstruction_backed=(
+                    src["reconstruction_backed"] or tgt["reconstruction_backed"]
+                ),
             )
             if eq_overlap:
                 reasoning = (
@@ -533,6 +556,7 @@ def _main_edges_from_groups(groups: list[dict]) -> list[ComponentGraphEdge]:
                 evidence_claim_ids=_ordered_unique(claim_overlap + tgt["claim_ids"]),
                 source_evidence_ids=tgt["evidence_ids"],
                 review_reasons=review_reasons,
+                graph_layer=GRAPH_LAYER_MAIN,
             ))
     return edges
 
@@ -549,8 +573,8 @@ def _fallback_sequential_edges(groups: list[dict]) -> list[ComponentGraphEdge]:
         tgt = groups[i + 1]
         edge_type = tgt["edge_type"]
         evidence_derivation_ids = _ordered_unique(
-            [rec["step_id"] for rec in src["records"]]
-            + [rec["step_id"] for rec in tgt["records"]]
+            [ref for rec in src["records"] for ref in _step_refs(rec)]
+            + [ref for rec in tgt["records"] for ref in _step_refs(rec)]
         )
         claim_ids = _ordered_unique(
             [cid for rec in tgt["records"] for cid in _step_claim_ids(rec["step"])]
@@ -578,6 +602,7 @@ def _fallback_sequential_edges(groups: list[dict]) -> list[ComponentGraphEdge]:
             evidence_claim_ids=claim_ids,
             source_evidence_ids=evidence_ids,
             review_reasons=["edge_not_source_backed"],
+            graph_layer=GRAPH_LAYER_MAIN,
         ))
     return edges
 
@@ -681,7 +706,7 @@ def _detail_node_from_record(
     edge_type = rec["edge_type"]
 
     linked_equation_ids = _ordered_unique(inputs + outputs)
-    linked_derivation_ids = _ordered_unique([rec["derivation_id"], rec["step_id"]])
+    linked_derivation_ids = _ordered_unique([rec["derivation_id"], *_step_refs(rec)])
     linked_claim_ids = _ordered_unique(_step_claim_ids(step))
     linked_evidence_ids = _ordered_unique(getattr(step, "source_evidence_ids", []) or [])
     atomic_claim_ids = _atomic_claim_ids(linked_claim_ids, claim_index)
@@ -699,6 +724,7 @@ def _detail_node_from_record(
         linked_claim_ids=linked_claim_ids,
         linked_evidence_ids=linked_evidence_ids,
         is_generic=rec["is_generic"] and not generic_kept,
+        reconstruction_backed=_records_are_reconstruction_backed([rec]),
     )
     if generic_kept:
         status = "partially_source_backed"
@@ -793,10 +819,17 @@ def _detail_edges_from_records(
                 continue
             seen.add(key)
             step = target["step"]
+            step_refs = _ordered_unique(_step_refs(source) + _step_refs(target))
             source_backing_status, review_status, review_reasons = _edge_backing(
                 evidence_equation_ids=eq_overlap,
                 is_generic=target["is_generic"],
-                evidence_derivation_ids=[source["step_id"], target["step_id"]],
+                evidence_derivation_ids=step_refs,
+                # 片端でも復元由来なら、その辺が渡している式は引用ではない。
+                # 慎重側に倒して確定させない（main 辺と同じ規則）。
+                reconstruction_backed=(
+                    _records_are_reconstruction_backed([source])
+                    or _records_are_reconstruction_backed([target])
+                ),
             )
             if eq_overlap:
                 reasoning = (
@@ -820,16 +853,29 @@ def _detail_edges_from_records(
                 evidence_equation_ids=_ordered_unique(eq_overlap),
                 source_backing_status=source_backing_status,
                 review_status=review_status,
-                evidence_derivation_ids=_ordered_unique([
-                    source["step_id"], target["step_id"]
-                ]),
+                evidence_derivation_ids=step_refs,
                 evidence_claim_ids=_ordered_unique(claim_overlap + _step_claim_ids(step)),
                 source_evidence_ids=_ordered_unique(
                     getattr(step, "source_evidence_ids", []) or []
                 ),
                 review_reasons=review_reasons,
+                graph_layer=_detail_edge_layer(source, target),
             ))
     return edges
+
+
+def _detail_edge_layer(source: dict, target: dict) -> str:
+    """Layer of a per-step edge: ``debug`` when either endpoint sits in the debug layer.
+
+    Mirrors ``_detail_node_from_record``'s layer rule (issue #361): a generic step
+    with equations on both ends stays in ``equation_detail``; a generic step without
+    them drops to ``debug``, and an edge touching such a node belongs there too.
+    """
+    for rec in (source, target):
+        generic_kept = rec["is_generic"] and bool(rec["inputs"]) and bool(rec["outputs"])
+        if rec["is_generic"] and not generic_kept:
+            return GRAPH_LAYER_DEBUG
+    return GRAPH_LAYER_EQUATION_DETAIL
 
 
 # ---------------------------------------------------------------------- #
@@ -844,6 +890,7 @@ def _node_backing(
     linked_claim_ids: list[str],
     linked_evidence_ids: list[str],
     is_generic: bool,
+    reconstruction_backed: bool = False,
 ) -> tuple[str, list[str]]:
     reasons: list[str] = []
     if not linked_equation_ids:
@@ -877,6 +924,13 @@ def _node_backing(
         # the node, but no minimal atomic claim directly supports its meaning,
         # so reviewers should still be told the atomic backing is absent.
         reasons = [] if atomic_claim_ids else ["missing_atomic_claim"]
+        if reconstruction_backed:
+            # The equations behind this node were reconstructed from context, not
+            # quoted from the paper. Keep the structure, never confirm it — the
+            # decision is a human's.
+            status = "partially_source_backed"
+    if reconstruction_backed and status in ("source_backed", "partially_source_backed"):
+        reasons = _ordered_unique(list(reasons) + [RECONSTRUCTION_BACKED_STEP_REASON])
     return status, _ordered_unique(reasons)
 
 
@@ -886,12 +940,17 @@ def _edge_backing(
     is_generic: bool,
     evidence_claims: list[str] | None = None,
     evidence_derivation_ids: list[str] | None = None,
+    reconstruction_backed: bool = False,
 ) -> tuple[str, str, list[str]]:
     """Return ``(source_backing_status, review_status, review_reasons)`` for an edge.
 
     ``source_backing_status`` uses the same vocabulary as nodes (issue #311
     criterion 6); ``review_status`` is derived from it via
     ``review_status_for_backing`` so the two fields never disagree.
+
+    ``reconstruction_backed`` caps the result at ``partially_source_backed``: the
+    equations behind the edge were reconstructed from context rather than quoted,
+    so the relation is kept but never confirmed automatically.
     """
     # A derivation-backed edge is just as source-backed as an equation- or
     # claim-backed one (issue #304): equation OR claim OR derivation evidence
@@ -910,12 +969,54 @@ def _edge_backing(
     else:
         status = "review_required"
         reasons = ["edge_not_source_backed"]
+    if reconstruction_backed and status in ("source_backed", "partially_source_backed"):
+        status = "partially_source_backed"
+        reasons = _ordered_unique(list(reasons) + [RECONSTRUCTION_BACKED_STEP_REASON])
     return status, review_status_for_backing(status), reasons
 
 
 # ---------------------------------------------------------------------- #
 # Claim helpers (atomic-claim preference, issue #306)
 # ---------------------------------------------------------------------- #
+
+def _is_reconstruction_backed(step) -> bool:
+    """True when this step's equations were reconstructed from context, not extracted.
+
+    DerivationChainAgent marks such steps in ``review_reason``; an equation record
+    carries the same fact in ``confidence_policy.must_not_treat_as_source_extracted``
+    (the step marker exists precisely so downstream readers, which do not see the
+    equation records, can tell). A reconstructed equation is a reading of the paper,
+    not a quotation of it, so it must not push a node or edge to ``source_backed``.
+    """
+    if str(getattr(step, "review_reason", "") or "").strip() == RECONSTRUCTION_BACKED_STEP_REASON:
+        return True
+    policy = getattr(step, "confidence_policy", None)
+    if isinstance(policy, dict):
+        return bool(policy.get("must_not_treat_as_source_extracted"))
+    return bool(getattr(policy, "must_not_treat_as_source_extracted", False))
+
+
+def _records_are_reconstruction_backed(records: list[dict]) -> bool:
+    """True when **every** equation-carrying member step is reconstruction-backed.
+
+    A group that also holds one genuinely extracted step keeps its normal backing —
+    only a node whose equation evidence is reconstructed throughout is capped.
+    """
+    with_equations = [rec for rec in records if rec["inputs"] or rec["outputs"]]
+    if not with_equations:
+        return False
+    return all(_is_reconstruction_backed(rec["step"]) for rec in with_equations)
+
+
+def _step_refs(rec: dict) -> list[str]:
+    """Both references for a step: the bare ``step_id`` and the document-unique ref.
+
+    The bare ID keeps old readers (and the derivation artifact index, which is keyed
+    by ``step_id``) working; the composite ``"{derivation_id}:{step_id}"`` is what
+    the persisted row is keyed by, so a reader can resolve either.
+    """
+    return _ordered_unique([rec.get("step_id"), rec.get("step_ref")])
+
 
 def _step_claim_ids(step) -> list[str]:
     return (
@@ -1103,6 +1204,12 @@ def _component_support_records(components: ComponentAssemblyResult | None) -> li
                 getattr(comp, "linked_derivation_ids", []) or []
             ),
             "linked_equation_ids": eq_ids,
+            # Claim backing is the only link a claim-chain component has (its
+            # linked_derivation_ids / linked_equation_ids are empty), so it is
+            # what step ↔ component matching has to use there.
+            "linked_claim_ids": _ordered_unique(
+                getattr(comp, "linked_claim_ids", []) or []
+            ),
             "operation": str(getattr(comp, "operation", "") or ""),
             "support_role": str(getattr(comp, "support_role", "") or ""),
             "supports_claim_ids": list(getattr(comp, "supports_claim_ids", []) or []),
@@ -1183,6 +1290,22 @@ def _linked_components_for_step(
     chain_component_ids: list[str],
     component_records: list[dict],
 ) -> list[str]:
+    """Components this derivation step belongs to.
+
+    Four independent matches, any of which links the step to a component:
+
+    1. the chain declares the component (``linked_component_ids``),
+    2. the component declares the chain (``derivation_id``),
+    3. the component declares the step,
+    4. the step's equations or **claims** overlap the component's.
+
+    (4)'s claim half matters for claim chains: a chain built from claims carries no
+    equation IDs at all, so matches 2–4-by-equation are all empty and every detail
+    node used to end up with no component (hence no ``parent_component_id``, no
+    ``representative_component_id``, and an ``orphan_detail_node`` reason on every
+    node). The assembled components do carry ``linked_claim_ids``, so the step's
+    input / output / required claims are the link that exists in that case.
+    """
     step_id = str(getattr(step, "step_id", "") or "")
     step_eqs = set(
         _ordered_unique(
@@ -1190,14 +1313,17 @@ def _linked_components_for_step(
             + list(getattr(step, "output_equation_ids", []) or [])
         )
     )
+    step_claims = set(_ordered_unique(_step_claim_ids(step)))
     linked = list(chain_component_ids)
     for rec in component_records:
         derivation_ids = set(rec["linked_derivation_ids"])
         equation_ids = set(rec["linked_equation_ids"])
+        claim_ids = set(rec.get("linked_claim_ids") or [])
         if (
             derivation_id in derivation_ids
             or step_id in derivation_ids
             or bool(step_eqs & equation_ids)
+            or bool(step_claims & claim_ids)
         ):
             linked.append(rec["component_id"])
     return _ordered_unique(linked)

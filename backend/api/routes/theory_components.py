@@ -59,6 +59,7 @@ from core.deliberation.graph_dialogue import APPROVED_REVIEW_STATUSES
 from core.deliberation.refs import document_run_artifacts
 from core.document_pipeline.persistence import document_run_cartridge_id
 from core.document_sections import build_document_structure, detect_section_heading, enrich_chunks_with_sections
+from core.knowledge_objects.references import claim_ref_variants, normalize_claim_ref
 from core.postgres import get_session as _pg_session
 from core.cartridges import load_cartridge
 from core.llm import generate_text, generate_text_with_structured_output, get_llm_params
@@ -1243,14 +1244,104 @@ def _propagate_rejected_component(component_id: str) -> None:
         session.close()
 
 
-def _refs_present(item: dict) -> bool:
+def _refs_present(
+    item: dict,
+    *,
+    reconstructed_equation_ids: frozenset[str] = frozenset(),
+) -> bool:
+    """項目（dict 形）に「論文まで辿れる参照」があるか。
+
+    :func:`_item_source_present`（TheoryComponentOut 形）と**同じ読み**にする — PUT
+    経路（``_validate_for_review``）と approve 経路（``_component_approval_problems``）で
+    出典の綴りの扱いが違うと、どちらかからだけ承認できる非対称が復活する
+    （2026-09-19 レビュー R-3）。``equation_ids`` は復元由来の式（``reconstructed_
+    equation_ids``）しか指していなければ出典に数えない — 復元式は論文の引用ではない。
+    """
     refs = item.get("source_refs")
-    return isinstance(refs, list) and any(isinstance(ref, dict) and ref.get("chunk_id") for ref in refs)
+    if isinstance(refs, list) and any(isinstance(ref, dict) and ref.get("chunk_id") for ref in refs):
+        return True
+    if item.get("evidence_claims") or item.get("claim_ids"):
+        return True
+    return _has_extracted_equation_source(item.get("equation_ids"), reconstructed_equation_ids)
 
 
-def _validation_warnings(payload: dict) -> list[dict]:
+def _has_extracted_equation_source(
+    equation_ids: object,
+    reconstructed_equation_ids: frozenset[str],
+) -> bool:
+    """``equation_ids`` のうち、復元由来ではない式が1つでもあるか。"""
+    if not isinstance(equation_ids, (list, tuple)):
+        return False
+    for eq_id in equation_ids:
+        text = str(eq_id or "").strip()
+        if text and text not in reconstructed_equation_ids:
+            return True
+    return False
+
+
+def _reconstructed_equation_ids_for_document(document_id: str | None) -> frozenset[str]:
+    """採用 run の ``equation_semantics`` artifact から、復元由来の式 ID 集合を引く。
+
+    復元由来 = ``confidence_policy.must_not_treat_as_source_extracted`` が真の式
+    （PDF 由来で AI が文脈から復元した LaTeX）。承認可能性の判定で ``equation_ids``
+    だけを出典に持つ項目を「論文まで辿れる」と数えないために使う。読み取りのみ・
+    取れなければ空集合（＝従来どおり全ての式を出典に数える fail-soft ではなく、
+    復元判定ができないだけ。列は書き換えない）。
+    """
+    doc_id = str(document_id or "").strip()
+    if not doc_id:
+        return frozenset()
+    try:
+        artifacts = document_run_artifacts(doc_id)
+    except Exception:
+        logger.debug("approval gate: equation_semantics artifact unavailable", exc_info=True)
+        return frozenset()
+    payload = artifacts.get("equation_semantics") if isinstance(artifacts, dict) else None
+    records = payload.get("equations") if isinstance(payload, dict) else None
+    out: set[str] = set()
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        policy = record.get("confidence_policy")
+        if isinstance(policy, dict) and policy.get("must_not_treat_as_source_extracted"):
+            eq_id = str(record.get("equation_id") or "").strip()
+            if eq_id:
+                out.add(eq_id)
+    return frozenset(out)
+
+
+def _payload_backing_claim_ids(payload: dict) -> list[str]:
+    """dict 形 payload の根拠 claim id（:func:`_component_backing_claim_ids` の dict 版）。"""
+    ids: list[str] = list(payload.get("evidence_claims") or [])
+    for field_name in ("inputs", "outputs", "preconditions", "constraints", "invalid_conditions"):
+        for item in payload.get(field_name) or []:
+            if not isinstance(item, dict):
+                continue
+            ids.extend(item.get("evidence_claims") or [])
+            ids.extend(item.get("claim_ids") or [])
+    return sorted({str(i).strip() for i in ids if str(i or "").strip()})
+
+
+def _payload_document_id(payload: dict) -> str:
+    scope = payload.get("source_scope")
+    if isinstance(scope, dict):
+        return str(scope.get("document_id") or "").strip()
+    return str(getattr(scope, "document_id", "") or "").strip()
+
+
+def _validation_warnings(
+    payload: dict,
+    *,
+    reconstructed_equation_ids: frozenset[str] = frozenset(),
+    derived_source_chunk_ids: list[str] | None = None,
+) -> list[dict]:
+    """非 blocking も含む警告一覧（承認時の blocking 判定は ``_validate_for_review``）。
+
+    ``derived_source_chunk_ids`` は ``source_chunks`` が空のときに根拠 claim から引いた
+    出典チャンク（approve 経路の ``_component_derived_source_chunk_ids`` と同じ読み）。
+    """
     warnings: list[dict] = []
-    if not payload.get("source_chunks"):
+    if not payload.get("source_chunks") and not derived_source_chunk_ids:
         warnings.append({"field": "source_chunks", "message": "コンポーネント全体の出典チャンクがありません。"})
     if not payload.get("inputs"):
         warnings.append({"field": "inputs", "message": "入力が未設定です。"})
@@ -1260,7 +1351,9 @@ def _validation_warnings(payload: dict) -> list[dict]:
         for idx, item in enumerate(payload.get(field) or []):
             if not isinstance(item, dict):
                 continue
-            if item.get("needs_source") or not _refs_present(item):
+            if item.get("needs_source") or not _refs_present(
+                item, reconstructed_equation_ids=reconstructed_equation_ids
+            ):
                 warnings.append({
                     "field": f"{field}.{idx}",
                     "message": f"{item.get('label') or field} には出典がありません。",
@@ -1269,7 +1362,20 @@ def _validation_warnings(payload: dict) -> list[dict]:
 
 
 def _validate_for_review(payload: dict) -> None:
-    warnings = _validation_warnings(payload)
+    """PUT 承認経路の blocking 判定。approve 経路 ``_component_approval_problems`` と同じ読み。
+
+    出典の綴り（``claim_ids`` / ``equation_ids``）・根拠 claim からの出典チャンク導出・
+    復元式の除外を**両経路で揃える**（R-3）。弁そのものは緩めない。
+    """
+    reconstructed = _reconstructed_equation_ids_for_document(_payload_document_id(payload))
+    derived: list[str] | None = None
+    if not payload.get("source_chunks"):
+        derived = _derived_source_chunk_ids_for_claims(_payload_backing_claim_ids(payload))
+    warnings = _validation_warnings(
+        payload,
+        reconstructed_equation_ids=reconstructed,
+        derived_source_chunk_ids=derived,
+    )
     blocking = [w for w in warnings if w["field"] in ("source_chunks", "inputs", "outputs") or "." in w["field"]]
     if not str(payload.get("name") or "").strip():
         blocking.append({"field": "name", "message": "名前が空です。"})
@@ -2467,6 +2573,14 @@ def _resolve_claim_reference_index(
     # 参照有無に関わらず全キーを控える（artifact 由来 claim の親 claim 解決に使う。
     # claim ごとの追加 SQL は発行しない）。
     db_by_key: dict[str, tuple[str, str]] = {}
+    # thesis_reconstruction / dsl_linking の参照は ``claim:{block_id}:{span_id}`` と
+    # 接頭辞付き、``theory_claims.source_scope.legacy_ids`` は接頭辞なしで持つ。素の
+    # 文字列で突合すると「行はあるのに未解決」になるので、正規化した綴りで引き当てて
+    # から**元の綴りのキー**で索引に載せる（呼び出し側は graph 上の綴りで引く）。
+    # 正規化の正本は core/knowledge_objects/references.py。
+    refs_by_normalized: dict[str, list[str]] = {}
+    for ref in ref_ids:
+        refs_by_normalized.setdefault(normalize_claim_ref(ref), []).append(str(ref))
     for row in rows:
         claim_uuid = str(row[0])
         text = str(row[1] or "")
@@ -2484,14 +2598,16 @@ def _resolve_claim_reference_index(
             if isinstance(legacy_ids, list):
                 candidate_keys.update(str(v) for v in legacy_ids if v)
         for key in candidate_keys:
-            db_by_key.setdefault(key, (claim_uuid, review_status))
-        for key in candidate_keys & ref_ids:
-            index[key] = {
-                "claim_id": claim_uuid,
-                "text": snippet,
-                "review_status": review_status,
-                "resolution": "db",
-            }
+            for variant in claim_ref_variants(key):
+                db_by_key.setdefault(variant, (claim_uuid, review_status))
+        for key in candidate_keys:
+            for ref in refs_by_normalized.get(normalize_claim_ref(key), ()):
+                index[ref] = {
+                    "claim_id": claim_uuid,
+                    "text": snippet,
+                    "review_status": review_status,
+                    "resolution": "db",
+                }
 
     unresolved = {ref for ref in ref_ids if ref not in index}
     if unresolved and isinstance(artifacts, dict) and artifacts:
@@ -2542,11 +2658,17 @@ def _resolve_artifact_claim_reference_index(
     known_ids = {
         str(r.get("claim_id") or "") for r in records if isinstance(r, dict)
     }
+    # DB 側と同じ理由（``claim:`` 接頭辞の有無）で、正規化した綴りで引き当ててから
+    # 元の綴りのキーで載せる。
+    refs_by_normalized: dict[str, list[str]] = {}
+    for ref in ref_ids:
+        refs_by_normalized.setdefault(normalize_claim_ref(ref), []).append(str(ref))
     for record in records:
         if not isinstance(record, dict):
             continue
         claim_id = str(record.get("claim_id") or "")
-        if not claim_id or claim_id not in ref_ids:
+        matched_refs = refs_by_normalized.get(normalize_claim_ref(claim_id), ()) if claim_id else ()
+        if not matched_refs:
             continue
         text = str(record.get("text") or "").strip() or str(record.get("normalized_text") or "")
         parent_uuid = ""
@@ -2556,14 +2678,17 @@ def _resolve_artifact_claim_reference_index(
         if isinstance(source_span_ids, list):
             parent_candidates.extend(str(v) for v in source_span_ids if v)
         for candidate in parent_candidates:
-            if candidate and candidate in db_by_key:
-                parent_uuid, parent_review_status = db_by_key[candidate]
+            for variant in claim_ref_variants(candidate):
+                if variant in db_by_key:
+                    parent_uuid, parent_review_status = db_by_key[variant]
+                    break
+            if parent_uuid:
                 break
         origin = _artifact_claim_origin(claim_id, record, known_ids)
         if origin == _CLAIM_ORIGIN_EQUATION_SYNTHESIS:
             # 旧 artifact（生成時に ``$`` を付けていなかった run）の救済。
             text = _delimit_synth_claim_math(text, _artifact_claim_concept_names(record))
-        index[claim_id] = {
+        entry = {
             # DB 行が無いので承認 API の対象にならない（UI は claim_id 空で判別する）。
             "claim_id": "",
             "text": _truncate_reference_text(text),
@@ -2575,6 +2700,8 @@ def _resolve_artifact_claim_reference_index(
             "parent_claim_id": parent_uuid,
             "parent_review_status": parent_review_status,
         }
+        for ref in matched_refs:
+            index[ref] = dict(entry)
     return index
 
 
@@ -2649,14 +2776,21 @@ def _resolve_derivation_reference_index(artifacts: dict, ref_ids: set[str]) -> d
             if not isinstance(step, dict):
                 continue
             step_id = str(step.get("step_id") or "")
-            if not step_id or step_id not in ref_ids:
+            if not step_id:
                 continue
-            operation = str(step.get("operation") or "")
-            index[step_id] = {
+            # ``step_001`` はチェーン内でしか一意でないため、保存済みの step 行
+            # （``knowledge_derivation_steps.agent_step_id``）と graph は
+            # ``{derivation_id}:{step_id}`` の合成 ID でも指す。どちらの綴りでも
+            # 解決できるようにする（規則の正本は
+            # core/knowledge_objects/stable_key.py::derivation_step_agent_id）。
+            entry = {
                 "label": _derivation_step_label(step, step_id),
                 "kind": "step",
-                "operation": operation,
+                "operation": str(step.get("operation") or ""),
             }
+            for key in {step_id, f"{derivation_id}:{step_id}" if derivation_id else step_id}:
+                if key in ref_ids:
+                    index[key] = dict(entry)
     return index
 
 
@@ -3284,30 +3418,46 @@ def _paper_layer_figure_rows(document_id: str) -> list[dict]:
 
 
 def _paper_layer_explanation_rows(document_id: str) -> list[dict]:
-    """component の contextual 説明（approved 優先・candidate も status 付きで返す）。
+    """contextual 説明（approved 優先・candidate も status 付きで返す）。
+
+    component だけでなく **claim / 式の説明行も渡す**（設計 §5.2 の「ノードの論文側の
+    顔」。実データでは説明行の多くが claim / 式に付いており、component の説明が
+    1件も無い論文ではノード詳細の説明が常に空だった）。どの要素の説明かは
+    ``element_type`` で渡し、束ね方は core 側（``_PaperIndex``）が決める。
 
     ``element_explanations.document_id`` は UUID 列なので、UUID でない参照
     （source_path 等）ではクエリ自体を投げない（DataError → 500 の回避）。
     """
     if not _is_db_uuid(document_id):
         return []
+    from core.graph_paper_layer.schema import EXPLANATION_ELEMENT_TYPES
+
+    element_types = list(EXPLANATION_ELEMENT_TYPES)
+    placeholders = ", ".join(f":element_type_{i}" for i in range(len(element_types)))
+    params: dict[str, Any] = {"document_id": document_id}
+    params.update({f"element_type_{i}": t for i, t in enumerate(element_types)})
     session = _pg_session()
     try:
         rows = session.execute(
-            sa_text("""
-                SELECT element_id, body, status
+            sa_text(f"""
+                SELECT element_id, element_type, body, status
                 FROM element_explanations
                 WHERE document_id = CAST(:document_id AS uuid)
-                  AND element_type = 'theory_component'
+                  AND element_type IN ({placeholders})
                   AND kind = 'contextual'
                   AND status IN ('approved', 'candidate')
             """),
-            {"document_id": document_id},
+            params,
         ).fetchall()
     finally:
         session.close()
     return [
-        {"element_id": row.element_id, "body": row.body, "status": row.status}
+        {
+            "element_id": row.element_id,
+            "element_type": row.element_type,
+            "body": row.body,
+            "status": row.status,
+        }
         for row in rows
     ]
 
@@ -3604,18 +3754,65 @@ _APPROVAL_FIELD_LABELS = {
 }
 
 
-def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
+def _item_source_present(
+    item: Any,
+    *,
+    reconstructed_equation_ids: frozenset[str] = frozenset(),
+) -> bool:
+    """項目に「論文まで辿れる参照」が1つでもあるか。
+
+    教員が手で編集した項目は ``source_refs`` / ``evidence_claims`` を持つが、
+    パイプラインが作った項目は同じ根拠を ``claim_ids``（claim の DB UUID）/
+    ``equation_ids``（式の agent ID）で持つ。綴りが違うだけで指している先は同じ
+    「論文の中の場所」なので、どちらも出典として数える。**出典必須という弁自体は
+    緩めない**（4キーとも空の項目は従来どおり承認できない）。ただし ``equation_ids``
+    が復元由来の式（``reconstructed_equation_ids``）しか指していなければ出典に数えない —
+    復元式は AI の読みであって論文の引用ではない（R-3）。
+    """
+    for key in ("source_refs", "evidence_claims", "claim_ids"):
+        if getattr(item, key, None):
+            return True
+    return _has_extracted_equation_source(
+        getattr(item, "equation_ids", None), reconstructed_equation_ids
+    )
+
+
+def _component_approval_problems(
+    component: TheoryComponentOut,
+    *,
+    derived_source_chunk_ids: list[str] | None = None,
+    reconstructed_equation_ids: frozenset[str] | None = None,
+) -> list[str]:
     """承認できない理由の事実文一覧を返す（空なら承認可）。
 
     基準は PUT 承認経路の ``_validate_for_review`` の blocking 集合
     （name / source_chunks / inputs / outputs / 各項目の出典）と揃える —
     グラフレビューからだけ緩く承認できる非対称を作らない（2026-08-29 レビュー是正）。
+
+    出典の**綴り**だけは読み時に広げる（2026-09-19）。パイプラインが作った component は
+    ``source_chunks`` が空・``primary_chunk_id`` が NULL で、各項目の根拠は
+    ``claim_ids`` / ``equation_ids`` に入る。文字どおりに読むと 1 件も承認できないが、
+    根拠そのものは存在するので、
+
+    - 項目の出典は :func:`_item_source_present` の4キーのいずれか、
+    - コンポーネント全体の出典チャンクは ``source_chunks`` **または**根拠 claim から
+      引いたチャンク（:func:`_component_derived_source_chunk_ids`。``None`` を渡すと
+      ここで解決する。テストは解決済みの list を渡して DB を避けられる）、
+
+    で判定する。列は書き換えない（読み時の判定だけ・migration なし）。
     """
     problems: list[str] = []
     if not str(component.name or "").strip():
         problems.append("名前が空です")
+    if reconstructed_equation_ids is None:
+        reconstructed_equation_ids = _reconstructed_equation_ids_for_document(
+            _component_document_id(component)
+        )
     if not component.source_chunks:
-        problems.append("出典チャンク（source_chunks）が未設定です")
+        if derived_source_chunk_ids is None:
+            derived_source_chunk_ids = _component_derived_source_chunk_ids(component)
+        if not derived_source_chunk_ids:
+            problems.append("出典チャンク（source_chunks）が未設定です")
     if not component.inputs:
         problems.append("入力（inputs）が未設定です")
     if not component.outputs:
@@ -3626,12 +3823,47 @@ def _component_approval_problems(component: TheoryComponentOut) -> list[str]:
             if getattr(item, "needs_source", None):
                 problems.append(f"{label}に出典未確定（needs_source）の項目があります")
                 break
-            source_refs = getattr(item, "source_refs", None) or []
-            evidence_claims = getattr(item, "evidence_claims", None) or []
-            if not source_refs and not evidence_claims:
+            if not _item_source_present(
+                item, reconstructed_equation_ids=reconstructed_equation_ids
+            ):
                 problems.append(f"{label}に出典（source_refs / evidence_claims）の無い項目があります")
                 break
     return problems
+
+
+def _component_derived_source_chunk_ids(component: TheoryComponentOut) -> list[str]:
+    """根拠 claim（DB UUID）から引いた出典チャンク ID（読み取りのみ・fail-soft）。
+
+    パイプラインの component は ``source_chunks`` が空だが、根拠 claim は
+    ``theory_claims_live.chunk_id`` を持つ。承認可能性の判定で「コンポーネント全体の
+    出典」として使う。**DB は書き換えない**（列の中身は解析結果のまま残す）。
+    取得できないときは空リスト（＝従来どおり「未設定」と判定される）。
+    """
+    return _derived_source_chunk_ids_for_claims(_component_backing_claim_ids(component))
+
+
+def _derived_source_chunk_ids_for_claims(backing_claim_ids: list[str]) -> list[str]:
+    """根拠 claim id の列から出典チャンク ID を引く（PUT / approve の両経路で共有）。"""
+    claim_ids = [cid for cid in backing_claim_ids if _is_db_uuid(cid)]
+    if not claim_ids:
+        return []
+    placeholders = ", ".join(f"CAST(:claim_{i} AS uuid)" for i in range(len(claim_ids)))
+    params = {f"claim_{i}": cid for i, cid in enumerate(claim_ids)}
+    session = _pg_session()
+    try:
+        rows = session.execute(
+            sa_text(
+                "SELECT DISTINCT chunk_id::text FROM theory_claims_live "
+                f"WHERE id IN ({placeholders}) AND chunk_id IS NOT NULL"
+            ),
+            params,
+        ).fetchall()
+    except Exception:
+        logger.debug("approval gate: derived source chunks unavailable", exc_info=True)
+        return []
+    finally:
+        session.close()
+    return sorted({str(row[0]) for row in rows if row[0]})
 
 
 # 確定文脈（DC2）— 単発の承認を覆す実際の経路。どちらも status 遷移だけで行を消さない。
@@ -3677,12 +3909,15 @@ def _component_backing_claim_ids(component: TheoryComponentOut) -> list[str]:
     """承認画面が根拠として並べる claim id（コンポーネント全体 + 各項目の evidence）。
 
     承認可能性の判定（`_component_approval_problems`）が読むのと同じ集合。順序は
-    重複除去のうえ安定させる（監査行の差分が読めるように）。
+    重複除去のうえ安定させる（監査行の差分が読めるように）。項目側は教員が編集した
+    ``evidence_claims`` と、パイプラインが書く ``claim_ids`` の**両方**を読む
+    （:func:`_item_source_present` と同じ綴りの扱い）。
     """
     ids: list[str] = list(getattr(component, "evidence_claims", None) or [])
     for field_name in _APPROVAL_EVIDENCE_FIELDS:
         for item in getattr(component, field_name, None) or []:
             ids.extend(getattr(item, "evidence_claims", None) or [])
+            ids.extend(getattr(item, "claim_ids", None) or [])
     return sorted({str(i).strip() for i in ids if str(i or "").strip()})
 
 

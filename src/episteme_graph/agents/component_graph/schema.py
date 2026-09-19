@@ -73,7 +73,18 @@ REVIEW_REASONS = [
     # Issue #358: two-layer linkage gaps recorded on the node itself.
     "orphan_detail_node",
     "empty_main_node",
+    # The only equations backing this node/edge were reconstructed from context by
+    # the AI rather than extracted from the paper, so the structure is kept but
+    # never confirmed (a human decides). See RECONSTRUCTION_BACKED_STEP_REASON.
+    "reconstructed_equation_backing",
 ]
+
+#: Marker a derivation step carries in ``review_reason`` when the equations it uses
+#: were reconstructed from context instead of extracted from the paper. The value is
+#: produced by DerivationChainAgent (``RECONSTRUCTION_BACKED_REASON``); the two are
+#: pinned to each other by a test. Refusing to confirm on such backing is this
+#: module's responsibility.
+RECONSTRUCTION_BACKED_STEP_REASON = "reconstructed_equation_backing"
 
 # Edge types that are too generic to publish as confirmed theory structure.
 GENERIC_EDGE_TYPES = {"related_to", "correlates", "supports", "transforms", "relate"}
@@ -159,6 +170,25 @@ _EDGE_TYPE_TO_STAGE = {
     # entry never promotes a generic step to the main graph).
     "transforms": THEORY_STAGE_EQUATION_SYSTEM,
 }
+
+
+def derivation_step_ref(derivation_id: str, step_id: str) -> str:
+    """Document-unique reference for a derivation step: ``"{derivation_id}:{step_id}"``.
+
+    A step's ``step_id`` (``step_001`` …) is only unique *within* its chain — every
+    chain restarts the numbering — so a bare ``step_id`` in the graph cannot be
+    matched to one specific step of the document. Downstream readers therefore
+    address a step by this composite form.
+
+    Graph nodes / edges keep the bare ``step_id`` as well (older graphs and the
+    derivation artifact index are keyed by it); the composite is emitted *next to*
+    it so a reader can resolve either spelling.
+    """
+    chain = str(derivation_id or "").strip()
+    step = str(step_id or "").strip()
+    if not chain:
+        return step
+    return f"{chain}:{step}" if step else chain
 
 
 def stage_for_edge_type(edge_type: str) -> str:
@@ -448,6 +478,12 @@ class ComponentGraphEdge:
     # "" non-polar). Mirrors DSLEdge.polarity; carried to the UI so polarity is
     # visualised from the field, never guessed from the relation label string.
     polarity: str = ""
+    # Graph layer of the edge, mirroring ComponentGraphNode.graph_layer (issue #306).
+    # Nodes carried the layer from the start but edges did not, so a reader could
+    # only infer an edge's layer from its endpoints. Main-graph edges are "main",
+    # per-step edges "equation_detail", and edges touching a fallback/inferred node
+    # "debug".
+    graph_layer: str = GRAPH_LAYER_MAIN
 
 
 
@@ -550,6 +586,7 @@ class ComponentGraphResult:
                     "review_status": e.review_status,
                     "review_reasons": e.review_reasons,
                     "polarity": e.polarity,
+                    "graph_layer": e.graph_layer,
                     "evidence": {
                         "evidence_claims": e.evidence_claims,
                         "evidence_equation_ids": e.evidence_equation_ids,
