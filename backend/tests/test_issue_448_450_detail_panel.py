@@ -220,6 +220,7 @@ eval(extract("function lsGraphNodeGroup(node)"));
 eval(extract("function lsGraphRoleLabel(node)"));
 eval(extract("function lsGraphBuildResolver(graph)"));
 eval(extract("function lsGraphSnippet(text, max)"));
+eval(extract("function lsGraphStripMathDelimiters(text)"));
 eval(extract("function lsGraphResolveRef(resolver, kind, id)"));
 eval(extract("function lsGraphUniqueIds(ids)"));
 eval(extract("function lsGraphRefItem(resolver, kind, id, relationLabel, unresolved)"));
@@ -316,7 +317,7 @@ eval(extractVar("var LS_GRAPH_REF_ELEMENT_TYPES = {"));
 eval(extractArrayVar("var LS_GRAPH_DELIBERABLE_ELEMENT_TYPES = ["));
 eval(extractArrayVar("var LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES = ["));
 var names=["lsGraphEdgeLabel","lsGraphSourceBackingLabel","lsGraphReviewReasonLabel",
-  "lsGraphBuildResolver","lsGraphSnippet","lsGraphResolveRef","lsGraphUniqueIds",
+  "lsGraphBuildResolver","lsGraphSnippet","lsGraphStripMathDelimiters","lsGraphResolveRef","lsGraphUniqueIds",
   "lsGraphRefItem","lsGraphPushRefItems","lsGraphUnresolvedNote","lsGraphEdgeToCardDto",
   "lsGraphBackingBadge","lsGraphMountCard","lsGraphEdgeSystemInfoHtml","lsRenderGraphEdgeDetail"];
 eval(names.map(extractFn).join("\n\n"));

@@ -119,7 +119,7 @@ function lsGraphActiveDocumentId(){ return "doc-1"; }
 eval(extractVar(src, "LS_GRAPH_REF_ELEMENT_TYPES"));
 eval(extractArrayVar(src, "LS_GRAPH_DELIBERABLE_ELEMENT_TYPES"));
 eval(extractArrayVar(src, "LS_GRAPH_DOCUMENT_SCOPED_ELEMENT_TYPES"));
-eval(extractMany(src, ["lsGraphBuildResolver","lsGraphSnippet","lsGraphResolveRef",
+eval(extractMany(src, ["lsGraphBuildResolver","lsGraphSnippet","lsGraphStripMathDelimiters","lsGraphResolveRef",
   "lsGraphUniqueIds","lsGraphRefItem","lsGraphUnresolvedNote"]));
 
 const graph = {

@@ -718,9 +718,11 @@ class TestCapabilityApiPathsExist:
     def _app_routes(self):
         pytest.importorskip("fastapi")
         from api.main import app
+        from tests.guardrail_helpers import iter_app_routes
 
         routes = set()
-        for route in app.routes:
+        # FastAPI 0.139+ の遅延ラッパーと prefix を吸収する共通ヘルパー経由で歩く（素の app.routes を歩かない）
+        for route in iter_app_routes(app):
             path = getattr(route, "path", "")
             if not path:
                 continue

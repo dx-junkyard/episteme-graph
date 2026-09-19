@@ -830,10 +830,11 @@ class TestRouterRegistration:
 
     def test_routes_are_mounted_under_admin_discovery(self):
         from api.main import app
+        from tests.guardrail_helpers import iter_app_routes
 
         paths = {
-            (tuple(sorted(getattr(route, "methods", []) or [])), route.path)
-            for route in app.routes
+            (tuple(sorted(m for m in (getattr(route, "methods", []) or []) if m != "HEAD")), route.path)
+            for route in iter_app_routes(app)
             if "/api/admin/discovery" in getattr(route, "path", "")
         }
         assert (("GET",), "/api/admin/discovery/subscriptions") in paths

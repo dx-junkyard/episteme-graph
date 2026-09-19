@@ -289,7 +289,9 @@ class TestPermissions:
 
     def test_no_learning_route_is_registered(self, env):
         """PR8: 学習者向けのレーダー系ルートを作らない。"""
-        paths = {getattr(route, "path", "") for route in env["client"].app.routes}
+        from tests.guardrail_helpers import iter_app_routes
+
+        paths = {getattr(route, "path", "") for route in iter_app_routes(env["client"].app)}
         assert not [p for p in paths if p.startswith("/api/learning") and "radar" in p]
 
 

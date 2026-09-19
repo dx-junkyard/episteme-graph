@@ -127,10 +127,9 @@ def test_accept_switches_active_and_rebuilds_projection_atomically(pg):
         claims = s.execute(text("SELECT count(*) FROM theory_claims WHERE document_id = :d"),
                            {"d": doc_id}).fetchone()[0]
         assert claims == 1
-        stage_outputs = s.execute(text(
-            "SELECT stage_outputs FROM document_analysis_runs WHERE id = CAST(:r AS uuid)"
-        ), {"r": rev}).fetchone()[0]
-        artifacts = stage_outputs["_artifacts"]
+        # Phase 1（migration 079）以降、artifact は document_analysis_artifacts 表が正本で
+        # stage_outputs 列には残らない。読み手の契約どおり getter（hydrate 済み）で読む。
+        artifacts = persistence.get_analysis_run(run_id=rev)["stage_outputs"]["_artifacts"]
         assert artifacts["claim_object_builder"]["claims"][0]["text"] == "A"
         assert artifacts["candidate"]["candidate_artifacts"]["claim_object_builder"]
         assert artifacts["diff_report"]["summary"]["acceptable"] is True

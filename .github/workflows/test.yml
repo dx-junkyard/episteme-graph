@@ -42,6 +42,15 @@ jobs:
       - name: Install dependencies
         run: pip install -r api/requirements.txt
 
+      # 依存の版はローカルと CI でずれ得る（2026-09-19: FastAPI 0.141 で app.routes の形が変わり
+      # 登録検査 10 件が CI だけ落ちた）。再現のためにログへ主要な版と node の有無を残す。
+      - name: Show tool versions
+        run: |
+          python --version
+          pip list 2>/dev/null | grep -iE "^(fastapi|starlette|pydantic|sqlalchemy|psycopg2)" || true
+          node --version || echo "node: not available"
+          psql --version
+
       # 正本は backend/db/*.sql。2 つの実行経路の両方で流す:
       #  1) psql — ファイルが plain SQL として読めること（docker の initdb と同じ経路）と、
       #     フレッシュ DB への番号順全適用を検証する。
