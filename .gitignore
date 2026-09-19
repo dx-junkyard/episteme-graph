@@ -213,3 +213,7 @@ __marimo__/
 # GCP
 .gcp/
 .DS_Store
+
+# Codex の作業ディレクトリ（ローカル生成物。リポジトリ管理外）
+.codex-build/
+.codex-finalizer/
