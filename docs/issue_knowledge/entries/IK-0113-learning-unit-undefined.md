@@ -53,6 +53,9 @@ resolution:
     - backend/core/knowledge_objects/learning_units.py
     - backend/core/course_units.py
     - docs/features/learning_units_design.md §12.1
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified: []
 related: [IK-0114, IK-0122]
 view_of: []
 history:

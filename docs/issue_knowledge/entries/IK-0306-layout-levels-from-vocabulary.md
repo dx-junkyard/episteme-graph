@@ -56,6 +56,9 @@ resolution:
     - frontend/public/js/admin-lecture-studio.js
     - frontend/public/js/admin-graph-review.js
     - docs/features/graph_dialogue_review_design.md §17
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0303]
 view_of: []
 history:

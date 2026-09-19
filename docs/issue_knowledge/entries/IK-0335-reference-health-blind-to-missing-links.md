@@ -50,6 +50,10 @@ resolution:
     - backend/core/reference_health.py
     - backend/core/coverage_facts.py
     - backend/api/routes/admin.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0333, IK-0334]
 view_of: []
 history: []

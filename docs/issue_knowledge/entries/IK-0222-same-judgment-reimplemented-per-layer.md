@@ -60,6 +60,9 @@ resolution:
     - backend/core/label_vocab.py
     - backend/core/document_pipeline/orchestrator.py
     - docs/features/candidate_flow_design.md
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0218, IK-0220]
 view_of: [IK-0314]
 pattern: duplicate-canonical-sources

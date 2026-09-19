@@ -59,6 +59,11 @@ resolution:
     - backend/core/document_pipeline/persistence.py
     - backend/core/learner_context_common.py
     - frontend/public/js/app.js
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
+      - docker で組み上げた実機での E2E
 related: [IK-0320, IK-0019, IK-0304]
 view_of: []
 history: []

@@ -51,6 +51,9 @@ resolution:
   landed_in:
     - backend/tests/test_knowledge_objects_guardrails.py
     - docs/features/knowledge_objects_design.md §12.2
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0105]
 view_of: []
 history:

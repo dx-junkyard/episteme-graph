@@ -51,6 +51,9 @@ resolution:
   landed_in:
     - src/episteme_graph/agents/alias_matching.py
     - docs/architecture/knowledge_structure_review_2026-09-12.md §4 Phase 0 実装記録
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0104, IK-0116]
 view_of: []
 history:

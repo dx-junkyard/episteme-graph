@@ -53,6 +53,10 @@ resolution:
   landed_in:
     - backend/core/knowledge_objects/sync.py
     - docs/features/knowledge_objects_design.md §12.1
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0106, IK-0109, IK-0110]
 view_of: [IK-0002, IK-0109]
 history:

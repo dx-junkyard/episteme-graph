@@ -47,6 +47,11 @@ resolution:
   landed_in:
     - backend/core/knowledge_objects/learning_units.py
     - backend/core/course_units.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
+      - docker で組み上げた実機での E2E
 related: [IK-0113]
 view_of: []
 history: []

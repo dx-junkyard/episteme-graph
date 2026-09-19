@@ -53,6 +53,9 @@ resolution:
   landed_in:
     - backend/core/learning_experience.py
     - docs/backend/rag-chat.md
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0209]
 view_of: []
 pattern: condition-not-propagated

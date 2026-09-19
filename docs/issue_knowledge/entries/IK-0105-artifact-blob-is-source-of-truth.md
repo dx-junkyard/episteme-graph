@@ -55,6 +55,10 @@ resolution:
     - backend/core/document_pipeline/persistence.py
     - backend/db/079_analysis_artifacts.sql
     - docs/features/knowledge_objects_design.md §12.1
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0106, IK-0107, IK-0122]
 view_of: [IK-0019, IK-0304]
 history:

@@ -52,6 +52,10 @@ resolution:
     - backend/core/course_units.py
     - backend/core/library/identity_candidates.py
     - backend/api/routes/doubt.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 実 DB（docker）での E2E（docker 復帰後）
 related: [IK-0116]
 view_of: []
 history:

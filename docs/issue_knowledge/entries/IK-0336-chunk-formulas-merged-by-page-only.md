@@ -47,6 +47,10 @@ resolution:
   landed_in:
     - backend/core/document_pipeline/persistence.py
     - backend/tests/test_equation_preview_scope.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0328]
 view_of: []
 history: []

@@ -42,6 +42,10 @@ resolution:
   landed_in:
     - src/episteme_graph/agents/rhetorical_role/repair.py
     - src/tests/agents/rhetorical_role/test_offset_correction.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0331]
 view_of: []
 history: []

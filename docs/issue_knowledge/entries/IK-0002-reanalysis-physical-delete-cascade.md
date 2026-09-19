@@ -55,6 +55,10 @@ resolution:
     - backend/core/knowledge_objects/stable_key.py
     - backend/core/knowledge_objects/sync.py
     - docs/features/knowledge_objects_design.md §12
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0020, IK-0021]
 view_of: [IK-0108, IK-0109]
 history:

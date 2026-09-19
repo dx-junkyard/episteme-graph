@@ -54,6 +54,10 @@ resolution:
   landed_in:
     - backend/db/084_claim_chunk_fk_set_null.sql
     - backend/core/document_pipeline/persistence.py
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0108, IK-0112]
 view_of: [IK-0002, IK-0108]
 history:

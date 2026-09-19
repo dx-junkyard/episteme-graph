@@ -54,6 +54,9 @@ resolution:
     - backend/core/learning_stance/heuristic.py
     - frontend/public/js/app.js
     - docs/features/learning_chat_entry_unification_design.md §13
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0309]
 view_of: []
 history:

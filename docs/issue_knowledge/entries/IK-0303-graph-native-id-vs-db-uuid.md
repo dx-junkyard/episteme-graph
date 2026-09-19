@@ -55,6 +55,9 @@ resolution:
     - backend/api/routes/theory_components.py
     - frontend/public/js/admin-graph-review.js
     - docs/features/graph_dialogue_review_design.md §13
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0301, IK-0304]
 view_of: []
 history:

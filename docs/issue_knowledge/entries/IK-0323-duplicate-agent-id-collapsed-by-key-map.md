@@ -57,6 +57,9 @@ resolution:
     - backend/core/knowledge_objects/sync.py
     - backend/tests/test_knowledge_objects_persist.py
     - docs/features/knowledge_objects_design.md §12.4
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0106, IK-0109]
 view_of: [IK-0107]
 history: []

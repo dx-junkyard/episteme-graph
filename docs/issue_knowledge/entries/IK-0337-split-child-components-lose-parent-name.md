@@ -47,6 +47,10 @@ resolution:
   landed_in:
     - src/episteme_graph/agents/component_assembly/granularity_analyzer.py
     - src/episteme_graph/agents/component_assembly/component_refiner.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: []
 view_of: []
 history: []

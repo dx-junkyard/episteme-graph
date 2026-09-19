@@ -42,6 +42,10 @@ resolution:
   landed_in:
     - backend/api/routes/theory_components.py
     - backend/tests/test_pipeline_component_approval.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0342, IK-0328]
 view_of: []
 history: []

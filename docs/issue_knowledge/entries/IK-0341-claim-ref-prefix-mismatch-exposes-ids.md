@@ -48,6 +48,10 @@ resolution:
     - backend/core/discuss/opening.py
     - backend/api/routes/theory_components.py
     - backend/core/document_pipeline/export_validation_gate.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0303, IK-0339]
 view_of: []
 history: []

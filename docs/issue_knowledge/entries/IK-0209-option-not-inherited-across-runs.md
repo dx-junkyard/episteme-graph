@@ -56,6 +56,9 @@ resolution:
     - backend/core/document_pipeline/orchestrator.py
     - frontend/public/js/admin.js
     - docs/development_checklist.md §3
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0207, IK-0208]
 view_of: []
 pattern: condition-not-propagated

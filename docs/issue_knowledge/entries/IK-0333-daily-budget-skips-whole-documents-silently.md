@@ -49,6 +49,10 @@ resolution:
     - backend/core/admin_assistant/next_steps.py
     - backend/core/reference_health.py
     - backend/core/coverage_facts.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0308]
 view_of: []
 history: []

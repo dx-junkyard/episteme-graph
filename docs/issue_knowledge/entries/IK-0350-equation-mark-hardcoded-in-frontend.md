@@ -43,6 +43,10 @@ resolution:
     - backend/core/lecture.py
     - backend/core/label_vocab.py
     - frontend/public/js/app.js
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0328]
 view_of: []
 history: []

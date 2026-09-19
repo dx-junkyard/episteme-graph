@@ -53,6 +53,9 @@ resolution:
     - frontend/public/js/admin.js
     - frontend/public/js/versioning.js
     - docs/architecture/vision_ux_gap_survey_2026-07-17.md §4
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0209, IK-0212]
 view_of: []
 pattern: destructive-action-without-confirmation

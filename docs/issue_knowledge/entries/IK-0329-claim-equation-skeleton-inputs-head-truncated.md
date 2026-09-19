@@ -54,6 +54,10 @@ resolution:
     - src/episteme_graph/agents/equation_semantics/input_builder.py
     - src/episteme_graph/agents/paper_skeleton/input_builder.py
     - backend/core/document_pipeline/orchestrator.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0101]
 view_of: [IK-0101]
 history: []

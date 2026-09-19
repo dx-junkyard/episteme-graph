@@ -43,6 +43,10 @@ resolution:
     - src/episteme_graph/agents/llm_json_client.py
     - src/episteme_graph/agents/claim_qualification/agent.py
     - docs/pipeline/overview.md §4
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0329]
 view_of: []
 history: []

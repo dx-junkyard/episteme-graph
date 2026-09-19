@@ -51,6 +51,10 @@ resolution:
   landed_in:
     - backend/core/knowledge_objects/stable_key.py
     - backend/core/knowledge_objects/remap.py
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0105, IK-0107, IK-0108, IK-0118]
 view_of: []
 history:

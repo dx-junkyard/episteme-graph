@@ -48,6 +48,11 @@ resolution:
   landed_in:
     - backend/core/document_pipeline/persistence.py
     - backend/core/reference_health.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
+      - docker で組み上げた実機での E2E
 related: [IK-0323]
 view_of: []
 history: []

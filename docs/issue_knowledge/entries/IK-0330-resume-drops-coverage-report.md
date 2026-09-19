@@ -47,6 +47,10 @@ resolution:
   landed_in:
     - backend/core/document_pipeline/orchestrator.py
     - backend/tests/test_pipeline_coverage_report.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0329]
 view_of: []
 history: []

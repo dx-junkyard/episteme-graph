@@ -53,6 +53,10 @@ resolution:
     - backend/core/text_hygiene.py
     - backend/tests/test_pdf_trust_boundary_guardrails.py
     - docs/architecture/trust_boundary_pdf_input.md
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0013]
 view_of: [IK-0320]
 history:

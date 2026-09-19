@@ -49,6 +49,10 @@ resolution:
     - src/episteme_graph/agents/claim_object_builder/equation_claim_synthesis.py
     - src/episteme_graph/agents/symbol_registry/builder.py
     - src/episteme_graph/agents/component_assembly/schema.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0103]
 view_of: []
 history: []

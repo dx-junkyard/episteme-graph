@@ -53,6 +53,10 @@ resolution:
   landed_in:
     - backend/core/library/identity_candidates.py
     - docs/features/concept_registry_design.md §6.2
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 実 DB での migration 適用と E2E（docker 復帰後）
 related: [IK-0115, IK-0117, IK-0121]
 view_of: [IK-0121]
 history:

@@ -52,6 +52,10 @@ resolution:
   landed_in:
     - backend/api/routes/lecture_studio/_shared.py
     - docs/features/assistant_common_infra_design.md
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（ローカルの pytest のみ）
 related: [IK-0314]
 view_of: []
 history:

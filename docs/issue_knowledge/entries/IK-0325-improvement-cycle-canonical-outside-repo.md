@@ -61,6 +61,9 @@ resolution:
     - docs/issue_knowledge/layers.md
     - backend/scripts/issue_knowledge_index.py
     - backend/tests/test_issue_knowledge_guardrails.py
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0324]
 view_of: []
 history: []

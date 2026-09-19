@@ -53,6 +53,9 @@ resolution:
     - backend/db/035_document_group_permissions.sql
     - backend/tests/test_migrations_runner.py
     - docs/architecture/consolidation_survey_2026-07.md
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0314]
 view_of: []
 history:

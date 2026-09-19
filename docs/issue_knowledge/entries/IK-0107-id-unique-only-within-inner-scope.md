@@ -53,6 +53,10 @@ resolution:
   landed_in:
     - backend/core/knowledge_objects/stable_key.py
     - backend/core/document_pipeline/persistence.py
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 複製ではない開発 DB 本体・本番 DB への適用
 related: [IK-0106]
 view_of: [IK-0323, IK-0340]
 history:

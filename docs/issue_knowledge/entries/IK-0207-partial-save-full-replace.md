@@ -53,6 +53,9 @@ resolution:
     - backend/api/schemas.py
     - frontend/public/js/admin-lecture-studio.js
     - docs/development_checklist.md §3
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0208, IK-0209]
 view_of: []
 pattern: full-update-clobbers-unrelated-fields

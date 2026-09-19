@@ -60,6 +60,9 @@ resolution:
     - frontend/public/js/deliberation.js
     - frontend/public/js/doubt-atlas.js
     - docs/architecture/vision_ux_gap_survey_2026-07.md §6
+  verification:
+    methods: [guardrail]
+    unverified: []
 related: [IK-0205, IK-0203]
 view_of: []
 pattern: available-but-unwired

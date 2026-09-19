@@ -54,6 +54,10 @@ resolution:
     - backend/core/deliberation/graph_dialogue.py
     - backend/api/routes/theory_components.py
     - docs/features/graph_dialogue_review_design.md §11.1
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E（グラフ描画・対話・承認の通し確認）
 related: [IK-0301, IK-0307]
 view_of: []
 history:

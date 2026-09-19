@@ -50,6 +50,10 @@ resolution:
     - src/episteme_graph/agents/document_structure/grobid_parser.py
     - src/episteme_graph/agents/document_structure/agent.py
     - src/tests/agents/document_structure/test_grobid_structure_recovery.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
 related: [IK-0329]
 view_of: []
 history: []

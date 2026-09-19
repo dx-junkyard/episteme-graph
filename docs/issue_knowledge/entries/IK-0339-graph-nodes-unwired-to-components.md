@@ -52,6 +52,11 @@ resolution:
     - src/episteme_graph/agents/component_graph/schema.py
     - backend/api/routes/theory_components.py
     - backend/core/graph_paper_layer/builder.py
+  verification:
+    methods: [guardrail, scratch_db]
+    unverified:
+      - 是正後の再解析による実データでの効果の実測（LLM の live 呼び出しを行わない方針のため次回の解析待ち）
+      - docker で組み上げた実機での E2E
 related: [IK-0328, IK-0303]
 view_of: []
 history: []

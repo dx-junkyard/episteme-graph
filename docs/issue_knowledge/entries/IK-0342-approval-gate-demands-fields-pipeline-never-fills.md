@@ -49,6 +49,10 @@ resolution:
     - backend/api/routes/theory_components.py
     - backend/api/schemas.py
     - backend/tests/test_pipeline_component_approval.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0301]
 view_of: []
 history: []

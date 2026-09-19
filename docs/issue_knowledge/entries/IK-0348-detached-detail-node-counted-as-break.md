@@ -42,6 +42,10 @@ resolution:
   landed_in:
     - backend/core/reference_health.py
     - backend/tests/test_reference_health_gaps.py
+  verification:
+    methods: [guardrail]
+    unverified:
+      - docker で組み上げた実機での E2E
 related: [IK-0338]
 view_of: []
 history: []
