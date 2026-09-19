@@ -61,6 +61,11 @@ class Section:
     page_start: int
     page_end: int | None = None
     parent_section_id: str | None = None
+    # 見出し番号（"3" / "3.1" / "A.2"）。TEI の @n か head 本文の先頭から
+    # 決定論的に読んだ値で、無ければ None（推測して付けない）。
+    section_number: str | None = None
+    # 付録（GROBID の ``<back><div type="annex">``）由来かどうか。
+    is_appendix: bool = False
 
 
 @dataclass
@@ -83,6 +88,13 @@ class DocumentMetadata:
     # source. Shape: {"display_math_blocks": int, "labels": [str], "label_count": int}.
     # None for non-TeX or legacy artifacts.
     tex_equation_inventory: dict | None = None
+    # TEI 構造回収の内訳（GROBID 経路のみ）。付録・本文直下の図表・表本体・
+    # 走り込み見出しを何件拾ったかの事実だけを持つ。None は旧 artifact。
+    # Shape: {"appendix_sections": int, "appendix_blocks": int,
+    #         "figure_captions": int, "table_captions": int,
+    #         "table_bodies": int, "container_level_figures": int,
+    #         "run_in_headings": int}
+    structure_recovery: dict | None = None
 
 
 @dataclass

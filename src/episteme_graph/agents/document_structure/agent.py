@@ -35,10 +35,23 @@ logger = logging.getLogger(__name__)
 
 # GROBID が <figure>/<figDesc> を落とした PDF だけを PyMuPDF から補うための保守的な
 # caption パターン。本文の ``Figure 2 shows ...`` は対象にせず、図番号直後に明示的な
-# caption 区切り（colon / dash）がある独立ブロックだけを採用する。
+# caption 区切り（colon / dash / period）がある独立ブロックだけを採用する。
+# REVTeX 系の ``FIG. 1. Sketch of ...`` / ``Table 1. Summary`` はピリオド区切りで、
+# colon・dash だけを見る旧パターンでは1件も拾えなかった。ピリオド区切りのときは
+# 直後が小文字で始まらないこと（= 本文の続きでないこと）を追加で要求する。
+_CAPTION_SEPARATOR = r"(?:[:\-–—]\s*\S|\.\s*(?![a-z])\S)"
+# 番号は最長一致で読み切る。``(?!\s*\.\s*\d)`` があるので ``Figure 6 .9 shows`` で
+# 番号を "6" まで戻し ".9" の点を caption 区切りと誤認する後戻りが起きない。
+_CAPTION_NUMBER = r"\d+(?:\s*\.\s*\d+)*(?!\s*\.\s*\d)"
+
 _PDF_FIGURE_CAPTION_RE = re.compile(
-    r"^(?:Figure|Fig\.?|図)\s*\d+(?:\s*\.\s*\d+)*(?:[A-Za-z])?\s*(?::|[-–—])\s*\S",
-    re.IGNORECASE,
+    r"^(?i:Figure|Fig\.?|図)\s*" + _CAPTION_NUMBER + r"[A-Za-z]?\s*" + _CAPTION_SEPARATOR
+)
+
+# ``Table 1.`` / ``TABLE I.`` / ``表 1:``。ローマ数字は REVTeX の表番号で頻出する。
+_PDF_TABLE_CAPTION_RE = re.compile(
+    r"^(?i:Table|Tab\.|表)\s*(?:" + _CAPTION_NUMBER + r"|[IVXLC]+)[A-Za-z]?\s*"
+    + _CAPTION_SEPARATOR
 )
 
 # 単調alignmentの1 blockあたり先読み上限。全文末尾まで検索すると、局所blockが
@@ -305,6 +318,9 @@ class DocumentStructureAgent:
 
         if pymupdf_blocks:
             self._align_grobid_blocks_to_pdf_blocks(typed_blocks, pymupdf_blocks)
+            # TEI の <body> 直下 figure は本文段落の後ろに並ぶため、単調 alignment の
+            # カーソルでは届かない。caption だけは文書全体から引き当て直す。
+            self._align_caption_blocks_globally(typed_blocks, pymupdf_blocks)
             self._supplement_grobid_figure_captions(typed_blocks, pymupdf_blocks)
             self._refresh_section_pages_from_blocks(
                 sections, typed_blocks, total_pages or metadata.pages or 1
@@ -409,23 +425,108 @@ class DocumentStructureAgent:
             return best
         return None
 
-    @staticmethod
-    def _supplement_grobid_figure_captions(typed_blocks, pymupdf_blocks) -> None:
-        """GROBID TEI が欠落させた明示的な図 caption を PDF text layer から補う。
+    # caption を PDF 全体から引き当てるときの最低一致度。単調 alignment の 0.60 より
+    # 厳しくする（誤ったページを図に与えると図画像の切り出しごと間違う）。
+    _CAPTION_GLOBAL_MATCH_MIN = 0.75
+    _CAPTION_TYPES = ("figure_caption", "table_caption")
 
-        hybrid backend はこれまで PyMuPDF を既存 TEI block の page/bbox 補完にしか使わず、
-        TEI に存在しない caption は捨てていた。その結果 ``figure_table_semantics`` が0件、
-        ``document_figures`` が caption 無しの残余 embedded image だけになる。本文参照を
-        caption と誤認しないよう、``_PDF_FIGURE_CAPTION_RE`` に一致する独立 block のみ追加する。
+    @staticmethod
+    def _align_caption_blocks_globally(typed_blocks, pymupdf_blocks) -> None:
+        """未整列の caption block に PDF 全体から page / bbox を与える。
+
+        ``<body>`` 直下（div の兄弟）に置かれた TEI の figure は文書末尾に集まるため、
+        単調な ``_align_grobid_blocks_to_pdf_blocks`` では一致先が走査窓の外になり、
+        page=1 のまま残る。page が 1 に固定された caption は後段の図画像抽出で
+        1 ページ目の画像に誤って対応づくので、caption だけは非単調に探し直す。
         """
         if not typed_blocks or not pymupdf_blocks:
             return
 
-        existing_texts = {
-            DocumentStructureAgent._normalize_match_text(getattr(block, "text", "") or "")
-            for block in typed_blocks
-            if getattr(block, "block_type", "") == "figure_caption"
-        }
+        pending = [
+            block for block in typed_blocks
+            if getattr(block, "block_type", "") in DocumentStructureAgent._CAPTION_TYPES
+            and not (isinstance(getattr(block, "raw", None), dict)
+                     and block.raw.get("pdf_alignment"))
+        ]
+        if not pending:
+            return
+
+        records = []
+        for raw in pymupdf_blocks:
+            norm = DocumentStructureAgent._normalize_match_text(
+                str(getattr(raw, "text", "") or "")
+            )
+            if len(norm) >= 12:
+                records.append((raw, norm))
+        if not records:
+            return
+
+        for block in pending:
+            target = DocumentStructureAgent._normalize_match_text(
+                getattr(block, "text", "") or ""
+            )
+            if len(target) < 12:
+                continue
+            # 文字列包含だけで判定する（caption 数 × PDF block 数の総当たりなので
+            # SequenceMatcher を掛けると大きな論文で数十秒かかる）。正規化で空白・
+            # 記号は落ちているため、包含が成立すれば同一 caption とみなしてよい。
+            head = target[:120]
+            short_head = target[:40]
+            best_raw = None
+            best_score = 0.0
+            for raw, candidate in records:
+                if head in candidate:
+                    score = 0.95
+                elif len(candidate) >= 40 and target.startswith(candidate[:120]):
+                    score = 0.9
+                elif len(target) >= 40 and candidate.startswith(short_head):
+                    score = 0.85
+                else:
+                    continue
+                if score > best_score:
+                    best_score = score
+                    best_raw = raw
+                if best_score >= 0.95:
+                    break
+            if best_raw is None or best_score < DocumentStructureAgent._CAPTION_GLOBAL_MATCH_MIN:
+                continue
+            block.page = int(getattr(best_raw, "page", block.page) or block.page)
+            block.bbox = getattr(best_raw, "bbox", block.bbox)
+            if isinstance(getattr(block, "raw", None), dict):
+                block.raw["pdf_alignment"] = {
+                    "page": block.page,
+                    "pdf_order": getattr(best_raw, "order", None),
+                    "score": round(float(best_score), 3),
+                    "source": "global_caption_scan",
+                }
+
+    @staticmethod
+    def _supplement_grobid_figure_captions(typed_blocks, pymupdf_blocks) -> None:
+        """GROBID TEI が欠落させた明示的な図・表 caption を PDF text layer から補う。
+
+        hybrid backend はこれまで PyMuPDF を既存 TEI block の page/bbox 補完にしか使わず、
+        TEI に存在しない caption は捨てていた。その結果 ``figure_table_semantics`` が0件、
+        ``document_figures`` が caption 無しの残余 embedded image だけになる。本文参照を
+        caption と誤認しないよう、``_PDF_FIGURE_CAPTION_RE`` /
+        ``_PDF_TABLE_CAPTION_RE`` に一致する独立 block のみ追加する。
+        """
+        if not typed_blocks or not pymupdf_blocks:
+            return
+
+        # TEI 由来 caption との重複判定は完全一致だと表記ゆれ（空白・ハイフン）で
+        # すり抜けるので、正規化した先頭 40 文字を鍵にする。
+        existing_texts: set[str] = set()
+        existing_prefixes: set[str] = set()
+        for block in typed_blocks:
+            if getattr(block, "block_type", "") not in DocumentStructureAgent._CAPTION_TYPES:
+                continue
+            norm = DocumentStructureAgent._normalize_match_text(
+                getattr(block, "text", "") or ""
+            )
+            if not norm:
+                continue
+            existing_texts.add(norm)
+            existing_prefixes.add(norm[:40])
         aligned = [
             block
             for block in typed_blocks
@@ -436,10 +537,16 @@ class DocumentStructureAgent:
 
         for raw in pymupdf_blocks:
             text = str(getattr(raw, "text", "") or "").strip()
-            if not _PDF_FIGURE_CAPTION_RE.match(text):
+            if _PDF_FIGURE_CAPTION_RE.match(text):
+                block_type = "figure_caption"
+            elif _PDF_TABLE_CAPTION_RE.match(text):
+                block_type = "table_caption"
+            else:
                 continue
             normalized = DocumentStructureAgent._normalize_match_text(text)
             if not normalized or normalized in existing_texts:
+                continue
+            if normalized[:40] in existing_prefixes:
                 continue
 
             page = int(getattr(raw, "page", 1) or 1)
@@ -457,12 +564,13 @@ class DocumentStructureAgent:
             )
             section_id = getattr(nearest, "section_id", None) if nearest else None
 
+            prefix = "tbl" if block_type == "table_caption" else "fig"
             typed_blocks.append(TypedBlock(
-                block_id=f"blk_pdf_fig_{page}_{raw_order}",
+                block_id=f"blk_pdf_{prefix}_{page}_{raw_order}",
                 page=page,
                 order=raw_order,
                 text=text,
-                block_type="figure_caption",
+                block_type=block_type,
                 bbox=getattr(raw, "bbox", None),
                 confidence=0.95,
                 section_id=section_id,
@@ -476,6 +584,7 @@ class DocumentStructureAgent:
                 },
             ))
             existing_texts.add(normalized)
+            existing_prefixes.add(normalized[:40])
 
     @staticmethod
     def _refresh_section_pages_from_blocks(
