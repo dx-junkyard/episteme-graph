@@ -1,4 +1,12 @@
-"""Build ThesisReconstructionAgent LLM input."""
+"""Build ThesisReconstructionAgent LLM input.
+
+上限（``_MAX_CLAIMS`` / ``_MAX_EQUATIONS`` / ``_MAX_LOGICAL_BLOCKS``）は「全部渡す」の
+代わりの**文脈サンプリング**としてそのまま残す（中心命題の再構成は文書全体の代表を
+見れば足り、claim の選抜は重要度ベースの ``claim_selection`` が既に担う）。ただし
+**どれだけ渡さなかったかは報告する** — :meth:`compute_input_coverage` が母集合・
+処理数・理由コードを返し、orchestrator が stage payload の ``coverage`` に載せる
+（P0-10）。
+"""
 from __future__ import annotations
 
 from episteme_graph.agents.claim_qualification.schema import ClaimQualificationResult
@@ -60,6 +68,56 @@ class ThesisReconstructionInputBuilder:
             normalized_terms=self._build_normalized_terms(cartridge) if cartridge else None,
             excluded_from_pipeline_input=claim_selection.excluded,
         )
+
+    def compute_input_coverage(
+        self,
+        skeleton: PaperSkeletonResult,
+        qualified_claims: ClaimQualificationResult,
+        equations: EquationSemanticsResult | None = None,
+        config: dict | None = None,
+        claim_objects=None,
+    ) -> dict:
+        """入力文脈の母集合・処理数の**事実**を返す（``build_coverage_report`` の引数）。
+
+        3 種（claim / equation / logical_block）は単位が違うので、母集合は
+        「LLM に渡し得た文脈要素の総数」として合算し、どの種別が上限に当たったかを
+        理由コード（``max_claims`` / ``max_equations`` / ``max_logical_blocks``）で
+        区別する。件数は population / processed / truncated の 3 値で尽くす。
+        """
+        cfg = config or {}
+        max_claims = int(cfg.get("max_claims", _MAX_CLAIMS))
+        max_equations = int(cfg.get("max_equations", _MAX_EQUATIONS))
+        max_logical_blocks = int(cfg.get("max_logical_blocks", _MAX_LOGICAL_BLOCKS))
+
+        available_claims = len(getattr(qualified_claims, "qualified_spans", []) or [])
+        selected_claims = len(
+            self._accepted_claims(
+                qualified_claims,
+                max_claims,
+                claim_objects=claim_objects,
+                skeleton=skeleton,
+            ).selected
+        )
+        available_equations = len(getattr(equations, "equations", []) or []) if equations else 0
+        selected_equations = min(available_equations, max(max_equations, 0))
+        available_blocks = len(getattr(skeleton, "logical_blocks", []) or [])
+        selected_blocks = min(available_blocks, max(max_logical_blocks, 0))
+
+        reasons: list[str] = []
+        if available_claims > selected_claims:
+            reasons.append("max_claims")
+        if available_equations > selected_equations:
+            reasons.append("max_equations")
+        if available_blocks > selected_blocks:
+            reasons.append("max_logical_blocks")
+
+        return {
+            "population": available_claims + available_equations + available_blocks,
+            "processed": selected_claims + selected_equations + selected_blocks,
+            "reasons": reasons,
+            "unit": "context_items",
+            "details": {"scope": "claims_equations_logical_blocks"},
+        }
 
     @staticmethod
     def _entry_text(entry: dict) -> str | None:

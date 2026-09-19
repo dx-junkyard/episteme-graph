@@ -30,6 +30,10 @@ class ProviderJSONLLMClient:
         self._api_key = api_key
         self.last_raw_text: str | None = None
         self.last_parse_error: str | None = None
+        #: このクライアントが ``generate`` を呼んだ回数（修復・再試行を含む）。上限を
+        #: 撤廃したステージ（主張採否など）が「何回呼んだか」を ``summary_stats`` に
+        #: 残すための計器。U層の実測（llm_usage_events）とは別の、agent 側の自己申告。
+        self.calls: int = 0
 
     @property
     def model(self) -> str | None:
@@ -55,6 +59,7 @@ class ProviderJSONLLMClient:
             return 12000
 
     def generate(self, messages: list[dict], response_schema: dict | None = None) -> dict:
+        self.calls += 1
         try:
             from core.llm import generate_text
         except ImportError as exc:

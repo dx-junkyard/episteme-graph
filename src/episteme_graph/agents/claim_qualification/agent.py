@@ -8,6 +8,7 @@ from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
 
 from episteme_graph.agents.cartridge_loader import load_cartridge_or_none
+from episteme_graph.agents.coverage_report import COVERAGE_REPORT_KEY
 
 from .cartridge_loader import CartridgeLoader
 from .context_lint import unresolved_fragments
@@ -50,13 +51,20 @@ class ClaimQualificationAgent:
         progress_callback=None,
     ) -> ClaimQualificationResult:
         cartridge = self._load_cartridge(cartridge_id)
-        llm_inputs = self._input_builder.build(
+        llm_inputs, coverage = self._input_builder.build_with_coverage(
             structure, skeleton, roles, cartridge=cartridge, config=config
         )
+        # 上限を撤廃した（既定「上限なし」）ので、LLM 呼び出し回数は span 数に比例する。
+        # 何回呼んだか（修復・参照再試行を含む）を summary_stats に残す（R-6）。
+        calls_before = int(getattr(self._llm_client, "calls", 0) or 0)
         if not llm_inputs:
-            return ClaimQualificationResult.make_fallback(
+            fallback = ClaimQualificationResult.make_fallback(
                 roles.document_id, cartridge_id, None, "No target spans for qualification"
             )
+            # 「対象 span が無かった」のか「上限で 1 件も採れなかった」のかを
+            # 読み手が区別できるよう、fallback でも取りこぼし報告は残す（P0-10）。
+            fallback.summary_stats[COVERAGE_REPORT_KEY] = coverage
+            return fallback
 
         records: list[QualifiedSpanRecord] = []
         total = len(llm_inputs)
@@ -112,7 +120,11 @@ class ClaimQualificationAgent:
             document_id=roles.document_id,
             cartridge_id=cartridge.cartridge_id if cartridge else cartridge_id,
             records=records,
+            coverage=coverage,
         )
+        calls_after = getattr(self._llm_client, "calls", None)
+        if isinstance(calls_after, int):
+            result.summary_stats["llm_calls"] = max(calls_after - calls_before, 0)
         result.validation_issues = self._validator.validate(result, cartridge)
         return result
 
@@ -170,6 +182,7 @@ class ClaimQualificationAgent:
         document_id: str,
         cartridge_id: str | None,
         records: list[QualifiedSpanRecord],
+        coverage: dict | None = None,
     ) -> ClaimQualificationResult:
         accepted: list[QualifiedSpanRecord] = []
         rejected: list[dict] = []
@@ -196,18 +209,22 @@ class ClaimQualificationAgent:
                 merge_suggested += 1
             atomic_claims_total += len(getattr(record, "atomic_claims", None) or [])
 
+        summary_stats: dict = {
+            "accepted": len(accepted),
+            "rejected": len(rejected),
+            "deferred": len(deferred),
+            "split_suggested": split_suggested,
+            "merge_suggested": merge_suggested,
+            "atomic_claims": atomic_claims_total,
+        }
+        if coverage is not None:
+            summary_stats[COVERAGE_REPORT_KEY] = coverage
+
         return ClaimQualificationResult(
             document_id=document_id,
             cartridge_id=cartridge_id,
             qualified_spans=accepted,
             rejected_spans=rejected,
             deferred_spans=deferred,
-            summary_stats={
-                "accepted": len(accepted),
-                "rejected": len(rejected),
-                "deferred": len(deferred),
-                "split_suggested": split_suggested,
-                "merge_suggested": merge_suggested,
-                "atomic_claims": atomic_claims_total,
-            },
+            summary_stats=summary_stats,
         )

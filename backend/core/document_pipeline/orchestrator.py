@@ -38,6 +38,7 @@ from core.llm_worker.cost_gate import CostGate, today_str
 from episteme_graph.agents.coverage_report import (
     COVERAGE_REPORT_KEY,
     build_coverage_report,
+    is_coverage_report,
 )
 
 from .chunker import build_source_chunks
@@ -181,8 +182,10 @@ def _attach_coverage(
     一切変更せず、読み手が段階的に移行できるようにする（後方互換）。
 
     呼び出し規約:
-    - **resume で artifact を再利用したステージには足さない**（前回 run の母集合を
-      今回の報告として捏造しない）。
+    - **今回の入力から母集合をでっち上げない**。resume で artifact を再利用した
+      ステージは、**前回 run の artifact から導ける事実だけ**を報告し、
+      ``details["source"] = "artifact"`` を必ず添えて「前回 run 由来」と明示する
+      （導けないなら足さない）。
     - 母集合・処理数が事実として導けないステージには足さない（でっち上げない）。
     - 報告の組み立てで例外を出してステージを落とさない（fail-soft）。
     """
@@ -197,6 +200,102 @@ def _attach_coverage(
     except Exception:  # pragma: no cover - 防御的（報告でステージを止めない）
         logger.warning("failed to build coverage report (non-fatal)", exc_info=True)
     return payload
+
+
+#: resume で artifact を再利用したステージの coverage に必ず添える印。
+#: 「今回の入力から数え直した母集合」ではなく「前回 run の記録から導いた事実」。
+_COVERAGE_SOURCE_ARTIFACT = {"source": "artifact"}
+
+
+def _coverage_details(base: dict[str, Any] | None, *, resumed: bool) -> dict[str, Any]:
+    """coverage の ``details`` を組み立てる（resume なら出所を明示する）。"""
+    details = dict(base or {})
+    if resumed:
+        details.update(_COVERAGE_SOURCE_ARTIFACT)
+    return details
+
+
+def _attach_existing_coverage(payload: dict, report: Any, *, resumed: bool) -> dict:
+    """A層 agent が既に組み立てた coverage を stage payload に移す。
+
+    agent の ``summary_stats`` に coverage が入って来る（rhetorical_role /
+    claim_qualification）ステージ用。数値は agent が出した事実のまま触らず、
+    resume のときだけ ``details.source = "artifact"``（前回 run 由来）を足す。
+    """
+    if not is_coverage_report(report):
+        return payload
+    return _attach_coverage(
+        payload,
+        population=report.get("population", 0),
+        processed=report.get("processed", 0),
+        reasons=report.get("reasons") or [],
+        unit=report.get("unit"),
+        details=_coverage_details(report.get("details"), resumed=resumed),
+    )
+
+
+def _restamp_resumed_coverage(payload: dict, *, resumed: bool) -> dict:
+    """payload に載っている coverage に、resume なら前回 run 由来の印を足す。"""
+    if not resumed:
+        return payload
+    return _attach_existing_coverage(
+        payload, payload.get(COVERAGE_REPORT_KEY), resumed=True
+    )
+
+
+def _input_builder_for(ctx: Any, agent_key: str, probe: str) -> Any | None:
+    """ステージ agent の input_builder を取り出す（fail-soft）。
+
+    coverage の母集合は「その agent が何を入力にし得たか」なので、上限の値・選抜規則を
+    orchestrator に写経せず A層の input_builder に聞く（二重管理の防止）。
+
+    ``probe`` は必要なメソッド名。注入された agent（テスト用モックなど）がそれを
+    持たない場合は A層の既定 input_builder を直接作って使う — 母集合の計算は LLM を
+    呼ばない純粋な処理なので、agent の差し替えで報告が消えるのは正直さの後退になる。
+    """
+    try:
+        agent_class = (getattr(ctx, "agent_classes", None) or {}).get(agent_key)
+        if agent_class is not None:
+            builder = getattr(_instantiate(agent_class), "_input_builder", None)
+            if builder is not None and hasattr(builder, probe):
+                return builder
+    except Exception:  # pragma: no cover - 防御的（agent の生成で報告を落とさない）
+        logger.warning("failed to instantiate %s for coverage", agent_key, exc_info=True)
+    try:
+        factory = _DEFAULT_INPUT_BUILDERS.get(agent_key)
+        return factory() if factory else None
+    except Exception:  # pragma: no cover - 防御的（報告でステージを止めない）
+        logger.warning("failed to resolve input builder for %s", agent_key, exc_info=True)
+        return None
+
+
+def _default_paper_skeleton_input_builder() -> Any:
+    from episteme_graph.agents.paper_skeleton.input_builder import SkeletonInputBuilder
+
+    return SkeletonInputBuilder()
+
+
+def _default_equation_semantics_input_builder() -> Any:
+    from episteme_graph.agents.equation_semantics.input_builder import (
+        EquationSemanticsInputBuilder,
+    )
+
+    return EquationSemanticsInputBuilder()
+
+
+def _default_thesis_input_builder() -> Any:
+    from episteme_graph.agents.thesis_reconstruction.input_builder import (
+        ThesisReconstructionInputBuilder,
+    )
+
+    return ThesisReconstructionInputBuilder()
+
+
+_DEFAULT_INPUT_BUILDERS: dict[str, Any] = {
+    "PaperSkeletonAgent": _default_paper_skeleton_input_builder,
+    "EquationSemanticsAgent": _default_equation_semantics_input_builder,
+    "ThesisReconstructionAgent": _default_thesis_input_builder,
+}
 
 
 def _blocks_of_type(structure: Any, block_type: str) -> list[Any]:
@@ -1049,7 +1148,8 @@ def _stage_source_embedding(ctx: PipelineContext) -> bool:
 def _stage_paper_skeleton(ctx: PipelineContext) -> bool:
     # ── Stage 5: paper_skeleton ────────────────────────────────────────
     skeleton_artifact = ctx.artifact("paper_skeleton")
-    if ctx.should_use_artifact("paper_skeleton"):
+    resumed_from_artifact = ctx.should_use_artifact("paper_skeleton")
+    if resumed_from_artifact:
         ctx.skeleton = _from_agent_dict("paper_skeleton", skeleton_artifact)
         logger.info("Resuming document pipeline: loaded paper_skeleton artifact for document %s", ctx.document_id)
     else:
@@ -1061,14 +1161,36 @@ def _stage_paper_skeleton(ctx: PipelineContext) -> bool:
             logger.exception("paper_skeleton stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("paper_skeleton", str(exc), cause=exc) from exc
         ctx.save_artifact("paper_skeleton", ctx.skeleton)
-    ctx.report_done("paper_skeleton", {"document_id": ctx.document_id, "total": 1, "processed": 1})
-    return ctx.finish_target_stage("paper_skeleton", {"document_id": ctx.document_id, "total": 1, "processed": 1})
+    skeleton_done_payload: dict[str, Any] = {
+        "document_id": ctx.document_id, "total": 1, "processed": 1,
+    }
+    # P0-10: 母集合 = document_structure の level-1 節。骨格判断に見せた節だけが
+    # processed で、appendix 除外・上限（既定は上限なし）の取りこぼしを理由コードで残す。
+    # resume でも structure artifact から同じ事実が導けるので報告する（source=artifact）。
+    skeleton_builder = _input_builder_for(ctx, "PaperSkeletonAgent", "compute_section_coverage")
+    if skeleton_builder is not None and getattr(ctx, "structure", None) is not None:
+        try:
+            facts = skeleton_builder.compute_section_coverage(ctx.structure)
+        except Exception:  # pragma: no cover - 防御的
+            logger.warning("failed to compute paper_skeleton coverage", exc_info=True)
+        else:
+            _attach_coverage(
+                skeleton_done_payload,
+                population=facts["population"],
+                processed=facts["processed"],
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(facts.get("details"), resumed=resumed_from_artifact),
+            )
+    ctx.report_done("paper_skeleton", skeleton_done_payload)
+    return ctx.finish_target_stage("paper_skeleton", skeleton_done_payload)
 
 
 def _stage_rhetorical_role(ctx: PipelineContext) -> bool:
     # ── Stage 6: rhetorical_role ───────────────────────────────────────
     roles_artifact = ctx.artifact("rhetorical_role")
-    if ctx.should_use_artifact("rhetorical_role"):
+    resumed_from_artifact = ctx.should_use_artifact("rhetorical_role")
+    if resumed_from_artifact:
         ctx.roles = _from_agent_dict("rhetorical_role", roles_artifact)
         logger.info("Resuming document pipeline: loaded rhetorical_role artifact for document %s", ctx.document_id)
     else:
@@ -1085,14 +1207,19 @@ def _stage_rhetorical_role(ctx: PipelineContext) -> bool:
             logger.exception("rhetorical_role stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("rhetorical_role", str(exc), cause=exc) from exc
         ctx.save_artifact("rhetorical_role", ctx.roles)
-    ctx.report_done("rhetorical_role", getattr(ctx.roles, "summary_stats", {}) or {})
-    return ctx.finish_target_stage("rhetorical_role", getattr(ctx.roles, "summary_stats", {}) or {})
+    role_done_payload: dict[str, Any] = dict(getattr(ctx.roles, "summary_stats", {}) or {})
+    # coverage は agent（input_builder）が summary_stats に載せて来る。resume では
+    # それが前回 run の記録であることを印で明示する。
+    _restamp_resumed_coverage(role_done_payload, resumed=resumed_from_artifact)
+    ctx.report_done("rhetorical_role", role_done_payload)
+    return ctx.finish_target_stage("rhetorical_role", role_done_payload)
 
 
 def _stage_claim_qualification(ctx: PipelineContext) -> bool:
     # ── Stage 7: claim_qualification ───────────────────────────────────
     qualified_artifact = ctx.artifact("claim_qualification")
-    if ctx.should_use_artifact("claim_qualification"):
+    resumed_from_artifact = ctx.should_use_artifact("claim_qualification")
+    if resumed_from_artifact:
         ctx.qualified = _from_agent_dict("claim_qualification", qualified_artifact)
         logger.info("Resuming document pipeline: loaded claim_qualification artifact for document %s", ctx.document_id)
     else:
@@ -1108,10 +1235,79 @@ def _stage_claim_qualification(ctx: PipelineContext) -> bool:
             logger.exception("claim_qualification stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("claim_qualification", str(exc), cause=exc) from exc
         ctx.save_artifact("claim_qualification", ctx.qualified)
-    ctx.report_done("claim_qualification", {
+    claim_done_payload: dict[str, Any] = {
         "qualified_count": len(ctx.qualified.qualified_spans),
-    })
-    return ctx.finish_target_stage("claim_qualification", {"qualified_count": len(ctx.qualified.qualified_spans)})
+    }
+    # 上限撤廃後の呼び出し回数（agent の自己申告。無い＝旧 run / テストの stub）。
+    claim_llm_calls = (getattr(ctx.qualified, "summary_stats", None) or {}).get("llm_calls")
+    if isinstance(claim_llm_calls, int) and not isinstance(claim_llm_calls, bool):
+        claim_done_payload["llm_calls"] = claim_llm_calls
+    # P0-10: 母集合 = rhetorical_role が出した採否判定対象の span。agent
+    # （input_builder）が summary_stats["coverage"] に載せて来るので、それを
+    # stage payload へ移す。前回 run の artifact に coverage が無い場合だけ、
+    # roles artifact と採否結果の件数から導き直す（source=artifact）。
+    claim_coverage = (getattr(ctx.qualified, "summary_stats", None) or {}).get(
+        COVERAGE_REPORT_KEY
+    )
+    if is_coverage_report(claim_coverage):
+        _attach_existing_coverage(
+            claim_done_payload, claim_coverage, resumed=resumed_from_artifact
+        )
+    else:
+        facts = _claim_qualification_coverage_from_roles(ctx)
+        if facts is not None:
+            _attach_coverage(
+                claim_done_payload,
+                population=facts["population"],
+                processed=facts["processed"],
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(
+                    facts.get("details"), resumed=resumed_from_artifact
+                ),
+            )
+    ctx.report_done("claim_qualification", claim_done_payload)
+    return ctx.finish_target_stage("claim_qualification", claim_done_payload)
+
+
+def _claim_qualification_coverage_from_roles(ctx: Any) -> dict | None:
+    """agent が coverage を出さなかった場合に、roles と採否結果から事実を導く。
+
+    母集合 = rhetorical_role が出した採否判定対象 span、処理数 = accepted /
+    rejected / deferred に振り分けられた span。resume ではどちらも前回 run の
+    artifact の記録なので、呼び出し側が ``details.source = "artifact"`` を足す。
+    導けない（roles が無い）ときは ``None`` を返して報告を足さない（でっち上げない）。
+    """
+    roles = getattr(ctx, "roles", None)
+    annotations = getattr(roles, "role_annotations", None)
+    if not annotations:
+        return None
+    try:
+        from episteme_graph.agents.claim_qualification.input_builder import (
+            ClaimQualificationInputBuilder,
+        )
+
+        population = 0
+        for annotation in annotations:
+            for span in getattr(annotation, "span_annotations", None) or []:
+                if ClaimQualificationInputBuilder._should_include(span, True):
+                    population += 1
+        qualified = ctx.qualified
+        processed = (
+            len(getattr(qualified, "qualified_spans", []) or [])
+            + len(getattr(qualified, "rejected_spans", []) or [])
+            + len(getattr(qualified, "deferred_spans", []) or [])
+        )
+    except Exception:  # pragma: no cover - 防御的
+        logger.warning("failed to derive claim_qualification coverage", exc_info=True)
+        return None
+    return {
+        "population": population,
+        "processed": min(processed, population),
+        "reasons": ["max_spans"],
+        "unit": "spans",
+        "details": {},
+    }
 
 
 def _stage_equation_semantics(ctx: PipelineContext) -> bool:
@@ -1145,31 +1341,28 @@ def _stage_equation_semantics(ctx: PipelineContext) -> bool:
     equation_done_payload: dict[str, Any] = {
         "equations": len(getattr(ctx.equations, "equations", []) or []),
     }
-    if not resumed_from_artifact:
-        # P0-10: 母集合 = document_structure の式ブロック、処理数 = そのうち
-        # 候補化まで到達したブロック（EquationSemanticsInputBuilder は式ブロックを
-        # 先頭から順に候補化し `max_equations`（既定 64）で打ち切る）。上限に当たった
-        # 論文では「原本 176 式 → records 64」の切断がここまでどこにも現れなかった
-        # （F-18 / 定量サマリ）。inline math 由来の候補は式ブロック母集合の外なので
-        # 数えない（母集合と処理数の単位を混ぜない）。
-        equation_block_ids = {
-            str(getattr(b, "block_id", "") or "")
-            for b in _blocks_of_type(ctx.structure, "equation_block")
-        }
-        equation_block_ids.discard("")
-        covered_block_ids: set[str] = set()
-        for candidate in getattr(ctx.equations, "equation_candidates", []) or []:
-            location = getattr(candidate, "source_location", None) or {}
-            block_id = str((location.get("block_id") if isinstance(location, dict) else "") or "")
-            if block_id in equation_block_ids:
-                covered_block_ids.add(block_id)
-        _attach_coverage(
-            equation_done_payload,
-            population=len(equation_block_ids),
-            processed=len(covered_block_ids),
-            reasons=["max_equations"],
-            unit="equation_blocks",
-        )
+    # P0-10: 母集合 = **display の equation_block + inline 数式候補**、処理数 = 実際に
+    # 候補化された件数。かつては式ブロックだけを母集合に数えていたため、上限 64 の枠を
+    # 式ブロックと inline で分け合った論文（式ブロック 37 + inline 27 = 64）で inline の
+    # 切り捨てが `truncated: 0` と報告されていた。母集合・選抜規則の正本は A層の
+    # input_builder（`compute_candidate_coverage`）に置き、ここに写経しない。
+    # resume でも structure artifact と前回の候補から同じ事実が導ける（source=artifact）。
+    equation_builder = _input_builder_for(ctx, "EquationSemanticsAgent", "compute_candidate_coverage")
+    if equation_builder is not None and getattr(ctx, "structure", None) is not None:
+        try:
+            facts = equation_builder.compute_candidate_coverage(ctx.structure)
+        except Exception:  # pragma: no cover - 防御的
+            logger.warning("failed to compute equation_semantics coverage", exc_info=True)
+        else:
+            observed = len(getattr(ctx.equations, "equation_candidates", []) or [])
+            _attach_coverage(
+                equation_done_payload,
+                population=facts["population"],
+                processed=min(observed, facts["population"]),
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(facts.get("details"), resumed=resumed_from_artifact),
+            )
     ctx.report_done("equation_semantics", equation_done_payload)
     return ctx.finish_target_stage("equation_semantics", equation_done_payload)
 
@@ -1671,7 +1864,8 @@ def _stage_apparatus_semantics(ctx: PipelineContext) -> bool:
 def _stage_thesis_reconstruction(ctx: PipelineContext) -> bool:
     # ── Stage 9: thesis_reconstruction ─────────────────────────────────
     thesis_artifact = ctx.artifact("thesis_reconstruction")
-    if ctx.should_use_artifact("thesis_reconstruction"):
+    resumed_from_artifact = ctx.should_use_artifact("thesis_reconstruction")
+    if resumed_from_artifact:
         ctx.thesis = _from_agent_dict("thesis_reconstruction", thesis_artifact)
         logger.info("Resuming document pipeline: loaded thesis_reconstruction artifact for document %s", ctx.document_id)
     else:
@@ -1686,8 +1880,32 @@ def _stage_thesis_reconstruction(ctx: PipelineContext) -> bool:
             logger.exception("thesis_reconstruction stage failed for document=%s material=%s", ctx.document_id, ctx.material_id)
             raise PipelineStageError("thesis_reconstruction", str(exc), cause=exc) from exc
         ctx.save_artifact("thesis_reconstruction", ctx.thesis)
-    ctx.report_done("thesis_reconstruction", {"total": 1, "processed": 1})
-    return ctx.finish_target_stage("thesis_reconstruction", {"total": 1, "processed": 1})
+    thesis_done_payload: dict[str, Any] = {"total": 1, "processed": 1}
+    # P0-10: 上限（claim 32 / equation 16 / logical_block 16）は中心命題の再構成に
+    # 必要な文脈サンプリングとして残すが、**どれだけ渡さなかったか**は報告する。
+    # 単位が違う 3 種を合算した母集合で、どれが上限に当たったかは理由コードで示す。
+    thesis_builder = _input_builder_for(ctx, "ThesisReconstructionAgent", "compute_input_coverage")
+    if thesis_builder is not None and getattr(ctx, "qualified", None) is not None:
+        try:
+            facts = thesis_builder.compute_input_coverage(
+                ctx.skeleton,
+                ctx.qualified,
+                equations=ctx.equations,
+                claim_objects=getattr(ctx, "claim_objects", None),
+            )
+        except Exception:  # pragma: no cover - 防御的
+            logger.warning("failed to compute thesis_reconstruction coverage", exc_info=True)
+        else:
+            _attach_coverage(
+                thesis_done_payload,
+                population=facts["population"],
+                processed=facts["processed"],
+                reasons=facts["reasons"],
+                unit=facts["unit"],
+                details=_coverage_details(facts.get("details"), resumed=resumed_from_artifact),
+            )
+    ctx.report_done("thesis_reconstruction", thesis_done_payload)
+    return ctx.finish_target_stage("thesis_reconstruction", thesis_done_payload)
 
 
 def _stage_dsl_linking(ctx: PipelineContext) -> bool:

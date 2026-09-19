@@ -2,6 +2,29 @@
 
 Issue #245: build_candidates() で EquationCandidate を生成し、
 acceptance gate 通過済みの accepted 候補のみ LLM 入力を作る。
+
+P0-1 と同じ是正（`docs/architecture/knowledge_structure_review_2026-09-12.md` §4 /
+付属資料 A）:
+
+1. **既定では打ち切らない**。従来は ``_MAX_EQUATIONS = 64`` で ``(page, order)`` 順の
+   先頭 64 候補に切り捨てていた（実測: 10 本中 8 本が**ちょうど 64**、式ブロック 348 の
+   論文で 64）。既定は上限なし（0）で、上限を敷きたい運用だけが
+   ``config["max_equations"]`` か env ``EQUATION_SEMANTICS_MAX_EQUATIONS`` で明示する。
+2. **並び順は ``order`` が一意なら ``order`` のみ**（正本
+   ``episteme_graph.agents.stratified_sampling``）。``page`` は GROBID 経路で既定 1 の
+   ままのブロックが多く（実測: 803 中 558）、``(page, order)`` だと突合失敗群が先頭に
+   集まって順序が内容と無関係になる。
+3. **上限がある場合も先頭切り捨てにしない**。display の equation_block を節単位で
+   層化サンプリングし、inline 数式候補は残枠に入れる。
+4. **inline 数式候補には既定の上限を敷く**（``_DEFAULT_MAX_INLINE_EQUATIONS = 32`` /
+   env ``EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS``、0 = 上限なし）。inline は
+   ``x = 1`` のような本文中の表記を正規表現で拾う**弱い候補**で、1 件ごとに LLM
+   コールを消費する。display の式ブロック（論文が式として組んだもの）は上限なしの
+   まま、inline だけを既定で抑える。打ち切りは coverage の理由コード
+   ``max_inline_equations`` に必ず出す（黙って切らない）。
+5. **取りこぼしの量を報告する**。母集合（display block + inline 候補）と処理数は
+   :func:`compute_candidate_coverage` が返し、orchestrator が stage payload の
+   ``coverage`` に載せる（``schema.py`` に手を入れずに済ませるための出口）。
 """
 from __future__ import annotations
 
@@ -11,6 +34,13 @@ import re
 from episteme_graph.agents.document_structure.schema import DocumentStructureResult, TypedBlock
 from episteme_graph.agents.paper_skeleton.schema import PaperSkeletonResult
 from episteme_graph.agents.rhetorical_role.schema import RhetoricalRoleResult
+from episteme_graph.agents.stratified_sampling import (
+    NO_SECTION_KEY,
+    order_blocks,
+    resolve_limit,
+    select_indices,
+    unprocessed_section_entries,
+)
 
 from .normalizer import EquationNormalizer
 from .schema import (
@@ -20,9 +50,19 @@ from .schema import (
 )
 
 _CONTEXT_BLOCK_TYPES = {"body_paragraph", "equation_block"}
-_MAX_EQUATIONS = 64
+# 候補全体（display + inline）の上限。0 = 上限なし（既定）。かつての 64 打ち切りは廃止した。
+_DEFAULT_MAX_EQUATIONS = 0
+_MAX_EQUATIONS_ENV = "EQUATION_SEMANTICS_MAX_EQUATIONS"
+# inline 数式候補だけの上限。display の式ブロック（論文が式として組んだもの）は
+# 上限なしのままで、正規表現由来の弱い候補である inline のみ既定で抑える。
+_DEFAULT_MAX_INLINE_EQUATIONS = 32
+_MAX_INLINE_EQUATIONS_ENV = "EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS"
 _MAX_CONTEXT_BLOCKS = 6
 _MAX_CONTEXT_CHARS = 1200
+
+_COVERAGE_UNIT = "equation_candidates"
+_TRUNCATION_REASON = "max_equations"
+_INLINE_TRUNCATION_REASON = "max_inline_equations"
 
 # extraction_status のうち再構成が必要なもの
 _NEEDS_RECONSTRUCTION_STATUSES = {"partial", "fragment_only", "label_only", "missing", "unparsed"}
@@ -54,30 +94,130 @@ class EquationSemanticsInputBuilder:
         cartridge: CartridgeContext | None = None,
         config: dict | None = None,
     ) -> list[EquationCandidate]:
-        """全 equation_block から EquationCandidate を生成する (acceptance gate 適用前)。"""
+        """全 equation_block から EquationCandidate を生成する (acceptance gate 適用前)。
+
+        既定では打ち切らない。上限があるときは display の equation_block を節単位で
+        層化サンプリングし、残枠に inline 数式候補を入れる（先頭切り捨てにしない）。
+        """
         cfg = config or {}
         self._normalizer.set_extra_label_patterns(self._cartridge_label_patterns(cartridge))
-        max_equations = int(cfg.get("max_equations", _MAX_EQUATIONS))
-        ordered_blocks = sorted(structure.blocks, key=lambda b: (b.page, b.order))
+        plan = self._plan_candidates(structure, cfg)
 
-        candidates: list[EquationCandidate] = []
-        for block in ordered_blocks:
-            if block.block_type != "equation_block":
-                continue
-            candidates.append(self._block_to_candidate(block, structure.document_id))
-            if len(candidates) >= max_equations:
-                break
-        if len(candidates) < max_equations and bool(cfg.get("include_inline", True)):
+        candidates: list[EquationCandidate] = [
+            self._block_to_candidate(block, structure.document_id)
+            for block in plan["display_blocks"]
+        ]
+        candidates.extend(plan["inline_candidates"])
+        return candidates
+
+    def _plan_candidates(self, structure: DocumentStructureResult, cfg: dict) -> dict:
+        """候補の母集合・選抜結果を決定論的に組み立てる（coverage と共有する内部計画）。"""
+        max_equations = resolve_limit(
+            cfg, "max_equations", _MAX_EQUATIONS_ENV, default=_DEFAULT_MAX_EQUATIONS
+        )
+        max_inline = resolve_limit(
+            cfg,
+            "max_inline_equations",
+            _MAX_INLINE_EQUATIONS_ENV,
+            default=_DEFAULT_MAX_INLINE_EQUATIONS,
+        )
+        include_inline = bool(cfg.get("include_inline", True))
+        ordered_blocks, sort_key_name = order_blocks(structure.blocks)
+
+        display_indices = [
+            idx
+            for idx, block in enumerate(ordered_blocks)
+            if block.block_type == "equation_block"
+        ]
+        selected_display = select_indices(
+            ordered_blocks,
+            display_indices,
+            max_equations,
+            section_key_of=lambda b: getattr(b, "section_id", None) or NO_SECTION_KEY,
+        )
+
+        inline_all: list[EquationCandidate] = []
+        if include_inline:
             for block in ordered_blocks:
                 if block.block_type != "body_paragraph":
                     continue
-                for candidate in self._inline_candidates_for_block(block, structure.document_id):
-                    candidates.append(candidate)
-                    if len(candidates) >= max_equations:
-                        break
-                if len(candidates) >= max_equations:
-                    break
-        return candidates
+                inline_all.extend(
+                    self._inline_candidates_for_block(block, structure.document_id)
+                )
+
+        # inline は「文書順に上限まで」。display の層化とは独立の弁で、
+        # display の式ブロックはこの上限では減らない。
+        inline_selected = inline_all[:max_inline] if max_inline > 0 else list(inline_all)
+        inline_cut_by_inline_limit = len(inline_selected) < len(inline_all)
+        inline_cut_by_total_limit = False
+        if max_equations > 0:
+            remaining = max(max_equations - len(selected_display), 0)
+            if len(inline_selected) > remaining:
+                inline_cut_by_total_limit = True
+            inline_selected = inline_selected[:remaining]
+        display_cut_by_total_limit = len(selected_display) < len(display_indices)
+
+        return {
+            "ordered_blocks": ordered_blocks,
+            "sort_key": sort_key_name,
+            "display_indices": display_indices,
+            "selected_display_indices": selected_display,
+            "display_blocks": [ordered_blocks[idx] for idx in selected_display],
+            "inline_total": len(inline_all),
+            "inline_candidates": inline_selected,
+            "inline_cut_by_inline_limit": inline_cut_by_inline_limit,
+            "inline_cut_by_total_limit": inline_cut_by_total_limit,
+            "display_cut_by_total_limit": display_cut_by_total_limit,
+            "include_inline": include_inline,
+        }
+
+    def compute_candidate_coverage(
+        self,
+        structure: DocumentStructureResult,
+        config: dict | None = None,
+    ) -> dict:
+        """候補生成の母集合・処理数の**事実**を返す（``build_coverage_report`` の引数）。
+
+        戻り値は ``{"population", "processed", "reasons", "unit", "details"}``。
+        報告そのものを組み立てないのは、orchestrator 側の ``_attach_coverage`` だけが
+        ``coverage`` キーを作るという規律（`test_pipeline_coverage_report.py`）を
+        保つため。母集合は **display の equation_block + inline 数式候補**で、
+        従来 orchestrator が式ブロックだけを数えていたために inline の切り捨てが
+        ``truncated: 0`` と報告されていた取り違えを直す。
+        """
+        plan = self._plan_candidates(structure, config or {})
+        population = len(plan["display_indices"]) + plan["inline_total"]
+        processed = len(plan["selected_display_indices"]) + len(plan["inline_candidates"])
+        details: dict = {
+            "sort_key": plan["sort_key"],
+            "includes_inline_candidates": bool(plan["include_inline"]),
+        }
+        unprocessed = unprocessed_section_entries(
+            plan["ordered_blocks"],
+            plan["display_indices"],
+            plan["selected_display_indices"],
+            section_key_of=lambda b: getattr(b, "section_id", None) or NO_SECTION_KEY,
+            title_of=lambda key: getattr(
+                {s.section_id: s for s in structure.sections}.get(key), "title", None
+            ),
+        )
+        if unprocessed:
+            details["unprocessed_sections"] = unprocessed
+        # 理由コードは**実際に効いた弁だけ**を書く（``build_coverage_report`` は
+        # truncated==0 のとき理由を落とすが、inline 上限だけが効いたときに
+        # ``max_equations`` を並べると「全体上限で切った」と読めてしまう）。
+        reasons: list[str] = []
+        if plan["display_cut_by_total_limit"] or plan["inline_cut_by_total_limit"]:
+            reasons.append(_TRUNCATION_REASON)
+        if plan["inline_cut_by_inline_limit"]:
+            reasons.append(_INLINE_TRUNCATION_REASON)
+        return {
+            "population": population,
+            "processed": processed,
+            "reasons": reasons,
+            "unit": _COVERAGE_UNIT,
+            "details": details,
+        }
 
     def build_llm_inputs(
         self,
@@ -102,7 +242,7 @@ class EquationSemanticsInputBuilder:
         backbone_by_section = self._map_backbone_by_section(skeleton)
         spans_by_block = self._map_spans_by_block(roles)
         normalized_terms = self._build_normalized_terms(cartridge) if cartridge else None
-        ordered_blocks = sorted(structure.blocks, key=lambda b: (b.page, b.order))
+        ordered_blocks, _sort_key = order_blocks(structure.blocks)
         block_by_id = {b.block_id: b for b in ordered_blocks}
         index_by_block_id = {b.block_id: i for i, b in enumerate(ordered_blocks)}
 

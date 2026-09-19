@@ -673,6 +673,45 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("RHETORICAL_ROLE_MAX_BLOCKS"),
     )
 
+    # --- A層パイプライン: 他ステージの入力上限（P0-1 と同じ是正・2026-09-19） ---
+    # いずれも **0 = 上限なし（既定）**。上限を敷く運用だけが明示的に値を入れる。
+    # 上限がある場合も先頭切り捨てではなく節単位の層化サンプリング
+    # （`src/episteme_graph/agents/stratified_sampling.py`）で配分し、取りこぼしは
+    # stage_outputs の `coverage` に必ず報告される。
+    # ※値の正本は env そのもの（A層 agent は src/backend の依存方向の制約でこの
+    #   Settings を読めないため、各 input_builder が同じ env を直接読む）。
+
+    # claim_qualification: 採否判定にかける span 数の上限。かつて 96 がハードコード
+    # され、文書順の先頭 96 span で打ち切られていたため、結論・限界の節が 1 件も
+    # claim 化されない論文があった。
+    claim_qualification_max_spans: int = Field(
+        default=0,
+        validation_alias=AliasChoices("CLAIM_QUALIFICATION_MAX_SPANS"),
+    )
+
+    # equation_semantics: 式候補（display の equation_block + inline 数式）数の上限。
+    # かつて 64 がハードコードされ、実測 10 本中 8 本が**ちょうど 64**で切れていた。
+    equation_semantics_max_equations: int = Field(
+        default=0,
+        validation_alias=AliasChoices("EQUATION_SEMANTICS_MAX_EQUATIONS"),
+    )
+
+    # equation_semantics: inline 数式候補（本文中の `x = 1` 等を正規表現で拾う弱い
+    # 候補）だけの上限。**既定 32**（0 = 上限なし）。display の式ブロックは上限なしの
+    # ままで、1 件 1 LLM コールを消費する inline 側だけを抑える。打ち切りは coverage の
+    # 理由コード `max_inline_equations` に必ず出る。
+    equation_semantics_max_inline_equations: int = Field(
+        default=32,
+        validation_alias=AliasChoices("EQUATION_SEMANTICS_MAX_INLINE_EQUATIONS"),
+    )
+
+    # paper_skeleton: 骨格判断に見せる level-1 節数の上限。かつて 12 がハードコード
+    # され、先頭 12 節しか見せていなかった（付録は従来どおり対象外）。
+    paper_skeleton_max_sections: int = Field(
+        default=0,
+        validation_alias=AliasChoices("PAPER_SKELETON_MAX_SECTIONS"),
+    )
+
     # --- M層（LLM モデル選択, core/llm_policy.py） ---
     # モデルカタログ (JSON) のパス。空/不在/パース不能なら catalog_models() は空リスト
     # を返す（M4: 選択肢を捏造しない）。正本: docs/features/llm_model_selection_design.md §5
