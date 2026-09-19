@@ -236,7 +236,7 @@ class TestSpokenMode:
     def test_spoken_is_returned_and_stripped(self, monkeypatch):
         out = type("_O", (), {
             "reply": r"密度は $\delta$ です。",
-            "spoken": "- 結論です\n式 $\delta$ は密度ゆらぎ デルタ です。",
+            "spoken": "- 結論です\n式 $\\delta$ は密度ゆらぎ デルタ です。",
         })()
         seen = self._patch_llm(monkeypatch, out)
         result = gd.run_graph_turn(

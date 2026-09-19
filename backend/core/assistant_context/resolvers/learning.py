@@ -75,7 +75,7 @@ def _text(value: Any, limit: int | None = None) -> str:
 
 
 def _safe(value: Any, limit: int | None = None) -> str:
-    """内部 ID / 生 TeX が混ざった自由文はその欄ごと落とす（学習者射影の最後の砦）。
+    r"""内部 ID / 生 TeX が混ざった自由文はその欄ごと落とす（学習者射影の最後の砦）。
 
     遮断の述語は :func:`core.learner_context_common.safe_text` が正本
     （内部 ID + 生 TeX 判定）。ここで**新しい判定を作らない**。V-8 の実測では
